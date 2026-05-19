@@ -10,14 +10,15 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
-// hotfix16.8: WebUI in hotfix15+ polls these lightweight endpoints.
-// Some merged branches shipped a WebUI that calls /api/live and /api/capabilities
-// while the bundled hnc_httpd only knew the older API set, causing repeated
-// "invalid JSON: 404 page not found" toasts. Keep the endpoints small and
-// file-based so they work even without the full snapshot-cache branch.
+// rc30.12.30 (P2.11): merged from hotfix16_8_live_api.go.
+// 按功能命名 (轻量级 live/capabilities/metrics API), 跟 api_v5.go / api_dpi_v53.go
+// 等文件风格对齐.
+//
+// WebUI (hotfix15+) polls these lightweight endpoints. /api/live 是 devices 的
+// 浓缩摘要 (用于状态条 / 流量条); /api/capabilities 暴露内核能力检测结果;
+// /api/metrics 是 snapshot cache 占位 (这个分支没装完整 snapshot, 永远是 0).
 
 func (s *server) apiCapabilities(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.hncDir, "run", "capabilities.json")
@@ -46,7 +47,7 @@ func (s *server) apiMetrics(w http.ResponseWriter, r *http.Request) {
 		"shell_fallback_count":   0,
 		"offload_check_count":    0,
 		"backend_version":        version,
-		"compat":                "hotfix16.8-live-api",
+		"compat":                 "hotfix16.8-live-api",
 	})
 }
 
@@ -183,6 +184,3 @@ func liveDevicesSig(devices []map[string]interface{}, active bool, iface string)
 	h := sha1.Sum([]byte(strings.Join(parts, "\n")))
 	return hex.EncodeToString(h[:])
 }
-
-// Keep the symbol alive for future cache branches without forcing a dependency.
-var _ = time.Now

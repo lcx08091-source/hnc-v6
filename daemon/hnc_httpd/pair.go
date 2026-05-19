@@ -331,26 +331,43 @@ func labelFromUA(ua string) string {
 }
 
 // handleLogout 处理 POST /api/logout
-// 从 context 拿 tokenID(authMiddleware 放进来的) → 直接 revoke → 清 cookie
+//
+// rc30.12.30 (P0.1): 自己解 cookie + VerifyCookie + revoke, 不依赖 authMiddleware ctx.
+//
+// 之前的实现假设 authMiddleware 已 inject ctxKeyTokenID, 但 /api/logout 在 isPublicPath
+// 里, middleware 早期就 next.ServeHTTP 跳过验证不会 inject. 结果 tidVal 永远 nil,
+// revoke 那段死代码永不执行, 只清浏览器 cookie. cookie 被偷过的攻击者照样能用
+// server-side token 直到 60 天硬过期. 这是 GPT 三审 P0.
+//
+// 设计选择: 仍保留 /api/logout 在 isPublicPath 而非走 auth middleware. 因为 logout
+// 应是 idempotent — cookie 过期/无效场景也应返回 200, 不应让用户在"我都要登出了"
+// 时还看到 401. 服务端自己读 cookie, 有效就 revoke, 无效就只清浏览器 cookie. 无论
+// 何种情况 status 200.
 func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	// authMiddleware 会 inject;没有的话 ctx 里就没有,退化为只清 cookie
-	if tidVal := r.Context().Value(ctxKeyTokenID); tidVal != nil {
-		if tid, ok := tidVal.(string); ok && tid != "" {
-			// 标记 revoked 并持久化
-			// rc2 修 G5: Put 内部已调 saveAtomicLocked (见 tokens.go:350), 再
-			// Flush 是第二次 saveAtomicLocked + fsync, 纯浪费. logout 单次请求
-			// 原来要两次 fsync, 在慢盘上对用户可见.
-			if tok, ok := s.tokens.Get(tid); ok {
+
+	// 自己解 cookie. cookie 不存在或无效都 fall-through 到清浏览器 cookie + 200.
+	cookie, err := r.Cookie(CookieName)
+	if err == nil && cookie != nil && cookie.Value != "" {
+		tokenID, _, verr := VerifyCookie(s.tokens, cookie.Value)
+		if verr == nil && tokenID != "" {
+			// 标记 revoked 并持久化.
+			// rc2 修 G5: Put 内部已调 saveAtomicLocked (见 tokens.go:350), 再 Flush
+			// 是第二次 saveAtomicLocked + fsync, 纯浪费. logout 单次请求原来要两次
+			// fsync, 在慢盘上对用户可见.
+			if tok, ok := s.tokens.Get(tokenID); ok {
 				tok.Revoked = true
-				_ = s.tokens.Put(tid, tok)
-				log.Printf("logout: revoked tid=%s", TokenIDLogPrefix(tid))
+				_ = s.tokens.Put(tokenID, tok)
+				log.Printf("logout: revoked tid=%s", TokenIDLogPrefix(tokenID))
 			}
+		} else if verr != nil {
+			log.Printf("logout: cookie present but verify failed (%v), still clearing", verr)
 		}
 	}
+
 	http.SetCookie(w, clearCookie())
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)

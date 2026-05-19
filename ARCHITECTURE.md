@@ -2,7 +2,7 @@
 
 > 给未来的 Ling、Claude、或者任何接手这个项目的人
 
-**版本**: v5.3.0-rc30.12.29 <!-- rc30.12.29: 文档版本号统一同步 module.prop -->
+**版本**: v5.3.0-rc30.12.30 <!-- rc30.12.30: 文档版本号统一同步 module.prop -->
 **最后更新**: 2026-05-19
 
 ---
@@ -329,7 +329,70 @@ fi
 
 所有运行时状态都在 `/data/local/hnc/run/` 和 `/data/local/hnc/data/`:
 
-### `run/devices.json` (hotspotd 写, httpd 读)
+### `run/devices.json` (hotspotd 写)
+
+<!-- rc30.12.30 (P2.17): 字段权威 schema, 替代之前的纯 JSON 示例 -->
+
+**重要**: 这个文件由 `hotspotd` 单方面写, 不要从其他进程往里写. `hnc_httpd` 经过 `buildDevicesPayload()` 在内存里合并 `devices.json` + `data/rules.json` + `data/names.json` + 实时差分速率, 但**结果只通过 /api/devices 返回**, 不回写 devices.json. 这一节列三类字段来源, 因为之前 GPT 三审指出"混在一个 map 里靠 key 检索容易出错".
+
+#### 顶层字段
+
+| 字段 | 类型 | 写者 | 含义 |
+|---|---|---|---|
+| `schema` | int | hotspotd | 当前是 `1`, 升级时 bump |
+| `hotspot_active` | bool | hotspotd | 热点接口存在 + 有 IP + 至少一台 client 见过 |
+| `hotspot_iface` | string | hotspotd | 热点接口名 (`wlan2` / `ap0` / `softap0` 等) |
+| `hotspot_ip` | string | hotspotd | 热点接口 IPv4 (通常 `192.168.43.1`) |
+| `devices` | array | hotspotd | 当前可见 client 数组 (见下) |
+
+#### `devices[]` 字段 — 按来源分三类
+
+**A) hotspotd 原始字段** (devices.json 真实存的内容):
+
+| 字段 | 类型 | 必填 | 含义 |
+|---|---|---|---|
+| `mac` | string | ✅ | 客户端 MAC, 小写, 冒号分隔 (`aa:bb:cc:11:22:33`) |
+| `ip` | string | ✅ | 当前 DHCP 分配的 IPv4 |
+| `hostname` | string | 可空 | DHCP option 12 / ARP 探测出的设备名 |
+| `vendor` | string | 可空 | OUI 查表得到的厂商 (`Xiaomi` / `Apple` / `Huawei` …) |
+| `rx_bytes` | int64 | ✅ | hostapd/tc 累计接收字节 (单调递增) |
+| `tx_bytes` | int64 | ✅ | 累计发送字节 |
+| `first_seen` | int64 | ✅ | unix 秒, 首次 association |
+| `last_seen` | int64 | ✅ | unix 秒, 最近 DHCP renewal / probe 响应 |
+| `online` | bool | — | hotspotd 写入的近似值. **httpd 会覆盖** (基于 last_seen) |
+| `rx_bps`/`tx_bps` | int64 | — | hotspotd 历史字段, **httpd 会覆盖** (实时差分) |
+
+**B) hnc_httpd 在 buildDevicesPayload 时临时注入** (`/api/devices` 返回, 不进 devices.json):
+
+| 字段 | 类型 | 注入条件 | 含义 |
+|---|---|---|---|
+| `online` | bool | 总是覆盖 | `last_seen > 0 && now - last_seen < 90` |
+| `rx_bps` | int64 | 总是覆盖 | `(rx_bytes - prev_rx_bytes) / dt`, dt < 2s 时沿用缓存 |
+| `tx_bps` | int64 | 总是覆盖 | 同上 |
+| `status` | string | 总是注入 | `"blocked"` (在 rules.json blacklist) / `"allowed"` |
+| `hostname` | string | manual rename 时 | rules/names.json 里的 manual rename, 优先级最高 |
+| `hostname_src` | string | manual rename 时 | 固定 `"manual"`, 标记字段来源, UI 可显示标签 |
+
+**C) hnc_httpd 从 `data/rules.json` 的 `device_rules.<mac>` 合并** (`/api/devices` 返回):
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `mark_id` | int | iptables fwmark 值, tc class 用 |
+| `down_mbps` | float | 下行限速 (Mbps), 0 = 不限 |
+| `up_mbps` | float | 上行限速 (Mbps), 0 = 不限 |
+| `delay_ms` | int | netem 延迟注入 (毫秒) |
+| `jitter_ms` | int | netem 抖动 |
+| `loss_pct` | float | netem 丢包率 (0-100) |
+| `limit_enabled` | bool | 限速规则是否激活 |
+| `delay_enabled` | bool | 延迟规则是否激活 |
+
+#### Rule-only / blacklist-only 设备
+
+`devices.json` 只列当前可见 client. 一台设备配了限速但目前断开, **不在 devices.json**.
+
+`buildDevicesPayload` 末尾会扫描 `rules.json.device_rules` 和 `blacklist`, 把规则存在但 hotspotd 没看到的 MAC 也追加成离线行 (`online: false`, `ip: "-"`, `rx_bps/tx_bps: 0`), 让 UI 仍能显示已配置状态. 这些"虚行"**不写回 devices.json**, 只在 `/api/devices` 返回时存在.
+
+#### 示例(httpd 合并后的 /api/devices 形态)
 
 ```json
 {
@@ -341,17 +404,26 @@ fi
     {
       "mac": "aa:bb:cc:11:22:33",
       "ip": "192.168.43.5",
-      "hostname": "红米K70",
+      "hostname": "我的红米",
+      "hostname_src": "manual",
       "vendor": "Xiaomi",
       "online": true,
+      "rx_bytes": 8421000000,
+      "tx_bytes": 102400000,
       "rx_bps": 12800000,
       "tx_bps": 450000,
-      "first_seen": 1747507200,
-      "last_seen": 1747510800
+      "first_seen": 1747500000,
+      "last_seen": 1747510800,
+      "status": "allowed",
+      "mark_id": 11,
+      "down_mbps": 5.0,
+      "up_mbps": 2.0,
+      "limit_enabled": true
     }
   ]
 }
 ```
+
 
 ### `data/dpi_state.json` (dpid 写, httpd 读)
 

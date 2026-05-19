@@ -1,4 +1,144 @@
 
+## v5.3.0-rc30.12.30
+
+**发布日期**: 2026-05-19
+**versionCode**: 530150
+**致谢**: GPT 三审 P0 列表全部修完 + 部分 P2 工程整洁度收口
+
+### 概述
+
+rc30.12.29 把 P1 (架构 / 跨语言契约 / C 细节) 全部落地. 这一版收 P0 4 条安全相关
+修复 + 力所能及的 P2 工程整洁度 (hotfix 文件命名 / .bak 残留 / CI 检查 / 文档 schema).
+
+剩下 P2.13 (`stats_v52_*` 重命名) / P2.14 (`hnc_common.sh`) / P2.15 (巨型 shell
+拆分) / P2.16 (`dpi_rules.json` 拆分) 风险大或工作量大, 留给下个 rc 分阶段做.
+按 GPT 报告标准, 本版做完后 "rc30.12 系列可以心安理得 tag v5.3.0 stable", 但
+还有 P2 大头未做, 暂不 tag.
+
+### P0.1 handleLogout 漏洞修复 (pair.go / middleware.go)
+
+之前的实现假设 authMiddleware 已 inject `ctxKeyTokenID`, 但 `/api/logout` 在
+`isPublicPath` 里, middleware 早期就 `next.ServeHTTP` 跳过验证不会 inject.
+结果 `tidVal` 永远 nil, revoke 那段死代码永不执行, 只清浏览器 cookie. cookie
+被偷过的攻击者照样能用 server-side token 直到 60 天硬过期. **这是安全漏洞**.
+
+**修法**: handler 自己解 cookie + `VerifyCookie` + revoke. 仍保留 `/api/logout`
+在 isPublicPath 而非走 auth middleware, 因为 logout 应是 idempotent — cookie
+过期/无效场景也应返回 200, 不应让用户在"我都要登出了"时还看到 401. 服务端自己
+读 cookie, 有效就 revoke server-side token, 无效就只清浏览器 cookie. 无论何种
+情况 status 200.
+
+```go
+// pair.go: 自己解 cookie. cookie 不存在或无效都 fall-through 到清浏览器 cookie + 200.
+cookie, err := r.Cookie(CookieName)
+if err == nil && cookie != nil && cookie.Value != "" {
+    tokenID, _, verr := VerifyCookie(s.tokens, cookie.Value)
+    if verr == nil && tokenID != "" {
+        if tok, ok := s.tokens.Get(tokenID); ok {
+            tok.Revoked = true
+            _ = s.tokens.Put(tokenID, tok)
+        }
+    }
+}
+http.SetCookie(w, clearCookie())
+// 返回 200
+```
+
+### P0.2 checkLocalAdminSecret 强制 64 hex (middleware.go)
+
+之前只比较长度是否相等. 如果磁盘 secret 被部分写入 (截断/写半), 后端会接受
+同样截断长度的伪 secret. 前端 (hf2 已修) 明确 `/^[0-9a-fA-F]{64}$/.test(s)`,
+后端必须对齐. 抽 `isValid64Hex()` helper, got/want 都强制校验. 磁盘 secret
+不是合法 64 hex 时打 log 并拒绝所有请求 (defense-in-depth, 服务变 fail-closed).
+
+### P0.3 forceRemoteAuth 死变量删 (main.go / middleware.go)
+
+rc30.12.18 默认拒绝重构后没有任何代码读 `forceRemoteAuth`. 启动时给它赋
+`true` 的代码 + 全局变量声明都删, 只保留 SECURITY log. middleware.go 注释里
+"forceRemoteAuth 旗子也保留" 那段误导文字也清除.
+
+### P0.4 apiHealth session_label 死代码删 (server.go / web/app.js)
+
+之前 `apiHealth` 从 ctx 取 `Token` 拿 `Label` 写进 resp, 但 `/api/health` 在
+`isPublicPath`, authMiddleware 不会 inject `ctxKeyToken`, `tokVal` 永远 nil.
+这段代码从来没跑过.
+
+两个选项:
+- (a) 移出 isPublicPath. 但远程 WebUI 顶部 `fetch('/api/health')` 探活会拿
+  `version` 和 `watchdog_passive` (app.js:974), 移走会破坏匿名探活. 不可接受.
+- (b) 删 session_label 死代码 - 保留匿名探活, 失去 session label UX (次要功能).
+
+选 (b). `app.js loadSessionInfo()` 加 deprecation 注释说明字段永久 absent +
+graceful degradation. 如果未来想恢复 session label, 应走独立 `/api/whoami`
+端点 (鉴权).
+
+### P2.11 hotfix*.go 合并 (daemon/hnc_httpd/)
+
+之前按 "修第 N 个 bug" 命名的源文件是 patch 思维不是模块思维. 重命名 + 合并:
+
+| 旧文件 | 新文件 | 功能 |
+|---|---|---|
+| `hotfix16_7_compile_compat.go` | `action_hotspot_iface_set.go` | actionHotspotIfaceSet + requestSnapshotRefresh shim |
+| `hotfix16_8_live_api.go` | `api_live.go` | apiLive / apiCapabilities / apiMetrics handlers |
+| `hotfix16_9_capability_gate.go` | `capability.go` | readCapabilityBool + tc_htb/tc_netem 读取 |
+
+跟现有 `action_app_limit.go` / `action_device_rename.go` / `api_dpi_v53.go`
+风格对齐. 内部逻辑零改动 (字节级 copy), 仅文件名 + 顶部注释更新. `go build` 通过.
+
+### P2.12 .bak 残留 + CI 黑名单 (bin/ci_preflight.sh)
+
+- 删除两个残留 `.bak.<timestamp>` 文件 (`bin/version_consistency_check.sh.bak.1777517057` / `.bak.1777517242`)
+- `ci_preflight.sh` 残留检查扩展, 新增黑名单: `*.bak / *.bak.[0-9]* / *~ / .DS_Store / Thumbs.db`
+- 顺手修正 module.prop version 正则: 旧版 `.` 没转义 + 只允许 `rc N.M` 两段 + `hotfix` 跟实际 `-hf` 命名不一致. 新正则 `^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+){0,3}(-hf[0-9]+)?$` 正确识别 `v5.3.0-rc30.12.30`.
+
+### P2.17 devices.json 权威 schema (ARCHITECTURE.md)
+
+之前的 schema 段只有个示例 JSON, 字段混在一起靠 key 检索. 替换为三张权威表:
+
+- **A) hotspotd 原始字段**: mac / ip / hostname / vendor / rx_bytes / tx_bytes / first_seen / last_seen / online / rx_bps,tx_bps (写入但 httpd 覆盖)
+- **B) hnc_httpd 注入字段**: online (重算) / rx_bps,tx_bps (实时差分) / status (blocked/allowed) / hostname (manual 覆盖) / hostname_src
+- **C) rules.json 合并字段**: mark_id / down_mbps / up_mbps / delay_ms / jitter_ms / loss_pct / limit_enabled / delay_enabled
+
+明确写了 "devices.json 只由 hotspotd 写, httpd 经过 buildDevicesPayload 在内存
+合并 + 返回, 不回写". 也写了 rule-only / blacklist-only 虚行的来源 (httpd 追加
+离线行, 不进 devices.json).
+
+### 没动的部分 (留给下个 rc)
+
+- **P2.13** `bin/stats_v52_*` 重命名 (10 文件 / 100+ 引用跨多语言, 一次性
+  风险大, 需要分阶段重命名 + 每次跑 CI 验证)
+- **P2.14** 抽 `bin/hnc_common.sh` (设计需要讨论 + 涉及很多 shell 改动)
+- **P2.15** 巨型 shell 拆分 (`tc_manager.sh` 2041 行 / `watchdog.sh` 1252 行 等, 真机风险)
+- **P2.16** `dpi_rules.json` 拆 `etc/dpi_rules.d/*.json` (dpid 启动逻辑 Go 代码改动)
+
+### 编译 / 验证
+
+- `go build ./daemon/hnc_httpd`: 通过 (Go 1.22.5 host build)
+- `sh -n bin/ci_preflight.sh`: 通过
+- `sh bin/ci_preflight.sh`: residue 检查 OK, module.prop version 正则识别 valid
+- 自检命令 (装机后跑):
+  ```bash
+  su
+  SECRET=$(cat /data/local/hnc/run/local_admin.secret)
+  # P0.2 校验: 错长度 secret 必拒
+  curl -s -o /dev/null -w "wrong-len: %{http_code}\n" \
+    -H "X-HNC-Local-Admin: $(echo -n "$SECRET" | head -c 32)" \
+    http://127.0.0.1:8444/api/devices
+  # 期望 401
+  curl -s -o /dev/null -w "valid: %{http_code}\n" \
+    -H "X-HNC-Local-Admin: $SECRET" \
+    http://127.0.0.1:8444/api/devices
+  # 期望 200
+
+  # P0.1 校验: logout 应 idempotent
+  curl -s -X POST -o /dev/null -w "no-cookie: %{http_code}\n" \
+    http://127.0.0.1:8444/api/logout
+  # 期望 200 (即使没 cookie)
+  ```
+
+---
+
+
 ## v5.3.0-rc30.12.29
 
 **发布日期**: 2026-05-19

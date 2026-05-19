@@ -42,7 +42,9 @@ var (
 	// says auth_required=false, force remote cookie auth in-process instead of
 	// merely logging a warning. Loopback KSU requests without Origin/Referer keep
 	// their local bypass in middleware.
-	forceRemoteAuth bool
+	//
+	// rc30.12.30 (P0.3): forceRemoteAuth 删除. rc30.12.18 默认拒绝重构后没人读它,
+	// 启动时给它赋 true 的代码也一并删. 只保留 SECURITY log 提醒.
 )
 
 // rc5.1.1 修 X-G2: 之前硬编码 "v4.1.0-rc3.1.14", 每次发版都要手动改.
@@ -97,12 +99,14 @@ func main() {
 	// 联合配置下任何热点用户都能裸读/写 HNC 控制平面. 默认全新装机就是这状态
 	// (rc3.1.13 起 rules.json 模板 auth_required:false). 启动时打一次 WARN
 	// 让用户在 boot.log / WebUI 日志里看到, 提示开 toggle.
+	//
+	// rc30.12.30 (P0.3): forceRemoteAuth=true 的赋值已删. rc30.12.18 默认拒绝
+	// 已经在中间件层强制 cookie 鉴权, 这个变量是 dead state. 只留 SECURITY log.
 	if haveRemote {
 		ip := net.ParseIP(*flagBind)
 		if ip != nil && ip.To4() != nil && ip.To4().IsUnspecified() {
 			if !readAuthRequired(*flagHNCDir) {
-				forceRemoteAuth = true
-				log.Printf("SECURITY: bind=0.0.0.0 with auth_required=false — forcing cookie auth for remote clients in this process. Local KSU loopback bypass remains available.")
+				log.Printf("SECURITY: bind=0.0.0.0 with auth_required=false — rc30.12.18 default-deny enforces cookie auth on remote clients. Local KSU loopback bypass remains via X-HNC-Local-Admin secret.")
 			}
 		}
 	}

@@ -984,6 +984,11 @@ fetch('/api/health').then(function(r){return r.json();}).then(function(d){
 
 // ── v4.0 Patch 2.d: 当前身份 + logout ─────────────────────
 // /api/health 返回的身份信息(仅已鉴权请求返回)
+//
+// rc30.12.30 (P0.4): session_label 字段已从 apiHealth 移除 (是死代码,
+// /api/health 在 isPublicPath, middleware 不 inject token, label 永远是空).
+// 函数保留, badge 在 session_label 缺失时不显示 (graceful degradation).
+// 如果未来恢复, 应走独立 /api/whoami 端点.
 function loadSessionInfo() {
   fetch('/api/health', { credentials: 'same-origin' })
     .then(function(r) { return r.json(); })

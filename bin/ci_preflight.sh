@@ -28,12 +28,19 @@ say "HNC preflight v5.3.0-rc25.0"
 say "root=$ROOT"
 
 # 1. Patch residue check
-RESIDUE="$(find . -path './.git' -prune -o \( -name '*.rej' -o -name '*.orig' \) -print 2>/dev/null | head -50)"
+# rc30.12.30 (P2.12): 扩展黑名单. 之前 zip 里曾经混进过 .bak.<timestamp> 文件
+# (bin/version_consistency_check.sh.bak.1777517057 等), 占模块 zip 体积也让安装包
+# 看着不专业. 现在 release zip / source tree 一律不允许这些临时文件.
+RESIDUE="$(find . -path './.git' -prune -o \( \
+    -name '*.rej' -o -name '*.orig' \
+    -o -name '*.bak' -o -name '*.bak.[0-9]*' -o -name '*~' \
+    -o -name '.DS_Store' -o -name 'Thumbs.db' \
+  \) -print 2>/dev/null | head -50)"
 if [ -n "$RESIDUE" ]; then
-  fail "patch residue found (.rej/.orig):"
+  fail "patch/editor residue found (.rej/.orig/.bak/~/.DS_Store/Thumbs.db):"
   say "$RESIDUE"
 else
-  ok "no .rej/.orig residue"
+  ok "no patch/editor residue (.rej/.orig/.bak/~/.DS_Store)"
 fi
 
 # 2. Secrets / accidental home repo files
@@ -52,7 +59,12 @@ else
   VER="$(awk -F= '$1=="version"{print $2; exit}' module.prop)"
   VC="$(awk -F= '$1=="versionCode"{print $2; exit}' module.prop)"
   say "module.prop version=$VER versionCode=$VC"
-  if echo "$VER" | grep -Eq '^v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+(.[0-9]+)?(-hotfix[0-9]+(.[0-9]+)?)?$'; then
+  # rc30.12.30 (P2.12): 修正正则.
+  # 之前: ^v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+(.[0-9]+)?(-hotfix[0-9]+(.[0-9]+)?)?$
+  #   - 点没转义 (".") , 任意字符都匹配, 误报概率高
+  #   - 只允许 rc N.M 两段, 但实际用了 rc30.12.29 三段
+  #   - hotfix 拼写跟实际 -hf2 命名不一致
+  if echo "$VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+){0,3}(-hf[0-9]+)?$'; then
     ok "module.prop version format looks valid"
   else
     warn "module.prop version format is unexpected"

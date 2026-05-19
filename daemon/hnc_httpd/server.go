@@ -268,20 +268,20 @@ func (s *server) apiHealth(w http.ResponseWriter, r *http.Request) {
 		passive = true
 	}
 
-	// v4.0 Patch 2.d: 鉴权会话时返回当前设备 label
-	// authMiddleware 把 Token 塞进 context,这里取出
-	resp := map[string]interface{}{
+	// rc30.12.30 (P0.4): 删 session_label 死代码.
+	// 之前从 ctx 取 Token 拿 Label 写进 resp, 但 /api/health 在 isPublicPath,
+	// authMiddleware 不会 inject ctxKeyToken, tokVal 永远 nil. 这段代码从来没跑过.
+	// 选项:
+	//   (a) 移出 isPublicPath - 但远程 WebUI 顶部 fetch('/api/health') 探活会拿
+	//       version 和 watchdog_passive (app.js:974), 移走会破坏匿名探活. 不可接受.
+	//   (b) 删 session_label 死代码 - 保留匿名探活, 失去 session label UX (次要功能).
+	// 选了 (b). 如果未来想恢复 session label, 走独立 /api/whoami 端点 (鉴权).
+	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":           "ok",
 		"version":          version,
 		"hnc_dir":          s.hncDir,
 		"watchdog_passive": passive,
-	}
-	if tokVal := r.Context().Value(ctxKeyToken); tokVal != nil {
-		if tok, ok := tokVal.(Token); ok && tok.Label != "" {
-			resp["session_label"] = tok.Label
-		}
-	}
-	writeJSON(w, http.StatusOK, resp)
+	})
 }
 
 // ═══ API: devices ═══════════════════════════════════════════════

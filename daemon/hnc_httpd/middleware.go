@@ -51,8 +51,16 @@ const CookieName = "hnc_token"
 // 公共路径分类:
 //   1. UI 入口 (没鉴权就看不到登录页) - /, /pair, /changelog.html, /static/*
 //   2. 鉴权流程本身              - /api/pair/verify, /api/pairing/status
-//   3. 健康检查                  - /api/health
-//   4. 反向流程                  - /api/logout (登出永远应该允许)
+//   3. 健康检查 / 探活            - /api/health (返回 version + watchdog_passive,
+//                                  远程 WebUI 顶部探活. rc30.12.30 P0.4 后已删
+//                                  session_label 死代码 — 那是 isPublicPath 下永远
+//                                  拿不到的字段)
+//   4. 登出 (idempotent, handler 自己处理 cookie revoke) - /api/logout
+//
+// 注意: /api/logout 仍在白名单, 但不再依赖 authMiddleware inject ctx —
+// handleLogout 已改为自己解 cookie + VerifyCookie + revoke (见 pair.go).
+// 这样登出对 cookie 过期/无效场景仍是 idempotent (返回 200), 同时 cookie 有效
+// 时真正 revoke server-side token.
 //
 // 注意: "/" SPA 主页放行是为了让 JS 加载, JS 加载后会自己判断登录态并 fetch /api/*,
 // 第一个 fetch 会拿到 401, WebUI 收到 401 后跳转到 /pair. 这是 SPA 标准流程.
@@ -209,8 +217,10 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			// 配对流程即可. 配对配置本身仍由 /api/pairing/status 公开查询.
 			//
 			// 兼容性: auth_required 字段保留在 rules.json (不报错), 但不再有
-			// "放行匿名" 的语义. forceRemoteAuth 旗子也保留 (有它就强制走 cookie,
-			// 没它现在也强制走 cookie, 等价于一直 ON).
+			// "放行匿名" 的语义.
+			//
+			// rc30.12.30 (P0.3): forceRemoteAuth 全局变量删除 — 没有任何代码读它,
+			// rc30.12.18 默认拒绝重构后就语义死了, 但变量留着误导读者. 已从 main.go 删.
 			if !readAuthRequired(s.hncDir) {
 				// 老用户 rules.json 还是 false. 打 log 一次性提醒, 但仍 fail-closed.
 				log.Printf("auth: anonymous request to %s (auth_required=false in rules.json, but rc30.12.18 enforces default-deny → 401)", r.URL.Path)
@@ -382,9 +392,18 @@ func (s *server) localAdminSecretExists() bool {
 
 // checkLocalAdminSecret 比对请求 header 跟磁盘 secret.
 // 用 constant-time compare 防 timing attack.
+//
+// rc30.12.30 (P0.2): 加 64 字符 hex 严格校验.
+//
+// 之前只比较长度是否相等. 如果磁盘 secret 被部分写入 (截断/写半), 后端会接受同样
+// 截断长度的伪 secret. service.sh 生成的是 32 字节 hex = 64 字符, 不应接受任何
+// 其他形式. 前端 (hf2 已修) 明确 /^[0-9a-fA-F]{64}$/.test(s), 后端必须对齐.
+//
+// 威胁面有限 (文件 mode 0600 + owner root, 普通进程写不进), 但前端做了后端必须严,
+// 否则下一次某个写者把文件写坏, 整条防线松动. 这是 defense-in-depth.
 func (s *server) checkLocalAdminSecret(r *http.Request) bool {
 	got := strings.TrimSpace(r.Header.Get("X-HNC-Local-Admin"))
-	if got == "" {
+	if !isValid64Hex(got) {
 		return false
 	}
 	p := filepath.Join(s.hncDir, localAdminSecretRelPath)
@@ -393,11 +412,29 @@ func (s *server) checkLocalAdminSecret(r *http.Request) bool {
 		return false
 	}
 	want := strings.TrimSpace(string(wantB))
-	if want == "" {
+	if !isValid64Hex(want) {
+		// 磁盘 secret 不是合法 64 hex (被截断/写坏), 拒绝. service.sh 应重新生成.
+		log.Printf("checkLocalAdminSecret: on-disk secret invalid (not 64 hex), rejecting all requests until regenerated")
 		return false
 	}
-	if len(got) != len(want) {
-		return false
-	}
+	// 现在 got 和 want 都是 64 字符 hex, 长度天然相等 (不再需要单独 len check).
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
+}
+
+// isValid64Hex 检查字符串是否恰好 64 字符且全为 hex.
+// rc30.12.30 (P0.2): 跟前端 /^[0-9a-fA-F]{64}$/.test(s) 对齐.
+func isValid64Hex(s string) bool {
+	if len(s) != 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		ok := (c >= '0' && c <= '9') ||
+			(c >= 'a' && c <= 'f') ||
+			(c >= 'A' && c <= 'F')
+		if !ok {
+			return false
+		}
+	}
+	return true
 }

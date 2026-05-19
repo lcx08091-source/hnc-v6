@@ -1,3 +1,18 @@
+<!-- v5.3.0-rc30.12.30 -->
+<div class="cl-section">
+  <div class="cl-title">🔒 v5.3.0-rc30.12.30: GPT 三审 P0 全修 + 部分 P2 收口 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>P0.1 handleLogout 漏洞修复</b>: 之前 <code>/api/logout</code> 在 isPublicPath, authMiddleware 不 inject ctx, revoke 死代码永不跑, cookie 被偷可用到 60 天硬过期. 现在 handler 自己解 cookie + VerifyCookie + revoke, idempotent (cookie 无效仍 200, 有效真 revoke server-side token).</li>
+    <li><b>P0.2 checkLocalAdminSecret 强制 64 hex</b>: 抽 <code>isValid64Hex()</code>, got/want 都校验 64 字符 hex, 跟前端 <code>/^[0-9a-fA-F]{64}$/.test(s)</code> 对齐. 磁盘 secret 损坏时 fail-closed.</li>
+    <li><b>P0.3 forceRemoteAuth 死变量删</b>: rc30.12.18 默认拒绝后没人读它, 一并清掉变量声明 + 赋值 + 注释里的误导说明.</li>
+    <li><b>P0.4 apiHealth session_label 死代码删</b>: isPublicPath 下 token 永远 nil, session_label 字段从来没返回过. 选 "删死代码" 而非 "移出 isPublicPath", 因为远程 WebUI 顶部用 fetch('/api/health') 探活拿 version + watchdog_passive, 不能加鉴权. <code>app.js loadSessionInfo()</code> 加 deprecation 注释.</li>
+    <li><b>P2.11 hotfix*.go 合并</b>: <code>hotfix16_7_compile_compat.go</code> → <code>action_hotspot_iface_set.go</code>, <code>hotfix16_8_live_api.go</code> → <code>api_live.go</code>, <code>hotfix16_9_capability_gate.go</code> → <code>capability.go</code>. 按 patch 命名改成按功能命名, 跟现有 <code>action_*.go</code> / <code>api_*.go</code> 风格对齐.</li>
+    <li><b>P2.12 .bak 残留 + CI 检查</b>: 删 2 个 <code>.bak.&lt;timestamp&gt;</code>; <code>ci_preflight.sh</code> 残留检查加 <code>*.bak / *.bak.[0-9]* / *~ / .DS_Store / Thumbs.db</code>; 顺手修正 module.prop version 正则 (旧版 . 没转义 + 只允许两段 + hotfix 拼写跟实际 -hf 不一致).</li>
+    <li><b>P2.17 devices.json 权威 schema</b>: <code>ARCHITECTURE.md</code> 替换原 JSON 示例为三张表 — hotspotd 原始字段 / hnc_httpd 注入字段 (online,rx_bps,tx_bps,status,hostname_src) / rules.json 合并字段 (mark_id,down_mbps,up_mbps,delay/loss/jitter,*_enabled).</li>
+    <li><b>没动的</b>: P2.13 stats_v52_* 重命名 (100+ 引用风险大) / P2.14 hnc_common.sh / P2.15 巨型 shell 拆分 / P2.16 dpi_rules.json 拆分. 留给下个 rc 分阶段做.</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.29 -->
 <div class="cl-section">
   <div class="cl-title">🔧 v5.3.0-rc30.12.29: GPT 三审 P1 列表全收口 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
