@@ -1,4 +1,42 @@
 
+## v5.3.0-rc30.12.28-hf1
+
+**发布日期**: 2026-05-19
+**versionCode**: 530147
+
+hotfix1: 修 rc30.12.28 launcher 编译 + TLS 对齐根因.
+
+### 根因
+
+rc30.12.28 用 `-static-pie` 和 `-Wl,-z,max-page-size` 试图修 Bionic TLS 对齐, 但**都没用** —— 因为静态链接时, NDK 提供的 Bionic libc archive (`libc.a`) 里 TLS segment 本身就是 8 字节对齐. Linker flag 改不了 archive 内已经编好的 segment 对齐.
+
+### 重新审视
+
+发现 hnc_launcher.c 注释说"需要 `-static` 是因为 post-fs-data 早期 /system 未必 mount" —— 但 service.sh 实际是 **Magisk/KSU late_start service**, 跑在 boot 5 秒后, 此时 `/system` 早已 mount. 静态链接不是必须的, 完全可以动态链接.
+
+### 真修
+
+`src/launcher/build.sh`: hnc_launcher 改用 PIE + 动态链接 (跟 fork_probe 一样的编法).
+
+```sh
+# 之前 (有 TLS 对齐问题):
+$CLANG -static -o hnc_launcher hnc_launcher.c
+
+# 现在 (跟 fork_probe 一样的 PIE 动态链接):
+$CLANG -o hnc_launcher hnc_launcher.c
+```
+
+### 副作用
+
+- hnc_launcher 大小: ~700 KB → ~7 KB (libc 不再嵌入)
+- 启动时依赖 `/system/lib64/libc.so` (late_start 阶段一定存在)
+- 跟 fork_probe 行为一致, 不引入新的兼容性风险
+
+### 为什么这次能成
+
+因为你机器上 **fork_probe 跑通了** (是动态链接 PIE). hnc_launcher 用一模一样的编译方式, 应该也能跑.
+
+
 ## v5.3.0-rc30.12.28
 
 **发布日期**: 2026-05-19

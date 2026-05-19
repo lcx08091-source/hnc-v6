@@ -1,3 +1,14 @@
+<!-- v5.3.0-rc30.12.28-hf1 -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.3.0-rc30.12.28-hf1: hotfix launcher TLS 根因修复 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>问题</b>: rc30.12.28 试图用 LDFLAGS 修 launcher TLS 对齐, 但失败 — 静态链接时 NDK Bionic libc archive 的 TLS segment 本身就 8 字节对齐, linker flag 改不了.</li>
+    <li><b>根因</b>: hnc_launcher.c 注释说需要 -static 防止"/system 未 mount", 但 service.sh 是 late_start (boot 5s 后), /system 早就 mount 了.</li>
+    <li><b>修法</b>: 改用动态链接 PIE (跟 fork_probe 一样的编法). launcher 体积 ~700K → ~7K, 依赖 /system/lib64/libc.so (late_start 阶段一定存在).</li>
+    <li><b>结果</b>: CI 这次应该能编出能跑的 hnc_launcher, service.sh 会优先选 C launcher 而不是 fallback 到 shell guard.</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.28 -->
 <div class="cl-section">
   <div class="cl-title">🚨 v5.3.0-rc30.12.28: 紧急修复 rc30.12.27 装机 P0/P1 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>

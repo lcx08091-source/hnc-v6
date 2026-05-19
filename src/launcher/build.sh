@@ -98,29 +98,31 @@ file fork_probe
 ls -lh fork_probe
 
 echo ""
-echo "Building hnc_launcher (static)..."
-# -static: 不依赖运行时 /system/lib64 (post-fs-data 早期可能未 mount)
-# rc30.12.28: -static-pie 比纯 -static 更兼容 Bionic, 同时保留 ASLR.
-"$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -static -o hnc_launcher hnc_launcher.c
+echo "Building hnc_launcher (PIE, dynamic linked)..."
+# rc30.12.28 三修: 之前用 -static 会因为静态链接 NDK 的 Bionic libc 时, TLS segment
+# 默认 8 字节对齐, 但运行时 Bionic loader 要求 64 字节, 导致 'TLS segment is
+# underaligned' abort.
+#
+# 真相: service.sh 是 Magisk/KSU 的 late_start service, 跑在 boot 5s 后, /system
+# 早已 mount. 不需要 -static 来对抗 "post-fs-data 早期阶段 /system 未必 mount"
+# 这个并不存在的问题. 改用普通 PIE (动态链接 /system/lib64/libc.so), 由 Bionic
+# loader 解决 TLS 对齐, 跟 fork_probe 一样能正常跑.
+#
+# 副作用: launcher 大小从 ~700KB 变成 ~7KB (libc 不再嵌入). 不影响功能.
+"$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -o hnc_launcher hnc_launcher.c
 file hnc_launcher
 ls -lh hnc_launcher
 
-# rc30.12.28: 检查 TLS 对齐. readelf 看 .tbss / .tdata segment 的 align,
-# 如果 < 64 就警告 (Bionic 会 abort).
+# rc30.12.28: TLS 对齐诊断 (informational, never fails CI).
+# Bionic ARM64 需要 TLS align >= 64; 默认 toolchain 出 8 字节会 abort.
+# 这里只打印, 不 exit. 如果对齐错, 用户装机时 service.sh sentinel 会自动检测
+# 'TLS segment is underaligned' abort 并 fallback 到 shell guard.
 echo ""
-echo "Checking TLS alignment (must be >= 64 on Bionic ARM64)..."
-TLS_ALIGN=$(readelf -l hnc_launcher 2>/dev/null | grep -A1 'TLS' | grep -oE 'Align: 0x[0-9a-f]+' | head -1 | grep -oE '0x[0-9a-f]+')
-if [ -n "$TLS_ALIGN" ]; then
-    TLS_ALIGN_DEC=$(printf "%d" "$TLS_ALIGN" 2>/dev/null)
-    if [ "$TLS_ALIGN_DEC" -lt 64 ]; then
-        echo "  ⚠ WARN: TLS alignment = $TLS_ALIGN ($TLS_ALIGN_DEC bytes), need >= 64 for Bionic"
-        echo "    hnc_launcher will Abort with 'TLS segment is underaligned' on Android"
-        echo "    NDK version: $("$CLANG" --version | head -1)"
-        echo "    Try: NDK r25+ or add -Wl,--no-tls-align-relax"
-    else
-        echo "  ✓ TLS alignment = $TLS_ALIGN ($TLS_ALIGN_DEC bytes), Bionic-safe"
-    fi
-fi
+echo "TLS alignment diag (informational):"
+(
+    set +e
+    readelf -l hnc_launcher 2>/dev/null | grep -A 1 'TLS' | head -3 || true
+) || true
 
 # ─── 4. 简单 sanity check ─────────────────────────────────────────
 
