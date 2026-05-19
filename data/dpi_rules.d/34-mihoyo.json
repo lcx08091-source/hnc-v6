@@ -1,0 +1,49 @@
+{
+  "schema_version": "2.0",
+  "subset": "34-mihoyo",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#34-mihoyo",
+  "rules": [
+    {
+      "id": "hoyoplay_launcher",
+      "app": "HoYoPlay 启动器",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "hoyoplay.com",
+        "launcher-webstatic.mihoyo.com",
+        "webstatic.mihoyo.com"
+      ]
+    },
+    {
+      "id": "mihoyo",
+      "app": "米哈游 (原神/星穹/崩坏)",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "mihoyo.com",
+        "hoyoverse.com",
+        "mhystatic.com",
+        "hoyolab.com",
+        "genshinimpact.com",
+        "honkaiimpact3.com",
+        "bhsr.com",
+        "yuanshen.com",
+        "starrails.com",
+        "hoyoplay.com"
+      ]
+    },
+    {
+      "id": "mihoyo_extra",
+      "app": "米哈游日志/SDK 服务",
+      "category": "game",
+      "confidence": "medium",
+      "suffixes": [
+        "log-upload.mihoyo.com",
+        "minor-api.mihoyo.com",
+        "sdkstat-cn-rpg.mhystatic.com",
+        "cn-rpg-prod-logproxy.mhystatic.com",
+        "log-upload-os.mihoyo.com"
+      ]
+    }
+  ]
+}

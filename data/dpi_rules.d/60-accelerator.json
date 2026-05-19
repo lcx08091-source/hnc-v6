@@ -1,0 +1,38 @@
+{
+  "schema_version": "2.0",
+  "subset": "60-accelerator",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#60-accelerator",
+  "rules": [
+    {
+      "id": "xunlei",
+      "app": "迅雷",
+      "category": "download",
+      "confidence": "high",
+      "suffixes": [
+        "xunlei.com",
+        "xlmc.sandai.net",
+        "sandai.net"
+      ]
+    },
+    {
+      "id": "xunyou_accelerator",
+      "app": "迅游加速器",
+      "category": "game-tools",
+      "confidence": "very_high",
+      "suffixes": [
+        "xunyou.mobi"
+      ],
+      "behavioral_hint": "通常陪同腾讯游戏 (尤其和平精英/CF/王者) 出现, 是'当前正玩腾讯游戏'的强辅助信号",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "client": "10.58.71.89 (RMX5010 主机 - 玩 PUBG 时被触发)"
+      },
+      "strong_correlation_observed": [
+        "和平精英 (2026-05-18 第一次)",
+        "王者荣耀 (2026-05-18 第二次, portal.xunyou.mobi 17 SNI 最高)"
+      ],
+      "behavioral_hint_v2": "迅游和腾讯重度国服手游强相关: portal.xunyou.mobi 高频 SNI → 大概率正在玩腾讯重度手游 (王者/和平/CF/火影). 可作为'游戏中'状态辅助信号"
+    }
+  ]
+}

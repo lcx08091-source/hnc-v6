@@ -1,0 +1,122 @@
+{
+  "schema_version": "2.0",
+  "subset": "41-social-shopping-cn",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#41-social-shopping-cn",
+  "rules": [
+    {
+      "id": "didi",
+      "app": "滴滴",
+      "category": "navigation",
+      "confidence": "high",
+      "suffixes": [
+        "didiglobal.com",
+        "udache.com",
+        "xiaojukeji.com",
+        "diditaxi.com.cn"
+      ]
+    },
+    {
+      "id": "douban",
+      "app": "豆瓣",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "douban.com",
+        "doubanio.com"
+      ]
+    },
+    {
+      "id": "feishu",
+      "app": "飞书",
+      "category": "office",
+      "confidence": "high",
+      "suffixes": [
+        "feishu.cn",
+        "larksuite.com",
+        "larkoffice.com",
+        "feishucdn.com"
+      ]
+    },
+    {
+      "id": "jd",
+      "app": "京东",
+      "category": "shopping",
+      "confidence": "high",
+      "suffixes": [
+        "jd.com",
+        "360buyimg.com",
+        "jdcdn.com",
+        "jdpay.com",
+        "jcloud.com"
+      ]
+    },
+    {
+      "id": "meituan",
+      "app": "美团",
+      "category": "shopping",
+      "confidence": "high",
+      "suffixes": [
+        "meituan.com",
+        "meituan.net",
+        "dianping.com",
+        "dpfile.com",
+        "mtmap.com"
+      ]
+    },
+    {
+      "id": "pinduoduo",
+      "app": "拼多多",
+      "category": "shopping",
+      "confidence": "high",
+      "suffixes": [
+        "pinduoduo.com",
+        "yangkeduo.com",
+        "pddpic.com",
+        "pinyincdn.com"
+      ]
+    },
+    {
+      "id": "weibo",
+      "app": "微博",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "weibo.com",
+        "sinaimg.cn",
+        "weibocdn.com",
+        "miaopai.com",
+        "wbimg.com",
+        "sina.com.cn"
+      ]
+    },
+    {
+      "id": "xiaohongshu",
+      "app": "小红书",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "xiaohongshu.com",
+        "xhscdn.com",
+        "xhsapi.com",
+        "as.xiaohongshu.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-16",
+        "packets_observed": 0
+      },
+      "priority": "specific"
+    },
+    {
+      "id": "zhihu",
+      "app": "知乎",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "zhihu.com",
+        "zhimg.com",
+        "zhihuhcdn.com"
+      ]
+    }
+  ]
+}

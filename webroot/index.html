@@ -5876,7 +5876,35 @@ body.kb-open .container {
     return btoa(unescape(encodeURIComponent(String(s || ''))));
   }
   async function dpiRulesExportBackend() {
-    const script = 'H=/data/local/hnc; MOD=$(cat "$H/run/service.path" 2>/dev/null); [ -z "$MOD" ] && MOD=/data/adb/modules/hotspot_network_control; if [ -f "$H/etc/dpi_rules.json" ]; then cat "$H/etc/dpi_rules.json"; elif [ -f "$MOD/data/dpi_rules.json" ]; then cat "$MOD/data/dpi_rules.json"; else echo "{\"schema_version\":\"1.0\",\"rules_version\":\"empty\",\"rules\":[]}"; fi';
+    // rc30.12.32 (TASK-a Stage 3): dpi_rules.d/ 优先, fallback 到 legacy dpi_rules.json.
+    // 优先 etc/dpi_rules.d/, 其次 module data/dpi_rules.d/, 再次 etc/dpi_rules.json,
+    // 再次 module data/dpi_rules.json, 都没有就返回空 schema. jq 可用时合并所有 rules
+    // 数组成单文件; 不可用时降级到 cat dpi_rules.json (派生产物, 跟 dpi_rules.d/ 等价).
+    const script = [
+      'H=/data/local/hnc',
+      'MOD=$(cat "$H/run/service.path" 2>/dev/null)',
+      '[ -z "$MOD" ] && MOD=/data/adb/modules/hotspot_network_control',
+      'EMPTY=\'{"schema_version":"1.0","rules_version":"empty","rules":[]}\'',
+      'try_dir() {',
+      '  D="$1"',
+      '  [ -d "$D" ] || return 1',
+      // shell glob: 看 *.json 是否真的展开了 (空目录会保留字面 *.json)
+      '  set -- "$D"/*.json',
+      '  [ -e "$1" ] || return 1',
+      '  if command -v jq >/dev/null 2>&1; then',
+      // 用 jq merge: schema_version 取第一个, rules_version 标 merged, rules 拼接所有 + 同 id 后入覆盖
+      '    jq -s \'reduce .[] as $f ({"schema_version":"2.0","rules_version":"merged-from-dpi_rules.d","rules":[]}; .schema_version = ($f.schema_version // .schema_version) | .rules = (.rules + ($f.rules // [])))\' "$D"/*.json | jq \'.rules |= (group_by(.id) | map(.[-1]))\'',
+      '  else',
+      // 没 jq: 不去 merge 子文件 (sed/awk 拼 144 条规则 JSON 会非常脆弱), 让外层 fallback 去找 legacy 单文件
+      '    return 2',
+      '  fi',
+      '}',
+      'try_dir "$H/etc/dpi_rules.d" && exit 0',
+      'try_dir "$MOD/data/dpi_rules.d" && exit 0',
+      'if [ -f "$H/etc/dpi_rules.json" ]; then cat "$H/etc/dpi_rules.json"; exit 0; fi',
+      'if [ -f "$MOD/data/dpi_rules.json" ]; then cat "$MOD/data/dpi_rules.json"; exit 0; fi',
+      'echo "$EMPTY"',
+    ].join('; ');
     return await kexec('sh -c ' + sq(script));
   }
   async function dpiRulesImportBackend(text) {

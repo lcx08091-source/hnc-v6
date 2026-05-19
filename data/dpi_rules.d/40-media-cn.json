@@ -1,0 +1,110 @@
+{
+  "schema_version": "2.0",
+  "subset": "40-media-cn",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#40-media-cn",
+  "rules": [
+    {
+      "id": "apple_music",
+      "app": "Apple Music",
+      "category": "music",
+      "confidence": "high",
+      "suffixes": [
+        "music.apple.com",
+        "applemusic.com"
+      ]
+    },
+    {
+      "id": "bilibili",
+      "app": "哔哩哔哩",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "bilibili.com",
+        "biliapi.net",
+        "biliapi.com",
+        "hdslb.com",
+        "bilivideo.com",
+        "bilivideo.cn",
+        "b23.tv",
+        "acgvideo.com"
+      ],
+      "ground_truth_2026_05_18": {
+        "source": "external_ai_pcap_analysis",
+        "date": "2026-05-18"
+      }
+    },
+    {
+      "id": "iqiyi",
+      "app": "爱奇艺",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "iqiyi.com",
+        "iqiyipic.com",
+        "qiyipic.com",
+        "qy.net",
+        "qiyi.com"
+      ]
+    },
+    {
+      "id": "kugou",
+      "app": "酷狗音乐",
+      "category": "music",
+      "confidence": "high",
+      "suffixes": [
+        "kugou.com",
+        "kgimg.com"
+      ]
+    },
+    {
+      "id": "kuwo",
+      "app": "酷我音乐",
+      "category": "music",
+      "confidence": "high",
+      "suffixes": [
+        "kuwo.cn",
+        "kwcdn.kuwo.cn"
+      ]
+    },
+    {
+      "id": "mango_tv",
+      "app": "芒果 TV",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "mgtv.com",
+        "hitv.com",
+        "imgo.tv"
+      ]
+    },
+    {
+      "id": "qq_music",
+      "app": "QQ 音乐",
+      "category": "music",
+      "confidence": "high",
+      "suffixes": [
+        "qqmusic.qq.com",
+        "music.tc.qq.com",
+        "tencentmusic.com",
+        "kg.qq.com",
+        "y.gtimg.cn"
+      ],
+      "ground_truth_2026_05_18": {
+        "source": "external_ai_pcap_analysis",
+        "date": "2026-05-18"
+      }
+    },
+    {
+      "id": "youku",
+      "app": "优酷",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "youku.com",
+        "ykimg.com",
+        "youkupie.com",
+        "soku.com"
+      ]
+    }
+  ]
+}

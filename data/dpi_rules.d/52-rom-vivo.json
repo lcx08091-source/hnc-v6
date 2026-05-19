@@ -1,0 +1,30 @@
+{
+  "schema_version": "2.0",
+  "subset": "52-rom-vivo",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#52-rom-vivo",
+  "rules": [
+    {
+      "id": "vivo",
+      "app": "vivo 服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "vivo.com",
+        "vivo.com.cn",
+        "vivoglobal.com"
+      ]
+    },
+    {
+      "id": "vivo_system_extra",
+      "app": "vivo 系统服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "vivoglobal.com",
+        "vivo.com.cn",
+        "vivospace.com",
+        "bbk.com"
+      ]
+    }
+  ]
+}

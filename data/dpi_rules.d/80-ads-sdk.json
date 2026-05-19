@@ -1,0 +1,53 @@
+{
+  "schema_version": "2.0",
+  "subset": "80-ads-sdk",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#80-ads-sdk",
+  "rules": [
+    {
+      "id": "adjust",
+      "app": "Adjust 统计",
+      "category": "ads",
+      "confidence": "medium",
+      "suffixes": [
+        "adjust.com",
+        "adjust.net",
+        "adjust.world"
+      ]
+    },
+    {
+      "id": "appsflyer",
+      "app": "AppsFlyer 统计",
+      "category": "ads",
+      "confidence": "medium",
+      "suffixes": [
+        "appsflyer.com",
+        "appsflyersdk.com"
+      ]
+    },
+    {
+      "id": "google_ads_firebase",
+      "app": "Google Ads / Firebase",
+      "category": "ads",
+      "confidence": "medium",
+      "suffixes": [
+        "googleads.g.doubleclick.net",
+        "pagead2.googlesyndication.com",
+        "firebaseio.com",
+        "firebaseapp.com",
+        "app-measurement.com",
+        "crashlytics.com",
+        "firebase-settings.crashlytics.com"
+      ]
+    },
+    {
+      "id": "sensorsdata",
+      "app": "神策数据",
+      "category": "ads",
+      "confidence": "high",
+      "suffixes": [
+        "sensorsdata.cn",
+        "sensorsdata.com"
+      ]
+    }
+  ]
+}

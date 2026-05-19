@@ -1,0 +1,49 @@
+{
+  "schema_version": "2.0",
+  "subset": "53-rom-huawei",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#53-rom-huawei",
+  "rules": [
+    {
+      "id": "huawei",
+      "app": "华为/HMS 服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "huawei.com",
+        "hicloud.com",
+        "dbankcloud.cn",
+        "dbankcdn.com",
+        "dbankcdn.cn",
+        "hispace.dbankcloud.cn",
+        "cbg-app.huawei.com",
+        "hihonor.com"
+      ]
+    },
+    {
+      "id": "huawei_cloud",
+      "app": "华为云/CDN",
+      "category": "cloud",
+      "confidence": "low",
+      "suffixes": [
+        "huaweicloud.com",
+        "myhuaweicloud.com",
+        "huaweicloud-dns.com"
+      ]
+    },
+    {
+      "id": "huawei_update",
+      "app": "华为更新/应用市场",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "update.dbankcdn.com",
+        "update-drcn.platform.hicloud.com",
+        "connectivitycheck.platform.hicloud.com",
+        "connectivitycheck.cbg-app.huawei.com",
+        "wise-device-drcn.things.dbankcloud.cn",
+        "metrics1-drcn.dt.dbankcloud.cn",
+        "applinking-drcn.hispace.dbankcloud.cn"
+      ]
+    }
+  ]
+}

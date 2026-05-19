@@ -1,0 +1,317 @@
+{
+  "schema_version": "2.0",
+  "subset": "30-bytedance-kuaishou",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#30-bytedance-kuaishou",
+  "rules": [
+    {
+      "id": "bytedance_ads_extra",
+      "app": "字节广告/统计 SDK",
+      "category": "ads",
+      "confidence": "high",
+      "suffixes": [
+        "pangolin-sdk-toutiao.com",
+        "pangolin-sdk-toutiao-b.com",
+        "pglstatp-toutiao.com",
+        "pglstatp.snssdk.com",
+        "is.snssdk.com",
+        "log.snssdk.com",
+        "log.zijieapi.com",
+        "api-access.pangolin-sdk-toutiao-b.com"
+      ]
+    },
+    {
+      "id": "bytedance_group",
+      "app": "字节系服务",
+      "category": "social",
+      "confidence": "low",
+      "suffixes": [
+        "bytedance.com",
+        "bytefcdn.com",
+        "bytecdn.cn",
+        "byteoversea.com"
+      ],
+      "priority": "fallback",
+      "_comment": "字节兜底规则 - 只在更具体的规则 (douyin/toutiao/xigua) 都不匹配时才用"
+    },
+    {
+      "id": "doubao",
+      "app": "豆包",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "doubao.com",
+        "volces.com"
+      ]
+    },
+    {
+      "id": "douyin",
+      "app": "抖音",
+      "category": "video",
+      "confidence": "very_high",
+      "suffixes": [
+        "iesdouyin.com",
+        "amemv.com",
+        "douyin.com",
+        "douyinpic.com",
+        "douyinvod.com",
+        "douyincdn.com",
+        "ixigua.com",
+        "ixiguavideo.com",
+        "ixiguapic.com",
+        "aweme.snssdk.com",
+        "douyinstatic.com",
+        "zijieapi.com",
+        "snssdk.com",
+        "pstatp.com",
+        "byteimg.com",
+        "bytedanceapi.com",
+        "douyinliving.com",
+        "bytedance.com",
+        "bytednsdoc.com",
+        "byteeffecttos.com",
+        "bytegecko.com",
+        "tcdnos.com",
+        "ndcpp.com",
+        "ndcimgs.com",
+        "bytemastatic.com",
+        "bytemaimg.com",
+        "dailygn.com",
+        "volcsirius.com",
+        "huoshanimg.com",
+        "creativityeco.com",
+        "starrydyn.com",
+        "bdgp.cc",
+        "ecombdapi.com",
+        "ecombdimg.com",
+        "jinritemai.com"
+      ],
+      "ip_matchers": [
+        {
+          "cidr": "223.85.110.0/24",
+          "ports": [
+            8889
+          ],
+          "proto": "tcp",
+          "purpose": "抖音视频 CDN",
+          "evidence_packets": 1527
+        },
+        {
+          "cidr": "111.62.113.0/24",
+          "ports": [
+            9681,
+            9922
+          ],
+          "proto": "udp",
+          "purpose": "抖音直播低延迟",
+          "evidence_packets": 401
+        }
+      ],
+      "ipv6_matchers": [
+        {
+          "cidr": "2409:8963:e08::/48",
+          "ports_pattern": "dynamic_high",
+          "proto": "tcp+udp",
+          "purpose": "抖音 IPv6 主连接 (中国移动)",
+          "evidence_packets": 19892,
+          "note": "★ ECH 加密 SNI, 只能靠 IPv6 段识别"
+        },
+        {
+          "cidr": "2409:8c62:e10::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp+udp",
+          "purpose": "IPv6 备用",
+          "evidence_packets": 2618
+        },
+        {
+          "cidr": "2409:8c20:9c71::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp+udp",
+          "evidence_packets": 1933
+        },
+        {
+          "cidr": "240e:947:4002::/48",
+          "ports": [
+            8591,
+            8594,
+            8599,
+            8601,
+            8603,
+            8609
+          ],
+          "proto": "udp",
+          "purpose": "抖音直播 IPv6",
+          "evidence_packets": 541
+        }
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-16",
+        "packets_observed": 27040
+      },
+      "priority": "specific",
+      "ground_truth_2026_05_18": {
+        "source": "external_ai_pcap_analysis",
+        "date": "2026-05-18"
+      },
+      "confidence_upgrade_2026_05_18": {
+        "from": "high",
+        "to": "very_high",
+        "reason": "35 个 suffix 完整覆盖字节系生态 + 两次真机 pcap 印证 (K80 + 主机), 升级至 very_high"
+      }
+    },
+    {
+      "id": "douyin_p2p_inferred",
+      "app": "抖音 P2P 加速节点 (推断)",
+      "category": "p2p-bytedance-inferred",
+      "confidence": "high",
+      "suffixes": [
+        "cjjd13.com",
+        "cjjd14.com",
+        "dahhxxttxs.com"
+      ],
+      "note": "只在重度抖音用户上观察到, 强推断属于抖音 P2P 隐藏节点, 但归属未官方确认",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "client": "10.121.156.247 (K80, 重度抖音用户)"
+      }
+    },
+    {
+      "id": "ixigua_disambiguation",
+      "app": "西瓜视频(歧义,需配合判断)",
+      "category": "video",
+      "confidence": "medium",
+      "suffixes": [
+        "ixigua.com"
+      ],
+      "note": "ixigua.com 在字节系内部作为直播 CDN 共享给抖音/抖音极速版等。判定规则: 若同时大量抖音流量 → 属于抖音直播 CDN; 若抖音流量低 → 才可能是真的西瓜视频 App"
+    },
+    {
+      "id": "kuaishou",
+      "app": "快手",
+      "category": "video",
+      "confidence": "very_high",
+      "suffixes": [
+        "kuaishou.com",
+        "kuaishouzt.com",
+        "gifshow.com",
+        "yximgs.com",
+        "kuaishoupay.com",
+        "ksapisrv.com",
+        "wskwai.com",
+        "kwai.com",
+        "inkuai.com",
+        "kwimgs.com",
+        "wsukwai.com",
+        "xxpkg.com",
+        "kuiniuca.com"
+      ],
+      "note": "出现这些后缀说明真的在用快手 App",
+      "merged_from": [
+        {
+          "id": "kuaishou_main_app",
+          "date": "2026-05-18"
+        }
+      ],
+      "p2p_acceleration_suffixes": [
+        "xxpkg.com",
+        "kuiniuca.com"
+      ],
+      "shared_cdn_borrowed_from_bytedance": [
+        "djvod.ndcimgs.com"
+      ],
+      "confidence_upgrade_2026_05_18": {
+        "from": "high",
+        "to": "very_high",
+        "reason": "5 分钟纯快手会话真机印证 (160+ 命中, 10 个域名族完整 ID, 含 P2P 节点 + 字节 CDN 借用)",
+        "added_suffixes": [
+          "inkuai.com",
+          "kwimgs.com",
+          "wsukwai.com",
+          "xxpkg.com",
+          "kuiniuca.com"
+        ],
+        "added_p2p_attribution": [
+          "xxpkg.com",
+          "kuiniuca.com (re-attributed from unknown)"
+        ]
+      }
+    },
+    {
+      "id": "kuaishou_ad_sdk",
+      "app": "快手广告 SDK (可能嵌入其他 App)",
+      "category": "ad-sdk",
+      "confidence": "medium",
+      "suffixes": [
+        "adkwai.com",
+        "adukwai.com"
+      ],
+      "note": "只见 ad-only suffix 不能判定真用了快手, 可能是别的 App 嵌入了快手广告 SDK"
+    },
+    {
+      "id": "pangle",
+      "app": "穿山甲广告 SDK",
+      "category": "ads",
+      "confidence": "high",
+      "suffixes": [
+        "pangolin-sdk-toutiao-b.com",
+        "pglstatp-toutiao.com",
+        "pangle.io",
+        "pangle-ads.com"
+      ]
+    },
+    {
+      "id": "tiktok",
+      "app": "TikTok",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "tiktok.com",
+        "tiktokcdn.com",
+        "tiktokv.com",
+        "musical.ly",
+        "tiktokcdn-us.com",
+        "byteoversea.com"
+      ]
+    },
+    {
+      "id": "toutiao",
+      "app": "今日头条",
+      "category": "news",
+      "confidence": "high",
+      "suffixes": [
+        "toutiao.com",
+        "toutiaoimg.com",
+        "toutiaocdn.com",
+        "toutiaovod.com"
+      ]
+    },
+    {
+      "id": "volcengine",
+      "app": "火山引擎/字节云服务",
+      "category": "cloud",
+      "confidence": "medium",
+      "suffixes": [
+        "volcengine.com",
+        "volces.com",
+        "byteplus.com",
+        "bytecdn.cn",
+        "volccdn.com"
+      ]
+    },
+    {
+      "id": "xigua",
+      "app": "西瓜视频",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "ixiguavideo.com",
+        "ixiguapic.com"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,139 @@
+{
+  "schema_version": "2.0",
+  "subset": "32-alibaba",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#32-alibaba",
+  "rules": [
+    {
+      "id": "alibaba_doh",
+      "app": "阿里 DoH (DNS over HTTPS)",
+      "category": "infrastructure",
+      "confidence": "high",
+      "note": "5G 网络下加密 DNS 普及, 所有 App 都用. 不归任何 App",
+      "ip_matchers": [
+        {
+          "cidr": "223.5.5.0/24",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "阿里 DoH"
+        },
+        {
+          "cidr": "223.6.6.0/24",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "阿里 DoH 备用"
+        }
+      ],
+      "do_not_attribute_to_app": true
+    },
+    {
+      "id": "alibaba_group",
+      "app": "阿里系服务",
+      "category": "system",
+      "confidence": "medium",
+      "suffixes": [
+        "alibaba.com",
+        "alibabausercontent.com",
+        "alibabacloud.com",
+        "aliyun.com",
+        "aliyuncs.com",
+        "alipayobjects.com",
+        "alicdn.com"
+      ]
+    },
+    {
+      "id": "aliyun_cloud",
+      "app": "阿里云/CDN",
+      "category": "cloud",
+      "confidence": "low",
+      "suffixes": [
+        "aliyuncs.com",
+        "alicdn.com",
+        "aliyundun.com",
+        "alibabacloud.com",
+        "kunluncan.com"
+      ]
+    },
+    {
+      "id": "aliyun_drive",
+      "app": "阿里云盘",
+      "category": "download",
+      "confidence": "high",
+      "suffixes": [
+        "alipan.com",
+        "aliyundrive.com",
+        "aliyundrive.net"
+      ]
+    },
+    {
+      "id": "amap",
+      "app": "高德地图",
+      "category": "navigation",
+      "confidence": "high",
+      "suffixes": [
+        "amap.com",
+        "autonavi.com"
+      ]
+    },
+    {
+      "id": "dingding",
+      "app": "钉钉",
+      "category": "office",
+      "confidence": "high",
+      "suffixes": [
+        "dingtalk.com",
+        "dingtalkapps.com"
+      ]
+    },
+    {
+      "id": "eleme",
+      "app": "饿了么",
+      "category": "shopping",
+      "confidence": "high",
+      "suffixes": [
+        "ele.me",
+        "elemecdn.com"
+      ]
+    },
+    {
+      "id": "taobao",
+      "app": "淘宝/天猫",
+      "category": "shopping",
+      "confidence": "high",
+      "suffixes": [
+        "taobao.com",
+        "tmall.com",
+        "taobaocdn.com",
+        "tbcache.com",
+        "mmstat.com",
+        "alipay.com",
+        "tmall-cdn.com",
+        "fliggy.com"
+      ]
+    },
+    {
+      "id": "tongyi",
+      "app": "通义千问",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "tongyi.aliyun.com",
+        "tongyi.com"
+      ]
+    },
+    {
+      "id": "umeng",
+      "app": "友盟统计",
+      "category": "ads",
+      "confidence": "high",
+      "suffixes": [
+        "umeng.com",
+        "umeng.co",
+        "umengcloud.com"
+      ]
+    }
+  ]
+}

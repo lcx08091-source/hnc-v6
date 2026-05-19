@@ -1,0 +1,54 @@
+{
+  "schema_version": "2.0",
+  "subset": "50-rom-xiaomi",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#50-rom-xiaomi",
+  "rules": [
+    {
+      "id": "xiaomi",
+      "app": "小米服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "mi.com",
+        "xiaomi.com",
+        "miui.com",
+        "mi-img.com",
+        "duokan.com",
+        "xiaomiev.com",
+        "xiaomiyoupin.com"
+      ]
+    },
+    {
+      "id": "xiaomi_device_indicator",
+      "app": "小米/MIUI(设备识别)",
+      "category": "system-xiaomi",
+      "confidence": "very_high",
+      "suffixes": [
+        "xiaomi.com",
+        "xiaomi.net",
+        "mi.com",
+        "miui.com"
+      ],
+      "mdns_indicators": [
+        "_lyra-mdns._udp.local",
+        "_mi-connect._udp.local",
+        "_miplay_lan._tcp.local"
+      ],
+      "note": "mDNS 三件套是 100% 确认为小米/红米设备的特征, 可用作设备指纹"
+    },
+    {
+      "id": "xiaomi_update",
+      "app": "小米更新/系统服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "update.miui.com",
+        "resolver.msg.xiaomi.net",
+        "api.account.xiaomi.com",
+        "api.io.mi.com",
+        "tracking.miui.com",
+        "data.mistat.xiaomi.com"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,52 @@
+{
+  "schema_version": "2.0",
+  "subset": "33-baidu",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#33-baidu",
+  "rules": [
+    {
+      "id": "baidu_group",
+      "app": "百度系服务",
+      "category": "system",
+      "confidence": "medium",
+      "suffixes": [
+        "baidu.com",
+        "bdstatic.com",
+        "baidustatic.com",
+        "bcebos.com",
+        "bdimg.com",
+        "bcelogin.com"
+      ]
+    },
+    {
+      "id": "baidu_map",
+      "app": "百度地图",
+      "category": "navigation",
+      "confidence": "high",
+      "suffixes": [
+        "map.baidu.com",
+        "mapbox.baidu.com"
+      ]
+    },
+    {
+      "id": "baidu_pan",
+      "app": "百度网盘",
+      "category": "download",
+      "confidence": "high",
+      "suffixes": [
+        "pan.baidu.com",
+        "pcs.baidu.com",
+        "baidupcs.com"
+      ]
+    },
+    {
+      "id": "wenxin",
+      "app": "文心一言",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "yiyan.baidu.com",
+        "wenxin.baidu.com"
+      ]
+    }
+  ]
+}

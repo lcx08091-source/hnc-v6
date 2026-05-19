@@ -1,0 +1,69 @@
+{
+  "schema_version": "2.0",
+  "subset": "70-network-infra",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#70-network-infra",
+  "rules": [
+    {
+      "id": "akamai_cdn",
+      "app": "Akamai CDN",
+      "category": "cdn",
+      "confidence": "low",
+      "suffixes": [
+        "akamaihd.net",
+        "akamaized.net",
+        "edgekey.net",
+        "edgesuite.net",
+        "akamai.net"
+      ]
+    },
+    {
+      "id": "china_mobile_doh",
+      "app": "中国移动 DNS",
+      "category": "infrastructure",
+      "confidence": "high",
+      "ip_matchers": [
+        {
+          "cidr": "223.87.253.0/24",
+          "ports": [
+            53
+          ],
+          "proto": "udp",
+          "purpose": "中国移动 DNS"
+        }
+      ],
+      "do_not_attribute_to_app": true
+    },
+    {
+      "id": "cloudflare_cdn",
+      "app": "Cloudflare CDN",
+      "category": "cdn",
+      "confidence": "low",
+      "suffixes": [
+        "cloudflare.com",
+        "cloudflare.net",
+        "cloudflare-dns.com",
+        "pages.dev",
+        "workers.dev"
+      ]
+    },
+    {
+      "id": "cloudfront_cdn",
+      "app": "Amazon CloudFront CDN",
+      "category": "cdn",
+      "confidence": "low",
+      "suffixes": [
+        "cloudfront.net"
+      ]
+    },
+    {
+      "id": "fastly_cdn",
+      "app": "Fastly CDN",
+      "category": "cdn",
+      "confidence": "low",
+      "suffixes": [
+        "fastly.net",
+        "fastlylb.net"
+      ]
+    }
+  ]
+}

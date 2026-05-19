@@ -1,0 +1,83 @@
+{
+  "schema_version": "2.0",
+  "subset": "21-tencent-other",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#21-tencent-other",
+  "rules": [
+    {
+      "id": "bugly",
+      "app": "腾讯 Bugly",
+      "category": "ads",
+      "confidence": "medium",
+      "suffixes": [
+        "bugly.qq.com",
+        "android.bugly.qq.com"
+      ]
+    },
+    {
+      "id": "gdt",
+      "app": "腾讯优量汇广告",
+      "category": "ads",
+      "confidence": "high",
+      "suffixes": [
+        "gdt.qq.com"
+      ]
+    },
+    {
+      "id": "tencent_ads_extra",
+      "app": "腾讯广告/统计 SDK",
+      "category": "ads",
+      "confidence": "medium",
+      "suffixes": [
+        "adsmind.gdtimg.com",
+        "pgdt.gtimg.cn",
+        "qzs.gdtimg.com",
+        "e.qq.com",
+        "gdt.qq.com",
+        "mi.gdt.qq.com",
+        "tangram.e.qq.com"
+      ]
+    },
+    {
+      "id": "tencent_cloud",
+      "app": "腾讯云/CDN",
+      "category": "cloud",
+      "confidence": "low",
+      "suffixes": [
+        "myqcloud.com",
+        "tencent-cloud.net",
+        "qcloudcdn.com",
+        "dnsv1.com",
+        "cdn-go.cn"
+      ]
+    },
+    {
+      "id": "tencent_group",
+      "app": "腾讯系服务",
+      "category": "system",
+      "confidence": "medium",
+      "suffixes": [
+        "qq.com",
+        "qpic.cn",
+        "gtimg.cn",
+        "gtimg.com",
+        "tencent-cloud.net",
+        "qcloud.com",
+        "myapp.com",
+        "myqcloud.com",
+        "tencent.com"
+      ]
+    },
+    {
+      "id": "tencent_video",
+      "app": "腾讯视频",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "v.qq.com",
+        "qqvideo.tc.qq.com",
+        "video.qq.com",
+        "vv.video.qq.com"
+      ]
+    }
+  ]
+}

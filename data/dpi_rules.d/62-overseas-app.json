@@ -1,0 +1,208 @@
+{
+  "schema_version": "2.0",
+  "subset": "62-overseas-app",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#62-overseas-app",
+  "rules": [
+    {
+      "id": "discord",
+      "app": "Discord",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "discord.com",
+        "discordapp.com",
+        "discordapp.net",
+        "discord.gg",
+        "discord.media"
+      ],
+      "merged_from": [
+        {
+          "id": "discord_extra",
+          "date": "2026-05-18"
+        }
+      ]
+    },
+    {
+      "id": "disneyplus",
+      "app": "Disney+",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "disneyplus.com",
+        "disney-plus.net",
+        "dssott.com"
+      ]
+    },
+    {
+      "id": "facebook",
+      "app": "Facebook",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "facebook.com",
+        "fbcdn.net",
+        "fbsbx.com",
+        "fb.com",
+        "messenger.com"
+      ]
+    },
+    {
+      "id": "instagram",
+      "app": "Instagram",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "instagram.com",
+        "cdninstagram.com"
+      ]
+    },
+    {
+      "id": "line",
+      "app": "LINE",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "line.me",
+        "line-apps.com",
+        "line-scdn.net"
+      ]
+    },
+    {
+      "id": "meta_group",
+      "app": "Meta 系服务",
+      "category": "system",
+      "confidence": "medium",
+      "suffixes": [
+        "meta.com",
+        "facebook.net",
+        "fb.gg"
+      ]
+    },
+    {
+      "id": "netflix",
+      "app": "Netflix",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "netflix.com",
+        "nflxvideo.net",
+        "nflxso.net",
+        "nflximg.net",
+        "nflxext.com"
+      ]
+    },
+    {
+      "id": "slack",
+      "app": "Slack",
+      "category": "office",
+      "confidence": "high",
+      "suffixes": [
+        "slack.com",
+        "slack-edge.com",
+        "slack-imgs.com"
+      ]
+    },
+    {
+      "id": "spotify",
+      "app": "Spotify",
+      "category": "music",
+      "confidence": "high",
+      "suffixes": [
+        "spotify.com",
+        "scdn.co",
+        "spotifycdn.com"
+      ]
+    },
+    {
+      "id": "teams",
+      "app": "Microsoft Teams",
+      "category": "office",
+      "confidence": "high",
+      "suffixes": [
+        "teams.microsoft.com",
+        "teams.live.com",
+        "skypeforbusiness.com"
+      ]
+    },
+    {
+      "id": "telegram",
+      "app": "Telegram",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "telegram.org",
+        "t.me",
+        "telegram.me",
+        "tdesktop.com",
+        "telegram-cdn.org",
+        "telegra.ph"
+      ],
+      "merged_from": [
+        {
+          "id": "telegram_extra",
+          "date": "2026-05-18"
+        }
+      ]
+    },
+    {
+      "id": "twitch",
+      "app": "Twitch",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "twitch.tv",
+        "twitchcdn.net",
+        "ttvnw.net",
+        "jtvnw.net"
+      ]
+    },
+    {
+      "id": "twitter",
+      "app": "Twitter/X",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "twitter.com",
+        "x.com",
+        "twimg.com",
+        "t.co"
+      ]
+    },
+    {
+      "id": "whatsapp",
+      "app": "WhatsApp",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "whatsapp.com",
+        "whatsapp.net",
+        "wa.me"
+      ]
+    },
+    {
+      "id": "youtube",
+      "app": "YouTube",
+      "category": "video",
+      "confidence": "high",
+      "suffixes": [
+        "youtube.com",
+        "ytimg.com",
+        "googlevideo.com",
+        "youtu.be",
+        "youtubei.googleapis.com",
+        "yt3.ggpht.com"
+      ]
+    },
+    {
+      "id": "zoom",
+      "app": "Zoom",
+      "category": "office",
+      "confidence": "high",
+      "suffixes": [
+        "zoom.us",
+        "zoomgov.com",
+        "zoomcdn.net"
+      ]
+    }
+  ]
+}

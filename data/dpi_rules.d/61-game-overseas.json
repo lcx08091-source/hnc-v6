@@ -1,0 +1,134 @@
+{
+  "schema_version": "2.0",
+  "subset": "61-game-overseas",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#61-game-overseas",
+  "rules": [
+    {
+      "id": "battlenet",
+      "app": "暴雪 Battle.net",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "battle.net",
+        "blizzard.com",
+        "blzstatic.com"
+      ]
+    },
+    {
+      "id": "epic",
+      "app": "Epic Games",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "epicgames.com",
+        "unrealengine.com",
+        "epicgames.dev"
+      ]
+    },
+    {
+      "id": "garena",
+      "app": "Garena / Free Fire",
+      "category": "game",
+      "confidence": "medium",
+      "suffixes": [
+        "garena.com",
+        "garenanow.com",
+        "freefiremobile.com"
+      ]
+    },
+    {
+      "id": "minecraft",
+      "app": "Minecraft / Mojang",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "minecraft.net",
+        "mojang.com",
+        "mojangstudios.com"
+      ]
+    },
+    {
+      "id": "playstation",
+      "app": "PlayStation Network",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "playstation.net",
+        "sonyentertainmentnetwork.com",
+        "playstation.com",
+        "scea.com"
+      ]
+    },
+    {
+      "id": "pubg_global",
+      "app": "PUBG / KRAFTON",
+      "category": "game",
+      "confidence": "medium",
+      "suffixes": [
+        "pubg.com",
+        "krafton.com",
+        "pubgmobile.com",
+        "igamecj.com"
+      ]
+    },
+    {
+      "id": "riot",
+      "app": "Riot Games",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "riotgames.com",
+        "leagueoflegends.com",
+        "riotcdn.net"
+      ]
+    },
+    {
+      "id": "roblox",
+      "app": "Roblox",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "roblox.com",
+        "rbxcdn.com",
+        "rbx.com"
+      ]
+    },
+    {
+      "id": "steam",
+      "app": "Steam",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "steampowered.com",
+        "steamcommunity.com",
+        "steamcontent.com",
+        "steamstatic.com",
+        "steamserver.net",
+        "valvesoftware.com"
+      ]
+    },
+    {
+      "id": "supercell",
+      "app": "Supercell 游戏",
+      "category": "game",
+      "confidence": "medium",
+      "suffixes": [
+        "supercell.com",
+        "supercell.net",
+        "clashroyaleapp.com",
+        "brawlstars.com"
+      ]
+    },
+    {
+      "id": "xbox",
+      "app": "Xbox Live",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "xboxlive.com",
+        "xbox.com",
+        "xboxservices.com"
+      ]
+    }
+  ]
+}

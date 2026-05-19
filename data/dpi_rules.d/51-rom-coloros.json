@@ -1,0 +1,106 @@
+{
+  "schema_version": "2.0",
+  "subset": "51-rom-coloros",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#51-rom-coloros",
+  "rules": [
+    {
+      "id": "coloros_realme_device_indicator",
+      "app": "ColorOS/Realme(设备识别)",
+      "category": "system-oppo",
+      "confidence": "very_high",
+      "suffixes": [
+        "heytapmobi.com",
+        "allawntech.com",
+        "coloros.com"
+      ]
+    },
+    {
+      "id": "ms_telemetry_realme_baseline",
+      "app": "Microsoft 遥测 (Realme 国行系统基线)",
+      "category": "system-microsoft-baseline",
+      "confidence": "high",
+      "suffixes": [
+        "events.data.microsoft.com",
+        "appcenter.ms",
+        "pipe.aria.microsoft.com"
+      ],
+      "description": "Realme 国行 ColorOS 的微软遥测固定基线流量, 不代表用户在使用微软产品",
+      "baseline_hits_per_5min": {
+        "mobile.events.data.microsoft.com": 18,
+        "in.appcenter.ms": 4,
+        "mobile.pipe.aria.microsoft.com": 2
+      },
+      "usage": "HNC 看到这些命中应识别为系统基线, 不要归到'用户使用了 Microsoft Office/OneDrive'. 如果某 5 分钟窗口命中 >> 基线 (e.g. >40), 才考虑用户真在用 MS 产品",
+      "do_not_attribute_to_user_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "evidence": "两次独立 5 分钟 pcap 都观察到稳定 22-24 包基线"
+      }
+    },
+    {
+      "id": "oppo",
+      "app": "OPPO 服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "oppo.com",
+        "oppomobile.com",
+        "coloros.com",
+        "heytap.com",
+        "oppopush.com"
+      ]
+    },
+    {
+      "id": "oppo_heytap",
+      "app": "OPPO/HeyTap 服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "heytapmobi.com",
+        "heytapdl.com",
+        "heytapdownload.com",
+        "ocloud.heytap.com",
+        "push.heytap.com"
+      ]
+    },
+    {
+      "id": "realme_gamespace_trigger",
+      "app": "Realme 游戏空间 (游戏触发信号)",
+      "category": "system-oppo-game-signal",
+      "confidence": "high",
+      "suffixes": [
+        "gc-gamespace-cn.heytapmobi.com",
+        "isdk-gameunion-cn.heytapmobi.com",
+        "api-cn.game.heytapmobi.com",
+        "iot-earbuds-cn.heytapmobi.com"
+      ],
+      "note": "ColorOS 游戏空间在用户启动任何游戏时自动激活, 查询这些域名. 可用作'主机当前在跑游戏'的辅助信号, 但不区分具体游戏",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "client": "10.58.71.89 (RMX5010 - 启动 PUBG 时自动触发)"
+      },
+      "trigger_sequence_2026_05_18_v2": [
+        "gc-gamespace-cn.heytapmobi.com (核心)",
+        "api-cn.game.heytapmobi.com (游戏中心 API)",
+        "isdk-gameunion-cn.heytapmobi.com (游戏联运 SDK)",
+        "iot-earbuds-cn.heytapmobi.com (玩游戏戴耳机时触发, 新发现)"
+      ]
+    },
+    {
+      "id": "realme_preinstalled_third_party",
+      "app": "Realme 国行预装第三方 (背景命中)",
+      "category": "system-oppo-preinstall",
+      "confidence": "medium",
+      "description": "Realme 国行系统内置或预装的第三方 SDK, 用户没主动打开但后台跑流量",
+      "observed_domains": {
+        "zuoyebang.cc / zybang.com": "作业帮 (可能 ColorOS 教育空间集成或预装统计)",
+        "youlishipin.com": "西番有梨视频 (ColorOS 预装短视频聚合, 推测)",
+        "finzfin.com": "未知 SDK, 归属未确认"
+      },
+      "usage": "看到这些命中不代表用户主动使用. 命中很少 (2-6 包/5min) 应视为后台基线",
+      "do_not_attribute_to_user_app": true
+    }
+  ]
+}

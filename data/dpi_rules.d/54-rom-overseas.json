@@ -1,0 +1,80 @@
+{
+  "schema_version": "2.0",
+  "subset": "54-rom-overseas",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#54-rom-overseas",
+  "rules": [
+    {
+      "id": "apple",
+      "app": "Apple 服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "apple.com",
+        "icloud.com",
+        "mzstatic.com",
+        "cdn-apple.com",
+        "apple-cloudkit.com",
+        "apple-mapkit.com",
+        "itunes.apple.com",
+        "applepay.com"
+      ]
+    },
+    {
+      "id": "apple_update",
+      "app": "Apple 更新/iCloud",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "mesu.apple.com",
+        "swcdn.apple.com",
+        "swdownload.apple.com",
+        "appldnld.apple.com",
+        "icloud-content.com",
+        "icloud.com.cn"
+      ]
+    },
+    {
+      "id": "microsoft_group",
+      "app": "微软系服务",
+      "category": "system",
+      "confidence": "medium",
+      "suffixes": [
+        "microsoft.com",
+        "live.com",
+        "msftncsi.com",
+        "msftconnecttest.com",
+        "windowsupdate.com",
+        "msedge.net",
+        "office.com",
+        "office365.com",
+        "azure.com",
+        "azureedge.net",
+        "windows.com"
+      ]
+    },
+    {
+      "id": "microsoft_update",
+      "app": "微软更新/Windows 服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "download.windowsupdate.com",
+        "update.microsoft.com",
+        "delivery.mp.microsoft.com",
+        "dl.delivery.mp.microsoft.com",
+        "settings-win.data.microsoft.com"
+      ]
+    },
+    {
+      "id": "samsung",
+      "app": "三星服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "samsung.com",
+        "samsungcloud.com",
+        "samsungknox.com"
+      ]
+    }
+  ]
+}

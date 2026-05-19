@@ -1,0 +1,72 @@
+{
+  "schema_version": "2.0",
+  "subset": "43-ai",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#43-ai",
+  "rules": [
+    {
+      "id": "anthropic",
+      "app": "Claude / Anthropic",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "anthropic.com",
+        "claude.ai"
+      ]
+    },
+    {
+      "id": "copilot",
+      "app": "GitHub Copilot",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "githubcopilot.com",
+        "copilot.microsoft.com"
+      ]
+    },
+    {
+      "id": "gemini",
+      "app": "Gemini / Google AI",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "gemini.google.com",
+        "bard.google.com",
+        "generativelanguage.googleapis.com"
+      ]
+    },
+    {
+      "id": "kimi",
+      "app": "Kimi (Moonshot AI)",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "moonshot.cn",
+        "kimi.com"
+      ]
+    },
+    {
+      "id": "openai",
+      "app": "ChatGPT / OpenAI",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "openai.com",
+        "chatgpt.com",
+        "oaistatic.com",
+        "oaiusercontent.com"
+      ]
+    },
+    {
+      "id": "openai_extra",
+      "app": "OpenAI / ChatGPT",
+      "category": "ai",
+      "confidence": "high",
+      "suffixes": [
+        "chatgpt.com",
+        "oaistatic.com",
+        "oaiusercontent.com",
+        "openaiapi-site.azureedge.net"
+      ]
+    }
+  ]
+}

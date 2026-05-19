@@ -1,0 +1,76 @@
+{
+  "schema_version": "2.0",
+  "subset": "35-netease",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#35-netease",
+  "rules": [
+    {
+      "id": "lolm",
+      "app": "英雄联盟手游",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "lolm.qq.com",
+        "lolmobile.com"
+      ]
+    },
+    {
+      "id": "netease_game",
+      "app": "网易游戏",
+      "category": "game",
+      "confidence": "high",
+      "suffixes": [
+        "easebar.com",
+        "gameyw.netease.com",
+        "game.163.com",
+        "gdl.netease.com",
+        "dwstatic.com",
+        "fmgameusa.netease.com",
+        "fmgame.netease.com",
+        "ymli.netease.com"
+      ]
+    },
+    {
+      "id": "netease_game_extra",
+      "app": "网易游戏公共服务",
+      "category": "game",
+      "confidence": "medium",
+      "suffixes": [
+        "neteasegames.com",
+        "neteasegame.com",
+        "n.netease.com",
+        "leihuo.netease.com",
+        "xyq.163.com",
+        "onmyoji.163.com",
+        "mc.163.com"
+      ]
+    },
+    {
+      "id": "netease_group",
+      "app": "网易系服务",
+      "category": "system",
+      "confidence": "medium",
+      "suffixes": [
+        "netease.com",
+        "163.com",
+        "126.net",
+        "127.net"
+      ]
+    },
+    {
+      "id": "netease_music",
+      "app": "网易云音乐",
+      "category": "music",
+      "confidence": "high",
+      "suffixes": [
+        "music.163.com",
+        "music.126.net",
+        "y.163.com",
+        "126.net"
+      ],
+      "ground_truth_2026_05_18": {
+        "source": "external_ai_pcap_analysis",
+        "date": "2026-05-18"
+      }
+    }
+  ]
+}

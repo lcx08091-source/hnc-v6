@@ -1,0 +1,53 @@
+{
+  "schema_version": "2.0",
+  "subset": "00-core-meta",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#00-core-meta",
+  "rules": [
+    {
+      "id": "p2p_unknown_attribution",
+      "app": "未知 P2P 节点",
+      "category": "p2p-unknown",
+      "confidence": "medium",
+      "suffixes": [
+        "comfylink.com",
+        "xinqiucc.com",
+        "sjxydc.com",
+        "ahdohpiechei.com"
+      ],
+      "note": "主要在主机自己侧观察到 (不只在重度抖音用户上), 可能是 ColorOS 系统级 CDN 或多 App 共用 P2P SDK",
+      "attribution_corrections": [
+        {
+          "date": "2026-05-18",
+          "removed": [
+            "xxpkg.com",
+            "kuiniuca.com"
+          ],
+          "new_owner": "kuaishou",
+          "evidence": "pcap 2026-05-18 19:49 纯快手会话 5 分钟, 这两个域名出现 16 次, 无抖音流量同时段"
+        }
+      ]
+    },
+    {
+      "id": "vpn_capture_double_count_trap",
+      "app": "VPN 流量双计费陷阱 (HNC 自检元规则)",
+      "category": "meta-warning",
+      "confidence": "very_high",
+      "suffixes": [],
+      "description": "当 HNC 在挂 VPN 环境下抓包/限速, 同一份流量在 tun + rmnet 接口各出现一次, 字节数翻倍.",
+      "vpn_active_indicators": [
+        "存在 tun0 / tun1 接口且 state=up",
+        "ip route show default 指向 tun 接口",
+        "本地 IP 在 172.19.0.x / 10.{0-255}.0.x 段 (非运营商 CGN)"
+      ],
+      "interface_priority_for_bandwidth_control": [
+        "rmnet_data{0,1,2,3} > wlan{0,2} > tun{0,...}"
+      ],
+      "recommendation": "HNC tc/iptables 限速规则只挂一个接口. 优先选 rmnet_data2 (真实出口), 不要同时挂 tun + rmnet 否则双重计费.",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "evidence": "pcap 5 分钟 -i any 抓出 66k 包 (43k tun + 23k rmnet), 同一字节流被记录两次"
+      }
+    }
+  ]
+}

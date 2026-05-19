@@ -1,0 +1,50 @@
+{
+  "schema_version": "2.0",
+  "subset": "81-overseas-misc",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#81-overseas-misc",
+  "rules": [
+    {
+      "id": "github",
+      "app": "GitHub",
+      "category": "dev",
+      "confidence": "high",
+      "suffixes": [
+        "github.com",
+        "githubusercontent.com",
+        "githubassets.com",
+        "ghcr.io"
+      ]
+    },
+    {
+      "id": "google",
+      "app": "Google 服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "google.com",
+        "gstatic.com",
+        "googleapis.com",
+        "googleusercontent.com",
+        "googlesyndication.com",
+        "doubleclick.net",
+        "1e100.net",
+        "ggpht.com"
+      ]
+    },
+    {
+      "id": "google_play",
+      "app": "Google Play / Android 服务",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "play.googleapis.com",
+        "android.clients.google.com",
+        "gvt1.com",
+        "gvt2.com",
+        "googlezip.net",
+        "play-fe.googleapis.com",
+        "firebaseinstallations.googleapis.com"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,503 @@
+{
+  "schema_version": "2.0",
+  "subset": "20-tencent-game",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#20-tencent-game",
+  "rules": [
+    {
+      "id": "tencent_codev_valorant_mobile",
+      "app": "无畏契约:源能行动",
+      "category": "game",
+      "confidence": "very_high",
+      "rationale": "腾讯运营国服 VALORANT 手游, package=com.tencent.tmgp.codev. 数据来源: 2026-05-19 RMX5010+ColorOS16+5G 真机 pcap, 13 分钟 2261 包覆盖大厅+实战, 93 个 SNI 提取, 2 个独占域名 + 4 个游戏服务器 IP+端口 + 6 个 IPv6 段印证. 不用 QUIC, 全部 TLS-over-TCP, DPI 完全可识别. 跟通用腾讯 SDK 规则解耦 (那些走 sdk-tencent-game 分类).",
+      "suffixes": [
+        "codev-club.qq.com",
+        "estv-op.tga.qq.com"
+      ],
+      "ip_matchers": [
+        {
+          "cidr": "14.17.78.0/24",
+          "ports": [
+            8001,
+            8002,
+            8003,
+            8004
+          ],
+          "proto": "tcp",
+          "purpose": "腾讯手游 game server (典型 4 端口配对)",
+          "evidence_packets": 59
+        },
+        {
+          "cidr": "117.135.156.0/24",
+          "ports": [
+            8013
+          ],
+          "proto": "tcp",
+          "purpose": "腾讯手游 game server 经典端口",
+          "evidence_packets": 25
+        },
+        {
+          "cidr": "183.194.238.0/24",
+          "ports": [
+            8002
+          ],
+          "proto": "tcp",
+          "purpose": "上海移动 IDC - 腾讯游戏专用端口",
+          "evidence_packets": 6
+        }
+      ],
+      "ipv6_matchers": [
+        {
+          "cidr": "2409:8c1e:75b0::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 主连接 #1 (中国移动)",
+          "evidence_packets": 195
+        },
+        {
+          "cidr": "2409:8c1e:8f60::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 主连接 #2 (中国移动)",
+          "evidence_packets": 118
+        },
+        {
+          "cidr": "2409:8c70:3a10::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 主连接 #3 (中国移动)",
+          "evidence_packets": 73
+        },
+        {
+          "cidr": "2409:8c54:871::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 辅助 (中国移动, 4 个 IP)",
+          "evidence_packets": 62
+        },
+        {
+          "cidr": "2409:8c54:1040::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 辅助 (中国移动)",
+          "evidence_packets": 56
+        },
+        {
+          "cidr": "2409:8c6c:1720::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 辅助 (中国移动)",
+          "evidence_packets": 32
+        }
+      ]
+    },
+    {
+      "id": "tencent_game_broker_tplay",
+      "app": "腾讯游戏对战匹配 Broker (通用)",
+      "category": "sdk-tencent-game",
+      "confidence": "very_high",
+      "suffixes": [
+        "broker.tplay.qq.com",
+        "tplay.qq.com"
+      ],
+      "game_code_prefix_mapping": {
+        "hyrz-new": "火影忍者 OL",
+        "cjm": "和平精英 (PUBGMHD)",
+        "jsonatm": "和平精英 (PUBGMHD)",
+        "yxzj": "王者荣耀 (com.tencent.tmgp.sgame)"
+      },
+      "note": "*.broker.tplay.qq.com 是腾讯所有手游对战匹配的通用 broker, 前缀就是游戏代号. 可以用一条规则归类多个游戏",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18"
+      },
+      "game_code_prefix_mapping_2026_05_18_v2": {
+        "note": "新增 yxzj 前缀映射 - 王者荣耀",
+        "jsonatm_observation": "和平精英 + 王者荣耀都见过 jsonatm.broker.tplay, 可能是通用 broker, 不能用作单游戏识别"
+      }
+    },
+    {
+      "id": "tencent_game_codename_table",
+      "app": "腾讯游戏内部代号对照表 (元规则)",
+      "category": "sdk-tencent-game",
+      "confidence": "very_high",
+      "description": "腾讯游戏的多套内部代号, HNC 见到任何代号前缀都可以反查到具体游戏",
+      "codename_table": {
+        "yxzj": "王者荣耀 - 英雄战迹",
+        "sgame": "王者荣耀 - 天美 S 工作室",
+        "smoba": "王者荣耀 - Smart MOBA",
+        "koh / kohesport / kohcloud": "王者荣耀 - King of Honor",
+        "estv": "王者荣耀 - E-Sports TV",
+        "pvp.ingame": "王者荣耀 - 项目原名",
+        "hpjy": "和平精英 - 拼音首字母",
+        "418021106": "和平精英 - 腾讯 appid",
+        "gcloudpg": "和平精英 - GCloud PUBG",
+        "hyrz / hyrzol": "火影忍者OL",
+        "kihan": "火影忍者OL - 内部代号",
+        "tmgp.cf / cfm / cfmuhd": "穿越火线手游"
+      },
+      "usage": "见到任何代号前缀作为子域 → 立刻判定具体游戏",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "evidence": "基于 4 次真机 pcap (K80 火影 + 主机和平精英 + 主机王者荣耀 + 共享 SDK 观察)"
+      }
+    },
+    {
+      "id": "tencent_game_common",
+      "app": "腾讯游戏公共服务",
+      "category": "game",
+      "confidence": "medium",
+      "suffixes": [
+        "game.qq.com",
+        "game.gtimg.cn",
+        "game.weixin.qq.com",
+        "tencentgames.com",
+        "iegcom.qq.com",
+        "gamecenter.qq.com"
+      ]
+    },
+    {
+      "id": "tencent_game_family",
+      "app": "腾讯手游通用识别",
+      "category": "game",
+      "confidence": "medium",
+      "note": "看到这套端口组合 + CIDR 几乎确定是腾讯系手游, 但区分不出具体游戏",
+      "tcp_port_family": [
+        6647,
+        6649,
+        8013,
+        8085,
+        8801,
+        17500,
+        19051,
+        30000,
+        35595
+      ],
+      "cidrs_observed": [
+        "36.155.0.0/16",
+        "36.150.0.0/16",
+        "117.185.255.0/24"
+      ],
+      "detection_logic": "AND: (TCP 端口 ∈ port_family) AND (IP ∈ cidrs_observed)",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-16"
+      },
+      "priority": "specific"
+    },
+    {
+      "id": "tencent_game_foreground_heartbeat",
+      "app": "腾讯游戏前台心跳 (behavior marker)",
+      "category": "behavior-marker",
+      "confidence": "very_high",
+      "suffix": "mdt.qq.com",
+      "behavioral_rules": {
+        "domains_to_track": [
+          "game.eve.mdt.qq.com"
+        ],
+        "rate_thresholds": {
+          "foreground_active_playing": ">10 queries/min (实际数据: 前台连续游戏可达 12+/min)",
+          "background_keepalive": "1-5 queries/min (游戏在后台不杀进程)",
+          "killed": "0 queries/min (5+ 分钟无查询 = 已退出)"
+        }
+      },
+      "note": "查询频率是腾讯游戏前台/后台/已杀的金标准判别. HNC 可用作 'app foreground state' 信号, 不只是'app 是否安装'",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "evidence": [
+          "K80 火影后台保活: 20 queries / 5min = 4/min (背景节奏)",
+          "RMX5010 PUBG 前台: 26+ queries / 5min ~= 5+/min (但屏幕亮+操作)"
+        ]
+      }
+    },
+    {
+      "id": "tencent_game_geo_template",
+      "app": "腾讯游戏地理分布模板 (元规则)",
+      "category": "sdk-tencent-game",
+      "confidence": "high",
+      "description": "腾讯游戏后端典型架构: 每个游戏部署 3-4 个地区 IDC, 域名跟随地区代号",
+      "regions_observed": {
+        "nj": "南京",
+        "sh": "上海",
+        "gz": "广州",
+        "cq": "重庆",
+        "tj": "天津",
+        "cd": "成都(推测)"
+      },
+      "patterns_observed": [
+        "prod-{region}.ino.<game>.qq.com (火影忍者 — nj/gz/cq/tj)",
+        "measurement.{region}.prod.smoba.qq.com (王者荣耀 — tj/sh/gz/cq)",
+        "<service>.{region}.<game>.qq.com (通用模式)"
+      ],
+      "usage": "看到 <X>.{nj|sh|gz|cq|tj|cd}.<X>.qq.com 几乎必然是腾讯游戏后端 IDC. 中间或末尾的游戏代号可以反查具体游戏",
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "evidence": "火影 (4 IDC: nj/gz/cq/tj) + 王者 (4 IDC: tj/sh/gz/cq) 命名模式完全对称"
+      }
+    },
+    {
+      "id": "tencent_game_ino_servers",
+      "app": "腾讯游戏内网服务器 (通用)",
+      "category": "sdk-tencent-game",
+      "confidence": "very_high",
+      "suffixes": [
+        "ino.qq.com"
+      ],
+      "game_code_mapping": {
+        "hyrz": "火影忍者 OL (例: prod-{nj,gz,cq,tj}.ino.hyrz.qq.com)",
+        "_unknown_pubg": "和平精英 (例: speed.ino.qq.com — 注意 PUBG 用了顶级 ino.qq.com 而不是中间段)",
+        "sgame": "王者荣耀 (推测, 待验证)",
+        "cf": "穿越火线手游 (推测, 待验证)"
+      },
+      "subdomain_patterns": [
+        "*.ino.<game>.qq.com   (中间段是游戏代号)",
+        "*.ino.qq.com          (顶级, 不区分游戏, 可能是 PUBG)"
+      ],
+      "note": "腾讯游戏内网/对战服务器命名模式",
+      "related_patterns_2026_05_18_v2": [
+        "*.prod.smoba.qq.com (王者荣耀, 跟 ino.hyrz 平行的另一种模式)",
+        "measurement.<region>.prod.smoba.qq.com (跟 prod-<region>.ino.hyrz 平行)"
+      ]
+    },
+    {
+      "id": "tencent_game_sdk_common",
+      "app": "腾讯游戏通用 SDK",
+      "category": "sdk-tencent-game",
+      "confidence": "very_high",
+      "suffixes": [
+        "tdm.qq.com",
+        "tgpa.qq.com",
+        "itop.qq.com",
+        "beacon.qq.com",
+        "crashsight.qq.com",
+        "perfsight.qq.com",
+        "snowflake.qq.com",
+        "anticheatexpert.com",
+        "native.qq.com",
+        "wetest.qq.com",
+        "mna.qq.com",
+        "tpns.sh.tencent.com",
+        "tpns.qq.com",
+        "gcloud.qq.com",
+        "gcloudsdk.com",
+        "gcloudcs.com",
+        "gcloudgbs.com",
+        "msdk.qq.com",
+        "tmga.qq.com",
+        "ias.qq.com",
+        "gp.qq.com",
+        "bkapps.com",
+        "tga.qq.com",
+        "imtmp.net",
+        "tplay.qq.com"
+      ],
+      "note": "命中只能判定某腾讯游戏在运行, 定位具体游戏需配合 hyrz/tmgp.cf/pubgmhd/sgame 等专属规则",
+      "ground_truth_2026_05_18_v2": {
+        "added_from_pubg_capture": [
+          "gp.qq.com",
+          "bkapps.com",
+          "tga.qq.com",
+          "imtmp.net",
+          "tplay.qq.com"
+        ],
+        "date": "2026-05-18"
+      }
+    },
+    {
+      "id": "tencent_hyrz_naruto",
+      "app": "火影忍者OL",
+      "category": "game",
+      "confidence": "very_high",
+      "package_hint": "com.tencent.hyrzol",
+      "suffixes": [
+        "hyrz.qq.com"
+      ],
+      "subdomain_patterns": [
+        "prod-{region}.ino.hyrz.qq.com",
+        "prod-*.bcs.pvp.hyrz.qq.com",
+        "kihanres.hyrz.qq.com",
+        "advert-prod.hyrz.qq.com",
+        "*.cloud.game.hyrz.qq.com",
+        "*.broker.tplay.qq.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "client": "10.121.156.247 (REDMI K80)",
+        "evidence": {
+          "telemetry_upload": "game.eve.mdt.qq.com x272 (15s/次, 前台游戏数据上报)",
+          "battle_servers": [
+            "prod-nj.ino.hyrz.qq.com x26",
+            "prod-gz.ino.hyrz.qq.com x26",
+            "prod-cq.ino.hyrz.qq.com x26",
+            "prod-tj.ino.hyrz.qq.com x26"
+          ],
+          "pvp": "prod-cq-0611.bcs.pvp.hyrz.qq.com x24",
+          "sdk_companions": [
+            "tgpa",
+            "perfsight",
+            "anticheatexpert",
+            "mna",
+            "itop",
+            "tdm"
+          ]
+        }
+      },
+      "ground_truth_2026_05_18_v2": {
+        "background_keepalive_observed": true,
+        "rate": "4 queries/min (game.eve.mdt.qq.com), 无 prod-*.ino.hyrz.qq.com 查询",
+        "interpretation": "游戏未被杀但用户没在玩, 仅心跳",
+        "date": "2026-05-18 (二次 pcap)"
+      }
+    },
+    {
+      "id": "tencent_pubgmhd_exclusive",
+      "app": "和平精英",
+      "category": "game",
+      "confidence": "very_high",
+      "package_hint": "com.tencent.tmgp.pubgmhd",
+      "tencent_appid": "418021106",
+      "suffixes": [
+        "gcloudpg.qq.com",
+        "pubgmhd.qq.com",
+        "tipw.qq.com",
+        "gameact.qq.com",
+        "hpjy.qq.com"
+      ],
+      "subdomain_patterns": [
+        "hpjy.itop.qq.com",
+        "hpjy-op.tga.qq.com",
+        "hpjy*.itop.qq.com",
+        "hpjy*.tga.qq.com",
+        "*.418021106.gcloudpg.qq.com",
+        "download.*.418021106.gcloudpg.qq.com",
+        "puffer.*.418021106.gcloudpg.qq.com"
+      ],
+      "exclusive_indicators": [
+        {
+          "domain": "hpjy.itop.qq.com",
+          "meaning": "hpjy = '和平精英' 拼音首字母, 100% 专属指纹"
+        },
+        {
+          "domain": "*.418021106.gcloudpg.qq.com",
+          "meaning": "418021106 是和平精英的腾讯 appid, gcloudpg = PUBG GCloud"
+        }
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "client": "10.58.71.89 (RMX5010 主机自玩)",
+        "behavior": "前台主玩 (5 分钟独占)",
+        "duration_sec": 303
+      },
+      "merged_from": [
+        {
+          "id": "peace_elite",
+          "date": "2026-05-18",
+          "reason": "duplicate app, this very_high rule subsumes the old high rule"
+        }
+      ]
+    },
+    {
+      "id": "tencent_vod_p2p",
+      "app": "腾讯游戏 VOD P2P 加速",
+      "category": "sdk-tencent-game",
+      "confidence": "high",
+      "suffixes": [
+        "teg.tencent-cloud.net"
+      ],
+      "subdomain_patterns": [
+        "apd-vodp2plogin.teg.tencent-cloud.net",
+        "apd-vodp2pnat.teg.tencent-cloud.net",
+        "apd-vodp2preport.teg.tencent-cloud.net",
+        "apd-vodp2ptracker.teg.tencent-cloud.net",
+        "apd-pcdnvod*.teg.tencent-cloud.net",
+        "apd-pcdnieghp*.teg.tencent-cloud.net"
+      ],
+      "note": "腾讯大型手游 (PUBG/王者) 内置的游戏回放/录像 P2P 节点全套"
+    },
+    {
+      "id": "tencent_wzry_exclusive",
+      "app": "王者荣耀",
+      "category": "game",
+      "confidence": "very_high",
+      "package_hint": "com.tencent.tmgp.sgame",
+      "internal_codenames": [
+        "yxzj",
+        "sgame",
+        "smoba",
+        "koh",
+        "kohesport",
+        "estv",
+        "pvp",
+        "ingame"
+      ],
+      "codename_meanings": {
+        "yxzj": "英雄战迹 (王者初版/内部名) 拼音首字母",
+        "sgame": "天美 S 工作室代号",
+        "smoba": "Smart MOBA (王者英文内部代号)",
+        "koh": "King of Honor (王者英文)",
+        "kohesport": "王者电竞 KPL",
+        "estv": "E-Sports TV 电竞频道",
+        "pvp/ingame": "项目原名 (代码里 PVP 是核心模块)"
+      },
+      "suffixes": [
+        "smoba.qq.com",
+        "kohesport.qq.com",
+        "livelink.qq.com",
+        "sgame.qq.com",
+        "wzry.qq.com",
+        "info.zb.qq.com",
+        "cc.map.qq.com"
+      ],
+      "subdomain_patterns": [
+        "yxzj*.broker.tplay.qq.com",
+        "yxzj*.*.qq.com",
+        "faasyxzj*.native.qq.com",
+        "sgame*.itop.qq.com",
+        "koh*.tgpa.qq.com",
+        "*.prod.smoba.qq.com",
+        "measurement.{tj,sh,gz,cq}.prod.smoba.qq.com",
+        "*.kohesport.qq.com",
+        "estv-*.tga.qq.com",
+        "static-estv.tga.qq.com",
+        "op.tv.kohesport.qq.com",
+        "pvp.ingame.qq.com"
+      ],
+      "measurement_servers": [
+        "measurement.tj.prod.smoba.qq.com",
+        "measurement.sh.prod.smoba.qq.com",
+        "measurement.gz.prod.smoba.qq.com",
+        "measurement.cq.prod.smoba.qq.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-18",
+        "client": "10.7.59.47 (RMX5010 主机自玩)",
+        "behavior": "前台主玩 5 分钟",
+        "pcap": "trace-20260518-183731 (304s, 32249 packets)"
+      },
+      "merged_from": [
+        {
+          "id": "wangzhe",
+          "date": "2026-05-18",
+          "reason": "replaced with very_high pcap-verified rule"
+        }
+      ]
+    }
+  ]
+}
