@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.20
-versionCode=530140
+version=v5.3.0-rc30.12.21
+versionCode=530141
 author=Claude (Anthropic AI) + Ling
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.20 · CI 流水线引入: GitHub Actions 自动 build hnc_httpd / hnc_dpid / hnc_launcher / fork_probe / hnc_tc_ingress, 跑 version_consistency_check + ci_preflight + shell -n, 打包 artifact zip, tag push 自动 release. hotspotd / hnc_ipc / mdns_resolve 直接入 git (依赖 libbpf 不便 CI 编). 跟 hnc-v5 老 build.yml 不同的是: 编 launcher, 适配 rc30.12 新目录, 不依赖 third_party submodule.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.21 · CI hotfix: json_regression_test.sh 第 102 行 tpl_set 参数错误修复 (传字符串 down_mbps 当数字, 现改成 5 个数字 1 0 0 0 0). 这个 bug 一直存在但之前没在 CI 跑过 preflight 所以没暴露. 现在 ci_preflight 本地跑 0 failure (之前是 1).
 minKernelSU=11485

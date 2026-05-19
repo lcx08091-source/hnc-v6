@@ -1,3 +1,13 @@
+<!-- v5.3.0-rc30.12.21 -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.3.0-rc30.12.21: CI hotfix <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>修复</b>: <code>bin/json_regression_test.sh</code> 第 102 行 <code>tpl_set</code> 调用参数错误。把字符串 <code>down_mbps</code> 改成数字 <code>1 0 0 0 0</code> (down/up/delay/jitter/loss)。bug 一直存在, rc30.12.20 引入 CI 后才暴露。</li>
+    <li><b>影响</b>: ci_preflight 现在 0 failure (rc30.12.20 是 1 failure)。CI Annotations 应该只剩 Node 20 deprecated 这条平台级 warning。</li>
+    <li><b>代码 / 二进制 / 行为</b>: 没动。</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.20 -->
 <div class="cl-section">
   <div class="cl-title">⚙️ v5.3.0-rc30.12.20: GitHub Actions CI 引入 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>

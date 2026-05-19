@@ -1,4 +1,24 @@
 
+## v5.3.0-rc30.12.21
+
+**发布日期**: 2026-05-19
+**versionCode**: 530141
+
+CI hotfix.
+
+### 修复
+
+- `bin/json_regression_test.sh` 第 102 行 `tpl_set` 调用参数错误
+  - 之前: `sh "$JSON_SET" tpl_set "$TPL" down_mbps 1` (传字符串 `down_mbps` 当数字)
+  - 现在: `sh "$JSON_SET" tpl_set "$TPL" 1 0 0 0 0` (5 个数字: down/up/delay/jitter/loss)
+  - 这个 bug 一直存在, 但 rc30.12.20 之前没在 CI 跑过 ci_preflight, 所以没人发现
+  - 修复后 ci_preflight 本地跑结果: failures=0 (之前是 1)
+
+### 没改的
+
+代码 / 二进制 / 行为 — 都没动. 只是测试脚本本身的 bug.
+
+
 ## v5.3.0-rc30.12.20
 
 **发布日期**: 2026-05-19

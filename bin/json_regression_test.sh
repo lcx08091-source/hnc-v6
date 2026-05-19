@@ -100,7 +100,7 @@ else
   say "[WARN] name_set not supported or failed in this tree; output:"; cat "$OUT"
 fi
 
-if sh "$JSON_SET" tpl_set "$TPL" down_mbps 1 >"$OUT" 2>&1; then
+if sh "$JSON_SET" tpl_set "$TPL" 1 0 0 0 0 >"$OUT" 2>&1; then
   check_json "$TMP/data/templates.json" && ok "templates.json valid after tpl_set" || fail "templates invalid after tpl_set"
 else
   say "[WARN] tpl_set not supported or failed in this tree; output:"; cat "$OUT"
