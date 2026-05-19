@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.18
-versionCode=530138
+version=v5.3.0-rc30.12.19
+versionCode=530139
 author=Claude (Anthropic AI) + Ling
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.18 · 默认拒绝中间件重构: (1) isPublicPath 白名单 + 其他全要 cookie, 替代之前的"敏感读白名单 + 其他放行"模式. (2) auth_required=false 不再有"放行"语义, 任何路径只要不在 isPublicPath 都强制 cookie. (3) service.sh 自动检测老 rules.json auth_required=false 自动升级到 true (UI 一致性). (4) rules.json 默认值改成 true. 行为变化: 升级后必须走一次 /pair 配对. 副作用: 以后加新 API 默认就是 401, 不会再漏鉴权.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.19 · 工程收口版 (GPT 二审 P2/P3 修复): (1) launch_httpd_safe 改成每次调用动态读 rules.json, 不再用全局快照, 关闭"用户切 remote_enabled=false 同时 httpd 死掉"的窗口风险. (2) version_consistency_check.sh 正则支持三段 rc 编号 (rc30.12.18 等), 不再误报 warn. (3) src/README.md 完整重写, 同步到 rc30.12.18 状态 (之前还是 rc29.1 文档, 误导). 不动 vendor / gofmt (推迟到独立工程整洁度版本).
 minKernelSU=11485

@@ -305,24 +305,29 @@ prune_duplicate_hotspotd
 # 完全无视 REMOTE_ENABLED. 现在统一通过 launch_httpd_safe 函数, 读 remote_enabled
 # 决定是否暴露热点段 HTTPS. remote_enabled=false 时只开 loopback (本机 WebUI).
 #
-# 注意: REMOTE_ENABLED 变量是脚本启动时读的快照, 用户中途改了配置 watchdog 会处理
-# (watchdog 看 rules.json 实时, 不依赖此快照).
+# rc30.12.19 P2 加固: 上一版用 $REMOTE_ENABLED 全局快照, 用户中途改 remote_enabled=false
+# 之后, 如果 httpd 恰好死掉, sentinel 会用旧快照拉起 0.0.0.0 模式, 30s 窗口内会
+# 跟用户配置不一致. 现在改成每次调用都从 rules.json 实时读, 关闭这个窗口.
 launch_httpd_safe() {
-    if [ "$REMOTE_ENABLED" = "true" ]; then
+    # 每次调用都重新读 rules.json (GPT 二审 P2 修复)
+    _remote_now=$(grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' \
+        "$HNC_DIR/data/rules.json" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
+    if [ "$_remote_now" = "true" ]; then
         nohup "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" \
             -bind 0.0.0.0 -port 8443 -loopback-port 8444 \
             -hnc-dir "$HNC_DIR" -http-port 8080 \
             >> "$HNC_DIR/logs/httpd.log" 2>&1 &
         echo $! > "$RUN/httpd.pid" 2>/dev/null || true
-        log "rc30.12.16 launch_httpd_safe: remote+loopback mode (PID=$!)"
+        log "rc30.12.19 launch_httpd_safe: remote+loopback mode (PID=$!, remote_enabled=true)"
     else
         nohup "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" \
             -loopback-port 8444 \
             -hnc-dir "$HNC_DIR" \
             >> "$HNC_DIR/logs/httpd.log" 2>&1 &
         echo $! > "$RUN/httpd.pid" 2>/dev/null || true
-        log "rc30.12.16 launch_httpd_safe: loopback-only mode (remote_enabled=false, PID=$!)"
+        log "rc30.12.19 launch_httpd_safe: loopback-only mode (PID=$!, remote_enabled=$_remote_now)"
     fi
+    unset _remote_now
 }
 
 if [ -x "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" ]; then

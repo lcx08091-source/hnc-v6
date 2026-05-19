@@ -1,3 +1,14 @@
+<!-- v5.3.0-rc30.12.19 -->
+<div class="cl-section">
+  <div class="cl-title">🧹 v5.3.0-rc30.12.19: 工程收口版 (GPT P2/P3 修复) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>P2 修复</b>: <code>launch_httpd_safe</code> 改成每次调用动态读 rules.json, 不再用全局快照。关闭"用户切 remote_enabled=false + httpd 恰好死掉"的 30s 不一致窗口。</li>
+    <li><b>P3 修复</b>: <code>version_consistency_check.sh</code> 正则支持三段 rc 编号 (rc30.12.18 等), 不再误报 warn。</li>
+    <li><b>P3 修复</b>: <code>src/README.md</code> 完整重写, 同步到 rc30.12.18 状态 (之前还停留在 rc29.1 文档, 误导新接手者)。</li>
+    <li><b>推迟</b>: gofmt 30 个文件 + go mod vendor。不影响运行, 自用场景性价比一般。</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.18 -->
 <div class="cl-section">
   <div class="cl-title">🛡️ v5.3.0-rc30.12.18: 默认拒绝中间件重构 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
