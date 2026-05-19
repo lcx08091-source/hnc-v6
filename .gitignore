@@ -1,19 +1,25 @@
+# Compiled binaries that CI builds from source - exclude from git
 bin/hnc_dpid
-bin/hnc_ipc
 bin/hnc_tc_ingress
-bin/hotspotd
-bin/mdns_resolve
 bin/hnc_launcher
 bin/fork_probe
 daemon/hnc_httpd/hnc_httpd
 
+# Pre-built binaries that DO go in git (libbpf not vendored, can't be CI-built):
+# - bin/hotspotd        (committed)
+# - bin/hnc_ipc         (committed)
+# - bin/mdns_resolve    (committed)
+
+# Build artifacts
 **/_libs_out/
 **/_obj/
 **/build/
 **/out/
+**/prebuilt/
 *.o
 *.a
 
+# Backup and temp
 *.bak
 *.tmp
 *.old
@@ -22,6 +28,7 @@ daemon/hnc_httpd/hnc_httpd
 .DS_Store
 Thumbs.db
 
+# IDE
 .idea/
 .vscode/
 *.swp

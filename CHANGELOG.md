@@ -1,4 +1,62 @@
 
+## v5.3.0-rc30.12.20
+
+**发布日期**: 2026-05-19
+**versionCode**: 530140
+
+CI 流水线引入. 解决 hnc-v6 push 后不自动 build 的问题.
+
+### 新增 .github/workflows/build.yml
+
+每次 push 到 main 触发, 自动:
+
+1. **预检**: shell `sh -n` 全扫 / version_consistency_check / ci_preflight
+2. **build hnc_httpd**: 用 build.sh 注入版本号
+3. **build hnc_dpid**: Go 交叉编译 android/arm64
+4. **build hnc_launcher + fork_probe**: NDK r27c 编 C
+5. **build hnc_tc_ingress**: NDK 编 C (纯 netlink, 不依赖 BPF)
+6. **校验**: file 检查 arm64, strings 检查版本注入
+7. **打包**: 排除 .git / build artifacts, 输出 HNC-x_x_x-arm64.zip
+8. **artifact**: 30 天保留
+9. **tag push**: 自动 GitHub Release
+
+### 跟 hnc-v5 老 workflow 的差异
+
+| 维度 | hnc-v5 build.yml | hnc-v6 build.yml (本版) |
+|---|---|---|
+| 编 hnc_launcher / fork_probe | 不编 | **编** |
+| third_party submodule | 必须有 | 不要求 (hotspotd 直接入 git) |
+| 适配的目录结构 | rc25 时代 | rc30.12 |
+| Go 版本 | 1.22 | 1.22 |
+| NDK 版本 | r27c | r27c |
+| version 注入校验 | 强 fail | 强 fail |
+
+### 关于 hotspotd / hnc_ipc
+
+之前 .gitignore 排除了所有二进制. 但 hotspotd 依赖 libbpf 而 hnc-v6 没 vendor third_party/libbpf, CI 编不出来. 妥协方案: 把 hotspotd / hnc_ipc / mdns_resolve 三个二进制保留在 git, 其他 (hnc_dpid / launcher / fork_probe / tc_ingress / hnc_httpd) CI 编.
+
+未来如果 vendor 了 libbpf, 可以让 CI 编全部.
+
+### 下次 push 行为
+
+```
+git push origin main
+  ↓ 5-10 分钟
+GitHub Actions 编出 HNC-v5_3_0-rc30_12_20-arm64.zip
+  ↓
+Actions 页面下载 (或者 release 区, 如果是 tag push)
+```
+
+如果想触发 release 自动化:
+
+```
+git tag v5.3.0-rc30.12.20
+git push origin v5.3.0-rc30.12.20
+  ↓
+CI 跑完后自动创建 Release, zip 自动 attach
+```
+
+
 ## v5.3.0-rc30.12.19
 
 **发布日期**: 2026-05-19

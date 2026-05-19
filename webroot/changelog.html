@@ -1,3 +1,15 @@
+<!-- v5.3.0-rc30.12.20 -->
+<div class="cl-section">
+  <div class="cl-title">⚙️ v5.3.0-rc30.12.20: GitHub Actions CI 引入 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>新增 .github/workflows/build.yml</b>: 每次 push 到 main 自动 build + 打包, tag push 自动 release。</li>
+    <li><b>CI 编</b>: hnc_httpd / hnc_dpid / hnc_launcher / fork_probe / hnc_tc_ingress。</li>
+    <li><b>直接入 git</b>: hotspotd / hnc_ipc / mdns_resolve (依赖 libbpf 不便 CI 编, 妥协方案)。</li>
+    <li><b>预检</b>: shell sh -n / version_consistency_check / ci_preflight 都跑, 任一失败终止 CI。</li>
+    <li><b>跟 hnc-v5 老 workflow 的差异</b>: 编 launcher (老的没编), 适配 rc30.12 新目录, 不依赖 third_party submodule。</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.19 -->
 <div class="cl-section">
   <div class="cl-title">🧹 v5.3.0-rc30.12.19: 工程收口版 (GPT P2/P3 修复) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>

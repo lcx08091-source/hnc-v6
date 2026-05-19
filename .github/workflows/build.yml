@@ -1,0 +1,250 @@
+name: Build HNC arm64
+
+# Triggers:
+#   - push to main: full build + zip artifact
+#   - workflow_dispatch: manual run from Actions UI
+#   - tags v*: also creates a GitHub Release with the zip attached
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # for creating releases on tags
+
+    steps:
+      # ─── Setup ────────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        # NOTE: No submodules. third_party/libbpf is not vendored in hnc-v6.
+        # hotspotd + hnc_ipc binaries come from the existing bin/ committed
+        # to the repo (built once with NDK + libbpf, kept stable since rc25).
+
+      - name: Setup Android NDK
+        uses: nttld/setup-ndk@v1
+        id: setup-ndk
+        with:
+          ndk-version: r27c
+          add-to-path: false
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+          cache-dependency-path: daemon/hnc_httpd/go.sum
+
+      - name: Get version from module.prop
+        id: version
+        run: |
+          VERSION=$(grep '^version=' module.prop | cut -d= -f2)
+          VERSION_SAFE=${VERSION//./_}
+          VERSION_SAFE=${VERSION_SAFE//+/_}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_safe=$VERSION_SAFE" >> $GITHUB_OUTPUT
+          echo "Building HNC version: $VERSION"
+
+      # ─── Preflight checks (fail fast) ─────────────────────
+      - name: Make scripts executable
+        run: |
+          chmod 755 bin/*.sh service.sh post-fs-data.sh 2>/dev/null || true
+          chmod 755 daemon/hnc_httpd/build.sh 2>/dev/null || true
+          chmod 755 src/launcher/build.sh 2>/dev/null || true
+          find bin -name "*.sh" -exec chmod 755 {} \; 2>/dev/null || true
+
+      - name: Shell syntax check
+        run: |
+          echo "Checking all shell scripts with sh -n..."
+          fail=0
+          for f in $(find . -name "*.sh" -not -path './.github/*' -not -path './third_party*'); do
+            if ! sh -n "$f" 2>&1; then
+              echo "FAIL: $f"
+              fail=$((fail + 1))
+            fi
+          done
+          if [ $fail -gt 0 ]; then
+            echo "$fail shell scripts failed syntax check"
+            exit 1
+          fi
+          echo "All shell scripts passed sh -n"
+
+      - name: Version consistency check
+        run: sh bin/version_consistency_check.sh
+
+      - name: Source preflight
+        run: sh bin/ci_preflight.sh
+        continue-on-error: true  # warnings allowed, hard fails caught above
+
+      # ─── Build Go components ──────────────────────────────
+      - name: Build hnc_httpd (Go)
+        env:
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd daemon/hnc_httpd
+          bash build.sh
+          ls -lh hnc_httpd
+          file hnc_httpd | grep -q "ARM aarch64" || (echo "ERROR: hnc_httpd not arm64"; exit 1)
+
+      - name: Build hnc_dpid (Go)
+        run: |
+          cd src/dpid
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w" \
+            -o ../../bin/hnc_dpid ./cmd/dpid
+          ls -lh ../../bin/hnc_dpid
+          file ../../bin/hnc_dpid | grep -q "ARM aarch64" || exit 1
+          chmod 755 ../../bin/hnc_dpid
+
+      # ─── Build C launcher (rc30.12 introduced this) ───────
+      - name: Build hnc_launcher + fork_probe (C)
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd src/launcher
+          bash build.sh install
+          ls -lh ../../bin/hnc_launcher ../../bin/fork_probe
+          file ../../bin/hnc_launcher | grep -q "ARM aarch64" || exit 1
+          file ../../bin/fork_probe   | grep -q "ARM aarch64" || exit 1
+
+      # ─── Build hnc_tc_ingress (C, no third_party) ─────────
+      - name: Build hnc_tc_ingress (C)
+        env:
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd daemon/tc_netlink
+          bash build.sh arm64
+          # Copy result into bin/
+          if [ -f out/arm64/hnc_tc_ingress ]; then
+            cp out/arm64/hnc_tc_ingress ../../bin/hnc_tc_ingress
+            chmod 755 ../../bin/hnc_tc_ingress
+          fi
+          file ../../bin/hnc_tc_ingress | grep -q "ARM aarch64" || exit 1
+
+      # ─── Verify existing binaries (hotspotd, hnc_ipc) ─────
+      # These are committed to git (NDK build needs third_party/libbpf submodule
+      # which we don't vendor in hnc-v6). They were stable since rc25.
+      - name: Verify pre-built binaries
+        run: |
+          echo "=== bin/ directory ==="
+          ls -la bin/ | head -30
+          
+          # These must exist in git (not built by CI)
+          for bin in bin/hotspotd bin/hnc_ipc; do
+            if [ ! -f "$bin" ]; then
+              echo "ERROR: $bin missing — required for HNC to function"
+              echo "       hotspotd and hnc_ipc must be committed to git"
+              echo "       (they depend on libbpf which is not vendored here)"
+              exit 1
+            fi
+            file "$bin" | grep -q "ARM aarch64" || (echo "ERROR: $bin not arm64"; exit 1)
+            chmod 755 "$bin"
+          done
+          echo "OK: hotspotd and hnc_ipc are arm64"
+
+      - name: Fix file permissions
+        run: |
+          chmod 755 bin/*.sh 2>/dev/null || true
+          chmod 755 bin/hotspotd bin/hnc_ipc bin/hnc_tc_ingress 2>/dev/null || true
+          chmod 755 bin/hnc_dpid bin/hnc_launcher bin/fork_probe 2>/dev/null || true
+          chmod 755 bin/mdns_resolve 2>/dev/null || true
+          chmod 755 daemon/hnc_httpd/hnc_httpd 2>/dev/null || true
+          chmod 755 post-fs-data.sh service.sh
+
+      # ─── Final binary verification ────────────────────────
+      - name: Verify version strings injected correctly
+        run: |
+          VERSION="${{ steps.version.outputs.version }}"
+          echo "Expecting version $VERSION in binaries..."
+          
+          # hnc_httpd should have main.version injected
+          if ! strings daemon/hnc_httpd/hnc_httpd | grep -qF "$VERSION"; then
+            echo "ERROR: hnc_httpd missing version string $VERSION"
+            echo "       (build.sh should have injected it via -X main.version=$VERSION)"
+            exit 1
+          fi
+          echo "OK: hnc_httpd contains $VERSION"
+          
+          # hnc_dpid has its own version (0.5.3-rc30.12.x), not module version
+          if ! strings bin/hnc_dpid | grep -qE "0\.5\.[0-9]+.*rc30"; then
+            echo "WARN: hnc_dpid version string not in expected format"
+          else
+            echo "OK: hnc_dpid version string present"
+          fi
+          
+          # hnc_launcher has its own version (0.1.0-rc30.12)
+          if ! strings bin/hnc_launcher | grep -qF "0.1.0-rc30.12"; then
+            echo "WARN: hnc_launcher version string missing"
+          else
+            echo "OK: hnc_launcher version string present"
+          fi
+
+      # ─── Package zip ──────────────────────────────────────
+      - name: Package module zip
+        run: |
+          OUT="HNC-${{ steps.version.outputs.version_safe }}-arm64.zip"
+          
+          # Clean build artifacts before zipping
+          rm -rf daemon/hotspotd/prebuilt
+          rm -rf daemon/tc_netlink/out
+          rm -rf third_party_build/_libs_out 2>/dev/null || true
+          rm -rf third_party_build/_obj 2>/dev/null || true
+          
+          # Build zip excluding hidden files, .git, and the zip itself
+          zip -rqX "$OUT" . \
+            -x ".*" \
+            -x "*/.*" \
+            -x "*.zip" \
+            -x ".github/*" \
+            -x "**/_libs_out/*" \
+            -x "**/_obj/*" \
+            -x "**/build/*" \
+            -x "**/out/*" \
+            -x "**/prebuilt/*"
+          
+          echo "OUT_ZIP=$OUT" >> $GITHUB_ENV
+          ls -lh "$OUT"
+          
+          # Print summary
+          echo ""
+          echo "=== Zip contents summary ==="
+          unzip -l "$OUT" | tail -5
+
+      - name: Compute SHA256 of zip
+        run: |
+          sha256sum "${{ env.OUT_ZIP }}" | tee "${{ env.OUT_ZIP }}.sha256"
+
+      # ─── Upload as Actions artifact ───────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HNC-${{ steps.version.outputs.version_safe }}-arm64
+          path: |
+            ${{ env.OUT_ZIP }}
+            ${{ env.OUT_ZIP }}.sha256
+          retention-days: 30
+
+      # ─── Auto-release on tag push ─────────────────────────
+      - name: Create GitHub Release (on tag push only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.OUT_ZIP }}
+            ${{ env.OUT_ZIP }}.sha256
+          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          body: |
+            HNC ${{ steps.version.outputs.version }} - automated build.
+            
+            See CHANGELOG.md for changes in this release.
+            
+            **Install**: Download the `.zip` below and install via KernelSU / SukiSU / Magisk Manager.
+            
+            **SHA256**:
+            ```
+            (see attached .sha256 file)
+            ```
