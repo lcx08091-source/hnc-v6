@@ -144,12 +144,12 @@ func lookupDFP(ja4 string) (DFPFingerprint, bool) {
 // JA4Inputs is the subset of ClientHello fields needed to compute JA4.
 // Capture/parse.go populates this from the TLS ClientHello it already parses.
 type JA4Inputs struct {
-	TLSVersion  uint16   // legacy_version OR negotiated via supported_versions extension
-	HasSNI      bool
-	Ciphers     []uint16 // raw cipher suites in ClientHello order
-	Extensions  []uint16 // raw extension types in ClientHello order
-	ALPNs       []string // ALPN values in ClientHello order
-	SigAlgs     []uint16 // signature_algorithms extension contents
+	TLSVersion uint16 // legacy_version OR negotiated via supported_versions extension
+	HasSNI     bool
+	Ciphers    []uint16 // raw cipher suites in ClientHello order
+	Extensions []uint16 // raw extension types in ClientHello order
+	ALPNs      []string // ALPN values in ClientHello order
+	SigAlgs    []uint16 // signature_algorithms extension contents
 }
 
 // IsGREASE returns true if the given value is one of TLS GREASE markers

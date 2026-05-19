@@ -7,19 +7,22 @@
 // fragile.
 //
 // JSON layout (data/app_limits.json):
-//   {
-//     "version": 1,
-//     "items": [
-//       {"mac": "aa:bb:cc:dd:ee:01", "app_id": "douyin", "down_mbps": 1.0}
-//     ]
-//   }
+//
+//	{
+//	  "version": 1,
+//	  "items": [
+//	    {"mac": "aa:bb:cc:dd:ee:01", "app_id": "douyin", "down_mbps": 1.0}
+//	  ]
+//	}
 //
 // Flat layout (data/app_limits.flat), one line per entry:
-//   <mac> <app_id> <down_mbps>
+//
+//	<mac> <app_id> <down_mbps>
 //
 // Actions:
-//   app_limit_set    {mac, app_id, down_mbps}   set / replace
-//   app_limit_clear  {mac, app_id?}             clear one or all for a mac
+//
+//	app_limit_set    {mac, app_id, down_mbps}   set / replace
+//	app_limit_clear  {mac, app_id?}             clear one or all for a mac
 package main
 
 import (
@@ -52,9 +55,10 @@ type AppLimitFile struct {
 var appLimitMu sync.Mutex
 
 // actionAppLimitSet adds or replaces a (mac, app_id) → down_mbps entry.
-//   mac:     canonical aa:bb:cc:dd:ee:ff (lowercase or upper accepted)
-//   app_id:  classifier rule ID (e.g. "douyin", "weixin")
-//   down_mbps: target downlink in Mbps, 0 = clear
+//
+//	mac:     canonical aa:bb:cc:dd:ee:ff (lowercase or upper accepted)
+//	app_id:  classifier rule ID (e.g. "douyin", "weixin")
+//	down_mbps: target downlink in Mbps, 0 = clear
 func actionAppLimitSet(hncDir string, p map[string]string) actionResp {
 	mac := canonMAC(p["mac"])
 	if mac == "" {
@@ -113,8 +117,9 @@ func actionAppLimitSet(hncDir string, p map[string]string) actionResp {
 }
 
 // actionAppLimitClear removes one or all app limits for a MAC.
-//   mac:     required
-//   app_id:  optional. Empty = clear all entries for this MAC.
+//
+//	mac:     required
+//	app_id:  optional. Empty = clear all entries for this MAC.
 func actionAppLimitClear(hncDir string, p map[string]string) actionResp {
 	mac := canonMAC(p["mac"])
 	if mac == "" {
@@ -236,8 +241,9 @@ func triggerAppLimitApply(hncDir string) {
 
 // rc30.6: read current app rate limit config. Mirrors data/app_limits.json
 // but in a stable shape for WebUI consumption.
-//   GET /api/app_limits
-//   → {"ok":true,"items":[{"mac":"...","app_id":"...","down_mbps":1.0}, ...]}
+//
+//	GET /api/app_limits
+//	→ {"ok":true,"items":[{"mac":"...","app_id":"...","down_mbps":1.0}, ...]}
 func (s *server) apiAppLimits(w http.ResponseWriter, r *http.Request) {
 	file := loadAppLimits(s.hncDir)
 	writeJSON(w, http.StatusOK, map[string]interface{}{

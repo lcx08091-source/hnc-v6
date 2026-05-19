@@ -21,7 +21,7 @@ import (
 
 const (
 	rlMaxEntries       = 512
-	rlPinAttemptsMax   = 5               // PIN 错误次数上限
+	rlPinAttemptsMax   = 5                // PIN 错误次数上限
 	rlPinLockDuration  = 10 * time.Minute // PIN 锁定时长
 	rlPinWindow        = 1 * time.Minute  // PIN 错误计数窗口(独立于 lock)
 	rlUnauthCapacity   = 20.0             // 未鉴权 token bucket 容量
@@ -40,13 +40,13 @@ const (
 
 // rlEntry 单个 IP 的限流状态
 type rlEntry struct {
-	ip              string
-	pinAttempts     int
-	pinWindowStart  int64
-	pinLockTS       int64 // Unix ts,> now 时处于锁定
-	unauthTokens    float64
+	ip               string
+	pinAttempts      int
+	pinWindowStart   int64
+	pinLockTS        int64 // Unix ts,> now 时处于锁定
+	unauthTokens     float64
 	unauthLastRefill int64
-	lastSeen        int64
+	lastSeen         int64
 }
 
 // RateLimiter 是 per-IP 的限流器。并发安全。
@@ -113,9 +113,10 @@ func (rl *RateLimiter) evictOldestLocked(now int64) bool {
 
 // CheckPinVerify 检查是否允许 PIN verify 请求。
 // 返回:
-//   true  → 允许
-//   false → 拒绝(已锁 or LRU 全锁定)
-//   retryAfter → 客户端应等多少秒(用于 429 响应头)
+//
+//	true  → 允许
+//	false → 拒绝(已锁 or LRU 全锁定)
+//	retryAfter → 客户端应等多少秒(用于 429 响应头)
 func (rl *RateLimiter) CheckPinVerify(ip string) (allowed bool, retryAfter int64) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()

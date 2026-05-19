@@ -23,12 +23,13 @@ var auditMu sync.Mutex
 
 // auditLog 追加一条审计记录
 // 字段:
-//   tid       — TokenID 前 8 位(VerifyCookie 返回的完整 ID,这里截短)
-//                匿名请求(过渡期)为 "anon"
-//   action    — action 名(白名单里的标识)
-//   params    — map[string]string,会被展平成 k=v 追加,顺序按 key 字母表
-//   result    — "ok" 或 "error"
-//   detail    — 错误消息或成功细节,会做简单转义避免换行
+//
+//	tid       — TokenID 前 8 位(VerifyCookie 返回的完整 ID,这里截短)
+//	             匿名请求(过渡期)为 "anon"
+//	action    — action 名(白名单里的标识)
+//	params    — map[string]string,会被展平成 k=v 追加,顺序按 key 字母表
+//	result    — "ok" 或 "error"
+//	detail    — 错误消息或成功细节,会做简单转义避免换行
 func auditLog(hncDir, tid, action string, params map[string]string, result, detail string) {
 	auditMu.Lock()
 	defer auditMu.Unlock()

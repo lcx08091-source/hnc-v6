@@ -476,7 +476,9 @@ func actionCleanupRules(hncDir string) actionResp {
 // actionCleanupOfflineDevices · rc29
 // WebUI "清理离线设备" 按钮。
 // params:
-//   include_rules · "1" 时连带规则一起清(否则保留有规则的设备)
+//
+//	include_rules · "1" 时连带规则一起清(否则保留有规则的设备)
+//
 // 返回 Detail 透传脚本的 JSON {removed, kept_with_rules, skipped_online}
 // 给前端 toast 用。
 func actionCleanupOfflineDevices(hncDir string, p map[string]string) actionResp {

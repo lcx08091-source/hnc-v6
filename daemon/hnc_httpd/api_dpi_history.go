@@ -1,15 +1,16 @@
 // rc30.4: traffic history readout.
 //
 // dpid emits one JSONL row per (15-min tick, client, app) to:
-//   $HNC_DIR/run/stats.YYYYMMDD.jsonl
+//
+//	$HNC_DIR/run/stats.YYYYMMDD.jsonl
 //
 // This handler reads the requested number of days (default: today only,
 // max: 7), aggregates rows server-side into two views the UI uses directly:
 //
-//   1) by_app:  pie-chart input { app_id -> {name, cat, tx, rx} }
-//   2) by_hour: 24-hour line-chart input [{hour, tx, rx}, ...] (hour-of-day,
-//              local time, summed across all clients)
-//   3) by_client_app: per-client breakdown { mac -> { app_id -> {name, tx, rx} } }
+//  1. by_app:  pie-chart input { app_id -> {name, cat, tx, rx} }
+//  2. by_hour: 24-hour line-chart input [{hour, tx, rx}, ...] (hour-of-day,
+//     local time, summed across all clients)
+//  3. by_client_app: per-client breakdown { mac -> { app_id -> {name, tx, rx} } }
 //
 // The raw samples are NOT returned by default (would be ~5000 rows for a
 // week × small household). Pass `raw=1` to include them — useful for tools.
@@ -100,8 +101,8 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Aggregation pass.
-	byApp := map[string]*appBucket{}     // app_id -> bucket
-	byHour := make([]hourBucket, 24)     // hour-of-day local time
+	byApp := map[string]*appBucket{} // app_id -> bucket
+	byHour := make([]hourBucket, 24) // hour-of-day local time
 	for i := range byHour {
 		byHour[i].Hour = i
 	}

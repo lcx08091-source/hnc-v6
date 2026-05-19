@@ -43,11 +43,11 @@ import (
 // Tunables. Exported so the main entrypoint can override for tests, but the
 // defaults are what production uses.
 var (
-	HistoryDir          = "/data/local/hnc/run"
-	HistorySampleEvery  = 15 * time.Minute
-	HistoryRetainDays   = 7
-	HistoryFilePrefix   = "stats."
-	HistoryFileSuffix   = ".jsonl"
+	HistoryDir         = "/data/local/hnc/run"
+	HistorySampleEvery = 15 * time.Minute
+	HistoryRetainDays  = 7
+	HistoryFilePrefix  = "stats."
+	HistoryFileSuffix  = ".jsonl"
 )
 
 // historySample matches what we serialize to JSONL. Field tags are short to

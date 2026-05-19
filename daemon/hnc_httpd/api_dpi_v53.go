@@ -24,9 +24,9 @@ func (s *server) apiDPIState(w http.ResponseWriter, r *http.Request) {
 	raw, err := readJSON(path)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"available":    false,
-			"error":        err.Error(),
-			"hint":         "hnc_dpid not running or no state yet; check $HNC_DIR/logs/dpid.log",
+			"available": false,
+			"error":     err.Error(),
+			"hint":      "hnc_dpid not running or no state yet; check $HNC_DIR/logs/dpid.log",
 		})
 		return
 	}

@@ -49,13 +49,13 @@ const CookieName = "hnc_token"
 // 已经被 3 次 (alerts / dpi_history / app_limits 都漏过敏感读白名单).
 //
 // 公共路径分类:
-//   1. UI 入口 (没鉴权就看不到登录页) - /, /pair, /changelog.html, /static/*
-//   2. 鉴权流程本身              - /api/pair/verify, /api/pairing/status
-//   3. 健康检查 / 探活            - /api/health (返回 version + watchdog_passive,
-//                                  远程 WebUI 顶部探活. rc30.12.30 P0.4 后已删
-//                                  session_label 死代码 — 那是 isPublicPath 下永远
-//                                  拿不到的字段)
-//   4. 登出 (idempotent, handler 自己处理 cookie revoke) - /api/logout
+//  1. UI 入口 (没鉴权就看不到登录页) - /, /pair, /changelog.html, /static/*
+//  2. 鉴权流程本身              - /api/pair/verify, /api/pairing/status
+//  3. 健康检查 / 探活            - /api/health (返回 version + watchdog_passive,
+//     远程 WebUI 顶部探活. rc30.12.30 P0.4 后已删
+//     session_label 死代码 — 那是 isPublicPath 下永远
+//     拿不到的字段)
+//  4. 登出 (idempotent, handler 自己处理 cookie revoke) - /api/logout
 //
 // 注意: /api/logout 仍在白名单, 但不再依赖 authMiddleware inject ctx —
 // handleLogout 已改为自己解 cookie + VerifyCookie + revoke (见 pair.go).
@@ -262,10 +262,12 @@ func isWritePath(p string) bool {
 // 仍保留是因为 loopback secret 缺失场景仍需要分级判断:
 //   - secret 不存在 + 是写接口 / 敏感读 → fail-closed
 //   - secret 不存在 + 普通读 (主页/静态) → 兼容放行
+//
 // 这避免升级窗口期 (secret 还没生成) WebUI 完全瘫痪.
 //
 // 注: rc30.12.16 加了 alerts/dpi_history/app_limits 3 个之前漏的;
-//      logout 不该算敏感, 登出永远应该允许 (现已移到 isPublicPath).
+//
+//	logout 不该算敏感, 登出永远应该允许 (现已移到 isPublicPath).
 func isSensitiveReadPath(p string) bool {
 	switch p {
 	case "/api/logs",

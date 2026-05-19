@@ -30,12 +30,12 @@ import (
 
 // Token 对应 tokens.json 里 tokens[<TokenID>] 的 value
 type Token struct {
-	Hash     string `json:"hash"`       // bcrypt(Secret, cost=10)
-	Created  int64  `json:"created"`    // Unix ts,首次签发
-	LastSeen int64  `json:"last_seen"`  // Unix ts,最后一次成功验证
-	Label    string `json:"label"`      // "Chrome on Mac" 等,User-Agent 启发式
-	IPHint   string `json:"ip_hint"`    // 配对时的 remote IP,不参与鉴权
-	Revoked  bool   `json:"revoked"`    // 撤销后 true,保留记录作审计
+	Hash     string `json:"hash"`      // bcrypt(Secret, cost=10)
+	Created  int64  `json:"created"`   // Unix ts,首次签发
+	LastSeen int64  `json:"last_seen"` // Unix ts,最后一次成功验证
+	Label    string `json:"label"`     // "Chrome on Mac" 等,User-Agent 启发式
+	IPHint   string `json:"ip_hint"`   // 配对时的 remote IP,不参与鉴权
+	Revoked  bool   `json:"revoked"`   // 撤销后 true,保留记录作审计
 }
 
 // tokensFile 是 tokens.json 的顶层 JSON 结构
@@ -46,15 +46,15 @@ type tokensFile struct {
 
 // TokensStore 是内存中的 tokens 状态。支持 stat/mtime 同步。
 type TokensStore struct {
-	path     string       // tokens.json 的绝对路径
+	path     string // tokens.json 的绝对路径
 	mu       sync.RWMutex
 	tokens   map[string]Token
-	lastRead int64        // 上次 reload 时的文件 mtime(Unix ns)
+	lastRead int64 // 上次 reload 时的文件 mtime(Unix ns)
 	// rc3.1.33 修 #10/#29: dirty 集合记录"本进程改过的 token id".
 	// saveAtomicLocked merge 时只反向删除 dirty 集合外的、磁盘上已不存在的 token,
 	// 避免把刚 PutIfAbsent 还没落盘的 token 当成"shell 删的"误删.
 	// 任何走 saveAtomicLocked 的写路径 (PutIfAbsent / Put / Prune / Flush) 成功后清空.
-	dirty    map[string]bool
+	dirty map[string]bool
 }
 
 // NewTokensStore 创建 store。首次会尝试从磁盘 load;文件不存在视为空 store,不报错。
@@ -74,9 +74,10 @@ func NewTokensStore(path string) *TokensStore {
 // 多个并发协程同时 SyncIfChanged 发现 mtime 变了都进来 reload,
 // 实际只需要一个协程做。进入 Lock 后再 stat 一次,如果已经被别人 reload 过就直接返回。
 // rc3.1.13.2 修 P1 (review §鉴权-1):
-//   原顺序 Read 然后 Stat 存在窄窗口竞态 — 如果在 ReadFile 之后 Stat 之前
-//   外部又写一次, 新 mtime 被记 lastRead, 内存里却是旧数据, 后续 Sync 跳过
-//   → 新写入永远丢. 改 Stat-Read-Stat 三明治, 两次 Stat 不一致就重试.
+//
+//	原顺序 Read 然后 Stat 存在窄窗口竞态 — 如果在 ReadFile 之后 Stat 之前
+//	外部又写一次, 新 mtime 被记 lastRead, 内存里却是旧数据, 后续 Sync 跳过
+//	→ 新写入永远丢. 改 Stat-Read-Stat 三明治, 两次 Stat 不一致就重试.
 func (s *TokensStore) reload() error {
 	const maxRetry = 3
 	var data []byte
@@ -214,13 +215,15 @@ const (
 // saveAtomic 把内存 tokens 写回磁盘。用 tmp + rename 原子保证。
 // 注意: httpd 写 tokens.json 跟 json_set.sh 写是两个进程,
 // 理论上可能产生 last-write-wins 冲突。但 httpd 只做两件写操作:
-//   1. issueToken: 加新条目
-//   2. updateLastSeen: 改现有条目的 last_seen
+//  1. issueToken: 加新条目
+//  2. updateLastSeen: 改现有条目的 last_seen
+//
 // json_set.sh 做 token_revoke/token_revoke_all/token_prune。
 // 实际冲突场景:
 //   - 主人撤销 token + httpd 正好 updateLastSeen 同一条 → 一方覆盖
 //   - 缓解: updateLastSeen 在 middleware 里只做内存,每 N 秒或 logout 时才 saveAtomic
 //     (见 saveLoop),大幅减小冲突窗口
+//
 // saveAtomicLocked 把内存全量序列化覆盖磁盘.
 // rc3.1.13.2 修 P1 (review §鉴权-2): 之前 Go 端的 Put/Revoke 直接全量覆盖,
 // 如果 shell (json_set.sh token_revoke) 在 Go 内存操作期间写了磁盘,

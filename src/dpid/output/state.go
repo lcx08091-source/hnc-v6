@@ -86,8 +86,8 @@ type FingerprintCount struct {
 }
 
 type ClientProfile struct {
-	ClientIP      string             `json:"client_ip"`
-	ClientMAC     string             `json:"client_mac,omitempty"`
+	ClientIP  string `json:"client_ip"`
+	ClientMAC string `json:"client_mac,omitempty"`
 	// rc29.2: every IP we've ever seen this client (this MAC) use, e.g.
 	// ["10.117.193.52", "2409:8963:e03:4493:a090:ebab:827e:9558"]. Lets the
 	// WebUI display "Mi-10 · 2 IPs" rather than two separate phantom clients.
@@ -200,8 +200,8 @@ type fpStat struct {
 }
 
 type clientAgg struct {
-	ClientIP     string
-	ClientMAC    string
+	ClientIP  string
+	ClientMAC string
 	// rc29.2: a single MAC may show up under multiple IPs simultaneously
 	// (IPv4 DHCP + IPv6 SLAAC, IPv6 Privacy Extensions rotating, etc.).
 	// ClientIPs collects every IP we've ever seen this MAC use, with last-seen
@@ -237,7 +237,7 @@ type Writer struct {
 	startTime time.Time
 	path      string
 
-	clients          map[string]*clientAgg
+	clients map[string]*clientAgg
 	// rc29.2 mac→client-key index. Lets us look up a client by MAC even when
 	// the same device has multiple IPs (IPv4 + IPv6 SLAAC/Privacy Extensions).
 	// Without this, IPv4 and IPv6 of the same phone produced 2 separate client

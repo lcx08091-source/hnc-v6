@@ -1,11 +1,11 @@
 // Package alert handles HNC unauthorized-device detection and notification
 // persistence. It is consumed by hnc_watchdog on a 5-minute cadence:
 //
-//   1. Read hotspotd's devices.json (current active MACs).
-//   2. Diff against data/known_devices.json (everything ever observed).
-//   3. For each new MAC, emit an "unknown_device" alert.
-//   4. Append the alert to run/alerts.jsonl.
-//   5. Best-effort: post an Android system notification via `cmd notification`.
+//  1. Read hotspotd's devices.json (current active MACs).
+//  2. Diff against data/known_devices.json (everything ever observed).
+//  3. For each new MAC, emit an "unknown_device" alert.
+//  4. Append the alert to run/alerts.jsonl.
+//  5. Best-effort: post an Android system notification via `cmd notification`.
 //
 // Why JSONL for alerts: append-only, no read-modify-write races, easy to
 // stream from /api/alerts, trivial to truncate when older than 30 days.
@@ -40,10 +40,10 @@ import (
 type Config struct {
 	HNCDir string
 	// Path overrides (mostly for tests). Defaults are derived from HNCDir.
-	DevicesJSON       string // hotspotd output
-	KnownDevicesPath  string // our acknowledged-MAC ledger
-	AlertsJSONLPath   string // append-only alert log
-	AlertsConfigPath  string // user prefs (enabled, quiet hours, etc.)
+	DevicesJSON      string // hotspotd output
+	KnownDevicesPath string // our acknowledged-MAC ledger
+	AlertsJSONLPath  string // append-only alert log
+	AlertsConfigPath string // user prefs (enabled, quiet hours, etc.)
 	// Notification posting can be disabled in tests / when running outside Android.
 	DisableNotify bool
 }

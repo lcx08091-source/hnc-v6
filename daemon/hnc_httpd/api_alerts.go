@@ -1,13 +1,15 @@
 // rc30.5: alert read API and acknowledgement actions.
 //
 // Endpoints:
-//   GET  /api/alerts              -> recent alerts + unread count
+//
+//	GET  /api/alerts              -> recent alerts + unread count
 //
 // Action verbs (via /api/action):
-//   alert_mark_seen   {ids:[...]}  -> mark alert IDs as read by user
-//   alert_mark_known  {mac:"..."}  -> add MAC to known_devices.json,
-//                                     suppresses future unknown_device alerts
-//   alert_dismiss_all              -> mark every current alert as seen
+//
+//	alert_mark_seen   {ids:[...]}  -> mark alert IDs as read by user
+//	alert_mark_known  {mac:"..."}  -> add MAC to known_devices.json,
+//	                                  suppresses future unknown_device alerts
+//	alert_dismiss_all              -> mark every current alert as seen
 package main
 
 import (

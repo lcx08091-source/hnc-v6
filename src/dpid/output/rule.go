@@ -135,9 +135,9 @@ type subCategory struct {
 	Name     string
 	Category string
 	// Behavioural detector. For rc29 we support a single rate-based detector.
-	DetectIP   *net.IPNet
-	DetectPort uint16
-	DetectProto matchProto
+	DetectIP     *net.IPNet
+	DetectPort   uint16
+	DetectProto  matchProto
 	DetectPPSMin float64
 }
 
@@ -172,12 +172,12 @@ type externalMatcher struct {
 }
 
 type externalIPMatcher struct {
-	CIDR         string   `json:"cidr"`
-	Proto        string   `json:"proto"`
-	Ports        []int    `json:"ports"`
-	PortsPattern string   `json:"ports_pattern"`
-	Purpose      string   `json:"purpose"`
-	Note         string   `json:"note"`
+	CIDR         string `json:"cidr"`
+	Proto        string `json:"proto"`
+	Ports        []int  `json:"ports"`
+	PortsPattern string `json:"ports_pattern"`
+	Purpose      string `json:"purpose"`
+	Note         string `json:"note"`
 	// Evidence fields are advisory and ignored by classifier:
 	EvidencePackets int     `json:"evidence_packets"`
 	RatePPSActive   float64 `json:"rate_pps_active"`
@@ -190,9 +190,9 @@ type externalSub struct {
 }
 
 type externalGT struct {
-	Verified       bool   `json:"verified"`
-	Date           string `json:"date"`
-	PacketsObserved int   `json:"packets_observed"`
+	Verified        bool   `json:"verified"`
+	Date            string `json:"date"`
+	PacketsObserved int    `json:"packets_observed"`
 }
 
 // loadedRules is the compiled rule set + a version tag for telemetry.
@@ -378,13 +378,13 @@ func compileIPMatchers(in []externalIPMatcher, wantV6 bool) []ipMatcher {
 
 // compileSubCategories parses the schema:
 //
-//   "sub_categories": {
-//     "voice_call": {
-//       "name":     "微信电话",
-//       "detect":   "UDP 183.232.84.0/24:8000 rate > 200 pps",
-//       "category": "social_voip"
-//     }
-//   }
+//	"sub_categories": {
+//	  "voice_call": {
+//	    "name":     "微信电话",
+//	    "detect":   "UDP 183.232.84.0/24:8000 rate > 200 pps",
+//	    "category": "social_voip"
+//	  }
+//	}
 //
 // The "detect" string is human-readable, so we parse it best-effort.
 // Unparseable detectors are kept (with name + category) but won't fire.
@@ -416,7 +416,8 @@ func compileSubCategories(in map[string]externalSub) []subCategory {
 }
 
 // parseDetectExpr extracts (proto, cidr, port, ppsMin) from a string like:
-//   "UDP 183.232.84.0/24:8000 rate > 200 pps"
+//
+//	"UDP 183.232.84.0/24:8000 rate > 200 pps"
 //
 // Robust to extra whitespace and case. Anything we can't parse just stays
 // empty on the sub-category and that detector simply never fires.
