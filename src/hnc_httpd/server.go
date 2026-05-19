@@ -161,11 +161,22 @@ func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	// 用户看到 "需要 KernelSU/Magisk WebUI" 卡死页, 硬编码显示 v4.0.0-patch5.0
 	// (rc3.1.x 以来一直没更新). app.html + app.js 原本就是 embed 且能独立工作的
 	// 远端 UI, 只是从未挂到路由上.
+	//
+	// rc30.12.28 修: 本地手机浏览器访问 127.0.0.1:8443 时也是 loopback, 之前同样 serve
+	// KSU 版导致 "需要 KernelSU 或 Magisk WebUI" 白屏. 现在加 UA 检测: loopback 但 UA
+	// 不像 KSU/Magisk WebView 时, 也 serve 浏览器版本.
+	// KSU/SukiSU WebView 的 UA 包含 "KernelSU" 或 file:// 来源, 没有 "Mozilla/5.0";
+	// 而手机浏览器 UA 都带 "Mozilla/5.0" + "Mobile".
 	if !isLoopbackRequest(r) {
 		_, _ = w.Write(indexHTML) // embed: web/app.html
 		return
 	}
-	// 本地 loopback: serve 磁盘上的 KSU bridge 版 UI
+	if !looksLikeKSUWebView(r) {
+		// loopback 但是普通浏览器 (Chrome / Safari / 系统浏览器), 给浏览器版本
+		_, _ = w.Write(indexHTML) // embed: web/app.html
+		return
+	}
+	// 本地 loopback + KSU WebView UA: serve 磁盘上的 KSU bridge 版 UI
 	// 注: 模块实际 install 路径是 /data/adb/modules/hotspot_network_control/webroot/,
 	// 但 data dir (s.hncDir) 是 /data/local/hnc, 两者不同。用 post-fs-data.sh 建 symlink 或
 	// 直接硬编码模块路径(更简单)
@@ -176,6 +187,47 @@ func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	// fallback: 本地也读不到磁盘版就退化到 embed (比丢白屏强)
 	_, _ = w.Write(indexHTML)
+}
+
+// looksLikeKSUWebView 判断请求是不是来自 KSU/SukiSU/Magisk 的内嵌 WebView.
+// rc30.12.28: 之前只看 loopback IP, 把"本机浏览器访问 127.0.0.1"也判成 KSU,
+// 用户看到"需要 KernelSU 或 Magisk WebUI"白屏. 现在加 UA 检测.
+//
+// KSU/SukiSU WebView 的特征:
+//   - UA 含 "Android" 但不像普通浏览器 (没 Chrome 完整 token)
+//   - 部分管理器加 X-KernelSU-Version 之类自定义 header (不强求)
+//   - 没有 Referer (file:// 加载) — 但浏览器首次访问也可能没 Referer
+//
+// 最简单可靠的启发式: 如果 UA 带完整的 Chrome/Safari/Firefox 标识, 一定是浏览器;
+// 否则可能是 WebView (这里宽松一点, 不能确认是浏览器就给 KSU 版兜底, 因为浏览器
+// 还会自动跳 /pair, 不会卡死).
+//
+// rc30.12.28: 反转策略 - 默认假设 loopback 客户端是浏览器 (现在浏览器 WebUI 能用),
+// 只有 UA 明确像 WebView 时才给 KSU 版. KSU WebView 通常 UA 是 "Mozilla/5.0 (Linux; ..."
+// 而手机浏览器是 "Mozilla/5.0 (Linux; Android XX; ... Chrome/..." 含 "Chrome" 关键字.
+func looksLikeKSUWebView(r *http.Request) bool {
+	ua := r.Header.Get("User-Agent")
+	if ua == "" {
+		// 没 UA 当 WebView (curl/wget 也可能这样, 但它们应该走 API 不是 /)
+		return true
+	}
+	// 浏览器特征: 含 Chrome / Edg / Firefox / Safari (不含 wv 的)
+	// WebView 特征: UA 含 "wv" (Android WebView 标识) 或非常短没有 Chrome token
+	if strings.Contains(ua, "; wv)") || strings.Contains(ua, "wv)") {
+		return true
+	}
+	// 标识为完整 Chrome/Firefox 浏览器
+	if strings.Contains(ua, "Chrome/") && !strings.Contains(ua, "; wv") {
+		return false
+	}
+	if strings.Contains(ua, "Firefox/") {
+		return false
+	}
+	if strings.Contains(ua, "Safari/") && !strings.Contains(ua, "Chrome/") {
+		return false
+	}
+	// 其他情况默认 WebView (保守)
+	return true
 }
 
 // serveChangelog · v5.0 新增, serve 磁盘 webroot/changelog.html 给 lazy load 用

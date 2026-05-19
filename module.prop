@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.21
-versionCode=530141
+version=v5.3.0-rc30.12.28
+versionCode=530146
 author=Claude (Anthropic AI) + Ling
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.21 · CI hotfix: json_regression_test.sh 第 102 行 tpl_set 参数错误修复 (传字符串 down_mbps 当数字, 现改成 5 个数字 1 0 0 0 0). 这个 bug 一直存在但之前没在 CI 跑过 preflight 所以没暴露. 现在 ci_preflight 本地跑 0 failure (之前是 1).
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.28 · 修复 rc30.12.27 真机装机暴露的 5 个 P0/P1: (1) webroot/index.html fetch 路径漏注入 X-HNC-Local-Admin secret 导致 KSU WebUI auth required (2) service.sh 选 C launcher 后启动分支错误 (GPT 三审 P0) (3) sentinel 不区分 direct vs launcher 模式 + 检测 launcher abort 自动 fallback (4) httpd serveIndex UA 区分浏览器 vs KSU WebView, 本机浏览器访问 127.0.0.1:8443 不再卡白屏 (5) webroot 收 401 自动跳 /pair. 另: build.sh 加 Bionic TLS 对齐 linker flag, 修 hnc_launcher 在 Android 16 ARM64 abort. 本 zip 暂不打包 hnc_launcher (重编需 CI), service.sh 会 fallback 到 shell guard, 功能完全正常.
 minKernelSU=11485

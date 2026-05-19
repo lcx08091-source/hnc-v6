@@ -5164,13 +5164,23 @@ body.kb-open .container {
   async function fetchJsonWithTimeout(url, ms, label) {
     if (typeof fetch !== 'function') throw new Error('fetch unavailable');
     let ctrl = null;
-    let opts = { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } };
+    // rc30.12.28 修 P0: fetch 路径也注入 X-HNC-Local-Admin secret. 之前只有 bridge 路径注入,
+    // 导致 KSU WebUI 在 rc30.12.18 默认拒绝中间件下永远 401 (fetch 优先, fetch 401 后 bridge
+    // 也没被启用). 现在不论 transport, 只要 secret 在就注入.
+    // 注意: __hncLocalAdminSecret 可能是空 (首屏 paint 前 secret 还没加载完).
+    //       但因为 __hncLoadLocalAdminSecret() 在脚本顶部启动时就 fire, 大部分情况下
+    //       第一次 fetch 时它已经回调完了; 没回调完就空着, fetch 401 后 bridge 路径会再 await.
+    let headers = { 'Cache-Control': 'no-cache' };
+    if (typeof __hncLocalAdminSecret === 'string' && __hncLocalAdminSecret) {
+      headers['X-HNC-Local-Admin'] = __hncLocalAdminSecret;
+    }
+    let opts = { cache: 'no-store', headers: headers };
     try {
       if (typeof AbortController !== 'undefined') {
         ctrl = new AbortController();
         opts.signal = ctrl.signal;
       }
-    } catch (_) { ctrl = null; opts = { cache: 'no-store', headers: { 'Cache-Control': 'no-cache' } }; }
+    } catch (_) { ctrl = null; opts = { cache: 'no-store', headers: headers }; }
 
     return new Promise(function(resolve, reject) {
       let done = false;
@@ -5184,7 +5194,24 @@ body.kb-open .container {
       try {
         fetch(url, opts).then(function(resp) {
           if (done) return;
-          if (!resp || !resp.ok) throw new Error('HTTP ' + (resp ? resp.status : 'no response'));
+          if (!resp || !resp.ok) {
+            // rc30.12.28: 收到 401 立即引导到配对页, 跟远程 web/app.js (line 609) 行为一致.
+            // 之前本机 KSU WebUI 401 时只显示 toast, 用户无路可走.
+            // 注意 KSU WebUI 是 file:// 加载, 直接 window.location.href='/pair' 不行,
+            // 必须用 API_BASE + '/pair' 跳到 httpd 服务的配对页.
+            if (resp && resp.status === 401) {
+              try {
+                var pairUrl = API_BASE + '/pair';
+                var here = String(window.location.href || '');
+                if (here.indexOf(pairUrl) !== 0) {
+                  setTimeout(function(){
+                    try { window.location.href = pairUrl; } catch (_) {}
+                  }, 800);
+                }
+              } catch (_) {}
+            }
+            throw new Error('HTTP ' + (resp ? resp.status : 'no response'));
+          }
           return resp.text();
         }).then(function(txt) {
           if (done) return;
@@ -5221,6 +5248,11 @@ body.kb-open .container {
     }
     const url = API_BASE + p;
 
+    // rc30.12.28: 在 fetch 之前先 await secret 加载完成. 之前只在 bridge 路径 await,
+    // fetch 路径用空 secret 发请求 -> 401 (rc30.12.18 默认拒绝中间件下). 加载有缓存,
+    // 第二次起立即返回, 不会变慢.
+    try { await __hncLoadLocalAdminSecret(); } catch (e) {}
+
     // rc1.10 · first transport: browser fetch.
     // 这是异步 Web API，不会像 window.ksu.exec 那样同步卡死 UI 线程。
     // 一旦 bridge 已确认可用，后续请求直接走 bridge，避免每个接口先等 fetch 失败 1.8s。
@@ -5239,6 +5271,7 @@ body.kb-open .container {
     // 首屏 paint 后自动尝试一次；或者用户点击"强制桥接"后到这里。
     // rc30.12.14: 注入 X-HNC-Local-Admin header. 先 await 一次 secret 加载, 避免竞态.
     //            secret 没就绪 (老 service.sh 没生成) 时 adminH='', 后端 fallback 老 loopback bypass.
+    // rc30.12.28: secret 现在已经在 apiGet 入口处 await 过, 这里调用是缓存命中, 立即返回.
     try { await __hncLoadLocalAdminSecret(); } catch (e) {}
     let adminH = '';
     if (__hncLocalAdminSecret) {

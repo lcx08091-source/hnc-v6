@@ -472,9 +472,24 @@ LAUNCHER_CHOICE=""
 if [ -x "$DPID_LAUNCHER_C" ] && [ -x "$FORK_PROBE" ]; then
     # 用 /system/bin/true 测试 (它执行后立刻退 0)
     if "$FORK_PROBE" /system/bin/true >/dev/null 2>&1; then
-        DPID_LAUNCHER="$DPID_LAUNCHER_C"
-        LAUNCHER_CHOICE="c_launcher"
-        log "dpid launcher: hnc_launcher (C, rc30.12+) — fork_probe PASS"
+        # rc30.12.28 加固: fork_probe PASS 不代表 hnc_launcher 自己能 exec.
+        # 老的 hnc_launcher 在 Bionic 上可能因为 TLS segment 对齐错 (8 vs 64) 直接 abort,
+        # 这跟 fork+execv 能力无关. 真试一下 hnc_launcher --version (或 -h), 看是不是
+        # exit 0/正常错误码. 立刻 abort (137/134) 就说明二进制损坏, 跳过.
+        _launcher_test=$("$DPID_LAUNCHER_C" --version 2>&1)
+        _launcher_test_rc=$?
+        # abort: SIGABRT 6 → exit 134 (128+6) or 蓝端报错文字 "Aborted" / "underaligned"
+        if echo "$_launcher_test" | grep -qE 'underaligned|Aborted|cannot execute|error:.*executable'; then
+            log "dpid launcher: hnc_launcher binary broken (TLS/Bionic mismatch), skip"
+            log "  diag: $(echo "$_launcher_test" | head -1)"
+        elif [ "$_launcher_test_rc" = "134" ] || [ "$_launcher_test_rc" = "137" ]; then
+            log "dpid launcher: hnc_launcher aborted (rc=$_launcher_test_rc), skip"
+        else
+            DPID_LAUNCHER="$DPID_LAUNCHER_C"
+            LAUNCHER_CHOICE="c_launcher"
+            log "dpid launcher: hnc_launcher (C, rc30.12+) — fork_probe PASS + exec PASS"
+        fi
+        unset _launcher_test _launcher_test_rc
     else
         log "dpid launcher: fork_probe FAIL on this device, falling back to shell guard"
     fi
@@ -555,18 +570,22 @@ else
     # dpid.pid 只给真实 hnc_dpid child 使用, 避免 guard/child 互相覆盖 pidfile.
     # rc30.0: 同一启动块同时适用 Go supervisor (DPID_SUPERVISOR) 和老 shell guard
     # (DPID_GUARD). 二者都自维护 dpid_guard.pid 锁文件, 启动方式一致 (nohup &).
-    if [ "$DPID_LAUNCHER" = "$DPID_SUPERVISOR" ] || [ "$DPID_LAUNCHER" = "$DPID_GUARD" ]; then
+    # rc30.12.28 修 P0 (GPT 三审): 之前判断只匹配 SUPERVISOR/GUARD, C launcher 选中后
+    # 会落到 else 分支直启 hnc_dpid. 后续 sentinel 又会拉 C launcher, 双 dpid 风险.
+    # 现在改成: 任何 launcher (C/shell/Go) 都走统一 launcher 分支, 只有 fallback 到
+    # DPID_BIN (没有 launcher 可用) 才走 direct 模式.
+    if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
         gp=$(cat "$DPID_GUARD_PID" 2>/dev/null)
         if [ -n "$gp" ] && kill -0 "$gp" 2>/dev/null; then
-            log "hnc_dpid supervisor/guard already running (PID=$gp), skip duplicate launch"
+            log "hnc_dpid launcher already running (PID=$gp, choice=$LAUNCHER_CHOICE), skip duplicate launch"
         else
             live_gp=$(find_live_dpid_guard_pid)
             if [ -n "$live_gp" ] && kill -0 "$live_gp" 2>/dev/null; then
                 echo "$live_gp" > "$DPID_GUARD_PID" 2>/dev/null || true
-                log "hnc_dpid supervisor live without pidfile (PID=$live_gp), repaired pidfile and skipped duplicate launch"
+                log "hnc_dpid launcher live without pidfile (PID=$live_gp, choice=$LAUNCHER_CHOICE), repaired pidfile and skipped duplicate launch"
             else
                 rm -f "$DPID_GUARD_PID" 2>/dev/null || true
-                log "starting hnc_dpid launcher: $DPID_LAUNCHER"
+                log "starting hnc_dpid launcher: $DPID_LAUNCHER (choice=$LAUNCHER_CHOICE)"
                 nohup "$DPID_LAUNCHER" >> "$HNC_DIR/logs/dpid_guard.log" 2>&1 &
                 echo $! > "$DPID_GUARD_PID"
                 log "hnc_dpid launcher started (PID: $(cat $DPID_GUARD_PID))"
@@ -575,9 +594,9 @@ else
     else
         dp=$(cat "$DPID_PID" 2>/dev/null)
         if [ -n "$dp" ] && kill -0 "$dp" 2>/dev/null; then
-            log "hnc_dpid already running (PID=$dp), skip duplicate launch"
+            log "hnc_dpid already running (PID=$dp, direct mode), skip duplicate launch"
         else
-            log "starting hnc_dpid: $DPID_BIN"
+            log "starting hnc_dpid direct: $DPID_BIN (no launcher available)"
             nohup "$DPID_BIN" -config "$DPID_CONFIG" >> "$HNC_DIR/logs/dpid.log" 2>&1 &
             echo $! > "$DPID_PID"
             log "hnc_dpid started (PID: $(cat $DPID_PID))"
@@ -597,17 +616,52 @@ fi
     log "sentinel: starting (launcher_choice=$LAUNCHER_CHOICE, dpid_launcher=$DPID_LAUNCHER)"
 
     while true; do
-        # 1. 检查 launcher 进程 (C / shell guard / Go supervisor 任一)
-        LAUNCHER_ALIVE=$(ps -ef 2>/dev/null | grep -v grep \
-            | grep -cE '/data/local/hnc/bin/(hnc_launcher|hnc_dpid_supervisor)|hnc_dpid_guard\.sh')
-        if [ "$LAUNCHER_ALIVE" = "0" ]; then
-            log "sentinel: no dpid launcher running, restarting via $DPID_LAUNCHER"
-            if [ -x "$DPID_LAUNCHER" ]; then
-                nohup "$DPID_LAUNCHER" >> "$HNC_DIR/logs/dpid_guard.log" 2>&1 &
-                echo $! > "$DPID_GUARD_PID" 2>/dev/null || true
+        # rc30.12.28: 区分 direct vs launcher 模式. 之前只检查 launcher 进程,
+        # 如果没有 launcher (DPID_LAUNCHER=DPID_BIN), sentinel 会一直试图启动
+        # DPID_BIN 但又把它认作 launcher, 状态机错乱.
+        if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
+            # 1a. launcher 模式 - 检查 launcher 进程 (C / shell guard / Go supervisor 任一)
+            LAUNCHER_ALIVE=$(ps -ef 2>/dev/null | grep -v grep \
+                | grep -cE '/data/local/hnc/bin/(hnc_launcher|hnc_dpid_supervisor)|hnc_dpid_guard\.sh')
+            if [ "$LAUNCHER_ALIVE" = "0" ]; then
+                # rc30.12.28: 检测 launcher 反复启动失败 (TLS abort 等). 如果 dpid_guard.log
+                # 最近 60 秒出现 "TLS segment is underaligned" 或类似 abort, 不要再拉 launcher,
+                # 直接 fallback 到 direct mode 启动 hnc_dpid.
+                LAUNCHER_BROKEN=0
+                if [ -f "$HNC_DIR/logs/dpid_guard.log" ]; then
+                    if tail -50 "$HNC_DIR/logs/dpid_guard.log" 2>/dev/null \
+                       | grep -qE 'TLS segment is underaligned|Aborted|cannot execute|error:.*executable'; then
+                        LAUNCHER_BROKEN=1
+                    fi
+                fi
+                if [ "$LAUNCHER_BROKEN" = "1" ]; then
+                    # launcher 坏了, 直接拉 dpid (绕过 launcher)
+                    DPID_ALIVE=$(ps -ef 2>/dev/null | grep -v grep \
+                        | grep -cE '/data/local/hnc/bin/hnc_dpid( |$)')
+                    if [ "$DPID_ALIVE" = "0" ]; then
+                        log "sentinel: launcher broken (abort detected), fallback to direct dpid"
+                        nohup "$DPID_BIN" -config "$DPID_CONFIG" >> "$HNC_DIR/logs/dpid.log" 2>&1 &
+                        echo $! > "$DPID_PID" 2>/dev/null || true
+                        sleep 2
+                    fi
+                elif [ -x "$DPID_LAUNCHER" ]; then
+                    log "sentinel: no dpid launcher running, restarting via $DPID_LAUNCHER"
+                    nohup "$DPID_LAUNCHER" >> "$HNC_DIR/logs/dpid_guard.log" 2>&1 &
+                    echo $! > "$DPID_GUARD_PID" 2>/dev/null || true
+                    sleep 2
+                else
+                    log "sentinel: WARN DPID_LAUNCHER unset or not executable ($DPID_LAUNCHER), skip"
+                fi
+            fi
+        else
+            # 1b. direct 模式 - 检查 dpid 进程
+            DPID_ALIVE=$(ps -ef 2>/dev/null | grep -v grep \
+                | grep -cE '/data/local/hnc/bin/hnc_dpid( |$)')
+            if [ "$DPID_ALIVE" = "0" ]; then
+                log "sentinel: hnc_dpid not running (direct mode), relaunching"
+                nohup "$DPID_BIN" -config "$DPID_CONFIG" >> "$HNC_DIR/logs/dpid.log" 2>&1 &
+                echo $! > "$DPID_PID" 2>/dev/null || true
                 sleep 2
-            else
-                log "sentinel: WARN DPID_LAUNCHER unset or not executable ($DPID_LAUNCHER), skip"
             fi
         fi
 

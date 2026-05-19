@@ -187,6 +187,7 @@ jobs:
       - name: Package module zip
         run: |
           OUT="HNC-${{ steps.version.outputs.version_safe }}-arm64.zip"
+          TOOLS_OUT="hnc-ground-truth-tools.zip"
           
           # Clean build artifacts before zipping
           rm -rf daemon/hotspotd/prebuilt
@@ -194,7 +195,8 @@ jobs:
           rm -rf third_party_build/_libs_out 2>/dev/null || true
           rm -rf third_party_build/_obj 2>/dev/null || true
           
-          # Build zip excluding hidden files, .git, and the zip itself
+          # Main module zip - EXCLUDES tools/ground_truth/ (rc30.12.23+)
+          # tools/ground_truth/ is shipped as a separate zip below.
           zip -rqX "$OUT" . \
             -x ".*" \
             -x "*/.*" \
@@ -204,28 +206,56 @@ jobs:
             -x "**/_obj/*" \
             -x "**/build/*" \
             -x "**/out/*" \
-            -x "**/prebuilt/*"
+            -x "**/prebuilt/*" \
+            -x "tools/ground_truth/*" \
+            -x "tools/ground_truth"
           
           echo "OUT_ZIP=$OUT" >> $GITHUB_ENV
           ls -lh "$OUT"
           
+          # Separate ground-truth tools zip (rc30.12.23+)
+          # Lightweight (~15 KB), only needed when expanding DPI rules.
+          if [ -d tools/ground_truth ]; then
+            (cd tools/ground_truth && zip -rqX "../../$TOOLS_OUT" .)
+            echo "TOOLS_ZIP=$TOOLS_OUT" >> $GITHUB_ENV
+            ls -lh "$TOOLS_OUT"
+          fi
+          
           # Print summary
           echo ""
-          echo "=== Zip contents summary ==="
+          echo "=== Module zip contents (last lines) ==="
           unzip -l "$OUT" | tail -5
+          echo ""
+          if [ -f "$TOOLS_OUT" ]; then
+            echo "=== Tools zip contents ==="
+            unzip -l "$TOOLS_OUT"
+          fi
 
-      - name: Compute SHA256 of zip
+      - name: Compute SHA256 of zips
         run: |
           sha256sum "${{ env.OUT_ZIP }}" | tee "${{ env.OUT_ZIP }}.sha256"
+          if [ -n "${{ env.TOOLS_ZIP }}" ] && [ -f "${{ env.TOOLS_ZIP }}" ]; then
+            sha256sum "${{ env.TOOLS_ZIP }}" | tee "${{ env.TOOLS_ZIP }}.sha256"
+          fi
 
       # ─── Upload as Actions artifact ───────────────────────
-      - name: Upload artifact
+      - name: Upload module artifact
         uses: actions/upload-artifact@v4
         with:
           name: HNC-${{ steps.version.outputs.version_safe }}-arm64
           path: |
             ${{ env.OUT_ZIP }}
             ${{ env.OUT_ZIP }}.sha256
+          retention-days: 30
+
+      - name: Upload ground-truth tools artifact
+        if: env.TOOLS_ZIP != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: hnc-ground-truth-tools
+          path: |
+            ${{ env.TOOLS_ZIP }}
+            ${{ env.TOOLS_ZIP }}.sha256
           retention-days: 30
 
       # ─── Auto-release on tag push ─────────────────────────
@@ -236,6 +266,8 @@ jobs:
           files: |
             ${{ env.OUT_ZIP }}
             ${{ env.OUT_ZIP }}.sha256
+            ${{ env.TOOLS_ZIP }}
+            ${{ env.TOOLS_ZIP }}.sha256
           prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
           body: |
             HNC ${{ steps.version.outputs.version }} - automated build.

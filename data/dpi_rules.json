@@ -1,6 +1,6 @@
 {
   "schema_version": "2.0",
-  "rules_version": "hnc-curated-v3-rc30.12-2026-05-18-v5-kuaishou-vpn",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile",
   "updated_at": "2026-05-18",
   "_comment_top": "HNC DPI 规则库 v3 - 整合 SNI Labeler 抓取数据 + tcpdump ground truth. 新增 IP+端口 + IPv6 段匹配, 支持 5G 网络下 SNI 不可得的场景",
   "schema_changes_from_v1": [
@@ -2349,6 +2349,105 @@
         "date": "2026-05-18",
         "evidence": "pcap 5 分钟 -i any 抓出 66k 包 (43k tun + 23k rmnet), 同一字节流被记录两次"
       }
+    },
+    {
+      "id": "tencent_codev_valorant_mobile",
+      "app": "无畏契约:源能行动",
+      "category": "game",
+      "confidence": "very_high",
+      "rationale": "腾讯运营国服 VALORANT 手游, package=com.tencent.tmgp.codev. 数据来源: 2026-05-19 RMX5010+ColorOS16+5G 真机 pcap, 13 分钟 2261 包覆盖大厅+实战, 93 个 SNI 提取, 2 个独占域名 + 4 个游戏服务器 IP+端口 + 6 个 IPv6 段印证. 不用 QUIC, 全部 TLS-over-TCP, DPI 完全可识别. 跟通用腾讯 SDK 规则解耦 (那些走 sdk-tencent-game 分类).",
+      "suffixes": [
+        "codev-club.qq.com",
+        "estv-op.tga.qq.com"
+      ],
+      "ip_matchers": [
+        {
+          "cidr": "14.17.78.0/24",
+          "ports": [
+            8001,
+            8002,
+            8003,
+            8004
+          ],
+          "proto": "tcp",
+          "purpose": "腾讯手游 game server (典型 4 端口配对)",
+          "evidence_packets": 59
+        },
+        {
+          "cidr": "117.135.156.0/24",
+          "ports": [
+            8013
+          ],
+          "proto": "tcp",
+          "purpose": "腾讯手游 game server 经典端口",
+          "evidence_packets": 25
+        },
+        {
+          "cidr": "183.194.238.0/24",
+          "ports": [
+            8002
+          ],
+          "proto": "tcp",
+          "purpose": "上海移动 IDC - 腾讯游戏专用端口",
+          "evidence_packets": 6
+        }
+      ],
+      "ipv6_matchers": [
+        {
+          "cidr": "2409:8c1e:75b0::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 主连接 #1 (中国移动)",
+          "evidence_packets": 195
+        },
+        {
+          "cidr": "2409:8c1e:8f60::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 主连接 #2 (中国移动)",
+          "evidence_packets": 118
+        },
+        {
+          "cidr": "2409:8c70:3a10::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 主连接 #3 (中国移动)",
+          "evidence_packets": 73
+        },
+        {
+          "cidr": "2409:8c54:871::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 辅助 (中国移动, 4 个 IP)",
+          "evidence_packets": 62
+        },
+        {
+          "cidr": "2409:8c54:1040::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 辅助 (中国移动)",
+          "evidence_packets": 56
+        },
+        {
+          "cidr": "2409:8c6c:1720::/48",
+          "ports": [
+            443
+          ],
+          "proto": "tcp",
+          "purpose": "无畏契约 IPv6 辅助 (中国移动)",
+          "evidence_packets": 32
+        }
+      ]
     }
   ],
   "_comment_changes": [

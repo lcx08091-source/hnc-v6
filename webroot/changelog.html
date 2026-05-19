@@ -1,3 +1,52 @@
+<!-- v5.3.0-rc30.12.28 -->
+<div class="cl-section">
+  <div class="cl-title">🚨 v5.3.0-rc30.12.28: 紧急修复 rc30.12.27 装机 P0/P1 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>P0 修复 #1</b>: WebUI auth required (fetch 路径漏注入 secret)。<code>fetchJsonWithTimeout</code> 现在会注入 <code>X-HNC-Local-Admin</code> header,<code>apiGet</code> 入口处 await secret 加载完成。</li>
+    <li><b>P0 修复 #2 (GPT 三审 P0)</b>: service.sh 选 C launcher 后启动分支错。判断改成 <code>$DPID_LAUNCHER != $DPID_BIN</code>。</li>
+    <li><b>P0 修复 #3</b>: sentinel 区分 direct vs launcher 模式 + 检测 launcher abort 自动 fallback 到 direct dpid。</li>
+    <li><b>P1 修复 #1</b>: httpd serveIndex 用 UA 区分。本机浏览器访问 127.0.0.1:8443 不再卡"需要 KernelSU"白屏。</li>
+    <li><b>P1 修复 #2</b>: KSU WebUI 收 401 自动跳 /pair。</li>
+    <li><b>P2 修复</b>: <code>src/launcher/build.sh</code> 加 Bionic 兼容 LDFLAGS。本 zip 暂不带 launcher 二进制,等 CI 重编。service.sh 会 fallback 到 shell guard,功能完全正常。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.27 -->
+<div class="cl-section">
+  <div class="cl-title">🎯 v5.3.0-rc30.12.27: 加入"无畏契约:源能行动" DPI 规则 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>新增 very_high 规则</b>: 无畏契约:源能行动 (com.tencent.tmgp.codev) - VALORANT Mobile 国服。</li>
+    <li><b>识别依据</b>: 2 个独占域名 (codev-club.qq.com / estv-op.tga.qq.com) + 3 个 IPv4 段 (含腾讯手游经典 8001-8004/8013 端口) + 6 个 IPv6 段 (中国移动 5G)。</li>
+    <li><b>数据来源</b>: 真机 13 分钟 pcap, 2261 包, 93 SNI 印证。</li>
+    <li><b>关键发现</b>: 全部 TLS-over-TCP, 不用 QUIC, DPI 100% 可识别。</li>
+    <li><b>总规则数</b>: 143 → <b>144</b>; very_high: 15 → <b>16</b>。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.23 -->
+<div class="cl-section">
+  <div class="cl-title">📦 v5.3.0-rc30.12.23: DPI 抓包工具拆分 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>改动</b>: <code>tools/ground_truth/</code> 不再打进主模块 zip。改成独立 <code>hnc-ground-truth-tools.zip</code> (15 KB) 分发。</li>
+    <li><b>理由</b>: 抓包是 ad-hoc 操作, 不该常驻模块目录。analyze.py 是给电脑跑的, 手机用不上。</li>
+    <li><b>仓库</b>: GitHub 仓库里仍保留 <code>tools/ground_truth/</code> 完整源码 (CI 可访问, 开源审计可见)。</li>
+    <li><b>用法变化</b>: 想抓包时单独下载 <code>hnc-ground-truth-tools.zip</code> 解压到 <code>/sdcard/Download/hnc_tools/</code>, Termux 跑 <code>sh capture.sh 1800</code> 即可。</li>
+    <li><b>不变</b>: BPF / analyze.py / 抓包后发 Claude 的流程。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.22 -->
+<div class="cl-section">
+  <div class="cl-title">📦 v5.3.0-rc30.12.22: pcap 抓包工具体积优化 (15-30× 压缩) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>问题</b>: 之前抓 36 分钟 pcap 体积 441 MB, 90% 是 DPI 分析用不到的视频流/HTTP stream/下载数据。</li>
+    <li><b>优化</b>: <code>capture.sh</code> 重写 BPF 过滤, 只抓真正能产生 DPI 信号的包 (SYN + TLS handshake + DNS + QUIC Initial)。</li>
+    <li><b>预期</b>: 36 min 真机抓包 441 MB → 15-30 MB (15-30 倍压缩), 无信号损失。</li>
+    <li><b>兼容</b>: analyze.py 不需要改 (v2 pcap 是 v1 子集), 老 pcap 仍可用。</li>
+    <li><b>顺手改</b>: 倒计时实时显示 pcap 大小, tcpdump 启动失败自动 fallback。</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.21 -->
 <div class="cl-section">
   <div class="cl-title">🔧 v5.3.0-rc30.12.21: CI hotfix <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>

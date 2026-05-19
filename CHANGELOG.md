@@ -1,4 +1,286 @@
 
+## v5.3.0-rc30.12.28
+
+**发布日期**: 2026-05-19
+**versionCode**: 530146
+
+紧急修复 rc30.12.27 真机装机暴露的 **5 个 P0/P1** + GPT 三审 P0.
+
+### 背景
+
+rc30.12.27 装到 RMX5010 (ColorOS 16 + SukiSU) 后,**WebUI 完全不能用**(显示 auth required),GPT 三审同时报告了一个 dpid 启动链 P0。诊断后发现 5 个独立但叠加的问题。
+
+### 修复清单
+
+#### P0-1: webroot/index.html fetch 路径漏注入 secret
+
+**症状**: KSU WebUI 永远显示 "刷新提示: auth required" / "失败: auth required",刷新按钮失败,设备列表空。
+
+**根因**: rc30.12.18 引入默认拒绝中间件后,所有 API 调用必须带鉴权(cookie 或 X-HNC-Local-Admin header)。webroot/index.html 的 `apiGet` 函数**优先走 fetch 路径**,但 `fetchJsonWithTimeout` 函数**只设置 `Cache-Control` header,没注入 X-HNC-Local-Admin**,只有 bridge 路径 (`window.ksu.exec` curl) 才注入。所以 fetch 永远 401,bridge 又因为 fetch "成功"(其实是 401)而不会被启用。
+
+**修复**:
+- `fetchJsonWithTimeout`: 设置 fetch options 时检查 `__hncLocalAdminSecret`,有就注入 `X-HNC-Local-Admin` header
+- `apiGet`: 函数入口处先 `await __hncLoadLocalAdminSecret()`,保证 fetch 调用时 secret 一定就绪(有缓存,只首次有开销)
+
+#### P0-2: service.sh 选 C launcher 后启动分支错 (GPT 三审 P0)
+
+**症状**: fork_probe PASS 选了 C launcher,但 service.sh 第 558 行判断只匹配 `$DPID_SUPERVISOR` 或 `$DPID_GUARD`,**没匹配 `$DPID_LAUNCHER_C`**,走 else 分支**直启 hnc_dpid**。然后 sentinel 检查"launcher 进程"为 0,试图拉 hnc_launcher,可能造成双 dpid (如果 launcher 能正常 exec)。
+
+**修复**: 改判断条件 `[ "$DPID_LAUNCHER" != "$DPID_BIN" ]` — 只要不是 fallback 到 DPID_BIN,任何 launcher (C / shell / Go) 都走统一 launcher 分支。
+
+#### P0-3: sentinel 不区分 direct vs launcher 模式
+
+**症状**: 配合 P0-2,sentinel 状态机错乱,日志反复刷 "no dpid launcher running"。
+
+**修复**: sentinel 检查 `$DPID_LAUNCHER != $DPID_BIN`,launcher 模式查 launcher 进程,direct 模式查 hnc_dpid 进程。另外加 **launcher abort 检测**:如果 dpid_guard.log 最近 50 行出现 `TLS segment is underaligned` / `Aborted` / `cannot execute`,自动 fallback 到 direct mode,不再重复拉坏的 launcher。
+
+#### P1-1: httpd serveIndex 用 UA 区分浏览器 vs KSU WebView
+
+**症状**: 用户用手机浏览器访问 `https://127.0.0.1:8443/` 想绕过 KSU WebUI 问题,但**127.0.0.1 也是 loopback**,httpd 把浏览器当成 KSU WebView,serve KSU 版 index.html,浏览器没 `window.ksu` → 显示"需要 KernelSU 或 Magisk WebUI"白屏。
+
+**修复**: 加 `looksLikeKSUWebView()` 函数,看 UA 里 Chrome/Firefox/Safari 标识。loopback 客户端如果是普通浏览器,serve 浏览器版 (app.html);只有像 WebView (UA 含 `wv)` 或无完整浏览器 token) 才 serve KSU 版。
+
+#### P1-2: webroot/index.html 收 401 自动跳 /pair
+
+**症状**: KSU WebUI 一旦 cookie 失效或 secret 注入失败,用户卡死在错误页,**没有自助修复路径**。
+
+**修复**: `fetchJsonWithTimeout` 检测 401,自动 setTimeout 800ms 后 `window.location.href = API_BASE + '/pair'`。跟远程浏览器 WebUI (web/app.js line 609) 行为一致。
+
+#### P2-1: hnc_launcher TLS 对齐错 (Bionic ARM64)
+
+**症状**: 用户机上(Android 16 + SukiSU Ultra),`/data/local/hnc/bin/hnc_launcher` 直接报错:
+```
+error: "/data/local/hnc/bin/hnc_launcher": executable's TLS segment is underaligned: 
+       alignment is 8, needs to be at least 64 for ARM64 Bionic
+Aborted
+```
+
+**根因**: NDK toolchain 编出来的 TLS segment 默认 8 字节对齐,但 Bionic (Android libc) 在 ARM64 要求至少 64 字节对齐。
+
+**修复**:
+- `src/launcher/build.sh`: 加 `-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384` linker flags
+- 编完后加 `readelf -l` 检查 TLS align >= 64,< 64 警告
+- 本 zip **暂不打包** `bin/hnc_launcher` / `bin/fork_probe` (需要 CI 重编)。service.sh 看不到这两个二进制就 fallback 到 shell guard,**功能完全正常**
+
+#### 加固: launcher 选择阶段 abort 自检
+
+即使 hnc_launcher 二进制存在,选中后**真试一下 `--version`**,如果输出含 `underaligned` / `Aborted` 或退出码 134/137,**立即跳过 C launcher**,fallback 到 shell guard。
+
+### 验证(从 rc30.12.27 装机数据)
+
+```
+现象 rc30.12.27          →   预期 rc30.12.28 行为
+─────────────────────────────────────────────────
+KSU WebUI: auth required  →  apiGet 注入 secret, HTTP 200, WebUI 正常加载
+                             (退路: 收 401 自动跳 /pair)
+                             
+service.log:              →  service.log:
+"no dpid launcher running" →  "launcher broken, fallback to direct dpid"
+循环刷                      或 "starting hnc_dpid launcher: hnc_dpid_guard.sh"
+                             
+浏览器 127.0.0.1:8443      →  serve app.html (浏览器版)
+"需要 KernelSU 或 Magisk"
+白屏
+```
+
+### 待 CI 验证
+
+第 6 项 P2 hnc_launcher 重编依赖 CI:
+- push 后 CI 跑 `src/launcher/build.sh install` 编出新的 hnc_launcher (带 LDFLAGS)
+- CI 产出的 zip artifact 应该包含**修好的** hnc_launcher
+- 用户从 GitHub Releases 下的 zip = 完整版,本地解压的这个 zip = 不带 launcher (但能 fallback)
+
+
+## v5.3.0-rc30.12.27
+
+**发布日期**: 2026-05-19
+**versionCode**: 530145
+
+DPI 规则更新: 加入**无畏契约:源能行动** (VALORANT Mobile 国服).
+
+### 数据来源
+
+真机 pcap (RMX5010 + ColorOS 16 + SukiSU + 5G):
+
+- 抓包时长: 13 分钟 (大厅 + 实战)
+- 总包数: 2261
+- SNI 提取: 93 个
+- foreground app: com.tencent.tmgp.codev
+
+### 新增规则细节 (very_high)
+
+- **id**: `tencent_codev_valorant_mobile`
+- **app**: 无畏契约:源能行动
+- **category**: game
+- **suffixes** (2 个独占):
+  - `codev-club.qq.com` — 游戏俱乐部专属
+  - `estv-op.tga.qq.com` — 国服内部代号
+- **ip_matchers** (3 段):
+  - `14.17.78.0/24:8001-8004` — 腾讯手游 game server 4 端口配对 (59 包印证)
+  - `117.135.156.0/24:8013` — 腾讯手游经典端口 (25 包印证)
+  - `183.194.238.0/24:8002` — 上海移动 IDC 腾讯游戏 (6 包印证)
+- **ipv6_matchers** (6 段, 中国移动 5G):
+  - `2409:8c1e:75b0::/48` — 主连接 #1 (195 包)
+  - `2409:8c1e:8f60::/48` — 主连接 #2 (118 包)
+  - `2409:8c70:3a10::/48` — 主连接 #3 (73 包)
+  - `2409:8c54:871::/48` — 辅助 (62 包)
+  - `2409:8c54:1040::/48` — 辅助 (56 包)
+  - `2409:8c6c:1720::/48` — 辅助 (32 包)
+
+### 关键发现
+
+1. **不用 QUIC** — 无畏契约:源能行动**全部走 TLS-over-TCP**, DPI 完全能识别. 不像很多 Google/字节系 App 把 SNI 加密了, 这游戏的 SNI 是明文.
+
+2. **跟现有规则无冲突** — IP 段都是新的, suffix 也独占.
+
+3. **ColorOS 16 默认 DoH** — 你的 ROM 用 223.5.5.5/223.6.6.6 (阿里 DoH), 所以 DNS 抓不到. 但 SNI 在 TLS 握手里是明文, 不受影响.
+
+### 跟通用腾讯 SDK 规则的关系
+
+那些**所有腾讯游戏共用**的 SDK 域名 (如 `cloud.tgpa.qq.com`, `android.perfsight.qq.com`) **不重复加进 codev 规则**, 它们在 `tencent_game_sdk_common` 里. 这样 HNC 看到 SDK 流量会归类到"腾讯游戏通用 SDK", 看到 `codev-club.qq.com` 才确定是无畏契约.
+
+### 总规则数变化
+
+| 版本 | 总规则 | very_high | high | medium | low |
+|---|---|---|---|---|---|
+| rc30.12.22 | 143 | 15 | 97 | 23 | 8 |
+| rc30.12.27 | **144** | **16** | 97 | 23 | 8 |
+
+### rules_version
+
+`hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile`
+
+
+## v5.3.0-rc30.12.23
+
+**发布日期**: 2026-05-19
+**versionCode**: 530143
+
+DPI 抓包工具拆分.
+
+### 背景
+
+rc30.12.22 把 capture.sh BPF 优化后, 工具本身已经很小 (5 个文件 / 52 KB). 但它仍打进 9 MB 主模块 zip 里, 装到手机的 `/data/adb/modules/.../tools/ground_truth/` — 这位置不合理:
+
+1. 抓包是 ad-hoc 操作, 不需要常驻模块目录
+2. analyze.py / sni_to_rules*.py 是给电脑 / Claude 跑的, 手机用不上
+3. 用户用模块根本不需要它存在
+
+### 改动
+
+**模块 zip 打包时排除 `tools/`**:
+
+```
+zip ... -x "tools/*"
+```
+
+**独立分发**: `hnc-ground-truth-tools.zip` (15 KB)
+
+### 体积影响
+
+- 主模块 zip: 9.0 MB → 9.0 MB (变化忽略不计, tools/ 才 52 KB)
+- 工具包: 单独 15 KB
+- 用户体验: 想抓包再下载工具包, 不想抓的人模块里就没这个目录
+
+### 仓库结构
+
+GitHub `hnc-v6` 仓库**仍然保留** `tools/ground_truth/` 完整源码 (CI 可访问, 开源审计可见). 只是模块 zip 打包时不带它了.
+
+### 拿工具包的方式
+
+如果你后面想抓 pcap 标注 DPI 规则:
+
+```bash
+# 下载 hnc-ground-truth-tools.zip
+# 解压到任意位置 (推荐 /sdcard/Download/hnc_tools/)
+# Termux 跑:
+su
+sh /sdcard/Download/hnc_tools/capture.sh 1800
+```
+
+工具包里附带的 README.md 有完整工作流说明.
+
+### 不变的部分
+
+- BPF (rc30.12.22 优化)
+- analyze.py
+- sni_to_rules_v2.py
+- 抓包后发 Claude 的流程
+
+
+## v5.3.0-rc30.12.22
+
+**发布日期**: 2026-05-19
+**versionCode**: 530142
+
+DPI pcap 抓包工具体积优化.
+
+### 背景
+
+之前 4 次 pcap 标注积累 441 MB / 36 分钟 (~12 MB/min). 体积大主要因为 BPF 太宽:
+
+```
+old BPF: (tcp or udp) and not arp + -s 200
+```
+
+抓所有 TCP/UDP 包. 但 analyze.py 实际只用 4 种东西:
+- TLS ClientHello (TCP 443 内 payload 0x16 0x03)
+- DNS query / response (UDP 53)
+- QUIC Initial (UDP 443 long header)
+- TCP SYN (5-tuple 流元数据)
+
+视频流 / 文件下载 / HTTP/2 stream / keepalive 全是浪费.
+
+### 优化
+
+`tools/ground_truth/capture.sh` 重写 BPF, 双段过滤:
+
+**IPv4 (精细)**:
+
+```
+(tcp[tcpflags] & tcp-syn != 0)
+or (tcp port 443 and tcp[((tcp[12] & 0xf0) >> 2):2] = 0x1603)
+or (udp port 53)
+or (udp port 443 and udp[8] >= 0xc0 and udp[8] <= 0xff)
+```
+
+**IPv6 (粗过滤)**:
+
+```
+ip6 and (tcp port 443 or udp port 53 or udp port 443)
+```
+
+IPv6 粗一些是因为 tcp[] subscript 在 IPv6 上 tcpdump 编译行为依赖版本, 跨平台兼容性差. 而 IPv6 流量在移动场景通常 < 10%, 体积影响小.
+
+### 预期效果
+
+| 场景 | v1 体积 | v2 体积 | 压缩比 |
+|---|---|---|---|
+| 重度 (视频+游戏) | ~12 MB/min | 0.5-1 MB/min | 12-24× |
+| 中度 (社交+刷) | ~6 MB/min | 0.2-0.5 MB/min | 12-30× |
+| 单 App | ~3 MB/min | 0.1 MB/min | 30× |
+| **36 min 真机** | **441 MB** | **15-30 MB** | **15-30×** |
+
+### 其他改进
+
+- 倒计时实时显示 pcap 大小 (能边抓边看体积)
+- tcpdump 启动失败时自动 fallback 到 v1 BPF (兼容老版 tcpdump)
+- meta-*.json 标记 schema v2 + capture_filters_summary
+- 结束报告显示 KB/分钟率, 方便后续校准
+
+### analyze.py 兼容性
+
+不需要改. v2 pcap 仍是标准 pcap 格式, 内容是 v1 的子集 (handshake-only). analyze.py 本来就只看 handshake, 完美兼容.
+
+### 用法
+
+```bash
+# 跟之前一样
+sh tools/ground_truth/capture.sh                    # 默认 300s
+sh tools/ground_truth/capture.sh 1800 wlan0 256     # 30 min
+```
+
+
 ## v5.3.0-rc30.12.21
 
 **发布日期**: 2026-05-19

@@ -85,18 +85,42 @@ cd "$(dirname "$0")"
 
 COMMON_FLAGS="-O2 -Wall -Wextra -Wno-unused-parameter"
 
+# rc30.12.28: Bionic (Android libc) 在 ARM64 要求 TLS segment 对齐至少 64 字节.
+# 默认 toolchain 可能生成 8 字节对齐的 TLS, 导致 "TLS segment is underaligned" abort.
+# 同时 max-page-size 在 Android 16K page 设备上也要设为 65536 才能 mmap 成功.
+# 这两个 ld flag 都是 Android NDK 推荐的标准做法.
+LDFLAGS_BIONIC="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
 echo ""
 echo "Building fork_probe (dynamic)..."
-"$CLANG" $COMMON_FLAGS -o fork_probe fork_probe.c
+"$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -o fork_probe fork_probe.c
 file fork_probe
 ls -lh fork_probe
 
 echo ""
 echo "Building hnc_launcher (static)..."
 # -static: 不依赖运行时 /system/lib64 (post-fs-data 早期可能未 mount)
-"$CLANG" $COMMON_FLAGS -static -o hnc_launcher hnc_launcher.c
+# rc30.12.28: -static-pie 比纯 -static 更兼容 Bionic, 同时保留 ASLR.
+"$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -static -o hnc_launcher hnc_launcher.c
 file hnc_launcher
 ls -lh hnc_launcher
+
+# rc30.12.28: 检查 TLS 对齐. readelf 看 .tbss / .tdata segment 的 align,
+# 如果 < 64 就警告 (Bionic 会 abort).
+echo ""
+echo "Checking TLS alignment (must be >= 64 on Bionic ARM64)..."
+TLS_ALIGN=$(readelf -l hnc_launcher 2>/dev/null | grep -A1 'TLS' | grep -oE 'Align: 0x[0-9a-f]+' | head -1 | grep -oE '0x[0-9a-f]+')
+if [ -n "$TLS_ALIGN" ]; then
+    TLS_ALIGN_DEC=$(printf "%d" "$TLS_ALIGN" 2>/dev/null)
+    if [ "$TLS_ALIGN_DEC" -lt 64 ]; then
+        echo "  ⚠ WARN: TLS alignment = $TLS_ALIGN ($TLS_ALIGN_DEC bytes), need >= 64 for Bionic"
+        echo "    hnc_launcher will Abort with 'TLS segment is underaligned' on Android"
+        echo "    NDK version: $("$CLANG" --version | head -1)"
+        echo "    Try: NDK r25+ or add -Wl,--no-tls-align-relax"
+    else
+        echo "  ✓ TLS alignment = $TLS_ALIGN ($TLS_ALIGN_DEC bytes), Bionic-safe"
+    fi
+fi
 
 # ─── 4. 简单 sanity check ─────────────────────────────────────────
 
