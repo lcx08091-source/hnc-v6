@@ -1,4 +1,103 @@
 
+## v5.3.0-rc30.12.28-hf2
+
+**发布日期**: 2026-05-19
+**versionCode**: 530148
+**致谢**: GPT 三审 (找到了 hf1 还没修到根的真正 bug)
+
+### 真正根因 (我之前漏掉的)
+
+hf1 装上用户机器后, KSU WebUI 还是 "auth required". GPT 审查代码发现:
+
+**`__hncLoadLocalAdminSecret()` 的 ksu.exec 回调签名写错了**
+
+```javascript
+// 错的 (rc30.12.14 起就一直错):
+window[cbName] = function(out) {           // ← 只接 1 个参数
+  const s = String(out || '').trim();
+  if (s) {
+    __hncLocalAdminSecret = s;             // ← 实际拿到的 s = "0" (exitCode!)
+  }
+  resolve(__hncLocalAdminSecret);
+};
+window.ksu.exec('cat ... secret', cbName);
+```
+
+KSU/SukiSU 的 `ksu.exec` 回调**真实签名**是 `(exitCode, stdout, stderr)` 三参数 (可在 `kexec()` 第 4990 行确认). 之前写 `function(out)` 拿到的 `out` 就是 **exitCode** (数字 0), 不是 stdout!
+
+然后 `String(0).trim() = "0"`, `__hncLocalAdminSecret` 被设为字符串 `"0"`. fetch 注入 header 变成 `X-HNC-Local-Admin: 0`. 后端 `checkLocalAdminSecret` 用 64 字节 hex 文件内容做 constant-time 比较, 长度不等直接拒绝 -> 401.
+
+**这就是为什么用户 curl 用 `$SECRET` 能 200, 但 WebUI 永远 auth required.**
+
+### 修复
+
+#### 1. secret 回调签名修正 + hex 校验
+
+```javascript
+window[cbName] = function(exitCode, stdout, stderr) {
+  var code = parseInt(String(exitCode), 10);
+  var s = (typeof stdout === 'string' ? stdout : String(stdout || '')).trim();
+  // 校验: 64 字符 hex (service.sh /dev/urandom 32 字节 hex)
+  if (code === 0 && /^[0-9a-fA-F]{64}$/.test(s)) {
+    __hncLocalAdminSecret = s;
+  }
+  resolve(__hncLocalAdminSecret);
+};
+```
+
+#### 2. KSU WebUI 强制 bridge-first
+
+GPT 还指出: 即使 fetch 注入了正确 secret, 也可能因为 KSU WebView 加载源是远程域 (e.g. `https://mui.kernelsu.org`) 导致 fetch 自动带 Origin header, `authMiddleware` 看到 Origin 就不走 "无 Origin/Referer 的 loopback secret" 分支, 还是 cookie 鉴权失败.
+
+最稳的链路是 `ksu.exec curl ...` (curl 没有浏览器 Origin), 完美匹配中间件的本地管理员安全模型.
+
+修改 `apiGet`:
+
+```javascript
+var __hncIsKsuWebUI = (window.ksu && typeof window.ksu.exec === 'function');
+// KSU WebUI 直接跳过 fetch, 不浪费 1.8s 等超时
+if (!__hncIsKsuWebUI && !__hncPreferBridgeTransport) {
+  // fetch path
+}
+// bridge path (ksu.exec curl)
+```
+
+#### 3. KSU WebUI 收 401 不跳 /pair
+
+`/pair` 是远程浏览器的 cookie 配对流程, 本地 KSU WebUI 应用 root secret, 不应被 401 误导到错流程. 修改 `fetchJsonWithTimeout` 的 401 处理:
+
+```javascript
+if (resp.status === 401 && !isKsu) {
+  // 才跳 /pair
+}
+```
+
+### 装机验证
+
+刷入 rc30.12.28-hf2 后, KSU WebUI:
+
+1. ✅ 设备列表能正常加载 (`X-HNC-Local-Admin` header 现在带的是真 64 hex)
+2. ✅ 顶部 toast 不再 "auth required"
+3. ✅ DPI / 统计 / 日志 / 设置 tab 都能访问
+4. ✅ 不会自动跳到 /pair 页面
+
+验证命令:
+```bash
+su
+# 1. 看 secret 文件
+ls -la /data/local/hnc/run/local_admin.secret  # 64 字节
+# 2. 直接 curl 测后端
+SECRET=$(cat /data/local/hnc/run/local_admin.secret)
+curl -H "X-HNC-Local-Admin: $SECRET" http://127.0.0.1:8444/api/devices  # 200
+# 3. 看 webroot 是新版
+grep "rc30.12.28-hf2" /data/adb/modules/hotspot_network_control/webroot/index.html | head -1
+# 应输出 hf2 注释
+# 4. 看 httpd 日志没 401
+tail -50 /data/local/hnc/logs/httpd.log | grep -c "auth required"
+# 应该 0 (KSU WebUI 打开后)
+```
+
+
 ## v5.3.0-rc30.12.28-hf1
 
 **发布日期**: 2026-05-19

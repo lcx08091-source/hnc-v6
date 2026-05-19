@@ -1,3 +1,15 @@
+<!-- v5.3.0-rc30.12.28-hf2 -->
+<div class="cl-section">
+  <div class="cl-title">🔑 v5.3.0-rc30.12.28-hf2: 修 KSU WebUI auth required 根因 (GPT 三审) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>根因</b>: <code>__hncLoadLocalAdminSecret</code> 的 ksu.exec 回调签名写错了 — 实际是 <code>(exitCode, stdout, stderr)</code> 三参数, 之前只接 1 个 <code>out</code> 拿到的是 exitCode=0, 导致 secret 被设为字符串 "0", 永远 401.</li>
+    <li><b>修</b>: 回调改三参数, 校验 64 字符 hex 才接受.</li>
+    <li><b>加固</b>: KSU WebUI 强制走 bridge curl (ksu.exec), 跳过 fetch — 避免浏览器 fetch 自动加 Origin 头让中间件不走 secret 分支.</li>
+    <li><b>修正 P1-2</b>: KSU 本地 WebUI 收 401 不跳 /pair (那是远程浏览器流程, 本地应走 root secret).</li>
+    <li><b>致谢</b>: GPT 三审找到这个 bug, Claude 之前 5 处修复都没修到根.</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.28-hf1 -->
 <div class="cl-section">
   <div class="cl-title">🔧 v5.3.0-rc30.12.28-hf1: hotfix launcher TLS 根因修复 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>

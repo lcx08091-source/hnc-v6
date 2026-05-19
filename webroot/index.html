@@ -5086,11 +5086,20 @@ body.kb-open .container {
           return;
         }
         // 直接 kexec, 不走 kexec() 包装 (那个还没初始化)
+        // rc30.12.28-hf2 修 (GPT 三审): 回调签名错了!
+        // KSU/SukiSU 的 ksu.exec 回调是 (exitCode, stdout, stderr) 三参数,
+        // 之前写 function(out) 拿到的 out 是 exitCode (数字 0), 不是 stdout.
+        // 然后 String(0).trim() = "0", __hncLocalAdminSecret 被设为字符串 "0".
+        // 注入 header 变成 X-HNC-Local-Admin: 0, 后端 64 字节 hex 校验失败 -> 401.
+        // 这就是为啥用户 curl 用 $SECRET 能 200, 但 KSU WebUI 一直 auth required.
+        // 现在: 取第 2 个参数 stdout, 并校验 64 字符 hex (service.sh 生成的是 hex).
         const cbName = '__hnc_secret_cb_' + Date.now();
-        window[cbName] = function(out) {
+        window[cbName] = function(exitCode, stdout, stderr) {
           try { delete window[cbName]; } catch (e) {}
-          const s = String(out || '').trim();
-          if (s) {
+          var code = parseInt(String(exitCode), 10);
+          var s = (typeof stdout === 'string' ? stdout : String(stdout || '')).trim();
+          // 校验: 64 字符 hex (service.sh /dev/urandom 32 字节 hex)
+          if (code === 0 && /^[0-9a-fA-F]{64}$/.test(s)) {
             __hncLocalAdminSecret = s;
           }
           resolve(__hncLocalAdminSecret);
@@ -5199,7 +5208,17 @@ body.kb-open .container {
             // 之前本机 KSU WebUI 401 时只显示 toast, 用户无路可走.
             // 注意 KSU WebUI 是 file:// 加载, 直接 window.location.href='/pair' 不行,
             // 必须用 API_BASE + '/pair' 跳到 httpd 服务的配对页.
-            if (resp && resp.status === 401) {
+            //
+            // rc30.12.28-hf2 (GPT 三审): KSU/SukiSU 本地 WebUI 不应跳 /pair.
+            // /pair 是远程浏览器的 cookie 配对流程, 本地 KSU WebUI 应该用 root
+            // secret bridge curl. 跳 /pair 会把用户引到错误的流程.
+            // 现在: 只有非 KSU 环境 (远程浏览器, fetch 失败 + 无 cookie) 才跳.
+            // KSU WebUI 实际上 fetch 路径已经被 apiGet 的 __hncIsKsuWebUI 短路了,
+            // 这里几乎不会被命中, 但保留作为防御.
+            var isKsu = (typeof window !== 'undefined' && 
+                         typeof window.ksu !== 'undefined' && 
+                         typeof window.ksu.exec === 'function');
+            if (resp && resp.status === 401 && !isKsu) {
               try {
                 var pairUrl = API_BASE + '/pair';
                 var here = String(window.location.href || '');
@@ -5248,6 +5267,21 @@ body.kb-open .container {
     }
     const url = API_BASE + p;
 
+    // rc30.12.28-hf2 (GPT 三审): KSU/SukiSU WebUI 强制 bridge-first, 跳过 fetch.
+    // 理由:
+    //   1. KSU WebView 加载源可能是 https://mui.kernelsu.org 之类的远程域,
+    //      fetch 到 http://127.0.0.1:8444 会带 Origin header 触发 CORS preflight,
+    //      或者至少让 authMiddleware 不再走 "无 Origin/Referer 的 loopback" 分支.
+    //   2. authMiddleware 真正信任的是: isLoopbackRequest + Origin/Referer 为空 + 
+    //      X-HNC-Local-Admin secret 校验通过. curl 命令没有浏览器 Origin,
+    //      正好匹配这个安全模型.
+    //   3. fetch 即使注入 secret, 浏览器自动加 Origin 后中间件不走 secret 分支,
+    //      还是 cookie 鉴权失败 -> 401.
+    // 所以 KSU 环境下: 跳过 fetch, 直接走 ksu.exec curl bridge.
+    var __hncIsKsuWebUI = (typeof window !== 'undefined' && 
+                          typeof window.ksu !== 'undefined' && 
+                          typeof window.ksu.exec === 'function');
+
     // rc30.12.28: 在 fetch 之前先 await secret 加载完成. 之前只在 bridge 路径 await,
     // fetch 路径用空 secret 发请求 -> 401 (rc30.12.18 默认拒绝中间件下). 加载有缓存,
     // 第二次起立即返回, 不会变慢.
@@ -5256,7 +5290,8 @@ body.kb-open .container {
     // rc1.10 · first transport: browser fetch.
     // 这是异步 Web API，不会像 window.ksu.exec 那样同步卡死 UI 线程。
     // 一旦 bridge 已确认可用，后续请求直接走 bridge，避免每个接口先等 fetch 失败 1.8s。
-    if (!__hncPreferBridgeTransport) {
+    // rc30.12.28-hf2: KSU WebUI 直接跳过 fetch, 不浪费 1.8s 等超时.
+    if (!__hncIsKsuWebUI && !__hncPreferBridgeTransport) {
       try {
         return await fetchJsonWithTimeout(url, 1800, 'FETCH ' + p);
       } catch (fetchErr) {
