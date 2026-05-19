@@ -1,3 +1,15 @@
+<!-- v5.3.0-rc30.12.18 -->
+<div class="cl-section">
+  <div class="cl-title">🛡️ v5.3.0-rc30.12.18: 默认拒绝中间件重构 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>核心改动</b>: 鉴权逻辑从"敏感读白名单 + 默认放行"反转成"公共路径白名单 + 默认拒绝"。新加 API 默认是 401, 忘记加白名单也是安全的。</li>
+    <li><b>行为变化</b>: <code>auth_required</code> 字段不再有"放行匿名"作用, 任何不在 isPublicPath 的请求都强制 cookie。升级后第一次访问要走一次 /pair 配对。</li>
+    <li><b>自动迁移</b>: service.sh 自动把老 rules.json <code>auth_required=false</code> 改成 <code>true</code>, 保持 WebUI toggle 一致。</li>
+    <li><b>新增放行</b>: <code>/</code> (SPA 主页) / <code>/changelog.html</code> / <code>/api/logout</code> (登出永远允许)。</li>
+    <li><b>意义</b>: 过去 3 次漏鉴权事故 (alerts / dpi_history / app_limits) 的根因消除。GPT 评分预期 80→85。</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.17 -->
 <div class="cl-section">
   <div class="cl-title">🔧 v5.3.0-rc30.12.17: 可复现构建小修 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>

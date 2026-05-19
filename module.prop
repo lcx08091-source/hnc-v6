@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.17
-versionCode=530137
+version=v5.3.0-rc30.12.18
+versionCode=530138
 author=Claude (Anthropic AI) + Ling
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.17 · 可复现构建小修: (1) src/hnc_httpd/web/ 补齐 (从 daemon/ 同步), src/ 现在能独立 go build. (2) build.sh 重新编译 daemon/hnc_httpd 二进制, version 字符串从 'dev' 修正为 v5.3.0-rc30.12.17. (3) build.sh 自动 fail 检查保证 DPI API 路由在重编后不会丢. 内含 rc30.12.16 全部 P0/P1 修复.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.18 · 默认拒绝中间件重构: (1) isPublicPath 白名单 + 其他全要 cookie, 替代之前的"敏感读白名单 + 其他放行"模式. (2) auth_required=false 不再有"放行"语义, 任何路径只要不在 isPublicPath 都强制 cookie. (3) service.sh 自动检测老 rules.json auth_required=false 自动升级到 true (UI 一致性). (4) rules.json 默认值改成 true. 行为变化: 升级后必须走一次 /pair 配对. 副作用: 以后加新 API 默认就是 401, 不会再漏鉴权.
 minKernelSU=11485

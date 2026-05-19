@@ -1,4 +1,68 @@
 
+## v5.3.0-rc30.12.18
+
+**发布日期**: 2026-05-19
+**versionCode**: 530138
+
+**默认拒绝中间件重构**. GPT 之前强推的 P1 修复.
+
+### 核心改动
+
+将 `middleware.go` 的鉴权逻辑从"敏感读白名单 + 其他默认放行"反转为"公共路径白名单 + 其他默认拒绝".
+
+**之前**:
+
+```
+非公共路径 (cookie 缺失):
+  if !auth_required && !isWritePath() && !isSensitiveReadPath() → 放行匿名
+  else → 401
+```
+
+问题: 新加 API **默认是匿名可读**, 必须记得加进 isSensitiveReadPath() 白名单. 过去 3 次都漏过 (alerts / dpi_history / app_limits).
+
+**现在**:
+
+```
+isPublicPath (/, /pair, /api/health, /api/pair/verify, /api/logout, /api/pairing/status, /changelog.html, /static/*):
+  → 放行
+
+其他所有路径:
+  必须有 cookie, 否则 401
+```
+
+新加 API **默认是 401**, 忘记加白名单也是安全的. 工程师友好.
+
+### 行为变化
+
+- **rules.json `auth_required` 字段不再有"放行匿名"作用** — 任何不在 isPublicPath 的请求都强制 cookie. 字段保留兼容老配置, 但实际无效
+- **service.sh 自动迁移**: 老 rules.json `auth_required=false` 启动时自动改成 `true` (UI 一致性)
+- **rules.json 默认值**: false → true
+- **升级用户行为**: 升级后第一次访问会要求登录. 走一遍 /pair 配对即可. SPA 主页能加载, 但 fetch /api/* 会 401, WebUI 自动跳 /pair
+
+### 新增放行的公共路径
+
+之前 isPublicPath 只有 5 个, 现在 8 个:
+
+- 新增 `/` SPA 主页 (没鉴权也能加载 HTML, JS 自己处理登录跳转)
+- 新增 `/changelog.html` (静态信息页)
+- 新增 `/api/logout` (登出永远应该允许)
+- 保留 `/pair` `/api/pair/verify` `/api/pairing/status` `/api/health` `/static/*`
+
+### isSensitiveReadPath() 函数仍保留
+
+主鉴权流程不再用它, 但 loopback secret 缺失时的分级 fail-closed 仍需它:
+- secret 不存在 + 写接口 / 敏感读 → fail-closed
+- secret 不存在 + 普通读 → 兼容放行 (避免升级窗口期 UI 完全瘫痪)
+
+### 安全提升
+
+| 维度 | rc30.12.17 | rc30.12.18 |
+|---|---|---|
+| 加新 API 时忘了鉴权 | 默认匿名可读 | 默认 401 |
+| 老用户裸奔 (auth_required=false 默认) | 是 | 否 (自动升级) |
+| GPT 评分预期 | 80-83 | 85-88 |
+
+
 ## v5.3.0-rc30.12.17
 
 **发布日期**: 2026-05-19

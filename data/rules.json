@@ -1,7 +1,7 @@
 {
   "version": 1,
   "whitelist_mode": false,
-  "auth_required": false,
+  "auth_required": true,
   "remote_enabled": false,
   "hotspot_auto": false,
   "hotspot_ssid": "",

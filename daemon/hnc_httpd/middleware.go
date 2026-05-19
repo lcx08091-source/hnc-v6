@@ -43,8 +43,28 @@ const (
 const CookieName = "hnc_token"
 
 // isPublicPath 不需要 auth 的路径
+//
+// rc30.12.18 重构: 之前 "敏感读白名单 + 其他默认放行" 改成 "公共路径白名单 + 默认拒绝".
+// 设计理由: 新加 API 默认是 401, 忘记反而是安全的, 而不是默认匿名可读. 我们之前
+// 已经被 3 次 (alerts / dpi_history / app_limits 都漏过敏感读白名单).
+//
+// 公共路径分类:
+//   1. UI 入口 (没鉴权就看不到登录页) - /, /pair, /changelog.html, /static/*
+//   2. 鉴权流程本身              - /api/pair/verify, /api/pairing/status
+//   3. 健康检查                  - /api/health
+//   4. 反向流程                  - /api/logout (登出永远应该允许)
+//
+// 注意: "/" SPA 主页放行是为了让 JS 加载, JS 加载后会自己判断登录态并 fetch /api/*,
+// 第一个 fetch 会拿到 401, WebUI 收到 401 后跳转到 /pair. 这是 SPA 标准流程.
 func isPublicPath(p string) bool {
-	if p == "/pair" || p == "/api/pair/verify" || p == "/api/health" || p == "/api/pairing/status" {
+	switch p {
+	case "/",
+		"/pair",
+		"/changelog.html",
+		"/api/pair/verify",
+		"/api/pairing/status",
+		"/api/health",
+		"/api/logout":
 		return true
 	}
 	if strings.HasPrefix(p, "/static/") {
@@ -176,13 +196,24 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 
 		cookie, err := r.Cookie(CookieName)
 		if err != nil || cookie.Value == "" {
-			// 无 cookie:按 remote_auth_required 决定
-			// v4.0 Patch 3.a: /api/action 是写操作,永不放行匿名
-			// 即使 remote_auth_required=false 也强制要 cookie
-			if !readAuthRequired(s.hncDir) && !forceRemoteAuth && !isWritePath(r.URL.Path) && !isSensitiveReadPath(r.URL.Path) {
-				// 过渡期且非写操作: 放行
-				next.ServeHTTP(w, r)
-				return
+			// rc30.12.18: 默认拒绝重构.
+			//
+			// 之前: !readAuthRequired() && !isWritePath() && !isSensitiveReadPath() → 放行
+			//       (即 auth_required=false 时, 写接口和敏感读以外全放行匿名)
+			//
+			// 现在: 任何到这里的请求都必须有 cookie. 公共路径已在 isPublicPath()
+			//       提前放行, 其他全拒.
+			//
+			// 行为变化: 老用户 (rules.json auth_required=false) 升级后远程访问
+			// 会被强制要求登录. SPA 客户端收到 401 应自动跳转 /pair, 用户走一遍
+			// 配对流程即可. 配对配置本身仍由 /api/pairing/status 公开查询.
+			//
+			// 兼容性: auth_required 字段保留在 rules.json (不报错), 但不再有
+			// "放行匿名" 的语义. forceRemoteAuth 旗子也保留 (有它就强制走 cookie,
+			// 没它现在也强制走 cookie, 等价于一直 ON).
+			if !readAuthRequired(s.hncDir) {
+				// 老用户 rules.json 还是 false. 打 log 一次性提醒, 但仍 fail-closed.
+				log.Printf("auth: anonymous request to %s (auth_required=false in rules.json, but rc30.12.18 enforces default-deny → 401)", r.URL.Path)
 			}
 			respondUnauthorized(w, r, false)
 			return
@@ -213,14 +244,18 @@ func isWritePath(p string) bool {
 }
 
 // hotfix17.8: 敏感只读接口。
-// /api/logs 会暴露 MAC/IP/hostname/SSID/操作时间线；远程访问即使 auth_required=false
-// 也必须要求 cookie。本机 KSU loopback 且无 Origin/Referer 仍由上方 loopback bypass 放行。
 //
-// rc30.12.16 P1-1: 补 3 个漏网的接口 (GPT 审查发现):
-//   - /api/alerts        告警时间线, 含 MAC/未知设备
-//   - /api/dpi_history   应用流量历史, 按 app 聚合
-//   - /api/app_limits    应用限速策略
-// 上一份 GPT 报告漏掉了 logout, 实际 logout 不该算敏感 (登出永远应该允许).
+// rc30.12.18 重构后用途变化: 主鉴权流程改为"默认拒绝"后, 这个白名单不再用于
+// "remote_auth_required=false 时哪些读接口仍需 cookie" 的判断 (因为现在所有
+// 非 isPublicPath 都需要 cookie).
+//
+// 仍保留是因为 loopback secret 缺失场景仍需要分级判断:
+//   - secret 不存在 + 是写接口 / 敏感读 → fail-closed
+//   - secret 不存在 + 普通读 (主页/静态) → 兼容放行
+// 这避免升级窗口期 (secret 还没生成) WebUI 完全瘫痪.
+//
+// 注: rc30.12.16 加了 alerts/dpi_history/app_limits 3 个之前漏的;
+//      logout 不该算敏感, 登出永远应该允许 (现已移到 isPublicPath).
 func isSensitiveReadPath(p string) bool {
 	switch p {
 	case "/api/logs",

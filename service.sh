@@ -196,6 +196,29 @@ fi
 # marker 总是 set — watchdog 看 remote_enabled 再决定是否带 -bind
 touch "$RUN/httpd.wanted" 2>/dev/null
 
+# ─── rc30.12.18: auth_required 自动迁移到默认拒绝 ────────────────
+# rc30.12.18 起 hnc_httpd 改成"默认拒绝"鉴权 (isPublicPath 白名单 + 其他都要 cookie).
+# 老 rules.json 默认 auth_required=false (rc25 时代的兼容设置), 升级到 rc30.12.18
+# 后这个值不再有"放行匿名"的语义 — 不管 true/false, 非公共路径都强制 cookie.
+#
+# 但为了让用户/WebUI 配置 toggle 看起来一致 (不让用户看到 toggle=OFF 但实际全要登录),
+# 自动把它修正成 true.
+#
+# 这个改动是单向的: 一旦升级到 rc30.12.18+, auth_required 永远是 true.
+# 如果有人后续手动改回 false, 后端也会忽略它 (只 log warn).
+RULES_JSON="$HNC_DIR/data/rules.json"
+if [ -f "$RULES_JSON" ]; then
+    CUR_AUTH=$(grep -o '"auth_required"[[:space:]]*:[[:space:]]*[a-z]*' \
+        "$RULES_JSON" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
+    if [ "$CUR_AUTH" = "false" ]; then
+        log "rc30.12.18 migration: auth_required=false in rules.json detected, auto-upgrading to true"
+        log "  (rc30.12.18 enforces default-deny regardless; this just keeps WebUI toggle consistent)"
+        # 简单 sed 替换 (rules.json 里只可能有一个 auth_required 字段)
+        sed -i 's/"auth_required"[[:space:]]*:[[:space:]]*false/"auth_required": true/' "$RULES_JSON" 2>/dev/null
+        # 失败也无妨 - 后端反正不看这字段了, 只是 cosmetic
+    fi
+fi
+
 # 验证 hnc_httpd binary 存在且可执行(防御性 chmod,zip 安装可能丢 +x)
 HTTPD_BIN="$HNC_DIR/daemon/hnc_httpd/hnc_httpd"
 if [ -f "$HTTPD_BIN" ] && [ ! -x "$HTTPD_BIN" ]; then
