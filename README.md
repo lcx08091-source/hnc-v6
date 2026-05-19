@@ -114,9 +114,9 @@
 
 ## 项目状态
 
-- **版本**: v5.1.0-rc2(2026-04-24)
+- **版本**: v5.3.0-rc30.12.29 (2026-05-19) <!-- rc30.12.29: 文档版本号统一同步 module.prop -->
 - **主测设备**: realme GT 7 Pro / ColorOS 16 / kernel 6.6.102 / SukiSU Ultra
-- **代码规模**: C 7K + Go 4.4K + Shell 6.5K + HTML/JS 7K ≈ 2.5 万行
+- **代码规模**: C 9.9K + Go 19K + Shell 17K + HTML/JS 12K ≈ 5.8 万行
 - 由 **Ling** 维护。架构和大量代码与 Claude(Anthropic)协作完成,详见 [HACKING.md](HACKING.md) 的开发笔记。
 
 ---

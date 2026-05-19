@@ -610,12 +610,26 @@ fi
 # 导致死掉重启时 `[ -x "$DPID_LAUNCHER" ]` 永远为 false. 现在移到这里,
 # DPID_LAUNCHER 已确定, subshell 拿到的是真实值.
 #
-# 巡检"任何 launcher" — C launcher 或 shell guard 或 Go supervisor 任一在跑都算 OK.
+# rc30.12.29 (P1.7): 收窄 sentinel 职责. GPT 报告指出 sentinel ↔ watchdog ↔ launcher
+# 三层重叠 — watchdog 已经管 hotspotd / httpd, launcher 已经管 dpid. sentinel 不应
+# 再重复管这些, 否则两个 supervisor 同时重启 → 双进程风险.
+#
+# 收窄后 sentinel 的职责:
+#   1. dpid launcher + LAUNCHER_BROKEN 救命 (保留, 这是 rc30.12.28 真机救命路径,
+#      因为 watchdog 跟 launcher 串在一起, 同样会卡 TLS abort 循环, 需要 sentinel
+#      在更外层兜底跳过 launcher 直拉 dpid)
+#   2. hnc_watchdog 健康 (新核心职责 — watchdog 死了 sentinel 重启它,
+#      watchdog 自己接管 hotspotd / httpd)
+#
+# 委托给 watchdog 不再 sentinel 检查的:
+#   - hnc_httpd  (watchdog.sh ensure_httpd_running)
+#   - hotspotd   (watchdog.sh check_services)
 (
     sleep 15
-    log "sentinel: starting (launcher_choice=$LAUNCHER_CHOICE, dpid_launcher=$DPID_LAUNCHER)"
+    log "sentinel: starting (launcher_choice=$LAUNCHER_CHOICE, dpid_launcher=$DPID_LAUNCHER, scope=dpid+watchdog)"
 
     while true; do
+        # 1. dpid launcher 检查 (HANDOFF 红线 — rc30.12.28 真机救命路径, 不动)
         # rc30.12.28: 区分 direct vs launcher 模式. 之前只检查 launcher 进程,
         # 如果没有 launcher (DPID_LAUNCHER=DPID_BIN), sentinel 会一直试图启动
         # DPID_BIN 但又把它认作 launcher, 状态机错乱.
@@ -665,36 +679,24 @@ fi
             fi
         fi
 
-        # 2. 检查 hnc_httpd
-        # rc30.12.16: 用 launch_httpd_safe 函数, 同样判 REMOTE_ENABLED. 不再硬编 0.0.0.0
-        if ! ps -ef 2>/dev/null | grep -E '/data/local/hnc/daemon/hnc_httpd/hnc_httpd' \
-             | grep -v grep > /dev/null; then
-            log "sentinel: hnc_httpd not running, relaunching via launch_httpd_safe"
-            launch_httpd_safe
-            sleep 2
-        fi
-
-        # 3. 检查 hnc_watchdog
+        # 2. hnc_watchdog 检查 (新核心职责 — watchdog 死了 sentinel 重启它)
+        # rc30.12.29 (P1.7): watchdog 是 hotspotd / httpd / dpid (常规路径) 的 supervisor,
+        # 它死了 sentinel 必须兜底重启. 重启后 watchdog 自己会拉起 hotspotd / httpd,
+        # sentinel 不再直接管这两个 (之前的重复检查已删, 避免双 supervisor 并发拉起).
         if ! ps -ef 2>/dev/null | grep -E '/data/local/hnc/bin/hnc_watchdog' \
              | grep -v grep > /dev/null; then
-            log "sentinel: hnc_watchdog not running, relaunching via shell"
+            log "sentinel: hnc_watchdog not running, relaunching"
             nohup "$HNC_DIR/bin/hnc_watchdog" \
                 >> "$HNC_DIR/logs/watchdog.log" 2>&1 &
             echo $! > "$RUN/watchdog.pid" 2>/dev/null || true
             sleep 2
         fi
 
-        # 4. 检查 hotspotd
-        if ! ps -ef 2>/dev/null | grep -E '/data/local/hnc/bin/hotspotd' \
-             | grep -v grep > /dev/null; then
-            log "sentinel: hotspotd not running, relaunching via shell"
-            nohup "$HNC_DIR/bin/hotspotd" \
-                >> "$HNC_DIR/logs/hotspotd.log" 2>&1 &
-            echo $! > "$RUN/hotspotd.pid" 2>/dev/null || true
-            sleep 2
-        fi
+        # rc30.12.29 (P1.7): hnc_httpd / hotspotd 的检查已移除 — 委托给 watchdog.
+        # 之前的 sentinel 在这里直接 launch_httpd_safe / nohup hotspotd, 跟 watchdog
+        # ensure_httpd_running / check_services 并发, 触发过双进程事故.
 
         sleep 30
     done
 ) >> "$HNC_DIR/logs/sentinel.log" 2>&1 &
-log "sentinel started (PID=$!, dpid_launcher=$DPID_LAUNCHER)"
+log "sentinel started (PID=$!, dpid_launcher=$DPID_LAUNCHER, scope=dpid+watchdog)"

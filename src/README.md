@@ -20,12 +20,14 @@ src/
 
 ## 当前版本对照
 
+<!-- rc30.12.29: 文档版本号统一同步 module.prop -->
+
 | 组件 | 版本 | 位置 |
 |---|---|---|
-| 主模块 | `v5.3.0-rc30.12.18` | `module.prop` |
-| hnc_httpd | `v5.3.0-rc30.12.18` | 二进制 strings 找 `main.version=` |
+| 主模块 | `v5.3.0-rc30.12.29` | `module.prop` |
+| hnc_httpd | `v5.3.0-rc30.12.29` | 二进制 strings 找 `main.version=` |
 | hnc_dpid | `0.5.3-rc30.12.3-iface-retry` | `src/dpid/cmd/dpid/main.go` |
-| hnc_launcher | `0.1.0-rc30.12` | `src/launcher/hnc_launcher.c` |
+| hnc_launcher | `0.1.0-rc30.12.29` | `src/launcher/hnc_launcher.c` |
 
 ---
 

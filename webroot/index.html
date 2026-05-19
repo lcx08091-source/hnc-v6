@@ -4971,15 +4971,66 @@ body.kb-open .container {
     return null;
   }
 
+  /* rc30.12.29 (P1.8): __hncKsuExecRaw — 全 codebase 唯一直接 touch ksu.exec callback API 的地方.
+   * 任何对 ksu.exec 调用风格的修改 (回调签名、Promise 化、SDK 升级等) 只改这一个函数.
+   * hf2 修过的 callback signature bug 之所以发生, 就是因为 ksu.exec 调用散在 kexec()
+   * 和 __hncLoadLocalAdminSecret() 两处, 同文件 200 行外有正确写法却没参照.
+   *
+   * 入参: cmd 是要执行的 shell 命令, timeoutMs 默认 30000ms (callback 不触发兜底).
+   * 出参: Promise< { exitCode, stdout, stderr, syncMs } >
+   *       - exitCode: 数字, 0 = 成功. -1 = bridge 缺失/timeout/异常.
+   *       - stdout/stderr: 字符串 (永远不是 undefined).
+   *       - syncMs: window.ksu.exec(...) 同步返回耗时, 用于 profiling.
+   * 不 reject, 一律 resolve, 调用方根据 exitCode 判断.
+   */
+  let __hncKsuRawCb = 0;
+  function __hncKsuExecRaw(cmd, timeoutMs) {
+    return new Promise(function(resolve) {
+      if (typeof window.ksu === 'undefined' || typeof window.ksu.exec !== 'function') {
+        resolve({ exitCode: -1, stdout: '', stderr: 'no ksu bridge', syncMs: 0 });
+        return;
+      }
+      var cbName = '__hnc_ksu_raw_cb_' + (++__hncKsuRawCb);
+      var done = false;
+      var tStart = performance.now();
+      var syncMs = 0;
+
+      window[cbName] = function(exitCode, stdout, stderr) {
+        if (done) return;
+        done = true;
+        try { delete window[cbName]; } catch (e) {}
+        resolve({
+          exitCode: parseInt(String(exitCode), 10),
+          stdout: typeof stdout === 'string' ? stdout : String(stdout || ''),
+          stderr: typeof stderr === 'string' ? stderr : String(stderr || ''),
+          syncMs: syncMs
+        });
+      };
+      var tm = setTimeout(function() {
+        if (done) return;
+        done = true;
+        try { delete window[cbName]; } catch (e) {}
+        resolve({ exitCode: -1, stdout: '', stderr: 'timeout', syncMs: syncMs });
+      }, timeoutMs || 30000);
+      try {
+        window.ksu.exec(cmd, cbName);
+        syncMs = Math.round(performance.now() - tStart);
+      } catch (e) {
+        if (done) return;
+        done = true;
+        clearTimeout(tm);
+        try { delete window[cbName]; } catch (e2) {}
+        resolve({ exitCode: -1, stdout: '', stderr: String(e), syncMs: 0 });
+      }
+    });
+  }
+
   function kexec(cmd) {
     return new Promise((resolve, reject) => {
       if (__ksuFramework === null) __ksuFramework = detectKsuLike();
       if (!__ksuFramework) { reject(new Error('No KSU/Magisk WebUI detected')); return; }
-      const cbName = '__kcb_' + (++__kcb);
       // rc3.1.25 · profiling: 记录每次 kexec 的同步阻塞时长 + 回调总时长
-      // tSync = window.ksu.exec 返回那一刻 - 调用前 = 主线程真·阻塞 (若 bridge 同步, = shell 命令全程耗时)
-      // tCb = callback 触发时刻 - 调用前 = 总耗时 (同步 bridge 下 tCb ≈ tSync)
-      // cmd 摘关键字 (防止超长): 只取 curl URL 的 path 段
+      // rc30.12.29 (P1.8): 改走 __hncKsuExecRaw 统一入口, profiling 由 raw 提供 syncMs
       if (!window.__kexec_log) window.__kexec_log = [];
       const _tStart = performance.now();
       const _key = (function(){
@@ -4987,42 +5038,34 @@ body.kb-open .container {
         return m ? m[0] : cmd.slice(0, 40);
       })();
 
-      window[cbName] = (exitCode, stdout, stderr) => {
-        try { delete window[cbName]; } catch (e) {}
+      __hncKsuExecRaw(cmd, 30000).then(function(r) {
         // rc3.1.32: profiling push 只在 __HNC_DEBUG 下做, 避免长跑下 __kexec_log 涨到几 MB
         if (window.__HNC_DEBUG) {
           try {
             window.__kexec_log.push({
               k: _key,
-              sync: _tSyncMs,
+              sync: r.syncMs,
               cb: Math.round(performance.now() - _tStart)
             });
           } catch(_){}
         }
-        const code = parseInt(String(exitCode), 10);
-        if (code === 0) {
-          resolve(typeof stdout === 'string' ? stdout : String(stdout || ''));
+        if (r.exitCode === 0) {
+          resolve(r.stdout);
         } else {
           // rc3.1.4: 友好化常见错误. curl exit 7 = connection refused,
           // 意味着 hnc_httpd 未监听 127.0.0.1:8444
-          const raw = stderr ? String(stderr) : '';
+          const raw = r.stderr || '';
           let msg;
-          if (code === 7 || /failed to connect|connection refused|port \d+ after/i.test(raw)) {
+          if (r.exitCode === 7 || /failed to connect|connection refused|port \d+ after/i.test(raw)) {
             msg = '后端未就绪 · hnc_httpd 未运行, 等 10s 或检查模块是否启用';
-          } else if (code === 28 || /timed out|timeout/i.test(raw)) {
+          } else if (r.exitCode === 28 || /timed out|timeout/i.test(raw)) {
             msg = '后端无响应 · 超时';
           } else {
-            msg = 'exit=' + code + (raw ? ' ' + raw.slice(0, 80) : '');
+            msg = 'exit=' + r.exitCode + (raw ? ' ' + raw.slice(0, 80) : '');
           }
           reject(new Error(msg));
         }
-      };
-      let _tSyncMs = 0;
-      try {
-        window.ksu.exec(cmd, cbName);
-        _tSyncMs = Math.round(performance.now() - _tStart);
-      }
-      catch (e) { try { delete window[cbName]; } catch (e2) {} reject(e); }
+      });
     });
   }
 
@@ -5072,50 +5115,28 @@ body.kb-open .container {
    * service.sh 启动时生成 /data/local/hnc/run/local_admin.secret (mode 0600, owner root).
    * 普通 App 没 root 读不到. WebUI 通过 kexec (有 root) 读出来缓存在内存里, 注入到每个 curl.
    * 启动时读一次, 失败 (老 service.sh 没生成) 则保持 '', 后端会 fallback 到老行为.
+   *
+   * rc30.12.28-hf2 修过 (GPT 三审): 之前 ksu.exec 回调签名写错 (function(out) 拿到 exitCode
+   * 而非 stdout), secret 被设为字符串 "0". 同文件 kexec() 有正确签名却没参照.
+   *
+   * rc30.12.29 (P1.8): 不再直接调 ksu.exec, 改走 __hncKsuExecRaw 统一入口.
+   * callback signature 集中在 raw 里, 这里只关心 stdout 内容 + 64 hex 校验.
    */
   let __hncLocalAdminSecret = '';
   let __hncLocalAdminSecretLoaded = false;
   function __hncLoadLocalAdminSecret() {
     if (__hncLocalAdminSecretLoaded) return Promise.resolve(__hncLocalAdminSecret);
     __hncLocalAdminSecretLoaded = true;
-    return new Promise(function(resolve) {
-      try {
-        if (typeof window.ksu === 'undefined' || typeof window.ksu.exec !== 'function') {
-          // 没有 ksu bridge, 走 fetch 路径, header 注入也没意义
-          resolve('');
-          return;
-        }
-        // 直接 kexec, 不走 kexec() 包装 (那个还没初始化)
-        // rc30.12.28-hf2 修 (GPT 三审): 回调签名错了!
-        // KSU/SukiSU 的 ksu.exec 回调是 (exitCode, stdout, stderr) 三参数,
-        // 之前写 function(out) 拿到的 out 是 exitCode (数字 0), 不是 stdout.
-        // 然后 String(0).trim() = "0", __hncLocalAdminSecret 被设为字符串 "0".
-        // 注入 header 变成 X-HNC-Local-Admin: 0, 后端 64 字节 hex 校验失败 -> 401.
-        // 这就是为啥用户 curl 用 $SECRET 能 200, 但 KSU WebUI 一直 auth required.
-        // 现在: 取第 2 个参数 stdout, 并校验 64 字符 hex (service.sh 生成的是 hex).
-        const cbName = '__hnc_secret_cb_' + Date.now();
-        window[cbName] = function(exitCode, stdout, stderr) {
-          try { delete window[cbName]; } catch (e) {}
-          var code = parseInt(String(exitCode), 10);
-          var s = (typeof stdout === 'string' ? stdout : String(stdout || '')).trim();
-          // 校验: 64 字符 hex (service.sh /dev/urandom 32 字节 hex)
-          if (code === 0 && /^[0-9a-fA-F]{64}$/.test(s)) {
-            __hncLocalAdminSecret = s;
-          }
-          resolve(__hncLocalAdminSecret);
-        };
-        // cat 失败 (文件不存在) 时 ksu.exec 通常仍回调 stdout=''
-        window.ksu.exec('cat /data/local/hnc/run/local_admin.secret 2>/dev/null', cbName);
-        // 兜底 1.5s 没回调就放弃
-        setTimeout(function() {
-          if (typeof window[cbName] === 'function') {
-            try { delete window[cbName]; } catch (e) {}
-            resolve(__hncLocalAdminSecret);
-          }
-        }, 1500);
-      } catch (e) {
-        resolve('');
+    return __hncKsuExecRaw(
+      'cat /data/local/hnc/run/local_admin.secret 2>/dev/null',
+      1500
+    ).then(function(r) {
+      var s = (r.stdout || '').trim();
+      // 校验: 64 字符 hex (service.sh /dev/urandom 32 字节 hex)
+      if (r.exitCode === 0 && /^[0-9a-fA-F]{64}$/.test(s)) {
+        __hncLocalAdminSecret = s;
       }
+      return __hncLocalAdminSecret;
     });
   }
   // 启动时异步加载, 不阻塞渲染
@@ -11886,95 +11907,5 @@ body.kb-open .container {
 })();
 </script>
 
-<!-- HNC_JSON_HEALTH_ENTRY_START hotfix18.7 -->
-<style id="hnc-json-health-entry-style">
-#hnc-json-health-entry{margin:12px 0;padding:14px;border-radius:18px;border:1px solid rgba(255,255,255,.12);background:rgba(255,255,255,.07);box-shadow:0 14px 32px rgba(0,0,0,.18);backdrop-filter:blur(14px);color:var(--text,#eef6ff);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
-#hnc-json-health-entry .hje-top{display:flex;align-items:center;justify-content:space-between;gap:10px}
-#hnc-json-health-entry .hje-title{font-weight:800;font-size:14px;letter-spacing:.2px}
-#hnc-json-health-entry .hje-sub{margin-top:4px;color:var(--muted,#91a4bd);font-size:12px;line-height:1.45}
-#hnc-json-health-entry .hje-pill{display:inline-flex;align-items:center;gap:6px;border-radius:999px;padding:6px 9px;font-size:12px;font-weight:800;background:rgba(145,164,189,.14);color:var(--muted,#91a4bd);white-space:nowrap}
-#hnc-json-health-entry .hje-pill.ok{background:rgba(53,208,127,.16);color:#35d07f}
-#hnc-json-health-entry .hje-pill.warn{background:rgba(255,209,102,.16);color:#ffd166}
-#hnc-json-health-entry .hje-pill.fail{background:rgba(255,92,122,.16);color:#ff5c7a}
-#hnc-json-health-entry .hje-actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:12px}
-#hnc-json-health-entry button{border:0;border-radius:13px;padding:9px 11px;color:#fff;background:linear-gradient(135deg,#4ea1ff,#7c5cff);font-weight:800;box-shadow:0 8px 22px rgba(78,161,255,.22)}
-#hnc-json-health-entry button.secondary{background:rgba(255,255,255,.10);box-shadow:none;color:var(--text,#eef6ff);border:1px solid rgba(255,255,255,.10)}
-#hnc-json-health-entry.hje-float{position:fixed;right:14px;bottom:14px;z-index:99999;width:min(330px,calc(100vw - 28px));margin:0}
-#hnc-json-health-entry.hje-float .hje-sub{display:none}
-@media (max-width:520px){#hnc-json-health-entry.hje-float{left:12px;right:12px;width:auto;bottom:12px}#hnc-json-health-entry .hje-top{align-items:flex-start;flex-direction:column}}
-</style>
-<script id="hnc-json-health-entry-script">
-(function(){
-  if(window.__hncJsonHealthEntry187) return;
-  window.__hncJsonHealthEntry187 = true;
-  // v5.2-rc1.10: 禁用主 WebUI 内嵌 JSON 健康入口的自动 window.ksu.exec。
-  // 该 legacy 注入脚本使用 promise 风格 window.ksu.exec(cmd).then(...)，
-  // 在部分 SukiSU/ColorOS WebView 中可能在 DOMContentLoaded 后再次卡住页面。
-  // JSON 健康仍可通过独立 json-health.html 打开，不应在主页面加载时自动探测。
-  return;
-  var HNC = '/data/local/hnc';
-  function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,function(m){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m];});}
-  function execCmd(cmd){
-    if(!window.ksu || typeof window.ksu.exec !== 'function') return Promise.reject(new Error('no window.ksu.exec'));
-    return window.ksu.exec(cmd).then(function(r){
-      if(typeof r === 'string') return r;
-      if(r && typeof r.stdout === 'string') return r.stdout + (r.stderr ? '\n'+r.stderr : '');
-      return JSON.stringify(r || {});
-    });
-  }
-  function findPanelTarget(){
-    var nodes = Array.prototype.slice.call(document.querySelectorAll('.card,.panel,.section,section,main,[class*=setting],[class*=diag],[id*=setting],[id*=diag]'));
-    for(var i=0;i<nodes.length;i++){
-      var t=(nodes[i].innerText||'').slice(0,300);
-      if(/诊断|调试|设置|系统|日志|状态/.test(t)) return {node:nodes[i], floating:false};
-    }
-    var main=document.querySelector('main') || document.querySelector('.container') || document.querySelector('#app');
-    if(main) return {node:main, floating:false};
-    return {node:document.body, floating:true};
-  }
-  function pillClass(overall){
-    overall=String(overall||'unknown').toLowerCase();
-    if(overall==='ok') return 'ok';
-    if(overall==='fail' || overall==='bad') return 'fail';
-    if(overall==='warn' || overall==='missing') return 'warn';
-    return '';
-  }
-  function setStatus(text, cls){
-    var p=document.querySelector('#hnc-json-health-entry .hje-pill');
-    if(!p) return;
-    p.className='hje-pill '+(cls||'');
-    p.textContent=text;
-  }
-  function refreshEntry(){
-    setStatus('检测中…','');
-    execCmd("su -c 'sh "+HNC+"/bin/json_health_panel.sh'").then(function(out){
-      var m=String(out||'').match(/\{[\s\S]*\}/);
-      var data=m?JSON.parse(m[0]):{};
-      var overall=data.overall || 'unknown';
-      var label=overall==='ok'?'JSON 正常':(overall==='fail'||overall==='bad'?'JSON 异常':(overall==='warn'?'JSON 警告':'JSON 未知'));
-      setStatus(label,pillClass(overall));
-    }).catch(function(){ setStatus('JSON 未知',''); });
-  }
-  function mount(){
-    if(document.getElementById('hnc-json-health-entry')) return;
-    var where=findPanelTarget();
-    var div=document.createElement('div');
-    div.id='hnc-json-health-entry';
-    if(where.floating) div.className='hje-float';
-    div.innerHTML=''
-      + '<div class="hje-top"><div><div class="hje-title">JSON 健康 / 诊断</div>'
-      + '<div class="hje-sub">检查 rules、设备名、模板、token JSON 状态，并可导出排障包。</div></div>'
-      + '<span class="hje-pill">检测中…</span></div>'
-      + '<div class="hje-actions"><button type="button" data-hje-open>打开诊断页</button>'
-      + '<button type="button" class="secondary" data-hje-refresh>刷新</button></div>';
-    where.node.appendChild(div);
-    div.querySelector('[data-hje-open]').onclick=function(){ location.href='json-health.html'; };
-    div.querySelector('[data-hje-refresh]').onclick=refreshEntry;
-    refreshEntry();
-  }
-  if(document.readyState==='loading') document.addEventListener('DOMContentLoaded',mount); else mount();
-})();
-</script>
-<!-- HNC_JSON_HEALTH_ENTRY_END -->
 </body>
 </html>

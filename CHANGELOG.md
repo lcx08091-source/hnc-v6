@@ -1,4 +1,179 @@
 
+## v5.3.0-rc30.12.29
+
+**发布日期**: 2026-05-19
+**versionCode**: 530149
+**致谢**: GPT 三审 P1 列表全收口
+
+### 概述
+
+hf2 装机已确认完全修复 KSU WebUI auth required. 这一版回过头收 GPT 三审报告 P1
+列表 (架构层重叠 / 跨语言契约一致性 / C 代码细节). 不修真机 bug, 是把工程脆性
+点都拧紧, 为后续 tag v5.3.0 stable 做准备.
+
+### P1.6 文档版本号同步
+
+之前 module.prop 一路打到 rc30.12.28-hf2, 但:
+
+- `README.md` 版本字段还停在 `v5.1.0-rc2 (2026-04-24)` — 落后 21 个 rc 版本
+- `ARCHITECTURE.md` 顶部 `v5.3.0-rc30.12.7`
+- `COMPATIBILITY.md` 顶部 `v5.3.0-rc30.12.8`
+- `src/README.md` 当前版本表格 `v5.3.0-rc30.12.18`
+- `EVOLUTION.md` "现状" 行 `v5.3.0-rc30.12.7`
+
+全部统一同步到 `v5.3.0-rc30.12.29 / 2026-05-19`. 每处加 HTML 注释
+`<!-- rc30.12.29: 文档版本号统一同步 module.prop -->` 方便后续 grep 定位.
+
+后续可在 CI 里 sed module.prop 注入到 .md 顶部占位符自动同步, 这次先把数字对齐.
+
+### P1.7 sentinel 收窄 (service.sh)
+
+GPT 指出 sentinel ↔ watchdog ↔ launcher 三层 supervisor 职责重叠:
+
+- `service.sh` sentinel 在管: dpid launcher / httpd / watchdog / hotspotd
+- `bin/watchdog.sh` 在管: hotspotd / httpd / dpid (常规路径)
+- `bin/hnc_launcher` 在管: dpid (waitpid + 2s backoff)
+
+watchdog 死了 → sentinel 该兜底重启它.
+hotspotd 死了 → 应该是 watchdog 管, sentinel 不该插一脚 (并发拉起触发过双进程事故).
+
+**收窄后 sentinel 只管两件事**:
+
+1. **dpid launcher + LAUNCHER_BROKEN 救命**: 保留. 这是 rc30.12.28 真机救命路径,
+   因为 watchdog 自己用 launcher 重启 dpid, launcher 反复失败 (TLS abort) 时
+   watchdog 也会一起卡, 需要 sentinel 在更外层兜底 fallback 到直拉 dpid.
+   HANDOFF 红线, 不动.
+
+2. **hnc_watchdog 健康**: 新核心职责. watchdog 死了 sentinel 重启,
+   watchdog 接管 hotspotd / httpd.
+
+**删除的部分**:
+
+- `sentinel` 对 `hnc_httpd` 的检查 (调用 `launch_httpd_safe`) — 委托 watchdog.ensure_httpd_running
+- `sentinel` 对 `hotspotd` 的检查 — 委托 watchdog.check_services
+
+启动日志改 `scope=dpid+watchdog`, 方便日志看清当前 sentinel 在管哪些进程.
+
+### P1.8 ksu.exec 统一入口 (webroot/index.html)
+
+GPT 报告: 同一文件存在两种 `ksu.exec` 调用风格:
+
+- callback-style: `ksu.exec(cmd, cbName) → window[cbName](exitCode, stdout, stderr)` (4990 行 `kexec()`)
+- promise-style: `ksu.exec(cmd).then(r => ...)` (11919 行 `execCmd()` legacy)
+
+虽然 promise-style 那段已经 `return` 短路掉 (v5.2-rc1.10), 但源里两套并存,
+"下一次 GPT 三审找到根因" 的种子还在. hf2 修过的 callback signature bug 之所以发生,
+就是因为 ksu.exec 调用散在 `kexec()` 和 `__hncLoadLocalAdminSecret()` 两处,
+同文件 200 行外有正确签名却没参照.
+
+**修法**:
+
+1. 抽 `__hncKsuExecRaw(cmd, timeoutMs)` 作为全 codebase 唯一直接 touch
+   `window.ksu.exec` callback API 的函数. 出参标准化为
+   `{exitCode, stdout, stderr, syncMs}`, 一律 resolve 不 reject.
+2. `kexec()` 改走 raw, profiling (sync/cb 耗时) 保留, 错误友好化保留.
+3. `__hncLoadLocalAdminSecret()` 改走 raw, 64 hex 校验保留,
+   1500ms timeout 在 raw 里实现.
+4. 删 11910-11999 整段 dead promise-style code (90 行 + CSS + HTML 入口块).
+
+任何对 ksu.exec 调用风格的修改 (回调签名、Promise 化、SDK 升级等) 之后只改
+`__hncKsuExecRaw` 一个函数.
+
+`grep "window\.ksu\.exec("` 真实调用点从 4 处压到 1 处.
+
+### P1.9 crash_tracker_record 重写 (hnc_launcher.c)
+
+旧版本是 "滑动窗口里现有几次 + 加新条目 + 数组满滚动覆盖最老" 三步交错,
+窗口边界滚动时容易让人误读. 改成 "先压缩窗口外、再追加新崩溃" 两步语义:
+
+```c
+static int crash_tracker_record(struct crash_tracker *t)
+{
+    time_t now = time(NULL);
+    int kept = 0, i;
+
+    /* 1. 压缩 */
+    for (i = 0; i < t->count; i++) {
+        if (now - t->timestamps[i] <= CRASH_WINDOW_SEC)
+            t->timestamps[kept++] = t->timestamps[i];
+    }
+    /* 2. 追加 (数组满了丢最老) */
+    if (kept >= CRASH_LIMIT) {
+        memmove(&t->timestamps[0], &t->timestamps[1],
+                sizeof(time_t) * (CRASH_LIMIT - 1));
+        t->timestamps[CRASH_LIMIT - 1] = now;
+        t->count = CRASH_LIMIT;
+    } else {
+        t->timestamps[kept++] = now;
+        t->count = kept;
+    }
+    return t->count >= CRASH_LIMIT;
+}
+```
+
+行为等价 (单元测试可证), 阅读清晰.
+
+### P1.10 check_singleton TOCTOU 修复 (hnc_launcher.c)
+
+旧版本:
+
+```c
+pid_t existing = read_pid_file(PID_GUARD);
+if (existing > 0 && existing != getpid() && pid_alive(existing))
+    return -1;
+if (write_pid_file(PID_GUARD, getpid()) < 0) return -1;
+```
+
+read → check → write 三步, 两个 launcher 同时启动可能都过 check 然后都 write,
+后写者赢但实际两个 launcher 都在跑抢 dpid.
+
+**修法**: `open(O_CREAT|O_RDWR|O_CLOEXEC) + flock(LOCK_EX|LOCK_NB)` 一步原子锁定.
+
+```c
+int fd = open(PID_GUARD, O_CREAT|O_RDWR|O_CLOEXEC, 0644);
+if (flock(fd, LOCK_EX|LOCK_NB) != 0) {
+    /* 另一个 launcher 持锁, 退出 */
+    close(fd);
+    return -1;
+}
+/* 持锁, 写 pid. fd 全程不 close — 进程退出时 kernel 释放 flock. */
+ftruncate(fd, 0);
+write(fd, pidbuf, n);
+g_lock_fd = fd;  /* 全局保存防止误 close */
+```
+
+副作用: `pid_alive()` 不再被使用, 一并删掉. `read_pid_file()` 还在用 (锁失败时
+读对方 pid 报告日志). VERSION bump `0.1.0-rc30.12` → `0.1.0-rc30.12.29`.
+
+新加 include: `<sys/file.h>` (flock).
+
+### 没动的部分 (留给下个 rc)
+
+仍未处理的 GPT 三审条目:
+
+- **P0** 全部 (handleLogout / checkLocalAdminSecret hex / forceRemoteAuth / apiHealth) — 下个对话做
+- **P2** 全部 (hotfix*.go 合并 / stats_v52_* 清理 / bin/hnc_common.sh / 巨型 shell 拆分 / dpi_rules.json 拆分 / devices.json schema) — 下个对话做
+- CI 自动版本号注入 (sed module.prop → docs)
+- rc 系列收敛成 v5.3.0 stable (等 P0 + P2 落地后再 tag)
+
+### 编译验证
+
+- `gcc -O2 -Wall -Wextra -c hnc_launcher.c`: 通过 (只剩 pre-existing 的 `on_term_signal` unused 'sig' warning, 跟本次改动无关)
+- `sh -n service.sh`: 通过
+- `grep "window\.ksu\.exec(" webroot/index.html`: 1 处真实调用点 (在 `__hncKsuExecRaw` 内部, 符合设计)
+
+### 装机验证清单
+
+1. `cat /data/adb/modules/hotspot_network_control/module.prop` 应看到 `v5.3.0-rc30.12.29`
+2. KSU WebUI 加载正常 (hf2 修复仍有效, P1.8 wrapper 不应破坏功能)
+3. `tail -30 /data/local/hnc/logs/sentinel.log` 应看到 `scope=dpid+watchdog`
+4. `ps -ef | grep hnc_` 应看到 5 个进程都在 (hotspotd / dpid / launcher / httpd / watchdog)
+5. **故意测试 P1.10**: 在 `bin/hnc_launcher` 启动后再手动 `bin/hnc_launcher`,
+   第二个应立刻退出并打印 `another launcher running (PID=...), exiting`
+
+---
+
+
 ## v5.3.0-rc30.12.28-hf2
 
 **发布日期**: 2026-05-19

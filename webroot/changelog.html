@@ -1,3 +1,16 @@
+<!-- v5.3.0-rc30.12.29 -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.3.0-rc30.12.29: GPT 三审 P1 列表全收口 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>P1.6 文档版本号同步</b>: README/ARCHITECTURE/COMPATIBILITY/src/README/EVOLUTION 顶部版本号 + 日期统一同步到 <code>v5.3.0-rc30.12.29 / 2026-05-19</code>. 之前最老的 README.md 还停在 <code>v5.1.0-rc2</code>, 落后 21 个 rc 版本.</li>
+    <li><b>P1.7 sentinel 收窄</b> (<code>service.sh</code>): 删除 sentinel 对 <code>hnc_httpd</code> / <code>hotspotd</code> 的重复检查 — watchdog 已经管这俩, sentinel 不再插一脚避免并发拉起. 新增 <code>hnc_watchdog</code> 健康检查. <b>保留</b> dpid launcher + LAUNCHER_BROKEN 救命路径 (HANDOFF 红线).</li>
+    <li><b>P1.8 ksu.exec 统一入口</b> (<code>webroot/index.html</code>): 抽 <code>__hncKsuExecRaw</code> 作为全 codebase 唯一直接 touch ksu.exec callback API 的点, <code>kexec</code>/<code>__hncLoadLocalAdminSecret</code> 全走 wrapper. 删 90 行 dead promise-style legacy code (HNC_JSON_HEALTH_ENTRY 那段). 真实调用点从 4 处压到 1 处, 之后改回调签名只动一个函数.</li>
+    <li><b>P1.9 crash_tracker_record 重写</b> (<code>hnc_launcher.c</code>): 改成 "先压缩窗口外、再追加新崩溃" 两步语义, 行为等价但语义直观.</li>
+    <li><b>P1.10 check_singleton TOCTOU 修复</b> (<code>hnc_launcher.c</code>): 改用 <code>open(O_CREAT|O_RDWR|O_CLOEXEC) + flock(LOCK_EX|LOCK_NB)</code> 原子锁定. fd 全程持有, 进程退出 kernel 自动释放. 删除不再使用的 <code>pid_alive()</code>.</li>
+    <li><b>没动的</b>: P0 (handleLogout / checkLocalAdminSecret hex / forceRemoteAuth / apiHealth 死代码) + P2 (hotfix*.go 合并 / stats_v52_* / bin/hnc_common.sh / 巨型 shell / dpi_rules 拆分) — 留给下个 rc.</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.28-hf2 -->
 <div class="cl-section">
   <div class="cl-title">🔑 v5.3.0-rc30.12.28-hf2: 修 KSU WebUI auth required 根因 (GPT 三审) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>

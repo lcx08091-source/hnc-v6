@@ -46,10 +46,11 @@
 #include <sys/wait.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <sys/file.h>		/* rc30.12.29: flock() for singleton lock */
 
 /* ─── 编译期常量 ───────────────────────────────────────────────────── */
 
-#define VERSION                 "0.1.0-rc30.12"
+#define VERSION                 "0.1.0-rc30.12.29"
 
 #define BIN_DPID                "/data/local/hnc/bin/hnc_dpid"
 #define DPID_CONFIG             "/data/local/hnc/etc/dpi_config.json"
@@ -136,27 +137,52 @@ static pid_t read_pid_file(const char *path)
 	return pid;
 }
 
-static int pid_alive(pid_t pid)
-{
-	if (pid <= 0)
-		return 0;
-	return kill(pid, 0) == 0;
-}
+/* rc30.12.29 (P1.10): pid_alive() 已删除 — check_singleton 改 flock 后不再使用 */
 
 /* ─── 单实例保护 ──────────────────────────────────────────────────── */
 
+/* rc30.12.29 (P1.10): TOCTOU 修复.
+ * 之前 check_singleton 是 read_pid → kill(pid, 0) → write_pid_file 两阶段,
+ * 中间窗口里两个 launcher 同时启动可能都过检查然后都写 pid, 后写者赢但实际
+ * 有两个 launcher 在抢 dpid.
+ *
+ * 现在: open(O_CREAT|O_RDWR) + flock(LOCK_EX|LOCK_NB) 一步原子锁定.
+ * fd 故意全程不 close — kernel 在进程退出时自动释放 flock, 干净.
+ * 如果锁被另一个 launcher 持有, 读 pid 报告并退出. */
+static int g_lock_fd = -1;
+
 static int check_singleton(void)
 {
-	pid_t existing = read_pid_file(PID_GUARD);
-	if (existing > 0 && existing != getpid() && pid_alive(existing)) {
-		log_msg("another launcher running (PID=%d), exiting", (int)existing);
-		return -1;
-	}
-	if (write_pid_file(PID_GUARD, getpid()) < 0) {
-		log_msg("failed to write %s: errno=%d %s",
+	int fd = open(PID_GUARD, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+	if (fd < 0) {
+		log_msg("cannot open %s: errno=%d %s",
 			PID_GUARD, errno, strerror(errno));
 		return -1;
 	}
+	if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+		/* 另一个 launcher 已持锁 — 读它的 pid 用于日志 */
+		pid_t existing = read_pid_file(PID_GUARD);
+		log_msg("another launcher running (PID=%d), exiting",
+			(int)existing);
+		close(fd);
+		return -1;
+	}
+	/* 持锁成功. 写自己的 pid. ftruncate 清掉前一个 launcher 残留的 pid. */
+	if (ftruncate(fd, 0) < 0) {
+		log_msg("ftruncate %s failed: errno=%d %s",
+			PID_GUARD, errno, strerror(errno));
+		/* 非致命, 继续 */
+	}
+	char buf[32];
+	int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+	if (n <= 0 || write(fd, buf, (size_t)n) != n) {
+		log_msg("write pid to %s failed: errno=%d %s",
+			PID_GUARD, errno, strerror(errno));
+		close(fd);
+		return -1;
+	}
+	/* fd 不 close — 持续持有 flock 直到进程退出 */
+	g_lock_fd = fd;
 	return 0;
 }
 
@@ -172,29 +198,34 @@ static void crash_tracker_init(struct crash_tracker *t)
 	memset(t, 0, sizeof(*t));
 }
 
-/* 记录一次崩溃. 返回 1 表示已超过阈值 (需要进入 observe 模式) */
+/* 记录一次崩溃. 返回 1 表示窗口内崩溃数 >= 阈值 (需进 observe 模式) */
+/* rc30.12.29 (P1.9): 重写为 "先压缩窗口外, 再追加新崩溃" 的两步语义.
+ * 之前是 "滑动窗口里现有几次 + 加新条目 + 滚动覆盖" 三步交错,
+ * 在窗口边界滚动时容易让人误读. 行为等价, 代码更直白. */
 static int crash_tracker_record(struct crash_tracker *t)
 {
 	time_t now = time(NULL);
-	int i, recent = 0;
+	int kept = 0;
+	int i;
 
-	/* 滑动窗口里现有几次 */
+	/* 1. 压缩: 把窗口内的留下, 窗口外的丢掉 */
 	for (i = 0; i < t->count; i++) {
 		if (now - t->timestamps[i] <= CRASH_WINDOW_SEC)
-			recent++;
+			t->timestamps[kept++] = t->timestamps[i];
 	}
 
-	/* 写入新崩溃时间. 如果数组满, 滚动覆盖最老的 */
-	if (t->count < CRASH_LIMIT) {
-		t->timestamps[t->count++] = now;
-	} else {
-		for (i = 0; i < CRASH_LIMIT - 1; i++)
-			t->timestamps[i] = t->timestamps[i + 1];
+	/* 2. 追加当前崩溃 (数组满了就丢最老的, 用 memmove 保留语义) */
+	if (kept >= CRASH_LIMIT) {
+		memmove(&t->timestamps[0], &t->timestamps[1],
+			sizeof(time_t) * (CRASH_LIMIT - 1));
 		t->timestamps[CRASH_LIMIT - 1] = now;
+		t->count = CRASH_LIMIT;
+	} else {
+		t->timestamps[kept++] = now;
+		t->count = kept;
 	}
-	recent++;
 
-	return recent >= CRASH_LIMIT;
+	return t->count >= CRASH_LIMIT;
 }
 
 static void write_crash_flag(void)

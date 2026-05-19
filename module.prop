@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.28-hf2
-versionCode=530148
+version=v5.3.0-rc30.12.29
+versionCode=530149
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.28-hf2 · 修复 KSU WebUI auth required 根因 (GPT 三审发现): (1) __hncLoadLocalAdminSecret 回调签名错: ksu.exec 回调实际是 (exitCode, stdout, stderr) 三参数, 之前写 function(out) 拿到的 out 是 exitCode=0, 导致 secret 被设为字符串 "0", 注入 header 后 64 字节校验失败永远 401. (2) KSU WebUI 强制 bridge-first, 跳过 fetch (避免 Origin/CORS 干扰中间件的 loopback 信任分支). (3) KSU 本地 WebUI 收 401 不跳 /pair (那是远程浏览器流程, 本地应走 root secret).
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.29 · GPT 三审 P1 收口: (1) sentinel 收窄 — 删除对 hnc_httpd / hotspotd 的重复检查 (watchdog 已经管这俩), 新增 hnc_watchdog 健康检查; dpid launcher + LAUNCHER_BROKEN 救命路径保留. (2) ksu.exec 统一入口 — 抽 __hncKsuExecRaw 作为全 codebase 唯一直接 touch callback API 的点, kexec/__hncLoadLocalAdminSecret 全走 wrapper, 删 90 行 dead promise-style legacy code. (3) hnc_launcher.c crash_tracker_record 重写为 "先压缩窗口外、再追加" 两步语义, 行为等价但直观. (4) check_singleton 改用 flock(LOCK_EX|LOCK_NB) 修 TOCTOU, fd 全程持有, 进程退出 kernel 自动释放. (5) 文档版本号统一同步 (README/ARCHITECTURE/COMPATIBILITY/src/README/EVOLUTION).
 minKernelSU=11485
