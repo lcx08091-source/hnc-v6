@@ -5,20 +5,41 @@
 // rc20.1->rc28.1.1 binary never read them. rc29 finally reads them so the
 // rule library actually does what its schema promises.
 //
-// External rule path:  /data/local/hnc/etc/dpi_rules.json
-// On parse error or missing file we fall back to a small built-in set.
+// External rule paths (probed in order):
+//  1. /data/local/hnc/etc/dpi_rules.d/*.json   (rc30.12.31+, glob + merge)
+//  2. /data/local/hnc/etc/dpi_rules.json       (legacy single file)
+//  3. builtinRules                              (compiled-in fallback)
+//
+// rc30.12.31 (TASK-a Stage 2): added dpi_rules.d/ support. Loader globs
+// *.json by filename order (subset prefix 00..99 controls precedence),
+// merges all rules, dedups by id (last write wins, nginx conf.d style) so
+// 99-user-custom.json can reliably override curated rules. A single bad
+// subset file is skipped with a WARN log instead of killing the whole load.
+// If the dir is absent, falls back to the legacy single-file path with
+// 100% identical behavior to rc30.12.30.
 
 package output
 
 import (
 	"encoding/json"
+	"log"
 	"net"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 )
 
-const externalRulesPath = "/data/local/hnc/etc/dpi_rules.json"
+const (
+	externalRulesPath = "/data/local/hnc/etc/dpi_rules.json"
+	// rc30.12.31 (TASK-a Stage 2): preferred path. Glob etc/dpi_rules.d/*.json
+	// and merge in filename order. Falls back to externalRulesPath if absent.
+	externalRulesDir = "/data/local/hnc/etc/dpi_rules.d"
+	// rc30.12.31 (TASK-a Stage 2): per-subset file size cap. A bad subset
+	// gets skipped with WARN; cap protects against runaway file growth.
+	externalRulesSubsetMaxBytes = 1024 * 1024
+)
 
 // PriorityClass orders matches when several rules hit the same flow/host.
 // "specific" rules win over "fallback" rules; rules without an explicit
@@ -135,9 +156,9 @@ type subCategory struct {
 	Name     string
 	Category string
 	// Behavioural detector. For rc29 we support a single rate-based detector.
-	DetectIP     *net.IPNet
-	DetectPort   uint16
-	DetectProto  matchProto
+	DetectIP   *net.IPNet
+	DetectPort uint16
+	DetectProto matchProto
 	DetectPPSMin float64
 }
 
@@ -172,12 +193,12 @@ type externalMatcher struct {
 }
 
 type externalIPMatcher struct {
-	CIDR         string `json:"cidr"`
-	Proto        string `json:"proto"`
-	Ports        []int  `json:"ports"`
-	PortsPattern string `json:"ports_pattern"`
-	Purpose      string `json:"purpose"`
-	Note         string `json:"note"`
+	CIDR         string   `json:"cidr"`
+	Proto        string   `json:"proto"`
+	Ports        []int    `json:"ports"`
+	PortsPattern string   `json:"ports_pattern"`
+	Purpose      string   `json:"purpose"`
+	Note         string   `json:"note"`
 	// Evidence fields are advisory and ignored by classifier:
 	EvidencePackets int     `json:"evidence_packets"`
 	RatePPSActive   float64 `json:"rate_pps_active"`
@@ -190,9 +211,9 @@ type externalSub struct {
 }
 
 type externalGT struct {
-	Verified        bool   `json:"verified"`
-	Date            string `json:"date"`
-	PacketsObserved int    `json:"packets_observed"`
+	Verified       bool   `json:"verified"`
+	Date           string `json:"date"`
+	PacketsObserved int   `json:"packets_observed"`
 }
 
 // loadedRules is the compiled rule set + a version tag for telemetry.
@@ -217,9 +238,136 @@ func currentL3RuleVersion() string {
 	return lr.version
 }
 
-// loadL3Rules reads /data/local/hnc/etc/dpi_rules.json with mtime-based
-// caching. Falls back to builtinRules on any error.
+// loadL3Rules dispatches between the new etc/dpi_rules.d/ directory
+// (preferred, rc30.12.31+) and the legacy etc/dpi_rules.json single file.
+// Returns builtinRules on any error path so dpid always has a working set.
+//
+// rc30.12.31 (TASK-a Stage 2): added dpi_rules.d/ dispatch. Behavior on
+// hosts that don't have the dir is byte-for-byte identical to rc30.12.30.
 func loadL3Rules() loadedRules {
+	if lr, ok := loadL3RulesFromDir(); ok {
+		return lr
+	}
+	return loadL3RulesLegacy()
+}
+
+// loadL3RulesFromDir tries the dpi_rules.d/ glob path.
+//
+// Returns (rules, true) on success.
+// Returns (_, false) when the directory does not exist, contains no usable
+// subset files, or yields zero compiled rules — in all these cases the
+// caller falls back to loadL3RulesLegacy. A subset file that fails to parse
+// is skipped with a WARN log but does NOT cause a fallback: partial loads
+// are acceptable, since some rules > zero rules.
+//
+// Cache: keyed on (max child mtime, sum of child sizes) plus the "external-d:"
+// version prefix. The version-prefix check protects against the rare case
+// where a legacy load's (single-file mtime, size) collide with the dir's
+// (aggregate mtime, sum size).
+func loadL3RulesFromDir() (loadedRules, bool) {
+	st, err := os.Stat(externalRulesDir)
+	if err != nil || !st.IsDir() {
+		return loadedRules{}, false
+	}
+	files, err := filepath.Glob(filepath.Join(externalRulesDir, "*.json"))
+	if err != nil || len(files) == 0 {
+		return loadedRules{}, false
+	}
+	// Filename prefix (00- .. 99-) controls merge precedence. sort.Strings
+	// gives lexicographic order which matches the proposal's intent
+	// (00-core-meta first, 99-user-custom last so user overrides win).
+	sort.Strings(files)
+
+	var (
+		aggrMtime    int64
+		aggrSize     int64
+		versionParts = make([]string, 0, len(files))
+		allRules     = make([]externalRule, 0, 256)
+		usableFiles  int
+	)
+	for _, f := range files {
+		fst, err := os.Stat(f)
+		if err != nil {
+			log.Printf("WARN dpi_rules.d: stat %s err=%v (skipping subset)", f, err)
+			continue
+		}
+		if mt := fst.ModTime().UnixNano(); mt > aggrMtime {
+			aggrMtime = mt
+		}
+		aggrSize += fst.Size()
+		if fst.Size() > externalRulesSubsetMaxBytes {
+			log.Printf("WARN dpi_rules.d: skip oversized %s (%d bytes > cap %d)",
+				f, fst.Size(), externalRulesSubsetMaxBytes)
+			continue
+		}
+		b, err := os.ReadFile(f)
+		if err != nil || len(b) == 0 {
+			log.Printf("WARN dpi_rules.d: read %s err=%v (skipping subset)", f, err)
+			continue
+		}
+		var sub externalRuleFile
+		if err := json.Unmarshal(b, &sub); err != nil {
+			log.Printf("WARN dpi_rules.d: parse %s err=%v (skipping subset, other subsets still load)", f, err)
+			continue
+		}
+		if v := strings.TrimSpace(sub.RulesVersion); v != "" {
+			versionParts = append(versionParts, v)
+		}
+		allRules = append(allRules, sub.Rules...)
+		usableFiles++
+	}
+
+	// No usable subset → fall back to legacy. We do NOT cache "empty dir"
+	// because tomorrow the user might drop a subset file in and we want
+	// the next load to pick it up.
+	if usableFiles == 0 || len(allRules) == 0 {
+		return loadedRules{}, false
+	}
+
+	// Cache hit check. We require the cached entry to also have the
+	// "external-d:" prefix — otherwise a stale legacy-path cache entry
+	// with coincidentally equal (mtime, size) could be returned here.
+	ruleCache.Lock()
+	if ruleCache.mtime == aggrMtime && ruleCache.size == aggrSize &&
+		len(ruleCache.val.rules) > 0 &&
+		strings.HasPrefix(ruleCache.val.version, "external-d:") {
+		v := ruleCache.val
+		ruleCache.Unlock()
+		return v, true
+	}
+	ruleCache.Unlock()
+
+	compiled := compileExternalRules(allRules)
+	if len(compiled) == 0 {
+		return loadedRules{}, false
+	}
+
+	merged := make([]l3Rule, 0, len(compiled)+len(builtinRules))
+	// External rules first so they win on equal-length suffix matches —
+	// same precedence rule as the legacy single-file path.
+	merged = append(merged, compiled...)
+	merged = append(merged, builtinRules...)
+
+	version := "external-d:" + strings.Join(versionParts, ",")
+	if len(versionParts) == 0 {
+		version = "external-d:" // unnamed subsets; still distinguishable from "external:"
+	}
+	lr := loadedRules{version: version, rules: merged}
+
+	ruleCache.Lock()
+	ruleCache.mtime = aggrMtime
+	ruleCache.size = aggrSize
+	ruleCache.val = lr
+	ruleCache.Unlock()
+	return lr, true
+}
+
+// loadL3RulesLegacy reads /data/local/hnc/etc/dpi_rules.json with mtime-based
+// caching. Falls back to builtinRules on any error.
+//
+// This is the pre-rc30.12.31 implementation, retained verbatim as the
+// fallback path for hosts that don't have etc/dpi_rules.d/.
+func loadL3RulesLegacy() loadedRules {
 	st, err := os.Stat(externalRulesPath)
 	if err != nil {
 		ruleCache.Lock()
@@ -233,7 +381,8 @@ func loadL3Rules() loadedRules {
 	size := st.Size()
 
 	ruleCache.Lock()
-	if ruleCache.mtime == mtime && ruleCache.size == size && len(ruleCache.val.rules) > 0 {
+	if ruleCache.mtime == mtime && ruleCache.size == size && len(ruleCache.val.rules) > 0 &&
+		!strings.HasPrefix(ruleCache.val.version, "external-d:") {
 		v := ruleCache.val
 		ruleCache.Unlock()
 		return v
@@ -334,6 +483,23 @@ func compileExternalRules(in []externalRule) []l3Rule {
 			break
 		}
 	}
+	// rc30.12.31 (TASK-a Stage 2): dedup by id, last-write-wins.
+	// Required by dpi_rules.d/ semantics so 99-user-custom.json can reliably
+	// override curated rules (nginx conf.d style). For the legacy single-file
+	// path this is a no-op because dpi_rules.json never has same-id duplicates.
+	if len(out) > 1 {
+		seen := make(map[string]int, len(out))
+		dedup := out[:0]
+		for _, r := range out {
+			if idx, ok := seen[r.ID]; ok {
+				dedup[idx] = r // overwrite the earlier entry in place
+				continue
+			}
+			seen[r.ID] = len(dedup)
+			dedup = append(dedup, r)
+		}
+		out = dedup
+	}
 	return out
 }
 
@@ -378,13 +544,13 @@ func compileIPMatchers(in []externalIPMatcher, wantV6 bool) []ipMatcher {
 
 // compileSubCategories parses the schema:
 //
-//	"sub_categories": {
-//	  "voice_call": {
-//	    "name":     "微信电话",
-//	    "detect":   "UDP 183.232.84.0/24:8000 rate > 200 pps",
-//	    "category": "social_voip"
-//	  }
-//	}
+//   "sub_categories": {
+//     "voice_call": {
+//       "name":     "微信电话",
+//       "detect":   "UDP 183.232.84.0/24:8000 rate > 200 pps",
+//       "category": "social_voip"
+//     }
+//   }
 //
 // The "detect" string is human-readable, so we parse it best-effort.
 // Unparseable detectors are kept (with name + category) but won't fire.
@@ -416,8 +582,7 @@ func compileSubCategories(in map[string]externalSub) []subCategory {
 }
 
 // parseDetectExpr extracts (proto, cidr, port, ppsMin) from a string like:
-//
-//	"UDP 183.232.84.0/24:8000 rate > 200 pps"
+//   "UDP 183.232.84.0/24:8000 rate > 200 pps"
 //
 // Robust to extra whitespace and case. Anything we can't parse just stays
 // empty on the sub-category and that detector simply never fires.

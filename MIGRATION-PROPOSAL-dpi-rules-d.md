@@ -1,11 +1,28 @@
 # MIGRATION PROPOSAL: `data/dpi_rules.json` → `etc/dpi_rules.d/*.json`
 
-<!-- rc30.12.30 (TASK-a): GPT 三审报告 §四 P2.16 提案落地 -->
+<!-- rc30.12.30 (TASK-a) v2: GPT 三审报告 §四 P2.16 提案落地 -->
+<!-- v2 修订: 锁定 5 个决策点 (§"决策锁定" 节) + 加入 webroot:5879 隐患 (§5.3 + §6) -->
 
 **类型**: 设计提案 (Stage 1, 0 代码改动)
 **基线**: HNC v5.3.0-rc30.12.30 / `data/dpi_rules.json` 144 条
 **作者对接**: 新对话 Claude → Ling 审 → 通过后下一轮做真实拆分
 **生效状态**: **本文档仅为提案**. dpid 加载器未改, `dpi_rules.d/` 未生成
+
+---
+
+## 决策锁定 (v2 修订)
+
+提案初稿留了 5 个开放决策点, Ling 审后锁定如下. 进入 Stage 2 实施时直接按这些走, 不再争论:
+
+| # | 决策 | 锁定 | 备注 |
+|---|---|---|---|
+| 1 | 文件数粒度 | **方案 A: 23 个 bucket + 1 个 99-user-custom 占位** | 单 bucket 0.6-16 KB, 加规则 diff 最小 (§2.3) |
+| 2 | dedup 保护 (compileExternalRules 末尾按 id 去重, 后入覆盖) | **做** | ~10 行, 给 99-user-custom 留可靠覆盖语义 (§3.4 #1) |
+| 3 | rules_version 字符串格式 | **`external-d:<v1>,<v2>,...` 拼接** | 已 grep 确认 webroot/Go 无硬解析, 见 §3.4 #3 |
+| 4 | service.sh 同步方式 | **`rm -rf <dst> && cp -r <src> <dst>`** | mksh 兼容, rsync 在 Android sh 不一定有 (§3.4 #5) |
+| 5 | Stage 4 (删 legacy `dpi_rules.json`) | **永不执行** | 70 KB 留作 dpi_rules.d/ 路径出预料外问题时的保险, 见 §5.4 |
+
+v2 修订还加入了一个 grep 发现的隐患: **`webroot/index.html:5879` 的 KSU WebUI "导出当前规则" 功能硬编码 `cat dpi_rules.json`**, Stage 2/3 需要顺手改. 详见 §5.3 和 §6.
 
 ---
 
@@ -201,20 +218,15 @@ type externalRuleFile struct {
 - `rules_version` 加 `#bucket` 后缀, 让单子文件被替换时整体版本号有可追溯性
 - `subset` 字段 dpid struct 没定义, json.Unmarshal 会忽略, 不影响兼容性
 
-### 2.3 文件数 trade-off (让 Ling 挑)
+### 2.3 文件数 trade-off (v2: 已锁定方案 A)
 
 | 方案 | 文件数 | 最大文件 | 优点 | 缺点 |
 |---|---:|---|---|---|
-| **A: 细分 (本方案)** | 23 (+ 1 user-custom 占位) | 20-tencent-game 16 KB | 业务族最清晰, 改 1 条规则 diff 最小, 加新业务族零冲突 | 文件数偏多, IDE 跳转/grep 噪音 |
-| **B: 中等** | ~15 | 合并 21/35 进 20, 合并 33/34 进 32, 合并 70/80/81 → 20 KB 左右 | 平衡 | 桶内边界模糊 |
-| **C: 粗分** | ~8 | tencent / bytedance / alibaba / cn / rom / overseas / cdn / misc | git diff 简单 | 单文件回到 15-20 KB, 失去拆分意义 |
+| ★ **A: 细分 (锁定)** | 23 (+ 1 user-custom 占位) | 20-tencent-game 16 KB | 业务族最清晰, 改 1 条规则 diff 最小, 加新业务族零冲突 | 文件数偏多, IDE 跳转/grep 噪音 |
+| B: 中等 | ~15 | 合并 21/35 进 20, 合并 33/34 进 32, 合并 70/80/81 → 20 KB 左右 | 平衡 | 桶内边界模糊 |
+| C: 粗分 | ~8 | tencent / bytedance / alibaba / cn / rom / overseas / cdn / misc | git diff 简单 | 单文件回到 15-20 KB, 失去拆分意义 |
 
-**推荐 A**, 理由:
-- 主要痛点是"加一条新规则不要 diff 70 KB 单文件", A 把单 bucket 压到 0.5-16 KB
-- 文件数 23 不算多 (`webroot/` 已经 30+ 文件)
-- 后续如果觉得碎, 合并比拆分简单 (合并不需要改 dpid)
-
-但最终由 Ling 拍板.
+锁定 A 的理由: 主要痛点是"加一条新规则不要 diff 70 KB", A 把单 bucket 压到 0.6-16 KB, 效果最好. 23 个文件不算多 (webroot/ 已 30+). 后续如果觉得碎, 合并比拆分简单 (合并不需要改 dpid).
 
 ---
 
@@ -335,18 +347,20 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 }
 ```
 
-### 3.4 关键设计点 (审查这几点)
+### 3.4 关键设计点 (v2: 5 条已锁定)
 
-1. **冲突解决**: 同 `id` 后加载覆盖先加载
+1. **冲突解决 (锁定: 加 dedup 保护)**:
    - 当前 `compileExternalRules` 不去重, 多条同 id 会都进 merge slice → suffix trie / cidr 匹配阶段最先匹到哪条无确定保证
-   - **建议**: 拆分后, 由于业务族不重叠, 自然不会有同 id 重复; 但留一个 dedup 保护:
+   - 分桶后业务族不重叠, 实际不会触发; 但加 dedup 保护给 `99-user-custom.json` 留可靠覆盖语义 (nginx conf.d 风格), 改动小, 无负面
+   - 实施代码 (Stage 2 在 `compileExternalRules` 末尾加):
      ```go
-     // compileExternalRules 末尾加: 按 id 去重, 后入覆盖先入
+     // rc30.12.X (TASK-a follow-up): 按 id 去重, 后入覆盖先入 (nginx conf.d 风格).
+     // 给 99-user-custom.json 留可靠覆盖空间.
      seen := make(map[string]int)
      dedup := out[:0]
      for _, r := range out {
          if idx, ok := seen[r.ID]; ok {
-             dedup[idx] = r  // 覆盖
+             dedup[idx] = r  // 同 id, 后入覆盖
          } else {
              seen[r.ID] = len(dedup)
              dedup = append(dedup, r)
@@ -354,23 +368,30 @@ func loadL3RulesFromDir() (loadedRules, bool) {
      }
      out = dedup
      ```
-   - 这一步是否在本任务做, 由 Ling 决定. 不做也行 (因为分桶不重叠), 但建议做, 给 `99-user-custom.json` 留覆盖空间
 
-2. **错误处理边界**:
+2. **错误处理边界 (设计自带, 无开放选项)**:
    - 单子文件 JSON 解析失败 → `log.Printf("WARN ...") + continue`, 不抛
    - 整个目录都 0 条规则 → 返回 `ok=false`, 走 legacy fallback
    - 目录存在但 glob 0 个 .json → 同上, 走 legacy
 
-3. **rules_version 字段拼装**:
-   - 当前是单文件单 version 字符串 → 拆分后多 version
-   - 方案 A (推荐): `external-d:<version1>,<version2>,...` 用逗号拼接, 给 WebUI 看
-   - 方案 B: 取所有子文件 mtime 最大值, 用 `external-d:mtime-<unix>` 风格. 但失去人类可读
-   - 方案 C: 加新顶层 `dpi_rules.d/_VERSION` 文件统一管 (最简洁, 但多一个文件)
+3. **rules_version 字符串格式 (锁定: `external-d:<v1>,<v2>,...` 拼接)**:
+   - v2 grep 实查结论: **webroot 和 Go 代码无 `^external:` 硬解析**, 可以放心改 prefix
+     ```
+     扫描结果:
+       src/dpid/output/rule.go:265-273   只是 prepend, 无反向解析
+       src/dpid/output/dfp.go:121-125    JA4 指纹独立文件, 不受影响
+       webroot/index.html:3397           textarea placeholder 文案, 无逻辑
+       webroot/index.html:7783           WebUI 写用户自定义 rules_version, 不读
+       webroot/changelog.html            纯文案
+       daemon/hnc_httpd/web/             无任何引用
+     ```
+   - 拼接格式: `external-d:<v1>,<v2>,...`, 例如:
+     ```
+     external-d:hnc-curated-v3-rc30.12-...#00-core-meta,hnc-curated-v3-rc30.12-...#10-tencent-im,...
+     ```
+   - 备选方案 B (`external-d:mtime-<unix>`) 和 C (`_VERSION` 文件) 已废弃 — 拼接虽然长但人类可读, WebUI 显示也能直接 show
 
-   **推荐 A**. WebUI 那边只是显示, 拼长一点不影响.
-   注: 当前 webroot 解析这个字符串是不是要正则? 让 Ling 自查 webroot/index.html 里有没有对 version 格式的硬解析
-
-4. **缓存 invalidation**:
+4. **缓存 invalidation (设计自带, 无开放选项)**:
    - legacy 用 (单文件 mtime, size) 双 key
    - 新的用 (max(子文件 mtime), sum(子文件 size)) 双 key
    - 加新文件 → size 涨, 命中失败 → reload ✓
@@ -378,10 +399,18 @@ func loadL3RulesFromDir() (loadedRules, bool) {
    - 修改某文件 → mtime 涨, 命中失败 → reload ✓
    - **边界**: 同时 +A 删 B 且 sizeof(A)==sizeof(B) 且 mtime 没动 → cache 不刷. 这跟 legacy 的边界一致 (legacy 也是 mtime+size 双 key), 实际不会出问题, 因为修改总会动 mtime
 
-5. **service.sh 部署同步**:
+5. **service.sh 部署同步 (锁定: `rm -rf + cp -r`, 不用 rsync)**:
    - 现在 service.sh 把 `data/dpi_rules.json` 同步到 `/data/local/hnc/etc/dpi_rules.json`
-   - 拆分阶段需要同步 `data/dpi_rules.d/*.json` 到 `/data/local/hnc/etc/dpi_rules.d/*.json`
-   - 建议同步逻辑: `cp -r data/dpi_rules.d /data/local/hnc/etc/` 或 `rsync --delete` (后者更干净, 但 mksh 不一定有 rsync, 看真机)
+   - 拆分后需要同步整个目录. 锁定语法 (mksh 兼容):
+     ```sh
+     # rc30.12.X (TASK-a follow-up): 同步 dpi_rules.d 目录, 先清旧防 rename 残留.
+     if [ -d "$MOD/data/dpi_rules.d" ]; then
+         rm -rf "$H/etc/dpi_rules.d"
+         cp -r "$MOD/data/dpi_rules.d" "$H/etc/dpi_rules.d"
+     fi
+     ```
+   - 不用 rsync 的理由: Android `/system/bin/sh` (mksh + BusyBox) 上 rsync 不一定在, `cp -r` 是 POSIX 标配 100% 可用
+   - 先 `rm -rf` 的理由: 防止 bucket 改名 (例如 `30-bytedance.json` → `30-bytedance-kuaishou.json`) 时旧文件残留导致同 id 规则双份加载
 
 ### 3.5 估算改动行数
 
@@ -445,42 +474,83 @@ output: data/dpi_rules.d/   (23 files, 66 333 bytes)
 
 ## 5. 向后兼容 & 部署节奏
 
-四阶段, 每阶段都可装机验证 + git revert 单 commit 回滚.
+三阶段实施 + 一个永不执行的预留阶段, 每阶段都可装机验证 + git revert 单 commit 回滚.
 
-### Stage 1 (本提案) — rc30.12.30+ 文档
+### 5.1 Stage 1 (本提案) — rc30.12.30+ 文档
 
 - 提交 `MIGRATION-PROPOSAL-dpi-rules-d.md` + `tools/dpi_rules_split.py`
 - 不改 dpid, 不改 service.sh, 不动 `data/dpi_rules.json`
 - **不 bump module.prop / 不改 CHANGELOG** (按 HANDOFF §10 纯文档不 bump 规则)
 - 风险: 0
 
-### Stage 2 — dpid 加载器双路径 (下一个 rc, 例如 rc30.12.31)
+### 5.2 Stage 2 — dpid 加载器双路径 (下一个 rc, 例如 rc30.12.31)
 
-- 改 `src/dpid/output/rule.go` 加 `loadL3RulesFromDir` (§3.3)
-- 改 `service.sh` 同步 `data/dpi_rules.d/` 目录 (如果存在的话)
+- 改 `src/dpid/output/rule.go` 加 `loadL3RulesFromDir` (§3.3) + dedup 保护 (§3.4 #1)
+- 改 `service.sh` 同步 `data/dpi_rules.d/` 目录 (§3.4 #5 锁定的 `rm -rf + cp -r` 语法)
 - 此时 `data/dpi_rules.d/` 还不存在 → dpid 永远走 legacy 路径 → 行为完全等价于当前
 - 装机验证: 看 `dpid.log` 里的 version tag 还是 `external:hnc-curated-v3-...`, 没变就对
 - bump 一档 rc, 因为 dpid 二进制变了
 - 风险: 低 (legacy 路径完全保留, 新分支死代码状态)
 - 回滚: revert 单 commit 即可
 
-### Stage 3 — 跑 migration 脚本生成子文件 (rc30.12.32 或同档)
+### 5.3 Stage 3 — 跑 migration 脚本生成子文件 + 修 webroot:5879 (rc30.12.32 或同档)
 
 - 在工程目录跑 `python3 tools/dpi_rules_split.py`
 - `git add data/dpi_rules.d/`
-- **同时保留** `data/dpi_rules.json` (双源并存, 但 service.sh 同步两份)
-- dpid 启动: dpi_rules.d/ 存在 → 走新路径; legacy 那条永远走不到
-- 装机验证: `dpid.log` 的 version tag 现在变成 `external-d:hnc-curated-v3-...#00-core-meta,hnc-curated-v3-...#10-tencent-im,...` (拼接的)
+- **同时保留** `data/dpi_rules.json` (双源并存, 但 service.sh 现在同步两个路径)
+
+**★ Stage 3 必须同时修复 `webroot/index.html:5879` (v2 grep 发现的隐患)**:
+
+KSU WebUI "导出当前规则" 功能 (UI 上的"导出"按钮) 当前是这条 shell:
+```js
+// webroot/index.html:5879 (现状)
+const script = 'H=/data/local/hnc; MOD=$(cat "$H/run/service.path" 2>/dev/null); [ -z "$MOD" ] && MOD=/data/adb/modules/hotspot_network_control; if [ -f "$H/etc/dpi_rules.json" ]; then cat "$H/etc/dpi_rules.json"; elif [ -f "$MOD/data/dpi_rules.json" ]; then cat "$MOD/data/dpi_rules.json"; else echo "{...empty...}"; fi';
+```
+
+切到 `dpi_rules.d/` 后这条会读到老文件或读不到, 必须改成优先合并子文件:
+```js
+// rc30.12.X (TASK-a follow-up): 优先合并 dpi_rules.d/, fallback 到 legacy 单文件.
+// 用 jq 把多个子文件 rules 数组合并; jq 不在则降级单 cat.
+const script = `
+H=/data/local/hnc
+MOD=$(cat "$H/run/service.path" 2>/dev/null)
+[ -z "$MOD" ] && MOD=/data/adb/modules/hotspot_network_control
+for BASE in "$H/etc" "$MOD/data"; do
+    if [ -d "$BASE/dpi_rules.d" ] && [ -n "$(ls "$BASE/dpi_rules.d"/*.json 2>/dev/null)" ]; then
+        if command -v jq >/dev/null 2>&1; then
+            jq -s '{schema_version:.[0].schema_version,rules_version:"exported-merged",rules:[.[].rules[]]}' "$BASE"/dpi_rules.d/*.json
+        else
+            # jq 不在: cat 第一个子文件做 fallback (不完整但能给用户看格式)
+            cat "$BASE"/dpi_rules.d/$(ls "$BASE"/dpi_rules.d/ | head -1)
+        fi
+        exit 0
+    fi
+    if [ -f "$BASE/dpi_rules.json" ]; then
+        cat "$BASE/dpi_rules.json"
+        exit 0
+    fi
+done
+echo '{"schema_version":"1.0","rules_version":"empty","rules":[]}'
+`;
+```
+
+如果 jq 在真机 Termux/BusyBox 不一定有 (Ling 你的环境自查一下), 可以让 fallback 改成 `cat` 所有子文件拼一个粗糙输出.
+
+- 装机验证: `dpid.log` 的 version tag 现在变成 `external-d:hnc-curated-v3-...#00-core-meta,hnc-curated-v3-...#10-tencent-im,...`
 - 验证 144 条规则识别行为不变: 抓个微信/抖音/王者包看 ground_truth 还能命中
+- 验证 WebUI "导出当前规则"按钮拿到完整 144 条规则的 JSON
 - bump 一档 rc
-- 回滚: `rm -rf data/dpi_rules.d/`, dpid 自动 fallback 到 `data/dpi_rules.json`, 行为恢复
+- 回滚: `rm -rf data/dpi_rules.d/`, dpid 自动 fallback 到 `data/dpi_rules.json`, 行为恢复. webroot 改动也可单独 revert.
 
-### Stage 4 — 删 legacy 单文件 (1-2 个 rc 后, 给观察窗口)
+### 5.4 Stage 4 — 删 legacy `dpi_rules.json` (v2 锁定: 永不执行)
 
-- 装机稳定运行 1-2 个 rc 后, `git rm data/dpi_rules.json`
-- 改 service.sh 删掉对 legacy 路径的 cp 同步 (`rm -f /data/local/hnc/etc/dpi_rules.json` 防止老安装包残留)
-- 风险: 中. 一旦发现新加载器 bug 只能 revert 这个 commit + 重新引入 legacy 文件
-- 实际推荐: **不要急着做 Stage 4**, legacy 文件留着也就 70 KB, 当成保险
+- 原计划: 装机稳定运行 1-2 个 rc 后, `git rm data/dpi_rules.json`
+- **v2 锁定: 不执行**. 理由:
+  - 70 KB 单文件留着零成本, 是 dpi_rules.d/ 路径出预料外问题时的保险
+  - 如果半年/一年后 dpi_rules.d/ 路径稳定无任何 incident, 再补一个独立的 Stage 4 patch 不迟, 不急于现在锁定
+  - 永不执行的代价: dpi_rules.json 跟 dpi_rules.d/ 双源, Stage 3 之后所有 curated 规则改动需要在两边同步 — 不可接受
+  - 修正方案: **Stage 3 之后, `dpi_rules.json` 由 `tools/dpi_rules_split.py` 生成同步**(不是手编), 即每次跑脚本时把 dpi_rules.d/ 的所有 rules 反向合并写回 dpi_rules.json. 让 dpi_rules.json 成为 dpi_rules.d/ 的派生产物 (只有出问题回滚时才用到)
+  - 这个反向合并的实现可以加到 `dpi_rules_split.py` 里, Stage 3 实施时一并做
 
 ---
 
@@ -491,9 +561,10 @@ output: data/dpi_rules.d/   (23 files, 66 333 bytes)
 | dpid 加载器解析错 → DPI 全瘫 | **高** | Stage 2 新代码引入 bug | Stage 2 走 dry path (目录不存在), 实际不切换; Stage 3 才真切. 装机验证 version tag |
 | 单子文件 JSON 损坏 → 整批拆分丢规则 | 中 | 手工编辑 dpi_rules.d/ 时手误 | 加载器 per-file try/catch + log warn (§3.3), 一个坏文件只丢一桶, 其他正常 |
 | bucket 分类逻辑错 → 规则路由到错的子文件 | 低 | migration 脚本 bucket 判定函数有 bug | 影响**仅**是文件组织, 所有 144 条规则 merge 后全部生效, classify 行为不变 (因为零 cidr overlap, 见 §1.4) |
-| `rules_version` 字段格式变化 → WebUI 解析错 | 中 | webroot/index.html 对 `external:` 前缀有正则硬匹配 | Stage 2 提前 grep webroot 看有没有 `^external:` 之类硬解析; 没有就直接换 `external-d:` 前缀 |
-| service.sh 同步 dpi_rules.d/ 失败 | 中 | mksh 兼容性 (cp -r 是否 ok) | rc30.12.X+1 装机验证时 `ls -la /data/local/hnc/etc/dpi_rules.d/` 确认 |
-| `99-user-custom.json` 用户加错字段名 | 低 | 用户自己写 JSON 用了 `app_id` 而不是 `id` | dpid 加载器现有逻辑会 silently drop (rule.go:294 `if id == "" || cat == "" { continue }`); WebUI 加个 "已加载 N 条" 计数让用户自查 |
+| ★ `webroot/index.html:5879` 导出功能读不到新规则 | 中 | Stage 3 切到 dpi_rules.d/ 但忘改 KSU WebUI 的 cat 脚本 | v2 已识别 (§5.3). Stage 3 必须同步改 webroot:5879 那条 shell, 让它先 merge dpi_rules.d/, fallback cat 单文件 |
+| `rules_version` 字段格式变化 → WebUI 解析错 | ~~中~~ → **0** | ~~webroot/index.html 对 `external:` 前缀有正则硬匹配~~ | **v2 grep 实查: 无任何硬解析**, Go 代码只 prepend 不反向解析, WebUI 只显示. 风险消除 (§3.4 #3) |
+| service.sh 同步 dpi_rules.d/ 失败 | 中 | mksh 兼容性 (cp -r 是否 ok) | `cp -r` 是 POSIX 标配, mksh 必有. rc30.12.X+1 装机验证时 `ls -la /data/local/hnc/etc/dpi_rules.d/` 确认 |
+| `99-user-custom.json` 用户加错字段名 | 低 | 用户自己写 JSON 用了 `app_id` 而不是 `id` | dpid 加载器现有逻辑会 silently drop (rule.go:294 `if id == "" \|\| cat == "" { continue }`); WebUI 加个 "已加载 N 条" 计数让用户自查 |
 | dpid 启动慢 (打开 23 个文件而不是 1 个) | 极低 | 真机 fs IO 慢 | Android tmpfs 上 23 次 stat+open+read 总开销 < 5ms, 无感 |
 
 ### 不在本提案范围内的事

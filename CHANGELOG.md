@@ -1,4 +1,117 @@
 
+## v5.3.0-rc30.12.31
+
+**发布日期**: 2026-05-19
+**versionCode**: 530151
+**致谢**: TASK-a Stage 2 落地 (GPT 三审 P2.16 收口路径)
+
+### 概述
+
+rc30.12.30 (上一版) 收完 GPT P0 4 条 + 部分 P2. 本版按 `MIGRATION-PROPOSAL-dpi-rules-d.md`
+(Stage 1 提案, 同 commit 序列) 的 Stage 2 实施: dpid 加载器加 `dpi_rules.d/`
+分支, 但**本版仍走 legacy 单文件路径** — 模块还没 ship `data/dpi_rules.d/` 目录,
+新代码处于"预埋"状态. Stage 3 (下个或下下个 rc) 跑 `tools/dpi_rules_split.py`
+生成子文件 + 修 `webroot/index.html:5879` 后才真正切到新路径.
+
+风险评估: 低. 任何还没拿到 `etc/dpi_rules.d/` 目录的真机, dpid 行为跟
+rc30.12.30 字节级等价 — 同一份 `dpi_rules.json` 同样的 mtime cache 同样的
+externalRule 解析. 验收: `dpid.log` 里 version tag 仍是 `external:hnc-curated-v3-...`
+(`-d:` 前缀 = Stage 3 才出现), 装机后正常识别 144 条 App.
+
+### dpid 加载器 (`src/dpid/output/rule.go`)
+
+把单函数 `loadL3Rules()` 拆成 dispatcher:
+
+```go
+func loadL3Rules() loadedRules {
+    if lr, ok := loadL3RulesFromDir(); ok {
+        return lr
+    }
+    return loadL3RulesLegacy()
+}
+```
+
+新加 `loadL3RulesFromDir()`:
+
+- `os.Stat(externalRulesDir)` 不存在 → 立即返回 `(_, false)`, 走 legacy
+- `filepath.Glob("*.json")` + `sort.Strings(files)` → 文件名前缀 (`00-` .. `99-`)
+  控制 merge 优先级, `99-user-custom.json` 最后加载所以可覆盖 curated
+- 逐文件 stat + read + json.Unmarshal, 任一步失败 `log.Printf("WARN ...") + continue` — **单个坏子文件不让整批拆分丢规则**
+- 单子文件大小硬上限 1 MB (`externalRulesSubsetMaxBytes`), 超限 skip
+- 所有 rules 收齐后走原 `compileExternalRules`, 跟 legacy 路径共享同一份解析逻辑
+- merged version tag = `external-d:` + 各子文件 `rules_version` 逗号拼接
+
+`loadL3RulesLegacy()` 是 rc30.12.30 的 `loadL3Rules()` 原封改名, 行为字节级等价.
+mtime cache 加 prefix check (`!strings.HasPrefix(cached.version, "external-d:")`),
+防 dir/legacy 路径切换时 (aggregate mtime, sum size) 跟 (single mtime, size)
+巧合相等导致返回 stale cache.
+
+### dedup 保护 (compileExternalRules 末尾)
+
+```go
+// rc30.12.31 (TASK-a Stage 2): dedup by id, last-write-wins (nginx conf.d 风格).
+if len(out) > 1 {
+    seen := make(map[string]int, len(out))
+    dedup := out[:0]
+    for _, r := range out {
+        if idx, ok := seen[r.ID]; ok {
+            dedup[idx] = r // overwrite earlier entry
+            continue
+        }
+        seen[r.ID] = len(dedup)
+        dedup = append(dedup, r)
+    }
+    out = dedup
+}
+```
+
+legacy 单文件路径走这条代码也对的 — `dpi_rules.json` 没有同 id 重复, 不会触发. 主要给
+Stage 3 `99-user-custom.json` 用户自定义覆盖 curated 留可靠语义.
+
+### `service.sh` 子集目录同步
+
+在原 `dpi_rules.json` 升级逻辑后追加 `dpi_rules.d/` 同步块:
+
+```sh
+MOD_RULES_D="$MODDIR/data/dpi_rules.d"
+DPID_RULES_D="$HNC_DIR/etc/dpi_rules.d"
+if [ -d "$MOD_RULES_D" ]; then
+    # 跨升级保留 99-user-custom.json (用户本地抓包扩规则)
+    USER_CUSTOM_TMP=""
+    [ -f "$DPID_RULES_D/99-user-custom.json" ] && \
+        USER_CUSTOM_TMP="$HNC_DIR/etc/.99-user-custom.json.preserve.$$" && \
+        cp -f "$DPID_RULES_D/99-user-custom.json" "$USER_CUSTOM_TMP" 2>/dev/null
+    rm -rf "$DPID_RULES_D" 2>/dev/null
+    cp -r "$MOD_RULES_D" "$DPID_RULES_D" 2>/dev/null
+    # 修权限 + 还原 user-custom
+    chmod 755 "$DPID_RULES_D"
+    find "$DPID_RULES_D" -type f -name '*.json' -exec chmod 644 {} \;
+    [ -n "$USER_CUSTOM_TMP" ] && [ -f "$USER_CUSTOM_TMP" ] && \
+        mv "$USER_CUSTOM_TMP" "$DPID_RULES_D/99-user-custom.json"
+    log "dpid: synced dpi_rules.d/ ... subset files to $DPID_RULES_D"
+fi
+```
+
+本版 `$MODDIR/data/dpi_rules.d` 不存在 → `[ -d ... ]` 失败 → 整块 skip → service.sh
+跟 rc30.12.30 行为等价. Stage 3 模块开始 ship 这个目录时此块自动激活.
+
+### 还未做 (留给后续 rc)
+
+- **Stage 3** (下个或下下个 rc): 跑 `tools/dpi_rules_split.py` 生成 23 个子文件 + git add `data/dpi_rules.d/` + 修 `webroot/index.html:5879` (KSU WebUI "导出当前规则" 现在硬 `cat dpi_rules.json`, Stage 3 后这条命令读到老文件, 见 MIGRATION-PROPOSAL §5.3)
+- **Stage 4** (永不执行, v2 锁定): `dpi_rules.json` 留作 dpi_rules.d/ 路径出预料外问题时的 70 KB 保险, 不删. Stage 3 起 `dpi_rules.json` 变成由脚本生成的派生产物
+- **P2.13/14/15**: 别的 TASK 范围, 跟本任务无关
+
+### 验收
+
+- `go build ./output/...` 通过, gofmt 干净 (新代码无新增 diff; baseline 原有 5 处 struct 字段对齐遗留不在本任务范围, 红线 §2 "不打超出范围的修复")
+- `sh -n service.sh` syntax 通过; shellcheck `-S error` 无 error, `-S warning` 在新增段无 warning
+- 真机装上 rc30.12.31 → `dpid.log` 第一条 rule load 行的 version tag 仍 `external:hnc-curated-v3-...` (没有 `-d:` = 走 legacy = 行为等价 rc30.12.30) → ✓
+- 抓个微信/抖音/王者包看 ground_truth 仍命中 144 条规则 → ✓
+- `ls /data/local/hnc/etc/dpi_rules.d/` 应该看到目录不存在 (本版没 ship), 这是正常的 → ✓
+
+---
+
+
 ## v5.3.0-rc30.12.30
 
 **发布日期**: 2026-05-19

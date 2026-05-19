@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.30
-versionCode=530150
+version=v5.3.0-rc30.12.31
+versionCode=530151
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.30 · GPT 三审 P0 + 部分 P2 收口: (1) P0.1 handleLogout 不再依赖 isPublicPath ctx, handler 自己解 cookie + VerifyCookie + revoke, idempotent (cookie 无效仍 200, 有效真 revoke server-side token, 修堵 cookie 被偷 60 天有效期漏洞). (2) P0.2 checkLocalAdminSecret 抽 isValid64Hex 强制 64 hex 校验, 跟前端对齐. (3) P0.3 forceRemoteAuth 死变量删除 (rc30.12.18 默认拒绝后没人读它). (4) P0.4 apiHealth 删 session_label 死代码 (isPublicPath 下 token 永远 nil), app.js 加 deprecation 注释. (5) P2.11 hotfix16_7/8/9.go 按 patch 命名合并入功能型文件名 (action_hotspot_iface_set / api_live / capability). (6) P2.12 删 .bak 残留 + ci_preflight 扩展残留检查 + 修正 version 正则. (7) P2.17 ARCHITECTURE.md 追加 devices.json 权威 schema 三类来源.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.31 · TASK-a Stage 2: dpi_rules.d/ 加载器落地 (GPT P2.16 收口). (1) src/dpid/output/rule.go 加 loadL3RulesFromDir, glob etc/dpi_rules.d/*.json 顺序 merge, 单子文件解析失败 WARN log + skip 不中断, 目录缺失自动 fallback 到 legacy etc/dpi_rules.json (本版仍走 legacy, Stage 3 才生成子文件). (2) compileExternalRules 末尾加 id dedup (后入覆盖, nginx conf.d 语义), 给 99-user-custom.json 留可靠覆盖空间. (3) service.sh 加 dpi_rules.d/ 目录同步, rm -rf + cp -r 保证 rename 子文件无残留, 99-user-custom.json 跨升级保留. (4) ruleCache prefix check 防 legacy/dir 路径 (mtime,size) 巧合命中. 本版本机行为等价 rc30.12.30, 是死代码状态预埋, 待 Stage 3 真生成 dpi_rules.d/ 时激活.
 minKernelSU=11485

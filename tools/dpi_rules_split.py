@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# rc30.12.30 (TASK-a): dpi_rules.json -> dpi_rules.d/ 拆分迁移脚本.
+# rc30.12.30 (TASK-a) v2: dpi_rules.json -> dpi_rules.d/ 拆分迁移脚本.
 #
 # 用法 (在 hnc-v6 仓库根跑):
 #   python3 tools/dpi_rules_split.py               # 实际写文件
@@ -9,8 +9,8 @@
 # 红线 (跟 TASK-a 一致):
 #   - 这个脚本是工具, 不要在 commit 提案时同时生成 dpi_rules.d/*.json 进 git.
 #   - 实际拆分要等提案被 Ling 审过, 进入 Stage 3 时再跑.
-#   - 跑出来的子文件可直接 git add, 但要决定是否同时 git rm data/dpi_rules.json
-#     (推荐 Stage 4 才删, 给保险窗口).
+#   - 跑出来的子文件可直接 git add. v2 锁定: dpi_rules.json 保留作为
+#     dpi_rules.d/ 的派生产物 (双源, 由脚本同步生成, 不手编), 永不 git rm.
 #
 # 幂等性: 同输入 -> 同输出 (按 id 字典序 + bucket 编号顺序).
 # 99-user-custom.json 不被脚本写, 留给用户本地抓包扩规则.

@@ -547,6 +547,38 @@ else
         fi
     fi
 
+    # rc30.12.31 (TASK-a Stage 2): sync dpi_rules.d/ subset directory if the
+    # module ships one. dpid prefers etc/dpi_rules.d/*.json (globbed + merged)
+    # over the legacy single etc/dpi_rules.json. In rc30.12.31 the module
+    # doesn't ship dpi_rules.d/ yet so this block is dormant; Stage 3 (next rc)
+    # will start shipping the directory and this block will activate.
+    #
+    # Sync strategy: rm -rf the destination then cp -r the source. We don't
+    # try to merge user edits in /data/local/hnc/etc/dpi_rules.d/ because
+    # user-authored subsets belong in 99-user-custom.json, which the module
+    # never ships (so it survives this sync). If the user has rolled their
+    # own non-99 subset they'll lose it on upgrade — same trade-off as the
+    # legacy dpi_rules.json upgrade path above.
+    MOD_RULES_D="$MODDIR/data/dpi_rules.d"
+    DPID_RULES_D="$HNC_DIR/etc/dpi_rules.d"
+    if [ -d "$MOD_RULES_D" ]; then
+        # Preserve 99-user-custom.json across the resync if it exists.
+        USER_CUSTOM_TMP=""
+        if [ -f "$DPID_RULES_D/99-user-custom.json" ]; then
+            USER_CUSTOM_TMP="$HNC_DIR/etc/.99-user-custom.json.preserve.$$"
+            cp -f "$DPID_RULES_D/99-user-custom.json" "$USER_CUSTOM_TMP" 2>/dev/null
+        fi
+        rm -rf "$DPID_RULES_D" 2>/dev/null
+        cp -r "$MOD_RULES_D" "$DPID_RULES_D" 2>/dev/null
+        chmod 755 "$DPID_RULES_D" 2>/dev/null
+        find "$DPID_RULES_D" -type f -name '*.json' -exec chmod 644 {} \; 2>/dev/null
+        if [ -n "$USER_CUSTOM_TMP" ] && [ -f "$USER_CUSTOM_TMP" ]; then
+            mv "$USER_CUSTOM_TMP" "$DPID_RULES_D/99-user-custom.json" 2>/dev/null
+            chmod 644 "$DPID_RULES_D/99-user-custom.json" 2>/dev/null
+        fi
+        log "dpid: synced dpi_rules.d/ ($(find "$DPID_RULES_D" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l) subset files) to $DPID_RULES_D"
+    fi
+
     # rc22 (DFP): install default JA4 fingerprint library. Same soft-migration:
     # if user already has /data/local/hnc/etc/dpi_ja4_fingerprints.json we
     # respect it; otherwise drop the seed library shipped with the module.
