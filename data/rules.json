@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "whitelist_mode": false,
+  "auth_required": false,
+  "remote_enabled": false,
+  "hotspot_auto": false,
+  "hotspot_ssid": "",
+  "hotspot_pass": "",
+  "hotspot_delay": 60,
+  "hotspot_charging_only": false,
+  "stale_rule_ttl_days": 30,
+  "hotspot_time_enable": false,
+  "hotspot_time_start": "08:00",
+  "hotspot_time_end": "23:00",
+  "devices": {},
+  "blacklist": [],
+  "whitelist": []
+}

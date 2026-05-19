@@ -1,0 +1,34 @@
+{
+  "schema_version": "1.0",
+  "rules_version": "hnc-dfp-v0-seed",
+  "_comment_top": "HNC DFP (JA4 指纹库) v0 种子. 实际 JA4 值需在用户设备上抓包验证. 这份种子只列出 'JA4 算法本身的预期格式' 和几个文档公开的 JA4 值. 装机跑几天后, 拍下 DPI 页面里的 globalJA4 列表发回, 我根据真实数据迭代到 v1.",
+  "_comment_workflow": "当前 DFP 流程: 1) dpid 抓 ClientHello 并 sha256-truncate 成 JA4; 2) Top JA4 列表写进 dpi_state.json; 3) WebUI 显示原始 JA4 和 (如果匹配本库) 客户端名. 未匹配的 JA4 不会消失, 只是显示为原始字符串. 这样用户能看到 '哪些设备的 ClientHello 我们认识, 哪些不认识'.",
+  "_comment_publish": "JA4 库的最佳来源是 FoxIO 维护的 FingerprintDB (github.com/FoxIO-LLC/ja4). 但那个库主要面向企业服务器场景, 移动 app 覆盖较少. 国内 app 的 JA4 几乎没有公开数据. 这意味着 v1 库的内容主要靠你的设备实测.",
+
+  "fingerprints": [
+    {
+      "ja4": "t13d1517h2_8daaf6152771_b0da82dd1658",
+      "client": "Chrome",
+      "version": "120+",
+      "category": "browser",
+      "confidence": "high",
+      "_source": "FoxIO 公开样本, Chrome 桌面 120.x"
+    },
+    {
+      "ja4": "t13d1715h2_5b57614c22b0_3d5424432f57",
+      "client": "iOS Safari",
+      "version": "17.x",
+      "category": "browser",
+      "confidence": "medium",
+      "_source": "社区抓包"
+    },
+    {
+      "ja4": "t13d1716h2_5b57614c22b0_eeeeeeeeeeee",
+      "client": "iOS Safari (placeholder)",
+      "version": "?",
+      "category": "browser",
+      "confidence": "low",
+      "_source": "占位条目, 等真实数据替换"
+    }
+  ]
+}

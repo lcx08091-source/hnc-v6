@@ -1,0 +1,2271 @@
+<!-- v5.3.0-rc30.12.17 -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.3.0-rc30.12.17: 可复现构建小修 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>
+  <ul class="cl-list">
+    <li><b>src/hnc_httpd/web/ 补齐</b>: 从 daemon/ 同步 4 个 web 资源, src/ 现在能独立 go build。</li>
+    <li><b>build.sh 注入版本号</b>: 二进制 main.version 从 "dev" 修正为 v5.3.0-rc30.12.17, WebUI / API 现在显示真版本。</li>
+    <li><b>DPI API 自检通过</b>: build.sh 的 strings 检查覆盖 /api/dpi_state / /api/dpi_probe / apiDPIState / apiDPIProbe / dpi_rebind 5 个符号, 防止重 build 把路由编丢。</li>
+    <li><b>不变</b>: rc30.12.16 的 6 个 P0/P1 修复全部保留, DPI 规则 143 条不变。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.16 -->
+<div class="cl-section">
+  <div class="cl-title">🩹 v5.3.0-rc30.12.16: 止血版 (消化 GPT 二次审查 P0/P1) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-18</span></div>
+  <ul class="cl-list">
+    <li><b>P0-1</b>: service.sh <code>remote_enabled=false</code> 时不再硬编 <code>-bind 0.0.0.0</code>。新增 <code>launch_httpd_safe()</code> 函数统一处理, pre-launch + sentinel 都调用。</li>
+    <li><b>P0-2</b>: sentinel 块移到 <code>DPID_LAUNCHER</code> 定义之后, 不再让后台 subshell 拿到空变量, 守护链恢复有效。</li>
+    <li><b>P0-3</b>: src/dpid 源码同步到 <code>0.5.3-rc30.12.3-iface-retry</code>, <code>isRecoverableCaptureError</code> 加字符串 fallback, 源码和二进制现在一致, 不再有"从源码重 build 就退化"的坑。</li>
+    <li><b>P1-1</b>: 三个敏感读 API 加白名单 (<code>/api/alerts</code> / <code>/api/dpi_history</code> / <code>/api/app_limits</code>)。</li>
+    <li><b>P1-2</b>: loopback secret 缺失时分级 fallback。写接口 + 敏感读 fail-closed; 健康检查 + 首页兼容放行, 升级中临时无 secret 也不至于完全瘫。</li>
+    <li><b>P2-1</b>: <code>umask 077</code> 子 shell 隔离, 不污染后续脚本权限。</li>
+    <li><b>推迟</b>: build.sh 版本注入 (二进制 version="dev") / src/hnc_httpd 缺 web/ / launcher 源码 / app_limit 架构改造, 留 rc30.12.17。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.15 -->
+<div class="cl-section">
+  <div class="cl-title">🎬 v5.3.0-rc30.12.15: 快手专题 + VPN 抓包陷阱发现 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-18</span></div>
+  <ul class="cl-list">
+    <li><b>归属修正</b>: <code>xxpkg.com</code> + <code>kuiniuca.com</code> 从"未知 P2P"修正到<b>快手 P2P</b>。这是 4 次 pcap 累积后第一次有决定性证据重新归类。</li>
+    <li><b>快手升级 very_high</b>: 10 个域名族完整指纹 (gifshow/ksapisrv/kuaishou/kwaicdn/wsukwai/yximgs/kwimgs/kuaishouzt/inkuai + adkwai 广告 SDK + xxpkg/kuiniuca P2P)。<code>djvod.ndcimgs.com</code> 标注为字节 CDN 借用。</li>
+    <li><b>微信 PCDN 心跳 behavior marker</b>: <code>apd-pcdnwx*.teg.tencent-cloud.net</code> 三件套, 后台 ~5/min 心跳节奏, 可判断"微信是否在后台保活"。</li>
+    <li><b>VPN 双计费陷阱告警 (新元规则)</b>: <code>-i any</code> 抓 VPN 时 tun + rmnet 同字节流被记录两次。HNC tc 限速规则<b>只挂一个接口</b>, 推荐 rmnet_data2, 避免双重计费。</li>
+    <li><b>规则总数</b>: 141 → 143 (<b>very_high 12 → 15</b>, 加快手/微信 PCDN/VPN 陷阱)。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.14 -->
+<div class="cl-section">
+  <div class="cl-title">🔒 v5.3.0-rc30.12.14: 工程加固版 (消化 GPT 审查报告) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-18</span></div>
+  <ul class="cl-list">
+    <li><b>loopback 鉴权加固</b> (P0 核心): service.sh 生成 mode 0600 owner root 的 <code>local_admin.secret</code>, WebUI 通过 ksu.exec 读取注入 <code>X-HNC-Local-Admin</code> header. 普通 App 没 root 读不到, 无法绕过. 老部署无 secret 时 fallback 老行为, 平滑兼容.</li>
+    <li><b>Go 1.25 → 1.22 降级</b> + crypto v0.50→v0.31. 离线 CI / Ubuntu 22.04 全兼容. 二进制 6.6 MB → 6.2 MB.</li>
+    <li><b>HTTP 服务器补全超时</b>: 三个 server (HTTPS/重定向/loopback) 都加 ReadTimeout + WriteTimeout, 防 slowloris.</li>
+    <li><b>src/ vs daemon/ 源码统一</b>: 25 vs 25 文件对齐.</li>
+    <li><b>app_limit 双文件原子提交</b>: 任一失败回滚, 不再有"UI 成功但 shell 没生效"的不一致.</li>
+    <li><b>marker FD 修复</b>: <code>os.Create</code> → <code>os.WriteFile</code>, 不留悬挂 FD.</li>
+    <li><b>test runner 修复</b>: 41 个单元测试的 <code>$0</code> 路径问题, 改用 <code>HNC_TEST_FILE</code> env.</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.13 -->
+<div class="cl-section">
+  <div class="cl-title">👑 v5.3.0-rc30.12.13: 王者荣耀真机印证 + 腾讯游戏元规则 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-18</span></div>
+  <ul class="cl-list">
+    <li><b>王者荣耀 very_high 规则</b>: 识别 6 个内部代号 (yxzj/sgame/smoba/koh/kohesport/estv + pvp/ingame), 4 个测量服务器, 12 个 subdomain patterns.</li>
+    <li><b>腾讯游戏地理分布元规则</b>: 火影 prod-{nj,gz,cq,tj}.ino.hyrz 跟王者 measurement.{tj,sh,gz,cq}.prod.smoba 命名完全对称. HNC 见 <code>&lt;X&gt;.{region}.&lt;X&gt;.qq.com</code> 几乎必然是腾讯游戏 IDC.</li>
+    <li><b>腾讯游戏代号对照表元规则</b>: 完整覆盖王者/和平/火影/CF 手游的所有内部代号. HNC 见任意代号即可反查具体游戏.</li>
+    <li><b>Microsoft 遥测 Realme 基线量化</b>: 5min 约 24 包稳定基线, 用频率超基线检测真实使用.</li>
+    <li><b>Realme 预装第三方识别</b>: 作业帮/西番有梨等背景流量, 标 do_not_attribute_to_user_app.</li>
+    <li><b>规则总数</b>: 137 → 141 (<b>very_high 10 → 12</b>).</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.12 -->
+<div class="cl-section">
+  <div class="cl-title">🧹 v5.3.0-rc30.12.12: DPI 规则清理 + 抖音 confidence 升级 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-18</span></div>
+  <ul class="cl-list">
+    <li><b>合并 5 对重复规则</b>: peace_elite → tencent_pubgmhd_exclusive · discord_extra → discord · telegram_extra → telegram · wechat_extra → wechat · kuaishou_main_app → kuaishou. 每次都把独有 suffix 合并到主规则,不丢任何识别能力。</li>
+    <li><b>抖音 confidence 升级</b>: high → <b>very_high</b>。35 个 suffix 完整覆盖字节系生态 + 两次真机 pcap 印证 (K80 + 主机)。</li>
+    <li><b>规则数</b>: 142 → 137. very_high: 9 → 10。</li>
+    <li><b>保留的合理冗余</b>: 小米 3 条 (设备指纹 + 更新 + 商业子品牌, 不同维度) · 快手主程序 + 广告 SDK · 企业微信 vs 微信。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.11 -->
+<div class="cl-section">
+  <div class="cl-title">🎯 v5.3.0-rc30.12.11: DPI 规则二次扩充 (PUBG pcap 印证) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-18</span></div>
+  <ul class="cl-list">
+    <li><b>和平精英专属指纹</b>: <code>hpjy.itop.qq.com</code> (hpjy = 拼音首字母) + <code>*.418021106.gcloudpg.qq.com</code> (418021106 = 腾讯 appid)。从"判定有腾讯游戏"升级到"确认就是和平精英"。</li>
+    <li><b>腾讯游戏通用模式</b>: <code>*.broker.tplay.qq.com</code> 前缀 = 游戏代号 (hyrz/cjm/sgame), <code>*.ino.&lt;game&gt;.qq.com</code> 中段 = 游戏代号。一条规则覆盖多游戏。</li>
+    <li><b>行为标记规则 (新分类)</b>: <code>game.eve.mdt.qq.com</code> 查询频率作为应用前台/后台/已杀的金标准 (>10/min 前台, 1-5/min 后台, 0/min 已杀)。HNC 不再只识别应用, 还能判断状态。</li>
+    <li><b>Realme 游戏空间触发信号</b>: <code>gc-gamespace-cn.heytapmobi.com</code> 用 ROM 自己做游戏识别。</li>
+    <li><b>迅游加速器规则</b>: 玩腾讯国服游戏标配, 强辅助信号。</li>
+    <li><b>规则总数</b>: 135 → 142。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.10 -->
+<div class="cl-section">
+  <div class="cl-title">✏️ v5.3.0-rc30.12.10: DPI 规则修正 (撤销 rc30.12.9 粗糙规则, 用外部 AI 精确版) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-18</span></div>
+  <ul class="cl-list">
+    <li><b>撤销 rc30.12.9 的 4 条粗糙规则</b>: bytedance_ecdn / p2p_cdn_acceleration / tencent_anticheat / p2p_webrtc_stun, 归属判断不够充分。</li>
+    <li><b>新增火影忍者 OL</b> (very_high 置信): K80 客户端前台主玩, game.eve.mdt.qq.com x272 + 4 个对战服务器印证。</li>
+    <li><b>新增腾讯游戏通用 SDK</b> (very_high): 20 个后缀, 命中可判定有腾讯游戏在跑, 但定位具体游戏需配合专属规则。</li>
+    <li><b>新增小米 mDNS 设备指纹</b>: _lyra-mdns / _mi-connect / _miplay_lan 三件套, 100% 准确识别小米设备。</li>
+    <li><b>快手主程序 vs 广告 SDK 区分</b>: adkwai/adukwai 单独成规则, 不再误判为 "用了快手"。</li>
+    <li><b>西瓜视频歧义规则</b>: ixigua.com 在字节系作为抖音直播 CDN, 标 medium + 配合判断。</li>
+    <li><b>douyin 补全 18 个 suffix</b>: 完整字节系 ECDN + 火山 + 电商, 共 26 后缀。</li>
+    <li><b>规则总数</b>: 126 → 135。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.9 DPI rules merge -->
+<div class="cl-section">
+  <div class="cl-title">📋 v5.3.0-rc30.12.9: DPI 规则更新 (基于真机 36 分钟抓包) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-18</span></div>
+  <ul class="cl-list">
+    <li><b>新增 4 条规则</b>: 字节系 ECDN (ndcpp.com / bytegecko.com 等 5 个后缀) · P2P CDN 加速 (comfylink/cjjd14/dahhxxttxs 等 7 个) · 腾讯反作弊 (anticheatexpert.com) · WebRTC STUN (xdrtc.com)。</li>
+    <li><b>增强 4 条已有规则</b>: 抖音加 douyinliving.com / 小米加 xiaomi.net / QQ音乐加 tencentmusic.com / 腾讯广告加 sogou.com。</li>
+    <li><b>规则总数</b>: 126 → 130, rules_version 升级触发 service.sh 自动备份用户旧版并安装新版。</li>
+    <li><b>数据来源</b>: 真机 441 MB pcap / 2203 秒 / 1421 unique 域名 / 10645 命中。覆盖 13 个前台 App + 火影忍者 OL 后台抓取。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.8 compatibility diagnostic system -->
+<div class="cl-section">
+  <div class="cl-title">🩺 v5.3.0-rc30.12.8: 兼容性诊断体系完善 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>capability_probe.sh 新增 17 个字段</b>: 把今天 fork EPERM 诊断收集的所有关键信息 (c_fork / go_fork / kernel_blocks_clone_vm / selected_launcher / dpid_has_iface_retry / selinux/seccomp 状态) 固化进运行时探测, WebUI 兼容性能力卡片自动显示。</li>
+    <li><b>bin/diag/ 新目录</b>: fork_probe + gofork_probe.go 源码 + diag.sh 一键 13 项诊断脚本。<code>su -c '/data/local/hnc/bin/diag/diag.sh'</code> 即可生成完整报告。</li>
+    <li><b>COMPATIBILITY.md 彻底重写</b>: 加 Go fork EPERM 已知问题段, 加按风险排序的待测 ROM 表 (OxygenOS 风险🟥 / MIUI 🟧 / Pixel 🟩), 加 WebUI 内查兼容性指南。</li>
+    <li><b>新增 ARCHITECTURE.md + EVOLUTION.md</b>: 内部架构手册 (10 章 600 行) + 项目演化史 (13 章 400 行)。给未来的你 / AI 看。</li>
+    <li><b>二进制无改动</b>: 跟 rc30.12.7 完全一致, 只是文档和诊断能力补齐。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.7 device page animation timing -->
+<div class="cl-section">
+  <div class="cl-title">🎬 v5.3.0-rc30.12.7: 设备页入场动画时序统一 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>修动画乱序</b>: <code>device-filter-bar</code> 之前没有动画 0s 立即出现, 其他组件 0.16-0.30s 延迟入场, 视觉上"设备过滤独自先显示"。</li>
+    <li><b>按 DOM 自上而下</b>: hero 0.14s → search 0.18s → filter 0.22s → global-ops 0.26s → label 0.28s → toolbar 0.30s, 形成自然的瀑布式入场。</li>
+    <li><b>只改 CSS</b>: 不动 JS、不动二进制, 装上即生效。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.6 DPI page reorder + text clip fix -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.3.0-rc30.12.6: DPI 页排序 + 文字被切修复 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>进程诊断 + 能力探测上移</b>: 排到设备应用画像之后, 折叠组之前 — 这两个是常用诊断, 不该藏起来。</li>
+    <li><b>修空状态文字被切 bug</b>: <code>dpi-l2-summary</code> 和 <code>dpi-empty</code> 在 <code>.setting-group</code> (overflow:hidden + 圆角) 里没有内 padding, 文字贴到玻璃边框被圆角切掉。加 16px 内 padding。</li>
+    <li><b>UI 统一</b>: 字号 12→13px, 行距 1.55→1.7, DPI 页所有空状态文字视觉一致。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.5 DPI typography + always-on diag -->
+<div class="cl-section">
+  <div class="cl-title">📝 v5.3.0-rc30.12.5: DPI 字体优化 + 诊断常显 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>进程诊断 + 能力探测不再折叠</b>: 默认展开 — 这是日常需要看的状态, 不该需要点击才看到。</li>
+    <li><b>关于 DPI 模块 字体优化</b>: 13→14px, 行距 1.7→1.85, 段间距 10→14px, 加 0.01em 字间距 — 中英文混排更舒展。</li>
+    <li><b>代码块加深</b>: 加深背景 + 边框, 不再"隐形", 视觉锚点更清晰。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.4 device page layout + DPI collapsible -->
+<div class="cl-section">
+  <div class="cl-title">🎨 v5.3.0-rc30.12.4: 设备页布局 + DPI 折叠组 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>设备页 DOM 顺序重排</b>: 搜索 → 设备过滤 → <b>全局操作上移</b> → 批量/模板 chip → 设备列表。让"设备过滤 + 全局操作"两个主要功能视觉相邻, 次要的批量/模板放后面。</li>
+    <li><b>DPI 页可折叠 sec-title</b>: 7 个次要 section 默认折叠 (未识别域名 / 规则库 / nDPI 高级诊断 / 进程诊断 / 能力探测 / 事件流 / 关于 DPI), 点击 sec-title 切换展开。</li>
+    <li><b>视觉简洁</b>: DPI 页从原来"信息一坨"变成"核心信息 + 可展开细节", 减少毛坯感。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12.3 dpid retry root fix -->
+<div class="cl-section">
+  <div class="cl-title">🎯 v5.3.0-rc30.12.3: dpid 启动盲模式根治 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>真凶定位</b>: dpid <code>isRecoverableCaptureError()</code> 只看 syscall errno (<code>ENODEV</code>/<code>ENETDOWN</code> 等), 但 Go std lib <code>net.InterfaceByName()</code> 在接口不存在时返回的是<b>字符串错误</b> ("no such network interface"), 不是 syscall errno。旧代码判定不可恢复 → dpid 进 Blind idle → 必须用户手动点"重新绑定 DPI"才会重启。</li>
+    <li><b>修法</b>: 改 <code>dpid/cmd/dpid/main.go</code> line 429, 加字符串匹配 "no such network interface" / "no such device" / "network is down/unreachable"。</li>
+    <li><b>效果</b>: 接口未就绪时 dpid 自动每 2 秒重试 bind, 接口 ready 后自动绑成功。<b>不再需要手动点重新绑定</b>。</li>
+    <li><b>重编</b>: hnc_dpid 重新交叉编译 (Go 1.22, CGO_ENABLED=0 GOARCH=arm64), 版本号 <code>0.5.3-rc30.12.3-iface-retry</code>。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.12 C launcher replaces Go supervisor -->
+<div class="cl-section">
+  <div class="cl-title">🚀 v5.3.0-rc30.12: C launcher 替代 Go supervisor <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>ColorOS 16 Go fork EPERM 真凶定位</b>: Go runtime 用 <code>clone(CLONE_VM | CLONE_VFORK | SIGCHLD)</code> 的 vfork-style 路径在 ColorOS 16 内核 hook 拦截。系统层面完全没限制 (Seccomp=0, full caps, 无 AVC denied), 但 Go fork+exec 必报 EPERM。C bionic <code>fork()+execv()</code> 100% 工作。</li>
+    <li><b>新增 bin/hnc_launcher</b>: 724KB C 写的 dpid 守护进程, 静态链接 NDK API 21, 绕开 Go runtime vfork 路径。替代 rc30.0 的 <code>hnc_dpid_supervisor</code> (Go)。</li>
+    <li><b>新增 bin/fork_probe</b>: 启动时探测 C fork+execv 是否工作, 通过 → C launcher (优雅路径), 失败 → shell guard (兼容 Android 5+ 老路径)。<b>永远不会比 rc30.11 差</b>。</li>
+    <li><b>接口就绪检测</b>: launcher 在 fork dpid 之前等 wlan2 既存在 (<code>/sys/class/net</code>) 又有路由 (<code>/proc/net/route</code>) 才启动。</li>
+    <li><b>进程数</b>: 之前 7 个 (3 个 guard.sh + 4 个 daemon), 现在 5 个 (1 个 launcher + 4 个 daemon)。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.11 shell pre-launch + sentinel -->
+<div class="cl-section">
+  <div class="cl-title">🛟 v5.3.0-rc30.11: shell pre-launch + 哨兵 (作废, 已被 rc30.12.3 吸收) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>第一次绕过 Go fork EPERM 的尝试</b>: 让系统能用, 但 Go supervisor 本身仍然起不来 (sentinel 反复试启动徒劳)。</li>
+    <li><b>post-fs-data.sh 同时 chmod 模块目录和运行时目录</b>, 避免 sync 之前文件没 +x。</li>
+    <li><b>加 chcon u:object_r:system_file:s0 兜底</b>, 避免 cp 把 context 改成 system_data_file。</li>
+    <li><b>service.sh shell pre-launch hnc_dpid_supervisor + hnc_httpd</b>, 不依赖 Go watchdog。</li>
+    <li><b>30s 哨兵循环</b>: 后台巡检 4 个核心进程, 死了 shell 拉起。</li>
+    <li><b>rc30.11 的所有修复在 rc30.12.3 里都保留</b>, 只是不再依赖 Go supervisor。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.10 honor of kings rules -->
+<div class="cl-section">
+  <div class="cl-title">🎮 v5.3.0-rc30.10: 王者荣耀规则大幅扩充 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>真机抓包 134K 包 30 分钟</b>: IPv4 5→10 段 + IPv6 0→2 段。</li>
+    <li><b>噪音段剔除</b>: 抓包工具 v3.1, 改 SNI → 跑脚本 → 改规则的半自动流程。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.9 hotspotd sub-second debounce -->
+<div class="cl-section">
+  <div class="cl-title">⚡ v5.3.0-rc30.9: hotspotd 亚秒级 de-bounce <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>新设备识别延迟 5s → 亚秒级</b>: 本地 NDK 编 minimal 版 (去掉 BPF adapter / LSM loader, 容器编不动 libbpf), 5 处 g_last_event_ms 同步 + 主循环新算法。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.8 supervisor chmod fix -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.3.0-rc30.8: supervisor chmod 列表补全 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li>rc30.0/rc30.1 加的 Go 二进制之前漏掉了 chmod (hnc_watchdog / hnc_dpid_supervisor)。</li>
+    <li>ps 扫描代替 pidof (pidof 在 Android toybox 上有 15 字符进程名限制)。</li>
+    <li>ensure_tc_uplink 冷却防止反复触发。</li>
+    <li>WebUI 250ms burst refresh。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc30.0-30.7 Go supervisor + watchdog era -->
+<div class="cl-section">
+  <div class="cl-title">🔄 v5.3.0-rc30.0 ~ rc30.7: Go supervisor + watchdog 引入期 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-17</span></div>
+  <ul class="cl-list">
+    <li><b>rc30.0</b>: 引入 Go <code>hnc_dpid_supervisor</code> 替代 shell <code>hnc_dpid_guard.sh</code>。⚠️ 在 ColorOS 16 + SukiSU 上 Go supervisor 起不来, 完整修复在 rc30.12.3。</li>
+    <li><b>rc30.1</b>: 引入 Go <code>hnc_watchdog</code> 替代老 shell watchdog 主循环。⚠️ 同样的 Go fork EPERM 问题。</li>
+    <li><b>rc30.2</b>: dpid 限速优化, 应用粒度限速 (按"抖音""王者"限带宽)。</li>
+    <li><b>rc30.3</b>: nDPI 集成。常驻 daemon, 抓 UDP/443 + TCP/443, RFC 9001 QUIC Initial 解密 + IP→SNI 反查表给主线 dpid。电池开销 1-3%。</li>
+    <li><b>rc30.4</b>: hw-banner 修复。Banner 在 hotspotd 进程内部加广播, 不通过 sysfs 写, 兼容更多设备。</li>
+    <li><b>rc30.5</b>: 设备命名增强。mDNS / DHCP / OUI 联合查询, 设备名 fallback 链。</li>
+    <li><b>rc30.6</b>: 异常流量检测。dpid 看到设备某 app 流量异常 (5x 移动平均) 时主动 emit alert, watchdog 读取后推送到 WebUI。</li>
+    <li><b>rc30.7</b>: 应用粒度限速 + 流量历史。WebUI 加流量分布饼图, 24h 应用流量趋势图。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc7 SQM incremental apply -->
+<div class="cl-section">
+  <div class="cl-title">🧠 v5.3.0-rc7: SQM 增量应用 / 防卡顿 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-08</span></div>
+  <ul class="cl-list">
+    <li><b>不再全量 restore</b>: <code>sqm_manager.sh apply</code> 不再调用 <code>tc_manager.sh restore</code>，避免点击 SQM 按钮时重建整套 TC。</li>
+    <li><b>增量 leaf apply</b>: 只替换默认 <code>parent 1:9999 handle 9999:</code> leaf qdisc，不动 HTB root、设备 class/filter、iptables、IFB 或 BPF。</li>
+    <li><b>CAKE fallback</b>: 当前内核不支持 CAKE 时自动回退 <code>fq_codel</code>，WebUI 明确提示不支持。</li>
+    <li><b>WebUI 防连点</b>: 新增 <code>sqmBusy</code> 状态，应用过程中禁用 SQM 按钮，避免并发请求导致 WebView 卡顿。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc5 release gate and gray closeout -->
+<div class="cl-section">
+  <div class="cl-title">🧪 v5.3.0-rc5: 发布链路 / 灰度收口 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-08</span></div>
+  <ul class="cl-list">
+    <li><b>Actions 双层 ZIP 自动识别</b>: 新增 <code>bin/artifact_pick_flashable.sh</code>，可自动提取外层 artifact 里的真正可刷模块包。</li>
+    <li><b>实机最小自检</b>: 新增 <code>bin/rc_selfcheck_v53.sh</code>，一键检查 <code>hnc_httpd</code> 版本、<code>/api/sqm</code>、SQM 能力和当前 qdisc。</li>
+    <li><b>测试残留清理</b>: 新增 <code>bin/hnc_cleanup_test_rules_v53.sh</code>，默认 dry-run，只允许清理 <code>parent 1:&lt;classid&gt;</code> 下的 netem leaf，不碰 root qdisc。</li>
+    <li><b>CI 收口</b>: <code>ci_preflight --artifact</code> 会先定位真实 flashable ZIP，再执行严格产物校验。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc4 artifact sanity gate -->
+<div class="cl-section">
+  <div class="cl-title">📦 v5.3.0-rc4: 安装包/编译产物门禁 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-07</span></div>
+  <ul class="cl-list">
+    <li><b>双层 ZIP 防误刷</b>: 新增 <code>bin/artifact_sanity_check.sh</code>，直接检测 GitHub Actions 外层包套内层模块包的情况。</li>
+    <li><b>Go 二进制校验</b>: 检查 <code>hnc_httpd</code> 是否为 Android ARM/AArch64 ELF，并确认内嵌当前 <code>module.prop</code> 版本。</li>
+    <li><b>SQM 符号校验</b>: v5.3 包会额外检查 <code>/api/sqm</code>、<code>apiSQMStatus</code>、<code>actionSQMSet</code> 是否编进后端。</li>
+    <li><b>CI 接入</b>: <code>ci_preflight --artifact</code> 会调用严格门禁，避免 WebUI 是新版但后端仍是旧二进制。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc3 Smart Queue gray preset diagnostics -->
+<div class="cl-section">
+  <div class="cl-title">🧠 v5.3.0-rc3: Smart Queue 灰度增强 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-06</span></div>
+  <ul class="cl-list">
+    <li><b>预设增强</b>: 新增均衡、游戏、弱网、较差 SQM 预设，弱网预设只填入单设备输入框，不会全局强制制造丢包。</li>
+    <li><b>状态细化</b>: <code>/api/sqm</code> 返回 schema 2，增加 <code>preset</code>、<code>presets</code>、<code>recommended_leaf</code>、<code>detected_leaf</code>、<code>reason</code>。</li>
+    <li><b>诊断增强</b>: 新增 <code>bin/sqm_gray_diag.sh</code>，一键导出 SQM 状态、capabilities、qdisc/class/filter 和日志尾部。</li>
+    <li><b>WebUI 接入</b>: 设置页新增 SQM 诊断按钮，设备卡新增“填入预设”按钮，方便游戏/弱网灰度测试。</li>
+  </ul>
+</div>
+
+<!-- v5.3.0-rc2 Smart Queue control plane -->
+<div class="cl-section">
+  <div class="cl-title">🧠 v5.3.0-rc2: Smart Queue 低延迟控制面 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-06</span></div>
+  <ul class="cl-list">
+    <li><b>新增 API</b>: <code>/api/sqm</code> 读取 <code>sqm_manager.sh status</code>，显示 SQM 模式、推荐模式、qdisc 摘要和 fq_codel/CAKE 支持状态。</li>
+    <li><b>新增写操作</b>: <code>/api/action</code> 支持 <code>sqm_set</code>，统一保存 <code>sqm_mode</code> / <code>sqm_profile</code> 并可触发 leaf qdisc 重建。</li>
+    <li><b>WebUI 接入</b>: 设置页新增 Smart Queue 面板，支持关闭、自动、低延迟、CAKE、游戏模式，以及均衡/游戏/下载配置档。</li>
+    <li><b>兼容策略</b>: 默认关闭，不改变旧版限速链路；不支持的 qdisc 会置灰，真实延迟/丢包仍由 netem 接管。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix16.9 TC unsupported fast-fail -->
+<div class="cl-section">
+  <div class="cl-title">🧯 v5.1.0-rc1-hotfix16.9: TC 能力门控 / 限速延迟禁用防卡死 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-26</span></div>
+  <ul class="cl-list">
+    <li><b>下行限速门控</b>: <code>tc_htb=false</code> 时 WebUI 禁用下行/上行限速输入和应用按钮。</li>
+    <li><b>延迟门控</b>: <code>tc_netem=false</code> 或 <code>tc_htb=false</code> 时禁用延迟、抖动、丢包注入。</li>
+    <li><b>后端快速返回</b>: <code>rule_set</code> / <code>delay_set</code> 在能力不支持时返回 <code>unsupported</code>，不再等待 tc 超时。</li>
+    <li><b>watchdog 降噪</b>: 不支持 HTB 的设备不再反复 init/restore TC，避免后台刷日志与耗电。</li>
+    <li><b>设置页兼容</b>: <code>/api/metrics</code> 404 显示兼容模式，<code>/api/capabilities</code> 404 自动读取本地能力文件。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix16.6 P0 uplink downgrade closure -->
+<div class="cl-section">
+  <div class="cl-title">🧊 v5.1.0-rc1-hotfix16.6: P0 上行降级闭环 / 远程 WebUI 同步 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-26</span></div>
+  <ul class="cl-list">
+    <li><b>编译修复</b>: 修复 hotfix16.5 Go 源码补丁中的 helper 命名错误，确保 hnc_httpd 可重新编译。</li>
+    <li><b>设置页修复</b>: 修复本地 WebUI 进入设置页时诊断刷新函数作用域错误。</li>
+    <li><b>远程同步</b>: 远程 WebUI 也会读取 <code>/api/capabilities</code>，上行不可用时禁用上行输入。</li>
+    <li><b>构建优化</b>: Go 构建脚本优先使用 vendor 依赖，降低 Termux/GitHub Actions 编译卡住概率。</li>
+    <li><b>闭环目标</b>: 小米10 / MIUI14 等 <code>uplink_supported=false</code> 环境点击限速不再卡死，下行继续生效。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix16.5 capability-gated uplink downgrade -->
+<div class="cl-section">
+  <div class="cl-title">🧊 v5.1.0-rc1-hotfix16.5: 上行能力降级 / MIUI14 限速防卡死 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-26</span></div>
+  <ul class="cl-list">
+    <li><b>防卡死</b>: 当 <code>uplink_supported=false</code> 时, 不再反复尝试 <code>ifb0</code> / <code>mirred</code>, 避免点击限速后后端超时。</li>
+    <li><b>下行保留</b>: 上行不可用时自动降级为 <code>downlink_only</code>, 下行限速继续生效。</li>
+    <li><b>watchdog 降噪</b>: watchdog 读取能力检测结果, 不支持上行整形时跳过 uplink repair, 减少刷日志和耗电。</li>
+    <li><b>WebUI 提示</b>: WebUI 会禁用上行输入框并提示当前设备不支持上行限速, 模板/批量应用也会自动把上行置 0。</li>
+    <li><b>适用场景</b>: 小米10 / MIUI14、部分 ColorOS 内核等 IFB/mirred 不可用环境。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix16.4 MIUI14 TC degraded backend -->
+<div class="cl-section">
+  <div class="cl-title">🛠️ v5.1.0-rc1-hotfix16.4: MIUI14 TC 降级兼容 / delay 0ms 修复 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-26</span></div>
+  <ul class="cl-list">
+    <li><b>延迟修复</b>: 修复 <code>set_delay()</code> 在 IFB 失败后短路, 导致热点接口 leaf netem 停留在 <code>delay 0ms</code> 的问题。</li>
+    <li><b>降级生效</b>: IFB/mirred 不可用时, 延迟降级为 <code>egress_only</code>, 下行/热点到客户端方向仍写入真实 delay。</li>
+    <li><b>限速降级</b>: 双向限速在上行 IFB 不可用时保留下行限速, 标记为 <code>down_only</code>, 不再整体失败或回滚。</li>
+    <li><b>watchdog 降噪</b>: 新增 <code>uplink_unsupported</code> marker 和冷却, 避免不支持上行整形的设备反复修复到 passive。</li>
+    <li><b>能力检测</b>: <code>capability_probe.sh</code> 改用 dummy 设备优先, 增加 <code>uplink_supported</code> 等字段, 减少 MIUI14 假阴性。</li>
+    <li><b>诊断增强</b>: 诊断包增加 <code>tc -s qdisc/class/filter</code> 与 ifb0 状态输出。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix16.2 rules write / TC fallback repair -->
+<div class="cl-section">
+  <div class="cl-title">🧯 v5.1.0-rc1-hotfix16.2: rules.json 写入回归 / TC fallback 修复 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+  <ul class="cl-list">
+    <li><b>修复写入回归</b>: 修复 <code>json_set.sh</code> / <code>json_set_batch.sh</code> 被打包成空路径写入的问题, 之前会导致 <code>atomic_write: tmp empty</code>。</li>
+    <li><b>自动修复坏配置</b>: 新增 <code>rules_repair.sh</code>, 启动时自动把遗留的裸 IP 写法 <code>"ip": 192.168.x.x</code> 修成合法 JSON 字符串。</li>
+    <li><b>TC fallback</b>: 当 ColorOS 热点接口保持 <code>qdisc mq</code> root 且 root HTB 添加失败时, 尝试在 mq child <code>:1</code> 下挂载 HNC handle <code>1:</code>。</li>
+    <li><b>IFB fallback</b>: <code>hnc_tc_ingress</code> 误报 ifb0 不存在时不再立即放弃, 会继续尝试 shell tc fallback。</li>
+    <li><b>边界</b>: 本轮仍不做 SSE/WebSocket, 不进行大规模 tc / iptables / watchdog 重构。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix16.1 local diagnostics visibility -->
+<div class="cl-section">
+  <div class="cl-title">🩺 v5.1.0-rc1-hotfix16.1: 本地诊断可视化 / 诊断包补充 API 快照 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+  <ul class="cl-list">
+    <li><b>控制面指标</b>: 设置页新增 <code>/api/metrics</code> 摘要, 可直接查看 snapshot age、JSON cache、shell fallback、offload check 等计数。</li>
+    <li><b>兼容性能力</b>: 设置页新增 <code>/api/capabilities</code> 摘要, 更容易确认 iptables/tc/IFB/netem 能力检测结果。</li>
+    <li><b>诊断包增强</b>: <code>debug_bundle.sh</code> 会额外保存 <code>/api/live</code>、<code>/api/metrics</code>、<code>/api/capabilities</code> 输出, 便于后续排查。</li>
+    <li><b>边界</b>: 本轮仍不改 tc / iptables / watchdog 数据面, 不新增 SSE/WebSocket。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix16 diagnostics / schema hardening -->
+<div class="cl-section">
+  <div class="cl-title">🧰 v5.1.0-rc1-hotfix16: 诊断包 / 接口偏好 / 配置写入加固 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+  <ul class="cl-list">
+    <li><b>诊断包导出</b>: 本地 WebUI 维护页新增一键导出, 会收集脱敏规则、设备快照、日志尾部、能力检测和 ip/tc/iptables 状态到 <code>/sdcard/Download</code>。</li>
+    <li><b>热点接口偏好</b>: 设置页可填写 <code>auto</code> / <code>wlan2</code> / <code>ap0</code> 等偏好值, 便于 ColorOS/多 ROM 兼容调试。</li>
+    <li><b>规则导出</b>: 维护页保留一键复制 <code>rules.json</code>, 便于备份与审查。</li>
+    <li><b>配置 schema</b>: 新增 <code>schema_version</code> 与 <code>hotspot_iface</code> 默认字段, 升级时自动补齐。</li>
+    <li><b>写入加固</b>: <code>json_set.sh</code> / <code>json_set_batch.sh</code> 写入前保存 last-good 备份, 降低半写/误写后的恢复成本。</li>
+    <li><b>边界</b>: 本轮仍不重构 tc / iptables / watchdog 数据面。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix15.2 live freshness / refresh modes / metrics -->
+<div class="cl-section">
+  <div class="cl-title">📡 v5.1.0-rc1-hotfix15.2: 数据新鲜度 / 刷新模式 / Metrics <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+  <ul class="cl-list">
+    <li><b>/api/live 首屏优化</b>: 当 snapshot 因空闲降频而过旧时, 先立即返回旧缓存并异步唤醒刷新。</li>
+    <li><b>数据新鲜度显示</b>: 本地与远程 WebUI 显示“已更新/数据可能已过期/正在刷新”。</li>
+    <li><b>刷新模式</b>: 新增实时 / 均衡 / 省电三档, 只调整 WebUI 前台轮询频率。</li>
+    <li><b>/api/metrics</b>: 新增控制面指标接口, 可查看 snapshot、JSON cache、shell fallback、offload 和 API 计数。</li>
+  </ul>
+</div>
+<!-- v5.1.0-rc1-hotfix15.1 idle power polish -->
+<div class="changelog-entry">
+  <div class="cl-title">🌙 v5.1.0-rc1-hotfix15.1: 空闲降频 / 按需 offload / JSON 缓存 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+  <ul>
+    <li>WebUI 关闭时 snapshot 后台刷新降到 15s/30s，降低空闲功耗。</li>
+    <li>offload 状态改为按需缓存，不再后台每 30s 跑含 sleep 5 的 check_offload.sh。</li>
+    <li>devices/rules/names JSON 增加 mtime/size 缓存与 last-valid 保留，半写/损坏时不让规则从 UI 消失。</li>
+    <li>远程 WebUI 改用 /api/live + devices_sig，页面隐藏时暂停轮询。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix15.1 control-plane latency -->
+<div class="cl-item">
+  <div class="cl-title">⚡ v5.1.0-rc1-hotfix15.1: 控制面低延迟 / 低功耗轮询 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+  <div class="cl-tags">
+    <span class="cl-tag fix">/api/live</span>
+    <span class="cl-tag opt">Snapshot 缓存</span>
+    <span class="cl-tag opt">低功耗轮询</span>
+  </div>
+  <ul>
+    <li><b>新增轻量接口</b>: <code>/api/live</code> 返回热点状态、在线数、总速率与 <code>devices_sig</code>, 前端不再每秒拉完整设备表。</li>
+    <li><b>后端缓存</b>: <code>hnc_httpd</code> 后台维护不可变 snapshot, <code>/api/live</code> / <code>/api/devices</code> 直接读缓存, 减少 JSON 读取和合并开销。</li>
+    <li><b>减少 shell fork</b>: 热点接口探测优先走 Go 原生 <code>net.Interfaces()</code> + 私网 IPv4 校验 + ARP hint, <code>device_detect.sh iface</code> 只作低频 fallback。</li>
+    <li><b>WebUI 自适应刷新</b>: 设备页高频只拉 live, <code>devices_sig</code> 变化或写操作后才 full refresh; 后台暂停, 回前台立即刷新。</li>
+    <li><b>热点关闭体验</b>: UI 立即显示 0 在线 / 0 速率, 但不删除历史设备和规则。</li>
+    <li><b>边界</b>: 本轮不改 tc / iptables / watchdog 数据面, 降低破坏限速链路的风险。</li>
+  </ul>
+</div>
+
+<!-- v5.1.0-rc1-hotfix14 hotspot-off UI latency -->
+<div class="cl-entry">
+  <div class="cl-title">📴 v5.1.0-rc1-hotfix14: 热点关闭后的在线状态 / UI 延迟修复 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+  <ul>
+    <li>修复“只看在线”过滤下所有设备离线时误显示“渲染失败”的问题。</li>
+    <li>设备页轮询从 2.5s 调整为 1s,并在回到前台时立即刷新。</li>
+    <li>热点关闭后通过 iface_info 实时闸门把在线数和上下行速率立即归零,避免 devices.json 的 60-90s 拖尾。</li>
+    <li>iface.cache 增加私网 IPv4 校验,避免热点关闭后缓存接口继续被当成热点接口。</li>
+  </ul>
+</div>
+
+<!-- HNC v4.0 完整变更记录, 由 webroot/index.html lazy load -->
+<!-- v5.1.0-rc1-hotfix13 compatibility rollup -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🧩 v5.1.0-rc1-hotfix13: 兼容性一次性修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">安装脚本</span>
+            <span class="cl-tag fix">tc/IFB</span>
+            <span class="cl-tag fix">远程 WebUI</span>
+            <span class="cl-tag fix">白名单</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>📦 安装兼容</b>: 更新 <code>update-binary</code>,移除旧 v3.x <code>api/server.sh</code> 逻辑和 brace expansion,增加 arm64 ABI 检测。</li>
+            <li><b>🧬 schema 修复</b>: 首装直接使用完整 <code>data/rules.json</code>,老配置自动补齐新字段,不覆盖用户设置。</li>
+            <li><b>🛠️ tc 兼容</b>: root qdisc 只复用 HNC 兼容的 <code>htb 1:</code>;清理时只删除 HNC 自己创建的 root。</li>
+            <li><b>🌉 ingress/IFB</b>: 上行 mirred 统一走 netlink/shell fallback,watchdog 可识别 matchall/u32/parent ffff 多种形式。</li>
+            <li><b>🌐 远程 WebUI</b>: 保留 ColorOS 需要的 <code>0.0.0.0</code> 绑定兼容性,但新增 INPUT guard,仅允许热点接口/loopback 访问 8443。</li>
+            <li><b>✅ 白名单</b>: 改为 MAC-only ACCEPT,并尽量清理旧 IP ACCEPT,避免 DHCP 复用导致误放行。</li>
+            <li><b>🔍 能力探测</b>: 新增 <code>capability_probe.sh</code>,生成 <code>run/capabilities.json</code> 便于判断当前 ROM 支持哪些 iptables/tc 能力。</li>
+          </ul>
+        </div>
+      </div>
+
+<!-- v5.1.0-rc1-hotfix12 release docs consolidation -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🗂️ v5.1.0-rc1-hotfix12: 更新日志合并 / 刷机包根目录瘦身 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">更新日志</span>
+            <span class="cl-tag fix">刷机包瘦身</span>
+            <span class="cl-tag fix">CI 打包</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>📝 更新日志合并</b>: 历史 <code>PATCH-NOTES-*</code> 已汇总进 <code>CHANGELOG.md</code> 与 WebUI 更新记录, release 包根目录不再堆很多单独说明文件。</li>
+            <li><b>📦 根目录瘦身</b>: 可刷 ZIP 只保留运行必需文件、<code>README.md</code> 和 <code>CHANGELOG.md</code>, 手机文件管理器里更清爽。</li>
+            <li><b>🔁 CI 同步</b>: GitHub Actions 打包规则同步排除历史 patch notes 和开发阶段文档, 避免后续版本再次变臃肿。</li>
+            <li><b>ℹ️ 说明</b>: 本轮不改限速/iptables/BPF 逻辑, 不需要重新编译二进制。</li>
+          </ul>
+        </div>
+      </div>
+
+<!-- v5.1.0-rc1-hotfix11 cleanup jank / stats counter preservation -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">⚙️ v5.1.0-rc1-hotfix11: cleanup 去卡顿 / stats 计数保留 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">cleanup</span>
+            <span class="cl-tag fix">stats</span>
+            <span class="cl-tag fix">UI 卡顿</span>
+            <span class="cl-tag fix">offload IPC</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🧹 cleanup 去卡顿</b>:不再整轮持有 <code>gate_lock</code>,改为每台 stale 设备短暂抢锁; 单轮默认最多清理 20 台。</li>
+            <li><b>🧯 cleanup 防重复</b>:新增私有 cleanup lock 和每日 stamp,避免 service / watchdog 同一天重复跑。</li>
+            <li><b>🔠 大写 MAC 兼容</b>:保留 rules.json 原始 MAC key 大小写,修复 uppercase 历史规则无法自动清理。</li>
+            <li><b>📊 stats 保留计数</b>:<code>ensure_stats()</code> 正常 1 条规则时不再删除重建,避免扫描时重置 iptables 计数器。</li>
+            <li><b>⚡ 点击限速防卡</b>:<code>hnc_ipc OFFLOAD_NOTIFY_LIMIT</code> 增加 1 秒 timeout; limit 成功路径减少一次同步 JSON 写。</li>
+          </ul>
+        </div>
+      </div>
+
+
+<!-- v5.1.0-rc1-hotfix10 stale rules cleanup / hotspotd truncate fix -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🧹 v5.1.0-rc1-hotfix10: stale rules 自动清理 / hotspotd 16KB 截断修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-25</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">rules.json</span>
+            <span class="cl-tag fix">hotspotd</span>
+            <span class="cl-tag fix">统计去重</span>
+            <span class="cl-tag fix">启动可靠性</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🧹 stale rules 自动清理</b>:新增 <code>cleanup_stale_rules.sh</code>,默认清理 30 天未见且当前不在线的 <code>rules.json.devices[mac]</code> 规则记录,防止离线规则无限膨胀。不删除 blacklist / whitelist / device_names。</li>
+            <li><b>🕒 last_seen_persist</b>:限速与 delay-only 分配 mark_id 时写入持久 last_seen,作为后续安全清理依据。</li>
+            <li><b>🧱 C3</b>:<code>hotspotd.c write_json()</code> 从固定 <code>char buf[16384]</code> 改为动态读取 rules.json,上限 1MB,避免大 rules.json 截断 blacklist。</li>
+            <li><b>📊 S5</b>:<code>ensure_stats()</code> 去掉 <code>-C || -A</code> 竞态,先删除重复 RETURN 再添加唯一规则,避免统计翻倍。</li>
+            <li><b>🚀 S11</b>:<code>service.sh</code> 启动 hotspotd 后最多 5 秒轮询 pid,替代固定 <code>sleep 2</code>。</li>
+            <li><b>🛡️ C1</b>:<code>find_device()</code> 改为 <code>strcasecmp</code>,防御 MAC 大小写不一致。</li>
+            <li><b>📦 注意</b>:本轮修改 C 源码,必须重新编译 <code>bin/hotspotd</code>。</li>
+          </ul>
+        </div>
+      </div>
+
+<!-- v4.0.0-patch5.0 iOS 26 Liquid Glass WebUI 重设计 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">✨ v4.0.0-patch5.0: WebUI 完整重设计 (iOS 26 Liquid Glass) &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-20</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">Liquid Glass</span>
+            <span class="cl-tag feat">4 tab 导航</span>
+            <span class="cl-tag feat">批量模式</span>
+            <span class="cl-tag feat">模板 CRUD</span>
+            <span class="cl-tag fix">精准 DOM 更新</span>
+            <span class="cl-tag fix">WCAG AA</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎨 视觉语言重做</b>:完整 iOS 26 "Liquid Glass" 风格 — 3 级玻璃材质(<code>--glass-bg-1/2/3</code>)+ inner light stroke + 4 路 mesh 背景 + grain 质感。动画语言 3 级缓动曲线(<code>spring / smooth / crisp</code>)。底部 4 tab 悬浮 nav 替代原 3 tab(设备 / 统计 / 日志 / <b>设置</b>)。首屏 staggered 入场 + FLIP indicator + CSS Grid <code>0fr→1fr</code> 折叠动画。</li>
+            <li><b>🧩 新功能</b>:<br>
+              • 主页<b>全局操作折叠卡</b>(白名单 / 刷新 / 清空规则 / 释放资源)<br>
+              • <b>硬件 offload 警告横幅</b>(调 <code>check_offload.sh</code> 检测)<br>
+              • <b>批量模式</b>完整版 — 全选 / 清空 / 应用模板 / 清除限速 / 清除延迟 / 加黑 / 解黑(Promise.allSettled 并行)<br>
+              • <b>模板 CRUD</b> — 5 条默认预设 + 新建 / 编辑 / 删除 + localStorage 持久化<br>
+              • <b>远程访问 URL 面板</b>(自动调 <code>device_detect.sh iface_ip</code> 填 URL) + 复制链接 / WebShare 分享<br>
+              • <b>PIN 配对 modal</b>(大号数字 + 倒计时 + 复制快捷链接,离线 fallback 本地 PIN)<br>
+              • <b>授权设备展开式列表</b> + 撤销授权(调 <code>pair_gen.sh revoke</code>)<br>
+              • <b>下拉刷新</b>(transform-based 1:1 tracking + 橡皮筋阻尼 + spring 回弹)<br>
+              • 限速输入<b>单位下拉</b> MB/s ↔ KB/s(step 0.1,iOS <code>inputmode=decimal</code>)<br>
+              • 统计页 <b>4 计数卡</b>(在线 / 限速中 / 延迟中 / 已封锁)+ TC 命令参考代码块<br>
+              • 日志页 12 文件下拉(<code>service / watchdog / detect / iptables / tc / apply / audit / httpd / hotspot / stats / hotspotd</code>)+ "combined" 合并视图<br>
+              • 设置页<b>热点自动启动</b> section(SSID / 密码 / 开机延迟 + 保存/立即启动/停止)</li>
+            <li><b>🔬 工程质量</b>(对照 11 + 6 条 review):<br>
+              • 新 <code>updateCardInPlace(mac)</code> 精准单卡更新 — 保留 input 值 / expanded / selected 状态,彻底解决原版 <code>renderDevs</code> 全量 innerHTML 吞 input 的问题<br>
+              • 新 <code>readLimitInputs(card)</code> 读取契约 — 从 DOM 解析出 down/up + 单位,commit 到 model 后调 backend<br>
+              • CSS 暗色主题去重 — 删除 7 处 <code>@media (prefers-color-scheme: dark)</code> 重复块,JS 启动 <code>matchMedia</code> 解析 auto 到实际 <code>data-theme</code>(-2.8 KB)<br>
+              • <code>--text-3</code> 对比度 0.48 → 0.62(WCAG AA ≥ 4.5:1,原浅色 desc 文本不过标)<br>
+              • <code>setInterval</code> 加页面激活检查 + 数值变化 &lt; 5% 不翻页(省电 + 减视觉噪声)<br>
+              • Toggle a11y: <code>role="switch"</code> <code>aria-checked</code> <code>tabindex="0"</code> + 空格/回车支持 + <code>:focus-visible</code> ring<br>
+              • chevron 误用修正 — 内联操作(清空 / 释放 / 重启)改 action-hint 文字标签(iOS HIG: chevron 仅 drill-down)<br>
+              • 21 个功能图标 emoji → 内联 SVG(feather 风格,跟 <code>currentColor</code>,解决 ColorOS 字体杂)<br>
+              • <code>runBtnWithFeedback</code> 用 <code>innerHTML</code> 保存而非 <code>textContent</code>(支持按钮内含 SVG)+ 加 <code>onDone</code> 回调<br>
+              • <code>visualViewport</code> resize rAF 节流 · <code>moveChartTabInd</code> 切页时才算(避免 rect=0)</li>
+            <li><b>🔌 Backend 对接</b>(<code>kexec</code> 桥接层 + 19 个真实 backend 函数):<br>
+              • <code>fetchDevices</code> 合并 devices.json + rules.json + blacklist<br>
+              • <code>applyLimitBackend / clearLimitBackend / addBlacklistBackend / rmBlacklistBackend</code> → <code>apply_device_rule.sh</code><br>
+              • <code>applyDelayBackend / clearDelayBackend</code> → <code>tc_manager.sh set_netem/clear_netem</code><br>
+              • <code>fetchAuthDevices / revokeAuthBackend / genPairingPinBackend</code> → <code>pair_gen.sh</code><br>
+              • <code>setWhitelistBackend</code> → <code>json_set.sh wl_mode</code><br>
+              • <code>hotspotAutoStartBackend / hotspotStartNowBackend / saveHotspotConfigBackend</code> → <code>hotspot_autostart.sh</code><br>
+              • <code>clearAllRulesBackend / stopAllServicesBackend</code> → <code>cleanup.sh</code><br>
+              • <code>fetchLog / fetchCombinedLog</code> → <code>tail logs/*.log</code><br>
+              • Changelog lazy load(fetch <code>changelog.html</code>)<br>
+              • 2.5s 轮询设备页,切出页面自动停(<code>startPolling</code> / <code>clearInterval</code>)</li>
+            <li><b>📦 改动</b>:<code>webroot/index.html</code> 完整重写(原 252 KB → 184 KB,因剥离 OUI inline + 去掉 changelog inline + CSS 去重)。<code>webroot/changelog.html</code> 顶部加 v5.0 条目。<code>module.prop</code> → v4.0.0-patch5.0 / versionCode 50000。<code>daemon/hnc_httpd/main.go</code> version bump(无逻辑改动)。<b>arm64 binary 重编</b>。<b>不动 shell 后端</b> — 所有 21 个核心业务函数保持原 API 契约,测试 154/154 全过。</li>
+            <li><b>🔐 降级策略</b>:检测不到 <code>window.ksu</code> 时显示友好 <code>showNoKsuPage</code> 引导页;<code>pair_gen.sh</code> 不可用时 PIN 本地生成并标注 "(离线)";所有 backend 调用失败走 toast err + dbg buffer 记录(底部 dbgbar 6s 自动淡出)。</li>
+            <li><b>🧪 装机验证</b>(每项真机复现):<br>
+              1. 设备页加载应立即看到热点连接设备 + 限速/状态标签<br>
+              2. 限速输入应用后实际网速测试应真被限(2.5s 轮询状态更新)<br>
+              3. 批量模式选 2 台 → 应用模板 → 两台都受限<br>
+              4. 长按封锁按钮 520ms → 该设备立即断网<br>
+              5. 设置页远程访问 URL 应自动填对 — 在另一手机打开应能进 Dashboard<br>
+              6. 生成 PIN → 120s 倒计时 → 远端输入 PIN 应可配对<br>
+              7. 日志页切换 12 个文件应分别加载 tail -300<br>
+              8. 深色模式长按右上角切换应无卡片闪烁 · 系统跟随模式应在夜间自动切深<br>
+              9. 限速 input 聚焦时底部 nav 应滑下去不挡内容 · 下拉刷新应 1:1 跟手</li>
+          </ul>
+        </div>
+      </div>
+
+<!-- v4.0.0-patch4.b 及之前 -->
+<!-- v4.0.0-patch3.b.1 真机 BUG hotfix -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🚑 v4.0.0-patch3.b.1: 远程限速真机 BUG hotfix &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">真机 BUG</span>
+            <span class="cl-tag fix">apply 链路</span>
+            <span class="cl-tag fix">watchdog 假设</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🔥 真机症状</b>:Patch 3.b 装机后,远端 dashboard 点 "🚦 限速" 输入数值 → 应用 → Toast "✓ 限速已设置" → 但<b>实际网速完全没变</b>。点"⛔ 加黑" → Toast "✓ 已加入黑名单" → 设备<b>仍能正常上网</b>。</li>
+            <li><b>🎯 根因</b>:Patch 3.a 的 <code>actionRuleSet</code> 注释里有个错误假设 — "watchdog 60s 内会 sync rules.json 到 tc"。实际 watchdog 的 <code>check_health</code> 只验证 HTB qdisc + iptables 链<b>存在性</b>,完全不读 rules.json,也不应用具体限速规则。我之前只调了 <code>json_set.sh device</code> 写 rules.json 字段,而 <code>iptables_manager.sh mark</code> + <code>tc_manager.sh set_limit</code> 这条本机 WebUI 验证可用的<b>真正限速命令链</b>从未被 Go 后端执行。</li>
+            <li><b>🛠️ 修法 · 新 <code>bin/apply_device_rule.sh</code></b>(242 行):封装本机 WebUI <code>applyLimit</code> 同等的完整链路。Go 一次 exec 完成全部:<br>
+              • <code>get_ip(mac)</code>:从 devices.json 现读 IP(awk 提取)<br>
+              • <code>get_or_assign_mid(mac)</code>:rules.json 已有就复用,没有就按 MAC 末字节哈希起点 + 1-99 范围线性探测避碰(模仿 WebUI <code>getMid</code> 算法)<br>
+              • <code>exec iptables_manager.sh mark &lt;ip&gt; &lt;mac&gt; &lt;mid&gt;</code><br>
+              • <code>exec tc_manager.sh set_limit &lt;iface&gt; &lt;mid&gt; &lt;dn_mbps&gt; &lt;up_mbps&gt; &lt;ip&gt;</code><br>
+              • 写 rules.json 5 字段(mark_id/ip/down_mbps/up_mbps/limit_enabled)<br>
+              • <code>clear</code> 命令做反向操作 + bl_add/bl_del 同样封装(之前 actionBLAdd 也只写 json 没真断网)</li>
+            <li><b>📦 Go 改动</b>:<code>action.go</code> 的 4 个 action 全部改走 <code>apply_device_rule.sh</code>,一次 exec 完成不再拆开 N 步。新 <code>rateToMbps()</code> 把 <code>"10mbit"</code> / <code>"5120kbit"</code> 转 mbps 整数传给 shell,不足 1mbps 向上取整防 0(64kbit → 1mbps,5120kbit → 5mbps,1025kbit → 2mbps)。</li>
+            <li><b>🧪 测试</b>:新 8 个测试(<code>rateToMbps</code> 6 + apply_device_rule.sh smoke 2)。Go 全量 114s + shell 151/151 全过。arm64 binary 重编 7.3 MB。</li>
+            <li><b>🔍 旁观察</b>:这个 BUG 是真机 + 用户实际操作才暴露的 — Go 测试我用 stub json_set.sh 假装成功了,根本没测真链路。教训:涉及 shell exec 的功能,装机前应该用 grep 确认底层命令真被调到,不能信注释里的"应该会"。</li>
+            <li><b>🧪 装机验证</b>(覆盖之前 3.b 的全部用例):<br>
+              1. 远端点限速 → Toast 成功 → 等 10 秒 → 实际网速测试应该真的被限<br>
+              2. 本机 <code>cat /data/local/hnc/logs/apply.log</code> 应看到 <code>limit applied OK</code> + iptables/tc 输出<br>
+              3. 本机 <code>iptables -t mangle -S HNC_MARK | grep &lt;远端 MAC&gt;</code> 应看到对应规则<br>
+              4. 本机 <code>tc class show dev wlan2 | grep -i 1:&lt;mid&gt;</code> 应看到 HTB class<br>
+              5. 远端点加黑 → 该设备应该真的断网</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch3.b 远端 dashboard 写操作 UI -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🎮 v4.0.0-patch3.b: 远端 dashboard 写操作 UI(HNC v4.0 终极形态完成) &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">远程管理</span>
+            <span class="cl-tag feat">限速 UI</span>
+            <span class="cl-tag feat">加黑/移黑</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 HNC v4.0 终极形态</b>:3.a/3.a.1 提供了 <code>/api/action</code> 后端,3.b 给远端 WebUI 接入。HNC 远程访问从<b>"只读" → "鉴权" → "能管"</b>,功能闭环。</li>
+            <li><b>🎨 设备卡片按钮栏</b>:<code>app.js renderCard</code> 里给每个设备行加 "🚦 限速" / "✅ 移黑" / "⛔ 加黑" / "解除"(根据设备当前状态动态显示)。</li>
+            <li><b>🚦 限速 Modal</b>:<code>showLimitModal</code> 下行/上行速率分开输入 + 单位下拉(kbit/mbit),输入框 <code>min=64 max=10240</code> 跟后端 <code>validateRate</code> 范围一致。留空表示该方向不限速(至少填一项)。</li>
+            <li><b>🔧 统一 helper</b>:<code>callAction()</code> 自动带 CSRF header + credentials; <code>handleActionResult()</code> 处理常见错误:429 频繁提示、401 cookie 过期跳 /pair、"protected mac" 友好提示、其他错误显示 detail。</li>
+            <li><b>🛡️ 二次确认</b>:加黑 / 移黑 / 解除限速都有 <code>confirm()</code> 二次确认防误点。限速 Modal 有独立"应用"按钮。</li>
+            <li><b>📣 toast 反馈</b>:写操作完成立即绿色 toast "✓ 已生效",错误红色 toast 显示具体原因,2.8 秒自动消失。500ms 后触发设备列表刷新(虽然 watchdog 60s 后才真正 apply 到 tc/iptables,rules.json 立即变)。</li>
+            <li><b>🎨 style.css +102 行</b>:<code>.act-modal</code>/<code>.act-btn</code>/<code>.act-rate-row</code>/<code>.toast</code> 样式 + 深浅色主题适配。</li>
+            <li><b>📦 改动</b>:<code>web/app.html</code>(0 行 — 结构不变); <code>web/app.js</code> +170 行(callAction/handleActionResult/showLimitModal/actionClearRate/actionBlockDevice/actionUnblockDevice + renderCard 加按钮栏); <code>web/style.css</code> +102 行; <code>main.go</code> version bump; <code>module.prop</code> → v4.0.0-patch3.b / 40017。<b>arm64 binary 重编 7.3 MB</b>。Go test + shell 151/151 全过。</li>
+            <li><b>🧪 装机验证(完整远程管理流程)</b>:<br>
+              1. 装 + 重启手机, 本机开鉴权 + 生成 PIN 配对远端浏览器<br>
+              2. 远端 dashboard 设备卡片应看到 "🚦 限速" 和 "⛔ 加黑" 按钮<br>
+              3. 点 "🚦 限速" 弹 Modal,下行输 "5" 单位 "mbit",上行输 "2",点 "应用" → toast "✓ 限速已设置"<br>
+              4. 60 秒内本机 <code>iptables -t mangle -S HNC_MARK</code> 应见到该 MAC 限速规则<br>
+              5. 点 "⛔ 加黑" → confirm → toast → 60 秒内 iptables DROP 规则生效<br>
+              6. 对主人自己手机 MAC 点加黑 → 应 toast "⚠️ 无法对该设备操作 cannot blacklist host mac"(3.a.1 防自锁)</li>
+            <li><b>⏭️ 留给未来</b>:Patch 3.c(audit.log 展示 section)作为可选项,本机 WebUI 和远端 dashboard 都加"审计日志"卡片展示最近 50 条写操作。如果实际装机用下来需要看操作历史,再开 3.c。</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch3.a.1 Gemini 审查 hotfix -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🛡️ v4.0.0-patch3.a.1: Gemini 审查 hotfix &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">防自锁</span>
+            <span class="cl-tag fix">rate 上限</span>
+            <span class="cl-tag fix">状态码</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 3 个真实 bug 修复</b>:Gemini 审查 3.a 命中两个 Claude 没想到的业务层风险 + 一个状态码语义小问题。</li>
+            <li><b>⚠️ Bug A · rate 上限缺失</b>:<code>validateRate</code> 原只卡最小值 64kbit 防自锁,没卡最大值。攻击者传 <code>999999999mbit</code> 会让底层 <code>tc</code> 算参数时溢出或吃满 CPU。修:加 <code>maxRateKbit = 10 * 1024 * 1024</code> (10 Gbit),合法上限足够任何实际场景。</li>
+            <li><b>🔒 Bug B · 防自锁(Gemini 最佳贡献)</b>:<code>bl_add</code> 或 <code>rule_set</code> 如果被针对<b>主人本机 MAC</b> 会导致主人自己被断网/限速,连 WebUI 都进不去要物理重启热点。这是 Claude 视角完全没覆盖的业务层风险。
+              新 <code>isProtectedMAC()</code> + <code>readHotspotIfaceMAC()</code>:查 <code>run/hnc_state</code> 里的 <code>ACTIVE:iface</code> 读 <code>/sys/class/net/iface/address</code> 对比,命中就拒绝。
+              写死的特殊 MAC(<code>ff:ff:ff:ff:ff:ff</code> broadcast + <code>00:00:00:00:00:00</code> null)也在保护列表。
+              <code>rule_clear</code> / <code>bl_del</code> <b>不受保护</b>(允许从外部恢复误锁的设备)。
+              fail-open 设计:sysfs 读失败时不阻断所有写操作,这是宁可漏保护也不能让业务瘫痪的权衡。</li>
+            <li><b>📟 Bug C · 状态码语义</b>:<code>protected mac</code> 拒绝之前归 500(server error),改成 400(client error)语义更准,curl 用户看到 4xx 就知道是自己参数问题。</li>
+            <li><b>🧪 新测试</b>:5 个 action_test 新用例 — <code>TestValidateRateUpperBound</code> / <code>TestActionRejectsProtectedBroadcast</code> / <code>TestActionRejectsProtectedNull</code> / <code>TestActionRejectsProtectedInRuleSet</code> / <code>TestActionRuleClearAllowsProtectedMAC</code> / <code>TestActionRejectsHotspotIfaceMAC</code>(容器环境 skip)。Go 全量 + shell 151/151 全过。</li>
+            <li><b>📦 改动</b>:<code>action.go</code> +50 行(maxRateKbit / protectedSpecialMACs / isProtectedMAC / readHotspotIfaceMAC / 两处 action 加保护检查 / 错误分类 switch);<code>action_test.go</code> +80 行;<code>main.go</code> version bump;<code>module.prop</code> → v4.0.0-patch3.a.1 / 40016。arm64 binary 重编 7.3 MB。不动 WebUI 不动 shell。</li>
+            <li><b>🧪 装机验证</b>(3.a 之上):<br>
+              1. curl 带 <code>"mac":"ff:ff:ff:ff:ff:ff"</code> → 期望 400 + <code>"error":"protected mac"</code><br>
+              2. curl 带 <code>"rate_down":"100000mbit"</code>(100Gbit)→ 期望 400 + 超上限提示<br>
+              3. curl 带主人手机 MAC → 期望 400 protected(实际要先查主人 MAC)<br>
+              4. curl 带 <code>"action":"rule_clear","mac":"ff:ff:ff:ff:ff:ff"</code> → 期望 200(逆向操作不拦截)</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch3.a 远程写操作后端 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🎛️ v4.0.0-patch3.a: 远程写操作后端(v4.0 终极形态第一步) &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">远程写 API</span>
+            <span class="cl-tag feat">action 白名单</span>
+            <span class="cl-tag feat">audit 审计</span>
+            <span class="cl-tag feat">CSRF 防御</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 目标</b>:让远端已鉴权设备能做写操作(限速/黑名单),HNC 远程管理闭环。3.a 只做后端 Go API,远端 WebUI 写操作 UI 留到 3.b。后端先跑稳 + Gemini 审后再开前端。</li>
+            <li><b>🛡️ 4 个 whitelist action</b>:<code>rule_set</code>(设限速 mac + rate_down + rate_up)、<code>rule_clear</code>(清限速 mac)、<code>bl_add</code>(加黑 mac)、<code>bl_del</code>(移黑 mac)。所有写操作统一走 <code>POST /api/action</code>,便于集中 auth + rate limit + audit。</li>
+            <li><b>🔒 多层防御</b>:<br>
+              • <b>强制鉴权</b>: <code>isWritePath</code> 让 /api/action 即使在 <code>remote_auth_required=false</code> 过渡期也拒绝匿名<br>
+              • <b>CSRF</b>: 必需 <code>X-HNC-CSRF: 1</code> header + SameSite=Strict cookie 双保险<br>
+              • <b>参数白名单</b>: mac 严格 <code>^[0-9a-f]{2}(:[0-9a-f]{2}){5}$</code>, rate 严格 <code>^[0-9]+(kbit|mbit)$</code> 且最小 64 kbit(防用户锁死自己设备)<br>
+              • <b>argv 分离防注入</b>: <code>exec.CommandContext</code> 每个参数独立 argv,不走字符串拼接<br>
+              • <b>exec timeout</b>: 10s,防挂<br>
+              • <b>环境清洁</b>: 只传 HNC_DIR + PATH</li>
+            <li><b>⏱️ per-token write rate limit</b>:新 <code>writelimit.go</code> WriteCounter 滑动窗口 60/min,超过返 429 带错误信息,不用 LRU(写量天然有限) + 5 分钟 GC 清 10 分钟以上无活动 entry。</li>
+            <li><b>📝 审计日志</b>:每个请求写一行到 <code>logs/audit.log</code>,格式 <code>[ts] tid=xxxxxxxx action=X params=k=v... result=ok/error detail=msg</code>,params 按 key 字母表排序方便 grep,换行/回车自动转义防 log injection,字段超 256 字节截。被 log_rotate.sh 一起轮转。</li>
+            <li><b>🐢 保守 apply 策略</b>:写 rules.json 后<b>不立即</b> 调 tc/iptables,等 watchdog 下轮 check_health(60 秒内)sync 规则到 tc。这样 Patch 3.a 只需把 JSON 改对就行,不触碰复杂的 mid 分配 + iptables_manager/tc_manager 调用链,风险最小。用户感知:最多 60 秒后生效。</li>
+            <li><b>🧪 测试</b>:Go 新 25 个测试(<code>action_test 17</code> / <code>writelimit_test 6</code> / <code>audit_test 6</code>),覆盖每个 action 合法/非法参数 + 注入尝试(MAC 含分号/空格/IP 格式、rate 含 <code>;ls</code>/kbps/小数/负数)+ 速率限制阈值 + audit 格式校验。全量 137 秒全过。shell 回归 151/151。</li>
+            <li><b>📦 改动</b>:新 <code>action.go</code>(285 行)/<code>writelimit.go</code>(109 行)/<code>audit.go</code>(103 行)/<code>action_test.go</code>(330 行)/<code>writelimit_test.go</code>(100 行)/<code>audit_test.go</code>(95 行);改 <code>server.go</code>(+writeCounter 字段 + 路由);<code>middleware.go</code>(+isWritePath);<code>main.go</code>(version bump + GCLoop 启动)。<b>arm64 binary 重编 7.3 MB</b>。不动 WebUI,不动 shell。</li>
+            <li><b>🧪 装机验证(纯 curl,Patch 3.b 前无 UI)</b>:<br>
+              1. 装 + 重启手机,先在本机生成 PIN 配对一个远端设备(熟练流程)<br>
+              2. 从 cookie jar 取出 hnc_token,远端 curl:<br>
+                 <code>curl -k -X POST https://&lt;热点IP&gt;:8443/api/action -H 'X-HNC-CSRF: 1' -H 'Content-Type: application/json' -b 'hnc_token=&lt;cookie&gt;' -d '{"action":"bl_add","params":{"mac":"aa:bb:cc:dd:ee:01"}}'</code><br>
+              3. 本机 <code>grep aa:bb:cc:dd:ee:01 /data/local/hnc/data/rules.json</code> 看到进黑名单<br>
+              4. 60 秒内本机 <code>iptables -t mangle -L HNC_MARK</code> 看到对应规则<br>
+              5. <code>cat /data/local/hnc/logs/audit.log</code> 看到 <code>action=bl_add result=ok</code></li>
+            <li><b>⚠️ 安全敏感 · 必须 Gemini 严审</b>:4 个新 Go 文件(action.go / writelimit.go / audit.go / middleware.go 修改段)交叉评审。审查要点:action 白名单完整性、参数正则充分性、argv 分离是否真防注入、CSRF 方案是否够、audit 是否完整覆盖(特别是失败/rate limit 也记了)。</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch1.6 稳定性卫生 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🧹 v4.0.0-patch1.6: 稳定性卫生 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">日志轮转</span>
+            <span class="cl-tag fix">watchdog 心跳</span>
+            <span class="cl-tag fix">ERROR 前缀</span>
+            <span class="cl-tag fix">日备份</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🗂️ 新 <code>bin/log_rotate.sh</code></b>(105 行)· 通用三代日志轮转。默认 1 MB 阈值,超过就 .log → .1 → .2 → 丢弃。支持 <code>log_rotate.sh &lt;file&gt;</code> 单文件模式和 <code>log_rotate.sh check</code> 扫 <code>logs/*.log</code> 批量。stat -c %s + wc -c fallback,Android toybox 兼容。</li>
+            <li><b>❤️ watchdog 心跳 + 自动轮转</b>:主循环末尾新 <code>heartbeat()</code> 每 5 分钟至少打一行 <code>[WDG] alive state=ACTIVE:wlan2 httpd=ok</code>,grep 一下就知道 watchdog 还活着 + 当前状态 + httpd 存活。<code>rotate_logs_periodic()</code> 每 5 分钟自动调 log_rotate.sh check,任何 log 涨爆都会被无声处理。</li>
+            <li><b>🚨 [ERROR] 前缀统一</b>:<code>log_error()</code> 便利函数加入 watchdog.sh / tc_manager.sh / iptables_manager.sh。tc_manager 三个关键失败点改为 log_error:<code>init_tc: skipped, invalid iface=</code> / <code>failed to add root htb</code> / <code>ingress v4 mirred filter add FAILED(上传限速会失效!)</code>。以后 <code>grep ERROR logs/</code> 只会出真错误。</li>
+            <li><b>🛡️ trap EXIT 防挂诊断</b>:watchdog TERM/INT 收到时设 <code>WDG_CLEAN_EXIT=1</code>,EXIT trap 检查这个 flag 决定是打 <code>[ERROR] watchdog EXITED unexpectedly (last_state=...)</code> 还是什么都不做。以后 watchdog 如果意外退了,log 里会有破案线索。</li>
+            <li><b>📦 每日 logs 备份</b>:<code>stats_rollup.sh</code>(本来就每日凌晨跑一次的聚合脚本)末尾新增 logs/ 打 tar.gz 存到 <code>data/.backup-YYYYMMDD/logs.tar.gz</code>,保留 7 天 find -mtime +7 自动清。raw stats 缺失时只跳过 stats 聚合<b>仍跑备份</b>(装机前几天没 raw 的用户依然受保护)。</li>
+            <li><b>🧪 测试</b>:新 <code>test/unit/test_log_rotate.sh</code> 9 用例:under/over/3-gen/nonexistent/custom/check-all/empty/missing-dir/atomicity 全过。shell 回归 <b>142 → 151/151</b>。</li>
+            <li><b>📦 改动</b>:<code>bin/log_rotate.sh</code> 新 105 行;<code>bin/watchdog.sh</code> +30 行(log_error/heartbeat/rotate/trap);<code>bin/tc_manager.sh</code> +log_error + 3 点改 log→log_error;<code>bin/iptables_manager.sh</code> +log_error;<code>bin/stats_rollup.sh</code> +28 行(logs backup + SKIP_STATS);<code>test/unit/test_log_rotate.sh</code> 新 120 行;<code>module.prop</code> → v4.0.0-patch1.6 / 40014。<b>不动 Go 代码</b>(binary 复用 patch2.d 的 6.9 MB)<b>不动 WebUI</b> 纯 shell 卫生工程。</li>
+            <li><b>🧪 装机验证</b>:<br>
+              1. <code>tail -f /data/local/hnc/logs/watchdog.log</code> 每 5 分钟一行 <code>[WDG] alive state=...</code><br>
+              2. 手动把日志撑到 1 MB+ 等 5 分钟应自动轮转成 <code>.log.1</code> + 空 <code>.log</code><br>
+              3. 临时关热点制造错误,<code>grep '\[ERROR\]' /data/local/hnc/logs/*.log</code> 应干净可见<br>
+              4. 第二天看 <code>ls /data/local/hnc/data/.backup-*/</code> 应有 <code>logs.tar.gz</code></li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch2.d UX 精修 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">✨ v4.0.0-patch2.d: 配对 UX 精修 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">快捷链接</span>
+            <span class="cl-tag feat">登出</span>
+            <span class="cl-tag feat">剩余次数提示</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🔗 快捷链接登录</b>:本机配对 Modal 新增"复制快捷链接"按钮,复制形如 <code>https://热点IP:8443/pair?prefill=123456</code> 的 URL,主人通过消息 app(微信/iMessage/邮件)发给远端,<b>远端点开自动填 PIN 自动提交</b>,无需手输。pair.html 支持 <code>?prefill=XXXXXX</code> query 参数,严格校验 6 位数字,填入后立即 history.replaceState 清 URL 防暴露。</li>
+            <li><b>📋 复制 PIN</b>:本机 Modal 新增"复制 PIN"按钮,用 navigator.clipboard.writeText 优先 + document.execCommand fallback,成功 2 秒"✓ 已复制"绿色反馈。</li>
+            <li><b>⚠️ 输错提示剩余次数</b>:Go <code>RegisterPinFail</code> 返回 <code>(locked, remaining)</code>;pair.go 用 <code>writePairErrorWithRem</code> 返回 <code>attempts_remaining</code>;pair.html 根据该字段显示 "还有 N 次机会" / "⚠️ 最后 1 次机会" 红色警告 / 锁定后"⛔ 10 分钟后重试"。</li>
+            <li><b>🔑 远端登出按钮</b>:app.html 顶部加 logout 按钮 + session-badge。app.js <code>loadSessionInfo()</code> 拉 /api/health 显示当前身份如"Chrome on Mac",点"登出"调 POST /api/logout revoke token + 清 cookie + 回 /pair。server.go <code>apiHealth</code> 在已鉴权请求里返回 <code>session_label</code>。</li>
+            <li><b>👥 "已授权设备"列表改进</b>:每行现在显示 <code>ip_hint</code>(配对时 IP),整行 title tooltip 显示创建 + 最近活动的完整时间戳 (y-m-d h:m 格式,新 <code>formatTokenTimeFull</code> helper)。</li>
+            <li><b>📦 改动</b>:<code>ratelimit.go</code>(签名扩展) / <code>pair.go</code>(新错误函数) / <code>server.go</code>(apiHealth session_label) / <code>main.go</code>(version bump) / <code>app.html</code>+<code>app.js</code>+<code>style.css</code>(远端 logout UI) / <code>pair.html</code>(prefill + 剩余次数) / <code>webroot/index.html</code>(本机复制按钮 + 已授权设备改进)。arm64 binary 重编 6.7 MB。Go test + shell 142/142 全过。</li>
+            <li><b>🧪 装机验证</b>:<br>
+              1. 远端 /pair 输错 PIN → 红色"还有 N 次机会"<br>
+              2. 输错 5 次 → "⛔ 尝试次数过多,请 10 分钟后重试"<br>
+              3. 配对成功远端 dashboard 顶部应显示 "Chrome on Mac" + "登出"<br>
+              4. 本机 Modal 点"🔗 复制快捷链接" → 粘贴到浏览器应自动填 PIN 自动登录<br>
+              5. "已授权设备"可见 IP · 悬停看完整时间戳</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch2.c -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🎛️ v4.0.0-patch2.c: WebUI 配对管理界面 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">配对 UI</span>
+            <span class="cl-tag feat">设备管理</span>
+            <span class="cl-tag feat">PIN 生成脚本</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎨 新 section · 远程访问鉴权</b>:<br>
+              • <b>总开关</b> ─ 启用/关闭 <code>remote_auth_required</code>,状态 badge 实时同步<br>
+              • <b>生成配对码按钮</b> ─ 调 <code>bin/pair_gen.sh</code> 生成 PIN,弹 Modal<br>
+              • <b>已授权设备列表</b> ─ 展开显示,每行一个撤销 + 顶部全部撤销</li>
+            <li><b>📱 配对 Modal</b>:6 位 PIN 大字显示 + 120s 倒计时进度条 + 远端 URL(<code>https://&lt;热点IP&gt;:8443/pair</code>)+ 每 1.5 秒轮询 <code>$RUN/pair_success.&lt;sid&gt;</code> 文件,读到内容立即显示"✓ &lt;设备 label&gt; 已授权访问",用户主动关闭时自动调 <code>pair_gen.sh cancel</code> 清 <code>pair_pending</code>。PIN 过期时显示红色提示"PIN 已过期,请重新生成"。</li>
+            <li><b>🔧 新 bin/pair_gen.sh</b>(140 行):<br>
+              • <code>generate</code>(默认): 生成均匀分布的 6 位 PIN(/dev/urandom od -tu4 % 10^6 + printf '%06d')+ 12 字符 base64url session_id(首字符强制 [a-zA-Z0-9] 防参数冲突)+ tmp+rename 原子写 <code>pair_pending</code>,输出 JSON<br>
+              • <code>cancel</code>: 删 pair_pending(用户取消配对)<br>
+              • <code>status</code>: 查当前配对状态(<b>不返回 PIN 本身</b>,防截屏/日志泄露)<br>
+              • 启动前校验 httpd 在跑(pid 文件 + kill -0),否则返 error<br>
+              • 自动清理 60 分钟前的过期 <code>pair_success.*</code> 文件</li>
+            <li><b>🔒 安全设计</b>:httpd 只读 pair_pending 不写,所有生成/取消都在本机通过 kexec 操作文件;远端浏览器只能看到 pair.html 的 6 位输入框,看不到任何生成按钮;本机 WebUI 渲染 token 列表只显示 TokenID 前 8 字符 + label(Secret 永远不离开 bcrypt);撤销走 <code>json_set.sh token_revoke</code>(严格 base64url 校验防注入)。</li>
+            <li><b>📦 改动</b>:<code>webroot/index.html</code>(+70 行 HTML + 60 行 CSS + 230 行 JS);<code>bin/pair_gen.sh</code> 新建 140 行;<code>module.prop</code> 升 v4.0.0-patch2.c / 40010。Go binary 不重编(2.b 已稳,2.c 纯前端改动)。Patch 2.b/2.a.1/1.5 全保留。</li>
+            <li><b>🧪 装机验证</b>:<br>
+              1. 重启模块后,进 WebUI 应看到新 section "远程访问鉴权"<br>
+              2. 开总开关 → badge "已启用" + 远端未配对设备访问应 302 /pair<br>
+              3. 点"生成配对码" → 弹 Modal 显示 PIN + 倒计时<br>
+              4. 在远端浏览器 /pair 输入 PIN → Modal 自动变成"✓ 配对成功"<br>
+              5. 展开"已授权设备"应看到该设备,点撤销应移除并让该设备下次访问被拒</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch2.b -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🔐 v4.0.0-patch2.b: 远程访问 PIN 配对 + Token 鉴权接入 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">鉴权中间件</span>
+            <span class="cl-tag feat">PIN 配对</span>
+            <span class="cl-tag feat">per-IP 限流</span>
+            <span class="cl-tag fix">httpd 崩溃保护</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🏛️ 架构</b>:继 2.a.1 底层(TokenID+Secret+bcrypt)之后,2.b 把 authMiddleware 挂到 httpd。默认过渡期 <code>remote_auth_required=false</code> 放行,用户可 opt-in 启用。启用后未授权访问 → 302 <code>/pair</code> → 输入 6 位 PIN → Set-Cookie 30d HttpOnly+Secure+SameSite=Strict → 302 /app dashboard。</li>
+            <li><b>📁 三个新 Go 文件</b>:<br>
+              <code>ratelimit.go</code> · per-IP 三桶限流,LRU 512 entry fail-safe(全锁定时拒绝新请求不重置锁)、PIN 5 次/分锁 10 分钟、unauth 20/s token bucket、GCLoop 5 分钟清理<br>
+              <code>middleware.go</code> · authMiddleware + unauthRateLimit + clearCookie 双保险(MaxAge=-1 + Expires=1970)<br>
+              <code>pair.go</code> · GET /pair + POST /api/pair/verify(constant-time PIN 比较)+ POST /api/logout(revoke + 清 cookie 双动作)
+            </li>
+            <li><b>🎨 新嵌入页面</b>:<code>web/pair.html</code> 6 位数字输入,Liquid Glass 暗色风格,中文错误提示。</li>
+            <li><b>⚙️ main.go 接入 + 崩溃保护</b>:启动三个后台 goroutine ─ <code>tokens.SaveLoop</code>(30s flush last_seen)、<code>limiter.GCLoop</code>(5min 清限流 entry)、<code>pruneLoop</code>(监视 <code>$RUN/httpd_prune_request</code> marker + 每日兜底清过期 token)。<b>顺手修 Patch 1.5 遗留的 8080 server 崩带走主 8443 的 bug</b>:区分 httpsErrCh 和 8080 err,8080 server 崩只 log 不 Fatalf(wlan2 IP 漂移时 accept4 EINVAL 不再导致整个 httpd 进程退出)。</li>
+            <li><b>🔒 配对流程原子性</b>:主人本机 WebUI 生成 PIN 通过 kexec 写 <code>$RUN/pair_pending</code>(tmp+rename 原子),httpd 只读不写;成功配对后 httpd 写 <code>$RUN/pair_success.&lt;sid&gt;</code>(tmp+rename 原子)让本机感知;httpd 只有 2 个 pairing endpoint,生成 / 取消 / 查状态都由本机 WebUI 通过 kexec 操作文件,不经 HTTP。</li>
+            <li><b>🧪 测试</b>:新 41 个 Go 单测全过(<code>ratelimit_test</code> 11 + <code>middleware_test</code> 14 + <code>pair_test</code> 16)。原 2.a.1 <code>auth_test</code> 14 用例不破。shell 回归 128/128 全过。arm64 binary 6.9 MB。</li>
+            <li><b>📦 改动</b>:+3 个新 Go 文件(705 行)+ 3 个测试(760 行)+ pair.html(205 行);<code>server.go</code> 加字段 + 挂路由;<code>main.go</code> goroutine 启动 + 8080 保护;<code>embed.go</code> 加 pair.html;<code>module.prop</code> 升 v4.0.0-patch2.b / 40009。Patch 1.5 Defer Init 状态机完整保留。</li>
+            <li><b>⏭️ 留给 2.c</b>:WebUI 本机"生成配对码"按钮 + 120s 倒计时 modal + "已授权设备"列表 + 撤销单个/全部 + remote_auth_required toggle。2.b 纯后端,本机 WebUI 还是老样子。</li>
+            <li><b>🧪 装机验证</b>:<br>
+              • <code>head -4 module.prop</code> 应显示 v4.0.0-patch2.b<br>
+              • <code>hnc_httpd -bind xxx</code> 启动 log 应显示 version v4.0.0-patch2.b<br>
+              • 未启用鉴权时(<code>remote_auth_required=false</code>),远程访问应跟 1.5 一样直接进 dashboard<br>
+              • 启用鉴权: <code>sh bin/json_set.sh cfg_set remote_auth_required true</code> 后,远程访问应 302 /pair<br>
+              • 本机生成 pair_pending(临时可手工: <code>echo -e '123456\\nsidtest12\\n'$(date +%s -d '+120 seconds') &gt; run/pair_pending</code>)后远程输入 123456 应成功登入</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch1.5 架构级 hotfix -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🏗️ v4.0.0-patch1.5 架构级 hotfix: Defer Init + 状态机 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix" style="background:#dc2626;color:#fff">真机事故修复</span>
+            <span class="cl-tag fix">架构重构</span>
+            <span class="cl-tag fix">watchdog 状态机</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🔥 真机事故根因</b>:service.sh 开机时 <code>detect_hotspot_iface</code> 探不到热点(late_start 早于热点 bootstrap),兜底返回 <code>wlan0</code>,然后 <code>tc_manager.sh init wlan0</code> + <code>iptables_manager.sh init</code> 直接把 HTB 限速队列和 mangle MARK 规则挂到了本机 WiFi 接口。用户感觉"手机上网慢"几周无人察觉,<code>tc qdisc show dev wlan0</code> 才暴露。这是所有"网络怪"症状的根源。</li>
+            <li><b>🏛️ 架构重构(Gemini 方案)· Defer Init + 状态机</b>:<br>
+              <b>service.sh</b>:彻底剥离业务初始化 ─ 不探测 iface / 不 init tc / 不 init iptables / 不直接拉 httpd。只建目录 + 启动 watchdog + 写 <code>httpd.wanted</code> marker。service.sh 绝不再碰 wlan0。从 216 行瘦到 152 行。<br>
+              <b>watchdog.sh</b>:变成真正的状态机,<code>$RUN/hnc_state</code> 记录状态:
+              <ul>
+                <li><code>PENDING</code>:还没探到有效热点,什么都不做,每 10 秒严格探测</li>
+                <li><code>ACTIVE:&lt;iface&gt;</code>:已初始化,每 60 秒稳态维护</li>
+              </ul>
+              状态转移:
+              <ul>
+                <li><code>PENDING → ACTIVE:X</code>:五层校验通过(非空 + 非 wlan0 + 有 IPv4 + RFC1918)→ <code>do_full_init</code>(iptables + tc + v6_sync + 拉 httpd)</li>
+                <li><code>ACTIVE:X → ACTIVE:Y</code>:探到 iface 变化 → <code>do_migrate</code>(cleanup X + init Y + kill httpd 重绑)</li>
+                <li><code>ACTIVE:X</code> 热点关了 → 保持 ACTIVE(不做动作,用户可能只是临时关)</li>
+              </ul></li>
+            <li><b>🐛 修复 · ensure_httpd_running 从 check_services 抽出成独立函数</b>:之前 httpd 拉起逻辑嵌在 check_services 里,hotspotd 健康会 <code>return 0</code> 提前退出,导致 <b>httpd 永远不被 watchdog 拉起</b>。这解释了用户真机上 "watchdog 活着但 httpd 不起"。</li>
+            <li><b>📦 改动</b>:<code>service.sh</code>(-64 行 +15 行)、<code>bin/watchdog.sh</code>(+状态机 ~180 行,主循环完全重写)、<code>bin/cleanup.sh</code>(+清 hnc_state)、<code>module.prop</code> 升 v4.0.0-patch1.5+2.a.1 / 40008。watchdog 版本字符串同步。<b>Patch 2.a.1 底层鉴权完整保留未启用</b>。</li>
+            <li><b>🧪 装机验证点</b>:<br>
+              • 冷启动无热点 ─ <code>tc qdisc show dev wlan0</code> 应该 <b>clean</b>(无 HTB)<br>
+              • 冷启动无热点 ─ <code>cat /data/local/hnc/run/hnc_state</code> 应该是 <code>PENDING</code><br>
+              • 开热点 ─ 60 秒内 <code>hnc_state</code> 变 <code>ACTIVE:wlan2</code>(或你的热点接口),httpd 自动拉起绑热点 IP<br>
+              • 关热点再开 ─ 规则不重复挂,httpd 自动保活(IP 漂移检测)<br>
+              • 手机上网体验 ─ 应恢复正常(wlan0 再无 HNC 规则污染)</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch1.4 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🚨 v4.0.0-patch1.4 紧急 hotfix:远程访问 IP 绑错 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix" style="background:#dc2626;color:#fff">真机事故修复</span>
+            <span class="cl-tag fix">远程访问</span>
+            <span class="cl-tag fix">watchdog</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🔥 真机事故</b>:用户报告装完 patch2.a.1 后远端从热点子网访问 httpd 永远 <code>ERR_CONNECTION_REFUSED</code>。诊断发现 httpd 活着但绑在 <code>10.24.23.45:8443</code>(上游 WiFi IP),而不是 <code>10.217.134.49</code>(热点 wlan2 IP)。watchdog 拉起时拿错了 IP。</li>
+            <li><b>🎯 根因</b>:<code>device_detect.sh iface</code> 分支在热点 bootstrap 期间(iptables tetherctrl 链还没建好 + ARP 表空 + iface.cache 过期)返回兜底值 <code>wlan0</code>,watchdog 用这个去查 IPv4 拿到了上游 WiFi 的私网地址,绑了个永远不可达的接口。2 个月之前放的 wlan0 兜底本意是"有个默认值别崩",但严重副作用在远程访问启用后才暴露。</li>
+            <li><b>🔧 修复 1 · device_detect.sh 移除 wlan0 兜底</b>:<code>iface</code> 分支检测失败直接 <code>exit 1</code> + 空输出,让调用方(watchdog/service.sh)明确知道"热点未就绪"而不是拿错值继续。</li>
+            <li><b>🔧 修复 2 · watchdog 拉 httpd 前 4 层校验</b>:iface 非空 → iface 非 wlan0 → 有 IPv4 → IPv4 在 RFC1918 私网段。任一失败记 log 后 defer 到下个 60s 循环再试。日志里会明确说明哪一层失败,方便诊断。</li>
+            <li><b>🔧 修复 3 · 新增 httpd IP 漂移检测</b>:<code>$RUN/httpd_bind_ip</code> 文件记录每次绑定的 IP。watchdog 每 60s 对比 marker 和当前 iface 实际 IP,不等则 <code>kill -9 httpd</code>,让同一轮 <code>ensure_httpd_running</code> 用新 IP 重拉。场景:手机热点重启 / DHCP 续租失败 / tethering 模式切换导致 wlan2 IP 从 A 变成 B 但 httpd 还绑 A,现在能自愈。</li>
+            <li><b>🔧 修复 4 · watchdog 版本字符串 bump</b>:从 <code>v3.4.1 started</code> 改成 <code>v4.0.0-patch1.4 started</code>,之前诊断时差点被陈旧字符串误导(以为 patch1.x 的修复根本没装)。</li>
+            <li><b>📦 改动</b>:<code>bin/device_detect.sh</code>(-3+5 行)、<code>bin/watchdog.sh</code>(+70 行,4 层校验 + drift check)、<code>service.sh</code>(+2 行 marker 记录)、<code>bin/cleanup.sh</code>(+1 行清 marker)、<code>module.prop</code> 升 v4.0.0-patch1.4+2.a.1 / 40007。<b>Patch 2.a.1 底层鉴权代码完整保留,未启用</b>。<b>128/128 shell + Go test 全过</b>。累计 patch <code>hnc_v4_0_0_patch1_4_full.patch</code> 重新生成覆盖 2.a.1 + 1.4 所有修改。</li>
+            <li><b>🧪 装机验证</b>:<br>
+              • <code>ps -ef | grep hnc_httpd</code> 应看到 <code>-bind 10.217.134.49</code>(热点 IP,不是 10.24.x)<br>
+              • <code>cat /data/local/hnc/run/httpd_bind_ip</code> = 热点 IP<br>
+              • <code>tail /data/local/hnc/logs/watchdog.log</code> 首行应有 <code>=== Watchdog v4.0.0-patch1.4 started ===</code>(版本终于对了)<br>
+              • 远端浏览器访问 <code>https://&lt;热点 IP&gt;:8443</code> 应能打开 dashboard,跟 Patch 1.3 一致无需鉴权</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch2.a.1 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🔬 v4.0.0-patch2.a.1 采纳 Gemini 第三轮审查 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#7c3aed;color:#fff">Patch 2.a hotfix</span>
+            <span class="cl-tag feat">并发模型修正</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 背景</b>:Patch 2.a 完成后交付 Gemini 3 Pro 独立审查。结论"无真 bug",但指出两处并发模型设计缺陷 + 一处密码学严格性优化。全部采纳修复,成为 patch2.a.1</li>
+            <li><b>🔧 修复 1 · TokenID 生成的 TOCTOU 竞态</b>(Gemini 2.1):<br>
+              • 原实现:<code>generateUniqueTokenID</code> 持 <code>RLock</code> 查 map 不存在后释放锁,<code>store.Put</code> 再升 <code>Lock</code> 写盘。两步之间别的协程可以插队<br>
+              • 问题:两个并发 IssueToken 极度巧合生成同 TokenID 会相互覆盖,第一个用户 Cookie 瞬间失效<br>
+              • 2^64 空间现实不发生,但代码模型缺陷应消除<br>
+              • 改成 <code>PutIfAbsent(tokenID, token) error</code> 单锁原子:内部持 Lock 做 "check + insert",冲突返回 <code>ErrTokenIDCollision</code>,外层重试最多 3 次<br>
+              • 新测 <code>TestPutIfAbsent_RejectsDuplicate</code> + <code>TestIssueToken_HighConcurrency_NoOverwrite</code>(100 并发不覆盖)</li>
+            <li><b>🔧 修复 2 · reload 惊群效应</b>(Gemini 2.2):<br>
+              • 原实现:<code>SyncIfChanged</code> 发现 mtime 变化直接 <code>reload</code>,10 个并发请求同时到达会调 10 次 <code>reload</code>,每次都做磁盘 read + JSON parse + 内存覆写<br>
+              • 改成 double-check locking:<code>reload</code> 内部先持 Lock,再次 <code>stat</code> 对比 <code>lastRead</code> 和新 <code>mtime</code>,一致就 <code>return nil</code>(别人抢先做了)<br>
+              • 只有第一个协程真的做 parse 工作,其他协程零成本返回<br>
+              • 新测 <code>TestReload_DoubleCheckPreventsThunderingHerd</code>(10 并发 sync 后状态一致)</li>
+            <li><b>🔧 修复 3 · base64url 长度严格等号</b>(Gemini 3.1):<br>
+              • 原实现:<code>parseCookie</code> 长度校验用区间 <code>[10,12]</code> / <code>[30,34]</code>(防御性宽容)<br>
+              • 优化:base64url <code>RawURLEncoding</code> 对固定字节输入长度**唯一**:8 字节必然 11 字符,24 字节必然 32 字符。密码学代码标准做法是严格等号<br>
+              • 改成 <code>len(tokenID) == 11</code> && <code>len(secret) == 32</code>,去除歧义<br>
+              • 新测 <code>TestParseCookie_StrictLengths</code> 覆盖 ±1 字符边界</li>
+            <li><b>✅ 4 项 Gemini 认可(不变)</b>:<br>
+              • O(1) 鉴权架构防御 DoS ✅<br>
+              • Last_seen 30s 丢失窗口对 60 天硬过期无影响 ✅<br>
+              • 撤销"最终一致性"毫秒级延迟符合行业实践 ✅<br>
+              • bcrypt.CompareHashAndPassword 是恒时比较 ✅</li>
+            <li><b>🧪 测试</b>:Go test 全过(新增 4 类测试都 pass,100 并发 IssueToken 零覆盖),shell 测试仍 128/128。bin 大小无变化(仍 6.7 MB)</li>
+            <li><b>📦 改动</b>:<code>daemon/hnc_httpd/auth.go</code>(~30 行,IssueToken 循环重试 + parseCookie 严格长度) + <code>daemon/hnc_httpd/tokens.go</code>(~20 行,PutIfAbsent + reload double-check) + <code>daemon/hnc_httpd/auth_test.go</code>(+100 行 4 类新测) + <code>module.prop</code> v4.0.0-patch2.a.1 / 40006。<b>本 hotfix 不启用鉴权,行为跟 patch2.a / patch1.3 完全一致</b>,可以安心从任何 patch1.x 升级</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch2.a -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🔐 v4.0.0-patch2.a 鉴权层底层基础设施 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#7c3aed;color:#fff">Patch 2 · 1/3</span>
+            <span class="cl-tag feat">远程访问鉴权</span>
+            <span class="cl-tag feat">Go + bcrypt</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 目的</b>:Patch 2 整体给远程访问加 PIN 配对 + bcrypt token 鉴权,2.a 只做底层(数据结构 + token 签发验证 + json_set 命令),完全不改 WebUI,完全不启用 — 安装后用户感知不到任何变化。PIN 流程留 2.b,WebUI 已授权设备管理留 2.c</li>
+            <li><b>📐 架构核心</b>(按 v4_0_design_v2.1,采纳 Gemini 第二轮审查):<br>
+              • <b>TokenID + Secret 结构</b>: Cookie=<code>&lt;TokenID&gt;.&lt;Secret&gt;</code>,TokenID 8 字节 base64url(≈11 字符)为 Map key,Secret 24 字节 base64url(≈32 字符)做 bcrypt<br>
+              • <b>tokens.json Map 结构</b>: <code>{"version":1,"tokens":{"&lt;TokenID&gt;":{hash,created,last_seen,label,ip_hint,revoked}}}</code>,按 TokenID 原地操作,并发 revoke 不错位<br>
+              • <b>O(1) 查找 + 单次 bcrypt</b>: 恒定 100ms,不随 token 数扩展。解决了 v2.0 的 O(N) bcrypt scan CPU DoS(10 token × 100ms × 20 QPS = 2000% CPU)<br>
+              • <b>未命中 TokenID 立即 401</b>: 不碰 bcrypt,测试证实 &lt; 20ms。攻击者发垃圾 cookie 吃不到 CPU</li>
+            <li><b>🔧 实现</b>:<br>
+              • <code>daemon/hnc_httpd/tokens.go</code>(260 行): TokensStore 管理 tokens.json,stat+mtime 检测外部修改自动 reload,saveAtomic 用 tmp+rename 保证原子,SaveLoop 每 30 秒批量 flush last_seen 到磁盘避免每请求 I/O<br>
+              • <code>daemon/hnc_httpd/auth.go</code>(175 行): <code>IssueToken</code> 签发 + 冲突 retry,<code>VerifyCookie</code> 解析 + O(1) 查表 + 硬过期检查 + bcrypt 比对,<code>parseCookie</code> 严格格式校验(长度/字符集/分隔符)防注入<br>
+              • <code>daemon/hnc_httpd/auth_test.go</code>(370 行): 14 组测试覆盖 TokenID 唯一性(1000 个)、UnknownTokenID 不走 bcrypt(<20ms 证明)、14 种恶意 cookie payload 全拒、stat/mtime 同步、50 并发签发不重复、0600 权限、原子写清理 .tmp<br>
+              • 新依赖 <code>golang.org/x/crypto/bcrypt</code> v0.50,Go toolchain 1.22 → 1.25(bcrypt 要求),binary 5.7 MB → 6.7 MB</li>
+            <li><b>🔧 json_set.sh 三个新命令</b>:<br>
+              • <code>token_revoke &lt;TokenID&gt;</code>: 严格 base64url 字符集校验(<code>[A-Za-z0-9_-]</code>),awk 状态机定位目标对象修改 revoked:false → true,不改其他字段<br>
+              • <code>token_revoke_all</code>: 全局 sub() 把所有 <code>revoked:false</code> 改 true<br>
+              • <code>token_prune</code>: 维护命令,touch marker 让 httpd 内部 GC goroutine(用 Go json 库可靠实现)处理,避免 busybox/toybox awk 多行 JSON 解析的碎片化坑<br>
+              • 三命令都进 acquire_lock 保护表,与 rules.json 的写操作共享锁机制</li>
+            <li><b>🧪 测试</b>:<br>
+              • Shell: <code>test/unit/test_tokens.sh</code> 20 个测试(单条 revoke / 全量 revoke / 幂等性 / 注入防御 / 权限 / JSON 有效性 / 并发),<b>128/128 全过</b>(原 108 + 新 20)<br>
+              • Go: 14 类单测全过,<code>TestVerifyCookie_UnknownTokenID_NoBcrypt</code> 实测 < 20ms 确证 DoS 防御<br>
+              • 注入测试覆盖: <code>../../etc/passwd</code>, <code>; rm -rf /</code>, 引号, 空格, 空值等 5 种 payload</li>
+            <li><b>🔒 为什么 2.a 不启用鉴权</b>:<br>
+              • 底层能签发验证 token 不代表 middleware 已接入。2.a 完成后 main.go 还没调 authMiddleware,server.go 的路由也没保护<br>
+              • 2.b 接入 middleware + 加 PIN 流程,2.c 加 WebUI 配对管理,<code>remote_auth_required</code> 开关在 2.c 生效<br>
+              • 好处: 用户装 2.a 没感觉,可以放心升级;Gemini 对 2.a 独立审查后才开 2.b,降低返工</li>
+            <li><b>📦 改动</b>:<code>daemon/hnc_httpd/</code> 新增 auth.go / tokens.go / auth_test.go + go.mod/go.sum(bcrypt 依赖) + <code>bin/json_set.sh</code>(+140 行 token_* 命令) + <code>test/unit/test_tokens.sh</code>(210 行) + <code>module.prop</code> 到 v4.0.0-patch2.a / 40005。<b>128/128 shell + Go test 全过。Gemini 独立审查后开 2.b。</b></li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch1.3 Gemini 审查修复 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🔬 v4.0.0-patch1.3 采纳 Gemini 审查 · watchdog 深度修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-19</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#ef4444;color:#fff">hotfix</span>
+            <span class="cl-tag feat">审查落地</span>
+            <span class="cl-tag feat">watchdog</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 背景</b>:patch1.2 修好了 Android 16 的 tc 正则词序 bug,但 Gemini 3 Pro 交叉审查后指出 check_health 还有 2 个真 bug 和若干设计缺陷。本 patch 系统性消化审查意见</li>
+            <li><b>🐛 Gemini bug 1.1 · xtables 并发锁</b>:<code>check_health</code> 里的 <code>iptables -L</code> 没加 <code>-w</code>,如果 HNC WebUI 或 hotspotd 正在改规则抢了锁,<code>iptables</code> 会静默失败返回空,<code>grep -q "CONNMARK"</code> 必然 rc=1 误判为"规则丢失",触发不必要的 <code>full_restore</code>。修:全部 <code>iptables</code> 调用加 <code>-w 2</code> 等 2 秒</li>
+            <li><b>🐛 Gemini bug 1.2 · HNC_MARK 空链检测失效</b>:原 <code>iptables -L HNC_MARK --line-numbers | grep -q "."</code> 永远为真——空链也输出 "Chain HNC_MARK..." 和 "target prot opt..." 两行表头。检查形同虚设。修:改用 <code>iptables -S HNC_MARK >/dev/null 2>&1</code> 只看命令 exit code,<b>链存在但为空是合法状态</b>(用户没设限速时),不要把空链当丢失</li>
+            <li><b>💎 新增 · 区分命令失败 vs 规则缺失</b>:这是我自己根据 Gemini 优化建议 3.1 延伸的修复。iptables 退出码 2 = bad parameter(链真的不存在),其他非 0 码 = resource problem(xtables 锁超时等临时故障)。<code>check_health</code> 区分这两种:真丢失返回 1 → <code>full_restore</code>;临时故障返回 2 → 主循环跳过本轮,不计入窗口。避免系统临时繁忙被误判成网络毁坏</li>
+            <li><b>💎 Gemini 建议 2.1 · 指数退避防慢死循环</b>:patch1.2 的速率限制堵住了"每 30 秒打断一次"的 busy loop,但 Gemini 指出留下了慢循环——5 分钟 passive 到期后计数清零,如果故障仍在,又会 30s-30s-30s 三次打断然后再 passive,<b>每 6 分钟重复一次</b>。修:记录退出 passive 的时间戳,如果 2 个窗口内又进 passive,视为持续性故障,下个窗口时长翻倍:5m→10m→20m→40m→60m 封顶。连续故障的后果会越来越温和,而不是稳定每 6 分钟折腾一次</li>
+            <li><b>💎 Gemini 建议 2.3 · Passive 状态对用户可见</b>:之前 passive 只写 watchdog.log,用户看 WebUI 觉得"一切正常",但限速可能已经不生效——认知失调。修:进入 passive 时 <code>touch run/watchdog_passive.marker</code>,<code>/api/health</code> 读这个文件返回 <code>watchdog_passive=true</code>,远端 dashboard 顶部显示醒目橙色 warning banner "守护进程已挂起:检测到系统规则异常"。Watchdog 恢复正常时 rm marker,warning 消失</li>
+            <li><b>✅ 保留 Gemini 认可的设计</b>(见 Gemini 审查 4.x):<br>
+              • tc 正则的两段 pipe 词序修复,完全正确<br>
+              • 速率限制变量语义(RESTORE_COUNT vs RESTORE_WINDOW_COUNT),边界清晰<br>
+              • httpd.wanted marker 机制,优雅解耦 service.sh 和热点就绪时序</li>
+            <li><b>🚫 暂不做</b>(Gemini 建议 2.2 · Soft Restore):<br>
+              需要重写 iptables_manager.sh 和 tc_manager.sh 改成声明式差量更新,改 <code>full_restore</code> 为"只补丢失规则不拆整棵树"。工作量大(几百行),且需要形式化证明"必需规则集"的完整性。列入 v4.2 长期规划,patch1.x hotfix 不做</li>
+            <li><b>📦 改动</b>:<code>bin/watchdog.sh</code>(+60 行,check_health 区分命令失败/规则缺失 + 指数退避 + passive marker)+ <code>bin/cleanup.sh</code>(+2 行 marker 清理)+ <code>daemon/hnc_httpd/server.go</code>(+6 行 /api/health 上报 passive 状态)+ <code>daemon/hnc_httpd/web/app.js</code>(+8 行 dashboard warning banner 渲染)+ <code>module.prop</code> 到 v4.0.0-patch1.3 / 40004。<b>108/108 shell 测试 + Go test 全过</b></li>
+            <li><b>🔬 感谢 Gemini 3 Pro 的细致审查</b>。这种 AI 交叉 review 模式把单个模型容易错过的 edge case(xtables 并发锁、iptables 退出码语义、慢循环退化)都拎出来了。记账:Patch 2 的审计模块要把 check_health 每一步的中间状态都上报,让下次类似问题在实机运行时就能被主动观测到,而不是靠事后审 250 行循环日志发现</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch1.2 watchdog 死循环 hotfix -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🚑 v4.0.0-patch1.2 修 watchdog 死循环 + httpd 被打断 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-18</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#ef4444;color:#fff">hotfix</span>
+            <span class="cl-tag feat">watchdog</span>
+            <span class="cl-tag feat">Android 16</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 现象</b>:patch1.1 装上后远程访问第一次能连接,几秒后浏览器报 "Failed to fetch",每次刷新都重演。用户查 <code>watchdog.log</code> 发现两小时内累计 <code>RESTORE triggered: health_fail (total=248)</code> — 每 30 秒 <code>full_restore</code> 一次,每次重建 iptables / tc 会 RST 所有 TCP 连接,httpd 的长连接首当其冲。<b>patch1.1 的 httpd 本身没问题,是 watchdog 一直在打断它</b></li>
+            <li><b>🔍 根因</b>:<code>bin/watchdog.sh</code> 的 <code>check_health()</code> 第 76 行:<br>
+              <code>tc qdisc show dev "$iface" 2>/dev/null | grep -q "root.*htb"</code><br>
+              正则假设 <code>root</code> 出现在 <code>htb</code> <b>之前</b>,这在老版 iproute2 成立:<br>
+              <code>qdisc htb 1: dev wlan2 <b>root</b> refcnt 10 ...</code>(root 在后但在 htb 前)<br>
+              但 Android 16 / ColorOS 的新版 iproute2 输出:<br>
+              <code>qdisc <b>htb</b> 1: <b>root</b> refcnt 18 r2q 10 ...</code>(htb 提前到 root 前)<br>
+              正则永远匹配失败 → rc=1 → <code>health_fail</code> → <code>full_restore</code> → 30 秒后 <code>check_health</code> 仍失败(iproute2 输出格式没变)→ 死循环<br>
+              这个 bug 可能在 Android 16 升级后就存在,但没人看 watchdog.log 所以一直没发现。v4.0 远程访问暴露出来是因为 httpd 的长连接对网络打断敏感</li>
+            <li><b>🔧 修复 1 · tc 正则词序无关</b>:改用两段 pipe grep<br>
+              <code>tc qdisc show dev $iface | grep "htb" | grep -q "root"</code><br>
+              同一行同时包含 htb 和 root 才算健康,不管先后。兼容新旧 iproute2。附带注释说明 Android 16 的词序变化,避免未来再踩坑</li>
+            <li><b>🔧 修复 2 · RESTORE 速率限制</b>:加 5 分钟滑动窗口,最多 3 次 RESTORE。超过进入 <b>passive mode</b>,只记日志不执行 <code>full_restore</code>,下个窗口才重置。哲学:单次误判能容忍,持续触发说明 watchdog 自己出 bug 了,继续破坏网络不如停手。之前没有这个限制,一个正则 bug 让 watchdog 两小时 RESTORE 248 次</li>
+            <li><b>🔧 修复 3 · 日志含窗口进度</b>:<code>RESTORE triggered: health_fail (total=N, window=X/3)</code>,进 passive 时 log <code>entering passive mode</code>,出 passive 时 log <code>exiting passive mode, resuming health-based restore</code>。异常状态用户能一眼看出</li>
+            <li><b>✅ 用户真机验证</b>:patch1.1 手动 kill watchdog 后 httpd 立刻稳定,两台客户端设备都能正常访问 dashboard。patch1.2 打包修复永久化,重启后 watchdog 不会再误判。自签证书首次警告是浏览器正常行为不是 bug</li>
+            <li><b>📦 改动</b>:<code>bin/watchdog.sh</code>(+50 行,tc 正则 + 速率限制 + passive mode)+ <code>module.prop</code> 到 v4.0.0-patch1.2 / 40003。无其他文件改动。<b>108/108 shell 测试通过,Go test 通过</b></li>
+            <li><b>🔬 沉淀</b>:<br>
+              1. 正则匹配外部命令输出时<b>绝不假设字段词序</b>,Android / iproute2 / toybox 版本碎片化很严重<br>
+              2. 自恢复系统必须有<b>速率限制</b>,否则单个误判会放大成服务中断<br>
+              3. 用户常看的 log 是 service.log,watchdog.log 被忽视 — 关键异常应该同时写两个地方<br>
+              (2 和 3 在 Patch 2 的审计模块里落实)</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0.0-patch1.1 hotfix -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🚑 v4.0.0-patch1.1 hotfix:修 patch1 装上无法启动 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-18</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#ef4444;color:#fff">hotfix</span>
+            <span class="cl-tag feat">远程访问</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 真机现象</b>:v4.0.0-patch1 刷入后打开"远程访问"开关,重启模块,连同热点的设备浏览器访问 <code>https://&lt;ip&gt;:8443</code> 报 <code>ERR_CONNECTION_REFUSED</code>。手动跑 <code>/data/local/hnc/daemon/hnc_httpd/hnc_httpd</code> 提示 <code>No such file or directory</code>,但 KSU module root <code>/data/adb/modules/hotspot_network_control/daemon/hnc_httpd/</code> 下 binary 真在且 5.7 MB</li>
+            <li><b>🔍 根因</b>:<code>post-fs-data.sh</code> 之前只 copy <code>bin/</code> + <code>api/</code> + <code>webroot/</code> + <code>test/</code> 四个目录从 module root 到 <code>$HNC_DIR</code>(=/data/local/hnc/),<b>漏了 daemon/</b>。所以 Go httpd binary 虽然在 module 里,但 service.sh 查 <code>$HTTPD_BIN=$HNC_DIR/daemon/hnc_httpd/hnc_httpd</code> 永远 miss → 直接 skip → httpd 从没跑过 → ERR_CONNECTION_REFUSED。<br>附带两个小问题:zip 打包时 binary 的 +x 位在某些 Android 安装路径下可能丢失;service.sh 跑在 Magisk late_start 阶段,此时热点往往还没起,<code>ip addr show</code> 拿不到 IP 又直接 skip 第二次,用户后来开热点 httpd 还是不会被拉起</li>
+            <li><b>🔧 修复 1 · 精细 daemon copy</b>:<code>post-fs-data.sh</code> 加一块:检查 <code>$MODDIR/daemon/hnc_httpd/hnc_httpd</code> 存在,mkdir <code>$HNC_DIR/daemon/hnc_httpd</code>,cp 只 binary 自己(<b>不</b> copy .c 源码 / README.md / build.sh / web 目录,因为 web 静态资源已经 <code>//go:embed</code> 进 binary,源码和构建脚本用户用不到),立刻 chmod 755。这个 chmod 是关键:无论 zip 装完权限是什么都强制修正</li>
+            <li><b>🔧 修复 2 · service.sh 启动前 chmod 自愈</b>:二道保险,post-fs-data.sh 如果没成功 copy,service.sh 看到 <code>$HTTPD_BIN</code> 存在但不可执行时先 chmod 755 再启动。避免单点故障</li>
+            <li><b>🔧 修复 3 · watchdog 延迟拉起</b>:<code>service.sh</code> 拿不到热点 IP 时不再 skip,改 <code>touch $RUN/httpd.wanted</code> 留 marker。<code>bin/watchdog.sh</code> 主循环里检查 marker 存在但 httpd 没跑时,动态探测热点接口(先读 <code>rules.json.hotspot_iface</code> 再 fallback 到 <code>device_detect.sh iface</code>),拿到 IP 立刻拉起 httpd。用户先装模块后开热点的顺序现在可以正常工作</li>
+            <li><b>🔧 修复 4 · 503 友好提示</b>:远端 dashboard 如果收到 503(httpd 连通但 devices.json 读不到)显示"检查 logs/httpd.log"提示,不再只一个红色 "HTTP 503" 让用户摸不着头脑</li>
+            <li><b>✅ 测试</b>:108/108 shell 测试全过,Go test 全过。真机验证:重装 module 后 httpd binary 在正确位置,+x 位正常,开关切到启用后热点起来 watchdog 自动拉起 httpd,浏览器连接成功</li>
+            <li><b>📦 改动</b>:<code>post-fs-data.sh</code>(+12 行)+ <code>service.sh</code>(+11 行 chmod + marker 逻辑)+ <code>bin/watchdog.sh</code>(+25 行延迟拉起)+ <code>bin/cleanup.sh</code>(+2 行 marker 清理)+ <code>daemon/hnc_httpd/web/app.js</code>(+15 行 503 UX)+ <code>module.prop</code> 到 v4.0.0-patch1.1 / 40002。无功能变化,纯 hotfix</li>
+          </ul>
+        </div>
+      </div>
+<!-- v4.0 Patch 1 远程访问 MVP -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🌐 v4.0.0 Patch 1 远程访问(只读 MVP) &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-18</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">大 v4.0 阶段 1/4</span>
+            <span class="cl-tag feat">远程访问</span>
+            <span class="cl-tag feat">HTTPS</span>
+            <span class="cl-tag feat">Go 后端</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 动机</b>:出租屋场景或手机架设位置不方便物理接触时,现在能从同热点的别的设备(笔记本/平板)打开浏览器查看连接设备和流量。旧 api/server.sh 因 shell=True RCE 在 v3.8.6 彻底删除,<b>v4.0 是从零设计的替代方案</b>,不是 revert</li>
+            <li><b>🔒 威胁模型收缩</b>:<br>
+              • <b>永远不绑 0.0.0.0</b>:严格白名单 RFC 1918 (10/8 / 172.16-31 / 192.168/16) + loopback,公网 IP 直接拒绝启动<br>
+              • <b>只绑热点接口 IP</b>(service.sh 从 <code>ip -4 addr show $HOTSPOT_IFACE</code> 动态拿),上行 wwan0/wlan0 完全不 listen<br>
+              • <b>HTTPS 自签证书</b>:P-256 ECDSA,10 年有效,首次启动自动生成,私钥权限 0600,SAN 包含 bindIP + 127.0.0.1<br>
+              • <b>HTTP 8080 自动跳 HTTPS 8443</b>:防用户输错协议挂住<br>
+              • <b>只读 MVP</b>:Patch 1 无任何写操作,无 pairing 无鉴权(绑 ap0 是唯一安全门),同子网客户端全部可访问</li>
+            <li><b>🚀 Go httpd</b>:新增 <code>daemon/hnc_httpd/</code> (~830 行 Go + 470 行 HTML/CSS/JS):<br>
+              • <code>main.go</code>:flag 解析、绑定地址白名单、TLS 启动、信号处理、accessLog middleware + panic recovery<br>
+              • <code>server.go</code>:router + handler,读 devices.json / rules.json / device_names.json / stats_daily.jsonl / stats_raw.jsonl,后端聚合后返回 JSON<br>
+              • <code>tls.go</code>:ECDSA P-256 自签证书,tmp-rename 写 key 0600<br>
+              • <code>embed.go</code>:<code>//go:embed web/*</code> 把 HTML/CSS/JS 编进二进制,单文件部署<br>
+              • 交叉编译 android/arm64 + <code>-ldflags="-s -w"</code> 产物 <b>5.5 MB</b>(静态,无 libc 依赖)</li>
+            <li><b>📡 API 端点</b>(全部只读):<br>
+              • <code>GET /api/health</code>:版本 + 构建信息<br>
+              • <code>GET /api/devices</code>:合并 devices.json + rules.json + device_names.json,manual 名覆盖 hostname,status 含 blocked/allowed,online 按 last_seen < 90s 判定<br>
+              • <code>GET /api/stats?range=today|week|month|all&mac=<optional></code>:跟 WebUI v3.9.1 的 aggregateStats 等价的后端实现,今日从 raw 实时算 delta,历史读 daily,单设备过滤<br>
+              • <code>GET /api/templates</code>:返回 templates.json<br>
+              所有参数严格 validator:<code>validRange</code> / <code>validMAC</code> 17 字符精确 + 小写 hex,坏参数 400 拒绝</li>
+            <li><b>📱 远程 dashboard</b>:单独的精简版 WebUI(<b>不</b>复用 5700 行主 index.html):标签切换 设备/流量,设备卡片显示名/MAC/IP/限速状态/累计流量,流量页用 SVG 堆叠柱状图(RX 蓝/TX 红)+ 粒度和设备筛选。沿用主 WebUI 的 CSS 变量(--blue/--t0/--divider)保持视觉一致,dark mode media query 自适应</li>
+            <li><b>🔌 service.sh 集成</b>:读 <code>rules.json.remote_enabled</code>,true 且 <code>$HOTSPOT_IFACE</code> 有 IPv4 时 fork <code>hnc_httpd</code>,-bind IP -port 8443 -http-port 8080 -hnc-dir $HNC_DIR,pid 写 <code>$RUN/httpd.pid</code>。关闭或找不到 binary 时静默跳过(保持老部署兼容)</li>
+            <li><b>🐕 watchdog.sh 钩子</b>:<code>check_services</code> 加 httpd 存活检查,死进程只 rm pid 文件,<b>不自动重启</b>(跟 hotspot_autostart 同策略,让用户从 WebUI 重新控制)</li>
+            <li><b>🧹 cleanup.sh</b>:pidfile 清理列表加 httpd,SIGTERM 退出</li>
+            <li><b>🎛️ WebUI 远程访问 section</b>:主 index.html 在"热点自动启动"之后新增卡片,包含开关 + 当前 URL 显示(<code>https://&lt;ap0-ip&gt;:8443</code>)+ 复制 URL 按钮 + 使用说明 + "需要重启生效"提示(改开关后要重启模块或重启手机 httpd 才会启停)</li>
+            <li><b>🧪 Go 单测</b>:<code>daemon/hnc_httpd/httpd_test.go</code> 301 行,17 组 <code>validateBindAddress</code> 边界 case(拒绝 0.0.0.0 / 公网 v4 / IPv6 :: / 公网 v6 / link-local 169.254 / 172.32 越界;接受 127 / 10 / 172.16-31 / 192.168 各子段)、<code>validMAC</code> 多种注入 payload 全拒(<code>../../../etc/passwd</code> / <code>"; rm -rf /" </code>等)、<code>aggregate</code> 今日 delta / 跳变 / 空数据 / 单设备、<code>ensureCert</code> 幂等 + 坏 IP 拒绝。<code>go test ./...</code> 全过</li>
+            <li><b>🔐 已知限制</b>(Patch 1 MVP):<br>
+              • <b>无鉴权</b>,任何连上热点的人能访问。热点 WPA2-PSK 本身是第一道门,但同网租客仍能看(隐私风险)<br>
+              • 改 <code>remote_enabled</code> 后需重启模块(service.sh 只在启动时 fork httpd)<br>
+              • 自签证书浏览器首次警告不可避免<br>
+              <b>Patch 2</b> 解决:PIN pairing(120 秒 TTL)+ bcrypt token 30 天 + WebUI 已授权设备管理</li>
+            <li><b>🗺️ v4.0 路线图</b>:Patch 0(v3.9.2 并发锁,已发)→ <b>Patch 1 只读 MVP(本版)</b> → Patch 2(pairing + token)→ Patch 3(写操作白名单 + 4 个 action)→ Patch 4(加固 + 审计日志 + 真机交叉审)</li>
+            <li><b>📦 改动</b>:新 <code>daemon/hnc_httpd/</code> 目录(Go 源 + web 模板 + 5.5 MB arm64 prebuilt binary)+ <code>service.sh</code>(+25 行 httpd 启动逻辑)+ <code>bin/watchdog.sh</code>(+5 行 httpd 存活检查)+ <code>bin/cleanup.sh</code>(+1 字 httpd 进 pidfile 列表)+ <code>webroot/index.html</code>(+110 行 远程访问 section + initRemoteUI/setRemoteEnabled/copyRemoteUrl)+ <code>module.prop</code> bump 到 v4.0.0-patch1 / 40001。<b>全量测试 108/108 通过</b></li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.9.2 并发安全加固 Patch 0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🔒 v3.9.2 并发安全加固 (v4.0 Patch 0) &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-18</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#7c3aed;color:#fff">v4.0 前置</span>
+            <span class="cl-tag feat">防御加固</span>
+            <span class="cl-tag feat">并发安全</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 动机</b>:v4.0 要做远程访问(Go httpd),暴露 HTTP API 意味着同一 MAC 可能被 WebUI + httpd 两个进程并发写。之前的 <code>iptables_manager.sh</code> 和 <code>tc_manager.sh</code> <b>没有文件系统级锁</b>——<code>iptables -S | grep | xargs iptables -D</code> 这类 GC TOCTOU 会触发,最后写者覆盖语义下两个并发 apply 结果随机。当前 WebUI 靠 JS 端 <code>_busy[mac]</code> 客户端锁挡住了,但进程间不够。Patch 0 是 v4.0 的前置防御</li>
+            <li><b>🚪 门禁(Gate)模式</b>:新增 <code>bin/hnc_lock.sh</code>,提供两层锁原语:<br>
+              • <b>per-MAC 锁</b>:<code>$RUN/lock/mac/&lt;mac&gt;/</code>,允许不同 MAC 并发(30 台设备同时 apply 不串行化)<br>
+              • <b>gate 全局锁</b>:<code>$RUN/lock/gate/</code>,等所有 per-MAC 释放后执行<br>
+              协议:per-MAC 写先检查 gate 不存在 → mkdir mac/ → <b>二次检查 gate 不存在</b>(关闭 TOCTOU)→ 执行。gate 写先 mkdir gate → 等 mac/*/ 全空 → 执行。用纯 <code>mkdir</code>/<code>rmdir</code>/<code>ls</code> 原语实现读写锁语义,POSIX shell 可移植。gate 阶段 2 超时<b>保守让步</b>(rmdir gate 返回 11,不强拆 per-MAC)</li>
+            <li><b>🧟 PID 存活检测</b>:锁目录内存 holder PID,第 20 轮(≈2 秒)未抢到时读 PID 文件,<code>kill -0</code> 检测:PID 死透了才强拆,活着继续等。复用 json_set.sh 的成熟逻辑。独立入口场景下 <code>sh hnc_lock.sh lock</code> 的 <code>$$</code> 会在 subshell 退出时消失,所以加了 <code>HNC_LOCK_HOLDER_PID</code> 环境变量让调用方传自己的 PID</li>
+            <li><b>🛡️ MAC 输入白名单</b>:<code>_mac_sanitize()</code> 严格匹配 <code>xx:xx:xx:xx:xx:xx</code> 小写归一化,拒绝路径穿越(<code>../etc</code>)/空字符串/短 MAC/shell metachar。测试覆盖 <code>"aa:bb:cc:dd:ee:ff; rm -rf /tmp/canary"</code> 这类注入 payload,rc=1 + canary 不被创建</li>
+            <li><b>⚙️ iptables_manager.sh 集成</b>:<code>mark / unmark / blacklist_add / blacklist_remove / whitelist_add / whitelist_remove</code> 走 per-MAC 锁;<code>init / cleanup / whitelist_on / whitelist_off</code> 走 gate;<code>stats / stats_all / ensure_stats / reset_counters</code> 只读不加锁。dispatcher 里用 <code>exit $rc</code> 模式保证 trap 清理</li>
+            <li><b>⚙️ tc_manager.sh 集成</b>:<code>init / cleanup / restore</code> 走 gate。<b>单设备操作(set_limit / set_delay / set_all / remove) 不加锁</b>,<b>依赖调用方持 iptables per-MAC 锁</b>——所有现有调用路径都是 <code>iptables_manager.sh mark</code> 在前 <code>tc_manager.sh set_limit</code> 在后,per-MAC 锁已覆盖。tc 参数是 mark_id 不是 MAC,这一层加独立锁会引入锁空间不一致</li>
+            <li><b>🧪 反 flaky 测试</b>:新 <code>test/unit/test_locks.sh</code> 17 个并发测试,零 <code>sleep N</code> 时序假设。关键机制:<br>
+              • <b>文件屏障</b>:worker 通过 <code>ready.&lt;id&gt;</code> 汇报就绪,主测试 <code>touch go</code> 统一放行<br>
+              • <b>Hook ack 握手</b>:worker 到达 <code>_hook</code> 时 <code>touch hook.after_mac_acquire.ack</code>,主测试轮询 .ack 出现才验证其他 worker 的阻塞状态。消除"worker 还没执行到 hook 点"的竞态<br>
+              • <b>状态断言</b>:不测时序,只测最终锁目录存在性 + rc + 操作时间戳后验重叠分析<br>
+              • <b>跨环境 sleep</b>:<code>usleep 100000 → sleep 0.1 → sleep 1</code> 三级 fallback,Android toybox / Debian / POSIX 严格 shell 都兼容</li>
+            <li><b>🐛 调试中发现的真 bug</b>:原 gate_lock 循环退出后用 <code>[ ! -d GATE ]</code> 判断是否超时,但如果 HOLDER_PID 和前次相同(同 bash 进程调两次),<code>expected_holder</code> 比对会误判"我就是持有者"直接 return 0。修成显式 <code>acquired=1</code> 标记,break 才置位,循环自然退出则未置位,不依赖 pid 文件比对</li>
+            <li><b>🧪 测试覆盖</b>:17 个测试含:基础 acquire/release、mac 输入校验 5 种、同 MAC 互斥、不同 MAC 并发、gate 阻塞 per-MAC、per-MAC 期间 gate 等待、stale 锁回收、PID 活着不回收、超时 rc=11、两 gate 互斥、unlock 幂等。全量回归 <b>108/108</b>(原 91 + locks 17)</li>
+            <li><b>📦 改动</b>:新 <code>bin/hnc_lock.sh</code>(240 行)+ <code>bin/iptables_manager.sh</code>(+70 行 dispatcher 包装)+ <code>bin/tc_manager.sh</code>(+30 行)+ 新 <code>test/unit/test_locks.sh</code>(310 行)+ <code>module.prop</code> 到 v3.9.2/3902。<b>无功能变化,纯防御性加固</b>。为 v4.0 Patch 1 (Go httpd 只读 MVP) 打地基</li>
+            <li><b>🎯 降级兼容</b>:两个 manager 都有 <code>. hnc_lock.sh || 定义 noop 锁函数</code> 的 fallback。如果用户手动删 hnc_lock.sh 或升级不完整,只是退化到无锁模式,不破坏现有功能</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.9.1 流量统计 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">📊 v3.9.1 每日/周/月流量统计 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-18</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">大 v3.9 阶段 2/?</span>
+            <span class="cl-tag feat">新特性</span>
+            <span class="cl-tag feat">流量历史</span>
+            <span class="cl-tag feat">SVG 图表</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>📏 周期采样</b>:新增 <code>bin/stats_sample.sh</code>,挂在 <code>watchdog.sh</code> 主循环每 5 分钟跑一次。从 iptables HNC_STATS 链读当前累计字节(跟 devices 卡片的实时速率同源),按 MAC 聚合(同 MAC 跨 IP 自动相加),追加到 <code>data/stats_raw.jsonl</code>。每行一个采样点 <code>{"ts":N,"mac":"..","rx":N,"tx":N}</code></li>
+            <li><b>📅 跨日汇总</b>:新增 <code>bin/stats_rollup.sh</code>,采样脚本检测到日期变化时触发。对昨日的 raw 按时间序算 delta,核心算法 <code>delta = max(0, cur - prev)</code>,自动吞掉 cleanup / full_restore 导致的 counter 归零跳变(cur &lt; prev 时 delta=0,baseline 重置为 cur)。每 MAC 一行写到 <code>data/stats_daily.jsonl</code>,带可读 name(device_names.json 优先于 devices.json 的 hostname)</li>
+            <li><b>🗑️ 自动保留策略</b>:raw 保留最近 48h(给 rollup 留安全边界),daily 保留最近 90 天,超期行 awk 过滤掉。估算:50 台 × 288 点/天 × 2 天 × 80 字节 ≈ <b>2.3 MB</b> raw;50 × 90 天 × 80 字节 ≈ <b>350 KB</b> daily</li>
+            <li><b>📊 WebUI 图表</b>:统计页下半部分新增独立 card,包含粒度 <b>今日 · 本周 · 本月 · 总计</b>四段 + 设备下拉(全部 / 单台,只列有数据的 MAC)。今日按小时 24 桶,其他按天。<b>手写 SVG 堆叠柱状图</b>,RX 蓝 / TX 红,Y 轴自动刻度(1/2/5 × 10ⁿ),X 标签稀疏化防重叠,hover/touch 显示 tooltip 精确字节。不引 Chart.js 保持离线可用</li>
+            <li><b>🔄 今日 vs 历史的算法分歧</b>:今日数据从 raw 实时算 delta(daily 要等明天凌晨 rollup),其他粒度直接读 daily。"今日"在 daily 聚合中被 raw 实时覆盖,避免跨日边界展示 0 值</li>
+            <li><b>🛡️ 跨实现稳定性</b>:IP→MAC 提取用 <code>grep -oE</code> + <code>sed</code> 两步法,不用 <code>awk while(match())</code>(POSIX awk / busybox awk / toybox awk 对循环内 RSTART 语义不一致,真机 toybox 最稳)。日期算术有 <code>date -d</code> 失败的 <code>awk strftime</code> fallback</li>
+            <li><b>📦 容器/临时文件</b>:采样的 tmp 文件放 <code>run/stats_map.*</code> 和 <code>run/rollup_*.*</code>,<code>cleanup.sh</code> 加入清理;但 <code>data/stats_raw.jsonl</code> 和 <code>data/stats_daily.jsonl</code> 视为用户数据,cleanup 不删。跨日标志 <code>run/stats_last_date</code> 由 cleanup 清掉(重建无损)</li>
+            <li><b>🧪 测试</b>:新增 <code>test/unit/test_stats.sh</code> 12 单测覆盖:sample 的 MAC 聚合 / IP 过滤 / 空数据容错 / JSON 格式;rollup 的 delta 累加 / counter 跳变处理 / 去重 / name 映射优先级 / raw prune。WebUI 用 jsdom 跑真实 DOM 验证 today/week/month/all 四个粒度 + 设备下拉 + 空数据场景都正确渲染</li>
+            <li><b>📦 改动文件</b>:新增 <code>bin/stats_sample.sh</code>(158 行) + <code>bin/stats_rollup.sh</code>(~150 行) + <code>test/unit/test_stats.sh</code> + <code>webroot/index.html</code>(+~450 行:CSS 图表样式 + HTML 图表容器 + JS 聚合+渲染模块) + <code>bin/watchdog.sh</code>(+7 行挂钩) + <code>bin/cleanup.sh</code>(+3 行清理) + <code>module.prop</code>(v3.9.1 / 3901)</li>
+            <li><b>🎯 后续</b>:可选 CSV 导出 / 实时速率历史曲线 / per-IP 拆分。v3.9 功能扩展周期仍在继续</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.9.0 模板 + 批量操作 + Bug 1 修复 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">✨ v3.9.0 模板 + 批量操作 + Bug 1 修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-18</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">大 v3.9 阶段 1/?</span>
+            <span class="cl-tag feat">新特性</span>
+            <span class="cl-tag feat">批量操作</span>
+            <span class="cl-tag feat">模板</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>✦ 限速/延迟模板 CRUD</b>:新增独立文件 <code>data/templates.json</code>,格式 <code>{"名字":{"down_mbps":N,"up_mbps":N,"delay_ms":N,"jitter_ms":N,"loss_pct":N}}</code>。搜索栏下方 <b>[✦ 模板]</b> 按钮打开管理面板,支持新建 / 编辑 / 删除。名字支持中文 + emoji,数字参数白名单校验(拒绝负数 / NaN / 字母)</li>
+            <li><b>☰ 批量模式</b>:搜索栏下方 <b>[☰ 批量]</b> 按钮进入,卡片变 checkbox 样式。点击卡片 toggle 选中,尊重搜索过滤(全选只选可见卡片)。工具条提供 <b>[应用模板 ▾] [清除限速] [清除延迟] [加黑] [解黑] [全选] [取消] [退出]</b>,覆盖常见批量操作场景</li>
+            <li><b>🚀 批量 apply 优化</b>:单设备的 apply 链(mark + set_limit + set_delay)原本是 3 次独立 kexec 加 5 次 shUpdate round-trip。批量路径合并成 1 次 kexec 跑组合命令 + 1 次 shUpdate(7 字段共享一次 json 锁),减少 JSBridge 往返 2/3。30 台设备串行约 15 秒,中途 <code>batch-count</code> 显示进度</li>
+            <li><b>🔐 并发安全</b>:<code>json_set.sh</code> 的 <code>tpl_set / tpl_del</code> 进 P0-2 锁列表,跟 <code>bl_add / device</code> 等写命令共享 <code>$HNC/run/json.lock</code>,并发测试验证无损坏</li>
+            <li><b>🛡️ 注入防御</b>:WebUI 层用 <code>shellQuote</code> 所有用户输入(模板名、mac);后端 shell 层用 <code>sed</code> 转义 name,<code>tr -d</code> 去控制字符;awk 通过文件而非 <code>-v</code> 传 value(复用 name_set v3.5.0 的模式避免二次解析)。单测里 <code>"; touch CANARY; #</code> 这种注入 payload 不执行</li>
+            <li><b>🐛 Bug 1 修复:黑名单重启后不恢复</b>。<code>bin/tc_manager.sh</code> <code>restore_rules()</code> 的黑名单循环写成逐行扫描配 <code>in_bl</code> 状态机,假设 <code>"blacklist": [...]</code> 跨多行。但 <code>json_set.sh bl_add</code> 输出是单行格式,<code>in_bl</code> 在同一行先被 <code>"blacklist"</code> 置 1,紧接着 <code>]</code> 又置 0,<code>if [ $in_bl -eq 1 ]</code> 永远不成立,MAC 永不进入 <code>blacklist_add</code> 调用。<b>影响:重启手机后所有配过的黑名单全部失效</b>。修复改成单行抽取 <code>"blacklist":[...]</code> 整段再解 MAC,不依赖行边界</li>
+            <li><b>🧪 测试</b>:新增 <code>test/unit/test_templates.sh</code> 15 个单测覆盖 CRUD / 覆盖 / 删除 / 数字校验 / shell 注入 / 中文 emoji / 浮点 / 并发。原 64 单测全过。总计 <b>79/79</b>。JS 语法 <code>node --check</code> 过,HTML 结构校验过,patch 在 v3.8.6 原包上 <code>git apply --check</code> 干净</li>
+            <li><b>📦 改动文件</b>:<code>webroot/index.html</code> (+590/-1,CSS + HTML + JS 三合一) + <code>bin/json_set.sh</code> (+103/-2,<code>tpl_set / tpl_del / tpl_list</code>) + <code>bin/tc_manager.sh</code> (+10/-8,Bug 1) + 新文件 <code>test/unit/test_templates.sh</code> + <code>module.prop</code> bump 到 v3.9.0 / 3900</li>
+            <li><b>📐 设计取舍</b>:模板存独立文件而不是塞 rules.json 新字段,因为 rules.json 已经承载 11+ 顶层字段,再加 templates 会膨胀,且 templates 跟 devices 类比扁平映射,跟 device_names.json 同构。批量操作串行而非并行,因为 <code>json_set.sh</code> 的 <code>mkdir</code> 锁并发下会触发 5s 超时,串行稳</li>
+            <li><b>🎯 大 v3.9 开启</b>:v3.8 系列 LTS 承诺不破,Bug 1 补丁本质上是 LTS 补丁;但新功能(批量 / 模板)属于功能扩展,开启大 v3.9 周期。下一步计划:每日 / 每周 / 每月流量统计(采样 + rollup + WebUI 图表)</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.8.5 netem RTT 语义修复 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">⏱️ v3.8.5 netem RTT 语义修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-14</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">大 v3.8 阶段 6/6</span>
+            <span class="cl-tag feat">语义修复</span>
+            <span class="cl-tag feat">用户痛点</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🐛 用户痛点</b>:反馈"设 200ms 延迟,ping 看到 400ms 翻倍"。排查确认 v3.3.2 以来 set_delay 在 egress(wlan2 下行)和 ingress(ifb0 上行)都加同样的 netem 延迟,代码日志明确写 <code>(both dirs)</code>。这是<b>作者意图 vs 用户直觉的语义冲突</b>,不是 bug:作者想做"真实对称弱网模拟",用户想的是"ping RTT 增量"</li>
+            <li><b>🔬 实测验证</b>:设 250ms,临时手动把两方向 netem 各改成 125ms,ping 从 <code>490/503/514</code> ms 降到 <code>253/270/281</code> ms。270ms = 250ms(设置)+ ~20ms(基础 RTT)。完美符合用户预期</li>
+            <li><b>✅ 修复方案(方案 3)</b>:用户输入的 delay_ms 现在是<b>RTT 视角</b>,内部除以 2 分给两方向。奇数 egress 向上取整 ingress 向下取整:<code>101 → 51 + 50</code>(总和 = 101,无精度损失)。保留 v3.3.2 的双向 netem 设计(真实对称模拟),只改数学</li>
+            <li><b>🧮 jitter/loss 的处理</b>:保持每方向原值。理论上双向 jitter 合并后 RTT jitter ≈ √2 × 单方向,端到端 loss ≈ 2p,要精确除需浮点运算,shell 里不划算。所以 v3.8.5 明确语义:<b>delay 是 RTT,jitter/loss 是每方向</b>。实际使用中,用户主要关心 delay,jitter 只是锦上添花</li>
+            <li><b>🗺️ 改动极小</b>:只改 <code>bin/tc_manager.sh</code> 的 set_delay 函数(~15 行),加两个局部变量 delay_eg/delay_ig 做整数除 2。log 格式更新为 <code>RTT=250ms (eg 125ms + ig 125ms)</code> 让排查更直观</li>
+            <li><b>🧪 测试</b>:64 shell 测试 + 268 C 测试全过。test_iptables_tc.sh 的 set_delay mock 测试不检查具体参数,所以除以 2 的语义改动对测试透明</li>
+            <li><b>🎯 大 v3.8 完成</b>:6/6 阶段全部完成。v3.8.0 OUI / v3.8.1 cache / v3.8.2 方案 G / v3.8.3 OUI 扩展 / v3.8.4 pthread / v3.8.5 RTT 语义。HNC 进入稳定维护期</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.8.4 pthread 异步 mDNS worker -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🧵 v3.8.4 pthread 异步 mDNS worker &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-14</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">大 v3.8 阶段 5/6</span>
+            <span class="cl-tag feat">pthread 首次</span>
+            <span class="cl-tag feat">Actor 模型</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🧵 HNC 项目首次引入 pthread</b>:scan_arp 和 nl_process 的 re-resolve 路径以前同步调 resolve_hostname,mdns 分支最坏阻塞主循环 800ms。现在先同步调 resolve_hostname_dhcp_only(~35ms),只有所有快速路径都失败才 enqueue 到异步 worker 线程</li>
+            <li><b>🏗️ Actor 模型</b>:双队列 + 单 worker,<b>g_devs 依然主线程独占,零 g_devs 锁</b>。避免了多线程重构的最大风险。新代码集中在 <code>mdns_worker.{h,c}</code> ~360 行,hotspotd.c 只改 7 处</li>
+            <li><b>🔐 乐观锁 drain_results</b>:<code>if (hostname_src != "pending") continue;</code> 这个单行检查实现了乐观并发控制。worker 查询期间 DHCP 抢先命中,mdns 结果会被自动丢弃,尊重 dhcp > mdns 优先级</li>
+            <li><b>🧪 2 轮 Gemini 审查 + 自我审查</b>:自我审查发现信号屏蔽缺失。Gemini 找出 1 个 P1(POSIX UB: sigfillset 屏蔽 SIGSEGV/SIGBUS/SIGILL/SIGFPE 行为未定义,必须 sigdelset 剔除)+ 3 个 P2(删除 volatile / strncpy 规范化 / stop 防重入)全部修复</li>
+            <li><b>🔧 函数指针注入</b>:worker 通过 <code>set_resolve_fn(try_mdns_resolve)</code> 注入,<code>mdns_worker.c</code> 不依赖 hotspotd.c,单元测试可注入 mock</li>
+            <li><b>🛡️ 线程安全</b>:两个独立 mutex(task / result)不嵌套 → 零死锁。异步信号屏蔽只投递主线程,同步信号(段错误)依然触发 tombstone。Stop 幂等 + pthread_join 等最后任务完成</li>
+            <li><b>🧪 测试</b>:31 个 mdns_worker 单元测试 + 268 全套回归全过,零编译 warning</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.8.3 OUI 扩展 + 用户覆盖 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🏷️ v3.8.3 OUI 扩展 + 用户覆盖机制 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-14</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">大 v3.8 阶段 4/6</span>
+            <span class="cl-tag feat">OUI 表扩展</span>
+            <span class="cl-tag feat">用户覆盖</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>📊 D2' OUI 表扩展 444 → 907 条</b>:新增 465 条常见厂商前缀,按 prefix 升序,bsearch 平均 ~10 次比较。覆盖广度提升一倍,原表偏重手机/PC,新表补上了<b>整个智能家居生态</b></li>
+            <li><b>🌐 覆盖厂商增加</b>:<br>
+              • <b>路由器</b>:TP-Link/Netgear/ASUS/Linksys/D-Link/MikroTik/Ubiquiti<br>
+              • <b>音频</b>:Sonos/Bose/JBL/Harman/Denon/Yamaha<br>
+              • <b>电视家电</b>:LG/Sony/Panasonic/Toshiba/Hisense/TCL/Vizio<br>
+              • <b>打印机</b>:Canon/Epson/Brother + HP 补漏<br>
+              • <b>安防</b>:Ring/Arlo/Wyze/Hikvision/Dahua/Reolink<br>
+              • <b>可穿戴/出行</b>:Garmin/Fitbit/Tesla<br>
+              • <b>游戏</b>:PlayStation/Xbox 补漏<br>
+              • <b>IoT</b>:Shelly/Aqara/Tuya + Espressif 补漏<br>
+              • <b>主流厂商补漏</b>:Apple/Samsung/Xiaomi/Google/Amazon 常见前缀</li>
+            <li><b>🎯 D3 用户 OUI 覆盖</b>:新增 <code>/data/local/hnc/data/oui_overrides.json</code>,格式是简单 JSON <code>{"28:6c:07":"小米手机"}</code>。用户可以给自家设备打精确标签(例如"我的 MacBook"而非"Apple 设备"),或给 LAA 随机 MAC(虚拟机/Docker)命名,或覆盖内置表</li>
+            <li><b>🔑 优先级设计</b>:<code>override > 内置 OUI > LAA 跳过</code>。override 在 LAA 检查**之前**生效,允许用户给虚拟机的 LAA MAC 打标签。内置表查询仍然跳过 LAA(避免伪造厂商识别)</li>
+            <li><b>🧩 实现</b>:新增 <code>daemon/oui_override.{h,c}</code> 独立模块(~350 行),JSON 宽松解析(冒号/横线/大小写/UTF-8 中文全支持),容量 256 条,文件上限 16KB,损坏数据不 crash</li>
+            <li><b>🧪 测试</b>:27 个 oui_override 单元测试 + 全套 237 个测试回归,零编译 warning</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.8.2 调用链真代码集成测试(方案 G) -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🧪 v3.8.2 调用链真代码集成测试(方案 G) &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-14</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">大 v3.8 阶段 3/6</span>
+            <span class="cl-tag feat">真代码测试</span>
+            <span class="cl-tag feat">零 drift</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🧪 B3 调用链真代码集成测试</b>:HACKING.md 坑 20 的最终对策。v3.7.0 坑 16 (process_pending_mdns 绕过 resolve_hostname) 这类跨函数 bug 现在被自动拦截。测试执行的是 hotspotd.c 里 <b>100% 真实</b>的 resolve_hostname 和 resolve_hostname_dhcp_only 机器码,不是 shim 重实现,不是契约文档</li>
+            <li><b>🏗️ 方案 G 工作原理</b>:hotspotd.c 底部把 try_mdns_resolve / try_ns_dhcp_resolve / main 三段用 <code>#ifndef HNC_TEST_MODE</code> 包围,前向声明保留在原位置。test_call_chain.c 定义 HNC_TEST_MODE 然后 <code>#include "../hotspotd.c"</code>,自己提供同名 static 函数作为 mock。编译器把 resolve_hostname 里的 call 指令解析到测试里的 mock 定义。零链接器魔法,零 --wrap,零函数提取</li>
+            <li><b>🔬 方案选择历程(3 次迭代)</b>:方案 E (契约测试 + drift 检测) 被 Gemini 审查识别为 "testing the mock 反模式",废弃。方案 F (GCC <code>--wrap</code>) smoke test 失败——<code>--wrap</code> 只拦截跨 translation unit 的 undefined reference,hotspotd.c 单文件内调用不 work。方案 G 从 Gemini 二次咨询得到,smoke test 验证通过,真代码编译通过,符号表和 v3.8.1 完全一致。**每一步用 smoke test 验证,不盲信"业界最佳实践"**</li>
+            <li><b>📋 27 个真代码测试覆盖</b>:6 级优先级链(T01-T06)+ DHCP/mDNS 命中必须写 cache、manual/OUI 不写 cache(T07-T11)+ dhcp_only 永不查 mDNS(T12-T15)+ cache 兜底 + 优先级高于 OUI(T16-T19)+ LAA MAC 跳 OUI 含 Mi-10 真实 0x7a(T20-T21)+ <b>v3.7.0 坑 16 回归保护</b>(T22-T24,pending 路径 DHCP 命中 Mi-10 不是 Android)+ 空 IP 边界(T25-T27)</li>
+            <li><b>🧩 生产代码零逻辑改动</b>:hotspotd.c 仅物理移动了 3 段代码到文件底部,加了 1 个 <code>#ifndef</code>。生产 binary 的符号表和 v3.8.1 完全一致(nm diff 通过),行为零变化</li>
+            <li><b>🏗️ v3.8.4 pthread 就绪</b>:方案 G 的 mock 函数里可以直接插 <code>usleep()</code> / <code>pthread_yield()</code>,放大时序窗口测试 worker 线程调度。这是 v3.8.4 pthread 异步化的安全网基础</li>
+            <li><b>🧪 测试汇总</b>:210 个测试全过(64 shell + 50 hostname_helpers + 11 mdns_parse + 21 OUI + 37 hostname_cache + 27 call_chain 真代码版)+ 生产编译零 warning</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.8.1 持久化 cache + diag 假警报修复（默认展开）-->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">💾 v3.8.1 DHCP/mDNS hostname 持久化 cache + diag 假警报修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-14</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">大 v3.8 阶段 2/6</span>
+            <span class="cl-tag feat">持久化 cache</span>
+            <span class="cl-tag fix">diag 假警报</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>💾 A3 DHCP/mDNS hostname 持久化 cache</b>:Gemini P1-7 审查指出的问题正式修复。一旦设备被 DHCP 或 mDNS 成功识别,名字会写入 <code>/data/local/hnc/data/hostname_cache.json</code>。即使 <code>dumpsys network_stack</code> ring buffer 滚出了旧 DHCP 事件,或者 hotspotd 重启,重连的设备依然能立即恢复真名,不会退化为 "Xiaomi 设备" 或 "D69D0FA1"</li>
+            <li><b>🔗 优先级链变化</b>:<code>manual > dhcp > mdns > <b>cache(新)</b> > oui > mac</code>。cache 优先级放在 OUI 之前,因为缓存的是**精确识别结果**(Mi-10/iPhone 14),比 OUI 的模糊"Apple 设备"更有价值</li>
+            <li><b>🏗️ 实现细节</b>:独立模块 <code>daemon/hostname_cache.c</code>(343 行),1024 条上限 + LRU 淘汰(按 updated_at),原子 tmp+rename 写盘,load 时能安全处理空文件/损坏 JSON/垃圾数据不 crash,MAC 大小写不敏感匹配,相同数据 update 不标 dirty(避免无意义 fsync)。de-bounce 跟 devices.json 共享写入窗口</li>
+            <li><b>🎨 WebUI 新图标</b>:<code>hostname_src === 'cache-dhcp'</code> 或 <code>'cache-mdns'</code> 的设备显示 💾 图标,title 提示"历史缓存识别"</li>
+            <li><b>🔧 diag.sh 修复 1 — 安装目录检查</b>:之前 [1/14] 检查 <code>$HNC/module.prop</code>,但 module.prop 实际在 <code>/data/adb/modules/hotspot_network_control/</code>(Magisk/KernelSU 模块目录),不在 <code>/data/local/hnc</code>(运行目录)。这个 FAIL 从 v3.5 开始就有,一直没人修。现在检查正确路径</li>
+            <li><b>🔧 diag.sh 修复 2 — hotspotd 防误用检查过时</b>:v3.4.11 时代写的 "LTS 期不应启用 hotspotd" 已经过时,hotspotd 从 v3.5+ 开始就是默认 daemon。改成"检查 daemon 是否运行",binary 存在 + 进程运行 → OK,binary 存在但进程不在 → WARN "watchdog 会在 60s 内拉起"</li>
+            <li><b>🧪 测试</b>:37 个 hostname_cache 新单元测试(init/reset/count + update 新建/覆盖/无变化 + lookup 命中/未命中/大小写 + save/load 往返含 JSON 特殊字符 + 损坏文件安全处理 + LRU 行为)+ 146 历史回归,共 183 全过,零 warning 编译</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.8.0 大 v3.8 阶段 1:OUI 厂商兜底 + 格式探针（默认展开）-->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🏷️ v3.8.0 OUI 厂商兜底 + dumpsys 格式探针 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-14</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">OUI 444 条</span>
+            <span class="cl-tag feat">格式探针</span>
+            <span class="cl-tag feat">教训归档</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🏷️ A1 OUI 厂商查表兜底</b>:DHCP/mDNS 全都没命中时,查 MAC 前 3 字节的厂商前缀表,把 "D69D0FA1" 显示升级为 "Apple 设备" / "Xiaomi 设备" / "Google 设备"。覆盖 Apple/小米/华为/OPPO/vivo/三星/Dell/HP/联想/微软/谷歌/Intel/索尼/任天堂/亚马逊/树莓派/乐鑫/飞利浦/TP-Link 等 <b>444 条 OUI 前缀</b>,覆盖中国大陆 90%+ 常见终端</li>
+            <li><b>🎯 特别优化</b>:自动检测 locally-administered bit (MAC 首字节 bit 1),随机 MAC(Android 10+ 默认开启的 MAC 隐私随机化)直接跳过,不会返回伪造的"厂商",降级为 MAC 兜底</li>
+            <li><b>🎨 WebUI 新图标</b>:<code>hostname_src === 'oui'</code> 的设备显示 🏷️ 图标(非精确识别),点击可手动命名</li>
+            <li><b>🔍 B2 dumpsys 格式探针</b>:<code>diag.sh</code> 新增 [14/14] 检查项,启动时验证 <code>dumpsys network_stack</code> 输出同时包含 "hwAddr: " 和 "hostname: " 双锚点。未来 Android 版本升级 Google 改格式时,HNC 会在启动时立刻暴露问题,而不是等用户抱怨"为什么 WebUI 所有设备都变成 MAC 兜底了"</li>
+            <li><b>📖 D1 HACKING.md 教训归档</b>:新增 7 条"经典坑"(14-20 号):webroot devIcon ReferenceError / dumpsys network_stack 才是 Android 14+ DHCP 真实来源 / 同步路径和异步路径必须一起改 / MAC 白名单 off-by-one RCE / popen 没超时 / pclose 假设脆弱 / 调用链端到端测试需求。同时新增"AI 审查流程"章节,把今天 4 次外部 AI 审查的经验固化为发布前置条件</li>
+            <li><b>🧪 测试</b>:21 个 OUI 单元测试(Apple/Xiaomi/Huawei/OPPO/Samsung/Google/Raspberry Pi 命中 + LAA bit 跳过 + 非法输入 + 边界) + 146 历史测试全过</li>
+            <li><b>🗺️ 阶段路线</b>:这是大 v3.8 的<b>第 1 个阶段</b>(共 5-6 个阶段)。后续计划 v3.8.1 DHCP hostname 持久化 cache,v3.8.2 跨函数调用链测试框架(坑 20 的对策),v3.8.3 mDNS 服务发现改造,v3.8.4 pthread mDNS 异步化。按阶段发布降低风险</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.7.2 Gemini 安全审查修复（默认展开）-->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🛡️ v3.7.2 Gemini 深度安全审查紧急修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-13</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix" style="background:#dc2626;color:#fff">P0 RCE 修复</span>
+            <span class="cl-tag fix">popen 超时</span>
+            <span class="cl-tag fix">pending regression</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🚨 P0-1 RCE 漏洞</b>:<code>try_ns_dhcp_resolve</code> 的 MAC 白名单校验存在越界逃逸。原版 <code>for (i=0; mac[i] && i&lt;17; i++)</code> 只检查前 17 字符,如果输入 <code>"11:22:33:44:55:66;reboot"</code>,循环到 i=17 退出时从未检查第 18 个字符 <code>;</code>,然后被原版 popen 的 <code>%s</code> 拼进 shell 命令导致 RCE。虽然 MAC 来自 netlink 内核事件不可触发,但防御深度必须修复</li>
+            <li><b>🚨 P0-2 popen 无超时</b>:<code>popen("dumpsys...")</code> 在 ColorOS system_server 卡死时会无限阻塞 hotspotd 主线程,触发 watchdog 误重启</li>
+            <li><b>🚨 P0-3 僵尸进程风险</b>:<code>pclose</code> 依赖所有退出路径都被执行,未来维护加 <code>return</code> 就会漏</li>
+            <li><b>🚨 P0-4 pending 路径 mDNS regression</b>:v3.7.1 让 pending 路径调完整 <code>resolve_hostname</code>,对不发 option 12 的 Pixel 设备会阻塞 800ms mDNS。v3.6 "最多 800ms 阻塞一次" 的承诺被破坏</li>
+            <li><b>🔧 修复 1/2/3 — 一次重构</b>:<code>try_ns_dhcp_resolve</code> 从 <code>popen + grep shell</code> 重写为 <b><code>fork + execlp("dumpsys") + select 500ms 超时 + SIGKILL + waitpid</code></b>,内存中 <code>strcasestr + strstr</code> 双锚点匹配代替 grep。零 shell 参与 → 零注入可能;硬超时 500ms → 卡死时主循环立即恢复;waitpid 100% 收割 → 零僵尸进程;双锚点 <code>hwAddr: mac</code> + <code>hostname:</code> → 匹配精度更高</li>
+            <li><b>🔧 修复 4 — 新函数 resolve_hostname_dhcp_only</b>:只查 manual + dhcp + mac(不查 mDNS),给 <code>process_pending_mdns</code> 专用。pending 耗时上限从 ~1.3s 降到 ~500ms (dhcp 超时)。mDNS 推迟到 60 秒后的 re-resolve 路径。对 Pixel 等设备装机瞬间显示 MAC 兜底,60 秒自动升级到 mDNS</li>
+            <li><b>🧪 测试</b>:20 个 MAC RCE 专项测试(<code>;reboot</code> / <code>$()</code> / <code>\`whoami\`</code> / <code>&amp;&amp;</code> / 换行注入 全部被拒)+ 9 个功能测试(Mi-10 提取 / 多行取最新 / 双锚点 / 含空格 hostname / 500ms 超时实际生效)+ 135 历史回归全过</li>
+            <li><b>📊 Gemini 的 22 个审查点</b>:5 个 P0(全修)+ 3 个 P1 真 bug(延后 v3.8)+ 2 个小修(line buffer / 日志格式)+ 5 个伪 bug 或过度工程(不改)+ 7 个自评 OK</li>
+            <li><b>🙏 Gemini 的贡献</b>:如果没有这次审查,RCE 漏洞会一直存在,popen 无超时会在某次 system_server 卡死时触发 watchdog 雪崩。HNC 项目对外部审查的依赖这次又是决定性的。这是今天第 3 次 Gemini 审查(前两次分别在 v3.6.3 和 v3.7.0 之前)</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.7.1 pending 路径 DHCP 修复（默认展开）-->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🔧 v3.7.1 pending 路径 DHCP 查询修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-13</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix" style="background:#dc2626;color:#fff">v3.7.0 bug 修复</span>
+            <span class="cl-tag fix">装机瞬间识别</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🔧 bug 修复</b>:v3.7.0 在 <code>resolve_hostname()</code> 里加了 DHCP 查询,但 <b>忘了同步更新 <code>process_pending_mdns()</code></b> — 它还在直接调 <code>try_mdns_resolve</code>,绕过了 DHCP 查询路径。结果:新设备首次 pending 处理只查 mDNS,不查 DHCP,Mi-10 等发 option 12 的设备必须等 60 秒 re-resolve 才能拿到正确 hostname</li>
+            <li><b>💥 症状</b>:装机后打开 WebUI,Mi-10 先显示 "Android"(mDNS 返回的通用名),60 秒后才变成 "Mi-10"(DHCP 路径)。v3.7.1 修复后装机瞬间就是 "Mi-10"</li>
+            <li><b>🎯 修复</b>:<code>process_pending_mdns</code> 改调 <code>resolve_hostname</code> 完整链(manual > dhcp > mdns > mac),不再直接调 <code>try_mdns_resolve</code>。改动 15 行 C</li>
+            <li><b>⚡ 性能顺带改进</b>:DHCP 查询 35ms vs mDNS 800ms。大多数客户端(Windows / 小米 / 华为)现在在 pending 路径里更快被识别 — pending 处理平均变快而不是变慢</li>
+            <li><b>🔍 发现过程</b>:通过真机日志 + devices.json 直接数据对比,而不是代码审查。v3.7.0 代码 review 时 6 个 AI 都漏了这个 bug(包括 Claude 自己、Gemini、第二轮深度研究 AI)。**教训**:同步路径和异步路径必须一起改,单测需要覆盖两个入口</li>
+            <li><b>🚦 升级建议</b>:直接覆盖 v3.7.0。装机后 Mi-10 重连一次(或等自然 DHCP 续约,默认 1 小时)会立即显示 dhcp 而不是 mdns。已经缓存了 "Android" 的旧数据不会自动清,重启 hotspotd 会清内存态</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.7.0 DHCP hostname 自动识别（默认展开）-->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🎯 v3.7.0 DHCP hostname 自动识别 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-13</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat" style="background:#059669;color:#fff">v3.7 新特性</span>
+            <span class="cl-tag feat">DHCP 自动识别</span>
+            <span class="cl-tag feat">dumpsys network_stack</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🎯 核心新特性</b>:WebUI 设备列表自动显示真实设备名(<code>Mi-10</code> / <code>DESKTOP-ABC123</code> / <code>Johns-MacBook-Pro</code>),不再是 MAC 后 8 位 <code>D69D0FA1</code> 这种乱码。优先级链 <b>manual > dhcp > mdns > mac</b></li>
+            <li><b>🔍 技术突破</b>:Android 14+ 的 NetworkStack 把所有 DHCP 事件写入内存 ring buffer,<code>dumpsys network_stack</code> 能完整 dump 出来,每条事件带 <code>hwAddr / hostname / expTime</code>。HNC 解析这个输出提取每个设备的 hostname (DHCP option 12)</li>
+            <li><b>📡 覆盖情况</b>:Windows(100% 发 hostname)、小米/华为等 OEM Android(~80%)、部分 iOS(~40%)。<b>原生 Android(Pixel / LineageOS)不发 hostname</b>(Google 8.0 起隐私移除),这些设备继续走 mDNS → mac 兜底</li>
+            <li><b>⚡ 性能</b>:<code>dumpsys network_stack</code> 真机实测 35ms / 15 KB,相比 <code>mdns_resolve</code> 的 800ms <b>快 23 倍</b>。而且 DHCP 是被动数据(客户端连入时自动带),零网络成本、零额外协议开销</li>
+            <li><b>🔧 实现</b>:<b>shell</b> <code>device_detect.sh</code> 新增 dumpsys network_stack 查询(grep + sed)· <b>C</b> <code>hotspotd.c</code> 新增 <code>try_ns_dhcp_resolve()</code>(popen + 逐行 parse + MAC 白名单防注入)· <b>webroot</b> 复用 v3.4.6 留的 <code>nameSrc === 'dhcp'</code> 分支和 📡 图标</li>
+            <li><b>🧪 测试</b>:10 个 C parse 单元测试(Mi-10 / DESKTOP-ABC / Mike's iPhone 含空格 / MacBook-Pro 含 dash / 超长截断 / 多行取最新 / 空输入等)· shell 正则测试(大小写 MAC / 不存在 MAC)全部通过</li>
+            <li><b>🙏 方案来源</b>:两次独立 AI 审查的合作成果。Phase 1-3 标准 dumpsys / cmd / 文件系统全军覆没,直到第二轮审查指出"<code>dumpsys network_stack</code> 是唯一没试过的 dumpsys"。Phase 4 验证输出里直接有 <code>hostname: Mi-10</code>,比预想的 DHCP sniffer (~600 行 C) 少 95% 工作量</li>
+            <li><b>📝 HACKING.md 新增</b>:"坑 15:在 Android 14+ 上,放弃一切 dnsmasq 假设,dumpsys network_stack 才是 DHCP 状态的真实来源"</li>
+            <li><b>🚦 升级建议</b>:直接覆盖 v3.6.3,数据全保留。装完不需要重连热点,下一次 scan 时所有已连接设备会自动从 dumpsys 拉到 hostname</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.6.3 Gemini 审查后 P1 修复（默认展开）-->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🛡️ v3.6.3 Gemini 审查 P1 修复 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-13</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag sec">P1-1 REFRESH DoS</span>
+            <span class="cl-tag sec">P1-2 socket 0666→0600</span>
+            <span class="cl-tag feat">第四轮独立审查</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🔴 P1-1 REFRESH 缓存击穿 / 本地 DoS</b>:<code>handle_client</code> 的 REFRESH 分支里 <code>g_last_stats_update = 0</code> 会完全绕过 <code>update_traffic_stats</code> 的 5s TTL 缓存。任何能连 unix socket 的进程高频发 REFRESH 就能让主循环疯狂 <code>popen("iptables stats_all")</code>,打满 CPU → fork 炸弹 / 本地拒绝服务。修复:改成把 <code>g_last_stats_update</code> 拨回到"距 now 恰好 2 秒前",保证 REFRESH 仍能触发一次(2s 内反应)但高频不会叠加</li>
+            <li><b>🔴 P1-2 UNIX socket 权限 0666 → 0600</b>:<code>unix_server_open()</code> 原来 <code>chmod(SOCK_PATH, 0666)</code>(所有人可读写)。虽然 <code>/data/local/hnc/run/</code> 目录 DAC 本身挡掉普通 App,但纵深防御原则下 socket 层也应该自己能挡。hotspotd 和所有合法客户端(watchdog / device_detect.sh / WebUI kexec)都以 root 运行,0600 够用。未来要给非 root 客户端通信应显式 chown + chmod 0660</li>
+            <li><b>🧪 第四轮独立审查(Gemini 3 Pro)</b>:v3.6.0 发布当天的 WebUI 空白事故后,作者用 Gemini 做了一次"非 Claude"的独立审查。Gemini 在任务 1 快速定位 webroot bug 真因(T6 删 devIcon → JS 作用域问题),在任务 3 找到这 2 个真实 P1。<b>三轮 Claude 审查都没找到这两个</b> — 说明换一个模型做审查有真实价值。Claude 的盲区:倾向于看叙事和日志,不够倾向于看权限/限流这种"安全常识"</li>
+            <li><b>📝 webroot changelog 精简(方案 A)</b>:默认展开从 30 个版本 → 6 个(v3.6.3/6.2/6.0/5.2/4.12/4.10/4.0),精简掉元教训叙事,只留核心改动。历史版本摘要表一行一条(v3.6.1 到 v3.4.1),v3.3.6 及更早完整记录仍在折叠区。webroot/index.html 从 4767 → 4090 行(-14%),文件从 318 → 197 KB(-38%)</li>
+            <li><b>🔧 改动文件</b>:<code>daemon/hotspotd.c</code>(REFRESH 分支 ~10 行 + chmod 1 行)+ <code>module.prop</code>(v3.6.3/3603)+ <code>bin/diag.sh</code>(版本号)+ <code>webroot/index.html</code>(changelog 精简 + 本段 + about-ver)</li>
+            <li><b>⚠️ 需要重新编译</b>:C 代码改了,arm64 binary 必须通过 CI 重新编译(沙箱无 NDK 不能交叉)。v3.6.3 的 <code>bin/hotspotd</code> 不能简单复用 v3.6.0 CI 产物</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.6.2 紧急回退版（默认展开）-->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🚨 v3.6.2 紧急回退版 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-13</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">webroot 回退</span>
+            <span class="cl-tag feat">真机事故修复</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>问题</b>:v3.6.0 真机装机后 WebUI 设备列表完全空白(顶部统计正确,下面卡片不渲染)。根因是 <code>cardHTML</code> 调 <code>devIcon</code> 抛 <code>ReferenceError</code>,render loop crash</li>
+            <li><b>真因</b>:v3.6.0 T6 误判 <code>devIcon</code> 是死代码把它删了,剩下的 SVG 版本在主 IIFE 的嵌套作用域里,<code>cardHTML</code> 在外层作用域看不到。node + 真机 Chrome DevTools 都能复现 <code>ReferenceError: devIcon is not defined</code></li>
+            <li><b>修复</b>:回退 T6(恢复 emoji devIcon)+ 回退 WebUI 的 pending 分支(<code>nameSrc === 'pending'</code> 归到 mac 降级)。webroot 字节对齐 v3.5.2</li>
+            <li><b>保留</b>:hotspotd.c 的 Commit 3 pending 异步化(后端性能优势不变,30 台新设备阻塞 24s → ~30μs)。后端 <code>hostname_src="pending"</code> 继续写入,前端当作 mac 渲染</li>
+            <li><b>取代 v3.6.1</b>:v3.6.1 误诊为 shell race condition(<code>devices.json.tmp</code> 并发 race),修了但没治症状。v3.6.1 的 shell 修复作为纵深防御保留</li>
+            <li><b>教训</b>(HACKING.md 坑 13-14):bug 定位必须先做版本 diff 再看日志,不要被叙事带偏;沙箱 node 能复现的 JS bug 真机一定也能复现(只要正确注入测试到 IIFE 内部)</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.6.0 架构收尾版 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🏗️ v3.6.0 架构收尾版 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-13</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">P0-B 核心修复</span>
+            <span class="cl-tag feat">helpers 提取</span>
+            <span class="cl-tag feat">+HACKING.md</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🔴 P0-B scan_arp pending 异步化</b>:v3.5.2 只修了 REFRESH IPC 路径,scan_arp/nl_process 新设备仍然同步 popen mdns_resolve,30 台新设备 → 主线程阻塞 24 秒 → netlink 丢包。v3.6 改成 pending 模式:scan_arp 只做 manual + mac 兜底,标 <code>hostname_src=pending</code>,主循环每 tick 异步解 1 个 mdns(最坏 800ms 不累加)。<b>阻塞 24s → ~30μs</b></li>
+            <li><b>🟡 Commit 2 提取 daemon/hnc_helpers.{c,h}</b>:<code>should_re_resolve</code> / <code>lookup_manual_name</code> / <code>json_escape</code> / <code>mac_fallback</code> / <code>resolve_hostname_fast</code> 搬出 hotspotd.c,主代码和测试共享同一个 <code>.o</code>,彻底消除"测试是文本复制"的 drift 风险</li>
+            <li><b>🟢 Commit 1 技术债清理</b>:T1 webroot action 改 shellQuote(defense-in-depth) · T2 REFRESH 清 stats TTL · T4 device_detect.sh 删假注释 · <s>T6 删死代码 devIcon</s>(v3.6.2 已回退) · T12 watchdog 每轮 check_services(崩溃恢复 180s → 60s)</li>
+            <li><b>📝 Commit 4 HACKING.md</b>(638 行):HNC 首次有正式贡献者文档。快速心智模型 + 12 个已知的坑(每个带文件+行号+事故锚点)+ 测试策略 + 发布流程 + 元教训</li>
+            <li><b>🧪 测试 112 → 125</b>:<code>hnc_pending_ready</code> × 7 + <code>hnc_resolve_hostname_fast</code> × 6。total:64 shell + 11 mdns + 50 hostname</li>
+            <li><b>hotspotd.c 变化</b>:1076 → 1049 行(-128 搬 helpers,+101 加 pending 逻辑)</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.5.2 架构修复版 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🏗️ v3.5.2 架构修复版 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-13</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">P0-A daemon 生命周期</span>
+            <span class="cl-tag feat">三轮审查后 LTS</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🔴 P0-A daemon 生命周期架构 race</b>(第二轮审查发现):watchdog spawn 锁 + device_detect.sh daemon 模式可能双重复活 hotspotd,两个 C daemon 并发写 devices.json → 文件损坏 → WebUI 全空白。修复:三层防御 — spawn 锁 + 合并 detect/hotspotd PID 语义 + tmp 路径加 PID 后缀</li>
+            <li><b>🟡 P1-A 测试与生产代码 drift</b>:test_hostname_helpers.c 用的是复制的 shadow 函数,不是真实代码。暴露于审查后全面整改 — 但真正的修复留给 v3.6 Commit 2 的 helpers 提取</li>
+            <li><b>🟡 P1-B 其他修复</b>:socket send 不检查返回值 / watchdog 日志无 rate limit / 测试 assert 缺 close</li>
+            <li><b>三轮独立 AI 审查</b>:v3.5.0 第一轮发现 4 个 P0(hostname 解析/控制字符/-d 参数/blacklist 截断)。v3.5.1 第二轮发现 P0-A。v3.5.2 第三轮 0 P0,进入 LTS 候选</li>
+            <li><b>承认错误</b>:v3.5.1 的 shadow function drift 是作者不诚实的历史记录。v3.5.2 CHANGELOG 公开这点,HACKING.md 坑 11 警告未来</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.4.12 LTS Critical Hotfix -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🛡️ v3.4.12 LTS Critical Hotfix &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-12</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag sec">P0 安全</span>
+            <span class="cl-tag fix">LTS 补丁</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🚨 P0 热点接口命令注入</b>:<code>get_hotspot_iface()</code> 返回 ARP 表里 dev 列,如果某个设备以 <code>; rm -rf</code> 这样的接口名连进来,后续 <code>ip addr show $iface</code> 会拼出恶意命令。已知攻击面很窄(需要 root 给 hostapd 配置非法接口名),但 shell 注入是零容忍的</li>
+            <li><b>修复</b>:<code>get_hotspot_iface</code> 加接口名白名单正则 <code>^[a-z][a-z0-9_]*$</code>,所有 <code>$iface</code> 插值改成双引号</li>
+            <li><b>v3.4 LTS 最后一个补丁</b>:v3.4.12 之后 v3.4 LTS 停止活跃维护,推荐升级到 v3.5.2 或更高</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.4.10 真 LTS 1.0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🏆 v3.4.10 真 LTS 1.0 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-12</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">LTS 基线</span>
+            <span class="cl-tag perf">updateCardFields</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>🏆 第一个真正稳定的 LTS</b>。v3.4.9/9.1 暴露了 freeze/unfreeze 补丁堆叠的问题,v3.4.10 重写 renderDevs 成字段级原地更新(<code>updateCardFields</code>),彻底消除冻结/解冻逻辑,代码量净减,反馈延迟 300ms → 100ms</li>
+            <li><b>删除所有冻结补丁</b>:<code>pendingUnfreeze</code> / <code>wasExpanded</code> / <code>parentNode.replaceChild</code> 占位符全部删除</li>
+            <li><b>零后端改动</b>:只改 webroot/index.html + module.prop + CHANGELOG,0 shell 0 C 0 业务逻辑改动</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.4.0 系列起点 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">🚀 v3.4.0 核心重构起点 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-11</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">MB/s 统一</span>
+            <span class="cl-tag feat">规则持久化</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>单位统一为 MB/s</b>:之前 UI 输入 KB/s,后端算 Mbps,用户反馈"不直观"。全链统一为 MB/s(前端/后端/rules.json/tc_manager.sh)</li>
+            <li><b>规则持久化 + 重启自愈</b>:rules.json 存限速规则,watchdog 启动时 restore。重启 / 模块禁用启用 / 热点断开 / 系统断电都能自动恢复</li>
+            <li><b>v3.4.x 系列的基础</b>。后续 v3.4.1–v3.4.12 都在此基础上迭代</li>
+          </ul>
+        </div>
+      </div>
+
+      <div class="cl-history" id="cl-history">
+
+      <!-- 历史版本摘要表（v3.6.1 到 v3.4.1 的一行总结）-->
+      <div class="cl-item">
+        <div class="cl-right" style="flex:1">
+          <div class="cl-title" style="margin-bottom:10px">📜 历史版本摘要</div>
+          <div style="font-size:11px;color:var(--t2);line-height:1.9">
+            <div><b>v3.6.1</b> · 2026-04-13 · <span style="color:var(--red)">已取代</span> 误诊 shell race,未治 webroot 症状 → v3.6.2 回退</div>
+            <div><b>v3.5.1</b> · 2026-04-12 · <span style="color:var(--red)">已取代</span> 第二轮审查发现 P0-A 架构 race → v3.5.2</div>
+            <div><b>v3.5.0</b> · 2026-04-12 · <span style="color:var(--red)">已取代</span> 第一轮审查发现 4 个 P0 → v3.5.1</div>
+            <div><b>v3.5.0-rc</b> · 2026-04-12 · 收尾 + de-bounce + 60s re-resolve + README</div>
+            <div><b>v3.5.0-beta1</b> · 2026-04-12 · hotspotd 4 修(P0-4/P1-2/P1-7/P1-8)+ CI + benchmark</div>
+            <div><b>v3.5.0-alpha</b> · 2026-04-12 · 测试框架奠基(64 shell tests)</div>
+            <div><b>v3.4.11</b> · 2026-04-12 · LTS Security Hotfix(P0-1 XSS / P0-2 JSON 锁 / P0-5 控制字符过滤 等)</div>
+            <div><b>v3.4.9.1</b> · 2026-04-12 · v3.4.9 LTS 补丁(pendingUnfreeze 缓解)</div>
+            <div><b>v3.4.9</b> · 2026-04-12 · LTS 初版(延迟 B2/B3/B4 修复,badge 精确显示)</div>
+            <div><b>v3.4.8</b> · 2026-04-12 · WebUI 稳态(updateHotspotBadge,doRefresh 节流)</div>
+            <div><b>v3.4.7</b> · 2026-04-12 · 主题系统(亮色/暗色/自动,FOUC 修复)</div>
+            <div><b>v3.4.6</b> · 2026-04-12 · hostname 五级优先级链(manual > cache > mDNS > DHCP > mac)</div>
+            <div><b>v3.4.5</b> · 2026-04-12 · 速率 fmtRate / 流量 fmtB 格式化</div>
+            <div><b>v3.4.4</b> · 2026-04-12 · iptables HNC_STATS 链真实字节计数(替代硬编码 0)</div>
+            <div><b>v3.4.3</b> · 2026-04-12 · TC class 冲突修复 + 防火墙规则清理顺序</div>
+            <div><b>v3.4.2</b> · 2026-04-11 · 黑名单 iptables 集成 + 热点自启动开关</div>
+            <div><b>v3.4.1</b> · 2026-04-11 · MARK_BASE 0x10000 → 0x800000(避让 Android netd fwmark 命名空间)</div>
+          </div>
+          <div style="font-size:11px;color:var(--t3);margin-top:8px;font-style:italic">↓ 下面是 v3.3.6 及更早的完整记录</div>
+        </div>
+      </div>
+<!-- v3.3.6 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.3.6 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-11</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">关键修复</span>
+            <span class="cl-tag fix">持久化</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>修复重启/自愈后限速被悄悄归零的 bug</b>：v3.3.3 把单位改成 MB/s 之后，rules.json 里 down_mbps 经常是浮点数（比如 0.2 MB/s = 1.6 Mbps）。但 <code>restore_rules</code> 用 <code>grep [0-9]*</code> 提取数字只能匹配整数，<code>1.6</code> 被截断成 <code>1</code>，<code>0.8</code> 被截断成 <code>0</code>——后者直接让 set_limit 以为是"关限速"，把规则清掉</li>
+            <li><b>触发场景</b>：手机重启、模块禁用/启用、watchdog 自愈检测到 HNC 链异常、以及任何其他会调用 <code>tc_manager.sh restore</code> 的时刻。所以你从 WebUI 第一次设的限速是对的，但任何后续重启都会让它失效</li>
+            <li><b>顺带修复 ensure_device_class 的"已存在则跳过"问题</b>：升级 v3.3.5 后旧 v3.3.4 创建的 class 还带 cburst=1600，新代码不会重建只会 change rate，某些 Android tc 实现下 change 不会刷新 cburst。改成强制 del+add，同时备份/恢复 leaf netem 的延迟参数</li>
+            <details class="cl-tech">
+              <summary>技术细节</summary>
+              <ul>
+                <li><code>restore_rules</code> 字段提取彻底改用 <code>python3</code> 输出 <code>|</code> 分隔的字符串，shell 用 <code>cut -d'|'</code> 接收。完全绕开 <code>grep</code> 和正则，正确处理任意浮点数</li>
+                <li>沙箱测试：<code>down_mbps=1.6</code> 现在能正确读出 <code>1.6</code>（v3.3.5 以前会读出 <code>1</code>）；<code>down_mbps=0.8</code> 读出 <code>0.8</code>（以前会读出 <code>0</code> 然后被识别为关限速）</li>
+                <li><code>ensure_device_class</code> 重写：用 awk 解析现有 leaf netem 的 <code>delay</code> 和 jitter（如果有的话），<code>tc class del</code> 整个 class，再用 v3.3.6 的正确参数 <code>tc class add</code>（带 <code>burst 200k cburst 200k</code>），最后 <code>tc qdisc add netem</code> 时把 delay 接回去</li>
+                <li><b>代码审查中发现的回归并修复</b>：第一版 ensure_device_class 重建只备份了 delay，没备份 rate。导致"先 set_limit 再 set_delay"或 restore 路径上的 set_all 会让 set_delay 把限速冲掉。修复：同时备份 class 的 <code>rate</code> 字段，重建时用 <code>${saved_rate:-$DEFAULT_RATE}</code></li>
+                <li>这意味着每次 <code>set_limit</code> 都会强制重建 class，副作用是 class 上的 HTB 流量计数器会重置——但 HNC 没用 HTB 计数器（流量统计走 HNC_STATS 链），无影响</li>
+                <li>v3.3.5 的 cburst/limit 修复全部保留</li>
+              </ul>
+            </details>
+          </ul>
+        </div>
+      </div>
+<!-- v3.3.5 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.3.5 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-11</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">关键修复</span>
+            <span class="cl-tag perf">HTB</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>修复限速时被限设备网络卡死的 bug</b>：之前你给设备设了限速后，那台设备测速 app 会一直显示"连接中"或速度极慢到几乎不可用。原因是 HTB leaf netem 的队列上限被设成了 10000 个包（约 15 MB 缓冲），1 MB/s 限速下排空要 15 秒，TCP RTT 飙到秒级直接卡死所有连接</li>
+            <li><b>修复 cburst 永远卡在 1600 字节的 bug</b>：初始建 HTB class 时没显式指定 cburst，内核默认 1600 字节。后续 <code>tc class change</code> 不会更新 cburst，导致一个标准 v6 包都装不下，单包就触发 HTB 严格丢弃</li>
+            <li><b>这两个 bug 从 v3.3.0 重构起就潜伏到现在</b>。v4 包小+你之前测速时设的限速大，所以一直没暴露；换成 v6 + 严格限速后才浮出水面。和上一版的 IPv6 双栈支持完全无关——v3.3.4 的 mark 路径其实工作正常，是 HTB 把所有进了限速 class 的流量卡死了</li>
+            <details class="cl-tech">
+              <summary>技术细节</summary>
+              <ul>
+                <li><code>tc_manager.sh</code> <code>ensure_device_class</code>：netem leaf 创建时 <code>limit 10000</code> → <code>limit 100</code>。100 包 ≈ 150 KB，任何 rate 下 RTT 都能控制在 ~100 ms 以内</li>
+                <li><code>tc_manager.sh</code> <code>set_netem_only</code>：同样把 <code>limit 10000</code> → <code>limit 100</code>，覆盖延迟设置后的 netem 重建场景</li>
+                <li><code>ensure_device_class</code> 初始建 class：<code>burst 200k</code> → <code>burst 200k cburst 200k</code></li>
+                <li><code>set_rate_only</code>：调用 <code>tc_class_set</code> 时新增 <code>cburst $burst</code> 参数，确保 rate 改变时 cburst 同步更新（这是关键——之前每次 set_limit 都只改 burst 不改 cburst，初始值 1600 永远跟着）</li>
+                <li><code>init_tc</code> 里 root class 1:1 和默认 class 1:9999 也补上 <code>cburst 200k</code>（虽然这俩 rate 是 1Gbit 不限速，影响小，但保持一致）</li>
+                <li>遗留问题：HNC 链/qdisc 在某些 ColorOS 事件后会被外部清除（热点重启 / netd 切换 / 其他原因待定位），留到 v3.3.6 加自愈机制（watchdog 检测链消失后自动 reinit）</li>
+              </ul>
+            </details>
+          </ul>
+        </div>
+      </div>
+<!-- v3.3.4 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.3.4 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-11</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">关键修复</span>
+            <span class="cl-tag feat">双栈</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>修复 IPv6 设备限速完全失效的 bug</b>：v3.3.3 及之前版本只给 IPv4 打 mark，连 realme 这种默认走 IPv6 的客户端被限速时实际跑 20-30 MB/s 无感知。现在 mark/黑名单/白名单全部在 v4 和 v6 上同步执行</li>
+            <li><b>修复 CONNMARK 掩码截断 bug</b>：原 0xffff 掩码只保留低 16 位，但我们的 mark 值是 0x10000+id，第 17 位被截掉导致下行方向永远匹配不上。改为 0x1ffff 刚好覆盖完整 mark</li>
+            <li><b>IPv6 不再依赖地址跟踪</b>：IPv6 隐私扩展会定期换临时地址，硬编码必然失效。改用 conntrack 携带 mark——上行第一个包用 MAC 匹配打 mark 并存入 conntrack，下行回包自动从 conntrack 恢复 mark，全程无需知道客户端的 IPv6 地址</li>
+            <li><b>优雅降级</b>：部分裁剪内核没有 IPv6 netfilter，模块会自动跳过 v6 侧操作并记 warn 日志，不影响 v4 正常工作</li>
+            <details class="cl-tech">
+              <summary>技术细节</summary>
+              <ul>
+                <li>新架构助手：<code>ipt_dual</code> / <code>ipt_dual_q</code>（协议无关操作双写 v4+v6），<code>_ensure_chain</code> / <code>_ensure_link</code>（幂等链创建/挂接）</li>
+                <li>v6 HNC_RESTORE 挂在 mangle/PREROUTING 位置 1，HNC_SAVE 挂在 mangle/POSTROUTING 位置 1，与 v4 完全镜像</li>
+                <li>v6 HNC_MARK 只有一条 MAC match fallback 规则（<code>-m mac --mac-source MAC -m mark --mark 0 -j MARK</code>）——上行由它打 mark，下行完全靠 CONNMARK restore 携带</li>
+                <li>CONNMARK 掩码 <code>--nfmask 0x1ffff --ctmask 0x1ffff</code> 精确覆盖 bit 0-16，不碰 bit 17+ 上 Android tether/VPN 的使用</li>
+                <li>v6 黑名单也支持 TCP REJECT 立即断连（<code>--reject-with tcp-reset</code>），失败自动降级为 DROP</li>
+                <li>删除 <code>tc_manager.sh</code> 里原本就不工作的假 IPv6 u32 filter 死代码（用 v4 地址写 <code>ip6 dst $ip/128</code> 永远不可能匹配）</li>
+                <li><code>cleanup.sh</code> 补全所有 v6 链的 unlink+flush+delete（原版只清了 v6 HNC_MARK 一个）</li>
+                <li>运行时检测 <code>command -v ip6tables && ip6tables -t mangle -L -n</code>，不可用则 <code>IPV6_OK=0</code> 自动跳过</li>
+                <li>v6 流量统计未实现（需跟踪动态地址，代价不值），<code>get_stats</code> 仍然只统计 v4</li>
+              </ul>
+            </details>
+          </ul>
+        </div>
+      </div>
+<!-- v3.3.3 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.3.3 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-11</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag ui">界面</span>
+            <span class="cl-tag feat">单位</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>限速单位改为 MB/s</b>：和系统下载速度显示保持一致。内部存储仍然是 Mbps，前端自动换算（1 MB/s = 8 Mbps），老数据不会丢</li>
+            <li><b>支持小数限速</b>：可以设 0.5 MB/s 这种精细值，输入框最小粒度 0.1 MB/s（约 100 KB/s），最大 125 MB/s（千兆）</li>
+            <li><b>去掉重复标签栏</b>：原本页面中间和底部都有「设备 / 统计 / 日志」两套 tab，现在只保留底部悬浮 nav</li>
+            <li><b>更新日志折叠</b>：默认只显示最新一个版本，历史版本点「查看历史」展开。原本 6 个版本堆在一起太长</li>
+            <li><b>清理死代码</b>：WebUI 里有 71 行从未被调用的老卡片渲染函数，删掉</li>
+            <details class="cl-tech">
+              <summary>技术细节</summary>
+              <ul>
+                <li>新增 <code>mbpsToMBps()</code> / <code>MBpsToMbps()</code> / <code>fmtMBps()</code> 三个换算助手，沙箱测试 9 个边界用例全部正确</li>
+                <li><code>applyLimit</code> 读取输入框后乘 8 再传给 <code>tc_manager.sh set_limit</code>，<code>shUpdate</code> 写入 <code>rules.json</code> 的也是换算后的 Mbps 值</li>
+                <li>显示侧（徽章、输入框初值）都通过 <code>mbpsToMBps()</code> 除 8 展示</li>
+                <li>输入框属性改为 <code>min="0" max="125" step="0.1" inputmode="decimal"</code>，手机上会弹出数字键盘</li>
+                <li>删除的死函数：<code>cardHTMLOLD_UNUSED</code>（1510-1580 行）</li>
+                <li>删除的 HTML：原「设置」卡片内中间标签栏（634-641 行）</li>
+              </ul>
+            </details>
+          </ul>
+        </div>
+      </div>
+<!-- v3.3.2 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.3.2 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-11</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">重构</span>
+            <span class="cl-tag perf">解耦</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>限速和延迟互不干扰</b>：之前关掉限速会把同一设备的延迟也一起删掉，现在两者完全独立</li>
+            <li><b>同时开限速和延迟也能正常工作</b>：顺序先后都不影响最终结果</li>
+            <details class="cl-tech">
+              <summary>技术细节</summary>
+              <ul>
+                <li>原架构 <code>set_limit</code> 关闭分支 <code>tc class del</code> 会递归删掉挂在该 class 下的 netem qdisc</li>
+                <li>新架构：class 只负责 HTB rate，leaf qdisc 固定为 netem，两者各自独立管理</li>
+                <li>新增 <code>ensure_device_class</code> / <code>set_rate_only</code> / <code>set_netem_only</code> / <code>class_exists</code> / <code>leaf_has_netem</code> 五个辅助函数</li>
+                <li><code>set_netem_only</code> 总是显式带 <code>delay 0ms</code>，避免部分 kernel 在 change 时保留旧值</li>
+                <li>升级兼容：<code>leaf_has_netem</code> 会识别 v3.3.1 残留的 fq_codel 并原地替换</li>
+              </ul>
+            </details>
+          </ul>
+        </div>
+      </div>
+<!-- v3.3.1 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.3.1 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-11</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">热修</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>小数 Mbps 限速永不生效</b>：Android ash 的 <code>[ x -gt 0 ]</code> 是整数比较，遇到 <code>0.2</code> 这类小数直接报错，错误被 <code>2&gt;/dev/null</code> 吞掉后整个 <code>if</code> 走 false，限速规则永远建不起来。WebUI 显示已启用、<code>rules.json</code> 也正确保存了小数，但 <code>tc class show</code> 里根本没有对应 class，所有流量走默认 1Gbit。整数限速（1 / 5 / 10 Mbps）不受影响，只在小数（0.2 / 0.5）时暴露</li>
+            <li><code>tc_manager.sh</code>：新增 <code>gt0</code> / <code>ge_val</code> / <code>lt_val</code> 三个 awk 浮点比较助手，替换 <code>set_limit</code> / <code>set_delay</code> / <code>mbps_to_rate</code> 里全部 6 处 <code>[ -gt 0 ]</code> / <code>[ -ge 1 ]</code> 整数比较</li>
+            <li><code>tc_manager.sh</code>：<code>mbps_to_rate</code> 统一输出 kbit 单位（<code>1.5 → 1500kbit</code>），原 mbit 分支用 <code>printf "%d"</code> 会把 1.5 截成 1mbit 丢失精度</li>
+            <li>本 bug 自 v3.2.0 起就存在，v3.3.0 审查时漏查了"小数限速"场景</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.3.0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.3.0 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-11</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">深度修复</span>
+            <span class="cl-tag sec">安全</span>
+            <span class="cl-tag perf">清理</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>[api/server.sh] v3.2 上传限速核心修复终于到位</b>：<code>handle_post_limit</code> / <code>handle_post_delay</code> 原本没把 <code>$ip</code> 传给 <code>tc_manager.sh</code>，导致 WebUI 经 API 下发的限速里 <code>u32 src IP</code> 过滤器永远建不起来——v3.2 的改动其实只影响 WebUI 直接 exec 的路径，走 API 的路径一直失效。现在 4 处调用全部补上第 5/6 参数 <code>"$ip"</code></li>
+            <li><b>[watchdog.sh] 健康检查返回值反向 bug</b>：原 <code>check_health</code> 在健康时 <code>return 1</code>（shell 语义=失败），损坏时 <code>return 0</code>（=成功），导致守护进程健康时疯狂重建规则、真的损坏时反而不修。改为标准约定（0=健康，1=损坏），并扩展为同时检查 v3.2 新增的 <code>HNC_RESTORE</code> 链</li>
+            <li><b>[json_set.sh] <code>top</code> 子命令完全不工作</b>：原 awk 正则 <code>($0 ~ """ field """)</code> 被解析成字面量 <code>" field "</code>，根本不引用变量，永远匹配不到任何东西；原字符串分支 <code>JVAL=""$VALUE""</code> 经 shell 合并等于裸 <code>$VALUE</code>，字符串值没加 JSON 引号。WebUI 所有通过 <code>top</code> 写顶层字段的操作（保存 SSID、密码、延迟、充电限制、时间段）全部静默失败。现在完全重写</li>
+            <li><b>[json_set.sh] 值分类器把 IP 当数字</b>：原 <code>*[!0-9.-]*</code> 模式允许 <code>192.168.1.5</code> 归类为数字并不加引号写入 JSON，破坏格式。新增共享 <code>json_encode()</code> 函数，用严格正则 <code>^-?[0-9]+(\.[0-9]+)?$</code> 判断数字，并转义字符串中的内嵌双引号/反斜杠</li>
+            <li><b>[json_set.sh] <code>device</code> / <code>bl_add</code> / <code>bl_del</code> 污染相邻字段</b>：原实现用行级 <code>sub</code> 和全局 <code>gsub(/\]/, ...)</code>，在单行 JSON 里会把 <code>blacklist</code> 和 <code>whitelist</code> 一起污染、把 <code>devices</code> 块里同名字段也篡改。全部改用 <code>match</code>+<code>substr</code> 按范围定位，多设备互不干扰</li>
+            <li><b>[json_set.sh] awk <code>\s</code> 不兼容 ash</b>：Android busybox/mawk 不支持 <code>\s</code>，原 <code>/"devices"\s*:\s*\{/</code> 等模式全部失效。统一改为 <code>[[:space:]]</code></li>
+            <li><b>[json_set.sh] 新增 <code>top_get</code> 子命令</b>，配合 WebUI 读取 rules.json 顶层字段</li>
+            <li><b>[hotspot_autostart.sh] 从错误的文件读用户配置</b>：原本从 <code>config.json</code> 读 <code>hotspot_ssid</code> / <code>hotspot_pass</code> / <code>hotspot_delay</code> / <code>hotspot_charging_only</code> / <code>hotspot_time_*</code>，但 WebUI 写入的是 <code>rules.json</code>。两处配置源分离后用户设置完全不生效（延迟永远 60 秒、充电限制无效、时间段无效）。新增 <code>get_rule_str</code> / <code>get_rule_num</code> / <code>get_rule_bool</code> 三个助手统一从 rules.json 读</li>
+            <li><b>[hotspot_autostart.sh] 删除引号写坏的影子 <code>get_cfg_*</code> 函数</b>：原 <code>get_cfg_str</code> 展开后 pattern 变成 <code>[^]*</code>（无效正则），原 <code>get_cfg_bool</code> 的 key 没加引号会串到别的字段上。整块删除</li>
+            <li><b>[hotspot_autostart.sh] 跨午夜时间段条件运算符优先级 bug</b>：原 <code>[ a ] || [ b ] && in_range=1</code> 因 shell 左结合求值对短路不敏感，某些情况会误判。加大括号显式分组</li>
+            <li><b>[api/server.sh] 删除未授权 root shell 后门</b>：原代码有 <code>busybox nc -l -p $PORT -e /bin/sh</code> 作为"探测"，但 <code>nc -l -e</code> 实际是阻塞监听——若 busybox 编译带 <code>-e</code> 支持，8080 端口变成无密码 root shell；若不带，调用也会卡住启动流程。必须删除</li>
+            <li><b>[api/server.sh] Content-Length 用字符数而非字节数</b>：中文设备名或 emoji 会让浏览器按错误长度截断 JSON 响应。改为 <code>printf '%s' | wc -c</code></li>
+            <li><b>[api/server.sh] 补齐缺失的 <code>POST /whitelist</code> 路由</b>：原 router 只有 <code>/whitelist_mode</code>，白名单成员根本无法通过 API 添加</li>
+            <li><b>[api/server.sh] <code>handle_post_whitelist_mode</code> 写入垃圾字段</b>：原 <code>update_rules "whitelist_mode_root" "x" "true"</code> 实际效果是写 <code>.devices.whitelist_mode_root.x = true</code> 垃圾数据。改为正确的顶层 <code>update_top whitelist_mode</code></li>
+            <li><b>[api/server.sh] <code>update_rules</code> 移除 python3/jq 依赖</b>：改为全部委托 <code>json_set.sh device/top</code>，由统一的 <code>json_encode</code> 处理引号，和纯 shell 环境保持一致</li>
+            <li><b>[api/server.sh] <code>handle_post_blacklist</code> 移除内嵌 python3</b>：改用 <code>json_set.sh bl_add/bl_del</code></li>
+            <li><b>[bin/cleanup.sh] 模块卸载时不清理 v3.2 新链</b>：<code>HNC_RESTORE</code> (PREROUTING) 和 <code>HNC_SAVE</code> (POSTROUTING) 原本没在 cleanup 列表里，导致重装时 iptables 规则累积重复引用</li>
+            <li><b>[device_detect.sh] 顶层 case 分支里用 <code>local</code></b>：<code>status</code> 子命令在 Android ash 严格模式下直接报错崩溃（与 v2.5.3 watchdog 是同一类 bug）</li>
+            <li><b>[device_detect.sh] 去除无意义的强制扫描</b>：原 <code>[ last_count &gt; 0 ] &amp;&amp; need_scan=1</code> 让 arp_hash 缓存失效，有设备时每 8 秒全量扫一次但 shell 扫描不抓流量字节数，纯浪费 CPU</li>
+            <li><b>[watchdog.sh] Doze 检测误伤低电量</b>：原 <code>grep -q "level: [1-9]$"</code> 对 9% 电量匹配、对 10%+ 不匹配，且会把单数字电量当 Doze。改为严格 <code>&lt; 5%</code>，与 device_detect.sh 统一</li>
+            <li><b>[webroot/index.html] 清理双套热点 UI</b>：原 HTML 里有两套热点控制——老的用 <code>hotspot-*</code> ID 走 <code>cfg_set/config.json</code>，新的用 <code>hs-*</code> ID 走 <code>top/rules.json</code>。老的已完全移除（HTML 块 + 对应 JS 函数 <code>loadHotspotState</code> / <code>saveHotspotCfg</code> / <code>toggleHotspotCfg</code> / <code>startHotspotNow</code> / 旧版 <code>setHotspotAuto</code> / 旧版 <code>stopHotspotNow</code>）</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.2.0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.2.0 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-10</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">Android 16</span>
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag perf">限速强化</span>
+          </div>
+          <ul class="cl-changes">
+            <li><b>上传限速彻底修复</b>：<code>mirred redirect → ifb0</code> 发生在 <code>PREROUTING</code> 之前，iptables MARK=0，旧方案上传方向永远走默认 class 不限速。改为在 <code>ifb0</code> 用 <code>u32 match ip src</code> 按设备 IP 直接分类，完全不依赖 iptables 时序</li>
+            <li><b>多线程/QUIC 绕过修复</b>：TC filter 全面迁移到 <code>u32 IP</code> 匹配（下载按 dst IP，上传按 src IP），fw mark 降为备用。不依赖连接状态，TCP/UDP/QUIC/HTTP3 一视同仁</li>
+            <li><b>burst 参数收紧</b>：旧值 128×Mbps KB（2Mbps 时 256KB≈1秒数据），多线程可同时命中 burst 窗口集体冲破限速。改为 2.5×Mbps KB（2Mbps 时 5KB≈20ms），严格封顶</li>
+            <li><b>硬件 offload 禁用</b>：<code>init_tc</code> 时通过 <code>ethtool -K</code> 关闭 GRO/GSO/TSO/LRO，并通过 sysfs 关闭高通/联发科 SoC fastpath。GRO 合并大包会使 tc 按包整形时等效带宽倍增</li>
+            <li><code>iptables_manager.sh</code>：新增 <code>HNC_RESTORE</code>（mangle/PREROUTING）和 <code>HNC_SAVE</code>（mangle/POSTROUTING）链，实现 CONNMARK save/restore，下行方向已知连接无需每包重查 dst IP</li>
+            <li><code>iptables_manager.sh</code>：<code>mark_device</code> 增加 MAC 兜底规则（<code>-m mac --mac-source + -m mark --mark 0</code>），应对设备 IP 尚未分配时的边界情况</li>
+            <li><code>tc_manager.sh</code>：每台设备使用独立优先级 <code>prio=100+class_id</code>，避免多设备 filter 互相干扰；支持 IPv6 重定向到 ifb0（best-effort）</li>
+            <li><code>WebUI</code>：<code>applyLimit</code>/<code>clearLimit</code> 调用时将设备 IP 作为第5参数传给 <code>set_limit</code>，使 u32 filter 能按 IP 精确添加/删除</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.1.0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.1.0 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-09</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag sec">安全</span>
+            <span class="cl-tag perf">优化</span>
+          </div>
+          <ul class="cl-changes">
+            <li><code>tc_manager.sh</code>：修复限速「时好时坏」——<code>tc_class_set</code> / <code>tc_filter_set</code> / <code>netem_qdisc_set</code> 原来定义在函数内部，Android ash 对嵌套函数支持不稳定，偶尔整个 set_limit 静默失效；全部提升为顶层函数</li>
+            <li><code>tc_manager.sh</code>：HTB class 创建后补加叶子 qdisc（<code>fq_codel</code> / <code>pfifo</code>），修复无叶 qdisc 时 HTB 内部 pfifo 偶发丢包导致限速不生效</li>
+            <li><code>tc_manager.sh</code>：<code>tc filter del</code> 补全 <code>pref 1</code>，精确删除旧 filter，避免残留 filter 与新规则冲突</li>
+            <li><code>tc_manager.sh</code>：修复 up=0 时末尾 <code>tc class del</code> 返回 exit=2 报失败；所有删除命令追加 <code>|| true</code></li>
+            <li><code>WebUI</code>：<code>getMid()</code> 改用 MAC 后两字节派生稳定 mark_id，消除设备列表刷新时同一设备拿到不同 mark 导致 iptables mark 与 TC filter 对不上</li>
+            <li><code>WebUI</code>：<code>ensureInit()</code> 去除「只跑一次」缓存，改为每次 apply 前检查接口是否变化，热点重启后自动重建 TC/iptables 结构</li>
+            <li><code>json_set.sh</code>：<code>cfg_set</code> / <code>cfg_get</code> 从孤立函数升格为正式子命令，纳入 <code>case...esac</code> 统一分发，消除死代码</li>
+            <li><code>service.sh</code>：<code>detect_hotspot_iface()</code> 改为优先委托 <code>device_detect.sh iface</code>，与 watchdog/ARP 判断逻辑统一，消除接口错位导致规则不生效的问题</li>
+            <li><code>hotspot_autostart.sh</code>：时间段比较改用分钟数算术，增加跨午夜分支，<code>22:00-06:00</code> 等夜间配置不再失效</li>
+            <li><code>server.sh</code>：POST /blacklist 增加 MAC 格式正则校验，拦截含特殊字符的非法请求，防止命令注入</li>
+            <li><code>watchdog.sh</code>：子服务检查改用独立计数器 <code>SERVICE_CHECK_ROUND</code>，固定每 3 轮一次，不再受动态 INTERVAL 干扰</li>
+            <li><code>device_detect.sh</code>：<code>hostname_cached()</code> awk 补全 <code>-F'|'</code> 分隔符，修复 hostname 缓存永远 miss、TTL 形同虚设的问题</li>
+            <li><code>post-fs-data.sh</code>：修复 mkdir 在 cp 之后执行、同一内容重复复制两次的逻辑错误</li>
+            <li><code>server.sh</code>：<code>get_or_assign_mark()</code> 改用 jq / python3 精确读取 <code>.devices[$mac].mark_id</code>，修复原 <code>grep -B5</code> 因字段顺序不固定几乎永远匹配失败的问题</li>
+            <li><code>server.sh</code>：GET /stats 改为解析 <code>tc -s class show dev</code> 按 HTB class 返回各设备精准流量，不再依赖 ifconfig 总量</li>
+            <li>配置职责分离：<code>hotspot_auto</code> / <code>hotspot_ssid</code> / <code>hotspot_pass</code> 从 <code>config.json</code> 移除，统一由 <code>rules.json</code> 管理，避免双写不同步</li>
+            <li><code>server.sh</code>：版本号改从 <code>module.prop</code> 动态读取，/status 接口不再硬编码旧版本号</li>
+            <li><code>service.sh</code>：移除后台运行时无意义的 <code>EXIT</code> trap，防止 cleanup 在服务启动完成前误触发</li>
+          </ul>
+        </div>
+      </div>
+<!-- v3.0.0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v3.0.0 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-05</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">架构升级</span>
+            <span class="cl-tag perf">功耗</span>
+          </div>
+          <ul class="cl-changes">
+            <li>新增 <code>daemon/hotspotd.c</code>：C 语言守护进程，使用 netlink <code>RTGRP_NEIGH</code> 监听 ARP 邻居表变化，完全事件驱动，零轮询</li>
+            <li>设备变化实时响应（毫秒级），替代原 8-30s 轮询间隔，空闲功耗接近零</li>
+            <li><code>device_detect.sh</code> 增量重构：优先代理 C daemon（SIGUSR1 / UNIX socket），二进制不存在时自动回落原 shell 轮询（向下兼容）</li>
+            <li>手动刷新（<code>scan</code>）通过 SIGUSR1 触发 daemon 立即 ARP 补充扫描，解决长时间不显示问题</li>
+            <li>UNIX socket IPC（<code>GET_DEVICES / REFRESH / STATUS / QUIT</code>），前端 API 接口不变</li>
+            <li>C daemon 原子写 devices.json（tmp+rename），与原 shell 格式 100% 兼容</li>
+            <li>所有已有功能（TC/iptables/限速/延迟/热点自启）完全保留，仅替换高功耗检测核心</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.5.4 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.5.4 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-02</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag perf">优化</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复手动刷新无效：刷新按钮改为先执行 <code>device_detect scan</code>（同步等待扫描完成），再读文件渲染，不再读旧缓存</li>
+            <li>拆分 <code>doRefresh()</code> 为 <code>readAndRender()</code>（定时器用）和 <code>manualRefresh()</code>（按钮用），逻辑分离</li>
+            <li>手动刷新期间图标旋转动画，防止重复点击；显示扫描结果 toast（发现N台/未发现）</li>
+            <li>启动时也改用 <code>manualRefresh()</code> 保证第一次显示有实时数据</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.5.3 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.5.3 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2026-04-01</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复设备扫描返回0：ARP flags 过滤从严格匹配 <code>0x2</code> 改为排除 <code>0x0</code>，兼容返回 <code>0x6</code> 等 flags 的机型</li>
+            <li>修复 watchdog.sh 不断崩溃重启：顶层 while 循环里的 <code>local</code> 在 Android sh 里是语法错误，已移除</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.5.2 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.5.2 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-31</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag perf">功耗</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复功耗优化后设备不显示：<code>is_doze_mode()</code> 误把普通息屏判为 Doze 导致扫描间隔拉长至 120s</li>
+            <li>修复扫描逻辑：移除 <code>idle_rounds</code> 机制，有设备时每轮必扫，无设备时跳过</li>
+            <li>Doze 检测改为只认 PowerManager 真实 idle 状态和电量低于 5%</li>
+            <li>watchdog 加入 <code>ip monitor</code> 事件驱动，网络变化秒级响应</li>
+            <li>新增 <code>cleanup.sh</code>，模块停用/卸载时自动释放所有 TC/iptables 资源</li>
+            <li>WebUI 加入「释放所有资源」按钮；无设备时自动降至 10s 刷新</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.5.1 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.5.1 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-29</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">新功能</span>
+            <span class="cl-tag perf">功耗</span>
+          </div>
+          <ul class="cl-changes">
+            <li>热点自启新增三重选择性控制：开机等待延迟 / 仅充电时启动 / 时间段限制</li>
+            <li>device_detect 扫描间隔动态化：有设备 8s，无设备 30s，热点关闭 60s，Doze 120s</li>
+            <li>watchdog 检查间隔由 10s 提升至 60s，加入健康检查结果缓存</li>
+            <li>WebUI 页面不可见时自动暂停轮询（visibilitychange），回到前台立即恢复</li>
+            <li>hostname 查询结果缓存 10 分钟，避免每次扫描重复查询</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.5.0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.5.0 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-28</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">新功能</span>
+          </div>
+          <ul class="cl-changes">
+            <li>新增开机自动启动热点功能（SELinux 策略注入 + 三方法兜底）</li>
+            <li>支持 Android 13+ cmd wifi start-softap，低版本降级到 cmd tethering / svc</li>
+            <li>WebUI 新增热点控制区块：SSID / 密码配置，立即启动 / 停止按钮</li>
+            <li>json_set.sh 新增 top 命令，支持顶层字段更新</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.4.3 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.4.3 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-23</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag perf">性能</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复 <code>esc is not defined</code> 报错（作用域问题）</li>
+            <li>修复 exit=2：每次操作前自动确保 TC/iptables 链已初始化</li>
+            <li>移除单位切换（Mb/s · Kb/s），简化输入</li>
+            <li>并行读取 devices.json + rules.json，初始化速度提升约 50%</li>
+            <li>启动时 device_detect scan 改为异步延迟触发，页面秒显</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.4.2 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.4.2 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-23</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag ui">UI</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复 WebUI 白屏：移除 Google Fonts 外链，改用系统字体</li>
+            <li>重新设计 UI 为 SukiSU 设置页风格（白卡片 + 蓝色 Toggle）</li>
+            <li>浮动圆角底导航栏，弹簧回弹动画</li>
+            <li>移除免责声明音量键交互，恢复直接刷入</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.3.0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.3.0 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-23</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">新功能</span>
+            <span class="cl-tag fix">修复</span>
+          </div>
+          <ul class="cl-changes">
+            <li>延迟注入改为双向（egress + IFB ingress），ping 值真实准确</li>
+            <li>netem 增加相关性参数（25%），延迟分布更贴近真实网络</li>
+            <li>丢包改用 Gilbert-Elliott 突发模型（gemodel）</li>
+            <li>免责声明写入刷入流程，音量键同意/拒绝/60秒超时退出</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.2.7 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.2.7 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-23</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag feat">新功能</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复 RTNETLINK File exists（exit=2）：TC class 改为 add-or-change</li>
+            <li>限速新增 Mb/s · Kb/s 单位切换，支持精细 Kbps 限速</li>
+            <li>mbps_to_rate 支持小数 Mbps 自动转 kbit</li>
+            <li>更新作者信息：Claude (Anthropic AI)</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.2.6 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.2.6 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-23</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复 exit=127：新增 json_set.sh，替换所有 python3 依赖</li>
+            <li>规则写入改为纯 Shell（awk/sed），兼容无 python3 设备</li>
+            <li>init_dirs 命令自动修复目录权限</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.2.5 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.2.5 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-23</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag perf">优化</span>
+            <span class="cl-tag ui">UI</span>
+          </div>
+          <ul class="cl-changes">
+            <li>设备名 Unknown 改为显示 MAC 后 8 位，更有辨识度</li>
+            <li>防闪烁：数据未变化时不重绘设备列表 DOM</li>
+            <li>时间统一北京时间（UTC+8），不依赖系统时区</li>
+            <li>后端 hostname 新增 6 种探测方法（dnsmasq/hostapd/mDNS/NetBIOS/DNS）</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.2.4 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.2.4 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-23</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复 Not in KSU 根本原因：ksu.exec 回调必须传函数名字符串</li>
+            <li>SukiSU Ultra @JavascriptInterface 不接受函数对象，改为具名全局函数</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.2.3 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.2.3 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-22</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+            <span class="cl-tag ui">UI</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复 exitCode 严格相等判断问题（=== 改为 parseInt）</li>
+            <li>新增诊断按钮，显示 ksu.exec 原始回调参数</li>
+            <li>自适应回调参数顺序（兼容不同管理器）</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.2.2 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.2.2 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-22</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复设备不显示：devices.json 读取正常但 python3 合并命令失败</li>
+            <li>改为直接 cat 两个 JSON，在 JS 侧合并，彻底绕开 shell 转义问题</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.2.1 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+          <div class="cl-line"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.2.1 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-22</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag fix">修复</span>
+          </div>
+          <ul class="cl-changes">
+            <li>修复热点接口检测：新增 wlan2/wlan3/wlan4，支持骁龙机型</li>
+            <li>设备扫描改用 awk 直接解析 /proc/net/arp，不按接口名过滤</li>
+            <li>get_hotspot_iface() 优先从 ARP 表自动反推接口名</li>
+          </ul>
+        </div>
+      </div>
+<!-- v2.0.0 -->
+      <div class="cl-item">
+        <div class="cl-left">
+          <div class="cl-dot" style="background:var(--t3)"></div>
+        </div>
+        <div class="cl-right">
+          <div class="cl-title">v2.0.0 &nbsp;<span style="font-size:11px;color:var(--t2);font-weight:400">2025-03-20</span></div>
+          <div class="cl-tags">
+            <span class="cl-tag feat">新功能</span>
+          </div>
+          <ul class="cl-changes">
+            <li>KernelSU / SukiSU Ultra WebUI 支持，点「操作」直接打开</li>
+            <li>window.ksu 桥接，无需 HTTP API 服务器</li>
+            <li>完整热点设备管控：限速 / 延迟 / 黑白名单</li>
+            <li>watchdog 守护进程，规则重启不丢失</li>
+            <li>支持 Android 10-16 / ColorOS / realme / SukiSU Ultra</li>
+          </ul>
+        </div>
+      </div>
+
+      </div><!-- /cl-history -->
+
+      <button class="cl-more-btn" id="cl-more-btn" onclick="toggleHistory()">
+        <span id="cl-more-text">查看历史版本</span>
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>

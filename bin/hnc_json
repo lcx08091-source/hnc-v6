@@ -1,0 +1,1155 @@
+#!/system/bin/sh
+# HNC hotfix20.8 - unified JSON helper frontend with read-only default C helper
+#
+# This version makes set-top self-contained and safe. It no longer delegates
+# top-level writes back to json_set.sh, so json_set.sh can be migrated to call
+# hnc_json in later hotfixes without creating recursion.
+#
+# Usage:
+#   hnc_json validate <file>
+#   hnc_json get-top <file> <key>
+#   hnc_json set-top <file> <key> <value> [str|num|bool|null|json]
+#   hnc_json get-device <file> <mac> <key>
+#   hnc_json set-device <file> <mac> <key> <value> [str|num|bool|null|json]
+#   hnc_json version
+
+set -eu
+
+SELF="$0"
+BINDIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)"
+JSON_GUARD="$BINDIR/json_guard.sh"
+HNC_JSON_C="$BINDIR/hnc_json_c"
+HNC_BASE="${HNC:-/data/local/hnc}"
+LOCKDIR="$HNC_BASE/run/hnc_json.lock"
+BACKUP_DIR="${JSON_BACKUP_DIR:-$HNC_BASE/data/.json_backups}"
+
+usage() {
+  cat <<'USAGE'
+Usage:
+  hnc_json validate <file>
+  hnc_json get-top <file> <key>
+  hnc_json set-top <file> <key> <value> [str|num|bool|null|json]
+  hnc_json get-device <file> <mac> <key>
+  hnc_json set-device <file> <mac> <key> <value> [str|num|bool|null|json]
+  hnc_json set-device-batch <file> <mac> <key> <value> <type> [<key> <value> <type> ...]
+  hnc_json get-object-key <file> <key>
+  hnc_json set-object-key <file> <key> <value> [str|num|bool|null|json]
+  hnc_json del-object-key <file> <key>
+  hnc_json add-array-unique <file> <key> <value>
+  hnc_json del-array-value <file> <key> <value>
+  hnc_json set-map-field <file> <top_key> <entry_key> <field> <value> [str|num|bool|null|json]
+  hnc_json token-revoke <file> <token_id>
+  hnc_json token-revoke-all <file>
+  hnc_json version
+
+Notes:
+  If bin/hnc_json_c exists and is executable, read-only commands may try it first.
+  C write commands are disabled by default and require HNC_JSON_C_WRITE_ENABLE=1.
+  Shell implementation remains the fallback for every write path.
+USAGE
+}
+
+log_lock_stale() {
+  mkdir -p "$HNC_BASE/logs" 2>/dev/null || true
+  printf '[%s] hnc_json: reclaim stale lock: %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null || date)" "$1" \
+    >> "$HNC_BASE/logs/hnc_json.log" 2>/dev/null || true
+}
+
+reclaim_stale_lock() {
+  [ -d "$LOCKDIR" ] || return 1
+  lp="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+  if [ -n "$lp" ] && ! kill -0 "$lp" 2>/dev/null; then
+    log_lock_stale "dead pid=$lp path=$LOCKDIR"
+    rm -rf "$LOCKDIR" 2>/dev/null || true
+    return 0
+  fi
+  now="$(date +%s 2>/dev/null || echo 0)"
+  ts="$(cat "$LOCKDIR/ts" 2>/dev/null || echo 0)"
+  case "$now:$ts" in
+    *[!0-9:]*|0:*) : ;;
+    *)
+      age=$((now - ts))
+      if [ "$age" -ge 30 ]; then
+        log_lock_stale "age=${age}s pid=${lp:-unknown} path=$LOCKDIR"
+        rm -rf "$LOCKDIR" 2>/dev/null || true
+        return 0
+      fi
+      ;;
+  esac
+  return 1
+}
+
+acquire_lock() {
+  mkdir -p "$HNC_BASE/run" 2>/dev/null || true
+  i=0
+  while ! mkdir "$LOCKDIR" 2>/dev/null; do
+    i=$((i+1))
+    reclaim_stale_lock >/dev/null 2>&1 || true
+    if [ "$i" -gt 20 ] && [ ! -f "$LOCKDIR/pid" ]; then
+      log_lock_stale "missing pid after ${i} tries path=$LOCKDIR"
+      rm -rf "$LOCKDIR" 2>/dev/null || true
+    fi
+    [ "$i" -gt 50 ] && { echo "hnc_json: lock timeout: $LOCKDIR" >&2; return 1; }
+    sleep 0.1
+  done
+  echo $$ > "$LOCKDIR/pid" 2>/dev/null || true
+  date +%s > "$LOCKDIR/ts" 2>/dev/null || true
+  trap 'rm -rf "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
+}
+
+hnc_json_c_machine() {
+  # Read ELF e_machine from bytes 18..19.
+  # AArch64 = b7 00, ARM = 28 00, x86_64 host builds = 3e 00.
+  [ -f "$1" ] || return 1
+  od -An -tx1 -j18 -N2 "$1" 2>/dev/null | awk '{print $1 " " $2}'
+}
+
+hnc_json_c_available() {
+  [ "${HNC_JSON_C_DISABLE:-0}" = "1" ] && return 1
+  [ -x "$HNC_JSON_C" ] || return 1
+
+  mach="$(hnc_json_c_machine "$HNC_JSON_C" 2>/dev/null || true)"
+  case "$mach" in
+    "b7 00"|"28 00") : ;;
+    "")
+      # If od is unavailable, fall through to the executable self-test.
+      : ;;
+    *)
+      # Do not try host-built Linux/x86 helpers inside Android modules.
+      # Unit tests may opt in with HNC_JSON_C_ALLOW_HOST=1.
+      [ "${HNC_JSON_C_ALLOW_HOST:-0}" = "1" ] || return 1
+      ;;
+  esac
+
+  "$HNC_JSON_C" version >/dev/null 2>&1 || return 1
+  return 0
+}
+
+hnc_json_c_write_enabled() {
+  # hotfix20.8: keep the optional C helper read-only by default. The C writer
+  # is still useful for controlled experiments, but normal runtime writes stay
+  # on the shell/json_guard path unless explicitly opted in.
+  [ "${HNC_JSON_C_WRITE_ENABLE:-0}" = "1" ]
+}
+
+hnc_json_c_try() {
+  hnc_json_c_available || return 127
+  case "${1:-}" in
+    validate|get-top|get|version)
+      "$HNC_JSON_C" "$@"; return $? ;;
+    set-object-key|object-set|del-object-key|object-del|add-array-unique|array-add-unique|del-array-value|array-del-value|token-revoke|token-revoke-all)
+      hnc_json_c_write_enabled || return 127
+      "$HNC_JSON_C" "$@"; return $? ;;
+    *) return 127 ;;
+  esac
+}
+
+validate_file() {
+  f="$1"
+  [ -f "$f" ] || { echo "hnc_json: missing file: $f" >&2; return 2; }
+  if [ -x "$JSON_GUARD" ]; then
+    "$JSON_GUARD" "$f" >/dev/null
+    return $?
+  fi
+  awk '
+  BEGIN{in_s=0; esc=0; depth=0; ok=1; seen=0}
+  {
+    for(i=1;i<=length($0);i++){
+      c=substr($0,i,1)
+      if(in_s){
+        if(esc){esc=0; continue}
+        if(c=="\\"){esc=1; continue}
+        if(c=="\""){in_s=0; continue}
+        continue
+      }
+      if(c=="\""){in_s=1; seen=1; continue}
+      if(c=="{" || c=="["){depth++; seen=1}
+      else if(c=="}" || c=="]") {depth--; if(depth<0) ok=0}
+      else if(c !~ /[ \t\r\n]/) seen=1
+    }
+  }
+  END{ if(!seen||in_s||esc||depth!=0||!ok) exit 1; exit 0 }' "$f"
+}
+
+json_literal() {
+  typ="${2:-str}"
+  v="$1"
+  case "$typ" in
+    str|string)
+      awk 'BEGIN{
+        s=ARGV[1]; ARGV[1]="";
+        out="\"";
+        for(i=1;i<=length(s);i++){
+          c=substr(s,i,1);
+          if(c=="\\") out=out "\\\\";
+          else if(c=="\"") out=out "\\\"";
+          else if(c=="\b") out=out "\\b";
+          else if(c=="\f") out=out "\\f";
+          else if(c=="\n") out=out "\\n";
+          else if(c=="\r") out=out "\\r";
+          else if(c=="\t") out=out "\\t";
+          else out=out c;
+        }
+        print out "\"";
+      }' "$v"
+      ;;
+    num|number)
+      echo "$v" | grep -Eq '^-?[0-9]+([.][0-9]+)?$' || { echo "hnc_json: invalid number: $v" >&2; return 2; }
+      printf '%s\n' "$v"
+      ;;
+    bool|boolean)
+      case "$v" in true|false) printf '%s\n' "$v" ;; *) echo "hnc_json: invalid bool: $v" >&2; return 2 ;; esac
+      ;;
+    null)
+      [ "$v" = "null" ] || { echo "hnc_json: invalid null literal: $v" >&2; return 2; }
+      printf 'null\n'
+      ;;
+    json|raw)
+      tmp="$HNC_BASE/run/hnc_json_literal.$$"
+      mkdir -p "$HNC_BASE/run" 2>/dev/null || true
+      printf '%s\n' "$v" > "$tmp" || return 1
+      validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: invalid json literal" >&2; return 2; }
+      rm -f "$tmp"
+      printf '%s\n' "$v"
+      ;;
+    *) echo "hnc_json: bad type: $typ" >&2; return 2 ;;
+  esac
+}
+
+get_top() {
+  f="$1"; key="$2"
+  validate_file "$f" || return $?
+  awk -v key="$key" '
+  function skip_ws(pos,   c){ while(pos<=n){c=substr(s,pos,1); if(c!~/[ \t\r\n]/) break; pos++} return pos }
+  function parse_string(pos,   c,out){
+    out=""; esc=0
+    for(pos=pos+1; pos<=n; pos++){
+      c=substr(s,pos,1)
+      if(esc){out=out c; esc=0; continue}
+      if(c=="\\"){esc=1; continue}
+      if(c=="\""){str_end=pos; str_val=out; return pos+1}
+      out=out c
+    }
+    str_end=0; str_val=""; return 0
+  }
+  function value_end(pos,   c,d,ins,e,dep){
+    ins=0; e=0; dep=0
+    for(; pos<=n; pos++){
+      c=substr(s,pos,1)
+      if(ins){
+        if(e){e=0; continue}
+        if(c=="\\"){e=1; continue}
+        if(c=="\""){ins=0; continue}
+        continue
+      }
+      if(c=="\""){ins=1; continue}
+      if(c=="{" || c=="[") dep++
+      else if(c=="}" || c=="]"){
+        if(dep==0) return pos-1
+        dep--
+      } else if(c=="," && dep==0) return pos-1
+    }
+    return n
+  }
+  BEGIN{ s="" }
+  { s=s $0 "\n" }
+  END{
+    n=length(s); i=skip_ws(1); if(substr(s,i,1)!="{") exit 2; i++
+    while(i<=n){
+      i=skip_ws(i); c=substr(s,i,1)
+      if(c=="}") exit 3
+      if(c==","){i++; continue}
+      if(c!="\"") exit 2
+      ni=parse_string(i); if(ni==0) exit 2
+      k=str_val; i=skip_ws(ni); if(substr(s,i,1)!=";"){} # no-op for old awk parsing
+      if(substr(s,i,1)!=";"){}
+      if(substr(s,i,1)!=":") exit 2
+      i=skip_ws(i+1); ve=value_end(i); v=substr(s,i,ve-i+1)
+      if(k==key){ gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", v); print v; exit 0 }
+      i=ve+1
+    }
+    exit 3
+  }' "$f"
+}
+
+get_device() {
+  f="$1"; mac="$2"; key="$3"
+  [ -n "$mac" ] || { echo "hnc_json: empty mac" >&2; return 2; }
+  [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
+  validate_file "$f" || return $?
+  awk -v mac="$mac" -v key="$key" '
+  function ch(i){ return substr(s,i,1) }
+  function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
+  function parse_string(i,   j,c,out,esc){
+    out=""; esc=0
+    if(ch(i)!="\"") return 0
+    for(j=i+1; j<=n; j++){
+      c=ch(j)
+      if(esc){ out=out c; esc=0; continue }
+      if(c=="\\"){ esc=1; continue }
+      if(c=="\""){ str_val=out; return j+1 }
+      out=out c
+    }
+    return 0
+  }
+  function value_end(i,   j,c,depth,ins,esc,ni){
+    i=skip_ws(i); c=ch(i)
+    if(c=="\""){ ni=parse_string(i); return ni ? ni : n+1 }
+    if(c=="{" || c=="["){
+      depth=0; ins=0; esc=0
+      for(j=i; j<=n; j++){
+        c=ch(j)
+        if(ins){
+          if(esc){esc=0; continue}
+          if(c=="\\"){esc=1; continue}
+          if(c=="\""){ins=0; continue}
+          continue
+        }
+        if(c=="\""){ins=1; continue}
+        if(c=="{" || c=="[") depth++
+        else if(c=="}" || c=="]"){
+          depth--
+          if(depth==0) return j+1
+          if(depth<0) return j
+        }
+      }
+      return n+1
+    }
+    for(j=i; j<=n; j++){
+      c=ch(j)
+      if(c=="," || c=="}" || c=="]" || c ~ /[ \t\r\n]/) return j
+    }
+    return n+1
+  }
+  function find_key(os, oe, target,   i,ni,k,colon,vs,ve,c){
+    fk=fs=fe=0
+    i=skip_ws(os+1)
+    while(i<oe){
+      i=skip_ws(i); c=ch(i)
+      if(c==","){ i++; continue }
+      if(c=="}") return 0
+      if(c!="\"") return 0
+      ni=parse_string(i); if(!ni) return 0
+      k=str_val
+      colon=skip_ws(ni)
+      if(ch(colon) != ":") return 0
+      vs=skip_ws(colon+1); ve=value_end(vs)
+      if(k==target){ fk=i; fs=vs; fe=ve; return 1 }
+      i=ve
+    }
+    return 0
+  }
+  BEGIN{ s="" }
+  { s=s $0 "\n" }
+  END{
+    n=length(s); root=skip_ws(1)
+    if(ch(root)!="{") exit 2
+    root_end=value_end(root)
+    if(!find_key(root, root_end, "devices")) exit 3
+    devs_start=fs; devs_end=fe
+    if(ch(skip_ws(devs_start))!="{") exit 3
+    if(!find_key(devs_start, devs_end, mac)) exit 3
+    dev_start=fs; dev_end=fe
+    if(ch(skip_ws(dev_start))!="{") exit 3
+    if(!find_key(dev_start, dev_end, key)) exit 3
+    v=substr(s, fs, fe-fs)
+    gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", v)
+    print v
+    exit 0
+  }' "$f"
+}
+
+
+set_top_inner() {
+  f="$1"; key="$2"; lit="$3"
+  awk -v key="$key" -v lit="$lit" '
+  function skip_ws(pos,   c){ while(pos<=n){c=substr(s,pos,1); if(c!~/[ \t\r\n]/) break; pos++} return pos }
+  function parse_string(pos,   c,out){
+    out=""; esc=0
+    for(pos=pos+1; pos<=n; pos++){
+      c=substr(s,pos,1)
+      if(esc){out=out c; esc=0; continue}
+      if(c=="\\"){esc=1; continue}
+      if(c=="\""){str_end=pos; str_val=out; return pos+1}
+      out=out c
+    }
+    str_end=0; str_val=""; return 0
+  }
+  function value_end(pos,   c,ins,e,dep){
+    ins=0; e=0; dep=0
+    for(; pos<=n; pos++){
+      c=substr(s,pos,1)
+      if(ins){
+        if(e){e=0; continue}
+        if(c=="\\"){e=1; continue}
+        if(c=="\""){ins=0; continue}
+        continue
+      }
+      if(c=="\""){ins=1; continue}
+      if(c=="{" || c=="[") dep++
+      else if(c=="}" || c=="]"){
+        if(dep==0) return pos-1
+        dep--
+      } else if(c=="," && dep==0) return pos-1
+    }
+    return n
+  }
+  function esc_key(x,   i,c,out){
+    out=""
+    for(i=1;i<=length(x);i++){
+      c=substr(x,i,1)
+      if(c=="\\") out=out "\\\\"
+      else if(c=="\"") out=out "\\\""
+      else out=out c
+    }
+    return out
+  }
+  BEGIN{ s="" }
+  { s=s $0 "\n" }
+  END{
+    n=length(s); i=skip_ws(1)
+    if(n==0 || i>n){ print "{\n  \"" esc_key(key) "\": " lit "\n}"; exit 0 }
+    if(substr(s,i,1)!="{") exit 2
+    obj_start=i; i++
+    last_close=0; depth=0; ins=0; e=0
+    for(p=obj_start; p<=n; p++){
+      c=substr(s,p,1)
+      if(ins){ if(e){e=0; continue}; if(c=="\\"){e=1; continue}; if(c=="\"") ins=0; continue }
+      if(c=="\""){ins=1; continue}
+      if(c=="{") depth++
+      else if(c=="}"){depth--; if(depth==0){last_close=p; break}}
+    }
+    if(last_close==0) exit 2
+    i=obj_start+1
+    while(i<last_close){
+      i=skip_ws(i); c=substr(s,i,1)
+      if(c==","){i++; continue}
+      if(c=="}") break
+      if(c!="\"") exit 2
+      ni=parse_string(i); if(ni==0) exit 2
+      k=str_val; i=skip_ws(ni)
+      if(substr(s,i,1)!=":") exit 2
+      val_start=skip_ws(i+1); ve=value_end(val_start)
+      if(k==key){ print substr(s,1,val_start-1) lit substr(s,ve+1); exit 0 }
+      i=ve+1
+    }
+    before=substr(s,1,last_close-1)
+    after=substr(s,last_close)
+    inner=substr(s,obj_start+1,last_close-obj_start-1)
+    tmp=inner; gsub(/[ \t\r\n]/,"",tmp)
+    if(tmp=="") sep="\n  "
+    else sep=",\n  "
+    print before sep "\"" esc_key(key) "\": " lit after
+  }' "$f"
+}
+
+set_top() {
+  target="$1"; key="$2"; value="$3"; typ="${4:-str}"
+  [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
+  lit="$(json_literal "$value" "$typ")" || return $?
+
+  target_dir="$(dirname "$target")"
+  target_base="$(basename "$target")"
+  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
+  [ -f "$target" ] || printf '{}\n' > "$target"
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
+
+  acquire_lock || return 1
+  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  tmp="$target_dir/.$target_base.hnc_json.$$"
+  cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
+
+  # awk -v consumes backslash escapes, so double backslashes in JSON string literals before passing them in.
+  # Raw JSON object values must not be escaped as a string literal.
+  case "$typ" in
+    json|raw) awk_lit="$lit" ;;
+    *) awk_lit="$(printf '%s' "$lit" | sed 's/\\/\\\\/g')" ;;
+  esac
+  if ! set_top_inner "$target" "$key" "$awk_lit" > "$tmp"; then
+    rm -f "$tmp"
+    echo "hnc_json: set-top parser failed for $target" >&2
+    return 1
+  fi
+  validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
+
+  mv "$tmp" "$target"
+  validate_file "$target" || {
+    echo "hnc_json: live JSON failed validation after write, rolling back" >&2
+    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
+    return 1
+  }
+}
+
+
+
+set_device_inner() {
+  f="$1"; mac="$2"; key="$3"; lit="$4"
+  awk -v mac="$mac" -v key="$key" -v lit="$lit" '
+  function ch(i){ return substr(s,i,1) }
+  function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
+  function parse_string(i,   j,c,out,esc){
+    out=""; esc=0
+    if(ch(i)!="\"") return 0
+    for(j=i+1; j<=n; j++){
+      c=ch(j)
+      if(esc){ out=out c; esc=0; continue }
+      if(c=="\\"){ esc=1; continue }
+      if(c=="\""){ str_val=out; return j+1 }
+      out=out c
+    }
+    return 0
+  }
+  function value_end(i,   j,c,depth,ins,esc,ni){
+    i=skip_ws(i); c=ch(i)
+    if(c=="\""){ ni=parse_string(i); return ni ? ni : n+1 }
+    if(c=="{" || c=="["){
+      depth=0; ins=0; esc=0
+      for(j=i; j<=n; j++){
+        c=ch(j)
+        if(ins){
+          if(esc){esc=0; continue}
+          if(c=="\\"){esc=1; continue}
+          if(c=="\""){ins=0; continue}
+          continue
+        }
+        if(c=="\""){ins=1; continue}
+        if(c=="{" || c=="[") depth++
+        else if(c=="}" || c=="]"){
+          depth--
+          if(depth==0) return j+1
+          if(depth<0) return j
+        }
+      }
+      return n+1
+    }
+    for(j=i; j<=n; j++){
+      c=ch(j)
+      if(c=="," || c=="}" || c=="]" || c ~ /[ \t\r\n]/) return j
+    }
+    return n+1
+  }
+  function find_key(os, oe, target,   i,ni,k,colon,vs,ve,c){
+    fk=fs=fe=0
+    i=skip_ws(os+1)
+    while(i<oe){
+      i=skip_ws(i); c=ch(i)
+      if(c==","){ i++; continue }
+      if(c=="}") return 0
+      if(c!="\"") return 0
+      ni=parse_string(i); if(!ni) return 0
+      k=str_val
+      colon=skip_ws(ni)
+      if(ch(colon) != ":") return 0
+      vs=skip_ws(colon+1); ve=value_end(vs)
+      if(k==target){ fk=i; fs=vs; fe=ve; return 1 }
+      i=ve
+    }
+    return 0
+  }
+  function esc_key(x,   i,c,out){
+    out=""
+    for(i=1;i<=length(x);i++){
+      c=substr(x,i,1)
+      if(c=="\\") out=out "\\\\"
+      else if(c=="\"") out=out "\\\""
+      else out=out c
+    }
+    return out
+  }
+  function object_insert(obj_start, obj_end_excl, k, val,   closepos,inner,tmp,sep){
+    closepos=obj_end_excl-1
+    inner=substr(s,obj_start+1,closepos-obj_start-1)
+    tmp=inner; gsub(/[ \t\r\n]/,"",tmp)
+    sep=(tmp=="" ? "\n  " : ",\n  ")
+    return substr(s,1,closepos-1) sep "\"" esc_key(k) "\": " val substr(s,closepos)
+  }
+  BEGIN{ s="" }
+  { s=s $0 "\n" }
+  END{
+    sub(/\n$/, "", s); n=length(s)
+    root=skip_ws(1)
+    if(n==0 || ch(root)!="{") exit 2
+    root_end=value_end(root)
+    if(!find_key(root, root_end, "devices")) exit 3
+    devs_start=skip_ws(fs); devs_end=fe
+    if(ch(devs_start)!="{") exit 3
+    if(!find_key(devs_start, devs_end, mac)){
+      newdev="{\"" esc_key(key) "\": " lit "}"
+      print object_insert(devs_start, devs_end, mac, newdev)
+      exit 0
+    }
+    dev_start=skip_ws(fs); dev_end=fe
+    if(ch(dev_start)!="{") exit 3
+    if(find_key(dev_start, dev_end, key)){
+      print substr(s,1,fs-1) lit substr(s,fe)
+      exit 0
+    }
+    print object_insert(dev_start, dev_end, key, lit)
+    exit 0
+  }' "$f"
+}
+
+set_device() {
+  target="$1"; mac="$2"; key="$3"; value="$4"; typ="${5:-str}"
+  [ -n "$mac" ] || { echo "hnc_json: empty mac" >&2; return 2; }
+  [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
+  lit="$(json_literal "$value" "$typ")" || return $?
+  target_dir="$(dirname "$target")"
+  target_base="$(basename "$target")"
+  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
+  [ -f "$target" ] || printf '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}\n' > "$target"
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
+  acquire_lock || return 1
+  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  tmp="$target_dir/.$target_base.hnc_json_device.$$"
+  cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
+  awk_lit="$(printf '%s' "$lit" | sed 's/\\/\\\\/g')"
+  if ! set_device_inner "$target" "$mac" "$key" "$awk_lit" > "$tmp"; then
+    rm -f "$tmp"
+    echo "hnc_json: set-device parser failed for $target" >&2
+    return 1
+  fi
+  validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
+  mv "$tmp" "$target"
+  validate_file "$target" || {
+    echo "hnc_json: live JSON failed validation after write, rolling back" >&2
+    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
+    return 1
+  }
+}
+
+
+del_object_key_inner() {
+  f="$1"; key="$2"
+  awk -v key="$key" '
+  function ch(i){ return substr(s,i,1) }
+  function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
+  function prev_non_ws(i){ while(i>=1 && ch(i) ~ /[ \t\r\n]/) i--; return i }
+  function parse_string(i,   j,c,out,esc){
+    out=""; esc=0
+    if(ch(i)!="\"") return 0
+    for(j=i+1; j<=n; j++){
+      c=ch(j)
+      if(esc){ out=out c; esc=0; continue }
+      if(c=="\\"){ esc=1; continue }
+      if(c=="\""){ str_val=out; return j+1 }
+      out=out c
+    }
+    return 0
+  }
+  function value_end(i,   j,c,depth,ins,esc,ni){
+    i=skip_ws(i); c=ch(i)
+    if(c=="\""){ ni=parse_string(i); return ni ? ni : n+1 }
+    if(c=="{" || c=="["){
+      depth=0; ins=0; esc=0
+      for(j=i; j<=n; j++){
+        c=ch(j)
+        if(ins){
+          if(esc){esc=0; continue}
+          if(c=="\\"){esc=1; continue}
+          if(c=="\""){ins=0; continue}
+          continue
+        }
+        if(c=="\""){ins=1; continue}
+        if(c=="{" || c=="[") depth++
+        else if(c=="}" || c=="]"){
+          depth--
+          if(depth==0) return j+1
+          if(depth<0) return j
+        }
+      }
+      return n+1
+    }
+    for(j=i; j<=n; j++){
+      c=ch(j)
+      if(c=="," || c=="}" || c=="]" || c ~ /[ \t\r\n]/) return j
+    }
+    return n+1
+  }
+  function find_key(os, oe, target,   i,ni,k,colon,vs,ve,c){
+    fk=fs=fe=0
+    i=skip_ws(os+1)
+    while(i<oe){
+      i=skip_ws(i); c=ch(i)
+      if(c==","){ i++; continue }
+      if(c=="}") return 0
+      if(c!="\"") return 0
+      ni=parse_string(i); if(!ni) return 0
+      k=str_val
+      colon=skip_ws(ni)
+      if(ch(colon) != ":") return 0
+      vs=skip_ws(colon+1); ve=value_end(vs)
+      if(k==target){ fk=i; fs=vs; fe=ve; return 1 }
+      i=ve
+    }
+    return 0
+  }
+  BEGIN{ s="" }
+  { s=s $0 "\n" }
+  END{
+    sub(/\n$/, "", s); n=length(s)
+    root=skip_ws(1)
+    if(n==0 || root>n){ print "{}"; exit 0 }
+    if(ch(root)!="{") exit 2
+    root_end=value_end(root)
+    if(!find_key(root, root_end, key)){ print s; exit 0 }
+    after=skip_ws(fe); before=prev_non_ws(fk-1)
+    if(after<=n && ch(after)==",") print substr(s,1,fk-1) substr(s,after+1)
+    else if(before>=1 && ch(before)==",") print substr(s,1,before-1) substr(s,fe)
+    else print substr(s,1,fk-1) substr(s,fe)
+  }' "$f"
+}
+
+set_object_key() {
+  target="$1"; key="$2"; value="$3"; typ="${4:-str}"
+  [ -n "$key" ] || { echo "hnc_json: empty object key" >&2; return 2; }
+  set_top "$target" "$key" "$value" "$typ"
+}
+
+get_object_key() {
+  target="$1"; key="$2"
+  [ -n "$key" ] || { echo "hnc_json: empty object key" >&2; return 2; }
+  get_top "$target" "$key"
+}
+
+del_object_key() {
+  target="$1"; key="$2"
+  [ -n "$key" ] || { echo "hnc_json: empty object key" >&2; return 2; }
+  target_dir="$(dirname "$target")"
+  target_base="$(basename "$target")"
+  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
+  [ -f "$target" ] || printf '{}\n' > "$target"
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
+  acquire_lock || return 1
+  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  tmp="$target_dir/.$target_base.hnc_json_del.$$"
+  cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
+  if ! del_object_key_inner "$target" "$key" > "$tmp"; then
+    rm -f "$tmp"
+    echo "hnc_json: del-object-key parser failed for $target" >&2
+    return 1
+  fi
+  validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
+  mv "$tmp" "$target"
+  validate_file "$target" || {
+    echo "hnc_json: live JSON failed validation after delete, rolling back" >&2
+    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
+    return 1
+  }
+}
+
+
+
+array_add_unique() {
+  target="$1"; key="$2"; value="$3"
+  [ -n "$key" ] || { echo "hnc_json: empty array key" >&2; return 2; }
+  [ -n "$value" ] || { echo "hnc_json: empty array value" >&2; return 2; }
+  lit="$(json_literal "$value" str)" || return $?
+  current="$(get_top "$target" "$key" 2>/dev/null || true)"
+  case "$current" in
+    \[*\]) ;;
+    "") current="[]" ;;
+    *) echo "hnc_json: target key is not array: $key" >&2; return 2 ;;
+  esac
+  # blacklist/whitelist are string arrays of MAC-like values. This deliberately
+  # keeps the parser small and only consumes quoted JSON string entries.
+  exists=0
+  items=""
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    [ "$item" = "$value" ] && exists=1
+    q="$(json_literal "$item" str)" || return $?
+    if [ -z "$items" ]; then items="$q"; else items="$items,$q"; fi
+  done <<EOF_ITEMS
+$(printf '%s\n' "$current" | awk '
+  function emit(x){ if(x!="") print x }
+  BEGIN{ins=0;esc=0;out=""}
+  { s=s $0 }
+  END{
+    for(i=1;i<=length(s);i++){
+      c=substr(s,i,1)
+      if(ins){
+        if(esc){ out=out c; esc=0; continue }
+        if(c=="\\"){ esc=1; continue }
+        if(c=="\""){ emit(out); out=""; ins=0; continue }
+        out=out c; continue
+      }
+      if(c=="\""){ ins=1; out=""; continue }
+    }
+  }')
+EOF_ITEMS
+  [ "$exists" -eq 1 ] || { if [ -z "$items" ]; then items="$lit"; else items="$items,$lit"; fi; }
+  set_top "$target" "$key" "[$items]" json
+}
+
+array_del_value() {
+  target="$1"; key="$2"; value="$3"
+  [ -n "$key" ] || { echo "hnc_json: empty array key" >&2; return 2; }
+  [ -n "$value" ] || { echo "hnc_json: empty array value" >&2; return 2; }
+  current="$(get_top "$target" "$key" 2>/dev/null || true)"
+  case "$current" in
+    \[*\]) ;;
+    "") current="[]" ;;
+    *) echo "hnc_json: target key is not array: $key" >&2; return 2 ;;
+  esac
+  items=""
+  while IFS= read -r item; do
+    [ -z "$item" ] && continue
+    [ "$item" = "$value" ] && continue
+    q="$(json_literal "$item" str)" || return $?
+    if [ -z "$items" ]; then items="$q"; else items="$items,$q"; fi
+  done <<EOF_ITEMS
+$(printf '%s\n' "$current" | awk '
+  function emit(x){ if(x!="") print x }
+  BEGIN{ins=0;esc=0;out=""}
+  { s=s $0 }
+  END{
+    for(i=1;i<=length(s);i++){
+      c=substr(s,i,1)
+      if(ins){
+        if(esc){ out=out c; esc=0; continue }
+        if(c=="\\"){ esc=1; continue }
+        if(c=="\""){ emit(out); out=""; ins=0; continue }
+        out=out c; continue
+      }
+      if(c=="\""){ ins=1; out=""; continue }
+    }
+  }')
+EOF_ITEMS
+  set_top "$target" "$key" "[$items]" json
+}
+set_device_batch() {
+  target="$1"; mac="$2"; shift 2
+  [ -n "$mac" ] || { echo "hnc_json: empty mac" >&2; return 2; }
+  [ $# -ge 3 ] || { echo "hnc_json: set-device-batch needs key value type triples" >&2; return 2; }
+  [ $(( $# % 3 )) -eq 0 ] || { echo "hnc_json: set-device-batch arguments must be key value type triples" >&2; return 2; }
+
+  target_dir="$(dirname "$target")"
+  target_base="$(basename "$target")"
+  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
+  [ -f "$target" ] || printf '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}\n' > "$target"
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
+
+  acquire_lock || return 1
+  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  tmp="$target_dir/.$target_base.hnc_json_batch.$$"
+  tmp2="$target_dir/.$target_base.hnc_json_batch.$$.next"
+  cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
+  cp -p "$target" "$tmp" 2>/dev/null || cp "$target" "$tmp" 2>/dev/null || { rm -f "$tmp" "$tmp2"; return 1; }
+
+  while [ $# -ge 3 ]; do
+    key="$1"; value="$2"; typ="$3"; shift 3
+    [ -n "$key" ] || { echo "hnc_json: empty key in batch" >&2; rm -f "$tmp" "$tmp2"; return 2; }
+    lit="$(json_literal "$value" "$typ")" || { rc=$?; rm -f "$tmp" "$tmp2"; return $rc; }
+    awk_lit="$(printf '%s' "$lit" | sed 's/\\/\\\\/g')"
+    if ! set_device_inner "$tmp" "$mac" "$key" "$awk_lit" > "$tmp2"; then
+      rm -f "$tmp" "$tmp2"
+      echo "hnc_json: set-device-batch parser failed field=$key" >&2
+      return 1
+    fi
+    validate_file "$tmp2" || {
+      rm -f "$tmp" "$tmp2"
+      echo "hnc_json: set-device-batch candidate failed validation field=$key" >&2
+      return 1
+    }
+    mv "$tmp2" "$tmp"
+  done
+
+  validate_file "$tmp" || { rm -f "$tmp" "$tmp2"; echo "hnc_json: final batch candidate failed validation" >&2; return 1; }
+  mv "$tmp" "$target"
+  validate_file "$target" || {
+    echo "hnc_json: live JSON failed validation after batch write, rolling back" >&2
+    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
+    return 1
+  }
+}
+
+
+
+set_map_field_inner() {
+  f="$1"; topkey="$2"; entrykey="$3"; field="$4"; lit="$5"
+  awk -v topkey="$topkey" -v entrykey="$entrykey" -v field="$field" -v lit="$lit" '
+  function ch(i){ return substr(s,i,1) }
+  function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
+  function parse_string(i,   j,c,out,esc){
+    out=""; esc=0
+    if(ch(i)!="\"") return 0
+    for(j=i+1; j<=n; j++){
+      c=ch(j)
+      if(esc){ out=out c; esc=0; continue }
+      if(c=="\\"){ esc=1; continue }
+      if(c=="\""){ str_val=out; return j+1 }
+      out=out c
+    }
+    return 0
+  }
+  function value_end(i,   j,c,depth,ins,esc,ni){
+    i=skip_ws(i); c=ch(i)
+    if(c=="\""){ ni=parse_string(i); return ni ? ni : n+1 }
+    if(c=="{" || c=="["){
+      depth=0; ins=0; esc=0
+      for(j=i; j<=n; j++){
+        c=ch(j)
+        if(ins){
+          if(esc){esc=0; continue}
+          if(c=="\\"){esc=1; continue}
+          if(c=="\""){ins=0; continue}
+          continue
+        }
+        if(c=="\""){ins=1; continue}
+        if(c=="{" || c=="[") depth++
+        else if(c=="}" || c=="]"){
+          depth--
+          if(depth==0) return j+1
+          if(depth<0) return j
+        }
+      }
+      return n+1
+    }
+    for(j=i; j<=n; j++){
+      c=ch(j)
+      if(c=="," || c=="}" || c=="]" || c ~ /[ \t\r\n]/) return j
+    }
+    return n+1
+  }
+  function find_key(os, oe, target,   i,ni,k,colon,vs,ve,c){
+    fk=fs=fe=0
+    i=skip_ws(os+1)
+    while(i<oe){
+      i=skip_ws(i); c=ch(i)
+      if(c==","){ i++; continue }
+      if(c=="}") return 0
+      if(c!="\"") return 0
+      ni=parse_string(i); if(!ni) return 0
+      k=str_val
+      colon=skip_ws(ni)
+      if(ch(colon) != ":") return 0
+      vs=skip_ws(colon+1); ve=value_end(vs)
+      if(k==target){ fk=i; fs=vs; fe=ve; return 1 }
+      i=ve
+    }
+    return 0
+  }
+  function esc_key(x,   i,c,out){
+    out=""
+    for(i=1;i<=length(x);i++){
+      c=substr(x,i,1)
+      if(c=="\\") out=out "\\\\"
+      else if(c=="\"") out=out "\\\""
+      else out=out c
+    }
+    return out
+  }
+  function object_insert(obj_start, obj_end_excl, k, val,   closepos,inner,tmp,sep){
+    closepos=obj_end_excl-1
+    inner=substr(s,obj_start+1,closepos-obj_start-1)
+    tmp=inner; gsub(/[ \t\r\n]/,"",tmp)
+    sep=(tmp=="" ? "\n  " : ",\n  ")
+    return substr(s,1,closepos-1) sep "\"" esc_key(k) "\": " val substr(s,closepos)
+  }
+  BEGIN{ s="" }
+  { s=s $0 "\n" }
+  END{
+    sub(/\n$/, "", s); n=length(s)
+    root=skip_ws(1)
+    if(n==0 || ch(root)!="{") exit 2
+    root_end=value_end(root)
+    if(!find_key(root, root_end, topkey)) exit 3
+    map_start=skip_ws(fs); map_end=fe
+    if(ch(map_start)!="{") exit 3
+    if(!find_key(map_start, map_end, entrykey)) exit 3
+    entry_start=skip_ws(fs); entry_end=fe
+    if(ch(entry_start)!="{") exit 3
+    if(find_key(entry_start, entry_end, field)){
+      print substr(s,1,fs-1) lit substr(s,fe)
+      exit 0
+    }
+    print object_insert(entry_start, entry_end, field, lit)
+    exit 0
+  }' "$f"
+}
+
+set_map_field() {
+  target="$1"; topkey="$2"; entrykey="$3"; field="$4"; value="$5"; typ="${6:-str}"
+  [ -n "$topkey" ] || { echo "hnc_json: empty top map key" >&2; return 2; }
+  [ -n "$entrykey" ] || { echo "hnc_json: empty map entry key" >&2; return 2; }
+  [ -n "$field" ] || { echo "hnc_json: empty map field" >&2; return 2; }
+  lit="$(json_literal "$value" "$typ")" || return $?
+  target_dir="$(dirname "$target")"
+  target_base="$(basename "$target")"
+  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
+  [ -f "$target" ] || printf '{"version":1,"%s":{}}\n' "$topkey" > "$target"
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
+  acquire_lock || return 1
+  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  tmp="$target_dir/.$target_base.hnc_json_map.$$"
+  cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
+  case "$typ" in
+    json|raw) awk_lit="$lit" ;;
+    *) awk_lit="$(printf '%s' "$lit" | sed 's/\\/\\\\/g')" ;;
+  esac
+  set +e
+  set_map_field_inner "$target" "$topkey" "$entrykey" "$field" "$awk_lit" > "$tmp"
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    rm -f "$tmp"
+    [ "$rc" -eq 3 ] && return 3
+    echo "hnc_json: set-map-field parser failed for $target" >&2
+    return 1
+  fi
+  validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
+  mv "$tmp" "$target"
+  chmod 600 "$target" 2>/dev/null || true
+  validate_file "$target" || {
+    echo "hnc_json: live JSON failed validation after map write, rolling back" >&2
+    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
+    return 1
+  }
+}
+
+token_revoke() {
+  target="$1"; token_id="$2"
+  case "$token_id" in
+    *[!A-Za-z0-9_-]*|"") echo "hnc_json: invalid token id" >&2; return 2 ;;
+  esac
+  [ -f "$target" ] || printf '{"version":1,"tokens":{}}\n' > "$target"
+  token_key="$(json_literal "$token_id" str)" || return $?
+  tokens_obj="$(get_top "$target" "tokens" 2>/dev/null || printf '{}')"
+  if ! printf '%s
+' "$tokens_obj" | grep -F "$token_key" >/dev/null 2>&1; then
+    return 0
+  fi
+  set_map_field "$target" "tokens" "$token_id" "revoked" "true" bool
+  rc=$?
+  chmod 600 "$target" 2>/dev/null || true
+  return "$rc"
+}
+
+token_revoke_all() {
+  target="$1"
+  target_dir="$(dirname "$target")"
+  target_base="$(basename "$target")"
+  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
+  [ -f "$target" ] || printf '{"version":1,"tokens":{}}\n' > "$target"
+  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
+  acquire_lock || return 1
+  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  tmp="$target_dir/.$target_base.hnc_json_token_all.$$"
+  cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
+  awk '
+  BEGIN{ins=0;esc=0;buf=""}
+  {
+    line=$0
+    if(!ins){ gsub(/"revoked"[ \t]*:[ \t]*false/, "\"revoked\": true", line) }
+    print line
+  }' "$target" > "$tmp" || { rm -f "$tmp"; return 1; }
+  validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: token-revoke-all candidate failed validation" >&2; return 1; }
+  mv "$tmp" "$target"
+  chmod 600 "$target" 2>/dev/null || true
+  validate_file "$target" || {
+    echo "hnc_json: live JSON failed validation after token revoke all, rolling back" >&2
+    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
+    return 1
+  }
+}
+
+cmd="${1:-}"
+case "$cmd" in
+  validate)
+    [ $# -eq 2 ] || { usage >&2; exit 2; }
+    unset rc
+    hnc_json_c_try validate "$2" || rc=$?
+    case "${rc:-0}" in 0) exit 0 ;; 1|2) exit "$rc" ;; esac
+    validate_file "$2"
+    ;;
+  get-top|get)
+    [ $# -eq 3 ] || { usage >&2; exit 2; }
+    unset rc
+    hnc_json_c_try get-top "$2" "$3" || rc=$?
+    case "${rc:-0}" in 0) exit 0 ;; 2|3) exit "$rc" ;; esac
+    get_top "$2" "$3"
+    ;;
+  set-top|set)
+    [ $# -ge 4 ] && [ $# -le 5 ] || { usage >&2; exit 2; }
+    set_top "$2" "$3" "$4" "${5:-str}"
+    ;;
+  get-device|device-get)
+    [ $# -eq 4 ] || { usage >&2; exit 2; }
+    get_device "$2" "$3" "$4"
+    ;;
+  set-device|device-set)
+    [ $# -ge 5 ] && [ $# -le 6 ] || { usage >&2; exit 2; }
+    set_device "$2" "$3" "$4" "$5" "${6:-str}"
+    ;;
+  set-device-batch|device-set-batch)
+    [ $# -ge 6 ] || { usage >&2; exit 2; }
+    target="$2"; mac="$3"; shift 3; set_device_batch "$target" "$mac" "$@"
+    ;;
+  get-object-key|object-get)
+    [ $# -eq 3 ] || { usage >&2; exit 2; }
+    get_object_key "$2" "$3"
+    ;;
+  set-object-key|object-set)
+    [ $# -ge 4 ] && [ $# -le 5 ] || { usage >&2; exit 2; }
+    unset rc
+    hnc_json_c_try set-object-key "$2" "$3" "$4" "${5:-str}" || rc=$?
+    [ "${rc:-0}" = "0" ] && exit 0
+    set_object_key "$2" "$3" "$4" "${5:-str}"
+    ;;
+  del-object-key|object-del)
+    [ $# -eq 3 ] || { usage >&2; exit 2; }
+    unset rc
+    hnc_json_c_try del-object-key "$2" "$3" || rc=$?
+    [ "${rc:-0}" = "0" ] && exit 0
+    del_object_key "$2" "$3"
+    ;;
+  add-array-unique|array-add-unique)
+    [ $# -eq 4 ] || { usage >&2; exit 2; }
+    unset rc
+    hnc_json_c_try add-array-unique "$2" "$3" "$4" || rc=$?
+    [ "${rc:-0}" = "0" ] && exit 0
+    array_add_unique "$2" "$3" "$4"
+    ;;
+  del-array-value|array-del-value)
+    [ $# -eq 4 ] || { usage >&2; exit 2; }
+    unset rc
+    hnc_json_c_try del-array-value "$2" "$3" "$4" || rc=$?
+    [ "${rc:-0}" = "0" ] && exit 0
+    array_del_value "$2" "$3" "$4"
+    ;;
+  set-map-field|map-set-field)
+    [ $# -ge 6 ] && [ $# -le 7 ] || { usage >&2; exit 2; }
+    set_map_field "$2" "$3" "$4" "$5" "$6" "${7:-str}"
+    ;;
+  token-revoke)
+    [ $# -eq 3 ] || { usage >&2; exit 2; }
+    unset rc
+    hnc_json_c_try token-revoke "$2" "$3" || rc=$?
+    [ "${rc:-0}" = "0" ] && exit 0
+    token_revoke "$2" "$3"
+    ;;
+  token-revoke-all)
+    [ $# -eq 2 ] || { usage >&2; exit 2; }
+    unset rc
+    hnc_json_c_try token-revoke-all "$2" || rc=$?
+    [ "${rc:-0}" = "0" ] && exit 0
+    token_revoke_all "$2"
+    ;;
+  version)
+    hnc_json_c_try version >/dev/null 2>&1 && echo "hnc_json hotfix20.8 readonly-c-bridge+c-helper" || echo "hnc_json hotfix20.8 readonly-c-bridge"
+    ;;
+  -h|--help|help|"")
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac

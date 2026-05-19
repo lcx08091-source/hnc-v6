@@ -1,0 +1,133 @@
+#!/bin/bash
+# daemon/hotspotd/build.sh — 使用 Android NDK 交叉编译 hotspotd
+# v5.0.0-beta.4 hotfix6: 链接 libbpf 静态库
+#
+# 用法:
+#   export ANDROID_NDK=/path/to/android-ndk
+#   bash daemon/hotspotd/build.sh [arm64]
+
+set -e
+cd "$(dirname "$0")"
+
+ARCH=${1:-arm64}
+
+# v5.0.0-beta.4 hotfix6: 改用 libbpf, 删除手撸 lsm/hnc_lsm_loader.c 的
+# sys_bpf 实现, 改为 libbpf 标准 API
+SRCS="hotspotd.c hnc_helpers.c hostname_cache.c oui_override.c mdns_worker.c \
+      platform.c scheduler.c upstream.c \
+      offload/adapter.c offload/adapter_null.c offload/adapter_bpf.c \
+      lsm/hnc_lsm_loader.c lsm/compat_stubs.c"
+OUTDIR=prebuilt/${ARCH}
+OUT=${OUTDIR}/hotspotd
+
+mkdir -p "$OUTDIR"
+
+# ── NDK toolchain ──────────────────────────────────────────────
+if [ -z "$ANDROID_NDK" ] && [ -z "$CC" ]; then
+    echo "[build] ERROR: 请设置 ANDROID_NDK 或 CC"
+    exit 1
+fi
+
+case "$ARCH" in
+    arm64)   TARGET=aarch64-linux-android;  API=28 ;;
+    arm)     TARGET=armv7a-linux-androideabi; API=28 ;;
+    x86_64)  TARGET=x86_64-linux-android;   API=28 ;;
+    *)       echo "Unknown arch: $ARCH"; exit 1 ;;
+esac
+
+if [ -n "$ANDROID_NDK" ]; then
+    HOST_TAG=$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)
+    TOOLCHAIN="$ANDROID_NDK/toolchains/llvm/prebuilt/$HOST_TAG"
+    CC="$TOOLCHAIN/bin/${TARGET}${API}-clang"
+fi
+
+# ── v5.0.0-beta.4 hotfix6: 编 third_party libs (zlib, libelf, libbpf) ──
+LIBS_OUT="$(cd ../../third_party_build && pwd)/_libs_out"
+if [ ! -f "$LIBS_OUT/lib/libbpf.a" ]; then
+    echo ""
+    echo "=== Building third_party libs ==="
+    (cd ../../third_party_build && bash build_libs.sh "$ARCH")
+fi
+
+if [ ! -f "$LIBS_OUT/lib/libbpf.a" ]; then
+    echo "[build] ERROR: libbpf.a missing after build_libs.sh"
+    exit 1
+fi
+
+# ── 编译 hotspotd 主体 + 链接 libbpf ─────────────────────────
+echo ""
+echo "[build] Compiler: $CC"
+echo "[build] Target:   $ARCH  Output: $OUT"
+echo "[build] libs:     $LIBS_OUT/lib/{libbpf,libelf,libz}.a"
+
+$CC \
+    -O2 \
+    -std=c11 \
+    -Wall \
+    -Wextra \
+    -Wno-unused-parameter \
+    -static-libgcc \
+    -D_GNU_SOURCE \
+    -DANDROID \
+    -DHNC_HAVE_ADAPTER_BPF \
+    -fPIE -pie \
+    -pthread \
+    -I"$LIBS_OUT/include" \
+    -o "$OUT" \
+    $SRCS \
+    -Wl,--allow-multiple-definition \
+    "$LIBS_OUT/lib/libbpf.a" \
+    "$LIBS_OUT/lib/libelf.a" \
+    "$LIBS_OUT/lib/libz.a"
+
+strip "$OUT" 2>/dev/null || true
+echo "[build] OK: $(ls -lh "$OUT" | awk '{print $5}')  $OUT"
+
+# 复制到 bin/
+BINDIR=../../bin
+mkdir -p "$BINDIR"
+cp "$OUT" "$BINDIR/hotspotd"
+chmod 755 "$BINDIR/hotspotd"
+echo "[build] Copied to $BINDIR/hotspotd"
+
+# ── 编 hnc_ipc ─────────────────────────────────────────────
+echo ""
+echo "=== v5.0 tools build (hnc_ipc) ==="
+if [ -d tools ]; then
+    (cd tools && bash build.sh "$ARCH" hnc_ipc) || \
+        echo "[build] WARN: hnc_ipc build failed"
+    if [ -f "tools/prebuilt/${ARCH}/hnc_ipc" ]; then
+        cp "tools/prebuilt/${ARCH}/hnc_ipc" "$BINDIR/hnc_ipc"
+        chmod 755 "$BINDIR/hnc_ipc"
+    fi
+fi
+
+# ── 编 BPF object (LSM 程序) ─────────────────────────────
+echo ""
+echo "=== v5.0.0-beta.4 BPF LSM build ==="
+if [ -f lsm/vmlinux.h ] && [ -f lsm/hnc_limit_map_guard.bpf.c ]; then
+    BPFCC="${BPFCC:-clang}"
+    if ! command -v "$BPFCC" >/dev/null 2>&1; then
+        echo "[build] WARN: $BPFCC not found, skip BPF compile"
+    else
+        BPF_OUT_DIR=../../bpf
+        mkdir -p "$BPF_OUT_DIR"
+        "$BPFCC" -O2 -g \
+            -target bpf \
+            -D__TARGET_ARCH_arm64 \
+            -I"$LIBS_OUT/include" \
+            -Ilsm \
+            -c lsm/hnc_limit_map_guard.bpf.c \
+            -o "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" || \
+            echo "[build] WARN: BPF compile failed"
+        if [ -f "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" ]; then
+            llvm-strip -g "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" 2>/dev/null \
+              || strip -g "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" 2>/dev/null \
+              || true
+            echo "[build] BPF object: $(ls -lh "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" | awk '{print $5}')"
+        fi
+    fi
+fi
+
+echo ""
+echo "[build] === build done ==="

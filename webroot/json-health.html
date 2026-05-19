@@ -1,0 +1,110 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>HNC JSON 健康状态</title>
+<style>
+:root{--bg:#07111f;--card:rgba(255,255,255,.08);--line:rgba(255,255,255,.12);--text:#eef6ff;--muted:#91a4bd;--ok:#35d07f;--warn:#ffd166;--bad:#ff5c7a;--blue:#4ea1ff;--blue2:#7c5cff}
+*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0%,rgba(78,161,255,.24),transparent 35%),radial-gradient(circle at 100% 20%,rgba(124,92,255,.18),transparent 36%),var(--bg);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);padding:18px}.wrap{max-width:920px;margin:0 auto}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.title{font-size:22px;font-weight:800;letter-spacing:.2px}.sub{color:var(--muted);font-size:13px;margin-top:4px}.card{background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:0 16px 40px rgba(0,0,0,.22);backdrop-filter:blur(16px);padding:16px;margin:12px 0}.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.08)}.row:last-child{border-bottom:0}.name{font-weight:650}.val{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;text-align:right;word-break:break-all}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:6px 10px;font-weight:800;font-size:12px}.ok{background:rgba(53,208,127,.16);color:var(--ok)}.warn{background:rgba(255,209,102,.16);color:var(--warn)}.bad{background:rgba(255,92,122,.16);color:var(--bad)}.unknown{background:rgba(145,164,189,.14);color:var(--muted)}button{border:0;border-radius:15px;padding:11px 13px;color:white;background:linear-gradient(135deg,var(--blue),var(--blue2));font-weight:800;box-shadow:0 10px 26px rgba(78,161,255,.24)}button:disabled{opacity:.55}.btns{display:flex;flex-wrap:wrap;gap:10px}.mono{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfe1ff;font-size:12px;line-height:1.55}.hint{color:var(--muted);font-size:13px;line-height:1.6}.small{font-size:12px;color:var(--muted)}.sectionTitle{font-size:15px;font-weight:850;margin:14px 0 6px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mini{background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:11px}.mini .k{font-size:12px;color:var(--muted);margin-bottom:6px}.mini .v{font-weight:800;word-break:break-word}@media(max-width:640px){.grid{grid-template-columns:1fr}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top">
+    <div><div class="title">JSON 健康状态</div><div class="sub">HNC hotfix18.6 · 只读检查 / 一键导出诊断包</div></div>
+  </div>
+
+  <div class="card">
+    <div class="btns">
+      <button id="refreshBtn" onclick="refreshHealth()">刷新状态</button>
+      <button id="exportBtn" onclick="exportBundle()">导出 JSON 诊断包</button>
+    </div>
+    <p class="hint">这个页面不会修改 rules.json。导出按钮会生成 <b>/sdcard/Download/hnc-json-debug-*.tar.gz</b>，方便直接发给排障。</p>
+  </div>
+
+  <div class="card" id="summaryCard"><div class="hint">正在读取状态...</div></div>
+  <div class="card"><div class="name">执行日志</div><div id="log" class="mono"></div></div>
+</div>
+<script>
+const HNC = '/data/local/hnc';
+function log(msg){ const el=document.getElementById('log'); el.textContent = '['+new Date().toLocaleTimeString()+'] '+msg+'\n'+el.textContent; }
+function badge(v){
+  const s=String(v||'unknown').toLowerCase();
+  let cls=s==='ok'?'ok':(s==='bad'||s==='fail'?'bad':(s==='warn'||s==='missing'?'warn':'unknown'));
+  return `<span class="pill ${cls}">${String(v||'unknown')}</span>`;
+}
+function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
+function parseRaw(raw){
+  if(!raw) return null;
+  try{return JSON.parse(String(raw));}catch(e){return null;}
+}
+function boolText(v){return v===true?'是':(v===false?'否':'未知');}
+async function execCmd(cmd){
+  if(!window.ksu || !window.ksu.exec){ throw new Error('当前环境没有 window.ksu.exec，请在 KernelSU/SukiSU WebUI 中打开'); }
+  const r = await window.ksu.exec(cmd);
+  if(typeof r === 'string') return r;
+  if(r && typeof r.stdout === 'string') return r.stdout + (r.stderr ? '\n'+r.stderr : '');
+  return JSON.stringify(r);
+}
+async function refreshHealth(){
+  const btn=document.getElementById('refreshBtn'); btn.disabled=true;
+  try{
+    const out=await execCmd(`su -c 'sh ${HNC}/bin/json_health_panel.sh'`);
+    let data=JSON.parse(out.trim().replace(/^.*?(\{)/s,'$1'));
+    render(data); log('JSON 健康状态刷新完成');
+  }catch(e){
+    document.getElementById('summaryCard').innerHTML='<div class="pill bad">读取失败</div><p class="hint">'+esc(e.message||e)+'</p>';
+    log('刷新失败: '+(e.message||e));
+  }finally{btn.disabled=false;}
+}
+function render(data){
+  const files=data.files||{};
+  let html='';
+  html += `<div class="row"><div><div class="name">整体状态</div><div class="small">json_doctor rc=${esc(data.json_doctor_rc)}</div></div><div>${badge(data.overall)}</div></div>`;
+  for(const k of ['rules.json','device_names.json','templates.json','remote_tokens.json','devices.json']){
+    html += `<div class="row"><div class="name">${esc(k)}</div><div>${badge(files[k])}</div></div>`;
+  }
+  html += `<div class="row"><div class="name">JSON 备份数量</div><div class="val">${esc(data.backup_count)}</div></div>`;
+  html += `<div class="row"><div class="name">最新备份</div><div class="val">${esc(data.latest_backup||'无')}</div></div>`;
+  html += `<div class="row"><div class="name">TC 状态快照</div><div>${badge(data.has_tc_state?'ok':'missing')}</div></div>`;
+  html += `<div class="row"><div class="name">能力探测文件</div><div>${badge(data.has_capabilities?'ok':'missing')}</div></div>`;
+  html += `<div class="row"><div class="name">最近诊断包</div><div class="val">${esc(data.last_bundle||'无')}</div></div>`;
+  const stats=data.stats||{};
+  const v52=parseRaw(stats.v52_web_status_raw)||parseRaw(stats.v52_rc1_switch_raw)||{};
+  html += `<div class="sectionTitle">v5.2 RC / 灰度状态</div>`;
+  html += `<div class="grid">`;
+  html += `<div class="mini"><div class="k">RC1 状态</div><div class="v">${badge(v52.status||'missing')}</div></div>`;
+  html += `<div class="mini"><div class="k">健康等级</div><div class="v">${badge(v52.severity||v52.status||'unknown')}</div></div>`;
+  html += `<div class="mini"><div class="k">默认统计源</div><div class="v">${esc(v52.default_source||'legacy')}</div></div>`;
+  html += `<div class="mini"><div class="k">legacy 默认保留</div><div class="v">${esc(boolText(v52.legacy_default_preserved))}</div></div>`;
+  html += `<div class="mini"><div class="k">RC flag</div><div class="v">${esc(boolText(v52.rc_enabled))}</div></div>`;
+  html += `<div class="mini"><div class="k">RC1 flag</div><div class="v">${esc(boolText(v52.rc1_enabled))}</div></div>`;
+  html += `<div class="mini"><div class="k">设备门禁可启用</div><div class="v">${esc(boolText(v52.rc_enable_ready))}</div></div>`;
+  html += `<div class="mini"><div class="k">shadow 采样</div><div class="v">${esc(boolText(v52.shadow_effective_enabled))}</div></div>`;
+  html += `</div>`;
+  if(v52.recommendation){ html += `<p class="hint"><b>建议：</b>${esc(v52.recommendation)}</p>`; }
+  html += `<div class="sectionTitle">v5.2 子检查</div>`;
+  html += `<div class="grid">`;
+  for(const pair of [['health','health_status'],['device','device_check_status'],['smoke','smoke_status'],['readiness','readiness_status'],['compare','compare_status'],['source','source_status'],['shadow','shadow_status']]){
+    if(v52[pair[1]]) html += `<div class="mini"><div class="k">${esc(pair[0])}</div><div class="v">${badge(v52[pair[1]])}</div></div>`;
+  }
+  html += `</div>`;
+  html += `<p class="hint">${esc(data.json_doctor_message||'')}</p>`;
+  document.getElementById('summaryCard').innerHTML=html;
+}
+async function exportBundle(){
+  const btn=document.getElementById('exportBtn'); btn.disabled=true;
+  try{
+    log('开始导出 JSON 诊断包...');
+    const out=await execCmd(`su -c 'sh ${HNC}/bin/json_export_for_web.sh'`);
+    let data=JSON.parse(out.trim().replace(/^.*?(\{)/s,'$1'));
+    if(data.ok){ log('导出完成: '+data.path); } else { log('导出失败 rc='+data.rc+' '+(data.output||'')); }
+    await refreshHealth();
+  }catch(e){ log('导出失败: '+(e.message||e)); }
+  finally{btn.disabled=false;}
+}
+refreshHealth();
+</script>
+</body>
+</html>

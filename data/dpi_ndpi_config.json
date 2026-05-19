@@ -1,0 +1,9 @@
+{
+  "schema_version": "1.0",
+  "enabled": true,
+  "mode": "external_ndpiReader",
+  "engine_path": "/data/local/hnc/bin/hnc_ndpi_probe",
+  "state_path": "/data/local/hnc/run/ndpi_lab_state.json",
+  "max_sample_seconds": 10,
+  "note": "rc30.3: nDPI continuous mode enabled by default. dpid reads /data/local/hnc/run/ip_to_host.json as a SNI/QUIC fallback when IP rules don't match. To disable, set enabled to false and restart watchdog."
+}
