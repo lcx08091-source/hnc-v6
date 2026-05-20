@@ -321,6 +321,26 @@ if [ -n "$ARTIFACT" ]; then
   fi
 fi
 
+# rc30.12.33 (P0.1) — 防止 src/hnc_httpd/ 副本复发
+# 历史: rc30.12.32 时仓库里同时存在 src/hnc_httpd/ 和 daemon/hnc_httpd/, README 声称
+# 完全一致, 实际分叉 120+ 行. rc30.12.33 删 src/hnc_httpd/, daemon/ 是唯一源. 加这个
+# check 是为了防止以后有人(或 AI 协作者)"为了对称性"又把源码复制回 src/.
+if [ -d "src/hnc_httpd" ]; then
+    # 允许保留极少数 marker 文件(.gitkeep / README.md 等文档), 但不能有 .go 源码
+    GO_FILES_IN_SRC=$(find src/hnc_httpd -maxdepth 2 -type f -name '*.go' 2>/dev/null | wc -l)
+    if [ "$GO_FILES_IN_SRC" -gt 0 ]; then
+        echo "[ERROR] src/hnc_httpd/ contains $GO_FILES_IN_SRC .go file(s) — double source tree forbidden since rc30.12.33"
+        echo "        唯一权威源在 daemon/hnc_httpd/, src/hnc_httpd/ 不应再包含 .go 源码"
+        echo "        修复方式: git rm src/hnc_httpd/*.go (以及 go.mod/go.sum/web/ 等构建产物)"
+        find src/hnc_httpd -maxdepth 2 -type f -name '*.go' | head -10 | sed 's/^/        /'
+        FAIL=$((FAIL+1))
+    else
+        ok "src/hnc_httpd/ 不含 .go 源码 (P0.1 唯一源码树检查)"
+    fi
+else
+    ok "src/hnc_httpd/ 不存在 (P0.1 唯一源码树检查)"
+fi
+
 say "summary: failures=$FAIL warnings=$WARN"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

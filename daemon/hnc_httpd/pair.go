@@ -127,6 +127,18 @@ func (s *server) handlePair(w http.ResponseWriter, r *http.Request) {
 
 // handlePairVerify 处理 POST /api/pair/verify
 // form body: pin=<6 digits>
+//
+// rc30.12.33 (P0.2): 修复 PIN 限流并发窗口.
+// 旧流程: CheckPinVerify(只读 check) → 释放锁 → 解析 body / 读 pending /
+//
+//	constant-time 比对 → 失败再 RegisterPinFail. 同一 IP 并发 N 个
+//	错误请求都能通过 Check 进入比对, 实际尝试数可达 5+(N-1).
+//
+// 新流程: 入口先用 CheckPinVerify 短路检查"是否已锁定"(避免对已锁的 IP 还
+//
+//	读 body 浪费); 真正进入 PIN 比对前用 ConsumePinAttempt 原子占用
+//	一次名额. 占用成功→比对; 占用失败→已用满, 返回 429.
+//	PIN 比对成功 → ResetPin; 比对失败 → 名额已扣, 直接返回 wrong pin.
 func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -135,7 +147,7 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 
 	ip := ipOnly(r.RemoteAddr)
 
-	// PIN 专用速率限制(独立于 unauth bucket)
+	// 入口短路: 如果 IP 已被锁定, 不浪费 body 读取
 	allowed, retry := s.limiter.CheckPinVerify(ip)
 	if !allowed {
 		w.Header().Set("Retry-After", int64ToStr(retry))
@@ -155,13 +167,14 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	submitted := r.FormValue("pin")
 	if len(submitted) != 6 {
-		_, rem := s.limiter.RegisterPinFail(ip)
+		// 格式错也消费一次名额: 防御 "用错误格式探测限流状态"
+		_, _, rem := s.limiter.ConsumePinAttempt(ip)
 		writePairErrorWithRem(w, http.StatusBadRequest, "bad pin format", rem)
 		return
 	}
 	for _, c := range submitted {
 		if c < '0' || c > '9' {
-			_, rem := s.limiter.RegisterPinFail(ip)
+			_, _, rem := s.limiter.ConsumePinAttempt(ip)
 			writePairErrorWithRem(w, http.StatusBadRequest, "bad pin format", rem)
 			return
 		}
@@ -175,26 +188,34 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(msg, "expired") {
 			status = http.StatusGone // 410 语义更准
 		}
-		// 不 RegisterPinFail(没可错的目标)
+		// 不消费名额(没可错的目标 — 配对窗口本身的问题, 不是攻击)
 		writePairError(w, status, msg)
 		return
 	}
 
-	// constant-time 比较 PIN 防 timing attack
+	// rc30.12.33 (P0.2): 进入比对前原子占用名额. 并发 N 个错误请求时,
+	// 只有先到的 rlPinAttemptsMax 个能进入下面的 ConstantTimeCompare,
+	// 其他都在这里 429 返回. 旧版本 RegisterPinFail 在比对后才记账, 中
+	// 间存在 race window.
+	consumed, consumedRetry, remaining := s.limiter.ConsumePinAttempt(ip)
+	if !consumed {
+		w.Header().Set("Retry-After", int64ToStr(consumedRetry))
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"too many pin attempts","locked_for_sec":` +
+			int64ToStr(consumedRetry) + `}`))
+		return
+	}
+
+	// constant-time 比较 PIN 防 timing attack.
+	// 名额已经在上一步扣过 — 这里只决定 ResetPin (成功) 还是 wrong pin (失败).
 	if subtle.ConstantTimeCompare([]byte(submitted), []byte(pending.PIN)) != 1 {
-		locked, remaining := s.limiter.RegisterPinFail(ip)
-		if locked {
-			_, rt := s.limiter.CheckPinVerify(ip)
-			w.Header().Set("Retry-After", int64ToStr(rt))
-			w.Header().Set("Content-Type", "application/json; charset=utf-8")
-			w.WriteHeader(http.StatusTooManyRequests)
-			_, _ = w.Write([]byte(`{"error":"too many pin attempts","locked_for_sec":` +
-				int64ToStr(rt) + `}`))
-			return
-		}
 		writePairErrorWithRem(w, http.StatusBadRequest, "wrong pin", remaining)
 		return
 	}
+
+	// PIN 对了, 清空计数 (避免下一次正常配对受历史失败影响)
+	s.limiter.ResetPin(ip)
 
 	// PIN 对!颁发 token
 	label := labelFromUA(r.UserAgent())

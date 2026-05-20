@@ -117,6 +117,10 @@ func (rl *RateLimiter) evictOldestLocked(now int64) bool {
 //	true  → 允许
 //	false → 拒绝(已锁 or LRU 全锁定)
 //	retryAfter → 客户端应等多少秒(用于 429 响应头)
+//
+// rc30.12.33 (P0.2): 此方法仍保留, 用于 handlePairVerify 入口 "锁定状态"
+// 短路检查 (避免对已锁定 IP 做无意义的 body 读取). 真正的尝试计数原子消费
+// 在 ConsumePinAttempt 里, 不再用"Check + RegisterFail"两步走的旧模式.
 func (rl *RateLimiter) CheckPinVerify(ip string) (allowed bool, retryAfter int64) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
@@ -131,9 +135,58 @@ func (rl *RateLimiter) CheckPinVerify(ip string) (allowed bool, retryAfter int64
 	return true, 0
 }
 
+// ConsumePinAttempt 原子地占用一次 PIN 尝试机会。
+//
+// rc30.12.33 (P0.2): 修复旧的 "Check + later RegisterFail" 并发漏洞。
+// 旧流程: CheckPinVerify(只读) → 释放锁 → 解析 body / 读 pending / constant-time
+// 比对 → 失败再 RegisterPinFail. 同一 IP 并发发起 N 个错误 PIN 请求时, N 个请求都
+// 能通过 Check 进入比对, 直到 RegisterPinFail 累计到上限, 实际尝试数可达
+// rlPinAttemptsMax + (N-1).
+//
+// 新流程: 进入 PIN 比对前先调本方法占用一次名额. 若 allowed=true, 调用方继续
+// 比对; PIN 对则 ResetPin, PIN 错则不需要再调 RegisterPinFail (本方法已经
+// 累计了). 若 allowed=false (本次占用刚好触发锁定 或 之前就已锁定),
+// 直接 429.
+//
+// 返回:
+//
+//	allowed    本次请求是否允许进入比对 (false = 已锁定/刚被锁)
+//	retryAfter 锁定剩余秒数 (仅 allowed=false 时有意义)
+//	remaining  本窗口内剩余尝试次数 (允许时供前端显示, 锁定时返回 0)
+func (rl *RateLimiter) ConsumePinAttempt(ip string) (allowed bool, retryAfter int64, remaining int) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	now := time.Now().Unix()
+	e := rl.getOrCreate(ip, now)
+	if e == nil {
+		// LRU 全锁定 / 内存压力 → 拒
+		return false, int64(rlPinLockDuration.Seconds()), 0
+	}
+	// 之前已经锁定, 直接拒
+	if e.pinLockTS > now {
+		return false, e.pinLockTS - now, 0
+	}
+	// 窗口过期则重置
+	if now-e.pinWindowStart > int64(rlPinWindow.Seconds()) {
+		e.pinWindowStart = now
+		e.pinAttempts = 0
+	}
+	// 原子占用: 计数 +1, 若达到上限立即锁定本次也算 allowed=false
+	e.pinAttempts++
+	if e.pinAttempts >= rlPinAttemptsMax {
+		e.pinLockTS = now + int64(rlPinLockDuration.Seconds())
+		return false, e.pinLockTS - now, 0
+	}
+	return true, 0, rlPinAttemptsMax - e.pinAttempts
+}
+
 // RegisterPinFail 记一次 PIN 验证失败。
 // 累计到 rlPinAttemptsMax 触发锁定。
 // 返回: locked=是否已锁定 / remaining=剩余允许尝试次数(锁定时为 0)
+//
+// rc30.12.33 (P0.2): 此方法 deprecated, 不再被 handlePairVerify 调用。
+// 保留是因为旧 unit test 仍引用, 删除会让 ratelimit_test.go 编译失败。
+// 新代码应使用 ConsumePinAttempt 做原子占用。
 func (rl *RateLimiter) RegisterPinFail(ip string) (locked bool, remaining int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()

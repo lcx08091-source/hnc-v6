@@ -276,10 +276,15 @@ func (s *server) apiHealth(w http.ResponseWriter, r *http.Request) {
 	//       version 和 watchdog_passive (app.js:974), 移走会破坏匿名探活. 不可接受.
 	//   (b) 删 session_label 死代码 - 保留匿名探活, 失去 session label UX (次要功能).
 	// 选了 (b). 如果未来想恢复 session label, 走独立 /api/whoami 端点 (鉴权).
+	//
+	// rc30.12.33 (P1.3b): 删 hnc_dir 字段. /api/health 在 isPublicPath,
+	// 任何能访问端口的网络方都能拿到. hnc_dir 是模块部署路径
+	// (典型 /data/local/hnc), 暴露给匿名调用属于信息泄露 — 帮助攻击者
+	// 定位文件系统结构. grep webroot 确认前端无任何代码读 health.hnc_dir,
+	// 删除零回归. 如果未来某管理面需要 hnc_dir, 走鉴权端点 (/api/whoami 之类).
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":           "ok",
 		"version":          version,
-		"hnc_dir":          s.hncDir,
 		"watchdog_passive": passive,
 	})
 }

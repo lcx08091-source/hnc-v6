@@ -1,4 +1,154 @@
 
+## v5.3.0-rc30.12.33
+
+**发布日期**: 2026-05-20
+**versionCode**: 530153
+**致谢**: GPT 第二轮审查 (rc30.12.32 时点) P0/P1 收口
+
+### 概述
+
+GPT 第一轮审查 (rc28-hf2 时点) 给了 17 条 P0/P1/P2, rc30.12.30 修了
+P0 全部 + 关键 P2; TASK-a 三阶段 (rc30.12.30 提案 → rc30.12.31 加载器
+预埋 → rc30.12.32 真激活) 把 P2.16 dpi_rules.d/ 收掉. **GPT 第二轮审查**
+在 rc30.12.32 之上又找到 7 条问题, 其中 2 条 P0 + 1 条 P1 必须修了才能
+tag v5.3.0 stable:
+
+1. **P0.1 双源码树分叉** — rc30.12.30 修 P2.11 时只改了 daemon/hnc_httpd/
+   没改 src/hnc_httpd/, 两边内容分叉 120+ 行 (middleware 77 + pair 47),
+   `src/README.md` 还在声称"完全一致". 等于源代码层面撒谎: 审计者审 src/
+   评估的是死代码, CI 构建跑的是 daemon/. **本版删 src/hnc_httpd/**,
+   daemon/ 是唯一权威源, ci_preflight 加 check 防复发.
+2. **P0.2 PIN 限流并发窗口** — `CheckPinVerify`(只读) → 释放锁 → constant-time
+   比对 → `RegisterPinFail`(累计). 同一 IP 并发 N 个错误请求都能过 Check
+   进入比对, 实际尝试可达 5+(N-1) 次. **本版新增 `ConsumePinAttempt`**
+   原子方法, 把"占用 1 个名额"放进一把锁, pair.go 改用此方法.
+3. **P1.3b /api/health 信息泄露** — apiHealth 返回 `hnc_dir` 字段, 而
+   /api/health 在 isPublicPath, 任何能访问端口的网络方都能拿到模块部署
+   路径 (典型 `/data/local/hnc`). 帮助攻击者定位文件系统结构. **本版删
+   此字段**, grep webroot 确认前端无引用, 零回归.
+
+剩 4 条 P1/P2 (构建 hermetic / 测试夹具 / launcher SIGKILL / LICENSE)
+列入 v5.3.1 backlog, 不在本版范围.
+
+### P0.1 双源码树合并 (`src/hnc_httpd/` 删除)
+
+**问题确认**:
+```
+src/hnc_httpd/hotfix*.go           ← 还在 (3 个 hotfix 文件)
+daemon/hnc_httpd/api_live.go       ← rc30.12.30 P2.11 重命名后的新名字
+daemon/hnc_httpd/capability.go     ← 同上
+daemon/hnc_httpd/action_hotspot_iface_set.go  ← 同上
+src/README.md L87-91               ← "两目录内容完全一致"
+diff middleware.go: 77 行 diff
+diff pair.go: 47 行 diff
+binary panic stack 路径 = daemon/hnc_httpd/...  ← CI 真构建 daemon/
+```
+
+**修法**:
+
+- 写一次性清理脚本 `tools/cleanup-src-hnc_httpd.sh`, Ling 跑 `--apply` 后
+  `git rm -rf src/hnc_httpd/` (patch zip 用 unzip -o 无法表达"删除文件")
+- 改 `src/README.md`: 删"两目录完全一致"虚假声明, 改成"daemon/ 是唯一权威源,
+  src/ 副本已删. 这是历史遗留布局, 项目 v5.0 起 hnc_httpd 源码就放在 daemon/,
+  build.sh 直接从那里 go build 输出"
+- `bin/ci_preflight.sh` 末尾加 `check_no_src_httpd_dupe`:
+  ```sh
+  if [ -d "src/hnc_httpd" ]; then
+      GO_FILES=$(find src/hnc_httpd -maxdepth 2 -type f -name '*.go' 2>/dev/null | wc -l)
+      if [ "$GO_FILES" -gt 0 ]; then
+          echo "[ERROR] src/hnc_httpd/ contains $GO_FILES .go file(s) — double source tree forbidden since rc30.12.33"
+          FAIL=$((FAIL+1))
+      fi
+  fi
+  ```
+
+**为什么选删 src/ 而不是改名 daemon/→src/**:
+
+- daemon/hnc_httpd/ 已经是 build.sh、CI、release zip 一切下游的源, 改这个
+  路径要动 build.sh / artifact_sanity_check / 可能还有别的脚本, 风险大
+- src/hnc_httpd/ 是死代码副本, 删它零下游影响
+- "唯一源" 比 "目录命名美学" 更重要
+
+### P0.2 PIN 限流原子化
+
+**问题**:
+```go
+// 旧 pair.go handlePairVerify (有并发窗口):
+allowed, _ := s.limiter.CheckPinVerify(ip)  // ← 只 read, 放锁
+if !allowed { return 429 }
+// ↓ ↓ ↓ 这段时间内同 IP 别的请求都能过 CheckPinVerify
+... parse body ...
+... read pending ...
+if subtle.ConstantTimeCompare(submitted, pending.PIN) != 1 {
+    s.limiter.RegisterPinFail(ip)  // ← 这才扣计数, 但已经晚了
+}
+```
+
+**修法**:
+
+`ratelimit.go` 加新方法 `ConsumePinAttempt`:
+```go
+func (rl *RateLimiter) ConsumePinAttempt(ip string) (allowed bool, retryAfter int64, remaining int) {
+    rl.mu.Lock()
+    defer rl.mu.Unlock()
+    // ... 检查 pinLockTS / 窗口过期 / pinAttempts++ / 触锁判断 ...
+    // 全部在一把锁里完成
+}
+```
+
+`pair.go` 改两处:
+
+1. 入口仍用 `CheckPinVerify` 做"已锁定短路"(避免对已锁 IP 浪费 body 读取)
+2. 进入 PIN 比对**前**用 `ConsumePinAttempt` 原子占用名额, 占用成功才比对,
+   占用失败直接 429
+3. PIN 比对成功调 `ResetPin` 清空计数
+
+`RegisterPinFail` 保留 (向后兼容 unit test) 但 deprecated, 新代码不再调用.
+
+### P1.3b /api/health 删 hnc_dir 字段
+
+**问题**: `apiHealth` 返回 `{"status": "ok", "version": ..., "hnc_dir": s.hncDir, "watchdog_passive": ...}`,
+而 /api/health 在 isPublicPath, 任何能 reach 端口的网络方都能拿到 hnc_dir 值
+(典型 `/data/local/hnc`). 信息泄露.
+
+**修法**:
+- `server.go:282` 删 `"hnc_dir": s.hncDir,` 一行
+- 加注释说明删除原因, 如果未来需要 hnc_dir 走鉴权端点 (`/api/whoami` 风格)
+- grep `webroot/` 全目录确认无任何 JS 代码读 `.hnc_dir` 字段, 零回归
+
+### 验收
+
+1. `go vet ./...` 通过 (本地用 GOPROXY=off 验不了, 因为 x/crypto 没 vendor.
+   等 CI 跑完看 build 是否绿. Stage 2 已知 vet 干净, 改动局部不会引入新错)
+2. `gofmt` 干净 (本版 3 个 .go 文件 gofmt -d 无输出)
+3. `shellcheck -S error` 干净 (本版 2 个 .sh 文件无 error)
+4. **Ling 在 commit 前必须先跑 `sh tools/cleanup-src-hnc_httpd.sh --apply`**
+   完成 src/hnc_httpd/ 的 git rm. patch zip 是 unzip -o 覆盖式, 无法
+   表达"删除文件", 所以这一步必须手动跑
+
+### 装机验证 (跟 rc30.12.32 比)
+
+1. **dpi_rules.d/ 路径不动** — `external-d:` 前缀应保持 (TASK-a Stage 3 验过)
+2. **PIN 配对功能**: 用错 PIN 5 次应 429 锁定 (跟之前一样行为, 没改业务流程)
+3. **/api/health** 响应 JSON 不再含 `hnc_dir`:
+   ```sh
+   su -c 'curl -sk https://127.0.0.1:8443/api/health' | jq .
+   ```
+   应只见 `status` / `version` / `watchdog_passive` 三个字段
+
+### 不在本版范围
+
+- **P1.1 构建非 hermetic** = TASK-i (go mod vendor), 独立任务, 后续做
+- **P1.2 测试夹具落后**: 真存在, 但不是 ship blocker, 等 v5.3.1
+- **P1.3a 0.0.0.0 绑定**: 有意设计权衡 (ColorOS 主机 IP 漂移), 不动
+- **P1.4 launcher 无 SIGKILL 升级**: 改 launcher 启停流程有中等风险, 等 v5.3.1
+- **P2.7a 仓库根无 LICENSE**: 法律问题不是工程问题, 单独 commit
+- **P2.7b launcher README 静态/动态链接说法**: rc30.12.28 已改代码为 PIE 动态,
+  文档没跟. 5 分钟纯文档修复, 等顺手做
+
+---
+
+
 ## v5.3.0-rc30.12.32
 
 **发布日期**: 2026-05-19

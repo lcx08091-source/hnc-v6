@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.32
-versionCode=530152
+version=v5.3.0-rc30.12.33
+versionCode=530153
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.32 · TASK-a Stage 3: dpi_rules.d/ 真正落地. (1) 跑 tools/dpi_rules_split.py split 生成 23 个 bucket 子文件到 data/dpi_rules.d/, 144 条规则零跨桶 CIDR overlap. (2) 反向同步: data/dpi_rules.json 重生成为派生产物 (`sync-legacy` 子命令从 dpi_rules.d/ merge 出来), 顶层加 _comment_top 警告不要手编, 144 条规则跟原文件字节级等价. (3) 修 webroot/index.html:5879 KSU WebUI 导出按钮, jq 在则 merge dpi_rules.d/, 不在则 fallback cat dpi_rules.json (派生产物两端等价), 都没有则 empty schema. (4) tools/dpi_rules_split.py 加 sync-legacy 子命令, v2 锁定 Stage 4 永不删 legacy 改为 "dpi_rules.json 由 sync-legacy 生成". 装机后 dpid 第一次走 loadL3RulesFromDir 真路径, l3_rule_version 应变 external-d:hnc-curated-...#00-core-meta,...
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.33 · GPT 第二轮审查 P0/P1 收口. (P0.1) 双源码树合并: src/hnc_httpd/ 作为副本与 daemon/hnc_httpd/ 已分叉 120+ 行 (rc30.12.30 的 P2.11 修复只改了 daemon 没碰 src), README 还在声称完全一致 = 源代码层面撒谎. 删 src/hnc_httpd/, daemon/ 是唯一源, ci_preflight.sh 加 check_no_src_httpd_dupe 防复发, src/README.md 同步更新. (P0.2) PIN 限流并发窗口: ratelimit.go 新增 ConsumePinAttempt 原子方法 (Check + 计数 +1 + 触锁全在一把锁里), pair.go handlePairVerify 改用此方法替代旧"Check + later RegisterFail"两步走, 修堵同 IP 并发 N 个错误 PIN 可超 5+(N-1) 次的窗口. (P1.3b) /api/health 删 hnc_dir 字段 — isPublicPath 路径泄露文件系统结构给匿名调用, grep webroot 确认无前端引用零回归. 所有改动不动 dpi_rules.d/ 路径, 跟 rc30.12.32 TASK-a 行为字节级正交.
 minKernelSU=11485
