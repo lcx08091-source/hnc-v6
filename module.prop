@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.33
-versionCode=530153
+version=v5.3.0-rc30.12.34
+versionCode=530154
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.33 · GPT 第二轮审查 P0/P1 收口. (P0.1) 双源码树合并: src/hnc_httpd/ 作为副本与 daemon/hnc_httpd/ 已分叉 120+ 行 (rc30.12.30 的 P2.11 修复只改了 daemon 没碰 src), README 还在声称完全一致 = 源代码层面撒谎. 删 src/hnc_httpd/, daemon/ 是唯一源, ci_preflight.sh 加 check_no_src_httpd_dupe 防复发, src/README.md 同步更新. (P0.2) PIN 限流并发窗口: ratelimit.go 新增 ConsumePinAttempt 原子方法 (Check + 计数 +1 + 触锁全在一把锁里), pair.go handlePairVerify 改用此方法替代旧"Check + later RegisterFail"两步走, 修堵同 IP 并发 N 个错误 PIN 可超 5+(N-1) 次的窗口. (P1.3b) /api/health 删 hnc_dir 字段 — isPublicPath 路径泄露文件系统结构给匿名调用, grep webroot 确认无前端引用零回归. 所有改动不动 dpi_rules.d/ 路径, 跟 rc30.12.32 TASK-a 行为字节级正交.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.34 · A+B 档批量稳妥收口 (7 件中 6 件做完). A1 加 LICENSE.TODO 占位说明 (许可证选型留 Ling 决定, 选错不可逆所以不直接 commit 实文件). A2 src/launcher/README.md 把"静态链接(-static)"改成"动态 PIE"跟 rc28 改的 build.sh 现实对齐. A3 docs/TASK-c-stats-v52-rename-plan.md 设计稿 (选 "一动不如一静": 不重命名 10 个 stats_v52_* 文件, 因为 5 个调用方漏改一处就 break; 改注释清掉 hotfix22.x 这种历史 rc 编号即可). A4 docs/TASK-d-hnc-common-shell-design.md 设计稿 (草案 hnc_common.sh API + 三阶段安全迁移路径, 实际抽公共库 Stage 2 才做). B2 test/unit/test_artifact_release_rc5.sh + test_ci_preflight_artifact_gate.sh fixture 补全 13 个 sanity 必需文件 (之前只 cp 5 个, 当前 sanity gate 要 13 个, fixture 红灯). B3 README.md / ARCHITECTURE.md 头部硬编码版本号改成 {{VERSION}}/{{DATE}} 占位符, bin/inject_version_to_docs.sh 新脚本 CI 可调注入, 本地开发也能保持文档跟版本号同步. P1.9 crash_tracker 经核查 rc30.12.29 已经修过, 不在本版范围.
 minKernelSU=11485

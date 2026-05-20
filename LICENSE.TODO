@@ -1,0 +1,32 @@
+HNC (Hotspot Network Control) — License selection pending
+
+This file is a placeholder for the project-level license decision.
+
+== Background ==
+
+GPT 二审报告 P2.7a 指出仓库根缺少明确的 LICENSE / NOTICE 文件. 在
+rc30.12.34 (本版) 之前, 项目以 "未明示" 状态分发, 这对二次分发 / 审计 /
+合规检查不友好.
+
+== Selection considerations ==
+
+HNC 是 Android root module, 与下列 GPL 软件深度交互:
+  - Linux kernel (iptables, tc, eBPF)
+  - BusyBox (mksh)
+  - KernelSU / Magisk / SukiSU (各家许可证不一)
+
+主流选项:
+  - GPLv3:    跟内核 / iptables / KSU 主流生态对齐, 强 copyleft, 二次商用受限
+  - GPLv2:    跟 Linux 内核兼容性最好, copyleft 略弱于 v3
+  - Apache 2.0: 含专利授权条款, 适合期望商用/再分发的场景
+  - MIT:      最宽松, 但与 GPL 软件混合后下游分发要看具体场景
+
+== Action required ==
+
+Ling 选定许可证后:
+  1. 替换本文件为标准 LICENSE 文件 (从 https://choosealicense.com/ 取模板)
+  2. 在 LICENSE 顶部加版权声明: "Copyright (c) 2024-2026 Ling"
+  3. 删除本 LICENSE.TODO 文件
+  4. 在 module.prop / README.md / ARCHITECTURE.md 头部加 SPDX-License-Identifier 注释
+
+rc30.12.34 (TASK-A1 P2.7a 部分修): 已识别问题, 选型决策留给 Ling.

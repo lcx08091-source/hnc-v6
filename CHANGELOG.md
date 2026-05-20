@@ -1,4 +1,133 @@
 
+## v5.3.0-rc30.12.34
+
+**发布日期**: 2026-05-20
+**versionCode**: 530154
+**致谢**: A+B 档批量稳妥收口 (GPT 一审 P1.6 后半 + P1.9 复核 + P2.7 + P2.13 + P2.14 / GPT 二审 P1.2 / P2.7)
+
+### 概述
+
+rc30.12.33 收完 P0 (双源码树 + PIN 限流并发 + /api/health 信息泄露).
+本版做"能批量做的稳妥收口", 7 件原计划里 6 件做完, 1 件 (P1.9) 复核
+后发现 rc30.12.29 已经修过, 不在本版范围.
+
+风险: **极低**. 本版改动以纯文档 + 测试夹具 + 占位符注入为主, 零运行时
+代码改动 (Go / C 代码 0 byte 改动). 装机后 `dpi_state.json` 的
+`l3_rule_version` 字段应保持 `external-d:` 前缀不变 (跟 rc32/33 字节
+等价). 这是 v5.3.0 stable 的最后一发收尾.
+
+### A1 — LICENSE.TODO 占位说明
+
+GPT 二审 P2.7a 指出仓库根缺 LICENSE / NOTICE. 直接 commit 一个具体许可证
+不可逆 (二次分发者已按那个 license 复制走), 所以本版加 `LICENSE.TODO`
+占位文件, 列出选型考虑 (GPLv3 / GPLv2 / Apache 2.0 / MIT 的 trade-off)
+和 Ling 选定后的 action 清单. **选型决策留给 Ling**, AI 不替主选.
+
+### A2 — `src/launcher/README.md` 链接方式修正
+
+GPT 二审 P2.7b 指出 launcher README 写 "静态链接(`-static`)" 但 build.sh
+实际是 PIE 动态. 这是 rc30.12.28 三修后改了代码忘改文档. 本版同步:
+README 改成"动态 PIE 链接", 解释 rc28 三修的历史 (静态链接遇到 NDK Bionic
+libc TLS segment underaligned 问题), 并加 fork_probe 链接方式说明.
+
+### A3 — TASK-c stats_v52_* 重命名设计稿
+
+`docs/TASK-c-stats-v52-rename-plan.md`. GPT 一审 P2.13 抱怨 stats_v52_*
+脚本前缀暴露历史 rc 编号. 实测仓库现状:
+
+- 10 个 `stats_v52_*.sh` 共 2260 行, 都在 hot path
+- 5 个调用方 (json_diag_bundle / ci_preflight / json_health_panel /
+  stats_health_summary / webroot/changelog.html)
+- 报告写的 `rc1_13`/`rc1_14` 这种命名形式**不存在**, 是报告作者按
+  "假想可能存在" 写的
+
+选型 (**方案 C 一动不如一静**, 推荐):
+- 不重命名文件 (rename 高风险 — 5 个调用方任一漏改就 break)
+- 加 `bin/stats_v52_README.md` 解释前缀历史
+- 改脚本顶部注释把 `hotfix22.x` / `v5.2-rc1.21` 统一改成 `since v5.2-...`
+- 加架构文档 "命名反模式" 段, 未来新功能不用 v\<N\> 前缀
+
+(Stage 2 实际做改注释 + 加 README, 5 分钟纯文档.)
+
+### A4 — TASK-d hnc_common.sh 设计稿
+
+`docs/TASK-d-hnc-common-shell-design.md`. GPT 一审 P2.14: 22 个脚本各自
+写 `log()`, 抽公共库. 设计稿包含:
+
+- 当前 22 个脚本 log() 实现差异分析 (4 种时间戳格式 / 6 种前缀 / 2 种 mkdir 行为)
+- `hnc_common.sh` 草案 API (`hnc_log` / `hnc_log_error` / `hnc_log_init` /
+  `hnc_sq` / `hnc_json_get_top` / `hnc_lock_acquire`)
+- 三阶段安全迁移路径 (跟 TASK-a 同样的模式: 加文件 → 逐脚本迁移 → 永不删)
+- 风险评估: mksh 兼容性 / source 路径硬编码 / 新旧并存期
+
+(Stage 2 实际做加单文件 + 一份 unit test, ~80 行 shell.)
+
+### B2 — 测试夹具修复
+
+GPT 二审 P1.2: `test/unit/test_artifact_release_rc5.sh` 和
+`test_ci_preflight_artifact_gate.sh` 当前红灯, 因为 fixture 只 cp 5 个
+文件而 `artifact_sanity_check.sh` 要 13 个. 红灯不是真业务回归, 但会让
+开发者逐渐学会忽略 CI 红灯, 必须修.
+
+本版补全 fixture:
+- `_REQUIRED_FILES_v5_3_rc5` 列表反映当前 13 个必需文件
+- baseline 有的文件从 `$HNC_REPO_ROOT` cp, 没有的留占位文件 (sanity 主
+  要检查 path 存在 + ELF magic, 不深查内容)
+- 两个 test 都用同样模式, 后续 sanity 改 require 时只改 `_REQ_FILES`
+  列表一处
+
+shellcheck SC2086 故意保留 word splitting (`$_REQ_FILES` 展开成多 arg
+是 intended), 加 disable 注释.
+
+### B3 — CI 文档版本号自动注入
+
+GPT 一审 P1.6 后半: README/ARCHITECTURE 顶部版本号当前是 hardcode, 应该
+从 module.prop 自动注入. 本版做:
+
+- README.md 头部 `v5.3.0-rc30.12.30` → `{{VERSION}} ({{DATE}})`
+- ARCHITECTURE.md 同样改
+- 新加 `bin/inject_version_to_docs.sh`:
+  - `sh bin/inject_version_to_docs.sh` 在 CI 跑, 把占位符替换成 module.prop
+    里的真版本号 + `$(date +%Y-%m-%d)`
+  - `sh bin/inject_version_to_docs.sh --check` 给 CI 用, 看是否还有未注入
+    的占位符 (注入失败会被 --check 抓到, fail 整个 CI)
+
+**接入位置 (Ling 决定)**: GitHub Actions yml 在 zip 打包前加一步
+`run: sh bin/inject_version_to_docs.sh`, 或者顶层 build.sh (如果以后引入).
+本地开发也能跑 — 这样 git commit 前自动同步文档版本号.
+
+### 已识别但本版不做
+
+- **P1.9 crash_tracker 没清过期**: 实测 `src/launcher/hnc_launcher.c:202`
+  的注释明确写 "rc30.12.29 (P1.9): 重写为'先压缩窗口外, 再追加新崩溃'
+  的两步语义", **rc30.12.29 已经修过**. GPT 一审报告写在 rc28 时点, 没
+  catch up 到当时已经修了的事. 本版不做.
+- **P1.7 sentinel/watchdog/launcher 三层重叠**: 冗余是真机生存网, 不动.
+- **P1.8 ksu.exec 双 API 共存**: wrapper 探测逻辑本身就是 hf3 新载体, 不动.
+- **P1.10 check_singleton TOCTOU**: 改 launcher 启动早期路径有中等风险,
+  留 v5.3.1.
+- **P1.4 launcher 无 SIGKILL 升级**: 改 launcher 关停流程有中等风险,
+  留 v5.3.1.
+- **P2.15 巨型 shell**: 跨语言契约扩大净负收益, 永不做或留 v6.0 大重构.
+- **TASK-i go mod vendor**: 半天工作量独立任务, 留 v5.3.1.
+- **TASK-k capture-self.sh bug**: 需要 Ling 先提供脚本源码, 留 v5.3.1.
+
+### 验收
+
+1. `sh -n` 通过 (本版 3 个 .sh 文件)
+2. `shellcheck -S error` 干净
+3. **Python/Go/C 零代码改动** — `git diff --stat` 应只看到 .md / .sh /
+   module.prop / CHANGELOG 改动
+4. 装机后 `dpi_state.json` 的 `l3_rule_version` 字段保持 `external-d:`
+   前缀 (跟 rc33 字节等价)
+5. **Ling push 完后强烈建议**:
+   - 不要再叠新 rc
+   - 装机观察 3-7 天
+   - 一切稳定 → **tag v5.3.0 stable**
+
+---
+
+
 ## v5.3.0-rc30.12.33
 
 **发布日期**: 2026-05-20

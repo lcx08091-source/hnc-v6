@@ -124,16 +124,27 @@ killall hnc_launcher  # service.sh sentinel 会自动重启
 
 - Android NDK r23+(用到的 API 都很基础,任何版本都行)
 - API level 24+(Android 7.0+)
-- 静态链接(`-static`)
+- 动态 PIE 链接(`-fPIE -pie`,**不是** `-static`)
 
-静态链接是因为 launcher 可能在 post-fs-data 早期启动,`/system/lib64/` 还未必 mount 完。动态链接会找不到 libc 加载失败。fork_probe 是 service.sh 起来之后才跑,动态链接 OK。
+**rc30.12.34 文档修正**:本文件之前写 "静态链接(`-static`)",这是
+v5.2 时期的实情。rc30.12.28 三修之后改用普通 PIE 动态链接 — 因为
+NDK 的 Bionic libc 静态链接时会出现 TLS segment underaligned 问题,导致
+launcher 在某些 KSU 版本上启动失败。`build.sh` 自己的注释已经写清楚这段
+历史,但本 README 没跟。本版同步。
+
+动态链接的可靠性来源:`/system/lib64/` 在 post-fs-data 阶段早已 mount,
+这是 Android 启动流程的硬保证,launcher 启动时不会找不到 libc。
+之前 README 担心的 "/system/lib64 未 mount 完" 是不存在的问题。
+
+`fork_probe` 一直是动态链接,这个没变。
 
 ## 版本
 
-`hnc_launcher`: 0.1.0-rc30.12 (内嵌)
+`hnc_launcher`: 0.1.0-rc30.12.29 (内嵌, 见 `hnc_launcher.c` 顶部)
+`fork_probe`: 0.1.0 (稳定不动)
 
-这个版本号跟 HNC 主模块版本号独立。launcher 接口稳定,不轻易变。
+这两个版本号跟 HNC 主模块版本号独立。launcher 接口稳定,不轻易变。
 
 ## License
 
-同 HNC 主项目。
+同 HNC 主项目(待 Ling 选型,见仓库根 `LICENSE.TODO`)。
