@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# stats_v52_review_bundle.sh — v5.2-rc1.16 scrubbed shadow-review bundle exporter.
+# stats_v52_review_bundle.sh — scrubbed shadow-review bundle exporter (since v5.2-rc1.16)
 # Read-only: generates a sanitized bundle that can be sent to Claude/Gemini/GPT.
 # It does not enable RC, switch stats source, or touch tc/iptables/watchdog.
 # rc1.14: consumes stats_v52_gray_report cache instead of re-running the whole helper tree.

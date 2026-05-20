@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# stats_v52_rc_control.sh — HNC hotfix22.0 guarded v5.2 stats RC control
+# stats_v52_rc_control.sh — guarded v5.2 stats RC control (since v5.2-hotfix22.0)
 # Safe control helper. It does not rewrite stats files and does not change tc/iptables/watchdog.
 # It only creates/removes a small runtime flag after readiness checks.
 #

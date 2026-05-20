@@ -1,4 +1,115 @@
 
+## v5.3.0-rc30.12.35
+
+**发布日期**: 2026-05-20
+**versionCode**: 530155
+**致谢**: 零风险 3 件批量收口 — v5.3.0 stable 临门一脚
+
+### 概述
+
+rc34 做完 A+B 档 6 件后, 剩下 backlog 评估下来真正能做又确实有价值的
+只有 3 件零风险动作. 本版做完它们后, v5.3.0 stable 的工程债基本归零,
+可以装机观察 → tag stable.
+
+风险: **极低**. 本版无 Go/C 代码改动, 改动以纯文档 + 新加文件为主.
+装机后 `dpi_state.json` 的 `l3_rule_version` 字段应保持 `external-d:`
+前缀不变 (跟 rc32/33/34 字节等价).
+
+### 1. 撤回 rc34 B3 (inject_version_to_docs.sh 删)
+
+Ling 在 rc34 push 后确认 `bin/inject_version_to_docs.sh` 不准备接入
+CI, 一人维护项目手改 2 个文档字段比维护脚本 + 改 yml 更省事. **rc34
+B3 是过度工程**, 本版撤回:
+
+- `README.md` 头部 `{{VERSION}} ({{DATE}})` 改回 `v5.3.0-rc30.12.35
+  (2026-05-20)` 字面值, 注释改成 "手动维护, 跟 module.prop 同步"
+- `ARCHITECTURE.md` 同样改回
+- `tools/cleanup-b3-revert.sh` 一次性清理脚本: `git rm
+  bin/inject_version_to_docs.sh` (patch zip 无法表达删除, 必须手动跑)
+
+**教训** (写进 ARCHITECTURE.md 第十一节命名反模式 #4): 一人项目的过度
+自动化是反模式, 真正需要的是简单可维护.
+
+### 2. TASK-c Stage 2 — stats_v52_* 注释清理 + README
+
+GPT 一审 P2.13 抱怨 `stats_v52_*.sh` 暴露历史 rc 编号. 实测仓库现状:
+没有 `rc1_13`/`rc1_14` 这种命名 (报告作者按"假想可能存在"写的), 真正
+暴露历史的是脚本顶部注释 `# HNC hotfix22.x v5.2 stats ...`.
+
+按 rc34 TASK-c 设计稿 (`docs/TASK-c-stats-v52-rename-plan.md`) 选定的
+"方案 C 一动不如一静": **不重命名文件**, 只改注释.
+
+实施:
+
+- 9 个脚本头注释改写, 例:
+  ```
+  之前: # stats_v52_diag_bundle.sh — HNC hotfix22.3 v5.2 stats diagnostic aggregator
+  之后: # stats_v52_diag_bundle.sh — v5.2 stats diagnostic aggregator (since v5.2-hotfix22.3)
+  ```
+  功能描述放前面, 历史 rc 标在 since 字段
+  (`stats_v52_web_status.sh` 注释里没历史 rc, 不动)
+- 新加 `bin/stats_v52_README.md` 解释 v52 前缀历史 + 调用方清单 +
+  v6.0 重命名迁移路径
+- `ARCHITECTURE.md` 加第十一节 "命名反模式与历史包袱", 把 v5.0-v5.3
+  真实出现过的 4 个命名失误 (rc 编号入文件名 / hotfix 编号入文件名 /
+  双源码树副本 / 文档自动化过度工程) 列出来当反模式手册
+
+零文件 rename — 调用方 (5 处 hardcode 文件名) 零影响.
+
+### 3. TASK-d Stage 2 — `bin/hnc_common.sh` 公共库 + 单元测试
+
+按 rc34 TASK-d 设计稿 (`docs/TASK-d-hnc-common-shell-design.md`)
+Stage 2 落地. **本版不动现有 22 个脚本**, 只加新文件:
+
+- `bin/hnc_common.sh` (~120 行, mksh/POSIX 兼容):
+  - 路径常量: `HNC_DIR` / `HNC_BIN` / `HNC_ETC` / `HNC_RUN` /
+    `HNC_LOGS` / `HNC_DATA`
+  - 日志: `hnc_log_init <path> [tag]` / `hnc_log <msg>` /
+    `hnc_log_error <msg>` (自动 mkdir + 256KB rotate, 没 init 走 stdout)
+  - 工具: `hnc_sq <str>` (shell quote, 单引号转义, eval 安全) /
+    `hnc_json_get_top <file> <key>` (顶层 JSON 字符串读取)
+  - 锁: `hnc_lock_acquire <lockfile>` / `hnc_lock_release` (简单
+    singleton, 检测 stale lock 自动覆盖)
+  - 校验: `hnc_is_uint <s>` / `hnc_is_uint_gt0 <s>` (规则参数校验常用)
+
+- `test/unit/test_hnc_common.sh` (15 个 case, 覆盖所有 9 个函数):
+  - 日志: init + log + 没 init 走 stdout + error 写 stderr
+  - shell quote: 简单串 + 含单引号串 + eval 安全
+  - JSON: 读取正常 key / 不存在 key / 不存在文件
+  - 锁: fresh / release / 活跃持锁拒绝 / stale 覆盖
+  - 数字: 0/正整数/负数/字母/小数/空串
+
+**Stage 3 (v5.3.1+) 才逐个迁移现有 22 个脚本到本库**. 本版做 Stage 2
+的价值是给 Stage 3 留接口, 同时本库本身就是一份可读性高的公共代码.
+
+### 验收
+
+1. **零 Go/C 代码改动**: `git diff --stat` 本版应只见 .md / .sh /
+   module.prop / CHANGELOG 改动
+2. `sh -n` + `shellcheck -S error` 全过 (本版 3 个新 .sh + 9 个改注释脚本)
+3. `bin/hnc_common.sh` 真跑过 9 个函数, 行为正确
+4. 装机后 `dpi_state.json` 的 `l3_rule_version` 字段保持 `external-d:`
+   前缀 (字节等价 rc34)
+5. **Ling push 前必跑**: `sh tools/cleanup-b3-revert.sh --apply`
+   完成 inject_version_to_docs.sh 的 `git rm` (patch zip 不能表达删除)
+
+### 不在本版范围 (留 v5.3.1)
+
+- **P1.4** launcher SIGKILL 升级 (改 launcher 关停, 中等风险)
+- **P1.10** check_singleton TOCTOU (改 launcher 启动, 中等风险)
+- **TASK-i** go mod vendor (vendor/ 5-10 MB 进 git, 中等风险)
+- **TASK-d Stage 3** 22 个脚本迁移到 hnc_common.sh (本版只做 Stage 2)
+- **A1** 选 LICENSE (法律选型, Ling 决定)
+- **TASK-k** capture-self.sh bug (Ling 确认不需修)
+
+### 这是 v5.3.0 stable 临门一脚
+
+push rc35 → 装机 1-2 天 (零代码改动, 不用观察 7 天) → **tag v5.3.0
+stable**. 剩下的全部进 v5.3.1 backlog, 不阻塞.
+
+---
+
+
 ## v5.3.0-rc30.12.34
 
 **发布日期**: 2026-05-20

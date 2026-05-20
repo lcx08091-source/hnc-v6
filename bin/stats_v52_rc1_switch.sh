@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# stats_v52_rc1_switch.sh — HNC v5.2-rc1 controlled gray switch
+# stats_v52_rc1_switch.sh — controlled gray switch (since v5.2-rc1)
 # Safe staged entry for v5.2 stats RC testing. Legacy stats remains default.
 # It toggles only the existing v5.2 RC flag + shadow sampling flag and offers
 # one-command rollback. It does not touch tc/iptables/watchdog or rewrite stats.
