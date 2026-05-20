@@ -1,4 +1,135 @@
 
+## v5.3.0-rc30.12.37
+
+**发布日期**: 2026-05-20
+**versionCode**: 530157
+**致谢**: DPI 规则集 ground_truth #3 增量 — B 站 biligame 子域 + 夸克 quark
+
+### 概述
+
+rc36 加完 zhuanzhuan 后 Ling 在真机上跑了**第三次** ground_truth 抓包
+验证 (`tools/ground_truth/capture-self.sh`):
+
+- **抓包时间**: 2026-05-20 14:30:58, 持续 **10 分钟**
+- **设备**: Realme RMX5010 / ColorOS / Android 16 / 5G
+- **接口**: rmnet_ipa0 / rmnet_data0 / rmnet_data2
+- **覆盖**: 13644 包, 35 个 TLS SNI, 85 条独立流
+- **前台 app**: tv.danmaku.bili (B 站, 287 次) + com.xingin.xhs (小红书, 221 次)
+
+对照 rc36 v3 规则集 (145 条):
+
+| 指标 | 结果 | 对比 #2 |
+|---|---|---|
+| SNI 命中 | **32/35 (91.4%)** | #2 是 96.7% |
+| 流量覆盖率 | **80/85 (94.1%)** | #2 是 97.8% |
+| 漏 | **3 条** (5 流) | #2 是 1 条 (2 流) |
+
+**完美命中的 3 个 app**:
+- 哔哩哔哩: 10 个 SNI / 44 流 (`bilibili.com` + `hdslb.com` + `bilivideo.com` + `biliapi.net` 联合)
+- 小红书: 15 个 SNI / 24 流 (`xiaohongshu.com` + `xhscdn.com` 联合)
+- ColorOS/Realme 设备识别: 6 个 SNI / 9 流
+
+**3 个 MISS**:
+1. `line3-h5-mobile-api.biligame.com` (2 流) — B 站游戏中心, biligame.com
+   不在 bilibili 规则 suffixes 里 — **本版补**
+2. `unet.quark.cn` (2 流) — 夸克 (阿里系) — **本版补**
+3. `hw-edge-v2.solseed.cn` (1 流) — solseed 来源不明且只 1 流量 — **本版不补**,
+   等下次 ground_truth 看是否复现
+
+### 改动
+
+只动 **`data/` 下 3 个文件**, 零代码改动 (Go / C / WebUI / shell 全不动):
+
+#### 1. `data/dpi_rules.d/40-media-cn.json` — bilibili 规则升级
+
+- `suffixes` 加 `biligame.com` (新增, 覆盖 B 站游戏中心相关子域)
+- `confidence` 从 `high` 升 `very_high` (本版起 B 站有真机 ground_truth 印证)
+- 新加 `ground_truth_2026_05_20` metadata 字段,记录 11 个观察到的子域 + 46 流证据
+- `rules_version`: `...v6-valorant-mobile#40-media-cn` → `...v7-bilibili-very-high#40-media-cn`
+
+#### 2. `data/dpi_rules.d/32-alibaba.json` — 加 quark 规则
+
+新加 1 条:
+
+```json
+{
+  "id": "quark",
+  "app": "夸克",
+  "category": "tool",
+  "confidence": "high",
+  "rationale": "夸克 - 阿里系搜索/浏览器/网盘综合产品...",
+  "suffixes": ["quark.cn"]
+}
+```
+
+`rules` 按 id 字典序重排, 10 → 11 条规则. `rules_version`:
+`...v6-valorant-mobile#32-alibaba` → `...v7-quark#32-alibaba`.
+
+#### 3. `data/dpi_rules.json` (派生产物)
+
+跑 `python3 tools/dpi_rules_split.py sync-legacy` 重生成, 145 → 146 条,
+63582 → 64864 bytes (+1282).
+
+派生产物 `rules_version` 手动覆盖为:
+
+```
+hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile+2026-05-20-v7-zhuanzhuan+bilibili-very-high+quark+derived-from-dpi_rules.d
+```
+
+(累积反映 rc35→rc36→rc37 三次 v7 增量)
+
+### 装机验证
+
+1. **`l3_rule_version` 字段应展示 3 个 v7 bucket**:
+   ```sh
+   su -c 'grep -oE "v7-[a-z-]+#[a-z0-9-]+" /data/local/hnc/run/dpi_state.json | sort -u'
+   ```
+   预期输出:
+   ```
+   v7-bilibili-very-high#40-media-cn
+   v7-quark#32-alibaba
+   v7-zhuanzhuan#41-social-shopping-cn
+   ```
+
+2. **总规则数 146**: dpid 启动日志或 dpi_state.json 的 rule count = 146
+
+3. **very_high 17 条**: rc36 是 16, 本版 bilibili 升级 +1
+
+4. **ground_truth #4 应该 100% 命中(除非 solseed 复现或又出新 SNI)**
+
+### 累计 ground_truth 历史
+
+| # | 时间 | 时长 | 包数 | SNI | SNI 命中率 | 流量覆盖率 | 结果 |
+|---|---|---|---|---|---|---|---|
+| #1 | 2026-05-19 | 13 min | 2261 | 93 | — | — | 加无畏契约规则 (rc34) |
+| #2 | 2026-05-20 13:43 | 20 min | 6033 | 47 | 96.7% | 97.8% | 加转转规则 (rc36) |
+| #3 | 2026-05-20 14:30 | 10 min | 13644 | 35 | 91.4% | 94.1% | 加 biligame + quark (rc37) |
+
+**rc37 累计 146 条规则 + 3 次真机印证**, DPI 规则集对国内主流 app 覆盖
+非常扎实.
+
+### 跟 rc35/rc36 的关系
+
+- rc35 改 `bin/` / `docs/` / `.md` (TASK-c/d Stage 2 + 撤回 B3)
+- rc36 改 `data/dpi_rules.d/41-social-shopping-cn.json` + 派生产物 (zhuanzhuan)
+- **rc37 改 `data/dpi_rules.d/{40-media-cn,32-alibaba}.json` + 派生产物**
+
+三版完全正交, 可以叠加 unzip. 如果 Ling 没 push rc35/rc36, unzip rc37 zip
+也只会覆盖 3 个 dpi_rules.d 文件 + 派生产物 + module.prop + CHANGELOG, 不会
+碰到 rc35/rc36 的其他改动.
+
+### 不在本版范围
+
+- **hw-edge-v2.solseed.cn** (ground_truth #3 第 3 个 miss): 来源不明,
+  1 流量太小. v5.3.1 ground_truth #4 看是否复现, 复现再 web_search 确认
+  归属再加规则.
+- **sync-legacy 算法增强**: 仍是手动覆盖派生产物 rules_version (跟 rc36 同样的
+  workaround). 修法留 v5.3.1.
+- **rc35 全部 backlog**: P1.4/P1.10/TASK-i/TASK-d Stage 3 等仍不在本版范围.
+
+---
+
+
 ## v5.3.0-rc30.12.36
 
 **发布日期**: 2026-05-20
