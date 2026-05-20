@@ -1,4 +1,124 @@
 
+## v5.3.0-rc30.12.36
+
+**发布日期**: 2026-05-20
+**versionCode**: 530156
+**致谢**: DPI 规则集 ground_truth #2 增量 — 转转 (zhuanzhuan) 加规则
+
+### 概述
+
+rc35 收完零风险 3 件后, Ling 在真机上跑了第二次 ground_truth 抓包验证
+(`tools/ground_truth/capture-self.sh`):
+
+- **抓包时间**: 2026-05-20 13:43:52, 持续 20 分钟
+- **设备**: Realme RMX5010 / ColorOS / Android 16 / 5G
+- **接口**: rmnet_ipa0 / rmnet_data0 / rmnet_data2 (3 个移动数据接口)
+- **覆盖**: 6033 包, 47 个 TLS SNI, 109 条独立流
+- **前台 app**: com.tencent.tmgp.codev (无畏契约源能行动, 99% 占比) +
+  com.smile.gifmaker (快手, 偶现)
+
+对照 v3 规则集 v6 版本 (rc34 已上 ship) 145 个 SNI 桶:
+
+| 指标 | 结果 |
+|---|---|
+| SNI 命中 | **29/30 (96.7%)** |
+| 流量覆盖率 | **90/92 (97.8%)** |
+| 漏 | **1 条** (`ad.zhuanzhuan.com`, 2 流) |
+
+**漏的分析**: `ad.zhuanzhuan.com` 是 **转转(二手交易电商)** 的广告域名,
+应该归类到 `41-social-shopping-cn.json` 桶 (跟京东 / 拼多多 / 美团 / 小红书
+等国内社交电商同类). v3 v6 curated 列表里漏了转转, 本版补.
+
+### 改动
+
+只动 **`data/` 下 2 个文件**, 零代码改动 (Go / C / WebUI / shell 全部不动):
+
+#### 1. `data/dpi_rules.d/41-social-shopping-cn.json`
+
+加 1 条规则:
+
+```json
+{
+  "id": "zhuanzhuan",
+  "app": "转转",
+  "category": "shopping",
+  "confidence": "high",
+  "rationale": "转转二手交易电商. 数据来源: 2026-05-20 13:43 RMX5010+ColorOS+5G 真机 pcap (HNC v5.3.0-rc30.12.34 ground_truth #2), 20 分钟 6033 包 47 SNI 命中 ad.zhuanzhuan.com 共 2 流. 当前主域 zhuanzhuan.com 涵盖 ad/api/m/cdn 子域. 中国头部二手电商, 跟 41-social-shopping-cn 桶其他 9 个国内社交电商同类.",
+  "suffixes": ["zhuanzhuan.com"]
+}
+```
+
+`rules_version` 从 `...2026-05-19-v6-valorant-mobile#41-social-shopping-cn`
+bump 到 `...2026-05-20-v7-zhuanzhuan#41-social-shopping-cn`. 其他 22 个
+bucket **不动**, 仍是 v6.
+
+`rules` 数组重新按 id 字典序排序, 保证 sync-legacy 跟 split 输出幂等一致.
+
+#### 2. `data/dpi_rules.json` (派生产物自动重生成)
+
+跑 `python3 tools/dpi_rules_split.py sync-legacy` 把 `dpi_rules.d/` 145 条
+规则反向合并到派生产物. 144 → 145 条规则, 63022 → 63536 bytes (+514).
+
+派生产物的 `rules_version` 手动覆盖为:
+
+```
+hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile+2026-05-20-v7-zhuanzhuan+derived-from-dpi_rules.d
+```
+
+原因: sync-legacy 默认用最长公共前缀算法, 在 v6/v7 混合状态下会截断成
+`...2026-05-+derived-from-dpi_rules.d` 丢信息. 手动覆盖让派生产物头部
+能看到 "v6 主体 + v7 增量" 这件事. (sync-legacy 算法增强是 v5.3.1
+backlog, 见下文未做项)
+
+### 装机验证
+
+1. **`l3_rule_version` 字段应展示 mixed 状态**:
+   ```
+   external-d:hnc-curated-...-v6-valorant-mobile#00-core-meta,
+              ...#10-tencent-im,
+              ...#20-tencent-game,
+              ...
+              hnc-curated-...-v7-zhuanzhuan#41-social-shopping-cn,  ← 唯一 v7
+              ...
+              hnc-curated-...-v6-valorant-mobile#81-overseas-misc
+   ```
+   预期: 22 个 bucket 是 `v6-valorant-mobile`, 1 个 bucket
+   (`41-social-shopping-cn`) 是 `v7-zhuanzhuan`. 装机后 grep 验证:
+   ```sh
+   su -c 'grep -o "v7-zhuanzhuan" /data/local/hnc/run/dpi_state.json | wc -l'
+   ```
+   应输出 `1`.
+
+2. **ground_truth #3 应该 100% 命中**: 重新跑一次 `capture-self.sh` 20 分钟,
+   如果还会出现 `ad.zhuanzhuan.com` 流量, 应该被识别为 `zhuanzhuan` → shopping.
+
+3. **总规则数 145**: dpid 启动日志或者 dpi_state.json 的 rule count 应该是 145.
+
+### 跟 rc35 的关系
+
+rc35 改的是: TASK-c Stage 2 (stats_v52 注释清理 + README + ARCHITECTURE
+第十一节) + TASK-d Stage 2 (hnc_common.sh + 单测) + 撤回 B3 (删 inject 脚本).
+**全部在 bin/ / docs/ / .md 文件, 不动 data/dpi_rules*.**
+
+rc36 改的是: **只动 data/dpi_rules.d/41-social-shopping-cn.json +
+data/dpi_rules.json (派生产物)**. **不动 bin/ / docs/ / .md.**
+
+两版改动**完全正交**, 可以:
+- 先 rc35 后 rc36 (推荐, 按顺序)
+- rc35/36 一起 push (打包成 rc36 commit, 因为 rc35 改的文件 rc36 也包含)
+- 单独 push rc36 (跳过 rc35, 不推荐, 那 stats_v52 注释清理这件事就没了)
+
+### 不在本版范围
+
+- **sync-legacy 算法增强**: 公共前缀算法在 mixed version 状态下会截断信息.
+  这次手动覆盖 rules_version 是 workaround. 真正的修法是改 `cmd_sync_legacy`
+  的 `common_prefix()` 调用, 改成"列出所有不同的 version label". 留 v5.3.1.
+- **rc35 backlog**: P1.4 / P1.10 / TASK-i / TASK-d Stage 3 / A1 LICENSE 等
+  全部不在本版范围.
+
+---
+
+
 ## v5.3.0-rc30.12.35
 
 **发布日期**: 2026-05-20
