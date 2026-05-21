@@ -441,6 +441,17 @@ func cooldownOK(name string, cd time.Duration) bool {
 // For dpid specifically, prefer launching the supervisor binary (rc30.0)
 // when available; supervisor itself manages the dpid child.
 func ensureDaemonRunning(d daemonSpec) {
+	// v5.5.0-rc3 fix: hnc_launcher (C binary, added in rc30.12) was created
+	// specifically to manage dpid lifecycle, bypassing the ColorOS Go fork
+	// EPERM issue. If launcher is running, IT owns dpid — watchdog must NOT
+	// race it. Without this check, watchdog kept trying to spawn the legacy
+	// hnc_dpid_supervisor (Go binary) which hits the SAME EPERM and crashes.
+	if d.name == "hnc_dpid" {
+		if findLiveByName("hnc_launcher") > 0 {
+			return // launcher is running, it handles dpid; we're done
+		}
+	}
+
 	// Choose launcher: supervisor takes precedence over direct binary for dpid.
 	launcher := d.binPath
 	launcherArgs := d.args
@@ -499,7 +510,17 @@ func spawnDaemon(bin string, args []string, logPath, pidFile string) error {
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Setsid: true}
+	// v5.5.0-rc3 fix: previously this was {Setpgid: true, Setsid: true}.
+	// `Setsid: true` triggers ColorOS + SukiSU Go-runtime fork EPERM
+	// (same root cause as the rc30.12 hnc_launcher workaround for dpid).
+	// Setpgid alone gives sufficient process-group isolation; when watchdog
+	// dies, spawned daemons get reparented to init and keep running. They
+	// don't need their own session — watchdog has no controlling terminal
+	// so there's no SIGHUP propagation to defend against.
+	// Without this fix, every spawnDaemon call fails ("operation not
+	// permitted") and the failure cascades: watchdog can't restart httpd
+	// when it dies, user has to manually click "重新拉起服务" in KSU.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
 		if out != nil {
 			_ = out.Close()

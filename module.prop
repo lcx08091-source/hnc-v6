@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.5.0-rc2
-versionCode=550002
+version=v5.5.0-rc3
+versionCode=550003
 author=Claude (Anthropic AI) + Ling + GPT (audit)
 description=Android 热点带宽/延迟/黑白名单管理 · v5.5.0-rc2 · 吸收 AHNC 卫星模块, 新增"我的应用"自身流量追踪. 后端: hnc_dpid 加 /proc/net + uid→pkg 采样 goroutine (默认 OFF, /api/self/toggle 开关), 5s tick 写 self_attrib.YYYYMMDD.jsonl. 新 API: /api/self, /api/self/{toggle,ifaces,attrib}, /api/export, /api/exports. WebUI 主页 (webroot/index.html) 加第 6 个 '应用' tab + segmented control 3 子页 (我的应用/导出/设置), 远程访问 UI 同步加 tab. service.sh 启动时跑 bin/ahnc_migration.sh 自动迁移 7 天 self-conns.jsonl. ARCHITECTURE.md 新增第 11 章: v5.6/v5.7 完整路线 + 走法1+2 hybrid 设计 (子域自动扩展 + candidate 审批). dpid 2.9MB→4.1MB, httpd 6.6MB→8.9MB, schema_version 仍 2.0 (Self 字段 omitempty 向后兼容). rc1 (550001) 把 WebUI 改在 daemon/hnc_httpd/web/app.html (远程访问 UI, 86 行小页), 主 webroot 没改, 用户看不到; rc2 修正补全主 webroot.
 updateJson=
