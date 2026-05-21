@@ -1,7 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.13.1
-versionCode=530156
+version=v5.5.0-rc2
+versionCode=550002
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.13.1 · 在 rc30.13.0 基础上修复审计发现的 critical/high bug: (1) tc_manager.sh L661 中文括号注释 (每次限速 stderr 报 command not found), (2) json_set.sh 5 段重复函数定义 (git merge 残留, -117 行死代码), (3) hnc_launcher.c fork 失败误导日志 + 加 fork-failure crash tracker (防 OOM 无限重试), (4) hotspotd.c write_json 加 ferror 检查 (防磁盘满时推半截 JSON), (5) 清理几个 SC2034 死变量. C 源码改了但 arm64 binary 需要 NDK 重 build (bin/hnc_launcher, bin/hotspotd 仍是 rc30.13.0 的). 仅 shell 改动 flash 即生效.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.5.0-rc2 · 吸收 AHNC 卫星模块, 新增"我的应用"自身流量追踪. 后端: hnc_dpid 加 /proc/net + uid→pkg 采样 goroutine (默认 OFF, /api/self/toggle 开关), 5s tick 写 self_attrib.YYYYMMDD.jsonl. 新 API: /api/self, /api/self/{toggle,ifaces,attrib}, /api/export, /api/exports. WebUI 主页 (webroot/index.html) 加第 6 个 '应用' tab + segmented control 3 子页 (我的应用/导出/设置), 远程访问 UI 同步加 tab. service.sh 启动时跑 bin/ahnc_migration.sh 自动迁移 7 天 self-conns.jsonl. ARCHITECTURE.md 新增第 11 章: v5.6/v5.7 完整路线 + 走法1+2 hybrid 设计 (子域自动扩展 + candidate 审批). dpid 2.9MB→4.1MB, httpd 6.6MB→8.9MB, schema_version 仍 2.0 (Self 字段 omitempty 向后兼容). rc1 (550001) 把 WebUI 改在 daemon/hnc_httpd/web/app.html (远程访问 UI, 86 行小页), 主 webroot 没改, 用户看不到; rc2 修正补全主 webroot.
+updateJson=
 minKernelSU=11485

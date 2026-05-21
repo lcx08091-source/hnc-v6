@@ -110,6 +110,15 @@ func (s *server) handler() http.Handler {
 	// 必经 authMiddleware(不允许过渡期匿名写)
 	mux.HandleFunc("/api/action", s.handleAction)
 
+	// v5.5: self-capture (own phone's traffic attribution by uid → pkg)
+	mux.HandleFunc("/api/self", s.apiSelf)
+	mux.HandleFunc("/api/self/toggle", s.apiSelfToggle)
+	mux.HandleFunc("/api/self/ifaces", s.apiSelfIfaces)
+	mux.HandleFunc("/api/self/attrib", s.apiSelfAttrib)
+	mux.HandleFunc("/api/export", s.apiExport)
+	mux.HandleFunc("/api/exports", s.apiExportList)
+	mux.HandleFunc("/api/exports/", s.apiExportFile)
+
 	// 中间件链: accessLog → authMiddleware → mux
 	return accessLogMiddleware(s.authMiddleware(mux))
 }

@@ -134,6 +134,11 @@ if [ -x $HNC_DIR/bin/capability_probe.sh ]; then
     ( sh $HNC_DIR/bin/capability_probe.sh >> $HNC_DIR/logs/capabilities.log 2>&1 ) &
 fi
 
+# v5.5.0: AHNC → HNC migration (idempotent, runs once via marker file)
+if [ -x $HNC_DIR/bin/ahnc_migration.sh ]; then
+    ( sh $HNC_DIR/bin/ahnc_migration.sh >> $HNC_DIR/logs/migration.log 2>&1 ) &
+fi
+
 # 等待系统网络服务就绪
 wait_for_network() {
     local max=60

@@ -459,3 +459,39 @@ main {
   font-variant-numeric: tabular-nums;
 }
 .freshness-line.stale { color: var(--sys-orange); }
+
+/* v5.5: 我的应用 + 导出 tabs */
+.self-toggle-row { display:flex; align-items:center; gap:1em; flex-wrap:wrap; margin-bottom:.6em; }
+.self-toggle { display:flex; align-items:center; gap:.4em; font-weight:600; cursor:pointer; }
+.self-toggle-hint { color: var(--text-3); font-size: 12px; }
+.iface-eligible { display:inline-block; padding:.1em .5em; border-radius:10px;
+                  background:#2a9d2a; color:#fff; font-size:11px; margin-right:.2em; }
+.iface-skip     { display:inline-block; padding:.1em .5em; border-radius:10px;
+                  background:#ddd; color:#666; font-size:11px; margin-right:.2em;
+                  text-decoration:line-through; }
+.self-app-card { padding:.6em .9em; border-bottom:1px solid var(--stroke); }
+.self-app-head { display:flex; gap:.8em; align-items:baseline; flex-wrap:wrap; }
+.self-app-head .meta { color: var(--text-3); font-size:12px; }
+.self-app-snis { font-size:12px; color: var(--text-2); margin-top:.2em; font-family:ui-monospace,Menlo,monospace; }
+.self-app-rules { font-size:12px; color: var(--text-2); margin-top:.1em; }
+.self-app-time { margin-top:.2em; }
+.export-row { padding:.4em .6em; border-bottom:1px solid var(--stroke); font-size:12px; }
+.export-result-ok { padding:.8em; background:#f0f7f0; border:1px solid #b6d7b6;
+                    border-radius:6px; margin-top:.6em; }
+.export-result-ok .download-btn {
+  display:inline-block; margin-top:.6em; padding:.5em 1em;
+  background:#2a9d2a; color:#fff; border-radius:6px; text-decoration:none;
+}
+.form-row { display:flex; gap:.5em; flex-wrap:wrap; align-items:center; margin-bottom:.4em; }
+.form-row label { min-width: 4em; color: var(--text-2); font-size: 13px; }
+.form-row input, .form-row textarea, .form-row select {
+  font: inherit; padding:.35em .5em; border:1px solid var(--stroke); border-radius:6px;
+  background: var(--input-bg); color: var(--text-1); flex:1;
+}
+.form-row textarea { min-height:3em; }
+.quick { display:flex; gap:.4em; flex-wrap:wrap; }
+.quick button { background: var(--input-bg); border:1px solid var(--stroke); padding:.35em .8em;
+                border-radius:6px; cursor:pointer; font-size:12px; color: var(--text-1); }
+.primary { background:#1f1f23; color:#fff; border:0; padding:.55em 1.2em; border-radius:6px;
+           cursor:pointer; font: inherit; }
+.primary:hover { background:#000; }

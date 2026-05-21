@@ -113,6 +113,53 @@ type ClientProfile struct {
 	BackgroundFlowsPct float64 `json:"background_flows_pct,omitempty"`
 }
 
+// ─── v5.5: self-capture types ──────────────────────────────────────────
+//
+// v5.5 adds an optional "self-capture" mode where hnc_dpid attaches ALSO
+// to non-AP interfaces (rmnet*, wlan0 STA, etc.) to identify what apps
+// THIS phone is running, via /proc/net/* + `pm list packages -U`
+// attribution. Off by default; flipped via /data/local/hnc/run/self_capture.enabled
+// flag file (touch to enable, rm to disable).
+//
+// All v5.5 additions are additive — the `self` block is nil-pointer
+// omitted when self-capture is disabled, so rc30.x WebUIs that don't
+// know about it keep working.
+
+// SelfIfaceState is per-self-interface capture state.
+type SelfIfaceState struct {
+	Name      string `json:"name"`
+	StartedAt int64  `json:"started_at"`
+	Restarts  int64  `json:"restarts"`
+	LastError string `json:"last_error,omitempty"`
+	Packets   uint64 `json:"packets"`
+	TLSEvents uint64 `json:"tls_events"`
+	DNSEvents uint64 `json:"dns_events"`
+}
+
+// SelfApp is one app's aggregated state, keyed by uid in
+// SelfState.AppsByUID.
+type SelfApp struct {
+	Pkg         string   `json:"pkg,omitempty"`         // empty if pm couldn't resolve uid
+	UID         int      `json:"uid"`
+	FirstSeen   int64    `json:"first_seen"`
+	LastSeen    int64    `json:"last_seen"`
+	ActiveConns int      `json:"active_conns"`          // current /proc/net count
+	TotalConns  uint64   `json:"total_conns"`           // cumulative
+	TopSNIs     []string `json:"top_snis,omitempty"`    // up to 8 distinct SNIs
+	TopRules    []string `json:"top_rules,omitempty"`   // matched rule IDs (HNC L3 rules)
+}
+
+// SelfState is the top-level container written into State.Self.
+type SelfState struct {
+	Enabled        bool             `json:"enabled"`
+	Reason         string           `json:"reason,omitempty"` // why disabled (e.g. "no eligible ifaces")
+	Interfaces     []SelfIfaceState `json:"interfaces,omitempty"`
+	AppsByUID      map[string]*SelfApp `json:"apps_by_uid,omitempty"`
+	UnknownConns   int              `json:"unknown_conns,omitempty"` // conns w/ uid that pm couldn't resolve
+	LastAttribTick int64            `json:"last_attrib_tick,omitempty"`
+	PkgCacheSize   int              `json:"pkg_cache_size,omitempty"`
+}
+
 type State struct {
 	SchemaVersion string `json:"schema_version"`
 	GeneratedAt   int64  `json:"generated_at"`
@@ -162,6 +209,11 @@ type State struct {
 	// Global byte counters (sum across clients).
 	TotalTxBytes uint64 `json:"total_tx_bytes,omitempty"`
 	TotalRxBytes uint64 `json:"total_rx_bytes,omitempty"`
+
+	// v5.5: self-capture mode. nil pointer when disabled (omitted from JSON
+	// via omitempty on the pointer). When non-nil, contains live state of
+	// per-iface captures + per-uid app aggregation. See SelfState.
+	Self *SelfState `json:"self,omitempty"`
 }
 
 // ─── per-client aggregation ────────────────────────────────────────────
@@ -309,6 +361,41 @@ func (w *Writer) UpdateConntrack(available, readable bool, path string, flows in
 	w.state.ConntrackReadable = readable
 	w.state.ConntrackPath = path
 	w.state.ConntrackFlows = flows
+}
+
+// SetSelf publishes the v5.5 self-capture state block. Pass nil to clear
+// it (e.g. when self-capture is toggled off). Called from main.go's
+// self-attribution goroutine; safe to call concurrently with the rest of
+// the Writer API. The passed pointer is owned by the caller until this
+// call returns — Writer takes its own deep-ish copy of slices/maps so
+// later mutation by the caller is safe.
+func (w *Writer) SetSelf(s *SelfState) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if s == nil {
+		w.state.Self = nil
+		return
+	}
+	// Deep-ish copy: clone slice + map so caller can mutate freely after
+	// SetSelf returns (e.g. on next attribution tick).
+	cp := *s
+	if s.Interfaces != nil {
+		cp.Interfaces = append([]SelfIfaceState(nil), s.Interfaces...)
+	}
+	if s.AppsByUID != nil {
+		cp.AppsByUID = make(map[string]*SelfApp, len(s.AppsByUID))
+		for k, v := range s.AppsByUID {
+			vv := *v
+			if v.TopSNIs != nil {
+				vv.TopSNIs = append([]string(nil), v.TopSNIs...)
+			}
+			if v.TopRules != nil {
+				vv.TopRules = append([]string(nil), v.TopRules...)
+			}
+			cp.AppsByUID[k] = &vv
+		}
+	}
+	w.state.Self = &cp
 }
 
 // ─── ingest paths (DNS / TLS / Flow / JA4) ─────────────────────────────

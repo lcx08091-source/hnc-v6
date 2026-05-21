@@ -90,6 +90,8 @@ window.switchTab = function(name) {
     c.style.display = c.id === 'tab-'+name ? '' : 'none';
   });
   if (name === 'stats') loadStats();
+  if (name === 'self') loadSelf();
+  if (name === 'export') loadExports();
 };
 
 // ── 设备列表 ─────────────────────────────────────────────
@@ -1013,6 +1015,173 @@ window.doLogout = function() {
   fetch('/api/logout', { method: 'POST', credentials: 'same-origin' })
     .then(function(){ window.location.href = '/pair'; })
     .catch(function(e){ alert('登出失败: ' + (e.message || e)); });
+};
+
+// ── v5.5: 我的应用 + 导出 ──────────────────────────────
+function loadSelf() {
+  fetch('/api/dpi_state', { credentials: 'same-origin' })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d || !d.available || !d.state) {
+        $('self-apps-list').innerHTML = '<div class="loading">dpi_state 暂未就绪</div>';
+        return;
+      }
+      var self = d.state.self;
+      var toggle = document.getElementById('self-toggle-input');
+      if (self) {
+        if (toggle) toggle.checked = !!self.enabled;
+        $('self-meta').textContent = self.enabled
+          ? '运行中 · 采样 ' + (self.last_attrib_tick ? new Date(self.last_attrib_tick*1000).toLocaleTimeString() : '未开始')
+          : '已关闭';
+      } else {
+        if (toggle) toggle.checked = false;
+        $('self-meta').textContent = '已关闭(dpid 未上报 self 块)';
+      }
+      // Iface preview
+      fetch('/api/self/ifaces', { credentials: 'same-origin' })
+        .then(function(r){ return r.json(); })
+        .then(function(ifd){
+          var html = [];
+          if (ifd.ap_iface) html.push('热点接口: <code>' + esc(ifd.ap_iface) + '</code>');
+          html.push('候选自身接口: ');
+          (ifd.ifaces || []).slice(0, 10).forEach(function(it){
+            var cls = it.eligible ? 'iface-eligible' : 'iface-skip';
+            var title = it.reason || (it.eligible ? 'eligible' : '');
+            html.push('<span class="' + cls + '" title="' + esc(title) + '">' + esc(it.name) + '</span>');
+          });
+          $('self-ifaces-row').innerHTML = html.join(' ');
+        }).catch(function(){});
+      // Apps list
+      var apps = (self && self.apps_by_uid) || {};
+      var rows = Object.keys(apps).map(function(uid){
+        var a = apps[uid];
+        return { uid: parseInt(uid, 10), app: a };
+      }).sort(function(a, b){
+        return (b.app.last_seen || 0) - (a.app.last_seen || 0);
+      });
+      if (rows.length === 0) {
+        $('self-apps-list').innerHTML = '<div class="loading">' +
+          ((self && self.enabled) ? '已开启,正在等待第一次采样...' : '关闭中(打开后约 5 秒出现数据)') +
+          '</div>';
+        return;
+      }
+      $('self-apps-list').innerHTML = rows.map(function(r){
+        var a = r.app;
+        var snis = (a.top_snis || []).slice(0, 5);
+        var rules = (a.top_rules || []).slice(0, 4);
+        return '<div class="self-app-card">' +
+          '<div class="self-app-head">' +
+            '<b>' + esc(a.pkg || '(uid ' + a.uid + ', pm 未解析)') + '</b>' +
+            '<span class="meta">uid ' + a.uid + ' · 活跃连接 ' + (a.active_conns || 0) + ' · 累计 ' + (a.total_conns || 0) + '</span>' +
+          '</div>' +
+          (snis.length > 0 ? '<div class="self-app-snis">SNI: ' + snis.map(esc).join(', ') + '</div>' : '') +
+          (rules.length > 0 ? '<div class="self-app-rules">规则: ' + rules.map(esc).join(', ') + '</div>' : '') +
+          '<div class="self-app-time meta">最后见: ' + (a.last_seen ? new Date(a.last_seen*1000).toLocaleTimeString() : '--') + '</div>' +
+        '</div>';
+      }).join('');
+    })
+    .catch(function(e){
+      $('self-apps-list').innerHTML = '<div class="loading">加载失败: ' + esc(e.message || e) + '</div>';
+    });
+}
+
+window.toggleSelf = function(enabled) {
+  fetch('/api/self/toggle', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled: enabled })
+  }).then(function(r){ return r.json(); })
+    .then(function(d){
+      if (d && d.error) {
+        showToast('切换失败: ' + d.error, 'err');
+        document.getElementById('self-toggle-input').checked = !enabled;
+      } else {
+        showToast(enabled ? '已开启 · 等待 5 秒后出现数据' : '已关闭', 'ok');
+        setTimeout(loadSelf, 6000);
+      }
+    })
+    .catch(function(e){
+      showToast('网络错误: ' + (e.message || e), 'err');
+      document.getElementById('self-toggle-input').checked = !enabled;
+    });
+};
+
+function loadExports() {
+  fetch('/api/exports', { credentials: 'same-origin' })
+    .then(function(r){ return r.json(); })
+    .then(function(d){
+      var list = (d && d.exports) || [];
+      if (list.length === 0) {
+        $('exports-list').innerHTML = '<div class="loading">(还没打包过 export)</div>';
+        return;
+      }
+      $('exports-list').innerHTML = list.map(function(x){
+        return '<div class="export-row">' +
+          '<code>' + esc(x.name) + '</code> · ' + fmtB(x.size) + ' · ' + esc(x.modified) + ' ' +
+          '<a href="' + esc(x.download_url) + '" download>下载</a>' +
+        '</div>';
+      }).join('');
+    })
+    .catch(function(e){
+      $('exports-list').innerHTML = '<div class="loading">加载失败: ' + esc(e.message || e) + '</div>';
+    });
+}
+
+window.setExportRange = function(mins) {
+  var now = Math.floor(Date.now() / 1000);
+  function fmt(unix) {
+    var d = new Date(unix*1000);
+    var pad = function(n){ return String(n).padStart(2, '0'); };
+    return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+           'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+  }
+  $('export-from').value = fmt(now - mins*60);
+  $('export-to').value = fmt(now);
+};
+
+window.buildExport = function() {
+  var fromUnix = 0, toUnix = 0;
+  var fv = $('export-from').value, tv = $('export-to').value;
+  if (fv) fromUnix = Math.floor(new Date(fv).getTime() / 1000);
+  if (tv) toUnix = Math.floor(new Date(tv).getTime() / 1000);
+  var notes = ($('export-notes').value || '').trim();
+  var resBox = $('export-result');
+  resBox.innerHTML = '<div class="loading">打包中...</div>';
+  fetch('/api/export', {
+    method: 'POST',
+    credentials: 'same-origin',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      from: fromUnix || undefined,
+      to: toUnix || undefined,
+      notes: notes ? [notes] : undefined
+    })
+  }).then(function(r){ return r.json(); })
+    .then(function(d){
+      if (!d || d.status !== 'ok') {
+        resBox.innerHTML = '<div class="err-banner">打包失败: ' + esc(JSON.stringify(d)) + '</div>';
+        return;
+      }
+      var tr = (d.manifest && d.manifest.tracks) || {};
+      var trkLines = [];
+      Object.keys(tr).forEach(function(k){
+        var v = tr[k];
+        if (v && v.included) {
+          trkLines.push(k + ': ' + (v.file_count || 1) + ' 个文件 / ' + fmtB(v.bytes_total || 0));
+        }
+      });
+      resBox.innerHTML =
+        '<div class="export-result-ok">' +
+          '<b>已打包</b> · <code>' + esc(d.name) + '</code> · ' + fmtB(d.size_bytes || 0) +
+          '<div class="meta">' + trkLines.map(esc).join('<br>') + '</div>' +
+          '<a class="download-btn" href="' + esc(d.download_url) + '" download>下载 zip</a>' +
+        '</div>';
+      loadExports();
+    })
+    .catch(function(e){
+      resBox.innerHTML = '<div class="err-banner">网络错误: ' + esc(e.message || e) + '</div>';
+    });
 };
 
 })();

@@ -643,3 +643,202 @@ cat /data/local/hnc/run/devices.json | python3 -m json.tool
 ---
 
 *本文写于 rc30.12.7 时期,趁记忆鲜活。如果你 3 个月后回来发现哪里不对,大概率是项目又演化了 — 以代码为准。*
+
+---
+
+## 十一、v5.5+ 自身流量识别与规则闭环 (新章节)
+
+> 写于 v5.5.0 时期。这一章描述 v5.5 已落地的内容,以及 v5.6 / v5.7 的规划路径。
+> v5.5 之前 HNC 只识别热点客户端的流量;v5.5 起新增了对本机自身流量的可选追踪,
+> 并把原 AHNC 卫星模块的能力整合进来。
+
+### 11.1 整体分阶段路线
+
+```
+v5.5 ─┬─► /proc/net + uid→pkg 半自动采样 (本章 11.2)
+      └─► "我的应用" + "导出" WebUI (整合在新 "应用" tab)
+
+v5.6 ─┬─► self-iface (rmnet/wlan0) AF_PACKET capture
+      ├─► SNI 抓取 + 跟 /proc/net 的 uid join → 自动填 top_snis/top_rules
+      └─► 已知 app 子域自动扩展 (走法 1 · _auto_expanded.json)
+
+v5.7 ─┬─► unmatched SNI 频率累积器 (candidates.jsonl)
+      └─► WebUI "候选规则" 子页 (走法 2 · 一键 promote · HIGH/MED/LOW 三档)
+```
+
+### 11.2 v5.5 实现细节
+
+**新进程? 无。** 所有逻辑都在 `hnc_dpid` 内,作为它的一个 goroutine 跑。
+理由:`dpid` 本来就有 5 秒主循环和 JSON Writer,加一个 sampler 不需要新进程。
+
+**新文件**:
+- `src/dpid/output/self_attrib.go` (593 行) — `/proc/net/*` 解析 + uid→pkg 映射 + 历史 JSONL
+- `src/dpid/capture/self_iface.go` (153 行) — 列出哪些接口算"自身接口"(供 v5.6 使用,v5.5 仅 WebUI 预览用)
+- `daemon/hnc_httpd/api_self.go` (261 行) — 4 个 self 端点 (`/api/self`, `/toggle`, `/ifaces`, `/attrib`)
+- `daemon/hnc_httpd/api_export.go` (421 行) — export 打包 (`/api/export`, `/api/exports`)
+- `bin/ahnc_migration.sh` (108 行) — 一次性数据迁移
+
+**State schema 扩展**:
+`dpi_state.json` 的 `schema_version` 仍然是 `2.0`(兼容性优先),新增字段是 `state.self`,
+为 nil 时 `omitempty` 不输出。当采样开启时形如:
+
+```jsonc
+{
+  "self": {
+    "enabled": true,
+    "last_attrib_tick": 1716293400,
+    "pkg_cache_size": 73,
+    "apps_by_uid": {
+      "10198": {
+        "uid": 10198,
+        "pkg": "com.tencent.mm",
+        "active_conns": 28,
+        "total_conns": 247,
+        "first_seen": 1716293000,
+        "last_seen": 1716293400,
+        "top_snis": [],     // v5.5: 空; v5.6 接 self-iface capture 后才填
+        "top_rules": []     // 同上
+      }
+    },
+    "interfaces": []        // v5.6 才有
+  }
+}
+```
+
+**触发开关**:`/data/local/hnc/run/self_capture.enabled` 标志文件。
+- 文件存在 → 采样器 5s 一次工作
+- 文件不存在 → 采样器 idle (snapshot 仍上报但 enabled=false)
+- WebUI 的 `POST /api/self/toggle` 就是 touch/rm 这个文件
+
+**默认关闭** —— 装上 HNC v5.5 不会自动采你自己的流量。
+
+### 11.3 v5.6 设计 (待实现)
+
+#### 11.3.1 self-iface AF_PACKET
+
+为什么需要:v5.5 已有 `/proc/net` 给出 `(uid, remote_ip, remote_port)`,但 SNI 没有。
+要拿 SNI,必须 AF_PACKET 抓 TLS ClientHello。
+
+实现思路 (基于 `capture/iface.go` 现有 AP 选 iface 的 `DiscoverAPCandidates` 模式):
+
+```
+main.go (dpid):
+  现在:    一个 runCapture(ctx, cfg, pr, sw) on pr.APIface (wlan2)
+  v5.6 改: 上面那个 + 启动一批 secondary captures on
+           capture.DiscoverSelfCandidates(pr.APIface) 返回的接口
+
+  每个 secondary capture:
+    - 同样的 BPF (TCP/443 + UDP/53 + UDP/443)
+    - 同样的 parser (TLS ClientHello → SNI)
+    - SNI 事件不进 sw.RecordTLS (那会污染热点客户端聚合)
+    - 而是进 selfAttrib.RecordSNI(uid, sni, now)
+    - uid 通过 selfAttrib.LookupUID(remote_ip, remote_port) 查到
+```
+
+需注意的坑:
+- ColorOS BPF fast path 可能截走 tethered 流量;但 self iface 流量 (本机自己) 应该不受影响,因为 BPF fast path 只针对 tether 链路
+- 多 capture handle 的 SIGTERM 关停顺序 — child contexts 先 cancel
+- rmnet 接口在飞行模式 / 双卡切换时会增删,需要每 30s 重扫一次 DiscoverSelfCandidates
+
+#### 11.3.2 子域自动扩展 (走法 1)
+
+**触发条件 (三重证据,缺一不可)**:
+
+1. **apex 相同**:观测到的新 SNI 跟现有某规则中至少一个已 verified SNI 共享 effective TLD+1 (eTLD+1)
+2. **uid 相同**:观测到这条新 SNI 的 uid,跟上面那个规则中高频命中的 uid 相同 (>= 10 次)
+3. **apex 不在 blocklist**:`data/auto_expand_blocklist.json` 列了禁止自动扩展的 apex
+   (CDN / 共享 API gateway / 跨公司基础设施)
+
+**dpid 中的实现位点**:在 `applyRuleHitLocked` 之后、把命中写进 client 聚合之前,
+对 *未* 命中的 SNI 做一次 `tryAutoExpand(sni, uid, now)` 检查。
+
+**输出**:`data/dpi_rules.d/_auto_expanded.json` (单文件)。每条 entry 长这样:
+
+```jsonc
+{
+  "id": "tencent_wechat_voice",            // <existing_rule_id>_<new_subdomain>
+  "name": "微信 (自动扩展: 语音子域)",
+  "category": "messaging",
+  "sni_suffixes": ["voice.weixin.qq.com"],
+  "_source": "auto_expanded",
+  "_apex": "weixin.qq.com",
+  "_parent_rule_id": "tencent_wechat",
+  "_added_at": 1716293400,
+  "_evidence": {
+    "uid": 10198,
+    "uid_pkg": "com.tencent.mm",
+    "parent_hits_at_time_of_expand": 47,
+    "hours_observed": 3
+  }
+}
+```
+
+**回滚**:`rm data/dpi_rules.d/_auto_expanded.json && killall hnc_dpid` 即可。
+所有自动条目集中在一个文件,人工写的规则**永不被自动修改**。
+
+**Blocklist 初版** (`data/auto_expand_blocklist.json`):
+
+```jsonc
+{
+  "blocked_apex": [
+    "cloudfront.net", "amazonaws.com",
+    "akamai.net", "akamaiedge.net",
+    "fastly.net", "cloudflare.com",
+    "googleapis.com", "googleusercontent.com",
+    "appsflyer.com", "adjust.com", "branch.io",
+    "newrelic.com", "datadoghq.com",
+    "trustarc.com", "onetrust.com"
+  ],
+  "_comment": "These apex domains are shared across many companies / generic SDK providers. Auto-expansion would misattribute traffic."
+}
+```
+
+### 11.4 v5.7 设计 (待实现)
+
+#### 11.4.1 candidate 累积器
+
+任何 SNI 既没匹配已有规则、也不满足走法 1 的三重证据 → 进 candidate 累积。
+
+`/data/local/hnc/run/candidates.jsonl` (按日 rotate):
+
+```jsonc
+{"t":1716293400, "sni":"api.adjust.com", "uid":10256, "pkg":"com.ss.android.ugc.aweme",
+ "remote_ip":"54.230.x.x", "tier":"medium", "reason":"apex shared across known pkgs"}
+```
+
+dpid 端只做累积,不判断 tier 优先级 —— tier 由 httpd 在 WebUI 加载时算出来。
+
+#### 11.4.2 WebUI 审批页
+
+`#apps-sub-candidates` (新增子页)。3 档,每档 collapse 一组:
+
+- **HIGH** (绿色,默认展开):新 apex 但 uid 跟现有规则一致 → 建议 promote 为该 app 的新规则
+- **MEDIUM** (黄色,折叠):uid 在多个已知 app 间分布 → 显示候选 app,人工选
+- **LOW** (灰色,折叠):频率 <5、uid 不在 pm 缓存里 → "再观察一周"
+
+每条记录有按钮:
+- **加入规则**:弹出表单 (rule_id / name / category / 选 app 归属),提交后写入 `dpi_rules.d/_user_promoted.json`
+- **永不再问**:加入 `data/_blocklist_personal.json`,下次出现自动 hide
+- **导出给 Claude**:把这条记录加进下一次 export zip 的 `pending_review.json`
+
+### 11.5 关键不变量 (设计宪法)
+
+无论 v5.6 / v5.7 怎么扩展,以下原则不能违反:
+
+1. **人工规则永不被自动改**。`dpi_rules.d/00-core-meta.json` 到 `90-anomaly-heuristics.json` 这些文件,自动逻辑只读不写。
+2. **自动产物有独立命名空间**。`_auto_expanded.json` 和 `_user_promoted.json` 用下划线前缀,永远在最后加载,优先级低于人工规则。
+3. **采集默认 OFF**。每个新增的探测能力 (self-iface capture / candidate 累积 / 等等) 必须有独立开关 + 默认关闭。
+4. **任何"自动"动作必须可一键回滚**。删除一个 JSON 文件 + 重启 dpid = 完全还原。
+5. **WebUI 显示自动产物时永远带 badge** (`auto_expanded` / `promoted_from_candidate` 等),让用户看到这条规则是怎么来的。
+
+### 11.6 跟 AHNC 卫星模块的关系
+
+v5.5 之前,AHNC 是个独立 KSU 模块,跑自己的 tcpdump、写自己的 pcap、做自己的 uid 解析。
+v5.5 把它的能力吸收进 HNC 主仓:
+
+- **保留**:`/proc/net` + uid→pkg 思路、historical JSONL、给 Claude 的 export 工作流
+- **废弃**:独立 tcpdump 进程 (HNC 主 capture 已经在 AF_PACKET 实时解);独立 daemon (合进 hnc_dpid);独立 WebUI (合进主 webroot)
+- **迁移**:`/data/local/ahnc/self-conns.*.jsonl` 最近 7 天会被 `bin/ahnc_migration.sh` 自动搬到 `/data/local/hnc/run/self_attrib.*.jsonl`,其他 AHNC 数据 (pcap / 旧 export / mirror) 全丢弃
+
+迁移完成后 AHNC 模块本体仍在 `/data/adb/modules/ahnc-capture/`,需手动从 KSU 管理器卸载。
+迁移脚本会留 marker 文件 `/data/local/hnc/run/.ahnc_migration_done` 写明清理步骤。

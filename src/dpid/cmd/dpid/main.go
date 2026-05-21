@@ -238,6 +238,53 @@ func main() {
 		}()
 	}
 
+	// v5.5: self-attribution sampler.
+	//
+	// Reads /proc/net/{tcp,tcp6,udp,udp6} every 5s, resolves each
+	// socket's uid via `pm list packages -U` (cached 5min), publishes a
+	// per-uid app aggregation into State.Self via Writer.SetSelf(), and
+	// appends one observation per tick to self_attrib.YYYYMMDD.jsonl.
+	//
+	// Gated by the flag file /data/local/hnc/run/self_capture.enabled:
+	// touch to enable, rm to disable. Re-read on every sampler tick so
+	// changes take effect within 5s without restarting dpid.
+	//
+	// The aggregator is built unconditionally so SetSelf() can be called
+	// from the goroutine on every tick — the WebUI then sees either a
+	// populated `self` block (when enabled) or a stub block with
+	// {enabled: false, reason: ...}.
+	selfAttribFlag := filepath.Join(cfg.RunDir, "self_capture.enabled")
+	selfAttrib := output.NewSelfAttribAggregator(cfg.RunDir)
+	go func() {
+		isEnabled := func() bool {
+			_, err := os.Stat(selfAttribFlag)
+			enabled := err == nil
+			if enabled {
+				selfAttrib.SetEnabled(true, "")
+			} else {
+				selfAttrib.SetEnabled(false, "self-capture flag file not present")
+			}
+			return enabled
+		}
+		// Also publish a periodic snapshot into the dpi_state, regardless
+		// of enabled (so WebUI can see "feature exists but is off").
+		go func() {
+			tk := time.NewTicker(5 * time.Second)
+			defer tk.Stop()
+			isEnabled() // prime the flag once
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tk.C:
+					isEnabled() // refresh enabled bit
+					sw.SetSelf(selfAttrib.Snapshot())
+				}
+			}
+		}()
+		selfAttrib.RunSampler(ctx, isEnabled)
+	}()
+
 	switch mode {
 	case ModeBlind, ModeDisabled:
 		log.Printf("no capture in %s mode; idling for state writes", mode)

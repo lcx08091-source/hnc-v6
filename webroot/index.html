@@ -3020,6 +3020,149 @@ body.kb-open .container {
   </div>
 </div>
 
+<!-- ═══ APPS (v5.5: self-traffic uid → pkg attribution + export) ═══ -->
+<div id="page-apps" class="page">
+  <div class="container">
+
+    <!-- Hero -->
+    <div class="glass-liquid app-hero" id="app-hero">
+      <div class="app-hero-stats">
+        <div class="app-hero-stat">
+          <div class="app-hero-stat-label">追踪状态</div>
+          <div class="app-hero-stat-val" id="apps-hero-state">--</div>
+        </div>
+        <div class="app-hero-divider"></div>
+        <div class="app-hero-stat">
+          <div class="app-hero-stat-label">活跃应用</div>
+          <div class="app-hero-stat-val" id="apps-hero-active">--</div>
+        </div>
+        <div class="app-hero-divider"></div>
+        <div class="app-hero-stat">
+          <div class="app-hero-stat-label">连接数</div>
+          <div class="app-hero-stat-val" id="apps-hero-conns">--</div>
+        </div>
+      </div>
+      <div class="app-hero-foot">
+        <div class="app-hero-status" id="apps-hero-status">
+          <span class="dot"></span>等待 dpid 上报...
+        </div>
+      </div>
+    </div>
+
+    <!-- Segmented control -->
+    <div class="seg-control" id="apps-seg">
+      <button class="on" data-sub="my-apps" onclick="appsSwitchSub('my-apps', this)">我的应用</button>
+      <button data-sub="export" onclick="appsSwitchSub('export', this)">导出</button>
+      <button data-sub="settings" onclick="appsSwitchSub('settings', this)">设置</button>
+    </div>
+
+    <!-- ── 我的应用 ── -->
+    <div class="apps-sub-view on" id="apps-sub-my-apps">
+      <div class="iface-row" id="apps-iface-row">
+        <span style="color:var(--text-3);font-size:12px">加载接口...</span>
+      </div>
+      <div class="app-list" id="apps-list">
+        <div style="padding:40px 20px;text-align:center;color:var(--text-3)">加载中...</div>
+      </div>
+    </div>
+
+    <!-- ── 导出 ── -->
+    <div class="apps-sub-view" id="apps-sub-export">
+      <div class="glass-elevated exp-card">
+        <div class="exp-field">
+          <div class="exp-field-label">快速选择时间范围</div>
+          <div class="exp-quick" id="exp-quick">
+            <button onclick="appsExpPickRange(this, 15)">最近 15 分</button>
+            <button class="on" onclick="appsExpPickRange(this, 60)">最近 1 小时</button>
+            <button onclick="appsExpPickRange(this, 180)">最近 3 小时</button>
+            <button onclick="appsExpPickRange(this, 360)">最近 6 小时</button>
+          </div>
+        </div>
+        <div class="exp-field">
+          <div class="exp-field-label">起始</div>
+          <input type="datetime-local" id="exp-from" step="60">
+        </div>
+        <div class="exp-field">
+          <div class="exp-field-label">结束</div>
+          <input type="datetime-local" id="exp-to" step="60">
+        </div>
+        <div class="exp-field">
+          <div class="exp-field-label">备注 (给 Claude 的上下文)</div>
+          <textarea id="exp-notes" placeholder="比如: 刚才开了一把王者, 中间切到抖音 10s, SNI 漏识别请看 ..."></textarea>
+        </div>
+        <div class="exp-btn-row">
+          <button class="btn-primary" id="exp-build-btn" onclick="appsExpBuild()">⚡ 打包 export</button>
+        </div>
+        <div id="exp-result" style="margin-top:12px"></div>
+      </div>
+
+      <div class="sec-title">最近的导出</div>
+      <div class="glass-elevated exp-history" id="exp-history">
+        <div style="padding:20px;text-align:center;color:var(--text-3)">加载中...</div>
+      </div>
+    </div>
+
+    <!-- ── 设置 ── -->
+    <div class="apps-sub-view" id="apps-sub-settings">
+      <div class="sec-title">追踪开关</div>
+      <div class="glass-elevated">
+        <div class="set-row">
+          <div class="set-icon green">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+          </div>
+          <div class="set-info">
+            <div class="set-label">追踪本机应用流量</div>
+            <div class="set-desc">5 秒一采样 · 读取 /proc/net + pm list packages -U</div>
+          </div>
+          <div class="toggle" id="apps-toggle" onclick="appsToggleSelf(this)"></div>
+        </div>
+        <div class="set-row">
+          <div class="set-icon purple">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+          </div>
+          <div class="set-info">
+            <div class="set-label">SNI / 规则联合标注 (v5.6 ⏳)</div>
+            <div class="set-desc">在 rmnet/wlan0 开 AF_PACKET capture · 等 v5.6</div>
+          </div>
+          <div class="toggle" style="opacity:.5;pointer-events:none"></div>
+        </div>
+      </div>
+
+      <div class="sec-title">规则自动扩展 (v5.7 ⏳)</div>
+      <div class="glass-elevated">
+        <div class="set-row">
+          <div class="set-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+          </div>
+          <div class="set-info">
+            <div class="set-label">已知 app 子域自动加入规则</div>
+            <div class="set-desc">同 apex + 同 uid + 非 blocklist → 自动写 _auto_expanded.json</div>
+          </div>
+          <div style="font-size:11px;color:var(--text-3)">规划中</div>
+        </div>
+        <div class="set-row">
+          <div class="set-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+          </div>
+          <div class="set-info">
+            <div class="set-label">未匹配 SNI 候选审批</div>
+            <div class="set-desc">按 (uid, apex, 频率) 分 HIGH/MED/LOW 三档 · 一键 promote</div>
+          </div>
+          <div style="font-size:11px;color:var(--text-3)">规划中</div>
+        </div>
+      </div>
+
+      <div class="set-footer">
+        v5.5 ships: /proc/net 采样 + 我的应用列表 + 导出。<br>
+        v5.6 ships: self-iface AF_PACKET → SNI/uid 联合 + 子域自动扩展 (走法 1)。<br>
+        v5.7 ships: candidate 累积器 + WebUI 审批 (走法 2)。<br>
+        详见 <code>ARCHITECTURE.md</code> 的 v5.5+ 章节。
+      </div>
+    </div>
+
+  </div>
+</div>
+
 <!-- ═══ DPI (v5.3.0-rc19: L2 per-client DNS/SNI attribution) ═══ -->
 <div id="page-dpi" class="page">
   <div class="container">
@@ -4542,6 +4685,202 @@ body.kb-open .container {
   [data-theme="dark"] .dpi-legacy-summary-icon {
     background: linear-gradient(135deg, rgba(255,255,255,.08), rgba(255,255,255,.04));
   }
+
+  /* ═══════════════════════════════════════════════════════════════
+     APPS TAB (v5.5)
+     ═══════════════════════════════════════════════════════════════ */
+  .app-hero { padding: 14px 16px 12px; margin-bottom: 14px; }
+  .app-hero-stats {
+    display: grid; grid-template-columns: 1fr auto 1fr auto 1fr;
+    align-items: center; gap: 0;
+  }
+  .app-hero-stat { padding: 4px 6px; }
+  .app-hero-stat-label {
+    font-size: 10.5px; font-weight: 600; color: var(--text-3);
+    display: flex; align-items: center; gap: 4px;
+  }
+  .app-hero-stat-val {
+    font-size: 17px; font-weight: 700; color: var(--text-1);
+    margin-top: 2px; font-variant-numeric: tabular-nums;
+    display: flex; align-items: baseline; gap: 4px;
+  }
+  .app-hero-stat-val .unit { font-size: 11px; font-weight: 600; color: var(--text-3); }
+  .app-hero-divider { width: 1px; height: 26px; background: var(--row-divider); }
+  .app-hero-foot {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--row-divider);
+  }
+  .app-hero-status { font-size: 11.5px; color: var(--text-2); }
+  .app-hero-status .dot {
+    display: inline-block; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--sys-green); margin-right: 5px; box-shadow: 0 0 6px var(--sys-green);
+  }
+  .app-hero-status.off .dot { background: var(--text-4); box-shadow: none; }
+
+  .seg-control {
+    display: flex; padding: 3px; border-radius: 12px;
+    background: rgba(120,120,128,.10); border: 1px solid var(--stroke);
+    margin-bottom: 14px;
+  }
+  .seg-control button {
+    flex: 1; padding: 9px 12px; border: 0; background: transparent;
+    font: inherit; font-size: 13px; font-weight: 600;
+    color: var(--text-2); border-radius: 9px; cursor: pointer;
+    transition: all var(--dur-mid) var(--ease-spring);
+  }
+  .seg-control button.on {
+    background: var(--glass-bg-3); color: var(--text-1);
+    box-shadow: 0 1px 3px rgba(0,0,0,.06), 0 0 0 1px rgba(255,255,255,.5) inset;
+  }
+  [data-theme="dark"] .seg-control button.on {
+    box-shadow: 0 1px 3px rgba(0,0,0,.3), 0 0 0 1px rgba(255,255,255,.1) inset;
+  }
+
+  .iface-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 0 0 14px; }
+  .iface-chip {
+    display: inline-flex; align-items: center; gap: 5px;
+    padding: 5px 10px; font-size: 11.5px; font-weight: 600;
+    border-radius: 999px; font-family: var(--font-mono);
+  }
+  .iface-chip.elig {
+    background: linear-gradient(135deg, rgba(52,199,89,.16), rgba(0,199,190,.10));
+    color: #1d7c2e; border: 1px solid rgba(52,199,89,.28);
+  }
+  [data-theme="dark"] .iface-chip.elig { color: #6ce479; border-color: rgba(52,199,89,.4); }
+  .iface-chip.elig::before {
+    content: ""; width: 6px; height: 6px; border-radius: 50%;
+    background: var(--sys-green); box-shadow: 0 0 6px var(--sys-green);
+  }
+  .iface-chip.skip {
+    background: var(--input-bg); color: var(--text-3);
+    border: 1px solid var(--stroke); text-decoration: line-through;
+  }
+
+  .app-list { display: flex; flex-direction: column; gap: 8px; }
+  .app-card {
+    padding: 14px 16px; display: flex; flex-direction: column; gap: 8px;
+    animation: fadeUp .55s var(--ease-spring) both;
+  }
+  .app-card:nth-child(1){animation-delay:.05s}
+  .app-card:nth-child(2){animation-delay:.10s}
+  .app-card:nth-child(3){animation-delay:.15s}
+  .app-card:nth-child(4){animation-delay:.20s}
+  .app-card:nth-child(5){animation-delay:.25s}
+  .app-card:nth-child(6){animation-delay:.30s}
+  .app-card-head {
+    display: grid; grid-template-columns: 36px 1fr auto;
+    gap: 12px; align-items: center;
+  }
+  .app-icon {
+    width: 36px; height: 36px; border-radius: 10px;
+    display: flex; align-items: center; justify-content: center;
+    color: white; font-weight: 700; font-size: 16px;
+    background: linear-gradient(135deg, var(--ai-a, var(--sys-blue)), var(--ai-b, var(--sys-indigo)));
+    box-shadow: 0 1px 3px rgba(0,0,0,.1), 0 0 0 1px rgba(255,255,255,.18) inset;
+  }
+  .app-icon.wechat   { --ai-a: #07C160; --ai-b: #00BFA5; }
+  .app-icon.douyin   { --ai-a: #000000; --ai-b: #25F4EE; }
+  .app-icon.tencent  { --ai-a: #1A6FEB; --ai-b: #5856D6; }
+  .app-icon.bytedance{ --ai-a: #FF1744; --ai-b: #FF5252; }
+  .app-icon.alibaba  { --ai-a: #FF6A00; --ai-b: #FFB300; }
+  .app-icon.baidu    { --ai-a: #2932E1; --ai-b: #4285F4; }
+  .app-icon.google   { --ai-a: #EA4335; --ai-b: #FBBC05; }
+  .app-icon.netease  { --ai-a: #E60012; --ai-b: #FF4444; }
+  .app-icon.realme   { --ai-a: #FFCC00; --ai-b: #FF9500; }
+  .app-icon.miui     { --ai-a: #FF6700; --ai-b: #FF9500; }
+  .app-icon.system   { --ai-a: #8E8E93; --ai-b: #636366; }
+  .app-icon.unknown  { --ai-a: #8E8E93; --ai-b: #636366; }
+  .app-name {
+    font-size: 15px; font-weight: 600; color: var(--text-1); letter-spacing: -.005em;
+  }
+  .app-pkg {
+    font-size: 11px; color: var(--text-3); font-family: var(--font-mono);
+    margin-top: 2px; word-break: break-all;
+  }
+  .app-uid-badge {
+    font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
+    background: var(--input-bg); color: var(--text-2); font-family: var(--font-mono);
+    flex-shrink: 0; text-align: right; line-height: 1.3;
+  }
+  .app-uid-badge .conns { color: var(--sys-blue); font-weight: 700; }
+  .app-meta-row { display: flex; flex-wrap: wrap; gap: 6px; }
+  .app-meta-pill {
+    font-size: 10.5px; font-weight: 600; padding: 3px 8px; border-radius: 6px;
+    background: var(--input-bg); color: var(--text-2); font-family: var(--font-mono);
+  }
+  .app-meta-pill.sni { color: var(--sys-blue); background: rgba(0,122,255,.08); }
+  .app-meta-pill.rule { color: var(--sys-purple); background: rgba(175,82,222,.08); }
+
+  .exp-card { padding: 18px; margin-bottom: 14px; }
+  .exp-quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
+  .exp-quick button {
+    padding: 7px 12px; font: inherit; font-size: 12px; font-weight: 600;
+    background: var(--glass-bg-2); color: var(--text-1);
+    border: 1px solid var(--stroke); border-radius: 999px; cursor: pointer;
+  }
+  .exp-quick button.on {
+    background: linear-gradient(135deg, var(--sys-blue), var(--sys-indigo));
+    color: white; border-color: transparent;
+    box-shadow: 0 2px 8px rgba(0,122,255,.3);
+  }
+  .exp-field { margin-bottom: 12px; }
+  .exp-field-label {
+    font-size: 11.5px; font-weight: 700; color: var(--text-3);
+    letter-spacing: .04em; margin-bottom: 6px; text-transform: uppercase;
+  }
+  .exp-field input, .exp-field textarea {
+    width: 100%; padding: 11px 13px; font: inherit; font-size: 14px;
+    background: var(--input-bg); border: 1px solid var(--stroke);
+    color: var(--text-1); border-radius: 10px; outline: none;
+    font-family: var(--font-mono);
+  }
+  .exp-field textarea {
+    min-height: 60px; resize: vertical; font-family: var(--font-sans);
+  }
+  .exp-field input:focus, .exp-field textarea:focus {
+    border-color: var(--sys-blue); box-shadow: 0 0 0 3px rgba(0,122,255,.12);
+  }
+  .exp-btn-row { display: flex; gap: 10px; align-items: center; }
+  .btn-primary {
+    flex: 1; padding: 12px; font: inherit; font-size: 14px; font-weight: 700;
+    background: linear-gradient(135deg, var(--sys-blue), var(--sys-indigo));
+    color: white; border: 0; border-radius: 12px;
+    box-shadow: 0 4px 14px rgba(0,122,255,.32); cursor: pointer;
+  }
+  .btn-primary:active { transform: scale(.98); }
+  .btn-primary:disabled { opacity: .5; cursor: wait; }
+  .exp-history { padding: 4px 0; }
+  .exp-row {
+    padding: 12px 16px; display: grid; grid-template-columns: 1fr auto;
+    gap: 8px; align-items: center;
+  }
+  .exp-row + .exp-row { border-top: 1px solid var(--row-divider); }
+  .exp-row-name {
+    font-size: 13.5px; font-weight: 600; color: var(--text-1);
+    font-family: var(--font-mono); letter-spacing: -.01em; word-break: break-all;
+  }
+  .exp-row-meta { font-size: 11px; color: var(--text-3); margin-top: 2px; }
+  .exp-row-dl {
+    padding: 7px 12px; font-size: 12px; font-weight: 600;
+    background: var(--sys-blue); color: white;
+    border-radius: 8px; text-decoration: none;
+  }
+  .apps-sub-view { display: none; }
+  .apps-sub-view.on { display: block; }
+
+  .exp-result-ok {
+    padding: 12px 14px; border-radius: 12px;
+    background: linear-gradient(135deg, rgba(52,199,89,.12), rgba(0,199,190,.08));
+    border: 1px solid rgba(52,199,89,.28);
+    font-size: 13px; color: var(--text-1);
+  }
+  .exp-result-ok b { color: #1d7c2e; }
+  [data-theme="dark"] .exp-result-ok b { color: #6ce479; }
+  .exp-result-err {
+    padding: 12px 14px; border-radius: 12px;
+    background: rgba(255,59,48,.10); border: 1px solid rgba(255,59,48,.28);
+    color: var(--sys-red); font-size: 13px;
+  }
 </style>
 
 <!-- ═══ SETTINGS (new) ═══ -->
@@ -4921,6 +5260,15 @@ body.kb-open .container {
       <polyline points="14 2 14 8 20 8"/>
     </svg>
     <span>日志</span>
+  </div>
+  <div class="nav-item" data-page="apps">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="3" width="7" height="7" rx="1.5"/>
+      <rect x="14" y="3" width="7" height="7" rx="1.5"/>
+      <rect x="3" y="14" width="7" height="7" rx="1.5"/>
+      <rect x="14" y="14" width="7" height="7" rx="1.5"/>
+    </svg>
+    <span>应用</span>
   </div>
   <div class="nav-item" data-page="dpi">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -9194,6 +9542,9 @@ body.kb-open .container {
       } else if (name === 'dpi') {
         fetchDPI();
         startDPIPolling();
+      } else if (name === 'apps') {
+        appsLoad();
+        appsStartPolling();
       }
     }, 180);
     $$('.nav-item').forEach(n => n.classList.remove('active'));
@@ -9209,6 +9560,9 @@ body.kb-open .container {
       window.__lastDPIStateRaw = null;
       window.__lastNDPIObj = null;
       __cachedBuiltin = null; __cachedRawRef = null;
+    }
+    if (name !== 'apps') {
+      appsStopPolling();
     }
   }
   function moveChartTabInd(target) {
@@ -11931,6 +12285,368 @@ body.kb-open .container {
       }
     });
   })();
+
+  /* ═══════════════════════════════════════════════════════════════
+     APPS TAB (v5.5)
+     /proc/net + uid→pkg attribution + WebUI export
+     ═══════════════════════════════════════════════════════════════ */
+  var __appsPollTimer = null;
+
+  function appsStartPolling() {
+    appsStopPolling();
+    __appsPollTimer = setInterval(function(){ appsLoad(true); }, 5000);
+  }
+  function appsStopPolling() {
+    if (__appsPollTimer) { clearInterval(__appsPollTimer); __appsPollTimer = null; }
+  }
+
+  // Iconize a package name to one of our app-icon themes.
+  function appsClassifyIcon(pkg) {
+    if (!pkg) return { cls: 'unknown', letter: '?' };
+    if (pkg.indexOf('com.tencent.mm') === 0) return { cls: 'wechat', letter: '微' };
+    if (pkg.indexOf('com.ss.android.ugc.aweme') === 0) return { cls: 'douyin', letter: '抖' };
+    if (pkg.indexOf('com.ss.android') === 0 ||
+        pkg.indexOf('com.bytedance') === 0) return { cls: 'bytedance', letter: '字' };
+    if (pkg.indexOf('com.tencent.') === 0) return { cls: 'tencent', letter: '腾' };
+    if (pkg.indexOf('com.taobao') === 0 ||
+        pkg.indexOf('com.alibaba') === 0 ||
+        pkg.indexOf('com.alipay') === 0 ||
+        pkg.indexOf('com.eg.android.AlipayGphone') === 0) return { cls: 'alibaba', letter: '阿' };
+    if (pkg.indexOf('com.baidu') === 0) return { cls: 'baidu', letter: '百' };
+    if (pkg.indexOf('com.google') === 0 ||
+        pkg.indexOf('com.android.chrome') === 0 ||
+        pkg.indexOf('com.android.vending') === 0) return { cls: 'google', letter: 'G' };
+    if (pkg.indexOf('com.netease') === 0) return { cls: 'netease', letter: '网' };
+    if (pkg.indexOf('com.coloros') === 0 ||
+        pkg.indexOf('com.heytap') === 0 ||
+        pkg.indexOf('com.oplus') === 0 ||
+        pkg.indexOf('com.realme') === 0) return { cls: 'realme', letter: 'R' };
+    if (pkg.indexOf('com.miui') === 0 ||
+        pkg.indexOf('com.xiaomi') === 0) return { cls: 'miui', letter: '米' };
+    if (pkg === 'android' || pkg.indexOf('android.') === 0 ||
+        pkg.indexOf('com.android.') === 0) return { cls: 'system', letter: '系' };
+    // Fallback: first non-com letter, uppercase
+    var parts = pkg.split('.');
+    var seg = parts[parts.length - 1] || pkg;
+    return { cls: 'unknown', letter: (seg[0] || '?').toUpperCase() };
+  }
+
+  // Pretty app display name from pkg (last segment, common-app overrides).
+  function appsDisplayName(pkg, uid) {
+    if (!pkg) return '未识别 · uid ' + uid;
+    var known = {
+      'com.tencent.mm': '微信',
+      'com.tencent.mobileqq': 'QQ',
+      'com.tencent.tmgp.sgame': '王者荣耀',
+      'com.tencent.tmgp.pubgmhd': '和平精英',
+      'com.ss.android.ugc.aweme': '抖音',
+      'com.ss.android.article.news': '今日头条',
+      'com.taobao.taobao': '淘宝',
+      'com.alibaba.android.rimet': '钉钉',
+      'com.eg.android.AlipayGphone': '支付宝',
+      'com.tmall.wireless': '天猫',
+      'com.jingdong.app.mall': '京东',
+      'com.netease.cloudmusic': '网易云音乐',
+      'com.xunmeng.pinduoduo': '拼多多',
+      'com.sina.weibo': '微博',
+      'com.zhihu.android': '知乎',
+      'com.baidu.searchbox': '百度',
+      'com.android.chrome': 'Chrome',
+      'org.telegram.messenger': 'Telegram',
+      'com.coloros.weather2': '天气 (ColorOS)',
+      'com.heytap.market': '应用商店 (Heytap)'
+    };
+    if (known[pkg]) return known[pkg];
+    var parts = pkg.split('.');
+    return parts[parts.length - 1] || pkg;
+  }
+
+  function appsFormatBytes(n) {
+    if (n < 1024) return n + ' B';
+    if (n < 1024*1024) return (n/1024).toFixed(1) + ' KB';
+    if (n < 1024*1024*1024) return (n/1024/1024).toFixed(1) + ' MB';
+    return (n/1024/1024/1024).toFixed(2) + ' GB';
+  }
+
+  function appsLoad(silent) {
+    // Fetch /api/dpi_state (or /api/self for the self-only shortcut) + /api/self/ifaces
+    fetch('/api/dpi_state', { credentials: 'same-origin' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var self = (d && d.available && d.state && d.state.self) ? d.state.self : null;
+        appsRenderHero(self);
+        appsRenderList(self);
+      })
+      .catch(function(e){
+        if (!silent) console.warn('apps: dpi_state fetch failed', e);
+      });
+    fetch('/api/self/ifaces', { credentials: 'same-origin' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){ appsRenderIfaces(d); })
+      .catch(function(){});
+  }
+
+  function appsRenderHero(self) {
+    var stEl = document.getElementById('apps-hero-state');
+    var actEl = document.getElementById('apps-hero-active');
+    var conEl = document.getElementById('apps-hero-conns');
+    var stsEl = document.getElementById('apps-hero-status');
+    var togg = document.getElementById('apps-toggle');
+    if (!self) {
+      stEl.textContent = '未就绪';
+      actEl.textContent = '--';
+      conEl.textContent = '--';
+      stsEl.classList.add('off');
+      stsEl.innerHTML = '<span class="dot"></span>dpid 暂未上报 self 块 · 检查 logs/dpid.log';
+      if (togg) togg.classList.remove('on');
+      return;
+    }
+    var apps = self.apps_by_uid || {};
+    var uids = Object.keys(apps);
+    var totalConns = 0;
+    var activeCount = 0;
+    uids.forEach(function(u){
+      var a = apps[u];
+      totalConns += (a.active_conns || 0);
+      if ((a.active_conns || 0) > 0) activeCount++;
+    });
+    stEl.textContent = self.enabled ? '运行中' : '已关闭';
+    actEl.textContent = activeCount + (uids.length > activeCount ? ' / ' + uids.length : '');
+    conEl.textContent = totalConns;
+    if (togg) togg.classList.toggle('on', !!self.enabled);
+    if (self.enabled) {
+      stsEl.classList.remove('off');
+      var lt = self.last_attrib_tick;
+      var ago = lt ? Math.max(0, Math.floor(Date.now()/1000 - lt)) + ' 秒前' : '采样未开始';
+      stsEl.innerHTML = '<span class="dot"></span>采样器活跃 · ' + ago +
+                       ' · pm 缓存 ' + (self.pkg_cache_size || 0) + ' 个包';
+    } else {
+      stsEl.classList.add('off');
+      stsEl.innerHTML = '<span class="dot"></span>采样器停止 · ' +
+                       (self.reason || 'flag file 不存在');
+    }
+  }
+
+  function appsRenderIfaces(ifData) {
+    var row = document.getElementById('apps-iface-row');
+    if (!row) return;
+    if (!ifData || !ifData.ifaces) {
+      row.innerHTML = '<span style="color:var(--text-3);font-size:12px">(接口信息不可用)</span>';
+      return;
+    }
+    var bits = [];
+    if (ifData.ap_iface) {
+      bits.push('<span style="color:var(--text-3);font-size:11.5px;font-weight:600">热点接口:</span> ' +
+                '<span class="iface-chip skip" title="HNC 主路径已在抓">' +
+                appsEsc(ifData.ap_iface) + ' (AP)</span>');
+    }
+    var elig = ifData.ifaces.filter(function(x){ return x.eligible; });
+    var skip = ifData.ifaces.filter(function(x){ return !x.eligible && (x.name !== ifData.ap_iface); });
+    elig.slice(0, 6).forEach(function(it){
+      var kind = it.name.indexOf('rmnet') === 0 || it.name.indexOf('ccmni') === 0 ? '5G/4G'
+               : it.name.indexOf('wlan') === 0 ? 'WiFi'
+               : it.name.indexOf('eth') === 0 ? '以太' : '';
+      bits.push('<span class="iface-chip elig" title="rx_bytes=' + (it.rx_bytes||0) + '">' +
+                appsEsc(it.name) + (kind ? ' · ' + kind : '') + '</span>');
+    });
+    skip.slice(0, 4).forEach(function(it){
+      bits.push('<span class="iface-chip skip" title="' + appsEsc(it.reason || 'skipped') + '">' +
+                appsEsc(it.name) + '</span>');
+    });
+    row.innerHTML = bits.join(' ');
+  }
+
+  function appsRenderList(self) {
+    var list = document.getElementById('apps-list');
+    if (!self || !self.apps_by_uid || Object.keys(self.apps_by_uid).length === 0) {
+      var hint = !self ? 'dpid 未上报 self · 检查后端' :
+                 !self.enabled ? '采样器未开启 · 去 "设置" 子页打开开关 (5 秒内生效)' :
+                 '采样器刚开启 · 等下一次采样...';
+      list.innerHTML = '<div style="padding:40px 20px;text-align:center;color:var(--text-3)">' +
+                       appsEsc(hint) + '</div>';
+      return;
+    }
+    var apps = self.apps_by_uid;
+    var rows = Object.keys(apps).map(function(uid){
+      return { uid: parseInt(uid, 10), app: apps[uid] };
+    });
+    // Sort: active first (by active_conns desc), then by last_seen desc
+    rows.sort(function(a, b){
+      var aa = a.app.active_conns || 0, ba = b.app.active_conns || 0;
+      if (aa !== ba) return ba - aa;
+      return (b.app.last_seen || 0) - (a.app.last_seen || 0);
+    });
+    var html = rows.slice(0, 50).map(function(r){
+      var a = r.app;
+      var icon = appsClassifyIcon(a.pkg);
+      var name = appsDisplayName(a.pkg, r.uid);
+      var snis = (a.top_snis || []).slice(0, 4);
+      var rules = (a.top_rules || []).slice(0, 3);
+      var metaHTML = '';
+      if (snis.length || rules.length) {
+        metaHTML = '<div class="app-meta-row">' +
+          snis.map(function(s){
+            return '<span class="app-meta-pill sni">' + appsEsc(s) + '</span>';
+          }).join('') +
+          rules.map(function(r){
+            return '<span class="app-meta-pill rule">' + appsEsc(r) + '</span>';
+          }).join('') +
+          '</div>';
+      }
+      var pkgLine = (a.pkg ? appsEsc(a.pkg) : '(pm 未解析)') + ' · uid ' + r.uid;
+      return '<div class="glass-elevated app-card">' +
+        '<div class="app-card-head">' +
+          '<div class="app-icon ' + icon.cls + '">' + appsEsc(icon.letter) + '</div>' +
+          '<div><div class="app-name">' + appsEsc(name) + '</div>' +
+               '<div class="app-pkg">' + pkgLine + '</div></div>' +
+          '<div class="app-uid-badge">' +
+            '<span class="conns">' + (a.active_conns || 0) + '</span><br>活跃连接' +
+          '</div>' +
+        '</div>' +
+        metaHTML +
+      '</div>';
+    }).join('');
+    list.innerHTML = html;
+  }
+
+  window.appsSwitchSub = function(name, btn) {
+    var seg = document.getElementById('apps-seg');
+    if (seg) seg.querySelectorAll('button').forEach(function(b){ b.classList.remove('on'); });
+    btn.classList.add('on');
+    document.querySelectorAll('.apps-sub-view').forEach(function(v){ v.classList.remove('on'); });
+    var target = document.getElementById('apps-sub-' + name);
+    if (target) target.classList.add('on');
+    if (name === 'export') appsLoadExports();
+  };
+
+  window.appsToggleSelf = function(togEl) {
+    var willEnable = !togEl.classList.contains('on');
+    togEl.classList.toggle('on'); // optimistic
+    fetch('/api/self/toggle', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: willEnable })
+    }).then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d && d.error) {
+          togEl.classList.toggle('on'); // revert
+          if (window.toast) toast('切换失败: ' + d.error, 'err');
+        } else {
+          if (window.toast) toast(willEnable ? '已开启 · 5 秒内出现数据' : '已关闭', 'ok');
+          setTimeout(function(){ appsLoad(true); }, 5500);
+        }
+      })
+      .catch(function(e){
+        togEl.classList.toggle('on'); // revert
+        if (window.toast) toast('网络错误: ' + (e.message || e), 'err');
+      });
+  };
+
+  window.appsExpPickRange = function(btn, mins) {
+    document.querySelectorAll('#exp-quick button').forEach(function(b){ b.classList.remove('on'); });
+    btn.classList.add('on');
+    var now = Math.floor(Date.now() / 1000);
+    function fmt(unix) {
+      var d = new Date(unix*1000);
+      var pad = function(n){ return String(n).padStart(2, '0'); };
+      return d.getFullYear() + '-' + pad(d.getMonth()+1) + '-' + pad(d.getDate()) +
+             'T' + pad(d.getHours()) + ':' + pad(d.getMinutes());
+    }
+    document.getElementById('exp-from').value = fmt(now - mins*60);
+    document.getElementById('exp-to').value = fmt(now);
+  };
+
+  window.appsExpBuild = function() {
+    var fv = document.getElementById('exp-from').value;
+    var tv = document.getElementById('exp-to').value;
+    var notes = (document.getElementById('exp-notes').value || '').trim();
+    var fromUnix = fv ? Math.floor(new Date(fv).getTime() / 1000) : 0;
+    var toUnix = tv ? Math.floor(new Date(tv).getTime() / 1000) : 0;
+    var btn = document.getElementById('exp-build-btn');
+    var resBox = document.getElementById('exp-result');
+    btn.disabled = true;
+    btn.textContent = '⏳ 打包中...';
+    resBox.innerHTML = '';
+    fetch('/api/export', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        from: fromUnix || undefined,
+        to: toUnix || undefined,
+        notes: notes ? [notes] : undefined
+      })
+    }).then(function(r){ return r.json(); })
+      .then(function(d){
+        btn.disabled = false;
+        btn.textContent = '⚡ 打包 export';
+        if (!d || d.status !== 'ok') {
+          resBox.innerHTML = '<div class="exp-result-err">打包失败: ' +
+                             appsEsc(JSON.stringify(d)) + '</div>';
+          return;
+        }
+        var tr = (d.manifest && d.manifest.tracks) || {};
+        var trkLines = [];
+        Object.keys(tr).forEach(function(k){
+          var v = tr[k];
+          if (v && v.included) {
+            trkLines.push(k + ': ' + (v.file_count || 1) + ' 个文件 / ' +
+                          appsFormatBytes(v.bytes_total || 0));
+          }
+        });
+        resBox.innerHTML = '<div class="exp-result-ok">' +
+          '<b>✓ 已打包</b><br><code style="font-size:11px;font-family:var(--font-mono)">' +
+          appsEsc(d.name) + '</code> · ' + appsFormatBytes(d.size_bytes || 0) +
+          '<div style="font-size:11px;color:var(--text-3);margin-top:6px;line-height:1.6">' +
+          trkLines.map(appsEsc).join('<br>') + '</div>' +
+          '<a class="exp-row-dl" style="display:inline-block;margin-top:10px" href="' +
+          appsEsc(d.download_url) + '" download>下载 zip</a>' +
+        '</div>';
+        appsLoadExports();
+      })
+      .catch(function(e){
+        btn.disabled = false;
+        btn.textContent = '⚡ 打包 export';
+        resBox.innerHTML = '<div class="exp-result-err">网络错误: ' +
+                           appsEsc(e.message || e) + '</div>';
+      });
+  };
+
+  function appsLoadExports() {
+    fetch('/api/exports', { credentials: 'same-origin' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var list = (d && d.exports) || [];
+        var box = document.getElementById('exp-history');
+        if (list.length === 0) {
+          box.innerHTML = '<div style="padding:20px;text-align:center;color:var(--text-3)">' +
+                         '(还没打包过 export)</div>';
+          return;
+        }
+        box.innerHTML = list.map(function(x){
+          return '<div class="exp-row">' +
+            '<div>' +
+              '<div class="exp-row-name">' + appsEsc(x.name) + '</div>' +
+              '<div class="exp-row-meta">' + appsFormatBytes(x.size) + ' · ' +
+                                            appsEsc(x.modified) + '</div>' +
+            '</div>' +
+            '<a class="exp-row-dl" href="' + appsEsc(x.download_url) + '" download>下载</a>' +
+          '</div>';
+        }).join('');
+      })
+      .catch(function(){
+        document.getElementById('exp-history').innerHTML =
+          '<div style="padding:20px;text-align:center;color:var(--sys-red)">加载失败</div>';
+      });
+  }
+
+  function appsEsc(s) {
+    if (s == null) return '';
+    return String(s).replace(/[&<>"']/g, function(c){
+      return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+    });
+  }
 
 })();
 </script>

@@ -25,6 +25,8 @@
 <nav class="tabs">
   <button class="tab on" data-tab="devices" onclick="switchTab('devices')">设备</button>
   <button class="tab" data-tab="stats" onclick="switchTab('stats')">统计</button>
+  <button class="tab" data-tab="self" onclick="switchTab('self')">我的应用</button>
+  <button class="tab" data-tab="export" onclick="switchTab('export')">导出</button>
 </nav>
 
 <main>
@@ -70,6 +72,54 @@
   <div class="legend">
     <span><i class="dot rx"></i>下行 (RX)</span>
     <span><i class="dot tx"></i>上行 (TX)</span>
+  </div>
+</section>
+
+<section id="tab-self" class="tab-content" style="display:none">
+  <div class="section-head">
+    <h2>我的应用</h2>
+    <span class="meta" id="self-meta">--</span>
+  </div>
+  <div class="self-toggle-row">
+    <label class="self-toggle">
+      <input type="checkbox" id="self-toggle-input" onchange="toggleSelf(this.checked)">
+      <span>开启自身流量追踪</span>
+    </label>
+    <span class="self-toggle-hint">关闭状态下不会读取 /proc/net,不会调用 pm list packages</span>
+  </div>
+  <div id="self-ifaces-row" class="meta" style="margin-bottom:.6em">--</div>
+  <div id="self-apps-list" class="list">
+    <div class="loading">未开启 / 加载中...</div>
+  </div>
+</section>
+
+<section id="tab-export" class="tab-content" style="display:none">
+  <div class="section-head">
+    <h2>导出给 Claude 分析</h2>
+  </div>
+  <div class="quick" style="margin-bottom:.6em">
+    <button onclick="setExportRange(15)">最近 15 分钟</button>
+    <button onclick="setExportRange(60)">最近 1 小时</button>
+    <button onclick="setExportRange(180)">最近 3 小时</button>
+    <button onclick="setExportRange(360)">最近 6 小时</button>
+  </div>
+  <div class="form-row">
+    <label for="export-from">起始</label>
+    <input id="export-from" type="datetime-local" step="60">
+  </div>
+  <div class="form-row">
+    <label for="export-to">结束</label>
+    <input id="export-to" type="datetime-local" step="60">
+  </div>
+  <div class="form-row">
+    <label for="export-notes">备注</label>
+    <textarea id="export-notes" placeholder="给 Claude 的上下文(可空)"></textarea>
+  </div>
+  <button class="primary" onclick="buildExport()">打包 export zip</button>
+  <div id="export-result"></div>
+  <h3 style="margin-top:1em">最近的导出</h3>
+  <div id="exports-list" class="list">
+    <div class="loading">加载中...</div>
   </div>
 </section>
 
