@@ -85,7 +85,8 @@ QOS_SCALE_FILE="$HNC_DIR/run/tc_qos_scale"
 # When enabled, delay-free device classes use fq_codel/CAKE leaf qdisc instead of
 # the old netem-0ms placeholder. Any real delay/jitter/loss still forces netem.
 SQM_MODE_FILE="$HNC_DIR/run/sqm_mode"
-SQM_PROFILE_FILE="$HNC_DIR/run/sqm_profile"
+# rc30.13.1 cleanup: SQM_PROFILE_FILE 在此文件无任何引用 (真实使用在
+# sqm_manager.sh 自己声明). 这里只是 SC2034 死变量, 删掉.
 
 json_top_string() {
     local key=$1 file=${2:-$RULES_FILE}
@@ -656,8 +657,10 @@ ensure_device_class() {
         fi
     fi
 
-    # 4. 创建 u32 filter
-（若有 IP）
+    # 4. 创建 u32 filter (若有 IP)
+    # rc30.13.1 fix: 上一版续行 `（若有 IP）` 没有 `#` 前缀, shell 把中文括号
+    # 当成命令执行, 每次 ensure_device_class 都报 command not found 污染 stderr.
+    # 还活着是因为没开 set -e. 合并进上一行注释即可.
     local u32_ok=0
     if [ -n "$ip" ]; then
         if [ "$direction" = "src" ]; then

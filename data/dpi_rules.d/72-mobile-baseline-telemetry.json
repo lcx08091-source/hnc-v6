@@ -1,0 +1,38 @@
+{
+  "schema_version": "2.0",
+  "subset": "72-mobile-baseline-telemetry",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#72-mobile-baseline-telemetry",
+  "rules": [
+    {
+      "id": "cmcc_dm_self_register",
+      "app": "中国移动 CMCC DM (终端强制注册)",
+      "category": "system_telemetry_baseline",
+      "confidence": "high",
+      "suffixes": [
+        "fxltsbl.com"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: a.fxltsbl.com. 中国移动终端管理平台 (CMCC DM Self-Registration). 2017 年起所有入移动产品库的安卓终端 (定制/非定制) 必须支持. 首次开机即上报 IMEI 等系统基础信息. 适配文档地址 test.fxltsbl.com/Q1w2e3 (CSDN 公开). 此规则归 baseline telemetry, 不归任何前台 app"
+      }
+    },
+    {
+      "id": "qualcomm_xtra_gnss",
+      "app": "Qualcomm GNSS 辅助服务 (GPS XTRA)",
+      "category": "system_chipset",
+      "confidence": "high",
+      "suffixes": [
+        "qualcomm.cn",
+        "xtracloud.cn"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: qcc.qualcomm.cn / nts.prod.xtracloud.cn / pathcf.prod.xtracloud.cn. Qualcomm GNSS Assistance Service / GPS XTRA, 高通芯片自带, 上传少量技术数据换 GPS 辅助文件以加速定位首次锁定. 不传位置出设备. 所有骁龙设备本地服务, 归 chipset baseline"
+      }
+    }
+  ]
+}

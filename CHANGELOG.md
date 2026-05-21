@@ -1,367 +1,55 @@
 
-## v5.3.0-rc30.12.37
-
-**发布日期**: 2026-05-20
-**versionCode**: 530157
-**致谢**: DPI 规则集 ground_truth #3 增量 — B 站 biligame 子域 + 夸克 quark
-
-### 概述
-
-rc36 加完 zhuanzhuan 后 Ling 在真机上跑了**第三次** ground_truth 抓包
-验证 (`tools/ground_truth/capture-self.sh`):
-
-- **抓包时间**: 2026-05-20 14:30:58, 持续 **10 分钟**
-- **设备**: Realme RMX5010 / ColorOS / Android 16 / 5G
-- **接口**: rmnet_ipa0 / rmnet_data0 / rmnet_data2
-- **覆盖**: 13644 包, 35 个 TLS SNI, 85 条独立流
-- **前台 app**: tv.danmaku.bili (B 站, 287 次) + com.xingin.xhs (小红书, 221 次)
-
-对照 rc36 v3 规则集 (145 条):
-
-| 指标 | 结果 | 对比 #2 |
-|---|---|---|
-| SNI 命中 | **32/35 (91.4%)** | #2 是 96.7% |
-| 流量覆盖率 | **80/85 (94.1%)** | #2 是 97.8% |
-| 漏 | **3 条** (5 流) | #2 是 1 条 (2 流) |
-
-**完美命中的 3 个 app**:
-- 哔哩哔哩: 10 个 SNI / 44 流 (`bilibili.com` + `hdslb.com` + `bilivideo.com` + `biliapi.net` 联合)
-- 小红书: 15 个 SNI / 24 流 (`xiaohongshu.com` + `xhscdn.com` 联合)
-- ColorOS/Realme 设备识别: 6 个 SNI / 9 流
-
-**3 个 MISS**:
-1. `line3-h5-mobile-api.biligame.com` (2 流) — B 站游戏中心, biligame.com
-   不在 bilibili 规则 suffixes 里 — **本版补**
-2. `unet.quark.cn` (2 流) — 夸克 (阿里系) — **本版补**
-3. `hw-edge-v2.solseed.cn` (1 流) — solseed 来源不明且只 1 流量 — **本版不补**,
-   等下次 ground_truth 看是否复现
-
-### 改动
-
-只动 **`data/` 下 3 个文件**, 零代码改动 (Go / C / WebUI / shell 全不动):
-
-#### 1. `data/dpi_rules.d/40-media-cn.json` — bilibili 规则升级
-
-- `suffixes` 加 `biligame.com` (新增, 覆盖 B 站游戏中心相关子域)
-- `confidence` 从 `high` 升 `very_high` (本版起 B 站有真机 ground_truth 印证)
-- 新加 `ground_truth_2026_05_20` metadata 字段,记录 11 个观察到的子域 + 46 流证据
-- `rules_version`: `...v6-valorant-mobile#40-media-cn` → `...v7-bilibili-very-high#40-media-cn`
-
-#### 2. `data/dpi_rules.d/32-alibaba.json` — 加 quark 规则
-
-新加 1 条:
-
-```json
-{
-  "id": "quark",
-  "app": "夸克",
-  "category": "tool",
-  "confidence": "high",
-  "rationale": "夸克 - 阿里系搜索/浏览器/网盘综合产品...",
-  "suffixes": ["quark.cn"]
-}
-```
-
-`rules` 按 id 字典序重排, 10 → 11 条规则. `rules_version`:
-`...v6-valorant-mobile#32-alibaba` → `...v7-quark#32-alibaba`.
-
-#### 3. `data/dpi_rules.json` (派生产物)
-
-跑 `python3 tools/dpi_rules_split.py sync-legacy` 重生成, 145 → 146 条,
-63582 → 64864 bytes (+1282).
-
-派生产物 `rules_version` 手动覆盖为:
-
-```
-hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile+2026-05-20-v7-zhuanzhuan+bilibili-very-high+quark+derived-from-dpi_rules.d
-```
-
-(累积反映 rc35→rc36→rc37 三次 v7 增量)
-
-### 装机验证
-
-1. **`l3_rule_version` 字段应展示 3 个 v7 bucket**:
-   ```sh
-   su -c 'grep -oE "v7-[a-z-]+#[a-z0-9-]+" /data/local/hnc/run/dpi_state.json | sort -u'
-   ```
-   预期输出:
-   ```
-   v7-bilibili-very-high#40-media-cn
-   v7-quark#32-alibaba
-   v7-zhuanzhuan#41-social-shopping-cn
-   ```
-
-2. **总规则数 146**: dpid 启动日志或 dpi_state.json 的 rule count = 146
-
-3. **very_high 17 条**: rc36 是 16, 本版 bilibili 升级 +1
-
-4. **ground_truth #4 应该 100% 命中(除非 solseed 复现或又出新 SNI)**
-
-### 累计 ground_truth 历史
-
-| # | 时间 | 时长 | 包数 | SNI | SNI 命中率 | 流量覆盖率 | 结果 |
-|---|---|---|---|---|---|---|---|
-| #1 | 2026-05-19 | 13 min | 2261 | 93 | — | — | 加无畏契约规则 (rc34) |
-| #2 | 2026-05-20 13:43 | 20 min | 6033 | 47 | 96.7% | 97.8% | 加转转规则 (rc36) |
-| #3 | 2026-05-20 14:30 | 10 min | 13644 | 35 | 91.4% | 94.1% | 加 biligame + quark (rc37) |
-
-**rc37 累计 146 条规则 + 3 次真机印证**, DPI 规则集对国内主流 app 覆盖
-非常扎实.
-
-### 跟 rc35/rc36 的关系
-
-- rc35 改 `bin/` / `docs/` / `.md` (TASK-c/d Stage 2 + 撤回 B3)
-- rc36 改 `data/dpi_rules.d/41-social-shopping-cn.json` + 派生产物 (zhuanzhuan)
-- **rc37 改 `data/dpi_rules.d/{40-media-cn,32-alibaba}.json` + 派生产物**
-
-三版完全正交, 可以叠加 unzip. 如果 Ling 没 push rc35/rc36, unzip rc37 zip
-也只会覆盖 3 个 dpi_rules.d 文件 + 派生产物 + module.prop + CHANGELOG, 不会
-碰到 rc35/rc36 的其他改动.
-
-### 不在本版范围
-
-- **hw-edge-v2.solseed.cn** (ground_truth #3 第 3 个 miss): 来源不明,
-  1 流量太小. v5.3.1 ground_truth #4 看是否复现, 复现再 web_search 确认
-  归属再加规则.
-- **sync-legacy 算法增强**: 仍是手动覆盖派生产物 rules_version (跟 rc36 同样的
-  workaround). 修法留 v5.3.1.
-- **rc35 全部 backlog**: P1.4/P1.10/TASK-i/TASK-d Stage 3 等仍不在本版范围.
-
----
-
-
-## v5.3.0-rc30.12.36
-
-**发布日期**: 2026-05-20
-**versionCode**: 530156
-**致谢**: DPI 规则集 ground_truth #2 增量 — 转转 (zhuanzhuan) 加规则
-
-### 概述
-
-rc35 收完零风险 3 件后, Ling 在真机上跑了第二次 ground_truth 抓包验证
-(`tools/ground_truth/capture-self.sh`):
-
-- **抓包时间**: 2026-05-20 13:43:52, 持续 20 分钟
-- **设备**: Realme RMX5010 / ColorOS / Android 16 / 5G
-- **接口**: rmnet_ipa0 / rmnet_data0 / rmnet_data2 (3 个移动数据接口)
-- **覆盖**: 6033 包, 47 个 TLS SNI, 109 条独立流
-- **前台 app**: com.tencent.tmgp.codev (无畏契约源能行动, 99% 占比) +
-  com.smile.gifmaker (快手, 偶现)
-
-对照 v3 规则集 v6 版本 (rc34 已上 ship) 145 个 SNI 桶:
-
-| 指标 | 结果 |
-|---|---|
-| SNI 命中 | **29/30 (96.7%)** |
-| 流量覆盖率 | **90/92 (97.8%)** |
-| 漏 | **1 条** (`ad.zhuanzhuan.com`, 2 流) |
-
-**漏的分析**: `ad.zhuanzhuan.com` 是 **转转(二手交易电商)** 的广告域名,
-应该归类到 `41-social-shopping-cn.json` 桶 (跟京东 / 拼多多 / 美团 / 小红书
-等国内社交电商同类). v3 v6 curated 列表里漏了转转, 本版补.
-
-### 改动
-
-只动 **`data/` 下 2 个文件**, 零代码改动 (Go / C / WebUI / shell 全部不动):
-
-#### 1. `data/dpi_rules.d/41-social-shopping-cn.json`
-
-加 1 条规则:
-
-```json
-{
-  "id": "zhuanzhuan",
-  "app": "转转",
-  "category": "shopping",
-  "confidence": "high",
-  "rationale": "转转二手交易电商. 数据来源: 2026-05-20 13:43 RMX5010+ColorOS+5G 真机 pcap (HNC v5.3.0-rc30.12.34 ground_truth #2), 20 分钟 6033 包 47 SNI 命中 ad.zhuanzhuan.com 共 2 流. 当前主域 zhuanzhuan.com 涵盖 ad/api/m/cdn 子域. 中国头部二手电商, 跟 41-social-shopping-cn 桶其他 9 个国内社交电商同类.",
-  "suffixes": ["zhuanzhuan.com"]
-}
-```
-
-`rules_version` 从 `...2026-05-19-v6-valorant-mobile#41-social-shopping-cn`
-bump 到 `...2026-05-20-v7-zhuanzhuan#41-social-shopping-cn`. 其他 22 个
-bucket **不动**, 仍是 v6.
-
-`rules` 数组重新按 id 字典序排序, 保证 sync-legacy 跟 split 输出幂等一致.
-
-#### 2. `data/dpi_rules.json` (派生产物自动重生成)
-
-跑 `python3 tools/dpi_rules_split.py sync-legacy` 把 `dpi_rules.d/` 145 条
-规则反向合并到派生产物. 144 → 145 条规则, 63022 → 63536 bytes (+514).
-
-派生产物的 `rules_version` 手动覆盖为:
-
-```
-hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile+2026-05-20-v7-zhuanzhuan+derived-from-dpi_rules.d
-```
-
-原因: sync-legacy 默认用最长公共前缀算法, 在 v6/v7 混合状态下会截断成
-`...2026-05-+derived-from-dpi_rules.d` 丢信息. 手动覆盖让派生产物头部
-能看到 "v6 主体 + v7 增量" 这件事. (sync-legacy 算法增强是 v5.3.1
-backlog, 见下文未做项)
-
-### 装机验证
-
-1. **`l3_rule_version` 字段应展示 mixed 状态**:
-   ```
-   external-d:hnc-curated-...-v6-valorant-mobile#00-core-meta,
-              ...#10-tencent-im,
-              ...#20-tencent-game,
-              ...
-              hnc-curated-...-v7-zhuanzhuan#41-social-shopping-cn,  ← 唯一 v7
-              ...
-              hnc-curated-...-v6-valorant-mobile#81-overseas-misc
-   ```
-   预期: 22 个 bucket 是 `v6-valorant-mobile`, 1 个 bucket
-   (`41-social-shopping-cn`) 是 `v7-zhuanzhuan`. 装机后 grep 验证:
-   ```sh
-   su -c 'grep -o "v7-zhuanzhuan" /data/local/hnc/run/dpi_state.json | wc -l'
-   ```
-   应输出 `1`.
-
-2. **ground_truth #3 应该 100% 命中**: 重新跑一次 `capture-self.sh` 20 分钟,
-   如果还会出现 `ad.zhuanzhuan.com` 流量, 应该被识别为 `zhuanzhuan` → shopping.
-
-3. **总规则数 145**: dpid 启动日志或者 dpi_state.json 的 rule count 应该是 145.
-
-### 跟 rc35 的关系
-
-rc35 改的是: TASK-c Stage 2 (stats_v52 注释清理 + README + ARCHITECTURE
-第十一节) + TASK-d Stage 2 (hnc_common.sh + 单测) + 撤回 B3 (删 inject 脚本).
-**全部在 bin/ / docs/ / .md 文件, 不动 data/dpi_rules*.**
-
-rc36 改的是: **只动 data/dpi_rules.d/41-social-shopping-cn.json +
-data/dpi_rules.json (派生产物)**. **不动 bin/ / docs/ / .md.**
-
-两版改动**完全正交**, 可以:
-- 先 rc35 后 rc36 (推荐, 按顺序)
-- rc35/36 一起 push (打包成 rc36 commit, 因为 rc35 改的文件 rc36 也包含)
-- 单独 push rc36 (跳过 rc35, 不推荐, 那 stats_v52 注释清理这件事就没了)
-
-### 不在本版范围
-
-- **sync-legacy 算法增强**: 公共前缀算法在 mixed version 状态下会截断信息.
-  这次手动覆盖 rules_version 是 workaround. 真正的修法是改 `cmd_sync_legacy`
-  的 `common_prefix()` 调用, 改成"列出所有不同的 version label". 留 v5.3.1.
-- **rc35 backlog**: P1.4 / P1.10 / TASK-i / TASK-d Stage 3 / A1 LICENSE 等
-  全部不在本版范围.
-
----
-
-
-## v5.3.0-rc30.12.35
+## v5.3.0-rc30.13.0
 
 **发布日期**: 2026-05-20
 **versionCode**: 530155
-**致谢**: 零风险 3 件批量收口 — v5.3.0 stable 临门一脚
+**类型**: rules-only patch · 零二进制变更
+**致谢**: AHNC export 实测分析驱动 (Claude / AHNC v0.3.1-dev 抓的 6h 热点流量)
 
 ### 概述
 
-rc34 做完 A+B 档 6 件后, 剩下 backlog 评估下来真正能做又确实有价值的
-只有 3 件零风险动作. 本版做完它们后, v5.3.0 stable 的工程债基本归零,
-可以装机观察 → tag stable.
+rc30.12.34 收完 v5.3 stable 收尾后, AHNC v0.3.1-dev 第一次端到端跑通,
+6h 热点 export 给 Claude 分析 raw pcap SNI, 回填本版 9 个 `data/dpi_rules.d/`
+文件 / 24 条 rule / 56 个 suffix.
 
-风险: **极低**. 本版无 Go/C 代码改动, 改动以纯文档 + 新加文件为主.
-装机后 `dpi_state.json` 的 `l3_rule_version` 字段应保持 `external-d:`
-前缀不变 (跟 rc32/33/34 字节等价).
+**这次 export 上的命中率**:
+- 之前 rc30.12.34: 296/360 unique SNI (82.2%), 1195/1470 次出现 (81.3%)
+- 之后 rc30.13.0:  345/360 unique SNI (95.8%), 1444/1470 次出现 (98.2%)
 
-### 1. 撤回 rc34 B3 (inject_version_to_docs.sh 删)
+详见 `PATCH-NOTES-v5.3.0-rc30.13.0.md`.
 
-Ling 在 rc34 push 后确认 `bin/inject_version_to_docs.sh` 不准备接入
-CI, 一人维护项目手改 2 个文档字段比维护脚本 + 改 yml 更省事. **rc34
-B3 是过度工程**, 本版撤回:
+### 风险
 
-- `README.md` 头部 `{{VERSION}} ({{DATE}})` 改回 `v5.3.0-rc30.12.35
-  (2026-05-20)` 字面值, 注释改成 "手动维护, 跟 module.prop 同步"
-- `ARCHITECTURE.md` 同样改回
-- `tools/cleanup-b3-revert.sh` 一次性清理脚本: `git rm
-  bin/inject_version_to_docs.sh` (patch zip 无法表达删除, 必须手动跑)
+**极低**. 纯规则数据回填. 不动 dpid / hnc_httpd / launcher 任何 Go / C 代码,
+0 byte 二进制变更. 装机后 `dpi_state.json` 的:
+- `l3_rule_version` 跟 rc30.12.34 不同 (因为 dpi_rules.d/ 集合变了, 是预期的)
+- `external-d:` 前缀不变
 
-**教训** (写进 ARCHITECTURE.md 第十一节命名反模式 #4): 一人项目的过度
-自动化是反模式, 真正需要的是简单可维护.
+### 新增 dpi_rules.d/ 文件清单
 
-### 2. TASK-c Stage 2 — stats_v52_* 注释清理 + README
+```
+02-doh-sni-extra.json              2 rules   阿里 DoH / 腾讯 DoH SNI 补充
+35-microsoft-extra.json            2 rules   microsoftonline / skype / xiaomixiaoai
+36-bytedance-music.json            2 rules   汽水音乐 + 字节 HTTPDNS
+42-caiyun.json                     1 rule    彩云科技全家桶
+44-cn-utility.json                 5 rules   酷安 / 搜狗 / MT / Via / 拼多多补充
+55-rom-coloros-extras.json         2 rules   HeyTap 内部域 + Realme Allawn 天气
+72-mobile-baseline-telemetry.json  2 rules   CMCC DM + Qualcomm GPS XTRA
+82-third-party-sdk.json            6 rules   Sentry/Segment/Datadog/Sift/作业帮/finzfin
+84-code-hosting.json               2 rules   GitHub / Gitee
+```
 
-GPT 一审 P2.13 抱怨 `stats_v52_*.sh` 暴露历史 rc 编号. 实测仓库现状:
-没有 `rc1_13`/`rc1_14` 这种命名 (报告作者按"假想可能存在"写的), 真正
-暴露历史的是脚本顶部注释 `# HNC hotfix22.x v5.2 stats ...`.
+合计 dpi_rules.d/: 23 → 32 文件, 144 → 168 rules.
 
-按 rc34 TASK-c 设计稿 (`docs/TASK-c-stats-v52-rename-plan.md`) 选定的
-"方案 C 一动不如一静": **不重命名文件**, 只改注释.
+### 待办 (rc31 候选)
 
-实施:
-
-- 9 个脚本头注释改写, 例:
-  ```
-  之前: # stats_v52_diag_bundle.sh — HNC hotfix22.3 v5.2 stats diagnostic aggregator
-  之后: # stats_v52_diag_bundle.sh — v5.2 stats diagnostic aggregator (since v5.2-hotfix22.3)
-  ```
-  功能描述放前面, 历史 rc 标在 since 字段
-  (`stats_v52_web_status.sh` 注释里没历史 rc, 不动)
-- 新加 `bin/stats_v52_README.md` 解释 v52 前缀历史 + 调用方清单 +
-  v6.0 重命名迁移路径
-- `ARCHITECTURE.md` 加第十一节 "命名反模式与历史包袱", 把 v5.0-v5.3
-  真实出现过的 4 个命名失误 (rc 编号入文件名 / hotfix 编号入文件名 /
-  双源码树副本 / 文档自动化过度工程) 列出来当反模式手册
-
-零文件 rename — 调用方 (5 处 hardcode 文件名) 零影响.
-
-### 3. TASK-d Stage 2 — `bin/hnc_common.sh` 公共库 + 单元测试
-
-按 rc34 TASK-d 设计稿 (`docs/TASK-d-hnc-common-shell-design.md`)
-Stage 2 落地. **本版不动现有 22 个脚本**, 只加新文件:
-
-- `bin/hnc_common.sh` (~120 行, mksh/POSIX 兼容):
-  - 路径常量: `HNC_DIR` / `HNC_BIN` / `HNC_ETC` / `HNC_RUN` /
-    `HNC_LOGS` / `HNC_DATA`
-  - 日志: `hnc_log_init <path> [tag]` / `hnc_log <msg>` /
-    `hnc_log_error <msg>` (自动 mkdir + 256KB rotate, 没 init 走 stdout)
-  - 工具: `hnc_sq <str>` (shell quote, 单引号转义, eval 安全) /
-    `hnc_json_get_top <file> <key>` (顶层 JSON 字符串读取)
-  - 锁: `hnc_lock_acquire <lockfile>` / `hnc_lock_release` (简单
-    singleton, 检测 stale lock 自动覆盖)
-  - 校验: `hnc_is_uint <s>` / `hnc_is_uint_gt0 <s>` (规则参数校验常用)
-
-- `test/unit/test_hnc_common.sh` (15 个 case, 覆盖所有 9 个函数):
-  - 日志: init + log + 没 init 走 stdout + error 写 stderr
-  - shell quote: 简单串 + 含单引号串 + eval 安全
-  - JSON: 读取正常 key / 不存在 key / 不存在文件
-  - 锁: fresh / release / 活跃持锁拒绝 / stale 覆盖
-  - 数字: 0/正整数/负数/字母/小数/空串
-
-**Stage 3 (v5.3.1+) 才逐个迁移现有 22 个脚本到本库**. 本版做 Stage 2
-的价值是给 Stage 3 留接口, 同时本库本身就是一份可读性高的公共代码.
-
-### 验收
-
-1. **零 Go/C 代码改动**: `git diff --stat` 本版应只见 .md / .sh /
-   module.prop / CHANGELOG 改动
-2. `sh -n` + `shellcheck -S error` 全过 (本版 3 个新 .sh + 9 个改注释脚本)
-3. `bin/hnc_common.sh` 真跑过 9 个函数, 行为正确
-4. 装机后 `dpi_state.json` 的 `l3_rule_version` 字段保持 `external-d:`
-   前缀 (字节等价 rc34)
-5. **Ling push 前必跑**: `sh tools/cleanup-b3-revert.sh --apply`
-   完成 inject_version_to_docs.sh 的 `git rm` (patch zip 不能表达删除)
-
-### 不在本版范围 (留 v5.3.1)
-
-- **P1.4** launcher SIGKILL 升级 (改 launcher 关停, 中等风险)
-- **P1.10** check_singleton TOCTOU (改 launcher 启动, 中等风险)
-- **TASK-i** go mod vendor (vendor/ 5-10 MB 进 git, 中等风险)
-- **TASK-d Stage 3** 22 个脚本迁移到 hnc_common.sh (本版只做 Stage 2)
-- **A1** 选 LICENSE (法律选型, Ling 决定)
-- **TASK-k** capture-self.sh bug (Ling 确认不需修)
-
-### 这是 v5.3.0 stable 临门一脚
-
-push rc35 → 装机 1-2 天 (零代码改动, 不用观察 7 天) → **tag v5.3.0
-stable**. 剩下的全部进 v5.3.1 backlog, 不阻塞.
-
----
+- `90-anomaly-heuristics.json` — `sni_without_dns` + `dga_sni` 启发式打分,
+  对付这次 export 里发现的代理 SNI (`cdn-backup-pool-west.com` /
+  `df6fa9ab.qtaeixd.com`)
+- rule schema 加 `client_filter` 字段, 解决 `ms_telemetry_realme_baseline`
+  在 Windows PC 上的误归因 (这次 export 168 次命中全在 PC, 不在 Realme 手机)
 
 
-## v5.3.0-rc30.12.34
 
 **发布日期**: 2026-05-20
 **versionCode**: 530154

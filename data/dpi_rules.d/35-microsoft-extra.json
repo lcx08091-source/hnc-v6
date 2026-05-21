@@ -1,0 +1,37 @@
+{
+  "schema_version": "2.0",
+  "subset": "35-microsoft-extra",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#35-microsoft-extra",
+  "rules": [
+    {
+      "id": "microsoft_extras",
+      "app": "微软服务 (补充域)",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "microsoftonline.com",
+        "skype.com",
+        "live.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: login.microsoftonline.com (12) / config.edge.skype.com (4). 现有 microsoft_group rule 的 suffix 没覆盖到 microsoftonline / skype.com (Edge 浏览器复用 skype.com 子域做配置)"
+      }
+    },
+    {
+      "id": "xiaomi_xiaoai_tracker",
+      "app": "小米小爱跟踪",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "xiaomixiaoai.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: tracker.xiaomixiaoai.com. 小米小爱同学相关跟踪域, 现有 50-rom-xiaomi 应该覆盖但 xiaomixiaoai.com 是独立注册域"
+      }
+    }
+  ]
+}

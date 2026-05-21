@@ -1,0 +1,38 @@
+{
+  "schema_version": "2.0",
+  "subset": "02-doh-sni-extra",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#02-doh-sni-extra",
+  "rules": [
+    {
+      "id": "alibaba_doh_sni",
+      "app": "阿里 DoH (DNS over HTTPS, SNI 补充)",
+      "category": "infrastructure",
+      "confidence": "high",
+      "suffixes": [
+        "alidns.com"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: dns.alidns.com (15). 现有 00-core-meta.json 里的 alibaba_doh 用 ip_matchers (223.5.5.5/32 + 223.6.6.6/32 + 443) 识别, 漏了 SNI 路径. 这条补 SNI 维度的命中, 与 IP matcher 并存"
+      }
+    },
+    {
+      "id": "tencent_doh_sni",
+      "app": "腾讯 DoH (DNS over HTTPS, SNI 补充)",
+      "category": "infrastructure",
+      "confidence": "high",
+      "suffixes": [
+        "doh.pub",
+        "dnspod.cn"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: doh.pub (8). 腾讯 DNSPod 的 DoH 服务, doh.pub 是公开访问入口"
+      }
+    }
+  ]
+}

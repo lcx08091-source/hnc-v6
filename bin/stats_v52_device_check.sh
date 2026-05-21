@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# stats_v52_device_check.sh — v5.2 stats real-device pre-RC check (since v5.2-hotfix22.4)
+# stats_v52_device_check.sh — HNC hotfix22.4 v5.2 stats real-device pre-RC check
 # Read-only one-shot checker for real-device v5.2 stats RC validation.
 # It does not enable/disable RC, rewrite stats files, run capability_probe, or touch tc/iptables/watchdog.
 

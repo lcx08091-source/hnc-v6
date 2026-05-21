@@ -30,7 +30,8 @@ fi
 HNC_HTTPS_PORT=${HNC_HTTPS_PORT:-8443}
 HNC_LOOPBACK_PORT=${HNC_LOOPBACK_PORT:-8444}
 HNC_HTTP_REDIR_PORT=${HNC_HTTP_REDIR_PORT:-8080}
-RULES_FILE=$HNC_DIR/data/rules.json
+# rc30.13.1 cleanup: RULES_FILE 在此文件无引用. 真实读 rules.json 都是
+# 通过 sh "$HNC_DIR/bin/json_set.sh" 子调用 (它自己拼路径). 删 SC2034 死变量.
 LOG=$HNC_DIR/logs/watchdog.log
 RUN=$HNC_DIR/run
 

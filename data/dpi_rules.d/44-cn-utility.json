@@ -1,0 +1,75 @@
+{
+  "schema_version": "2.0",
+  "subset": "44-cn-utility",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#44-cn-utility",
+  "rules": [
+    {
+      "id": "coolapk",
+      "app": "酷安",
+      "category": "social",
+      "confidence": "high",
+      "suffixes": [
+        "coolapk.com"
+      ]
+    },
+    {
+      "id": "sogou_input",
+      "app": "搜狗输入法",
+      "category": "input_method",
+      "confidence": "high",
+      "suffixes": [
+        "sogou.com",
+        "shouji.sogou.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: v2.get.sogou.com / worldwide.sogou.com / ws-keyboard.shouji.sogou.com / input.shouji.sogou.com — 搜狗输入法已知子域结构"
+      }
+    },
+    {
+      "id": "mt_manager",
+      "app": "MT 管理器",
+      "category": "tool_modding",
+      "confidence": "high",
+      "suffixes": [
+        "mt2.cn"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: safe.mt2.cn / sv1.mt2.cn; mt2.cn 官方域名(MT 管理器 = Android 文件管理/逆向修改神器, https://mt2.cn/)"
+      }
+    },
+    {
+      "id": "via_browser",
+      "app": "Via 浏览器",
+      "category": "browser",
+      "confidence": "high",
+      "suffixes": [
+        "viayoo.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: c.viayoo.com; viayoo.com 是 Via 浏览器官方域 (mark.via app 的对应后端)"
+      }
+    },
+    {
+      "id": "pinduoduo_extra",
+      "app": "拼多多 (补充域)",
+      "category": "shopping",
+      "confidence": "high",
+      "suffixes": [
+        "pinduoduo.net",
+        "pddpic.com",
+        "yangkeduo.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: m.pinduoduo.net, avatar3-1.pddpic.com, api.pinduoduo.com; 拼多多除 .com 主域外还用 .net / pddpic 图片 / yangkeduo 老品牌域"
+      }
+    }
+  ]
+}

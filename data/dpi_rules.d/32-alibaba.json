@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "32-alibaba",
-  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-v7-quark#32-alibaba",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#32-alibaba",
   "rules": [
     {
       "id": "alibaba_doh",
@@ -96,16 +96,6 @@
       "suffixes": [
         "ele.me",
         "elemecdn.com"
-      ]
-    },
-    {
-      "id": "quark",
-      "app": "夸克",
-      "category": "tool",
-      "confidence": "high",
-      "rationale": "夸克 - 阿里系搜索/浏览器/网盘综合产品. 数据来源: 2026-05-20 14:30 RMX5010+ColorOS+5G 真机 pcap (HNC v5.3.0-rc30.12.36 ground_truth #3), 10 分钟 13644 包 35 SNI 命中 unet.quark.cn 共 2 流. 当前主域 quark.cn 涵盖 unet/api/m/cdn 等子域. 跟 32-alibaba 桶其他阿里系服务同类.",
-      "suffixes": [
-        "quark.cn"
       ]
     },
     {

@@ -1,0 +1,25 @@
+{
+  "schema_version": "2.0",
+  "subset": "42-caiyun",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#42-caiyun",
+  "rules": [
+    {
+      "id": "caiyun_tech",
+      "app": "彩云科技 (彩云天气/彩云小译)",
+      "category": "weather",
+      "confidence": "high",
+      "suffixes": [
+        "caiyunapp.com",
+        "caiyuncdn.com",
+        "colorfulclouds.net",
+        "cyapi.cn"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI 命中 meteorology.caiyuncdn.com / cdn-w.caiyunapp.com / gather.colorfulclouds.net / starplucker.cyapi.cn / wrapper.cyapi.cn; LinkedIn 公司页 + caiyunapp.com 官网确认 cyapi.cn 属于彩云科技 (ColorfulClouds Tech.) 同一公司,旗下 LingoCloud 小译 API base = api.interpreter.caiyunai.com,与 caiyunapp.com 文档站对应",
+        "evidence_export": "ahnc-export-20260520-110221.zip"
+      }
+    }
+  ]
+}

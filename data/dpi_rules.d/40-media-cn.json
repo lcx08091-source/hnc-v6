@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "40-media-cn",
-  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-v7-bilibili-very-high#40-media-cn",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#40-media-cn",
   "rules": [
     {
       "id": "apple_music",
@@ -17,7 +17,7 @@
       "id": "bilibili",
       "app": "哔哩哔哩",
       "category": "video",
-      "confidence": "very_high",
+      "confidence": "high",
       "suffixes": [
         "bilibili.com",
         "biliapi.net",
@@ -26,34 +26,11 @@
         "bilivideo.com",
         "bilivideo.cn",
         "b23.tv",
-        "acgvideo.com",
-        "biligame.com"
+        "acgvideo.com"
       ],
       "ground_truth_2026_05_18": {
         "source": "external_ai_pcap_analysis",
         "date": "2026-05-18"
-      },
-      "ground_truth_2026_05_20": {
-        "source": "ling_self_capture_v2",
-        "date": "2026-05-20T14:30:58+08:00",
-        "duration_seconds": 600,
-        "device": "RMX5010+ColorOS+Android16+5G",
-        "packets": 13644,
-        "sni_hit": "10/10 (bilibili.com 主域全部子域覆盖) + line3-h5-mobile-api.biligame.com (biligame.com 此版新增覆盖)",
-        "subdomains_observed": [
-          "app.bilibili.com",
-          "api.bilibili.com",
-          "cm.bilibili.com",
-          "mall.bilibili.com",
-          "passport.bilibili.com",
-          "i1.hdslb.com",
-          "i2.hdslb.com",
-          "s1.hdslb.com",
-          "upos-sz-static.bilivideo.com",
-          "grpc.biliapi.net",
-          "line3-h5-mobile-api.biligame.com"
-        ],
-        "evidence_flows": 46
       }
     },
     {

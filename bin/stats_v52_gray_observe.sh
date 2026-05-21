@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# stats_v52_gray_observe.sh — real-device gray observation helper (since v5.2-rc1.21)
+# stats_v52_gray_observe.sh — HNC v5.2-rc1.21 real-device gray observation helper.
 # Observation-only helper. It does not enable v5.2 RC, switch stats source,
 # or touch tc/watchdog/limit/delay. By default it refreshes the derived
 # same-day shadow rollup when raw samples exist so daily totals are not stale.

@@ -1,0 +1,110 @@
+{
+  "schema_version": "2.0",
+  "subset": "82-third-party-sdk",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#82-third-party-sdk",
+  "rules": [
+    {
+      "id": "sentry_telemetry",
+      "app": "Sentry 错误监控 SDK",
+      "category": "third_party_telemetry",
+      "confidence": "high",
+      "suffixes": [
+        "sentry.io",
+        "ingest.sentry.io",
+        "ingest.us.sentry.io",
+        "ingest.de.sentry.io"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: o1158394.ingest.us.sentry.io. Sentry 是开源错误监控/崩溃上报 SDK, 大量 app/小程序内嵌. 通配 oN.ingest.{region}.sentry.io 子域结构"
+      }
+    },
+    {
+      "id": "segment_analytics",
+      "app": "Segment 数据分析 SDK",
+      "category": "third_party_telemetry",
+      "confidence": "high",
+      "suffixes": [
+        "segment.io",
+        "segment.com"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: api.segment.io. Segment (Twilio 旗下) 用户行为分析平台 SDK"
+      }
+    },
+    {
+      "id": "datadog_rum",
+      "app": "Datadog RUM/APM",
+      "category": "third_party_telemetry",
+      "confidence": "high",
+      "suffixes": [
+        "datadoghq.com",
+        "datadoghq.eu",
+        "ddog-gov.com",
+        "browser-intake-datadoghq.com",
+        "browser-intake-us3-datadoghq.com",
+        "browser-intake-us5-datadoghq.com",
+        "browser-intake-ap1-datadoghq.com",
+        "browser-intake-eu1-datadoghq.com"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: browser-intake-us5-datadoghq.com. Datadog 真实用户监控/性能监控 SDK. 注: browser-intake-<region>-datadoghq.com 是单独注册的多 region 域 (不是 datadoghq.com 子域), 所以 suffix 列表要逐个列举"
+      }
+    },
+    {
+      "id": "sift_science_antifraud",
+      "app": "Sift Science 反欺诈 SDK",
+      "category": "third_party_telemetry",
+      "confidence": "high",
+      "suffixes": [
+        "siftscience.com"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: api3.siftscience.com. Sift Science 设备指纹/反欺诈, 电商支付类 app 常嵌"
+      }
+    },
+    {
+      "id": "zuoyebang_sdk",
+      "app": "作业帮 SDK (内嵌)",
+      "category": "third_party_telemetry",
+      "confidence": "high",
+      "suffixes": [
+        "zuoyebang.com",
+        "zuoyebang.cc",
+        "zybang.com"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: adx.zuoyebang.com / httpdns.zybang.com / zyb-stats.zuoyebang.cc / resourceserver.zybang.com. 作业帮自己 app 是教育, 但这些子域 (adx/stats/httpdns) 是 SDK 形式嵌入第三方, 归 telemetry"
+      }
+    },
+    {
+      "id": "finzfin_loan_sdk",
+      "app": "finzfin 信贷 SDK (推测)",
+      "category": "third_party_financial",
+      "confidence": "medium",
+      "suffixes": [
+        "finzfin.com"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": false,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: i.finzfin.com / tepoch.finzfin.com / configx.finzfin.com / gslb.finzfin.com (39.156.138.105 中国移动). 公开能查到 rloanshop.finzfin.com (registered loan shop) 形态. 推测为小额贷款 / 现金贷 SDK, 嵌在某 app 内. confidence: medium 直到能确认归属"
+      }
+    }
+  ]
+}

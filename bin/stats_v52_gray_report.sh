@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# stats_v52_gray_report.sh — shadow-aware gray observation report exporter (since v5.2-rc1.16)
+# stats_v52_gray_report.sh — v5.2-rc1.16 shadow-aware gray observation report exporter.
 # Read-only: aggregates v5.2 stats gray-release signals for human review.
 # It does not enable RC, switch stats source, or touch tc/iptables/watchdog.
 # rc1.14: uses cached helper outputs by default to avoid repeated slow diagnostics.

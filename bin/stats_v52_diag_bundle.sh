@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# stats_v52_diag_bundle.sh — v5.2 stats diagnostic aggregator (since v5.2-hotfix22.3)
+# stats_v52_diag_bundle.sh — HNC hotfix22.3 v5.2 stats diagnostic aggregator
 # Read-only single-entry diagnostic for staged v5.2 stats migration.
 # It does not enable/disable RC, rewrite stats files, or touch tc/iptables/watchdog.
 

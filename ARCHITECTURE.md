@@ -2,8 +2,8 @@
 
 > 给未来的 Ling、Claude、或者任何接手这个项目的人
 
-**版本**: v5.3.0-rc30.12.35 <!-- 手动维护, 跟 module.prop 同步 -->
-**最后更新**: 2026-05-20
+**版本**: {{VERSION}} <!-- rc30.12.34: CI build.sh 自动注入, 不要手编 -->
+**最后更新**: {{DATE}}
 
 ---
 
@@ -639,74 +639,6 @@ cat /data/local/hnc/run/devices.json | python3 -m json.tool
 - `CHANGELOG.md` — 完整版本变更记录
 - `PATCH-NOTES-v5.3.0-rc30.12.3.md` — Go fork EPERM 完整诊断 + 修复链
 - `go-fork-eperm-coloros-sukisu-diagnosis.md` — 公开技术笔记(可发布)
-- `bin/stats_v52_README.md` — `stats_v52_*` 前缀历史(rc30.12.35 新加)
-- `docs/TASK-c-stats-v52-rename-plan.md` — stats_v52 重命名分析(rc30.12.34)
-- `docs/TASK-d-hnc-common-shell-design.md` — 公共 shell 库设计稿(rc30.12.34)
-
----
-
-## 十一、命名反模式与历史包袱
-
-<!-- rc30.12.35 (TASK-c Stage 2): 给未来留规矩, 防止重蹈覆辙 -->
-
-这一节是给未来 Ling / Claude / 接手者的"不要再这样做"清单. 都是
-v5.0-v5.3 真实出现过的命名失误.
-
-### 1. 文件名里不要带 rc 编号
-
-**反例**: `stats_v52_rc1_switch.sh`, `dpi_v53_split.py`
-
-**问题**: rc 是时间维度, 不是功能维度. 当 v5.3 进入 stable, "v52" 这种
-前缀就成了化石. 但因为 5+ 个调用方 hardcode 文件名, **rename 风险高
-收益低** — 文件名永远变不掉 (见 `bin/stats_v52_README.md`).
-
-**正例**: `dpi_rules_split.py`, `stats_diag_bundle.sh`
-
-历史 rc 编号属于 git log / CHANGELOG / 文件顶部注释里的 `since v5.2-xxx`,
-**绝对不要进文件名**.
-
-### 2. hotfix 文件不要按 "hotfix第N号" 命名
-
-**反例**: `hotfix16_7_compile_compat.go`, `hotfix16_8_live_api.go`, `hotfix16_9_capability_gate.go`
-
-**问题**: rc30.12.30 已经把它们重命名为功能名 (`api_live.go`, `capability.go` 等),
-但下一次出 hotfix 时还是容易犯同样错误 — 因为"按问题第 N 号命名"反映了
-"修第 N 个 bug" 的 patch 思维, 不是"这块代码做什么"的模块思维.
-
-**正例**: 当一个 bug 修复需要新文件, 给它功能名而不是历史标号. 例:
-`tls_cert_rotation.go` 而不是 `hotfix17_3_cert.go`.
-
-### 3. 双源码树副本
-
-**反例**: rc30.12.30 → rc30.12.32 期间, `src/hnc_httpd/` 和
-`daemon/hnc_httpd/` 同时存在, README 声称"两边完全一致", 实际分叉 120+ 行.
-
-**问题**: rc30.12.30 的 hotfix\*.go 重命名修复**只在 daemon/ 做了 src/ 没碰**.
-"为了对称性"复制源码是反模式 — 维持同步靠纪律, 失败靠口头声明, 必然分叉.
-
-**正例**: rc30.12.33 删 `src/hnc_httpd/` 副本, daemon/ 是唯一源,
-ci_preflight 加 `check_no_src_httpd_dupe` 防复发.
-
-唯一源 (single source of truth) 比对称性 / 美学优先级高.
-
-### 4. 文档版本号 hardcode
-
-**反例**: README 头部写 `**版本**: v5.1.0-rc2 (2026-04-24)`, 模块已经 rc28
-了文档还没改, 拖到一审被人提.
-
-**问题**: 多份信息源容易脱节, 哪个是真不清楚.
-
-**rc30.12.34 尝试**: 改成 `{{VERSION}}` 占位符 + CI 注入. 但接入 CI 要
-改 GitHub Actions yml, Ling 一人维护, 手改 2 个字段比维护脚本 + 改 yml
-更省事. **rc30.12.35 撤回**, 改成手动维护 + 在 README/ARCHITECTURE 头部
-加注释 "手动维护, 跟 module.prop 同步".
-
-**教训**: 自动化不是越多越好. 一人项目的"过度自动化"是另一种反模式.
-
----
-
-*本节由 rc30.12.35 引入, 内容来自 v5.0-v5.3 真实失误教训. 后续如果再发现
-新的命名/文档反模式, 直接加到本节, 不要重蹈覆辙.*
 
 ---
 

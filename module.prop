@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.3.0-rc30.12.37
-versionCode=530157
+version=v5.3.0-rc30.13.1
+versionCode=530156
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.12.37 · DPI 规则集 ground_truth #3 增量 (零代码改动). 基于 2026-05-20 14:30 RMX5010+ColorOS 真机 ground_truth pcap (10 分钟 13644 包 35 SNI B站+小红书): (1) bilibili 规则加 biligame.com suffix (覆盖 line3-h5-mobile-api.biligame.com 等 B站游戏中心子域), confidence 从 high 升 very_high (有真机印证), 加 ground_truth_2026_05_20 metadata. (2) 32-alibaba 桶加 quark 新规则 (夸克: 阿里系搜索/网盘/浏览器), 覆盖 unet.quark.cn 等. 派生产物 dpi_rules.json 跟着 sync-legacy 重生成保持字节级等价. 146 条规则 (rc36 是 145, +1 quark), very_high 17 条 (rc36 是 16, +1 bilibili 升级). 装机后 l3_rule_version 应反映 3 个 v7 bucket (32-alibaba/40-media-cn/41-social-shopping-cn) 跟 20 个 v6 bucket 的 mixed 状态. ground_truth #3 漏的第三个 hw-edge-v2.solseed.cn (1 流) 不补 — solseed 来源不明且只 1 流量, 等下次 ground_truth 看是否复现.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.3.0-rc30.13.1 · 在 rc30.13.0 基础上修复审计发现的 critical/high bug: (1) tc_manager.sh L661 中文括号注释 (每次限速 stderr 报 command not found), (2) json_set.sh 5 段重复函数定义 (git merge 残留, -117 行死代码), (3) hnc_launcher.c fork 失败误导日志 + 加 fork-failure crash tracker (防 OOM 无限重试), (4) hotspotd.c write_json 加 ferror 检查 (防磁盘满时推半截 JSON), (5) 清理几个 SC2034 死变量. C 源码改了但 arm64 binary 需要 NDK 重 build (bin/hnc_launcher, bin/hotspotd 仍是 rc30.13.0 的). 仅 shell 改动 flash 即生效.
 minKernelSU=11485

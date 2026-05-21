@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "41-social-shopping-cn",
-  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-v7-zhuanzhuan#41-social-shopping-cn",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#41-social-shopping-cn",
   "rules": [
     {
       "id": "didi",
@@ -116,16 +116,6 @@
         "zhihu.com",
         "zhimg.com",
         "zhihuhcdn.com"
-      ]
-    },
-    {
-      "id": "zhuanzhuan",
-      "app": "转转",
-      "category": "shopping",
-      "confidence": "high",
-      "rationale": "转转二手交易电商. 数据来源: 2026-05-20 13:43 RMX5010+ColorOS+5G 真机 pcap (HNC v5.3.0-rc30.12.34 ground_truth #2), 20 分钟 6033 包 47 SNI 命中 ad.zhuanzhuan.com 共 2 流. 当前主域 zhuanzhuan.com 涵盖 ad/api/m/cdn 子域. 中国头部二手电商, 跟 41-social-shopping-cn 桶其他 9 个国内社交电商同类.",
-      "suffixes": [
-        "zhuanzhuan.com"
       ]
     }
   ]

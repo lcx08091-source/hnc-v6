@@ -1,0 +1,36 @@
+{
+  "schema_version": "2.0",
+  "subset": "36-bytedance-music",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#36-bytedance-music",
+  "rules": [
+    {
+      "id": "qishui_music",
+      "app": "汽水音乐",
+      "category": "music",
+      "confidence": "high",
+      "suffixes": [
+        "qishui.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI + web confirm: 字节跳动音乐 app, https://www.qishui.com/"
+      }
+    },
+    {
+      "id": "bytedance_dig",
+      "app": "字节跳动 HTTPDNS",
+      "category": "infrastructure",
+      "confidence": "high",
+      "suffixes": [
+        "bdurl.net"
+      ],
+      "do_not_attribute_to_app": true,
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "dig.bdurl.net 是字节跳动 HTTPDNS / 域名调度接口,内部基础设施"
+      }
+    }
+  ]
+}

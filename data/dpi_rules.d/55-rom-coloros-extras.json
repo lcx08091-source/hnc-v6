@@ -1,0 +1,39 @@
+{
+  "schema_version": "2.0",
+  "subset": "55-rom-coloros-extras",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#55-rom-coloros-extras",
+  "rules": [
+    {
+      "id": "oppo_heytap_extras",
+      "app": "OPPO/HeyTap 服务 (补充内部域)",
+      "category": "system",
+      "confidence": "high",
+      "suffixes": [
+        "heytapcs.com",
+        "heytapimage.com",
+        "heypiqi.com",
+        "youlishipin.com"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: opbattcloudv2.heypiqi.com / xifan.heytapimage.com / xifan-api-cn.youlishipin.com / ocs-cn-south1.heytapcs.com. heypiqi/youlishipin 是 HeyTap 内部代号域(opbattcloud = OPPO 电池云 v2; xifan = OPPO 喜番视频). 现有 51-rom-coloros.json 的 oppo_heytap suffix 列表未覆盖,这里补全"
+      }
+    },
+    {
+      "id": "realme_allawn_weather",
+      "app": "Realme 天气服务 (Allawn)",
+      "category": "system",
+      "confidence": "medium",
+      "suffixes": [
+        "allawntech.com",
+        "allawnos.com"
+      ],
+      "ground_truth": {
+        "verified": false,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: weather-server.allawntech.com (8) / weather-server.allawnos.com (3); allawn = Realme 内部天气/系统服务代号,公开资料较少,confidence 暂定 medium"
+      }
+    }
+  ]
+}

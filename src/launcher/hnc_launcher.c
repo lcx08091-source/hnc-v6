@@ -50,7 +50,7 @@
 
 /* ─── 编译期常量 ───────────────────────────────────────────────────── */
 
-#define VERSION                 "0.1.0-rc30.12.29"
+#define VERSION                 "0.1.0-rc30.13.1"
 
 #define BIN_DPID                "/data/local/hnc/bin/hnc_dpid"
 #define DPID_CONFIG             "/data/local/hnc/etc/dpi_config.json"
@@ -382,9 +382,11 @@ static int wait_dpid(pid_t pid, int *out_rc, int *out_signum)
 static int run_supervise_loop(void)
 {
 	struct crash_tracker crashes;
+	struct crash_tracker fork_fails;  /* rc30.13.1: 独立追踪 fork 失败 */
 	int backoff = RESTART_BACKOFF_MIN;
 
 	crash_tracker_init(&crashes);
+	crash_tracker_init(&fork_fails);
 
 	while (!g_shutdown) {
 		pid_t pid;
@@ -393,8 +395,20 @@ static int run_supervise_loop(void)
 		/* 启动 dpid */
 		pid = spawn_dpid();
 		if (pid < 0) {
-			log_msg("spawning dpid anyway (it will go blind mode)");
-			/* fork 失败 → 等一会儿重试. 不计入崩溃 (因为 dpid 没真跑) */
+			/* rc30.13.1 fix: 上一版日志 "spawning dpid anyway (it will
+			 * go blind mode)" 误导 — fork 失败根本没 spawn 任何东西.
+			 * 改成据实描述. 同时加 fork 失败的 crash tracker, 防止系统
+			 * OOM / ulimit 触顶时无限重试 (上一版只在 dpid 真跑起来后
+			 * 异常退出才计数, fork 失败永远不进 observe 模式). */
+			log_msg("fork failed (errno=%d), retrying after %ds backoff",
+				errno, backoff);
+			if (crash_tracker_record(&fork_fails)) {
+				log_msg("FORK_LOOP: %d fork failures in %ds window, "
+					"refusing to retry. Clear %s manually to recover.",
+					CRASH_LIMIT, CRASH_WINDOW_SEC, CRASH_FLAG);
+				write_crash_flag();
+				return 1;
+			}
 			if (g_shutdown)
 				break;
 			sleep(backoff);

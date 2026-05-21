@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# stats_v52_rc_smoke.sh — v5.2 stats RC smoke gate (since v5.2-hotfix22.2)
+# stats_v52_rc_smoke.sh — HNC hotfix22.2 v5.2 stats RC smoke gate
 # Read-only smoke checker for staged v5.2 stats migration.
 # It does not enable/disable RC, rewrite stats files, or touch tc/iptables/watchdog.
 

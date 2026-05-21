@@ -60,7 +60,7 @@
 #   缺点是无法限速"无对应上行连接的下行流量"（极罕见），可接受。
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
-RULES_FILE=$HNC_DIR/data/rules.json
+# rc30.13.1 cleanup: RULES_FILE 在此文件无引用. 子调用走 sh json_set.sh 自己拼路径.
 LOG=$HNC_DIR/logs/iptables.log
 
 log() {
@@ -80,7 +80,8 @@ if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
 else
     MARK_BASE=0x800000
 fi
-MARK_BLACKLIST=0xDEAD
+# rc30.13.1 cleanup: MARK_BLACKLIST=0xDEAD 是 v3.x 设想的"黑名单专用 mark"但从未启用,
+# 黑名单实际走 filter/HNC_CTRL DROP 而不是 mangle MARK. 删 SC2034 死变量.
 # CONNMARK 掩码：0xffffff 覆盖低 24 位，足以容纳 MARK_BASE(0x800000) + mark_id(1..99)
 # v3.4.1：从 0x1ffff 扩到 0xffffff，配合新 MARK_BASE 避开 Android netd 命名空间
 CONNMARK_MASK=0xffffff

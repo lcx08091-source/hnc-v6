@@ -1,0 +1,23 @@
+{
+  "schema_version": "2.0",
+  "subset": "84-code-hosting",
+  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#84-code-hosting",
+  "rules": [
+    {
+      "id": "gitee",
+      "app": "Gitee 码云",
+      "category": "code_hosting",
+      "confidence": "high",
+      "suffixes": [
+        "gitee.com",
+        "giteeusercontent.com",
+        "gitee.io"
+      ],
+      "ground_truth": {
+        "verified": true,
+        "date": "2026-05-20",
+        "evidence_method": "raw SNI: gitee.com / raw.giteeusercontent.com. Gitee 国内代码托管, raw.giteeusercontent.com 对应 raw.githubusercontent.com 拉文件"
+      }
+    }
+  ]
+}
