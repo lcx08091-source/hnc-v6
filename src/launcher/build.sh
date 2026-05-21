@@ -130,12 +130,20 @@ echo ""
 echo "Sanity check..."
 
 # 验证关键字符串都在
-for s in "hnc_launcher" "0.1.0-rc30.12" "/data/local/hnc/bin/hnc_dpid" "execv failed" "CRASH_LOOP"; do
+# rc30.13.1 cleanup: 原版 sanity check 写死 "0.1.0-rc30.12" 字面字符串,
+# 每次 launcher 想 bump 大版本 (比如 0.2.0) 都得改 build.sh, 是反模式.
+# 改成正则前缀匹配, 接受任意 0.X.Y-rcN(.M)* 形式的版本号.
+for s in "hnc_launcher" "/data/local/hnc/bin/hnc_dpid" "execv failed" "CRASH_LOOP"; do
     if ! strings hnc_launcher | grep -qF "$s"; then
         echo "  ERROR: hnc_launcher missing string: $s" >&2
         exit 1
     fi
 done
+# 版本字符串单独用正则匹配 (0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*)
+if ! strings hnc_launcher | grep -qE '^0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*$'; then
+    echo "  ERROR: hnc_launcher missing version string matching 0.X.Y-rcN(.M)*" >&2
+    exit 1
+fi
 
 for s in "=== fork_probe v1 ===" "FORK FAILED" "EXECV FAILED" "RESULT: C fork+execv WORKS"; do
     if ! strings fork_probe | grep -qF "$s"; then

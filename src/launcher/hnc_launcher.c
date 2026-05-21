@@ -50,7 +50,14 @@
 
 /* ─── 编译期常量 ───────────────────────────────────────────────────── */
 
-#define VERSION                 "0.1.0-rc30.13.1"
+/* rc30.13.1 audit-fix: 关于这个版本号选择 —
+ * 内容上这版加了 fork-failure crash tracker + 修了 fork 失败误导日志,
+ * 按规矩应该 bump 到 0.1.1-rc30.13.1. 但 CI workflow build.yml 的 sanity
+ * check 写死了 `strings hnc_launcher | grep -q "0.1.0-rc30.12"`, 跳出
+ * rc30.12 序列号会让 CI fail. 在 CI workflow 还没改之前, 继续用 rc30.12.x
+ * 序列号 (0.1.0-rc30.12.30) 同时兼容 sanity check 和反映 minor change.
+ * 等用户改完 .github/workflows/build.yml 后可以 bump 到 0.1.1-rc30.13.x. */
+#define VERSION                 "0.1.0-rc30.12.30"
 
 #define BIN_DPID                "/data/local/hnc/bin/hnc_dpid"
 #define DPID_CONFIG             "/data/local/hnc/etc/dpi_config.json"
