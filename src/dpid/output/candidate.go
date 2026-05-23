@@ -58,6 +58,11 @@ const (
 	// autoPromotedOutFile is the rule file brand-new-apex promotions go into.
 	autoPromotedOutFile = "_auto_promoted.json"
 
+	// candidateDecisionsFile holds user-approved apexes (manual "一键 promote"
+	// from the WebUI). dpid force-promotes these even in shadow mode. Re-read
+	// each tick (like the blocklist) so clicks take effect within 60s.
+	candidateDecisionsFile = "/data/local/hnc/etc/candidate_decisions.json"
+
 	// candSharedUIDThreshold: an apex contacted by >= this many distinct uids
 	// is treated as shared infrastructure (never attributed to one app).
 	candSharedUIDThreshold = 3
@@ -68,7 +73,7 @@ const (
 
 	candMaxApex     = 4096         // accumulator hard cap
 	candMaxPromoted = 500          // promoted-rule hard cap
-	candMaxSamples  = 12           // candidate samples surfaced in dpi_state
+	candMaxSamples  = 40           // candidate samples surfaced in dpi_state (review queue)
 	candMaxAgeSec   = 24 * 60 * 60 // drop candidates unseen for 24h
 )
 
@@ -212,6 +217,10 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 		autoPromoteOn = true
 	}
 
+	// User-approved apexes (manual "一键 promote" from the WebUI). Re-read each
+	// tick; force-promotion below works regardless of the auto_promote flag.
+	decisions := loadCandidateDecisions()
+
 	sum := candidateSummary{autoPromoteOn: autoPromoteOn}
 	changed := false
 	for apex, c := range acc.byApex {
@@ -226,21 +235,34 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 
 		if _, isProm := promoted[apex]; isProm {
 			// self-correct: a promoted apex that became multi-uid / shared
-			// was a mistake — remove the rule and never re-promote it.
+			// was a mistake — remove the rule and never re-promote it. This
+			// also fires when the user rejected it (→ blocklist → tier shared).
 			if tier == "shared" || len(c.UIDs) > 1 {
 				delete(promoted, apex)
 				c.SharedLearned = true
 				changed = true
 				log.Printf("auto-promote: demoted %s (now multi-uid/shared, uids=%d)", apex, len(c.UIDs))
 			}
-		} else if tier == "high" && autoPromoteOn && len(promoted) < candMaxPromoted {
-			pkg, label := a.DisplayForUID(uid)
-			promoted[apex] = buildPromotedRule(apex, uid, pkg, label, c, now)
-			changed = true
-			log.Printf("auto-promote: promoted %s -> %q (uid=%d hits=%d windows=%d)", apex, label, uid, c.TotalHits, c.Windows)
+		} else if (tier == "high" || tier == "med") && len(promoted) < candMaxPromoted {
+			// HIGH auto-promotes when the flag is on; HIGH or MED can be
+			// promoted manually (decisions file), which works even in shadow
+			// mode. Both are single-uid, preserving the self-correct invariant.
+			_, manual := decisions[apex]
+			if manual || (tier == "high" && autoPromoteOn) {
+				pkg, label := a.DisplayForUID(uid)
+				src := "auto_promoted"
+				if manual {
+					src = "manual_promoted"
+				}
+				promoted[apex] = buildPromotedRule(apex, uid, pkg, label, c, now, src)
+				changed = true
+				log.Printf("%s: promoted %s -> %q (uid=%d hits=%d windows=%d)", src, apex, label, uid, c.TotalHits, c.Windows)
+			}
 		}
 
-		if len(sum.samples) < candMaxSamples && (tier == "high" || tier == "shared") {
+		// surface only actionable candidates (high/med) in the review queue;
+		// shared total is reported via sum.shared, low is too ambiguous.
+		if len(sum.samples) < candMaxSamples && (tier == "high" || tier == "med") {
 			_, label := a.DisplayForUID(uid)
 			_, isProm := promoted[apex]
 			sum.samples = append(sum.samples, CandidateSample{
@@ -264,7 +286,9 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 
 // buildPromotedRule materializes a brand-new-apex rule attributed to the
 // uid's app (label from the live PackageManager resolver / curated map).
-func buildPromotedRule(apex string, uid int, pkg, label string, c *apexCandidate, now int64) autoExpandedRule {
+// source is "auto_promoted" (uid-cardinality heuristic) or "manual_promoted"
+// (user clicked 一键 promote in the WebUI).
+func buildPromotedRule(apex string, uid int, pkg, label string, c *apexCandidate, now int64, source string) autoExpandedRule {
 	if strings.TrimSpace(label) == "" {
 		label = pkg
 	}
@@ -275,15 +299,19 @@ func buildPromotedRule(apex string, uid int, pkg, label string, c *apexCandidate
 	if len(idSuffix) > 48 {
 		idSuffix = idSuffix[:48]
 	}
+	tag, conf := "自动识别", "low"
+	if source == "manual_promoted" {
+		tag, conf = "已确认", "medium" // user-confirmed → higher confidence
+	}
 	return autoExpandedRule{
 		ID:         "autopromo_" + idSuffix,
-		Name:       label + " (自动识别)",
+		Name:       label + " (" + tag + ")",
 		App:        label,
 		Category:   "auto_identified",
-		Confidence: "low", // auto-identified, not human-verified
+		Confidence: conf,
 		Suffixes:   []string{apex},
 
-		Source:       "auto_promoted",
+		Source:       source,
 		Apex:         apex,
 		ParentRuleID: "",
 		AddedAt:      now,
@@ -324,6 +352,34 @@ func writePromotedRules(promoted map[string]autoExpandedRule) error {
 		return fmt.Errorf("rename %s -> %s: %w", tmp, dst, err)
 	}
 	return nil
+}
+
+// candidateDecisionsData is the on-disk shape of candidate_decisions.json,
+// written by the WebUI action candidate_promote.
+type candidateDecisionsData struct {
+	Promote []string `json:"promote"`
+	Comment string   `json:"_comment,omitempty"`
+}
+
+// loadCandidateDecisions reads the user-approved apex list. Missing or
+// malformed file = empty set (best-effort, never an error to the caller).
+func loadCandidateDecisions() map[string]struct{} {
+	out := map[string]struct{}{}
+	data, err := os.ReadFile(candidateDecisionsFile)
+	if err != nil {
+		return out
+	}
+	var d candidateDecisionsData
+	if err := json.Unmarshal(data, &d); err != nil {
+		return out
+	}
+	for _, a := range d.Promote {
+		a = strings.ToLower(strings.TrimSpace(a))
+		if a != "" {
+			out[a] = struct{}{}
+		}
+	}
+	return out
 }
 
 // loadExistingPromoted reloads the previous run's promoted rules (keyed by apex).

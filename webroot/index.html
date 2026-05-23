@@ -3175,17 +3175,18 @@ body.kb-open .container {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           </div>
           <div class="set-info">
-            <div class="set-label">未匹配 SNI 候选审批 (v5.7 ⏳)</div>
-            <div class="set-desc">按 (uid, apex, 频率) 分 HIGH/MED/LOW 三档 · 一键 promote</div>
+            <div class="set-label">未匹配 SNI 候选审批 <span style="color:var(--sys-green);font-size:11px">✓ v5.7 已上线</span></div>
+            <div class="set-desc">按 uid 独占性分档 · HIGH 自动晋级 · MED 一键 promote · 拒绝=共享黑名单</div>
           </div>
-          <div style="font-size:11px;color:var(--text-3)">规划中</div>
+          <div class="toggle" id="apps-autopromote-toggle" onclick="appsToggleAutoPromote(this)" title="开=HIGH 自动晋级写规则; 关=影子模式(只统计, 仍可手动 promote)"></div>
         </div>
+        <div id="apps-candidate-list"></div>
       </div>
 
       <div class="set-footer">
         v5.5 ships: /proc/net 采样 + 我的应用列表 + 导出。<br>
         v5.6 ships: ✓ self-iface AF_PACKET (rmnet RawIP + tun) + SNI/uid 联合 + 子域自动扩展。<br>
-        v5.7 ships: candidate 累积器 + WebUI 审批 (走法 2)。<br>
+        v5.7 ships: ✓ candidate 累积器 + WebUI 审批 (走法 2)。<br>
         详见 <code>ARCHITECTURE.md</code> 的 v5.5+ 章节。
       </div>
     </div>
@@ -12458,6 +12459,7 @@ body.kb-open .container {
         var self = (d && d.available && d.state && d.state.self) ? d.state.self : null;
         appsRenderHero(self);
         appsRenderList(self);
+        appsRenderCandidates(self);
       })
       .catch(function(e){
         if (!silent) console.warn('apps: dpi_state fetch failed', e);
@@ -12471,6 +12473,8 @@ body.kb-open .container {
       .then(function(d){
         var togg = document.getElementById('apps-autoexpand-toggle');
         if (togg) togg.classList.toggle('on', !!(d && d.auto_expand_enabled));
+        var tg2 = document.getElementById('apps-autopromote-toggle');
+        if (tg2) tg2.classList.toggle('on', !!(d && d.auto_promote_enabled));
       })
       .catch(function(){});
   }
@@ -12755,6 +12759,104 @@ body.kb-open .container {
       .catch(function(e){
         togEl.classList.toggle('on'); // revert
         if (window.toast) toast('网络错误: ' + (e.message || e), 'err');
+      });
+  };
+
+  // v5.7.0-rc2: auto-promote toggle (gates HIGH 自动晋级; off = shadow mode).
+  window.appsToggleAutoPromote = function(togEl) {
+    var willEnable = !togEl.classList.contains('on');
+    togEl.classList.toggle('on'); // optimistic
+    apiPostJSON('/api/self/auto_promote/toggle', { enabled: willEnable })
+      .then(function(d){
+        if (d && d.error) {
+          togEl.classList.toggle('on'); // revert
+          if (window.toast) toast('切换失败: ' + d.error, 'err');
+        } else if (window.toast) {
+          toast(willEnable ? 'HIGH 自动晋级已开 · 60s 内生效' : '已关 · 影子模式(仍可手动 promote)', 'ok');
+        }
+      })
+      .catch(function(e){
+        togEl.classList.toggle('on'); // revert
+        if (window.toast) toast('网络错误: ' + (e.message || e), 'err');
+      });
+  };
+
+  // v5.7.0-rc2: render the brand-new-apex candidate review queue from
+  // self.candidate_samples[] (走法2). Groups: 已晋级(可撤销) / 待审(一键 promote) /
+  // 共享(自动排除). Buttons go through the queued /api/action dispatcher.
+  function appsRenderCandidates(self) {
+    var box = document.getElementById('apps-candidate-list');
+    if (!box) return;
+    var samples = (self && self.candidate_samples) ? self.candidate_samples : [];
+    var sharedTotal = (self && self.candidate_shared) ? self.candidate_shared : 0;
+    // samples are actionable high/med only; split by whether already promoted.
+    var promoted = [], pending = [];
+    samples.forEach(function(c){
+      if (c.promoted) promoted.push(c);
+      else pending.push(c);
+    });
+    function row(c, kind) {
+      var app = c.app ? appsEsc(c.app) : ('uid ' + c.uid);
+      var apex = appsEsc(c.apex);
+      var ev = (c.hits || 0) + '次/' + (c.windows || 0) + '窗 · ' + (c.tier === 'high' ? '强证据' : '中证据');
+      var btns = '';
+      if (kind === 'promoted') {
+        btns = '<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="appsCandReject(\'' + apex + '\', this)">撤销</button>';
+      } else {
+        btns = '<button class="btn btn-primary" style="padding:5px 10px;font-size:12px" onclick="appsCandPromote(\'' + apex + '\', this)">一键 promote</button>' +
+               '<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px;margin-left:6px" onclick="appsCandReject(\'' + apex + '\', this)">拒绝</button>';
+      }
+      return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid rgba(128,128,128,.15)">' +
+               '<div style="min-width:0;flex:1"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + app + '</div>' +
+               '<div style="font-family:monospace;font-size:11.5px;color:var(--text-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + apex +
+               ' <span style="color:var(--text-3)">· ' + ev + '</span></div></div>' +
+               '<div style="flex-shrink:0;white-space:nowrap">' + btns + '</div></div>';
+    }
+    var html = '';
+    if (promoted.length) {
+      html += '<div style="font-size:11.5px;font-weight:700;color:var(--sys-green);padding:8px 4px 0">已晋级 ' + promoted.length + ' · 撤销=加入共享黑名单</div>';
+      promoted.forEach(function(c){ html += row(c, 'promoted'); });
+    }
+    if (pending.length) {
+      html += '<div style="font-size:11.5px;font-weight:700;color:var(--text-2);padding:10px 4px 0">待审 ' + pending.length + ' · 确认是该 app 就 promote</div>';
+      pending.forEach(function(c){ html += row(c, 'pending'); });
+    }
+    if (sharedTotal) {
+      html += '<div style="font-size:11px;color:var(--text-3);padding:10px 4px 0">共享基础设施 ' + sharedTotal + ' 个已自动排除(CDN/统计等, 不归个人 app)</div>';
+    }
+    if (!html) {
+      html = '<div style="padding:10px 4px;color:var(--text-3);font-size:12px">' +
+        ((self && self.candidate_pending)
+          ? '影子模式累积中 · 共 ' + self.candidate_pending + ' 个 apex(证据不足, 暂不可审)'
+          : '暂无候选(开启上方追踪后自动累积)') + '</div>';
+    }
+    box.innerHTML = html;
+  }
+
+  // apiAction throws on !ok, so success → .then, any failure → .catch.
+  window.appsCandPromote = function(apex, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    apiAction('candidate_promote', { apex: apex })
+      .then(function(){
+        if (window.toast) toast('已批准 ' + apex + ' · 60s 内归类', 'ok');
+        setTimeout(function(){ appsLoad(true); }, 1500);
+      })
+      .catch(function(e){
+        if (window.toast) toast('promote 失败: ' + (e.message || e) + (e.detail ? ' (' + e.detail + ')' : ''), 'err');
+        if (btn) { btn.disabled = false; btn.textContent = '一键 promote'; }
+      });
+  };
+
+  window.appsCandReject = function(apex, btn) {
+    if (btn) { btn.disabled = true; btn.textContent = '…'; }
+    apiAction('candidate_reject', { apex: apex })
+      .then(function(){
+        if (window.toast) toast('已拒绝 ' + apex + ' · 加入共享黑名单', 'ok');
+        setTimeout(function(){ appsLoad(true); }, 1500);
+      })
+      .catch(function(e){
+        if (window.toast) toast('reject 失败: ' + (e.message || e) + (e.detail ? ' (' + e.detail + ')' : ''), 'err');
+        if (btn) { btn.disabled = false; }
       });
   };
 

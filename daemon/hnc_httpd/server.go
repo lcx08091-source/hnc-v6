@@ -117,6 +117,8 @@ func (s *server) handler() http.Handler {
 	// self_capture because auto-expand mutates rule files (different
 	// risk profile from read-only observation).
 	mux.HandleFunc("/api/self/auto_expand/toggle", s.apiAutoExpandToggle)
+	// v5.7.0-rc2: gate for brand-new-apex auto-promotion (走法2 candidate flywheel)
+	mux.HandleFunc("/api/self/auto_promote/toggle", s.apiAutoPromoteToggle)
 	mux.HandleFunc("/api/self/ifaces", s.apiSelfIfaces)
 	mux.HandleFunc("/api/self/attrib", s.apiSelfAttrib)
 	mux.HandleFunc("/api/export", s.apiExport)

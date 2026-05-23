@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc1
-versionCode=570101
+version=v5.7.0-rc2
+versionCode=570102
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc1 · 本轮 (m2→rc1): 底栏精简为 4 tab (设备/应用/分析/设置), 日志并入设置, 统计+DPI 合并为"分析"段控; 应用 tab 改走 ksu.exec 桥接 (本机现可见 per-uid 字节/SNI); 真实系统应用名 (app_process + 极小 dex 调 PackageManager.getApplicationLabel, 覆盖用户自装/系统/分包 APK, 失败自动回退 curated); 远程面板未配对时自动跳配对页 (修 401 卡死); 新增"自动识别飞轮"(走法2: 以内核 uid 为准, 全新域名按 uid 独占性+持续性自动归类到对应 app, 影子模式默认开仅统计不写规则, touch auto_promote.enabled 放开, 多 uid 矛盾自动降级, 只标注不动作). 详见 CHANGELOG.md 与应用内更新日志.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc2 · 本轮: 自动识别飞轮(走法2)收尾——把"未匹配 SNI 候选审批"卡从"规划中"做成可用 WebUI。应用→设置 现列出候选队列(已晋级/待审/共享自动排除),HIGH 自动晋级开关(关=影子模式只统计仍可手动),MED 候选「一键 promote」按内核 uid 归到对应 app,「拒绝/撤销」加入共享黑名单(dpid 每 tick 热加载, 还会自纠撤销既有误归)。后端: dpid 读 candidate_decisions.json 强制晋级 + manual_promoted 来源; hnc_httpd 加 /api/self/auto_promote/toggle 与 candidate_promote/reject 动作(队列化+原子写)。rc1 已含: 4-tab 导航/真实应用名/远程配对修复/候选累积器后端。详见 CHANGELOG.md 与应用内更新日志.
 updateJson=
 minKernelSU=11485

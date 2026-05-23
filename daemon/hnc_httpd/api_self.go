@@ -36,6 +36,13 @@ func (s *server) autoExpandFlagPath() string {
 	return filepath.Join(s.hncDir, "run", "auto_expand.enabled")
 }
 
+// v5.7.0-rc2: gates brand-new-apex auto-promotion (走法2). When absent,
+// dpid runs the candidate accumulator in shadow mode (stats only, no rule
+// writes); manual "一键 promote" still works via candidate_decisions.json.
+func (s *server) autoPromoteFlagPath() string {
+	return filepath.Join(s.hncDir, "run", "auto_promote.enabled")
+}
+
 // apiSelf returns just the `self` block from dpi_state.json. Cheaper
 // than the full /api/dpi_state for WebUI tabs that only need self.
 func (s *server) apiSelf(w http.ResponseWriter, r *http.Request) {
@@ -62,10 +69,13 @@ func (s *server) apiSelf(w http.ResponseWriter, r *http.Request) {
 	// round-trip).
 	_, aeErr := os.Stat(s.autoExpandFlagPath())
 	autoExpandEnabled := aeErr == nil
+	_, apErr := os.Stat(s.autoPromoteFlagPath())
+	autoPromoteEnabled := apErr == nil
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"available":           true,
-		"self":                selfBlock, // may be nil if disabled / not yet populated
-		"auto_expand_enabled": autoExpandEnabled,
+		"available":            true,
+		"self":                 selfBlock, // may be nil if disabled / not yet populated
+		"auto_expand_enabled":  autoExpandEnabled,
+		"auto_promote_enabled": autoPromoteEnabled,
 	})
 }
 
@@ -127,6 +137,13 @@ func (s *server) apiSelfToggle(w http.ResponseWriter, r *http.Request) {
 func (s *server) apiAutoExpandToggle(w http.ResponseWriter, r *http.Request) {
 	s.flipFlagFile(w, r, s.autoExpandFlagPath(),
 		"auto-expander goroutine will pick up the change within 60s on its next tick")
+}
+
+// v5.7.0-rc2: apiAutoPromoteToggle flips auto_promote.enabled, gating
+// brand-new-apex auto-promotion (走法2). Off = shadow mode (stats only).
+func (s *server) apiAutoPromoteToggle(w http.ResponseWriter, r *http.Request) {
+	s.flipFlagFile(w, r, s.autoPromoteFlagPath(),
+		"candidate goroutine will pick up the change within 60s on its next tick")
 }
 
 // apiSelfIfaces returns the current /sys/class/net enumeration filtered

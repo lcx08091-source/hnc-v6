@@ -316,6 +316,12 @@ func dispatchAction(hncDir, action string, p map[string]string, isLoopback bool)
 		return actionAppLimitSet(hncDir, p)
 	case "app_limit_clear":
 		return actionAppLimitClear(hncDir, p)
+	// v5.7.0-rc2: candidate approval (走法2). promote → user-approved apex
+	// list dpid force-promotes; reject → shared-infra blocklist.
+	case "candidate_promote":
+		return actionCandidatePromote(hncDir, p)
+	case "candidate_reject":
+		return actionCandidateReject(hncDir, p)
 	default:
 		return actionResp{OK: false, Error: "unknown action"}
 	}

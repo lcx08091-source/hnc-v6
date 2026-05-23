@@ -1,3 +1,15 @@
+<!-- v5.7.0-rc2 -->
+<div class="cl-section">
+  <div class="cl-title">🤖 v5.7.0-rc2: 自动识别审批界面(走法2 收尾) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-23</span></div>
+  <ul class="cl-list">
+    <li><b>「未匹配 SNI 候选审批」从"规划中"变可用</b>: 应用→设置 现在列出候选队列,分「已晋级 / 待审 / 共享(自动排除)」三组。</li>
+    <li><b>自动晋级开关</b>: 开 = 证据强(单 app 长期独占)的域名自动归到对应 App;关 = 影子模式(只统计、不写规则,但你仍能逐条手动 promote)。</li>
+    <li><b>一键 promote</b>: 对"待审"里确认是某 App 的域名点一下,60s 内归类(按系统 uid,准)。影子模式下也能用。</li>
+    <li><b>拒绝 / 撤销</b>: 把域名加入共享黑名单 —— 永不再归到任何 App,且会自动撤销之前的误归(治 CDN/统计域名)。</li>
+    <li><b>底层</b>: dpid 读 candidate_decisions.json 强制晋级 + 自纠;hnc_httpd 加 auto_promote 开关与 promote/reject 动作(队列化、原子写)。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc1 -->
 <div class="cl-section">
   <div class="cl-title">🚀 v5.7.0-rc1: 真实应用名 + 自动识别飞轮 + 导航精简 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-23</span></div>

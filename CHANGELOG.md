@@ -18,6 +18,19 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc2, 2026-05-23)
+- **WebUI 候选审批 / 走法2 收尾** — 把"未匹配 SNI 候选审批"卡从"规划中"做成可用界面。应用→设置:
+  - **自动晋级开关** (`/api/self/auto_promote/toggle` → `run/auto_promote.enabled`):开=HIGH 自动晋级写规则;关=影子模式(只统计,但仍可手动 promote)。
+  - **候选队列** (`appsRenderCandidates` 读 `self.candidate_samples[]`):分「已晋级(可撤销)/ 待审(HIGH·MED)/ 共享(自动排除)」三组。
+  - **一键 promote**(`candidate_promote` 动作)→ 写 `etc/candidate_decisions.json`;dpid 每 tick 读取,对该 apex **强制晋级**(按内核 uid 归到对应 app,`source=manual_promoted`,confidence=medium),**影子模式下也生效**。
+  - **拒绝/撤销**(`candidate_reject` 动作)→ 追加进 `etc/auto_expand_blocklist.json`;dpid 已每 tick 热加载 → 该 apex 判为共享,永不归个人,且**自纠撤销**任何既有晋级。
+
+### Changed (v5.7.0-rc2, 2026-05-23)
+- dpid 候选累积器:MED 档也进 `candidate_samples`(供人工审队列),样例上限 12 → 40;`buildPromotedRule` 带 `source`(auto/manual)+ 对应 confidence/命名。
+
+### Internals (v5.7.0-rc2, 2026-05-23)
+- hnc_httpd 新增 `action_candidate.go`(promote/reject,走队列化 `/api/action`,域名正则校验 + 原子 tmp+rename,仿 `action_device_rename.go`)+ `apiAutoPromoteToggle`;`/api/self` 响应加 `auto_promote_enabled`。版本 rc1 → rc2(versionCode 570102)。
+
 ### Added (v5.7.0-rc1, 2026-05-23)
 - **自动识别飞轮 / 走法2** (`src/dpid/output/candidate.go` 新增) — 给"全新 apex"(不匹配任何规则的域名)自动建规则。以内核 uid 为 ground truth,按 **uid 独占性 + 持续性** 给候选 apex 分档:
   - **HIGH** (单 uid + ≥3 窗口 & ≥6 次 + 非共享) → 自动归到该 uid 的应用 (用 live PackageManager label 命名)
