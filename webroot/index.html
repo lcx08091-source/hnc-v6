@@ -2399,6 +2399,12 @@ body.kb-open .container {
 .nav-item.active { color: white; }
 .nav-item.active svg { transform: translateY(-1px) scale(1.08); }
 
+/* b-nav4: 分析页顶部段控 (统计 / DPI) + 设置内日志入口/返回 */
+.analysis-seg { display: flex; gap: 6px; padding: 5px; margin-bottom: 12px; border-radius: 14px; }
+.aseg-btn { flex: 1; padding: 9px 12px; border: none; border-radius: 10px; background: transparent; font: inherit; font-size: 13px; font-weight: 600; color: var(--text-2); cursor: pointer; transition: color var(--dur-mid) var(--ease-crisp), background var(--dur-mid) var(--ease-crisp); }
+.aseg-btn.active { background: var(--sys-blue); color: #fff; box-shadow: 0 2px 8px rgba(0,122,255,.3); }
+.logs-back-row { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; font-size: 14px; font-weight: 600; color: var(--sys-blue); cursor: pointer; }
+
 /* ═══════════════════════════════════════════════════════════════════
    TOAST
    ═══════════════════════════════════════════════════════════════════ */
@@ -2907,6 +2913,12 @@ body.kb-open .container {
 <div id="page-stats" class="page">
   <div class="container">
 
+    <!-- b-nav4: 分析段控 (统计 / DPI 合并到一个底部 tab) -->
+    <div class="analysis-seg glass">
+      <button class="aseg-btn active" data-aseg="stats">流量统计</button>
+      <button class="aseg-btn" data-aseg="dpi">DPI 分析</button>
+    </div>
+
     <!-- 4 计数卡 -->
     <div class="counter-grid">
       <div class="counter-card glass">
@@ -2992,6 +3004,8 @@ body.kb-open .container {
 <!-- ═══ LOGS ═══ -->
 <div id="page-logs" class="page">
   <div class="container">
+    <!-- b-nav4: 日志现为 设置 的子页, 提供返回入口 -->
+    <div class="logs-back-row" data-action="back-to-settings">‹ 返回设置</div>
     <div class="log-controls">
       <select class="log-select" id="log-file-select" aria-label="选择日志文件">
         <option value="combined">综合 · service + watchdog + detect</option>
@@ -3182,6 +3196,12 @@ body.kb-open .container {
 <!-- ═══ DPI (v5.3.0-rc19: L2 per-client DNS/SNI attribution) ═══ -->
 <div id="page-dpi" class="page">
   <div class="container">
+
+    <!-- b-nav4: 分析段控 (统计 / DPI 合并到一个底部 tab) -->
+    <div class="analysis-seg glass">
+      <button class="aseg-btn" data-aseg="stats">流量统计</button>
+      <button class="aseg-btn active" data-aseg="dpi">DPI 分析</button>
+    </div>
 
     <!-- ═══ v0.4.0-rc23: 截图风格头部 — 状态条 + 运行卡 + 4 计数卡 + 当前活跃区 ═══ -->
 
@@ -4909,6 +4929,19 @@ body.kb-open .container {
 <div id="page-settings" class="page">
   <div class="container">
 
+    <!-- b-nav4: 日志合并进设置 -->
+    <div class="sec-title">诊断</div>
+    <div class="setting-group glass-elevated">
+      <div class="set-row" data-action="open-logs" style="cursor:pointer">
+        <div class="set-icon blue"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">运行日志</div>
+          <div class="set-desc">service · hotspotd · dpid · iptables/tc 等</div>
+        </div>
+        <span class="set-chev" aria-hidden="true">›</span>
+      </div>
+    </div>
+
     <!-- Hotspot autostart -->
     <div class="sec-title">热点自动启动</div>
     <div class="setting-group glass-elevated">
@@ -5268,21 +5301,6 @@ body.kb-open .container {
     </svg>
     <span>设备</span>
   </div>
-  <div class="nav-item" data-page="stats">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <line x1="18" y1="20" x2="18" y2="10"/>
-      <line x1="12" y1="20" x2="12" y2="4"/>
-      <line x1="6" y1="20" x2="6" y2="14"/>
-    </svg>
-    <span>统计</span>
-  </div>
-  <div class="nav-item" data-page="logs">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
-      <polyline points="14 2 14 8 20 8"/>
-    </svg>
-    <span>日志</span>
-  </div>
   <div class="nav-item" data-page="apps">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <rect x="3" y="3" width="7" height="7" rx="1.5"/>
@@ -5292,13 +5310,13 @@ body.kb-open .container {
     </svg>
     <span>应用</span>
   </div>
-  <div class="nav-item" data-page="dpi">
+  <div class="nav-item" data-page="stats">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <circle cx="11" cy="11" r="8"/>
-      <path d="m21 21-4.3-4.3"/>
-      <path d="M11 8v3l2 1"/>
+      <line x1="18" y1="20" x2="18" y2="10"/>
+      <line x1="12" y1="20" x2="12" y2="4"/>
+      <line x1="6" y1="20" x2="6" y2="14"/>
     </svg>
-    <span>DPI</span>
+    <span>分析</span>
   </div>
   <div class="nav-item" data-page="settings">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -5776,6 +5794,35 @@ body.kb-open .container {
     } finally {
       __apiActionInFlight.delete(actionKey);
     }
+  }
+
+  // b-nav4 fix: 通用桥接 POST (给 /api/self/toggle、/api/export 等非 /api/action 端点).
+  // 与 apiGet 同样 dual-mode: 非 KSU 走 fetch, KSU WebUI 走 ksu.exec curl 桥接.
+  async function apiPostJSON(path, body) {
+    const p = path.startsWith('/') ? path : '/api/' + path;
+    const url = API_BASE + p;
+    const json = JSON.stringify(body || {});
+    try { await __hncLoadLocalAdminSecret(); } catch (e) {}
+    const __isKsu = (typeof window !== 'undefined' && typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function');
+    if (!__isKsu) {
+      const opts = {
+        method: 'POST', credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json', 'X-HNC-CSRF': '1' },
+        body: json
+      };
+      if (__hncLocalAdminSecret) opts.headers['X-HNC-Local-Admin'] = __hncLocalAdminSecret;
+      const resp = await fetch(url, opts);
+      const raw = await resp.text();
+      try { return JSON.parse(raw || '{}'); } catch (e) { throw new Error('invalid JSON: ' + String(raw).slice(0, 80)); }
+    }
+    let adminH = '';
+    if (__hncLocalAdminSecret) adminH = "-H " + sq('X-HNC-Local-Admin: ' + __hncLocalAdminSecret) + " ";
+    const cmd = "curl -sS --connect-timeout 1 --max-time 6 -X POST " +
+                "-H " + sq('Content-Type: application/json') + " " +
+                "-H " + sq('X-HNC-CSRF: 1') + " " + adminH +
+                "--data " + sq(json) + " " + sq(url);
+    const raw = await withTimeout(kexec(cmd), 9000, 'POST ' + p);
+    try { return JSON.parse(raw || '{}'); } catch (e) { throw new Error('invalid JSON: ' + String(raw).slice(0, 80)); }
   }
 
   /* 内部 dbg buffer — 错误信息显示在底部 dbgbar, 不刷屏 */
@@ -9569,9 +9616,16 @@ body.kb-open .container {
         appsStartPolling();
       }
     }, 180);
+    // b-nav4: 子页归属映射 — dpi 归"分析"(stats), logs 归"设置"(settings),
+    // 这样从段控/设置进子页时底部 nav 高亮正确, 且 navItem 可省略.
+    const __navOwner = { devices: 'devices', apps: 'apps', stats: 'stats', dpi: 'stats', logs: 'settings', settings: 'settings' };
     $$('.nav-item').forEach(n => n.classList.remove('active'));
-    navItem.classList.add('active');
-    moveNavIndicator(navItem);
+    const __ownerNav = $('.nav-item[data-page="' + (__navOwner[name] || name) + '"]');
+    if (__ownerNav) { __ownerNav.classList.add('active'); moveNavIndicator(__ownerNav); }
+    // 分析段控(统计/DPI)高亮同步
+    if (name === 'stats' || name === 'dpi') {
+      $$('.aseg-btn').forEach(b => b.classList.toggle('active', b.dataset.aseg === name));
+    }
     // 轮询省电: 离开设备页就停, 回来再起 (tickPoll 本身也会 bail, 这里提前省事件开销)
     if (name === 'devices') startPolling();
     else stopPolling();
@@ -11360,6 +11414,13 @@ body.kb-open .container {
     const hwBanner = e.target.closest('#hw-banner');
     if (hwBanner) { hwBanner.classList.toggle('expanded'); hwBanner.querySelector('.go-head,.hw-banner-head')?.setAttribute('aria-expanded', hwBanner.classList.contains('expanded')); return; }
 
+    /* b-nav4: 分析段控 (统计/DPI) */
+    const asegBtn = e.target.closest('.aseg-btn');
+    if (asegBtn) { switchPage(asegBtn.dataset.aseg); return; }
+    /* b-nav4: 设置 → 日志 / 返回 */
+    if (e.target.closest('[data-action="open-logs"]')) { switchPage('logs'); return; }
+    if (e.target.closest('[data-action="back-to-settings"]')) { switchPage('settings'); return; }
+
     /* 底部 nav */
     const navItem = e.target.closest('.nav-item');
     if (navItem) { switchPage(navItem.dataset.page, navItem); return; }
@@ -12391,9 +12452,8 @@ body.kb-open .container {
   }
 
   function appsLoad(silent) {
-    // Fetch /api/dpi_state (or /api/self for the self-only shortcut) + /api/self/ifaces
-    fetch('/api/dpi_state', { credentials: 'same-origin' })
-      .then(function(r){ return r.json(); })
+    // b-nav4 fix: 走 apiGet 桥接 (原裸 fetch 在 KSU file:// 下 404, 本机看不到 M1/M2 数据)
+    apiGet('/api/dpi_state')
       .then(function(d){
         var self = (d && d.available && d.state && d.state.self) ? d.state.self : null;
         appsRenderHero(self);
@@ -12402,14 +12462,12 @@ body.kb-open .container {
       .catch(function(e){
         if (!silent) console.warn('apps: dpi_state fetch failed', e);
       });
-    fetch('/api/self/ifaces', { credentials: 'same-origin' })
-      .then(function(r){ return r.json(); })
+    apiGet('/api/self/ifaces')
       .then(function(d){ appsRenderIfaces(d); })
       .catch(function(){});
     // v5.6.0-rc6: /api/self carries the auto-expand flag state so the
     // settings toggle reflects truth on initial load (no extra endpoint).
-    fetch('/api/self', { credentials: 'same-origin' })
-      .then(function(r){ return r.json(); })
+    apiGet('/api/self')
       .then(function(d){
         var togg = document.getElementById('apps-autoexpand-toggle');
         if (togg) togg.classList.toggle('on', !!(d && d.auto_expand_enabled));
@@ -12636,12 +12694,7 @@ body.kb-open .container {
   window.appsToggleSelf = function(togEl) {
     var willEnable = !togEl.classList.contains('on');
     togEl.classList.toggle('on'); // optimistic
-    fetch('/api/self/toggle', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: willEnable })
-    }).then(function(r){ return r.json(); })
+    apiPostJSON('/api/self/toggle', { enabled: willEnable })
       .then(function(d){
         if (d && d.error) {
           togEl.classList.toggle('on'); // revert
@@ -12663,12 +12716,7 @@ body.kb-open .container {
   window.appsToggleAutoExpand = function(togEl) {
     var willEnable = !togEl.classList.contains('on');
     togEl.classList.toggle('on'); // optimistic
-    fetch('/api/self/auto_expand/toggle', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: willEnable })
-    }).then(function(r){ return r.json(); })
+    apiPostJSON('/api/self/auto_expand/toggle', { enabled: willEnable })
       .then(function(d){
         if (d && d.error) {
           togEl.classList.toggle('on'); // revert
@@ -12712,17 +12760,11 @@ body.kb-open .container {
     btn.disabled = true;
     btn.textContent = '⏳ 打包中...';
     resBox.innerHTML = '';
-    fetch('/api/export', {
-      method: 'POST',
-      credentials: 'same-origin',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        from: fromUnix || undefined,
-        to: toUnix || undefined,
-        notes: notes ? [notes] : undefined
-      })
-    }).then(function(r){ return r.json(); })
-      .then(function(d){
+    apiPostJSON('/api/export', {
+      from: fromUnix || undefined,
+      to: toUnix || undefined,
+      notes: notes ? [notes] : undefined
+    }).then(function(d){
         btn.disabled = false;
         btn.textContent = '⚡ 打包 export';
         if (!d || d.status !== 'ok') {
@@ -12758,8 +12800,7 @@ body.kb-open .container {
   };
 
   function appsLoadExports() {
-    fetch('/api/exports', { credentials: 'same-origin' })
-      .then(function(r){ return r.json(); })
+    apiGet('/api/exports')
       .then(function(d){
         var list = (d && d.exports) || [];
         var box = document.getElementById('exp-history');
