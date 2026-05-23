@@ -299,7 +299,12 @@ func dpidDaemon() daemonSpec {
 func httpdDaemon() daemonSpec {
 	return daemonSpec{
 		name:     "hnc_httpd",
-		binPath:  binDir + "/hnc_httpd",
+		// v5.5.0-rc6 fix: 之前是 binDir + "/hnc_httpd" 但 httpd binary 实际装在
+		// hncDir + "/daemon/hnc_httpd/hnc_httpd" (跟 watchdog.sh:655 + service.sh:74 一致).
+		// 错配的后果: ensureDaemonRunning 走到 os.Stat(launcher) 时永远 fail,
+		// 进入 "binary missing — silently skip" 的 silent return 分支, watchdog
+		// 永远不会自动重启 httpd, 用户必须手动点 KSU 重新拉起服务. 修复一行.
+		binPath:  hncDir + "/daemon/hnc_httpd/hnc_httpd",
 		args:     nil,
 		logFile:  logDir + "/httpd.log",
 		pidFile:  runDir + "/httpd.pid",
@@ -315,6 +320,23 @@ func hotspotdDaemon() daemonSpec {
 		logFile:  logDir + "/hotspotd.log",
 		pidFile:  runDir + "/hotspotd.pid",
 		cooldown: hotspotdRestartCD,
+	}
+}
+
+// v5.5.0-rc6: hnc_launcher 之前没有 daemon spec, 只在 ensureDaemonRunning
+// 对 dpid 的 short-circuit 里被引用 (rc3 fix: "如果 launcher 活, dpid 不要 spawn").
+// 但 launcher 自己死了**没人拉**. 所以一旦 launcher 在某次启动失败 / 被 OOM /
+// 任何原因消失, Go watchdog 完全感知不到, dpid 也跟着死. 加上 spec 之后,
+// watchdog 跟监管其他 daemon 一样监管 launcher, 死了自动用 spawnDaemon 拉.
+// launcher 重新起来后, launcher 自己会接管 dpid 的 fork, 行为跟现状一致.
+func launcherDaemon() daemonSpec {
+	return daemonSpec{
+		name:     "hnc_launcher",
+		binPath:  binDir + "/hnc_launcher",
+		args:     nil,
+		logFile:  logDir + "/launcher.log",
+		pidFile:  runDir + "/launcher.pid",
+		cooldown: 30 * time.Second,
 	}
 }
 
@@ -390,7 +412,10 @@ func ensureNDPIRunning() {
 			cmd.Stdout = out
 			cmd.Stderr = out
 		}
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Setsid: true}
+		// v5.5.0-rc4 fix: same ColorOS Go fork EPERM issue as spawnDaemon
+		// (rc3 fixed it there, missed this second spawn path inside
+		// ensureNDPIRunning). Setpgid alone — no Setsid.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		if err := cmd.Start(); err != nil {
 			logf("nDPI: launch failed: %v", err)
 			if out != nil {
@@ -718,6 +743,11 @@ func mainLoop() {
 		// Daemon supervision (regardless of state)
 		ensureDaemonRunning(hotspotdDaemon())
 		ensureDaemonRunning(httpdDaemon())
+		// v5.5.0-rc6: launcher 监管必须在 dpid 之前, 因为 dpid 的 ensureDaemonRunning
+		// 入口会 findLiveByName("hnc_launcher") 决定要不要 short-circuit. 这一行
+		// 保证 launcher 死后下一 tick 就被拉起来, 紧接着 dpid 检查就能看到 launcher
+		// 活了, 走 short-circuit, 让 launcher 接管 dpid (避免双重 spawn).
+		ensureDaemonRunning(launcherDaemon())
 		ensureDaemonRunning(dpidDaemon())
 		ensureNDPIRunning()
 

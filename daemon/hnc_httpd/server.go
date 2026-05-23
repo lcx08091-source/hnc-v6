@@ -113,6 +113,10 @@ func (s *server) handler() http.Handler {
 	// v5.5: self-capture (own phone's traffic attribution by uid → pkg)
 	mux.HandleFunc("/api/self", s.apiSelf)
 	mux.HandleFunc("/api/self/toggle", s.apiSelfToggle)
+	// v5.6.0-rc6: independent toggle for auto-expand. Separate from
+	// self_capture because auto-expand mutates rule files (different
+	// risk profile from read-only observation).
+	mux.HandleFunc("/api/self/auto_expand/toggle", s.apiAutoExpandToggle)
 	mux.HandleFunc("/api/self/ifaces", s.apiSelfIfaces)
 	mux.HandleFunc("/api/self/attrib", s.apiSelfAttrib)
 	mux.HandleFunc("/api/export", s.apiExport)

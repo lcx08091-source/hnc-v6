@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.5.0-rc3
-versionCode=550003
+version=v5.7.0-m2
+versionCode=570002
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.5.0-rc2 · 吸收 AHNC 卫星模块, 新增"我的应用"自身流量追踪. 后端: hnc_dpid 加 /proc/net + uid→pkg 采样 goroutine (默认 OFF, /api/self/toggle 开关), 5s tick 写 self_attrib.YYYYMMDD.jsonl. 新 API: /api/self, /api/self/{toggle,ifaces,attrib}, /api/export, /api/exports. WebUI 主页 (webroot/index.html) 加第 6 个 '应用' tab + segmented control 3 子页 (我的应用/导出/设置), 远程访问 UI 同步加 tab. service.sh 启动时跑 bin/ahnc_migration.sh 自动迁移 7 天 self-conns.jsonl. ARCHITECTURE.md 新增第 11 章: v5.6/v5.7 完整路线 + 走法1+2 hybrid 设计 (子域自动扩展 + candidate 审批). dpid 2.9MB→4.1MB, httpd 6.6MB→8.9MB, schema_version 仍 2.0 (Self 字段 omitempty 向后兼容). rc1 (550001) 把 WebUI 改在 daemon/hnc_httpd/web/app.html (远程访问 UI, 86 行小页), 主 webroot 没改, 用户看不到; rc2 修正补全主 webroot.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-m2 (M2 of 9) · app metadata 子系统 (display name 部分). v5.7 路线 M2 = 让 com.tencent.mobileqq 显示成 QQ. Spike 否定 APK 解析方案 (无 aapt2 + 资源混淆), 改用 策划静态 label map (~180 个 app 覆盖腾讯/字节/阿里/米哈游/银行/VPN/系统/AI 等热门类) + 用户覆盖文件 /data/local/hnc/etc/app_labels.json (mtime 热加载) + prettyFallback 兜底. 零依赖, 纯 map lookup, 任何 Android 100% 工作. 新增 src/dpid/appmeta/ 包 (appmeta.go Resolver + labels.go curated map). output.SelfApp 加 display_name 字段, output 通过 AppMetaResolver interface 避免反向依赖 appmeta. cmd/dpid/main.go 启动时构造 Resolver 注入 selfAttrib. Icon 部分留给 M6 UI 重做 (auto-生成 2 字母 + 哈希色块, 跟设计稿一致). v5.6 + M1 全部保留.
 updateJson=
 minKernelSU=11485

@@ -58,12 +58,32 @@ const (
 
 	// MaxRulesPerApp caps the TopRules slice per app.
 	MaxRulesPerApp = 4
+
+	// ruleHitCounterMax caps how high a single (uid, ruleID) counter
+	// can grow. v5.6.0-rc2: keeps a hot rule from making the counter
+	// unbounded; 100,000 is comfortably above the auto-expand threshold
+	// (10) and large enough that sort-by-count remains meaningful.
+	ruleHitCounterMax = 100000
+
+	// maxUnmatchedSNIs is the hard cap on the auto-expand candidate
+	// queue. Exceeded → silently drop new entries until the expander
+	// goroutine drains. 4096 covers ~8 hours of normal usage.
+	maxUnmatchedSNIs = 4096
 )
 
 // SelfAttribObservation is one record written to the historical JSONL.
 type SelfAttribObservation struct {
 	T     int64               `json:"t"`
 	Conns []SelfAttribConnRow `json:"conns"`
+}
+
+// uint64BytePair holds the (rx, tx) cumulative byte counts for one
+// uid at one sample time. v5.7.0-m1 byte tracking; the aggregator
+// keeps two of these per uid (current + previous sample) and the
+// Snapshot exports both the cumulative and the delta.
+type uint64BytePair struct {
+	Rx uint64
+	Tx uint64
 }
 
 // SelfAttribConnRow is one connection from /proc/net joined with uid→pkg.
@@ -93,8 +113,18 @@ type SelfAttribAggregator struct {
 
 	// snisByUID tracks distinct SNIs per uid, capped to MaxSNIsPerApp.
 	snisByUID map[int]map[string]struct{}
-	// rulesByUID likewise for rule IDs.
-	rulesByUID map[int]map[string]struct{}
+	// rulesByUID counts hits per (uid, ruleID). v5.6.0-rc2: upgraded from
+	// set to counter so auto-expansion can use "uid hit rule R >= N times"
+	// as the evidence requirement #2 (see auto_expand.go). The count is
+	// capped per-key at some reasonable max to prevent unbounded growth
+	// from a single hot rule on a long-lived uid.
+	rulesByUID map[int]map[string]int
+
+	// unmatchedSNIs tracks SNIs observed for some uid that DID NOT match
+	// any existing rule. v5.6.0-rc2: feeds the auto-expand candidate
+	// queue. Key is sni (normalized), value is the set of uids that have
+	// observed this sni since last expander tick.
+	unmatchedSNIs map[string]map[int]struct{}
 
 	// pkgCache is the resolved uid→pkg map (TTL'd, refreshed lazily).
 	pkgCache         map[int]string
@@ -104,6 +134,20 @@ type SelfAttribAggregator struct {
 	// ifaceState is the per-iface child status, owned by the
 	// reconciler (see self_capture goroutines in main.go).
 	ifaceState []SelfIfaceState
+
+	// v5.7.0-m1: per-uid cumulative byte counters from the kernel.
+	// Indexed by uid. Updated by RecordBytes on each byteSampler tick.
+	// Delta = current cumulative − prevByteCounters[uid] at sample time.
+	currByteCounters    map[int]uint64BytePair // (rx, tx) cumulative this sample
+	prevByteCounters    map[int]uint64BytePair // (rx, tx) cumulative last sample
+	byteSamplerSource   string                 // "ebpf" | "dumpsys" | "none"
+	byteSamplerUpdatedAt int64                 // last successful sample time (unix s)
+
+	// v5.7.0-m2: package→display-name resolver. Optional; nil means
+	// Snapshot leaves DisplayName empty (UI shows raw pkg fallback).
+	// Set via SetAppMetaResolver after construction so output/ stays
+	// independent of appmeta/ package.
+	appMeta AppMetaResolver
 
 	// counters
 	lastTick     int64
@@ -128,12 +172,34 @@ func NewSelfAttribAggregator(jsonlDir string) *SelfAttribAggregator {
 		appsByUID:     make(map[int]*SelfApp),
 		remoteToUID:   make(map[string]int),
 		snisByUID:     make(map[int]map[string]struct{}),
-		rulesByUID:    make(map[int]map[string]struct{}),
+		rulesByUID:    make(map[int]map[string]int),
+		unmatchedSNIs: make(map[string]map[int]struct{}),
 		pkgCache:      make(map[int]string),
+		currByteCounters: make(map[int]uint64BytePair),
+		prevByteCounters: make(map[int]uint64BytePair),
 		seenTuples:    make(map[string]int64),
 		maxSeenTuples: 4096,
 		jsonlDir:      jsonlDir,
 	}
+}
+
+// SetAppMetaResolver wires the package→display-name resolver. v5.7.0-m2.
+// Called once at startup from main.go; safe to skip if not set (Snapshot
+// just leaves DisplayName empty in that case). Separate from the
+// constructor so the output package doesn't need to import appmeta at
+// construction time (it only needs the interface for resolution).
+func (a *SelfAttribAggregator) SetAppMetaResolver(r AppMetaResolver) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.appMeta = r
+}
+
+// AppMetaResolver is the narrow interface the aggregator needs from
+// appmeta. Defined here (in output/) rather than importing appmeta to
+// avoid a layering edge — appmeta has its own dependencies (os, json)
+// that output/ doesn't need.
+type AppMetaResolver interface {
+	Display(pkg string) string
 }
 
 // SetIfaceState publishes per-iface child status from the capture
@@ -179,6 +245,41 @@ func (a *SelfAttribAggregator) LookupUID(remoteIP string, remotePort uint16) (ui
 	return uid, pkg, true
 }
 
+// ByteSample is the per-uid byte counts handed to RecordBytes. Defined
+// here in output/ rather than imported from bytestats/ to avoid the
+// reverse dependency edge — output/ already has many callers and we
+// don't want to drag in the eBPF/dumpsys backends just to define types.
+// Callers (cmd/dpid/main.go) translate from bytestats.ByteCounts to
+// output.ByteSample. Cheap translation (4 uint64 copies).
+type ByteSample struct {
+	RxBytes uint64
+	TxBytes uint64
+}
+
+// RecordBytes is called by the byteSampler goroutine on each tick
+// (~5s) with a fresh map of cumulative per-uid byte counters from the
+// kernel. We rotate curr→prev and install the new sample so the next
+// Snapshot can compute deltas.
+//
+// source identifies the backend feeding data ("ebpf" | "dumpsys" |
+// "none"), surfaced in dpi_state.json so the UI can show users where
+// the numbers come from.
+//
+// now is the unix timestamp (seconds) of this sample, also surfaced
+// per-app as ByteSamplerUpdatedAt.
+func (a *SelfAttribAggregator) RecordBytes(samples map[int]ByteSample, source string, now int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	// Rotate: current cumulative → previous, install new as current.
+	a.prevByteCounters = a.currByteCounters
+	a.currByteCounters = make(map[int]uint64BytePair, len(samples))
+	for uid, bs := range samples {
+		a.currByteCounters[uid] = uint64BytePair{Rx: bs.RxBytes, Tx: bs.TxBytes}
+	}
+	a.byteSamplerSource = source
+	a.byteSamplerUpdatedAt = now
+}
+
 // RecordSNI is called from the capture path when a TLS ClientHello
 // extracted a SNI on a remote we have a uid for. Updates TopSNIs +
 // LastSeen for the relevant SelfApp.
@@ -200,7 +301,8 @@ func (a *SelfAttribAggregator) RecordSNI(uid int, sni string, now int64) {
 
 // RecordRuleHit is called when the L3 classifier matched a rule for a
 // flow that we have a uid for. ruleID is the matched rule (e.g.
-// "tencent_jkmobile_tft").
+// "tencent_jkmobile_tft"). v5.6.0-rc2: now a counter (was set), feeds
+// the auto-expand evidence-#2 check via HitCount().
 func (a *SelfAttribAggregator) RecordRuleHit(uid int, ruleID string, now int64) {
 	if uid == 0 || ruleID == "" {
 		return
@@ -210,11 +312,82 @@ func (a *SelfAttribAggregator) RecordRuleHit(uid int, ruleID string, now int64) 
 	app := a.ensureAppLocked(uid, now)
 	app.LastSeen = now
 	if a.rulesByUID[uid] == nil {
-		a.rulesByUID[uid] = make(map[string]struct{})
+		a.rulesByUID[uid] = make(map[string]int)
 	}
-	if len(a.rulesByUID[uid]) < MaxRulesPerApp {
-		a.rulesByUID[uid][ruleID] = struct{}{}
+	// MaxRulesPerApp guard: refuse NEW keys when full, but keep counting
+	// existing ones (so a hot rule's count keeps growing while we don't
+	// admit new ones we won't have room to display).
+	if _, exists := a.rulesByUID[uid][ruleID]; exists {
+		if a.rulesByUID[uid][ruleID] < ruleHitCounterMax {
+			a.rulesByUID[uid][ruleID]++
+		}
+	} else if len(a.rulesByUID[uid]) < MaxRulesPerApp {
+		a.rulesByUID[uid][ruleID] = 1
 	}
+}
+
+// HitCount returns how many times (uid, ruleID) has been observed.
+// Returns 0 if uid or rule unseen. Lifetime-of-process counter; no
+// persistence across dpid restarts.
+func (a *SelfAttribAggregator) HitCount(uid int, ruleID string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if m := a.rulesByUID[uid]; m != nil {
+		return m[ruleID]
+	}
+	return 0
+}
+
+// ObserveSNI is the unified entry from self_capture: store the SNI,
+// classify it against the rule set, and dispatch.
+//   - If classify hits a rule → RecordRuleHit (counter ++).
+//   - If classify misses → enqueue into unmatched queue for auto-expand.
+//
+// This must be called instead of (not in addition to) RecordSNI from
+// self_capture. RecordSNI stays as a lower-level primitive for code paths
+// (tests, future) that just want to register an SNI without classification.
+func (a *SelfAttribAggregator) ObserveSNI(uid int, sni string, now int64) {
+	if uid == 0 || sni == "" {
+		return
+	}
+	a.RecordSNI(uid, sni, now)
+	rule, hit := classifyHost(sni)
+	if hit {
+		a.RecordRuleHit(uid, rule.ID, now)
+		return
+	}
+	// Unmatched — candidate for auto-expansion.
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.unmatchedSNIs[sni] == nil {
+		if len(a.unmatchedSNIs) >= maxUnmatchedSNIs {
+			// Hard cap to prevent runaway memory under SNI flood. New
+			// candidates beyond this are silently dropped until the
+			// expander goroutine drains the map. The number 4096 is
+			// generous (a busy phone sees ~500 distinct SNIs/hour).
+			return
+		}
+		a.unmatchedSNIs[sni] = make(map[int]struct{})
+	}
+	a.unmatchedSNIs[sni][uid] = struct{}{}
+}
+
+// drainUnmatchedSNIs atomically takes ownership of the unmatched queue
+// and clears it. Called by the auto-expander goroutine each tick.
+func (a *SelfAttribAggregator) drainUnmatchedSNIs() map[string]map[int]struct{} {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	out := a.unmatchedSNIs
+	a.unmatchedSNIs = make(map[string]map[int]struct{})
+	return out
+}
+
+// PkgForUID is a public accessor for the resolved package name (used by
+// the auto-expander when writing evidence).
+func (a *SelfAttribAggregator) PkgForUID(uid int) string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.pkgCache[uid]
 }
 
 func (a *SelfAttribAggregator) ensureAppLocked(uid int, now int64) *SelfApp {
@@ -259,17 +432,79 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 				sort.Strings(snis)
 				cp.TopSNIs = snis
 			}
-			if set := a.rulesByUID[uid]; set != nil {
-				rules := make([]string, 0, len(set))
-				for k := range set {
+			if hits := a.rulesByUID[uid]; hits != nil {
+				// v5.6.0-rc2: sort by hit count descending (was
+				// alphabetic). WebUI cares about "most-used rules",
+				// not lex order; ties broken by rule ID for stability.
+				rules := make([]string, 0, len(hits))
+				for k := range hits {
 					rules = append(rules, k)
 				}
-				sort.Strings(rules)
+				sort.Slice(rules, func(i, j int) bool {
+					if hits[rules[i]] != hits[rules[j]] {
+						return hits[rules[i]] > hits[rules[j]]
+					}
+					return rules[i] < rules[j]
+				})
 				cp.TopRules = rules
+				// v5.6.0-rc5: also export the raw counts so debugging
+				// auto-expansion thresholds is possible from outside.
+				cp.RuleHitCounts = make(map[string]int, len(hits))
+				for k, v := range hits {
+					cp.RuleHitCounts[k] = v
+				}
+			}
+			// v5.7.0-m1: per-uid byte counters + delta. omitempty in the
+			// struct tag means uids with no byte data drop these fields
+			// entirely from the JSON (vs reporting zeros that confuse the
+			// UI into thinking the app is idle).
+			if curr, ok := a.currByteCounters[uid]; ok {
+				cp.RxBytes = curr.Rx
+				cp.TxBytes = curr.Tx
+				if prev, hasPrev := a.prevByteCounters[uid]; hasPrev {
+					// Diff against previous sample. If kernel counter
+					// somehow went backwards (counter reset on reboot
+					// reload, uid recycled, etc), clamp delta to 0
+					// rather than underflow.
+					if curr.Rx >= prev.Rx {
+						cp.RxBytesDelta = curr.Rx - prev.Rx
+					}
+					if curr.Tx >= prev.Tx {
+						cp.TxBytesDelta = curr.Tx - prev.Tx
+					}
+				}
+				cp.ByteSamplerUpdatedAt = a.byteSamplerUpdatedAt
+			}
+			// v5.7.0-m2: resolve display name. Cheap (single map lookup
+			// inside appmeta + optional reloadOverridesIfChanged stat).
+			// Done here in Snapshot rather than at uid resolution time
+			// so user override file edits take effect within ~5s without
+			// dpid restart.
+			if a.appMeta != nil && cp.Pkg != "" {
+				cp.DisplayName = a.appMeta.Display(cp.Pkg)
 			}
 			s.AppsByUID[strconv.Itoa(uid)] = &cp
 		}
 	}
+	// v5.6.0-rc5: surface auto-expand input queue size and a sample of
+	// what's in it. Sample is capped to 20 SNIs alphabetically (stable
+	// across calls so the WebUI doesn't churn).
+	s.UnmatchedSNIsPending = len(a.unmatchedSNIs)
+	if len(a.unmatchedSNIs) > 0 {
+		snis := make([]string, 0, len(a.unmatchedSNIs))
+		for k := range a.unmatchedSNIs {
+			snis = append(snis, k)
+		}
+		sort.Strings(snis)
+		if len(snis) > 20 {
+			snis = snis[:20]
+		}
+		s.UnmatchedSNISamples = snis
+	}
+	// v5.7.0-m1: surface which byte sampler backend is feeding data
+	// (ebpf/dumpsys/none). Empty string means RecordBytes was never
+	// called (byteSampler goroutine not started yet, or no backend).
+	s.ByteSamplerSource = a.byteSamplerSource
 	return s
 }
 

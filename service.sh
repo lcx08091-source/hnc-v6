@@ -588,6 +588,18 @@ else
         log "dpid: synced dpi_rules.d/ ($(find "$DPID_RULES_D" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l) subset files) to $DPID_RULES_D"
     fi
 
+    # v5.6.0-rc2: auto-expand blocklist. Soft-install — if the user has
+    # already edited /data/local/hnc/etc/auto_expand_blocklist.json, respect
+    # it; otherwise drop in the seed list shipped with the module. The
+    # auto-expander reads this on every tick, so edits take effect within
+    # ~60s without restarting dpid.
+    DPID_BLOCKLIST="$HNC_DIR/etc/auto_expand_blocklist.json"
+    if [ ! -f "$DPID_BLOCKLIST" ] && [ -f "$MODDIR/data/auto_expand_blocklist.json" ]; then
+        cp -f "$MODDIR/data/auto_expand_blocklist.json" "$DPID_BLOCKLIST" 2>/dev/null
+        chmod 644 "$DPID_BLOCKLIST" 2>/dev/null
+        log "dpid: installed default auto_expand_blocklist.json to $DPID_BLOCKLIST"
+    fi
+
     # rc22 (DFP): install default JA4 fingerprint library. Same soft-migration:
     # if user already has /data/local/hnc/etc/dpi_ja4_fingerprints.json we
     # respect it; otherwise drop the seed library shipped with the module.

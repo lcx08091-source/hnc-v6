@@ -3041,6 +3041,12 @@ body.kb-open .container {
           <div class="app-hero-stat-label">连接数</div>
           <div class="app-hero-stat-val" id="apps-hero-conns">--</div>
         </div>
+        <!-- v5.6.0-rc6: self-capture metrics, the real visible value -->
+        <div class="app-hero-divider"></div>
+        <div class="app-hero-stat">
+          <div class="app-hero-stat-label">SNI 抓取</div>
+          <div class="app-hero-stat-val" id="apps-hero-tls">--</div>
+        </div>
       </div>
       <div class="app-hero-foot">
         <div class="app-hero-status" id="apps-hero-status">
@@ -3063,6 +3069,16 @@ body.kb-open .container {
       </div>
       <div class="app-list" id="apps-list">
         <div style="padding:40px 20px;text-align:center;color:var(--text-3)">加载中...</div>
+      </div>
+
+      <!-- v5.6.0-rc7: unmatched SNI block. Surfaces the auto-expand
+           candidate queue so users can see what's "interesting but
+           unclassified". When queue is empty (the normal case given
+           current rule coverage), shows a neutral "ruleset covers it"
+           message rather than looking broken. -->
+      <div class="sec-title" style="margin-top:18px">未匹配的 SNI <span class="dpi-flow-hint">候选自动扩展队列</span></div>
+      <div class="glass-elevated" id="apps-unmatched-card" style="padding:14px 16px;min-height:50px">
+        <div style="color:var(--text-3);font-size:12px">加载中...</div>
       </div>
     </div>
 
@@ -3121,14 +3137,14 @@ body.kb-open .container {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
           </div>
           <div class="set-info">
-            <div class="set-label">SNI / 规则联合标注 (v5.6 ⏳)</div>
-            <div class="set-desc">在 rmnet/wlan0 开 AF_PACKET capture · 等 v5.6</div>
+            <div class="set-label">SNI / 规则联合标注 <span style="color:var(--accent-green);font-size:11px">✓ v5.6 已上线</span></div>
+            <div class="set-desc">rmnet / tun / wlan0 上的 AF_PACKET capture · 实测每分钟数十个 SNI · 与主追踪开关联动</div>
           </div>
-          <div class="toggle" style="opacity:.5;pointer-events:none"></div>
+          <div class="toggle on" style="opacity:.7;pointer-events:none" title="与上方主追踪开关联动"></div>
         </div>
       </div>
 
-      <div class="sec-title">规则自动扩展 (v5.7 ⏳)</div>
+      <div class="sec-title">规则自动扩展 (v5.6 已上线 · 实际很少触发)</div>
       <div class="glass-elevated">
         <div class="set-row">
           <div class="set-icon">
@@ -3136,16 +3152,16 @@ body.kb-open .container {
           </div>
           <div class="set-info">
             <div class="set-label">已知 app 子域自动加入规则</div>
-            <div class="set-desc">同 apex + 同 uid + 非 blocklist → 自动写 _auto_expanded.json</div>
+            <div class="set-desc">触发条件: uid 对某规则命中 ≥10 + 新 SNI 同 apex + 不在 blocklist · 写 _auto_expanded.json · 现有规则集已覆盖大多场景, 实际很少有 unmatched 候选触发</div>
           </div>
-          <div style="font-size:11px;color:var(--text-3)">规划中</div>
+          <div class="toggle" id="apps-autoexpand-toggle" onclick="appsToggleAutoExpand(this)"></div>
         </div>
         <div class="set-row">
           <div class="set-icon">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
           </div>
           <div class="set-info">
-            <div class="set-label">未匹配 SNI 候选审批</div>
+            <div class="set-label">未匹配 SNI 候选审批 (v5.7 ⏳)</div>
             <div class="set-desc">按 (uid, apex, 频率) 分 HIGH/MED/LOW 三档 · 一键 promote</div>
           </div>
           <div style="font-size:11px;color:var(--text-3)">规划中</div>
@@ -3154,7 +3170,7 @@ body.kb-open .container {
 
       <div class="set-footer">
         v5.5 ships: /proc/net 采样 + 我的应用列表 + 导出。<br>
-        v5.6 ships: self-iface AF_PACKET → SNI/uid 联合 + 子域自动扩展 (走法 1)。<br>
+        v5.6 ships: ✓ self-iface AF_PACKET (rmnet RawIP + tun) + SNI/uid 联合 + 子域自动扩展。<br>
         v5.7 ships: candidate 累积器 + WebUI 审批 (走法 2)。<br>
         详见 <code>ARCHITECTURE.md</code> 的 v5.5+ 章节。
       </div>
@@ -4810,6 +4826,12 @@ body.kb-open .container {
   }
   .app-meta-pill.sni { color: var(--sys-blue); background: rgba(0,122,255,.08); }
   .app-meta-pill.rule { color: var(--sys-purple); background: rgba(175,82,222,.08); }
+  /* v5.6.0-rc6: rule pill turns green when the per-app hit count has
+     crossed autoExpandMinHits (10). Signals "this rule is at
+     auto-expand threshold for this app" — not necessarily that an
+     expansion happened (needs unmatched candidate too), just that the
+     evidence-#2 condition is met. */
+  .app-meta-pill.rule.ready { color: var(--sys-green); background: rgba(48,209,88,.10); }
 
   .exp-card { padding: 18px; margin-bottom: 14px; }
   .exp-quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
@@ -12384,6 +12406,15 @@ body.kb-open .container {
       .then(function(r){ return r.json(); })
       .then(function(d){ appsRenderIfaces(d); })
       .catch(function(){});
+    // v5.6.0-rc6: /api/self carries the auto-expand flag state so the
+    // settings toggle reflects truth on initial load (no extra endpoint).
+    fetch('/api/self', { credentials: 'same-origin' })
+      .then(function(r){ return r.json(); })
+      .then(function(d){
+        var togg = document.getElementById('apps-autoexpand-toggle');
+        if (togg) togg.classList.toggle('on', !!(d && d.auto_expand_enabled));
+      })
+      .catch(function(){});
   }
 
   function appsRenderHero(self) {
@@ -12413,6 +12444,27 @@ body.kb-open .container {
     stEl.textContent = self.enabled ? '运行中' : '已关闭';
     actEl.textContent = activeCount + (uids.length > activeCount ? ' / ' + uids.length : '');
     conEl.textContent = totalConns;
+
+    // v5.6.0-rc6: aggregate self-capture metrics from interfaces[].
+    var tlsEl = document.getElementById('apps-hero-tls');
+    if (tlsEl) {
+      var ifs = self.interfaces || [];
+      if (ifs.length === 0) {
+        tlsEl.textContent = '0';
+        tlsEl.title = '尚未开启 self-iface AF_PACKET capture';
+      } else {
+        var totalTLS = 0, totalPkts = 0, activeIfs = 0;
+        ifs.forEach(function(it){
+          totalTLS += (it.tls_events || 0);
+          totalPkts += (it.packets || 0);
+          if ((it.packets || 0) > 0) activeIfs++;
+        });
+        tlsEl.textContent = totalTLS;
+        tlsEl.title = totalTLS + ' TLS ClientHello / ' +
+                      totalPkts + ' 包 · ' + activeIfs + '/' + ifs.length + ' 接口在抓';
+      }
+    }
+
     if (togg) togg.classList.toggle('on', !!self.enabled);
     if (self.enabled) {
       stsEl.classList.remove('off');
@@ -12456,7 +12508,62 @@ body.kb-open .container {
     row.innerHTML = bits.join(' ');
   }
 
+  // v5.6.0-rc7: render the unmatched-SNI candidate queue (input to
+  // auto-expander). Three visual states:
+  //   1. self block missing → "等待数据" (rare; only at startup)
+  //   2. pending == 0 → "✓ 规则集已覆盖所有抓到的 SNI" (the common
+  //      case — explains WHY no auto-expansion is happening without
+  //      making it look broken)
+  //   3. pending > 0 → list the samples as monospace chips, with the
+  //      queue size badge. Useful to see what's actually unclassified.
+  function appsRenderUnmatched(self) {
+    var card = document.getElementById('apps-unmatched-card');
+    if (!card) return;
+    if (!self) {
+      card.innerHTML = '<div style="color:var(--text-3);font-size:12px">等待 dpid 上报...</div>';
+      return;
+    }
+    var pending = self.unmatched_snis_pending || 0;
+    var samples = self.unmatched_sni_samples || [];
+
+    if (pending === 0) {
+      card.innerHTML =
+        '<div style="display:flex;align-items:center;gap:10px">' +
+          '<div style="width:32px;height:32px;border-radius:8px;background:rgba(48,209,88,.10);' +
+               'display:flex;align-items:center;justify-content:center;color:var(--sys-green);font-size:18px;font-weight:700">✓</div>' +
+          '<div>' +
+            '<div style="font-size:13px;font-weight:600;color:var(--text-1)">规则集已覆盖所有抓到的 SNI</div>' +
+            '<div style="font-size:11.5px;color:var(--text-3);margin-top:2px">' +
+              '当前 463 个规则 apex 覆盖很广, 没有陌生子域进入 auto-expand 候选队列。这是符合预期的状态, 不是 bug。' +
+            '</div>' +
+          '</div>' +
+        '</div>';
+      return;
+    }
+
+    // pending > 0: show count badge + sample chips.
+    var chips = samples.map(function(s){
+      return '<span class="app-meta-pill sni" style="margin:2px 4px 2px 0">' +
+             appsEsc(s) + '</span>';
+    }).join('');
+    var moreNote = pending > samples.length
+      ? '<span style="font-size:11px;color:var(--text-3);margin-left:6px">' +
+        '(还有 ' + (pending - samples.length) + ' 条未列出)</span>'
+      : '';
+    card.innerHTML =
+      '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:8px">' +
+        '<div style="font-size:13px;font-weight:600;color:var(--text-1)">' +
+          '<span style="color:var(--sys-orange)">⚠</span> ' + pending + ' 条候选等待证据' + moreNote +
+        '</div>' +
+      '</div>' +
+      '<div style="font-size:11px;color:var(--text-3);margin-bottom:6px">' +
+        '这些 SNI 没匹配现有规则 · 若某 uid 对相关规则命中 ≥10, 且 apex 不在 blocklist, 会自动加进 _auto_expanded.json' +
+      '</div>' +
+      '<div style="display:flex;flex-wrap:wrap;gap:2px">' + chips + '</div>';
+  }
+
   function appsRenderList(self) {
+    appsRenderUnmatched(self); // v5.6.0-rc7
     var list = document.getElementById('apps-list');
     if (!self || !self.apps_by_uid || Object.keys(self.apps_by_uid).length === 0) {
       var hint = !self ? 'dpid 未上报 self · 检查后端' :
@@ -12482,14 +12589,21 @@ body.kb-open .container {
       var name = appsDisplayName(a.pkg, r.uid);
       var snis = (a.top_snis || []).slice(0, 4);
       var rules = (a.top_rules || []).slice(0, 3);
+      var hitCounts = a.rule_hit_counts || {};
       var metaHTML = '';
       if (snis.length || rules.length) {
         metaHTML = '<div class="app-meta-row">' +
           snis.map(function(s){
             return '<span class="app-meta-pill sni">' + appsEsc(s) + '</span>';
           }).join('') +
-          rules.map(function(r){
-            return '<span class="app-meta-pill rule">' + appsEsc(r) + '</span>';
+          rules.map(function(rid){
+            // v5.6.0-rc6: show hit count if available. ≥10 (autoExpandMinHits)
+            // gets a green ✓ to signal "this rule has crossed the auto-expand
+            // threshold for this app". Useful for the user to see what's
+            // ready for auto-expand even when nothing was actually expanded.
+            var cnt = hitCounts[rid] || 0;
+            var label = cnt > 0 ? rid + ' · ' + cnt + (cnt >= 10 ? ' ✓' : '') : rid;
+            return '<span class="app-meta-pill rule' + (cnt >= 10 ? ' ready' : '') + '">' + appsEsc(label) + '</span>';
           }).join('') +
           '</div>';
       }
@@ -12535,6 +12649,36 @@ body.kb-open .container {
         } else {
           if (window.toast) toast(willEnable ? '已开启 · 5 秒内出现数据' : '已关闭', 'ok');
           setTimeout(function(){ appsLoad(true); }, 5500);
+        }
+      })
+      .catch(function(e){
+        togEl.classList.toggle('on'); // revert
+        if (window.toast) toast('网络错误: ' + (e.message || e), 'err');
+      });
+  };
+
+  // v5.6.0-rc7: auto-expand toggle, now fully wired (httpd rc7 ships
+  // /api/self/auto_expand/toggle). Initial state synced via /api/self
+  // response's auto_expand_enabled field in appsLoad().
+  window.appsToggleAutoExpand = function(togEl) {
+    var willEnable = !togEl.classList.contains('on');
+    togEl.classList.toggle('on'); // optimistic
+    fetch('/api/self/auto_expand/toggle', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: willEnable })
+    }).then(function(r){ return r.json(); })
+      .then(function(d){
+        if (d && d.error) {
+          togEl.classList.toggle('on'); // revert
+          if (window.toast) toast('切换失败: ' + d.error, 'err');
+        } else {
+          if (window.toast) {
+            toast(willEnable
+              ? '已开启 · 下一 tick (60s 内) 生效'
+              : '已关闭', 'ok');
+          }
         }
       })
       .catch(function(e){

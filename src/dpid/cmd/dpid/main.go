@@ -24,6 +24,8 @@ import (
 	"syscall"
 	"time"
 
+	"hnc.io/dpid/appmeta"
+	"hnc.io/dpid/bytestats"
 	"hnc.io/dpid/capture"
 	"hnc.io/dpid/output"
 	"hnc.io/dpid/probe"
@@ -255,6 +257,19 @@ func main() {
 	// {enabled: false, reason: ...}.
 	selfAttribFlag := filepath.Join(cfg.RunDir, "self_capture.enabled")
 	selfAttrib := output.NewSelfAttribAggregator(cfg.RunDir)
+
+	// v5.7.0-m2: wire the package→display-name resolver. Curated map
+	// of ~200 popular apps + optional user override at
+	// /data/local/hnc/etc/app_labels.json (hot-reloaded on file mtime
+	// change). Selfattrib.Snapshot calls .Display() per-app to fill
+	// the DisplayName field. No init failure path needed — if override
+	// file is bad JSON we just use the curated map.
+	appLabelsOverride := "/data/local/hnc/etc/app_labels.json"
+	appResolver := appmeta.NewResolver(appLabelsOverride)
+	selfAttrib.SetAppMetaResolver(appResolver)
+	curated, overridden := appResolver.LabelCount()
+	log.Printf("appmeta: resolver ready (curated=%d, override=%d from %s)",
+		curated, overridden, appLabelsOverride)
 	go func() {
 		isEnabled := func() bool {
 			_, err := os.Stat(selfAttribFlag)
@@ -284,6 +299,32 @@ func main() {
 		}()
 		selfAttrib.RunSampler(ctx, isEnabled)
 	}()
+
+	// v5.6.0-rc1: self-iface AF_PACKET capture supervisor.
+	// Gated by the same flag file the /proc/net sampler watches
+	// (self_capture.enabled). Reconciles iface list every 30s and feeds
+	// extracted SNIs into selfAttrib via LookupUID + RecordSNI. See
+	// self_capture.go for the full lifecycle / failure model.
+	go runSelfCaptures(ctx, cfg, selfAttrib, func() string {
+		return pr.APIface
+	})
+
+	// v5.6.0-rc2: auto-expander goroutine. Walks unmatched-SNI candidate
+	// queue every 60s and confirms expansions that pass the 3-evidence
+	// test (apex match + uid hit count >= 10 + not blocklisted), writing
+	// to /data/local/hnc/etc/dpi_rules.d/_auto_expanded.json. Gated by
+	// SEPARATE flag (auto_expand.enabled) because this one writes rules
+	// — different risk profile from read-only self_capture. See
+	// output/auto_expand.go for the full design.
+	go selfAttrib.RunAutoExpander(ctx, cfg.RunDir)
+
+	// v5.7.0-m1: per-uid byte sampler. Detects the best backend at
+	// startup (eBPF preferred, dumpsys fallback, none if neither works)
+	// and ticks every 5s. Each tick reads cumulative byte counters
+	// from the kernel, hands them to selfAttrib.RecordBytes which
+	// computes deltas vs the previous sample and exposes them in
+	// dpi_state.json. Backend choice is logged once at startup.
+	go runByteSampler(ctx, selfAttrib)
 
 	switch mode {
 	case ModeBlind, ModeDisabled:
@@ -675,4 +716,62 @@ func checkCrashLoop(runDir string) string {
 		return fmt.Sprintf("crash loop: %d starts in last %s", recent, maxCrashesWindow)
 	}
 	return ""
+}
+
+// runByteSampler is the v5.7.0-m1 per-uid byte sampler goroutine.
+//
+// On startup it picks the best available backend (eBPF preferred,
+// dumpsys fallback, no-op as last resort). Then ticks every 5s,
+// reading cumulative kernel byte counters per uid and handing them
+// to selfAttrib.RecordBytes, which computes deltas and surfaces them
+// in dpi_state.json.
+//
+// If a backend transiently fails on a given tick (e.g. dumpsys forks
+// fail under memory pressure), we log+skip rather than crashing —
+// next tick will retry. If a backend's Source() is "none", we just
+// don't tick (no point waking up to do nothing).
+func runByteSampler(ctx context.Context, agg *output.SelfAttribAggregator) {
+	sampler := bytestats.Detect()
+	defer sampler.Close()
+
+	src := sampler.Source()
+	if src == "none" {
+		log.Printf("byteSampler: no backend available, byte stats permanently disabled")
+		return // No point ticking forever for nothing.
+	}
+
+	const tickEvery = 5 * time.Second
+	ticker := time.NewTicker(tickEvery)
+	defer ticker.Stop()
+
+	// Tick once immediately so the first dpi_state.json has byte data.
+	doByteSample(sampler, agg, src)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Printf("byteSampler: shutdown (source=%s)", src)
+			return
+		case <-ticker.C:
+			doByteSample(sampler, agg, src)
+		}
+	}
+}
+
+func doByteSample(sampler bytestats.ByteSampler, agg *output.SelfAttribAggregator, src string) {
+	raw, err := sampler.Sample()
+	if err != nil {
+		// Don't spam: log only the first error per minute or so. For
+		// now just log every failure; if it becomes noisy we'll add
+		// rate limiting.
+		log.Printf("byteSampler: sample failed (source=%s): %v", src, err)
+		return
+	}
+	// Translate bytestats.ByteCounts → output.ByteSample to keep the
+	// output package free of bytestats imports (no reverse deps).
+	out := make(map[int]output.ByteSample, len(raw))
+	for uid, bc := range raw {
+		out[uid] = output.ByteSample{RxBytes: bc.RxBytes, TxBytes: bc.TxBytes}
+	}
+	agg.RecordBytes(out, src, time.Now().Unix())
 }

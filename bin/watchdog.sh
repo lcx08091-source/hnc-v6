@@ -904,6 +904,14 @@ do_migrate() {
 # initialization (which writes pidfiles, state files, and starts logging).
 # ═══════════════════════════════════════════════════════════════════════════
 if [ "${1:-}" = "action" ]; then
+    # v5.5.0-rc5 fix: action 子进程的退出是设计上的正常退出, 不是主循环异常崩溃.
+    # 上面 ~line 238 的 EXIT trap 是为了捕获 mainLoop 异常退出报警, 但每次 Go
+    # runAction 都 fork 这个脚本以 action 模式跑, 子进程跑到 case 里 exit $?
+    # 干净退出时 trap 误以为是主循环崩了, 打 "watchdog EXITED unexpectedly".
+    # PENDING 状态下每 10s tick 跑 probe_hotspot + prune_dup_hotspotd + 偶尔
+    # is_doze, 平均 2-3 个 action subprocess / 10s, 节奏跟日志刷屏完美吻合.
+    # 设这个 flag 让 EXIT trap 在 action 模式下变成 noop, 原本主循环监控完整保留.
+    WDG_CLEAN_EXIT=1
     shift
     _action="${1:-}"
     shift 2>/dev/null || true

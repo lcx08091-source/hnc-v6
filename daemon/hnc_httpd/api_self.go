@@ -30,6 +30,12 @@ func (s *server) selfFlagPath() string {
 	return filepath.Join(s.hncDir, "run", "self_capture.enabled")
 }
 
+// v5.6.0-rc6: separate flag from self_capture.enabled — auto-expand
+// writes rule files, different risk profile from read-only sampling.
+func (s *server) autoExpandFlagPath() string {
+	return filepath.Join(s.hncDir, "run", "auto_expand.enabled")
+}
+
 // apiSelf returns just the `self` block from dpi_state.json. Cheaper
 // than the full /api/dpi_state for WebUI tabs that only need self.
 func (s *server) apiSelf(w http.ResponseWriter, r *http.Request) {
@@ -51,15 +57,26 @@ func (s *server) apiSelf(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	selfBlock, _ := m["self"]
+	// v5.6.0-rc6: include the auto-expand flag state so the WebUI can
+	// reflect it in the settings toggle on initial load (without an extra
+	// round-trip).
+	_, aeErr := os.Stat(s.autoExpandFlagPath())
+	autoExpandEnabled := aeErr == nil
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"available": true,
-		"self":      selfBlock, // may be nil if disabled / not yet populated
+		"available":           true,
+		"self":                selfBlock, // may be nil if disabled / not yet populated
+		"auto_expand_enabled": autoExpandEnabled,
 	})
 }
 
-// apiSelfToggle is the POST endpoint that flips the runtime flag file.
-// body: {"enabled": true | false}. Empty body / missing key is rejected.
-func (s *server) apiSelfToggle(w http.ResponseWriter, r *http.Request) {
+// flipFlagFile is the shared implementation for any "POST /api/x/toggle"
+// endpoint that maps a boolean to the presence/absence of a flag file.
+// Centralized in v5.6.0-rc6 so adding more toggle endpoints (auto-expand,
+// future v5.7 candidate-approval, etc) doesn't grow boilerplate.
+//
+// note: short human-readable hint for the response (e.g. "dpid picks up
+// the change within 5s on its next sampler tick").
+func (s *server) flipFlagFile(w http.ResponseWriter, r *http.Request, flagPath, note string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -76,7 +93,6 @@ func (s *server) apiSelfToggle(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing 'enabled' field"})
 		return
 	}
-	flagPath := s.selfFlagPath()
 	if *body.Enabled {
 		f, err := os.OpenFile(flagPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 		if err != nil {
@@ -94,8 +110,23 @@ func (s *server) apiSelfToggle(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":  "ok",
 		"enabled": *body.Enabled,
-		"note":    "dpid will pick up the change within 5s on its next sampler tick",
+		"note":    note,
 	})
+}
+
+// apiSelfToggle is the POST endpoint that flips the self_capture flag.
+// body: {"enabled": true | false}. Empty body / missing key is rejected.
+func (s *server) apiSelfToggle(w http.ResponseWriter, r *http.Request) {
+	s.flipFlagFile(w, r, s.selfFlagPath(),
+		"dpid will pick up the change within 5s on its next sampler tick")
+}
+
+// v5.6.0-rc6: apiAutoExpandToggle flips auto_expand.enabled. Sister
+// endpoint to apiSelfToggle. Separate flag so users can run pure self-
+// capture observation (read-only) without enabling the rule-file writer.
+func (s *server) apiAutoExpandToggle(w http.ResponseWriter, r *http.Request) {
+	s.flipFlagFile(w, r, s.autoExpandFlagPath(),
+		"auto-expander goroutine will pick up the change within 60s on its next tick")
 }
 
 // apiSelfIfaces returns the current /sys/class/net enumeration filtered

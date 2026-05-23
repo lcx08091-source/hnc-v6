@@ -175,6 +175,184 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 	return out, nil
 }
 
+// BuildFilterRawIP is the BuildFilter sibling for link types that DON'T
+// have an Ethernet header — Qualcomm rmnet (ARPHRD_RAWIP=519) and tun
+// VPN devices (ARPHRD_NONE=65534). The packet bytes start directly with
+// the IP header, so:
+//   - Dispatch by IP version (first nibble of byte 0) instead of etherType
+//     at offset [12:14] (which on RawIP would land in the middle of the IP
+//     header's source-address field — never matches 0x0800/0x86dd).
+//   - All "ind" addressing that previously used (IPHL + 14) now uses
+//     (IPHL + 0). All "abs" addressing for the IP header drops the +14
+//     Ethernet prefix.
+//   - For IPv6 fields: offsets 20→6 (next header), 54→40 (UDP/TCP src),
+//     56→42 (UDP/TCP dst), 66→52 (TCP byte 12 for header-length calc).
+//
+// This is bug-for-bug compatible with BuildFilter modulo the 14-byte
+// shift and the dispatch front-end. Same accept criteria: TCP/443 (with
+// TLS ClientHello first-byte check) + UDP/53 + UDP/443.
+//
+// v5.6.0-rc4 fix: without this, cellular-only or VPN-active devices got
+// zero packets through the AF_PACKET capture because the kernel BPF
+// program rejected everything. Symptom: dpi_state.json showed
+// interfaces[*].packets=0 across all rmnet ifaces even after capture
+// handle open succeeded.
+func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
+	if snaplen == 0 {
+		snaplen = 1024
+	}
+
+	const (
+		ld   = 0x00
+		ldx  = 0x01
+		alu  = 0x04
+		jmp  = 0x05
+		ret  = 0x06
+		misc = 0x07
+
+		h   = 0x08
+		b   = 0x10
+		abs = 0x20
+		ind = 0x40
+		msh = 0xa0
+
+		jeq  = 0x10
+		jset = 0x40
+
+		add = 0x00
+		and = 0x50
+		rsh = 0x70
+
+		k = 0x00
+		x = 0x08
+
+		tax = 0x00
+	)
+
+	type insn struct {
+		op     uint16
+		jt, jf string
+		k      uint32
+	}
+
+	const (
+		LBL_DROP   = "DROP"
+		LBL_ACCEPT = "ACCEPT"
+	)
+
+	labels := make(map[string]int)
+	plan := []insn{}
+
+	addInsn := func(label string, op uint16, jt, jf string, kk uint32) {
+		if label != "" {
+			labels[label] = len(plan)
+		}
+		plan = append(plan, insn{op: op, jt: jt, jf: jf, k: kk})
+	}
+
+	// ── IP version dispatch (replaces etherType check) ─────────────────
+	// First byte of packet = (version << 4) | IHL. Extract version by
+	// AND'ing with 0xf0; compare to 0x40 (IPv4) or 0x60 (IPv6).
+	addInsn("", ld|b|abs, "", "", 0)      // A = packet[0]
+	addInsn("", alu|and|k, "", "", 0xf0)  // A &= 0xf0
+	addInsn("", jmp|jeq|k, "IPV6", "", 0x60)
+	addInsn("", jmp|jeq|k, "IPV4", LBL_DROP, 0x40)
+
+	// ── IPv4 path ──────────────────────────────────────────────────────
+	addInsn("IPV4", ld|b|abs, "", "", 9) // A = IP proto (offset 14→0+9)
+	addInsn("", jmp|jeq|k, "IPV4_UDP", "", 17)
+	addInsn("", jmp|jeq|k, "IPV4_TCP", LBL_DROP, 6)
+
+	addInsn("IPV4_UDP", ld|h|abs, "", "", 6) // frag (20→6)
+	addInsn("", jmp|jset|k, LBL_DROP, "", 0x1fff)
+	addInsn("", ldx|b|msh, "", "", 0) // X = IPHL (offset 14→0)
+	addInsn("", ld|h|ind, "", "", 0)  // UDP src (X + 14 → X + 0)
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	addInsn("", ld|h|ind, "", "", 2) // UDP dst (16→2)
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, LBL_DROP, 53)
+
+	addInsn("IPV4_TCP", ld|h|abs, "", "", 6) // frag
+	addInsn("", jmp|jset|k, LBL_DROP, "", 0x1fff)
+	addInsn("", ldx|b|msh, "", "", 0) // X = IPHL
+	addInsn("", ld|h|ind, "", "", 0)  // TCP src
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	addInsn("", jmp|jeq|k, "IPV4_TLS", "", 443)
+	addInsn("", ld|h|ind, "", "", 2) // TCP dst
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	addInsn("", jmp|jeq|k, "IPV4_TLS", LBL_DROP, 443)
+
+	// First payload byte = IPHL + TCPHL. With Ethernet, the existing
+	// filter computes IPHL+TCPHL+14 then adds X (=IPHL) implicitly via
+	// ind addressing trick; the cleanest RawIP equivalent is to compute
+	// IPHL+TCPHL into X and read at X+0.
+	addInsn("IPV4_TLS", ld|b|ind, "", "", 12) // TCP byte 12 (X + 26 → X + 12)
+	addInsn("", alu|and|k, "", "", 0xf0)
+	addInsn("", alu|rsh|k, "", "", 2) // TCPHL bytes
+	addInsn("", alu|add|x, "", "", 0) // A = IPHL + TCPHL
+	addInsn("", misc|tax, "", "", 0)  // X = A
+	addInsn("", ld|b|ind, "", "", 0)  // first TCP payload byte (offset 14→0)
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, LBL_DROP, 0x16)
+
+	// ── IPv6 path (assumes no ext headers) ─────────────────────────────
+	addInsn("IPV6", ld|b|abs, "", "", 6) // next header (20→6)
+	addInsn("", jmp|jeq|k, "IPV6_UDP", "", 17)
+	addInsn("", jmp|jeq|k, "IPV6_TCP", LBL_DROP, 6)
+
+	addInsn("IPV6_UDP", ld|h|abs, "", "", 40) // UDP src (54→40)
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	addInsn("", ld|h|abs, "", "", 42) // UDP dst (56→42)
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, LBL_DROP, 53)
+
+	addInsn("IPV6_TCP", ld|h|abs, "", "", 40) // TCP src
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	addInsn("", jmp|jeq|k, "IPV6_TLS", "", 443)
+	addInsn("", ld|h|abs, "", "", 42) // TCP dst
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	addInsn("", jmp|jeq|k, "IPV6_TLS", LBL_DROP, 443)
+
+	addInsn("IPV6_TLS", ld|b|abs, "", "", 52) // TCP byte 12 at offset 40+12 (66→52)
+	addInsn("", alu|and|k, "", "", 0xf0)
+	addInsn("", alu|rsh|k, "", "", 2)  // TCPHL bytes
+	addInsn("", alu|add|k, "", "", 40) // A = 40 + TCPHL (54→40)
+	addInsn("", misc|tax, "", "", 0)   // X = A
+	addInsn("", ld|b|ind, "", "", 0)   // first payload byte
+	addInsn("", jmp|jeq|k, LBL_ACCEPT, LBL_DROP, 0x16)
+
+	// ── Returns ────────────────────────────────────────────────────────
+	addInsn(LBL_ACCEPT, ret|k, "", "", snaplen)
+	addInsn(LBL_DROP, ret|k, "", "", 0)
+
+	// Resolve labels.
+	out := make([]syscall.SockFilter, len(plan))
+	for i, ins := range plan {
+		out[i].Code = ins.op
+		out[i].K = ins.k
+		if ins.jt != "" {
+			t, ok := labels[ins.jt]
+			if !ok {
+				return nil, fmt.Errorf("unresolved label %q at insn %d", ins.jt, i)
+			}
+			d := t - i - 1
+			if d < 0 || d > 255 {
+				return nil, fmt.Errorf("jt jump out of range: %d -> %d (%s, d=%d)", i, t, ins.jt, d)
+			}
+			out[i].Jt = uint8(d)
+		}
+		if ins.jf != "" {
+			t, ok := labels[ins.jf]
+			if !ok {
+				return nil, fmt.Errorf("unresolved label %q at insn %d", ins.jf, i)
+			}
+			d := t - i - 1
+			if d < 0 || d > 255 {
+				return nil, fmt.Errorf("jf jump out of range: %d -> %d (%s, d=%d)", i, t, ins.jf, d)
+			}
+			out[i].Jf = uint8(d)
+		}
+	}
+	return out, nil
+}
+
 // AttachFilter installs the compiled program on a raw socket.
 func AttachFilter(fd int, filters []syscall.SockFilter) error {
 	if len(filters) == 0 {

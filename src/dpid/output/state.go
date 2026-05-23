@@ -140,6 +140,11 @@ type SelfIfaceState struct {
 // SelfState.AppsByUID.
 type SelfApp struct {
 	Pkg         string   `json:"pkg,omitempty"`         // empty if pm couldn't resolve uid
+	// v5.7.0-m2: human-readable display name resolved via appmeta.Resolver.
+	// Curated map (top ~200 apps) + optional user override file at
+	// /data/local/hnc/etc/app_labels.json. Falls back to a cleaned-up
+	// package name if pkg is unknown to the resolver. Empty if Pkg is empty.
+	DisplayName string   `json:"display_name,omitempty"`
 	UID         int      `json:"uid"`
 	FirstSeen   int64    `json:"first_seen"`
 	LastSeen    int64    `json:"last_seen"`
@@ -147,6 +152,26 @@ type SelfApp struct {
 	TotalConns  uint64   `json:"total_conns"`           // cumulative
 	TopSNIs     []string `json:"top_snis,omitempty"`    // up to 8 distinct SNIs
 	TopRules    []string `json:"top_rules,omitempty"`   // matched rule IDs (HNC L3 rules)
+	// v5.6.0-rc5: per-rule hit counts, exposed for debugging the
+	// auto-expansion threshold (autoExpandMinHits = 10). Without this it
+	// was impossible to tell from outside whether the goroutine was
+	// idle because no candidates qualified, or because hit counts were
+	// stuck low. Same key set as TopRules.
+	RuleHitCounts map[string]int `json:"rule_hit_counts,omitempty"`
+
+	// v5.7.0-m1: per-uid byte counters from the kernel BPF map (or
+	// dumpsys fallback). RxBytes/TxBytes are cumulative since boot;
+	// RxBytesDelta/TxBytesDelta are bytes since the previous sample
+	// (~5s window), useful for showing "current activity" rather than
+	// lifetime totals. ByteSamplerUpdatedAt is the unix timestamp of
+	// the last successful sample for this uid; if missing/zero, no
+	// byte data is available (sampler returned no entry or was Source
+	// "none").
+	RxBytes              uint64 `json:"rx_bytes,omitempty"`
+	TxBytes              uint64 `json:"tx_bytes,omitempty"`
+	RxBytesDelta         uint64 `json:"rx_bytes_delta,omitempty"`
+	TxBytesDelta         uint64 `json:"tx_bytes_delta,omitempty"`
+	ByteSamplerUpdatedAt int64  `json:"byte_sampler_updated_at,omitempty"`
 }
 
 // SelfState is the top-level container written into State.Self.
@@ -158,6 +183,21 @@ type SelfState struct {
 	UnknownConns   int              `json:"unknown_conns,omitempty"` // conns w/ uid that pm couldn't resolve
 	LastAttribTick int64            `json:"last_attrib_tick,omitempty"`
 	PkgCacheSize   int              `json:"pkg_cache_size,omitempty"`
+
+	// v5.6.0-rc5: auto-expander queue visibility. Pending = current
+	// unmatched-SNI queue size (not yet drained by expander tick).
+	// Samples = up to 20 example unmatched SNIs so we can see WHAT's
+	// going unmatched (helps decide if rule set needs more coverage,
+	// or if blocklist needs more entries, etc).
+	UnmatchedSNIsPending int      `json:"unmatched_snis_pending"`
+	UnmatchedSNISamples  []string `json:"unmatched_sni_samples,omitempty"`
+
+	// v5.7.0-m1: which per-uid byte sampler backend is active.
+	// One of: "ebpf", "dumpsys", "none". Surfaced so the UI can show
+	// users "your device's byte data is from <source>" — esp. useful
+	// when source is "none" and bytes show zero, so user doesn't think
+	// HNC is broken.
+	ByteSamplerSource string `json:"byte_sampler_source,omitempty"`
 }
 
 type State struct {

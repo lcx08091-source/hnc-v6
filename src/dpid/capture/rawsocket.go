@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -28,12 +31,29 @@ type Stats struct {
 	ParseErrors    uint64
 }
 
+// ARPHRD_* link-layer type constants seen in the wild on Android.
+// Used by Handle.linkType to dispatch the right parser in Run.
+const (
+	arphrdEther = 1     // wlanX, ovnetX, dummyX, ifbX, eth0
+	arphrdRawIP = 519   // rmnet_dataX (Qualcomm cellular)
+	arphrdNone  = 65534 // tun0 (Clash, WireGuard, Tailscale)
+)
+
 type Handle struct {
 	fd        int
 	iface     string
 	snap      int
 	buf       []byte
 	closeOnce sync.Once
+
+	// v5.6.0-rc3: link-layer type (ARPHRD_*) read from
+	// /sys/class/net/$iface/type at Open. Determines whether parsePacket
+	// (Ethernet, 14-byte L2 header) or parseRawIPPacket (no L2 header)
+	// is dispatched in Run. Values seen on Android in the wild:
+	//   1     = ARPHRD_ETHER   (wlanX AP-side, wlan0 STA, ovnetX)
+	//   519   = ARPHRD_RAWIP   (Qualcomm rmnet cellular)
+	//   65534 = ARPHRD_NONE    (tun used by VPN: Clash, WG, Tailscale)
+	linkType int
 
 	stats struct {
 		packets  atomic.Uint64
@@ -81,7 +101,20 @@ func Open(opts Options) (*Handle, error) {
 	}
 
 	// Attach filter before bind so unfiltered packets do not queue on the socket.
-	raw, err := BuildFilter(uint32(opts.Snaplen))
+	//
+	// v5.6.0-rc4: choose filter by link layer. RawIP (rmnet, 519) and
+	// tun (NONE, 65534) have no Ethernet header — using the Ether-aware
+	// BuildFilter on these would reject all packets in the kernel BPF
+	// program, leaving recvfrom() permanently silent (the exact bug
+	// observed in rc1-rc3).
+	lt := readLinkType(opts.Iface)
+	var raw []syscall.SockFilter
+	switch lt {
+	case arphrdRawIP, arphrdNone:
+		raw, err = BuildFilterRawIP(uint32(opts.Snaplen))
+	default:
+		raw, err = BuildFilter(uint32(opts.Snaplen))
+	}
 	if err != nil {
 		return nil, closeFD("build bpf", err)
 	}
@@ -103,8 +136,38 @@ func Open(opts Options) (*Handle, error) {
 		}
 	}
 
-	return &Handle{fd: fd, iface: opts.Iface, snap: opts.Snaplen, buf: make([]byte, opts.Snaplen+64)}, nil
+	// v5.6.0-rc3: detect link type so Run can dispatch to the right
+	// parser. Read failure or unknown type → default to Ethernet (the
+	// historical behavior; main AP capture always opens on Ether-class
+	// wlanX so this preserves bug-for-bug compat).
+	// (v5.6.0-rc4: `lt` was already read above for filter selection.)
+
+	return &Handle{
+		fd:       fd,
+		iface:    opts.Iface,
+		snap:     opts.Snaplen,
+		buf:      make([]byte, opts.Snaplen+64),
+		linkType: lt,
+	}, nil
 }
+
+// readLinkType returns the ARPHRD_* value from /sys/class/net/$iface/type.
+// 0 on any failure (callers treat 0 as "assume Ethernet" for safety).
+func readLinkType(iface string) int {
+	data, err := os.ReadFile("/sys/class/net/" + iface + "/type")
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil {
+		return 0
+	}
+	return n
+}
+
+// LinkType returns the ARPHRD_* link type discovered at Open time.
+// Used by self_capture.go for diagnostic logging.
+func (h *Handle) LinkType() int { return h.linkType }
 
 func (h *Handle) Close() {
 	h.closeOnce.Do(func() {
@@ -182,7 +245,21 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 		}
 
 		h.stats.packets.Add(1)
-		ev, res := parsePacket(h.buf[:n], time.Now())
+		// v5.6.0-rc3: dispatch parser by link layer. ARPHRD_RAWIP (519)
+		// on Qualcomm cellular and ARPHRD_NONE (65534) on tun VPN both
+		// deliver bare IP packets — using the Ethernet parser would read
+		// IP header bytes as bogus etherType and silently drop everything.
+		var ev Event
+		var res ParseResult
+		switch h.linkType {
+		case arphrdRawIP, arphrdNone:
+			ev, res = parseRawIPPacket(h.buf[:n], time.Now())
+		default:
+			// 0 (unknown — fallback), 1 (Ether), or anything else uses
+			// the original Ethernet path. wlan2 = AP mode, wlan0 = STA,
+			// ovnetX = bridged Ether-class all land here.
+			ev, res = parsePacket(h.buf[:n], time.Now())
+		}
 		switch res {
 		case ParseOK:
 			switch ev.Kind {

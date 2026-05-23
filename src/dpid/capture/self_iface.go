@@ -42,16 +42,26 @@ var selfPositivePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^wwan\d+$`),
 	regexp.MustCompile(`^wlan0$`), // STA mode WiFi
 	regexp.MustCompile(`^eth\d+$`),
+	// v5.6.0-rc3: VPN tun interfaces. These carry decrypted in-app
+	// traffic (TLS ClientHello with plaintext SNI), which is exactly
+	// what self-attribution needs. Without these, users running Clash /
+	// WireGuard / Tailscale would only see the encrypted uplink on
+	// rmnet — useless for SNI extraction. Link type ARPHRD_NONE (65534)
+	// for tun, handled by rawsocket.go's RawIP dispatch.
+	regexp.MustCompile(`^tun\d+$`),
+	regexp.MustCompile(`^vpn\d+$`),
+	regexp.MustCompile(`^wg\d+$`),
+	regexp.MustCompile(`^tailscale\d+$`),
+	regexp.MustCompile(`^utun\d+$`), // iOS-style naming, occasionally seen
 }
 
 // selfNegativePatterns: name matches one of these → never picked, even if
-// up. These are virtual / loopback / AP-side / VPN.
+// up. These are virtual / loopback / AP-side. (VPN tun/vpn/wg/tailscale
+// moved to positives in rc3; see above.)
 var selfNegativePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^lo$`),
 	regexp.MustCompile(`^dummy\d*$`),
 	regexp.MustCompile(`^ifb\d*$`),
-	regexp.MustCompile(`^tun\d*$`),
-	regexp.MustCompile(`^vpn\d*$`),
 	regexp.MustCompile(`^gre\d*$`),
 	regexp.MustCompile(`^sit\d*$`),
 	regexp.MustCompile(`^ip6?_vti\d*$`),
@@ -59,8 +69,6 @@ var selfNegativePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^gretap\d*$`),
 	regexp.MustCompile(`^docker\d*$`),
 	regexp.MustCompile(`^br-`),
-	regexp.MustCompile(`^wg\d*$`),
-	regexp.MustCompile(`^tailscale\d*$`),
 	regexp.MustCompile(`^ap\d*$`),
 	regexp.MustCompile(`^softap\d*$`),
 	regexp.MustCompile(`^swlan\d+$`),

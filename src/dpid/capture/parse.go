@@ -79,6 +79,10 @@ const (
 )
 
 // parsePacket returns event metadata and a result code.
+//
+// Assumes Ethernet link layer (14-byte ether header at start). For
+// link types without Ethernet headers (ARPHRD_RAWIP=519 on Qualcomm
+// cellular, ARPHRD_NONE=65534 on tun VPN), use parseRawIPPacket instead.
 func parsePacket(b []byte, ts time.Time) (Event, ParseResult) {
 	if len(b) < 14 {
 		return Event{}, ParseMalformed
@@ -93,6 +97,32 @@ func parsePacket(b []byte, ts time.Time) (Event, ParseResult) {
 	case etherTypeIPv6:
 		return parseIPv6(b[14:], dstMAC, srcMAC, ts)
 	default:
+		return Event{}, ParseIgnore
+	}
+}
+
+// parseRawIPPacket parses a packet that has no Ethernet header. This is
+// the case for link types ARPHRD_RAWIP=519 (Qualcomm rmnet on cellular)
+// and ARPHRD_NONE=65534 (tun device used by VPN apps like Clash,
+// WireGuard, Tailscale). The first byte's high nibble distinguishes
+// IPv4 (4) from IPv6 (6).
+//
+// We pass empty MACs to the downstream parsers — there is no L2 identity
+// on these links. For self-attribution this is fine: callers use the IP
+// 5-tuple + /proc/net to look up uid, not MAC.
+func parseRawIPPacket(b []byte, ts time.Time) (Event, ParseResult) {
+	if len(b) < 1 {
+		return Event{}, ParseMalformed
+	}
+	var emptyMAC net.HardwareAddr
+	switch b[0] >> 4 {
+	case 4:
+		return parseIPv4(b, emptyMAC, emptyMAC, ts)
+	case 6:
+		return parseIPv6(b, emptyMAC, emptyMAC, ts)
+	default:
+		// Not an IPv4 or IPv6 packet — could be a tunneled non-IP
+		// protocol (rare). Drop silently.
 		return Event{}, ParseIgnore
 	}
 }
