@@ -12528,8 +12528,12 @@ body.kb-open .container {
       stsEl.classList.remove('off');
       var lt = self.last_attrib_tick;
       var ago = lt ? Math.max(0, Math.floor(Date.now()/1000 - lt)) + ' 秒前' : '采样未开始';
+      // labels: 标注应用名来源 — 系统解析(app_process PackageManager) vs 内置字典
+      var labelSrc = (self.app_label_source === 'pm_live')
+        ? ' · 应用名:系统解析 ' + (self.live_label_count || 0) + ' 个'
+        : ' · 应用名:内置字典';
       stsEl.innerHTML = '<span class="dot"></span>采样器活跃 · ' + ago +
-                       ' · pm 缓存 ' + (self.pkg_cache_size || 0) + ' 个包';
+                       ' · pm 缓存 ' + (self.pkg_cache_size || 0) + ' 个包' + labelSrc;
     } else {
       stsEl.classList.add('off');
       stsEl.innerHTML = '<span class="dot"></span>采样器停止 · ' +
