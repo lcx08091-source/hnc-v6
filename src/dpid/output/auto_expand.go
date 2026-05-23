@@ -245,6 +245,18 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 		log.Printf("auto-expand: failed to read existing %s: %v (starting fresh)", autoExpandOutFile, err)
 	}
 
+	// v5.7: brand-new-apex candidate accumulator ("走法 2", see candidate.go).
+	// Runs every tick regardless of the auto_expand flag (shadow calibration);
+	// only writes rules when auto_promote.enabled exists.
+	acc := newCandidateAccumulator()
+	promoted := map[string]autoExpandedRule{}
+	if existing, err := loadExistingPromoted(); err == nil {
+		promoted = existing
+		log.Printf("auto-promote: loaded %d existing promoted rules from %s", len(promoted), autoPromotedOutFile)
+	} else if !os.IsNotExist(err) {
+		log.Printf("auto-promote: failed to read existing %s: %v (starting fresh)", autoPromotedOutFile, err)
+	}
+
 	tk := time.NewTicker(autoExpandTick)
 	defer tk.Stop()
 	for {
@@ -252,14 +264,16 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 		case <-ctx.Done():
 			return
 		case <-tk.C:
-			// Flag check: absent = drain (so the queue doesn't blow up
-			// memory) but don't write rules.
+			// Drain once; feed BOTH the brand-new-apex candidate accumulator
+			// (always, for shadow calibration) and the same-apex expander below.
+			pending := a.drainUnmatchedSNIs()
+
+			a.processCandidates(pending, acc, promoted, runDir, time.Now().Unix())
+
+			// Same-apex auto-expand: gated by auto_expand.enabled.
 			if _, err := os.Stat(flagPath); err != nil {
-				_ = a.drainUnmatchedSNIs()
 				continue
 			}
-
-			pending := a.drainUnmatchedSNIs()
 			if len(pending) == 0 {
 				continue
 			}

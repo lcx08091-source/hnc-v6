@@ -12532,8 +12532,17 @@ body.kb-open .container {
       var labelSrc = (self.app_label_source === 'pm_live')
         ? ' · 应用名:系统解析 ' + (self.live_label_count || 0) + ' 个'
         : ' · 应用名:内置字典';
+      // v5.7 自动识别候选 (走法2): 影子累积 / 自动晋级诊断
+      var candInfo = '';
+      if (self.candidate_pending) {
+        candInfo = ' · 候选 ' + self.candidate_pending +
+                   '(高 ' + (self.candidate_high || 0) +
+                   '·共享 ' + (self.candidate_shared || 0) +
+                   '·已晋级 ' + (self.candidate_promoted || 0) + ')' +
+                   (self.auto_promote_on ? ' · 自动晋级:开' : ' · 自动晋级:关(影子)');
+      }
       stsEl.innerHTML = '<span class="dot"></span>采样器活跃 · ' + ago +
-                       ' · pm 缓存 ' + (self.pkg_cache_size || 0) + ' 个包' + labelSrc;
+                       ' · pm 缓存 ' + (self.pkg_cache_size || 0) + ' 个包' + labelSrc + candInfo;
     } else {
       stsEl.classList.add('off');
       stsEl.innerHTML = '<span class="dot"></span>采样器停止 · ' +

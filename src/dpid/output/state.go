@@ -206,6 +206,28 @@ type SelfState struct {
 	// Lets the UI confirm "real system names" are actually in use on-device.
 	AppLabelSource string `json:"app_label_source,omitempty"`
 	LiveLabelCount int    `json:"live_label_count,omitempty"`
+
+	// v5.7: brand-new-apex auto-identification candidate accumulator (走法 2).
+	// SHADOW by default — reports what WOULD be auto-promoted so thresholds can
+	// be calibrated in-vivo. AutoPromoteOn reflects whether
+	// /data/local/hnc/run/auto_promote.enabled is present (rules actually written).
+	CandidatePending  int               `json:"candidate_pending,omitempty"`  // distinct brand-new apexes tracked
+	CandidateHigh     int               `json:"candidate_high,omitempty"`     // apexes at HIGH tier (auto-promotable)
+	CandidateShared   int               `json:"candidate_shared,omitempty"`   // apexes judged shared infra (never attributed)
+	CandidatePromoted int               `json:"candidate_promoted,omitempty"` // rules actually auto-promoted
+	AutoPromoteOn     bool              `json:"auto_promote_on,omitempty"`
+	CandidateSamples  []CandidateSample `json:"candidate_samples,omitempty"`
+}
+
+// CandidateSample is one brand-new-apex candidate surfaced for inspection.
+type CandidateSample struct {
+	Apex     string `json:"apex"`
+	Tier     string `json:"tier"` // high | med | low | shared
+	UID      int    `json:"uid,omitempty"`
+	App      string `json:"app,omitempty"`
+	Hits     int    `json:"hits"`
+	Windows  int    `json:"windows"`
+	Promoted bool   `json:"promoted,omitempty"`
 }
 
 type State struct {

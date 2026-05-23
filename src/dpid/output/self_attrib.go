@@ -149,6 +149,11 @@ type SelfAttribAggregator struct {
 	// independent of appmeta/ package.
 	appMeta AppMetaResolver
 
+	// v5.7: brand-new-apex candidate accumulator summary, published by the
+	// expander goroutine each tick (see candidate.go) and surfaced in
+	// dpi_state for shadow calibration / auto-promote diagnostics.
+	candidateSummary candidateSummary
+
 	// counters
 	lastTick     int64
 	unknownConns int
@@ -398,6 +403,27 @@ func (a *SelfAttribAggregator) PkgForUID(uid int) string {
 	return a.pkgCache[uid]
 }
 
+// DisplayForUID resolves a uid to its (package, human-label) via the pm cache
+// + appMeta resolver. label is "" if pkg unknown or no resolver. v5.7.
+func (a *SelfAttribAggregator) DisplayForUID(uid int) (pkg, label string) {
+	a.mu.Lock()
+	pkg = a.pkgCache[uid]
+	m := a.appMeta
+	a.mu.Unlock()
+	if m != nil && pkg != "" {
+		label = m.Display(pkg)
+	}
+	return pkg, label
+}
+
+// SetCandidateSummary publishes the expander goroutine's per-tick candidate
+// summary so Snapshot can surface it in dpi_state. v5.7.
+func (a *SelfAttribAggregator) SetCandidateSummary(s candidateSummary) {
+	a.mu.Lock()
+	a.candidateSummary = s
+	a.mu.Unlock()
+}
+
 func (a *SelfAttribAggregator) ensureAppLocked(uid int, now int64) *SelfApp {
 	app := a.appsByUID[uid]
 	if app != nil {
@@ -518,6 +544,17 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 	// PackageManager helper or the curated fallback (best-effort capability).
 	if st, ok := a.appMeta.(appMetaStatser); ok {
 		s.LiveLabelCount, s.AppLabelSource = st.LiveLabelStats()
+	}
+
+	// v5.7: brand-new-apex candidate accumulator summary (shadow/auto-promote).
+	cs := a.candidateSummary
+	s.CandidatePending = cs.pending
+	s.CandidateHigh = cs.high
+	s.CandidateShared = cs.shared
+	s.CandidatePromoted = cs.promoted
+	s.AutoPromoteOn = cs.autoPromoteOn
+	if len(cs.samples) > 0 {
+		s.CandidateSamples = append([]CandidateSample(nil), cs.samples...)
 	}
 	return s
 }
