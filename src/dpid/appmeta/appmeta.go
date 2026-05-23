@@ -23,21 +23,29 @@
 package appmeta
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"strings"
 	"sync"
+	"time"
 	"unicode"
 )
 
-// Resolver holds the static curated map + optional user overrides.
+// Resolver holds the static curated map + optional user overrides, plus
+// an optional live PackageManager label cache (see pmlabels.go).
 // Thread-safe; resolution is a single map lookup so cheap to call
 // from the per-snapshot hot path.
 type Resolver struct {
-	mu           sync.RWMutex
-	overrideFile string
-	overrides    map[string]string // pkg → label (loaded from JSON, may be empty)
-	overrideMTime int64            // last file mtime so we know when to reload
+	mu            sync.RWMutex
+	overrideFile  string
+	overrides     map[string]string // pkg → label (loaded from JSON, may be empty)
+	overrideMTime int64             // last file mtime so we know when to reload
+
+	// live is the optional PackageManager-resolved label cache. nil unless
+	// EnableLiveLabels was called. When present and it has a label for a
+	// package, that real system label wins over the curated map.
+	live *liveLabels
 }
 
 // NewResolver constructs a Resolver. overrideFile is the path to the
@@ -53,10 +61,12 @@ func NewResolver(overrideFile string) *Resolver {
 	return r
 }
 
-// Display returns the user-facing label for a package name.
-//   - If user override set: that wins (e.g. user customized "QQ" → "Tencent QQ")
-//   - If in curated map: curated entry (e.g. "com.tencent.mm" → "微信")
-//   - Else: cleaned-up package name (e.g. "com.example.foo" → "Foo")
+// Display returns the user-facing label for a package name. Resolution
+// order (first hit wins):
+//   - user override file (e.g. user customized "QQ" → "Tencent QQ")
+//   - live PackageManager label (the real localized system name), if enabled
+//   - curated map (e.g. "com.tencent.mm" → "微信")
+//   - cleaned-up package name (e.g. "com.example.foo" → "Foo")
 //   - Empty pkg → empty string (caller decides display, usually "uid=N")
 func (r *Resolver) Display(pkg string) string {
 	if pkg == "" {
@@ -69,12 +79,68 @@ func (r *Resolver) Display(pkg string) string {
 		r.mu.RUnlock()
 		return v
 	}
+	live := r.live
 	r.mu.RUnlock()
+
+	if live != nil {
+		if v, ok := live.get(pkg); ok {
+			return v
+		}
+	}
 
 	if v, ok := curatedLabels[pkg]; ok {
 		return v
 	}
 	return prettyFallback(pkg)
+}
+
+// EnableLiveLabels turns on live PackageManager label resolution via the
+// app_process dex helper at dexPath. persistTo is an optional JSON cache
+// path so labels survive a dpid restart (and a transient helper failure).
+// Call once at startup before StartLiveRefresh. Best-effort: if dexPath is
+// empty or the helper can't run, Display just falls back to curated/pretty.
+func (r *Resolver) EnableLiveLabels(dexPath, persistTo string) {
+	r.mu.Lock()
+	r.live = newLiveLabels(dexPath, persistTo)
+	r.mu.Unlock()
+}
+
+// StartLiveRefresh kicks an initial label refresh and then re-runs the
+// helper every liveLabelTTL until ctx is cancelled. No-op if live labels
+// were not enabled.
+func (r *Resolver) StartLiveRefresh(ctx context.Context) {
+	r.mu.RLock()
+	live := r.live
+	r.mu.RUnlock()
+	if live == nil {
+		return
+	}
+	go func() {
+		live.refresh(ctx)
+		t := time.NewTicker(liveLabelTTL)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				live.refresh(ctx)
+			}
+		}
+	}()
+}
+
+// LiveLabelStats reports the live label count and source ("pm_live" or
+// "none"), for diagnostics surfaced in dpi_state.json. Returns (0,"none")
+// if live labels are not enabled.
+func (r *Resolver) LiveLabelStats() (count int, source string) {
+	r.mu.RLock()
+	live := r.live
+	r.mu.RUnlock()
+	if live == nil {
+		return 0, "none"
+	}
+	return live.stats()
 }
 
 // reloadOverridesIfChanged stats the override file and reloads if the

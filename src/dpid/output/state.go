@@ -139,7 +139,7 @@ type SelfIfaceState struct {
 // SelfApp is one app's aggregated state, keyed by uid in
 // SelfState.AppsByUID.
 type SelfApp struct {
-	Pkg         string   `json:"pkg,omitempty"`         // empty if pm couldn't resolve uid
+	Pkg string `json:"pkg,omitempty"` // empty if pm couldn't resolve uid
 	// v5.7.0-m2: human-readable display name resolved via appmeta.Resolver.
 	// Curated map (top ~200 apps) + optional user override file at
 	// /data/local/hnc/etc/app_labels.json. Falls back to a cleaned-up
@@ -148,10 +148,10 @@ type SelfApp struct {
 	UID         int      `json:"uid"`
 	FirstSeen   int64    `json:"first_seen"`
 	LastSeen    int64    `json:"last_seen"`
-	ActiveConns int      `json:"active_conns"`          // current /proc/net count
-	TotalConns  uint64   `json:"total_conns"`           // cumulative
-	TopSNIs     []string `json:"top_snis,omitempty"`    // up to 8 distinct SNIs
-	TopRules    []string `json:"top_rules,omitempty"`   // matched rule IDs (HNC L3 rules)
+	ActiveConns int      `json:"active_conns"`        // current /proc/net count
+	TotalConns  uint64   `json:"total_conns"`         // cumulative
+	TopSNIs     []string `json:"top_snis,omitempty"`  // up to 8 distinct SNIs
+	TopRules    []string `json:"top_rules,omitempty"` // matched rule IDs (HNC L3 rules)
 	// v5.6.0-rc5: per-rule hit counts, exposed for debugging the
 	// auto-expansion threshold (autoExpandMinHits = 10). Without this it
 	// was impossible to tell from outside whether the goroutine was
@@ -176,13 +176,13 @@ type SelfApp struct {
 
 // SelfState is the top-level container written into State.Self.
 type SelfState struct {
-	Enabled        bool             `json:"enabled"`
-	Reason         string           `json:"reason,omitempty"` // why disabled (e.g. "no eligible ifaces")
-	Interfaces     []SelfIfaceState `json:"interfaces,omitempty"`
+	Enabled        bool                `json:"enabled"`
+	Reason         string              `json:"reason,omitempty"` // why disabled (e.g. "no eligible ifaces")
+	Interfaces     []SelfIfaceState    `json:"interfaces,omitempty"`
 	AppsByUID      map[string]*SelfApp `json:"apps_by_uid,omitempty"`
-	UnknownConns   int              `json:"unknown_conns,omitempty"` // conns w/ uid that pm couldn't resolve
-	LastAttribTick int64            `json:"last_attrib_tick,omitempty"`
-	PkgCacheSize   int              `json:"pkg_cache_size,omitempty"`
+	UnknownConns   int                 `json:"unknown_conns,omitempty"` // conns w/ uid that pm couldn't resolve
+	LastAttribTick int64               `json:"last_attrib_tick,omitempty"`
+	PkgCacheSize   int                 `json:"pkg_cache_size,omitempty"`
 
 	// v5.6.0-rc5: auto-expander queue visibility. Pending = current
 	// unmatched-SNI queue size (not yet drained by expander tick).
@@ -198,6 +198,14 @@ type SelfState struct {
 	// when source is "none" and bytes show zero, so user doesn't think
 	// HNC is broken.
 	ByteSamplerSource string `json:"byte_sampler_source,omitempty"`
+
+	// app-label resolution diagnostics. AppLabelSource is "pm_live" when
+	// DisplayName comes from the live PackageManager dex helper, or "none"
+	// when it falls back to the curated map + prettyFallback (helper absent
+	// or blocked). LiveLabelCount is how many packages the helper resolved.
+	// Lets the UI confirm "real system names" are actually in use on-device.
+	AppLabelSource string `json:"app_label_source,omitempty"`
+	LiveLabelCount int    `json:"live_label_count,omitempty"`
 }
 
 type State struct {

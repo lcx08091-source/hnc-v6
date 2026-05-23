@@ -47,7 +47,30 @@ const (
 	maxCrashesAllowed = 3
 
 	debugEventsPerSec = 20
+
+	// appLabelDexName is the dex helper shipped alongside the dpid binary
+	// (in the module bin/ dir). Run via app_process to read real PM labels.
+	appLabelDexName = "hnc_applabel.dex"
+	// appLabelDexModule is the on-device fallback path if dpid's own
+	// directory can't be determined (module id from bin/ahnc_migration.sh).
+	appLabelDexModule = "/data/adb/modules/hotspot_network_control/bin/" + appLabelDexName
 )
+
+// resolveAppLabelDex locates the app-label dex helper. Prefers a file next
+// to the running dpid binary (where the module ships it), then the known
+// module path. Returns "" if neither exists, which disables live labels.
+func resolveAppLabelDex() string {
+	if exe, err := os.Executable(); err == nil {
+		cand := filepath.Join(filepath.Dir(exe), appLabelDexName)
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+	if _, err := os.Stat(appLabelDexModule); err == nil {
+		return appLabelDexModule
+	}
+	return ""
+}
 
 type Config struct {
 	Iface          string `json:"iface,omitempty"`
@@ -266,10 +289,17 @@ func main() {
 	// file is bad JSON we just use the curated map.
 	appLabelsOverride := "/data/local/hnc/etc/app_labels.json"
 	appResolver := appmeta.NewResolver(appLabelsOverride)
+	// Live PackageManager labels: run the app_process dex helper to read the
+	// real, localized system app names for ALL apps (not just the curated
+	// map). Best-effort — if the dex/app_process is unavailable the resolver
+	// transparently falls back to the curated map + prettyFallback.
+	dexPath := resolveAppLabelDex()
+	appResolver.EnableLiveLabels(dexPath, filepath.Join(cfg.RunDir, "app_labels_live.json"))
+	appResolver.StartLiveRefresh(ctx)
 	selfAttrib.SetAppMetaResolver(appResolver)
 	curated, overridden := appResolver.LabelCount()
-	log.Printf("appmeta: resolver ready (curated=%d, override=%d from %s)",
-		curated, overridden, appLabelsOverride)
+	log.Printf("appmeta: resolver ready (curated=%d, override=%d, dex=%s, from %s)",
+		curated, overridden, dexPath, appLabelsOverride)
 	go func() {
 		isEnabled := func() bool {
 			_, err := os.Stat(selfAttribFlag)

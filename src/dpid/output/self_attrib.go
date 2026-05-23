@@ -138,10 +138,10 @@ type SelfAttribAggregator struct {
 	// v5.7.0-m1: per-uid cumulative byte counters from the kernel.
 	// Indexed by uid. Updated by RecordBytes on each byteSampler tick.
 	// Delta = current cumulative − prevByteCounters[uid] at sample time.
-	currByteCounters    map[int]uint64BytePair // (rx, tx) cumulative this sample
-	prevByteCounters    map[int]uint64BytePair // (rx, tx) cumulative last sample
-	byteSamplerSource   string                 // "ebpf" | "dumpsys" | "none"
-	byteSamplerUpdatedAt int64                 // last successful sample time (unix s)
+	currByteCounters     map[int]uint64BytePair // (rx, tx) cumulative this sample
+	prevByteCounters     map[int]uint64BytePair // (rx, tx) cumulative last sample
+	byteSamplerSource    string                 // "ebpf" | "dumpsys" | "none"
+	byteSamplerUpdatedAt int64                  // last successful sample time (unix s)
 
 	// v5.7.0-m2: package→display-name resolver. Optional; nil means
 	// Snapshot leaves DisplayName empty (UI shows raw pkg fallback).
@@ -169,17 +169,17 @@ type SelfAttribAggregator struct {
 // to write the daily JSONL into (usually cfg.RunDir).
 func NewSelfAttribAggregator(jsonlDir string) *SelfAttribAggregator {
 	return &SelfAttribAggregator{
-		appsByUID:     make(map[int]*SelfApp),
-		remoteToUID:   make(map[string]int),
-		snisByUID:     make(map[int]map[string]struct{}),
-		rulesByUID:    make(map[int]map[string]int),
-		unmatchedSNIs: make(map[string]map[int]struct{}),
-		pkgCache:      make(map[int]string),
+		appsByUID:        make(map[int]*SelfApp),
+		remoteToUID:      make(map[string]int),
+		snisByUID:        make(map[int]map[string]struct{}),
+		rulesByUID:       make(map[int]map[string]int),
+		unmatchedSNIs:    make(map[string]map[int]struct{}),
+		pkgCache:         make(map[int]string),
 		currByteCounters: make(map[int]uint64BytePair),
 		prevByteCounters: make(map[int]uint64BytePair),
-		seenTuples:    make(map[string]int64),
-		maxSeenTuples: 4096,
-		jsonlDir:      jsonlDir,
+		seenTuples:       make(map[string]int64),
+		maxSeenTuples:    4096,
+		jsonlDir:         jsonlDir,
 	}
 }
 
@@ -200,6 +200,14 @@ func (a *SelfAttribAggregator) SetAppMetaResolver(r AppMetaResolver) {
 // that output/ doesn't need.
 type AppMetaResolver interface {
 	Display(pkg string) string
+}
+
+// appMetaStatser is an optional capability: resolvers that can report
+// live PackageManager label diagnostics implement it. Checked via type
+// assertion in Snapshot so the narrow AppMetaResolver interface stays
+// minimal and resolvers without live labels need not implement it.
+type appMetaStatser interface {
+	LiveLabelStats() (count int, source string)
 }
 
 // SetIfaceState publishes per-iface child status from the capture
@@ -505,6 +513,12 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 	// (ebpf/dumpsys/none). Empty string means RecordBytes was never
 	// called (byteSampler goroutine not started yet, or no backend).
 	s.ByteSamplerSource = a.byteSamplerSource
+
+	// app-label diagnostics: report whether DisplayName came from the live
+	// PackageManager helper or the curated fallback (best-effort capability).
+	if st, ok := a.appMeta.(appMetaStatser); ok {
+		s.LiveLabelCount, s.AppLabelSource = st.LiveLabelStats()
+	}
 	return s
 }
 
@@ -677,7 +691,8 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 }
 
 // loadPkgUIDs runs `pm list packages -U` and parses output:
-//   package:com.tencent.jkchess uid:10123
+//
+//	package:com.tencent.jkchess uid:10123
 func loadPkgUIDs() (map[int]string, error) {
 	cmd := exec.Command("pm", "list", "packages", "-U")
 	out, err := cmd.Output()
