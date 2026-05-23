@@ -12644,7 +12644,17 @@ body.kb-open .container {
     var html = rows.slice(0, 50).map(function(r){
       var a = r.app;
       var icon = appsClassifyIcon(a.pkg);
-      var name = appsDisplayName(a.pkg, r.uid);
+      // labels: 优先用后端已解析好的 display_name (curated/系统 label), 缺失才本地兜底
+      var name = (a.display_name && a.display_name.trim())
+                 ? a.display_name.trim()
+                 : appsDisplayName(a.pkg, r.uid);
+      // 未命中厂商分类的真实应用, 徽标取应用名首字(中文优先), 比包名末段首字母直观
+      if (a.pkg && icon.cls === 'unknown' && name) {
+        var ch0 = name.charAt(0);
+        if (ch0 && ch0 !== '?') {
+          icon = { cls: 'unknown', letter: /[一-鿿]/.test(ch0) ? ch0 : ch0.toUpperCase() };
+        }
+      }
       var snis = (a.top_snis || []).slice(0, 4);
       var rules = (a.top_rules || []).slice(0, 3);
       var hitCounts = a.rule_hit_counts || {};
