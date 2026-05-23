@@ -57,6 +57,19 @@ var statsInFlight = false;
 
 function $(id) { return document.getElementById(id); }
 
+// 远程面板未配对 / 登录过期 → 跳配对页。
+// 后端把 "/" 作为公共 SPA 入口放行,但数据接口需要 hnc_token cookie,缺失即 401;
+// SPA 必须据此自动跳到 /pair(见 hnc_httpd middleware.go 注释)。之前只有写路径
+// (/api/action) 这么做,读/轮询路径把 401 当普通错误显示,导致未配对用户卡在
+// "加载失败: HTTP 401" 永远到不了配对页。守卫防止多个并发 401 重复跳转 / 循环。
+var __pairRedirecting = false;
+function redirectToPair() {
+  if (__pairRedirecting) return;
+  __pairRedirecting = true;
+  try { setStatus(false, '未配对 · 正在跳转配对页…'); } catch (_) {}
+  setTimeout(function(){ try { window.location.href = '/pair'; } catch (_) {} }, 600);
+}
+
 // hotfix4: bounded async transport. fetch() can stay pending for a long time
 // on unstable mobile links, keeping in-flight flags true and making the UI look
 // frozen. AbortController is available on modern Android WebView; fallback keeps
@@ -64,8 +77,11 @@ function $(id) { return document.getElementById(id); }
 function fetchWithTimeout(url, opts, timeoutMs) {
   opts = opts || {};
   timeoutMs = timeoutMs || 10000;
+  // 任一 API 拿到 401 (未配对/过期) → 统一跳配对页. 在中心助手里做, 所有读写
+  // 端点都覆盖, 调用方各自的 r.ok / status 处理不受影响.
+  function checkAuth(r) { if (r && r.status === 401) redirectToPair(); return r; }
   if (typeof AbortController === 'undefined') {
-    return fetch(url, opts);
+    return fetch(url, opts).then(checkAuth);
   }
   var ctrl = new AbortController();
   var t = setTimeout(function(){ try { ctrl.abort(); } catch (_) {} }, timeoutMs);
@@ -74,7 +90,7 @@ function fetchWithTimeout(url, opts, timeoutMs) {
   nextOpts.signal = ctrl.signal;
   return fetch(url, nextOpts).then(function(r){
     clearTimeout(t);
-    return r;
+    return checkAuth(r);
   }, function(e){
     clearTimeout(t);
     throw e;
@@ -610,7 +626,7 @@ function handleActionResult(r, successMsg) {
     msg = '⛔ 操作过于频繁,请稍后再试';
   } else if (r.status === 401) {
     msg = '登录已过期,请重新配对';
-    setTimeout(function(){ window.location.href = '/pair'; }, 1000);
+    redirectToPair();
   } else if (r.error === 'protected mac') {
     msg = '⚠️ 无法对该设备操作: ' + (r.detail || 'protected');
   }
@@ -1019,7 +1035,7 @@ window.doLogout = function() {
 
 // ── v5.5: 我的应用 + 导出 ──────────────────────────────
 function loadSelf() {
-  fetch('/api/dpi_state', { credentials: 'same-origin' })
+  fetchWithTimeout('/api/dpi_state', { cache: 'no-store', credentials: 'same-origin' }, 8000)
     .then(function(r){ return r.json(); })
     .then(function(d){
       if (!d || !d.available || !d.state) {
@@ -1038,7 +1054,7 @@ function loadSelf() {
         $('self-meta').textContent = '已关闭(dpid 未上报 self 块)';
       }
       // Iface preview
-      fetch('/api/self/ifaces', { credentials: 'same-origin' })
+      fetchWithTimeout('/api/self/ifaces', { cache: 'no-store', credentials: 'same-origin' }, 6000)
         .then(function(r){ return r.json(); })
         .then(function(ifd){
           var html = [];
@@ -1086,12 +1102,12 @@ function loadSelf() {
 }
 
 window.toggleSelf = function(enabled) {
-  fetch('/api/self/toggle', {
+  fetchWithTimeout('/api/self/toggle', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ enabled: enabled })
-  }).then(function(r){ return r.json(); })
+  }, 12000).then(function(r){ return r.json(); })
     .then(function(d){
       if (d && d.error) {
         showToast('切换失败: ' + d.error, 'err');
@@ -1108,7 +1124,7 @@ window.toggleSelf = function(enabled) {
 };
 
 function loadExports() {
-  fetch('/api/exports', { credentials: 'same-origin' })
+  fetchWithTimeout('/api/exports', { cache: 'no-store', credentials: 'same-origin' }, 8000)
     .then(function(r){ return r.json(); })
     .then(function(d){
       var list = (d && d.exports) || [];
@@ -1148,7 +1164,7 @@ window.buildExport = function() {
   var notes = ($('export-notes').value || '').trim();
   var resBox = $('export-result');
   resBox.innerHTML = '<div class="loading">打包中...</div>';
-  fetch('/api/export', {
+  fetchWithTimeout('/api/export', {
     method: 'POST',
     credentials: 'same-origin',
     headers: { 'Content-Type': 'application/json' },
@@ -1157,7 +1173,7 @@ window.buildExport = function() {
       to: toUnix || undefined,
       notes: notes ? [notes] : undefined
     })
-  }).then(function(r){ return r.json(); })
+  }, 30000).then(function(r){ return r.json(); })
     .then(function(d){
       if (!d || d.status !== 'ok') {
         resBox.innerHTML = '<div class="err-banner">打包失败: ' + esc(JSON.stringify(d)) + '</div>';
