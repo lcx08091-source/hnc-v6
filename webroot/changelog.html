@@ -1,3 +1,16 @@
+<!-- v5.7.0-rc1 -->
+<div class="cl-section">
+  <div class="cl-title">🚀 v5.7.0-rc1: 真实应用名 + 自动识别飞轮 + 导航精简 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-23</span></div>
+  <ul class="cl-list">
+    <li><b>底栏精简 6→4</b>: 设备 / 应用 / 分析 / 设置。"统计 + DPI" 合并成"分析"页顶部切换;"日志"并入"设置"子页。</li>
+    <li><b>真实系统应用名</b>: 应用列表不再显示包名末段 (incallui / findmyphone),改用系统真实名 (通话 / 查找手机 / 设备互联)。底层用 <code>app_process</code> 调 PackageManager,覆盖用户自装 / 系统 / 分包 App;失败自动回退内置字典。状态行可见"应用名:系统解析 N 个"。</li>
+    <li><b>自动识别飞轮 (实验)</b>: 以系统 uid 为准,把"全新域名"按 uid 独占性自动归类到对应 App,共享域名 (CDN/统计) 自动判别不误归。<b>默认影子模式</b>(只统计不建规则);状态行显示"候选 高X·共享Y"。需放开时 <code>touch /data/local/hnc/run/auto_promote.enabled</code>;猜错会自我撤销。</li>
+    <li><b>修: 应用 tab 本机看不到数据</b>: 之前用裸 fetch 在 KSU <code>file://</code> 下 404,改走 ksu.exec 桥接,本机现可见 per-uid 字节/SNI。</li>
+    <li><b>修: 远程访问配对卡死</b>: <code>:8443</code> 远程面板未配对时卡在"加载失败 HTTP 401",现自动跳转配对页。</li>
+    <li><b>规范</b>: 从本版起每次更新都 bump 版本号 + 写更新日志 (此前一直停在 v5.7.0-m2)。</li>
+  </ul>
+</div>
+
 <!-- v5.3.0-rc30.12.30 -->
 <div class="cl-section">
   <div class="cl-title">🔒 v5.3.0-rc30.12.30: GPT 三审 P0 全修 + 部分 P2 收口 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-19</span></div>

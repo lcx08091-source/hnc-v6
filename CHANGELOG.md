@@ -18,6 +18,27 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc1, 2026-05-23)
+- **自动识别飞轮 / 走法2** (`src/dpid/output/candidate.go` 新增) — 给"全新 apex"(不匹配任何规则的域名)自动建规则。以内核 uid 为 ground truth,按 **uid 独占性 + 持续性** 给候选 apex 分档:
+  - **HIGH** (单 uid + ≥3 窗口 & ≥6 次 + 非共享) → 自动归到该 uid 的应用 (用 live PackageManager label 命名)
+  - **SHARED** (静态黑名单 / ≥3 个 uid / 学习到的共享) → 永不归个人 (治 CDN/统计域名误标)
+  - **MED/LOW** → 证据不足或 2 uid 模糊,不动
+  - **影子模式默认开**:累积+分档一直跑并写进 `dpi_state` (`candidate_pending/high/shared/promoted`),但**仅当 `auto_promote.enabled` 存在时才真写规则** (`_auto_promoted.json`)
+  - **自纠**:已晋级 apex 之后又被第 2 个 uid 命中 → 自动撤销 + 标记学习共享,不再晋级
+  - 只标注不动作、限量、原子写;应用 tab 状态行显示候选统计
+- **真实系统应用名** (`tools/applabel/AppLabel.java` + `src/dpid/appmeta/pmlabels.go`) — 用 `app_process` 跑极小 dex 调 `PackageManager.getApplicationLabel()`,拿系统本地化名 (覆盖用户自装 / OEM 系统 / 分包 APK,不止 curated 的 ~200 条)。解析顺序:用户覆盖 → live PM label → curated → prettyFallback。失败 (无 app_process / SELinux 拦) 自动回退,绝不 panic。CI 新增 d8 编 dex 步骤。`dpi_state` 加 `app_label_source`/`live_label_count` 诊断。
+
+### Changed (v5.7.0-rc1, 2026-05-23)
+- **底栏导航 6 → 4**:设备 / 应用 / 分析 / 设置。"统计 + DPI" 合并成"分析"页顶部段控;"日志"并入"设置"子页。
+- 应用 tab 优先用后端 `display_name` (放弃前端 21 条小字典),徽标取真实名首字 (中文优先)。
+
+### Fixed (v5.7.0-rc1, 2026-05-23)
+- **应用 tab 本机看不到数据**:`appsLoad`/toggle/export 等 7 处用裸 `fetch('/api/...')`,在 KSU `file://` 下 404 → 改走 `apiGet`/新增 `apiPostJSON` 的 ksu.exec 桥接,本机现可见 M1/M2 (per-uid 字节 + 应用名)。
+- **远程面板 (`:8443`) 配对死循环**:未配对时直接进 dashboard 但所有 `/api/*` 返回 401,用户卡在"加载失败"到不了配对页。`app.js` 在中心 `fetchWithTimeout` 拦 401 → 自动跳 `/pair` (守卫防循环),并把 我的应用/导出 tab 的裸 fetch 也并入。
+
+### Internals (v5.7.0-rc1, 2026-05-23)
+- 建立**版本/更新日志规范**:每次更新 bump `module.prop` version (`-rcN`) + versionCode,并同步写 `CHANGELOG.md` 与应用内 `webroot/changelog.html`。本轮版本号从一直停滞的 `v5.7.0-m2` 推进到 `v5.7.0-rc1` (versionCode 570101)。
+
 ### Added (v5.7.0-m2, 2026-05-22)
 - **app metadata 子系统** (`src/dpid/appmeta/` 新包) — 把 `com.tencent.mobileqq` 显示成 `QQ`、`com.ss.android.ugc.aweme` → `抖音` 等
   - 策划静态 label map: ~180 个最热门 app (腾讯 / 字节 / 阿里 / 米哈游 / 网易 / 银行 / VPN / 系统 app / 全球 app / AI 助手 ...)
