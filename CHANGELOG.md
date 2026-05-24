@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc13, 2026-05-24)
+- **/system/bin 卸载韧性(方案一,缓解根因 A)** — SukiSU/ColorOS 运行期会间歇性把 `/system/bin` 从模块脚本的挂载命名空间卸掉,导致常驻 shell(watchdog.sh / iptables_manager.sh)的裸命令 `sleep`/`sh`/... ENOENT 崩(日志:`full_init rc=-1`、`iptables_manager.sh: /system/bin/sleep: No such file`)。
+  - `service.sh` 启动时(此刻 `/system` 仍正常)`provision_fallback_tools`:把 `/system/bin/toybox`(或 busybox)复制到 `/data/local/hnc/bin/.hnc_mc`,建 `sleep/head/tail/cat/printf/date/grep/sed/cut/tr/wc` applet 符号链接 + 复制 `mksh` 为 `sh`。`/data` 永不被卸。
+  - `watchdog.sh` / `iptables_manager.sh` 的 PATH 追加 `/data/local/hnc/bin`(置于 `/system/bin` 之后,纯 fallback)。`/system/bin` 一旦消失,裸命令自动 fallthrough 到 `/data` 副本,不再崩。
+  - **不向仓库提交任何二进制**(从设备现有 toybox 复制;容器无 NDK 无法产出 busybox)。设备若连 toybox 都没有才会退化——极罕见。
+  - guard 的硬编码 `/system/bin/*`(fallback-only,rc12 已让 C launcher 为主)留作后续谨慎处理。根治仍建议用户在 SukiSU 管理器关"卸载模块挂载 / 调 Mount Namespace 模式"。版本 rc12 → rc13(570113)。
+
 ### Fixed (v5.7.0-rc12, 2026-05-24)
 - **C launcher 自愈,堵上"launcher 活着但 dpid 永久没了"的盲区**(`src/launcher/hnc_launcher.c`,补 rc11)。外部审查(GPT)指出残留 P0:rc11 让 launcher 不再因单次外部 SIGTERM(rc=0)放弃,但**crash-loop / 启动见到旧 `dpid_crashflag` 时仍会永久放弃**(`run_supervise_loop` 崩溃超限 → `write_crash_flag()+return 1`;`main` 见 crashflag → `pause()` 死等)→ launcher 进程活着、`hnc_dpid` 子进程永远不被拉起、没人自动恢复,用户必须手动"重新绑定"。
   - 改为**自愈**:① crash-loop 触发 → 写崩溃标志(仅诊断)+ 冷却 `CRASH_COOLDOWN_SEC`(120s)+ 清标志 + 重置计数 + 继续监管,不再 `return 1` 永久退出;② 启动见到旧 crashflag → 冷却 120s + 清标志 + 正常监管,不再 `pause()` 死等用户删文件。被动只读守护进程应当自愈:制造崩溃风暴的瞬时原因(残留 shell guard、/system/bin 暂时蒸发)消退后,dpid 自动恢复。

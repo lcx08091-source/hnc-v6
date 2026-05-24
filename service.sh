@@ -18,6 +18,35 @@ mkdir -p $HNC_DIR/logs $RUN
 rm -f $RUN/uplink_unsupported $RUN/uplink_fail_count $RUN/uplink_unsupported_logged 2>/dev/null || true
 rm -rf $RUN/hnc_json.lock 2>/dev/null || true
 
+# rc13: /system/bin resilience. SukiSU/ColorOS 在运行期会间歇性把 /system/bin 从
+# 模块脚本的挂载命名空间里卸掉 → 裸命令 sleep/head/sh 等 ENOENT,watchdog/
+# iptables_manager 等常驻 shell 逻辑随时崩(日志: full_init rc=-1、iptables sleep
+# ENOENT)。对策: 在 /data/local/hnc/bin(在 /data,永不被卸)放一组指向已复制
+# multicall 二进制的 applet 符号链接;脚本 PATH 含 /data/local/hnc/bin,/system/bin
+# 一旦消失,裸命令会自动 fallthrough 到这些 /data 副本。启动时 /system 仍正常,
+# 趁机复制。全程 best-effort,绝不让 service 失败。
+provision_fallback_tools() {
+    bbdir="$HNC_DIR/bin"
+    mc=""
+    for c in /system/bin/toybox /system/xbin/busybox /data/adb/magisk/busybox /data/adb/ksu/bin/busybox; do
+        [ -x "$c" ] && { mc="$c"; break; }
+    done
+    if [ -n "$mc" ] && cp -f "$mc" "$bbdir/.hnc_mc" 2>/dev/null; then
+        chmod 755 "$bbdir/.hnc_mc" 2>/dev/null
+        for ap in sleep head tail cat printf date grep sed cut tr wc; do
+            ln -sf .hnc_mc "$bbdir/$ap" 2>/dev/null
+        done
+        command -v log >/dev/null 2>&1 && log "rc13: provisioned fallback applets from $mc -> $bbdir"
+    fi
+    # sh: 用 mksh(脚本是 mksh 方言),保证 fallback 的 sh 行为一致
+    if [ -e /system/bin/mksh ] && cp -fL /system/bin/mksh "$bbdir/sh" 2>/dev/null; then
+        chmod 755 "$bbdir/sh" 2>/dev/null
+    elif [ -e /system/bin/sh ] && cp -fL /system/bin/sh "$bbdir/sh" 2>/dev/null; then
+        chmod 755 "$bbdir/sh" 2>/dev/null
+    fi
+}
+provision_fallback_tools 2>/dev/null || true
+
 # rc3.1 修 N-15R: 记下自己路径让 cleanup.sh restart 时能找到我们
 # (KSU / SukiSU / Magisk 的 MODDIR 路径不一样, 不能硬编码)
 echo "$MODDIR" > "$RUN/service.path" 2>/dev/null

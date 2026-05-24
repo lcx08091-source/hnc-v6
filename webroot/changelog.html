@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc13 -->
+<div class="cl-section">
+  <div class="cl-title">🧰 v5.7.0-rc13: 对 /system/bin 被卸免疫(方案一) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>根上缓解"/system/bin 运行期消失"</b>: 你的 ROM 会间歇性把 /system/bin 从模块脚本里"弄丢",导致后台限速/守护逻辑(watchdog、iptables)崩。现在开机时(系统正常)把工具(toybox/mksh)复制一份到 /data(永不被卸),脚本在 /system/bin 消失时自动改用 /data 的副本,不再崩。</li>
+    <li><b>不打包任何二进制</b>: 是从你设备自带的 toybox 复制的,不引入外来文件。</li>
+    <li>说明: 这是缓解(让脚本扛得住),根上还是建议在 SukiSU 管理器里调"卸载模块挂载 / 命名空间模式"。dpid 监管的自愈(上一版)保留。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc12 -->
 <div class="cl-section">
   <div class="cl-title">♻️ v5.7.0-rc12: dpid 监管自愈(续修必须重新绑定) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

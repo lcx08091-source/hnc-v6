@@ -1,7 +1,9 @@
 #!/system/bin/sh
 
 # v3.5.0 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+# rc13: 追加 /data/local/hnc/bin —— SukiSU 运行期卸 /system/bin 时,裸命令
+# (sleep/sh/...) 会 fallthrough 到 service.sh 在 /data 预置的 applet 副本,不再 ENOENT 崩。
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
 # watchdog.sh — 规则完整性守护
 #
 # 【v3.4.1 核心修复】

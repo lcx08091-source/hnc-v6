@@ -1,7 +1,8 @@
 #!/system/bin/sh
 
 # v3.5.0 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+# rc13: 追加 /data/local/hnc/bin —— /system/bin 被卸时裸命令 fallthrough 到 /data 预置副本。
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
 # iptables_manager.sh — v3.4.1  双栈（IPv4 + IPv6）+ 安全 MARK 命名空间
 #
 # 【v3.4.1 关键修复】

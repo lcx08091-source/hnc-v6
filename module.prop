@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc12
-versionCode=570112
+version=v5.7.0-rc13
+versionCode=570113
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc12 · 续修 dpid 监管(rc11 基础上补 GPT 审查指出的残留 P0): C launcher 进 crash-loop / 启动见到旧 crashflag 时,以前会"永久放弃/observe"——launcher 活着但永不再拉 dpid,用户必须手动重新绑定。现改为自愈:崩溃风暴后冷却 120s → 清标志、重置计数、继续监管;启动遇旧 crashflag 也只冷却后恢复,不再死等。配合 rc11(dpi_rebind 不再起竞争 guard、launcher 不把 rc=0 当人工停止、service.sh 清残留 guard、guard get_iface 取空不抖动),"launcher 活着但 dpid 没了且无人恢复"的盲区被堵上。⚠ 需 CI 重编 hnc_launcher。根因 A(SukiSU 运行期卸 /system/bin)仍建议在 SukiSU 管理器调挂载命名空间设置。rc1~rc11 详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc13 · 方案一(根因 A 缓解):让常驻 shell 对 SukiSU 运行期卸 /system/bin 免疫。service.sh 启动时(/system 仍正常)把 toybox(或 busybox)复制到 /data/local/hnc/bin/.hnc_mc 并建 sleep/head/cat/printf/date/grep/sed 等 applet 符号链接 + 复制 mksh 为 sh;watchdog.sh / iptables_manager.sh 的 PATH 追加 /data/local/hnc/bin。这样 /system/bin 一旦被卸,裸命令自动 fallthrough 到 /data 副本,不再 ENOENT 崩(修 full_init rc=-1 / iptables sleep ENOENT)。不打包任何二进制(从设备现有 toybox 复制);设备无 toybox 才会退化。guard 的硬编码 /system/bin 路径(fallback-only)留作后续。rc12 的 dpid 监管自愈保留。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485
