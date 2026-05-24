@@ -660,6 +660,16 @@ else
     # 会落到 else 分支直启 hnc_dpid. 后续 sentinel 又会拉 C launcher, 双 dpid 风险.
     # 现在改成: 任何 launcher (C/shell/Go) 都走统一 launcher 分支, 只有 fallback 到
     # DPID_BIN (没有 launcher 可用) 才走 direct 模式.
+    # rc11: when using the C launcher (normal/robust path, also enforced by
+    # hnc_watchdog), kill any stale shell guard / Go supervisor left from a
+    # previous session (e.g. an old dpi_rebind that spawned a shell guard). Two
+    # different managers fighting over dpid is fatal (one SIGTERMs it, the other
+    # gives up) → dpid dies and the user has to keep hitting "重新绑定".
+    if [ "$LAUNCHER_CHOICE" = "c_launcher" ]; then
+        pkill -f 'hnc_dpid_guard\.sh' 2>/dev/null || true
+        pkill -f 'hnc_dpid_supervisor' 2>/dev/null || true
+    fi
+
     if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
         gp=$(cat "$DPID_GUARD_PID" 2>/dev/null)
         if [ -n "$gp" ] && kill -0 "$gp" 2>/dev/null; then

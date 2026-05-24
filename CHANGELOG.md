@@ -18,6 +18,17 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc11, 2026-05-24)
+- **"开机必须点重新绑定 / 抓不到包"**(realme RMX5010 / Android16 / SukiSU,真机日志确诊)。根因有二:
+  1. **ColorOS/SukiSU 运行期间间歇性把 `/system/bin/*` 从模块脚本的挂载命名空间移除**(日志反复 `/system/bin/{sleep,head,printf,sh}: No such file or directory`)→ shell guard 的 `get_iface` 用 `cat|head` 取到空 → 误判 iface 变更 → 杀 dpid churn;`sleep` ENOENT → guard `[FATAL]` 退出。
+  2. **双监管互杀 dpid**:权威 launcher 是 C launcher(`hnc_launcher`,由 `hnc_watchdog` 保活),但 `dpi_rebind.sh`(重新绑定按钮)却另起一个**竞争的 shell guard** → 两个监管抢 dpid;一个 SIGTERM 掉 dpid,dpid 干净退出 rc=0,**C launcher 把 rc=0 当"人工停止"就放弃监管** → dpid 没人再拉 → 必须再点重新绑定 → 越点越坏。dpid 本身健康(连续跑 8 分钟 `tls=40 dns=1196`)。
+  - **修复**:
+    - `bin/dpi_rebind.sh`:不再启动 shell guard;改为清崩溃标志(`dpid_crashflag`/`dpid.crashflag`)、杀残留 shell guard/supervisor、只重启 dpid 子进程,让 C launcher 用新 iface 配置重拉(C launcher 缺失才回退 shell guard)。
+    - `src/launcher/hnc_launcher.c`:dpid 在 launcher 未关闭(`g_shutdown` 假)时 rc=0 退出 → 当意外退出**重启**而非放弃(断开"必须重新绑定"致命链)。**需 CI 重编 hnc_launcher**。
+    - `service.sh`:用 C launcher 时 `pkill` 残留 shell guard / Go supervisor,避免双监管。
+    - `bin/hnc_dpid_guard.sh`:`get_iface` 取空(工具 ENOENT)不再触发 rebind(空=探测失败,保留当前 iface)。
+  - ⚠ 根因是 SukiSU 卸载 /system/bin(root 管理器行为),模块只能"少受伤";建议在 SukiSU 管理器找挂载命名空间设置(umount modules / namespace 模式)。版本 rc10 → rc11(570111)。
+
 ### Fixed (v5.7.0-rc10, 2026-05-24)
 - **导出下载在本机点了没反应** — 打包是成功的,坏在下载:`下载 zip` 是 `<a href="/api/exports/..">`,在本机 KSU WebUI(`file://`)下会被解析成 `file:///api/exports/..`(指向文件系统而非 http 守护进程),且带不了 loopback 鉴权头 → 点了无效(远程 `:8443` 浏览器正常)。新增 `appsDownloadExport(name,url)`:本机走 `ksu.exec` `cp` 到 `/sdcard/Download/` 并 toast;远程仍用原生 `<a download>`。两处下载入口(打包结果 + 最近导出列表)都改走它。
 - **应用解析改用 `/data/system/packages.list`**(`self_attrib.go`)— uid→pkg 主源从 `pm list packages -U` 改为读 root 权威表 `/data/system/packages.list`(含全部已装包、更全更快、不会像 pm 那样偶发漏掉真 app;失败回退 pm)。修复部分真 app 显示「未识别 (pm 未解析)」(如 uid 10347/10111)。注:uid 0(root)/系统服务/隔离进程(99910111)本就无 app,仍显示未识别属正常。HNC 是 root 守护进程,无需也无法申请 QUERY_ALL_PACKAGES。版本 rc9 → rc10(570110)。

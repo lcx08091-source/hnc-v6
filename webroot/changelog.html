@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc11 -->
+<div class="cl-section">
+  <div class="cl-title">🩹 v5.7.0-rc11: 修"必须点重新绑定 / 抓不到包" <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>找到根因(靠你给的日志)</b>: 你的 ROM(ColorOS/SukiSU)运行时会间歇性把 <code>/system/bin</code> 从模块脚本里"弄丢",再加上两个守护进程互相抢着管 dpid,导致 dpid 被反复杀掉、最后没人拉起。dpid 本身没问题(能连续抓包就一切正常)。</li>
+    <li><b>关键修复</b>: "重新绑定"以前会另起一个和后台打架的守护进程,越点越坏;现在改成保留主守护进程、清掉崩溃标记、只重启抓包子进程。主守护进程也不再因为被外部杀掉就"撂挑子"。</li>
+    <li><b>预期</b>: 刷本版后开机/切热点应该不用再手动点"重新绑定"就能自己抓包。</li>
+    <li><b>建议你也试</b>: 在 SukiSU 管理器里找一下"挂载命名空间 / umount 模块"相关设置——根上是 SukiSU 把 /system/bin 卸了,调那个设置可能直接根治。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc10 -->
 <div class="cl-section">
   <div class="cl-title">⬇️ v5.7.0-rc10: 修导出下载 + 应用解析更全 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

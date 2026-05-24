@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc10
-versionCode=570110
+version=v5.7.0-rc11
+versionCode=570111
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc10 · 本轮: ① 修导出下载——本机 KSU WebUI(file://)下「下载 zip」点了没反应(链接解析成 file://、且带不了 loopback 鉴权头),改成走 ksu.exec 把 zip 拷到 /sdcard/Download/ 并提示;远程浏览器仍用原生下载。② 应用解析改用 /data/system/packages.list 为 uid→pkg 主源(root 权威表,比 pm list packages -U 更全更快, 多解析出被 pm 漏掉的真 app; 失败回退 pm)。root 守护进程无需 QUERY_ALL_PACKAGES 权限。rc1~rc9 已含: 4-tab 导航/真实应用名/远程配对修复/候选审批/实体库 166/客户端识别/self 常驻/dpid 不依赖热点/飞轮持久化/系统 app 过滤。本轮上一条描述: 过滤系统 app。本机一堆 ColorOS 系统 app(com.oplus/coloros/heytap, uid≥10000)被飞轮归类、污染规则库、塞满列表。用 pm list packages -s 判定系统包(能抓 uid≥10000 的 OEM 系统 app, 按 uid 段切不掉)。飞轮: 系统 app 的域名不进候选累积器、不被晋级成规则。WebUI: 我的应用 把系统 app 折叠进可点开的"系统应用 N 个"灰显分组(默认收起), 真实 app 不再被淹没。rc1~rc8 已含: 4-tab 导航/真实应用名/远程配对修复/候选审批/实体库 166/客户端识别/self 常驻/dpid 不依赖热点常驻/未匹配SNI上移+飞轮进度持久化。详见 CHANGELOG.md 与应用内更新日志.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc11 · 修"开机必须点重新绑定/抓不到包"(真机日志确诊): 根因是 ColorOS/SukiSU 运行期间间歇性把 /system/bin/* 从模块脚本命名空间移除 + 双监管互杀 dpid。① dpi_rebind.sh 不再启动"竞争的 shell guard"(以前每点一次重新绑定就和 watchdog 的 C launcher 打架、越点越坏)→ 改成保留 C launcher、清崩溃标志、只重启 dpid 子进程。② C launcher 不再把 dpid 被外部 SIGTERM 后的 rc=0 当"人工停止"而放弃监管。③ service.sh 用 C launcher 时清理残留 shell guard。④ shell guard get_iface 取空(工具 ENOENT)不再误判 iface 变更而抖动。dpid 本身没问题。⚠ 需 CI 重编 hnc_launcher。建议用户在 SukiSU 管理器查挂载命名空间设置。rc1~rc10 详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

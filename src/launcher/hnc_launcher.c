@@ -435,12 +435,16 @@ static int run_supervise_loop(void)
 			break;
 
 		if (abnormal == 0) {
-			/* dpid rc=0 退出 = 主动停止, 不重启 */
-			log_msg("dpid exited cleanly, supervisor stopping");
-			break;
+			/* rc11: dpid 干净退出(rc=0)但 launcher 没在关(g_shutdown 上面已
+			 * 处理)。dpid 把 SIGTERM 当干净退出 → 残留 shell guard / LMK 一旦
+			 * SIGTERM 掉 dpid,这里就会被误当"主动停止"而放弃监管,导致 dpid
+			 * 永远不再被拉起,用户必须手动"重新绑定"。真正的人工停止会先置
+			 * g_shutdown。所以这里当作意外退出 → 落入下面的重启路径。 */
+			log_msg("dpid exited rc=0 without supervisor shutdown "
+				"(external SIGTERM / stale guard?); treating as unexpected, restarting");
 		}
 
-		/* 异常退出 — 记崩溃, 检查 loop 保护 */
+		/* 异常退出 或 意外的 rc=0 — 记崩溃, 检查 loop 保护 */
 		if (crash_tracker_record(&crashes)) {
 			log_msg("CRASH_LOOP: %d crashes in %ds window, refusing to restart. "
 				"Clear %s manually to recover.",

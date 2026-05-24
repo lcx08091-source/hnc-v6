@@ -464,7 +464,12 @@ while true; do
             kill "$child" 2>/dev/null || true
             break
         fi
-        if [ "$cur_iface" != "$iface" ]; then
+        # rc11: only rebind on a REAL iface change. When /system/bin tools
+        # (head/cat) transiently vanish from our mount namespace (SukiSU/ColorOS),
+        # get_iface returns EMPTY — that must NOT be read as "iface changed to
+        # nothing" (which caused spurious kill+rebind churn). Empty = unknown,
+        # keep the current binding.
+        if [ -n "$cur_iface" ] && [ "$cur_iface" != "$iface" ]; then
             log "iface changed while running: $iface -> $cur_iface; rebind"
             kill "$child" 2>/dev/null || true
             break
