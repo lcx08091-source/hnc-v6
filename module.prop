@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc26
-versionCode=570126
+version=v5.7.0-rc27
+versionCode=570127
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc26 · 修 rc25 NAT 的上联口探测 bug。真机干净测试确认本地热点成立(start-softap -b any 后 wlan2 起来带 10.126.123.0/24 子网,会给客户端发 IP),A 方案地基 OK。但 rc25 的 detect_up_iface 用 `ip route show default` —— Android 是策略路由、main 表常无 default,所以探空 → NAT 直接跳过、客户端没网。rc26 改用 `ip route get 1.1.1.1` 取真实互联网出口接口(rmnet/tun 都能正确取到),NAT 才会真正挂上。其余同 rc25(start-softap -b any、去 svc wifi enable、stop 撤 NAT、UI 诚实标注)。仍需真机验证:刷后关手动热点→点立即启动→另一台连上看能否上网。纯 shell,不用重编。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc27 · 开机自动开热点(含流量共享)真机端到端验证通过!用户实测:start-softap -b any 起本地热点(wlan2 + 10.126.123.0/24)+ ip route get 探出口(此机走 VPN tun0)+ ip_forward/MASQUERADE/FORWARD,另一台设备连上能正常上网。本版加可靠性补丁:setup_nat 起热点后改为轮询等热点接口拿到 IP(最多 ~8s,真机 wlan2 约 5s 才就绪;开机更忙,旧的固定 sleep 2 可能漏挂 NAT)。至此 ColorOS 开机自启热点 A 方案打通(rc24 异步不卡死 + rc25 start-softap -b any/去 svc wifi enable/自建 NAT + rc26 ip route get 出口探测 + rc27 轮询就绪)。刷后:关手动热点→点立即启动/重启→另一台连上即可上网。纯 shell,不用重编。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

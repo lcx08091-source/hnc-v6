@@ -95,12 +95,18 @@ detect_ap_iface() {
 }
 setup_nat() {
     up=$(detect_up_iface)
-    sleep 2  # 等本地热点接口拿到子网/IP
-    ap=$(detect_ap_iface "$up")
+    # rc27: 轮询等本地热点接口拿到 IP(最多 ~8s)。开机时系统忙,固定 sleep 2 可能
+    # 还没就绪 → 找不到接口 → NAT 没挂 → 客户端没网。真机实测 wlan2 约 5s 才有 IP。
+    ap=""; _t=0
+    while [ "$_t" -lt 8 ]; do
+        ap=$(detect_ap_iface "$up"); [ -n "$ap" ] && break
+        sleep 1; _t=$((_t + 1))
+    done
     if [ -z "$ap" ] || [ -z "$up" ]; then
-        log "NAT: 找不到 ap=[$ap] / up=[$up],跳过 —— 客户端可能没网,请改从系统设置开热点"
+        log "NAT: 找不到 ap=[$ap] / up=[$up](等了 ${_t}s),跳过 —— 客户端可能没网,请改从系统设置开热点"
         return 0
     fi
+    log "NAT: ap=$ap up=$up(${_t}s 就绪)"
     log "NAT: ap=$ap up=$up,启用 ip_forward + MASQUERADE + FORWARD"
     { echo 1 > /proc/sys/net/ipv4/ip_forward; } 2>/dev/null || sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
     iptables -t nat -C POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true

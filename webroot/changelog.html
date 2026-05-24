@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc27 -->
+<div class="cl-section">
+  <div class="cl-title">✅ v5.7.0-rc27: 开机自动开热点(带流量共享)实测打通 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>成了!</b> 真机验证:模块起本地热点 + 自己做流量共享后,另一台设备连上能正常上网(你这台还是经 VPN 出口也通了)。ColorOS 上"开机自动开热点"这条路打通了。</li>
+    <li><b>本版补丁</b>: 起热点后改成"等热点接口就绪再挂共享规则"(最多等约 8 秒)。因为开机时系统忙,接口要几秒才好,之前等太短可能漏挂、导致没网。</li>
+    <li><b>怎么用</b>: 关掉手动热点 → app 点「立即启动」或直接重启 → 另一台连上就能上网。开关打开后,以后每次开机都会自动开。</li>
+    <li>说明: 纯脚本改动,不用重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc26 -->
 <div class="cl-section">
   <div class="cl-title">📡 v5.7.0-rc26: 修自建 NAT 的上联口探测(开机热点共享) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

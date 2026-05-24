@@ -18,6 +18,12 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc27, 2026-05-25)
+- **开机自动开热点(含流量共享)真机端到端验证通过** + 加可靠性补丁(`bin/hotspot_autostart.sh`)。用户用 rc26 的等效命令实测:`start-softap -b any` 起本地热点(`wlan2` + `10.126.123.0/24`)→ `ip route get` 探出口(此机经 VPN `tun0`)→ `ip_forward`+`MASQUERADE`+`FORWARD` → **另一台设备连上能正常上网**。A 方案(本地热点 + 模块自建 NAT)在 ColorOS 上完整跑通。
+  - **补丁**:`setup_nat` 起热点后由"固定 `sleep 2`"改为**轮询等热点接口拿到 IP(最多 ~8s)**。真机 `wlan2` 约 5s 才有 IP,开机时系统更忙,旧的 2s 可能在接口就绪前就放弃 → 漏挂 NAT → 客户端没网。轮询确保与已验证的手动流程一致。
+  - 至此 ColorOS"开机自启热点"链路打通:rc24(异步不卡死)+ rc25(`start-softap -b any` / 删 `svc wifi enable` / 自建 NAT / UI 诚实标注)+ rc26(`ip route get` 出口探测)+ rc27(轮询接口就绪)。
+  - `sh -n` 通过;纯 shell,不用重编。验证:刷后关手动热点 → 点「立即启动」或重启 → 另一台连上即可上网。版本 rc26 → rc27(570127)。
+
 ### Fixed (v5.7.0-rc26, 2026-05-25)
 - **修 rc25 自建 NAT 的「上联口探测」bug**(`bin/hotspot_autostart.sh`)。真机干净测试(手动热点关闭)确认:`cmd wifi start-softap ... -b any` 后 **`wlan2` 起来并带 `10.126.123.0/24` 子网** → 本地热点会给客户端发 IP,A 方案地基成立。但 rc25 的 `detect_up_iface` 用 `ip route show default` 取上联接口 —— **Android 用策略路由(per-network 路由表),main 表常常没有 default route**,所以探到空 → `setup_nat` 走"找不到 up"分支直接跳过 → 客户端永远没网。
   - **修复**:`detect_up_iface` 改用 `ip route get 1.1.1.1` 解析实际互联网出口接口(`rmnet_data2` / VPN `tun0` 都能正确取到;纯 `${var#*dev }` 参数展开,不依赖 awk/sed)。这样 `setup_nat` 才能正确挂上 MASQUERADE。
