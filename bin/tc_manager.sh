@@ -820,6 +820,54 @@ clear_uplink_police() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# rc20: 每设备「低延迟」(智能队列) — 把该设备 class 的叶子换成 CAKE/fq_codel
+# (AQM),关闭时换回按速率缩放的 netem 占位。配合限速效果最好(限速=瓶颈,
+# 队列排在我们能管的地方,AQM 才压得住延迟)。与延迟/弱网注入互斥:叶子上若有
+# 真实 netem(delay/loss)则不动它(延迟优先,UI 也做互斥)。
+# ═══════════════════════════════════════════════════════════════
+device_sqm_leaf() {
+    local dev=$1 class_id=$2 want=$3
+    leaf_has_active_netem "$dev" "$class_id" && return 0   # 真实延迟/丢包占着叶子,不抢
+    local leaf_handle
+    if [ "$dev" = "$IFB_IFACE" ]; then leaf_handle=$((class_id + 2000)); else leaf_handle=$((class_id + 1000)); fi
+    if [ "$want" = on ]; then
+        tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" cake besteffort 2>/dev/null && return 0
+        tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" fq_codel target 5ms interval 100ms quantum 1514 limit 1024 2>/dev/null && return 0
+        return 1   # 内核既无 cake 也无 fq_codel
+    fi
+    # off: 换回按速率缩放的 netem 占位
+    netem_leaf_replace_zero "$dev" "$class_id" "$leaf_handle"
+    local _mbps; _mbps=$(rate_to_mbps_num "$(tc class show dev "$dev" classid "1:$class_id" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="rate"){print $(i+1); exit}}')")
+    tune_leaf_netem_limit "$dev" "$class_id" "$_mbps"
+    return 0
+}
+
+# set_sqm <iface> <mark_id> <on|off> [ip]
+set_sqm() {
+    local iface=$1 mark_id=$2 want=$3 ip=${4:-}
+    _validate_mark_id "$mark_id" || return 1
+    local class_id; class_id=$(printf "%d" "$mark_id")
+    log "set_sqm: mark=$mark_id ip=${ip:-(none)} want=$want"
+    if [ "$want" = on ]; then
+        if ! tc_limit_supported_runtime; then
+            log_tc_unsupported_once "set_sqm" "tc_htb"
+            echo "SQM_APPLY_MODE=unsupported"
+            return 66
+        fi
+        ensure_egress_htb_ready "$iface" "set_sqm" || return 1
+        ensure_device_class "$iface" "$class_id" "$ip" || return 1
+        device_sqm_leaf "$iface" "$class_id" on || { log "set_sqm: no cake/fq_codel leaf available on $iface"; echo "SQM_APPLY_MODE=no_aqm"; return 67; }
+        if class_exists "$IFB_IFACE" "$class_id"; then device_sqm_leaf "$IFB_IFACE" "$class_id" on || true; fi
+        echo "SQM_APPLY_MODE=on"
+    else
+        class_exists "$iface" "$class_id" && device_sqm_leaf "$iface" "$class_id" off || true
+        class_exists "$IFB_IFACE" "$class_id" && device_sqm_leaf "$IFB_IFACE" "$class_id" off || true
+        echo "SQM_APPLY_MODE=off"
+    fi
+    return 0
+}
+
+# ═══════════════════════════════════════════════════════════════
 # 禁用硬件加速 / offload
 # 必须在 tc qdisc 建立之前调用，否则大包绕过整形层
 # ═══════════════════════════════════════════════════════════════
@@ -1866,7 +1914,7 @@ restore_rules() {
                     i++
                 }
                 block = substr($0, start, i - start - 1)
-                mark_id = ""; ip = ""; down = "0"; up = "0"; delay = "0"; jitter = "0"; loss = "0"
+                mark_id = ""; ip = ""; down = "0"; up = "0"; delay = "0"; jitter = "0"; loss = "0"; sqm = "false"
                 n = split(block, parts, ",")
                 for (j = 1; j <= n; j++) {
                     if (match(parts[j], /"mark_id"[[:space:]]*:[[:space:]]*[0-9]+/)) {
@@ -1893,10 +1941,13 @@ restore_rules() {
                         # 调用硬编码 "0"). 现在正确解析并传递.
                         s = substr(parts[j], RSTART, RLENGTH)
                         sub(/.*:[[:space:]]*/, "", s); loss = s
+                    } else if (match(parts[j], /"sqm_enabled"[[:space:]]*:[[:space:]]*true/)) {
+                        # rc20: 每设备低延迟标志, restore 时一并恢复 AQM 叶子
+                        sqm = "true"
                     }
                 }
                 if (mark_id != "") {
-                    print mark_id "|" ip "|" down "|" up "|" delay "|" jitter "|" loss
+                    print mark_id "|" ip "|" down "|" up "|" delay "|" jitter "|" loss "|" sqm
                     exit
                 }
             }
@@ -1910,6 +1961,7 @@ restore_rules() {
         local delay;   delay=$(echo   "$fields" | cut -d'|' -f5)
         local jitter;  jitter=$(echo  "$fields" | cut -d'|' -f6)
         local loss;    loss=$(echo    "$fields" | cut -d'|' -f7)
+        local sqm;     sqm=$(echo     "$fields" | cut -d'|' -f8)
         [ -z "$mark_id" ] && continue
 
         # rc3.1.30 Bug B: 优先用 devices.json 里的实时 IP.
@@ -1938,9 +1990,10 @@ restore_rules() {
             fi
         fi
 
-        local want_limit=0 want_delay=0
+        local want_limit=0 want_delay=0 want_sqm=0
         if gt0 "${down:-0}" || gt0 "${up:-0}"; then want_limit=1; fi
         if gt0 "${delay:-0}" || gt0 "${jitter:-0}" || gt0 "${loss:-0}"; then want_delay=1; fi
+        if [ "$sqm" = "true" ]; then want_sqm=1; fi
         if [ "$want_limit" = "1" ] && [ "$limit_supported" = "0" ]; then
             log "  restore skip limit for $mac: tc_htb=false"
             down=0; up=0; want_limit=0
@@ -1949,7 +2002,9 @@ restore_rules() {
             log "  restore skip delay for $mac: tc_netem/tc_htb unsupported"
             delay=0; jitter=0; loss=0; want_delay=0
         fi
-        if [ "$want_limit" = "0" ] && [ "$want_delay" = "0" ]; then
+        # rc20: 低延迟需要 HTB 叶子类; tc_htb 不支持就别恢复
+        if [ "$want_sqm" = "1" ] && [ "$limit_supported" = "0" ]; then want_sqm=0; fi
+        if [ "$want_limit" = "0" ] && [ "$want_delay" = "0" ] && [ "$want_sqm" = "0" ]; then
             log "  restore skip tc for $mac: all tc features unsupported or rule is zero"
             continue
         fi
@@ -1965,6 +2020,10 @@ restore_rules() {
                 log_error "restore_rules: abort after 2 consecutive failures to avoid holding gate_lock/UI stall"
                 break
             fi
+        fi
+        # rc20: 恢复每设备「低延迟」AQM 叶子(set_all 之后, 延迟未占叶子时才生效)
+        if [ "$want_sqm" = "1" ]; then
+            set_sqm "$iface" "$mark_id" on "$ip" >/dev/null 2>&1 || log "  restore: set_sqm on failed for $mac"
         fi
     done
 
@@ -2110,6 +2169,13 @@ case "$1" in
     set_delay)
         tc_action_lock set_delay || exit 12
         set_delay "$2" "$3" "$4" "$5" "$6" "$7"
+        rc=$?
+        tc_snapshot_async "$2"
+        tc_action_unlock
+        exit $rc ;;
+    set_sqm)
+        tc_action_lock set_sqm || exit 12
+        set_sqm "$2" "$3" "$4" "$5"
         rc=$?
         tc_snapshot_async "$2"
         tc_action_unlock

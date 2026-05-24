@@ -5967,6 +5967,7 @@ body.kb-open .container {
           delay: d.delay_ms || 0,
           jitter: d.jitter_ms || 0,
           loss: d.loss_pct || 0,
+          sqm: (d.sqm_enabled === true || d.sqm_enabled === 'true'),
           delay_apply_mode: d.delay_apply_mode || '',
           limit_apply_mode: d.limit_apply_mode || '',
           apply_error: d.apply_error || '',
@@ -6109,6 +6110,11 @@ body.kb-open .container {
   }
   async function clearDelayBackend(mac) {
     await apiAction('delay_clear', { mac });
+    return true;
+  }
+  /* rc20: 每设备「低延迟」(智能队列) 开关 */
+  async function applySqmBackend(mac, enabled) {
+    await apiAction('rule_sqm', { mac, enabled: enabled ? 'true' : 'false' });
     return true;
   }
 
@@ -9279,6 +9285,13 @@ body.kb-open .container {
               </div>
             </div>
             <div class="ctrl-section">
+              <div class="ctrl-label"><span class="ctrl-label-dot accent"></span>低延迟<span class="ctrl-label-hint">智能队列 · 配合限速最佳</span></div>
+              <div class="btn-row">
+                <button class="btn ${d.sqm ? 'btn-primary' : 'btn-ghost'}" data-action="toggle-sqm"${(downlinkDisabled || ((Number(d.delay)||0)>0 || (Number(d.jitter)||0)>0 || (Number(d.loss)||0)>0)) ? ' disabled aria-disabled="true"' : ''}>${d.sqm ? '低延迟 · 已开启' : '开启低延迟'}</button>
+              </div>
+              ${downlinkDisabled ? '<div class="input-hint warn">当前内核/TC 不支持 HTB，低延迟不可用。</div>' : (((Number(d.delay)||0)>0 || (Number(d.jitter)||0)>0 || (Number(d.loss)||0)>0) ? '<div class="input-hint">已注入延迟时不能同时开低延迟(两者互斥);清除延迟后可开。</div>' : '<div class="input-hint">给该设备智能队列(CAKE/fq_codel),跑满时更跟手。给它设个限速效果最佳。</div>')}
+            </div>
+            <div class="ctrl-section">
               <div class="ctrl-label"><span class="ctrl-label-dot danger"></span>访问控制</div>
               <div class="btn-row">
                 ${blockBtn}
@@ -11861,6 +11874,29 @@ body.kb-open .container {
         const detail = e.detail ? (': ' + e.detail) : '';
         toast('失败: ' + e.message + detail, 'err');
         dbg('clear-delay err: ' + e.message + detail, true);
+      });
+      return;
+    }
+    if (action === 'toggle-sqm') {
+      const card = btn.closest('.device-card');
+      const mac = card.dataset.mac;
+      if (!guardCardAction(card)) return;
+      const dev = DEVICES.find(x => x.mac === mac);
+      const want = !(dev && dev.sqm);
+      setCardBusy(card, true, action);
+      btn.disabled = true; btn.classList.add('loading');
+      applySqmBackend(mac, want).then(() => requestForceRefresh()).then(() => {
+        if (dev) dev.sqm = want;
+        btn.classList.remove('loading'); btn.classList.add('success');
+        btn.classList.toggle('btn-primary', want); btn.classList.toggle('btn-ghost', !want);
+        btn.textContent = want ? '低延迟 · 已开启' : '开启低延迟';
+        toast(want ? '已开启低延迟(智能队列)' : '已关闭低延迟', 'ok');
+        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; updateCardInPlace(mac); }, 650);
+      }).catch(e => {
+        btn.classList.remove('loading'); setCardBusy(card, false); btn.disabled = false;
+        const detail = e.detail ? (': ' + e.detail) : '';
+        toast('失败: ' + e.message + detail, 'err');
+        dbg('toggle-sqm err: ' + e.message + detail, true);
       });
       return;
     }

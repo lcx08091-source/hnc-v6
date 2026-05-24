@@ -270,6 +270,8 @@ func dispatchAction(hncDir, action string, p map[string]string, isLoopback bool)
 		return actionDelaySet(hncDir, p)
 	case "delay_clear":
 		return actionDelayClear(hncDir, p)
+	case "rule_sqm": // rc20: per-device low-latency (smart queue) toggle
+		return actionDeviceSQMSet(hncDir, p)
 	case "template_apply":
 		return actionTemplateApply(hncDir, p)
 	case "hotspot_start":

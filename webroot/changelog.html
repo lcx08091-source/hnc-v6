@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc20 -->
+<div class="cl-section">
+  <div class="cl-title">✨ v5.7.0-rc20: 每台设备一键「低延迟」(做进设备卡片) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>新功能</b>: 展开任意设备卡片,多了一个「低延迟」开关。开了之后,这台设备走智能队列(CAKE/fq_codel),它自己跑满带宽时也不卡、更跟手。</li>
+    <li><b>怎么用最好</b>: 配合限速一起用效果最佳——给这台设备设个限速,再开低延迟,它一边下载一边玩也顺。</li>
+    <li><b>说明</b>: 「低延迟」和「延迟/弱网注入」是反的,不能同时开(开关会互相禁用)。设置一次后,关机/切热点都会自动恢复。</li>
+    <li>这取代了设置页那个又复杂又难用的全局 SQM——现在直接在你要控制的那台设备上点就行。本次含后端改动,刷新版本会重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc19 -->
 <div class="cl-section">
   <div class="cl-title">🩹 v5.7.0-rc19: 修「SQM 一点就报错」 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

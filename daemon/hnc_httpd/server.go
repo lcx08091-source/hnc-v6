@@ -399,7 +399,7 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 			}
 			if rule, ok := ruleRaw.(map[string]interface{}); ok {
 				for _, k := range []string{"mark_id", "down_mbps", "up_mbps", "delay_ms",
-					"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled"} {
+					"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled", "sqm_enabled"} {
 					if v, exists := rule[k]; exists {
 						merged[k] = v
 					}

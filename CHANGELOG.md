@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc20, 2026-05-24)
+- **每设备「低延迟」开关 —— 做进设备卡片(取代设置页那个复杂的全局 SQM)**。展开任一设备卡 → 新的「低延迟」一键开关 → 把该设备 HTB class 的叶子 qdisc 换成 **CAKE/fq_codel(AQM)**,这台设备自己跑满时也跟手;关闭则换回按速率缩放的 netem 占位。
+  - **为什么做成每设备**:全局 SQM 在设置页"太复杂、基本用不上";而"低延迟"恰恰是**单设备 + 已限速**时最有效(限速给这台造了瓶颈,队列就排在我们能管的叶子上,AQM 才压得住延迟)。UI hint 写明"配合限速效果最佳"。
+  - **互斥**:与延迟/弱网注入互斥(同一个叶子:一个压低延迟、一个注入延迟)。卡片上注入了延迟时,低延迟开关禁用并提示;后端 `device_sqm_leaf` 也会在叶子已有真实 netem(delay/loss)时不抢。
+  - **持久化 + restore**:`rules.json` per-device 加 `sqm_enabled`;开机/切热点 `restore_rules` 解析并 `set_sqm on` 恢复(连"只开低延迟、没限速"的设备也会建好 class + AQM 叶子),不会切热点后丢失。
+  - **链路**(改动文件):前端卡片开关 `data-action="toggle-sqm"` → `applySqmBackend` → `apiAction('rule_sqm')`;Go `action_dev_sqm.go: actionDeviceSQMSet`(镜像 delay 路径:解析 iface/mark_id/ip,`tc_htb` 不支持则拒绝)→ `apply_device_rule.sh alloc_mid`(复用)+ `tc_manager.sh set_sqm`(新增 `set_sqm`/`device_sqm_leaf` + CLI dispatch)+ `json_set.sh device … sqm_enabled`;`action.go` 注册 `rule_sqm`;`server.go` 把 `sqm_enabled` 加进 `/api/devices` 字段白名单;`index.html` 设备模型加 `sqm`、卡片加低延迟 section + 点击处理。
+  - cake 不支持自动退 fq_codel,都没有则提示无 AQM;`tc_htb` 不支持时开关在 UI 灰掉。⚠ **Go 改动,需 CI 重编 `hnc_httpd`**;`go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` + `node --check` + `sh -n` 均通过。(设置页旧全局 SQM 卡暂留,后续看是否简化/移除。)版本 rc19 → rc20(570120)。
+
 ### Fixed (v5.7.0-rc19, 2026-05-24)
 - **修复"SQM 一点就报错"——设置页 SQM 任意按钮点了都弹「SQM 切换失败」**(`bin/sqm_manager.sh`)。根因:`actionSQMSet` → `sqm_manager.sh apply` → `apply_default_leaf` 是**增量**应用(只在已存在的 HTB 树上替换默认类 `1:9999` 的叶子 qdisc),它要求 `qdisc htb 1:` 和 `class htb 1:9999` 已经存在;**否则 `return 3`/`return 4` 硬失败**。但 HTB 队列树只在 `set_limit`(第一次给某设备设限速)时经 `ensure_egress_htb_ready→init_tc` **惰性创建**,开机 / 开热点都不主动建。**结果:只要你没给任何设备设过限速,点 SQM 的任意模式/档位都命中 rc=3「HTB root 1: not found」→ 前端每次 toast「SQM 切换失败: sqm apply failed」**——SQM 实际上从来没法独立用。
   - **修复**:`apply_default_leaf` 在热点网卡存在、但 HTB 根缺失时,先 `sh tc_manager.sh init "$iface"` 把树建起来(幂等,建 root + 默认类 1:9999 + fq_codel 叶子),再做增量叶子替换;若 bootstrap 仍失败(如内核真不支持 HTB),改为**优雅保存 `return 0`**(stderr/log 给 WARN)而不是硬报错——前端不再误报失败。默认类缺失同样改为优雅保存。
