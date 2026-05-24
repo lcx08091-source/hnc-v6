@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc4, 2026-05-24)
+- **自建实体库扩到 166 条**(`data/entity_db.json`,+45)——重点补**国内 + OEM 共享基础设施**(西方公开库最弱的部分):
+  - OEM:OPPO/HeyTap(heytapcs/heytapimage/heytapdownload/heytapmobi)、华为(hicloud/dbankcdn/dbankcloud)——对 ColorOS 设备尤其相关。
+  - 国内大 app CDN/云:爱奇艺(qiyipic/iqiyipic/ppsimg/71.am/qy.net)、优酷(ykimg)、网易(126.net/127.net/ydstatic)、知乎(zhimg)、小红书(xhscdn)、拼多多(pddpic)、美团(meituan.net)、大众点评(dpfile)、饿了么(elemecdn)、虎牙(msstatic)、斗鱼(douyucdn.cn)、酷狗(kgimg)、汽车之家(autoimg)、58(58cdn.com.cn)、搜狐(itc.cn)、新浪(sinajs/sinastorage)、字节(toutiaocdn/toutiaoimg)。
+  - 统计/广告/SDK:秒针 miaozhen、AdMaster、热云 reyun、Mintegral/rayjump、字节穿山甲 pangle、Unity、AppLovin、Vungle、Cloudflare insights;微软连通性检测(msftconnecttest/msftncsi)。
+  - **均为自有整理的事实,未抄取任何第三方数据集**(Tracker Radar 等 CC-BY-NC-SA/GPL 不可再分发);继续排除会单独归属某 app 的 vendor apex(qq.com/oppo.com/iqiyi.com/zhihu.com 等不收)。
+  - 纯数据增量:`dpid` 与 `service.sh` 无需改动,`entity_db.json` 的 `version` 升到 `2026-05-24.2`,service.sh 自动热替换 + 备份。版本 rc3 → rc4(versionCode 570104)。
+
 ### Added (v5.7.0-rc3, 2026-05-24)
 - **自建实体库 / 阶段4** (`data/entity_db.json` + `src/dpid/output/entity.go`) — 121 条 HNC 自有整理的 `apex→{type,entity}`,覆盖全球+国内主流**共享基础设施**(CDN / 云存储 / 统计 / 广告 / 推送 SDK:Akamai/Cloudfront/Fastly、阿里云/腾讯云 myqcloud/百度云/字节 volces、友盟/TalkingData/神策、个推/极光 …)。
   - **license 干净**:全部自有整理,**不含任何第三方数据集**。明确放弃 DuckDuckGo Tracker Radar —— 它是 CC-BY-NC-SA(非商用 + 传染性 ShareAlike),打进公开模块会把整个模块拖成 NC-SA,法律上不可行。
