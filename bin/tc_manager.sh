@@ -871,6 +871,67 @@ set_sqm() {
 }
 
 # ═══════════════════════════════════════════════════════════════
+# rc32: 全局带宽整形器 (opt-in, 默认关)
+#
+# 把整个热点的 HTB 父类 1:1 的 ceil 设成 WAN 带宽,并把默认类 1:9999 的叶子升级成
+# 最优 AQM (cake → fq_codel → sfq)。HTB 借用模型下,所有子类(每设备 class + 默认类)
+# 都借不出 1:1 的 ceil → 整个热点总吞吐受 WAN 瓶颈管;此时队列排在我们能管的叶子上,
+# AQM 才压得住 bufferbloat。关闭时把 1:1 复位回 DEFAULT_RATE(≈ 不限)。
+#
+# 方向:egress on AP iface = 客户端下载(WAN down);ifb0 = 客户端上传(WAN up)。
+# 用法: set_global_shaper <iface> <on|off> <down_rate> <up_rate>
+#   down_rate/up_rate: "<n>mbit"/"<n>kbit",或 "0" = 该方向不整形
+# ═══════════════════════════════════════════════════════════════
+global_shaper_default_leaf() {
+    # 默认类 1:9999 叶子升级成最优 AQM(整条链路抗 bufferbloat)
+    local dev=$1
+    tc qdisc replace dev "$dev" parent 1:9999 handle 9999: cake besteffort 2>/dev/null && return 0
+    tc qdisc replace dev "$dev" parent 1:9999 handle 9999: fq_codel target 5ms interval 100ms quantum 1514 2>/dev/null && return 0
+    tc qdisc replace dev "$dev" parent 1:9999 handle 9999: sfq perturb 10 2>/dev/null && return 0
+    return 1
+}
+set_global_shaper() {
+    local iface=$1 want=$2 down_rate=${3:-0} up_rate=${4:-0}
+    log "set_global_shaper: want=$want down=$down_rate up=$up_rate iface=$iface"
+    if [ "$want" = on ]; then
+        if ! tc_limit_supported_runtime; then
+            log_tc_unsupported_once "set_global_shaper" "tc_htb"
+            echo "GLOBAL_SHAPER=unsupported"
+            return 66
+        fi
+        ensure_egress_htb_ready "$iface" "set_global_shaper" || return 1
+        # 下行(egress on AP iface): 1:1 ceil = WAN down
+        if [ -n "$down_rate" ] && [ "$down_rate" != "0" ]; then
+            local b; b=$(burst_for_rate "$down_rate")
+            tc_class_set "$iface" 1: 1:1 rate "$down_rate" ceil "$down_rate" burst "$b" cburst "$b" \
+                || { log_error "set_global_shaper: egress 1:1 set failed on $iface"; echo "GLOBAL_SHAPER=down_fail"; return 1; }
+            global_shaper_default_leaf "$iface" || log "set_global_shaper: no AQM leaf on $iface default class"
+        fi
+        # 上行(ifb0 egress): 1:1 ceil = WAN up
+        if [ -n "$up_rate" ] && [ "$up_rate" != "0" ]; then
+            if uplink_supported_runtime; then
+                ensure_ifb_root_v1 || true
+                local bu; bu=$(burst_for_rate "$up_rate")
+                tc_class_set "$IFB_IFACE" 1: 1:1 rate "$up_rate" ceil "$up_rate" burst "$bu" cburst "$bu" \
+                    || log_error "set_global_shaper: ifb0 1:1 set failed (上行整形未生效)"
+                global_shaper_default_leaf "$IFB_IFACE" || true
+            else
+                log_uplink_unsupported_once "set_global_shaper"
+                log "set_global_shaper: uplink unsupported; skip ifb0 shaping"
+            fi
+        fi
+        echo "GLOBAL_SHAPER=on down=${down_rate} up=${up_rate}"
+        return 0
+    else
+        # off: 复位 1:1 回 DEFAULT_RATE(egress + ifb0),叶子留 AQM(本就是 fq_codel/sfq,无害)
+        tc_class_set "$iface" 1: 1:1 rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k || true
+        tc class change dev "$IFB_IFACE" parent 1: classid 1:1 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null || true
+        echo "GLOBAL_SHAPER=off"
+        return 0
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════
 # 禁用硬件加速 / offload
 # 必须在 tc qdisc 建立之前调用，否则大包绕过整形层
 # ═══════════════════════════════════════════════════════════════
@@ -2042,6 +2103,20 @@ restore_rules() {
             [ -n "$bl_mac" ] && sh "$HNC_DIR/bin/iptables_manager.sh" blacklist_add "" "$bl_mac"
         done
     fi
+
+    # rc32: 恢复全局带宽整形器 (opt-in, 默认关)。仅 enabled=true 时应用,默认不碰 1:1。
+    local gs_en; gs_en=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_enabled 2>/dev/null)
+    if [ "$gs_en" = "true" ] && [ -n "$iface" ]; then
+        local gs_down gs_up
+        gs_down=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_down 2>/dev/null); [ -n "$gs_down" ] || gs_down=0
+        gs_up=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_up 2>/dev/null);   [ -n "$gs_up" ]   || gs_up=0
+        if set_global_shaper "$iface" on "$gs_down" "$gs_up" >/dev/null 2>&1; then
+            log "  restore: global shaper on down=$gs_down up=$gs_up"
+        else
+            log "  restore: global shaper apply failed (down=$gs_down up=$gs_up)"
+        fi
+    fi
+
     log "Restore complete"
 }
 
@@ -2192,6 +2267,19 @@ case "$1" in
         tc_snapshot_async "$2"
         tc_action_unlock
         exit $rc ;;
+    global_shaper)
+        # rc32: 全局带宽整形器 (opt-in)。$2=iface $3=on|off $4=down_rate $5=up_rate
+        _gs_try=0
+        until tc_action_lock global_shaper; do
+            _gs_try=$((_gs_try + 1))
+            [ "$_gs_try" -ge 12 ] && exit 12
+            sleep 0.25 2>/dev/null || sleep 1
+        done
+        set_global_shaper "$2" "$3" "$4" "$5"
+        rc=$?
+        tc_snapshot_async "$2"
+        tc_action_unlock
+        exit $rc ;;
     set_all)
         tc_action_lock set_all || exit 12
         set_all "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"
@@ -2210,7 +2298,7 @@ case "$1" in
     status)     show_status "$2" ;;
     snapshot)   sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$2" ;;
     *)
-        echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_all|remove|restore|ensure_ingress|status|snapshot|cleanup}"
+        echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_sqm|global_shaper|set_all|remove|restore|ensure_ingress|status|snapshot|cleanup}"
         echo ""
         echo "v5.1.0-rc1-hotfix17.7: TC writer serialization + state snapshot"
         echo ""

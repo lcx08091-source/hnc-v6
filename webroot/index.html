@@ -4955,6 +4955,46 @@ body.kb-open .container {
     </div>
     <div class="set-footer">技术说明: ColorOS 真机实测——<code>cmd tethering</code>/<code>svc wifi hotspot</code> 无 shell 实现,只有 <code>cmd wifi start-softap -b any</code> 能起,但那是"本地热点"(系统不给它做流量共享)。所以本模块起热点后自己补 <code>ip_forward</code>+<code>iptables MASQUERADE</code> 到上联接口做共享。若客户端连上没网,说明本地热点这条路在你机型上不通,请改从系统设置开热点(那条才是系统原生共享)。日志: <code>/data/local/hnc/logs/hotspot.log</code></div>
 
+    <!-- 全局带宽整形 (opt-in, 默认关) rc32 -->
+    <div class="sec-title">全局带宽整形 <span style="font-size:11px;color:var(--text-3);font-weight:400">· 进阶 · 默认关</span></div>
+    <div class="setting-group glass-elevated">
+      <div class="set-row">
+        <div class="set-icon orange"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3 8 4-16 3 8h4"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">启用全局带宽整形</div>
+          <div class="set-desc">给整个热点设 WAN 带宽上限 + 智能队列(AQM),抗 bufferbloat。最适合<b>稳定链路</b>(WiFi 中继 / 固定宽带);蜂窝速率乱跳时效果有限。</div>
+        </div>
+        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="全局带宽整形" id="gs-toggle" data-action="toggle-gs"></div>
+      </div>
+      <div id="gs-config" class="hs-config">
+        <div class="hs-field-row">
+          <div style="flex:1">
+            <div class="hs-field-label">WAN 下行带宽</div>
+            <div class="hs-field-desc">宽带下载速率(Mbps,和套餐一致)</div>
+          </div>
+          <div class="hs-delay-input">
+            <input type="number" inputmode="decimal" class="glass-input" id="gs-down" placeholder="如 100" min="1" step="1">
+            <span class="input-suffix">Mbps</span>
+          </div>
+        </div>
+        <div class="hs-field-row">
+          <div style="flex:1">
+            <div class="hs-field-label">WAN 上行带宽</div>
+            <div class="hs-field-desc">宽带上传速率(Mbps,可留空)</div>
+          </div>
+          <div class="hs-delay-input">
+            <input type="number" inputmode="decimal" class="glass-input" id="gs-up" placeholder="如 30" min="1" step="1">
+            <span class="input-suffix">Mbps</span>
+          </div>
+        </div>
+        <div class="input-hint" id="gs-hint">填好带宽后点「应用」才生效。建议填比实测略低 5~10%(留整形余量)。<br>原理:把整个热点总吞吐压在 WAN 带宽下 → 队列排在我们能管的叶子上,AQM 才压得住延迟。</div>
+        <div class="btn-row" style="margin-top:12px">
+          <button class="btn btn-primary" data-action="gs-apply">✅ 应用整形</button>
+        </div>
+      </div>
+    </div>
+    <div class="set-footer">诚实说明:这是<b>固定</b>带宽整形——填多少按多少限。蜂窝网速率每分钟都在变,固定值大部分时间偏差较大(本内核大概率没有 CAKE autorate 自适应),所以蜂窝下收益有限;稳定链路(光猫 / WISP / WiFi 中继)才是主战场。<b>不开则完全不影响</b>每设备限速/低延迟。需要热点已开启才能应用;重启后会按保存值自动恢复。</div>
+
     <!-- Refresh mode -->
     <div class="sec-title">刷新与功耗</div>
     <div class="setting-group glass-elevated">
@@ -6050,6 +6090,38 @@ body.kb-open .container {
   /* rc20: 每设备「低延迟」(智能队列) 开关 */
   async function applySqmBackend(mac, enabled) {
     await apiAction('rule_sqm', { mac, enabled: enabled ? 'true' : 'false' });
+    return true;
+  }
+
+  /* rc32: 全局带宽整形 (opt-in)。downMbps/upMbps 为 Mbps 数(WAN 带宽),
+   * 转 tc 速率字符串 "<n>mbit"/"<n>kbit" 传后端 global_shaper_set。 */
+  function wanMbpsToRate(n) {
+    const v = parseFloat(n) || 0;
+    if (v <= 0) return '0';
+    if (v >= 1 && v === Math.floor(v)) return Math.floor(v) + 'mbit';
+    return Math.round(v * 1000) + 'kbit';
+  }
+  /* tc 速率字符串 → Mbps 数(回读 cfg 用),解析失败返回 '' */
+  function rateToWanMbps(r) {
+    if (!r) return '';
+    const m = /^(\d+)(mbit|kbit)$/.exec(String(r).trim());
+    if (!m) return '';
+    const n = parseInt(m[1], 10);
+    return m[2] === 'kbit' ? (n / 1000) : n;
+  }
+  async function applyGlobalShaperBackend(enabled, downMbps, upMbps) {
+    if (enabled && !isDownlinkLimitSupported()) {
+      throw unsupportedError('当前内核/TC 不支持 HTB,无法全局整形', 'tc_htb=false');
+    }
+    const params = { enabled: enabled ? 'true' : 'false' };
+    if (enabled) {
+      const dn = wanMbpsToRate(downMbps);
+      const up = wanMbpsToRate(upMbps);
+      if (dn === '0' && up === '0') throw new Error('请至少填一个方向的 WAN 带宽');
+      if (dn !== '0') params.rate_down = dn;
+      if (up !== '0') params.rate_up = up;
+    }
+    await apiAction('global_shaper_set', params);
     return true;
   }
 
@@ -11214,6 +11286,31 @@ body.kb-open .container {
       }).catch(e => toast('停止失败: ' + e.message, 'err'));
       return;
     }
+    if (e.target.closest('[data-action="gs-apply"]')) {
+      // rc32: 应用全局带宽整形(enabled=true + WAN 带宽)
+      const gsBtn = e.target.closest('[data-action="gs-apply"]');
+      const down = ($('#gs-down')||{}).value || '';
+      const up = ($('#gs-up')||{}).value || '';
+      if ((parseFloat(down)||0) <= 0 && (parseFloat(up)||0) <= 0) {
+        toast('请至少填一个方向的 WAN 带宽', 'err');
+        return;
+      }
+      gsBtn.disabled = true; gsBtn.classList.add('loading');
+      applyGlobalShaperBackend(true, down, up).then(() => {
+        // 应用成功 → 确保开关为 on
+        const gsTog = $('#gs-toggle');
+        if (gsTog) { gsTog.classList.add('on'); gsTog.setAttribute('aria-checked', 'true'); }
+        gsBtn.classList.remove('loading'); gsBtn.classList.add('success');
+        toast('全局整形已应用: ↓' + (parseFloat(down)||0) + ' ↑' + (parseFloat(up)||0) + ' Mbps', 'ok');
+        setTimeout(() => { gsBtn.classList.remove('success'); gsBtn.disabled = false; }, 700);
+      }).catch(e => {
+        gsBtn.classList.remove('loading'); gsBtn.disabled = false;
+        const detail = e.detail ? (': ' + e.detail) : '';
+        toast('应用失败: ' + e.message + detail, 'err');
+        dbg('gs-apply err: ' + e.message + detail, true);
+      });
+      return;
+    }
 
     /* 已授权设备展开 */
     if (e.target.closest('[data-action="toggle-auth-devices"]')) {
@@ -11309,6 +11406,24 @@ body.kb-open .container {
           const cfg = $('#hs-config');
           if (cfg) cfg.classList.toggle('open', on);
           break;
+        case 'toggle-gs': {
+          // rc32: 全局带宽整形。开 → 仅展开面板(填带宽后点「应用」才真正生效);
+          // 关 → 立即下发 disable 复位 1:1。
+          const gsPanel = $('#gs-config');
+          if (gsPanel) gsPanel.classList.toggle('open', on);
+          if (on) {
+            if (!isDownlinkLimitSupported()) {
+              doRevert(); if (gsPanel) gsPanel.classList.remove('open');
+              toast('当前内核/TC 不支持 HTB,无法全局整形', 'err');
+              break;
+            }
+            toast('填好 WAN 带宽后点「应用整形」才生效', 'warn');
+          } else {
+            applyGlobalShaperBackend(false).then(() => toast('全局整形已关闭', 'ok'))
+              .catch(e => { doRevert(); if (gsPanel) gsPanel.classList.add('open'); toast('关闭失败: ' + e.message, 'err'); });
+          }
+          break;
+        }
         case 'toggle-auth':
           /* rc3.1.13.2 P0-B 修复 (review final v2):
            * 之前 kexec('sh '+HNC+'/bin/json_set.sh cfg_set auth_required '+...') 直接走 shell,
@@ -11972,6 +12087,12 @@ body.kb-open .container {
       setTog($$('[data-action="toggle-offload-warn"]')[0],  owLocal);
       // rc3.1.3: 远程访问服务开关 + url-badge 动态状态
       setTog($$('[data-action="toggle-remote"]')[0],        !!cfg.remote_enabled);
+      // rc32: 全局带宽整形(opt-in)状态回读 —— 开关 + 面板展开 + 带宽输入框
+      setTog($('#gs-toggle'), !!cfg.global_shaper_enabled, on => {
+        const p = $('#gs-config'); if (p) p.classList.toggle('open', on);
+      });
+      { const d = rateToWanMbps(cfg.global_shaper_down); const el = $('#gs-down'); if (el && d !== '') el.value = d; }
+      { const u = rateToWanMbps(cfg.global_shaper_up);   const el = $('#gs-up');   if (el && u !== '') el.value = u; }
 
       // rc3.1.17: toggle 状态确定后立即让 url 卡片三态 force 重算
       // (init 时 sig 缓存还是空, force 确保第一次走完整切换分支)

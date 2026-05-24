@@ -33,6 +33,10 @@ type configResp struct {
 	HotspotAutostart bool   `json:"hotspot_autostart"`
 	HotspotSSID      string `json:"hotspot_ssid,omitempty"`
 	HotspotDelaySec  int    `json:"hotspot_delay_sec,omitempty"`
+	// rc32: 全局带宽整形器 (opt-in, 默认关)。down/up 为 tc 速率字符串 "<n>mbit"/"<n>kbit"。
+	GlobalShaperEnabled bool   `json:"global_shaper_enabled"`
+	GlobalShaperDown    string `json:"global_shaper_down,omitempty"`
+	GlobalShaperUp      string `json:"global_shaper_up,omitempty"`
 	// rc3.1.13.1 删 OffloadWarn (review §3 P0): 历史上后端读 rules.json
 	// 但从无写路径, 前端 toggle 只写 localStorage 自管, 字段始终死值 false.
 	// rc3.1.12 config.json 兜底分支删除后, 死状况暴露 — 不如直接清掉
@@ -59,6 +63,14 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 				resp.HotspotDelaySec = int(d)
 			} else if d, ok := m["hotspot_delay_sec"].(float64); ok {
 				resp.HotspotDelaySec = int(d)
+			}
+			// rc32: 全局带宽整形器状态
+			resp.GlobalShaperEnabled = boolField(m, "global_shaper_enabled")
+			if v, ok := m["global_shaper_down"].(string); ok {
+				resp.GlobalShaperDown = v
+			}
+			if v, ok := m["global_shaper_up"].(string); ok {
+				resp.GlobalShaperUp = v
 			}
 		}
 	}

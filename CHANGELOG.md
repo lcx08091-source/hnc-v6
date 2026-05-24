@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc32, 2026-05-25)
+- **全局带宽整形器(opt-in,默认关)—— 整个热点设 WAN 带宽上限 + AQM 抗 bufferbloat**(`bin/tc_manager.sh` / `daemon/hnc_httpd/action_global_shaper.go` / `api_v5.go` / `webroot/index.html`)。用户从 roadmap 选「手动填带宽·默认关」方案落地:
+  - **原理**:给整个热点的 HTB 父类 `1:1` 的 `ceil` 设成 WAN 带宽(egress on AP iface = 客户端下载;`ifb0` = 客户端上传),并把默认类 `1:9999` 叶子升级成最优 AQM(`cake besteffort → fq_codel → sfq`)。HTB 借用模型下所有子类(每设备 class + 默认类)都借不出 `1:1` 的 ceil → 总吞吐受 WAN 瓶颈管;此时队列排在我们能管的叶子上,AQM 才压得住 bufferbloat(AQM 只在「我们就是瓶颈」时才有效)。
+  - **后端**:新增 action `global_shaper_set`(`action_global_shaper.go`,params `enabled`/`rate_down`/`rate_up`,复用 `validateRate`,`tc_htb=false` 直接拒)→ `tc_manager.sh global_shaper <iface> <on|off> <down> <up>`(新增 `set_global_shaper` + `global_shaper_default_leaf`,走 `tc_action_lock` 串行 + 短重试)。状态持久化到 rules.json 顶层 `global_shaper_enabled/down/up`(`json_set.sh top`),`restore_rules` 重启后据此恢复,**关闭时复位 `1:1` 回 `DEFAULT_RATE`**。`/api/config` 暴露三字段供前端回读。
+  - **前端(本机设置页)**:新增「全局带宽整形 · 进阶 · 默认关」卡片——开关 + WAN 上/下行带宽(Mbps,和宽带套餐一致)+「应用整形」按钮;`tc_htb=false` 时禁用(`isDownlinkLimitSupported` 门控);开关关闭即时下发 disable。WAN Mbps ↔ tc 速率字符串由 `wanMbpsToRate`/`rateToWanMbps` 在边界转换。
+  - **诚实边界**:这是**固定**整形——填多少按多少限。蜂窝速率乱跳、固定值大部分时间偏差大(本内核大概率无 CAKE autorate 自适应),蜂窝收益有限;**稳定链路(光猫/WISP/WiFi 中继)才是主战场**。默认关 → 不开则完全不影响每设备限速/低延迟,**不用的人零风险**。UI/CHANGELOG 均如实标注。
+  - 含 Go 改动,**需 CI 重编 hnc_httpd**。`sh -n`(tc_manager.sh)+ `node --check`(两段内联 JS)+ `go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` 均通过。版本 rc31 → rc32(570132)。
+
 ### Added (v5.7.0-rc31, 2026-05-25)
 - **远程 WebUI 功能对齐本机 —— 设备卡片在用 app 展示 + 每设备低延迟开关**(`daemon/hnc_httpd/web/app.js`)。本机 KSU WebUI(`webroot/index.html`)在 rc20/rc22 加的两个能力此前远程 SPA 没有,这版补齐:
   - **① 设备卡片直接显示「在用」的 app**:`renderCard` 读 `/api/devices` 已带的 `dpi_apps`(dpid 按 MAC 上报的 `{name,category,confidence,count}`),在卡片正文渲染最多 4 个蓝色 app 标签,`confidence=low` 标「?」,hover 看分类/命中次数。和本机折叠卡一致——不藏二级页。

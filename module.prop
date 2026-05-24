@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc31
-versionCode=570131
+version=v5.7.0-rc32
+versionCode=570132
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc31 · 远程 WebUI 功能对齐(daemon/hnc_httpd/web/app.js):① 设备卡片现在直接显示"在用"的 app(dpid 经 /api/devices 的 dpi_apps 上报),和本机 WebUI 折叠卡一致,不再藏二级页;② 每设备"低延迟(智能队列)"开关补到远程——按钮 + 蓝色"低延迟"角标,走后端 rule_sqm,与延迟注入互斥、tc_htb=false 时禁用(对齐本机 capBool 门控)。web 资源 go:embed 进二进制,本版需 CI 重编 hnc_httpd。node --check + go vet + android/arm64 交叉编译均通过。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc32 · 全局带宽整形器(opt-in,默认关):设置页新增"全局带宽整形"——手动填 WAN 上/下行带宽,把整个热点 HTB 父类 1:1 的 ceil 压到 WAN 带宽 + 默认类挂最优 AQM(cake→fq_codel→sfq),让总流量受 WAN 瓶颈管,AQM 才压得住 bufferbloat。默认关→不用的人零风险;诚实标注固定整形对蜂窝收益有限、稳定链路才是主战场。新后端 action global_shaper_set + tc_manager.sh set_global_shaper + restore 恢复 + /api/config 暴露状态。含 Go 改动,需 CI 重编。sh -n + node --check + go vet + android/arm64 交叉编译均通过。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485
