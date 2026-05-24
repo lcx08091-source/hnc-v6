@@ -774,10 +774,49 @@ func (a *SelfAttribAggregator) IsSystemUID(uid int) bool {
 	return ok
 }
 
+// loadPkgUIDsFromList parses /data/system/packages.list, the authoritative
+// root-readable package↔uid table. Each line:
+//
+//	com.tencent.mm 10123 0 /data/user/0/com.tencent.mm default:... 3003,9997
+//
+// fields[0]=pkg, fields[1]=uid. More complete + faster than `pm` (no fork)
+// and doesn't miss uids the way `pm list packages -U` occasionally does.
+func loadPkgUIDsFromList() (map[int]string, error) {
+	data, err := os.ReadFile("/data/system/packages.list")
+	if err != nil {
+		return nil, err
+	}
+	m := make(map[int]string, 512)
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		uid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			continue
+		}
+		pkg := fields[0]
+		if pkg == "" {
+			continue
+		}
+		// First wins (shared uids); matches loadPkgUIDs behaviour.
+		if _, ok := m[uid]; !ok {
+			m[uid] = pkg
+		}
+	}
+	return m, nil
+}
+
 // loadPkgUIDs runs `pm list packages -U` and parses output:
 //
 //	package:com.tencent.jkchess uid:10123
 func loadPkgUIDs() (map[int]string, error) {
+	// Primary: /data/system/packages.list (root, authoritative, complete).
+	// Falls back to pm when it's unreadable/empty.
+	if m, lerr := loadPkgUIDsFromList(); lerr == nil && len(m) > 0 {
+		return m, nil
+	}
 	cmd := exec.Command("pm", "list", "packages", "-U")
 	out, err := cmd.Output()
 	if err != nil {

@@ -12946,8 +12946,8 @@ body.kb-open .container {
           appsEsc(d.name) + '</code> · ' + appsFormatBytes(d.size_bytes || 0) +
           '<div style="font-size:11px;color:var(--text-3);margin-top:6px;line-height:1.6">' +
           trkLines.map(appsEsc).join('<br>') + '</div>' +
-          '<a class="exp-row-dl" style="display:inline-block;margin-top:10px" href="' +
-          appsEsc(d.download_url) + '" download>下载 zip</a>' +
+          '<a class="exp-row-dl" style="display:inline-block;margin-top:10px" href="javascript:void(0)" ' +
+          'onclick="appsDownloadExport(\'' + appsEsc(d.name) + '\',\'' + appsEsc(d.download_url) + '\');return false">下载 zip</a>' +
         '</div>';
         appsLoadExports();
       })
@@ -12957,6 +12957,37 @@ body.kb-open .container {
         resBox.innerHTML = '<div class="exp-result-err">网络错误: ' +
                            appsEsc(e.message || e) + '</div>';
       });
+  };
+
+  // v5.7.0-rc10: export download. On the local KSU WebUI (file://) a normal
+  // <a href="/api/exports/.."> can't work (resolves against file://, and can't
+  // send the loopback-admin header), so copy the zip to /sdcard/Download via
+  // the ksu.exec bridge. On a remote browser the href download works normally.
+  window.appsDownloadExport = function(name, url) {
+    var isLocal = (typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function');
+    if (!isLocal) {
+      var a = document.createElement('a');
+      a.href = url; a.download = name || '';
+      document.body.appendChild(a); a.click(); a.remove();
+      return;
+    }
+    if (!/^[A-Za-z0-9._-]+$/.test(name || '')) {
+      if (window.toast) toast('文件名异常,已取消', 'err');
+      return;
+    }
+    var dst = '/sdcard/Download/';
+    var cmd = 'mkdir -p ' + sq(dst) + ' && cp -f ' + sq('/data/local/hnc/exports/' + name) +
+              ' ' + sq(dst) + ' && echo HNC_DL_OK';
+    if (window.toast) toast('保存中…', 'ok');
+    kexec(cmd).then(function(out){
+      if (String(out).indexOf('HNC_DL_OK') >= 0) {
+        if (window.toast) toast('已保存到 ' + dst + name, 'ok');
+      } else {
+        if (window.toast) toast('保存失败: ' + String(out).slice(0, 100), 'err');
+      }
+    }).catch(function(e){
+      if (window.toast) toast('保存失败: ' + (e.message || e), 'err');
+    });
   };
 
   function appsLoadExports() {
@@ -12976,7 +13007,8 @@ body.kb-open .container {
               '<div class="exp-row-meta">' + appsFormatBytes(x.size) + ' · ' +
                                             appsEsc(x.modified) + '</div>' +
             '</div>' +
-            '<a class="exp-row-dl" href="' + appsEsc(x.download_url) + '" download>下载</a>' +
+            '<a class="exp-row-dl" href="javascript:void(0)" ' +
+            'onclick="appsDownloadExport(\'' + appsEsc(x.name) + '\',\'' + appsEsc(x.download_url) + '\');return false">下载</a>' +
           '</div>';
         }).join('');
       })

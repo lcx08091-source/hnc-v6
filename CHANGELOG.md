@@ -18,6 +18,10 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc10, 2026-05-24)
+- **导出下载在本机点了没反应** — 打包是成功的,坏在下载:`下载 zip` 是 `<a href="/api/exports/..">`,在本机 KSU WebUI(`file://`)下会被解析成 `file:///api/exports/..`(指向文件系统而非 http 守护进程),且带不了 loopback 鉴权头 → 点了无效(远程 `:8443` 浏览器正常)。新增 `appsDownloadExport(name,url)`:本机走 `ksu.exec` `cp` 到 `/sdcard/Download/` 并 toast;远程仍用原生 `<a download>`。两处下载入口(打包结果 + 最近导出列表)都改走它。
+- **应用解析改用 `/data/system/packages.list`**(`self_attrib.go`)— uid→pkg 主源从 `pm list packages -U` 改为读 root 权威表 `/data/system/packages.list`(含全部已装包、更全更快、不会像 pm 那样偶发漏掉真 app;失败回退 pm)。修复部分真 app 显示「未识别 (pm 未解析)」(如 uid 10347/10111)。注:uid 0(root)/系统服务/隔离进程(99910111)本就无 app,仍显示未识别属正常。HNC 是 root 守护进程,无需也无法申请 QUERY_ALL_PACKAGES。版本 rc9 → rc10(570110)。
+
 ### Changed (v5.7.0-rc9, 2026-05-24)
 - **过滤系统 app** — 本机的 OEM 系统 app(ColorOS 的 com.oplus/coloros/heytap 等,uid≥10000)此前会被飞轮归类(污染规则库,系统域名是 OEM 遥测、对识别别人设备无用)并塞满「我的应用」列表。
   - **判定**:`pm list packages -s` → 系统包集合(`self_attrib.go:loadSystemPkgs`,随 pkgCache 同 5min TTL 刷新;`IsSystemUID(uid)`)。按 uid 段切不掉这些(它们 uid≥10000),必须用包标志。
