@@ -57,7 +57,7 @@
  * rc30.12 序列号会让 CI fail. 在 CI workflow 还没改之前, 继续用 rc30.12.x
  * 序列号 (0.1.0-rc30.12.30) 同时兼容 sanity check 和反映 minor change.
  * 等用户改完 .github/workflows/build.yml 后可以 bump 到 0.1.1-rc30.13.x. */
-#define VERSION                 "0.1.0-rc30.12.30"
+#define VERSION                 "0.1.0-rc30.12.31"
 
 #define BIN_DPID                "/data/local/hnc/bin/hnc_dpid"
 #define DPID_CONFIG             "/data/local/hnc/etc/dpi_config.json"
@@ -71,7 +71,9 @@
 #define RESTART_BACKOFF_MIN     2          /* 第一次重启等 2s */
 #define RESTART_BACKOFF_MAX     30         /* 最长 30s (指数退避封顶) */
 #define CRASH_WINDOW_SEC        60         /* 60s 滑动窗口 */
-#define CRASH_LIMIT             5          /* 窗口内 5 次崩溃 → observe 模式 */
+#define CRASH_LIMIT             5          /* 窗口内 5 次崩溃 → 进入冷却(非永久放弃) */
+#define CRASH_COOLDOWN_SEC      120        /* rc12: 崩溃风暴后冷却 120s 再自愈重试,
+                                            * 不再永久 observe(被动只读守护进程应自愈) */
 
 /* ─── 全局状态 ─────────────────────────────────────────────────────── */
 
@@ -446,11 +448,22 @@ static int run_supervise_loop(void)
 
 		/* 异常退出 或 意外的 rc=0 — 记崩溃, 检查 loop 保护 */
 		if (crash_tracker_record(&crashes)) {
-			log_msg("CRASH_LOOP: %d crashes in %ds window, refusing to restart. "
-				"Clear %s manually to recover.",
-				CRASH_LIMIT, CRASH_WINDOW_SEC, CRASH_FLAG);
-			write_crash_flag();
-			return 1;
+			/* rc12: 不再永久放弃。以前这里 write_crash_flag()+return 1 → launcher
+			 * 退出 → watchdog 重新拉起 → 因 crashflag 进 observe 模式永不再拉 dpid,
+			 * 用户必须手动"重新绑定"。被动只读守护进程应当自愈:写崩溃标志仅作诊断,
+			 * 长冷却后清标志、重置计数、继续监管。制造崩溃风暴的瞬时原因(如残留
+			 * shell guard、/system/bin 暂时蒸发)消退后,dpid 会自动恢复。 */
+			log_msg("CRASH_LOOP: %d crashes in %ds; cooling down %ds then self-healing "
+				"(no permanent give-up)",
+				CRASH_LIMIT, CRASH_WINDOW_SEC, CRASH_COOLDOWN_SEC);
+			write_crash_flag();      /* 诊断标记; 冷却后清掉 */
+			if (g_shutdown)
+				break;
+			sleep(CRASH_COOLDOWN_SEC);
+			unlink(CRASH_FLAG);
+			crash_tracker_init(&crashes);
+			backoff = RESTART_BACKOFF_MIN;
+			continue;
 		}
 
 		/* 重启 */
@@ -523,22 +536,28 @@ int main(int argc, char **argv)
 	if (check_singleton() < 0)
 		return 1;
 
-	/* 检查 crashflag — 存在则进 observe 模式 */
-	if (file_exists(CRASH_FLAG)) {
-		log_msg("crashflag exists (%s), starting in observe mode (no auto-restart). "
-			"Delete the file to resume.", CRASH_FLAG);
-		/* observe 模式: 不启动 dpid, 等待信号 */
-		install_signal_handlers();
-		while (!g_shutdown)
-			pause();
-		log_msg("observe mode: shutting down (signal received)");
-		return 0;
-	}
-
 	if (install_signal_handlers() < 0) {
 		log_msg("failed to install signal handlers: errno=%d %s",
 			errno, strerror(errno));
 		return 1;
+	}
+
+	/* rc12: stale crashflag 不再永久 observe(以前 pause() 死等用户手动删文件 →
+	 * "launcher 活着但永不拉 dpid",必须手动重新绑定)。改为冷却一段时间让瞬时
+	 * 原因消退,然后清标志、正常监管,实现自愈。 */
+	if (file_exists(CRASH_FLAG)) {
+		int waited = 0;
+		log_msg("crashflag exists (%s); cooling down %ds then resuming supervision "
+			"(self-heal, no permanent observe)", CRASH_FLAG, CRASH_COOLDOWN_SEC);
+		while (waited < CRASH_COOLDOWN_SEC && !g_shutdown) {
+			sleep(1);
+			waited++;
+		}
+		if (g_shutdown) {
+			log_msg("crashflag cooldown interrupted by signal; exiting");
+			return 0;
+		}
+		unlink(CRASH_FLAG);
 	}
 
 	return run_supervise_loop();

@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc11
-versionCode=570111
+version=v5.7.0-rc12
+versionCode=570112
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc11 · 修"开机必须点重新绑定/抓不到包"(真机日志确诊): 根因是 ColorOS/SukiSU 运行期间间歇性把 /system/bin/* 从模块脚本命名空间移除 + 双监管互杀 dpid。① dpi_rebind.sh 不再启动"竞争的 shell guard"(以前每点一次重新绑定就和 watchdog 的 C launcher 打架、越点越坏)→ 改成保留 C launcher、清崩溃标志、只重启 dpid 子进程。② C launcher 不再把 dpid 被外部 SIGTERM 后的 rc=0 当"人工停止"而放弃监管。③ service.sh 用 C launcher 时清理残留 shell guard。④ shell guard get_iface 取空(工具 ENOENT)不再误判 iface 变更而抖动。dpid 本身没问题。⚠ 需 CI 重编 hnc_launcher。建议用户在 SukiSU 管理器查挂载命名空间设置。rc1~rc10 详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc12 · 续修 dpid 监管(rc11 基础上补 GPT 审查指出的残留 P0): C launcher 进 crash-loop / 启动见到旧 crashflag 时,以前会"永久放弃/observe"——launcher 活着但永不再拉 dpid,用户必须手动重新绑定。现改为自愈:崩溃风暴后冷却 120s → 清标志、重置计数、继续监管;启动遇旧 crashflag 也只冷却后恢复,不再死等。配合 rc11(dpi_rebind 不再起竞争 guard、launcher 不把 rc=0 当人工停止、service.sh 清残留 guard、guard get_iface 取空不抖动),"launcher 活着但 dpid 没了且无人恢复"的盲区被堵上。⚠ 需 CI 重编 hnc_launcher。根因 A(SukiSU 运行期卸 /system/bin)仍建议在 SukiSU 管理器调挂载命名空间设置。rc1~rc11 详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

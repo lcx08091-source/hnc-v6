@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc12 -->
+<div class="cl-section">
+  <div class="cl-title">♻️ v5.7.0-rc12: dpid 监管自愈(续修必须重新绑定) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>堵上最后一个盲区</b>: 上一版让后台不再因被误杀就撂挑子;但如果短时间内 dpid 崩太多次,后台守护进程会"永久放弃"——自己还活着,却再也不拉起抓包进程,你就得手动点"重新绑定"。</li>
+    <li><b>现在改为自愈</b>: 崩溃风暴后冷却 2 分钟,自动清状态、重新接管;开机遇到旧的崩溃标记也只冷却后恢复,不再死等。瞬时原因(环境抖动)过去后会自己好,不用手动重新绑定。</li>
+    <li>注意: 需要 CI 重新编译后台二进制才生效(刷本版即可)。根上的 /system/bin 偶发消失仍建议在 SukiSU 管理器调"卸载模块挂载 / 命名空间模式"。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc11 -->
 <div class="cl-section">
   <div class="cl-title">🩹 v5.7.0-rc11: 修"必须点重新绑定 / 抓不到包" <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

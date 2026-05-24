@@ -18,6 +18,12 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc12, 2026-05-24)
+- **C launcher 自愈,堵上"launcher 活着但 dpid 永久没了"的盲区**(`src/launcher/hnc_launcher.c`,补 rc11)。外部审查(GPT)指出残留 P0:rc11 让 launcher 不再因单次外部 SIGTERM(rc=0)放弃,但**crash-loop / 启动见到旧 `dpid_crashflag` 时仍会永久放弃**(`run_supervise_loop` 崩溃超限 → `write_crash_flag()+return 1`;`main` 见 crashflag → `pause()` 死等)→ launcher 进程活着、`hnc_dpid` 子进程永远不被拉起、没人自动恢复,用户必须手动"重新绑定"。
+  - 改为**自愈**:① crash-loop 触发 → 写崩溃标志(仅诊断)+ 冷却 `CRASH_COOLDOWN_SEC`(120s)+ 清标志 + 重置计数 + 继续监管,不再 `return 1` 永久退出;② 启动见到旧 crashflag → 冷却 120s + 清标志 + 正常监管,不再 `pause()` 死等用户删文件。被动只读守护进程应当自愈:制造崩溃风暴的瞬时原因(残留 shell guard、/system/bin 暂时蒸发)消退后,dpid 自动恢复。
+  - launcher 内部版本 `0.1.0-rc30.12.30 → .31`(保持 CI sanity grep 的 `0.1.0-rc30.12` 前缀)。**需 CI 重编 hnc_launcher 二进制**。版本 rc11 → rc12(570112)。
+  - ⚠ 根因 A(SukiSU 运行期把 /system/bin 从模块命名空间卸载)仍未根治,建议用户在 SukiSU 管理器调 Umount Modules / Mount Namespace 模式。
+
 ### Fixed (v5.7.0-rc11, 2026-05-24)
 - **"开机必须点重新绑定 / 抓不到包"**(realme RMX5010 / Android16 / SukiSU,真机日志确诊)。根因有二:
   1. **ColorOS/SukiSU 运行期间间歇性把 `/system/bin/*` 从模块脚本的挂载命名空间移除**(日志反复 `/system/bin/{sleep,head,printf,sh}: No such file or directory`)→ shell guard 的 `get_iface` 用 `cat|head` 取到空 → 误判 iface 变更 → 杀 dpid churn;`sleep` ENOENT → guard `[FATAL]` 退出。
