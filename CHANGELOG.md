@@ -18,6 +18,11 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc22, 2026-05-25)
+- **每设备「低延迟」开关点了报 `TC_ACTION_BUSY=1`(rc20 功能的真机 bug)**(`bin/tc_manager.sh`)。根因:点开关的瞬间,tc 全局锁(`tc_action_lock`)被 watchdog 的 restore/health 等后台 tc 动作短暂占着,而 `set_sqm` 的 CLI 包装是 `tc_action_lock || exit 12`——抢不到锁就**立刻失败**。`set_limit`/`set_delay` 共用同一把锁但用户是在空窗期点的所以成功,`set_sqm` 不巧每次都撞上 → 一直"用不了"。**修复**:`set_sqm` 获取锁改为**短重试循环**(最多 12×0.25s ≈ 3s;`tc_action_lock` 本身还会回收 >25s 的陈旧锁),骑过 watchdog 的短暂占用再执行。
+- **设备卡片"在用 app"一直空、看着像假的**(`webroot/index.html`)。`renderCard` 早就在**折叠卡片头部**(IP/MAC 下方)渲染 `dpiLine`("在用 [app 徽章]",rc5 加的),但前端设备模型(`fetchDevices` 的 `DEVICES.push`)**从没把 `/api/devices` 返回的 `dpi_apps` 字段映射进去** → `d.dpi_apps` 恒为空 → `dpiLine` 永远是空串 → 永不显示。不是假数据,是**数据没接上**(后端 `server.go dpiAppsByMAC` 一直在提供)。**修复**:模型补 `dpi_apps` 映射。这样 dpid 识别到该客户端流量后,**折叠状态的设备卡上直接显示"在用 XXX"**(无需展开进二级页)——正是你要的。识别为空仍属正常(dpid 还没抓到该客户端的流量)。
+- 纯 shell + 前端改动,`sh -n` / `node --check` 通过,**不用重编二进制**。版本 rc21 → rc22(570122)。
+
 ### Removed (v5.7.0-rc21, 2026-05-24)
 - **删除旧的全局 SQM(设置页那张复杂又基本用不上的卡)** —— rc20 的每设备「低延迟」开关已经取代它。彻底移除,避免留"假/死"代码:
   - **前端**(`webroot/index.html`):移除 SQM 设置卡 HTML(Smart Queue 行 + `.sqm-control-panel` 三排按钮)、`.sqm-*` CSS、全部 SQM JS(`normalizeSqm*`/`sqm*Label`/`sqmPresetDetail`/`applySqmStatus`/`updateSqmPanel`/`fetchSQM`/`setSqmBackend`/`fillCardWithSqmPreset`、`data-sqm-*` 与 `sqm-gray-diag` 点击处理、init 的 `fetchSQM()`/诊断页的 `await fetchSQM()`、`state.sqm*` 字段)、以及设备卡延迟区那个依赖 SQM 预设的"填入预设"按钮 + 处理。删后 grep 确认 index.html **零残留旧 SQM 引用**,`node --check` 双 script 块均通过。

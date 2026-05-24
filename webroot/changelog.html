@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc22 -->
+<div class="cl-section">
+  <div class="cl-title">🩹 v5.7.0-rc22: 修「低延迟」点了报错 + 设备卡片显示在用 app <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>修「低延迟」开关点了报 TC_ACTION_BUSY</b>: 点的瞬间后台正好在做别的队列操作、把锁占着,开关一抢不到就直接失败。现在改成短暂重试(约 3 秒),骑过去再执行,就不会一点就红了。</li>
+    <li><b>设备卡片直接显示"在用 app"</b>: 之前那行"在用 …"一直空、像假的——其实是数据没接上(界面早就准备好显示在折叠卡片上了,但没把后端识别结果喂进去)。现在接上了:抓到该设备的应用流量后,<b>不用展开</b>,折叠的设备卡上就会显示它在用哪些 app。</li>
+    <li>说明: 识别还需要设备产生一会儿流量才会出现;为空属正常。纯界面+脚本改动,不用重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc21 -->
 <div class="cl-section">
   <div class="cl-title">🧹 v5.7.0-rc21: 删掉设置页那个旧的全局 SQM <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

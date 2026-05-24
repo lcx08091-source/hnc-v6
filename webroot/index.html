@@ -5905,6 +5905,7 @@ body.kb-open .container {
           jitter: d.jitter_ms || 0,
           loss: d.loss_pct || 0,
           sqm: (d.sqm_enabled === true || d.sqm_enabled === 'true'),
+          dpi_apps: Array.isArray(d.dpi_apps) ? d.dpi_apps : [],   // rc22: 在用 app, 显示在折叠卡片上
           delay_apply_mode: d.delay_apply_mode || '',
           limit_apply_mode: d.limit_apply_mode || '',
           apply_error: d.apply_error || '',

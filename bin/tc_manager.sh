@@ -2174,7 +2174,16 @@ case "$1" in
         tc_action_unlock
         exit $rc ;;
     set_sqm)
-        tc_action_lock set_sqm || exit 12
+        # rc22: retry lock briefly — the per-device 低延迟 toggle kept failing with
+        # TC_ACTION_BUSY when a watchdog restore/health tc action held the lock at
+        # tap time. Ride out short contention (~3s); tc_action_lock also reclaims a
+        # stale (>25s) lock on its own.
+        _sqm_try=0
+        until tc_action_lock set_sqm; do
+            _sqm_try=$((_sqm_try + 1))
+            [ "$_sqm_try" -ge 12 ] && exit 12
+            sleep 0.25 2>/dev/null || sleep 1
+        done
         set_sqm "$2" "$3" "$4" "$5"
         rc=$?
         tc_snapshot_async "$2"
