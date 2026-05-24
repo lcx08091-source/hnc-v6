@@ -18,6 +18,12 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc6, 2026-05-24)
+- **self-capture 改为常驻(默认开)** — 自动识别飞轮(per-uid `/proc/net` 采样 + 自接口 AF_PACKET SNI 抓取)全靠 `run/self_capture.enabled` flag 驱动;此前默认关,用户不手动开「追踪本机应用流量」就永远没数据(界面一直「追踪状态:未就绪 / dpid 暂未上报 self 块」)。
+  - `service.sh`(dpid 段)现在每次启动 `[ -f ] || : > "$RUN/self_capture.enabled"`,即默认常驻开;会话内仍可在 WebUI 临时关(删 flag),重启后恢复常驻。dpid 每 5s 读 flag,~5s 内生效。
+  - UI:「追踪本机应用流量」卡加「✓ 常驻(默认开)」标注。
+- **诊断说明**:读码确认 dpid 只要在跑就**无条件每 5s** 发布 self 块(`main.go:316-329`,关时 `enabled:false`)。所以若界面显示「dpid 暂未上报 self 块」(self=null,而非「采样器停止」),说明 **dpid 没在正常产出**(崩溃/crash-loop/capture 初始化失败),常驻 flag 救不了——需查 `logs/dpid.log` + `ps | grep hnc_dpid` 定位后端启动问题。
+
 ### Added (v5.7.0-rc5, 2026-05-24)
 - **客户端识别展示 / 阶段5(上半)** — 设备 tab 现在每个连入热点的设备显示「在用什么 app」。
   - 数据本就存在:dpid 把每个客户端的 SNI 经 `classifyHost`(飞轮规则 + 实体库)分类成 app,写进 `dpi_state.json` 的 `clients[].top_apps`(按 client-key,含 `client_mac`)。

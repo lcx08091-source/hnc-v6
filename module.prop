@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc5
-versionCode=570105
+version=v5.7.0-rc6
+versionCode=570106
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc5 · 本轮(阶段5上半·客户端识别展示): 设备 tab 现在每个连入热点的设备都显示"在用什么 app"。dpid 本就把每个客户端的 SNI 分类成 app 写进 dpi_state.json(clients[].top_apps), 本轮 hnc_httpd 把它按 MAC join 进 /api/devices(新增 dpi_apps 字段), 本机 WebUI 设备卡片在 IP/MAC 下显示在用 app 徽章(低置信度标 ?)。纯展示, 无新采集; 飞轮训练出的规则 + 实体库直接体现在客户端识别上。rc1~rc4 已含: 4-tab 导航/真实应用名/远程配对修复/候选累积器+WebUI 审批/自建实体库(166 条)。详见 CHANGELOG.md 与应用内更新日志.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc6 · 本轮: self-capture 改为常驻(默认开)。自动识别飞轮(per-uid 采样 + 自接口 SNI 抓取)全靠 self_capture.enabled flag, 之前默认关、用户不点开关就永远没数据/显示"未就绪"。service.sh 现在每次启动确保该 flag 存在=默认常驻开(临时关重启恢复)。注意: 若界面仍"dpid 暂未上报 self 块"(self=null 而非"采样器停止"), 多半是 dpid 没正常运行, 需查 logs/dpid.log, 常驻开关救不了。rc1~rc5 已含: 4-tab 导航/真实应用名/远程配对修复/候选累积器+WebUI 审批/自建实体库 166 条/设备 tab 客户端 app 识别。详见 CHANGELOG.md 与应用内更新日志.
 updateJson=
 minKernelSU=11485

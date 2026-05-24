@@ -3141,8 +3141,8 @@ body.kb-open .container {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
           </div>
           <div class="set-info">
-            <div class="set-label">追踪本机应用流量</div>
-            <div class="set-desc">5 秒一采样 · 读取 /proc/net + pm list packages -U</div>
+            <div class="set-label">追踪本机应用流量 <span style="color:var(--sys-green);font-size:11px">✓ 常驻(默认开)</span></div>
+            <div class="set-desc">5 秒一采样 · 读取 /proc/net + pm list packages -U · 开机自动开启;临时关闭重启后会恢复</div>
           </div>
           <div class="toggle" id="apps-toggle" onclick="appsToggleSelf(this)"></div>
         </div>

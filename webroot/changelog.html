@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc6 -->
+<div class="cl-section">
+  <div class="cl-title">🔁 v5.7.0-rc6: 本机追踪改为"常驻"(默认开) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>「追踪本机应用流量」默认常驻开</b>: 自动识别飞轮(本机 app 采样 + SNI 抓取)全靠这个开关;之前默认关,不手动点开就一直"未就绪、没数据"。现在开机自动开启,省得每次手点。</li>
+    <li>会话内仍可临时关(WebUI 点一下),重启后会恢复常驻。</li>
+    <li><b>排错提示</b>: 如果刷了本版还显示"dpid 暂未上报 self 块"(不是"采样器停止"),说明不是开关问题,而是 dpid 后台没正常跑——需要看 <code>logs/dpid.log</code> 和 <code>ps | grep hnc_dpid</code> 才能定位。常驻开关解决不了 dpid 没启动的情况。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc5 -->
 <div class="cl-section">
   <div class="cl-title">📱 v5.7.0-rc5: 设备 tab 显示"每台设备在用什么 app" <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

@@ -518,6 +518,16 @@ if [ ! -x "$DPID_BIN" ]; then
 else
     # 软迁: 把模块内默认 dpi_config.json 复制到 etc/ (如果用户没有自定义)
     mkdir -p "$HNC_DIR/etc" 2>/dev/null || true
+
+    # v5.7.0-rc6: self-capture 常驻. 自动识别飞轮(per-uid 采样 + 自接口 SNI 抓取)
+    # 全靠 self_capture.enabled 这个 flag; 之前默认关, 用户不点开关就永远没数据.
+    # 这里在每次启动确保 flag 存在 = 默认常驻开. 用户仍可在 WebUI 临时关 (删 flag),
+    # 但重启后回到常驻开. dpid 每 5s 读这个 flag, ~5s 内生效.
+    if [ ! -f "$RUN/self_capture.enabled" ]; then
+        : > "$RUN/self_capture.enabled" 2>/dev/null && chmod 644 "$RUN/self_capture.enabled" 2>/dev/null
+        log "dpid: self-capture 常驻 — created $RUN/self_capture.enabled (default-on)"
+    fi
+
     if [ ! -f "$DPID_CONFIG" ] && [ -f "$MODDIR/data/dpi_config.json" ]; then
         cp -f "$MODDIR/data/dpi_config.json" "$DPID_CONFIG" 2>/dev/null
         chmod 644 "$DPID_CONFIG" 2>/dev/null
