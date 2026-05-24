@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Removed (v5.7.0-rc21, 2026-05-24)
+- **删除旧的全局 SQM(设置页那张复杂又基本用不上的卡)** —— rc20 的每设备「低延迟」开关已经取代它。彻底移除,避免留"假/死"代码:
+  - **前端**(`webroot/index.html`):移除 SQM 设置卡 HTML(Smart Queue 行 + `.sqm-control-panel` 三排按钮)、`.sqm-*` CSS、全部 SQM JS(`normalizeSqm*`/`sqm*Label`/`sqmPresetDetail`/`applySqmStatus`/`updateSqmPanel`/`fetchSQM`/`setSqmBackend`/`fillCardWithSqmPreset`、`data-sqm-*` 与 `sqm-gray-diag` 点击处理、init 的 `fetchSQM()`/诊断页的 `await fetchSQM()`、`state.sqm*` 字段)、以及设备卡延迟区那个依赖 SQM 预设的"填入预设"按钮 + 处理。删后 grep 确认 index.html **零残留旧 SQM 引用**,`node --check` 双 script 块均通过。
+  - **后端**:删 `daemon/hnc_httpd/api_sqm_v53.go`、`action_sqm_v53.go`;移除 `/api/sqm` 路由(`server.go`)、middleware loopback 白名单条目、`sqm_set` action 注册(`action.go`);删 `bin/sqm_manager.sh`、`bin/sqm_gray_diag.sh`。`go build`(android/arm64)通过 → 编译器确认无悬空引用。
+  - **测试/CI**:删 5 个 `test/unit/test_sqm_v53*.sh`(测的是已删功能);从 `test_ci_preflight_artifact_gate.sh`/`test_artifact_release_rc5.sh` 的必需文件清单移除 `bin/sqm_manager.sh`;从 `bin/artifact_sanity_check.sh` 移除 `sqm_manager.sh` 必需项 + `/api/sqm` 符号校验。CI 关键路径(`ci_preflight.sh`/`build.sh`/`version_consistency_check.sh`)无 SQM 依赖,已确认不破。
+  - 保留:每设备「低延迟」(`rule_sqm`/`set_sqm`/`device_sqm_leaf`/`sqm_enabled`)完整不动。已知遗留:`bin/rc_selfcheck_v53.sh`、`bin/hnc_cleanup_test_rules_v53.sh` 这两个 v5.3 手动诊断脚本里还提到 `/api/sqm`(非 CI、非运行时,404 时优雅降级),暂留。⚠ Go 改动需 CI 重编 `hnc_httpd`。版本 rc20 → rc21(570121)。
+
 ### Added (v5.7.0-rc20, 2026-05-24)
 - **每设备「低延迟」开关 —— 做进设备卡片(取代设置页那个复杂的全局 SQM)**。展开任一设备卡 → 新的「低延迟」一键开关 → 把该设备 HTB class 的叶子 qdisc 换成 **CAKE/fq_codel(AQM)**,这台设备自己跑满时也跟手;关闭则换回按速率缩放的 netem 占位。
   - **为什么做成每设备**:全局 SQM 在设置页"太复杂、基本用不上";而"低延迟"恰恰是**单设备 + 已限速**时最有效(限速给这台造了瓶颈,队列就排在我们能管的叶子上,AQM 才压得住延迟)。UI hint 写明"配合限速效果最佳"。

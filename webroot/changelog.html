@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc21 -->
+<div class="cl-section">
+  <div class="cl-title">🧹 v5.7.0-rc21: 删掉设置页那个旧的全局 SQM <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>删除</b>: 设置页里那张复杂、又基本用不上的"Smart Queue / SQM"卡彻底移除了。</li>
+    <li><b>为什么</b>: 上一版的每设备「低延迟」开关(在设备卡片上)已经把这个功能用更顺手的方式取代了,旧的全局卡留着只会让人困惑。</li>
+    <li><b>范围</b>: 前端卡片 + 样式 + 相关代码、后端接口/脚本、相关旧测试一并清理干净,没有留下"按了没反应"的死代码。每设备「低延迟」开关完整保留。</li>
+    <li>说明: 含后端改动,刷新版本会重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc20 -->
 <div class="cl-section">
   <div class="cl-title">✨ v5.7.0-rc20: 每台设备一键「低延迟」(做进设备卡片) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

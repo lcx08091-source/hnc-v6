@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc20
-versionCode=570120
+version=v5.7.0-rc21
+versionCode=570121
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc20 · 新功能:每设备「低延迟」开关(直接做到设备卡片里,取代设置页那个复杂又难用的全局 SQM)。展开任一设备卡 → 「低延迟」一键开关 → 把该设备 class 的队列叶子换成 CAKE/fq_codel(AQM),它自己跑满时也跟手。配合限速效果最好(限速=瓶颈,队列排在我们能管的地方);与延迟/弱网注入互斥(同一叶子);开机/切热点 restore 时自动恢复。链路:卡片开关→rule_sqm(Go action_dev_sqm.go)→apply_device_rule alloc_mid + tc_manager.sh set_sqm(新 device_sqm_leaf/set_sqm)+ rules.json per-device sqm_enabled;server.go 把 sqm_enabled 透传到 /api/devices;restore_rules 解析并恢复。Go 改动需 CI 重编 hnc_httpd;go vet + arm64 编译 + node --check + sh -n 均通过。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc21 · 删除旧的全局 SQM(设置页那个复杂又用不上的卡)——rc20 已用每设备「低延迟」开关取代它。前端:移除 SQM 设置卡 HTML + .sqm-* CSS + 全部 JS(模式/档位/预设处理、fetchSQM/setSqmBackend/updateSqmPanel/applySqmStatus、normalize/label/preset 助手、init/poll 调用、state 字段、设备卡"填入预设"按钮)。后端:删 api_sqm_v53.go/action_sqm_v53.go、/api/sqm 路由 + middleware 白名单 + sqm_set action;删 bin/sqm_manager.sh、bin/sqm_gray_diag.sh;删 5 个 test_sqm_v53*.sh 单测 + 从两个 artifact gate 清单移除 sqm_manager.sh + artifact_sanity_check 的 /api/sqm 校验。验证:index.html 零残留旧 SQM 引用、node --check 双块通过、go build OK、sh -n OK、版本一致性 0 失败。每设备「低延迟」(rule_sqm/set_sqm)完整保留。Go 改动需 CI 重编 hnc_httpd。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

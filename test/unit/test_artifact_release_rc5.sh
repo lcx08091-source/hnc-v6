@@ -11,7 +11,6 @@
 _REQUIRED_FILES_v5_3_rc5="
 webroot/index.html
 webroot/json-health.html
-bin/sqm_manager.sh
 bin/capability_probe.sh
 daemon/hnc_httpd/hnc_httpd
 bin/hnc_dpid

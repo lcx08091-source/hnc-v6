@@ -51,7 +51,7 @@ fi
 [ "$NESTED_COUNT" -gt 0 ] && fail "artifact contains nested ZIP(s); use the inner module ZIP or fix packaging: $(printf '%s' "$NESTED_ZIPS" | tr '\n' ' ')" || ok "artifact has no nested ZIP"
 grep -E '\.rej$|\.orig$' "$TMP.entries" >/dev/null && fail "artifact contains .rej/.orig patch residue" || ok "artifact has no .rej/.orig residue"
 grep -E '(^|/)(\.ssh|id_rsa|id_ed25519|.*_ed25519|.*_rsa|.*\.pem)$' "$TMP.entries" >/dev/null && fail "artifact may contain private key/secret files" || ok "artifact has no obvious private key/secret files"
-for req in webroot/index.html webroot/json-health.html bin/sqm_manager.sh bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe; do
+for req in webroot/index.html webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe; do
   grep -x "$req" "$TMP.entries" >/dev/null && ok "required file exists: $req" || fail "required file missing at ZIP root path: $req"
 done
 
@@ -110,9 +110,6 @@ if grep -x 'daemon/hnc_httpd/hnc_httpd' "$TMP.entries" >/dev/null; then
       strings "$TMP.extract/hnc_httpd" > "$TMP.httpd.strings" 2>/dev/null
       [ -n "$VER" ] && { grep -F "$VER" "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd embeds module version $VER" || fail "hnc_httpd does not embed module version $VER; Go binary may be stale"; }
       case "$VER" in v5.3.*)
-        grep -F '/api/sqm' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/sqm" || fail "hnc_httpd missing /api/sqm symbol/string"
-        grep -F 'apiSQMStatus' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains apiSQMStatus" || fail "hnc_httpd missing apiSQMStatus"
-        grep -F 'actionSQMSet' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains actionSQMSet" || fail "hnc_httpd missing actionSQMSet"
         grep -F '/api/dpi_state' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_state" || fail "hnc_httpd missing /api/dpi_state"
         grep -F '/api/dpi_probe' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_probe" || fail "hnc_httpd missing /api/dpi_probe"
         grep -F 'apiDPIState' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains apiDPIState" || fail "hnc_httpd missing apiDPIState"

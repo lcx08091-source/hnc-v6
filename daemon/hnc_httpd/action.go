@@ -288,8 +288,6 @@ func dispatchAction(hncDir, action string, p map[string]string, isLoopback bool)
 		return actionRemoteEnabledSet(hncDir, p)
 	case "hotspot_iface_set":
 		return actionHotspotIfaceSet(hncDir, p)
-	case "sqm_set":
-		return actionSQMSet(hncDir, p)
 	case "refresh":
 		return actionRefresh(hncDir)
 	case "pair_new":
