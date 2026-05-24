@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc17
-versionCode=570117
+version=v5.7.0-rc18
+versionCode=570118
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc17 · 收尾根因 A 的最后一处 /system/bin 依赖:hnc_watchdog(Go 主守护)的核心保活循环本来就是纯 Go、免疫,但它顺带跑的业务动作(runAction→watchdog.sh)和定时任务(stats_sample/v6_sync/ndpi)用的是硬编码 /system/bin/sh ×6,/system/bin 被卸的几秒里这些杂活会跳过(核心抓包不受影响、过会儿自恢复)。本版加 shellPath() 帮手:有 /system/bin/sh 就用、没有就退到 rc13 预置的 /data mksh 副本(脚本是 mksh 方言,兜底必须用 mksh 不能用 busybox ash),六处调用全改走它。已确认 dpid_supervisor(Go 兜底)与 dpid 核心本就无 /system/bin 依赖;dpid 的 pm/dumpsys/cmd/app_process 是框架工具、无 /data 替代、本就优雅降级。Go 改动需 CI 重编 hnc_watchdog;go vet + 安卓 arm64 交叉编译通过。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc18 · 限速/延迟引擎兼容性+优化(审查后做最值两项,纯 shell 不用重编):① 上行限速 police 兜底——capability_probe 早就探测出 uplink_mode=police(IFB/mirred 不可用但 tc police 可用,常见于 vendor wifi 驱动/缺 act_mirred 的 GKI),但 tc_manager 从没消费它,导致这些机器上行限速直接静默失效。现在 IFB 不可用时改走"热点网卡 ingress 按源 IP police"的逐客户端限速(无需 IFB,IPv4),恢复一批设备的上行限速;成功=完整生效,失败才退回只下行(与旧行为一致)。② netem 队列 limit 按速率缩放——旧的固定 limit 100 在 >50Mbit 时太小、尾丢把吞吐压到限速值以下;现在 limit≈速率×(延迟+50ms),低速率仍保留小队列(下限 100,不增延迟),高速率/带延迟时按 BDP 放大(上限 20000)。set_limit 设速率后回调 tune_leaf_netem_limit 把占位 netem 队列对齐到实际速率;默认(不限速)类用慷慨值不再成瓶颈。eBPF 维持现状(读 netd map 的字节统计本就稳;不引入 tc-bpf/XDP)。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

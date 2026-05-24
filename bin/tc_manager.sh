@@ -243,9 +243,13 @@ sqm_leaf_replace() {
 
 netem_leaf_replace_zero() {
     local dev=$1 class_id=$2 leaf_handle=$3
-    tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit 100 2>/dev/null && return 0
+    # rc18: generous limit (assume high rate) so the unlimited default class is
+    # never the bottleneck; per-device classes get this re-tuned to their actual
+    # rate by tune_leaf_netem_limit right after set_rate_only.
+    local lim; lim=$(netem_limit_pkts 0 0 0)
+    tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$lim" 2>/dev/null && return 0
     tc qdisc del dev "$dev" parent "1:$class_id" 2>/dev/null || true
-    tc qdisc add dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit 100 2>/dev/null
+    tc qdisc add dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$lim" 2>/dev/null
 }
 
 cap_bool_value() {
@@ -316,6 +320,14 @@ uplink_supported_runtime() {
     return 0
 }
 
+# rc18: capability_probe records uplink_mode = ifb_htb | police | unsupported.
+# When IFB/mirred is unavailable but tc supports ingress `police`, we can still
+# rate-limit uplink per client (ingress police by src IP, no IFB needed).
+cap_uplink_mode_value() {
+    [ -f "$CAP_FILE" ] || return 1
+    sed -n 's/.*"uplink_mode"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' "$CAP_FILE" 2>/dev/null | head -1
+}
+
 log_uplink_unsupported_once() {
     local where=${1:-tc}
     mkdir -p "$HNC_DIR/run" 2>/dev/null || true
@@ -350,11 +362,41 @@ lt_val() {
     awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{exit !(a+0 < b+0)}'
 }
 
+# rc18: parse a tc rate string (e.g. "10Mbit", "500Kbit", "1Gbit", "8000000bit")
+# into bits/sec. Empty/unparseable → 0 (callers treat 0 as "unlimited/unknown").
+rate_to_bps() {
+    awk -v s="${1:-}" 'BEGIN{
+        if(s==""){print 0; exit}
+        n=s; sub(/[A-Za-z]+$/,"",n); u=s; sub(/^[0-9.]+/,"",u);
+        m=1;
+        if(u ~ /^[Gg]/) m=1000000000;
+        else if(u ~ /^[Mm]/) m=1000000;
+        else if(u ~ /^[Kk]/) m=1000;
+        v=(n+0)*m; if(v<0)v=0; print int(v);
+    }'
+}
+
+# rc18: pick a netem queue limit (packets) that won't bottleneck the class rate
+# (old fixed "limit 100" tail-drops above ~50Mbit and caps throughput) but also
+# won't add bufferbloat at low rates. packets ≈ rate_bps × (delay+jitter+50ms)
+# of buffer, clamped [100, 20000]. rate_bps 0/empty → assume 1Gbit (generous,
+# used for the unlimited default class so it never bottlenecks).
+netem_limit_pkts() {
+    awk -v r="${1:-0}" -v d="${2:-0}" -v j="${3:-0}" 'BEGIN{
+        if(r+0<=0) r=1000000000;
+        win=(d+j+50)/1000.0;
+        p=int(r*win/8/1500)+1;
+        if(p<100)p=100; if(p>20000)p=20000;
+        print p;
+    }'
+}
+
 # ─── 常量 ────────────────────────────────────────────────────
 DEFAULT_RATE="1000mbit"
 IFB_IFACE="ifb0"
 FILTER_PRIO_FW=1       # fw mark filter（备用）
 FILTER_PRIO_BASE=100   # u32 IP filter 基准优先级（每设备 100+class_id）
+INGRESS_POLICE_PRIO_BASE=300  # rc18: per-client ingress police filter prio (IFB-less uplink fallback)
 
 # rc3.1.34 修 #14: 防御 mark_id 非数字传入. 3 处 set_limit/set_delay/remove_device
 # 之前 `printf "%d" "$mark_id"` 对非数字会输出 0 + stderr 报错 → class_id=0 →
@@ -508,8 +550,8 @@ netem_qdisc_set() {
 # 限速（HTB rate）与延迟（netem）使用同一个 HTB class，但互不干扰：
 #
 #   class 1:$class_id  (HTB, rate = 限速值 或 DEFAULT_RATE 表示不限速)
-#     └─ qdisc leaf: netem [delay Xms] limit 100
-#                    （无延迟时仅 limit，不带 delay 参数）
+#     └─ qdisc leaf: netem [delay Xms] limit <按 rate×延迟 缩放, rc18>
+#                    （无延迟时仅 limit，不带 delay 参数；limit 见 netem_limit_pkts）
 #
 # 【分工】
 #   - ensure_device_class : 幂等创建 class + leaf netem + filter
@@ -714,7 +756,11 @@ set_netem_only() {
     else
         args="delay 0ms"
     fi
-    args="$args limit 100"  # v3.3.5: 同 ensure_device_class，避免 buffer bloat
+    # rc18: scale netem queue to the class rate + delay window so high-rate limits
+    # aren't tail-dropped (old fixed "limit 100" capped throughput above ~50Mbit),
+    # while low rates keep a small queue (floor 100) to avoid bufferbloat.
+    local _rate_bps; _rate_bps=$(rate_to_bps "$(tc class show dev "$dev" classid "1:$class_id" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="rate"){print $(i+1); exit}}')")
+    args="$args limit $(netem_limit_pkts "$_rate_bps" "$delay_ms" "$jitter_ms")"
 
     # v5.3: clearing delay can safely return to SQM leaf if the user enabled it.
     if ! gt0 "$delay_ms" && ! gt0 "$jitter_ms" && ! gt0 "$loss"; then
@@ -730,6 +776,47 @@ set_netem_only() {
     tc qdisc del    dev "$dev" parent "1:$class_id" 2>/dev/null || true
     # shellcheck disable=SC2086
     tc qdisc add    dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem $args 2>/dev/null
+}
+
+# rc18: re-tune the zero-delay netem placeholder's queue limit to match the
+# class's actual rate (called from set_limit right after set_rate_only). Active
+# delay/loss netem and SQM (fq_codel/cake) leaves are left untouched — they own
+# their own queue management.
+tune_leaf_netem_limit() {
+    local dev=$1 class_id=$2 mbps=$3
+    leaf_has_netem "$dev" "$class_id" || return 0
+    leaf_has_active_netem "$dev" "$class_id" && return 0
+    local leaf_handle
+    if [ "$dev" = "$IFB_IFACE" ]; then leaf_handle=$((class_id + 2000)); else leaf_handle=$((class_id + 1000)); fi
+    local bps; bps=$(awk -v m="${mbps:-0}" 'BEGIN{print int((m+0)*1000000)}')
+    tc qdisc change dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$(netem_limit_pkts "$bps" 0 0)" 2>/dev/null || true
+}
+
+# ─── rc18: IFB-less uplink fallback via ingress police ───────────
+# When capability_probe reports uplink_mode=police (IFB/mirred unavailable but
+# tc `police` works — common on vendor wifi drivers / GKI without act_mirred),
+# limit per-client uplink with an ingress police filter matched by src IP on the
+# hotspot iface. No IFB redirect needed. Best-effort: any failure falls back to
+# downlink-only (same as before this path existed). IPv4 only for now.
+ensure_ingress_qdisc() {
+    local iface=$1
+    tc qdisc show dev "$iface" 2>/dev/null | grep -qE 'qdisc (ingress|clsact) ffff:' && return 0
+    tc qdisc add dev "$iface" handle ffff: ingress 2>/dev/null && return 0
+    # clsact and ingress are mutually exclusive; if one already exists reuse it
+    tc qdisc show dev "$iface" 2>/dev/null | grep -qE 'qdisc (ingress|clsact) ffff:'
+}
+set_uplink_police() {
+    local iface=$1 class_id=$2 ip=$3 rate=$4 burst=$5
+    [ -n "$ip" ] || return 1
+    local prio=$((INGRESS_POLICE_PRIO_BASE + class_id))
+    tc filter del dev "$iface" parent ffff: protocol ip prio "$prio" 2>/dev/null || true
+    tc filter add dev "$iface" parent ffff: protocol ip prio "$prio" u32 \
+        match ip src "$ip/32" police rate "$rate" burst "$burst" drop 2>/dev/null
+}
+clear_uplink_police() {
+    local iface=$1 class_id=$2
+    local prio=$((INGRESS_POLICE_PRIO_BASE + class_id))
+    tc filter del dev "$iface" parent ffff: protocol ip prio "$prio" 2>/dev/null || true
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1391,11 +1478,13 @@ set_limit() {
             ensure_egress_htb_ready "$iface" "set_limit_rate_retry" && ensure_device_class "$iface" "$class_id" "$ip" && \
                 set_rate_only "$iface" "$class_id" "$dn_rate" "$dn_burst" || { log_error "set_limit: egress rate set failed after retry dev=$iface class=1:$class_id"; return 1; }
         fi
+        tune_leaf_netem_limit "$iface" "$class_id" "$dn_effective_mbps"  # rc18: size placeholder queue to the rate
         log "  Egress 1:$class_id @ $dn_rate burst $dn_burst (requested=${down_mbps}M effective=${dn_effective_mbps}M)"
     else
         # 关限速：只重置 rate，保留 leaf netem（可能承载延迟）
         if class_exists "$iface" "$class_id"; then
             set_rate_only "$iface" "$class_id" "$DEFAULT_RATE" 200k || { log_error "set_limit: egress rate clear failed dev=$iface class=1:$class_id"; return 1; }
+            tune_leaf_netem_limit "$iface" "$class_id" 0  # rc18: rate cleared → generous placeholder queue
             log "  Egress 1:$class_id rate cleared (leaf preserved)"
         fi
     fi
@@ -1408,8 +1497,20 @@ set_limit() {
     # whole downlink rule just because IFB is unavailable.
     if gt0 "$up_mbps"; then
         if ! uplink_supported_runtime; then
+            # rc18: IFB/mirred unavailable. Try the ingress-police fallback that
+            # capability_probe already detected (uplink_mode=police) before giving
+            # up on uplink. Per-client police by src IP on the hotspot iface — no
+            # IFB needed. IPv4 only; best-effort → falls back to downlink-only.
+            if [ "$(cap_uplink_mode_value 2>/dev/null)" = "police" ] && [ -n "$ip" ] && \
+               ensure_ingress_qdisc "$iface" && \
+               set_uplink_police "$iface" "$class_id" "$ip" "$(mbps_to_rate "$up_mbps")" "$(burst_for_rate "$up_mbps")"; then
+                log "  Ingress(police) src=$ip @ ${up_mbps}M (IFB unavailable → police fallback)"
+                echo "LIMIT_APPLY_MODE=full_police"
+                sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+                return 0
+            fi
             log_uplink_unsupported_once "set_limit"
-            log "  Ingress(ifb0) skipped: uplink unsupported; keeping downlink only"
+            log "  Ingress skipped: uplink unsupported (no IFB, no police); keeping downlink only"
             echo "LIMIT_APPLY_MODE=down_only"
             sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
             return 8
@@ -1443,6 +1544,7 @@ set_limit() {
         log "  Ingress(ifb0) 1:$class_id @ $up_rate burst $up_burst"
         echo "LIMIT_APPLY_MODE=full"
     else
+        clear_uplink_police "$iface" "$class_id"  # rc18: best-effort clear police fallback filter
         if class_exists "$IFB_IFACE" "$class_id"; then
             set_rate_only "$IFB_IFACE" "$class_id" "$DEFAULT_RATE" 200k || log_error "set_limit: ingress rate clear best-effort failed dev=$IFB_IFACE class=1:$class_id"
             log "  Ingress(ifb0) 1:$class_id rate cleared best-effort (leaf preserved)"
@@ -1606,6 +1708,7 @@ remove_device() {
         tc qdisc del dev "$dev" parent "1:$class_id" 2>/dev/null || true
         tc class del dev "$dev" classid "1:$class_id" 2>/dev/null || true
     done
+    clear_uplink_police "$iface" "$class_id"  # rc18: drop the ingress police fallback filter too
     log "Removed TC rules: mark_id=$mark_id"
 }
 

@@ -18,6 +18,12 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc18, 2026-05-24)
+- **限速/延迟引擎:兼容性 + 优化(多代理审查后落地最值的两项,纯 `tc_manager.sh` shell 改动,不用重编)**。
+  - **① 上行限速 police 兜底(兼容性,影响最大)**(`bin/tc_manager.sh`)。`capability_probe.sh` 早就会算出 `uplink_mode=police`——当 IFB/mirred 不可用(常见于 vendor wifi 驱动、缺 `act_mirred`/`ifb` 的 GKI)但 tc `police` 可用时,本可用 ingress police 限上行;**但 `tc_manager.sh` 从来没消费这个字段**,导致这些机器上行限速**静默失效**(就是界面"上行不支持"那批设备)。现在 `set_limit` 在 `uplink_supported_runtime` 为假时,先尝试 **逐客户端 ingress police(按源 IP,在热点网卡 `ffff:` 上,无需 IFB)**:`cap_uplink_mode_value`/`ensure_ingress_qdisc`/`set_uplink_police`/`clear_uplink_police`。成功 → `return 0`(完整生效,UI 如实显示上行已限);失败或无 police → `return 8`(只下行,与旧行为完全一致)。`set_limit` 清除路径与 `remove_device` 都加了 `clear_uplink_police` 清理。目前 IPv4(v6 上行 police 留作后续);best-effort,任何失败都不劣于"本来就没有上行"。
+  - **② netem 队列 `limit` 按速率缩放(正确性/吞吐)**(`bin/tc_manager.sh`)。旧的固定 `limit 100` 在 >~50Mbit 时只有 ~1ms 缓冲,**尾丢把实际吞吐压到限速值以下、还多丢包**。新增 `netem_limit_pkts`(`packets ≈ rate_bps×(delay+jitter+50ms)/8/1500`,clamp `[100,20000]`)+ `rate_to_bps`:低速率仍是小队列(下限 100,**不增延迟**),高速率/带延迟按 BDP 放大。三处接入:`netem_leaf_replace_zero`(占位叶子用慷慨值,使不限速的默认类不再成瓶颈)、`set_netem_only`(延迟路径按"查到的类速率+延迟"算)、`set_limit` 设速率后回调新的 `tune_leaf_netem_limit` 把占位 netem 队列对齐到刚生效的实际速率(只动零延迟占位叶子,不碰真延迟/丢包 netem 与 fq_codel/cake SQM 叶子)。
+  - **未改、确认是好的**:netem↔HTB 解耦、能力探测用真 dummy 网卡实测、C rtnetlink 工具绕 ColorOS 坏 tc、oplus-netd 占根 qdisc 时诚实退出。**eBPF 维持现状**(读 netd map 的字节统计本就稳、可移植;明确不引入 tc-bpf/XDP,那会按内核编译 BPF 对象、反而降兼容)。审查另记的 CAKE 补参数 / u32→flower 属架构级,留作可选大改。`sh -n` 通过,awk 数学已单测。版本 rc17 → rc18(570118)。
+
 ### Fixed (v5.7.0-rc17, 2026-05-24)
 - **收尾根因 A 的最后一处 `/system/bin` 依赖:`hnc_watchdog`(Go 主守护)的硬编码 `/system/bin/sh`**。承 rc16 把 supervision 栈扫了一遍:
   - `dpid_supervisor`(Go 兜底 launcher)**本就完全免疫**——`realBin` 是绝对 `/data` 路径、netlink 走直接 syscall(不 shell out `ip`)、计时用 Go timer、只 `exec` 绝对路径的 dpid 二进制。无需改。
