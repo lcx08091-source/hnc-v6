@@ -18,6 +18,15 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc3, 2026-05-24)
+- **自建实体库 / 阶段4** (`data/entity_db.json` + `src/dpid/output/entity.go`) — 121 条 HNC 自有整理的 `apex→{type,entity}`,覆盖全球+国内主流**共享基础设施**(CDN / 云存储 / 统计 / 广告 / 推送 SDK:Akamai/Cloudfront/Fastly、阿里云/腾讯云 myqcloud/百度云/字节 volces、友盟/TalkingData/神策、个推/极光 …)。
+  - **license 干净**:全部自有整理,**不含任何第三方数据集**。明确放弃 DuckDuckGo Tracker Radar —— 它是 CC-BY-NC-SA(非商用 + 传染性 ShareAlike),打进公开模块会把整个模块拖成 NC-SA,法律上不可行。
+  - **用途**:候选飞轮(走法2)的冷启动先验。`classifyTier` 在 uid 基数累积出来之前,凭实体库即可把 CDN/统计类 apex 首次出现就判为"共享",**不会被误归**到第一个命中它的 uid。
+  - dpid 每 tick 读 `etc/entity_db.json`(缺失/损坏=空,绝不致命);`dpi_state` 加 `entity_db_size` 诊断;应用→设置 候选区显示"实体库 N 条已加载"。
+
+### Internals (v5.7.0-rc3, 2026-05-24)
+- `service.sh` 软装 `entity_db.json` 到 `etc/`,并按 `version` 字段升级(带 `.bak` 备份,保留用户编辑),与 `dpi_rules.json` 同范式。版本 rc2 → rc3(versionCode 570103)。
+
 ### Added (v5.7.0-rc2, 2026-05-23)
 - **WebUI 候选审批 / 走法2 收尾** — 把"未匹配 SNI 候选审批"卡从"规划中"做成可用界面。应用→设置:
   - **自动晋级开关** (`/api/self/auto_promote/toggle` → `run/auto_promote.enabled`):开=HIGH 自动晋级写规则;关=影子模式(只统计,但仍可手动 promote)。

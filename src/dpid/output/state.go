@@ -215,6 +215,7 @@ type SelfState struct {
 	CandidateHigh     int               `json:"candidate_high,omitempty"`     // apexes at HIGH tier (auto-promotable)
 	CandidateShared   int               `json:"candidate_shared,omitempty"`   // apexes judged shared infra (never attributed)
 	CandidatePromoted int               `json:"candidate_promoted,omitempty"` // rules actually auto-promoted
+	CandidateEntityDB int               `json:"entity_db_size,omitempty"`     // curated entity-lib entries loaded
 	AutoPromoteOn     bool              `json:"auto_promote_on,omitempty"`
 	CandidateSamples  []CandidateSample `json:"candidate_samples,omitempty"`
 }

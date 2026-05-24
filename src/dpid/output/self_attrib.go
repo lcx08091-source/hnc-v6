@@ -552,6 +552,7 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 	s.CandidateHigh = cs.high
 	s.CandidateShared = cs.shared
 	s.CandidatePromoted = cs.promoted
+	s.CandidateEntityDB = cs.entityDBSize
 	s.AutoPromoteOn = cs.autoPromoteOn
 	if len(cs.samples) > 0 {
 		s.CandidateSamples = append([]CandidateSample(nil), cs.samples...)

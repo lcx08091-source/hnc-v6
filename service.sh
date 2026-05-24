@@ -600,6 +600,29 @@ else
         log "dpid: installed default auto_expand_blocklist.json to $DPID_BLOCKLIST"
     fi
 
+    # v5.7.0-rc3: curated entity library (self-authored, license-clean) used by
+    # the candidate flywheel to recognize shared infrastructure (CDN / cloud /
+    # analytics / push SDK) on first sighting. Soft-install; on a module version
+    # bump, back up the user's copy and refresh so the curated lib grows across
+    # updates (same trade-off as dpi_rules.json above).
+    DPID_ENTITY="$HNC_DIR/etc/entity_db.json"
+    MOD_ENTITY="$MODDIR/data/entity_db.json"
+    if [ ! -f "$DPID_ENTITY" ] && [ -f "$MOD_ENTITY" ]; then
+        cp -f "$MOD_ENTITY" "$DPID_ENTITY" 2>/dev/null
+        chmod 644 "$DPID_ENTITY" 2>/dev/null
+        log "dpid: installed default entity_db.json to $DPID_ENTITY"
+    elif [ -f "$DPID_ENTITY" ] && [ -f "$MOD_ENTITY" ]; then
+        MOD_EV=$(grep -m1 '"version"' "$MOD_ENTITY" 2>/dev/null | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+        ETC_EV=$(grep -m1 '"version"' "$DPID_ENTITY" 2>/dev/null | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+        if [ -n "$MOD_EV" ] && [ "$MOD_EV" != "$ETC_EV" ]; then
+            BAK="$DPID_ENTITY.bak-$(date +%s 2>/dev/null || echo prev)"
+            mv "$DPID_ENTITY" "$BAK" 2>/dev/null
+            cp -f "$MOD_ENTITY" "$DPID_ENTITY" 2>/dev/null
+            chmod 644 "$DPID_ENTITY" 2>/dev/null
+            log "dpid: upgraded entity_db.json: was [$ETC_EV] -> now [$MOD_EV]; user backup at $BAK"
+        fi
+    fi
+
     # rc22 (DFP): install default JA4 fingerprint library. Same soft-migration:
     # if user already has /data/local/hnc/etc/dpi_ja4_fingerprints.json we
     # respect it; otherwise drop the seed library shipped with the module.

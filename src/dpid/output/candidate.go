@@ -133,11 +133,16 @@ func (c *apexCandidate) topUID() int {
 }
 
 // classifyTier decides an apex's tier + the uid it would be attributed to.
-func classifyTier(c *apexCandidate, blocklist map[string]struct{}) (tier string, uid int) {
+func classifyTier(c *apexCandidate, blocklist map[string]struct{}, entityDB map[string]entityRec) (tier string, uid int) {
 	if c.SharedLearned {
 		return "shared", 0
 	}
 	if _, blocked := blocklist[c.Apex]; blocked {
+		return "shared", 0
+	}
+	// curated entity library: CDN / cloud / analytics / ads / push SDK apexes
+	// are shared infrastructure from the first sighting (cold-start prior).
+	if entityIsShared(c.Apex, entityDB) {
 		return "shared", 0
 	}
 	if len(c.UIDs) >= candSharedUIDThreshold {
@@ -173,6 +178,7 @@ type candidateSummary struct {
 	high          int
 	shared        int
 	promoted      int
+	entityDBSize  int
 	autoPromoteOn bool
 	samples       []CandidateSample
 }
@@ -184,6 +190,7 @@ type candidateSummary struct {
 func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]struct{}, acc *candidateAccumulator, promoted map[string]autoExpandedRule, runDir string, now int64) {
 	rules := loadL3Rules().rules
 	blocklist, _ := loadBlocklist()
+	entityDB := loadEntityDB()
 
 	touched := map[string]struct{}{}
 	for sni, uidSet := range pending {
@@ -221,10 +228,10 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 	// tick; force-promotion below works regardless of the auto_promote flag.
 	decisions := loadCandidateDecisions()
 
-	sum := candidateSummary{autoPromoteOn: autoPromoteOn}
+	sum := candidateSummary{autoPromoteOn: autoPromoteOn, entityDBSize: len(entityDB)}
 	changed := false
 	for apex, c := range acc.byApex {
-		tier, uid := classifyTier(c, blocklist)
+		tier, uid := classifyTier(c, blocklist, entityDB)
 		sum.pending++
 		switch tier {
 		case "high":

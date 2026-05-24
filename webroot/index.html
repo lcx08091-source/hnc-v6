@@ -12824,6 +12824,9 @@ body.kb-open .container {
     if (sharedTotal) {
       html += '<div style="font-size:11px;color:var(--text-3);padding:10px 4px 0">共享基础设施 ' + sharedTotal + ' 个已自动排除(CDN/统计等, 不归个人 app)</div>';
     }
+    if (self && self.entity_db_size) {
+      html += '<div style="font-size:10.5px;color:var(--text-3);padding:6px 4px 0">实体库 ' + self.entity_db_size + ' 条已加载(自建, 冷启动即排除共享域名)</div>';
+    }
     if (!html) {
       html = '<div style="padding:10px 4px;color:var(--text-3);font-size:12px">' +
         ((self && self.candidate_pending)
