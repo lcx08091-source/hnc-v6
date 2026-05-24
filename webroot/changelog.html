@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc19 -->
+<div class="cl-section">
+  <div class="cl-title">🩹 v5.7.0-rc19: 修「SQM 一点就报错」 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>问题</b>: 设置页的 SQM(智能队列)按钮,只要你没给任何设备设过限速,点哪个都弹"SQM 切换失败"。</li>
+    <li><b>原因</b>: SQM 应用时要求底层限速队列结构已经存在,但这个结构只在"第一次设限速"时才建,开机/开热点都不建——所以没设过限速时,SQM 一点就找不到结构、直接报错。</li>
+    <li><b>修复</b>: SQM 应用时如果发现结构没建,先自动把它建起来再套用;实在建不起来也安静保存设置,不再弹红色失败。现在没设限速也能正常用 SQM。</li>
+    <li>说明: 纯脚本修复,不用重新编译。(之前聊的"把低延迟做到每个设备卡片上"那个更大改动先放一放。)</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc18 -->
 <div class="cl-section">
   <div class="cl-title">🚀 v5.7.0-rc18: 限速兼容性 + 高速吞吐优化 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

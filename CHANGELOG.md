@@ -18,6 +18,12 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc19, 2026-05-24)
+- **修复"SQM 一点就报错"——设置页 SQM 任意按钮点了都弹「SQM 切换失败」**(`bin/sqm_manager.sh`)。根因:`actionSQMSet` → `sqm_manager.sh apply` → `apply_default_leaf` 是**增量**应用(只在已存在的 HTB 树上替换默认类 `1:9999` 的叶子 qdisc),它要求 `qdisc htb 1:` 和 `class htb 1:9999` 已经存在;**否则 `return 3`/`return 4` 硬失败**。但 HTB 队列树只在 `set_limit`(第一次给某设备设限速)时经 `ensure_egress_htb_ready→init_tc` **惰性创建**,开机 / 开热点都不主动建。**结果:只要你没给任何设备设过限速,点 SQM 的任意模式/档位都命中 rc=3「HTB root 1: not found」→ 前端每次 toast「SQM 切换失败: sqm apply failed」**——SQM 实际上从来没法独立用。
+  - **修复**:`apply_default_leaf` 在热点网卡存在、但 HTB 根缺失时,先 `sh tc_manager.sh init "$iface"` 把树建起来(幂等,建 root + 默认类 1:9999 + fq_codel 叶子),再做增量叶子替换;若 bootstrap 仍失败(如内核真不支持 HTB),改为**优雅保存 `return 0`**(stderr/log 给 WARN)而不是硬报错——前端不再误报失败。默认类缺失同样改为优雅保存。
+  - 这样 SQM 在"开了热点但没设任何限速"的常见场景下**能真正生效**(给默认类挂上 fq_codel/CAKE AQM 叶子),而不是一点就红。纯 shell,`sh -n` 通过,不用重编。
+  - ⚠ 注:之前讨论的"把低延迟做成每设备卡片开关 / 全局带宽整形(`1:1` ceil)"是更大的方向,本版**先按下不表**,只修这个一点就报错的 bug。版本 rc18 → rc19(570119)。
+
 ### Changed (v5.7.0-rc18, 2026-05-24)
 - **限速/延迟引擎:兼容性 + 优化(多代理审查后落地最值的两项,纯 `tc_manager.sh` shell 改动,不用重编)**。
   - **① 上行限速 police 兜底(兼容性,影响最大)**(`bin/tc_manager.sh`)。`capability_probe.sh` 早就会算出 `uplink_mode=police`——当 IFB/mirred 不可用(常见于 vendor wifi 驱动、缺 `act_mirred`/`ifb` 的 GKI)但 tc `police` 可用时,本可用 ingress police 限上行;**但 `tc_manager.sh` 从来没消费这个字段**,导致这些机器上行限速**静默失效**(就是界面"上行不支持"那批设备)。现在 `set_limit` 在 `uplink_supported_runtime` 为假时,先尝试 **逐客户端 ingress police(按源 IP,在热点网卡 `ffff:` 上,无需 IFB)**:`cap_uplink_mode_value`/`ensure_ingress_qdisc`/`set_uplink_police`/`clear_uplink_police`。成功 → `return 0`(完整生效,UI 如实显示上行已限);失败或无 police → `return 8`(只下行,与旧行为完全一致)。`set_limit` 清除路径与 `remove_device` 都加了 `clear_uplink_police` 清理。目前 IPv4(v6 上行 police 留作后续);best-effort,任何失败都不劣于"本来就没有上行"。

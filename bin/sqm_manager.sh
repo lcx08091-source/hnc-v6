@@ -254,8 +254,26 @@ apply_default_leaf() {
 
     kind=$(effective_leaf_for_apply)
     out=$($TC_BIN qdisc show dev "$iface" 2>/dev/null || true)
-    echo "$out" | grep -q 'qdisc htb 1:' || { echo "ERROR: HTB root 1: not found on $iface; skip incremental SQM apply" >&2; return 3; }
-    $TC_BIN class show dev "$iface" 2>/dev/null | grep -q 'class htb 1:9999' || { echo "ERROR: default class 1:9999 not found on $iface; skip incremental SQM apply" >&2; return 4; }
+    if ! echo "$out" | grep -q 'qdisc htb 1:'; then
+        # rc19: SQM apply used to hard-fail (rc=3 "HTB root not found") whenever no
+        # per-device limit had ever been set — the HTB tree is built lazily on the
+        # first set_limit and nothing builds it on hotspot-up, so on a normal hotspot
+        # EVERY SQM click errored ("SQM 切换失败"). Bootstrap the tree here so SQM
+        # works standalone (applies the AQM leaf on the default class 1:9999).
+        log "apply: HTB root missing on $iface; bootstrapping via tc_manager.sh init"
+        sh "$HNC_DIR/bin/tc_manager.sh" init "$iface" >/dev/null 2>&1 || true
+        out=$($TC_BIN qdisc show dev "$iface" 2>/dev/null || true)
+        if ! echo "$out" | grep -q 'qdisc htb 1:'; then
+            log "apply skipped iface=$iface reason=htb-bootstrap-failed; settings saved"
+            echo "WARN: HTB tree could not be created on $iface; SQM settings saved, will apply once limiting is active" >&2
+            return 0
+        fi
+    fi
+    if ! $TC_BIN class show dev "$iface" 2>/dev/null | grep -q 'class htb 1:9999'; then
+        log "apply skipped iface=$iface reason=default-class-missing-after-init; settings saved"
+        echo "WARN: default class 1:9999 not present on $iface; SQM settings saved" >&2
+        return 0
+    fi
 
     # Do not overwrite a real netem default leaf. Device-specific netem classes are
     # separate, but this guard protects unusual fallback layouts.
