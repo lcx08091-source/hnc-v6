@@ -931,6 +931,28 @@ set_global_shaper() {
     fi
 }
 
+# rc36 (GS-1): 应用持久化的全局带宽整形(opt-in)。供 init_tc 末尾 + restore_rules 共用。
+# 关键:ROM 把根 qdisc 换成 mq/noqueue 触发 ensure_egress_htb_ready→init_tc 重建时,
+# 1:1 被重建为 DEFAULT_RATE;init_tc 末尾调本函数把 ceil 重新压回 WAN 带宽,避免全局
+# 整形"UI 显示开着、实际全速"的静默失效。直接调 set_global_shaper 函数(不经 CLI 锁),
+# 因为 init_tc/restore_rules 自身已在 tc_action_lock 下。set_global_shaper 内部的
+# ensure_egress_htb_ready 在树已就绪时直接返回,不会递归回 init_tc。
+apply_global_shaper_if_enabled() {
+    local _gs_iface=$1
+    [ -n "$_gs_iface" ] || return 0
+    local _gs_en
+    _gs_en=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_enabled 2>/dev/null)
+    [ "$_gs_en" = "true" ] || return 0
+    local _gs_down _gs_up
+    _gs_down=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_down 2>/dev/null); [ -n "$_gs_down" ] || _gs_down=0
+    _gs_up=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_up 2>/dev/null);     [ -n "$_gs_up" ]   || _gs_up=0
+    if set_global_shaper "$_gs_iface" on "$_gs_down" "$_gs_up" >/dev/null 2>&1; then
+        log "global shaper (re)applied: down=$_gs_down up=$_gs_up iface=$_gs_iface"
+    else
+        log "global shaper (re)apply failed: down=$_gs_down up=$_gs_up iface=$_gs_iface"
+    fi
+}
+
 # ═══════════════════════════════════════════════════════════════
 # 禁用硬件加速 / offload
 # 必须在 tc qdisc 建立之前调用，否则大包绕过整形层
@@ -1462,9 +1484,13 @@ init_tc() {
     fi
 
     # 以下 class / ingress qdisc / ifb 等代码只在 root htb OK 时执行
+    # rc36 (TC-1): root htb 彻底失败时返回 1(此前静默 return 0 误导调用方)。ingress
+    # mirred 已在上面无条件装好,这里返回 1 只是如实上报"HTB 树没建成",让
+    # ensure_egress_htb_ready / CLI init 拿到准确状态;set_limit 等会据此正确中止而非
+    # 在缺失的 parent 1:1 上继续。
     if [ "$_htb_add_ok" != "1" ]; then
-        log "init_tc: skipping class/ingress/ifb setup due to root htb failure"
-        return 0
+        log_error "init_tc: HTB tree NOT built on $iface (root htb failed); returning 1 after ingress mirred install"
+        return 1
     fi
 
     if [ "$_htb_added_by_hnc" = "1" ]; then
@@ -1501,6 +1527,10 @@ init_tc() {
         log_uplink_unsupported_once "init_tc"
         log "init_tc: skip IFB0 root/classes because uplink is unsupported"
     fi
+
+    # rc36 (GS-1): HTB 树刚建好,若持久化里全局整形是开的,把 1:1 ceil 重新压回 WAN 带宽。
+    # 防 ROM 换根 qdisc 触发重建后整形静默失效。树已就绪,set_global_shaper 不会递归。
+    apply_global_shaper_if_enabled "$iface"
 
     log "=== TC init OK ==="
 }
@@ -2104,18 +2134,9 @@ restore_rules() {
         done
     fi
 
-    # rc32: 恢复全局带宽整形器 (opt-in, 默认关)。仅 enabled=true 时应用,默认不碰 1:1。
-    local gs_en; gs_en=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_enabled 2>/dev/null)
-    if [ "$gs_en" = "true" ] && [ -n "$iface" ]; then
-        local gs_down gs_up
-        gs_down=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_down 2>/dev/null); [ -n "$gs_down" ] || gs_down=0
-        gs_up=$(sh "$HNC_DIR/bin/json_set.sh" top_get global_shaper_up 2>/dev/null);   [ -n "$gs_up" ]   || gs_up=0
-        if set_global_shaper "$iface" on "$gs_down" "$gs_up" >/dev/null 2>&1; then
-            log "  restore: global shaper on down=$gs_down up=$gs_up"
-        else
-            log "  restore: global shaper apply failed (down=$gs_down up=$gs_up)"
-        fi
-    fi
+    # rc32/rc36: 恢复全局带宽整形器 (opt-in, 默认关)。抽成 apply_global_shaper_if_enabled,
+    # 与 init_tc 末尾共用同一逻辑(GS-1),避免两处各写一份导致行为漂移。
+    apply_global_shaper_if_enabled "$iface"
 
     log "Restore complete"
 }

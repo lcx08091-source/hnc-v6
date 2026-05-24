@@ -21,6 +21,13 @@ JSON_GUARD="$BINDIR/json_guard.sh"
 HNC_JSON_C="$BINDIR/hnc_json_c"
 HNC_BASE="${HNC:-/data/local/hnc}"
 LOCKDIR="$HNC_BASE/run/hnc_json.lock"
+# rc36 (LOCK-1): json_set.sh 用 $HNC/run/json.lock 作全局写锁。历史上 hnc_json 只用
+# 自己的 hnc_json.lock,导致直接调 hnc_json 的写者(json_set_batch.sh / service / 等)
+# 与走 json_set.sh 的写者并发写同一 rules.json 时互不见锁。这里让 hnc_json 的写路径
+# 也先抢同一把 json.lock(外层),从而和 json_set.sh 串行;但 json_set.sh 桥接调用
+# hnc_json 时它已持 json.lock(非重入 mkdir 锁会死锁),故用 HNC_JSON_OUTER_LOCK_HELD=1
+# 让被桥接的 hnc_json 跳过外层锁。
+OUTER_LOCKDIR="$HNC_BASE/run/json.lock"
 BACKUP_DIR="${JSON_BACKUP_DIR:-$HNC_BASE/data/.json_backups}"
 
 usage() {
@@ -55,46 +62,79 @@ log_lock_stale() {
     >> "$HNC_BASE/logs/hnc_json.log" 2>/dev/null || true
 }
 
-reclaim_stale_lock() {
-  [ -d "$LOCKDIR" ] || return 1
-  lp="$(cat "$LOCKDIR/pid" 2>/dev/null || true)"
+# rc36 (LOCK-1): dir 参数化,供 hnc_json.lock(内层)与 json.lock(外层)共用。
+# 重要:age 强拆只在 ts 文件存在且 >0 时生效。json_set.sh 持 json.lock 时只写 pid、
+# 不写 ts(ts→0),若按 age 强拆会误拆一个"活着的 json_set.sh 锁"。所以 ts 缺失时
+# 只走 dead-pid 强拆(kill -0),绝不按 age 拆 —— 保证不破坏 json_set.sh 的互斥。
+reclaim_stale_lock_dir() {
+  _rd="$1"
+  [ -d "$_rd" ] || return 1
+  lp="$(cat "$_rd/pid" 2>/dev/null || true)"
   if [ -n "$lp" ] && ! kill -0 "$lp" 2>/dev/null; then
-    log_lock_stale "dead pid=$lp path=$LOCKDIR"
-    rm -rf "$LOCKDIR" 2>/dev/null || true
+    log_lock_stale "dead pid=$lp path=$_rd"
+    rm -rf "$_rd" 2>/dev/null || true
     return 0
   fi
   now="$(date +%s 2>/dev/null || echo 0)"
-  ts="$(cat "$LOCKDIR/ts" 2>/dev/null || echo 0)"
-  case "$now:$ts" in
-    *[!0-9:]*|0:*) : ;;
-    *)
-      age=$((now - ts))
-      if [ "$age" -ge 30 ]; then
-        log_lock_stale "age=${age}s pid=${lp:-unknown} path=$LOCKDIR"
-        rm -rf "$LOCKDIR" 2>/dev/null || true
-        return 0
-      fi
-      ;;
-  esac
+  ts="$(cat "$_rd/ts" 2>/dev/null || echo 0)"
+  case "$now" in *[!0-9]*|'') return 1 ;; esac
+  case "$ts" in *[!0-9]*|''|0) return 1 ;; esac
+  age=$((now - ts))
+  if [ "$age" -ge 30 ]; then
+    log_lock_stale "age=${age}s pid=${lp:-unknown} path=$_rd"
+    rm -rf "$_rd" 2>/dev/null || true
+    return 0
+  fi
   return 1
+}
+reclaim_stale_lock() { reclaim_stale_lock_dir "$LOCKDIR"; }
+
+# Spin-acquire one mkdir lock dir. Writes pid+ts. Returns 0 on acquire, 1 on timeout.
+_acquire_lock_dir() {
+  _ld="$1"
+  i=0
+  while ! mkdir "$_ld" 2>/dev/null; do
+    i=$((i+1))
+    reclaim_stale_lock_dir "$_ld" >/dev/null 2>&1 || true
+    if [ "$i" -gt 20 ] && [ ! -f "$_ld/pid" ]; then
+      log_lock_stale "missing pid after ${i} tries path=$_ld"
+      rm -rf "$_ld" 2>/dev/null || true
+    fi
+    [ "$i" -gt 50 ] && { echo "hnc_json: lock timeout: $_ld" >&2; return 1; }
+    sleep 0.1
+  done
+  echo $$ > "$_ld/pid" 2>/dev/null || true
+  date +%s > "$_ld/ts" 2>/dev/null || true
+  return 0
+}
+
+# rc36 (LOCK-1): tracks whether THIS process acquired the outer json.lock so the
+# trap only releases what it owns (never the inner-only / parent-held cases).
+_OUTER_HELD=0
+_release_locks() {
+  rm -rf "$LOCKDIR" 2>/dev/null || true
+  if [ "$_OUTER_HELD" = "1" ]; then
+    rm -rf "$OUTER_LOCKDIR" 2>/dev/null || true
+  fi
 }
 
 acquire_lock() {
   mkdir -p "$HNC_BASE/run" 2>/dev/null || true
-  i=0
-  while ! mkdir "$LOCKDIR" 2>/dev/null; do
-    i=$((i+1))
-    reclaim_stale_lock >/dev/null 2>&1 || true
-    if [ "$i" -gt 20 ] && [ ! -f "$LOCKDIR/pid" ]; then
-      log_lock_stale "missing pid after ${i} tries path=$LOCKDIR"
-      rm -rf "$LOCKDIR" 2>/dev/null || true
+  # 外层 json.lock:与 json_set.sh 同一把,统一序列化所有 rules.json 写者。
+  # 已被外层(json_set.sh 桥接)持有时跳过,避免非重入死锁。
+  if [ "${HNC_JSON_OUTER_LOCK_HELD:-0}" != "1" ]; then
+    _acquire_lock_dir "$OUTER_LOCKDIR" || return 1
+    _OUTER_HELD=1
+  fi
+  # 内层 hnc_json.lock:保留(向后兼容,且 hnc_json 实例之间二次互斥)。
+  if ! _acquire_lock_dir "$LOCKDIR"; then
+    if [ "$_OUTER_HELD" = "1" ]; then
+      rm -rf "$OUTER_LOCKDIR" 2>/dev/null || true
+      _OUTER_HELD=0
     fi
-    [ "$i" -gt 50 ] && { echo "hnc_json: lock timeout: $LOCKDIR" >&2; return 1; }
-    sleep 0.1
-  done
-  echo $$ > "$LOCKDIR/pid" 2>/dev/null || true
-  date +%s > "$LOCKDIR/ts" 2>/dev/null || true
-  trap 'rm -rf "$LOCKDIR" 2>/dev/null || true' EXIT INT TERM
+    return 1
+  fi
+  trap '_release_locks' EXIT INT TERM
 }
 
 hnc_json_c_machine() {

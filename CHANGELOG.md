@@ -18,6 +18,15 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc36, 2026-05-25)
+- **第三方审查报告(基于 rc32)逐条核查后的真问题修复 · A 组(功能/正确性)**。用户把项目发给多个 AI 审查;我对照 rc35 源码逐条验证,本组修确认为真且影响正确性的项(误报/已修/by-design 见 CHANGELOG 末尾说明,不动代码):
+  - **GS-1 全局整形 init_tc 一致性缺口**(`bin/tc_manager.sh`):`init_tc` 用 `DEFAULT_RATE` 建 `1:1`,而全局整形 ceil 此前只在 `restore_rules` 末段恢复。ROM 把根 qdisc 换成 mq/noqueue → `ensure_egress_htb_ready`→`init_tc` 重建 → 1:1 退回全速,UI 仍显示开启,直到下次 restore 才纠回。修:抽 `apply_global_shaper_if_enabled <iface>`,在 `init_tc` 建好 HTB 树后 + `restore_rules` 共用同一逻辑;树重建后立刻把 1:1 ceil 压回 WAN 带宽。`set_global_shaper` 内的 `ensure_egress_htb_ready` 在树已就绪时直接返回,不会递归回 init_tc(已验证)。
+  - **LOCK-1 两套 JSON 锁并发写同一 rules.json**(`bin/hnc_json` + `bin/json_set.sh`):`hnc_json` 用 `run/hnc_json.lock`,`json_set.sh` 用 `run/json.lock`;直接调 hnc_json 的写者(`json_set_batch.sh`)与走 json_set.sh 的写者并发时互不见锁,且 json_set.sh 内部 `top`(经 hnc_json)与 `device`(legacy)就用了不同锁。**报告建议的"1 行改 LOCKDIR 对齐"会死锁**(json_set.sh 持 json.lock 再桥接 hnc_json,非重入 mkdir 锁自锁)。修:`hnc_json` 写路径现在也先抢同一把 `json.lock`(外层)+ 保留 `hnc_json.lock`(内层);新增 `HNC_JSON_OUTER_LOCK_HELD=1` env,json_set.sh 桥接前导出,被桥接的 hnc_json 跳过外层锁避免死锁;`reclaim_stale_lock_dir` 加 `ts>0` 守卫,避免误拆 json_set.sh 那把"只写 pid 不写 ts"的活锁。并发实测:交错 15×`json_set.sh top` + 15×`json_set_batch device` 12s 全完成、**零丢写、终态合法、无死锁、无残留锁**。
+  - **TC-1 init_tc 失败仍返回 0**(`bin/tc_manager.sh`):root htb add 3 次重试彻底失败后只装 ingress mirred 却 `return 0`,误导调用方。修:ingress mirred 装好后 `return 1` 如实上报(`ensure_egress_htb_ready` 的后置树检查本就能纠正,这里让 CLI/调用方拿到准确状态)。
+  - **GS-2 global_shaper_set 写入不检 rc**(`daemon/hnc_httpd/action_global_shaper.go`):on 路径前两次 `json_set.sh top`(down/up)与 off 路径写 enabled 都忽略了 rc → 半状态。修:三次写全检 rc;down/up 任一失败显式落 `enabled=false` 防半状态后返回 error;off 写 enabled 检 rc。
+  - 含 `hnc_httpd`(Go)改动,**需 CI 重编**。`sh -n`(tc_manager/hnc_json/json_set)+ `go vet` + `android/arm64` 交叉编译 + 并发冒烟全过。版本 rc35 → rc36(570136)。
+  - **审查报告中的误报/已修/by-design(不改)**:M1 dpid_supervisor 防抖确为 bug 但该 Go 二进制是"最后兜底"启动器、CI 不构建/git 不跟踪 → 实际不发布不运行(暂不动,留待 C/D 组顺手);"dpid/httpd 未 strip"误报(CI 已 `-s -w`,只 `bin/hnc_watchdog` 真未 strip,B 组处理);"json_set_batch 没人用"误报(`apply_device_rule.sh` 在用);"global_shaper_off 残留 down/up"为 by-design(WebUI 预填上次值,`enabled=false` 已阻止 restore);"shell 注入 / auth_required=false 放行 / loopback 任意 app 可写 / WebUI 假数据"均已 fail-closed 或前序版本已修。
+
 ### Added (v5.7.0-rc35, 2026-05-25)
 - **VPN 飞轮排除:可视化(卡片徽标)+ 可管理(WebUI)+ 单元测试**(用户选定的三项打包)。承 rc33/34 的引擎,补齐 UX 与测试:
   - **① 应用卡片标注**(`src/dpid/output/state.go`·`self_attrib.go`·`candidate.go` + `webroot/index.html`):`SelfApp` 新增 `flywheel_excluded`,在 Snapshot 里按三种来源置位——内置清单 / 用户清单(`flywheelExcludePkgs`)/ 导管自动识别(新增 `conduitUIDs`,由 expander 每 tick `SetConduitUIDs` 发布)。「应用」页对被排除的应用显示「🛡️ VPN/代理 · 不学习规则」徽标;未排除且已知包名的卡片上有「排除 · 不学习此应用规则」按钮,一键加入。

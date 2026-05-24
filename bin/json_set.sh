@@ -295,6 +295,10 @@ json_token_revoke_all_hnc_json() {
 case "$CMD" in
     top|device|device_remove|bl_add|bl_del|reset|cfg_set|name_set|name_del|tpl_set|tpl_del|token_revoke|token_revoke_all|token_prune)
         acquire_lock || { echo "json_set: lock timeout (5s)" >&2; exit 2; }
+        # rc36 (LOCK-1): 我们已持有 json.lock。下面 *_hnc_json 桥接会调 hnc_json,而
+        # hnc_json 现在也会抢同一把 json.lock(统一两套锁)。导出该标志让被桥接的
+        # hnc_json 跳过外层锁,避免非重入 mkdir 锁自锁死锁。
+        export HNC_JSON_OUTER_LOCK_HELD=1
         ;;
 esac
 

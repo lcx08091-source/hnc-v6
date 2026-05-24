@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc35
-versionCode=570135
+version=v5.7.0-rc36
+versionCode=570136
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc35 · VPN 飞轮排除可视化 + 可管理 + 加单测。① 应用卡片标注:被排除的 VPN/代理应用现在显示"🛡️ VPN/代理·不学习规则"徽标(dpid SelfApp 新增 flywheel_excluded,含内置清单/用户清单/导管自动识别三种来源);未排除的应用卡片上有"排除"按钮一键加入。② WebUI 管理:设置页新增"飞轮排除名单"卡片,可看/增/删你自定义的排除包名(走新 action flywheel_exclude_set 写 etc/flywheel_exclude.json,/api/config 暴露用户清单),不用再手编 JSON。③ 补 Go 单元测试:覆盖排除清单加载(内置常驻/用户合并/坏文件降级)、UID/包名排除判定、构造器播种、候选分级 classifyTier。含 dpid + hnc_httpd(Go)改动,需 CI 重编。go vet + go test + android/arm64 交叉编译 + node --check 全通过。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc36 · 第三方审查报告(rc32)真问题修复·A 组(功能/正确性)。① GS-1 全局整形 init_tc 一致性:ROM 换根 qdisc 触发 HTB 树重建后,1:1 ceil 不再被静默退回全速 —— 抽 apply_global_shaper_if_enabled,init_tc 末尾 + restore 共用,树重建后自动把 ceil 压回 WAN 带宽。② LOCK-1 两套 JSON 锁:hnc_json 现在也抢 json_set.sh 的 json.lock(env-guard 防桥接嵌套死锁),所有 rules.json 写者统一串行;并发 30 写实测零丢写、无死锁、终态合法。③ TC-1 init_tc root htb 彻底失败改返回 1(此前静默 0 误导调用方)。④ GS-2 global_shaper_set 三次写全检 rc、失败回滚 enabled。含 hnc_httpd(Go)改动需 CI 重编。sh -n + go vet + 交叉编译 + 并发冒烟全过。详见 CHANGELOG.md。① 应用卡片标注:被排除的 VPN/代理应用现在显示"🛡️ VPN/代理·不学习规则"徽标(dpid SelfApp 新增 flywheel_excluded,含内置清单/用户清单/导管自动识别三种来源);未排除的应用卡片上有"排除"按钮一键加入。② WebUI 管理:设置页新增"飞轮排除名单"卡片,可看/增/删你自定义的排除包名(走新 action flywheel_exclude_set 写 etc/flywheel_exclude.json,/api/config 暴露用户清单),不用再手编 JSON。③ 补 Go 单元测试:覆盖排除清单加载(内置常驻/用户合并/坏文件降级)、UID/包名排除判定、构造器播种、候选分级 classifyTier。含 dpid + hnc_httpd(Go)改动,需 CI 重编。go vet + go test + android/arm64 交叉编译 + node --check 全通过。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485
