@@ -63,6 +63,12 @@ const (
 	// each tick (like the blocklist) so clicks take effect within 60s.
 	candidateDecisionsFile = "/data/local/hnc/etc/candidate_decisions.json"
 
+	// candidateAccumFile persists the accumulator across dpid restarts. dpid is
+	// restarted on every hotspot-iface change (2-3x per toggle), which would
+	// otherwise reset the per-apex window/uid progress so the flywheel could
+	// never reach the promotion window threshold on hotspot-toggling devices.
+	candidateAccumFile = "/data/local/hnc/run/candidate_accum.json"
+
 	// candSharedUIDThreshold: an apex contacted by >= this many distinct uids
 	// is treated as shared infrastructure (never attributed to one app).
 	candSharedUIDThreshold = 3
@@ -289,6 +295,11 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 			invalidateRuleCache()
 		}
 	}
+
+	// Persist the accumulator so window/uid progress survives dpid restarts
+	// (hotspot toggles restart dpid 2-3x; without this the flywheel never
+	// reaches the promotion window threshold on such devices).
+	saveCandidateAccum(acc)
 }
 
 // buildPromotedRule materializes a brand-new-apex rule attributed to the
@@ -366,6 +377,61 @@ func writePromotedRules(promoted map[string]autoExpandedRule) error {
 type candidateDecisionsData struct {
 	Promote []string `json:"promote"`
 	Comment string   `json:"_comment,omitempty"`
+}
+
+// candidateAccumData is the on-disk shape of candidate_accum.json.
+type candidateAccumData struct {
+	SavedAt int64                     `json:"saved_at"`
+	ByApex  map[string]*apexCandidate `json:"by_apex"`
+}
+
+// saveCandidateAccum atomically persists the accumulator so it survives dpid
+// restarts. Best-effort: any error is silently ignored (we just lose this
+// snapshot, next tick retries).
+func saveCandidateAccum(acc *candidateAccumulator) {
+	data := candidateAccumData{SavedAt: time.Now().Unix(), ByApex: acc.byApex}
+	body, err := json.Marshal(&data)
+	if err != nil {
+		return
+	}
+	tmp := candidateAccumFile + ".tmp"
+	if err := os.WriteFile(tmp, body, 0o644); err != nil {
+		return
+	}
+	_ = os.Rename(tmp, candidateAccumFile)
+}
+
+// loadCandidateAccum repopulates acc.byApex from the on-disk snapshot at
+// startup. Missing/malformed = empty (best-effort). Stale entries (older than
+// candMaxAgeSec) are dropped so a long downtime doesn't resurrect dead apexes.
+func loadCandidateAccum(acc *candidateAccumulator) int {
+	body, err := os.ReadFile(candidateAccumFile)
+	if err != nil {
+		return 0
+	}
+	var data candidateAccumData
+	if err := json.Unmarshal(body, &data); err != nil {
+		return 0
+	}
+	now := time.Now().Unix()
+	n := 0
+	for apex, c := range data.ByApex {
+		if c == nil || apex == "" {
+			continue
+		}
+		if c.UIDs == nil {
+			c.UIDs = map[int]int{}
+		}
+		if now-c.LastSeen > candMaxAgeSec {
+			continue
+		}
+		if len(acc.byApex) >= candMaxApex {
+			break
+		}
+		acc.byApex[apex] = c
+		n++
+	}
+	return n
 }
 
 // loadCandidateDecisions reads the user-approved apex list. Missing or

@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc8 -->
+<div class="cl-section">
+  <div class="cl-title">📌 v5.7.0-rc8: 未匹配SNI上移 + 飞轮进度不再被切热点清零 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>「未匹配的 SNI」块移到上方</b>: 之前在"我的应用"整列 app 最底下,要划很久;现在挪到 app 列表上面,一眼可见。</li>
+    <li><b>修: 切热点后自动识别进度清零</b>: 切换热点会让后台 dpid 重启好几次,把飞轮的累积进度(候选要攒够 3 个时间窗才会自动归类)清空——在经常开关热点的设备上等于永远学不成。现在累积进度会落盘、重启后接着算,飞轮真正能推进。</li>
+    <li>说明: 切热点瞬间 SNI/应用数字会短暂归零再几秒内自动恢复(dpid 重启窗口),属正常;上一版已让 dpid 不再依赖热点常驻运行。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc7 -->
 <div class="cl-section">
   <div class="cl-title">🛠️ v5.7.0-rc7: 修"本机追踪必须开热点才生效" <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

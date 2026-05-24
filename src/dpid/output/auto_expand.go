@@ -180,24 +180,24 @@ func loadBlocklist() (map[string]struct{}, error) {
 // underscore-prefixed fields for human/provenance use (silently ignored
 // by the loader because they're not in externalRule's tag set).
 type autoExpandedRule struct {
-	ID           string                 `json:"id"`
-	Name         string                 `json:"name,omitempty"`
-	App          string                 `json:"app,omitempty"`
-	Category     string                 `json:"category"`
-	Confidence   string                 `json:"confidence,omitempty"`
-	Suffixes     []string               `json:"suffixes"`
-	Source       string                 `json:"_source"`
-	Apex         string                 `json:"_apex"`
-	ParentRuleID string                 `json:"_parent_rule_id"`
-	AddedAt      int64                  `json:"_added_at"`
-	Evidence     autoExpandedEvidence   `json:"_evidence"`
+	ID           string               `json:"id"`
+	Name         string               `json:"name,omitempty"`
+	App          string               `json:"app,omitempty"`
+	Category     string               `json:"category"`
+	Confidence   string               `json:"confidence,omitempty"`
+	Suffixes     []string             `json:"suffixes"`
+	Source       string               `json:"_source"`
+	Apex         string               `json:"_apex"`
+	ParentRuleID string               `json:"_parent_rule_id"`
+	AddedAt      int64                `json:"_added_at"`
+	Evidence     autoExpandedEvidence `json:"_evidence"`
 }
 
 type autoExpandedEvidence struct {
-	UID                       int    `json:"uid"`
-	UIDPkg                    string `json:"uid_pkg,omitempty"`
-	ParentHitsAtTimeOfExpand  int    `json:"parent_hits_at_time_of_expand"`
-	ObservedHostname          string `json:"observed_hostname"`
+	UID                      int    `json:"uid"`
+	UIDPkg                   string `json:"uid_pkg,omitempty"`
+	ParentHitsAtTimeOfExpand int    `json:"parent_hits_at_time_of_expand"`
+	ObservedHostname         string `json:"observed_hostname"`
 }
 
 // autoExpandedFile is the top-level JSON shape, matching dpi_rules.d/*.json.
@@ -249,6 +249,9 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 	// Runs every tick regardless of the auto_expand flag (shadow calibration);
 	// only writes rules when auto_promote.enabled exists.
 	acc := newCandidateAccumulator()
+	if n := loadCandidateAccum(acc); n > 0 {
+		log.Printf("auto-promote: restored %d candidate apexes from %s (survives hotspot-toggle restarts)", n, candidateAccumFile)
+	}
 	promoted := map[string]autoExpandedRule{}
 	if existing, err := loadExistingPromoted(); err == nil {
 		promoted = existing

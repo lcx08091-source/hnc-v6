@@ -3081,18 +3081,17 @@ body.kb-open .container {
       <div class="iface-row" id="apps-iface-row">
         <span style="color:var(--text-3);font-size:12px">加载接口...</span>
       </div>
-      <div class="app-list" id="apps-list">
-        <div style="padding:40px 20px;text-align:center;color:var(--text-3)">加载中...</div>
+
+      <!-- v5.7.0-rc8: unmatched-SNI block moved ABOVE the app list so it's
+           visible without scrolling past the whole (long) app list. Render
+           targets #apps-unmatched-card by id, so this reorder needs no JS change. -->
+      <div class="sec-title" style="margin-top:6px">未匹配的 SNI <span class="dpi-flow-hint">候选自动扩展队列</span></div>
+      <div class="glass-elevated" id="apps-unmatched-card" style="padding:14px 16px;min-height:50px;margin-bottom:14px">
+        <div style="color:var(--text-3);font-size:12px">加载中...</div>
       </div>
 
-      <!-- v5.6.0-rc7: unmatched SNI block. Surfaces the auto-expand
-           candidate queue so users can see what's "interesting but
-           unclassified". When queue is empty (the normal case given
-           current rule coverage), shows a neutral "ruleset covers it"
-           message rather than looking broken. -->
-      <div class="sec-title" style="margin-top:18px">未匹配的 SNI <span class="dpi-flow-hint">候选自动扩展队列</span></div>
-      <div class="glass-elevated" id="apps-unmatched-card" style="padding:14px 16px;min-height:50px">
-        <div style="color:var(--text-3);font-size:12px">加载中...</div>
+      <div class="app-list" id="apps-list">
+        <div style="padding:40px 20px;text-align:center;color:var(--text-3)">加载中...</div>
       </div>
     </div>
 

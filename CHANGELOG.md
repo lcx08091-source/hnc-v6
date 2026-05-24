@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc8, 2026-05-24)
+- **「未匹配的 SNI」块上移**(`webroot/index.html`,issue #1)——从 应用→我的应用 的整列 app **之后**移到 app 列表**之前**(接口行下方),不用划过几十个 app 才看到。纯 DOM 顺序调整,`appsRenderUnmatched` 按 id 渲染不受影响。
+
+### Fixed (v5.7.0-rc8, 2026-05-24)
+- **切热点后飞轮进度清零**(`src/dpid/output/candidate.go` + `auto_expand.go`,issue #2 核心)——切热点会让 supervisor 重启 dpid 2-3 次,而候选累积器是纯内存、每次重启重置;候选要 ≥3 个窗口才晋级,所以**在会切热点的设备上飞轮永远晋级不了**(比"显示清空"更严重的功能性 bug)。
+  - 新增 `saveCandidateAccum`/`loadCandidateAccum`:`processCandidates` 每 tick 把 `acc.byApex` 原子写到 `run/candidate_accum.json`;`RunAutoExpander` 启动读回(缺失/损坏=空;>24h 陈旧项丢弃)。窗口数 / uid 集 / `SharedLearned` 跨重启累加 → 飞轮真正能推进到晋级。
+  - 显示层的"切热点后 SNI/app 秒级空白"已由 rc7(dpid 保持运行)兜底,几秒自动重建;故本轮不做 dpi_state 回种(Option B)与进程内 rebind(Option C),留待真机验证后按需再加。版本 rc7 → rc8(versionCode 570108)。
+
 ### Fixed (v5.7.0-rc7, 2026-05-24)
 - **dpid 只在热点开着时才运行(rc6"未上报 self 块"的真正根因)** — 读码 + 用户实测定位:
   - dpid 由三个 launcher 之一拉起,优先级 **C launcher(`hnc_launcher`)→ shell guard(`hnc_dpid_guard.sh`)→ Go supervisor(`hnc_dpid_supervisor`)**。
