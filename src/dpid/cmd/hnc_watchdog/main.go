@@ -203,6 +203,23 @@ type actionResult struct {
 	err      error
 }
 
+// shellPath returns the shell interpreter to run business-logic scripts with.
+// Prefers /system/bin/sh, but falls back to the /data mksh copy that
+// service.sh provisions (/data is never unmounted) when SukiSU has transiently
+// unmounted /system/bin at runtime. Evaluated per call (not cached) because
+// /system/bin can come and go while we run. Scripts are mksh dialect, so the
+// fallback must be the mksh copy at binDir/sh, not a busybox ash.
+func shellPath() string {
+	const sysSh = "/system/bin/sh"
+	if _, err := os.Stat(sysSh); err == nil {
+		return sysSh
+	}
+	if fb := binDir + "/sh"; func() bool { _, e := os.Stat(fb); return e == nil }() {
+		return fb
+	}
+	return sysSh // last resort; let exec surface the real error
+}
+
 // runAction forks watchdog.sh with the action subcommand. Returns the
 // subcommand's exit code, captured stdout, and any spawn-level error.
 //
@@ -214,7 +231,7 @@ func runAction(name string, args ...string) actionResult {
 	defer cancel()
 
 	cmdArgs := append([]string{wdShell, "action", name}, args...)
-	cmd := exec.CommandContext(ctx, "/system/bin/sh", cmdArgs...)
+	cmd := exec.CommandContext(ctx, shellPath(), cmdArgs...)
 	cmd.Env = os.Environ()
 	// Isolate from our own pgrp so action kills don't propagate to us.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -405,7 +422,7 @@ func ensureNDPIRunning() {
 			return
 		}
 		logf("nDPI: launching ndpi_continuous.sh")
-		cmd := exec.Command("/system/bin/sh", ndpiScriptPath, "start")
+		cmd := exec.Command(shellPath(), ndpiScriptPath, "start")
 		cmd.Env = os.Environ()
 		out, _ := os.OpenFile(logDir+"/ndpi_continuous.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 		if out != nil {
@@ -436,7 +453,7 @@ func ensureNDPIRunning() {
 
 	if !enabled && alive {
 		logf("nDPI: config disabled, stopping ndpi_continuous.sh")
-		cmd := exec.Command("/system/bin/sh", ndpiScriptPath, "stop")
+		cmd := exec.Command(shellPath(), ndpiScriptPath, "stop")
 		cmd.Env = os.Environ()
 		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 		_ = cmd.Run()
@@ -850,7 +867,7 @@ func handleActive(activeIface string, throttle *restoreThrottle, recoveryRounds 
 
 // runV6Sync forks bin/v6_sync.sh — independent of watchdog.sh, so just direct exec.
 func runV6Sync() {
-	cmd := exec.Command("/system/bin/sh", binDir+"/v6_sync.sh", "sync")
+	cmd := exec.Command(shellPath(), binDir+"/v6_sync.sh", "sync")
 	cmd.Env = os.Environ()
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -858,7 +875,7 @@ func runV6Sync() {
 }
 
 func runStatsSample() {
-	cmd := exec.Command("/system/bin/sh", binDir+"/stats_sample.sh")
+	cmd := exec.Command(shellPath(), binDir+"/stats_sample.sh")
 	cmd.Env = os.Environ()
 	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -950,7 +967,7 @@ func appLimitApplyLoop() {
 	defer tk.Stop()
 	for {
 		if _, err := os.Stat(script); err == nil {
-			cmd := exec.Command("/system/bin/sh", script)
+			cmd := exec.Command(shellPath(), script)
 			cmd.Env = os.Environ()
 			cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}

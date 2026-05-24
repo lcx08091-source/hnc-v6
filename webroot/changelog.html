@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc17 -->
+<div class="cl-section">
+  <div class="cl-title">🧹 v5.7.0-rc17: 给看门狗也加上 /data 兜底(收尾) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>修的是什么</b>: 看门狗最重要的活儿(保证抓包程序一直活着)本来就不受系统目录被卸影响;但它顺带做的杂事(定时存流量统计、同步等)之前写死用系统的 sh,系统目录被卸的那几秒会做不了。</li>
+    <li><b>怎么修</b>: 给它也加上"系统的没了就用 /data 里那份备用 sh"的兜底,杂事也不会再被中断。</li>
+    <li>说明: 这是收尾。检查确认其余后台程序(兜底守护、抓包核心)本来就没这个毛病。这块需要重新编译一次,刷新版本即可。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc16 -->
 <div class="cl-section">
   <div class="cl-title">🩹 v5.7.0-rc16: 补上守护脚本最后一处硬编码 /system/bin(真机数据定位) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

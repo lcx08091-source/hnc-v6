@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc17, 2026-05-24)
+- **收尾根因 A 的最后一处 `/system/bin` 依赖:`hnc_watchdog`(Go 主守护)的硬编码 `/system/bin/sh`**。承 rc16 把 supervision 栈扫了一遍:
+  - `dpid_supervisor`(Go 兜底 launcher)**本就完全免疫**——`realBin` 是绝对 `/data` 路径、netlink 走直接 syscall(不 shell out `ip`)、计时用 Go timer、只 `exec` 绝对路径的 dpid 二进制。无需改。
+  - `dpid` 核心抓包**无任何 shell-out**;它的 `pm`/`dumpsys`/`cmd`/`app_process` 都是 Android 框架工具、**没有 toybox/busybox 替代**(PATH 兜底救不了),且都是 best-effort + 错误处理、优雅降级,不影响抓包。无需也无法改。
+  - `hnc_watchdog`:**核心保活循环(让 launcher/dpid 不死)是纯 Go、免疫**(这也是真机上系统没崩的原因);但它的业务动作(`runAction` → `watchdog.sh action`,每周期)和定时任务(`v6_sync.sh`/`stats_sample.sh`/ndpi 启停/脚本运行)用的是**硬编码 `/system/bin/sh` 共 6 处**。`/system/bin` 被卸的那几秒,这些杂活会失败、跳过该周期,过会儿自恢复——非致命,但确属残留 `/system/bin` 依赖。
+  - **修复**(`src/dpid/cmd/hnc_watchdog/main.go`):新增 `shellPath()` 帮手——有 `/system/bin/sh` 就用,没有就退到 `binDir + "/sh"`(rc13 预置的 mksh 副本;脚本是 mksh 方言,兜底必须 mksh、不能 busybox ash);**逐调用求值(不缓存)**,因为 `/system/bin` 会运行期来回变。六处 `exec.Command("/system/bin/sh", …)` 全改走 `shellPath()`。
+  - ⚠ **Go 改动,需 CI 重编 `hnc_watchdog` 二进制**。`go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` 均通过。至此根因 A 在模块层可处理的部分全部做满:rc12(C launcher 自愈)+ rc13/rc15(`/data` 兜底工具)+ rc16(shell guard 去硬编码)+ rc17(Go watchdog 加 sh 兜底)。版本 rc16 → rc17(570117)。
+
 ### Fixed (v5.7.0-rc16, 2026-05-24)
 - **补上 fallback shell guard 残留的硬编码 `/system/bin/*` 绝对路径(rc13 标注"留作后续"的那处)—— 真机数据定位后确认是最后一块短板**。诊断过程(真机 `mount` / `mountinfo` / `ps etime` / 模块清单):
   - 设备已在 **Magic Mount**(`magic_mount_rs` 元模块,`umount = false`)——不在 OverlayFS;且是 **system-as-root**(`/system/bin` 属根挂载、**不是可被单独 `umount` 的挂载点**),所以"切 Magic Mount / 调 SuSFS try_umount"对这台都不对症(改 SuSFS 纯属冒险削弱隐藏)。
