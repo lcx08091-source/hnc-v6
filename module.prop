@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc28
-versionCode=570128
+version=v5.7.0-rc29
+versionCode=570129
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc28 · 给"开机自动开热点"补兼容性 + 自动降级(用户问到)。启动按"1a start-softap -b any → 1b 不带 -b 的旧式(老 Android/不认 -b 的 ROM 自动降级)→ 1c 等 5s 重试 → 2 cmd tethering → 3 svc wifi hotspot"逐级兜底,直到某一种起来或全失败。NAT 做成方法感知:本地热点(softap_local,系统不共享)才自建 ip_forward+MASQUERADE+FORWARD;走系统原生共享(method 2/3,自带 NAT)则跳过自建避免冲突。出口接口用 ip route get 自适应(VPN tun0 / rmnet / wifi 自动切),NAT 接口轮询等就绪(rc27)。全程 best-effort:起不来如实记日志 + UI 提示改从系统设置开。rc24 异步不卡死起步。纯 shell,不用重编。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc29 · 修"未匹配的 SNI"卡误导(用户发现飞轮的陌生主域名问题)。后端其实有两条轨:走法1 unmatched_snis_pending(陌生子域)、走法2 candidate_pending(全新主域名 apex,真机已抓到 claude.com/idouyinvod.com/proxyinfo.net 并晋级)。但 appsRenderUnmatched 那张卡只看走法1,子域为 0 就喊"规则集已覆盖所有抓到的 SNI·没有陌生子域",完全无视走法2 的主域候选 → 用户误以为主域名没被识别。本版:子域队列空但有走法2 主域候选时,卡片如实显示"还有 N 个陌生主域名在候选区(其中 M 个已达 HIGH 可晋级)·见下方自动识别候选",不再谎称全覆盖;真·全空时文案也补上"也没有陌生主域候选"。纯前端,不用重编。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

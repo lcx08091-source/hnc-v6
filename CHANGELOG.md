@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc29, 2026-05-25)
+- **修"未匹配的 SNI"卡误导 —— 它只讲陌生子域、无视陌生主域候选**(`webroot/index.html` `appsRenderUnmatched`,用户提出"飞轮有没有把陌生主域名加进去")。后端是**两条独立轨**:
+  - 走法1 `unmatched_snis_pending` = 没匹配规则的**子域**(完整 SNI)→ auto-expand 队列。
+  - 走法2 `candidate_pending` = **全新主域名(apex)** 累积器 → "自动识别候选"区(`appsRenderCandidates`,可一键 promote / 拒绝)。真机已证明在工作:`candidate_accum.json` 抓到 `claude.com`/`idouyinvod.com`/`proxyinfo.net`,`_auto_promoted.json` 已晋级 claude.com→Claude、抖音。
+  - **bug**:`appsRenderUnmatched` 只看走法1,当子域队列为 0 时直接显示"✓ 规则集已覆盖所有抓到的 SNI · 没有陌生子域",**完全不提走法2 的主域候选** → 即使有 3 个全新主域在排队,也喊"全覆盖" → 用户误以为主域名没被识别。
+  - **修复**:子域队列空、但 `candidate_pending > 0` 时,卡片改显示"子域已覆盖;另有 N 个陌生主域名在候选区(其中 M 个已达 HIGH 可晋级)· 见下方'自动识别候选'",指向走法2 审批区;真·两轨全空时文案补上"也没有陌生主域候选(走法2)"。
+  - 说明(非本版改):走法2 自动晋级需 ≥3 窗口 + ≥6 命中(`candPromoteMinWindows/Hits`);真机候选多为 Windows=1/hits=1(app 只用过一两次),所以"已晋级 2"目前是手动 promote 的,自动晋级要该 app 多用几次累积到阈值才会触发——这是保守设计,不是 bug。纯前端,`node --check` 通过,不用重编。版本 rc28 → rc29(570129)。
+
 ### Changed (v5.7.0-rc28, 2026-05-25)
 - **「开机自动开热点」补齐兼容性 + 自动降级**(`bin/hotspot_autostart.sh`,应用户提问)。
   - **启动逐级降级**:`1a` `start-softap -b any`(现代/ColorOS 主力,`-b any` 避开 band error 18)→ `1b` **不带 `-b` 的旧式 start-softap**(老 Android / 不认 `-b` 的 ROM 自动降级)→ `1c` 等 5s 重试一轮(WifiService 刚就绪首次可能失败)→ `2` `cmd tethering tether wifi` → `3` `svc wifi hotspot enable`。逐个尝试直到成功或全部失败(失败 `exit 1` + 记日志)。

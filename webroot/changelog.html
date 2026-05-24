@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc29 -->
+<div class="cl-section">
+  <div class="cl-title">🔎 v5.7.0-rc29: 修"未匹配 SNI"卡误导(陌生主域名没显示) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>问题</b>: "未匹配的 SNI"那张卡只盯"陌生子域",没有就喊"全覆盖",但其实还有另一条轨在抓"全新的主域名"(比如 claude.com、抖音的域名),卡上完全没提 → 让人以为主域名没被识别。</li>
+    <li><b>真相</b>: 飞轮确实在抓陌生主域名,而且能在"自动识别候选"区看到、一键确认/拒绝(你之前手动确认 Claude 走的就是这条)。</li>
+    <li><b>修了什么</b>: 子域没问题但有陌生主域候选时,卡片如实显示"还有 N 个陌生主域名在候选区,见下方自动识别候选",不再假装全覆盖。</li>
+    <li>补充: 主域名"自动"晋级需要那个 app 多用几次(攒够窗口和命中次数)才会触发;用得少的就先手动一键确认。纯界面改动,不用重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc28 -->
 <div class="cl-section">
   <div class="cl-title">🧩 v5.7.0-rc28: 开机自动开热点 — 兼容性 + 自动降级 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

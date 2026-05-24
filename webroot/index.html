@@ -12409,6 +12409,27 @@ body.kb-open .container {
     var samples = self.unmatched_sni_samples || [];
 
     if (pending === 0) {
+      // rc29: 这张卡只管"走法1 子域"(unmatched_snis_pending)。但还有"走法2 陌生
+      // 主域名"(candidate_pending)是另一条轨——别在有主域候选时谎称"全覆盖",
+      // 否则用户以为主域名没被识别。如实指向下方"自动识别候选"区。
+      var candPending = (self.candidate_pending || 0);
+      var candHigh = (self.candidate_high || 0);
+      if (candPending > 0) {
+        card.innerHTML =
+          '<div style="display:flex;align-items:center;gap:10px">' +
+            '<div style="width:32px;height:32px;border-radius:8px;background:rgba(255,159,10,.12);' +
+                 'display:flex;align-items:center;justify-content:center;color:var(--sys-orange);font-size:18px;font-weight:700">◎</div>' +
+            '<div>' +
+              '<div style="font-size:13px;font-weight:600;color:var(--text-1)">子域已覆盖;另有 ' + candPending + ' 个陌生主域名在候选区</div>' +
+              '<div style="font-size:11.5px;color:var(--text-3);margin-top:2px">' +
+                '走法1(子域 auto-expand)无待办;走法2(全新主域名)还有 ' + candPending + ' 个候选' +
+                (candHigh > 0 ? '(其中 ' + candHigh + ' 个已达 HIGH 可晋级)' : '') +
+                ' —— 见下方"自动识别候选",可一键 promote 或拒绝。' +
+              '</div>' +
+            '</div>' +
+          '</div>';
+        return;
+      }
       card.innerHTML =
         '<div style="display:flex;align-items:center;gap:10px">' +
           '<div style="width:32px;height:32px;border-radius:8px;background:rgba(48,209,88,.10);' +
@@ -12416,7 +12437,7 @@ body.kb-open .container {
           '<div>' +
             '<div style="font-size:13px;font-weight:600;color:var(--text-1)">规则集已覆盖所有抓到的 SNI</div>' +
             '<div style="font-size:11.5px;color:var(--text-3);margin-top:2px">' +
-              '没有陌生子域进入 auto-expand 候选队列。这是符合预期的状态, 不是 bug。' +
+              '没有陌生子域(走法1)、也没有陌生主域候选(走法2)进入队列。这是符合预期的状态, 不是 bug。' +
             '</div>' +
           '</div>' +
         '</div>';
