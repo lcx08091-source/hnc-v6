@@ -9042,7 +9042,7 @@ body.kb-open .container {
               <div class="btn-row">
                 <button class="btn ${d.sqm ? 'btn-primary' : 'btn-ghost'}" data-action="toggle-sqm"${(downlinkDisabled || ((Number(d.delay)||0)>0 || (Number(d.jitter)||0)>0 || (Number(d.loss)||0)>0)) ? ' disabled aria-disabled="true"' : ''}>${d.sqm ? '低延迟 · 已开启' : '开启低延迟'}</button>
               </div>
-              ${downlinkDisabled ? '<div class="input-hint warn">当前内核/TC 不支持 HTB，低延迟不可用。</div>' : (((Number(d.delay)||0)>0 || (Number(d.jitter)||0)>0 || (Number(d.loss)||0)>0) ? '<div class="input-hint">已注入延迟时不能同时开低延迟(两者互斥);清除延迟后可开。</div>' : '<div class="input-hint">给该设备智能队列(CAKE/fq_codel),跑满时更跟手。给它设个限速效果最佳。</div>')}
+              ${downlinkDisabled ? '<div class="input-hint warn">当前内核/TC 不支持 HTB，低延迟不可用。</div>' : (((Number(d.delay)||0)>0 || (Number(d.jitter)||0)>0 || (Number(d.loss)||0)>0) ? '<div class="input-hint">已注入延迟时不能同时开低延迟(两者互斥);清除延迟后可开。</div>' : ((capBool('tc_cake') === false && capBool('tc_fq_codel') === false) ? '<div class="input-hint">本内核无 CAKE/fq_codel,低延迟将用 sfq 兜底(效果略弱)。配合限速效果最佳。</div>' : '<div class="input-hint">给该设备智能队列(CAKE/fq_codel),跑满时更跟手。给它设个限速效果最佳。</div>'))}
             </div>
             <div class="ctrl-section">
               <div class="ctrl-label"><span class="ctrl-label-dot danger"></span>访问控制</div>
@@ -11183,9 +11183,24 @@ body.kb-open .container {
       return;
     }
     if (e.target.closest('[data-action="hs-start"]')) {
+      // rc24: 后端改为异步触发(detached),立即返回; 这里轮询 /api/live 看热点是否真起来。
       hotspotStartNowBackend().then(() => {
-        toast('正在启动热点…', 'warn');
-      }).catch(e => toast('启动失败: ' + e.message, 'err'));
+        toast('正在启动热点,请稍候…', 'warn');
+        let tries = 0;
+        const poll = () => {
+          tries++;
+          apiGet('/api/live').then(live => {
+            if (live && live.hotspot_active) {
+              toast('热点已启动', 'ok');
+              if (typeof requestForceRefresh === 'function') requestForceRefresh().catch(() => {});
+              return;
+            }
+            if (tries >= 12) { toast('热点 ~24s 内未就绪;ColorOS 可能拦了启动命令,请看 logs/hotspot.log', 'warn'); return; }
+            setTimeout(poll, 2000);
+          }).catch(() => { if (tries < 12) setTimeout(poll, 2000); });
+        };
+        setTimeout(poll, 2000);
+      }).catch(e => toast('启动触发失败: ' + e.message, 'err'));
       return;
     }
     if (e.target.closest('[data-action="hs-stop"]')) {

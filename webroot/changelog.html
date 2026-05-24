@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc24 -->
+<div class="cl-section">
+  <div class="cl-title">🩹 v5.7.0-rc24: 修热点「立即启动」卡死 + 低延迟 no_aqm <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>修热点「立即启动」一点就超时 + WebUI 卡死</b>: 原因是手动启动也照睡了 60 秒开机延迟,而且后端同步执行把整个界面的刷新都堵住了。现在:手动启动跳过那 60 秒延迟、后端改成后台异步触发立刻返回,界面不再冻;点了之后会自动轮询热点是否真起来,起来报成功、~24 秒没起提示去看日志。</li>
+    <li><b>修每设备「低延迟」报 no_aqm</b>: 你这台内核没有 CAKE/fq_codel 这两种智能队列,之前直接失败。现在加了 sfq 兜底(也能让流量更公平、跑满时更跟手),低延迟在更多机型上能用了;没有 CAKE/fq_codel 时界面会说明用的是 sfq(效果略弱)。</li>
+    <li>说明: 开机自动开热点能不能真点亮,取决于你的 ColorOS 是否放行系统命令——起不来就看 /data/local/hnc/logs/hotspot.log。本次含一处后端改动,刷新版本会重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc23 -->
 <div class="cl-section">
   <div class="cl-title">🔌 v5.7.0-rc23: 设置页"运行状态"改成真数据 + 核实开机自动开热点 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

@@ -77,13 +77,16 @@ CMD=${1:-start}
 
 case "$CMD" in
 
-start)
-    log "=== Hotspot autostart begin ==="
+start|start-now)
+    log "=== Hotspot autostart begin (cmd=$CMD) ==="
 
     # ── 0. 读取用户配置（全部来自 rules.json）────────────────
     # v3.4.9: 删除充电限制 / 时间段限制(用户用不上,徒增配置复杂度)
     DELAY=$(get_rule_num hotspot_delay)
     DELAY=${DELAY:-60}
+    # rc24: 手动「立即启动」(start-now) 跳过开机延迟 —— 开机后台路径用 start 保留延迟,
+    # 但 WebUI 点立即启动若也睡 60s 会让 Go action 超时 + WebUI 卡死。
+    [ "$CMD" = "start-now" ] && DELAY=0
 
     log "Config: delay=${DELAY}s"
 
@@ -191,7 +194,7 @@ status)
     ;;
 
 *)
-    echo "Usage: $0 {start|stop|status} [ssid] [password]"
+    echo "Usage: $0 {start|start-now|stop|status} [ssid] [password]"
     exit 1
     ;;
 esac

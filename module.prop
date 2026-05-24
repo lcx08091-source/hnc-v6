@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc23
-versionCode=570123
+version=v5.7.0-rc24
+versionCode=570124
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc23 · 继续清"摆着但没接数据"的假显示(设备卡+应用页扫一遍的结果)。设置页"运行状态"面板原来整块是硬编码假值(hotspotd PID 18432 / RES 4.2MB、tc 规则数 11、iptables 7 chains、watchdog 运行中)——没有任何 JS/接口喂数据。改为真实:进设置页时 kexec 实采 hotspotd pid+RSS、tc 对象数、iptables MARK 0x800000 规则数、watchdog 存活,拿不到显示 — 而不是假数字(远程无 kexec 显示"远程不可读")。"热点接口"行接真实 state.hotspotIface(不再写死 wlan2);删掉无真实来源的假"上联接口 rmnet0"行。另核实:开机自动开热点(hotspot_auto)整条链路真实可用(开关→hotspot_save 写 rules.json→开机 service.sh 读取→hotspot_autostart.sh 用 cmd wifi start-softap / cmd tethering / svc 真启 AP + 补 SELinux;开关回读已接 cfg.hotspot_autostart);能否成功取决于 ColorOS 是否放行这些命令,需真机验证。纯前端,不用重编。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc24 · 修真机两 bug。① 热点「立即启动」后端超时 + WebUI 卡死:根因是 hotspot_autostart.sh 的 start 无条件睡 60s 开机延迟,且 Go action 同步执行(持全局写锁阻塞所有轮询)→ 前端 9s 必超时、UI 冻住。修复:新增 start-now 子命令跳过延迟;actionHotspotStart 改 detached 异步立即返回;前端「立即启动」改为轮询 /api/live 看热点是否真起来(~24s),不再卡死/误报。② 每设备「低延迟」报 SQM_APPLY_MODE=no_aqm:device_sqm_leaf 只试 cake/fq_codel,你内核两者都没装就失败。修复:加 sfq perturb 10 兜底(每流公平,init_tc 默认叶子早就这么兜),低延迟在更多内核上可用;UI 文案说明无 CAKE/fq_codel 时用 sfq(效果略弱)。开机自启 AP 能否成功仍取决于 ColorOS 是否放行,需看 logs/hotspot.log。纯 shell+前端+一处 Go(需 CI 重编 hnc_httpd)。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

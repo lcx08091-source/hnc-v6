@@ -833,7 +833,10 @@ device_sqm_leaf() {
     if [ "$want" = on ]; then
         tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" cake besteffort 2>/dev/null && return 0
         tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" fq_codel target 5ms interval 100ms quantum 1514 limit 1024 2>/dev/null && return 0
-        return 1   # 内核既无 cake 也无 fq_codel
+        # rc24: 内核无 cake/fq_codel 时退 sfq(每流公平,缓解 bufferbloat);init_tc 默认
+        # 叶子也是这么兜底的,sfq 几乎必有。只有连 sfq 都装不上才算真没 AQM。
+        tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" sfq perturb 10 2>/dev/null && return 0
+        return 1   # 内核连 sfq 都没有
     fi
     # off: 换回按速率缩放的 netem 占位
     netem_leaf_replace_zero "$dev" "$class_id" "$leaf_handle"

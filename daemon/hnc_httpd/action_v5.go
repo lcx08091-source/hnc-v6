@@ -312,11 +312,15 @@ func validPass(s string) bool {
 }
 
 func actionHotspotStart(hncDir string) actionResp {
-	rc, out := runBin(hncDir, "hotspot_autostart.sh", "start")
-	if rc != 0 {
-		return actionResp{OK: false, Error: "hotspot start failed", Detail: out}
+	// rc24: run DETACHED with start-now (skips the boot delay). hotspot_autostart.sh
+	// can take 10-90s (SELinux inject + wifi service wait + cmd retries); running it
+	// synchronously under the global write lock timed out the HTTP request (~9s
+	// frontend) and froze every /api poll until the 30s server timeout. Fire-and-
+	// forget; the WebUI polls /api/live hotspot_active for the real result.
+	if err := runBinDetached(hncDir, "hotspot_autostart.sh", "start-now"); err != nil {
+		return actionResp{OK: false, Error: "hotspot start failed", Detail: err.Error()}
 	}
-	return actionResp{OK: true, Detail: "hotspot started"}
+	return actionResp{OK: true, Detail: "已触发启动,正在后台拉起热点(请稍候)"}
 }
 
 func actionHotspotStop(hncDir string) actionResp {

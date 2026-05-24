@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc24, 2026-05-25)
+- **热点「立即启动」后端超时 + WebUI 卡死**(真机)。根因两条叠加:(a) `bin/hotspot_autostart.sh` 的 `start` 子命令**无条件 sleep 开机延迟 `hotspot_delay`(默认 60s)**,手动「立即启动」也照睡;(b) `daemon/hnc_httpd/action_v5.go:actionHotspotStart` 用 `runBin` **同步**跑该脚本,而 `handleAction` 期间持**全局写锁 `stateMu.Lock()`** → 所有 `/api/devices`/`/api/live` 轮询被阻塞 → 前端 ~9s(curl `--max-time 6` + `withTimeout 9000`)必超时报「后端无响应」、UI 冻住。
+  - **修复**:`hotspot_autostart.sh` 新增 `start-now`(= `start` 但跳过延迟,SELinux/wifi/重试逻辑复用);`actionHotspotStart` 改为 `runBinDetached(... "start-now")` **异步立即返回**(不持锁久等);`webroot/index.html` 「立即启动」处理改为触发后**轮询 `/api/live` 的 `hotspot_active`**(每 2s,最多 ~24s):起来了报「热点已启动」并刷新,超时报「未就绪,请看 hotspot.log」。不再卡死、不再误报超时。开机后台路径(`service.sh`)仍用 `start`(保留延迟)。
+  - 注:能否真正点亮 AP 取决于 ColorOS 是否放行 `cmd wifi start-softap`/`cmd tethering`/`svc wifi hotspot enable`——失败需看 `/data/local/hnc/logs/hotspot.log` 定位,属环境问题。
+- **每设备「低延迟」开关报 `SQM_APPLY_MODE=no_aqm`**(真机,rc22 的 TC_ACTION_BUSY 已修)。根因:`bin/tc_manager.sh:device_sqm_leaf` 只试 `cake` → `fq_codel`,你这台内核两者都装不上就 `return 1`。**修复**:cake/fq_codel 之后**加 `sfq perturb 10` 兜底**(每流公平、缓解 bufferbloat;`init_tc` 默认叶子早就 `fq_codel || sfq`,sfq 几乎必有),只有连 sfq 都没有才算真无 AQM;前端 `低延迟` 文案在无 CAKE/fq_codel 时提示「用 sfq 兜底(效果略弱)」。这样低延迟在更多内核上可用。
+- 「低延迟 + 高速」其他优化(回应用户):核心是「HTB 限速做瓶颈 + AQM 叶子压队列延迟」,本版补全了叶子的 sfq 兜底;rc18 的 netem `limit` 按速率缩放已避免限速压低吞吐。全局带宽整形(整个热点抗 bufferbloat)属架构级,留待真机验证 A/B 后再议。
+- 验证:`sh -n`(hotspot_autostart/tc_manager)、`go vet`+`CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build`、`node --check` 均通过。⚠ 有一处 Go 改动,需 CI 重编 `hnc_httpd`。版本 rc23 → rc24(570124)。
+
 ### Fixed (v5.7.0-rc23, 2026-05-25)
 - **设置页"运行状态"面板整块是硬编码假值 → 改为真实数据**(`webroot/index.html`,设备卡+应用页"断连数据"扫描的结果)。原来 4 行全是写死字面量、无任何 JS/接口喂数据:hotspotd "PID 18432 · RES 4.2 MB"、tc 规则数 "11"、iptables "7 chains"、watchdog "运行中"——永远是这串假的。**修复**:进设置页(`refreshLocalDiagnostics`)时新增 `fetchRunStatus()`,本机 KSU WebUI 走 kexec 实采:hotspotd `pidof`+`/proc/$pid/status` 的 VmRSS、`tc qdisc/class` 对象数、`iptables/ip6tables -t mangle` 里 `0x800000` 规则数、`hnc_watchdog` 存活;采不到显示 `—`,远程(无 kexec)显示"远程不可读"——不再展示假数字。
 - **"热点接口"行写死 wlan2 → 接真实接口**:改读 `state.hotspotIface`(来自 `/api/live`/`/api/iface_info`),非 wlan2 的设备不再显示错的接口。**删掉无真实来源的假"上联接口 rmnet0"行**(IFB 上联接口在运行期才探测,前端无可靠来源,留着只会误导)。
