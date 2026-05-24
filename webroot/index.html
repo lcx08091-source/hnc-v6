@@ -2367,6 +2367,10 @@ body.kb-open .container {
 .nav-item svg { width: 22px; height: 22px; transition: transform var(--dur-mid) var(--ease-spring); }
 .nav-item.active { color: white; }
 .nav-item.active svg { transform: translateY(-1px) scale(1.08); }
+/* rc30: 候选角标 — 有"证据充分待确认"的陌生主域名时在"应用"项亮红点 */
+.nav-dot { position: absolute; top: 4px; left: 56%; width: 8px; height: 8px; border-radius: 50%;
+  background: var(--sys-red, #ff3b30); box-shadow: 0 0 6px rgba(255,59,48,.6); pointer-events: none; }
+.nav-dot[hidden] { display: none; }
 
 /* b-nav4: 分析页顶部段控 (统计 / DPI) + 设置内日志入口/返回 */
 .analysis-seg { display: flex; gap: 6px; padding: 5px; margin-bottom: 12px; border-radius: 14px; }
@@ -5231,6 +5235,7 @@ body.kb-open .container {
     <span>设备</span>
   </div>
   <div class="nav-item" data-page="apps">
+    <span class="nav-dot" id="apps-nav-dot" hidden></span>
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <rect x="3" y="3" width="7" height="7" rx="1.5"/>
       <rect x="14" y="3" width="7" height="7" rx="1.5"/>
@@ -12008,6 +12013,7 @@ body.kb-open .container {
     // 8. 启动轮询
 
     startPolling();
+    startCandidateBadgePoll();
 
 
     // 8. 就绪提示 · P1-4 条件触发, 避免掩盖 init 失败
@@ -12259,6 +12265,25 @@ body.kb-open .container {
     return (n/1024/1024/1024).toFixed(2) + ' GB';
   }
 
+  // rc30: 候选角标 —— 有"证据充分待确认"的陌生主域(candidate_high>0)时,在底部
+  // "应用"导航项亮红点,提醒去候选区一键确认。跨页面轮询,不必停在应用页才看到。
+  function updateAppsNavDot(self) {
+    var dot = document.getElementById('apps-nav-dot'); if (!dot) return;
+    dot.hidden = !(self && Number(self.candidate_high || 0) > 0);
+  }
+  var __candDotTimer = null;
+  function startCandidateBadgePoll() {
+    if (__candDotTimer) return;
+    var tick = function(){
+      apiGet('/api/dpi_state').then(function(d){
+        var self = (d && d.available && d.state && d.state.self) ? d.state.self : null;
+        updateAppsNavDot(self);
+      }).catch(function(){});
+    };
+    tick();
+    __candDotTimer = setInterval(tick, 25000);
+  }
+
   function appsLoad(silent) {
     // b-nav4 fix: 走 apiGet 桥接 (原裸 fetch 在 KSU file:// 下 404, 本机看不到 M1/M2 数据)
     apiGet('/api/dpi_state')
@@ -12267,6 +12292,7 @@ body.kb-open .container {
         appsRenderHero(self);
         appsRenderList(self);
         appsRenderCandidates(self);
+        updateAppsNavDot(self);
       })
       .catch(function(e){
         if (!silent) console.warn('apps: dpi_state fetch failed', e);

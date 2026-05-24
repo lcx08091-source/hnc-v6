@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc29
-versionCode=570129
+version=v5.7.0-rc30
+versionCode=570130
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc29 · 修"未匹配的 SNI"卡误导(用户发现飞轮的陌生主域名问题)。后端其实有两条轨:走法1 unmatched_snis_pending(陌生子域)、走法2 candidate_pending(全新主域名 apex,真机已抓到 claude.com/idouyinvod.com/proxyinfo.net 并晋级)。但 appsRenderUnmatched 那张卡只看走法1,子域为 0 就喊"规则集已覆盖所有抓到的 SNI·没有陌生子域",完全无视走法2 的主域候选 → 用户误以为主域名没被识别。本版:子域队列空但有走法2 主域候选时,卡片如实显示"还有 N 个陌生主域名在候选区(其中 M 个已达 HIGH 可晋级)·见下方自动识别候选",不再谎称全覆盖;真·全空时文案也补上"也没有陌生主域候选"。纯前端,不用重编。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc30 · 候选角标:底部"应用"导航项现在会在有"证据充分待确认"的陌生主域(candidate_high>0)时亮红点,跨页面 25s 轮询 /api/dpi_state —— 不必停在应用页才发现走法2 攒了全新主域名等你一键确认。补全 rc29 的可发现性:rc29 让那张卡如实讲"还有 N 个主域在候选区",rc30 让你在任何页面都能第一时间看到提醒。纯前端,node --check 通过,不用重编。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

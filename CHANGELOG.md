@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc30, 2026-05-25)
+- **候选角标 —— 陌生主域待确认时,底部「应用」导航项亮红点**(`webroot/index.html`)。承 rc29:rc29 修好了「未匹配 SNI」卡如实讲走法2 的主域候选,但用户得**主动进应用页**才看得到。rc30 补全可发现性:
+  - 新增 `updateAppsNavDot(self)` + `startCandidateBadgePoll()`:`init()` 里和 `startPolling()` 一起启动,**每 25s 跨页面轮询** `/api/dpi_state`,当 `self.candidate_high > 0`(走法2 累积到「证据充分、达 HIGH 可晋级」的全新主域名)时,在底部导航「应用」项右上角亮一颗红点(`.nav-dot`,带微光),提醒去「自动识别候选」区一键确认/拒绝。
+  - 进应用页时 `appsLoad` 也会同步刷新角标(`updateAppsNavDot(self)`);候选清空后红点自动熄灭。
+  - 为什么用 `candidate_high` 而非 `candidate_pending`:`pending` 含一两次命中的弱候选(window=1/hits=1,噪音多),`high` 才是达到晋级证据门槛的——只在「真的该看一眼」时打扰用户,避免角标常亮失去意义。
+  - 纯前端,`node --check`(两段内联 JS)通过,不用重编。版本 rc29 → rc30(570130)。
+
 ### Fixed (v5.7.0-rc29, 2026-05-25)
 - **修"未匹配的 SNI"卡误导 —— 它只讲陌生子域、无视陌生主域候选**(`webroot/index.html` `appsRenderUnmatched`,用户提出"飞轮有没有把陌生主域名加进去")。后端是**两条独立轨**:
   - 走法1 `unmatched_snis_pending` = 没匹配规则的**子域**(完整 SNI)→ auto-expand 队列。
