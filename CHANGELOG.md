@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc28, 2026-05-25)
+- **「开机自动开热点」补齐兼容性 + 自动降级**(`bin/hotspot_autostart.sh`,应用户提问)。
+  - **启动逐级降级**:`1a` `start-softap -b any`(现代/ColorOS 主力,`-b any` 避开 band error 18)→ `1b` **不带 `-b` 的旧式 start-softap**(老 Android / 不认 `-b` 的 ROM 自动降级)→ `1c` 等 5s 重试一轮(WifiService 刚就绪首次可能失败)→ `2` `cmd tethering tether wifi` → `3` `svc wifi hotspot enable`。逐个尝试直到成功或全部失败(失败 `exit 1` + 记日志)。
+  - **方法感知的 NAT**:记 `START_METHOD`。本地热点(`softap_local`,系统不做共享)才 `setup_nat` 自建 `ip_forward`+`MASQUERADE`+`FORWARD`;走系统原生共享(`2`/`3`,**自带 NAT**)则**跳过自建**,避免和系统 tetherctrl 的 NAT 冲突。
+  - **出口自适应**(承 rc26):`detect_up_iface` 用 `ip route get` —— VPN(`tun0`)/ 蜂窝(`rmnet`)/ WiFi 上联自动切;VPN 关了下次起会自动改挂到 rmnet。NAT 接口轮询等就绪(承 rc27)。
+  - 全程 best-effort:每步失败不致命、日志可查;彻底起不来时 UI 已如实提示改从系统设置开。`sh -n` 通过;纯 shell,不用重编。版本 rc27 → rc28(570128)。
+
 ### Fixed (v5.7.0-rc27, 2026-05-25)
 - **开机自动开热点(含流量共享)真机端到端验证通过** + 加可靠性补丁(`bin/hotspot_autostart.sh`)。用户用 rc26 的等效命令实测:`start-softap -b any` 起本地热点(`wlan2` + `10.126.123.0/24`)→ `ip route get` 探出口(此机经 VPN `tun0`)→ `ip_forward`+`MASQUERADE`+`FORWARD` → **另一台设备连上能正常上网**。A 方案(本地热点 + 模块自建 NAT)在 ColorOS 上完整跑通。
   - **补丁**:`setup_nat` 起热点后由"固定 `sleep 2`"改为**轮询等热点接口拿到 IP(最多 ~8s)**。真机 `wlan2` 约 5s 才有 IP,开机时系统更忙,旧的 2s 可能在接口就绪前就放弃 → 漏挂 NAT → 客户端没网。轮询确保与已验证的手动流程一致。

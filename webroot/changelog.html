@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc28 -->
+<div class="cl-section">
+  <div class="cl-title">🧩 v5.7.0-rc28: 开机自动开热点 — 兼容性 + 自动降级 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>多重兜底</b>: 开热点会按顺序逐个尝试——先新式(选频段)、不行就旧式(老系统)、再等几秒重试、再退到系统原生的两种开法,直到有一种成功;全失败才报错并记日志。</li>
+    <li><b>智能 NAT</b>: 只有"本地热点"才由模块自己做流量共享;如果用的是系统原生热点(自带共享),就不再画蛇添足,避免冲突。</li>
+    <li><b>出口自适应</b>: 共享走哪条网(VPN / 流量 / WiFi)自动判断;比如你关掉 VPN,下次开热点会自动改走流量,不用手动调。</li>
+    <li>说明: 纯脚本改动,不用重新编译。彻底起不来时界面会提示改从系统设置开。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc27 -->
 <div class="cl-section">
   <div class="cl-title">✅ v5.7.0-rc27: 开机自动开热点(带流量共享)实测打通 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

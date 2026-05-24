@@ -198,37 +198,50 @@ start|start-now)
     [ -z "$AP_PASS" ] && AP_PASS="12345678"
     log "SSID=$AP_SSID"
 
-    # ── 4. 启动热点（多方法兜底）───────────────────────────
-    STARTED=0
+    # ── 4. 启动热点（多方法兜底 + 自动降级）────────────────
+    # 兼容性顺序:1a start-softap -b any(现代/ColorOS 主力)→ 1b 不带 -b 的旧式
+    # (老 Android / 不认 -b 的 ROM)→ 1c 等 5s 重试 → 2 cmd tethering → 3 svc。
+    # 记 START_METHOD:softap_local(系统不共享,需自建 NAT)/ system(原生共享,自带 NAT)。
+    STARTED=0; START_METHOD=""
 
-    # 方法1: cmd wifi start-softap（Android 13+ 主力,真机唯一可用)
-    # rc25: 加 -b any —— 真机实测不带 -b 时默认频段会撞(error 18),-b any 让固件自选
-    # 可用频段后成功起来。SEC 仍按 wpa2→wpa3→… 兜底。
-    for attempt in 1 2 3; do
-        for SEC in wpa2 wpa3 wpa3_transition open; do
-            RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" -b any 2>&1)
-            echo "$RESULT" | grep -qi "started\|success" && STARTED=1 && log "started via cmd wifi (sec=$SEC -b any)" && break 2
-        done
-        [ "$STARTED" = "1" ] && break
-        [ "$attempt" -lt 3 ] && sleep 5
+    # 1a: start-softap -b any（-b any 让固件自选频段,绕开 ColorOS 的 band error 18)
+    for SEC in wpa2 wpa3 wpa3_transition open; do
+        RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" -b any 2>&1)
+        echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC -b any)"; break; }
     done
-
-    # 方法2/3(cmd tethering / svc wifi hotspot)在 ColorOS 上无 shell 实现,保留仅作
-    # 其他 ROM 兜底;ColorOS 走不到这里。
+    # 1b: 不带 -b 的旧式(老 Android / ROM 不认 -b 时自动降级)
     if [ "$STARTED" = "0" ]; then
-        cmd tethering tether wifi 2>/dev/null && STARTED=1 && log "started via cmd tethering"
+        for SEC in wpa2 wpa3 open; do
+            RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" 2>&1)
+            echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC no-b)"; break; }
+        done
+    fi
+    # 1c: 等 5s 再试一轮(WifiService 刚就绪首次可能失败)
+    if [ "$STARTED" = "0" ]; then
+        sleep 5
+        RESULT=$(cmd wifi start-softap "$AP_SSID" wpa2 "$AP_PASS" -b any 2>&1)
+        echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (retry -b any)"; }
+    fi
+
+    # 2/3: 系统原生共享(自带 NAT)。ColorOS 无 shell 实现走不到;其他 ROM 可用则用。
+    if [ "$STARTED" = "0" ]; then
+        cmd tethering tether wifi 2>/dev/null && { STARTED=1; START_METHOD=system; log "started via cmd tethering (system NAT)"; }
     fi
     if [ "$STARTED" = "0" ]; then
-        svc wifi hotspot enable 2>/dev/null && STARTED=1 && log "started via svc"
+        svc wifi hotspot enable 2>/dev/null && { STARTED=1; START_METHOD=system; log "started via svc (system NAT)"; }
     fi
 
     if [ "$STARTED" = "1" ]; then
         rm -f "$HNC_DIR/run/uplink_unsupported" "$HNC_DIR/run/uplink_fail_count" "$HNC_DIR/run/uplink_unsupported_logged" 2>/dev/null || true
-        # rc25: 本地热点没有系统 tethering 的 NAT,手动补一份,让客户端能上网。
-        setup_nat
-        log "=== Hotspot autostart SUCCESS ==="
+        # 本地热点(softap_local)系统不共享流量 → 自建 NAT;系统原生共享已自带 NAT → 跳过,避免冲突。
+        if [ "$START_METHOD" = "softap_local" ]; then
+            setup_nat
+        else
+            log "NAT: 系统原生共享($START_METHOD)自带 NAT,跳过自建"
+        fi
+        log "=== Hotspot autostart SUCCESS (method=$START_METHOD) ==="
     else
-        log "=== Hotspot autostart FAILED ==="; exit 1
+        log "=== Hotspot autostart FAILED (所有方法都失败) ==="; exit 1
     fi
     ;;
 
