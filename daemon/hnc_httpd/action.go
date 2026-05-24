@@ -274,6 +274,8 @@ func dispatchAction(hncDir, action string, p map[string]string, isLoopback bool)
 		return actionDeviceSQMSet(hncDir, p)
 	case "global_shaper_set": // rc32: opt-in global bandwidth shaper (off by default)
 		return actionGlobalShaperSet(hncDir, p)
+	case "flywheel_exclude_set": // rc35: manage VPN/proxy flywheel exclusion list
+		return actionFlywheelExcludeSet(hncDir, p)
 	case "template_apply":
 		return actionTemplateApply(hncDir, p)
 	case "hotspot_start":

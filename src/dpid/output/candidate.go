@@ -261,6 +261,16 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 	}
 	isConduitUID := func(uid int) bool { return apexCountByUID[uid] >= conduitApexThreshold }
 
+	// v5.7.0-rc35: publish the detected conduit uids so Snapshot can badge those
+	// apps as flywheel-excluded in the WebUI (alongside the explicit list).
+	conduitSet := map[int]struct{}{}
+	for uid, n := range apexCountByUID {
+		if n >= conduitApexThreshold {
+			conduitSet[uid] = struct{}{}
+		}
+	}
+	a.SetConduitUIDs(conduitSet)
+
 	changed := false
 	// v5.7.0-rc33: demote already-promoted rules whose attributed app is now a
 	// VPN/proxy (explicit list) or a detected conduit. Cleans up bad rules like

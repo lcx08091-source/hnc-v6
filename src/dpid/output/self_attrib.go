@@ -143,6 +143,11 @@ type SelfAttribAggregator struct {
 	// is live even before the first pkg-cache refresh.
 	flywheelExcludePkgs map[string]struct{}
 
+	// v5.7.0-rc35: uids the expander flagged as conduits (VPN/proxy/browser by
+	// apex cardinality). Published by the expander each tick via SetConduitUIDs;
+	// read in Snapshot to badge those apps as flywheel-excluded in the WebUI.
+	conduitUIDs map[int]struct{}
+
 	// ifaceState is the per-iface child status, owned by the
 	// reconciler (see self_capture goroutines in main.go).
 	ifaceState []SelfIfaceState
@@ -440,6 +445,19 @@ func (a *SelfAttribAggregator) SetCandidateSummary(s candidateSummary) {
 	a.mu.Unlock()
 }
 
+// SetConduitUIDs publishes the set of uids the expander flagged as conduits
+// (VPN/proxy/browser by apex cardinality), so Snapshot can badge those apps as
+// flywheel-excluded. Takes a copy; caller may mutate after the call. v5.7.0-rc35.
+func (a *SelfAttribAggregator) SetConduitUIDs(uids map[int]struct{}) {
+	cp := make(map[int]struct{}, len(uids))
+	for u := range uids {
+		cp[u] = struct{}{}
+	}
+	a.mu.Lock()
+	a.conduitUIDs = cp
+	a.mu.Unlock()
+}
+
 func (a *SelfAttribAggregator) ensureAppLocked(uid int, now int64) *SelfApp {
 	app := a.appsByUID[uid]
 	if app != nil {
@@ -475,6 +493,14 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 			cp := *app // shallow copy
 			if a.systemPkgs != nil && cp.Pkg != "" {
 				_, cp.IsSystem = a.systemPkgs[cp.Pkg]
+			}
+			// v5.7.0-rc35: badge flywheel-excluded apps (VPN/proxy on the list, or
+			// a detected conduit uid) so the WebUI can explain why they get no rules.
+			if cp.Pkg != "" && a.flywheelExcludePkgs != nil {
+				_, cp.FlywheelExcluded = a.flywheelExcludePkgs[cp.Pkg]
+			}
+			if !cp.FlywheelExcluded && a.conduitUIDs != nil {
+				_, cp.FlywheelExcluded = a.conduitUIDs[uid]
 			}
 			// Materialize SNI set as sorted slice (deterministic for diffing)
 			if set := a.snisByUID[uid]; set != nil {

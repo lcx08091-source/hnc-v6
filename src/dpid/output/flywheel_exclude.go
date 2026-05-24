@@ -33,19 +33,18 @@ import (
 	"strings"
 )
 
-const (
-	// flywheelExcludeFile is the user-editable exclusion list, merged with the
-	// built-in seed. Shape: {"exclude_pkgs": ["com.foo.bar", ...]}. Missing or
-	// malformed = built-in seed only (best-effort, never fatal).
-	flywheelExcludeFile = "/data/local/hnc/etc/flywheel_exclude.json"
+// flywheelExcludeFile is the user-editable exclusion list, merged with the
+// built-in seed. Shape: {"exclude_pkgs": ["com.foo.bar", ...]}. Missing or
+// malformed = built-in seed only (best-effort, never fatal). var (not const)
+// so tests can point it at a temp file.
+var flywheelExcludeFile = "/data/local/hnc/etc/flywheel_exclude.json"
 
-	// conduitApexThreshold: a single uid associated with >= this many distinct
-	// brand-new apexes in the accumulator is treated as a generic conduit
-	// (VPN/proxy/browser) and blocked from AUTO-promotion. Brand-new apexes
-	// (matching no curated rule) under one uid are rare for a normal app, so a
-	// high count strongly indicates proxied/aggregated traffic.
-	conduitApexThreshold = 8
-)
+// conduitApexThreshold: a single uid associated with >= this many distinct
+// brand-new apexes in the accumulator is treated as a generic conduit
+// (VPN/proxy/browser) and blocked from AUTO-promotion. Brand-new apexes
+// (matching no curated rule) under one uid are rare for a normal app, so a
+// high count strongly indicates proxied/aggregated traffic.
+const conduitApexThreshold = 8
 
 // builtinFlywheelExcludePkgs seeds the exclusion with well-known VPN / proxy
 // client packages (CN proxy clients first, then mainstream VPNs). Not meant

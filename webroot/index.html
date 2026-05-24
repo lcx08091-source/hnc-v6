@@ -4826,6 +4826,35 @@ body.kb-open .container {
      evidence-#2 condition is met. */
   .app-meta-pill.rule.ready { color: var(--sys-green); background: rgba(48,209,88,.10); }
 
+  /* rc35: VPN/代理飞轮排除 — 卡片徽标 + 排除按钮 */
+  .app-flag-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 8px; }
+  .app-flag-vpn {
+    font-size: 11px; font-weight: 600; padding: 3px 9px; border-radius: 6px;
+    color: var(--sys-orange); background: rgba(255,149,0,.12);
+    border: 1px solid rgba(255,149,0,.25);
+  }
+  .app-excl-btn {
+    font: inherit; font-size: 11.5px; font-weight: 600; padding: 4px 11px;
+    border-radius: 999px; cursor: pointer; color: var(--text-2);
+    background: var(--glass-bg-2); border: 1px solid var(--stroke);
+  }
+  .app-excl-btn:active { transform: scale(.96); }
+
+  /* rc35: 设置页飞轮排除名单管理 */
+  .fw-excl-list { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; }
+  .fw-excl-item {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 7px 10px; border-radius: 8px; background: var(--input-bg);
+    font-size: 12.5px; font-family: var(--font-mono); color: var(--text-1);
+  }
+  .fw-excl-item .rm {
+    cursor: pointer; color: var(--sys-red); font-weight: 700; padding: 0 6px;
+    flex-shrink: 0; font-family: var(--font-sans, inherit);
+  }
+  .fw-excl-empty { font-size: 12px; color: var(--text-3); padding: 6px 2px; }
+  .fw-excl-add { display: flex; gap: 8px; margin-top: 8px; }
+  .fw-excl-add input { flex: 1; }
+
   .exp-card { padding: 18px; margin-bottom: 14px; }
   .exp-quick { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 6px; }
   .exp-quick button {
@@ -4994,6 +5023,24 @@ body.kb-open .container {
       </div>
     </div>
     <div class="set-footer">诚实说明:这是<b>固定</b>带宽整形——填多少按多少限。蜂窝网速率每分钟都在变,固定值大部分时间偏差较大(本内核大概率没有 CAKE autorate 自适应),所以蜂窝下收益有限;稳定链路(光猫 / WISP / WiFi 中继)才是主战场。<b>不开则完全不影响</b>每设备限速/低延迟。需要热点已开启才能应用;重启后会按保存值自动恢复。</div>
+
+    <!-- 飞轮排除名单 (VPN/代理) rc35 -->
+    <div class="sec-title">飞轮排除名单 <span style="font-size:11px;color:var(--text-3);font-weight:400">· VPN/代理 · 不学习规则</span></div>
+    <div class="setting-group glass-elevated">
+      <div class="set-row" style="align-items:flex-start">
+        <div class="set-icon orange"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+        <div class="set-info" style="flex:1">
+          <div class="set-label">不参与规则学习的应用</div>
+          <div class="set-desc">VPN/代理(Clash、v2rayNG、sing-box…)会代理别的 app 流量,系统把这些流量算到 VPN 头上 → 飞轮会误把别人的域名学成 VPN 的规则。名单里的应用不参与学习。<b>内置常见 VPN + 导管型应用自动识别</b>已默认生效,这里维护你额外添加的。</div>
+          <div id="fw-excl-list" class="fw-excl-list"></div>
+          <div class="fw-excl-add">
+            <input type="text" class="glass-input-full" id="fw-excl-input" placeholder="包名,如 com.example.vpn" autocapitalize="off" autocomplete="off" spellcheck="false">
+            <button class="btn btn-primary" data-action="fw-excl-add">添加</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="set-footer">提示:在「应用」页每个应用卡片上也能直接点「排除」。内置清单(FlClash / Clash / v2rayNG / sing-box / WireGuard 等)和"导管型应用自动识别"始终生效,无需在此重复添加。改动约 5 分钟内被识别引擎热加载。</div>
 
     <!-- Refresh mode -->
     <div class="sec-title">刷新与功耗</div>
@@ -11286,6 +11333,20 @@ body.kb-open .container {
       }).catch(e => toast('停止失败: ' + e.message, 'err'));
       return;
     }
+    if (e.target.closest('[data-action="fw-excl-add"]')) {
+      // rc35: 设置页手动添加飞轮排除包名
+      const inp = $('#fw-excl-input');
+      const pkg = ((inp && inp.value) || '').trim();
+      if (!pkg) { toast('请输入包名', 'err'); return; }
+      apiAction('flywheel_exclude_set', { op: 'add', pkg: pkg }).then(() => {
+        toast('已添加 ' + pkg + ' · 约 5 分钟内生效', 'ok');
+        if (!Array.isArray(state.fwExclude)) state.fwExclude = [];
+        if (state.fwExclude.indexOf(pkg) < 0) state.fwExclude.push(pkg);
+        if (inp) inp.value = '';
+        renderFlywheelExcludeList();
+      }).catch(e2 => toast('添加失败: ' + (e2.message || e2) + (e2.detail ? ' (' + e2.detail + ')' : ''), 'err'));
+      return;
+    }
     if (e.target.closest('[data-action="gs-apply"]')) {
       // rc32: 应用全局带宽整形(enabled=true + WAN 带宽)
       const gsBtn = e.target.closest('[data-action="gs-apply"]');
@@ -12093,6 +12154,9 @@ body.kb-open .container {
       });
       { const d = rateToWanMbps(cfg.global_shaper_down); const el = $('#gs-down'); if (el && d !== '') el.value = d; }
       { const u = rateToWanMbps(cfg.global_shaper_up);   const el = $('#gs-up');   if (el && u !== '') el.value = u; }
+      // rc35: 飞轮排除名单(用户自定义部分)回读 + 渲染
+      state.fwExclude = Array.isArray(cfg.flywheel_exclude_user) ? cfg.flywheel_exclude_user.slice() : [];
+      try { renderFlywheelExcludeList(); } catch (e) { dbg('fw-excl render err: ' + e.message); }
 
       // rc3.1.17: toggle 状态确定后立即让 url 卡片三态 force 重算
       // (init 时 sig 缓存还是空, force 确保第一次走完整切换分支)
@@ -12671,6 +12735,15 @@ body.kb-open .container {
           '</div>';
       }
       var pkgLine = (a.pkg ? appsEsc(a.pkg) : '(pm 未解析)') + ' · uid ' + r.uid;
+      // rc35: VPN/代理飞轮排除徽标(已排除)或「排除」按钮(未排除且已知包名)。
+      var flagRow = '';
+      if (a.flywheel_excluded) {
+        flagRow = '<div class="app-flag-row"><span class="app-flag-vpn">🛡️ VPN/代理 · 不学习规则</span></div>';
+      } else if (a.pkg) {
+        flagRow = '<div class="app-flag-row"><button class="app-excl-btn" ' +
+                  'data-pkg="' + appsEsc(a.pkg) + '" data-name="' + appsEsc(name) + '" ' +
+                  'onclick="appsExclude(this)">排除 · 不学习此应用规则</button></div>';
+      }
       return '<div class="glass-elevated app-card"' + (dim ? ' style="opacity:.5"' : '') + '>' +
         '<div class="app-card-head">' +
           '<div class="app-icon ' + icon.cls + '">' + appsEsc(icon.letter) + '</div>' +
@@ -12681,6 +12754,7 @@ body.kb-open .container {
           '</div>' +
         '</div>' +
         metaHTML +
+        flagRow +
       '</div>';
     }
     var usr = rows.filter(function(r){ return !(r.app && r.app.is_system); });
@@ -12858,6 +12932,55 @@ body.kb-open .container {
         if (window.toast) toast('reject 失败: ' + (e.message || e) + (e.detail ? ' (' + e.detail + ')' : ''), 'err');
         if (btn) { btn.disabled = false; }
       });
+  };
+
+  // rc35: 从应用卡片把某 app 加入飞轮排除名单(VPN/代理不学习规则)。
+  window.appsExclude = function(btn) {
+    if (!btn || !btn.getAttribute) return;
+    var pkg = btn.getAttribute('data-pkg');
+    var name = btn.getAttribute('data-name') || pkg;
+    if (!pkg) return;
+    if (!confirm('把「' + name + '」加入飞轮排除名单?\n\n以后不再根据它的流量自动学习/晋级规则(适合 VPN/代理/浏览器等会代理别的 app 流量的应用)。它仍会正常显示在列表里。')) return;
+    btn.disabled = true; btn.textContent = '…';
+    apiAction('flywheel_exclude_set', { op: 'add', pkg: pkg })
+      .then(function(){
+        if (window.toast) toast('已排除 ' + pkg + ' · 约 5 分钟内生效', 'ok');
+        if (Array.isArray(state.fwExclude) && state.fwExclude.indexOf(pkg) < 0) {
+          state.fwExclude.push(pkg);
+          try { renderFlywheelExcludeList(); } catch (e) {}
+        }
+        setTimeout(function(){ appsLoad(true); }, 1500);
+      })
+      .catch(function(e){
+        if (window.toast) toast('排除失败: ' + (e.message || e) + (e.detail ? ' (' + e.detail + ')' : ''), 'err');
+        btn.disabled = false; btn.textContent = '排除 · 不学习此应用规则';
+      });
+  };
+
+  // rc35: 渲染设置页的飞轮排除名单(用户自定义部分),数据源 state.fwExclude。
+  function renderFlywheelExcludeList() {
+    var box = document.getElementById('fw-excl-list');
+    if (!box) return;
+    var pkgs = (typeof state !== 'undefined' && Array.isArray(state.fwExclude)) ? state.fwExclude : [];
+    if (!pkgs.length) {
+      box.innerHTML = '<div class="fw-excl-empty">你还没有额外添加(内置清单 + 自动识别已在生效)</div>';
+      return;
+    }
+    box.innerHTML = pkgs.map(function(p){
+      return '<div class="fw-excl-item"><span>' + appsEsc(p) + '</span>' +
+             '<span class="rm" data-pkg="' + appsEsc(p) + '" onclick="fwExcludeRemove(this)" title="移除">✕</span></div>';
+    }).join('');
+  }
+  window.fwExcludeRemove = function(el) {
+    var pkg = el && el.getAttribute && el.getAttribute('data-pkg');
+    if (!pkg) return;
+    apiAction('flywheel_exclude_set', { op: 'remove', pkg: pkg })
+      .then(function(){
+        if (window.toast) toast('已移除 ' + pkg, 'ok');
+        if (Array.isArray(state.fwExclude)) state.fwExclude = state.fwExclude.filter(function(x){ return x !== pkg; });
+        renderFlywheelExcludeList();
+      })
+      .catch(function(e){ if (window.toast) toast('移除失败: ' + (e.message || e), 'err'); });
   };
 
   window.appsExpPickRange = function(btn, mins) {

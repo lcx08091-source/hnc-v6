@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc35, 2026-05-25)
+- **VPN 飞轮排除:可视化(卡片徽标)+ 可管理(WebUI)+ 单元测试**(用户选定的三项打包)。承 rc33/34 的引擎,补齐 UX 与测试:
+  - **① 应用卡片标注**(`src/dpid/output/state.go`·`self_attrib.go`·`candidate.go` + `webroot/index.html`):`SelfApp` 新增 `flywheel_excluded`,在 Snapshot 里按三种来源置位——内置清单 / 用户清单(`flywheelExcludePkgs`)/ 导管自动识别(新增 `conduitUIDs`,由 expander 每 tick `SetConduitUIDs` 发布)。「应用」页对被排除的应用显示「🛡️ VPN/代理 · 不学习规则」徽标;未排除且已知包名的卡片上有「排除 · 不学习此应用规则」按钮,一键加入。
+  - **② WebUI 管理**(`daemon/hnc_httpd/action_flywheel.go` 新增 + `api_v5.go` + `webroot/index.html`):设置页新增「飞轮排除名单 · VPN/代理」卡片,展示/添加/删除你**自定义**的排除包名。新 action `flywheel_exclude_set`(op=add|remove,pkg 校验为合法包名)load-modify-store `etc/flywheel_exclude.json`(原子写,镜像 `action_candidate.go`);`/api/config` 新增 `flywheel_exclude_user` 供前端回读。内置清单 + 导管识别始终生效、不在此管理(文案已注明)。
+  - **③ Go 单元测试**(`src/dpid/output/flywheel_exclude_test.go` 新增,该包此前零测试):覆盖 `loadFlywheelExcludePkgs`(内置常驻 / 用户合并去空格 / 坏 JSON 降级到内置)、`IsFlywheelExcludedUID`+`IsFlywheelExcludedPkg`(VPN/普通/未知 uid、空包名)、构造器播种、`classifyTier`(high/med/low/shared/blocklist/SharedLearned 六种路径)。`flywheelExcludeFile` 由 const 改 var 以便测试覆盖路径。
+  - 含 `dpid` + `hnc_httpd`(Go)改动,**需 CI 重编两者**。`go vet ./...` + `go test ./output/`(6 测试全过)+ `android/arm64` 交叉编译 + `node --check`(两段内联 JS)全通过。版本 rc34 → rc35(570135)。
+
 ### Changed (v5.7.0-rc34, 2026-05-25)
 - **扩充 VPN/代理飞轮排除清单**(`src/dpid/output/flywheel_exclude.go`,承 rc33,应用户要求"多收录开源 VPN")。从各项目 GitHub 仓库的 `build.gradle(.kts)` 里**核实 `applicationId`** 后扩充内置清单:
   - **本会话已核实**:`io.github.trojan_gfw.igniter`(Igniter/trojan-gfw)、`net.mullvad.mullvadvpn`(Mullvad,开源)、`eu.faircode.netguard`(NetGuard,开源)、`com.celzero.bravedns`(Rethink DNS+Firewall,开源)、`io.nekohasekai.sfa`(sing-box SFA)、`com.v2ray.ang`(v2rayNG)、`com.github.shadowsocks`、`app.hiddify.com`(Hiddify)。

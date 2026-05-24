@@ -37,6 +37,8 @@ type configResp struct {
 	GlobalShaperEnabled bool   `json:"global_shaper_enabled"`
 	GlobalShaperDown    string `json:"global_shaper_down,omitempty"`
 	GlobalShaperUp      string `json:"global_shaper_up,omitempty"`
+	// rc35: 用户维护的飞轮排除名单(VPN/代理),不含内置清单。供设置页展示/增删。
+	FlywheelExcludeUser []string `json:"flywheel_exclude_user,omitempty"`
 	// rc3.1.13.1 删 OffloadWarn (review §3 P0): 历史上后端读 rules.json
 	// 但从无写路径, 前端 toggle 只写 localStorage 自管, 字段始终死值 false.
 	// rc3.1.12 config.json 兜底分支删除后, 死状况暴露 — 不如直接清掉
@@ -74,6 +76,8 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// rc35: 用户维护的飞轮排除名单(VPN/代理),从 etc/flywheel_exclude.json 读。
+	resp.FlywheelExcludeUser = loadFlywheelExcludeUser(s.hncDir)
 	// rc3.1.13: 删除 config.json 覆盖分支. config.json 已弃用, 由 post-fs-data.sh
 	// 启动时单向迁移 auth_required 到 rules.json 后删除. 字段单源化让 toggle / 后端
 	// 视角永远一致, 杜绝 rc3.1.9~12 那种"前端 ON 但 middleware 不认"的 skew.

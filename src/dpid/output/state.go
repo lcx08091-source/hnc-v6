@@ -148,14 +148,19 @@ type SelfApp struct {
 	// v5.7.0-rc9: true when pkg is a system package (pm list packages -s).
 	// The flywheel skips system apps (their domains are OEM telemetry, useless
 	// as shareable rules) and the WebUI collapses them in 我的应用.
-	IsSystem    bool     `json:"is_system,omitempty"`
-	UID         int      `json:"uid"`
-	FirstSeen   int64    `json:"first_seen"`
-	LastSeen    int64    `json:"last_seen"`
-	ActiveConns int      `json:"active_conns"`        // current /proc/net count
-	TotalConns  uint64   `json:"total_conns"`         // cumulative
-	TopSNIs     []string `json:"top_snis,omitempty"`  // up to 8 distinct SNIs
-	TopRules    []string `json:"top_rules,omitempty"` // matched rule IDs (HNC L3 rules)
+	IsSystem bool `json:"is_system,omitempty"`
+	// v5.7.0-rc35: true when this app is excluded from the auto-learn flywheel
+	// because it's a VPN/proxy (on the built-in/user list) or a detected conduit
+	// (associated with many distinct brand-new apexes). The WebUI badges these so
+	// the user understands why such apps never get auto-learned rules.
+	FlywheelExcluded bool     `json:"flywheel_excluded,omitempty"`
+	UID              int      `json:"uid"`
+	FirstSeen        int64    `json:"first_seen"`
+	LastSeen         int64    `json:"last_seen"`
+	ActiveConns      int      `json:"active_conns"`        // current /proc/net count
+	TotalConns       uint64   `json:"total_conns"`         // cumulative
+	TopSNIs          []string `json:"top_snis,omitempty"`  // up to 8 distinct SNIs
+	TopRules         []string `json:"top_rules,omitempty"` // matched rule IDs (HNC L3 rules)
 	// v5.6.0-rc5: per-rule hit counts, exposed for debugging the
 	// auto-expansion threshold (autoExpandMinHits = 10). Without this it
 	// was impossible to tell from outside whether the goroutine was
