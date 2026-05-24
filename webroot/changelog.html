@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc25 -->
+<div class="cl-section">
+  <div class="cl-title">📡 v5.7.0-rc25: 开机自动开热点(ColorOS 真机诊断后修) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>诊断结论</b>: 你这台 ColorOS 上,命令行只有 cmd wifi start-softap 能开热点,且必须让固件自选频段(否则会撞频段失败);而且它开的是"本地热点",系统不帮它共享流量。其余两种开热点命令在 ColorOS 上根本没实现。</li>
+    <li><b>修了什么</b>: ① 开热点时让固件自选频段(不再撞频段失败);② 去掉多余的"打开 WiFi"动作(以前会无故打开你的 WiFi);③ 开热点后模块自己做 NAT 转发,尽量让连上的设备能用你的流量上网;④ 界面如实说明这个限制。</li>
+    <li><b>需要你验证</b>: 本地热点能不能给连上的设备发 IP、能不能上网,得真机测(建议先把手动热点关掉再测,免得频段冲突)。如果连上没网,说明这条路在你机型走不通,那就还是从系统设置手动开热点。</li>
+    <li>说明: 纯脚本+界面改动,不用重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc24 -->
 <div class="cl-section">
   <div class="cl-title">🩹 v5.7.0-rc24: 修热点「立即启动」卡死 + 低延迟 no_aqm <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

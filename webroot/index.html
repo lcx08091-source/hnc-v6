@@ -4918,7 +4918,7 @@ body.kb-open .container {
         <div class="set-icon purple"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg></div>
         <div class="set-info">
           <div class="set-label">开机自动开热点</div>
-          <div class="set-desc">启动后自动开启 WiFi 热点</div>
+          <div class="set-desc">开机后自动开 WiFi 热点。注:ColorOS 不让命令行开"带流量共享"的系统热点,本模块改用"起本地热点 + 自建 NAT 共享";若连上没网,请改从系统设置手动开。</div>
         </div>
         <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="热点自启动" id="hs-autostart" data-action="toggle-hs-autostart"></div>
       </div>
@@ -4949,7 +4949,7 @@ body.kb-open .container {
         </div>
       </div>
     </div>
-    <div class="set-footer">技术说明: Android 13+ 用 <code>cmd wifi start-softap</code>(主力) · 低版本降级到 <code>cmd tethering</code> / <code>svc wifi hotspot</code>。日志: <code>/data/local/hnc/logs/hotspot.log</code></div>
+    <div class="set-footer">技术说明: ColorOS 真机实测——<code>cmd tethering</code>/<code>svc wifi hotspot</code> 无 shell 实现,只有 <code>cmd wifi start-softap -b any</code> 能起,但那是"本地热点"(系统不给它做流量共享)。所以本模块起热点后自己补 <code>ip_forward</code>+<code>iptables MASQUERADE</code> 到上联接口做共享。若客户端连上没网,说明本地热点这条路在你机型上不通,请改从系统设置开热点(那条才是系统原生共享)。日志: <code>/data/local/hnc/logs/hotspot.log</code></div>
 
     <!-- Refresh mode -->
     <div class="sec-title">刷新与功耗</div>

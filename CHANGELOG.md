@@ -18,6 +18,15 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc25, 2026-05-25)
+- **开机自动开热点(ColorOS)真机诊断后修复**(`bin/hotspot_autostart.sh` + `webroot/index.html`)。真机 `cmd wifi` 探测结论:
+  - `cmd tethering tether wifi` → **No shell command implementation**;`svc wifi hotspot` → 不存在 —— ColorOS **这两个兜底是死的**。
+  - `cmd wifi start-softap` 能用,但**不带 `-b` 会撞频段** → `Soft AP start failed with tether error: 18`;`-b 5` / `-b any` **成功**。且它起的是**本地热点**(Android 明说 shell 命令不激活 internet tethering),系统不给它做 NAT/共享。
+  - 之前脚本里的 `svc wifi enable` 是多余的(softap 不需要开 STA WiFi,实测 WiFi 关着也能起),反而会**无谓打开用户的 WiFi**。
+  - **改动**:① start-softap 加 `-b any`(固件自选可用频段);② 删 `svc wifi enable`,只等 WifiService 可响应;③ **A 方向(自建共享)**:起热点成功后 `setup_nat` —— 检测上联(默认路由口)+ 本地热点口,`echo 1 > .../ip_forward` + `iptables -t nat MASQUERADE -o 上联` + `FORWARD` 放行(全 best-effort、幂等),让客户端用手机流量上网;`stop` 时 `teardown_nat` 撤掉;④ **B 方向(诚实标注)**:热点面板描述 + 技术说明如实写明 ColorOS 限制 + "没网就改从系统设置手动开"。
+  - ⚠ **本地热点能否给客户端发 IP / NAT 后能否上网,仍需真机验证**(要先关掉手动热点再测,避免频段冲突)。若本地热点这条路在该机型不通,只能走系统设置——UI 已如实说明。
+  - 纯 shell + 前端,`sh -n` / `node --check` 通过,不用重编。版本 rc24 → rc25(570125)。
+
 ### Fixed (v5.7.0-rc24, 2026-05-25)
 - **热点「立即启动」后端超时 + WebUI 卡死**(真机)。根因两条叠加:(a) `bin/hotspot_autostart.sh` 的 `start` 子命令**无条件 sleep 开机延迟 `hotspot_delay`(默认 60s)**,手动「立即启动」也照睡;(b) `daemon/hnc_httpd/action_v5.go:actionHotspotStart` 用 `runBin` **同步**跑该脚本,而 `handleAction` 期间持**全局写锁 `stateMu.Lock()`** → 所有 `/api/devices`/`/api/live` 轮询被阻塞 → 前端 ~9s(curl `--max-time 6` + `withTimeout 9000`)必超时报「后端无响应」、UI 冻住。
   - **修复**:`hotspot_autostart.sh` 新增 `start-now`(= `start` 但跳过延迟,SELinux/wifi/重试逻辑复用);`actionHotspotStart` 改为 `runBinDetached(... "start-now")` **异步立即返回**(不持锁久等);`webroot/index.html` 「立即启动」处理改为触发后**轮询 `/api/live` 的 `hotspot_active`**(每 2s,最多 ~24s):起来了报「热点已启动」并刷新,超时报「未就绪,请看 hotspot.log」。不再卡死、不再误报超时。开机后台路径(`service.sh`)仍用 `start`(保留延迟)。

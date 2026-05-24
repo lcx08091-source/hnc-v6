@@ -73,6 +73,45 @@ get_setting() {
     [ "$val" = "null" ] || [ -z "$val" ] && echo "" || echo "$val"
 }
 
+# rc25: ColorOS 不支持命令行开「带网络共享」的热点(cmd tethering 无 shell 实现、
+# svc wifi 无 hotspot 子命令);cmd wifi start-softap 只起「本地热点」(Android 明说
+# 不激活 internet tethering)。所以这里手动做 NAT:把本地热点接口的流量
+# MASQUERADE 到上联(默认路由)接口,让连上的设备能用手机流量上网。
+# 全程 best-effort:失败只是没网,不影响热点起来(日志会记;否则请从系统设置开)。
+detect_up_iface() { ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
+detect_ap_iface() {
+    _up="$1"
+    for _i in ap0 wlan1 wlan2 wlan3 swlan0 wlan0; do
+        [ "$_i" = "$_up" ] && continue
+        ip addr show "$_i" 2>/dev/null | grep -q 'inet ' && { echo "$_i"; return; }
+    done
+}
+setup_nat() {
+    up=$(detect_up_iface)
+    sleep 2  # 等本地热点接口拿到子网/IP
+    ap=$(detect_ap_iface "$up")
+    if [ -z "$ap" ] || [ -z "$up" ]; then
+        log "NAT: 找不到 ap=[$ap] / up=[$up],跳过 —— 客户端可能没网,请改从系统设置开热点"
+        return 0
+    fi
+    log "NAT: ap=$ap up=$up,启用 ip_forward + MASQUERADE + FORWARD"
+    { echo 1 > /proc/sys/net/ipv4/ip_forward; } 2>/dev/null || sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
+    iptables -t nat -C POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true
+    iptables -C FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || true
+    iptables -C FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    log "NAT: done (ap=$ap up=$up)"
+}
+teardown_nat() {
+    up=$(detect_up_iface)
+    [ -n "$up" ] && iptables -t nat -D POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true
+    ap=$(detect_ap_iface "$up")
+    if [ -n "$ap" ] && [ -n "$up" ]; then
+        iptables -D FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || true
+        iptables -D FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    fi
+    log "NAT: torn down"
+}
+
 CMD=${1:-start}
 
 case "$CMD" in
@@ -127,12 +166,13 @@ start|start-now)
     sleep 1
 
     # ── 2. 等待 WifiService 就绪 ────────────────────────────
+    # rc25: 不再 svc wifi enable —— softap 不需要开 STA WiFi(真机实测 WiFi 关着也能起),
+    # 之前 enable 会无谓打开用户的 WiFi。仅等 WifiService 可响应即可。
     log "Waiting for WifiService..."
-    svc wifi enable 2>/dev/null || true
     i=0
-    while [ $i -lt 30 ]; do
+    while [ $i -lt 15 ]; do
         [ -n "$(cmd wifi status 2>/dev/null)" ] && break
-        sleep 2; i=$((i+1))
+        sleep 1; i=$((i+1))
     done
     log "WifiService check done (${i} retries)"
 
@@ -148,28 +188,31 @@ start|start-now)
     # ── 4. 启动热点（多方法兜底）───────────────────────────
     STARTED=0
 
-    # 方法1: cmd wifi start-softap（Android 13+）
+    # 方法1: cmd wifi start-softap（Android 13+ 主力,真机唯一可用)
+    # rc25: 加 -b any —— 真机实测不带 -b 时默认频段会撞(error 18),-b any 让固件自选
+    # 可用频段后成功起来。SEC 仍按 wpa2→wpa3→… 兜底。
     for attempt in 1 2 3; do
         for SEC in wpa2 wpa3 wpa3_transition open; do
-            RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" 2>&1)
-            echo "$RESULT" | grep -qi "started\|success" && STARTED=1 && log "started via cmd wifi (sec=$SEC)" && break 2
+            RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" -b any 2>&1)
+            echo "$RESULT" | grep -qi "started\|success" && STARTED=1 && log "started via cmd wifi (sec=$SEC -b any)" && break 2
         done
         [ "$STARTED" = "1" ] && break
         [ "$attempt" -lt 3 ] && sleep 5
     done
 
-    # 方法2: cmd tethering
+    # 方法2/3(cmd tethering / svc wifi hotspot)在 ColorOS 上无 shell 实现,保留仅作
+    # 其他 ROM 兜底;ColorOS 走不到这里。
     if [ "$STARTED" = "0" ]; then
         cmd tethering tether wifi 2>/dev/null && STARTED=1 && log "started via cmd tethering"
     fi
-
-    # 方法3: svc
     if [ "$STARTED" = "0" ]; then
         svc wifi hotspot enable 2>/dev/null && STARTED=1 && log "started via svc"
     fi
 
     if [ "$STARTED" = "1" ]; then
         rm -f "$HNC_DIR/run/uplink_unsupported" "$HNC_DIR/run/uplink_fail_count" "$HNC_DIR/run/uplink_unsupported_logged" 2>/dev/null || true
+        # rc25: 本地热点没有系统 tethering 的 NAT,手动补一份,让客户端能上网。
+        setup_nat
         log "=== Hotspot autostart SUCCESS ==="
     else
         log "=== Hotspot autostart FAILED ==="; exit 1
@@ -178,6 +221,7 @@ start|start-now)
 
 stop)
     log "Stopping hotspot..."
+    teardown_nat   # rc25: 先撤我们加的 NAT 规则
     cmd wifi stop-softap 2>/dev/null \
         || cmd tethering untether wifi 2>/dev/null \
         || svc wifi hotspot disable 2>/dev/null
