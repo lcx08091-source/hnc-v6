@@ -18,6 +18,12 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc37, 2026-05-25)
+- **审查报告真问题修复 · B 组(打包瘦身)**。纯 CI/打包改动(`.github/workflows/build.yml` + `.gitignore`),无运行时代码变更:
+  - **PKG-1 hnc_watchdog 未 strip + 可能过期**:`bin/hnc_watchdog` 此前是**提交进 git 的预编译二进制**,而 CI 从无构建步骤 → 发布的是陈旧(改了 `src/dpid/cmd/hnc_watchdog` 也不会重编)且未 strip(3.1M)的版本;service.sh 优先用它(L405)。修:① 加 CI 步骤从源码构建 `bin/hnc_watchdog`(`-trimpath -ldflags="-s -w"`,与 hnc_dpid 同款,并断言已 strip);② 从 git 取消跟踪 + 加进 `.gitignore`(对齐 hnc_dpid/hnc_httpd 的"CI 产物不入库"约定)。此后每次 CI 重编为最新 + 已 strip(2.6M)。注:CI 用 `GOOS=android` 产物为 dynamically-linked(linker64),与 hnc_dpid 一致、设备已验证可用。
+  - **PKG-2 发行 zip 全量打包开发产物**:`zip -rqX . ` 仅排除了 tools/ground_truth → `src/`(8.7M)、`docs/`、`test/`、`third_party_build/`、`third_party_prebuilt/`、`daemon/**` 下 `.go/.c/.h` 源码、`PATCH-NOTES-*.md` / 设计类 `.md` 都进了刷机包。运行时一概不依赖(已核 service/post-fs-data/bin 无引用;Go/C 源码编译产物在 bin/);加排除后刷机包减约 9MB。保留 README/CHANGELOG/SECURITY + 运行时目录。
+  - 仅打包/CI 改动,**需 CI 重新走流程**产出瘦身包;YAML 已校验。版本 rc36 → rc37(570137)。
+
 ### Fixed (v5.7.0-rc36, 2026-05-25)
 - **第三方审查报告(基于 rc32)逐条核查后的真问题修复 · A 组(功能/正确性)**。用户把项目发给多个 AI 审查;我对照 rc35 源码逐条验证,本组修确认为真且影响正确性的项(误报/已修/by-design 见 CHANGELOG 末尾说明,不动代码):
   - **GS-1 全局整形 init_tc 一致性缺口**(`bin/tc_manager.sh`):`init_tc` 用 `DEFAULT_RATE` 建 `1:1`,而全局整形 ceil 此前只在 `restore_rules` 末段恢复。ROM 把根 qdisc 换成 mq/noqueue → `ensure_egress_htb_ready`→`init_tc` 重建 → 1:1 退回全速,UI 仍显示开启,直到下次 restore 才纠回。修:抽 `apply_global_shaper_if_enabled <iface>`,在 `init_tc` 建好 HTB 树后 + `restore_rules` 共用同一逻辑;树重建后立刻把 1:1 ceil 压回 WAN 带宽。`set_global_shaper` 内的 `ensure_egress_htb_ready` 在树已就绪时直接返回,不会递归回 init_tc(已验证)。

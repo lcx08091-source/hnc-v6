@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc37 -->
+<div class="cl-section">
+  <div class="cl-title">📦 v5.7.0-rc37: 刷机包瘦身 + 看门狗二进制自动重编(第二批·打包) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>包更小</b>: 刷机包以前把源码(src,8.7M)、文档、测试、开发产物都打了进去。现在排除这些纯开发文件,刷机包减小约 9MB,只留运行真正需要的。</li>
+    <li><b>看门狗更新更可靠</b>: 后台看门狗程序(hnc_watchdog)以前是手动放进仓库的旧版、且没瘦身;现在改由编译流水线每次自动重编最新版并瘦身,不会再发布过期版本。</li>
+    <li>说明: 这版只改打包/编译流程,不动运行逻辑;重新出包后刷入即可。还剩最后一批"轻量补丁"。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc36 -->
 <div class="cl-section">
   <div class="cl-title">🔧 v5.7.0-rc36: 外部审查报告的真问题修复(第一批·功能正确性) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

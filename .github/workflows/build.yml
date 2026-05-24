@@ -108,6 +108,20 @@ jobs:
           file ../../bin/hnc_dpid | grep -q "ARM aarch64" || exit 1
           chmod 755 ../../bin/hnc_dpid
 
+      # rc36/PKG-1: rebuild hnc_watchdog fresh + stripped every CI run. It was a
+      # committed prebuilt that CI never rebuilt → shipped stale + unstripped.
+      # service.sh prefers this Go watchdog over the shell watchdog.sh.
+      - name: Build hnc_watchdog (Go)
+        run: |
+          cd src/dpid
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w" \
+            -o ../../bin/hnc_watchdog ./cmd/hnc_watchdog
+          ls -lh ../../bin/hnc_watchdog
+          file ../../bin/hnc_watchdog | grep -q "ARM aarch64" || exit 1
+          file ../../bin/hnc_watchdog | grep -q "not stripped" && { echo "ERROR: hnc_watchdog not stripped"; exit 1; }
+          chmod 755 ../../bin/hnc_watchdog
+
       # ─── Build app-label dex helper (Java → dex) ──────────
       # Reads real localized PackageManager labels on-device via app_process.
       # Compiled against a public android.jar; @hide bootstrap done by
@@ -248,7 +262,22 @@ jobs:
             -x "tools/ground_truth/*" \
             -x "tools/ground_truth" \
             -x "tools/applabel/*" \
-            -x "tools/applabel"
+            -x "tools/applabel" \
+            -x "src/*" -x "src" \
+            -x "docs/*" -x "docs" \
+            -x "test/*" -x "test" \
+            -x "third_party_build/*" -x "third_party_build" \
+            -x "third_party_prebuilt/*" -x "third_party_prebuilt" \
+            -x "daemon/**/*.go" \
+            -x "daemon/**/*.c" \
+            -x "daemon/**/*.h" \
+            -x "PATCH-NOTES-*.md" \
+            -x "MIGRATION-PROPOSAL-*.md" \
+            -x "ARCHITECTURE.md" \
+            -x "EVOLUTION.md" \
+            -x "COMPATIBILITY.md" \
+            -x "INSTRUCTIONS.md" \
+            -x "CLAUDE.md"
           
           echo "OUT_ZIP=$OUT" >> $GITHUB_ENV
           ls -lh "$OUT"

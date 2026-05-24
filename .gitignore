@@ -1,5 +1,6 @@
 # Compiled binaries that CI builds from source - exclude from git
 bin/hnc_dpid
+bin/hnc_watchdog
 bin/hnc_tc_ingress
 bin/hnc_launcher
 bin/fork_probe
