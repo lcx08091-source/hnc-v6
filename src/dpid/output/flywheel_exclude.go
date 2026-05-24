@@ -52,32 +52,44 @@ const (
 // to be exhaustive — conduit auto-detection covers the long tail; this just
 // gives common apps immediate, deterministic exclusion.
 var builtinFlywheelExcludePkgs = map[string]struct{}{
-	// Clash family
-	"com.follow.clash":              {}, // FlClash
-	"com.github.kr328.clash":        {}, // Clash for Android / Meta
-	"com.github.metacubex.clash.meta": {},
-	// v2ray / Xray
-	"com.v2ray.ang":      {}, // v2rayNG
-	"com.v2ray.actinium": {},
-	// sing-box / NekoBox
-	"io.nekohasekai.sfa":           {}, // sing-box for Android
-	"moe.nb4a":                     {}, // NekoBox
-	"io.nekohasekai.sagernet":      {}, // SagerNet
-	// shadowsocks
-	"com.github.shadowsocks": {},
-	// other proxy front-ends
-	"com.getsurfboard":  {}, // Surfboard
-	"com.hiddify.hiddify": {}, // Hiddify
-	"app.hiddify.com":    {},
-	// mainstream VPNs
-	"com.wireguard.android": {}, // WireGuard
-	"net.openvpn.openvpn":   {}, // OpenVPN Connect
-	"de.blinkt.openvpn":     {}, // OpenVPN for Android
-	"com.tailscale.ipn":     {}, // Tailscale
-	"org.torproject.android": {}, // Orbot
-	"ch.protonvpn.android":  {}, // ProtonVPN
-	"com.nordvpn.android":   {}, // NordVPN
-	"com.expressvpn.vpn":    {}, // ExpressVPN
+	// ── Clash family ──
+	"com.follow.clash":                {}, // FlClash
+	"com.github.kr328.clash":          {}, // Clash for Android (Kr328)
+	"com.github.metacubex.clash.meta": {}, // Clash Meta for Android (MetaCubeX)
+	// ── v2ray / Xray ──
+	"com.v2ray.ang":      {}, // v2rayNG (verified)
+	"com.v2ray.actinium": {}, // Actinium
+	// ── sing-box / SagerNet family ──
+	"io.nekohasekai.sfa":      {}, // sing-box for Android / SFA (verified)
+	"io.nekohasekai.sagernet": {}, // SagerNet
+	"moe.nb4a":                {}, // NekoBox for Android
+	"moe.matsuri.lite":        {}, // Matsuri
+	// ── shadowsocks / trojan ──
+	"com.github.shadowsocks":       {}, // shadowsocks-android (verified)
+	"io.github.trojan_gfw.igniter": {}, // Igniter / trojan-gfw (verified)
+	// ── other proxy front-ends ──
+	"com.getsurfboard":    {}, // Surfboard
+	"com.hiddify.hiddify": {}, // Hiddify (older id)
+	"app.hiddify.com":     {}, // Hiddify (verified)
+	// ── WireGuard / OpenVPN / Tor ──
+	"com.wireguard.android":  {}, // WireGuard
+	"net.openvpn.openvpn":    {}, // OpenVPN Connect
+	"de.blinkt.openvpn":      {}, // OpenVPN for Android (ics-openvpn)
+	"org.torproject.android": {}, // Orbot (Tor)
+	// ── mesh / mainstream VPNs ──
+	"com.tailscale.ipn":                    {}, // Tailscale
+	"net.mullvad.mullvadvpn":               {}, // Mullvad VPN (open source, verified)
+	"org.outline.android.client":           {}, // Outline (Jigsaw)
+	"ch.protonvpn.android":                 {}, // ProtonVPN
+	"com.nordvpn.android":                  {}, // NordVPN
+	"com.expressvpn.vpn":                   {}, // ExpressVPN
+	"com.windscribe.vpn":                   {}, // Windscribe
+	"com.surfshark.vpnclient.android":      {}, // Surfshark
+	"com.cloudflare.onedotonedotonedotone": {}, // Cloudflare 1.1.1.1 / WARP
+	// ── local-VPN firewalls / DNS (own the tun → re-originate traffic) ──
+	"eu.faircode.netguard": {}, // NetGuard (open source, verified)
+	"com.celzero.bravedns": {}, // Rethink DNS + Firewall (open source, verified)
+	"com.adguard.android":  {}, // AdGuard
 }
 
 // flywheelExcludeFileData is the on-disk shape of flywheel_exclude.json.

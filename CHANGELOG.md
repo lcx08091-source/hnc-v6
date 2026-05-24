@@ -18,6 +18,15 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc34, 2026-05-25)
+- **扩充 VPN/代理飞轮排除清单**(`src/dpid/output/flywheel_exclude.go`,承 rc33,应用户要求"多收录开源 VPN")。从各项目 GitHub 仓库的 `build.gradle(.kts)` 里**核实 `applicationId`** 后扩充内置清单:
+  - **本会话已核实**:`io.github.trojan_gfw.igniter`(Igniter/trojan-gfw)、`net.mullvad.mullvadvpn`(Mullvad,开源)、`eu.faircode.netguard`(NetGuard,开源)、`com.celzero.bravedns`(Rethink DNS+Firewall,开源)、`io.nekohasekai.sfa`(sing-box SFA)、`com.v2ray.ang`(v2rayNG)、`com.github.shadowsocks`、`app.hiddify.com`(Hiddify)。
+  - **高把握新增**(权威文档/Play id):`org.outline.android.client`(Outline/Jigsaw)、`moe.matsuri.lite`(Matsuri)、`com.cloudflare.onedotonedotonedotone`(Cloudflare 1.1.1.1/WARP)、`com.windscribe.vpn`(Windscribe)、`com.surfshark.vpnclient.android`(Surfshark)、`com.adguard.android`(AdGuard)。
+  - **截图佐证**:用户截图里的 Clash Meta for Android = `com.github.metacubex.clash.meta`,rc33 已在清单内。
+  - 清单现覆盖 Clash 三件套 / v2rayNG / sing-box·SagerNet 家族(SFA·SagerNet·NekoBox·Matsuri)/ shadowsocks / trojan / WireGuard / OpenVPN(Connect + ics-openvpn)/ Tor·Orbot / 本地 VPN 防火墙(NetGuard·RethinkDNS·AdGuard)及主流商业 VPN(Proton·Nord·Express·Mullvad·Windscribe·Surfshark·WARP·Tailscale·Outline)。
+  - 清单外的 VPN 仍由 rc33 的「导管型 uid 自动识别」(≥8 个陌生主域)兜底;用户也可编辑 `/data/local/hnc/etc/flywheel_exclude.json` 自行增删(5min 内热加载)。包名写错只是不匹配、无副作用。
+  - 纯清单数据改动(`dpid` Go),**需 CI 重编 dpid**。`go vet ./...` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` 通过。版本 rc33 → rc34(570134)。
+
 ### Fixed (v5.7.0-rc33, 2026-05-25)
 - **修飞轮把 VPN/代理应用的流量错记成它的规则**(`src/dpid/output/`,用户开 FlClash 时发现 `capcom.co.jp` 等被晋级成「FlClash」的规则)。
   - **根因**:dpid 靠内核 uid 地面真值(`/proc/net` socket 属主)把 SNI 归因到 app。但 VPN/代理(Clash/v2rayNG/sing-box…)开着时,它**重新发起**别的 app 的所有流量 → 这些被代理流量的 socket 属主 uid 就是 VPN 的 → 飞轮把它们的域名错挂到 VPN(走法2 晋级出 `autopromo_capcom_co_jp → FlClash`)。

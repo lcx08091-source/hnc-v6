@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc33
-versionCode=570133
+version=v5.7.0-rc34
+versionCode=570134
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc33 · 修飞轮把 VPN/代理应用的流量错记成它的规则(用户开 FlClash 时把 capcom.co.jp 等晋级成 FlClash 规则)。根因:VPN 开着时别的 app 流量被代理走,socket 在内核归 VPN 的 uid,飞轮就把这些域名错挂到 VPN。修法两层:① 内置常见 VPN/代理包名清单(FlClash/Clash/v2rayNG/sing-box/SS/WireGuard 等)+ 用户可编辑 flywheel_exclude.json,观察期就跳过,不进飞轮;② 自动识别"导管型 uid"(一个 uid 攒了 ≥8 个互不相关的陌生主域 = VPN/代理/浏览器特征),禁止自动晋级;并自动降级已经错误晋级到 VPN 的规则(capcom→FlClash 会被自动清掉)。VPN 仍正常显示在"我的应用"列表,只是不再据其流量造规则。含 dpid(Go)改动,需 CI 重编。go vet + android/arm64 交叉编译通过。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc34 · 扩充 VPN/代理飞轮排除清单(承 rc33,应用户要求收录更多开源 VPN)。从各项目 GitHub 仓库核实 applicationId 后新增:Igniter(io.github.trojan_gfw.igniter)、Mullvad(net.mullvad.mullvadvpn)、Matsuri(moe.matsuri.lite)、Outline(org.outline.android.client)、NetGuard(eu.faircode.netguard)、RethinkDNS(com.celzero.bravedns)、AdGuard、Cloudflare 1.1.1.1/WARP、Windscribe、Surfshark 等;清单现覆盖 Clash 三件套/v2rayNG/sing-box 家族/SS/trojan/WireGuard/OpenVPN/Tor 及主流商业 VPN。清单外的 VPN 仍由"导管型 uid 自动识别"兜底,也可自行编辑 flywheel_exclude.json。纯清单数据改动(dpid Go),需 CI 重编。go vet + android/arm64 交叉编译通过。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485
