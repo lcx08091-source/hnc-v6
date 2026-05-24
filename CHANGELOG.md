@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc15, 2026-05-24)
+- **加固"无挂载模块"对根因 A(SukiSU 运行期卸 `/system/bin`)的韧性 —— 取外部 AI 建议的安全子集**。背景:把根因 A 的问题陈述发给外部 AI 咨询"能否从其他途径绕过",结论是"HNC 这种纯守护模块不该和 OverlayFS 全局 `/system` overlay 同命运"。我对其方案做了安全甄别后落地可安全的部分:
+  - **⚠ 否决了它的头号建议(用 `busybox sh -o standalone` 跑常驻脚本)**:实测本仓库常驻脚本(watchdog.sh / hnc_dpid_guard.sh / service.sh 等)**大量使用 `[[ ]]` 和 `(( ))`**,这是 mksh/ksh 方言,**busybox `ash` 不支持**,换解释器会直接把脚本跑崩。解释器**继续用 mksh**(rc13 已把 mksh 复制到 `/data`)。
+  - **`provision_fallback_tools` 升级**(`service.sh`):multicall 源**优先用常驻 `/data` 上的 KSU/Magisk busybox**(`/data/adb/ksu/bin/busybox` 等)——它永不被卸、且 applet 比 toybox 全(很多 ROM 的 toybox 不带 `awk`,而我们常驻循环 `awk` 用得很多);system 的 busybox/toybox 作兜底。applet 链接表从 11 个扩到含 `awk rm mkdir mv touch dirname basename stat readlink sort uniq find ln chmod chown id seq pidof ps xargs`,并**按二进制实际支持的 applet 列表(busybox `--list` / toybox 无参)安全建链**——探测不到就只建 toybox/busybox 都必有的核心集,绝不建出"调用即 unknown applet"的死链。
+  - **修 `device_detect.sh` 的 PATH 缺口**:它是常驻 daemon 循环(`while true`),但 PATH 此前**漏了 `/data/local/hnc/bin`**(watchdog/iptables/guard 在 rc11/rc13 都补了,就它没补)→ `/system/bin` 被卸时它的裸命令(`awk`/`grep`/`sleep`)仍会 ENOENT。现已补上。
+  - **新增空 `skip_mount` 文件**:本模块本就没有 `system/` 文件夹、不替换任何 `/system` 文件,`skip_mount` 显式声明"不参与 systemless 挂载"(KernelSU/Magisk 仅判存在;脚本/sepolicy/webroot 不受影响)。它不能阻止管理器对别的 overlay 做 umount,但让 HNC 明确不进入挂载规划。
+  - **根治仍在用户侧**(模块无法自行决定挂载后端):优先把挂载模式从 OverlayFS 切到 **Magic Mount / Hybrid Mount 的 Magic 后端**(HNC 不往 `/system/bin` 放东西 → Magic Mount 下该路径无模块挂载可拆,大概率消除整体消失);或改成只对敏感 app 精准 umount,而非全局关 umount(避免削弱挂载层 root 隐藏)。namespace 隔离(`unshare`+private+bind pin)作为 OverlayFS 用户的实验性增强,暂不默认上。版本 rc14 → rc15(570115)。
+
 ### Fixed (v5.7.0-rc14, 2026-05-24)
 - **WebUI 假代码审计 — 清掉"看着像真、其实是假数据或空操作"的前端代码**(分支 `webui-fake-code-audit`;全量通读 `webroot/index.html` 13032 行 + 远程 `daemon/hnc_httpd/web/app.js` + 27 个 Go handler)。结论:从 v9 demo 继承的 mock 数据绝大多数已被替换成真实后端源,残留 6 处:
   1. **(HIGH)展开单台设备选模板时静默空操作**(`webroot/index.html` `tpl-pick` 单设备分支)——批量模式走 `batchApply→applyLimitBackend`(真调后端),但**单台展开后选模板只改内存 `DEVICES` 数组 + 弹"已应用模板"成功 toast,从不发 `/api/action rule_set`**,tc/iptables 规则根本没下,下次轮询乐观值被真实数据覆盖、限速静默消失。改为真正 `applyLimitBackend`(两向都 0 走 `clearLimitBackend`)→ `requestForceRefresh` → 成功/失败如实 toast。

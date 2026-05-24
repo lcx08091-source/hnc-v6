@@ -1,3 +1,16 @@
+<!-- v5.7.0-rc15 -->
+<div class="cl-section">
+  <div class="cl-title">🛡️ v5.7.0-rc15: 让"不改系统的守护模块"更扛得住 /system/bin 被卸 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>背景</b>: 把"/system/bin 运行期消失"的问题发给外部 AI 咨询后,采纳了其中安全可落地的部分(并否决了一个会把脚本跑崩的建议)。</li>
+    <li><b>更全更稳的兜底工具</b>: 开机预置兜底命令时,优先用常驻 /data、命令更全(带 awk)的 busybox,而不是命令较少的 toybox;并按它实际支持的命令安全建链,绝不建出"点了报错"的死链接。</li>
+    <li><b>补一个常驻进程的命令兜底缺口</b>: 设备探测这个常驻循环之前漏配了 /data 兜底路径,/system/bin 被卸时它的命令会失败,现已补上。</li>
+    <li><b>显式声明本模块不挂载系统</b>: HNC 本来就不改任何系统文件,新增标记让 root 管理器明确"这个模块不参与系统挂载"。</li>
+    <li><b>没换 shell 解释器</b>: 外部 AI 建议改用 busybox 的 ash,但本模块脚本用到 mksh 专有语法,ash 跑不了,所以继续用 mksh(更稳)。</li>
+    <li>说明: 这些都是"扛得住"的加固。真正根治还是建议你在 SukiSU 管理器里把挂载模式切到 Magic Mount,或只对个别敏感 app 单独隐藏,而不是全局关闭隐藏。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc14 -->
 <div class="cl-section">
   <div class="cl-title">🔍 v5.7.0-rc14: WebUI 假代码审计(清掉"看着真、其实假"的界面) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

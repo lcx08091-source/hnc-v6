@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc14
-versionCode=570114
+version=v5.7.0-rc15
+versionCode=570115
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc14 · WebUI 假代码审计:清掉几处"看着像真、其实是假/空操作"的前端代码。① 展开单台设备选模板时只改内存+弹"已应用"toast、根本没调后端 → 改为真正调 applyLimitBackend/clearLimitBackend 再强制刷新(原 HIGH bug,批量路径本来就对)。② 下拉刷新原是 setTimeout 假装刷新 → 改为真向后端拉 /api/live+/api/devices。③ "数据新鲜度"恒显"刚刚/不过期"(后端 /api/live 硬编码 snapshot_age_ms=0/stale=false)→ 改为基于客户端最近一次成功轮询的真实时间,停滞会翻"已过期";后端删掉这俩伪字段。④ /api/metrics 恒返回全 0 假计数 → 改为诚实 instrumented:false(本构建实时读文件无快照缓存),前端显示"实时读取"。⑤ 候选区"当前 463 个规则"硬编码假数字 → 删除。⑥ fetchHnIp 取不到 IP 时伪造 192.168.1.1 当远程地址 → 改为显示"无法获取本机 IP"。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc15 · 加固"无挂载模块"对根因 A 的韧性(咨询外部 AI 后取其安全子集):① 本模块本就不改 /system(无 system/ 文件夹),新增空 skip_mount 显式声明"不参与 systemless 挂载"。② provision_fallback_tools 优先用常驻 /data 且 applet 更全(含 awk)的 KSU/Magisk busybox 作 multicall 源(toybox 兜底),并按二进制实际支持的 applet 安全建链(awk/rm/mkdir/mv/stat/dirname... 扩展,只建支持的、不建死链)。③ 修 device_detect.sh(常驻 daemon 循环)PATH 漏掉 /data/local/hnc/bin 的缺口。④ 不切 busybox ash 解释器——脚本是 mksh 方言([[ ]]/(( )))ash 跑不了,继续用 mksh。根治路线仍是用户侧切 Magic Mount 或精准 umount。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

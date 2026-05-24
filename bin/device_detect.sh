@@ -1,7 +1,9 @@
 #!/system/bin/sh
 
 # v3.5.0 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+# rc15: 追加 /data/local/hnc/bin —— device_detect.sh 是常驻 daemon 循环(while true),
+# /system/bin 被卸时裸命令(awk/grep/sleep...)要能 fallthrough 到 /data 预置副本。
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
 # device_detect.sh — HNC 设备检测（C daemon 代理 + shell 兜底）
 #
 # 【增量重构 v2.5.4 → v3.0.0】

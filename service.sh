@@ -28,17 +28,32 @@ rm -rf $RUN/hnc_json.lock 2>/dev/null || true
 provision_fallback_tools() {
     bbdir="$HNC_DIR/bin"
     mc=""
-    for c in /system/bin/toybox /system/xbin/busybox /data/adb/magisk/busybox /data/adb/ksu/bin/busybox; do
+    # rc15: 优先用常驻 /data 上、且 applet 更全(含 awk)的 busybox 作 multicall 源。
+    # KSU/Magisk 的 busybox 在 /data,永不被卸且一直在;toybox 的 applet 更少、很多
+    # ROM 的 toybox 还不带 awk(我们常驻循环 awk 用得很多)。system 的 busybox/toybox
+    # 作兜底(启动时 /system 仍正常,拷到 /data 后即使后续 /system 被卸,副本仍在)。
+    for c in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox /system/xbin/busybox /system/bin/busybox /system/bin/toybox; do
         [ -x "$c" ] && { mc="$c"; break; }
     done
     if [ -n "$mc" ] && cp -f "$mc" "$bbdir/.hnc_mc" 2>/dev/null; then
         chmod 755 "$bbdir/.hnc_mc" 2>/dev/null
-        for ap in sleep head tail cat printf date grep sed cut tr wc; do
-            ln -sf .hnc_mc "$bbdir/$ap" 2>/dev/null
+        # 只给该 multicall 二进制真正支持的 applet 建符号链接,避免建出"调用即报
+        # unknown applet"的死链接。busybox 用 --list;toybox 无参时打印 applet 列表。
+        _al=" $("$bbdir/.hnc_mc" --list 2>/dev/null | tr '\n' ' ') "
+        [ "$_al" = "  " ] && _al=" $("$bbdir/.hnc_mc" 2>/dev/null | tr '\n' ' ') "
+        _core="sleep head tail cat printf date grep sed cut tr wc"
+        _extra="awk rm mkdir mv touch dirname basename stat readlink sort uniq find ln chmod chown id seq pidof ps xargs"
+        for ap in $_core $_extra; do
+            if [ "$_al" != "  " ]; then
+                case "$_al" in *" $ap "*) ln -sf .hnc_mc "$bbdir/$ap" 2>/dev/null ;; esac
+            else
+                # applet 列表探测失败:只建 toybox/busybox 都必有的核心集,绝不乱建
+                case " $_core " in *" $ap "*) ln -sf .hnc_mc "$bbdir/$ap" 2>/dev/null ;; esac
+            fi
         done
-        command -v log >/dev/null 2>&1 && log "rc13: provisioned fallback applets from $mc -> $bbdir"
+        command -v log >/dev/null 2>&1 && log "rc15: provisioned fallback applets from $mc -> $bbdir"
     fi
-    # sh: 用 mksh(脚本是 mksh 方言),保证 fallback 的 sh 行为一致
+    # sh: 脚本是 mksh 方言([[ ]] / (( )) / function),必须用 mksh,不能换 busybox ash
     if [ -e /system/bin/mksh ] && cp -fL /system/bin/mksh "$bbdir/sh" 2>/dev/null; then
         chmod 755 "$bbdir/sh" 2>/dev/null
     elif [ -e /system/bin/sh ] && cp -fL /system/bin/sh "$bbdir/sh" 2>/dev/null; then
