@@ -389,25 +389,20 @@ while true; do
     disabled=$(read_json_bool_key disable_capture "$CONFIG" 2>/dev/null)
     iface=$(get_iface)
 
+    # v5.7.0-rc7: always launch the real dpid daemon, even when the hotspot
+    # iface isn't ready. dpid self-selects blind mode for AP capture but keeps
+    # running self-capture (/proc/net + self-iface SNI) + the auto-id flywheel,
+    # which use the phone's OWN interfaces, not the AP. We rebind to full capture
+    # once the iface becomes ready (netlink event or the periodic check in the
+    # monitor loop below). Previously the not-ready branches wrote a one-shot
+    # blind state and 'continue'd WITHOUT launching dpid, so self-capture and the
+    # flywheel were dead whenever the hotspot was off.
+    launch_blind=0
     if [ "$disabled" = "true" ]; then
-        # Let real dpid write the official disabled state.
-        log "disable_capture=true; launching real dpid once"
-    else
-        if ! iface_exists "$iface"; then
-            write_waiting_state "$iface" "waiting for hotspot interface $iface to appear; rc17 guard will rebind immediately on netlink event"
-            log "iface $iface missing; waiting"
-            sleep_s 3
-            continue
-        fi
-        if ! iface_ready "$iface"; then
-            write_waiting_state "$iface" "waiting for hotspot interface $iface to become usable; rc17 relaxed-ready fast retry active; $(iface_ready_reason "$iface")"
-            # Startup fast window, then low-frequency fallback.
-            delay=$(echo "$FAST_DELAYS" | awk -v i="$fast_index" '{print $i}')
-            [ -z "$delay" ] && delay=3
-            [ "$fast_index" -lt 7 ] && fast_index=$((fast_index + 1))
-            sleep_s "$delay"
-            continue
-        fi
+        log "disable_capture=true; launching real dpid (it writes the disabled state)"
+    elif ! iface_exists "$iface" || ! iface_ready "$iface"; then
+        launch_blind=1
+        log "hotspot iface $iface not ready; launching dpid BLIND (self-capture still runs): $(iface_ready_reason "$iface" 2>/dev/null)"
     fi
 
     if [ "$iface" != "$last_iface" ]; then
@@ -416,7 +411,7 @@ while true; do
     fi
     fast_index=1
 
-    log "launching hnc_dpid on iface=$iface"
+    log "launching hnc_dpid on iface=$iface (blind=$launch_blind)"
     "$REAL_BIN" -config "$CONFIG" >> "$LOG_DIR/dpid.log" 2>&1 &
     child=$!
     echo "$child" > "$CHILD_PID_FILE"
@@ -474,27 +469,37 @@ while true; do
             kill "$child" 2>/dev/null || true
             break
         fi
-        if [ "$disabled" != "true" ] && ! iface_ready "$iface"; then
-            # rc29.2: also apply grace to iface_ready checks. Tethering's
-            # transient DORMANT→UP transitions in first GRACE_S sec aren't
-            # cause for restart.
-            if [ "$age" -lt "$GRACE_S" ]; then
-                log "iface $iface not ready (age=${age}s < ${GRACE_S}s, grace period); leaving dpid alone"
-                sleep_s 0.2
-                continue
+        if [ "$disabled" != "true" ]; then
+            if [ "$launch_blind" = "1" ]; then
+                # v5.7.0-rc7: launched blind (no usable hotspot) — dpid is running
+                # self-capture meanwhile. Upgrade to full AP capture as soon as the
+                # iface becomes usable. Don't treat "not ready" as a fault here.
+                if iface_ready "$iface"; then
+                    log "hotspot iface $iface became ready; rebind to full capture"
+                    kill "$child" 2>/dev/null || true
+                    break
+                fi
+            else
+                if ! iface_ready "$iface"; then
+                    # rc29.2: grace for transient DORMANT→UP transitions in first GRACE_S.
+                    if [ "$age" -lt "$GRACE_S" ]; then
+                        log "iface $iface not ready (age=${age}s < ${GRACE_S}s, grace period); leaving dpid alone"
+                        sleep_s 0.2
+                        continue
+                    fi
+                    write_waiting_state "$iface" "hotspot interface $iface is not currently usable; rc17 guard is rebinding; $(iface_ready_reason "$iface")"
+                    log "iface $iface not ready while running; rebind when usable: $(iface_ready_reason "$iface")"
+                    kill "$child" 2>/dev/null || true
+                    break
+                fi
+                if grep -qi 'network is down' "$RUN/dpi_state.json" 2>/dev/null; then
+                    # rc12 failure: dpid started during the AP iface down/up window
+                    # and stayed blind. Kill so next iteration binds after IFF_UP.
+                    log "dpi_state reports network is down; restart capture immediately"
+                    kill "$child" 2>/dev/null || true
+                    break
+                fi
             fi
-            write_waiting_state "$iface" "hotspot interface $iface is not currently usable; rc17 guard is rebinding; $(iface_ready_reason "$iface")"
-            log "iface $iface not ready while running; rebind when usable: $(iface_ready_reason "$iface")"
-            kill "$child" 2>/dev/null || true
-            break
-        fi
-        if grep -qi 'network is down' "$RUN/dpi_state.json" 2>/dev/null; then
-            # The original rc12 failure: dpid started while AP iface was in the
-            # small down/up transition window and stayed blind.  Kill it so the
-            # next iteration can bind after IFF_UP is stable.
-            log "dpi_state reports network is down; restart capture immediately"
-            kill "$child" 2>/dev/null || true
-            break
         fi
         if [ "$age" -lt 5 ]; then sleep_s 0.2; else sleep_s 3; fi
     done

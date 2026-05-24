@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc7 -->
+<div class="cl-section">
+  <div class="cl-title">🛠️ v5.7.0-rc7: 修"本机追踪必须开热点才生效" <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>找到 rc6"未上报"的真正根因</b>: dpid(DPI 守护进程)之前<b>只在热点开着时才被拉起</b>。你的设备因为 ColorOS 的兼容性回退到了"必须等热点就绪"的那个启动器,所以热点没开时 dpid 根本没跑,本机 app 自然识别不了。</li>
+    <li><b>修复</b>: 把两个会门控的启动器都改成<b>无论热点开没开都常驻拉起 dpid</b>——没热点时,连接到热点的"客户端抓取"暂停(blind),但<b>本机自己的 app 追踪 + 自动识别飞轮照常跑</b>(用的是本机网卡,跟热点无关);热点一打开,自动恢复全量抓取。</li>
+    <li>配合上一版的"本机追踪常驻",现在<b>不用开热点也能识别本机 app</b>。</li>
+    <li>提示: 这是后台守护进程的核心改动,建议刷后留意——热点关着时应用 tab 应显示"运行中";开热点后设备客户端识别仍正常。如有异常请反馈 dpid.log。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc6 -->
 <div class="cl-section">
   <div class="cl-title">🔁 v5.7.0-rc6: 本机追踪改为"常驻"(默认开) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

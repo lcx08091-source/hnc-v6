@@ -495,8 +495,8 @@ func ifNameFromAddrMsg(m *syscall.NetlinkMessage) string {
 //
 // Returns true if we should immediately re-loop (rebind), false if we should
 // shut down.
-func runChild(iface string) bool {
-	logf("launching hnc_dpid on iface=%s", iface)
+func runChild(iface string, launchBlind bool) bool {
+	logf("launching hnc_dpid on iface=%s (blind=%v)", iface, launchBlind)
 
 	cmd := exec.Command(realBin, "-config", configPath)
 	cmd.Env = os.Environ()
@@ -572,16 +572,27 @@ func runChild(iface string) bool {
 				killAndReap()
 				return true
 			}
-			if !ifaceReady(iface) {
-				logf("iface %s no longer ready; rebind (%s)", iface, ifaceReadyReason(iface))
-				writeWaitingState(iface, "iface lost mid-run: "+ifaceReadyReason(iface))
-				killAndReap()
-				return true
-			}
-			if dpidReportsNetworkDown() {
-				logf("dpi_state reports 'network is down'; restart immediately")
-				killAndReap()
-				return true
+			if launchBlind {
+				// Launched without a ready hotspot iface: dpid is running blind for
+				// AP capture but self-capture + the flywheel are alive. Upgrade to
+				// full capture as soon as the iface becomes usable.
+				if ifaceExists(iface) && ifaceReady(iface) {
+					logf("hotspot iface %s became ready; rebind to full capture", iface)
+					killAndReap()
+					return true
+				}
+			} else {
+				if !ifaceReady(iface) {
+					logf("iface %s no longer ready; rebind (%s)", iface, ifaceReadyReason(iface))
+					writeWaitingState(iface, "iface lost mid-run: "+ifaceReadyReason(iface))
+					killAndReap()
+					return true
+				}
+				if dpidReportsNetworkDown() {
+					logf("dpi_state reports 'network is down'; restart immediately")
+					killAndReap()
+					return true
+				}
 			}
 		}
 	}
@@ -590,12 +601,6 @@ func runChild(iface string) bool {
 // ─── main loop ───────────────────────────────────────────────────────────
 
 func mainLoop() {
-	fastDelays := []time.Duration{
-		0, 100 * time.Millisecond, 200 * time.Millisecond,
-		500 * time.Millisecond, 1 * time.Second,
-		1500 * time.Millisecond, 2 * time.Second,
-	}
-	fastIdx := 0
 	lastIface := ""
 
 	for {
@@ -608,37 +613,26 @@ func mainLoop() {
 		cfg := readConfig()
 		iface := getIface()
 
-		if !cfg.DisableCapture {
-			if !ifaceExists(iface) {
-				writeWaitingState(iface, "waiting for hotspot interface "+iface+" to appear")
-				logf("iface %s missing; waiting", iface)
-				if !sleepUntil(3 * time.Second) {
-					return
-				}
-				continue
-			}
-			if !ifaceReady(iface) {
-				writeWaitingState(iface, "waiting for "+iface+" to become usable: "+ifaceReadyReason(iface))
-				d := 3 * time.Second
-				if fastIdx < len(fastDelays) {
-					d = fastDelays[fastIdx]
-					fastIdx++
-				}
-				if !sleepUntil(d) {
-					return
-				}
-				continue
-			}
+		// v5.7.0-rc7: always launch the real dpid daemon, even when the hotspot
+		// iface isn't ready. dpid self-selects blind mode for AP capture but keeps
+		// running self-capture (/proc/net + self-iface SNI) + the auto-id flywheel,
+		// which use the phone's OWN interfaces, not the AP. runChild upgrades to
+		// full capture once the iface is ready (netlink event or 3s poll).
+		// Previously this wrote a one-shot waiting state and never launched the
+		// daemon, so self-capture/flywheel were dead whenever the hotspot was off.
+		launchBlind := false
+		if !cfg.DisableCapture && (!ifaceExists(iface) || !ifaceReady(iface)) {
+			launchBlind = true
+			logf("hotspot iface %s not ready; launching dpid blind (self-capture still runs): %s", iface, ifaceReadyReason(iface))
 		}
 
 		if iface != lastIface {
 			logf("target iface changed: [%s] -> [%s]", lastIface, iface)
 			lastIface = iface
 		}
-		fastIdx = 0
 
 		// runChild blocks until exit/rebind/shutdown.
-		if !runChild(iface) {
+		if !runChild(iface, launchBlind) {
 			return // shutdown requested
 		}
 		// Small damping after restart to avoid tight crash loops.

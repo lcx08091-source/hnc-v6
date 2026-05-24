@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc6
-versionCode=570106
+version=v5.7.0-rc7
+versionCode=570107
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc6 · 本轮: self-capture 改为常驻(默认开)。自动识别飞轮(per-uid 采样 + 自接口 SNI 抓取)全靠 self_capture.enabled flag, 之前默认关、用户不点开关就永远没数据/显示"未就绪"。service.sh 现在每次启动确保该 flag 存在=默认常驻开(临时关重启恢复)。注意: 若界面仍"dpid 暂未上报 self 块"(self=null 而非"采样器停止"), 多半是 dpid 没正常运行, 需查 logs/dpid.log, 常驻开关救不了。rc1~rc5 已含: 4-tab 导航/真实应用名/远程配对修复/候选累积器+WebUI 审批/自建实体库 166 条/设备 tab 客户端 app 识别。详见 CHANGELOG.md 与应用内更新日志.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc7 · 关键修复(找到 rc6"未上报"根因): dpid 之前只在热点开着时才被拉起。默认 C launcher 不卡, 但它在 ColorOS 上常 fork/TLS 探测失败 → 退到 shell guard / Go supervisor, 而这俩只有热点 iface ready 才启动 dpid → 热点没开时 dpid 根本没跑 → self 块永远不上报、飞轮拿不到数据。本轮把 shell guard 和 Go supervisor 都改成: 无论热点开没开都常驻拉起 dpid(没热点时 AP 抓取走 blind 模式, 但自抓取/飞轮照常跑, 用的是本机自己的网卡), 热点一就绪再自动 rebind 成全量抓取。配合 rc6 的 self-capture 常驻, 现在不依赖热点也能识别本机 app。rc1~rc6 已含: 4-tab 导航/真实应用名/远程配对修复/候选累积器+WebUI 审批/自建实体库 166 条/设备 tab 客户端识别/self 常驻。详见 CHANGELOG.md 与应用内更新日志.
 updateJson=
 minKernelSU=11485

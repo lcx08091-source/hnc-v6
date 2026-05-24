@@ -18,6 +18,15 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc7, 2026-05-24)
+- **dpid 只在热点开着时才运行(rc6"未上报 self 块"的真正根因)** — 读码 + 用户实测定位:
+  - dpid 由三个 launcher 之一拉起,优先级 **C launcher(`hnc_launcher`)→ shell guard(`hnc_dpid_guard.sh`)→ Go supervisor(`hnc_dpid_supervisor`)**。
+  - C launcher **不**门控热点(无条件跑 dpid),但它在 ColorOS 上常因 fork/TLS 探测失败被跳过 → 回退到 shell guard 或 Go supervisor;**这两个都只在热点 iface `ready` 时才启动 dpid**(否则只写一次性 waiting 状态、`continue`,从不拉起守护进程)。
+  - 后果:热点没开时 dpid 根本没跑 → `dpi_state.json` 没有 self 块(界面显示「dpid 暂未上报 self 块」而非「采样器停止」)→ 自抓取/飞轮永远拿不到数据。而自抓取用的是本机自己的网卡(rmnet/wlan0)+ `/proc/net`,**本不该依赖热点**。
+  - **修复**:`hnc_dpid_guard.sh` 与 `cmd/dpid_supervisor/main.go` 改为**无条件常驻拉起 dpid**——热点没就绪时 dpid 走 blind 模式(AP 抓取暂停,但 `main.go:303+` 的自抓取 + 飞轮 goroutine 照常跑),热点一就绪(netlink 事件或 3s 轮询)就自动 kill+rebind 升级成全量 AP 抓取。沿用各自原有的 grace/debounce/netlink 逻辑。C launcher 无需改(本就无条件)。
+  - 配合 rc6 的 self-capture 常驻,本机 app 识别现在完全不依赖热点。版本 rc6 → rc7(versionCode 570107)。
+  - ⚠️ 这是 dpid 生命周期核心改动,本容器无法跑安卓验证,需真机确认:热点关时应用 tab 应「运行中」、热点开时 AP 客户端识别仍正常、热点开关切换无重启抖动。
+
 ### Changed (v5.7.0-rc6, 2026-05-24)
 - **self-capture 改为常驻(默认开)** — 自动识别飞轮(per-uid `/proc/net` 采样 + 自接口 AF_PACKET SNI 抓取)全靠 `run/self_capture.enabled` flag 驱动;此前默认关,用户不手动开「追踪本机应用流量」就永远没数据(界面一直「追踪状态:未就绪 / dpid 暂未上报 self 块」)。
   - `service.sh`(dpid 段)现在每次启动 `[ -f ] || : > "$RUN/self_capture.enabled"`,即默认常驻开;会话内仍可在 WebUI 临时关(删 flag),重启后恢复常驻。dpid 每 5s 读 flag,~5s 内生效。
