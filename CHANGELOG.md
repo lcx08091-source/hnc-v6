@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc31, 2026-05-25)
+- **远程 WebUI 功能对齐本机 —— 设备卡片在用 app 展示 + 每设备低延迟开关**(`daemon/hnc_httpd/web/app.js`)。本机 KSU WebUI(`webroot/index.html`)在 rc20/rc22 加的两个能力此前远程 SPA 没有,这版补齐:
+  - **① 设备卡片直接显示「在用」的 app**:`renderCard` 读 `/api/devices` 已带的 `dpi_apps`(dpid 按 MAC 上报的 `{name,category,confidence,count}`),在卡片正文渲染最多 4 个蓝色 app 标签,`confidence=low` 标「?」,hover 看分类/命中次数。和本机折叠卡一致——不藏二级页。
+  - **② 每设备「低延迟(智能队列)」开关**:动作栏加「🚀 低延迟」按钮,开启后变「低延迟·关」+ 卡片亮蓝色「低延迟」角标;走后端已有的 `rule_sqm`(`actionDeviceSQMSet` → 叶子换 CAKE/fq_codel/sfq)。门控对齐本机:新增 `remoteCapBool()` 三态读 `/api/capabilities`,`tc_htb=false` 时禁用按钮(后端也会拒,前端先拦避免无谓往返);与延迟注入互斥(`delayOn` 时禁用,两者抢叶子)。
+  - 走 `callAction('rule_sqm', {mac, enabled})` + 统一 `handleActionResult` toast/刷新链路,与远程已有的限速/延迟写操作一致(CSRF header、actionInFlight 去重、超时后强刷)。
+  - web 资源经 `go:embed`(`embed.go`)打进 hnc_httpd 二进制,**本版需 CI 重编**。`node --check`(app.js)+ `go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` 均通过。版本 rc30 → rc31(570131)。
+
 ### Added (v5.7.0-rc30, 2026-05-25)
 - **候选角标 —— 陌生主域待确认时,底部「应用」导航项亮红点**(`webroot/index.html`)。承 rc29:rc29 修好了「未匹配 SNI」卡如实讲走法2 的主域候选,但用户得**主动进应用页**才看得到。rc30 补全可发现性:
   - 新增 `updateAppsNavDot(self)` + `startCandidateBadgePoll()`:`init()` 里和 `startPolling()` 一起启动,**每 25s 跨页面轮询** `/api/dpi_state`,当 `self.candidate_high > 0`(走法2 累积到「证据充分、达 HIGH 可晋级」的全新主域名)时,在底部导航「应用」项右上角亮一颗红点(`.nav-dot`,带微光),提醒去「自动识别候选」区一键确认/拒绝。

@@ -141,6 +141,14 @@ function fetchRemoteCapabilities() {
     })
     .catch(function(){ return null; });
 }
+// rc31: 三态能力读取(true / false / null=未知)。本机 WebUI 用 capBool 门控每设备
+// 低延迟,远端这里对齐:tc_htb=false 时禁用开关(后端也会拒,前端先拦避免无谓往返)。
+function remoteCapBool(key) {
+  var c = remoteCapabilities;
+  if (!c || typeof c !== 'object') return null;
+  var v = c[key];
+  return (typeof v === 'boolean') ? v : null;
+}
 
 function fetchHotspotLiveState(data) {
   if (data && typeof data.hotspot_active === 'boolean') {
@@ -305,6 +313,7 @@ function renderCard(d) {
   var displayName = emoji + ' ' + name;
   var blk = d.status === 'blocked';
   var limited = d.limit_enabled && (d.down_mbps > 0 || d.up_mbps > 0);
+  var sqmOn = (d.sqm_enabled === true || d.sqm_enabled === 'true');
   var badges = '';
   if (blk) badges += '<span class="b red">封锁</span>';
   else if (d.online) badges += '<span class="b green">在线</span>';
@@ -324,6 +333,7 @@ function renderCard(d) {
     var dc = d.delay_apply_mode === 'failed' ? 'red' : 'orange';
     badges += '<span class="b '+dc+'">'+p.join(' ')+'</span>';
   }
+  if (sqmOn) badges += '<span class="b blue">低延迟</span>';
 
   // v4.0 Patch 3.b: 远端写操作按钮栏
   // 用 data-* 属性存 mac/name, 全局 click 监听分发(loadDevices 初始化时绑).
@@ -345,12 +355,35 @@ function renderCard(d) {
     if (delayOn) {
       actions += '<button class="act-btn small ghost" data-act="delay-clear"'+a+'>清延迟</button>';
     }
+    // rc31: 每设备低延迟(智能队列)。与延迟注入互斥(本机 UI 同);tc_htb=false 时禁用。
+    var htbNo = remoteCapBool('tc_htb') === false;
+    if (sqmOn) {
+      actions += '<button class="act-btn small ghost" data-act="sqm-off"'+a+'>低延迟·关</button>';
+    } else {
+      var sqmDis = htbNo || delayOn;
+      var sqmTip = htbNo ? '内核不支持 HTB,低延迟不可用' : (delayOn ? '已注入延迟时不能同时开低延迟(两者互斥)' : '给该设备智能队列(CAKE/fq_codel/sfq),跑满时更跟手·配合限速最佳');
+      actions += '<button class="act-btn small"'+a+' data-act="sqm"'+(sqmDis?' disabled':'')+' title="'+esc(sqmTip)+'">🚀 低延迟</button>';
+    }
     if (blk) {
       actions += '<button class="act-btn small success" data-act="unblock"'+a+'>✅ 移黑</button>';
     } else {
       actions += '<button class="act-btn small danger" data-act="block"'+a+'>⛔ 加黑</button>';
     }
     actions += '</div>';
+  }
+
+  // rc31: 设备在用 app(dpid 经 /api/devices 的 dpi_apps 上报)。与本机 WebUI 折叠卡一致,
+  // 直接展示在卡片上,不藏二级页。confidence=low 标 "?",hover 看分类/命中次数。
+  var dpiApps = Array.isArray(d.dpi_apps) ? d.dpi_apps : [];
+  var dpiLine = '';
+  if (dpiApps.length) {
+    dpiLine = '<div style="margin-top:6px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">'+
+      '<span style="font-size:11px;color:var(--text-3);opacity:.85">在用</span>'+
+      dpiApps.slice(0, 4).map(function(ap){
+        var q = (ap.confidence === 'low') ? '?' : '';
+        var t = esc((ap.category ? ap.category + ' · ' : '') + '命中 ' + (ap.count || 0) + ' 次');
+        return '<span title="'+t+'" style="font-size:11px;background:rgba(0,122,255,.10);color:var(--sys-blue,#0a84ff);border-radius:5px;padding:1px 7px">'+esc(ap.name)+q+'</span>';
+      }).join('')+'</div>';
   }
 
   return '<div class="card'+(blk?' blocked':'')+'">'+
@@ -363,6 +396,7 @@ function renderCard(d) {
       '<div class="field"><span class="k">MAC</span><span class="v">'+esc(d.mac || '-')+'</span></div>'+
       '<div class="field"><span class="k">下行累计</span><span class="v">'+fmtB(d.rx_bytes)+'</span></div>'+
       '<div class="field"><span class="k">上行累计</span><span class="v">'+fmtB(d.tx_bytes)+'</span></div>'+
+      dpiLine +
     '</div>'+
     actions +
   '</div>';
@@ -834,6 +868,14 @@ window.actionClearDelay = async function(mac, name) {
   handleActionResult(r, '延迟已清除');
 };
 
+// rc31: 每设备低延迟开关 (后端 rule_sqm → actionDeviceSQMSet)。
+// enabled=true 把该设备 class 叶子换成 CAKE/fq_codel/sfq (AQM, 压队列延迟);
+// false 换回 netem 占位。与本机 WebUI 的 toggle-sqm 等价, 状态由 sqm_enabled 持久化。
+window.actionToggleSqm = async function(mac, name, enable) {
+  var r = await callAction('rule_sqm', {mac: mac, enabled: enable ? 'true' : 'false'});
+  handleActionResult(r, enable ? '已开启低延迟(智能队列)' : '已关闭低延迟');
+};
+
 
 // ── 启动 ─────────────────────────────────────────────────
 var filterSel = $('device-filter-mode');
@@ -983,6 +1025,8 @@ document.addEventListener('click', function(ev) {
     case 'clear':       window.actionClearRate(mac, name); break;
     case 'delay':       window.showDelayModal(mac, name); break;
     case 'delay-clear': window.actionClearDelay(mac, name); break;
+    case 'sqm':         window.actionToggleSqm(mac, name, true); break;
+    case 'sqm-off':     window.actionToggleSqm(mac, name, false); break;
     case 'block':       window.actionBlockDevice(mac, name); break;
     case 'unblock':     window.actionUnblockDevice(mac, name); break;
   }
