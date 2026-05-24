@@ -18,6 +18,16 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc33, 2026-05-25)
+- **修飞轮把 VPN/代理应用的流量错记成它的规则**(`src/dpid/output/`,用户开 FlClash 时发现 `capcom.co.jp` 等被晋级成「FlClash」的规则)。
+  - **根因**:dpid 靠内核 uid 地面真值(`/proc/net` socket 属主)把 SNI 归因到 app。但 VPN/代理(Clash/v2rayNG/sing-box…)开着时,它**重新发起**别的 app 的所有流量 → 这些被代理流量的 socket 属主 uid 就是 VPN 的 → 飞轮把它们的域名错挂到 VPN(走法2 晋级出 `autopromo_capcom_co_jp → FlClash`)。
+  - **修法两层**(`flywheel_exclude.go` 新增 + `candidate.go`/`auto_expand.go`/`self_attrib.go` 改):
+    - **① 显式排除清单**:内置常见 VPN/代理包名(FlClash `com.follow.clash`、Clash、v2rayNG、sing-box、shadowsocks、WireGuard、Tailscale、Orbot 等)+ 用户可编辑 `/data/local/hnc/etc/flywheel_exclude.json`(`{"exclude_pkgs":[...]}`,随 pkg 缓存 TTL 5min 热加载)。这些 uid 在**观察期**(走法1+走法2)就被跳过,从不进飞轮,镜像既有 `IsSystemUID` 的系统应用过滤。
+    - **② 导管型 uid 自动识别**:一个 uid 在累积器里关联 ≥8 个**互不相关的陌生主域**(`conduitApexThreshold`)= 典型 VPN/代理/浏览器特征 → 禁止其**自动**晋级(手动一键 promote 仍可,用户说了算)。兜住清单没覆盖的长尾。
+    - **③ 自动降级历史错误规则**:每 tick 扫已晋级规则,凡归因 uid/包名命中排除清单(按 `Evidence.UIDPkg` 稳健匹配,uid 回收也不怕)或被判为导管 → 删除该规则并标 `SharedLearned` 不再复活。用户现有的 `capcom→FlClash` 会在刷 rc33 后**自动清掉**。
+  - **边界**:VPN 仍正常显示在「我的应用」列表(它确实有那些连接)——只是不再据其(代理的)流量造 app 规则。需要加别的 VPN 自己编辑 `flywheel_exclude.json` 即可。
+  - 含 `dpid`(Go)改动,**需 CI 重编 dpid**。`go vet ./...` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build ./...` 通过。版本 rc32 → rc33(570133)。
+
 ### Added (v5.7.0-rc32, 2026-05-25)
 - **全局带宽整形器(opt-in,默认关)—— 整个热点设 WAN 带宽上限 + AQM 抗 bufferbloat**(`bin/tc_manager.sh` / `daemon/hnc_httpd/action_global_shaper.go` / `api_v5.go` / `webroot/index.html`)。用户从 roadmap 选「手动填带宽·默认关」方案落地:
   - **原理**:给整个热点的 HTB 父类 `1:1` 的 `ceil` 设成 WAN 带宽(egress on AP iface = 客户端下载;`ifb0` = 客户端上传),并把默认类 `1:9999` 叶子升级成最优 AQM(`cake besteffort → fq_codel → sfq`)。HTB 借用模型下所有子类(每设备 class + 默认类)都借不出 `1:1` 的 ceil → 总吞吐受 WAN 瓶颈管;此时队列排在我们能管的叶子上,AQM 才压得住 bufferbloat(AQM 只在「我们就是瓶颈」时才有效)。

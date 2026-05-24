@@ -1,3 +1,15 @@
+<!-- v5.7.0-rc33 -->
+<div class="cl-section">
+  <div class="cl-title">🛡️ v5.7.0-rc33: 修飞轮把 VPN/代理软件错认成"规则归属" <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>问题</b>: 你开着 FlClash 时,别的 app 的流量被它代理走,在系统底层看就像是"FlClash 在访问 capcom.co.jp",于是飞轮把这些域名错挂成了 FlClash 的规则。</li>
+    <li><b>修了什么</b>: ① 内置一份常见 VPN/代理软件名单(FlClash、Clash、v2rayNG、sing-box、shadowsocks、WireGuard、Tailscale 等),这些 app 的流量直接不进飞轮;② 自动识别"导管型"应用(一个 app 莫名访问了一大堆互不相关的陌生域名 = 典型代理/VPN 特征),禁止自动晋级。</li>
+    <li><b>历史错误自动清理</b>: 之前已经错误生成的规则(比如 capcom.co.jp → FlClash)在刷新本版后会被自动删除,不用手动处理。</li>
+    <li><b>不影响展示</b>: VPN 软件本身还是会正常出现在"我的应用"列表里(它确实有那些连接),只是不再拿它的流量去造规则。想排除别的 VPN,可编辑 <code>/data/local/hnc/etc/flywheel_exclude.json</code>。</li>
+    <li>说明: 改的是流量识别引擎(dpid),需要重新编译;刷新版本后生效。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc32 -->
 <div class="cl-section">
   <div class="cl-title">🌊 v5.7.0-rc32: 全局带宽整形(进阶·默认关)——整个热点抗卡顿 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

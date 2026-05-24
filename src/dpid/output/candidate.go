@@ -221,6 +221,12 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 			if a.IsSystemUID(uid) {
 				continue
 			}
+			// v5.7.0-rc33: keep VPN/proxy apps out of the flywheel. When a VPN is
+			// active it re-originates other apps' traffic, so the socket uid is the
+			// VPN's — accumulating here would mis-learn e.g. "capcom.co.jp -> FlClash".
+			if a.IsFlywheelExcludedUID(uid) {
+				continue
+			}
 			acc.observe(apex, sni, uid, now)
 			touched[apex] = struct{}{}
 		}
@@ -242,8 +248,41 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 	// tick; force-promotion below works regardless of the auto_promote flag.
 	decisions := loadCandidateDecisions()
 
-	sum := candidateSummary{autoPromoteOn: autoPromoteOn, entityDBSize: len(entityDB)}
+	// v5.7.0-rc33: conduit auto-detection. A uid associated with many distinct
+	// brand-new apexes is a generic conduit (VPN/proxy/browser) even if it's not
+	// on the explicit exclude list — block it from AUTO-promotion. Computed from
+	// the current accumulator (listed VPNs were already skipped at observe-time,
+	// so this only catches the unlisted long tail).
+	apexCountByUID := map[int]int{}
+	for _, c := range acc.byApex {
+		for uid := range c.UIDs {
+			apexCountByUID[uid]++
+		}
+	}
+	isConduitUID := func(uid int) bool { return apexCountByUID[uid] >= conduitApexThreshold }
+
 	changed := false
+	// v5.7.0-rc33: demote already-promoted rules whose attributed app is now a
+	// VPN/proxy (explicit list) or a detected conduit. Cleans up bad rules like
+	// "capcom.co.jp -> FlClash" that were minted before the exclusion existed.
+	// Manual promotions (user clicked) are NEVER auto-demoted by the conduit
+	// heuristic — only by the explicit list, since the user may knowingly want it.
+	for apex, r := range promoted {
+		excludedByList := a.IsFlywheelExcludedPkg(r.Evidence.UIDPkg) || a.IsFlywheelExcludedUID(r.Evidence.UID)
+		conduit := r.Source == "auto_promoted" && isConduitUID(r.Evidence.UID)
+		if excludedByList || conduit {
+			delete(promoted, apex)
+			if c := acc.byApex[apex]; c != nil {
+				c.SharedLearned = true
+			}
+			changed = true
+			log.Printf("flywheel-exclude: demoted %s -> %q (uid=%d pkg=%q reason=%s)",
+				apex, r.App, r.Evidence.UID, r.Evidence.UIDPkg,
+				map[bool]string{true: "vpn/proxy", false: "conduit"}[excludedByList])
+		}
+	}
+
+	sum := candidateSummary{autoPromoteOn: autoPromoteOn, entityDBSize: len(entityDB)}
 	for apex, c := range acc.byApex {
 		tier, uid := classifyTier(c, blocklist, entityDB)
 		sum.pending++
@@ -269,7 +308,11 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 			// promoted manually (decisions file), which works even in shadow
 			// mode. Both are single-uid, preserving the self-correct invariant.
 			_, manual := decisions[apex]
-			if manual || (tier == "high" && autoPromoteOn) {
+			// v5.7.0-rc33: never AUTO-promote to a detected conduit uid
+			// (VPN/proxy/browser). Manual promote still wins (user override).
+			if !manual && isConduitUID(uid) {
+				// conduit uid: suppress auto-promotion (no rule minted)
+			} else if manual || (tier == "high" && autoPromoteOn) {
 				pkg, label := a.DisplayForUID(uid)
 				src := "auto_promoted"
 				if manual {

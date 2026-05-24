@@ -135,6 +135,14 @@ type SelfAttribAggregator struct {
 	// flywheel and to collapse them in the WebUI.
 	systemPkgs map[string]struct{}
 
+	// v5.7.0-rc33: set of VPN/proxy package names excluded from the flywheel
+	// (built-in seed ∪ user file). Refreshed alongside pkgCache. uids resolving
+	// to these never accumulate candidates / get auto-promotions, because a VPN
+	// re-originates other apps' traffic and would mis-attribute their domains to
+	// itself. Initialized to the built-in seed in the constructor so the guard
+	// is live even before the first pkg-cache refresh.
+	flywheelExcludePkgs map[string]struct{}
+
 	// ifaceState is the per-iface child status, owned by the
 	// reconciler (see self_capture goroutines in main.go).
 	ifaceState []SelfIfaceState
@@ -189,6 +197,10 @@ func NewSelfAttribAggregator(jsonlDir string) *SelfAttribAggregator {
 		seenTuples:       make(map[string]int64),
 		maxSeenTuples:    4096,
 		jsonlDir:         jsonlDir,
+		// Seed the flywheel exclusion immediately so VPN/proxy guards are live
+		// before the first pkg-cache refresh (and so existing bad promotions get
+		// demoted on the very first expander tick by stored UIDPkg).
+		flywheelExcludePkgs: loadFlywheelExcludePkgs(),
 	}
 }
 
@@ -737,6 +749,10 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	if s, serr := loadSystemPkgs(); serr == nil {
 		a.systemPkgs = s
 	}
+	// v5.7.0-rc33: refresh the flywheel exclusion (built-in ∪ user file) so edits
+	// to flywheel_exclude.json take effect within the pkg-cache TTL without a
+	// dpid restart. Always non-nil (degrades to the built-in seed).
+	a.flywheelExcludePkgs = loadFlywheelExcludePkgs()
 	return m
 }
 
@@ -771,6 +787,37 @@ func (a *SelfAttribAggregator) IsSystemUID(uid int) bool {
 		return false
 	}
 	_, ok := a.systemPkgs[pkg]
+	return ok
+}
+
+// IsFlywheelExcludedUID reports whether uid resolves to a VPN/proxy package
+// excluded from the flywheel. Unknown uid → false (we can't decide until pm
+// resolves it; the stored-UIDPkg path in candidate.go covers demotion of
+// already-promoted rules even before pkg resolution). v5.7.0-rc33.
+func (a *SelfAttribAggregator) IsFlywheelExcludedUID(uid int) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	pkg := a.pkgCache[uid]
+	if pkg == "" || a.flywheelExcludePkgs == nil {
+		return false
+	}
+	_, ok := a.flywheelExcludePkgs[pkg]
+	return ok
+}
+
+// IsFlywheelExcludedPkg reports whether a package name is on the flywheel
+// exclusion list. Used to demote already-promoted rules by their stored
+// Evidence.UIDPkg (robust even if the uid was recycled). v5.7.0-rc33.
+func (a *SelfAttribAggregator) IsFlywheelExcludedPkg(pkg string) bool {
+	if pkg == "" {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.flywheelExcludePkgs == nil {
+		return false
+	}
+	_, ok := a.flywheelExcludePkgs[pkg]
 	return ok
 }
 
