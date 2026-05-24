@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc8
-versionCode=570108
+version=v5.7.0-rc9
+versionCode=570109
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc8 · 本轮: ① 「未匹配的 SNI」块从我的应用列表最底部移到列表上方(不用划到底)。② 候选累积器持久化: 切热点会让 dpid 重启 2-3 次、把飞轮的内存进度清零(候选要 ≥3 窗口才晋级 → 在会切热点的设备上永远晋级不了); 现每 tick 把累积器原子写到 run/candidate_accum.json、启动读回, 窗口/uid 集/学习共享跨重启累加, 飞轮真正能晋级。显示层的"切热点后秒级空白"已由 rc7(dpid 保持运行)兜底, 几秒自动重建。rc1~rc7 已含: 4-tab 导航/真实应用名/远程配对修复/候选审批/实体库 166/客户端识别/self 常驻/dpid 不依赖热点常驻。详见 CHANGELOG.md 与应用内更新日志.
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc9 · 本轮: 过滤系统 app。本机一堆 ColorOS 系统 app(com.oplus/coloros/heytap, uid≥10000)被飞轮归类、污染规则库、塞满列表。用 pm list packages -s 判定系统包(能抓 uid≥10000 的 OEM 系统 app, 按 uid 段切不掉)。飞轮: 系统 app 的域名不进候选累积器、不被晋级成规则。WebUI: 我的应用 把系统 app 折叠进可点开的"系统应用 N 个"灰显分组(默认收起), 真实 app 不再被淹没。rc1~rc8 已含: 4-tab 导航/真实应用名/远程配对修复/候选审批/实体库 166/客户端识别/self 常驻/dpid 不依赖热点常驻/未匹配SNI上移+飞轮进度持久化。详见 CHANGELOG.md 与应用内更新日志.
 updateJson=
 minKernelSU=11485

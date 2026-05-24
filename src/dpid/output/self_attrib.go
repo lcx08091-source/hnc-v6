@@ -130,6 +130,10 @@ type SelfAttribAggregator struct {
 	pkgCache         map[int]string
 	pkgCacheLoadedAt time.Time
 	pkgCacheErr      string
+	// v5.7.0-rc9: set of system package names (pm list packages -s),
+	// refreshed alongside pkgCache. Used to keep system apps out of the
+	// flywheel and to collapse them in the WebUI.
+	systemPkgs map[string]struct{}
 
 	// ifaceState is the per-iface child status, owned by the
 	// reconciler (see self_capture goroutines in main.go).
@@ -457,6 +461,9 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 		s.AppsByUID = make(map[string]*SelfApp, len(a.appsByUID))
 		for uid, app := range a.appsByUID {
 			cp := *app // shallow copy
+			if a.systemPkgs != nil && cp.Pkg != "" {
+				_, cp.IsSystem = a.systemPkgs[cp.Pkg]
+			}
 			// Materialize SNI set as sorted slice (deterministic for diffing)
 			if set := a.snisByUID[uid]; set != nil {
 				snis := make([]string, 0, len(set))
@@ -725,7 +732,46 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	a.pkgCache = m
 	a.pkgCacheLoadedAt = time.Now()
 	a.pkgCacheErr = ""
+	// Refresh the system-package set on the same cadence. Best-effort: keep the
+	// old set on error.
+	if s, serr := loadSystemPkgs(); serr == nil {
+		a.systemPkgs = s
+	}
 	return m
+}
+
+// loadSystemPkgs runs `pm list packages -s` and returns the set of system
+// package names: lines look like "package:com.android.systemui".
+func loadSystemPkgs() (map[string]struct{}, error) {
+	out, err := exec.Command("pm", "list", "packages", "-s").Output()
+	if err != nil {
+		return nil, err
+	}
+	set := make(map[string]struct{}, 256)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if !strings.HasPrefix(line, "package:") {
+			continue
+		}
+		pkg := strings.TrimSpace(strings.TrimPrefix(line, "package:"))
+		if pkg != "" {
+			set[pkg] = struct{}{}
+		}
+	}
+	return set, nil
+}
+
+// IsSystemUID reports whether the package owning uid is a system package.
+// Unknown uid / not-yet-loaded set → false (don't filter until we know).
+func (a *SelfAttribAggregator) IsSystemUID(uid int) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	pkg := a.pkgCache[uid]
+	if pkg == "" || a.systemPkgs == nil {
+		return false
+	}
+	_, ok := a.systemPkgs[pkg]
+	return ok
 }
 
 // loadPkgUIDs runs `pm list packages -U` and parses output:

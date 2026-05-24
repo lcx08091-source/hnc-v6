@@ -12668,7 +12668,10 @@ body.kb-open .container {
       if (aa !== ba) return ba - aa;
       return (b.app.last_seen || 0) - (a.app.last_seen || 0);
     });
-    var html = rows.slice(0, 50).map(function(r){
+    // v5.7.0-rc9: system apps (is_system) are collapsed into a separate,
+    // tappable, dimmed group so the OEM system-app wall doesn't crowd out the
+    // real apps the user cares about.
+    function card(r, dim) {
       var a = r.app;
       var icon = appsClassifyIcon(a.pkg);
       // labels: 优先用后端已解析好的 display_name (curated/系统 label), 缺失才本地兜底
@@ -12703,7 +12706,7 @@ body.kb-open .container {
           '</div>';
       }
       var pkgLine = (a.pkg ? appsEsc(a.pkg) : '(pm 未解析)') + ' · uid ' + r.uid;
-      return '<div class="glass-elevated app-card">' +
+      return '<div class="glass-elevated app-card"' + (dim ? ' style="opacity:.5"' : '') + '>' +
         '<div class="app-card-head">' +
           '<div class="app-icon ' + icon.cls + '">' + appsEsc(icon.letter) + '</div>' +
           '<div><div class="app-name">' + appsEsc(name) + '</div>' +
@@ -12714,9 +12717,28 @@ body.kb-open .container {
         '</div>' +
         metaHTML +
       '</div>';
-    }).join('');
+    }
+    var usr = rows.filter(function(r){ return !(r.app && r.app.is_system); });
+    var sys = rows.filter(function(r){ return r.app && r.app.is_system; });
+    var html = usr.slice(0, 50).map(function(r){ return card(r, false); }).join('');
+    if (sys.length) {
+      html += '<div id="apps-sys-toggle" onclick="appsToggleSysList()" ' +
+              'style="cursor:pointer;text-align:center;padding:10px;margin-top:6px;color:var(--text-3);font-size:12.5px">' +
+              '系统应用 ' + sys.length + ' 个 · 点按展开 ▾</div>';
+      html += '<div id="apps-sys-list" data-count="' + sys.length + '" style="display:none">' +
+              sys.slice(0, 100).map(function(r){ return card(r, true); }).join('') + '</div>';
+    }
     list.innerHTML = html;
   }
+
+  window.appsToggleSysList = function() {
+    var el = document.getElementById('apps-sys-list');
+    var tg = document.getElementById('apps-sys-toggle');
+    if (!el || !tg) return;
+    var show = (el.style.display === 'none');
+    el.style.display = show ? '' : 'none';
+    tg.textContent = '系统应用 ' + (el.getAttribute('data-count') || '') + ' 个 · 点按' + (show ? '收起 ▴' : '展开 ▾');
+  };
 
   window.appsSwitchSub = function(name, btn) {
     var seg = document.getElementById('apps-seg');

@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc9 -->
+<div class="cl-section">
+  <div class="cl-title">🧹 v5.7.0-rc9: 过滤系统应用 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>系统 app 不再进飞轮</b>: 本机的系统/OEM 应用(ColorOS 的 com.oplus/coloros/heytap 等)域名是厂商遥测,对识别别人设备没用还污染规则库。现在它们不会被自动归类成规则。</li>
+    <li><b>列表折叠</b>: 「我的应用」里系统应用收进可点开的"系统应用 N 个 ▾"灰显分组(默认收起),真实应用一眼可见,不再被几十个系统应用淹没。</li>
+    <li>判定方式: <code>pm list packages -s</code>(能识别 uid≥10000 的 OEM 系统应用,按 uid 段切不掉)。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc8 -->
 <div class="cl-section">
   <div class="cl-title">📌 v5.7.0-rc8: 未匹配SNI上移 + 飞轮进度不再被切热点清零 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

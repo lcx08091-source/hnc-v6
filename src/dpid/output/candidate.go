@@ -213,6 +213,14 @@ func (a *SelfAttribAggregator) processCandidates(pending map[string]map[int]stru
 			if uid == 0 {
 				continue
 			}
+			// v5.7.0-rc9: keep system apps out of the flywheel. Their domains
+			// are OEM telemetry/services — useless as shareable app rules and
+			// they clutter the candidate queue. An apex used only by system
+			// uids never accumulates; if a real app also uses it, it still
+			// accumulates under that (non-system) uid.
+			if a.IsSystemUID(uid) {
+				continue
+			}
 			acc.observe(apex, sni, uid, now)
 			touched[apex] = struct{}{}
 		}

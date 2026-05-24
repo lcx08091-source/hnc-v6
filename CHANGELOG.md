@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc9, 2026-05-24)
+- **过滤系统 app** — 本机的 OEM 系统 app(ColorOS 的 com.oplus/coloros/heytap 等,uid≥10000)此前会被飞轮归类(污染规则库,系统域名是 OEM 遥测、对识别别人设备无用)并塞满「我的应用」列表。
+  - **判定**:`pm list packages -s` → 系统包集合(`self_attrib.go:loadSystemPkgs`,随 pkgCache 同 5min TTL 刷新;`IsSystemUID(uid)`)。按 uid 段切不掉这些(它们 uid≥10000),必须用包标志。
+  - **飞轮挡**(`candidate.go`):`processCandidates` 折叠时跳过系统 uid → 系统 app 的 apex 不进候选累积器、不被晋级。某 apex 若同时被真实 app 用到,仍在该(非系统)uid 下正常累积。
+  - **列表折叠**(`webroot/index.html` `appsRenderList`):`SelfApp.is_system` 为真的 app 折叠进可点开的「系统应用 N 个 ▾」灰显分组(默认收起),真实 app 不再被淹没。
+  - `state.go` SelfApp 加 `is_system` 字段。版本 rc8 → rc9(versionCode 570109)。
+
 ### Changed (v5.7.0-rc8, 2026-05-24)
 - **「未匹配的 SNI」块上移**(`webroot/index.html`,issue #1)——从 应用→我的应用 的整列 app **之后**移到 app 列表**之前**(接口行下方),不用划过几十个 app 才看到。纯 DOM 顺序调整,`appsRenderUnmatched` 按 id 渲染不受影响。
 

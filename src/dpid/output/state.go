@@ -144,7 +144,11 @@ type SelfApp struct {
 	// Curated map (top ~200 apps) + optional user override file at
 	// /data/local/hnc/etc/app_labels.json. Falls back to a cleaned-up
 	// package name if pkg is unknown to the resolver. Empty if Pkg is empty.
-	DisplayName string   `json:"display_name,omitempty"`
+	DisplayName string `json:"display_name,omitempty"`
+	// v5.7.0-rc9: true when pkg is a system package (pm list packages -s).
+	// The flywheel skips system apps (their domains are OEM telemetry, useless
+	// as shareable rules) and the WebUI collapses them in 我的应用.
+	IsSystem    bool     `json:"is_system,omitempty"`
 	UID         int      `json:"uid"`
 	FirstSeen   int64    `json:"first_seen"`
 	LastSeen    int64    `json:"last_seen"`
