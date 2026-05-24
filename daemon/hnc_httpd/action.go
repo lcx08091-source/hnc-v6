@@ -446,35 +446,6 @@ func actionRuleClear(hncDir string, p map[string]string) actionResp {
 	return actionResp{OK: true, Detail: "limit cleared"}
 }
 
-// rateToKbit · 把 "10mbit" / "5120kbit" 标准化成 kbit 整数字符串传给 shell.
-// v5.1 P2-8 修: 之前 rateToMbps 向上取整把 500kbit 取成 1 mbps, 丢精度.
-// shell 侧 apply_device_rule.sh 期望 mbps 数值, 但 tc_manager.sh:mbps_to_rate
-// 会 tr -d 'kK' 把 "500k" 当 500kbit 处理, 所以我们传 "500k" 字符串 shell 也认.
-func rateToKbit(r string) (string, error) {
-	if r == "" || r == "0" {
-		return "0", nil
-	}
-	for i, c := range r {
-		if c < '0' || c > '9' {
-			n, err := strconv.Atoi(r[:i])
-			if err != nil {
-				return "", err
-			}
-			unit := r[i:]
-			switch unit {
-			case "mbit":
-				// mbit * 1000 = kbit
-				return strconv.Itoa(n*1000) + "k", nil
-			case "kbit":
-				return strconv.Itoa(n) + "k", nil
-			default:
-				return "", fmt.Errorf("unknown unit: %s", unit)
-			}
-		}
-	}
-	return "", fmt.Errorf("no unit in %q", r)
-}
-
 // rateToMbpsStr · v5.1 P2-8: 保留小数精度把速率转 mbps 字符串.
 //
 //	"500kbit"  → "0.5"
@@ -523,44 +494,6 @@ func rateToMbpsStr(r string) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("no unit in %q", r)
-}
-
-// rateToMbps 转 "10mbit" / "5120kbit" / "0" / "" → mbps 整数
-// 空字符串 → 0 (不限速)
-// 不足 1 mbps 的速率向上取整(64kbit 也等于 1 mbps)
-// validateRate 已经卡了格式 + 边界,这里只做单位转换
-// v5.1: 保留为 legacy, 新路径用 rateToKbit 保留精度
-func rateToMbps(r string) (int, error) {
-	if r == "" || r == "0" {
-		return 0, nil
-	}
-	// 已知格式: ^[0-9]+(kbit|mbit)$
-	for i, c := range r {
-		if c < '0' || c > '9' {
-			n, err := strconv.Atoi(r[:i])
-			if err != nil {
-				return 0, err
-			}
-			unit := r[i:]
-			switch unit {
-			case "mbit":
-				if n < 1 {
-					return 1, nil
-				}
-				return n, nil
-			case "kbit":
-				// 向上取整: 64kbit → 1mbps, 5120kbit → 5mbps, 1023kbit → 1mbps
-				m := (n + 1023) / 1024
-				if m < 1 {
-					m = 1
-				}
-				return m, nil
-			default:
-				return 0, fmt.Errorf("unknown unit: %s", unit)
-			}
-		}
-	}
-	return 0, fmt.Errorf("missing unit in rate: %q", r)
 }
 
 // actionBLAdd · 加入黑名单

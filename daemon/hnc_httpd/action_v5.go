@@ -184,16 +184,17 @@ func actionDelaySet(hncDir string, p map[string]string) actionResp {
 		{"jitter_ms", strconv.Itoa(jitter)},
 		{"loss_pct", lossStr},
 	}
-	var failed []string
+	// rc38 (DELAY-1): 原子批量写 4 字段(json_set_batch → hnc_json set-device-batch:
+	// 一次校验/备份/锁/提交),避免逐字段写中途失败留半状态。hnc_json 缺失时该脚本
+	// 自动退回逐字段串行(与旧行为等价)。
+	batchArgs := make([]string, 0, 2+2*len(jsonWrites))
+	batchArgs = append(batchArgs, "device", mac)
 	for _, w := range jsonWrites {
-		if rc, out := runBin(hncDir, "json_set.sh", "device", mac, w.field, w.value); rc != 0 {
-			failed = append(failed, w.field+":"+strings.TrimSpace(out))
-		}
+		batchArgs = append(batchArgs, w.field, w.value)
 	}
-	if len(failed) > 0 {
-		// tc 已应用但 JSON 部分字段写失败。返回失败让 UI 不显示“假成功”，
-		// 用户可再次点击应用来收敛 rules.json。
-		return actionResp{OK: false, Error: "partial json write failed", Detail: strings.Join(failed, "; ")}
+	if rc, out := runBin(hncDir, "json_set_batch.sh", batchArgs...); rc != 0 {
+		// tc 已应用但 JSON 写失败。返回失败让 UI 不显示“假成功”，用户可重试收敛。
+		return actionResp{OK: false, Error: "json write failed", Detail: strings.TrimSpace(out)}
 	}
 	return actionResp{OK: true, Detail: "delay injected"}
 }
@@ -249,14 +250,14 @@ func actionDelayClear(hncDir string, p map[string]string) actionResp {
 		{"jitter_ms", "0"},
 		{"loss_pct", "0"},
 	}
-	var failed []string
+	// rc38 (DELAY-1): 原子批量写(同 delay_set)。
+	batchArgs := make([]string, 0, 2+2*len(clearFields))
+	batchArgs = append(batchArgs, "device", mac)
 	for _, f := range clearFields {
-		if rcJ, outJ := runBin(hncDir, "json_set.sh", "device", mac, f.key, f.val); rcJ != 0 {
-			failed = append(failed, f.key+":"+strings.TrimSpace(outJ))
-		}
+		batchArgs = append(batchArgs, f.key, f.val)
 	}
-	if len(failed) > 0 {
-		return actionResp{OK: false, Error: "partial json write failed", Detail: strings.Join(failed, "; ")}
+	if rcJ, outJ := runBin(hncDir, "json_set_batch.sh", batchArgs...); rcJ != 0 {
+		return actionResp{OK: false, Error: "json write failed", Detail: strings.TrimSpace(outJ)}
 	}
 	return actionResp{OK: true, Detail: "delay cleared"}
 }

@@ -1,3 +1,15 @@
+<!-- v5.7.0-rc38 -->
+<div class="cl-section">
+  <div class="cl-title">🧰 v5.7.0-rc38: 审查报告收尾(第三批·轻量补丁) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>延迟设置写入更稳</b>: 注入/清除延迟时改成一次性原子写配置,避免中途失败留下半套状态。</li>
+    <li><b>修一个 JSON 反斜杠损坏</b>: 含反斜杠的 JSON 值以前会被悄悄写坏,已修复并实测验证(普通用户基本碰不到,但属真问题)。</li>
+    <li><b>卸载备份更安全</b>: 卸载时备份的远程访问 token 文件现在会设为仅自己可读,防止其他有 root 的程序读取。</li>
+    <li><b>清理 + 小加固</b>: 删了几处死代码;修了后台 dpid 守护的一个防抖小 bug(防患未然);全局整形输入下限对齐后端。</li>
+    <li>说明: 含后端改动,需要重新编译;刷新版本后生效。至此外部审查发现的真问题已全部处理完。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc37 -->
 <div class="cl-section">
   <div class="cl-title">📦 v5.7.0-rc37: 刷机包瘦身 + 看门狗二进制自动重编(第二批·打包) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

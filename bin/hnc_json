@@ -500,10 +500,12 @@ set_top() {
   tmp="$target_dir/.$target_base.hnc_json.$$"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
 
-  # awk -v consumes backslash escapes, so double backslashes in JSON string literals before passing them in.
-  # Raw JSON object values must not be escaped as a string literal.
+  # rc38 (ESC-1): awk -v consumes one level of C-style backslash escapes for
+  # EVERY value regardless of type. The old json|raw branch skipped escaping on
+  # the false belief that raw JSON shouldn't be escaped — but valid JSON like
+  # {"p":"a\\b"} then got its backslash eaten by awk -v → silent corruption.
+  # Double all backslashes uniformly so awk -v round-trips the value verbatim.
   case "$typ" in
-    json|raw) awk_lit="$lit" ;;
     *) awk_lit="$(printf '%s' "$lit" | sed 's/\\/\\\\/g')" ;;
   esac
   if ! set_top_inner "$target" "$key" "$awk_lit" > "$tmp"; then
@@ -1030,7 +1032,6 @@ set_map_field() {
   tmp="$target_dir/.$target_base.hnc_json_map.$$"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
   case "$typ" in
-    json|raw) awk_lit="$lit" ;;
     *) awk_lit="$(printf '%s' "$lit" | sed 's/\\/\\\\/g')" ;;
   esac
   set +e

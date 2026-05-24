@@ -495,7 +495,13 @@ func ifNameFromAddrMsg(m *syscall.NetlinkMessage) string {
 //
 // Returns true if we should immediately re-loop (rebind), false if we should
 // shut down.
-func runChild(iface string, launchBlind bool) bool {
+//
+// rc38 (M1): lastRebind is owned by mainLoop and passed by pointer so the
+// debounce window survives across runChild invocations. Previously it was a
+// local reset to zero on every call, so the netlink debounce never actually
+// fired (a rebind returns immediately after setting it) — flap rate was only
+// bounded by mainLoop's 200ms damping, not debounceDur.
+func runChild(iface string, launchBlind bool, lastRebind *time.Time) bool {
 	logf("launching hnc_dpid on iface=%s (blind=%v)", iface, launchBlind)
 
 	cmd := exec.Command(realBin, "-config", configPath)
@@ -521,7 +527,6 @@ func runChild(iface string, launchBlind bool) bool {
 	defer os.Remove(childPidFile)
 
 	childStart := time.Now()
-	lastRebind := time.Time{}
 
 	// Goroutine: wait for child exit, signal via exitCh.
 	exitCh := make(chan error, 1)
@@ -555,12 +560,12 @@ func runChild(iface string, launchBlind bool) bool {
 				logf("ignore netlink event %s in startup grace (age=%v < %v)", ev.raw, age.Round(time.Millisecond), graceDur)
 				continue
 			}
-			if !lastRebind.IsZero() && time.Since(lastRebind) < debounceDur {
-				logf("debounce netlink event %s (last rebind %v ago)", ev.raw, time.Since(lastRebind).Round(time.Millisecond))
+			if !lastRebind.IsZero() && time.Since(*lastRebind) < debounceDur {
+				logf("debounce netlink event %s (last rebind %v ago)", ev.raw, time.Since(*lastRebind).Round(time.Millisecond))
 				continue
 			}
 			logf("netlink event %s for iface=%s, request immediate rebind", ev.raw, iface)
-			lastRebind = time.Now()
+			*lastRebind = time.Now()
 			killAndReap()
 			return true
 
@@ -602,6 +607,7 @@ func runChild(iface string, launchBlind bool) bool {
 
 func mainLoop() {
 	lastIface := ""
+	lastRebind := time.Time{} // rc38 (M1): owned here so debounce survives across runChild calls
 
 	for {
 		select {
@@ -632,7 +638,7 @@ func mainLoop() {
 		}
 
 		// runChild blocks until exit/rebind/shutdown.
-		if !runChild(iface, launchBlind) {
+		if !runChild(iface, launchBlind, &lastRebind) {
 			return // shutdown requested
 		}
 		// Small damping after restart to avoid tight crash loops.

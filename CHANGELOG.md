@@ -18,6 +18,16 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc38, 2026-05-25)
+- **审查报告真问题修复 · C+D 组(轻量补丁 + 防未然)**。收尾确认为真的轻量项:
+  - **DELAY-1 delay_set/clear 多次 json 写非原子**(`daemon/hnc_httpd/action_v5.go`):此前循环逐字段 `json_set.sh device` 写 4 个字段,中途失败留半状态。改用 `json_set_batch.sh device`(→ `hnc_json set-device-batch`:一次校验/备份/锁/提交,原子);hnc_json 缺失时该脚本自动退回逐字段串行(行为等价)。
+  - **ESC-1 hnc_json json/raw 值反斜杠转义**(`bin/hnc_json`):`set-top`/`set-object-key` 对 `json`/`raw` 类型**不转义**反斜杠,但 awk -v 对任何值都吃一层 C 风格转义 → 合法 JSON 如 `{"p":"a\\b"}` 被写成 `{"p":"a\b"}`(静默损坏)。**已实测复现并验证修复**:统一对所有类型 `sed 's/\\/\\\\/g'`,删除错误的 json|raw 特例 + 改正误导注释。
+  - **SEC-1 uninstall 备份未收权**(`uninstall.sh`):`tokens.json.last` 含远程访问 token,备份目录默认 755/文件 644 → 有 root 的其他模块可读。改:备份目录 `chmod 700`、`tokens.json.last` `chmod 600`。
+  - **M1 dpid_supervisor netlink 防抖失效**(`src/dpid/cmd/dpid_supervisor/main.go`,防未然):`lastRebind` 是 `runChild` 局部变量、每次调用归零,命中 netlink 事件赋值后立即 return → 下次又归零 → `IsZero()` 恒真 → 防抖永不触发(staticcheck SA4006)。修:`lastRebind` 提到 `mainLoop` 栈、按指针传入 `runChild`,跨调用保活。注:该 Go 二进制是"最后兜底"启动器,当前实际很少跑(主用 C launcher / shell guard),此修为将来启用预防。
+  - **死代码/加固清扫**:删 `bin/watchdog.sh` 死变量 `PROBE_INTERVAL_ACTIVE`(全脚本 0 引用,稳态实走 `$INTERVAL`)、`bin/apply_device_rule.sh` 未用 `IFS_ORIG`、`daemon/hnc_httpd/action.go` 未用 `rateToKbit`/`rateToMbps`(staticcheck U1000);`post-fs-data.sh` 给 rm 路径加引号 + 开机同时清 `json.lock`(配合 rc36 LOCK-1 统一锁);WebUI 全局整形输入 `min` 由 1 改 0.1(对齐后端 64kbit 下限,避免 sub-floor 输入触发后端报错)。
+  - **未改(评估后)**:`capture/bpf.go` 的 `syscall.AttachLsf` 虽 deprecated 但仍可用,换 `x/net/bpf` 是非平凡重构、风险>收益,暂留;`middleware.go` 的 S1008、`server.go` 的 nil-map range 判断纯属风格,改动鉴权/核心路径不值当,保留。
+  - 含 `hnc_httpd` + `dpid`(Go)改动,**需 CI 重编**。`sh -n` + `go vet ./...` + `go test ./output/` + `android/arm64` 交叉编译 + ESC-1 实测全过。版本 rc37 → rc38(570138)。**至此审查报告确认为真的问题(A/B/C/D)全部处理完毕。**
+
 ### Changed (v5.7.0-rc37, 2026-05-25)
 - **审查报告真问题修复 · B 组(打包瘦身)**。纯 CI/打包改动(`.github/workflows/build.yml` + `.gitignore`),无运行时代码变更:
   - **PKG-1 hnc_watchdog 未 strip + 可能过期**:`bin/hnc_watchdog` 此前是**提交进 git 的预编译二进制**,而 CI 从无构建步骤 → 发布的是陈旧(改了 `src/dpid/cmd/hnc_watchdog` 也不会重编)且未 strip(3.1M)的版本;service.sh 优先用它(L405)。修:① 加 CI 步骤从源码构建 `bin/hnc_watchdog`(`-trimpath -ldflags="-s -w"`,与 hnc_dpid 同款,并断言已 strip);② 从 git 取消跟踪 + 加进 `.gitignore`(对齐 hnc_dpid/hnc_httpd 的"CI 产物不入库"约定)。此后每次 CI 重编为最新 + 已 strip(2.6M)。注:CI 用 `GOOS=android` 产物为 dynamically-linked(linker64),与 hnc_dpid 一致、设备已验证可用。

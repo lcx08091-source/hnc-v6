@@ -20,8 +20,8 @@ mkdir -p $HNC_DIR/run
 # 18:30 重启后 watchdog.log 无任何 do_full_init 输出, 谎报 alive=ok).
 # 清掉 → watchdog 进 PENDING → 配合 rc3.1.30 watchdog.sh 的"首轮立刻 probe"
 # 改动, ~100ms 内跑完 iptables init + tc init + tc restore.
-rm -f $HNC_DIR/run/hnc_state 2>/dev/null
-rm -rf $HNC_DIR/run/hnc_json.lock 2>/dev/null
+rm -f "$HNC_DIR/run/hnc_state" 2>/dev/null
+rm -rf "$HNC_DIR/run/hnc_json.lock" "$HNC_DIR/run/json.lock" 2>/dev/null
 
 # 初始化规则文件 · rc3.1.13 起 auth_required 也在这
 [ ! -f $HNC_DIR/data/rules.json ] && cat > $HNC_DIR/data/rules.json << 'EOF'

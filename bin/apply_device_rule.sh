@@ -176,7 +176,6 @@ js_set_dev_flush() {
     [ -z "$JSET_BUF" ] && return 0
     # 1. 把 buffer 切成 K V K V ... 给 batch helper
     local args=""
-    local IFS_ORIG="$IFS"
     local SEP_REC="$(printf '\036')"
     local SEP_KV="$(printf '\037')"
     local rec k v

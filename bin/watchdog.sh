@@ -967,10 +967,10 @@ PASSIVE_LOGGED=0
 PASSIVE_MARKER="$RUN/watchdog_passive.marker"
 
 # 探测节流: PENDING 状态下每 10 秒探一次(为了快速启动);
-# ACTIVE 状态每 60 秒(稳态)。避免 PENDING 状态 60 秒才试一次,
-# 开机后 1 分钟以上热点才能被使用。
+# PENDING 状态每 10 秒探一次(热点刚开、还没客户端时),避免 60 秒才试一次导致
+# 开机后 1 分钟以上热点才能被使用。ACTIVE 稳态沿用主循环 $INTERVAL(60s)。
+# rc38: 删死变量 PROBE_INTERVAL_ACTIVE(全脚本 0 引用,稳态实际走 $INTERVAL)。
 PROBE_INTERVAL_PENDING=10
-PROBE_INTERVAL_ACTIVE=60
 
 # rc3.1.5 修: 进 main loop 前立即 ensure httpd_running, 不等第一次 sleep 完.
 # 之前 watchdog 启动后要先 sleep 60-120s 才第一次 ensure httpd, 导致用户点 toggle
