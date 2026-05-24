@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc26, 2026-05-25)
+- **修 rc25 自建 NAT 的「上联口探测」bug**(`bin/hotspot_autostart.sh`)。真机干净测试(手动热点关闭)确认:`cmd wifi start-softap ... -b any` 后 **`wlan2` 起来并带 `10.126.123.0/24` 子网** → 本地热点会给客户端发 IP,A 方案地基成立。但 rc25 的 `detect_up_iface` 用 `ip route show default` 取上联接口 —— **Android 用策略路由(per-network 路由表),main 表常常没有 default route**,所以探到空 → `setup_nat` 走"找不到 up"分支直接跳过 → 客户端永远没网。
+  - **修复**:`detect_up_iface` 改用 `ip route get 1.1.1.1` 解析实际互联网出口接口(`rmnet_data2` / VPN `tun0` 都能正确取到;纯 `${var#*dev }` 参数展开,不依赖 awk/sed)。这样 `setup_nat` 才能正确挂上 MASQUERADE。
+  - 其余同 rc25:start-softap `-b any`、删 `svc wifi enable`、`stop` 撤 NAT、UI 诚实标注 ColorOS 限制。
+  - ⚠ 仍需真机端到端验证:刷后**关掉手动热点** → 点「立即启动」(或 `hotspot_autostart.sh start-now`)→ 另一台设备连上 → 看能否上网。VPN(tun0)在跑时,转发流量能否过 VPN 取决于该 VPN 的实现,属另一回事。
+  - `sh -n` 通过、参数解析已单测;纯 shell,不用重编。版本 rc25 → rc26(570126)。
+
 ### Fixed (v5.7.0-rc25, 2026-05-25)
 - **开机自动开热点(ColorOS)真机诊断后修复**(`bin/hotspot_autostart.sh` + `webroot/index.html`)。真机 `cmd wifi` 探测结论:
   - `cmd tethering tether wifi` → **No shell command implementation**;`svc wifi hotspot` → 不存在 —— ColorOS **这两个兜底是死的**。

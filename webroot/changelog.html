@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc26 -->
+<div class="cl-section">
+  <div class="cl-title">📡 v5.7.0-rc26: 修自建 NAT 的上联口探测(开机热点共享) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>好消息</b>: 干净测试确认你这台的本地热点是好用的——开起来后会给连上的设备发 IP。所以"模块自己做流量共享"这条路是走得通的。</li>
+    <li><b>修了什么</b>: 上一版找"流量出口接口"的方法在你这台取不到(安卓的路由表结构不一样),导致共享规则根本没挂上、客户端没网。这版换成更可靠的探测方式,共享规则才能真正生效。</li>
+    <li><b>请验证</b>: 刷新后→关掉手动热点→在 app 点「立即启动」→ 用另一台手机连上→看能不能上网。能上网就说明开机自动开热点(带共享)成了。</li>
+    <li>说明: 纯脚本改动,不用重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc25 -->
 <div class="cl-section">
   <div class="cl-title">📡 v5.7.0-rc25: 开机自动开热点(ColorOS 真机诊断后修) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

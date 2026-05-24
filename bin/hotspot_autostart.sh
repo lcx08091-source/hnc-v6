@@ -78,7 +78,14 @@ get_setting() {
 # 不激活 internet tethering)。所以这里手动做 NAT:把本地热点接口的流量
 # MASQUERADE 到上联(默认路由)接口,让连上的设备能用手机流量上网。
 # 全程 best-effort:失败只是没网,不影响热点起来(日志会记;否则请从系统设置开)。
-detect_up_iface() { ip route show default 2>/dev/null | awk '/^default/{for(i=1;i<=NF;i++) if($i=="dev"){print $(i+1); exit}}'; }
+detect_up_iface() {
+    # rc26: Android 用策略路由(per-network 路由表),main 表常无 default route,
+    # `ip route show default` 探不到。改用 `ip route get` 探实际互联网出口接口。
+    _r=$(ip route get 1.1.1.1 2>/dev/null)
+    case "$_r" in
+        *" dev "*) _r=${_r#*dev }; echo "${_r%% *}" ;;
+    esac
+}
 detect_ap_iface() {
     _up="$1"
     for _i in ap0 wlan1 wlan2 wlan3 swlan0 wlan0; do

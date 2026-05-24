@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc25
-versionCode=570125
+version=v5.7.0-rc26
+versionCode=570126
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc25 · 真机诊断后修开机自动开热点(ColorOS)。实测:cmd tethering/svc wifi hotspot 在 ColorOS 无 shell 实现,只有 cmd wifi start-softap 能起,且不带 -b 会撞频段报 error 18、起的是"本地热点"(系统不给它共享流量)。改动:① start-softap 加 -b any(让固件自选频段,实测 -b 5/any 成功);② 去掉多余的 svc wifi enable(之前会无谓打开用户 WiFi);③ A 方向:起热点后自建 NAT(检测上联默认路由口 + 本地热点口,开 ip_forward + iptables MASQUERADE + FORWARD),让客户端用流量上网;stop 时撤掉;④ B 方向:UI 如实说明 ColorOS 限制 + 没网就改从系统设置手动开。注:本地热点能否给客户端发 IP/上网仍需真机验证(需先关手动热点再测),不通则只能走系统设置。纯 shell+前端,不用重编。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc26 · 修 rc25 NAT 的上联口探测 bug。真机干净测试确认本地热点成立(start-softap -b any 后 wlan2 起来带 10.126.123.0/24 子网,会给客户端发 IP),A 方案地基 OK。但 rc25 的 detect_up_iface 用 `ip route show default` —— Android 是策略路由、main 表常无 default,所以探空 → NAT 直接跳过、客户端没网。rc26 改用 `ip route get 1.1.1.1` 取真实互联网出口接口(rmnet/tun 都能正确取到),NAT 才会真正挂上。其余同 rc25(start-softap -b any、去 svc wifi enable、stop 撤 NAT、UI 诚实标注)。仍需真机验证:刷后关手动热点→点立即启动→另一台连上看能否上网。纯 shell,不用重编。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485
