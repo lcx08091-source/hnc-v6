@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc16, 2026-05-24)
+- **补上 fallback shell guard 残留的硬编码 `/system/bin/*` 绝对路径(rc13 标注"留作后续"的那处)—— 真机数据定位后确认是最后一块短板**。诊断过程(真机 `mount` / `mountinfo` / `ps etime` / 模块清单):
+  - 设备已在 **Magic Mount**(`magic_mount_rs` 元模块,`umount = false`)——不在 OverlayFS;且是 **system-as-root**(`/system/bin` 属根挂载、**不是可被单独 `umount` 的挂载点**),所以"切 Magic Mount / 调 SuSFS try_umount"对这台都不对症(改 SuSFS 纯属冒险削弱隐藏)。
+  - "为什么现在才有":内核升到 **6.6 android15 GKI**,新内核**砍了内置自动挂载**,改由用户态元模块挂载;叠加 HNC rc6/rc7 把抓包改成 24h 常驻,于是早期命名空间未就绪的瞬时窗口天天被撞上。
+  - 真机日志确认 ENOENT 全部来自 `hnc_dpid_guard.sh` 的**硬编码绝对路径**(`/system/bin/sleep`、`/system/bin/date`),它们**绕过 PATH**,所以 rc13 的 PATH 兜底救不到;且 guard 旧设计是 `ensure_path_or_die`"die-fast 等 watchdog 重启"。当前 boot 是 **C launcher 胜出**(launcher/dpid 稳定在线 3.5h、零 churn),guard 只是 boot 初瞬间跑了一下就被 C launcher 接管杀掉——所以系统当前是好的;但在 **C launcher 落选**(ColorOS fork/TLS 探测失败 → shell guard 成为主监管)的那些 boot 上,这些硬编码路径就会让 guard 反复 ENOENT、wedge,重现"必须重新绑定"。
+  - **修复**(`bin/hnc_dpid_guard.sh`):把 `ensure_path_or_die` / `wait_for_clean_env` / `sleep_s` / 主循环心跳 / 锁接管里所有 `/system/bin/sleep`、`/system/bin/date` 绝对路径**改成裸命令**——PATH 已含 `/data/local/hnc/bin`(rc13 预置、`/data` 永不被卸),`/system/bin` 一旦消失自动 fallthrough 到 `/data` 副本,guard **不再 die、继续监管 dpid**;只有连 `/data` 兜底也没有(真·坏)才退出让 watchdog 重开。这把 rc13 标注"留作后续"的 fallback-only 硬编码路径清干净了。
+  - 纯 shell 改动,`sh -n` 通过,不用重编任何二进制。⚠ 底层 SukiSU/元模块在运行期动挂载仍是 ROM/隐藏栈行为,模块只能"撞上也不崩";rc13/rc15 的预置 + 本版 guard 加固共同构成这层韧性。版本 rc15 → rc16(570116)。
+
 ### Changed (v5.7.0-rc15, 2026-05-24)
 - **加固"无挂载模块"对根因 A(SukiSU 运行期卸 `/system/bin`)的韧性 —— 取外部 AI 建议的安全子集**。背景:把根因 A 的问题陈述发给外部 AI 咨询"能否从其他途径绕过",结论是"HNC 这种纯守护模块不该和 OverlayFS 全局 `/system` overlay 同命运"。我对其方案做了安全甄别后落地可安全的部分:
   - **⚠ 否决了它的头号建议(用 `busybox sh -o standalone` 跑常驻脚本)**:实测本仓库常驻脚本(watchdog.sh / hnc_dpid_guard.sh / service.sh 等)**大量使用 `[[ ]]` 和 `(( ))`**,这是 mksh/ksh 方言,**busybox `ash` 不支持**,换解释器会直接把脚本跑崩。解释器**继续用 mksh**(rc13 已把 mksh 复制到 `/data`)。

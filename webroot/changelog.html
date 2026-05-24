@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc16 -->
+<div class="cl-section">
+  <div class="cl-title">🩹 v5.7.0-rc16: 补上守护脚本最后一处硬编码 /system/bin(真机数据定位) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>定位</b>: 根据你真机的 mount / 进程在线时长 / 模块清单确认:你已经在 Magic Mount 上(不用切),且系统是 system-as-root(/system/bin 属根挂载、卸不掉)。当前这次开机一切正常(后台进程稳定在线 3.5 小时、无重启)。</li>
+    <li><b>修的是什么</b>: 日志里的 ENOENT 全来自备用守护脚本里几处<b>写死的 /system/bin 绝对路径</b>(绕开了 PATH 兜底)。当主用的 C 守护落选、备用脚本顶上时,这几处会让它在 /system/bin 被卸时反复报错、卡住,重现"必须重新绑定"。</li>
+    <li><b>怎么修</b>: 把那些绝对路径改成普通命令,/system/bin 没了就自动用 /data 里的备用副本(永不被卸),备用守护不再崩、继续看护抓包;只有连备用副本都没有才退出等重启。</li>
+    <li>说明: 纯脚本改动,不用重编。底层是你 ROM/隐藏栈在运行期动挂载,模块这边做到"撞上也不崩"。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc15 -->
 <div class="cl-section">
   <div class="cl-title">🛡️ v5.7.0-rc15: 让"不改系统的守护模块"更扛得住 /system/bin 被卸 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

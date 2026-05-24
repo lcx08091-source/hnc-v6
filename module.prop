@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc15
-versionCode=570115
+version=v5.7.0-rc16
+versionCode=570116
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc15 · 加固"无挂载模块"对根因 A 的韧性(咨询外部 AI 后取其安全子集):① 本模块本就不改 /system(无 system/ 文件夹),新增空 skip_mount 显式声明"不参与 systemless 挂载"。② provision_fallback_tools 优先用常驻 /data 且 applet 更全(含 awk)的 KSU/Magisk busybox 作 multicall 源(toybox 兜底),并按二进制实际支持的 applet 安全建链(awk/rm/mkdir/mv/stat/dirname... 扩展,只建支持的、不建死链)。③ 修 device_detect.sh(常驻 daemon 循环)PATH 漏掉 /data/local/hnc/bin 的缺口。④ 不切 busybox ash 解释器——脚本是 mksh 方言([[ ]]/(( )))ash 跑不了,继续用 mksh。根治路线仍是用户侧切 Magic Mount 或精准 umount。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc16 · 真机数据定位后补上最后一块短板:fallback shell guard(hnc_dpid_guard.sh)里残留的硬编码 /system/bin/{sleep,date} 绝对路径(rc13 标注"留作后续"的那处)——它们绕过 PATH,所以 /system/bin 被 SukiSU 运行期卸掉时仍 ENOENT,且 guard 旧设计是"die-fast 等重启";在 C launcher 落选(ColorOS fork/TLS 探测失败)、shell guard 成为主监管的那些 boot 上,这就重现"必须重新绑定"。本版把这些绝对路径全改成裸命令,fallthrough 到 rc13 预置的 /data 副本,guard 不再 die、继续监管 dpid;只有连 /data 兜底也没有才退出。诊断同时确认:设备是 system-as-root(/system/bin 属根挂载、非独立挂载点)、已在 Magic Mount(magic_mount_rs,umount=false)、当前 C launcher 稳定 3.5h 无 churn。纯 shell 改动,不用重编二进制。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

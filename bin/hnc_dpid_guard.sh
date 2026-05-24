@@ -28,23 +28,25 @@
 # to occasionally lose env on subshell forks.
 #
 # Defense in depth:
-#   1. Hard-set PATH at top (no inheritance).
-#   2. ensure_path_or_die: if absolute /system/bin/sleep stops working, exit
-#      with code 99 so watchdog spawns a fresh guard with clean env. Better
-#      to die-and-restart than burn CPU in a broken loop.
-#   3. sleep_s uses absolute path and propagates failure to caller.
+#   1. Hard-set PATH at top, including /data/local/hnc/bin fallback copies.
+#   2. ensure_path_or_die: bare commands fall through to /data when /system/bin
+#      is unmounted; only exit (code 99, watchdog respawns) if even the /data
+#      fallback is gone. rc16: was "die on any /system/bin loss" before the
+#      /data fallback (rc13 provision_fallback_tools) existed.
+#   3. sleep_s uses bare sleep (PATH fallthrough) and propagates failure.
 ensure_path_or_die() {
-    if /system/bin/sleep 0 2>/dev/null; then
+    # rc16: 改用裸命令 — PATH 含 /data/local/hnc/bin 兜底副本(service.sh 开机预置,
+    # /data 永不被卸)。SukiSU 运行期卸掉 /system/bin 时,sleep 自动 fallthrough 到
+    # /data 副本,守护不再 die、能继续监管 dpid(这正是"必须重新绑定"的根因之一)。
+    if sleep 0 2>/dev/null; then
         return 0
     fi
     export PATH='/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin'
-    if /system/bin/sleep 0 2>/dev/null; then
+    if sleep 0 2>/dev/null; then
         return 0
     fi
-    # Truly broken — even absolute path doesn't work. /system might be
-    # transiently unmounted or env is poisoned beyond recovery.
-    # Exit non-zero so watchdog respawns us cleanly.
-    echo "[$(date +%H:%M:%S 2>/dev/null)] [DPID-GUARD] [FATAL] /system/bin/sleep ENOENT, exiting for clean restart" >> "$LOG" 2>/dev/null
+    # 连 /data 兜底都没有(真·坏)才退出, 让 watchdog 重开一个干净环境的 guard。
+    echo "[$(date +%H:%M:%S 2>/dev/null)] [DPID-GUARD] [FATAL] sleep unavailable even via /data fallback, exiting for clean restart" >> "$LOG" 2>/dev/null
     exit 99
 }
 
@@ -101,9 +103,9 @@ wait_for_clean_env() {
     while [ "$tries" -lt "$max_tries" ]; do
         # Check both: sleep works AND date works. Both must function for
         # the guard's main loop to be useful.
-        if /system/bin/sleep 0 2>/dev/null && /system/bin/date +%s >/dev/null 2>&1; then
+        if sleep 0 2>/dev/null && date +%s >/dev/null 2>&1; then
             if [ "$tries" -gt 0 ]; then
-                echo "[$(/system/bin/date '+%H:%M:%S' 2>/dev/null)] [DPID-GUARD] env healed after ${tries}s wait" >> "$LOG" 2>/dev/null
+                echo "[$(date '+%H:%M:%S' 2>/dev/null)] [DPID-GUARD] env healed after ${tries}s wait" >> "$LOG" 2>/dev/null
             fi
             return 0
         fi
@@ -137,8 +139,8 @@ sleep_s() {
     # rc29.4: absolute path. If both fail, /system might be transiently
     # unmounted or env is poisoned — die so watchdog respawns us with
     # a clean environment rather than burning CPU in a sleep-less loop.
-    /system/bin/sleep "$1" 2>/dev/null && return 0
-    /system/bin/sleep 1 2>/dev/null && return 0
+    sleep "$1" 2>/dev/null && return 0
+    sleep 1 2>/dev/null && return 0
     ensure_path_or_die  # this exits if truly broken
     return 0
 }
@@ -309,14 +311,14 @@ if ! mkdir "$LOCKDIR" 2>/dev/null; then
         # rc29.4: PID 活着, 但 heartbeat 是不是 fresh? 如果 60+ 秒没更新,
         # 那个老 guard 就是死锁状态 (busy loop / 卡住), 强制接管.
         hb=$(cat "$HEARTBEAT_FILE" 2>/dev/null)
-        now=$(/system/bin/date +%s 2>/dev/null || echo 0)
+        now=$(date +%s 2>/dev/null || echo 0)
         if [ -n "$hb" ] && [ "$now" -gt 0 ] && [ $((now - hb)) -lt 60 ]; then
             log "another guard already running pid=$old (heartbeat fresh)"
             exit 0
         fi
         log "guard pid=$old alive but heartbeat stale ($((now - hb))s); taking over"
         kill -9 "$old" 2>/dev/null || true
-        /system/bin/sleep 0.3 2>/dev/null
+        sleep 0.3 2>/dev/null
     else
         # If a previous rc16 child shell left a stale lock behind, release it.
         log "stale guard lock without live guard pid; releasing"
@@ -384,7 +386,7 @@ last_event_seen=""
 while true; do
     # rc29.4: every iteration — verify env is still usable, refresh heartbeat.
     ensure_path_or_die
-    /system/bin/date +%s > "$HEARTBEAT_FILE" 2>/dev/null
+    date +%s > "$HEARTBEAT_FILE" 2>/dev/null
 
     disabled=$(read_json_bool_key disable_capture "$CONFIG" 2>/dev/null)
     iface=$(get_iface)
