@@ -1,8 +1,8 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.7.0-rc22
-versionCode=570122
+version=v5.7.0-rc23
+versionCode=570123
 author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc22 · 修两处真机反馈。① 每设备「低延迟」开关点了报 TC_ACTION_BUSY=1:根因是点的瞬间 tc 锁被 watchdog 的 restore/health 短暂占着,而 set_sqm 一抢不到就立刻失败(set_limit/set_delay 共用同锁但你在空窗期点的所以成功)。修复:set_sqm 获取 tc 锁改为短重试(~3s,期间 tc_action_lock 也会自动回收 >25s 的陈旧锁),骑过短暂占用。② 设备卡片"在用 app"一直空、像假的:dpiLine 早就渲染在折叠卡片头部(IP/MAC 下方),但前端设备模型从没把 /api/devices 的 dpi_apps 映射进去 → d.dpi_apps 恒空 → 永不显示。修复:模型补 dpi_apps 映射,dpid 识别到该客户端流量后,折叠卡上直接显示"在用 [app]"(无需展开)。纯 shell+前端,不用重编。详见 CHANGELOG.md。
+description=Android 热点带宽/延迟/黑白名单管理 · v5.7.0-rc23 · 继续清"摆着但没接数据"的假显示(设备卡+应用页扫一遍的结果)。设置页"运行状态"面板原来整块是硬编码假值(hotspotd PID 18432 / RES 4.2MB、tc 规则数 11、iptables 7 chains、watchdog 运行中)——没有任何 JS/接口喂数据。改为真实:进设置页时 kexec 实采 hotspotd pid+RSS、tc 对象数、iptables MARK 0x800000 规则数、watchdog 存活,拿不到显示 — 而不是假数字(远程无 kexec 显示"远程不可读")。"热点接口"行接真实 state.hotspotIface(不再写死 wlan2);删掉无真实来源的假"上联接口 rmnet0"行。另核实:开机自动开热点(hotspot_auto)整条链路真实可用(开关→hotspot_save 写 rules.json→开机 service.sh 读取→hotspot_autostart.sh 用 cmd wifi start-softap / cmd tethering / svc 真启 AP + 补 SELinux;开关回读已接 cfg.hotspot_autostart);能否成功取决于 ColorOS 是否放行这些命令,需真机验证。纯前端,不用重编。详见 CHANGELOG.md。
 updateJson=
 minKernelSU=11485

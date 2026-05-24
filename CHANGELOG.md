@@ -18,6 +18,12 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc23, 2026-05-25)
+- **设置页"运行状态"面板整块是硬编码假值 → 改为真实数据**(`webroot/index.html`,设备卡+应用页"断连数据"扫描的结果)。原来 4 行全是写死字面量、无任何 JS/接口喂数据:hotspotd "PID 18432 · RES 4.2 MB"、tc 规则数 "11"、iptables "7 chains"、watchdog "运行中"——永远是这串假的。**修复**:进设置页(`refreshLocalDiagnostics`)时新增 `fetchRunStatus()`,本机 KSU WebUI 走 kexec 实采:hotspotd `pidof`+`/proc/$pid/status` 的 VmRSS、`tc qdisc/class` 对象数、`iptables/ip6tables -t mangle` 里 `0x800000` 规则数、`hnc_watchdog` 存活;采不到显示 `—`,远程(无 kexec)显示"远程不可读"——不再展示假数字。
+- **"热点接口"行写死 wlan2 → 接真实接口**:改读 `state.hotspotIface`(来自 `/api/live`/`/api/iface_info`),非 wlan2 的设备不再显示错的接口。**删掉无真实来源的假"上联接口 rmnet0"行**(IFB 上联接口在运行期才探测,前端无可靠来源,留着只会误导)。
+- **核实"开机自动开热点"是真的可用**(应用户要求):整条链路真实——UI 开关(`#hs-autostart` 4920)→ `hotspot_save` 写 `rules.json` 的 `hotspot_auto` → 开机 `service.sh:464` 读到 true 就跑 `hotspot_autostart.sh start` → 该脚本用 `cmd wifi start-softap`(A13+)/`cmd tethering tether wifi`/`svc wifi hotspot enable` 真启 AP 并补 SELinux;开关回读也已接 `cfg.hotspot_autostart`(11907)。**不是假功能**;能否真正点亮 AP 取决于 ColorOS 是否放行这些命令,需真机验证(开开关→重启→看 `logs/hotspot.log`)。
+- 纯前端改动,`node --check` 通过,不用重编二进制。版本 rc22 → rc23(570123)。
+
 ### Fixed (v5.7.0-rc22, 2026-05-25)
 - **每设备「低延迟」开关点了报 `TC_ACTION_BUSY=1`(rc20 功能的真机 bug)**(`bin/tc_manager.sh`)。根因:点开关的瞬间,tc 全局锁(`tc_action_lock`)被 watchdog 的 restore/health 等后台 tc 动作短暂占着,而 `set_sqm` 的 CLI 包装是 `tc_action_lock || exit 12`——抢不到锁就**立刻失败**。`set_limit`/`set_delay` 共用同一把锁但用户是在空窗期点的所以成功,`set_sqm` 不巧每次都撞上 → 一直"用不了"。**修复**:`set_sqm` 获取锁改为**短重试循环**(最多 12×0.25s ≈ 3s;`tc_action_lock` 本身还会回收 >25s 的陈旧锁),骑过 watchdog 的短暂占用再执行。
 - **设备卡片"在用 app"一直空、看着像假的**(`webroot/index.html`)。`renderCard` 早就在**折叠卡片头部**(IP/MAC 下方)渲染 `dpiLine`("在用 [app 徽章]",rc5 加的),但前端设备模型(`fetchDevices` 的 `DEVICES.push`)**从没把 `/api/devices` 返回的 `dpi_apps` 字段映射进去** → `d.dpi_apps` 恒为空 → `dpiLine` 永远是空串 → 永不显示。不是假数据,是**数据没接上**(后端 `server.go dpiAppsByMAC` 一直在提供)。**修复**:模型补 `dpi_apps` 映射。这样 dpid 识别到该客户端流量后,**折叠状态的设备卡上直接显示"在用 XXX"**(无需展开进二级页)——正是你要的。识别为空仍属正常(dpid 还没抓到该客户端的流量)。

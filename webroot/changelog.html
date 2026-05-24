@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc23 -->
+<div class="cl-section">
+  <div class="cl-title">🔌 v5.7.0-rc23: 设置页"运行状态"改成真数据 + 核实开机自动开热点 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>"运行状态"不再是假的</b>: 设置页那块(hotspotd 进程、tc 规则数、iptables、watchdog)以前是写死的假数字(PID 18432、11 条、7 chains…),根本没接数据。现在进设置页会真实读取当前 hotspotd 内存、tc/iptables 规则数、watchdog 是否在跑;读不到就显示"—",不再骗你。</li>
+    <li><b>"热点接口"显示真实接口</b>: 以前写死 wlan2,现在显示当前真正在用的接口;删掉了那个没真实来源的假"上联接口 rmnet0"。</li>
+    <li><b>核实了"开机自动开热点"是真能用的</b>: 整条链路是通的(开关→保存→开机自动跑→用系统命令真开热点)。是否成功取决于你的 ColorOS 是否允许这些命令,建议:打开开关→重启手机→看热点是否自动开起来。</li>
+    <li>说明: 纯界面改动,不用重新编译。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc22 -->
 <div class="cl-section">
   <div class="cl-title">🩹 v5.7.0-rc22: 修「低延迟」点了报错 + 设备卡片显示在用 app <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
