@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc5, 2026-05-24)
+- **客户端识别展示 / 阶段5(上半)** — 设备 tab 现在每个连入热点的设备显示「在用什么 app」。
+  - 数据本就存在:dpid 把每个客户端的 SNI 经 `classifyHost`(飞轮规则 + 实体库)分类成 app,写进 `dpi_state.json` 的 `clients[].top_apps`(按 client-key,含 `client_mac`)。
+  - 新增 join:`hnc_httpd` `buildDevicesPayload` 调 `dpiAppsByMAC()` 读 `dpi_state.json`,按 MAC 把 `top_apps`(name/category/confidence/count,取前 5)挂到 `/api/devices` 每个设备的新字段 `dpi_apps`(server.go)。
+  - 前端:`renderCard`(webroot/index.html)在 IP/MAC 行下渲染「在用 <app> · <app>」徽章,低置信度标 `?`,hover 显示分类 + 命中次数。
+  - **纯展示、无新采集**;飞轮训练出的规则与实体库的效果直接体现在客户端识别上。本机 WebUI 已接;远程 SPA(app.js)的设备卡渲染留作后续。
+
 ### Changed (v5.7.0-rc4, 2026-05-24)
 - **自建实体库扩到 166 条**(`data/entity_db.json`,+45)——重点补**国内 + OEM 共享基础设施**(西方公开库最弱的部分):
   - OEM:OPPO/HeyTap(heytapcs/heytapimage/heytapdownload/heytapmobi)、华为(hicloud/dbankcdn/dbankcloud)——对 ColorOS 设备尤其相关。

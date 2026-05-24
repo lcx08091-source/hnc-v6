@@ -9136,6 +9136,16 @@ body.kb-open .container {
               </div>` : '';
     const upValue = uplinkDisabled ? '' : (d.up ? mbpsToMBsStr(d.up) : '');
     const selected = state.selected.has(d.mac) ? 'selected' : '';
+    // v5.7.0-rc5 (阶段5): identified apps for this device (from dpid via /api/devices).
+    const dpiApps = Array.isArray(d.dpi_apps) ? d.dpi_apps : [];
+    const dpiLine = dpiApps.length
+      ? `<div class="dpi-apps" style="margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center">
+           <span style="font-size:11px;color:var(--text-3);opacity:.8">在用</span>${dpiApps.slice(0, 4).map(function(a){
+             var q = (a.confidence === 'low') ? '?' : '';
+             var t = esc((a.category ? a.category + ' · ' : '') + '命中 ' + (a.count || 0) + ' 次');
+             return '<span title="' + t + '" style="font-size:11px;background:rgba(10,132,255,.10);color:#0a84ff;border-radius:5px;padding:1px 7px">' + esc(a.name) + q + '</span>';
+           }).join('')}</div>`
+      : '';
     const blocked = d.status === 'blocked';
     const blockBtn = blocked
       ? `<button class="btn btn-primary" data-action="unblock">✓ 解除封锁</button>`
@@ -9164,6 +9174,7 @@ body.kb-open .container {
             ${statusBadge(d)}${limitBadge}
           </div>
           <div class="ip-mac">${esc(d.ip)} · ${esc(d.mac)}</div>
+          ${dpiLine}
         </div>
         <div class="metrics">
           <span class="speed" data-rate="rx"><span class="arrow-down">↓</span> ${fmtSpeed(d.rx)}</span>

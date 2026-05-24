@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc5 -->
+<div class="cl-section">
+  <div class="cl-title">📱 v5.7.0-rc5: 设备 tab 显示"每台设备在用什么 app" <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <ul class="cl-list">
+    <li><b>客户端识别上线</b>: 设备列表里每个连入热点的设备,卡片上(IP/MAC 下方)现在显示它正在用的 app 徽章,如"在用 微信 · 抖音 · 微博"。</li>
+    <li><b>怎么来的</b>: dpid 本来就把每个客户端的 SNI 用飞轮规则 + 实体库分类成 app(写在 dpi_state),本轮把这份结果按 MAC 接进设备列表。<b>纯展示,不新增任何抓取</b>。</li>
+    <li><b>置信度</b>: 低置信度的 app 名后面标 <code>?</code>;长按/悬停徽章看分类与命中次数。</li>
+    <li>说明: 你之前在"应用→设置"里 promote 的规则、实体库的共享判定,效果都会直接反映到这里的客户端识别上。(远程网页版的设备卡展示留作下一步。)</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc4 -->
 <div class="cl-section">
   <div class="cl-title">🇨🇳 v5.7.0-rc4: 实体库扩到 166 条(国内 + OEM) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>

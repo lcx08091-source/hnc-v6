@@ -351,6 +351,12 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		namesMap = map[string]interface{}{}
 	}
 
+	// v5.7.0-rc5 (阶段5): per-client app identification. dpid already classifies
+	// client SNIs into apps and writes them under dpi_state.json "clients" keyed
+	// by client-key, each with client_mac + top_apps. Join them onto devices by
+	// MAC so the 设备 tab can show "what app is this device using".
+	dpiApps := s.dpiAppsByMAC()
+
 	deviceRules, _ := rulesMap["devices"].(map[string]interface{})
 	blacklist, _ := rulesMap["blacklist"].([]interface{})
 	blSet := make(map[string]bool)
@@ -419,6 +425,11 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		// online 判断(跟 WebUI 一致: last_seen 在 90s 内)
 		lastSeen, _ := merged["last_seen"].(float64)
 		merged["online"] = lastSeen > 0 && (nowSec-lastSeen) < 90
+
+		// v5.7.0-rc5: attach per-device identified apps (by MAC) from dpid.
+		if apps := dpiApps[macKey]; len(apps) > 0 {
+			merged["dpi_apps"] = apps
+		}
 
 		// v5.1 P1-1: rx_bps / tx_bps 差分计算
 		// rc3.1.34 修 #5: 之前无条件 newSamples[mac]=now, 高频请求 (两 client 同时
@@ -551,6 +562,72 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		"whitelist_mode": rulesMap["whitelist_mode"],
 		"remote_enabled": rulesMap["remote_enabled"],
 	}
+}
+
+// dpiAppsByMAC reads dpi_state.json and returns, per lowercased client MAC, a
+// compact list of identified apps ({name, category, confidence, count}) from
+// that client's top_apps. Missing/malformed dpi_state = empty map (best effort).
+// One entry per MAC: if several client-keys share a MAC, the first non-empty wins.
+func (s *server) dpiAppsByMAC() map[string][]map[string]interface{} {
+	out := map[string][]map[string]interface{}{}
+	raw, err := readJSON(filepath.Join(s.hncDir, "run", "dpi_state.json"))
+	if err != nil {
+		return out
+	}
+	root, ok := raw.(map[string]interface{})
+	if !ok {
+		return out
+	}
+	clients, ok := root["clients"].(map[string]interface{})
+	if !ok {
+		return out
+	}
+	for _, cRaw := range clients {
+		c, ok := cRaw.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		mac := strings.ToLower(strings.TrimSpace(asString(c["client_mac"])))
+		if mac == "" {
+			continue
+		}
+		if _, exists := out[mac]; exists {
+			continue // first non-empty entry for this MAC wins
+		}
+		appsRaw, ok := c["top_apps"].([]interface{})
+		if !ok || len(appsRaw) == 0 {
+			continue
+		}
+		var apps []map[string]interface{}
+		for _, aRaw := range appsRaw {
+			a, ok := aRaw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			name := asString(a["name"])
+			if name == "" {
+				continue
+			}
+			item := map[string]interface{}{"name": name}
+			if v, ok := a["category"]; ok {
+				item["category"] = v
+			}
+			if v, ok := a["confidence"]; ok {
+				item["confidence"] = v
+			}
+			if v, ok := a["count"]; ok {
+				item["count"] = v
+			}
+			apps = append(apps, item)
+			if len(apps) >= 5 {
+				break
+			}
+		}
+		if len(apps) > 0 {
+			out[mac] = apps
+		}
+	}
+	return out
 }
 
 // ═══ API: stats ═════════════════════════════════════════════════
