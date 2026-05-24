@@ -18,6 +18,16 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc14, 2026-05-24)
+- **WebUI 假代码审计 — 清掉"看着像真、其实是假数据或空操作"的前端代码**(分支 `webui-fake-code-audit`;全量通读 `webroot/index.html` 13032 行 + 远程 `daemon/hnc_httpd/web/app.js` + 27 个 Go handler)。结论:从 v9 demo 继承的 mock 数据绝大多数已被替换成真实后端源,残留 6 处:
+  1. **(HIGH)展开单台设备选模板时静默空操作**(`webroot/index.html` `tpl-pick` 单设备分支)——批量模式走 `batchApply→applyLimitBackend`(真调后端),但**单台展开后选模板只改内存 `DEVICES` 数组 + 弹"已应用模板"成功 toast,从不发 `/api/action rule_set`**,tc/iptables 规则根本没下,下次轮询乐观值被真实数据覆盖、限速静默消失。改为真正 `applyLimitBackend`(两向都 0 走 `clearLimitBackend`)→ `requestForceRefresh` → 成功/失败如实 toast。
+  2. **(MED)下拉刷新是假刷新**(`triggerRefresh`)——注释直写"模拟刷新 800ms",`setTimeout(900ms)` 后弹"已刷新设备列表"并只 `renderDeviceList()` 重渲内存数组,**从不向后端拉新数据**。改为 `requestForceRefresh()`(真走 `/api/live`+`/api/devices`)后再 toast。
+  3. **(MED)"数据新鲜度"指示器结构性说谎**——后端 `/api/live` 硬编码 `snapshot_age_ms:0`、`snapshot_stale:false`,本地 UI 据此让 `#freshness-line` 永远显示"已更新 · 刚刚",永不过期(本构建后端每次请求都实时读文件、根本没有快照缓存,这个"快照年龄"概念在本分支不存在)。改为基于**客户端最近一次成功轮询的真实时间戳**(`state.lastPollOkAt`)计算新鲜度 + 1s ticker,轮询停滞会真的翻成"数据可能已过期 · 正在重试";后端从 `/api/live` 删掉这两个伪字段(远程 SPA 的消费者本就是死代码,无 DOM)。
+  4. **(MED)`/api/metrics` 恒返回全 0 假计数**——`snapshot_age_ms/json_cache_hits/misses/shell_fallback_count/offload_check_count` 全是硬编码 0,设置页诊断面板把它们当真实指标渲染成"snapshot=0 · cache 0/0 · fallback=0"。改为后端诚实返回 `instrumented:false`(本构建实时读文件、无这些计数器),前端显示"实时读取 · 无快照缓存"。
+  5. **(MED)候选区硬编码"当前 463 个规则"**(`appsRenderUnmatched` 的 `pending===0` 分支)——把一个写死的数字当作实时规则集大小展示(后端并无该字段可用)。删掉伪造数字,只保留"规则集已覆盖所有抓到的 SNI"的状态说明。
+  6. **(MED)`fetchHnIp` 伪造 `192.168.1.1`**——拿不到本机 IP 时回退一个看似可用的假网关地址,远程访问卡片会显示 `https://192.168.1.1:8443` 让用户复制一个根本连不上的地址(函数注释本身写着"不再猜测")。改为返回空 + 卡片显示"无法获取本机 IP · 请确认热点已开启"。
+  - 已核非问题(均为诚实实现,不改):设备/DPI/统计/告警/导出全部读真实 `/api/*`;所有控制按钮真调后端且失败如实报错;空状态("暂无数据"/"未启用"/禁用按钮)是诚实降级;模板/SQM 预设是用户配置默认值非假数据;`OUI_DB` 现为空 `{}` 是诚实"未知"回退;`crypto/rand` 仅用于 token/TLS 非伪造指标。纯前端 + Go handler 改动,无需重编 launcher。版本 rc13 → rc14(570114)。
+
 ### Added (v5.7.0-rc13, 2026-05-24)
 - **/system/bin 卸载韧性(方案一,缓解根因 A)** — SukiSU/ColorOS 运行期会间歇性把 `/system/bin` 从模块脚本的挂载命名空间卸掉,导致常驻 shell(watchdog.sh / iptables_manager.sh)的裸命令 `sleep`/`sh`/... ENOENT 崩(日志:`full_init rc=-1`、`iptables_manager.sh: /system/bin/sleep: No such file`)。
   - `service.sh` 启动时(此刻 `/system` 仍正常)`provision_fallback_tools`:把 `/system/bin/toybox`(或 busybox)复制到 `/data/local/hnc/bin/.hnc_mc`,建 `sleep/head/tail/cat/printf/date/grep/sed/cut/tr/wc` applet 符号链接 + 复制 `mksh` 为 `sh`。`/data` 永不被卸。

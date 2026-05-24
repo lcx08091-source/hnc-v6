@@ -18,7 +18,8 @@ import (
 //
 // WebUI (hotfix15+) polls these lightweight endpoints. /api/live 是 devices 的
 // 浓缩摘要 (用于状态条 / 流量条); /api/capabilities 暴露内核能力检测结果;
-// /api/metrics 是 snapshot cache 占位 (这个分支没装完整 snapshot, 永远是 0).
+// /api/metrics 诚实上报 instrumented:false (本构建实时读状态文件, 无快照缓存,
+// 没有可报告的 cache/fallback 计数), 不再伪造恒为 0 的计数让前端误当真实指标.
 
 func (s *server) apiCapabilities(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.hncDir, "run", "capabilities.json")
@@ -37,17 +38,15 @@ func (s *server) apiCapabilities(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) apiMetrics(w http.ResponseWriter, r *http.Request) {
-	// Compatibility shape expected by WebUI diagnostics. These counters are zero
-	// when the full snapshot-cache implementation is not compiled in.
+	// This build has no snapshot cache: every request reads the state files live,
+	// so there are genuinely no cache/fallback/offload counters to report. Report
+	// instrumented:false honestly instead of emitting fake all-zero counters that
+	// the WebUI would render as if they were measured.
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"snapshot_age_ms":        0,
-		"snapshot_refresh_count": 0,
-		"json_cache_hits":        0,
-		"json_cache_misses":      0,
-		"shell_fallback_count":   0,
-		"offload_check_count":    0,
-		"backend_version":        version,
-		"compat":                 "hotfix16.8-live-api",
+		"instrumented":    false,
+		"mode":            "live-read",
+		"backend_version": version,
+		"compat":          "hotfix16.8-live-api",
 	})
 }
 
@@ -88,8 +87,6 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 		"rx_bps":          rxBps,
 		"tx_bps":          txBps,
 		"devices_sig":     liveDevicesSig(devices, active, iface),
-		"snapshot_age_ms": 0,
-		"snapshot_stale":  false,
 		"backend_version": version,
 	})
 }

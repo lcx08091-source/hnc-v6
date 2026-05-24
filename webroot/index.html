@@ -6176,11 +6176,11 @@ body.kb-open .container {
   async function fetchHnIp() {
     try {
       const info = await apiGet('/api/iface_info');
-      // 优先 gateway (更准确), 退而求其次 IP
-      return info.gateway || info.ip || '192.168.1.1';
+      // 优先 gateway (更准确), 退而求其次 IP; 拿不到就返回空 (不再伪造 192.168.1.1)
+      return info.gateway || info.ip || '';
     } catch (e) {
       dbg('fetchHnIp err: ' + e.message);
-      return '192.168.1.1';
+      return '';
     }
   }
 
@@ -6236,7 +6236,7 @@ body.kb-open .container {
       if (force || prevCount === 0) {
         fetchHnIp().then(ip => {
           const el = document.getElementById('url-display');
-          if (el) el.textContent = 'https://' + ip + ':8443';
+          if (el) el.textContent = ip ? ('https://' + ip + ':8443') : '无法获取本机 IP · 请确认热点已开启';
         });
       }
     }
@@ -8697,8 +8697,6 @@ body.kb-open .container {
     if (typeof live.rx_bps === 'number') state.liveRx = live.rx_bps;
     if (typeof live.tx_bps === 'number') state.liveTx = live.tx_bps;
     if (live.devices_sig) state.liveDevicesSig = String(live.devices_sig);
-    if (typeof live.snapshot_age_ms === 'number') state.snapshotAgeMs = live.snapshot_age_ms;
-    state.snapshotStale = !!(live.snapshot_stale || live.refresh_requested);
     if (state.hotspotActive === false) applyHotspotClosedState();
     try { updateCounters(); updateHero(); updateFreshnessLine(); syncDeviceFilterUI(); updateRemoteUrlPanel(); } catch (e) {}
   }
@@ -8749,16 +8747,29 @@ body.kb-open .container {
   /* rc30.8: sig-change burst window. 250ms quick-poll until this timestamp. */
   let __sigBurstUntil = 0;
   const SIG_BURST_DURATION_MS = 5000;
+  /* 真实"数据新鲜度": 基于客户端最近一次成功轮询的时间 (后端每次请求都实时
+   * 读状态文件, 没有快照缓存, 所以"新鲜度" = 上次成功 fetch 至今多久).
+   * 不再依赖后端伪造的 snapshot_age_ms / snapshot_stale 常量. */
   function updateFreshnessLine() {
-    const age = Math.max(0, Number(state.snapshotAgeMs || 0));
-    const sec = age >= 1000 ? (age / 1000).toFixed(age < 10000 ? 1 : 0) + ' 秒前' : '刚刚';
+    const last = Number(state.lastPollOkAt || 0);
+    const age = last ? Math.max(0, Date.now() - last) : 0;
+    const sec = !last ? '等待刷新'
+              : age < 1500 ? '刚刚'
+              : (age / 1000).toFixed(age < 10000 ? 1 : 0) + ' 秒前';
     const modeLabel = ({realtime:'实时', balanced:'均衡', powersave:'省电'})[getRefreshMode()] || '均衡';
-    const stale = !!state.snapshotStale || age > 5000;
-    const txt = stale ? ('数据可能已过期 · ' + sec + ' · 正在刷新') : ('已更新 · ' + sec + ' · ' + modeLabel + '模式');
+    // 轮询正常时 age≈0; 长时间没有成功轮询 (后台拉取失败/中断) → 视为过期
+    const stale = !last || age > 8000;
+    const txt = !last ? '数据：等待刷新'
+              : stale ? ('数据可能已过期 · ' + sec + ' · 正在重试')
+              : ('已更新 · ' + sec + ' · ' + modeLabel + '模式');
+    // 桥接断开时 showBridgeStatus 接管 #freshness-line (显示"正在连接后端" + 重试卡片),
+    // 此时不抢这行, 避免每秒 ticker 把桥接提示覆盖掉.
+    const bridgeCard = document.getElementById('bridge-status-card');
+    const bridgeDown = !!(bridgeCard && bridgeCard.classList.contains('show'));
     const line = $('#freshness-line');
-    if (line) { line.textContent = txt; line.classList.toggle('stale', stale); line.classList.toggle('err', false); }
+    if (line && !bridgeDown) { line.textContent = txt; line.classList.toggle('stale', stale); line.classList.toggle('err', false); }
     const val = $('#snapshot-freshness-value'); if (val) val.textContent = sec;
-    const desc = $('#snapshot-freshness-desc'); if (desc) desc.textContent = (stale ? '后端快照较旧，已异步请求刷新' : ('当前为' + modeLabel + '模式'));
+    const desc = $('#snapshot-freshness-desc'); if (desc) desc.textContent = (stale ? '轮询可能已中断，正在重试刷新' : ('实时读取 · 当前为' + modeLabel + '模式'));
   }
   function clearPollTimer() {
     if (__pollTimer) { clearTimeout(__pollTimer); __pollTimer = null; }
@@ -8784,7 +8795,7 @@ body.kb-open .container {
     let live = null;
     try {
       live = await fetchLive();
-      if (live) applyLiveState(live);
+      if (live) { state.lastPollOkAt = Date.now(); applyLiveState(live); }
       const sig = live && live.devices_sig ? String(live.devices_sig) : '';
       const needFull = reason === 'force' || !__lastDevicesSig || (sig && sig !== __lastDevicesSig);
       if (needFull) {
@@ -8837,10 +8848,17 @@ body.kb-open .container {
       }
     }
   }
+  let __freshTimer = null;
+  function ensureFreshnessTicker() {
+    if (__freshTimer) return;
+    // 每秒重算新鲜度: 轮询停滞时 age 会持续增长并翻成"已过期", 不靠后端常量
+    __freshTimer = setInterval(() => { try { updateFreshnessLine(); } catch (e) {} }, 1000);
+  }
   function startPolling() {
     __pollVisible = !document.hidden;
     if (!__pollVisible) return;
     clearPollTimer();
+    ensureFreshnessTicker();
     tickPoll('force');
   }
   function stopPolling() {
@@ -8921,8 +8939,7 @@ body.kb-open .container {
     liveRx: 0,
     liveTx: 0,
     liveDevicesSig: '',
-    snapshotAgeMs: 0,
-    snapshotStale: false,
+    lastPollOkAt: 0,        // 客户端最近一次成功轮询的时间戳 (真实数据新鲜度依据)
     capabilities: null,
     uplinkSupported: null,
     downlinkSupported: null,
@@ -10553,13 +10570,11 @@ body.kb-open .container {
       // 列表回弹
       const container = $('#page-devices .container');
       if (container) container.style.transform = '';
-      // 模拟刷新 800ms
-      setTimeout(() => {
-        ptr.classList.remove('refreshing');
-        refreshing = false;
-        toast('已刷新设备列表', 'ok');
-        renderDeviceList();
-      }, 900);
+      // 真正向后端拉一次最新设备数据 (requestForceRefresh → tickPoll → /api/live + /api/devices)
+      const done = () => { ptr.classList.remove('refreshing'); refreshing = false; };
+      Promise.resolve(typeof requestForceRefresh === 'function' ? requestForceRefresh() : null)
+        .then(() => { done(); renderDeviceList(); toast('已刷新设备列表', 'ok'); })
+        .catch(() => { done(); toast('刷新失败，请重试', 'err'); });
     }
 
     // rc3.1.1: body 不滚后 window.scrollY 永远 0, 改读当前 active page
@@ -10688,11 +10703,18 @@ body.kb-open .container {
     try {
       if (state.metricsApiUnavailable) throw new Error('metrics api unavailable');
       const m = await apiGet('/api/metrics');
-      const age = Number(m.snapshot_age_ms || 0);
-      const hit = Number(m.json_cache_hits || 0);
-      const miss = Number(m.json_cache_misses || 0);
-      if (mVal) mVal.textContent = age >= 1000 ? (age / 1000).toFixed(age < 10000 ? 1 : 0) + 's' : age + 'ms';
-      if (mDesc) mDesc.textContent = 'snapshot=' + (m.snapshot_refresh_count || 0) + ' · cache ' + hit + '/' + miss + ' · fallback=' + (m.shell_fallback_count || 0) + ' · offload=' + (m.offload_check_count || 0);
+      // 本构建直接实时读状态文件, 没有快照缓存/计数器 → 后端返回 instrumented:false.
+      // 不再把恒为 0 的伪计数当真实指标展示.
+      if (m && m.instrumented === false) {
+        if (mVal) mVal.textContent = '实时读取';
+        if (mDesc) mDesc.textContent = '本构建无快照缓存，每次请求直接读状态文件，无 cache/fallback 计数';
+      } else {
+        const age = Number(m.snapshot_age_ms || 0);
+        const hit = Number(m.json_cache_hits || 0);
+        const miss = Number(m.json_cache_misses || 0);
+        if (mVal) mVal.textContent = age >= 1000 ? (age / 1000).toFixed(age < 10000 ? 1 : 0) + 's' : age + 'ms';
+        if (mDesc) mDesc.textContent = 'snapshot=' + (m.snapshot_refresh_count || 0) + ' · cache ' + hit + '/' + miss + ' · fallback=' + (m.shell_fallback_count || 0) + ' · offload=' + (m.offload_check_count || 0);
+      }
     } catch (e) {
       const msg = e && e.message ? e.message : String(e);
       if (/404|page not found|unavailable/i.test(msg)) {
@@ -11009,10 +11031,16 @@ body.kb-open .container {
           const d = DEVICES.find(x => x.mac === mac);
           if (d) {
             const effTpl = (state.uplinkSupported === false) ? Object.assign({}, tpl, {up: 0}) : tpl;
-            d.limited = effTpl.down > 0 || effTpl.up > 0;
-            d.down = effTpl.down; d.up = effTpl.up;
-            renderDeviceList();
-            toast(`已应用模板: ${tpl.name}${state.uplinkSupported === false ? ' · 仅下行' : ''}`, 'ok');
+            const op = (effTpl.down === 0 && effTpl.up === 0)
+              ? clearLimitBackend(mac)
+              : applyLimitBackend(mac, effTpl.down, effTpl.up);
+            Promise.resolve(op)
+              .then(() => requestForceRefresh())
+              .then(() => {
+                renderDeviceList();
+                toast(`已应用模板: ${tpl.name}${state.uplinkSupported === false ? ' · 仅下行' : ''}`, 'ok');
+              })
+              .catch(e => toast('应用模板失败: ' + (e && (e.detail || e.message) || e), 'err'));
           }
         } else toast('请先展开一个设备卡', 'warn');
       }
@@ -12619,7 +12647,7 @@ body.kb-open .container {
           '<div>' +
             '<div style="font-size:13px;font-weight:600;color:var(--text-1)">规则集已覆盖所有抓到的 SNI</div>' +
             '<div style="font-size:11.5px;color:var(--text-3);margin-top:2px">' +
-              '当前 463 个规则 apex 覆盖很广, 没有陌生子域进入 auto-expand 候选队列。这是符合预期的状态, 不是 bug。' +
+              '没有陌生子域进入 auto-expand 候选队列。这是符合预期的状态, 不是 bug。' +
             '</div>' +
           '</div>' +
         '</div>';
