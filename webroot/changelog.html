@@ -1,3 +1,14 @@
+<!-- v5.8.1 -->
+<div class="cl-section">
+  <div class="cl-title">🛠️ v5.8.1: 审查修复 — 杜绝"假修复发布" + dpid 抗崩 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>dpid 更稳</b>: 流量识别进程在处理单个畸形/异常网络包时,以前可能整个崩掉;现在加了兜底,单个坏包只记一笔、跳过,不再拖垮整个 dpid。</li>
+    <li><b>修复真正进包</b>: 发现一个发布流程问题——`hnc_dpid_supervisor`(监护进程)其实可以由 CI 自动编译,却一直被漏掉、发的是旧版本;现已让 CI 每次重新编译它,之前的防抖修复终于生效。</li>
+    <li><b>防"假修复"</b>: 新增构建护栏——某些依赖特殊工具链的二进制(hotspotd 等)如果源码改了却忘了重新编译,CI 会直接报错,避免"改了源码但用户拿到的还是旧版"。</li>
+    <li>说明: 含 dpid 改动需重新编译;另有一个旧的 hotspotd 二进制仍需在带工具链的机器上手动重编一次(详见技术 CHANGELOG)。</li>
+  </ul>
+</div>
+
 <!-- v5.8.0 -->
 <div class="cl-section">
   <div class="cl-title">🏷️ v5.8.0: 统一版本号、关于页不再显示旧版本 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

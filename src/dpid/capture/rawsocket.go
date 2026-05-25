@@ -29,6 +29,7 @@ type Stats struct {
 	FlowEvents     uint64 // rc29
 	IgnoredPackets uint64
 	ParseErrors    uint64
+	Panics         uint64 // recovered packet-handler panics (see Run)
 }
 
 // ARPHRD_* link-layer type constants seen in the wild on Android.
@@ -63,6 +64,7 @@ type Handle struct {
 		flow     atomic.Uint64
 		ignored  atomic.Uint64
 		parseErr atomic.Uint64
+		panics   atomic.Uint64
 	}
 }
 
@@ -190,6 +192,7 @@ func (h *Handle) Stats() Stats {
 		FlowEvents:     h.stats.flow.Load(),
 		IgnoredPackets: h.stats.ignored.Load(),
 		ParseErrors:    h.stats.parseErr.Load(),
+		Panics:         h.stats.panics.Load(),
 	}
 }
 
@@ -245,36 +248,50 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 		}
 
 		h.stats.packets.Add(1)
-		// v5.6.0-rc3: dispatch parser by link layer. ARPHRD_RAWIP (519)
-		// on Qualcomm cellular and ARPHRD_NONE (65534) on tun VPN both
-		// deliver bare IP packets — using the Ethernet parser would read
-		// IP header bytes as bogus etherType and silently drop everything.
-		var ev Event
-		var res ParseResult
-		switch h.linkType {
-		case arphrdRawIP, arphrdNone:
-			ev, res = parseRawIPPacket(h.buf[:n], time.Now())
-		default:
-			// 0 (unknown — fallback), 1 (Ether), or anything else uses
-			// the original Ethernet path. wlan2 = AP mode, wlan0 = STA,
-			// ovnetX = bridged Ether-class all land here.
-			ev, res = parsePacket(h.buf[:n], time.Now())
-		}
-		switch res {
-		case ParseOK:
-			switch ev.Kind {
-			case EventDNS:
-				h.stats.dns.Add(1)
-			case EventTLSClientHello:
-				h.stats.tls.Add(1)
-			case EventFlow:
-				h.stats.flow.Add(1)
+		// A single malformed or hostile packet must never take down the capture
+		// goroutine (and with it the whole dpid process). Wrap parse + onEvent in
+		// a recover: count the panic, log it (rate-limited so a panic-triggering
+		// flood can't spam logs), and keep reading the next packet.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					c := h.stats.panics.Add(1)
+					if c == 1 || c%1000 == 0 {
+						fmt.Fprintf(os.Stderr, "[dpid/capture] recovered from packet handler panic #%d: %v\n", c, r)
+					}
+				}
+			}()
+			// v5.6.0-rc3: dispatch parser by link layer. ARPHRD_RAWIP (519)
+			// on Qualcomm cellular and ARPHRD_NONE (65534) on tun VPN both
+			// deliver bare IP packets — using the Ethernet parser would read
+			// IP header bytes as bogus etherType and silently drop everything.
+			var ev Event
+			var res ParseResult
+			switch h.linkType {
+			case arphrdRawIP, arphrdNone:
+				ev, res = parseRawIPPacket(h.buf[:n], time.Now())
+			default:
+				// 0 (unknown — fallback), 1 (Ether), or anything else uses
+				// the original Ethernet path. wlan2 = AP mode, wlan0 = STA,
+				// ovnetX = bridged Ether-class all land here.
+				ev, res = parsePacket(h.buf[:n], time.Now())
 			}
-			onEvent(ev)
-		case ParseIgnore:
-			h.stats.ignored.Add(1)
-		case ParseMalformed:
-			h.stats.parseErr.Add(1)
-		}
+			switch res {
+			case ParseOK:
+				switch ev.Kind {
+				case EventDNS:
+					h.stats.dns.Add(1)
+				case EventTLSClientHello:
+					h.stats.tls.Add(1)
+				case EventFlow:
+					h.stats.flow.Add(1)
+				}
+				onEvent(ev)
+			case ParseIgnore:
+				h.stats.ignored.Add(1)
+			case ParseMalformed:
+				h.stats.parseErr.Add(1)
+			}
+		}()
 	}
 }

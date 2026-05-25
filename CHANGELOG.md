@@ -14,6 +14,20 @@
 
 ---
 
+## [5.8.1] - 2026-05-25
+
+针对全面审查报告的首批落地修复。重点是治"假修复发布"——近期 C/supervisor 改动只在源码、从未编进发布包。
+
+### Fixed
+- **dpid 抓包加 panic 兜底**(`src/dpid/capture/rawsocket.go`)。`Handle.Run` 的每包处理(解析 + `onEvent` 回调)此前无 `recover`,单个畸形/恶意包触发的 panic 会崩掉抓包 goroutine、进而拖垮整个 dpid。现把每包处理包进带 `recover` 的闭包:计数(新增 `stats.panics` / `Stats.Panics`)、限流打印(首次 + 每 1000 次)、继续读下一个包 → 抗畸形/恶意输入,单包不再致命。含 dpid(Go)改动,CI 会重编。`go vet` + android/arm64 交叉编译通过。
+
+### Internals
+- **CI 补编 `hnc_dpid_supervisor`**(`.github/workflows/build.yml`)。它是纯 Go(`src/dpid/cmd/dpid_supervisor`)、不依赖 libbpf,但 CI 此前只编 `./cmd/dpid` 与 `./cmd/hnc_watchdog`、**漏编了它** → 一直以陈旧的提交版预编译形式发布,rc38 的 netlink 防抖修复(及之后改动)从未到达用户。现按 `hnc_dpid` / `hnc_watchdog` 同款每次 CI 重编 + strip。
+- **预编译 C 二进制新鲜度护栏**(`.github/workflows/build.yml` + `bin/.hotspotd_src.sha256`)。`bin/hotspotd` / `bin/hnc_ipc` / `bin/mdns_resolve` 依赖未 vendoring 的 libbpf,CI 无法重编,只能预编译入库——这正是 rc39 `scheduler.c`(16KB 定长→动态读)修复"号称修了却没进包"的根因。新增护栏:对 `daemon/hotspotd/**` 的 C 源码(排除 `test/`)算确定性指纹,与 `bin/.hotspotd_src.sha256` 比对,**源码改了却没重编 → CI 失败**并提示重编步骤,从此杜绝静默发布陈旧二进制。
+  - ⚠️ **遗留债**:护栏基线设在当前(v5.8.1)源码,故从本版起防"未来"的假修复;但**存量 `bin/hotspotd` 仍是 rc30.12.20 的旧二进制**(早于 rc39/rc43),缺 `scheduler.c` 动态读、offload 换网重探等修复。需在装有 NDK+libbpf 的机器上**一次性重编 hotspotd 并刷新指纹**,本远程环境无该工具链、无法代劳。(注:rc39 截断 bug 的危害链"漏识别→BPF offload 不关→绕过 HTB"在 RMX5010 上因 BPF tether offload 实测不旁路 tc 而不触发,实际影响低于报告定级。)
+
+---
+
 ## [5.8.0] - 2026-05-25
 
 把开发期的 rc 系列收敛为一个干净的正式版。下方 `[Unreleased]` 保留各 rc 的逐条明细作为历史。

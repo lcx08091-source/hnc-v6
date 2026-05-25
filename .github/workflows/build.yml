@@ -122,6 +122,22 @@ jobs:
           file ../../bin/hnc_watchdog | grep -q "not stripped" && { echo "ERROR: hnc_watchdog not stripped"; exit 1; }
           chmod 755 ../../bin/hnc_watchdog
 
+      # rc47/audit: hnc_dpid_supervisor is pure Go (./cmd/dpid_supervisor) and
+      # does NOT depend on libbpf, yet CI never built it — it shipped as a stale
+      # committed prebuilt, so the rc38 netlink-debounce fix (and anything since)
+      # never reached users. Rebuild it fresh + stripped every CI run, same as
+      # hnc_dpid / hnc_watchdog.
+      - name: Build hnc_dpid_supervisor (Go)
+        run: |
+          cd src/dpid
+          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+            go build -trimpath -ldflags="-s -w" \
+            -o ../../bin/hnc_dpid_supervisor ./cmd/dpid_supervisor
+          ls -lh ../../bin/hnc_dpid_supervisor
+          file ../../bin/hnc_dpid_supervisor | grep -q "ARM aarch64" || exit 1
+          file ../../bin/hnc_dpid_supervisor | grep -q "not stripped" && { echo "ERROR: hnc_dpid_supervisor not stripped"; exit 1; }
+          chmod 755 ../../bin/hnc_dpid_supervisor
+
       # ─── Build app-label dex helper (Java → dex) ──────────
       # Reads real localized PackageManager labels on-device via app_process.
       # Compiled against a public android.jar; @hide bootstrap done by
@@ -197,6 +213,46 @@ jobs:
             chmod 755 "$bin"
           done
           echo "OK: hotspotd and hnc_ipc are arm64"
+
+      # rc47/audit: freshness guard for the prebuilt C binaries CI cannot rebuild
+      # (hotspotd / hnc_ipc / mdns_resolve — they need libbpf which is not
+      # vendored here). Their sources live under daemon/hotspotd/. If a C source
+      # changes but the prebuilt binaries are not rebuilt, the fix silently never
+      # ships — exactly how the rc39 scheduler.c fix was lost. We fingerprint the
+      # C source tree (excluding test/) and compare against the committed
+      # bin/.hotspotd_src.sha256. A mismatch means: rebuild the binaries locally
+      # with the NDK+libbpf toolchain, then refresh the fingerprint.
+      - name: Prebuilt C binary freshness guard
+        run: |
+          set -e
+          FP_FILE="bin/.hotspotd_src.sha256"
+          fp_cmd() {
+            find daemon/hotspotd -type f \( -name '*.c' -o -name '*.h' \) \
+              -not -path '*/test/*' -print0 \
+              | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1
+          }
+          cur=$(fp_cmd)
+          if [ ! -f "$FP_FILE" ]; then
+            echo "ERROR: $FP_FILE missing (current source fingerprint: $cur)"
+            exit 1
+          fi
+          want=$(awk 'NR==1{print $1}' "$FP_FILE")
+          if [ "$cur" != "$want" ]; then
+            echo "ERROR: daemon/hotspotd C sources changed but the prebuilt binaries"
+            echo "       (bin/hotspotd, bin/hnc_ipc, bin/mdns_resolve) were not rebuilt."
+            echo "       committed fingerprint: $want"
+            echo "       current   fingerprint: $cur"
+            echo ""
+            echo "These binaries depend on libbpf and are NOT built by CI. After"
+            echo "changing their sources you MUST, on a machine with the NDK+libbpf"
+            echo "toolchain:"
+            echo "  1) rebuild them and copy into bin/,"
+            echo "  2) refresh the fingerprint:"
+            echo "     find daemon/hotspotd -type f \\( -name '*.c' -o -name '*.h' \\) -not -path '*/test/*' -print0 | sort -z | xargs -0 sha256sum | sha256sum | cut -d' ' -f1 > bin/.hotspotd_src.sha256"
+            echo "  3) commit the rebuilt binaries + updated fingerprint together."
+            exit 1
+          fi
+          echo "OK: daemon/hotspotd C sources match committed prebuilt fingerprint ($cur)"
 
       - name: Fix file permissions
         run: |
