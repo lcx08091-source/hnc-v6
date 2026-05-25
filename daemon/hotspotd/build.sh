@@ -102,6 +102,20 @@ if [ -d tools ]; then
     fi
 fi
 
+# ── 编 mdns_resolve (自包含, 无 libbpf 依赖) ───────────────
+# v5.8.3 (audit): 之前 mdns_resolve 是 ad-hoc 预编译、无构建脚本、CI 不重编。
+# 它只用标准 POSIX 头, 单文件直接编即可, 纳入 build.sh 让 CI 一并重编。
+echo ""
+echo "=== mdns_resolve build ==="
+if [ -f mdns_resolve.c ]; then
+    $CC -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter \
+        -D_GNU_SOURCE -DANDROID -fPIE -pie -pthread \
+        -o "$BINDIR/mdns_resolve" mdns_resolve.c
+    strip "$BINDIR/mdns_resolve" 2>/dev/null || true
+    chmod 755 "$BINDIR/mdns_resolve"
+    echo "[build] OK: $(ls -lh "$BINDIR/mdns_resolve" | awk '{print $5}')  $BINDIR/mdns_resolve"
+fi
+
 # ── 编 BPF object (LSM 程序) ─────────────────────────────
 echo ""
 echo "=== v5.0.0-beta.4 BPF LSM build ==="

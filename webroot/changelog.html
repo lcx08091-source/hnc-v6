@@ -1,3 +1,12 @@
+<!-- v5.8.3 -->
+<div class="cl-section">
+  <div class="cl-title">🏗️ v5.8.3: 根治"修了却没进包" — CI 现在重新编译 hotspotd <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>底层修复终于生效</b>: 之前 hotspotd(热点核心程序)是预先编好提交的、CI 从不重新编译,导致一些底层修复(如规则多时被截断、换网重探)只改了源码、从没真正打进安装包。现在把所需的 libbpf 库收进仓库,让 CI 每次都从源码重新编译 hotspotd、hnc_ipc、mdns_resolve,这类"假修复"问题根除。</li>
+    <li><b>说明</b>: 这是构建流程的改动,功能行为不变;下次从 CI 出的安装包会带上之前没进包的底层修复。</li>
+  </ul>
+</div>
+
 <!-- v5.8.2 -->
 <div class="cl-section">
   <div class="cl-title">🔒 v5.8.2: 写操作接口加固 + dpid 修内存泄漏 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

@@ -14,6 +14,22 @@
 
 ---
 
+## [5.8.3] - 2026-05-25
+
+根治"陈旧 C 二进制"问题:让 CI 真正从源码重编 hotspotd,而不是发陈旧预编译 + 靠护栏提醒。
+
+### Internals
+- **libbpf 收为 git submodule + CI 从源码重编 hotspotd**(`.gitmodules` + `third_party/libbpf@v1.4.7` + `.github/workflows/build.yml` + `daemon/hotspotd/build.sh` + `.gitignore`)。此前 `bin/hotspotd`/`bin/hnc_ipc`/`bin/mdns_resolve` 是提交进 git 的预编译、CI 从不重编(因 libbpf 未 vendoring),导致 rc39(`scheduler.c` 16KB→动态读)、rc43(offload 换网重探)等 C 修复**只在源码、从未进包**。
+  - libbpf 以 git submodule 形式定在 **v1.4.7**;CI checkout 改 `submodules: recursive`;新增 "Build hotspotd + hnc_ipc + mdns_resolve (C)" 步骤跑 `build.sh`(自动编 `libbpf.a` + hotspotd + hnc_ipc + mdns_resolve + BPF LSM object),**每次 CI 重编**。
+  - `mdns_resolve`(自包含、之前同样是无构建脚本的 ad-hoc 预编译)纳入 `build.sh` 一并重编。
+  - 这三个二进制 + `hnc_dpid_supervisor` 从 git **取消跟踪并加进 `.gitignore`**(与 `hnc_dpid`/`hnc_watchdog` 同款"CI 产物不入库"),陈旧预编译再不可能。
+  - **移除** v5.8.1 加的预编译 C 新鲜度护栏(`bin/.hotspotd_src.sha256` + CI guard 步骤)—— 既然 CI 直接重编,护栏已无意义。
+  - `hnc_ndpi_probe` 源码不在本仓库,仍是唯一保留的提交预编译(无法 CI 重编)。
+  - zip 打包排除 `third_party/`(submodule,仅构建期)与 `bpf/`(LSM object,暂不随包发布以保持现有"LSM object 缺省即跳过"行为,待真机验证后再开)。
+  - 验证:本环境无 Android NDK(`dl.google.com` 被网络策略封),无法本地产出 arm64 二进制;改用 host clang 冒烟:libbpf v1.4.7 源码编译通过、全部 13 个 hotspotd 构建源对 v1.4.7 头文件 `-fsyntax-only` 通过、`mdns_resolve.c`/`hnc_ipc.c` 独立编译通过。**真实 arm64 构建在 GitHub Actions(其 runner 网络放开、用 setup-ndk 下 NDK)首次跑 main 时验证。**
+
+---
+
 ## [5.8.2] - 2026-05-25
 
 审查报告第二批落地:Go 写端点防御纵深 + dpid map 内存泄漏。两项均为纯 Go,CI 重编 hnc_httpd / hnc_dpid。
