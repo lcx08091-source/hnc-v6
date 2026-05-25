@@ -785,7 +785,12 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 // loadSystemPkgs runs `pm list packages -s` and returns the set of system
 // package names: lines look like "package:com.android.systemui".
 func loadSystemPkgs() (map[string]struct{}, error) {
-	out, err := exec.Command("pm", "list", "packages", "-s").Output()
+	cmd := exec.Command("pm", "list", "packages", "-s")
+	// rc39 (P2-23): nohup-launched dpid may inherit an incomplete Env; without
+	// LD_LIBRARY_PATH the `pm` app_process wrapper can hit a linker error and
+	// return nothing → system-app filtering breaks. Pin the standard lib paths.
+	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/system/lib64:/system/lib")
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
@@ -891,6 +896,10 @@ func loadPkgUIDs() (map[int]string, error) {
 		return m, nil
 	}
 	cmd := exec.Command("pm", "list", "packages", "-U")
+	// rc39 (P2-23): pin LD_LIBRARY_PATH so the pm fallback works under an
+	// incomplete (nohup) Env. (Primary path is packages.list above; this is the
+	// fallback when that's unreadable/empty.)
+	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/system/lib64:/system/lib")
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err

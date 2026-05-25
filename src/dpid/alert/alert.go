@@ -632,13 +632,30 @@ func MarkSeen(cfg Config, ids []string) error {
 	for _, id := range ids {
 		seen[id] = struct{}{}
 	}
-	// Cap at 1000 to avoid unbounded growth.
+	// rc39 (P2-25): cap at 1000, but NEVER drop the ids just marked this call.
+	// Old code built `list` from random map-iteration order and kept the LAST
+	// 1000 → the id the user just marked could be truncated away → the alert
+	// flips back to unread on next refresh. (sort.Strings wouldn't help: the ID
+	// is kind_mac_bucket, timestamp is the trailing field.) Put the just-marked
+	// ids first, then the rest, and keep the LEADING 1000 so recent
+	// acknowledgements always persist.
+	inIds := make(map[string]struct{}, len(ids))
 	list := make([]string, 0, len(seen))
+	for _, id := range ids {
+		if _, ok := seen[id]; ok {
+			if _, dup := inIds[id]; !dup {
+				inIds[id] = struct{}{}
+				list = append(list, id)
+			}
+		}
+	}
 	for id := range seen {
-		list = append(list, id)
+		if _, ok := inIds[id]; !ok {
+			list = append(list, id)
+		}
 	}
 	if len(list) > 1000 {
-		list = list[len(list)-1000:]
+		list = list[:1000]
 	}
 	b, _ := json.Marshal(SeenFile{IDs: list})
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

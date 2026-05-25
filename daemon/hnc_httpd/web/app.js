@@ -593,7 +593,11 @@ window.hideTip = function() {
 var actionInFlight = {};
 function actionKey(action, params) {
   params = params || {};
-  return params.mac ? ('dev:' + String(params.mac)) : ('global:' + String(action || ''));
+  // rc39 (P2-12): include action in the per-device key so different ops on the
+  // SAME device (e.g. limit then block) aren't falsely de-duped as "busy".
+  return params.mac
+    ? ('dev:' + String(params.mac) + ':' + String(action || ''))
+    : ('global:' + String(action || ''));
 }
 async function callAction(action, params) {
   params = params || {};

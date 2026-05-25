@@ -217,17 +217,29 @@ static int rebuild_from_rules(void)
         return 0;    /* 没配置文件 = 无限速设备, 正常场景 */
     }
 
-    static char buf[16384];
-    size_t n = fread(buf, 1, sizeof(buf) - 1, f);
+    /* rc39 (P1-5): 动态读整文件。旧的 static char buf[16384] 在 rules.json >16KB
+     * (~80+ 限速设备) 时截断 → brace-count 找不到 devices 结尾 → return 0 →
+     * limited 集合空 → BPF offload 不被 disable → 被限速流量静默走 fast-path 绕过
+     * HTB。改用 fseek/ftell 取大小后 malloc 读全量(无 sys/stat.h 依赖)。 */
+    long fsz = 0;
+    if (fseek(f, 0, SEEK_END) == 0) { fsz = ftell(f); rewind(f); }
+    size_t cap = (fsz > 0) ? (size_t)fsz + 1 : 65536;
+    char *buf = malloc(cap);
+    if (!buf) {
+        fclose(f);
+        fprintf(stderr, "[sched] rebuild: OOM allocating %zu bytes, skip\n", cap);
+        return 0;
+    }
+    size_t n = fread(buf, 1, cap - 1, f);
     fclose(f);
-    if (n == 0) return 0;
+    if (n == 0) { free(buf); return 0; }
     buf[n] = '\0';
 
     /* 定位 devices section: "devices":{...} */
     char *dev_start = strstr(buf, "\"devices\"");
-    if (!dev_start) return 0;
+    if (!dev_start) { free(buf); return 0; }
     char *obj_start = strchr(dev_start, '{');
-    if (!obj_start) return 0;
+    if (!obj_start) { free(buf); return 0; }
 
     /* brace-counting 找 devices 对象结尾 (跳过嵌套, 跳过字符串内 brace)
      * hostname 里可能有 '{' 或 '}', 要识别 JSON 字符串 */
@@ -246,7 +258,7 @@ static int rebuild_from_rules(void)
             if (depth == 0) { dev_end = p; break; }
         }
     }
-    if (!dev_end) return 0;
+    if (!dev_end) { free(buf); return 0; }
     *dev_end = '\0';   /* 临时截断, devices 对象仅存在这范围 */
 
     /* 扫每个 MAC-key + 它的 block (brace-match) */
@@ -321,6 +333,7 @@ static int rebuild_from_rules(void)
     } else {
         fprintf(stderr, "[sched] rebuild: no limited devices in rules.json\n");
     }
+    free(buf);
     return added;
 }
 

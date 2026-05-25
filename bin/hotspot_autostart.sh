@@ -81,10 +81,15 @@ get_setting() {
 detect_up_iface() {
     # rc26: Android 用策略路由(per-network 路由表),main 表常无 default route,
     # `ip route show default` 探不到。改用 `ip route get` 探实际互联网出口接口。
-    _r=$(ip route get 1.1.1.1 2>/dev/null)
-    case "$_r" in
-        *" dev "*) _r=${_r#*dev }; echo "${_r%% *}" ;;
-    esac
+    # rc39 (P2-28): 不止探 1.1.1.1 —— 受限网络(企业/学校/部分地区)1.1.1.1 不可达
+    # 会让出口探测失败 → NAT 不挂 → 客户端连上没网。依次试多个公共 IP,第一个
+    # 探到 dev 即用(1.1.1.1 Cloudflare / 223.5.5.5 阿里 / 114.114.114.114)。
+    for _t in 1.1.1.1 223.5.5.5 114.114.114.114; do
+        _r=$(ip route get "$_t" 2>/dev/null)
+        case "$_r" in
+            *" dev "*) _r=${_r#*dev }; echo "${_r%% *}"; return ;;
+        esac
+    done
 }
 detect_ap_iface() {
     _up="$1"

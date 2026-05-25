@@ -18,6 +18,16 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc39, 2026-05-25)
+- **第 4 份审查报告(rc32 .docx)新发现真问题 · G1 快赢**。该报告与前 3 份大量重叠(P1-1/1-2/1-3、P2-1/2-2 我已在 rc36-38 修);本组修它**新发现且确认为真**的项:
+  - **P1-5 scheduler.c 16KB 静态 buffer 截断**(`daemon/hotspotd/scheduler.c:rebuild_from_rules`,唯一新 P1):`static char buf[16384]` + `fread(...sizeof-1)` 在 rules.json >16KB(~80+ 限速设备)时只读前 16KB → devices 对象 `}` 被截 → brace-count 找不到结尾 → `return 0` → `limited_macs` 空 → BPF tether offload 不被 disable → **被限速设备流量走 BPF fast-path 全速绕过 HTB,UI 显示限速实际满速,完全 silent**。修:`fseek`/`ftell` 取文件大小后 `malloc` 读全量(失败回退 65536),所有 return 路径 `free`。边界:仅当①设备多到 >16KB ②内核 BPF tether offload 生效 时触发;低成本作保险。
+  - **P2-12 远程 SPA actionKey 去重过粗**(`daemon/hnc_httpd/web/app.js:actionKey`):per-device key 由 `'dev:'+mac` 改 `'dev:'+mac+':'+action` —— 同设备先点限速(in-flight)再点封锁不再被误判 busy 拒掉。
+  - **P2-23 dpid 调 pm 缺 LD_LIBRARY_PATH**(`src/dpid/output/self_attrib.go` `loadSystemPkgs`/`loadPkgUIDs`):nohup 启动 Env 不全时 `pm` 可能 linker error → uid→pkg 全空 / 系统应用过滤失效。两处 exec 前 `cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/system/lib64:/system/lib")`。
+  - **P2-28 出口探测只试 1.1.1.1**(`bin/hotspot_autostart.sh:detect_up_iface`):受限网络 1.1.1.1 不可达 → 出口探测失败 → NAT 不挂 → 客户端连上没网。改依次试 `1.1.1.1 / 223.5.5.5 / 114.114.114.114`,第一个探到 `dev` 即用。
+  - **P2-25 alert 标记已读截断丢最新**(`src/dpid/alert/alert.go:MarkSeen`):旧代码按 map 随机序建 list 再留最后 1000,刚标记的可能被截掉 → 刷新又变未读。修:把本次 `ids` 放最前、再补其余、保留**前** 1000,确保最近的确认必留(alert id 是 `kind_mac_bucket`,sort.Strings 给不出时序,故不用 sort)。
+  - 含 `hotspotd`(C)+ `hnc_httpd`/`dpid`(Go,app.js 经 go:embed)改动,**需 CI 重编**。`sh -n` + `node --check` + `go vet ./...` + `go test` + `android/arm64` 交叉编译 + scheduler.c 主机 `-fsyntax-only` 全过。版本 rc38 → rc39(570139)。
+  - **P3 评估结论(应用户问)**:无一值得现在修。P3-16(alert XSS)= 误报(WebUI `renderAlertList` 已 `esc()`);P3-8(ip6tables `-m mac` 无能力探测)= 真但设备特定·有 IP/CONNMARK 兜底;其余 P3-9/11/12/13/15/17/18/19 = 微优化/设计接受/诊断精度,影响可忽略。
+
 ### Fixed (v5.7.0-rc38, 2026-05-25)
 - **审查报告真问题修复 · C+D 组(轻量补丁 + 防未然)**。收尾确认为真的轻量项:
   - **DELAY-1 delay_set/clear 多次 json 写非原子**(`daemon/hnc_httpd/action_v5.go`):此前循环逐字段 `json_set.sh device` 写 4 个字段,中途失败留半状态。改用 `json_set_batch.sh device`(→ `hnc_json set-device-batch`:一次校验/备份/锁/提交,原子);hnc_json 缺失时该脚本自动退回逐字段串行(行为等价)。
