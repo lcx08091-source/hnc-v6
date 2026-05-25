@@ -26,6 +26,7 @@ const (
 	maxClients        = 128
 	maxNamesPerClient = 64
 	maxGlobalNames    = 256
+	maxIPsPerClient   = 256 // bound RemoteIPs/ClientIPs per client (audit P2-3)
 	maxFlowsPerClient = 64
 	maxGlobalFlows    = 512
 	topN              = 8
@@ -492,9 +493,7 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 	c := w.clientLocked(clientMAC, clientIP, now)
 	c.DNSEvents++
 	c.LastSeen = now
-	if remoteIP != "" {
-		c.RemoteIPs[remoteIP] = now
-	}
+	touchIP(c.RemoteIPs, remoteIP, now, maxIPsPerClient)
 	if host != "" {
 		c.LastHostname = host
 		bumpName(c.Hostnames, host, now, maxNamesPerClient)
@@ -515,9 +514,7 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 	c := w.clientLocked(clientMAC, clientIP, now)
 	c.TLSEvents++
 	c.LastSeen = now
-	if remoteIP != "" {
-		c.RemoteIPs[remoteIP] = now
-	}
+	touchIP(c.RemoteIPs, remoteIP, now, maxIPsPerClient)
 	if host != "" {
 		c.LastSNI = host
 		bumpName(c.SNI, host, now, maxNamesPerClient)
@@ -567,7 +564,7 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 	}
 	c.FlowEvents++
 	c.LastSeen = now
-	c.RemoteIPs[remoteIPRaw] = now
+	touchIP(c.RemoteIPs, remoteIPRaw, now, maxIPsPerClient)
 
 	// Byte attribution.
 	if bytes > 0 {
@@ -760,9 +757,7 @@ func (w *Writer) clientLocked(mac, ip string, now int64) *clientAgg {
 	if c.ClientIPs == nil {
 		c.ClientIPs = make(map[string]int64)
 	}
-	if ipKey != "" {
-		c.ClientIPs[ipKey] = now
-	}
+	touchIP(c.ClientIPs, ipKey, now, maxIPsPerClient)
 	if c.ClientIP == "" && ip != "" {
 		c.ClientIP = ip
 	}
@@ -783,8 +778,8 @@ func (w *Writer) touchClientIPLocked(c *clientAgg, ip string, now int64) *client
 		c.ClientIPs = make(map[string]int64)
 	}
 	ipKey := strings.TrimSpace(ip)
+	touchIP(c.ClientIPs, ipKey, now, maxIPsPerClient)
 	if ipKey != "" {
-		c.ClientIPs[ipKey] = now
 		// Prefer IPv4 as the "primary" ClientIP for display when available;
 		// otherwise the most recent IPv6.
 		if c.ClientIP == "" {
@@ -859,6 +854,39 @@ func normalizeName(s string) string {
 		return ""
 	}
 	return s
+}
+
+// touchIP records ip→now in a bounded IP-timestamp set, evicting the
+// oldest entry (LRU by last-seen) when full. Mirrors bumpName's eviction.
+//
+// v5.8.2 (audit P2-3): RemoteIPs / ClientIPs previously grew without bound —
+// a single client talking to many remote IPs (or churning/spoofing source
+// IPs) leaked memory for the whole process lifetime, unlike globalDNS/SNI
+// which were already capped.
+func touchIP(m map[string]int64, ip string, now int64, limit int) {
+	if ip == "" {
+		return
+	}
+	if _, ok := m[ip]; !ok {
+		if limit > 0 && len(m) >= limit {
+			evictOldestIP(m)
+		}
+	}
+	m[ip] = now
+}
+
+func evictOldestIP(m map[string]int64) {
+	var oldestKey string
+	var oldest int64
+	first := true
+	for k, ts := range m {
+		if first || ts < oldest {
+			oldestKey, oldest, first = k, ts, false
+		}
+	}
+	if oldestKey != "" {
+		delete(m, oldestKey)
+	}
 }
 
 func bumpName(m map[string]*nameStat, name string, now int64, limit int) {

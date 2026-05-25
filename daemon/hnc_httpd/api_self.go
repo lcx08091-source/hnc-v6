@@ -282,7 +282,9 @@ func (s *server) apiSelfAttrib(w http.ResponseWriter, r *http.Request) {
 	// Read all lines (typical daily file is small; we cap by limit)
 	var lines []string
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 1<<20), 16<<20) // up to 16MB per line just in case
+	// v5.8.2 (audit): 1MB/line is already far above any real self_attrib JSONL
+	// record; the old 16MB cap was needlessly large.
+	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
 		lines = append(lines, sc.Text())
 	}

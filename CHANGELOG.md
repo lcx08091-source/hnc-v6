@@ -14,6 +14,23 @@
 
 ---
 
+## [5.8.2] - 2026-05-25
+
+审查报告第二批落地:Go 写端点防御纵深 + dpid map 内存泄漏。两项均为纯 Go,CI 重编 hnc_httpd / hnc_dpid。
+
+### Security
+- **P2-2 写端点统一 mutating 防护**(`daemon/hnc_httpd/middleware.go` + `server.go` + `api_self.go` + `web/app.js`)。`/api/self/toggle`、`/api/self/auto_expand/toggle`、`/api/self/auto_promote/toggle`、`/api/export` 这些状态变更 POST 此前不走 `/api/action` 那套校验:无 `X-HNC-CSRF` header、不校验 `Content-Type`、用裸 `json.NewDecoder(r.Body)` **无 `MaxBytesReader`**(已鉴权/cookie 被盗的客户端可喂超大 body 撑内存)。
+  - 新增 `requireMutation` 包装器(POST + `application/json` + `X-HNC-CSRF: 1` + 16KB body 上限),在路由注册处包住上述 4 个端点,与 `/api/action` 同款防护。
+  - 把这 4 个路径加进 `isWritePath` —— 之前它们漏在外面,导致 loopback 本机管理员 secret 缺失时的分级兜底把状态变更端点当普通路径放行,现在正确 fail-closed。
+  - 前端配套:远程 `web/app.js` 的 `toggleSelf` / export 调用之前只发 `Content-Type` 没发 `X-HNC-CSRF`,补上(否则新校验会挡掉远程 UI)。本地 `webroot/index.html` 的 `apiPostJSON`(fetch 与 ksu.exec 桥接两条路径)早已带齐两个 header,无需改。
+  - 顺带:`api_self.go` 读 self_attrib 的 `bufio.Scanner` 单行缓冲 16MB → 1MB(对该 JSONL 远超所需)。
+  - 说明:CSRF 本就被 `SameSite=Strict` cookie 兜住(跨站 fetch 带不上 cookie、自定义 header 触发我们不放行的 CORS preflight),故非可被外站利用的 CSRF;真正实打实的是 body 无上限的 OOM 面,本版一并堵死,并补齐防御纵深防回归。
+
+### Fixed
+- **P2-3 dpid 单客户端 IP map 无界增长**(`src/dpid/output/state.go`)。`clientAgg.RemoteIPs` 与 `ClientIPs`(`map[string]int64`,IP→时间戳)此前每见一个新 IP 就写、永不清理、无上限 —— 一个活跃客户端访问海量远端 IP(或源 IP churn/伪造)会让单 client 的该 map 无限涨,长跑内存泄漏(对比 `globalDNS`/`globalSNI` 早有 `maxGlobalNames=256` 上限)。新增 `touchIP`/`evictOldestIP` 有界写入 helper(满 `maxIPsPerClient=256` 时按 last-seen LRU 驱逐最旧),替换全部 5 处写入点(3× RemoteIPs + 2× ClientIPs)。`go vet` + `go test ./output/...` + android/arm64 交叉编译通过。
+
+---
+
 ## [5.8.1] - 2026-05-25
 
 针对全面审查报告的首批落地修复。重点是治"假修复发布"——近期 C/supervisor 改动只在源码、从未编进发布包。

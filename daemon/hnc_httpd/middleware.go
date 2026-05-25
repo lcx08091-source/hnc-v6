@@ -247,10 +247,53 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// v4.0 Patch 3.a: 写操作路径 - 永不放行匿名,即使过渡期也强制鉴权
+// v4.0 Patch 3.a: 写操作路径 - 永不放行匿名,即使过渡期也强制鉴权。
+// 也用于 loopback-secret 缺失时的分级 fail-closed(见 authMiddleware)。
+// v5.8.2 (audit P2-2): 把 self toggles + export 也归类为写路径 —— 它们都是
+// 状态变更端点, 之前漏在这里, 导致 secret 缺失的 loopback 兜底把它们当普通
+// 路径放行。
 func isWritePath(p string) bool {
-	// 目前仅 /api/action, 未来新写操作端点加这里
-	return p == "/api/action"
+	switch p {
+	case "/api/action",
+		"/api/self/toggle",
+		"/api/self/auto_expand/toggle",
+		"/api/self/auto_promote/toggle",
+		"/api/export":
+		return true
+	}
+	return false
+}
+
+// mutatingMaxBytes caps request bodies for state-changing endpoints.
+const mutatingMaxBytes = 16384
+
+// requireMutation wraps a state-changing handler with the same guards
+// /api/action enforces inline: POST only, Content-Type application/json, and an
+// X-HNC-CSRF: 1 header (defence-in-depth on top of SameSite=Strict cookies —
+// cross-site fetch can't set custom headers without a CORS preflight we never
+// allow), plus a body-size cap so an authenticated (or cookie-stolen) client
+// can't OOM us with a giant body.
+//
+// v5.8.2 (audit P2-2): centralised after the api_self toggles and /api/export
+// were found to skip these checks (no MaxBytesReader, no CSRF/content-type).
+func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			w.Header().Set("Allow", "POST")
+			writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
+			return
+		}
+		if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
+			writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "content-type must be application/json"})
+			return
+		}
+		if r.Header.Get("X-HNC-CSRF") != "1" {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "csrf header missing"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, mutatingMaxBytes)
+		next(w, r)
+	}
 }
 
 // hotfix17.8: 敏感只读接口。

@@ -1,3 +1,13 @@
+<!-- v5.8.2 -->
+<div class="cl-section">
+  <div class="cl-title">🔒 v5.8.2: 写操作接口加固 + dpid 修内存泄漏 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>设置开关 / 导出更安全</b>: "自身流量""自动扩展""自动提升"几个开关和"导出诊断包"接口,以前缺少和主写接口一致的请求校验(请求体无大小上限等);现在统一加上 CSRF 头、内容类型校验和体积上限,堵住"超大请求撑爆内存"的面。</li>
+    <li><b>修内存泄漏</b>: 流量识别(dpid)给每个设备记录"对端 IP / 本机 IP"的表此前没有上限,一台设备访问大量 IP 时会一直涨、长期运行漏内存;现在加了 256 条上限(满了淘汰最旧的),和域名/SNI 表一致。</li>
+    <li>说明: 含后端(hnc_httpd + dpid)改动,需重新编译;刷新版本后生效。远程访问页的开关已同步带上新校验头,不受影响。</li>
+  </ul>
+</div>
+
 <!-- v5.8.1 -->
 <div class="cl-section">
   <div class="cl-title">🛠️ v5.8.1: 审查修复 — 杜绝"假修复发布" + dpid 抗崩 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

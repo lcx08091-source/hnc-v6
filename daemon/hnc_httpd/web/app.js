@@ -1187,7 +1187,7 @@ window.toggleSelf = function(enabled) {
   fetchWithTimeout('/api/self/toggle', {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-HNC-CSRF': '1' },
     body: JSON.stringify({ enabled: enabled })
   }, 12000).then(function(r){ return r.json(); })
     .then(function(d){
@@ -1249,7 +1249,7 @@ window.buildExport = function() {
   fetchWithTimeout('/api/export', {
     method: 'POST',
     credentials: 'same-origin',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', 'X-HNC-CSRF': '1' },
     body: JSON.stringify({
       from: fromUnix || undefined,
       to: toUnix || undefined,

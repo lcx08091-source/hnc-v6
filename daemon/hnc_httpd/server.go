@@ -118,16 +118,20 @@ func (s *server) handler() http.Handler {
 
 	// v5.5: self-capture (own phone's traffic attribution by uid → pkg)
 	mux.HandleFunc("/api/self", s.apiSelf)
-	mux.HandleFunc("/api/self/toggle", s.apiSelfToggle)
+	// v5.8.2 (audit P2-2): state-changing endpoints go through requireMutation
+	// (POST + application/json + X-HNC-CSRF + body cap), same guard /api/action
+	// uses. These previously decoded raw bodies with no CSRF/content-type/size
+	// check.
+	mux.HandleFunc("/api/self/toggle", s.requireMutation(s.apiSelfToggle))
 	// v5.6.0-rc6: independent toggle for auto-expand. Separate from
 	// self_capture because auto-expand mutates rule files (different
 	// risk profile from read-only observation).
-	mux.HandleFunc("/api/self/auto_expand/toggle", s.apiAutoExpandToggle)
+	mux.HandleFunc("/api/self/auto_expand/toggle", s.requireMutation(s.apiAutoExpandToggle))
 	// v5.7.0-rc2: gate for brand-new-apex auto-promotion (走法2 candidate flywheel)
-	mux.HandleFunc("/api/self/auto_promote/toggle", s.apiAutoPromoteToggle)
+	mux.HandleFunc("/api/self/auto_promote/toggle", s.requireMutation(s.apiAutoPromoteToggle))
 	mux.HandleFunc("/api/self/ifaces", s.apiSelfIfaces)
 	mux.HandleFunc("/api/self/attrib", s.apiSelfAttrib)
-	mux.HandleFunc("/api/export", s.apiExport)
+	mux.HandleFunc("/api/export", s.requireMutation(s.apiExport))
 	mux.HandleFunc("/api/exports", s.apiExportList)
 	mux.HandleFunc("/api/exports/", s.apiExportFile)
 
