@@ -14,6 +14,16 @@
 
 ---
 
+## [5.8.6] - 2026-05-25
+
+### Fixed
+- **修 libbpf 在 NDK 下的 `__poll_t` 编译错误 + 残缺 libbpf.a 被静默放行**(`third_party_build/build_libs.sh`)。v5.8.5 让 CI 找到了 libelf.a/libz.a,但 hotspotd 构建仍失败:NDK r27c 的 sanitized UAPI `<linux/eventpoll.h>` 把 `EPOLLIN`/`EPOLLOUT` 定义成 `(__poll_t)0xN`,而 NDK 的 `<linux/types.h>` 剥掉了 `__poll_t` 的 typedef → `libbpf.c`、`ringbuf.c` 编译报 `use of undeclared identifier '__poll_t'`。
+  - 给 libbpf 的 CFLAGS 补 `-D__poll_t=unsigned`(`__poll_t` 仅经 `EPOLL*` 宏间接使用,定义为 `unsigned` 即合法;NDK 编 libbpf 的标准修法)。本地以最小复现验证该 define 解决该 cast、且 `libbpf.c`/`ringbuf.c`/`bpf.c` host 编译无回归。
+  - **根因放大器**:`build_libs.sh` 原本只检查 `OBJ_COUNT>=15`、**容忍少数文件编译失败** → 产出缺 `libbpf.c`/`ringbuf.c` 的残缺 `libbpf.a` → 真正错误被推迟到链接 hotspotd 时一堆 `undefined symbol`(`libbpf_set_print`/`bpf_object__*`/`ring_buffer__*`,全在那两个文件里),极难定位。改为**任一 libbpf 源文件编译失败即 FATAL**,在编译阶段就暴露真实 C 错误(`linker.c` 仍有意 SKIP、不计失败)。
+  - 说明:这是 v5.8.3"CI 从源码编 hotspotd"落地路上的两个构建坑(v5.8.5 补库 → v5.8.6 修编译)。真实 arm64 构建在 GitHub Actions 验证。
+
+---
+
 ## [5.8.5] - 2026-05-25
 
 ### Fixed

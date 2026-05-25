@@ -1,3 +1,12 @@
+<!-- v5.8.6 -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.8.6: 修构建 — libbpf 在 NDK 下编译报错 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>让 hotspotd 真正编译通过</b>: 上一版补齐了缺的库后,libbpf 在 Android 编译器下还有个头文件兼容问题(__poll_t 未定义)导致两个核心文件编不过、最终链接失败。这次补上对应编译选项,并让"库没编全"在编译阶段就直接报错(而不是拖到链接才暴露),hotspotd 构建恢复。</li>
+    <li>说明: 纯构建修复,不改功能;只影响打包流程。</li>
+  </ul>
+</div>
+
 <!-- v5.8.5 -->
 <div class="cl-section">
   <div class="cl-title">🔧 v5.8.5: 修构建 — 补回 hotspotd 编译缺的库 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
