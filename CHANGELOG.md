@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc44, 2026-05-25)
+- **远程 SPA 用 SSE 替代轮询**(`daemon/hnc_httpd/api_events.go` 新增 + `server.go` + `web/app.js`)。**仅远程**:本机 WebUI 是 `file://` + `window.ksu.exec(curl)`,exec 一次性回调撑不起 EventSource 长连接 → 本机继续轮询(其帧率问题 rc41 已治)。
+  - **服务端 `/api/events`**:`text/event-stream` 长连接,每 ~1.5s `stat` `devices.json`,mtime 变化才推 `event: changed`(+ 20s `: hb` 心跳保活)。连上立即推一次让 SPA 拉最新。**关键坑已处理**:httpsSrv 配了 `WriteTimeout: 60s`,会把 SSE 长连接每 60s 掐断 → 用 `http.NewResponseController(w).SetWriteDeadline(time.Time{})` 清写超时(middleware 不包裹 w,可直达底层 conn)。退出靠 `r.Context().Done()`(客户端断开)。
+  - **远程 SPA(app.js)**:`startRemoteSSE` 用 `EventSource('/api/events')`(同源带 auth cookie);收 `changed` → `remotePollOnce('force')`(复用既有刷新);`onopen` 停定时轮询(SSE 接管,空闲零拉取);`onerror` 回退轮询(EventSource 自动重连,重连 onopen 再停)。`remotePollOnce` 末尾在 SSE 在线时不再自排下次轮询。可见性/焦点切换同步开关 SSE 省电;`EventSource` 不支持则纯轮询。
+  - 收益:远程访问从盲目 1Hz 轮询(每次 = 网络 fetch + 全量 buildDevicesPayload)变成"变了才拉",降 CPU/电耗;有变化近实时。
+  - 含 `hnc_httpd`(Go,`app.js` 经 go:embed)改动,**需 CI 重编**。`go vet` + `android/arm64` 交叉编译 + `node --check`(app.js)全过。版本 rc43 → rc44(570144)。**至此用户选的 SLA / G3 / SSE 三项全部完成。**
+
 ### Fixed (v5.7.0-rc43, 2026-05-25)
 - **审查报告 · G3 offload C**(`daemon/hotspotd/`。**仅当内核 BPF tether offload 真生效才相关** —— start-softap+手动 NAT 多半用不到;无法在此环境真机验证,改动保守)。
   - **P2-17 换网后限速窗口 60s → 瞬时**(`hotspotd.c:nl_open`/`nl_process`):netlink 订阅加 `RTMGRP_LINK`,iface 链路状态变化(WiFi↔4G 切换、VPN tun 上下线)立即 `hnc_scheduler_request_refresh()` 让调度器重探主上游。原来只靠 worker 的 60s 周期重探,换网瞬间限速对新上游最长失效 60s。`request_refresh` 非阻塞(仅 flag+signal)、有 `!initialized` 守卫(未启用 offload 时安全空操作)、netlink 循环已按类型过滤(不影响 NEIGH 设备发现);事件风暴被 worker 合并成一次重探。

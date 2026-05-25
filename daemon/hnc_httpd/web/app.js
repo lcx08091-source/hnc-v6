@@ -984,7 +984,8 @@ function remotePollOnce(reason) {
       remotePendingForce = false;
       clearRemotePollTimer();
       setTimeout(function(){ remotePollOnce('force'); }, 0);
-    } else {
+    } else if (!__sseUp) {
+      // rc44: SSE 驱动时不再自排下一次定时轮询(SSE 收到 changed 才刷新)。
       scheduleRemotePoll(remotePollDelay(live));
     }
   });
@@ -1004,15 +1005,48 @@ function startRemotePolling() {
 }
 function stopRemotePolling() { clearRemotePollTimer(); }
 
+// rc44: 远程 SPA 用 SSE(/api/events)替代盲目轮询。服务端 devices.json 变化才推
+// "changed",收到后做一次 remotePollOnce('force')。SSE 在线时停掉定时轮询(空闲零
+// 拉取);SSE 不支持/断开时自动回退轮询(EventSource 会自动重连,onopen 再停轮询)。
+// 仅远程有效:本机 file:// + ksu.exec 无 EventSource。
+var __remoteSSE = null;
+var __sseUp = false;
+function stopRemoteSSE() {
+  if (__remoteSSE) { try { __remoteSSE.close(); } catch (e) {} __remoteSSE = null; }
+  __sseUp = false;
+}
+function startRemoteSSE() {
+  if (typeof EventSource === 'undefined') return false; // 不支持 → 调用方走轮询
+  if (__remoteSSE) return true;
+  try {
+    var es = new EventSource('/api/events'); // 同源, 自动带 auth cookie
+    __remoteSSE = es;
+    es.addEventListener('changed', function(){
+      if (remotePollVisible && !document.hidden) remotePollOnce('force');
+    });
+    es.onopen = function(){ __sseUp = true; clearRemotePollTimer(); };
+    es.onerror = function(){
+      // EventSource 会自动重连;断开期间用轮询兜底,重连 onopen 后再停。
+      __sseUp = false;
+      if (remotePollVisible && !document.hidden) startRemotePolling();
+    };
+    return true;
+  } catch (e) { __remoteSSE = null; return false; }
+}
+function startRemoteUpdates() {
+  // 优先 SSE,不支持则轮询。SSE 连上后会经 'connect' 事件触发首次刷新。
+  if (!startRemoteSSE()) startRemotePolling();
+}
+
 document.addEventListener('visibilitychange', function(){
   remotePollVisible = !document.hidden;
-  if (remotePollVisible) startRemotePolling(); else stopRemotePolling();
+  if (remotePollVisible) startRemoteUpdates(); else { stopRemoteSSE(); stopRemotePolling(); }
 });
-window.addEventListener('focus', function(){ remotePollVisible = true; startRemotePolling(); });
-window.addEventListener('pageshow', function(){ remotePollVisible = true; startRemotePolling(); });
-window.addEventListener('blur', function(){ remotePollVisible = !document.hidden; if (!remotePollVisible) stopRemotePolling(); });
-window.addEventListener('pagehide', function(){ remotePollVisible = false; stopRemotePolling(); });
-fetchRemoteCapabilities().finally(function(){ startRemotePolling(); });
+window.addEventListener('focus', function(){ remotePollVisible = true; startRemoteUpdates(); });
+window.addEventListener('pageshow', function(){ remotePollVisible = true; startRemoteUpdates(); });
+window.addEventListener('blur', function(){ remotePollVisible = !document.hidden; if (!remotePollVisible) { stopRemoteSSE(); stopRemotePolling(); } });
+window.addEventListener('pagehide', function(){ remotePollVisible = false; stopRemoteSSE(); stopRemotePolling(); });
+fetchRemoteCapabilities().finally(function(){ startRemoteUpdates(); });
 
 // v4.0 Patch 3.b: 卡片 action 按钮走 event delegation
 // 所有写操作按钮用 data-act/data-mac/data-name 属性, 这里统一 dispatch

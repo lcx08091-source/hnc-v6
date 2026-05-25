@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc44 -->
+<div class="cl-section">
+  <div class="cl-title">📡 v5.7.0-rc44: 远程访问改用推送(SSE)替代轮询 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>远程更省电</b>: 在别的设备浏览器打开的"远程访问"页,以前每秒都去拉一次数据;现在改成服务端有变化才推送(SSE),没变化时几乎零开销,有变化近实时,降 CPU/耗电。</li>
+    <li><b>更稳</b>: 断线会自动重连;万一浏览器不支持推送,会自动回退到老的轮询方式。</li>
+    <li><b>本机不变</b>: 手机上本机界面因技术限制(无法用长连接推送)仍走轮询——但它的流畅度上一版已经优化过了。</li>
+    <li>说明: 含后端改动,需要重新编译;刷新版本后远程访问页生效。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc43 -->
 <div class="cl-section">
   <div class="cl-title">🔀 v5.7.0-rc43: 换网即时重探 offload(仅硬件加速生效时相关) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
