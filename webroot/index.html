@@ -5240,6 +5240,52 @@ body.kb-open .container {
       </div>
     </div>
 
+    <!-- 运行健康 (SLA) rc42 -->
+    <div class="sec-title">运行健康 <span style="font-size:11px;color:var(--text-3);font-weight:400">· 累计计数 · 数据驱动</span></div>
+    <div class="setting-group glass-elevated">
+      <div class="set-row clickable" data-action="refresh-sla">
+        <div class="set-icon purple"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><path d="M18.7 8l-5.1 5.2-2.8-2.7L7 14.3"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">dpid 重启 / 近期崩溃</div>
+          <div class="set-desc">识别守护累计重启次数 · 近期崩溃环启动数</div>
+        </div>
+        <div class="set-value" id="sla-dpid-val">点按刷新</div>
+      </div>
+      <div class="set-row">
+        <div class="set-icon orange"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M23 4v6h-6"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">watchdog 全量重建</div>
+          <div class="set-desc">tc 树被整体重建的累计次数(越多越说明 tc 不稳)</div>
+        </div>
+        <div class="set-value" id="sla-frestore-val">—</div>
+      </div>
+      <div class="set-row">
+        <div class="set-icon red"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">tc 修复失败 / 上行失败</div>
+          <div class="set-desc">tc 自修复熔断计数 · 上行 IFB/police 累计失败</div>
+        </div>
+        <div class="set-value" id="sla-fail-val">—</div>
+      </div>
+      <div class="set-row">
+        <div class="set-icon blue"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">JSON 退回 legacy</div>
+          <div class="set-desc">写 JSON 退回旧 awk 路径的累计次数(应长期为 0)</div>
+        </div>
+        <div class="set-value" id="sla-json-val">—</div>
+      </div>
+      <div class="set-row">
+        <div class="set-icon gray"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">能力降级标记</div>
+          <div class="set-desc">qos_fallback / uplink_unsupported 当前是否处于降级</div>
+        </div>
+        <div class="set-value" id="sla-degrade-val">—</div>
+      </div>
+    </div>
+    <div class="set-footer">这些是累计/状态计数(非实时),用于看「我的 HNC 长期稳不稳、哪类问题多」。无埋点的项显示「未统计」。点上面一行刷新。</div>
+
     <!-- Maintenance -->
     <div class="sec-title">维护</div>
     <div class="setting-group glass-elevated">
@@ -10622,8 +10668,30 @@ body.kb-open .container {
     set('rs-ipt-val', (kv.IPT !== undefined && kv.IPT !== '') ? (kv.IPT + ' 条') : '—');
     set('rs-wd-val', (Number(kv.WD) || 0) >= 1 ? '运行中' : '未运行');
   }
+  /* rc42: 运行健康 (SLA) 面板。读 /api/sla 聚合的真实累计计数;无埋点的字段后端返
+   * null → 这里显示「未统计」(不造假)。本机/远程都能读(走 apiGet 桥接 loopback)。 */
+  async function fetchSLA() {
+    const set = (id, t) => { const el = $('#' + id); if (el) el.textContent = t; };
+    const num = v => (v === null || v === undefined) ? '未统计' : String(v);
+    let d;
+    try { d = await apiGet('/api/sla'); } catch (_) {
+      ['sla-dpid-val','sla-frestore-val','sla-fail-val','sla-json-val','sla-degrade-val'].forEach(id => set(id, '读取失败'));
+      return;
+    }
+    if (!d || typeof d !== 'object') { return; }
+    set('sla-dpid-val', num(d.dpid_restart_count) + ' / ' + num(d.dpid_crash_recent));
+    set('sla-frestore-val', d.watchdog_full_restore_count == null ? '未统计' : (d.watchdog_full_restore_count + ' 次'));
+    set('sla-fail-val', num(d.tc_repair_fail_count) + ' / ' + num(d.uplink_fail_count));
+    set('sla-json-val', num(d.json_legacy_fallback_count));
+    const deg = [];
+    if (d.qos_fallback_active) deg.push('QoS');
+    if (d.uplink_unsupported) deg.push('上行');
+    set('sla-degrade-val', deg.length ? ('降级中: ' + deg.join('+')) : '正常');
+  }
+
   async function refreshLocalDiagnostics() {
     fetchRunStatus().catch(() => {});
+    fetchSLA().catch(() => {});
     const mVal = $('#diag-metrics-value');
     const mDesc = $('#diag-metrics-desc');
     const cVal = $('#diag-cap-value');
@@ -11609,6 +11677,10 @@ body.kb-open .container {
       }
       if (act === 'refresh-diag') {
         refreshLocalDiagnostics().then(() => toast('诊断状态已刷新', 'ok'));
+        return;
+      }
+      if (act === 'refresh-sla') {
+        fetchSLA().then(() => toast('运行健康已刷新', 'ok')).catch(() => {});
         return;
       }
       if (act === 'export-rules') {

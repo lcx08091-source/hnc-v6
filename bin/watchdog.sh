@@ -341,6 +341,10 @@ check_health() {
 full_restore() {
     local reason=$1
     log "RESTORE triggered: $reason"
+    # rc42: 持久累计 full_restore 次数,供 /api/sla 面板(tc 树被重建几次是关键健康信号)。
+    local _frc="$HNC_DIR/run/watchdog_full_restore.count" _frn
+    _frn=$(cat "$_frc" 2>/dev/null); case "$_frn" in *[!0-9]*|'') _frn=0 ;; esac
+    echo $((_frn + 1)) > "$_frc" 2>/dev/null || true
     # rc3.1.13.2 修 P1 (review §2): cleanup rules mode 后用户通常正在重配,
     # 600s 内 skip restore. 之前 watchdog 60s 内就把规则全恢复, 用户白清.
     local marker="$HNC_DIR/run/cleanup_rules.marker"

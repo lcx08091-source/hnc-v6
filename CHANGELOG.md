@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Added (v5.7.0-rc42, 2026-05-25)
+- **运行健康(SLA)面板 —— 从"修 bug 驱动"转"数据驱动维护"**(`daemon/hnc_httpd/api_sla.go` 新增 + `server.go` + `src/dpid/cmd/dpid/main.go` + `bin/watchdog.sh` + `webroot/index.html`)。之前 5 提案里唯一主动推荐项。
+  - **只读 `/api/sla`**:聚合散落 `run/` 的**真实**累计计数 + 状态标记 → dpid 重启次数、近期崩溃环启动、dpid_guard 心跳年龄、watchdog 全量重建次数、tc 修复失败、上行失败、JSON 退回 legacy 次数、qos/uplink 降级标记。**诚实原则**(同 /api/metrics 的 instrumented:false 思路):没埋点的信号返回 `null`,前端显示「未统计」,绝不编造数字。
+  - **新增 2 个持久 lifetime 计数**(原来缺、价值高、改动极小):`dpid.start_count`(dpid `main` 启动 +1,`bumpStartCount`,不像 crashflag 会被清)、`run/watchdog_full_restore.count`(watchdog `full_restore` +1 —— tc 树被整体重建几次是关键健康信号)。其余复用既有计数(`json_legacy_fallback.count`/`uplink_fail_count`/`tc_repair_fail_count`/`dpid.crashflag`/`dpid_guard.heartbeat`/降级 marker)。
+  - **前端**:设置页新增「运行健康」卡片(`fetchSLA` 走 apiGet → /api/sla,进设置页 + 点首行刷新),展示上述计数,降级标记显示「正常 / 降级中: QoS+上行」。
+  - 含 `hnc_httpd` + `dpid`(Go)改动,**需 CI 重编**。`go vet ./...` + `go test ./output/` + `android/arm64` 交叉编译 + `sh -n` + `node --check`(两段内联 JS)全过。版本 rc41 → rc42(570142)。
+
 ### Changed (v5.7.0-rc41, 2026-05-25)
 - **WebUI 提帧 + 点击秒响应**(`webroot/index.html`,纯前端,**不需 CI 重编**)。真机反馈「点限速/延迟会卡一下、整体帧率不高」。读码定位为三层叠加,本版用低风险纯前端方案治其中两层(第 2 层"action 期间持全局锁"暂不动):
   - **乐观 UI(治点击卡顿)**:点击的卡顿根因之一是后端 shell 链路慢(apply 一次 fork 十几个进程、抢 tc_action_lock,几百 ms)。`updateCardInPlace` 本就会从 DEVICES 模型重建限速/延迟徽标——于是 apply-limit/clear-limit/apply-delay/clear-delay/toggle-sqm 改为:点击**先改模型 + 即时 `updateCardInPlace`**(秒显徽标/按钮),后端在后台跑,**成功**后台 `requestForceRefresh` 对账(真实值覆盖)、**失败**回滚快照 + 红 toast。不动 shell、不动锁。

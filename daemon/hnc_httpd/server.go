@@ -82,6 +82,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/live", s.apiLive)
 	mux.HandleFunc("/api/capabilities", s.apiCapabilities)
 	mux.HandleFunc("/api/metrics", s.apiMetrics)
+	mux.HandleFunc("/api/sla", s.apiSLA) // rc42: 只读运行健康聚合
 	mux.HandleFunc("/api/stats", s.apiStats)
 	mux.HandleFunc("/api/templates", s.apiTemplates)
 	// v5.3.0-rc12: DPI passive observability (hnc_dpid daemon)

@@ -217,6 +217,7 @@ func main() {
 	}()
 
 	armCrashFlag(cfg.RunDir)
+	bumpStartCount(cfg.RunDir) // rc42: 持久 lifetime 启动计数, 供 /api/sla
 
 	// rc30.4: traffic history sampler. Runs at the top-level ctx so it
 	// survives attempt restarts (interface migration, capture re-open).
@@ -748,6 +749,20 @@ func armCrashFlag(runDir string) {
 
 func clearCrashFlag(runDir string) {
 	_ = os.Remove(filepath.Join(runDir, crashFlagFile))
+}
+
+// bumpStartCount increments a persistent lifetime dpid-start counter for
+// /api/sla (rc42). Unlike the crash flag, this is never cleared — it answers
+// "how many times has dpid (re)started over this boot's lifetime". Best-effort.
+func bumpStartCount(runDir string) {
+	path := filepath.Join(runDir, "dpid.start_count")
+	n := int64(0)
+	if b, err := os.ReadFile(path); err == nil {
+		if v, perr := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); perr == nil {
+			n = v
+		}
+	}
+	_ = os.WriteFile(path, []byte(strconv.FormatInt(n+1, 10)), 0o644)
 }
 
 func checkCrashLoop(runDir string) string {
