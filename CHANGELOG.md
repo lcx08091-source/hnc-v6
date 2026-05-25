@@ -14,6 +14,30 @@
 
 ---
 
+## [5.8.9] - 2026-05-25
+
+针对上传的 v5.8.8 刷机包做的一轮全面审查(5 路并行:hnc_httpd Go / dpid Go / hotspotd C / shell / WebUI,外加 launcher、tc_netlink、tokens、middleware 人工复核)后的优化收尾。**未发现可触发的 P1**(崩溃/可利用漏洞);本版收掉 9 项 P2/P3 健壮性与纵深防御加固。**排除的误报**:dpid `appsByUID` 内存泄漏(以 uid 为键受安装应用数约束,且 `self_attrib.go:259` 故意保留 last-known 状态;真正问题仅是 `105-106` 注释不实)、httpd token "撤销被复活"竞态(`token_revoke` 走 C 的 `token-revoke` 只翻 `revoked` 标志不删盘,反向 merge 只删盘上不存在的 token,前提不成立)。
+
+### Security
+- **`bin/apply_app_limits.sh` 加 MAC/RATE 输入校验**。此前它是唯一施加规则却不校验输入的脚本:`$MAC`(来自 root 可编辑的 `app_limits.flat`)被直接插入 `resolve_mac_ip` 的 `sed` 程序、`$RATE` 直接喂 `printf '%.2f'` 与 `tc ... rate`。新增 `valid_mac`(`aa:bb:cc:dd:ee:ff` 格式)+ `valid_rate`(正数)守卫,非法行 `log` 后 skip —— 与兄弟脚本 `apply_device_rule.sh` 对 `/api/action` 输入的做法对齐(防御纵深 + 挡手改/坏 flat 文件)。
+- **`bin/json_set_batch.sh` 临时文件钉到私有 `run/`**。批处理参数文件此前落在 `${TMPDIR:-/data/local/tmp}`(Android 上 world-writable)且 `$$` 可预测 → 可被预置符号链接重定向写入(参数含 MAC + 字段值)。改钉到 root-only 的 `$HNC/run/.hnc_json_batch_args.$$`。
+- **WebUI 黑名单确认弹窗对插值补 `esc()`**(`webroot/index.html`)。`addBlacklistBackend` 的确认弹窗把 `mac`/`ip`/`iface` 原样插进 `showModal` 的 innerHTML,而 modal sanitizer 按设计放过 `on*` 处理器。这几个字段来自内核 ARP/DHCP、格式被定死,**当前不可触发**(故 v5.8.8 列为误报),但按"调用点必转义"的既定模型补齐 `esc()` 关闭该潜在面;sanitizer 与 rc27 保留的 literal `onclick` 按钮不动(无法在此真机验证剥 `on*` 不破坏按钮)。
+- **`daemon/hnc_httpd/middleware.go` 把 `/api/exports`(含 zip 下载)、`/api/self[/attrib|/ifaces]`、`/api/sla`、`/api/events` 纳入 `isSensitiveReadPath`**。`local_admin.secret` 缺失的兼容兜底窗口里,这些只读端点之前未归类敏感读 → 会被任意本机低信任 App 经 loopback 读取(导出 zip 下载最敏感)。`/api/exports/<name>` 是前缀路由,额外用 `strings.HasPrefix` 兜住。仅影响 secret 缺失窗口,正常(带 secret / 已鉴权)访问不受影响。
+
+### Fixed
+- **修 `collectBuiltinDPIForCompare` 死代码使 memo 真正生效**(`webroot/index.html`)。函数体把对象 `return {…}` 写在 `__cachedBuiltin = result; return result;` 之前,导致后两行不可达、`__cachedBuiltin` 永不填充、`result` 为未声明变量 → 缓存命中检查永假,nDPI 对比页每次渲染都全量重算 client/app/host/SNI 聚合。改为 `const result = {…}` 后正常缓存。
+- **`daemon/hnc_httpd/api_export.go` 的 JSON decode 错误改报 400**。`_ = json.NewDecoder(...).Decode(&req)` 吞掉错误 → 畸形 body 静默回退默认 1h 导出。改为空 body(`io.EOF`)仍走默认、其余畸形 body 返回 400。
+- **`daemon/hotspotd/tools/hnc_json.c` 的 `array_add` malloc 后加 NULL 检查**。`malloc(strlen(lit)+3)` 后直接 `sprintf` 无 NULL 检查(本文件其余 malloc 均检查),OOM 时 NULL 解引用崩溃。补 `if (!arr) { free(lit); free(s); return 1; }`。
+- **`daemon/hotspotd/scheduler.c` 的 worker 刷新计数加锁**。worker 线程在 `sched.lock` 外写 `worker_last_refresh_ts`/`worker_refresh_count`,而 `hnc_scheduler_get_summary` 也在锁外读 → 32 位 arm 上 `int64_t` 撕裂读。把 worker 的更新包进 `sched.lock`,并把 summary 的三处读移入既有加锁块。
+- **`bin/device_detect.sh` 的 `hostname_cache_set` 临时文件加 PID 后缀 + 引号**。临时文件名无 `$$`(全文件其余处都有)、变量未引号 → 手动 `scan` 与后台扫描重入时竞争 truncate。改为 `"${CACHE_FILE}.tmp.$$"` 并补引号。
+
+验证:`sh -n`(3 个改过的脚本)+ `node --check`(index.html 两个内联 JS 块)+ `go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build`(hnc_httpd)+ `clang -fsyntax-only`(hnc_json.c / scheduler.c)全过。Go(hnc_httpd)/C(hotspotd)改动随 CI 源码构建进包。
+
+### Internals
+- 设计判断项**维持现状**(用户确认):远程已配对客户端仍可调用 `restart_service` / `cleanup_all` / `hotspot_save`(改 SSID/密码),即"已过 PIN+cookie 即视为可信"的远程信任模型不变。
+
+---
+
 ## [5.8.8] - 2026-05-25
 
 审查报告剩余真问题一次性收尾(8 项,跨 Go/C/shell)。误报项(IPv6 自归因 key、热路径 os.Stat、IPv6 分片越界、hnc_json.c malloc、WebUI XSS)经核实不改。

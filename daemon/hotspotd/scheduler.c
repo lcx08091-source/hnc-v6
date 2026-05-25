@@ -576,8 +576,12 @@ static void *worker_main(void *arg)
                 fprintf(stderr, "[sched] refresh_active: %s\n", offload_err_str(e));
             }
         }
+        /* 这两个 int64 计数被 hnc_scheduler_get_summary 跨线程读 —— 在 sched.lock
+         * 下更新, 配合 get_summary 的加锁读, 消除 32 位 arm 上的撕裂读. */
+        pthread_mutex_lock(&sched.lock);
         sched.worker_last_refresh_ts = (int64_t)time(NULL);
         sched.worker_refresh_count++;
+        pthread_mutex_unlock(&sched.lock);
     }
 
     fprintf(stderr, "[sched] worker stopped\n");
@@ -852,11 +856,10 @@ void hnc_scheduler_get_summary(hnc_offload_summary_t *out)
     snprintf(out->primary_upstream_ifname,
              sizeof(out->primary_upstream_ifname),
              "%s", sched.primary_upstream_ifname);
-    pthread_mutex_unlock(&sched.lock);
-
     out->worker_running          = sched.worker_started;
     out->worker_last_refresh_ts  = sched.worker_last_refresh_ts;
     out->worker_refresh_count    = sched.worker_refresh_count;
+    pthread_mutex_unlock(&sched.lock);
 }
 
 int hnc_scheduler_summary_to_json(const hnc_offload_summary_t *s,

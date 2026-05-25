@@ -48,6 +48,20 @@ FILTER_PRIO=200
 mkdir -p "$HNC_DIR/logs" 2>/dev/null
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 
+# Defense-in-depth: app_limits.flat is root-editable; a malformed MAC would be
+# interpolated into the resolve_mac_ip sed program (below), and a non-numeric
+# RATE would reach `printf '%.2f'` / `tc ... rate`. Reject both like the sibling
+# apply_device_rule.sh does for /api/action input.
+valid_mac() {
+    printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'
+}
+valid_rate() {
+    case "$1" in
+        ''|*[!0-9.]*) return 1 ;;
+    esac
+    awk -v r="$1" 'BEGIN{ exit !(r+0 > 0) }'
+}
+
 # rotate log if >256 KB
 if [ -f "$LOG" ]; then
     sz=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
@@ -175,6 +189,19 @@ skipped=0
 while IFS=' ' read -r MAC APP RATE; do
     [ -z "$MAC" ] && continue
     case "$MAC" in '#'*) continue ;; esac
+
+    if ! valid_mac "$MAC"; then
+        log "skip $MAC/$APP: invalid mac format"
+        skipped=$((skipped + 1))
+        i=$((i + 1))
+        continue
+    fi
+    if ! valid_rate "$RATE"; then
+        log "skip $MAC/$APP: invalid rate '$RATE'"
+        skipped=$((skipped + 1))
+        i=$((i + 1))
+        continue
+    fi
 
     CLIENT_IP=$(resolve_mac_ip "$MAC")
     if [ -z "$CLIENT_IP" ]; then

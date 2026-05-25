@@ -83,7 +83,10 @@ JSON
 # Prefer native hnc_json set-device-batch. This performs one validation,
 # one backup, one lock, and one final commit for the whole field set.
 if [ -x "$HNC_JSON" ]; then
-    TMP_ARGS_FILE="${TMPDIR:-/data/local/tmp}/hnc_json_batch_args.$$"
+    # Pin to HNC's root-only run/ dir, not ${TMPDIR:-/data/local/tmp} (the latter
+    # is world-writable on Android and $$ is predictable → symlink-redirect risk
+    # on the batch args, which carry MAC + field values).
+    TMP_ARGS_FILE="$HNC/run/.hnc_json_batch_args.$$"
     : > "$TMP_ARGS_FILE" || exit 1
     while [ $# -ge 2 ]; do
         K=$1; V=$2; shift 2

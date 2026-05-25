@@ -6140,15 +6140,15 @@ body.kb-open .container {
         const isUpstreamIface = iface === 'wlan0';
         if (isGatewayLike || isUpstreamIface) {
           const reason = isUpstreamIface
-            ? `这台设备的接口是 ${iface}，看起来不像热点客户端（可能是你自己连接的上游 Wi‑Fi 设备）`
-            : `这台设备的 IP 是 ${ip}，看起来像路由器网关地址`;
+            ? `这台设备的接口是 ${esc(iface)}，看起来不像热点客户端（可能是你自己连接的上游 Wi‑Fi 设备）`
+            : `这台设备的 IP 是 ${esc(ip)}，看起来像路由器网关地址`;
           const ok = await new Promise(resolve => {
             showModal(`
               <div class="modal-title">⚠️ 确认屏蔽</div>
               <div class="modal-body" style="line-height:1.6">
                 <p>${reason}。</p>
                 <p>屏蔽它会让 iptables DROP 这个 MAC 的所有流量。<b>如果它真是你自己网络里的设备，你会立刻断网。</b></p>
-                <p>你确定要继续屏蔽 <code>${mac}</code> 吗？</p>
+                <p>你确定要继续屏蔽 <code>${esc(mac)}</code> 吗？</p>
               </div>
               <div class="modal-actions">
                 <button class="btn" onclick="window.__bl_confirm(false)">取消</button>
@@ -6662,7 +6662,7 @@ body.kb-open .container {
       ndpiTopListFromClientArray(c.top_sni).forEach(x => add(sniMap, x.name, x.count, 'sni'));
     });
     const sortTop = map => Array.from(map.values()).sort((a,b) => (b.count||0)-(a.count||0));
-    return {
+    const result = {
       mode: st.mode || '',
       version: st.version || '',
       iface: st.interface || '',

@@ -312,6 +312,10 @@ func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
 //
 //	logout 不该算敏感, 登出永远应该允许 (现已移到 isPublicPath).
 func isSensitiveReadPath(p string) bool {
+	// 导出 zip 下载 /api/exports/<name> 是前缀路由, switch 精确匹配兜不住.
+	if strings.HasPrefix(p, "/api/exports/") {
+		return true
+	}
 	switch p {
 	case "/api/logs",
 		"/api/devices",
@@ -328,7 +332,15 @@ func isSensitiveReadPath(p string) bool {
 		"/api/dpi_probe",
 		"/api/alerts",
 		"/api/dpi_history",
-		"/api/app_limits":
+		"/api/app_limits",
+		// v5.8.9: secret 缺失兼容窗口里这些只读端点之前漏归类, 会被任意本机
+		// 低信任 App 经 loopback 读取(导出列表/自归因/运行健康/SSE 变更流).
+		"/api/exports",
+		"/api/self",
+		"/api/self/attrib",
+		"/api/self/ifaces",
+		"/api/sla",
+		"/api/events":
 		return true
 	default:
 		return false

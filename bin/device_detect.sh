@@ -157,9 +157,9 @@ hostname_cache_set() {
     [ -z "$name" ] && return
     mkdir -p "$(dirname "$CACHE_FILE")"
     if [ -f "$CACHE_FILE" ]; then
-        grep -v "^$mac|" "$CACHE_FILE" > ${CACHE_FILE}.tmp 2>/dev/null || true
-        echo "$mac|$name|$now" >> ${CACHE_FILE}.tmp
-        mv ${CACHE_FILE}.tmp "$CACHE_FILE"
+        grep -v "^${mac}|" "$CACHE_FILE" > "${CACHE_FILE}.tmp.$$" 2>/dev/null || true
+        echo "$mac|$name|$now" >> "${CACHE_FILE}.tmp.$$"
+        mv "${CACHE_FILE}.tmp.$$" "$CACHE_FILE"
     else
         echo "$mac|$name|$now" > "$CACHE_FILE"
     fi

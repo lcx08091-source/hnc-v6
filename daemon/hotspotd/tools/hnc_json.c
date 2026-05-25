@@ -72,7 +72,7 @@ static int del_object_key(const char *file, const char *key) {
 static int array_add(const char *file, const char *key, const char *v) {
     size_t n = 0; char *s = read_file(file, &n); if (!s) s = strdup("{}"); if (!s) return 1; if (valid_json(s)) { free(s); return 2; }
     char *lit = escstr(v), *val = NULL, *end = NULL, *p = find_key(s, key, &val, &end), *out = NULL; if (!lit) { free(s); return 1; }
-    if (!p) { char *arr = malloc(strlen(lit) + 3); sprintf(arr, "[%s]", lit); int rc = set_object_key(file, key, arr, "json"); free(arr); free(lit); free(s); return rc; }
+    if (!p) { char *arr = malloc(strlen(lit) + 3); if (!arr) { free(lit); free(s); return 1; } sprintf(arr, "[%s]", lit); int rc = set_object_key(file, key, arr, "json"); free(arr); free(lit); free(s); return rc; }
     if (strstr(val, lit)) { free(lit); free(s); return 0; }
     char *rb = strrchr(val, ']'); if (!rb || rb > end) { free(lit); free(s); return 2; }
     char *q = val + 1; while (isspace((unsigned char)*q)) q++; int empty = (*q == ']'); char *m = malloc(strlen(lit) + 2); sprintf(m, "%s%s", empty ? "" : ",", lit); out = join3(s, (size_t)(rb - s), m, rb); free(m); free(lit); free(s); if (!out) return 1; int rc = valid_json(out) ? 1 : write_file(file, out); free(out); return rc;

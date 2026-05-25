@@ -83,7 +83,11 @@ func (s *server) apiExport(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req exportRequest
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	// 空 body (io.EOF) 合法 → 用默认时间窗; 其余畸形 body 明确报 400 而非静默回退.
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "invalid JSON body"})
+		return
+	}
 	now := time.Now()
 	if req.To == 0 {
 		req.To = now.Unix()
