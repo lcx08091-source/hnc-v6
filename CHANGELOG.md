@@ -14,6 +14,17 @@
 
 ---
 
+## [5.8.7] - 2026-05-25
+
+### Fixed
+- **修 hotspotd 链接报 glibc undefined symbol + 拆掉 LSM guard 的 libelf/libz 依赖**(`daemon/hotspotd/build.sh` + `lsm/hnc_lsm_stub.c` 新增 + `third_party_build/build_libs.sh` + `.gitignore` + 移除 glibc 预编译库)。v5.8.6 让 libbpf 编全后,链接 hotspotd 报 `__errno_location` / `__assert_fail` / `__fxstat` / `__ctype_b_loc` / `dcgettext` 等 undefined —— **这些是 glibc 符号**:v5.8.5 从 JiaHuann 取的 `libelf.a`/`libz.a` 实为 **glibc(普通 Linux aarch64)版,不是 Android/bionic 版**(`compat_stubs.c` 注释显示原构建用的是 Termux 的 libelf-static 0.193)。
+  - **根因隔离**:审计发现 libbpf 的重型 object-loading API(`bpf_object__*`/`ring_buffer__*`,需 libelf+libz)**只被可选的 LSM guard `hnc_lsm_loader.c` 使用**;实际发布的 BPF tether offload(`adapter_bpf.c`)只用 libbpf 的 `bpf()` syscall 包装(`bpf_map_*`/`bpf_obj_get`,在 `bpf.c`,**不需要 libelf/libz**)。而 LSM guard 本就**可选、非致命,其 BPF object 从未随模块 zip 发布**(每个发行版里它都是 dormant)。
+  - **修法**:新增 `lsm/hnc_lsm_stub.c`(按 `hnc_lsm_loader.h` 实现全部 5 个接口为 DISABLED no-op,走头文件文档化的 graceful 降级路径),`build.sh` 改编 stub(替下 `hnc_lsm_loader.c`+`compat_stubs.c`)并从链接里去掉 `libelf.a`/`libz.a`。链接器因此不再拉入需要 libelf/libz 的 `libbpf.c`/`elf.c`/`btf.c` → 彻底消除该依赖。`build_libs.sh` 的 libelf/libz `.a` 复制改为可选;移除 v5.8.5 误加的 glibc `.a` 及其 `.gitignore` 例外。
+  - **验证**:host clang 全量编译 13 个 hotspotd 构建源(0 失败)+ `nm` 对象级符号闭合检查 —— 确认全部 `.o` 无任何未定义的 libelf 重符号(`bpf_object__`/`ring_buffer__`/`btf__`),stub 满足 `scheduler.c` 的全部 5 个 `hnc_lsm_*` 调用。真实 arm64 链接在 GitHub Actions 验证。
+  - **影响**:offload(实际在用的 BPF 功能)不受影响;LSM 限速保卫(本就 dormant)暂时禁用,WebUI/状态里显示 `lsm:disabled`。将来拿到真正的 bionic `libelf.a`/`libz.a`(如 Termux libelf-static)即可把 `build.sh` 换回 `hnc_lsm_loader.c` 重新启用。
+
+---
+
 ## [5.8.6] - 2026-05-25
 
 ### Fixed

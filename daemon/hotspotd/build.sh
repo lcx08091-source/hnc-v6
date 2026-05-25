@@ -13,10 +13,15 @@ ARCH=${1:-arm64}
 
 # v5.0.0-beta.4 hotfix6: 改用 libbpf, 删除手撸 lsm/hnc_lsm_loader.c 的
 # sys_bpf 实现, 改为 libbpf 标准 API
+# v5.8.7 (audit): LSM guard 暂用 stub(见 lsm/hnc_lsm_stub.c)。真 loader 需
+# libbpf 的 object-loading API → 牵出 libelf+libz;唯一能拿到的 Android 预编译
+# 实为 glibc 版(链接报 __errno_location/__fxstat/dcgettext 等 glibc 符号)。
+# offload(adapter_bpf.c)只用 libbpf 的 bpf() syscall 包装,不需要 libelf/libz,
+# 故拆掉 LSM loader(本就可选/非致命/object 从不随包)即可让 CI 从源码编出 hotspotd。
 SRCS="hotspotd.c hnc_helpers.c hostname_cache.c oui_override.c mdns_worker.c \
       platform.c scheduler.c upstream.c \
       offload/adapter.c offload/adapter_null.c offload/adapter_bpf.c \
-      lsm/hnc_lsm_loader.c lsm/compat_stubs.c"
+      lsm/hnc_lsm_stub.c"
 OUTDIR=prebuilt/${ARCH}
 OUT=${OUTDIR}/hotspotd
 
@@ -58,7 +63,7 @@ fi
 echo ""
 echo "[build] Compiler: $CC"
 echo "[build] Target:   $ARCH  Output: $OUT"
-echo "[build] libs:     $LIBS_OUT/lib/{libbpf,libelf,libz}.a"
+echo "[build] libs:     $LIBS_OUT/lib/libbpf.a (libelf/libz not linked — LSM stubbed)"
 
 $CC \
     -O2 \
@@ -76,9 +81,10 @@ $CC \
     -o "$OUT" \
     $SRCS \
     -Wl,--allow-multiple-definition \
-    "$LIBS_OUT/lib/libbpf.a" \
-    "$LIBS_OUT/lib/libelf.a" \
-    "$LIBS_OUT/lib/libz.a"
+    "$LIBS_OUT/lib/libbpf.a"
+# v5.8.7 (audit): 不再链接 libelf.a/libz.a。hotspotd 仅用 libbpf 的 bpf() syscall
+# 包装(bpf.c),不调 bpf_object__*/ring_buffer__*,故链接器不会拉入需要 libelf/libz
+# 的 libbpf.c/elf.c/btf.c 目标 → 无需这两个库(且我们只有 glibc 版,链了反而炸)。
 
 strip "$OUT" 2>/dev/null || true
 echo "[build] OK: $(ls -lh "$OUT" | awk '{print $5}')  $OUT"

@@ -27,14 +27,14 @@ CFLAGS_COMMON="-O2 -fPIC -D_GNU_SOURCE -Wno-everything"
 
 mkdir -p "$OUT/include/bpf" "$OUT/include/linux" "$OUT/lib"
 
-# ─── 0. 拷 prebuilt libelf.a + libz.a + headers ─────────────
-echo "=== Copy prebuilt libelf + libz (from JiaHuann) ==="
-cp "$PREBUILT/libelf/libelf.a" "$OUT/lib/"
-cp "$PREBUILT/libz/libz.a"     "$OUT/lib/"
+# ─── 0. 拷 prebuilt libelf/libz 头 (+ .a 若存在) ─────────────
+# v5.8.7 (audit): hotspotd 不再链接 libelf.a/libz.a(LSM 走 stub),所以这两个 .a
+# 不再是必需——只在存在时拷贝(libbpf 编译只需头文件;链接只用 libbpf.a)。
+echo "=== Copy prebuilt libelf + libz headers (+ .a if present) ==="
+[ -f "$PREBUILT/libelf/libelf.a" ] && cp "$PREBUILT/libelf/libelf.a" "$OUT/lib/" || echo "  (libelf.a absent — not linked, OK)"
+[ -f "$PREBUILT/libz/libz.a" ]     && cp "$PREBUILT/libz/libz.a"     "$OUT/lib/" || echo "  (libz.a absent — not linked, OK)"
 cp -r "$PREBUILT/libelf/include"/* "$OUT/include/" 2>/dev/null || true
 cp "$PREBUILT/libz/include"/*.h    "$OUT/include/" 2>/dev/null || true
-echo "  libelf.a:  $(ls -lh "$OUT/lib/libelf.a" | awk '{print $5}')"
-echo "  libz.a:    $(ls -lh "$OUT/lib/libz.a" | awk '{print $5}')"
 echo "  headers:   libelf.h=$([ -f "$OUT/include/libelf.h" ] && echo yes), zlib.h=$([ -f "$OUT/include/zlib.h" ] && echo yes)"
 
 # ─── 1. 编 libbpf ────────────────────────────────────────

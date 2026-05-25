@@ -1,3 +1,13 @@
+<!-- v5.8.7 -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.8.7: 修构建 — hotspotd 终于能从源码编出 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>链接通过</b>: 上一版补的 libelf/libz 库其实是普通 Linux 版(不是 Android 版),链接 hotspotd 时一堆符号对不上。排查发现:只有"BPF 限速保卫(LSM)"这个可选功能才需要这两个库,而它本来就从没随包发布、一直是关闭状态;真正在用的流量卸载(offload)只用最基础的 BPF 系统调用、不需要它们。于是把 LSM 暂时停用、从链接里去掉这两个库,hotspotd 构建恢复。</li>
+    <li><b>影响</b>: 流量卸载等功能不受影响;BPF 限速保卫(原本就没启用)暂时关闭,状态显示 disabled,以后拿到正确的 Android 版库可再开。</li>
+    <li>说明: 纯构建修复;之前积累的底层修复(规则截断、换网重探、写盘保护等)随这次构建一起进包。</li>
+  </ul>
+</div>
+
 <!-- v5.8.6 -->
 <div class="cl-section">
   <div class="cl-title">🔧 v5.8.6: 修构建 — libbpf 在 NDK 下编译报错 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
