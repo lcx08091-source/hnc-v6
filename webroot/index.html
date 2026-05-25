@@ -248,9 +248,10 @@ input, button, select { font-family: inherit; color: inherit; }
     radial-gradient(35% 45% at 82% 18%, var(--mesh-2), transparent 60%),
     radial-gradient(45% 55% at 70% 82%, var(--mesh-3), transparent 60%),
     radial-gradient(38% 48% at 12% 88%, var(--mesh-4), transparent 60%);
-  filter: blur(80px) saturate(130%);
-  animation: meshDrift 32s var(--ease-smooth) infinite alternate;
-  will-change: transform;
+  filter: blur(40px) saturate(130%);
+  /* rc41 perf: 停掉背景漂移动画。它让玻璃卡片背后的内容每帧变化 → 强制所有
+     backdrop-filter 每帧重算模糊(空闲也掉帧)。静态背景下 backdrop-filter 只在
+     内容真变时才重绘,帧率明显回升。保留 keyframes 但不挂,观感几乎无损。 */
 }
 @keyframes meshDrift {
   0%   { transform: translate(0,0) rotate(0deg) scale(1); }
@@ -267,7 +268,7 @@ input, button, select { font-family: inherit; color: inherit; }
 [data-theme="dark"] .bg-grain { opacity: .1; mix-blend-mode: overlay; }
 /* [audit-fix] reduced-motion: 禁用 bg-grain 和 bg-mesh 动画 */
 @media (prefers-reduced-motion: reduce) {
-  .bg-mesh { animation: none; filter: blur(80px) saturate(130%); }
+  .bg-mesh { animation: none; filter: blur(40px) saturate(130%); }
   .bg-grain { display: none; }
 }
 
@@ -280,22 +281,22 @@ input, button, select { font-family: inherit; color: inherit; }
   border: 1px solid var(--stroke);
 }
 .glass {
-  backdrop-filter: blur(24px) saturate(180%);
-  -webkit-backdrop-filter: blur(24px) saturate(180%);
+  backdrop-filter: blur(12px) saturate(140%);
+  -webkit-backdrop-filter: blur(12px) saturate(140%);
   background: var(--glass-bg-1);
   box-shadow: var(--glass-shadow-1);
 }
 .glass-elevated {
-  backdrop-filter: blur(40px) saturate(180%);
-  -webkit-backdrop-filter: blur(40px) saturate(180%);
+  backdrop-filter: blur(16px) saturate(140%);
+  -webkit-backdrop-filter: blur(16px) saturate(140%);
   background: var(--glass-bg-2);
   border-color: var(--stroke-strong);
   border-radius: var(--r-lg);
   box-shadow: var(--glass-shadow-2);
 }
 .glass-floating {
-  backdrop-filter: blur(60px) saturate(180%);
-  -webkit-backdrop-filter: blur(60px) saturate(180%);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
   background: var(--glass-bg-3);
   border-color: var(--stroke-strong);
   border-radius: var(--r-xl);
@@ -330,8 +331,8 @@ input, button, select { font-family: inherit; color: inherit; }
   position: relative;
   border-radius: var(--r-xl);
   border: 1px solid var(--stroke);
-  backdrop-filter: blur(32px) saturate(200%);
-  -webkit-backdrop-filter: blur(32px) saturate(200%);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
   background:
     linear-gradient(180deg, rgba(255,255,255,.35) 0%, rgba(255,255,255,.18) 40%, rgba(255,255,255,.12) 100%),
     var(--glass-bg-2);
@@ -442,8 +443,8 @@ input, button, select { font-family: inherit; color: inherit; }
   display: flex; align-items: center; justify-content: space-between;
   background: var(--glass-bg-2);
   background: color-mix(in srgb, var(--bg-base) 85%, transparent);
-  backdrop-filter: blur(28px) saturate(180%);
-  -webkit-backdrop-filter: blur(28px) saturate(180%);
+  backdrop-filter: blur(14px) saturate(140%);
+  -webkit-backdrop-filter: blur(14px) saturate(140%);
   border-bottom: 1px solid var(--stroke);
   animation: headerDrop var(--dur-slow) var(--ease-spring) both .08s;
 }
@@ -1654,6 +1655,12 @@ body.batch-mode .card-body-wrapper { grid-template-rows: 0fr !important; }
   overflow: hidden;
   transition: background var(--dur-mid) var(--ease-crisp);
   animation: cardRise var(--dur-slow) var(--ease-spring) both;
+  /* rc41 perf: 离屏卡片跳过渲染(含其 backdrop-filter blur)。设备多时滚动只渲染
+     可见卡,帧率明显回升。content-visibility:auto 只对离屏生效,在屏/展开卡正常渲染;
+     intrinsic-size 是离屏占位高度估值(滚动条用),渲染时按真实高度。不支持的旧
+     WebView 会忽略本属性(优雅降级)。 */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 120px;
 }
 .device-card:nth-child(1) { animation-delay: .32s; }
 .device-card:nth-child(2) { animation-delay: .37s; }
@@ -2398,8 +2405,8 @@ body.kb-open .container {
   gap: 8px;
   white-space: nowrap;
   background: var(--glass-bg-3);
-  backdrop-filter: blur(60px) saturate(180%);
-  -webkit-backdrop-filter: blur(60px) saturate(180%);
+  backdrop-filter: blur(18px) saturate(140%);
+  -webkit-backdrop-filter: blur(18px) saturate(140%);
   border: 1px solid var(--stroke-strong);
   box-shadow: var(--glass-shadow-3);
 }
@@ -3922,8 +3929,8 @@ body.kb-open .container {
     padding: 14px 14px 12px 18px;
     border-radius: 18px;
     overflow: hidden;
-    backdrop-filter: blur(16px) saturate(160%);
-    -webkit-backdrop-filter: blur(16px) saturate(160%);
+    backdrop-filter: blur(12px) saturate(140%);
+    -webkit-backdrop-filter: blur(12px) saturate(140%);
     background: linear-gradient(180deg, rgba(255,255,255,.55), rgba(255,255,255,.32));
     border: 1px solid rgba(0,0,0,.05);
     box-shadow:
@@ -8765,10 +8772,10 @@ body.kb-open .container {
     return Promise.resolve(false);
   }
   function burstRefresh() {
+    // rc41 perf: 4 次 → 2 次。乐观 UI 已让点击即时反馈,不再需要密集强刷跟进;
+    // 每次 requestForceRefresh 都会重拉 + 可能重渲,减半降交互后冗余重绘。
     requestForceRefresh();
-    setTimeout(() => requestForceRefresh(), 500);
-    setTimeout(() => requestForceRefresh(), 1000);
-    setTimeout(() => requestForceRefresh(), 1500);
+    setTimeout(() => requestForceRefresh(), 800);
   }
   document.addEventListener('visibilitychange', () => {
     __pollVisible = !document.hidden;
@@ -10239,9 +10246,10 @@ body.kb-open .container {
         btn.classList.remove('holding');
         const card = btn.closest('.device-card');
         const mac = card.dataset.mac;
-        addBlacklistBackend(mac).then(() => requestForceRefresh()).then(() => {
-          renderDeviceList();
+        // rc41: 删多余的显式 renderDeviceList(requestForceRefresh 已在轮询重渲一次)。
+        addBlacklistBackend(mac).then(() => {
           toast('已封锁 ' + mac, 'err');
+          requestForceRefresh();
         }).catch(err => {
           toast('封锁失败: ' + err.message, 'err');
           dbg('block err: ' + err.message);
@@ -11391,9 +11399,11 @@ body.kb-open .container {
     if (unblockBtn) {
       const card = unblockBtn.closest('.device-card');
       const mac = card.dataset.mac;
-      rmBlacklistBackend(mac).then(() => requestForceRefresh()).then(() => {
+      // rc41: 状态变化会让 requestForceRefresh 在轮询里重渲一次,删掉这里多余的
+      // 显式 renderDeviceList(原来一次操作渲染两遍,徒增掉帧)。
+      rmBlacklistBackend(mac).then(() => {
         toast('已解除封锁: ' + mac, 'ok');
-        renderDeviceList();
+        requestForceRefresh();
       }).catch(e => { toast('解除失败: ' + e.message, 'err'); });
       return;
     }
@@ -11723,17 +11733,22 @@ body.kb-open .container {
       const mac = card.dataset.mac;
       if (!guardCardAction(card)) return;
       const rates = readLimitInputs(card);
+      // rc41 乐观 UI:先把限速写进模型 + 即时显示徽标(秒响应,不等后端几百 ms),
+      // 后台发请求;成功后台对账,失败回滚。
+      const dev = DEVICES.find(x => x.mac === mac);
+      const snap = dev ? { down: dev.down, up: dev.up, limit_enabled: dev.limit_enabled, limit_apply_mode: dev.limit_apply_mode } : null;
+      if (dev) { dev.down = rates.down; dev.up = rates.up; dev.limit_enabled = (rates.down > 0 || rates.up > 0); dev.limit_apply_mode = ''; updateCardInPlace(mac); }
       setCardBusy(card, true, action);
       btn.disabled = true; btn.classList.add('loading');
       applyLimitBackend(mac, rates.down, rates.up).then(() => {
-        return requestForceRefresh();
-      }).then(() => {
         btn.classList.remove('loading'); btn.classList.add('success');
         toast('限速已应用: ↓' + mbpsToMBsStr(rates.down) + ' ↑' + mbpsToMBsStr(rates.up) + ' MB/s' + (state.uplinkSupported === false ? ' · 仅下行' : ''), 'ok');
-        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; updateCardInPlace(mac); }, 650);
+        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; }, 650);
+        requestForceRefresh();
       }).catch(e => {
+        if (dev && snap) { dev.down = snap.down; dev.up = snap.up; dev.limit_enabled = snap.limit_enabled; dev.limit_apply_mode = snap.limit_apply_mode; updateCardInPlace(mac); }
         btn.classList.remove('loading'); setCardBusy(card, false); btn.disabled = false;
-        const detail = e.detail ? (': ' + e.detail) : ''; toast('失败: ' + e.message + detail, 'err'); dbg('apply-limit err: ' + e.message + detail, true);
+        const detail = e.detail ? (': ' + e.detail) : ''; toast('失败(已回滚): ' + e.message + detail, 'err'); dbg('apply-limit err: ' + e.message + detail, true);
       });
       return;
     }
@@ -11741,15 +11756,21 @@ body.kb-open .container {
       const card = btn.closest('.device-card');
       const mac = card.dataset.mac;
       if (!guardCardAction(card)) return;
+      // rc41 乐观 UI:即时清零徽标,后台清除,失败回滚。
+      const dev = DEVICES.find(x => x.mac === mac);
+      const snap = dev ? { down: dev.down, up: dev.up, limit_enabled: dev.limit_enabled, limit_apply_mode: dev.limit_apply_mode } : null;
+      if (dev) { dev.down = 0; dev.up = 0; dev.limit_enabled = false; dev.limit_apply_mode = ''; updateCardInPlace(mac); }
       setCardBusy(card, true, action);
       btn.disabled = true; btn.classList.add('loading');
-      clearLimitBackend(mac).then(() => requestForceRefresh()).then(() => {
+      clearLimitBackend(mac).then(() => {
         btn.classList.remove('loading'); btn.classList.add('success');
         toast('限速已清除', 'ok');
-        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; updateCardInPlace(mac); }, 650);
+        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; }, 650);
+        requestForceRefresh();
       }).catch(e => {
+        if (dev && snap) { dev.down = snap.down; dev.up = snap.up; dev.limit_enabled = snap.limit_enabled; dev.limit_apply_mode = snap.limit_apply_mode; updateCardInPlace(mac); }
         btn.classList.remove('loading'); setCardBusy(card, false); btn.disabled = false;
-        const detail = e.detail ? (': ' + e.detail) : ''; toast('失败: ' + e.message + detail, 'err'); dbg('clear-limit err: ' + e.message + detail, true);
+        const detail = e.detail ? (': ' + e.detail) : ''; toast('失败(已回滚): ' + e.message + detail, 'err'); dbg('clear-limit err: ' + e.message + detail, true);
       });
       return;
     }
@@ -11762,15 +11783,21 @@ body.kb-open .container {
       const delay = parseInt((card.querySelector('input[data-field="delay"]')||{}).value || 0, 10);
       const jitter = parseInt((card.querySelector('input[data-field="jitter"]')||{}).value || 0, 10);
       const loss = parseFloat((card.querySelector('input[data-field="loss"]')||{}).value || 0);
+      // rc41 乐观 UI:即时显示延迟徽标,后台注入,失败回滚。
+      const dev = DEVICES.find(x => x.mac === mac);
+      const snap = dev ? { delay: dev.delay, jitter: dev.jitter, loss: dev.loss, delay_apply_mode: dev.delay_apply_mode } : null;
+      if (dev) { dev.delay = delay; dev.jitter = jitter; dev.loss = loss; dev.delay_apply_mode = ''; updateCardInPlace(mac); }
       btn.disabled = true; btn.classList.add('loading');
-      applyDelayBackend(mac, delay, jitter, loss).then(() => requestForceRefresh()).then(() => {
+      applyDelayBackend(mac, delay, jitter, loss).then(() => {
         btn.classList.remove('loading'); btn.classList.add('success');
         toast('延迟已注入: ' + delay + 'ms ±' + jitter + 'ms ' + loss + '%', 'warn');
-        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; updateCardInPlace(mac); }, 650);
+        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; }, 650);
+        requestForceRefresh();
       }).catch(e => {
+        if (dev && snap) { dev.delay = snap.delay; dev.jitter = snap.jitter; dev.loss = snap.loss; dev.delay_apply_mode = snap.delay_apply_mode; updateCardInPlace(mac); }
         btn.classList.remove('loading'); setCardBusy(card, false); btn.disabled = false;
         const detail = e.detail ? (': ' + e.detail) : '';
-        toast('失败: ' + e.message + detail, 'err');
+        toast('失败(已回滚): ' + e.message + detail, 'err');
         dbg('apply-delay err: ' + e.message + detail, true);
       });
       return;
@@ -11779,16 +11806,22 @@ body.kb-open .container {
       const card = btn.closest('.device-card');
       const mac = card.dataset.mac;
       if (!guardCardAction(card)) return;
+      // rc41 乐观 UI:即时清零延迟徽标,后台清除,失败回滚。
+      const dev = DEVICES.find(x => x.mac === mac);
+      const snap = dev ? { delay: dev.delay, jitter: dev.jitter, loss: dev.loss, delay_apply_mode: dev.delay_apply_mode } : null;
+      if (dev) { dev.delay = 0; dev.jitter = 0; dev.loss = 0; dev.delay_apply_mode = ''; updateCardInPlace(mac); }
       setCardBusy(card, true, action);
       btn.disabled = true; btn.classList.add('loading');
-      clearDelayBackend(mac).then(() => requestForceRefresh()).then(() => {
+      clearDelayBackend(mac).then(() => {
         btn.classList.remove('loading'); btn.classList.add('success');
         toast('延迟已清除', 'ok');
-        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; updateCardInPlace(mac); }, 650);
+        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; }, 650);
+        requestForceRefresh();
       }).catch(e => {
+        if (dev && snap) { dev.delay = snap.delay; dev.jitter = snap.jitter; dev.loss = snap.loss; dev.delay_apply_mode = snap.delay_apply_mode; updateCardInPlace(mac); }
         btn.classList.remove('loading'); setCardBusy(card, false); btn.disabled = false;
         const detail = e.detail ? (': ' + e.detail) : '';
-        toast('失败: ' + e.message + detail, 'err');
+        toast('失败(已回滚): ' + e.message + detail, 'err');
         dbg('clear-delay err: ' + e.message + detail, true);
       });
       return;
@@ -11799,19 +11832,26 @@ body.kb-open .container {
       if (!guardCardAction(card)) return;
       const dev = DEVICES.find(x => x.mac === mac);
       const want = !(dev && dev.sqm);
+      // rc41 乐观 UI:即时翻按钮 + 模型,后台切换,失败回滚。
+      const prevSqm = dev ? dev.sqm : undefined;
+      if (dev) dev.sqm = want;
+      btn.classList.toggle('btn-primary', want); btn.classList.toggle('btn-ghost', !want);
+      btn.textContent = want ? '低延迟 · 已开启' : '开启低延迟';
       setCardBusy(card, true, action);
       btn.disabled = true; btn.classList.add('loading');
-      applySqmBackend(mac, want).then(() => requestForceRefresh()).then(() => {
-        if (dev) dev.sqm = want;
+      applySqmBackend(mac, want).then(() => {
         btn.classList.remove('loading'); btn.classList.add('success');
-        btn.classList.toggle('btn-primary', want); btn.classList.toggle('btn-ghost', !want);
-        btn.textContent = want ? '低延迟 · 已开启' : '开启低延迟';
         toast(want ? '已开启低延迟(智能队列)' : '已关闭低延迟', 'ok');
-        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; updateCardInPlace(mac); }, 650);
+        setTimeout(() => { btn.classList.remove('success'); setCardBusy(card, false); btn.disabled = false; }, 650);
+        requestForceRefresh();
       }).catch(e => {
+        // 回滚按钮 + 模型
+        if (dev) dev.sqm = prevSqm;
+        btn.classList.toggle('btn-primary', !!prevSqm); btn.classList.toggle('btn-ghost', !prevSqm);
+        btn.textContent = prevSqm ? '低延迟 · 已开启' : '开启低延迟';
         btn.classList.remove('loading'); setCardBusy(card, false); btn.disabled = false;
         const detail = e.detail ? (': ' + e.detail) : '';
-        toast('失败: ' + e.message + detail, 'err');
+        toast('失败(已回滚): ' + e.message + detail, 'err');
         dbg('toggle-sqm err: ' + e.message + detail, true);
       });
       return;

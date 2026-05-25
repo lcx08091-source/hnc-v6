@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc41 -->
+<div class="cl-section">
+  <div class="cl-title">⚡ v5.7.0-rc41: 界面提帧 + 点击秒响应 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>点限速/延迟不再卡一下</b>: 点完卡片上的限速/延迟/低延迟会<b>立即</b>显示生效(以前要等后端跑完那几百毫秒),后台再落地;万一失败会自动回滚并提示。</li>
+    <li><b>整体更流畅</b>: 大幅降低了毛玻璃模糊的强度,并停掉了一直在动的背景(它会逼着系统每帧重算模糊)。滚动和空闲时帧率明显回升,玻璃质感只是略微变实。</li>
+    <li><b>设备多也跟手</b>: 看不见的设备卡片不再参与渲染,设备一多滚动也不卡。</li>
+    <li>说明: 这版<b>纯界面改动、不用重新编译</b>,刷新版本(或只替换界面文件)即可生效。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc40 -->
 <div class="cl-section">
   <div class="cl-title">🛡️ v5.7.0-rc40: 后台 dpid 崩溃环处理更稳(第二批) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

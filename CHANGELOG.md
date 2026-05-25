@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Changed (v5.7.0-rc41, 2026-05-25)
+- **WebUI 提帧 + 点击秒响应**(`webroot/index.html`,纯前端,**不需 CI 重编**)。真机反馈「点限速/延迟会卡一下、整体帧率不高」。读码定位为三层叠加,本版用低风险纯前端方案治其中两层(第 2 层"action 期间持全局锁"暂不动):
+  - **乐观 UI(治点击卡顿)**:点击的卡顿根因之一是后端 shell 链路慢(apply 一次 fork 十几个进程、抢 tc_action_lock,几百 ms)。`updateCardInPlace` 本就会从 DEVICES 模型重建限速/延迟徽标——于是 apply-limit/clear-limit/apply-delay/clear-delay/toggle-sqm 改为:点击**先改模型 + 即时 `updateCardInPlace`**(秒显徽标/按钮),后端在后台跑,**成功**后台 `requestForceRefresh` 对账(真实值覆盖)、**失败**回滚快照 + 红 toast。不动 shell、不动锁。
+  - **降 backdrop-filter blur(治帧率)**:全文 28 处玻璃模糊半径 60→18 / 40→16 / 32→14 / 28→14 / 24→12,`saturate(180~200%)→140%`(GPU 成本约随半径平方);并**停掉 `.bg-mesh` 的 `meshDrift` 漂移动画**——它让玻璃卡片背后内容每帧变化 → 强制所有 `backdrop-filter` 每帧重算模糊(空闲也掉帧)。静态背景后 blur 只在内容真变时才重绘。玻璃质感仅略变实。
+  - **离屏卡片容器化**:`.device-card` 加 `content-visibility:auto` + `contain-intrinsic-size`,离屏卡(含其 blur)跳过渲染;在屏/展开卡正常;不支持的旧 WebView 优雅忽略。设备多时滚动 FPS 明显回升。
+  - **减冗余重渲**:`burstRefresh` 4→2;删 block/unblock 里多余的显式 `renderDeviceList`(`requestForceRefresh` 已在轮询重渲一次)。
+  - `node --check`(两段内联 JS)+ `version_consistency_check` 通过;**无 Go/C 改动,不触发 CI**(替换 webroot/index.html 即可,像 rc29/rc30)。版本 rc40 → rc41(570141)。
+
 ### Fixed (v5.7.0-rc40, 2026-05-25)
 - **第 4 份审查报告 · G2 dpid 稳定性**(弱网 / iface 抖动下的崩溃环处理):
   - **P2-20 健康运行时不清 crashflag**(`src/dpid/cmd/dpid/main.go:runCapture`):`clearCrashFlag` 旧只在采集 open 失败转 blind / 干净退出时调;长时间健康运行后被 SIGKILL(OOM / iface flap / 硬杀)→ flag 残留 → 下次 `checkCrashLoop` 误判 → `ModeCrashLoop`。修:同一采集 attempt 健康跑满 5min 后起 goroutine 调 `clearCrashFlag`(attemptCtx 在 rebind 时取消,故只在真撑过 5min 才清)。
