@@ -14,11 +14,12 @@ else
   # rc30.12.19: 扩展正则支持三段 rc 编号 (rc30.12.18 等). 之前只支持两段 (rc30.12),
   # rc30 系列引入更多小版本号后正则跟不上, 导致 version_consistency_check 误报 warn.
   # 现在接受:
+  #   v5.8.0                       (正式版, 三段, 无 rc 后缀)
   #   v5.3.0-rc30                  (一段)
   #   v5.3.0-rc30.12               (两段)
   #   v5.3.0-rc30.12.18            (三段)
   #   v5.1.0-rc1-hotfix17.3        (rc + hotfix 旧风格)
-  if printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+){0,2}(-hotfix[0-9]+(\.[0-9]+)?)?$'; then ok "module version format is accepted"; else warn "module version format is unexpected"; fi
+  if printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+(\.[0-9]+){0,2}(-hotfix[0-9]+(\.[0-9]+)?)?)?$'; then ok "module version format is accepted"; else warn "module version format is unexpected"; fi
   if printf '%s\n' "$VERSION_CODE" | grep -Eq '^[0-9]+$'; then ok "versionCode is numeric"; else fail "versionCode is not numeric"; fi
 fi
 if [ -f daemon/hnc_httpd/hnc_httpd ]; then

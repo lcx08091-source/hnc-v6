@@ -14,6 +14,16 @@
 
 ---
 
+## [5.8.0] - 2026-05-25
+
+把开发期的 rc 系列收敛为一个干净的正式版。下方 `[Unreleased]` 保留各 rc 的逐条明细作为历史。
+
+### Changed
+- **统一版本号到 v5.8.0 正式版**(`module.prop` + `bin/version_consistency_check.sh`)。对外/模块版本从开发期 `v5.7.0-rc46` 收敛为正式版 **`v5.8.0`**(versionCode `570146` → `580000`,单调递增)。`version_consistency_check.sh` 第 21 行正则把 `-rc…` 后缀改为可选,新增接受无后缀的三段正式版 `^vX.Y.Z$` → 正式版不再误报 `[WARN]`(failures/warnings 均为 0)。dpid(`0.5.3-rc30.12.3…`)、hnc_watchdog(`0.1.0-rc30.1`)、hnc_launcher(`0.1.0-rc30.12.31`)各自的独立内部版本号**不变**(独立轨,CI/launcher build.sh 按前缀校验)。
+- **关于页版本号改为读后端真实版本**(`webroot/index.html`)。此前「设置 → 关于」写死 `v5.2.0-rc1.21 · versionCode 520031` 与短号 `5.1.0`,且 JS 从不更新 → 长期显示 3+ 个小版本前的陈旧号。现给两个版本元素加 `id`(`about-version-desc`/`about-version-short`),在 `/api/live` 的 `applyLiveState` 回调里用 `backend_version` 动态填充——该字段由 `build.sh` 读 `module.prop` 的 `version` 经 `-X main.version` 注入二进制 → 以后版本变了关于页自动跟,不再陈旧。旧二进制(无 `backend_version` 或为 `dev`)保留静态 `v5.8.0 / 580000` 兜底;versionCode 因后端不暴露,存于 `data-vcode`(随版本纪律手动维护)。纯前端改动,无 Go/C 源码逻辑改动(但 `module.prop` 版本变化会在合并 main 时触发 CI 把新版本注入二进制)。
+
+---
+
 ## [Unreleased]
 
 正在开发中,合并到 v5.7.0 时清空。

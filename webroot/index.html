@@ -5330,9 +5330,9 @@ body.kb-open .container {
         <div class="set-icon blue"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/></svg></div>
         <div class="set-info">
           <div class="set-label">版本</div>
-          <div class="set-desc">v5.2.0-rc1.21 · versionCode 520031</div>
+          <div class="set-desc" id="about-version-desc" data-vcode="580000">v5.8.0 · versionCode 580000</div>
         </div>
-        <div class="set-value">5.1.0</div>
+        <div class="set-value" id="about-version-short">5.8.0</div>
       </div>
       <div class="set-row">
         <div class="set-icon gray"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="4" width="16" height="16" rx="2" ry="2"/><rect x="9" y="9" width="6" height="6"/><line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/><line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/><line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/><line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/></svg></div>
@@ -8643,6 +8643,20 @@ body.kb-open .container {
     if (typeof live.tx_bps === 'number') state.liveTx = live.tx_bps;
     if (live.devices_sig) state.liveDevicesSig = String(live.devices_sig);
     if (state.hotspotActive === false) applyHotspotClosedState();
+    // 关于页版本号改为读后端真实版本(build.sh 把 module.prop version 注入 -X main.version),
+    // 不再写死 → 以后版本变了自动跟。后端字段缺失/为 "dev"(旧二进制)则保留静态兜底。
+    try {
+      const bv = (typeof live.backend_version === 'string') ? live.backend_version.trim() : '';
+      if (bv && bv !== 'dev') {
+        const shortEl = document.getElementById('about-version-short');
+        const descEl = document.getElementById('about-version-desc');
+        if (shortEl) shortEl.textContent = bv.replace(/^v/, '');
+        if (descEl) {
+          const vcode = descEl.getAttribute('data-vcode') || '';
+          descEl.textContent = vcode ? (bv + ' · versionCode ' + vcode) : bv;
+        }
+      }
+    } catch (e) {}
     try { updateCounters(); updateHero(); updateFreshnessLine(); syncDeviceFilterUI(); updateRemoteUrlPanel(); } catch (e) {}
   }
 
