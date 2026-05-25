@@ -14,6 +14,26 @@
 
 ---
 
+## [5.8.8] - 2026-05-25
+
+审查报告剩余真问题一次性收尾(8 项,跨 Go/C/shell)。误报项(IPv6 自归因 key、热路径 os.Stat、IPv6 分片越界、hnc_json.c malloc、WebUI XSS)经核实不改。
+
+### Security
+- **SSE `/api/events` 加并发连接上限**(`daemon/hnc_httpd/api_events.go`)。已鉴权(或 cookie 被盗)客户端此前可开任意多个 EventSource,每个占一个 goroutine + 1.5s ticker 放大 CPU/内存。新增包级原子计数 + `maxSSEConns=64`,超限返回 503 + `Retry-After`。
+- **ip/mac 进 tc/iptables 前加白名单校验**(`bin/apply_device_rule.sh`)。新增 `valid_mac`/`valid_ipv4`:MAC(来自 /api/action 的外部输入)在分发前强制 `aa:bb:cc:dd:ee:ff` 格式,非法即拒;`get_ip` 只回合法四段 IPv4。**注:原拼接处均带引号、无 eval,本非命令注入**,此为防御纵深 + 挡畸形值。
+- **service.sh 弱熵兜底改内核 CSPRNG / 失败 fail-closed**(`service.sh`)。`/dev/urandom` 不可读时不再退到 `date+$$+RANDOM`(mksh RANDOM 仅 15bit,可暴力构造 `X-HNC-Local-Admin`);改用 `/proc/sys/kernel/random/uuid`(get_random_bytes)拼 64 hex,仍失败则**放弃生成**——middleware 对 loopback 写接口本就 fail-closed,宁可退回 cookie 鉴权也不下发弱 secret。
+
+### Fixed
+- **dpid 单应用 SNI 满 8 个改 LRU**(`src/dpid/output/self_attrib.go`)。`snisByUID` 从 `map[string]struct{}` 改为 `map[string]int64`(last-seen ts),满 `MaxSNIsPerApp=8` 时驱逐最旧而非"丢弃此后所有新 SNI"——后者会让应用 SNI 集合到 8 后永久冻结、长期失真。复用 `state.go` 的有界 LRU helper。
+- **mdns DNS 压缩指针加后向校验**(`daemon/hotspotd/mdns_resolve.c`)。`decode_dns_name` 此前只数跳转次数;现要求压缩指针必须指向当前位置**之前**(`ptr < cur`),禁前向引用/自环,把解析耗时封顶在 O(pktlen),构造包无法放大。
+- **scheduler 改增长读,不再受 ftell 失败截断**(`daemon/hotspotd/scheduler.c`)。`ftell` 返回 -1 时旧码回落固定 65536 → `fread` 截断 >64KB 的 rules.json(正是 rc39 要修的截断,只在 ftell 失败路径复发)。改为不信任 ftell 的增长缓冲循环,whole-file 读全。
+- **iptables `ipt_del_all` 加轮次上限**(`bin/iptables_manager.sh`)。`while $cmd -D; do :; done` 在 `-D` 恒"成功"的异常情形理论可死循环;加 100 轮上限。
+- **cleanup 删 root qdisc 加归属检查**(`bin/cleanup.sh`)。卸载时此前无条件 `tc qdisc del dev $IFACE root`,ColorOS 上可能误删系统/别的模块的 root qdisc;改为仅在 HNC 归属标记 `run/tc_root_owned_$IFACE` 存在时才删(与 `tc_manager.sh` 的 `cleanup_tc` 一致)。ingress/ifb0 是 HNC 自建构件,照常清理。
+
+验证:go vet + go test + android/arm64 交叉编译(hnc_httpd + dpid);mdns/scheduler host 编译/`-fsyntax-only`;改过的 shell `sh -n` + IP/MAC 校验逻辑冒烟。C 改动随 v5.8.3 起的 CI 源码构建进包。
+
+---
+
 ## [5.8.7] - 2026-05-25
 
 ### Fixed

@@ -112,7 +112,10 @@ type SelfAttribAggregator struct {
 	remoteToUID map[string]int
 
 	// snisByUID tracks distinct SNIs per uid, capped to MaxSNIsPerApp.
-	snisByUID map[int]map[string]struct{}
+	// v5.8.8 (audit): value is last-seen unix ts so the cap is LRU (evict
+	// oldest) instead of "drop everything after the first 8" — the latter
+	// froze an app's SNI set forever once it hit 8, distorting attribution.
+	snisByUID map[int]map[string]int64
 	// rulesByUID counts hits per (uid, ruleID). v5.6.0-rc2: upgraded from
 	// set to counter so auto-expansion can use "uid hit rule R >= N times"
 	// as the evidence requirement #2 (see auto_expand.go). The count is
@@ -193,7 +196,7 @@ func NewSelfAttribAggregator(jsonlDir string) *SelfAttribAggregator {
 	return &SelfAttribAggregator{
 		appsByUID:        make(map[int]*SelfApp),
 		remoteToUID:      make(map[string]int),
-		snisByUID:        make(map[int]map[string]struct{}),
+		snisByUID:        make(map[int]map[string]int64),
 		rulesByUID:       make(map[int]map[string]int),
 		unmatchedSNIs:    make(map[string]map[int]struct{}),
 		pkgCache:         make(map[int]string),
@@ -326,11 +329,11 @@ func (a *SelfAttribAggregator) RecordSNI(uid int, sni string, now int64) {
 	app := a.ensureAppLocked(uid, now)
 	app.LastSeen = now
 	if a.snisByUID[uid] == nil {
-		a.snisByUID[uid] = make(map[string]struct{})
+		a.snisByUID[uid] = make(map[string]int64)
 	}
-	if len(a.snisByUID[uid]) < MaxSNIsPerApp {
-		a.snisByUID[uid][sni] = struct{}{}
-	}
+	// touchIP is a generic bounded last-seen LRU set (defined in state.go);
+	// here it keeps the newest MaxSNIsPerApp SNIs per app, evicting the oldest.
+	touchIP(a.snisByUID[uid], sni, now, MaxSNIsPerApp)
 }
 
 // RecordRuleHit is called when the L3 classifier matched a rule for a

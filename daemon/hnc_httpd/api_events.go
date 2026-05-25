@@ -15,10 +15,27 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"time"
 )
 
+// v5.8.8 (audit): cap concurrent SSE connections. An authenticated (or
+// cookie-stolen) client could otherwise open many EventSource streams, each
+// holding a goroutine + a 1.5s ticker, to amplify CPU/memory. 64 is far above
+// any legitimate use (a few remote tabs).
+const maxSSEConns = 64
+
+var sseConns atomic.Int64
+
 func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
+	if n := sseConns.Add(1); n > maxSSEConns {
+		sseConns.Add(-1)
+		w.Header().Set("Retry-After", "10")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "too many SSE connections"})
+		return
+	}
+	defer sseConns.Add(-1)
+
 	rc := http.NewResponseController(w)
 	// SSE 是长连接:必须清掉 WriteTimeout(httpsSrv 配了 60s),否则 60s 被掐断。
 	// middleware 不包裹 w,ResponseController 能直达底层 conn。

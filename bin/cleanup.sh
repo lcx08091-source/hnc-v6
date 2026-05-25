@@ -119,7 +119,15 @@ fi  # end MODE=all|restart 的进程清理分支
 # ── 2. 清除 TC 规则 ──────────────────────────────────────────
 IFACE=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null || echo wlan2)
 log "Cleaning TC on $IFACE and ifb0..."
-tc qdisc del dev "$IFACE" root 2>/dev/null
+# v5.8.8 (audit): 只在 HNC 拥有该 iface 的 root qdisc 时才删(归属标记由 tc_manager
+# 写,见 tc_root_owned_$iface),避免在 ColorOS 上误删系统/别的模块的 root qdisc。
+# ingress/ifb0 是 HNC 上行整形自建的构件,属 HNC,正常清理。
+if [ -f "$HNC_DIR/run/tc_root_owned_$IFACE" ]; then
+    tc qdisc del dev "$IFACE" root 2>/dev/null
+    rm -f "$HNC_DIR/run/tc_root_owned_$IFACE" 2>/dev/null
+else
+    log "skip root qdisc del on $IFACE (no HNC ownership marker)"
+fi
 tc qdisc del dev "$IFACE" ingress 2>/dev/null
 tc qdisc del dev ifb0 root 2>/dev/null
 ip link set ifb0 down 2>/dev/null

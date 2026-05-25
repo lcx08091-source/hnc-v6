@@ -1,3 +1,14 @@
+<!-- v5.8.8 -->
+<div class="cl-section">
+  <div class="cl-title">🧹 v5.8.8: 审查收尾 — 一批稳定性 / 安全加固 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>更稳</b>: dpid 给每个应用记录的 SNI(域名)满 8 个后改为"淘汰最旧"而不是"从此不再记",应用画像不再卡死;mdns 解析对畸形/恶意包更稳;流量规则文件很大时不再被读截断。</li>
+    <li><b>更安全</b>: 远程推送(SSE)加并发连接上限,防恶意客户端开海量连接放大开销;设备限速接口对 IP/MAC 加格式白名单(防御纵深);本机管理密钥在系统随机源异常时改用内核随机数、再不行就拒发(不再用弱随机兜底)。</li>
+    <li><b>更稳妥</b>: 卸载时只删本模块自己建立的限速根规则(避免误删系统的);某清理循环加了上限防极端情况卡住。</li>
+    <li>说明: 含 Go/C 改动,随 CI 重新构建进包;功能行为不变。</li>
+  </ul>
+</div>
+
 <!-- v5.8.7 -->
 <div class="cl-section">
   <div class="cl-title">🔧 v5.8.7: 修构建 — hotspotd 终于能从源码编出 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

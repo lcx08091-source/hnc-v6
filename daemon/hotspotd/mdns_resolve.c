@@ -153,6 +153,11 @@ static int decode_dns_name(const uint8_t *pkt, size_t pktlen,
             jumps++;
             if (jumps > MAX_NAME_JUMPS) return -1;
             if (ptr >= pktlen) return -1;
+            /* v5.8.8 (audit): a compression pointer must point strictly BEFORE
+             * the pointer itself. This forbids forward refs / self-loops and
+             * caps total work at O(pktlen) regardless of MAX_NAME_JUMPS, so a
+             * crafted packet can't amplify parse cost. */
+            if (ptr >= cur) return -1;
             cur = ptr;
             continue;
         }

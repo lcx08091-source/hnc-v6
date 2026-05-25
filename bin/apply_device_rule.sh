@@ -66,7 +66,8 @@ get_ip() {
     [ -f "$DEVICES" ] || { echo ""; return; }
     # 简单 grep + sed: 找 "<mac>": { ... "ip": "x.x.x.x" ... }
     # devices.json 是单行 JSON, 找 mac 后 60 字符内的 "ip":"..."
-    awk -v m="$mac" '
+    local _ip
+    _ip=$(awk -v m="$mac" '
     BEGIN { found=0 }
     {
         idx = index($0, "\"" m "\"")
@@ -83,7 +84,10 @@ get_ip() {
         }
     }
     END { if (!found) print "" }
-    ' "$DEVICES"
+    ' "$DEVICES")
+    # v5.8.8 (audit): 只回合法 IPv4,挡掉 1.2.3.4.5 这类畸形(awk 已限 [0-9.]、不可注入,
+    # 这里再保证四段合法八位组),否则返回空,调用方按"无 IP"处理。
+    if valid_ipv4 "$_ip"; then printf '%s\n' "$_ip"; else echo ""; fi
 }
 
 # rules.json fallback IP, used when the device is offline but old IP-specific
@@ -224,11 +228,27 @@ js_set_dev_flush() {
     gate_unlock() { return 0; }
 }
 
+# v5.8.8 (audit): 白名单校验进 tc/iptables 的外部字段(防御纵深)。
+# MAC 来自 /api/action(经鉴权但仍是外部输入);IP 由 get_ip 从 devices.json 读
+# (源头含 DHCP option12/mDNS 任意字节)。变量拼接处均已带引号、无 eval,故非命令
+# 注入;此处再做格式白名单,异常输入直接拒,绝不让怪字符进 tc/iptables 参数。
+valid_mac() {
+    printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'
+}
+valid_ipv4() {
+    printf '%s' "$1" | grep -Eq '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
+}
+
 # ── main ─────────────────────────────────────────────────────────
 
 CMD=$1
 MAC=$2
 shift 2
+
+# 所有动作都以 MAC 为键;格式不合法直接拒(合法 MAC 必过,怪字符必拒)。
+if ! valid_mac "$MAC"; then
+    emit_err "invalid mac: $MAC"
+fi
 
 case "$CMD" in
     limit)

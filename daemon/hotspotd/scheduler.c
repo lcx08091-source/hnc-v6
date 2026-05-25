@@ -223,6 +223,10 @@ static int rebuild_from_rules(void)
      * HTB。改用 fseek/ftell 取大小后 malloc 读全量(无 sys/stat.h 依赖)。 */
     long fsz = 0;
     if (fseek(f, 0, SEEK_END) == 0) { fsz = ftell(f); rewind(f); }
+    /* v5.8.8 (audit): don't trust ftell. When fseek/ftell fail (fsz<=0) the
+     * old code capped at 65536 and fread truncated any rules.json >64KB — the
+     * exact truncation rc39 set out to fix, just on the ftell-failure path.
+     * Read with a growing buffer so the whole file is consumed regardless. */
     size_t cap = (fsz > 0) ? (size_t)fsz + 1 : 65536;
     char *buf = malloc(cap);
     if (!buf) {
@@ -230,7 +234,24 @@ static int rebuild_from_rules(void)
         fprintf(stderr, "[sched] rebuild: OOM allocating %zu bytes, skip\n", cap);
         return 0;
     }
-    size_t n = fread(buf, 1, cap - 1, f);
+    size_t n = 0;
+    for (;;) {
+        if (n + 1 >= cap) {
+            size_t ncap = cap * 2;
+            char *nb = realloc(buf, ncap);
+            if (!nb) {
+                free(buf);
+                fclose(f);
+                fprintf(stderr, "[sched] rebuild: OOM growing to %zu bytes, skip\n", ncap);
+                return 0;
+            }
+            buf = nb;
+            cap = ncap;
+        }
+        size_t got = fread(buf + n, 1, cap - 1 - n, f);
+        n += got;
+        if (got == 0) break; /* EOF or read error */
+    }
     fclose(f);
     if (n == 0) { free(buf); return 0; }
     buf[n] = '\0';

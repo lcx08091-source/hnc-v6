@@ -129,10 +129,16 @@ ipt_dual_q() {
 }
 
 # v5.1.0-rc1 hotfix: 删除旧规则时循环 -D 直到不存在,避免历史重复规则残留。
+# v5.8.8 (audit): 加轮次上限,防 -D 恒"成功"(异常内核/规则)时的理论死循环。
+# 同一规则重复 >100 条几乎不可能;到上限即停。
 ipt_del_all() {
     local cmd=$1
     shift
-    while $cmd "$@" 2>/dev/null; do :; done
+    local i=0
+    while $cmd "$@" 2>/dev/null; do
+        i=$((i + 1))
+        [ "$i" -ge 100 ] && break
+    done
     return 0
 }
 

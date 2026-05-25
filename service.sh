@@ -289,8 +289,15 @@ if [ ! -s "$LOCAL_ADMIN_SECRET" ]; then
     if [ -r /dev/urandom ]; then
         SECRET_VAL=$(head -c 32 /dev/urandom 2>/dev/null | od -An -tx1 | tr -d ' \n' 2>/dev/null)
     fi
-    if [ -z "$SECRET_VAL" ]; then
-        SECRET_VAL=$(echo "$(date +%s%N)$$$RANDOM$RANDOM" | sha256sum 2>/dev/null | awk '{print $1}')
+    # v5.8.8 (audit): urandom 不可读时,不再退到 date+$$+RANDOM 弱熵(mksh RANDOM 仅
+    # 15bit,本机低信任 App 可暴力构造 X-HNC-Local-Admin)。改用内核 CSPRNG
+    # /proc/sys/kernel/random/uuid(get_random_bytes,每个 128bit)拼 3 个取 64 hex;
+    # 仍失败则放弃生成 —— middleware 对 loopback 写接口本就 fail-closed,宁可本机管理面
+    # 退回 cookie 鉴权,也不下发弱 secret。
+    if [ -z "$SECRET_VAL" ] && [ -r /proc/sys/kernel/random/uuid ]; then
+        SECRET_VAL=$( { cat /proc/sys/kernel/random/uuid /proc/sys/kernel/random/uuid \
+                            /proc/sys/kernel/random/uuid 2>/dev/null; } | tr -dc '0-9a-f' | cut -c1-64 )
+        [ "${#SECRET_VAL}" -eq 64 ] || SECRET_VAL=""
     fi
     if [ -n "$SECRET_VAL" ]; then
         # rc30.12.16 P2-1: umask 改用子 shell 隔离, 避免污染后续脚本.
@@ -300,7 +307,7 @@ if [ ! -s "$LOCAL_ADMIN_SECRET" ]; then
         chown root:root "$LOCAL_ADMIN_SECRET" 2>/dev/null
         log "rc30.12.14: generated local admin secret ($LOCAL_ADMIN_SECRET, mode 0600)"
     else
-        log "rc30.12.14: WARN failed to generate local_admin.secret (falling back to legacy loopback bypass)"
+        log "v5.8.8: WARN no CSPRNG available, NOT generating local_admin.secret — loopback write/sensitive paths stay fail-closed (cookie required), no weak-entropy fallback"
     fi
 fi
 
