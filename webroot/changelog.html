@@ -1,3 +1,13 @@
+<!-- v5.8.4 -->
+<div class="cl-section">
+  <div class="cl-title">🩹 v5.8.4: 设备列表写盘更稳,坏数据不再污染下游 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>避免半截坏数据</b>: hotspotd 写设备列表(devices.json)时,以前若遇磁盘满/IO 错误会把写了一半的坏文件直接覆盖上去,导致界面、限速、规则恢复等全部拿到坏数据、严重时卡住。现在写完先检查是否出错,出错就保留上一份可用的,不覆盖。</li>
+    <li><b>清理重复代码</b>: 删掉一份早已分叉的 hotspotd 旧副本(正是它导致上面这个修复"改了一份、漏了实际用的那份")。</li>
+    <li>说明: 含 hotspotd 改动;配合上一版"CI 重编 hotspotd",这次修复合并后即可进包。</li>
+  </ul>
+</div>
+
 <!-- v5.8.3 -->
 <div class="cl-section">
   <div class="cl-title">🏗️ v5.8.3: 根治"修了却没进包" — CI 现在重新编译 hotspotd <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

@@ -633,8 +633,20 @@ static void write_json(void) {
         first = 0;
     }
     fprintf(f, "}");
-    fflush(f);
+    /* P2-1 (audit) / rc30.13.1 fix: 必须在 rename 前检查 fwrite 错误.
+     * 之前只 fflush 不看 ferror, 磁盘满 / fs 错误时上面 fprintf 默默失败,
+     * 然后 rename 会把一个 "{\"aa:bb:..\":{ ip:\"1.2." 这种半截 JSON 推到
+     * devices.json, 所有下游 (WebUI / apply_device_rule / restore_rules /
+     * tc_manager 抽 IP) 拿到坏 JSON. 严重时整个 watchdog 链 stall.
+     * 改成: 写完发现错误就 abandon tmp, 保留上一版本的 devices.json. */
+    int write_failed = (fflush(f) != 0) || ferror(f);
     fclose(f);
+    if (write_failed) {
+        hlog("ERROR: write_json: fwrite/fflush failed (errno=%d %s), keeping previous devices.json",
+             errno, strerror(errno));
+        unlink(devices_tmp);
+        return;
+    }
 
     if (rename(devices_tmp, DEVICES_JSON) != 0) {
         hlog("ERROR: rename failed: %s", strerror(errno));

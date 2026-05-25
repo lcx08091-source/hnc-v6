@@ -14,6 +14,17 @@
 
 ---
 
+## [5.8.4] - 2026-05-25
+
+### Fixed
+- **P2-1 hotspotd `write_json` 不查写错误**(`daemon/hotspotd/hotspotd.c`)。写 `devices.json` 时此前 `fflush(f); fclose(f);` 后直接 `rename` 上位,**两者返回值都不查**——磁盘满 / 文件系统错误时上面的 `fprintf` 会静默失败,然后把一个半截坏 JSON(如 `{"aa:bb:..":{ ip:"1.2.`)rename 成 `devices.json`,污染所有下游(WebUI / `apply_device_rule` / `restore_rules` / `tc_manager` 抽 IP),严重时整条 watchdog 链 stall。改为 rename 前 `int write_failed = (fflush(f)!=0) || ferror(f);`,出错就 `unlink` 临时文件并 `return`,**保留上一版可用的 `devices.json`**。
+
+### Internals
+- **删除 `src/hotspotd/hotspotd.c` 死副本**。它是 `daemon/hotspotd/hotspotd.c` 的陈旧重复(无配套源码、编不了、`src/` 不随包、无任何引用),且正是这种"两份分叉、修一份漏一份"导致 P2-1 的修复(rc30.13.1)早已存在于 `src/` 副本却从没进过 CI 实际编译的 `daemon/` 版。删掉防止再次分叉。
+  - 说明:本修复在 hotspotd 里,得益于 v5.8.3 让 CI 真正从源码重编 hotspotd,这次改动合并 main 后即可进包(此前改 `daemon/hotspotd/*.c` 也不会进包)。host clang `-fsyntax-only` 通过;真实 arm64 构建在 GitHub Actions 验证。
+
+---
+
 ## [5.8.3] - 2026-05-25
 
 根治"陈旧 C 二进制"问题:让 CI 真正从源码重编 hotspotd,而不是发陈旧预编译 + 靠护栏提醒。
