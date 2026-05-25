@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc46, 2026-05-25)
+- **修流量统计页"一直不动" + 速率变假**(`bin/iptables_manager.sh` + `bin/stats_sample.sh`,**纯 shell 不用重编 CI**)。真机三轮诊断锁定的架构缺口。
+  - **后端怎么计流量**:iptables `HNC_STATS` 链给每台在线设备各一对 `-s/-d RETURN` 规则,内核在其上累计字节;hotspotd 每 5s 读(`stats_all`)写 `devices.json`,`stats_sample.sh` 每 ~60s 读累计追加到 `stats_raw.jsonl`,前端按增量画图。**整套依赖那对 per-IP 计数规则存在。**
+  - **根因(谁维护那对规则的缺口)**:① hotspotd **只读不写**(`hotspotd.c` 仅 `execlp stats_all`);② `mark_device` **只在限速时**才加规则;③ `ensure_stats`(唯一给未限速设备维护规则的)**只在 `device_detect.sh` 的 shell 扫描循环里**,而该循环在 hotspotd 模式下**从不运行**——`device_detect.sh` 起了 hotspotd 就 `return 0` 退出。于是 watchdog 的 `iptables_manager.sh init` 每次 `-F HNC_STATS`(清累计 + 删规则)后,**没人重建** → 计数冻结(统计页不动、`stats_all` 空 → hotspotd 写 `rx_bytes=0` 连带速率算 0)、HNC 累计远低于安卓 tether 实际值。
+  - **现场铁证**:诊断时 `HNC_STATS` 链为空(仅表头),而几分钟前 `stats_all` 还有数据 → 链刚被 flush 且无人重建;`stats_daily` 历史有 GB 级真实数据(链路本身没坏)。
+  - **修法两步**:① `init_chains` **不再 `-F HNC_STATS`** —— 链已存在只补 `FORWARD -j HNC_STATS` 跳转、保留累计与规则,watchdog 重建不再清零。② 新增 `iptables_manager.sh ensure_stats_online` 命令(读 `devices.json` 在线 IP,**在线缺规则就幂等 `-C`/`-A` 补、不删不重置累计;链里已离线的 IP 删掉防增长**;`devices.json` 解析不出在线 IP 时**只补不删**做护栏,防半写瞬间误清空),由 `stats_sample.sh` 每周期开头调一次 → hotspotd 模式下也有人维护规则、空链/新设备自愈。同时治好"统计不动"和"速率变 0"。
+  - 纯 shell。`sh -n`(两个脚本)+ IP 提取/在线离线对齐逻辑冒烟(devices.json→在线集、`iptables -S`→现存集、离线判定)全过。版本 rc45 → rc46(570146)。
+
 ### Fixed (v5.7.0-rc45, 2026-05-25)
 - **修上下行速率"假" + hero 与卡片对不上**(`daemon/hnc_httpd/server.go` + `main.go`)。真机反馈:设备页顶部 hero「上下行」长期 0.00,但某台设备卡片显示 0.85 MB/s,整体速率"发飘"。
   - **根因(代码缺陷,与设备无关)**:`/api/live`(喂 hero)与 `/api/devices`(喂卡片)各自独立调 `buildDevicesPayload`,**在请求里**用 `rx_bytes - lastSamples[mac]` 差分算速率,**算完又覆盖同一个 `s.lastSamples`**。前端两端点轮询时间错开 → 从快照 map 的角度看样本以 ~1.2s 间隔到达 → `dt` 常 <2 → 频繁走 dt<2 分支返回缓存值,一旦缓存残留 init 时的 0,hero 就长期 0 而卡片偶尔算出真值 → 两者对不上。

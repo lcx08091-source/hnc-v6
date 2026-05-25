@@ -33,6 +33,18 @@ log() {
 mkdir -p "$(dirname "$RAW_FILE")" 2>/dev/null
 
 # ═══════════════════════════════════════════════════════════════
+# 0. 对齐 HNC_STATS 的 per-IP 计数规则(rc46)
+# ═══════════════════════════════════════════════════════════════
+# hotspotd 模式下 device_detect 扫描循环不跑、无人调 ensure_stats 维护 HNC_STATS
+# 的 per-IP RETURN 计数规则 → 链一旦被 init flush(或新设备接入)就没人重建 →
+# 计数冻结(统计页"一直不动" + rx_bytes 归 0 连带速率变假)。这里每周期先对齐:
+# 在线设备缺规则就幂等补、已离线的删(保累计、防链增长)。让计数自愈。
+# 测试模式(STATS_ALL_CMD 被覆盖)跳过,避免动真 iptables。
+if [ -z "$HNC_TEST_MODE" ] && [ -x "$IPT_MGR" ]; then
+    sh "$IPT_MGR" ensure_stats_online >/dev/null 2>&1 || true
+fi
+
+# ═══════════════════════════════════════════════════════════════
 # 1. 从 iptables 拿当前累计 stats(IP -> rx,tx)
 # ═══════════════════════════════════════════════════════════════
 # stats_all 输出格式: "<ip> <rx_bytes> <tx_bytes>",每行一台

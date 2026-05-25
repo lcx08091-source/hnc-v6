@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc46 -->
+<div class="cl-section">
+  <div class="cl-title">📊 v5.7.0-rc46: 修流量统计页"一直不动"、上下行变 0 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>统计不再冻结</b>: 之前流量统计页会卡住不动、上下行速度变 0,但安卓系统自己却显示用了几百 MB。真机诊断查到:计流量靠 iptables 里给每台设备的一对计数规则,而新版用 hotspotd 后,负责维护这些规则的旧扫描循环不再运行;watchdog 每次重建网络规则又会把计数清零——清完没人补回来,计数就彻底停了。</li>
+    <li><b>两处修复</b>: ① 重建规则时不再清零流量计数(累计值跨重建保留);② 采样器每轮自动把计数规则和当前在线设备对齐(缺的补、走了的清),无论谁在扫描都有人维护。统计和速率一起恢复。</li>
+    <li>说明: <b>纯脚本修复,不用重新编译</b>;刷新版本后,有流量时等一两分钟统计就会开始增长。(历史数据本来就在,切「本周/全部」能看到。)</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc45 -->
 <div class="cl-section">
   <div class="cl-title">⚡ v5.7.0-rc45: 修上下行速率"假"、顶部速率与设备卡片对不上 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

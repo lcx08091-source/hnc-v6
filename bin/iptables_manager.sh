@@ -194,8 +194,14 @@ init_chains() {
     _ensure_link mangle FORWARD HNC_MARK 1
 
     # ── HNC_STATS (mangle/FORWARD): 流量字节数 (v4 only) ──────
-    $IPT -t mangle -N HNC_STATS 2>/dev/null
-    $IPT -t mangle -F HNC_STATS 2>/dev/null
+    # HNC_STATS 是【累计计数】链, 跟其他规则链不同 —— re-init 时【绝不能 -F】:
+    # watchdog full_restore / do_full_init 会反复调 init, 每次 flush 都把 per-device
+    # 累计字节清零、连 per-IP RETURN 规则一起删. 而 hotspotd 模式下 device_detect
+    # 扫描循环不跑(device_detect.sh 起了 hotspotd 就 return 0 退出)、无人 ensure_stats
+    # 重加规则 → 计数彻底冻结(流量统计页"一直不动"、rx_bytes 归 0 连带速率假).
+    # 故仅在链不存在时新建空链; 已存在则保留累计与规则. per-IP 规则的补/删由
+    # ensure_stats_online 周期对齐(stats_sample 每轮调).
+    $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1 || $IPT -t mangle -N HNC_STATS 2>/dev/null
     $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -I FORWARD 2 -j HNC_STATS
 
@@ -549,6 +555,48 @@ ensure_stats() {
     $IPT -t mangle -A HNC_STATS -d "$ip" -j RETURN 2>/dev/null || return 1
 }
 
+# ensure_stats_online — 让 HNC_STATS 的 per-IP 计数规则与当前在线设备【对齐】:
+#   - 在线 IP 缺规则 → 幂等补上(先 -C 检测、缺了才 -A,绝不删/重加,保住累计)
+#   - 链里有但已不在线的 IP → 删掉(兜底防链无限增长; 该设备在线时已被采样过)
+#
+# 为什么需要: hotspotd 模式下 device_detect 扫描循环不跑 → 没人调 ensure_stats
+# 维护计数规则; 且 init 改为不再 -F HNC_STATS 后, 离线残留也需要这里兜底清理。
+# 由 stats_sample.sh 每周期(~60s)调一次。单线程无并发, -C/-A 安全。
+#
+# 安全护栏: devices.json 缺失/解析不出任何在线 IP 时【只补不删】(空集不当作
+# "全部离线"去清空整条链, 防 devices.json 半写/损坏瞬间误删所有计数)。
+ensure_stats_online() {
+    local devices_file="$HNC_DIR/data/devices.json"
+    # 确保链 + FORWARD 跳转存在(不 flush)
+    $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1 || $IPT -t mangle -N HNC_STATS 2>/dev/null
+    $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null || $IPT -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null
+    [ -f "$devices_file" ] || return 0
+
+    local online_tmp="$HNC_DIR/run/.stats_online.$$"
+    grep -oE '"ip"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' "$devices_file" 2>/dev/null \
+        | sed -nE 's/.*"([0-9.]+)".*/\1/p' | sort -u > "$online_tmp"
+
+    # 在线 IP 缺则补(幂等, 保累计)
+    while IFS= read -r ip; do
+        [ -z "$ip" ] && continue
+        $IPT -t mangle -C HNC_STATS -s "$ip" -j RETURN 2>/dev/null || $IPT -t mangle -A HNC_STATS -s "$ip" -j RETURN 2>/dev/null
+        $IPT -t mangle -C HNC_STATS -d "$ip" -j RETURN 2>/dev/null || $IPT -t mangle -A HNC_STATS -d "$ip" -j RETURN 2>/dev/null
+    done < "$online_tmp"
+
+    # 已离线的 IP 删掉(防链增长)。空集护栏: online_tmp 为空则只补不删。
+    if [ -s "$online_tmp" ]; then
+        $IPT -t mangle -S HNC_STATS 2>/dev/null \
+            | awk '/-j RETURN/{for(i=1;i<=NF;i++) if($i=="-s"||$i=="-d"){t=$(i+1); sub(/\/32$/,"",t); print t}}' \
+            | sort -u | while IFS= read -r ip; do
+            [ -z "$ip" ] && continue
+            grep -qxF "$ip" "$online_tmp" 2>/dev/null && continue
+            ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
+            ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
+        done
+    fi
+    rm -f "$online_tmp" 2>/dev/null
+}
+
 stats_all() {
     $IPT -t mangle -L HNC_STATS -nvx 2>/dev/null | awk '
     # $IPT -nvx 数据行:
@@ -662,6 +710,7 @@ case "$1" in
     # ═══ 只读 / 只改 counter,不加锁 ═══════════════════════════
     stats)             get_stats "$2" ;;
     ensure_stats)      ensure_stats "$2" ;;
+    ensure_stats_online) ensure_stats_online ;;
     stats_all)         stats_all ;;
     reset_counters)    reset_counters ;;
     *)
