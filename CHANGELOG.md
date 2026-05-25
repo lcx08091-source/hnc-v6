@@ -18,6 +18,14 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc45, 2026-05-25)
+- **修上下行速率"假" + hero 与卡片对不上**(`daemon/hnc_httpd/server.go` + `main.go`)。真机反馈:设备页顶部 hero「上下行」长期 0.00,但某台设备卡片显示 0.85 MB/s,整体速率"发飘"。
+  - **根因(代码缺陷,与设备无关)**:`/api/live`(喂 hero)与 `/api/devices`(喂卡片)各自独立调 `buildDevicesPayload`,**在请求里**用 `rx_bytes - lastSamples[mac]` 差分算速率,**算完又覆盖同一个 `s.lastSamples`**。前端两端点轮询时间错开 → 从快照 map 的角度看样本以 ~1.2s 间隔到达 → `dt` 常 <2 → 频繁走 dt<2 分支返回缓存值,一旦缓存残留 init 时的 0,hero 就长期 0 而卡片偶尔算出真值 → 两者对不上。
+  - **改法**:抽出单一后台采样器 **`RateLoop`**(每 2s),读 `devices.json` 算每台 `rx_bps/tx_bps` 发布到新的 `s.rates` 快照;`buildDevicesPayload` 改成**只读** `s.rates`(拷一份不持锁遍历),不再在请求里计算、不再覆盖 `lastSamples`。`/api/devices` 与 `/api/live` 读**同一份** → hero 与卡片永远一致、`dt` 稳定。
+  - **抗"掉零"**:`hotspotd` 最快 ~5s 才刷一次 `devices.json` 的字节数(`hotspotd.c` `g_last_stats_update<5 return`),若每 2s 硬差分会在字节没动的 tick 闪 0。故基线(`lastSamples[mac]`)**只在字节真变化时前移**、`ts` 记上次变化时刻 → `dt` 反映真实流量间隔;字节没动时沿用上次速率,连续 `rateIdleZeroSec`(10s)没增长才衰减归零。计数器复位(`full_restore -F HNC_STATS`)的负 delta 仍夹到 0。
+  - **顺带澄清(流量统计页空白,本版未改)**:界面的 `source=旧统计` **不是出错回退** —— `legacy` 是默认数据源名(`index.html` `<option value="legacy">旧统计</option>`),`shadow` 才是 v5.2 迁移对比源。今日 0.00 GB + 空 24h 图是因为 `aggregateToday` 需今日同一 MAC ≥2 个累计样本,而 `stats_sample.sh` **只被 Go `hnc_watchdog` 在 `stateActive` 时每 30s 调一次**;是否进 `active` / 采样是否提前退出需真机 `su` 诊断后再精确修(已与用户约定 B 先修、A 先诊断)。
+  - 含 `hnc_httpd`(Go)改动,**需 CI 重编**。`go vet ./...` + `go test ./...` + `android/arm64` 交叉编译全过。版本 rc44 → rc45(570145)。
+
 ### Added (v5.7.0-rc44, 2026-05-25)
 - **远程 SPA 用 SSE 替代轮询**(`daemon/hnc_httpd/api_events.go` 新增 + `server.go` + `web/app.js`)。**仅远程**:本机 WebUI 是 `file://` + `window.ksu.exec(curl)`,exec 一次性回调撑不起 EventSource 长连接 → 本机继续轮询(其帧率问题 rc41 已治)。
   - **服务端 `/api/events`**:`text/event-stream` 长连接,每 ~1.5s `stat` `devices.json`,mtime 变化才推 `event: changed`(+ 20s `: hb` 心跳保活)。连上立即推一次让 SPA 拉最新。**关键坑已处理**:httpsSrv 配了 `WriteTimeout: 60s`,会把 SSE 长连接每 60s 掐断 → 用 `http.NewResponseController(w).SetWriteDeadline(time.Time{})` 清写超时(middleware 不包裹 w,可直达底层 conn)。退出靠 `r.Context().Done()`(客户端断开)。

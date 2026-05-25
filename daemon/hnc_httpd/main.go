@@ -179,6 +179,7 @@ func main() {
 	go srv.pruneLoop(stopCh)
 	go srv.writeCounter.GCLoop(stopCh)
 	go srv.OffloadLoop(stopCh) // rc3.1.26 · 30s 刷 offload_status cache, 避免 apiOffloadStatus 同步跑 check_offload.sh (含 sleep 5)
+	go srv.RateLoop(stopCh)    // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
 
 	if haveRemote {
 		if *flagNoTLS {

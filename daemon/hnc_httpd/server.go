@@ -14,16 +14,18 @@ import (
 	"time"
 )
 
+// rateSample — RateLoop 私有的"上一帧"快照: 字节计数器变化时才前移, ts 记录
+// 上次有变化的时刻 (不是上次采样时刻). 用来跨过 hotspotd 5s 刷新间隔而不掉零.
 type rateSample struct {
 	rxBytes int64
 	txBytes int64
-	ts      int64 // unix seconds
-	// rc3.1.34 修 #5: 缓存上次成功计算的速率值. 高频请求 (两 client 同时刷, 或
-	// 前端 2.5s 轮询撞 stats_sample 30s 周期) 会让 dt<2, 之前直接返 0 → UI 速率
-	// 间歇掉零. 现在 dt<2 时保留 prev sample 不覆盖, 同时返回 lastRxBps/Bps,
-	// UI 看到的就是上轮的真实速率, 平滑过渡到下次正常差分.
-	lastRxBps int64
-	lastTxBps int64
+	ts      int64 // unix seconds, 上次字节有变化的时刻
+}
+
+// rateOut — RateLoop 发布给读端的当前速率 (bytes/sec).
+type rateOut struct {
+	rxBps int64
+	txBps int64
 }
 
 type server struct {
@@ -36,10 +38,12 @@ type server struct {
 	// This is deliberately coarse-grained: tc/iptables/json_set actions are short,
 	// and preserving operation order is safer than introducing parallel shell workers.
 	stateMu sync.RWMutex
-	// v5.1 · P1-1 修复: 速率差分. 每次 /api/devices 被调用时用当前
-	// rx_bytes/tx_bytes 和上一轮做差, 得到 rx_bps/tx_bps.
+	// 速率差分. 由单一后台 RateLoop 每 2s 更新, /api/devices 与 /api/live 都只读
+	// s.rates → hero 与卡片永远同源一致. 取代旧的"每个请求各自差分并覆盖 lastSamples"
+	// (两端点抢同一 map → dt 乱 → 速率发飘/掉零/hero 与卡片对不上).
 	rateMu      sync.Mutex
-	lastSamples map[string]rateSample
+	lastSamples map[string]rateSample // RateLoop 私有: 每台上一帧(字节变化时才前移)
+	rates       map[string]rateOut    // RateLoop 发布: 每台当前 bps, 读端只读不改
 	// rc3.1.26 · offload_status 缓存 (check_offload.sh 含 sleep 5, 避免每请求阻塞)
 	// OffloadLoop 每 30s 跑一次脚本更新 offloadCache, apiOffloadStatus 直接读
 	offloadMu    sync.RWMutex
@@ -54,6 +58,7 @@ func newServer(hncDir string) *server {
 		limiter:      NewRateLimiter(),
 		writeCounter: NewWriteCounter(),
 		lastSamples:  make(map[string]rateSample),
+		rates:        make(map[string]rateOut),
 	}
 }
 
@@ -368,12 +373,14 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	}
 
 	nowSec := float64(time.Now().Unix())
-	nowUnix := time.Now().Unix()
 
-	// v5.1 P1-1: 计算速率差分
-	// 锁一次, 读写快照 map 都在内部
+	// 速率: 读后台 RateLoop 发布的快照 (只读, 不在请求里计算). 拷一份避免持锁遍历.
 	s.rateMu.Lock()
-	newSamples := make(map[string]rateSample, len(devicesMap))
+	ratesSnap := make(map[string]rateOut, len(s.rates))
+	for k, v := range s.rates {
+		ratesSnap[k] = v
+	}
+	s.rateMu.Unlock()
 
 	// 合并
 	out := make([]map[string]interface{}, 0, len(devicesMap))
@@ -432,51 +439,11 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 			merged["dpi_apps"] = apps
 		}
 
-		// v5.1 P1-1: rx_bps / tx_bps 差分计算
-		// rc3.1.34 修 #5: 之前无条件 newSamples[mac]=now, 高频请求 (两 client 同时
-		// 刷 / 前端 2.5s 轮询碰巧错位) 让 dt<2, 走 "if dt>=2" else 分支 → rxBps=0,
-		// 然后覆盖 prev → 下一次还是 dt 小 → 速率永远 0. 修法: dt<2 时保留 prev
-		// sample 不覆盖, 返回缓存的 lastRxBps/Bps. 这样 UI 看到上轮真实速率而不是 0.
-		rxB, _ := toInt64(merged["rx_bytes"])
-		txB, _ := toInt64(merged["tx_bytes"])
-
-		var rxBps, txBps int64
-		if prev, ok := s.lastSamples[mac]; ok {
-			dt := nowUnix - prev.ts
-			if dt >= 2 && dt <= 120 {
-				// 正常差分窗口: 计算速率 + 推进 sample, 缓存最新结果
-				drx := rxB - prev.rxBytes
-				dtx := txB - prev.txBytes
-				if drx < 0 {
-					drx = 0
-				}
-				if dtx < 0 {
-					dtx = 0
-				}
-				rxBps = drx / dt
-				txBps = dtx / dt
-				newSamples[mac] = rateSample{
-					rxBytes:   rxB,
-					txBytes:   txB,
-					ts:        nowUnix,
-					lastRxBps: rxBps,
-					lastTxBps: txBps,
-				}
-			} else if dt < 2 {
-				// 高频请求: 保留 prev 不覆盖, 让下次 GET dt 足够大. 速率沿用上次缓存值.
-				newSamples[mac] = prev
-				rxBps = prev.lastRxBps
-				txBps = prev.lastTxBps
-			} else {
-				// dt > 120: 长间隔(stats_sample 中断 / counter reset), 重新初始化
-				newSamples[mac] = rateSample{rxBytes: rxB, txBytes: txB, ts: nowUnix}
-			}
-		} else {
-			// 首次见此 MAC: 初始化, 不计算速率
-			newSamples[mac] = rateSample{rxBytes: rxB, txBytes: txB, ts: nowUnix}
-		}
-		merged["rx_bps"] = rxBps
-		merged["tx_bps"] = txBps
+		// 速率: 只读 RateLoop 发布的快照 (按 macKey 小写索引). 单一采样源 →
+		// /api/devices 与 /api/live 永远一致.
+		r := ratesSnap[macKey]
+		merged["rx_bps"] = r.rxBps
+		merged["tx_bps"] = r.txBps
 
 		out = append(out, merged)
 	}
@@ -532,10 +499,6 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		appendRuleOnly(mac, nil)
 	}
 
-	// 更新快照 (只保留本轮真实出现的 MAC, 过期的自动丢弃)
-	s.lastSamples = newSamples
-	s.rateMu.Unlock()
-
 	// 按 ip 排序稳定前端显示 · rc3 N-9: 数值序 (避免 .10 < .2 字符串序)
 	ipSortKey := func(s string) [4]int {
 		var k [4]int
@@ -563,6 +526,100 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		"whitelist_mode": rulesMap["whitelist_mode"],
 		"remote_enabled": rulesMap["remote_enabled"],
 	}
+}
+
+// 速率采样周期. hotspotd 最快 ~5s 才刷一次 devices.json 的 rx_bytes (hotspotd.c
+// g_last_stats_update<5 return), 所以这里 2s 跑一轮但只在字节真变了才前移基线、重算速率;
+// rateIdleZeroSec 内字节没动则沿用上次速率 (跨过 5s 刷新间隔不掉零), 超过则衰减到 0.
+const (
+	rateLoopInterval = 2 * time.Second
+	rateIdleZeroSec  = 10 // 字节连续 10s 没增长 = 真空闲 → 速率归零
+)
+
+// RateLoop — 单一后台速率采样器. 每 2s 读 devices.json, 算每台 rx_bps/tx_bps 发布到
+// s.rates. /api/devices 与 /api/live 都只读 s.rates → hero 与卡片永远同源一致, 速率准.
+func (s *server) RateLoop(stop <-chan struct{}) {
+	s.sampleRatesOnce()
+	tick := time.NewTicker(rateLoopInterval)
+	defer tick.Stop()
+	for {
+		select {
+		case <-stop:
+			return
+		case <-tick.C:
+			s.sampleRatesOnce()
+		}
+	}
+}
+
+// sampleRatesOnce — 读一次 devices.json, 对每台用"上次字节有变化的帧"做差分.
+// 基线 (lastSamples[mac]) 只在字节变化时前移, ts 记录上次变化时刻 → dt 反映真实
+// 流量间隔而非采样间隔, 既不被 hotspotd 5s 刷新拖成 0, 又能在真空闲时衰减归零.
+func (s *server) sampleRatesOnce() {
+	raw, err := readJSON(filepath.Join(s.hncDir, "data", "devices.json"))
+	if err != nil {
+		return // devices.json 暂缺/半写: 跳过这轮, 保留上次 rates
+	}
+	devicesMap, _ := raw.(map[string]interface{})
+	if devicesMap == nil {
+		return
+	}
+	now := time.Now().Unix()
+
+	s.rateMu.Lock()
+	defer s.rateMu.Unlock()
+	newPrev := make(map[string]rateSample, len(devicesMap))
+	newRates := make(map[string]rateOut, len(devicesMap))
+	for mac, devRaw := range devicesMap {
+		dev, _ := devRaw.(map[string]interface{})
+		if dev == nil {
+			continue
+		}
+		macKey := strings.ToLower(mac)
+		rxB, _ := toInt64(dev["rx_bytes"])
+		txB, _ := toInt64(dev["tx_bytes"])
+
+		prev, hadPrev := s.lastSamples[macKey]
+		if !hadPrev {
+			// 首见此 MAC: 记基线, 速率 0 (要下一帧字节变化才有速率)
+			newPrev[macKey] = rateSample{rxBytes: rxB, txBytes: txB, ts: now}
+			newRates[macKey] = rateOut{}
+			continue
+		}
+		if rxB == prev.rxBytes && txB == prev.txBytes {
+			// 字节没动 (常遇到 hotspotd 还没刷): 基线不前移; 速率沿用上次, 超空闲阈值才归零
+			keep := s.rates[macKey]
+			if now-prev.ts >= rateIdleZeroSec {
+				keep = rateOut{}
+			}
+			newPrev[macKey] = prev
+			newRates[macKey] = keep
+			continue
+		}
+		// 字节变了: 用距"上次变化时刻"的 dt 算速率
+		dt := now - prev.ts
+		if dt < 1 {
+			dt = 1
+		}
+		var rxBps, txBps int64
+		if dt <= 120 {
+			drx := rxB - prev.rxBytes
+			dtx := txB - prev.txBytes
+			if drx < 0 { // 计数器复位 (full_restore -F HNC_STATS)
+				drx = 0
+			}
+			if dtx < 0 {
+				dtx = 0
+			}
+			rxBps = drx / dt
+			txBps = dtx / dt
+		}
+		// dt>120: 长间隔(stats 中断/复位), 当基线重置, 这轮速率 0
+		newPrev[macKey] = rateSample{rxBytes: rxB, txBytes: txB, ts: now}
+		newRates[macKey] = rateOut{rxBps: rxBps, txBps: txBps}
+	}
+	s.lastSamples = newPrev
+	s.rates = newRates
 }
 
 // dpiAppsByMAC reads dpi_state.json and returns, per lowercased client MAC, a
