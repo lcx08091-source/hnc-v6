@@ -199,7 +199,11 @@ typedef struct {
 #define ACTIVE_THRESHOLD_BYTES  (1ULL * 1024 * 1024)         /* 1 MB / 5s = active */
 #define ACTIVE_SAMPLE_INTERVAL  5                             /* 秒 */
 
-#define MAX_DISABLED_UPSTREAMS  8
+/* rc43 (P2-15): 8 → 32。原来 8 个上游同时被禁(多 SIM+VPN+5G+WiFi 齐探)时,
+ * 第 9 个会写进 BPF map 但本地集合丢记录 → status() 少报一项。真正的 disable/restore
+ * 都直接遍历 BPF limit_map、不依赖本地集合,所以这只是显示瑕疵;把上限抬到 32(=128B,
+ * 任何现实场景都用不满)实际消除溢出,比加 disable_global 兜底更简单、零递归风险。 */
+#define MAX_DISABLED_UPSTREAMS  32
 
 /* ══════════════════════════════════════════════════════════
  * Adapter 状态 (file-static, 与 hotspotd.c 风格一致)

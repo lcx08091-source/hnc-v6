@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc43, 2026-05-25)
+- **审查报告 · G3 offload C**(`daemon/hotspotd/`。**仅当内核 BPF tether offload 真生效才相关** —— start-softap+手动 NAT 多半用不到;无法在此环境真机验证,改动保守)。
+  - **P2-17 换网后限速窗口 60s → 瞬时**(`hotspotd.c:nl_open`/`nl_process`):netlink 订阅加 `RTMGRP_LINK`,iface 链路状态变化(WiFi↔4G 切换、VPN tun 上下线)立即 `hnc_scheduler_request_refresh()` 让调度器重探主上游。原来只靠 worker 的 60s 周期重探,换网瞬间限速对新上游最长失效 60s。`request_refresh` 非阻塞(仅 flag+signal)、有 `!initialized` 守卫(未启用 offload 时安全空操作)、netlink 循环已按类型过滤(不影响 NEIGH 设备发现);事件风暴被 worker 合并成一次重探。
+  - **P2-15 disabled_set 溢出**(`offload/adapter_bpf.c`):`MAX_DISABLED_UPSTREAMS` 8→32。原来 >8 个上游同时被禁时第 9 个写进 BPF map 但本地集合丢记录 → `status()` 少报(真正的 disable/restore 都直接遍历 BPF map、不依赖本地集合,故仅显示瑕疵)。抬上限到 32(128B)实际消除溢出,比加 disable_global 兜底更简单、零递归风险。
+  - **P2-16 暂缓**:`bpf_refresh_active` 的 `sleep(5)` 关停时不响应 → 关停最多慢 5s。`hnc_scheduler_shutdown` 先 join worker 再 shutdown adapter,要让 sleep 提前退出得加 adapter↔scheduler 的中断联动(改通用 vtable + 跨模块 abort),而本环境无法验证 offload,收益(≤5s 关停延迟、~8% 重启命中)不值这风险 → 留待将来真机确认 offload 生效后再议。
+  - 含 `hotspotd`(C)改动,**需 CI 重编**。`adapter_bpf.c` + `hotspotd.c` 主机 `-fsyntax-only` 通过。版本 rc42 → rc43(570143)。
+
 ### Added (v5.7.0-rc42, 2026-05-25)
 - **运行健康(SLA)面板 —— 从"修 bug 驱动"转"数据驱动维护"**(`daemon/hnc_httpd/api_sla.go` 新增 + `server.go` + `src/dpid/cmd/dpid/main.go` + `bin/watchdog.sh` + `webroot/index.html`)。之前 5 提案里唯一主动推荐项。
   - **只读 `/api/sla`**:聚合散落 `run/` 的**真实**累计计数 + 状态标记 → dpid 重启次数、近期崩溃环启动、dpid_guard 心跳年龄、watchdog 全量重建次数、tc 修复失败、上行失败、JSON 退回 legacy 次数、qos/uplink 降级标记。**诚实原则**(同 /api/metrics 的 instrumented:false 思路):没埋点的信号返回 `null`,前端显示「未统计」,绝不编造数字。

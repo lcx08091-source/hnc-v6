@@ -1,3 +1,13 @@
+<!-- v5.7.0-rc43 -->
+<div class="cl-section">
+  <div class="cl-title">🔀 v5.7.0-rc43: 换网即时重探 offload(仅硬件加速生效时相关) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>换网更快跟上</b>: 从 WiFi 切到 4G(或 VPN 上下线)时,以前限速对新网络最长 60 秒才跟上;现在监听链路变化、立即重探,几乎瞬时。</li>
+    <li><b>多上游不漏记</b>: 同时禁用的上游接口上限从 8 提到 32,极端多网场景下状态显示不再少报。</li>
+    <li>说明: 这些只在你设备真用了内核 BPF 流量卸载时才有意义(本模块自建 NAT 的本地热点通常用不到);含后端改动需重新编译。关停响应那项评估后暂缓(收益小、风险大)。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc42 -->
 <div class="cl-section">
   <div class="cl-title">📊 v5.7.0-rc42: 运行健康(SLA)面板 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

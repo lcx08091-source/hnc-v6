@@ -855,7 +855,10 @@ static int nl_open(void) {
 
     struct sockaddr_nl sa = {
         .nl_family = AF_NETLINK,
-        .nl_groups = RTMGRP_NEIGH,   /* 只监听邻居表变化 */
+        /* rc43 (P2-17): 加 RTMGRP_LINK —— 监听 iface 链路状态变化(WiFi↔4G 切换、
+         * VPN tun 上下线等),用来即时通知 offload 调度器重探主上游,把原来最坏 60s
+         * 的"换网后限速对新上游短暂失效"窗口缩到瞬时。NEIGH 仍用于设备表发现。 */
+        .nl_groups = RTMGRP_NEIGH | RTMGRP_LINK,
     };
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         hlog("ERROR: netlink bind: %s", strerror(errno));
@@ -892,6 +895,13 @@ static void nl_process(int fd) {
 
         struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
         for (; NLMSG_OK(nlh, (unsigned)n); nlh = NLMSG_NEXT(nlh, n)) {
+        /* rc43 (P2-17): 链路状态变化 → 即时请求 offload 调度器重探主上游。
+         * request_refresh 非阻塞(仅置 flag + cond_signal),未启用 offload 时是
+         * 安全空操作;事件风暴会被 worker 合并成一次重探。不影响下面 NEIGH 处理。 */
+        if (nlh->nlmsg_type == RTM_NEWLINK || nlh->nlmsg_type == RTM_DELLINK) {
+            hnc_scheduler_request_refresh();
+            continue;
+        }
         if (nlh->nlmsg_type != RTM_NEWNEIGH && nlh->nlmsg_type != RTM_DELNEIGH)
             continue;
 
