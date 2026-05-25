@@ -14,6 +14,16 @@
 
 ---
 
+## [5.8.5] - 2026-05-25
+
+### Fixed
+- **修 CI hotspotd 构建:补回缺失的预编译 `libelf.a` / `libz.a`**(`third_party_prebuilt/` + `.gitignore`)。v5.8.4 合并 main 后 CI 的 hotspotd 构建步骤在全新 checkout 上失败:`cp: cannot stat '.../third_party_prebuilt/libelf/libelf.a'`。根因:`.gitignore` 的 `*.a` 通配把这两个 hotspotd 链接必需的 Android arm64 预编译静态库挡在 git 之外——它们本地存在(原作者构建时有)、但从没被跟踪,fresh checkout(本地构建机、CI)都拿不到。`build_libs.sh` 复制它们时即失败。
+  - 从来源 `JiaHuann/libbpf-bootstrap-android`(BSD-3,与已入库的 libelf/libz 头同源)取 arm64 `libelf.a`(272K)/`libz.a`(142K),`git add -f` 入库,并加 `.gitignore` 例外 `!third_party_prebuilt/**/*.a`,从此随仓库分发。
+  - 已校验:两库均为 AArch64 归档,符号齐备(libelf 有 `elf_begin`/`gelf_getehdr`/`elf_getdata`,libz 有 `inflate`/`uncompress`/`zlibVersion`);zlib 头(1.3.2)与库(1.2.10)大版本一致、ABI 兼容。`third_party_prebuilt/` 不随模块 zip 发布(仅构建期)。
+  - 同时审计了 `build.sh`/`build_libs.sh` 引用的全部文件(SRCS、lsm/vmlinux.h、libbpf submodule、头文件),确认其余均已入库,不会再缺。
+
+---
+
 ## [5.8.4] - 2026-05-25
 
 ### Fixed

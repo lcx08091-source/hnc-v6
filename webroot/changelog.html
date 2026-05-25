@@ -1,3 +1,12 @@
+<!-- v5.8.5 -->
+<div class="cl-section">
+  <div class="cl-title">🔧 v5.8.5: 修构建 — 补回 hotspotd 编译缺的库 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>让 CI 真能编出 hotspotd</b>: 上一版让 CI 从源码重编 hotspotd,但有两个编译必需的预编译库(libelf/libz)因被忽略规则挡在仓库外、全新环境拿不到,导致 CI 构建失败。这次把它们补进仓库,构建恢复正常。</li>
+    <li>说明: 纯构建依赖修复,不改功能;只影响打包流程。</li>
+  </ul>
+</div>
+
 <!-- v5.8.4 -->
 <div class="cl-section">
   <div class="cl-title">🩹 v5.8.4: 设备列表写盘更稳,坏数据不再污染下游 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>

@@ -25,6 +25,14 @@ bin/mdns_resolve
 *.o
 *.a
 
+# v5.8.5 (audit): exceptions to the *.a rule above — these prebuilt Android
+# arm64 static libs (JiaHuann/libbpf-bootstrap-android, BSD-3) are REQUIRED by
+# the hotspotd CI build (build_libs.sh copies them); they must ship in git.
+# Previously the blanket *.a rule kept them out of the repo, so CI's fresh
+# checkout had no libelf.a/libz.a and the hotspotd build failed.
+!third_party_prebuilt/libelf/libelf.a
+!third_party_prebuilt/libz/libz.a
+
 # Backup and temp
 *.bak
 *.tmp
