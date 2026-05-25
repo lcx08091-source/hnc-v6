@@ -405,6 +405,23 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 		sw.SetMode(string(ModeOK), "", iface, pr.TLSReassembly, pr.OffloadHint)
 		_ = sw.Flush()
 
+		// rc40 (P2-20): once capture has run healthily for 5 min, clear the crash
+		// flag. clearCrashFlag was previously only reached on capture-open failure
+		// or clean exit, so a long-healthy dpid later SIGKILLed (OOM / iface flap /
+		// hard kill) left a stale flag → next start could falsely trip
+		// checkCrashLoop → ModeCrashLoop. attemptCtx cancels on rebind, so this
+		// only fires when the SAME capture attempt survived 5 min.
+		go func(ctxLocal context.Context) {
+			t := time.NewTimer(5 * time.Minute)
+			defer t.Stop()
+			select {
+			case <-ctxLocal.Done():
+			case <-t.C:
+				clearCrashFlag(cfg.RunDir)
+				log.Printf("capture healthy for 5m; cleared crash flag")
+			}
+		}(attemptCtx)
+
 		debug := cfg.LogLevel == "debug"
 		var debugBudget atomic.Int64
 		if debug {
@@ -596,9 +613,19 @@ func idleUntilSignal(sw *output.Writer) {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
+	// rc40 (P2-30): bound the crash-loop idle so we don't block the launcher's
+	// waitpid forever (which froze its own cooldown/self-heal). After 30min, exit
+	// so the launcher restarts us and we re-evaluate checkCrashLoop — the 60s
+	// crash window will have aged out, so a transient loop self-heals and a
+	// persistent one self-throttles to ~1 attempt / 30min instead of a tight loop.
+	deadline := time.NewTimer(30 * time.Minute)
+	defer deadline.Stop()
 	for {
 		select {
 		case <-sigCh:
+			return
+		case <-deadline.C:
+			log.Printf("crash-loop idle timeout (30m); exiting for launcher re-evaluation")
 			return
 		case <-tk.C:
 			_ = sw.Flush()

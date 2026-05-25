@@ -18,6 +18,13 @@
 
 正在开发中,合并到 v5.7.0 时清空。
 
+### Fixed (v5.7.0-rc40, 2026-05-25)
+- **第 4 份审查报告 · G2 dpid 稳定性**(弱网 / iface 抖动下的崩溃环处理):
+  - **P2-20 健康运行时不清 crashflag**(`src/dpid/cmd/dpid/main.go:runCapture`):`clearCrashFlag` 旧只在采集 open 失败转 blind / 干净退出时调;长时间健康运行后被 SIGKILL(OOM / iface flap / 硬杀)→ flag 残留 → 下次 `checkCrashLoop` 误判 → `ModeCrashLoop`。修:同一采集 attempt 健康跑满 5min 后起 goroutine 调 `clearCrashFlag`(attemptCtx 在 rebind 时取消,故只在真撑过 5min 才清)。
+  - **P2-30 crash-loop 空转无超时拖死 launcher**(`main.go:idleUntilSignal`,仅 ModeCrashLoop 用):旧永久阻塞 → launcher 的 `waitpid` 永不返回 → 它自己的 cooldown 自愈也卡住。修:加 30min 超时分支 return 退出,让 launcher 重启 dpid 重评估。crash 窗口 60s/3 次,30min 后旧时间戳早过期 → 瞬时抖动自愈;持续故障自降到 ~30min 一次而非紧打循环。
+  - **P2-18 dpid_guard 杀子进程过于激进**(`bin/hnc_dpid_guard.sh:kill_child`):SIGTERM 后只等 0.2s 就 SIGKILL,不够 dpid 清 BPF map / ringbuf / flush → pinned BPF 资源可能泄漏。修:轮询至多 ~2s(10×0.2s,提前退出)再 SIGKILL。
+  - 改 `dpid`(Go)+ shell,**需 CI 重编 dpid**。`go vet ./...` + `go test ./output/` + `android/arm64` 交叉编译 + `sh -n` 全过。版本 rc39 → rc40(570140)。
+
 ### Fixed (v5.7.0-rc39, 2026-05-25)
 - **第 4 份审查报告(rc32 .docx)新发现真问题 · G1 快赢**。该报告与前 3 份大量重叠(P1-1/1-2/1-3、P2-1/2-2 我已在 rc36-38 修);本组修它**新发现且确认为真**的项:
   - **P1-5 scheduler.c 16KB 静态 buffer 截断**(`daemon/hotspotd/scheduler.c:rebuild_from_rules`,唯一新 P1):`static char buf[16384]` + `fread(...sizeof-1)` 在 rules.json >16KB(~80+ 限速设备)时只读前 16KB → devices 对象 `}` 被截 → brace-count 找不到结尾 → `return 0` → `limited_macs` 空 → BPF tether offload 不被 disable → **被限速设备流量走 BPF fast-path 全速绕过 HTB,UI 显示限速实际满速,完全 silent**。修:`fseek`/`ftell` 取文件大小后 `malloc` 读全量(失败回退 65536),所有 return 路径 `free`。边界:仅当①设备多到 >16KB ②内核 BPF tether offload 生效 时触发;低成本作保险。

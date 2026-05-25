@@ -282,7 +282,14 @@ kill_child() {
     child=$(cat "$CHILD_PID_FILE" 2>/dev/null)
     if [ -n "$child" ] && kill -0 "$child" 2>/dev/null; then
         kill "$child" 2>/dev/null || true
-        sleep_s 0.2
+        # rc40 (P2-18): give dpid up to ~2s to flush state + tear down BPF/ringbuf
+        # cleanly before SIGKILL (old 0.2s was too short → pinned BPF resources
+        # could leak). Poll so we still return promptly when it exits early.
+        _i=0
+        while [ "$_i" -lt 10 ] && kill -0 "$child" 2>/dev/null; do
+            sleep_s 0.2
+            _i=$((_i + 1))
+        done
         kill -0 "$child" 2>/dev/null && kill -9 "$child" 2>/dev/null || true
     fi
     rm -f "$CHILD_PID_FILE" 2>/dev/null || true

@@ -1,3 +1,14 @@
+<!-- v5.7.0-rc40 -->
+<div class="cl-section">
+  <div class="cl-title">🛡️ v5.7.0-rc40: 后台 dpid 崩溃环处理更稳(第二批) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
+  <ul class="cl-list">
+    <li><b>不再误判"崩溃循环"</b>: dpid 健康跑满 5 分钟后清掉崩溃标记;以前长期正常但被系统强杀(内存紧张/网卡抖动)会留下旧标记,下次启动被误判成崩溃循环而罢工。</li>
+    <li><b>崩溃循环能自愈</b>: 进入"崩溃保护"空转后最多 30 分钟自动退出让守护重启重判;以前会永久卡住、连带把守护进程也拖住,自愈失效。瞬时问题会自动恢复,持续问题也降到每 30 分钟试一次而非疯狂重启。</li>
+    <li><b>关停更干净</b>: 重启 dpid 时多给最多 2 秒做清理(BPF/缓冲/日志),避免内核资源残留。</li>
+    <li>说明: 改后台识别守护,需重新编译;刷新版本后生效。</li>
+  </ul>
+</div>
+
 <!-- v5.7.0-rc39 -->
 <div class="cl-section">
   <div class="cl-title">🛠️ v5.7.0-rc39: 第 4 份审查报告新发现修复(第一批) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-25</span></div>
