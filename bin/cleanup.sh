@@ -69,7 +69,7 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
 # 仍活的升级 SIGKILL. SIGKILL 内核直接回收, hotspotd 没机会跑 mdns_worker stop,
 # 但反正我们要 cleanup 全清, 子进程清理路径跑完跑半都无关紧要.
 PIDS_TO_WAIT=""
-for pidfile in watchdog dpid_guard dpid.monitor dpid.child dpid hotspotd detect api hotspot netmon httpd; do
+for pidfile in sentinel watchdog dpid_guard dpid.monitor dpid.child dpid hotspotd detect api hotspot netmon httpd; do
     PID=$(cat "$RUN/${pidfile}.pid" 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         kill "$PID" 2>/dev/null
@@ -113,6 +113,11 @@ done
 # rc30.0+ : 加入 hnc_dpid_supervisor 和 hnc_watchdog (Go 二进制) 的清理.
 for proc in bin/hnc_dpid_supervisor bin/hnc_dpid_guard.sh bin/hnc_watchdog bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
     pkill -f "$proc" 2>/dev/null && log "pkill $proc"
+done
+# watchdogfix-v6.1: also stop stale service.sh sentinel shells; otherwise
+# cleanup/restart can kill watchdog and an old sentinel immediately recreates it.
+for svcpat in "hotspot_network_control/service.sh" "/data/adb/hnc/service.sh"; do
+    pkill -f "$svcpat" 2>/dev/null && log "pkill service/sentinel $svcpat"
 done
 fi  # end MODE=all|restart 的进程清理分支
 

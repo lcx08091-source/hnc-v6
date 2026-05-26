@@ -99,10 +99,119 @@ prune_duplicate_hotspotd() {
     done
 }
 
-find_live_watchdog_pid() {
-    # rc30.1: match both Go binary and shell fallback
-    ps -ef 2>/dev/null | awk '$0 ~ /\/data\/local\/hnc\/bin\/(hnc_watchdog|watchdog\.sh)/ && $3==1 {print $2; exit}'
+# watchdogfix-v6.1: process matching must not depend on ps showing full paths.
+# On ColorOS/SukiSU, ps may show only basename ("hnc_watchdog"/"hnc_launcher"),
+# while cmdline/proc still belongs to HNC. The old full-path grep made sentinel
+# think watchdog/launcher were dead and relaunch new copies every 30s.
+is_pid_alive() {
+    [ -n "$1" ] && kill -0 "$1" 2>/dev/null
 }
+
+process_by_name_alive() {
+    local n
+    n="$1"
+    [ -z "$n" ] && return 1
+    pidof "$n" >/dev/null 2>&1 && return 0
+    ps -ef 2>/dev/null | awk -v n="$n" '
+        $0 !~ /awk/ && $0 !~ /grep/ {
+            if ($0 ~ ("(^|[ /])" n "([[:space:]]|$)")) found=1
+        }
+        END { exit found ? 0 : 1 }
+    '
+}
+
+list_watchdog_pids() {
+    (
+        pidof hnc_watchdog 2>/dev/null | tr ' ' '\n'
+        ps -ef 2>/dev/null | awk '
+            $0 !~ /awk/ && $0 !~ /grep/ && $0 ~ /(^|[ /])(hnc_watchdog|watchdog\.sh)([[:space:]]|$)/ { print $2 }
+        '
+    ) | awk 'NF && !seen[$1]++ { print $1 }'
+}
+
+find_live_watchdog_pid() {
+    local p
+    for p in $(list_watchdog_pids); do
+        if is_pid_alive "$p"; then
+            echo "$p"
+            return 0
+        fi
+    done
+    return 1
+}
+
+prune_duplicate_watchdogs() {
+    local reason pids count keep p
+    reason="$1"
+    pids="$(list_watchdog_pids | tr '\n' ' ')"
+    count=$(echo "$pids" | wc -w | tr -d ' ')
+    [ -z "$count" ] && count=0
+    [ "$count" -le 1 ] && return 0
+
+    keep=$(cat "$RUN/watchdog.pid" 2>/dev/null)
+    case " $pids " in
+        *" $keep "*) ;;
+        *) keep="" ;;
+    esac
+    if [ -z "$keep" ]; then
+        keep=$(echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -n | head -1)
+    fi
+    [ -n "$keep" ] && echo "$keep" > "$RUN/watchdog.pid" 2>/dev/null || true
+    log "watchdogfix-v6.1: duplicate watchdogs detected count=$count keep=$keep reason=$reason"
+
+    for p in $pids; do
+        [ -z "$p" ] && continue
+        [ "$p" = "$keep" ] && continue
+        kill "$p" 2>/dev/null || true
+    done
+    sleep 0.3 2>/dev/null || sleep 1
+    for p in $pids; do
+        [ -z "$p" ] && continue
+        [ "$p" = "$keep" ] && continue
+        if is_pid_alive "$p"; then
+            kill -9 "$p" 2>/dev/null || true
+            log "watchdogfix-v6.1: KILL duplicate hnc_watchdog pid=$p keep=$keep"
+        fi
+    done
+}
+
+prune_stale_service_sentinels() {
+    local self pids p
+    self=$$
+    pids=$(ps -ef 2>/dev/null | awk -v self="$self" '
+        $0 !~ /awk/ && $0 ~ /(hotspot_network_control|\/data\/adb\/hnc)\/service\.sh/ && $2 != self { print $2 }
+    ')
+    [ -z "$pids" ] && return 0
+    log "watchdogfix-v6.1: stopping stale service/sentinel pids: $pids"
+    for p in $pids; do
+        [ -n "$p" ] && kill "$p" 2>/dev/null || true
+    done
+    sleep 0.3 2>/dev/null || sleep 1
+    for p in $pids; do
+        if is_pid_alive "$p"; then
+            kill -9 "$p" 2>/dev/null || true
+            log "watchdogfix-v6.1: KILL stale service/sentinel pid=$p"
+        fi
+    done
+    rm -f "$RUN/sentinel.pid" 2>/dev/null || true
+}
+
+launcher_alive_count() {
+    local c
+    c=0
+    process_by_name_alive hnc_launcher && c=$((c + 1))
+    process_by_name_alive hnc_dpid_supervisor && c=$((c + 1))
+    process_by_name_alive hnc_dpid_guard.sh && c=$((c + 1))
+    echo "$c"
+}
+
+dpid_alive() {
+    process_by_name_alive hnc_dpid
+}
+
+# Kill old buggy sentinel/service shells before this fixed service starts supervisors.
+# Old sentinels can keep spawning watchdogs while the new service is starting.
+prune_stale_service_sentinels
 
 log "=== HNC Service Starting ==="
 # hotfix16.2: best-effort repair before reading rules.json in late_start.
@@ -399,6 +508,7 @@ fi
 
 # ─── 启动 Watchdog ──────────────────────────────────────────
 log "Starting watchdog..."
+prune_duplicate_watchdogs "service-prestart"
 WPID=$(cat "$RUN/watchdog.pid" 2>/dev/null)
 if [ -n "$WPID" ] && kill -0 "$WPID" 2>/dev/null; then
     log "watchdog already running (PID=$WPID), skip duplicate launch"
@@ -782,8 +892,7 @@ fi
         # DPID_BIN 但又把它认作 launcher, 状态机错乱.
         if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
             # 1a. launcher 模式 - 检查 launcher 进程 (C / shell guard / Go supervisor 任一)
-            LAUNCHER_ALIVE=$(ps -ef 2>/dev/null | grep -v grep \
-                | grep -cE '/data/local/hnc/bin/(hnc_launcher|hnc_dpid_supervisor)|hnc_dpid_guard\.sh')
+            LAUNCHER_ALIVE=$(launcher_alive_count)
             if [ "$LAUNCHER_ALIVE" = "0" ]; then
                 # rc30.12.28: 检测 launcher 反复启动失败 (TLS abort 等). 如果 dpid_guard.log
                 # 最近 60 秒出现 "TLS segment is underaligned" 或类似 abort, 不要再拉 launcher,
@@ -797,9 +906,7 @@ fi
                 fi
                 if [ "$LAUNCHER_BROKEN" = "1" ]; then
                     # launcher 坏了, 直接拉 dpid (绕过 launcher)
-                    DPID_ALIVE=$(ps -ef 2>/dev/null | grep -v grep \
-                        | grep -cE '/data/local/hnc/bin/hnc_dpid( |$)')
-                    if [ "$DPID_ALIVE" = "0" ]; then
+                    if ! dpid_alive; then
                         log "sentinel: launcher broken (abort detected), fallback to direct dpid"
                         nohup "$DPID_BIN" -config "$DPID_CONFIG" >> "$HNC_DIR/logs/dpid.log" 2>&1 &
                         echo $! > "$DPID_PID" 2>/dev/null || true
@@ -816,9 +923,7 @@ fi
             fi
         else
             # 1b. direct 模式 - 检查 dpid 进程
-            DPID_ALIVE=$(ps -ef 2>/dev/null | grep -v grep \
-                | grep -cE '/data/local/hnc/bin/hnc_dpid( |$)')
-            if [ "$DPID_ALIVE" = "0" ]; then
+            if ! dpid_alive; then
                 log "sentinel: hnc_dpid not running (direct mode), relaunching"
                 nohup "$DPID_BIN" -config "$DPID_CONFIG" >> "$HNC_DIR/logs/dpid.log" 2>&1 &
                 echo $! > "$DPID_PID" 2>/dev/null || true
@@ -830,8 +935,8 @@ fi
         # rc30.12.29 (P1.7): watchdog 是 hotspotd / httpd / dpid (常规路径) 的 supervisor,
         # 它死了 sentinel 必须兜底重启. 重启后 watchdog 自己会拉起 hotspotd / httpd,
         # sentinel 不再直接管这两个 (之前的重复检查已删, 避免双 supervisor 并发拉起).
-        if ! ps -ef 2>/dev/null | grep -E '/data/local/hnc/bin/hnc_watchdog' \
-             | grep -v grep > /dev/null; then
+        prune_duplicate_watchdogs "sentinel-loop"
+        if ! find_live_watchdog_pid >/dev/null 2>&1; then
             log "sentinel: hnc_watchdog not running, relaunching"
             nohup "$HNC_DIR/bin/hnc_watchdog" \
                 >> "$HNC_DIR/logs/watchdog.log" 2>&1 &
@@ -846,4 +951,5 @@ fi
         sleep 30
     done
 ) >> "$HNC_DIR/logs/sentinel.log" 2>&1 &
-log "sentinel started (PID=$!, dpid_launcher=$DPID_LAUNCHER, scope=dpid+watchdog)"
+echo $! > "$RUN/sentinel.pid" 2>/dev/null || true
+log "sentinel started (PID=$(cat "$RUN/sentinel.pid" 2>/dev/null), dpid_launcher=$DPID_LAUNCHER, scope=dpid+watchdog, watchdogfix-v6.1)"
