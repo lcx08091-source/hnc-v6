@@ -1,0 +1,2276 @@
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index 1d39866..aa134a8 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -14,6 +14,22 @@
+ 
+ ---
+ 
++## [5.8.8-portal-0.1.4] - 2026-06-11
++
++### Added
++- Native Portal module: public user `/portal` and `/api/portal/*` APIs; admin `/api/portal/admin/*` keeps HNC token auth.
++- `bin/portal_manager.sh`: owns only `HNC_PORTAL_*`, redirects HTTP 80 only, never hijacks HTTPS 443, and prints pure JSON for `status`.
++- Portal admin panel with device name, IP, MAC, vendor, online/auth state, allow, revoke, summon, reply, and cleanup actions.
++
++### Fixed
++- Portal sessions now bind IP+MAC. Expired sessions are scanned every 30 seconds, removed, revoked through `portal_manager.sh`, and audited without crashing `hnc_httpd` on revoke failure.
++- Chat rate limits: one message per IP per 3 seconds, 100 per hour, 500 runes per message.
++
++### Internals
++- Portal state lives under `/data/local/hnc/data|run|logs` as `portal_*` files. Device fusion reuses HNC device data first, then falls back to `/proc/net/arp` and `ip neigh`.
++
++---
++
+ ## [5.8.8] - 2026-05-25
+ 
+ 审查报告剩余真问题一次性收尾(8 项,跨 Go/C/shell)。误报项(IPv6 自归因 key、热路径 os.Stat、IPv6 分片越界、hnc_json.c malloc、WebUI XSS)经核实不改。
+diff --git a/bin/artifact_sanity_check.sh b/bin/artifact_sanity_check.sh
+index af8e0e0..57176c7 100644
+--- a/bin/artifact_sanity_check.sh
++++ b/bin/artifact_sanity_check.sh
+@@ -51,7 +51,7 @@ fi
+ [ "$NESTED_COUNT" -gt 0 ] && fail "artifact contains nested ZIP(s); use the inner module ZIP or fix packaging: $(printf '%s' "$NESTED_ZIPS" | tr '\n' ' ')" || ok "artifact has no nested ZIP"
+ grep -E '\.rej$|\.orig$' "$TMP.entries" >/dev/null && fail "artifact contains .rej/.orig patch residue" || ok "artifact has no .rej/.orig residue"
+ grep -E '(^|/)(\.ssh|id_rsa|id_ed25519|.*_ed25519|.*_rsa|.*\.pem)$' "$TMP.entries" >/dev/null && fail "artifact may contain private key/secret files" || ok "artifact has no obvious private key/secret files"
+-for req in webroot/index.html webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe; do
++for req in webroot/index.html webroot/json-health.html webroot/portal.html webroot/portal.js webroot/portal.css bin/portal_manager.sh bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe; do
+   grep -x "$req" "$TMP.entries" >/dev/null && ok "required file exists: $req" || fail "required file missing at ZIP root path: $req"
+ done
+ 
+@@ -109,6 +109,8 @@ if grep -x 'daemon/hnc_httpd/hnc_httpd' "$TMP.entries" >/dev/null; then
+     if command -v strings >/dev/null 2>&1; then
+       strings "$TMP.extract/hnc_httpd" > "$TMP.httpd.strings" 2>/dev/null
+       [ -n "$VER" ] && { grep -F "$VER" "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd embeds module version $VER" || fail "hnc_httpd does not embed module version $VER; Go binary may be stale"; }
++      grep -F '/api/portal/status' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains Portal user API" || fail "hnc_httpd missing Portal user API"
++      grep -F '/api/portal/admin/status' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains Portal admin API" || fail "hnc_httpd missing Portal admin API"
+       case "$VER" in v5.3.*)
+         grep -F '/api/dpi_state' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_state" || fail "hnc_httpd missing /api/dpi_state"
+         grep -F '/api/dpi_probe' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_probe" || fail "hnc_httpd missing /api/dpi_probe"
+diff --git a/bin/ci_preflight.sh b/bin/ci_preflight.sh
+index c086b1e..af06079 100644
+--- a/bin/ci_preflight.sh
++++ b/bin/ci_preflight.sh
+@@ -64,7 +64,7 @@ else
+   #   - 点没转义 (".") , 任意字符都匹配, 误报概率高
+   #   - 只允许 rc N.M 两段, 但实际用了 rc30.12.29 三段
+   #   - hotfix 拼写跟实际 -hf2 命名不一致
+-  if echo "$VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+){0,3}(-hf[0-9]+)?$'; then
++  if echo "$VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-portal-[0-9]+\.[0-9]+\.[0-9]+|-rc[0-9]+(\.[0-9]+){0,3}(-hf[0-9]+)?)$'; then
+     ok "module.prop version format looks valid"
+   else
+     warn "module.prop version format is unexpected"
+@@ -77,12 +77,12 @@ else
+ fi
+ 
+ # 4. Required files
+-for f in webroot/index.html webroot/json-health.html bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_shadow_sample.sh bin/stats_shadow_rollup.sh bin/stats_shadow_diag.sh bin/stats_shadow_control.sh bin/stats_source_diag.sh bin/stats_compare.sh bin/stats_health_summary.sh bin/stats_migration_readiness.sh bin/stats_v52_rc_control.sh bin/stats_v52_rc_smoke.sh bin/stats_v52_diag_bundle.sh bin/stats_v52_device_check.sh bin/stats_v52_rc1_switch.sh bin/stats_v52_web_status.sh bin/stats_v52_install_selfcheck.sh bin/stats_v52_gray_report.sh bin/stats_v52_review_bundle.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe; do
++for f in webroot/index.html webroot/json-health.html webroot/portal.html webroot/portal.js webroot/portal.css bin/portal_manager.sh bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_shadow_sample.sh bin/stats_shadow_rollup.sh bin/stats_shadow_diag.sh bin/stats_shadow_control.sh bin/stats_source_diag.sh bin/stats_compare.sh bin/stats_health_summary.sh bin/stats_migration_readiness.sh bin/stats_v52_rc_control.sh bin/stats_v52_rc_smoke.sh bin/stats_v52_diag_bundle.sh bin/stats_v52_device_check.sh bin/stats_v52_rc1_switch.sh bin/stats_v52_web_status.sh bin/stats_v52_install_selfcheck.sh bin/stats_v52_gray_report.sh bin/stats_v52_review_bundle.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe; do
+   if [ -e "$f" ]; then ok "required file exists: $f"; else warn "required file missing: $f"; fi
+ done
+ 
+ # 5. Executable bits, source tree check only.
+-for f in service.sh post-fs-data.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_shadow_sample.sh bin/stats_shadow_rollup.sh bin/stats_shadow_diag.sh bin/stats_shadow_control.sh bin/stats_source_diag.sh bin/stats_compare.sh bin/stats_health_summary.sh bin/stats_migration_readiness.sh bin/stats_v52_rc_control.sh bin/stats_v52_rc_smoke.sh bin/stats_v52_diag_bundle.sh bin/stats_v52_device_check.sh bin/stats_v52_rc1_switch.sh bin/stats_v52_web_status.sh bin/stats_v52_install_selfcheck.sh bin/stats_v52_gray_report.sh bin/stats_v52_review_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh bin/hnc_ndpi_probe daemon/hnc_httpd/build.sh; do
++for f in service.sh post-fs-data.sh bin/portal_manager.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_shadow_sample.sh bin/stats_shadow_rollup.sh bin/stats_shadow_diag.sh bin/stats_shadow_control.sh bin/stats_source_diag.sh bin/stats_compare.sh bin/stats_health_summary.sh bin/stats_migration_readiness.sh bin/stats_v52_rc_control.sh bin/stats_v52_rc_smoke.sh bin/stats_v52_diag_bundle.sh bin/stats_v52_device_check.sh bin/stats_v52_rc1_switch.sh bin/stats_v52_web_status.sh bin/stats_v52_install_selfcheck.sh bin/stats_v52_gray_report.sh bin/stats_v52_review_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh bin/hnc_ndpi_probe daemon/hnc_httpd/build.sh; do
+   [ -e "$f" ] || continue
+   if [ -x "$f" ]; then ok "executable: $f"; else fail "not executable: $f"; fi
+ done
+diff --git a/bin/portal_manager.sh b/bin/portal_manager.sh
+new file mode 100644
+index 0000000..b98bd32
+--- /dev/null
++++ b/bin/portal_manager.sh
+@@ -0,0 +1,159 @@
++#!/system/bin/sh
++# Native HNC Portal firewall manager. Owns only HNC_PORTAL_* chains/rules.
++
++[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
++
++HNC_DIR=${HNC_DIR:-${HNC:-/data/local/hnc}}
++LOG="$HNC_DIR/logs/portal_manager.log"
++NAT_CHAIN=HNC_PORTAL_NAT
++FWD_CHAIN=HNC_PORTAL_FWD
++PORT=${HNC_PORTAL_PORT:-8088}
++IPT="iptables -w 2"
++
++log() {
++    mkdir -p "$HNC_DIR/logs" 2>/dev/null || true
++    printf '[%s] [PORTAL] %s\n' "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)" "$*" >> "$LOG" 2>/dev/null || true
++}
++
++valid_ip() {
++    echo "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
++    OLDIFS=$IFS; IFS=.; set -- $1; IFS=$OLDIFS
++    for o in "$@"; do
++        [ "$o" -ge 0 ] 2>/dev/null && [ "$o" -le 255 ] 2>/dev/null || return 1
++    done
++    return 0
++}
++
++norm_mac() { printf '%s' "$1" | tr 'A-F' 'a-f'; }
++valid_mac() { echo "$1" | tr 'A-F' 'a-f' | grep -Eq '^[0-9a-f]{2}(:[0-9a-f]{2}){5}$'; }
++json_escape() {
++    case "$1" in
++        *[!abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-]*) printf '%s' "" ;;
++        *) printf '%s' "$1" ;;
++    esac
++}
++
++detect_iface() {
++    if [ -n "$HNC_PORTAL_IFACE" ]; then printf '%s' "$HNC_PORTAL_IFACE"; return 0; fi
++    if [ -x "$HNC_DIR/bin/device_detect.sh" ]; then
++        _i=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null)
++        _nl='
++'
++        _i=${_i%%$_nl*}
++        _cr=$(printf '\r')
++        _i=${_i%%$_cr*}
++        [ -n "$_i" ] && { printf '%s' "$_i"; return 0; }
++    fi
++    if [ -f "$HNC_DIR/run/hnc_state" ]; then
++        _s=$(cat "$HNC_DIR/run/hnc_state" 2>/dev/null)
++        case "$_s" in ACTIVE:*) printf '%s' "${_s#ACTIVE:}"; return 0 ;; esac
++    fi
++    printf '%s' wlan2
++}
++
++chain_exists() { $IPT -t "$1" -L "$2" -n >/dev/null 2>&1; }
++ensure_chain() { table="$1"; chain="$2"; chain_exists "$table" "$chain" || $IPT -t "$table" -N "$chain" 2>/dev/null || true; }
++
++ensure_tail_rules() {
++    ensure_chain nat "$NAT_CHAIN"
++    ensure_chain filter "$FWD_CHAIN"
++    $IPT -t nat -C "$NAT_CHAIN" -p tcp --dport 80 -j REDIRECT --to-ports "$PORT" 2>/dev/null \
++        || $IPT -t nat -A "$NAT_CHAIN" -p tcp --dport 80 -j REDIRECT --to-ports "$PORT"
++    $IPT -t filter -C "$FWD_CHAIN" -j REJECT --reject-with icmp-port-unreachable 2>/dev/null \
++        || $IPT -t filter -A "$FWD_CHAIN" -j REJECT --reject-with icmp-port-unreachable
++}
++
++link_exists() {
++    iface="$1"
++    $IPT -t nat -C PREROUTING -i "$iface" -p tcp --dport 80 -j "$NAT_CHAIN" >/dev/null 2>&1
++}
++
++ensure_links() {
++    iface="$1"
++    $IPT -t nat -C PREROUTING -i "$iface" -p tcp --dport 80 -j "$NAT_CHAIN" 2>/dev/null \
++        || $IPT -t nat -I PREROUTING 1 -i "$iface" -p tcp --dport 80 -j "$NAT_CHAIN"
++    $IPT -t filter -C FORWARD -i "$iface" -j "$FWD_CHAIN" 2>/dev/null \
++        || $IPT -t filter -I FORWARD 1 -i "$iface" -j "$FWD_CHAIN"
++}
++
++remove_links() {
++    iface="$1"
++    i=0; while $IPT -t nat -D PREROUTING -i "$iface" -p tcp --dport 80 -j "$NAT_CHAIN" 2>/dev/null; do i=$((i + 1)); [ "$i" -ge 100 ] && break; done
++    i=0; while $IPT -t filter -D FORWARD -i "$iface" -j "$FWD_CHAIN" 2>/dev/null; do i=$((i + 1)); [ "$i" -ge 100 ] && break; done
++}
++
++delete_rule_all() {
++    table="$1"; shift
++    i=0; while $IPT -t "$table" -D "$@" 2>/dev/null; do i=$((i + 1)); [ "$i" -ge 100 ] && break; done
++}
++
++revoke_rules() {
++    ip="$1"; mac=$(norm_mac "$2")
++    [ -n "$ip" ] && valid_ip "$ip" || return 1
++    [ -n "$mac" ] && valid_mac "$mac" || return 1
++    chain_exists nat "$NAT_CHAIN" && delete_rule_all nat "$NAT_CHAIN" -s "$ip" -m mac --mac-source "$mac" -p tcp --dport 80 -j RETURN
++    if chain_exists filter "$FWD_CHAIN"; then
++        delete_rule_all filter "$FWD_CHAIN" -s "$ip" -m mac --mac-source "$mac" -j RETURN
++        delete_rule_all filter "$FWD_CHAIN" -d "$ip" -j RETURN
++    fi
++    log "revoke ip=$ip mac=$mac"
++    return 0
++}
++
++do_enable() {
++    iface=$(detect_iface)
++    ensure_tail_rules
++    ensure_links "$iface"
++    log "enable iface=$iface port=$PORT"
++}
++
++do_disable() {
++    iface=$(detect_iface)
++    remove_links "$iface"
++    log "disable iface=$iface"
++}
++
++do_allow() {
++    ip="$1"; mac=$(norm_mac "$2")
++    [ -n "$ip" ] && valid_ip "$ip" || { log "allow invalid ip=$ip"; return 2; }
++    [ -n "$mac" ] && valid_mac "$mac" || { log "allow invalid mac=$mac"; return 2; }
++    do_enable
++    revoke_rules "$ip" "$mac" >/dev/null 2>&1 || true
++    $IPT -t nat -I "$NAT_CHAIN" 1 -s "$ip" -m mac --mac-source "$mac" -p tcp --dport 80 -j RETURN
++    $IPT -t filter -I "$FWD_CHAIN" 1 -d "$ip" -j RETURN
++    $IPT -t filter -I "$FWD_CHAIN" 1 -s "$ip" -m mac --mac-source "$mac" -j RETURN
++    log "allow ip=$ip mac=$mac"
++}
++
++do_cleanup() {
++    iface=$(detect_iface)
++    remove_links "$iface"
++    if chain_exists nat "$NAT_CHAIN"; then $IPT -t nat -F "$NAT_CHAIN" 2>/dev/null || true; $IPT -t nat -X "$NAT_CHAIN" 2>/dev/null || true; fi
++    if chain_exists filter "$FWD_CHAIN"; then $IPT -t filter -F "$FWD_CHAIN" 2>/dev/null || true; $IPT -t filter -X "$FWD_CHAIN" 2>/dev/null || true; fi
++    log "cleanup iface=$iface"
++}
++
++do_status() {
++    iface=$(detect_iface)
++    enabled=false; link_exists "$iface" && enabled=true
++    if command -v iptables-save >/dev/null 2>&1; then
++        count=$(iptables-save 2>/dev/null | grep -c 'HNC_PORTAL_' 2>/dev/null)
++    else
++        count=$({ $IPT -t nat -S 2>/dev/null; $IPT -t filter -S 2>/dev/null; } | grep -c 'HNC_PORTAL_' 2>/dev/null)
++    fi
++    case "$count" in ''|*[!0-9]*) count=0 ;; esac
++    iface_json=$(json_escape "$iface")
++    printf '{"ok":true,"enabled":%s,"iface":"%s","nat_chain":"%s","fwd_chain":"%s","rules_count":%s}\n' "$enabled" "$iface_json" "$NAT_CHAIN" "$FWD_CHAIN" "$count"
++}
++
++cmd="$1"; shift || true
++case "$cmd" in
++    enable) do_enable ;;
++    disable) do_disable ;;
++    allow) do_allow "$1" "$2" ;;
++    revoke) revoke_rules "$1" "$2" ;;
++    summon) revoke_rules "$1" "$2" >/dev/null 2>&1 || true; do_enable ;;
++    cleanup) do_cleanup ;;
++    status) do_status ;;
++    *) printf 'usage: %s {enable|disable|allow <ip> <mac>|revoke <ip> <mac>|summon <ip> <mac>|cleanup|status}\n' "$0" >&2; exit 2 ;;
++esac
+diff --git a/daemon/hnc_httpd/embed.go b/daemon/hnc_httpd/embed.go
+index 9741c9f..e56ba5b 100644
+--- a/daemon/hnc_httpd/embed.go
++++ b/daemon/hnc_httpd/embed.go
+@@ -13,3 +13,12 @@ var styleCSS []byte
+ 
+ //go:embed web/pair.html
+ var pairHTML []byte
++
++//go:embed web/portal.html
++var portalHTML []byte
++
++//go:embed web/portal.js
++var portalJS []byte
++
++//go:embed web/portal.css
++var portalCSS []byte
+diff --git a/daemon/hnc_httpd/main.go b/daemon/hnc_httpd/main.go
+index 2c42caf..9f97ff8 100644
+--- a/daemon/hnc_httpd/main.go
++++ b/daemon/hnc_httpd/main.go
+@@ -34,6 +34,7 @@ var (
+ 	flagPort         = flag.Int("port", 8443, "HTTPS port")
+ 	flagHTTPPort     = flag.Int("http-port", 8080, "HTTP port for redirect to HTTPS (0 = disable)")
+ 	flagLoopbackPort = flag.Int("loopback-port", 8444, "loopback plain HTTP port for local KSU WebUI (0 = disable)")
++	flagPortalPort   = flag.Int("portal-port", 8088, "plain HTTP port for captive Portal user UI/API (0 = disable)")
+ 	flagHNCDir       = flag.String("hnc-dir", "/data/local/hnc", "HNC installation root")
+ 	flagNoTLS        = flag.Bool("no-tls", false, "disable TLS (for Patch 1 development only)")
+ 	flagVersion      = flag.Bool("version", false, "print version and exit")
+@@ -82,8 +83,8 @@ func main() {
+ 
+ 	setupLog(*flagHNCDir)
+ 
+-	log.Printf("hnc_httpd %s starting, remote=%v(%s:%d) loopback=%v(127.0.0.1:%d) tls=%v hnc_dir=%s",
+-		version, haveRemote, *flagBind, *flagPort, haveLocal, *flagLoopbackPort, !*flagNoTLS, *flagHNCDir)
++	log.Printf("hnc_httpd %s starting, remote=%v(%s:%d) loopback=%v(127.0.0.1:%d) portal=%v(0.0.0.0:%d) tls=%v hnc_dir=%s",
++		version, haveRemote, *flagBind, *flagPort, haveLocal, *flagLoopbackPort, *flagPortalPort > 0, *flagPortalPort, !*flagNoTLS, *flagHNCDir)
+ 
+ 	// 写 pid
+ 	pidFile := *flagHNCDir + "/run/httpd.pid"
+@@ -94,6 +95,9 @@ func main() {
+ 	defer os.Remove(pidFile)
+ 
+ 	srv := newServer(*flagHNCDir)
++	if err := srv.ensurePortalData(); err != nil {
++		log.Printf("WARN: cannot initialize portal data: %v", err)
++	}
+ 
+ 	// rc3.1.14 修 P2 (review §一信息泄漏): 0.0.0.0 + auth_required=false
+ 	// 联合配置下任何热点用户都能裸读/写 HNC 控制平面. 默认全新装机就是这状态
+@@ -147,6 +151,19 @@ func main() {
+ 		}
+ 	}
+ 
++	// Native Portal HTTP listener. It serves only the user Portal UI/API; admin routes stay on the authenticated HNC handler.
++	var portalSrv *http.Server
++	if *flagPortalPort > 0 {
++		portalSrv = &http.Server{
++			Addr:              fmt.Sprintf("0.0.0.0:%d", *flagPortalPort),
++			Handler:           srv.portalHandler(),
++			ReadHeaderTimeout: 10 * time.Second,
++			ReadTimeout:       30 * time.Second,
++			WriteTimeout:      60 * time.Second,
++			IdleTimeout:       60 * time.Second,
++		}
++	}
++
+ 	// v5.0 loopback HTTP server · 让本机 KSU WebUI 免鉴权访问
+ 	// 不走 TLS(loopback 不需要加密), 共享同一 handler
+ 	// rc30.12.14: 补 Read/Write 超时. loopback 也是同一个 goroutine 模型.
+@@ -179,6 +196,7 @@ func main() {
+ 	go srv.pruneLoop(stopCh)
+ 	go srv.writeCounter.GCLoop(stopCh)
+ 	go srv.OffloadLoop(stopCh) // rc3.1.26 · 30s 刷 offload_status cache, 避免 apiOffloadStatus 同步跑 check_offload.sh (含 sleep 5)
++	go srv.PortalExpiryLoop(stopCh)
+ 	go srv.RateLoop(stopCh)    // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
+ 
+ 	if haveRemote {
+@@ -206,6 +224,15 @@ func main() {
+ 
+ 	// v5.0 loopback server(非 TLS) — 只监听 127.0.0.1:8444, 给本机 WebUI 用
+ 	// 崩只记 log 不影响主 server(和 8080 同处理)
++	if portalSrv != nil {
++		log.Printf("starting Portal HTTP listener on 0.0.0.0:%d (user UI/API only)", *flagPortalPort)
++		go func() {
++			if err := portalSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
++				log.Printf("Portal HTTP listener exited: %v (HNC admin server continues)", err)
++			}
++		}()
++	}
++
+ 	if loopbackSrv != nil {
+ 		log.Printf("starting loopback HTTP server on 127.0.0.1:%d (no TLS, no auth for local WebUI)", *flagLoopbackPort)
+ 		go func() {
+@@ -237,6 +264,9 @@ func main() {
+ 		if loopbackSrv != nil {
+ 			_ = loopbackSrv.Shutdown(ctx)
+ 		}
++		if portalSrv != nil {
++			_ = portalSrv.Shutdown(ctx)
++		}
+ 	}
+ 	log.Printf("shutdown complete")
+ }
+diff --git a/daemon/hnc_httpd/middleware.go b/daemon/hnc_httpd/middleware.go
+index f92a534..fa66eab 100644
+--- a/daemon/hnc_httpd/middleware.go
++++ b/daemon/hnc_httpd/middleware.go
+@@ -68,11 +68,19 @@ func isPublicPath(p string) bool {
+ 	switch p {
+ 	case "/",
+ 		"/pair",
++		"/portal",
++		"/portal.html",
++		"/portal.js",
++		"/portal.css",
+ 		"/changelog.html",
+ 		"/api/pair/verify",
+ 		"/api/pairing/status",
+ 		"/api/health",
+-		"/api/logout":
++		"/api/logout",
++		"/api/portal/status",
++		"/api/portal/login",
++		"/api/portal/chat/send",
++		"/api/portal/chat/poll":
+ 		return true
+ 	}
+ 	if strings.HasPrefix(p, "/static/") {
+@@ -253,6 +261,9 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
+ // 状态变更端点, 之前漏在这里, 导致 secret 缺失的 loopback 兜底把它们当普通
+ // 路径放行。
+ func isWritePath(p string) bool {
++	if strings.HasPrefix(p, "/api/portal/admin/") {
++		return true
++	}
+ 	switch p {
+ 	case "/api/action",
+ 		"/api/self/toggle",
+@@ -312,6 +323,9 @@ func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
+ //
+ //	logout 不该算敏感, 登出永远应该允许 (现已移到 isPublicPath).
+ func isSensitiveReadPath(p string) bool {
++	if strings.HasPrefix(p, "/api/portal/admin/") {
++		return true
++	}
+ 	switch p {
+ 	case "/api/logs",
+ 		"/api/devices",
+diff --git a/daemon/hnc_httpd/portal_admin.go b/daemon/hnc_httpd/portal_admin.go
+new file mode 100644
+index 0000000..9ba9c2f
+--- /dev/null
++++ b/daemon/hnc_httpd/portal_admin.go
+@@ -0,0 +1,245 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"strings"
++	"time"
++)
++
++func portalTokenID(r *http.Request) string {
++	if v := r.Context().Value(ctxKeyTokenID); v != nil {
++		if s, ok := v.(string); ok {
++			return s
++		}
++	}
++	if isLoopbackRequest(r) && r.Header.Get("Origin") == "" && r.Header.Get("Referer") == "" {
++		return "loopback"
++	}
++	return "admin"
++}
++
++func (s *server) apiPortalAdminSummary(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		w.Header().Set("Allow", "GET")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	sessions := s.portalSessionsList()
++	pending := s.portalPendingList()
++	cfg := s.portalLoadConfig()
++	writeJSON(w, http.StatusOK, map[string]interface{}{
++		"ok":             true,
++		"config":         cfg,
++		"sessions_count": len(sessions),
++		"pending_count":  len(pending),
++		"messages":       s.portalRecentMessages(20),
++	})
++}
++
++func (s *server) apiPortalAdminPending(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		w.Header().Set("Allow", "GET")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "pending": s.portalPendingList()})
++}
++
++func (s *server) apiPortalAdminSessions(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		w.Header().Set("Allow", "GET")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "sessions": s.portalSessionsList()})
++}
++
++func (s *server) apiPortalAdminMessages(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		w.Header().Set("Allow", "GET")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	ip := strings.TrimSpace(r.URL.Query().Get("ip"))
++	mac := portalNormalizeMAC(r.URL.Query().Get("mac"))
++	if ip != "" {
++		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "messages": s.portalMessagesFor(ip, mac, 200)})
++		return
++	}
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "messages": s.portalRecentMessages(200)})
++}
++
++func (s *server) apiPortalAdminApprove(w http.ResponseWriter, r *http.Request) {
++	var req struct {
++		IP         string `json:"ip"`
++		MAC        string `json:"mac"`
++		TTLSeconds int    `json:"ttl_seconds"`
++	}
++	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
++		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
++		return
++	}
++	ip := strings.TrimSpace(req.IP)
++	mac := portalNormalizeMAC(req.MAC)
++	if !portalValidIPv4(ip) {
++		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "invalid_ip"})
++		return
++	}
++	dev := s.portalResolveDevice(ip, mac, "")
++	if dev.MAC != "" {
++		mac = dev.MAC
++	}
++	if !portalValidMAC(mac) {
++		writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": "no_mac"})
++		return
++	}
++	cfg := s.portalLoadConfig()
++	ttl := req.TTLSeconds
++	if ttl <= 0 {
++		ttl = cfg.SessionTTLSeconds
++	}
++	now := time.Now().Unix()
++	if rc, out := s.portalManager("enable"); rc != 0 {
++		s.portalAppendAudit(portalAuditEntry{Action: "approve_enable", IP: ip, MAC: mac, OK: false, Detail: strings.TrimSpace(out), Meta: map[string]string{"tid": portalTokenID(r)}})
++		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "enable_failed", "detail": strings.TrimSpace(out)})
++		return
++	}
++	if rc, out := s.portalManager("allow", ip, mac); rc != 0 {
++		s.portalAppendAudit(portalAuditEntry{Action: "approve_allow", IP: ip, MAC: mac, OK: false, Detail: strings.TrimSpace(out), Meta: map[string]string{"tid": portalTokenID(r)}})
++		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "allow_failed", "detail": strings.TrimSpace(out)})
++		return
++	}
++	_ = s.portalSetEnabled(true)
++	if err := s.portalSaveSession(portalSession{IP: ip, MAC: mac, DeviceName: dev.Name, Vendor: dev.Vendor, CreatedAt: now, LastSeen: now, ExpiresAt: now + int64(ttl)}); err != nil {
++		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "session_write_failed"})
++		return
++	}
++	s.portalAppendAudit(portalAuditEntry{Action: "approve", IP: ip, MAC: mac, OK: true, Meta: map[string]string{"tid": portalTokenID(r)}})
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "expires_at": now + int64(ttl)})
++}
++
++func (s *server) apiPortalAdminRevoke(w http.ResponseWriter, r *http.Request) {
++	var req struct{ IP, MAC string }
++	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error":"bad json"}); return }
++	ip := strings.TrimSpace(req.IP)
++	mac := portalNormalizeMAC(req.MAC)
++	if !portalValidIPv4(ip) { writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok":false,"error":"invalid_ip"}); return }
++	if mac == "" { mac = s.portalResolveDevice(ip, "", "").MAC }
++	_, _, _ = s.portalDeleteSession(ip, mac)
++	rc, out := s.portalManager("revoke", ip, mac)
++	s.portalAppendAudit(portalAuditEntry{Action: "revoke", IP: ip, MAC: mac, OK: rc == 0, Detail: strings.TrimSpace(out), Meta: map[string]string{"tid": portalTokenID(r)}})
++	if rc != 0 { writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok":false,"error":"revoke_failed","detail":strings.TrimSpace(out)}); return }
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
++}
++
++func (s *server) apiPortalAdminReply(w http.ResponseWriter, r *http.Request) {
++	var req struct{ IP, MAC, Message string }
++	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error":"bad json"}); return }
++	ip := strings.TrimSpace(req.IP)
++	mac := portalNormalizeMAC(req.MAC)
++	text, tooLong := portalTrimText(req.Message, portalChatMaxRunes)
++	if !portalValidIPv4(ip) || text == "" { writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok":false,"error":"bad_params"}); return }
++	if tooLong { writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{"ok": false, "error": "rate_limited"}); return }
++	dev := s.portalResolveDevice(ip, mac, "")
++	if mac == "" { mac = dev.MAC }
++	if err := s.portalAppendChat(portalChatMessage{TS: time.Now().Unix(), IP: ip, MAC: mac, DeviceName: dev.Name, From: "admin", Text: text}); err != nil {
++		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok":false,"error":"write_failed"}); return
++	}
++	s.portalAppendAudit(portalAuditEntry{Action: "reply", IP: ip, MAC: mac, OK: true, Meta: map[string]string{"tid": portalTokenID(r)}})
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
++}
++
++func (s *server) apiPortalAdminSummon(w http.ResponseWriter, r *http.Request) {
++	var req struct{ IP, Message string }
++	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error":"bad json"}); return }
++	ip := strings.TrimSpace(req.IP)
++	if !portalValidIPv4(ip) { writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok":false,"error":"invalid_ip"}); return }
++	message, tooLong := portalTrimText(req.Message, portalChatMaxRunes)
++	if message == "" { message = "管理员正在呼叫你，请打开认证页面回复。" }
++	if tooLong { writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{"ok": false, "error": "rate_limited"}); return }
++	dev := s.portalResolveDevice(ip, "", "")
++	if !portalValidMAC(dev.MAC) { writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok":false,"error":"no_mac"}); return }
++	now := time.Now().Unix()
++	_ = s.portalAppendChat(portalChatMessage{TS: now, IP: ip, MAC: dev.MAC, DeviceName: dev.Name, From: "admin", Text: message, Summon: true})
++	_ = s.portalUpsertPending(portalPending{IP: ip, MAC: dev.MAC, DeviceName: dev.Name, Vendor: dev.Vendor, Message: message, Summon: true, CreatedAt: now, UpdatedAt: now})
++	_, _, _ = s.portalDeleteSession(ip, dev.MAC)
++	rcRevoke, outRevoke := s.portalManager("revoke", ip, dev.MAC)
++	rcEnable, outEnable := s.portalManager("enable")
++	_ = s.portalSetEnabled(true)
++	ok := rcEnable == 0
++	detail := strings.TrimSpace(outRevoke + " " + outEnable)
++	if rcRevoke != 0 { detail = "revoke: " + strings.TrimSpace(outRevoke) + "; " + detail }
++	s.portalAppendAudit(portalAuditEntry{Action: "summon", IP: ip, MAC: dev.MAC, OK: ok, Detail: detail, Meta: map[string]string{"tid": portalTokenID(r)}})
++	if rcEnable != 0 { writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok":false,"error":"enable_failed","detail":strings.TrimSpace(outEnable)}); return }
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "revoke_rc": rcRevoke})
++}
++
++func (s *server) apiPortalAdminConfigRoute(w http.ResponseWriter, r *http.Request) {
++	if r.Method == http.MethodGet { s.apiPortalAdminConfigGet(w, r); return }
++	s.requireMutation(s.apiPortalAdminConfigPost)(w, r)
++}
++
++func (s *server) apiPortalAdminConfigGet(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		w.Header().Set("Allow", "GET")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "config": s.portalLoadConfig()})
++}
++
++func (s *server) apiPortalAdminConfigPost(w http.ResponseWriter, r *http.Request) {
++	var req struct {
++		Enabled           *bool  `json:"enabled"`
++		Iface             string `json:"iface"`
++		PortalPort        int    `json:"portal_port"`
++		SessionTTLSeconds int    `json:"session_ttl_seconds"`
++		AutoApprove       *bool  `json:"auto_approve"`
++		Welcome           string `json:"welcome"`
++	}
++	if err := json.NewDecoder(r.Body).Decode(&req); err != nil { writeJSON(w, http.StatusBadRequest, map[string]string{"error":"bad json"}); return }
++	s.portalMu.Lock()
++	cfg := s.portalReadConfigUnlocked()
++	if req.Enabled != nil { cfg.Enabled = *req.Enabled }
++	if req.Iface != "" { cfg.Iface = strings.TrimSpace(req.Iface) }
++	if req.PortalPort > 0 { cfg.PortalPort = req.PortalPort }
++	if req.SessionTTLSeconds > 0 { cfg.SessionTTLSeconds = req.SessionTTLSeconds }
++	if req.AutoApprove != nil { cfg.AutoApprove = *req.AutoApprove }
++	if req.Welcome != "" { cfg.Welcome = req.Welcome }
++	err := s.portalWriteConfigUnlocked(cfg)
++	s.portalMu.Unlock()
++	if err != nil { writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok":false,"error":"write_failed"}); return }
++	if req.Enabled != nil {
++		if *req.Enabled {
++			if rc, out := s.portalManager("enable"); rc != 0 { writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok":false,"error":"enable_failed","detail":strings.TrimSpace(out)}); return }
++		} else {
++			if rc, out := s.portalManager("disable"); rc != 0 { writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok":false,"error":"disable_failed","detail":strings.TrimSpace(out)}); return }
++		}
++	}
++	s.portalAppendAudit(portalAuditEntry{Action: "config", OK: true, Meta: map[string]string{"tid": portalTokenID(r)}})
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "config": cfg})
++}
++
++func (s *server) apiPortalAdminCleanup(w http.ResponseWriter, r *http.Request) {
++	rc, out := s.portalManager("cleanup")
++	s.portalAppendAudit(portalAuditEntry{Action: "cleanup", OK: rc == 0, Detail: strings.TrimSpace(out), Meta: map[string]string{"tid": portalTokenID(r)}})
++	if rc != 0 { writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok":false,"error":"cleanup_failed","detail":strings.TrimSpace(out)}); return }
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
++}
++
++func (s *server) apiPortalAdminStatus(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		w.Header().Set("Allow", "GET")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	rc, out := s.portalManager("status")
++	var parsed map[string]interface{}
++	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &parsed); err != nil {
++		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "bad_status_json", "rc": rc, "detail": strings.TrimSpace(out)})
++		return
++	}
++	if rc != 0 { parsed["ok"] = false; parsed["rc"] = rc }
++	writeJSON(w, http.StatusOK, parsed)
++}
+diff --git a/daemon/hnc_httpd/portal_api.go b/daemon/hnc_httpd/portal_api.go
+new file mode 100644
+index 0000000..f0e9a68
+--- /dev/null
++++ b/daemon/hnc_httpd/portal_api.go
+@@ -0,0 +1,228 @@
++package main
++
++import (
++	"encoding/json"
++	"net/http"
++	"os"
++	"path/filepath"
++	"strings"
++	"time"
++)
++
++func (s *server) registerPortalRoutes(mux *http.ServeMux) {
++	mux.HandleFunc("/portal", s.servePortalPage)
++	mux.HandleFunc("/portal.html", s.servePortalPage)
++	mux.HandleFunc("/portal.js", s.servePortalAsset)
++	mux.HandleFunc("/portal.css", s.servePortalAsset)
++	mux.HandleFunc("/api/portal/status", s.apiPortalStatus)
++	mux.HandleFunc("/api/portal/login", s.apiPortalLogin)
++	mux.HandleFunc("/api/portal/chat/send", s.apiPortalChatSend)
++	mux.HandleFunc("/api/portal/chat/poll", s.apiPortalChatPoll)
++	mux.HandleFunc("/api/portal/admin/summary", s.apiPortalAdminSummary)
++	mux.HandleFunc("/api/portal/admin/pending", s.apiPortalAdminPending)
++	mux.HandleFunc("/api/portal/admin/sessions", s.apiPortalAdminSessions)
++	mux.HandleFunc("/api/portal/admin/messages", s.apiPortalAdminMessages)
++	mux.HandleFunc("/api/portal/admin/approve", s.requireMutation(s.apiPortalAdminApprove))
++	mux.HandleFunc("/api/portal/admin/revoke", s.requireMutation(s.apiPortalAdminRevoke))
++	mux.HandleFunc("/api/portal/admin/reply", s.requireMutation(s.apiPortalAdminReply))
++	mux.HandleFunc("/api/portal/admin/summon", s.requireMutation(s.apiPortalAdminSummon))
++	mux.HandleFunc("/api/portal/admin/config", s.apiPortalAdminConfigRoute)
++	mux.HandleFunc("/api/portal/admin/cleanup", s.requireMutation(s.apiPortalAdminCleanup))
++	mux.HandleFunc("/api/portal/admin/status", s.apiPortalAdminStatus)
++}
++
++func (s *server) portalHandler() http.Handler {
++	mux := http.NewServeMux()
++	mux.HandleFunc("/api/portal/status", s.apiPortalStatus)
++	mux.HandleFunc("/api/portal/login", s.apiPortalLogin)
++	mux.HandleFunc("/api/portal/chat/send", s.apiPortalChatSend)
++	mux.HandleFunc("/api/portal/chat/poll", s.apiPortalChatPoll)
++	mux.HandleFunc("/portal.js", s.servePortalAsset)
++	mux.HandleFunc("/portal.css", s.servePortalAsset)
++	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
++		if strings.HasPrefix(r.URL.Path, "/api/") {
++			http.NotFound(w, r)
++			return
++		}
++		s.servePortalPage(w, r)
++	})
++	return accessLogMiddleware(mux)
++}
++
++func (s *server) servePortalPage(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet && r.Method != http.MethodHead {
++		w.Header().Set("Allow", "GET, HEAD")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	w.Header().Set("Content-Type", "text/html; charset=utf-8")
++	w.Header().Set("X-Content-Type-Options", "nosniff")
++	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
++	if data, ok := s.readPortalWebAsset("portal.html"); ok {
++		_, _ = w.Write(data)
++		return
++	}
++	_, _ = w.Write(portalHTML)
++}
++
++func (s *server) servePortalAsset(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet && r.Method != http.MethodHead {
++		w.Header().Set("Allow", "GET, HEAD")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	name := strings.TrimPrefix(r.URL.Path, "/")
++	switch name {
++	case "portal.js":
++		w.Header().Set("Content-Type", "application/javascript; charset=utf-8")
++		if data, ok := s.readPortalWebAsset(name); ok { _, _ = w.Write(data); return }
++		_, _ = w.Write(portalJS)
++	case "portal.css":
++		w.Header().Set("Content-Type", "text/css; charset=utf-8")
++		if data, ok := s.readPortalWebAsset(name); ok { _, _ = w.Write(data); return }
++		_, _ = w.Write(portalCSS)
++	default:
++		http.NotFound(w, r)
++	}
++}
++
++func (s *server) readPortalWebAsset(name string) ([]byte, bool) {
++	if strings.Contains(name, "/") || strings.Contains(name, "\\") || strings.Contains(name, "..") {
++		return nil, false
++	}
++	data, err := osReadFile(filepath.Join(s.hncDir, "webroot", name))
++	return data, err == nil && len(data) > 0
++}
++
++var osReadFile = func(path string) ([]byte, error) { return os.ReadFile(path) }
++
++func decodePortalJSON(w http.ResponseWriter, r *http.Request, out interface{}) bool {
++	if r.Method != http.MethodPost {
++		w.Header().Set("Allow", "POST")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "POST only"})
++		return false
++	}
++	if !strings.HasPrefix(r.Header.Get("Content-Type"), "application/json") {
++		writeJSON(w, http.StatusUnsupportedMediaType, map[string]string{"error": "content-type must be application/json"})
++		return false
++	}
++	r.Body = http.MaxBytesReader(w, r.Body, mutatingMaxBytes)
++	if err := json.NewDecoder(r.Body).Decode(out); err != nil {
++		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "bad json"})
++		return false
++	}
++	return true
++}
++
++func (s *server) apiPortalStatus(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		w.Header().Set("Allow", "GET")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	ip := ipOnly(r.RemoteAddr)
++	dev := s.portalResolveDevice(ip, "", "")
++	cfg := s.portalLoadConfig()
++	sess, authed := s.portalFindSession(ip, dev.MAC)
++	pending, hasPending := s.portalFindPending(ip, dev.MAC)
++	writeJSON(w, http.StatusOK, map[string]interface{}{
++		"ok":            true,
++		"enabled":       cfg.Enabled,
++		"authenticated": authed,
++		"ip":            ip,
++		"mac":           dev.MAC,
++		"device_name":   dev.Name,
++		"vendor":        dev.Vendor,
++		"online":        dev.Online,
++		"session":       sess,
++		"pending":       mapOrNil(hasPending, pending),
++		"messages":      s.portalMessagesFor(ip, dev.MAC, 100),
++	})
++}
++
++func mapOrNil(ok bool, v interface{}) interface{} {
++	if !ok { return nil }
++	return v
++}
++
++func (s *server) apiPortalLogin(w http.ResponseWriter, r *http.Request) {
++	var req struct {
++		Name    string `json:"name"`
++		Message string `json:"message"`
++	}
++	if !decodePortalJSON(w, r, &req) {
++		return
++	}
++	ip := ipOnly(r.RemoteAddr)
++	name, _ := portalTrimText(req.Name, 80)
++	msg, tooLong := portalTrimText(req.Message, portalChatMaxRunes)
++	if tooLong {
++		writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{"ok": false, "error": "rate_limited"})
++		return
++	}
++	dev := s.portalResolveDevice(ip, "", name)
++	now := time.Now().Unix()
++	if msg != "" {
++		_ = s.portalAppendChat(portalChatMessage{TS: now, IP: ip, MAC: dev.MAC, DeviceName: dev.Name, From: "user", Text: msg})
++	}
++	if dev.MAC == "" {
++		_ = s.portalUpsertPending(portalPending{IP: ip, DeviceName: dev.Name, UserName: name, Message: msg, CreatedAt: now, UpdatedAt: now})
++		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": false, "error": "mac_unresolved", "pending": true})
++		return
++	}
++	cfg := s.portalLoadConfig()
++	if cfg.AutoApprove {
++		_ = s.portalSetEnabled(true)
++		if rc, out := s.portalManager("enable"); rc != 0 {
++			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "enable_failed", "detail": strings.TrimSpace(out)})
++			return
++		}
++		if rc, out := s.portalManager("allow", ip, dev.MAC); rc != 0 {
++			writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "allow_failed", "detail": strings.TrimSpace(out)})
++			return
++		}
++		exp := now + int64(cfg.SessionTTLSeconds)
++		_ = s.portalSaveSession(portalSession{IP: ip, MAC: dev.MAC, DeviceName: dev.Name, UserName: name, Vendor: dev.Vendor, CreatedAt: now, LastSeen: now, ExpiresAt: exp})
++		s.portalAppendAudit(portalAuditEntry{Action: "auto_approve", IP: ip, MAC: dev.MAC, OK: true})
++		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "authenticated": true, "expires_at": exp})
++		return
++	}
++	if err := s.portalUpsertPending(portalPending{IP: ip, MAC: dev.MAC, DeviceName: dev.Name, UserName: name, Vendor: dev.Vendor, Message: msg, CreatedAt: now, UpdatedAt: now}); err != nil {
++		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "pending_failed"})
++		return
++	}
++	s.portalAppendAudit(portalAuditEntry{Action: "login_pending", IP: ip, MAC: dev.MAC, OK: true})
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "pending": true})
++}
++
++func (s *server) apiPortalChatSend(w http.ResponseWriter, r *http.Request) {
++	var req struct{ Text string `json:"text"` }
++	if !decodePortalJSON(w, r, &req) {
++		return
++	}
++	ip := ipOnly(r.RemoteAddr)
++	text, tooLong := portalTrimText(req.Text, portalChatMaxRunes)
++	if text == "" || tooLong || !s.portalCheckChatRate(ip) {
++		writeJSON(w, http.StatusTooManyRequests, map[string]interface{}{"ok": false, "error": "rate_limited"})
++		return
++	}
++	dev := s.portalResolveDevice(ip, "", "")
++	msg := portalChatMessage{TS: time.Now().Unix(), IP: ip, MAC: dev.MAC, DeviceName: dev.Name, From: "user", Text: text}
++	if err := s.portalAppendChat(msg); err != nil {
++		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": "write_failed"})
++		return
++	}
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
++}
++
++func (s *server) apiPortalChatPoll(w http.ResponseWriter, r *http.Request) {
++	if r.Method != http.MethodGet {
++		w.Header().Set("Allow", "GET")
++		writeJSON(w, http.StatusMethodNotAllowed, map[string]string{"error": "GET only"})
++		return
++	}
++	ip := ipOnly(r.RemoteAddr)
++	dev := s.portalResolveDevice(ip, "", "")
++	pending, hasPending := s.portalFindPending(ip, dev.MAC)
++	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "pending": mapOrNil(hasPending, pending), "messages": s.portalMessagesFor(ip, dev.MAC, 100)})
++}
+diff --git a/daemon/hnc_httpd/portal_store.go b/daemon/hnc_httpd/portal_store.go
+new file mode 100644
+index 0000000..f58028d
+--- /dev/null
++++ b/daemon/hnc_httpd/portal_store.go
+@@ -0,0 +1,706 @@
++package main
++
++import (
++	"bufio"
++	"context"
++	"encoding/json"
++	"fmt"
++	"log"
++	"net"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"sort"
++	"strconv"
++	"strings"
++	"time"
++)
++
++const (
++	portalDefaultPort       = 8088
++	portalDefaultSessionTTL = 24 * 60 * 60
++	portalChatMaxRunes      = 500
++	portalChatMinSeconds    = 3
++	portalChatHourlyLimit   = 100
++)
++
++type portalConfig struct {
++	Version           int    `json:"version"`
++	Enabled           bool   `json:"enabled"`
++	Iface             string `json:"iface,omitempty"`
++	PortalPort        int    `json:"portal_port"`
++	SessionTTLSeconds int    `json:"session_ttl_seconds"`
++	AutoApprove       bool   `json:"auto_approve"`
++	Welcome           string `json:"welcome,omitempty"`
++}
++
++type portalSession struct {
++	IP         string `json:"ip"`
++	MAC        string `json:"mac"`
++	DeviceName string `json:"device_name,omitempty"`
++	UserName   string `json:"user_name,omitempty"`
++	Vendor     string `json:"vendor,omitempty"`
++	CreatedAt  int64  `json:"created_at"`
++	ExpiresAt  int64  `json:"expires_at"`
++	LastSeen   int64  `json:"last_seen"`
++}
++
++type portalPending struct {
++	IP         string `json:"ip"`
++	MAC        string `json:"mac,omitempty"`
++	DeviceName string `json:"device_name,omitempty"`
++	UserName   string `json:"user_name,omitempty"`
++	Vendor     string `json:"vendor,omitempty"`
++	Message    string `json:"message,omitempty"`
++	Summon     bool   `json:"summon,omitempty"`
++	CreatedAt  int64  `json:"created_at"`
++	UpdatedAt  int64  `json:"updated_at"`
++}
++
++type portalChatMessage struct {
++	ID         string `json:"id"`
++	TS         int64  `json:"ts"`
++	IP         string `json:"ip"`
++	MAC        string `json:"mac,omitempty"`
++	DeviceName string `json:"device_name,omitempty"`
++	From       string `json:"from"`
++	Text       string `json:"text"`
++	Summon     bool   `json:"summon,omitempty"`
++}
++
++type portalAuditEntry struct {
++	TS     int64             `json:"ts"`
++	Action string            `json:"action"`
++	IP     string            `json:"ip,omitempty"`
++	MAC    string            `json:"mac,omitempty"`
++	OK     bool              `json:"ok"`
++	Detail string            `json:"detail,omitempty"`
++	Meta   map[string]string `json:"meta,omitempty"`
++}
++
++type portalDeviceInfo struct {
++	IP     string `json:"ip"`
++	MAC    string `json:"mac,omitempty"`
++	Name   string `json:"device_name,omitempty"`
++	Vendor string `json:"vendor,omitempty"`
++	Online bool   `json:"online"`
++}
++
++type portalRateState struct {
++	LastTS int64
++	Hour   []int64
++}
++
++func defaultPortalConfig() portalConfig {
++	return portalConfig{Version: 1, Enabled: false, PortalPort: portalDefaultPort, SessionTTLSeconds: portalDefaultSessionTTL, AutoApprove: false}
++}
++
++func (c *portalConfig) normalize() {
++	if c.Version == 0 {
++		c.Version = 1
++	}
++	if c.PortalPort <= 0 {
++		c.PortalPort = portalDefaultPort
++	}
++	if c.SessionTTLSeconds <= 0 {
++		c.SessionTTLSeconds = portalDefaultSessionTTL
++	}
++}
++
++func (s *server) portalConfigPath() string  { return filepath.Join(s.hncDir, "data", "portal_config.json") }
++func (s *server) portalSessionsPath() string { return filepath.Join(s.hncDir, "run", "portal_sessions.json") }
++func (s *server) portalPendingPath() string  { return filepath.Join(s.hncDir, "run", "portal_pending.json") }
++func (s *server) portalChatPath() string     { return filepath.Join(s.hncDir, "logs", "portal_chat.jsonl") }
++func (s *server) portalAuditPath() string    { return filepath.Join(s.hncDir, "logs", "portal_audit.jsonl") }
++
++func (s *server) ensurePortalData() error {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	for _, d := range []string{filepath.Join(s.hncDir, "data"), filepath.Join(s.hncDir, "run"), filepath.Join(s.hncDir, "logs")} {
++		if err := os.MkdirAll(d, 0o755); err != nil {
++			return err
++		}
++	}
++	if _, err := os.Stat(s.portalConfigPath()); os.IsNotExist(err) {
++		cfg := defaultPortalConfig()
++		if err := writeJSONAtomic(s.portalConfigPath(), &cfg); err != nil {
++			return err
++		}
++	}
++	if _, err := os.Stat(s.portalSessionsPath()); os.IsNotExist(err) {
++		if err := writeJSONAtomic(s.portalSessionsPath(), map[string]portalSession{}); err != nil {
++			return err
++		}
++	}
++	if _, err := os.Stat(s.portalPendingPath()); os.IsNotExist(err) {
++		if err := writeJSONAtomic(s.portalPendingPath(), map[string]portalPending{}); err != nil {
++			return err
++		}
++	}
++	for _, p := range []string{s.portalChatPath(), s.portalAuditPath()} {
++		f, err := os.OpenFile(p, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
++		if err != nil {
++			return err
++		}
++		_ = f.Close()
++	}
++	return nil
++}
++
++func portalKey(ip, mac string) string {
++	return strings.TrimSpace(ip) + "|" + portalNormalizeMAC(mac)
++}
++
++func portalNormalizeMAC(mac string) string {
++	return strings.ToLower(strings.TrimSpace(mac))
++}
++
++func portalValidMAC(mac string) bool {
++	mac = portalNormalizeMAC(mac)
++	return validMAC(mac)
++}
++
++func portalValidIPv4(ip string) bool {
++	p := net.ParseIP(strings.TrimSpace(ip))
++	return p != nil && p.To4() != nil
++}
++
++func (s *server) portalReadConfigUnlocked() portalConfig {
++	cfg := defaultPortalConfig()
++	if err := readJSONInto(s.portalConfigPath(), &cfg); err != nil {
++		log.Printf("portal: read config failed, using defaults: %v", err)
++	}
++	cfg.normalize()
++	return cfg
++}
++
++func (s *server) portalLoadConfig() portalConfig {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	return s.portalReadConfigUnlocked()
++}
++
++func (s *server) portalWriteConfigUnlocked(cfg portalConfig) error {
++	cfg.normalize()
++	return writeJSONAtomic(s.portalConfigPath(), &cfg)
++}
++
++func (s *server) portalLoadSessionsUnlocked() map[string]portalSession {
++	m := map[string]portalSession{}
++	if err := readJSONInto(s.portalSessionsPath(), &m); err != nil {
++		log.Printf("portal: read sessions failed: %v", err)
++	}
++	if m == nil {
++		m = map[string]portalSession{}
++	}
++	return m
++}
++
++func (s *server) portalWriteSessionsUnlocked(m map[string]portalSession) error {
++	if m == nil {
++		m = map[string]portalSession{}
++	}
++	return writeJSONAtomic(s.portalSessionsPath(), m)
++}
++
++func (s *server) portalLoadPendingUnlocked() map[string]portalPending {
++	m := map[string]portalPending{}
++	if err := readJSONInto(s.portalPendingPath(), &m); err != nil {
++		log.Printf("portal: read pending failed: %v", err)
++	}
++	if m == nil {
++		m = map[string]portalPending{}
++	}
++	return m
++}
++
++func (s *server) portalWritePendingUnlocked(m map[string]portalPending) error {
++	if m == nil {
++		m = map[string]portalPending{}
++	}
++	return writeJSONAtomic(s.portalPendingPath(), m)
++}
++
++func (s *server) portalFindSession(ip, mac string) (portalSession, bool) {
++	now := time.Now().Unix()
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	for _, sess := range s.portalLoadSessionsUnlocked() {
++		if sess.IP != ip {
++			continue
++		}
++		if mac != "" && !strings.EqualFold(sess.MAC, mac) {
++			continue
++		}
++		if sess.ExpiresAt > now {
++			return sess, true
++		}
++	}
++	return portalSession{}, false
++}
++
++func (s *server) portalFindPending(ip, mac string) (portalPending, bool) {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	pending := s.portalLoadPendingUnlocked()
++	if mac != "" {
++		if p, ok := pending[portalKey(ip, mac)]; ok {
++			return p, true
++		}
++	}
++	for _, p := range pending {
++		if p.IP == ip && (mac == "" || p.MAC == "" || strings.EqualFold(p.MAC, mac)) {
++			return p, true
++		}
++	}
++	return portalPending{}, false
++}
++
++func (s *server) portalUpsertPending(p portalPending) error {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	m := s.portalLoadPendingUnlocked()
++	now := time.Now().Unix()
++	if p.CreatedAt == 0 {
++		p.CreatedAt = now
++	}
++	p.UpdatedAt = now
++	m[portalKey(p.IP, p.MAC)] = p
++	return s.portalWritePendingUnlocked(m)
++}
++
++func (s *server) portalDeleteSession(ip, mac string) (portalSession, bool, error) {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	m := s.portalLoadSessionsUnlocked()
++	var removed portalSession
++	found := false
++	for k, sess := range m {
++		if sess.IP == ip && (mac == "" || strings.EqualFold(sess.MAC, mac)) {
++			removed = sess
++			delete(m, k)
++			found = true
++		}
++	}
++	return removed, found, s.portalWriteSessionsUnlocked(m)
++}
++
++func (s *server) portalSaveSession(sess portalSession) error {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	m := s.portalLoadSessionsUnlocked()
++	m[portalKey(sess.IP, sess.MAC)] = sess
++	pending := s.portalLoadPendingUnlocked()
++	delete(pending, portalKey(sess.IP, sess.MAC))
++	for k, p := range pending {
++		if p.IP == sess.IP && (p.MAC == "" || strings.EqualFold(p.MAC, sess.MAC)) {
++			delete(pending, k)
++		}
++	}
++	if err := s.portalWriteSessionsUnlocked(m); err != nil {
++		return err
++	}
++	return s.portalWritePendingUnlocked(pending)
++}
++
++func (s *server) portalSetEnabled(enabled bool) error {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	cfg := s.portalReadConfigUnlocked()
++	cfg.Enabled = enabled
++	return s.portalWriteConfigUnlocked(cfg)
++}
++
++func (s *server) portalAppendChat(msg portalChatMessage) error {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	if msg.TS == 0 {
++		msg.TS = time.Now().Unix()
++	}
++	if msg.ID == "" {
++		msg.ID = fmt.Sprintf("%d-%s-%s", msg.TS, msg.From, strings.ReplaceAll(msg.MAC, ":", ""))
++	}
++	if msg.From == "" {
++		msg.From = "user"
++	}
++	data, err := json.Marshal(msg)
++	if err != nil {
++		return err
++	}
++	f, err := os.OpenFile(s.portalChatPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
++	if err != nil {
++		return err
++	}
++	defer f.Close()
++	_, err = f.Write(append(data, '\n'))
++	return err
++}
++
++func (s *server) portalAppendAudit(a portalAuditEntry) {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	if a.TS == 0 {
++		a.TS = time.Now().Unix()
++	}
++	data, err := json.Marshal(a)
++	if err != nil {
++		log.Printf("portal audit marshal: %v", err)
++		return
++	}
++	f, err := os.OpenFile(s.portalAuditPath(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
++	if err != nil {
++		log.Printf("portal audit open: %v", err)
++		return
++	}
++	defer f.Close()
++	_, _ = f.Write(append(data, '\n'))
++}
++
++func (s *server) portalMessagesFor(ip, mac string, limit int) []portalChatMessage {
++	if limit <= 0 {
++		limit = 100
++	}
++	f, err := os.Open(s.portalChatPath())
++	if err != nil {
++		return nil
++	}
++	defer f.Close()
++	out := []portalChatMessage{}
++	sc := bufio.NewScanner(f)
++	sc.Buffer(make([]byte, 64*1024), 1024*1024)
++	for sc.Scan() {
++		var m portalChatMessage
++		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
++			continue
++		}
++		if m.IP != ip {
++			continue
++		}
++		if mac != "" && m.MAC != "" && !strings.EqualFold(m.MAC, mac) {
++			continue
++		}
++		out = append(out, m)
++		if len(out) > limit {
++			out = out[len(out)-limit:]
++		}
++	}
++	return out
++}
++
++func (s *server) portalRecentMessages(limit int) []portalChatMessage {
++	if limit <= 0 {
++		limit = 200
++	}
++	f, err := os.Open(s.portalChatPath())
++	if err != nil {
++		return nil
++	}
++	defer f.Close()
++	out := []portalChatMessage{}
++	sc := bufio.NewScanner(f)
++	sc.Buffer(make([]byte, 64*1024), 1024*1024)
++	for sc.Scan() {
++		var m portalChatMessage
++		if err := json.Unmarshal(sc.Bytes(), &m); err != nil {
++			continue
++		}
++		out = append(out, m)
++		if len(out) > limit {
++			out = out[len(out)-limit:]
++		}
++	}
++	return out
++}
++
++func (s *server) portalCheckChatRate(ip string) bool {
++	now := time.Now().Unix()
++	s.portalRateMu.Lock()
++	defer s.portalRateMu.Unlock()
++	st := s.portalChatRate[ip]
++	if st == nil {
++		st = &portalRateState{}
++		s.portalChatRate[ip] = st
++	}
++	if st.LastTS > 0 && now-st.LastTS < portalChatMinSeconds {
++		return false
++	}
++	cutoff := now - 3600
++	kept := st.Hour[:0]
++	for _, ts := range st.Hour {
++		if ts >= cutoff {
++			kept = append(kept, ts)
++		}
++	}
++	st.Hour = kept
++	if len(st.Hour) >= portalChatHourlyLimit {
++		return false
++	}
++	st.LastTS = now
++	st.Hour = append(st.Hour, now)
++	return true
++}
++
++func portalTrimText(s string, maxRunes int) (string, bool) {
++	s = strings.TrimSpace(s)
++	if maxRunes <= 0 {
++		return s, false
++	}
++	r := []rune(s)
++	if len(r) > maxRunes {
++		return string(r[:maxRunes]), true
++	}
++	return s, false
++}
++
++func (s *server) portalManager(args ...string) (int, string) {
++	cfg := s.portalLoadConfig()
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	defer cancel()
++	cmdArgs := append([]string{filepath.Join(s.hncDir, "bin", "portal_manager.sh")}, args...)
++	cmd := exec.CommandContext(ctx, "sh", cmdArgs...)
++	cmd.Env = append(os.Environ(),
++		"HNC_DIR="+s.hncDir,
++		"HNC="+s.hncDir,
++		"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin",
++		"HNC_PORTAL_PORT="+strconv.Itoa(cfg.PortalPort),
++	)
++	if strings.TrimSpace(cfg.Iface) != "" {
++		cmd.Env = append(cmd.Env, "HNC_PORTAL_IFACE="+strings.TrimSpace(cfg.Iface))
++	}
++	out, err := cmd.CombinedOutput()
++	if ctx.Err() == context.DeadlineExceeded {
++		return 124, "timeout"
++	}
++	if len(out) > 8192 {
++		out = out[:8192]
++	}
++	if err != nil {
++		if ee, ok := err.(*exec.ExitError); ok {
++			return ee.ExitCode(), string(out)
++		}
++		return 127, err.Error() + ": " + string(out)
++	}
++	return 0, string(out)
++}
++
++func (s *server) PortalExpiryLoop(stop <-chan struct{}) {
++	s.portalExpireOnce()
++	tick := time.NewTicker(30 * time.Second)
++	defer tick.Stop()
++	for {
++		select {
++		case <-stop:
++			return
++		case <-tick.C:
++			s.portalExpireOnce()
++		}
++	}
++}
++
++func (s *server) portalExpireOnce() {
++	now := time.Now().Unix()
++	expired := []portalSession{}
++	s.portalMu.Lock()
++	sessions := s.portalLoadSessionsUnlocked()
++	for k, sess := range sessions {
++		if sess.ExpiresAt > 0 && sess.ExpiresAt <= now {
++			expired = append(expired, sess)
++			delete(sessions, k)
++		}
++	}
++	if len(expired) > 0 {
++		if err := s.portalWriteSessionsUnlocked(sessions); err != nil {
++			log.Printf("portal expire: write sessions failed: %v", err)
++		}
++	}
++	s.portalMu.Unlock()
++	for _, sess := range expired {
++		rc, out := s.portalManager("revoke", sess.IP, sess.MAC)
++		if rc != 0 {
++			log.Printf("portal expire: revoke failed ip=%s mac=%s rc=%d out=%q", sess.IP, sess.MAC, rc, strings.TrimSpace(out))
++		}
++		s.portalAppendAudit(portalAuditEntry{Action: "expire_revoke", IP: sess.IP, MAC: sess.MAC, OK: rc == 0, Detail: strings.TrimSpace(out)})
++	}
++}
++
++func (s *server) portalResolveDevice(ip, macHint, userName string) portalDeviceInfo {
++	ip = strings.TrimSpace(ip)
++	macHint = portalNormalizeMAC(macHint)
++	info := portalDeviceInfo{IP: ip, MAC: macHint}
++	status, payload := s.buildDevicesPayload()
++	if status == 200 && payload != nil {
++		if rows, ok := payload["devices"].([]map[string]interface{}); ok {
++			for _, d := range rows {
++				mac := portalNormalizeMAC(asString(d["mac"]))
++				dip := strings.TrimSpace(asString(d["ip"]))
++				if (macHint != "" && mac == macHint) || (ip != "" && dip == ip) {
++					info = portalInfoFromDeviceMap(d, ip, macHint, userName)
++					break
++				}
++			}
++		}
++	}
++	if info.MAC == "" && ip != "" {
++		info.MAC = s.portalMACFromARP(ip)
++	}
++	if info.MAC == "" && ip != "" {
++		info.MAC = s.portalMACFromIPNeigh(ip)
++	}
++	if info.MAC != "" && (info.Name == "" || info.Vendor == "") {
++		if status == 200 && payload != nil {
++			if rows, ok := payload["devices"].([]map[string]interface{}); ok {
++				for _, d := range rows {
++					mac := portalNormalizeMAC(asString(d["mac"]))
++					if mac == info.MAC {
++						info = portalInfoFromDeviceMap(d, ip, info.MAC, userName)
++						break
++					}
++				}
++			}
++		}
++	}
++	if info.Vendor == "" && info.MAC != "" {
++		info.Vendor = s.portalVendorForMAC(info.MAC)
++	}
++	if info.Name == "" && strings.TrimSpace(userName) != "" {
++		info.Name = strings.TrimSpace(userName)
++	}
++	if info.Name == "" && info.Vendor != "" && info.MAC != "" {
++		info.Name = fmt.Sprintf("%s %s", info.Vendor, portalMACLast4(info.MAC))
++	}
++	if info.Name == "" {
++		info.Name = ip
++	}
++	return info
++}
++
++func portalInfoFromDeviceMap(d map[string]interface{}, ip, macHint, userName string) portalDeviceInfo {
++	info := portalDeviceInfo{IP: strings.TrimSpace(ip), MAC: portalNormalizeMAC(macHint)}
++	if v := strings.TrimSpace(asString(d["ip"])); v != "" && v != "-" {
++		info.IP = v
++	}
++	if v := portalNormalizeMAC(asString(d["mac"])); v != "" {
++		info.MAC = v
++	}
++	info.Vendor = firstNonEmpty(asString(d["vendor"]), asString(d["manufacturer"]), asString(d["oui"]), asString(d["device_class"]))
++	host := firstNonEmpty(asString(d["hostname"]), asString(d["name"]))
++	if host != "" {
++		info.Name = host
++	} else if strings.TrimSpace(userName) != "" {
++		info.Name = strings.TrimSpace(userName)
++	}
++	if b, ok := d["online"].(bool); ok {
++		info.Online = b
++	}
++	return info
++}
++
++func firstNonEmpty(vals ...string) string {
++	for _, v := range vals {
++		v = strings.TrimSpace(v)
++		if v != "" {
++			return v
++		}
++	}
++	return ""
++}
++
++func portalMACLast4(mac string) string {
++	m := strings.ToUpper(strings.ReplaceAll(mac, ":", ""))
++	if len(m) >= 4 {
++		return m[len(m)-4:]
++	}
++	return m
++}
++
++func (s *server) portalVendorForMAC(mac string) string {
++	mac = strings.ToUpper(strings.ReplaceAll(mac, ":", ""))
++	if len(mac) < 6 {
++		return ""
++	}
++	path := filepath.Join(s.hncDir, "data", "oui_db.json")
++	data, err := os.ReadFile(path)
++	if err != nil {
++		data, err = os.ReadFile("/data/adb/modules/hotspot_network_control/data/oui_db.json")
++	}
++	if err != nil {
++		return ""
++	}
++	var m map[string]string
++	if json.Unmarshal(data, &m) != nil {
++		return ""
++	}
++	return m[mac[:6]]
++}
++
++func (s *server) portalMACFromARP(ip string) string {
++	f, err := os.Open("/proc/net/arp")
++	if err != nil {
++		return ""
++	}
++	defer f.Close()
++	sc := bufio.NewScanner(f)
++	for sc.Scan() {
++		fields := strings.Fields(sc.Text())
++		if len(fields) >= 4 && fields[0] == ip {
++			mac := portalNormalizeMAC(fields[3])
++			if portalValidMAC(mac) && mac != "00:00:00:00:00:00" {
++				return mac
++			}
++		}
++	}
++	return ""
++}
++
++func (s *server) portalMACFromIPNeigh(ip string) string {
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	cmd := exec.CommandContext(ctx, "ip", "neigh", "show", ip)
++	out, err := cmd.Output()
++	if err != nil || len(out) == 0 {
++		cmd = exec.CommandContext(ctx, "ip", "neigh")
++		out, err = cmd.Output()
++		if err != nil {
++			return ""
++		}
++	}
++	for _, line := range strings.Split(string(out), "\n") {
++		fields := strings.Fields(line)
++		if len(fields) == 0 || fields[0] != ip {
++			continue
++		}
++		for i := 0; i+1 < len(fields); i++ {
++			if fields[i] == "lladdr" {
++				mac := portalNormalizeMAC(fields[i+1])
++				if portalValidMAC(mac) && mac != "00:00:00:00:00:00" {
++					return mac
++				}
++			}
++		}
++	}
++	return ""
++}
++
++func (s *server) portalSessionsList() []portalSession {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	m := s.portalLoadSessionsUnlocked()
++	out := make([]portalSession, 0, len(m))
++	for _, v := range m {
++		out = append(out, v)
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
++	return out
++}
++
++func (s *server) portalPendingList() []portalPending {
++	s.portalMu.Lock()
++	defer s.portalMu.Unlock()
++	m := s.portalLoadPendingUnlocked()
++	out := make([]portalPending, 0, len(m))
++	for _, v := range m {
++		out = append(out, v)
++	}
++	sort.Slice(out, func(i, j int) bool { return out[i].UpdatedAt > out[j].UpdatedAt })
++	return out
++}
+diff --git a/daemon/hnc_httpd/server.go b/daemon/hnc_httpd/server.go
+index fb5fcd9..68140f5 100644
+--- a/daemon/hnc_httpd/server.go
++++ b/daemon/hnc_httpd/server.go
+@@ -49,6 +49,10 @@ type server struct {
+ 	offloadMu    sync.RWMutex
+ 	offloadCache offloadResp
+ 	offloadReady bool // false 时返回 {active:false, detail:"PENDING"}, 避免首次启动 30s 窗口内假报 IDLE
++
++	portalMu       sync.Mutex
++	portalRateMu   sync.Mutex
++	portalChatRate map[string]*portalRateState
+ }
+ 
+ func newServer(hncDir string) *server {
+@@ -58,7 +62,8 @@ func newServer(hncDir string) *server {
+ 		limiter:      NewRateLimiter(),
+ 		writeCounter: NewWriteCounter(),
+ 		lastSamples:  make(map[string]rateSample),
+-		rates:        make(map[string]rateOut),
++		rates:          make(map[string]rateOut),
++		portalChatRate: make(map[string]*portalRateState),
+ 	}
+ }
+ 
+@@ -75,6 +80,8 @@ func (s *server) handler() http.Handler {
+ 	mux.HandleFunc("/", s.serveIndex)
+ 	// 静态资源 /static/* 在 authMiddleware 里是 public,无需登录
+ 	mux.HandleFunc("/static/", s.serveStatic)
++	// v5.8.8-portal-0.1.4: native Portal user/admin routes.
++	s.registerPortalRoutes(mux)
+ 
+ 	// v4.0 Patch 2.b: 配对页 + 配对 endpoint
+ 	// 外层 unauthRateLimit 每 IP 20 req/s; PIN 5 次/分钟 锁在 handlePairVerify 内部
+diff --git a/daemon/hnc_httpd/web/app.html b/daemon/hnc_httpd/web/app.html
+index a02ba99..387c3e5 100644
+--- a/daemon/hnc_httpd/web/app.html
++++ b/daemon/hnc_httpd/web/app.html
+@@ -24,6 +24,7 @@
+ 
+ <nav class="tabs">
+   <button class="tab on" data-tab="devices" onclick="switchTab('devices')">设备</button>
++  <button class="tab" data-tab="portal" onclick="switchTab('portal')">Portal</button>
+   <button class="tab" data-tab="stats" onclick="switchTab('stats')">统计</button>
+   <button class="tab" data-tab="self" onclick="switchTab('self')">我的应用</button>
+   <button class="tab" data-tab="export" onclick="switchTab('export')">导出</button>
+@@ -49,6 +50,26 @@
+   </div>
+ </section>
+ 
++
++<section id="tab-portal" class="tab-content" style="display:none">
++  <div class="section-head">
++    <h2>Portal</h2>
++    <span class="meta" id="portal-meta">--</span>
++  </div>
++  <div class="portal-admin-toolbar">
++    <button class="act-btn primary" onclick="portalSetEnabled(true)">??</button>
++    <button class="act-btn" onclick="portalSetEnabled(false)">??</button>
++    <button class="act-btn danger" onclick="portalCleanup()">????</button>
++    <button class="act-btn ghost" onclick="loadPortalAdmin(true)">??</button>
++  </div>
++  <div id="portal-status" class="portal-status-line">???...</div>
++  <div id="portal-devices" class="list">
++    <div class="loading">???...</div>
++  </div>
++  <h3 class="portal-subhead">????</h3>
++  <div id="portal-messages" class="portal-messages"></div>
++</section>
++
+ <section id="tab-stats" class="tab-content" style="display:none">
+   <div class="section-head">
+     <h2>流量统计</h2>
+diff --git a/daemon/hnc_httpd/web/app.js b/daemon/hnc_httpd/web/app.js
+index 7c707be..b989eb6 100644
+--- a/daemon/hnc_httpd/web/app.js
++++ b/daemon/hnc_httpd/web/app.js
+@@ -105,6 +105,7 @@ window.switchTab = function(name) {
+   document.querySelectorAll('.tab-content').forEach(function(c){
+     c.style.display = c.id === 'tab-'+name ? '' : 'none';
+   });
++  if (name === 'portal') loadPortalAdmin(false);
+   if (name === 'stats') loadStats();
+   if (name === 'self') loadSelf();
+   if (name === 'export') loadExports();
+@@ -1282,4 +1283,136 @@ window.buildExport = function() {
+     });
+ };
+ 
++
++// Native Portal admin panel
++var portalAdminState = { summary:null, status:null, pending:[], sessions:[], messages:[] };
++function portalAdminApi(path, opts) {
++  opts = opts || {};
++  opts.credentials = 'same-origin';
++  opts.cache = 'no-store';
++  if (opts.method === 'POST') {
++    opts.headers = opts.headers || {};
++    opts.headers['Content-Type'] = 'application/json';
++    opts.headers['X-HNC-CSRF'] = '1';
++  }
++  return fetchWithTimeout(path, opts, 10000).then(function(r){
++    return r.json().catch(function(){ return {}; }).then(function(j){
++      if (!r.ok) throw new Error((j && (j.error || j.detail)) || ('HTTP '+r.status));
++      return j;
++    });
++  });
++}
++function portalKeyFor(ip, mac) { return String(ip || '') + '|' + String(mac || '').toLowerCase(); }
++function portalJSArg(s) { return JSON.stringify(String(s == null ? '' : s)); }
++function portalDeviceName(d) { return (d && (d.hostname || d.name || d.device_name || d.ip || d.mac)) || '--'; }
++function portalIndex(list) {
++  var m = {};
++  (list || []).forEach(function(x){ m[portalKeyFor(x.ip, x.mac)] = x; if (x.ip && !m[x.ip]) m[x.ip] = x; });
++  return m;
++}
++window.loadPortalAdmin = function(force) {
++  var devPromise = devicesData.length && !force ? Promise.resolve(true) : loadDevices({force:true}).catch(function(){ return false; });
++  return devPromise.then(function(){
++    return Promise.all([
++      portalAdminApi('/api/portal/admin/summary'),
++      portalAdminApi('/api/portal/admin/pending'),
++      portalAdminApi('/api/portal/admin/sessions'),
++      portalAdminApi('/api/portal/admin/messages'),
++      portalAdminApi('/api/portal/admin/status').catch(function(e){ return { ok:false, error:e.message }; })
++    ]);
++  }).then(function(all){
++    portalAdminState.summary = all[0] || {};
++    portalAdminState.pending = (all[1] && all[1].pending) || [];
++    portalAdminState.sessions = (all[2] && all[2].sessions) || [];
++    portalAdminState.messages = (all[3] && all[3].messages) || [];
++    portalAdminState.status = all[4] || {};
++    renderPortalAdmin();
++  }).catch(function(e){
++    var box = $('portal-devices');
++    if (box) box.innerHTML = '<div class="empty">Portal ????: '+esc(e.message || e)+'</div>';
++  });
++};
++function renderPortalAdmin() {
++  var summary = portalAdminState.summary || {};
++  var cfg = summary.config || {};
++  var st = portalAdminState.status || {};
++  var meta = $('portal-meta');
++  if (meta) meta.textContent = (cfg.enabled ? '???' : '???') + ' ? pending ' + (summary.pending_count || 0) + ' ? session ' + (summary.sessions_count || 0);
++  var status = $('portal-status');
++  if (status) status.innerHTML = 'manager: ' + esc(st.ok === false ? (st.error || 'error') : ((st.enabled ? 'enabled' : 'disabled') + ' ? ' + (st.iface || '--') + ' ? rules ' + (st.rules_count || 0)));
++  var pendingBy = portalIndex(portalAdminState.pending);
++  var sessionBy = portalIndex(portalAdminState.sessions);
++  var rows = [];
++  (devicesData || []).forEach(function(d){ rows.push({ device:d }); });
++  portalAdminState.pending.forEach(function(p){
++    var exists = rows.some(function(r){ return (r.device && r.device.ip) === p.ip || (r.device && String(r.device.mac).toLowerCase()) === String(p.mac).toLowerCase(); });
++    if (!exists) rows.push({ pending:p });
++  });
++  portalAdminState.sessions.forEach(function(sess){
++    var exists = rows.some(function(r){ return (r.device && r.device.ip) === sess.ip || (r.device && String(r.device.mac).toLowerCase()) === String(sess.mac).toLowerCase(); });
++    if (!exists) rows.push({ session:sess });
++  });
++  var box = $('portal-devices');
++  if (!box) return;
++  if (!rows.length) { box.innerHTML = '<div class="empty">?? Portal ??</div>'; renderPortalMessages(); return; }
++  box.innerHTML = rows.map(function(row){
++    var d = row.device || {};
++    var p = row.pending || pendingBy[portalKeyFor(d.ip, d.mac)] || pendingBy[d.ip] || null;
++    var sess = row.session || sessionBy[portalKeyFor(d.ip, d.mac)] || sessionBy[d.ip] || null;
++    var ip = d.ip || (p && p.ip) || (sess && sess.ip) || '';
++    var mac = String(d.mac || (p && p.mac) || (sess && sess.mac) || '').toLowerCase();
++    var vendor = d.vendor || d.manufacturer || (p && p.vendor) || (sess && sess.vendor) || deviceClass(mac);
++    var name = portalDeviceName(d);
++    if (name === '--' && p) name = p.device_name || p.user_name || p.ip;
++    if (name === '--' && sess) name = sess.device_name || sess.ip;
++    var auth = !!sess;
++    var state = auth ? '???' : (p && p.summon ? '???' : (p ? '???' : '???'));
++    var badge = auth ? 'green' : (p ? 'orange' : 'gray');
++    return '<div class="card portal-card">'+
++      '<div class="card-head"><div><div class="dev-name">'+esc(name)+'</div><div class="portal-card-sub">'+esc(ip || '--')+' ? '+esc(mac || 'no-mac')+'</div></div><div class="dev-badges"><span class="b '+badge+'">'+esc(state)+'</span><span class="b '+(d.online?'green':'gray')+'">'+(d.online?'??':'??')+'</span></div></div>'+
++      '<div class="card-body"><div class="field"><span class="k">??</span><span class="v">'+esc(vendor || '--')+'</span></div><div class="field"><span class="k">??</span><span class="v">'+esc(sess && sess.expires_at ? new Date(sess.expires_at*1000).toLocaleString() : '--')+'</span></div></div>'+
++      '<div class="card-actions">'+
++        '<button class="act-btn primary" onclick="portalApprove('+portalJSArg(ip)+','+portalJSArg(mac)+')">??</button>'+
++        '<button class="act-btn" onclick="portalRevoke('+portalJSArg(ip)+','+portalJSArg(mac)+')">??</button>'+
++        '<button class="act-btn" onclick="portalSummon('+portalJSArg(ip)+')">??</button>'+
++        '<button class="act-btn ghost" onclick="portalReply('+portalJSArg(ip)+','+portalJSArg(mac)+')">??</button>'+
++      '</div></div>';
++  }).join('');
++  renderPortalMessages();
++}
++function renderPortalMessages() {
++  var box = $('portal-messages');
++  if (!box) return;
++  var msgs = portalAdminState.messages || [];
++  if (!msgs.length) { box.innerHTML = '<div class="empty">????</div>'; return; }
++  box.innerHTML = msgs.slice(-40).reverse().map(function(m){
++    return '<div class="portal-msg"><b>'+esc(m.from || '--')+'</b><span>'+esc(m.ip || '')+'</span><p>'+esc(m.text || '')+'</p></div>';
++  }).join('');
++}
++window.portalSetEnabled = function(enabled) {
++  portalAdminApi('/api/portal/admin/config', { method:'POST', body:JSON.stringify({ enabled: !!enabled }) }).then(function(){ loadPortalAdmin(true); }).catch(function(e){ alert('Portal ????: '+(e.message || e)); });
++};
++window.portalCleanup = function() {
++  if (!confirm('??? Portal ??? HNC_PORTAL_* ???')) return;
++  portalAdminApi('/api/portal/admin/cleanup', { method:'POST', body:'{}' }).then(function(){ loadPortalAdmin(true); }).catch(function(e){ alert('????: '+(e.message || e)); });
++};
++window.portalApprove = function(ip, mac) {
++  if (!ip) return alert('?? IP');
++  portalAdminApi('/api/portal/admin/approve', { method:'POST', body:JSON.stringify({ ip:ip, mac:mac }) }).then(function(){ loadPortalAdmin(true); }).catch(function(e){ alert('????: '+(e.message || e)); });
++};
++window.portalRevoke = function(ip, mac) {
++  if (!ip) return alert('?? IP');
++  portalAdminApi('/api/portal/admin/revoke', { method:'POST', body:JSON.stringify({ ip:ip, mac:mac }) }).then(function(){ loadPortalAdmin(true); }).catch(function(e){ alert('????: '+(e.message || e)); });
++};
++window.portalReply = function(ip, mac) {
++  var message = prompt('????');
++  if (!message) return;
++  portalAdminApi('/api/portal/admin/reply', { method:'POST', body:JSON.stringify({ ip:ip, mac:mac, message:message }) }).then(function(){ loadPortalAdmin(true); }).catch(function(e){ alert('????: '+(e.message || e)); });
++};
++window.portalSummon = function(ip) {
++  var message = prompt('????', '???????????????????');
++  if (!message) return;
++  portalAdminApi('/api/portal/admin/summon', { method:'POST', body:JSON.stringify({ ip:ip, message:message }) }).then(function(){ loadPortalAdmin(true); }).catch(function(e){ alert('????: '+(e.message || e)); });
++};
++
+ })();
+diff --git a/daemon/hnc_httpd/web/portal.css b/daemon/hnc_httpd/web/portal.css
+new file mode 100644
+index 0000000..12cf31f
+--- /dev/null
++++ b/daemon/hnc_httpd/web/portal.css
+@@ -0,0 +1,48 @@
++:root {
++  --bg: #f7f9fb;
++  --ink: #14202b;
++  --muted: #647386;
++  --line: rgba(20,32,43,.12);
++  --panel: rgba(255,255,255,.88);
++  --blue: #1463ff;
++  --green: #0a9f5a;
++  --red: #d82f2f;
++  --admin: #fff5da;
++  --user: #e9f1ff;
++  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
++}
++* { box-sizing: border-box; }
++body { margin:0; min-height:100vh; background:linear-gradient(180deg,#f7f9fb,#eef3f7); color:var(--ink); }
++.portal-shell { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:22px; }
++.portal-panel { width:min(720px,100%); background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 18px 60px rgba(29,45,61,.12); padding:18px; }
++.portal-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }
++.eyebrow { font-size:12px; color:var(--muted); font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
++h1 { margin:2px 0 0; font-size:26px; letter-spacing:0; }
++.pill { border:1px solid var(--line); border-radius:999px; padding:6px 10px; font-size:12px; color:var(--muted); white-space:nowrap; }
++.pill.ok { color:var(--green); border-color:rgba(10,159,90,.25); background:rgba(10,159,90,.08); }
++.pill.warn { color:#a15c00; border-color:rgba(255,149,0,.28); background:rgba(255,149,0,.10); }
++.pill.err { color:var(--red); border-color:rgba(216,47,47,.25); background:rgba(216,47,47,.08); }
++.device-strip { display:grid; grid-template-columns:1.2fr 1fr 1.3fr; gap:8px; margin-bottom:14px; }
++.device-strip div { border:1px solid var(--line); border-radius:8px; padding:10px; min-width:0; background:rgba(255,255,255,.55); }
++.device-strip span { display:block; font-size:11px; color:var(--muted); margin-bottom:2px; }
++.device-strip strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
++.chat-box { min-height:280px; max-height:46vh; overflow:auto; display:flex; flex-direction:column; gap:8px; padding:12px; border:1px solid var(--line); border-radius:8px; background:#fff; }
++.msg { max-width:84%; border-radius:8px; padding:9px 10px; font-size:14px; line-height:1.42; border:1px solid var(--line); }
++.msg .meta { font-size:11px; color:var(--muted); margin-bottom:3px; }
++.msg.user { align-self:flex-end; background:var(--user); }
++.msg.admin { align-self:flex-start; background:var(--admin); }
++.msg.system { align-self:center; background:#f4f6f8; color:var(--muted); text-align:center; }
++.login-box, .send-box { display:flex; gap:8px; margin-top:10px; }
++.login-box { display:grid; grid-template-columns:1fr; }
++input, textarea, button { font:inherit; border-radius:8px; }
++input, textarea { width:100%; border:1px solid var(--line); padding:11px 12px; background:#fff; color:var(--ink); }
++textarea { min-height:72px; resize:vertical; }
++button { border:0; background:var(--blue); color:white; font-weight:700; padding:11px 14px; cursor:pointer; }
++button:disabled { opacity:.55; cursor:not-allowed; }
++.send-box input { flex:1; }
++@media (max-width:620px) {
++  .portal-shell { padding:10px; align-items:stretch; }
++  .portal-panel { border-radius:0; min-height:calc(100vh - 20px); }
++  .device-strip { grid-template-columns:1fr; }
++  .send-box { flex-direction:column; }
++}
+diff --git a/daemon/hnc_httpd/web/portal.html b/daemon/hnc_httpd/web/portal.html
+new file mode 100644
+index 0000000..e071c5f
+--- /dev/null
++++ b/daemon/hnc_httpd/web/portal.html
+@@ -0,0 +1,39 @@
++<!doctype html>
++<html lang="zh-CN">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
++<meta name="theme-color" content="#f7f9fb">
++<title>HNC Portal</title>
++<link rel="stylesheet" href="/portal.css">
++</head>
++<body>
++<main class="portal-shell">
++  <section class="portal-panel">
++    <header class="portal-head">
++      <div>
++        <div class="eyebrow">HNC Portal</div>
++        <h1>热点认证</h1>
++      </div>
++      <span id="state-pill" class="pill">连接中</span>
++    </header>
++    <section class="device-strip" id="device-strip">
++      <div><span>设备</span><strong id="device-name">--</strong></div>
++      <div><span>IP</span><strong id="device-ip">--</strong></div>
++      <div><span>MAC</span><strong id="device-mac">--</strong></div>
++    </section>
++    <section class="chat-box" id="chat-box" aria-live="polite"></section>
++    <section class="login-box" id="login-box">
++      <input id="login-name" maxlength="80" autocomplete="name" placeholder="你的设备名或称呼">
++      <textarea id="login-message" maxlength="500" placeholder="给管理员的申请说明"></textarea>
++      <button id="login-btn" type="button">申请认证</button>
++    </section>
++    <section class="send-box">
++      <input id="chat-text" maxlength="500" placeholder="输入消息">
++      <button id="send-btn" type="button">发送</button>
++    </section>
++  </section>
++</main>
++<script src="/portal.js"></script>
++</body>
++</html>
+diff --git a/daemon/hnc_httpd/web/portal.js b/daemon/hnc_httpd/web/portal.js
+new file mode 100644
+index 0000000..cfa05f0
+--- /dev/null
++++ b/daemon/hnc_httpd/web/portal.js
+@@ -0,0 +1,66 @@
++(function(){
++'use strict';
++var state = { messagesSig:'', mac:'', ip:'' };
++function $(id){ return document.getElementById(id); }
++function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
++function api(path, opts){
++  opts = opts || {};
++  opts.credentials = 'same-origin';
++  opts.cache = 'no-store';
++  return fetch(path, opts).then(function(r){ return r.json().catch(function(){return {};}).then(function(j){ if(!r.ok) j.http_status = r.status; return j; }); });
++}
++function setPill(cls, text){ var p=$('state-pill'); p.className='pill '+(cls||''); p.textContent=text; }
++function renderMessages(messages){
++  messages = messages || [];
++  var sig = JSON.stringify(messages.map(function(m){ return [m.id,m.ts,m.from,m.text]; }));
++  if (sig === state.messagesSig) return;
++  state.messagesSig = sig;
++  var box = $('chat-box');
++  if (!messages.length) {
++    box.innerHTML = '<div class="msg system">填写申请后，管理员可以在 HNC 后台放行或回复。</div>';
++    return;
++  }
++  box.innerHTML = messages.map(function(m){
++    var from = m.from === 'admin' ? 'admin' : (m.from === 'system' ? 'system' : 'user');
++    var who = from === 'admin' ? '管理员' : (from === 'system' ? '系统' : '我');
++    var t = m.ts ? new Date(m.ts*1000).toLocaleTimeString() : '';
++    return '<div class="msg '+from+'"><div class="meta">'+esc(who)+' '+esc(t)+'</div><div>'+esc(m.text)+'</div></div>';
++  }).join('');
++  box.scrollTop = box.scrollHeight;
++}
++function applyStatus(s){
++  state.mac = s.mac || '';
++  state.ip = s.ip || '';
++  $('device-name').textContent = s.device_name || s.ip || '--';
++  $('device-ip').textContent = s.ip || '--';
++  $('device-mac').textContent = s.mac || '等待识别';
++  if (s.authenticated) setPill('ok','已认证');
++  else if (s.pending && s.pending.summon) setPill('warn','管理员呼叫');
++  else if (s.pending) setPill('warn','等待放行');
++  else if (s.enabled === false) setPill('', 'Portal 未启用');
++  else setPill('', '未认证');
++  renderMessages(s.messages || []);
++}
++function refresh(){ api('/api/portal/status').then(applyStatus).catch(function(){ setPill('err','连接失败'); }); }
++function login(){
++  var name = $('login-name').value.trim();
++  var msg = $('login-message').value.trim();
++  $('login-btn').disabled = true;
++  api('/api/portal/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name,message:msg}) })
++    .then(function(j){ if (j && j.error === 'mac_unresolved') setPill('err','未识别 MAC'); refresh(); })
++    .finally(function(){ $('login-btn').disabled = false; });
++}
++function send(){
++  var text = $('chat-text').value.trim();
++  if (!text) return;
++  $('send-btn').disabled = true;
++  api('/api/portal/chat/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:text}) })
++    .then(function(j){ if (j && j.error === 'rate_limited') setPill('warn','发送太快'); else $('chat-text').value=''; refresh(); })
++    .finally(function(){ $('send-btn').disabled = false; });
++}
++$('login-btn').addEventListener('click', login);
++$('send-btn').addEventListener('click', send);
++$('chat-text').addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); send(); }});
++refresh();
++setInterval(refresh, 3000);
++})();
+diff --git a/daemon/hnc_httpd/web/style.css b/daemon/hnc_httpd/web/style.css
+index d1b6680..3b1832a 100644
+--- a/daemon/hnc_httpd/web/style.css
++++ b/daemon/hnc_httpd/web/style.css
+@@ -495,3 +495,16 @@ main {
+ .primary { background:#1f1f23; color:#fff; border:0; padding:.55em 1.2em; border-radius:6px;
+            cursor:pointer; font: inherit; }
+ .primary:hover { background:#000; }
++
++
++/* Native Portal admin */
++.portal-admin-toolbar { display:flex; flex-wrap:wrap; gap:8px; margin:0 4px 12px; }
++.portal-status-line { margin:0 4px 12px; padding:10px 12px; border:1px solid var(--stroke); border-radius:8px; color:var(--text-2); background:var(--glass-bg-2); font-size:12px; }
++.portal-card-sub { margin-top:2px; font-size:12px; color:var(--text-2); font-family:var(--font-mono); word-break:break-all; }
++.portal-subhead { margin:18px 4px 8px; font-size:14px; color:var(--text-1); }
++.portal-messages { display:flex; flex-direction:column; gap:8px; }
++.portal-msg { border:1px solid var(--stroke); border-radius:8px; background:var(--glass-bg-2); padding:10px 12px; }
++.portal-msg b { font-size:12px; color:var(--text-1); margin-right:8px; }
++.portal-msg span { font-size:11px; color:var(--text-3); font-family:var(--font-mono); }
++.portal-msg p { margin:5px 0 0; color:var(--text-2); font-size:13px; line-height:1.4; word-break:break-word; }
++.act-btn.danger { color:var(--sys-red); border-color:rgba(255,59,48,.24); background:rgba(255,59,48,.08); }
+diff --git a/module.prop b/module.prop
+index 8c4004c..05df3ee 100644
+--- a/module.prop
++++ b/module.prop
+@@ -1,8 +1,8 @@
+ id=hotspot_network_control
+ name=Hotspot Network Control
+-version=v5.8.8
+-versionCode=588000
++version=v5.8.8-portal-0.1.4
++versionCode=588014
+ author=Claude (Anthropic AI) + Ling + GPT (audit)
+-description=Android 热点带宽/延迟/黑白名单管理 · v5.8.8 · 审查收尾(8 项):SSE 加并发连接上限(防 goroutine 放大)、dpid SNI 满 8 改 LRU(不再冻结)、mdns 压缩指针加后向校验、scheduler 改增长读不再受 ftell 失败截断、iptables ipt_del_all 加轮次上限、cleanup 删 root qdisc 加归属检查、ip/mac 进 tc/iptables 前加白名单、service.sh 弱熵兜底改内核 CSPRNG/失败 fail-closed。 v5.8.7 · 修构建:链接 hotspotd 报一堆 glibc undefined symbol(__errno_location/__fxstat/dcgettext)——拿到的"Android"libelf/libz 实为 glibc 版。鉴于只有可选/非致命且 object 从不随包的 LSM guard 需要 libelf/libz,改用 stub 拆掉 LSM loader、链接里去掉 libelf/libz(offload 只用 libbpf 的 bpf() syscall 包装)。host 对象级符号闭合已验证。 v5.8.6:libbpf NDK 下 __poll_t 未定义,补 -D__poll_t=unsigned + 编译失败即报错。 v5.8.5:补回(后又因 ABI 不对而移除)libelf.a/libz.a。 v5.8.4:hotspotd write_json 在 rename 前检查 fflush/ferror,磁盘满/IO 错时保留上一版 devices.json 而非把半截坏 JSON 推给所有下游;并删除会导致"修一份漏一份"的 src/hotspotd 死副本(CI 现在能编 hotspotd,本修复即可进包)。 v5.8.3:libbpf 收为 git submodule,CI 现在从源码重编 hotspotd/hnc_ipc/mdns_resolve(+supervisor),陈旧 C 二进制问题根除(rc39/rc43 修复终于能进包),取代上版的新鲜度护栏。 v5.8.2:Go 写端点统一 CSRF+body 上限(P2-2)+ dpid IP map 有界化(P2-3)(纯 Go、之前漏编→rc38 防抖修复终于进包)+ 新增预编译 C 二进制源码指纹护栏(改了没重编则 CI 失败,杜绝"假修复发布")+ dpid 抓包每包加 recover(畸形/恶意包不再崩整个 dpid)。 v5.8.0:统一版本号到正式版(收敛 rc 系列);关于页版本号改为读后端真实版本、不再显示陈旧的 5.2 旧号(纯 shell/前端不重编)。 修流量统计"一直不动"+速率变假(纯 shell 不重编)。根因:hotspotd 模式下 device_detect 扫描循环不跑(起了 hotspotd 就退出)、没人调 ensure_stats 维护 HNC_STATS 的 per-IP 计数规则;而 watchdog 的 iptables init 每次 -F HNC_STATS 把累计清零连规则一起删 → 清完没人重建 → 计数冻结(统计页不动)、rx_bytes 归 0 连带速率假、HNC 累计远低于安卓实际。两步修:① init 不再 -F HNC_STATS(链已存在只补 FORWARD 跳转、保累计);② stats_sample 每周期调新增 ensure_stats_online,把 per-IP 规则与在线设备对齐(在线缺则幂等补不重置累计、离线删防链增长,devices.json 空集时只补不删做护栏)。真机诊断证据:链被 flush 后变空、计数停。sh -n + IP 提取/对齐逻辑冒烟全过。详见 CHANGELOG.md。 修速率"假"+hero 与卡片对不上。根因:/api/live(hero)与 /api/devices(卡片)各自在请求里差分并覆盖同一个 lastSamples 快照,两端点轮询错开 → dt 乱 → 速率发飘/掉零、hero 长期 0 而卡片有值。改成单一后台采样器 RateLoop:每 2s 读 devices.json 算每台 rx_bps/tx_bps 发布到 s.rates,两端点只读同一份 → 永远一致。并针对 hotspotd 最快 5s 才刷一次字节数的事实,做成"字节变了才前移基线、空闲 10s 才衰减归零",跨过刷新间隔不掉零。含 hnc_httpd(Go)改动需 CI 重编。go vet+test+交叉编译全过。(流量统计页空白另查:已确认 source=旧统计是默认源非报错,空图是今日 stats_raw.jsonl 没有≥2 样本,待真机诊断 watchdog 是否进 active。)详见 CHANGELOG.md。 远程 SPA 用 SSE 替代轮询(仅远程,本机 file://+ksu.exec 撑不起流式仍走轮询)。新增只读 /api/events:服务端每 ~1.5s 看 devices.json 变化才推 changed 事件 + 20s 心跳;远程 SPA 用 EventSource 收到才做一次刷新 → 停掉盲目 1Hz 轮询,空闲零拉取、有变化近实时,降远程访问 CPU/电耗。SSE 在线停定时轮询、断开/不支持自动回退轮询(EventSource 自动重连)。已处理 SSE 长连接被 WriteTimeout 60s 掐断的坑(ResponseController 清写超时)。含 hnc_httpd(Go,含 go:embed 的 app.js)改动,需 CI 重编。go vet+交叉编译+node --check 全过。详见 CHANGELOG.md。 审查 G3 offload C(仅内核 BPF tether offload 生效时相关)。① P2-17 换网即时重探:hotspotd netlink 加 RTMGRP_LINK,iface 链路变化(WiFi↔4G/VPN 上下线)立即通知 offload 调度器重探主上游,把原来最坏 60s 的"换网后限速对新上游短暂失效"窗口缩到瞬时(request_refresh 非阻塞、未启用 offload 时安全空操作)。② P2-15 disabled_set 上限 8→32,实际消除多上游溢出导致的 status 少报。③ P2-16(关停时 5s 采样不响应)评估后暂缓:仅省关停 ~5s、且要加无法在此验证的 adapter↔scheduler 中断联动,风险>收益。含 hotspotd C 改动,需 CI 重编。两个 C 文件 -fsyntax-only 通过。详见 CHANGELOG.md。 运行健康(SLA)面板。新增只读 /api/sla,把散落 run/ 的真实累计计数聚合:dpid 重启次数(新增持久计数)、近期崩溃环启动、watchdog 全量重建次数(新增持久计数)、tc 修复失败/上行失败、JSON 退回 legacy 次数、能力降级标记。设置页"运行健康"卡片展示;无埋点的字段返回 null→显示"未统计"(不造假)。从"修 bug 驱动"转"数据驱动维护"。含 hnc_httpd + dpid(Go)改动,需 CI 重编。go vet+test+交叉编译+sh -n+node --check 全过。详见 CHANGELOG.md。 WebUI 提帧 + 点击秒响应(纯前端,不用重编)。① 乐观 UI:点限速/延迟/清除/低延迟后,卡片徽标立即更新(不再等后端几百 ms 的 fork 链),后台发请求、成功对账、失败回滚+toast——点击「卡一下」消失。② 适度降 backdrop-filter blur(60→18/40→16/32→14/28→14/24→12,saturate→140%)并停掉背景 meshDrift 动画(它让玻璃后内容每帧变、强制 blur 每帧重算)——帧率明显回升,玻璃质感仅略变实。③ 设备卡片 content-visibility:auto 离屏跳过渲染——设备多时滚动更跟手。④ 交互后强刷 burst 4→2、删 block/unblock 的重复整表重渲。详见 CHANGELOG.md。 审查报告·G2 dpid 稳定性。① P2-20 dpid 健康跑满 5 分钟后清 crashflag —— 此前只在采集失败/干净退出时清,长时间健康运行被 SIGKILL(OOM/网卡抖动)后 flag 残留,下次启动会被误判 crash-loop。② P2-30 crash-loop 空转加 30 分钟超时自退 —— 此前永久阻塞会拖死 launcher 的 waitpid 让其自愈失效;超时退出后 launcher 重启 dpid、60s crash 窗口已过期 → 瞬时抖动自愈、持续故障也降到每 30min 一次而非紧打循环。③ P2-18 dpid_guard 杀子进程由等 0.2s 改轮询至多 2s 再 SIGKILL,给 dpid 清 BPF/ringbuf/flush 时间,避免 pinned 资源泄漏。改 dpid main.go + hnc_dpid_guard.sh,含 Go 需 CI 重编。go vet+test+交叉编译+sh -n 全过。详见 CHANGELOG.md。 第 4 份审查报告(rc32 docx)新发现真问题·G1 快赢。① P1-5 scheduler.c 修 16KB 静态 buffer 截断:rules.json >16KB(多设备)时会被截断→当成"无限速设备"→BPF offload 不关→被限速流量静默全速绕过 HTB;改 fseek/ftell+malloc 读全量。② P2-12 远程 actionKey 加上 action(同设备先限速再封锁不再误判 busy)。③ P2-23 dpid 调 pm 时 pin LD_LIBRARY_PATH(Env 不全时不致 uid→pkg 全空)。④ P2-28 出口探测多目标(1.1.1.1/223.5.5.5/114.114),受限网络也能挂 NAT。⑤ P2-25 alert 标记已读截断时保住刚标记的,不再回弹未读。(报告其余 P1/P2 多数我已在 rc36-38 修;P3 评估后影响可忽略、不改。)含 hotspotd C + hnc_httpd/dpid Go,需 CI 重编。详见 CHANGELOG.md。 审查报告真问题修复·C+D 组(轻量补丁 + 防未然)。① DELAY-1 delay_set/clear 改原子批量写(json_set_batch→hnc_json set-device-batch),不再逐字段写留半状态。② ESC-1 hnc_json 修反斜杠转义:json/raw 值此前不转义 → 合法 JSON 含 \\ 会被 awk -v 吃掉一层导致静默损坏(已实测复现+修复验证)。③ SEC-1 uninstall 备份目录 chmod 700 + tokens.json.last chmod 600(含远程 token,防其他 root 模块读)。④ M1 dpid_supervisor netlink 防抖:lastRebind 提到 mainLoop 栈、按指针传入,修复"每次进 runChild 归零→防抖永不触发"。⑤ 清死代码:watchdog PROBE_INTERVAL_ACTIVE、apply_device_rule IFS_ORIG、action.go 未用的 rateToKbit/rateToMbps;post-fs-data 引号加固 + 开机清 json.lock。含 hnc_httpd + dpid(Go)改动需 CI 重编。sh -n + go vet + go test + 交叉编译 + ESC-1 实测全过。详见 CHANGELOG.md。① PKG-1:bin/hnc_watchdog 此前是提交进 git 的预编译、CI 从不重编 → 发布陈旧且未 strip;现加入 CI 构建步骤(`-trimpath -ldflags="-s -w"`,与 hnc_dpid 同款)并从 git 取消跟踪、加进 .gitignore,从此每次 CI 重编为最新+已 strip(3.1M→2.6M)。② PKG-2:刷机 zip 排除纯开发产物 src/(8.7M)、docs/、test/、third_party_build/、third_party_prebuilt/、daemon 下 .go/.c/.h 源码、PATCH-NOTES/设计类 .md —— 运行时一概不依赖,刷机包减约 9MB。仅 .github/workflows/build.yml + .gitignore 改动;需 CI 重新走流程产出瘦身包。详见 CHANGELOG.md。① GS-1 全局整形 init_tc 一致性:ROM 换根 qdisc 触发 HTB 树重建后,1:1 ceil 不再被静默退回全速 —— 抽 apply_global_shaper_if_enabled,init_tc 末尾 + restore 共用,树重建后自动把 ceil 压回 WAN 带宽。② LOCK-1 两套 JSON 锁:hnc_json 现在也抢 json_set.sh 的 json.lock(env-guard 防桥接嵌套死锁),所有 rules.json 写者统一串行;并发 30 写实测零丢写、无死锁、终态合法。③ TC-1 init_tc root htb 彻底失败改返回 1(此前静默 0 误导调用方)。④ GS-2 global_shaper_set 三次写全检 rc、失败回滚 enabled。含 hnc_httpd(Go)改动需 CI 重编。sh -n + go vet + 交叉编译 + 并发冒烟全过。详见 CHANGELOG.md。① 应用卡片标注:被排除的 VPN/代理应用现在显示"🛡️ VPN/代理·不学习规则"徽标(dpid SelfApp 新增 flywheel_excluded,含内置清单/用户清单/导管自动识别三种来源);未排除的应用卡片上有"排除"按钮一键加入。② WebUI 管理:设置页新增"飞轮排除名单"卡片,可看/增/删你自定义的排除包名(走新 action flywheel_exclude_set 写 etc/flywheel_exclude.json,/api/config 暴露用户清单),不用再手编 JSON。③ 补 Go 单元测试:覆盖排除清单加载(内置常驻/用户合并/坏文件降级)、UID/包名排除判定、构造器播种、候选分级 classifyTier。含 dpid + hnc_httpd(Go)改动,需 CI 重编。go vet + go test + android/arm64 交叉编译 + node --check 全通过。详见 CHANGELOG.md。
++description=Android hotspot bandwidth/latency/blacklist/whitelist control plus native Portal v5.8.8-portal-0.1.4: Portal APIs in hnc_httpd, user/admin UI, IP+MAC sessions, device fusion, summon, expiry revoke, chat rate limits, and HNC_PORTAL_* firewall rules.
+ updateJson=
+ minKernelSU=11485
+diff --git a/post-fs-data.sh b/post-fs-data.sh
+index c2fb6c6..beea89e 100644
+--- a/post-fs-data.sh
++++ b/post-fs-data.sh
+@@ -42,6 +42,22 @@ EOF
+ # rc3.1.13 起所有活字段统一到 rules.json, config.json 只做单向迁移.
+ # (迁移块在下方 cp -rf 后执行, 不依赖目标目录残留脚本)
+ 
++
++# Native Portal defaults (disabled until admin enables/approves/summons).
++[ ! -f $HNC_DIR/data/portal_config.json ] && cat > $HNC_DIR/data/portal_config.json << 'EOF'
++{
++  "version": 1,
++  "enabled": false,
++  "portal_port": 8088,
++  "session_ttl_seconds": 86400,
++  "auto_approve": false
++}
++EOF
++[ ! -f $HNC_DIR/run/portal_sessions.json ] && printf '%s\n' '{}' > $HNC_DIR/run/portal_sessions.json
++[ ! -f $HNC_DIR/run/portal_pending.json ] && printf '%s\n' '{}' > $HNC_DIR/run/portal_pending.json
++touch $HNC_DIR/logs/portal_chat.jsonl $HNC_DIR/logs/portal_audit.jsonl 2>/dev/null || true
++chmod 644 $HNC_DIR/data/portal_config.json $HNC_DIR/run/portal_sessions.json $HNC_DIR/run/portal_pending.json 2>/dev/null || true
++
+ # Fix #7: 先建目录，再统一复制（去除重复操作）
+ mkdir -p $HNC_DIR/bin $HNC_DIR/api $HNC_DIR/webroot $HNC_DIR/test
+ cp -rf $MODDIR/bin/* $HNC_DIR/bin/ 2>/dev/null || true
+@@ -80,6 +96,7 @@ if [ -f "$MODDIR/bpf/hnc_limit_map_guard.bpf.o" ]; then
+ fi
+ 
+ chmod 755 $HNC_DIR/bin/*.sh
++chmod 755 $HNC_DIR/bin/portal_manager.sh 2>/dev/null || true
+ # v5.0 beta.1 修: 单独 chmod 所有无后缀二进制
+ # post-fs-data.sh 原来只 chmod *.sh, 但 bin/ 下的 C 二进制 (hotspotd / hnc_ipc /
+ # hnc_tc_ingress / mdns_resolve) 没 .sh 后缀, 权限不被保证是 755.
+diff --git a/service.sh b/service.sh
+index 762883d..3329016 100644
+--- a/service.sh
++++ b/service.sh
+@@ -261,6 +261,7 @@ sync_runtime_from_moddir() {
+     fi
+ 
+     chmod 755 "$HNC_DIR/bin/"*.sh 2>/dev/null || true
++    chmod 755 "$HNC_DIR/bin/portal_manager.sh" 2>/dev/null || true
+     # rc30.11: sync_runtime_from_moddir 把模块 bin/ 拷到 /data/local/hnc/bin/ 后,
+     # 立即 chmod + chcon 兜底. 不能依赖 post-fs-data.sh — 它跑时这步还没发生.
+     # chcon system_file:s0: 防止 cp 把 context 改成 system_data_file:s0, 后者
+@@ -282,6 +283,27 @@ sync_runtime_from_moddir() {
+ }
+ 
+ sync_runtime_from_moddir
++
++ensure_portal_runtime_files() {
++    mkdir -p "$HNC_DIR/data" "$HNC_DIR/run" "$HNC_DIR/logs" 2>/dev/null || true
++    if [ ! -f "$HNC_DIR/data/portal_config.json" ]; then
++        cat > "$HNC_DIR/data/portal_config.json" << 'EOF'
++{
++  "version": 1,
++  "enabled": false,
++  "portal_port": 8088,
++  "session_ttl_seconds": 86400,
++  "auto_approve": false
++}
++EOF
++    fi
++    [ ! -f "$HNC_DIR/run/portal_sessions.json" ] && printf '%s\n' '{}' > "$HNC_DIR/run/portal_sessions.json"
++    [ ! -f "$HNC_DIR/run/portal_pending.json" ] && printf '%s\n' '{}' > "$HNC_DIR/run/portal_pending.json"
++    touch "$HNC_DIR/logs/portal_chat.jsonl" "$HNC_DIR/logs/portal_audit.jsonl" 2>/dev/null || true
++    chmod 644 "$HNC_DIR/data/portal_config.json" "$HNC_DIR/run/portal_sessions.json" "$HNC_DIR/run/portal_pending.json" 2>/dev/null || true
++    chmod 755 "$HNC_DIR/bin/portal_manager.sh" 2>/dev/null || true
++}
++ensure_portal_runtime_files
+ # hotfix13: record platform/kernel capability profile for diagnostics and UI fallback hints
+ if [ -x $HNC_DIR/bin/capability_probe.sh ]; then
+     ( sh $HNC_DIR/bin/capability_probe.sh >> $HNC_DIR/logs/capabilities.log 2>&1 ) &
+diff --git a/webroot/index.html b/webroot/index.html
+index 779af51..4b055e0 100644
+--- a/webroot/index.html
++++ b/webroot/index.html
+@@ -2689,6 +2689,7 @@ body.kb-open .container {
+     transition-duration: 0.01ms !important;
+   }
+ }
++.portal-admin-link { display:inline-flex; align-items:center; justify-content:center; text-decoration:none; font-weight:800; font-size:12px; }
+ </style>
+ </head>
+ <body>
+diff --git a/webroot/portal.css b/webroot/portal.css
+new file mode 100644
+index 0000000..12cf31f
+--- /dev/null
++++ b/webroot/portal.css
+@@ -0,0 +1,48 @@
++:root {
++  --bg: #f7f9fb;
++  --ink: #14202b;
++  --muted: #647386;
++  --line: rgba(20,32,43,.12);
++  --panel: rgba(255,255,255,.88);
++  --blue: #1463ff;
++  --green: #0a9f5a;
++  --red: #d82f2f;
++  --admin: #fff5da;
++  --user: #e9f1ff;
++  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", sans-serif;
++}
++* { box-sizing: border-box; }
++body { margin:0; min-height:100vh; background:linear-gradient(180deg,#f7f9fb,#eef3f7); color:var(--ink); }
++.portal-shell { min-height:100vh; display:flex; align-items:center; justify-content:center; padding:22px; }
++.portal-panel { width:min(720px,100%); background:var(--panel); border:1px solid var(--line); border-radius:8px; box-shadow:0 18px 60px rgba(29,45,61,.12); padding:18px; }
++.portal-head { display:flex; justify-content:space-between; align-items:flex-start; gap:12px; margin-bottom:14px; }
++.eyebrow { font-size:12px; color:var(--muted); font-weight:700; letter-spacing:.08em; text-transform:uppercase; }
++h1 { margin:2px 0 0; font-size:26px; letter-spacing:0; }
++.pill { border:1px solid var(--line); border-radius:999px; padding:6px 10px; font-size:12px; color:var(--muted); white-space:nowrap; }
++.pill.ok { color:var(--green); border-color:rgba(10,159,90,.25); background:rgba(10,159,90,.08); }
++.pill.warn { color:#a15c00; border-color:rgba(255,149,0,.28); background:rgba(255,149,0,.10); }
++.pill.err { color:var(--red); border-color:rgba(216,47,47,.25); background:rgba(216,47,47,.08); }
++.device-strip { display:grid; grid-template-columns:1.2fr 1fr 1.3fr; gap:8px; margin-bottom:14px; }
++.device-strip div { border:1px solid var(--line); border-radius:8px; padding:10px; min-width:0; background:rgba(255,255,255,.55); }
++.device-strip span { display:block; font-size:11px; color:var(--muted); margin-bottom:2px; }
++.device-strip strong { display:block; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; font-size:13px; }
++.chat-box { min-height:280px; max-height:46vh; overflow:auto; display:flex; flex-direction:column; gap:8px; padding:12px; border:1px solid var(--line); border-radius:8px; background:#fff; }
++.msg { max-width:84%; border-radius:8px; padding:9px 10px; font-size:14px; line-height:1.42; border:1px solid var(--line); }
++.msg .meta { font-size:11px; color:var(--muted); margin-bottom:3px; }
++.msg.user { align-self:flex-end; background:var(--user); }
++.msg.admin { align-self:flex-start; background:var(--admin); }
++.msg.system { align-self:center; background:#f4f6f8; color:var(--muted); text-align:center; }
++.login-box, .send-box { display:flex; gap:8px; margin-top:10px; }
++.login-box { display:grid; grid-template-columns:1fr; }
++input, textarea, button { font:inherit; border-radius:8px; }
++input, textarea { width:100%; border:1px solid var(--line); padding:11px 12px; background:#fff; color:var(--ink); }
++textarea { min-height:72px; resize:vertical; }
++button { border:0; background:var(--blue); color:white; font-weight:700; padding:11px 14px; cursor:pointer; }
++button:disabled { opacity:.55; cursor:not-allowed; }
++.send-box input { flex:1; }
++@media (max-width:620px) {
++  .portal-shell { padding:10px; align-items:stretch; }
++  .portal-panel { border-radius:0; min-height:calc(100vh - 20px); }
++  .device-strip { grid-template-columns:1fr; }
++  .send-box { flex-direction:column; }
++}
+diff --git a/webroot/portal.html b/webroot/portal.html
+new file mode 100644
+index 0000000..e071c5f
+--- /dev/null
++++ b/webroot/portal.html
+@@ -0,0 +1,39 @@
++<!doctype html>
++<html lang="zh-CN">
++<head>
++<meta charset="utf-8">
++<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
++<meta name="theme-color" content="#f7f9fb">
++<title>HNC Portal</title>
++<link rel="stylesheet" href="/portal.css">
++</head>
++<body>
++<main class="portal-shell">
++  <section class="portal-panel">
++    <header class="portal-head">
++      <div>
++        <div class="eyebrow">HNC Portal</div>
++        <h1>热点认证</h1>
++      </div>
++      <span id="state-pill" class="pill">连接中</span>
++    </header>
++    <section class="device-strip" id="device-strip">
++      <div><span>设备</span><strong id="device-name">--</strong></div>
++      <div><span>IP</span><strong id="device-ip">--</strong></div>
++      <div><span>MAC</span><strong id="device-mac">--</strong></div>
++    </section>
++    <section class="chat-box" id="chat-box" aria-live="polite"></section>
++    <section class="login-box" id="login-box">
++      <input id="login-name" maxlength="80" autocomplete="name" placeholder="你的设备名或称呼">
++      <textarea id="login-message" maxlength="500" placeholder="给管理员的申请说明"></textarea>
++      <button id="login-btn" type="button">申请认证</button>
++    </section>
++    <section class="send-box">
++      <input id="chat-text" maxlength="500" placeholder="输入消息">
++      <button id="send-btn" type="button">发送</button>
++    </section>
++  </section>
++</main>
++<script src="/portal.js"></script>
++</body>
++</html>
+diff --git a/webroot/portal.js b/webroot/portal.js
+new file mode 100644
+index 0000000..cfa05f0
+--- /dev/null
++++ b/webroot/portal.js
+@@ -0,0 +1,66 @@
++(function(){
++'use strict';
++var state = { messagesSig:'', mac:'', ip:'' };
++function $(id){ return document.getElementById(id); }
++function esc(s){ return String(s == null ? '' : s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
++function api(path, opts){
++  opts = opts || {};
++  opts.credentials = 'same-origin';
++  opts.cache = 'no-store';
++  return fetch(path, opts).then(function(r){ return r.json().catch(function(){return {};}).then(function(j){ if(!r.ok) j.http_status = r.status; return j; }); });
++}
++function setPill(cls, text){ var p=$('state-pill'); p.className='pill '+(cls||''); p.textContent=text; }
++function renderMessages(messages){
++  messages = messages || [];
++  var sig = JSON.stringify(messages.map(function(m){ return [m.id,m.ts,m.from,m.text]; }));
++  if (sig === state.messagesSig) return;
++  state.messagesSig = sig;
++  var box = $('chat-box');
++  if (!messages.length) {
++    box.innerHTML = '<div class="msg system">填写申请后，管理员可以在 HNC 后台放行或回复。</div>';
++    return;
++  }
++  box.innerHTML = messages.map(function(m){
++    var from = m.from === 'admin' ? 'admin' : (m.from === 'system' ? 'system' : 'user');
++    var who = from === 'admin' ? '管理员' : (from === 'system' ? '系统' : '我');
++    var t = m.ts ? new Date(m.ts*1000).toLocaleTimeString() : '';
++    return '<div class="msg '+from+'"><div class="meta">'+esc(who)+' '+esc(t)+'</div><div>'+esc(m.text)+'</div></div>';
++  }).join('');
++  box.scrollTop = box.scrollHeight;
++}
++function applyStatus(s){
++  state.mac = s.mac || '';
++  state.ip = s.ip || '';
++  $('device-name').textContent = s.device_name || s.ip || '--';
++  $('device-ip').textContent = s.ip || '--';
++  $('device-mac').textContent = s.mac || '等待识别';
++  if (s.authenticated) setPill('ok','已认证');
++  else if (s.pending && s.pending.summon) setPill('warn','管理员呼叫');
++  else if (s.pending) setPill('warn','等待放行');
++  else if (s.enabled === false) setPill('', 'Portal 未启用');
++  else setPill('', '未认证');
++  renderMessages(s.messages || []);
++}
++function refresh(){ api('/api/portal/status').then(applyStatus).catch(function(){ setPill('err','连接失败'); }); }
++function login(){
++  var name = $('login-name').value.trim();
++  var msg = $('login-message').value.trim();
++  $('login-btn').disabled = true;
++  api('/api/portal/login', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({name:name,message:msg}) })
++    .then(function(j){ if (j && j.error === 'mac_unresolved') setPill('err','未识别 MAC'); refresh(); })
++    .finally(function(){ $('login-btn').disabled = false; });
++}
++function send(){
++  var text = $('chat-text').value.trim();
++  if (!text) return;
++  $('send-btn').disabled = true;
++  api('/api/portal/chat/send', { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({text:text}) })
++    .then(function(j){ if (j && j.error === 'rate_limited') setPill('warn','发送太快'); else $('chat-text').value=''; refresh(); })
++    .finally(function(){ $('send-btn').disabled = false; });
++}
++$('login-btn').addEventListener('click', login);
++$('send-btn').addEventListener('click', send);
++$('chat-text').addEventListener('keydown', function(e){ if(e.key==='Enter'){ e.preventDefault(); send(); }});
++refresh();
++setInterval(refresh, 3000);
++})();
