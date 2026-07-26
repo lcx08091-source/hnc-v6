@@ -14,6 +14,38 @@
 
 ---
 
+## [5.9.1] - 2026-07-26
+
+用户真机反馈的一批界面/逻辑问题修复,加上 v5.9.0 两个并发回归的收尾(经 6 维度审查 + 对抗性交叉验证确认,详见 CODE-REVIEW-V2-v5.9.1.md)。
+
+### Fixed
+- **统计页柱状图不显示**(`webroot/index.html`)。根因是 CSS 高度塌陷:`.bars` 是 `height:140px` + `align-items:flex-end` 的 flex 行,`.bar-col` 无定高 → 子元素 `height:X%` 按 Flexbox 规范对 indefinite 高度解析为 auto → 24 根柱全塌成 0px(轴与图例正常,只柱子消失)。`.bar-col` 补 `height:100%`;归一化基准从"rx/tx 各自 max"改为"堆叠总量 max + niceMax()"(原逻辑两柱纵向堆叠可达 200% 被 flex 静默压缩);非零极小值加 1.5% 下限。这是自 v5.7.0-rc11 引入以来的存量 bug,本机柱状图从未正确显示过。
+- **24h/7d/30d 假页签**(`webroot/index.html`)。旧代码页签点击只切高亮、`renderBars` 硬编码 `range:'today'`、标题写死 → 三个页签渲染同一份今日数据。现引入 `statsRange` 状态,页签带 `data-range`,请求参数/标题/轴标签(自适应 `every=ceil(n/8)`)/明细表全部联动。后端 `/api/stats` 本就支持 `week/month`(daily 保留 90 天),纯前端修复。
+- **设备改名后断开变回 MAC 名**(三层根因,`action_device_rename.go` + `hnc_helpers.c` + `server.go` + `index.html`)。① hnc_httpd 用 `MarshalIndent` 写 `device_names.json`(`"mac": "name"` 冒号后带空格),而 hotspotd 的 `hnc_lookup_manual_name` 是零空白容忍子串匹配 → 恒失配 → **手动名对 hotspotd 从来没生效过**,`hostname_src` 永远回落 mac/oui/cache。写者改 `json.Marshal` 紧凑格式,C 侧匹配器同步放宽空白容忍(双保险)。② 只改过名、无任何限速/黑名单规则的设备断开 90s 后被 hotspotd 从 `devices.json` 剔除 → 从 `/api/devices` 彻底消失;`buildDevicesPayload` 现在也为 `device_names.json` 的 MAC 追加离线虚行,并补 `last_seen`(取 `last_seen_persist`)。③ 前端 `fetchDevices` 建模补 `hostname_src`/`last_seen`/`vendor`(此前丢失致"自定义"标签永不渲染、"清除自定义"按钮永不出现、`deviceIsRecent` 恒 false 使默认"近 7 天活跃"过滤等价于"只看在线")。新增 C 测试用例覆盖 pretty-JSON/异常空白/非字符串 value(此前用例全用紧凑 JSON,是"单测全绿真机全挂"的盲区)。
+- **模板批量"全选"点不动**(`webroot/index.html`)。`batchSelectAll` 用 `$('.device-card')`(返回单个 Element)而非 `$$`,`.forEach` 抛 TypeError 被委托链静默吞掉。改 `$$`,并给全局点击委托加 try/catch 防单 handler 抛错吞链。
+- **P1 回归 tc_action_lock 续租/释放不验属主**(`bin/tc_manager.sh` + `bin/watchdog.sh`)。v5.9.0 新增的续租只判目录存在即覆写 owner、unlock 无条件 `rm -rf` → 锁被陈旧回收(活着但 90s 未续租的 hung 场景)交给新持有者后,老 restore 醒来偷回/删掉他人的锁,重新制造"两个 TC 写者并发"。现在两者都校验 owner 第 1 字段 == 自身 PID;restore 循环发现锁易主立即 `return 12`(复用 busy 约定);watchdog 对 rc=12 特判为良性竞争不计入 tc_repair 熔断;陈旧回收 `rm -rf`+`mkdir` 改 mv 原子抢占。
+- **P1 回归 consumeTokenRevokeRequests 无互斥**(`daemon/hnc_httpd/server.go`)。middleware 每请求都调,并发 goroutine 的 `Remove(.working)` 会删掉另一个刚 rename 出、尚未 ReadFile 的 `.working` → 该批撤销永久丢失。加 `revokeMu`:无锁快路径(两次 stat 均 ENOENT 即返,每请求零成本不变)→ 有活儿才取锁并重新 stat 处理。
+- **"清理离线设备"误删有规则设备**(`bin/cleanup_offline_devices.sh`)。`device_has_rule` 匹配的字段名 `limit_down/limit_up` 在 rules.json 里根本不存在(实际是 `down_mbps/up_mbps`)→ 旧正则恒不匹配 → 把有限速规则的设备当无规则一并清掉,与脚本 `kept_with_rules` 承诺相反。
+- **json_set.sh name_get 空白容忍**:legacy grep 遇 pretty JSON 的 `"mac": "name"` 恒失配(与上述改名 bug 同族),加 `[[:space:]]*` 与 stats_rollup.sh 约定对齐。
+
+### Added
+- **图表增强**(`webroot/index.html`)。纵轴刻度线 + 字节标签;点击柱子弹该时段数值气泡(时段·↓·↑·Σ,带 title 兜底);图卡下方可折叠"流量明细表"(时段|下行|上行|合计|占比条,只列有流量的桶,随 range 变),数据复用 renderBars 已取 buckets 不发新请求。
+- **统计页 60s 自动刷新**:此前进页后图完全冻住,须切走再切回才更新;空数据文案"每 5 分钟采样一次"(实际 30s/300s)改为不写死数字。
+- **/api/config 暴露 stats_shadow_enabled**(`api_v5.go` + 前端)。统计来源下拉框的"新统计 Shadow"此前选中会得到全 0 空图且无解释(该灰度装机默认从未启用);现据此字段禁用该选项并说明。
+
+### Changed
+- **硬件 offload 警告重构**(`webroot/index.html` + `api_v5.go`)。此前是 localStorage 显示偏好开关且默认关 —— 即使后端检测到 BPF 正在旁路 tc 限速也永不弹。改为设置页只读状态行(ACTIVE/IDLE/NOMAP/PENDING 四态)+ 横幅仅实测 `active` 时显示 + dismiss 记录 detail(IDLE→ACTIVE 可重弹)+ 60s 轮询;横幅文案从无关的 Wi-Fi burst 重写为 BPF 旁路 tc 的实际后果与补救(不加"一键关闭"按钮,后端无该动作通道)。offload active 判定从子串 contains 收紧为整词相等(消 runBin 错误串假阳性)。
+- **后台轮询接入可见性暂停**(`webroot/index.html`)。新增 `managedInterval`(隐藏暂停、回前台补 tick),接入 alert/candidate/apps/新鲜度/统计/offload 六个轮询;DPI setTimeout 链加 `document.hidden` 守卫 —— 此前切后台每 tick 仍是 root shell fork,持续耗电。`switchPage` 加空值兜底(180ms 转场窗口连点抛 TypeError)。
+- **设备过滤卡与全局操作卡间距**:实测 0px(两侧都无对向 margin),`.device-filter-bar` 补 `margin-bottom:12px`。
+
+### Internals
+- CODE-REVIEW-V2-v5.9.1.md:6 维度并行审查 + 对抗性交叉验证的完整报告(确认 21 项、P3 11 项、误报否决 2 项)。P2/P3 未修项列入下轮排期。
+- ARCHITECTURE.md 键名勘误(虚行合并源实际是 `rules.json.devices` 非 `device_rules`)。
+
+验证:2 个内联 script 块 node --check 全过;HTML 标签配平(与 HEAD 基线逐条一致);jsdom 全页 77/77;go vet + android/arm64 交叉编译(httpd);hnc_helpers.c clang -fsyntax-only;C 测试 55/55(含新增 3 条);test/run_all.sh 相比基线减少 2 个失败;version_consistency_check + ci_preflight 双 exit 0。C/Go 改动随 CI 重编 hotspotd + hnc_httpd。**真机回归清单**:三页签各自出图且标题/轴/明细表联动、点柱出气泡、改名后断开 90s+ 名字保持且"自定义"标签常驻、模板批量全选→应用模板、offload 状态行四态、间距 12px、后台挂起时定时器暂停、清理离线设备不误删限速设备。
+
+---
+
 ## [5.9.0] - 2026-07-26
 
 架构审查(仓库根 `CODE-ARCHITECTURE-REVIEW-v5.8.9.md`)选定范围的"止血包+深度修复",共 13 项,跨 shell/Go/C/CI。7 个独立 commit,各自可 revert。
