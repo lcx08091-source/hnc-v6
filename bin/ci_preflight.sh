@@ -59,15 +59,13 @@ else
   VER="$(awk -F= '$1=="version"{print $2; exit}' module.prop)"
   VC="$(awk -F= '$1=="versionCode"{print $2; exit}' module.prop)"
   say "module.prop version=$VER versionCode=$VC"
-  # rc30.12.30 (P2.12): 修正正则.
-  # 之前: ^v[0-9]+.[0-9]+.[0-9]+-rc[0-9]+(.[0-9]+)?(-hotfix[0-9]+(.[0-9]+)?)?$
-  #   - 点没转义 (".") , 任意字符都匹配, 误报概率高
-  #   - 只允许 rc N.M 两段, 但实际用了 rc30.12.29 三段
-  #   - hotfix 拼写跟实际 -hf2 命名不一致
-  if echo "$VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+){0,3}(-hf[0-9]+)?$'; then
+  # v5.9.0: 正则与 bin/version_consistency_check.sh 统一为同一表达式。
+  # 此前这里强制 -rc[0-9]+(连正式版 v5.8.8 都判 unexpected)且只认 -hf,
+  # 那边只认 -hotfix —— 两个护栏互相矛盾等于没有护栏。不匹配升级为 fail。
+  if echo "$VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then
     ok "module.prop version format looks valid"
   else
-    warn "module.prop version format is unexpected"
+    fail "module.prop version format is unexpected: $VER"
   fi
   if echo "$VC" | grep -Eq '^[0-9]+$'; then
     ok "module.prop versionCode is numeric"
@@ -117,7 +115,12 @@ if [ -f bin/hnc_dpid ]; then
     warn "strings unavailable; cannot inspect hnc_dpid version/name marker"
   fi
 else
-  fail "bin/hnc_dpid missing; DPI observer will not work on fresh installs"
+  # v5.9.0: fail → warn。bin/hnc_dpid 自 PKG-1 起从 git 移除、由 CI 构建期
+  # 产出,而本脚本在构建之前跑 —— 干净源码树上 fail 是常态误报,正是
+  # build.yml 里 continue-on-error 存在的原因。降为 warn 后 build.yml 才能
+  # 摘掉 continue-on-error 让真 fail 拦住构建。(artifact 模式对成品 zip 的
+  # 同名检查保持 fail 不动 —— 成品必须有。)
+  warn "bin/hnc_dpid not present in source tree; CI must build it before packaging"
 fi
 
 # 6b. Optional hnc_json_c helper architecture sanity.

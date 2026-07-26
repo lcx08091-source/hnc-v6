@@ -86,8 +86,18 @@ jobs:
         run: sh bin/version_consistency_check.sh
 
       - name: Source preflight
+        # v5.9.0: 去掉 continue-on-error。此前唯一的常态 fail 源是
+        # "bin/hnc_dpid missing"(CI 构建期产物,preflight 跑在构建前),
+        # 该项已在 ci_preflight.sh 内降为 warn —— 现在 fail 就是真问题,
+        # 必须拦住构建。
         run: sh bin/ci_preflight.sh
-        continue-on-error: true  # warnings allowed, hard fails caught above
+
+      # v5.9.0: Go 静态检查与单元测试(此前 CI 完全没有 go vet/test,
+      # 唯一 Go 质量关卡是 preflight 的二进制 strings 检查)。host GOOS 跑。
+      - name: Go vet + test (hnc_httpd + dpid)
+        run: |
+          cd daemon/hnc_httpd && go vet ./... && go test ./...
+          cd ../../src/dpid && go vet ./... && go test ./...
 
       # ─── Build Go components ──────────────────────────────
       - name: Build hnc_httpd (Go)

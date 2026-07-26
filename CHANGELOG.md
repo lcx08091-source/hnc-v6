@@ -14,6 +14,36 @@
 
 ---
 
+## [5.9.0] - 2026-07-26
+
+架构审查(仓库根 `CODE-ARCHITECTURE-REVIEW-v5.8.9.md`)选定范围的"止血包+深度修复",共 13 项,跨 shell/Go/C/CI。7 个独立 commit,各自可 revert。
+
+### Security
+- **remote_tokens.json 单写者化**(`daemon/hnc_httpd/tokens.go`/`server.go`/`middleware.go`/`main.go`/`action_v5.go`/`pair.go` + `bin/json_set.sh`)。撤销 token 不再由 shell 直改文件 + Go 双向 merge/dirty 集合缝合(该逻辑历经 3 轮补丁,注释自认需要 flock,撤销与 UpdateLastSeen 并发仍有复活已撤销 token 的窗口):Go `TokensStore` 新增 `Revoke`/`RevokeAll` 成为唯一运行期写者;`json_set.sh token_revoke(_all)` 改追加 `run/token_revoke.request`(CLI 接口/退出码不变),httpd 启动时 + 每请求鉴权前 + pruneLoop 60s 兜底三处消费,**撤销对下一个请求即刻生效(零延迟窗口)**;`saveAtomicLocked` 删双向 merge 与 dirty(约 80 行),保留 tmp+chmod600+rename 与防御性 reload(容忍 json_doctor 整文件恢复)。`/api/action pair_revoke` 与 logout 也统一收敛到 `Revoke`,不再绕 shell。单测(test_tokens.sh / bridge 回归)同步改写为单写者不变量断言。
+
+### Fixed
+- **hotspotd 上游探测挪出 sched.lock + 超时**(`daemon/hotspotd/scheduler.c`/`upstream.c`)。worker 此前持锁调无超时 `popen("ip route get …")`,`ip` 被 ROM 挂起时主线程 IPC(OFFLOAD_NOTIFY_LIMIT/STATUS)抢同一把锁 → **整个 hotspotd(设备发现/devices.json/全部 IPC)永久冻死**。`refresh_primary_upstream_locked` 拆为锁外 `probe_primary_upstream` + 锁内 `apply_primary_upstream_locked`,init/init-rebuild/worker/notify 四个调用点统一;Tier1 换 500ms 超时实现。顺手把 worker 统计字段(last_refresh_ts/count/started)读写全部收进锁内,消除 C11 data race。
+- **新公共 `hnc_run_cmd_timeout`**(`daemon/hotspotd/hnc_helpers.{c,h}`)。fork+execvp+O_NONBLOCK+select 截止循环+超时 SIGKILL+EINTR-safe waitpid(骨架取自 try_ns_dhcp_resolve,该函数本体因 test_call_chain 注入机制不动)。接入 upstream Tier1(500ms)与 `update_traffic_stats`(3s 超时 + 32KB 截断保护)——iptables 卡内核不再拖死主循环。host 行为测试:捕获/超时击杀/截断/exec 失败全过。
+- **offload 空 map 不再静默"成功"**(`daemon/hotspotd/offload/adapter.{h,c}`/`adapter_bpf.c` + `scheduler.c`)。disable/restore_global 在 touched==0 && errs==0(冷启 limit_map 未填充)时返回新错误码 `OFFLOAD_EEMPTY`;调度器置重试标记,worker 以 5s 短周期重探至多 6 次后回落 60s——消除"假禁用后被限速流量走 offload 旁路最长 60s"的窗口;IPC 强制命令对 EEMPTY 回 `OK:EMPTY`(前缀保持 OK,契约不破坏,仓库内无解析者)。
+- **tc_action_lock 假陈旧强拆**(`bin/tc_manager.sh`)。强拆前先 kill -0 验尸,三态判定:持有者活且租约(90s)内只返回 busy;活但不续租(hung/PID 复用)按租约上限回收;死持有者维持原 25s 回收。restore_rules 每设备/黑名单段前调新增的 `tc_action_lock_renew` 续租——修"restore 超 25s 被并发 set_limit 强拆 → 两个 TC 写者并发改树"的竞态。每条 busy 路径保留 `TC_ACTION_BUSY=1` stdout 契约。
+- **gate/mac 锁嵌套自阻塞**(`bin/hnc_lock.sh` + `bin/tc_manager.sh`)。restore 持 gate 锁期间 fork 的 `iptables_manager.sh mark/blacklist_add` 要抢 mac_lock,而 mac_lock 见 gate 目录必等满 5s 退 11 → **每台设备白等 5 秒且 MARK/CONNMARK 规则静默缺装**。仿 `HNC_JSON_OUTER_LOCK_HELD` 先例加 gate 传递:restore 分发 `export HNC_GATE_HELD=$$`,mac_lock 校验其与 gate/pid 一致才豁免门禁等待(per-MAC 锁照常取,防冒领)。同时 mark/blacklist_add 返回值不再被丢弃:失败计数 + log_error,黑名单恢复从子 shell 管道 while 改 for(计数可传出),失败数>0 时 restore rc=1(不中断循环)。test_locks.sh 新增两用例。
+- **service.sh 绕锁改 rules.json**(`service.sh`)。auth_required 迁移从裸 `sed -i` 改为 `HNC=$HNC_DIR sh json_set.sh top auth_required true`(bool 自动推断),与全部写者共用 json.lock,消除与并发 JSON 写者的 lost-update 窗口。
+- **dpid 规则目录缓存两段式**(`src/dpid/output/rule.go`)。dpi_rules.d 加载此前"先全量 ReadFile+Unmarshal 所有子集再查缓存"(每个 DNS/TLS/Flow 包事件一次、且在 Writer 全局锁内)——缓存只省编译不省 I/O。现 Pass1 纯 stat 聚合缓存键 → 命中零读盘解析 → Pass2 仅 miss 时读+解析。oversized 文件 size 仍计入缓存键、内容仍跳过;legacy fallback 判据仍在解析后;`external-d:` 前缀守卫保留。
+- **self_attrib JSONL 无限增长**(`src/dpid/output/self_attrib.go`/`history.go`)。新增包级 `trimDailyFiles(dir,prefix,suffix,retain,now,utc)`(utc 参数显式区分日期戳基准:stats.* 按 UTC 命名、self_attrib.* 按本地时区命名,混用会在时区边界日漏删/早删);`HistorySampler.trimOldFiles` 改薄封装;self_attrib 采样循环按日切换保留 7 天,禁用状态也照常清理——此前该 JSONL **无任何 retention**,开启 self-capture 后每天数十 MB 直至吃满 /data。新增 `trim_test.go`。
+- **httpd `/api/self_attrib` 尾读环形化**(`daemon/hnc_httpd/api_self.go`)。全文件读进 []string 再切尾 → 容量=limit 的环形缓冲,内存上界从整个文件降为 limit×行长;total/shown 语义不变。
+
+### Changed
+- **httpd stateMu 拆锁**(`daemon/hnc_httpd/server.go`/`action.go`)。RWMutex 改 `actionMu`(Mutex)仅串行化 /api/action 写链;`buildDevicesPayload` 去 RLock——读一致性由各 JSON 的 tmp+rename 原子发布保证,外部写者(hotspotd/watchdog)本就不共享此锁,旧 RLock 从未提供真正的读一致性,只会让一次慢 action(cleanup.sh 最长 60s)冻住全部读端点。现在慢操作期间 UI 仍可读。
+- **LSM loader 死代码修复+防腐**(`daemon/hotspotd/lsm/hnc_lsm_loader.c` + `build.sh`)。init 错误路径统一 goto fail(修 6 条路径的 target_limit_map_fd 永久泄漏);pthread_create 失败不再置 ACTIVE(consumer 线程没起 = guard 完全不工作却报 active);rb_should_stop 改 `_Atomic int`;build.sh 加 `-fsyntax-only` 门禁(loader 仍不链接,防将来启用时踩雷)。
+
+### Internals
+- **CI/版本护栏**(`.github/workflows/build.yml` + `bin/version_consistency_check.sh` + `bin/ci_preflight.sh`)。两处版本正则统一为同一表达式(可选 `-rcN(.N){0,3}` 与可选 `-hotfix/-hf` 后缀;此前一边强制 -hotfix、一边强制 -rc+-hf,互相矛盾等于没有护栏,v5.8.9-portal 手工发布正是从缝里穿过),格式不符从 warn 升级 **fail**;ci_preflight 对"源码树缺 CI 构建产物 bin/hnc_dpid"降为 warn(与 hnc_httpd 同型)后,build.yml 删除 Source preflight 的 `continue-on-error`;新增 `go vet ./...` + `go test ./...` step(daemon/hnc_httpd 与 src/dpid,此前 CI 完全没有 Go 检查)。
+- tools/sched_test.c 断言接纳 EEMPTY(非 CI,顺手保正确)。
+
+验证:`sh -n`(全部改动脚本)+ `sh test/run_all.sh`(失败集与改动前基线完全一致,新增 gate 传递/marker 语义用例全过);`go vet` + `go test` + android/arm64 交叉编译(两个 module 全绿);hotspotd C host `clang -fsyntax-only` 全过 + `hnc_run_cmd_timeout` host 行为测试全过;lsm loader 以 libbpf submodule 头通过语法检查;`version_consistency_check` + `ci_preflight` 双 exit 0(含反向测试:改坏版本号确认 fail)。C 层 arm64 真实链接以 CI NDK 构建为准。**真机回归清单**:① 反复 WiFi↔4G↔VPN 切换 + 并发点限速,确认 hotspotd 不冻(OFFLOAD_STATUS 始终秒回);② 冷启热点下发限速,日志应见 `map empty → EEMPTY` 与 ≤10s 内 offload 真正关闭;③ 多设备重启 restore,日志无 mac_lock 5s 超时、无 TC_ACTION 强拆;④ 撤销远程 token 后被撤销浏览器下一个请求即 401(httpd 停机期间 CLI 撤销 → 重启后生效);⑤ 开 self-capture 跑数日,run/ 下 self_attrib.*.jsonl ≤8 个。
+
+---
+
 ## [5.8.8] - 2026-05-25
 
 审查报告剩余真问题一次性收尾(8 项,跨 Go/C/shell)。误报项(IPv6 自归因 key、热路径 os.Stat、IPv6 分片越界、hnc_json.c malloc、WebUI XSS)经核实不改。
