@@ -14,6 +14,26 @@
 
 ---
 
+## [5.9.2] - 2026-07-26
+
+用户预览确认后的界面视觉/性能优化合入(纯前端,不重编二进制),外加 P2/P3 待办排期文档。预览版基于旧基线,故按"A 类纯视觉增量逐项移植"执行(v5.9.1 已有更优实现的 B 类跳过防回退,预览 mock 层 C 类零携带)。
+
+### Changed
+- **backdrop-filter 收敛 20→8 处声明**(`webroot/index.html`)。仅保留 header/底部导航/弹窗遮罩三处毛玻璃(半径统一 `--blur-chrome`/`--blur-backdrop` token);`.glass*`/`.toast`/`.dpi-active-card` 去 blur 用上调底色不透明度补偿——设备列表滚动不再逐卡逐帧计算模糊,帧率收益最大的一项。暗色主题的独立 background 覆盖单独补偿(`.glass-liquid` 0.72→0.86、`.glass-inset` .05/.02→.07/.035);`.dpi-active-card` 只删 blur 不动渐变(其亮色被整体覆盖规则接管,预览版的补偿值只作用于暗色且方向相反)。
+- **暗色对比度上调**:`--text-2/3/4` 各上调一档、分隔线 .08→.10;v5.9.1 新增的纵轴刻度标签/明细表空态文字连带受益。
+- **动画时长 token 化**(`.bottom-nav`/`.nav-indicator`/`.dbgbar`);删除 `.dpi-rank-bar` 的 `width 600ms` 死过渡(元素每轮 createElement 新建,过渡从未触发过)。
+- **触控目标外扩**:页签/设备改名铅笔/横幅关闭/调试条关闭四处 `::after` 外扩 8px 命中区,视觉不变。
+- **首屏骨架卡**:设备列表首次拉取前显示 3 张 shimmer 骨架,不再闪"暂无设备";加载失败也会在 finally 后落到真实空态,不会永久骨架。
+- **统计图占位幽灵柱**:进页/空数据时显示 24 根呼吸幽灵柱 + 居中提示,不再是纯空白;提示文字带 `z-index:2`(v5.9.1 的 `.bar-col` 有 `z-index:1`,预览版原样移植会被幽灵柱盖住——移植期发现的适配点)。
+- **prefers-reduced-motion 补覆盖**:新增的 `skelSweep`/`ghostPulse` 两个无限循环动画与 `.bar`/`.bar-tip` 纳入降级。
+
+### Internals
+- **`CODE-REVIEW-V2-BACKLOG.md`**:审查 v2 确认但未修的 12 项 P2 经二次实测核实(2 次 host 编译、1 次完整 shell 测试套件运行)后分 A/B/C/D 四档排期;实测修正了多处初判(DPID-1 范围收窄、XC-1 的 c/d 护栏在 tag push 下定义上恒败、shell 测试 16 失败中 10 条是容器缺 `/system/bin/sh`、runner 静默吞掉 13 条 exit 1 失败、tools/build.sh 缺 3 个 .c 补齐后 sched_test 全 PASS)。
+
+验证:`node --check` ×2 全过;`backdrop-filter` 计数 8、预览 mock 残留 0;HTMLParser 与上版基线增量为 0;jsdom 109/109(含 v5.9.1 全量功能回归:7d/30d 切换、柱子气泡、明细表、纵轴刻度、批量全选、offload 四态、managedInterval)。真机回归点:暗色下卡片是否发虚(已做暗色补偿)、滚动帧率、首屏骨架→真实数据过渡、统计页占位→出图过渡。
+
+---
+
 ## [5.9.1] - 2026-07-26
 
 用户真机反馈的一批界面/逻辑问题修复,加上 v5.9.0 两个并发回归的收尾(经 6 维度审查 + 对抗性交叉验证确认,详见 CODE-REVIEW-V2-v5.9.1.md)。
