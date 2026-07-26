@@ -1973,7 +1973,12 @@ restore_rules() {
         }
     }' "$RULES_FILE" | sort -u)
     local restore_fail_streak=0
+    # v5.9.0: 侧信道失败计数(iptables mark / blacklist_add)。此前这些返回值被
+    # 静默丢弃 —— gate/mac 自阻塞时代每台设备的 mark 都超时失败且无人知晓。
+    # 失败不中断循环(尽力恢复其余设备),但计数>0 时 restore 最终 rc=1。
+    local restore_side_fail=0
     for mac in $macs; do
+        tc_action_lock_renew
         # v3.4.1：纯 awk 解析。先在 rules.json 里定位 "mac": { ... } 块，
         # 然后从块里逐字段抽 mark_id/ip/down_mbps/up_mbps/delay_ms/jitter_ms。
         # 不依赖 python3，浮点数原样保留。
@@ -2105,6 +2110,11 @@ restore_rules() {
 
         log "Restoring: $mac mark=$mark_id ip=$ip dn=${down}M up=${up}M delay=${delay}ms loss=${loss}%"
         sh "$HNC_DIR/bin/iptables_manager.sh" mark "$ip" "$mac" "$mark_id"
+        mark_rc=$?
+        if [ "$mark_rc" -ne 0 ]; then
+            restore_side_fail=$((restore_side_fail + 1))
+            log_error "restore_rules: iptables mark failed for $mac rc=$mark_rc (counted, continuing)"
+        fi
         if set_all "$iface" "$mark_id" "${down:-0}" "${up:-0}" "${delay:-0}" "${jitter:-0}" "${loss:-0}" "$ip"; then
             restore_fail_streak=0
         else
@@ -2126,11 +2136,21 @@ restore_rules() {
     # 写出的是单行格式 `"blacklist": ["aa:...","bb:..."]`,in_bl 在同一行先被
     # 置 1 立刻又被 ']' 置 0,后面 if 分支永远进不去 → 重启后黑名单从不恢复。
     # 改成:一次性抽整段 "blacklist":[...],再从段里抽所有 MAC,不依赖行边界。
-    local bl_seg
+    # v5.9.0: 原 `grep | while read` 管道的 while 体在子 shell 里,失败计数
+    # 传不回父 shell;MAC 是无空白 token,word-splitting 安全,改 for 循环。
+    local bl_seg bl_macs bl_mac bl_rc
     bl_seg=$(grep -oE '"blacklist"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$RULES_FILE" 2>/dev/null)
     if [ -n "$bl_seg" ]; then
-        echo "$bl_seg" | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}' | while IFS= read -r bl_mac; do
-            [ -n "$bl_mac" ] && sh "$HNC_DIR/bin/iptables_manager.sh" blacklist_add "" "$bl_mac"
+        tc_action_lock_renew
+        bl_macs=$(echo "$bl_seg" | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}')
+        for bl_mac in $bl_macs; do
+            [ -n "$bl_mac" ] || continue
+            sh "$HNC_DIR/bin/iptables_manager.sh" blacklist_add "" "$bl_mac"
+            bl_rc=$?
+            if [ "$bl_rc" -ne 0 ]; then
+                restore_side_fail=$((restore_side_fail + 1))
+                log_error "restore_rules: blacklist_add failed for $bl_mac rc=$bl_rc (counted, continuing)"
+            fi
         done
     fi
 
@@ -2138,6 +2158,11 @@ restore_rules() {
     # 与 init_tc 末尾共用同一逻辑(GS-1),避免两处各写一份导致行为漂移。
     apply_global_shaper_if_enabled "$iface"
 
+    if [ "${restore_side_fail:-0}" -gt 0 ]; then
+        log_error "restore_rules: $restore_side_fail side-channel failures (iptables mark/blacklist_add), see errors above"
+        log "Restore complete (with $restore_side_fail side failures)"
+        return 1
+    fi
     log "Restore complete"
 }
 
@@ -2172,32 +2197,64 @@ cleanup_tc() {
 # hotfix17.7: serialize TC writers and snapshot kernel state.
 # This protects set_limit/set_delay/restore/cleanup from overlapping with each other
 # when WebUI, watchdog, and delayed restore fire at the same time.
+#
+# v5.9.0 强拆三态(修"假陈旧强拆":长 restore 超 25s 被并发 set_limit 拆锁
+# → 两个 TC 写者并发改树,恰是这把锁要防的场景):
+#   1. 持有者活着(kill -0)且租约未超 LEASE_MAX → 只返回 busy,永不强拆;
+#      restore 每设备调 tc_action_lock_renew 续租,长恢复合法续命。
+#   2. 持有者活着但租约超 LEASE_MAX(不续租 = hung,或 PID 被复用)→ 回收。
+#      LEASE_MAX 必须存在:纯 kill -0 方案在 PID 复用或 tc 卡内核时会永久 busy。
+#   3. 持有者已死 → 按原 STALE_SEC(25s)回收。
+# owner 文件格式不变: "<pid> <requester> <epoch>",续租只重写第 3 字段。
 TC_ACTION_LOCK="$HNC_DIR/run/tc_action.lock"
 TC_ACTION_STALE_SEC=25
+TC_ACTION_LEASE_MAX_SEC=90
 
 tc_action_lock() {
     mkdir -p "$HNC_DIR/run" 2>/dev/null || true
-    local now old age owner
+    local now old age owner owner_pid
     now=$(date +%s 2>/dev/null || echo 0)
     if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
         echo "$$ $1 $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
         return 0
     fi
-    old=$(awk '{print $3}' "$TC_ACTION_LOCK/owner" 2>/dev/null)
     owner=$(cat "$TC_ACTION_LOCK/owner" 2>/dev/null)
+    owner_pid=$(echo "$owner" | awk '{print $1}')
+    old=$(echo "$owner" | awk '{print $3}')
     [ -n "$old" ] || old=0
     age=$((now - old))
-    if [ "$age" -ge "$TC_ACTION_STALE_SEC" ] 2>/dev/null; then
-        log_error "tc_action_lock: stale lock age=${age}s owner=${owner}; reclaim"
-        rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
-        if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
-            echo "$$ $1 $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
-            return 0
+    if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
+        # 持有者活着: 租约内 → busy;租约过期(不续租,视为 hung)→ 回收
+        if [ "$age" -lt "$TC_ACTION_LEASE_MAX_SEC" ] 2>/dev/null; then
+            log "tc_action_lock: busy owner=${owner} requester=$1"
+            echo "TC_ACTION_BUSY=1"
+            return 1
         fi
+        log_error "tc_action_lock: owner pid=$owner_pid alive but lease expired age=${age}s (no renewal); reclaim"
+    else
+        # 持有者已死(或 owner 文件缺失 → old=0, age 天然超限): 按 25s 回收
+        if [ "$age" -lt "$TC_ACTION_STALE_SEC" ] 2>/dev/null; then
+            log "tc_action_lock: busy (dead-owner grace) owner=${owner} requester=$1"
+            echo "TC_ACTION_BUSY=1"
+            return 1
+        fi
+        log_error "tc_action_lock: stale lock age=${age}s owner=${owner}; reclaim"
+    fi
+    rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
+    if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
+        echo "$$ $1 $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
+        return 0
     fi
     log "tc_action_lock: busy owner=${owner} requester=$1"
     echo "TC_ACTION_BUSY=1"
     return 1
+}
+
+# v5.9.0: 长操作(restore)在循环内周期续租,配合上面的三态判定。
+# 只重写 owner 第 3 字段(时间戳),pid/requester 不变。
+tc_action_lock_renew() {
+    [ -d "$TC_ACTION_LOCK" ] || return 0
+    echo "$$ restore $(date +%s 2>/dev/null || echo 0)" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
 }
 
 tc_action_unlock() {
@@ -2244,8 +2301,14 @@ case "$1" in
     restore)
         tc_action_lock restore || exit 12
         gate_lock || { tc_action_unlock; exit 11; }
+        # v5.9.0 gate 传递: restore 循环内 fork 的 iptables_manager(mark/
+        # blacklist_add)要抢 mac_lock,而 mac_lock 见 gate 目录会等满 5s 退 11
+        # (自阻塞,且失败此前被静默丢弃)。export 持有者 pid,hnc_lock.sh 校验
+        # 其与 gate/pid 一致时豁免门禁等待(per-MAC 锁照常取)。
+        export HNC_GATE_HELD=$$
         restore_rules
         rc=$?
+        unset HNC_GATE_HELD
         gate_unlock
         tc_snapshot_async "$(cat "$HNC_DIR/run/iface.cache" 2>/dev/null | head -1)"
         tc_action_unlock

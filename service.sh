@@ -371,9 +371,18 @@ if [ -f "$RULES_JSON" ]; then
     if [ "$CUR_AUTH" = "false" ]; then
         log "rc30.12.18 migration: auth_required=false in rules.json detected, auto-upgrading to true"
         log "  (rc30.12.18 enforces default-deny regardless; this just keeps WebUI toggle consistent)"
-        # 简单 sed 替换 (rules.json 里只可能有一个 auth_required 字段)
-        sed -i 's/"auth_required"[[:space:]]*:[[:space:]]*false/"auth_required": true/' "$RULES_JSON" 2>/dev/null
-        # 失败也无妨 - 后端反正不看这字段了, 只是 cosmetic
+        # v5.9.0: 原来这里是裸 `sed -i` 直改 rules.json —— 绕开 json.lock,
+        # 与同期任何 json_set.sh/hnc_json 写者(WebUI 操作、watchdog top 写)
+        # 并发时是经典 lost-update。改走 json_set.sh(与全部写者共用锁;
+        # json_set.sh 认 $HNC 而非 $HNC_DIR,true 会被自动推断为 JSON bool)。
+        JSON_SET="$MODDIR/bin/json_set.sh"
+        [ -f "$JSON_SET" ] || JSON_SET="$HNC_DIR/bin/json_set.sh"
+        if HNC=$HNC_DIR sh "$JSON_SET" top auth_required true >/dev/null 2>&1; then
+            log "auth_required migrated to true via json_set.sh (locked writer)"
+        else
+            # 失败也无妨 - 后端反正不看这字段了, 只是 cosmetic
+            log "WARN: auth_required migration via json_set.sh failed rc=$? (cosmetic only)"
+        fi
     fi
 fi
 

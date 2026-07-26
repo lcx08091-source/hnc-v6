@@ -425,3 +425,40 @@ lock_test_init
 HNC_DIR="$HNC_TEST_DIR" sh "$LOCK_SH" gate_unlock >/dev/null 2>&1
 rc=$?
 assert_eq "0" "$rc" && test_pass
+
+# ═══ v5.9.0 gate 传递(HNC_GATE_HELD)══════════════════════════════
+
+test_start "mac_lock: HNC_GATE_HELD matching gate/pid bypasses gate wait"
+lock_test_init
+HNC_DIR="$HNC_TEST_DIR" sh "$LOCK_SH" gate_lock
+gate_pid=$(cat "$HNC_TEST_DIR/run/lock/gate/pid" 2>/dev/null)
+start=$(date +%s)
+HNC_DIR="$HNC_TEST_DIR" HNC_GATE_HELD="$gate_pid" sh "$LOCK_SH" mac_lock "aa:bb:cc:dd:ee:05"
+rc=$?
+end=$(date +%s)
+elapsed=$((end - start))
+has_mac=0; [ -d "$HNC_TEST_DIR/run/lock/mac/aa:bb:cc:dd:ee:05" ] && has_mac=1
+HNC_DIR="$HNC_TEST_DIR" sh "$LOCK_SH" mac_unlock "aa:bb:cc:dd:ee:05"
+HNC_DIR="$HNC_TEST_DIR" sh "$LOCK_SH" gate_unlock
+# gate 被自己链上持有 → 立即拿到 mac 锁(per-MAC 目录锁仍然真实获取)
+if [ "$rc" = "0" ] && [ "$has_mac" = "1" ] && [ "$elapsed" -le 2 ]; then
+    test_pass
+else
+    test_fail "rc=$rc has_mac=$has_mac elapsed=${elapsed}s (expected rc=0, immediate)"
+fi
+
+test_start "mac_lock: HNC_GATE_HELD mismatching gate/pid still waits"
+lock_test_init
+HNC_DIR="$HNC_TEST_DIR" sh "$LOCK_SH" gate_lock
+start=$(date +%s)
+HNC_DIR="$HNC_TEST_DIR" HNC_GATE_HELD="99999999" sh "$LOCK_SH" mac_lock "aa:bb:cc:dd:ee:06" 2>/dev/null
+rc=$?
+end=$(date +%s)
+elapsed=$((end - start))
+HNC_DIR="$HNC_TEST_DIR" sh "$LOCK_SH" gate_unlock
+# 冒领的 env(与 gate/pid 不符)不得豁免 → 照常等满超时 rc=11
+if [ "$rc" = "11" ] && [ "$elapsed" -ge 4 ]; then
+    test_pass
+else
+    test_fail "rc=$rc elapsed=${elapsed}s (expected rc=11 after full wait)"
+fi

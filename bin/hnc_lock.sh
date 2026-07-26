@@ -24,6 +24,15 @@
 #   - gate 超时等 per-MAC 时保守让步(rmdir gate 并返回 11,不强拆 per-MAC)
 #   - stale 锁(PID 已死)在 20 轮检查后自动回收
 #
+# gate 传递(v5.9.0):
+#   gate 持有者(如 tc_manager restore)fork 出的子进程(iptables_manager
+#   mark/blacklist_add)需要 mac_lock,而 mac_lock 见 gate 目录会等满 5 秒
+#   退 11 —— gate 持有者调自己的下游必死锁超时。仿 json 子系统的
+#   HNC_JSON_OUTER_LOCK_HELD 先例:持有者 gate_lock 成功后
+#   export HNC_GATE_HELD=<gate 持有者 pid>,mac_lock 仅当该值与 gate/pid
+#   文件内容一致时才豁免门禁等待(防 stale env 冒领别人的 gate);
+#   per-MAC 目录锁本身照常获取,"单 MAC 单写者"不变量不放松。
+#
 # 用法(在其他 shell 脚本里 source):
 #   . "$HNC_DIR/bin/hnc_lock.sh"
 #   mac_lock "$mac" || exit 11
@@ -141,6 +150,16 @@ _try_reclaim_stale() {
 
 # ═══ per-MAC 锁 ═════════════════════════════════════════════════
 
+# v5.9.0 gate 传递: 调用链上游是否持有 gate(见文件头"gate 传递"一节)。
+# 仅当 env 声称的持有者与 gate/pid 文件内容一致时才算数,
+# 防止 stale/伪造 env 在别人持 gate 时冒领豁免。
+_gate_held_by_caller() {
+    [ -n "$HNC_GATE_HELD" ] || return 1
+    [ -d "$GATE_LOCK" ] || return 1
+    [ "$(cat "$GATE_LOCK/pid" 2>/dev/null)" = "$HNC_GATE_HELD" ] || return 1
+    return 0
+}
+
 # mac_lock <mac>
 # 成功: rc=0,锁已持有
 # 失败: rc=1 (mac 非法) 或 rc=11 (超时)
@@ -152,8 +171,8 @@ mac_lock() {
     local i=0
 
     while [ $i -lt $_LOCK_TIMEOUT_ROUNDS ]; do
-        # 1. 门禁检查: gate 被占 → 等
-        if [ -d "$GATE_LOCK" ]; then
+        # 1. 门禁检查: gate 被占 → 等(v5.9.0: 上游调用链自己持 gate 则豁免)
+        if [ -d "$GATE_LOCK" ] && ! _gate_held_by_caller; then
             _short_sleep
             i=$((i+1))
             continue
@@ -164,8 +183,8 @@ mac_lock() {
             echo "${HNC_LOCK_HOLDER_PID:-$$}" > "$lockdir/pid"
 
             # 3. 双重检查: 抢锁过程中 gate 刚好出现?
-            # 如果是,让步给 gate,释放自己的 mac 锁
-            if [ -d "$GATE_LOCK" ]; then
+            # 如果是,让步给 gate,释放自己的 mac 锁(自己链上的 gate 不算)
+            if [ -d "$GATE_LOCK" ] && ! _gate_held_by_caller; then
                 rm -f "$lockdir/pid"
                 rmdir "$lockdir" 2>/dev/null
                 _short_sleep
