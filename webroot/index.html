@@ -139,6 +139,11 @@ html.booting[data-theme="dark"] .device-filter-bar {
   --dur-mid:  .35s;
   --dur-slow: .55s;
 
+  /* 模糊层级 token: chrome=常驻框架层(header/底栏), backdrop=模态遮罩
+   * 卡片类玻璃不再用 backdrop-filter (改为提高底色不透明度), 降低移动端合成开销 */
+  --blur-chrome:   10px;
+  --blur-backdrop: 6px;
+
   --sys-green:  #34C759;
   --sys-mint:   #00C7BE;
   --sys-cyan:   #32ADE6;
@@ -161,9 +166,10 @@ html.booting[data-theme="dark"] .device-filter-bar {
   --text-4: rgba(60, 60, 67, 0.28);
   --stroke:         rgba(0, 0, 0, 0.07);
   --stroke-strong:  rgba(0, 0, 0, 0.14);
-  --glass-bg-1:   rgba(255, 255, 255, 0.62);
-  --glass-bg-2:   rgba(255, 255, 255, 0.72);
-  --glass-bg-3:   rgba(255, 255, 255, 0.82);
+  --glass-bg-1:   rgba(255, 255, 255, 0.78);
+  --glass-bg-2:   rgba(255, 255, 255, 0.86);
+  --glass-bg-3:   rgba(255, 255, 255, 0.93);
+  --overlay-bg:   rgba(252, 252, 253, 0.95);
   --glass-shadow-1: 0 4px 16px rgba(0,0,0,0.04), 0 1px 0 rgba(255,255,255,0.9) inset;
   --glass-shadow-2: 0 8px 28px rgba(0,0,0,0.06), 0 1px 0 rgba(255,255,255,0.95) inset;
   --glass-shadow-3: 0 12px 36px rgba(0,0,0,0.10), 0 1px 0 rgba(255,255,255,1) inset;
@@ -183,21 +189,22 @@ html.booting[data-theme="dark"] .device-filter-bar {
   --bg-base:    #000;
   --bg-tinted:  #0b0b0d;
   --text-1: rgba(255, 255, 255, 0.96);
-  --text-2: rgba(235, 235, 245, 0.64);
-  --text-3: rgba(235, 235, 245, 0.52);
-  --text-4: rgba(235, 235, 245, 0.22);
+  --text-2: rgba(235, 235, 245, 0.68);
+  --text-3: rgba(235, 235, 245, 0.58);
+  --text-4: rgba(235, 235, 245, 0.28);
   --stroke:         rgba(255, 255, 255, 0.09);
   --stroke-strong:  rgba(255, 255, 255, 0.18);
-  --glass-bg-1:   rgba(255, 255, 255, 0.045);
-  --glass-bg-2:   rgba(255, 255, 255, 0.08);
-  --glass-bg-3:   rgba(255, 255, 255, 0.12);
+  --glass-bg-1:   rgba(255, 255, 255, 0.065);
+  --glass-bg-2:   rgba(255, 255, 255, 0.10);
+  --glass-bg-3:   rgba(255, 255, 255, 0.14);
+  --overlay-bg:   rgba(30, 30, 34, 0.95);
   --glass-shadow-1: 0 4px 20px rgba(0,0,0,0.35), 0 1px 0 rgba(255,255,255,0.06) inset;
   --glass-shadow-2: 0 8px 32px rgba(0,0,0,0.40), 0 1px 0 rgba(255,255,255,0.10) inset;
   --glass-shadow-3: 0 16px 40px rgba(0,0,0,0.50), 0 1px 0 rgba(255,255,255,0.45) inset, 0 -1px 0 rgba(0,0,0,0.12) inset;
   --input-bg:     rgba(255, 255, 255, 0.04);
   --input-focus:  rgba(10, 132, 255, 0.12);
   --focus-ring:   0 0 0 3px rgba(10, 132, 255, 0.32);
-  --row-divider:  rgba(255, 255, 255, 0.08);
+  --row-divider:  rgba(255, 255, 255, 0.10);
   --card-expanded-bg: #1a1a1d;
   --mesh-1: rgba(94, 92, 230, 0.55);
   --mesh-2: rgba(10, 132, 255, 0.45);
@@ -281,26 +288,25 @@ input, button, select { font-family: inherit; color: inherit; }
   border: 1px solid var(--stroke);
 }
 .glass {
-  backdrop-filter: blur(12px) saturate(140%);
-  -webkit-backdrop-filter: blur(12px) saturate(140%);
   background: var(--glass-bg-1);
   box-shadow: var(--glass-shadow-1);
 }
 .glass-elevated {
-  backdrop-filter: blur(16px) saturate(140%);
-  -webkit-backdrop-filter: blur(16px) saturate(140%);
   background: var(--glass-bg-2);
   border-color: var(--stroke-strong);
   border-radius: var(--r-lg);
   box-shadow: var(--glass-shadow-2);
 }
 .glass-floating {
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
   background: var(--glass-bg-3);
   border-color: var(--stroke-strong);
   border-radius: var(--r-xl);
   box-shadow: var(--glass-shadow-3);
+}
+/* 底栏是常驻框架层, 保留真实模糊(内容会从下方滚过) */
+.bottom-nav.glass-floating {
+  backdrop-filter: blur(var(--blur-chrome)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--blur-chrome)) saturate(130%);
 }
 .glass::before, .glass-elevated::before, .glass-floating::before {
   content: "";
@@ -331,10 +337,8 @@ input, button, select { font-family: inherit; color: inherit; }
   position: relative;
   border-radius: var(--r-xl);
   border: 1px solid var(--stroke);
-  backdrop-filter: blur(14px) saturate(140%);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
   background:
-    linear-gradient(180deg, rgba(255,255,255,.35) 0%, rgba(255,255,255,.18) 40%, rgba(255,255,255,.12) 100%),
+    linear-gradient(180deg, rgba(255,255,255,.40) 0%, rgba(255,255,255,.22) 40%, rgba(255,255,255,.14) 100%),
     var(--glass-bg-2);
   box-shadow:
     0 1px 0 rgba(255,255,255,1) inset,         /* 顶部内边高光 */
@@ -380,7 +384,7 @@ input, button, select { font-family: inherit; color: inherit; }
 [data-theme="dark"] .glass-liquid {
   background:
     linear-gradient(180deg, rgba(255,255,255,.10) 0%, rgba(255,255,255,.04) 40%, rgba(255,255,255,.02) 100%),
-    rgba(28, 28, 32, 0.72);
+    rgba(28, 28, 32, 0.86);
   box-shadow:
     0 1px 0 rgba(255,255,255,.14) inset,
     0 -1px 0 rgba(0,0,0,.20) inset,
@@ -409,15 +413,13 @@ input, button, select { font-family: inherit; color: inherit; }
   position: relative;
   border-radius: var(--r-md);
   border: 1px solid rgba(0,0,0,.04);
-  background: linear-gradient(180deg, rgba(255,255,255,.55), rgba(255,255,255,.32));
+  background: linear-gradient(180deg, rgba(255,255,255,.70), rgba(255,255,255,.48));
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.6),
     inset 0 -1px 0 rgba(0,0,0,.02);
-  backdrop-filter: blur(8px) saturate(140%);
-  -webkit-backdrop-filter: blur(8px) saturate(140%);
 }
 [data-theme="dark"] .glass-inset {
-  background: linear-gradient(180deg, rgba(255,255,255,.05), rgba(255,255,255,.02));
+  background: linear-gradient(180deg, rgba(255,255,255,.07), rgba(255,255,255,.035));
   border-color: rgba(255,255,255,.06);
   box-shadow:
     inset 0 1px 0 rgba(255,255,255,.06),
@@ -442,9 +444,9 @@ input, button, select { font-family: inherit; color: inherit; }
   padding: 12px 16px 10px;
   display: flex; align-items: center; justify-content: space-between;
   background: var(--glass-bg-2);
-  background: color-mix(in srgb, var(--bg-base) 85%, transparent);
-  backdrop-filter: blur(14px) saturate(140%);
-  -webkit-backdrop-filter: blur(14px) saturate(140%);
+  background: color-mix(in srgb, var(--bg-base) 90%, transparent);
+  backdrop-filter: blur(var(--blur-chrome)) saturate(130%);
+  -webkit-backdrop-filter: blur(var(--blur-chrome)) saturate(130%);
   border-bottom: 1px solid var(--stroke);
   animation: headerDrop var(--dur-slow) var(--ease-spring) both .08s;
 }
@@ -958,9 +960,9 @@ body.ptr-tracking .container { transition: none; }
    ═══════════════════════════════════════════════════════════════════ */
 .modal-backdrop {
   position: fixed; inset: 0;
-  background: rgba(0, 0, 0, 0.35);
-  backdrop-filter: blur(8px);
-  -webkit-backdrop-filter: blur(8px);
+  background: rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(var(--blur-backdrop));
+  -webkit-backdrop-filter: blur(var(--blur-backdrop));
   z-index: 300;
   display: none;
   align-items: center;
@@ -2331,8 +2333,8 @@ body.batch-mode .card-body-wrapper { grid-template-rows: 0fr !important; }
   z-index: 100;
   display: flex; align-items: center;
   gap: 2px; padding: 5px;
-  animation: navPop .55s var(--ease-spring) both .6s;
-  transition: transform .28s var(--ease-smooth), opacity .22s var(--ease-crisp);
+  animation: navPop var(--dur-slow) var(--ease-spring) both .6s;
+  transition: transform var(--dur-mid) var(--ease-smooth), opacity var(--dur-fast) var(--ease-crisp);
 }
 /* 键盘弹出时隐藏底部 nav, 让它滑下去淡出, 避免挡内容 */
 body.kb-open .bottom-nav {
@@ -2356,7 +2358,7 @@ body.kb-open .container {
   border-radius: 22px;
   background: linear-gradient(135deg, var(--sys-blue), var(--sys-indigo));
   box-shadow: 0 4px 12px rgba(0, 122, 255, 0.35), 0 1px 0 rgba(255,255,255,.28) inset;
-  transition: transform .45s var(--ease-spring), width .45s var(--ease-spring);
+  transition: transform var(--dur-mid) var(--ease-spring), width var(--dur-mid) var(--ease-spring);
   z-index: 0;
   pointer-events: none;
 }
@@ -2407,9 +2409,7 @@ body.kb-open .container {
   display: inline-flex; align-items: center;
   gap: 8px;
   white-space: nowrap;
-  background: var(--glass-bg-3);
-  backdrop-filter: blur(18px) saturate(140%);
-  -webkit-backdrop-filter: blur(18px) saturate(140%);
+  background: var(--overlay-bg);
   border: 1px solid var(--stroke-strong);
   box-shadow: var(--glass-shadow-3);
 }
@@ -2457,7 +2457,7 @@ body.kb-open .container {
   opacity: 0;
   transform: translateY(20px);
   pointer-events: none;
-  transition: opacity .22s ease, transform .22s ease;
+  transition: opacity var(--dur-fast) var(--ease-crisp), transform var(--dur-fast) var(--ease-crisp);
 }
 .dbgbar.show {
   opacity: 1;
@@ -2596,6 +2596,17 @@ body.kb-open .container {
 .chart-tabs { display: flex; gap: 2px; padding: 3px; background: var(--input-bg); border-radius: var(--r-xs); border: 1px solid var(--stroke); position: relative; }
 .chart-tab { padding: 4px 10px; font-size: 11px; font-weight: 600; color: var(--text-2); border-radius: 5px; cursor: pointer; z-index: 1; transition: color var(--dur-mid) var(--ease-crisp); position: relative; }
 .chart-tab.active { color: var(--text-1); }
+/* 小控件触控目标扩展: 视觉尺寸不变, 命中区外扩 8px (~≥38px),
+   降低误触/点不中。仅命中区, 不影响布局。 */
+.chart-tab::after,
+.hostname-edit::after,
+.hw-banner-close::after,
+.dbg-close::after {
+  content: "";
+  position: absolute;
+  inset: -8px;
+}
+.hostname-edit { position: relative; }
 .chart-tab-indicator {
   position: absolute;
   top: 3px; bottom: 3px;
@@ -2671,6 +2682,23 @@ body.kb-open .container {
 .bar-rx { background: linear-gradient(180deg, var(--sys-blue), rgba(0,122,255,.3)); }
 .bar-tx { background: linear-gradient(180deg, var(--sys-purple), rgba(175,82,222,.3)); }
 @keyframes barRise { from { transform: scaleY(0); opacity: .4; } to { transform: scaleY(1); opacity: 1; } }
+/* 占位骨架柱 + 提示文字 (只动 opacity, 合成器友好)
+ * .bars 已是 position:relative (见上), 这里不重复声明 */
+.bar-ghost {
+  background: var(--text-4);
+  opacity: .35;
+  animation: ghostPulse 1.6s ease-in-out infinite alternate;
+}
+@keyframes ghostPulse { from { opacity: .18; } to { opacity: .40; } }
+.bars-placeholder-label {
+  position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--text-3); font-size: 12px;
+  text-shadow: 0 1px 4px var(--bg-base);
+  pointer-events: none;
+  /* .bar-col 有 z-index:1, 提示文字必须压在幽灵柱之上 */
+  z-index: 2;
+}
 .bar-axis { display: flex; gap: 3px; font-size: 9.5px; color: var(--text-3); text-align: center; margin-top: 6px; font-family: var(--font-mono); }
 .bar-axis span { flex: 1; font-variant-numeric: tabular-nums; }
 .chart-legend { display: flex; gap: 14px; margin-top: 12px; font-size: 11.5px; color: var(--text-2); }
@@ -2731,6 +2759,25 @@ body.kb-open .container {
 /* ═══════════════════════════════════════════════════════════════════
    UTILITY
    ═══════════════════════════════════════════════════════════════════ */
+/* 首次加载骨架卡: 第一次 /api/devices 返回前显示,
+   避免先闪"暂无设备"再跳成设备列表的抖动。shimmer 只用 transform。 */
+.skel-card {
+  height: 76px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--stroke);
+  background: var(--glass-bg-1);
+  position: relative;
+  overflow: hidden;
+  margin-bottom: 10px;
+}
+.skel-card::before {
+  content: "";
+  position: absolute; inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(90deg, transparent, var(--stroke), transparent);
+  animation: skelSweep 1.4s var(--ease-smooth) infinite;
+}
+@keyframes skelSweep { to { transform: translateX(100%); } }
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(12px); }
   to   { opacity: 1; transform: translateY(0); }
@@ -2749,6 +2796,8 @@ body.kb-open .container {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+  /* 循环 shimmer / 脉冲彻底关掉, 而不是压成 0.01ms 疯狂重绘 */
+  .skel-card::before, .bar-ghost, .bar-tip, .bar { animation: none; }
 }
 </style>
 </head>
@@ -4000,8 +4049,6 @@ body.kb-open .container {
     padding: 14px 14px 12px 18px;
     border-radius: 18px;
     overflow: hidden;
-    backdrop-filter: blur(12px) saturate(140%);
-    -webkit-backdrop-filter: blur(12px) saturate(140%);
     background: linear-gradient(180deg, rgba(255,255,255,.55), rgba(255,255,255,.32));
     border: 1px solid rgba(0,0,0,.05);
     box-shadow:
@@ -4203,7 +4250,8 @@ body.kb-open .container {
     height: 100%;
     border-radius: 4px;
     background: linear-gradient(90deg, var(--sys-blue,#007aff), var(--sys-indigo,#5856d6));
-    transition: width 600ms cubic-bezier(0.4, 0, 0.2, 1);
+    /* 无 width 过渡: 排行条每轮刷新都由 createElement 新建, 初始宽度即终值,
+     * transition 永远不会触发, 留着只会白占合成层 */
   }
   .dpi-rank-bar.cat-video    { background: linear-gradient(90deg, #ff3b30, #ff9500); }
   .dpi-rank-bar.cat-social   { background: linear-gradient(90deg, #5856d6, #af52de); }
@@ -6223,6 +6271,8 @@ body.kb-open .container {
       if (seq === __fetchDevicesSeq) dbg('fetchDevices err: ' + e.message);
       return false;
     } finally {
+      // 首次拉取已结束 (无论成败) → 骨架卡可以退场
+      state.devicesLoadedOnce = true;
       if (seq === __fetchDevicesSeq) __fetchDevicesInFlight = false;
     }
   }
@@ -9062,6 +9112,7 @@ body.kb-open .container {
     batchMode: false,
     selected: new Set(),    // mac 集合
     batchAction: null,      // 当前批量待触发操作 { type, template? }
+    devicesLoadedOnce: false, // 首次 /api/devices 是否已返回 (骨架卡退场依据)
     hwBannerDismissed: false,
     currentFilter: '',       // 搜索过滤文本
     deviceFilter: (function () {
@@ -9445,6 +9496,14 @@ body.kb-open .container {
       if (searchBar) searchBar.style.display = 'none';
       if (toolbar) toolbar.style.display = 'none';
       if (listLabel) listLabel.style.display = 'none';
+      // 第一次 /api/devices 尚未返回 → 骨架卡, 不闪"暂无设备"
+      if (!state.devicesLoadedOnce) {
+        container.innerHTML =
+          '<div class="skel-card"></div><div class="skel-card"></div><div class="skel-card"></div>';
+        updateHero();
+        updateCounters();
+        return;
+      }
       container.innerHTML = `<div class="empty-state">
         <div class="empty-icon">📡</div>
         <div class="empty-title">暂无设备</div>
@@ -9668,14 +9727,15 @@ body.kb-open .container {
     const bars = $('#bars');
     const axis = $('#bar-axis');
     if (!bars || !axis) return;
-    /* v5.9.1: 原来写的是 grid-column:1/-1, 但 .bars 是 flex 容器不是 grid,
-     * 该属性完全无效 → 占位块被 flex 挤成内容宽度. 改 flex:1. */
-    bars.innerHTML = `<div style="
-      flex: 1;
-      display: flex; align-items: center; justify-content: center;
-      color: var(--text-3); font-size: 12px;
-      padding: 40px 0;
-    ">${esc(text || '等待后端连接 · 统计图稍后刷新')}</div>`;
+    /* 骨架占位: 24 根低透明度幽灵柱 + 居中提示, 避免图表区从空白跳成柱状图
+     * (v5.9.1 的单块 flex:1 占位仍是正确的布局思路, 这里换成幽灵柱形态) */
+    let ghosts = '';
+    for (let i = 0; i < 24; i++) {
+      // 确定性伪随机高度 (不用 Math.random, 每次渲染稳定不抖)
+      const h = 18 + ((i * 37) % 52);
+      ghosts += `<div class="bar-col" aria-hidden="true"><div class="bar bar-ghost" style="height:${h}%"></div></div>`;
+    }
+    bars.innerHTML = ghosts + `<div class="bars-placeholder-label">${esc(text || '等待后端连接 · 统计图稍后刷新')}</div>`;
     axis.innerHTML = '';
     renderStatsDetail(null);
   }
@@ -9722,15 +9782,9 @@ body.kb-open .container {
 
     if (!buckets || !buckets.length || buckets.every(b => !b.rx && !b.tx)) {
       __statsBuckets = [];
-      /* 文案修正: 采样周期由 watchdog 决定 (Go 30s / shell 300s), 不写死数字 */
-      bars.innerHTML = `<div style="
-        flex: 1;
-        display: flex; align-items: center; justify-content: center;
-        color: var(--text-3); font-size: 12px;
-        padding: 40px 0;
-      ">暂无采样数据 · 统计服务在后台周期采样，稍后再看</div>`;
-      axis.innerHTML = '';
-      renderStatsDetail([]);
+      /* 文案修正: 采样周期由 watchdog 决定 (Go 30s / shell 300s), 不写死数字
+       * 复用幽灵柱占位, 空数据态和加载态视觉一致 (内部已清空轴 + 明细表) */
+      renderBarsPlaceholder('暂无采样数据 · 统计服务在后台周期采样，稍后再看');
       return;
     }
     __statsBuckets = buckets;
