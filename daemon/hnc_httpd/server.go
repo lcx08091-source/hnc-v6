@@ -54,6 +54,11 @@ type server struct {
 	offloadMu    sync.RWMutex
 	offloadCache offloadResp
 	offloadReady bool // false 时返回 {active:false, detail:"PENDING"}, 避免首次启动 30s 窗口内假报 IDLE
+	// v5.9.1 P1: token_revoke.request 消费串行化。middleware 每请求都调,
+	// 多 goroutine 并发时 apply() 的 os.Remove(.working) 会删掉另一个
+	// goroutine 刚 Rename 出来、尚未 ReadFile 的 .working → 该批撤销永久
+	// 丢失(marker 已被 rename 走, 60s poll 也补不回)。快路径不取锁。
+	revokeMu sync.Mutex
 }
 
 func newServer(hncDir string) *server {
@@ -481,6 +486,16 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 					merged[k] = v
 				}
 			}
+			// v5.9.1: 虚行补 last_seen —— 前端的"近 N 天活跃"过滤按该字段
+			// 判定,缺失时虚行恒被过滤掉(等价于只看在线)。rules.json 的
+			// last_seen_persist 由 cleanup_stale_rules.sh 维护,是这里唯一
+			// 可用的离线时间来源;取不到就留 0(前端按"很久以前"处理)。
+			if v, exists := rule["last_seen_persist"]; exists {
+				merged["last_seen"] = v
+			}
+		}
+		if _, exists := merged["last_seen"]; !exists {
+			merged["last_seen"] = int64(0)
 		}
 		nmRaw, ok := namesMap[mac]
 		if !ok {
@@ -504,6 +519,13 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		}
 	}
 	for mac := range blSet {
+		appendRuleOnly(mac, nil)
+	}
+	// v5.9.1: 手动命名过、但没有任何限速/黑名单规则的设备,断开 90s 后被
+	// hotspotd 从 devices.json 剔除 → 既无真行也无虚行 → 从 /api/devices
+	// 彻底消失,UI 只能回落 MAC 兜底(用户报告的"改的名字没了")。names.json
+	// 里有条目本身就是"用户关心这台设备"的证据,同样值得一行离线记录。
+	for mac := range namesMap {
 		appendRuleOnly(mac, nil)
 	}
 
@@ -1071,15 +1093,33 @@ var tokenRevokeIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{8,256}$`)
 // (json_set.sh token_revoke/_all)到 httpd 撤销的桥。v5.9.0 单写者化:
 // shell 只追加此文件,httpd 是 remote_tokens.json 唯一写者。
 //
-// 流程: 先处理上次崩溃遗留的 .working,再把 request rename 成 .working
+// 流程: 无锁快路径(两次 stat 都 ENOENT 即返)→ 取 revokeMu → 重新 stat →
+// 先处理上次崩溃遗留的 .working,再把 request rename 成 .working
 // (原子接管 —— 与 shell 的 O_APPEND 追加并发时最坏丢一条刚追加的行,
 // 撤销是稀有人工操作且幂等,重跑即可),逐行 ALL→RevokeAll、否则校验
 // TokenID 后 Revoke,处理完删除 .working。上限读 64KB 防异常膨胀。
+// v5.9.1: 慢路径全程持 revokeMu —— 否则并发消费者的 Remove(.working) 会
+// 删掉另一个 goroutine 刚 rename 出、尚未读取的 .working,该批撤销永久丢失。
 // 调用点: 启动时(startup)、middleware 每请求鉴权前(request,ENOENT
 // 一次 stat 即返回 —— 保证撤销零延迟生效)、pruneLoop 60s 兜底(poll)。
 func (s *server) consumeTokenRevokeRequests(reason string) {
 	marker := filepath.Join(s.hncDir, "run", "token_revoke.request")
 	work := marker + ".working"
+
+	// v5.9.1 P1: 无锁快路径 —— marker 与 .working 都 ENOENT 直接返回。
+	// 这是 middleware 每请求调用的常态(两次 stat,与下方 SyncIfChanged 同级
+	// 开销),不进临界区、不与任何请求排队。漏检不丢数据:此刻才被 shell
+	// 追加出来的 marker 完好留在盘上,由下一个请求或 60s poll 消费。
+	_, errWork := os.Stat(work)
+	_, errMarker := os.Stat(marker)
+	if errWork != nil && errMarker != nil {
+		return
+	}
+
+	// 慢路径: 有活儿才取锁,全程持有到返回 —— .working 的 read/remove 与
+	// marker→.working 的 rename 从此严格串行,消除"未读先删"竞态。
+	s.revokeMu.Lock()
+	defer s.revokeMu.Unlock()
 
 	apply := func(path string) {
 		data, err := os.ReadFile(path)
@@ -1111,12 +1151,13 @@ func (s *server) consumeTokenRevokeRequests(reason string) {
 		_ = os.Remove(path)
 	}
 
+	// 持锁后重新 stat: 快路径与取锁之间,别的 goroutine 可能已把活儿干完。
 	// 崩溃恢复: 上次 rename 成功但处理中途死了 → .working 残留,先补处理。
 	if _, err := os.Stat(work); err == nil {
 		apply(work)
 	}
 	if _, err := os.Stat(marker); err != nil {
-		return // ENOENT 快路径(每请求调用的常态)
+		return // 已被并发消费者处理完
 	}
 	if err := os.Rename(marker, work); err != nil {
 		return // 已被并发消费者接管

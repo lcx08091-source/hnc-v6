@@ -100,6 +100,36 @@ static void test_lookup_manual_name_chinese(void) {
     ASSERT_EQ("客厅平板", out, "chinese name preserved");
 }
 
+/* v5.9.1 回归: pretty-printed device_names.json (冒号后有空格)。
+ *
+ * 本文件历史上所有用例写的都是紧凑 JSON,而 hnc_httpd 的 actionDeviceRename
+ * 一直用 json.MarshalIndent 写出 `"mac": "name"` —— 旧的零空白容忍子串匹配
+ * 恒失配,导致手动名对 hotspotd 从来没生效过(用户可见现象:改的名字在设备
+ * 断开后变回 MAC)。单测全绿 + 真机全挂的典型盲区,故补齐格式矩阵。 */
+static void test_lookup_manual_name_pretty_json(void) {
+    write_test_file("{\n  \"aa:bb:cc:dd:ee:ff\": \"客厅电视\"\n}");
+    char out[HN_LEN] = "";
+    int rc = lookup_manual_name("aa:bb:cc:dd:ee:ff", out, sizeof(out));
+    ASSERT_INT_EQ(1, rc, "pretty json lookup returns 1");
+    ASSERT_EQ("客厅电视", out, "pretty json value");
+}
+
+static void test_lookup_manual_name_odd_whitespace(void) {
+    write_test_file("{ \"aa:bb:cc:dd:ee:ff\"  :   \"Spaced Name\" }");
+    char out[HN_LEN] = "";
+    int rc = lookup_manual_name("aa:bb:cc:dd:ee:ff", out, sizeof(out));
+    ASSERT_INT_EQ(1, rc, "odd whitespace lookup returns 1");
+    ASSERT_EQ("Spaced Name", out, "odd whitespace value");
+}
+
+/* value 不是字符串时必须判定为"无手动名",不能把数字当名字读进来 */
+static void test_lookup_manual_name_non_string_value(void) {
+    write_test_file("{\"aa:bb:cc:dd:ee:ff\": 123}");
+    char out[HN_LEN] = "x";
+    int rc = lookup_manual_name("aa:bb:cc:dd:ee:ff", out, sizeof(out));
+    ASSERT_INT_EQ(0, rc, "non-string value returns 0");
+}
+
 static void test_lookup_manual_name_multiple(void) {
     write_test_file(
         "{\"11:11:11:11:11:11\":\"Phone\","
@@ -441,6 +471,9 @@ int main(void) {
     printf("── lookup_manual_name ──\n");
     test_lookup_manual_name_empty_file();
     test_lookup_manual_name_basic();
+    test_lookup_manual_name_pretty_json();
+    test_lookup_manual_name_odd_whitespace();
+    test_lookup_manual_name_non_string_value();
     test_lookup_manual_name_chinese();
     test_lookup_manual_name_multiple();
     test_lookup_manual_name_not_found();

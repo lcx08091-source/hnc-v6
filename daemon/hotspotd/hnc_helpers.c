@@ -130,9 +130,17 @@ int hnc_lookup_manual_name(const char *mac, const char *names_path,
     if (n == 0) return 0;
     buf[n] = '\0';
 
-    /* 查找 "mac":"name" 子串(case-insensitive mac) */
+    /* 查找 "mac":"name"(case-insensitive mac)
+     *
+     * v5.9.1: pattern 收缩为只含被引号包住的 mac,冒号与 value 起始引号
+     * 改为匹配后逐段跳空白 —— 旧 pattern 是 "\"<mac>\":\"" 的零空白容忍
+     * 子串,遇到任何 pretty-printed 的 device_names.json(`"mac": "name"`,
+     * 冒号后有空格)恒失配 → hnc_resolve_hostname_fast 的 manual 优先级
+     * 永远落空 → 用户改的名字对 hotspotd 从来没生效过(devices.json 的
+     * hostname_src 恒为 mac/oui/cache-*)。写者侧已改回紧凑格式,这里放宽
+     * 容忍是防腐:任何未来写者用什么格式都不会再静默失效。 */
     char pattern[32];
-    snprintf(pattern, sizeof(pattern), "\"%s\":\"", mac);
+    snprintf(pattern, sizeof(pattern), "\"%s\"", mac);
 
     /* rc3.1.34 修 #65: 子串搜索必须锚边界. 之前任意 buf 位置只要后续字符匹配
      * pattern 就成功. 实际场景 mac 永远 17 字符 + name_set 在写入前 escape, 当前
@@ -163,6 +171,15 @@ int hnc_lookup_manual_name(const char *mac, const char *names_path,
                 p++;
                 continue;
             }
+            /* v5.9.1: key 匹配后按 JSON 语法跳到 value 起始 —— 跳空白、
+             * 吃掉 `:`、再跳空白、要求 value 是字符串(起始 `"`)。
+             * 任一步不符说明这不是 "<mac>": "<string>" 形态,继续往后找。 */
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            if (*q != ':') { p++; continue; }
+            q++;
+            while (*q == ' ' || *q == '\t' || *q == '\n' || *q == '\r') q++;
+            if (*q != '"') { p++; continue; }
+            q++;
             /* 真匹配, q 指向 name 起始 */
             size_t i = 0;
             while (*q && *q != '"' && i < outlen - 1) {

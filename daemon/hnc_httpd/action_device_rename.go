@@ -102,7 +102,12 @@ func saveDeviceNames(path string, m map[string]string) error {
 	for k, v := range m {
 		normalized[strings.ToLower(strings.TrimSpace(k))] = v
 	}
-	data, err := json.MarshalIndent(normalized, "", "  ")
+	// v5.9.1: 必须是紧凑格式。MarshalIndent 产出 `"mac": "name"`(冒号后有
+	// 空格),而 hotspotd 的 hnc_lookup_manual_name 用零空白容忍的子串匹配
+	// (pattern = "\"<mac>\":\"")→ 恒失配 → 手动名对 C 侧从来没生效过,
+	// devices.json 的 hostname_src 永远回落 mac/oui/cache。C 侧的容忍度也
+	// 一并放宽了(见 hnc_helpers.c),这里保持紧凑是双保险 + 省 8KB 读缓冲。
+	data, err := json.Marshal(normalized)
 	if err != nil {
 		return err
 	}

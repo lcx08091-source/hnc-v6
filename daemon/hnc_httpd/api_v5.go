@@ -39,6 +39,11 @@ type configResp struct {
 	GlobalShaperUp      string `json:"global_shaper_up,omitempty"`
 	// rc35: 用户维护的飞轮排除名单(VPN/代理),不含内置清单。供设置页展示/增删。
 	FlywheelExcludeUser []string `json:"flywheel_exclude_user,omitempty"`
+	// v5.9.1: v5.2 shadow 统计是否真的在采样(run/stats_shadow.enabled 存在)。
+	// 此前统计页的"统计来源"下拉框允许选"新统计 Shadow",但该灰度装机默认
+	// 从未启用 → /api/stats?source=shadow 读不到文件时静默返回空 → 用户看到
+	// 全 0 空图且无任何解释。前端据此禁用该选项并说明原因。
+	StatsShadowEnabled bool `json:"stats_shadow_enabled"`
 	// rc3.1.13.1 删 OffloadWarn (review §3 P0): 历史上后端读 rules.json
 	// 但从无写路径, 前端 toggle 只写 localStorage 自管, 字段始终死值 false.
 	// rc3.1.12 config.json 兜底分支删除后, 死状况暴露 — 不如直接清掉
@@ -47,6 +52,10 @@ type configResp struct {
 
 func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 	resp := configResp{}
+	// v5.9.1: shadow 采样开关是 run/ 下的 marker 文件(见 stats_sample.sh)
+	if _, err := os.Stat(s.hncDir + "/run/stats_shadow.enabled"); err == nil {
+		resp.StatsShadowEnabled = true
+	}
 	// rules.json 一次读全部字段 (v5.1: rules.json 同时存 top-level hotspot_* 和 remote_enabled/auth_required)
 	// 兼容两套命名: shell 写 hotspot_auto/_pass/_delay, 旧版 Go 写 hotspot_autostart/_delay_sec
 	if rulesData, err := os.ReadFile(s.hncDir + "/data/rules.json"); err == nil {
@@ -234,10 +243,15 @@ func (s *server) runOffloadCheck() {
 	if out == "" {
 		out = "IDLE"
 	}
+	// v5.9.1: 整词判定取代子串 contains。check_offload.sh 的 stdout 只有
+	// NOMAP / IDLE / ACTIVE 三个词,子串匹配在正常路径等价;但 runBin 失败时
+	// 会把错误串塞进 out,任何含 "active" 的错误文本都会假报"硬件 offload
+	// 正在截胡限速"。前端已改成完全由该字段驱动警告横幅,假阳性会直接骚扰
+	// 用户,故收紧。保留 warning/bpf_on/offload_on 作为将来脚本扩展的整词。
+	low := strings.ToLower(strings.TrimSpace(out))
 	active := false
-	low := strings.ToLower(out)
 	for _, kw := range []string{"active", "warning", "bpf_on", "offload_on"} {
-		if strings.Contains(low, kw) {
+		if low == kw {
 			active = true
 			break
 		}
