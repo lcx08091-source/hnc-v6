@@ -1558,7 +1558,10 @@ body.batch-mode .card-body-wrapper { grid-template-rows: 0fr !important; }
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  margin-top: 10px;
+  /* v5.9.1: 原 margin-top:10px + 无 margin-bottom, 而下方 .global-ops 也没有
+     margin-top → 两张卡边框贴边框 (实测间距 0px). 统一到 search-bar 的 12px 节奏. */
+  margin-top: 0;
+  margin-bottom: 12px;
   padding: 8px 10px;
   border-radius: 16px;
   background: var(--glass-bg-1);
@@ -2603,9 +2606,67 @@ body.kb-open .container {
   transition: transform var(--dur-mid) var(--ease-spring), width var(--dur-mid) var(--ease-spring);
 }
 [data-theme="dark"] .chart-tab-indicator { background: rgba(255,255,255,.12); border: .5px solid var(--stroke-strong); }
-.bars { display: flex; align-items: flex-end; gap: 3px; height: 140px; margin-bottom: 6px; }
-.bar-col { flex: 1; display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; cursor: pointer; transition: opacity var(--dur-fast); position: relative; }
+/* v5.9.1 流量图塌陷修复:
+   .bars 是 align-items:flex-end 的 flex 行, 高度 140px 定死;
+   .bar-col 作为 flex item 之前没有定高 → 其子 .bar 的 height:X% 找不到
+   可解析的包含块高度, 全部解析成 auto (内容为空 → 0px), 24 根柱全隐形。
+   修复: .bar-col 显式 height:100%。
+   同时 .bars 加 position:relative 作为纵轴刻度线的定位上下文。 */
+.bars { display: flex; align-items: flex-end; gap: 3px; height: 140px; margin-bottom: 6px; position: relative; }
+.bar-col { flex: 1; height: 100%; display: flex; flex-direction: column; justify-content: flex-end; gap: 2px; cursor: pointer; transition: opacity var(--dur-fast); position: relative; z-index: 1; }
 .bar-col:hover { opacity: .75; }
+.bar-col.picked { opacity: 1; }
+.bar-col.picked .bar { filter: brightness(1.25); }
+
+/* 纵轴刻度线 + 左侧字节标签 (绝对定位, 不参与 flex 布局) */
+.bars-grid { position: absolute; inset: 0; pointer-events: none; z-index: 0; }
+.bars-gridline { position: absolute; left: 0; right: 0; border-top: 1px dashed var(--stroke); opacity: .55; }
+.bars-gridlabel {
+  position: absolute; left: 0; transform: translateY(-50%);
+  font-size: 9px; font-family: var(--font-mono); color: var(--text-3);
+  background: var(--glass-bg-1); padding: 0 3px; border-radius: 3px;
+  line-height: 1.4; font-variant-numeric: tabular-nums;
+}
+
+/* 柱子点击气泡 · 定位在 .bars 内部顶端, 不会溢出卡片上沿;
+   水平方向由 JS 按柱子位置设 left/right, 避免首尾柱溢出卡片侧边 */
+.bar-tip {
+  position: absolute; top: 2px;
+  z-index: 5; white-space: nowrap;
+  padding: 6px 9px; border-radius: 10px;
+  background: var(--glass-bg-2, rgba(30,30,32,.92));
+  border: 1px solid var(--stroke-strong);
+  box-shadow: 0 6px 18px rgba(0,0,0,.22);
+  font-size: 11px; font-weight: 600; color: var(--text-1);
+  font-variant-numeric: tabular-nums;
+  /* 只动 opacity —— 不能用 fadeUp, 它会覆盖 JS 设的 translateX(-50%) 居中 */
+  animation: barTipIn .16s ease both;
+}
+@keyframes barTipIn { from { opacity: 0; } to { opacity: 1; } }
+
+/* 流量明细表 */
+.stats-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.stats-table th {
+  text-align: right; font-weight: 600; color: var(--text-3);
+  padding: 5px 6px; border-bottom: 1px solid var(--stroke); white-space: nowrap;
+}
+.stats-table th:first-child, .stats-table td:first-child { text-align: left; }
+.stats-table td {
+  text-align: right; padding: 5px 6px; color: var(--text-2);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+  border-bottom: 1px solid var(--stroke);
+}
+.stats-table tr:last-child td { border-bottom: 0; }
+.stats-table td.st-label { color: var(--text-1); font-weight: 600; font-family: var(--font-mono); }
+.stats-table td.st-sum { color: var(--text-1); font-weight: 700; }
+.st-pct-wrap { position: relative; min-width: 62px; }
+.st-pct-bar {
+  position: absolute; left: 0; top: 50%; transform: translateY(-50%);
+  height: 12px; border-radius: 3px;
+  background: linear-gradient(90deg, rgba(0,122,255,.42), rgba(175,82,222,.32));
+}
+.st-pct-num { position: relative; z-index: 1; padding-left: 4px; font-size: 10.5px; }
+.stats-detail-empty { padding: 16px 4px; text-align: center; color: var(--text-3); font-size: 12px; }
 .bar { border-radius: 3px 3px 0 0; transform-origin: bottom; animation: barRise .6s var(--ease-spring) both; }
 .bar-rx { background: linear-gradient(180deg, var(--sys-blue), rgba(0,122,255,.3)); }
 .bar-tx { background: linear-gradient(180deg, var(--sys-purple), rgba(175,82,222,.3)); }
@@ -2728,17 +2789,19 @@ body.kb-open .container {
 <div id="page-devices" class="page active">
   <div class="container">
 
-    <!-- rc30.7: 此 banner 默认隐藏. 历史上一直无条件常亮误导用户.
-         v3.4.3 在 RMX5010 上手工写 tether_limit_map[iif]=0 实测前后 tc 精度
-         无可观测变化, 证明该机型 BPF 不旁路 tc, 旧文案"上行限速被 BPF 直接放行"是不准确的.
-         banner 保留作为未来主动 BPF offload 状态信号的展示位. -->
+    <!-- v5.9.1: 此 banner 现在完全由 /api/offload_status 的检测结果驱动 —
+         仅当后端整词判定 active===true 且 detail 不是 PENDING 时才显示,
+         不再依赖设置页那个默认关闭的开关 (那意味着真检测到也永远不弹).
+         文案也改回讲 offload 本身 (旧文案讲的是 Wi-Fi burst, 与 offload 无关).
+         注意: 后端没有"关闭 offload"的动作通道, 故此处不放一键关闭按钮. -->
     <div class="hw-banner" id="hw-banner" style="display:none">
       <div class="hw-banner-icon">!</div>
       <div class="hw-banner-body">
-        <div class="hw-banner-title">如果限速精度看起来不对</div>
+        <div class="hw-banner-title">检测到硬件 offload 正在转发流量</div>
         <div class="hw-banner-detail">
-          Wi-Fi 介质 burst + driver 缓冲会让 HTB 实测值高于配置 5-15%. 这是正常的物理现象, 不是 bug.
-          可以在限速面板切换"精确"模式调档 (标准/稳准/严格), 让实测值更接近设置值.
+          系统的 BPF tether offload 正在接管转发路径, 这条路径可能绕过 tc,
+          导致下行/上行限速不生效或明显偏松 (实测值远高于设置值).
+          若限速看起来失灵, 可尝试在系统设置里关闭热点的硬件加速, 或重启一次热点让流量回到 tc 路径。
         </div>
       </div>
       <button class="hw-banner-close" data-action="hw-banner-close" aria-label="忽略此提示">×</button>
@@ -2945,12 +3008,12 @@ body.kb-open .container {
 
     <div class="chart-card glass">
       <div class="chart-head">
-        <h3>24 小时分布</h3>
+        <h3 id="chart-title">24 小时分布</h3>
         <div class="chart-tabs" id="chart-tabs">
           <div class="chart-tab-indicator" id="chart-tab-ind"></div>
-          <span class="chart-tab active">24h</span>
-          <span class="chart-tab">7d</span>
-          <span class="chart-tab">30d</span>
+          <span class="chart-tab active" data-range="today">24h</span>
+          <span class="chart-tab" data-range="week">7d</span>
+          <span class="chart-tab" data-range="month">30d</span>
         </div>
       </div>
       <div class="bars" id="bars"></div>
@@ -2959,6 +3022,14 @@ body.kb-open .container {
         <span><span class="legend-dot rx"></span>下行</span>
         <span><span class="legend-dot tx"></span>上行</span>
       </div>
+    </div>
+
+    <!-- v5.9.1: 流量明细表 · 复用已有的 .sec-title.collapsible 折叠机制
+         (点击 sec-title 会隐藏它到下一个 sec-title 之间的所有兄弟节点),
+         数据直接来自 renderBars 已取到的 buckets, 不发新请求. -->
+    <div class="sec-title collapsible collapsed" style="padding-left:4px">流量明细 <span style="font-size:11px;font-weight:600;color:var(--text-3)">按时段 · 点开查看</span></div>
+    <div class="glass" id="stats-detail-card" style="padding:10px 12px;border-radius:18px;margin-bottom:14px;overflow-x:auto">
+      <div id="stats-detail-body"><div class="stats-detail-empty">暂无数据</div></div>
     </div>
 
     <!-- TC 命令参考 -->
@@ -5196,10 +5267,11 @@ body.kb-open .container {
       <div class="set-row">
         <div class="set-icon orange"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg></div>
         <div class="set-info">
-          <div class="set-label">硬件 offload 警告</div>
-          <div class="set-desc">SD8 Elite + ColorOS 已知限制</div>
+          <div class="set-label">硬件 offload</div>
+          <div class="set-desc">BPF tether 是否绕过 tc 限速</div>
         </div>
-        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="卸载警告" data-action="toggle-offload-warn"></div>
+        <!-- v5.9.1: 由开关改为只读状态行 —— 这是检测结果, 不是用户偏好. -->
+        <div class="set-value" id="rs-offload-state">—</div>
       </div>
     </div>
 
@@ -5932,6 +6004,93 @@ body.kb-open .container {
     if (window.__dbgHideTimer) { clearTimeout(window.__dbgHideTimer); window.__dbgHideTimer = null; }
   };
 
+  /* ═══════════════════════════════════════════════════════════════
+     v5.9.1 · managedInterval · visibility 感知的 setInterval 封装
+     背景: __candDotTimer(25s) / __alertPollTimer(60s) / __appsPollTimer(5s) /
+     __freshTimer(1s) 原本切后台照跑, 每次 tick 还可能 fork 一个 root shell
+     去 curl loopback, WebView 挂后台持续耗电。统一封装:
+       · document.hidden 时自动 pause (清掉底层 interval)
+       · 回前台自动 resume; 若停摆时长已超过一个周期, 立即补一次 tick
+       · handle.stop() 彻底停止 (等价旧 clearInterval)
+     ═══════════════════════════════════════════════════════════════ */
+  const __hncManagedTimers = [];
+  function managedInterval(fn, ms, opts) {
+    opts = opts || {};
+    const h = { id: null, last: 0, stopped: false };
+    function tickWrap() {
+      h.last = Date.now();
+      try { fn(); } catch (e) { try { dbg('managedInterval tick err: ' + (e && e.message || e)); } catch (_) {} }
+    }
+    function arm() {
+      if (h.stopped || h.id || document.hidden) return;
+      h.id = setInterval(tickWrap, ms);
+    }
+    h.pause = function () { if (h.id) { clearInterval(h.id); h.id = null; } };
+    h.resume = function () {
+      if (h.stopped || document.hidden) return;
+      if (h.last && Date.now() - h.last >= ms) tickWrap();   // 补一次错过的 tick
+      arm();
+    };
+    h.stop = function () {
+      h.stopped = true;
+      h.pause();
+      const i = __hncManagedTimers.indexOf(h);
+      if (i >= 0) __hncManagedTimers.splice(i, 1);
+    };
+    __hncManagedTimers.push(h);
+    if (opts.immediate) tickWrap();
+    arm();
+    return h;
+  }
+  document.addEventListener('visibilitychange', function () {
+    for (let i = 0; i < __hncManagedTimers.length; i++) {
+      const h = __hncManagedTimers[i];
+      if (document.hidden) h.pause(); else h.resume();
+    }
+  });
+
+  /* ═══════════════════════════════════════════════════════════════
+     v5.9.1 · 硬件 offload 状态 · GET /api/offload_status
+     后端返回 { active: bool, detail: "ACTIVE"|"IDLE"|"NOMAP"|"PENDING" }
+     (detail 由 check_offload.sh stdout 整词判定, active 是它的布尔结论)
+
+     旧实现的问题: 横幅要求用户先在设置页打开"硬件 offload 警告"开关,
+     而那个开关默认是关的 —— 真检测到 ACTIVE 也永远不弹, 等于没有告警。
+     现在: 设置页只显示只读状态, 横幅完全由检测结果驱动。
+     ═══════════════════════════════════════════════════════════════ */
+  const OFFLOAD_STATE_TEXT = {
+    ACTIVE:  '已启用 · 影响限速精度',
+    IDLE:    '未在转发',
+    NOMAP:   '设备不支持',
+    PENDING: '检测中…'
+  };
+  function refreshOffloadStatus() {
+    return apiGet('/api/offload_status').then(r => {
+      const detail = String((r && r.detail) || '').trim();
+      const key = detail.toUpperCase();
+      state.offloadDetail = detail;
+      const row = $('#rs-offload-state');
+      if (row) row.textContent = OFFLOAD_STATE_TEXT[key] || (detail || '—');
+
+      const banner = $('#hw-banner');
+      if (!banner) return;
+      /* 只有真的在转发才弹; PENDING 是首启 30s 窗口的未知态, 不算 */
+      const shouldShow = (r && r.active === true) && key !== 'PENDING';
+      let dismissed = '';
+      try { dismissed = sessionStorage.getItem('hnc.hw-dismiss') || ''; } catch (_) {}
+      if (shouldShow && dismissed !== detail) {
+        banner.style.display = 'flex';
+        state.hwBannerDismissed = false;
+      } else {
+        banner.style.display = 'none';
+      }
+    }).catch(e => {
+      try { dbg('offload err: ' + (e && e.message || e)); } catch (_) {}
+      const row = $('#rs-offload-state');
+      if (row) row.textContent = '读取失败';
+    });
+  }
+
   function showNoKsuPage() {
     window.__hncKsuPage = true; // 标记: 异步回调应检查此标志
     document.body.innerHTML =
@@ -6027,6 +6186,15 @@ body.kb-open .container {
           mac: d.mac,
           ip: d.ip || '-',
           hostname: d.hostname || (d.mac || '').slice(-8),
+          /* v5.9.1: 这三个字段之前在建模时被丢掉, 后果:
+           *   hostname_src → 设备卡"自定义"标签永不渲染, 重命名弹窗
+           *                  "清除自定义"按钮永不出现;
+           *   last_seen    → deviceIsRecent() 恒 false, 默认"近 7 天活跃"
+           *                  过滤等价于"只看在线";
+           *   vendor       → OUI 厂商信息拿不到。 */
+          hostname_src: d.hostname_src || '',
+          last_seen: d.last_seen || 0,
+          vendor: d.vendor || '',
           cls: classInfo.cls,
           emoji: classInfo.emoji,
           status,
@@ -6993,12 +7161,24 @@ body.kb-open .container {
   }
   function scheduleNextDPIPoll() {
     stopDPIPolling();
+    /* v5.9.1: 页面隐藏时不再续 setTimeout 链 (1s/4s 每 tick 都要 fork root shell).
+     * 回前台由下面的 visibilitychange 在 DPI 页仍激活时重新起链. */
+    if (document.hidden) return;
     const ms = dpiShouldFastPoll() ? 1000 : 4000;
     dpiPollTimer = setTimeout(async () => {
+      if (document.hidden) { dpiPollTimer = null; return; }
       await fetchDPI();
       scheduleNextDPIPoll();
     }, ms);
   }
+  /* 回前台: 仅当 DPI 页仍是当前激活页时续跑轮询链 */
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) { stopDPIPolling(); return; }
+    const dpiPage = document.getElementById('page-dpi');
+    if (dpiPage && dpiPage.classList.contains('active') && !dpiPollTimer) {
+      try { startDPIPolling(); } catch (e) { try { dbg('dpi resume err: ' + e.message); } catch (_) {} }
+    }
+  });
   function startDPIPolling() {
     stopDPIPolling();
     fetchDPI().finally(scheduleNextDPIPoll);
@@ -7318,9 +7498,9 @@ body.kb-open .container {
   }
 
   function startAlertPolling() {
-    fetchAlerts();
-    if (__alertPollTimer) clearInterval(__alertPollTimer);
-    __alertPollTimer = setInterval(fetchAlerts, ALERT_POLL_INTERVAL_MS);
+    /* v5.9.1: 改 managedInterval —— 页面隐藏时暂停, 不再后台空转 fork root shell */
+    if (__alertPollTimer && __alertPollTimer.stop) __alertPollTimer.stop();
+    __alertPollTimer = managedInterval(fetchAlerts, ALERT_POLL_INTERVAL_MS, { immediate: true });
   }
 
   /* 打开告警面板 */
@@ -8811,7 +8991,8 @@ body.kb-open .container {
   function ensureFreshnessTicker() {
     if (__freshTimer) return;
     // 每秒重算新鲜度: 轮询停滞时 age 会持续增长并翻成"已过期", 不靠后端常量
-    __freshTimer = setInterval(() => { try { updateFreshnessLine(); } catch (e) {} }, 1000);
+    // v5.9.1: managedInterval —— 隐藏时暂停; 回前台按时间戳重算, 不失真
+    __freshTimer = managedInterval(() => { try { updateFreshnessLine(); } catch (e) {} }, 1000);
   }
   function startPolling() {
     __pollVisible = !document.hidden;
@@ -9429,6 +9610,12 @@ body.kb-open .container {
   }
 
   const STATS_SOURCE_KEY = 'hnc_stats_source_v1';
+  /* v5.9.1: 图表区间. 之前 7d/30d 页签只切高亮不改请求参数 (假页签),
+   * renderBars 恒发 range=today. 后端 /api/stats 支持 today|week|month|all,
+   * daily 数据保留 90 天. */
+  let statsRange = 'today';
+  /* /api/config.stats_shadow_enabled 回读结果. null = 还没读到. */
+  let statsShadowEnabled = null;
   function getStatsSource() {
     try {
       const v = localStorage.getItem(STATS_SOURCE_KEY) || 'legacy';
@@ -9441,11 +9628,26 @@ body.kb-open .container {
   function initStatsSourceSelect() {
     const sel = $('#stats-source-select');
     if (!sel) return;
+    /* v5.9.1: shadow 采样没开时选 shadow 只会拿到全 0 空图, 且过去没有任何解释.
+     * 后端本轮在 /api/config 加了 stats_shadow_enabled, 这里据此禁用 option. */
+    const shadowOpt = sel.querySelector('option[value="shadow"]');
+    const shadowOff = (statsShadowEnabled === false);
+    if (shadowOpt) shadowOpt.disabled = shadowOff;
+    if (shadowOff && getStatsSource() === 'shadow') {
+      /* 已经被存成 shadow 的话强制退回 legacy, 免得图恒空 */
+      try { localStorage.setItem(STATS_SOURCE_KEY, 'legacy'); } catch (_) {}
+    }
     sel.value = getStatsSource();
     const hint = $('#stats-source-hint');
-    if (hint) hint.textContent = sel.value === 'shadow'
-      ? '正在读取 shadow 新统计；旧统计仍是主系统，异常时可切回'
-      : '旧统计为默认；新统计仅用于 shadow 对比';
+    if (hint) {
+      if (shadowOff) {
+        hint.textContent = '新统计未启用(shadow 采样未开启)，只能读旧统计';
+      } else if (sel.value === 'shadow') {
+        hint.textContent = '正在读取 shadow 新统计；旧统计仍是主系统，异常时可切回';
+      } else {
+        hint.textContent = '旧统计为默认；新统计仅用于 shadow 对比';
+      }
+    }
   }
   function onStatsSourceChange(v) {
     const source = v === 'shadow' ? 'shadow' : 'legacy';
@@ -9466,14 +9668,46 @@ body.kb-open .container {
     const bars = $('#bars');
     const axis = $('#bar-axis');
     if (!bars || !axis) return;
+    /* v5.9.1: 原来写的是 grid-column:1/-1, 但 .bars 是 flex 容器不是 grid,
+     * 该属性完全无效 → 占位块被 flex 挤成内容宽度. 改 flex:1. */
     bars.innerHTML = `<div style="
-      grid-column: 1 / -1;
+      flex: 1;
       display: flex; align-items: center; justify-content: center;
       color: var(--text-3); font-size: 12px;
       padding: 40px 0;
     ">${esc(text || '等待后端连接 · 统计图稍后刷新')}</div>`;
     axis.innerHTML = '';
+    renderStatsDetail(null);
   }
+
+  /* niceMax · 把峰值向上取整到 1/2/2.5/5/10 × 10^n, 让纵轴刻度是整数
+   * (照抄 daemon/hnc_httpd/web/app.js 的同名函数) */
+  function niceMax(v) {
+    if (!(v > 0)) return 1;
+    const exp = Math.floor(Math.log10(v));
+    const base = Math.pow(10, exp);
+    const d = v / base;
+    let nice;
+    if (d <= 1) nice = 1;
+    else if (d <= 2) nice = 2;
+    else if (d <= 2.5) nice = 2.5;
+    else if (d <= 5) nice = 5;
+    else nice = 10;
+    return nice * base;
+  }
+
+  const STATS_RANGE_TITLE = { today: '24 小时分布', week: '近 7 天', month: '近 30 天', all: '全部' };
+
+  /* 关掉当前打开的柱状图数值气泡 */
+  function closeBarTip() {
+    try {
+      document.querySelectorAll('.bar-tip').forEach(t => t.remove());
+      document.querySelectorAll('.bar-col.picked').forEach(c => c.classList.remove('picked'));
+    } catch (_) {}
+  }
+
+  /* v5.9.1: 最近一次 renderBars 拿到的 buckets, 供明细表复用 (不再发第二次请求) */
+  let __statsBuckets = [];
 
   async function renderBars() {
     const bars = $('#bars');
@@ -9481,36 +9715,114 @@ body.kb-open .container {
     if (!bars || !axis) return;
     let buckets = null;
     try {
-      const data = await apiGet('/api/stats', statsApiParams({ range: 'today' }));
+      /* v5.9.1: 之前这里硬编码 range:'today', 7d/30d 页签只是换个高亮的假页签 */
+      const data = await apiGet('/api/stats', statsApiParams({ range: statsRange }));
       if (data && Array.isArray(data.buckets)) buckets = data.buckets;
     } catch (e) { dbg('renderBars err: ' + e.message); }
 
     if (!buckets || !buckets.length || buckets.every(b => !b.rx && !b.tx)) {
+      __statsBuckets = [];
+      /* 文案修正: 采样周期由 watchdog 决定 (Go 30s / shell 300s), 不写死数字 */
       bars.innerHTML = `<div style="
-        grid-column: 1 / -1;
+        flex: 1;
         display: flex; align-items: center; justify-content: center;
         color: var(--text-3); font-size: 12px;
         padding: 40px 0;
-      ">暂无采样数据 · 统计服务每 5 分钟采样一次</div>`;
+      ">暂无采样数据 · 统计服务在后台周期采样，稍后再看</div>`;
       axis.innerHTML = '';
+      renderStatsDetail([]);
       return;
     }
+    __statsBuckets = buckets;
 
-    const max = Math.max(...buckets.flatMap(b => [b.rx || 0, b.tx || 0]), 1);
+    /* v5.9.1 归一化基准修正:
+     * .bar-col 里 rx/tx 两根柱是纵向堆叠的 (flex-direction:column),
+     * 旧代码用 max(各自 rx, 各自 tx) 做分母, 峰值桶能叠出 200% → 被 flex 压缩,
+     * 所有柱子的相对高度全部失真. 正确基准是堆叠总量 max(rx+tx), 再套 niceMax
+     * 让纵轴刻度落在整数上. */
+    const peak = Math.max(...buckets.map(b => (b.rx || 0) + (b.tx || 0)), 0);
+    const max = niceMax(peak || 1);
+
+    /* 非零但极小的值给一个百分比下限, 否则 1KB / 5GB ≈ 0.00002% 直接看不见 */
+    const MIN_PCT = 1.5;
+    const pct = v => {
+      v = Number(v) || 0;
+      if (v <= 0) return 0;
+      return Math.max(MIN_PCT, (v / max) * 100);
+    };
+
+    const n = buckets.length;
+    /* 轴标签自适应: 24 桶标 8 个, 7 桶全标, 30 桶标 8 个
+     * (原来固定 i%4: 7 桶时只有 2 个标签, 30 桶时挤成一坨) */
+    const every = Math.max(1, Math.ceil(n / 8));
+
     let rows = '', axisRow = '';
-    for (let i = 0; i < buckets.length; i++) {
+    for (let i = 0; i < n; i++) {
       const b = buckets[i];
-      const rxH = ((b.rx || 0) / max) * 100;
-      const txH = ((b.tx || 0) / max) * 100;
-      rows += `<div class="bar-col">
-        <div class="bar bar-tx" style="height:${txH}%; animation-delay:${i*18}ms"></div>
-        <div class="bar bar-rx" style="height:${rxH}%; animation-delay:${i*18 + 6}ms"></div>
+      const rx = Number(b.rx) || 0, tx = Number(b.tx) || 0;
+      const label = String(b.label || String(i).padStart(2, '0'));
+      const tipText = `${label} · ↓${fmtBytes(rx)} · ↑${fmtBytes(tx)} · Σ${fmtBytes(rx + tx)}`;
+      rows += `<div class="bar-col" data-bar-idx="${i}" data-label="${esc(label)}" data-rx="${rx}" data-tx="${tx}" title="${esc(tipText)}">
+        <div class="bar bar-tx" style="height:${pct(tx).toFixed(2)}%; animation-delay:${i*18}ms"></div>
+        <div class="bar bar-rx" style="height:${pct(rx).toFixed(2)}%; animation-delay:${i*18 + 6}ms"></div>
       </div>`;
-      // label 每 4 个显示一次, 剩下留空避免挤
-      axisRow += i % 4 === 0 ? `<span>${esc(b.label || String(i).padStart(2,'0'))}</span>` : `<span></span>`;
+      axisRow += (i % every === 0 || i === n - 1)
+        ? `<span>${esc(label)}</span>`
+        : `<span></span>`;
     }
-    bars.innerHTML = rows;
+    /* 纵轴刻度线 (4 档) — 绝对定位, 不参与 flex 布局, 放在柱子前面 */
+    let grid = '<div class="bars-grid">';
+    const TICKS = 4;
+    for (let t = 1; t <= TICKS; t++) {
+      const yPct = 100 - (t / TICKS) * 100;   // t=TICKS → 顶部 0%
+      grid += `<div class="bars-gridline" style="top:${yPct.toFixed(2)}%"></div>`;
+      grid += `<div class="bars-gridlabel" style="top:${yPct.toFixed(2)}%">${esc(fmtBytes(max * t / TICKS))}</div>`;
+    }
+    grid += '</div>';
+
+    bars.innerHTML = grid + rows;
     axis.innerHTML = axisRow;
+    renderStatsDetail(buckets);
+  }
+
+  /* v5.9.1 流量明细表 · 数据来自 renderBars 已取到的 buckets, 不发新请求.
+   * 占比列用背景条做横向对比. 默认只列有流量的桶. */
+  function renderStatsDetail(buckets) {
+    const box = $('#stats-detail-body');
+    if (!box) return;
+    if (!buckets || !buckets.length) {
+      box.innerHTML = '<div class="stats-detail-empty">暂无数据</div>';
+      return;
+    }
+    const rowsData = buckets
+      .map((b, i) => ({
+        label: String(b.label || String(i).padStart(2, '0')),
+        rx: Number(b.rx) || 0,
+        tx: Number(b.tx) || 0
+      }))
+      .map(r => (r.sum = r.rx + r.tx, r))
+      .filter(r => r.sum > 0);
+    if (!rowsData.length) {
+      box.innerHTML = '<div class="stats-detail-empty">该区间内没有产生流量</div>';
+      return;
+    }
+    const total = rowsData.reduce((a, r) => a + r.sum, 0) || 1;
+    let html = '<table class="stats-table"><thead><tr>' +
+      '<th>时段</th><th>下行</th><th>上行</th><th>合计</th><th>占比</th>' +
+      '</tr></thead><tbody>';
+    for (const r of rowsData) {
+      const p = (r.sum / total) * 100;
+      html += '<tr>' +
+        `<td class="st-label">${esc(r.label)}</td>` +
+        `<td>${esc(fmtBytes(r.rx))}</td>` +
+        `<td>${esc(fmtBytes(r.tx))}</td>` +
+        `<td class="st-sum">${esc(fmtBytes(r.sum))}</td>` +
+        `<td class="st-pct-wrap"><div class="st-pct-bar" style="width:${p.toFixed(1)}%"></div>` +
+        `<span class="st-pct-num">${p.toFixed(1)}%</span></td>` +
+        '</tr>';
+    }
+    html += '</tbody></table>';
+    box.innerHTML = html;
   }
 
   /* 今日累计 · 从 /api/stats?range=today 的 buckets 求和, 配合昨日对比
@@ -9572,18 +9884,39 @@ body.kb-open .container {
     ind.style.width = itemRect.width + 'px';
     ind.style.transform = `translateX(${x - 5}px)`;
   }
+  /* v5.9.1: 统计页自动刷新. 进页起 60s 定时器, 离开清除.
+   * 之前进页后图完全冻住, 必须切走再切回才更新. */
+  let __statsPollTimer = null;
+  function startStatsPolling() {
+    stopStatsPolling();
+    __statsPollTimer = managedInterval(() => { renderBars(); fetchStatsDay(); }, 60 * 1000);
+  }
+  function stopStatsPolling() {
+    if (__statsPollTimer) { if (__statsPollTimer.stop) __statsPollTimer.stop(); __statsPollTimer = null; }
+  }
+
   function switchPage(name, navItem) {
     const old = $('.page.active');
     const next = $('#page-' + name);
     if (!next || old === next) return;
-    old.classList.remove('active');
-    old.classList.add('leaving');
+    /* v5.9.1: 180ms 转场窗口内连点两个 tab, 第二次进来时 .page.active 已经被
+     * 第一次的 old.classList.remove('active') 摘掉 → old 为 null → TypeError,
+     * 整个 switchPage 抛出, 导航高亮和实际页面失同步. 这里兜底. */
+    if (old) {
+      old.classList.remove('active');
+      old.classList.add('leaving');
+    } else {
+      $$('.page.leaving').forEach(p => p.classList.remove('leaving'));
+    }
     setTimeout(() => {
-      old.classList.remove('leaving');
+      if (old) old.classList.remove('leaving');
+      /* 兜底路径里可能已有别的页面被标 active, 统一清一遍再上 */
+      $$('.page.active').forEach(p => { if (p !== next) p.classList.remove('active'); });
       next.classList.add('active');
       if (name === 'stats') {
         renderBars();
         fetchStatsDay();
+        startStatsPolling();
         requestAnimationFrame(() => {
           const activeTab = $('.chart-tab.active');
           if (activeTab) moveChartTabInd(activeTab);
@@ -9624,6 +9957,11 @@ body.kb-open .container {
     }
     if (name !== 'apps') {
       appsStopPolling();
+    }
+    /* v5.9.1: 离开统计页停掉 60s 自动刷新, 并收掉可能还开着的柱状图气泡 */
+    if (name !== 'stats') {
+      stopStatsPolling();
+      try { closeBarTip(); } catch (_) {}
     }
   }
   function moveChartTabInd(target) {
@@ -10356,7 +10694,9 @@ body.kb-open .container {
   }
   function batchSelectAll() {
     state.selected.clear();
-    $('.device-card').forEach(c => {
+    /* v5.9.1: 原来写的是 $('.device-card') —— $ 返回单个 Element, .forEach 直接
+     * 抛 TypeError, "全选"从来没能用过 (相邻 batchSelectNone 用的就是 $$). */
+    $$('.device-card').forEach(c => {
       if (c.style.display === 'none') return;
       const mac = c.getAttribute('data-mac');
       if (mac) state.selected.add(mac);
@@ -10810,7 +11150,10 @@ body.kb-open .container {
     }
   }
 
-  document.addEventListener('click', (e) => {
+  /* v5.9.1: 全局点击委托的回调体抽成具名函数, 注册处包 try/catch.
+   * 之前任何一个分支抛错都会打断整条委托链 —— 后面所有 data-action 一起失效
+   * (batchSelectAll 的 $ vs $$ TypeError 就曾这样连坐)。 */
+  function __hncGlobalClickHandler(e) {
 
     /* v5.2-rc1.10 · retry 先尝试 fetch，失败后延迟自动 bridge 一次 */
     if (e.target.closest('[data-action="bridge-retry"]')) {
@@ -11507,7 +11850,9 @@ body.kb-open .container {
     if (e.target.closest('[data-action="hw-banner-close"]')) {
       e.stopPropagation();
       $('#hw-banner').style.display = 'none';
-      try { sessionStorage.setItem('hnc.hw-dismiss', '1'); } catch (err) {}
+      /* v5.9.1: 记录被忽略时的 detail 而不是死值 '1' —— 这样 IDLE→ACTIVE 的
+       * 新事件(detail 变了)还能重新弹出, 而不是本会话内永久静音. */
+      try { sessionStorage.setItem('hnc.hw-dismiss', String(state.offloadDetail || '1')); } catch (err) {}
       state.hwBannerDismissed = true;
       return;
     }
@@ -11525,15 +11870,45 @@ body.kb-open .container {
     const navItem = e.target.closest('.nav-item');
     if (navItem) { switchPage(navItem.dataset.page, navItem); return; }
 
-    /* 图表 tab */
+    /* 图表 tab · v5.9.1: 真正切 range (旧版只切高亮, 请求恒 range=today) */
     const chartTab = e.target.closest('.chart-tab');
     if (chartTab) {
       $$('.chart-tab').forEach(t => t.classList.remove('active'));
       chartTab.classList.add('active');
       moveChartTabInd(chartTab);
+      statsRange = chartTab.dataset.range || 'today';
+      const ct = $('#chart-title');
+      if (ct) ct.textContent = STATS_RANGE_TITLE[statsRange] || '流量分布';
+      closeBarTip();
       renderBars();
+      fetchStatsDay();
       return;
     }
+
+    /* 图表柱子 · v5.9.1: .bar-col 一直挂着 cursor:pointer 但从来没有点击处理,
+     * 这是个死承诺. 现在点击弹数值气泡, 再点/点别处关闭. */
+    const barCol = e.target.closest('.bar-col');
+    if (barCol) {
+      const already = barCol.classList.contains('picked');
+      closeBarTip();
+      if (!already) {
+        const rx = Number(barCol.dataset.rx) || 0;
+        const tx = Number(barCol.dataset.tx) || 0;
+        const tip = document.createElement('div');
+        tip.className = 'bar-tip';
+        tip.textContent = `${barCol.dataset.label || ''} · ↓${fmtBytes(rx)} · ↑${fmtBytes(tx)} · Σ${fmtBytes(rx + tx)}`;
+        /* 水平锚定: 靠左的柱子气泡左对齐, 靠右的右对齐, 中间居中 —— 防溢出 */
+        const idx = Number(barCol.dataset.barIdx) || 0;
+        const total = (barCol.parentElement ? barCol.parentElement.querySelectorAll('.bar-col').length : 1) || 1;
+        if (idx < total / 3) { tip.style.left = '0'; }
+        else if (idx > total * 2 / 3) { tip.style.right = '0'; }
+        else { tip.style.left = '50%'; tip.style.transform = 'translateX(-50%)'; }
+        barCol.classList.add('picked');
+        barCol.appendChild(tip);
+      }
+      return;
+    }
+    closeBarTip();
 
     /* Toggle */
     const tog = e.target.closest('.toggle');
@@ -11601,10 +11976,8 @@ body.kb-open .container {
             })
             .catch(e => { doRevert(); toast('切换失败: ' + e.message, 'err'); });
           break;
-        case 'toggle-offload-warn':
-          try { localStorage.setItem('hnc.offload-warn', on ? '1' : '0'); } catch (err) {}
-          toast('Offload 警告: ' + (on ? '显示' : '隐藏'), 'ok');
-          break;
+        /* v5.9.1: toggle-offload-warn 已删除 —— 硬件 offload 是检测结果不是偏好,
+         * 横幅现在完全由 /api/offload_status 驱动, 设置页只留只读状态行. */
         default:
           toast(on ? '已启用' : '已禁用', 'ok');
       }
@@ -11943,6 +12316,13 @@ body.kb-open .container {
       return;
     }
     if (action === 'log-refresh')  { reloadCurrentLog(); return; }
+  }
+  document.addEventListener('click', (e) => {
+    try {
+      __hncGlobalClickHandler(e);
+    } catch (err) {
+      try { dbg('click delegate err: ' + (err && err.message || err), true); } catch (_) {}
+    }
   });
 
   /* 点击 modal backdrop 外关闭(不关按钮) */
@@ -12267,11 +12647,13 @@ body.kb-open .container {
       // Whitelist / Auth / Offload · 全部 add/remove 对称
       setTog($$('[data-action="toggle-wl"]')[0],            !!cfg.whitelist_mode);
       setTog($$('[data-action="toggle-auth"]')[0],          !!cfg.auth_required);
-      // rc3.1.13.1: offload_warn 完全 client-side (review §3 P0).
-      // 后端 cfg 不再返这字段, 用 localStorage 自管.
-      var owLocal = false;
-      try { owLocal = localStorage.getItem('hnc.offload-warn') === '1'; } catch (err) {}
-      setTog($$('[data-action="toggle-offload-warn"]')[0],  owLocal);
+      // v5.9.1: offload 警告开关已删除 (改成只读状态行 #rs-offload-state,
+      // 由 /api/offload_status 轮询驱动), 这里不再回读 hnc.offload-warn.
+      // v5.9.1: shadow 统计是否启用 —— 决定"新统计 Shadow"选项是否可选
+      if (cfg.stats_shadow_enabled !== undefined) {
+        statsShadowEnabled = !!cfg.stats_shadow_enabled;
+        try { initStatsSourceSelect(); } catch (e) { dbg('statsSource init err: ' + e.message); }
+      }
       // rc3.1.3: 远程访问服务开关 + url-badge 动态状态
       setTog($$('[data-action="toggle-remote"]')[0],        !!cfg.remote_enabled);
       // rc32: 全局带宽整形(opt-in)状态回读 —— 开关 + 面板展开 + 带宽输入框
@@ -12294,16 +12676,9 @@ body.kb-open .container {
     // rc3.1.26 · Go httpd 改用内存 cache (OffloadLoop goroutine 每 30s 刷),
     //   apiOffloadStatus 直接读 cache 返回, 0ms · 不再需要 setTimeout 包装.
     //   首启 30s 窗口内返回 {active:false, detail:"PENDING"}, 不显示 banner.
-    apiGet('/api/offload_status').then(r => {
-      const banner = $('#hw-banner');
-      let warnEnabled = false;
-      try { warnEnabled = localStorage.getItem('hnc.offload-warn') === '1'; } catch (err) {}
-      if (r.active && banner && warnEnabled && !sessionStorage.getItem('hnc.hw-dismiss')) {
-        banner.style.display = 'flex';
-      } else if (banner) {
-        banner.style.display = 'none';
-      }
-    }).catch(e => dbg('offload err: ' + e.message));
+    refreshOffloadStatus();
+    /* v5.9.1: 挂 60s 轮询 —— 之前只在 init 查一次, 运行中变成 ACTIVE 永远不弹 */
+    managedInterval(refreshOffloadStatus, 60 * 1000);
 
     // 7. 本地刷新模式 · 仅影响 WebUI 前台轮询，不改变后端/数据面规则
     try {
@@ -12502,10 +12877,11 @@ body.kb-open .container {
 
   function appsStartPolling() {
     appsStopPolling();
-    __appsPollTimer = setInterval(function(){ appsLoad(true); }, 5000);
+    /* v5.9.1: managedInterval —— 应用页 5s 轮询在页面隐藏时自动暂停 */
+    __appsPollTimer = managedInterval(function(){ appsLoad(true); }, 5000);
   }
   function appsStopPolling() {
-    if (__appsPollTimer) { clearInterval(__appsPollTimer); __appsPollTimer = null; }
+    if (__appsPollTimer) { if (__appsPollTimer.stop) __appsPollTimer.stop(); __appsPollTimer = null; }
   }
 
   // Iconize a package name to one of our app-icon themes.
@@ -12591,8 +12967,8 @@ body.kb-open .container {
         updateAppsNavDot(self);
       }).catch(function(){});
     };
-    tick();
-    __candDotTimer = setInterval(tick, 25000);
+    /* v5.9.1: managedInterval —— 旧版 25s 定时器切后台照跑 curl */
+    __candDotTimer = managedInterval(tick, 25000, { immediate: true });
   }
 
   function appsLoad(silent) {
