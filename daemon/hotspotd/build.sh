@@ -86,6 +86,12 @@ $CC \
 # 包装(bpf.c),不调 bpf_object__*/ring_buffer__*,故链接器不会拉入需要 libelf/libz
 # 的 libbpf.c/elf.c/btf.c 目标 → 无需这两个库(且我们只有 glibc 版,链了反而炸)。
 
+# v5.9.0: hnc_lsm_loader.c 当前不参与链接(SRCS 用的是 lsm/hnc_lsm_stub.c),
+# 但保持可编译 —— 防止将来换回真 loader 时才发现源码早已腐烂。语法坏即构建失败。
+echo "[build] syntax gate: lsm/hnc_lsm_loader.c (not linked, kept compilable)"
+$CC -fsyntax-only -std=c11 -Wall -Wextra -Wno-unused-parameter \
+    -D_GNU_SOURCE -DANDROID -I"$LIBS_OUT/include" lsm/hnc_lsm_loader.c
+
 strip "$OUT" 2>/dev/null || true
 echo "[build] OK: $(ls -lh "$OUT" | awk '{print $5}')  $OUT"
 

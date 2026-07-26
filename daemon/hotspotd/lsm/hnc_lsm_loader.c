@@ -20,6 +20,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <stdatomic.h>   /* v5.9.0: rb_should_stop 跨线程标志原子化 */
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
@@ -66,7 +67,9 @@ static struct {
     struct ring_buffer  *rb;
     pthread_t            rb_thread;
     int                  rb_thread_started;
-    int                  rb_should_stop;
+    /* v5.9.0: shutdown(主线程)写 / ringbuf_thread 读, 无锁 —— 普通 int
+     * 属 C11 data race(UB, -O2 理论可把循环条件外提)。_Atomic 一行消除。 */
+    _Atomic int          rb_should_stop;
 
     pthread_mutex_t      stat_lock;
     hnc_lsm_status_t     stat;
@@ -220,7 +223,7 @@ int hnc_lsm_init(const char *bpf_object_path,
     int fd = bpf_obj_get(target_limit_map_path);
     if (fd < 0) {
         set_fail("bpf_obj_get(%s): %s", target_limit_map_path, strerror(errno));
-        return -1;
+        return -1;   /* 此时尚无任何已持资源 */
     }
     g.target_limit_map_fd = fd;
 
@@ -229,7 +232,7 @@ int hnc_lsm_init(const char *bpf_object_path,
     uint32_t info_len = sizeof(info);
     if (bpf_obj_get_info_by_fd(fd, &info, &info_len) != 0) {
         set_fail("bpf_obj_get_info_by_fd: %s", strerror(errno));
-        return -1;
+        goto fail;
     }
     pthread_mutex_lock(&g.stat_lock);
     g.stat.protected_map_id = info.id;
@@ -244,8 +247,8 @@ int hnc_lsm_init(const char *bpf_object_path,
     if (!g.obj || libbpf_get_error(g.obj)) {
         long err = libbpf_get_error(g.obj);
         set_fail("bpf_object__open_file: %s", strerror(-err));
-        g.obj = NULL;
-        return -1;
+        g.obj = NULL;   /* 可能是 error-pointer, 清掉防 fail 标签误 close */
+        goto fail;
     }
     fprintf(stderr, "[lsm] step3: open OK\n"); fflush(stderr);
 
@@ -255,9 +258,7 @@ int hnc_lsm_init(const char *bpf_object_path,
     int load_err = bpf_object__load(g.obj);
     if (load_err) {
         set_fail("bpf_object__load: %s", strerror(-load_err));
-        bpf_object__close(g.obj);
-        g.obj = NULL;
-        return -1;
+        goto fail;
     }
     fprintf(stderr, "[lsm] step4: load OK\n"); fflush(stderr);
 
@@ -265,15 +266,13 @@ int hnc_lsm_init(const char *bpf_object_path,
     g.prog = bpf_object__find_program_by_name(g.obj, "hnc_check_bpf");
     if (!g.prog) {
         set_fail("find prog 'hnc_check_bpf' failed");
-        bpf_object__close(g.obj); g.obj = NULL;
-        return -1;
+        goto fail;
     }
     g.ctrl_map = bpf_object__find_map_by_name(g.obj, "hnc_ctrl_map");
     g.events_map = bpf_object__find_map_by_name(g.obj, "hnc_lsm_events");
     if (!g.ctrl_map || !g.events_map) {
         set_fail("find map ctrl/events failed");
-        bpf_object__close(g.obj); g.obj = NULL;
-        return -1;
+        goto fail;
     }
     g.ctrl_map_fd = bpf_map__fd(g.ctrl_map);
     g.events_map_fd = bpf_map__fd(g.events_map);
@@ -292,8 +291,7 @@ int hnc_lsm_init(const char *bpf_object_path,
         uint32_t k = 0;
         if (bpf_map_update_elem(g.ctrl_map_fd, &k, &v, BPF_ANY) != 0) {
             set_fail("populate ctrl: %s", strerror(errno));
-            bpf_object__close(g.obj); g.obj = NULL;
-            return -1;
+            goto fail;
         }
         fprintf(stderr, "[lsm] step6: ctrl populated\n"); fflush(stderr);
     }
@@ -310,9 +308,8 @@ int hnc_lsm_init(const char *bpf_object_path,
     if (!g.link || libbpf_get_error(g.link)) {
         long err = libbpf_get_error(g.link);
         set_fail("attach_kprobe: %s", strerror(-err));
-        g.link = NULL;
-        bpf_object__close(g.obj); g.obj = NULL;
-        return -1;
+        g.link = NULL;   /* 可能是 error-pointer, 清掉防 fail 标签误 destroy */
+        goto fail;
     }
     fprintf(stderr, "[lsm] step7: kprobe attached to security_bpf\n");
     fflush(stderr);
@@ -321,16 +318,17 @@ int hnc_lsm_init(const char *bpf_object_path,
     g.rb = ring_buffer__new(g.events_map_fd, ringbuf_handle_event, NULL, NULL);
     if (!g.rb) {
         set_fail("ring_buffer__new: %s", strerror(errno));
-        bpf_link__destroy(g.link); g.link = NULL;
-        bpf_object__close(g.obj); g.obj = NULL;
-        return -1;
+        goto fail;
     }
     g.rb_should_stop = 0;
     if (pthread_create(&g.rb_thread, NULL, ringbuf_thread, NULL) != 0) {
-        fprintf(stderr, "[lsm] WARN: ringbuf thread start failed\n");
-    } else {
-        g.rb_thread_started = 1;
+        /* v5.9.0: 此前仅 WARN 却照样置 ACTIVE —— 而 Plan B 的整个防护就是
+         * ringbuf 事件 → 用户态 counter-write,consumer 线程没起 = guard
+         * 完全不工作却对外报 active(静默失效)。现在视为 init 失败。 */
+        set_fail("ringbuf consumer thread start failed");
+        goto fail;
     }
+    g.rb_thread_started = 1;
     fprintf(stderr, "[lsm] step8: ringbuf consumer started\n"); fflush(stderr);
 
     pthread_mutex_lock(&g.stat_lock);
@@ -343,6 +341,22 @@ int hnc_lsm_init(const char *bpf_object_path,
             g.stat.protected_map_id, initial_ifindex, (uint32_t)getpid());
     fflush(stderr);
     return 0;
+
+fail:
+    /* v5.9.0: 统一失败清理(顺序照抄 hnc_lsm_shutdown)。旧实现各错误路径
+     * 手工局部清理,step2 之后的 6 条路径全部泄漏 target_limit_map_fd ——
+     * 且失败时 initialized 恒 0,hnc_lsm_shutdown 首行直接 return,该 fd
+     * 永久不可回收。 */
+    if (g.rb)   { ring_buffer__free(g.rb);   g.rb = NULL; }
+    if (g.link) { bpf_link__destroy(g.link); g.link = NULL; }
+    if (g.obj)  { bpf_object__close(g.obj);  g.obj = NULL; }
+    g.prog = NULL;
+    g.ctrl_map = NULL;
+    g.events_map = NULL;
+    g.ctrl_map_fd = -1;
+    g.events_map_fd = -1;
+    if (g.target_limit_map_fd >= 0) { close(g.target_limit_map_fd); g.target_limit_map_fd = -1; }
+    return -1;
 }
 
 int hnc_lsm_update_ifindex(uint32_t new_ifindex)
