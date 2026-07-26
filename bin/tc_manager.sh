@@ -1978,7 +1978,13 @@ restore_rules() {
     # 失败不中断循环(尽力恢复其余设备),但计数>0 时 restore 最终 rc=1。
     local restore_side_fail=0
     for mac in $macs; do
-        tc_action_lock_renew
+        # v5.9.1 P1: 续租失败 = 锁已易主(被陈旧回收交给别人)。必须立即中止:
+        # 继续跑就是无锁写 tc 树,正是这把锁要防的双写者。rc 12 复用 dispatcher
+        # 既有的 busy 约定,watchdog 据此判为"竞争"而非"修复失败",不污染熔断。
+        if ! tc_action_lock_renew; then
+            log_error "restore_rules: 锁已易主, 中止恢复 (mac=$mac)"
+            return 12
+        fi
         # v3.4.1：纯 awk 解析。先在 rules.json 里定位 "mac": { ... } 块，
         # 然后从块里逐字段抽 mark_id/ip/down_mbps/up_mbps/delay_ms/jitter_ms。
         # 不依赖 python3，浮点数原样保留。
@@ -2141,7 +2147,11 @@ restore_rules() {
     local bl_seg bl_macs bl_mac bl_rc
     bl_seg=$(grep -oE '"blacklist"[[:space:]]*:[[:space:]]*\[[^]]*\]' "$RULES_FILE" 2>/dev/null)
     if [ -n "$bl_seg" ]; then
-        tc_action_lock_renew
+        # v5.9.1 P1: 同上 —— 锁易主即中止(见 per-MAC 循环处注释)
+        if ! tc_action_lock_renew; then
+            log_error "restore_rules: 锁已易主, 中止恢复 (blacklist 阶段)"
+            return 12
+        fi
         bl_macs=$(echo "$bl_seg" | grep -oE '([0-9a-f]{2}:){5}[0-9a-f]{2}')
         for bl_mac in $bl_macs; do
             [ -n "$bl_mac" ] || continue
@@ -2212,6 +2222,9 @@ TC_ACTION_LEASE_MAX_SEC=90
 
 tc_action_lock() {
     mkdir -p "$HNC_DIR/run" 2>/dev/null || true
+    # v5.9.1: 清理 mv 抢占后可能残留的 stale 坟场目录(mv 与 rm 之间被
+    # SIGKILL 的极端情况),防 run/ 下堆积。
+    rm -rf "$TC_ACTION_LOCK".stale.* 2>/dev/null || true
     local now old age owner owner_pid
     now=$(date +%s 2>/dev/null || echo 0)
     if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
@@ -2240,7 +2253,17 @@ tc_action_lock() {
         fi
         log_error "tc_action_lock: stale lock age=${age}s owner=${owner}; reclaim"
     fi
-    rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
+    # v5.9.1 P1: 陈旧回收用 mv 原子抢占。原 `rm -rf`+`mkdir` 非互斥 —— 两个
+    # racer 都过陈旧判定时,后到的 rm -rf 会删掉先到者刚建的新锁,双方 mkdir
+    # 均成功 → 双持有并发改 tc 树。rename(2) 同目录原子,只有一个 racer 能把
+    # 陈旧目录搬到自己的私有名字下,失败者源已不存在,落回 busy。
+    _stale_grave="${TC_ACTION_LOCK}.stale.$$.$now"
+    if ! mv "$TC_ACTION_LOCK" "$_stale_grave" 2>/dev/null; then
+        log "tc_action_lock: reclaim lost race owner=${owner} requester=$1"
+        echo "TC_ACTION_BUSY=1"
+        return 1
+    fi
+    rm -rf "$_stale_grave" 2>/dev/null || true
     if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
         echo "$$ $1 $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
         return 0
@@ -2251,14 +2274,38 @@ tc_action_lock() {
 }
 
 # v5.9.0: 长操作(restore)在循环内周期续租,配合上面的三态判定。
-# 只重写 owner 第 3 字段(时间戳),pid/requester 不变。
+# v5.9.1 P1: 续租必须校验属主 —— 锁被陈旧回收(活着但 90s 未续租的 hung
+# 场景)交给别人后,老 restore 醒来不得覆写新持有者的 owner 静默偷回锁;
+# 第 2 字段 requester 原样保留(不再硬编码 restore 污染 busy 日志)。
+# 返回: 0=续租成功(仍是自己的锁) / 1=锁已易主或已消失(调用方必须中止)。
 tc_action_lock_renew() {
-    [ -d "$TC_ACTION_LOCK" ] || return 0
-    echo "$$ restore $(date +%s 2>/dev/null || echo 0)" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
+    local owner owner_pid owner_req now
+    [ -d "$TC_ACTION_LOCK" ] || return 1
+    owner=$(cat "$TC_ACTION_LOCK/owner" 2>/dev/null)
+    [ -n "$owner" ] || return 1
+    owner_pid=$(echo "$owner" | awk '{print $1}')
+    owner_req=$(echo "$owner" | awk '{print $2}')
+    [ "$owner_pid" = "$$" ] || return 1
+    [ -n "$owner_req" ] || owner_req=restore
+    now=$(date +%s 2>/dev/null || echo 0)
+    echo "$$ $owner_req $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || return 1
+    return 0
 }
 
+# v5.9.1 P1: 只有属主能释放。锁已易主时仅告警不删 —— 删了会把新属主的
+# 临界区一起打开,比"漏删一次由 25s/90s 陈旧回收兜底"危险得多。
+# rc 刻意保持 0: dispatcher 各分支依赖 unlock 不干扰 exit $rc 传播。
 tc_action_unlock() {
+    local owner owner_pid
+    [ -d "$TC_ACTION_LOCK" ] || return 0
+    owner=$(cat "$TC_ACTION_LOCK/owner" 2>/dev/null)
+    owner_pid=$(echo "$owner" | awk '{print $1}')
+    if [ -n "$owner_pid" ] && [ "$owner_pid" != "$$" ]; then
+        log_error "tc_action_unlock: lock now owned by pid=$owner_pid (self=$$); refuse to release"
+        return 0
+    fi
     rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
+    return 0
 }
 
 tc_snapshot_async() {

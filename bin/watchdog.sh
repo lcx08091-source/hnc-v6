@@ -400,7 +400,14 @@ full_restore() {
     fi
     sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1
     local tc_restore_rc=$?
-    if [ $tc_init_rc -eq 0 ] && [ $tc_restore_rc -eq 0 ]; then
+    # v5.9.1: rc=12 是 tc_manager 的 busy 约定(拿不到 tc_action_lock,或
+    # restore 中途发现锁已易主而主动中止)。这是良性竞争 —— 说明另一个进程
+    # 正在正常改 tc 树,不是修复失败。计进 tc_repair 熔断器会让 3 次竞争就
+    # 停掉 5 分钟的自动修复能力(语义错配)。只置 _HEALTH_RC=1 让下轮重试。
+    if [ $tc_restore_rc -eq 12 ]; then
+        log "full_restore: tc restore busy/lock lost (rc=12), not counted as repair failure"
+        _HEALTH_RC=1
+    elif [ $tc_init_rc -eq 0 ] && [ $tc_restore_rc -eq 0 ]; then
         tc_repair_record 1
         _HEALTH_RC=0
     else

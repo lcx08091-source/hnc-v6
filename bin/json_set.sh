@@ -877,9 +877,12 @@ name_get)
     if ! json_name_get_hnc_json "$MAC"; then
         json_legacy_fallback_warn "name_get" "object-get"
         # 提取 "mac":"name" 中的 name
-        grep -o "\"$MAC\":\"[^\"]*\"" "$NAMES_FILE" 2>/dev/null \
+        # v5.9.1: 容忍 key 与 value 之间的空白(pretty JSON 的 `"mac": "name"`)。
+        # 旧正则零空白容忍,遇到任何格式化过的 device_names.json 恒不匹配。
+        # 与 stats_rollup.sh 的 [[:space:]]* 约定对齐。
+        grep -oE "\"$MAC\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$NAMES_FILE" 2>/dev/null \
             | head -1 \
-            | sed "s/^\"$MAC\":\"//; s/\"$//"
+            | sed "s/^\"$MAC\"[[:space:]]*:[[:space:]]*\"//; s/\"$//"
     fi
     ;;
 

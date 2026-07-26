@@ -75,7 +75,12 @@ device_has_rule() {
     [ -f "$RULES" ] || return 1
     block=$(grep -oE "\"$mac\":[[:space:]]*\\{[^}]*\\}" "$RULES" 2>/dev/null | head -1)
     [ -z "$block" ] && return 1
-    echo "$block" | grep -qE '"(limit_down|limit_up)":[[:space:]]*"[1-9]' && return 0
+    # v5.9.1: 字段名修正。rules.json 的限速字段实际是 down_mbps/up_mbps
+    # (见 json_set.sh device 写入与 server.go buildDevicesPayload),
+    # 从来没有 limit_down/limit_up —— 旧正则恒不匹配,导致"有限速规则的
+    # 离线设备"被当成无规则一并清掉,与本脚本 kept_with_rules 的承诺相反。
+    # 数值形态也修正: 这两个字段是裸数字(可含小数)而非带引号字符串。
+    echo "$block" | grep -qE '"(down_mbps|up_mbps)":[[:space:]]*[0-9]*[1-9]' && return 0
     echo "$block" | grep -qE '"delay_ms":[[:space:]]*[1-9]' && return 0
     echo "$block" | grep -qE '"whitelist":[[:space:]]*true' && return 0
     return 1
