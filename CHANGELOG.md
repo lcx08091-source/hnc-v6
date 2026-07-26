@@ -37,6 +37,7 @@
 - **LSM loader 死代码修复+防腐**(`daemon/hotspotd/lsm/hnc_lsm_loader.c` + `build.sh`)。init 错误路径统一 goto fail(修 6 条路径的 target_limit_map_fd 永久泄漏);pthread_create 失败不再置 ACTIVE(consumer 线程没起 = guard 完全不工作却报 active);rb_should_stop 改 `_Atomic int`;build.sh 加 `-fsyntax-only` 门禁(loader 仍不链接,防将来启用时踩雷)。
 
 ### Internals
+- **build.yml 增加 workflow_dispatch 一键发版入口**。Actions 页 Run workflow 填 `release_tag`(如 v5.9.0)→ 构建后在同一个 run 内创建 tag + GitHub Release 并挂 zip。四重护栏:tag 格式(与两护栏脚本同正则)、必须等于 module.prop 的 version、仅限 main、tag 不得已存在。背景:机器人 git 凭证只能推分支不能推 tag,且 GITHUB_TOKEN 建的 tag 不触发其他 workflow,故 tag+release 必须在构建 run 内完成。原 tag push 发版路径不变;留空 release_tag = 只构建(原行为)。
 - **build.yml 增加 `pull_request` 触发器**。此前只在 push main / tag / 手动时构建,PR 上零 check —— C 层交叉编译等"只能靠 CI 验证"的环节要等合并 main 后才暴露问题。现在 PR 即跑全量构建+打包(Release 步骤有 tags 条件门,PR 运行不发版)。
 - **CI/版本护栏**(`.github/workflows/build.yml` + `bin/version_consistency_check.sh` + `bin/ci_preflight.sh`)。两处版本正则统一为同一表达式(可选 `-rcN(.N){0,3}` 与可选 `-hotfix/-hf` 后缀;此前一边强制 -hotfix、一边强制 -rc+-hf,互相矛盾等于没有护栏,v5.8.9-portal 手工发布正是从缝里穿过),格式不符从 warn 升级 **fail**;ci_preflight 对"源码树缺 CI 构建产物 bin/hnc_dpid"降为 warn(与 hnc_httpd 同型)后,build.yml 删除 Source preflight 的 `continue-on-error`;新增 `go vet ./...` + `go test ./...` step(daemon/hnc_httpd 与 src/dpid,此前 CI 完全没有 Go 检查)。
 - tools/sched_test.c 断言接纳 EEMPTY(非 CI,顺手保正确)。

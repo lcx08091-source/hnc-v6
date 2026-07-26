@@ -3,8 +3,15 @@ name: Build HNC arm64
 # Triggers:
 #   - push to main: full build + zip artifact
 #   - pull_request: full build + zip artifact (v5.9.0: 合并前即可验证
-#     C/Go 交叉编译与打包;Release 步骤有 tags 条件门,PR 运行不发版)
-#   - workflow_dispatch: manual run from Actions UI
+#     C/Go 交叉编译与打包;Release 步骤有条件门,PR 运行不发版)
+#   - workflow_dispatch: manual run from Actions UI。
+#     v5.9.0 一键发版: 填 release_tag(如 v5.9.0)则构建后在同一个 run 内
+#     创建 tag + GitHub Release 并挂 zip —— 必须在 main 上运行、tag 须与
+#     module.prop 的 version 一致且尚不存在(见 Resolve release tag 步骤)。
+#     留空 = 只构建不发版(原行为)。
+#     背景: 会话/机器人 git 凭证通常只能推分支不能推 tag;且 GITHUB_TOKEN
+#     创建的 tag 不会再触发其他 workflow,所以 tag+release 必须在构建 run
+#     内一步完成 —— 本入口即为此设计。
 #   - tags v*: also creates a GitHub Release with the zip attached
 on:
   push:
@@ -12,6 +19,12 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: '发版 tag(如 v5.9.0)。留空=只构建不发版。须与 module.prop 的 version 一致,仅限 main。'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   build:
@@ -60,6 +73,39 @@ jobs:
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "version_safe=$VERSION_SAFE" >> $GITHUB_OUTPUT
           echo "Building HNC version: $VERSION"
+
+      # v5.9.0 一键发版: 解析本 run 是否要发 Release,输出 steps.reltag.outputs.tag
+      # (空 = 不发版)。fail fast: 校验不过直接挂掉 run,构建不白跑。
+      - name: Resolve release tag
+        id: reltag
+        env:
+          INPUT_RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.release_tag || '' }}
+          MODULE_VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          TAG=""
+          if [ -n "$INPUT_RELEASE_TAG" ]; then
+            TAG="$INPUT_RELEASE_TAG"
+            # a. 格式护栏(与 bin/version_consistency_check.sh / ci_preflight.sh 同一正则)
+            echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$' \
+              || { echo "ERROR: release_tag '$TAG' 格式非法"; exit 1; }
+            # b. 与 module.prop 一致(防 tag 与内容不符 —— v5.8.9-portal 事故的护栏)
+            [ "$TAG" = "$MODULE_VERSION" ] \
+              || { echo "ERROR: release_tag '$TAG' != module.prop version '$MODULE_VERSION'"; exit 1; }
+            # c. 只允许在 main 上发版
+            [ "$GITHUB_REF" = "refs/heads/main" ] \
+              || { echo "ERROR: 发版只能在 main 上运行 (当前 $GITHUB_REF)"; exit 1; }
+            # d. tag 不得已存在
+            if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null 2>&1; then
+              echo "ERROR: tag $TAG 已存在于 origin"; exit 1
+            fi
+            echo "Release mode: will create tag+release $TAG at $GITHUB_SHA"
+          elif printf '%s' "$GITHUB_REF" | grep -q '^refs/tags/v'; then
+            TAG="$GITHUB_REF_NAME"
+            echo "Tag-push mode: release for $TAG"
+          else
+            echo "No release for this run (build only)"
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
       # ─── Preflight checks (fail fast) ─────────────────────
       - name: Make scripts executable
@@ -376,17 +422,24 @@ jobs:
             ${{ env.TOOLS_ZIP }}.sha256
           retention-days: 30
 
-      # ─── Auto-release on tag push ─────────────────────────
-      - name: Create GitHub Release (on tag push only)
-        if: startsWith(github.ref, 'refs/tags/v')
+      # ─── Auto-release: tag push 或 workflow_dispatch 一键发版 ───────
+      # v5.9.0: 条件从 startsWith(github.ref, 'refs/tags/v') 改为 reltag 步骤
+      # 的输出;dispatch 发版时 tag 尚不存在,action-gh-release 会用
+      # target_commitish 在当前 commit 上创建它(tag+release 一步完成)。
+      # prerelease 判定改用 resolved tag(dispatch 时 github.ref 是 main,
+      # 旧的 contains(github.ref,...) 会失真)。
+      - name: Create GitHub Release (tag push or manual release)
+        if: steps.reltag.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.reltag.outputs.tag }}
+          target_commitish: ${{ github.sha }}
           files: |
             ${{ env.OUT_ZIP }}
             ${{ env.OUT_ZIP }}.sha256
             ${{ env.TOOLS_ZIP }}
             ${{ env.TOOLS_ZIP }}.sha256
-          prerelease: ${{ contains(github.ref, 'alpha') || contains(github.ref, 'beta') || contains(github.ref, 'rc') }}
+          prerelease: ${{ contains(steps.reltag.outputs.tag, 'alpha') || contains(steps.reltag.outputs.tag, 'beta') || contains(steps.reltag.outputs.tag, 'rc') }}
           body: |
             HNC ${{ steps.version.outputs.version }} - automated build.
             
