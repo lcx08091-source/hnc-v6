@@ -199,7 +199,12 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			// 不 return · 继续走下面 cookie 鉴权路径
 		}
 
-		// 同步 tokens.json 如果被外部修改过(json_set.sh revoke)
+		// v5.9.0: 先消费 shell 侧的撤销请求(run/token_revoke.request),
+		// 再做 token 校验 —— CLI 撤销对下一个请求即刻生效,零延迟窗口。
+		// ENOENT 快路径只是一次 stat,与下面 SyncIfChanged 的 stat 同级开销。
+		s.consumeTokenRevokeRequests("request")
+		// 同步 tokens.json 如果被外部整文件替换过(json_doctor 恢复/手工修复;
+		// 运行期唯一写者是本进程,见 tokens.go 单写者声明)
 		_ = s.tokens.SyncIfChanged()
 
 		cookie, err := r.Cookie(CookieName)

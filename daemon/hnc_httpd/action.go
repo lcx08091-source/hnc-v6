@@ -217,7 +217,7 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := func() actionResp {
 		defer s.actionMu.Unlock()
-		return dispatchAction(s.hncDir, req.Action, req.Params, tid == "loopback")
+		return dispatchAction(s, req.Action, req.Params, tid == "loopback")
 	}()
 	if resp.OK {
 		// hotfix15: a successful write usually changes rules/devices-derived UI state.
@@ -249,7 +249,10 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 }
 
 // dispatchAction 按 action 白名单分发(已通过 auth + rate limit + CSRF)
-func dispatchAction(hncDir, action string, p map[string]string, isLoopback bool) actionResp {
+// v5.9.0: 增加 *server 参数 —— pair_revoke 需要直达 s.tokens(单写者化,
+// 不再绕 shell);其余 handler 继续只用 hncDir。
+func dispatchAction(s *server, action string, p map[string]string, isLoopback bool) actionResp {
+	hncDir := s.hncDir
 	// rc2 修 G1: loopback-only guard 合并为单 switch (rc5.1.1 只合了注释没合代码)
 	switch action {
 	case "pair_revoke", "auth_required_set", "remote_enabled_set":
@@ -299,7 +302,7 @@ func dispatchAction(hncDir, action string, p map[string]string, isLoopback bool)
 	case "pair_new":
 		return actionPairNew(hncDir)
 	case "pair_revoke":
-		return actionPairRevoke(hncDir, p)
+		return actionPairRevoke(s, p)
 	case "cleanup_rules":
 		return actionCleanupRules(hncDir)
 	case "cleanup_all":

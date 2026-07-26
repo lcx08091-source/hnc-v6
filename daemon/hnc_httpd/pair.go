@@ -375,13 +375,9 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if err == nil && cookie != nil && cookie.Value != "" {
 		tokenID, _, verr := VerifyCookie(s.tokens, cookie.Value)
 		if verr == nil && tokenID != "" {
-			// 标记 revoked 并持久化.
-			// rc2 修 G5: Put 内部已调 saveAtomicLocked (见 tokens.go:350), 再 Flush
-			// 是第二次 saveAtomicLocked + fsync, 纯浪费. logout 单次请求原来要两次
-			// fsync, 在慢盘上对用户可见.
-			if tok, ok := s.tokens.Get(tokenID); ok {
-				tok.Revoked = true
-				_ = s.tokens.Put(tokenID, tok)
+			// v5.9.0: 统一走 Revoke(单写者入口),取代 Get+Put 手工翻转
+			// (rc2 修 G5 的"单次 saveAtomic"性质不变)。
+			if s.tokens.Revoke(tokenID) {
 				log.Printf("logout: revoked tid=%s", TokenIDLogPrefix(tokenID))
 			}
 		} else if verr != nil {

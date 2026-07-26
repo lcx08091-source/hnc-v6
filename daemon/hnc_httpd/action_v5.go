@@ -450,7 +450,7 @@ func actionPairNew(hncDir string) actionResp {
 	return actionResp{OK: true, Detail: strings.TrimSpace(out)}
 }
 
-func actionPairRevoke(hncDir string, p map[string]string) actionResp {
+func actionPairRevoke(s *server, p map[string]string) actionResp {
 	token := p["token"]
 	// rc3.1.14 修 P2 (review §校验): 加长度上下界, 防滥用 (空字符串绕过 / 超长输入).
 	// rc2 修 G12: TokenID 实际是 8 字节 random → base64url ~11 字符 (见 auth.go:5),
@@ -463,10 +463,11 @@ func actionPairRevoke(hncDir string, p map[string]string) actionResp {
 	if !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(token) {
 		return actionResp{OK: false, Error: "bad params", Detail: "invalid token format"}
 	}
-	rc, out := runBin(hncDir, "json_set.sh", "token_revoke", token)
-	if rc != 0 {
-		return actionResp{OK: false, Error: "revoke failed", Detail: out}
-	}
+	// v5.9.0 单写者化: 不再 runBin json_set.sh token_revoke(那会让 shell 改
+	// tokens.json,而 shell 侧现在也只写 marker 桥)——httpd 自己就是唯一写者,
+	// 直接走内存 Revoke + 原子落盘。token 不存在保持旧的静默 OK 语义。
+	found := s.tokens.Revoke(token)
+	log.Printf("pair_revoke: tid=%s found=%v", TokenIDLogPrefix(token), found)
 	return actionResp{OK: true}
 }
 

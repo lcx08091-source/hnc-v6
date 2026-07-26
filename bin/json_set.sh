@@ -278,20 +278,11 @@ json_blacklist_del_hnc_json() {
 }
 
 
-# hotfix20.0: bridge remote_tokens.json revoke writes to hnc_json.
-# Token issuing/last_seen stays owned by Go TokensStore; shell only routes
-# revoke/revoke_all through the same guarded JSON helper and keeps legacy fallback.
-json_token_revoke_hnc_json() {
-    local file="$1" tid="$2"
-    [ -x "$HNC_JSON" ] || return 127
-    "$HNC_JSON" token-revoke "$file" "$tid"
-}
-
-json_token_revoke_all_hnc_json() {
-    local file="$1"
-    [ -x "$HNC_JSON" ] || return 127
-    "$HNC_JSON" token-revoke-all "$file"
-}
+# v5.9.0 单写者化: token_revoke/_all 不再直改 remote_tokens.json(hotfix20.0
+# 时代的 hnc_json 桥接与 awk 回落整体删除)。httpd 是该文件唯一运行期写者,
+# shell 侧只追加撤销请求到 run/token_revoke.request(marker 桥,与 token_prune
+# 同型),httpd 在启动时/每请求鉴权前/60s 兜底轮询时消费并落盘。
+# (bin/hnc_json 的 token-revoke 子命令保留不删 —— 供手工恢复场景直接调用。)
 case "$CMD" in
     top|device|device_remove|bl_add|bl_del|reset|cfg_set|name_set|name_del|tpl_set|tpl_del|token_revoke|token_revoke_all|token_prune)
         acquire_lock || { echo "json_set: lock timeout (5s)" >&2; exit 2; }
@@ -978,16 +969,19 @@ tpl_list)
     fi
     ;;
 
-# ═══ v4.0 Patch 2.a: token 管理命令 ═══════════════════════════════
-# tokens.json 是 Map by TokenID:
-#   {"version":1,"tokens":{"<TokenID>":{"hash":"...","created":...,
-#     "last_seen":...,"label":"...","ip_hint":"...","revoked":false}}}
-# 文件权限 600(敏感数据)。写入用 tmp+mv 原子,配合 acquire_lock 保证并发安全。
-# 与 httpd 协同: httpd 每次 auth 前 stat tokens.json,mtime 变就 reload。
+# ═══ v4.0 Patch 2.a → v5.9.0: token 管理命令(marker 桥) ═══════════
+# v5.9.0 单写者模型: remote_tokens.json 的唯一运行期写者是 hnc_httpd
+# (Go TokensStore)。shell 撤销不再直改文件 —— 追加一行 TokenID(或 ALL)
+# 到 run/token_revoke.request,httpd 三个时机消费: 启动时、每请求鉴权前
+# (撤销对下一个请求即刻生效)、pruneLoop 60s 兜底。
+# httpd 未运行时撤销在其下次启动时生效 —— httpd 不在则无人能用 token
+# 鉴权,不存在生效窗口。CLI 接口与退出码与旧版一致(幂等,重复排队无害)。
+# 本命令仍持 json.lock(见上方 acquire_lock 名单): 串行化多个并发 CLI
+# 追加者,防交错写。
 
 token_revoke)
     # 用法: token_revoke <TokenID>
-    # 把指定 TokenID 的 revoked 设为 true。TokenID 不存在时静默(幂等)。
+    # 排队撤销请求;TokenID 不存在时由 httpd 侧静默(幂等)。
     TID=$2
     if [ -z "$TID" ]; then
         echo "Usage: json_set.sh token_revoke <TokenID>" >&2
@@ -1000,63 +994,27 @@ token_revoke)
             exit 1
             ;;
     esac
-    TOKENS_FILE=$HNC/data/remote_tokens.json
-    TOKENS_TMP=$HNC/data/remote_tokens.tmp
-    [ -f "$TOKENS_FILE" ] || echo '{"version":1,"tokens":{}}' > "$TOKENS_FILE"
-
-    # hotfix20.0: prefer hnc_json for token revoke. This keeps Go TokensStore
-    # as the owner of token issue/last_seen while replacing the fragile shell
-    # mutation path with guarded validate/backup/commit. Legacy fallback remains.
-    if ! json_token_revoke_hnc_json "$TOKENS_FILE" "$TID"; then
-        json_legacy_fallback_warn "token_revoke" "token-revoke"
-        # 策略: 用 awk 状态机进入 "TokenID":{ 对象后改 revoked:false -> true
-        # POSIX awk(busybox/toybox 通用), 不用 gawk match(,,arr)
-        awk -v tid="$TID" '
-        BEGIN { in_target = 0; depth = 0 }
-        {
-            line = $0
-            if (in_target) {
-                brace_delta = 0
-                for (i = 1; i <= length(line); i++) {
-                    c = substr(line, i, 1)
-                    if (c == "{") brace_delta++
-                    else if (c == "}") brace_delta--
-                }
-                sub(/"revoked"[ \t]*:[ \t]*false/, "\"revoked\": true", line)
-                depth += brace_delta
-                if (depth <= 0) in_target = 0
-            } else {
-                pat = "\"" tid "\"[ \t]*:[ \t]*\\{"
-                if (match(line, pat)) {
-                    in_target = 1
-                    depth = 0
-                    for (i = 1; i <= length(line); i++) {
-                        c = substr(line, i, 1)
-                        if (c == "{") depth++
-                        else if (c == "}") depth--
-                    }
-                    if (depth <= 0) in_target = 0
-                    sub(/"revoked"[ \t]*:[ \t]*false/, "\"revoked\": true", line)
-                }
-            }
-            print line
-        }
-        ' "$TOKENS_FILE" > "$TOKENS_TMP" && guarded_commit "$TOKENS_TMP" "$TOKENS_FILE"
+    REVOKE_REQ="$HNC/run/token_revoke.request"
+    mkdir -p "$HNC/run" 2>/dev/null
+    if printf '%s\n' "$TID" >> "$REVOKE_REQ" 2>/dev/null; then
+        chmod 600 "$REVOKE_REQ" 2>/dev/null
+        echo "token_revoke queued (httpd applies on next request/startup)"
+    else
+        echo "token_revoke: cannot write $REVOKE_REQ" >&2
+        exit 1
     fi
-    chmod 600 "$TOKENS_FILE" 2>/dev/null
     ;;
 token_revoke_all)
-    # 所有 tokens[*].revoked 从 false 改 true
-    TOKENS_FILE=$HNC/data/remote_tokens.json
-    TOKENS_TMP=$HNC/data/remote_tokens.tmp
-    [ -f "$TOKENS_FILE" ] || echo '{"version":1,"tokens":{}}' > "$TOKENS_FILE"
-    if ! json_token_revoke_all_hnc_json "$TOKENS_FILE"; then
-        json_legacy_fallback_warn "token_revoke_all" "token-revoke-all"
-        awk '
-        { gsub(/"revoked"[ \t]*:[ \t]*false/, "\"revoked\": true"); print }
-        ' "$TOKENS_FILE" > "$TOKENS_TMP" && guarded_commit "$TOKENS_TMP" "$TOKENS_FILE"
+    # 排队"撤销全部"请求(httpd 把所有未撤销 token 置 revoked=true)
+    REVOKE_REQ="$HNC/run/token_revoke.request"
+    mkdir -p "$HNC/run" 2>/dev/null
+    if printf '%s\n' "ALL" >> "$REVOKE_REQ" 2>/dev/null; then
+        chmod 600 "$REVOKE_REQ" 2>/dev/null
+        echo "token_revoke_all queued (httpd applies on next request/startup)"
+    else
+        echo "token_revoke_all: cannot write $REVOKE_REQ" >&2
+        exit 1
     fi
-    chmod 600 "$TOKENS_FILE" 2>/dev/null
     ;;
 token_prune)
     # 维护命令:移除 last_seen > 90 天 + revoked=true 且 last_seen > 30 天 的条目

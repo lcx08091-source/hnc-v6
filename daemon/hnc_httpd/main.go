@@ -95,6 +95,10 @@ func main() {
 
 	srv := newServer(*flagHNCDir)
 
+	// v5.9.0: httpd 停机期间 CLI 写入的撤销请求(run/token_revoke.request)
+	// 在启动时补处理 —— httpd 不在时无人能用 token 鉴权,故不存在生效窗口。
+	srv.consumeTokenRevokeRequests("startup")
+
 	// rc3.1.14 修 P2 (review §一信息泄漏): 0.0.0.0 + auth_required=false
 	// 联合配置下任何热点用户都能裸读/写 HNC 控制平面. 默认全新装机就是这状态
 	// (rc3.1.13 起 rules.json 模板 auth_required:false). 启动时打一次 WARN

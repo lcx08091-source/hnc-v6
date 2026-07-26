@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -1062,6 +1063,67 @@ func datesFromTo(start, end string) []string {
 	return out
 }
 
+// tokenRevokeIDRe 校验 request 文件里的每行 TokenID(base64url 字符集,
+// 与 json_set.sh token_revoke 的入口校验同源)。ALL 单独识别。
+var tokenRevokeIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{8,256}$`)
+
+// consumeTokenRevokeRequests 处理 run/token_revoke.request —— shell CLI
+// (json_set.sh token_revoke/_all)到 httpd 撤销的桥。v5.9.0 单写者化:
+// shell 只追加此文件,httpd 是 remote_tokens.json 唯一写者。
+//
+// 流程: 先处理上次崩溃遗留的 .working,再把 request rename 成 .working
+// (原子接管 —— 与 shell 的 O_APPEND 追加并发时最坏丢一条刚追加的行,
+// 撤销是稀有人工操作且幂等,重跑即可),逐行 ALL→RevokeAll、否则校验
+// TokenID 后 Revoke,处理完删除 .working。上限读 64KB 防异常膨胀。
+// 调用点: 启动时(startup)、middleware 每请求鉴权前(request,ENOENT
+// 一次 stat 即返回 —— 保证撤销零延迟生效)、pruneLoop 60s 兜底(poll)。
+func (s *server) consumeTokenRevokeRequests(reason string) {
+	marker := filepath.Join(s.hncDir, "run", "token_revoke.request")
+	work := marker + ".working"
+
+	apply := func(path string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Printf("token_revoke consume (%s): read %s: %v", reason, path, err)
+			return
+		}
+		if len(data) > 64<<10 {
+			log.Printf("token_revoke consume (%s): %s oversized (%d bytes), truncating to 64KB", reason, path, len(data))
+			data = data[:64<<10]
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" {
+				continue
+			}
+			if line == "ALL" {
+				n := s.tokens.RevokeAll()
+				log.Printf("token_revoke consume (%s): ALL → revoked %d tokens", reason, n)
+				continue
+			}
+			if !tokenRevokeIDRe.MatchString(line) {
+				log.Printf("token_revoke consume (%s): skip malformed line (%d bytes)", reason, len(line))
+				continue
+			}
+			found := s.tokens.Revoke(line)
+			log.Printf("token_revoke consume (%s): tid=%s… found=%v", reason, line[:4], found)
+		}
+		_ = os.Remove(path)
+	}
+
+	// 崩溃恢复: 上次 rename 成功但处理中途死了 → .working 残留,先补处理。
+	if _, err := os.Stat(work); err == nil {
+		apply(work)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		return // ENOENT 快路径(每请求调用的常态)
+	}
+	if err := os.Rename(marker, work); err != nil {
+		return // 已被并发消费者接管
+	}
+	apply(work)
+}
+
 // pruneLoop Patch 2.b: 监视 $RUN/httpd_prune_request marker 触发 tokens.Prune()
 // 也每 24 小时无条件跑一次。
 // json_set.sh token_prune 命令会 touch 这个 marker 通知 httpd 清理过期 token。
@@ -1088,6 +1150,9 @@ func (s *server) pruneLoop(stop <-chan struct{}) {
 		case <-stop:
 			return
 		case <-pollTicker.C:
+			// v5.9.0: 60s 兜底清扫撤销请求(主路径在 middleware 每请求消费,
+			// 这里只防"httpd 空闲无请求时 request 文件滞留")
+			s.consumeTokenRevokeRequests("poll")
 			if _, err := os.Stat(markerPath); err == nil {
 				doPrune("marker")
 				_ = os.Remove(markerPath)

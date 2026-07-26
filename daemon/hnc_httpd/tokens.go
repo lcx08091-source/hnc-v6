@@ -45,16 +45,20 @@ type tokensFile struct {
 }
 
 // TokensStore 是内存中的 tokens 状态。支持 stat/mtime 同步。
+//
+// v5.9.0 单写者模型: 本进程(httpd)是 remote_tokens.json 唯一的运行期写者。
+// shell 侧的撤销(json_set.sh token_revoke/_all)不再直改文件,而是追加
+// run/token_revoke.request,由 httpd 消费后经 Revoke/RevokeAll 落盘
+// (见 server.go consumeTokenRevokeRequests)。因此 rc3.1.13.2/rc3.1.33
+// 时代的双向 merge + dirty 集合缝合被整体删除。
+// reload/SyncIfChanged 保留为防御:json_doctor.sh 可能从备份整文件恢复
+// tokens.json,用户也可能手工修复 —— 这些是"整文件替换"而非并发字段写,
+// mtime 同步足以吸收。
 type TokensStore struct {
 	path     string // tokens.json 的绝对路径
 	mu       sync.RWMutex
 	tokens   map[string]Token
 	lastRead int64 // 上次 reload 时的文件 mtime(Unix ns)
-	// rc3.1.33 修 #10/#29: dirty 集合记录"本进程改过的 token id".
-	// saveAtomicLocked merge 时只反向删除 dirty 集合外的、磁盘上已不存在的 token,
-	// 避免把刚 PutIfAbsent 还没落盘的 token 当成"shell 删的"误删.
-	// 任何走 saveAtomicLocked 的写路径 (PutIfAbsent / Put / Prune / Flush) 成功后清空.
-	dirty map[string]bool
 }
 
 // NewTokensStore 创建 store。首次会尝试从磁盘 load;文件不存在视为空 store,不报错。
@@ -63,7 +67,6 @@ func NewTokensStore(path string) *TokensStore {
 	s := &TokensStore{
 		path:   path,
 		tokens: make(map[string]Token),
-		dirty:  make(map[string]bool),
 	}
 	_ = s.reload() // 首次 load,失败则保持空
 	return s
@@ -136,11 +139,6 @@ func (s *TokensStore) reload() error {
 	}
 	s.tokens = tf.Tokens
 	s.lastRead = newMtime
-	// rc3.1.33 修 #10/#29: reload 把 tokens map 整体替换, 之前 dirty 集合
-	// 引用的"待落盘"token 现在已经是磁盘版本了, 清空避免反向 merge 误保留
-	if s.dirty != nil && len(s.dirty) > 0 {
-		s.dirty = make(map[string]bool)
-	}
 	return nil
 }
 
@@ -212,80 +210,18 @@ const (
 	revokedExpireSec   = 30 * 86400 // 撤销后保留多久才 prune
 )
 
-// saveAtomic 把内存 tokens 写回磁盘。用 tmp + rename 原子保证。
-// 注意: httpd 写 tokens.json 跟 json_set.sh 写是两个进程,
-// 理论上可能产生 last-write-wins 冲突。但 httpd 只做两件写操作:
-//  1. issueToken: 加新条目
-//  2. updateLastSeen: 改现有条目的 last_seen
+// saveAtomicLocked 把内存 tokens 全量序列化写回磁盘。tmp + chmod 0600 +
+// rename 原子发布。
 //
-// json_set.sh 做 token_revoke/token_revoke_all/token_prune。
-// 实际冲突场景:
-//   - 主人撤销 token + httpd 正好 updateLastSeen 同一条 → 一方覆盖
-//   - 缓解: updateLastSeen 在 middleware 里只做内存,每 N 秒或 logout 时才 saveAtomic
-//     (见 saveLoop),大幅减小冲突窗口
-//
-// saveAtomicLocked 把内存全量序列化覆盖磁盘.
-// rc3.1.13.2 修 P1 (review §鉴权-2): 之前 Go 端的 Put/Revoke 直接全量覆盖,
-// 如果 shell (json_set.sh token_revoke) 在 Go 内存操作期间写了磁盘,
-// Go 的覆盖会把 shell 的修改抹掉. 修法: 写盘前 stat + read 一次磁盘,
-// 把磁盘上"我们没见过的"修改 (其他 token 被 shell 加/改) 合并进内存,
-// 然后再写盘. 我们自己改的 token (在 s.dirty 集合) 优先级更高.
-// 注: 这只能减小窗口, 真正的解决方案是引入文件锁 (flock). 但 Android
-// 不一定支持 flock 跨 fork 的语义, 暂时用 merge 兜底.
-//
-// rc3.1.33 修 #10/#29 (review §最终轮): 加反向 merge.
-// 之前正向 merge 漏了 "shell token_revoke_all 把磁盘清空, 但 Go 内存还有
-// 全量 token" 的场景 — 30s 后 SaveLoop 触发, diskTf.Tokens={} 循环不进入,
-// s.tokens 原样写回磁盘 → 撤销失效. 现在反向迭代 s.tokens, 不在 s.dirty
-// 集合的、磁盘上已删的 token 视为 "shell 主动删除", 同步删除内存版本.
-// dirty 集合保护的是"本进程刚 Put 还没第一次落盘"的 token (例如 IssueToken
-// 的 PutIfAbsent 第一次写, 或者循环里 Prune 后批量改).
+// v5.9.0 单写者声明: 本进程是 remote_tokens.json 唯一的运行期写者(shell
+// 撤销已改走 run/token_revoke.request marker,由本进程消费),因此这里
+// 不再需要 rc3.1.13.2 的正向 merge、rc3.1.33 的反向 merge 与 dirty 集合
+// —— 那套缝合历经 3 轮补丁仍只能"缩小窗口",单写者化后窗口本身不存在。
+// 磁盘被外部整文件替换(json_doctor 恢复/手工修复)由 reload/SyncIfChanged
+// 的 mtime 同步吸收,不属于并发字段写。
 //
 // 调用者持 Lock
 func (s *TokensStore) saveAtomicLocked() error {
-	// 先尝试合并磁盘最新数据 (防 Go-shell 写竞态)
-	var diskTokens map[string]Token
-	if st, err := os.Stat(s.path); err == nil {
-		diskMtime := st.ModTime().UnixNano()
-		if diskMtime > s.lastRead {
-			// 磁盘有我们没见过的修改, 读进来跟内存合并
-			if data, err := os.ReadFile(s.path); err == nil {
-				var diskTf tokensFile
-				if json.Unmarshal(data, &diskTf) == nil && diskTf.Tokens != nil {
-					diskTokens = diskTf.Tokens
-					// 策略: 磁盘上有但内存没有的 token → 加进内存
-					//       磁盘上 revoked=true 但内存里 revoked=false → 信磁盘 (shell 撤销了)
-					//       其他冲突字段保持内存版本 (我们正要写的)
-					for tid, dt := range diskTokens {
-						mt, ok := s.tokens[tid]
-						if !ok {
-							s.tokens[tid] = dt
-							continue
-						}
-						if dt.Revoked && !mt.Revoked {
-							mt.Revoked = true
-							s.tokens[tid] = mt
-						}
-					}
-					// rc3.1.33 修 #10/#29: 反向 merge.
-					// 内存有但磁盘完全没有的 token, 如果 *不在 dirty 集合*, 视为
-					// shell (json_set.sh token_revoke / token_revoke_all) 主动删除,
-					// 同步从内存删. dirty 集合里的是本进程刚 Put 还没首次落盘的,
-					// 必须保留 (本次 save 会把它们写下去).
-					var toDelete []string
-					for tid := range s.tokens {
-						if _, onDisk := diskTokens[tid]; !onDisk && !s.dirty[tid] {
-							toDelete = append(toDelete, tid)
-						}
-					}
-					for _, tid := range toDelete {
-						delete(s.tokens, tid)
-					}
-				}
-			}
-		}
-	}
-
 	tf := tokensFile{
 		Version: 1,
 		Tokens:  s.tokens,
@@ -315,11 +251,6 @@ func (s *TokensStore) saveAtomicLocked() error {
 	if err == nil {
 		s.lastRead = st.ModTime().UnixNano()
 	}
-	// rc3.1.33 修 #10/#29: 落盘成功 → dirty 清空
-	// (下一次 saveAtomicLocked 之前新 Put 的会重新加进 dirty)
-	if len(s.dirty) > 0 {
-		s.dirty = make(map[string]bool)
-	}
 	return nil
 }
 
@@ -337,8 +268,6 @@ func (s *TokensStore) PutIfAbsent(tokenID string, t Token) error {
 		return ErrTokenIDCollision
 	}
 	s.tokens[tokenID] = t
-	// rc3.1.33 修 #10/#29: 标 dirty, 防 saveAtomicLocked 反向 merge 误删
-	s.dirty[tokenID] = true
 	return s.saveAtomicLocked()
 }
 
@@ -348,9 +277,51 @@ func (s *TokensStore) Put(tokenID string, t Token) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.tokens[tokenID] = t
-	// rc3.1.33 修 #10/#29: 标 dirty
-	s.dirty[tokenID] = true
 	return s.saveAtomicLocked()
+}
+
+// Revoke 把 id 标记 revoked=true 并立即持久化。id 不存在返回 false
+// (幂等语义,与旧 json_set.sh token_revoke 的静默行为一致)。
+// 写盘失败只记日志不回滚内存: middleware 鉴权走内存,内存已翻转即刻
+// 生效;SaveLoop 每 30s Flush 会重试落盘。
+// v5.9.0: shell CLI 与 /api/action pair_revoke 的撤销统一收敛到这里,
+// httpd 由此成为 remote_tokens.json 唯一写者。
+func (s *TokensStore) Revoke(id string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.tokens[id]
+	if !ok {
+		return false
+	}
+	if !t.Revoked {
+		t.Revoked = true
+		s.tokens[id] = t
+		if err := s.saveAtomicLocked(); err != nil {
+			fmt.Fprintf(os.Stderr, "tokens: revoke %s persisted in memory, save failed (SaveLoop retries): %v\n", id, err)
+		}
+	}
+	return true
+}
+
+// RevokeAll 把所有未撤销 token 置 revoked=true,返回翻转数量,立即持久化。
+// 失败语义同 Revoke。
+func (s *TokensStore) RevokeAll() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n := 0
+	for id, t := range s.tokens {
+		if !t.Revoked {
+			t.Revoked = true
+			s.tokens[id] = t
+			n++
+		}
+	}
+	if n > 0 {
+		if err := s.saveAtomicLocked(); err != nil {
+			fmt.Fprintf(os.Stderr, "tokens: revoke_all (%d) persisted in memory, save failed (SaveLoop retries): %v\n", n, err)
+		}
+	}
+	return n
 }
 
 // UpdateLastSeen 更新某 TokenID 的 last_seen 到当前时间。仅内存,不立即持盘。
@@ -361,10 +332,6 @@ func (s *TokensStore) UpdateLastSeen(tokenID string) {
 	if t, ok := s.tokens[tokenID]; ok {
 		t.LastSeen = time.Now().Unix()
 		s.tokens[tokenID] = t
-		// rc3.1.33 修 #10/#29: 标 dirty 防 SaveLoop Flush 时反向 merge 误删.
-		// 这里是高频路径 (每个 API 都跑), 但 dirty 只是 map[string]bool 写入,
-		// O(1), 跟 mu.Lock 同 critical section, 零额外开销.
-		s.dirty[tokenID] = true
 	}
 }
 
