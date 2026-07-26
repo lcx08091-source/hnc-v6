@@ -249,17 +249,34 @@ func (h *HistorySampler) pathFor(t time.Time) string {
 	return filepath.Join(HistoryDir, HistoryFilePrefix+day+HistoryFileSuffix)
 }
 
-// trimOldFiles deletes JSONL files older than HistoryRetainDays. Iterates
-// HistoryRetainDays+1 → 30 by name — bounded constant work, no readdir.
-func (h *HistorySampler) trimOldFiles(now time.Time) {
-	// Walk a safe window: anything from (retain+1) up to 30 days back.
-	// We don't go further back; if dpid crashed for a month, manual cleanup.
-	for back := HistoryRetainDays + 1; back <= 30; back++ {
-		t := now.UTC().AddDate(0, 0, -back)
-		p := h.pathFor(t)
+// trimDailyFiles deletes <prefix>YYYYMMDD<suffix> files in dir that are older
+// than retainDays. Iterates (retainDays+1) → 30 by name — bounded constant
+// work, no readdir; anything further back needs manual cleanup (same policy
+// the history sampler always had).
+//
+// utc selects the date-stamp base and MUST match the writer's own file-name
+// formatting: history (stats.*) names files with now.UTC().Format, while
+// self_attrib.* uses local time. Mixing the bases would make the trimmer
+// compute a different file name than the writer around midnight (UTC+8
+// devices: 8h window), leaving boundary-day files undeleted (or deleting a
+// day early). v5.9.0: extracted as a package-level helper so self_attrib
+// gains retention too (its JSONL previously grew forever).
+func trimDailyFiles(dir, prefix, suffix string, retainDays int, now time.Time, utc bool) {
+	for back := retainDays + 1; back <= 30; back++ {
+		t := now.AddDate(0, 0, -back)
+		day := t.Format("20060102")
+		if utc {
+			day = t.UTC().Format("20060102")
+		}
 		// Best-effort, no error handling — missing is the common case.
-		_ = os.Remove(p)
+		_ = os.Remove(filepath.Join(dir, prefix+day+suffix))
 	}
+}
+
+// trimOldFiles deletes JSONL files older than HistoryRetainDays. Thin wrapper
+// over trimDailyFiles with the history sampler's UTC naming base.
+func (h *HistorySampler) trimOldFiles(now time.Time) {
+	trimDailyFiles(HistoryDir, HistoryFilePrefix, HistoryFileSuffix, HistoryRetainDays, now, true)
 }
 
 var histMacRe = regexp.MustCompile(`^([0-9a-f]{2}:){5}[0-9a-f]{2}$`)

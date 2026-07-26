@@ -264,6 +264,15 @@ func loadL3Rules() loadedRules {
 // version prefix. The version-prefix check protects against the rare case
 // where a legacy load's (single-file mtime, size) collide with the dir's
 // (aggregate mtime, sum size).
+//
+// v5.9.0 two-pass load: this function is on the per-packet classify hot path
+// (RecordDNS/RecordTLS/RecordFlow → classifyHost → loadL3Rules), and the old
+// single-pass shape did ReadFile+Unmarshal on every subset BEFORE the cache
+// check — the cache only saved the compile step, never the I/O. Now pass 1
+// stats every file (cheap), the cache check runs on the aggregate key, and
+// pass 2 (read+parse) happens only on a cache miss. The (mtime,size) key is
+// computed identically to before: oversized files still contribute their
+// size to the key even though their content is skipped.
 func loadL3RulesFromDir() (loadedRules, bool) {
 	st, err := os.Stat(externalRulesDir)
 	if err != nil || !st.IsDir() {
@@ -278,12 +287,13 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 	// (00-core-meta first, 99-user-custom last so user overrides win).
 	sort.Strings(files)
 
+	// Pass 1: stat only. Every stat-able file feeds the cache key (including
+	// oversized ones — preserves the pre-v5.9.0 key semantics); only files
+	// under the size cap are queued for the read pass.
 	var (
-		aggrMtime    int64
-		aggrSize     int64
-		versionParts = make([]string, 0, len(files))
-		allRules     = make([]externalRule, 0, 256)
-		usableFiles  int
+		aggrMtime int64
+		aggrSize  int64
+		readable  = make([]string, 0, len(files))
 	)
 	for _, f := range files {
 		fst, err := os.Stat(f)
@@ -300,6 +310,31 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 				f, fst.Size(), externalRulesSubsetMaxBytes)
 			continue
 		}
+		readable = append(readable, f)
+	}
+
+	// Cache hit check — BEFORE any read/parse. We require the cached entry
+	// to also have the "external-d:" prefix — otherwise a stale legacy-path
+	// cache entry with coincidentally equal (mtime, size) could be returned
+	// here. (The initial builtin cache entry has mtime=0/size=0 but no
+	// "external-d:" prefix, so an all-stat-failed pass cannot false-hit it.)
+	ruleCache.Lock()
+	if ruleCache.mtime == aggrMtime && ruleCache.size == aggrSize &&
+		len(ruleCache.val.rules) > 0 &&
+		strings.HasPrefix(ruleCache.val.version, "external-d:") {
+		v := ruleCache.val
+		ruleCache.Unlock()
+		return v, true
+	}
+	ruleCache.Unlock()
+
+	// Pass 2: read+parse, cache miss only.
+	var (
+		versionParts = make([]string, 0, len(readable))
+		allRules     = make([]externalRule, 0, 256)
+		usableFiles  int
+	)
+	for _, f := range readable {
 		b, err := os.ReadFile(f)
 		if err != nil || len(b) == 0 {
 			log.Printf("WARN dpi_rules.d: read %s err=%v (skipping subset)", f, err)
@@ -319,23 +354,11 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 
 	// No usable subset → fall back to legacy. We do NOT cache "empty dir"
 	// because tomorrow the user might drop a subset file in and we want
-	// the next load to pick it up.
+	// the next load to pick it up. (This check must stay after the read
+	// pass: stat-time knowledge alone cannot tell usable from unparsable.)
 	if usableFiles == 0 || len(allRules) == 0 {
 		return loadedRules{}, false
 	}
-
-	// Cache hit check. We require the cached entry to also have the
-	// "external-d:" prefix — otherwise a stale legacy-path cache entry
-	// with coincidentally equal (mtime, size) could be returned here.
-	ruleCache.Lock()
-	if ruleCache.mtime == aggrMtime && ruleCache.size == aggrSize &&
-		len(ruleCache.val.rules) > 0 &&
-		strings.HasPrefix(ruleCache.val.version, "external-d:") {
-		v := ruleCache.val
-		ruleCache.Unlock()
-		return v, true
-	}
-	ruleCache.Unlock()
 
 	compiled := compileExternalRules(allRules)
 	if len(compiled) == 0 {

@@ -50,6 +50,12 @@ const (
 	// SelfAttribInterval is how often /proc/net is sampled.
 	SelfAttribInterval = 5 * time.Second
 
+	// SelfAttribRetainDays is how many daily self_attrib.YYYYMMDD.jsonl
+	// files are kept. v5.9.0: before this there was NO retention at all —
+	// with self-capture enabled the run/ dir grew by tens of MB per day,
+	// forever (trimOldFiles only covered the stats.* prefix).
+	SelfAttribRetainDays = 7
+
 	// SelfPkgCacheTTL is how often pm list packages -U is re-run.
 	SelfPkgCacheTTL = 5 * time.Minute
 
@@ -615,11 +621,25 @@ func (a *SelfAttribAggregator) RunSampler(ctx context.Context, isEnabled func() 
 	t := time.NewTicker(SelfAttribInterval)
 	defer t.Stop()
 
+	// v5.9.0: daily retention. lastTrimDay is goroutine-local (RunSampler is
+	// the only writer of these files' lifecycle), first tick trims once at
+	// startup, then once per local-time day change. Runs BEFORE the
+	// isEnabled gate on purpose: old files get cleaned up even when
+	// self-capture is currently disabled. Date base is LOCAL time to match
+	// sampleOnce's file naming (now.Format, not UTC — see trimDailyFiles).
+	lastTrimDay := ""
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			if a.jsonlDir != "" {
+				if day := time.Now().Format("20060102"); day != lastTrimDay {
+					trimDailyFiles(a.jsonlDir, "self_attrib.", ".jsonl", SelfAttribRetainDays, time.Now(), false)
+					lastTrimDay = day
+				}
+			}
 			if !isEnabled() {
 				continue
 			}
