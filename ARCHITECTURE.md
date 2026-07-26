@@ -373,7 +373,9 @@ fi
 | `hostname` | string | manual rename 时 | rules/names.json 里的 manual rename, 优先级最高 |
 | `hostname_src` | string | manual rename 时 | 固定 `"manual"`, 标记字段来源, UI 可显示标签 |
 
-**C) hnc_httpd 从 `data/rules.json` 的 `device_rules.<mac>` 合并** (`/api/devices` 返回):
+**C) hnc_httpd 从 `data/rules.json` 的 `devices.<mac>` 合并** (`/api/devices` 返回):
+
+<!-- v5.9.1 文档勘误: 实际键名是 devices (server.go rulesMap["devices"], 与 json_set.sh schema 一致), 旧文写的 device_rules 从未存在过 -->
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
@@ -390,7 +392,7 @@ fi
 
 `devices.json` 只列当前可见 client. 一台设备配了限速但目前断开, **不在 devices.json**.
 
-`buildDevicesPayload` 末尾会扫描 `rules.json.device_rules` 和 `blacklist`, 把规则存在但 hotspotd 没看到的 MAC 也追加成离线行 (`online: false`, `ip: "-"`, `rx_bps/tx_bps: 0`), 让 UI 仍能显示已配置状态. 这些"虚行"**不写回 devices.json**, 只在 `/api/devices` 返回时存在.
+`buildDevicesPayload` 末尾会扫描 `rules.json.devices`、`blacklist` 与 `device_names.json`(v5.9.1 起: 只改过名的设备也保留离线行), 把规则/命名存在但 hotspotd 没看到的 MAC 也追加成离线行 (`online: false`, `ip: "-"`, `rx_bps/tx_bps: 0`), 让 UI 仍能显示已配置状态. 这些"虚行"**不写回 devices.json**, 只在 `/api/devices` 返回时存在.
 
 #### 示例(httpd 合并后的 /api/devices 形态)
 
