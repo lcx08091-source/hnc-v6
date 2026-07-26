@@ -2,12 +2,15 @@ name: Build HNC arm64
 
 # Triggers:
 #   - push to main: full build + zip artifact
+#   - pull_request: full build + zip artifact (v5.9.0: 合并前即可验证
+#     C/Go 交叉编译与打包;Release 步骤有 tags 条件门,PR 运行不发版)
 #   - workflow_dispatch: manual run from Actions UI
 #   - tags v*: also creates a GitHub Release with the zip attached
 on:
   push:
     branches: [main]
     tags: ['v*']
+  pull_request:
   workflow_dispatch:
 
 jobs:
