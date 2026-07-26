@@ -203,18 +203,20 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// hotfix4: serialize state-changing actions. The underlying shell scripts mutate
-	// tc, iptables and JSON files in several steps; concurrent writes from two
-	// remote clients can interleave and leave UI/API state out of sync. Keep reads
-	// via /api/devices behind the same RW lock in server.go.
+	// hotfix4 → v5.9.0: serialize state-changing actions. The underlying shell
+	// scripts mutate tc, iptables and JSON files in several steps; concurrent
+	// writes from two remote clients can interleave and leave UI/API state out
+	// of sync. Reads (/api/devices, /api/live) no longer share this lock —
+	// they rely on each JSON file's atomic tmp+rename publish (see
+	// buildDevicesPayload), so a slow action cannot freeze the whole UI.
 	waitStart := time.Now()
-	s.stateMu.Lock()
+	s.actionMu.Lock()
 	waited := time.Since(waitStart)
 	if waited > 200*time.Millisecond {
 		log.Printf("handleAction: queued action=%s waited=%s", req.Action, waited)
 	}
 	resp := func() actionResp {
-		defer s.stateMu.Unlock()
+		defer s.actionMu.Unlock()
 		return dispatchAction(s.hncDir, req.Action, req.Params, tid == "loopback")
 	}()
 	if resp.OK {

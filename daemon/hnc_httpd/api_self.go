@@ -279,26 +279,29 @@ func (s *server) apiSelfAttrib(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer f.Close()
-	// Read all lines (typical daily file is small; we cap by limit)
-	var lines []string
+	// v5.9.0: ring buffer of the last `limit` lines instead of slurping the
+	// whole file into a []string — the sampler appends every 5s, so a busy
+	// day's file is large; memory here is now bounded by limit×line-length
+	// regardless of file size. `total` keeps its old meaning (lines in file).
+	ring := make([]string, limit)
+	total := 0
 	sc := bufio.NewScanner(f)
 	// v5.8.2 (audit): 1MB/line is already far above any real self_attrib JSONL
 	// record; the old 16MB cap was needlessly large.
 	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for sc.Scan() {
-		lines = append(lines, sc.Text())
+		ring[total%limit] = sc.Text()
+		total++
 	}
-	// Take the last `limit` lines
-	start := len(lines) - limit
-	if start < 0 {
-		start = 0
+	n := total
+	if n > limit {
+		n = limit
 	}
-	tail := lines[start:]
 	// Parse each as JSON to validate (and produce structured response)
-	out := make([]interface{}, 0, len(tail))
-	for _, l := range tail {
+	out := make([]interface{}, 0, n)
+	for i := total - n; i < total; i++ {
 		var obj interface{}
-		if err := json.Unmarshal([]byte(l), &obj); err == nil {
+		if err := json.Unmarshal([]byte(ring[i%limit]), &obj); err == nil {
 			out = append(out, obj)
 		}
 	}
@@ -306,6 +309,6 @@ func (s *server) apiSelfAttrib(w http.ResponseWriter, r *http.Request) {
 		"file":         latest,
 		"observations": out,
 		"shown":        len(out),
-		"total":        len(lines),
+		"total":        total,
 	})
 }

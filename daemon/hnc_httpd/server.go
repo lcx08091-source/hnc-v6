@@ -33,11 +33,15 @@ type server struct {
 	tokens       *TokensStore
 	limiter      *RateLimiter
 	writeCounter *WriteCounter // Patch 3.a per-token write rate limit
-	// hotfix4: serialize state-changing actions and keep /api/devices from
-	// reading rules.json/devices.json while an httpd-originated write chain is running.
-	// This is deliberately coarse-grained: tc/iptables/json_set actions are short,
-	// and preserving operation order is safer than introducing parallel shell workers.
-	stateMu sync.RWMutex
+	// hotfix4 → v5.9.0: serialize state-changing actions only. The underlying
+	// shell scripts mutate tc/iptables/JSON in several steps, so /api/action
+	// stays strictly serialized. Readers no longer take this lock: every JSON
+	// file (devices/rules/device_names) is published by its writer via
+	// tmp+rename, so a reader always sees a complete old or complete new
+	// version; external writers (hotspotd/watchdog) never shared this lock
+	// anyway, so the old RLock never provided real read consistency — it only
+	// let one slow action (up to 60s: cleanup.sh) freeze every read endpoint.
+	actionMu sync.Mutex
 	// 速率差分. 由单一后台 RateLoop 每 2s 更新, /api/devices 与 /api/live 都只读
 	// s.rates → hero 与卡片永远同源一致. 取代旧的"每个请求各自差分并覆盖 lastSamples"
 	// (两端点抢同一 map → dt 乱 → 速率发飘/掉零/hero 与卡片对不上).
@@ -324,13 +328,12 @@ func (s *server) apiDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
-	// hotfix5: build the whole snapshot under the RW lock, but do not hold the
-	// lock while writing the HTTP response. A slow remote client should not block
-	// later /api/action writes. External writers such as hotspotd/watchdog can
-	// still update files, but httpd no longer races with its own shell write chain.
-	s.stateMu.RLock()
-	defer s.stateMu.RUnlock()
-
+	// v5.9.0: lock-free read path (was hotfix5's stateMu.RLock). Each JSON
+	// below is atomically published by its writer (tmp+rename), so this
+	// snapshot is per-file consistent without any lock; cross-file skew was
+	// always possible (hotspotd/watchdog write without httpd's lock) and is
+	// tolerated by the UI. Action writes stay serialized via s.actionMu, and
+	// a slow remote reader no longer queues behind a 30-60s shell action.
 	devicesPath := filepath.Join(s.hncDir, "data", "devices.json")
 	rulesPath := filepath.Join(s.hncDir, "data", "rules.json")
 	namesPath := filepath.Join(s.hncDir, "data", "device_names.json")
