@@ -657,7 +657,11 @@ static offload_err_t bpf_disable_global(void)
     s.globally_disabled = (touched > 0 && errs == 0) ? 1 : s.globally_disabled;
     fprintf(stderr, "[bpf] disable_global: touched=%d errs=%d\n", touched, errs);
 
-    if (errs == 0)                  ret = OFFLOAD_OK;
+    /* v5.9.0: 空 map (touched==0 && errs==0, 冷启 limit_map 未填充) 不再
+     * 报 OK 假成功 —— 返回 EEMPTY 让调度器快重试; globally_disabled 置位
+     * 逻辑不变 (本来就只在 touched>0 时置 1)。 */
+    if (errs == 0 && touched == 0)  ret = OFFLOAD_EEMPTY;
+    else if (errs == 0)             ret = OFFLOAD_OK;
     else if (iter_errno != 0 && touched == 0) ret = errno_to_offload(iter_errno);
     else if (touched > 0)           ret = OFFLOAD_OK;       /* 部分成功 */
     else                            ret = OFFLOAD_EINTERNAL;
@@ -710,7 +714,10 @@ static offload_err_t bpf_restore_global(void)
     }
     fprintf(stderr, "[bpf] restore_global: touched=%d errs=%d\n", touched, errs);
 
-    if (errs == 0)                  ret = OFFLOAD_OK;
+    /* v5.9.0: 与 disable_global 对称 —— 空 map 返回 EEMPTY (无事可恢复,
+     * 良性; 调度器对 restore 的 EEMPTY 只打日志); 状态复位逻辑不变。 */
+    if (errs == 0 && touched == 0)  ret = OFFLOAD_EEMPTY;
+    else if (errs == 0)             ret = OFFLOAD_OK;
     else if (iter_errno != 0 && touched == 0) ret = errno_to_offload(iter_errno);
     else if (touched > 0)           ret = OFFLOAD_OK;
     else                            ret = OFFLOAD_EINTERNAL;

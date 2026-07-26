@@ -445,64 +445,36 @@ static void update_traffic_stats(void) {
     if (now - g_last_stats_update < 5) return;
     g_last_stats_update = now;
 
-    /* rc3.1.15 修 P3 (review §2b): popen → fork+execlp 跟项目其他地方
-     * (try_mdns_resolve / dumpsys) 风格统一. IPTABLES_MGR 是编译时常量
-     * 不可注入, 但代码风格一致性 + 防御深度. */
-    int pipefd[2];
-    if (pipe(pipefd) < 0) return;
+    /* rc3.1.15 修 P3 (review §2b): popen → fork+execlp 风格统一.
+     * v5.9.0: 再收敛到公共 hnc_run_cmd_timeout —— 旧实现 fgets 流式读
+     * 无超时, iptables 卡内核(xtables lock / ROM 异常)时主线程在这里
+     * 无限阻塞, 连带 write_json/netlink 全停. 现在 3s 超时封顶, 超时/
+     * 失败保留上一轮统计值(缓存语义不变). 32KB 上限 ≈ 500+ 台设备的
+     * "ip rx tx" 行, 远超 MAX_DEVICES=128; 溢出被截断保护, 不会越界. */
+    const size_t STATS_CAP = 32 * 1024;
+    char *out = malloc(STATS_CAP);
+    if (!out) return;
 
-    pid_t pid = fork();
-    if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
-        return;
-    }
-
-    if (pid == 0) {
-        /* 子进程 */
-        close(pipefd[0]);
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-        close(pipefd[1]);
-        execlp("sh", "sh", IPTABLES_MGR, "stats_all", (char *)NULL);
-        _exit(127);
-    }
-
-    /* 父进程 · 用 fdopen 让 fgets 行解析逻辑零改动 */
-    close(pipefd[1]);
-    FILE *pf = fdopen(pipefd[0], "r");
-    if (!pf) {
-        close(pipefd[0]);
-        /* 仍要 reap 子进程, 不然 zombie */
-        int st;
-        while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {}
-        return;
-    }
-
-    char line[128];
-    while (fgets(line, sizeof(line), pf) != NULL) {
-        char ip[IP_STR_LEN];
-        long rx, tx;
-        if (sscanf(line, "%15s %ld %ld", ip, &rx, &tx) == 3) {
-            for (int i = 0; i < MAX_DEVICES; i++) {
-                if (g_devs[i].active && strcmp(g_devs[i].ip, ip) == 0) {
-                    g_devs[i].rx_bytes = rx;
-                    g_devs[i].tx_bytes = tx;
-                    break;
+    char *const cmd[] = { "sh", (char *)IPTABLES_MGR, "stats_all", NULL };
+    int n = hnc_run_cmd_timeout(cmd, out, STATS_CAP, 3000);
+    if (n > 0) {
+        char *save = NULL;
+        for (char *line = strtok_r(out, "\n", &save); line != NULL;
+             line = strtok_r(NULL, "\n", &save)) {
+            char ip[IP_STR_LEN];
+            long rx, tx;
+            if (sscanf(line, "%15s %ld %ld", ip, &rx, &tx) == 3) {
+                for (int i = 0; i < MAX_DEVICES; i++) {
+                    if (g_devs[i].active && strcmp(g_devs[i].ip, ip) == 0) {
+                        g_devs[i].rx_bytes = rx;
+                        g_devs[i].tx_bytes = tx;
+                        break;
+                    }
                 }
             }
         }
     }
-    fclose(pf);  /* 同时 close pipefd[0] */
-
-    int status;
-    pid_t w;
-    do { w = waitpid(pid, &status, 0); } while (w < 0 && errno == EINTR);
-    (void)status;
+    free(out);
 }
 
 /* rc30.9: monotonic clock in milliseconds.
@@ -1163,15 +1135,17 @@ static void handle_client(int cfd) {
     } else if (strcmp(req, "OFFLOAD_DISABLE_GLOBAL") == 0) {
         offload_err_t e = hnc_scheduler_force_disable_global();
         char resp[64];
+        /* v5.9.0: EEMPTY(map 空, 无事可做)对 IPC 调用方保持 OK 前缀
+         * (契约不破坏, 仓库内无解析者但保守处理), 细节段透出 "EMPTY"。 */
         snprintf(resp, sizeof(resp), "%s:%s\n",
-                 e == OFFLOAD_OK ? "OK" : "ERR",
+                 (e == OFFLOAD_OK || e == OFFLOAD_EEMPTY) ? "OK" : "ERR",
                  offload_err_str(e));
         (void)send_all(cfd, resp, strlen(resp));
     } else if (strcmp(req, "OFFLOAD_RESTORE_GLOBAL") == 0) {
         offload_err_t e = hnc_scheduler_force_restore_global();
         char resp[64];
         snprintf(resp, sizeof(resp), "%s:%s\n",
-                 e == OFFLOAD_OK ? "OK" : "ERR",
+                 (e == OFFLOAD_OK || e == OFFLOAD_EEMPTY) ? "OK" : "ERR",
                  offload_err_str(e));
         (void)send_all(cfd, resp, strlen(resp));
     } else if (strcmp(req, "QUIT") == 0) {

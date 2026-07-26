@@ -11,6 +11,7 @@
 #endif
 
 #include "upstream.h"
+#include "hnc_helpers.h"   /* v5.9.0: hnc_run_cmd_timeout (Tier1 超时执行) */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -48,12 +49,19 @@ int upstream_detect_via_ip_route(int *ifindex_out,
 {
     if (!ifindex_out || !ifname_out || ifname_size < 2) return -1;
 
-    FILE *f = popen("ip route get 8.8.8.8 2>/dev/null", "r");
-    if (!f) return -1;
+    /* v5.9.0: popen(无超时) → hnc_run_cmd_timeout(500ms + SIGKILL)。
+     * 此前 `ip` 被 ROM/SELinux 异常挂起时 pclose 无限阻塞;而本函数会被
+     * scheduler worker(曾经还持着 sched.lock)每 60s 调到 —— 挂起等于
+     * 冻死整个 hotspotd 的 IPC。现在最坏 500ms 返回,失败走 Tier2。 */
+    char out[4096];
+    char *const cmd[] = { "ip", "route", "get", "8.8.8.8", NULL };
+    int n = hnc_run_cmd_timeout(cmd, out, sizeof(out), 500);
+    if (n <= 0) return -1;
 
-    char line[512];
     int found = 0;
-    while (fgets(line, sizeof(line), f)) {
+    char *save = NULL;
+    for (char *line = strtok_r(out, "\n", &save); line != NULL;
+         line = strtok_r(NULL, "\n", &save)) {
         /* 找 " dev " 子串 (两侧 space 防 "cache" 等误匹配) */
         const char *dev = strstr(line, " dev ");
         if (!dev) continue;
@@ -71,7 +79,7 @@ int upstream_detect_via_ip_route(int *ifindex_out,
         /* alpha.4: 过滤 VPN / tunnel 接口
          * 用户开 Clash / WireGuard / OpenVPN 时 ip route get 会返回 tun0/wg0
          * 这些不是物理上游, BPF upstream4_map 里没这 ifindex, disable 无效
-         * 跳过继续 (但 popen 实际只返回一条, 所以这里会导致 Tier 1 返 -1, 触发 Tier 2/3) */
+         * 跳过继续 (实际只返回一条, 所以这里会导致 Tier 1 返 -1, 触发 Tier 2/3) */
         if (strncmp(iface, "tun",  3) == 0 ||
             strncmp(iface, "tap",  3) == 0 ||
             strncmp(iface, "ppp",  3) == 0 ||
@@ -90,7 +98,6 @@ int upstream_detect_via_ip_route(int *ifindex_out,
         found = 1;
         break;
     }
-    pclose(f);
     return found ? 0 : -1;
 }
 

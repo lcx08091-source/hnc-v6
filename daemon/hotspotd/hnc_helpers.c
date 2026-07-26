@@ -10,6 +10,14 @@
 #include <stdio.h>
 #include <string.h>
 #include <ctype.h>
+/* v5.9.0: hnc_run_cmd_timeout 依赖 */
+#include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
+#include <sys/select.h>
+#include <sys/time.h>
+#include <sys/wait.h>
 
 /* ══════════════════════════════════════════════════════════
  * should_re_resolve
@@ -1228,4 +1236,102 @@ int hnc_lookup_oui(const char *mac, char *out, size_t outlen) {
      * 总共 ≤ 20 字节,outlen ≥ 16 检查已保证安全 */
     snprintf(out, outlen, "%s 设备", hit->vendor);
     return 1;
+}
+
+/* ══════════════════════════════════════════════════════════
+ * hnc_run_cmd_timeout — 带总超时的子进程执行 (v5.9.0)
+ * 见 hnc_helpers.h 的接口说明。
+ * ══════════════════════════════════════════════════════════ */
+int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_ms) {
+    if (argv == NULL || argv[0] == NULL || buf == NULL || cap < 2 || timeout_ms <= 0)
+        return -1;
+    buf[0] = '\0';
+
+    int pipefd[2];
+    if (pipe(pipefd) < 0) return -1;
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        return -1;
+    }
+
+    if (pid == 0) {
+        /* 子进程: stdout → pipe, stderr → /dev/null */
+        close(pipefd[0]);
+        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        close(pipefd[1]);
+        execvp(argv[0], argv);
+        _exit(127);
+    }
+
+    /* 父进程: O_NONBLOCK + select 截止循环 (EINTR-safe) */
+    close(pipefd[1]);
+    int flags = fcntl(pipefd[0], F_GETFL, 0);
+    if (flags >= 0) fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
+
+    struct timeval tv_now;
+    gettimeofday(&tv_now, NULL);
+    long deadline_us = (long)tv_now.tv_sec * 1000000L + tv_now.tv_usec
+                       + (long)timeout_ms * 1000L;
+
+    size_t got = 0;
+    int killed = 0;
+    while (got < cap - 1) {
+        gettimeofday(&tv_now, NULL);
+        long now_us = (long)tv_now.tv_sec * 1000000L + tv_now.tv_usec;
+        long remain_us = deadline_us - now_us;
+        if (remain_us <= 0) {
+            kill(pid, SIGKILL);
+            killed = 1;
+            break;
+        }
+
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(pipefd[0], &rfds);
+        struct timeval tv = {
+            .tv_sec  = remain_us / 1000000L,
+            .tv_usec = remain_us % 1000000L,
+        };
+        int ret = select(pipefd[0] + 1, &rfds, NULL, NULL, &tv);
+        if (ret < 0) {
+            if (errno == EINTR) continue;
+            break;
+        }
+        if (ret == 0) {
+            /* 超时 */
+            kill(pid, SIGKILL);
+            killed = 1;
+            break;
+        }
+
+        ssize_t n = read(pipefd[0], buf + got, cap - 1 - got);
+        if (n < 0) {
+            if (errno == EINTR || errno == EAGAIN) continue;
+            break;
+        }
+        if (n == 0) break;   /* EOF: 子进程关闭了写端 */
+        got += (size_t)n;
+    }
+
+    /* buffer 写满但子进程还在产出 → 杀掉,避免它阻塞在写满的 pipe 上
+     * (close 读端后它也会收 SIGPIPE,kill 只是让 waitpid 确定性快返) */
+    if (!killed && got >= cap - 1) kill(pid, SIGKILL);
+
+    close(pipefd[0]);
+
+    int status;
+    pid_t w;
+    do { w = waitpid(pid, &status, 0); } while (w < 0 && errno == EINTR);
+    (void)status;
+
+    buf[got] = '\0';
+    return (int)got;
 }

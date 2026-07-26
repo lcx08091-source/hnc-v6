@@ -32,6 +32,14 @@
 #define RULES_JSON_PATH "/data/local/hnc/data/rules.json"
 #endif
 
+/* v5.9.0: disable_global 遇空 map (OFFLOAD_EEMPTY) 的快速重试参数。
+ * 热点冷启 limit_map 未填充时 disable_global 无 entry 可写 —— 旧行为
+ * 返回 OK 假装成功, 最坏 60s(下个 worker 周期)内被限速流量走 offload
+ * 旁路。现在 EEMPTY 置 pending, worker 以 5s 短周期重试至多 6 次
+ * (≈30s 预算), 之后回落 60s 节奏但每轮仍会重试。 */
+#define HNC_SCHED_EEMPTY_FAST_RETRY_SEC 5
+#define HNC_SCHED_EEMPTY_FAST_RETRIES   6
+
 /* ══════════════════════════════════════════════════════════
  * 内部状态
  * ══════════════════════════════════════════════════════════ */
@@ -70,6 +78,10 @@ static struct {
      * 的判断, 不依赖 wall clock 秒精度) */
     int64_t           worker_refresh_count;
 
+    /* v5.9.0: EEMPTY 快速重试状态 (sched.lock 保护, 见文件头 define 注释) */
+    int               eempty_retry_pending;
+    int               eempty_fast_credits;
+
     pthread_mutex_t   worker_lock;
     pthread_cond_t    worker_cond;
 } sched = {
@@ -83,6 +95,8 @@ static struct {
     .worker_refresh_requested = 0,
     .worker_last_refresh_ts   = 0,
     .worker_refresh_count     = 0,
+    .eempty_retry_pending     = 0,
+    .eempty_fast_credits      = 0,
 };
 
 /* ══════════════════════════════════════════════════════════
@@ -368,14 +382,26 @@ static int rebuild_from_rules(void)
  *   Tier 3: (留 alpha.3) BPF upstream4_map 反查
  * ══════════════════════════════════════════════════════════ */
 
-/* 公开 wrap, 加锁 + 缓存
- * 仅在内部触发: init / 0→>0 转换时
- */
-static void refresh_primary_upstream_locked(void)
+/* v5.9.0: 原 refresh_primary_upstream_locked 拆为 probe(锁外) + apply(锁内)。
+ *
+ * 为什么必须拆: 探测链 Tier3/4 是纯 bpf syscall(<1ms), 但 Tier1 是外部
+ * `ip route get`(现带 500ms 超时, 曾经无超时)。旧实现持 sched.lock 探测,
+ * 而主线程 IPC(OFFLOAD_NOTIFY_LIMIT / OFFLOAD_STATUS, hotspotd.c:1144/1154)
+ * 抢同一把锁 —— ip 命令被 ROM 挂起时整个 hotspotd(设备发现/JSON 写出/
+ * 全部 IPC)一起冻死。现在四个调用点(init / init-rebuild / worker / notify)
+ * 一律"锁外 probe → 锁内 apply"。 */
+
+/* 纯探测。禁止持 sched.lock 调用。成功返 0, idx/name 填充有效值。 */
+static int probe_primary_upstream(int *idx, char *name, size_t name_sz)
 {
-    int idx = 0;
-    char name[HNC_SCHED_IFNAME_LEN] = {0};
-    if (upstream_detect_primary(&idx, name, sizeof(name)) == 0) {
+    return upstream_detect_primary(idx, name, name_sz);
+}
+
+/* 只做赋值与日志。调用方需持 sched.lock。
+ * probe_rc != 0 时沿用 alpha.2 的"瞬态不清缓存"语义。 */
+static void apply_primary_upstream_locked(int probe_rc, int idx, const char *name)
+{
+    if (probe_rc == 0) {
         if (idx != sched.primary_upstream_ifindex ||
             strcmp(name, sched.primary_upstream_ifname) != 0) {
             fprintf(stderr, "[sched] primary upstream: %s (ifindex=%d)\n", name, idx);
@@ -423,6 +449,16 @@ static void trigger_adapter_disable_locked(void)
                 offload_err_t e = a->disable_global();
                 fprintf(stderr, "[sched] no primary upstream → fallback disable_global: %s\n",
                         offload_err_str(e));
+                /* v5.9.0: 空 map 不再被当成功 —— 置重试标记, worker 5s 短周期
+                 * 重探 (冷启 map 未填充的窗口从最坏 60s 缩到 ~5s)。 */
+                if (e == OFFLOAD_EEMPTY) {
+                    sched.eempty_retry_pending = 1;
+                    fprintf(stderr, "[sched] disable_global: map empty, will re-try (fast credits=%d)\n",
+                            sched.eempty_fast_credits);
+                } else if (e == OFFLOAD_OK) {
+                    sched.eempty_retry_pending = 0;
+                    sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
+                }
             } else {
                 fprintf(stderr, "[sched] no primary upstream AND no disable_global support\n");
             }
@@ -443,6 +479,13 @@ static void trigger_adapter_disable_locked(void)
         if (a->disable_global == NULL) return;
         offload_err_t e = a->disable_global();
         fprintf(stderr, "[sched] disable_global: %s\n", offload_err_str(e));
+        /* v5.9.0: EEMPTY → 快速重试 (同上 fallback 分支) */
+        if (e == OFFLOAD_EEMPTY) {
+            sched.eempty_retry_pending = 1;
+        } else if (e == OFFLOAD_OK) {
+            sched.eempty_retry_pending = 0;
+            sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
+        }
         break;
     }
     case OFFLOAD_GRAN_NONE:
@@ -505,6 +548,9 @@ static void *worker_main(void *arg)
     fprintf(stderr, "[sched] worker started (refresh interval %ds)\n",
             HNC_SCHED_REFRESH_INTERVAL_SEC);
 
+    /* v5.9.0: EEMPTY 快速重试时缩短下一轮等待 (worker 本地, 跨迭代生效) */
+    int next_wait_sec = HNC_SCHED_REFRESH_INTERVAL_SEC;
+
     while (1) {
         pthread_mutex_lock(&sched.worker_lock);
 
@@ -512,7 +558,7 @@ static void *worker_main(void *arg)
         if (!sched.worker_should_stop && !sched.worker_refresh_requested) {
             struct timespec ts;
             clock_gettime(CLOCK_REALTIME, &ts);
-            ts.tv_sec += HNC_SCHED_REFRESH_INTERVAL_SEC;
+            ts.tv_sec += next_wait_sec;
             pthread_cond_timedwait(&sched.worker_cond, &sched.worker_lock, &ts);
         }
 
@@ -540,10 +586,18 @@ static void *worker_main(void *arg)
          * 修复:
          *   每个 worker 周期(60s)都重探一次. 状态变化时 (探到新 upstream
          *   或上游切换) 自动 re-trigger adapter 操作,与 0->>0 路径等价.
-         *   纯 BPF 反查, 性能开销 < 1ms, 无副作用. */
+         *   纯 BPF 反查, 性能开销 < 1ms, 无副作用.
+         *
+         * v5.9.0: 探测本体移出 sched.lock(probe 锁外 / apply 锁内),
+         *   Tier1 的外部 ip 命令(500ms 超时)不再把主线程 IPC 卡在锁上. */
+        time_t cyc_ts = time(NULL);
+        int p_idx = 0;
+        char p_name[HNC_SCHED_IFNAME_LEN] = {0};
+        int p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
+
         pthread_mutex_lock(&sched.lock);
         int prev_ifindex = sched.primary_upstream_ifindex;
-        refresh_primary_upstream_locked();
+        apply_primary_upstream_locked(p_rc, p_idx, p_name);
         int now_ifindex = sched.primary_upstream_ifindex;
         /* 关键: 之前没探到 (=0) 现在探到了, 且当前有限速设备 → 立即触发
          * disable. 否则即便探到上游, adapter 状态还停留在
@@ -561,6 +615,18 @@ static void *worker_main(void *arg)
                     prev_ifindex, now_ifindex);
             trigger_adapter_disable_locked();
         }
+        /* v5.9.0: EEMPTY 待重试且仍有限速设备 → 本轮直接重触发一次 */
+        if (sched.eempty_retry_pending && sched.limited_count > 0 && !need_retrigger) {
+            sched.eempty_retry_pending = 0;
+            fprintf(stderr, "[sched] EEMPTY re-try: triggering disable again\n");
+            trigger_adapter_disable_locked();   /* 仍空会再次置 pending */
+        }
+        /* 决定下一轮等待: pending 且还有快速额度 → 5s, 否则回落 60s */
+        next_wait_sec = HNC_SCHED_REFRESH_INTERVAL_SEC;
+        if (sched.eempty_retry_pending && sched.eempty_fast_credits > 0) {
+            sched.eempty_fast_credits--;
+            next_wait_sec = HNC_SCHED_EEMPTY_FAST_RETRY_SEC;
+        }
         pthread_mutex_unlock(&sched.lock);
 
         /* v5.0.0-beta.4: ifindex 变化时同步通知 LSM guard
@@ -576,8 +642,15 @@ static void *worker_main(void *arg)
                 fprintf(stderr, "[sched] refresh_active: %s\n", offload_err_str(e));
             }
         }
-        sched.worker_last_refresh_ts = (int64_t)time(NULL);
+        /* v5.9.0: 统计字段读写全部收进 sched.lock(get_summary 的读侧同步
+         * 移入锁内), 消除跨线程 data race。语义微移: ts/count 现表示"本轮
+         * refresh 周期开始"(cyc_ts 在锁外先算好, 不为 time() 延长临界区),
+         * 不再等 refresh_active 的 5s 采样结束 —— sched_test [10] 段等 7s
+         * 判 count 增长, 不受影响。 */
+        pthread_mutex_lock(&sched.lock);
+        sched.worker_last_refresh_ts = (int64_t)cyc_ts;
         sched.worker_refresh_count++;
+        pthread_mutex_unlock(&sched.lock);
     }
 
     fprintf(stderr, "[sched] worker stopped\n");
@@ -633,10 +706,16 @@ int hnc_scheduler_init(void)
     pthread_mutex_init(&sched.worker_lock, NULL);
     pthread_cond_init(&sched.worker_cond, NULL);
 
-    /* 初次探测上游 */
-    pthread_mutex_lock(&sched.lock);
-    refresh_primary_upstream_locked();
-    pthread_mutex_unlock(&sched.lock);
+    /* 初次探测上游 (v5.9.0: probe 锁外 / apply 锁内 —— 此时 worker 未启,
+     * 单线程本无竞争, 改动纯为四个调用点形态统一) */
+    {
+        int p_idx = 0;
+        char p_name[HNC_SCHED_IFNAME_LEN] = {0};
+        int p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
+        pthread_mutex_lock(&sched.lock);
+        apply_primary_upstream_locked(p_rc, p_idx, p_name);
+        pthread_mutex_unlock(&sched.lock);
+    }
 
     /* 启动 worker 线程 */
     sched.worker_should_stop = 0;
@@ -682,10 +761,15 @@ int hnc_scheduler_init(void)
      * 这样重启后不需要手动 apply_device_rule.sh, 限速自动恢复 */
     int rebuilt = rebuild_from_rules();
     if (rebuilt > 0) {
-        pthread_mutex_lock(&sched.lock);
         /* 0 → >0 转换等价: 重新探测上游 + trigger disable
-         * (notify 路径一致, 避免重复代码) */
-        refresh_primary_upstream_locked();
+         * (notify 路径一致, 避免重复代码; v5.9.0 probe 移到锁外) */
+        int p_idx = 0;
+        char p_name[HNC_SCHED_IFNAME_LEN] = {0};
+        int p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
+        pthread_mutex_lock(&sched.lock);
+        apply_primary_upstream_locked(p_rc, p_idx, p_name);
+        /* v5.9.0: 新一轮 disable episode → 发满 EEMPTY 快速重试额度 */
+        sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
         trigger_adapter_disable_locked();
         pthread_mutex_unlock(&sched.lock);
         fprintf(stderr, "[sched] rebuild: triggered adapter disable (count=%d upstream=%s/%d)\n",
@@ -744,6 +828,16 @@ void hnc_scheduler_notify_device_limit_changed(const char *mac, int is_limited)
     int old_count, new_count;
     int triggered_disable = 0, triggered_restore = 0;
 
+    /* v5.9.0: 无条件先探测再加锁。旧实现在锁内 0→>0 分支里探测 ——
+     * Tier1 的外部 ip 命令会把持锁时间拉到无界(见 probe/apply 拆分注释)。
+     * 两段式"锁内查转换→放锁探测→重加锁复核"引入 ABA 复杂度不值;
+     * 常态(map 已填充)下 Tier3/4 是 <1ms 的纯 syscall, 无条件探测成本
+     * 可忽略; 最坏(走 Tier1)被 500ms 超时封顶, 而 IPC 客户端本就带 1s
+     * 超时。探测结果只在 0→>0 分支 apply, 非转换调用不改变现有行为。 */
+    int p_idx = 0;
+    char p_name[HNC_SCHED_IFNAME_LEN] = {0};
+    int p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
+
     pthread_mutex_lock(&sched.lock);
     old_count = sched.limited_count;
 
@@ -756,16 +850,18 @@ void hnc_scheduler_notify_device_limit_changed(const char *mac, int is_limited)
 
     /* 状态机: 0 → >0 / >0 → 0 */
     if (old_count == 0 && new_count > 0) {
-        /* 重新探测上游 (上次可能是冷启时, 上游可能已切换) */
-        refresh_primary_upstream_locked();
+        /* 采纳锁外探测结果 (上次可能是冷启时, 上游可能已切换) */
+        apply_primary_upstream_locked(p_rc, p_idx, p_name);
+        /* v5.9.0: 新一轮 disable episode → 发满 EEMPTY 快速重试额度 */
+        sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
         triggered_disable = 1;
     } else if (old_count > 0 && new_count == 0) {
         triggered_restore = 1;
     }
 
-    /* 注: trigger_* 内部不再读 limited_count, 只读 primary_upstream
-     * 与 adapter 状态。adapter 操作本身已是线程安全 (file-static lock free)
-     * 所以可以在持 sched.lock 时调 (调用 < 1ms 不会成为瓶颈) */
+    /* 注 (v5.9.0 更新): trigger_* 只做 BPF map 写 (<1ms), 可持 sched.lock
+     * 调用; 上游探测已全部移到锁外 (probe_primary_upstream), 主线程 IPC
+     * 不再被探测卡锁。 */
     if (triggered_disable)  trigger_adapter_disable_locked();
     if (triggered_restore)  trigger_adapter_restore_locked();
 
@@ -845,18 +941,20 @@ void hnc_scheduler_get_summary(hnc_offload_summary_t *out)
     for (int i = 0; i < n; i++)
         out->disabled_upstream_ifindex[i] = st.disabled_upstream_ifindex[i];
 
-    /* Scheduler 内部 (加锁) */
+    /* Scheduler 内部 (加锁)
+     * v5.9.0: worker_started/ts/count 三个字段的读也移进锁内 —— 写侧
+     * (worker_main 尾部)已收进 sched.lock, 旧的锁外读是形式 data race
+     * (C11 UB), 挪两行零成本消除。 */
     pthread_mutex_lock(&sched.lock);
     out->limited_device_count    = sched.limited_count;
     out->primary_upstream_ifindex = sched.primary_upstream_ifindex;
     snprintf(out->primary_upstream_ifname,
              sizeof(out->primary_upstream_ifname),
              "%s", sched.primary_upstream_ifname);
-    pthread_mutex_unlock(&sched.lock);
-
     out->worker_running          = sched.worker_started;
     out->worker_last_refresh_ts  = sched.worker_last_refresh_ts;
     out->worker_refresh_count    = sched.worker_refresh_count;
+    pthread_mutex_unlock(&sched.lock);
 }
 
 int hnc_scheduler_summary_to_json(const hnc_offload_summary_t *s,

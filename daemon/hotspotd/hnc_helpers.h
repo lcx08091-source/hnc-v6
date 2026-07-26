@@ -136,4 +136,22 @@ int hnc_pending_ready(const char *hostname_src, time_t pending_since, time_t now
  * ══════════════════════════════════════════════════════════ */
 int hnc_lookup_oui(const char *mac, char *out, size_t outlen);
 
+/* ══════════════════════════════════════════════════════════
+ * hnc_run_cmd_timeout — 带总超时的子进程执行 (v5.9.0)
+ *
+ * fork + execvp 运行 argv,捕获 stdout 到 buf(NUL 终结),子进程 stderr
+ * 重定向 /dev/null。总超时 timeout_ms(必须 >0),超时 SIGKILL 子进程,
+ * 已读到的部分输出保留返回。waitpid 带 EINTR 重试循环。
+ *
+ * 骨架提取自 hotspotd.c try_ns_dhcp_resolve 的 fork+select+SIGKILL 模式
+ * (该函数本体因 test_call_chain.c 的 HNC_TEST_MODE 注入机制保持不动),
+ * 并统一补上它缺的 waitpid EINTR 循环。诞生动机:upstream.c Tier1 的
+ * popen("ip route get …") 与 update_traffic_stats 的 fgets 流式读都没有
+ * 超时 —— ip/iptables 被 ROM 挂起时会把调用线程永久拖死。
+ *
+ * 返回:>=0 读到的字节数(超时/截断也算成功返回,调用方按内容判断);
+ *       -1 参数非法或 pipe/fork 失败。
+ * ══════════════════════════════════════════════════════════ */
+int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_ms);
+
 #endif /* HNC_HELPERS_H */

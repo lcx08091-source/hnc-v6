@@ -22,6 +22,7 @@ const char *offload_err_str(offload_err_t e)
     case OFFLOAD_EINVAL:    return "EINVAL";
     case OFFLOAD_ENOENT:    return "ENOENT";
     case OFFLOAD_EAGAIN:    return "EAGAIN";
+    case OFFLOAD_EEMPTY:    return "EMPTY";
     case OFFLOAD_EINTERNAL: return "EINTERNAL";
     }
     return "UNKNOWN";

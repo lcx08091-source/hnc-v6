@@ -47,6 +47,11 @@ typedef enum {
     OFFLOAD_EINVAL        = 3,    /* 参数非法(ifindex 不存在等) */
     OFFLOAD_ENOENT        = 4,    /* 资源不存在(map 文件被删等) */
     OFFLOAD_EAGAIN        = 5,    /* 暂时不可用(需稍后重试) */
+    OFFLOAD_EEMPTY        = 6,    /* v5.9.0: 操作对象集合为空(如 limit_map
+                                   * 无 entry): 无事可做, 非失败非成功。
+                                   * disable/restore_global 此前把空 map 报
+                                   * OK, 冷启窗口内"假禁用"最长 60s 被
+                                   * offload 旁路 —— 调度器现按此码快重试 */
     OFFLOAD_EINTERNAL     = 99,   /* 内部错误(syscall 异常等) */
 } offload_err_t;
 

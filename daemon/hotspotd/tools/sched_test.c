@@ -152,11 +152,12 @@ int main(int argc, char **argv)
     offload_err_t e2 = hnc_scheduler_force_restore_global();
     LOG("  force_disable_global: %s\n", offload_err_str(e1));
     LOG("  force_restore_global: %s\n", offload_err_str(e2));
-    /* null adapter 返 OK; bpf adapter 在无 entry 时也返 OK */
-    ASSERT(e1 == OFFLOAD_OK || e1 == OFFLOAD_ENOTSUP,
-           "force_disable_global ok or notsup");
-    ASSERT(e2 == OFFLOAD_OK || e2 == OFFLOAD_ENOTSUP,
-           "force_restore_global ok or notsup");
+    /* null adapter 返 OK; bpf adapter 在无 entry 时返 EEMPTY (v5.9.0 起
+     * 空 map 不再伪装 OK) */
+    ASSERT(e1 == OFFLOAD_OK || e1 == OFFLOAD_ENOTSUP || e1 == OFFLOAD_EEMPTY,
+           "force_disable_global ok/notsup/empty");
+    ASSERT(e2 == OFFLOAD_OK || e2 == OFFLOAD_ENOTSUP || e2 == OFFLOAD_EEMPTY,
+           "force_restore_global ok/notsup/empty");
 
     /* === 10. worker refresh === */
     if (!g_no_sleep) {
