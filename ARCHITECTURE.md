@@ -296,9 +296,9 @@ fi
           ↓ 写 devices.json
           ↓
 [t=200ms] hotspotd 完成设备识别, 写
-          /data/local/hnc/run/devices.json
+          /data/local/hnc/data/devices.json      ← data/, 不是 run/
           - mac=aa:bb:cc, ip=192.168.43.x,
-          - hostname=红米K70, vendor=Xiaomi
+          - hostname=红米K70, hostname_src=oui   ← 厂商进 hostname, 没有 vendor 字段
           ↓
 [t=200ms] hnc_dpid 同时在抓包
           (AF_PACKET 监听 wlan2)
@@ -307,7 +307,7 @@ fi
           ↓ 写 dpi_state.json
           ↓
 [t=300ms] hnc_dpid 完成识别, 写
-          /data/local/hnc/data/dpi_state.json
+          /data/local/hnc/run/dpi_state.json     ← run/, 不是 data/
           - client=aa:bb:cc → 抖音
           - bytes_rx=1234, bytes_tx=567
           ↓
@@ -327,168 +327,274 @@ fi
 
 ## 五、关键 JSON schema(运行时状态文件)
 
-所有运行时状态都在 `/data/local/hnc/run/` 和 `/data/local/hnc/data/`:
+<!-- v5.9.3 (BUG-007 B): 本节全部逐项对着代码核过一遍。上一版把 devices.json
+     写在 run/、把 dpi_state.json 写在 data/、stats 字段写成 pkts/dns/tls/drops,
+     全是漂移 —— 而 bin/diag/diag.sh 就照着漂移的路径去读, 结果诊断包对 DPI
+     恒定输出 "MISSING", 把好好的 dpid 报成挂了。文档漂移会变成可执行代码的
+     bug, 所以本节的每一行都带 file:line 出处。 -->
 
-### `run/devices.json` (hotspotd 写)
+**纪律(改代码时请一起改)**: 本节的路径与字段名**以实际代码为准**。任何一次
+改动 `daemon/hotspotd/hotspotd.c` 的 `write_json()`、`src/dpid/output/state.go`
+的结构体 tag、或 `daemon/hnc_httpd/server.go` 的 `buildDevicesPayload()`,都要
+在同一个提交里同步本节。写文档时**不要凭印象**,`grep` 一遍再写 —— 下游有真代码
+(诊断脚本、shell 解析、WebUI)按这里的描述去找文件和字段。
 
-<!-- rc30.12.30 (P2.17): 字段权威 schema, 替代之前的纯 JSON 示例 -->
+两个运行时目录的分工(不要凭直觉猜):
 
-**重要**: 这个文件由 `hotspotd` 单方面写, 不要从其他进程往里写. `hnc_httpd` 经过 `buildDevicesPayload()` 在内存里合并 `devices.json` + `data/rules.json` + `data/names.json` + 实时差分速率, 但**结果只通过 /api/devices 返回**, 不回写 devices.json. 这一节列三类字段来源, 因为之前 GPT 三审指出"混在一个 map 里靠 key 检索容易出错".
-
-#### 顶层字段
-
-| 字段 | 类型 | 写者 | 含义 |
-|---|---|---|---|
-| `schema` | int | hotspotd | 当前是 `1`, 升级时 bump |
-| `hotspot_active` | bool | hotspotd | 热点接口存在 + 有 IP + 至少一台 client 见过 |
-| `hotspot_iface` | string | hotspotd | 热点接口名 (`wlan2` / `ap0` / `softap0` 等) |
-| `hotspot_ip` | string | hotspotd | 热点接口 IPv4 (通常 `192.168.43.1`) |
-| `devices` | array | hotspotd | 当前可见 client 数组 (见下) |
-
-#### `devices[]` 字段 — 按来源分三类
-
-**A) hotspotd 原始字段** (devices.json 真实存的内容):
-
-| 字段 | 类型 | 必填 | 含义 |
-|---|---|---|---|
-| `mac` | string | ✅ | 客户端 MAC, 小写, 冒号分隔 (`aa:bb:cc:11:22:33`) |
-| `ip` | string | ✅ | 当前 DHCP 分配的 IPv4 |
-| `hostname` | string | 可空 | DHCP option 12 / ARP 探测出的设备名 |
-| `vendor` | string | 可空 | OUI 查表得到的厂商 (`Xiaomi` / `Apple` / `Huawei` …) |
-| `rx_bytes` | int64 | ✅ | hostapd/tc 累计接收字节 (单调递增) |
-| `tx_bytes` | int64 | ✅ | 累计发送字节 |
-| `first_seen` | int64 | ✅ | unix 秒, 首次 association |
-| `last_seen` | int64 | ✅ | unix 秒, 最近 DHCP renewal / probe 响应 |
-| `online` | bool | — | hotspotd 写入的近似值. **httpd 会覆盖** (基于 last_seen) |
-| `rx_bps`/`tx_bps` | int64 | — | hotspotd 历史字段, **httpd 会覆盖** (实时差分) |
-
-**B) hnc_httpd 在 buildDevicesPayload 时临时注入** (`/api/devices` 返回, 不进 devices.json):
-
-| 字段 | 类型 | 注入条件 | 含义 |
-|---|---|---|---|
-| `online` | bool | 总是覆盖 | `last_seen > 0 && now - last_seen < 90` |
-| `rx_bps` | int64 | 总是覆盖 | `(rx_bytes - prev_rx_bytes) / dt`, dt < 2s 时沿用缓存 |
-| `tx_bps` | int64 | 总是覆盖 | 同上 |
-| `status` | string | 总是注入 | `"blocked"` (在 rules.json blacklist) / `"allowed"` |
-| `hostname` | string | manual rename 时 | rules/names.json 里的 manual rename, 优先级最高 |
-| `hostname_src` | string | manual rename 时 | 固定 `"manual"`, 标记字段来源, UI 可显示标签 |
-
-**C) hnc_httpd 从 `data/rules.json` 的 `devices.<mac>` 合并** (`/api/devices` 返回):
-
-<!-- v5.9.1 文档勘误: 实际键名是 devices (server.go rulesMap["devices"], 与 json_set.sh schema 一致), 旧文写的 device_rules 从未存在过 -->
-
-| 字段 | 类型 | 含义 |
+| 目录 | 放什么 | 典型内容 |
 |---|---|---|
-| `mark_id` | int | iptables fwmark 值, tc class 用 |
-| `down_mbps` | float | 下行限速 (Mbps), 0 = 不限 |
-| `up_mbps` | float | 上行限速 (Mbps), 0 = 不限 |
-| `delay_ms` | int | netem 延迟注入 (毫秒) |
-| `jitter_ms` | int | netem 抖动 |
-| `loss_pct` | float | netem 丢包率 (0-100) |
-| `limit_enabled` | bool | 限速规则是否激活 |
-| `delay_enabled` | bool | 延迟规则是否激活 |
+| `data/` | **可跨重启保留**的状态与用户数据 | `devices.json`、`rules.json`、`device_names.json`、`known_devices.json`、`remote_tokens.json`、`oui.txt` |
+| `run/` | **进程生命周期内**的易失状态 | `dpi_state.json`、`*.pid`、`hotspotd.sock`、`ip_app_map.json`、`self_attrib.*.jsonl`、`local_admin.secret` |
 
-#### Rule-only / blacklist-only 设备
+### `data/devices.json` (hotspotd 写, httpd/dpid/shell 读)
 
-`devices.json` 只列当前可见 client. 一台设备配了限速但目前断开, **不在 devices.json**.
+**路径**: `/data/local/hnc/data/devices.json`
+(`hotspotd.c:75` `#define DEVICES_JSON HNC_DIR "/data/devices.json"`)
 
-`buildDevicesPayload` 末尾会扫描 `rules.json.devices`、`blacklist` 与 `device_names.json`(v5.9.1 起: 只改过名的设备也保留离线行), 把规则/命名存在但 hotspotd 没看到的 MAC 也追加成离线行 (`online: false`, `ip: "-"`, `rx_bps/tx_bps: 0`), 让 UI 仍能显示已配置状态. 这些"虚行"**不写回 devices.json**, 只在 `/api/devices` 返回时存在.
+**写者(两个,同一套 schema)**:
 
-#### 示例(httpd 合并后的 /api/devices 形态)
+| 写者 | 位置 | 何时 |
+|---|---|---|
+| `hotspotd` (C) | `hotspotd.c:498-628` `write_json()` | 常态。netlink NEIGH 事件 / 周期扫描后 |
+| `bin/device_detect.sh` | `:312` `do_scan_shell()` → `:478-479` | 兜底。`hotspotd_alive()`(`:55`)为假时 |
+
+两者都是 **tmp + rename 原子写**,tmp 名带 PID 后缀(`hotspotd.c:79`
+`DEVICES_TMP_FMT`;shell 侧 `${DEVICES_FILE}.tmp.$$`)—— 这是 v3.6.1 修的真实
+事故:两个 scan 并发写同一个 tmp,字节交错产出"看着合法但字段错位"的 JSON。
+
+**读者**: `hnc_httpd` 5 处 —— `server.go:343`(`buildDevicesPayload`)、
+`server.go:589`(`RateLoop` 采速率)、`api_v5.go:174`(反查热点 iface)、
+`api_events.go:64`(stat mtime 推 SSE 变更事件)、`action_v5.go:29`;
+`hnc_dpid` 1 处 —— `src/dpid/alert/alert.go:54`(新设备告警对比);
+shell 侧 `apply_device_rule.sh:24`、`apply_app_limits.sh:40`、
+`cleanup_offline_devices.sh:24`、`cleanup_stale_rules.sh:11` 等直接 grep 解析。
+
+#### 真实结构:**扁平 MAC → 对象 map**,没有任何外层包装
 
 ```json
 {
-  "schema": 1,
-  "hotspot_active": true,
-  "hotspot_iface": "wlan2",
-  "hotspot_ip": "192.168.43.1",
-  "devices": [
-    {
-      "mac": "aa:bb:cc:11:22:33",
-      "ip": "192.168.43.5",
-      "hostname": "我的红米",
-      "hostname_src": "manual",
-      "vendor": "Xiaomi",
-      "online": true,
-      "rx_bytes": 8421000000,
-      "tx_bytes": 102400000,
-      "rx_bps": 12800000,
-      "tx_bps": 450000,
-      "first_seen": 1747500000,
-      "last_seen": 1747510800,
-      "status": "allowed",
-      "mark_id": 11,
-      "down_mbps": 5.0,
-      "up_mbps": 2.0,
-      "limit_enabled": true
-    }
-  ]
+  "aa:bb:cc:11:22:33": {
+    "ip": "192.168.43.5",
+    "mac": "aa:bb:cc:11:22:33",
+    "hostname": "红米K70",
+    "hostname_src": "mdns",
+    "iface": "wlan2",
+    "rx_bytes": 8421000000,
+    "tx_bytes": 102400000,
+    "status": "allowed",
+    "last_seen": 1747510800
+  }
 }
 ```
 
+**顶层没有** `schema` / `hotspot_active` / `hotspot_iface` / `hotspot_ip` /
+`devices[]` 这些键 —— 旧文档写的那套外层包装从来不存在。热点自身状态由
+`/api/live` 提供(`api_live.go:81-84`),不在这个文件里。
 
-### `data/dpi_state.json` (dpid 写, httpd 读)
+hotspotd 真正写出的字段**只有下面 9 个**(`hotspotd.c:590-605` 的 `fprintf`
+格式串,一个不多一个不少;shell 兜底路径 `device_detect.sh:424` 逐字对齐):
+
+| 字段 | 类型 | 含义 |
+|---|---|---|
+| `ip` | string | 当前 IPv4 |
+| `mac` | string | 客户端 MAC,小写冒号分隔(同时也是 map 的 key) |
+| `hostname` | string | mDNS / DHCP / OUI / 缓存推出的名字;推不出时是 MAC 尾段 |
+| `hostname_src` | string | 名字来源:`mdns` / `dhcp` / `oui` / `cache-*` / `mac` / `pending` |
+| `iface` | string | 观察到该设备的接口名 |
+| `rx_bytes` | int64 | 累计字节(来自 `HNC_STATS` iptables 计数链) |
+| `tx_bytes` | int64 | 同上 |
+| `status` | string | `allowed` / `blocked`(hotspotd 读 rules.json 黑名单填);shell 兜底路径还会写 `stale` |
+| `last_seen` | int64 | unix 秒 |
+
+**没有** `vendor` 字段(OUI 查表的结果直接进 `hostname`,并把
+`hostname_src` 置成 `oui`,见 `hnc_helpers.c:1172` 附近的 OUI 表);
+**没有** `first_seen`;**没有** `online` / `rx_bps` / `tx_bps` —— 后三个是
+httpd 在内存里算出来的,见下。
+
+#### httpd 合并层:`/api/devices` 返回的对象 ≠ devices.json 里的对象
+
+`buildDevicesPayload()`(`server.go:336-558`)读 3 个文件在内存里合并,
+**结果只从 HTTP 返回,绝不回写 devices.json**:
+
+| 来源 | 文件 | 叠加的字段 |
+|---|---|---|
+| hotspotd | `data/devices.json` | 上表 9 个原始字段 |
+| 用户规则 | `data/rules.json` 的 `devices.<mac>` | `mark_id` `down_mbps` `up_mbps` `delay_ms` `jitter_ms` `loss_pct` `limit_enabled` `delay_enabled` `sqm_enabled`(`server.go:422-424`) |
+| 手动改名 | `data/device_names.json` | 覆盖 `hostname`,并把 `hostname_src` 置 `manual`(`server.go:433-439`) |
+| httpd 计算 | — | `status`(黑名单判定)、`online`(`last_seen` 在 90s 内)、`rx_bps`/`tx_bps`(`RateLoop` 2s 采样快照)、`dpi_apps`(来自 dpi_state.json 的 per-client top_apps) |
+
+> 文件名是 `device_names.json`,**不是** `names.json`(`server.go:345`)。
+
+**响应外层**是 `{ "devices": [...], "whitelist_mode": ..., "remote_enabled": ... }`
+(`server.go:554-558`),数组按 IP 数值序排(`.10` 排在 `.2` 后面)。
+
+#### Rule-only / blacklist-only / renamed-only 虚行
+
+`devices.json` 只列当前可见 client。配了限速但已断开的设备**不在文件里**,
+`buildDevicesPayload` 末尾会从 `rules.json.devices`、`blacklist`、
+`device_names.json` 三处补出离线虚行(`server.go:469-531`):
+`ip: "-"`、`online: false`、`rx_bps/tx_bps: 0`、`last_seen` 取
+`rules.json` 的 `last_seen_persist`(取不到给 0)。虚行同样**不写回**文件。
+
+### `run/hotspotd.sock` (IPC 命令通道,**不是** devices.json 的替代品)
+
+**路径**: `/data/local/hnc/run/hotspotd.sock`(`hotspotd.c:74`),
+`0600` + `chown root:root`(`hotspotd.c:1017-1021`)。
+
+这是一个 **UNIX SOCK_STREAM 命令通道**,支持 `GET_DEVICES` / `REFRESH` /
+`STATUS` / `QUIT`(`hotspotd.c:9`、`:1064` 起的请求分发)。它与
+`data/devices.json` **并存**,不存在"改用 socket 所以 devices.json 没有了"
+这回事:
+
+- 状态的**权威落盘**始终是 `data/devices.json`,httpd 只读文件不连 socket;
+- socket 是给 shell / 工具**主动问一次**用的:`bin/device_detect.sh:62`
+  `socket_query()` 优先 `socat`,退 `nc -U`,**两个都没有时直接
+  `cat "$DEVICES_FILE"`**(`:69`)—— 兜底路径本身就说明两者是同一份数据;
+- `daemon/hotspotd/tools/hnc_ipc.c` 是这个 socket 的独立客户端(调试用)。
+
+真机上看不到设备,先怀疑热点没开 / hotspotd 没起,不要怀疑"文件换成 socket 了"。
+
+### `run/dpi_state.json` (dpid 写, httpd 读)
+
+**路径**: `/data/local/hnc/run/dpi_state.json` —— `run/`,**不是** `data/`。
+出处:`src/dpid/cmd/dpid/main.go:38`(`defaultRunDir = "/data/local/hnc/run"`)
++ `:43`(`stateFileName = "dpi_state.json"`)+ `:155` 拼路径。可以被
+`etc/dpi_config.json` 的 `run_dir` 覆盖,但没人这么干。
+
+**读者全部按 `run/` 读**:`api_dpi_v53.go:23`(整文件透传给 WebUI)、
+`api_self.go:49`、`api_export.go:139`、`server.go:661`(join `dpi_apps`)、
+`dpid_supervisor/main.go:47`、`src/bin/hnc_dpid_guard.sh:491`。
+
+顶层字段来自 `src/dpid/output/state.go:244-298` 的 `State` 结构体:
 
 ```json
 {
   "schema_version": "2.0",
-  "iface": "wlan2",
-  "mode": "ok",         // ok | blind | disabled
-  "uptime_sec": 4523,
+  "generated_at": 1747510800,
   "version": "0.5.3-rc30.12.3-iface-retry",
-  "stats": { "pkts": 158234, "dns": 24891, "tls": 18432, "drops": 12 },
-  "actives": [
-    {
-      "client_mac": "aa:bb:cc:11:22:33",
-      "client_ip": "192.168.43.5",
-      "app": "抖音",
-      "category": "video",
-      "confidence": 0.97,
-      "rx_bps": 25600000, "tx_bps": 1200000,
-      "recent_domains": ["douyin.com", "amemv.com"]
-    }
-  ],
-  "rank": [ /* 应用排行 */ ],
-  "history_24h": [ /* 24 小时趋势 */ ]
+  "mode": "ok",
+  "blind_reason": "",
+  "interface": "wlan2",
+  "uptime_s": 4523,
+  "tls_reassembly": true,
+  "ipv6_capture": true,
+  "offload_hint": false,
+  "stats": {
+    "packets": 158234,
+    "kernel_drops": 12,
+    "dns_events": 24891,
+    "tls_events": 18432,
+    "flow_events": 9021,
+    "ignored_packets": 3,
+    "parse_errors": 0
+  },
+  "clients": { "<client-key>": { "client_ip": "…", "client_mac": "…", "top_apps": [] } },
+  "client_count": 2,
+  "top_hostnames": [], "top_sni": [], "top_apps": [], "top_categories": [], "top_ja4": [],
+  "l3_enabled": true, "l3_rule_version": "…",
+  "ndpi_available": false,
+  "conntrack_readable": true, "conntrack_flows": 128,
+  "total_rx_bytes": 0, "total_tx_bytes": 0,
+  "self": { "enabled": false }
 }
 ```
 
-### `etc/dpi_rules.json` (用户/项目维护, dpid 读)
+**容易写错的四个点(旧文档四个全错)**:
+
+| 旧文档 | 实际 | 出处 |
+|---|---|---|
+| `iface` | `interface` | `state.go:250` |
+| `uptime_sec` | `uptime_s` | `state.go:254` |
+| `stats.pkts` / `.dns` / `.tls` / `.drops` | `stats.packets` / `.dns_events` / `.tls_events` / `.kernel_drops` | `state.go:38-44` |
+| 顶层 `actives` / `rank` / `history_24h` | **不存在**。per-client 数据在 `clients`,排行在 `top_apps` / `top_categories`,24h 趋势走 `/api/dpi_history`(另一套采样文件) | `state.go:244-298` |
+
+`mode` 只有四个取值(`cmd/dpid/main.go:94-99`):
+
+| 值 | 含义 |
+|---|---|
+| `ok` | `decideMode`(`main.go:637-648`)判定可抓包,且 AF_PACKET socket 打开成功 |
+| `blind` | AF_PACKET 不可用 / 没探到热点接口;`blind_reason` 给原因 |
+| `disabled` | 配置 `disable_capture=true` |
+| `crash_loop` | 60s 内崩 ≥3 次,dpid 自保进 idle |
+
+> **`mode: "ok"` 不等于"正在抓到包"**(BUG-003)。它只表示 socket 开成功了,
+> 整个 attempt 生命周期内不复查流量。真机出现过 `mode=ok` 且
+> `stats.packets` 恒为 0 持续 5 天。判断"DPI 到底有没有在干活"必须
+> **同时**看 `stats.packets` 与 `uptime_s`;WebUI 从 v5.9.3 起在
+> `webroot/index.html` 的徽标处做这个交叉校验。
+
+### `etc/dpi_rules.json` / `etc/dpi_rules.d/*.json` (用户/项目维护, dpid 读)
+
+加载顺序(`src/dpid/output/rule.go:33-40`,先命中先用):
+
+1. `/data/local/hnc/etc/dpi_rules.d/*.json` —— rc30.12.31+,按文件名序 glob
+   合并,同 id 后写覆盖(nginx `conf.d` 风格,`99-user-custom.json` 能盖掉
+   项目内置规则);单个子集文件坏掉只 WARN 跳过,不影响整体加载
+2. `/data/local/hnc/etc/dpi_rules.json` —— legacy 单文件
+3. 编译进二进制的 `builtinRules` 兜底
+
+文件结构(`rule.go:170-215` 的结构体 tag):
 
 ```json
 {
+  "schema_version": "1",
   "rules_version": "my-rules-001",
   "rules": [
     {
       "id": "mihoyo",
-      "priority": 25,
-      "hostmark": [{ "app": "米哈游", "category": "game", "suffixes": ["mihoyo.com", "hoyoverse.com", "mhystatic.com"] }]
+      "name": "米哈游",
+      "app": "米哈游",
+      "category": "game",
+      "priority": "specific",
+      "suffixes": ["mihoyo.com", "hoyoverse.com", "mhystatic.com"],
+      "domains": [],
+      "ip_matchers": [{ "cidr": "1.2.3.0/24", "proto": "udp", "ports": [7000] }]
     }
   ]
 }
 ```
 
+`priority` 是**字符串**,只认 `specific`(默认)/ `fallback`
+(`rule.go:54-60`),不是数字;顶层键是 `rules`,没有 `hostmark` 这种东西。
+
 ### `etc/dpi_config.json` (用户配置)
+
+dpid 只认下面 6 个键(`cmd/dpid/main.go:75-82` 的 `Config` 结构体),
+多写的键会被静默忽略:
 
 ```json
 {
-  "disable_capture": false,
   "iface": "wlan2",
-  "rules_path": "/data/local/hnc/etc/dpi_rules.json"
+  "snaplen": 1024,
+  "rcv_buf_bytes": 4194304,
+  "log_level": "info",
+  "run_dir": "/data/local/hnc/run",
+  "disable_capture": false
 }
 ```
 
+没有 `rules_path` 这个键 —— 规则路径是上面写死的三级探测顺序。
+
 ### `run/*.pid` (各 daemon 的 pidfile)
 
+<!-- v5.9.3 (BUG-007 B): 逐个对着写者核过。旧文档写的 hnc_dpid.pid /
+     hnc_httpd.pid / hnc_watchdog.pid / hnc_launcher.pid 四个文件名**都不存在**
+     —— 真实文件名没有 hnc_ 前缀。照旧文档写监控脚本会永远 "pidfile missing"。 -->
+
 ```
-/data/local/hnc/run/hotspotd.pid       (hotspotd 自己写)
-/data/local/hnc/run/hnc_dpid.pid       (launcher 写)
-/data/local/hnc/run/hnc_httpd.pid      (httpd 自己写)
-/data/local/hnc/run/hnc_watchdog.pid   (watchdog 自己写)
-/data/local/hnc/run/hnc_launcher.pid   (launcher 自己写, rc30.12+)
+/data/local/hnc/run/hotspotd.pid       (hotspotd 自己写, hotspotd.c:81/1182)
+/data/local/hnc/run/dpid.pid           (hnc_launcher 写, src/launcher/hnc_launcher.c:64)
+/data/local/hnc/run/dpid_guard.pid     (hnc_launcher / dpid_supervisor 写, hnc_launcher.c:65)
+/data/local/hnc/run/dpid.child.pid     (dpid_supervisor 写, dpid_supervisor/main.go:45)
+/data/local/hnc/run/httpd.pid          (httpd 自己写, hnc_httpd/main.go:89)
+/data/local/hnc/run/watchdog.pid       (hnc_watchdog 自己写, hnc_watchdog/main.go:55)
+/data/local/hnc/run/launcher.pid       (hnc_watchdog spawn launcher 时写, main.go:355 + :579)
+/data/local/hnc/run/detect.pid         (device_detect.sh:507 自己写)
+/data/local/hnc/run/ndpi_continuous.pid(ndpi_continuous.sh, 由 watchdog 监管)
 ```
 
-watchdog 每 N 秒检查这些文件的 mtime 是否新鲜(每个 daemon 自己每 5 秒 touch 一次自己的 pidfile),不新鲜说明卡死,触发重启。
+watchdog 每 N 秒检查这些文件的 mtime 是否新鲜(每个 daemon 自己每 5 秒 touch 一次自己的 pidfile),不新鲜说明卡死,触发重启。Go watchdog 侧的对照表在
+`src/dpid/cmd/hnc_watchdog/main.go:304-360`(`daemonSpec.pidFile`),**加/改 pidfile 名字要同时改那张表**,否则 watchdog 会永远认为该 daemon 没在跑。
 
 ---
 
@@ -517,35 +623,65 @@ watchdog 每 N 秒检查这些文件的 mtime 是否新鲜(每个 daemon 自己�
 
 ## 七、关键文件位置
 
+<!-- v5.9.3 (BUG-007 B): 本节与第五节同一条纪律 —— 路径以代码为准, 改动同步。
+     上一版把 devices.json 标在 run/、把 dpi_state 标在 data/, 正好是反的;
+     bin/diag/diag.sh 就是照着这份描述去读 data/dpi_state.json, 于是诊断包
+     对 DPI 恒报 MISSING。目录归属写错的代价是真的会让人误判故障。 -->
+
 ### 模块目录(只读,KSU/Magisk 挂载)
 
 ```
 /data/adb/modules/hotspot_network_control/
 ├── module.prop
-├── post-fs-data.sh
-├── service.sh
+├── post-fs-data.sh          ← 建目录 + 从模块目录 sync 到 /data/local/hnc
+├── service.sh               ← 拉起 5 个 daemon
 ├── uninstall.sh
-├── bin/          ← 二进制 (source of truth)
-├── daemon/       ← 大二进制 (hnc_httpd / hotspotd ELF)
-├── data/         ← 规则文件 (dpi_rules, oui)
-├── bpf/          ← eBPF 字节码
-├── webroot/      ← WebUI 静态文件
+├── bin/          ← 脚本 + 小二进制 (hotspotd / hnc_dpid / hnc_launcher / fork_probe / hnc_ipc …)
+├── daemon/       ← hnc_httpd ELF (daemon/hnc_httpd/hnc_httpd)
+├── api/          ← WebUI 用的 shell API 入口
+├── data/         ← 项目维护的规则/数据 (dpi_rules.json, dpi_rules.d/, oui.txt, entity_db.json …)
+├── bpf/          ← eBPF 字节码 (hnc_limit_map_guard.bpf.o)
+├── webroot/      ← WebUI 静态文件 (index.html / changelog.html …)
+├── test/         ← 真机可跑的单测
 └── META-INF/     ← 模块元数据
 ```
 
-### 运行时目录(读写, /data/local/)
+### 运行时目录(读写, `/data/local/hnc/`)
 
 ```
 /data/local/hnc/
-├── bin/          ← service.sh sync 自模块目录
-├── daemon/       ← 同上
+├── bin/          ← post-fs-data.sh:63-70 从模块目录 cp
+├── api/          ← 同上
 ├── webroot/      ← 同上
-├── data/         ← 用户数据 (dpi_state, rules 副本)
-├── etc/          ← 用户配置 (可编辑)
-├── run/          ← pidfile + 实时状态 (devices.json)
-├── logs/         ← 日志文件
-└── tmp/          ← 临时文件
+├── test/         ← 同上
+├── daemon/hnc_httpd/hnc_httpd  ← post-fs-data.sh:80-88 单独 cp (只 cp 产物)
+├── bpf/          ← post-fs-data.sh:98-105
+├── data/    ← 持久状态 + 用户数据
+│   ├── devices.json          ← hotspotd 写 (见第五节)
+│   ├── rules.json            ← 限速/黑名单/白名单规则, json_set.sh 单写者
+│   ├── device_names.json     ← 手动改名 (不是 names.json)
+│   ├── known_devices.json    ← 新设备告警的"已知"集合
+│   ├── remote_tokens.json    ← 远程访问凭据 (bcrypt), httpd 是唯一写者 (tokens.go:65)
+│   ├── hostname_cache.json   ← hotspotd 名字缓存
+│   └── oui.txt / entity_db.json / dpi_*.json  ← service.sh 从模块目录同步的只读数据
+├── etc/     ← 用户可编辑配置 (刷机不覆盖, service.sh:705 起做软迁移)
+│   ├── dpi_config.json
+│   ├── dpi_rules.json        ← legacy 单文件
+│   └── dpi_rules.d/*.json    ← 首选, 99-user-custom.json 可覆盖项目规则
+├── run/     ← 易失状态 (重启即弃)
+│   ├── dpi_state.json        ← dpid 写 (**在这里, 不在 data/**)
+│   ├── *.pid                 ← 见上一节的真实文件名清单
+│   ├── hotspotd.sock         ← IPC 命令通道
+│   ├── ip_app_map.json / .flat
+│   ├── self_attrib.YYYYMMDD.jsonl
+│   ├── local_admin.secret    ← 本机免密凭据 (0600, 目录 700)
+│   └── iface.cache / dpid.netlink.event / dpid.crashflag / json.lock …
+└── logs/    ← service.log / dpid.log / httpd.log / hotspotd.log / detect.log /
+              watchdog.log / tc.log / iptables.log … (log_rotate.sh 轮转)
 ```
+
+> 没有 `tmp/` 目录 —— 临时文件一律是"目标文件同目录 + `.tmp.$$` 后缀"再 rename,
+> 这样 rename 才是同一文件系统内的原子操作。
 
 **为什么要 sync 一份到 /data/local**: KSU 挂载的模块目录有 mount namespace 限制,某些 daemon 跨 namespace 启动时找不到二进制。运行时拷贝一份到 /data/local/ 是稳定方案。
 
@@ -607,9 +743,9 @@ tail -50 /data/local/hnc/logs/hotspotd.log
 # 期望看到:
 # [HOTSPOTD] NEW: aa:bb:cc:dd:ee:ff (192.168.43.x) on wlan2
 
-# 3. 看 devices.json 是否更新
-ls -la /data/local/hnc/run/devices.json
-cat /data/local/hnc/run/devices.json | python3 -m json.tool
+# 3. 看 devices.json 是否更新 (data/, 不是 run/)
+ls -la /data/local/hnc/data/devices.json
+cat /data/local/hnc/data/devices.json | python3 -m json.tool
 ```
 
 ---
@@ -630,7 +766,7 @@ cat /data/local/hnc/run/devices.json | python3 -m json.tool
 
 7. **真机调试时最有用的三个命令**:
    - `tail -f /data/local/hnc/logs/service.log` — 启动诊断
-   - `cat /data/local/hnc/data/dpi_state.json | python3 -m json.tool` — DPI 状态
+   - `cat /data/local/hnc/run/dpi_state.json | python3 -m json.tool` — DPI 状态(**run/**)
    - `ps -ef | grep -E "hnc|hotspotd"` — 进程清单
 
 ---

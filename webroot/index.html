@@ -4312,6 +4312,9 @@ body.kb-open .container {
   .dpi-mode-badge.mode-disabled { background: rgba(150,150,150,0.18); color: var(--text-2); }
   .dpi-mode-badge.mode-crash    { background: rgba(255,59,48,0.20); color: #ff3b30; border-color: rgba(255,59,48,0.40); }
   .dpi-mode-badge.mode-unavail  { background: rgba(255,59,48,0.20); color: #ff3b30; border-color: rgba(255,59,48,0.40); }
+  /* v5.9.3 · BUG-003 第2层: mode=ok 但零抓包 (交叉校验判定) —— 复用 blind 的橙色告警配色,
+     单独一个 class 是为了不跟真正的 blind 混淆 (blind 是 dpid 自报, stall 是前端推断) */
+  .dpi-mode-badge.mode-stall    { background: rgba(255,149,0,0.18); color: #ff9500; border-color: rgba(255,149,0,0.32); }
   .dpi-status-rows { display: grid; gap: 6px; }
   .dpi-status-row {
     display: flex; justify-content: space-between; align-items: baseline;
@@ -6107,16 +6110,30 @@ body.kb-open .container {
      现在: 设置页只显示只读状态, 横幅完全由检测结果驱动。
      ═══════════════════════════════════════════════════════════════ */
   const OFFLOAD_STATE_TEXT = {
-    ACTIVE:  '已启用 · 影响限速精度',
-    IDLE:    '未在转发',
-    NOMAP:   '设备不支持',
-    PENDING: '检测中…'
+    ACTIVE:   '已启用 · 影响限速精度',
+    /* v5.9.3 · BUG-005 ②: check_offload.sh 新增的第四态。map 在、上游接口有条目,
+       但 5 秒窗口内增量不足 1MB —— 没跑流量时的常态。刻意只更新这行状态文案,
+       不弹横幅 (弹了就退回 v3.4.1 "map 存在就报警"的误报老路)。 */
+    CAPABLE:  '待命 · 一跑流量可能接管',
+    IDLE:     '未在转发',
+    NOMAP:    '设备不支持',
+    PENDING:  '检测中…'
   };
+  /* v5.9.3 · BUG-005 ①: 上行限速输入框旁的行内提示要不要显示。
+     ACTIVE(正在转发) 与 CAPABLE(随时可能接管) 都会让上行限速看起来"设了没用",
+     故两态都提示;IDLE / NOMAP / PENDING / 读取失败一律不提示。
+     与 v5.9.1 的顶部横幅是两个粒度: 横幅只在 ACTIVE 弹且在 page-devices 顶部
+     (用户滚到设备卡时早已出视口), 这里是操作点旁的常驻一行。 */
+  function offloadMayBypassShaping() {
+    if (state.offloadActive === true) return true;
+    return String(state.offloadDetail || '').trim().toUpperCase() === 'CAPABLE';
+  }
   function refreshOffloadStatus() {
     return apiGet('/api/offload_status').then(r => {
       const detail = String((r && r.detail) || '').trim();
       const key = detail.toUpperCase();
       state.offloadDetail = detail;
+      state.offloadActive = (r && r.active === true) && key !== 'PENDING';
       const row = $('#rs-offload-state');
       if (row) row.textContent = OFFLOAD_STATE_TEXT[key] || (detail || '—');
 
@@ -7856,6 +7873,68 @@ body.kb-open .container {
     }
   }
 
+  /* ═══════════════════════════════════════════════════════════════
+     v5.9.3 · BUG-003 第2层 · DPI "已绑定但零抓包" 交叉校验 (纯前端)
+
+     背景: dpid 的 mode=ok 语义只是"AF_PACKET socket 开成功了", 整个
+     attempt 生命周期内不复查流量; 三个 watchdog 也全部只看进程存活。
+     真机上 mode=ok 与 stats.packets=0 同时成立了 5 天, UI 却一直显示
+     绿点 "正常 · 抓包中" —— 徽标零交叉校验是这 5 天没人察觉的直接原因。
+
+     判定优先级 (下一批给 dpid 加 health/stall_seconds 后能平滑共存):
+       ① 后端自报: stall_seconds > 180 或 health=degraded/stalled → 失效
+       ② 后端明确自报 health=ok 且没有 stall 信号 → 信后端, 不再推断
+       ③ 后端还没这两个字段 (当前版本) → 用 packets × uptime_s 推断:
+          跑满 5 分钟仍然一个包没抓到 = 实际失效
+     字段缺失兼容: packets / uptime_s 任一取不到 (undefined / null /
+     非数字) 一律返回 null, 退回改动前的行为, 绝不因为读不到字段就报警。
+     ═══════════════════════════════════════════════════════════════ */
+  const DPI_STALL_SECONDS_MIN = 180;   // 后端 stall_seconds 门槛 (秒)
+  const DPI_ZERO_PKT_UPTIME_MIN = 300; // 推断路径: 零抓包要跑满这么久才算失效 (秒)
+  function dpiNumOrNull(v) {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(v);
+    return Number.isFinite(n) ? n : null;
+  }
+  /* 返回 null = 健康(或无法判定); 返回对象 = 已绑定但没在抓包 */
+  function dpiStallVerdict(st) {
+    if (!st || typeof st !== 'object') return null;
+    const stall = dpiNumOrNull(st.stall_seconds);
+    if (stall !== null && stall > DPI_STALL_SECONDS_MIN) {
+      return { src: 'stall', stall: stall, pkts: null, uptime: null };
+    }
+    const health = String(st.health || '').toLowerCase();
+    if (health === 'degraded' || health === 'stalled') {
+      return { src: 'health', stall: stall, pkts: null, uptime: null };
+    }
+    // 后端明确自报健康才跳过推断; 认不出的取值 (将来新增的中间态) 继续往下推断,
+    // 宁可多判一次也不要因为一个没见过的字符串就当作"一切正常"。
+    if (health === 'ok' || health === 'healthy') return null;
+    const stats = (st.stats && typeof st.stats === 'object') ? st.stats : null;
+    if (!stats) return null;
+    // 字段名核实过: src/dpid/output/state.go 的 tag 是 `packets` (不是 pkts)
+    const pkts = dpiNumOrNull(stats.packets);
+    const uptime = dpiNumOrNull(st.uptime_s);
+    if (pkts === null || uptime === null) return null;  // 字段缺失 → 退回现有行为
+    if (pkts === 0 && uptime > DPI_ZERO_PKT_UPTIME_MIN) {
+      return { src: 'zero_pkt', stall: null, pkts: pkts, uptime: uptime };
+    }
+    return null;
+  }
+  function dpiStallDetailText(v) {
+    let why;
+    if (v.src === 'zero_pkt') {
+      why = '已运行 ' + formatUptime(v.uptime) + ' 但抓包计数仍为 0';
+    } else if (v.src === 'stall') {
+      why = '后端自报已停滞 ' + Math.round(v.stall) + ' 秒无新包';
+    } else {
+      why = '后端自报抓包链路已降级 (health=degraded)';
+    }
+    return 'DPI 实际失效,请点“重新绑定 DPI”。' + why
+      + ' · mode 仍是 ok 只说明 socket 开成功了,不代表真的在收包;'
+      + '若热点刚开或确实没有设备在用,可先跑点流量再看。';
+  }
+
   function renderDPI(stateResp, probeResp) {
     const badge = $('#dpi-mode-badge');
     const detail = $('#dpi-status-detail');
@@ -7868,6 +7947,7 @@ body.kb-open .container {
     let badgeMode = 'unavail';
     let modeLabel = 'dpid 不可达';
     let detailText = '';
+    let dpiStall = null;   // v5.9.3 · BUG-003: mode=ok 但零抓包的判定结果
 
     if (stateResp && stateResp.available && stateResp.state) {
       const st = stateResp.state || {};
@@ -7875,8 +7955,17 @@ body.kb-open .container {
       badgeMode = (mode === 'crash_loop' ? 'crash' : mode);
       switch (mode) {
         case 'ok':
-          modeLabel = '正常 · 抓包中';
-          detailText = '';
+          /* v5.9.3 · BUG-003 第2层: 不再无条件绿灯, 交叉校验 packets × uptime
+           * (或后端将来的 health / stall_seconds)。判定失败一律退回原文案。 */
+          dpiStall = dpiStallVerdict(st);
+          if (dpiStall) {
+            badgeMode = 'stall';
+            modeLabel = '已绑定但零抓包';
+            detailText = dpiStallDetailText(dpiStall);
+          } else {
+            modeLabel = '正常 · 抓包中';
+            detailText = '';
+          }
           break;
         case 'blind': {
           const reason = String(st.blind_reason || '未知 — 可能 AF_PACKET 不可用或未探到热点接口');
@@ -7939,8 +8028,10 @@ body.kb-open .container {
       const sbMode = $('#dpi-sb-mode-val');
       const sbClients = $('#dpi-sb-clients-val');
       if (sbIface) sbIface.textContent = st.interface || '—';
-      if (sbIfaceDot) sbIfaceDot.className = 'dpi-dot' + (mode === 'ok' ? '' : (mode === 'blind' || mode === 'waiting' || mode === 'rebinding' ? ' warn' : ' bad'));
-      if (sbMode) sbMode.textContent = (mode === 'ok') ? '运行中' : (mode === 'disabled' ? '已禁用' : (mode === 'crash_loop' ? '崩溃' : '等待中'));
+      /* v5.9.3 · BUG-003 第2层: mode=ok 但零抓包时圆点/状态文案同步转 warn,
+       * 否则徽标已经告警了这里还是绿点, 用户仍然会以为一切正常。 */
+      if (sbIfaceDot) sbIfaceDot.className = 'dpi-dot' + ((mode === 'ok' && !dpiStall) ? '' : (dpiStall || mode === 'blind' || mode === 'waiting' || mode === 'rebinding' ? ' warn' : ' bad'));
+      if (sbMode) sbMode.textContent = (mode === 'ok') ? (dpiStall ? '零抓包' : '运行中') : (mode === 'disabled' ? '已禁用' : (mode === 'crash_loop' ? '崩溃' : '等待中'));
       if (sbClients) sbClients.textContent = String(st.client_count || (st.clients ? Object.keys(st.clients).length : 0));
 
       // 运行卡 (新)
@@ -9114,6 +9205,8 @@ body.kb-open .container {
     batchAction: null,      // 当前批量待触发操作 { type, template? }
     devicesLoadedOnce: false, // 首次 /api/devices 是否已返回 (骨架卡退场依据)
     hwBannerDismissed: false,
+    offloadDetail: '',       // v5.9.3 · /api/offload_status 的 detail 原文 (ACTIVE/CAPABLE/IDLE/NOMAP/PENDING)
+    offloadActive: false,    // v5.9.3 · 同一响应的 active 布尔结论 (PENDING 不算)
     currentFilter: '',       // 搜索过滤文本
     deviceFilter: (function () {
       var v = localStorage.getItem('hnc_device_filter');
@@ -9334,6 +9427,16 @@ body.kb-open .container {
                 <div class="qos-mode-desc">当前设备无法使用最精确队列链路，已进入 root HTB fallback。精确模式会减小 burst；校准越严格，实际测速越接近设定，但可能略低于目标。兼容模式更稳，允许短暂突发。</div>
               </div>` : '';
     const upValue = uplinkDisabled ? '' : (d.up ? mbpsToMBsStr(d.up) : '');
+    /* v5.9.3 · BUG-005 ①: 上行限速失效最常见的外部原因是硬件 offload 把转发
+     * 路径从 tc 手里抢走。顶部横幅只在 ACTIVE 弹、且用户滚到设备卡时早已出
+     * 视口 —— 这里在操作点旁补一行, ACTIVE / CAPABLE 两态都提示。
+     * 上/下行本身不可用时不显示 (那两条 warn 更准确, 别叠三行噪音)。 */
+    const offloadHint = (!uplinkDisabled && !downlinkDisabled && offloadMayBypassShaping())
+      ? '<div class="input-hint warn">若设备启用了硬件 offload（当前检测：'
+        + esc(state.offloadDetail || '未知')
+        + '），上行限速可能不生效或明显偏松 —— 转发路径绕过了 tc。'
+        + '可在「设置 · 硬件 offload」查看状态。</div>'
+      : '';
     const selected = state.selected.has(d.mac) ? 'selected' : '';
     // v5.7.0-rc5 (阶段5): identified apps for this device (from dpid via /api/devices).
     const dpiApps = Array.isArray(d.dpi_apps) ? d.dpi_apps : [];
@@ -9411,7 +9514,7 @@ body.kb-open .container {
                   </div>
                 </div>
               </div>
-              ${downlinkDisabled ? '<div class="input-hint warn">当前内核/TC 不支持 HTB，下行限速不可用；已禁用应用限速，避免后端超时。</div>' : (uplinkDisabled ? '<div class="input-hint warn">当前设备内核不支持 IFB/mirred，上行限速已禁用；下行限速仍可用。</div>' : '')}
+              ${downlinkDisabled ? '<div class="input-hint warn">当前内核/TC 不支持 HTB，下行限速不可用；已禁用应用限速，避免后端超时。</div>' : (uplinkDisabled ? '<div class="input-hint warn">当前设备内核不支持 IFB/mirred，上行限速已禁用；下行限速仍可用。</div>' : offloadHint)}
               ${qosModePanel}
               <div class="btn-row">
                 <button class="btn btn-primary" data-action="apply-limit"${applyLimitAttr}>应用限速</button>

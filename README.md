@@ -75,7 +75,7 @@
 
 ## 安装
 
-1. 从 [Releases](https://github.com/lcx08091-source/hnc-v5/releases) 下载最新 zip
+1. 从 [Releases](https://github.com/lcx08091-source/hnc-v6/releases) 下载最新 zip
 2. 在 KernelSU / Magisk Manager 里"从本地安装",选 zip
 3. 重启
 4. 手机浏览器打开 `http://127.0.0.1:8444/`(或通过 KSU WebUI 入口)
@@ -93,9 +93,12 @@
 
 1. **收集诊断**:
    ```sh
+   # 自检(逐项 OK/WARN/FAIL,回答"现在健不健康")
    su -c 'sh /data/local/hnc/bin/diag.sh' > /sdcard/hnc_diag.txt
+   # 环境转储(内核/ROM/root 框架/fork 兼容性,报兼容性问题时一起附上)
+   su -c 'sh /data/local/hnc/bin/diag/diag.sh' > /sdcard/hnc_env.txt
    ```
-2. 在 [Issues](https://github.com/lcx08091-source/hnc-v5/issues) 开一个 bug,附 `hnc_diag.txt`
+2. 在 [Issues](https://github.com/lcx08091-source/hnc-v6/issues) 开一个 bug,附 `hnc_diag.txt`
 3. 说明:
    - 哪个 ROM / 哪台设备 / 内核版本
    - 做了什么操作之后出现了什么现象
@@ -117,12 +120,16 @@
 - **版本**: {{VERSION}} ({{DATE}}) <!-- rc30.12.34: CI build.sh 自动注入, 不要手编 -->
 - **主测设备**: realme GT 7 Pro / ColorOS 16 / kernel 6.6.102 / SukiSU Ultra
 - **代码规模**: C 9.9K + Go 19K + Shell 17K + HTML/JS 12K ≈ 5.8 万行
-- 由 **Ling** 维护。架构和大量代码与 Claude(Anthropic)协作完成,详见 [HACKING.md](HACKING.md) 的开发笔记。
+- 由 **Ling** 维护。架构和大量代码与 Claude(Anthropic)协作完成,内部结构见 [ARCHITECTURE.md](ARCHITECTURE.md),演化史见 [EVOLUTION.md](EVOLUTION.md)。
 
 ---
 
 ## 贡献
 
-欢迎 bug 报告、兼容性反馈、PR。详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎 bug 报告、兼容性反馈、PR。
+
+- 报 bug:按上面「出问题了」的两条命令附诊断,开 [Issue](https://github.com/lcx08091-source/hnc-v6/issues)
+- 补兼容性:在 [COMPATIBILITY.md](COMPATIBILITY.md) 的 ROM 表里加一行,注明设备 / ROM / 内核 / root 框架
+- 提 PR:先读 [ARCHITECTURE.md](ARCHITECTURE.md);CI 只做交叉编译 + 静态检查,行为改动请附真机验证结果
 
 安全漏洞请**不要**在公开 issue 报告,按 [SECURITY.md](SECURITY.md) 的流程私下沟通。

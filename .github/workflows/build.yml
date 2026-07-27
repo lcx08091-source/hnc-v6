@@ -328,6 +328,27 @@ jobs:
             echo "OK: hnc_launcher version string present"
           fi
 
+      # ─── v5.9.3 · BUG-015 B: 文档版本占位符注入 ────────────
+      # bin/inject_version_to_docs.sh 从 rc30.12.34 就写好了, 但从来没被任何
+      # 地方调用过 → README.md 又不在下面 zip 的排除列表里 → 用户装机后看到的
+      # "版本" 栏一直是字面 {{VERSION}} ({{DATE}}), 而 module.prop 已经是 v5.9.x。
+      #
+      # 必须在 Package zip 之前跑, 且**只改 runner 工作区, 绝不 commit 回仓库**:
+      # 一旦把注入结果 commit 进去, 下次 inject 就走脚本 :78-81 的 noop 分支
+      # (文件里已经没有占位符了), 版本号会永久锁死在某个旧版本 —— 这是本条
+      # 最危险的误修法, 不要"顺手 git add"。
+      #
+      # 三步自证: 注入 → --check 确认占位符已消失 → 带 HNC_RELEASE_CHECK=1 再跑
+      # 一次版本护栏 (该变量把 version_consistency_check.sh 里的占位符 warn 升级
+      # 成 fail, 拦住任何带占位符的包出门)。
+      - name: Inject version into docs (README/ARCHITECTURE)
+        run: |
+          sh bin/inject_version_to_docs.sh
+          sh bin/inject_version_to_docs.sh --check
+          HNC_RELEASE_CHECK=1 sh bin/version_consistency_check.sh
+          echo "--- README 版本行 (注入后) ---"
+          grep -n '^- \*\*版本\*\*' README.md || true
+
       # ─── Package zip ──────────────────────────────────────
       - name: Package module zip
         run: |
