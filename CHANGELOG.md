@@ -14,6 +14,43 @@
 
 ---
 
+## [5.9.3] - 2026-07-27
+
+用户提供的真机缺陷清单(BUGSv5,15 条)的第一批止血。分诊结论见 `BUGSV5-TRIAGE.md`(still_open 10 / partial 5 / fixed_in_repo 0,6 条推翻或改写了原归因)。
+
+本批**只含 shell / 前端 / 文档**,零 Go、零 C —— 失败也只回到现状,不会更糟,无真机验证前置。dpid 核心批(BUG-001 网卡重绑等)与 hotspotd 批分别排在 v5.9.4 / v5.9.5,后者失败模式是"0 设备",必须能独立回滚,故不与 dpid 批混。
+
+### Fixed
+
+- **日志轮转的 inode 黑洞**(`bin/log_rotate.sh`,BUG-014 步骤1)。旧实现 `mv foo.log foo.log.1` 的前提是"进程用 append 模式,mv 后下次 open 走新文件"——这只对每写一行重开文件的 shell 成立。五个长驻 daemon(dpid / httpd / hotspotd / watchdog / launcher)的 stdout/stderr 都是 spawn 那一刻一次性打开的 O_APPEND fd,永远不会重开:mv 只改目录项不动 inode → 轮转后 daemon 继续往 `foo.log.1` 里写(真机实测 dpid 的 fd 1/2 双双指向 `dpid.log.1`),而 WebUI 日志页读的是那个空的新 `foo.log`;再轮两次,`rm -f $f.2` 会 unlink 掉仍被持有的 inode → **日志彻底消失,磁盘空间也不释放**(inode 到进程退出才回收)。改为 copytruncate(`cp` + `: > "$f"`),inode 不变,所有写者都是 O_APPEND,truncate 后写位置回到文件头不留稀疏洞,一处修好全部长驻 daemon。`cp` 与 truncate 必须 `&&` 串联:cp 失败(磁盘满/只读)时绝不能截断原文件,否则从"日志没轮转"升级成"日志被清空"。代价是 cp 与 truncate 之间新写入的几行会丢,日志场景可接受。
+- **`json_legacy_fallback` 计数把"键不存在"当故障**(`bin/json_set.sh`,BUG-008,归因反转)。`hnc_json` 用 rc=3 表示"键不存在"——这是正常结果不是故障。三个 reader wrapper(`top_get` / `device_get` / `name_get`)用 `if ! ...` 把 rc=3 和 rc=1(锁超时)/ rc=2(文件缺失或 JSON 非法)/ rc=127(helper 不可用)一视同仁地计数并回退 legacy reader。而热路径上"键不存在"是常态(`device_detect.sh` 每轮对每台未命名设备 +1、`apply_device_rule.sh` 一台无延迟设备 +5),于是该计数变成只会单调猛涨的无意义大数,`api_sla.go` → WebUI 把它当健康指标展示,同时让"计数长期为 0 才能退役 400 行 legacy writer"的退役条件永远不可能达成。现在 rc=3 按空答案 `exit 0`(不计数、不回退),只有 1/2/127 等才继续计数并回退。**写路径未动**。
+- **目录权限 0777**(`post-fs-data.sh` / `service.sh` / `bin/json_set.sh init_dirs`,BUG-009)。根因是引导脚本继承 magiskd/KSU 的 `umask=0`,裸 `mkdir -p` 建出来就是 0777、裸 `>` 建出来的文件就是 0666——仓库里一处 `chmod 777` 都没有。现在显式设 `umask 022`,凭据目录(`$HNC_DIR` / `data` / `logs` / `run` / `.backup-*`)再显式 `chmod 700`。`run/local_admin.secret` 文件本身早已是 0600,但目录 0777 且无 sticky 位时别人可以直接 unlink 掉它再写一个自己的,伪造 `X-HNC-Local-Admin` 拿到 root 级写 API——**收目录才是真正的修法**。`service.sh` 也必须收:WebUI 的"重启后端"是直接 fork `service.sh`、根本不经过 `post-fs-data.sh`。
+- **portal 残留文件永不清理**(`bin/cleanup.sh` + `post-fs-data.sh`,BUG-010)。portal 是 v5.8.9 的实验分支、最终未合入 main,在 `run/` 留下 `portal_pending.json` / `portal_sessions.json`。`run/` 的清理是白名单式逐项 `rm`,历来不含 `portal_*`,三种 mode 一个都清不掉,只有 `uninstall.sh` 的 `rm -rf run/` 会带走——而日常清理和 v5.8.9-portal → v5.9.x 的升级路径都不走那条。两处都带守卫:portal 若将来真的合入 main(`bin/portal_manager.sh` 会存在)则绝不删,否则每次开机清空会话表 = 用户被强制重认证。
+- **tc 快照与真实 tc 树失联**(`bin/cleanup.sh` + `bin/apply_app_limits.sh`,BUG-012 步骤1)。`run/tc_state.json` 的唯一写者是 `tc_state_snapshot.sh`,而它的触发全挂在 `tc_manager.sh` 的命令分发器上。有两条路径真改 tc 却完全绕过分发器:① `cleanup.sh` 走自己的 tc 删除路径(删完 root/ingress/ifb0,快照仍写着 `htb_ready:true`,与真实的空树完全相反);② `apply_app_limits.sh` 被 watchdog 每 30s fork,自建一整套 iptables + tc 规则(真机实测快照停在 9 天前)。cleanup 侧无条件同步刷一次;apply_app_limits 侧做**条件触发**,签名只取 `classid=rate` 集合——刻意排除 IP 列表,那些只改 iptables MARK 规则、tc 的 class/qdisc/filter 一个字节都不变,算进去会让 dpid 每观测到一个新 IP 就误触发,每天多 2880 行日志噪声。两处都同步跑而非 `( ... ) &`:调用方(httpd 的 `CombinedOutput` / watchdog 的 `io.Discard`)都会为非 `*os.File` 的 Writer 建管道,后台子 shell 继承写端会把 `Wait()` 挂死。
+- **诊断脚本对 DPI 恒报 MISSING**(`bin/diag/diag.sh`,BUG-007 A,实际代码 bug 而非文档问题)。① `dpi_state.json` 读的是 `data/`,但 dpid 一直写 `run/`(`main.go` 的 `stateFileName`,httpd 侧 `api_dpi_v53.go` / `api_self.go` / `api_export.go` / `server.go` 也全部读 `run/`)→ 该段对任何机器恒定输出 `MISSING`,把正常运行的 dpid 误报成挂了;② dpid 日志读的是 `logs/hnc_dpid.log`,实际名字是 `logs/dpid.log`(`dpid_supervisor` 的 `dpidChildLog`、`hnc_dpid_guard.sh`、httpd `allowedLogs` 三处一致)→ 该段永远空白。两处都改为新路径优先、老路径兜底,并打印实际命中的路径。
+- **README 死链与版本占位符**(`README.md` + `.github/workflows/build.yml`,BUG-015)。两处 Releases / Issues 链接仍指向 `hnc-v5`(仓库早已是 `hnc-v6`),"详见 HACKING.md" 指向不存在的文件;更要紧的是 `bin/inject_version_to_docs.sh` 从 rc30.12.34 就写好了却从未被任何地方调用过,而 `README.md` 又不在刷机 zip 的排除列表里 → **用户装机后看到的"版本"栏一直是字面 `{{VERSION}}`(`{{DATE}}`)**,而 `module.prop` 已经是 v5.9.x。现在接进 `build.yml`,排在 Package zip 之前,三步自证:注入 → `--check` 确认占位符消失 → 带 `HNC_RELEASE_CHECK=1` 再跑一次版本护栏。**只改 runner 工作区,绝不 commit 回仓库**——一旦把注入结果 commit 进去,下次 inject 就走 noop 分支,版本号会永久锁死在某个旧版,这是本条最危险的误修法。
+
+### Added
+
+- **DPI 徽标交叉校验**(`webroot/index.html`,BUG-003 第2层)。dpid 的 `mode=ok` 语义只是"AF_PACKET socket 开成功了",整个 attempt 生命周期内不复查流量;三个 watchdog 也全部只看进程存活。真机上 `mode=ok` 与 `stats.packets=0` 同时成立了 5 天,UI 却一直显示绿点"正常 · 抓包中"——**徽标零交叉校验是这 5 天没人察觉的直接原因**。判定优先级:① 后端自报 `stall_seconds > 180` 或 `health=degraded/stalled` → 失效;② 后端明确自报 `health=ok/healthy` 且无 stall 信号 → 信后端,不再推断;③ 后端还没这两个字段(当前版本)→ 用 `packets × uptime_s` 推断,跑满 5 分钟仍零抓包即判失效。字段缺失(undefined / null / 非数字)一律返回 null 退回改动前行为,**绝不因为读不到字段就报警**。新增 `mode-stall` 橙色徽标(与 dpid 自报的 `blind` 区分:blind 是后端自报,stall 是前端推断),侧栏圆点与状态文案同步转 warn,文案引导"重新绑定 DPI"。纯前端独立判定、不依赖任何后端新字段,所以能先于 dpid 批发出去;下一批给 dpid 加 `health`/`stall_seconds` 后可平滑共存。
+- **上行限速旁的 offload 行内提示**(`webroot/index.html`,BUG-005 ①)。上行限速失效最常见的外部原因是硬件 offload 把转发路径从 tc 手里抢走,而 v5.9.1 的顶部横幅只在 ACTIVE 弹、且在 page-devices 顶部——用户滚到设备卡时早已出视口。这里在操作点旁补一行常驻提示,ACTIVE 与 CAPABLE 两态都提示;上/下行本身不可用时不显示(那两条 warn 更准确,不叠三行噪音)。
+- **`check_offload.sh` 第四态 CAPABLE**(BUG-005 ②)。原判定是流量门控的(5 秒内增量 ≥1MB 才 ACTIVE),用户"设了上行限速但当前没跑流量"时必然落 IDLE,状态行永远显示"未在转发",排障分不清"没能力"和"有能力但此刻闲着"。新增不依赖流量的只读静态探测:tc filter 链里挂着 AOSP 的 `schedcls/tether_{upstream,downstream}{4,6}`,或 tether `limit_map`/`stats_map` 里已有 ifindex 条目。NOMAP / ACTIVE / IDLE 三态的判定条件与上版**完全一致**,CAPABLE 只从原本会输出 IDLE 的那部分细分出来。**不报警、不弹横幅**——一旦把 CAPABLE 接成弹窗条件就退回 v3.4.1 那个"map 存在就报警"的误报老路。已核实 httpd 的 `runOffloadCheck` 是整词匹配(`active`/`warning`/`bpf_on`/`offload_on`),`capable` 不在表里,老后端拿到也只会当未知态忽略。
+- **应用级限速失效不再静默**(`bin/apply_app_limits.sh`,BUG-011 连带)。`ip_app_map.flat` 的唯一生产者是 dpid 主抓包路径上的 `IPAppMap.Record`;dpid 一旦选错网卡或接口重建后不重绑(BUG-001),这张表就恒空,而旧代码只 log 一行普通句子后 `exit 0`,对 watchdog 看起来完全成功。用户侧观感是"应用级限速配了但毫无作用"却完全不知道断在哪一环。现在打一条固定可 grep 的 `HNC_APP_LIMIT_INACTIVE`,并在 `run/app_limits_inactive.marker` 落首次失效时间戳 + 连续失效轮次(30s 一轮,streak × 30 秒即失效时长),日志直接指向排查点"`run/dpi_state.json` 的 `stats.packets` 是否在涨"。
+- **tc 快照新鲜度判定**(`bin/diag.sh` + `bin/json_health_panel.sh`,BUG-012 步骤2)。`tc_state.json` 是纯事件驱动快照、自身无心跳,稳态下几天不更新是设计不是故障;但两个消费端只判"文件存在"就报健康,直接 `cat` 快照排障会被几天前的数据误导。加 900s 新鲜度提示,措辞明确写"**陈旧不代表 tc 树有问题,以 `tc qdisc show` 为准**"。刻意不把陈旧算进 OVERALL,也刻意不改 `has_tc_state` 的语义(`json-health.html` 仍按它渲染)——拿设计行为造假告警是另一种 bug。
+- **版本护栏加文档占位符检查**(`bin/version_consistency_check.sh`)。构成注入护栏的另一侧:`HNC_RELEASE_CHECK=1`(打包/发布路径)→ fail,平时/本地开发 → warn(仓库里保留占位符是正常状态)。刻意不拿 `GITHUB_REF=refs/tags/v*` 自动升级成 fail——本步骤在 `build.yml` 里排在打包之前而注入发生在打包步,tag 构建跑到这里时占位符本来就还在,自动 fail 会把"步骤顺序"误报成"文档没注入",直接卡死发布。扫描清单直接从 inject 脚本的 `DOC_FILES` 读取(读不到再退回硬编码),避免两处清单各写一份互相漂移。
+
+### Internals
+
+- **新增 28 条单元断言**:`test_json_set_miss_rc3.sh`(7)、`test_dir_permissions.sh`(7)、`test_log_rotate.sh`(+3,含 inode 不变断言)、`test_app_limits_visibility.sh`(11)。两条"新测试能抓住旧 bug"的反证已实测:旧 `json_set.sh` 把 rc=3 计进 fallback;旧 `log_rotate.sh` 轮转后 inode 变化(1925298→1925314)且被持有的 fd 写进 `foo.log.1`。
+- **两个 diag 脚本的分工写进各自头部**(BUG-007 B)。此前 README 与 COMPATIBILITY 各指一个,用户以为是同一个东西写错了路径。`bin/diag.sh` = 逐项判定型自检(OK/WARN/FAIL + 退出码语义,回答"现在健不健康");`bin/diag/diag.sh` = 环境信息转储型(不判定、不返回错误码,回答"这台机器是什么环境")。互补不互替,报兼容性问题时建议两个都跑。
+- **`ARCHITECTURE.md` 逐行勘误**:路径、文件名、daemon 职责与实际代码逐条核对后订正,并补齐 v5.7 → v5.9 期间新增的运行时文件与数据流说明。
+
+验证:`sh -n`(全部改动脚本)全过;`node --check` ×2 全过;HTMLParser 标签平衡 0 错、与上版基线增量为 0;`build.yml` 经 YAML 解析确认新步骤落在 build job 内且顺序正确;`sh test/run_all.sh` 失败集与基线**完全一致**(16 项,均为容器缺 `/system/bin/sh` 等既有问题),201 passed / 214 total(上版 173 / 186),新增 28 条全绿、0 新失败。
+
+真机回归点:轮转后 `ls -i logs/*.log` 确认 inode 不变且 daemon 仍写主文件;`stat -c %a /data/local/hnc/{,data,logs,run}` 应为 700 而 `bin`/`api`/`webroot` 仍 755 且脚本可执行;诊断包 DPI 栏不再 MISSING;`json_legacy_fallback.count` 不再随时间猛涨;应用限速未生效时 `logs/app_limits.log` 能 grep 到 `HNC_APP_LIMIT_INACTIVE`。
+
+---
+
 ## [5.9.2] - 2026-07-26
 
 用户预览确认后的界面视觉/性能优化合入(纯前端,不重编二进制),外加 P2/P3 待办排期文档。预览版基于旧基线,故按"A 类纯视觉增量逐项移植"执行(v5.9.1 已有更优实现的 B 类跳过防回退,预览 mock 层 C 类零携带)。
