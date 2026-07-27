@@ -137,6 +137,18 @@ tc qdisc del dev "$IFACE" ingress 2>/dev/null
 tc qdisc del dev ifb0 root 2>/dev/null
 ip link set ifb0 down 2>/dev/null
 ip link del ifb0 2>/dev/null
+# v5.9.3 BUG-012 步骤1:上面刚把 root/ingress/ifb0 qdisc 全删了,但 cleanup.sh
+# 历来不刷 run/tc_state.json —— 快照的写者只有 tc_state_snapshot.sh,而它的触发
+# 全挂在 tc_manager.sh 的命令分发器上,cleanup.sh 走的是自己的 tc 删除路径。
+# 结果:cleanup 之后快照仍然写着 htb_ready:true,和真实的空树完全相反,而
+# bin/diag.sh 与 bin/json_health_panel.sh 只判"文件存在"就报健康。
+# 这里同步刷一次(不用 tc_manager.sh 的 `( ... ) &` 异步模式):cleanup.sh 会被
+# hnc_httpd 的 runBin/CombinedOutput() 调用,后台子 shell 会继承那两个管道的写端,
+# 让 Wait() 一直挂着;同步跑约 50ms,cleanup 不是热路径,完全划算。
+if [ -x "$HNC_DIR/bin/tc_state_snapshot.sh" ]; then
+    HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$IFACE" >/dev/null 2>&1
+    log "tc_state snapshot refreshed after TC cleanup (BUG-012)"
+fi
 log "TC cleanup done"
 
 # ── 3. 清除 iptables 规则 ────────────────────────────────────
@@ -179,6 +191,14 @@ rm -f "$HNC_DIR/run/hostname_cache" 2>/dev/null  # 缓存可以删
 rm -rf "$HNC_DIR/run/v6" 2>/dev/null              # v3.4.0：v6_sync 快照目录
 # v3.5.0 P2-5: 清理 device_detect.sh 留下的临时文件(进程异常退出后残留)
 rm -f "$RUN"/scan_tmp.* "$RUN"/scan_arp.* "$RUN"/.gc_* "$RUN"/.lock_check_* 2>/dev/null
+# v5.9.3 BUG-010:portal(v5.8.9 实验分支,最终未合入 main)的残留。run/ 清理是
+# 白名单式逐项 rm,历来不含 portal_*,三种 mode 一个都清不掉,只有 uninstall.sh
+# 的 `rm -rf run/` 会带走 —— 而日常清理和 v5.8.9-portal → v5.9.x 升级都不走那条。
+# 守卫:portal 若将来真的合入 main,bin/portal_manager.sh 必然存在,那时这行绝不
+# 能删会话表(用户会被强制重认证),合入时应显式删掉这几行而不是依赖守卫。
+if [ ! -f "$HNC_DIR/bin/portal_manager.sh" ]; then
+    rm -f "$RUN/portal_pending.json" "$RUN/portal_sessions.json" 2>/dev/null
+fi
 rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" 2>/dev/null  # P0-2 锁残留 + rc11 hnc_json stale lock
 # v3.9.1: stats 临时文件 + 日期标记(stats_raw / stats_daily 是用户数据,不删)
 rm -f "$RUN"/stats_map.* "$RUN"/rollup_names.* "$RUN"/rollup_agg.* 2>/dev/null

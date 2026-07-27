@@ -738,7 +738,17 @@ EOF
 # ── 初始化目录结构 ────────────────────────────────────────
 init_dirs)
     mkdir -p "$HNC/bin" "$HNC/api" "$HNC/webroot" "$HNC/data" "$HNC/logs" "$HNC/run"
-    chmod 755 "$HNC" "$HNC/bin" "$HNC/api" "$HNC/webroot" "$HNC/data" "$HNC/logs" "$HNC/run"
+    # v5.9.3 BUG-009:目录权限分级收紧。
+    # 顶层 + data/logs/run 存的是 rules.json / tokens.json / local_admin.secret
+    # 这类东西,0755 让任何能 traverse 进来的非 root 进程(adb shell uid 2000、
+    # 其它 root 模块)都能列目录;更要命的是历史上引导脚本继承 magiskd 的
+    # umask=0,裸 `mkdir -p` 直接建成 0777 —— 无 sticky 位时别人可以 unlink
+    # 掉 run/local_admin.secret 再写一个自己的,伪造 X-HNC-Local-Admin 拿到
+    # root 级写 API。这里改 700(只有 root 能进)。
+    # bin/api/webroot 是可执行/静态资源,保持 755(HNC 全部组件以 root 运行,
+    # httpd 与 KSU WebUI 读的都是模块目录而不是这里,755 纯粹是保守选择)。
+    chmod 700 "$HNC" "$HNC/data" "$HNC/logs" "$HNC/run" 2>/dev/null
+    chmod 755 "$HNC/bin" "$HNC/api" "$HNC/webroot" 2>/dev/null
     [ -f "$RULES" ] || cat > "$RULES" << 'EOF'
 {"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}
 EOF
@@ -785,7 +795,24 @@ top_get)
     # hotfix19.2: prefer hnc_json get-top for top-level reads. This avoids
     # grep-based reads that break on escaped quotes and keeps read/write paths
     # moving toward one JSON abstraction. Fallback preserves legacy behavior.
-    if ! json_top_get_hnc_json "$KEY"; then
+    #
+    # v5.9.3 BUG-008(归因反转):hnc_json 用 rc=3 表示"键不存在" —— 这是正常
+    # 结果不是故障(bin/hnc_json:300/311,C 版 hnc_json.c:94)。老实现一个
+    # `if ! ...` 把 rc=3 和 rc=1(锁超时)/rc=2(文件缺失或 JSON 非法)/
+    # rc=127(helper 不可用)一视同仁地计进 json_legacy_fallback.count 并回退
+    # legacy reader。而热路径上"键不存在"是常态(device_detect.sh 每轮对每台
+    # 未命名设备 +1、apply_device_rule.sh 一台无延迟设备 +5),于是该计数变成
+    # 一个只会单调猛涨的无意义大数,api_sla.go → WebUI 把它当健康指标展示,
+    # 同时让 CODE-ARCHITECTURE-REVIEW-v5.8.9.md:306 那条"计数长期为 0 才能
+    # 退役 400 行 legacy writer"的条件永远不可能达成。
+    # 现在:rc=3 = 空答案,直接 exit 0(不计数、不回退);只有 1/2/127 等
+    # 才是真故障信号,继续计数并回退 legacy。
+    json_top_get_hnc_json "$KEY"
+    rc=$?
+    if [ "$rc" -eq 3 ]; then
+        # 键不存在 → 与 legacy reader 的"匹配不到就输出空"语义一致
+        exit 0
+    elif [ "$rc" -ne 0 ]; then
         json_legacy_fallback_warn "top_get" "reader"
         # 先尝试字符串字段（带引号），取引号内的完整内容
         result=$(grep -o "\"$KEY\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" "$RULES" 2>/dev/null \
@@ -814,7 +841,13 @@ device_get)
     # hotfix19.3: prefer hnc_json get-device for per-device reads. The legacy
     # fallback is intentionally kept because device_get is used by delay/clear
     # hot paths and must not hard-fail if hnc_json is unavailable.
-    if ! json_device_get_hnc_json "$MAC" "$KEY"; then
+    # v5.9.3 BUG-008:rc=3 = 设备或字段不存在(hnc_json:388-394),正常空答案。
+    # 这是本条计数暴涨的最大来源(每台设备每轮都可能命中),不再计数/回退。
+    json_device_get_hnc_json "$MAC" "$KEY"
+    rc=$?
+    if [ "$rc" -eq 3 ]; then
+        exit 0
+    elif [ "$rc" -ne 0 ]; then
         json_legacy_fallback_warn "device_get" "reader"
         # awk 扫整个文件, 找 "<mac>":{ ... "<key>": <value> ... }
         awk -v m="$MAC" -v k="$KEY" '
@@ -874,7 +907,14 @@ name_get)
     [ -z "$MAC" ] && exit 0
     [ -f "$NAMES_FILE" ] || exit 0
     MAC=$(echo "$MAC" | tr 'A-Z' 'a-z')
-    if ! json_name_get_hnc_json "$MAC"; then
+    # v5.9.3 BUG-008:get-object-key 走的是 get_top,同样用 rc=3 表示"这个 MAC
+    # 没有手工命名"。device_detect.sh 每轮对每台未命名设备都会问一次,是计数
+    # 暴涨的第二大来源。rc=3 按"没有名字"返回空,不计数不回退。
+    json_name_get_hnc_json "$MAC"
+    rc=$?
+    if [ "$rc" -eq 3 ]; then
+        exit 0
+    elif [ "$rc" -ne 0 ]; then
         json_legacy_fallback_warn "name_get" "object-get"
         # 提取 "mac":"name" 中的 name
         # v5.9.1: 容忍 key 与 value 之间的空白(pretty JSON 的 `"mac": "name"`)。

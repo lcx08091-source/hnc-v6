@@ -5,6 +5,17 @@
 # v3.5.0 alpha-0:PATH 健壮性(见 service.sh 同段注释)
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
+# v5.9.3 BUG-009:引导脚本继承 magiskd/KSU 的 umask=0,裸 `mkdir -p` 建出来的
+# 目录就是 0777、裸 `>` 建出来的文件就是 0666 —— 仓库里一处 chmod 777 都没有,
+# 真机上那一堆 0777 全是这么来的。这里显式定 umask。
+# 为什么是 022 不是 077:下面 :47-51 的 `cp -rf` 不带 -p,新建文件的权限是
+# 源权限 & ~umask;umask=077 会把仓库里 644 的脚本和 755 的二进制统统压成
+# 0600/0700,而后面的 chmod 覆盖面并不完整(`chmod 755 bin/*.sh` 的 glob 不
+# 递归,漏 bin/diag/diag.sh;二进制 chmod 只覆盖 10 个白名单名字,漏
+# bin/diag/fork_probe、bin/hnc_ndpi_probe)→ 会变成"文件在但不能执行"的静默
+# 回归,比 0777 更难查。022 足以杀掉 0777 这个根因,敏感目录再单独 chmod 700。
+umask 022
+
 MODDIR=${0%/*}
 HNC_DIR=/data/local/hnc
 
@@ -12,6 +23,12 @@ HNC_DIR=/data/local/hnc
 mkdir -p $HNC_DIR/data
 mkdir -p $HNC_DIR/logs
 mkdir -p $HNC_DIR/run
+# v5.9.3 BUG-009:已存在的老装机目录不会被 umask 影响(mkdir -p 对已存在目录
+# 不改权限),必须显式收。data/ 有 tokens.json、run/ 有 local_admin.secret,
+# 两者都是"拿到就等于 root 级写 API"的凭据,只留 root 可进。
+# 已核实不影响任何生产路径:HNC 全部组件由 root 拉起,KSU WebUI 走 ksu.exec,
+# httpd 读的 index.html 是模块目录的硬编码路径而不是 $HNC_DIR/webroot。
+chmod 700 $HNC_DIR $HNC_DIR/data $HNC_DIR/logs $HNC_DIR/run 2>/dev/null
 
 # rc3.1.30 Bug A 修复 · 清内核重启跨不过去的运行时状态
 # 旧 $RUN/hnc_state 是 watchdog 持久化的 "PENDING" / "ACTIVE:<iface>" 状态.
@@ -44,6 +61,9 @@ EOF
 
 # Fix #7: 先建目录，再统一复制（去除重复操作）
 mkdir -p $HNC_DIR/bin $HNC_DIR/api $HNC_DIR/webroot $HNC_DIR/test
+# v5.9.3 BUG-009:资源目录显式 755(老装机可能是 0777),不收到 700 是为了
+# 保留"非 root 也能只读排查"的余地,这几个目录里没有凭据。
+chmod 755 $HNC_DIR/bin $HNC_DIR/api $HNC_DIR/webroot $HNC_DIR/test 2>/dev/null
 cp -rf $MODDIR/bin/* $HNC_DIR/bin/ 2>/dev/null || true
 cp -rf $MODDIR/api/* $HNC_DIR/api/ 2>/dev/null || true
 cp -rf $MODDIR/webroot/* $HNC_DIR/webroot/ 2>/dev/null || true
@@ -58,6 +78,7 @@ cp -rf $MODDIR/test/* $HNC_DIR/test/ 2>/dev/null || true
 # 只 copy 产物 binary,不 copy .c 源 / README / build.sh / web/(web 已 //go:embed 进 binary)
 if [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
     mkdir -p $HNC_DIR/daemon/hnc_httpd
+    chmod 755 $HNC_DIR/daemon $HNC_DIR/daemon/hnc_httpd 2>/dev/null  # v5.9.3 BUG-009
     if ! cmp -s "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null; then
         cp -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         echo "[HNC] hotfix17.3: refreshed runtime hnc_httpd binary from module" >> $HNC_DIR/logs/boot.log
@@ -75,6 +96,7 @@ fi
 # 路径, 业务正常但失去精准防御。
 if [ -f "$MODDIR/bpf/hnc_limit_map_guard.bpf.o" ]; then
     mkdir -p $HNC_DIR/bpf
+    chmod 755 $HNC_DIR/bpf 2>/dev/null   # v5.9.3 BUG-009
     cp -f $MODDIR/bpf/hnc_limit_map_guard.bpf.o $HNC_DIR/bpf/ 2>/dev/null || true
     chmod 644 $HNC_DIR/bpf/hnc_limit_map_guard.bpf.o 2>/dev/null
 fi
@@ -175,6 +197,9 @@ if [ -n "$TODAY" ]; then
     BACKUP_DIR="$HNC_DIR/data/.backup-$TODAY"
     if [ ! -d "$BACKUP_DIR" ]; then
         mkdir -p "$BACKUP_DIR" 2>/dev/null
+        # v5.9.3 BUG-009:备份目录里是 rules.json / tokens.json 的完整副本,
+        # 权限必须和 data/ 同级,否则等于给凭据开了个 0777 的后门。
+        chmod 700 "$BACKUP_DIR" 2>/dev/null
         # 只备份 .json 文件,不备份 .backup-* 子目录(避免递归)
         for f in $HNC_DIR/data/*.json; do
             [ -f "$f" ] && cp "$f" "$BACKUP_DIR/" 2>/dev/null
@@ -197,6 +222,18 @@ fi
 
 # PID文件清理（防上次未正常退出）
 rm -f $HNC_DIR/run/*.pid
+
+# v5.9.3 BUG-010:portal(v5.8.9 实验分支,最终未合入 main)在 run/ 留下
+# portal_pending.json / portal_sessions.json。run/ 的清理是白名单式逐项 rm,
+# 从来不含 portal_*,只有 uninstall.sh 的 `rm -rf run/` 会带走 —— 而
+# v5.8.9-portal → v5.9.x 的升级路径根本不走卸载,于是这两个文件(含会话表)
+# 会一直躺在 run/ 里。cleanup.sh 也补了同样一行,但 cleanup 不是每次开机都跑,
+# 所以开机路径这一处是必须的。
+# 守卫:portal 若将来真的合入 main(bin/portal_manager.sh 会存在),这里绝不能
+# 删,否则每次开机都清空会话表 = 用户被强制重认证。合入时请显式删掉这几行。
+if [ ! -f "$HNC_DIR/bin/portal_manager.sh" ]; then
+    rm -f $HNC_DIR/run/portal_pending.json $HNC_DIR/run/portal_sessions.json 2>/dev/null
+fi
 
 # v3.5.0 P2-6: 日志轮转 — 启动时检查每个 .log 文件,>10MB 的轮转一次
 # 之前 HNC 没有日志轮转,长跑(几周)后 logs 目录可能涨到几百 MB

@@ -8,12 +8,24 @@
 # 导致 HNC 用错版本的命令(行为可能跟系统 toybox 不一致)
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
+# v5.9.3 BUG-009:service.sh 也会被 magiskd 直接拉起(umask=0),而且 WebUI 的
+# "重启后端"是直接 fork service.sh、根本不经过 post-fs-data.sh,所以这里必须
+# 有一份同款的 umask + chmod,不能只在 post-fs-data.sh 收。
+# 取 022 而非 077 的理由见 post-fs-data.sh 同段注释(sync_runtime_from_moddir
+# 的 `cp -rf` 同样不带 -p,077 会把脚本/二进制压到不可执行)。
+umask 022
+
 MODDIR=${0%/*}
 HNC_DIR=/data/local/hnc
 LOG=$HNC_DIR/logs/service.log
 RUN=$HNC_DIR/run
 
 mkdir -p $HNC_DIR/logs $RUN
+# v5.9.3 BUG-009:run/ 下有 local_admin.secret(middleware 认它就给 root 级
+# 写 API)。secret 文件本身早已是 0600,但目录 0777 且无 sticky 位时,别人
+# 可以直接 unlink 掉它再写一个自己的 —— 收目录才是真正的修法。
+chmod 700 $HNC_DIR $HNC_DIR/logs $RUN 2>/dev/null
+[ -d $HNC_DIR/data ] && chmod 700 $HNC_DIR/data 2>/dev/null
 # hotfix16.4: clear stale uplink degraded marker on service start; watchdog will re-probe.
 rm -f $RUN/uplink_unsupported $RUN/uplink_fail_count $RUN/uplink_unsupported_logged 2>/dev/null || true
 rm -rf $RUN/hnc_json.lock 2>/dev/null || true
@@ -225,6 +237,10 @@ sync_runtime_from_moddir() {
     log "rc14 runtime sync: MODDIR=$MODDIR -> $HNC_DIR"
 
     mkdir -p "$HNC_DIR/bin" "$HNC_DIR/webroot" "$HNC_DIR/api" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null || true
+    # v5.9.3 BUG-009:资源目录 755(这里没有凭据);顶层/data/logs/run 的 700
+    # 在脚本开头已经收过。
+    chmod 755 "$HNC_DIR/bin" "$HNC_DIR/webroot" "$HNC_DIR/api" \
+              "$HNC_DIR/daemon" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null || true
     cp -rf "$MODDIR/bin/"* "$HNC_DIR/bin/" 2>/dev/null || true
     cp -rf "$MODDIR/webroot/"* "$HNC_DIR/webroot/" 2>/dev/null || true
     cp -rf "$MODDIR/api/"* "$HNC_DIR/api/" 2>/dev/null || true
@@ -688,6 +704,7 @@ if [ ! -x "$DPID_BIN" ]; then
 else
     # 软迁: 把模块内默认 dpi_config.json 复制到 etc/ (如果用户没有自定义)
     mkdir -p "$HNC_DIR/etc" 2>/dev/null || true
+    chmod 755 "$HNC_DIR/etc" 2>/dev/null || true   # v5.9.3 BUG-009:dpi_config.json 只读配置
 
     # v5.7.0-rc6: self-capture 常驻. 自动识别飞轮(per-uid 采样 + 自接口 SNI 抓取)
     # 全靠 self_capture.enabled 这个 flag; 之前默认关, 用户不点开关就永远没数据.
