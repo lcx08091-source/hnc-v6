@@ -13,6 +13,15 @@
 # 检查核心系统状态,每项 OK / FAIL / WARN,
 # 帮助快速定位问题。LTS 版本必备的故障排查工具。
 #
+# v5.9.3 · 与 bin/diag/diag.sh 的关系(此前 README 与 COMPATIBILITY 各指一个
+# 脚本,用户以为是同一个东西写错了路径,这里一次说清):
+#   bin/diag.sh       —— 本脚本,逐项判定型自检。给 OK/WARN/FAIL + 退出码,
+#                        回答"现在健不健康"。
+#   bin/diag/diag.sh  —— 信息转储型。不判定、不返回错误码,输出内核/ROM/
+#                        root 框架/fork 兼容性等原始信息,回答"这台机器是
+#                        什么环境",用于汇报兼容性问题。
+# 两者互补不互相替代;报兼容性问题时建议两个都跑。
+#
 # 退出码:
 #   0 = 全部 OK
 #   1 = 有 FAIL
@@ -262,6 +271,36 @@ elif [ "$HAS_TC_STATE" -eq 1 ]; then
     warn "诊断快照" "无 JSON 备份 / tc_state.json 已生成"
 else
     warn "诊断快照" "无 JSON 备份且无 tc_state.json,可运行 json_diag_bundle.sh"
+fi
+
+# ── [16b] tc_state 快照新鲜度(v5.9.3 · BUG-012 步骤2) ────
+# tc_state.json 是纯事件驱动快照:只有 tc_manager.sh 的命令分发会触发
+# tc_snapshot_async,自身没有心跳/定时器。所以稳态下它几天不更新是设计,
+# 不是故障 —— 上面那行"已生成"只证明文件在,不证明内容还对得上当前 tc 树。
+# 这里补一条新鲜度提示,避免直接 cat 快照排障时被几天前的数据误导:
+#   ≤900s  → OK
+#   >900s  → WARN,措辞明确写"不代表 tc 树有问题"(别把设计当故障报)
+# 真实 tc 状态以 `tc qdisc show dev <iface>` 为准;或跑 json_diag_bundle.sh,
+# 它打包前会重跑一次 snapshot,正式诊断包里的快照总是新鲜的。
+TC_STATE_MAX_AGE=900
+if [ "$HAS_TC_STATE" -eq 1 ]; then
+    TC_STATE_TS=$(sed -n 's/.*"ts"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$HNC/run/tc_state.json" 2>/dev/null | head -1)
+    # ts 缺失时退回文件 mtime(老快照或被截断的文件)
+    [ -n "$TC_STATE_TS" ] || TC_STATE_TS=$(stat -c %Y "$HNC/run/tc_state.json" 2>/dev/null)
+    case "$TC_STATE_TS" in ''|*[!0-9]*) TC_STATE_TS=0 ;; esac
+    TC_NOW=$(date +%s 2>/dev/null || echo 0)
+    case "$TC_NOW" in ''|*[!0-9]*) TC_NOW=0 ;; esac
+    if [ "$TC_STATE_TS" -le 0 ] || [ "$TC_NOW" -le 0 ]; then
+        warn "tc 快照新鲜度" "tc_state.json 无有效 ts,无法判定新鲜度"
+    else
+        TC_STATE_AGE=$((TC_NOW - TC_STATE_TS))
+        [ "$TC_STATE_AGE" -lt 0 ] && TC_STATE_AGE=0
+        if [ "$TC_STATE_AGE" -le "$TC_STATE_MAX_AGE" ]; then
+            ok "tc 快照新鲜度" "${TC_STATE_AGE}s 前刷新"
+        else
+            warn "tc 快照新鲜度" "快照陈旧(${TC_STATE_AGE}s 未刷新,阈值 ${TC_STATE_MAX_AGE}s);稳态无心跳属正常,不代表 tc 树有问题,排障请以 tc qdisc show 为准"
+        fi
+    fi
 fi
 
 # ── 汇总输出 ────────────────────────────────────────────

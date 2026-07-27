@@ -55,6 +55,40 @@ LATEST_BACKUP=""
 LAST_BUNDLE="$(ls -t /sdcard/Download/hnc-json-debug-*.tar.gz 2>/dev/null | head -1)"
 HAS_TC_STATE=false
 [ -f "$RUN/tc_state.json" ] && HAS_TC_STATE=true
+
+# v5.9.3 · BUG-012 步骤2: tc_state 快照新鲜度。
+# tc_state.json 是纯事件驱动快照(只有 tc_manager.sh 的命令分发会刷,
+# 自身无心跳),稳态下几天不更新是设计而非故障。但此前这里只导出
+# has_tc_state 一个布尔,消费端会把几天前的快照当成当前 tc 树状态。
+# 现在额外导出 ts / age_s / fresh / note,note 里写明"陈旧≠tc 树有问题"。
+# 刻意不改 has_tc_state 的语义(webroot/json-health.html 仍按它渲染),
+# 也刻意不把陈旧算进 OVERALL —— 否则就是拿设计行为造假告警。
+TC_STATE_MAX_AGE=900
+TC_STATE_TS=0
+TC_STATE_AGE=-1
+TC_STATE_FRESH=false
+TC_STATE_NOTE="tc_state.json 不存在,可运行 json_diag_bundle.sh 生成"
+if [ "$HAS_TC_STATE" = true ]; then
+  TC_STATE_TS="$(sed -n 's/.*"ts"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$RUN/tc_state.json" 2>/dev/null | head -1)"
+  # ts 缺失时退回文件 mtime(老快照或被截断的文件)
+  [ -n "$TC_STATE_TS" ] || TC_STATE_TS="$(stat -c %Y "$RUN/tc_state.json" 2>/dev/null)"
+  case "$TC_STATE_TS" in ''|*[!0-9]*) TC_STATE_TS=0 ;; esac
+  TC_NOW="$TS"
+  case "$TC_NOW" in ''|*[!0-9]*) TC_NOW=0 ;; esac
+  if [ "$TC_STATE_TS" -gt 0 ] && [ "$TC_NOW" -gt 0 ]; then
+    TC_STATE_AGE=$((TC_NOW - TC_STATE_TS))
+    [ "$TC_STATE_AGE" -lt 0 ] && TC_STATE_AGE=0
+    if [ "$TC_STATE_AGE" -le "$TC_STATE_MAX_AGE" ]; then
+      TC_STATE_FRESH=true
+      TC_STATE_NOTE="快照新鲜(${TC_STATE_AGE}s 前刷新)"
+    else
+      TC_STATE_NOTE="快照陈旧(${TC_STATE_AGE}s 未刷新,阈值 ${TC_STATE_MAX_AGE}s);tc_state 是事件驱动无心跳,陈旧不代表 tc 树有问题,以 tc qdisc show 为准"
+    fi
+  else
+    TC_STATE_NOTE="tc_state.json 无有效 ts,无法判定新鲜度"
+  fi
+fi
+
 HAS_CAP=false
 [ -f "$RUN/capabilities.json" ] && HAS_CAP=true
 
@@ -268,6 +302,14 @@ cat <<JSON
   "latest_backup": "$(json_escape "$LATEST_BACKUP")",
   "last_bundle": "$(json_escape "$LAST_BUNDLE")",
   "has_tc_state": $HAS_TC_STATE,
+  "tc_state": {
+    "present": $HAS_TC_STATE,
+    "ts": $TC_STATE_TS,
+    "age_s": $TC_STATE_AGE,
+    "max_age_s": $TC_STATE_MAX_AGE,
+    "fresh": $TC_STATE_FRESH,
+    "note": "$(json_escape "$TC_STATE_NOTE")"
+  },
   "has_capabilities": $HAS_CAP,
   "legacy_fallback": {
     "count": $LEGACY_FALLBACK_COUNT,

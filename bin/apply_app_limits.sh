@@ -34,11 +34,16 @@
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+RUN="$HNC_DIR/run"
 LIMITS_FLAT="$HNC_DIR/data/app_limits.flat"
 IP_APP_FLAT="$HNC_DIR/run/ip_app_map.flat"
 DEVICES="$HNC_DIR/data/devices.json"
 DIRTY="$HNC_DIR/run/app_limit.dirty"
 LOG="$HNC_DIR/logs/app_limits.log"
+
+# v5.9.3 BUG-012 步骤1 / BUG-011 连带:两个可观测性文件
+APP_SIG_FILE="$RUN/app_limits.applied.sig"        # 上一轮实际下发的 tc 规则签名
+INACTIVE_MARKER="$RUN/app_limits_inactive.marker" # "配了限速但没生效"的 marker
 
 APP_MARK_BASE_DEC=9437184   # 0x900000 — fwmark 高位避开 0x800000 device mark
 APP_CLASS_MINOR_BASE=36864  # 0x9000 — tc classid minor in [0x9000, 0xffff]
@@ -56,6 +61,36 @@ fi
 
 # Always clear dirty marker at start — even if we early-exit below.
 rm -f "$DIRTY" 2>/dev/null
+
+mkdir -p "$RUN" 2>/dev/null
+
+# ─── v5.9.3 BUG-012 步骤1:tc 快照条件触发 ─────────────────────────────
+#
+# 本脚本被 hnc_watchdog 每 30s fork 一次,做的是自己那套 iptables + tc 全量重建
+# (下面 Step 1 删 / Step 5 建),**完全不经过 tc_manager.sh 的命令分发器**,
+# 而 tc_snapshot_async 只挂在那个分发器上 → run/tc_state.json 可以停在几天前
+# (真机实测 9 天),bin/diag.sh / json_health_panel.sh 只判文件存在就报健康。
+#
+# 关键是"条件触发":每 30s 无条件刷会让 logs/tc_state.log 每天多 2880 行。
+# 判据取"本轮下发的 tc 规则签名"(classid=rate 的集合)——
+#   - 只包含真正影响 tc 树的东西,不含 ip_app_map 那些随时抖动的 IP 数量,
+#     否则 dpid 每观测到一个新 IP 就会误触发一次;
+#   - 规则集没变时,删了再原样加回去,tc 树的最终状态一致,快照没有刷新价值。
+#
+# 同步跑而不是 tc_manager.sh 那种 `( ... ) &`:hnc_watchdog 用
+# cmd.Stdout/Stderr = io.Discard,os/exec 会为非 *os.File 的 Writer 建管道,
+# Wait() 要等所有写端关闭 —— 后台子 shell 会继承那两个管道把 Wait 挂住。
+APP_SIG=""
+
+tc_snapshot_if_changed() {
+    prev=$(cat "$APP_SIG_FILE" 2>/dev/null)
+    [ "$prev" = "$APP_SIG" ] && return 0
+    printf '%s\n' "$APP_SIG" > "$APP_SIG_FILE" 2>/dev/null
+    log "tc app rules changed ['$prev' -> '$APP_SIG'], refreshing tc_state snapshot"
+    [ -x "$HNC_DIR/bin/tc_state_snapshot.sh" ] || return 0
+    HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$IFACE" >/dev/null 2>&1
+    return 0
+}
 
 # Locate current iface. Multiple fallbacks because watchdog may not have
 # written run/active_iface yet on a cold boot.
@@ -106,14 +141,42 @@ tc filter del dev "$IFACE" parent 1: prio $FILTER_PRIO 2>/dev/null
 if [ ! -s "$LIMITS_FLAT" ]; then
     # No active limits — clean exit, chain stays empty.
     log "no app_limits configured (cleaned old rules)"
+    # v5.9.3 BUG-011:用户压根没配应用限速,不算"失效",清掉 marker。
+    rm -f "$INACTIVE_MARKER" 2>/dev/null
+    # v5.9.3 BUG-012:上面 Step 1 可能刚删掉了上一轮的 app class/filter,
+    # 空签名 != 上一轮签名时说明 tc 树确实变了,要刷快照。
+    tc_snapshot_if_changed
     exit 0
 fi
 
 # Bail if dpid hasn't produced an ip→app map yet (e.g. just rebooted).
 if [ ! -s "$IP_APP_FLAT" ]; then
-    log "ip_app_map.flat empty, no rules to apply (dpid still warming up?)"
+    # ─── v5.9.3 BUG-011 连带:别再静默失效 ─────────────────────────────
+    # ip_app_map.flat 的唯一生产者是 dpid 主抓包路径上的 IPAppMap.Record;
+    # dpid 一旦选错网卡 / 接口重建后不重绑(BUG-001),这张表就恒空,而这里
+    # 只 log 一行普通句子后 exit 0,对 hnc_watchdog 看起来完全成功。
+    # 用户侧的观感是"应用级限速配了但毫无作用",却完全不知道断在哪一环。
+    # 现在:① 一条固定可 grep 的串 HNC_APP_LIMIT_INACTIVE;
+    #       ② run/ 里落 marker(首次失效的时间戳)+ 连续失效轮次计数,
+    #          让 diag / 人工 cat 能一眼定位到"是 dpid 没产出映射,
+    #          不是限速配置写错了"。30s 一轮,streak×30 秒即失效时长。
+    n_cfg=$(grep -c . "$LIMITS_FLAT" 2>/dev/null)
+    case "$n_cfg" in *[!0-9]*|'') n_cfg=0 ;; esac
+    # marker 格式(两行,故意保持人眼可读 + 好 parse):
+    #   第 1 行 = 本次连续失效的起始 unix ts(跨轮保留,不被覆盖)
+    #   第 2 行 = 连续失效轮次
+    since=$(sed -n '1p' "$INACTIVE_MARKER" 2>/dev/null)
+    case "$since" in *[!0-9]*|'') since=$(date +%s 2>/dev/null || echo 0) ;; esac
+    streak=$(sed -n '2p' "$INACTIVE_MARKER" 2>/dev/null)
+    case "$streak" in *[!0-9]*|'') streak=0 ;; esac
+    streak=$((streak + 1))
+    printf '%s\n%s\n' "$since" "$streak" > "$INACTIVE_MARKER" 2>/dev/null
+    log "HNC_APP_LIMIT_INACTIVE: ip_app_map.flat empty/missing — 应用级限速未生效 (configured=$n_cfg entries, streak=$streak rounds since=$since, dpid 未产出 IP→APP 映射; 排查: run/dpi_state.json 的 stats.packets 是否在涨)"
+    tc_snapshot_if_changed
     exit 0
 fi
+# 走到这里说明映射有数据了,清掉失效 marker。
+rm -f "$INACTIVE_MARKER" 2>/dev/null
 
 # ─── Step 3: resolve mac → client_ip from devices.json ────────────────
 #
@@ -225,9 +288,19 @@ while IFS=' ' read -r MAC APP RATE; do
     done
 
     n_ips=$(echo "$APP_IPS" | wc -l)
+    # v5.9.3 BUG-012:只把真正影响 tc 树的部分(classid + rate)累进签名。
+    # 故意不含 n_ips / IP 列表 —— 那些只改 iptables MARK 规则,tc 的
+    # class/qdisc/filter 一个字节都不变,算进去会让快照被 dpid 的 IP 抖动带着
+    # 每 30s 刷一次,正好是要避免的那种日志噪声。
+    APP_SIG="$APP_SIG$CID=$RATE_MBIT,"
     log "applied $MAC ($CLIENT_IP) / $APP / ${RATE_MBIT}mbit / $n_ips ip(s) / mark=$MARK class=$CID"
     applied=$((applied + 1))
     i=$((i + 1))
 done < "$LIMITS_FLAT"
 
+# 注:while 用的是重定向 `< "$LIMITS_FLAT"` 而不是管道,循环体在当前 shell 里
+# 跑,所以 APP_SIG / applied / skipped 的累加在这里是可见的。
 log "summary: applied=$applied skipped=$skipped"
+
+# v5.9.3 BUG-012 步骤1:本轮 tc 规则集与上一轮不同才刷快照。
+tc_snapshot_if_changed

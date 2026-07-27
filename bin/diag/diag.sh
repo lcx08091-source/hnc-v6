@@ -5,6 +5,15 @@
 # 使用: su -c '/data/local/hnc/bin/diag/diag.sh > /sdcard/hnc_diag.txt'
 #
 # 不会修改任何文件, 不会重启任何服务, 纯读取信息.
+#
+# v5.9.3 · 与 bin/diag.sh 的关系(此前 README 与 COMPATIBILITY 各指一个脚本,
+# 用户以为是同一个东西写错了路径, 这里一次说清):
+#   bin/diag.sh       —— 逐项判定型自检. 每项给 OK/WARN/FAIL, 支持 --json,
+#                        退出码 0/1/2 有语义, 回答"现在健不健康".
+#   bin/diag/diag.sh  —— 本脚本, 信息转储型. 不判定, 不返回错误码, 输出
+#                        内核/ROM/root 框架/fork 兼容性等原始信息,
+#                        回答"这台机器是什么环境", 用于汇报兼容性问题.
+# 两者互补不互相替代; 报兼容性问题时建议两个都跑, 一起发给维护者.
 
 HNC=${HNC:-/data/local/hnc}
 DIAG_BIN="$HNC/bin/diag"
@@ -115,13 +124,23 @@ fi
 echo ""
 
 echo "── [11] HNC dpi_state.json (DPI 当前状态) ────────────────────"
-if [ -f "$HNC/data/dpi_state.json" ]; then
+# v5.9.3 修 BUG-007 A: 之前只读 $HNC/data/dpi_state.json, 但 dpid 一直写在
+# $HNC/run/(src/dpid/cmd/dpid/main.go 的 stateFileName, httpd 侧 api_dpi_v53.go /
+# api_self.go / api_export.go / server.go 也全部读 run/) → 本段对任何机器都
+# 恒定输出 "MISSING", 把正常运行的 dpid 误报成挂了.
+# 现在 run/ 优先、data/ 兜底(兼容历史布局), 并打印实际命中的路径.
+DPI_STATE=""
+for c in "$HNC/run/dpi_state.json" "$HNC/data/dpi_state.json"; do
+    [ -f "$c" ] && { DPI_STATE="$c"; break; }
+done
+if [ -n "$DPI_STATE" ]; then
+    echo "  path: $DPI_STATE"
     # 不 dump 全部 (太大), 只关键字段
-    head -c 2000 "$HNC/data/dpi_state.json" 2>/dev/null
+    head -c 2000 "$DPI_STATE" 2>/dev/null
     echo ""
-    echo "  (truncated, full file at $HNC/data/dpi_state.json)"
+    echo "  (truncated, full file at $DPI_STATE)"
 else
-    echo "  dpi_state.json MISSING"
+    echo "  dpi_state.json MISSING (run/ 与 data/ 均无 — dpid 可能未运行)"
 fi
 echo ""
 
@@ -132,8 +151,19 @@ fi
 echo ""
 
 echo "── [13] dpid 日志尾部 (最近 20 行) ──────────────────────────"
-if [ -f "$HNC/logs/hnc_dpid.log" ]; then
-    tail -20 "$HNC/logs/hnc_dpid.log"
+# v5.9.3 修 BUG-007 A(同族路径漂移): 实际日志名是 logs/dpid.log
+# (dpid_supervisor/main.go 的 dpidChildLog、hnc_dpid_guard.sh:420 都写这个,
+# httpd allowedLogs 白名单里也是 dpid.log), 之前写的 hnc_dpid.log 不存在
+# → 本段永远空白. 现在 dpid.log 优先、hnc_dpid.log 兜底.
+DPI_LOG=""
+for c in "$HNC/logs/dpid.log" "$HNC/logs/hnc_dpid.log"; do
+    [ -f "$c" ] && { DPI_LOG="$c"; break; }
+done
+if [ -n "$DPI_LOG" ]; then
+    echo "  path: $DPI_LOG"
+    tail -20 "$DPI_LOG"
+else
+    echo "  dpid 日志 MISSING (logs/dpid.log 不存在)"
 fi
 echo ""
 
