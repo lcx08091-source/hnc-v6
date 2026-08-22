@@ -382,29 +382,34 @@ func actionHotspotSave(hncDir string, p map[string]string) actionResp {
 // 白名单 / 鉴权 toggle · 修 Bug 2
 // ────────────────────────────────────────────────────────────────
 
-func actionWhitelistSet(hncDir string, p map[string]string) actionResp {
+// actionSetTopBool 是 whitelist_mode / auth_required / remote_enabled 一类
+// "rules.json 顶层布尔开关" action 的公共实现 (v6 review: 此前 5 处同构复制)。
+// onDetail/offDetail 为空时返回裸 OK。
+func actionSetTopBool(hncDir, key string, p map[string]string, onDetail, offDetail string) actionResp {
 	v := p["enabled"]
 	if v != "true" && v != "false" {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
-	rc, out := runBin(hncDir, "json_set.sh", "top", "whitelist_mode", v)
+	rc, out := runBin(hncDir, "json_set.sh", "top", key, v)
 	if rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: out}
+	}
+	if v == "true" && onDetail != "" {
+		return actionResp{OK: true, Detail: onDetail}
+	}
+	if v == "false" && offDetail != "" {
+		return actionResp{OK: true, Detail: offDetail}
 	}
 	return actionResp{OK: true}
 }
 
+func actionWhitelistSet(hncDir string, p map[string]string) actionResp {
+	return actionSetTopBool(hncDir, "whitelist_mode", p, "", "")
+}
+
 func actionAuthRequiredSet(hncDir string, p map[string]string) actionResp {
-	v := p["enabled"]
-	if v != "true" && v != "false" {
-		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
-	}
 	// rc3.1.13: cfg_set (config.json) → top (rules.json) 单源化, 见 middleware.go 注释
-	rc, out := runBin(hncDir, "json_set.sh", "top", "auth_required", v)
-	if rc != 0 {
-		return actionResp{OK: false, Error: "write failed", Detail: out}
-	}
-	return actionResp{OK: true}
+	return actionSetTopBool(hncDir, "auth_required", p, "", "")
 }
 
 // rc3.1.3 修: actionRemoteEnabledSet · 启停远程访问 :8443.
@@ -413,20 +418,10 @@ func actionAuthRequiredSet(hncDir string, p map[string]string) actionResp {
 // 修复: 写 rules.json 顶层 remote_enabled = v.  watchdog 60s 内轮询 check_httpd_bind_drift
 // 检测到 loopback-only -> 热点 IP 漂移后重启 httpd 绑新 IP.
 func actionRemoteEnabledSet(hncDir string, p map[string]string) actionResp {
-	v := p["enabled"]
-	if v != "true" && v != "false" {
-		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
-	}
-	rc, out := runBin(hncDir, "json_set.sh", "top", "remote_enabled", v)
-	if rc != 0 {
-		return actionResp{OK: false, Error: "write failed", Detail: out}
-	}
 	// 写完后等 watchdog 自然触发. 返回提示给用户
-	detail := "remote access enabled · 约 1 分钟内远程 URL 可访问"
-	if v == "false" {
-		detail = "remote access disabled · 约 1 分钟内 :8443 关闭"
-	}
-	return actionResp{OK: true, Detail: detail}
+	return actionSetTopBool(hncDir, "remote_enabled", p,
+		"remote access enabled · 约 1 分钟内远程 URL 可访问",
+		"remote access disabled · 约 1 分钟内 :8443 关闭")
 }
 
 // ────────────────────────────────────────────────────────────────
@@ -452,16 +447,12 @@ func actionPairNew(hncDir string) actionResp {
 
 func actionPairRevoke(s *server, p map[string]string) actionResp {
 	token := p["token"]
-	// rc3.1.14 修 P2 (review §校验): 加长度上下界, 防滥用 (空字符串绕过 / 超长输入).
-	// rc2 修 G12: TokenID 实际是 8 字节 random → base64url ~11 字符 (见 auth.go:5),
-	// 不是注释原说的 "16 字节 hex = 32 字符". 但 token 参数可能是完整 cookie
-	// (<TokenID>.<Secret> 形式, ~44 字符) 所以上界 256 仍合理, 下界 8 保留.
-	if len(token) < 8 || len(token) > 256 {
-		return actionResp{OK: false, Error: "bad params", Detail: "token length out of range (8-256)"}
-	}
-	// token 是 base64url [A-Za-z0-9_-]+
-	if !regexp.MustCompile(`^[A-Za-z0-9_-]+$`).MatchString(token) {
-		return actionResp{OK: false, Error: "bad params", Detail: "invalid token format"}
+	// v6 review: 复用 server.go 的 tokenRevokeIDRe —— 长度上下界 (8-256,
+	// 防空串绕过/超长滥用) 与 base64url 字符集一次校验。此前这里手写长度
+	// 检查 + 函数内 MustCompile, 与 server.go 的规则各自演化。
+	// token 可能是完整 cookie (<TokenID>.<Secret>, ~44 字符), 上界 256 合理。
+	if !tokenRevokeIDRe.MatchString(token) {
+		return actionResp{OK: false, Error: "bad params", Detail: "invalid token format (8-256, base64url)"}
 	}
 	// v5.9.0 单写者化: 不再 runBin json_set.sh token_revoke(那会让 shell 改
 	// tokens.json,而 shell 侧现在也只写 marker 桥)——httpd 自己就是唯一写者,

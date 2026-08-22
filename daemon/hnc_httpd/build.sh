@@ -1,7 +1,7 @@
 #!/bin/sh
 # 交叉编译 hnc_httpd arm64 Android 二进制
 # 使用: sh build.sh
-# 需要: Go 1.22+ 且 CGO 不依赖(CGO_ENABLED=0)
+# 需要: Go 1.25+ 且 CGO 不依赖(CGO_ENABLED=0)
 set -e
 cd "$(dirname "$0")"
 

@@ -554,6 +554,17 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 		proto = protoUDP
 	}
 	now := ts.Unix()
+	// v6 review fix: flowKey 与 IP 字符串在锁外构造 —— 这是每包级热路径,
+	// 分配都发生在 w.mu 持有期间会直接放大 capture goroutine 的锁等待
+	// (转化为 AF_PACKET kernel drops)。proto 参与 key: 同一远端 IP 的
+	// TCP:443 (HTTPS) 与 UDP:443 (QUIC/HTTP3) 是两条流, 混流会污染
+	// packets/bytes/pps EMA (voice_call 检测输入) 与后台流占比。
+	protoByte := byte('T')
+	if isUDP {
+		protoByte = 'U'
+	}
+	flowKey := string(protoByte) + "|" + remoteIPRaw + ":" + portStr(port)
+	remoteIPStr := remoteIP.String()
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
@@ -588,11 +599,10 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 	if c.Flows == nil {
 		c.Flows = newFlowTracker()
 	}
-	flowKey := remoteIPRaw + ":" + portStr(port)
 	pps := c.Flows.observe(flowKey, now, bytes)
 
 	if ok {
-		w.applyRuleHitLocked(c, rule, remoteIPRaw, remoteIP, proto, port, bytes, now, pps, txFromClient)
+		w.applyRuleHitLocked(c, rule, remoteIPRaw, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
 	} else {
 		// rc30.3: nDPI fallback. The remote IP didn't match our builtin or
 		// external IP matchers — ask the long-running hnc_ndpi_probe pipeline
@@ -604,7 +614,7 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 		// nDPI is additive: we never reach here when IP matching already won.
 		if host, hostOK := lookupNDPIHost(remoteIPRaw); hostOK {
 			if hostRule, hostRuleOK := classifyHost(host); hostRuleOK {
-				w.applyRuleHitLocked(c, hostRule, "ndpi:"+host, remoteIP, proto, port, bytes, now, pps, txFromClient)
+				w.applyRuleHitLocked(c, hostRule, "ndpi:"+host, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
 			}
 		}
 	}
@@ -616,7 +626,10 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 // rc30.4: txFromClient propagated so per-app byte counters track direction.
 // rc30.6: feeds the IP→app reverse map used by application-granularity
 // rate limiting (apply_app_limits.sh).
-func (w *Writer) applyRuleHitLocked(c *clientAgg, r l3Rule, remoteEvidence string, remoteIP net.IP, proto matchProto, port uint16, bytes uint64, now int64, pps float64, txFromClient bool) {
+//
+// v6 review fix: remoteIPStr 是调用方在锁外预算好的 remoteIP.String(),
+// 避免在这把全局锁内再做一次 IP 格式化分配。
+func (w *Writer) applyRuleHitLocked(c *clientAgg, r l3Rule, remoteEvidence string, remoteIP net.IP, remoteIPStr string, proto matchProto, port uint16, bytes uint64, now int64, pps float64, txFromClient bool) {
 	subKey, subCat, subHit := classifySubCategory(r, remoteIP, proto, port, pps)
 
 	bumpLabelWithBytes(c.Apps, r.ID, r.Name, r.Category, remoteEvidence, now, bytes, r.Verified, subKey, txFromClient)
@@ -634,7 +647,7 @@ func (w *Writer) applyRuleHitLocked(c *clientAgg, r l3Rule, remoteEvidence strin
 	// remote IPs (not the client itself); we use remoteIP from EventFlow which
 	// is already the non-client side.
 	if remoteIP != nil && w.IPAppMap != nil && r.ID != "" {
-		w.IPAppMap.Record(remoteIP.String(), r.ID, r.Name, now)
+		w.IPAppMap.Record(remoteIPStr, r.ID, r.Name, now)
 	}
 }
 

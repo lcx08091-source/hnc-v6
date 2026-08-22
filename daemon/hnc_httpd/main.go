@@ -132,17 +132,33 @@ func main() {
 
 	// HTTP → HTTPS 重定向 server(如果启用, 仅 haveRemote)
 	// rc30.12.14: 重定向 server 也加 WriteTimeout. 客户端慢读 redirect 会卡 goroutine.
+	// v6 review fix: 不再信任 r.Host 构造 target —— 攻击者发 Host: evil.com
+	// 会得到 https://evil.com:... 的 301 (开放重定向/钓鱼). 改用连接实际到达的
+	// 本地地址; 拿不到时仅当 Host 是合法 IP 才采用, 否则回退 bind 地址.
+	redirHost := func(r *http.Request) string {
+		if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
+			if h, _, err := net.SplitHostPort(la.String()); err == nil && h != "" {
+				return h
+			}
+		}
+		if h, _, err := net.SplitHostPort(r.Host); err == nil {
+			if ip := net.ParseIP(h); ip != nil {
+				return h
+			}
+		} else if ip := net.ParseIP(r.Host); ip != nil {
+			return r.Host
+		}
+		if *flagBind != "" && *flagBind != "0.0.0.0" && *flagBind != "::" {
+			return *flagBind
+		}
+		return "127.0.0.1"
+	}
 	var httpSrv *http.Server
 	if haveRemote && *flagHTTPPort > 0 && !*flagNoTLS {
 		httpSrv = &http.Server{
 			Addr: fmt.Sprintf("%s:%d", *flagBind, *flagHTTPPort),
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				target := "https://" + r.Host
-				// 去掉原 host 的端口,换成 HTTPS 端口
-				if h, _, err := net.SplitHostPort(r.Host); err == nil {
-					target = fmt.Sprintf("https://%s:%d", h, *flagPort)
-				}
-				target += r.URL.RequestURI()
+				target := fmt.Sprintf("https://%s:%d", redirHost(r), *flagPort) + r.URL.RequestURI()
 				http.Redirect(w, r, target, http.StatusPermanentRedirect)
 			}),
 			ReadHeaderTimeout: 5 * time.Second,

@@ -10,6 +10,7 @@ package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
@@ -79,7 +80,11 @@ func auditLog(hncDir, tid, action string, params map[string]string, result, deta
 		return
 	}
 	defer f.Close()
-	_, _ = f.WriteString(line)
+	// v6 review fix: 审计日志是安全关键路径, 写失败(磁盘满/权限)必须留痕,
+	// 否则审计静默丢失且无从发现。
+	if _, err := f.WriteString(line); err != nil {
+		log.Printf("audit: write %s failed: %v", path, err)
+	}
 }
 
 // sanitizeField 清理字段内容,防 log injection

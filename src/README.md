@@ -47,7 +47,7 @@ api_live.go 等) 只在 `daemon/hnc_httpd/` 做了, `src/hnc_httpd/` 没跟,
 | 组件 | 工具链 | 备注 |
 |---|---|---|
 | hnc_dpid | Go 1.22+ | 纯 Go,无 CGO |
-| hnc_httpd | Go 1.22+ | 依赖 `golang.org/x/crypto v0.31.0` |
+| hnc_httpd | Go 1.25+ | 依赖 `golang.org/x/crypto v0.55.0` |
 | hnc_launcher / fork_probe | Android NDK r23+ (API 24+) | 静态链接 C |
 
 **目标平台**: Android arm64-v8a (`aarch64-linux-android`)
@@ -146,7 +146,7 @@ sh build.sh install     # install 模式会把编出来的二进制拷到 ../../
 
 当前**还不是完全 hermetic build**:
 
-- `daemon/hnc_httpd` 需要从 GOPROXY 下载 `golang.org/x/crypto v0.31.0`
+- `daemon/hnc_httpd` 需要从 GOPROXY 下载 `golang.org/x/crypto v0.55.0`
 - `src/dpid` 是纯 Go 无外部依赖,可以离线 build
 
 如果需要完全离线 build,在有网的机器跑一次 `go mod vendor` 把依赖固化:

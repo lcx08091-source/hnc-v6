@@ -23,7 +23,7 @@ import (
 
 func (s *server) apiCapabilities(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.hncDir, "run", "capabilities.json")
-	capRaw, err := readJSON(path)
+	capRaw, err := s.jsonCache.read(path)
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
 			"available": false,
@@ -73,7 +73,7 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	iface := currentHotspotIface(s.hncDir)
+	iface := s.currentHotspotIface()
 	ip := ifaceIPv4(iface)
 	active := hotspotActiveFromState(s.hncDir, iface, ip, online)
 
@@ -91,7 +91,10 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func currentHotspotIface(hncDir string) string {
+// currentHotspotIface 走 s.jsonCache 读 rules.json 兜底 —— /api/live 每次轮询
+// 都会调到这里, 与 buildDevicesPayload 共享同一份缓存, 消除重复读盘。
+func (s *server) currentHotspotIface() string {
+	hncDir := s.hncDir
 	// Prefer explicit runtime state written by service/watchdog.
 	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state")); err == nil {
 		line := strings.TrimSpace(string(b))
@@ -106,7 +109,7 @@ func currentHotspotIface(hncDir string) string {
 			return v
 		}
 	}
-	if raw, err := readJSON(filepath.Join(hncDir, "data", "rules.json")); err == nil {
+	if raw, err := s.jsonCache.read(filepath.Join(hncDir, "data", "rules.json")); err == nil {
 		if m, ok := raw.(map[string]interface{}); ok {
 			if v, ok := m["hotspot_iface"].(string); ok && strings.TrimSpace(v) != "" {
 				return strings.TrimSpace(v)

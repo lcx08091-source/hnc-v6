@@ -107,6 +107,10 @@ type SelfAttribConnRow struct {
 type SelfAttribAggregator struct {
 	mu sync.Mutex
 
+	// lastJSONLSig is the sorted connection-set signature of the most recent
+	// JSONL append (see sampleOnce). Owned by the RunSampler goroutine.
+	lastJSONLSig string
+
 	// appsByUID is the live aggregation, by uid → SelfApp pointer.
 	// Mutated under mu. Cleared (or filtered) when a uid hasn't been
 	// seen for staleEvictAge.
@@ -650,6 +654,18 @@ func (a *SelfAttribAggregator) RunSampler(ctx context.Context, isEnabled func() 
 	}
 }
 
+// connsSignature builds an order-independent fingerprint of a connection set:
+// the sorted "proto|local|remote|uid" tuples joined together. Equal signature
+// ⇒ identical connection set (byte counters are not part of the JSONL row).
+func connsSignature(rows []SelfAttribConnRow) string {
+	keys := make([]string, len(rows))
+	for i, r := range rows {
+		keys[i] = r.Proto + "|" + r.Local + "|" + r.Remote + "|" + strconv.Itoa(r.UID)
+	}
+	sort.Strings(keys)
+	return strings.Join(keys, "\n")
+}
+
 // sampleOnce is one /proc/net pass + JSONL write.
 func (a *SelfAttribAggregator) sampleOnce() error {
 	now := time.Now()
@@ -691,14 +707,21 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 		}
 	}
 
-	// Append to JSONL
-	if a.jsonlDir != "" {
+	// Append to JSONL.
+	//
+	// v6 review fix: 变更检测 —— 5s 一tick全量 append 连接表, 空闲设备一天也
+	// 要写 ~17k 行 × 全量连接, eMMC 写放大严重。连接集 (proto|local|remote|uid
+	// 的有序签名) 与上次写入相同时跳过 append; 聚合路径不受影响照常执行。
+	// sig 只在 RunSampler 的单一 goroutine 里读写, 无需加锁。
+	sig := connsSignature(rows)
+	if a.jsonlDir != "" && sig != a.lastJSONLSig {
 		dayPath := filepath.Join(a.jsonlDir,
 			fmt.Sprintf("self_attrib.%s.jsonl", now.Format("20060102")))
 		if f, err := os.OpenFile(dayPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
 			obs := SelfAttribObservation{T: now.Unix(), Conns: rows}
 			_ = json.NewEncoder(f).Encode(obs)
 			_ = f.Close()
+			a.lastJSONLSig = sig
 		}
 	}
 

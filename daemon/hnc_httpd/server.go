@@ -59,6 +59,9 @@ type server struct {
 	// goroutine 刚 Rename 出来、尚未 ReadFile 的 .working → 该批撤销永久
 	// 丢失(marker 已被 rename 走, 60s poll 也补不回)。快路径不取锁。
 	revokeMu sync.Mutex
+	// v6 review fix: data/run 下 JSON 的 mtime+size 缓存, 服务 /api/live 等
+	// 高频轮询端点 (见 jsoncache.go)。命中时零读盘零解析。
+	jsonCache *jsonFileCache
 }
 
 func newServer(hncDir string) *server {
@@ -67,6 +70,7 @@ func newServer(hncDir string) *server {
 		tokens:       NewTokensStore(filepath.Join(hncDir, "data", "remote_tokens.json")),
 		limiter:      NewRateLimiter(),
 		writeCounter: NewWriteCounter(),
+		jsonCache:    newJSONFileCache(),
 		lastSamples:  make(map[string]rateSample),
 		rates:        make(map[string]rateOut),
 	}
@@ -344,7 +348,7 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	rulesPath := filepath.Join(s.hncDir, "data", "rules.json")
 	namesPath := filepath.Join(s.hncDir, "data", "device_names.json")
 
-	devicesRaw, err := readJSON(devicesPath)
+	devicesRaw, err := s.jsonCache.read(devicesPath)
 	if err != nil {
 		// hotfix5: devices.json can be temporarily missing while hotspotd starts or
 		// when the hotspot is off. Still return persistent rules/blacklist entries
@@ -358,13 +362,13 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		devicesMap = map[string]interface{}{}
 	}
 
-	rulesRaw, _ := readJSON(rulesPath)
+	rulesRaw, _ := s.jsonCache.read(rulesPath)
 	rulesMap, _ := rulesRaw.(map[string]interface{})
 	if rulesMap == nil {
 		rulesMap = map[string]interface{}{}
 	}
 
-	namesRaw, _ := readJSON(namesPath)
+	namesRaw, _ := s.jsonCache.read(namesPath)
 	namesMap, _ := namesRaw.(map[string]interface{})
 	if namesMap == nil {
 		namesMap = map[string]interface{}{}
@@ -658,7 +662,7 @@ func (s *server) sampleRatesOnce() {
 // One entry per MAC: if several client-keys share a MAC, the first non-empty wins.
 func (s *server) dpiAppsByMAC() map[string][]map[string]interface{} {
 	out := map[string][]map[string]interface{}{}
-	raw, err := readJSON(filepath.Join(s.hncDir, "run", "dpi_state.json"))
+	raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_state.json"))
 	if err != nil {
 		return out
 	}

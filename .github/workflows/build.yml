@@ -52,7 +52,7 @@ jobs:
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25'
           cache-dependency-path: daemon/hnc_httpd/go.sum
 
       # Android SDK (build-tools d8 + a platform android.jar) for compiling

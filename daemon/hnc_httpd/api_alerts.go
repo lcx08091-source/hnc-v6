@@ -15,7 +15,7 @@ package main
 import (
 	"encoding/json"
 	"net/http"
-	"path/filepath"
+	"strconv"
 	"strings"
 
 	"hnc.io/dpid/alert"
@@ -145,13 +145,5 @@ func plural(n int, base string) string {
 		return "1 " + base
 	}
 	// English plural is fine here; UI overrides the wording in any case.
-	return jsonInt(n) + " " + base + "s"
+	return strconv.Itoa(n) + " " + base + "s"
 }
-
-func jsonInt(n int) string {
-	b, _ := json.Marshal(n)
-	return string(b)
-}
-
-// _ keeps filepath import alive if we move to a path-based helper later.
-var _ = filepath.Join

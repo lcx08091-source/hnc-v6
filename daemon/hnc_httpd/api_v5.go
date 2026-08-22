@@ -11,12 +11,12 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"io"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -90,10 +90,7 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 	// rc3.1.13: 删除 config.json 覆盖分支. config.json 已弃用, 由 post-fs-data.sh
 	// 启动时单向迁移 auth_required 到 rules.json 后删除. 字段单源化让 toggle / 后端
 	// 视角永远一致, 杜绝 rc3.1.9~12 那种"前端 ON 但 middleware 不认"的 skew.
-	setNoStore(w)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func boolField(m map[string]interface{}, key string) bool {
@@ -145,10 +142,7 @@ func (s *server) apiTokens(w http.ResponseWriter, r *http.Request) {
 			Revoked:  t.Revoked,
 		})
 	}
-	setNoStore(w)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ── /api/iface_info ────────────────────────────────────────────
@@ -214,10 +208,7 @@ func (s *server) apiIfaceInfo(w http.ResponseWriter, r *http.Request) {
 	// 不能从客户端 IP 推出主机 IP (客户端 .188 不代表主机 .1),
 	// 保留 iface/ip 为空, 让前端 fetchHnIp 回退到 '192.168.1.1' 兜底告知
 	// (用户会看到明显不对的值, 比无法访问更容易定位)
-	setNoStore(w)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ── /api/offload_status ────────────────────────────────────────
@@ -288,10 +279,7 @@ func (s *server) apiOffloadStatus(w http.ResponseWriter, r *http.Request) {
 	if !ready {
 		resp = offloadResp{Active: false, Detail: "PENDING"}
 	}
-	setNoStore(w)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(resp)
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ── /api/logs?file=xxx ─────────────────────────────────────────
@@ -332,31 +320,21 @@ func (s *server) apiLogs(w http.ResponseWriter, r *http.Request) {
 	// 特殊: combined = 多个 log 合并
 	if file == "combined" {
 		combined := combinedLog(s.hncDir, n)
-		setNoStore(w)
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		_ = json.NewEncoder(w).Encode(logResp{File: "combined", Content: combined, Tail: n})
+		writeJSON(w, http.StatusOK, logResp{File: "combined", Content: combined, Tail: n})
 		return
 	}
 	if !allowedLogs[file] {
-		setNoStore(w)
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		http.Error(w, `{"error":"log file not in whitelist"}`, http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "log file not in whitelist"})
 		return
 	}
 	// 绝对路径 + 再 Clean 一次兜底 · 防 ../
 	abs := filepath.Join(s.hncDir, "logs", file)
 	if !strings.HasPrefix(abs, s.hncDir+"/logs/") {
-		setNoStore(w)
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		http.Error(w, `{"error":"path escape detected"}`, http.StatusBadRequest)
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "path escape detected"})
 		return
 	}
 	content := tailFile(abs, n)
-	setNoStore(w)
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	_ = json.NewEncoder(w).Encode(logResp{File: file, Content: content, Tail: n})
+	writeJSON(w, http.StatusOK, logResp{File: file, Content: content, Tail: n})
 }
 
 // tailFile · 读文件末尾 N 行
@@ -366,35 +344,13 @@ func (s *server) apiLogs(w http.ResponseWriter, r *http.Request) {
 func tailFile(path string, n int) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "tail", "-n", intToStr(n), path)
+	cmd := exec.CommandContext(ctx, "tail", "-n", strconv.Itoa(n), path)
 	out, err := cmd.Output()
 	if err != nil {
 		// 读不到或文件不存在或超时 - 返回空而不是 error
 		return ""
 	}
 	return string(out)
-}
-
-func intToStr(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	buf := [20]byte{}
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }
 
 // combinedLog · 合并多个 log
@@ -424,6 +380,3 @@ func combinedLog(hncDir string, n int) string {
 	}
 	return buf.String()
 }
-
-// 占位引用防 "imported and not used" 错
-var _ = io.Discard

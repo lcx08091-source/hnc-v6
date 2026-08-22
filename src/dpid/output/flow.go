@@ -37,7 +37,7 @@ type flowBucket struct {
 }
 
 type flowEntry struct {
-	key       string // remoteIP:port
+	key       string // "T|remoteIP:port" 或 "U|remoteIP:port" (proto|ip:port)
 	firstSeen int64
 	lastSeen  int64
 	packets   uint64

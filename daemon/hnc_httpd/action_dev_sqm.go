@@ -2,6 +2,20 @@ package main
 
 import "strings"
 
+// parseEnabledParam 解析宽松布尔参数 (true|1|on|yes / false|0|off|no|"")。
+// v6 review: 此解析 switch 在 SQM 与 global_shaper 两个 action 里逐字重复,
+// 收敛为一处; 缺省值是 false, 非法取值 ok=false 由调用方拒绝。
+func parseEnabledParam(p map[string]string) (value, ok bool) {
+	switch strings.TrimSpace(strings.ToLower(p["enabled"])) {
+	case "true", "1", "on", "yes":
+		return true, true
+	case "false", "0", "off", "no", "":
+		return false, true
+	default:
+		return false, false
+	}
+}
+
 // actionDeviceSQMSet · rc20 每设备「低延迟」(智能队列) 开关
 //
 // params:
@@ -18,13 +32,8 @@ func actionDeviceSQMSet(hncDir string, p map[string]string) actionResp {
 	if !macRE.MatchString(mac) {
 		return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
 	}
-	enabled := false
-	switch strings.TrimSpace(strings.ToLower(p["enabled"])) {
-	case "true", "1", "on", "yes":
-		enabled = true
-	case "false", "0", "off", "no", "":
-		enabled = false
-	default:
+	enabled, ok := parseEnabledParam(p)
+	if !ok {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
 

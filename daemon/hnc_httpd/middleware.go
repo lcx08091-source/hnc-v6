@@ -316,6 +316,10 @@ func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
 // 注: rc30.12.16 加了 alerts/dpi_history/app_limits 3 个之前漏的;
 //
 //	logout 不该算敏感, 登出永远应该允许 (现已移到 isPublicPath).
+//
+// v6 review fix: 再补 self/* (uid 归因的本机 App 流量元数据)、exports(含
+// dpi_state/SNI 全景数据)、sla、events —— 此前这些在 secret 缺失窗口会被
+// loopback 匿名读到。新端点若含任何设备/流量数据, 必须同步登记到这里。
 func isSensitiveReadPath(p string) bool {
 	switch p {
 	case "/api/logs",
@@ -333,11 +337,17 @@ func isSensitiveReadPath(p string) bool {
 		"/api/dpi_probe",
 		"/api/alerts",
 		"/api/dpi_history",
-		"/api/app_limits":
+		"/api/app_limits",
+		"/api/self",
+		"/api/self/ifaces",
+		"/api/self/attrib",
+		"/api/sla",
+		"/api/events",
+		"/api/exports":
 		return true
-	default:
-		return false
 	}
+	// 导出文件按名子路径: /api/exports/<name>.zip
+	return strings.HasPrefix(p, "/api/exports/")
 }
 
 // respondUnauthorized 拒绝无效/缺失 token 的请求

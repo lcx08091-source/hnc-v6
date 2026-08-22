@@ -19,6 +19,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -205,22 +206,19 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 
 // readHistJSONL streams the JSONL file line-by-line, parsing each row.
 // Returns an empty slice on missing file / parse errors — never panics.
-// Bounded by file size, not row count: a 10 MB cap is enforced (typical
-// is <500 KB/day).
+// Bounded by file size, not row count: reads at most the first 10 MB
+// (typical is <500 KB/day). v6 review fix: 旧实现超过 10MB 时 return nil,
+// 整日数据被静默丢弃, 与"截断读"的注释矛盾 —— 改为 LimitedReader 真截断,
+// 保留前 10MB 行, 宁可少报不可缺天。
 func readHistJSONL(path string) []histRow {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil
 	}
 	defer f.Close()
-	if st, err := f.Stat(); err == nil {
-		if st.Size() > 10*1024*1024 {
-			// Truncate read at 10 MB. Better to under-report than OOM.
-			return nil
-		}
-	}
+	lr := io.LimitReader(f, 10*1024*1024)
 	out := make([]histRow, 0, 256)
-	sc := bufio.NewScanner(f)
+	sc := bufio.NewScanner(lr)
 	// Allow longer lines than the default 64 KB — paranoid; rows are ~100 B.
 	sc.Buffer(make([]byte, 0, 4096), 256*1024)
 	for sc.Scan() {

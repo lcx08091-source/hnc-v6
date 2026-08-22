@@ -17,13 +17,8 @@ import "strings"
 // 诚实边界:固定 ceil 对蜂窝(速率乱跳)效果有限;最适合稳定链路(WiFi 中继 / 固定
 // WISP / 光猫)。这是设计如此,不是 bug —— UI 文案已注明。
 func actionGlobalShaperSet(hncDir string, p map[string]string) actionResp {
-	enabled := false
-	switch strings.TrimSpace(strings.ToLower(p["enabled"])) {
-	case "true", "1", "on", "yes":
-		enabled = true
-	case "false", "0", "off", "no", "":
-		enabled = false
-	default:
+	enabled, ok := parseEnabledParam(p)
+	if !ok {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
 

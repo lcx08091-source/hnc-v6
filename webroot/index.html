@@ -48,7 +48,7 @@
   }catch(_){}
 })();
 </script>
-<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#F5F5F7" media="(prefers-color-scheme: light)">
 <meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
 <title>HNC · Hotspot Network Control</title>
@@ -6808,7 +6808,7 @@ body.kb-open .container {
         }
       }
     } catch (e) {
-      if (summaryEl) summaryEl.innerHTML = '<div class="dpi-empty">读取失败: ' + ((e && e.message) || e) + '</div>';
+      if (summaryEl) summaryEl.innerHTML = '<div class="dpi-empty">读取失败: ' + esc((e && e.message) || e) + '</div>';
     }
   }
   /* [opt #15] 共享 MAC 归一化函数 (之前在 renderDPIActiveCard 和 renderDPITimeline 各写了一遍) */
@@ -11665,13 +11665,13 @@ body.kb-open .container {
       /* [opt #5] 倒计时进度 */
       let sampleSec = 15;
       toast('正在进行 nDPI ' + sampleSec + ' 秒采样，请让热点客户端产生流量…', 'warn');
-      if (out) out.textContent = 'sampling ' + sampleSec + 's on hotspot iface…';
+      if (out) out.textContent = '正在热点接口上采样 ' + sampleSec + ' 秒…';
       const countdown = setInterval(() => {
         sampleSec--;
         if (sampleSec > 0) {
           toast('nDPI 采样中… ' + sampleSec + 's', 'warn', 1200);
-          if (out) out.textContent = 'sampling… ' + sampleSec + 's remaining';
-        } else { clearInterval(countdown); if (out) out.textContent = 'processing results…'; }
+          if (out) out.textContent = '采样中… 剩余 ' + sampleSec + ' 秒';
+        } else { clearInterval(countdown); if (out) out.textContent = '正在处理结果…'; }
       }, 1000);
       ndpiLabSampleBackend().then(raw => {
         clearInterval(countdown);
@@ -13529,12 +13529,15 @@ body.kb-open .container {
       var app = c.app ? appsEsc(c.app) : ('uid ' + c.uid);
       var apex = appsEsc(c.apex);
       var ev = (c.hits || 0) + '次/' + (c.windows || 0) + '窗 · ' + (c.tier === 'high' ? '强证据' : '中证据');
+      // XSS 防护: apex 是热点客户端 SNI 观测值, 属外部可控输入。不能拼进内联
+      // onclick 的 JS 字符串(appsEsc 的 &#39; 在事件属性里会被先解码回 ' 绕过),
+      // 只放入 data-apex 属性(属性上下文 appsEsc 有效), JS 侧从属性读取。
       var btns = '';
       if (kind === 'promoted') {
-        btns = '<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="appsCandReject(\'' + apex + '\', this)">撤销</button>';
+        btns = '<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" data-apex="' + apex + '" onclick="appsCandReject(this)">撤销</button>';
       } else {
-        btns = '<button class="btn btn-primary" style="padding:5px 10px;font-size:12px" onclick="appsCandPromote(\'' + apex + '\', this)">一键 promote</button>' +
-               '<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px;margin-left:6px" onclick="appsCandReject(\'' + apex + '\', this)">拒绝</button>';
+        btns = '<button class="btn btn-primary" style="padding:5px 10px;font-size:12px" data-apex="' + apex + '" onclick="appsCandPromote(this)">一键 promote</button>' +
+               '<button class="btn btn-ghost" style="padding:5px 10px;font-size:12px;margin-left:6px" data-apex="' + apex + '" onclick="appsCandReject(this)">拒绝</button>';
       }
       return '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;padding:8px 4px;border-top:1px solid rgba(128,128,128,.15)">' +
                '<div style="min-width:0;flex:1"><div style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + app + '</div>' +
@@ -13567,7 +13570,10 @@ body.kb-open .container {
   }
 
   // apiAction throws on !ok, so success → .then, any failure → .catch.
-  window.appsCandPromote = function(apex, btn) {
+  // apex 经按钮 data-apex 属性传入(勿以参数形式拼回内联 onclick)。
+  window.appsCandPromote = function(btn) {
+    var apex = btn && btn.getAttribute ? btn.getAttribute('data-apex') : '';
+    if (!apex) return;
     if (btn) { btn.disabled = true; btn.textContent = '…'; }
     apiAction('candidate_promote', { apex: apex })
       .then(function(){
@@ -13580,7 +13586,9 @@ body.kb-open .container {
       });
   };
 
-  window.appsCandReject = function(apex, btn) {
+  window.appsCandReject = function(btn) {
+    var apex = btn && btn.getAttribute ? btn.getAttribute('data-apex') : '';
+    if (!apex) return;
     if (btn) { btn.disabled = true; btn.textContent = '…'; }
     apiAction('candidate_reject', { apex: apex })
       .then(function(){
@@ -13694,7 +13702,8 @@ body.kb-open .container {
           '<div style="font-size:11px;color:var(--text-3);margin-top:6px;line-height:1.6">' +
           trkLines.map(appsEsc).join('<br>') + '</div>' +
           '<a class="exp-row-dl" style="display:inline-block;margin-top:10px" href="javascript:void(0)" ' +
-          'onclick="appsDownloadExport(\'' + appsEsc(d.name) + '\',\'' + appsEsc(d.download_url) + '\');return false">下载 zip</a>' +
+          'data-exp-name="' + appsEsc(d.name) + '" data-exp-url="' + appsEsc(d.download_url) + '" ' +
+          'onclick="appsDownloadExport(this);return false">下载 zip</a>' +
         '</div>';
         appsLoadExports();
       })
@@ -13710,7 +13719,10 @@ body.kb-open .container {
   // <a href="/api/exports/.."> can't work (resolves against file://, and can't
   // send the loopback-admin header), so copy the zip to /sdcard/Download via
   // the ksu.exec bridge. On a remote browser the href download works normally.
-  window.appsDownloadExport = function(name, url) {
+  // name/url 经 data-exp-name / data-exp-url 属性传入(勿拼回内联 onclick)。
+  window.appsDownloadExport = function(el) {
+    var name = el && el.getAttribute ? el.getAttribute('data-exp-name') : '';
+    var url = el && el.getAttribute ? el.getAttribute('data-exp-url') : '';
     var isLocal = (typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function');
     if (!isLocal) {
       var a = document.createElement('a');
@@ -13755,7 +13767,8 @@ body.kb-open .container {
                                             appsEsc(x.modified) + '</div>' +
             '</div>' +
             '<a class="exp-row-dl" href="javascript:void(0)" ' +
-            'onclick="appsDownloadExport(\'' + appsEsc(x.name) + '\',\'' + appsEsc(x.download_url) + '\');return false">下载</a>' +
+            'data-exp-name="' + appsEsc(x.name) + '" data-exp-url="' + appsEsc(x.download_url) + '" ' +
+            'onclick="appsDownloadExport(this);return false">下载</a>' +
           '</div>';
         }).join('');
       })

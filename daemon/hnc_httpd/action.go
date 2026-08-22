@@ -48,6 +48,10 @@ var rateRE = regexp.MustCompile(`^[0-9]+(kbit|mbit)$`)
 // IP v4, 宽松一点(只校验基础格式)
 var ipv4RE = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
 
+// 网卡名 (Linux iface 命名字符集, 限长 32)。v6 review: 从 actionDPIRebind
+// 的函数内 MustCompile 提升为包级, 与 macRE/rateRE 同处一地。
+var ifaceNameRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,32}$`)
+
 // v4.0 Patch 3.a Gemini: 受保护的特殊 MAC
 // broadcast/null MAC 永远不能被 bl_add / rule_set
 var protectedSpecialMACs = map[string]bool{
@@ -670,7 +674,7 @@ func actionDPIRebind(hncDir string, p map[string]string) actionResp {
 	iface := strings.TrimSpace(p["iface"])
 	args := []string{}
 	if iface != "" {
-		if !regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,32}$`).MatchString(iface) {
+		if !ifaceNameRE.MatchString(iface) {
 			return actionResp{OK: false, Error: "bad params", Detail: "invalid iface"}
 		}
 		args = append(args, iface)
