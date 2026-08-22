@@ -46,6 +46,7 @@ rm -rf "$HNC_DIR/run/hnc_json.lock" "$HNC_DIR/run/json.lock" 2>/dev/null
   "version": 1,
   "whitelist_mode": false,
   "auth_required": true,
+  "clsact_bpf_enabled": false,
   "devices": {},
   "blacklist": [],
   "whitelist": []

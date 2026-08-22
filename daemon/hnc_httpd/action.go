@@ -343,6 +343,13 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 			_ = os.Remove(f)
 		}
 		return actionResp{OK: true, Detail: fmt.Sprintf("purged %d file(s)", len(files))}
+	// v5.9.7: clsact BPF (T1 tier) 状态查询/修复/开关
+	case "clsact_check":
+		return actionClsactCheck(hncDir)
+	case "clsact_repair":
+		return actionClsactRepair(hncDir)
+	case "clsact_bpf_enabled_set":
+		return actionClsactEnabledSet(hncDir, p)
 	default:
 		return actionResp{OK: false, Error: "unknown action"}
 	}
@@ -692,6 +699,127 @@ func actionDPIRebind(hncDir string, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "dpi rebind failed", Detail: strings.TrimSpace(out)}
 	}
 	return actionResp{OK: true, Detail: strings.TrimSpace(out)}
+}
+
+// ── clsact BPF (T1 tier, opt-in) ────────────────────────────────
+
+// readHotspotIfaceName reads the current active hotspot interface from hnc_state.
+// Returns empty string if not active or unreadable. (回移自 5.9.91 分叉)
+func readHotspotIfaceName(hncDir string) string {
+	stateBytes, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state"))
+	if err != nil {
+		return ""
+	}
+	state := strings.TrimSpace(string(stateBytes))
+	if !strings.HasPrefix(state, "ACTIVE:") {
+		return ""
+	}
+	iface := strings.TrimSpace(strings.TrimPrefix(state, "ACTIVE:"))
+	// Validate iface to prevent injection (与 Go 侧 ifaceNameRE 同族, 此处只
+	// 允许小写字母数字, 分叉原版语义)
+	for _, c := range iface {
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+			return ""
+		}
+	}
+	return iface
+}
+
+// clsactCheckResult is the JSON response for clsact_check action.
+type clsactCheckResult struct {
+	OK        bool   `json:"ok"`
+	Clsact    bool   `json:"clsact"`
+	BPFFilter bool   `json:"bpf_filter"`
+	Map       bool   `json:"map"`
+	Watchdog  bool   `json:"watchdog"`
+	Iface     string `json:"iface"`
+}
+
+// actionClsactCheck 查询 clsact qdisc / pref1 BPF filter / map pin 三态。
+// 与分叉版不同: 探测走 hnc_clsact_ctl check(netlink 直通, 不依赖
+// /system/bin/tc —— ColorOS 魔改 tc 会拒 ingress 关键字), 且多报 map 态。
+func actionClsactCheck(hncDir string) actionResp {
+	iface := readHotspotIfaceName(hncDir)
+	if iface == "" {
+		return actionResp{OK: false, Error: "hotspot not active"}
+	}
+
+	// ctl check 输出 {"iface":..,"ok":..,"qdisc":..,"bpf_filter":..,"map":..}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "check", iface)
+	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
+	out, _ := cmd.CombinedOutput()
+	s := string(out)
+	hasClsact := strings.Contains(s, `"qdisc":true`)
+	hasBPF := strings.Contains(s, `"bpf_filter":true`)
+	hasMap := strings.Contains(s, `"map":true`)
+
+	// watchdog 进程态(脚本自身每 10s 自愈内核态, 进程在即有人管)
+	ctx3, cancel3 := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel3()
+	cmd3 := exec.CommandContext(ctx3, "sh", "-c", "pgrep -f hnc_clsact_watchdog")
+	cmd3.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
+	wdOut, _ := cmd3.CombinedOutput()
+	watchdogRunning := len(strings.TrimSpace(string(wdOut))) > 0
+
+	result := clsactCheckResult{
+		OK:        hasClsact && hasBPF && hasMap,
+		Clsact:    hasClsact,
+		BPFFilter: hasBPF,
+		Map:       hasMap,
+		Watchdog:  watchdogRunning,
+		Iface:     iface,
+	}
+	jsonBytes, _ := json.Marshal(result)
+	return actionResp{OK: true, Detail: string(jsonBytes)}
+}
+
+// actionClsactRepair 单次修复(调 watchdog 的 repair 子命令 —— v5.9.7 修复了
+// 分叉版把 "repair" 当接口名的死循环 bug)。
+func actionClsactRepair(hncDir string) actionResp {
+	iface := readHotspotIfaceName(hncDir)
+	if iface == "" {
+		return actionResp{OK: false, Error: "hotspot not active"}
+	}
+	rc, out := runBin(hncDir, "hnc_clsact_watchdog.sh", "repair", iface)
+	if rc != 0 {
+		return actionResp{OK: false, Error: "repair failed", Detail: strings.TrimSpace(out)}
+	}
+	return actionResp{OK: true, Detail: "clsact repaired"}
+}
+
+// actionClsactEnabledSet 开关联动: 开 → 拉起 watchdog(其内部自装 filter+灌
+// map); 关 → 精确卸掉自己的 pref1 filter + unpin(watchdog 10s 内自查退出)。
+func actionClsactEnabledSet(hncDir string, p map[string]string) actionResp {
+	v := p["enabled"]
+	if v != "true" && v != "false" {
+		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
+	}
+	rc, out := runBin(hncDir, "json_set.sh", "top", "clsact_bpf_enabled", v)
+	if rc != 0 {
+		return actionResp{OK: false, Error: "write failed", Detail: out}
+	}
+	iface := readHotspotIfaceName(hncDir)
+	if v == "true" {
+		if iface != "" {
+			// watchdog 幂等: 已在跑则无动作
+			rc2, out2 := runBin(hncDir, "hnc_clsact_watchdog.sh", "repair", iface)
+			if rc2 != 0 {
+				return actionResp{OK: true, Detail: "enabled (initial repair pending watchdog: " + strings.TrimSpace(out2) + ")"}
+			}
+		}
+		return actionResp{OK: true, Detail: "clsact BPF enabled · watchdog 会在 10s 内完成安装"}
+	}
+	// 关: 卸 filter + unpin map(不删 clsact qdisc —— AOSP tether 共用)
+	if iface != "" {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "uninstall", iface)
+		cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
+		_ = cmd.Run()
+	}
+	return actionResp{OK: true, Detail: "clsact BPF disabled · filter 已卸载"}
 }
 
 // writeActionResp 响应 JSON

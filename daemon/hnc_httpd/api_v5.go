@@ -39,6 +39,8 @@ type configResp struct {
 	GlobalShaperUp      string `json:"global_shaper_up,omitempty"`
 	// rc35: 用户维护的飞轮排除名单(VPN/代理),不含内置清单。供设置页展示/增删。
 	FlywheelExcludeUser []string `json:"flywheel_exclude_user,omitempty"`
+	// v5.9.7: clsact BPF (T1 tier, opt-in, 默认关)。设置页开关态。
+	ClsactBpfEnabled bool `json:"clsact_bpf_enabled"`
 	// v5.9.1: v5.2 shadow 统计是否真的在采样(run/stats_shadow.enabled 存在)。
 	// 此前统计页的"统计来源"下拉框允许选"新统计 Shadow",但该灰度装机默认
 	// 从未启用 → /api/stats?source=shadow 读不到文件时静默返回空 → 用户看到
@@ -64,6 +66,7 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 			resp.AuthRequired = boolField(m, "auth_required")
 			resp.WhitelistMode = boolField(m, "whitelist_mode")
 			resp.RemoteEnabled = boolField(m, "remote_enabled")
+			resp.ClsactBpfEnabled = boolField(m, "clsact_bpf_enabled")
 			// Autostart: 优先读 hotspot_auto (shell 名), 回退到 hotspot_autostart
 			resp.HotspotAutostart = boolField(m, "hotspot_auto") || boolField(m, "hotspot_autostart")
 			if ssid, ok := m["hotspot_ssid"].(string); ok {

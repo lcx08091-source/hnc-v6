@@ -62,12 +62,14 @@ func newFlowTracker() *flowTracker {
 
 // observe records a single packet on the named flow. Returns the latest
 // per-second packet rate estimate for this flow (used by sub-category
-// detectors like wechat voice_call).
-func (ft *flowTracker) observe(key string, nowUnix int64, bytes uint64) float64 {
+// detectors like wechat voice_call), plus created=true when this call
+// materialized a NEW flow entry (v5.9.7: Writer 用它做 O(1) 全局流计数)。
+func (ft *flowTracker) observe(key string, nowUnix int64, bytes uint64) (float64, bool) {
 	if ft.flows == nil {
 		ft.flows = make(map[string]*flowEntry)
 	}
 	f := ft.flows[key]
+	created := false
 	if f == nil {
 		if len(ft.flows) >= maxFlowsPerClient {
 			ft.evictOldest(nowUnix)
@@ -79,6 +81,7 @@ func (ft *flowTracker) observe(key string, nowUnix int64, bytes uint64) float64 
 		}
 		f.buckets[0].startUnix = bucketStart(nowUnix)
 		ft.flows[key] = f
+		created = true
 	}
 	f.lastSeen = nowUnix
 	f.packets++
@@ -115,7 +118,7 @@ func (ft *flowTracker) observe(key string, nowUnix int64, bytes uint64) float64 
 	}
 	f.buckets[f.head].packets++
 	f.buckets[f.head].bytes += bytes
-	return f.emaPPS
+	return f.emaPPS, created
 }
 
 // bucketStart truncates a unix timestamp to the start of its 30s bucket.
@@ -123,13 +126,16 @@ func bucketStart(t int64) int64 {
 	return t - (t % bucketSeconds)
 }
 
-func (ft *flowTracker) evictOldest(nowUnix int64) {
+// evictOldest 返回删除的流条数(v5.9.7: Writer 用它维护全局计数)。
+func (ft *flowTracker) evictOldest(nowUnix int64) int {
 	// v5.9.6 (回移自 5.9.91 分叉): 第一遍清掉全部 idle 流 (主判据) —— 旧实现
 	// 只删一个就返回, cap 压力大时一次只腾一个坑; 清完仍满员再按活跃度
 	// (bytes+packets 最低) 删最不活跃的 (次判据, 取代旧的"最旧")。
+	removed := 0
 	for k, f := range ft.flows {
 		if nowUnix-f.lastSeen > flowMaxIdleSeconds {
 			delete(ft.flows, k)
+			removed++
 		}
 	}
 	if len(ft.flows) >= maxFlowsPerClient {
@@ -144,8 +150,40 @@ func (ft *flowTracker) evictOldest(nowUnix int64) {
 		}
 		if worstKey != "" {
 			delete(ft.flows, worstKey)
+			removed++
 		}
 	}
+	return removed
+}
+
+// globalEvict 全局超限时的驱逐(回移自 5.9.91 分叉): 先清 idle, 再按活跃度
+// 从低到高删到全局预算以内。返回删除条数。
+func (ft *flowTracker) globalEvict(nowUnix int64, budget int) int {
+	removed := 0
+	// 先清 idle
+	for k, f := range ft.flows {
+		if nowUnix-f.lastSeen > flowMaxIdleSeconds {
+			delete(ft.flows, k)
+			removed++
+		}
+	}
+	for len(ft.flows) > budget {
+		var worstKey string
+		var worstScore uint64
+		first := true
+		for k, f := range ft.flows {
+			score := f.bytes + f.packets
+			if first || score < worstScore {
+				worstKey, worstScore, first = k, score, false
+			}
+		}
+		if worstKey == "" {
+			break
+		}
+		delete(ft.flows, worstKey)
+		removed++
+	}
+	return removed
 }
 
 // persistencePct returns the share of buckets within bucketCount window that

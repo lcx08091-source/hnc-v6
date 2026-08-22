@@ -290,6 +290,9 @@ case "$CMD" in
         TC_OUT=$(sh "$TC" set_limit "$IFACE" "$MID" "$DN_MBPS" "$UP_MBPS" "$IP" 2>&1)
         TC_RC=$?
         [ -n "$TC_OUT" ] && log "tc set_limit output rc=$TC_RC: $TC_OUT"
+        # v5.9.7: 限速规则变了, clsact BPF 的 ip→mark map 跟着刷新
+        # (未启用时 sync 脚本自检 map pin 缺失即静默退, 零开销)
+        [ -x "$HNC_DIR/bin/hnc_clsact_sync.sh" ] &&             sh "$HNC_DIR/bin/hnc_clsact_sync.sh" >> "$LOG" 2>&1 || true
         if [ $TC_RC -ne 0 ] && [ $TC_RC -ne 8 ]; then
             # hotfix5: avoid half-applied state. The mark was already installed, but
             # rules.json has not been updated yet; remove the packet mark so traffic

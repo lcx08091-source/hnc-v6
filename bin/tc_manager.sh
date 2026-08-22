@@ -937,6 +937,35 @@ set_global_shaper() {
 # 整形"UI 显示开着、实际全速"的静默失效。直接调 set_global_shaper 函数(不经 CLI 锁),
 # 因为 init_tc/restore_rules 自身已在 tc_action_lock 下。set_global_shaper 内部的
 # ensure_egress_htb_ready 在树已就绪时直接返回,不会递归回 init_tc。
+# ─── T1 tier: clsact BPF at pref 1 (before AOSP offload pref 2/3) ─────
+# 回移自 5.9.91 分叉并重写: 不再走 /system/bin tc(ColorOS 魔改 tc 会拒
+# ingress 关键字), 改走 hnc_clsact_ctl(netlink 直通 + 裸 bpf(2) 迷你加载器,
+# 负责 ELF 加载/map pin/filter 挂载)。opt-in: rules.json 顶层
+# clsact_bpf_enabled 默认 false, 一切缺失(obj/ctl/开关)静默降级。
+_hnc_clsact_enabled() {
+    [ -f "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact.o" ] || return 1
+    [ -x "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact_ctl" ] || return 1
+    if [ -x "${HNC_DIR:-/data/local/hnc}/bin/hnc_json" ]; then
+        if v="$("${HNC_DIR:-/data/local/hnc}/bin/hnc_json" get-top "${HNC_DIR:-/data/local/hnc}/data/rules.json" clsact_bpf_enabled 2>/dev/null)"; then
+            [ "$v" = "true" ] && return 0
+            [ "$v" = "false" ] && return 1
+        fi
+    fi
+    grep -q '"clsact_bpf_enabled"[[:space:]]*:[[:space:]]*true'         "${HNC_DIR:-/data/local/hnc}/data/rules.json" 2>/dev/null
+}
+
+_hnc_install_clsact_bpf() {
+    local iface="$1"
+    _hnc_clsact_enabled || return 0
+    if "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact_ctl" install "$iface" >> "$LOG" 2>&1; then
+        log "clsact BPF installed at pref 1 on $iface"
+        # filter 建好(或已在)后把 ip→mark 灌进 map
+        sh "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact_sync.sh" >> "$LOG" 2>&1 || true
+    else
+        log "WARN: clsact BPF install failed on $iface (see $LOG)"
+    fi
+}
+
 apply_global_shaper_if_enabled() {
     local _gs_iface=$1
     [ -n "$_gs_iface" ] || return 0
@@ -1531,6 +1560,9 @@ init_tc() {
     # rc36 (GS-1): HTB 树刚建好,若持久化里全局整形是开的,把 1:1 ceil 重新压回 WAN 带宽。
     # 防 ROM 换根 qdisc 触发重建后整形静默失效。树已就绪,set_global_shaper 不会递归。
     apply_global_shaper_if_enabled "$iface"
+
+    # T1 tier: install clsact BPF filter at pref 1 (before AOSP offload pref 2/3)
+    _hnc_install_clsact_bpf "$iface"
 
     log "=== TC init OK ==="
 }
@@ -2167,6 +2199,9 @@ restore_rules() {
     # rc32/rc36: 恢复全局带宽整形器 (opt-in, 默认关)。抽成 apply_global_shaper_if_enabled,
     # 与 init_tc 末尾共用同一逻辑(GS-1),避免两处各写一份导致行为漂移。
     apply_global_shaper_if_enabled "$iface"
+
+    # T1 tier: ensure clsact BPF filter persists across restore
+    _hnc_install_clsact_bpf "$iface"
 
     if [ "${restore_side_fail:-0}" -gt 0 ]; then
         log_error "restore_rules: $restore_side_fail side-channel failures (iptables mark/blacklist_add), see errors above"

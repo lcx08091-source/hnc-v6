@@ -254,6 +254,22 @@ jobs:
           fi
           file ../../bin/hnc_tc_ingress | grep -q "ARM aarch64" || exit 1
 
+      # ─── Build hnc_clsact_ctl + hnc_clsact.o (C + eBPF, v5.9.7) ──
+      # BPF object 由 ubuntu runner 自带的 clang 编(-target bpf, 无需 NDK);
+      # hnc_clsact_ctl 是裸 syscall 的迷你加载器(netlink 挂载 + map 写入),
+      # 不链接 libbpf/libelf。与分叉版不同: .o 不再预提交进 git, 每次 CI
+      # 现编, 杜绝陈旧产物(与 PKG-1 的历史教训一致)。
+      - name: Build hnc_clsact_ctl + BPF object (v5.9.7)
+        env:
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          cd daemon/clsact_ctl
+          bash build.sh arm64
+          cd ../..
+          file bin/hnc_clsact_ctl | grep -q "ARM aarch64" || exit 1
+          file bin/hnc_clsact.o | grep -qi "eBPF" || exit 1
+
       # ─── Build hotspotd + hnc_ipc + mdns_resolve (C, needs libbpf submodule) ─
       # v5.8.3 (audit): hotspotd was a committed prebuilt that CI never rebuilt
       # (libbpf wasn't vendored), so C fixes (rc39 scheduler.c dynamic read,

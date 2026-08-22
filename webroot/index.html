@@ -5446,6 +5446,28 @@ body.kb-open .container {
         <span class="set-action-hint">导出</span>
       </div>
     </div>
+
+    <!-- clsact BPF (T1 tier, opt-in) -->
+    <div class="sec-title">clsact BPF（实验性）</div>
+    <div class="setting-group glass-elevated">
+      <div class="set-row">
+        <div class="set-icon orange"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">启用 clsact BPF 打标</div>
+          <div class="set-desc">在 AOSP offload 之前按源 IP 预设限速 mark；默认关，开启后 watchdog 每 10s 自愈</div>
+        </div>
+        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="启用 clsact BPF" data-action="toggle-clsact" id="clsact-toggle"></div>
+      </div>
+      <div class="set-row clickable" data-action="clsact_check">
+        <div class="set-icon blue"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">clsact BPF 状态</div>
+          <div class="set-desc">qdisc · BPF filter · map · watchdog</div>
+        </div>
+        <div class="set-value" id="clsact-status">—</div>
+        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="checkClsact()">检查并修复</button>
+      </div>
+    </div>
     <!-- About -->
     <div class="sec-title">关于</div>
     <div class="setting-group glass-elevated">
@@ -12084,6 +12106,14 @@ body.kb-open .container {
           setWhitelistBackend(on).then(() => toast('白名单模式: ' + (on ? '启用' : '停用'), 'ok'))
             .catch(e => { doRevert(); toast('切换失败: ' + e.message, 'err'); });
           break;
+        case 'toggle-clsact':
+          apiAction('clsact_bpf_enabled_set', { enabled: on ? 'true' : 'false' })
+            .then(r => {
+              toast(on ? 'clsact BPF 已开启 · watchdog 10s 内完成安装' : ('clsact BPF 已关闭' + (r.detail ? ' · ' + r.detail : '')), 'ok');
+              setTimeout(checkClsact, on ? 12000 : 500);
+            })
+            .catch(e => { doRevert(); toast('切换失败: ' + (e.message || e), 'err'); });
+          break;
         case 'toggle-hs-autostart':
           hotspotAutoStartBackend(on).then(() => toast('热点自启: ' + (on ? '启用' : '停用'), 'ok'))
             .catch(e => { doRevert(); toast('切换失败: ' + e.message, 'err'); });
@@ -12782,7 +12812,31 @@ body.kb-open .container {
     // 5. 回读配置 · 设置 toggle 初始状态 (修 Bug 2 · P1-3)
     //    所有 toggle 必须 add/remove 对称, 否则之前是 on 但配置变 false 时 UI 卡在 on
     try {
-      const setTog = (el, on, also) => {
+// v5.9.7: clsact BPF (T1 tier) 状态检查(回移自 5.9.91 分叉, 加 map 态)
+      async function checkClsact() {
+        const el = document.getElementById('clsact-status');
+        if (!el) return;
+        el.textContent = '检查中...';
+        try {
+          const res = await apiAction('clsact_check', {});
+          let detail;
+          try { detail = JSON.parse(res.detail); } catch(e) { el.textContent = '检查失败: 解析错误'; return; }
+          const status = [];
+          status.push(detail.clsact ? '✅ qdisc' : '❌ qdisc');
+          status.push(detail.bpf_filter ? '✅ BPF' : '❌ BPF');
+          status.push(detail.map ? '✅ map' : '❌ map');
+          status.push(detail.watchdog ? '✅ watchdog' : '❌ watchdog');
+          el.textContent = status.join(' · ');
+          if (!detail.clsact || !detail.bpf_filter || !detail.map) {
+            const repairRes = await apiAction('clsact_repair', {});
+            el.textContent += repairRes.ok ? ' → 已修复' : ' → 修复失败';
+          }
+        } catch(e) {
+          el.textContent = '检查失败: ' + esc(e.message || e);
+        }
+      }
+      window.checkClsact = checkClsact;
+            const setTog = (el, on, also) => {
         if (!el) return;
         if (on) { el.classList.add('on'); el.setAttribute('aria-checked', 'true'); }
         else    { el.classList.remove('on'); el.setAttribute('aria-checked', 'false'); }
@@ -12803,6 +12857,7 @@ body.kb-open .container {
       if (cfg.tc_qos_scale) { state.qosScale = normalizeQosScale(cfg.tc_qos_scale); try { localStorage.setItem('hnc.qos-scale', String(state.qosScale)); } catch (_) {} }
       // Whitelist / Auth / Offload · 全部 add/remove 对称
       setTog($$('[data-action="toggle-wl"]')[0],            !!cfg.whitelist_mode);
+      setTog($('#clsact-toggle'),                            !!cfg.clsact_bpf_enabled);
       setTog($$('[data-action="toggle-auth"]')[0],          !!cfg.auth_required);
       // v5.9.1: offload 警告开关已删除 (改成只读状态行 #rs-offload-state,
       // 由 /api/offload_status 轮询驱动), 这里不再回读 hnc.offload-warn.

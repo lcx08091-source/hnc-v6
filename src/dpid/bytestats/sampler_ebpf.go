@@ -45,6 +45,7 @@ const (
 	bpfMapLookupElem  = 1
 	bpfMapGetNextKey  = 4
 	bpfObjGet         = 7
+	bpfObjGetInfoByFD = 15 // v5.9.7: tethering map schema 校验用
 )
 
 // netdStatsKey is the key struct of the BPF map. Layout matches AOSP's

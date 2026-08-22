@@ -310,6 +310,17 @@ type State struct {
 	// v5.9.6: 未识别字节占比 —— 规则覆盖率指标。Flush 时从全局字节账本
 	// 计算: 无 app 归因的字节 / 总字节。越高说明规则集覆盖越差。
 	UnidentifiedRatio UnidentifiedRatio `json:"unidentified_ratio,omitempty"`
+
+	// v5.9.7: 证据账本摘要(DPI 2.0 最小完成版)。每条证据带 log-odds 权重,
+	// 累计值可作 confidenceFor 之外的二级置信度信号。
+	EvidenceSummary EvidenceSummary `json:"evidence_summary,omitempty"`
+}
+
+// EvidenceSummary is a snapshot of the evidence ledger's state.
+type EvidenceSummary struct {
+	TotalEntries int            `json:"total"`
+	BySource     map[string]int `json:"by_source"`
+	TopApps      []string       `json:"top_apps,omitempty"`
 }
 
 // UnidentifiedRatio measures what fraction of observed traffic bytes
@@ -413,6 +424,16 @@ type Writer struct {
 	// Updated on every classification hit; flushed to disk by main.go's
 	// IPAppMap flusher goroutine every 30s.
 	IPAppMap *IPAppMap
+
+	// v5.9.7: 证据账本(DPI 2.0 最小完成版)。按 (clientMAC, appID) 记识别
+	// 证据链, log-odds 自动计权。注意: self_attrib 侧的注入通道
+	// (SetEvidenceLedger) 有意未接线 —— 分叉的 Writer 无 accessor 的结构
+	// 缺口未解, 且两命名空间("mac:appid" vs ":pkg")合流语义未定义。
+	evidence *EvidenceLedger
+
+	// v5.9.7: 全局活跃流计数(O(1) 维护, 仅 w.mu 内读写)。取代分叉版
+	// enforceGlobalFlowLimit 每包 O(客户端×流) 遍历的热路径回归。
+	totalActiveFlows int
 }
 
 func NewWriter(path, version string) *Writer {
@@ -437,6 +458,8 @@ func NewWriter(path, version string) *Writer {
 		globalCategories: make(map[string]*labelStat),
 		globalJA4:        make(map[string]*fpStat),
 		IPAppMap:         NewIPAppMap(),
+		// 64/key × 上限 1024 条全局; Trim 由 Flush 低频驱动(maxAge 1h)
+		evidence:         NewEvidenceLedger(64, 1024),
 	}
 }
 
@@ -547,6 +570,15 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 		bumpName(c.Hostnames, host, now, maxNamesPerClient)
 		bumpName(w.globalDNS, host, now, maxGlobalNames)
 		w.bumpLabelLocked(c, host, now, 0)
+		// v5.9.7: 证据账本(DNS 源, log-odds=1.5)
+		if w.evidence != nil && c.ClientMAC != "" {
+			if r, ok := classifyHost(host); ok && r.ID != "" {
+				w.evidence.Add(c.ClientMAC, r.ID, EvidenceEntry{
+					Ts: ts, Source: SrcDNS, RuleID: r.ID,
+					ParentEventID: host, Detail: host,
+				})
+			}
+		}
 	}
 }
 
@@ -574,6 +606,13 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		if remoteIP != "" && w.IPAppMap != nil {
 			if r, ok := classifyHost(host); ok && r.ID != "" {
 				w.IPAppMap.Record(remoteIP, r.ID, r.Name, now, "tls")
+				// v5.9.7: 证据账本(TLS 源, log-odds=2.0)
+				if w.evidence != nil && c.ClientMAC != "" {
+					w.evidence.Add(c.ClientMAC, r.ID, EvidenceEntry{
+						Ts: ts, Source: SrcTLS, RuleID: r.ID,
+						ParentEventID: host, Detail: host,
+					})
+				}
 			}
 		}
 	}
@@ -655,7 +694,20 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 	if c.Flows == nil {
 		c.Flows = newFlowTracker()
 	}
-	pps := c.Flows.observe(flowKey, now, bytes)
+	pps, flowCreated := c.Flows.observe(flowKey, now, bytes)
+	if flowCreated {
+		w.totalActiveFlows++
+	}
+	// 全局流上限: O(1) 计数判断, 超限才做驱逐(平时零遍历)。
+	w.enforceGlobalFlowLimitLocked(now)
+
+	// v5.9.7: 证据账本(flow 源, log-odds=0.5; ParentEventID 用 flowKey 指纹)
+	if ok && w.evidence != nil && c.ClientMAC != "" && rule.ID != "" {
+		w.evidence.Add(c.ClientMAC, rule.ID, EvidenceEntry{
+			Ts: ts, Source: SrcFlow, RuleID: rule.ID,
+			ParentEventID: flowKey, Detail: remoteIPRaw,
+		})
+	}
 
 	if ok {
 		w.applyRuleHitLocked(c, rule, remoteIPRaw, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
@@ -672,6 +724,42 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 			if hostRule, hostRuleOK := classifyHost(host); hostRuleOK {
 				w.applyRuleHitLocked(c, hostRule, "ndpi:"+host, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
 			}
+		}
+	}
+}
+
+// enforceGlobalFlowLimitLocked keeps total flows across all clients under
+// maxGlobalFlows. Caller must hold w.mu.
+//
+// v5.9.7 设计(对比分叉版): 分叉版每包全量遍历所有 client 的 flowCount
+// 求和 —— 热路径 O(客户端×流) 回归, 与 v5.9.4 锁外构造的方向相悖。
+// 本版: Writer 维护 totalActiveFlows 增量计数(observe 的 created 标志
+// +1, 驱逐时按返回值 -N), 判断是 O(1); 只有真正超限才遍历"流最多"的
+// client 逐个 globalEvict, 超限是偶发状态, 摊销成本可忽略。
+func (w *Writer) enforceGlobalFlowLimitLocked(now int64) {
+	if w.totalActiveFlows <= maxGlobalFlows {
+		return
+	}
+	type clientFlowCount struct {
+		key   string
+		count int
+	}
+	counts := make([]clientFlowCount, 0, len(w.clients))
+	for key, c := range w.clients {
+		if c.Flows != nil && len(c.Flows.flows) > 0 {
+			counts = append(counts, clientFlowCount{key, len(c.Flows.flows)})
+		}
+	}
+	sort.Slice(counts, func(i, j int) bool { return counts[i].count > counts[j].count })
+	// 从流最多的 client 开始压回 per-client 上限, 直到总量回限内。
+	for _, cfc := range counts {
+		if w.totalActiveFlows <= maxGlobalFlows {
+			break
+		}
+		if c, ok := w.clients[cfc.key]; ok && c.Flows != nil {
+			before := len(c.Flows.flows)
+			c.Flows.globalEvict(now, maxFlowsPerClient)
+			w.totalActiveFlows -= before - len(c.Flows.flows)
 		}
 	}
 }
@@ -1168,6 +1256,45 @@ func recentRemoteIPs(m map[string]int64, n int) []string {
 	return out
 }
 
+// buildEvidenceSummary constructs an EvidenceSummary from the ledger.
+// Caller must hold w.mu.
+func (w *Writer) buildEvidenceSummary() EvidenceSummary {
+	if w.evidence == nil {
+		return EvidenceSummary{}
+	}
+	snap := w.evidence.Snapshot()
+	summary := EvidenceSummary{
+		BySource: make(map[string]int),
+	}
+	appCounts := make(map[string]int)
+	for key, entries := range snap {
+		summary.TotalEntries += len(entries)
+		for _, e := range entries {
+			summary.BySource[string(e.Source)]++
+		}
+		// Extract appID from key (format: "mac:appid").
+		if idx := strings.LastIndex(key, ":"); idx >= 0 && idx < len(key)-1 {
+			appCounts[key[idx+1:]] += len(entries)
+		}
+	}
+	type appCountEntry struct {
+		id    string
+		count int
+	}
+	apps := make([]appCountEntry, 0, len(appCounts))
+	for id, count := range appCounts {
+		apps = append(apps, appCountEntry{id, count})
+	}
+	sort.Slice(apps, func(i, j int) bool { return apps[i].count > apps[j].count })
+	if len(apps) > 8 {
+		apps = apps[:8]
+	}
+	for _, ac := range apps {
+		summary.TopApps = append(summary.TopApps, ac.id)
+	}
+	return summary
+}
+
 func portStr(p uint16) string {
 	// Inline base-10 itoa.
 	if p == 0 {
@@ -1268,6 +1395,14 @@ func (w *Writer) Flush() error {
 			}
 			// identified > total (方向重叠/四舍五入) 时 clamp 到 0。
 		}
+	}
+
+	// v5.9.7: 证据账本 —— 低频 Trim(1h, 分叉的 Trim 是死代码, 这里接线)
+	// + 摘要导出。Trim 放锁内: Snapshot 已在 buildEvidenceSummary 里拷贝,
+	// Trim 只动旧条目, 顺序无影响。
+	if w.evidence != nil {
+		w.evidence.Trim(time.Hour)
+		snap.EvidenceSummary = w.buildEvidenceSummary()
 	}
 	w.mu.Unlock()
 

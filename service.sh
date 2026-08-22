@@ -576,6 +576,21 @@ else
     fi
 fi
 
+# ─── T1 tier: clsact BPF watchdog (opt-in, 默认关) ───────────
+# rules.json 顶层 clsact_bpf_enabled=true 且产物齐全时启动守护进程。
+# netd 重挂 qdisc / 接口重建后 10s 内自动恢复 BPF filter(脚本内部自带
+# 开关复查, 关闭即自行退出)。
+if [ -f "$HNC_DIR/bin/hnc_clsact.o" ] && [ -x "$HNC_DIR/bin/hnc_clsact_ctl" ]; then
+    if grep -q '"clsact_bpf_enabled"[[:space:]]*:[[:space:]]*true' "$HNC_DIR/data/rules.json" 2>/dev/null; then
+        CLSWPID=$(_verify_pid "$RUN/clsact_wd.pid" hnc_clsact_watchdog)
+        if [ -z "$CLSWPID" ] || ! kill -0 "$CLSWPID" 2>/dev/null; then
+            nohup sh "$HNC_DIR/bin/hnc_clsact_watchdog.sh" >> "$HNC_DIR/logs/clsact_watchdog.log" 2>&1 &
+            echo $! > "$RUN/clsact_wd.pid"
+            log "clsact watchdog started (PID=$(cat "$RUN/clsact_wd.pid"))"
+        fi
+    fi
+fi
+
 # hotfix10: 启动后延迟清理一次长期未见的离线规则,防止 rules.json 膨胀。
 if [ -x "$HNC_DIR/bin/cleanup_stale_rules.sh" ]; then
     (sleep 60 && sh "$HNC_DIR/bin/cleanup_stale_rules.sh") >> "$HNC_DIR/logs/cleanup_stale.log" 2>&1 &

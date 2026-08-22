@@ -35,7 +35,16 @@ func Detect() ByteSampler {
 		log.Printf("bytestats: eBPF backend active (map_netd_app_uid_stats_map)")
 		return s
 	} else {
-		log.Printf("bytestats: eBPF unavailable (%v), trying dumpsys", err)
+		log.Printf("bytestats: eBPF unavailable (%v), trying tethering", err)
+	}
+
+	// v5.9.7: AOSP tethering stats map backend(带 schema 校验护栏)。
+	// schema 不符的设备会在这里被拒, 自动落 dumpsys。
+	if s, err := NewTetheringStatsSampler(); err == nil {
+		log.Printf("bytestats: tethering backend active (AOSP tethering stats map)")
+		return s
+	} else {
+		log.Printf("bytestats: tethering unavailable (%v), trying dumpsys", err)
 	}
 
 	if s, err := NewDumpsysSampler(); err == nil {

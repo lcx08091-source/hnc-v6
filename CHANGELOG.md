@@ -14,6 +14,34 @@
 
 ---
 
+## [5.9.7] - 2026-08-22
+
+**三大未合并项补全批**(Go + C + eBPF + 前端)。把 v5.9.6 评估时拒收的三块(见该版"未合并"节)按批准方案补全落地;所有改动以本仓库为基线,不覆盖既有修复。
+
+### Added
+
+- **eBPF clsact T1 完整补全(opt-in, 默认关)**。这是本版最大的一块,补上了分叉的三层 no-op 之外的全部缺失:
+  - `src/dpid/bpf/hnc_clsact.bpf.c` + `vmlinux_clsact.h`:修分叉字节序 bug(`skb->protocol` 是网络序,小端 arm64 上 `!= 0x0800` 恒真导致 IPv4 包永不打标,改为 `bpf_htons(ETH_P_IP)`);map value 语义明确为**完整 mark**(`0x800000+mark_id`,与 iptables/tc fw 值域一致);map 改用传统 `bpf_map_def`(SEC("maps"))——配合迷你加载器,不需要 BTF 解析。
+  - **新 C 工具 `daemon/clsact_ctl/`**(~560 行):裸 bpf(2) syscall 迷你 ELF 加载器(读 ELF 节 → BPF_MAP_CREATE → patch `BPF_PSEUDO_MAP_FD` 伪指令 → BPF_PROG_LOAD,带 verifier log 输出)+ pin(`/sys/fs/bpf/hnc/ip_mark_map`)+ rtnetlink 挂载(clsact qdisc 幂等 + pref1 `direct-action` BPF filter,不依赖 ColorOS 魔改的 `/system/bin/tc`)。子命令:`install`/`check`(JSON 三态)/`repair`/`update`/`sync`/`uninstall`。**不链接 libelf/libz**(hotspotd v5.8.7 已验证该路不通)。
+  - `bin/hnc_clsact_watchdog.sh`:从分叉重写——修其 **repair 子命令缺失 bug**(分叉的 httpd 调 `watchdog.sh repair iface`,脚本把 "repair" 当接口名死循环);探测/安装走 clsact_ctl;去掉 toybox 不支持的 `pipefail`;受开关门控,关闭即自行退出。
+  - `bin/hnc_clsact_sync.sh`:从 devices.json/rules.json 提取 ip+mark_id,换算完整 mark 喂 `clsact_ctl sync`。
+  - 挂点:tc_manager `init_tc`/`restore_rules` 尾部、apply_device_rule 规则变更后、cleanup/uninstall 精确卸载(不删 clsact qdisc——AOSP tether filter 共用)、service.sh 启动 watchdog、httpd `clsact_check`/`clsact_repair`/`clsact_bpf_enabled_set`(开关联动:开=拉起 watchdog,关=精确卸 filter+unpin)、WebUI 状态面板(qdisc/BPF/map/watchdog 四态)+ 开关行。
+  - **CI 现编** `.o` 与 `clsact_ctl`(不提交预编译产物,与 PKG-1 教训一致);`rules.json` 默认 `clsact_bpf_enabled: false`。
+  - **风险披露:clsact 未经真机验证**——默认关闭 + 全链路优雅降级 + 面板可查三态兜底;启用路径:设置页开开关 → watchdog 10s 内自装 → 面板验证。
+- **DPI 2.0 证据账本(最小完成版)**。`output/evidence_ledger.go` 回移并修复分叉两缺陷:`maxTotal` 从未强制(现在超限丢最久无新证据的 key)、`Trim` 死代码(Flush 里低频接线 maxAge=1h)。**自定义 log-odds 权重表**(分叉从未设计):tls=2.0 / dns=1.5 / sni=1.0 / flow=0.5,Add 自动计权,ParentEventID 用事件指纹(flowKey/host)。三源接入:RecordDNS/RecordTLS/RecordFlow(均锁内 nil-guard,保住 v5.9.4 的 flowKey 锁外构造与协议前缀)。dpi_state.json 导出 `evidence_summary`(总量/按源/TOP apps)。有意不接线:SetEvidenceLedger 注入、contagion 计数器、三档采样(分叉自己都没接,Writer 无 accessor 的结构缺口记录在注释)。
+- **tethering sampler 带护栏**。`bytestats/sampler_tethering.go` 回移 + `bpfObjGetInfoCall`(cmd 15)新增:构造时校验 map 实际 key_size/value_size(预期 16/32),不符即构造失败自动落 dumpsys;首次 GET_NEXT_KEY EINVAL 视为不可用。真实 AOSP map 若是 ifindex+MAC 布局,该后端会安全自禁用,**杜绝分叉版把系统 uid 当 App 归因的静默污染**。detect 链:ebpf→tethering→dumpsys。
+- **全局流上限 O(1) 版**。`observe` 返回 created 标志、`evictOldest`/`globalEvict` 返回删除数,Writer 维护 `totalActiveFlows` 增量计数;`enforceGlobalFlowLimitLocked` 判断 O(1),超限才遍历驱逐——消除分叉版每包 O(客户端×流) 的热路径回归(与 v5.9.4 锁优化方向一致)。
+
+### Changed
+
+- 无行为变化项(除 opt-in 新功能外)。
+
+### 测试
+
+- 新增 `evidence_ledger_test.go`(per-key 滚动/maxTotal/权重表/Trim)、`flow_test.go`(created 标志/驱逐回报/globalEvict 预算)、`self_attrib_test.go`/`trim_test.go` 语义更新。go vet + test + android/arm64 交叉编译全过。
+
+---
+
 ## [5.9.6] - 2026-08-22
 
 **分叉源码级合并批**(Go + C,需 CI 重编全部二进制)。前提:找回了 5.9.91 分叉的完整源码树(`WorkBuddy/HNC/hnc-src`,与发布包逐字节一致),得以从"二进制 strings 考古"升级为真正的源码级 cherry-pick。经全面 diff 审查,按风险收益合并其高价值改动;**全部以本仓库为基线增量移植**,保住 v5.9.4 的 flowKey 协议前缀/锁外构造/self_attrib 签名去重/jsoncache 等修复(分叉版在这些位置是倒退的)。

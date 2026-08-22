@@ -69,7 +69,7 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
 # 仍活的升级 SIGKILL. SIGKILL 内核直接回收, hotspotd 没机会跑 mdns_worker stop,
 # 但反正我们要 cleanup 全清, 子进程清理路径跑完跑半都无关紧要.
 PIDS_TO_WAIT=""
-for pidfile in sentinel watchdog dpid_guard dpid.monitor dpid.child dpid hotspotd detect api hotspot netmon httpd; do
+for pidfile in sentinel watchdog clsact_wd dpid_guard dpid.monitor dpid.child dpid hotspotd detect api hotspot netmon httpd; do
     PID=$(cat "$RUN/${pidfile}.pid" 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         kill "$PID" 2>/dev/null
@@ -111,7 +111,7 @@ done
 #   watchdog.sh, 或其他模块路径含 watchdog). "bin/watchdog.sh" 把误杀面收窄到实际
 #   含 HNC 脚本路径的进程.
 # rc30.0+ : 加入 hnc_dpid_supervisor 和 hnc_watchdog (Go 二进制) 的清理.
-for proc in bin/hnc_launcher bin/hnc_dpid_supervisor bin/hnc_dpid_guard.sh bin/hnc_watchdog bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
+for proc in bin/hnc_launcher bin/hnc_dpid_supervisor bin/hnc_dpid_guard.sh bin/hnc_watchdog bin/hnc_clsact_watchdog.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
     pkill -f "$proc" 2>/dev/null && log "pkill $proc"
 done
 # watchdogfix-v6.1: also stop stale service.sh sentinel shells; otherwise
@@ -132,6 +132,11 @@ if [ -f "$HNC_DIR/run/tc_root_owned_$IFACE" ]; then
     rm -f "$HNC_DIR/run/tc_root_owned_$IFACE" 2>/dev/null
 else
     log "skip root qdisc del on $IFACE (no HNC ownership marker)"
+fi
+# v5.9.7: clsact BPF (T1 tier) —— 精确卸自己的 pref1 filter + unpin map。
+# 故意不删 clsact qdisc: AOSP tether offload filter 也挂在它上面。
+if [ -x "$HNC_DIR/bin/hnc_clsact_ctl" ]; then
+    "$HNC_DIR/bin/hnc_clsact_ctl" uninstall "$IFACE" >/dev/null 2>&1 && log "clsact BPF filter/map removed"
 fi
 tc qdisc del dev "$IFACE" ingress 2>/dev/null
 tc qdisc del dev ifb0 root 2>/dev/null
