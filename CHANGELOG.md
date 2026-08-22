@@ -14,6 +14,36 @@
 
 ---
 
+## [5.9.4] - 2026-08-22
+
+多 Agent 协同代码审查(安全 / 性能与网络逻辑 / 可维护性 / 前端体验四个并行审查,只保留高置信度问题)的修复批。共 13 项,全部为 Go(hnc_httpd + dpid)与纯前端改动,不涉 C;二次审查(两个独立审查 Agent 逐项核对)确认修复生效、无新回归。
+
+### Fixed
+
+- **WebUI 内联 onclick 拼接外部可控值(XSS)**(`webroot/index.html`)。三处:① 候选 app 审批行的 `appsCandPromote('...')` / `appsCandReject('...')` 把 apex(热点客户端 SNI 观测值——**陌生设备连入热点即可控制该字段**)拼进内联事件属性的 JS 字符串;② export 打包结果与历史列表的 `appsDownloadExport('name','url')`(name 含用户可控 notes)。`appsEsc` 把 `'` 转成 `&#39;` 在 innerHTML 上下文有效,但事件属性里 HTML 实体会被先解码回 `'` 再交给 JS 引擎,转义形同虚设——正是 6301 行注释自己警告过的威胁模型在 onclick 上下文的漏防。修复:外部值一律放 `data-*` 属性(属性上下文转义有效),onclick 只传 `this`,与 alert-row / fw-excl-list 的既有安全模式对齐;目标函数改从 `getAttribute` 取值。另补 6811 行错误消息 `e.message` 漏转义。
+- **鉴权敏感读白名单漂移**(`daemon/hnc_httpd/middleware.go`)。`isSensitiveReadPath` 漏登 `/api/self`、`/api/self/ifaces`、`/api/self/attrib`(uid 归因的本机 App 流量元数据)、`/api/exports` 与 `/api/exports/<name>`(导出 zip 含 dpi_state/SNI 全景)、`/api/sla`、`/api/events`——在 `local_admin.secret` 缺失的升级窗口内,这些端点会被 loopback 分级 fallback 匿名放行,本机低信任 App 无 root 即可拉取全部流量识别数据。这是该白名单历史上第四次同类漂移(注释自述前三次),已按 server.go 路由注册逐条补齐并加回归测试锁定。
+- **HTTP→HTTPS 重定向的开放重定向**(`daemon/hnc_httpd/main.go`)。重定向 target 直接由 `r.Host` 构造,发 `Host: evil.com` 的请求会拿到 `https://evil.com:8443/...` 的 301(钓鱼跳转)。改为优先用连接实际到达的本地地址(`http.LocalAddrContextKey`),Host 仅当为合法 IP 时采用,否则回退 bind 地址。
+- **flow key 不含协议,TCP:443 与 QUIC UDP:443 混为一条流**(`src/dpid/output/state.go`)。现代 App 同远端 IP 双协议并存是常态,混流会污染 packets/bytes/pps EMA(voice_call 检测输入)与后台流占比。flowKey 加 `T|`/`U|` 协议前缀;已核实 flowTracker 全部逻辑只把 key 当 map 键、无解析,改格式零影响。
+- **dpi_history 超 10MB 整日数据被静默丢弃**(`daemon/hnc_httpd/api_dpi_history.go`)。注释写"Truncate read at 10 MB",实现却是 `return nil`——单日文件超限时该日全部数据丢弃,7 天趋势图静默缺天。改为 `io.LimitReader` 真截断读,与注释语义一致。
+- **audit.log 写失败被完全吞掉**(`daemon/hnc_httpd/audit.go`)。安全审计关键路径的 `WriteString` 错误既不返回也不打日志,磁盘满时审计静默丢失。改为 `log.Printf` 告警。
+- **x/crypto 依赖近两年未升级**(`daemon/hnc_httpd/go.mod`)。v0.31.0(2024-12)→ v0.55.0,go 指令 1.25.0,CI `go-version` 与 README/build.sh 版本引用同步。
+
+### Changed
+
+- **/api/live 轮询热路径加 JSON 缓存**(`daemon/hnc_httpd/jsoncache.go` 新文件)。WebUI 状态条 1-2s 轮询一次的端点此前每请求同步读+解析 devices/rules/device_names/dpi_state/capabilities 多个 JSON(开 self-capture 后 dpi_state 可达上百 KB)。新增 mtime+size 失效的缓存(写入方均 tmp+rename 原子发布、最快 5s 一刷,命中率天然高),读后二次 stat 防竞态、错误不缓存;`currentHotspotIface` 改方法后与 `buildDevicesPayload` 共享同一份缓存,顺带消除 rules.json 双读。缓存值跨请求共享,已核实全部 6 个调用点只读不写。
+- **RecordFlow 热路径锁范围收缩**(`src/dpid/output/state.go`)。flowKey 拼接与 `remoteIP.String()` 移到 `w.mu` 之外(capture 回调侧本就有 `net.IP`),`applyRuleHitLocked` 的 IP→app 记录改用预算好的字符串——消除每包级事件在全局锁内的多次分配,降低 AF_PACKET kernel drops。
+- **self_attrib 削写放大**(`src/dpid/output/self_attrib.go`)。旧实现每 5s 把 `/proc/net` 全量连接整行追加 JSONL,空闲设备一天 ~17k 行全量快照。新增连接集签名(proto|local|remote|uid 排序指纹),与上次写入相同则跳过追加;聚合路径(ActiveConns/TotalConns/Pkg 回填)不受影响照常每 tick 执行。
+- **WebUI 可访问性与文案**:移除 `user-scalable=no`(WCAG 1.4.4,允许双指缩放);nDPI 采样倒计时的三处残留英文改中文。
+
+### Internals
+
+- 删除自制 `intToStr` / `jsonInt`(均等价 `strconv.Itoa`)与 `var _ = io.Discard` / `var _ = filepath.Join` 占位 import。
+- `api_v5.go` 8 处手写响应头统一走 `writeJSON`(含两个错误分支的 Content-Type 不一致)。
+- 五个同构布尔开关 action 收敛为 `actionSetTopBool` + `parseEnabledParam`;函数内 `regexp.MustCompile` 提升为包级(`ifaceNameRE`),`actionPairRevoke` 复用 `tokenRevokeIDRe`(校验等强或更强)。
+- 新增 4 个回归测试:`middleware_test.go`(敏感端点清单锁定+前缀反例)、`jsoncache_test.go`(命中/失效/坏 JSON 不缓存)、`api_dpi_history_test.go`(截断行为)、`self_attrib_test.go`(签名顺序无关性)。
+
+---
+
 ## [5.9.3] - 2026-07-27
 
 用户提供的真机缺陷清单(BUGSv5,15 条)的第一批止血。分诊结论见 `BUGSV5-TRIAGE.md`(still_open 10 / partial 5 / fixed_in_repo 0,6 条推翻或改写了原归因)。
