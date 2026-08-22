@@ -694,10 +694,11 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 	if c.Flows == nil {
 		c.Flows = newFlowTracker()
 	}
-	pps, flowCreated := c.Flows.observe(flowKey, now, bytes)
+	pps, flowCreated, flowEvicted := c.Flows.observe(flowKey, now, bytes)
 	if flowCreated {
 		w.totalActiveFlows++
 	}
+	w.totalActiveFlows -= flowEvicted
 	// 全局流上限: O(1) 计数判断, 超限才做驱逐(平时零遍历)。
 	w.enforceGlobalFlowLimitLocked(now)
 

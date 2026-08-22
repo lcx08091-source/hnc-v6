@@ -63,16 +63,19 @@ func newFlowTracker() *flowTracker {
 // observe records a single packet on the named flow. Returns the latest
 // per-second packet rate estimate for this flow (used by sub-category
 // detectors like wechat voice_call), plus created=true when this call
-// materialized a NEW flow entry (v5.9.7: Writer 用它做 O(1) 全局流计数)。
-func (ft *flowTracker) observe(key string, nowUnix int64, bytes uint64) (float64, bool) {
+// materialized a NEW flow entry, plus evicted=本次调用前为腾位而删除的
+// 流条数(v5.9.7: Writer 用后两者做 O(1) 全局流计数; evicted 必须在
+// map 满时上报, 否则计数器单向漂移)。
+func (ft *flowTracker) observe(key string, nowUnix int64, bytes uint64) (float64, bool, int) {
 	if ft.flows == nil {
 		ft.flows = make(map[string]*flowEntry)
 	}
 	f := ft.flows[key]
 	created := false
+	evicted := 0
 	if f == nil {
 		if len(ft.flows) >= maxFlowsPerClient {
-			ft.evictOldest(nowUnix)
+			evicted = ft.evictOldest(nowUnix)
 		}
 		f = &flowEntry{
 			key:             key,
@@ -118,7 +121,7 @@ func (ft *flowTracker) observe(key string, nowUnix int64, bytes uint64) (float64
 	}
 	f.buckets[f.head].packets++
 	f.buckets[f.head].bytes += bytes
-	return f.emaPPS, created
+	return f.emaPPS, created, evicted
 }
 
 // bucketStart truncates a unix timestamp to the start of its 30s bucket.

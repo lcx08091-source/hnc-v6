@@ -34,15 +34,26 @@ emit_entries() {
             ip=$("$HNC_DIR/bin/hnc_json" get-device "$DEVICES" "$mac" ip 2>/dev/null) || ip=""
             mid=$("$HNC_DIR/bin/hnc_json" get-device "$RULES" "$mac" mark_id 2>/dev/null) || mid=""
         fi
-        # hnc_json 不可用时 grep 兜底(apply_device_rule.sh get_ip 同款形态)
+        # hnc_json 不可用时 awk 兜底(与 apply_device_rule.sh get_ip 同款形态:
+        # 先定位 mac, 再在尾部找 "ip":"x.x.x.x", 数字段提取)
         if [ -z "$ip" ]; then
-            ip=$(awk -v m="\"$mac\"" '
-                $0 ~ m { inblk=1 }
-                inblk && /"ip"[[:space:]]*:/ {
-                    if (match($0, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
-                        s=substr($0, RSTART, RLENGTH); gsub(/.*:.*"|^.*/, "", s); gsub(/[^0-9.]/, "", s); print s; exit
+            ip=$(awk -v m="$mac" '
+            BEGIN { found=0 }
+            {
+                idx = index($0, "\"" m "\"")
+                if (idx > 0) {
+                    tail = substr($0, idx)
+                    if (match(tail, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
+                        seg = substr(tail, RSTART, RLENGTH)
+                        if (match(seg, /[0-9.]+/)) {
+                            print substr(seg, RSTART, RLENGTH)
+                            found=1
+                            exit
+                        }
                     }
                 }
+            }
+            END { if (!found) print "" }
             ' "$DEVICES")
         fi
         if [ -z "$mid" ]; then

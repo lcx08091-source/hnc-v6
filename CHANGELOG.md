@@ -14,6 +14,25 @@
 
 ---
 
+## [5.9.8] - 2026-08-22
+
+**v5.9.7 前后端接线复查批**。对 v5.9.7 合入的前后端接线做定向审查(前端契约、Go 计数、shell 数据流),修掉两个真 bug;前端契约检查全部对齐。
+
+### Fixed
+
+- **全局流计数单向漂移**(`src/dpid/output/flow.go` + `state.go`)。v5.9.7 的 O(1) 流计数只加不减:per-client 流表(64 条)满时,`observe` 内部驱逐旧流以腾位,但被删的流没有回扣 `Writer.totalActiveFlows` —— 忙设备上计数器持续虚高,提前触发全局流驱逐(`enforceGlobalFlowLimitLocked` 误判),加剧流表 churn 并影响后台流占比/持久化统计。`observe` 现在回报 `evicted` 条数,`RecordFlow` 精确回扣;`flow_test.go` 加回归断言。
+- **clsact sync 的 awk 兜底提取 bug**(`bin/hnc_clsact_sync.sh`)。hnc_json 缺失时的兜底 awk 里 `gsub(/.*:.*"|^.*/, "", s)` 贪婪匹配会把整个 `"ip": "x.x.x.x"` 段删空,导致一台设备都同步不进 map。改为 `apply_device_rule.sh` `get_ip` 同款"定位 mac → 尾部找 `"ip":"..."` → 数字段提取"三段式,并做了示例数据冒烟验证(正确输出 192.168.43.88)。
+
+### 审查确认无问题(前端契约)
+
+- `checkClsact()` 与 `apiAction` 契约一致(成功返回解析后的 actionResp,失败 throw;`res.detail` 是 JSON 字符串,`repairRes.ok` 在 resolve 时恒 true);后端 `clsactCheckResult` 字段(ok/clsact/bpf_filter/map/watchdog/iface)与前端解析字段一一对应。
+- `setTog($('#clsact-toggle'), !!cfg.clsact_bpf_enabled)` 与 `setTog(el, on, also)` 签名兼容(also 可选);`/api/config` 的 `clsact_bpf_enabled` 字段已赋值;设置页全局点击委托 `e.target.closest('.toggle')` 可达新开关;开关 aria-checked 与 `.on` class 切换逻辑对称。
+- `clsact_bpf_enabled_set` 的前端 `enabled: 'true'/'false'` 字符串与后端 `p["enabled"]` 解析一致;三个新 action 均已注册 dispatch。
+- sync.sh 在 `hnc_state=INACTIVE`(空 iface)时 `clsact_ctl check ""` 只报 map 态、不误判——map pin 存在才同步,语义正确。
+- evidence 锁序为单向 w.mu→el.mu,无反向路径;`bpfObjGetInfoCall` 的 attr 布局(u32,u32,u64 @0,4,8)与 kernel ABI 一致。
+
+---
+
 ## [5.9.7] - 2026-08-22
 
 **三大未合并项补全批**(Go + C + eBPF + 前端)。把 v5.9.6 评估时拒收的三块(见该版"未合并"节)按批准方案补全落地;所有改动以本仓库为基线,不覆盖既有修复。
