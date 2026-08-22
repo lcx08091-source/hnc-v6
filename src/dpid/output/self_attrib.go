@@ -56,6 +56,10 @@ const (
 	// forever (trimOldFiles only covered the stats.* prefix).
 	SelfAttribRetainDays = 7
 
+	// SelfAttribMaxDailyBytes caps each daily JSONL file at 32MB (回移自
+	// 5.9.91 分叉, BUG-002: 现场曾膨胀到 1.8GB)。与连接集签名去重叠加做双保险。
+	SelfAttribMaxDailyBytes = 32 << 20 // 32MB per day cap
+
 	// SelfPkgCacheTTL is how often pm list packages -U is re-run.
 	SelfPkgCacheTTL = 5 * time.Minute
 
@@ -640,7 +644,7 @@ func (a *SelfAttribAggregator) RunSampler(ctx context.Context, isEnabled func() 
 		case <-t.C:
 			if a.jsonlDir != "" {
 				if day := time.Now().Format("20060102"); day != lastTrimDay {
-					trimDailyFiles(a.jsonlDir, "self_attrib.", ".jsonl", SelfAttribRetainDays, time.Now(), false)
+					trimDailyFiles(a.jsonlDir, "self_attrib.", SelfAttribRetainDays)
 					lastTrimDay = day
 				}
 			}
@@ -717,7 +721,11 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 	if a.jsonlDir != "" && sig != a.lastJSONLSig {
 		dayPath := filepath.Join(a.jsonlDir,
 			fmt.Sprintf("self_attrib.%s.jsonl", now.Format("20060102")))
-		if f, err := os.OpenFile(dayPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		// BUG-002 (回移自 5.9.91 分叉): 单日 32MB 硬封顶 —— 签名去重治"没必要
+		// 写", 这里治"写太多", 双保险。防busy设备单日膨胀到 GB 级。
+		if info, err := os.Stat(dayPath); err == nil && info.Size() >= SelfAttribMaxDailyBytes {
+			// daily cap reached, skip writing
+		} else if f, err := os.OpenFile(dayPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
 			obs := SelfAttribObservation{T: now.Unix(), Conns: rows}
 			_ = json.NewEncoder(f).Encode(obs)
 			_ = f.Close()

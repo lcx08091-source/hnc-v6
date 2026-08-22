@@ -42,6 +42,7 @@ type Stats struct {
 	FlowEvents     uint64 `json:"flow_events"`
 	IgnoredPackets uint64 `json:"ignored_packets"`
 	ParseErrors    uint64 `json:"parse_errors"`
+	IPAppMapSize   int    `json:"ip_app_map_size,omitempty"` // BUG-011
 }
 
 type Device struct {
@@ -295,6 +296,28 @@ type State struct {
 	// via omitempty on the pointer). When non-nil, contains live state of
 	// per-iface captures + per-uid app aggregation. See SelfState.
 	Self *SelfState `json:"self,omitempty"`
+
+	// v5.9.6 (回移自 5.9.91 分叉): 抓包接口重绑次数 (iface 改名/ifindex 变化/
+	// 零包检测触发)。
+	RebindCount int `json:"rebind_count"`
+
+	// v5.9.6 BUG-003: 抓包健康自报。"ok" / "degraded"; StallSeconds 是距上次
+	// 收到包的秒数, 有新包即清零。由 main.go 的 5s 看门狗 goroutine 维护,
+	// WebUI/上层可据此判断 DPI 是否真的在抓包 (mode=ok 只代表 socket 开成功)。
+	Health       string `json:"health,omitempty"`
+	StallSeconds int64  `json:"stall_seconds,omitempty"`
+
+	// v5.9.6: 未识别字节占比 —— 规则覆盖率指标。Flush 时从全局字节账本
+	// 计算: 无 app 归因的字节 / 总字节。越高说明规则集覆盖越差。
+	UnidentifiedRatio UnidentifiedRatio `json:"unidentified_ratio,omitempty"`
+}
+
+// UnidentifiedRatio measures what fraction of observed traffic bytes
+// lack app attribution. A high ratio means the rule set has low coverage.
+type UnidentifiedRatio struct {
+	TotalBytes      uint64  `json:"total_bytes"`
+	IdentifiedBytes uint64  `json:"identified_bytes"`
+	Ratio           float64 `json:"ratio"` // 0.0-1.0, higher = more unidentified
 }
 
 // ─── per-client aggregation ────────────────────────────────────────────
@@ -399,7 +422,7 @@ func NewWriter(path, version string) *Writer {
 		state: State{
 			SchemaVersion:  SchemaVersion,
 			Version:        version,
-			IPv6Capture:    true, // rc29: BPF now passes both IPv4 and IPv6
+			IPv6Capture:    false, // BUG-013: 不再硬编码, 由 SetMode 从探测结果传入
 			Devices:        map[string]Device{},
 			L3Enabled:      true,
 			L3RuleVersion:  currentL3RuleVersion(),
@@ -417,7 +440,7 @@ func NewWriter(path, version string) *Writer {
 	}
 }
 
-func (w *Writer) SetMode(mode, reason, iface string, tlsReassembly, offloadHint bool) {
+func (w *Writer) SetMode(mode, reason, iface string, tlsReassembly, offloadHint, ipv6Capture bool) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.state.Mode = mode
@@ -425,6 +448,7 @@ func (w *Writer) SetMode(mode, reason, iface string, tlsReassembly, offloadHint 
 	w.state.Interface = iface
 	w.state.TLSReassembly = tlsReassembly
 	w.state.OffloadHint = offloadHint
+	w.state.IPv6Capture = ipv6Capture // BUG-013: 从探测结果透传,不再硬编码
 }
 
 func (w *Writer) UpdateStats(s Stats) {
@@ -442,6 +466,30 @@ func (w *Writer) UpdateConntrack(available, readable bool, path string, flows in
 	w.state.ConntrackReadable = readable
 	w.state.ConntrackPath = path
 	w.state.ConntrackFlows = flows
+}
+
+// SetRebindCount 更新重绑计数。由 main.go 的 rebind-check goroutine 调用。
+func (w *Writer) SetRebindCount(n int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.state.RebindCount = n
+}
+
+// SetHealth 更新抓包健康自报字段 (BUG-003)。
+// 由 main.go 的 5s 看门狗 goroutine 调用。
+func (w *Writer) SetHealth(health string, stallSeconds int64) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.state.Health = health
+	w.state.StallSeconds = stallSeconds
+}
+
+// IPAppMapSize 返回 IP→app 反查表当前条目数。
+func (w *Writer) IPAppMapSize() int {
+	if w.IPAppMap == nil {
+		return 0
+	}
+	return w.IPAppMap.Size()
 }
 
 // SetSelf publishes the v5.5 self-capture state block. Pass nil to clear
@@ -520,6 +568,14 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		bumpName(c.SNI, host, now, maxNamesPerClient)
 		bumpName(w.globalSNI, host, now, maxGlobalNames)
 		w.bumpLabelLocked(c, host, now, 0)
+		// BUG-011 (回移自 5.9.91 分叉): TLS 路径也写 IP→app 反查表 ——
+		// SNI 命中的远端 IP 不必等下一次 flow 命中才进表, 应用级限速
+		// (apply_app_limits.sh 读 ip_app_map) 不再因只靠 flow 路径而漏配。
+		if remoteIP != "" && w.IPAppMap != nil {
+			if r, ok := classifyHost(host); ok && r.ID != "" {
+				w.IPAppMap.Record(remoteIP, r.ID, r.Name, now, "tls")
+			}
+		}
 	}
 	if ja4 != "" {
 		w.bumpJA4Locked(c, ja4, now)
@@ -647,7 +703,7 @@ func (w *Writer) applyRuleHitLocked(c *clientAgg, r l3Rule, remoteEvidence strin
 	// remote IPs (not the client itself); we use remoteIP from EventFlow which
 	// is already the non-client side.
 	if remoteIP != nil && w.IPAppMap != nil && r.ID != "" {
-		w.IPAppMap.Record(remoteIPStr, r.ID, r.Name, now)
+		w.IPAppMap.Record(remoteIPStr, r.ID, r.Name, now, "flow")
 	}
 }
 
@@ -1193,6 +1249,26 @@ func (w *Writer) Flush() error {
 	snap.NDPIEntries = ndpiEntryCount()
 	snap.TotalTxBytes = w.totalTx
 	snap.TotalRxBytes = w.totalRx
+
+	// v5.9.6: 未识别字节占比 (回移自 5.9.91 分叉, 独立于其未完成的 M1 体系):
+	// 总字节 = tx+rx, 已识别 = globalApps 归因字节。占比高 = 规则覆盖差。
+	{
+		totalBytes := w.totalTx + w.totalRx
+		var identifiedBytes uint64
+		for _, st := range w.globalApps {
+			identifiedBytes += st.Bytes
+		}
+		if totalBytes > 0 {
+			snap.UnidentifiedRatio = UnidentifiedRatio{
+				TotalBytes:      totalBytes,
+				IdentifiedBytes: identifiedBytes,
+			}
+			if identifiedBytes <= totalBytes {
+				snap.UnidentifiedRatio.Ratio = 1.0 - float64(identifiedBytes)/float64(totalBytes)
+			}
+			// identified > total (方向重叠/四舍五入) 时 clamp 到 0。
+		}
+	}
 	w.mu.Unlock()
 
 	b, err := json.MarshalIndent(snap, "", "  ")

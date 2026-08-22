@@ -46,13 +46,30 @@ static char *join3(const char *a, size_t an, const char *m, const char *b) {
     size_t mn = strlen(m), bn = strlen(b); char *o = malloc(an + mn + bn + 1); if (!o) return NULL;
     memcpy(o, a, an); memcpy(o + an, m, mn); memcpy(o + an + mn, b, bn); o[an + mn + bn] = 0; return o;
 }
+/* CR-1 fix: find_key walks char-by-char, skipping string values to avoid
+   matching a key pattern that appears inside a JSON string value. */
 static char *find_key(const char *s, const char *key, char **val, char **end) {
-    char *k = escstr(key); if (!k) return NULL; size_t kn = strlen(k); char *p = s ? strstr((char *)s, k) : NULL; free(k); if (!p) return NULL;
-    char *c = strchr(p + kn, ':'); if (!c) return NULL; c++; while (isspace((unsigned char)*c)) c++;
-    int ins = 0, esc = 0, dep = 0; char *q = c; for (; *q; q++) { unsigned char ch = (unsigned char)*q; if (ins) { if (esc) { esc = 0; continue; } if (ch == '\\') { esc = 1; continue; } if (ch == '"') ins = 0; continue; } else { if (ch == '"') ins = 1; else if (ch == '{' || ch == '[') dep++; else if ((ch == ',' || ch == '}') && dep == 0) break; else if (ch == '}' || ch == ']') dep--; } }
-    if (val) *val = c;
-    if (end) *end = q;
-    return p;
+    char *k = escstr(key); if (!k) return NULL; size_t kn = strlen(k);
+    if (!s) { free(k); return NULL; }
+    const char *p = s; int in_str = 0, esc = 0;
+    for (; *p; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (in_str) { if (esc) { esc = 0; continue; } if (c == '\\') { esc = 1; continue; } if (c == '"') in_str = 0; continue; }
+        if (!strncmp(p, k, kn)) {
+            char *c2 = (char *)p + kn; while (isspace((unsigned char)*c2)) c2++;
+            if (*c2 == ':') {
+                c2++; while (isspace((unsigned char)*c2)) c2++;
+                int ins2 = 0, esc2 = 0, dep2 = 0; char *q = c2;
+                for (; *q; q++) { unsigned char ch = (unsigned char)*q; if (ins2) { if (esc2) { esc2 = 0; continue; } if (ch == '\\') { esc2 = 1; continue; } if (ch == '"') ins2 = 0; continue; } else { if (ch == '"') ins2 = 1; else if (ch == '{' || ch == '[') dep2++; else if ((ch == ',' || ch == '}') && dep2 == 0) break; else if (ch == '}' || ch == ']') dep2--; } }
+                free(k);
+                if (val) *val = c2;
+                if (end) *end = q;
+                return (char *)p;
+            }
+        }
+        if (c == '"') { in_str = 1; continue; }
+    }
+    free(k); return NULL;
 }
 static int set_object_key(const char *file, const char *key, const char *v, const char *typ) {
     size_t n = 0; char *s = read_file(file, &n); if (!s) s = strdup("{}"); if (!s) return 1; if (valid_json(s)) { free(s); return 2; }
@@ -72,24 +89,73 @@ static int del_object_key(const char *file, const char *key) {
 static int array_add(const char *file, const char *key, const char *v) {
     size_t n = 0; char *s = read_file(file, &n); if (!s) s = strdup("{}"); if (!s) return 1; if (valid_json(s)) { free(s); return 2; }
     char *lit = escstr(v), *val = NULL, *end = NULL, *p = find_key(s, key, &val, &end), *out = NULL; if (!lit) { free(s); return 1; }
-    if (!p) { char *arr = malloc(strlen(lit) + 3); sprintf(arr, "[%s]", lit); int rc = set_object_key(file, key, arr, "json"); free(arr); free(lit); free(s); return rc; }
-    if (strstr(val, lit)) { free(lit); free(s); return 0; }
+    if (!p) { char *arr = malloc(strlen(lit) + 3); snprintf(arr, strlen(lit) + 3, "[%s]", lit); int rc = set_object_key(file, key, arr, "json"); free(arr); free(lit); free(s); return rc; }
+    /* exact-match scan: walk quoted strings between [ and ] */
+    { char *scan = val + 1; size_t lit_len = strlen(lit);
+      while (scan < end) { while (scan < end && *scan != '"') scan++; if (scan >= end) break;
+        char *es = scan + 1; while (es < end && *es != '"') { if (*es == '\\' && es + 1 < end) es++; es++; }
+        if (es < end && (size_t)(es - scan + 1) == lit_len && !strncmp(scan, lit, lit_len)) { free(lit); free(s); return 0; }
+        scan = es + 1; } }
     char *rb = strrchr(val, ']'); if (!rb || rb > end) { free(lit); free(s); return 2; }
-    char *q = val + 1; while (isspace((unsigned char)*q)) q++; int empty = (*q == ']'); char *m = malloc(strlen(lit) + 2); sprintf(m, "%s%s", empty ? "" : ",", lit); out = join3(s, (size_t)(rb - s), m, rb); free(m); free(lit); free(s); if (!out) return 1; int rc = valid_json(out) ? 1 : write_file(file, out); free(out); return rc;
+    char *q = val + 1; while (isspace((unsigned char)*q)) q++; int empty = (*q == ']'); char *m = malloc(strlen(lit) + 2); snprintf(m, strlen(lit) + 2, "%s%s", empty ? "" : ",", lit); out = join3(s, (size_t)(rb - s), m, rb); free(m); free(lit); free(s); if (!out) return 1; int rc = valid_json(out) ? 1 : write_file(file, out); free(out); return rc;
 }
 static int array_del(const char *file, const char *key, const char *v) {
     size_t n = 0; char *s = read_file(file, &n); if (!s) return 0; char *lit = escstr(v), *val = NULL, *end = NULL, *p = find_key(s, key, &val, &end); if (!lit) { free(s); return 1; } if (!p) { free(s); free(lit); return 0; }
-    char *x = strstr(val, lit); if (!x || x > end) { free(s); free(lit); return 0; } char *a = x, *b = x + strlen(lit); while (isspace((unsigned char)*b)) b++; if (*b == ',') b++; else { while (a > val && isspace((unsigned char)a[-1])) a--; if (a > val && a[-1] == ',') a--; }
+    /* exact-match scan to find the element to remove */
+    char *x = NULL;
+    { char *scan = val + 1; size_t lit_len = strlen(lit);
+      while (scan < end) { while (scan < end && *scan != '"') scan++; if (scan >= end) break;
+        char *es = scan + 1; while (es < end && *es != '"') { if (*es == '\\' && es + 1 < end) es++; es++; }
+        if (es < end && (size_t)(es - scan + 1) == lit_len && !strncmp(scan, lit, lit_len)) { x = scan; break; }
+        scan = es + 1; } }
+    if (!x || x > end) { free(s); free(lit); return 0; } char *a = x, *b = x + strlen(lit); while (isspace((unsigned char)*b)) b++; if (*b == ',') b++; else { while (a > val && isspace((unsigned char)a[-1])) a--; if (a > val && a[-1] == ',') a--; }
     char *out = join3(s, (size_t)(a - s), "", b); free(s); free(lit); if (!out) return 1; int rc = valid_json(out) ? 1 : write_file(file, out); free(out); return rc;
 }
 static int token_revoke(const char *file, const char *tid) {
-    size_t n = 0; char *s = read_file(file, &n); if (!s) return 0; char *tk = escstr(tid); if (!tk) { free(s); return 1; } char *p = strstr(s, tk); free(tk); if (!p) { free(s); return 0; }
-    char *r = strstr(p, "\"revoked\""); if (!r) { free(s); return 0; } char *f = strstr(r, "false"); if (!f) { free(s); return 0; } char *out = join3(s, (size_t)(f - s), "true", f + 5); free(s); if (!out) return 1; int rc = valid_json(out) ? 1 : write_file(file, out); free(out); chmod(file, 0600); return rc;
-}
-static int token_revoke_all(const char *file) {
-    size_t n = 0; char *s = read_file(file, &n); if (!s) return 0; size_t cap = n + 1, k = 0; char *o = malloc(cap + 16); if (!o) { free(s); return 1; }
-    for (char *p = s; *p;) { if (!strncmp(p, "false", 5)) { memcpy(o + k, "true", 4); k += 4; p += 5; } else o[k++] = *p++; if (k + 8 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; } }
-    o[k] = 0; free(s); int rc = valid_json(o) ? 1 : write_file(file, o); free(o); chmod(file, 0600); return rc;
+    size_t n = 0; char *s = read_file(file, &n); if (!s) return 0;
+    if (!tid) { /* revoke all: walk tokens and set revoked=true where false */
+        size_t cap = n + 1, k = 0; char *o = malloc(cap + 16); if (!o) { free(s); return 1; }
+        const char *rev_key = "\"revoked\""; size_t rk_len = 9;
+        int in_str = 0, esc = 0;
+        for (char *p = s; *p;) {
+            unsigned char c = (unsigned char)*p;
+            if (in_str) {
+                if (esc) { esc = 0; if (k + 2 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; } o[k++] = *p++; continue; }
+                if (c == '\\') { esc = 1; if (k + 2 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; } o[k++] = *p++; continue; }
+                if (c == '"') in_str = 0;
+                if (k + 1 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; }
+                o[k++] = *p++; continue;
+            }
+            if (!strncmp(p, rev_key, rk_len)) {
+                while (k + 1 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; }
+                memcpy(o + k, rev_key, rk_len); k += rk_len; p += rk_len;
+                char *c2 = (char *)p; while (*c2 && isspace((unsigned char)*c2)) { if (k + 1 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; } o[k++] = *c2++; }
+                if (*c2 == ':') { if (k + 1 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; } o[k++] = *c2++; p = c2;
+                    while (*p && isspace((unsigned char)*p)) { if (k + 1 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; } o[k++] = *p++; }
+                    if (!strncmp(p, "false", 5)) { if (k + 4 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; } memcpy(o + k, "true", 4); k += 4; p += 5; }
+                }
+                continue;
+            }
+            if (c == '"') { in_str = 1; if (k + 1 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; } o[k++] = *p++; continue; }
+            if (k + 1 > cap) { cap *= 2; char *np = realloc(o, cap); if (!np) { free(o); free(s); return 1; } o = np; }
+            o[k++] = *p++;
+        }
+        o[k] = 0; free(s);
+        int rc = valid_json(o) ? 1 : write_file(file, o); free(o); chmod(file, 0600); return rc;
+    }
+    char *tk = escstr(tid); if (!tk) { free(s); return 1; }
+    char *tval = NULL, *tend = NULL;
+    char *p = find_key(s, tk, &tval, &tend); free(tk);
+    if (!p || !tval) { free(s); return 0; }
+    char saved = *tend; *tend = 0;
+    char *val = NULL, *end = NULL;
+    find_key(tval, "revoked", &val, &end);
+    *tend = saved;
+    if (!val || !end || !strncmp(val, "true", 4)) { free(s); return 0; }
+    char *out = join3(s, (size_t)(val - s), "true", end);
+    free(s); if (!out) return 1;
+    int rc = valid_json(out) ? 1 : write_file(file, out);
+    free(out); chmod(file, 0600); return rc;
 }
 static int get_top(const char *file, const char *key) { size_t n = 0; char *s = read_file(file, &n); if (!s) return 2; char *val = NULL, *end = NULL; if (!find_key(s, key, &val, &end)) { free(s); return 3; } fwrite(val, 1, (size_t)(end - val), stdout); putchar('\n'); free(s); return 0; }
 int main(int argc, char **argv) {
@@ -100,7 +166,6 @@ int main(int argc, char **argv) {
     if (argc == 4 && (!strcmp(argv[1], "del-object-key") || !strcmp(argv[1], "object-del"))) return del_object_key(argv[2], argv[3]);
     if (argc == 5 && (!strcmp(argv[1], "add-array-unique") || !strcmp(argv[1], "array-add-unique"))) return array_add(argv[2], argv[3], argv[4]);
     if (argc == 5 && (!strcmp(argv[1], "del-array-value") || !strcmp(argv[1], "array-del-value"))) return array_del(argv[2], argv[3], argv[4]);
-    if (argc == 4 && !strcmp(argv[1], "token-revoke")) return token_revoke(argv[2], argv[3]);
-    if (argc == 3 && !strcmp(argv[1], "token-revoke-all")) return token_revoke_all(argv[2]);
+    if (argc >= 3 && !strcmp(argv[1], "token-revoke")) return token_revoke(argv[2], argc >= 4 ? argv[3] : NULL);
     return 2;
 }

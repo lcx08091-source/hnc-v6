@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -131,7 +132,7 @@ func main() {
 	if *writeBlind != "" {
 		statePath := filepath.Join(cfg.RunDir, stateFileName)
 		sw := output.NewWriter(statePath, version)
-		sw.SetMode(string(ModeBlind), *writeBlind, *blindIface, false, false)
+		sw.SetMode(string(ModeBlind), *writeBlind, *blindIface, false, false, false)
 		if err := sw.Flush(); err != nil {
 			fmt.Fprintf(os.Stderr, "write-blind-state: %v\n", err)
 			os.Exit(1)
@@ -157,7 +158,7 @@ func main() {
 
 	if reason := checkCrashLoop(cfg.RunDir); reason != "" {
 		log.Printf("ERROR: %s", reason)
-		sw.SetMode(string(ModeCrashLoop), reason, "", false, false)
+		sw.SetMode(string(ModeCrashLoop), reason, "", false, false, false)
 		_ = sw.Flush()
 		idleUntilSignal(sw)
 		return
@@ -190,7 +191,7 @@ func main() {
 	}
 
 	mode, blindReason := decideMode(cfg, pr)
-	sw.SetMode(string(mode), blindReason, pr.APIface, pr.TLSReassembly, pr.OffloadHint)
+	sw.SetMode(string(mode), blindReason, pr.APIface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 	_ = sw.Flush()
 	if blindReason != "" {
 		log.Printf("startup mode: %s: %s", mode, blindReason)
@@ -366,7 +367,7 @@ func main() {
 			// Capture open/run failure is capability failure, not daemon crash.
 			reason := "open/run capture failed: " + err.Error()
 			log.Printf("ERROR: %s", reason)
-			sw.SetMode(string(ModeBlind), reason, pr.APIface, pr.TLSReassembly, pr.OffloadHint)
+			sw.SetMode(string(ModeBlind), reason, pr.APIface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 			_ = sw.Flush()
 			clearCrashFlag(cfg.RunDir)
 			idleWithFlush(ctx, sw)
@@ -381,6 +382,7 @@ func main() {
 func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Writer) error {
 	iface := pr.APIface
 	attempt := 0
+	rebindCount := 0
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -391,7 +393,7 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			if isRecoverableCaptureError(err) {
 				reason := "interface down/rebind retry: " + err.Error()
 				log.Printf("WARN: %s", reason)
-				sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint)
+				sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 				_ = sw.Flush()
 				if !sleepOrDone(ctx, 2*time.Second) {
 					return nil
@@ -401,9 +403,14 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			return fmt.Errorf("open capture: %w", err)
 		}
 
+		// Launch rebind-check goroutine for this capture attempt.
+		// It monitors iface changes and zero-packet conditions.
+		rebindCtx, rebindCancel := context.WithCancel(ctx)
+		go rebindCheckLoop(rebindCtx, h, cfg, sw, &rebindCount)
+
 		attemptCtx, attemptCancel := context.WithCancel(ctx)
 		log.Printf("capture started on %s (snaplen=%d, rcvbuf=%d, attempt=%d)", iface, cfg.Snaplen, cfg.RcvBufBytes, attempt)
-		sw.SetMode(string(ModeOK), "", iface, pr.TLSReassembly, pr.OffloadHint)
+		sw.SetMode(string(ModeOK), "", iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 		_ = sw.Flush()
 
 		// rc40 (P2-20): once capture has run healthily for 5 min, clear the crash
@@ -458,6 +465,7 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 						FlowEvents:     s.FlowEvents,
 						IgnoredPackets: s.IgnoredPackets,
 						ParseErrors:    s.ParseErrors,
+						IPAppMapSize:   sw.IPAppMapSize(),
 					})
 					if err := sw.Flush(); err != nil {
 						log.Printf("WARN: flush state: %v", err)
@@ -477,6 +485,38 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 					s := local.Stats()
 					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d ignored=%d perr=%d",
 						s.Packets, s.KernelDrops, s.DNSEvents, s.TLSEvents, s.FlowEvents, s.IgnoredPackets, s.ParseErrors)
+				}
+			}
+		}(h)
+
+		// BUG-003: 5s health watchdog. Tracks packet progress; if no new
+		// packets for 180s, reports health="degraded" with stall_seconds.
+		go func(local *capture.Handle) {
+			tk := time.NewTicker(5 * time.Second)
+			defer tk.Stop()
+			var (
+				lastPkts       uint64
+				lastProgressAt = time.Now()
+			)
+			lastPkts = local.Stats().Packets
+			for {
+				select {
+				case <-attemptCtx.Done():
+					return
+				case <-tk.C:
+					s := local.Stats()
+					if s.Packets != lastPkts {
+						lastPkts = s.Packets
+						lastProgressAt = time.Now()
+						sw.SetHealth("ok", 0)
+					} else {
+						stall := int64(time.Since(lastProgressAt).Seconds())
+						if stall >= 180 {
+							sw.SetHealth("degraded", stall)
+						} else {
+							sw.SetHealth("ok", 0)
+						}
+					}
 				}
 			}
 		}(h)
@@ -544,14 +584,24 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			}
 		})
 		attemptCancel()
+		rebindCancel()
 		h.Close()
 		if err == nil {
 			return nil
 		}
+		if errors.Is(err, capture.ErrRebound) {
+			// Rebind goroutine switched the interface; retry with new iface.
+			iface = h.Iface()
+			log.Printf("capture rebound to %s, retrying (attempt=%d)", iface, attempt+1)
+			if !sleepOrDone(ctx, 500*time.Millisecond) {
+				return nil
+			}
+			continue
+		}
 		if isRecoverableCaptureError(err) {
 			reason := "interface down/rebind retry: " + err.Error()
 			log.Printf("WARN: %s", reason)
-			sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint)
+			sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 			_ = sw.Flush()
 			if !sleepOrDone(ctx, 2*time.Second) {
 				return nil
@@ -846,4 +896,133 @@ func doByteSample(sampler bytestats.ByteSampler, agg *output.SelfAttribAggregato
 		out[uid] = output.ByteSample{RxBytes: bc.RxBytes, TxBytes: bc.TxBytes}
 	}
 	agg.RecordBytes(out, src, time.Now().Unix())
+}
+
+// resolveCurrentIface mirrors the supervisor's getIface() priority chain:
+//  1. cfg.Iface (explicit override)
+//  2. /data/local/hnc/run/hotspot_iface hint file (written by hotspotd)
+//  3. capture.DiscoverAPCandidates() auto-detection
+//  4. fallback scan of well-known AP iface names
+//
+// Returns "" if nothing usable is found.
+func resolveCurrentIface(cfg Config) string {
+	if cfg.Iface != "" {
+		return cfg.Iface
+	}
+	if data, err := os.ReadFile(filepath.Join(cfg.RunDir, "hotspot_iface")); err == nil {
+		line := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
+		if line != "" {
+			return line
+		}
+	}
+	cands, _ := capture.DiscoverAPCandidates()
+	if len(cands) > 0 {
+		return cands[0].Name
+	}
+	for _, name := range []string{"wlan2", "ap0", "ap1", "swlan0", "wlan1", "rndis0"} {
+		if _, err := os.Stat("/sys/class/net/" + name); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// readIfaceRxBytes returns the kernel rx_bytes counter for the named interface.
+// Returns 0 on any error.
+func readIfaceRxBytes(iface string) uint64 {
+	data, err := os.ReadFile("/sys/class/net/" + iface + "/statistics/rx_bytes")
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
+	return n
+}
+
+// rebindCheckLoop monitors the capture interface for changes and triggers
+// a rebind when:
+//   - The resolved iface name differs from the handle's current iface
+//   - The ifindex of the resolved iface differs from the handle's stored ifindex
+//   - packets==0 for 3 consecutive minutes but rx_bytes is growing (meaning
+//     the interface is alive but DPI is not seeing traffic, e.g. offload)
+//
+// Runs every 15s. Exits cleanly on ctx cancellation.
+func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *output.Writer, rebindCount *int) {
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	var (
+		zeroPktStart time.Time // when we first saw packets==0
+		lastRxBytes  uint64    // rx_bytes at previous tick
+	)
+	lastRxBytes = readIfaceRxBytes(h.Iface())
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			currentIface := resolveCurrentIface(cfg)
+			if currentIface == "" {
+				continue
+			}
+
+			handleIface := h.Iface()
+			handleIfindex := h.CurrentIfindex()
+
+			// Resolve the ifindex of the currently-resolved iface.
+			ifc, err := net.InterfaceByName(currentIface)
+			if err != nil {
+				// Interface doesn't exist yet, retry next tick.
+				continue
+			}
+
+			needRebind := false
+			reason := ""
+
+			// Check 1: iface name changed (e.g. wlan2 → ap0).
+			if currentIface != handleIface {
+				needRebind = true
+				reason = fmt.Sprintf("iface name changed: %s → %s", handleIface, currentIface)
+			}
+
+			// Check 2: ifindex changed (same name, different underlying device).
+			if !needRebind && ifc.Index != handleIfindex {
+				needRebind = true
+				reason = fmt.Sprintf("ifindex changed on %s: %d → %d", currentIface, handleIfindex, ifc.Index)
+			}
+
+			// Check 3: zero packets for 3 consecutive minutes but rx_bytes growing.
+			if !needRebind {
+				s := h.Stats()
+				rxBytes := readIfaceRxBytes(currentIface)
+				if s.Packets == 0 {
+					if zeroPktStart.IsZero() {
+						zeroPktStart = time.Now()
+					} else if time.Since(zeroPktStart) >= 3*time.Minute && rxBytes > lastRxBytes {
+						needRebind = true
+						reason = fmt.Sprintf("zero DPI packets for 3m but %s rx_bytes growing (%d → %d)",
+							currentIface, lastRxBytes, rxBytes)
+					}
+				} else {
+					zeroPktStart = time.Time{}
+				}
+				lastRxBytes = rxBytes
+			}
+
+			if needRebind {
+				log.Printf("REBIND: %s", reason)
+				if err := h.Rebind(currentIface); err != nil {
+					log.Printf("REBIND FAILED: %v", err)
+				} else {
+					*rebindCount++
+					sw.SetRebindCount(*rebindCount)
+					_ = sw.Flush()
+					log.Printf("REBIND OK: now on %s (ifindex=%d, rebind_count=%d)",
+						currentIface, ifc.Index, *rebindCount)
+				}
+				// Reset zero-packet tracker after any rebind attempt.
+				zeroPktStart = time.Time{}
+			}
+		}
+	}
 }

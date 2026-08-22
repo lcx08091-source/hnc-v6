@@ -124,21 +124,27 @@ func bucketStart(t int64) int64 {
 }
 
 func (ft *flowTracker) evictOldest(nowUnix int64) {
-	var oldestKey string
-	var oldest int64
+	// v5.9.6 (回移自 5.9.91 分叉): 第一遍清掉全部 idle 流 (主判据) —— 旧实现
+	// 只删一个就返回, cap 压力大时一次只腾一个坑; 清完仍满员再按活跃度
+	// (bytes+packets 最低) 删最不活跃的 (次判据, 取代旧的"最旧")。
 	for k, f := range ft.flows {
-		// Prefer evicting flows idle > flowMaxIdleSeconds.
 		if nowUnix-f.lastSeen > flowMaxIdleSeconds {
 			delete(ft.flows, k)
-			return
-		}
-		if oldestKey == "" || f.lastSeen < oldest {
-			oldestKey = k
-			oldest = f.lastSeen
 		}
 	}
-	if oldestKey != "" {
-		delete(ft.flows, oldestKey)
+	if len(ft.flows) >= maxFlowsPerClient {
+		var worstKey string
+		var worstScore uint64
+		first := true
+		for k, f := range ft.flows {
+			score := f.bytes + f.packets // activity score
+			if first || score < worstScore {
+				worstKey, worstScore, first = k, score, false
+			}
+		}
+		if worstKey != "" {
+			delete(ft.flows, worstKey)
+		}
 	}
 }
 

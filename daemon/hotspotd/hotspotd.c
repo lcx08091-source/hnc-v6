@@ -86,6 +86,9 @@
 #define OUI_OVERRIDE_JSON   HNC_DIR "/data/oui_overrides.json"  /* v3.8.3 D3 */
 #define MDNS_RESOLVE_BIN    HNC_DIR "/bin/mdns_resolve"         /* v3.5.0 P0-4 */
 #define IPTABLES_MGR        HNC_DIR "/bin/iptables_manager.sh"  /* v3.5.1 P1-2 */
+/* v5.9.6 P0-3: 正向确认热点接口文件 */
+#define HNC_STATE_FILE      HNC_DIR "/run/hnc_state"
+#define HOTSPOT_IFACE_FILE  HNC_DIR "/run/hotspot_iface"
 
 /* ── 设备表 ──────────────────────────────────────────────── */
 #define MAX_DEVICES     128
@@ -148,6 +151,12 @@ static FILE *g_log    = NULL;
 static volatile sig_atomic_t g_need_scan   = 1;  /* 1=需要立即补充扫描 */
 static volatile sig_atomic_t g_running     = 1;  /* 0=退出主循环 */
 
+/* v5.9.6 P0-3: 正向确认的热点接口缓存
+ * 避免每次 netlink/ARP 事件都读文件,只在 refresh 时更新。
+ * g_hs_iface[0]=='\0' 表示尚未确认(早期启动文件不存在),此时回退到黑名单。 */
+static char g_hs_iface[IF_LEN] = {0};
+static int  g_hs_ifindex = 0;   /* 对应 ifindex,0=未确认 */
+
 /* ══════════════════════════════════════════════════════════
    日志
 ══════════════════════════════════════════════════════════ */
@@ -190,7 +199,7 @@ static Device *alloc_device(void) {
     return oldest;
 }
 
-/* 忽略非热点接口（lo/rmnet/dummy/tun/p2p） */
+/* 忽略非热点接口（lo/rmnet/dummy/tun/p2p）— 黑名单回退 */
 static int is_hotspot_iface(const char *iface) {
     if (!iface || !*iface) return 0;
     const char *skip[] = {"lo","rmnet","dummy","v4-","tun","p2p","r_rmnet", NULL};
@@ -198,6 +207,85 @@ static int is_hotspot_iface(const char *iface) {
         if (strncmp(iface, skip[i], strlen(skip[i])) == 0)
             return 0;
     return 1;
+}
+
+/* v5.9.6 P0-3: 从状态文件读取当前活跃热点接口名
+ * 优先读 hnc_state 的 ACTIVE:<iface> 行,回退到 hotspot_iface 文件。
+ * 成功返回 1,失败(文件不存在/格式异常)返回 0。 */
+static int read_hotspot_iface(char *out, size_t out_len) {
+    FILE *f;
+    char line[256];
+
+    /* Tier 1: hnc_state — 解析 ACTIVE:<iface> */
+    f = fopen(HNC_STATE_FILE, "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "ACTIVE:", 7) == 0) {
+                /* 去掉尾部换行 */
+                char *nl = strchr(line + 7, '\n');
+                if (nl) *nl = '\0';
+                nl = strchr(line + 7, '\r');
+                if (nl) *nl = '\0';
+                if (line[7] != '\0') {
+                    strncpy(out, line + 7, out_len - 1);
+                    out[out_len - 1] = '\0';
+                    fclose(f);
+                    return 1;
+                }
+            }
+        }
+        fclose(f);
+    }
+
+    /* Tier 2: hotspot_iface 文件(纯文本,一行接口名) */
+    f = fopen(HOTSPOT_IFACE_FILE, "r");
+    if (f) {
+        if (fgets(line, sizeof(line), f)) {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+            nl = strchr(line, '\r');
+            if (nl) *nl = '\0';
+            if (line[0] != '\0') {
+                strncpy(out, line, out_len - 1);
+                out[out_len - 1] = '\0';
+                fclose(f);
+                return 1;
+            }
+        }
+        if (f) fclose(f);
+    }
+
+    return 0;
+}
+
+/* v5.9.6 P0-3: 刷新热点接口缓存
+ * 读文件 → 缓存接口名 + 解析 ifindex。
+ * 如果文件不存在(早期启动),保留旧缓存,让调用方回退到黑名单。 */
+static void refresh_hotspot_iface(void) {
+    char buf[IF_LEN] = {0};
+    if (read_hotspot_iface(buf, sizeof(buf))) {
+        if (strcmp(buf, g_hs_iface) != 0) {
+            strncpy(g_hs_iface, buf, sizeof(g_hs_iface) - 1);
+            g_hs_iface[sizeof(g_hs_iface) - 1] = '\0';
+            g_hs_ifindex = if_nametoindex(g_hs_iface);
+            hlog("HOTSPOT IFACE: confirmed '%s' (ifindex=%d)",
+                 g_hs_iface, g_hs_ifindex);
+        }
+    } else if (g_hs_iface[0] == '\0') {
+        /* 文件不存在且从未确认过 — 保持黑名单模式 */
+    }
+}
+
+/* v5.9.6 P0-3: 正向确认接口是否为热点接口
+ * 如果已确认热点接口(g_hs_iface 非空),直接比较;
+ * 否则回退到黑名单 is_hotspot_iface()。 */
+static int is_confirmed_hotspot_iface(const char *iface) {
+    if (!iface || !*iface) return 0;
+    if (g_hs_iface[0] != '\0') {
+        return strcmp(iface, g_hs_iface) == 0;
+    }
+    /* 早期启动回退:黑名单模式 */
+    return is_hotspot_iface(iface);
 }
 
 static void count_active(void) {
@@ -655,8 +743,8 @@ static void scan_arp(void) {
         if (strcmp(flags, "0x0") == 0) continue;
         /* 过滤全零 MAC */
         if (strcmp(mac, "00:00:00:00:00:00") == 0) continue;
-        /* 过滤非热点接口 */
-        if (!is_hotspot_iface(iface)) continue;
+        /* 过滤非热点接口 (v5.9.6 P0-3: 正向确认) */
+        if (!is_confirmed_hotspot_iface(iface)) continue;
 
         /* MAC 转小写 */
         for (int i = 0; mac[i]; i++) mac[i] = tolower((unsigned char)mac[i]);
@@ -884,6 +972,8 @@ static void nl_process(int fd) {
          * 安全空操作;事件风暴会被 worker 合并成一次重探。不影响下面 NEIGH 处理。 */
         if (nlh->nlmsg_type == RTM_NEWLINK || nlh->nlmsg_type == RTM_DELLINK) {
             hnc_scheduler_request_refresh();
+            /* v5.9.6 P0-3: 链路变化可能意味着热点接口切换,刷新缓存 */
+            refresh_hotspot_iface();
             continue;
         }
         if (nlh->nlmsg_type != RTM_NEWNEIGH && nlh->nlmsg_type != RTM_DELNEIGH)
@@ -895,7 +985,27 @@ static void nl_process(int fd) {
         /* 获取接口名 */
         char iface[IF_LEN] = {0};
         if_indextoname(ndm->ndm_ifindex, iface);
-        if (!is_hotspot_iface(iface)) continue;
+
+        /* v5.9.6 P0-3: 正向确认热点接口 + ifindex 过滤
+         * 如果已确认热点接口,先用 ifindex 快速过滤(零字符串比较);
+         * ifindex 不匹配直接跳过(上游接口不会出现在热点邻居中)。
+         * 未确认时回退到黑名单。 */
+        if (g_hs_iface[0] != '\0') {
+            if (g_hs_ifindex != 0 && ndm->ndm_ifindex != g_hs_ifindex) {
+                continue;  /* ifindex 不匹配,跳过上游 */
+            }
+            if (strcmp(iface, g_hs_iface) != 0) {
+                continue;  /* 接口名不匹配,跳过 */
+            }
+        } else {
+            /* BUG-004: 黑名单模式也要排除已知上游接口(rmnet/wwan/eth等),
+             * 防止上游 wlan0 的邻居被误认为热点客户端 */
+            if (!is_hotspot_iface(iface)) continue;
+            /* 额外排除明确的上游接口前缀(纵深防御) */
+            if (strncmp(iface, "rmnet", 5) == 0 ||
+                strncmp(iface, "wwan",  4) == 0 ||
+                strncmp(iface, "eth",   3) == 0) continue;
+        }
 
         /* 提取 NDA_DST（IP）和 NDA_LLADDR（MAC） */
         char ip_str[IP_STR_LEN]   = {0};
@@ -1734,6 +1844,9 @@ int main(int argc, char *argv[]) {
              summ.primary_upstream_ifname, summ.primary_upstream_ifindex);
     }
 
+    /* v5.9.6 P0-3: 启动时确认热点接口(可能在 scheduler 之后才可用) */
+    refresh_hotspot_iface();
+
     /* 初始扫描 */
     scan_arp();
 
@@ -1763,6 +1876,7 @@ int main(int argc, char *argv[]) {
         if (g_need_scan) {
             g_need_scan = 0;
             hlog("SIGUSR1: manual ARP scan triggered");
+            refresh_hotspot_iface();  /* v5.9.6 P0-3: 扫描前刷新热点接口 */
             scan_arp();
         }
 
@@ -1834,6 +1948,8 @@ int main(int argc, char *argv[]) {
                 g_last_event_ms = now_ms_mono();  /* rc30.9 */
             }
             last_offline_check = now;
+            /* v5.9.6 P0-3: 周期性刷新热点接口(早期启动文件可能延迟出现) */
+            refresh_hotspot_iface();
         }
 
         /* rc30.9: sub-second de-bounce 算法

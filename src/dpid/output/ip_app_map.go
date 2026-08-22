@@ -52,6 +52,7 @@ type IPAppObs struct {
 	AppID    string `json:"app_id"`
 	Name     string `json:"name,omitempty"`
 	LastSeen int64  `json:"last_seen"`
+	Src      string `json:"src,omitempty"` // "flow", "tls", "dns"
 }
 
 type ipAppMapFile struct {
@@ -82,7 +83,8 @@ func (m *IPAppMap) SetPath(p string) {
 
 // Record updates the map. Called from EventFlow / applyRuleHitLocked
 // hot path; must be cheap. Last-writer-wins for the IP.
-func (m *IPAppMap) Record(ip, appID, name string, now int64) {
+// src indicates the attribution source: "flow", "tls", or "dns".
+func (m *IPAppMap) Record(ip, appID, name string, now int64, src string) {
 	if ip == "" || appID == "" {
 		return
 	}
@@ -96,6 +98,7 @@ func (m *IPAppMap) Record(ip, appID, name string, now int64) {
 	e.AppID = appID
 	e.Name = name
 	e.LastSeen = now
+	e.Src = src
 }
 
 // Flush writes the current map to disk atomically. Prunes stale entries

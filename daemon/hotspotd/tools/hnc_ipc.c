@@ -116,9 +116,13 @@ int main(int argc, char **argv)
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* connect */
+    /* connect — validate env override to prevent attacker-controlled socket paths */
     const char *sock_path = getenv("HNC_SOCK");
-    if (!sock_path || !*sock_path) sock_path = DEFAULT_SOCK_PATH;
+    if (sock_path && *sock_path && strncmp(sock_path, "/data/", 6) == 0) {
+        /* env override accepted: must be under /data/ */
+    } else {
+        sock_path = DEFAULT_SOCK_PATH;
+    }
 
     struct sockaddr_un sa;
     memset(&sa, 0, sizeof(sa));

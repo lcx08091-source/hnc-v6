@@ -236,18 +236,52 @@ func sumByMAC(dir string, dayHint time.Time, startTs, endTs int64, out map[strin
 // the form `"key":"value"`. Returns "" if not present. Tolerant of
 // surrounding spaces. Does NOT handle escape sequences — none of our
 // fields contain them (MACs and IDs are [a-z0-9_:-]).
+//
+// CR-3 fix: After finding a match with strings.Index, verify that the
+// preceding non-whitespace character is '{' or ',' to confirm the match
+// is a real JSON key position, not a substring inside a string value.
+// When a false match is rejected, we also skip past the enclosing string
+// value (looking for the next unescaped '"') so that escaped quotes like
+// \" inside JSON values cannot fool subsequent searches.
 func jsonExtractString(buf []byte, key string) string {
 	s := string(buf)
-	i := strings.Index(s, key)
-	if i < 0 {
-		return ""
+	searchFrom := 0
+	for {
+		i := strings.Index(s[searchFrom:], key)
+		if i < 0 {
+			return ""
+		}
+		i += searchFrom
+		// Verify this is a key position: preceding non-whitespace char
+		// should be '{' or ',' (i.e. we are at a real object key, not
+		// inside a string value).
+		j := i - 1
+		if j >= 0 {
+			for j >= 0 && (s[j] == ' ' || s[j] == '\n' || s[j] == '\r' || s[j] == '\t') {
+				j--
+			}
+		}
+		if j < 0 || s[j] == '{' || s[j] == ',' {
+			// This is a key position, extract the value.
+			i += len(key)
+			end := strings.IndexByte(s[i:], '"')
+			if end < 0 {
+				return ""
+			}
+			return s[i : i+end]
+		}
+		// False match — likely inside a string value. Skip past the
+		// match, then advance to the closing '"' of the surrounding
+		// string so escaped quotes (\") within values cannot produce
+		// false positives on subsequent iterations.
+		searchFrom = i + len(key)
+		for searchFrom < len(s) && s[searchFrom] != '"' {
+			searchFrom++
+		}
+		if searchFrom < len(s) {
+			searchFrom++ // skip past closing '"'
+		}
 	}
-	i += len(key)
-	end := strings.IndexByte(s[i:], '"')
-	if end < 0 {
-		return ""
-	}
-	return s[i : i+end]
 }
 
 // jsonExtractInt returns the value of the first occurrence of `key:` (no
@@ -271,8 +305,13 @@ func jsonExtractInt(buf []byte, key string) int64 {
 	neg := false
 	for k := i; k < j; k++ {
 		if s[k] == '-' {
-			neg = true
-			continue
+			// L-4 fix: only accept '-' at the very first position of
+			// the number. A '-' anywhere else is invalid — stop parsing.
+			if k == i {
+				neg = true
+				continue
+			}
+			break // invalid character, stop parsing
 		}
 		v = v*10 + int64(s[k]-'0')
 	}
@@ -304,11 +343,42 @@ func lookupHostname(devicesPath, mac string) string {
 		return ""
 	}
 	tail := string(b[i+len(key):])
-	j := strings.Index(tail, "}")
-	if j < 0 {
+	// CR-4 fix: use brace-depth counting to find the correct closing '}'.
+	// The device object may contain nested structures (e.g. "ips":[...])
+	// so a naive strings.Index(tail, "}") could truncate the block early.
+	// String-aware: braces inside JSON string values (e.g. hostname "my}device")
+	// are skipped so they cannot corrupt the depth counter.
+	depth := 1
+	j := 0
+	inStr := false
+	esc := false
+	for j < len(tail) && depth > 0 {
+		c := tail[j]
+		if inStr {
+			if esc {
+				esc = false
+			} else if c == '\\' {
+				esc = true
+			} else if c == '"' {
+				inStr = false
+			}
+		} else {
+			if c == '"' {
+				inStr = true
+			} else if c == '{' {
+				depth++
+			} else if c == '}' {
+				depth--
+			}
+		}
+		if depth > 0 {
+			j++
+		}
+	}
+	if depth != 0 {
 		return ""
 	}
-	block := tail[:j]
+	block := "{" + tail[:j] + "}"
 	return jsonExtractString([]byte(block), `"hostname":"`)
 }
 

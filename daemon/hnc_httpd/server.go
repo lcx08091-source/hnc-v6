@@ -149,8 +149,9 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/exports", s.apiExportList)
 	mux.HandleFunc("/api/exports/", s.apiExportFile)
 
-	// 中间件链: accessLog → authMiddleware → mux
-	return accessLogMiddleware(s.authMiddleware(mux))
+	// 中间件链: securityHeaders → accessLog → authMiddleware → mux
+	// securityHeaders 在最外层, auth 失败的 401 响应也带头。
+	return securityHeaders(accessLogMiddleware(s.authMiddleware(mux)))
 }
 
 // ═══ 静态资源 ═══════════════════════════════════════════════════

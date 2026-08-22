@@ -35,13 +35,14 @@ func TestTrimDailyFiles_LocalTZ(t *testing.T) {
 	for _, back := range []int{SelfAttribRetainDays + 1, 15, 30} {
 		drop = append(drop, mkDaily(t, dir, "self_attrib.", ".jsonl", now, back, false))
 	}
-	// Older than the 30-day sweep window: deliberately untouched (documented
-	// policy — manual cleanup territory).
+	// Older than the 30-day sweep window: the glob-based trimmer (v5.9.6)
+	// now catches these too — the old "manual cleanup territory" policy is
+	// gone; the 30-day leak was the very bug this rewrite fixes.
 	tooOld := mkDaily(t, dir, "self_attrib.", ".jsonl", now, 31, false)
 	// Foreign prefix in the same dir must never be touched.
 	foreign := mkDaily(t, dir, "stats.", ".jsonl", now, 15, false)
 
-	trimDailyFiles(dir, "self_attrib.", ".jsonl", SelfAttribRetainDays, now, false)
+	trimDailyFiles(dir, "self_attrib.", SelfAttribRetainDays)
 
 	for _, p := range keep {
 		if _, err := os.Stat(p); err != nil {
@@ -53,8 +54,8 @@ func TestTrimDailyFiles_LocalTZ(t *testing.T) {
 			t.Errorf("expired file survived: %s", p)
 		}
 	}
-	if _, err := os.Stat(tooOld); err != nil {
-		t.Errorf(">30d file should be left alone (manual cleanup policy): %s", tooOld)
+	if _, err := os.Stat(tooOld); !os.IsNotExist(err) {
+		t.Errorf(">30d file should now be deleted by the glob-based trimmer: %s", tooOld)
 	}
 	if _, err := os.Stat(foreign); err != nil {
 		t.Errorf("foreign-prefix file must not be touched: %s", foreign)
@@ -68,7 +69,7 @@ func TestTrimDailyFiles_UTC(t *testing.T) {
 	kept := mkDaily(t, dir, "stats.", ".jsonl", now, HistoryRetainDays, true)
 	dropped := mkDaily(t, dir, "stats.", ".jsonl", now, HistoryRetainDays+1, true)
 
-	trimDailyFiles(dir, "stats.", ".jsonl", HistoryRetainDays, now, true)
+	trimDailyFiles(dir, "stats.", HistoryRetainDays)
 
 	if _, err := os.Stat(kept); err != nil {
 		t.Errorf("retained UTC file was deleted: %s", kept)

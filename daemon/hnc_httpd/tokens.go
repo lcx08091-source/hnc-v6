@@ -201,13 +201,16 @@ func (s *TokensStore) CountActive() int {
 // 硬过期相关常量
 // rc3.1.14 抽 const (review P3): 之前 hardExpireSec=60d 跟 Prune 内
 // hardExpire=90d 各写一处, 关系靠肉眼读. 实际语义:
-//   - 60d 后 last_seen, middleware 拒绝鉴权 (hardExpireSec)
-//   - 60d~90d 这 30 天保留 token 记录给审计 (revokedExpire 配合)
-//   - 90d 后 prune 物理删除 (hardExpirePruneSec)
+//   - hardExpireSec 后无 last_seen, middleware 拒绝鉴权
+//   - 保留窗口的 token 记录给审计 (revokedExpire 配合)
+//   - hardExpirePruneSec 后 prune 物理删除
+//
+// M-1 安全加固 (回移自 5.9.91 分叉): 60d → 14d。移动热点设备丢失/被盗场景下,
+// 缩短 token 有效窗口可降低未授权访问风险; 14 天不活跃即需重新配对。
 const (
-	hardExpireSec      = 60 * 86400 // middleware 拒绝鉴权门槛
-	hardExpirePruneSec = 90 * 86400 // 物理删除门槛 (含 30 天审计窗口)
-	revokedExpireSec   = 30 * 86400 // 撤销后保留多久才 prune
+	hardExpireSec      = 14 * 86400 // middleware 拒绝鉴权门槛 (14 天, 移动热点安全加固)
+	hardExpirePruneSec = 30 * 86400 // 物理删除门槛 (含 ~16 天审计窗口)
+	revokedExpireSec   = 16 * 86400 // 撤销后保留多久才 prune (与审计窗口对齐)
 )
 
 // saveAtomicLocked 把内存 tokens 全量序列化写回磁盘。tmp + chmod 0600 +

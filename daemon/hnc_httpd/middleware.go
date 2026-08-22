@@ -42,6 +42,23 @@ const (
 // CookieName hnc token cookie 名字
 const CookieName = "hnc_token"
 
+// securityHeaders 为所有 HTTP 响应添加安全头部 (回移自 5.9.91 分叉)。
+// 作为最外层中间件, 无论 auth 成功/失败/重定向都携带。
+// CSP 取自分叉发布二进制中恢复的完整版 (比其源码快照多 img-src/connect-src/
+// object-src/base-uri/frame-ancestors 四项); unsafe-inline 是存量内联脚本的
+// 妥协, WebUI 全面外联 JS 前去不掉。
+func securityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Security-Policy",
+			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; connect-src 'self' http://127.0.0.1:8444; "+
+				"object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		next.ServeHTTP(w, r)
+	})
+}
+
 // isPublicPath 不需要 auth 的路径
 //
 // rc30.12.18 重构: 之前 "敏感读白名单 + 其他默认放行" 改成 "公共路径白名单 + 默认拒绝".
@@ -171,22 +188,19 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 					next.ServeHTTP(w, r)
 					return
 				}
-				// rc30.12.16 P1-2: secret 不存在时 (老部署 / service.sh 没生成) 的兼容策略.
-				// 之前: 一律 fallback 老 loopback 行为, 全放行.
-				// 现在: 分级 fallback —
-				//   - 写接口 (/api/action) 永远 fail-closed, 不允许 secret 缺失时通过
-				//   - 敏感读接口同样 fail-closed
-				//   - 其他读接口 (/, /api/health, 静态资源等) 兼容旧行为放行
-				// 这样升级中 secret 临时不存在时, 用户 WebUI 仍能看到首页和健康状态,
-				// 但任何变更操作必须 secret 就绪后才能执行.
+				// H-5 安全加固 (回移自 5.9.91 分叉): secret 不存在时一律
+				// fail-closed。之前分级 fallback (写接口/敏感读拒绝, 其他放行)
+				// 在移动热点场景下风险过大 —— v5.9.4 虽把敏感端点补进了
+				// isSensitiveReadPath, 但该白名单历史上已四次漂移, 缺省拒绝
+				// 才是治本。唯一保留 /api/health 匿名可读: watchdog/监控依赖
+				// 它判断服务存活。
 				if !s.localAdminSecretExists() {
-					if isWritePath(r.URL.Path) || isSensitiveReadPath(r.URL.Path) {
-						log.Printf("loopback without secret + write/sensitive path → fail-closed (path=%s)", r.URL.Path)
-						respondUnauthorized(w, r, false)
+					if r.URL.Path == "/api/health" {
+						next.ServeHTTP(w, r)
 						return
 					}
-					// 非敏感路径 → 兼容老行为放行 (首页 / 健康检查 / 静态)
-					next.ServeHTTP(w, r)
+					log.Printf("loopback without local_admin.secret → fail-closed (path=%s)", r.URL.Path)
+					respondUnauthorized(w, r, false)
 					return
 				}
 				// secret 存在但请求没带, 或带错 → 拒绝

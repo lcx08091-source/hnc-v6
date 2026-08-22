@@ -1,9 +1,11 @@
 package probe
 
 import (
+	"bufio"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"syscall"
@@ -37,8 +39,11 @@ func Run(opt Options) Result {
 		Timestamp:     time.Now().Unix(),
 		Kernel:        readKernel(),
 		TLSReassembly: false,
-		IPv6Capture:   false,
 	}
+
+	// BUG-013: 真实 IPv6 捕获探测(不再硬编码 false)
+	// 先做系统级探测,后面 AP iface 确定后再做接口级确认
+	r.IPv6Capture = detectIPv6Capture()
 
 	if err := probeAFPacket(); err == nil {
 		r.AFPacketAvailable = true
@@ -55,6 +60,11 @@ func Run(opt Options) Result {
 	case len(cands) > 0:
 		r.APIface = cands[0].Name
 		r.APIfaceSource = "auto"
+	}
+
+	// BUG-013: 如果 AP iface 已确定,用接口级探测覆盖系统级结果
+	if r.APIface != "" {
+		r.IPv6Capture = detectIPv6OnIface(r.APIface)
 	}
 
 	for _, p := range []string{"/proc/net/nf_conntrack", "/proc/net/ip_conntrack"} {
@@ -124,6 +134,56 @@ func detectOffloadHints() []string {
 		}
 	}
 	return ev
+}
+
+// detectIPv6Capture checks if the system has active IPv6 connections.
+// Reads /proc/net/tcp6 — if there are entries beyond the header line,
+// IPv6 networking is active and BPF capture can process IPv6 traffic.
+func detectIPv6Capture() bool {
+	f, err := os.Open("/proc/net/tcp6")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	lineNum := 0
+	for scanner.Scan() {
+		lineNum++
+		if lineNum == 1 {
+			continue // skip header
+		}
+		// Any non-header line means there's an IPv6 TCP entry
+		line := strings.TrimSpace(scanner.Text())
+		if line != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// detectIPv6OnIface checks if a specific network interface has IPv6 addresses.
+// Reads /proc/net/if_inet6 which lists per-interface IPv6 addresses.
+// Format: "<hex_addr> <ifindex> <prefix_len> <scope> <flags> <iface_name>"
+func detectIPv6OnIface(iface string) bool {
+	if iface == "" {
+		return false
+	}
+	f, err := os.Open("/proc/net/if_inet6")
+	if err != nil {
+		// File doesn't exist → no IPv6 at all
+		return false
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) >= 6 && fields[5] == iface {
+			return true
+		}
+	}
+	return false
 }
 
 func WriteJSON(path string, r Result) error {

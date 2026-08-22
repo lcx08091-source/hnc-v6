@@ -893,7 +893,7 @@ else
             fi
         fi
     else
-        dp=$(cat "$DPID_PID" 2>/dev/null)
+        dp=$(_verify_pid "$DPID_PID" hnc_dpid)
         if [ -n "$dp" ] && kill -0 "$dp" 2>/dev/null; then
             log "hnc_dpid already running (PID=$dp, direct mode), skip duplicate launch"
         else

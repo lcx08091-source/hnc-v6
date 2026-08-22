@@ -14,6 +14,45 @@
 
 ---
 
+## [5.9.6] - 2026-08-22
+
+**分叉源码级合并批**(Go + C,需 CI 重编全部二进制)。前提:找回了 5.9.91 分叉的完整源码树(`WorkBuddy/HNC/hnc-src`,与发布包逐字节一致),得以从"二进制 strings 考古"升级为真正的源码级 cherry-pick。经全面 diff 审查,按风险收益合并其高价值改动;**全部以本仓库为基线增量移植**,保住 v5.9.4 的 flowKey 协议前缀/锁外构造/self_attrib 签名去重/jsoncache 等修复(分叉版在这些位置是倒退的)。
+
+### Added
+
+- **DPI 抓包接口自动重绑**(`src/dpid/capture/rawsocket.go` + `cmd/dpid/main.go`,分叉线 v5.9.6)。`Handle.Rebind()` 新建 AF_PACKET socket→选 filter→bind 新 ifindex→锁内原子换 fd(旧 fd 关闭使 Run 的 recvfrom 收 EBADF 干净退出,返回 `ErrRebound` 让主循环 500ms 后用新接口重试);`rebindCheckLoop` 每 15s 检查三个条件——①解析出的接口名与当前不一致(AP 改名 wlan2→ap0);②同名接口 ifindex 变化;③**接口有流量但 DPI 零抓包持续 3 分钟**(读 `/sys/class/net/$if/statistics/rx_bytes` 交叉验证,覆盖 offload 抢包场景)。修"热点接口一切换 DPI 就静默失明且永不自愈"。
+- **dpid 健康自报**(BUG-003)。dpi_state.json 新增 `health`("ok"/"degraded")、`stall_seconds`、`rebind_count` 字段,由 5s 看门狗维护(180s 无新包自动降级)。WebUI 的 DPI 徽标交叉校验(v5.9.3 前端修复)本就在等这两个字段,后端就位后前端无需改动即生效。
+- **未识别字节占比指标**。Flush 时计算 `unidentified_ratio`(无 app 归因字节/总字节),量化规则集覆盖率。
+
+### Fixed
+
+- **上游接口流量误计为热点设备**(`daemon/hotspotd/hotspotd.c` P0-3 + `upstream.c` BUG-004)。hotspotd 从 `run/hnc_state`/`run/hotspot_iface` 正向确认热点接口(缓存 + ifindex 快速过滤,链路变化/SIGUSR1/周期检查时刷新);上游探测三处路径排除已知热点接口,黑名单模式额外排除 rmnet/wwan/eth 前缀。修"wlan0 同时被当作热点和上游"。
+- **hnc_json 解析器三处真 bug**(`daemon/hotspotd/tools/hnc_json.c` CR-1)。①`find_key` 逐字符走并跳过字符串值——key 模式出现在字符串值里不再误匹配;②数组 add/del 改引号字符串精确匹配——旧 `strstr` 会把 `"foolbar"` 当 `"foo"` 已存在/误删;③`token_revoke` 用 find_key 定位指定 token 块内的 `revoked` 键——旧全局 `strstr` 可能改到别的 token;`token-revoke-all` 并入 `token-revoke` 无 tid 分支(shell 侧走 marker 桥不受影响,手工命令语义不变)。
+- **IPv6 抓包能力谎报**(BUG-013)。`IPv6Capture` 不再硬编码,由 probe 真实探测(`/proc/net/tcp6` 系统级 + `/proc/net/if_inet6` 接口级)经 `SetMode` 透传。
+- **应用级限速漏配**(BUG-011)。TLS SNI 命中现在直写 IP→app 反查表(`Record` 增加 `src` 字段区分 flow/tls),不必等下一次 flow 命中。
+- **anomaly 解析加固**(`src/dpid/alert/anomaly.go` CR-3/CR-4/L-4):`jsonExtractString` 验证命中位置前导字符为 `{`/`,`(字符串值内的假命中跳过且越过闭引号);`jsonExtractDeviceBlock` 花号深度计数且字符串感知(hostname 含 `}` 不再截断);负号只接受在数字首位。
+- **self_attrib 日志膨胀双保险**(BUG-002):单日 32MB 硬封顶 + `trimDailyFiles` 改 glob+文件名日期解析(名字不标准回退 mtime 与 30 天硬上限比)。**回移时修正分叉版两个 bug**:`TrimPrefix(base, prefix+".")` 前缀永不匹配导致按日期的清理从未生效;`time.Parse` 的 UTC 零点与本地 now 比瞬间在 UTC+8 时区会提前 8 小时误删保留窗口边界的文件——改为 YYYYMMDD 日期字符串比较(字典序即时间序),cutoff 取本地/UTC 两基较小者。
+- **service.sh 最后一处 `_verify_pid`**(v5.9.5 回移漏掉的第 10 处:直启 dpid 的 pidfile 读取)。
+
+### Changed
+
+- **HTTP 安全响应头**(`daemon/hnc_httpd/middleware.go` `securityHeaders` 中间件,最外层挂载):CSP(取自分叉发布二进制中恢复的完整版:`default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' http://127.0.0.1:8444; object-src 'none'; base-uri 'self'; frame-ancestors 'none'`)+ `X-Frame-Options: DENY` + `nosniff`。auth 失败的 401 响应同样带头。
+- **token 有效期 60d→14d**(M-1;prune 90d→30d、撤销保留 30d→16d 同步对齐)。移动热点设备丢失/被盗场景下缩短未授权窗口;**行为变化:14 天不活跃的授权设备需重新配对**。
+- **secret 缺失一律 fail-closed**(H-5)。local_admin.secret 不存在时所有 loopback 请求 401(唯一例外 `/api/health` 供 watchdog 监控)。取代 v5.9.4 的分级 fallback——敏感读白名单历史上已四次漂移,缺省拒绝才治本。
+- **流表驱逐改进**(`flow.go`):cap 压力下先清掉全部 idle 流(旧实现一次只删一个),仍满员再按活跃度删最不活跃的(取代"删最旧")。
+- **IPv6 病态包防护**(`capture/parse.go`):扩展头循环走满 nextHdr 仍是指示扩展类型(0/43/44/60)时跳过,而非带错误协议号继续。
+- **self_attrib_purge action**:手动清空膨胀的 self_attrib JSONL(API 入口,`{"action":"self_attrib_purge"}`)。
+- `cleanup_async.log` 收 0600(M-3,防 world-readable 日志泄审计信息);`hnc_ipc` 的 `HNC_SOCK` 环境变量覆盖限定必须 `/data/` 前缀(防攻击者指向任意 socket 路径)。
+
+### 未合并(有意,附原因)
+
+- **eBPF clsact 整链**(bpf 程序/tc_manager 安装/watchdog/httpd check/前端面板):分叉的 `hnc_clsact.bpf.c` 有字节序 bug(`proto != 0x0800` 在小端 arm64 恒真,IPv4 包全部提前返回,打标永不执行),且 `ip_mark_map` 无 userspace 写者(tc_manager 里是 TODO 空壳)、map 无 pin、卸载不回收 watchdog 与 filter——三层叠加的 no-op。需先修字节序(`bpf_htons(ETH_P_IP)`)并设计 map 写者/pin 生命周期,作为独立 feature 另立版本。
+- **DPI 2.0 证据账本**(`evidence_ledger.go` 等 ~300 行):`LogOddsDelta`/`ParentEventID` 声明后全树零写入、`Trim` 无调用者、`maxTotal` 从未强制、`RunAlwaysOn`/`SampleOneshot`/`RecordContagionFP/FN` 均未接线——半成品,热路径还有每包双锁+分配回归。立项时重做。
+- **tethering sampler**(`bytestats/sampler_tethering.go`):AOSP tethering stats map 的 key 疑似上游 ifindex 而非 uid,分叉注释自己都含糊;未真机验证 key schema 前不收,否则会把系统 uid 当 App 归因。
+- **全局流表上限**(`enforceGlobalFlowLimit`):分叉实现是每包 O(全部客户端) 遍历(锁内),明确的热路径回归;上限 512 也偏小。改造为 O(1) 计数或定时器驱动后再收。
+
+---
+
 ## [5.9.5] - 2026-08-22
 
 **分叉线加固回移批**(纯 shell / 前端,零 Go、零 C,不重编二进制)。来源:用户提供的 `HNC-v5_9_91-arm64` 构建包——一条从 v5.9.3 分叉出去的平行开发线(自带 v5.9.4→v5.9.91 共 7 个小版本)。逐文件 diff 审查后,回移其 shell 层的安全与健壮性修复;两条线的修复集零重叠(该分叉不含本仓库 v5.9.4 的 13 项审查修复,本仓库亦不含其下列改动)。

@@ -335,6 +335,14 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionCandidatePromote(hncDir, p)
 	case "candidate_reject":
 		return actionCandidateReject(hncDir, p)
+	// BUG-002 (回移自 5.9.91 分叉): 手动清空膨胀的 self_attrib JSONL。
+	// 与 32MB 日封顶 + 签名去重配合, 给用户一个立即回收磁盘的入口。
+	case "self_attrib_purge":
+		files, _ := filepath.Glob(filepath.Join(hncDir, "run", "self_attrib.*.jsonl"))
+		for _, f := range files {
+			_ = os.Remove(f)
+		}
+		return actionResp{OK: true, Detail: fmt.Sprintf("purged %d file(s)", len(files))}
 	default:
 		return actionResp{OK: false, Error: "unknown action"}
 	}
@@ -735,8 +743,9 @@ func runBinDetached(hncDir, script string, args ...string) error {
 		"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin",
 	}
 	// 重定向 stdout/stderr 到 cleanup.log · 脱离 httpd
+	// M-3 (回移自 5.9.91 分叉): 0600 防 world-readable 日志泄敏感审计信息
 	logPath := hncDir + "/logs/cleanup_async.log"
-	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
 	if err == nil {
 		cmd.Stdout = f
 		cmd.Stderr = f

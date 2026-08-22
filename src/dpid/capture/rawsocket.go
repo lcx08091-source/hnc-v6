@@ -2,6 +2,7 @@ package capture
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -14,6 +15,10 @@ import (
 
 	"syscall"
 )
+
+// ErrRebound is returned by Run when the capture was switched to a new
+// interface via Rebind. Callers should retry Open/Run with the updated Handle.
+var ErrRebound = errors.New("capture rebound to new interface")
 
 type Options struct {
 	Iface       string
@@ -41,11 +46,13 @@ const (
 )
 
 type Handle struct {
-	fd        int
-	iface     string
-	snap      int
-	buf       []byte
-	closeOnce sync.Once
+	fd      int
+	ifname  string
+	ifindex int
+	snap    int
+	buf     []byte
+	mu      sync.Mutex // protects fd/ifname/ifindex/linkType/rebound during Rebind
+	rebound bool       // set true by Rebind, checked by Run after EBADF
 
 	// v5.6.0-rc3: link-layer type (ARPHRD_*) read from
 	// /sys/class/net/$iface/type at Open. Determines whether parsePacket
@@ -109,7 +116,7 @@ func Open(opts Options) (*Handle, error) {
 	// BuildFilter on these would reject all packets in the kernel BPF
 	// program, leaving recvfrom() permanently silent (the exact bug
 	// observed in rc1-rc3).
-	lt := readLinkType(opts.Iface)
+	lt, _ := readLinkType(opts.Iface)
 	var raw []syscall.SockFilter
 	switch lt {
 	case arphrdRawIP, arphrdNone:
@@ -146,7 +153,8 @@ func Open(opts Options) (*Handle, error) {
 
 	return &Handle{
 		fd:       fd,
-		iface:    opts.Iface,
+		ifname:   opts.Iface,
+		ifindex:  ifc.Index,
 		snap:     opts.Snaplen,
 		buf:      make([]byte, opts.Snaplen+64),
 		linkType: lt,
@@ -155,32 +163,109 @@ func Open(opts Options) (*Handle, error) {
 
 // readLinkType returns the ARPHRD_* value from /sys/class/net/$iface/type.
 // 0 on any failure (callers treat 0 as "assume Ethernet" for safety).
-func readLinkType(iface string) int {
+func readLinkType(iface string) (int, error) {
+	if strings.ContainsAny(iface, "/\\..") {
+		return 0, fmt.Errorf("invalid iface name: %s", iface)
+	}
 	data, err := os.ReadFile("/sys/class/net/" + iface + "/type")
 	if err != nil {
-		return 0
+		return 0, err
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	return n
+	return n, nil
 }
 
 // LinkType returns the ARPHRD_* link type discovered at Open time.
 // Used by self_capture.go for diagnostic logging.
 func (h *Handle) LinkType() int { return h.linkType }
 
-func (h *Handle) Close() {
-	h.closeOnce.Do(func() {
-		if h.fd >= 0 {
-			_ = syscall.Close(h.fd)
-			h.fd = -1
-		}
-	})
+// CurrentIfindex returns the ifindex the handle was opened (or last rebound) with.
+func (h *Handle) CurrentIfindex() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ifindex
 }
 
-func (h *Handle) Iface() string { return h.iface }
+// Rebind switches the capture to a different network interface. It creates
+// a new raw socket, attaches the appropriate BPF filter, and atomically
+// swaps the fd so the Run goroutine picks up the new socket on its next
+// recvfrom call (the old fd is closed, causing EBADF → clean exit from Run).
+func (h *Handle) Rebind(newIface string) error {
+	ifc, err := net.InterfaceByName(newIface)
+	if err != nil {
+		return fmt.Errorf("rebind lookup %s: %w", newIface, err)
+	}
+
+	lt, _ := readLinkType(newIface)
+
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, int(htons(ETH_P_ALL)))
+	if err != nil {
+		return fmt.Errorf("rebind socket: %w", err)
+	}
+
+	// 500ms timeout matches Open().
+	tv := syscall.Timeval{Sec: 0, Usec: 500_000}
+	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
+		_ = syscall.Close(fd)
+		return fmt.Errorf("rebind set SO_RCVTIMEO: %w", err)
+	}
+
+	var raw []syscall.SockFilter
+	switch lt {
+	case arphrdRawIP, arphrdNone:
+		raw, err = BuildFilterRawIP(uint32(h.snap))
+	default:
+		raw, err = BuildFilter(uint32(h.snap))
+	}
+	if err != nil {
+		_ = syscall.Close(fd)
+		return fmt.Errorf("rebind build bpf: %w", err)
+	}
+	if err := AttachFilter(fd, raw); err != nil {
+		_ = syscall.Close(fd)
+		return fmt.Errorf("rebind attach bpf: %w", err)
+	}
+
+	sa := &syscall.SockaddrLinklayer{Protocol: htons(ETH_P_ALL), Ifindex: ifc.Index}
+	if err := syscall.Bind(fd, sa); err != nil {
+		_ = syscall.Close(fd)
+		return fmt.Errorf("rebind bind %s: %w", newIface, err)
+	}
+
+	// Atomic swap: Run() reads fd under lock, so it will see the new fd.
+	// The old fd is closed after the swap; Run's recvfrom on the old fd
+	// will return EBADF, causing a clean exit from Run.
+	h.mu.Lock()
+	oldFD := h.fd
+	h.fd = fd
+	h.ifname = newIface
+	h.ifindex = ifc.Index
+	h.linkType = lt
+	h.rebound = true
+	h.mu.Unlock()
+
+	_ = syscall.Close(oldFD)
+	fmt.Fprintf(os.Stderr, "[dpid/capture] rebind: switched to %s (ifindex=%d, linktype=%d)\n", newIface, ifc.Index, lt)
+	return nil
+}
+
+func (h *Handle) Close() {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.fd >= 0 {
+		_ = syscall.Close(h.fd)
+		h.fd = -1
+	}
+}
+
+func (h *Handle) Iface() string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.ifname
+}
 
 func (h *Handle) Stats() Stats {
 	h.refreshDrops()
@@ -232,12 +317,26 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 			return nil
 		}
 
-		n, _, err := syscall.Recvfrom(h.fd, h.buf, 0)
+		h.mu.Lock()
+		fd := h.fd
+		h.mu.Unlock()
+		if fd < 0 {
+			return nil // Close() was called
+		}
+
+		n, _, err := syscall.Recvfrom(fd, h.buf, 0)
 		if err != nil {
 			switch err {
 			case syscall.EAGAIN, syscall.EINTR:
 				continue
 			case syscall.EBADF:
+				// fd was closed — check if it was a rebind or a clean shutdown
+				h.mu.Lock()
+				wasRebound := h.rebound
+				h.mu.Unlock()
+				if wasRebound {
+					return ErrRebound
+				}
 				return nil
 			default:
 				return fmt.Errorf("recvfrom: %w", err)

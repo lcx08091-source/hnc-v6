@@ -204,9 +204,16 @@ func parseIPv6(ip []byte, dstMAC, srcMAC net.HardwareAddr, ts time.Time) (Event,
 			}
 			nextHdr = payload[0]
 			payload = payload[8:]
-		default:
-			goto done
+			default:
+				goto done
 		}
+	}
+	// v5.9.6 (回移自 5.9.91 分叉): 扩展头循环走满仍是指示扩展类型的 nextHdr
+	// (0/43/44/60 = Hop-by-Hop/Routing/Fragment/Destination) —— 病态包,
+	// 跳过而非带着错误的上层协议号继续解析。
+	switch nextHdr {
+	case 0, 43, 44, 60:
+		return Event{}, ParseIgnore // too many extension headers
 	}
 done:
 

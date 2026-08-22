@@ -115,9 +115,65 @@ int upstream_detect_via_ip_route(int *ifindex_out,
  * 注意: 我们跳过 wlan2 (手机热点 downstream), 只取可能的 uplink。
  * ══════════════════════════════════════════════════════════ */
 
+/* BUG-004: 缓存已知热点接口名,防止上游探测把它误判为 upstream。
+ * 由 upstream_detect_primary() 在每次探测前从状态文件刷新。
+ * 空字符串表示尚未确认(早期启动)。 */
+static char g_known_hs_iface[IFNAMSIZ] = {0};
+
+/* 从状态文件读取热点接口名(与 hotspotd.c 的 read_hotspot_iface 同逻辑) */
+static void refresh_known_hs_iface(void)
+{
+    char buf[IFNAMSIZ] = {0};
+    FILE *f;
+    char line[256];
+
+    /* Tier 1: hnc_state — ACTIVE:<iface> */
+    f = fopen("/data/local/hnc/run/hnc_state", "r");
+    if (f) {
+        while (fgets(line, sizeof(line), f)) {
+            if (strncmp(line, "ACTIVE:", 7) == 0) {
+                char *nl = strchr(line + 7, '\n');
+                if (nl) *nl = '\0';
+                nl = strchr(line + 7, '\r');
+                if (nl) *nl = '\0';
+                if (line[7] != '\0') {
+                    strncpy(buf, line + 7, sizeof(buf) - 1);
+                    fclose(f);
+                    goto done;
+                }
+            }
+        }
+        fclose(f);
+    }
+
+    /* Tier 2: hotspot_iface 文件 */
+    f = fopen("/data/local/hnc/run/hotspot_iface", "r");
+    if (f) {
+        if (fgets(line, sizeof(line), f)) {
+            char *nl = strchr(line, '\n');
+            if (nl) *nl = '\0';
+            nl = strchr(line, '\r');
+            if (nl) *nl = '\0';
+            if (line[0] != '\0') {
+                strncpy(buf, line, sizeof(buf) - 1);
+            }
+        }
+        fclose(f);
+    }
+
+done:
+    if (buf[0] != '\0') {
+        strncpy(g_known_hs_iface, buf, sizeof(g_known_hs_iface) - 1);
+        g_known_hs_iface[sizeof(g_known_hs_iface) - 1] = '\0';
+    }
+}
+
 static int looks_like_uplink_iface(const char *name)
 {
     if (!name) return 0;
+    /* BUG-004: 排除已知热点接口(防止 wlan0 同时被当作上游和热点) */
+    if (g_known_hs_iface[0] != '\0' && strcmp(name, g_known_hs_iface) == 0)
+        return 0;
     /* 已知热点 downstream 名字, 排除 */
     if (strncmp(name, "wlan2", 5) == 0) return 0;
     if (strncmp(name, "ap",    2) == 0) return 0;
@@ -402,6 +458,8 @@ int upstream_detect_via_limit_map(int *ifindex_out,
     unsigned wlan2_idx = if_nametoindex("wlan2");
     unsigned ap0_idx   = if_nametoindex("ap0");       /* 少数 ROM */
     unsigned swlan0_idx = if_nametoindex("swlan0");
+    /* BUG-004: 也跳过已知热点接口的 ifindex */
+    unsigned hs_idx = g_known_hs_iface[0] ? if_nametoindex(g_known_hs_iface) : 0;
 
     /* 找第一个非 downstream 的 ifindex */
     for (int i = 0; i < count; i++) {
@@ -410,6 +468,7 @@ int upstream_detect_via_limit_map(int *ifindex_out,
         if (wlan2_idx && idx == wlan2_idx) continue;
         if (ap0_idx && idx == ap0_idx) continue;
         if (swlan0_idx && idx == swlan0_idx) continue;
+        if (hs_idx && idx == hs_idx) continue;
 
         char name[IFNAMSIZ] = {0};
         if (if_indextoname(idx, name) == NULL) continue;
@@ -424,6 +483,8 @@ int upstream_detect_via_limit_map(int *ifindex_out,
         if (strncmp(name, "ap",     2) == 0) continue;
         if (strncmp(name, "swlan",  5) == 0) continue;
         if (strncmp(name, "lo",     2) == 0) continue;
+        /* BUG-004: 排除已知热点接口 */
+        if (g_known_hs_iface[0] != '\0' && strcmp(name, g_known_hs_iface) == 0) continue;
 
         *ifindex_out = (int)idx;
         snprintf(ifname_out, ifname_size, "%s", name);
@@ -449,6 +510,9 @@ int upstream_detect_primary(int *ifindex_out,
                              char *ifname_out,
                              size_t ifname_size)
 {
+    /* BUG-004: 探测前刷新已知热点接口,让 looks_like_uplink_iface 排除它 */
+    refresh_known_hs_iface();
+
     /* Tier 3: BPF upstream4_map 反查 (最准) */
     if (upstream_detect_via_bpf(ifindex_out, ifname_out, ifname_size) == 0) {
         return 0;

@@ -249,34 +249,62 @@ func (h *HistorySampler) pathFor(t time.Time) string {
 	return filepath.Join(HistoryDir, HistoryFilePrefix+day+HistoryFileSuffix)
 }
 
-// trimDailyFiles deletes <prefix>YYYYMMDD<suffix> files in dir that are older
-// than retainDays. Iterates (retainDays+1) → 30 by name — bounded constant
-// work, no readdir; anything further back needs manual cleanup (same policy
-// the history sampler always had).
+// trimDailyFiles deletes <prefix>*.jsonl files in dir that are older than
+// retainDays. Uses filepath.Glob + date parsing so non-standard names and
+// files beyond the 30-day name-iteration window are also cleaned up.
+// BUG-002 (回移自 5.9.91 分叉): 旧实现只按名字迭代 (retainDays+1)→30 天,
+// 名字不标准或超过 30 天的文件永远漏清。
 //
-// utc selects the date-stamp base and MUST match the writer's own file-name
-// formatting: history (stats.*) names files with now.UTC().Format, while
-// self_attrib.* uses local time. Mixing the bases would make the trimmer
-// compute a different file name than the writer around midnight (UTC+8
-// devices: 8h window), leaving boundary-day files undeleted (or deleting a
-// day early). v5.9.0: extracted as a package-level helper so self_attrib
-// gains retention too (its JSONL previously grew forever).
-func trimDailyFiles(dir, prefix, suffix string, retainDays int, now time.Time, utc bool) {
-	for back := retainDays + 1; back <= 30; back++ {
-		t := now.AddDate(0, 0, -back)
-		day := t.Format("20060102")
-		if utc {
-			day = t.UTC().Format("20060102")
-		}
-		// Best-effort, no error handling — missing is the common case.
-		_ = os.Remove(filepath.Join(dir, prefix+day+suffix))
+// 回移时修正了分叉版的两个 bug:
+//  1. TrimPrefix(base, prefix+".") —— prefix 自带尾点, 永远剥不掉, 日期解析
+//     全部失败退回 mtime 分支, 按日期的清理从未生效;
+//  2. time.Parse 得到 UTC 零点再与本地 now 的 maxAge 比瞬间, UTC+8 时区下
+//     保留窗口边界的文件会被提前 8 小时误删。改为按 YYYYMMDD 日期字符串
+//     比较(字典序即时间序), 且 cutoff 取本地/UTC 两个基的较小者, 混合命名
+//     基(history 用 UTC、self_attrib 用本地)都只晚删不早删。
+func trimDailyFiles(dir, prefix string, retainDays int) {
+	now := time.Now()
+	cutoffLocal := now.AddDate(0, 0, -retainDays).Format("20060102")
+	cutoffUTC := now.UTC().AddDate(0, 0, -retainDays).Format("20060102")
+	cutoff := cutoffLocal
+	if cutoffUTC < cutoffLocal {
+		cutoff = cutoffUTC
 	}
+	hardCap := now.AddDate(0, 0, -30) // 30 天硬上限(名字不标准时的 mtime 兜底)
+	files, _ := filepath.Glob(filepath.Join(dir, prefix+"*.jsonl"))
+	for _, f := range files {
+		base := filepath.Base(f)
+		dateStr := strings.TrimSuffix(strings.TrimPrefix(base, prefix), ".jsonl")
+		if len(dateStr) == 8 && isDigits(dateStr) {
+			if dateStr < cutoff {
+				_ = os.Remove(f)
+			}
+			continue
+		}
+		// 名字不标准: 回退按 mtime 与 30 天硬上限比
+		info, err := os.Stat(f)
+		if err != nil {
+			continue
+		}
+		if info.ModTime().Before(hardCap) {
+			_ = os.Remove(f)
+		}
+	}
+}
+
+func isDigits(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 // trimOldFiles deletes JSONL files older than HistoryRetainDays. Thin wrapper
 // over trimDailyFiles with the history sampler's UTC naming base.
 func (h *HistorySampler) trimOldFiles(now time.Time) {
-	trimDailyFiles(HistoryDir, HistoryFilePrefix, HistoryFileSuffix, HistoryRetainDays, now, true)
+	trimDailyFiles(HistoryDir, HistoryFilePrefix, HistoryRetainDays)
 }
 
 var histMacRe = regexp.MustCompile(`^([0-9a-f]{2}:){5}[0-9a-f]{2}$`)
