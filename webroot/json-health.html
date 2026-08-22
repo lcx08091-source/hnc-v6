@@ -51,7 +51,11 @@ async function refreshHealth(){
   const btn=document.getElementById('refreshBtn'); btn.disabled=true;
   try{
     const out=await execCmd(`su -c 'sh ${HNC}/bin/json_health_panel.sh'`);
-    let data=JSON.parse(out.trim().replace(/^.*?(\{)/s,'$1'));
+    // H-5 (回移自 5.9.91): 找第一个 { 后跟可选空白和 " 的位置, 避免前缀文本含 { 时误匹配
+    let trimmed=out.trim();
+    const jsonStart=trimmed.search(/\{\s*"/);
+    if(jsonStart>=0) trimmed=trimmed.substring(jsonStart);
+    let data=JSON.parse(trimmed);
     render(data); log('JSON 健康状态刷新完成');
   }catch(e){
     document.getElementById('summaryCard').innerHTML='<div class="pill bad">读取失败</div><p class="hint">'+esc(e.message||e)+'</p>';
@@ -98,7 +102,11 @@ async function exportBundle(){
   try{
     log('开始导出 JSON 诊断包...');
     const out=await execCmd(`su -c 'sh ${HNC}/bin/json_export_for_web.sh'`);
-    let data=JSON.parse(out.trim().replace(/^.*?(\{)/s,'$1'));
+    // H-5 (回移自 5.9.91): 同上,精确探测 JSON 起点
+    let trimmed=out.trim();
+    const jsonStart=trimmed.search(/\{\s*"/);
+    if(jsonStart>=0) trimmed=trimmed.substring(jsonStart);
+    let data=JSON.parse(trimmed);
     if(data.ok){ log('导出完成: '+data.path); } else { log('导出失败 rc='+data.rc+' '+(data.output||'')); }
     await refreshHealth();
   }catch(e){ log('导出失败: '+(e.message||e)); }

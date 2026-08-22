@@ -46,11 +46,11 @@ emit_json() {
 }
 
 emit_err() {
-    # $1=reason
-    printf '{"ok":false,"error":%s}\n' "$1"
+    # $1=reason (回移自 5.9.91: 引号由格式串统一补,调用方不再手拼 JSON 引号)
+    printf '{"ok":false,"error":"%s"}\n' "$1"
 }
 
-[ -f "$DEVICES" ] || { emit_err '"devices.json missing"'; exit 0; }
+[ -f "$DEVICES" ] || { emit_err 'devices.json missing'; exit 0; }
 
 . "$HNC_DIR/bin/hnc_lock.sh" 2>/dev/null || {
     gate_lock()   { return 0; }
@@ -59,7 +59,7 @@ emit_err() {
 
 gate_lock || {
     log "gate_lock failed, abort"
-    emit_err '"gate_lock failed"'
+    emit_err 'gate_lock failed'
     exit 1
 }
 

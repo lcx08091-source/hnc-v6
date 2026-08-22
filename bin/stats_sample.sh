@@ -22,8 +22,17 @@ DEVICES_FILE="$HNC_DIR/data/devices.json"
 LOG="$HNC_DIR/logs/stats.log"
 IPT_MGR="$HNC_DIR/bin/iptables_manager.sh"
 
-# 可通过环境变量覆盖用于测试
-STATS_ALL_CMD=${STATS_ALL_CMD:-"sh $IPT_MGR stats_all"}
+# 可通过环境变量覆盖用于测试（直接执行，不使用 eval）
+STATS_ALL_CMD=${STATS_ALL_CMD:-""}
+
+_run_stats_all() {
+  if [ -n "$STATS_ALL_CMD" ]; then
+    # shellcheck disable=SC2086
+    $STATS_ALL_CMD
+  else
+    sh "$IPT_MGR" stats_all
+  fi
+}
 
 log() {
     [ -d "$(dirname "$LOG")" ] || mkdir -p "$(dirname "$LOG")" 2>/dev/null
@@ -50,7 +59,7 @@ fi
 # stats_all 输出格式: "<ip> <rx_bytes> <tx_bytes>",每行一台
 # HNC_STATS 链没初始化的话 stats_all 输出空,直接退出,不写空采样
 
-stats_out=$(eval "$STATS_ALL_CMD" 2>/dev/null)
+stats_out=$(_run_stats_all 2>/dev/null)
 if [ -z "$stats_out" ]; then
     # 热点没开 / iptables 链没建 / 没设备连接,都走这里,不算错误
     exit 0

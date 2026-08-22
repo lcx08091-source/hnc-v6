@@ -13,9 +13,8 @@ OUT_JSON="$RUN/stats_v52_rc_smoke.json"
 OUT_TXT="$RUN/stats_v52_rc_smoke.txt"
 mkdir -p "$RUN" 2>/dev/null
 
-json_escape_into() {
+json_escape() {
   in="$1"
-  outvar="$2"
   out=""
   while [ -n "$in" ]; do
     c=${in%"${in#?}"}
@@ -29,7 +28,7 @@ json_escape_into() {
         ;;
     esac
   done
-  eval "$outvar=\$out"
+  printf '%s' "$out"
 }
 
 helper_json() {
@@ -84,7 +83,6 @@ SOURCE_JSON="$(helper_json stats_source_diag.sh)"
 
 status_of_into() {
   v="$1"
-  out="$2"
   case "$v" in
     *\"status\":\"*\"*)
       s=${v#*\"status\":\"}
@@ -93,29 +91,28 @@ status_of_into() {
       ;;
     *) s="unknown" ;;
   esac
-  eval "$out=\$s"
+  printf '%s' "$s"
 }
 
 bool_of_into() {
   key="$1"
   v="$2"
-  out="$3"
   prefix="\"$key\":"
   case "$v" in
     *"$prefix"true*) b=true ;;
     *"$prefix"false*) b=false ;;
     *) b=false ;;
   esac
-  eval "$out=\$b"
+  printf '%s' "$b"
 }
 
-status_of_into "$RC_JSON" RC_STATUS
-bool_of_into enabled "$RC_JSON" RC_ENABLED
-status_of_into "$READINESS_JSON" READY_STATUS
-bool_of_into ready "$READINESS_JSON" READY_BOOL
-status_of_into "$SHADOW_JSON" SHADOW_STATUS
-status_of_into "$COMPARE_JSON" COMPARE_STATUS
-status_of_into "$SOURCE_JSON" SOURCE_STATUS
+RC_STATUS=$(status_of_into "$RC_JSON")
+RC_ENABLED=$(bool_of_into enabled "$RC_JSON")
+READY_STATUS=$(status_of_into "$READINESS_JSON")
+READY_BOOL=$(bool_of_into ready "$READINESS_JSON")
+SHADOW_STATUS=$(status_of_into "$SHADOW_JSON")
+COMPARE_STATUS=$(status_of_into "$COMPARE_JSON")
+SOURCE_STATUS=$(status_of_into "$SOURCE_JSON")
 
 STATUS="pass"
 RECOMMENDATION="v5.2 stats RC smoke check passed; continue monitoring compare/readiness diagnostics"
@@ -157,15 +154,15 @@ fi
   echo "source_status=$SOURCE_STATUS"
 } > "$OUT_TXT"
 
-json_escape_into "$STATUS" E_STATUS
-json_escape_into "$RECOMMENDATION" E_RECOMMENDATION
-json_escape_into "$RC_STATUS" E_RC_STATUS
-json_escape_into "$READY_STATUS" E_READY_STATUS
-json_escape_into "$SHADOW_STATUS" E_SHADOW_STATUS
-json_escape_into "$COMPARE_STATUS" E_COMPARE_STATUS
-json_escape_into "$SOURCE_STATUS" E_SOURCE_STATUS
-json_escape_into "$OUT_JSON" E_OUT_JSON
-json_escape_into "$OUT_TXT" E_OUT_TXT
+E_STATUS=$(json_escape "$STATUS")
+E_RECOMMENDATION=$(json_escape "$RECOMMENDATION")
+E_RC_STATUS=$(json_escape "$RC_STATUS")
+E_READY_STATUS=$(json_escape "$READY_STATUS")
+E_SHADOW_STATUS=$(json_escape "$SHADOW_STATUS")
+E_COMPARE_STATUS=$(json_escape "$COMPARE_STATUS")
+E_SOURCE_STATUS=$(json_escape "$SOURCE_STATUS")
+E_OUT_JSON=$(json_escape "$OUT_JSON")
+E_OUT_TXT=$(json_escape "$OUT_TXT")
 
 printf '{"ok":true,"status":"%s","recommendation":"%s","components":{"v52_rc_control":"%s","rc_enabled":%s,"migration_readiness":"%s","readiness_ready":%s,"stats_shadow":"%s","stats_compare":"%s","stats_source":"%s"},"paths":{"json":"%s","text":"%s"}}\n' \
   "$E_STATUS" "$E_RECOMMENDATION" "$E_RC_STATUS" "$RC_ENABLED" "$E_READY_STATUS" "$READY_BOOL" "$E_SHADOW_STATUS" "$E_COMPARE_STATUS" "$E_SOURCE_STATUS" "$E_OUT_JSON" "$E_OUT_TXT" > "$OUT_JSON"

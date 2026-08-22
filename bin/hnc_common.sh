@@ -13,7 +13,11 @@
 
 # ─── 路径常量 ─────────────────────────────────────────────
 # shellcheck disable=SC2034  # 这些变量给 source 本库的脚本用, 不在本文件用
-HNC_DIR="${HNC_DIR:-/data/local/hnc}"
+# v5.9.3: 兼容两套变量名 — HNC_DIR (新, 25+ 脚本用) 和 HNC (旧, 6 个脚本用).
+# 优先取 HNC_DIR, 回退到 HNC, 最后兜底默认值. 两个变量都设好, 让新老脚本都能用.
+HNC_DIR="${HNC_DIR:-${HNC:-/data/local/hnc}}"
+# shellcheck disable=SC2034
+HNC="$HNC_DIR"
 # shellcheck disable=SC2034
 HNC_BIN="$HNC_DIR/bin"
 # shellcheck disable=SC2034

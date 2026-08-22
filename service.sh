@@ -20,15 +20,15 @@ HNC_DIR=/data/local/hnc
 LOG=$HNC_DIR/logs/service.log
 RUN=$HNC_DIR/run
 
-mkdir -p $HNC_DIR/logs $RUN
+mkdir -p "$HNC_DIR/logs" "$RUN"
 # v5.9.3 BUG-009:run/ 下有 local_admin.secret(middleware 认它就给 root 级
 # 写 API)。secret 文件本身早已是 0600,但目录 0777 且无 sticky 位时,别人
 # 可以直接 unlink 掉它再写一个自己的 —— 收目录才是真正的修法。
-chmod 700 $HNC_DIR $HNC_DIR/logs $RUN 2>/dev/null
-[ -d $HNC_DIR/data ] && chmod 700 $HNC_DIR/data 2>/dev/null
+chmod 700 "$HNC_DIR" "$HNC_DIR/logs" "$RUN" 2>/dev/null
+[ -d "$HNC_DIR/data" ] && chmod 700 "$HNC_DIR/data" 2>/dev/null
 # hotfix16.4: clear stale uplink degraded marker on service start; watchdog will re-probe.
-rm -f $RUN/uplink_unsupported $RUN/uplink_fail_count $RUN/uplink_unsupported_logged 2>/dev/null || true
-rm -rf $RUN/hnc_json.lock 2>/dev/null || true
+rm -f "$RUN/uplink_unsupported" "$RUN/uplink_fail_count" "$RUN/uplink_unsupported_logged" 2>/dev/null || true
+rm -rf "$RUN/hnc_json.lock" 2>/dev/null || true
 
 # rc13: /system/bin resilience. SukiSU/ColorOS 在运行期会间歇性把 /system/bin 从
 # 模块脚本的挂载命名空间里卸掉 → 裸命令 sleep/head/sh 等 ENOENT,watchdog/
@@ -89,12 +89,27 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [HNC] $1" >> $LOG
 }
 
+# H-6 fix (回移自 5.9.91 分叉线): PID TOCTOU protection — verify
+# /proc/$PID/cmdline contains expected binary name before trusting a pidfile
+# value. Prevents killing a recycled PID that now belongs to an unrelated process.
+_verify_pid() {
+    local pidfile="$1" expected="$2"
+    local pid
+    pid=$(cat "$pidfile" 2>/dev/null) || return 1
+    [ -n "$pid" ] || return 1
+    # Verify the process cmdline contains expected binary
+    if [ -f "/proc/$pid/cmdline" ]; then
+        grep -q "$expected" "/proc/$pid/cmdline" 2>/dev/null || return 1
+    fi
+    echo "$pid"
+}
+
 # rc17: keep C hotspot detector single-instance.  A manual service restart or
 # watchdog race may leave two hotspotd processes; keep the pidfile target and
 # remove extra instances before they both write devices.json.
 prune_duplicate_hotspotd() {
     local keep p seen
-    keep=$(cat "$RUN/hotspotd.pid" 2>/dev/null)
+    keep=$(_verify_pid "$RUN/hotspotd.pid" hotspotd)
     if [ -z "$keep" ] || ! kill -0 "$keep" 2>/dev/null; then
         keep=$(pidof hotspotd 2>/dev/null | awk '{print $1}')
         [ -n "$keep" ] && echo "$keep" > "$RUN/hotspotd.pid" 2>/dev/null || true
@@ -249,7 +264,7 @@ sync_runtime_from_moddir() {
     # 仅删除 /data/local/hnc 的运行时副本；模块目录里的正式二进制不删除。
     if [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
         log "runtime sync: stopping old hnc_httpd before replacing runtime binary"
-        oldpid=$(cat "$RUN/httpd.pid" 2>/dev/null)
+        oldpid=$(_verify_pid "$RUN/httpd.pid" hnc_httpd)
         [ -n "$oldpid" ] && kill -9 "$oldpid" 2>/dev/null || true
         if command -v pidof >/dev/null 2>&1; then
             for p in $(pidof hnc_httpd 2>/dev/null); do
@@ -360,8 +375,8 @@ log "v4.0.0-patch1.5 Defer Init: iface detection + tc/iptables init delegated to
 
 # v5.0: httpd 永远启动 (至少 loopback), 本机 WebUI 依赖它
 # REMOTE_ENABLED 只决定是否同时开热点段 HTTPS
-REMOTE_ENABLED=$(grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' \
-    $HNC_DIR/data/rules.json 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
+REMOTE_ENABLED=$("$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" remote_enabled 2>/dev/null \
+    || grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' $HNC_DIR/data/rules.json 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
 if [ "$REMOTE_ENABLED" = "true" ]; then
     log "remote_enabled=true, httpd.wanted marker set (watchdog will launch httpd with remote+loopback when hotspot ready)"
 else
@@ -464,7 +479,7 @@ DETECT_SHELL_PID=$!
 HPID=""
 i=0
 while [ $i -lt 50 ]; do
-    HPID=$(cat $RUN/hotspotd.pid 2>/dev/null)
+    HPID=$(_verify_pid $RUN/hotspotd.pid hotspotd)
     [ -n "$HPID" ] && kill -0 "$HPID" 2>/dev/null && break
     if usleep 100000 2>/dev/null; then
         i=$((i + 1))
@@ -500,8 +515,8 @@ prune_duplicate_hotspotd
 # 跟用户配置不一致. 现在改成每次调用都从 rules.json 实时读, 关闭这个窗口.
 launch_httpd_safe() {
     # 每次调用都重新读 rules.json (GPT 二审 P2 修复)
-    _remote_now=$(grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' \
-        "$HNC_DIR/data/rules.json" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
+    _remote_now=$("$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" remote_enabled 2>/dev/null \
+        || grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' "$HNC_DIR/data/rules.json" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
     if [ "$_remote_now" = "true" ]; then
         nohup "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" \
             -bind 0.0.0.0 -port 8443 -loopback-port 8444 \
@@ -534,7 +549,8 @@ fi
 # ─── 启动 Watchdog ──────────────────────────────────────────
 log "Starting watchdog..."
 prune_duplicate_watchdogs "service-prestart"
-WPID=$(cat "$RUN/watchdog.pid" 2>/dev/null)
+WPID=$(_verify_pid "$RUN/watchdog.pid" hnc_watchdog)
+WPID=${WPID:-$(_verify_pid "$RUN/watchdog.pid" watchdog)}
 if [ -n "$WPID" ] && kill -0 "$WPID" 2>/dev/null; then
     log "watchdog already running (PID=$WPID), skip duplicate launch"
 else
@@ -584,8 +600,8 @@ log "All services started. WebUI: open KernelSU manager → modules → HNC"
     # 格式假设: {"aa:bb:...":{..."limit_enabled":true...},...}
     # 用 grep 非贪婪粗暴匹配, 不引入 jq 依赖 (ColorOS 不装)
     RECOVERED=0
-    for MAC in $(grep -oE '"[0-9a-fA-F:]{17}"[^}]*"limit_enabled"[[:space:]]*:[[:space:]]*true' "$RULES" \
-                 | grep -oE '^"[0-9a-fA-F:]{17}"' \
+    for MAC in $(grep -oE '"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"[^}]*"limit_enabled"[[:space:]]*:[[:space:]]*true' "$RULES" \
+                 | grep -oE '^"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"' \
                  | tr -d '"'); do
         "$HNC_IPC" OFFLOAD_NOTIFY_LIMIT "$MAC" 1 >/dev/null 2>&1 && RECOVERED=$((RECOVERED+1))
     done
@@ -599,8 +615,8 @@ log "All services started. WebUI: open KernelSU manager → modules → HNC"
 
 # ─── 热点自动启动 ────────────────────────────────────────────
 # 读取 rules.json 里的 hotspot_auto 字段（WebUI 控制）
-HOTSPOT_AUTO=$(grep -o '"hotspot_auto"[[:space:]]*:[[:space:]]*[a-z]*' \
-    $HNC_DIR/data/rules.json 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
+HOTSPOT_AUTO=$("$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_auto 2>/dev/null \
+    || grep -o '"hotspot_auto"[[:space:]]*:[[:space:]]*[a-z]*' $HNC_DIR/data/rules.json 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
 
 if [ "$HOTSPOT_AUTO" = "true" ]; then
     log "hotspot_auto=true, launching hotspot_autostart.sh in background..."
@@ -858,7 +874,9 @@ else
     fi
 
     if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
-        gp=$(cat "$DPID_GUARD_PID" 2>/dev/null)
+        gp=$(_verify_pid "$DPID_GUARD_PID" hnc_launcher)
+        gp=${gp:-$(_verify_pid "$DPID_GUARD_PID" hnc_dpid_guard)}
+        gp=${gp:-$(_verify_pid "$DPID_GUARD_PID" hnc_dpid_supervisor)}
         if [ -n "$gp" ] && kill -0 "$gp" 2>/dev/null; then
             log "hnc_dpid launcher already running (PID=$gp, choice=$LAUNCHER_CHOICE), skip duplicate launch"
         else

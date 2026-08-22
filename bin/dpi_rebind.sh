@@ -53,6 +53,12 @@ kill_pidfile(){
 }
 
 IFACE=$(get_iface "$1")
+# Validate iface name (must match Go-side regex, 回移自 5.9.91 分叉线;
+# 与 hnc_httpd action.go 的 ifaceNameRE 保持同一字符集)
+if ! printf '%s' "$IFACE" | grep -qE '^[A-Za-z0-9_.:-]{1,32}$'; then
+    echo "invalid iface: $IFACE" >&2
+    exit 1
+fi
 log "manual rebind requested iface=$IFACE"
 write_state "$IFACE" "manual DPI rebind requested; restarting guard/capture on $IFACE"
 

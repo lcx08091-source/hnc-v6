@@ -14,6 +14,37 @@
 
 ---
 
+## [5.9.5] - 2026-08-22
+
+**分叉线加固回移批**(纯 shell / 前端,零 Go、零 C,不重编二进制)。来源:用户提供的 `HNC-v5_9_91-arm64` 构建包——一条从 v5.9.3 分叉出去的平行开发线(自带 v5.9.4→v5.9.91 共 7 个小版本)。逐文件 diff 审查后,回移其 shell 层的安全与健壮性修复;两条线的修复集零重叠(该分叉不含本仓库 v5.9.4 的 13 项审查修复,本仓库亦不含其下列改动)。
+
+### Fixed
+
+- **H-6:PID TOCTOU 防护**(`service.sh`)。5 处 pidfile 读取(hotspotd 去重 / httpd 运行时替换 / hotspotd 启动等待 / watchdog 去重 / dpid launcher 去重)从裸 `cat pidfile` 改为先验 `/proc/$PID/cmdline` 含预期二进制名再信任——防止 PID 被回收后 `kill -9` 误杀无关进程。
+- **锁 stale 重查**(`bin/hnc_lock.sh`)。抢锁失败时 stale 检查从"仅第 20 轮查一次"改为"第 20 轮起每 10 轮重查";长等待期间持锁者恰好崩溃,不再白等到底。mac 锁与 gate 锁两处都修(分叉线只修了 mac 处,gate 处为同型补齐)。
+- **offload 限额恢复的 MAC 匹配过宽**(`service.sh`)。`[0-9a-fA-F:]{17}` 会匹配任意 17 个 hex/冒号字符(如 `:::::::::::`),改为精确的 6 组 hex 对 `([0-9a-fA-F]{2}(:...){5})`。
+- **json-health H-5**(`webroot/json-health.html`)。JSON 起点探测 `replace(/^.*?(\{)/s)` 在前缀文本本身含 `{` 时会误匹配,改为 `search(/\{\s*"/)` 精确找对象字面量起点(两处)。
+- **设置页 debug-bundle 行脱离卡片**(`webroot/index.html`)。div 嵌套错误让"导出诊断包"行游离在 `setting-group` 容器外,归位到维护卡片内。
+- **emit_err JSON 引号**(`bin/cleanup_offline_devices.sh`)。错误消息的 JSON 引号由格式串统一补,调用方不再手拼。
+
+### Changed
+
+- **rules.json 读取统一走 hnc_json**(`service.sh`)。remote_enabled / hotspot_auto 三处读取改 `hnc_json get-top` 优先 + 原 grep 兜底,与 rc30.12.18 后其余脚本的单源化方向一致。
+- **stats 系列去 eval**(`bin/stats_sample.sh`、`stats_shadow_sample.sh`、`stats_health_summary.sh`、`stats_v52_device_check.sh`、`stats_v52_diag_bundle.sh`、`stats_v52_rc_smoke.sh`)。`eval "$STATS_ALL_CMD"` 与 outvar 模式(`eval "$outvar=\$out"`)全部改为直接执行 / stdout 捕获 `$(...)`,消除 shell 注入面与转义陷阱。
+- **新装默认开认证**(`post-fs-data.sh`)。默认 rules.json 的 `auth_required` 从 false 改 true(rc30.12.18 起后端已是"默认拒绝"语义,这让配置面与现实一致;存量装机由 service.sh 的单向迁移处理,不受影响)。
+- **开机日志三级轮转**(`post-fs-data.sh`)。boot.log 超限时从单级 `mv .log.1` 改三级轮转(.log.2 删、.log.1→.log.2、.log→.log.1),保留更多启动期历史;`wc -c` 输出加 `tr -d ' '` 兜底。
+- **路径引号加固**(`service.sh` / `post-fs-data.sh`)。两脚本全文未加引号的路径变量补引号。
+- **HNC/HNC_DIR 双变量名统一**(`bin/hnc_common.sh` / `bin/hnc_constants.sh`)。`HNC_DIR` 优先、回退旧名 `HNC` 并双向设好,6 个仍用旧名的脚本与 25+ 用新名的脚本互不影响。
+- **cleanup 清单补 hnc_launcher**(`bin/cleanup.sh`)。模块停用时 pkill 漏掉 C 启动器。
+- **dpi_rebind IFACE 白名单**(`bin/dpi_rebind.sh`)。接口名过 `^[A-Za-z0-9_.:-]{1,32}$`,与 hnc_httpd `ifaceNameRE` 同字符集。
+
+### 未回移(有意)
+
+- **eBPF clsact T1 ingress**(分叉线的 v5.9.9/v5.9.91 主线):功能不完整——`_hnc_update_clsact_map` 是 TODO 空壳(map 无写者)、`hnc_clsact_watchdog.sh` 不被 cleanup/uninstall 回收(模块停止后 BPF filter 与看门狗进程残留)、`tcx_spike_test.sh` 引用的二进制未随包发布。等上游补完再评估。
+- **仅存在于其 ARM 二进制的改动**(DPI 2.0 证据账本 / 自动重绑 / clsact_check API 等):分叉线未发布源码,无法审计与重编,不做二进制级混包(与仓库"CI 重编 + 源码指纹护栏"的发布纪律冲突)。
+
+---
+
 ## [5.9.4] - 2026-08-22
 
 多 Agent 协同代码审查(安全 / 性能与网络逻辑 / 可维护性 / 前端体验四个并行审查,只保留高置信度问题)的修复批。共 13 项,全部为 Go(hnc_httpd + dpid)与纯前端改动,不涉 C;二次审查(两个独立审查 Agent 逐项核对)确认修复生效、无新回归。

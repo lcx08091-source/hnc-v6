@@ -14,7 +14,16 @@ LOG="$HNC_DIR/logs/stats.log"
 RAW_FILE="$DATA/stats_shadow_raw.jsonl"
 DEVICES_FILE="$DATA/devices.json"
 IPT_MGR="$HNC_DIR/bin/iptables_manager.sh"
-STATS_ALL_CMD=${STATS_ALL_CMD:-"sh $IPT_MGR stats_all"}
+STATS_ALL_CMD=${STATS_ALL_CMD:-""}
+
+_run_stats_all() {
+  if [ -n "$STATS_ALL_CMD" ]; then
+    # shellcheck disable=SC2086
+    $STATS_ALL_CMD
+  else
+    sh "$IPT_MGR" stats_all
+  fi
+}
 
 extract_device_ips() {
   grep -oE '"ip"[[:space:]]*:[[:space:]]*"([0-9]{1,3}\.){3}[0-9]{1,3}"' "$DEVICES_FILE" 2>/dev/null | \
@@ -49,10 +58,10 @@ if [ ! -f "$DEVICES_FILE" ]; then
   exit 0
 fi
 
-stats_out=$(eval "$STATS_ALL_CMD" 2>/dev/null)
+stats_out=$(_run_stats_all 2>/dev/null)
 if [ -z "$stats_out" ]; then
   ensure_shadow_stats_rules || true
-  stats_out=$(eval "$STATS_ALL_CMD" 2>/dev/null)
+  stats_out=$(_run_stats_all 2>/dev/null)
 fi
 [ -n "$stats_out" ] || exit 0
 

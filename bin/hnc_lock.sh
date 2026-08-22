@@ -198,8 +198,10 @@ mac_lock() {
             return 0
         fi
 
-        # 抢锁失败(别人占着): 第 20 轮起检查 stale
-        if [ $i -eq $_LOCK_STALE_CHECK_ROUND ]; then
+        # 抢锁失败(别人占着): 第 20 轮起检查 stale,之后每 10 轮重查
+        # (回移自 5.9.91 分叉线: 原来只在第 20 轮查一次,长等待期间持锁者
+        # 恰好崩溃会白等到底)
+        if [ "$i" -ge 20 ] && [ $(( (i - 20) % 10 )) -eq 0 ]; then
             _try_reclaim_stale "$lockdir"
         fi
 
@@ -243,8 +245,8 @@ gate_lock() {
             break
         fi
 
-        # stale 检查
-        if [ $i -eq $_LOCK_STALE_CHECK_ROUND ]; then
+        # stale 检查(同上,第 20 轮起每 10 轮重查)
+        if [ "$i" -ge 20 ] && [ $(( (i - 20) % 10 )) -eq 0 ]; then
             _try_reclaim_stale "$GATE_LOCK"
         fi
 

@@ -13,9 +13,8 @@ OUT_JSON="$RUN/stats_v52_diag_bundle.json"
 OUT_TXT="$RUN/stats_v52_diag_bundle.txt"
 mkdir -p "$RUN" 2>/dev/null
 
-json_escape_into() {
+json_escape() {
   in="$1"
-  outvar="$2"
   out=""
   while [ -n "$in" ]; do
     c=${in%"${in#?}"}
@@ -26,7 +25,7 @@ json_escape_into() {
       *) out="${out}${c}" ;;
     esac
   done
-  eval "$outvar=\$out"
+  printf '%s' "$out"
 }
 
 helper_json() {
@@ -42,7 +41,6 @@ present_of() { [ -x "$BIN/$1" ] && echo true || echo false; }
 
 status_of_into() {
   v="$1"
-  out="$2"
   case "$v" in
     *\"status\":\"*\"*)
       s=${v#*\"status\":\"}
@@ -51,20 +49,19 @@ status_of_into() {
       ;;
     *) s="unknown" ;;
   esac
-  eval "$out=\$s"
+  printf '%s' "$s"
 }
 
 bool_of_into() {
   key="$1"
   v="$2"
-  out="$3"
   prefix="\"$key\":"
   case "$v" in
     *"$prefix"true*) b=true ;;
     *"$prefix"false*) b=false ;;
     *) b=false ;;
   esac
-  eval "$out=\$b"
+  printf '%s' "$b"
 }
 
 class_of_status() {
@@ -77,17 +74,17 @@ class_of_status() {
   esac
 }
 
-DIAG_JSON="$(helper_json stats_diag.sh)"; status_of_into "$DIAG_JSON" DIAG_STATUS
-IDENTITY_JSON="$(helper_json stats_identity_diag.sh)"; status_of_into "$IDENTITY_JSON" IDENTITY_STATUS
-RETENTION_JSON="$(helper_json stats_retention_diag.sh)"; status_of_into "$RETENTION_JSON" RETENTION_STATUS
-SHADOW_JSON="$(helper_json stats_shadow_diag.sh)"; status_of_into "$SHADOW_JSON" SHADOW_STATUS
-SHADOW_CONTROL_JSON="$(helper_json stats_shadow_control.sh)"; status_of_into "$SHADOW_CONTROL_JSON" SHADOW_CONTROL_STATUS
-SOURCE_JSON="$(helper_json stats_source_diag.sh)"; status_of_into "$SOURCE_JSON" SOURCE_STATUS
-COMPARE_JSON="$(helper_json stats_compare.sh)"; status_of_into "$COMPARE_JSON" COMPARE_STATUS
-READINESS_JSON="$(helper_json stats_migration_readiness.sh)"; status_of_into "$READINESS_JSON" READINESS_STATUS; bool_of_into ready "$READINESS_JSON" READINESS_READY
-RC_JSON="$(helper_json stats_v52_rc_control.sh)"; status_of_into "$RC_JSON" RC_STATUS; bool_of_into enabled "$RC_JSON" RC_ENABLED
-SMOKE_JSON="$(helper_json stats_v52_rc_smoke.sh)"; status_of_into "$SMOKE_JSON" SMOKE_STATUS
-SUMMARY_JSON="$(helper_json stats_health_summary.sh)"; status_of_into "$SUMMARY_JSON" SUMMARY_STATUS
+DIAG_JSON="$(helper_json stats_diag.sh)"; DIAG_STATUS=$(status_of_into "$DIAG_JSON")
+IDENTITY_JSON="$(helper_json stats_identity_diag.sh)"; IDENTITY_STATUS=$(status_of_into "$IDENTITY_JSON")
+RETENTION_JSON="$(helper_json stats_retention_diag.sh)"; RETENTION_STATUS=$(status_of_into "$RETENTION_JSON")
+SHADOW_JSON="$(helper_json stats_shadow_diag.sh)"; SHADOW_STATUS=$(status_of_into "$SHADOW_JSON")
+SHADOW_CONTROL_JSON="$(helper_json stats_shadow_control.sh)"; SHADOW_CONTROL_STATUS=$(status_of_into "$SHADOW_CONTROL_JSON")
+SOURCE_JSON="$(helper_json stats_source_diag.sh)"; SOURCE_STATUS=$(status_of_into "$SOURCE_JSON")
+COMPARE_JSON="$(helper_json stats_compare.sh)"; COMPARE_STATUS=$(status_of_into "$COMPARE_JSON")
+READINESS_JSON="$(helper_json stats_migration_readiness.sh)"; READINESS_STATUS=$(status_of_into "$READINESS_JSON"); READINESS_READY=$(bool_of_into ready "$READINESS_JSON")
+RC_JSON="$(helper_json stats_v52_rc_control.sh)"; RC_STATUS=$(status_of_into "$RC_JSON"); RC_ENABLED=$(bool_of_into enabled "$RC_JSON")
+SMOKE_JSON="$(helper_json stats_v52_rc_smoke.sh)"; SMOKE_STATUS=$(status_of_into "$SMOKE_JSON")
+SUMMARY_JSON="$(helper_json stats_health_summary.sh)"; SUMMARY_STATUS=$(status_of_into "$SUMMARY_JSON")
 
 HAS_DIAG=$(present_of stats_diag.sh)
 HAS_IDENTITY=$(present_of stats_identity_diag.sh)
@@ -155,21 +152,21 @@ fi
   echo "stats_retention=$RETENTION_STATUS"
 } > "$OUT_TXT"
 
-json_escape_into "$STATUS" E_STATUS
-json_escape_into "$RECOMMENDATION" E_RECOMMENDATION
-json_escape_into "$SUMMARY_STATUS" E_SUMMARY
-json_escape_into "$RC_STATUS" E_RC
-json_escape_into "$SMOKE_STATUS" E_SMOKE
-json_escape_into "$READINESS_STATUS" E_READINESS
-json_escape_into "$COMPARE_STATUS" E_COMPARE
-json_escape_into "$SOURCE_STATUS" E_SOURCE
-json_escape_into "$SHADOW_STATUS" E_SHADOW
-json_escape_into "$SHADOW_CONTROL_STATUS" E_SHADOW_CONTROL
-json_escape_into "$DIAG_STATUS" E_DIAG
-json_escape_into "$IDENTITY_STATUS" E_IDENTITY
-json_escape_into "$RETENTION_STATUS" E_RETENTION
-json_escape_into "$OUT_JSON" E_OUT_JSON
-json_escape_into "$OUT_TXT" E_OUT_TXT
+E_STATUS=$(json_escape "$STATUS")
+E_RECOMMENDATION=$(json_escape "$RECOMMENDATION")
+E_SUMMARY=$(json_escape "$SUMMARY_STATUS")
+E_RC=$(json_escape "$RC_STATUS")
+E_SMOKE=$(json_escape "$SMOKE_STATUS")
+E_READINESS=$(json_escape "$READINESS_STATUS")
+E_COMPARE=$(json_escape "$COMPARE_STATUS")
+E_SOURCE=$(json_escape "$SOURCE_STATUS")
+E_SHADOW=$(json_escape "$SHADOW_STATUS")
+E_SHADOW_CONTROL=$(json_escape "$SHADOW_CONTROL_STATUS")
+E_DIAG=$(json_escape "$DIAG_STATUS")
+E_IDENTITY=$(json_escape "$IDENTITY_STATUS")
+E_RETENTION=$(json_escape "$RETENTION_STATUS")
+E_OUT_JSON=$(json_escape "$OUT_JSON")
+E_OUT_TXT=$(json_escape "$OUT_TXT")
 
 printf '{"ok":true,"status":"%s","recommendation":"%s","helpers":{"stats_health_summary":%s,"stats_v52_rc_control":%s,"stats_v52_rc_smoke":%s,"stats_migration_readiness":%s,"stats_compare":%s,"stats_source_diag":%s,"stats_shadow_diag":%s,"stats_shadow_control":%s,"stats_diag":%s,"stats_identity_diag":%s,"stats_retention_diag":%s},"components":{"stats_health_summary":"%s","stats_v52_rc_control":"%s","stats_v52_rc_enabled":%s,"stats_v52_rc_smoke":"%s","stats_migration_readiness":"%s","stats_migration_ready":%s,"stats_compare":"%s","stats_source":"%s","stats_shadow":"%s","stats_shadow_control":"%s","stats_diag":"%s","stats_identity":"%s","stats_retention":"%s"},"paths":{"json":"%s","text":"%s"}}\n' \
   "$E_STATUS" "$E_RECOMMENDATION" "$HAS_SUMMARY" "$HAS_RC" "$HAS_SMOKE" "$HAS_READINESS" "$HAS_COMPARE" "$HAS_SOURCE" "$HAS_SHADOW" "$HAS_SHADOW_CONTROL" "$HAS_DIAG" "$HAS_IDENTITY" "$HAS_RETENTION" \
