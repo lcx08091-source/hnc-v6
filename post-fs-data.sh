@@ -129,7 +129,7 @@ for _dir in "$MODDIR/bin" "$HNC_DIR/bin"; do
     [ -d "$_dir" ] || continue
     for _b in hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_json \
               hnc_dpid hnc_dpid_supervisor hnc_watchdog \
-              hnc_launcher fork_probe; do
+              hnc_launcher fork_probe \n              hnc_clsact_ctl; do
         if [ -f "$_dir/$_b" ]; then
             chmod 755 "$_dir/$_b"
             chcon u:object_r:system_file:s0 "$_dir/$_b" 2>/dev/null || true

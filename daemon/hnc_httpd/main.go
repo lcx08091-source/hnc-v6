@@ -52,6 +52,10 @@ var (
 // build.sh 会在编译时读 module.prop 的 version 字段注入此变量.
 var version = "dev"
 
+// v5.9.9: build.sh 用 -X main.versionCode 从 module.prop 注入。
+// 关于页据此显示真实 versionCode(此前前端把它硬编码在 data-vcode 属性)。
+var versionCode = "0"
+
 func main() {
 	flag.Parse()
 

@@ -86,8 +86,9 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 		"total":           total,
 		"rx_bps":          rxBps,
 		"tx_bps":          txBps,
-		"devices_sig":     liveDevicesSig(devices, active, iface),
-		"backend_version": version,
+		"devices_sig":          liveDevicesSig(devices, active, iface),
+		"backend_version":      version,
+		"backend_version_code": versionCode,
 	})
 }
 

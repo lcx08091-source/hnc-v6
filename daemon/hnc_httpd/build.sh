@@ -32,8 +32,13 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-echo "Building hnc_httpd for android/arm64 (version=$VERSION)..."
-go build -ldflags="-s -w -X main.version=$VERSION" -o hnc_httpd .
+# v5.9.9: versionCode 一并注入 —— 关于页此前把它写死在 HTML 的 data-vcode
+# 属性里(580000), 版本升了 code 不变, 用户看到 "v5.9.8 · versionCode 580000"。
+VERSION_CODE=$(grep "^versionCode=" ../../module.prop 2>/dev/null | cut -d= -f2)
+[ -z "$VERSION_CODE" ] && VERSION_CODE=0
+
+echo "Building hnc_httpd for android/arm64 (version=$VERSION code=$VERSION_CODE)..."
+go build -ldflags="-s -w -X main.version=$VERSION -X main.versionCode=$VERSION_CODE" -o hnc_httpd .
 
 echo "OK: $(ls -la hnc_httpd)"
 file hnc_httpd

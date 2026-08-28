@@ -125,6 +125,11 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/offload_status", s.apiOffloadStatus) // v5.1 P2-6
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
+	// v5.9.9: 另两个磁盘页此前没有路由 —— json-health.html 完全没有入口
+	// (死页面), ndpi-lab.html 只在 KSU WebUI 的 file:// 同目录下能打开,
+	// 远程/浏览器访问 404。两者都补上, 与 changelog 同款只读 serve。
+	mux.HandleFunc("/json-health.html", s.serveWebrootPage("json-health.html"))
+	mux.HandleFunc("/ndpi-lab.html", s.serveWebrootPage("ndpi-lab.html"))
 
 	// v4.0 Patch 3.a: 写操作统一 endpoint, 内部白名单 + per-token rate limit + CSRF
 	// 必经 authMiddleware(不允许过渡期匿名写)
@@ -280,6 +285,23 @@ func (s *server) serveChangelog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.NotFound(w, r)
+}
+
+// serveWebrootPage 返回一个只读 serve 磁盘 webroot/<name> 的 handler。
+// v5.9.9: 抽出来给 json-health.html / ndpi-lab.html 共用(与 serveChangelog
+// 同款: 固定磁盘路径 + nosniff, 文件缺失 404)。name 由调用方以字面量给出,
+// 不接受请求参数, 无路径穿越面。
+func (s *server) serveWebrootPage(name string) http.HandlerFunc {
+	diskPath := "/data/adb/modules/hotspot_network_control/webroot/" + name
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		if data, err := os.ReadFile(diskPath); err == nil && len(data) > 0 {
+			_, _ = w.Write(data)
+			return
+		}
+		http.NotFound(w, r)
+	}
 }
 
 func (s *server) serveStatic(w http.ResponseWriter, r *http.Request) {

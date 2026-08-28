@@ -403,6 +403,17 @@ jobs:
             -x "daemon/**/*.go" \
             -x "daemon/**/*.c" \
             -x "daemon/**/*.h" \
+            -x "patches/*" -x "patches" \
+            -x "tools/*" -x "tools" \
+            -x "daemon/**/web/*" \
+            -x "daemon/**/build.sh" \
+            -x "daemon/**/Android.mk" \
+            -x "daemon/**/README.md" \
+            -x "daemon/**/test_cases.md" \
+            -x "*.patch" \
+            -x "BUGSV5-TRIAGE.md" \
+            -x "CODE-ARCHITECTURE-REVIEW-*.md" \
+            -x "CODE-REVIEW-V2-*.md" \
             -x "PATCH-NOTES-*.md" \
             -x "MIGRATION-PROPOSAL-*.md" \
             -x "ARCHITECTURE.md" \

@@ -14,6 +14,44 @@
 
 ---
 
+## [5.9.9] - 2026-08-22
+
+**全方位扫描修复批**。两路并行审查(前端接线深扫 / 死文件+假文件审计)后的修复,含一个让 v5.9.7-v5.9.8 主打功能完全失效的部署缺陷。
+
+### Fixed
+
+- **clsact BPF 在 v5.9.7/v5.9.8 实际不可用**(`post-fs-data.sh` / `service.sh`)。新加的 `hnc_clsact_ctl` 二进制没进那两处 `chmod 755 + chcon u:object_r:system_file:s0` 白名单 —— 从模块目录拷到 `/data/local/hnc/bin/` 后是 `644` + `system_data_file:s0`,而三处门控(`service.sh` watchdog 启动、`tc_manager.sh` 的 `_hnc_clsact_enabled`、`hnc_clsact_watchdog.sh`)全是 `[ -x ]` 判定 → **开了开关也全链路静默降级,用户看不到任何错误**。同型前科已有两次,就写在 `post-fs-data.sh` 的注释里:beta.1 漏 `hnc_tc_ingress` 导致上行限速失败、rc30.8 漏 `hnc_dpid_supervisor`/`hnc_watchdog` 导致后端起不来。
+- **「导出诊断包」是死按钮**(`bin/debug_bundle.sh` 新建)。WebUI 从第一版起就调 `$HNC/bin/debug_bundle.sh`,但仓库里从来没有这个文件,点了必报错。现补上真实实现:环境摘要、配置/状态 JSON(password/pass/secret/token/pin/psk 与 `X-HNC-Local-Admin` 全部脱敏,`remote_tokens.json` 只留键名)、每个日志尾 400 行、`ip`/`tc`/`iptables`/`arp` 状态、进程与自检输出、clsact 状态,打成 `tar.gz`(tar 不可用则留目录形式)。
+- **统计来源下拉完全失效**(`webroot/index.html`)。`onStatsSourceChange` 定义在主脚本的 IIFE 内部,而唯一调用点是内联 `onchange=` 属性 —— 内联属性只能在全局作用域解析,每次切换都是 `ReferenceError` 被 WebView 静默吞掉:localStorage 不写、图不重绘、无 toast。改为 `window.onStatsSourceChange = function …`(同文件其余 13 个内联 handler 都有 window 导出,只有这个漏了)。
+- **clsact 面板三个问题**:① 旧「检查并修复」在检出缺失后**无条件**调 `clsact_repair` —— 开关显示 OFF 时也会安装内核 pref1 BPF filter + pin map,UI 态与内核态劈裂,且是未经用户同意的数据面变更;② `data-action="clsact_check"` 根本没有处理分支,点整行会落到委托兜底、弹出一个内容为字符串 `clsact_check` 的**假成功** toast(行内按钮的 `onclick` 又会让每次点击多弹一个);③ 状态行从不自动刷新,进设置页永远停在「—」。现在:查/修拆成两个按钮与两个独立函数、修复按钮仅在功能已启用且检出缺失时可点、进设置页自动查一次、关闭态直接显示「未启用」而不是四个 ❌(旧显示会让人以为功能坏了)、`checkClsact` 从 `init` 的 try 块内提到 IIFE 顶层(块级作用域 + 内联 onclick 有竞态窗口)。
+- **点击委托兜底把「漏接」伪装成「成功」**。`toast(act, 'ok')` 是本次两个「点了没反应」缺陷(`clsact_check`、`modal-close`)能进版本的根因 —— 人工点测时都不像 bug。改为 `dbg(…, true)` + 红色 toast 显式告警。
+- **配对失败弹窗的「关闭」按钮点不动**:`data-action="modal-close"` 全文件仅此一处且无处理器,其余 10 个弹窗关闭按钮都用 `modal-cancel`,是笔误。
+- **关于页 versionCode 永久陈旧**。前端从 HTML 的 `data-vcode="580000"` 死属性读取,版本升了 code 不变,实机显示「v5.9.8 · versionCode 580000」。改为 `build.sh` 用 `-X main.versionCode` 从 module.prop 注入 → `/api/live` 返回 `backend_version_code` → 前端读后端值(缺失时回退旧属性)。
+- **CSS 失效选择器**:`#dpi-ndpi-group` 在全文件无对应元素(规则名改过但旧选择器没删);同时补上当初漏进那条 padding 规则的四个同型 group(`dpi-cap-group`/`dpi-history-group`/`dpi-process-group`/`ndpi-lab-group`),它们的卡片内容同样会被 `overflow:hidden` 的圆角裁切。
+
+### Removed
+
+- **两个有害死文件**:`bin/webui_embed_json_health_entry.sh`(零引用,但内含 `sed -i` 会把 `module.prop` 的 version 篡改回 `v5.1.0-rc1-hotfix18.7`、versionCode 改 `509187`)、`tools/cleanup-b3-revert.sh`(要 `git rm bin/inject_version_to_docs.sh`,而该脚本自 v5.9.3 已接进 CI 作版本注入护栏,执行它会打断发布流程)。
+- 三个零引用 selfcheck 脚本:`bin/rc13_release_resource_selfcheck.sh`、`bin/rc16_startup_selfcheck.sh`、`bin/rc17_startup_selfcheck.sh`(后者是 `rc17_process_health.sh` 的包装层,而 WebUI 直接调被包装的那个,绕过了它;`rc17_process_health.sh` 保留)。
+- 三个死函数:`ndpiContinuousStatusBackend`(已被 `ReadObsBackend` 取代)、`restartServiceBackend`、`runBtnWithFeedback`。
+
+### Added
+
+- **`json-health.html` 从死页面接回**:此前它零链接、httpd 也没路由,唯一入口是上面那个从未被调用的注入脚本 —— 结果是 `json_health_panel.sh`/`json_diag_bundle.sh` 加 20+ 个 `stats_*` 脚本(约 288KB)构成一个自洽闭环却无任何 UI 入口。现在设置页诊断段加入口 + httpd 注册 `/json-health.html` 路由。
+- `ndpi-lab.html` 补 httpd 路由(此前只能在 KSU WebUI 的 `file://` 同目录下打开,远程/浏览器访问 404)。
+- 「读取 nDPI 状态」按钮补回(handler 与 `ndpiLabStatusBackend` 都是完整实现,只是没有按钮触发)。
+
+### Changed
+
+- 刷机包排除清单收紧:`patches/`、`tools/`、`daemon/**/web/`(已 go:embed,磁盘副本零读取)、各 `build.sh`/`Android.mk`/构建期 README、`*.patch`、历史审查 md(BUGSV5-TRIAGE / CODE-ARCHITECTURE-REVIEW / CODE-REVIEW-V2),约减 600KB。已核实 v5.9.7 的 clsact 四件套(`hnc_clsact_watchdog.sh`/`hnc_clsact_sync.sh`/`hnc_clsact_ctl`/`hnc_clsact.o`)全部不受这些规则影响,仍正常进包。
+
+### 已知遗留(有意不在本版处理)
+
+- 设置页「重启服务」与「保存热点接口」仍走 `kexec` 直调 shell,绕过了后端已有的 `restart_service` / `hotspot_iface_set` action(那两条路径有 auth/CSRF/ratelimit/audit 覆盖,shell 路径没有)。属架构层面的双写路径债,与仓库里记录的 toggle-auth 历史 P0 同源,单独处理。
+- `daemon/hotspotd/lsm/` 的 BPF LSM guard 自 v5.8.7 起走 stub(恒返回 DISABLED),`bpf/*.o` 又被打包排除、而 `post-fs-data.sh` 仍有部署块 —— 三方不一致,需要一次性决策(修真 loader 或删部署块),不在本版。
+
+---
+
 ## [5.9.8] - 2026-08-22
 
 **v5.9.7 前后端接线复查批**。对 v5.9.7 合入的前后端接线做定向审查(前端契约、Go 计数、shell 数据流),修掉两个真 bug;前端契约检查全部对齐。

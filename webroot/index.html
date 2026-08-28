@@ -3696,6 +3696,7 @@ body.kb-open .container {
         <button type="button" class="btn btn-primary dpi-action-btn" data-action="ndpi-probe">一键探测 nDPI</button>
         <button type="button" class="btn btn-ghost dpi-action-btn" data-action="ndpi-sample">采样 10 秒</button>
         <button type="button" class="btn btn-ghost dpi-action-btn" data-action="ndpi-sample-read">读取采样结果</button>
+        <button type="button" class="btn btn-ghost dpi-action-btn" data-action="ndpi-status">读取 nDPI 状态</button>
         <button type="button" class="btn btn-ghost dpi-action-btn" data-action="ndpi-open">打开实验页</button>
       </div>
       <div id="ndpi-lab-cards" class="ndpi-lab-cards"></div>
@@ -4558,10 +4559,16 @@ body.kb-open .container {
   /* rc30.12.6: dpi-l2 卡片内 padding 修复.
    * .setting-group 自身 padding=0 + overflow:hidden, 内部纯 div 没 padding 直接顶到圆角边, 被裁切.
    * 修法: 给只有空状态文本的 group 内部加 padding. */
+  /* v5.9.9: #dpi-ndpi-group 是被改过名的旧选择器(全文件无对应元素), 删掉;
+   * 同时补上当初漏进这条规则的四个同型 group —— 它们的卡片内部同样是纯 div
+   * 直接顶到 overflow:hidden 的圆角边, 会被裁切。 */
   #dpi-l2-group,
   #dpi-unknown-group,
   #dpi-rules-group,
-  #dpi-ndpi-group,
+  #dpi-cap-group,
+  #dpi-history-group,
+  #dpi-process-group,
+  #ndpi-lab-group,
   #ndpi-continuous-group {
     padding: 4px 4px;
   }
@@ -5437,6 +5444,14 @@ body.kb-open .container {
         <span class="set-action-hint">导出</span>
       </div>
 
+      <div class="set-row clickable" data-action="json-health">
+        <div class="set-icon blue"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">JSON 健康面板</div>
+          <div class="set-desc">rules/devices/tokens 等配置文件的完整性与备份状态</div>
+        </div>
+        <span class="set-action-hint">打开</span>
+      </div>
       <div class="set-row clickable" data-action="debug-bundle">
         <div class="set-icon green"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg></div>
         <div class="set-info">
@@ -5448,8 +5463,8 @@ body.kb-open .container {
     </div>
 
     <!-- clsact BPF (T1 tier, opt-in) -->
-    <div class="sec-title">clsact BPF（实验性）</div>
-    <div class="setting-group glass-elevated">
+    <div class="sec-title" id="clsact-section-title">clsact BPF（实验性）</div>
+    <div class="setting-group glass-elevated" id="clsact-group">
       <div class="set-row">
         <div class="set-icon orange"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/></svg></div>
         <div class="set-info">
@@ -5458,14 +5473,15 @@ body.kb-open .container {
         </div>
         <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="启用 clsact BPF" data-action="toggle-clsact" id="clsact-toggle"></div>
       </div>
-      <div class="set-row clickable" data-action="clsact_check">
+      <div class="set-row">
         <div class="set-icon blue"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><path d="M9 12l2 2 4-4"/></svg></div>
         <div class="set-info">
           <div class="set-label">clsact BPF 状态</div>
           <div class="set-desc">qdisc · BPF filter · map · watchdog</div>
         </div>
         <div class="set-value" id="clsact-status">—</div>
-        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" onclick="checkClsact()">检查并修复</button>
+        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" data-action="clsact-status-check">检查</button>
+        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px;margin-left:6px" data-action="clsact-repair" id="clsact-repair-btn" disabled>修复</button>
       </div>
     </div>
     <!-- About -->
@@ -6640,7 +6656,6 @@ body.kb-open .container {
   async function clearAllRulesBackend()   { await apiAction('cleanup_rules'); return true; }
   async function stopAllServicesBackend() { await apiAction('cleanup_all'); return true; }
   async function manualRefreshBackend()   { await apiAction('refresh'); return true; }
-  async function restartServiceBackend()  { await apiAction('restart_service'); return true; }
   async function dpiRebindBackend() {
     // rc17: prefer Go /api/action when the rebuilt backend supports it, but
     // fall back to direct KSU/SukiSU bridge so older/stale httpd can still be rescued.
@@ -6739,9 +6754,6 @@ body.kb-open .container {
   }
   async function ndpiContinuousStop() {
     return ndpiLabRun('ndpi_continuous.sh', 'stop', '');
-  }
-  async function ndpiContinuousStatusBackend() {
-    return ndpiLabRun('ndpi_continuous.sh', 'status', '');
   }
   async function ndpiContinuousReadObsBackend() {
     const cmd = 'H=/data/local/hnc; ' +
@@ -8995,7 +9007,12 @@ body.kb-open .container {
         const descEl = document.getElementById('about-version-desc');
         if (shortEl) shortEl.textContent = bv.replace(/^v/, '');
         if (descEl) {
-          const vcode = descEl.getAttribute('data-vcode') || '';
+          // v5.9.9: versionCode 也从后端读(/api/live 的 backend_version_code)。
+          // 旧实现读 HTML 的 data-vcode 死属性 → 版本升了 code 不变,
+          // 实机会显示 "v5.9.8 · versionCode 580000" 这种混合态。
+          const bvc = (typeof live.backend_version_code === 'string')
+            ? live.backend_version_code.trim() : '';
+          const vcode = (bvc && bvc !== '0') ? bvc : (descEl.getAttribute('data-vcode') || '');
           descEl.textContent = vcode ? (bv + ' · versionCode ' + vcode) : bv;
         }
       }
@@ -9833,14 +9850,14 @@ body.kb-open .container {
       }
     }
   }
-  function onStatsSourceChange(v) {
+  window.onStatsSourceChange = function onStatsSourceChange(v) {
     const source = v === 'shadow' ? 'shadow' : 'legacy';
     try { localStorage.setItem(STATS_SOURCE_KEY, source); } catch (_) {}
     initStatsSourceSelect();
     renderBars();
     fetchStatsDay();
     toast(source === 'shadow' ? '已切到 shadow 新统计读取' : '已切回旧统计读取', 'ok');
-  }
+  };
 
   /* ═══════════════════════════════════════════════════════════════
      柱状图 · 读 /data/local/hnc/data/stats_24h.json
@@ -10105,6 +10122,9 @@ body.kb-open .container {
         reloadCurrentLog();
       } else if (name === 'settings') {
         refreshLocalDiagnostics();
+        // v5.9.9: clsact 状态自动刷新一次(未启用时函数内部直接渲染"未启用",
+        // 不会去碰内核)。旧版只能手点, 状态行永远停在"—"。
+        try { clsactCheckStatus({ quiet: true }); } catch (e) {}
       } else if (name === 'dpi') {
         fetchDPI();
         startDPIPolling();
@@ -10541,7 +10561,7 @@ body.kb-open .container {
         <div class="modal-title">配对码生成失败</div>
         <div class="modal-message">后端 pair_gen.sh 未返回有效结果。<br>错误: ${String(e.message || e).slice(0, 120)}<br><br>请检查:<br>· hnc_httpd 是否在跑<br>· ${HNC}/bin/pair_gen.sh 是否可执行</div>
         <div class="modal-actions">
-          <button class="btn btn-primary" data-action="modal-close">关闭</button>
+          <button class="btn btn-primary" data-action="modal-cancel">关闭</button>
         </div>
       `);
       return;
@@ -10783,29 +10803,6 @@ body.kb-open .container {
         if (Array.isArray(arr)) { TEMPLATES.length = 0; TEMPLATES.push(...arr); }
       }
     } catch (e) {}
-  }
-
-  /* ═══════════════════════════════════════════════════════════════
-     按钮反馈流
-     ═══════════════════════════════════════════════════════════════ */
-  /* 按钮反馈流: loading → success → (可选)回调
-   * 保存 innerHTML 而非 textContent · 支持按钮内含 SVG/图标
-   * onDone 回调在成功动画结束后调用(此时才能安全精准重渲染) */
-  function runBtnWithFeedback(btn, msg, kind, delay, onDone) {
-    const origHTML = btn.innerHTML;
-    btn.disabled = true;
-    btn.classList.add('loading');
-    setTimeout(() => {
-      btn.classList.remove('loading');
-      btn.classList.add('success');
-      toast(msg, kind);
-      setTimeout(() => {
-        btn.classList.remove('success');
-        btn.innerHTML = origHTML;
-        btn.disabled = false;
-        if (typeof onDone === 'function') onDone();
-      }, 650);
-    }, delay || 700);
   }
 
   /* ═══════════════════════════════════════════════════════════════
@@ -11203,6 +11200,75 @@ body.kb-open .container {
   }
   /* rc42: 运行健康 (SLA) 面板。读 /api/sla 聚合的真实累计计数;无埋点的字段后端返
    * null → 这里显示「未统计」(不造假)。本机/远程都能读(走 apiGet 桥接 loopback)。 */
+  /* ── v5.9.9: clsact BPF (T1 tier) 状态检查 / 修复 ────────────────
+   * v5.9.7 首版的三个问题在这里一并修掉:
+   *   1. 检查后无条件调 clsact_repair —— 开关是 OFF 也会装内核 BPF filter,
+   *      UI 态与内核态劈裂。现在查、修彻底分离, 修复按钮只在功能已启用
+   *      且检出缺失时才可点;
+   *   2. 函数定义在 init 的 try 块内(块级作用域), 内联 onclick 在 init
+   *      跑完之前点会 ReferenceError。现在提到 IIFE 顶层 + 走事件委托;
+   *      2. 关闭态下渲染四个 ❌ 让人误以为功能坏了 —— 现在直接显示"未启用"。
+   */
+  function clsactEnabledNow() {
+    const tog = document.getElementById('clsact-toggle');
+    return !!(tog && tog.classList.contains('on'));
+  }
+
+  function clsactSetRepairEnabled(on) {
+    const btn = document.getElementById('clsact-repair-btn');
+    if (btn) btn.disabled = !on;
+  }
+
+  // 只查不修。返回 detail 对象(失败返回 null)。
+  async function clsactCheckStatus(opts) {
+    const quiet = opts && opts.quiet;
+    const el = document.getElementById('clsact-status');
+    if (!el) return null;
+    if (!clsactEnabledNow()) {
+      el.textContent = '未启用';
+      clsactSetRepairEnabled(false);
+      return null;
+    }
+    if (!quiet) el.textContent = '检查中...';
+    try {
+      const res = await apiAction('clsact_check', {});
+      let detail;
+      try { detail = JSON.parse(res.detail); }
+      catch (e) { el.textContent = '检查失败: 返回格式异常'; clsactSetRepairEnabled(false); return null; }
+      const status = [];
+      status.push(detail.clsact ? '✅ qdisc' : '❌ qdisc');
+      status.push(detail.bpf_filter ? '✅ BPF' : '❌ BPF');
+      status.push(detail.map ? '✅ map' : '❌ map');
+      status.push(detail.watchdog ? '✅ watchdog' : '❌ watchdog');
+      el.textContent = status.join(' · ');
+      const incomplete = !detail.clsact || !detail.bpf_filter || !detail.map;
+      clsactSetRepairEnabled(incomplete);
+      return detail;
+    } catch (e) {
+      el.textContent = '检查失败: ' + esc(e.message || e);
+      clsactSetRepairEnabled(false);
+      return null;
+    }
+  }
+
+  // 显式修复(仅在功能已启用时允许)。修完再查一次刷新状态行。
+  async function clsactRepair() {
+    const el = document.getElementById('clsact-status');
+    if (!clsactEnabledNow()) {
+      toast('clsact BPF 未启用,请先打开上方开关', 'warn');
+      return;
+    }
+    clsactSetRepairEnabled(false);
+    try {
+      await apiAction('clsact_repair', {});
+      toast('clsact 已修复', 'ok');
+    } catch (e) {
+      toast('修复失败: ' + (e.message || e), 'err');
+      if (el) el.textContent += ' → 修复失败';
+    }
+    await clsactCheckStatus({ quiet: true });
+  }
+
   async function fetchSLA() {
     const set = (id, t) => { const el = $('#' + id); if (el) el.textContent = t; };
     const num = v => (v === null || v === undefined) ? '未统计' : String(v);
@@ -12110,7 +12176,7 @@ body.kb-open .container {
           apiAction('clsact_bpf_enabled_set', { enabled: on ? 'true' : 'false' })
             .then(r => {
               toast(on ? 'clsact BPF 已开启 · watchdog 10s 内完成安装' : ('clsact BPF 已关闭' + (r.detail ? ' · ' + r.detail : '')), 'ok');
-              setTimeout(checkClsact, on ? 12000 : 500);
+              setTimeout(() => clsactCheckStatus({ quiet: true }), on ? 12000 : 500);
             })
             .catch(e => { doRevert(); toast('切换失败: ' + (e.message || e), 'err'); });
           break;
@@ -12289,8 +12355,20 @@ body.kb-open .container {
 
       if (act === 'new-pair') { showPairPinModal(); return; }
       if (act === 'changelog') { showChangelogModal(); return; }
-      // 其他备用 (manage-devices 等)
-      toast(act, 'ok');
+      // v5.9.9: JSON 健康面板 —— webroot/json-health.html 此前零链接(死页面)
+      if (act === 'json-health') {
+        try { location.assign('json-health.html'); }
+        catch (e) { toast('打开失败: ' + (e.message || e), 'err'); }
+        return;
+      }
+      // v5.9.9: clsact 状态查/修(查不修, 修需已启用)
+      if (act === 'clsact-status-check') { clsactCheckStatus(); return; }
+      if (act === 'clsact-repair') { clsactRepair(); return; }
+      // v5.9.9: 兜底改为显式告警 —— 旧版 toast(act,'ok') 会把"漏接的
+      // data-action"伪装成操作成功(clsact_check / modal-close 两个漏接就是
+      // 这样溜进版本的), 人工点测时看不出问题。
+      dbg('unhandled set-row action: ' + act, true);
+      toast('该操作未接线: ' + act, 'err');
       return;
     }
 
@@ -12812,31 +12890,7 @@ body.kb-open .container {
     // 5. 回读配置 · 设置 toggle 初始状态 (修 Bug 2 · P1-3)
     //    所有 toggle 必须 add/remove 对称, 否则之前是 on 但配置变 false 时 UI 卡在 on
     try {
-// v5.9.7: clsact BPF (T1 tier) 状态检查(回移自 5.9.91 分叉, 加 map 态)
-      async function checkClsact() {
-        const el = document.getElementById('clsact-status');
-        if (!el) return;
-        el.textContent = '检查中...';
-        try {
-          const res = await apiAction('clsact_check', {});
-          let detail;
-          try { detail = JSON.parse(res.detail); } catch(e) { el.textContent = '检查失败: 解析错误'; return; }
-          const status = [];
-          status.push(detail.clsact ? '✅ qdisc' : '❌ qdisc');
-          status.push(detail.bpf_filter ? '✅ BPF' : '❌ BPF');
-          status.push(detail.map ? '✅ map' : '❌ map');
-          status.push(detail.watchdog ? '✅ watchdog' : '❌ watchdog');
-          el.textContent = status.join(' · ');
-          if (!detail.clsact || !detail.bpf_filter || !detail.map) {
-            const repairRes = await apiAction('clsact_repair', {});
-            el.textContent += repairRes.ok ? ' → 已修复' : ' → 修复失败';
-          }
-        } catch(e) {
-          el.textContent = '检查失败: ' + esc(e.message || e);
-        }
-      }
-      window.checkClsact = checkClsact;
-            const setTog = (el, on, also) => {
+      const setTog = (el, on, also) => {
         if (!el) return;
         if (on) { el.classList.add('on'); el.setAttribute('aria-checked', 'true'); }
         else    { el.classList.remove('on'); el.setAttribute('aria-checked', 'false'); }
