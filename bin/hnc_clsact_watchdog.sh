@@ -42,7 +42,10 @@ get_hotspot_iface() {
         h=$(head -n1 "$HNC_DIR/run/hotspot_iface" 2>/dev/null | tr -d ' \r\n')
         [ -n "$h" ] && { echo "$h"; return; }
     fi
-    for iface in wlan2 ap0 wlan1; do
+    # v5.9.91: 探测序对齐 daemon/hotspotd/upstream.c 的 wlan2→ap0→swlan0
+    # (旧表缺 swlan0 多了 wlan1 —— swlan0 机型上会把 BPF filter 挂到 STA
+    # 接口,clsact_check 显示正常但实际拦不到任何热点包)
+    for iface in wlan2 ap0 swlan0; do
         if ip link show "$iface" >/dev/null 2>&1; then
             echo "$iface"
             return

@@ -38,9 +38,9 @@ const (
 // evidenceLogOdds 是每个证据来源的 log-odds 权重(v5.9.7 自定义语义,
 // 分叉从未实现)。Add 按来源自动填充 LogOddsDelta。
 var evidenceLogOdds = map[EvidenceSource]float64{
-	SrcTLS: 2.0, // SNI 命中: domain 级强信号
-	SrcDNS: 1.5, // DNS 解析请求: 弱一级(可能只是预解析/CNAME 链)
-	SrcSNI: 1.0, // self_attrib 侧 SNI(self-capture, 保留档)
+	SrcTLS:  2.0, // SNI 命中: domain 级强信号
+	SrcDNS:  1.5, // DNS 解析请求: 弱一级(可能只是预解析/CNAME 链)
+	SrcSNI:  1.0, // self_attrib 侧 SNI(self-capture, 保留档)
 	SrcFlow: 0.5, // IP/端口级命中: 最弱(CDN 共享 IP 会误伤)
 }
 
@@ -60,6 +60,10 @@ type EvidenceLedger struct {
 	entries   map[string][]EvidenceEntry // key: "mac:appid"
 	maxPerKey int
 	maxTotal  int
+	// v5.9.91: 运行期总量计数 —— enforceTotalLocked 原版每条 Add 都全量
+	// O(keys) 重算(Size), 而这发生在 dpid 的 w.mu 持有期间(热路径),
+	// 数百 pps 时会把临界区拉长一个数量级、直接放大 AF_PACKET drops。
+	runningTotal int
 }
 
 func NewEvidenceLedger(maxPerKey, maxTotal int) *EvidenceLedger {
@@ -80,7 +84,9 @@ func (el *EvidenceLedger) Add(clientMAC, appID string, e EvidenceEntry) {
 	key := clientMAC + ":" + appID
 	entries := el.entries[key]
 	if len(entries) >= el.maxPerKey {
-		entries = entries[1:] // drop oldest
+		entries = entries[1:] // drop oldest (总量不变)
+	} else {
+		el.runningTotal++
 	}
 	el.entries[key] = append(entries, e)
 
@@ -94,13 +100,10 @@ func (el *EvidenceLedger) enforceTotalLocked() {
 	if el.maxTotal <= 0 {
 		return
 	}
-	total := 0
-	for _, v := range el.entries {
-		total += len(v)
+	if el.runningTotal <= el.maxTotal {
+		return // O(1) 计数判断, 平时零遍历
 	}
-	if total <= el.maxTotal {
-		return
-	}
+	total := el.runningTotal
 	// 按 key 的最后一条证据时间从旧到新丢, 直到回到限内
 	type keyLast struct {
 		key  string
@@ -118,6 +121,7 @@ func (el *EvidenceLedger) enforceTotalLocked() {
 		total -= len(el.entries[kl.key])
 		delete(el.entries, kl.key)
 	}
+	el.runningTotal = total
 }
 
 func (el *EvidenceLedger) Snapshot() map[string][]EvidenceEntry {
@@ -156,8 +160,10 @@ func (el *EvidenceLedger) Trim(maxAge time.Duration) {
 		}
 		if i == 0 {
 			delete(el.entries, key)
-		} else {
+			el.runningTotal -= len(entries)
+		} else if i < len(entries) {
 			el.entries[key] = entries[:i]
+			el.runningTotal -= len(entries) - i
 		}
 	}
 }

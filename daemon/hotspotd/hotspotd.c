@@ -260,17 +260,27 @@ static int read_hotspot_iface(char *out, size_t out_len) {
 
 /* v5.9.6 P0-3: 刷新热点接口缓存
  * 读文件 → 缓存接口名 + 解析 ifindex。
- * 如果文件不存在(早期启动),保留旧缓存,让调用方回退到黑名单。 */
+ * 如果文件不存在(早期启动),保留旧缓存,让调用方回退到黑名单。
+ *
+ * v5.9.91 修: if_nametoindex 现在【每次】重解析,不再只在接口名变化时做。
+ * 原实现名字没变就跳过 → ifindex 缓存住旧值; 而 Android 热点重启是"同名
+ * 接口销毁重建"(wlan2 down/up, ifindex 5→8),名字不变、ifindex 变。重建后
+ * ndm_ifindex(8) != g_hs_ifindex(5) → 所有热点邻居事件被当上游丢弃,设备表
+ * 冻结,直到接口改名才恢复。每次一个 if_nametoindex syscall,开销可忽略;
+ * 顺带修掉 if_nametoindex 失败时把 0 永久缓存住的问题(旧代码失败写 0 后
+ * 因名字不变永不重试,ifindex 快速过滤被永久短路)。 */
 static void refresh_hotspot_iface(void) {
     char buf[IF_LEN] = {0};
     if (read_hotspot_iface(buf, sizeof(buf))) {
+        unsigned new_idx = if_nametoindex(buf);
         if (strcmp(buf, g_hs_iface) != 0) {
             strncpy(g_hs_iface, buf, sizeof(g_hs_iface) - 1);
             g_hs_iface[sizeof(g_hs_iface) - 1] = '\0';
-            g_hs_ifindex = if_nametoindex(g_hs_iface);
-            hlog("HOTSPOT IFACE: confirmed '%s' (ifindex=%d)",
-                 g_hs_iface, g_hs_ifindex);
+            hlog("HOTSPOT IFACE: confirmed '%s' (ifindex=%u)",
+                 g_hs_iface, new_idx);
         }
+        /* 同名重建(ifindex 变了)/首次解析成功 → 无条件更新 ifindex */
+        g_hs_ifindex = (int)new_idx;
     } else if (g_hs_iface[0] == '\0') {
         /* 文件不存在且从未确认过 — 保持黑名单模式 */
     }

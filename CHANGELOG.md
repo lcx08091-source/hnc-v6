@@ -14,6 +14,32 @@
 
 ---
 
+## [5.9.91] - 2026-08-29
+
+**v5.9.9 复查 + 全量深扫批**。三个并行审查 Agent 验证 v5.9.9 修复的正确性(两路)并对全栈做新 bug 扫描(一路),修正 v5.9.9 引入的一个 Critical 断点,落地深扫发现的六个真 bug。同时把 module.prop 的 description 从"详细总结"重写为一行简介(那是用户在管理器里看到的简介位),完整更新历史补进 `webroot/changelog.html`(v5.9.4-v5.9.91 共 6 条用户向条目,该文件此前只到 v5.9.3)。
+
+### Fixed
+
+- **v5.9.9 新加的 clsact「检查/修复」按钮完全点不动**(`webroot/index.html`)。两个 case 被写进了 `e.target.closest('.set-row.clickable')` 分支,但按钮所在行是 `<div class="set-row">`(无 clickable)——点击落到后面的 `.btn[data-action]` 分支,那里没有 case,静默无效(连 v5.9.9 专门加的兜底告警都够不到,因为根本进不了 clickable 分支)。已挪到 `.btn[data-action]` 分支。**顺带发现同型的存量死按钮**:「热点接口偏好」保存按钮(`save-iface`)也在非 clickable 行里、handler 同样写错分支——一并修活。
+- **hotspotd 接口重建后设备表冻结**(`daemon/hotspotd/hotspotd.c`)。`refresh_hotspot_iface` 只在接口**名字**变化时才重解析 ifindex,但 Android 热点重启是"同名接口销毁重建"(wlan2 down/up,ifindex 5→8)——名字不变、ifindex 变,旧缓存让 `ndm_ifindex(8) != g_hs_ifindex(5)` 把所有热点邻居事件当上游丢弃,设备表冻在重启前,直到接口改名。现在每次调用都 `if_nametoindex`(一次 syscall),顺带修掉失败时把 0 永久缓存住的问题。
+- **restore_rules 空 iface 整链静默空跑**(`bin/tc_manager.sh`)。启动早期 `device_detect.sh` 探测失败时 `iface=""`,恢复链跑完、clsact 安装也拿空 iface 只打 WARN,watchdog 认为"恢复完成"实际什么都没恢复。补上与 `init_tc` 同款的空 iface 守卫(`return 1` 让调用方重试)。
+- **clsact watchdog 探测序与热点进程不一致**(`bin/hnc_clsact_watchdog.sh`)。兜底探测 `wlan2 ap0 wlan1` 而 upstream.c 是 `wlan2 ap0 swlan0`——swlan0 机型(部分三星/LG)上 hnc_state 未就绪的启动窗口会把 BPF filter 挂到 wlan1(STA 接口),clsact_check 显示 ✅ 但拦不到任何热点包。对齐探测序。
+- **hnc_json token 撤销对老数据"假成功"**(`daemon/hotspotd/tools/hnc_json.c`)。老版写出的 tokens.json 条目可能没有 `revoked` 字段,单 tid 撤销路径 `find_key` 未命中时 `return 0`——调用方把 rc=0 当成功,撤销被静默吞掉。未命中时改为在 token 对象收尾 `}` 前插入 `"revoked":true`。
+- **evidence 账本热路径 O(keys) 回归**(`src/dpid/output/evidence_ledger.go`)。`enforceTotalLocked` 原版每条 Add 都全量重算总数,而这发生在 dpid 的 `w.mu` 持有期间——数百 pps 时临界区拉长一个数量级,直接放大 AF_PACKET drops。改 `runningTotal` 增量计数(O(1) 判断,超限才扫),Trim/驱逐同步扣减。
+- **client 被驱逐时全局流计数漏扣**(`src/dpid/output/state.go`)。`evictOldestClientLocked` 整个 client(含其全部流)被删时没回扣 `totalActiveFlows`——计数单向正漂移,漂到恒超 `maxGlobalFlows` 后每包都进超限驱逐(O(客户端×流)),退化回分叉版的热路径问题。已回扣。
+- **两处白名单的字面 `\n` 脏词**(`post-fs-data.sh` / `service.sh`,v5.9.9 引入)。chmod/chcon 续行被写成"反斜杠+字母 n"两字符而非真换行——列表多出一个词 `n`,`sh -n` 与 CI 均拦不住;hnc_clsact_ctl 不受影响但属脏代码且误导后续维护。已清理为规范续行。
+
+### Changed
+
+- **module.prop description 重写为一行简介**。此前四个版本把详细修复总结写进 description(用户在管理器模块列表里看到的简介位,已膨胀到数 KB)——这不是它该承载的内容。完整更新历史改由两处承载:`webroot/changelog.html`(用户向,UI 更新日志弹窗读取,本次补齐 v5.9.4→v5.9.91 共 6 条,该文件此前停在 v5.9.3)与 `CHANGELOG.md`(开发向,一直是最新的)。
+- **json-health 入口与 nDPI 实验页加环境门禁**:两页面 100% 依赖 `window.ksu.exec`,远程浏览器打开就是全按钮报错的死胡同。json-health 入口默认隐藏、仅 KSU WebUI 环境显示;`ndpi-open` 非 KSU 环境点击提示"仅本机可用"。(httpd 路由保留——页面本身远程可加载,门禁的是入口与预期。)
+
+### 审查结论记录(v5.9.9 修复正确性)
+
+三路验证的完整结论:shell/部署侧 7 项中 5 项完全正确、2 项部分(clsact 白名单补对了但有 `\n` 脏词;json-health/ndpi-lab 路由生效但远程模式页面不可用且无门禁——均已在本版修正);前端 9 项中 7 项完全正确、clsact 面板重构"部分生效"(开关/自动检查/作用域全对,但两个按钮死接线——本版 Critical 修复)、json-health 入口"接线正确但无模式区分"(本版加门禁);versionCode 注入链(CI 走 build.sh、`-X` 变量名一致、前端回退闭环)验证通过。
+
+---
+
 ## [5.9.9] - 2026-08-22
 
 **全方位扫描修复批**。两路并行审查(前端接线深扫 / 死文件+假文件审计)后的修复,含一个让 v5.9.7-v5.9.8 主打功能完全失效的部署缺陷。

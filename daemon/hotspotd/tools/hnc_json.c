@@ -151,8 +151,23 @@ static int token_revoke(const char *file, const char *tid) {
     char *val = NULL, *end = NULL;
     find_key(tval, "revoked", &val, &end);
     *tend = saved;
-    if (!val || !end || !strncmp(val, "true", 4)) { free(s); return 0; }
-    char *out = join3(s, (size_t)(val - s), "true", end);
+    /* v5.9.91: 老 tokens.json 的条目可能没有 "revoked" 字段(旧版写出的文件)。
+     * 旧实现在 find_key 未命中(!val)时 return 0 —— 调用方把 rc=0 当成功,
+     * 撤销被静默吞掉(安全操作静默失效, C-2)。未命中时改为在 token 对象的
+     * 收尾 '}' 前插入 "revoked":true; 已是 true 的保持幂等成功。 */
+    if (val && end && !strncmp(val, "true", 4)) { free(s); return 0; }
+    char *out;
+    if (val && end) {
+        /* false → true 原地替换 */
+        out = join3(s, (size_t)(val - s), "true", end);
+    } else {
+        /* 无 revoked 键: 回退找 token 对象的收尾 '}'(tend 指向对象后一个
+         * 字符; 空白已跳过), 在它前面插 ,"revoked":true */
+        char *ins = tend - 1;
+        while (ins > tval && isspace((unsigned char)*ins)) ins--;
+        if (ins <= tval || *ins != '}') { free(s); return 1; }
+        out = join3(s, (size_t)(ins - s), ",\"revoked\":true", ins);
+    }
     free(s); if (!out) return 1;
     int rc = valid_json(out) ? 1 : write_file(file, out);
     free(out); chmod(file, 0600); return rc;

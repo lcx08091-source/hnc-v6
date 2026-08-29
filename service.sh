@@ -299,7 +299,8 @@ sync_runtime_from_moddir() {
     for _b in hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_json hnc_dpid \
               hnc_dpid_supervisor hnc_watchdog \
               hnc_launcher fork_probe \
-              hnc_clsact_ctl \n              hnc_ndpi_probe ndpiReader hnc_dpid_ndpi; do
+              hnc_clsact_ctl \
+              hnc_ndpi_probe ndpiReader hnc_dpid_ndpi; do
         if [ -f "$HNC_DIR/bin/$_b" ]; then
             chmod 755 "$HNC_DIR/bin/$_b" 2>/dev/null || true
             chcon u:object_r:system_file:s0 "$HNC_DIR/bin/$_b" 2>/dev/null || true

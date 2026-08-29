@@ -5444,7 +5444,9 @@ body.kb-open .container {
         <span class="set-action-hint">导出</span>
       </div>
 
-      <div class="set-row clickable" data-action="json-health">
+      <div class="set-row clickable" data-action="json-health" id="json-health-entry" style="display:none">
+        <!-- v5.9.91: 默认隐藏, init 时仅在 KSU WebUI 环境显示 —— 该页面完全依赖
+             window.ksu.exec 调 su 命令, 远程浏览器打开就是全按钮报错的死胡同 -->
         <div class="set-icon blue"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 12h-4l-3 9L9 3l-3 9H2"/></svg></div>
         <div class="set-info">
           <div class="set-label">JSON 健康面板</div>
@@ -11695,6 +11697,11 @@ body.kb-open .container {
     }
 
     if (e.target.closest('[data-action="ndpi-open"]')) {
+      // v5.9.91: 实验页完全依赖 window.ksu.exec, 远程浏览器打开是死胡同
+      if (typeof window.ksu === 'undefined' || typeof window.ksu.exec !== 'function') {
+        toast('nDPI 实验页仅在本机 KernelSU WebUI 中可用', 'warn');
+        return;
+      }
       /* [opt #9] 持久化 nDPI Lab 展开状态 */
       try { sessionStorage.setItem('hnc.ndpi-lab.open', '1'); } catch(_) {}
       try { location.assign('ndpi-lab.html'); }
@@ -12344,14 +12351,8 @@ body.kb-open .container {
         });
         return;
       }
-      if (act === 'save-iface') {
-        const el = $('#hotspot-iface-pref');
-        const val = ((el && el.value) || 'auto').trim() || 'auto';
-        kexec('sh ' + HNC + '/bin/json_set.sh top hotspot_iface ' + sq(val === 'auto' ? '' : val))
-          .then(() => { toast('热点接口偏好已保存', 'ok'); requestForceRefresh(); })
-          .catch(e => toast('保存失败: ' + e.message, 'err'));
-        return;
-      }
+      // v5.9.91: save-iface 已挪到下方 .btn[data-action] 分支 —— 按钮所在行
+      // 不是 .clickable, 此处永远不可达。
 
       if (act === 'new-pair') { showPairPinModal(); return; }
       if (act === 'changelog') { showChangelogModal(); return; }
@@ -12361,9 +12362,6 @@ body.kb-open .container {
         catch (e) { toast('打开失败: ' + (e.message || e), 'err'); }
         return;
       }
-      // v5.9.9: clsact 状态查/修(查不修, 修需已启用)
-      if (act === 'clsact-status-check') { clsactCheckStatus(); return; }
-      if (act === 'clsact-repair') { clsactRepair(); return; }
       // v5.9.9: 兜底改为显式告警 —— 旧版 toast(act,'ok') 会把"漏接的
       // data-action"伪装成操作成功(clsact_check / modal-close 两个漏接就是
       // 这样溜进版本的), 人工点测时看不出问题。
@@ -12446,6 +12444,21 @@ body.kb-open .container {
     if (!btn) return;
     const action = btn.dataset.action;
     if (action === 'block-hold') return;
+
+    // v5.9.91: clsact 检查/修复。v5.9.9 曾把这两个 case 写进上面 ".set-row.clickable"
+    // 分支 —— 但按钮所在行不是 .clickable, 点击落进本分支后无 case, 静默无效。
+    if (action === 'clsact-status-check') { clsactCheckStatus(); return; }
+    if (action === 'clsact-repair') { clsactRepair(); return; }
+    // v5.9.91: 「热点接口偏好」保存 —— 与上面同型的存量死按钮(handler 原写在
+    // clickable 分支, 而按钮行不带 .clickable), 一并挪到这里。
+    if (action === 'save-iface') {
+      const el = $('#hotspot-iface-pref');
+      const val = ((el && el.value) || 'auto').trim() || 'auto';
+      kexec('sh ' + HNC + '/bin/json_set.sh top hotspot_iface ' + sq(val === 'auto' ? '' : val))
+        .then(() => { toast('热点接口偏好已保存', 'ok'); requestForceRefresh(); })
+        .catch(e => toast('保存失败: ' + (e.message || e), 'err'));
+      return;
+    }
 
     if (action === 'copy-mac') {
       const mac = btn.closest('.device-card').dataset.mac;
@@ -12912,6 +12925,8 @@ body.kb-open .container {
       // Whitelist / Auth / Offload · 全部 add/remove 对称
       setTog($$('[data-action="toggle-wl"]')[0],            !!cfg.whitelist_mode);
       setTog($('#clsact-toggle'),                            !!cfg.clsact_bpf_enabled);
+      // v5.9.91: JSON 健康面板入口仅本机 KSU WebUI 显示(页面依赖 ksu.exec)
+      { const je = $('#json-health-entry'); if (je && typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function') je.style.display = ''; }
       setTog($$('[data-action="toggle-auth"]')[0],          !!cfg.auth_required);
       // v5.9.1: offload 警告开关已删除 (改成只读状态行 #rs-offload-state,
       // 由 /api/offload_status 轮询驱动), 这里不再回读 hnc.offload-warn.

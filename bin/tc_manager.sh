@@ -1932,6 +1932,13 @@ restore_rules() {
     log "Restoring rules from $RULES_FILE"
     [ -f "$RULES_FILE" ] || return 0
     local iface; iface=$(sh "$HNC_DIR/bin/device_detect.sh" iface)
+    # v5.9.91 修: 空 iface 提前退出(对齐 init_tc 的守卫)。启动早期 device_detect
+    # 可能探测失败,旧代码 iface="" 时整条恢复链空跑,末尾的 clsact 安装也拿到
+    # 空 iface 只打 WARN —— watchdog 以为恢复完成,实际什么都没恢复。
+    if [ -z "$iface" ] || ! ip link show "$iface" >/dev/null 2>&1; then
+        log_error "restore_rules: skipped, invalid iface='$iface'"
+        return 1
+    fi
     local cur_prefix; cur_prefix=$(current_iface_prefix24 "$iface" 2>/dev/null)
     local limit_supported=1 delay_supported=1
     tc_limit_supported_runtime || limit_supported=0

@@ -990,8 +990,17 @@ func (w *Writer) evictOldestClientLocked() {
 	if oldestKey != "" {
 		// rc29.2: also drop any macIndex entries pointing at this key, otherwise
 		// future lookups would hit a stale index and miss.
-		if evicted, ok := w.clients[oldestKey]; ok && evicted.ClientMAC != "" {
-			delete(w.macIndex, strings.ToLower(evicted.ClientMAC))
+		if evicted, ok := w.clients[oldestKey]; ok {
+			if evicted.ClientMAC != "" {
+				delete(w.macIndex, strings.ToLower(evicted.ClientMAC))
+			}
+			// v5.9.91: 整个 client 被驱逐时, 它的流也全没了 —— 必须回扣全局
+			// 流计数, 否则 totalActiveFlows 单向正漂移; 漂移到恒超
+			// maxGlobalFlows 后每包都进超限驱逐(O(客户端×流)), 退化回分叉版
+			// 的热路径问题。
+			if evicted.Flows != nil {
+				w.totalActiveFlows -= len(evicted.Flows.flows)
+			}
 		}
 		delete(w.clients, oldestKey)
 	}
