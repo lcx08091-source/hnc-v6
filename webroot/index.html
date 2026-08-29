@@ -5148,7 +5148,7 @@ body.kb-open .container {
           <div class="set-label">月度流量配额</div>
           <div class="set-desc">每台设备按自然月累计, 超配额提醒</div>
         </div>
-        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="月度流量配额" id="alert-quota-toggle"></div>
+        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="月度流量配额" id="alert-quota-toggle" data-action="toggle-alert-quota"></div>
       </div>
       <div class="set-row" id="alert-quota-rows" style="display:none">
         <div class="set-info" style="flex:1">
@@ -5168,7 +5168,7 @@ body.kb-open .container {
           <div class="set-label">异常流量检测</div>
           <div class="set-desc">某设备当前小时流量超过 7 日同时段均值 × 阈值且 ≥ 最低量时提醒</div>
         </div>
-        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="异常流量检测" id="alert-anomaly-toggle"></div>
+        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="异常流量检测" id="alert-anomaly-toggle" data-action="toggle-alert-anomaly"></div>
       </div>
       <div class="set-row" id="alert-anomaly-rows" style="display:none">
         <div class="set-info" style="flex:1">
@@ -9787,9 +9787,12 @@ body.kb-open .container {
     updateHero();
   }
 
-  // v5.10.0 (F5): 在线时长 —— 拉一次 /api/online_hours, 按 mac 填各卡。
+  // v5.10.0 (F5): 在线时长 —— 拉 /api/online_hours, 按 mac 填各卡。
   // 失败静默(采样文件可能还没生成)。
-  (function fillOnlineHours() {
+  // v5.10.1 修: 原为脚本求值期立即执行的 IIFE —— 设备卡那时还没渲染,
+  // getElementById 全部 miss 且永不重试。改为具名函数, 由 renderDeviceList
+  // 每次渲染后调用。
+  function fillOnlineHours() {
     apiGet('/api/online_hours?days=7').then(d => {
       const hours = (d && d.hours) || {};
       Object.keys(hours).forEach(mac => {
@@ -9801,9 +9804,12 @@ body.kb-open .container {
         if (today) el.textContent = '今日在线 ' + (days[today] || 0) + ' 小时';
       });
     }).catch(() => {});
-  })();
+  }
 
-    /* 更新单张卡片 · rc3.1.6 完全重写: 不再 replaceWith, 只更新文本/class.
+    // v5.10.1 (F5): 设备卡每次重渲后重填在线时长
+  fillOnlineHours();
+
+  /* 更新单张卡片 · rc3.1.6 完全重写: 不再 replaceWith, 只更新文本/class.
    * 之前每 2.5s 整卡 replaceWith 闪烁烦人 (用户反馈"前台刷新很挡看着很烦").
    * 改成找特定 DOM 节点打补丁 · 和后台渲染一致, 只有速率/状态 class 变化时才动. */
   function updateCardInPlace(mac) {
@@ -9962,7 +9968,8 @@ body.kb-open .container {
     initStatsSourceSelect();
     renderBars();
     fetchStatsDay();
-    toast(source === 'shadow' ? '已切到 shadow 新统计读取' : '已切回旧统计读取', 'ok');
+    const srcName = { dpi: '应用归因 (DPI)', shadow: 'Shadow 对比', legacy: '全量 (iptables)' };
+    toast('已切换统计来源: ' + (srcName[source] || source), 'ok');
   };
 
   /* ═══════════════════════════════════════════════════════════════
@@ -11991,7 +11998,8 @@ body.kb-open .container {
     // v5.10.0 (F3): 策展规则库在线更新 —— --check 比较版本, 有更新则确认后 --install
     if (e.target.closest('[data-action="dpi-rules-update"]')) {
       const ub = e.target.closest('[data-action="dpi-rules-update"]');
-      if (ub) ub.disabled = true;
+      // v5.10.1 (I1): 检查阶段不禁用按钮 —— confirmModal 无 onCancel 钩子,
+      // 用户点"取消"时按钮会永久禁用。只在进入安装时才 disable。
       kexec('sh ' + HNC + '/bin/dpi_rules_update.sh --check').then(out => {
         let cur = '', rem = '';
         try {
@@ -11999,7 +12007,6 @@ body.kb-open .container {
           cur = j.current || ''; rem = j.remote || '';
           if (j.update_available !== 'yes') {
             toast('规则库已是最新 (' + (cur || 'builtin') + ')', 'ok');
-            if (ub) ub.disabled = false;
             return;
           }
           confirmModal({
@@ -12008,6 +12015,8 @@ body.kb-open .container {
             message: '当前 ' + esc(cur || 'builtin') + ' → 最新 ' + esc(rem) + '<br>更新后自动重新绑定 DPI。',
             okText: '更新', okKind: 'btn-primary',
             onOk: () => {
+              const ub = document.querySelector('[data-action="dpi-rules-update"]');
+              if (ub) ub.disabled = true;
               kexec('sh ' + HNC + '/bin/dpi_rules_update.sh --install')
                 .then(o2 => toast('规则库已更新: ' + String(o2).trim(), 'ok'))
                 .catch(e2 => toast('更新失败: ' + (e2.message || e2), 'err'))
@@ -12016,11 +12025,9 @@ body.kb-open .container {
           });
         } catch (e) {
           toast('检查失败: 返回格式异常', 'err');
-          if (ub) ub.disabled = false;
         }
       }).catch(err => {
         toast('检查失败: ' + ((err && err.message) || err), 'err');
-        if (ub) ub.disabled = false;
       });
       return;
     }

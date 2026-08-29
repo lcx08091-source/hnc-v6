@@ -455,7 +455,7 @@ jobs:
       - name: Build DPI rules update package
         run: |
           python3 - <<'PY'
-          import json, os, glob
+          import json, os, glob, zipfile
           out = {"schema_version": "1.0", "rules_version": "", "rules": []}
           ver = ""
           mp = "module.prop"
@@ -468,14 +468,18 @@ jobs:
           for f in files:
               d = json.load(open(f, encoding="utf-8"))
               out["rules"].extend(d.get("rules", []))
+          # v5.10.1: 产出【真正的 zip】(dpi-rules.zip 内含 dpi_rules.json) ——
+          # v5.10.0 上传的是裸 dpi_rules.json, 与消费脚本期望的名字/格式三重不匹配。
           os.makedirs("build_rules", exist_ok=True)
           with open("build_rules/dpi_rules.json", "w", encoding="utf-8") as fh:
               json.dump(out, fh, ensure_ascii=False, separators=(",", ":"))
+          with zipfile.ZipFile("dpi-rules.zip", "w", zipfile.ZIP_DEFLATED) as zf:
+              zf.write("build_rules/dpi_rules.json", "dpi_rules.json")
           print("rules packaged:", len(out["rules"]), "entries, version", out["rules_version"])
           PY
-          cp build_rules/dpi_rules.json dpi_rules.json
-          sha256sum dpi_rules.json > dpi_rules.zip.sha256
-          echo "DPI_RULES_VERSION=$(cat dpi_rules.zip.sha256 | cut -d' ' -f1)" >> $GITHUB_ENV
+          # sha256 对【zip 本身】计算 —— 消费脚本校验的是下载的 zip
+          sha256sum dpi-rules.zip > dpi-rules.zip.sha256
+          echo "DPI_RULES_VERSION=$VER" >> $GITHUB_ENV
 
       - name: Compute SHA256 of zips
         run: |
@@ -492,8 +496,8 @@ jobs:
           path: |
             ${{ env.OUT_ZIP }}
             ${{ env.OUT_ZIP }}.sha256
-            dpi_rules.json
-            dpi_rules.zip.sha256
+            dpi-rules.zip
+            dpi-rules.zip.sha256
           retention-days: 30
 
       - name: Upload ground-truth tools artifact
@@ -521,8 +525,8 @@ jobs:
           files: |
             ${{ env.OUT_ZIP }}
             ${{ env.OUT_ZIP }}.sha256
-            dpi_rules.json
-            dpi_rules.zip.sha256
+            dpi-rules.zip
+            dpi-rules.zip.sha256
             ${{ env.TOOLS_ZIP }}
             ${{ env.TOOLS_ZIP }}.sha256
           prerelease: ${{ contains(steps.reltag.outputs.tag, 'alpha') || contains(steps.reltag.outputs.tag, 'beta') || contains(steps.reltag.outputs.tag, 'rc') }}

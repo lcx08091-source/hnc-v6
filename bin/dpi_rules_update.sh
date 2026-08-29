@@ -46,7 +46,7 @@ current_version() {
 fetch_json_field() {
     # $1=json文本 $2=字段名 → 取字符串值(裸字段, 无嵌套)
     printf '%s' "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
-        | head -1 | sed "s/.*:[[:space:]]*\"//; s/\"$//"
+        | head -1 | sed "s/^[^:]*:[[:space:]]*\"//; s/\"$//"
 }
 
 rebind_dpi(){
@@ -85,7 +85,6 @@ get_release_meta() {
 case "$1" in
   --check)
     CUR=$(current_version)
-    get_release_meta
     AVAILABLE=maybe
     if [ "$REMOTE_VERSION" != "$CUR" ]; then AVAILABLE=yes; else AVAILABLE=no; fi
     printf '{"current":"%s","remote":"%s","update_available":"%s"}\n' \
@@ -94,6 +93,11 @@ case "$1" in
     ;;
   --install)
     CUR=$(current_version)
+    # v5.10.1: 版本比对 —— 与当前版本相同则跳过重装
+    if [ "$REMOTE_VERSION" = "$CUR" ]; then
+        echo "ok: rules already at $CUR"
+        exit 0
+    fi
     get_release_meta
     [ -n "$DL_URL" ] || fail "release $REMOTE_VERSION has no dpi-rules.zip attachment"
     log "install from $DL_URL (current=$CUR remote=$REMOTE_VERSION)"
