@@ -838,8 +838,8 @@ do_full_init() {
     # 时写同值无感; 不一致时尊重偏好(device_detect 探测已读偏好, 探测
     # 结果 ≠ 偏好仅发生在偏好接口暂时不存在的窗口)。
     _pref=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_iface 2>/dev/null) || _pref=""
-    _pref=$(printf '%s' "$_pref" | tr -d ' 
-')
+    _pref=$(printf '%s' "$_pref" | tr -d '[:space:]')
+    case "$_pref" in \"*\") _pref=${_pref#\"}; _pref=${_pref%\"} ;; esac
     if [ -z "$_pref" ] || [ "$_pref" = "auto" ] || [ "$_pref" = "$iface" ]; then
         sh "$HNC_DIR/bin/json_set.sh" top hotspot_iface "$iface" >> "$LOG" 2>&1
     else
@@ -901,8 +901,8 @@ do_migrate() {
     fi
     # v5.9.92: 同 do_full_init —— 尊重用户偏好, 不无条件覆写
     _pref=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_iface 2>/dev/null) || _pref=""
-    _pref=$(printf '%s' "$_pref" | tr -d ' 
-')
+    _pref=$(printf '%s' "$_pref" | tr -d '[:space:]')
+    case "$_pref" in \"*\") _pref=${_pref#\"}; _pref=${_pref%\"} ;; esac
     if [ -z "$_pref" ] || [ "$_pref" = "auto" ] || [ "$_pref" = "$new" ]; then
         sh "$HNC_DIR/bin/json_set.sh" top hotspot_iface "$new" >> "$LOG" 2>&1
     else

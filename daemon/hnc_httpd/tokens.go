@@ -253,8 +253,6 @@ func (s *TokensStore) PutIfAbsent(tokenID string, t Token) error {
 	return s.saveAtomicLocked()
 }
 
-// Put 写入一个 token(新增或覆盖)。立即持久化到磁盘。
-// 历史 API 保留,给测试用;生产代码应该优先用 PutIfAbsent。
 
 // Revoke 把 id 标记 revoked=true 并立即持久化。id 不存在返回 false
 // (幂等语义,与旧 json_set.sh token_revoke 的静默行为一致)。

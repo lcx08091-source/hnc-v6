@@ -85,10 +85,13 @@ get_hotspot_iface() {
     # —— 保存提示"已保存"但 5 分钟内被探测值冲掉, 是一个假功能。
     # 偏好只在【接口存在且有 IPv4】时生效, 否则继续探测(防止偏好指向已消失
     # 的接口把整个模块钉死)。
+    # 方法 0 (v5.9.92): 用户偏好优先。rules.json 顶层 hotspot_iface(auto=空)。
+    # 注意 hnc_json get-top 返回【JSON 字面量】—— 字符串值带双引号("wlan2"),
+    # 必须剥引号后才能当接口名用(v5.9.93 修: 此前漏剥导致本方法永不命中)。
     local pref
-    pref=$(sh "${HNC_DIR:-/data/local/hnc}/bin/hnc_json" get-top         "${HNC_DIR:-/data/local/hnc}/data/rules.json" hotspot_iface 2>/dev/null) || pref=""
-    pref=$(printf '%s' "$pref" | tr -d ' 
-')
+    pref=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_iface 2>/dev/null) || pref=""
+    pref=$(printf '%s' "$pref" | tr -d '[:space:]')
+    case "$pref" in \"*\") pref=${pref#\"}; pref=${pref%\"} ;; esac
     if [ -n "$pref" ] && [ "$pref" != "auto" ]; then
         if ip link show "$pref" >/dev/null 2>&1            && ip addr show "$pref" 2>/dev/null | grep -q 'inet '; then
             echo "$pref"

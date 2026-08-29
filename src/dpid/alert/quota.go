@@ -83,13 +83,17 @@ func detectMonthlyQuota(cfg Config, uc AlertConfig) (int, error) {
 		extraPct = float64(used) / float64(limit) * 100
 
 		// 每月每档最多一条。
-		dedupKey := "monthly_quota:" + kind + ":" + monthKey + ":" + mac
+		// v5.9.93: dedup 键去掉月段 —— 月粒度已由 loadRecentAlerts 的 since=月起点
+		// 天然保证; 原四段键与读回侧的两段键永不相等 → 每 tick 重复告警(雪崩)。
+		dedupKey := "monthly_quota:" + kind + ":" + mac
 		if _, alerted := recentAlerts[dedupKey]; alerted {
 			continue
 		}
 
 		a := Alert{
-			ID:     makeAlertID("monthly_quota", mac, now.Unix()),
+			// v5.9.93: ID 带档位 —— warn/over 同小时跨档时 makeAlertID 相同会让
+			// MarkSeen 一条双标已读。
+			ID:     makeAlertID("monthly_quota"+kind, mac, now.Unix()),
 			Ts:     now.Unix(),
 			Kind:   "monthly_quota",
 			MAC:    mac,

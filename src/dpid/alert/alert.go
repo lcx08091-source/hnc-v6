@@ -502,6 +502,13 @@ func loadRecentAlerts(path string, since int64) map[string]struct{} {
 			continue
 		}
 		out[a.Kind+":"+a.MAC] = struct{}{}
+		// v5.9.93: monthly_quota 有 warn/over 两档独立去重 —— dedup 键需带档位,
+		// 否则 quota.go 按四段键查不到这里的两段键, 每 5min tick 重复告警(雪崩)。
+		if a.Kind == "monthly_quota" {
+			if wl, ok := a.Extra["warn_level"].(string); ok && wl != "" {
+				out["monthly_quota:"+wl+":"+a.MAC] = struct{}{}
+			}
+		}
 	}
 	return out
 }

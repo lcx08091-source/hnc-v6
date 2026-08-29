@@ -14,6 +14,37 @@
 
 ---
 
+## [5.9.93] - 2026-08-29
+
+**v5.9.92 终审修复批**。两路并行终审(修复验证 + 接线/加固验证)发现 4 个 Critical——全部是 v5.9.92 自己新代码引入的,典型的"写完没实测"教训。全部修复;另含 4 个 Important/Minor。
+
+### Fixed(Critical —— v5.9.92 引入)
+
+- **热点接口偏好修复无效(C1)**:`hnc_json get-top` 返回的是 **JSON 字面量**(字符串值带双引号 `"wlan2"`——json_set.sh:555 的注释早就自证了这一点并专门做了解码桥,而新代码绕过了解码桥)。三处 `tr -d` 清洗都没剥引号 → device_detect 方法 0 的 `ip link show '"wlan2"'` 必败、**永不命中**,偏好功能依旧无效;watchdog 守卫的 `_pref` 与探测值永不相等 → 顶层 hotspot_iface 永久停更 + 每轮噪声日志。三处(device_detect 方法 0 + watchdog 两处)重写:tr 清洗改 POSIX `[:space:]` 类,后接 `case "$pref" in \"*\"*)` 剥引号。
+- **monthly_quota 告警雪崩(C2)**:quota.go 的 dedup 键是四段式(`kind:档位:月:mac`),而 `loadRecentAlerts` 读回构造的是两段式(`kind:mac`)——键不同构、永不命中 → 每 5 分钟 tick 重复告警 + 重复系统通知(over 档含深夜),文件尾 50KB 窗口几小时内被刷满后连带 unknown_device/anomaly 的冷却去重一并失效,整个告警系统雪崩。修复:dedup 键去月段(月粒度由 `since=月起点` 天然保证);`loadRecentAlerts` 为 monthly_quota 补档位键特判,读回/写入两侧同构。
+- **模板合并整条死链(C3)**:`/api/templates` 返回的是**裸的 名→对象映射**(顶层无包装键,server.go 直接 writeJSON 文件原文),前端却读 `d.templates` —— 恒 undefined,"换浏览器恢复"的整个卖点静默失败。改读 `d` 本身。
+- **byte_sampler_source 层级读错(C4)**:该字段在 `SelfState`(`st.self.byte_sampler_source`),前端读 `st.byte_sampler_source` —— 恒 undefined,"字节全 0 时解释来源"的核心诉求不生效。改经 `st.self` 取值(self 块缺失时合理回落 `—`);查表与 warn 配色同步用 `bss` 变量(顺带消除一个因改写遗留的未定义变量引用)。
+
+### Fixed(Important/Minor)
+
+- **模板落盘单位错 8 倍**:saveTemplate 落盘时 `(t.down/8)` 把 Mbps 除回 MB/s 写进 `tpl_set` 的 `down_mbps`(契约是 Mbps;TEMPLATES 模型注释明确"内部全用 Mbps")——后端文件速率小 8 倍,与 localStorage 模型分叉。改传原值。
+- **三处 UI 文案仍指向旧导入路径**(`etc/dpi_rules.json` → `etc/dpi_rules.d/99-user-custom.json`);tokens.go 删除 Put 后遗留的孤儿注释;state.go/types.go 的 byte_sampler_source 三值注释补 `tethering_bpf`。
+- **makeAlertID 档位冲突**:monthly_quota 的 warn/over 同小时跨档时 ID 相同会让"标已读"一条双标 —— ID 构造带档位。
+
+### 审查结论记录
+
+v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名与应用限速契约/restart/save-iface action 化/ELF 校验语法/产物清单/死代码零残留/data-action 全接线/div 平衡);4 项如上修复。终审另确认两项此前版本的判断属实:`/api/templates` 响应形状、`device_detect iface` 的 5 分钟缓存使偏好生效最坏延迟 5 分钟(可接受)。
+
+### 遗留(终审新发现,记录待办)
+
+- monthly_quota 与 anomaly 的**配置写入链路**仍不存在(无 action/无 UI 表单/无 shell 写入方),用户开启需手写 `data/alerts_config.json` 且须同时满足 `enabled:true + limit_bytes>0` 哨兵——功能对普通用户仍不可达。这把"检测函数缺失"换成了"配置入口缺失",完整闭环需要 alerts_config 的 UI + action,评估为下一版本工作。
+- clsact_ctl 边界校验存在 uint64 回绕缺口(畸形头部 `shoff≈2^64-1` 时和回绕成小值通过校验)与 sh_name/sh_link 未校验——威胁面不变(root 换 .o),纵深防御的下一步。
+
+---
+
+## [5.9.92] - 2026-08-29
+---
+
 ## [5.9.92] - 2026-08-29
 
 **未完成功能清偿批**。三路并行盘点(Go 后端/前端/壳层与 C)列出的"值得补完"清单,本版全部落地:三个"用户可操作但静默无效"的真缺陷、七个"后端就绪差一根线"的接线、三个防御性加固,外加死代码清理与一处遗留决策收口。

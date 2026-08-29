@@ -3687,7 +3687,7 @@ body.kb-open .container {
         <div class="set-icon blue">R</div>
         <div class="set-body">
           <div class="set-label">域名规则库</div>
-          <div class="set-sub" id="dpi-rules-status">读取后可编辑 JSON，再导入到 <code>/data/local/hnc/etc/dpi_rules.json</code>。</div>
+          <div class="set-sub" id="dpi-rules-status">读取后可编辑 JSON，再导入到 <code>/data/local/hnc/etc/dpi_rules.d/99-user-custom.json</code>。</div>
         </div>
       </div>
       <textarea id="dpi-rules-text" class="dpi-rules-text" spellcheck="false" placeholder='{"schema_version":"1.0","rules_version":"my-rules","rules":[{"id":"mihoyo","app":"米哈游 / HoYoverse","category":"game","suffixes":["mihoyo.com","mhystatic.com"]}]}'></textarea>
@@ -3763,7 +3763,7 @@ body.kb-open .container {
       <div class="dpi-about">
         <p>HNC DPI (<code>hnc_dpid</code>) 是被动的元数据观察 daemon, 用 AF_PACKET + cBPF 抓 <b>DNS</b> 和 <b>TLS ClientHello</b> 元数据，并用内置/导入规则做只读 L3 标签/分类，不做任何主动操作 (不 NFQUEUE、不 DNS 劫持、不改 iptables/tc).</p>
         <p>当前 rc19/L2 阶段按客户端聚合 DNS 与 TLS SNI 元数据，只做域名画像，不做 App 分类、不参与限速。</p>
-        <p>如果卡在“等待接口就绪”，可点上方 <b>重新绑定 DPI</b>；规则库可在本页导入到 <code>/data/local/hnc/etc/dpi_rules.json</code>；关闭抓包: 修改 <code>/data/local/hnc/etc/dpi_config.json</code> 设 <code>"disable_capture": true</code> 后重启 watchdog.</p>
+        <p>如果卡在“等待接口就绪”，可点上方 <b>重新绑定 DPI</b>；规则库可在本页导入到 <code>/data/local/hnc/etc/dpi_rules.d/99-user-custom.json</code>；关闭抓包: 修改 <code>/data/local/hnc/etc/dpi_config.json</code> 设 <code>"disable_capture": true</code> 后重启 watchdog.</p>
       </div>
     </div>
 
@@ -8089,14 +8089,15 @@ body.kb-open .container {
         const mEl = $('#dpi-proc-metrics');
         if (mEl) {
           const srcMap = { ebpf: '内核 eBPF', tethering_bpf: '系统转发统计', dumpsys: '系统 dumpsys', none: '无(应用字节显示 0)' };
-          const src = srcMap[st.byte_sampler_source] || st.byte_sampler_source || '—';
+          const bss = (st.self && st.self.byte_sampler_source) || ''; // v5.9.93: 该字段在 self 块下(SelfState)
           let cov = '—';
           if (st.unidentified_ratio && typeof st.unidentified_ratio.ratio === 'number') {
             cov = '已归因 ' + Math.round((1 - st.unidentified_ratio.ratio) * 100) + '%';
           }
           const ev = (st.evidence_summary && st.evidence_summary.total) ? (' · 证据 ' + st.evidence_summary.total + ' 条') : '';
+          const src = srcMap[bss] || bss || '—'; // v5.9.93: 查表用 bss(此前 src 行引用未定义变量)
           mEl.textContent = '统计源 ' + src + ' · 规则覆盖 ' + cov + ev;
-          mEl.className = 'set-sub ' + (st.byte_sampler_source === 'none' ? 'dpi-proc-warn' : 'dpi-proc-ok');
+          mEl.className = 'set-sub ' + (bss === 'none' ? 'dpi-proc-warn' : 'dpi-proc-ok');
         }
       } catch (e) {}
 
@@ -8163,7 +8164,7 @@ body.kb-open .container {
     if (!el) return;
     const ver = st && st.l3_rule_version ? String(st.l3_rule_version) : '—';
     const enabled = st && st.l3_enabled;
-    el.textContent = 'L3 ' + (enabled ? '已启用' : '未启用') + ' · 规则版本: ' + ver + ' · rc25 支持未识别域名生成模板，可导入 /data/local/hnc/etc/dpi_rules.json。';
+    el.textContent = 'L3 ' + (enabled ? '已启用' : '未启用') + ' · 规则版本: ' + ver + ' · rc25 支持未识别域名生成模板，可导入 /data/local/hnc/etc/dpi_rules.d/99-user-custom.json。';
   }
 
   // ─── v0.4.0-rc23: 截图风格新区块 render ─────────────────────────
@@ -10803,7 +10804,7 @@ body.kb-open .container {
     // 清缓存/换浏览器/远程端打开即全部丢失, 而后端 /api/templates 端点在
     // 等一个永远没人写的文件。失败只提示不阻断(本地仍可用)。
     kexec('sh ' + HNC + '/bin/json_set.sh tpl_set ' + sq(t.name) + ' ' +
-          (t.down/8) + ' ' + (t.up/8) + ' ' + t.delay + ' ' + t.jitter + ' ' + t.loss)
+          t.down + ' ' + t.up + ' ' + t.delay + ' ' + t.jitter + ' ' + t.loss)
       .catch(e => toast('模板未同步到后端(仅本机保存): ' + (e.message || e), 'warn'));
     hideModal();
     toast(`模板${idx === '' || idx === undefined ? '已创建' : '已更新'}: ${name}`, 'ok');
@@ -10846,7 +10847,7 @@ body.kb-open .container {
     // 而本地没有的模板补进来(换浏览器/清缓存后恢复), 本地独有的保留。
     try {
       apiGet('/api/templates').then(d => {
-        const bt = d && d.templates;
+        const bt = d; // v5.9.93: /api/templates 返回裸的 名→对象 映射(顶层无包装键)
         if (bt && typeof bt === 'object') {
           Object.keys(bt).forEach(name => {
             const v = bt[name];

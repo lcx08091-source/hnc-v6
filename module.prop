@@ -1,7 +1,7 @@
 id=hotspot_network_control
 name=Hotspot Network Control
-version=v5.9.92
-versionCode=590920
+version=v5.9.93
+versionCode=590930
 author=Claude (Anthropic AI) + Ling + GPT (audit)
 description=Android 热点带宽/延迟/黑白名单管理 · DPI 流量识别 · 设备级限速/延迟模拟 · 应用级限速 · 远程 WebUI 管理
 updateJson=
