@@ -115,6 +115,8 @@ func (s *server) handler() http.Handler {
 	// rc30.4: traffic history (per-app pie + per-hour line chart)
 	mux.HandleFunc("/api/dpi_history", s.apiDPIHistory)
 	// rc30.5: alert log (unknown device detection)
+	mux.HandleFunc("/api/alert_config", s.apiAlertConfig)
+	mux.HandleFunc("/api/online_hours", s.apiOnlineHours)
 	mux.HandleFunc("/api/alerts", s.apiAlerts)
 	// rc30.6: per-app rate limit config
 	mux.HandleFunc("/api/app_limits", s.apiAppLimits)
@@ -805,6 +807,16 @@ func (s *server) apiStats(w http.ResponseWriter, r *http.Request) {
 		rawName = "stats_shadow_raw.jsonl"
 		dailyName = "stats_shadow_daily.jsonl"
 	}
+	if sourceParam == "dpi" {
+		// v5.10.0 (O2): 统计收口 —— 直接聚合 DPI 归因链的
+		// run/stats.YYYYMMDD.jsonl (HistorySampler 每 15min 一行, 含
+		// mac/app/tx/rx/t)。注意: 不能走 aggregate()/aggregateToday() ——
+		// 它们是【计数器 delta 语义】(legacy raw 是 iptables 累计计数器,
+		// 按 mac 排序后相邻做差), 而 DPI 行本身就是 15min 流量增量,
+		// 直接累加即可。口径: DPI 链只含被归因流量, 总量比 iptables 略小。
+		s.apiStatsDPI(w, r, rangeParam, macFilter)
+		return
+	}
 	rawPath := filepath.Join(s.hncDir, "data", rawName)
 	dailyPath := filepath.Join(s.hncDir, "data", dailyName)
 
@@ -932,7 +944,7 @@ func validRange(r string) bool {
 
 func validStatsSource(source string) bool {
 	switch source {
-	case "legacy", "shadow":
+	case "legacy", "shadow", "dpi":
 		return true
 	}
 	return false

@@ -1106,6 +1106,22 @@ while true; do
     # 读当前状态(每轮读,因为 do_full_init / do_migrate 会改文件)
     STATE=$(cat "$STATE_FILE" 2>/dev/null || echo "PENDING")
 
+    # v5.10.0 (F5): 在线时长小时采样 —— ACTIVE 状态且距上次采样 ≥55min 时,
+    # 把当前在线设备写一行到 run/online_hours.jsonl。聚合侧按 (mac, 日) 去重
+    # 计小时数(见 api_stats.go)。用文件 mtime 做节流, 不依赖额外状态变量。
+    if [ "$STATE" = "ACTIVE" ]; then
+        _now_s=$(date +%s)
+        _oh_mt=$(stat -c %Y "$RUN/online_hours.jsonl" 2>/dev/null || echo 0)
+        [ "$_oh_mt" -gt 0 ] && _oh_age=$((_now_s - _oh_mt)) || _oh_age=999999
+        if [ "$_oh_age" -ge 3300 ]; then
+            _oh_ts=$(_now_s)
+            _oh_day=$(date +%Y%m%d)
+            for _m in $(grep -oE '"([0-9a-f]{2}:){5}[0-9a-f]{2}"' "$HNC_DIR/data/devices.json" 2>/dev/null | tr -d '"' | tr 'A-F' 'a-f' | sort -u); do
+                echo "{\"t\":$_oh_ts,\"day\":\"$_oh_day\",\"mac\":\"$_m\"}" >> "$RUN/online_hours.jsonl" 2>/dev/null || true
+            done
+        fi
+    fi
+
     # rc3.1: service.wanted marker 逻辑已移除 · watchdog 在 cleanup.sh 杀进程
     # 阶段就已经死了, 这段永远执行不到. restart 改由 cleanup.sh 末尾直接 fork.
 

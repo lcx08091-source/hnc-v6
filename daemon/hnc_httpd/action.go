@@ -337,6 +337,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionCandidateReject(hncDir, p)
 	// BUG-002 (回移自 5.9.91 分叉): 手动清空膨胀的 self_attrib JSONL。
 	// 与 32MB 日封顶 + 签名去重配合, 给用户一个立即回收磁盘的入口。
+	case "alert_config_set":
+		return actionAlertConfigSet(hncDir, p)
 	case "self_attrib_purge":
 		files, _ := filepath.Glob(filepath.Join(hncDir, "run", "self_attrib.*.jsonl"))
 		for _, f := range files {

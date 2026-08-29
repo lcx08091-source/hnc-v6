@@ -10,6 +10,10 @@
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
+# v5.10.0 (O3): 本旗标在热路径已无读者(stats_sample/watchdog 读的是
+# HNC_STATS_SHADOW_ENABLE / stats_shadow.enabled)。status/json 输出保留
+# 兼容 health panel; enable/disable 仍维护旗标文件但不再改变任何行为。
+
 HNC_DIR=${HNC_DIR:-${HNC:-/data/local/hnc}}
 BIN="$HNC_DIR/bin"
 RUN="$HNC_DIR/run"

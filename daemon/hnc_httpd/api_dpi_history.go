@@ -89,6 +89,10 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 
 	includeRaw := r.URL.Query().Get("raw") == "1"
 
+	// v5.10.0 (F2): mac= 过滤 —— 只统计该设备的行, 供设备卡内嵌流量曲线。
+	// 规范化为小写(写侧 MAC 大小写不敏感, 读侧统一小写比较)。
+	macFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac")))
+
 	now := time.Now()
 	statsDir := filepath.Join(s.hncDir, statsDirRel)
 
@@ -98,7 +102,12 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 		t := now.AddDate(0, 0, -d)
 		path := filepath.Join(statsDir, statsFilePrefix+t.UTC().Format("20060102")+statsFileSuffix)
 		readRows := readHistJSONL(path)
-		rows = append(rows, readRows...)
+		for _, r := range readRows {
+			if macFilter != "" && strings.ToLower(r.MAC) != macFilter {
+				continue
+			}
+			rows = append(rows, r)
+		}
 	}
 
 	// Aggregation pass.

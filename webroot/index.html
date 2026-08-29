@@ -3034,11 +3034,12 @@ body.kb-open .container {
     <div class="glass" style="display:flex;align-items:center;justify-content:space-between;gap:12px;padding:12px 14px;margin:0 0 14px;border-radius:20px">
       <div>
         <div style="font-weight:700;font-size:13px">统计来源</div>
-        <div id="stats-source-hint" style="font-size:12px;color:var(--text-3);margin-top:3px">旧统计为默认；新统计仅用于 shadow 对比</div>
+        <div id="stats-source-hint" style="font-size:12px;color:var(--text-3);margin-top:3px">默认=应用归因(DPI)，与"应用历史"同源；全量=iptables 计数（含未归因流量）</div>
       </div>
       <select id="stats-source-select" aria-label="统计来源" onchange="onStatsSourceChange(this.value)" style="max-width:150px;border:1px solid rgba(255,255,255,.16);border-radius:14px;background:rgba(255,255,255,.08);color:var(--text-1);padding:8px 10px;font-weight:700;outline:0">
-        <option value="legacy">旧统计</option>
-        <option value="shadow">新统计 Shadow</option>
+        <option value="dpi">应用归因 (DPI)</option>
+        <option value="legacy">全量 (iptables)</option>
+        <option value="shadow">Shadow 对比</option>
       </select>
     </div>
 
@@ -3694,6 +3695,7 @@ body.kb-open .container {
       <div class="dpi-action-row dpi-rules-actions">
         <button type="button" class="btn btn-ghost dpi-action-btn" data-action="dpi-rules-export">读取当前规则</button>
         <button type="button" class="btn btn-primary dpi-action-btn" data-action="dpi-rules-import">导入规则库</button>
+        <button type="button" class="btn btn-ghost dpi-action-btn" data-action="dpi-rules-update">检查规则库更新</button>
         <button type="button" class="btn btn-ghost dpi-action-btn" data-action="dpi-rules-reset">恢复内置规则</button>
       </div>
       <div class="dpi-rule-help">规则导入后会自动重绑 DPI。导入内容只影响只读标签/分类，不会修改限速、iptables、tc 或 DNS。</div>
@@ -5136,6 +5138,51 @@ body.kb-open .container {
       </div>
     </div>
     <div class="set-footer">技术说明: ColorOS 真机实测——<code>cmd tethering</code>/<code>svc wifi hotspot</code> 无 shell 实现,只有 <code>cmd wifi start-softap -b any</code> 能起,但那是"本地热点"(系统不给它做流量共享)。所以本模块起热点后自己补 <code>ip_forward</code>+<code>iptables MASQUERADE</code> 到上联接口做共享。若客户端连上没网,说明本地热点这条路在你机型上不通,请改从系统设置开热点(那条才是系统原生共享)。日志: <code>/data/local/hnc/logs/hotspot.log</code></div>
+
+    <!-- 告警设置 (v5.10.0: monthly_quota/anomaly 此前只能手改 JSON) -->
+    <div class="sec-title">告警 <span style="font-size:11px;color:var(--text-3);font-weight:400">· 由 DPI 数据驱动</span></div>
+    <div class="setting-group glass-elevated" id="alert-cfg-group">
+      <div class="set-row">
+        <div class="set-icon orange"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><polyline points="18 9 13 14 9 10 3 16"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">月度流量配额</div>
+          <div class="set-desc">每台设备按自然月累计, 超配额提醒</div>
+        </div>
+        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="月度流量配额" id="alert-quota-toggle"></div>
+      </div>
+      <div class="set-row" id="alert-quota-rows" style="display:none">
+        <div class="set-info" style="flex:1">
+          <div class="set-label">配额 (GB/台/月) · 预警百分比</div>
+          <div class="set-desc" style="display:flex;gap:8px;margin-top:6px;align-items:center">
+            <input type="number" id="alert-quota-gb" min="0.1" step="0.1" placeholder="10" style="width:80px;padding:6px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text)">
+            GB ·
+            <input type="number" id="alert-quota-pct" min="1" max="99" placeholder="80" style="width:60px;padding:6px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text)">
+            %
+          </div>
+        </div>
+        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" data-action="alert-quota-save">保存</button>
+      </div>
+      <div class="set-row">
+        <div class="set-icon orange"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 9v4"/><path d="M12 17h.01"/><path d="M10.3 3.9L1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/></svg></div>
+        <div class="set-info">
+          <div class="set-label">异常流量检测</div>
+          <div class="set-desc">某设备当前小时流量超过 7 日同时段均值 × 阈值且 ≥ 最低量时提醒</div>
+        </div>
+        <div class="toggle" role="switch" aria-checked="false" tabindex="0" aria-label="异常流量检测" id="alert-anomaly-toggle"></div>
+      </div>
+      <div class="set-row" id="alert-anomaly-rows" style="display:none">
+        <div class="set-info" style="flex:1">
+          <div class="set-label">倍数阈值 · 最低量 (MB)</div>
+          <div class="set-desc" style="display:flex;gap:8px;margin-top:6px;align-items:center">
+            ×<input type="number" id="alert-anomaly-ratio" min="1" step="0.5" placeholder="3" style="width:70px;padding:6px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text)">
+            <input type="number" id="alert-anomaly-minmb" min="0" placeholder="50" style="width:80px;padding:6px;border-radius:10px;border:1px solid var(--line);background:var(--card);color:var(--text)">
+            MB
+          </div>
+        </div>
+        <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" data-action="alert-anomaly-save">保存</button>
+      </div>
+      <div class="set-footer">配置由 DPI 进程每 5 分钟读取, 保存后自动生效 · 数据在手机本地, 不上传</div>
+    </div>
 
     <!-- 全局带宽整形 (opt-in, 默认关) rc32 -->
     <div class="sec-title">全局带宽整形 <span style="font-size:11px;color:var(--text-3);font-weight:400">· 进阶 · 默认关</span></div>
@@ -9546,6 +9593,7 @@ body.kb-open .container {
             ${statusBadge(d)}${limitBadge}
           </div>
           <div class="ip-mac">${esc(d.ip)} · ${esc(d.mac)}</div>
+          <div class="online-hours" id="oh-${esc(d.mac)}" style="font-size:11px;color:var(--text-3);margin-top:2px"></div>
           ${dpiLine}
         </div>
         <div class="metrics">
@@ -9602,7 +9650,16 @@ body.kb-open .container {
                 <div class="app-limit-loading">展开后自动加载…</div>
               </div>
             </div>
+                        <!-- v5.10.0 (F2): 设备流量趋势 —— 展开卡片后点"看曲线"懒加载
+                 /api/dpi_history?mac=xx, 复用统计页的 SVG 柱状图渲染 -->
             <div class="ctrl-section">
+              <div class="ctrl-label"><span class="ctrl-label-dot"></span>流量趋势</div>
+              <div class="btn-row" style="margin:8px 0">
+                <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" data-action="dev-trend" data-trend-mac="${esc(d.mac)}" data-trend-name="${esc(d.hostname)}">📊 查看 7 天曲线</button>
+              </div>
+              <div id="trend-${esc(d.mac)}" style="display:none"></div>
+            </div>
+<div class="ctrl-section">
               <div class="ctrl-label"><span class="ctrl-label-dot warn"></span>延迟注入</div>
               <div class="input-grid cols-3">
                 <div class="input-cell">
@@ -9730,7 +9787,23 @@ body.kb-open .container {
     updateHero();
   }
 
-  /* 更新单张卡片 · rc3.1.6 完全重写: 不再 replaceWith, 只更新文本/class.
+  // v5.10.0 (F5): 在线时长 —— 拉一次 /api/online_hours, 按 mac 填各卡。
+  // 失败静默(采样文件可能还没生成)。
+  (function fillOnlineHours() {
+    apiGet('/api/online_hours?days=7').then(d => {
+      const hours = (d && d.hours) || {};
+      Object.keys(hours).forEach(mac => {
+        const el = document.getElementById('oh-' + mac);
+        if (!el) return;
+        const days = hours[mac] || {};
+        const dayKeys = Object.keys(days).sort();
+        const today = dayKeys[dayKeys.length - 1];
+        if (today) el.textContent = '今日在线 ' + (days[today] || 0) + ' 小时';
+      });
+    }).catch(() => {});
+  })();
+
+    /* 更新单张卡片 · rc3.1.6 完全重写: 不再 replaceWith, 只更新文本/class.
    * 之前每 2.5s 整卡 replaceWith 闪烁烦人 (用户反馈"前台刷新很挡看着很烦").
    * 改成找特定 DOM 节点打补丁 · 和后台渲染一致, 只有速率/状态 class 变化时才动. */
   function updateCardInPlace(mac) {
@@ -9849,10 +9922,12 @@ body.kb-open .container {
   /* /api/config.stats_shadow_enabled 回读结果. null = 还没读到. */
   let statsShadowEnabled = null;
   function getStatsSource() {
+    // v5.10.0 (O2): 默认源改为 dpi(应用归因), 与"应用历史"同源。
+    // 存量用户显式存过 legacy/shadow 的尊重其选择; 无值的回 dpi。
     try {
-      const v = localStorage.getItem(STATS_SOURCE_KEY) || 'legacy';
-      return v === 'shadow' ? 'shadow' : 'legacy';
-    } catch (_) { return 'legacy'; }
+      const v = localStorage.getItem(STATS_SOURCE_KEY) || 'dpi';
+      return (v === 'dpi' || v === 'shadow' || v === 'legacy') ? v : 'dpi';
+    } catch (_) { return 'dpi'; }
   }
   function statsApiParams(extra) {
     return Object.assign({ source: getStatsSource() }, extra || {});
@@ -9882,7 +9957,7 @@ body.kb-open .container {
     }
   }
   window.onStatsSourceChange = function onStatsSourceChange(v) {
-    const source = v === 'shadow' ? 'shadow' : 'legacy';
+    const source = (v === 'shadow' || v === 'dpi' || v === 'legacy') ? v : 'dpi';
     try { localStorage.setItem(STATS_SOURCE_KEY, source); } catch (_) {}
     initStatsSourceSelect();
     renderBars();
@@ -10116,7 +10191,9 @@ body.kb-open .container {
   let __statsPollTimer = null;
   function startStatsPolling() {
     stopStatsPolling();
-    __statsPollTimer = managedInterval(() => { renderBars(); fetchStatsDay(); }, 60 * 1000);
+    // v5.10.0 (O4): 刷新 60s → 300s。DPI 链 15min 一行、legacy 链 5min 一行,
+    // 60s 轮询拿不到新数据, 白费 fork。
+    __statsPollTimer = managedInterval(() => { renderBars(); fetchStatsDay(); }, 5 * 60 * 1000);
   }
   function stopStatsPolling() {
     if (__statsPollTimer) { if (__statsPollTimer.stop) __statsPollTimer.stop(); __statsPollTimer = null; }
@@ -11326,6 +11403,62 @@ body.kb-open .container {
     await clsactCheckStatus({ quiet: true });
   }
 
+  // v5.10.0: 告警配置卡片 —— 读 /api/alert_config 渲染开关与数值
+  async function loadAlertConfigUI() {
+    try {
+      const d = await apiGet('/api/alert_config');
+      const mq = d.monthly_quota || {};
+      const at = d.anomaly_traffic || {};
+      const qT = $('#alert-quota-toggle'); if (qT) { qT.classList.toggle('on', !!mq.enabled); qT.setAttribute('aria-checked', mq.enabled ? 'true' : 'false'); }
+      const aT = $('#alert-anomaly-toggle'); if (aT) { aT.classList.toggle('on', !!at.enabled); aT.setAttribute('aria-checked', at.enabled ? 'true' : 'false'); }
+      const gb = $('#alert-quota-gb'); if (gb && mq.limit_bytes) gb.value = (mq.limit_bytes / 1073741824).toFixed(1);
+      const pct = $('#alert-quota-pct'); if (pct && mq.warn_at_pct) pct.value = mq.warn_at_pct;
+      const rt = $('#alert-anomaly-ratio'); if (rt && at.ratio_threshold) rt.value = at.ratio_threshold;
+      const mb = $('#alert-anomaly-minmb'); if (mb && at.min_bytes) mb.value = Math.round(at.min_bytes / 1048576);
+      // 行展开: 开着才显示输入行
+      const q = $('#alert-quota-rows'); if (q) q.style.display = mq.enabled ? '' : 'none';
+      const a = $('#alert-anomaly-rows'); if (a) a.style.display = at.enabled ? '' : 'none';
+    } catch (e) {}
+  }
+
+  // v5.10.0 (F2): 设备流量趋势 —— 拉该设备近 7 天 DPI 归因数据画柱状图。
+  // 数据源: /api/dpi_history?days=7&mac=xx 的 by_hour(24 桶, 本地小时聚合)。
+  window.loadDevTrend = function(mac, name, containerId) {
+    const box = document.getElementById(containerId);
+    if (!box) return;
+    box.style.display = '';
+    box.innerHTML = '<div class="set-sub" style="padding:8px 0">加载中…</div>';
+    apiGet('/api/dpi_history?days=7&mac=' + encodeURIComponent(mac))
+      .then(function(d) {
+        const hours = (d && d.by_hour) || [];
+        const vals = hours.map(function(h) { return (h.tx || 0) + (h.rx || 0); });
+        const max = Math.max.apply(null, vals.concat([1]));
+        const total = vals.reduce(function(a, b) { return a + b; }, 0);
+        if (!total) {
+          box.innerHTML = '<div class="set-sub" style="padding:8px 0">近 7 天该设备无 DPI 归因流量 (设备离线过久或规则未覆盖时可能为空)</div>';
+          return;
+        }
+        let bars = '';
+        for (let h = 0; h < 24; h++) {
+          const v = vals[h] || 0;
+          const pct = Math.round(v / max * 100);
+          const gb = (v / 1073741824).toFixed(2);
+          bars += '<div style="flex:1;display:flex;flex-direction:column;align-items:center;justify-content:flex-end;height:100%">' +
+            '<div title="' + h + ':00 · ' + gb + ' GB" style="width:70%;height:' + Math.max(pct, 2) + '%;' +
+            'background:linear-gradient(180deg,var(--sys-blue,#0a84ff),rgba(10,132,255,.45));border-radius:3px 3px 0 0"></div></div>';
+        }
+        let axis = '';
+        for (let h = 0; h < 24; h += 6) axis += '<div style="flex:1;text-align:center">' + h + '</div>';
+        box.innerHTML =
+          '<div style="display:flex;align-items:flex-end;gap:2px;height:90px;margin:6px 0 2px">' + bars + '</div>' +
+          '<div style="display:flex;gap:2px;color:var(--text-3);font-size:10px">' + axis + '</div>' +
+          '<div class="set-sub" style="margin-top:4px">7 天合计 ' + (total / 1073741824).toFixed(2) + ' GB · ' + esc(name || mac) + '</div>';
+      })
+      .catch(function(e) {
+        box.innerHTML = '<div class="set-sub">加载失败: ' + esc(e.message || e) + '</div>';
+      });
+  };
+
   async function fetchSLA() {
     const set = (id, t) => { const el = $('#' + id); if (el) el.textContent = t; };
     const num = v => (v === null || v === undefined) ? '未统计' : String(v);
@@ -11855,6 +11988,42 @@ body.kb-open .container {
       return;
     }
 
+    // v5.10.0 (F3): 策展规则库在线更新 —— --check 比较版本, 有更新则确认后 --install
+    if (e.target.closest('[data-action="dpi-rules-update"]')) {
+      const ub = e.target.closest('[data-action="dpi-rules-update"]');
+      if (ub) ub.disabled = true;
+      kexec('sh ' + HNC + '/bin/dpi_rules_update.sh --check').then(out => {
+        let cur = '', rem = '';
+        try {
+          const j = JSON.parse(String(out).trim());
+          cur = j.current || ''; rem = j.remote || '';
+          if (j.update_available !== 'yes') {
+            toast('规则库已是最新 (' + (cur || 'builtin') + ')', 'ok');
+            if (ub) ub.disabled = false;
+            return;
+          }
+          confirmModal({
+            icon: '⬇️', iconClass: 'info',
+            title: '发现规则库更新',
+            message: '当前 ' + esc(cur || 'builtin') + ' → 最新 ' + esc(rem) + '<br>更新后自动重新绑定 DPI。',
+            okText: '更新', okKind: 'btn-primary',
+            onOk: () => {
+              kexec('sh ' + HNC + '/bin/dpi_rules_update.sh --install')
+                .then(o2 => toast('规则库已更新: ' + String(o2).trim(), 'ok'))
+                .catch(e2 => toast('更新失败: ' + (e2.message || e2), 'err'))
+                .finally(() => { if (ub) ub.disabled = false; });
+            },
+          });
+        } catch (e) {
+          toast('检查失败: 返回格式异常', 'err');
+          if (ub) ub.disabled = false;
+        }
+      }).catch(err => {
+        toast('检查失败: ' + ((err && err.message) || err), 'err');
+        if (ub) ub.disabled = false;
+      });
+      return;
+    }
     if (e.target.closest('[data-action="ndpi-status"]')) {
       const btn = e.target.closest('[data-action="ndpi-status"]');
       if (btn) btn.disabled = true;
@@ -12234,6 +12403,20 @@ body.kb-open .container {
           setWhitelistBackend(on).then(() => toast('白名单模式: ' + (on ? '启用' : '停用'), 'ok'))
             .catch(e => { doRevert(); toast('切换失败: ' + e.message, 'err'); });
           break;
+        case 'toggle-alert-quota':
+          { const qr = $('#alert-quota-rows'); if (qr) qr.style.display = on ? '' : 'none'; }
+          apiAction('alert_config_set', { section: 'monthly_quota', enabled: on ? 'true' : 'false',
+            limit_gb: ($('#alert-quota-gb').value || '10'), warn_pct: ($('#alert-quota-pct').value || '80') })
+            .then(() => toast('月度配额: ' + (on ? '已开启' : '已关闭'), 'ok'))
+            .catch(e => { doRevert(); toast('切换失败: ' + (e.message || e), 'err'); });
+          break;
+        case 'toggle-alert-anomaly':
+          { const ar = $('#alert-anomaly-rows'); if (ar) ar.style.display = on ? '' : 'none'; }
+          apiAction('alert_config_set', { section: 'anomaly_traffic', enabled: on ? 'true' : 'false',
+            ratio: ($('#alert-anomaly-ratio').value || '3'), min_mb: ($('#alert-anomaly-minmb').value || '50') })
+            .then(() => toast('异常流量检测: ' + (on ? '已开启' : '已关闭'), 'ok'))
+            .catch(e => { doRevert(); toast('切换失败: ' + (e.message || e), 'err'); });
+          break;
         case 'toggle-clsact':
           apiAction('clsact_bpf_enabled_set', { enabled: on ? 'true' : 'false' })
             .then(r => {
@@ -12496,6 +12679,14 @@ body.kb-open .container {
     }
 
 
+    // v5.10.0 (F2): 设备卡内嵌流量曲线懒加载
+    const trendBtn = e.target.closest('[data-action="dev-trend"]');
+    if (trendBtn) {
+      loadDevTrend(trendBtn.getAttribute('data-trend-mac'),
+                   trendBtn.getAttribute('data-trend-name'),
+                   'trend-' + trendBtn.getAttribute('data-trend-mac'));
+      return;
+    }
     /* 设备卡按钮操作 */
     const btn = e.target.closest('.btn[data-action]');
     if (!btn) return;
@@ -12504,6 +12695,20 @@ body.kb-open .container {
 
     // v5.9.91: clsact 检查/修复。v5.9.9 曾把这两个 case 写进上面 ".set-row.clickable"
     // 分支 —— 但按钮所在行不是 .clickable, 点击落进本分支后无 case, 静默无效。
+    if (action === 'alert-quota-save') {
+      apiAction('alert_config_set', { section: 'monthly_quota', enabled: 'true',
+        limit_gb: ($('#alert-quota-gb').value || '10'), warn_pct: ($('#alert-quota-pct').value || '80') })
+        .then(r => toast('配额已保存' + (r.detail ? ' · ' + r.detail : ''), 'ok'))
+        .catch(e => toast('保存失败: ' + (e.message || e), 'err'));
+      return;
+    }
+    if (action === 'alert-anomaly-save') {
+      apiAction('alert_config_set', { section: 'anomaly_traffic', enabled: 'true',
+        ratio: ($('#alert-anomaly-ratio').value || '3'), min_mb: ($('#alert-anomaly-minmb').value || '50') })
+        .then(r => toast('阈值已保存' + (r.detail ? ' · ' + r.detail : ''), 'ok'))
+        .catch(e => toast('保存失败: ' + (e.message || e), 'err'));
+      return;
+    }
     if (action === 'clsact-status-check') { clsactCheckStatus(); return; }
     if (action === 'clsact-repair') { clsactRepair(); return; }    // v5.9.92: self_attrib 明细手动清理 —— 后端 action v5.9.7 就绪, 此前无入口。
     if (action === 'self-attrib-purge') {
@@ -12996,6 +13201,8 @@ body.kb-open .container {
       // Whitelist / Auth / Offload · 全部 add/remove 对称
       setTog($$('[data-action="toggle-wl"]')[0],            !!cfg.whitelist_mode);
       setTog($('#clsact-toggle'),                            !!cfg.clsact_bpf_enabled);
+      // v5.10.0: 告警配置卡片
+      loadAlertConfigUI();
       // v5.9.91: JSON 健康面板入口仅本机 KSU WebUI 显示(页面依赖 ksu.exec)
       { const je = $('#json-health-entry'); if (je && typeof window.ksu !== 'undefined' && typeof window.ksu.exec === 'function') je.style.display = ''; }
       setTog($$('[data-action="toggle-auth"]')[0],          !!cfg.auth_required);

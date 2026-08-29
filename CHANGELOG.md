@@ -14,6 +14,35 @@
 
 ---
 
+## [5.10.0] - 2026-08-29
+
+**功能版本**。7 项优化与新功能一次推:告警配置界面、设备流量曲线、规则库在线更新、在线时长统计、统计链路收口、灰度旗标清理、轮询降频。
+
+### Added
+
+- **告警配置界面**(F1, 闭环 v5.9.93 遗留):设置页新增「告警」卡片——月度流量配额(开关 + GB/台/月 + 预警百分比)、异常流量检测(开关 + 倍数阈值 + 最低量 MB)。后端新增 `/api/alert_config` 读端点与 `alert_config_set` action(按 section 原子写 `data/alerts_config.json`,服务端补齐哨兵数值字段)。dpid 每 5 分钟 tick 重读配置,保存即生效。默认值复用 `alert.DefaultConfig()`,UI 与检测器语义不会漂移。
+- **设备卡内嵌流量曲线**(F2):`/api/dpi_history` 新增 `mac` 参数(过滤出该设备的行);设备卡展开区新增「流量趋势」折叠块——7 天按小时分布柱状图(复用 DPI 页 SVG 渲染风格)+ 7 天合计 GB,懒加载(点按钮才请求)。
+- **DPI 策展规则库在线更新**(F3):CI 新增打包步骤——每次发版自动把 `data/dpi_rules.d/`(32 文件/173 条)聚合为单文件 `dpi_rules.json`(带 `rules_version` 元数据)随 Release 上传。手机端新增 `bin/dpi_rules_update.sh`:`--check` 比对版本 / `--install` 下载 + sha256 校验 + 规则校验 + 安装为 `etc/dpi_rules.d/97-online-update.json`(加载序在策展集之后、99 用户文件之前——更新覆盖内置、用户自定义优先级最高)+ 自动重绑 DPI。前端「检查规则库更新」按钮。
+- **设备在线时长**(F5):watchdog 主循环每小时把在线设备列表追加到 `run/online_hours.jsonl`(mtime 节流 ≥55 分钟);新增 `/api/online_hours` 聚合端点(按 mac/日去重计数,一天最多 24 小时);设备卡显示「今日在线 X 小时」——家长管控场景的核心指标。
+
+### Changed
+
+- **统计链路收口**(O2):`/api/stats` 新增 `source=dpi`——直接聚合 DPI 归因链(`run/stats.YYYYMMDD.jsonl`),今日柱状图与应用历史页从此**数字同源**(旧口径 iptables 计数器是 delta 语义,不能复用 aggregateToday,已绕开并用独立的按小时/按天累加)。前端「统计来源」下拉改为三态:**应用归因(DPI,默认)/ 全量(iptables) / Shadow 对比**;统计页自动刷新 60s→300s(O4,DPI 链 15min 粒度下 60s 轮询拿不到新数据)。
+- **stats_v52 灰度旗标退役**(O3):`stats_v52_rc_control.sh` 的 enable/disable 维护的旗标文件在热路径已无任何读者——status/json 输出保留兼容健康面板,脚本头注明退役。
+
+### Fixed
+
+- **LSM 三方不一致收口**(v5.9.9 记录的遗留决策):删除 post-fs-data.sh 的部署块与 hotspotd build.sh 的编译块——hotspotd 链接的是恒 DISABLED 的 stub、.o 又被 zip 排除,两块均为误导性 no-op。源码保留,恢复条件写在注释里。
+
+### Removed
+
+- 盘点确认的零引用死代码:`stats_v52_gray_observe.sh`(灰度观察孤儿,连同单测)、`rc_selfcheck_v53.sh` / `hnc_cleanup_test_rules_v53.sh`(调用 v5.7 已删除的 /api/sqm)、`offload_ctl.c`(从不构建不随包,连同 tools/build.sh 分支)、前端 `restoreHwBanner` / `loadOuiDb` / `OUI_DB` 查库分支(功能已被服务端取代)、`TokensStore.Count/CountActive/Put`、`HistorySampler.PathForDate`。
+
+---
+
+## [5.9.93] - 2026-08-29
+---
+
 ## [5.9.93] - 2026-08-29
 
 **v5.9.92 终审修复批**。两路并行终审(修复验证 + 接线/加固验证)发现 4 个 Critical——全部是 v5.9.92 自己新代码引入的,典型的"写完没实测"教训。全部修复;另含 4 个 Important/Minor。
