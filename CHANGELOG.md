@@ -14,6 +14,46 @@
 
 ---
 
+## [5.9.92] - 2026-08-29
+
+**未完成功能清偿批**。三路并行盘点(Go 后端/前端/壳层与 C)列出的"值得补完"清单,本版全部落地:三个"用户可操作但静默无效"的真缺陷、七个"后端就绪差一根线"的接线、三个防御性加固,外加死代码清理与一处遗留决策收口。
+
+### Fixed — 三个"静默无效"级缺陷(用户可操作、提示成功、实际永不生效)
+
+- **DPI 规则导入按钮静默无效**(`bin/dpi_rules_import.sh`)。导入此前写 legacy 单文件 `etc/dpi_rules.json`,而 dpid 自 rc30.12.31 起优先读 `etc/dpi_rules.d/*.json`(99-user-custom 最后加载、可覆盖策展规则)且 service.sh 每次开机重同步该目录——**用户在 WebUI 导入规则库,看到"导入成功",规则永远不被读取**。导入/安装默认/重置全部改写 `etc/dpi_rules.d/99-user-custom.json`(与 service.sh 的保留机制、rule.go 的注释约定三方对齐),`--export` 改为聚合导出(用户导入 → 旧版单文件 → 模块默认)。
+- **热点接口偏好是假功能**(`bin/device_detect.sh` + `bin/watchdog.sh`)。前端保存的 `hotspot_iface` 偏好,探测链完全不读;更糟的是 watchdog 每轮 init/迁移都用探测值**覆写**用户刚保存的值——"已保存"提示后 5 分钟内被冲掉。修复:探测链新增"方法 0"读偏好(接口存在且有 IPv4 才生效,防偏好指向已消失接口钉死模块);watchdog 两处覆写点加守卫——非 auto 偏好不覆盖,不一致时记日志。
+- **monthly_quota 告警只差一个函数**(`src/dpid/alert/quota.go` 新建)。JSON schema、配置结构、默认配置、前端渲染分支(📈 图标)自 v3.9 就全部就位,唯独检测函数从未写出——用户设了配额永远收不到告警。实现 `detectMonthlyQuota`:自然月窗口按天滚 `sumByMAC` 统计,`WarnAtPct`(默认 80%)预警 + 100% 超限两档,每月每档每设备最多一条(月粒度 dedup),超限档不受免打扰限制;接入 `Run()`。
+
+### Added — 七个"后端就绪差一根线"的接线
+
+- **远程 SPA 登出复活**:实现 server.go 注释里规划了一个版本的 `/api/whoami`(鉴权端点,返回 token label);`app.js` 的 `loadSessionInfo` 改走它——rc30.12.30 删除 health 的 session_label 后,登出按钮三个版本恒隐藏、`doLogout` 白写。
+- **远程 SPA 补应用级限速 + 设备重命名**:两个后端 action 均非 loopback-only、一直是"后端允许、前端没做"(远程正是管孩子设备的主场景)。设备卡加 ✏️ 改名 / 📱 应用限速按钮 + 两个处理函数(参数契约对齐 `actionDeviceRename` / `actionAppLimitSet`)。
+- **self_attrib 明细手动清理入口**:「我的应用」设置区加"清理自学习明细数据"按钮(confirm → `self_attrib_purge` action)——该 action 自 v5.9.7 就绪,BUGSV5-TRIAGE 里计划的前端入口从未落地。
+- **三个 dpid 指标首次上 UI**:DPI 进程卡新增"字节统计来源 · 规则覆盖"行——`byte_sampler_source`(为字节全 0 时解释"数据来自哪/为什么是 0",后端注释早就把这条产品需求写好了)、`unidentified_ratio`(规则覆盖率)、`evidence_summary.total`(证据账本条目数),均为后端已产出、UI 零消费的字段。
+- **模板持久化双写**:save/delete 在写 localStorage 的同时落盘 `data/templates.json`(经 json_set.sh tpl_set/tpl_del,失败只提示不阻断);启动加载时合并后端模板(换浏览器/清缓存后恢复)。此前模板只存 localStorage——清缓存即丢、远程端不可见,而后端 `/api/templates` 端点在等一个永远没人写的文件。
+- **重启服务 / 保存接口偏好改走后端 action**(`restart_service` / `hotspot_iface_set`):消除 kexec 直写 shell 的双写通道(同型双轨在 toggle-auth 上翻过 P0),接口偏好顺带拿到 action 侧的 15 字符校验。
+- **ndpi-lab / json-health 两个子页补返回导航**(此前只能靠系统返回手势)。
+
+### Changed — 防御性加固
+
+- **clsact_ctl ELF 解析器越界校验**(v5.9.91 深扫的 I-10):`elf_load` 补节表边界校验(e_shoff/e_shnum/e_shstrndx、每节 offset+size 对文件大小;SHT_NOBITS 豁免)——畸形/截断的 .o 不再可越界读。
+- **产物校验清单补 clsact 四件套**:`artifact_sanity_check.sh`(ZIP 级)与 `ci_preflight.sh`(工作区级 + 可执行位)均加入 `hnc_clsact_ctl/.o/watchdog/sync` 与 `debug_bundle.sh`——chmod 白名单漏项这类 v5.9.9 事故,打包层从此也有护栏。
+- **ground-truth CI 死分支文档化**:`tools/ground_truth/` 于 v5.7.0-m2 被删,TOOLS_ZIP 三段(打包/校验/上传)自那以后恒空转。保留结构并在原位注明目录已删与恢复命令(`git checkout 4bb6f2b^ -- tools/ground_truth`),消除"读 CI 的人以为 zip 存在"的误导。
+- **LSM 三方不一致收口**(遗留决策):删除 post-fs-data.sh 的部署块与 build.sh 的编译块——hotspotd 链接的是恒 DISABLED 的 stub(v5.8.7:真 loader 需无可用 Android 版的 libelf/libz),编出的 .o 又被 zip 排除,两块恒为误导性 no-op。源码保留作参考,恢复条件写入注释。
+
+### Removed — 死代码清理(盘点"低价值可删"档)
+
+前端三个空壳:`restoreHwBanner`(banner 已由 offload_status 驱动)、`loadOuiDb` + `deviceClassByMAC` 的 OUI_DB 查库分支(恒空对象,功能已被服务端取代);Go 四个零调用方法:`TokensStore.Count/CountActive/Put`(注释承诺"诊断/WebUI 用"从未兑现)、`HistorySampler.PathForDate`(跨二进制根本无法被 httpd 调用);脚本四个:`stats_v52_gray_observe.sh`(灰度观察孤儿,连同其单测)、`rc_selfcheck_v53.sh` / `hnc_cleanup_test_rules_v53.sh`(调用 v5.7 已删除的 /api/sqm)、`offload_ctl.c`(从不构建不随包,连同 tools/build.sh 的构建分支)。
+
+### 未动项(有意)
+
+- `SetEvidenceLedger` 注入通道 / `RunAlwaysOn` / `Contagion` 计数器等分叉遗产桩(CHANGELOG 有背书,立项再议);`requestSnapshotRefresh` no-op 与 `/api/self/attrib` 调试端点(成本近零,保留);shell 单测进 CI(需实测 ubuntu 兼容性,单独评估);`session_label` 恢复(已由 /api/whoami 落地替代)。
+
+---
+
+## [5.9.91] - 2026-08-29
+---
+
 ## [5.9.91] - 2026-08-29
 
 **v5.9.9 复查 + 全量深扫批**。三个并行审查 Agent 验证 v5.9.9 修复的正确性(两路)并对全栈做新 bug 扫描(一路),修正 v5.9.9 引入的一个 Critical 断点,落地深扫发现的六个真 bug。同时把 module.prop 的 description 从"详细总结"重写为一行简介(那是用户在管理器里看到的简介位),完整更新历史补进 `webroot/changelog.html`(v5.9.4-v5.9.91 共 6 条用户向条目,该文件此前只到 v5.9.3)。

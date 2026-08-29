@@ -80,6 +80,22 @@ socket_query() {
 # 这样的规则。第一个 in 接口就是当前热点接口，这是绝对准确的。
 # tetherctrl 链不存在或为空时再降级到旧的 ARP / 接口扫描方法。
 get_hotspot_iface() {
+    # 方法 0 (v5.9.92)：用户偏好优先。WebUI「热点接口偏好」保存进 rules.json
+    # 顶层 hotspot_iface(auto=空)。此前该字段只写不读、且被 watchdog 每轮覆写
+    # —— 保存提示"已保存"但 5 分钟内被探测值冲掉, 是一个假功能。
+    # 偏好只在【接口存在且有 IPv4】时生效, 否则继续探测(防止偏好指向已消失
+    # 的接口把整个模块钉死)。
+    local pref
+    pref=$(sh "${HNC_DIR:-/data/local/hnc}/bin/hnc_json" get-top         "${HNC_DIR:-/data/local/hnc}/data/rules.json" hotspot_iface 2>/dev/null) || pref=""
+    pref=$(printf '%s' "$pref" | tr -d ' 
+')
+    if [ -n "$pref" ] && [ "$pref" != "auto" ]; then
+        if ip link show "$pref" >/dev/null 2>&1            && ip addr show "$pref" 2>/dev/null | grep -q 'inet '; then
+            echo "$pref"
+            return
+        fi
+    fi
+
     # 方法 1：tetherctrl iptables 链（最准确，只要热点开着就有）
     # 必须用 -v 才有接口列。awk 字段：$3=target $6=in_iface $7=out_iface
     local tc_iface

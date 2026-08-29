@@ -319,12 +319,6 @@ func normalizeHistMAC(mac string) string {
 	return mac
 }
 
-// PathForDate is exported for the hnc_httpd reader. Takes a UTC date and
-// returns the expected file path.
-func PathForDate(t time.Time) string {
-	day := t.UTC().Format("20060102")
-	return filepath.Join(HistoryDir, HistoryFilePrefix+day+HistoryFileSuffix)
-}
 
 // _unused silences "fmt imported but not used" once we drop debug helpers.
 var _ = fmt.Sprintf

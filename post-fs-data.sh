@@ -87,6 +87,102 @@ if [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
     chmod 755 "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null
 fi
 
+# v5.9.92: BPF LSM Limit Map Guard 部署块【删除】。
+# 三方不一致的收口(v5.9.9 CHANGELOG 已记录为已知遗留): hotspotd 链接的是
+# 恒返回 DISABLED 的 stub(v5.8.7: 真 loader 需 libelf/libz, 无可用 Android 版);
+# 打包又用 -x "bpf/*" 把 .o 排除在 zip 外 → 下方块恒为 no-op, 只会误导读者
+# 以为"部署失败时 graceful 降级"是真的在跑。源码(lsm/*.c + vmlinux.h)保留
+# 作参考, 待真 loader 可编时恢复此块与 build.sh 编译块。
+
+system/bin/sh
+# post-fs-data.sh — 在文件系统挂载后、Zygote启动前执行
+# 此阶段主要做目录初始化和文件权限设置
+
+# v3.5.0 alpha-0:PATH 健壮性(见 service.sh 同段注释)
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+
+# v5.9.3 BUG-009:引导脚本继承 magiskd/KSU 的 umask=0,裸 `mkdir -p` 建出来的
+# 目录就是 0777、裸 `>` 建出来的文件就是 0666 —— 仓库里一处 chmod 777 都没有,
+# 真机上那一堆 0777 全是这么来的。这里显式定 umask。
+# 为什么是 022 不是 077:下面 :47-51 的 `cp -rf` 不带 -p,新建文件的权限是
+# 源权限 & ~umask;umask=077 会把仓库里 644 的脚本和 755 的二进制统统压成
+# 0600/0700,而后面的 chmod 覆盖面并不完整(`chmod 755 bin/*.sh` 的 glob 不
+# 递归,漏 bin/diag/diag.sh;二进制 chmod 只覆盖 10 个白名单名字,漏
+# bin/diag/fork_probe、bin/hnc_ndpi_probe)→ 会变成"文件在但不能执行"的静默
+# 回归,比 0777 更难查。022 足以杀掉 0777 这个根因,敏感目录再单独 chmod 700。
+umask 022
+
+MODDIR=${0%/*}
+HNC_DIR=/data/local/hnc
+
+# 创建持久化数据目录
+mkdir -p "$HNC_DIR/data"
+mkdir -p "$HNC_DIR/logs"
+mkdir -p "$HNC_DIR/run"
+# v5.9.3 BUG-009:已存在的老装机目录不会被 umask 影响(mkdir -p 对已存在目录
+# 不改权限),必须显式收。data/ 有 tokens.json、run/ 有 local_admin.secret,
+# 两者都是"拿到就等于 root 级写 API"的凭据,只留 root 可进。
+# 已核实不影响任何生产路径:HNC 全部组件由 root 拉起,KSU WebUI 走 ksu.exec,
+# httpd 读的 index.html 是模块目录的硬编码路径而不是 $HNC_DIR/webroot。
+chmod 700 "$HNC_DIR" "$HNC_DIR/data" "$HNC_DIR/logs" "$HNC_DIR/run" 2>/dev/null
+
+# rc3.1.30 Bug A 修复 · 清内核重启跨不过去的运行时状态
+# 旧 $RUN/hnc_state 是 watchdog 持久化的 "PENDING" / "ACTIVE:<iface>" 状态.
+# 内核重启后 iptables/tc/ifb 全空,但这个文件还是 ACTIVE:wlan2 (磁盘持久),
+# 导致 watchdog 启动时跳过 do_full_init 永远不恢复规则 (Ling 真机实证:
+# 18:30 重启后 watchdog.log 无任何 do_full_init 输出, 谎报 alive=ok).
+# 清掉 → watchdog 进 PENDING → 配合 rc3.1.30 watchdog.sh 的"首轮立刻 probe"
+# 改动, ~100ms 内跑完 iptables init + tc init + tc restore.
+rm -f "$HNC_DIR/run/hnc_state" 2>/dev/null
+rm -rf "$HNC_DIR/run/hnc_json.lock" "$HNC_DIR/run/json.lock" 2>/dev/null
+
+# 初始化规则文件 · rc3.1.13 起 auth_required 也在这
+[ ! -f "$HNC_DIR/data/rules.json" ] && cat > "$HNC_DIR/data/rules.json" << 'EOF'
+{
+  "version": 1,
+  "whitelist_mode": false,
+  "auth_required": true,
+  "clsact_bpf_enabled": false,
+  "devices": {},
+  "blacklist": [],
+  "whitelist": []
+}
+EOF
+
+# rc3.1.13: config.json 弃用 · 不再创建默认
+# 历史上 config.json 承载 auth_required (cfg_set 写) + 4 个死字段
+# (api_port/poll_interval/watchdog_interval/log_level 没人读) +
+# hotspot_iface (watchdog 写但没人读). 字段分裂导致 rc3.1.9~12 P0 反复.
+# rc3.1.13 起所有活字段统一到 rules.json, config.json 只做单向迁移.
+# (迁移块在下方 cp -rf 后执行, 不依赖目标目录残留脚本)
+
+# Fix #7: 先建目录，再统一复制（去除重复操作）
+mkdir -p "$HNC_DIR/bin" "$HNC_DIR/api" "$HNC_DIR/webroot" "$HNC_DIR/test"
+# v5.9.3 BUG-009:资源目录显式 755(老装机可能是 0777),不收到 700 是为了
+# 保留"非 root 也能只读排查"的余地,这几个目录里没有凭据。
+chmod 755 "$HNC_DIR/bin" "$HNC_DIR/api" "$HNC_DIR/webroot" "$HNC_DIR/test" 2>/dev/null
+cp -rf "$MODDIR"/bin/* "$HNC_DIR/bin/" 2>/dev/null || true
+cp -rf "$MODDIR"/api/* "$HNC_DIR/api/" 2>/dev/null || true
+cp -rf "$MODDIR"/webroot/* "$HNC_DIR/webroot/" 2>/dev/null || true
+# v3.5.0 alpha: 复制测试框架(让 user 能在真机跑 sh test/run_all.sh)
+cp -rf "$MODDIR"/test/* "$HNC_DIR/test/" 2>/dev/null || true
+
+# v4.0.0-patch1.1 hotfix: daemon/hnc_httpd binary 精细 copy
+# post-fs-data.sh 之前只 copy bin/api/webroot/test,漏了 daemon/,
+# 导致 v4.0.0-patch1 的远程访问 binary 根本没进 data 目录,
+# service.sh 找 $HNC_DIR/daemon/hnc_httpd/hnc_httpd 永远 miss,
+# 结果 remote_enabled=true 也启动不了 httpd (用户报告:浏览器 ERR_CONNECTION_REFUSED)
+# 只 copy 产物 binary,不 copy .c 源 / README / build.sh / web/(web 已 //go:embed 进 binary)
+if [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
+    mkdir -p "$HNC_DIR/daemon/hnc_httpd"
+    chmod 755 "$HNC_DIR/daemon" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null  # v5.9.3 BUG-009
+    if ! cmp -s "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null; then
+        cp -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
+        echo "[HNC] hotfix17.3: refreshed runtime hnc_httpd binary from module" >> "$HNC_DIR/logs/boot.log"
+    fi
+    chmod 755 "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null
+fi
+
 # v5.0.0-beta.4: 部署 BPF LSM Limit Map Guard object
 # hotspotd 启动时从 /data/local/hnc/bpf/hnc_limit_map_guard.bpf.o 加载,
 # 然后 BPF_PROG_LOAD + attach 到 lsm/bpf hook, 拦截 framework 对

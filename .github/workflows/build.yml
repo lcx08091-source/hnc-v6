@@ -427,6 +427,10 @@ jobs:
           
           # Separate ground-truth tools zip (rc30.12.23+)
           # Lightweight (~15 KB), only needed when expanding DPI rules.
+          # v5.9.92: tools/ground_truth/ 于 v5.7.0-m2 导入时被删 —— 该目录已不存在,
+          # 下方分支(TOOLS_ZIP 打包/校验/上传)自那以后是死分支。保留结构: 目录
+          # 恢复后自动生效(用途: 自抓 App 流量扩充 DPI 规则库, 见 PATCH-NOTES
+          # -v5.3.0-rc28.1); 恢复: git checkout 4bb6f2b^ -- tools/ground_truth
           if [ -d tools/ground_truth ]; then
             (cd tools/ground_truth && zip -rqX "../../$TOOLS_OUT" .)
             echo "TOOLS_ZIP=$TOOLS_OUT" >> $GITHUB_ENV

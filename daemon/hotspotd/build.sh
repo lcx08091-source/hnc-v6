@@ -128,32 +128,10 @@ if [ -f mdns_resolve.c ]; then
     echo "[build] OK: $(ls -lh "$BINDIR/mdns_resolve" | awk '{print $5}')  $BINDIR/mdns_resolve"
 fi
 
-# ── 编 BPF object (LSM 程序) ─────────────────────────────
-echo ""
-echo "=== v5.0.0-beta.4 BPF LSM build ==="
-if [ -f lsm/vmlinux.h ] && [ -f lsm/hnc_limit_map_guard.bpf.c ]; then
-    BPFCC="${BPFCC:-clang}"
-    if ! command -v "$BPFCC" >/dev/null 2>&1; then
-        echo "[build] WARN: $BPFCC not found, skip BPF compile"
-    else
-        BPF_OUT_DIR=../../bpf
-        mkdir -p "$BPF_OUT_DIR"
-        "$BPFCC" -O2 -g \
-            -target bpf \
-            -D__TARGET_ARCH_arm64 \
-            -I"$LIBS_OUT/include" \
-            -Ilsm \
-            -c lsm/hnc_limit_map_guard.bpf.c \
-            -o "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" || \
-            echo "[build] WARN: BPF compile failed"
-        if [ -f "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" ]; then
-            llvm-strip -g "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" 2>/dev/null \
-              || strip -g "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" 2>/dev/null \
-              || true
-            echo "[build] BPF object: $(ls -lh "$BPF_OUT_DIR/hnc_limit_map_guard.bpf.o" | awk '{print $5}')"
-        fi
-    fi
-fi
+# v5.9.92: BPF LSM 编译块【删除】—— 链接的是 stub(v5.8.7 注释: 真 loader
+# 需要 libelf/libz, 无可用的 Android 静态版), 编出的 .o 又被打包排除,
+# 编了也永远没人加载。恢复条件: 真 loader 可编(见 lsm/README.md)时,
+# 与 post-fs-data.sh 的部署块一并恢复。
 
 echo ""
 echo "[build] === build done ==="

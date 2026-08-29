@@ -832,8 +832,19 @@ do_full_init() {
         sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1
         sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1
     fi
-    # 写 rules.json.hotspot_iface,给 WebUI 显示
-    sh "$HNC_DIR/bin/json_set.sh" top hotspot_iface "$iface" >> "$LOG" 2>&1
+    # 写 rules.json.hotspot_iface,给 WebUI 显示。
+    # v5.9.92: 用户设置了非 auto 偏好时不覆写 —— 否则"接口暂时消失"的
+    # 瞬间(重启/切换中)探测值会把用户刚保存的偏好冲掉。偏好与探测一致
+    # 时写同值无感; 不一致时尊重偏好(device_detect 探测已读偏好, 探测
+    # 结果 ≠ 偏好仅发生在偏好接口暂时不存在的窗口)。
+    _pref=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_iface 2>/dev/null) || _pref=""
+    _pref=$(printf '%s' "$_pref" | tr -d ' 
+')
+    if [ -z "$_pref" ] || [ "$_pref" = "auto" ] || [ "$_pref" = "$iface" ]; then
+        sh "$HNC_DIR/bin/json_set.sh" top hotspot_iface "$iface" >> "$LOG" 2>&1
+    else
+        log "skip hotspot_iface overwrite: user pref=$_pref, detected=$iface"
+    fi
     # 转移前必须先清健康检查缓存,不然下一轮 check_health 用旧数据
     _HEALTH_TS=0
     echo "ACTIVE:$iface" > "$STATE_FILE"
@@ -888,7 +899,15 @@ do_migrate() {
         watchdog_mark_tc_unsupported_once tc_htb
         log "do_migrate: tc skipped because tc_htb=false"
     fi
-    sh "$HNC_DIR/bin/json_set.sh" top hotspot_iface "$new" >> "$LOG" 2>&1
+    # v5.9.92: 同 do_full_init —— 尊重用户偏好, 不无条件覆写
+    _pref=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_iface 2>/dev/null) || _pref=""
+    _pref=$(printf '%s' "$_pref" | tr -d ' 
+')
+    if [ -z "$_pref" ] || [ "$_pref" = "auto" ] || [ "$_pref" = "$new" ]; then
+        sh "$HNC_DIR/bin/json_set.sh" top hotspot_iface "$new" >> "$LOG" 2>&1
+    else
+        log "skip hotspot_iface overwrite (migrate): user pref=$_pref, detected=$new"
+    fi
     # 杀 httpd 让下轮 ensure_httpd_running 拿新 IP 重绑
     local wpid; wpid=$(cat "$RUN/httpd.pid" 2>/dev/null)
     if [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null; then

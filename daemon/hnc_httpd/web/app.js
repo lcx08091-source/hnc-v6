@@ -369,6 +369,10 @@ function renderCard(d) {
     } else {
       actions += '<button class="act-btn small danger" data-act="block"'+a+'>⛔ 加黑</button>';
     }
+    // v5.9.92: 远程端补齐应用级限速 + 设备重命名(两个后端 action 均非
+    // loopback-only, 此前"后端允许、前端没做" —— 远程正是管孩子设备的主场景)。
+    actions += '<button class="act-btn small ghost" data-act="rename"'+a+'>✏️ 改名</button>';
+    actions += '<button class="act-btn small ghost" data-act="app-limit"'+a+' title="给该设备上的单个应用限速">📱 应用限速</button>';
     actions += '</div>';
   }
 
@@ -792,6 +796,28 @@ window.actionUnblockDevice = async function(mac, name) {
   handleActionResult(r, '已移出黑名单');
 };
 
+// ── v5.9.92: 设备重命名 modal (后端 actionDeviceRename, 非 loopback-only) ──
+window.showRenameModal = function(mac, name) {
+  var v = prompt('为 "' + name + '" 设置名称 (留空清除):', '');
+  if (v === null) return;
+  callAction('device_rename', { mac: mac, name: v })
+    .then(function(r) { handleActionResult(r, v ? '已命名为 ' + v : '已清除名称'); });
+};
+
+// ── v5.9.92: 应用级限速 modal (后端 actionAppLimitSet/Clear, 非 loopback-only) ──
+// 参数契约: mac + app_id(1-32 [a-z0-9_-]) + down_mbps(0..10000, 0=不限)
+window.showAppLimitModal = function(mac, name) {
+  var app = prompt('\u4E3A ' + name + '\u9650\u901F\u54EA\u4E2A\u5E94\u7528?\n\u8F93\u5165\u5E94\u7528\u6807\u8BC6 (\u5982 com.tencent.mm):', '');
+  if (!app || !/^[a-z0-9_-]{1,32}$/.test(app)) { if (app !== null) alert('应用标识须 1-32 字符 [a-z0-9_-]'); return; }
+  var rate = prompt('下行速率 (Mbps, 0 = 解除该应用限速):', '0');
+  if (rate === null) return;
+  var r = parseFloat(rate);
+  if (isNaN(r) || r < 0 || r > 10000) { alert('速率须 0..10000'); return; }
+  var action = r > 0 ? 'app_limit_set' : 'app_limit_clear';
+  callAction(action, { mac: mac, app_id: app, down_mbps: String(r) })
+    .then(function(res) { handleActionResult(res, r > 0 ? ('已限制 ' + app + ' → ' + r + ' Mbps') : ('已解除 ' + app + ' 的限速')); });
+};
+
 // ── rc3.1.10: 延迟注入 modal (netem · delay/jitter/loss) ──────
 // 后端 action_v5.go:actionDelaySet
 //   params: mac, delay_ms (0-5000), jitter_ms (0-5000), loss_pct (0-100, 支持小数)
@@ -1067,6 +1093,11 @@ document.addEventListener('click', function(ev) {
     case 'sqm-off':     window.actionToggleSqm(mac, name, false); break;
     case 'block':       window.actionBlockDevice(mac, name); break;
     case 'unblock':     window.actionUnblockDevice(mac, name); break;
+    // v5.9.92: 远程端补齐应用级限速与设备重命名 —— 两个后端 action 均非
+    // loopback-only, 一直是"后端允许、前端没做"的缺口(远程正是管孩子
+    // 设备的主场景, per-app 限速是核心操作)。
+    case 'rename':      window.showRenameModal(mac, name); break;
+    case 'app-limit':   window.showAppLimitModal(mac, name); break;
   }
 });
 
@@ -1083,15 +1114,13 @@ fetch('/api/health').then(function(r){return r.json();}).then(function(d){
 }).catch(function(){});
 
 // ── v4.0 Patch 2.d: 当前身份 + logout ─────────────────────
-// /api/health 返回的身份信息(仅已鉴权请求返回)
-//
-// rc30.12.30 (P0.4): session_label 字段已从 apiHealth 移除 (是死代码,
-// /api/health 在 isPublicPath, middleware 不 inject token, label 永远是空).
-// 函数保留, badge 在 session_label 缺失时不显示 (graceful degradation).
-// 如果未来恢复, 应走独立 /api/whoami 端点.
+// v5.9.92: 走独立 /api/whoami 端点(鉴权) —— rc30.12.30 P0.4 把 session_label
+// 从 /api/health 移除后(公共端点拿不到 token), 这里的 badge 和登出按钮
+// 3 个版本恒隐藏, doLogout 白写。whoami 是 server.go 注释里规划的那个
+// 端点, 现在落地。401 = 未鉴权/会话失效, 静默保持登出隐藏。
 function loadSessionInfo() {
-  fetch('/api/health', { credentials: 'same-origin' })
-    .then(function(r) { return r.json(); })
+  fetch('/api/whoami', { credentials: 'same-origin' })
+    .then(function(r) { return r.ok ? r.json() : null; })
     .then(function(d) {
       if (d && d.session_label) {
         var b = $('session-badge');

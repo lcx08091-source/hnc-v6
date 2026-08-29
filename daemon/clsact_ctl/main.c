@@ -344,6 +344,14 @@ struct elf_ctx {
     const char *shstr;
 };
 
+/* v5.9.92: SHT_NOBITS(8) 节(bss 类)不占文件空间, offset 无需校验;
+ * 其余类型(含 SHT_SYMTAB=2/SHT_STRTAB=3/SHT_PROGBITS=1/SHT_REL=9)按
+ * offset+size 必须落在文件内校验。 */
+static int sh_type_needs_data(uint32_t t)
+{
+    return t != 0 && t != 8; /* SHT_NULL / SHT_NOBITS */
+}
+
 static int elf_load(struct elf_ctx *c, const char *path)
 {
     FILE *f = fopen(path, "rb");
@@ -375,8 +383,37 @@ static int elf_load(struct elf_ctx *c, const char *path)
         LOGE("not an eBPF ELF object: %s", path);
         return -1;
     }
+    /* v5.9.92 (I-10): 节表边界校验 —— e_shoff/e_shnum/e_shstrndx 及每个节
+     * 的 sh_offset+sh_size 都必须落在文件内, 否则畸形/截断的 .o 会让后续
+     * 全部裸指针解引用越界读(崩溃或读垃圾)。威胁面低(需 root 换 obj),
+     * 但作为每次 install 都跑的解析器, 这是廉价的纵深防御。 */
+    if (c->eh->e_shoff == 0 || c->eh->e_shnum == 0 ||
+        c->eh->e_shstrndx >= c->eh->e_shnum ||
+        (uint64_t)c->eh->e_shoff + (uint64_t)c->eh->e_shnum * sizeof(Elf64_Shdr) > c->size) {
+        LOGE("bad section table: shoff=%llu shnum=%u strndx=%u size=%zu",
+             (unsigned long long)c->eh->e_shoff, c->eh->e_shnum,
+             c->eh->e_shstrndx, c->size);
+        return -1;
+    }
     c->sh = (Elf64_Shdr *)(c->data + c->eh->e_shoff);
+    {
+        uint64_t so = c->sh[c->eh->e_shstrndx].sh_offset;
+        uint64_t ss = c->sh[c->eh->e_shstrndx].sh_size;
+        if (so + ss > c->size) {
+            LOGE("bad shstr table: off=%llu size=%llu", (unsigned long long)so, (unsigned long long)ss);
+            return -1;
+        }
+    }
     c->shstr = (const char *)(c->data + c->sh[c->eh->e_shstrndx].sh_offset);
+    /* 所有节头的范围一并校验(sec_index/load_prog 里的逐节访问才有界) */
+    for (int i = 0; i < c->eh->e_shnum; i++) {
+        uint64_t so = c->sh[i].sh_offset, ss = c->sh[i].sh_size;
+        if (sh_type_needs_data(c->sh[i].sh_type) && so + ss > c->size) {
+            LOGE("section %d out of bounds: off=%llu size=%llu", i,
+                 (unsigned long long)so, (unsigned long long)ss);
+            return -1;
+        }
+    }
     return 0;
 }
 

@@ -51,7 +51,7 @@ fi
 [ "$NESTED_COUNT" -gt 0 ] && fail "artifact contains nested ZIP(s); use the inner module ZIP or fix packaging: $(printf '%s' "$NESTED_ZIPS" | tr '\n' ' ')" || ok "artifact has no nested ZIP"
 grep -E '\.rej$|\.orig$' "$TMP.entries" >/dev/null && fail "artifact contains .rej/.orig patch residue" || ok "artifact has no .rej/.orig residue"
 grep -E '(^|/)(\.ssh|id_rsa|id_ed25519|.*_ed25519|.*_rsa|.*\.pem)$' "$TMP.entries" >/dev/null && fail "artifact may contain private key/secret files" || ok "artifact has no obvious private key/secret files"
-for req in webroot/index.html webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe; do
+for req in webroot/index.html webroot/json-health.html webroot/ndpi-lab.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_watchdog.sh bin/hnc_clsact_sync.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh; do
   grep -x "$req" "$TMP.entries" >/dev/null && ok "required file exists: $req" || fail "required file missing at ZIP root path: $req"
 done
 

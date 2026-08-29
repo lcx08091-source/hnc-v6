@@ -3279,6 +3279,16 @@ body.kb-open .container {
           </div>
           <div class="toggle" id="apps-autopromote-toggle" onclick="appsToggleAutoPromote(this)" title="开=HIGH 自动晋级写规则; 关=影子模式(只统计, 仍可手动 promote)"></div>
         </div>
+        <div class="set-row">
+          <div class="set-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+          </div>
+          <div class="set-info">
+            <div class="set-label">清理自学习明细数据</div>
+            <div class="set-desc">清空 self_attrib 明细 JSONL(日常有 32MB/日封顶与去重, 此处立即回收) · 不影响已学习的规则与候选</div>
+          </div>
+          <button class="btn btn-ghost" style="padding:5px 10px;font-size:12px" data-action="self-attrib-purge">清理</button>
+        </div>
         <div id="apps-candidate-list"></div>
       </div>
 
@@ -3605,6 +3615,13 @@ body.kb-open .container {
         <div class="set-body">
           <div class="set-label">pidfile</div>
           <div class="set-sub" id="dpi-proc-pidfile">—</div>
+        </div>
+      </div>
+      <div class="set-row">
+        <div class="set-icon blue"><svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><polyline points="18 9 13 14 9 10 3 16"/></svg></div>
+        <div class="set-body">
+          <div class="set-label">字节统计来源 · 规则覆盖</div>
+          <div class="set-sub" id="dpi-proc-metrics">—</div>
         </div>
       </div>
     </div>
@@ -6233,12 +6250,8 @@ body.kb-open .container {
     const hex2 = mac.charAt(1).toLowerCase();
     // 局部管理位 = 1 (iOS/Android 隐私 MAC)
     if ('26ae'.includes(hex2)) return OUI_CLASS_MAP.privacy;
-    // 查 window.OUI_DB (由 oui_db.json 注入, 真迁移时再加载)
-    if (window.OUI_DB) {
-      const prefix = mac.replace(/[:-]/g, '').slice(0, 6).toUpperCase();
-      const cls = window.OUI_DB[prefix];
-      if (cls && OUI_CLASS_MAP[cls]) return OUI_CLASS_MAP[cls];
-    }
+    // v5.9.92: 删 OUI_DB 查库分支 —— loadOuiDb 恒设空对象, 该分支恒走不到;
+    // 设备类型推断已被服务端 /api/devices 取代。
     return OUI_CLASS_MAP.other;
   }
 
@@ -8069,6 +8082,23 @@ body.kb-open .container {
       if (sbIfaceDot) sbIfaceDot.className = 'dpi-dot' + ((mode === 'ok' && !dpiStall) ? '' : (dpiStall || mode === 'blind' || mode === 'waiting' || mode === 'rebinding' ? ' warn' : ' bad'));
       if (sbMode) sbMode.textContent = (mode === 'ok') ? (dpiStall ? '零抓包' : '运行中') : (mode === 'disabled' ? '已禁用' : (mode === 'crash_loop' ? '崩溃' : '等待中'));
       if (sbClients) sbClients.textContent = String(st.client_count || (st.clients ? Object.keys(st.clients).length : 0));
+      // v5.9.92: DPI 进程卡新行 —— byte_sampler_source(为字节全 0 时解释
+      // 数据来源, 防止用户以为坏了) + unidentified_ratio(规则覆盖率) +
+      // evidence_summary(证据账本)。三个 dpid 已产出字段此前 UI 零消费。
+      try {
+        const mEl = $('#dpi-proc-metrics');
+        if (mEl) {
+          const srcMap = { ebpf: '内核 eBPF', tethering_bpf: '系统转发统计', dumpsys: '系统 dumpsys', none: '无(应用字节显示 0)' };
+          const src = srcMap[st.byte_sampler_source] || st.byte_sampler_source || '—';
+          let cov = '—';
+          if (st.unidentified_ratio && typeof st.unidentified_ratio.ratio === 'number') {
+            cov = '已归因 ' + Math.round((1 - st.unidentified_ratio.ratio) * 100) + '%';
+          }
+          const ev = (st.evidence_summary && st.evidence_summary.total) ? (' · 证据 ' + st.evidence_summary.total + ' 条') : '';
+          mEl.textContent = '统计源 ' + src + ' · 规则覆盖 ' + cov + ev;
+          mEl.className = 'set-sub ' + (st.byte_sampler_source === 'none' ? 'dpi-proc-warn' : 'dpi-proc-ok');
+        }
+      } catch (e) {}
 
       // 运行卡 (新)
       $('#dpi-rc-uptime').textContent = formatUptime(st.uptime_s);
@@ -9023,9 +9053,7 @@ body.kb-open .container {
   }
 
 
-  /* OUI 数据库 · v5 不再需要 (服务端 /api/devices 已合并 hostname 来源)
-   * 保留空实现避免引用报错 */
-  (async function loadOuiDb() { window.OUI_DB = {}; })();
+
 
   /* ═══════════════════════════════════════════════════════════════
      POLLING · hotfix15: /api/live 高频, /api/devices 按 devices_sig 按需刷新
@@ -10771,6 +10799,12 @@ body.kb-open .container {
     if (idx === '' || idx === undefined) TEMPLATES.push(t);
     else TEMPLATES[parseInt(idx, 10)] = t;
     saveTemplatesToStorage();
+    // v5.9.92: 同步落盘 data/templates.json —— 此前模板只存 localStorage,
+    // 清缓存/换浏览器/远程端打开即全部丢失, 而后端 /api/templates 端点在
+    // 等一个永远没人写的文件。失败只提示不阻断(本地仍可用)。
+    kexec('sh ' + HNC + '/bin/json_set.sh tpl_set ' + sq(t.name) + ' ' +
+          (t.down/8) + ' ' + (t.up/8) + ' ' + t.delay + ' ' + t.jitter + ' ' + t.loss)
+      .catch(e => toast('模板未同步到后端(仅本机保存): ' + (e.message || e), 'warn'));
     hideModal();
     toast(`模板${idx === '' || idx === undefined ? '已创建' : '已更新'}: ${name}`, 'ok');
     setTimeout(() => showTemplateManager('manage'), 300);
@@ -10788,6 +10822,9 @@ body.kb-open .container {
       onOk: () => {
         TEMPLATES.splice(idx, 1);
         saveTemplatesToStorage();
+        // v5.9.92: 同步删除后端 templates.json 同名条目(见 saveTemplate 注释)
+        kexec('sh ' + HNC + '/bin/json_set.sh tpl_del ' + sq(t.name))
+          .catch(e => toast('后端删除失败(仅本机已删): ' + (e.message || e), 'warn'));
         toast(`已删除: ${t.name}`, 'ok');
         setTimeout(() => showTemplateManager('manage'), 300);
       }
@@ -10804,6 +10841,25 @@ body.kb-open .container {
         const arr = JSON.parse(raw);
         if (Array.isArray(arr)) { TEMPLATES.length = 0; TEMPLATES.push(...arr); }
       }
+    } catch (e) {}
+    // v5.9.92: 合并后端 data/templates.json(save/delete 已双写)—— 后端有
+    // 而本地没有的模板补进来(换浏览器/清缓存后恢复), 本地独有的保留。
+    try {
+      apiGet('/api/templates').then(d => {
+        const bt = d && d.templates;
+        if (bt && typeof bt === 'object') {
+          Object.keys(bt).forEach(name => {
+            const v = bt[name];
+            if (!v) return;
+            const exists = TEMPLATES.some(t => t.name === name);
+            if (!exists) TEMPLATES.push({
+              name,
+              down: (v.down_mbps || 0), up: (v.up_mbps || 0),
+              delay: (v.delay_ms || 0), jitter: (v.jitter_ms || 0), loss: (v.loss_pct || 0)
+            });
+          });
+        }
+      });
     } catch (e) {}
   }
 
@@ -11160,9 +11216,7 @@ body.kb-open .container {
      说明该机型上 BPF 不旁路 tc, banner 是误报.
      v5.3.0-rc30.7 起 banner 默认隐藏, 仅当未来真有主动 BPF offload
      检测信号 (检测 check_offload.sh 返回 ACTIVE) 时才展示. */
-  (function restoreHwBanner() {
-    /* 默认保持 hidden, 不做"演示展示". */
-  })();
+
 
   /* ═══════════════════════════════════════════════════════════════
      EVENT DELEGATION · 单 listener
@@ -12300,7 +12354,9 @@ body.kb-open .container {
           message: '期间限速规则会被重建,<br>可能短暂断开 3-5 秒',
           okText: '确认重启', okKind: 'btn-warn',
           onOk: () => {
-            kexec('sh ' + HNC + '/bin/cleanup.sh restart').then(() => {
+            // v5.9.92: 改走后端 restart_service action(带审计/超时/语义 detail),
+            // 不再 kexec 直跑 shell —— 消除双写通道(同型双轨翻过 P0)。
+            apiAction('restart_service', {}).then(() => {
               toast('服务正在重启…', 'warn');
               setTimeout(() => location.reload(), 2500);
             }).catch(e => toast('重启失败: ' + e.message, 'err'));
@@ -12448,13 +12504,27 @@ body.kb-open .container {
     // v5.9.91: clsact 检查/修复。v5.9.9 曾把这两个 case 写进上面 ".set-row.clickable"
     // 分支 —— 但按钮所在行不是 .clickable, 点击落进本分支后无 case, 静默无效。
     if (action === 'clsact-status-check') { clsactCheckStatus(); return; }
-    if (action === 'clsact-repair') { clsactRepair(); return; }
+    if (action === 'clsact-repair') { clsactRepair(); return; }    // v5.9.92: self_attrib 明细手动清理 —— 后端 action v5.9.7 就绪, 此前无入口。
+    if (action === 'self-attrib-purge') {
+      confirmModal({
+        icon: '🗑️', iconClass: 'danger',
+        title: '清理自学习明细?',
+        message: '将删除全部 self_attrib.*.jsonl 明细文件。已学习的规则、候选与统计不受影响。',
+        okText: '清理', okKind: 'btn-danger',
+        onOk: () => {
+          apiAction('self_attrib_purge', {})
+            .then(r => toast('已清理' + (r.detail ? ' · ' + r.detail : ''), 'ok'))
+            .catch(e => toast('清理失败: ' + (e.message || e), 'err'));
+        }
+      });
+      return;
+    }
     // v5.9.91: 「热点接口偏好」保存 —— 与上面同型的存量死按钮(handler 原写在
     // clickable 分支, 而按钮行不带 .clickable), 一并挪到这里。
     if (action === 'save-iface') {
       const el = $('#hotspot-iface-pref');
       const val = ((el && el.value) || 'auto').trim() || 'auto';
-      kexec('sh ' + HNC + '/bin/json_set.sh top hotspot_iface ' + sq(val === 'auto' ? '' : val))
+      apiAction('hotspot_iface_set', { iface: val === 'auto' ? '' : val })
         .then(() => { toast('热点接口偏好已保存', 'ok'); requestForceRefresh(); })
         .catch(e => toast('保存失败: ' + (e.message || e), 'err'));
       return;

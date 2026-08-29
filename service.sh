@@ -794,7 +794,8 @@ else
     # Sync strategy: rm -rf the destination then cp -r the source. We don't
     # try to merge user edits in /data/local/hnc/etc/dpi_rules.d/ because
     # user-authored subsets belong in 99-user-custom.json, which the module
-    # never ships (so it survives this sync). If the user has rolled their
+    # never ships (so it survives this sync). v5.9.92: WebUI 规则导入
+    # (bin/dpi_rules_import.sh) 也写这个文件 —— 与手工编辑共用同一保留通道. If the user has rolled their
     # own non-99 subset they'll lose it on upgrade — same trade-off as the
     # legacy dpi_rules.json upgrade path above.
     MOD_RULES_D="$MODDIR/data/dpi_rules.d"

@@ -177,27 +177,6 @@ func (s *TokensStore) Get(tokenID string) (Token, bool) {
 	return t, ok
 }
 
-// Count 返回当前 token 总数(包括 revoked)。诊断用。
-func (s *TokensStore) Count() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return len(s.tokens)
-}
-
-// CountActive 返回未撤销且未硬过期的 token 数。WebUI 显示用。
-func (s *TokensStore) CountActive() int {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	now := time.Now().Unix()
-	n := 0
-	for _, t := range s.tokens {
-		if !t.Revoked && (now-t.LastSeen) <= hardExpireSec {
-			n++
-		}
-	}
-	return n
-}
-
 // 硬过期相关常量
 // rc3.1.14 抽 const (review P3): 之前 hardExpireSec=60d 跟 Prune 内
 // hardExpire=90d 各写一处, 关系靠肉眼读. 实际语义:
@@ -276,12 +255,6 @@ func (s *TokensStore) PutIfAbsent(tokenID string, t Token) error {
 
 // Put 写入一个 token(新增或覆盖)。立即持久化到磁盘。
 // 历史 API 保留,给测试用;生产代码应该优先用 PutIfAbsent。
-func (s *TokensStore) Put(tokenID string, t Token) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.tokens[tokenID] = t
-	return s.saveAtomicLocked()
-}
 
 // Revoke 把 id 标记 revoked=true 并立即持久化。id 不存在返回 false
 // (幂等语义,与旧 json_set.sh token_revoke 的静默行为一致)。

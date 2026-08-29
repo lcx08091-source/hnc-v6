@@ -3,7 +3,7 @@
 #
 # 工具:
 #   platform_probe   平台探测 (host 模式可用, 字段会空)
-#   offload_ctl      adapter 真机验证 CLI (需 root + Android)
+#   offload_ctl      (removed v5.9.92 — 从不构建不随包; 真机验证用 termux 直接编)
 #
 # 用法:
 #   export ANDROID_NDK=/path/to/android-ndk-r27
@@ -12,7 +12,6 @@
 #   tool 可选:
 #     all              (默认) 编译两个工具
 #     platform_probe   只编 platform_probe
-#     offload_ctl      只编 offload_ctl
 #
 # 输出:
 #   tools/prebuilt/<arch>/<tool>
@@ -79,11 +78,10 @@ build_one() {
 case "$TOOL" in
     all)
         build_one platform_probe
-        build_one offload_ctl
         build_one sched_test
         build_one hnc_ipc
         ;;
-    platform_probe|offload_ctl|sched_test|hnc_ipc)
+    platform_probe|sched_test|hnc_ipc)
         build_one "$TOOL"
         ;;
     *)

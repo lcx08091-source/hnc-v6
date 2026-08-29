@@ -97,6 +97,10 @@ func (s *server) handler() http.Handler {
 
 	// 只读 API(被 authMiddleware 保护,2.b 默认 remote_auth_required=false 放行)
 	mux.HandleFunc("/api/health", s.apiHealth)
+	// v5.9.92: 鉴权身份查询 —— apiHealth 的 rc30.12.30 注释自己给的方案
+	// ("如果未来想恢复 session label, 走独立 /api/whoami 端点 (鉴权)")。
+	// 远程 SPA 的登出按钮因 session_label 删除而恒隐藏, doLogout 白写。
+	mux.HandleFunc("/api/whoami", s.apiWhoami)
 	mux.HandleFunc("/api/devices", s.apiDevices)
 	mux.HandleFunc("/api/live", s.apiLive)
 	mux.HandleFunc("/api/capabilities", s.apiCapabilities)
@@ -320,6 +324,27 @@ func (s *server) serveStatic(w http.ResponseWriter, r *http.Request) {
 }
 
 // ═══ API: health check ═════════════════════════════════════════
+
+// apiWhoami 返回当前鉴权 token 的身份信息(v5.9.92)。
+// /api/health 在 isPublicPath → middleware 不注入 token, 那里的 session_label
+// 是死代码(rc30.12.30 P0.4 删除); 本端点【不在】isPublicPath, 走完整 cookie
+// 鉴权后才能到达, 因此能安全地返回 label —— 远程 SPA 的登出按钮据此复活。
+func (s *server) apiWhoami(w http.ResponseWriter, r *http.Request) {
+	tok, ok := r.Context().Value(ctxKeyToken).(*Token)
+	if !ok || tok == nil {
+		// 理论不可达(非公开路径 + 鉴权中间件在前), 防御性 401
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		return
+	}
+	tid, _ := r.Context().Value(ctxKeyTokenID).(string)
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"token_id":     TokenIDLogPrefix(tid), // 日志前缀形态(前 8 字符), 不回完整 ID
+		"session_label": tok.Label,
+		"ip_hint":       tok.IPHint,
+		"created":       tok.Created,
+		"last_seen":     tok.LastSeen,
+	})
+}
 
 func (s *server) apiHealth(w http.ResponseWriter, r *http.Request) {
 	// v4.0.0-patch1.3: 暴露 watchdog passive mode 状态

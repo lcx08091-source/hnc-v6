@@ -340,7 +340,15 @@ func Run(cfg Config) (int, error) {
 		}
 		emitted += n
 	}
-	// Future: detectMonthlyQuota.
+	// v5.9.92: monthly quota detection (schema/config/UI 早已就位, 此前
+	// 唯独缺这个检测函数 —— 用户设了配额永远收不到告警)。
+	if uc.MonthlyQuota.Enabled {
+		n, err := detectMonthlyQuota(cfg, uc)
+		if err != nil {
+			return emitted, err
+		}
+		emitted += n
+	}
 	return emitted, nil
 }
 
