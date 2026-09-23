@@ -3,12 +3,12 @@
 # 用 node 解析 HTML 检查关键 DOM 结构和函数存在性
 set -u
 ROOT="${HNC_TEST_ROOT:-$(cd "$(dirname "${HNC_TEST_FILE:-${BASH_SOURCE:-$0}}")/../.." && pwd)}"
-HTML="$ROOT/webroot/index.html"
+HTML="$ROOT/webroot/classic.html"
 fail=0
 ok() { echo "[OK] $1"; }
 bad() { echo "[FAIL] $1"; fail=1; }
 
-[ -f "$HTML" ] || { echo "[FAIL] missing webroot/index.html"; exit 1; }
+[ -f "$HTML" ] || { echo "[FAIL] missing webroot/classic.html"; exit 1; }
 
 # 1. 检查关键 JS 函数存在 (用 node 解析而非纯 grep)
 if command -v node >/dev/null 2>&1; then

@@ -5,8 +5,11 @@ SAMPLE="$HNC_REPO_ROOT/bin/stats_sample.sh"
 ROLLUP="$HNC_REPO_ROOT/bin/stats_rollup.sh"
 
 ss() {
-    HNC_DIR="$HNC_TEST_DIR" \
-    STATS_ALL_CMD="echo \"$1\"" \
+    # v5.11: stats_sample.sh 为安全起见直接执行 $STATS_ALL_CMD(不再 eval),
+    # 旧写法 echo "\"...\"" 会把引号原样输出, 导致样本全被跳过。改为 cat 临时文件。
+    printf '%s\n' "$1" > "$HNC_TEST_DIR/stats_all.in"
+    HNC_DIR="$HNC_TEST_DIR" HNC_TEST_MODE=1 \
+    STATS_ALL_CMD="cat $HNC_TEST_DIR/stats_all.in" \
     sh "$SAMPLE"
 }
 
@@ -65,7 +68,7 @@ assert_eq "0" "$rc" "should not crash" && test_pass
 # ═══ rollup ═══════════════════════════════════════════════
 test_start "rollup: computes delta correctly with spike handling"
 mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
-YESTERDAY_TS=$(($(date +%s) - 86400))
+YESTERDAY_TS=$(date -d "$(date -d "@$(($(date +%s) - 86400))" +%Y-%m-%d) 01:00" +%s)  # v5.11: 锚定昨天 01:00, 避免晚上 20 点后样本跨过午夜
 YESTERDAY_DATE=$(date -d "@$YESTERDAY_TS" +%Y-%m-%d 2>/dev/null)
 T0=$YESTERDAY_TS
 cat > "$HNC_TEST_DIR/data/stats_raw.jsonl" <<EOF
@@ -85,7 +88,7 @@ assert_contains "$line" '"rx":5000' && \
 
 test_start "rollup: filters samples outside target date"
 mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
-YESTERDAY_TS=$(($(date +%s) - 86400))
+YESTERDAY_TS=$(date -d "$(date -d "@$(($(date +%s) - 86400))" +%Y-%m-%d) 01:00" +%s)  # v5.11: 锚定昨天 01:00, 避免晚上 20 点后样本跨过午夜
 TWO_DAYS_TS=$(($(date +%s) - 172800))
 YESTERDAY_DATE=$(date -d "@$YESTERDAY_TS" +%Y-%m-%d 2>/dev/null)
 cat > "$HNC_TEST_DIR/data/stats_raw.jsonl" <<EOF
@@ -102,7 +105,7 @@ assert_contains "$line" '"rx":500' && \
 
 test_start "rollup: dedupes when run twice for same date"
 mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
-YESTERDAY_TS=$(($(date +%s) - 86400))
+YESTERDAY_TS=$(date -d "$(date -d "@$(($(date +%s) - 86400))" +%Y-%m-%d) 01:00" +%s)  # v5.11: 锚定昨天 01:00, 避免晚上 20 点后样本跨过午夜
 YESTERDAY_DATE=$(date -d "@$YESTERDAY_TS" +%Y-%m-%d 2>/dev/null)
 cat > "$HNC_TEST_DIR/data/stats_raw.jsonl" <<EOF
 {"ts":$YESTERDAY_TS,"mac":"aa:bb:cc:dd:ee:01","rx":0,"tx":0}
@@ -117,7 +120,7 @@ assert_eq "1" "$n" "should have exactly 1 line after two rollups" && test_pass
 
 test_start "rollup: uses manual name from device_names.json"
 mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
-YESTERDAY_TS=$(($(date +%s) - 86400))
+YESTERDAY_TS=$(date -d "$(date -d "@$(($(date +%s) - 86400))" +%Y-%m-%d) 01:00" +%s)  # v5.11: 锚定昨天 01:00, 避免晚上 20 点后样本跨过午夜
 YESTERDAY_DATE=$(date -d "@$YESTERDAY_TS" +%Y-%m-%d 2>/dev/null)
 cat > "$HNC_TEST_DIR/data/stats_raw.jsonl" <<EOF
 {"ts":$YESTERDAY_TS,"mac":"aa:bb:cc:dd:ee:02","rx":0,"tx":0}
@@ -134,7 +137,7 @@ assert_contains "$line" '客厅 iPhone' && test_pass
 
 test_start "rollup: falls back to hostname when no manual name"
 mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
-YESTERDAY_TS=$(($(date +%s) - 86400))
+YESTERDAY_TS=$(date -d "$(date -d "@$(($(date +%s) - 86400))" +%Y-%m-%d) 01:00" +%s)  # v5.11: 锚定昨天 01:00, 避免晚上 20 点后样本跨过午夜
 YESTERDAY_DATE=$(date -d "@$YESTERDAY_TS" +%Y-%m-%d 2>/dev/null)
 cat > "$HNC_TEST_DIR/data/stats_raw.jsonl" <<EOF
 {"ts":$YESTERDAY_TS,"mac":"aa:bb:cc:dd:ee:01","rx":0,"tx":0}
@@ -162,7 +165,7 @@ assert_eq "1" "$n" "old sample should be pruned" && test_pass
 
 test_start "rollup: tolerates malformed JSONL lines"
 mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
-YESTERDAY_TS=$(($(date +%s) - 86400))
+YESTERDAY_TS=$(date -d "$(date -d "@$(($(date +%s) - 86400))" +%Y-%m-%d) 01:00" +%s)  # v5.11: 锚定昨天 01:00, 避免晚上 20 点后样本跨过午夜
 YESTERDAY_DATE=$(date -d "@$YESTERDAY_TS" +%Y-%m-%d 2>/dev/null)
 cat > "$HNC_TEST_DIR/data/stats_raw.jsonl" <<EOF
 garbage not json
