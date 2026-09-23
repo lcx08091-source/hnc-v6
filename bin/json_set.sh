@@ -775,11 +775,11 @@ cfg_set)
     CFG=$HNC/data/config.json
     [ -f "$CFG" ] || echo '{}' > "$CFG"
     JVAL=$(json_encode "$VAL")
-    if grep -q "\"$KEY\"" "$CFG" 2>/dev/null; then
-        sed -i "s|\"$KEY\"[[:space:]]*:[[:space:]]*[^,}]*|\"$KEY\": $JVAL|g" "$CFG"
-    else
-        sed -i "s|}$|,\"$KEY\": $JVAL}|" "$CFG"
-    fi
+    # v5.11: 旧实现两条 sed -i: 在空对象 {} 上插入得到 `{,"theme": "dark"}`(非法 JSON);
+    # 值里的 & 或 | 会被 sed 当替换元字符改写; 且 sed -i 非原子。改走与 name/tpl 相同的
+    # 状态机写入 + guarded_commit(候选校验 + 备份 + mv 原子替换)。
+    [ -z "$KEY" ] && { echo "cfg_set: key required" >&2; exit 1; }
+    json_object_set_safe_file "$CFG" "${CFG}.tmp" "$KEY" "$JVAL" || exit 1
     echo "ok"
     ;;
 

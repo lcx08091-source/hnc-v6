@@ -181,6 +181,14 @@ js cfg_set theme light
 val=$(js cfg_get theme)
 assert_eq "light" "$val" "should return 'light'" && test_pass
 
+# v5.11 回归: 旧 sed 实现把 & 当"整个匹配"、| 当分隔符, 值被改写或 sed 报错
+test_start "cfg_set keeps & and | in value and stays valid JSON"
+js cfg_set theme 'a&b|c' >/dev/null 2>&1
+js cfg_set theme 'x&y|z' >/dev/null 2>&1
+val=$(js cfg_get theme)
+assert_eq 'x&y|z' "$val" "value should round-trip" && \
+    assert_json_valid "$HNC_TEST_DIR/data/config.json" && test_pass
+
 test_start "cfg_get returns empty for missing key"
 js cfg_set theme dark
 val=$(js cfg_get nonexistent_key)
