@@ -83,19 +83,22 @@ JSON
 # Prefer native hnc_json set-device-batch. This performs one validation,
 # one backup, one lock, and one final commit for the whole field set.
 if [ -x "$HNC_JSON" ]; then
-    TMP_ARGS_FILE="${TMPDIR:-/data/local/tmp}/hnc_json_batch_args.$$"
-    : > "$TMP_ARGS_FILE" || exit 1
-    while [ $# -ge 2 ]; do
+    # v5.11: 旧实现把 k/v/type 逐行写进 /data/local/tmp/hnc_json_batch_args.$$ 再按行读回:
+    #   - 值里含换行就会错位成别的 k/v/type 三元组(写错字段或类型);
+    #   - /data/local/tmp 对 adb shell(uid 2000)可写、文件名可预测, root 往里 `: >`
+    #     会跟随预先放置的符号链接截断任意文件;
+    #   - 目录不可写时整个批量写直接失败, 被中断时临时文件残留。
+    # 改为在位置参数里原地轮转: 每取出一对 k v, 就把 k v type 追加到 "$@" 末尾,
+    # 处理完 n 对后 "$@" 恰好只剩三元组。无临时文件, 值原样保留。
+    npairs=$(( $# / 2 ))
+    i=0
+    while [ "$i" -lt "$npairs" ]; do
         K=$1; V=$2; shift 2
-        valid_field "$K" || { rm -f "$TMP_ARGS_FILE"; echo "bad field: $K" >&2; exit 2; }
+        valid_field "$K" || { echo "bad field: $K" >&2; exit 2; }
         T=$(infer_type "$V")
-        printf '%s\n%s\n%s\n' "$K" "$V" "$T" >> "$TMP_ARGS_FILE"
+        set -- "$@" "$K" "$V" "$T"
+        i=$((i + 1))
     done
-    set --
-    while IFS= read -r line; do
-        set -- "$@" "$line"
-    done < "$TMP_ARGS_FILE"
-    rm -f "$TMP_ARGS_FILE"
     "$HNC_JSON" set-device-batch "$RULES" "$MAC" "$@"
     rc=$?
     [ $rc -eq 0 ] || { echo "json_set_batch: hnc_json set-device-batch failed rc=$rc" >&2; exit $rc; }

@@ -4,6 +4,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -28,13 +29,23 @@ func ensureCert(certPath, keyPath, bindIP string) error {
 	if _, err := os.Stat(certPath); err == nil {
 		if _, err := os.Stat(keyPath); err == nil {
 			// 文件都在, 但要校验内容是否还匹配
-			if reason := certNeedsRegen(certPath, bindIP); reason == "" {
+			reason := certNeedsRegen(certPath, bindIP)
+			// v5.11: 还要校验 cert/key 是否配对。下面生成时 cert 与 key 分两次
+			// rename, 两次之间进程被杀 → 新 cert + 旧 key; certNeedsRegen 只看
+			// cert(有效)会直接复用 → ListenAndServeTLS 报 "private key does
+			// not match public key" → log.Fatalf, watchdog 重启后依旧, 远程
+			// 访问永久不可用。配对失败即重生, 自愈。
+			if reason == "" {
+				if _, err := tls.LoadX509KeyPair(certPath, keyPath); err != nil {
+					reason = "cert/key pair invalid: " + err.Error()
+				}
+			}
+			if reason == "" {
 				log.Printf("using existing cert: %s", certPath)
 				return nil
-			} else {
-				log.Printf("cert %s needs regen: %s", certPath, reason)
-				// fall through 重生
 			}
+			log.Printf("cert %s needs regen: %s", certPath, reason)
+			// fall through 重生
 		}
 	}
 

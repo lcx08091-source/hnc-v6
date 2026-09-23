@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -72,6 +73,11 @@ func (s *server) dpiAggregate(rangeParam, macFilter string) ([]Bucket, []Bucket)
 	now := time.Now()
 	loc := now.Location()
 	statsDir := filepath.Join(s.hncDir, "run")
+	// v5.11: 窗口下界取"本地零点"。旧代码用 now.AddDate(0,0,-(days-1)) 当下界
+	// —— 那是 N 天前的【此刻】: days=1 时下界就是 now 本身, 今天所有已发生
+	// 的行都被丢弃 → range=today 恒全 0(统计页默认源就是 dpi); week/month
+	// 首日也只剩当前时刻之后的部分。
+	windowStart := localDayStart(now).AddDate(0, 0, -(days - 1))
 
 	byHour := make([]Bucket, 24)
 	for i := range byHour {
@@ -79,9 +85,11 @@ func (s *server) dpiAggregate(rangeParam, macFilter string) ([]Bucket, []Bucket)
 	}
 	byDate := map[string]*dayBucket{}
 
-	for d := 0; d < days; d++ {
-		day := now.AddDate(0, 0, -d)
-		dayKey := day.Format("20060102")
+	// v5.11: dpid 以 UTC 日期命名 stats.YYYYMMDD.jsonl(output/history.go
+	// pathFor), 旧代码按本地日期找文件 → UTC+8 下本地 0-8 点的行落在前一个
+	// UTC 日文件里读不到。改为按窗口覆盖的(本地∪UTC)日期集合找文件, 每个
+	// 文件只读一次, 再按行时间戳过滤, 不会重复计数。
+	for _, dayKey := range dayFileKeys(windowStart, now) {
 		path := filepath.Join(statsDir, "stats."+dayKey+".jsonl")
 		f, err := os.Open(path)
 		if err != nil {
@@ -108,7 +116,7 @@ func (s *server) dpiAggregate(rangeParam, macFilter string) ([]Bucket, []Bucket)
 				continue
 			}
 			ts := time.Unix(row.T, 0).In(loc)
-			if ts.Before(now.AddDate(0, 0, -(days - 1))) || ts.After(now) {
+			if ts.Before(windowStart) || ts.After(now) {
 				continue
 			}
 			if rangeParam == "today" {
@@ -148,6 +156,51 @@ func (s *server) dpiAggregate(rangeParam, macFilter string) ([]Bucket, []Bucket)
 	return out, daily
 }
 
+// localDayStart 返回 t 所在本地日的零点。
+func localDayStart(t time.Time) time.Time {
+	return time.Date(t.Year(), t.Month(), t.Day(), 0, 0, 0, 0, t.Location())
+}
+
+// dayFileKeys v5.11: 返回覆盖 [from, to] 时间窗所需的按日文件名键(YYYYMMDD),
+// 取本地日期与 UTC 日期的并集并去重、升序。
+//
+// 背景: dpid 的 stats.YYYYMMDD.jsonl 按 UTC 日期命名, self_attrib.* 按本地
+// 日期命名(见 src/dpid/output/history.go trimDailyFiles 注释)。读侧只按
+// 其中一种算日期, 在非 UTC 时区必然漏掉窗口一端的文件。并集最多多打开一个
+// 文件, 调用方再按行时间戳过滤, 因此既不漏也不重复计数。
+func dayFileKeys(from, to time.Time) []string {
+	if to.Before(from) {
+		from, to = to, from
+	}
+	seen := map[string]bool{}
+	var keys []string
+	add := func(start, end time.Time) {
+		d := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+		for !d.After(end) {
+			k := d.Format("20060102")
+			if !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
+			d = d.AddDate(0, 0, 1)
+		}
+	}
+	add(from, to)
+	add(from.UTC(), to.UTC())
+	sort.Strings(keys)
+	return keys
+}
+
+// onlineHoursDayRE / onlineHoursMACRE v5.11: online_hours.jsonl 坏行兜底解析。
+// bin/watchdog.sh 的 `_oh_ts=$(_now_s)` 把变量当命令执行, 写出的行是
+// {"t":,"day":"YYYYMMDD","mac":"…"} —— 不是合法 JSON, 旧读侧 Unmarshal 失败
+// 即丢弃, /api/online_hours 因此恒为空。聚合只需要 day 与 mac 两个字段,
+// 这里对坏行按字段正则提取, 已落盘的历史数据也能恢复。
+var (
+	onlineHoursDayRE = regexp.MustCompile(`"day"\s*:\s*"([0-9]{8})"`)
+	onlineHoursMACRE = regexp.MustCompile(`"mac"\s*:\s*"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})"`)
+)
+
 // onlineHoursByMAC 读取 run/online_hours.jsonl(watchdog 每小时采样), 按天
 // 去重后返回每个 mac 的在线小时数: {mac: {day: 小时数}}。
 func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
@@ -170,7 +223,17 @@ func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
 			Day string `json:"day"`
 			MAC string `json:"mac"`
 		}
-		if err := json.Unmarshal(line, &row); err != nil || row.MAC == "" {
+		if err := json.Unmarshal(line, &row); err != nil {
+			// v5.11: 坏行兜底(见 onlineHoursDayRE 注释)
+			dm := onlineHoursDayRE.FindSubmatch(line)
+			mm := onlineHoursMACRE.FindSubmatch(line)
+			if dm == nil || mm == nil {
+				continue
+			}
+			row.Day = string(dm[1])
+			row.MAC = strings.ToLower(string(mm[1]))
+		}
+		if row.MAC == "" {
 			continue
 		}
 		if row.Day < cutoff {

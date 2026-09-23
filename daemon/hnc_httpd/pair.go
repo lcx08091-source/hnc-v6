@@ -217,6 +217,24 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	// PIN 对了, 清空计数 (避免下一次正常配对受历史失败影响)
 	s.limiter.ResetPin(ip)
 
+	// v5.11: 先原子"认领"一次性 PIN, 再发 token。旧流程在读 pending 与下方
+	// Remove 之间隔着 IssueToken 的 bcrypt(arm64 上 100-300ms), 同一 PIN 的
+	// 两个并发正确请求都能通过 → 签出两个 token, 一次性 PIN 契约失效。
+	// rename 是原子的: 并发者中只有一个能把 pair_pending 挪走, 其余拿到
+	// ENOENT, 按"无活动配对"处理。非 ENOENT 的 rename 失败(权限等)退回旧
+	// 路径(下方 Remove + truncate 兜底), 不阻断合法配对。
+	pendingPath := filepath.Join(s.hncDir, "run", "pair_pending")
+	claimedPath := pendingPath + ".claimed"
+	if err := os.Rename(pendingPath, claimedPath); err != nil {
+		if os.IsNotExist(err) {
+			writePairError(w, http.StatusBadRequest, "no active pairing")
+			return
+		}
+		log.Printf("WARN: pair_pending claim rename failed: %v (falling back to remove)", err)
+	} else {
+		defer os.Remove(claimedPath)
+	}
+
 	// PIN 对!颁发 token
 	label := labelFromUA(r.UserAgent())
 	cookieValue, tokenID, err := IssueToken(s.tokens, label, ip)
@@ -238,7 +256,7 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	// PIN 重放 (rate limit 5 次/分钟内). 本是一次性 PIN 的安全契约破裂.
 	// 现在: log + 强制 truncate 兜底. truncate 把文件清空, 即使 Remove 没成功
 	// 也让 readPending 走 "expired" 路径拒绝.
-	pendingPath := filepath.Join(s.hncDir, "run", "pair_pending")
+	// v5.11: 正常情况下 pending 已在上方被 rename 认领, 这里是 NotExist 空操作。
 	if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
 		log.Printf("WARN: pair_pending remove failed (PIN replay risk): %v, attempting truncate", err)
 		// 兜底: 清空文件内容. readPending 会因 unmarshal 失败拒绝.

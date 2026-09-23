@@ -48,15 +48,54 @@ test_start "top preserves other fields after update"
 seed_rules '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[]}'
 js top whitelist_mode true
 content=$(cat "$HNC_TEST_DIR/data/rules.json")
+# v5.11: 测试过时。已存在的键是原地替换值, 保留原文件格式 `"whitelist_mode":true`
+# (hnc_json set-top 与 hotfix18 legacy 状态机都是如此), 只有新插入的键才写成 `": "`。
+# 两种都是合法 JSON, 这里去掉空白后断言语义: 新值 true 生效、旧值 false 不残留、其它字段保留。
+content_ns=$(printf '%s' "$content" | tr -d ' \t\r\n')
 assert_contains "$content" '"version":1' && \
-    assert_contains "$content" '"whitelist_mode": true' && \
-    assert_contains "$content" '"blacklist":[]' && test_pass
+    assert_contains "$content_ns" '"whitelist_mode":true' && \
+    assert_not_contains "$content" 'false' && \
+    assert_contains "$content" '"blacklist":[]' && \
+    assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
 test_start "top handles string values with quotes"
 seed_rules
 js top hotspot_iface '"wlan2"'
 content=$(cat "$HNC_TEST_DIR/data/rules.json")
 assert_contains "$content" 'wlan2' && test_pass
+
+# v5.11 回归: 热点 SSID/密码是自由文本, 必须存成 JSON 字符串。
+# 旧逻辑按值推断类型: 纯数字密码存成数字 → hotspot_autostart.sh 读不到;
+# 前导 0 的数字密码推成非法数字字面量 → 写入被拒; SSID "true" 存成布尔。
+t_top_string_fields() {
+    RF="$HNC_TEST_DIR/data/rules.json"
+    js top hotspot_pass 12345678
+    assert_exit_zero $? "numeric password should save" || return 1
+    js top hotspot_ssid true
+    assert_exit_zero $? "ssid 'true' should save" || return 1
+    js top hotspot_pass 01234567
+    assert_exit_zero $? "leading-zero numeric password should save" || return 1
+    assert_json_valid "$RF" || return 1
+    c=$(tr -d ' \t\r\n' < "$RF")
+    assert_contains "$c" '"hotspot_pass":"01234567"' "password must be a JSON string" || return 1
+    assert_contains "$c" '"hotspot_ssid":"true"' "ssid must be a JSON string" || return 1
+    assert_eq "01234567" "$(js top_get hotspot_pass)" "top_get should return the password verbatim" || return 1
+    # 非字符串字段仍按值推断
+    js top hotspot_delay 30
+    assert_contains "$(tr -d ' \t\r\n' < "$RF")" '"hotspot_delay":30' "numeric field stays numeric" || return 1
+}
+test_start "top keeps hotspot_ssid/hotspot_pass as strings even if numeric-looking"
+seed_rules
+t_top_string_fields && test_pass
+
+test_start "top string fields stay strings on legacy fallback (no hnc_json)"
+seed_rules
+HNC="$HNC_TEST_DIR" HNC_JSON=/nonexistent/hnc_json sh "$JSON_SET" top hotspot_pass 01234567
+rc=$?
+c=$(tr -d ' \t\r\n' < "$HNC_TEST_DIR/data/rules.json")
+assert_exit_zero "$rc" "legacy write should succeed" && \
+    assert_contains "$c" '"hotspot_pass":"01234567"' "legacy path must also write a string" && \
+    assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
 # ═══ device (设备字段更新) ═══════════════════════════════
 test_start "device adds new device with single field"
@@ -175,6 +214,14 @@ js cfg_set theme light
 val=$(js cfg_get theme)
 assert_eq "light" "$val" "should return 'light'" && test_pass
 
+# v5.11 回归: 旧 sed 实现把 & 当"整个匹配"、| 当分隔符, 值被改写或 sed 报错
+test_start "cfg_set keeps & and | in value and stays valid JSON"
+js cfg_set theme 'a&b|c' >/dev/null 2>&1
+js cfg_set theme 'x&y|z' >/dev/null 2>&1
+val=$(js cfg_get theme)
+assert_eq 'x&y|z' "$val" "value should round-trip" && \
+    assert_json_valid "$HNC_TEST_DIR/data/config.json" && test_pass
+
 test_start "cfg_get returns empty for missing key"
 js cfg_set theme dark
 val=$(js cfg_get nonexistent_key)
@@ -241,6 +288,18 @@ assert_not_contains "$content" 'ee:01' && \
     assert_not_contains "$content" 'ee:02' && \
     assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
+
+# v5.11 回归: reset 走 tmp + guarded_commit, 留下可供 json_doctor 恢复的备份
+test_start "reset writes atomically and keeps a backup of the previous rules"
+seed_rules '{"version":1,"devices":{"aa:bb:cc:dd:ee:01":{"up_mbps":10}},"blacklist":[]}'
+js reset
+rc=$?
+bak=$(ls "$HNC_TEST_DIR/data/.json_backups"/rules.json.*.bak 2>/dev/null | head -1)
+assert_exit_zero "$rc" "reset should succeed" && \
+    assert_not_contains "$(cat "$HNC_TEST_DIR/data/rules.json")" 'ee:01' && \
+    assert_ne "" "$bak" "reset should leave a backup" && \
+    assert_contains "$(cat "$bak")" 'ee:01' "backup should hold pre-reset rules" && \
+    assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
 # ═══ hotfix18.0 JSON writer fuzz / regression tests ═════════════
 test_start "top update preserves comma inside existing string"
@@ -309,18 +368,54 @@ assert_contains "$content" '"note": "a,b}c"' && \
     assert_contains "$content" '"ip": "192.168.43.5"' && \
     assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
+# v5.11: 下面两条原写法是 `assert_json_valid ... || test_fail "..."` 然后继续往下跑。
+# assert 失败时自己已经 test_fail 一次, 而 test_fail 会 teardown(rm -rf 整个测试目录),
+# 于是后续再报 "file does not exist" —— 这是测试自身的假象, 不是产品删掉了用户文件。
+# 改成函数 + 首个失败即 return, 并补"逐字节往返"断言, 锁住反斜杠个数
+# (旧断言只看 JSON 是否合法, 抓不到 hnc_json 经 awk -v 吃掉模板名反斜杠的 bug)。
+# 输入 '...s\\TV' 是单引号字面量 = 2 个反斜杠, JSON 里应是 4 个。
+t_names_special() {
+    NF="$HNC_TEST_DIR/data/device_names.json"
+    js name_set aa:bb:cc:dd:ee:ff '客厅,电视}Bob"s\\TV'
+    assert_exit_zero $? "name_set should succeed" || return 1
+    assert_json_valid "$NF" "device_names invalid after name_set" || return 1
+    assert_contains "$(cat "$NF")" '"客厅,电视}Bob\"s\\\\TV"' "name should be JSON-escaped exactly once" || return 1
+    val=$(js name_get aa:bb:cc:dd:ee:ff)
+    assert_eq '客厅,电视}Bob"s\\TV' "$val" "name should round-trip byte-for-byte" || return 1
+    js name_del aa:bb:cc:dd:ee:ff
+    assert_exit_zero $? "name_del should succeed" || return 1
+    assert_not_contains "$(cat "$NF")" 'aa:bb:cc:dd:ee:ff' || return 1
+    assert_json_valid "$NF" || return 1
+}
 test_start "name_set/name_del handle comma brace quote and backslash"
-js name_set aa:bb:cc:dd:ee:ff '客厅,电视}Bob"s\\TV'
-assert_json_valid "$HNC_TEST_DIR/data/device_names.json" || test_fail "device_names invalid after name_set"
-js name_del aa:bb:cc:dd:ee:ff
-content=$(cat "$HNC_TEST_DIR/data/device_names.json")
-assert_not_contains "$content" 'aa:bb:cc:dd:ee:ff' && \
-    assert_json_valid "$HNC_TEST_DIR/data/device_names.json" && test_pass
+t_names_special && test_pass
 
+t_tpl_special() {
+    TF="$HNC_TEST_DIR/data/templates.json"
+    js tpl_set '游戏,严格}Bob"s\\profile' 1 2 3 4 5
+    assert_exit_zero $? "tpl_set should succeed" || return 1
+    assert_json_valid "$TF" "templates invalid after tpl_set" || return 1
+    assert_contains "$(cat "$TF")" '"游戏,严格}Bob\"s\\\\profile": {' "template key must keep both backslashes" || return 1
+    js tpl_del '游戏,严格}Bob"s\\profile'
+    assert_exit_zero $? "tpl_del should succeed" || return 1
+    assert_not_contains "$(cat "$TF")" 'down_mbps' || return 1
+    assert_json_valid "$TF" || return 1
+}
 test_start "tpl_set/tpl_del handle special template names"
-js tpl_set '游戏,严格}Bob"s\\profile' 1 2 3 4 5
-assert_json_valid "$HNC_TEST_DIR/data/templates.json" || test_fail "templates invalid after tpl_set"
-js tpl_del '游戏,严格}Bob"s\\profile'
-content=$(cat "$HNC_TEST_DIR/data/templates.json")
-assert_not_contains "$content" 'down_mbps' && \
-    assert_json_valid "$HNC_TEST_DIR/data/templates.json" && test_pass
+t_tpl_special && test_pass
+
+# v5.11 回归: 模板名含字面量 `\n`(反斜杠+n)。旧 hnc_json 经 awk -v 把它变成真换行:
+# tpl_set 被 guard 拒写后回落 legacy 写入成功, tpl_del 却在 hnc_json 里匹配不到 → rc=0 但删不掉。
+t_tpl_backslash_n() {
+    TF="$HNC_TEST_DIR/data/templates.json"
+    js tpl_set 'a\nb' 1 2 3 4 5
+    assert_exit_zero $? "tpl_set should succeed" || return 1
+    assert_contains "$(cat "$TF")" '"a\\nb": {' "key must be literal backslash-n" || return 1
+    js tpl_del 'a\nb'
+    assert_exit_zero $? "tpl_del should succeed" || return 1
+    assert_not_contains "$(cat "$TF")" 'down_mbps' "template must actually be deleted" || return 1
+    assert_file_not_exists "$HNC_TEST_DIR/run/json_legacy_fallback.count" \
+        "hnc_json path should handle it without legacy fallback" || return 1
+}
+test_start "tpl_set/tpl_del handle literal backslash-n in template name"
+t_tpl_backslash_n && test_pass
