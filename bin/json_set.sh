@@ -173,6 +173,13 @@ json_string_encode() {
     echo "\"$esc\""
 }
 
+# v5.11: awk -v 会再解析一层 C 风格反斜杠转义。已 JSON 编码的值(如 "a\\b")直接走 -v
+# 会被吃掉一个反斜杠("a\b" → JSON 里变成退格符;以反斜杠结尾时变成未闭合字符串)。
+# 经 -v 传入的字符串先翻倍反斜杠,awk 里还原后与原值逐字节一致。
+awk_v_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g'
+}
+
 # 确保目录和文件存在
 mkdir -p $HNC/data
 [ -f $RULES ] || cat > $RULES << 'EOF'
@@ -461,7 +468,7 @@ json_object_del_safe_file() {
 json_array_add_string_top_safe() {
     local field="$1" item="$2" jval
     jval=$(json_string_encode "$item")
-    awk -v field="$field" -v val="$jval" '
+    awk -v field="$field" -v val="$(awk_v_escape "$jval")" '
     function ch(i){ return substr(s,i,1) }
     function skipws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
     function strend(i,   j,c,esc){ esc=0; for(j=i+1;j<=n;j++){ c=ch(j); if(esc){esc=0; continue} if(c=="\\"){esc=1; continue} if(c=="\"") return j } return 0 }
@@ -487,7 +494,7 @@ json_array_add_string_top_safe() {
 json_array_del_string_top_safe() {
     local field="$1" item="$2" jval
     jval=$(json_string_encode "$item")
-    awk -v field="$field" -v val="$jval" '
+    awk -v field="$field" -v val="$(awk_v_escape "$jval")" '
     function ch(i){ return substr(s,i,1) }
     function skipws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
     function strend(i,   j,c,esc){ esc=0; for(j=i+1;j<=n;j++){ c=ch(j); if(esc){esc=0; continue} if(c=="\\"){esc=1; continue} if(c=="\"") return j } return 0 }
@@ -964,7 +971,10 @@ name_list)
 # ═══════════════════════════════════════════════════════════════
 
 tpl_set)
-    NAME=$2
+    # v5.11: 模板名先去控制字符,与 legacy json_escape_string_inner 的落盘结果一致。
+    # 否则含 TAB 的名字: hnc_json 路径被 guard 拒写 → legacy 去掉 TAB 后写入;
+    # 而 tpl_del 走 hnc_json 用带 TAB 的原名匹配不到, 返回 0 却删不掉。
+    NAME=$(printf '%s' "$2" | tr -d '\000-\037')
     DOWN=${3:-0}; UP=${4:-0}; DELAY=${5:-0}; JITTER=${6:-0}; LOSS=${7:-0}
     [ -z "$NAME" ] && { echo "tpl_set: name required" >&2; exit 1; }
 
@@ -992,7 +1002,8 @@ tpl_set)
     ;;
 
 tpl_del)
-    NAME=$2
+    # v5.11: 与 tpl_set 同样去控制字符, 保证写/删用同一个键
+    NAME=$(printf '%s' "$2" | tr -d '\000-\037')
     [ -z "$NAME" ] && exit 0
     TPL_FILE=$HNC/data/templates.json
     [ -f "$TPL_FILE" ] || exit 0

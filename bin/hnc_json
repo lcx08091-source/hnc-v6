@@ -211,6 +211,15 @@ validate_file() {
   END{ if(!seen||in_s||esc||depth!=0||!ok) exit 1; exit 0 }' "$f"
 }
 
+# v5.11: awk -v 会把值当 C 字符串字面量再解析一遍反斜杠转义(\\ → \、\n → 真换行、
+# \p 之类未知转义按实现丢弃或保留)。rc38 ESC-1 只给 lit 做了翻倍,键名/MAC/字段名仍直接
+# 走 -v:模板名 `x\\y` 落盘成 `x\y`(静默少一个反斜杠);`a\nb` 变成真换行被 guard 拒写后
+# 回落 legacy 写成功,但随后 tpl_del/get 用同一个名字在这里匹配不上 → 返回 0 却删不掉。
+# 所有经 -v 传给 awk 的字符串统一先翻倍反斜杠,让 awk 还原出与 shell 参数逐字节一致的值。
+awk_v() {
+  printf '%s' "$1" | sed 's/\\/\\\\/g'
+}
+
 json_literal() {
   typ="${2:-str}"
   v="$1"
@@ -259,7 +268,7 @@ json_literal() {
 get_top() {
   f="$1"; key="$2"
   validate_file "$f" || return $?
-  awk -v key="$key" '
+  awk -v key="$(awk_v "$key")" '
   function skip_ws(pos,   c){ while(pos<=n){c=substr(s,pos,1); if(c!~/[ \t\r\n]/) break; pos++} return pos }
   function parse_string(pos,   c,out){
     out=""; esc=0
@@ -317,7 +326,7 @@ get_device() {
   [ -n "$mac" ] || { echo "hnc_json: empty mac" >&2; return 2; }
   [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
   validate_file "$f" || return $?
-  awk -v mac="$mac" -v key="$key" '
+  awk -v mac="$(awk_v "$mac")" -v key="$(awk_v "$key")" '
   function ch(i){ return substr(s,i,1) }
   function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
   function parse_string(i,   j,c,out,esc){
@@ -402,7 +411,8 @@ get_device() {
 
 set_top_inner() {
   f="$1"; key="$2"; lit="$3"
-  awk -v key="$key" -v lit="$lit" '
+  # lit 已由调用方翻倍反斜杠(rc38 ESC-1);key 在这里翻倍(v5.11)
+  awk -v key="$(awk_v "$key")" -v lit="$lit" '
   function skip_ws(pos,   c){ while(pos<=n){c=substr(s,pos,1); if(c!~/[ \t\r\n]/) break; pos++} return pos }
   function parse_string(pos,   c,out){
     out=""; esc=0
@@ -527,7 +537,7 @@ set_top() {
 
 set_device_inner() {
   f="$1"; mac="$2"; key="$3"; lit="$4"
-  awk -v mac="$mac" -v key="$key" -v lit="$lit" '
+  awk -v mac="$(awk_v "$mac")" -v key="$(awk_v "$key")" -v lit="$lit" '
   function ch(i){ return substr(s,i,1) }
   function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
   function parse_string(i,   j,c,out,esc){
@@ -665,7 +675,7 @@ set_device() {
 
 del_object_key_inner() {
   f="$1"; key="$2"
-  awk -v key="$key" '
+  awk -v key="$(awk_v "$key")" '
   function ch(i){ return substr(s,i,1) }
   function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
   function prev_non_ws(i){ while(i>=1 && ch(i) ~ /[ \t\r\n]/) i--; return i }
@@ -738,9 +748,14 @@ del_object_key_inner() {
     root_end=value_end(root)
     if(!find_key(root, root_end, key)){ print s; exit 0 }
     after=skip_ws(fe); before=prev_non_ws(fk-1)
-    if(after<=n && ch(after)==",") print substr(s,1,fk-1) substr(s,after+1)
-    else if(before>=1 && ch(before)==",") print substr(s,1,before-1) substr(s,fe)
-    else print substr(s,1,fk-1) substr(s,fe)
+    if(after<=n && ch(after)==",") out=substr(s,1,fk-1) substr(s,after+1)
+    else if(before>=1 && ch(before)==",") out=substr(s,1,before-1) substr(s,fe)
+    else out=substr(s,1,fk-1) substr(s,fe)
+    # v5.11: 删掉最后一个键后只剩 "{\n  }" 这类纯空白对象, 规整成 "{}"
+    # (与 legacy writer 及 test_templates 的期望一致, 也避免空白随增删累积)
+    t=out; gsub(/[ \t\r\n]/,"",t)
+    if(t=="{}") out="{}"
+    print out
   }' "$f"
 }
 
@@ -914,7 +929,7 @@ set_device_batch() {
 
 set_map_field_inner() {
   f="$1"; topkey="$2"; entrykey="$3"; field="$4"; lit="$5"
-  awk -v topkey="$topkey" -v entrykey="$entrykey" -v field="$field" -v lit="$lit" '
+  awk -v topkey="$(awk_v "$topkey")" -v entrykey="$(awk_v "$entrykey")" -v field="$(awk_v "$field")" -v lit="$lit" '
   function ch(i){ return substr(s,i,1) }
   function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
   function parse_string(i,   j,c,out,esc){
