@@ -64,6 +64,39 @@ js top hotspot_iface '"wlan2"'
 content=$(cat "$HNC_TEST_DIR/data/rules.json")
 assert_contains "$content" 'wlan2' && test_pass
 
+# v5.11 回归: 热点 SSID/密码是自由文本, 必须存成 JSON 字符串。
+# 旧逻辑按值推断类型: 纯数字密码存成数字 → hotspot_autostart.sh 读不到;
+# 前导 0 的数字密码推成非法数字字面量 → 写入被拒; SSID "true" 存成布尔。
+t_top_string_fields() {
+    RF="$HNC_TEST_DIR/data/rules.json"
+    js top hotspot_pass 12345678
+    assert_exit_zero $? "numeric password should save" || return 1
+    js top hotspot_ssid true
+    assert_exit_zero $? "ssid 'true' should save" || return 1
+    js top hotspot_pass 01234567
+    assert_exit_zero $? "leading-zero numeric password should save" || return 1
+    assert_json_valid "$RF" || return 1
+    c=$(tr -d ' \t\r\n' < "$RF")
+    assert_contains "$c" '"hotspot_pass":"01234567"' "password must be a JSON string" || return 1
+    assert_contains "$c" '"hotspot_ssid":"true"' "ssid must be a JSON string" || return 1
+    assert_eq "01234567" "$(js top_get hotspot_pass)" "top_get should return the password verbatim" || return 1
+    # 非字符串字段仍按值推断
+    js top hotspot_delay 30
+    assert_contains "$(tr -d ' \t\r\n' < "$RF")" '"hotspot_delay":30' "numeric field stays numeric" || return 1
+}
+test_start "top keeps hotspot_ssid/hotspot_pass as strings even if numeric-looking"
+seed_rules
+t_top_string_fields && test_pass
+
+test_start "top string fields stay strings on legacy fallback (no hnc_json)"
+seed_rules
+HNC="$HNC_TEST_DIR" HNC_JSON=/nonexistent/hnc_json sh "$JSON_SET" top hotspot_pass 01234567
+rc=$?
+c=$(tr -d ' \t\r\n' < "$HNC_TEST_DIR/data/rules.json")
+assert_exit_zero "$rc" "legacy write should succeed" && \
+    assert_contains "$c" '"hotspot_pass":"01234567"' "legacy path must also write a string" && \
+    assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
+
 # ═══ device (设备字段更新) ═══════════════════════════════
 test_start "device adds new device with single field"
 seed_rules

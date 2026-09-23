@@ -552,10 +552,22 @@ hnc_json_type_for_value() {
 }
 
 json_update_top_hnc_json() {
-    local field="$1" value="$2" typ
+    local field="$1" value="$2" typ="$3"
     [ -x "$HNC_JSON" ] || return 127
-    typ=$(hnc_json_type_for_value "$value")
+    [ -n "$typ" ] || typ=$(hnc_json_type_for_value "$value")
     "$HNC_JSON" set-top "$RULES" "$field" "$value" "$typ"
+}
+
+# v5.11: 这些顶层字段是用户自由文本, 语义上永远是字符串, 不能按值猜类型。
+# 旧逻辑按值推断: 热点密码 "12345678"(8 位纯数字, 很常见)被写成数字 12345678,
+# hotspot_autostart.sh 的 get_rule_str 只认 "key": "..." 字符串 → 读空 → 开机自启
+# 退回系统设置/默认密码; "01234567" 推成非法数字字面量 → 两条写路径都被 guard
+# 拒绝 → WebUI 报 "save pass failed"; SSID 叫 "true"/"null" 会被写成布尔/null。
+json_top_field_is_string() {
+    case "$1" in
+        hotspot_ssid|hotspot_pass|hotspot_iface) return 0 ;;
+    esac
+    return 1
 }
 
 # hotfix19.2: bridge top-level reads to hnc_json when available.
@@ -669,11 +681,18 @@ case "$CMD" in
 #   3) 原实现只替换已存在字段；若字段不存在则无效。现补上“插入”分支
 top)
     FIELD=$2; VALUE=$3
+    # v5.11: 字符串字段强制 str(见 json_top_field_is_string), 其余仍按值推断
+    TOP_TYPE=""
+    json_top_field_is_string "$FIELD" && TOP_TYPE=str
     # hotfix19.1: prefer hnc_json set-top so top-level JSON writes use the
     # unified helper. Fallback preserves hotfix18 state-machine behavior.
-    if ! json_update_top_hnc_json "$FIELD" "$VALUE"; then
+    if ! json_update_top_hnc_json "$FIELD" "$VALUE" "$TOP_TYPE"; then
         json_legacy_fallback_warn "top" "writer"
-        JVAL=$(json_encode "$VALUE")
+        if [ "$TOP_TYPE" = "str" ]; then
+            JVAL=$(json_string_encode "$VALUE")
+        else
+            JVAL=$(json_encode "$VALUE")
+        fi
         json_update_top_safe "$FIELD" "$JVAL"
     fi
     ;;
