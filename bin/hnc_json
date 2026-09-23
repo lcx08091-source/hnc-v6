@@ -111,14 +111,28 @@ _acquire_lock_dir() {
 # rc36 (LOCK-1): tracks whether THIS process acquired the outer json.lock so the
 # trap only releases what it owns (never the inner-only / parent-held cases).
 _OUTER_HELD=0
+# v5.11: 本进程是否已持锁。array_add_unique/array_del_value/token_revoke 需要把
+# "读当前值 → 算新值 → set_top 写回" 整段放进锁里(旧实现读在锁外, 两个并发直调
+# hnc_json 的 add-array-unique 会互相覆盖丢一条); mkdir 锁不可重入, 所以 set_top
+# 内部再 acquire_lock 时直接复用。
+_LOCK_HELD=0
 _release_locks() {
   rm -rf "$LOCKDIR" 2>/dev/null || true
   if [ "$_OUTER_HELD" = "1" ]; then
     rm -rf "$OUTER_LOCKDIR" 2>/dev/null || true
   fi
+  _OUTER_HELD=0
+  _LOCK_HELD=0
+}
+
+# v5.11: 退出时顺带清掉本进程的临时候选文件(被信号打断时不再残留 .hnc_json.$$)。
+_on_exit() {
+  rm -f "${tmp:-}" "${tmp2:-}" 2>/dev/null || true
+  _release_locks
 }
 
 acquire_lock() {
+  [ "$_LOCK_HELD" = "1" ] && return 0
   mkdir -p "$HNC_BASE/run" 2>/dev/null || true
   # 外层 json.lock:与 json_set.sh 同一把,统一序列化所有 rules.json 写者。
   # 已被外层(json_set.sh 桥接)持有时跳过,避免非重入死锁。
@@ -134,7 +148,13 @@ acquire_lock() {
     fi
     return 1
   fi
-  trap '_release_locks' EXIT INT TERM
+  _LOCK_HELD=1
+  # v5.11: 旧写法 trap '_release_locks' EXIT INT TERM —— sh 里 INT/TERM 的 trap 执行完
+  # 并不退出, 脚本会在已放锁的状态下继续 mv 写文件, 最后 EXIT 再 rm 一次锁目录
+  # (此时可能已是别的进程的锁)。改为信号只负责 exit, 由 EXIT trap 统一收尾一次。
+  trap '_on_exit' EXIT
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 }
 
 hnc_json_c_machine() {
@@ -192,7 +212,6 @@ hnc_json_c_try() {
       _c_rc=$?
       set -e
       _release_locks
-      _OUTER_HELD=0
       trap - EXIT INT TERM
       return "$_c_rc" ;;
     *) return 127 ;;
@@ -508,6 +527,21 @@ set_top_inner() {
   }' "$f"
 }
 
+# v5.11: 每次写都在 .json_backups 留一份备份, 但 hnc_json 从不清理(只有 json_set.sh
+# 的 legacy guarded_commit 会 prune, 而现在绝大多数写走 hnc_json), 纯 hnc_json 写路径
+# 下备份目录无限增长。按文件名分别保留最新 HNC_JSON_BACKUP_KEEP(默认 30)份: 与
+# json_doctor 按 basename 找最新有效备份一致, 也不会让 rules.json 的高频写把
+# templates.json / device_names.json 的备份挤光。
+prune_backups() {
+  _pb_keep="${HNC_JSON_BACKUP_KEEP:-30}"
+  case "$_pb_keep" in ''|*[!0-9]*) _pb_keep=30 ;; esac
+  # shellcheck disable=SC2012  # 备份名由本脚本生成(<base>.<ts>.<pid>.bak), 无空白
+  ls -1t "$BACKUP_DIR/$1".*.bak 2>/dev/null | sed -n "$((_pb_keep + 1)),\$p" | while IFS= read -r _pb_f; do
+    rm -f "$_pb_f" 2>/dev/null || true
+  done
+  return 0
+}
+
 set_top() {
   target="$1"; key="$2"; value="$3"; typ="${4:-str}"
   [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
@@ -521,7 +555,7 @@ set_top() {
 
   acquire_lock || return 1
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json.$$"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
 
@@ -546,6 +580,7 @@ set_top() {
     [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
     return 1
   }
+  prune_backups "$target_base"
 }
 
 
@@ -669,7 +704,7 @@ set_device() {
   validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   acquire_lock || return 1
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_device.$$"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
   awk_lit="$(printf '%s' "$lit" | sed 's/\\/\\\\/g')"
@@ -685,6 +720,7 @@ set_device() {
     [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
     return 1
   }
+  prune_backups "$target_base"
 }
 
 
@@ -796,7 +832,7 @@ del_object_key() {
   validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   acquire_lock || return 1
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_del.$$"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
   if ! del_object_key_inner "$target" "$key" > "$tmp"; then
@@ -811,6 +847,7 @@ del_object_key() {
     [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
     return 1
   }
+  prune_backups "$target_base"
 }
 
 
@@ -820,6 +857,8 @@ array_add_unique() {
   [ -n "$key" ] || { echo "hnc_json: empty array key" >&2; return 2; }
   [ -n "$value" ] || { echo "hnc_json: empty array value" >&2; return 2; }
   lit="$(json_literal "$value" str)" || return $?
+  # v5.11: 读-改-写整段持锁(见 _LOCK_HELD 注释), 防并发 add 丢条目
+  acquire_lock || return 1
   current="$(get_top "$target" "$key" 2>/dev/null || true)"
   case "$current" in
     \[*\]) ;;
@@ -861,6 +900,8 @@ array_del_value() {
   target="$1"; key="$2"; value="$3"
   [ -n "$key" ] || { echo "hnc_json: empty array key" >&2; return 2; }
   [ -n "$value" ] || { echo "hnc_json: empty array value" >&2; return 2; }
+  # v5.11: 读-改-写整段持锁, 防并发 del 与 add 互相覆盖
+  acquire_lock || return 1
   current="$(get_top "$target" "$key" 2>/dev/null || true)"
   case "$current" in
     \[*\]) ;;
@@ -907,7 +948,7 @@ set_device_batch() {
 
   acquire_lock || return 1
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_batch.$$"
   tmp2="$target_dir/.$target_base.hnc_json_batch.$$.next"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
@@ -938,6 +979,7 @@ set_device_batch() {
     [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
     return 1
   }
+  prune_backups "$target_base"
 }
 
 
@@ -1058,7 +1100,7 @@ set_map_field() {
   validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   acquire_lock || return 1
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_map.$$"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
   case "$typ" in
@@ -1082,6 +1124,7 @@ set_map_field() {
     [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
     return 1
   }
+  prune_backups "$target_base"
 }
 
 token_revoke() {
@@ -1091,6 +1134,8 @@ token_revoke() {
   esac
   [ -f "$target" ] || printf '{"version":1,"tokens":{}}\n' > "$target"
   token_key="$(json_literal "$token_id" str)" || return $?
+  # v5.11: 存在性检查与写回同在锁内
+  acquire_lock || return 1
   tokens_obj="$(get_top "$target" "tokens" 2>/dev/null || printf '{}')"
   if ! printf '%s
 ' "$tokens_obj" | grep -F "$token_key" >/dev/null 2>&1; then
@@ -1111,7 +1156,7 @@ token_revoke_all() {
   validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
   acquire_lock || return 1
   ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  bak="$BACKUP_DIR/$target_base.$ts.bak"
+  bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_token_all.$$"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
   awk '
@@ -1129,6 +1174,7 @@ token_revoke_all() {
     [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
     return 1
   }
+  prune_backups "$target_base"
 }
 
 cmd="${1:-}"

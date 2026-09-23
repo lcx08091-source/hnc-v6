@@ -289,6 +289,18 @@ assert_not_contains "$content" 'ee:01' && \
     assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
 
+# v5.11 回归: reset 走 tmp + guarded_commit, 留下可供 json_doctor 恢复的备份
+test_start "reset writes atomically and keeps a backup of the previous rules"
+seed_rules '{"version":1,"devices":{"aa:bb:cc:dd:ee:01":{"up_mbps":10}},"blacklist":[]}'
+js reset
+rc=$?
+bak=$(ls "$HNC_TEST_DIR/data/.json_backups"/rules.json.*.bak 2>/dev/null | head -1)
+assert_exit_zero "$rc" "reset should succeed" && \
+    assert_not_contains "$(cat "$HNC_TEST_DIR/data/rules.json")" 'ee:01' && \
+    assert_ne "" "$bak" "reset should leave a backup" && \
+    assert_contains "$(cat "$bak")" 'ee:01' "backup should hold pre-reset rules" && \
+    assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
+
 # ═══ hotfix18.0 JSON writer fuzz / regression tests ═════════════
 test_start "top update preserves comma inside existing string"
 seed_rules '{"version":1,"hotspot_ssid":"我家,客房","devices":{},"blacklist":[]}'

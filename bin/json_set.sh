@@ -93,7 +93,12 @@ acquire_lock() {
             # rc3.1.34 修 #3: 之前 trap 第一句 `rmdir "$LOCKDIR/pid"` 是死代码 ——
             # pid 是 echo 写的普通文件不是目录, rmdir 永远 fail 但被 2>/dev/null 吞掉.
             # 教训 #8 反模式本身. 移除死代码, 只留正确的 rm + rmdir.
-            trap 'rm -f "$LOCKDIR/pid" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null' EXIT INT TERM
+            # v5.11: 旧写法把放锁同时挂在 EXIT INT TERM 上。sh 里 INT/TERM 的 trap 执行完
+            # 并不退出 —— 放锁后脚本继续跑、在无锁状态下写共享的 $TMP 并 mv, 退出时 EXIT
+            # 又 rmdir 一次(可能已是别的进程刚拿到的锁)。信号改为只 exit, 放锁只在 EXIT 做一次。
+            trap 'rm -f "$LOCKDIR/pid" 2>/dev/null; rmdir "$LOCKDIR" 2>/dev/null' EXIT
+            trap 'exit 130' INT
+            trap 'exit 143' TERM
             return 0
         fi
         # 第 20 次重试时检查是否真的陈旧
@@ -215,9 +220,18 @@ json_backup_file() {
     echo "$bak"
 }
 
+# v5.11: 旧实现对整个备份目录统一只留最新 30 份, apply_device_rule.sh 每次应用都写
+# rules.json, 很快就把 device_names.json / templates.json 的备份全部挤掉, json_doctor
+# restore 时无备份可用。改为按文件名分别保留 30 份(与 bin/hnc_json prune_backups 一致)。
 json_prune_backups() {
-    mkdir -p "$JSON_BACKUP_DIR" 2>/dev/null || return 0
-    (ls -1t "$JSON_BACKUP_DIR"/*.bak 2>/dev/null | sed -n '31,$p' | xargs rm -f) 2>/dev/null || true
+    local base="$1"
+    [ -n "$base" ] || return 0
+    [ -d "$JSON_BACKUP_DIR" ] || return 0
+    # shellcheck disable=SC2012  # 备份名由本脚本生成, 无空白
+    ls -1t "$JSON_BACKUP_DIR/$base".*.bak 2>/dev/null | sed -n '31,$p' | while IFS= read -r f; do
+        rm -f "$f" 2>/dev/null
+    done
+    return 0
 }
 
 guarded_commit() {
@@ -231,10 +245,12 @@ guarded_commit() {
     mv "$tmpfile" "$target" || return 1
     chmod 600 "$target" 2>/dev/null || true
     if json_validate_file "$target"; then
-        json_prune_backups
+        json_prune_backups "$(basename "$target")"
         return 0
     fi
-    rc=$?
+    # v5.11: 旧代码 `rc=$?` 取的是整个 if 语句的状态(条件为假且无 else 时恒为 0),
+    # 于是"写后校验失败并已回滚"也返回成功。这里明确返回失败。
+    rc=1
     echo "json_set: post-write validation failed for $target, rolling back" >&2
     if [ -n "$backup" ] && [ -f "$backup" ]; then
         cp -p "$backup" "$target" 2>/dev/null || true
@@ -756,9 +772,11 @@ bl_del)
 
 # ── 清空所有规则 ──────────────────────────────────────────
 reset)
-    cat > "$RULES" << 'EOF'
-{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}
-EOF
+    # v5.11: 旧实现 `cat > "$RULES"` 就地截断重写: httpd/tc_manager 此刻读到的可能是
+    # 空文件或半个文件; 也不留备份, 误点"清空"后 json_doctor 无从恢复。
+    # 改为写 $TMP 再走 guarded_commit(校验 + 备份 + mv 原子替换)。
+    printf '%s\n' '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}' > "$TMP" \
+        && atomic_write || exit 1
     ;;
 
 # ── 初始化目录结构 ────────────────────────────────────────
