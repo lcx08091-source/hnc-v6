@@ -14,6 +14,17 @@
 
 ---
 
+## [5.10.3] - 2026-09-23
+
+**WebUI 液态玻璃设计预览**。新增独立的设计预览页，不改动线上 WebUI，刷机包内容不变（`docs/` 被 CI 打包排除）。
+
+### Internals
+
+- 新增 `docs/webui-glass/`:苹果 Liquid Glass 风格的新版 WebUI 视觉方案。页面自包含，内置示例数据，不接后端；去掉了 DPI 识别、offload 检测、能力检测等检测类功能，保留设备 / 应用 / 统计 / 设置四页，其中设备卡的限速、延迟、长按封锁、重命名，模板，筛选，统计图的悬停提示和表格视图都能操作。
+- 折射效果采用 [Hyalite](https://github.com/VII-Cae/hyalite--liquid-glass) v0.5.0(作者 VII-Cae(VII),MIT):`hyalite.js` 原样引入,附 `LICENSE-hyalite`,页面「设置」页底部与 README 均署名。
+
+---
+
 ## [5.10.2] - 2026-09-23
 
 **开发环境:Claude Code 云端会话自动装好构建工具链**。不影响模块功能与刷机包内容(`.claude/` 被 CI 打包排除)。
