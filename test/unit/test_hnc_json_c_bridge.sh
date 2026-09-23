@@ -26,6 +26,12 @@ if HNC_JSON_C_DISABLE=1 "$HNC_JSON" validate "$TMP/bad.json"; then
   fail "shell fallback accepted bad JSON"
 fi
 
+# v5.11: 测试过时。build_hnc_json.sh 后来加了 host 构建拦截(防止把 x86 helper 打进
+# Android 模块), hnc_json_c_available 也拒绝非 ARM 的 helper, 两者都以
+# HNC_JSON_C_ALLOW_HOST=1 作为"仅单测"开关(报错信息原话)。本用例就是那个单测:
+# 不设它, 构建直接被拒; 即便构建成功, 下半段也会静默退回 shell 路径, 测不到 C 桥。
+export HNC_JSON_C_ALLOW_HOST=1
+
 # If a compiler is available, build and exercise the optional C helper.
 if command -v cc >/dev/null 2>&1; then
   CC=cc sh "$BUILD" "$TMP/hnc_json_c" >/dev/null || fail "C helper build failed"

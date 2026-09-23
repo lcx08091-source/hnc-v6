@@ -26,8 +26,12 @@ export HNC="$ROOT"
 export HNC_SKIP_PATH_HARDENING=1
 export HNC_TEST_MODE=1
 
+# v5.11: 夹具原为 `\\\"x\\\" \\\\ test` —— 在带引号的 heredoc('JSON')里不会被 shell
+# 再解一层, JSON 解码后是 `\"x\" \\ test`, 与下方期望的 `"x"` / `\ test` 对不上,
+# 该用例一直失败(被 run_all 的 0/0 计数掩盖)。产品解码与 python json.load 一致,
+# 是夹具多转义了一层: 改成单层 JSON 转义, 解码后正是 `"x" \ test`。
 cat > "$ROOT/data/rules.json" <<'JSON'
-{"version":1,"hotspot_ssid":"我家,客房} \\\"x\\\" \\\\ test","whitelist_mode":true,"speed_factor":0.85,"optional_value":null,"devices":{},"blacklist":[]}
+{"version":1,"hotspot_ssid":"我家,客房} \"x\" \\ test","whitelist_mode":true,"speed_factor":0.85,"optional_value":null,"devices":{},"blacklist":[]}
 JSON
 
 ssid=$(sh "$ROOT/bin/json_set.sh" top_get hotspot_ssid)

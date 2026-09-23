@@ -173,13 +173,28 @@ hnc_json_c_write_enabled() {
 }
 
 hnc_json_c_try() {
-  hnc_json_c_available || return 127
   case "${1:-}" in
     validate|get-top|get|version)
+      hnc_json_c_available || return 127
       "$HNC_JSON_C" "$@"; return $? ;;
     set-object-key|object-set|del-object-key|object-del|add-array-unique|array-add-unique|del-array-value|array-del-value|token-revoke|token-revoke-all)
+      # v5.11: 先判写门控再探测 helper。旧顺序先跑 hnc_json_c_available(会 exec 一次
+      # `hnc_json_c version`), 门控关闭(默认)时每次写都白白 fork+exec 一次 C helper;
+      # helper 损坏/卡住时还会拖住本该纯 shell 的写路径。
       hnc_json_c_write_enabled || return 127
-      "$HNC_JSON_C" "$@"; return $? ;;
+      hnc_json_c_available || return 127
+      # v5.11: C helper 自身不加锁。显式开启写时也要持有与 shell 写者同一把
+      # json.lock/hnc_json.lock, 否则与 json_set.sh 并发写同一文件会丢更新。
+      # 返回前释放, 失败时后面的 shell 回落路径会重新加锁(mkdir 锁不可重入)。
+      acquire_lock || return 1
+      set +e
+      "$HNC_JSON_C" "$@"
+      _c_rc=$?
+      set -e
+      _release_locks
+      _OUTER_HELD=0
+      trap - EXIT INT TERM
+      return "$_c_rc" ;;
     *) return 127 ;;
   esac
 }
