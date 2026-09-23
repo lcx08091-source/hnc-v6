@@ -20,7 +20,7 @@
 
 ### Internals
 
-- 新增 `docs/webui-glass/`:苹果 Liquid Glass 风格的新版 WebUI 视觉方案。页面自包含，内置示例数据，不接后端；去掉了 DPI 识别、offload 检测、能力检测等检测类功能，保留设备 / 应用 / 统计 / 设置四页，其中设备卡的限速、延迟、长按封锁、重命名，模板，筛选，统计图的悬停提示和表格视图都能操作。
+- 新增 `docs/webui-glass/`:苹果 Liquid Glass 风格的新版 WebUI 视觉方案。页面自包含，内置示例数据，不接后端；去掉了 DPI 识别、offload 检测、能力检测等检测类功能，背景为抽象柔光渐变(不含任何插画场景), 保留设备 / 应用 / 统计 / 设置四页，其中设备卡的限速、延迟、长按封锁、重命名，模板，筛选，统计图的悬停提示和表格视图都能操作。
 - 折射效果采用 [Hyalite](https://github.com/VII-Cae/hyalite--liquid-glass) v0.5.0(作者 VII-Cae(VII),MIT):`hyalite.js` 原样引入,附 `LICENSE-hyalite`,页面「设置」页底部与 README 均署名。
 
 ---

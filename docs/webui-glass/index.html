@@ -52,14 +52,15 @@ input{font:inherit;color:inherit}
 .num{font-family:var(--font-display);font-variant-numeric:tabular-nums}
 .mono{font-family:var(--font-mono);font-size:12px;letter-spacing:-.01em}
 
-/* ── 背景场景: canvas 固定铺满, 玻璃在它上面滚动 ── */
-#scene{position:fixed;inset:0;width:100%;height:100%;z-index:0;display:block}
-.dome{position:fixed;z-index:1;border-radius:50%;pointer-events:none;
-      width:min(74vw,420px);aspect-ratio:1;left:50%;top:-6vh;transform:translateX(-50%);
-      background:radial-gradient(circle at 34% 26%, rgba(255,255,255,.22), rgba(255,255,255,0) 42%),
-                 radial-gradient(circle at 50% 50%, rgba(255,255,255,0) 60%, rgba(255,255,255,.10) 100%);
-      backdrop-filter:var(--hyalite, blur(2px));-webkit-backdrop-filter:var(--hyalite, blur(2px));
-      box-shadow:var(--hyalite-edge, inset 0 0 0 1px rgba(255,255,255,.3)), 0 40px 80px -30px rgba(0,0,0,.5)}
+/* ── 背景: 抽象柔光渐变(沿用原 WebUI 的 bg-mesh 思路), 给玻璃一点可以折射的颜色 ── */
+.bg{position:fixed;inset:0;z-index:0;overflow:hidden;background:#161514}
+.bg i{position:absolute;border-radius:50%;filter:blur(38px);opacity:.9}
+.bg .b1{width:70vmax;height:70vmax;left:-28vmax;top:-22vmax;background:radial-gradient(circle,#ff8a3d 0%,rgba(255,138,61,0) 68%)}
+.bg .b2{width:60vmax;height:60vmax;right:-26vmax;top:18vh;background:radial-gradient(circle,#4f7fd6 0%,rgba(79,127,214,0) 66%)}
+.bg .b3{width:55vmax;height:55vmax;left:-10vmax;bottom:-26vmax;background:radial-gradient(circle,#c9577a 0%,rgba(201,87,122,0) 66%);opacity:.7}
+.bg .b4{width:40vmax;height:40vmax;right:-8vmax;bottom:-8vmax;background:radial-gradient(circle,#f2c265 0%,rgba(242,194,101,0) 66%);opacity:.55}
+.bg::after{content:"";position:absolute;inset:0;opacity:.07;mix-blend-mode:overlay;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)'/></svg>")}
 
 /* ── 玻璃材质 ── */
 .lg,.lg-pill,.lg-nav,.lg-dark{
@@ -102,7 +103,7 @@ input{font:inherit;color:inherit}
 @keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(70,211,140,.55)}50%{box-shadow:0 0 0 6px rgba(70,211,140,0)}}
 
 /* Hero —— 参考图右侧那张大日期卡的构图 */
-.hero{padding:20px 20px 16px;overflow:hidden;min-height:268px}
+.hero{padding:20px 20px 16px;overflow:hidden}
 .hero-top{display:flex;justify-content:space-between;align-items:flex-start;gap:12px;position:relative;z-index:1}
 .eyebrow{font-size:12px;letter-spacing:.12em;color:var(--ink-3)}
 .hero-when{text-align:right;font-size:12px;color:var(--ink-3);line-height:1.35}
@@ -113,11 +114,6 @@ input{font:inherit;color:inherit}
 .hero-sub{position:relative;z-index:1;display:flex;gap:18px;margin-top:10px;font-size:13px;color:var(--ink-2)}
 .hero-sub .num{font-size:20px;font-weight:400;color:var(--ink);margin-right:3px}
 .hero-rule{width:26px;height:2px;border-radius:2px;background:var(--ember);margin:14px 0 10px;position:relative;z-index:1}
-.orb-deco{position:absolute;right:-46px;top:62px;width:190px;height:190px;border-radius:50%;z-index:0;pointer-events:none;
-  background:radial-gradient(circle at 36% 32%, #fff4e6 0%, #ffc89a 22%, #ff9a4d 52%, rgba(255,122,40,.55) 72%, rgba(255,122,40,0) 100%);
-  filter:saturate(1.05);animation:orbGlow 6s ease-in-out infinite}
-@keyframes orbGlow{0%,100%{transform:scale(1)}50%{transform:scale(1.035)}}
-.orbit{position:absolute;right:-120px;top:10px;width:330px;height:330px;z-index:0;pointer-events:none}
 .spark-wrap{position:relative;z-index:1;margin-top:4px}
 .spark-cap{display:flex;justify-content:space-between;font-size:11px;color:var(--ink-3);margin-bottom:4px}
 .spark{display:block;width:100%;height:58px}
@@ -324,8 +320,7 @@ th:first-child,td:first-child{text-align:left}
 </head>
 <body>
 
-<canvas id="scene" aria-hidden="true"></canvas>
-<div class="dome lg-dome" aria-hidden="true"></div>
+<div class="bg" aria-hidden="true"><i class="b1"></i><i class="b2"></i><i class="b3"></i><i class="b4"></i></div>
 
 <div class="app" id="app">
   <header class="header">
@@ -348,12 +343,6 @@ th:first-child,td:first-child{text-align:left}
     </div>
 
     <div class="lg hero">
-      <svg class="orbit" viewBox="0 0 330 330" aria-hidden="true">
-        <circle cx="165" cy="165" r="150" fill="none" stroke="rgba(217,98,28,.45)" stroke-width="1.2"/>
-        <circle cx="30" cy="99" r="6" fill="#ff8a3d"/>
-        <circle cx="30" cy="99" r="11" fill="none" stroke="rgba(255,138,61,.35)" stroke-width="2"/>
-      </svg>
-      <div class="orb-deco" aria-hidden="true"></div>
       <div class="hero-top">
         <div class="eyebrow">实时下行</div>
         <div class="hero-when"><span id="clock">—</span><b id="online-line">6 / 9 台在线</b></div>
@@ -950,127 +939,8 @@ th:first-child,td:first-child{text-align:left}
   });
   window.addEventListener('resize', moveLens);
 
-  /* ───────────── 背景场景 (canvas, 只画一次) ───────────── */
-  function drawScene() {
-    var cv = $('#scene'), dpr = Math.min(window.devicePixelRatio || 1, 2);
-    var w = window.innerWidth, h = window.innerHeight;
-    cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
-    var c = cv.getContext('2d'); c.setTransform(dpr, 0, 0, dpr, 0, 0);
-    var s = 20260923; var R = function () { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; };
-    var m = Math.min(w, h), wl = h * 0.8;
-
-    var sky = c.createLinearGradient(0, 0, 0, h);
-    sky.addColorStop(0, '#57524b'); sky.addColorStop(.38, '#3a3631'); sky.addColorStop(.72, '#23201d'); sky.addColorStop(1, '#121110');
-    c.fillStyle = sky; c.fillRect(0, 0, w, h);
-    var haze = c.createRadialGradient(w * .5, h * .12, 0, w * .5, h * .12, m * .9);
-    haze.addColorStop(0, 'rgba(255,238,214,.28)'); haze.addColorStop(1, 'rgba(255,238,214,0)');
-    c.fillStyle = haze; c.fillRect(0, 0, w, h);
-
-    function rock(pts, top, bot, rim) {
-      c.beginPath(); c.moveTo(pts[0][0], pts[0][1]);
-      for (var i = 1; i < pts.length; i++) c.lineTo(pts[i][0], pts[i][1]);
-      c.closePath();
-      var ys = pts.map(function (p) { return p[1]; });
-      var g = c.createLinearGradient(0, Math.min.apply(null, ys), 0, Math.max.apply(null, ys));
-      g.addColorStop(0, top); g.addColorStop(1, bot); c.fillStyle = g; c.fill();
-      c.save(); c.clip();
-      for (var k = 0; k < 90; k++) {           // 石面颗粒
-        c.fillStyle = 'rgba(255,255,255,' + (R() * .05) + ')';
-        c.fillRect(pts[0][0] + R() * w, Math.min.apply(null, ys) + R() * (Math.max.apply(null, ys) - Math.min.apply(null, ys)), 1 + R() * 3, 1 + R() * 2);
-      }
-      c.restore();
-      if (rim) {
-        c.beginPath(); c.moveTo(pts[0][0], pts[0][1]);
-        for (var j = 1; j < Math.ceil(pts.length / 2); j++) c.lineTo(pts[j][0], pts[j][1]);
-        c.strokeStyle = rim; c.lineWidth = 1.4; c.stroke();
-      }
-    }
-    // 远景大石(右侧)
-    rock([[w*.52,wl],[w*.6,h*.44],[w*.7,h*.3],[w*.78,h*.24],[w*.86,h*.3],[w*.95,h*.38],[w*1.04,h*.5],[w*1.04,wl]], '#46423d', '#1d1b19', 'rgba(255,236,210,.28)');
-    // 左侧中景石
-    rock([[-w*.05,wl],[-w*.05,h*.5],[w*.08,h*.46],[w*.2,h*.5],[w*.34,h*.6],[w*.42,wl]], '#3d3935', '#1a1816', 'rgba(255,236,210,.22)');
-
-    function orb(x, y, r, a) {
-      var glow = c.createRadialGradient(x, y, r * .2, x, y, r * 2.8);
-      glow.addColorStop(0, 'rgba(255,214,160,' + (.42 * a) + ')'); glow.addColorStop(1, 'rgba(255,214,160,0)');
-      c.fillStyle = glow; c.beginPath(); c.arc(x, y, r * 2.8, 0, Math.PI * 2); c.fill();
-      var g = c.createRadialGradient(x - r * .3, y - r * .35, r * .05, x, y, r);
-      g.addColorStop(0, '#fffaf2'); g.addColorStop(.55, '#ffe6c4'); g.addColorStop(.9, '#f3c388'); g.addColorStop(1, 'rgba(236,178,112,.9)');
-      c.fillStyle = g; c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fill();
-      // 水面倒影
-      if (y + r < wl + 40) {
-        var ry = wl + (wl - y) * .35;
-        var rg = c.createRadialGradient(x, ry, 0, x, ry, r * 1.1);
-        rg.addColorStop(0, 'rgba(255,220,170,' + (.28 * a) + ')'); rg.addColorStop(1, 'rgba(255,220,170,0)');
-        c.save(); c.translate(x, ry); c.scale(1, .45); c.translate(-x, -ry);
-        c.fillStyle = rg; c.beginPath(); c.arc(x, ry, r * 1.1, 0, Math.PI * 2); c.fill(); c.restore();
-      }
-    }
-    // 水面
-    var water = c.createLinearGradient(0, wl, 0, h);
-    water.addColorStop(0, '#2d2a27'); water.addColorStop(1, '#0f0e0d');
-    c.fillStyle = water; c.fillRect(0, wl, w, h - wl);
-
-    orb(w * .17, h * .33, m * .12, 1);
-    orb(w * .9, h * .56, m * .1, 1);
-    orb(w * .3, h * .74, m * .075, .9);
-    orb(w * .72, h * .12, m * .05, .8);
-    orb(w * .62, h * .66, m * .04, .7);
-
-    for (var i = 0; i < 70; i++) {             // 水纹
-      var yy = wl + Math.pow(R(), 1.4) * (h - wl), xx = R() * w, ll = 20 + R() * 120;
-      c.strokeStyle = 'rgba(255,236,214,' + (0.03 + R() * .07) + ')'; c.lineWidth = 1;
-      c.beginPath(); c.moveTo(xx, yy); c.lineTo(xx + ll, yy); c.stroke();
-    }
-    // 前景石板
-    rock([[-w*.05,h],[-w*.05,h*.9],[w*.18,h*.88],[w*.42,h*.93],[w*.5,h]], '#3a3632', '#191715', 'rgba(255,236,210,.18)');
-    rock([[w*.58,h],[w*.66,h*.94],[w*.86,h*.9],[w*1.05,h*.92],[w*1.05,h]], '#35312d', '#171513', 'rgba(255,236,210,.16)');
-
-    function branch(x, y, len, ang, depth) {
-      var x2 = x + Math.cos(ang) * len, y2 = y + Math.sin(ang) * len;
-      c.strokeStyle = 'rgba(62,46,32,' + (.5 + depth * .08) + ')'; c.lineWidth = Math.max(.6, depth * .9);
-      c.beginPath(); c.moveTo(x, y); c.lineTo(x2, y2); c.stroke();
-      if (depth <= 2) {
-        for (var k = 0; k < 7; k++) {
-          var lx = x2 + (R() - .5) * len * 1.3, ly = y2 + (R() - .5) * len * 1.1;
-          var col = ['#e8c07a', '#d8a55c', '#f3d49a', '#c38a45'][Math.floor(R() * 4)];
-          c.fillStyle = col; c.globalAlpha = .55 + R() * .45;
-          c.beginPath(); c.ellipse(lx, ly, 2.2 + R() * 2.2, 1.2 + R() * 1.2, R() * Math.PI, 0, Math.PI * 2); c.fill();
-          c.globalAlpha = 1;
-        }
-      }
-      if (depth > 0) {
-        branch(x2, y2, len * (.68 + R() * .12), ang - .35 - R() * .3, depth - 1);
-        branch(x2, y2, len * (.64 + R() * .12), ang + .3 + R() * .3, depth - 1);
-      }
-    }
-    c.save(); c.shadowColor = 'rgba(255,200,120,.35)'; c.shadowBlur = 6;
-    branch(-10, h * .2, m * .16, -0.35, 6);
-    branch(w + 10, h * .46, m * .12, Math.PI + 0.45, 5);
-    c.restore();
-
-    function sparkle(x, y, r, col) {
-      c.fillStyle = col; c.beginPath();
-      c.moveTo(x, y - r); c.quadraticCurveTo(x, y, x + r * .9, y); c.quadraticCurveTo(x, y, x, y + r);
-      c.quadraticCurveTo(x, y, x - r * .9, y); c.quadraticCurveTo(x, y, x, y - r); c.fill();
-    }
-    c.save(); c.shadowColor = 'rgba(255,170,80,.8)'; c.shadowBlur = 10;
-    sparkle(w * .34, h * .22, 11, '#ffb869'); sparkle(w * .38, h * .27, 6, '#ffd6a0'); sparkle(w * .82, h * .8, 8, '#ffb869');
-    c.restore();
-
-    var img = c.getImageData(0, 0, cv.width, cv.height), px = img.data;   // 胶片颗粒
-    for (var p = 0; p < px.length; p += 4) { var n = (R() - .5) * 10; px[p] += n; px[p + 1] += n; px[p + 2] += n; }
-    c.putImageData(img, 0, 0);
-  }
-  var lastW = 0, lastH = 0;
-  function maybeRedraw() {
-    var w = window.innerWidth, h = window.innerHeight;
-    if (Math.abs(w - lastW) > 40 || Math.abs(h - lastH) > 120) { lastW = w; lastH = h; drawScene(); }
-  }
-  window.addEventListener('resize', maybeRedraw);
 
   /* ───────────── 启动 ───────────── */
-  maybeRedraw();
   for (var i = 0; i < 30; i++) state.spark.push(sum(onlineDevices(), function (d) { return d.base[0]; }) * (0.8 + rnd() * 0.4));
   renderDevices(); renderApps(); drawSpark(); tick();
   var saved = null; try { saved = localStorage.getItem('hnc-glass-page'); } catch (_) {}
@@ -1080,15 +950,14 @@ th:first-child,td:first-child{text-align:left}
   setInterval(tick, 2000);
 
   /* ───────────── 液态玻璃 (Hyalite by VII-Cae) ─────────────
-     卡片偏厚、带磨砂, 贴近参考图的乳白玻璃; 胶囊按钮薄一些; 导航透镜几乎不磨砂,
-     专门放大底下的图标; 顶部玻璃球最厚, 把整片背景弯过去。 */
+     卡片偏厚、带磨砂的乳白玻璃; 胶囊按钮薄一些; 导航透镜几乎不磨砂,
+     专门放大底下滑过的图标和内容。 */
   if (window.Hyalite) {
     Hyalite.watch(document.body, '.lg',       { bevel: 20, thickness: 30, blur: 7,   dispersion: 1.1, shade: .34, rim: 1.4, edge: .32, materialize: 280 });
     Hyalite.watch(document.body, '.lg-dark',  { bevel: 18, thickness: 26, blur: 5,   dispersion: 1.0, shade: .4,  rim: 1.5, edge: .3 });
     Hyalite.watch(document.body, '.lg-pill',  { bevel: 14, thickness: 18, blur: 4,   dispersion: .8,  shade: .3,  rim: 1.3, edge: .3 });
     Hyalite.watch(document.body, '.lg-nav',   { bevel: 18, thickness: 26, blur: 6,   dispersion: 1.0, shade: .32, rim: 1.4, edge: .32 });
     Hyalite.watch(document.body, '.lg-lens',  { bevel: 16, thickness: 40, blur: .6,  dispersion: 1.6, shade: .25, rim: 1.9, edge: .45 });
-    Hyalite.watch(document.body, '.lg-dome',  { bevel: 70, thickness: 80, blur: 0,   dispersion: 1.8, shade: .42, rim: 1.7, edge: .35, materialize: 600 });
   }
 })();
 </script>
