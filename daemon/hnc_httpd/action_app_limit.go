@@ -28,6 +28,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -70,7 +71,9 @@ func actionAppLimitSet(hncDir string, p map[string]string) actionResp {
 	}
 	rateStr := strings.TrimSpace(p["down_mbps"])
 	rate, err := strconv.ParseFloat(rateStr, 64)
-	if err != nil || rate < 0 || rate > 10000 {
+	// v5.11: ParseFloat 接受 "NaN", 而 NaN 与任何数比较都为 false, 会绕过范围
+	// 检查, 直到 json.Marshal 才失败 → 返回 500 "write failed" 而非 400。
+	if err != nil || math.IsNaN(rate) || rate < 0 || rate > 10000 {
 		return actionResp{OK: false, Error: "bad params", Detail: "down_mbps must be 0..10000"}
 	}
 

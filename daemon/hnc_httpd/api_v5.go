@@ -347,7 +347,7 @@ func (s *server) apiLogs(w http.ResponseWriter, r *http.Request) {
 func tailFile(path string, n int) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "tail", "-n", strconv.Itoa(n), path)
+	cmd := hardenCmd(exec.CommandContext(ctx, "tail", "-n", strconv.Itoa(n), path)) // v5.11: WaitDelay
 	out, err := cmd.Output()
 	if err != nil {
 		// 读不到或文件不存在或超时 - 返回空而不是 error

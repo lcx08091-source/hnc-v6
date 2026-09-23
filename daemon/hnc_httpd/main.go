@@ -349,3 +349,11 @@ func (lrw *loggingResponseWriter) WriteHeader(status int) {
 	lrw.status = status
 	lrw.ResponseWriter.WriteHeader(status)
 }
+
+// v5.11: 暴露被包装的底层 ResponseWriter。http.NewResponseController 靠
+// Unwrap() 逐层找到真正的连接; 缺了它, /api/events 的 SetWriteDeadline/Flush
+// 恒返回 ErrNotSupported → SSE 端点永远 500 "sse unsupported", 远程 SPA 一直
+// 退回轮询 (api_events.go 注释"middleware 不包裹 w"与事实不符)。
+func (lrw *loggingResponseWriter) Unwrap() http.ResponseWriter {
+	return lrw.ResponseWriter
+}

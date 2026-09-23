@@ -38,7 +38,8 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 
 	rc := http.NewResponseController(w)
 	// SSE 是长连接:必须清掉 WriteTimeout(httpsSrv 配了 60s),否则 60s 被掐断。
-	// middleware 不包裹 w,ResponseController 能直达底层 conn。
+	// v5.11: accessLogMiddleware 会把 w 包成 loggingResponseWriter, 它实现了
+	// Unwrap(), ResponseController 才能直达底层 conn(此前缺 Unwrap → 恒 500)。
 	if err := rc.SetWriteDeadline(time.Time{}); err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "sse unsupported"})
 		return

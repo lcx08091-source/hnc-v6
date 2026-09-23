@@ -36,6 +36,14 @@ const (
 	// PIN verify 仍在全锁时硬拒 (避免攻击者绕开 LRU 用全局 bucket 继续爆破 PIN).
 	rlGlobalCapacity   = 50.0
 	rlGlobalRefillRate = 50.0
+	// v5.11: PIN 尝试的全局(跨所有来源地址)上限。per-IP 锁挡不住"每个源地址
+	// 只猜 4 次就换地址"的轮换爆破: 热点客户端可自选静态 IPv4, -bind 0.0.0.0
+	// 时 Go 的 tcp 监听是双栈, IPv6 链路本地地址更是可任意生成; 只猜 4 次的
+	// 条目不进锁定态, LRU 照样淘汰回收, rlMaxEntries 构不成上限。PIN 只有 6 位
+	// 数字、有效 120s, 比对不走 bcrypt, 吞吐只受 TLS 握手限制。全局 20 次/分钟
+	// 把单个 PIN 窗口内的总尝试压到 ~40 次(命中率 ~4e-5)。代价: 攻击进行时合法
+	// 配对也会 429 —— 配对是主人低频操作, 可接受(安全方向取严)。
+	rlPinGlobalMaxPerWindow = 20
 )
 
 // rlEntry 单个 IP 的限流状态
@@ -57,6 +65,8 @@ type RateLimiter struct {
 	// rc3.1.13.2: LRU 全锁时的降级 bucket
 	globalTokens     float64
 	globalLastRefill int64
+	// v5.11: 全局 PIN 尝试滑动窗口(rlPinWindow 内每次消费的 unix 秒, 旧→新)
+	pinGlobalTS []int64
 }
 
 // NewRateLimiter 创建空 limiter
@@ -166,8 +176,24 @@ func (rl *RateLimiter) ConsumePinAttempt(ip string) (allowed bool, retryAfter in
 	if e.pinLockTS > now {
 		return false, e.pinLockTS - now, 0
 	}
+	// v5.11: 全局上限(见 rlPinGlobalMaxPerWindow)。超额时不消耗 per-IP 名额,
+	// 让合法用户在窗口滑过后仍有完整的 per-IP 次数。
+	winSec := int64(rlPinWindow.Seconds())
+	keep := 0
+	for keep < len(rl.pinGlobalTS) && now-rl.pinGlobalTS[keep] >= winSec {
+		keep++
+	}
+	rl.pinGlobalTS = rl.pinGlobalTS[keep:]
+	if len(rl.pinGlobalTS) >= rlPinGlobalMaxPerWindow {
+		retry := rl.pinGlobalTS[0] + winSec - now
+		if retry < 1 {
+			retry = 1
+		}
+		return false, retry, 0
+	}
+	rl.pinGlobalTS = append(rl.pinGlobalTS, now)
 	// 窗口过期则重置
-	if now-e.pinWindowStart > int64(rlPinWindow.Seconds()) {
+	if now-e.pinWindowStart > winSec {
 		e.pinWindowStart = now
 		e.pinAttempts = 0
 	}

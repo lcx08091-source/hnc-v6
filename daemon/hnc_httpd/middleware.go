@@ -314,9 +314,26 @@ func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "csrf header missing"})
 			return
 		}
+		// v5.11: 与 /api/action 共用 per-身份 60 次/分钟写限流。此前这几个状态
+		// 变更端点(尤其 /api/export —— 每次生成多 MB zip 且从不清理)可被
+		// 已鉴权客户端无限调用, 刷满 /data。
+		if !s.checkWriteRate(writeRateKey(r)) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "write rate limited (60/min)"})
+			return
+		}
 		r.Body = http.MaxBytesReader(w, r.Body, mutatingMaxBytes)
 		next(w, r)
 	}
+}
+
+// writeRateKey v5.11: 写限流计数 key, 与 handleAction 的约定一致:
+// cookie 身份 = "wr-<TokenID>", 本机 loopback secret 身份 = "wr-loopback"。
+// authMiddleware 已保证到这里的请求二者必居其一。
+func writeRateKey(r *http.Request) string {
+	if tid, ok := r.Context().Value(ctxKeyTokenID).(string); ok && tid != "" {
+		return "wr-" + tid
+	}
+	return "wr-loopback"
 }
 
 // hotfix17.8: 敏感只读接口。
