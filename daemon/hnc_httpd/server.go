@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"bufio"
 	"encoding/json"
 	"log"
@@ -129,6 +130,11 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/iface_info", s.apiIfaceInfo)
 	mux.HandleFunc("/api/logs", s.apiLogs)
 	mux.HandleFunc("/api/offload_status", s.apiOffloadStatus) // v5.1 P2-6
+	// v5.11: 新 WebUI 前后端对齐(取代旧前端直接 shell)
+	mux.HandleFunc("/api/rules_export", s.apiRulesExport)
+	mux.HandleFunc("/api/run_status", s.apiRunStatus)
+	mux.HandleFunc("/api/proc_health", s.apiProcHealth)
+	mux.HandleFunc("/api/dpi_rules", s.apiDPIRules)
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
 	// v5.9.9: 另两个磁盘页此前没有路由 —— json-health.html 完全没有入口
@@ -136,6 +142,9 @@ func (s *server) handler() http.Handler {
 	// 远程/浏览器访问 404。两者都补上, 与 changelog 同款只读 serve。
 	mux.HandleFunc("/json-health.html", s.serveWebrootPage("json-health.html"))
 	mux.HandleFunc("/ndpi-lab.html", s.serveWebrootPage("ndpi-lab.html"))
+	// v5.11: 新 WebUI 的底栏折射库(Hyalite, MIT)与旧版界面
+	mux.HandleFunc("/hyalite.js", s.serveWebrootPage("hyalite.js"))
+	mux.HandleFunc("/classic.html", s.serveWebrootPage("classic.html"))
 
 	// v4.0 Patch 3.a: 写操作统一 endpoint, 内部白名单 + per-token rate limit + CSRF
 	// 必经 authMiddleware(不允许过渡期匿名写)
@@ -185,6 +194,9 @@ func loadIndexDiskOnce() []byte {
 	return indexDiskBytes
 }
 
+// webuiV6Marker 出现在 webroot/index.html(v6) 的头部注释里。
+const webuiV6Marker = "HNC WebUI v6"
+
 func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -218,6 +230,13 @@ func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	// 不像 KSU/Magisk WebView 时, 也 serve 浏览器版本.
 	// KSU/SukiSU WebView 的 UA 包含 "KernelSU" 或 file:// 来源, 没有 "Mozilla/5.0";
 	// 而手机浏览器 UA 都带 "Mozilla/5.0" + "Mobile".
+	// v5.11: 新版 WebUI(v6) 同一份页面同时支持 KSU 桥接与浏览器同源 fetch,
+	// 磁盘上的 index.html 带有 v6 标记时, 远程/本机浏览器也直接用它(功能与本机
+	// 一致); 旧版磁盘页面仍按原规则只给 KSU WebView。
+	if data := loadIndexDiskOnce(); data != nil && bytes.Contains(data, []byte(webuiV6Marker)) {
+		_, _ = w.Write(data)
+		return
+	}
 	if !isLoopbackRequest(r) {
 		_, _ = w.Write(indexHTML) // embed: web/app.html
 		return
@@ -299,8 +318,12 @@ func (s *server) serveChangelog(w http.ResponseWriter, r *http.Request) {
 // 不接受请求参数, 无路径穿越面。
 func (s *server) serveWebrootPage(name string) http.HandlerFunc {
 	diskPath := "/data/adb/modules/hotspot_network_control/webroot/" + name
+	ctype := "text/html; charset=utf-8"
+	if strings.HasSuffix(name, ".js") {
+		ctype = "application/javascript; charset=utf-8" // v5.11: hyalite.js(nosniff 下类型错了浏览器会拒绝执行)
+	}
 	return func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if data, err := os.ReadFile(diskPath); err == nil && len(data) > 0 {
 			_, _ = w.Write(data)
@@ -473,8 +496,9 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 				ruleRaw = deviceRules[macKey]
 			}
 			if rule, ok := ruleRaw.(map[string]interface{}); ok {
+				// v5.11: +whitelist(设备卡的白名单开关回读; 此前从不返回)
 				for _, k := range []string{"mark_id", "down_mbps", "up_mbps", "delay_ms",
-					"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled", "sqm_enabled"} {
+					"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled", "sqm_enabled", "whitelist"} {
 					if v, exists := rule[k]; exists {
 						merged[k] = v
 					}
@@ -534,8 +558,9 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 			"tx_bps": int64(0),
 		}
 		if rule != nil {
+			// v5.11: 虚行也带 sqm_enabled / whitelist, 离线设备的开关状态不再丢
 			for _, k := range []string{"ip", "mark_id", "down_mbps", "up_mbps", "delay_ms",
-				"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled"} {
+				"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled", "sqm_enabled", "whitelist"} {
 				if v, exists := rule[k]; exists {
 					merged[k] = v
 				}

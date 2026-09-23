@@ -28,7 +28,7 @@ LOG="$HNC_DIR/logs/service.log"
 DRY=0
 [ "$1" = "--dry-run" ] && DRY=1
 
-log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [whitelist_sync] $*" >> "$LOG" 2>/dev/null; }
+log() { { echo "$(date '+%Y-%m-%d %H:%M:%S') [whitelist_sync] $*" >> "$LOG"; } 2>/dev/null; }
 
 ipt() {
     if [ "$DRY" = "1" ]; then
@@ -55,15 +55,20 @@ fi
 
 # 只取 devices 对象里 "whitelist":true 的条目。块内不含嵌套对象(与
 # cleanup_offline_devices.sh 的 device_has_rule 同一约定)。
-macs=$(grep -oE '"[0-9a-fA-F:]{17}"[[:space:]]*:[[:space:]]*\{[^}]*"whitelist"[[:space:]]*:[[:space:]]*true[^}]*\}' "$RULES" 2>/dev/null \
+# rules.json / devices.json 可能是多行格式化的, grep 按行匹配会漏掉跨行的块 ——
+# 先压成一行再匹配。
+FLAT_RULES=$(tr -d '\r\n' < "$RULES" 2>/dev/null)
+FLAT_DEVS=""
+[ -f "$DEVICES" ] && FLAT_DEVS=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null)
+macs=$(printf '%s' "$FLAT_RULES" | grep -oE '"[0-9a-fA-F:]{17}"[[:space:]]*:[[:space:]]*\{[^}]*"whitelist"[[:space:]]*:[[:space:]]*true[^}]*\}' 2>/dev/null \
        | grep -oE '^"[0-9a-fA-F:]{17}"' | tr -d '"' | tr 'A-F' 'a-f' | sort -u)
 
 count=0
 for mac in $macs; do
     # MAC 已由正则约束为 17 位 hex+冒号; IP 只接受点分十进制, 否则只按 MAC 放行
     ip=""
-    if [ -f "$DEVICES" ]; then
-        blk=$(grep -oiE "\"$mac\"[[:space:]]*:[[:space:]]*\\{[^}]*\\}" "$DEVICES" 2>/dev/null | head -1)
+    if [ -n "$FLAT_DEVS" ]; then
+        blk=$(printf '%s' "$FLAT_DEVS" | grep -oiE "\"$mac\"[[:space:]]*:[[:space:]]*\\{[^}]*\\}" 2>/dev/null | head -1)
         ip=$(printf '%s' "$blk" | grep -oE '"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
     fi
     ipt whitelist_add "$ip" "$mac" || log "whitelist_add $mac rc=$?"

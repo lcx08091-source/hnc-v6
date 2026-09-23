@@ -371,6 +371,8 @@ full_restore() {
     fi
 
     sh "$HNC_DIR/bin/iptables_manager.sh" init >> "$LOG" 2>&1
+    # v5.11: 白名单模式落到 iptables(init 后链可能是空的; 热点接口变化时 DROP 的 -i 也要跟着换)
+    sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     run_capability_probe_active "$iface"
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
@@ -815,6 +817,8 @@ do_full_init() {
     local iface=$1 ip=$2
     log "STATE PENDING -> ACTIVE:$iface (ip=$ip), running first-time init"
     sh "$HNC_DIR/bin/iptables_manager.sh" init >> "$LOG" 2>&1
+    # v5.11: 白名单模式落到 iptables(init 后链可能是空的; 热点接口变化时 DROP 的 -i 也要跟着换)
+    sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
         log "do_full_init: tc skipped because tc_htb=false; iptables only"

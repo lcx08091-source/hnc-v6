@@ -404,7 +404,13 @@ func actionSetTopBool(hncDir, key string, p map[string]string, onDetail, offDeta
 }
 
 func actionWhitelistSet(hncDir string, p map[string]string) actionResp {
-	return actionSetTopBool(hncDir, "whitelist_mode", p, "", "")
+	r := actionSetTopBool(hncDir, "whitelist_mode", p, "", "")
+	if !r.OK {
+		return r
+	}
+	// v5.11: 此前只改 rules.json, 从没人调用 iptables_manager.sh 的
+	// whitelist_on/add —— 开关打开后不拦截任何设备。现在同步落到 iptables。
+	return syncWhitelist(hncDir, r)
 }
 
 func actionAuthRequiredSet(hncDir string, p map[string]string) actionResp {

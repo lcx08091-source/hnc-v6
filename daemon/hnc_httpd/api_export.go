@@ -377,7 +377,7 @@ func (s *server) apiExportList(w http.ResponseWriter, r *http.Request) {
 	out := make([]item, 0, len(entries))
 	for _, e := range entries {
 		n := e.Name()
-		if !strings.HasSuffix(n, ".zip") {
+		if !isExportArchive(n) { // v5.11: 诊断包 hnc-debug-*.tar.gz 也在这里
 			continue
 		}
 		info, err := e.Info()
@@ -401,8 +401,8 @@ func (s *server) apiExportFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid name", http.StatusBadRequest)
 		return
 	}
-	if !strings.HasSuffix(name, ".zip") {
-		http.Error(w, "must end in .zip", http.StatusBadRequest)
+	if !isExportArchive(name) {
+		http.Error(w, "must end in .zip or .tar.gz", http.StatusBadRequest)
 		return
 	}
 	path := filepath.Join(s.exportsDir(), name)
@@ -410,7 +410,11 @@ func (s *server) apiExportFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "application/zip")
+	ctype := "application/zip"
+	if strings.HasSuffix(name, ".tar.gz") {
+		ctype = "application/gzip"
+	}
+	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
 	http.ServeFile(w, r, path)
 }
@@ -431,4 +435,9 @@ func execCommand(name string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// isExportArchive v5.11: /api/exports 可列出/下载的产物 —— 数据导出 .zip 与诊断包 .tar.gz。
+func isExportArchive(n string) bool {
+	return strings.HasSuffix(n, ".zip") || strings.HasSuffix(n, ".tar.gz")
 }

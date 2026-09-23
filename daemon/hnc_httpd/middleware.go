@@ -90,6 +90,9 @@ func isPublicPath(p string) bool {
 		// 设备数据 —— 页面内容自己再调 API, 那些 API 各自鉴权)。
 		"/json-health.html",
 		"/ndpi-lab.html",
+		// v5.11: 新 WebUI 的静态依赖/旧版界面, 同样不含数据(数据接口各自鉴权)
+		"/hyalite.js",
+		"/classic.html",
 		"/api/pair/verify",
 		"/api/pairing/status",
 		"/api/health",
@@ -300,6 +303,12 @@ const mutatingMaxBytes = 16384
 // v5.8.2 (audit P2-2): centralised after the api_self toggles and /api/export
 // were found to skip these checks (no MaxBytesReader, no CSRF/content-type).
 func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireMutationN(next, mutatingMaxBytes)
+}
+
+// requireMutationN v5.11: 同 requireMutation, 但可指定 body 上限(DPI 规则库
+// 导入需要 512KB, 其余端点仍是 16KB)。
+func (s *server) requireMutationN(next http.HandlerFunc, maxBytes int64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
@@ -321,7 +330,7 @@ func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "write rate limited (60/min)"})
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, mutatingMaxBytes)
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 		next(w, r)
 	}
 }

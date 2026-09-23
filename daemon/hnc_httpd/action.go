@@ -295,6 +295,23 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionHotspotSave(hncDir, p)
 	case "whitelist_set":
 		return actionWhitelistSet(hncDir, p)
+	// v5.11: 新 WebUI(v6) 前后端对齐补齐的动作, 取代旧前端直接 shell 写状态
+	case "device_whitelist_set":
+		return actionDeviceWhitelistSet(hncDir, p)
+	case "qos_set":
+		return actionQosSet(hncDir, p)
+	case "template_set":
+		return actionTemplateSet(hncDir, p)
+	case "template_del":
+		return actionTemplateDel(hncDir, p)
+	case "cache_clear":
+		return actionCacheClear(hncDir)
+	case "debug_bundle":
+		return actionDebugBundle(hncDir)
+	case "dpi_rules_reset":
+		return actionDPIRulesReset(hncDir)
+	case "dpi_rules_update":
+		return actionDPIRulesUpdate(hncDir, p)
 	case "auth_required_set":
 		return actionAuthRequiredSet(hncDir, p)
 	case "remote_enabled_set":
@@ -664,6 +681,11 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 	case "hotspot_autostart.sh":
 		timeoutSec = 30
 	case "dpi_rebind.sh":
+		timeoutSec = 30
+	// v5.11: 新 WebUI 接入的慢脚本
+	case "debug_bundle.sh", "dpi_rules_update.sh":
+		timeoutSec = 90
+	case "whitelist_sync.sh", "dpi_rules_import.sh":
 		timeoutSec = 30
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)

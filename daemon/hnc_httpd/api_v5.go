@@ -46,6 +46,11 @@ type configResp struct {
 	// 从未启用 → /api/stats?source=shadow 读不到文件时静默返回空 → 用户看到
 	// 全 0 空图且无任何解释。前端据此禁用该选项并说明原因。
 	StatsShadowEnabled bool `json:"stats_shadow_enabled"`
+	// v5.11: 旧前端一直在读但后端从没返回的字段(刷新后总显示 auto / 默认值)。
+	HotspotIface string `json:"hotspot_iface"`
+	TcQosMode    string `json:"tc_qos_mode"`
+	TcQosScale   int    `json:"tc_qos_scale"`
+	QosFallback  bool   `json:"qos_fallback"`
 	// rc3.1.13.1 删 OffloadWarn (review §3 P0): 历史上后端读 rules.json
 	// 但从无写路径, 前端 toggle 只写 localStorage 自管, 字段始终死值 false.
 	// rc3.1.12 config.json 兜底分支删除后, 死状况暴露 — 不如直接清掉
@@ -78,6 +83,17 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 			} else if d, ok := m["hotspot_delay_sec"].(float64); ok {
 				resp.HotspotDelaySec = int(d)
 			}
+			if v, ok := m["hotspot_iface"].(string); ok {
+				resp.HotspotIface = v
+			}
+			if v, ok := m["tc_qos_mode"].(string); ok {
+				resp.TcQosMode = v
+			}
+			if v, ok := m["tc_qos_scale"].(float64); ok {
+				resp.TcQosScale = int(v)
+			} else if v, ok := m["tc_qos_scale"].(string); ok {
+				resp.TcQosScale, _ = strconv.Atoi(v)
+			}
 			// rc32: 全局带宽整形器状态
 			resp.GlobalShaperEnabled = boolField(m, "global_shaper_enabled")
 			if v, ok := m["global_shaper_down"].(string); ok {
@@ -87,6 +103,26 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 				resp.GlobalShaperUp = v
 			}
 		}
+	}
+	// v5.11: run/ 下的 QoS 文件优先(与 tc_manager.sh qos_mode_raw 同一优先级)
+	if b, err := os.ReadFile(s.hncDir + "/run/tc_qos_mode"); err == nil {
+		if v := strings.TrimSpace(string(b)); v != "" {
+			resp.TcQosMode = v
+		}
+	}
+	if b, err := os.ReadFile(s.hncDir + "/run/tc_qos_scale"); err == nil {
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil {
+			resp.TcQosScale = n
+		}
+	}
+	if resp.TcQosMode != "precise" {
+		resp.TcQosMode = "compat"
+	}
+	if resp.TcQosScale < 50 || resp.TcQosScale > 120 {
+		resp.TcQosScale = 100
+	}
+	if _, err := os.Stat(s.hncDir + "/run/tc_qos_fallback"); err == nil {
+		resp.QosFallback = true
 	}
 	// rc35: 用户维护的飞轮排除名单(VPN/代理),从 etc/flywheel_exclude.json 读。
 	resp.FlywheelExcludeUser = loadFlywheelExcludeUser(s.hncDir)

@@ -433,10 +433,26 @@ blacklist_remove() {
 # ═══════════════════════════════════════════════════════════════
 # 白名单模式（v4+v6）
 # ═══════════════════════════════════════════════════════════════
+# v5.11: HNC_WHITELIST 无条件挂在 FORWARD 上, 旧实现在链尾追加裸 DROP ——
+# 从外网回来的应答包(源是公网、没有热点设备的 MAC)同样命中 DROP, 白名单
+# 设备自己也上不了网。现在:
+#   1. 链首放行 ESTABLISHED,RELATED(应答方向与已建立连接);
+#   2. DROP 只拦从热点接口进来的包(-i <iface>); 拿不到接口时退回裸 DROP,
+#      但有第 1 条兜底, 应答包不会被误杀。
 whitelist_mode_on() {
+    local iface=${1:-}
+    [ -n "$iface" ] || iface=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -1)
+    case "$iface" in *[!A-Za-z0-9_.-]*) iface="" ;; esac
     ipt_dual_q -t filter -D HNC_WHITELIST -j DROP
-    ipt_dual    -t filter -A HNC_WHITELIST -j DROP
-    log "Whitelist mode ON"
+    [ -n "$iface" ] && ipt_dual_q -t filter -D HNC_WHITELIST -i "$iface" -j DROP
+    ipt_dual_q -t filter -D HNC_WHITELIST -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    ipt_dual    -t filter -I HNC_WHITELIST 1 -m conntrack --ctstate ESTABLISHED,RELATED -j RETURN
+    if [ -n "$iface" ]; then
+        ipt_dual -t filter -A HNC_WHITELIST -i "$iface" -j DROP
+    else
+        ipt_dual -t filter -A HNC_WHITELIST -j DROP
+    fi
+    log "Whitelist mode ON (iface=${iface:-any})"
 }
 
 whitelist_mode_off() {
@@ -658,7 +674,7 @@ case "$1" in
         exit $rc ;;
     whitelist_on)
         gate_lock || exit 11
-        whitelist_mode_on
+        whitelist_mode_on "$2"
         rc=$?
         gate_unlock
         exit $rc ;;
