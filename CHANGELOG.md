@@ -14,6 +14,16 @@
 
 ---
 
+## [5.10.2] - 2026-09-23
+
+**开发环境:Claude Code 云端会话自动装好构建工具链**。不影响模块功能与刷机包内容(`.claude/` 被 CI 打包排除)。
+
+### Internals
+
+- 新增 `.claude/hooks/session-start.sh` + `.claude/settings.json`(SessionStart hook,仅在 `CLAUDE_CODE_REMOTE=true` 的云端容器执行):初始化 `third_party/libbpf` 子模块、预取 Go 1.25 工具链与模块、安装 Android NDK r27c 和 Android SDK(build-tools 34.0.0 + platforms android-34),并导出 `ANDROID_HOME` / `ANDROID_NDK` / `ANDROID_NDK_HOME`。与 `.github/workflows/build.yml` 的工具链版本对齐,会话内即可完整复现 CI 的 Go/C/eBPF 交叉编译与 applabel dex 构建。幂等:已安装部分直接跳过。
+
+---
+
 ## [5.10.1] - 2026-08-29
 
 **v5.10.0 终审修复批**。两路并行终审发现 6 个 Critical + 2 个 Important,全部修复——其中最严重的是 post-fs-data.sh 在 v5.9.92 的编辑事故(文件头被整段复制)。
