@@ -11,6 +11,8 @@
   - 就地展开的卡片代替二级页面; 平板(≥900px)设备页为 列表 + 右侧详情 分栏
   - 底部标签栏: 按住出现液态玻璃透镜, 可左右拖动, 松手按弹簧吸附到最近的标签并切页
   - 动画: 弹簧物理(linear() 采样) + 挤压拉伸, 统一的 Q 弹曲线
+  - 透镜边缘的真折射与色散: Hyalite v0.5.0 by VII-Cae (VII), MIT —— https://github.com/VII-Cae/hyalite--liquid-glass
+    (hyalite.js 原样引入, 许可证见 LICENSE-hyalite; 非 Chromium 内核退回模糊 + CSS 色散描边)
 -->
 <style>
 :root{
@@ -189,7 +191,7 @@ button.row:active,.row.tap:active{background:var(--input)}
 .btns .btn{flex:1}
 .chip{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 14px;border-radius:999px;font-size:13px;font-weight:700;background:var(--card-2);border:1px solid var(--stroke);box-shadow:var(--shadow)}
 .chip svg{width:14px;height:14px}
-.chip.on{background:linear-gradient(135deg,var(--blue),var(--indigo));color:#fff;border-color:transparent}
+.chip.on{background:linear-gradient(135deg,var(--blue),var(--indigo));color:#fff;border-color:transparent;box-shadow:0 6px 14px -6px rgba(0,122,255,.6)}
 .chips{display:flex;gap:8px;flex-wrap:wrap}
 
 /* 分段控件(原版 analysis-seg + chart-tabs), 滑块 Q 弹 */
@@ -403,17 +405,32 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
 .tab svg{width:23px;height:23px}
 .tab .dot{position:absolute;top:7px;left:58%;width:8px;height:8px;border-radius:50%;background:var(--red);box-shadow:0 0 6px rgba(255,59,48,.6)}
 .lens{position:absolute;z-index:1;top:5px;left:5px;height:54px;border-radius:27px;overflow:hidden;pointer-events:none;will-change:transform;
-  background:linear-gradient(135deg,var(--blue),var(--indigo));box-shadow:0 6px 16px -4px rgba(0,122,255,.55),0 1px 0 rgba(255,255,255,.3) inset;
-  transition:background .35s, box-shadow .35s}
+  background:var(--lens-glass);
+  -webkit-backdrop-filter:var(--hyalite, blur(2px) saturate(200%) brightness(1.06));backdrop-filter:var(--hyalite, blur(2px) saturate(200%) brightness(1.06));
+  box-shadow:0 6px 16px -4px rgba(0,122,255,.55),inset 0 0 0 1px rgba(255,255,255,0),inset 3px 0 5px -2px rgba(255,45,120,0),inset -3px 0 5px -2px rgba(0,190,255,0);
+  transition:box-shadow .45s ease}
+/* 静止时的蓝色: 独立一层, 按下时用透明度淡出 → 变成玻璃, 不再"啪"地一下变白 */
+.lens-tint{position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,var(--blue),var(--indigo));transition:opacity .42s cubic-bezier(.3,.7,.2,1)}
 .lens-in{position:absolute;top:0;left:0;height:54px}
-.lens-in .tab{color:#fff;transition:color .3s}
+.lens-in .tab{color:#fff;transition:color .42s ease}
 .lens-in .tab .dot{display:none}
-.tabbar.drag .lens{background:var(--lens-glass);-webkit-backdrop-filter:blur(2px) saturate(220%) brightness(1.08);backdrop-filter:blur(2px) saturate(220%) brightness(1.08);
-  box-shadow:0 10px 26px -6px rgba(0,0,0,.3),inset 0 0 0 1px rgba(255,255,255,.75),inset 0 2px 6px rgba(255,255,255,.6),inset 0 -3px 8px rgba(0,0,0,.1)}
+.tabbar.drag .lens{box-shadow:0 12px 28px -8px rgba(0,0,0,.32),inset 0 0 0 1px rgba(255,255,255,.7),inset 3px 0 5px -2px rgba(255,45,120,.55),inset -3px 0 5px -2px rgba(0,190,255,.55)}
+.tabbar.drag .lens-tint{opacity:.12}
 .tabbar.drag .lens-in .tab{color:var(--blue)}
-.lens::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .3s;
-  background:radial-gradient(120% 70% at 30% 0%,rgba(255,255,255,.75),rgba(255,255,255,0) 55%),radial-gradient(80% 60% at 80% 115%,rgba(255,255,255,.4),transparent 60%)}
+/* 放大层的轻微色散: 红/青两道错位描边 */
+.lens-in{transition:filter .42s ease}
+.tabbar.drag .lens-in{filter:drop-shadow(.8px 0 0 rgba(255,40,110,.45)) drop-shadow(-.8px 0 0 rgba(0,180,255,.45))}
+.lens::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .42s ease;
+  background:radial-gradient(120% 70% at 30% 0%,rgba(255,255,255,.7),rgba(255,255,255,0) 55%),radial-gradient(80% 60% at 80% 115%,rgba(255,255,255,.35),transparent 60%)}
 .tabbar.drag .lens::after{opacity:1}
+/* 透镜下方的原图标用遮罩挖掉, 只留透镜里放大的那一份, 避免重影 */
+.tabs{-webkit-mask-image:linear-gradient(90deg,#000 var(--ml,0px),transparent calc(var(--ml,0px) + 5px),transparent calc(var(--mr,0px) - 5px),#000 var(--mr,0px));
+      mask-image:linear-gradient(90deg,#000 var(--ml,0px),transparent calc(var(--ml,0px) + 5px),transparent calc(var(--mr,0px) - 5px),#000 var(--mr,0px))}
+
+/* 主题切换: 圆形扩散。关掉 View Transition 默认的交叉淡化, 旧画面原样垫在下面 */
+::view-transition-old(root),::view-transition-new(root){animation:none;mix-blend-mode:normal}
+::view-transition-old(root){z-index:1}
+::view-transition-new(root){z-index:2}
 
 /* ── 弹层 / Toast ── */
 .scrim{position:fixed;inset:0;z-index:80;background:var(--scrim);opacity:0;pointer-events:none;transition:opacity .35s}
@@ -459,13 +476,14 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
 
 <nav class="tabbar" id="tabbar" aria-label="主导航">
   <div class="tabs" id="tabs"></div>
-  <div class="lens" id="lens" aria-hidden="true"><div class="lens-in" id="lens-in"></div></div>
+  <div class="lens" id="lens" aria-hidden="true"><div class="lens-tint"></div><div class="lens-in" id="lens-in"></div></div>
 </nav>
 
 <div class="scrim" id="scrim"></div>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true"><div class="grab"></div><div id="sheet-body"></div></div>
 <div class="toast" id="toast" role="status" aria-live="polite"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span id="toast-t"></span></div>
 
+<script src="hyalite.js"></script>
 <script>
 (function () {
   'use strict';
@@ -985,7 +1003,8 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
   $('#tabs').innerHTML = tabsHtml; $('#lens-in').innerHTML = tabsHtml;
   var bar = $('#tabbar'), lens = $('#lens'), lensIn = $('#lens-in');
   var S = { x:0, v:0, tx:0, s:1, sv:0, ts:1, drag:false, raf:0, last:0, sx:0, gx:0 };
-  function slotW() { return (bar.clientWidth - 12) / TABS.length; }
+  var tabsEl = $('#tabs');
+  function slotW() { return tabsEl.clientWidth / TABS.length; }
   function layoutLens() { var w = slotW(); lens.style.width = w + 'px'; lensIn.style.width = (w * TABS.length) + 'px'; }
   function paint() {
     var w = slotW(), sp = Math.min(Math.abs(S.v) / 2600, .22);
@@ -995,6 +1014,8 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
     var cx = S.x + w / 2;
     lensIn.style.transformOrigin = cx.toFixed(1) + 'px 50%';
     lensIn.style.transform = 'translateX(' + (-S.x).toFixed(2) + 'px) scale(' + (mag / sxs).toFixed(4) + ',' + (mag / sys).toFixed(4) + ')';
+    tabsEl.style.setProperty('--ml', (cx - w * sxs / 2 + 3).toFixed(1) + 'px');
+    tabsEl.style.setProperty('--mr', (cx + w * sxs / 2 - 3).toFixed(1) + 'px');
   }
   function stepSpring(t) {
     var dt = S.last ? Math.min(.032, (t - S.last) / 1000) : .016; S.last = t;
@@ -1080,7 +1101,12 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
     if (document.startViewTransition && state.motion && !calm && x != null) {
       var r = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
       var vt = document.startViewTransition(applyTheme);
-      vt.ready.then(function () { document.documentElement.animate({ clipPath:['circle(0 at ' + x + 'px ' + y + 'px)', 'circle(' + r + 'px at ' + x + 'px ' + y + 'px)'] }, { duration:650, easing:EASE.soft, pseudoElement:'::view-transition-new(root)' }); }).catch(function () {});
+      vt.ready.then(function () {
+        document.documentElement.animate({ clipPath:['circle(0px at ' + x + 'px ' + y + 'px)', 'circle(' + r + 'px at ' + x + 'px ' + y + 'px)'] },
+          { duration:600, easing:'cubic-bezier(.4,0,.2,1)', fill:'forwards', pseudoElement:'::view-transition-new(root)' });
+      }).catch(function () {});
+      // 保险: 万一某些 WebView 卡住, 1.2 秒后强制结束过渡
+      setTimeout(function () { try { vt.skipTransition(); } catch (_) {} }, 1200);
     } else applyTheme();
     $$('[data-theme-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-theme-pick') === t); });
   }
@@ -1229,6 +1255,8 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
   if (wide()) state.sel = 'd1';
   RENDER[state.page](true); afterShow(state.page);
   layoutLens(); syncTab(state.page, true);
+  // 透镜边缘的真折射 + 色散: Hyalite by VII-Cae (MIT), https://github.com/VII-Cae/hyalite--liquid-glass
+  if (window.Hyalite) { try { Hyalite.attach(lens, { bevel:13, thickness:24, blur:.3, dispersion:2.6, shade:.28, rim:1.7, edge:0, sat:1.15 }); } catch (_) {} }
   wideMQ.addEventListener('change', function () { if (wide() && !state.sel) state.sel = 'd1'; RENDER[state.page](false); });
   addEventListener('resize', function () { layoutLens(); syncTab(state.page, true); placeSegs(document); drawSpark(); });
   setInterval(tick, 2000);
