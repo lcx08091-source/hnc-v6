@@ -60,6 +60,10 @@ jobs:
       # only the resulting bin/hnc_applabel.dex ships in the module.
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
+        # v5.11: 默认会装 'tools' 包, 新版 cmdline-tools 已无此包 → sdkmanager 退出 1。
+        # 不让 action 装默认包, 下一步自己装 build-tools + platform。
+        with:
+          packages: ''
 
       - name: Install SDK packages (build-tools + platform)
         run: sdkmanager "build-tools;34.0.0" "platforms;android-34"
