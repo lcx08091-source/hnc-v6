@@ -1894,11 +1894,15 @@ remove_device() {
     _validate_mark_id "$mark_id" || return 1
     local class_id; class_id=$(_class_id_for_mark "$mark_id")  # v5.12: mid=1 → 1:100
     local mark; mark=$(printf "0x%x" $((0x800000 + mark_id)))
-    # v5.12: u32 优先级按 mark_id 算(与 ensure_device_class 一致)
+    # v5.12: u32 优先级按 mark_id 算(与 ensure_device_class 一致)。
+    # 同时去掉旧的 `prio+1` 删除:u32 filter 只用 100+mark_id 这一个优先级,prio+1
+    # 恰好是 mark_id+1 那台设备的 u32 dst(热点口)/src(ifb0)filter —— 清 A 的
+    # 限速会顺手删掉 B 的 IP 分类器;B 的上行在 ifb0 上 mark 恒为 0(mirred 早于
+    # iptables),fw 兜底匹配不到,直接掉进默认类不限速。mark_id=99 时 prio 200
+    # 还会误删应用级限速的 fw filter。
     local prio=$((FILTER_PRIO_BASE + mark_id))
     for dev in "$iface" "$IFB_IFACE"; do
         tc filter del dev "$dev" parent 1: prio "$prio"         2>/dev/null || true
-        tc filter del dev "$dev" parent 1: prio "$((prio+1))"   2>/dev/null || true
         tc filter del dev "$dev" parent 1: pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
         tc qdisc del dev "$dev" parent "1:$class_id" 2>/dev/null || true
         tc class del dev "$dev" classid "1:$class_id" 2>/dev/null || true

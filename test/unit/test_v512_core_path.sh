@@ -60,3 +60,11 @@ mock_set_stdout tc "$TC_TREE"
 tcm set_limit wlan2 1 0 0 192.168.43.5 >/dev/null 2>&1
 assert_mock_not_called "classid 1:1 htb" "清限速不能改父类 1:1" && test_pass
 mock_teardown
+
+# ═══ remove_device 不得误删 mark_id+1 设备的 u32 filter ═══════
+test_start "remove mark_id=5: 只删 prio 105, 不碰 mark_id=6 的 prio 106"
+mock_setup
+tcm remove wlan2 5 >/dev/null 2>&1
+assert_mock_called "parent 1: prio 105" "应删自己的 prio 105" && \
+    assert_mock_not_called "prio 106" "不能删相邻设备 prio 106" && test_pass
+mock_teardown
