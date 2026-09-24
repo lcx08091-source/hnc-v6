@@ -371,6 +371,8 @@ full_restore() {
     fi
 
     sh "$HNC_DIR/bin/iptables_manager.sh" init >> "$LOG" 2>&1
+    # v5.11: 白名单模式落到 iptables(init 后链可能是空的; 热点接口变化时 DROP 的 -i 也要跟着换)
+    sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     run_capability_probe_active "$iface"
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
@@ -815,6 +817,8 @@ do_full_init() {
     local iface=$1 ip=$2
     log "STATE PENDING -> ACTIVE:$iface (ip=$ip), running first-time init"
     sh "$HNC_DIR/bin/iptables_manager.sh" init >> "$LOG" 2>&1
+    # v5.11: 白名单模式落到 iptables(init 后链可能是空的; 热点接口变化时 DROP 的 -i 也要跟着换)
+    sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
         log "do_full_init: tc skipped because tc_htb=false; iptables only"
@@ -1114,7 +1118,7 @@ while true; do
         _oh_mt=$(stat -c %Y "$RUN/online_hours.jsonl" 2>/dev/null || echo 0)
         [ "$_oh_mt" -gt 0 ] && _oh_age=$((_now_s - _oh_mt)) || _oh_age=999999
         if [ "$_oh_age" -ge 3300 ]; then
-            _oh_ts=$(_now_s)
+            _oh_ts=$_now_s
             _oh_day=$(date +%Y%m%d)
             # v5.10.1: 排除 blocked 设备 —— 被拉黑的设备不算"在线"
             for _m in $(grep -oE '"([0-9a-f]{2}:){5}[0-9a-f]{2}"[^}]*"status":"allowed"' "$HNC_DIR/data/devices.json" 2>/dev/null | grep -oE '"([0-9a-f]{2}:){5}[0-9a-f]{2}"' | tr -d '"' | tr 'A-F' 'a-f' | sort -u); do

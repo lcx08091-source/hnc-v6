@@ -76,7 +76,7 @@ test_start "BUG-009: post-fs-data.sh sets umask and chmods credential dirs"
 PFD="$HNC_REPO_ROOT/post-fs-data.sh"
 c=$(cat "$PFD" 2>/dev/null)
 assert_contains "$c" "umask 022" "post-fs-data.sh 应显式设 umask" && \
-    assert_contains "$c" "chmod 700 \$HNC_DIR \$HNC_DIR/data \$HNC_DIR/logs \$HNC_DIR/run" \
+    assert_contains "$c" "chmod 700 \"\$HNC_DIR\" \"\$HNC_DIR/data\" \"\$HNC_DIR/logs\" \"\$HNC_DIR/run\"" \
         "post-fs-data.sh 应把顶层/data/logs/run 收到 700" && \
     assert_not_contains "$c" "umask 077" \
         "不得用 umask 077(cp -rf 不带 -p 会把脚本/二进制压到不可执行)" && \
@@ -86,6 +86,6 @@ test_start "BUG-009: service.sh sets umask and chmods credential dirs"
 SVC="$HNC_REPO_ROOT/service.sh"
 c=$(cat "$SVC" 2>/dev/null)
 assert_contains "$c" "umask 022" "service.sh 应显式设 umask(WebUI 重启后端直接 fork 它)" && \
-    assert_contains "$c" "chmod 700 \$HNC_DIR \$HNC_DIR/logs \$RUN" \
+    assert_contains "$c" "chmod 700 \"\$HNC_DIR\" \"\$HNC_DIR/logs\" \"\$RUN\"" \
         "service.sh 应把顶层/logs/run 收到 700" && \
     test_pass

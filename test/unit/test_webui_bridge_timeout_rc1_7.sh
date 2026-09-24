@@ -3,8 +3,8 @@
 set -eu
 
 ROOT="${1:-.}"
-HTML="$ROOT/webroot/index.html"
-[ -f "$HTML" ] || { echo "missing webroot/index.html" >&2; exit 1; }
+HTML="$ROOT/webroot/classic.html"
+[ -f "$HTML" ] || { echo "missing webroot/classic.html" >&2; exit 1; }
 
 grep -q 'function withTimeout' "$HTML"
 grep -q 'withTimeout(kexec(cmd), 8000' "$HTML"

@@ -10,8 +10,11 @@ machine(){
   od -An -tx1 -j18 -N2 "$1" 2>/dev/null | awk '{print $1 " " $2}'
 }
 
+# v5.11: 路径来自环境变量(HNC_JSON_C / 安装目录), 原样塞进 "%s" 时含 " 或 \ 就输出非法 JSON
+json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
+
 printf '{\n'
-printf '  "helper": "%s",\n' "$BIN"
+printf '  "helper": "%s",\n' "$(json_str "$BIN")"
 if [ ! -e "$BIN" ]; then
   printf '  "present": false,\n  "enabled": false,\n  "reason": "missing"\n}\n'
   exit 0
@@ -23,6 +26,10 @@ case "$M" in
   "28 00") ARCH="arm"; ANDROID_ARM=true ;;
   "3e 00") ARCH="x86_64-host"; ANDROID_ARM=false ;;
   "03 00") ARCH="x86-host"; ANDROID_ARM=false ;;
+  # v5.11: 与 bin/hnc_json hnc_json_c_available 保持一致 —— 读不出 e_machine(od 缺失)
+  # 时不据此拒绝, 交给下面的 version 自检决定; 旧逻辑在这里报 not_android_arm_elf,
+  # 与 hnc_json 实际会启用 helper 的行为相反。
+  "") ARCH="unknown"; ANDROID_ARM=true ;;
   *) ARCH="unknown"; ANDROID_ARM=false ;;
 esac
 

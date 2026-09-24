@@ -144,20 +144,25 @@ assert_file_not_exists() {
     return 1
 }
 
-# 检查 JSON 文件能被 awk 解析(基础完整性)
+# 检查 JSON 文件是合法 JSON
+# v5.11: 旧实现用 tr 数全文件 { 与 } 的个数, 连字符串里的 "A}B" 也算进去,
+# 合法 JSON(如 {"ssid":"A}B"})被误报 "unbalanced braces"; 反过来 {"a":}{ 这种
+# 括号数相等的坏 JSON 又能通过。改用真解析器: 有 python3 用 json.load(独立于产品实现);
+# 真机无 python3 时退回仓库自带的递归下降校验器 bin/json_guard.sh。
 assert_json_valid() {
-    local path="$1" msg="${2:-JSON should be valid}"
+    local path="$1" msg="${2:-JSON should be valid}" err
     if [ ! -f "$path" ]; then
         test_fail "$msg (file does not exist: $path)"
         return 1
     fi
-    # 简单检查:括号配对(更严的 JSON 校验需要 python/jq,我们没有)
-    local opens closes
-    opens=$(tr -cd '{' < "$path" | wc -c)
-    closes=$(tr -cd '}' < "$path" | wc -c)
-    if [ "$opens" -ne "$closes" ]; then
-        test_fail "$msg (unbalanced braces: opens=$opens closes=$closes)
-      content: $(cat "$path" | head -c 200)"
+    if command -v python3 >/dev/null 2>&1; then
+        err=$(python3 -c 'import json,sys; json.load(open(sys.argv[1], encoding="utf-8"))' "$path" 2>&1)
+    else
+        err=$(sh "$HNC_REPO_ROOT/bin/json_guard.sh" "$path" 2>&1)
+    fi
+    if [ $? -ne 0 ]; then
+        test_fail "$msg (parse error: $(printf '%s\n' "$err" | tail -n 1))
+      content: $(head -c 200 "$path")"
         return 1
     fi
     # 必须以 { 开头 } 结尾(允许两端 whitespace)

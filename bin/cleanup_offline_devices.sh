@@ -73,7 +73,9 @@ skipped_online=0
 device_has_rule() {
     mac="$1"
     [ -f "$RULES" ] || return 1
-    block=$(grep -oE "\"$mac\":[[:space:]]*\\{[^}]*\\}" "$RULES" 2>/dev/null | head -1)
+    # v5.11: rules.json 可能是多行格式化的, 逐行 grep 永远匹配不到跨行的块
+    # (有规则的设备被当成"无规则"一起清掉) —— 先压成一行; MAC 大小写不敏感。
+    block=$(tr -d '\r\n' < "$RULES" 2>/dev/null | grep -oiE "\"$mac\"[[:space:]]*:[[:space:]]*\\{[^}]*\\}" 2>/dev/null | head -1)
     [ -z "$block" ] && return 1
     # v5.9.1: 字段名修正。rules.json 的限速字段实际是 down_mbps/up_mbps
     # (见 json_set.sh device 写入与 server.go buildDevicesPayload),

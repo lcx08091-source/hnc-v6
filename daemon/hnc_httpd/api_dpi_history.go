@@ -95,14 +95,23 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 
 	now := time.Now()
 	statsDir := filepath.Join(s.hncDir, statsDirRel)
+	// v5.11: 窗口 = [本地零点-(days-1)天, now], 与本文件头注释"today only /
+	// hour-of-day local time"一致。旧实现按"当前 UTC 日"取文件且不按时间戳
+	// 过滤: UTC+8 下 days=1 实际是本地 08:00 起(凌晨看到的是昨天 08:00 以后),
+	// 与 by_hour 的本地小时口径打架。现按窗口覆盖的日期集合找文件(dpid 以
+	// UTC 日期命名, 见 dayFileKeys)并按行 t 过滤。
+	windowStart := localDayStart(now).AddDate(0, 0, -(days - 1))
+	fromTs, toTs := windowStart.Unix(), now.Unix()
 
 	// Collect rows across the requested window.
 	rows := make([]histRow, 0, 1024)
-	for d := 0; d < days; d++ {
-		t := now.AddDate(0, 0, -d)
-		path := filepath.Join(statsDir, statsFilePrefix+t.UTC().Format("20060102")+statsFileSuffix)
+	for _, dayKey := range dayFileKeys(windowStart, now) {
+		path := filepath.Join(statsDir, statsFilePrefix+dayKey+statsFileSuffix)
 		readRows := readHistJSONL(path)
 		for _, r := range readRows {
+			if r.Ts < fromTs || r.Ts > toTs {
+				continue
+			}
 			if macFilter != "" && strings.ToLower(r.MAC) != macFilter {
 				continue
 			}
@@ -198,8 +207,8 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 		"ok":             true,
 		"generated_at":   now.Unix(),
 		"days_requested": days,
-		"window_start":   now.AddDate(0, 0, -days+1).UTC().Format("2006-01-02"),
-		"window_end":     now.UTC().Format("2006-01-02"),
+		"window_start":   windowStart.Format("2006-01-02"), // v5.11: 本地日期(旧为 UTC)
+		"window_end":     now.Format("2006-01-02"),
 		"sample_count":   len(rows),
 		"total_tx":       totalTx,
 		"total_rx":       totalRx,

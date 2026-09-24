@@ -1,0 +1,1267 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#F5F5F7">
+<title>HNC 新版界面</title>
+<!--
+  HNC WebUI · 新版界面设计预览 v3(示例数据, 不接后端)
+  - 视觉沿用原版 WebUI 的设计语言(统计页的卡片 / 计数格 / 渐变柱状图 / 分段控件), 全局统一
+  - 就地展开的卡片代替二级页面; 平板(≥900px)设备页为 列表 + 右侧详情 分栏
+  - 底部标签栏: 按住出现液态玻璃透镜, 可左右拖动, 松手按弹簧吸附到最近的标签并切页
+  - 动画: 弹簧物理(linear() 采样) + 挤压拉伸, 统一的 Q 弹曲线
+  - 透镜边缘的真折射与色散: Hyalite v0.5.0 by VII-Cae (VII), MIT —— https://github.com/VII-Cae/hyalite--liquid-glass
+    (hyalite.js 原样引入, 许可证见 LICENSE-hyalite; 非 Chromium 内核退回模糊 + CSS 色散描边)
+-->
+<style>
+:root{
+  color-scheme: light;
+  --font:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","HarmonyOS Sans SC","MiSans","Noto Sans SC","Microsoft YaHei",system-ui,sans-serif;
+  --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  --blue:#007AFF; --indigo:#5856D6; --purple:#AF52DE; --green:#34C759; --mint:#00C7BE;
+  --orange:#FF9500; --red:#FF3B30; --pink:#FF2D55; --cyan:#32ADE6; --yellow:#FFCC00;
+  --bg:#F5F5F7;
+  --text-1:rgba(0,0,0,.92); --text-2:rgba(60,60,67,.72); --text-3:rgba(60,60,67,.56); --text-4:rgba(60,60,67,.26);
+  --stroke:rgba(0,0,0,.07); --stroke-2:rgba(0,0,0,.12);
+  --card:rgba(255,255,255,.82); --card-2:rgba(255,255,255,.92); --card-solid:#fff;
+  --input:rgba(0,0,0,.035); --divider:rgba(60,60,67,.10);
+  --shadow:0 4px 16px rgba(0,0,0,.045), 0 1px 0 rgba(255,255,255,.9) inset;
+  --shadow-2:0 10px 30px rgba(0,0,0,.08), 0 1px 0 rgba(255,255,255,.95) inset;
+  --shadow-3:0 16px 40px rgba(0,0,0,.14), 0 1px 0 #fff inset;
+  --mesh-1:rgba(94,92,230,.13); --mesh-2:rgba(10,132,255,.11); --mesh-3:rgba(191,90,242,.10); --mesh-4:rgba(255,149,0,.08);
+  --rx:#0066E0; --tx:#C86BEA;
+  --badge-ok-bg:#E4F8EA; --badge-ok:#0F7A2E; --badge-gray-bg:#E8E8ED; --badge-gray:#636366;
+  --badge-red-bg:#FFE8E6; --badge-red:#C1281E; --badge-warn-bg:#FFF2DC; --badge-warn:#A85800;
+  --badge-acc-bg:#E3F0FF; --badge-acc:#0058B8; --badge-pur-bg:#F3E8FC; --badge-pur:#7A2FA8;
+  --scrim:rgba(0,0,0,.26);
+  --lens-glass:rgba(255,255,255,.34);
+  --q:cubic-bezier(.34,1.56,.64,1);
+  --q-soft:cubic-bezier(.32,.72,0,1);
+  --r-lg:22px; --r-md:16px;
+}
+@media (prefers-color-scheme: dark){
+  :root:not([data-theme="light"]){
+    color-scheme: dark;
+    --bg:#000;
+    --text-1:rgba(255,255,255,.96); --text-2:rgba(235,235,245,.70); --text-3:rgba(235,235,245,.52); --text-4:rgba(235,235,245,.24);
+    --stroke:rgba(255,255,255,.09); --stroke-2:rgba(255,255,255,.18);
+    --card:rgba(255,255,255,.07); --card-2:rgba(255,255,255,.11); --card-solid:#1c1c1e;
+    --input:rgba(255,255,255,.06); --divider:rgba(255,255,255,.10);
+    --shadow:0 4px 20px rgba(0,0,0,.35), 0 1px 0 rgba(255,255,255,.06) inset;
+    --shadow-2:0 8px 32px rgba(0,0,0,.4), 0 1px 0 rgba(255,255,255,.1) inset;
+    --shadow-3:0 16px 40px rgba(0,0,0,.6), 0 1px 0 rgba(255,255,255,.14) inset;
+    --mesh-1:rgba(94,92,230,.42); --mesh-2:rgba(10,132,255,.34); --mesh-3:rgba(191,90,242,.30); --mesh-4:rgba(255,55,95,.24);
+    --rx:#3780F8; --tx:#B864C9;
+    --badge-ok-bg:rgba(48,209,88,.16); --badge-ok:#5EE08A; --badge-gray-bg:rgba(142,142,147,.2); --badge-gray:#AEAEB2;
+    --badge-red-bg:rgba(255,69,58,.18); --badge-red:#FF7A70; --badge-warn-bg:rgba(255,159,10,.18); --badge-warn:#FFB54D;
+    --badge-acc-bg:rgba(10,132,255,.2); --badge-acc:#6CB2FF; --badge-pur-bg:rgba(191,90,242,.2); --badge-pur:#D9A0FA;
+    --scrim:rgba(0,0,0,.5); --lens-glass:rgba(255,255,255,.14);
+  }
+}
+:root[data-theme="dark"]{
+  color-scheme: dark;
+  --bg:#000;
+  --text-1:rgba(255,255,255,.96); --text-2:rgba(235,235,245,.70); --text-3:rgba(235,235,245,.52); --text-4:rgba(235,235,245,.24);
+  --stroke:rgba(255,255,255,.09); --stroke-2:rgba(255,255,255,.18);
+  --card:rgba(255,255,255,.07); --card-2:rgba(255,255,255,.11); --card-solid:#1c1c1e;
+  --input:rgba(255,255,255,.06); --divider:rgba(255,255,255,.10);
+  --shadow:0 4px 20px rgba(0,0,0,.35), 0 1px 0 rgba(255,255,255,.06) inset;
+  --shadow-2:0 8px 32px rgba(0,0,0,.4), 0 1px 0 rgba(255,255,255,.1) inset;
+  --shadow-3:0 16px 40px rgba(0,0,0,.6), 0 1px 0 rgba(255,255,255,.14) inset;
+  --mesh-1:rgba(94,92,230,.42); --mesh-2:rgba(10,132,255,.34); --mesh-3:rgba(191,90,242,.30); --mesh-4:rgba(255,55,95,.24);
+  --rx:#3780F8; --tx:#B864C9;
+  --badge-ok-bg:rgba(48,209,88,.16); --badge-ok:#5EE08A; --badge-gray-bg:rgba(142,142,147,.2); --badge-gray:#AEAEB2;
+  --badge-red-bg:rgba(255,69,58,.18); --badge-red:#FF7A70; --badge-warn-bg:rgba(255,159,10,.18); --badge-warn:#FFB54D;
+  --badge-acc-bg:rgba(10,132,255,.2); --badge-acc:#6CB2FF; --badge-pur-bg:rgba(191,90,242,.2); --badge-pur:#D9A0FA;
+  --scrim:rgba(0,0,0,.5); --lens-glass:rgba(255,255,255,.14);
+}
+
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;height:100%}
+body{background:var(--bg);color:var(--text-1);font:15px/1.45 var(--font);-webkit-font-smoothing:antialiased;
+     display:flex;flex-direction:column;overflow:hidden;padding-top:env(safe-area-inset-top,0px)}
+button,input,select,textarea{font:inherit;color:inherit}
+button{background:none;border:0;padding:0;cursor:pointer;text-align:inherit}
+:focus-visible{outline:2px solid var(--blue);outline-offset:2px}
+.num{font-family:var(--mono);font-variant-numeric:tabular-nums;letter-spacing:-.02em}
+.mono{font-family:var(--mono)}
+svg{flex:none}
+[hidden]{display:none!important}
+
+/* 背景柔光(原版 bg-mesh) */
+.mesh{position:fixed;inset:-20%;z-index:-2;pointer-events:none;filter:blur(40px) saturate(130%);
+  background:radial-gradient(40% 50% at 18% 22%,var(--mesh-1),transparent 60%),radial-gradient(35% 45% at 82% 18%,var(--mesh-2),transparent 60%),
+             radial-gradient(45% 55% at 70% 82%,var(--mesh-3),transparent 60%),radial-gradient(38% 48% at 12% 88%,var(--mesh-4),transparent 60%)}
+
+/* 卡片(原版 glass) */
+.glass{position:relative;background:var(--card);border:1px solid var(--stroke);border-radius:var(--r-lg);box-shadow:var(--shadow)}
+.glass::before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;padding:.5px;
+  background:linear-gradient(180deg,rgba(255,255,255,.55),transparent 35%,transparent 72%,rgba(0,0,0,.04));
+  -webkit-mask:linear-gradient(#000,#000) content-box,linear-gradient(#000,#000);-webkit-mask-composite:xor;mask-composite:exclude}
+
+/* ── 顶栏 ── */
+.header{flex:none;z-index:50;display:flex;align-items:center;gap:10px;padding:12px 16px 10px;
+  background:color-mix(in srgb,var(--bg) 82%,transparent);-webkit-backdrop-filter:blur(14px) saturate(160%);backdrop-filter:blur(14px) saturate(160%);
+  border-bottom:1px solid var(--stroke)}
+.brand{flex:1;min-width:0}
+.brand-title{font-size:21px;font-weight:800;letter-spacing:-.02em;background:linear-gradient(135deg,var(--blue),var(--indigo));-webkit-background-clip:text;background-clip:text;color:transparent;width:max-content}
+.brand-sub{font-size:10px;font-weight:600;letter-spacing:.04em;color:var(--text-3);white-space:nowrap}
+@media (max-width:420px){ .sample{display:none} }
+.hbtn{position:relative;width:38px;height:38px;border-radius:50%;display:grid;place-items:center;background:var(--card-2);border:1px solid var(--stroke);box-shadow:var(--shadow)}
+.hbtn svg{width:17px;height:17px}
+.hbadge{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;padding:0 5px;border-radius:9px;background:var(--red);color:#fff;font-size:11px;font-weight:700;line-height:18px;text-align:center;box-shadow:0 0 0 2px var(--bg)}
+.sample{font-size:11px;font-weight:600;color:var(--text-3);padding:4px 9px;border-radius:999px;background:var(--input);white-space:nowrap}
+
+/* ── 页面 ── */
+.pages{position:relative;flex:1;min-height:0}
+.page{position:absolute;inset:0;overflow-y:auto;overflow-x:hidden;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;
+      padding:14px 16px calc(env(safe-area-inset-bottom,0px) + 112px)}
+.page:not(.on){visibility:hidden;pointer-events:none}
+.wrap{max-width:640px;margin:0 auto;display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+.cols>div{min-width:0}
+.cols,.cols>div{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+@media (min-width:900px){ .wrap{max-width:1180px} .cols{grid-template-columns:minmax(0,1fr) minmax(0,1fr);align-items:start} }
+.sec{display:flex;align-items:baseline;justify-content:space-between;gap:10px;padding:6px 6px 0;font-size:13.5px;font-weight:700;color:var(--text-2)}
+.sec small{font-size:11.5px;font-weight:600;color:var(--text-3)}
+.sec .r{font-size:12px;font-weight:600;color:var(--text-3)}
+
+/* 按压 Q 弹 */
+.press{transition:transform .5s var(--q)}
+.press:active{transform:scale(.965);transition:transform .12s ease-out}
+
+/* ── 通用小件 ── */
+.badge{display:inline-flex;align-items:center;gap:3px;font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:6px;white-space:nowrap}
+.b-ok{background:var(--badge-ok-bg);color:var(--badge-ok)} .b-gray{background:var(--badge-gray-bg);color:var(--badge-gray)}
+.b-red{background:var(--badge-red-bg);color:var(--badge-red)} .b-warn{background:var(--badge-warn-bg);color:var(--badge-warn)}
+.b-acc{background:var(--badge-acc-bg);color:var(--badge-acc)} .b-pur{background:var(--badge-pur-bg);color:var(--badge-pur)}
+.gi{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;color:#fff;flex:none;
+    background:linear-gradient(135deg,var(--a),var(--b));box-shadow:0 4px 10px -3px color-mix(in srgb,var(--a) 70%,transparent),0 1px 0 rgba(255,255,255,.3) inset}
+.gi svg{width:17px;height:17px}
+.gi.blue{--a:var(--blue);--b:var(--indigo)} .gi.green{--a:var(--green);--b:var(--mint)} .gi.orange{--a:var(--orange);--b:#FFBB00}
+.gi.red{--a:var(--red);--b:var(--pink)} .gi.purple{--a:var(--purple);--b:var(--indigo)} .gi.cyan{--a:var(--cyan);--b:var(--blue)} .gi.gray{--a:#8E8E93;--b:#AEAEB2}
+.toggle{position:relative;width:46px;height:28px;border-radius:14px;background:var(--text-4);flex:none;transition:background-color .3s}
+.toggle::after{content:"";position:absolute;left:2px;top:2px;width:24px;height:24px;border-radius:12px;background:#fff;box-shadow:0 3px 7px rgba(0,0,0,.16),0 0 0 .5px rgba(0,0,0,.04);
+  transition:transform .55s var(--q), width .3s var(--q)}
+.toggle:active::after{width:30px}
+.toggle[aria-checked="true"]{background:var(--green)}
+.toggle[aria-checked="true"]::after{transform:translateX(18px)}
+.toggle[aria-checked="true"]:active::after{transform:translateX(12px)}
+.hint-a{font-size:13px;font-weight:700;color:var(--blue);white-space:nowrap}
+.hint-a.warn{color:var(--orange)} .hint-a.danger{color:var(--red)}
+.chev{width:14px;height:14px;color:var(--text-3);transition:transform .6s var(--q)}
+.open>.row-h .chev,.open>.card-h .chev,.open>.dev-h .chev{transform:rotate(180deg)}
+
+/* 行式列表 */
+.rows{overflow:hidden}
+.row{display:flex;align-items:center;gap:12px;padding:12px 14px;width:100%;position:relative;min-height:56px}
+.row+.row,.row-wrap+.row-wrap,.row+.row-wrap,.row-wrap+.row{border-top:1px solid var(--divider)}
+button.row:active,.row.tap:active{background:var(--input)}
+.row .tx{flex:1;min-width:0}
+.row .t{font-size:14.5px;font-weight:600}
+.row .s,.row-h .s{font-size:12px;color:var(--text-3);margin-top:1px}
+.row-h .t{font-size:14.5px;font-weight:600}
+.row .v{font-size:13px;font-weight:600;color:var(--text-2);white-space:nowrap;font-variant-numeric:tabular-nums}
+.v.ok{color:var(--badge-ok)!important} .v.warn{color:var(--badge-warn)!important} .v.bad{color:var(--badge-red)!important}
+
+/* 就地展开(统一的手风琴) */
+.fold{display:grid;grid-template-rows:0fr;transition:grid-template-rows .55s var(--q-soft)}
+.open>.fold{grid-template-rows:1fr}
+.fold>div{overflow:hidden;min-height:0}
+.fold-in{opacity:0;transform:translateY(-8px) scale(.985);transition:opacity .25s, transform .6s var(--q)}
+.open>.fold .fold-in{opacity:1;transform:none;transition-delay:.06s}
+
+/* 输入 */
+.field{display:grid;gap:5px;font-size:11.5px;font-weight:600;color:var(--text-3);min-width:0}
+.box{display:flex;align-items:center;height:42px;border-radius:12px;background:var(--input);border:1px solid var(--stroke);padding:0 12px;min-width:0;transition:border-color .2s, box-shadow .3s}
+.box:focus-within{border-color:var(--blue);box-shadow:0 0 0 3px rgba(0,122,255,.16)}
+.box input,.box select,.box textarea{flex:1;min-width:0;border:0;outline:none;background:none;font-size:15px;font-weight:600;color:var(--text-1)}
+.box input{font-family:var(--mono)}
+.box .u{font-size:12px;color:var(--text-3)}
+.box input::placeholder,.box textarea::placeholder{color:var(--text-4);font-weight:500;font-family:var(--font)}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.btn{height:42px;padding:0 16px;border-radius:12px;font-size:14px;font-weight:700;display:inline-flex;align-items:center;justify-content:center;gap:6px;white-space:nowrap}
+.btn svg{width:15px;height:15px}
+.btn.pri{background:linear-gradient(135deg,var(--blue),var(--indigo));color:#fff;box-shadow:0 6px 16px -6px rgba(0,122,255,.6)}
+.btn.sec{background:var(--input);border:1px solid var(--stroke);color:var(--blue)}
+.btn.dan{background:var(--badge-red-bg);color:var(--badge-red)}
+.btn.ok{background:var(--badge-ok-bg);color:var(--badge-ok)}
+.btn.wide{width:100%}
+.btns{display:flex;gap:8px}
+.btns .btn{flex:1}
+.chip{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 14px;border-radius:999px;font-size:13px;font-weight:700;background:var(--card-2);border:1px solid var(--stroke);box-shadow:var(--shadow)}
+.chip svg{width:14px;height:14px}
+.chip.on{background:linear-gradient(135deg,var(--blue),var(--indigo));color:#fff;border-color:transparent;box-shadow:0 6px 14px -6px rgba(0,122,255,.6)}
+.chips{display:flex;gap:8px;flex-wrap:wrap}
+
+/* 分段控件(原版 analysis-seg + chart-tabs), 滑块 Q 弹 */
+.seg{position:relative;display:flex;padding:4px;border-radius:14px}
+.seg.glass{border-radius:16px}
+.seg .thumb{position:absolute;top:4px;bottom:4px;left:0;border-radius:11px;background:linear-gradient(135deg,var(--blue),var(--indigo));
+  box-shadow:0 4px 12px rgba(0,122,255,.35),0 1px 0 rgba(255,255,255,.28) inset;transition:transform .6s var(--q), width .45s var(--q)}
+.seg button{position:relative;z-index:1;flex:1;height:36px;font-size:13.5px;font-weight:700;color:var(--text-2);text-align:center;white-space:nowrap;transition:color .3s}
+.seg button.on{color:#fff}
+.seg.small{padding:3px;border-radius:9px;background:var(--input);border:1px solid var(--stroke)}
+.seg.small .thumb{top:3px;bottom:3px;border-radius:7px;background:var(--card-solid);box-shadow:0 1px 4px rgba(0,0,0,.12)}
+.seg.small button{height:26px;font-size:11.5px;padding:0 11px}
+.seg.small button.on{color:var(--text-1)}
+.seg.jelly .thumb{animation:jelly .5s var(--q)}
+@keyframes jelly{30%{scale:1.12 .9}60%{scale:.97 1.04}100%{scale:1 1}}
+
+/* ── 设备页 ── */
+.hero{display:grid;grid-template-columns:1fr 1px 1fr 1px 1fr;gap:14px;align-items:center;padding:16px 18px}
+.hero-div{height:32px;background:var(--stroke-2)}
+.hero-l{font-size:11px;font-weight:700;color:var(--text-3);letter-spacing:.06em;display:flex;align-items:center;gap:5px}
+.hero-v{font-size:23px;font-weight:700;margin-top:2px;white-space:nowrap}
+.hero-v .u{font:500 11px var(--font);color:var(--text-2);margin-left:3px;letter-spacing:0}
+.hero .right{text-align:right}
+.hero .right .hero-l{justify-content:flex-end}
+.breathe{display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--green);animation:breathe 2.4s ease-in-out infinite}
+@keyframes breathe{0%,100%{box-shadow:0 0 0 0 rgba(52,199,89,.55)}50%{box-shadow:0 0 0 5px rgba(52,199,89,0)}}
+.breathe.off{background:var(--text-4);animation:none}
+.fresh{text-align:center;font-size:11.5px;color:var(--text-3);margin-top:-4px}
+.spark{display:block;width:100%;height:40px;margin-top:10px;grid-column:1/-1}
+.search{display:flex;align-items:center;gap:10px;height:46px;padding:0 16px;border-radius:999px}
+.search svg{width:17px;height:17px;color:var(--text-3)}
+.search input{flex:1;min-width:0;border:0;outline:none;background:none;font-size:15px}
+.search input::placeholder{color:var(--text-3)}
+.filter{display:flex;align-items:center;gap:12px;padding:12px 14px;z-index:5}
+.filter .tx,.srcc .tx{flex:1;min-width:0}
+.filter .t{font-size:13.5px;font-weight:700}
+.filter .s{font-size:11.5px;color:var(--text-3)}
+.dd{position:relative}
+.dd-btn{display:flex;align-items:center;gap:8px;height:40px;padding:0 14px;border-radius:12px;background:var(--input);border:1px solid var(--stroke);font-size:13.5px;font-weight:700;white-space:nowrap}
+.dd-btn svg{width:14px;height:14px;transition:transform .5s var(--q)}
+.dd.open .dd-btn svg{transform:rotate(180deg)}
+.dd-menu{position:absolute;right:0;top:calc(100% + 6px);z-index:30;min-width:180px;padding:6px;border-radius:16px;background:var(--card-solid);border:1px solid var(--stroke);box-shadow:var(--shadow-3);
+  transform-origin:top right;transform:scale(.6) translateY(-10px);opacity:0;pointer-events:none;transition:transform .5s var(--q), opacity .2s}
+.dd.open .dd-menu{transform:none;opacity:1;pointer-events:auto}
+.dd-menu button{display:flex;align-items:center;justify-content:space-between;gap:10px;width:100%;padding:10px 12px;border-radius:10px;font-size:14px;font-weight:600}
+.dd-menu button:active{background:var(--input)}
+.dd-menu button.on{color:var(--blue)}
+.dd-menu button svg{width:15px;height:15px;opacity:0}
+.dd-menu button.on svg{opacity:1}
+
+.card-h,.row-h{display:flex;align-items:center;gap:12px;width:100%;padding:14px 16px}
+.card-h .tx,.row-h .tx{flex:1;min-width:0}
+.card-h .t{font-size:15px;font-weight:700}
+.card-h .s{font-size:12px;color:var(--text-3);margin-top:1px}
+.gops .rows{border-top:1px solid var(--divider)}
+
+.toolbar{display:flex;gap:8px;align-items:center}
+.batchbar{padding:10px 12px;display:grid;gap:8px}
+.batchbar .top{display:flex;align-items:center;gap:12px;font-size:13px;font-weight:700}
+.batchbar .top span{flex:1}
+.batchbar .btns{flex-wrap:wrap}
+.batchbar .btn{height:34px;font-size:12.5px;padding:0 10px;flex:1 1 auto}
+
+.dev-split{display:grid;gap:12px}
+@media (min-width:900px){ .dev-split{grid-template-columns:minmax(0,1fr) minmax(360px,440px);align-items:start} .dev-side{position:sticky;top:0} }
+.dev-list{display:grid;gap:10px}
+.dev{overflow:hidden;transition:background-color .3s, box-shadow .3s}
+.dev.open{background:var(--card-2);box-shadow:var(--shadow-2)}
+.dev.sel{box-shadow:0 0 0 2px var(--blue),var(--shadow-2)}
+.dev-h{display:grid;grid-template-columns:auto auto 1fr auto;gap:12px;align-items:center;padding:13px 14px;width:100%;text-align:left}
+.check{width:22px;height:22px;border-radius:50%;border:2px solid var(--text-4);display:none;place-items:center;transition:background-color .2s, border-color .2s, transform .45s var(--q)}
+.batch .check{display:grid}
+.dev.picked .check{background:var(--blue);border-color:var(--blue);transform:scale(1.08)}
+.check svg{width:12px;height:12px;color:#fff;opacity:0}
+.dev.picked .check svg{opacity:1}
+.dev-h>.check:not(:first-child){display:none}
+.dev-h{grid-template-columns:auto 1fr auto}
+.batch .dev-h{grid-template-columns:auto auto 1fr auto}
+.av{position:relative;width:44px;height:44px;border-radius:14px;display:grid;place-items:center;font-size:22px;background:var(--input);border:1px solid var(--stroke);flex:none}
+.av .dot{position:absolute;right:-3px;bottom:-3px;width:13px;height:13px;border-radius:50%;background:var(--green);border:2.5px solid var(--card-solid)}
+.av .dot.blocked{background:var(--red)} .av .dot.offline{background:#8E8E93}
+.dev-info{min-width:0}
+.dev-name{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:15px;font-weight:700}
+.dev-name .nm{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:100%}
+.dev-meta{font-size:11.5px;color:var(--text-3);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dev-apps{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;align-items:center}
+.dev-apps .lb{font-size:10.5px;color:var(--text-3)}
+.dev-apps .a{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:5px;background:var(--badge-acc-bg);color:var(--badge-acc)}
+.dev-rate{display:grid;gap:1px;justify-items:end;font-size:12.5px;font-weight:700}
+.dev-rate .d{color:var(--rx)} .dev-rate .u{color:var(--tx)}
+.dev-rate .off{font-size:12px;font-weight:600;color:var(--text-3)}
+.dev-body{padding:0 14px 14px;display:grid;gap:12px}
+.ctrl{display:grid;gap:10px;padding:12px;border-radius:16px;background:var(--input);border:1px solid var(--stroke)}
+.ctrl-t{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:800;color:var(--text-2);letter-spacing:.04em}
+.ctrl-t i{width:6px;height:6px;border-radius:50%;background:var(--blue)}
+.ctrl .box{background:var(--card-2)}
+.hold{position:relative;overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:none}
+.hold .fill{position:absolute;inset:0;background:rgba(255,59,48,.2);transform:scaleX(0);transform-origin:left}
+.hold.run .fill{transform:scaleX(1);transition:transform .8s linear}
+.hold span{position:relative}
+.empty{padding:30px 16px;text-align:center;color:var(--text-3);font-size:13px}
+.side-head{display:flex;align-items:center;gap:12px;padding:16px 16px 4px}
+.side-head .av{width:52px;height:52px;font-size:26px}
+.side-head .t{font-size:18px;font-weight:800}
+.side-head .s{font-size:12px;color:var(--text-3)}
+.swap{animation:swap .6s var(--q) both}
+@keyframes swap{from{opacity:0;transform:translateX(24px) scale(.97)}to{opacity:1;transform:none}}
+
+/* ── 应用页 ── */
+.ahero{padding:16px 16px 12px}
+.ahero .stats{display:grid;grid-template-columns:1fr 1px 1fr 1px 1fr 1px 1fr;gap:10px;align-items:center}
+.ahero .l{font-size:10.5px;font-weight:700;color:var(--text-3);letter-spacing:.04em;white-space:nowrap}
+.ahero .v{font-size:19px;font-weight:700;margin-top:2px}
+.ahero .foot2{display:flex;align-items:center;gap:6px;margin-top:12px;padding-top:10px;border-top:1px solid var(--divider);font-size:12px;font-weight:600;color:var(--text-2)}
+.subview{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+.sni{padding:6px 14px;display:grid}
+.sni-row{display:flex;align-items:center;gap:10px;padding:8px 0}
+.sni-row+.sni-row{border-top:1px solid var(--divider)}
+.sni-row .dw{flex:1;min-width:0;display:grid}
+.sni-row .d{min-width:0;font-family:var(--mono);font-size:12.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sni-row .c{font-size:11.5px;color:var(--text-3);white-space:nowrap}
+.sni-row .btn{height:30px;font-size:12px;padding:0 10px}
+.appi{width:38px;height:38px;border-radius:11px;display:grid;place-items:center;color:#fff;font-weight:800;font-size:15px;flex:none;box-shadow:0 1px 0 rgba(255,255,255,.3) inset,0 4px 10px -4px rgba(0,0,0,.35)}
+.bar1{height:5px;border-radius:3px;background:var(--input);margin-top:6px;overflow:hidden}
+.bar1 i{display:block;height:100%;border-radius:3px;background:linear-gradient(90deg,var(--blue),var(--purple));transform-origin:left;animation:growX .9s var(--q) both}
+@keyframes growX{from{transform:scaleX(0)}to{transform:none}}
+.box.ta{height:auto;align-items:stretch}
+.box textarea{resize:vertical;min-height:70px;padding:10px 0;font-weight:500;font-size:14px}
+
+/* ── 分析页(原版统计) ── */
+.counters{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}
+.counter{padding:14px 6px;text-align:center}
+.counter .n{font-size:26px;font-weight:700;line-height:1.15}
+.counter .l{font-size:11.5px;font-weight:700;color:var(--text-3);margin-top:4px}
+.srcc{display:flex;align-items:center;gap:12px;padding:12px 14px;z-index:5}
+.srcc .t{font-size:13.5px;font-weight:800}
+.srcc .s{font-size:11.5px;color:var(--text-3);margin-top:2px}
+.stat{padding:16px}
+.stat .l{font-size:11px;font-weight:700;color:var(--text-3);letter-spacing:.06em}
+.stat .v{font-size:27px;font-weight:700;margin-top:6px}
+.stat .v .u{font:500 12px var(--font);color:var(--text-2);margin-left:3px;letter-spacing:0}
+.stat .tr{margin-top:4px;font-size:11.5px;font-weight:700;color:var(--badge-ok)}
+.stat .tr.dn{color:var(--badge-warn)}
+.chart{padding:18px 16px 14px}
+.chart-h{display:flex;justify-content:space-between;align-items:center;gap:10px;margin-bottom:14px}
+.chart-h h3{margin:0;font-size:15px;font-weight:800}
+.bars{position:relative;display:flex;align-items:flex-end;gap:3px;height:150px;padding-left:30px}
+.gridl{position:absolute;left:30px;right:0;border-top:1px dashed var(--stroke-2);pointer-events:none}
+.gridt{position:absolute;left:0;font:600 9.5px var(--mono);color:var(--text-3)}
+.bcol{flex:1;height:100%;display:flex;flex-direction:column;justify-content:flex-end;gap:2px;cursor:pointer;position:relative;z-index:1;transition:opacity .2s}
+.bars.picking .bcol{opacity:.4}
+.bars.picking .bcol.pk{opacity:1}
+.bar{border-radius:3px 3px 1px 1px;transform-origin:bottom;animation:barRise .8s var(--q) both;animation-delay:calc(var(--i) * 18ms)}
+.bar.rx{background:linear-gradient(180deg,var(--rx),color-mix(in srgb,var(--rx) 45%,transparent))}
+.bar.tx{background:linear-gradient(180deg,var(--tx),color-mix(in srgb,var(--tx) 45%,transparent))}
+@keyframes barRise{from{transform:scaleY(0)}to{transform:none}}
+.axis{display:flex;gap:3px;padding-left:30px;margin-top:6px;font:600 9.5px var(--mono);color:var(--text-3)}
+.axis span{flex:1;text-align:left;white-space:nowrap;overflow:visible;width:0}
+.legend{display:flex;gap:14px;margin-top:12px;font-size:12px;font-weight:600;color:var(--text-2)}
+.legend i{display:inline-block;width:9px;height:9px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.btip{position:absolute;top:0;z-index:5;padding:7px 10px;border-radius:12px;background:var(--card-solid);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3);
+  font-size:11.5px;font-weight:700;line-height:1.55;white-space:nowrap;pointer-events:none;transform:translateX(-50%);animation:pop .45s var(--q)}
+@keyframes pop{from{opacity:0;scale:.6}to{opacity:1;scale:1}}
+.btip i{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:5px}
+.tbl{overflow-x:auto;padding:4px 12px 10px}
+table{width:100%;border-collapse:collapse;font-size:12px}
+th{font-weight:700;color:var(--text-3);text-align:right;padding:6px;border-bottom:1px solid var(--stroke-2);white-space:nowrap}
+td{text-align:right;padding:6px;border-bottom:1px solid var(--stroke);color:var(--text-2);font-variant-numeric:tabular-nums;white-space:nowrap}
+th:first-child,td:first-child{text-align:left}
+td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
+.pct{position:relative;min-width:66px}
+.pct i{position:absolute;left:0;top:50%;height:12px;transform:translateY(-50%);border-radius:3px;background:linear-gradient(90deg,color-mix(in srgb,var(--rx) 45%,transparent),color-mix(in srgb,var(--tx) 35%,transparent))}
+.pct span{position:relative;padding-left:4px}
+.tcref{margin:0;padding:14px 16px;font:11.5px/1.75 var(--mono);white-space:pre-wrap;overflow-x:auto}
+.tcref .c{color:var(--text-3);font-style:italic} .tcref .k{color:var(--purple);font-weight:700} .tcref .h{color:var(--orange);font-weight:600} .tcref .v{color:var(--green);font-weight:600}
+.dpihero{padding:16px}
+.dpihero .top{display:flex;align-items:center;justify-content:space-between;gap:10px}
+.dpihero .l{font-size:11px;font-weight:700;color:var(--text-3);letter-spacing:.04em}
+.dpihero .mode{font-size:21px;font-weight:800;margin-top:2px}
+.dpihero .grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:14px;padding-top:12px;border-top:1px solid var(--divider)}
+.dpihero .grid .n{font-size:17px;font-weight:700}
+.feed{padding:10px 14px;font:11.5px/1.75 var(--mono);height:190px;overflow:hidden}
+.feed div{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;animation:feedIn .55s var(--q) both}
+@keyframes feedIn{from{opacity:0;transform:translateY(-12px)}to{opacity:1;transform:none}}
+.feed .tm{color:var(--text-3)} .feed .dn{color:var(--cyan)} .feed .tl{color:var(--purple)} .feed .ap{color:var(--badge-ok);font-weight:700}
+.prof{padding:12px 14px;display:grid;gap:10px}
+.prof-row{display:grid;grid-template-columns:120px 1fr;gap:10px;align-items:center;font-size:13px;font-weight:600}
+.prof-row .apps{display:flex;gap:4px;flex-wrap:wrap}
+
+/* ── 设置 / 日志 ── */
+.logv{padding:10px 12px;font:11.5px/1.65 var(--mono);max-height:300px;overflow:auto;background:var(--input);border-radius:12px;border:1px solid var(--stroke)}
+.logv div{white-space:pre-wrap;word-break:break-all}
+.logv .I{color:var(--text-2)} .logv .W{color:var(--badge-warn)} .logv .E{color:var(--badge-red)} .logv .t{color:var(--text-3)}
+.set-body{padding:0 14px 14px;display:grid;gap:10px}
+.theme-pick{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.theme-pick button{padding:10px 6px;border-radius:14px;border:2px solid var(--stroke);background:var(--card-2);font-size:12.5px;font-weight:700;display:grid;justify-items:center;gap:6px}
+.theme-pick button.on{border-color:var(--blue);color:var(--blue)}
+.theme-pick .sw{width:44px;height:30px;border-radius:8px;border:1px solid var(--stroke-2)}
+.foot{text-align:center;font-size:11.5px;color:var(--text-3);padding:8px 0}
+
+/* ── 底部标签栏: 液态玻璃透镜 ── */
+.tabbar{position:fixed;z-index:60;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 14px);transform:translateX(-50%);
+  width:min(420px,calc(100% - 32px));height:66px;padding:5px;border-radius:33px;
+  background:color-mix(in srgb,var(--card-solid) 78%,transparent);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3);
+  -webkit-backdrop-filter:blur(18px) saturate(170%);backdrop-filter:blur(18px) saturate(170%);touch-action:none;user-select:none;-webkit-user-select:none;
+  animation:navPop .9s var(--q) both .15s}
+@keyframes navPop{from{opacity:0;transform:translateX(-50%) translateY(70px) scale(.9)}to{opacity:1;transform:translateX(-50%)}}
+.tabs,.lens-in{display:grid;grid-template-columns:repeat(4,1fr);height:100%}
+.tabs{position:relative;z-index:0}
+.tab{display:grid;justify-items:center;align-content:center;gap:3px;font-size:10.5px;font-weight:700;color:var(--text-2);position:relative;transition:opacity .2s}
+.tab svg{width:23px;height:23px}
+.tab .dot{position:absolute;top:7px;left:58%;width:8px;height:8px;border-radius:50%;background:var(--red);box-shadow:0 0 6px rgba(255,59,48,.6)}
+.lens{position:absolute;z-index:1;top:5px;left:5px;height:54px;border-radius:27px;overflow:hidden;pointer-events:none;will-change:transform;
+  background:var(--lens-glass);
+  -webkit-backdrop-filter:var(--hyalite, blur(2px) saturate(200%) brightness(1.06));backdrop-filter:var(--hyalite, blur(2px) saturate(200%) brightness(1.06));
+  box-shadow:0 6px 16px -4px rgba(0,122,255,.55),inset 0 0 0 1px rgba(255,255,255,0),inset 3px 0 5px -2px rgba(255,45,120,0),inset -3px 0 5px -2px rgba(0,190,255,0);
+  transition:box-shadow .45s ease}
+/* 静止时的蓝色: 独立一层, 按下时用透明度淡出 → 变成玻璃, 不再"啪"地一下变白 */
+.lens-tint{position:absolute;inset:0;border-radius:inherit;background:linear-gradient(135deg,var(--blue),var(--indigo));transition:opacity .42s cubic-bezier(.3,.7,.2,1)}
+.lens-in{position:absolute;top:0;left:0;height:54px}
+.lens-in .tab{color:#fff;transition:color .42s ease}
+.lens-in .tab .dot{display:none}
+.tabbar.drag .lens{box-shadow:0 12px 28px -8px rgba(0,0,0,.32),inset 0 0 0 1px rgba(255,255,255,.7),inset 3px 0 5px -2px rgba(255,45,120,.55),inset -3px 0 5px -2px rgba(0,190,255,.55)}
+.tabbar.drag .lens-tint{opacity:.12}
+.tabbar.drag .lens-in .tab{color:var(--blue)}
+/* 放大层的轻微色散: 红/青两道错位描边 */
+.lens-in{transition:filter .42s ease}
+.tabbar.drag .lens-in{filter:drop-shadow(.8px 0 0 rgba(255,40,110,.45)) drop-shadow(-.8px 0 0 rgba(0,180,255,.45))}
+.lens::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;opacity:0;transition:opacity .42s ease;
+  background:radial-gradient(120% 70% at 30% 0%,rgba(255,255,255,.7),rgba(255,255,255,0) 55%),radial-gradient(80% 60% at 80% 115%,rgba(255,255,255,.35),transparent 60%)}
+.tabbar.drag .lens::after{opacity:1}
+/* 透镜下方的原图标用遮罩挖掉, 只留透镜里放大的那一份, 避免重影 */
+.tabs{-webkit-mask-image:linear-gradient(90deg,#000 var(--ml,0px),transparent calc(var(--ml,0px) + 5px),transparent calc(var(--mr,0px) - 5px),#000 var(--mr,0px));
+      mask-image:linear-gradient(90deg,#000 var(--ml,0px),transparent calc(var(--ml,0px) + 5px),transparent calc(var(--mr,0px) - 5px),#000 var(--mr,0px))}
+
+/* 主题切换: 圆形扩散。关掉 View Transition 默认的交叉淡化, 旧画面原样垫在下面 */
+::view-transition-old(root),::view-transition-new(root){animation:none;mix-blend-mode:normal}
+::view-transition-old(root){z-index:1}
+::view-transition-new(root){z-index:2}
+
+/* ── 弹层 / Toast ── */
+.scrim{position:fixed;inset:0;z-index:80;background:var(--scrim);opacity:0;pointer-events:none;transition:opacity .35s}
+.scrim.show{opacity:1;pointer-events:auto}
+.sheet{position:fixed;z-index:81;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 12px);width:min(460px,calc(100% - 20px));max-height:84vh;overflow:auto;
+  padding:18px;border-radius:28px;background:var(--card-solid);border:1px solid var(--stroke);box-shadow:var(--shadow-3);
+  transform:translate(-50%,calc(100% + 60px));visibility:hidden;transition:transform .7s var(--q), visibility 0s .7s}
+.sheet.show{transform:translate(-50%,0);visibility:visible;transition:transform .7s var(--q), visibility 0s}
+.sheet h3{margin:0 0 4px;font-size:18px;font-weight:800;text-align:center}
+.sheet .sub{text-align:center;font-size:13px;color:var(--text-3);margin-bottom:14px}
+.sheet .grab{width:38px;height:5px;border-radius:3px;background:var(--text-4);margin:-6px auto 12px}
+.code{font:700 44px/1 var(--mono);letter-spacing:.12em;text-align:center;padding:10px 0}
+.al{display:grid;grid-template-columns:auto 1fr;gap:10px;padding:10px 2px}
+.al+.al{border-top:1px solid var(--divider)}
+.al i{width:9px;height:9px;border-radius:50%;margin-top:6px}
+.al .s{font-size:12px;color:var(--text-3)}
+.toast{position:fixed;z-index:90;left:50%;top:calc(env(safe-area-inset-top,0px) + 64px);transform:translate(-50%,-30px) scale(.8);opacity:0;pointer-events:none;visibility:hidden;
+  display:flex;align-items:center;gap:8px;max-width:calc(100% - 32px);padding:11px 18px 11px 14px;border-radius:999px;font-size:13.5px;font-weight:700;
+  background:var(--card-solid);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3);transition:transform .6s var(--q), opacity .25s, visibility 0s .6s}
+.toast.show{transform:translate(-50%,0);opacity:1;visibility:visible;transition:transform .6s var(--q), opacity .25s, visibility 0s}
+.toast svg{width:18px;height:18px;color:var(--green)}
+
+:root.calm *,:root.calm *::before,:root.calm *::after{animation-duration:.01ms!important;transition-duration:.01ms!important}
+@media (prefers-reduced-motion:reduce){*,*::before,*::after{animation-duration:.01ms!important;animation-iteration-count:1!important;transition-duration:.01ms!important}}
+</style>
+</head>
+<body>
+<div class="mesh" aria-hidden="true"></div>
+
+<header class="header">
+  <div class="brand"><div class="brand-title">HNC</div><div class="brand-sub">HOTSPOT NETWORK CONTROL</div></div>
+  <span class="sample" title="界面中的全部数据均为示例">示例数据</span>
+  <button class="hbtn press" id="bell" aria-label="告警"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="hbadge" id="bell-n">3</span></button>
+  <button class="hbtn press" id="theme-btn" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg></button>
+</header>
+
+<main class="pages" id="pages">
+  <section class="page on" id="p-devices" data-page="devices"></section>
+  <section class="page" id="p-apps" data-page="apps"></section>
+  <section class="page" id="p-stats" data-page="stats"></section>
+  <section class="page" id="p-settings" data-page="settings"></section>
+</main>
+
+<nav class="tabbar" id="tabbar" aria-label="主导航">
+  <div class="tabs" id="tabs"></div>
+  <div class="lens" id="lens" aria-hidden="true"><div class="lens-tint"></div><div class="lens-in" id="lens-in"></div></div>
+</nav>
+
+<div class="scrim" id="scrim"></div>
+<div class="sheet" id="sheet" role="dialog" aria-modal="true"><div class="grab"></div><div id="sheet-body"></div></div>
+<div class="toast" id="toast" role="status" aria-live="polite"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span id="toast-t"></span></div>
+
+<script src="hyalite.js"></script>
+<script>
+(function () {
+  'use strict';
+  var $ = function (s, r) { return (r || document).querySelector(s); };
+  var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
+  function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]; }); }
+  function sum(a, f) { return a.reduce(function (s, x) { return s + f(x); }, 0); }
+  var wideMQ = matchMedia('(min-width: 900px)');
+  function wide() { return wideMQ.matches; }
+  var calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+  /* ───────────── 弹簧曲线: 用物理弹簧采样成 CSS linear(), 所有动画共用 ───────────── */
+  function springCurve(zeta, omega, ms) {
+    var wd = omega * Math.sqrt(1 - zeta * zeta), pts = [], n = 48;
+    for (var i = 0; i <= n; i++) {
+      var t = i / n * ms / 1000;
+      pts.push(+(1 - Math.exp(-zeta * omega * t) * (Math.cos(wd * t) + zeta * omega / wd * Math.sin(wd * t))).toFixed(4));
+    }
+    pts[n] = 1;
+    return 'linear(' + pts.join(',') + ')';
+  }
+  var EASE = { q:'cubic-bezier(.34,1.56,.64,1)', soft:'cubic-bezier(.32,.72,0,1)' };
+  (function () {
+    var q = springCurve(.42, 15, 800), s = springCurve(.72, 16, 600);
+    if (window.CSS && CSS.supports('transition-timing-function', q)) {
+      EASE.q = q; EASE.soft = s;
+      document.documentElement.style.setProperty('--q', q);
+      document.documentElement.style.setProperty('--q-soft', s);
+    }
+  })();
+  function anim(el, frames, opt) {
+    if (!el || !el.animate || calm || document.documentElement.classList.contains('calm')) return null;
+    return el.animate(frames, Object.assign({ duration: 700, easing: EASE.q }, opt));
+  }
+
+  /* ───────────── 图标 ───────────── */
+  var I = {
+    dev:'<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+    apps:'<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
+    stats:'<line x1="6" y1="20" x2="6" y2="13"/><line x1="12" y1="20" x2="12" y2="5"/><line x1="18" y1="20" x2="18" y2="10"/>',
+    gear:'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+    chev:'<polyline points="6 9 12 15 18 9"/>', right:'<polyline points="9 6 15 12 9 18"/>',
+    search:'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
+    bolt:'<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
+    home:'<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
+    refresh:'<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
+    trash:'<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
+    power:'<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>',
+    check:'<polyline points="20 6 9 17 4 12"/>', box:'<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
+    star:'<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
+    edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
+    doc:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>',
+    wifi:'<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/>',
+    gauge:'<path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
+    shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>', globe:'<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
+    cpu:'<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
+    heart:'<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>', tool:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
+    flask:'<path d="M9 2h6M10 2v6L4 20a1 1 0 0 0 .9 1.5h14.2A1 1 0 0 0 20 20L14 8V2"/>', info:'<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
+    palette:'<circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.5-.75 1.5-1.66 0-.43-.18-.83-.44-1.12-.29-.29-.44-.65-.44-1.12a1.64 1.64 0 0 1 1.67-1.67h2c3.05 0 5.56-2.5 5.56-5.56C21.97 6.01 17.46 2 12 2z"/>',
+    rocket:'<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/>',
+    layers:'<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
+    down:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>'
+  };
+  function ico(k, cls) { return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + I[k] + '</svg>'; }
+  function gi(color, k) { return '<span class="gi ' + color + '">' + ico(k) + '</span>'; }
+
+  /* ───────────── 示例数据 ───────────── */
+  var devices = [
+    { id:'d1', mac:'3a:f1:9c:22:7e:10', ip:'192.168.43.12', name:'Xiaomi 14 Pro', em:'📱', status:'online',  base:[5.2e6,.61e6], down:6, up:1,   delay:0,  jitter:0, loss:0, hours:4.2, today:7.9, apps:['抖音','微信','哔哩哔哩'] },
+    { id:'d2', mac:'a4:83:e7:5d:09:c2', ip:'192.168.43.25', name:'MacBook-Air',   em:'💻', status:'online',  base:[3.9e6,.84e6], down:0, up:0,   delay:80, jitter:10, loss:0, hours:6.8, today:5.6, apps:['Chrome','飞书'] },
+    { id:'d3', mac:'98:41:5c:1b:6a:ee', ip:'192.168.43.31', name:'客厅小米电视',   em:'📺', status:'online',  base:[2.1e6,.05e6], down:3, up:.5,  delay:0,  jitter:0, loss:0, hours:2.5, today:3.1, apps:['云视听极光'] },
+    { id:'d4', mac:'7c:bb:8a:40:13:5f', ip:'192.168.43.47', name:'Switch OLED',   em:'🎮', status:'online',  base:[1.18e6,.12e6],down:0, up:0,   delay:0,  jitter:0, loss:0, hours:1.4, today:1.4, apps:['任天堂 eShop'] },
+    { id:'d5', mac:'da:6e:02:9f:c4:31', ip:'192.168.43.52', name:'Apple Watch',   em:'⌚', status:'online',  base:[12e3,4e3],    down:0, up:0,   delay:0,  jitter:0, loss:0, hours:8.9, today:.2,  apps:[], priv:true },
+    { id:'d6', mac:'f2:1d:77:a0:58:0b', ip:'192.168.43.66', name:'iPad mini',     em:'📱', status:'blocked', base:[0,0],         down:0, up:0,   delay:0,  jitter:0, loss:0, hours:.3,  today:0,   apps:[] },
+    { id:'d7', mac:'5e:02:c1:9a:44:7d', ip:'192.168.43.71', name:'访客的手机',     em:'📱', status:'offline', base:[0,0],         down:1, up:.25, delay:50, jitter:5, loss:1, hours:0,   today:.4,  apps:[], seen:'2 天前' },
+    { id:'d8', mac:'0c:9d:92:3b:e1:a6', ip:'192.168.43.80', name:'书房台式机',     em:'🖥️', status:'offline', base:[0,0],         down:0, up:0,   delay:0,  jitter:0, loss:0, hours:0,   today:.1,  apps:[], seen:'9 天前' }
+  ];
+  devices.forEach(function (d) { d.rx = d.base[0]; d.tx = d.base[1]; });
+  var apps = [
+    { id:'a1', name:'抖音', c:'#FF2D55', mb:1240, conns:38, limit:2 },
+    { id:'a2', name:'哔哩哔哩', c:'#FB7299', mb:840, conns:21 },
+    { id:'a3', name:'微信', c:'#34C759', mb:471, conns:17 },
+    { id:'a4', name:'王者荣耀', c:'#FF9500', mb:317, conns:6 },
+    { id:'a5', name:'Chrome', c:'#007AFF', mb:287, conns:12 },
+    { id:'a6', name:'网易云音乐', c:'#FF3B30', mb:154, conns:4 },
+    { id:'a7', name:'系统更新', c:'#8E8E93', mb:92, conns:2, limit:.5 }
+  ];
+  var unmatched = [ { d:'cdn-ali.douyinpic.com', c:142, g:'抖音' }, { d:'upos-sz-mirrorcos.bilivideo.com', c:96, g:'哔哩哔哩' }, { d:'api.xiaohongshu.com', c:41, g:'小红书' }, { d:'dldir1.qq.com', c:17, g:'' } ];
+  var seed = 20260923;
+  function rnd() { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; }
+  function series(n, f) { var o = []; for (var i = 0; i < n; i++) { var d = f(i) * (.82 + rnd() * .36); o.push({ d: +d.toFixed(2), u: +(d * (.09 + rnd() * .07)).toFixed(2) }); } return o; }
+  var DATA = {
+    '24h': series(24, function (h) { return .08 + 1.55 * Math.pow(Math.max(0, Math.sin((h - 7) / 17 * Math.PI)), 1.6) + (h >= 20 && h <= 23 ? .35 : 0); }),
+    '7d': series(7, function (d) { return 13 + [0, 1, 2, 1, 5, 9, 7][d]; }),
+    '30d': series(30, function (d) { return 12 + 6 * Math.abs(Math.sin(d / 4.2)) + (d % 7 >= 5 ? 5 : 0); })
+  };
+  var LABELS = {
+    '24h': DATA['24h'].map(function (_, i) { return String(i).padStart(2, '0'); }),
+    '7d': ['周四', '周五', '周六', '周日', '周一', '周二', '今天'],
+    '30d': DATA['30d'].map(function (_, i) { var d = new Date(2026, 7, 25 + i); return (d.getMonth() + 1) + '/' + d.getDate(); })
+  };
+  var LOGS = {
+    '综合': [['I','service','HNC v5.10.5 启动完成, 用时 3.2s'],['I','detect','发现设备 Xiaomi 14 Pro 192.168.43.12'],['W','watchdog','tc 根队列校验不一致, 已自动修复'],['I','apply','限速 Xiaomi 14 Pro 6/1 MB/s 已生效'],['I','dpid','识别 哔哩哔哩 (SNI upos-sz-mirrorcos.bilivideo.com)'],['E','hotspot','ColorOS 拒绝 cmd wifi start-softap, 回退到 svc 方式'],['I','hotspot','热点已开启 wlan2 · 5 GHz']],
+    'hotspotd': [['I','hotspotd','epoll 循环启动, 监听 netlink'],['I','hotspotd','RTM_NEWNEIGH 192.168.43.25'],['I','hotspotd','速率采样 2s 周期']],
+    'watchdog': [['I','watchdog','60s 健康检查通过'],['W','watchdog','tc 规则数 18 ≠ 期望 19, 重建 1:14'],['I','watchdog','重建完成 (38ms)']],
+    'dpid': [['I','dpid','AF_PACKET 绑定 wlan2 成功'],['I','dpid','规则库 rules-v5.10.1 · 1284 条'],['I','dpid','内核丢包 0']],
+    'httpd': [['I','httpd','监听 127.0.0.1:8080 与 :8443'],['I','httpd','GET /api/devices 200 3ms'],['W','httpd','来自 192.168.43.71 的请求未授权 (401)']]
+  };
+  var alerts = [
+    { c:'var(--orange)', t:'客厅小米电视 本月已用 82% 流量配额', s:'今天 09:14 · 配额 300 GB' },
+    { c:'var(--red)', t:'MacBook-Air 当前小时流量是 7 日均值的 3.4 倍', s:'今天 10:02 · 异常流量检测' },
+    { c:'var(--blue)', t:'热点接口从 wlan1 切换到 wlan2, 规则已迁移', s:'昨天 22:41' }
+  ];
+
+  var state = {
+    page:'devices', filter:'recent', q:'', batch:false, picked:{}, open:{}, sel:null, whitelist:false,
+    appsSub:'my', iface:'wlan2', aseg:'stats', range:'24h', src:'dpi', refreshMode:'balanced',
+    theme:'system', motion:true, logFile:'综合', spark:[], feed:[]
+  };
+  try { state.theme = localStorage.getItem('hnc3-theme') || 'system'; state.motion = localStorage.getItem('hnc3-motion') !== '0'; } catch (_) {}
+
+  /* ───────────── 工具 ───────────── */
+  function rate(b) { return b >= 1e6 ? { v:(b / 1e6).toFixed(2), u:'MB/s' } : { v:String(Math.round(b / 1e3)), u:'KB/s' }; }
+  function byId(l, id) { return l.filter(function (x) { return x.id === id; })[0]; }
+  function online() { return devices.filter(function (d) { return d.status === 'online'; }); }
+  function hasRule(d) { return d.down || d.up || d.delay || d.status === 'blocked'; }
+  var toastT;
+  function toast(m) { $('#toast-t').textContent = m; var t = $('#toast'); t.classList.remove('show'); void t.offsetWidth; t.classList.add('show'); clearTimeout(toastT); toastT = setTimeout(function () { t.classList.remove('show'); }, 2100); }
+  function applyTheme() {
+    var r = document.documentElement;
+    if (state.theme === 'system') r.removeAttribute('data-theme'); else r.setAttribute('data-theme', state.theme);
+    r.classList.toggle('calm', !state.motion);
+  }
+  applyTheme();
+  function tween(el, to, dec) {
+    if (!el) return;
+    var from = parseFloat(el.textContent) || 0, t0 = performance.now(), dur = state.motion && !calm ? 800 : 0;
+    (function step(t) {
+      var k = dur ? Math.min(1, (t - t0) / dur) : 1, e = 1 - Math.pow(1 - k, 4);
+      el.textContent = (from + (to - from) * e).toFixed(dec);
+      if (k < 1) requestAnimationFrame(step);
+    })(t0);
+  }
+  function stagger(root) {
+    var kids = root ? root.children : [];
+    for (var i = 0; i < kids.length; i++) anim(kids[i], [{ opacity:0, transform:'translateY(22px) scale(.96)' }, { opacity:1, transform:'none' }], { delay: Math.min(i, 10) * 45, duration: 800, fill:'backwards' });
+  }
+  function seg(id, opts, cur, cls) {
+    return '<div class="seg ' + (cls || 'glass') + '" data-seg="' + id + '"><i class="thumb"></i>' + opts.map(function (o) {
+      return '<button type="button" data-v="' + o[0] + '" class="' + (String(o[0]) === String(cur) ? 'on' : '') + '">' + o[1] + '</button>'; }).join('') + '</div>';
+  }
+  function placeSegs(root) {
+    $$('.seg', root || document).forEach(function (s) {
+      var on = $('button.on', s), th = $('.thumb', s); if (!on || !on.offsetWidth) return;
+      th.style.width = on.offsetWidth + 'px'; th.style.transform = 'translateX(' + on.offsetLeft + 'px)';
+    });
+  }
+  function toggle(on, attrs) { return '<button class="toggle" role="switch" aria-checked="' + !!on + '" ' + (attrs || '') + '></button>'; }
+
+  /* ═════════════ 设备页 ═════════════ */
+  var FILTERS = [['recent', '近 7 天活跃'], ['online', '只看在线'], ['all', '显示全部'], ['rules', '只看离线规则']];
+  function visibleDevs() {
+    var q = state.q.trim().toLowerCase();
+    return devices.filter(function (d) {
+      if (state.filter === 'online' && d.status !== 'online') return false;
+      if (state.filter === 'recent' && d.seen === '9 天前') return false;
+      if (state.filter === 'rules' && !(d.status === 'offline' && hasRule(d))) return false;
+      return !q || (d.name + ' ' + d.ip + ' ' + d.mac).toLowerCase().indexOf(q) >= 0;
+    });
+  }
+  function badges(d) {
+    var b = '';
+    if (d.status === 'blocked') b += '<span class="badge b-red">已封锁</span>';
+    else if (d.status === 'offline') b += '<span class="badge b-gray">离线</span>';
+    if (d.down || d.up) b += '<span class="badge b-acc">限速 ' + d.down + '/' + d.up + '</span>';
+    if (d.delay) b += '<span class="badge b-pur">延迟 ' + d.delay + 'ms</span>';
+    if (d.wl) b += '<span class="badge b-ok">白名单</span>';
+    if (d.priv) b += '<span class="badge b-gray">随机 MAC</span>';
+    return b;
+  }
+  function devBody(d) {
+    return '<div class="dev-body">' +
+      '<div class="ctrl"><div class="ctrl-t"><i></i>限速控制</div><div class="grid2">' +
+        '<label class="field">下行<span class="box"><input type="number" inputmode="decimal" min="0" step="0.1" placeholder="不限" value="' + (d.down || '') + '" data-f="down"><span class="u">MB/s</span></span></label>' +
+        '<label class="field">上行<span class="box"><input type="number" inputmode="decimal" min="0" step="0.1" placeholder="不限" value="' + (d.up || '') + '" data-f="up"><span class="u">MB/s</span></span></label></div>' +
+        '<div class="btns"><button class="btn sec press" data-act="clear-limit">清除</button><button class="btn pri press" data-act="apply-limit">应用限速</button></div></div>' +
+      '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--purple)"></i>延迟注入</div>' + seg('delay-' + d.id, [[0, '关闭'], [50, '50ms'], [100, '100ms'], [200, '200ms']], d.delay, 'small') +
+        '<div class="grid2"><label class="field">抖动<span class="box"><input type="number" min="0" placeholder="0" value="' + (d.jitter || '') + '" data-f="jitter"><span class="u">ms</span></span></label>' +
+        '<label class="field">丢包<span class="box"><input type="number" min="0" max="100" step="0.1" placeholder="0" value="' + (d.loss || '') + '" data-f="loss"><span class="u">%</span></span></label></div>' +
+        '<div class="btns"><button class="btn sec press" data-act="clear-delay">清除</button><button class="btn pri press" data-act="apply-delay">应用延迟</button></div></div>' +
+      (d.status === 'blocked' ? '<button class="btn ok wide press" data-act="unblock">✓ 解除封锁</button>'
+        : '<button class="btn dan wide hold" data-act="hold"><i class="fill"></i><span>长按封锁设备</span></button>') +
+      '<div class="btns"><button class="btn sec press" data-act="rename">' + ico('edit') + '重命名</button><button class="btn sec press" data-act="wl">' + ico('shield') + (d.wl ? '移出白名单' : '加入白名单') + '</button></div>' +
+    '</div>';
+  }
+  function devCard(d) {
+    var r = rate(d.rx), t = rate(d.tx), open = !wide() && state.open[d.id];
+    var meta = d.status === 'online' ? '今日在线 ' + d.hours + ' 小时 · ' + d.today + ' GB' : d.status === 'blocked' ? '已阻止联网' : '最后在线 ' + (d.seen || '—');
+    return '<article class="glass dev' + (open ? ' open' : '') + (wide() && state.sel === d.id ? ' sel' : '') + (state.picked[d.id] ? ' picked' : '') + '" data-dev="' + d.id + '">' +
+      '<button class="dev-h" data-act="toggle-dev" aria-expanded="' + !!open + '"><span class="check">' + ico('check') + '</span>' +
+        '<span class="av">' + d.em + '<span class="dot ' + d.status + '"></span></span>' +
+        '<span class="dev-info"><span class="dev-name"><span class="nm">' + esc(d.name) + '</span>' + badges(d) + '</span>' +
+          '<span class="dev-meta mono" style="display:block">' + d.ip + ' · ' + d.mac + '</span>' +
+          '<span class="dev-meta" style="display:block">' + meta + '</span>' +
+          (d.apps.length ? '<span class="dev-apps"><span class="lb">在用</span>' + d.apps.map(function (a) { return '<span class="a">' + esc(a) + '</span>'; }).join('') + '</span>' : '') +
+        '</span>' +
+        (d.status === 'online' ? '<span class="dev-rate num"><span class="d">↓ <b data-rx>' + r.v + '</b> ' + r.u + '</span><span class="u">↑ <b data-tx>' + t.v + '</b> ' + t.u + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>'
+          : '<span class="dev-rate"><span class="off">' + (d.status === 'blocked' ? '已阻止' : '离线') + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>') +
+      '</button>' +
+      (wide() ? '' : '<div class="fold"><div><div class="fold-in">' + devBody(d) + '</div></div></div>') +
+    '</article>';
+  }
+  function devSide() {
+    var d = byId(devices, state.sel);
+    if (!d) return '<div class="glass empty">点左侧的设备查看和调整规则</div>';
+    return '<div class="glass swap" data-side="' + d.id + '"><div class="side-head"><span class="av">' + d.em + '<span class="dot ' + d.status + '"></span></span><div><div class="t">' + esc(d.name) + '</div><div class="s mono">' + d.ip + ' · ' + d.mac + '</div></div></div>' +
+      '<div style="padding:10px 14px 12px" class="dev-name">' + (badges(d) || '<span class="badge b-ok">无规则</span>') + '</div>' + devBody(d) + '</div>';
+  }
+  function devListHtml() {
+    var all = visibleDevs();
+    return all.length ? all.map(devCard).join('') : '<div class="glass empty">' + (state.filter === 'rules' ? '没有留有规则的离线设备' : '没有匹配的设备，换个关键词或过滤条件') + '</div>';
+  }
+  function renderDevices(anim1) {
+    var on = online();
+    var fl = FILTERS.filter(function (f) { return f[0] === state.filter; })[0][1];
+    var h = '<div class="wrap' + (wide() ? ' dev-split' : '') + '"><div class="wrap" style="margin:0;max-width:none">' +
+      '<div class="glass hero"><div><div class="hero-l">下行</div><div class="hero-v num"><span id="h-dn">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
+      '<div><div class="hero-l">上行</div><div class="hero-v num"><span id="h-up">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
+      '<div class="right"><div class="hero-l"><span class="breathe"></span>在线</div><div class="hero-v num"><span id="h-on">' + on.length + '</span><span class="u">/ ' + devices.length + ' 设备</span></div></div>' +
+      '<svg class="spark" id="spark" aria-label="近 60 秒下行"></svg></div>' +
+      '<div class="fresh">示例数据 · 已更新 · 刚刚 · ' + { live:'实时模式', balanced:'均衡模式', saver:'省电模式' }[state.refreshMode] + '</div>' +
+      '<label class="glass search">' + ico('search') + '<input id="q" type="search" placeholder="搜索设备 · IP · MAC · 名称" value="' + esc(state.q) + '" autocomplete="off"></label>' +
+      '<div class="glass filter"><div class="tx"><div class="t">设备过滤</div><div class="s">热点运行中 · wlan2 · 5 GHz</div></div>' +
+        '<div class="dd"><button class="dd-btn press" data-act="dd"><span>' + fl + '</span>' + ico('chev') + '</button><div class="dd-menu">' +
+        FILTERS.map(function (f) { return '<button data-filter="' + f[0] + '" class="' + (f[0] === state.filter ? 'on' : '') + '">' + f[1] + ico('check') + '</button>'; }).join('') + '</div></div></div>' +
+      '<div class="glass gops' + (state.open.gops ? ' open' : '') + '" id="gops"><button class="card-h" data-act="gops">' + gi('orange', 'bolt') +
+        '<span class="tx"><div class="t">全局操作</div><div class="s">白名单 · 刷新 · 清空 · 清理 · 释放</div></span>' + ico('chev', 'chev') + '</button>' +
+        '<div class="fold"><div><div class="fold-in rows">' +
+          '<div class="row">' + gi('green', 'home') + '<span class="tx"><div class="t">白名单模式</div><div class="s">仅允许白名单内的设备联网</div></span>' + toggle(state.whitelist, 'data-act="whitelist" aria-label="白名单模式"') + '</div>' +
+          '<button class="row" data-act="refresh">' + gi('blue', 'refresh') + '<span class="tx"><div class="t">刷新设备列表</div><div class="s">重新扫描热点连接设备</div></span><span class="hint-a">刷新</span></button>' +
+          '<button class="row" data-act="clear-all">' + gi('orange', 'trash') + '<span class="tx"><div class="t">清空所有规则</div><div class="s">移除全部限速、延迟、黑名单</div></span><span class="hint-a warn">清空</span></button>' +
+          '<button class="row" data-act="clean-offline">' + gi('orange', 'trash') + '<span class="tx"><div class="t">清理离线设备</div><div class="s">立即移除 devices.json 中所有离线设备</div></span><span class="hint-a warn">清理</span></button>' +
+          '<button class="row" data-act="release">' + gi('red', 'power') + '<span class="tx"><div class="t">释放并重启资源</div><div class="s">危险操作：清 tc/iptables 后自动拉起后端</div></span><span class="hint-a danger">重启</span></button>' +
+        '</div></div></div></div>' +
+      '<div class="toolbar"><button class="chip press' + (state.batch ? ' on' : '') + '" data-act="batch">' + ico('box') + '批量</button><button class="chip press" data-act="tpl">' + ico('star') + '模板</button></div>' +
+      (state.batch ? '<div class="glass batchbar swap"><div class="top"><span>已选 <b class="num" id="picked-n">' + Object.keys(state.picked).length + '</b> 台</span><button class="hint-a" data-act="b-all">全选</button><button class="hint-a" data-act="b-none">清空</button><button class="hint-a" data-act="batch">退出</button></div>' +
+        '<div class="btns"><button class="btn sec press" data-act="b-tpl">应用模板</button><button class="btn sec press" data-act="b-clear">清除限速</button><button class="btn sec press" data-act="b-cdelay">清除延迟</button><button class="btn dan press" data-act="b-block">加黑</button><button class="btn ok press" data-act="b-unblock">解黑</button></div></div>' : '') +
+      '<div class="sec"><span>设备列表</span><span class="r">' + on.length + ' 在线 · 共 ' + devices.length + '</span></div>' +
+      '<div class="dev-list' + (state.batch ? ' batch' : '') + '" id="dev-list">' + devListHtml() + '</div></div>' +
+      (wide() ? '<div class="dev-side" id="dev-side">' + devSide() + '</div>' : '') +
+    '</div>';
+    var p = $('#p-devices'); p.innerHTML = h;
+    placeSegs(p); drawSpark(); heroNums(false);
+    if (anim1) stagger($('.wrap .wrap', p));
+  }
+  function heroNums(tw) {
+    var on = online(), dn = sum(on, function (d) { return d.rx; }) / 1e6, up = sum(on, function (d) { return d.tx; }) / 1e6;
+    if (tw) { tween($('#h-dn'), dn, 2); tween($('#h-up'), up, 2); }
+    else if ($('#h-dn')) { $('#h-dn').textContent = dn.toFixed(2); $('#h-up').textContent = up.toFixed(2); }
+    if ($('#h-on')) $('#h-on').textContent = on.length;
+  }
+  function drawSpark() {
+    var el = $('#spark'); if (!el) return;
+    var s = state.spark, W = Math.round(el.clientWidth) || 300, H = 40, mx = Math.max.apply(null, s) * 1.15 || 1, st = W / (s.length - 1);
+    var pts = s.map(function (v, i) { return [i * st, H - 3 - v / mx * (H - 8)]; });
+    var line = pts.map(function (p, i) { return (i ? 'L' : 'M') + p[0].toFixed(1) + ' ' + p[1].toFixed(1); }).join(' '), last = pts[pts.length - 1];
+    el.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    el.innerHTML = '<defs><linearGradient id="sg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--rx)" stop-opacity=".25"/><stop offset="1" stop-color="var(--rx)" stop-opacity="0"/></linearGradient></defs>' +
+      '<path d="' + line + ' L' + W + ' ' + H + ' L0 ' + H + ' Z" fill="url(#sg)"/><path d="' + line + '" fill="none" stroke="var(--rx)" stroke-width="2" stroke-linejoin="round"/>' +
+      '<circle cx="' + last[0] + '" cy="' + last[1] + '" r="3.5" fill="var(--rx)" stroke="var(--card-solid)" stroke-width="2"/>';
+  }
+  function refreshDevCard(d) {
+    var el = $('.dev[data-dev="' + d.id + '"]');
+    if (el) { var tmp = document.createElement('div'); tmp.innerHTML = devCard(d); var nu = tmp.firstChild; el.replaceWith(nu); placeSegs(nu); anim(nu, [{ transform:'scale(.97)' }, { transform:'none' }], { duration:600 }); }
+    if (wide() && state.sel === d.id) { $('#dev-side').innerHTML = devSide(); placeSegs($('#dev-side')); }
+    heroNums(false);
+  }
+
+  /* ═════════════ 应用页 ═════════════ */
+  function renderApps(anim1) {
+    var total = sum(apps, function (a) { return a.mb; });
+    var h = '<div class="wrap">' +
+      '<div class="glass ahero"><div class="stats">' +
+        '<div><div class="l">追踪状态</div><div class="v" style="color:var(--badge-ok)">运行中</div></div><div class="hero-div"></div>' +
+        '<div><div class="l">活跃应用</div><div class="v num">' + apps.length + '</div></div><div class="hero-div"></div>' +
+        '<div><div class="l">连接数</div><div class="v num">' + sum(apps, function (a) { return a.conns; }) + '</div></div><div class="hero-div"></div>' +
+        '<div><div class="l">SNI 抓取</div><div class="v num">1,284</div></div></div>' +
+        '<div class="foot2"><span class="breathe"></span>dpid 已上报 · ' + state.iface + ' · 今日本机 ' + (total / 1024).toFixed(2) + ' GB</div></div>' +
+      seg('apps-sub', [['my', '我的应用'], ['export', '导出'], ['set', '设置']], state.appsSub) +
+      '<div class="subview" id="apps-sub">' + appsSub() + '</div></div>';
+    var p = $('#p-apps'); p.innerHTML = h; placeSegs(p);
+    if (anim1) stagger($('.wrap', p));
+  }
+  function appsSub() {
+    if (state.appsSub === 'my') {
+      var mx = apps[0].mb, tot = sum(apps, function (x) { return x.mb; });
+      return '<div class="chips">' + [['wlan2', 'wlan2 · 热点'], ['rmnet_data0', 'rmnet_data0 · 移动网络'], ['all', '全部接口']].map(function (f) {
+          return '<button class="chip press' + (state.iface === f[0] ? ' on' : '') + '" data-iface="' + f[0] + '">' + f[1] + '</button>'; }).join('') + '</div>' +
+        '<div class="sec"><span>未匹配的 SNI <small>候选自动扩展队列</small></span><span class="r">' + unmatched.length + '</span></div>' +
+        '<div class="glass sni">' + unmatched.map(function (u, i) {
+          return '<div class="sni-row"><span class="dw"><span class="d">' + u.d + '</span><span class="c">' + u.c + ' 次' + (u.g ? ' · 像' + u.g : '') + '</span></span><button class="btn sec press" data-sni="' + i + '">加入规则</button></div>'; }).join('') + '</div>' +
+        '<div class="sec"><span>应用流量 <small>今日 · 点开可限速</small></span></div>' +
+        '<div class="glass rows">' + apps.map(function (a) {
+          var v = a.mb >= 1024 ? (a.mb / 1024).toFixed(2) + ' GB' : a.mb + ' MB';
+          return '<div class="row-wrap' + (state.open['app' + a.id] ? ' open' : '') + '" data-app="' + a.id + '"><button class="row-h" data-act="app-open"><span class="appi" style="background:linear-gradient(145deg,' + a.c + ',color-mix(in srgb,' + a.c + ' 60%,#000))">' + esc(a.name.charAt(0)) + '</span>' +
+            '<span class="tx"><div class="dev-name" style="font-size:14.5px">' + esc(a.name) + (a.limit ? '<span class="badge b-acc">限速 ' + a.limit + ' MB/s</span>' : '') + '</div><div class="bar1"><i style="width:' + (a.mb / mx * 100).toFixed(1) + '%"></i></div></span>' +
+            '<span style="text-align:right"><div class="num" style="font-size:13.5px;font-weight:700">' + v + '</div><div style="font-size:11px;color:var(--text-3)">' + a.conns + ' 连接</div></span>' + ico('chev', 'chev') + '</button>' +
+            '<div class="fold"><div><div class="fold-in set-body"><div class="grid2"><label class="field">应用限速<span class="box"><input type="number" min="0" step="0.1" placeholder="不限" value="' + (a.limit || '') + '" data-f="app-limit"><span class="u">MB/s</span></span></label>' +
+            '<div class="field">今日占比<span class="box num" style="font-size:15px;font-weight:700">' + Math.round(a.mb / tot * 100) + '%</span></div></div>' +
+            '<div class="btns"><button class="btn sec press" data-act="app-clear">不限速</button><button class="btn pri press" data-act="app-save">保存</button></div></div></div></div></div>';
+        }).join('') + '</div>';
+    }
+    if (state.appsSub === 'export') {
+      return '<div class="glass" style="padding:14px;display:grid;gap:12px"><div class="field">快速选择时间范围<div class="chips">' + ['最近 15 分', '最近 1 小时', '最近 3 小时', '最近 6 小时'].map(function (x, i) {
+          return '<button class="chip press' + (i === 1 ? ' on' : '') + '" data-range-q>' + x + '</button>'; }).join('') + '</div></div>' +
+        '<div class="grid2"><label class="field">起始<span class="box"><input type="time" value="10:05"></span></label><label class="field">结束<span class="box"><input type="time" value="11:05"></span></label></div>' +
+        '<label class="field">备注（给 Claude 的上下文）<span class="box ta"><textarea placeholder="例如：刷抖音时偶尔卡顿，想看是哪个域名"></textarea></span></label>' +
+        '<button class="btn pri wide press" data-act="export">⚡ 打包 export</button></div>' +
+        '<div class="sec"><span>最近的导出</span></div><div class="glass rows">' +
+        [['hnc-export-0923-1005.tar.gz', '今天 10:05 · 1 小时 · 2.4 MB'], ['hnc-export-0922-2140.tar.gz', '昨天 21:40 · 3 小时 · 6.1 MB']].map(function (x) {
+          return '<button class="row" data-toast="已开始下载 ' + x[0] + '">' + gi('blue', 'down') + '<span class="tx"><div class="t mono" style="font-size:12.5px">' + x[0] + '</div><div class="s">' + x[1] + '</div></span>' + ico('right', 'chev') + '</button>'; }).join('') + '</div>';
+    }
+    return '<div class="sec"><span>追踪开关</span></div><div class="glass rows">' +
+      [['追踪本机应用流量', '✓ 常驻（默认开）', true], ['SNI / 规则联合标注', '✓ v5.6 已上线', true], ['已知 app 子域自动加入规则', '规则自动扩展 · 实际很少触发', false], ['未匹配 SNI 候选审批', '✓ v5.7 已上线', true]].map(function (x) {
+        return '<div class="row"><span class="tx"><div class="t">' + x[0] + '</div><div class="s">' + x[1] + '</div></span>' + toggle(x[2], 'aria-label="' + x[0] + '"') + '</div>'; }).join('') + '</div>' +
+      '<div class="glass rows"><button class="row" data-confirm="清理自学习明细数据">' + gi('orange', 'trash') + '<span class="tx"><div class="t">清理自学习明细数据</div><div class="s">保留规则，只清明细</div></span><span class="hint-a warn">清理</span></button></div>';
+  }
+
+  /* ═════════════ 分析页(原版统计 + DPI) ═════════════ */
+  function renderStats(anim1) {
+    var h = '<div class="wrap">' + seg('aseg', [['stats', '流量统计'], ['dpi', 'DPI 分析']], state.aseg) + '<div id="aseg-body" class="subview">' + (state.aseg === 'stats' ? statsBody() : dpiBody()) + '</div></div>';
+    var p = $('#p-stats'); p.innerHTML = h; placeSegs(p);
+    if (state.aseg === 'stats') renderBars(); else fillFeed();
+    if (anim1) { stagger($('.wrap', p)); stagger($('#aseg-body')); }
+  }
+  var SRC_LB = { dpi:'应用归因', legacy:'全量', shadow:'Shadow 对比' };
+  function statsBody() {
+    var d24 = DATA['24h'], dn = sum(d24, function (p) { return p.d; }), up = sum(d24, function (p) { return p.u; });
+    return '<div class="counters">' +
+        [[online().length, '在线设备'], [devices.filter(function (d) { return d.down || d.up; }).length, '限速中'], [devices.filter(function (d) { return d.delay; }).length, '延迟注入'], [devices.filter(function (d) { return d.status === 'blocked'; }).length, '已封锁']].map(function (c) {
+          return '<div class="glass counter"><div class="n num" data-count="' + c[0] + '">0</div><div class="l">' + c[1] + '</div></div>'; }).join('') + '</div>' +
+      '<div class="glass srcc"><div class="tx"><div class="t">统计来源</div><div class="s" id="src-hint">' + srcHint() + '</div></div>' +
+        '<div class="dd"><button class="dd-btn press" data-act="dd"><span id="src-lb">' + SRC_LB[state.src] + '</span>' + ico('chev') + '</button><div class="dd-menu">' +
+        [['dpi', '应用归因 (DPI)'], ['legacy', '全量 (iptables)'], ['shadow', 'Shadow 对比']].map(function (f) { return '<button data-src="' + f[0] + '" class="' + (f[0] === state.src ? 'on' : '') + '">' + f[1] + ico('check') + '</button>'; }).join('') + '</div></div></div>' +
+      '<div class="grid2"><div class="glass stat"><div class="l">今日下行</div><div class="v num"><span data-to="' + dn.toFixed(2) + '">0.00</span><span class="u">GB</span></div><div class="tr">↑ 12% 较昨日</div></div>' +
+        '<div class="glass stat"><div class="l">今日上行</div><div class="v num"><span data-to="' + up.toFixed(2) + '">0.00</span><span class="u">GB</span></div><div class="tr dn">↓ 4% 较昨日</div></div></div>' +
+      '<div class="glass chart"><div class="chart-h"><h3 id="chart-title">24 小时分布</h3>' + seg('range', [['24h', '24h'], ['7d', '7d'], ['30d', '30d']], state.range, 'small') + '</div>' +
+        '<div class="bars" id="bars"></div><div class="axis" id="axis"></div>' +
+        '<div class="legend"><span><i style="background:var(--rx)"></i>下行</span><span><i style="background:var(--tx)"></i>上行</span><span style="margin-left:auto;color:var(--text-3)">点柱子看数值</span></div></div>' +
+      '<div class="glass' + (state.open.detail ? ' open' : '') + '" id="detail"><button class="card-h" data-act="detail"><span class="tx"><div class="t">流量明细</div><div class="s">按时段 · 点开查看</div></span>' + ico('chev', 'chev') + '</button>' +
+        '<div class="fold"><div><div class="fold-in tbl" id="tbl"></div></div></div></div>' +
+      '<div class="sec"><span>TC 命令参考</span></div>' +
+      '<pre class="glass tcref"><span class="c"># 下行限速 (egress on wlan2)</span>\n<span class="k">tc</span> qdisc add dev wlan2 root handle <span class="h">1:</span> htb default 999\n<span class="k">tc</span> class add dev wlan2 parent <span class="h">1:</span> classid <span class="h">1:14</span> \\\n  htb rate <span class="v">10mbit</span> ceil <span class="v">10mbit</span>\n\n<span class="c"># 上行限速 (ingress via IFB)</span>\n<span class="k">tc</span> qdisc add dev wlan2 handle <span class="h">ffff:</span> ingress\n<span class="k">tc</span> filter add dev wlan2 parent <span class="h">ffff:</span> protocol ip \\\n  u32 match u32 0 0 action mirred egress redirect dev ifb0\n\n<span class="c"># 延迟注入 (netem)</span>\n<span class="k">tc</span> qdisc add dev wlan2 parent <span class="h">1:14</span> handle <span class="h">101:</span> \\\n  netem delay <span class="v">200ms 20ms</span> loss <span class="v">1%</span></pre>';
+  }
+  function srcHint() { return { dpi:'应用归因(DPI)，与“应用历史”同源', legacy:'全量 = iptables 计数，含未归因流量', shadow:'新旧两套统计并排对比，用来核对差异' }[state.src]; }
+  function niceTop(v) { var p = Math.pow(10, Math.floor(Math.log10(v / 2))), n = v / 2 / p, st = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10]; for (var i = 0; i < st.length; i++) if (n <= st[i]) return st[i] * p * 2; return 20 * p; }
+  function renderBars() {
+    var bars = $('#bars'); if (!bars) return;
+    var data = DATA[state.range], lb = LABELS[state.range];
+    var top = niceTop(Math.max.apply(null, data.map(function (p) { return p.d + p.u; }))), grid = '';
+    [0, .5, 1].forEach(function (k) { grid += '<div class="gridl" style="bottom:' + (k * 100) + '%"></div><div class="gridt" style="bottom:calc(' + (k * 100) + '% - 6px)">' + (+(top * k).toFixed(2)) + '</div>'; });
+    bars.innerHTML = grid + data.map(function (p, i) {
+      return '<div class="bcol" data-i="' + i + '"><div class="bar tx" style="--i:' + i + ';height:' + (p.u / top * 100).toFixed(2) + '%"></div><div class="bar rx" style="--i:' + i + ';height:' + (p.d / top * 100).toFixed(2) + '%"></div></div>';
+    }).join('');
+    var every = data.length === 24 ? 6 : data.length === 30 ? 7 : 1;
+    $('#axis').innerHTML = data.map(function (_, i) { return '<span>' + (i % every === 0 ? lb[i] : '') + '</span>'; }).join('');
+    $('#chart-title').textContent = { '24h':'24 小时分布', '7d':'近 7 天', '30d':'近 30 天' }[state.range];
+    var tot = sum(data, function (p) { return p.d + p.u; }), mxs = Math.max.apply(null, data.map(function (p) { return p.d + p.u; }));
+    $('#tbl').innerHTML = '<table><thead><tr><th>' + (state.range === '24h' ? '时段' : '日期') + '</th><th>下行 GB</th><th>上行 GB</th><th>合计</th><th>占比</th></tr></thead><tbody>' +
+      data.map(function (p, i) { var s = p.d + p.u; return '<tr><td class="lb">' + lb[i] + (state.range === '24h' ? ':00' : '') + '</td><td>' + p.d + '</td><td>' + p.u + '</td><td>' + s.toFixed(2) + '</td><td class="pct"><i style="width:' + (s / mxs * 100).toFixed(0) + '%"></i><span>' + (s / tot * 100).toFixed(1) + '%</span></td></tr>'; }).join('') + '</tbody></table>';
+  }
+  function dpiBody() {
+    var top = [['抖音', 3.2], ['哔哩哔哩', 2.1], ['王者荣耀', .8], ['微信', .6], ['云视听极光', .5]];
+    return '<div class="glass dpihero"><div class="top"><div><div class="l">识别模式</div><div class="mode">AF_PACKET 抓包</div></div><span class="badge b-ok" style="font-size:12px;padding:5px 10px"><span class="breathe"></span>&nbsp;运行中</span></div>' +
+        '<div class="grid"><div><div class="n num">1.28M</div><div class="l">已抓包</div></div><div><div class="n num" id="k-dns">18,432</div><div class="l">DNS 事件</div></div><div><div class="n num">9,871</div><div class="l">TLS 事件</div></div><div><div class="n num">0</div><div class="l">内核丢包</div></div></div></div>' +
+      '<div class="cols"><div>' +
+        '<div class="sec"><span>流量历史 <small>热点设备 · 今日</small></span></div><div class="glass rows">' + top.map(function (x) {
+          return '<div class="row"><span class="tx"><div class="t">' + x[0] + '</div><div class="bar1"><i style="width:' + (x[1] / top[0][1] * 100) + '%"></i></div></span><span class="v num">' + x[1] + ' GB</span></div>'; }).join('') + '</div>' +
+        '<div class="sec"><span>设备应用画像</span></div><div class="glass prof">' + devices.filter(function (d) { return d.apps.length; }).map(function (d) {
+          return '<div class="prof-row"><span>' + d.em + ' ' + esc(d.name) + '</span><span class="apps">' + d.apps.map(function (a) { return '<span class="badge b-acc">' + a + '</span>'; }).join('') + '</span></div>'; }).join('') + '</div>' +
+        '<div class="sec"><span>事件流 <small>实时</small></span></div><div class="glass feed" id="feed"></div>' +
+      '</div><div>' +
+        '<div class="sec"><span>总体状态</span></div><div class="glass rows">' +
+          [['后端 / DPI / 设备发现', '正常', 'ok'], ['watchdog / dpid_guard', '正常', 'ok'], ['pidfile', 'dpid 2314', ''], ['字节统计来源 · 规则覆盖', 'conntrack · 87%', '']].map(stRow).join('') + '</div>' +
+        '<div class="sec"><span>能力探测</span></div><div class="glass rows">' +
+          [['AF_PACKET 可用', '✓ 可用', 'ok'], ['热点接口', 'wlan2', ''], ['BPF Tether Offload', '未接管', 'ok'], ['Conntrack 可读', '✓ 可读', 'ok']].map(stRow).join('') + '</div>' +
+        '<div class="sec"><span>未识别域名助手 <small>待补库 DNS/SNI Top</small></span></div><div class="glass sni">' + unmatched.slice(0, 3).map(function (u, i) {
+          return '<div class="sni-row"><span class="dw"><span class="d">' + u.d + '</span><span class="c">出现 ' + u.c + ' 次</span></span><button class="btn sec press" data-sni="' + i + '">补库</button></div>'; }).join('') + '</div>' +
+        '<div class="sec"><span>DPI 规则库</span></div><div class="glass rows">' +
+          [['域名规则库', '1,284 条', ''], ['覆盖应用', '213 个', ''], ['版本', 'rules-v5.10.1', '']].map(stRow).join('') +
+          '<button class="row" data-toast="规则库已是最新 (rules-v5.10.1)">' + gi('blue', 'refresh') + '<span class="tx"><div class="t">检查规则库更新</div></span><span class="hint-a">检查</span></button></div>' +
+      '</div></div>';
+  }
+  function stRow(x) { return '<div class="row"><span class="tx"><div class="t" style="font-weight:600">' + x[0] + '</div></span><span class="v ' + x[2] + '">' + x[1] + '</span></div>'; }
+  var FEED = [['dn', 'Xiaomi 14 Pro', 'api.amemv.com', '抖音'], ['tl', 'MacBook-Air', 'www.feishu.cn', '飞书'], ['dn', '客厅小米电视', 'cdn.yst.aisee.tv', '云视听极光'], ['tl', 'Xiaomi 14 Pro', 'upos-sz-mirrorcos.bilivideo.com', '哔哩哔哩'], ['dn', 'Switch OLED', 'ctest.cdn.nintendo.net', '任天堂 eShop'], ['tl', 'Xiaomi 14 Pro', 'szextshort.weixin.qq.com', '微信']];
+  function feedLine() {
+    var f = FEED[Math.floor(rnd() * FEED.length)], n = new Date();
+    var tm = String(n.getHours()).padStart(2, '0') + ':' + String(n.getMinutes()).padStart(2, '0') + ':' + String(n.getSeconds()).padStart(2, '0');
+    return '<span class="tm">' + tm + '</span> <span class="' + f[0] + '">' + (f[0] === 'dn' ? 'DNS' : 'TLS') + '</span> ' + esc(f[1]) + ' → ' + f[2] + ' → <span class="ap">' + f[3] + '</span>';
+  }
+  function fillFeed() { var el = $('#feed'); if (!el) return; if (!state.feed.length) for (var i = 0; i < 8; i++) state.feed.push(feedLine()); el.innerHTML = state.feed.map(function (l) { return '<div>' + l + '</div>'; }).join(''); }
+
+  /* ═════════════ 设置页(原版全部条目, 就地展开) ═════════════ */
+  var SET = [
+    { g:'诊断', items:[{ ic:['gray', 'doc'], t:'运行日志', s:'service · hotspotd · dpid · iptables/tc 等', kind:'logs' }] },
+    { g:'热点自动启动', items:[{ ic:['blue', 'wifi'], t:'开机自动开热点', s:'开机后自动开 WiFi 热点；ColorOS 可能不放行命令行开热点', kind:'toggle', on:true }] },
+    { g:'告警', items:[
+      { ic:['orange', 'gauge'], t:'月度流量配额', s:'每台设备按自然月累计，超配额提醒', kind:'toggle-fold', on:true, fields:[['配额', '300', 'GB/台/月'], ['预警', '80', '%']] },
+      { ic:['red', 'heart'], t:'异常流量检测', s:'当前小时超过 7 日同时段均值 × 阈值时提醒', kind:'toggle-fold', on:true, fields:[['倍数阈值', '3', '倍'], ['最低量', '200', 'MB']] } ] },
+    { g:'全局带宽整形', items:[{ ic:['purple', 'layers'], t:'启用全局带宽整形', s:'给整个热点设 WAN 上限 + 智能队列(AQM)，抗 bufferbloat', kind:'toggle-fold', on:false, fields:[['下行上限', '100', 'Mbps'], ['上行上限', '30', 'Mbps']], note:'内核没有 sch_cake / fq_codel 时自动退回 sfq' }] },
+    { g:'飞轮排除名单', items:[{ ic:['cyan', 'shield'], t:'不参与规则学习的应用', s:'VPN / 代理会代理别的 app 流量，排除后不污染规则', kind:'fold', chips:['Clash Meta', 'v2rayNG', 'sing-box', 'NekoBox'] }] },
+    { g:'刷新与功耗', items:[
+      { ic:['green', 'refresh'], t:'设备页刷新模式', s:'实时更跟手；省电会降低前台轮询频率', kind:'seg' },
+      { ic:['gray', 'info'], t:'数据新鲜度', s:'/api/live 最近一次返回', kind:'val', v:'2 秒前', cls:'ok' },
+      { ic:['gray', 'cpu'], t:'控制面指标', s:'snapshot · JSON cache · fallback', kind:'val', v:'正常', cls:'ok' },
+      { ic:['gray', 'flask'], t:'兼容性能力', s:'iptables / tc / IFB / netem', kind:'val', v:'4 / 4 可用', cls:'ok' },
+      { ic:['blue', 'wifi'], t:'热点接口偏好', s:'默认 auto；ColorOS 常见 wlan2', kind:'val', v:'auto · wlan2' } ] },
+    { g:'远程访问', items:[
+      { ic:['blue', 'globe'], t:'启用远程访问服务', s:'开启后 :8443 监听，热点内其他设备可访问', kind:'toggle', on:true },
+      { ic:['green', 'shield'], t:'启用远程访问鉴权', s:'关闭时热点内任何设备都能访问', kind:'toggle', on:true },
+      { id:'pair', ic:['orange', 'star'], t:'生成配对码', s:'远端新设备首次连接用 · 120 秒有效', kind:'act' },
+      { ic:['gray', 'dev'], t:'已授权设备', s:'管理能远程访问的设备', kind:'fold', list:[['MacBook-Air', '9 月 20 日授权'], ['Xiaomi 14 Pro', '9 月 12 日授权']] } ] },
+    { g:'热点控制', items:[
+      { ic:['blue', 'wifi'], t:'热点接口', s:'当前热点使用的接口（实时）', kind:'val', v:'wlan2' },
+      { ic:['orange', 'rocket'], t:'硬件 offload', s:'BPF tether 是否绕过 tc 限速', kind:'val', v:'未接管', cls:'ok' } ] },
+    { g:'运行状态', items:[
+      { ic:['green', 'cpu'], t:'hotspotd 进程', s:'pid 1873 · 运行 3 时 12 分', kind:'val', v:'运行中', cls:'ok' },
+      { ic:['purple', 'layers'], t:'tc 规则数', s:'HTB egress + ingress IFB', kind:'val', v:'19' },
+      { ic:['orange', 'shield'], t:'iptables 规则', s:'MARK 0x800000 命名空间', kind:'val', v:'42' },
+      { ic:['blue', 'heart'], t:'watchdog', s:'每 60 秒健康检查', kind:'val', v:'正常', cls:'ok' } ] },
+    { g:'运行健康', items:[
+      { ic:['gray', 'refresh'], t:'dpid 重启 / 近期崩溃', s:'累计重启 · 近期崩溃环启动数', kind:'val', v:'2 / 0' },
+      { ic:['gray', 'layers'], t:'watchdog 全量重建', s:'tc 树被整体重建的次数', kind:'val', v:'1', cls:'warn' },
+      { ic:['gray', 'tool'], t:'tc 修复失败 / 上行失败', s:'自修复熔断 · 上行 IFB/police 失败', kind:'val', v:'0 / 0', cls:'ok' },
+      { ic:['gray', 'doc'], t:'JSON 退回 legacy', s:'应长期为 0', kind:'val', v:'0', cls:'ok' },
+      { ic:['gray', 'flask'], t:'能力降级标记', s:'qos_fallback / uplink_unsupported', kind:'val', v:'无', cls:'ok' } ] },
+    { g:'维护', items:[
+      { ic:['blue', 'refresh'], t:'重启 HNC 服务', s:'重跑 post-fs-data.sh + service.sh', kind:'confirm', hint:['重启', 'danger'] },
+      { ic:['orange', 'trash'], t:'清理缓存', s:'hostname_cache · dev_class_cache', kind:'toast', msg:'缓存已清理', hint:['清理', 'warn'] },
+      { ic:['green', 'down'], t:'导出规则', s:'备份 rules.json 与授权列表', kind:'toast', msg:'rules.json 已导出', hint:['导出', ''] },
+      { ic:['cyan', 'doc'], t:'JSON 健康面板', s:'rules / devices / tokens 的完整性与备份', kind:'val', v:'6 / 6 完好', cls:'ok' },
+      { ic:['purple', 'down'], t:'导出诊断包', s:'快照、配置、日志尾部和 tc/iptables/ip 状态', kind:'toast', msg:'诊断包已生成 (1.8 MB)', hint:['导出', ''] } ] },
+    { g:'clsact BPF（实验性）', items:[
+      { ic:['red', 'flask'], t:'启用 clsact BPF 打标', s:'在 AOSP offload 之前按源 IP 预设限速 mark；默认关', kind:'toggle', on:false },
+      { ic:['gray', 'layers'], t:'clsact BPF 状态', s:'qdisc · BPF filter · map · watchdog', kind:'val', v:'未启用' } ] },
+    { g:'外观', items:[{ ic:['purple', 'palette'], t:'主题与动画', s:'浅色 / 深色 / 跟随系统 · 界面动画', kind:'look' }] },
+    { g:'关于', items:[
+      { ic:['blue', 'info'], t:'版本', s:'v5.10.5 · versionCode 5100005', kind:'val', v:'5.10.5' },
+      { ic:['gray', 'cpu'], t:'内核 / 设备', s:'RMX5010 · SukiSU Ultra', kind:'val', v:'6.6.102' },
+      { ic:['green', 'doc'], t:'更新日志', s:'查看完整变更记录', kind:'toast', msg:'更新日志在正式版中查看', hint:['查看', ''] } ] }
+  ];
+  function setItem(it, key) {
+    var head = gi(it.ic[0], it.ic[1]) + '<span class="tx"><div class="t">' + it.t + '</div><div class="s">' + it.s + '</div></span>';
+    var foldable = { logs:1, fold:1, 'toggle-fold':1, seg:1, look:1 }[it.kind];
+    if (!foldable) {
+      if (it.kind === 'toggle') return '<div class="row">' + head + toggle(it.on, 'aria-label="' + it.t + '"') + '</div>';
+      if (it.kind === 'val') return '<div class="row">' + head + '<span class="v ' + (it.cls || '') + '">' + it.v + '</span></div>';
+      var hint = it.hint ? '<span class="hint-a ' + it.hint[1] + '">' + it.hint[0] + '</span>' : ico('right', 'chev');
+      return '<button class="row" data-sk="' + key + '">' + head + hint + '</button>';
+    }
+    var body = '';
+    if (it.kind === 'logs') body = '<div class="chips">' + Object.keys(LOGS).map(function (f) { return '<button class="chip press' + (f === state.logFile ? ' on' : '') + '" data-log="' + f + '">' + f + '</button>'; }).join('') + '</div><div class="logv" id="logv">' + logHtml() + '</div>';
+    if (it.fields) body = '<div class="grid2">' + it.fields.map(function (f) { return '<label class="field">' + f[0] + '<span class="box"><input type="number" value="' + f[1] + '"><span class="u">' + f[2] + '</span></span></label>'; }).join('') + '</div>' + (it.note ? '<div class="fresh" style="text-align:left;margin:0">' + it.note + '</div>' : '') + '<button class="btn pri press" data-toast="' + it.t + ' 已保存">保存</button>';
+    if (it.chips) body = '<div class="chips">' + it.chips.map(function (c) { return '<span class="chip">' + c + '</span>'; }).join('') + '<button class="chip press" data-toast="正式版里从已安装应用中挑选">＋ 添加</button></div>';
+    if (it.list) body = it.list.map(function (l) { return '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">' + l[0] + '</div><div class="s">' + l[1] + '</div></span><button class="hint-a danger" data-toast="已撤销 ' + l[0] + ' 的授权">撤销</button></div>'; }).join('');
+    if (it.kind === 'seg') body = seg('rmode', [['live', '实时'], ['balanced', '均衡'], ['saver', '省电']], state.refreshMode);
+    if (it.kind === 'look') body = '<div class="theme-pick">' + [['system', '跟随系统', 'linear-gradient(135deg,#F5F5F7 50%,#1c1c1e 50%)'], ['light', '浅色', '#F5F5F7'], ['dark', '深色', '#1c1c1e']].map(function (t) {
+        return '<button class="press' + (state.theme === t[0] ? ' on' : '') + '" data-theme-pick="' + t[0] + '"><span class="sw" style="background:' + t[2] + '"></span>' + t[1] + '</button>'; }).join('') + '</div>' +
+      '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">界面动画</div><div class="s">弹簧切页、列表浮现、按压回弹</div></span>' + toggle(state.motion, 'data-motion aria-label="界面动画"') + '</div>';
+    var ctrl = it.kind === 'toggle-fold' ? toggle(it.on, 'aria-label="' + it.t + '"') : '';
+    return '<div class="row-wrap' + (state.open['s' + key] ? ' open' : '') + '" data-fold="s' + key + '"><div class="row-h" style="padding:12px 14px"><button data-act="sfold" style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left">' + head + '</button>' + ctrl +
+      '<button data-act="sfold" aria-label="展开" style="padding:6px">' + ico('chev', 'chev') + '</button></div><div class="fold"><div><div class="fold-in set-body">' + body + '</div></div></div></div>';
+  }
+  function logHtml() { return LOGS[state.logFile].map(function (l, i) { return '<div class="' + l[0] + '"><span class="t">10:' + String(2 + i).padStart(2, '0') + ':1' + i + '</span> [' + l[0] + '] ' + l[1] + ': ' + l[2] + '</div>'; }).join(''); }
+  function renderSettings(anim1) {
+    var groups = SET.map(function (g, i) {
+      return '<div><div class="sec" style="padding-bottom:8px"><span>' + g.g + '</span></div><div class="glass rows">' + g.items.map(function (it, ii) { return setItem(it, i + '-' + ii); }).join('') + '</div></div>';
+    });
+    var half = 7;
+    var h = '<div class="wrap">' + (wide() ? '<div class="cols"><div>' + groups.slice(0, half).join('') + '</div><div>' + groups.slice(half).join('') + '</div></div>' : groups.join('')) +
+      '<div class="foot">设计预览 · 所有数据均为示例</div></div>';
+    var p = $('#p-settings'); p.innerHTML = h; placeSegs(p);
+    if (anim1) { if (wide()) $$('.cols>div', p).forEach(stagger); else stagger($('.wrap', p)); }
+  }
+
+  /* ═════════════ 页面切换(方向感知 + 弹簧) ═════════════ */
+  var ORDER = ['devices', 'apps', 'stats', 'settings'];
+  var RENDER = { devices:renderDevices, apps:renderApps, stats:renderStats, settings:renderSettings };
+  function afterShow(name) {
+    if (name === 'stats' && state.aseg === 'stats') countUp();
+    if (name === 'devices') heroNums(true);
+  }
+  function countUp() {
+    $$('#p-stats [data-count]').forEach(function (el) { tween(el, +el.getAttribute('data-count'), 0); });
+    $$('#p-stats [data-to]').forEach(function (el) { tween(el, +el.getAttribute('data-to'), 2); });
+  }
+  var leaving = null;
+  function go(name) {
+    if (name === state.page) { $('#p-' + name).scrollTo({ top:0, behavior:'smooth' }); return; }
+    var from = $('#p-' + state.page), to = $('#p-' + name), dir = ORDER.indexOf(name) > ORDER.indexOf(state.page) ? 1 : -1;
+    if (leaving) { leaving.el.classList.remove('on'); if (leaving.a) leaving.a.cancel(); leaving = null; }
+    state.page = name; closeDD(); syncTab(name);
+    to.classList.add('on');
+    RENDER[name](true);
+    var a = anim(from, [{ transform:'none', opacity:1 }, { transform:'translateX(' + (-dir * 18) + '%) scale(.95)', opacity:0 }], { duration:380, easing:EASE.soft, fill:'forwards' });
+    anim(to, [{ transform:'translateX(' + (dir * 30) + '%) scale(.97)', opacity:0 }, { transform:'none', opacity:1 }], { duration:800 });
+    leaving = { el:from, a:a };
+    function done() { if (leaving && leaving.el === from) { from.classList.remove('on'); if (a) a.cancel(); leaving = null; } }
+    if (a) a.onfinish = done; else done();
+    afterShow(name);
+    try { localStorage.setItem('hnc3-page', name); } catch (_) {}
+  }
+
+  /* ═════════════ 标签栏: 液态玻璃透镜 + 弹簧物理 ═════════════ */
+  var TABS = [['devices', '设备', 'dev'], ['apps', '应用', 'apps'], ['stats', '分析', 'stats'], ['settings', '设置', 'gear']];
+  var tabsHtml = TABS.map(function (t) { return '<div class="tab" data-tab="' + t[0] + '">' + ico(t[2]) + t[1] + (t[0] === 'apps' ? '<span class="dot"></span>' : '') + '</div>'; }).join('');
+  $('#tabs').innerHTML = tabsHtml; $('#lens-in').innerHTML = tabsHtml;
+  var bar = $('#tabbar'), lens = $('#lens'), lensIn = $('#lens-in');
+  var S = { x:0, v:0, tx:0, s:1, sv:0, ts:1, drag:false, raf:0, last:0, sx:0, gx:0 };
+  var tabsEl = $('#tabs');
+  function slotW() { return tabsEl.clientWidth / TABS.length; }
+  function layoutLens() { var w = slotW(); lens.style.width = w + 'px'; lensIn.style.width = (w * TABS.length) + 'px'; }
+  function paint() {
+    var w = slotW(), sp = Math.min(Math.abs(S.v) / 2600, .22);
+    var sxs = S.s * (1 + sp), sys = S.s * (1 - sp * .55), mag = 1 + (S.s - 1) * .8;
+    lens.style.transform = 'translateX(' + S.x.toFixed(2) + 'px) scale(' + sxs.toFixed(4) + ',' + sys.toFixed(4) + ')';
+    // 透镜里的"放大层": 与底层标签对齐, 抵消透镜自身的缩放, 再按 mag 放大 —— 像隔着一颗水珠看图标
+    var cx = S.x + w / 2;
+    lensIn.style.transformOrigin = cx.toFixed(1) + 'px 50%';
+    lensIn.style.transform = 'translateX(' + (-S.x).toFixed(2) + 'px) scale(' + (mag / sxs).toFixed(4) + ',' + (mag / sys).toFixed(4) + ')';
+    tabsEl.style.setProperty('--ml', (cx - w * sxs / 2 + 3).toFixed(1) + 'px');
+    tabsEl.style.setProperty('--mr', (cx + w * sxs / 2 - 3).toFixed(1) + 'px');
+  }
+  function stepSpring(t) {
+    var dt = S.last ? Math.min(.032, (t - S.last) / 1000) : .016; S.last = t;
+    var k = S.drag ? 900 : 360, c = S.drag ? 52 : 19;   // 拖动时紧跟手指; 松手后欠阻尼, 冲过头再弹回来
+    var n = 4, h = dt / n;
+    for (var i = 0; i < n; i++) {
+      S.v += (-k * (S.x - S.tx) - c * S.v) * h; S.x += S.v * h;
+      S.sv += (-560 * (S.s - S.ts) - 17 * S.sv) * h; S.s += S.sv * h;
+    }
+    paint();
+    if (!S.drag && Math.abs(S.x - S.tx) < .3 && Math.abs(S.v) < 4 && Math.abs(S.s - S.ts) < .002 && Math.abs(S.sv) < .02) {
+      S.x = S.tx; S.v = 0; S.s = S.ts; S.sv = 0; paint(); S.raf = 0; S.last = 0; return;
+    }
+    S.raf = requestAnimationFrame(stepSpring);
+  }
+  function kick() { if (!S.raf) { S.last = 0; S.raf = requestAnimationFrame(stepSpring); } }
+  function idxAt(x) { return Math.max(0, Math.min(TABS.length - 1, Math.round(x / slotW()))); }
+  function localX(e) { var r = bar.getBoundingClientRect(); return e.clientX - r.left - 6 - slotW() / 2; }
+  bar.addEventListener('pointerdown', function (e) {
+    try { bar.setPointerCapture(e.pointerId); } catch (_) {}
+    var x = localX(e), w = slotW();
+    S.drag = true; S.sx = e.clientX;
+    S.gx = Math.abs(x - S.x) < w * .5 ? S.x - x : 0;   // 按在透镜上 → 抓住它; 按在别处 → 透镜先弹过去
+    S.tx = Math.max(0, Math.min((TABS.length - 1) * w, x + S.gx)); S.ts = 1.18;
+    bar.classList.add('drag');
+    kick();
+  });
+  bar.addEventListener('pointermove', function (e) {
+    if (!S.drag) return;
+    var w = slotW(), raw = localX(e) + S.gx, max = (TABS.length - 1) * w;
+    if (raw < 0) raw = -Math.pow(-raw, .7); else if (raw > max) raw = max + Math.pow(raw - max, .7);   // 边缘橡皮筋
+    var prev = idxAt(S.tx); S.tx = raw;
+    if (idxAt(raw) !== prev && navigator.vibrate) try { navigator.vibrate(6); } catch (_) {}
+    kick();
+  });
+  function release() {
+    if (!S.drag) return;
+    S.drag = false; bar.classList.remove('drag');
+    var i = idxAt(S.tx + S.v * .05);    // 带一点惯性
+    S.tx = i * slotW(); S.ts = 1; S.sv -= 2.6;   // 松手的一瞬间"啵"地缩一下再弹回
+    kick(); go(TABS[i][0]);
+  }
+  bar.addEventListener('pointerup', release);
+  bar.addEventListener('pointercancel', release);
+  function syncTab(name, instant) { S.tx = ORDER.indexOf(name) * slotW(); if (instant) { S.x = S.tx; paint(); } else kick(); }
+
+  /* ═════════════ 下拉菜单 / 弹层 ═════════════ */
+  function closeDD() { $$('.dd.open').forEach(function (d) { d.classList.remove('open'); }); }
+  function sheet(html) { $('#sheet-body').innerHTML = html; $('#scrim').classList.add('show'); $('#sheet').classList.add('show'); }
+  var pairT;
+  function closeSheet() { $('#scrim').classList.remove('show'); $('#sheet').classList.remove('show'); clearInterval(pairT); }
+  $('#scrim').addEventListener('click', closeSheet);
+  document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeSheet(); closeDD(); } });
+  function confirmSheet(title, desc, okText, fn) {
+    sheet('<h3>' + title + '</h3><div class="sub">' + desc + '</div><div class="btns"><button class="btn sec press" data-close>取消</button><button class="btn dan press" id="ok">' + okText + '</button></div>');
+    $('#ok').onclick = function () { closeSheet(); fn(); };
+  }
+  var TPL = [['游戏低延迟', '不限速 · 关闭延迟', 0, 0, 0], ['追剧不卡', '下行 3 MB/s · 上行 0.5 MB/s', 3, .5, 0], ['访客限流', '下行 1 MB/s · 上行 0.25 MB/s · 延迟 50ms', 1, .25, 50]];
+  function tplSheet(targets) {
+    sheet('<h3>限速模板</h3><div class="sub">应用到 ' + targets.length + ' 台设备</div><div class="rows">' + TPL.map(function (t, i) {
+      return '<button class="row" data-tpl="' + i + '">' + gi(['green', 'blue', 'orange'][i], 'star') + '<span class="tx"><div class="t">' + t[0] + '</div><div class="s">' + t[1] + '</div></span>' + ico('right', 'chev') + '</button>'; }).join('') + '</div>');
+    $$('#sheet [data-tpl]').forEach(function (b) { b.onclick = function () { var t = TPL[+b.getAttribute('data-tpl')];
+      targets.forEach(function (d) { d.down = t[2]; d.up = t[3]; d.delay = t[4]; }); closeSheet(); renderDevices(false); toast('模板「' + t[0] + '」已应用到 ' + targets.length + ' 台'); }; });
+  }
+  function pairCode() {
+    var c = String(100000 + Math.floor(Math.random() * 900000)), left = 120;
+    sheet('<h3>配对码</h3><div class="sub">在新设备的浏览器里输入</div><div class="code">' + c.slice(0, 3) + ' ' + c.slice(3) + '</div><div class="sub" id="pl">2:00 后失效</div><button class="btn sec wide press" data-close>完成</button>');
+    clearInterval(pairT);
+    pairT = setInterval(function () { left--; var el = $('#pl'); if (!el || left < 0) return clearInterval(pairT); el.textContent = Math.floor(left / 60) + ':' + String(left % 60).padStart(2, '0') + ' 后失效'; }, 1000);
+  }
+  $('#sheet').addEventListener('click', function (e) { if (e.target.closest('[data-close]')) closeSheet(); });
+  $('#bell').addEventListener('click', function () {
+    sheet('<h3>告警</h3><div class="sub">最近 24 小时</div>' + alerts.map(function (a) { return '<div class="al"><i style="background:' + a.c + '"></i><div><div style="font-weight:700;font-size:14px">' + a.t + '</div><div class="s">' + a.s + '</div></div></div>'; }).join('') +
+      '<button class="btn sec wide press" data-close style="margin-top:10px">全部已读</button>');
+    $('#bell-n').hidden = true;
+  });
+  $('#theme-btn').addEventListener('click', function (e) {
+    var dark = document.documentElement.getAttribute('data-theme') === 'dark' || (!document.documentElement.getAttribute('data-theme') && matchMedia('(prefers-color-scheme: dark)').matches);
+    setTheme(dark ? 'light' : 'dark', e.clientX, e.clientY);
+  });
+  function setTheme(t, x, y) {
+    state.theme = t; try { localStorage.setItem('hnc3-theme', t); } catch (_) {}
+    if (document.startViewTransition && state.motion && !calm && x != null) {
+      var r = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
+      var vt = document.startViewTransition(applyTheme);
+      vt.ready.then(function () {
+        document.documentElement.animate({ clipPath:['circle(0px at ' + x + 'px ' + y + 'px)', 'circle(' + r + 'px at ' + x + 'px ' + y + 'px)'] },
+          { duration:600, easing:'cubic-bezier(.4,0,.2,1)', fill:'forwards', pseudoElement:'::view-transition-new(root)' });
+      }).catch(function () {});
+      // 保险: 万一某些 WebView 卡住, 1.2 秒后强制结束过渡
+      setTimeout(function () { try { vt.skipTransition(); } catch (_) {} }, 1200);
+    } else applyTheme();
+    $$('[data-theme-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-theme-pick') === t); });
+  }
+
+  /* ═════════════ 事件委托 ═════════════ */
+  function foldToggle(el, key) {
+    var on = !el.classList.contains('open'); el.classList.toggle('open', on); state.open[key] = on;
+    if (on) { placeSegs(el); anim(el, [{ transform:'scale(.985)' }, { transform:'none' }], { duration:650 }); }
+  }
+  document.addEventListener('click', function (e) {
+    var t = e.target, q;
+    if (!t.closest('.dd')) closeDD();
+    if ((q = t.closest('.seg button'))) {
+      var sg = q.parentNode, k = sg.getAttribute('data-seg'), v = q.getAttribute('data-v');
+      $$('button', sg).forEach(function (b) { b.classList.toggle('on', b === q); });
+      sg.classList.remove('jelly'); void sg.offsetWidth; sg.classList.add('jelly'); placeSegs(sg.parentNode);
+      if (k === 'apps-sub') { state.appsSub = v; var bx = $('#apps-sub'); bx.innerHTML = appsSub(); placeSegs(bx); stagger(bx); }
+      else if (k === 'aseg') { state.aseg = v; var ab = $('#aseg-body'); ab.innerHTML = v === 'stats' ? statsBody() : dpiBody(); placeSegs(ab); stagger(ab); if (v === 'stats') { renderBars(); countUp(); } else fillFeed(); }
+      else if (k === 'range') { state.range = v; renderBars(); }
+      else if (k === 'rmode') { state.refreshMode = v; toast('刷新模式：' + q.textContent); }
+      return;
+    }
+    if ((q = t.closest('.toggle'))) {
+      var nv = q.getAttribute('aria-checked') !== 'true'; q.setAttribute('aria-checked', nv);
+      if (q.hasAttribute('data-motion')) { state.motion = nv; applyTheme(); try { localStorage.setItem('hnc3-motion', nv ? '1' : '0'); } catch (_) {} }
+      if (q.getAttribute('data-act') === 'whitelist') state.whitelist = nv;
+      toast((q.getAttribute('aria-label') || '') + (nv ? ' 已开启' : ' 已关闭'));
+      return;
+    }
+    if ((q = t.closest('[data-filter]'))) { state.filter = q.getAttribute('data-filter'); closeDD(); var fb = $('#p-devices .dd-btn span'); fb.textContent = q.firstChild.textContent; $$('[data-filter]').forEach(function (b) { b.classList.toggle('on', b === q); }); $('#dev-list').innerHTML = devListHtml(); placeSegs($('#dev-list')); stagger($('#dev-list')); return; }
+    if ((q = t.closest('[data-src]'))) { state.src = q.getAttribute('data-src'); closeDD(); $('#src-hint').textContent = srcHint(); $('#src-lb').textContent = SRC_LB[state.src]; $$('[data-src]').forEach(function (b) { b.classList.toggle('on', b === q); }); renderBars(); toast('统计来源：' + q.firstChild.textContent); return; }
+    if ((q = t.closest('[data-iface]'))) { state.iface = q.getAttribute('data-iface'); $$('[data-iface]').forEach(function (b) { b.classList.toggle('on', b === q); }); $('.ahero .foot2').lastChild.textContent = 'dpid 已上报 · ' + state.iface + ' · 今日本机 ' + (sum(apps, function (a) { return a.mb; }) / 1024).toFixed(2) + ' GB'; return; }
+    if ((q = t.closest('[data-sni]'))) { var row = q.closest('.sni-row'); var ra = anim(row, [{ opacity:1, transform:'none' }, { opacity:0, transform:'translateX(50px) scale(.9)' }], { duration:380, easing:EASE.soft, fill:'forwards' }); setTimeout(function () { row.remove(); }, ra ? 360 : 0); toast('已加入规则库候选'); return; }
+    if ((q = t.closest('[data-range-q]'))) { $$('[data-range-q]').forEach(function (b) { b.classList.toggle('on', b === q); }); return; }
+    if ((q = t.closest('[data-log]'))) { state.logFile = q.getAttribute('data-log'); $$('[data-log]').forEach(function (b) { b.classList.toggle('on', b === q); }); $('#logv').innerHTML = logHtml(); stagger($('#logv')); return; }
+    if ((q = t.closest('[data-theme-pick]'))) { var r = q.getBoundingClientRect(); setTheme(q.getAttribute('data-theme-pick'), r.left + r.width / 2, r.top + r.height / 2); return; }
+    if ((q = t.closest('[data-toast]'))) { toast(q.getAttribute('data-toast')); return; }
+    if ((q = t.closest('[data-confirm]'))) { var nm = q.getAttribute('data-confirm'); confirmSheet(nm, '此操作不可撤销', '确定', function () { toast(nm + ' 已完成'); }); return; }
+    if ((q = t.closest('[data-sk]'))) {
+      var p = q.getAttribute('data-sk').split('-'), it = SET[+p[0]].items[+p[1]];
+      if (it.id === 'pair') pairCode(); else if (it.kind === 'confirm') confirmSheet(it.t, it.s, it.hint[0], function () { toast(it.t + '：预览版不会真的执行'); }); else toast(it.msg);
+      return;
+    }
+    var a = t.closest('[data-act]'); if (!a) return;
+    var act = a.getAttribute('data-act');
+    var card = a.closest('[data-dev]'), side = a.closest('[data-side]');
+    var d = card ? byId(devices, card.getAttribute('data-dev')) : side ? byId(devices, side.getAttribute('data-side')) : null;
+    var ctx = card || side;
+    switch (act) {
+      case 'dd': var dd = a.closest('.dd'), was = dd.classList.contains('open'); closeDD(); dd.classList.toggle('open', !was); break;
+      case 'gops': foldToggle($('#gops'), 'gops'); break;
+      case 'detail': foldToggle($('#detail'), 'detail'); break;
+      case 'sfold': var w = a.closest('[data-fold]'); foldToggle(w, w.getAttribute('data-fold')); break;
+      case 'app-open': var aw = a.closest('[data-app]'); foldToggle(aw, 'app' + aw.getAttribute('data-app')); break;
+      case 'app-save': case 'app-clear':
+        var wrapA = a.closest('[data-app]'), ap = byId(apps, wrapA.getAttribute('data-app'));
+        ap.limit = act === 'app-clear' ? 0 : (parseFloat($('[data-f="app-limit"]', wrapA).value) || 0);
+        state.open['app' + ap.id] = false; $('#apps-sub').innerHTML = appsSub(); toast(ap.limit ? ap.name + ' 已限速 ' + ap.limit + ' MB/s' : ap.name + ' 不再限速'); break;
+      case 'export': toast('正在打包最近 1 小时的数据…'); setTimeout(function () { toast('导出完成 · 2.3 MB'); }, 1400); break;
+      case 'toggle-dev':
+        if (state.batch) {
+          if (state.picked[d.id]) delete state.picked[d.id]; else state.picked[d.id] = 1;
+          card.classList.toggle('picked', !!state.picked[d.id]); $('#picked-n').textContent = Object.keys(state.picked).length;
+          anim(card, [{ transform:'scale(.96)' }, { transform:'none' }], { duration:550 }); break;
+        }
+        if (wide()) { state.sel = d.id; $$('.dev.sel').forEach(function (x) { x.classList.remove('sel'); }); card.classList.add('sel'); $('#dev-side').innerHTML = devSide(); placeSegs($('#dev-side')); anim(card, [{ transform:'scale(.97)' }, { transform:'none' }], { duration:550 }); }
+        else { foldToggle(card, d.id); a.setAttribute('aria-expanded', !!state.open[d.id]); }
+        break;
+      case 'apply-limit': d.down = parseFloat($('[data-f="down"]', ctx).value) || 0; d.up = parseFloat($('[data-f="up"]', ctx).value) || 0; refreshDevCard(d); toast('已应用限速到 ' + d.name); break;
+      case 'clear-limit': d.down = d.up = 0; refreshDevCard(d); toast('已清除 ' + d.name + ' 的限速'); break;
+      case 'apply-delay': var on = $('[data-seg^="delay"] button.on', ctx); d.delay = on ? +on.getAttribute('data-v') : 0; d.jitter = +$('[data-f="jitter"]', ctx).value || 0; d.loss = +$('[data-f="loss"]', ctx).value || 0; refreshDevCard(d); toast(d.delay ? '已注入 ' + d.delay + 'ms 延迟' : '已关闭延迟'); break;
+      case 'clear-delay': d.delay = d.jitter = d.loss = 0; refreshDevCard(d); toast('已清除 ' + d.name + ' 的延迟'); break;
+      case 'unblock': d.status = 'online'; d.base = [.8e6, .1e6]; d.rx = d.base[0]; d.tx = d.base[1]; refreshDevCard(d); toast(d.name + ' 已解除封锁'); break;
+      case 'wl': d.wl = !d.wl; refreshDevCard(d); toast(d.wl ? d.name + ' 已加入白名单' : d.name + ' 已移出白名单'); break;
+      case 'rename':
+        sheet('<h3>重命名</h3><div class="sub mono">' + d.mac + '</div><label class="field"><span class="box"><input id="rn" value="' + esc(d.name) + '" maxlength="24" style="font-family:var(--font)"></span></label><div class="btns" style="margin-top:12px"><button class="btn sec press" data-close>取消</button><button class="btn pri press" id="rn-ok">保存</button></div>');
+        $('#rn-ok').onclick = function () { var v = $('#rn').value.trim(); if (v) { d.name = v; refreshDevCard(d); toast('已重命名为 ' + v); } closeSheet(); };
+        break;
+      case 'refresh': $('#dev-list').innerHTML = devListHtml(); stagger($('#dev-list')); toast('已刷新 · ' + online().length + ' 台在线'); break;
+      case 'clear-all': confirmSheet('清空所有规则', '移除全部限速、延迟、黑名单', '清空', function () { devices.forEach(function (x) { x.down = x.up = x.delay = 0; if (x.status === 'blocked') { x.status = 'online'; x.base = [.8e6, .1e6]; } }); renderDevices(false); toast('已清空所有规则'); }); break;
+      case 'clean-offline': confirmSheet('清理离线设备', '从 devices.json 移除 ' + devices.filter(function (x) { return x.status === 'offline'; }).length + ' 台离线设备', '清理', function () { devices = devices.filter(function (x) { return x.status !== 'offline'; }); renderDevices(false); toast('离线设备已清理'); }); break;
+      case 'release': confirmSheet('释放并重启资源', '会清掉 tc / iptables，随后自动拉起后端，期间热点短暂断流', '重启', function () { toast('预览版不会真的重启'); }); break;
+      case 'batch': state.batch = !state.batch; state.picked = {}; renderDevices(false); break;
+      case 'b-all': visibleDevs().forEach(function (x) { state.picked[x.id] = 1; }); renderDevices(false); break;
+      case 'b-none': state.picked = {}; renderDevices(false); break;
+      case 'tpl': tplSheet(online()); break;
+      case 'b-tpl': case 'b-clear': case 'b-cdelay': case 'b-block': case 'b-unblock':
+        var sel = devices.filter(function (x) { return state.picked[x.id]; });
+        if (!sel.length) { toast('先勾选设备'); break; }
+        if (act === 'b-tpl') { tplSheet(sel); break; }
+        sel.forEach(function (x) { if (act === 'b-clear') { x.down = x.up = 0; } if (act === 'b-cdelay') x.delay = 0; if (act === 'b-block') { x.status = 'blocked'; x.rx = x.tx = 0; } if (act === 'b-unblock' && x.status === 'blocked') { x.status = 'online'; x.base = [.8e6, .1e6]; } });
+        renderDevices(false); toast('已处理 ' + sel.length + ' 台设备'); break;
+    }
+  });
+  document.addEventListener('input', function (e) { if (e.target.id === 'q') { state.q = e.target.value; $('#dev-list').innerHTML = devListHtml(); placeSegs($('#dev-list')); } });
+  /* 柱子点选气泡 */
+  document.addEventListener('pointerdown', function (e) {
+    var bars = $('#bars'); if (!bars) return;
+    var col = e.target.closest('.bcol'), old = $('.btip', bars);
+    if (old) old.remove(); bars.classList.remove('picking'); $$('.bcol.pk', bars).forEach(function (c) { c.classList.remove('pk'); });
+    if (!col) return;
+    var i = +col.getAttribute('data-i'), p = DATA[state.range][i], lb = LABELS[state.range][i];
+    bars.classList.add('picking'); col.classList.add('pk');
+    var tip = document.createElement('div'); tip.className = 'btip';
+    tip.innerHTML = lb + (state.range === '24h' ? ':00' : '') + '<br><i style="background:var(--rx)"></i>下行 ' + p.d + ' GB<br><i style="background:var(--tx)"></i>上行 ' + p.u + ' GB';
+    var br = bars.getBoundingClientRect(), cr = col.getBoundingClientRect();
+    tip.style.left = Math.min(Math.max(cr.left - br.left + cr.width / 2, 64), br.width - 64) + 'px';
+    bars.appendChild(tip);
+  });
+  /* 长按封锁 */
+  var holdT;
+  document.addEventListener('pointerdown', function (e) {
+    var hb = e.target.closest('[data-act="hold"]'); if (!hb) return;
+    e.preventDefault(); hb.classList.add('run');
+    var box = hb.closest('[data-dev]') || hb.closest('[data-side]'), d = byId(devices, box.getAttribute('data-dev') || box.getAttribute('data-side'));
+    holdT = setTimeout(function () {
+      d.status = 'blocked'; d.rx = d.tx = 0; refreshDevCard(d); toast(d.name + ' 已封锁');
+      if (navigator.vibrate) try { navigator.vibrate(15); } catch (_) {}
+    }, 800);
+  });
+  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) { document.addEventListener(ev, function () { clearTimeout(holdT); $$('.hold.run').forEach(function (b) { b.classList.remove('run'); }); }, true); });
+
+  /* ═════════════ 实时刷新 ═════════════ */
+  function tick() {
+    online().forEach(function (d) {
+      var j = function (b) { return b * (.72 + rnd() * .56); };
+      d.rx = d.down ? Math.min(j(d.base[0]), d.down * 1e6 * .98) : j(d.base[0]);
+      d.tx = d.up ? Math.min(j(d.base[1]), d.up * 1e6 * .98) : j(d.base[1]);
+      var c = $('.dev[data-dev="' + d.id + '"]');
+      if (c && $('[data-rx]', c)) { $('[data-rx]', c).textContent = rate(d.rx).v; $('[data-tx]', c).textContent = rate(d.tx).v; }
+    });
+    state.spark.push(sum(online(), function (d) { return d.rx; })); if (state.spark.length > 30) state.spark.shift();
+    if (state.page === 'devices') { heroNums(false); drawSpark(); }
+    if (state.page === 'stats' && state.aseg === 'dpi') {
+      var line = feedLine(); state.feed.unshift(line); if (state.feed.length > 9) state.feed.pop();
+      var f = $('#feed'); if (f) { var div = document.createElement('div'); div.innerHTML = line; f.insertBefore(div, f.firstChild); while (f.children.length > 9) f.lastChild.remove(); }
+      var dn = $('#k-dns'); if (dn) dn.textContent = (18432 + Math.floor(performance.now() / 700)).toLocaleString();
+    }
+  }
+
+  /* ═════════════ 启动 ═════════════ */
+  for (var i = 0; i < 30; i++) state.spark.push(sum(online(), function (d) { return d.base[0]; }) * (.8 + rnd() * .4));
+  var saved = null; try { saved = localStorage.getItem('hnc3-page'); } catch (_) {}
+  if (saved && ORDER.indexOf(saved) >= 0) state.page = saved;
+  $$('.page').forEach(function (p) { p.classList.toggle('on', p.getAttribute('data-page') === state.page); });
+  if (wide()) state.sel = 'd1';
+  RENDER[state.page](true); afterShow(state.page);
+  layoutLens(); syncTab(state.page, true);
+  // 透镜边缘的真折射 + 色散: Hyalite by VII-Cae (MIT), https://github.com/VII-Cae/hyalite--liquid-glass
+  if (window.Hyalite) { try { Hyalite.attach(lens, { bevel:13, thickness:24, blur:.3, dispersion:2.6, shade:.28, rim:1.7, edge:0, sat:1.15 }); } catch (_) {} }
+  wideMQ.addEventListener('change', function () { if (wide() && !state.sel) state.sel = 'd1'; RENDER[state.page](false); });
+  addEventListener('resize', function () { layoutLens(); syncTab(state.page, true); placeSegs(document); drawSpark(); });
+  setInterval(tick, 2000);
+  window.__hnc = { go:go, S:S };   // 截图脚本用
+})();
+</script>
+</body>
+</html>

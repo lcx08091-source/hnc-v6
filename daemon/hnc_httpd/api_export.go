@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -76,12 +77,22 @@ func (s *server) exportsDir() string {
 	return filepath.Join(s.hncDir, "exports")
 }
 
+// exportMu v5.11: 导出串行化。包名精确到秒, 同一秒内两个并发导出会写同一个
+// <name>.zip.tmp → 两个 zip.Writer 交错写同一文件 → 包损坏; 且每次导出都要
+// 读几十 MB 的 JSONL, 并发只会放大 IO。忙时直接 409, 不排队。
+var exportMu sync.Mutex
+
 func (s *server) apiExport(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	if !exportMu.TryLock() {
+		writeJSON(w, http.StatusConflict, map[string]string{"error": "export already in progress"})
+		return
+	}
+	defer exportMu.Unlock()
 	var req exportRequest
 	_ = json.NewDecoder(r.Body).Decode(&req)
 	now := time.Now()
@@ -243,9 +254,11 @@ func (s *server) addDailyJSONLToZip(zw *zip.Writer, prefix, archiveDir string, f
 	if err != nil {
 		return trackInfo{Included: false}
 	}
-	loc := time.Local
-	fromDay := time.Unix(from, 0).In(loc).Format("20060102")
-	toDay := time.Unix(to, 0).In(loc).Format("20060102")
+	// v5.11: stats.* 按 UTC 日期命名、self_attrib.* 按本地日期命名(见
+	// dayFileKeys 注释), 只按本地日期比会漏掉窗口一端的 stats 文件。取本地
+	// 与 UTC 两种日期的并集区间, 最多多打包一个相邻日文件。
+	keys := dayFileKeys(time.Unix(from, 0), time.Unix(to, 0))
+	fromDay, toDay := keys[0], keys[len(keys)-1]
 
 	t := trackInfo{}
 	for _, e := range entries {
@@ -364,7 +377,7 @@ func (s *server) apiExportList(w http.ResponseWriter, r *http.Request) {
 	out := make([]item, 0, len(entries))
 	for _, e := range entries {
 		n := e.Name()
-		if !strings.HasSuffix(n, ".zip") {
+		if !isExportArchive(n) { // v5.11: 诊断包 hnc-debug-*.tar.gz 也在这里
 			continue
 		}
 		info, err := e.Info()
@@ -388,8 +401,8 @@ func (s *server) apiExportFile(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid name", http.StatusBadRequest)
 		return
 	}
-	if !strings.HasSuffix(name, ".zip") {
-		http.Error(w, "must end in .zip", http.StatusBadRequest)
+	if !isExportArchive(name) {
+		http.Error(w, "must end in .zip or .tar.gz", http.StatusBadRequest)
 		return
 	}
 	path := filepath.Join(s.exportsDir(), name)
@@ -397,7 +410,11 @@ func (s *server) apiExportFile(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
-	w.Header().Set("Content-Type", "application/zip")
+	ctype := "application/zip"
+	if strings.HasSuffix(name, ".tar.gz") {
+		ctype = "application/gzip"
+	}
+	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
 	http.ServeFile(w, r, path)
 }
@@ -418,4 +435,9 @@ func execCommand(name string, args ...string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// isExportArchive v5.11: /api/exports 可列出/下载的产物 —— 数据导出 .zip 与诊断包 .tar.gz。
+func isExportArchive(n string) bool {
+	return strings.HasSuffix(n, ".zip") || strings.HasSuffix(n, ".tar.gz")
 }

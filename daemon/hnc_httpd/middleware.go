@@ -90,6 +90,9 @@ func isPublicPath(p string) bool {
 		// 设备数据 —— 页面内容自己再调 API, 那些 API 各自鉴权)。
 		"/json-health.html",
 		"/ndpi-lab.html",
+		// v5.11: 新 WebUI 的静态依赖/旧版界面, 同样不含数据(数据接口各自鉴权)
+		"/hyalite.js",
+		"/classic.html",
 		"/api/pair/verify",
 		"/api/pairing/status",
 		"/api/health",
@@ -300,6 +303,12 @@ const mutatingMaxBytes = 16384
 // v5.8.2 (audit P2-2): centralised after the api_self toggles and /api/export
 // were found to skip these checks (no MaxBytesReader, no CSRF/content-type).
 func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
+	return s.requireMutationN(next, mutatingMaxBytes)
+}
+
+// requireMutationN v5.11: 同 requireMutation, 但可指定 body 上限(DPI 规则库
+// 导入需要 512KB, 其余端点仍是 16KB)。
+func (s *server) requireMutationN(next http.HandlerFunc, maxBytes int64) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.Header().Set("Allow", "POST")
@@ -314,9 +323,26 @@ func (s *server) requireMutation(next http.HandlerFunc) http.HandlerFunc {
 			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "csrf header missing"})
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, mutatingMaxBytes)
+		// v5.11: 与 /api/action 共用 per-身份 60 次/分钟写限流。此前这几个状态
+		// 变更端点(尤其 /api/export —— 每次生成多 MB zip 且从不清理)可被
+		// 已鉴权客户端无限调用, 刷满 /data。
+		if !s.checkWriteRate(writeRateKey(r)) {
+			writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "write rate limited (60/min)"})
+			return
+		}
+		r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
 		next(w, r)
 	}
+}
+
+// writeRateKey v5.11: 写限流计数 key, 与 handleAction 的约定一致:
+// cookie 身份 = "wr-<TokenID>", 本机 loopback secret 身份 = "wr-loopback"。
+// authMiddleware 已保证到这里的请求二者必居其一。
+func writeRateKey(r *http.Request) string {
+	if tid, ok := r.Context().Value(ctxKeyTokenID).(string); ok && tid != "" {
+		return "wr-" + tid
+	}
+	return "wr-loopback"
 }
 
 // hotfix17.8: 敏感只读接口。

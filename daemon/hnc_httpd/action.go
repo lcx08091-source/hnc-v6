@@ -295,6 +295,23 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionHotspotSave(hncDir, p)
 	case "whitelist_set":
 		return actionWhitelistSet(hncDir, p)
+	// v5.11: 新 WebUI(v6) 前后端对齐补齐的动作, 取代旧前端直接 shell 写状态
+	case "device_whitelist_set":
+		return actionDeviceWhitelistSet(hncDir, p)
+	case "qos_set":
+		return actionQosSet(hncDir, p)
+	case "template_set":
+		return actionTemplateSet(hncDir, p)
+	case "template_del":
+		return actionTemplateDel(hncDir, p)
+	case "cache_clear":
+		return actionCacheClear(hncDir)
+	case "debug_bundle":
+		return actionDebugBundle(hncDir)
+	case "dpi_rules_reset":
+		return actionDPIRulesReset(hncDir)
+	case "dpi_rules_update":
+		return actionDPIRulesUpdate(hncDir, p)
 	case "auth_required_set":
 		return actionAuthRequiredSet(hncDir, p)
 	case "remote_enabled_set":
@@ -581,6 +598,12 @@ func validateRate(r string) error {
 			break
 		}
 	}
+	// v5.11: 乘法前先卡上界。num 来自 Atoi(最大 9.2e18), 直接 num*1000 会
+	// int64 溢出回绕, 可构造 "<19 位数>mbit" 使回绕值落在 [64, 10Gbit] 内骗过
+	// 下面的范围检查, 而 rateToMbpsStr 对 mbit 原样返回那串 19 位数字传给 shell。
+	if num > maxRateKbit {
+		return fmt.Errorf("maximum rate is %dkbit (~10 Gbit)", maxRateKbit)
+	}
 	var kbit int
 	switch unit {
 	case "kbit":
@@ -602,6 +625,22 @@ func validateRate(r string) error {
 	return nil
 }
 
+// execWaitDelay v5.11: 子进程被 ctx 超时杀掉后, 最多再等多久让 I/O 管道收尾。
+//
+// 原因: exec.CommandContext 超时只 kill 直接子进程(sh / 脚本解释器), 脚本
+// fork 出的孙进程(tc / iptables / sleep / cmd wifi …)继承了 stdout 管道,
+// CombinedOutput 的 Wait 会一直等到管道 EOF —— 超时形同虚设。handleAction
+// 持 s.actionMu 调用 runBin, 一个卡住的孙进程就能让之后所有 /api/action 永久
+// 排队。设置 Cmd.WaitDelay(Go ≥1.20)后, 超时再过 execWaitDelay 强制关闭管道
+// 返回, 孙进程自生自灭, 锁得以释放。
+const execWaitDelay = 2 * time.Second
+
+// hardenCmd 给 exec.Cmd 统一挂上 WaitDelay(见 execWaitDelay)。
+func hardenCmd(cmd *exec.Cmd) *exec.Cmd {
+	cmd.WaitDelay = execWaitDelay
+	return cmd
+}
+
 // runExe execs a binary helper directly from <hncDir>/bin/<name>.
 // Do not route ELF helpers through "sh"; Android will report syntax/ELF errors
 // and callers may silently lose important side effects such as offload notify.
@@ -609,7 +648,7 @@ func runExe(hncDir, name string, args ...string) (int, string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	path := filepath.Join(hncDir, "bin", name)
-	cmd := exec.CommandContext(ctx, path, args...)
+	cmd := hardenCmd(exec.CommandContext(ctx, path, args...))
 	cmd.Env = []string{
 		"HNC_DIR=" + hncDir,
 		"HNC=" + hncDir,
@@ -617,11 +656,13 @@ func runExe(hncDir, name string, args ...string) (int, string) {
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			return ee.ExitCode(), string(out)
-		}
+		// v5.11: 先判超时 —— 被 ctx kill 的进程同样返回 *ExitError(ExitCode -1),
+		// 旧顺序让 "timeout after 5s" 分支永远到不了, 调用方只看到 rc=-1。
 		if ctx.Err() == context.DeadlineExceeded {
 			return 124, "timeout after 5s"
+		}
+		if ee, ok := err.(*exec.ExitError); ok {
+			return ee.ExitCode(), string(out)
 		}
 		return -1, err.Error() + "\n" + string(out)
 	}
@@ -641,11 +682,16 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 		timeoutSec = 30
 	case "dpi_rebind.sh":
 		timeoutSec = 30
+	// v5.11: 新 WebUI 接入的慢脚本
+	case "debug_bundle.sh", "dpi_rules_update.sh":
+		timeoutSec = 90
+	case "whitelist_sync.sh", "dpi_rules_import.sh":
+		timeoutSec = 30
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
 	cmdArgs := append([]string{hncDir + "/bin/" + script}, args...)
-	cmd := exec.CommandContext(ctx, "sh", cmdArgs...)
+	cmd := hardenCmd(exec.CommandContext(ctx, "sh", cmdArgs...)) // v5.11: WaitDelay, 见 execWaitDelay
 	cmd.Env = []string{
 		"HNC_DIR=" + hncDir,
 		"HNC=" + hncDir, // rc3: json_set.sh / 其他脚本用 $HNC 不是 $HNC_DIR
@@ -654,10 +700,12 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 	out, err := cmd.CombinedOutput()
 	rc := 0
 	if err != nil {
-		if ee, ok := err.(*exec.ExitError); ok {
-			rc = ee.ExitCode()
-		} else if ctx.Err() == context.DeadlineExceeded {
+		// v5.11: 先判超时(同 runExe): 被 kill 的 sh 也是 *ExitError, 旧顺序下
+		// 超时只会得到 rc=-1, "timeout after Ns" 分支是死代码。
+		if ctx.Err() == context.DeadlineExceeded {
 			return 124, "timeout after " + strconv.Itoa(timeoutSec) + "s"
+		} else if ee, ok := err.(*exec.ExitError); ok {
+			rc = ee.ExitCode()
 		} else {
 			rc = -1
 		}
@@ -749,7 +797,7 @@ func actionClsactCheck(hncDir string) actionResp {
 	// ctl check 输出 {"iface":..,"ok":..,"qdisc":..,"bpf_filter":..,"map":..}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "check", iface)
+	cmd := hardenCmd(exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "check", iface)) // v5.11: WaitDelay
 	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
 	out, _ := cmd.CombinedOutput()
 	s := string(out)
@@ -760,7 +808,7 @@ func actionClsactCheck(hncDir string) actionResp {
 	// watchdog 进程态(脚本自身每 10s 自愈内核态, 进程在即有人管)
 	ctx3, cancel3 := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel3()
-	cmd3 := exec.CommandContext(ctx3, "sh", "-c", "pgrep -f hnc_clsact_watchdog")
+	cmd3 := hardenCmd(exec.CommandContext(ctx3, "sh", "-c", "pgrep -f hnc_clsact_watchdog")) // v5.11: WaitDelay
 	cmd3.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
 	wdOut, _ := cmd3.CombinedOutput()
 	watchdogRunning := len(strings.TrimSpace(string(wdOut))) > 0
@@ -817,7 +865,7 @@ func actionClsactEnabledSet(hncDir string, p map[string]string) actionResp {
 	if iface != "" {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "uninstall", iface)
+		cmd := hardenCmd(exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "uninstall", iface)) // v5.11: WaitDelay
 		cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
 		_ = cmd.Run()
 	}

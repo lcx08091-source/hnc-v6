@@ -24,6 +24,15 @@ LOCKDIR=$HNC/run/json_doctor.lock
 
 MANAGED_FILES="rules.json device_names.json templates.json remote_tokens.json tokens.json devices.json"
 RESTORE_FILES="rules.json device_names.json templates.json remote_tokens.json"
+# v5.11: 只有 rules.json 必须存在。templates.json(没建过模板)、remote_tokens.json
+# (没配对过)、tokens.json(历史文件名, 新装机永远没有)不存在是常态; 旧逻辑把
+# "missing" 也计入 bad, 于是 status 在几乎所有机器上恒为 degraded(rc=1, diag.sh 恒报
+# JSON 健康告警), repair 也恒以 failed>0 退出。缺失的可选文件现在只报告不计坏。
+REQUIRED_FILES="rules.json"
+is_required() {
+    case " $REQUIRED_FILES " in *" $1 "*) return 0 ;; esac
+    return 1
+}
 
 mkdir -p "$RUN_DIR" "$DATA_DIR" 2>/dev/null || true
 
@@ -82,8 +91,12 @@ restore_one() {
     bak=$(latest_valid_backup "$base") || { echo "json_doctor: no valid backup found for $base" >&2; return 1; }
     target="$DATA_DIR/$base"
     safe_backup_current "$target"
-    cp -p "$bak" "$target" || return 1
-    chmod 600 "$target" 2>/dev/null || true
+    # v5.11: 旧实现 `cp -p "$bak" "$target"` 就地覆盖, httpd/tc_manager 此刻可能读到
+    # 半个文件。改为先拷到同目录临时文件再 mv 原子替换。
+    rtmp="$target.restore.$$"
+    cp -p "$bak" "$rtmp" 2>/dev/null || { rm -f "$rtmp"; return 1; }
+    chmod 600 "$rtmp" 2>/dev/null || true
+    mv -f "$rtmp" "$target" || { rm -f "$rtmp"; return 1; }
     validate_json "$target"
     rc=$?
     [ "$rc" = "0" ] || { echo "json_doctor: restored file still invalid: $base" >&2; return 1; }
@@ -122,7 +135,9 @@ write_reports() {
         validate_json "$f"
         rc=$?
         st=$(status_word "$rc")
-        [ "$rc" = "0" ] || bad=$((bad + 1))
+        if [ "$rc" != "0" ]; then
+            { [ "$rc" = "2" ] && ! is_required "$base"; } || bad=$((bad + 1))
+        fi
         checked=$((checked + 1))
         size=0; mtime=""
         [ -f "$f" ] && size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
@@ -177,6 +192,8 @@ repair_all() {
         validate_json "$f"
         rc=$?
         [ "$rc" = "0" ] && continue
+        # 可选文件不存在不是损坏, 不去"恢复"(否则会凭空复活用户已删掉的文件)
+        [ "$rc" = "2" ] && ! is_required "$base" && continue
         echo "json_doctor: $base is $(status_word "$rc"), attempting restore" >&2
         restore_one "$base"
         r=$?
@@ -204,6 +221,43 @@ acquire_lock() {
 
 release_lock() { rm -rf "$LOCKDIR" 2>/dev/null || true; }
 
+# v5.11: restore/repair 改写的是 rules.json 等活文件, 但只持有 json_doctor 自己的锁,
+# 与 json_set.sh / hnc_json 写者(共用 $HNC/run/json.lock)互不见锁: 恢复可能被并发写
+# 覆盖, 或覆盖掉刚写入的更新。这里同时持有 json.lock(与 json_set.sh 同协议: mkdir +
+# pid, 持锁进程已死才回收; 不写 ts, hnc_json 不会按年龄误拆)。
+JSON_LOCKDIR=$HNC/run/json.lock
+JSON_LOCK_HELD=0
+acquire_json_lock() {
+    i=0
+    while ! mkdir "$JSON_LOCKDIR" 2>/dev/null; do
+        i=$((i + 1))
+        [ "$i" -gt 50 ] && return 1
+        oldpid=$(cat "$JSON_LOCKDIR/pid" 2>/dev/null)
+        if [ -n "$oldpid" ] && ! kill -0 "$oldpid" 2>/dev/null; then
+            rm -rf "$JSON_LOCKDIR" 2>/dev/null
+            continue
+        fi
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    echo $$ > "$JSON_LOCKDIR/pid" 2>/dev/null || true
+    JSON_LOCK_HELD=1
+    return 0
+}
+release_all_locks() {
+    if [ "$JSON_LOCK_HELD" = "1" ]; then
+        rm -rf "$JSON_LOCKDIR" 2>/dev/null || true
+        JSON_LOCK_HELD=0
+    fi
+    release_lock
+}
+lock_for_write() {
+    acquire_lock || return 1
+    trap 'release_all_locks' EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    acquire_json_lock || { echo "json_doctor: json.lock busy (writer active)" >&2; return 1; }
+}
+
 CMD=${1:-status}
 case "$CMD" in
     status|check)
@@ -213,18 +267,15 @@ case "$CMD" in
         list_backups
         ;;
     restore)
-        acquire_lock || exit 1
+        # 放锁统一交给 lock_for_write 设的 EXIT trap(只放一次, 不会误删别人随后拿到的锁)
+        lock_for_write || exit 1
         restore_one "$2"
-        rc=$?
-        release_lock
-        exit "$rc"
+        exit $?
         ;;
     repair)
-        acquire_lock || exit 1
+        lock_for_write || exit 1
         repair_all
-        rc=$?
-        release_lock
-        exit "$rc"
+        exit $?
         ;;
     *)
         echo "Usage: $0 [status|list|restore <file>|repair]" >&2

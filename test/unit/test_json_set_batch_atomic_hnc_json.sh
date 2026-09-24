@@ -24,5 +24,16 @@ echo "$NICK" | grep -q 'Phone, with } brace'
 echo "$NOTE" | grep -q 'quote'
 [ "$DN" = "1.5" ]
 [ "$LE" = "true" ]
+
+# v5.11 回归: 值里含换行。旧实现把 k/v/type 按行写临时文件再读回, 换行会把三元组
+# 切错位(这里会变成 7 个参数 → set-device-batch 报错; 构造得巧还能写错字段)。
+NL_VAL=$(printf 'x\ny')
+sh "$DIR/bin/json_set_batch.sh" device "$MAC" note "$NL_VAL" down_mbps 2 || {
+  echo "[FAIL] json_set_batch rejected a value containing newline" >&2; exit 1; }
+"$DIR/bin/hnc_json" validate "$RULES"
+NOTE2=$("$DIR/bin/hnc_json" get-device "$RULES" "$MAC" note)
+DN2=$("$DIR/bin/hnc_json" get-device "$RULES" "$MAC" down_mbps)
+[ "$NOTE2" = '"x\ny"' ] || { echo "[FAIL] newline value not stored as JSON \\n: $NOTE2" >&2; exit 1; }
+[ "$DN2" = "2" ] || { echo "[FAIL] down_mbps misaligned: $DN2" >&2; exit 1; }
 rm -rf "$DIR"
 echo "test_json_set_batch_atomic_hnc_json: OK"

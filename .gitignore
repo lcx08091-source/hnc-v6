@@ -12,6 +12,8 @@ daemon/hnc_httpd/hnc_httpd
 bin/hotspotd
 bin/hnc_ipc
 bin/mdns_resolve
+# v5.9.7: clsact 加载器也是 CI 现编
+bin/hnc_clsact_ctl
 
 # Pre-built binaries that DO go in git (no source in this repo, can't be CI-built):
 # - bin/hnc_ndpi_probe  (committed)
@@ -39,3 +41,6 @@ Thumbs.db
 .vscode/
 *.swp
 *.swo
+
+# Claude Code 子任务的临时工作区
+.claude/worktrees/

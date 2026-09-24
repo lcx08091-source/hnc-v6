@@ -133,7 +133,10 @@ mock_teardown
 # ═══ set_delay ═══════════════════════════════════════════
 test_start "set_delay with delay only generates netem"
 mock_setup
-mock_set_stdout tc ""
+mock_set_stdout tc "qdisc htb 1: root refcnt 2 r2q 10 default 0x270f
+class htb 1:1 root rate 1Gbit ceil 1Gbit
+class htb 1:1 parent 1:1 prio 0 rate 1Gbit
+qdisc ingress ffff: parent ffff:fff1"  # v5.11: set_delay 先校验 HTB 树, mock 要给出真实的 tc 状态
 tcm set_delay wlan2 1 100 0 0 192.168.43.5 >/dev/null 2>&1
 assert_mock_called "netem" && test_pass
 mock_teardown
@@ -141,7 +144,10 @@ mock_teardown
 # v3.4.11 P0-3 回归: loss-only 必须有效
 test_start "set_delay with loss-only (delay=0 jitter=0 loss=5) still generates netem"
 mock_setup
-mock_set_stdout tc ""
+mock_set_stdout tc "qdisc htb 1: root refcnt 2 r2q 10 default 0x270f
+class htb 1:1 root rate 1Gbit ceil 1Gbit
+class htb 1:1 parent 1:1 prio 0 rate 1Gbit
+qdisc ingress ffff: parent ffff:fff1"  # v5.11: set_delay 先校验 HTB 树, mock 要给出真实的 tc 状态
 tcm set_delay wlan2 1 0 0 5 192.168.43.5 >/dev/null 2>&1
 # v3.4.11 P0-3 回归: 必须调用 tc qdisc 设 netem,且参数包含 loss
 assert_mock_called "netem" "loss-only must produce netem qdisc" && \
@@ -157,14 +163,16 @@ assert_eq "0" "$rc" "should succeed" && test_pass
 mock_teardown
 
 # ═══ v3.4.12 clsact ingress filter parent ═══════════════
-test_start "init_tc detects clsact and uses ffff:fff2 for filter parent"
+test_start "init_tc on clsact attaches the ingress filter with the ingress alias"
 mock_setup
 mock_set_stdout tc "qdisc clsact ffff: parent ffff:fff1"
 mock_set_stdout ip "5: wlan2: <BROADCAST,MULTICAST,UP> mtu 1500 qdisc clsact"
 tcm init wlan2 >/dev/null 2>&1
-# 必须看到 parent ffff:fff2(v3.4.12 修复)
+# v5.11: 期望已变更 —— hotfix3 真机验证 ColorOS 的 tc 不认 parent ffff:fff2,
+# 只认 ingress 简写(见 tc_manager.sh 注释), 代码早已改用 "filter add dev <if> ingress"。
 output=$(cat "$MOCK_LOG" 2>/dev/null)
-assert_contains "$output" "ffff:fff2" "v3.4.12 fix: must use ffff:fff2 on clsact" && test_pass
+assert_contains "$output" "filter add dev wlan2 ingress" "clsact: filter must use the ingress alias" && \
+    assert_not_contains "$output" "parent ffff:fff2" "ColorOS tc rejects parent ffff:fff2" && test_pass
 mock_teardown
 
 test_start "init_tc on legacy ingress uses bare ffff:"
