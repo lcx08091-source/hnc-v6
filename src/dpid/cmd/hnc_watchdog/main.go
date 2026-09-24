@@ -117,14 +117,18 @@ func rotateLogIfBig() {
 	if err != nil || st.Size() < logMaxBytes {
 		return
 	}
+	// v5.12: 自死锁修复。旧代码 defer Unlock 持着 logMu 调 logf, 而 logf 自己
+	// 也要 logMu(Go Mutex 不可重入)→ watchdog.log 一旦 ≥1MiB, 6h 一次的轮转
+	// 检查就把主循环永久卡死; 心跳 goroutine 不打日志照常刷新, 不会触发接管,
+	// 于是 httpd/hotspotd/launcher 的拉起、规则恢复、告警扫描全部静默停摆。
 	logMu.Lock()
-	defer logMu.Unlock()
 	if logFile != nil {
 		_ = logFile.Close()
 	}
 	_ = os.Rename(wdLog, wdLog+".1")
 	f, _ := os.OpenFile(wdLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	logFile = f
+	logMu.Unlock()
 	logf("log rotated (>%d bytes)", logMaxBytes)
 }
 
