@@ -173,8 +173,13 @@ func liveDevicesSig(devices []map[string]interface{}, active bool, iface string)
 		if mac == "" {
 			continue
 		}
-		parts = append(parts, fmt.Sprintf("%s|ip=%s|on=%v|st=%s|lim=%v|del=%v|down=%v|up=%v|dms=%v|j=%v|loss=%v",
-			mac,
+		// v5.13: +主机名/低延迟/白名单/识别结果 —— 这些变了设备卡也要重画
+		idSig := ""
+		if id, ok := d["ident"].(map[string]interface{}); ok {
+			idSig = fmt.Sprintf("%v/%v/%v/%v/%v", id["os"], id["os_ver"], id["brand"], id["type"], id["confidence"])
+		}
+		parts = append(parts, fmt.Sprintf("%s|hn=%s|sqm=%v|wl=%v|id=%s|ip=%s|on=%v|st=%s|lim=%v|del=%v|down=%v|up=%v|dms=%v|j=%v|loss=%v",
+			mac, asString(d["hostname"]), d["sqm_enabled"], d["whitelist"], idSig,
 			asString(d["ip"]),
 			d["online"],
 			asString(d["status"]),

@@ -136,6 +136,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/proc_health", s.apiProcHealth)
 	mux.HandleFunc("/api/dpi_rules", s.apiDPIRules)
 	mux.HandleFunc("/api/usage_month", s.apiUsageMonth) // v5.12: 设备本月流量
+	mux.HandleFunc("/api/connections", s.apiConnections) // v5.13: 实时连接(conntrack)
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
 	// v5.9.9: 另两个磁盘页此前没有路由 —— json-health.html 完全没有入口
@@ -453,6 +454,8 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	// by client-key, each with client_mac + top_apps. Join them onto devices by
 	// MAC so the 设备 tab can show "what app is this device using".
 	dpiApps := s.dpiAppsByMAC()
+	// v5.13: dpid 被动设备识别(DHCP/mDNS/域名指纹) → 设备卡的系统/品牌/类型
+	dpiIdent := s.dpiIdentByMAC()
 
 	deviceRules, _ := rulesMap["devices"].(map[string]interface{})
 	blacklist, _ := rulesMap["blacklist"].([]interface{})
@@ -504,6 +507,14 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 						merged[k] = v
 					}
 				}
+			}
+		}
+		// v5.13: 设备识别结果; hotspotd 没拿到主机名时用 dpid 抓到的(DHCP/mDNS)
+		if id := dpiIdent[macKey]; id != nil {
+			merged["ident"] = id
+			if hn := asString(id["hostname"]); hn != "" && asString(merged["hostname"]) == "" {
+				merged["hostname"] = hn
+				merged["hostname_src"] = asString(id["hostname_src"])
 			}
 		}
 		// manual name 覆盖(最高优先级). hotfix5: tolerate case differences
@@ -584,6 +595,15 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		if nm, ok := nmRaw.(string); ok && nm != "" {
 			merged["hostname"] = nm
 			merged["hostname_src"] = "manual"
+		}
+		if id := dpiIdent[mac]; id != nil {
+			merged["ident"] = id
+			if _, named := merged["hostname"]; !named {
+				if hn := asString(id["hostname"]); hn != "" {
+					merged["hostname"] = hn
+					merged["hostname_src"] = asString(id["hostname_src"])
+				}
+			}
 		}
 		if blSet[mac] {
 			merged["status"] = "blocked"
