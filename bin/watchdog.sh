@@ -285,6 +285,18 @@ check_health() {
     if [ $rc -eq 0 ]; then
         if watchdog_tc_core_supported; then
             tc qdisc show dev "$iface" 2>/dev/null | grep "htb" | grep -q "root" || rc=1
+            # v5.12: 接口被重建检测。ColorOS 热点关→开会重建同名 wlan2 且 oplus-netd
+            # 立即预装 htb root,上面的检查照样通过,但 HNC 的设备 class/filter 已随
+            # 旧接口消失 → 限速永不恢复。init_tc 记录建树时的 ifindex,变了即判不健康。
+            if [ $rc -eq 0 ] && [ -f "$RUN/tc_ifindex_$iface" ]; then
+                local _idx_now _idx_init
+                _idx_now=$(cat "/sys/class/net/$iface/ifindex" 2>/dev/null)
+                _idx_init=$(cat "$RUN/tc_ifindex_$iface" 2>/dev/null)
+                if [ -n "$_idx_now" ] && [ -n "$_idx_init" ] && [ "$_idx_now" != "$_idx_init" ]; then
+                    log "check_health: $iface ifindex $_idx_init -> $_idx_now (interface recreated), tc rebuild needed"
+                    rc=1
+                fi
+            fi
         else
             watchdog_mark_tc_unsupported_once tc_htb
         fi

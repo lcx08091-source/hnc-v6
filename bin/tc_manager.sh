@@ -1584,6 +1584,12 @@ init_tc() {
     # T1 tier: install clsact BPF filter at pref 1 (before AOSP offload pref 2/3)
     _hnc_install_clsact_bpf "$iface"
 
+    # v5.12: 记下建树时的 ifindex。ColorOS 热点关→开会销毁并重建同名 wlan2,
+    # oplus-netd 随即预装 htb root —— watchdog 只看"有 htb root"会误判健康,
+    # HNC 的 class/filter 已随旧接口消失却永不恢复。check_health 比对此值。
+    _ifidx=$(cat "/sys/class/net/$iface/ifindex" 2>/dev/null)
+    [ -n "$_ifidx" ] && echo "$_ifidx" > "$HNC_DIR/run/tc_ifindex_$iface" 2>/dev/null
+
     log "=== TC init OK ==="
 }
 
