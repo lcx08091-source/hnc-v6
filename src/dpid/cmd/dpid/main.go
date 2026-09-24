@@ -25,6 +25,7 @@ import (
 	"syscall"
 	"time"
 
+	"hnc.io/dpid/apkscan"
 	"hnc.io/dpid/appmeta"
 	"hnc.io/dpid/bytestats"
 	"hnc.io/dpid/capture"
@@ -45,7 +46,12 @@ const (
 	// v5.13: 被动设备识别结果 / IP→域名反查表, 与 dpi_state.json 同目录。
 	devIDFileName  = "dpi_devid.json"
 	ipNameFileName = "dpi_ipname.json"
-	crashFlagFile  = "dpid.crashflag"
+	// v5.15: 未知应用发现(聚类结果 / JA4 家族学习表)与本机安装包域名索引。
+	discoverFileName  = "dpi_discover.json"
+	ja4FamilyFileName = "dpi_ja4family.json"
+	apkDomainsFile    = "apk_domains.json"
+	apkScanRequest    = "apk_scan.request"
+	crashFlagFile     = "dpid.crashflag"
 
 	maxCrashesWindow  = 60 * time.Second
 	maxCrashesAllowed = 3
@@ -114,6 +120,8 @@ func main() {
 		"write a single blind-mode dpi_state.json using this reason then exit (0 = full daemon)")
 	blindIface := flag.String("blind-iface", "",
 		"interface name to record in blind-state JSON (optional, used with -write-blind-state)")
+	// v5.15: 一次性扫描本机已装 App 的安装包域名(写 run/apk_domains.json)后退出
+	apkScanOnce := flag.Bool("apk-scan", false, "scan installed APKs for embedded domains once, write apk_domains.json and exit")
 	flag.Parse()
 
 	if *showVer {
@@ -124,6 +132,18 @@ func main() {
 	cfg := loadConfig(*cfgPath)
 	if err := os.MkdirAll(cfg.RunDir, 0o750); err != nil {
 		log.Fatalf("mkdir run_dir %s: %v", cfg.RunDir, err)
+	}
+
+	if *apkScanOnce {
+		res := appmeta.NewResolver("/data/local/hnc/etc/app_labels.json")
+		sc := apkscan.New(apkscan.Options{OutPath: filepath.Join(cfg.RunDir, apkDomainsFile), Label: res.Display, PerAPKSleep: -1})
+		out, err := sc.Scan(context.Background())
+		if err != nil {
+			fmt.Printf("{\"ok\":false,\"error\":%q}\n", err.Error())
+			os.Exit(1)
+		}
+		fmt.Printf("{\"ok\":true,\"app_count\":%d,\"scan_ms\":%d,\"path\":%q}\n", out.AppCount, out.ScanMS, sc.OutPath())
+		return
 	}
 
 	// rc29.1 blind-state writer mode: takes no lock, writes one file, exits.
@@ -373,6 +393,22 @@ func main() {
 	go flushEvery(ctx, 15*time.Second, "dpi_devid", devID.Flush)
 	go flushEvery(ctx, 5*time.Second, "dpi_ipname", ipNames.Flush)
 
+	// v5.15: 未知应用发现器 —— 规则库认不出的域名按同设备共现聚成组, 并从已知
+	// 应用学习 JA4 → 公司家族。启动读回, 30 秒落盘一次(无变化不写)。
+	disc := output.NewDiscoverer()
+	disc.SetPath(filepath.Join(cfg.RunDir, discoverFileName))
+	disc.SetFamilyPath(filepath.Join(cfg.RunDir, ja4FamilyFileName))
+	if err := disc.Load(); err != nil {
+		log.Printf("WARN: discover load: %v", err)
+	}
+	sw.SetDiscoverer(disc)
+	go flushEvery(ctx, 30*time.Second, "dpi_discover", disc.Flush)
+
+	// v5.15: 本机安装包域名扫描 —— 启动 10 分钟后首轮, 之后每天一轮(文件新鲜则跳过);
+	// httpd 的「立即扫描」写 run/apk_scan.request, 这里 60 秒内接手。
+	apkScanner := apkscan.New(apkscan.Options{OutPath: filepath.Join(cfg.RunDir, apkDomainsFile), Label: appResolver.Display})
+	go apkscan.RunDaemon(ctx, apkScanner, apkscan.DaemonOptions{RequestFile: filepath.Join(cfg.RunDir, apkScanRequest)})
+
 	switch mode {
 	case ModeBlind, ModeDisabled:
 		log.Printf("no capture in %s mode; idling for state writes", mode)
@@ -392,6 +428,7 @@ func main() {
 	_ = sw.Flush()
 	_ = devID.Flush(time.Now())
 	_ = ipNames.Flush(time.Now())
+	_ = disc.Flush(time.Now())
 	clearCrashFlag(cfg.RunDir)
 	log.Printf("hnc_dpid exited cleanly")
 }

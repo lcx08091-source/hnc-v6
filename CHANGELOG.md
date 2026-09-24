@@ -14,6 +14,27 @@
 
 ---
 
+## [5.15.0] - 2026-09-24
+
+**未知应用自动发现**:规则库认不出的流量,自动聚类并查出是哪个 App,确认后一键进规则库。
+
+### Added
+
+- **陌生域名聚类**(dpid `output/discover.go`):规则不命中的 DNS/SNI 名字取可注册域为节点;同一设备前后 5 秒内出现的不同节点两两连边(+1,同 JA4 再 +1),边权 24 小时半衰;有效权重 ≥3 的边并查集合并,强边度数 >24 的枢纽节点(多半是共用 SDK/CDN)不参与合并。节点 2000 / 边 20000 上限(LRU),7 天未见的节点清除。输出 `run/dpi_discover.json`(30 秒,无变化不写,重启读回)。
+- **JA4 → 公司家族学习**(`output/ja4family.go`):已知应用(仅 TierApp)的 JA4 按规则所属公司计数,样本 ≥20 且单一公司占比 ≥70% 才认定家族(浏览器等混用 JA4 自然不标);陌生组按组内 JA4 投票得到"疑似 XX 系"。学习表 `run/dpi_ja4family.json`。
+- **本机安装包域名扫描**(新包 `src/dpid/apkscan`):流式扫描 `/data/app` 下各 App 的 classes*.dex、resources.arsc(另按 UTF-16 扫)、assets 文本,提取可注册域;过滤基础设施/标准类域名,出现在 ≥6 个 App 的记为共用 SDK 不归属;按 APK 大小+mtime 增量缓存,超 400MB 跳过,损坏包不影响整轮。输出 `run/apk_domains.json`(含 `suffix_index` 反查)。dpid 启动 10 分钟后首轮、之后每天一轮,`run/apk_scan.request` 触发立即扫描;`hnc_dpid -apk-scan` 一次性扫描。
+- **服务器证书主动探测**(httpd `api_discover.go`):对陌生组的主机名连一次 443 读证书组织名与 SAN(只读不发数据;优先用 dpid 反查到的 IP,规避 Android 上 Go 没有 resolv.conf),组织名映射到中文公司名,SAN 里的兄弟域名一并用于匹配本机 App。后台每 20 秒最多一组,失败 6 小时后重试,`rules.json` `discover_cert_probe` 可关。
+- `GET /api/discover`:汇总各组 + 证书 + 本机 App 命中,按 本机 App > 证书公司 > JA4 家族 > 主域名 给出结论与把握度。
+- 动作:`discover_confirm`(写入 `etc/dpi_rules.d/99-user-custom.json`,同 id 合并后缀,dpid 按 mtime 自动重载)、`discover_ignore`、`discover_probe`、`apk_scan`、`discover_cert_probe_set`。
+- WebUI:分析页「新发现的应用」入口卡片 → 二级列表(每组的结论与线索标签)→ 三级详情(本机 App / 证书 / 指纹 / 域名 / 出现设备 + 名称、分类、域名勾选,确认或忽略);设置 → 应用识别 新增证书开关与入口。
+
+### Internals
+
+- 新测试:聚类(共现合并、跨设备/超窗口不合并、阈值与同 JA4 加权、衰减、落盘读回、容量与并发 -race)、家族学习(混用与 SDK 不标);apkscan(dex/arsc/assets 提取、误判过滤、SDK 频率过滤、增量缓存、损坏/超大/取消、跨块边界);httpd 发现流程(结论优先级、确认写规则与合并、非法输入、忽略)。
+- 需要 CI 重编 `hnc_dpid`、`hnc_httpd`。
+
+---
+
 ## [5.14.0] - 2026-09-24
 
 **「正在使用的应用」准确度专项**。

@@ -1,3 +1,14 @@
+<!-- v5.15.0 -->
+<div class="cl-section">
+  <div class="cl-title">🔎 v5.15.0: 自动发现规则库里没有的应用 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-09-24</span></div>
+  <ul class="cl-list">
+    <li><b>新发现的应用</b>(分析 → DPI 分析顶部, 或 设置 → 应用识别): 规则库认不出的域名会自动按"同一台设备几秒内一起出现"聚成一组, 一组大概就是一个 App。</li>
+    <li><b>自动查出它是谁</b>: ① 扫描本机已装 App 的安装包, 看这些域名写在哪个 App 里; ② 主动读一次服务器证书上的公司名(比如 Beijing Kuaishou → 快手); ③ 从已认识的应用学习网络指纹, 认出"字节系 / 腾讯系"的新 App。</li>
+    <li><b>一键加入规则库</b>: 点开一组能看到全部判断依据, 改好名称、选个分类、勾选域名, 点「确认」就生效, 之后自动识别; 不想要的点「忽略」。</li>
+    <li>全部在手机本地完成, 不会把域名发给任何第三方; 读证书只读不发数据, 也可以在设置里关掉。</li>
+  </ul>
+</div>
+
 <!-- v5.14.0 -->
 <div class="cl-section">
   <div class="cl-title">🎯 v5.14.0: 「正在用」更准 + 认得出 QUIC <span style="font-size:11px;color:var(--t2);font-weight:400">2026-09-24</span></div>

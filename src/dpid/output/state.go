@@ -434,6 +434,8 @@ type Writer struct {
 	// v5.13: 被动设备识别器。在释放 w.mu 之后才调用(它自带锁), 用
 	// atomic.Pointer 以便启动后设置而不与 capture 回调竞争。
 	devid atomic.Pointer[DeviceIdentifier]
+	// v5.15: 未知应用自动发现器。同 devid: 在释放 w.mu 之后才投递事件。
+	discover atomic.Pointer[Discoverer]
 
 	// rc29 totals
 	totalTx uint64
@@ -533,6 +535,12 @@ func (w *Writer) SetDeviceIdentifier(d *DeviceIdentifier) {
 	w.devid.Store(d)
 }
 
+// SetDiscoverer 接入 v5.15 未知应用自动发现器。RecordDNS / RecordTLS 会在
+// 释放 w.mu 之后把 (clientMAC, 域名, JA4, 是否命中规则) 投递给它。传 nil 断开。
+func (w *Writer) SetDiscoverer(d *Discoverer) {
+	w.discover.Store(d)
+}
+
 // IPAppMapSize 返回 IP→app 反查表当前条目数。
 func (w *Writer) IPAppMapSize() int {
 	if w.IPAppMap == nil {
@@ -589,6 +597,12 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 	if d := w.devid.Load(); d != nil && clientMAC != "" && host != "" {
 		defer d.ObserveDomain(clientMAC, host, "dns", ts)
 	}
+	// v5.15: 发现器同样在 w.mu 释放后投递; 分类结果由锁内填好。
+	var discRule l3Rule
+	var discKnown bool
+	if dc := w.discover.Load(); dc != nil && clientMAC != "" && host != "" {
+		defer func() { dc.Observe(clientMAC, host, "", ts, discKnown, discRule.ID, discRule.Category) }()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	c := w.clientLocked(clientMAC, clientIP, now)
@@ -603,6 +617,7 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 		if !ok {
 			w.bumpUnknownLocked(c, host, now)
 		}
+		discRule, discKnown = r, ok
 		// v5.9.7: 证据账本(DNS 源, log-odds=1.5)
 		// v5.13: 复用 bumpLabelLocked 的分类结果, 不再重复 classifyHost。
 		if w.evidence != nil && c.ClientMAC != "" {
@@ -636,6 +651,12 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 			}
 		}()
 	}
+	// v5.15: 发现器(未识别域名聚类 + JA4 家族学习), 同样在 w.mu 释放后投递。
+	var discRule l3Rule
+	var discKnown bool
+	if dc := w.discover.Load(); dc != nil && clientMAC != "" && host != "" {
+		defer func() { dc.Observe(clientMAC, host, ja4, ts, discKnown, discRule.ID, discRule.Category) }()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	c := w.clientLocked(clientMAC, clientIP, now)
@@ -650,6 +671,7 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		if !ok {
 			w.bumpUnknownLocked(c, host, now)
 		}
+		discRule, discKnown = r, ok
 		// BUG-011 (回移自 5.9.91 分叉): TLS 路径也写 IP→app 反查表 ——
 		// SNI 命中的远端 IP 不必等下一次 flow 命中才进表, 应用级限速
 		// (apply_app_limits.sh 读 ip_app_map) 不再因只靠 flow 路径而漏配。

@@ -2135,7 +2135,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       '<div class="btns" style="margin:2px 0 0"><button class="btn sec press" data-act="disc-probe">' + ico('refresh') + (c ? '重新获取证书' : '立即获取证书') + '</button></div></div>';
     // 指纹
     h += '<div class="dbox" style="margin-top:8px">' + kv('网络指纹', g.family_name ? esc(g.family_name) + ' 系网络库' + (g.family_conf ? '<span class="note"> · ' + Math.round(num(g.family_conf) * 100) + '%</span>' : '') : '<span class="note">没有匹配到已知家族</span>') +
-      ((g.ja4 || []).length ? kv('JA4', '<span class="mono" style="font-size:11px;font-weight:500">' + esc(g.ja4.slice(0, 2).join(' ')) + '</span>') : '') + '</div>';
+      ((g.ja4 || []).length ? kv('JA4', '<span class="mono" style="font-size:11px;font-weight:500">' + esc(g.ja4.slice(0, 2).map(function (x) { return typeof x === 'string' ? x : x.ja4 + ' ×' + num(x.count); }).join(' ')) + '</span>') : '') + '</div>';
     // 观测
     h += '<div class="dsec">看到的域名 · ' + num(g.hits) + ' 次</div><div class="dbox">' + (g.domains || []).slice(0, 10).map(function (d) { return kv('<span class="mono" style="color:var(--text-1);font-size:12px">' + esc(d.name) + '</span>', '<span class="note">' + num(d.count) + ' 次</span>'); }).join('') +
       kv('出现在', esc(devNames(g.devices).join('、') || '—')) + (g.last_seen ? kv('最近', ago(g.last_seen)) : '') + '</div>';
