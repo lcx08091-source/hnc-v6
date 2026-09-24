@@ -2239,7 +2239,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   var tabsHtml = TABS.map(function (t) { return '<div class="tab" data-tab="' + t[0] + '">' + ico(t[2]) + t[1] + (t[0] === 'apps' ? '<span class="dot" hidden></span>' : '') + '</div>'; }).join('');
   $('#tabs').innerHTML = tabsHtml; $('#lens-in').innerHTML = tabsHtml;
   var bar = $('#tabbar'), lens = $('#lens'), lensIn = $('#lens-in'), tabsEl = $('#tabs');
-  var L = { x: 0, v: 0, tx: 0, s: 1, sv: 0, ts: 1, drag: false, raf: 0, last: 0, gx: 0, moved: 0 };
+  var L = { x: 0, v: 0, tx: 0, s: 1, sv: 0, ts: 1, drag: false, raf: 0, last: 0, gx: 0, moved: 0, fx0: 0, fx: 0, ft: 0, fv: 0 };
   function slotW() { return tabsEl.clientWidth / TABS.length; }
   function layoutLens() { var w = slotW(); lens.style.width = w + 'px'; lensIn.style.width = (w * TABS.length) + 'px'; }
   function paintLens() {
@@ -2274,23 +2274,37 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   bar.addEventListener('pointerdown', function (e) {
     try { bar.setPointerCapture(e.pointerId); } catch (_) {}
     var x = localX(e), w = slotW();
-    L.drag = true; L.moved = 0;
+    L.drag = true; L.moved = 0; L.fx0 = L.fx = x; L.ft = performance.now(); L.fv = 0;
     L.gx = Math.abs(x - L.x) < w * .5 ? L.x - x : 0;   // 按在透镜上 → 抓住它; 按在别处 → 透镜先弹过去
     L.tx = clamp(x + L.gx, 0, (TABS.length - 1) * w); L.ts = 1.18;
     bar.classList.add('drag'); kick();
   });
   bar.addEventListener('pointermove', function (e) {
     if (!L.drag) return;
-    var w = slotW(), raw = localX(e) + L.gx, max = (TABS.length - 1) * w;
+    var w = slotW(), fx = localX(e), raw = fx + L.gx, max = (TABS.length - 1) * w;
+    // 手指速度(指数平滑), 松手时的惯性用它 —— 不能用透镜自身的弹簧速度
+    var now = performance.now(), dt = Math.max(1, now - L.ft);
+    L.fv = L.fv * .4 + (fx - L.fx) / dt * 1000 * .6; L.fx = fx; L.ft = now;
+    L.moved = Math.max(L.moved, Math.abs(fx - L.fx0));
     if (raw < 0) raw = -Math.pow(-raw, .7); else if (raw > max) raw = max + Math.pow(raw - max, .7);   // 边缘橡皮筋
-    var prev = idxAt(L.tx); L.tx = raw; L.moved++;
+    var prev = idxAt(L.tx); L.tx = raw;
     if (idxAt(raw) !== prev && navigator.vibrate) try { navigator.vibrate(6); } catch (_) {}
     kick();
   });
-  function releaseLens() {
+  function releaseLens(e) {
     if (!L.drag) return;
     L.drag = false; bar.classList.remove('drag');
-    var i = idxAt(L.tx + L.v * .05);
+    // v5.12: 此前用透镜自身的弹簧速度算惯性 —— 轻点时透镜正以 1000~2200px/s 冲向目标,
+    // 抬手瞬间被当成"甩"多滑一格: 在设备点应用跳到分析、在设置点应用跳到设备(点得越快越容易)。
+    // 现在: 轻点(手指移动 <8px)直接去手指下面的标签; 拖动才用手指速度算惯性, 且最多多滑半格。
+    var w = slotW(), i;
+    if (L.moved < 8) i = idxAt(e && e.clientX != null && e.type !== 'pointercancel' ? localX(e) : L.fx);
+    else {
+      // 只有真正"甩"(手指 >700px/s 且刚动过)才加惯性; 正常速度拖到哪就停哪
+      var fv = performance.now() - L.ft < 120 ? L.fv : 0, af = Math.abs(fv);
+      var fling = af > 700 ? (fv > 0 ? 1 : -1) * Math.min(w * .5, (af - 700) * .06) : 0;
+      i = idxAt(L.tx + fling);
+    }
     L.tx = i * slotW(); L.ts = 1; L.sv -= 2.6;   // 松手瞬间"啵"地缩一下再弹回
     kick(); go(TABS[i][0]);
   }
@@ -2621,7 +2635,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   addEventListener('resize', function () { layoutLens(); syncTab(S.page, true); placeSegs(document); drawSpark(); });
   matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () { if (S.theme === 'auto') applyTheme(); });
   boot(false);
-  window.__hnc6 = { S: S, go: go, api: api, boot: boot };   // 调试/截图用
+  window.__hnc6 = { S: S, go: go, api: api, boot: boot, L: L };   // 调试/截图用
 })();
 </script>
 </body>
