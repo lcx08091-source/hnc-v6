@@ -36,10 +36,11 @@ write_state(){
     iface=$(json_escape "$1")
     reason=$(json_escape "$2")
     now=$(date +%s 2>/dev/null || echo 0)
-    cat > "$RUN/dpi_state.json.tmp" <<EOF_STATE
+    # v5.12: 临时名带 pid, 不与 dpid / supervisor 的同名 .tmp 互踩
+    cat > "$RUN/dpi_state.json.tmp.$$" <<EOF_STATE
 {"schema_version":1,"timestamp":$now,"version":"0.1.0-rc1.2-fixed+rc17-manual","mode":"blind","interface":"$iface","uptime_s":0,"blind_reason":"$reason","stats":{"packets":0,"dns_events":0,"tls_events":0,"kernel_drops":0,"ignored_packets":0,"parse_errors":0}}
 EOF_STATE
-    mv -f "$RUN/dpi_state.json.tmp" "$RUN/dpi_state.json" 2>/dev/null || true
+    mv -f "$RUN/dpi_state.json.tmp.$$" "$RUN/dpi_state.json" 2>/dev/null || true
 }
 
 kill_pidfile(){

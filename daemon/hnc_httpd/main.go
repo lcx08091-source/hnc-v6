@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"hnc.io/dpid/tzlocal"
 	"log"
 	"net"
 	"net/http"
@@ -58,6 +59,10 @@ var versionCode = "0"
 
 func main() {
 	flag.Parse()
+	// v5.12: GOOS=android 时 Go 标准库不读系统时区, time.Local 恒为 UTC ——
+	// "今日"统计、本月流量、在线时长、导出时间窗的"本地零点"在东八区全都偏 8 小时。
+	// 进程启动即换成真实本地时区(tzlocal 读 persist.sys.timezone / APEX tzdata)。
+	time.Local = tzlocal.Location()
 
 	if *flagVersion {
 		fmt.Println("hnc_httpd", version)
