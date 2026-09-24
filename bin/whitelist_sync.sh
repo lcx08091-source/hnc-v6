@@ -75,6 +75,8 @@ for mac in $macs; do
     count=$((count + 1))
 done
 
-ipt whitelist_on || log "whitelist_on rc=$?"
+# v5.12: 调用方可用 HNC_WL_IFACE 指定热点接口(watchdog do_full_init 时 hnc_state 还是
+# PENDING, iptables_manager 从 hnc_state 取不到接口, DROP 会退化成不带 -i 的裸 DROP)
+ipt whitelist_on ${HNC_WL_IFACE:+"$HNC_WL_IFACE"} || log "whitelist_on rc=$?"
 log "mode=on allowed=$count"
 echo "WHITELIST=on count=$count"

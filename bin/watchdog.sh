@@ -853,7 +853,7 @@ do_full_init() {
     log "STATE PENDING -> ACTIVE:$iface (ip=$ip), running first-time init"
     sh "$HNC_DIR/bin/iptables_manager.sh" init >> "$LOG" 2>&1
     # v5.11: 白名单模式落到 iptables(init 后链可能是空的; 热点接口变化时 DROP 的 -i 也要跟着换)
-    sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
+    HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
         # v5.12: 同 full_restore —— 黑名单只在 restore 里恢复,tc_htb=false 也要跑
