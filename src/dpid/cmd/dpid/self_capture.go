@@ -191,6 +191,21 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 			cancelOne(n)
 		}
 
+		// v5.12: 回收已自行退出(Open 失败 / Run 出错)的抓包。旧代码只有
+		// cancelOne 才从 live 删除, 死掉的条目一直占着位, 下面 "exists →
+		// continue" 让该接口永远不会被重新拉起(与函数注释"下个 tick 重启"
+		// 的设计相反), 该接口的自抓包直到接口消失前都是死的。
+		dead := map[string]*liveCap{}
+		for name, lc := range live {
+			select {
+			case <-lc.done:
+				lc.cancel() // 释放 childCtx
+				dead[name] = lc
+				delete(live, name)
+			default:
+			}
+		}
+
 		// Start captures for newly-discovered ifaces.
 		for _, c := range cands {
 			if _, exists := live[c.Name]; exists {
@@ -202,6 +217,11 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 				cancel:    childCancel,
 				done:      make(chan struct{}),
 				startedAt: time.Now().Unix(),
+			}
+			if prev := dead[c.Name]; prev != nil {
+				// v5.12: 重启计数 / 最后错误延续到新条目, WebUI 可见。
+				lc.restarts.Store(prev.restarts.Load() + 1)
+				lc.setErr(prev.getErr())
 			}
 			live[c.Name] = lc
 			go runOneSelfCapture(childCtx, cfg, lc, selfAttrib)
@@ -304,7 +324,8 @@ func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib 
 	if err != nil && err != context.Canceled {
 		lc.setErr("run: " + err.Error())
 		log.Printf("self-capture[%s]: run ended with error: %v", lc.iface, err)
-		lc.restarts.Add(1) // visible in SelfIfaceState.Restarts
+		// v5.12: restarts 改由 reconcile 在真正重启时 +1(见上), 这里不再加,
+		// 否则 Run 出错的情况会被计两次。
 	} else {
 		log.Printf("self-capture[%s]: run ended cleanly", lc.iface)
 	}
