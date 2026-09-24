@@ -165,6 +165,18 @@ el=$((t1 - t0))
 if [ "$el" -lt 12 ]; then test_pass; else test_fail "full_init 捕获输出耗时 ${el}s(后台子 shell 持有管道)"; fi
 mock_teardown
 
+# ═══ watchdog check_health: mq 子队列下的 HNC htb 视为健康 ═══════
+test_start "watchdog check_health: mq child htb(无 root 字样)不误判为规则丢失"
+mock_setup
+echo "wlan1" > "$HNC_TEST_DIR/run/iface.cache"
+mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan1"
+mock_set_stdout tc "qdisc mq 0: root
+qdisc htb 1: parent :1 r2q 10 default 0x9999 direct_packets_stat 0"
+mock_set_stdout iptables "-A HNC_RESTORE -m connmark ! --mark 0x0 -j CONNMARK --restore-mark --nfmask 0xffffff --ctmask 0xffffff"
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action check_health >/dev/null 2>&1
+assert_eq "0" "$?" "mq child htb 模式应判健康" && test_pass
+mock_teardown
+
 # ═══ device_detect iface: 缓存的接口已消失 → 重新探测 ═══════════
 test_start "device_detect iface: 缓存接口已无 IPv4 时不返回旧值"
 mock_setup

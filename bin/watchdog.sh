@@ -284,7 +284,12 @@ check_health() {
     #   所以这里只看内容。命令本身失败场景极少,不特殊处理
     if [ $rc -eq 0 ]; then
         if watchdog_tc_core_supported; then
-            tc qdisc show dev "$iface" 2>/dev/null | grep "htb" | grep -q "root" || rc=1
+            # v5.12: 也接受 mq 子队列下的 HNC htb(tc_manager try_mq_child_htb 路径:
+            # "qdisc htb 1: parent :1",不含 root)。旧判断要求 htb 行含 root,该模式
+            # 下恒判不健康 → 每轮 full_restore → init_tc 再次 `qdisc replace parent :1`
+            # 把整棵设备 class 树换成空 htb,再由 restore 重建,直到进入 passive。
+            # 与 tc_manager egress_htb_tree_ready 的 '^qdisc htb 1:' 判据对齐。
+            tc qdisc show dev "$iface" 2>/dev/null | grep "htb" | grep -qE "root|^qdisc htb 1: " || rc=1
             # v5.12: 接口被重建检测。ColorOS 热点关→开会重建同名 wlan2 且 oplus-netd
             # 立即预装 htb root,上面的检查照样通过,但 HNC 的设备 class/filter 已随
             # 旧接口消失 → 限速永不恢复。init_tc 记录建树时的 ifindex,变了即判不健康。
