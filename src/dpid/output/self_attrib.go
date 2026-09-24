@@ -823,6 +823,17 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	a.mu.Unlock()
 
 	m, err := loadPkgUIDs()
+	// v5.12: pm / 文件读取放到锁外。旧代码在持 a.mu 时 exec `pm list packages -s`
+	// (app_process 冷启动 ~1s, system_server 忙时可卡更久且无超时), 期间
+	// LookupUID / ObserveSNI / Snapshot 全部阻塞 —— 自抓包回调跑在抓包
+	// goroutine 里, 阻塞直接变成内核丢包。
+	var sysPkgs map[string]struct{}
+	var sysErr error
+	var excl map[string]struct{}
+	if err == nil {
+		sysPkgs, sysErr = loadSystemPkgs()
+		excl = loadFlywheelExcludePkgs()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -837,20 +848,34 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	a.pkgCacheErr = ""
 	// Refresh the system-package set on the same cadence. Best-effort: keep the
 	// old set on error.
-	if s, serr := loadSystemPkgs(); serr == nil {
-		a.systemPkgs = s
+	if sysErr == nil {
+		a.systemPkgs = sysPkgs
 	}
 	// v5.7.0-rc33: refresh the flywheel exclusion (built-in ∪ user file) so edits
 	// to flywheel_exclude.json take effect within the pkg-cache TTL without a
 	// dpid restart. Always non-nil (degrades to the built-in seed).
-	a.flywheelExcludePkgs = loadFlywheelExcludePkgs()
+	a.flywheelExcludePkgs = excl
 	return m
+}
+
+// pmTimeout v5.12: pm 调用上限。pm 走 binder 找 system_server, 开机早期或
+// system_server 卡顿时可能长时间不返回; 旧代码无超时, 采样 goroutine 会被
+// 永久挂住(自归因从此停更)。
+const pmTimeout = 20 * time.Second
+
+func pmCommand(args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), pmTimeout)
+	cmd := exec.CommandContext(ctx, "pm", args...)
+	cmd.WaitDelay = 2 * time.Second
+	return cmd, cancel
 }
 
 // loadSystemPkgs runs `pm list packages -s` and returns the set of system
 // package names: lines look like "package:com.android.systemui".
 func loadSystemPkgs() (map[string]struct{}, error) {
-	cmd := exec.Command("pm", "list", "packages", "-s")
+	// v5.12: 加超时(见 pmCommand)。
+	cmd, cancel := pmCommand("list", "packages", "-s")
+	defer cancel()
 	// rc39 (P2-23): nohup-launched dpid may inherit an incomplete Env; without
 	// LD_LIBRARY_PATH the `pm` app_process wrapper can hit a linker error and
 	// return nothing → system-app filtering breaks. Pin the standard lib paths.
@@ -960,7 +985,8 @@ func loadPkgUIDs() (map[int]string, error) {
 	if m, lerr := loadPkgUIDsFromList(); lerr == nil && len(m) > 0 {
 		return m, nil
 	}
-	cmd := exec.Command("pm", "list", "packages", "-U")
+	cmd, cancel := pmCommand("list", "packages", "-U")
+	defer cancel()
 	// rc39 (P2-23): pin LD_LIBRARY_PATH so the pm fallback works under an
 	// incomplete (nohup) Env. (Primary path is packages.list above; this is the
 	// fallback when that's unreadable/empty.)
