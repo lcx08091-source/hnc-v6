@@ -1635,10 +1635,15 @@ ensure_ingress_mirred_v1() {
     fi
     # hotfix13: use the unified netlink/shell fallback path.
     # Accept matchall, u32 and parent ffff: variants instead of only pref-1 matchall.
-    if tc filter show dev "$iface" ingress 2>/dev/null | grep -q "mirred.*redirect dev $IFB_IFACE"; then
+    # v5.12: iproute2 实际输出是 "mirred (Egress Redirect to device ifb0) stolen",
+    # 旧模式 "mirred.*redirect dev ifb0"(区分大小写 + "dev")永远匹配不到 → 每次
+    # set_limit(up>0)/ensure_ingress 都判"缺失"去 del pref 1 再重装:上行在重装
+    # 窗口内不经 ifb0 整形;netlink 工具不可用时还会每次再起一个 45s 的异步重试
+    # worker。改为与 watchdog ensure_tc_uplink_healthy 相同的宽松匹配。
+    if tc filter show dev "$iface" ingress 2>/dev/null | grep -qiE "mirred.*redirect.*$IFB_IFACE"; then
         return 0
     fi
-    if tc filter show dev "$iface" parent ffff: 2>/dev/null | grep -q "mirred.*redirect dev $IFB_IFACE"; then
+    if tc filter show dev "$iface" parent ffff: 2>/dev/null | grep -qiE "mirred.*redirect.*$IFB_IFACE"; then
         return 0
     fi
     log "ensure_ingress_mirred_v1: mirred missing on $iface, reinstalling via unified path"

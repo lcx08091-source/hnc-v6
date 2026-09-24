@@ -139,6 +139,17 @@ assert_mock_called "mangle -D HNC_MARK -m mac --mac-source cc:cc:cc:cc:cc:07 -m 
     "陈旧设备的 MAC-only MARK 规则必须删除" && test_pass
 mock_teardown
 
+# ═══ ensure_ingress: 已有 mirred 时不得反复 del+重装 ════════════
+test_start "ensure_ingress: 识别 iproute2 真实输出的 mirred, 不重装"
+mock_setup
+mock_set_stdout tc "filter parent ffff: protocol all pref 1 matchall chain 0
+filter parent ffff: protocol all pref 1 matchall chain 0 handle 0x1
+	action order 1: mirred (Egress Redirect to device ifb0) stolen"
+tcm ensure_ingress wlan2 >/dev/null 2>&1
+assert_mock_not_called "ingress pref 1" "mirred 已在, 不应 del pref 1" && \
+    assert_mock_not_called "filter add" "mirred 已在, 不应重装" && test_pass
+mock_teardown
+
 # ═══ device_detect iface: 缓存的接口已消失 → 重新探测 ═══════════
 test_start "device_detect iface: 缓存接口已无 IPv4 时不返回旧值"
 mock_setup
