@@ -164,7 +164,8 @@ for table_chain in "mangle PREROUTING  HNC_RESTORE" \
                    "mangle FORWARD     HNC_STATS"   \
                    "mangle POSTROUTING HNC_SAVE"    \
                    "filter FORWARD     HNC_CTRL"    \
-                   "filter FORWARD     HNC_WHITELIST"; do
+                   "filter FORWARD     HNC_WHITELIST" \
+                   "filter FORWARD     HNC_QUIC"; do
     t=$(echo $table_chain | awk '{print $1}')
     c=$(echo $table_chain | awk '{print $2}')
     h=$(echo $table_chain | awk '{print $3}')
@@ -179,7 +180,8 @@ if command -v ip6tables >/dev/null 2>&1; then
                        "mangle FORWARD     HNC_MARK"    \
                        "mangle POSTROUTING HNC_SAVE"    \
                        "filter FORWARD     HNC_CTRL"    \
-                       "filter FORWARD     HNC_WHITELIST"; do
+                       "filter FORWARD     HNC_WHITELIST" \
+                       "filter FORWARD     HNC_QUIC"; do
         t=$(echo $table_chain | awk '{print $1}')
         c=$(echo $table_chain | awk '{print $2}')
         h=$(echo $table_chain | awk '{print $3}')

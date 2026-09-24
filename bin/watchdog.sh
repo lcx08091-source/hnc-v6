@@ -392,6 +392,7 @@ full_restore() {
     sh "$HNC_DIR/bin/iptables_manager.sh" init >> "$LOG" 2>&1
     # v5.11: 白名单模式落到 iptables(init 后链可能是空的; 热点接口变化时 DROP 的 -i 也要跟着换)
     sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
+    sh "$HNC_DIR/bin/quic_block_sync.sh" >> "$LOG" 2>&1 || true
     run_capability_probe_active "$iface"
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
@@ -854,6 +855,7 @@ do_full_init() {
     sh "$HNC_DIR/bin/iptables_manager.sh" init >> "$LOG" 2>&1
     # v5.11: 白名单模式落到 iptables(init 后链可能是空的; 热点接口变化时 DROP 的 -i 也要跟着换)
     HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
+    HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/quic_block_sync.sh" >> "$LOG" 2>&1 || true
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
         # v5.12: 同 full_restore —— 黑名单只在 restore 里恢复,tc_htb=false 也要跑
@@ -969,6 +971,7 @@ do_migrate() {
     # 不重同步,DROP 仍挂在旧接口上,新接口上的非白名单设备全部放行(封锁失效)。
     # 必须在上面写入新 STATE 之后调用,whitelist_mode_on 才能拿到新接口。
     sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
+    sh "$HNC_DIR/bin/quic_block_sync.sh" >> "$LOG" 2>&1 || true
 }
 
 # ═══════════════════════════════════════════════════════════════════════════

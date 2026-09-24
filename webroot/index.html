@@ -281,6 +281,8 @@ button.row:active,.row.tap:active{background:var(--input)}
 .dev-apps{display:flex;flex-wrap:wrap;gap:4px;margin-top:5px;align-items:center}
 .dev-apps .lb{font-size:10.5px;color:var(--text-3)}
 .dev-apps .a{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:5px;background:var(--badge-acc-bg);color:var(--badge-acc)}
+.dev-apps[hidden]{display:none}
+.dev-apps .a small{font-size:9.5px;font-weight:600;opacity:.75} .dev-apps .a.dim,.dev-apps .a.sys{background:var(--input);color:var(--text-2)}
 /* v5.13: 设备识别 / 实时连接 */
 .idg{display:grid;grid-template-columns:auto 1fr;gap:5px 14px;font-size:12.5px;align-items:center}
 .idg dt{color:var(--text-3)} .idg dd{margin:0;font-weight:600;min-width:0;overflow-wrap:anywhere}
@@ -982,7 +984,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       down: num(d.down_mbps), up: num(d.up_mbps), limitOn: d.limit_enabled !== false && (num(d.down_mbps) > 0 || num(d.up_mbps) > 0),
       delay: num(d.delay_ms), jitter: num(d.jitter_ms), loss: num(d.loss_pct),
       sqm: d.sqm_enabled === true || d.sqm_enabled === 'true', wl: d.whitelist === true || d.whitelist === 'true',
-      rx: 0, tx: 0, apps: Array.isArray(d.dpi_apps) ? d.dpi_apps : [],
+      rx: 0, tx: 0, apps: Array.isArray(d.dpi_apps) ? d.dpi_apps : [], live: Array.isArray(d.live_apps) ? d.live_apps : [],
       limitMode: d.limit_apply_mode || '', delayMode: d.delay_apply_mode || '', applyError: d.apply_error || '',
       mark: d.mark_id, iface: d.iface || '',
       ident: d.ident && typeof d.ident === 'object' ? d.ident : null, hnSrc: d.hostname_src || ''
@@ -1243,7 +1245,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var items = S.appLimits.filter(function (x) { return String(x.mac || '').toLowerCase() === d.mac; });
     var map = {}, rows = [];
     items.forEach(function (x) { map[x.app_id] = x; rows.push({ id: x.app_id, name: x.app_id, lim: num(x.down_mbps) }); });
-    d.apps.slice(0, 8).forEach(function (a) {
+    d.live.concat(d.apps).slice(0, 8).forEach(function (a) {
       var id = a.id || a.app_id || a.name; if (!id) return;
       if (map[id]) { rows.forEach(function (r) { if (r.id === id) r.name = a.name || id; }); return; }
       map[id] = 1; rows.push({ id: id, name: a.name || id, lim: 0 });
@@ -1263,12 +1265,18 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         '<span class="dev-info"><span class="dev-name"><span class="nm">' + esc(d.name) + '</span>' + badges(d) + '</span>' +
           '<span class="dev-meta mono" style="display:block">' + esc(d.ip || '—') + ' · ' + d.mac + '</span>' +
           '<span class="dev-meta" style="display:block">' + esc(d.online ? (d.idShort || d.vendor || '在线') : (d.idShort ? d.idShort + ' · ' : '') + meta) + '<span id="ct-' + d.mac.replace(/:/g, '') + '">' + connCountText(d) + '</span><span id="oh-' + d.mac.replace(/:/g, '') + '"></span><span id="mu-' + d.mac.replace(/:/g, '') + '"></span></span>' +
-          (d.apps.length ? '<span class="dev-apps"><span class="lb">在用</span>' + d.apps.slice(0, 4).map(function (a) { return '<span class="a">' + esc(a.name || a.id) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('') + '</span>' : '') +
+          '<span class="dev-apps" data-apps' + (appsLine(d) ? '' : ' hidden') + '>' + appsLine(d) + '</span>' +
         '</span>' +
         (d.online ? '<span class="dev-rate num"><span class="d">↓ <b data-rx>' + r.v + '</b> ' + r.u + '</span><span class="u">↑ <b data-tx>' + t.v + '</b> ' + t.u + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>'
           : '<span class="dev-rate"><span class="off">' + (d.blocked ? '已阻止' : '离线') + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>') +
       '</button>' + (wide() ? '' : '<div class="fold"><div><div class="fold-in">' + (open ? devBody(d) : '') + '</div></div></div>') +
     '</article>';
+  }
+  /* v5.14: 「在用」= 此刻按实时速率排出来的应用(后端 conntrack 平滑); 没有实时数据时退回 DPI 的"最近识别" */
+  function appsLine(d) {
+    if (d.online && d.live.length) return '<span class="lb">在用</span>' + d.live.slice(0, 3).map(function (a) { return '<span class="a' + (a.system ? ' sys' : '') + '">' + esc(a.name || a.id) + ' <small class="num">' + bpsTxt(a.bps) + '</small></span>'; }).join('');
+    if (d.apps.length) return '<span class="lb">最近</span>' + d.apps.slice(0, 4).map(function (a) { return '<span class="a dim">' + esc(a.name || a.id) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('');
+    return '';
   }
   function devSide() {
     var d = devBy(S.sel);
@@ -1388,9 +1396,10 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       var c = document.querySelector('.dev[data-dev="' + d.mac + '"]'); if (!c) return;
       var rx = $('[data-rx]', c), tx = $('[data-tx]', c);
       if (rx) { var a = bps(d.rx), b = bps(d.tx); rx.textContent = a.v; tx.textContent = b.v; rx.parentNode.lastChild.textContent = ' ' + a.u; tx.parentNode.lastChild.textContent = ' ' + b.u; }
+      var al = $('[data-apps]', c); if (al) { var h = appsLine(d); if (al._h !== h) { al._h = h; al.innerHTML = h; al.hidden = !h; } }
     });
   }
-  function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError, d.apps.length].join(':'); }).join('|'); }
+  function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError].join(':'); }).join('|'); }
   function refreshCard(mac) {
     var d = devBy(mac); if (!d) return;
     var el = document.querySelector('.dev[data-dev="' + mac + '"]');
@@ -2220,6 +2229,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       sBtn(['green', 'down'], '导出规则', '复制 rules.json（限速/延迟/黑名单/模板）', 'rules-json', '导出') +
       (KSU ? sBtn(['cyan', 'doc'], 'JSON 健康面板', 'rules / devices / tokens 的完整性与备份', 'json-health', '打开') : '') +
       sBtn(['purple', 'down'], '导出诊断包', '快照、配置、日志尾部和 tc/iptables/ip 状态', 'debug-bundle', '导出')]);
+    // v5.14: 应用识别 —— 强制 QUIC 回落 TCP
+    groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"'))]);
     var cs = S.clsact;
     groups.push(['clsact BPF（实验性）', sItem(['red', 'flask'], '启用 clsact BPF 打标', '在 AOSP offload 之前按源 IP 预设限速 mark；默认关', toggle(c.clsact_bpf_enabled === true, 'data-set="clsact" aria-label="clsact BPF"')) +
       '<div class="row">' + gi('gray', 'layers') + '<span class="tx"><div class="t">clsact BPF 状态</div><div class="s" id="clsact-s">' + (c.clsact_bpf_enabled !== true ? '未启用' : cs ? ['clsact', 'bpf_filter', 'map', 'watchdog'].map(function (k) { return k + (cs[k] ? ' ✓' : ' ✗'); }).join(' · ') : '点「检查」查看') + '</div></span>' +
@@ -2292,6 +2303,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         if (on) { var gw = el.closest('[data-foldkey]'); if (gw && !gw.classList.contains('open')) foldToggle(gw, 'gs'); el.setAttribute('aria-checked', 'false'); toast('填好上限后点「应用」启用'); return; }
         api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭')).catch(rollback); return;
       case 'remote': api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(rollback); return;
+      case 'quic': api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); }).catch(rollback); return;
       case 'auth': api.action('auth_required_set', { enabled: String(on) }).then(done()).catch(rollback); return;
       case 'clsact': api.action('clsact_bpf_enabled_set', { enabled: String(on) }).then(done()).then(function () { S.clsact = null; if (S.page === 'settings') renderSettings(false); if (on) setTimeout(clsactCheck, 12000); }).catch(rollback); return;
     }

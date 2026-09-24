@@ -39,6 +39,12 @@ type IPNameEntry struct {
 	Name string `json:"name"`
 	Src  string `json:"src"` // "dns" | "sni"
 	Ts   int64  `json:"ts"`
+	// v5.14: 域名按规则库归类的结果(Flush 时计算, 规则热更新后自动跟上)。
+	// httpd 用它把 DNS 解析出的 IP 上的流量(尤其是看不到 SNI 的 QUIC)
+	// 算给对应应用 —— 即"DNS 关联"。
+	App      string `json:"app,omitempty"`
+	AppName  string `json:"app_name,omitempty"`
+	Category string `json:"category,omitempty"`
 }
 
 type ipNameFile struct {
@@ -221,7 +227,11 @@ func (t *IPNameTable) Flush(now time.Time) error {
 	}
 	out := ipNameFile{Schema: 1, GeneratedAt: n, Entries: make(map[string]IPNameEntry, t.ll.Len())}
 	for ip, el := range t.m {
-		out.Entries[ip] = el.Value.(*ipNameItem).e
+		e := el.Value.(*ipNameItem).e
+		if r, ok := classifyHost(e.Name); ok && r.ID != "" {
+			e.App, e.AppName, e.Category = r.ID, r.Name, r.Category
+		}
+		out.Entries[ip] = e
 	}
 	path := t.path
 	t.dirty = false

@@ -456,6 +456,8 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	dpiApps := s.dpiAppsByMAC()
 	// v5.13: dpid 被动设备识别(DHCP/mDNS/域名指纹) → 设备卡的系统/品牌/类型
 	dpiIdent := s.dpiIdentByMAC()
+	// v5.14: 「正在用」—— conntrack 实时速率按应用平滑后的结果
+	liveApps := s.liveAppsByMAC()
 
 	deviceRules, _ := rulesMap["devices"].(map[string]interface{})
 	blacklist, _ := rulesMap["blacklist"].([]interface{})
@@ -540,6 +542,9 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		// v5.7.0-rc5: attach per-device identified apps (by MAC) from dpid.
 		if apps := dpiApps[macKey]; len(apps) > 0 {
 			merged["dpi_apps"] = apps
+		}
+		if la := liveApps[macKey]; len(la) > 0 {
+			merged["live_apps"] = la
 		}
 
 		// 速率: 只读 RateLoop 发布的快照 (按 macKey 小写索引). 单一采样源 →
@@ -786,12 +791,41 @@ func (s *server) dpiAppsByMAC() map[string][]map[string]interface{} {
 		if !ok || len(appsRaw) == 0 {
 			continue
 		}
-		var apps []map[string]interface{}
-		for _, aRaw := range appsRaw {
+		// v5.14: 广告/统计 SDK、CDN 等不算应用; 系统服务排在真应用后面;
+		// 同级里 10 分钟内出现过的排在更早的前面(dpid 按累计次数排, 会让
+		// 很久以前用过的应用一直霸榜)。
+		type cand struct {
+			a     map[string]interface{}
+			tier  int
+			fresh bool
+			idx   int
+		}
+		nowSec := time.Now().Unix()
+		var cands []cand
+		for i, aRaw := range appsRaw {
 			a, ok := aRaw.(map[string]interface{})
 			if !ok {
 				continue
 			}
+			tier := appTier(asString(a["category"]))
+			if tier == tierHidden {
+				continue
+			}
+			ls, _ := a["last_seen"].(float64)
+			cands = append(cands, cand{a, tier, nowSec-int64(ls) < 600, i})
+		}
+		sort.SliceStable(cands, func(i, j int) bool {
+			if cands[i].tier != cands[j].tier {
+				return cands[i].tier < cands[j].tier
+			}
+			if cands[i].fresh != cands[j].fresh {
+				return cands[i].fresh
+			}
+			return cands[i].idx < cands[j].idx
+		})
+		var apps []map[string]interface{}
+		for _, c := range cands {
+			a := c.a
 			name := asString(a["name"])
 			if name == "" {
 				continue
@@ -805,6 +839,12 @@ func (s *server) dpiAppsByMAC() map[string][]map[string]interface{} {
 			}
 			if v, ok := a["count"]; ok {
 				item["count"] = v
+			}
+			if v, ok := a["id"]; ok {
+				item["id"] = v
+			}
+			if v, ok := a["last_seen"]; ok {
+				item["last_seen"] = v
 			}
 			apps = append(apps, item)
 			if len(apps) >= 5 {

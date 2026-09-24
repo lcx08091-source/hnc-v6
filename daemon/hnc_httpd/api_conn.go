@@ -18,6 +18,7 @@ package main
 
 import (
 	"bufio"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -285,6 +286,8 @@ func wellKnownSvc(proto string, port int) string {
 type ipName struct {
 	Name string
 	Src  string
+	// v5.14: dpid 按规则库给域名归的类(DNS 关联: 看不到 SNI 的 QUIC 也能算给应用)
+	App, AppName, Category string
 }
 
 // loadIPNames 汇总 IP→域名: dpid 的 dpi_ipname.json 优先, nDPI 的 ip_to_host.json 兜底
@@ -301,7 +304,7 @@ func (s *server) loadIPNames() map[string]ipName {
 				m, _ := it.(map[string]interface{})
 				ip, host := asString(m["ip"]), asString(m["host"])
 				if ip != "" && host != "" {
-					out[ip] = ipName{host, "ndpi"}
+					out[ip] = ipName{Name: host, Src: "ndpi"}
 				}
 			}
 		}
@@ -316,7 +319,8 @@ func (s *server) loadIPNames() map[string]ipName {
 						if src == "" {
 							src = "dns"
 						}
-						out[ip] = ipName{name, src}
+						out[ip] = ipName{Name: name, Src: src, App: asString(m["app"]),
+							AppName: asString(m["app_name"]), Category: asString(m["category"])}
 					}
 				}
 			}
@@ -325,7 +329,7 @@ func (s *server) loadIPNames() map[string]ipName {
 	return out
 }
 
-type ipApp struct{ ID, Name string }
+type ipApp struct{ ID, Name, Category string }
 
 func (s *server) loadIPApps() map[string]ipApp {
 	out := map[string]ipApp{}
@@ -345,7 +349,7 @@ func (s *server) loadIPApps() map[string]ipApp {
 		if name == "" {
 			name = asString(m["app_id"])
 		}
-		out[ip] = ipApp{asString(m["app_id"]), name}
+		out[ip] = ipApp{asString(m["app_id"]), name, asString(m["category"])}
 	}
 	return out
 }
@@ -496,10 +500,14 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 			item["name_src"] = n.Src
 			label = n.Name
 		}
-		if a, ok := apps[e.Dst]; ok {
+		if a, ok := appForIP(e.Dst, apps, names); ok {
 			item["app"] = a.Name
 			item["app_id"] = a.ID
-			label = a.Name
+			if appTier(a.Category) == tierHidden {
+				item["sdk"] = true // 广告/统计/CDN: 界面上弱化, 不算"应用"
+			} else {
+				label = a.Name
+			}
 		}
 		if svc := wellKnownSvc(e.Proto, e.Dport); svc != "" {
 			item["svc"] = svc
@@ -612,4 +620,213 @@ func (s *server) dpiIdentByMAC() map[string]map[string]interface{} {
 		}
 	}
 	return out
+}
+
+// ─── v5.14: 应用分级 + 「正在用」────────────────────────────────────────
+
+// 应用分级。与 src/dpid/output/ip_app_map.go 的 AppTier 是同一张表, 两边同步改。
+const (
+	tierApp    = 0
+	tierSystem = 1
+	tierHidden = 2
+)
+
+func appTier(category string) int {
+	c := strings.ToLower(strings.TrimSpace(category))
+	switch c {
+	case "ads", "ad-sdk", "infrastructure", "third_party_telemetry", "system_telemetry_baseline",
+		"cloud", "cdn", "behavior-marker", "meta-warning", "p2p-unknown", "third_party_financial",
+		"system_chipset":
+		return tierHidden
+	case "system":
+		return tierSystem
+	}
+	if strings.HasPrefix(c, "sdk") {
+		return tierHidden
+	}
+	if strings.HasPrefix(c, "system-") || strings.HasPrefix(c, "system_") {
+		return tierSystem
+	}
+	return tierApp
+}
+
+// appForIP: 规则直接命中的 IP(ip_app_map)优先; 否则用 DNS/SNI 反查到的域名归类(DNS 关联)。
+func appForIP(ip string, apps map[string]ipApp, names map[string]ipName) (ipApp, bool) {
+	if a, ok := apps[ip]; ok && a.ID != "" {
+		return a, true
+	}
+	if n, ok := names[ip]; ok && n.App != "" {
+		name := n.AppName
+		if name == "" {
+			name = n.App
+		}
+		return ipApp{ID: n.App, Name: name, Category: n.Category}, true
+	}
+	return ipApp{}, false
+}
+
+// 「正在用」: 按 conntrack 实时速率把每台设备的流量归到应用, 做指数平滑
+// (时间常数 liveAppTau), 取速率最高的几个。比 dpid 的"累计命中次数"准得多:
+//   - 看的是真实字节(dpid 的 BPF 只抓握手包, 它的字节数几乎为零)
+//   - 1 小时前刷过的抖音会自然衰减掉, 一直发心跳的微信速率很低排不上
+//   - 广告/统计 SDK、CDN 不算应用; 系统服务只在没有真应用时显示
+const (
+	liveAppTau     = 20.0  // 秒
+	liveAppMinBps  = 16000 // 平滑后 < 2KB/s 不算"在用"
+	liveAppDropBps = 800   // 低于此值且 2 分钟没新流量就丢弃
+	liveAppMax     = 4
+)
+
+type liveAppAcc struct {
+	id, name string
+	tier     int
+	ewma     float64
+	last     time.Time // 最近一次有流量
+}
+
+var liveAppState struct {
+	mu     sync.Mutex
+	snapAt time.Time
+	lastAt time.Time
+	m      map[string]map[string]*liveAppAcc // mac → app id → acc
+}
+
+func (s *server) liveAppsByMAC() map[string][]map[string]interface{} {
+	sn := conntrackSnapshot()
+	out := map[string][]map[string]interface{}{}
+	if !sn.readable || !sn.acct {
+		return out
+	}
+	liveAppState.mu.Lock()
+	defer liveAppState.mu.Unlock()
+	if liveAppState.m == nil {
+		liveAppState.m = map[string]map[string]*liveAppAcc{}
+	}
+	if !sn.at.Equal(liveAppState.snapAt) {
+		owner := map[string]string{}
+		for mac, ips := range s.deviceIPsByMAC() {
+			for _, ip := range ips {
+				owner[ip] = mac
+			}
+		}
+		names := s.loadIPNames()
+		apps := s.loadIPApps()
+		inst := map[string]map[string]*liveAppAcc{}
+		for _, e := range sn.entries {
+			mac, ok := owner[e.Src]
+			if !ok {
+				continue
+			}
+			k := e.key()
+			bps := sn.upBps[k] + sn.dnBps[k]
+			if bps <= 0 {
+				continue
+			}
+			a, ok := appForIP(e.Dst, apps, names)
+			if !ok {
+				continue
+			}
+			tier := appTier(a.Category)
+			if tier == tierHidden {
+				continue
+			}
+			if inst[mac] == nil {
+				inst[mac] = map[string]*liveAppAcc{}
+			}
+			acc := inst[mac][a.ID]
+			if acc == nil {
+				acc = &liveAppAcc{id: a.ID, name: a.Name, tier: tier}
+				inst[mac][a.ID] = acc
+			}
+			acc.ewma += bps // 这里暂存本轮瞬时速率
+		}
+		dt := 2.0
+		if !liveAppState.lastAt.IsZero() {
+			dt = sn.at.Sub(liveAppState.lastAt).Seconds()
+		}
+		if dt <= 0 {
+			dt = 1
+		}
+		f := math.Exp(-dt / liveAppTau)
+		for mac, accs := range liveAppState.m {
+			for id, acc := range accs {
+				now := 0.0
+				if in := inst[mac][id]; in != nil {
+					now = in.ewma
+					acc.last = sn.at
+					delete(inst[mac], id)
+				}
+				acc.ewma = acc.ewma*f + now*(1-f)
+				if acc.ewma < liveAppDropBps && sn.at.Sub(acc.last) > 2*time.Minute {
+					delete(accs, id)
+				}
+			}
+			if len(accs) == 0 {
+				delete(liveAppState.m, mac)
+			}
+		}
+		for mac, accs := range inst {
+			for id, in := range accs {
+				if liveAppState.m[mac] == nil {
+					liveAppState.m[mac] = map[string]*liveAppAcc{}
+				}
+				liveAppState.m[mac][id] = &liveAppAcc{id: id, name: in.name, tier: in.tier, ewma: in.ewma * (1 - f), last: sn.at}
+			}
+		}
+		liveAppState.snapAt = sn.at
+		liveAppState.lastAt = sn.at
+	}
+	for mac, accs := range liveAppState.m {
+		var list []*liveAppAcc
+		var total float64
+		hasApp := false
+		for _, acc := range accs {
+			if acc.ewma >= liveAppMinBps {
+				list = append(list, acc)
+				total += acc.ewma
+				if acc.tier == tierApp {
+					hasApp = true
+				}
+			}
+		}
+		sort.Slice(list, func(i, j int) bool {
+			if list[i].tier != list[j].tier {
+				return list[i].tier < list[j].tier
+			}
+			return list[i].ewma > list[j].ewma
+		})
+		var items []map[string]interface{}
+		for _, acc := range list {
+			if hasApp && acc.tier != tierApp {
+				continue // 有真应用时不显示系统服务
+			}
+			items = append(items, map[string]interface{}{
+				"id": acc.id, "name": acc.name, "bps": int64(acc.ewma),
+				"share": math.Round(acc.ewma/total*100) / 100, "system": acc.tier == tierSystem,
+			})
+			if len(items) >= liveAppMax {
+				break
+			}
+		}
+		if len(items) > 0 {
+			out[mac] = items
+		}
+	}
+	return out
+}
+
+// actionQUICBlockSet v5.14: 「强制 QUIC 回落 TCP」开关(执行见 bin/quic_block_sync.sh)
+func actionQUICBlockSet(hncDir string, p map[string]string) actionResp {
+	r := actionSetTopBool(hncDir, "quic_block", p, "", "")
+	if !r.OK {
+		return r
+	}
+	rc, out := runBin(hncDir, "quic_block_sync.sh")
+	if rc != 0 {
+		return actionResp{OK: false, Error: "quic block sync failed", Detail: lastLine(strings.TrimSpace(out))}
+	}
+	if d := lastLine(strings.TrimSpace(out)); d != "" {
+		r.Detail = d
+	}
+	return r
 }

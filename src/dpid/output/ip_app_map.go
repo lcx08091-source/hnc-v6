@@ -30,6 +30,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -53,6 +54,9 @@ type IPAppObs struct {
 	Name     string `json:"name,omitempty"`
 	LastSeen int64  `json:"last_seen"`
 	Src      string `json:"src,omitempty"` // "flow", "tls", "dns"
+	// v5.14: 规则分类。下游(httpd「正在用」、apply_app_limits)据此区分真应用与
+	// 广告/统计 SDK/CDN 等共用基础设施。
+	Category string `json:"category,omitempty"`
 }
 
 type ipAppMapFile struct {
@@ -84,7 +88,7 @@ func (m *IPAppMap) SetPath(p string) {
 // Record updates the map. Called from EventFlow / applyRuleHitLocked
 // hot path; must be cheap. Last-writer-wins for the IP.
 // src indicates the attribution source: "flow", "tls", or "dns".
-func (m *IPAppMap) Record(ip, appID, name string, now int64, src string) {
+func (m *IPAppMap) Record(ip, appID, name, category string, now int64, src string) {
 	if ip == "" || appID == "" {
 		return
 	}
@@ -95,10 +99,48 @@ func (m *IPAppMap) Record(ip, appID, name string, now int64, src string) {
 		e = &IPAppObs{IP: ip}
 		m.entries[ip] = e
 	}
+	// v5.14: 共用 IP 上的 SDK/广告命中不覆盖近期的真应用归属。旧的"后写者胜"
+	// 会让友盟/穿山甲这类几十个 App 共用的域名把抖音的 IP 抢走, 「正在用」
+	// 与应用级限速都跟着错。真应用条目 2 分钟内只被真应用覆盖。
+	if e.AppID != "" && e.AppID != appID && AppTier(e.Category) == TierApp &&
+		AppTier(category) != TierApp && now-e.LastSeen < ipAppKeepRealSec {
+		return
+	}
 	e.AppID = appID
 	e.Name = name
+	e.Category = category
 	e.LastSeen = now
 	e.Src = src
+}
+
+const ipAppKeepRealSec = 120
+
+// 应用分级(v5.14)。httpd 的 appTier(daemon/hnc_httpd/api_conn.go)是同一张表的
+// 副本, 改这里要同步改那边。
+const (
+	TierApp    = 0 // 用户能感知的应用: 视频/社交/游戏/购物…
+	TierSystem = 1 // 系统/ROM 服务: 没有真应用时才显示
+	TierHidden = 2 // 广告/统计 SDK、CDN、云厂商、基础设施: 不当成"在用的应用"
+)
+
+// AppTier 按规则 category 给出分级。
+func AppTier(category string) int {
+	c := strings.ToLower(strings.TrimSpace(category))
+	switch c {
+	case "ads", "ad-sdk", "infrastructure", "third_party_telemetry", "system_telemetry_baseline",
+		"cloud", "cdn", "behavior-marker", "meta-warning", "p2p-unknown", "third_party_financial",
+		"system_chipset":
+		return TierHidden
+	case "system":
+		return TierSystem
+	}
+	if strings.HasPrefix(c, "sdk") {
+		return TierHidden
+	}
+	if strings.HasPrefix(c, "system-") || strings.HasPrefix(c, "system_") {
+		return TierSystem
+	}
+	return TierApp
 }
 
 // Flush writes the current map to disk atomically. Prunes stale entries

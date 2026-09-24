@@ -655,7 +655,7 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		// (apply_app_limits.sh 读 ip_app_map) 不再因只靠 flow 路径而漏配。
 		if remoteIP != "" && w.IPAppMap != nil {
 			if ok && r.ID != "" {
-				w.IPAppMap.Record(remoteIP, r.ID, r.Name, now, "tls")
+				w.IPAppMap.Record(remoteIP, r.ID, r.Name, r.Category, now, "tls")
 				// v5.9.7: 证据账本(TLS 源, log-odds=2.0)
 				if w.evidence != nil && c.ClientMAC != "" {
 					w.evidence.Add(c.ClientMAC, r.ID, EvidenceEntry{
@@ -842,7 +842,7 @@ func (w *Writer) applyRuleHitLocked(c *clientAgg, r l3Rule, remoteEvidence strin
 	// remote IPs (not the client itself); we use remoteIP from EventFlow which
 	// is already the non-client side.
 	if remoteIP != nil && w.IPAppMap != nil && r.ID != "" {
-		w.IPAppMap.Record(remoteIPStr, r.ID, r.Name, now, "flow")
+		w.IPAppMap.Record(remoteIPStr, r.ID, r.Name, r.Category, now, "flow")
 	}
 }
 
