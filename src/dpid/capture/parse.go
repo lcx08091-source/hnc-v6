@@ -24,7 +24,25 @@ const (
 	EventDNS
 	EventTLSClientHello
 	EventFlow
+	// v5.13: 被动设备识别线索(DHCP/DHCPv6/mDNS/SSDP/NBNS)。这些包多为
+	// 广播/组播, 不走 assignClient, 调用方也不得把它们喂给 RecordFlow /
+	// clientLocked —— 客户端身份只取 DevHint.MAC。
+	EventDevHint
 )
+
+// DevHint 是一条被动设备识别线索(v5.13)。字段按协议能提供的尽量填,
+// 语义解释(OS/品牌/类型投票)在 output/devid.go 完成, 这里只做忠实提取。
+type DevHint struct {
+	MAC         string   // 小写冒号格式; DHCP 取 chaddr, 其余取以太网源 MAC
+	Source      string   // "dhcp" / "dhcpv6" / "mdns" / "ssdp" / "nbns"
+	Hostname    string   // DHCP opt12/opt81、DHCPv6 opt39 首标签、mDNS xxx.local、NBNS 名
+	VendorClass string   // DHCP opt60 / DHCPv6 opt16
+	ParamList   string   // DHCP opt55 十进制逗号串, 如 "1,3,6,15"
+	Model       string   // mDNS TXT model= / md= / am=
+	OSHint      string   // 协议自带的 OS 线索(如 mDNS osxvers → "macOS")
+	UserAgent   string   // SSDP SERVER: / USER-AGENT:
+	Services    []string // mDNS 服务类型, 如 "_airplay._tcp"(去重, 最多 8 个)
+}
 
 type DNSInfo struct {
 	IsResponse bool
@@ -61,6 +79,8 @@ type Event struct {
 
 	DNS DNSInfo
 	TLS TLSInfo
+	// v5.13: 仅 Kind == EventDevHint 时非 nil。用指针避免每包 Event 值拷贝变大。
+	Dev *DevHint
 }
 
 const (
@@ -204,8 +224,8 @@ func parseIPv6(ip []byte, dstMAC, srcMAC net.HardwareAddr, ts time.Time) (Event,
 			}
 			nextHdr = payload[0]
 			payload = payload[8:]
-			default:
-				goto done
+		default:
+			goto done
 		}
 	}
 	// v5.9.6 (回移自 5.9.91 分叉): 扩展头循环走满仍是指示扩展类型的 nextHdr
@@ -245,6 +265,13 @@ func parseL4(ev Event, proto byte, payload []byte) (Event, ParseResult) {
 				return ev, ParseOK
 			}
 			return ev, ParseMalformed
+		}
+
+		// v5.13: 设备识别协议(DHCP/DHCPv6/mDNS/SSDP/NBNS)。无论解析成败都
+		// 在这里返回, 绝不落到下面的 EventFlow —— 这些包大多是广播/组播,
+		// 进 Flow 会把 255.255.255.255 / ff02::fb 之类当成"客户端"。
+		if isDevHintPort(ev.IsIPv6, ev.SrcPort, ev.DstPort) {
+			return parseDevHint(ev, payload[8:])
 		}
 
 		// Other UDP -> emit as Flow event (rc29).

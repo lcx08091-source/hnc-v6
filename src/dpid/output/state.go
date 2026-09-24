@@ -32,6 +32,10 @@ const (
 	maxFlowsPerClient = 64
 	maxGlobalFlows    = 512
 	topN              = 8
+	// v5.13: 未识别域名 top-N(全局 / 每客户端)。内存上限沿用 bumpName 的
+	// limit 机制: 全局 maxGlobalNames、每客户端 maxNamesPerClient。
+	topUnknownGlobal = 20
+	topUnknownClient = 5
 )
 
 // ─── shared types ──────────────────────────────────────────────────────
@@ -109,6 +113,9 @@ type ClientProfile struct {
 	TopApps       []LabelCount       `json:"top_apps,omitempty"`
 	TopCategories []LabelCount       `json:"top_categories,omitempty"`
 	TopJA4        []FingerprintCount `json:"top_ja4,omitempty"`
+	// v5.13: 该客户端 DNS/SNI 里 classifyHost 不命中的域名 top 5(已滤掉
+	// .local/.arpa/纯 IP/连通性检查/NTP 等基础设施名)。
+	TopUnknown []NameCount `json:"top_unknown,omitempty"`
 	// Per-client byte counters. Tx = client -> remote, Rx = remote -> client.
 	TxBytes uint64 `json:"tx_bytes,omitempty"`
 	RxBytes uint64 `json:"rx_bytes,omitempty"`
@@ -268,9 +275,11 @@ type State struct {
 	TopCategories   []LabelCount       `json:"top_categories,omitempty"`
 	TopJA4          []FingerprintCount `json:"top_ja4,omitempty"`
 	TopFingerprints []FingerprintCount `json:"top_fingerprints,omitempty"`
-	UniqueHostnames int                `json:"unique_hostnames"`
-	UniqueSNI       int                `json:"unique_sni"`
-	UniqueJA4       int                `json:"unique_ja4"`
+	// v5.13: 全局未识别域名 top 20, 供规则补全参考(过滤规则同 ClientProfile)。
+	TopUnknown      []NameCount `json:"top_unknown,omitempty"`
+	UniqueHostnames int         `json:"unique_hostnames"`
+	UniqueSNI       int         `json:"unique_sni"`
+	UniqueJA4       int         `json:"unique_ja4"`
 
 	// rc28.1.x feature gates and version tags.
 	L3Enabled      bool   `json:"l3_enabled"`
@@ -389,6 +398,8 @@ type clientAgg struct {
 	Categories   map[string]*labelStat
 	JA4          map[string]*fpStat
 	RemoteIPs    map[string]int64
+	// v5.13: 未识别域名计数(懒创建, 上限 maxNamesPerClient)。
+	Unknown map[string]*nameStat
 
 	// rc29 byte tracking (per-client).
 	TxBytes uint64
@@ -417,6 +428,12 @@ type Writer struct {
 	globalApps       map[string]*labelStat
 	globalCategories map[string]*labelStat
 	globalJA4        map[string]*fpStat
+	// v5.13: 全局未识别域名计数(上限 maxGlobalNames)。
+	globalUnknown map[string]*nameStat
+
+	// v5.13: 被动设备识别器。在释放 w.mu 之后才调用(它自带锁), 用
+	// atomic.Pointer 以便启动后设置而不与 capture 回调竞争。
+	devid atomic.Pointer[DeviceIdentifier]
 
 	// rc29 totals
 	totalTx uint64
@@ -459,9 +476,10 @@ func NewWriter(path, version string) *Writer {
 		globalApps:       make(map[string]*labelStat),
 		globalCategories: make(map[string]*labelStat),
 		globalJA4:        make(map[string]*fpStat),
+		globalUnknown:    make(map[string]*nameStat),
 		IPAppMap:         NewIPAppMap(),
 		// 64/key × 上限 1024 条全局; Trim 由 Flush 低频驱动(maxAge 1h)
-		evidence:         NewEvidenceLedger(64, 1024),
+		evidence: NewEvidenceLedger(64, 1024),
 	}
 }
 
@@ -507,6 +525,12 @@ func (w *Writer) SetHealth(health string, stallSeconds int64) {
 	defer w.mu.Unlock()
 	w.state.Health = health
 	w.state.StallSeconds = stallSeconds
+}
+
+// SetDeviceIdentifier 接入 v5.13 被动设备识别器。RecordDNS / RecordTLS 会
+// 在释放 w.mu 之后把 (clientMAC, 域名 / JA4 客户端名) 喂给它。传 nil 断开。
+func (w *Writer) SetDeviceIdentifier(d *DeviceIdentifier) {
+	w.devid.Store(d)
 }
 
 // IPAppMapSize 返回 IP→app 反查表当前条目数。
@@ -561,6 +585,10 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 		return
 	}
 	now := ts.Unix()
+	// v5.13: 设备识别器在 w.mu 释放后调用(defer 按 LIFO, 先注册的后执行)。
+	if d := w.devid.Load(); d != nil && clientMAC != "" && host != "" {
+		defer d.ObserveDomain(clientMAC, host, "dns", ts)
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	c := w.clientLocked(clientMAC, clientIP, now)
@@ -571,10 +599,14 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 		c.LastHostname = host
 		bumpName(c.Hostnames, host, now, maxNamesPerClient)
 		bumpName(w.globalDNS, host, now, maxGlobalNames)
-		w.bumpLabelLocked(c, host, now, 0)
+		r, ok := w.bumpLabelLocked(c, host, now, 0)
+		if !ok {
+			w.bumpUnknownLocked(c, host, now)
+		}
 		// v5.9.7: 证据账本(DNS 源, log-odds=1.5)
+		// v5.13: 复用 bumpLabelLocked 的分类结果, 不再重复 classifyHost。
 		if w.evidence != nil && c.ClientMAC != "" {
-			if r, ok := classifyHost(host); ok && r.ID != "" {
+			if ok && r.ID != "" {
 				w.evidence.Add(c.ClientMAC, r.ID, EvidenceEntry{
 					Ts: ts, Source: SrcDNS, RuleID: r.ID,
 					ParentEventID: host, Detail: host,
@@ -591,6 +623,19 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		return
 	}
 	now := ts.Unix()
+	// v5.13: 设备识别器在 w.mu 释放后调用(defer LIFO)。ja4Client 由
+	// bumpJA4Locked 在锁内填好, 闭包执行时已是最终值。
+	var ja4Client string
+	if d := w.devid.Load(); d != nil && clientMAC != "" {
+		defer func() {
+			if host != "" {
+				d.ObserveDomain(clientMAC, host, "sni", ts)
+			}
+			if ja4Client != "" {
+				d.ObserveJA4Client(clientMAC, ja4Client, ts)
+			}
+		}()
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	c := w.clientLocked(clientMAC, clientIP, now)
@@ -601,12 +646,15 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		c.LastSNI = host
 		bumpName(c.SNI, host, now, maxNamesPerClient)
 		bumpName(w.globalSNI, host, now, maxGlobalNames)
-		w.bumpLabelLocked(c, host, now, 0)
+		r, ok := w.bumpLabelLocked(c, host, now, 0)
+		if !ok {
+			w.bumpUnknownLocked(c, host, now)
+		}
 		// BUG-011 (回移自 5.9.91 分叉): TLS 路径也写 IP→app 反查表 ——
 		// SNI 命中的远端 IP 不必等下一次 flow 命中才进表, 应用级限速
 		// (apply_app_limits.sh 读 ip_app_map) 不再因只靠 flow 路径而漏配。
 		if remoteIP != "" && w.IPAppMap != nil {
-			if r, ok := classifyHost(host); ok && r.ID != "" {
+			if ok && r.ID != "" {
 				w.IPAppMap.Record(remoteIP, r.ID, r.Name, now, "tls")
 				// v5.9.7: 证据账本(TLS 源, log-odds=2.0)
 				if w.evidence != nil && c.ClientMAC != "" {
@@ -619,7 +667,7 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		}
 	}
 	if ja4 != "" {
-		w.bumpJA4Locked(c, ja4, now)
+		ja4Client = w.bumpJA4Locked(c, ja4, now)
 	}
 }
 
@@ -802,19 +850,65 @@ func (w *Writer) applyRuleHitLocked(c *clientAgg, r l3Rule, remoteEvidence strin
 // Direction doesn't apply (DNS query is technically tx but bytes=0 here so
 // no actual attribution). Pass false; bumpLabelWithBytes drops the rx side
 // when bytes==0 anyway.
-func (w *Writer) bumpLabelLocked(c *clientAgg, host string, now int64, bytes uint64) {
+//
+// v5.13: 返回分类结果, 调用方据此决定是否计入未识别域名、复用给证据账本。
+func (w *Writer) bumpLabelLocked(c *clientAgg, host string, now int64, bytes uint64) (l3Rule, bool) {
 	r, ok := classifyHost(host)
 	if !ok {
-		return
+		return l3Rule{}, false
 	}
 	bumpLabelWithBytes(c.Apps, r.ID, r.Name, r.Category, host, now, bytes, r.Verified, "", false)
 	bumpLabelWithBytes(w.globalApps, r.ID, r.Name, r.Category, host, now, bytes, r.Verified, "", false)
 	catName := categoryLabel(r.Category)
 	bumpLabelWithBytes(c.Categories, r.Category, catName, "", host, now, bytes, r.Verified, "", false)
 	bumpLabelWithBytes(w.globalCategories, r.Category, catName, "", host, now, bytes, r.Verified, "", false)
+	return r, true
 }
 
-func (w *Writer) bumpJA4Locked(c *clientAgg, ja4 string, now int64) {
+// bumpUnknownLocked 记录一个规则未命中的域名(v5.13 top_unknown)。
+func (w *Writer) bumpUnknownLocked(c *clientAgg, host string, now int64) {
+	if !reportableUnknown(host) {
+		return
+	}
+	if c.Unknown == nil {
+		c.Unknown = make(map[string]*nameStat)
+	}
+	bumpName(c.Unknown, host, now, maxNamesPerClient)
+	if w.globalUnknown == nil {
+		w.globalUnknown = make(map[string]*nameStat)
+	}
+	bumpName(w.globalUnknown, host, now, maxGlobalNames)
+}
+
+// unknownInfraPrefixes: 明显的基础设施/探测域名, 不值得进"未识别"榜单。
+var unknownInfraPrefixes = []string{"connectivitycheck.", "time.", "ntp.", "captive.", "wpad."}
+
+// reportableUnknown 过滤空名、单标签、纯 IP、*.local / *.arpa、以及
+// 连通性检查 / 时间同步等基础设施名。
+func reportableUnknown(host string) bool {
+	if host == "" || !strings.Contains(host, ".") {
+		return false
+	}
+	if net.ParseIP(host) != nil {
+		return false
+	}
+	if strings.HasSuffix(host, ".local") || strings.HasSuffix(host, ".arpa") {
+		return false
+	}
+	for _, p := range unknownInfraPrefixes {
+		if strings.HasPrefix(host, p) {
+			return false
+		}
+	}
+	if strings.HasSuffix(host, ".ntp.org") || strings.Contains(host, ".ntp.") {
+		return false
+	}
+	return true
+}
+
+// bumpJA4Locked 计数 JA4; v5.13 起返回指纹库映射到的客户端名(未命中为空),
+// 供设备识别器做弱信号。
+func (w *Writer) bumpJA4Locked(c *clientAgg, ja4 string, now int64) string {
 	if c.JA4 == nil {
 		c.JA4 = make(map[string]*fpStat)
 	}
@@ -856,6 +950,10 @@ func (w *Writer) bumpJA4Locked(c *clientAgg, ja4 string, now int64) {
 	}
 	w.globalJA4[ja4].Count++
 	w.globalJA4[ja4].LastSeen = now
+	if libHit {
+		return lib.Client
+	}
+	return ""
 }
 
 // ─── per-client helpers ───────────────────────────────────────────────
@@ -1386,6 +1484,7 @@ func (w *Writer) Flush() error {
 			TopApps:            topLabels(c.Apps, topN),
 			TopCategories:      topLabels(c.Categories, topN),
 			TopJA4:             topFingerprints(c.JA4, topN),
+			TopUnknown:         topNames(c.Unknown, topUnknownClient),
 			TxBytes:            c.TxBytes,
 			RxBytes:            c.RxBytes,
 			BackgroundFlowsPct: bgPct,
@@ -1399,6 +1498,7 @@ func (w *Writer) Flush() error {
 	snap.TopCategories = topLabels(w.globalCategories, topN)
 	snap.TopJA4 = topFingerprints(w.globalJA4, topN)
 	snap.TopFingerprints = snap.TopJA4 // alias for rc28.1.1 compatibility
+	snap.TopUnknown = topNames(w.globalUnknown, topUnknownGlobal)
 	snap.UniqueHostnames = len(w.globalDNS)
 	snap.UniqueSNI = len(w.globalSNI)
 	snap.UniqueJA4 = len(w.globalJA4)

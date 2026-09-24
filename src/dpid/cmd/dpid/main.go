@@ -42,7 +42,10 @@ const (
 	lockFileName  = "dpid.lock"
 	probeFileName = "dpid.probe.json"
 	stateFileName = "dpi_state.json"
-	crashFlagFile = "dpid.crashflag"
+	// v5.13: 被动设备识别结果 / IP→域名反查表, 与 dpi_state.json 同目录。
+	devIDFileName  = "dpi_devid.json"
+	ipNameFileName = "dpi_ipname.json"
+	crashFlagFile  = "dpid.crashflag"
 
 	maxCrashesWindow  = 60 * time.Second
 	maxCrashesAllowed = 3
@@ -358,12 +361,24 @@ func main() {
 	// dpi_state.json. Backend choice is logged once at startup.
 	go runByteSampler(ctx, selfAttrib)
 
+	// v5.13: 被动设备识别器 + IP→域名反查表。都自带锁, 跑在顶层 ctx 上,
+	// 跨 capture 重试/重绑存活。设备识别结果启动时从 dpi_devid.json 读回
+	// (DHCP 只在设备接入瞬间出现, 重启 dpid 不能丢); 坏文件忽略。
+	devID := output.NewDeviceIdentifier()
+	devID.SetPath(filepath.Join(cfg.RunDir, devIDFileName))
+	_ = devID.Load()
+	sw.SetDeviceIdentifier(devID)
+	ipNames := output.NewIPNameTable()
+	ipNames.SetPath(filepath.Join(cfg.RunDir, ipNameFileName))
+	go flushEvery(ctx, 15*time.Second, "dpi_devid", devID.Flush)
+	go flushEvery(ctx, 5*time.Second, "dpi_ipname", ipNames.Flush)
+
 	switch mode {
 	case ModeBlind, ModeDisabled:
 		log.Printf("no capture in %s mode; idling for state writes", mode)
 		idleWithFlush(ctx, sw)
 	case ModeOK:
-		if err := runCapture(ctx, cfg, pr, sw); err != nil {
+		if err := runCapture(ctx, cfg, pr, sw, devID, ipNames); err != nil {
 			// Capture open/run failure is capability failure, not daemon crash.
 			reason := "open/run capture failed: " + err.Error()
 			log.Printf("ERROR: %s", reason)
@@ -375,11 +390,56 @@ func main() {
 	}
 
 	_ = sw.Flush()
+	_ = devID.Flush(time.Now())
+	_ = ipNames.Flush(time.Now())
 	clearCrashFlag(cfg.RunDir)
 	log.Printf("hnc_dpid exited cleanly")
 }
 
-func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Writer) error {
+// flushEvery 以固定周期调用 flush(v5.13: dpi_devid / dpi_ipname 共用)。
+// flush 内部自带"无变化不写"判断, 这里只负责节拍和日志。
+func flushEvery(ctx context.Context, every time.Duration, name string, flush func(time.Time) error) {
+	tk := time.NewTicker(every)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case t := <-tk.C:
+			if err := flush(t); err != nil {
+				log.Printf("WARN: %s flush: %v", name, err)
+			}
+		}
+	}
+}
+
+// setLocalMACsFor 把抓包接口自身的 MAC 告诉 capture, 避免把本机发出的
+// mDNS/SSDP 公告识别成一台客户端(v5.13)。
+func setLocalMACsFor(iface string) {
+	ifc, err := net.InterfaceByName(iface)
+	if err != nil || len(ifc.HardwareAddr) != 6 {
+		capture.SetLocalMACs(nil)
+		return
+	}
+	capture.SetLocalMACs([]net.HardwareAddr{ifc.HardwareAddr})
+}
+
+// toDeviceHint 把 capture.DevHint 转成 output.DeviceHint(output 不依赖 capture)。
+func toDeviceHint(h *capture.DevHint) output.DeviceHint {
+	return output.DeviceHint{
+		MAC:         h.MAC,
+		Source:      h.Source,
+		Hostname:    h.Hostname,
+		VendorClass: h.VendorClass,
+		ParamList:   h.ParamList,
+		Model:       h.Model,
+		OSHint:      h.OSHint,
+		UserAgent:   h.UserAgent,
+		Services:    append([]string(nil), h.Services...),
+	}
+}
+
+func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Writer, devID *output.DeviceIdentifier, ipNames *output.IPNameTable) error {
 	iface := pr.APIface
 	attempt := 0
 	rebindCount := 0
@@ -388,6 +448,7 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			return nil
 		}
 		attempt++
+		setLocalMACsFor(iface)
 		h, err := capture.Open(capture.Options{Iface: iface, Snaplen: cfg.Snaplen, RcvBufBytes: cfg.RcvBufBytes})
 		if err != nil {
 			if isRecoverableCaptureError(err) {
@@ -483,8 +544,8 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 					return
 				case <-tk.C:
 					s := local.Stats()
-					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d ignored=%d perr=%d",
-						s.Packets, s.KernelDrops, s.DNSEvents, s.TLSEvents, s.FlowEvents, s.IgnoredPackets, s.ParseErrors)
+					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d devhint=%d ignored=%d perr=%d",
+						s.Packets, s.KernelDrops, s.DNSEvents, s.TLSEvents, s.FlowEvents, s.DevHintEvents, s.IgnoredPackets, s.ParseErrors)
 				}
 			}
 		}(h)
@@ -547,8 +608,22 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			switch ev.Kind {
 			case capture.EventDNS:
 				sw.RecordDNS(clientMAC, clientIP, remoteIP, ev.DNS.QName, ev.Time)
+				// v5.13: DNS 响应的 A/AAAA → 原始 qname 进反查表。assignClient
+				// 对响应已把 ClientMAC 设为客户端, 这里只需要 qname + answers。
+				if ev.DNS.IsResponse && len(ev.DNS.Answers) > 0 {
+					ipNames.RecordDNS(ev.DNS.QName, ev.DNS.Answers, ev.DNS.TTL, ev.Time)
+				}
 			case capture.EventTLSClientHello:
 				sw.RecordTLS(clientMAC, clientIP, remoteIP, ev.TLS.SNI, ev.TLS.JA4, ev.Time)
+				if ev.TLS.SNI != "" {
+					ipNames.RecordSNI(remoteIP, ev.TLS.SNI, ev.Time)
+				}
+			case capture.EventDevHint:
+				// v5.13: 设备识别线索只进识别器, 绝不走 RecordFlow/clientLocked ——
+				// 这些包多为广播/组播, 其 IP 不代表客户端。
+				if ev.Dev != nil {
+					devID.ObserveHint(toDeviceHint(ev.Dev), ev.Time)
+				}
 			case capture.EventFlow:
 				// txFromClient: heuristic — when ClientIP == SrcIP, this packet
 				// went client->remote (uplink). The assignClient() logic in
@@ -578,6 +653,11 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			case capture.EventTLSClientHello:
 				log.Printf("TLS-CH client=%s/%s remote=%s sni=%q alpn=%v ja4=%s",
 					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.TLS.SNI, ev.TLS.ALPN, ev.TLS.JA4)
+			case capture.EventDevHint:
+				if ev.Dev != nil {
+					log.Printf("DEVHINT mac=%s src=%s host=%q vc=%q fp=%q model=%q ua=%q svc=%v",
+						ev.Dev.MAC, ev.Dev.Source, ev.Dev.Hostname, ev.Dev.VendorClass, ev.Dev.ParamList, ev.Dev.Model, ev.Dev.UserAgent, ev.Dev.Services)
+				}
 			case capture.EventFlow:
 				log.Printf("FLOW client=%s/%s remote=%s udp=%v sport=%d dport=%d bytes=%d v6=%v",
 					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.IsUDP, ev.SrcPort, ev.DstPort, ev.Bytes, ev.IsIPv6)

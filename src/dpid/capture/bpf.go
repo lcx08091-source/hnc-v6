@@ -12,6 +12,12 @@
 //
 // The filter is built with symbolic labels and resolved in a second pass,
 // because hand-counting JT/JF for ~50 instructions is error-prone.
+//
+// v5.13: UDP 端口白名单扩展为被动设备识别协议 —— IPv4 额外放行
+// 67/68 (DHCP)、137 (NBNS)、1900 (SSDP)、5353 (mDNS); IPv6 额外放行
+// 546/547 (DHCPv6)、5353 (mDNS)。这些协议包量极小(接入瞬间几个 DHCP、
+// 每分钟若干组播公告), 对 AF_PACKET 队列压力可忽略。src/dst 任一端口
+// 命中即放行; 用户态 parse.go 再按方向细分, 且绝不把它们记成 EventFlow。
 
 package capture
 
@@ -23,6 +29,14 @@ import (
 const ETH_P_ALL = 0x0003
 
 func htons(v uint16) uint16 { return v<<8 | v>>8 }
+
+// v5.13: cBPF 放行的 UDP 端口表(src 或 dst 任一命中)。53 = DNS, 其余为
+// 设备识别协议。改这里两个 BuildFilter 变体同步生效; bpf_test.go 用 cBPF
+// 解释器逐端口校验放行/丢弃。
+var (
+	bpfUDPPortsV4 = []uint32{53, 67, 68, 137, 1900, 5353}
+	bpfUDPPortsV6 = []uint32{53, 546, 547, 5353}
+)
 
 // BuildFilter compiles the cBPF program. Returns ~50 instructions.
 func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
@@ -79,6 +93,19 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 		plan = append(plan, insn{op: op, jt: jt, jf: jf, k: kk})
 	}
 
+	// v5.13: A 寄存器已装入端口号时, 逐个 jeq 端口表; 命中跳 ACCEPT。
+	// lastJF 非空时最后一条的 JF 指向它(dst 端口检查末尾 → DROP),
+	// 为空时落空继续执行下一条(src 端口检查后接着检查 dst)。
+	acceptPorts := func(ports []uint32, lastJF string) {
+		for i, p := range ports {
+			jf := ""
+			if i == len(ports)-1 {
+				jf = lastJF
+			}
+			addInsn("", jmp|jeq|k, LBL_ACCEPT, jf, p)
+		}
+	}
+
 	// ── etherType dispatch ─────────────────────────────────────────────
 	addInsn("", ld|h|abs, "", "", 12) // A = etherType
 	addInsn("", jmp|jeq|k, "IPV6", "", 0x86dd)
@@ -93,9 +120,9 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("", jmp|jset|k, LBL_DROP, "", 0x1fff)
 	addInsn("", ldx|b|msh, "", "", 14) // X = IPHL
 	addInsn("", ld|h|ind, "", "", 14)  // UDP src
-	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	acceptPorts(bpfUDPPortsV4, "")
 	addInsn("", ld|h|ind, "", "", 16) // UDP dst
-	addInsn("", jmp|jeq|k, LBL_ACCEPT, LBL_DROP, 53)
+	acceptPorts(bpfUDPPortsV4, LBL_DROP)
 
 	addInsn("IPV4_TCP", ld|h|abs, "", "", 20) // frag
 	addInsn("", jmp|jset|k, LBL_DROP, "", 0x1fff)
@@ -121,9 +148,9 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("", jmp|jeq|k, "IPV6_TCP", LBL_DROP, 6)
 
 	addInsn("IPV6_UDP", ld|h|abs, "", "", 54) // UDP src
-	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	acceptPorts(bpfUDPPortsV6, "")
 	addInsn("", ld|h|abs, "", "", 56) // UDP dst
-	addInsn("", jmp|jeq|k, LBL_ACCEPT, LBL_DROP, 53)
+	acceptPorts(bpfUDPPortsV6, LBL_DROP)
 
 	addInsn("IPV6_TCP", ld|h|abs, "", "", 54) // TCP src
 	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
@@ -250,11 +277,24 @@ func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
 		plan = append(plan, insn{op: op, jt: jt, jf: jf, k: kk})
 	}
 
+	// v5.13: A 寄存器已装入端口号时, 逐个 jeq 端口表; 命中跳 ACCEPT。
+	// lastJF 非空时最后一条的 JF 指向它(dst 端口检查末尾 → DROP),
+	// 为空时落空继续执行下一条(src 端口检查后接着检查 dst)。
+	acceptPorts := func(ports []uint32, lastJF string) {
+		for i, p := range ports {
+			jf := ""
+			if i == len(ports)-1 {
+				jf = lastJF
+			}
+			addInsn("", jmp|jeq|k, LBL_ACCEPT, jf, p)
+		}
+	}
+
 	// ── IP version dispatch (replaces etherType check) ─────────────────
 	// First byte of packet = (version << 4) | IHL. Extract version by
 	// AND'ing with 0xf0; compare to 0x40 (IPv4) or 0x60 (IPv6).
-	addInsn("", ld|b|abs, "", "", 0)      // A = packet[0]
-	addInsn("", alu|and|k, "", "", 0xf0)  // A &= 0xf0
+	addInsn("", ld|b|abs, "", "", 0)     // A = packet[0]
+	addInsn("", alu|and|k, "", "", 0xf0) // A &= 0xf0
 	addInsn("", jmp|jeq|k, "IPV6", "", 0x60)
 	addInsn("", jmp|jeq|k, "IPV4", LBL_DROP, 0x40)
 
@@ -267,9 +307,9 @@ func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("", jmp|jset|k, LBL_DROP, "", 0x1fff)
 	addInsn("", ldx|b|msh, "", "", 0) // X = IPHL (offset 14→0)
 	addInsn("", ld|h|ind, "", "", 0)  // UDP src (X + 14 → X + 0)
-	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	acceptPorts(bpfUDPPortsV4, "")
 	addInsn("", ld|h|ind, "", "", 2) // UDP dst (16→2)
-	addInsn("", jmp|jeq|k, LBL_ACCEPT, LBL_DROP, 53)
+	acceptPorts(bpfUDPPortsV4, LBL_DROP)
 
 	addInsn("IPV4_TCP", ld|h|abs, "", "", 6) // frag
 	addInsn("", jmp|jset|k, LBL_DROP, "", 0x1fff)
@@ -299,9 +339,9 @@ func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("", jmp|jeq|k, "IPV6_TCP", LBL_DROP, 6)
 
 	addInsn("IPV6_UDP", ld|h|abs, "", "", 40) // UDP src (54→40)
-	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
+	acceptPorts(bpfUDPPortsV6, "")
 	addInsn("", ld|h|abs, "", "", 42) // UDP dst (56→42)
-	addInsn("", jmp|jeq|k, LBL_ACCEPT, LBL_DROP, 53)
+	acceptPorts(bpfUDPPortsV6, LBL_DROP)
 
 	addInsn("IPV6_TCP", ld|h|abs, "", "", 40) // TCP src
 	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)

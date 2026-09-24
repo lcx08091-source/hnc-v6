@@ -35,11 +35,11 @@ import (
 )
 
 const (
-	dumpsysCmd          = "dumpsys"
-	dumpsysArg          = "netstats"
-	dumpsysArgDetail    = "detail"
-	dumpsysCmdTimeout   = 10 * time.Second
-	dumpsysMinInterval  = 4 * time.Second // throttle: don't fork faster than this
+	dumpsysCmd         = "dumpsys"
+	dumpsysArg         = "netstats"
+	dumpsysArgDetail   = "detail"
+	dumpsysCmdTimeout  = 10 * time.Second
+	dumpsysMinInterval = 4 * time.Second // throttle: don't fork faster than this
 )
 
 // DumpsysSampler is the fallback ByteSampler. Stateless except for
@@ -89,11 +89,14 @@ func (s *DumpsysSampler) Sample() (map[int]ByteCounts, error) {
 }
 
 // uidRE matches the per-section header line:
-//   ident=[{...}] uid=N set=FOREGROUND tag=0x0
+//
+//	ident=[{...}] uid=N set=FOREGROUND tag=0x0
 var uidRE = regexp.MustCompile(`uid=(-?\d+)\s+set=`)
 
 // bucketRE matches a single history bucket line:
-//   st=1779444000 rb=8326 rp=55 tb=6977 tp=59 op=0
+//
+//	st=1779444000 rb=8326 rp=55 tb=6977 tp=59 op=0
+//
 // We only need rb and tb. Numbers are unsigned 64-bit.
 var bucketRE = regexp.MustCompile(`st=\d+\s+rb=(\d+)\s+rp=\d+\s+tb=(\d+)`)
 

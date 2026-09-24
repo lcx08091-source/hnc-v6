@@ -337,7 +337,7 @@ func dpidDaemon() daemonSpec {
 
 func httpdDaemon() daemonSpec {
 	return daemonSpec{
-		name:     "hnc_httpd",
+		name: "hnc_httpd",
 		// v5.5.0-rc6 fix: 之前是 binDir + "/hnc_httpd" 但 httpd binary 实际装在
 		// hncDir + "/daemon/hnc_httpd/hnc_httpd" (跟 watchdog.sh:655 + service.sh:74 一致).
 		// 错配的后果: ensureDaemonRunning 走到 os.Stat(launcher) 时永远 fail,
@@ -384,10 +384,10 @@ func launcherDaemon() daemonSpec {
 // CSV→JSON pipeline in shell preserves its battle-tested edge cases (column
 // reordering across ndpiReader versions, awk parsing of QUIC SNI).
 const (
-	ndpiConfigPath  = dataDir + "/dpi_ndpi_config.json"
-	ndpiScriptPath  = binDir + "/ndpi_continuous.sh"
-	ndpiPidPath     = runDir + "/ndpi_continuous.pid"
-	alertScanEvery  = 5 * time.Minute
+	ndpiConfigPath = dataDir + "/dpi_ndpi_config.json"
+	ndpiScriptPath = binDir + "/ndpi_continuous.sh"
+	ndpiPidPath    = runDir + "/ndpi_continuous.pid"
+	alertScanEvery = 5 * time.Minute
 )
 
 // ndpiEnabledByConfig reads dpi_ndpi_config.json and reports whether nDPI
@@ -659,13 +659,13 @@ func isDoze() bool {
 // ─── restore window throttle ────────────────────────────────────────────
 
 type restoreThrottle struct {
-	windowStart    time.Time
-	windowCount    int
-	consecutive    int
-	passiveMode    bool
-	passiveExitTS  time.Time
-	totalRestores  int
-	passiveLogged  bool
+	windowStart   time.Time
+	windowCount   int
+	consecutive   int
+	passiveMode   bool
+	passiveExitTS time.Time
+	totalRestores int
+	passiveLogged bool
 }
 
 func (r *restoreThrottle) currentWindowDur() time.Duration {

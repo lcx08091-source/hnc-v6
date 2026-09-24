@@ -3,14 +3,14 @@
 //
 // Backends, in preference order:
 //
-//   1. eBPF: read /sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map
-//      directly via the bpf(2) syscall. Available on Android 12+ (most
-//      devices shipped after 2021). Real-time, ~zero CPU cost.
+//  1. eBPF: read /sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map
+//     directly via the bpf(2) syscall. Available on Android 12+ (most
+//     devices shipped after 2021). Real-time, ~zero CPU cost.
 //
-//   2. dumpsys: parse `dumpsys netstats detail` output. Available on
-//      any Android with a system_server (i.e. all of them). Slower
-//      (~200ms per fork) and parsing is somewhat fragile, but works
-//      as a universal fallback.
+//  2. dumpsys: parse `dumpsys netstats detail` output. Available on
+//     any Android with a system_server (i.e. all of them). Slower
+//     (~200ms per fork) and parsing is somewhat fragile, but works
+//     as a universal fallback.
 //
 // detect.go chooses the best available backend at startup. If neither
 // works, returns a NoneSampler that reports zeros — dpid keeps running

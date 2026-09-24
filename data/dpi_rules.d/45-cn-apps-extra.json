@@ -1,0 +1,162 @@
+{
+  "schema_version": "2.0",
+  "subset": "45-cn-apps-extra",
+  "rules_version": "hnc-curated-v5.13-2026-09-24#45-cn-apps-extra",
+  "_comment": "v5.13: 补充现有规则集缺失的常见中国 App。全部为官方主域/公开静态资源域, 未经真机抓包核验(无 ground_truth), confidence=medium。已确认与其他子集无重复 id、无重复后缀; 支付宝(alipay.com 在 taobao)、QQ 邮箱(mail.qq.com 在 qq_extra)、126.net(netease_group) 已覆盖故未收录; 蛋仔派对域名不确定未收录。meeting.tencent.com / mail.163.com 依赖同优先级最长后缀胜出, 自动压过 tencent.com / 163.com。",
+  "rules": [
+    {
+      "id": "ctrip",
+      "app": "携程",
+      "category": "travel",
+      "confidence": "medium",
+      "suffixes": ["ctrip.com", "trip.com", "c-ctrip.com"]
+    },
+    {
+      "id": "rail_12306",
+      "app": "铁路12306",
+      "category": "travel",
+      "confidence": "medium",
+      "suffixes": ["12306.cn"]
+    },
+    {
+      "id": "hellobike",
+      "app": "哈啰",
+      "category": "travel",
+      "confidence": "medium",
+      "suffixes": ["hellobike.com"]
+    },
+    {
+      "id": "huya",
+      "app": "虎牙直播",
+      "category": "video",
+      "confidence": "medium",
+      "suffixes": ["huya.com", "huya.cn"]
+    },
+    {
+      "id": "douyu",
+      "app": "斗鱼直播",
+      "category": "video",
+      "confidence": "medium",
+      "suffixes": ["douyu.com", "douyucdn.cn"]
+    },
+    {
+      "id": "ximalaya",
+      "app": "喜马拉雅",
+      "category": "music",
+      "confidence": "medium",
+      "suffixes": ["ximalaya.com", "xmcdn.com"]
+    },
+    {
+      "id": "quark",
+      "app": "夸克",
+      "category": "browser",
+      "confidence": "medium",
+      "suffixes": ["quark.cn"]
+    },
+    {
+      "id": "uc_browser",
+      "app": "UC 浏览器",
+      "category": "browser",
+      "confidence": "medium",
+      "suffixes": ["uc.cn", "ucweb.com"]
+    },
+    {
+      "id": "dewu",
+      "app": "得物",
+      "category": "shopping",
+      "confidence": "medium",
+      "suffixes": ["dewu.com", "poizon.com"]
+    },
+    {
+      "id": "xianyu",
+      "app": "闲鱼",
+      "category": "shopping",
+      "confidence": "medium",
+      "suffixes": ["goofish.com"]
+    },
+    {
+      "id": "vipshop",
+      "app": "唯品会",
+      "category": "shopping",
+      "confidence": "medium",
+      "suffixes": ["vip.com", "vipstatic.com"]
+    },
+    {
+      "id": "beike",
+      "app": "贝壳找房",
+      "category": "life_service",
+      "confidence": "medium",
+      "suffixes": ["ke.com", "bkjk.com", "lianjia.com"]
+    },
+    {
+      "id": "wuba_58",
+      "app": "58同城",
+      "category": "life_service",
+      "confidence": "medium",
+      "suffixes": ["58.com", "58cdn.com.cn"]
+    },
+    {
+      "id": "zhipin",
+      "app": "BOSS直聘",
+      "category": "recruitment",
+      "confidence": "medium",
+      "suffixes": ["zhipin.com"]
+    },
+    {
+      "id": "dongchedi",
+      "app": "懂车帝",
+      "category": "auto",
+      "confidence": "medium",
+      "suffixes": ["dongchedi.com"]
+    },
+    {
+      "id": "autohome",
+      "app": "汽车之家",
+      "category": "auto",
+      "confidence": "medium",
+      "suffixes": ["autohome.com.cn", "autoimg.cn"]
+    },
+    {
+      "id": "meitu",
+      "app": "美图秀秀",
+      "category": "photo",
+      "confidence": "medium",
+      "suffixes": ["meitu.com", "meitudata.com"]
+    },
+    {
+      "id": "wps",
+      "app": "WPS Office",
+      "category": "office",
+      "confidence": "medium",
+      "suffixes": ["wps.cn", "wps.com", "kdocs.cn"]
+    },
+    {
+      "id": "tencent_meeting",
+      "app": "腾讯会议",
+      "category": "office",
+      "confidence": "medium",
+      "suffixes": ["meeting.tencent.com", "voovmeeting.com"]
+    },
+    {
+      "id": "netease_mail",
+      "app": "网易邮箱",
+      "category": "office",
+      "confidence": "medium",
+      "suffixes": ["mail.163.com", "126.com", "yeah.net"]
+    },
+    {
+      "id": "fanqie_novel",
+      "app": "番茄小说",
+      "category": "reading",
+      "confidence": "medium",
+      "suffixes": ["fqnovel.com"]
+    },
+    {
+      "id": "qimao",
+      "app": "七猫免费小说",
+      "category": "reading",
+      "confidence": "medium",
+      "suffixes": ["qimao.com"]
+    }
+  ]
+}
