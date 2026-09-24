@@ -207,11 +207,11 @@ func saveKnownLedger(path string, f *knownFile) error {
 	if err != nil {
 		return err
 	}
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, path)
+	// v5.12: 固定的 path+".tmp" 会被 httpd(MarkKnown)与 hnc_watchdog
+	// (detectUnknownDevices)两个进程同时写, 交错内容被 rename 上去后
+	// loadKnownLedger 解析失败 → 视为空账本 → 所有在线设备重新报"陌生设备"。
+	// 改用带 pid 的临时文件 + fsync。
+	return writeFileAtomic(path, b)
 }
 
 // MarkKnown adds the given MAC to the known-devices ledger. Idempotent.
@@ -436,8 +436,21 @@ func detectUnknownDevices(cfg Config, uc AlertConfig) (int, error) {
 	}
 
 	if dirty {
+		// v5.12: 保存前重新读盘再合并, 不直接写回扫描开始时的快照。扫描期间
+		// (含 postNotification 子进程, 可达数秒)httpd 的 MarkKnown 写入的
+		// 条目/MarkedKnownAt 否则会被旧快照整体覆盖丢失。
 		ledgerMu.Lock()
-		_ = saveKnownLedger(cfg.KnownDevicesPath, ledger)
+		cur := loadKnownLedger(cfg.KnownDevicesPath)
+		for mac, e := range ledger.MACs {
+			if ce, ok := cur.MACs[mac]; ok {
+				if ce.FirstSeen == 0 {
+					ce.FirstSeen = e.FirstSeen
+				}
+				continue
+			}
+			cur.MACs[mac] = e
+		}
+		_ = saveKnownLedger(cfg.KnownDevicesPath, cur)
 		ledgerMu.Unlock()
 	}
 	return emitted, nil
@@ -643,8 +656,14 @@ func LoadSeen(cfg Config) map[string]struct{} {
 	return out
 }
 
+var seenMu sync.Mutex
+
 func MarkSeen(cfg Config, ids []string) error {
 	path := filepath.Join(cfg.HNCDir, "run", "alerts_seen.json")
+	// v5.12: 读-改-写全程持锁。httpd 对每个 HTTP 请求开 goroutine, 两个并发
+	// 的 "标记已读" 各自 LoadSeen 后先后写回, 后写者覆盖前者 → 先标的变回未读。
+	seenMu.Lock()
+	defer seenMu.Unlock()
 	seen := LoadSeen(cfg)
 	for _, id := range ids {
 		seen[id] = struct{}{}
@@ -678,7 +697,39 @@ func MarkSeen(cfg Config, ids []string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	return os.WriteFile(path, b, 0o644)
+	// v5.12: tmp + rename 原子替换。旧代码直接 os.WriteFile(O_TRUNC 后写),
+	// 写到一半崩溃/断电/ENOSPC 会留下空或截断的 alerts_seen.json, LoadSeen
+	// 解析失败即返回空集 → 所有告警一起变回未读。
+	return writeFileAtomic(path, b)
+}
+
+// writeFileAtomic v5.12: 写同目录临时文件 → fsync → rename, 读者要么看到旧
+// 内容要么看到新内容。临时文件名带 pid, 避免 httpd/watchdog 两个进程互踩。
+func writeFileAtomic(path string, b []byte) error {
+	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(b); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // _ keeps the strconv import used even if we drop one helper later.
