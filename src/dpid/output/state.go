@@ -819,6 +819,16 @@ func (w *Writer) bumpJA4Locked(c *clientAgg, ja4 string, now int64) {
 		c.JA4 = make(map[string]*fpStat)
 	}
 	lib, libHit := lookupDFP(ja4)
+	// v5.12: JA4 表加上限。hostname/SNI/IP 表早就按 LRU 封顶(maxNamesPerClient /
+	// maxGlobalNames / maxIPsPerClient), 唯独 c.JA4 与 w.globalJA4 无上限: 任何
+	// 热点客户端发随机化 ClientHello(扫描器、恶意/异常客户端)都能让它们随进程
+	// 寿命无限增长, 且 Flush 每 5s 对全表排序, 内存与 CPU 一起涨。
+	if c.JA4[ja4] == nil && len(c.JA4) >= maxNamesPerClient {
+		evictOldestFP(c.JA4)
+	}
+	if w.globalJA4[ja4] == nil && len(w.globalJA4) >= maxGlobalNames {
+		evictOldestFP(w.globalJA4)
+	}
 	if c.JA4[ja4] == nil {
 		c.JA4[ja4] = &fpStat{JA4: ja4}
 		if libHit {
@@ -1084,6 +1094,21 @@ func evictOldestName(m map[string]*nameStat) {
 		}
 	}
 	if oldestKey != "" {
+		delete(m, oldestKey)
+	}
+}
+
+// evictOldestFP v5.12: 删除 LastSeen 最旧的 JA4 条目(与 evictOldestName 同款)。
+func evictOldestFP(m map[string]*fpStat) {
+	var oldestKey string
+	var oldest int64
+	first := true
+	for k, v := range m {
+		if first || v.LastSeen < oldest {
+			oldestKey, oldest, first = k, v.LastSeen, false
+		}
+	}
+	if !first {
 		delete(m, oldestKey)
 	}
 }
