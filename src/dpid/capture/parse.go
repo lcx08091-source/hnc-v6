@@ -56,6 +56,11 @@ type TLSInfo struct {
 	SNI  string
 	ALPN []string
 	JA4  string // rc29: pre-computed JA4 fingerprint
+	// v5.14: 来自 QUIC(HTTP/3) Initial / gQUIC CHLO。此时 Event.IsUDP=true,
+	// JA4 首字符为 'q'(gQUIC 没有 TLS ClientHello, JA4 为空)。
+	IsQUIC bool
+	// v5.14: gQUIC CHLO 的 UAID 标签(客户端 User-Agent), 仅 gQUIC 填。
+	UserAgent string
 }
 
 type Event struct {
@@ -272,6 +277,13 @@ func parseL4(ev Event, proto byte, payload []byte) (Event, ParseResult) {
 		// 进 Flow 会把 255.255.255.255 / ff02::fb 之类当成"客户端"。
 		if isDevHintPort(ev.IsIPv6, ev.SrcPort, ev.DstPort) {
 			return parseDevHint(ev, payload[8:])
+		}
+
+		// v5.14: QUIC 客户端 long header(目的 443)。只在拿到完整 ClientHello
+		// 时产出 EventTLSClientHello, 其余 ParseIgnore —— 不落到 EventFlow,
+		// 与以前 BPF 不放行 UDP/443 时的字节统计口径一致。
+		if ev.DstPort == 443 && len(payload) > 8 && payload[8]&0x80 != 0 {
+			return parseQUIC(ev, payload[8:])
 		}
 
 		// Other UDP -> emit as Flow event (rc29).

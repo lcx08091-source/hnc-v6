@@ -544,8 +544,9 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 					return
 				case <-tk.C:
 					s := local.Stats()
-					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d devhint=%d ignored=%d perr=%d",
-						s.Packets, s.KernelDrops, s.DNSEvents, s.TLSEvents, s.FlowEvents, s.DevHintEvents, s.IgnoredPackets, s.ParseErrors)
+					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d devhint=%d ignored=%d perr=%d quic_init=%d quic_ok=%d quic_fail=%d quic_sni=%d gquic_sni=%d gquic_skip=%d",
+						s.Packets, s.KernelDrops, s.DNSEvents, s.TLSEvents, s.FlowEvents, s.DevHintEvents, s.IgnoredPackets, s.ParseErrors,
+						s.QUICInitial, s.QUICDecryptOK, s.QUICDecryptFail, s.QUICSNI, s.GQUICSNI, s.GQUICSkipped) // v5.14: QUIC 计数
 				}
 			}
 		}(h)

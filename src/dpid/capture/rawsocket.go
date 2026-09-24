@@ -36,6 +36,15 @@ type Stats struct {
 	IgnoredPackets uint64
 	ParseErrors    uint64
 	Panics         uint64 // recovered packet-handler panics (see Run)
+
+	// v5.14: QUIC(HTTP/3) SNI 提取计数。进程级总数(quic.go 包级原子量),
+	// 多个 Handle 读到的是同一组值。
+	QUICInitial     uint64 // 识别为客户端 Initial 的包
+	QUICDecryptOK   uint64
+	QUICDecryptFail uint64
+	QUICSNI         uint64 // IETF QUIC 产出带 SNI 的 ClientHello
+	GQUICSNI        uint64 // gQUIC Q046 明文 CHLO 取到 SNI
+	GQUICSkipped    uint64 // gQUIC Q050+ 加密 CHLO, 跳过
 }
 
 // ARPHRD_* link-layer type constants seen in the wild on Android.
@@ -160,11 +169,13 @@ func Open(opts Options) (*Handle, error) {
 	// (v5.6.0-rc4: `lt` was already read above for filter selection.)
 
 	return &Handle{
-		fd:       fd,
-		ifname:   opts.Iface,
-		ifindex:  ifc.Index,
-		snap:     opts.Snaplen,
-		buf:      make([]byte, opts.Snaplen+64),
+		fd:      fd,
+		ifname:  opts.Iface,
+		ifindex: ifc.Index,
+		snap:    opts.Snaplen,
+		// v5.14: BPF 对 QUIC 分支返回 max(snaplen, quicSnaplen), 缓冲按大者
+		// 分配, 否则 1200+ 字节的 Initial 被 recvfrom 截断、GCM 必然失败。
+		buf:      make([]byte, max(opts.Snaplen, quicSnaplen)+64),
 		linkType: lt,
 	}, nil
 }
@@ -298,6 +309,13 @@ func (h *Handle) Stats() Stats {
 		IgnoredPackets: h.stats.ignored.Load(),
 		ParseErrors:    h.stats.parseErr.Load(),
 		Panics:         h.stats.panics.Load(),
+
+		QUICInitial:     quicStats.initial.Load(),
+		QUICDecryptOK:   quicStats.decryptOK.Load(),
+		QUICDecryptFail: quicStats.decryptFail.Load(),
+		QUICSNI:         quicStats.sni.Load(),
+		GQUICSNI:        quicStats.gquicSNI.Load(),
+		GQUICSkipped:    quicStats.gquicSkipped.Load(),
 	}
 }
 

@@ -18,6 +18,13 @@
 // 546/547 (DHCPv6)、5353 (mDNS)。这些协议包量极小(接入瞬间几个 DHCP、
 // 每分钟若干组播公告), 对 AF_PACKET 队列压力可忽略。src/dst 任一端口
 // 命中即放行; 用户态 parse.go 再按方向细分, 且绝不把它们记成 EventFlow。
+//
+// v5.14: 额外放行 QUIC —— UDP 目的端口 443 且 UDP 载荷首字节 & 0x80 != 0
+// (long header)。只放行客户端→服务器方向; long header 之外不再细分类型
+// (v1 Initial=0b00 / v2 Initial=0b01 / gQUIC Q046 都是 long header), 由
+// quic.go 在用户态判定。QUIC 分支单独返回 max(snaplen, quicSnaplen), 因为
+// Initial 至少 1200 字节, 截断后 AEAD 无法解密。握手期 long header 包每连接
+// 只有寥寥几个, 1-RTT 数据走 short header, 仍在内核里丢弃。
 
 package capture
 
@@ -81,6 +88,8 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 	const (
 		LBL_DROP   = "DROP"
 		LBL_ACCEPT = "ACCEPT"
+		// v5.14: QUIC 放行单独返回更大的 snaplen。
+		LBL_ACCEPT_QUIC = "ACCEPT_QUIC"
 	)
 
 	labels := make(map[string]int)
@@ -122,7 +131,10 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("", ld|h|ind, "", "", 14)  // UDP src
 	acceptPorts(bpfUDPPortsV4, "")
 	addInsn("", ld|h|ind, "", "", 16) // UDP dst
-	acceptPorts(bpfUDPPortsV4, LBL_DROP)
+	acceptPorts(bpfUDPPortsV4, "")
+	addInsn("", jmp|jeq|k, "", LBL_DROP, 443) // v5.14: QUIC
+	addInsn("", ld|b|ind, "", "", 22)         // UDP 载荷首字节 (14+IPHL+8)
+	addInsn("", jmp|jset|k, LBL_ACCEPT_QUIC, LBL_DROP, 0x80)
 
 	addInsn("IPV4_TCP", ld|h|abs, "", "", 20) // frag
 	addInsn("", jmp|jset|k, LBL_DROP, "", 0x1fff)
@@ -150,7 +162,10 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("IPV6_UDP", ld|h|abs, "", "", 54) // UDP src
 	acceptPorts(bpfUDPPortsV6, "")
 	addInsn("", ld|h|abs, "", "", 56) // UDP dst
-	acceptPorts(bpfUDPPortsV6, LBL_DROP)
+	acceptPorts(bpfUDPPortsV6, "")
+	addInsn("", jmp|jeq|k, "", LBL_DROP, 443) // v5.14: QUIC
+	addInsn("", ld|b|abs, "", "", 62)         // UDP 载荷首字节 (14+40+8)
+	addInsn("", jmp|jset|k, LBL_ACCEPT_QUIC, LBL_DROP, 0x80)
 
 	addInsn("IPV6_TCP", ld|h|abs, "", "", 54) // TCP src
 	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
@@ -169,6 +184,7 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 
 	// ── Returns ────────────────────────────────────────────────────────
 	addInsn(LBL_ACCEPT, ret|k, "", "", snaplen)
+	addInsn(LBL_ACCEPT_QUIC, ret|k, "", "", max(snaplen, quicSnaplen))
 	addInsn(LBL_DROP, ret|k, "", "", 0)
 
 	// Pass 2: resolve labels to JT/JF byte offsets.
@@ -217,7 +233,7 @@ func BuildFilter(snaplen uint32) ([]syscall.SockFilter, error) {
 //
 // This is bug-for-bug compatible with BuildFilter modulo the 14-byte
 // shift and the dispatch front-end. Same accept criteria: TCP/443 (with
-// TLS ClientHello first-byte check) + UDP/53 + UDP/443.
+// TLS ClientHello first-byte check) + UDP 端口表 + v5.14 QUIC long header。
 //
 // v5.6.0-rc4 fix: without this, cellular-only or VPN-active devices got
 // zero packets through the AF_PACKET capture because the kernel BPF
@@ -265,6 +281,8 @@ func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
 	const (
 		LBL_DROP   = "DROP"
 		LBL_ACCEPT = "ACCEPT"
+		// v5.14: QUIC 放行单独返回更大的 snaplen。
+		LBL_ACCEPT_QUIC = "ACCEPT_QUIC"
 	)
 
 	labels := make(map[string]int)
@@ -309,7 +327,10 @@ func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("", ld|h|ind, "", "", 0)  // UDP src (X + 14 → X + 0)
 	acceptPorts(bpfUDPPortsV4, "")
 	addInsn("", ld|h|ind, "", "", 2) // UDP dst (16→2)
-	acceptPorts(bpfUDPPortsV4, LBL_DROP)
+	acceptPorts(bpfUDPPortsV4, "")
+	addInsn("", jmp|jeq|k, "", LBL_DROP, 443) // v5.14: QUIC
+	addInsn("", ld|b|ind, "", "", 8)          // UDP 载荷首字节 (IPHL+8)
+	addInsn("", jmp|jset|k, LBL_ACCEPT_QUIC, LBL_DROP, 0x80)
 
 	addInsn("IPV4_TCP", ld|h|abs, "", "", 6) // frag
 	addInsn("", jmp|jset|k, LBL_DROP, "", 0x1fff)
@@ -341,7 +362,10 @@ func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("IPV6_UDP", ld|h|abs, "", "", 40) // UDP src (54→40)
 	acceptPorts(bpfUDPPortsV6, "")
 	addInsn("", ld|h|abs, "", "", 42) // UDP dst (56→42)
-	acceptPorts(bpfUDPPortsV6, LBL_DROP)
+	acceptPorts(bpfUDPPortsV6, "")
+	addInsn("", jmp|jeq|k, "", LBL_DROP, 443) // v5.14: QUIC
+	addInsn("", ld|b|abs, "", "", 48)         // UDP 载荷首字节 (40+8)
+	addInsn("", jmp|jset|k, LBL_ACCEPT_QUIC, LBL_DROP, 0x80)
 
 	addInsn("IPV6_TCP", ld|h|abs, "", "", 40) // TCP src
 	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
@@ -360,6 +384,7 @@ func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
 
 	// ── Returns ────────────────────────────────────────────────────────
 	addInsn(LBL_ACCEPT, ret|k, "", "", snaplen)
+	addInsn(LBL_ACCEPT_QUIC, ret|k, "", "", max(snaplen, quicSnaplen))
 	addInsn(LBL_DROP, ret|k, "", "", 0)
 
 	// Resolve labels.

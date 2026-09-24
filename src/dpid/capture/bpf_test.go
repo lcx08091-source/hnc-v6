@@ -176,6 +176,11 @@ func TestBPFFilterPorts(t *testing.T) {
 		accept bool
 	}
 	pl := []byte{1, 2, 3, 4}
+	// v5.14: QUIC 载荷首字节。0xc3 = long header Initial(v1), 0xd3 = v2 Initial
+	// 类型位, 0x40 = short header(1-RTT)。
+	qLong := []byte{0xc3, 0, 0, 0, 1, 8}
+	qLongV2 := []byte{0xd3, 0x6b, 0x33, 0x43, 0xcf, 8}
+	qShort := []byte{0x40, 1, 2, 3, 4, 5}
 	cases := []tc{
 		{"v4 dns dst", udp4(40000, 53, pl), false, true},
 		{"v4 dns src", udp4(53, 40000, pl), false, true},
@@ -197,6 +202,16 @@ func TestBPFFilterPorts(t *testing.T) {
 		{"v6 ssdp drop", udp6(40000, 1900, pl), true, false},
 		{"v6 nbns drop", udp6(137, 137, pl), true, false},
 		{"v6 random drop", udp6(40000, 40001, pl), true, false},
+		// v5.14: QUIC
+		{"v4 quic long accept", udp4(40000, 443, qLong), false, true},
+		{"v4 quic v2 long accept", udp4(40000, 443, qLongV2), false, true},
+		{"v4 quic short drop", udp4(40000, 443, qShort), false, false},
+		{"v4 quic server->client drop", udp4(443, 40000, qLong), false, false},
+		{"v4 quic other port drop", udp4(40000, 8443, qLong), false, false},
+		{"v4 quic empty payload drop", udp4(40000, 443, nil), false, false},
+		{"v6 quic long accept", udp6(40000, 443, qLong), true, true},
+		{"v6 quic short drop", udp6(40000, 443, qShort), true, false},
+		{"v6 quic server->client drop", udp6(443, 40000, qLong), true, false},
 	}
 	for _, c := range cases {
 		gotEth := runCBPF(t, eth, withEther(c.ip, c.v6)) != 0
@@ -207,6 +222,25 @@ func TestBPFFilterPorts(t *testing.T) {
 		if gotRaw != c.accept {
 			t.Errorf("rawip %s: accept=%v want %v", c.name, gotRaw, c.accept)
 		}
+	}
+
+	// v5.14: QUIC 分支返回放大的 snaplen(Initial ≥1200 字节不能截断),
+	// 其余放行仍按原 snaplen。
+	if got := runCBPF(t, eth, withEther(udp4(40000, 443, qLong), false)); got != quicSnaplen {
+		t.Errorf("ether quic snaplen=%d want %d", got, quicSnaplen)
+	}
+	if got := runCBPF(t, raw, udp6(40000, 443, qLong)); got != quicSnaplen {
+		t.Errorf("rawip v6 quic snaplen=%d want %d", got, quicSnaplen)
+	}
+	if got := runCBPF(t, eth, withEther(udp4(40000, 53, pl), false)); got != 1024 {
+		t.Errorf("ether dns snaplen=%d want 1024", got)
+	}
+	// IPv4 带选项(IHL=6)时 QUIC 首字节偏移随 IPHL 走。
+	opt := udp4(40000, 443, qLong)
+	opt = append(opt[:20:20], append([]byte{1, 1, 1, 1}, opt[20:]...)...)
+	opt[0] = 0x46
+	if runCBPF(t, eth, withEther(opt, false)) == 0 || runCBPF(t, raw, opt) == 0 {
+		t.Errorf("v4 with options: quic long header should accept")
 	}
 
 	// IPv4 分片(非首片)必须丢弃, 即使端口看起来命中。
