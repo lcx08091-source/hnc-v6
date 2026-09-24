@@ -934,6 +934,10 @@ do_migrate() {
     _HEALTH_TS=0
     echo "ACTIVE:$new" > "$STATE_FILE"
     log "STATE entered ACTIVE:$new"
+    # v5.12: 白名单模式的 DROP 规则带 `-i <热点口>`(接口取自 hnc_state)。迁移后
+    # 不重同步,DROP 仍挂在旧接口上,新接口上的非白名单设备全部放行(封锁失效)。
+    # 必须在上面写入新 STATE 之后调用,whitelist_mode_on 才能拿到新接口。
+    sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
 }
 
 # ═══════════════════════════════════════════════════════════════════════════
