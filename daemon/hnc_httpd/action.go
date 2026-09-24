@@ -325,6 +325,16 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionDiscoverConfirm(s, p)
 	case "discover_ignore":
 		return actionDiscoverIgnore(s, p)
+	case "discover_unignore":
+		return actionDiscoverUnignore(s, p)
+	case "user_rule_del":
+		return actionUserRuleDel(s, p)
+	case "device_ident_set":
+		return actionDeviceIdentSet(hncDir, p)
+	case "conn_block_add":
+		return actionConnBlockAdd(s, p)
+	case "conn_block_del":
+		return actionConnBlockDel(s, p)
 	case "discover_probe":
 		return actionDiscoverProbe(s, p)
 	case "apk_scan":

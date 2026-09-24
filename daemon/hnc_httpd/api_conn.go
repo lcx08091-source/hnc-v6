@@ -18,6 +18,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/json"
 	"math"
 	"net"
 	"net/http"
@@ -462,6 +463,12 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	names := s.loadIPNames()
 	apps := s.loadIPApps()
+	blocked := map[string]bool{}
+	for _, l := range s.expandConnBlocks(connBlockFile{Items: connBlocksFor(s.hncDir, mac)}) {
+		if sp := strings.IndexByte(l, ' '); sp > 0 {
+			blocked[l[sp+1:]] = true
+		}
+	}
 
 	type row struct {
 		m     map[string]interface{}
@@ -518,6 +525,9 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 		if mine[e.Dst] || isPrivateIP(e.Dst) {
 			item["local"] = true
 		}
+		if blocked[e.Dst] {
+			item["blocked"] = true
+		}
 		if label == "" {
 			label = "未识别"
 		}
@@ -568,6 +578,7 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	base["mac"] = mac
 	base["ips"] = ips
+	base["blocks"] = connBlocksFor(s.hncDir, mac)
 	base["total"] = len(rows)
 	base["conns"] = list
 	base["groups"] = groups
@@ -619,7 +630,77 @@ func (s *server) dpiIdentByMAC() map[string]map[string]interface{} {
 			out[strings.ToLower(strings.TrimSpace(mac))] = id
 		}
 	}
+	// v5.16: 用户手动纠正的识别结果覆盖在上面(类型/系统/品牌/型号), 把握 100%
+	for mac, ov := range readIdentOverrides(s.hncDir) {
+		id := out[mac]
+		if id == nil {
+			id = map[string]interface{}{}
+			out[mac] = id
+		}
+		for _, k := range []string{"type", "os", "os_ver", "brand", "model"} {
+			if v := asString(ov[k]); v != "" {
+				id[k] = v
+			} else if _, set := ov[k]; set {
+				delete(id, k) // 用户明确清空
+			}
+		}
+		id["confidence"] = 100
+		id["manual"] = true
+	}
 	return out
+}
+
+// ─── v5.16: 设备识别手动纠正 ─────────────────────────────────────────
+
+func identOverridePath(hncDir string) string {
+	return filepath.Join(hncDir, "data", "device_ident_override.json")
+}
+
+func readIdentOverrides(hncDir string) map[string]map[string]interface{} {
+	out := map[string]map[string]interface{}{}
+	b, err := os.ReadFile(identOverridePath(hncDir))
+	if err != nil {
+		return out
+	}
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+var identTypes = map[string]bool{"phone": true, "tablet": true, "pc": true, "tv": true, "iot": true, "console": true, "watch": true, "unknown": true}
+
+// actionDeviceIdentSet: mac 必填; type/os/os_ver/brand/model 可选(空串 = 清空该项);
+// clear=true 删除这台设备的全部纠正, 回到自动识别。
+func actionDeviceIdentSet(hncDir string, p map[string]string) actionResp {
+	mac := strings.ToLower(strings.TrimSpace(p["mac"]))
+	if !validMAC(mac) {
+		return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
+	}
+	all := readIdentOverrides(hncDir)
+	if p["clear"] == "true" {
+		delete(all, mac)
+	} else {
+		ov := map[string]interface{}{"ts": time.Now().Unix()}
+		for _, k := range []string{"type", "os", "os_ver", "brand", "model"} {
+			v, ok := p[k]
+			if !ok {
+				continue
+			}
+			v = strings.TrimSpace(v)
+			if len([]rune(v)) > 40 {
+				return actionResp{OK: false, Error: "bad params", Detail: k + " too long"}
+			}
+			if k == "type" && v != "" && !identTypes[v] {
+				return actionResp{OK: false, Error: "bad params", Detail: "invalid type"}
+			}
+			ov[k] = v
+		}
+		all[mac] = ov
+	}
+	b, _ := json.MarshalIndent(all, "", "  ")
+	if err := discoverWriteAtomic(identOverridePath(hncDir), b); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	}
+	return actionResp{OK: true}
 }
 
 // ─── v5.14: 应用分级 + 「正在用」────────────────────────────────────────
@@ -679,6 +760,7 @@ const (
 
 type liveAppAcc struct {
 	id, name string
+	cat      string
 	tier     int
 	ewma     float64
 	last     time.Time // 最近一次有流量
@@ -686,6 +768,7 @@ type liveAppAcc struct {
 
 var liveAppState struct {
 	mu     sync.Mutex
+	calls  map[string]*liveCall // v5.16: mac → 正在进行的通话
 	snapAt time.Time
 	lastAt time.Time
 	m      map[string]map[string]*liveAppAcc // mac → app id → acc
@@ -712,6 +795,7 @@ func (s *server) liveAppsByMAC() map[string][]map[string]interface{} {
 		names := s.loadIPNames()
 		apps := s.loadIPApps()
 		inst := map[string]map[string]*liveAppAcc{}
+		callNow := map[string]liveCall{}
 		for _, e := range sn.entries {
 			mac, ok := owner[e.Src]
 			if !ok {
@@ -721,6 +805,9 @@ func (s *server) liveAppsByMAC() map[string][]map[string]interface{} {
 			bps := sn.upBps[k] + sn.dnBps[k]
 			if bps <= 0 {
 				continue
+			}
+			if c, ok := callCandidate(e, sn.upBps[k], sn.dnBps[k], apps, names); ok && c.bps > callNow[mac].bps {
+				callNow[mac] = c
 			}
 			a, ok := appForIP(e.Dst, apps, names)
 			if !ok {
@@ -735,7 +822,7 @@ func (s *server) liveAppsByMAC() map[string][]map[string]interface{} {
 			}
 			acc := inst[mac][a.ID]
 			if acc == nil {
-				acc = &liveAppAcc{id: a.ID, name: a.Name, tier: tier}
+				acc = &liveAppAcc{id: a.ID, name: a.Name, cat: a.Category, tier: tier}
 				inst[mac][a.ID] = acc
 			}
 			acc.ewma += bps // 这里暂存本轮瞬时速率
@@ -770,9 +857,10 @@ func (s *server) liveAppsByMAC() map[string][]map[string]interface{} {
 				if liveAppState.m[mac] == nil {
 					liveAppState.m[mac] = map[string]*liveAppAcc{}
 				}
-				liveAppState.m[mac][id] = &liveAppAcc{id: id, name: in.name, tier: in.tier, ewma: in.ewma * (1 - f), last: sn.at}
+				liveAppState.m[mac][id] = &liveAppAcc{id: id, name: in.name, cat: in.cat, tier: in.tier, ewma: in.ewma * (1 - f), last: sn.at}
 			}
 		}
+		updateCallsLocked(callNow, sn.at)
 		liveAppState.snapAt = sn.at
 		liveAppState.lastAt = sn.at
 	}
@@ -801,7 +889,7 @@ func (s *server) liveAppsByMAC() map[string][]map[string]interface{} {
 				continue // 有真应用时不显示系统服务
 			}
 			items = append(items, map[string]interface{}{
-				"id": acc.id, "name": acc.name, "bps": int64(acc.ewma),
+				"id": acc.id, "name": acc.name, "bps": int64(acc.ewma), "category": acc.cat,
 				"share": math.Round(acc.ewma/total*100) / 100, "system": acc.tier == tierSystem,
 			})
 			if len(items) >= liveAppMax {
@@ -829,4 +917,92 @@ func actionQUICBlockSet(hncDir string, p map[string]string) actionResp {
 		r.Detail = d
 	}
 	return r
+}
+
+// ─── v5.16: 通话检测 ──────────────────────────────────────────────────
+//
+// dpid 规则里的「微信电话」子类靠包速率判断, 但 dpid 的抓包过滤器只放行握手包,
+// 通话的 UDP 媒体流根本到不了它 —— 那个检测实际上从未触发。这里改用连接表:
+// 一条 UDP 连接(非 443/53/123 等)双向都在持续收发、上下行量级接近, 持续 ≥8 秒
+// 即认为在通话; 总速率 > 600 kbps 记为视频通话。能对上应用的显示「微信 · 语音通话」。
+
+type liveCall struct {
+	label, kind string
+	bps         float64
+	since, last time.Time
+}
+
+var callExcludedPorts = map[int]bool{443: true, 80: true, 53: true, 123: true, 853: true, 5353: true, 1900: true, 137: true, 67: true, 68: true}
+
+var wechatVoipNet = mustCIDR("183.232.84.0/24")
+
+func mustCIDR(s string) *net.IPNet { _, n, _ := net.ParseCIDR(s); return n }
+
+func callCandidate(e ctEntry, up, dn float64, apps map[string]ipApp, names map[string]ipName) (liveCall, bool) {
+	if e.Proto != "udp" || callExcludedPorts[e.Dport] || isPrivateIP(e.Dst) {
+		return liveCall{}, false
+	}
+	const minBps, maxBps = 12000, 8_000_000
+	if up < minBps || dn < minBps || up > maxBps || dn > maxBps {
+		return liveCall{}, false
+	}
+	lo, hi := up, dn
+	if lo > hi {
+		lo, hi = hi, lo
+	}
+	if lo/hi < 0.08 { // 单向为主(下载/直播)不是通话
+		return liveCall{}, false
+	}
+	name := ""
+	if a, ok := appForIP(e.Dst, apps, names); ok && appTier(a.Category) != tierHidden {
+		name = a.Name
+	}
+	if ip := net.ParseIP(e.Dst); name == "" && ip != nil && wechatVoipNet.Contains(ip) {
+		name = "微信"
+	}
+	kind := "语音通话"
+	if up+dn > 600_000 {
+		kind = "视频通话"
+	}
+	label := kind
+	if name != "" {
+		label = name + " · " + kind
+	}
+	return liveCall{label: label, kind: kind, bps: up + dn}, true
+}
+
+func updateCallsLocked(now map[string]liveCall, at time.Time) {
+	if liveAppState.calls == nil {
+		liveAppState.calls = map[string]*liveCall{}
+	}
+	for mac, c := range liveAppState.calls {
+		if _, ok := now[mac]; !ok && at.Sub(c.last) > 6*time.Second { // 允许一两次采样的空档
+			delete(liveAppState.calls, mac)
+		}
+	}
+	for mac, c := range now {
+		old := liveAppState.calls[mac]
+		c.last = at
+		if old != nil {
+			c.since = old.since
+		} else {
+			c.since = at
+		}
+		cc := c
+		liveAppState.calls[mac] = &cc
+	}
+}
+
+// liveCallsByMAC 返回持续 ≥8 秒的通话(在 liveAppsByMAC 之后调用)
+func liveCallsByMAC() map[string]map[string]interface{} {
+	out := map[string]map[string]interface{}{}
+	liveAppState.mu.Lock()
+	defer liveAppState.mu.Unlock()
+	for mac, c := range liveAppState.calls {
+		if c.last.Sub(c.since) < 8*time.Second {
+			continue
+		}
+		out[mac] = map[string]interface{}{"label": c.label, "kind": c.kind, "bps": int64(c.bps), "since": c.since.Unix()}
+	}
+	return out
 }

@@ -138,6 +138,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/usage_month", s.apiUsageMonth) // v5.12: 设备本月流量
 	mux.HandleFunc("/api/connections", s.apiConnections) // v5.13: 实时连接(conntrack)
 	mux.HandleFunc("/api/discover", s.apiDiscover)       // v5.15: 未知应用发现
+	mux.HandleFunc("/api/app_usage", s.apiAppUsage)      // v5.16: 按应用的真实流量(conntrack)
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
 	// v5.9.9: 另两个磁盘页此前没有路由 —— json-health.html 完全没有入口
@@ -459,6 +460,7 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	dpiIdent := s.dpiIdentByMAC()
 	// v5.14: 「正在用」—— conntrack 实时速率按应用平滑后的结果
 	liveApps := s.liveAppsByMAC()
+	liveCalls := liveCallsByMAC() // v5.16: 通话检测(连接表)
 
 	deviceRules, _ := rulesMap["devices"].(map[string]interface{})
 	blacklist, _ := rulesMap["blacklist"].([]interface{})
@@ -546,6 +548,9 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		}
 		if la := liveApps[macKey]; len(la) > 0 {
 			merged["live_apps"] = la
+		}
+		if lc := liveCalls[macKey]; lc != nil {
+			merged["live_call"] = lc
 		}
 
 		// 速率: 只读 RateLoop 发布的快照 (按 macKey 小写索引). 单一采样源 →

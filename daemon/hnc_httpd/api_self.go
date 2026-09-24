@@ -17,6 +17,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -304,6 +305,30 @@ func (s *server) apiSelfAttrib(w http.ResponseWriter, r *http.Request) {
 		if err := json.Unmarshal([]byte(ring[i%limit]), &obj); err == nil {
 			out = append(out, obj)
 		}
+	}
+	// v5.16: ?latest=1 —— 只要最新一次采样的连接列表, 并用 DPI 反查表补上远端域名
+	// (WebUI「本机连接明细」用)。remote 形如 "1.2.3.4:443" / "[2409::1]:443"。
+	if r.URL.Query().Get("latest") == "1" && len(out) > 0 {
+		names := s.loadIPNames()
+		last, _ := out[len(out)-1].(map[string]interface{})
+		conns, _ := last["conns"].([]interface{})
+		for _, c := range conns {
+			m, _ := c.(map[string]interface{})
+			host, _, err := net.SplitHostPort(asString(m["remote"]))
+			if err != nil {
+				continue
+			}
+			if ip := net.ParseIP(host); ip != nil {
+				if n, ok := names[ip.String()]; ok {
+					m["name"] = n.Name
+					if n.AppName != "" {
+						m["app"] = n.AppName
+					}
+				}
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{"file": latest, "t": last["t"], "conns": conns})
+		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"file":         latest,

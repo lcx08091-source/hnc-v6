@@ -329,6 +329,111 @@ func addIDList(path, id string) error {
 	return discoverWriteAtomic(path, b)
 }
 
+// v5.16: 已忽略的组(仍在 dpid 聚类结果里的)与用户规则库, 供「管理」页撤销/删除
+func (s *server) ignoredGroups() []map[string]interface{} {
+	raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_discover.json"))
+	ign := readIDList(filepath.Join(s.hncDir, "run", "discover_ignored.json"))
+	out := []map[string]interface{}{}
+	seen := map[string]bool{}
+	if err == nil {
+		root, _ := raw.(map[string]interface{})
+		gs, _ := root["groups"].([]interface{})
+		for _, g := range gs {
+			m, _ := g.(map[string]interface{})
+			id := asString(m["id"])
+			if ign[id] {
+				seen[id] = true
+				out = append(out, map[string]interface{}{"id": id, "suffixes": uniqStrings(strList(m["suffixes"]), 4), "hits": m["hits"]})
+			}
+		}
+	}
+	for id := range ign { // 聚类里已经没有的也列出来, 允许撤销
+		if !seen[id] {
+			out = append(out, map[string]interface{}{"id": id, "suffixes": []string{}, "gone": true})
+		}
+	}
+	sort.Slice(out, func(i, j int) bool { return asString(out[i]["id"]) < asString(out[j]["id"]) })
+	return out
+}
+
+func (s *server) userRules() []map[string]interface{} {
+	out := []map[string]interface{}{}
+	b, err := os.ReadFile(userRulesPath(s.hncDir))
+	if err != nil {
+		return out
+	}
+	var doc map[string]interface{}
+	if json.Unmarshal(b, &doc) != nil {
+		return out
+	}
+	rules, _ := doc["rules"].([]interface{})
+	for _, r := range rules {
+		m, _ := r.(map[string]interface{})
+		if id := asString(m["id"]); id != "" {
+			out = append(out, map[string]interface{}{"id": id, "app": asString(m["app"]), "category": asString(m["category"]), "suffixes": strList(m["suffixes"])})
+		}
+	}
+	return out
+}
+
+func actionDiscoverUnignore(s *server, p map[string]string) actionResp {
+	id := strings.TrimSpace(p["id"])
+	path := filepath.Join(s.hncDir, "run", "discover_ignored.json")
+	m := readIDList(path)
+	if !m[id] {
+		return actionResp{OK: false, Error: "not found", Detail: "not ignored"}
+	}
+	delete(m, id)
+	l := discoverList{IDs: []string{}}
+	for k := range m {
+		l.IDs = append(l.IDs, k)
+	}
+	sort.Strings(l.IDs)
+	b, _ := json.Marshal(l)
+	if err := discoverWriteAtomic(path, b); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	}
+	return actionResp{OK: true}
+}
+
+// actionUserRuleDel 从 99-user-custom.json 删一条规则(dpid 按 mtime 自动重载)
+func actionUserRuleDel(s *server, p map[string]string) actionResp {
+	id := strings.TrimSpace(p["id"])
+	if id == "" {
+		return actionResp{OK: false, Error: "bad params", Detail: "id required"}
+	}
+	path := userRulesPath(s.hncDir)
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return actionResp{OK: false, Error: "not found", Detail: "no user rules"}
+	}
+	var doc map[string]interface{}
+	if json.Unmarshal(b, &doc) != nil {
+		return actionResp{OK: false, Error: "user rules corrupt"}
+	}
+	rules, _ := doc["rules"].([]interface{})
+	kept := make([]interface{}, 0, len(rules))
+	found := false
+	for _, r := range rules {
+		m, _ := r.(map[string]interface{})
+		if asString(m["id"]) == id {
+			found = true
+			continue
+		}
+		kept = append(kept, r)
+	}
+	if !found {
+		return actionResp{OK: false, Error: "not found", Detail: "rule not found"}
+	}
+	doc["rules"] = kept
+	doc["rules_version"] = "user-" + time.Now().Format("20060102")
+	nb, _ := json.MarshalIndent(doc, "", "  ")
+	if err := discoverWriteAtomic(path, nb); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	}
+	return actionResp{OK: true, Detail: "已删除规则 " + id + " · dpid 自动重载"}
+}
+
 func (s *server) discoverGroups() []map[string]interface{} {
 	raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_discover.json"))
 	if err != nil {
@@ -512,6 +617,8 @@ func (s *server) apiDiscover(w http.ResponseWriter, r *http.Request) {
 		"cert_probe":  certProbeEnabled(s.hncDir),
 		"ignored_n":   len(readIDList(filepath.Join(s.hncDir, "run", "discover_ignored.json"))),
 		"confirmed_n": len(readIDList(filepath.Join(s.hncDir, "run", "discover_confirmed.json"))),
+		"ignored":     s.ignoredGroups(),
+		"user_rules":  s.userRules(),
 	})
 }
 

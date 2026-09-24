@@ -5,7 +5,9 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestRegistrableAndCompany(t *testing.T) {
@@ -125,5 +127,204 @@ func TestDiscoverFlow(t *testing.T) {
 	}
 	if r := actionAPKScan(dir); !r.OK || !fileExists(filepath.Join(dir, "run", "apk_scan.request")) {
 		t.Fatal("apk scan request not written")
+	}
+}
+
+// v5.16: 按应用真实流量 —— 连接表字节差分按 (设备, 应用, 小时) 累加
+func TestAppUsageAccounting(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"data", "run"} {
+		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
+	}
+	w := func(p, s string) {
+		if err := os.WriteFile(filepath.Join(dir, p), []byte(s), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w("data/devices.json", `{"aa:bb:cc:00:00:01":{"ip":"192.168.43.12"}}`)
+	w("run/dpi_ipname.json", `{"schema":1,"entries":{"9.9.9.9":{"name":"upos.bilivideo.com","src":"dns","app":"bilibili","app_name":"哔哩哔哩","category":"video"}}}`)
+	t.Setenv("HNC_CONNTRACK_PATH", filepath.Join(dir, "ct"))
+	t.Setenv("HNC_CONNTRACK_ACCT_PATH", filepath.Join(dir, "acct"))
+	line := func(dst string, sport, up, dn int) string {
+		return "ipv4 2 tcp 6 300 ESTABLISHED src=192.168.43.12 dst=" + dst + " sport=" + itoa(sport) + " dport=443 packets=1 bytes=" + itoa(up) +
+			" src=" + dst + " dst=10.0.0.1 sport=443 dport=" + itoa(sport) + " packets=1 bytes=" + itoa(dn) + " mark=0 use=1\n"
+	}
+	reset := func() {
+		ctState.mu.Lock()
+		ctState.snap, ctState.prev, ctState.acctTried = nil, nil, true
+		ctState.mu.Unlock()
+	}
+	appUsage.mu.Lock()
+	appUsage.day, appUsage.prev, appUsage.init, appUsage.dirty = nil, nil, false, false
+	appUsage.mu.Unlock()
+	s := newServer(dir)
+	now := time.Date(2026, 9, 24, 14, 5, 0, 0, time.Local)
+	// 第一轮: 已存在的连接只建立基线, 历史字节不算
+	w("ct", line("9.9.9.9", 1000, 5000, 1_000_000)+line("5.5.5.5", 1001, 100, 200))
+	reset()
+	if got := s.appUsageTick(now); got != 0 {
+		t.Fatalf("baseline tick counted %d bytes", got)
+	}
+	// 第二轮: 增量 + 一条新连接(全部字节算进来) + 一条局域网
+	w("ct", line("9.9.9.9", 1000, 6000, 3_000_000)+line("5.5.5.5", 1001, 100, 200)+line("7.7.7.7", 1002, 50, 950)+line("192.168.43.1", 1003, 10, 20))
+	reset()
+	if got := s.appUsageTick(now.Add(10 * time.Second)); got != 1000+2_000_000+1000+30 {
+		t.Fatalf("delta bytes = %d", got)
+	}
+	s.appUsageFlush(now.Add(time.Minute))
+	if _, err := os.Stat(appUsagePath(dir, "20260924")); err != nil {
+		t.Fatal("usage file not written")
+	}
+	// 连接计数器归零(连接重建同 key) → 不产生负数/巨大值
+	w("ct", line("9.9.9.9", 1000, 10, 10))
+	reset()
+	if got := s.appUsageTick(now.Add(20 * time.Second)); got != 0 {
+		t.Fatalf("counter reset should add 0, got %d", got)
+	}
+}
+
+// v5.16: 通话检测 —— 双向持续的 UDP 媒体流 ≥8 秒才算; 单向下载、443 不算
+func TestLiveCallDetection(t *testing.T) {
+	up, dn := 40000.0, 50000.0
+	e := ctEntry{Proto: "udp", Dst: "183.232.84.10", Dport: 8000}
+	c, ok := callCandidate(e, up, dn, map[string]ipApp{}, map[string]ipName{})
+	if !ok || c.label != "微信 · 语音通话" {
+		t.Fatalf("wechat voip = %+v %v", c, ok)
+	}
+	if c, ok := callCandidate(ctEntry{Proto: "udp", Dst: "8.8.8.8", Dport: 3478}, 400000, 500000, nil, nil); !ok || c.label != "视频通话" {
+		t.Fatalf("generic video call = %+v %v", c, ok)
+	}
+	for _, bad := range []struct {
+		e      ctEntry
+		up, dn float64
+	}{
+		{ctEntry{Proto: "udp", Dst: "8.8.8.8", Dport: 443}, 40000, 50000},   // QUIC 网页/视频
+		{ctEntry{Proto: "tcp", Dst: "8.8.8.8", Dport: 8000}, 40000, 50000},  // TCP
+		{ctEntry{Proto: "udp", Dst: "8.8.8.8", Dport: 9000}, 1000, 3e6},     // 单向下载
+		{ctEntry{Proto: "udp", Dst: "192.168.43.5", Dport: 9000}, 4e4, 4e4}, // 局域网
+	} {
+		if _, ok := callCandidate(bad.e, bad.up, bad.dn, nil, nil); ok {
+			t.Fatalf("should not be a call: %+v", bad)
+		}
+	}
+	liveAppState.mu.Lock()
+	liveAppState.calls = nil
+	t0 := time.Unix(1_800_000_000, 0)
+	updateCallsLocked(map[string]liveCall{"aa": c}, t0)
+	liveAppState.mu.Unlock()
+	if len(liveCallsByMAC()) != 0 {
+		t.Fatal("call shorter than 8s must not show")
+	}
+	liveAppState.mu.Lock()
+	updateCallsLocked(map[string]liveCall{"aa": c}, t0.Add(9*time.Second))
+	liveAppState.mu.Unlock()
+	if lc := liveCallsByMAC()["aa"]; lc == nil {
+		t.Fatal("sustained call should show")
+	}
+	liveAppState.mu.Lock()
+	updateCallsLocked(map[string]liveCall{}, t0.Add(20*time.Second))
+	liveAppState.mu.Unlock()
+	if len(liveCallsByMAC()) != 0 {
+		t.Fatal("ended call should disappear")
+	}
+}
+
+func TestDiscoverManage(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_discover.json"), []byte(`{"groups":[{"id":"g_a","suffixes":["a.io"],"hits":9}]}`), 0o644)
+	s := newServer(dir)
+	if r := actionDiscoverIgnore(s, map[string]string{"id": "g_a"}); !r.OK {
+		t.Fatal(r)
+	}
+	if ig := s.ignoredGroups(); len(ig) != 1 || ig[0]["id"] != "g_a" {
+		t.Fatalf("ignored = %v", ig)
+	}
+	if r := actionDiscoverUnignore(s, map[string]string{"id": "g_a"}); !r.OK || len(s.ignoredGroups()) != 0 {
+		t.Fatalf("unignore failed: %+v", r)
+	}
+	if r := actionDiscoverConfirm(s, map[string]string{"id": "g_a", "name": "A", "category": "tool", "suffixes": "a.io"}); !r.OK {
+		t.Fatal(r)
+	}
+	ur := s.userRules()
+	if len(ur) != 1 || ur[0]["app"] != "A" {
+		t.Fatalf("user rules = %v", ur)
+	}
+	if r := actionUserRuleDel(s, map[string]string{"id": asString(ur[0]["id"])}); !r.OK || len(s.userRules()) != 0 {
+		t.Fatalf("delete failed: %+v", r)
+	}
+	if r := actionUserRuleDel(s, map[string]string{"id": "nope"}); r.OK {
+		t.Fatal("deleting missing rule should fail")
+	}
+}
+
+func TestDeviceIdentOverride(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"data", "run"} {
+		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_devid.json"), []byte(`{"devices":{"aa:bb:cc:00:00:01":{"os":"Android","type":"phone","brand":"小米","confidence":60}}}`), 0o644)
+	s := newServer(dir)
+	if r := actionDeviceIdentSet(dir, map[string]string{"mac": "AA:BB:CC:00:00:01", "type": "tablet", "model": "Pad 6", "brand": ""}); !r.OK {
+		t.Fatal(r)
+	}
+	id := s.dpiIdentByMAC()["aa:bb:cc:00:00:01"]
+	if id["type"] != "tablet" || id["model"] != "Pad 6" || id["os"] != "Android" || id["confidence"] != 100 || id["manual"] != true {
+		t.Fatalf("override = %v", id)
+	}
+	if _, has := id["brand"]; has {
+		t.Fatal("explicitly cleared brand should be removed")
+	}
+	if r := actionDeviceIdentSet(dir, map[string]string{"mac": "aa:bb:cc:00:00:01", "type": "spaceship"}); r.OK {
+		t.Fatal("invalid type accepted")
+	}
+	// 没有自动识别结果的设备也能手动设
+	_ = actionDeviceIdentSet(dir, map[string]string{"mac": "aa:bb:cc:00:00:02", "type": "tv"})
+	if s.dpiIdentByMAC()["aa:bb:cc:00:00:02"]["type"] != "tv" {
+		t.Fatal("override for unknown device missing")
+	}
+	_ = actionDeviceIdentSet(dir, map[string]string{"mac": "aa:bb:cc:00:00:01", "clear": "true"})
+	if id := s.dpiIdentByMAC()["aa:bb:cc:00:00:01"]; id["type"] != "phone" || id["manual"] == true {
+		t.Fatalf("clear should restore auto result: %v", id)
+	}
+}
+
+func TestConnBlocks(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"data", "run", "bin"} {
+		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
+	}
+	// 假脚本: 把收到的 flat 复制一份, 输出最后一行
+	_ = os.WriteFile(filepath.Join(dir, "bin", "connblock_sync.sh"), []byte("cp \"$HNC_DIR/run/conn_blocks.flat\" \"$HNC_DIR/run/synced\" 2>/dev/null; echo CONN_BLOCK=on rules=$(wc -l < \"$HNC_DIR/run/conn_blocks.flat\")\n"), 0o755)
+	t.Setenv("HNC_DIR", dir)
+	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{"1.1.1.1":{"name":"v26.douyinvod.com"},"2.2.2.2":{"name":"douyinvod.com"},"3.3.3.3":{"name":"notdouyinvod.com"}}}`), 0o644)
+	s := newServer(dir)
+	mac := "aa:bb:cc:00:00:01"
+	if r := actionConnBlockAdd(s, map[string]string{"mac": mac, "kind": "domain", "value": "douyinvod.com", "label": "抖音"}); !r.OK {
+		t.Fatalf("add domain: %+v", r)
+	}
+	b, _ := os.ReadFile(connBlocksFlat(dir))
+	if string(b) != mac+" 1.1.1.1\n"+mac+" 2.2.2.2\n" {
+		t.Fatalf("flat = %q", b)
+	}
+	if r := actionConnBlockAdd(s, map[string]string{"mac": mac, "kind": "ip", "value": "192.168.43.1"}); r.OK {
+		t.Fatal("LAN ip must be rejected")
+	}
+	if r := actionConnBlockAdd(s, map[string]string{"mac": mac, "kind": "domain", "value": "x.com; rm -rf /"}); r.OK {
+		t.Fatal("bad domain accepted")
+	}
+	// 反查表出现新 IP → 后台刷新后跟上
+	_ = os.WriteFile(filepath.Join(dir, "run", "dpi_ipname.json"), []byte(`{"entries":{"1.1.1.1":{"name":"v26.douyinvod.com"},"4.4.4.4":{"name":"v9.douyinvod.com"}}}`), 0o644)
+	s.jsonCache = newJSONFileCache()
+	s.connBlockRefresh()
+	b, _ = os.ReadFile(connBlocksFlat(dir))
+	if !strings.Contains(string(b), "4.4.4.4") || strings.Contains(string(b), "2.2.2.2") {
+		t.Fatalf("refresh did not follow ipname: %q", b)
+	}
+	if r := actionConnBlockDel(s, map[string]string{"mac": mac, "kind": "domain", "value": "douyinvod.com"}); !r.OK {
+		t.Fatal(r)
+	}
+	if b, _ := os.ReadFile(connBlocksFlat(dir)); len(b) != 0 {
+		t.Fatalf("flat should be empty after delete: %q", b)
 	}
 }

@@ -14,6 +14,33 @@
 
 ---
 
+## [5.16.0] - 2026-09-24
+
+**全量真实统计 + 补齐排查出来的缺口与半成品**(依据一次前后端逐项对账:路由 / 动作 / 配置字段 / dpid 输出 / 脚本调用)。
+
+### Changed
+
+- **统计页只保留全量统计**(iptables 计数器),去掉「统计来源」选择与 Shadow 选项。原默认的「应用归因(DPI)」口径只含 dpid 抓到的握手包(cBPF 只放行 DNS 与 TLS/QUIC 握手),按应用字节数严重偏小。
+- 分析页「流量历史」优先使用新的按应用真实流量,无累计数据时才回落 DPI 历史。
+
+### Added
+
+- **按应用的真实流量统计**(httpd `app_usage.go`):后台每 10 秒读连接表,按连接做字节差分,按 (设备, 应用, 小时) 累加;应用归属同实时连接(规则命中 IP → DNS/SNI 反查),其余记「未识别」/「局域网」。首轮只建基线不计历史字节,计数器回绕按 0 处理;`run/app_usage.YYYYMMDD.json` 每分钟落盘、保留 32 天。新接口 `GET /api/app_usage?days=&mac=`。统计页新增「按应用 · 真实流量」。
+- **通话检测**:dpid 规则里的「微信电话」子类依赖包速率,但抓包过滤器根本不放行媒体流,从未触发。改在 httpd 用连接表判断 —— 非 443/53/123 等的 UDP 连接双向持续收发、上下行量级接近、持续 ≥8 秒即为通话,>600 kbps 记为视频通话,能对上应用的显示「微信 · 语音通话」。设备项新增 `live_call`,`live_apps` 带 `category`;设备卡显示通话标记与「此刻：视频 72% · 社交 20%」。
+- **按设备封锁域名 / IP**:实时连接里点一条连接 → 封锁该域名(含子域名)/ 只封这个 IP / 给该应用限速 / 复制。`data/conn_blocks.json` 由 httpd 按 DNS/SNI 反查表展开成 `run/conn_blocks.flat`,新脚本 `bin/connblock_sync.sh` 在独立链 `HNC_CONNBLK`(filter/FORWARD 第 1 位)按 `-m mac --mac-source <mac> -d <ip> -j REJECT` 落地(v4+v6,只接受 IP 字面量与合法 MAC);反查表变化时后台重新展开同步;watchdog 三处随白名单重同步,cleanup 清理。动作 `conn_block_add` / `conn_block_del`,`/api/connections` 返回 `blocks` 与每条的 `blocked`。
+- **设备识别手动纠正**:`data/device_ident_override.json`,动作 `device_ident_set`(类型 / 系统 / 版本 / 品牌 / 型号,`clear=true` 恢复自动),合并时覆盖自动结果、把握 100%。
+- **新设备接入提醒设置 + 告警总开关**(后端 `alert_config_set` 的 `unknown_device` / `master` section 早已存在,界面此前没有):开关、免打扰时段、最短提醒间隔。
+- **「新发现的应用」管理页**:已忽略的可撤销(`discover_unignore`),已加入规则库的可删除(`user_rule_del`,dpid 按 mtime 自动重载);`/api/discover` 返回 `ignored` 与 `user_rules`。
+- **本机连接明细**:应用页「此刻连接明细」,`/api/self/attrib?latest=1` 返回最近一次采样并补上远端域名。
+- 分析页总体状态补充 nDPI 辅助、证据账本、指纹种数。
+
+### Internals
+
+- 新测试:app_usage(基线 / 增量 / 新连接 / 局域网 / 计数器回绕 / 落盘)、通话检测(正反例与持续时间)、封锁展开与跟随反查表、识别纠正、发现管理;`test_connblock.sh`(规则生成、注入行过滤)。
+- 需要 CI 重编 `hnc_httpd`(本版 dpid 未改)。
+
+---
+
 ## [5.15.0] - 2026-09-24
 
 **未知应用自动发现**:规则库认不出的流量,自动聚类并查出是哪个 App,确认后一键进规则库。
