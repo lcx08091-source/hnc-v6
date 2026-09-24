@@ -454,9 +454,15 @@ case "$CMD" in
             fi
             # v5.0: tc 规则已清, 通知 scheduler 可能恢复 offload
             notify_offload "$MAC" 0
-            if [ -n "$IP" ]; then
-                sh "$IPT" unmark "$IP" "$MAC" "$MID" >> "$LOG" 2>&1 || log "iptables unmark warn"
-            fi
+            # v5.12: 设备离线(devices.json 无 IP)时旧实现直接跳过 unmark,MAC-only 的
+            # MARK 规则(v4+v6)、-s/-d 旧 IP 规则和 v6 u32 filter 全部残留;
+            # cleanup_stale_rules 删陈旧设备走的正是这条路径,随后 mid 被释放复用。
+            # 先回退到 rules.json 记录的 IP;仍为空也照样 unmark —— MAC-only 规则与
+            # v6 filter 不依赖 IP,-s/-d 规则删除失败是幂等无害的。
+            UNMARK_IP=$IP
+            [ -n "$UNMARK_IP" ] || UNMARK_IP=$(get_rule_ip "$MAC")
+            valid_ipv4 "$UNMARK_IP" || UNMARK_IP=""
+            sh "$IPT" unmark "$UNMARK_IP" "$MAC" "$MID" >> "$LOG" 2>&1 || log "iptables unmark warn"
         fi
         # 3. 写 rules.json: 清空 down_mbps/up_mbps + limit_enabled=false
         # rc3.1.33 修 #18: 累计失败. 如果 limit_enabled 写失败但 tc 已清, 下次 watchdog

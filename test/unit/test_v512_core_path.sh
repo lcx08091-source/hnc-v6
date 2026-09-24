@@ -122,3 +122,19 @@ assert_mock_called "filter del dev wlan2 parent 1: prio 205 protocol ipv6" "孤�
     assert_mock_called "filter del dev ifb0 parent 1: prio 205 protocol ipv6" "ifb0 上的也要删" && \
     assert_file_not_exists "$HNC_TEST_DIR/run/v6/aa:bb:cc:dd:ee:05" && test_pass
 mock_teardown
+
+# ═══ cleanup_stale_rules: 持 gate 时 unmark 不得自阻塞 + 离线设备也要 unmark ═══
+test_start "cleanup_stale_rules: 陈旧离线设备的 MARK 规则被真正删除"
+mock_setup
+mock_set_exit iptables 1     # 让 ipt_del_all 一次即停(规则"已不存在")
+mock_set_exit ip6tables 1
+echo "wlan2" > "$HNC_TEST_DIR/run/iface.cache"
+mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan2"
+cat > "$HNC_TEST_DIR/data/rules.json" <<'EOF'
+{"version":1,"stale_rule_ttl_days":30,"devices":{"cc:cc:cc:cc:cc:07":{"mark_id":7,"down_mbps":5,"limit_enabled":true,"last_seen_persist":1000}},"blacklist":[],"whitelist":[]}
+EOF
+echo '{}' > "$HNC_TEST_DIR/data/devices.json"
+HNC_DIR="$HNC_TEST_DIR" HNC="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/cleanup_stale_rules.sh" >/dev/null 2>&1
+assert_mock_called "mangle -D HNC_MARK -m mac --mac-source cc:cc:cc:cc:cc:07 -m mark --mark 0 -j MARK --set-mark 0x800007" \
+    "陈旧设备的 MAC-only MARK 规则必须删除" && test_pass
+mock_teardown
