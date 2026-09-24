@@ -312,6 +312,11 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionDPIRulesReset(hncDir)
 	case "dpi_rules_update":
 		return actionDPIRulesUpdate(hncDir, p)
+	// v5.12
+	case "hotspot_schedule_set":
+		return actionHotspotScheduleSet(hncDir, p)
+	case "stale_ttl_set":
+		return actionStaleTTLSet(hncDir, p)
 	case "auth_required_set":
 		return actionAuthRequiredSet(hncDir, p)
 	case "remote_enabled_set":

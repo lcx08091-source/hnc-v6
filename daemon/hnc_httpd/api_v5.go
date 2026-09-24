@@ -51,6 +51,12 @@ type configResp struct {
 	TcQosMode    string `json:"tc_qos_mode"`
 	TcQosScale   int    `json:"tc_qos_scale"`
 	QosFallback  bool   `json:"qos_fallback"`
+	// v5.12: 定时 / 充电热点 与 过期规则清理天数
+	HotspotTimeEnable   bool   `json:"hotspot_time_enable"`
+	HotspotTimeStart    string `json:"hotspot_time_start"`
+	HotspotTimeEnd      string `json:"hotspot_time_end"`
+	HotspotChargingOnly bool   `json:"hotspot_charging_only"`
+	StaleRuleTTLDays    int    `json:"stale_rule_ttl_days"`
 	// rc3.1.13.1 删 OffloadWarn (review §3 P0): 历史上后端读 rules.json
 	// 但从无写路径, 前端 toggle 只写 localStorage 自管, 字段始终死值 false.
 	// rc3.1.12 config.json 兜底分支删除后, 死状况暴露 — 不如直接清掉
@@ -82,6 +88,14 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 				resp.HotspotDelaySec = int(d)
 			} else if d, ok := m["hotspot_delay_sec"].(float64); ok {
 				resp.HotspotDelaySec = int(d)
+			}
+			resp.HotspotTimeEnable = boolField(m, "hotspot_time_enable")
+			resp.HotspotChargingOnly = boolField(m, "hotspot_charging_only")
+			resp.HotspotTimeStart, _ = m["hotspot_time_start"].(string)
+			resp.HotspotTimeEnd, _ = m["hotspot_time_end"].(string)
+			resp.StaleRuleTTLDays = 30 // 与 cleanup_stale_rules.sh 缺省一致
+			if v, ok := m["stale_rule_ttl_days"].(float64); ok {
+				resp.StaleRuleTTLDays = int(v)
 			}
 			if v, ok := m["hotspot_iface"].(string); ok {
 				resp.HotspotIface = v
@@ -197,10 +211,13 @@ type ifaceInfoResp struct {
 // 对应 Bug A · 解决 URL 显示 192.168.1.1 的问题
 func (s *server) apiIfaceInfo(w http.ResponseWriter, r *http.Request) {
 	resp := ifaceInfoResp{}
-	// 1. device_detect.sh iface → 接口名
-	rc, out := runBin(s.hncDir, "device_detect.sh", "iface")
-	if rc == 0 {
-		resp.Iface = strings.TrimSpace(out)
+	// 1. 接口名: v5.12 先走 currentHotspotIface(读 run/hnc_state / iface.cache, 无 fork);
+	//    拿不到才 fork device_detect.sh(最长 10s)—— 此前每次调用都 fork, 远程页轮询时放大。
+	resp.Iface = s.currentHotspotIface()
+	if resp.Iface == "" {
+		if rc, out := runBin(s.hncDir, "device_detect.sh", "iface"); rc == 0 {
+			resp.Iface = strings.TrimSpace(out)
+		}
 	}
 	// 2. 如果没拿到 iface, 尝试从 devices.json 找有活设备的 iface
 	if resp.Iface == "" {

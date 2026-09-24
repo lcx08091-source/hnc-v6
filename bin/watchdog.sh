@@ -1127,6 +1127,9 @@ while true; do
         fi
     fi
 
+    # v5.12: 定时开关热点 / 只在充电时开热点(边沿触发, 两项都没启用时几乎零开销)
+    sh "$HNC_DIR/bin/hotspot_schedule.sh" >/dev/null 2>&1 || true
+
     # rc3.1: service.wanted marker 逻辑已移除 · watchdog 在 cleanup.sh 杀进程
     # 阶段就已经死了, 这段永远执行不到. restart 改由 cleanup.sh 末尾直接 fork.
 

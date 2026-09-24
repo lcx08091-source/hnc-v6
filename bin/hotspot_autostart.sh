@@ -136,6 +136,12 @@ case "$CMD" in
 
 start|start-now)
     log "=== Hotspot autostart begin (cmd=$CMD) ==="
+    # v5.12: 开机自启(start)先问定时/充电规则; 手动"立即开启"(start-now)不受限。
+    if [ "$CMD" = "start" ] && [ -f "$HNC_DIR/bin/hotspot_schedule.sh" ] \
+        && ! HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hotspot_schedule.sh" --check; then
+        log "skip: 不在热点定时时段内或未在充电(hotspot_time_* / hotspot_charging_only)"
+        exit 0
+    fi
 
     # ── 0. 读取用户配置（全部来自 rules.json）────────────────
     # v3.4.9: 删除充电限制 / 时间段限制(用户用不上,徒增配置复杂度)
