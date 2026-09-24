@@ -319,6 +319,5 @@ func normalizeHistMAC(mac string) string {
 	return mac
 }
 
-
 // _unused silences "fmt imported but not used" once we drop debug helpers.
 var _ = fmt.Sprintf

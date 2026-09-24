@@ -58,11 +58,11 @@ const (
 
 // netlink group constants (Linux RTNLGRP_*; not all exported by syscall)
 const (
-	rtnlgrpLink         = 0x1
-	rtnlgrpIPv4IfAddr   = 0x5
-	rtnlgrpIPv6IfAddr   = 0x9
-	rtnlgrpIPv4Route    = 0x7
-	rtnlgrpIPv6Route    = 0xb
+	rtnlgrpLink       = 0x1
+	rtnlgrpIPv4IfAddr = 0x5
+	rtnlgrpIPv6IfAddr = 0x9
+	rtnlgrpIPv4Route  = 0x7
+	rtnlgrpIPv6Route  = 0xb
 )
 
 // ─── globals ──────────────────────────────────────────────────────────────
@@ -184,10 +184,10 @@ func readConfig() Config {
 }
 
 // getIface mirrors guard.sh's get_iface() priority:
-//   1. config.iface (explicit override)
-//   2. /data/local/hnc/run/hotspot_iface hint file (written by hotspotd)
-//   3. built-in scan of likely AP-style iface names
-//   4. default "wlan2"
+//  1. config.iface (explicit override)
+//  2. /data/local/hnc/run/hotspot_iface hint file (written by hotspotd)
+//  3. built-in scan of likely AP-style iface names
+//  4. default "wlan2"
 func getIface() string {
 	if c := readConfig(); c.Iface != "" {
 		return c.Iface

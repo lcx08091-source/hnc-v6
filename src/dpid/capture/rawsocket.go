@@ -32,6 +32,7 @@ type Stats struct {
 	DNSEvents      uint64
 	TLSEvents      uint64
 	FlowEvents     uint64 // rc29
+	DevHintEvents  uint64 // v5.13: DHCP/DHCPv6/mDNS/SSDP/NBNS 设备识别线索
 	IgnoredPackets uint64
 	ParseErrors    uint64
 	Panics         uint64 // recovered packet-handler panics (see Run)
@@ -69,6 +70,7 @@ type Handle struct {
 		dns      atomic.Uint64
 		tls      atomic.Uint64
 		flow     atomic.Uint64
+		devHint  atomic.Uint64
 		ignored  atomic.Uint64
 		parseErr atomic.Uint64
 		panics   atomic.Uint64
@@ -275,6 +277,7 @@ func (h *Handle) Stats() Stats {
 		DNSEvents:      h.stats.dns.Load(),
 		TLSEvents:      h.stats.tls.Load(),
 		FlowEvents:     h.stats.flow.Load(),
+		DevHintEvents:  h.stats.devHint.Load(),
 		IgnoredPackets: h.stats.ignored.Load(),
 		ParseErrors:    h.stats.parseErr.Load(),
 		Panics:         h.stats.panics.Load(),
@@ -384,6 +387,8 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 					h.stats.tls.Add(1)
 				case EventFlow:
 					h.stats.flow.Add(1)
+				case EventDevHint:
+					h.stats.devHint.Add(1)
 				}
 				onEvent(ev)
 			case ParseIgnore:

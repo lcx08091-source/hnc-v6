@@ -23,9 +23,9 @@ import "log"
 // reports zeros.
 type NoneSampler struct{}
 
-func (n *NoneSampler) Source() string                          { return "none" }
-func (n *NoneSampler) Close() error                            { return nil }
-func (n *NoneSampler) Sample() (map[int]ByteCounts, error)     { return map[int]ByteCounts{}, nil }
+func (n *NoneSampler) Source() string                      { return "none" }
+func (n *NoneSampler) Close() error                        { return nil }
+func (n *NoneSampler) Sample() (map[int]ByteCounts, error) { return map[int]ByteCounts{}, nil }
 
 // Detect picks a backend, logs which one won, returns it. Never returns
 // nil — at worst, NoneSampler. Callers should still check Source() to

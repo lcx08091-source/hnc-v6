@@ -237,6 +237,7 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 //     permissions, etc) → log, set lc.lastErr, return.
 //   - h.Run returns non-nil non-Canceled error (kernel drop, raw socket
 //     EOF, etc) → log, set lc.lastErr, return.
+//
 // In all cases, the reconciler will see this iface still present in
 // DiscoverSelfCandidates on the next tick and restart us — restarts
 // counter bumps to make this visible in dpi_state.json.

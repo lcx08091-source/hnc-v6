@@ -35,7 +35,7 @@ func TestEvidenceLedgerMaxTotal(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			el.Add("mac"+strings.Repeat("x", k), "app", EvidenceEntry{
 				// 后写的 key 时间更晚 —— 最旧的 key 先被丢
-				Ts: base.Add(time.Duration(k)*time.Minute + time.Duration(i)*time.Second),
+				Ts:     base.Add(time.Duration(k)*time.Minute + time.Duration(i)*time.Second),
 				Source: SrcDNS,
 			})
 		}
