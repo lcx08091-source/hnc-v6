@@ -53,6 +53,12 @@ type Handle struct {
 	buf     []byte
 	mu      sync.Mutex // protects fd/ifname/ifindex/linkType/rebound during Rebind
 	rebound bool       // set true by Rebind, checked by Run after EBADF
+	// v5.12: Rebind 换下来的旧 fd 不再立即 close, 挂在这里, 由 Close() 统一关。
+	// 旧实现在 Run 从 h.fd 取出旧 fd、尚未进入 recvfrom 的窗口里就 close 了它,
+	// fd 号可能立刻被本进程别处(状态文件 flush / 读 /proc 等)复用 → Run 对
+	// 一个无关 fd 调 recvfrom: 普通文件得 ENOTSOCK → 被当成致命错误, 整个
+	// capture 退出进入 blind 模式且不再重试; 若复用成了别的 socket 还会偷读数据。
+	retired []int
 
 	// v5.6.0-rc3: link-layer type (ARPHRD_*) read from
 	// /sys/class/net/$iface/type at Open. Determines whether parsePacket
@@ -180,7 +186,11 @@ func readLinkType(iface string) (int, error) {
 
 // LinkType returns the ARPHRD_* link type discovered at Open time.
 // Used by self_capture.go for diagnostic logging.
-func (h *Handle) LinkType() int { return h.linkType }
+func (h *Handle) LinkType() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.linkType
+}
 
 // CurrentIfindex returns the ifindex the handle was opened (or last rebound) with.
 func (h *Handle) CurrentIfindex() int {
@@ -236,8 +246,9 @@ func (h *Handle) Rebind(newIface string) error {
 	}
 
 	// Atomic swap: Run() reads fd under lock, so it will see the new fd.
-	// The old fd is closed after the swap; Run's recvfrom on the old fd
-	// will return EBADF, causing a clean exit from Run.
+	// v5.12: 旧 fd 不在这里 close(见 retired 字段注释)。Run 的 recvfrom 最多
+	// 500ms(SO_RCVTIMEO)后返回, 发现 h.fd 已换即返回 ErrRebound; 旧 fd 由
+	// 调用方随后的 Close() 关闭。
 	h.mu.Lock()
 	oldFD := h.fd
 	h.fd = fd
@@ -245,9 +256,11 @@ func (h *Handle) Rebind(newIface string) error {
 	h.ifindex = ifc.Index
 	h.linkType = lt
 	h.rebound = true
+	if oldFD >= 0 {
+		h.retired = append(h.retired, oldFD)
+	}
 	h.mu.Unlock()
 
-	_ = syscall.Close(oldFD)
 	fmt.Fprintf(os.Stderr, "[dpid/capture] rebind: switched to %s (ifindex=%d, linktype=%d)\n", newIface, ifc.Index, lt)
 	return nil
 }
@@ -259,6 +272,10 @@ func (h *Handle) Close() {
 		_ = syscall.Close(h.fd)
 		h.fd = -1
 	}
+	for _, fd := range h.retired { // v5.12
+		_ = syscall.Close(fd)
+	}
+	h.retired = nil
 }
 
 func (h *Handle) Iface() string {
@@ -289,6 +306,10 @@ type tpacketStats struct {
 }
 
 func (h *Handle) refreshDrops() {
+	// v5.12: 持锁读 fd 并在锁内完成 getsockopt —— 旧代码无锁读 h.fd, 与
+	// Rebind/Close 构成数据竞争, 可能对已关闭(甚至被复用)的 fd 号取统计。
+	h.mu.Lock()
+	defer h.mu.Unlock()
 	if h.fd < 0 {
 		return
 	}
@@ -319,12 +340,22 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 
 		h.mu.Lock()
 		fd := h.fd
+		linkType := h.linkType // v5.12: 与 fd 一起在锁内取, 旧代码无锁读(数据竞争)
 		h.mu.Unlock()
 		if fd < 0 {
 			return nil // Close() was called
 		}
 
 		n, _, err := syscall.Recvfrom(fd, h.buf, 0)
+		// v5.12: recvfrom 返回后先看 fd 是否已被 Rebind 换掉, 是则按设计返回
+		// ErrRebound(旧实现依赖旧 fd 被 close 产生 EBADF, 但阻塞中的 recvfrom
+		// 不会因 close 被唤醒, 且 close 后的 fd 号复用会导致 ENOTSOCK 致命退出)。
+		h.mu.Lock()
+		swapped := h.fd != fd && h.rebound
+		h.mu.Unlock()
+		if swapped {
+			return ErrRebound
+		}
 		if err != nil {
 			switch err {
 			case syscall.EAGAIN, syscall.EINTR:
@@ -366,7 +397,7 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 			// IP header bytes as bogus etherType and silently drop everything.
 			var ev Event
 			var res ParseResult
-			switch h.linkType {
+			switch linkType {
 			case arphrdRawIP, arphrdNone:
 				ev, res = parseRawIPPacket(h.buf[:n], time.Now())
 			default:
