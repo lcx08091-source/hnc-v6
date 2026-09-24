@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -285,7 +286,8 @@ func (a *SelfAttribAggregator) SetEnabled(enabled bool, reason string) {
 // remoteToUID a sync.Map but the cost-benefit at 5s replacement cadence
 // is not worth the complexity.
 func (a *SelfAttribAggregator) LookupUID(remoteIP string, remotePort uint16) (uid int, pkg string, ok bool) {
-	key := fmt.Sprintf("%s:%d", remoteIP, remotePort)
+	// v5.12: 用与 sampleOnce 建表相同的规范化键(见 canonRemoteKey)。
+	key := canonIPPort(remoteIP, strconv.Itoa(int(remotePort)))
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	uid, ok = a.remoteToUID[key]
@@ -706,7 +708,16 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 			} else if e.UID > 0 {
 				unknownConns++
 			}
-			newRemoteToUID[e.Remote] = e.UID
+			// v5.12: 表键规范化。旧代码直接用 parseHexAddr 的原样字符串当键:
+			// IPv6 形如 "[2409:8963:e03:0:...]:443"(%x 不补零、不做 :: 压缩),
+			// 而 LookupUID 用 net.IP.String()("2409:8963:e03::...", 无方括号)
+			// 拼键, 永远对不上; 更常见的是 Android Java 应用用双栈 AF_INET6
+			// socket 连 IPv4 服务器, /proc/net/tcp6 里是 ::ffff:a.b.c.d 映射
+			// 地址, 抓包侧看到的却是纯 IPv4 → 自抓包 SNI 归因对大多数 App
+			// 全部落空。统一规范为 "IPv4点分 或 IPv6 规范串:port"。
+			if k := canonRemoteKey(e.Remote); k != "" {
+				newRemoteToUID[k] = e.UID
+			}
 			rows = append(rows, e)
 		}
 	}
@@ -1017,7 +1028,11 @@ func parseProcNet(path, proto string, isIPv6 bool) ([]SelfAttribConnRow, error) 
 		}
 		// Skip all-zero remote (UDP server sockets bound to 0.0.0.0:port,
 		// etc.) — they have no remote peer.
-		if strings.HasPrefix(remote, "0.0.0.0:") || strings.HasPrefix(remote, "[::]:") {
+		// v5.12: parseHexAddr 的 IPv6 输出不做 :: 压缩, 全零地址是
+		// "[0:0:0:0:0:0:0:0]:port", 旧的 "[::]:" 前缀永不匹配 → udp6/tcp6
+		// 未连接 socket 全被当成连接写进 JSONL 并计入 TotalConns。
+		if strings.HasPrefix(remote, "0.0.0.0:") || strings.HasPrefix(remote, "[::]:") ||
+			strings.HasPrefix(remote, "[0:0:0:0:0:0:0:0]:") {
 			continue
 		}
 
@@ -1031,6 +1046,30 @@ func parseProcNet(path, proto string, isIPv6 bool) ([]SelfAttribConnRow, error) 
 		})
 	}
 	return out, sc.Err()
+}
+
+// canonRemoteKey v5.12: 把 parseHexAddr 产出的 "a.b.c.d:port" /
+// "[v6]:port" 规范为 canonIPPort 形式; 解析失败返回 ""。
+func canonRemoteKey(hostport string) string {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return ""
+	}
+	return canonIPPort(host, port)
+}
+
+// canonIPPort v5.12: IPv4-mapped IPv6(::ffff:a.b.c.d)折叠成 IPv4, 其余 IPv6
+// 用 net.IP.String() 的规范写法; 结果形如 "1.2.3.4:443" / "2409:8963::1:443"
+// (键只用于 map 查找, 不需要可逆)。无法解析的 IP 原样保留。
+func canonIPPort(ip, port string) string {
+	if p := net.ParseIP(ip); p != nil {
+		if v4 := p.To4(); v4 != nil {
+			ip = v4.String()
+		} else {
+			ip = p.String()
+		}
+	}
+	return ip + ":" + port
 }
 
 // parseHexAddr converts "0100007F:1F40" (IPv4 little-endian per byte
