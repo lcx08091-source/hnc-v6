@@ -114,6 +114,10 @@ sync_one() {
     fi
 
     local prio=$((PRIO_BASE + mark_id))
+    # v5.12: 与 tc_manager.sh _class_id_for_mark 保持一致 —— mark_id=1 的 class
+    # 是 1:100(1:1 是 HTB 父类),否则 v6 filter flowid 指向父类,等于没分类。
+    local cls=$mark_id
+    [ "$mark_id" = "1" ] && cls=100
     local snap="$SNAP_DIR/$mac"
     mkdir -p "$SNAP_DIR" 2>/dev/null
 
@@ -146,7 +150,7 @@ sync_one() {
 
     # 检查 ifb0 上是否有该 class（用户设了 up 限速时才会有）
     local has_ingress=0
-    if tc class show dev "$IFB_IFACE" 2>/dev/null | grep -q "1:$mark_id "; then
+    if tc class show dev "$IFB_IFACE" 2>/dev/null | grep -q "class htb 1:$cls "; then
         has_ingress=1
     fi
 
@@ -155,7 +159,7 @@ sync_one() {
     for addr in $cur; do
         # Egress（下行限速）：wlan2 上 dst 匹配
         if tc filter add dev "$iface" parent 1: protocol ipv6 prio "$prio" u32 \
-                match ip6 dst "$addr/128" flowid "1:$mark_id" 2>/dev/null; then
+                match ip6 dst "$addr/128" flowid "1:$cls" 2>/dev/null; then
             n=$((n+1))
         else
             nfail=$((nfail+1))
@@ -165,7 +169,7 @@ sync_one() {
         # Ingress（上行限速）：ifb0 上 src 匹配（仅当 class 存在）
         if [ "$has_ingress" = "1" ]; then
             tc filter add dev "$IFB_IFACE" parent 1: protocol ipv6 prio "$prio" u32 \
-                match ip6 src "$addr/128" flowid "1:$mark_id" 2>/dev/null
+                match ip6 src "$addr/128" flowid "1:$cls" 2>/dev/null
         fi
     done
 
