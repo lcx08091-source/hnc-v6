@@ -9,12 +9,14 @@ package output
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -1423,8 +1425,18 @@ func (w *Writer) Flush() error {
 	return atomicWrite(w.path, b, 0o644)
 }
 
+// atomicWriteSeq v5.12: 临时文件名序号, 见 atomicWrite。
+var atomicWriteSeq atomic.Uint64
+
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
+	// v5.12: 临时文件名带 pid + 进程内序号。旧的固定 path+".tmp" 有两类并发
+	// 写者: (1) 进程内 —— 5s 状态 goroutine、rebind 循环、runCapture 的
+	// SetMode 后都会 Flush; (2) 跨进程 —— dpid_supervisor 的
+	// writeWaitingState 与 dpid -write-blind-state 写同一个
+	// dpi_state.json.tmp。两个写者 O_TRUNC 打开同一 inode 各自从 offset 0
+	// 写, 长度不同时得到"新内容 + 旧内容尾巴"的坏 JSON, 再被 rename 成
+	// dpi_state.json → WebUI/守护脚本读到解析失败的状态文件。
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), atomicWriteSeq.Add(1))
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err

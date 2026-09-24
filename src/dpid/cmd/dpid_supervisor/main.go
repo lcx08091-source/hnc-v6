@@ -350,11 +350,17 @@ func writeWaitingState(iface, reason string) {
 	if err != nil {
 		return
 	}
-	tmp := dpiStateFile + ".tmp"
+	// v5.12: 临时文件名带 pid。旧的 dpiStateFile+".tmp" 与 dpid 自己
+	// (output.atomicWrite)写的是同一个临时文件, 而本函数恰在 dpid 仍存活时
+	// (killAndReap 之前)调用 → 两进程交错写出坏 JSON 后被 rename 上线。
+	tmp := fmt.Sprintf("%s.tmp.sup.%d", dpiStateFile, os.Getpid())
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		_ = os.Remove(tmp)
 		return
 	}
-	_ = os.Rename(tmp, dpiStateFile)
+	if err := os.Rename(tmp, dpiStateFile); err != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // dpidReportsNetworkDown peeks dpi_state.json for the "network is down" hint
