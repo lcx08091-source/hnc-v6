@@ -100,25 +100,65 @@ get_rule_ip() {
 # ── helper: 读/分配 mark_id ──────────────────────────────────────
 # 1. 优先复用 rules.json 里 devices.<mac>.mark_id
 # 2. 没有就按 MAC 后两字节哈希算起点, 在 1-99 范围线性探测避开已用
+# v5.12: 只在 devices.<mac> 自己的 {...} 块里取 mark_id。
+# 旧实现从 MAC 首次出现处往后找"第一个 mark_id",不限定块边界:设备条目存在但
+# 没有 mark_id(Go 端 device whitelist / sqm_enabled=false 会只写这一个字段)时,
+# 拿到的是文件里【下一台设备】的 mark_id → 两台设备共用同一 tc class / fwmark,
+# 互相串限速。这里按 devices 顶层 key 精确定位,做字符串感知的括号计数。
+# 整个文件先 tr -d 换行,单行 / pretty JSON 都能处理(JSON 字符串内不会有裸换行)。
+rules_device_mid() {
+    local mac=$1
+    [ -f "$RULES" ] || return 0
+    tr -d '\n\r' < "$RULES" 2>/dev/null | awk -v m="$mac" '
+    {
+        s = $0; m = tolower(m)
+        if (!match(s, /"devices"[[:space:]]*:[[:space:]]*\{/)) exit
+        i = RSTART + RLENGTH; n = length(s); depth = 1
+        while (i <= n && depth > 0) {
+            c = substr(s, i, 1)
+            if (c == "\"") {
+                j = i + 1
+                while (j <= n) {
+                    d = substr(s, j, 1)
+                    if (d == "\\") { j += 2; continue }
+                    if (d == "\"") break
+                    j++
+                }
+                key = substr(s, i + 1, j - i - 1)
+                i = j + 1
+                if (depth == 1 && tolower(key) == m) {
+                    rest = substr(s, i)
+                    if (!match(rest, /^[[:space:]]*:[[:space:]]*\{/)) continue
+                    k = i + RLENGTH; bd = 1; ins = 0; st = k
+                    while (k <= n && bd > 0) {
+                        e = substr(s, k, 1)
+                        if (ins) { if (e == "\\") k++; else if (e == "\"") ins = 0 }
+                        else if (e == "\"") ins = 1
+                        else if (e == "{") bd++
+                        else if (e == "}") bd--
+                        k++
+                    }
+                    blk = substr(s, st, k - st)
+                    if (match(blk, /"mark_id"[[:space:]]*:[[:space:]]*[0-9]+/)) {
+                        seg = substr(blk, RSTART, RLENGTH)
+                        sub(/.*:[[:space:]]*/, "", seg)
+                        print seg
+                    }
+                    exit
+                }
+                continue
+            }
+            if (c == "{") depth++
+            else if (c == "}") depth--
+            i++
+        }
+    }'
+}
+
 get_or_assign_mid() {
     local mac=$1
     local existing
-    # 用 awk 提取 devices 里的 mark_id
-    existing=$(awk -v m="$mac" '
-    {
-        idx = index($0, "\"" m "\"")
-        if (idx > 0) {
-            tail = substr($0, idx)
-            if (match(tail, /"mark_id"[[:space:]]*:[[:space:]]*[0-9]+/)) {
-                seg = substr(tail, RSTART, RLENGTH)
-                if (match(seg, /[0-9]+$/)) {
-                    print substr(seg, RSTART, RLENGTH)
-                    exit
-                }
-            }
-        }
-    }
-    ' "$RULES" 2>/dev/null)
+    existing=$(rules_device_mid "$mac")
     if [ -n "$existing" ] && [ "$existing" -ge 1 ] && [ "$existing" -le 99 ] 2>/dev/null; then
         echo "$existing"
         return
@@ -414,9 +454,15 @@ case "$CMD" in
             fi
             # v5.0: tc 规则已清, 通知 scheduler 可能恢复 offload
             notify_offload "$MAC" 0
-            if [ -n "$IP" ]; then
-                sh "$IPT" unmark "$IP" "$MAC" "$MID" >> "$LOG" 2>&1 || log "iptables unmark warn"
-            fi
+            # v5.12: 设备离线(devices.json 无 IP)时旧实现直接跳过 unmark,MAC-only 的
+            # MARK 规则(v4+v6)、-s/-d 旧 IP 规则和 v6 u32 filter 全部残留;
+            # cleanup_stale_rules 删陈旧设备走的正是这条路径,随后 mid 被释放复用。
+            # 先回退到 rules.json 记录的 IP;仍为空也照样 unmark —— MAC-only 规则与
+            # v6 filter 不依赖 IP,-s/-d 规则删除失败是幂等无害的。
+            UNMARK_IP=$IP
+            [ -n "$UNMARK_IP" ] || UNMARK_IP=$(get_rule_ip "$MAC")
+            valid_ipv4 "$UNMARK_IP" || UNMARK_IP=""
+            sh "$IPT" unmark "$UNMARK_IP" "$MAC" "$MID" >> "$LOG" 2>&1 || log "iptables unmark warn"
         fi
         # 3. 写 rules.json: 清空 down_mbps/up_mbps + limit_enabled=false
         # rc3.1.33 修 #18: 累计失败. 如果 limit_enabled 写失败但 tc 已清, 下次 watchdog

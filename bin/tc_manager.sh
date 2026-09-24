@@ -418,6 +418,24 @@ _validate_mark_id() {
     esac
 }
 
+# v5.12: mark_id → HTB class 号映射。
+# 旧实现 class 号 = mark_id,mark_id=1 得到 classid "1:1" —— 正是 init_tc 建的
+# HTB 父类 1:1(所有设备 class + 默认类 1:9999 的父亲)。后果:
+#   - class_exists 命中父类,leaf qdisc 挂到内部类被内核拒(htb_graft -EINVAL),
+#     该设备的 set_limit / set_delay / set_sqm 永远失败,restore 计入连续失败;
+#   - down=0 的"清限速"分支 set_rate_only 1:1 → 把父类 ceil 复位成 1000mbit,
+#     全局带宽整形静默失效。
+# apply_device_rule 的分配起点 lb%99+1 在 MAC 末字节 00/63/c6 时必然落到 1。
+# 这里只把 mark_id=1 挪到空闲的 class 号 100(tc 按十六进制解析 = 0x100,
+# 与 1:2..1:99 / 1:9999 / 应用限速 0x9001+ 均不冲突)。fwmark(0x800001)、u32
+# filter 优先级(按 mark_id 算)、rules.json 里的 mark_id 都不变,无需数据迁移。
+_class_id_for_mark() {
+    if [ "$1" = "1" ]; then echo 100; else printf '%d' "$1"; fi
+}
+_mark_for_class_id() {
+    if [ "$1" = "100" ]; then echo 1; else echo "$1"; fi
+}
+
 # ═══════════════════════════════════════════════════════════════
 # 顶层辅助函数（Android ash 不支持嵌套函数定义）
 # ═══════════════════════════════════════════════════════════════
@@ -594,8 +612,10 @@ leaf_has_netem() {
 # leaf netem 同样优先 change, 不存在才 add。这样 set_limit ↔ set_delay 不再互相破坏。
 ensure_device_class() {
     local dev=$1 class_id=$2 ip=$3
-    local mark; mark=$(printf "0x%x" $((0x800000 + class_id)))
-    local prio=$((FILTER_PRIO_BASE + class_id))
+    # v5.12: fwmark / u32 优先级按 mark_id 算(class 号可能被 _class_id_for_mark 挪过)
+    local _mid; _mid=$(_mark_for_class_id "$class_id")
+    local mark; mark=$(printf "0x%x" $((0x800000 + _mid)))
+    local prio=$((FILTER_PRIO_BASE + _mid))
     local leaf_handle direction
     if [ "$dev" = "$IFB_IFACE" ]; then
         leaf_handle=$((class_id + 2000))
@@ -849,7 +869,7 @@ device_sqm_leaf() {
 set_sqm() {
     local iface=$1 mark_id=$2 want=$3 ip=${4:-}
     _validate_mark_id "$mark_id" || return 1
-    local class_id; class_id=$(printf "%d" "$mark_id")
+    local class_id; class_id=$(_class_id_for_mark "$mark_id")  # v5.12: mid=1 → 1:100
     log "set_sqm: mark=$mark_id ip=${ip:-(none)} want=$want"
     if [ "$want" = on ]; then
         if ! tc_limit_supported_runtime; then
@@ -1564,6 +1584,12 @@ init_tc() {
     # T1 tier: install clsact BPF filter at pref 1 (before AOSP offload pref 2/3)
     _hnc_install_clsact_bpf "$iface"
 
+    # v5.12: 记下建树时的 ifindex。ColorOS 热点关→开会销毁并重建同名 wlan2,
+    # oplus-netd 随即预装 htb root —— watchdog 只看"有 htb root"会误判健康,
+    # HNC 的 class/filter 已随旧接口消失却永不恢复。check_health 比对此值。
+    _ifidx=$(cat "/sys/class/net/$iface/ifindex" 2>/dev/null)
+    [ -n "$_ifidx" ] && echo "$_ifidx" > "$HNC_DIR/run/tc_ifindex_$iface" 2>/dev/null
+
     log "=== TC init OK ==="
 }
 
@@ -1609,10 +1635,15 @@ ensure_ingress_mirred_v1() {
     fi
     # hotfix13: use the unified netlink/shell fallback path.
     # Accept matchall, u32 and parent ffff: variants instead of only pref-1 matchall.
-    if tc filter show dev "$iface" ingress 2>/dev/null | grep -q "mirred.*redirect dev $IFB_IFACE"; then
+    # v5.12: iproute2 实际输出是 "mirred (Egress Redirect to device ifb0) stolen",
+    # 旧模式 "mirred.*redirect dev ifb0"(区分大小写 + "dev")永远匹配不到 → 每次
+    # set_limit(up>0)/ensure_ingress 都判"缺失"去 del pref 1 再重装:上行在重装
+    # 窗口内不经 ifb0 整形;netlink 工具不可用时还会每次再起一个 45s 的异步重试
+    # worker。改为与 watchdog ensure_tc_uplink_healthy 相同的宽松匹配。
+    if tc filter show dev "$iface" ingress 2>/dev/null | grep -qiE "mirred.*redirect.*$IFB_IFACE"; then
         return 0
     fi
-    if tc filter show dev "$iface" parent ffff: 2>/dev/null | grep -q "mirred.*redirect dev $IFB_IFACE"; then
+    if tc filter show dev "$iface" parent ffff: 2>/dev/null | grep -qiE "mirred.*redirect.*$IFB_IFACE"; then
         return 0
     fi
     log "ensure_ingress_mirred_v1: mirred missing on $iface, reinstalling via unified path"
@@ -1623,7 +1654,7 @@ ensure_ingress_mirred_v1() {
 set_limit() {
     local iface=$1 mark_id=$2 down_mbps=${3:-0} up_mbps=${4:-0} ip=${5:-}
     _validate_mark_id "$mark_id" || return 1
-    local class_id; class_id=$(printf "%d" "$mark_id")
+    local class_id; class_id=$(_class_id_for_mark "$mark_id")  # v5.12: mid=1 → 1:100
 
     log "set_limit: mark=$mark_id ip=${ip:-(none)} dn=${down_mbps}M up=${up_mbps}M qos=$(qos_mode) scale=$(qos_scale_percent)%"
 
@@ -1761,7 +1792,7 @@ set_limit() {
 set_delay() {
     local iface=$1 mark_id=$2 delay_ms=${3:-0} jitter_ms=${4:-0} loss=${5:-0} ip=${6:-}
     _validate_mark_id "$mark_id" || return 1
-    local class_id; class_id=$(printf "%d" "$mark_id")
+    local class_id; class_id=$(_class_id_for_mark "$mark_id")  # v5.12: mid=1 → 1:100
 
     # v3.8.5: 把 RTT delay 除以 2 分给两个方向
     # egress 向上取整,ingress 向下取整(奇数精度保留)
@@ -1872,12 +1903,17 @@ set_all() {
 remove_device() {
     local iface=$1 mark_id=$2
     _validate_mark_id "$mark_id" || return 1
-    local class_id; class_id=$(printf "%d" "$mark_id")
+    local class_id; class_id=$(_class_id_for_mark "$mark_id")  # v5.12: mid=1 → 1:100
     local mark; mark=$(printf "0x%x" $((0x800000 + mark_id)))
-    local prio=$((FILTER_PRIO_BASE + class_id))
+    # v5.12: u32 优先级按 mark_id 算(与 ensure_device_class 一致)。
+    # 同时去掉旧的 `prio+1` 删除:u32 filter 只用 100+mark_id 这一个优先级,prio+1
+    # 恰好是 mark_id+1 那台设备的 u32 dst(热点口)/src(ifb0)filter —— 清 A 的
+    # 限速会顺手删掉 B 的 IP 分类器;B 的上行在 ifb0 上 mark 恒为 0(mirred 早于
+    # iptables),fw 兜底匹配不到,直接掉进默认类不限速。mark_id=99 时 prio 200
+    # 还会误删应用级限速的 fw filter。
+    local prio=$((FILTER_PRIO_BASE + mark_id))
     for dev in "$iface" "$IFB_IFACE"; do
         tc filter del dev "$dev" parent 1: prio "$prio"         2>/dev/null || true
-        tc filter del dev "$dev" parent 1: prio "$((prio+1))"   2>/dev/null || true
         tc filter del dev "$dev" parent 1: pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
         tc qdisc del dev "$dev" parent "1:$class_id" 2>/dev/null || true
         tc class del dev "$dev" classid "1:$class_id" 2>/dev/null || true
@@ -2353,7 +2389,9 @@ tc_action_unlock() {
 tc_snapshot_async() {
     local iface="$1"
     [ -x "$HNC_DIR/bin/tc_state_snapshot.sh" ] || return 0
-    ( HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$iface" >/dev/null 2>&1 ) &
+    # v5.12: 重定向放到子 shell 外层 —— 旧写法子 shell 进程本身仍持有调用方的
+    # stdout/stderr 管道,httpd runBin(CombinedOutput)要等快照跑完才返回。
+    ( HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$iface" ) </dev/null >/dev/null 2>&1 &
 }
 
 

@@ -20,8 +20,8 @@
 # Mark range: APP_MARK_BASE = 0x900000, avoids the 0x800000 range used by
 # per-device limits in iptables_manager.sh / tc_manager.sh.
 #
-# Class id range: 0x9000-0xffff (36864-65535). Stays away from per-device
-# classes which live in 1:100-1:9999.
+# Class id range: 0x9001-0x9998 (v5.12: 避开默认类 1:9999 = 0x9999). Stays away
+# from per-device classes (1:2..1:99, 1:100 — 十六进制解析后均 < 0x9001).
 #
 # Idempotent: full rebuild each call. No state is kept between invocations.
 # Costs ~50ms per call on Pixel-class hw for a handful of limits.
@@ -46,7 +46,13 @@ APP_SIG_FILE="$RUN/app_limits.applied.sig"        # 上一轮实际下发的 tc 
 INACTIVE_MARKER="$RUN/app_limits_inactive.marker" # "配了限速但没生效"的 marker
 
 APP_MARK_BASE_DEC=9437184   # 0x900000 — fwmark 高位避开 0x800000 device mark
-APP_CLASS_MINOR_BASE=36864  # 0x9000 — tc classid minor in [0x9000, 0xffff]
+APP_CLASS_MINOR_BASE=36864  # 0x9000 — tc classid minor in [0x9001, 0x9998]
+# v5.12: 上界收到 0x9998。tc 的 classid 次号按【十六进制】解析,HNC 的默认类
+# "1:9999" 实际是 0x9999=39321,旧上界 65520 把它圈进"应用限速保留段":本脚本
+# 由 hnc_watchdog 每 30s 无条件调用,Step 1 每轮都 `tc class del 1:9999`(默认类
+# 没有 filter 引用,HTB 允许删)→ 未限速设备走 HTB direct 队列,全局带宽整形
+# (1:1 ceil)与默认叶子 AQM 全部失效。0x9001..0x9998 仍有 2456 个槽位,足够。
+APP_CLASS_MINOR_MAX=39320   # 0x9998
 CHAIN=HNC_APP_LIMIT
 FILTER_PRIO=200
 
@@ -119,7 +125,7 @@ ensure_chain() {
 ensure_chain
 iptables -t mangle -F $CHAIN 2>/dev/null
 
-# Remove app-range tc classes (0x9000-0xfff0 — our reserved minor range).
+# Remove app-range tc classes (0x9001-0x9998 — our reserved minor range).
 tc class show dev "$IFACE" 2>/dev/null | \
     awk '$1=="class" && $2=="htb" {print $3}' | \
     while IFS= read -r cid; do
@@ -128,7 +134,7 @@ tc class show dev "$IFACE" 2>/dev/null | \
         # printf to dec; tolerant of leading 0x or bare hex
         minor_dec=$(printf '%d' "0x$minor_hex" 2>/dev/null)
         [ -z "$minor_dec" ] && continue
-        if [ "$minor_dec" -ge 36864 ] && [ "$minor_dec" -le 65520 ]; then
+        if [ "$minor_dec" -gt "$APP_CLASS_MINOR_BASE" ] && [ "$minor_dec" -le "$APP_CLASS_MINOR_MAX" ]; then
             tc class del dev "$IFACE" classid "$cid" 2>/dev/null
         fi
     done
@@ -218,11 +224,10 @@ mark_for_index() {
 }
 
 classid_for_index() {
-    # tc classid minor MUST fit in 16 bits (max 0xffff = 65535). We use the
-    # 0x9000-0xfff0 range; up to ~4000 distinct (mac, app) limits.
-    # 1:9001, 1:9002, ..., 1:fff0
+    # tc classid minor MUST fit in 16 bits. v5.12: 用 0x9001-0x9998(不含默认类
+    # 0x9999),最多 2456 条 (mac, app) 限速。1:9001, 1:9002, ..., 1:9998
     local minor=$((APP_CLASS_MINOR_BASE + 1 + $1))
-    if [ "$minor" -gt 65520 ]; then
+    if [ "$minor" -gt "$APP_CLASS_MINOR_MAX" ]; then
         # Past the safe window. Drop. apply log will note skipped entries.
         echo ""
         return
@@ -259,7 +264,7 @@ while IFS=' ' read -r MAC APP RATE; do
     MARK=$(mark_for_index $i)
     CID=$(classid_for_index $i)
     if [ -z "$CID" ]; then
-        log "skip $MAC/$APP: classid space exhausted (>4000 entries)"
+        log "skip $MAC/$APP: classid space exhausted (>2456 entries)"
         skipped=$((skipped + 1))
         i=$((i + 1))
         continue

@@ -39,6 +39,20 @@ chmod 700 "$HNC_DIR" "$HNC_DIR/data" "$HNC_DIR/logs" "$HNC_DIR/run" 2>/dev/null
 # 改动, ~100ms 内跑完 iptables init + tc init + tc restore.
 rm -f "$HNC_DIR/run/hnc_state" 2>/dev/null
 rm -rf "$HNC_DIR/run/hnc_json.lock" "$HNC_DIR/run/json.lock" 2>/dev/null
+# v5.12: 同理清掉其它"只对本次开机有效"的运行期状态(内核 tc/iptables 已全空):
+#   - run/lock(gate / per-MAC 锁)、tc_action.lock: 上次关机时若正持锁,目录连同
+#     旧 pid 留下;开机后 PID 被别的活进程复用 → hnc_lock 的 kill -0 判"持有者活着"
+#     永不回收 → gate_lock 恒超时,restore / 限速分配全部 rc=11。
+#   - tc_root_owned_*: cleanup 据此判断"本次开机 HNC 自建的 root qdisc 才删";
+#     跨重启残留会让 cleanup 删掉 ROM 自己的 root qdisc(本次是复用而非自建)。
+#   - tc_mq_child_* / tc_qos_fallback / tc_ifindex_*: 上次建树方式与接口 ifindex,
+#     跨重启残留会误导 QoS 缩放与 watchdog 的接口重建判断。
+#   - v6/(v6_sync 快照)、iface.cache: 上次会话的地址/接口,开机后必须重新探测。
+rm -rf "$HNC_DIR/run/lock" "$HNC_DIR/run/tc_action.lock" "$HNC_DIR/run/v6" 2>/dev/null
+rm -rf "$HNC_DIR"/run/tc_action.lock.stale.* 2>/dev/null
+rm -f "$HNC_DIR"/run/tc_root_owned_* "$HNC_DIR"/run/tc_mq_child_* "$HNC_DIR"/run/tc_ifindex_* \
+      "$HNC_DIR/run/tc_qos_fallback" "$HNC_DIR/run/iface.cache" \
+      "$HNC_DIR/run/tc_restore_pending" 2>/dev/null
 
 # 初始化规则文件 · rc3.1.13 起 auth_required 也在这
 [ ! -f "$HNC_DIR/data/rules.json" ] && cat > "$HNC_DIR/data/rules.json" << 'EOF'

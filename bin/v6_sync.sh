@@ -114,23 +114,66 @@ sync_one() {
     fi
 
     local prio=$((PRIO_BASE + mark_id))
+    # v5.12: 与 tc_manager.sh _class_id_for_mark 保持一致 —— mark_id=1 的 class
+    # 是 1:100(1:1 是 HTB 父类),否则 v6 filter flowid 指向父类,等于没分类。
+    local cls=$mark_id
+    [ "$mark_id" = "1" ] && cls=100
     local snap="$SNAP_DIR/$mac"
     mkdir -p "$SNAP_DIR" 2>/dev/null
 
-    # 当前活跃 v6 地址 vs 上次快照
-    local cur prev
-    cur=$(get_v6_addrs "$mac" "$iface")
-    prev=""
-    [ -f "$snap" ] && prev=$(cat "$snap" 2>/dev/null)
-
-    # 无变化：跳过（最常见路径，零开销）
-    if [ "$cur" = "$prev" ]; then
-        return 0
+    # 检查 ifb0 上是否有该 class（用户设了 up 限速时才会有）
+    local has_ingress=0
+    if tc class show dev "$IFB_IFACE" 2>/dev/null | grep -q "class htb 1:$cls "; then
+        has_ingress=1
     fi
 
-    log "Sync $mac (mark=$mark_id prio=$prio): addresses changed"
+    # v5.12: 快照 = 头行(iface/mark/ingress) + 地址列表。
+    # 旧快照只存地址,地址不变即 return,以下场景 v6 filter 永远不会重建,设备走
+    # IPv6 时绕过限速:
+    #   - 热点关→开 / ROM 换根 qdisc 触发 init_tc 重建 / 重启(run/v6 跨重启残留)
+    #     → tc 树上的 filter 已没了,但地址没变;
+    #   - 接口切换(wlan1→wlan2),新接口上从未加过 filter;
+    #   - 先只限下行、后补上行限速:ifb0 class 新建,但 ingress filter 从未加。
+    #   - mid 被重新分配:旧 prio 段的 filter 残留,指向别人的 class。
+    # 头行记录这些维度,任一变化即重建;没变化时再核对 filter 是否仍在 tc 上。
+    local hdr="#hnc_v6 iface=$iface mark=$mark_id ing=$has_ingress"
+    local cur cur_all prev_all prev prev_mark prev_iface
+    cur=$(get_v6_addrs "$mac" "$iface")
+    cur_all="$hdr"
+    [ -n "$cur" ] && cur_all="$hdr
+$cur"
+    prev_all=""
+    [ -f "$snap" ] && prev_all=$(cat "$snap" 2>/dev/null)
+    prev=$(printf '%s\n' "$prev_all" | grep -v '^#hnc_v6 ')
+    prev_mark=$(printf '%s\n' "$prev_all" | sed -n 's/^#hnc_v6 .* mark=\([0-9]*\).*/\1/p' | head -1)
+    prev_iface=$(printf '%s\n' "$prev_all" | sed -n 's/^#hnc_v6 iface=\([^ ]*\).*/\1/p' | head -1)
+
+    if [ "$cur_all" = "$prev_all" ]; then
+        # 无变化(最常见路径)。无地址时无需核对;有地址时确认 filter 仍挂在 tc 上。
+        [ -z "$cur" ] && return 0
+        if tc filter show dev "$iface" parent 1: 2>/dev/null | grep -q "pref $prio " && \
+           { [ "$has_ingress" != "1" ] || tc filter show dev "$IFB_IFACE" parent 1: 2>/dev/null | grep -q "pref $prio "; }; then
+            return 0
+        fi
+        log "Sync $mac (mark=$mark_id prio=$prio): filters missing on tc (tree rebuilt?), rebuilding"
+    else
+        log "Sync $mac (mark=$mark_id prio=$prio iface=$iface ingress=$has_ingress): state changed"
+    fi
     [ -n "$prev" ] && log "  prev: $(echo "$prev" | tr '\n' ' ')"
     log "  cur:  $(echo "$cur" | tr '\n' ' ')"
+
+    # v5.12: mid 变了 → 旧 prio 段的 filter 也要清(否则指向已归别人的 class)
+    if [ -n "$prev_mark" ] && [ "$prev_mark" != "$mark_id" ]; then
+        local old_prio=$((PRIO_BASE + prev_mark))
+        tc filter del dev "$iface"     parent 1: prio "$old_prio" protocol ipv6 2>/dev/null
+        tc filter del dev "$IFB_IFACE" parent 1: prio "$old_prio" protocol ipv6 2>/dev/null
+        [ -n "$prev_iface" ] && [ "$prev_iface" != "$iface" ] && \
+            tc filter del dev "$prev_iface" parent 1: prio "$old_prio" protocol ipv6 2>/dev/null
+    fi
+    # 接口换了: 旧接口若还在,把旧 filter 一并清掉
+    if [ -n "$prev_iface" ] && [ "$prev_iface" != "$iface" ]; then
+        tc filter del dev "$prev_iface" parent 1: prio "$prio" protocol ipv6 2>/dev/null
+    fi
 
     # Flush 该设备的所有 v6 filter（egress + ingress）
     # 该设备独占 prio 段，不会误删别的设备
@@ -139,15 +182,9 @@ sync_one() {
 
     # 设备 v6 全失活 → 仅记录，不加 filter
     if [ -z "$cur" ]; then
-        : > "$snap"
+        printf '%s\n' "$cur_all" > "$snap"
         log "  $mac: no active v6 addresses"
         return 0
-    fi
-
-    # 检查 ifb0 上是否有该 class（用户设了 up 限速时才会有）
-    local has_ingress=0
-    if tc class show dev "$IFB_IFACE" 2>/dev/null | grep -q "1:$mark_id "; then
-        has_ingress=1
     fi
 
     # 重建 filter，每个地址一条
@@ -155,7 +192,7 @@ sync_one() {
     for addr in $cur; do
         # Egress（下行限速）：wlan2 上 dst 匹配
         if tc filter add dev "$iface" parent 1: protocol ipv6 prio "$prio" u32 \
-                match ip6 dst "$addr/128" flowid "1:$mark_id" 2>/dev/null; then
+                match ip6 dst "$addr/128" flowid "1:$cls" 2>/dev/null; then
             n=$((n+1))
         else
             nfail=$((nfail+1))
@@ -165,12 +202,12 @@ sync_one() {
         # Ingress（上行限速）：ifb0 上 src 匹配（仅当 class 存在）
         if [ "$has_ingress" = "1" ]; then
             tc filter add dev "$IFB_IFACE" parent 1: protocol ipv6 prio "$prio" u32 \
-                match ip6 src "$addr/128" flowid "1:$mark_id" 2>/dev/null
+                match ip6 src "$addr/128" flowid "1:$cls" 2>/dev/null
         fi
     done
 
     # 更新快照
-    echo "$cur" > "$snap"
+    printf '%s\n' "$cur_all" > "$snap"
     log "  $mac: synced $n filter(s) (failed=$nfail, ingress=$has_ingress)"
 }
 
@@ -186,19 +223,31 @@ clear_one() {
 
     # 试图从快照文件读出该设备的 prio——但我们没存 prio
     # 改为：从 iptables 找 mark_hex（即使被 unmark 了，可能还在）
-    local mark_hex
+    local mark_hex mark_id="" snap_iface=""
     mark_hex=$(list_marked_devices | awk -v m="$mac" '$1==m {print $2; exit}')
-
     if [ -n "$mark_hex" ]; then
-        local mark_id=$((mark_hex))
+        mark_id=$((mark_hex))
         mark_id=$((mark_id - MARK_BASE))
-        local prio=$((PRIO_BASE + mark_id))
-        tc filter del dev "$iface"     parent 1: prio "$prio" protocol ipv6 2>/dev/null
-        tc filter del dev "$IFB_IFACE" parent 1: prio "$prio" protocol ipv6 2>/dev/null
-        log "Clear $mac (mark=$mark_id prio=$prio): filters removed"
-    else
-        log "Clear $mac: no mark found, snapshot only"
     fi
+    # v5.12: iptables 里已没有 mark(sync_all 孤儿清理 / 规则已被删)时,旧实现只删
+    # 快照不删 filter → v6 u32 filter 残留;mid 复用给别的设备后,旧设备的 v6 流量
+    # 被归进新设备的 class。改为从快照头行取回当时的 mark / iface。
+    if [ -f "$snap" ]; then
+        [ -n "$mark_id" ] || mark_id=$(sed -n 's/^#hnc_v6 .* mark=\([0-9]*\).*/\1/p' "$snap" 2>/dev/null | head -1)
+        snap_iface=$(sed -n 's/^#hnc_v6 iface=\([^ ]*\).*/\1/p' "$snap" 2>/dev/null | head -1)
+    fi
+
+    case "$mark_id" in
+        ''|*[!0-9]*)
+            log "Clear $mac: no mark found, snapshot only" ;;
+        *)
+            local prio=$((PRIO_BASE + mark_id))
+            [ -n "$iface" ] && tc filter del dev "$iface" parent 1: prio "$prio" protocol ipv6 2>/dev/null
+            tc filter del dev "$IFB_IFACE" parent 1: prio "$prio" protocol ipv6 2>/dev/null
+            [ -n "$snap_iface" ] && [ "$snap_iface" != "$iface" ] && \
+                tc filter del dev "$snap_iface" parent 1: prio "$prio" protocol ipv6 2>/dev/null
+            log "Clear $mac (mark=$mark_id prio=$prio): filters removed" ;;
+    esac
 
     rm -f "$snap" 2>/dev/null
 }

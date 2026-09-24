@@ -362,15 +362,21 @@ unmark_device() {
     # 必须在删 $IPT 规则之前调用，否则它找不到 mark）
     sh "$HNC_DIR/bin/v6_sync.sh" clear "$mac" 2>/dev/null || true
 
-    ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$ip" -m mac --mac-source "$mac" \
-        -j MARK --set-mark "$mark"
-    ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" -j MARK --set-mark "$mark"
+    # v5.12: ip 为空(设备离线、rules.json 也无 IP)时只删 MAC-only 规则,
+    # 不拼 `-s ""` 这类非法参数。
+    if [ -n "$ip" ]; then
+        ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$ip" -m mac --mac-source "$mac" \
+            -j MARK --set-mark "$mark"
+        ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" -j MARK --set-mark "$mark"
+    fi
     ipt_dual_del_all -t mangle -D HNC_MARK \
         -m mac --mac-source "$mac" -m mark --mark 0 \
         -j MARK --set-mark "$mark"
 
-    ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
-    ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
+    if [ -n "$ip" ]; then
+        ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
+        ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
+    fi
 
     return 0
 }

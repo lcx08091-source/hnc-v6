@@ -272,6 +272,8 @@ check_health() {
 
     # 0. iface 必须有效
     [ -z "$iface" ] && rc=1
+    # v5.12: 上次 full_restore 因锁竞争没把规则(黑名单/mark)补回 → 仍判不健康
+    [ -f "$RUN/tc_restore_pending" ] && rc=1
 
     # 1. TC 根 qdisc 是否为 HTB
     # 注意: 不同 iproute2 版本输出词序不同:
@@ -284,7 +286,24 @@ check_health() {
     #   所以这里只看内容。命令本身失败场景极少,不特殊处理
     if [ $rc -eq 0 ]; then
         if watchdog_tc_core_supported; then
-            tc qdisc show dev "$iface" 2>/dev/null | grep "htb" | grep -q "root" || rc=1
+            # v5.12: 也接受 mq 子队列下的 HNC htb(tc_manager try_mq_child_htb 路径:
+            # "qdisc htb 1: parent :1",不含 root)。旧判断要求 htb 行含 root,该模式
+            # 下恒判不健康 → 每轮 full_restore → init_tc 再次 `qdisc replace parent :1`
+            # 把整棵设备 class 树换成空 htb,再由 restore 重建,直到进入 passive。
+            # 与 tc_manager egress_htb_tree_ready 的 '^qdisc htb 1:' 判据对齐。
+            tc qdisc show dev "$iface" 2>/dev/null | grep "htb" | grep -qE "root|^qdisc htb 1: " || rc=1
+            # v5.12: 接口被重建检测。ColorOS 热点关→开会重建同名 wlan2 且 oplus-netd
+            # 立即预装 htb root,上面的检查照样通过,但 HNC 的设备 class/filter 已随
+            # 旧接口消失 → 限速永不恢复。init_tc 记录建树时的 ifindex,变了即判不健康。
+            if [ $rc -eq 0 ] && [ -f "$RUN/tc_ifindex_$iface" ]; then
+                local _idx_now _idx_init
+                _idx_now=$(cat "/sys/class/net/$iface/ifindex" 2>/dev/null)
+                _idx_init=$(cat "$RUN/tc_ifindex_$iface" 2>/dev/null)
+                if [ -n "$_idx_now" ] && [ -n "$_idx_init" ] && [ "$_idx_now" != "$_idx_init" ]; then
+                    log "check_health: $iface ifindex $_idx_init -> $_idx_now (interface recreated), tc rebuild needed"
+                    rc=1
+                fi
+            fi
         else
             watchdog_mark_tc_unsupported_once tc_htb
         fi
@@ -378,7 +397,12 @@ full_restore() {
         watchdog_mark_tc_unsupported_once tc_htb
         _HEALTH_TS=0
         _HEALTH_RC=0
-        log "RESTORE tc skipped: tc_htb=false; iptables restored only"
+        # v5.12: 上面 iptables init 已 flush HNC_CTRL,黑名单只在 tc_manager restore
+        # 里恢复。旧代码 tc_htb=false 时直接 return → 黑名单设备恢复上网。restore
+        # 自身按能力跳过所有 tc 操作(limit/delay/uplink 均有 capability 门控),
+        # 只做黑名单与 mark 恢复,可以安全调用。
+        sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1 || true
+        log "RESTORE tc skipped: tc_htb=false; iptables + blacklist restored only"
         return 0
     fi
     sh "$HNC_DIR/bin/tc_manager.sh" init "$iface" >> "$LOG" 2>&1
@@ -406,8 +430,19 @@ full_restore() {
     # restore 中途发现锁已易主而主动中止)。这是良性竞争 —— 说明另一个进程
     # 正在正常改 tc 树,不是修复失败。计进 tc_repair 熔断器会让 3 次竞争就
     # 停掉 5 分钟的自动修复能力(语义错配)。只置 _HEALTH_RC=1 让下轮重试。
-    if [ $tc_restore_rc -eq 12 ]; then
-        log "full_restore: tc restore busy/lock lost (rc=12), not counted as repair failure"
+    # v5.12: 上面 iptables init 已把 HNC_MARK / HNC_CTRL(黑名单)整链 flush,只有
+    # restore 才会把 mark 和黑名单加回来。restore 因锁竞争退 12(tc_action_lock)或
+    # 11(gate_lock 超时)时,旧代码"置 _HEALTH_RC=1 让下轮重试"并不成立:紧接着
+    # _HEALTH_TS=0 让缓存失效,Go 版每轮又是新进程 —— 下轮 check_health 看到链都在
+    # 就判健康,黑名单设备从此恢复上网、v6 限速失去 mark,直到下次别的原因触发恢复。
+    # 落一个 pending 标记,check_health 见标记即判不健康,由(已限流的)下轮再恢复。
+    if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
+        echo "$(date +%s 2>/dev/null)" > "$RUN/tc_restore_pending" 2>/dev/null || true
+    else
+        rm -f "$RUN/tc_restore_pending" 2>/dev/null
+    fi
+    if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
+        log "full_restore: tc restore busy/lock lost (rc=$tc_restore_rc), not counted as repair failure; marked pending"
         _HEALTH_RC=1
     elif [ $tc_init_rc -eq 0 ] && [ $tc_restore_rc -eq 0 ]; then
         tc_repair_record 1
@@ -821,7 +856,10 @@ do_full_init() {
     sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
-        log "do_full_init: tc skipped because tc_htb=false; iptables only"
+        # v5.12: 同 full_restore —— 黑名单只在 restore 里恢复,tc_htb=false 也要跑
+        # (restore 内部按能力跳过 tc),否则开机/开热点后黑名单永远不生效。
+        sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1 || true
+        log "do_full_init: tc skipped because tc_htb=false; iptables + blacklist only"
     else
         sh "$HNC_DIR/bin/tc_manager.sh" init "$iface" >> "$LOG" 2>&1
         local tc_init_rc=$?
@@ -874,7 +912,12 @@ do_full_init() {
                 fi
                 ;;
         esac
-    ) &
+    ) </dev/null >/dev/null 2>&1 &
+    # v5.12: ↑ 必须断开 stdio。Go hnc_watchdog 以 `watchdog.sh action full_init`
+    # 调用本函数并用 cmd.Output() 收 stdout:后台子 shell 继承了那根管道,Output()
+    # 要等它 sleep 15 + 整轮 restore 结束才返回;超过 actionTimeout(30s)即判
+    # rc=-1 → "full_init returned rc=-1; staying PENDING" → 下一轮重跑整套 init。
+    # 子 shell 内部的日志本来就显式 >> "$LOG",断开 stdio 不丢输出。
 }
 
 # do_migrate: ACTIVE:<old_iface> → ACTIVE:<new_iface>
@@ -922,6 +965,10 @@ do_migrate() {
     _HEALTH_TS=0
     echo "ACTIVE:$new" > "$STATE_FILE"
     log "STATE entered ACTIVE:$new"
+    # v5.12: 白名单模式的 DROP 规则带 `-i <热点口>`(接口取自 hnc_state)。迁移后
+    # 不重同步,DROP 仍挂在旧接口上,新接口上的非白名单设备全部放行(封锁失效)。
+    # 必须在上面写入新 STATE 之后调用,whitelist_mode_on 才能拿到新接口。
+    sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
 }
 
 # ═══════════════════════════════════════════════════════════════════════════

@@ -651,7 +651,13 @@ case "${1:-scan}" in
             now_ts=$(date +%s)
             if [ -n "$cache_ts" ] && [ $((now_ts - cache_ts)) -lt 300 ]; then
                 cached=$(cat "$IFACE_CACHE" 2>/dev/null)
-                if [ -n "$cached" ] && [ "$cached" != "wlan0" ]; then
+                # v5.12: 命中缓存也要确认接口还在且有 IPv4。热点从 wlan2 换到
+                # wlan1/ap0(重开换频段、USB 共享等)后,旧实现最长 5 分钟内仍返回
+                # 已消失的旧接口:watchdog probe 因"无 IPv4"判为热点关闭而不迁移,
+                # apply_device_rule / tc_manager / v6_sync 把规则打到旧接口上全失败。
+                # 校验失败就落到下面重新探测(只多一次 ip addr,不影响防抖初衷)。
+                if [ -n "$cached" ] && [ "$cached" != "wlan0" ] && \
+                   ip addr show "$cached" 2>/dev/null | grep -q 'inet '; then
                     echo "$cached"
                     exit 0
                 fi

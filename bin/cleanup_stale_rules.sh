@@ -37,6 +37,12 @@ threshold=$((now - ttl_days * 86400))
 }
 
 gate_lock || { log "gate_lock failed, skip this round"; exit 1; }
+# v5.12: gate 传递(同 tc_manager restore)。下面的 apply_device_rule clear 会 fork
+# iptables_manager unmark,它的 mac_lock 见 gate 目录会等满 5s 退 11 —— 本脚本自己
+# 持 gate 就自己把自己堵死:陈旧设备的 MARK 规则(v4+v6)永远删不掉,紧接着
+# device_remove 又把 mark_id 释放,mid 复用后该 MAC 回来会被打上新主人的 mark。
+# gate/pid 由 gate_lock 写为本进程 $$,hnc_lock.sh 校验一致才豁免门禁。
+export HNC_GATE_HELD=$$
 
 removed=0
 scanned=0
@@ -73,6 +79,7 @@ for mac in $(grep -oE '"[0-9a-fA-F:]{17}"[[:space:]]*:' "$RULES" 2>/dev/null \
     fi
 done
 
+unset HNC_GATE_HELD
 gate_unlock
 log "cleanup done scanned=$scanned removed=$removed skipped_online=$skipped_online skipped_no_seen=$skipped_no_seen ttl_days=$ttl_days"
 exit 0
