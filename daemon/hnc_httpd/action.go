@@ -320,6 +320,17 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 	// v5.14
 	case "quic_block_set":
 		return actionQUICBlockSet(hncDir, p)
+	// v5.15: 未知应用发现
+	case "discover_confirm":
+		return actionDiscoverConfirm(s, p)
+	case "discover_ignore":
+		return actionDiscoverIgnore(s, p)
+	case "discover_probe":
+		return actionDiscoverProbe(s, p)
+	case "apk_scan":
+		return actionAPKScan(hncDir)
+	case "discover_cert_probe_set":
+		return actionSetTopBool(hncDir, "discover_cert_probe", p, "", "")
 	case "auth_required_set":
 		return actionAuthRequiredSet(hncDir, p)
 	case "remote_enabled_set":

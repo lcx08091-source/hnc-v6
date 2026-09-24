@@ -57,7 +57,8 @@ type configResp struct {
 	HotspotTimeEnd      string `json:"hotspot_time_end"`
 	HotspotChargingOnly bool   `json:"hotspot_charging_only"`
 	StaleRuleTTLDays    int    `json:"stale_rule_ttl_days"`
-	QUICBlock           bool   `json:"quic_block"` // v5.14
+	QUICBlock           bool   `json:"quic_block"`          // v5.14
+	DiscoverCertProbe   bool   `json:"discover_cert_probe"` // v5.15, 缺省 true
 	// rc3.1.13.1 删 OffloadWarn (review §3 P0): 历史上后端读 rules.json
 	// 但从无写路径, 前端 toggle 只写 localStorage 自管, 字段始终死值 false.
 	// rc3.1.12 config.json 兜底分支删除后, 死状况暴露 — 不如直接清掉
@@ -93,6 +94,10 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 			resp.HotspotTimeEnable = boolField(m, "hotspot_time_enable")
 			resp.HotspotChargingOnly = boolField(m, "hotspot_charging_only")
 			resp.QUICBlock = boolField(m, "quic_block")
+			resp.DiscoverCertProbe = true
+			if v, ok := m["discover_cert_probe"].(bool); ok {
+				resp.DiscoverCertProbe = v
+			}
 			resp.HotspotTimeStart, _ = m["hotspot_time_start"].(string)
 			resp.HotspotTimeEnd, _ = m["hotspot_time_end"].(string)
 			resp.StaleRuleTTLDays = 30 // 与 cleanup_stale_rules.sh 缺省一致

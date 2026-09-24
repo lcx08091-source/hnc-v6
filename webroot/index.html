@@ -305,6 +305,24 @@ button.row:active,.row.tap:active{background:var(--input)}
 .cn .r{font:600 11.5px var(--mono);text-align:right;color:var(--text-2);white-space:nowrap}
 .cn .r small{display:block;font-weight:500;color:var(--text-3);font-size:10.5px}
 .cn.idle .n{color:var(--text-2);font-weight:550}
+.disc-entry{display:flex;align-items:center;gap:12px;padding:14px;width:100%;text-align:left;border:0;background:none;color:inherit;font:inherit;cursor:pointer}
+.disc-entry .tx{flex:1;min-width:0}.disc-entry .t{font-weight:800;font-size:15px}.disc-entry .s{font-size:12px;color:var(--text-3);margin-top:2px}
+.disc-entry .n{font:800 22px var(--mono);color:var(--blue)}
+.dg{display:grid;gap:4px;padding:12px 0;border:0;background:none;width:100%;text-align:left;color:inherit;font:inherit;cursor:pointer}
+.dg+.dg{border-top:1px solid var(--divider)}
+.dg .h{display:flex;align-items:center;gap:8px}.dg .nm{font-weight:750;font-size:14.5px;flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dg .d{font:11.5px var(--mono);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.dg .tags{display:flex;gap:4px;flex-wrap:wrap}
+.dtag{font-size:10.5px;font-weight:700;padding:1px 7px;border-radius:5px;background:var(--input);color:var(--text-2)}
+.dtag.apk{background:var(--badge-acc-bg);color:var(--badge-acc)}.dtag.cert{background:var(--badge-pur-bg);color:var(--badge-pur)}.dtag.ja4{background:rgba(255,149,0,.15);color:#C26A00}
+.dsec{margin:14px 0 6px;font-size:12px;font-weight:800;color:var(--text-2);letter-spacing:.04em}
+.dbox{border-radius:12px;background:var(--input);padding:10px 12px;font-size:13px;display:grid;gap:6px}
+.dbox .row2{display:flex;justify-content:space-between;gap:10px;align-items:baseline}.dbox .row2 .k{color:var(--text-3);flex:none}.dbox .row2 .v{text-align:right;min-width:0;overflow-wrap:anywhere;font-weight:600}
+.dchips{display:flex;flex-wrap:wrap;gap:6px}
+.dchip{font:600 12px var(--mono);padding:4px 9px;border-radius:8px;border:1px solid var(--divider);background:var(--card,transparent);color:var(--text-1);cursor:pointer}
+.dchip.on{background:var(--blue);border-color:var(--blue);color:#fff}
+.dchip.cat{font-family:var(--font)}
+.dback{border:0;background:none;color:var(--blue);font:600 14px var(--font);padding:0;cursor:pointer;margin-bottom:6px}
 .cn-sum{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:var(--text-2);margin:2px 0 8px}
 .cn-sum b{font-family:var(--mono);color:var(--text)}
 .dev-rate{display:grid;gap:1px;justify-items:end;font-size:12.5px;font-weight:700}
@@ -1916,6 +1934,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       ps.push(api.getSafe('/api/dpi_probe', null, null).then(function (r) { S.probe = r && r.probe; }));
       ps.push(loadDpiHist(S.dpiDays));
       if (KSU || S.procHealthOk !== false) ps.push(loadProcHealth());
+      ps.push(loadDisc());
     }
     return Promise.all(ps).then(function () { if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); paintAppsDot(); });
   }
@@ -1928,7 +1947,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     return api.get('/api/proc_health', null, { timeout: 9000 }).then(function (r) { S.proc = r; S.procHealthOk = true; }).catch(function () { S.proc = null; S.procHealthOk = false; });
   }
   function dpiBody() {
-    return '<div id="dpi-hero"></div><div class="cols"><div>' +
+    return '<div id="dpi-hero"></div><div class="glass" id="disc-entry" style="margin-top:12px">' + discEntryHtml() + '</div><div class="cols"><div>' +
         '<div class="sec"><span>流量历史 <small>热点设备 · 按应用</small></span>' + seg('hist', [[1, '今日'], [3, '3 天'], [7, '7 天']], S.dpiDays, 'small') + '</div><div class="glass" style="padding:12px 14px" id="dpi-hist"></div>' +
         '<div class="sec"><span>活跃设备 <small>应用画像</small></span>' + seg('dflt', [['all', '全部'], ['active', '活跃'], ['high', '高置信']], S.dpiFilter, 'small') + '</div><div class="glass" id="dpi-clients"></div>' +
         '<div class="sec"><span>设备画像 <small>DHCP / mDNS / 域名被动指纹</small></span></div><div class="glass" id="dpi-ident"></div>' +
@@ -1976,7 +1995,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       stRow('热点接口', esc(pr.ap_iface || '—'), '', pr.ap_iface_source ? '来源 ' + esc(pr.ap_iface_source) : '') +
       stRow('Conntrack', pr.conntrack_readable ? '✓ 可读' : '不可读', pr.conntrack_readable ? 'ok' : 'warn', esc(pr.conntrack_path || '')) +
       stRow('BPF Tether Offload', pr.offload_hint ? '可能接管' : '未接管', pr.offload_hint ? 'warn' : 'ok', esc(pr.offload_evidence || ''));
-    paintDpiHist(); paintClients(); paintUnknown(); paintIdent();
+    paintDpiHist(); paintClients(); paintUnknown(); paintIdent(); paintDiscEntry();
   }
   var HIST_COLORS = ['#007AFF', '#AF52DE', '#34C759', '#FF9500', '#FF2D55', '#32ADE6', '#5856D6', '#8E8E93'];
   function paintDpiHist() {
@@ -2040,6 +2059,110 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var st = S.dpi && S.dpi.available && S.dpi.state;
     if (!st || !Array.isArray(st.top_unknown) || !st.top_unknown.length) return null;
     return st.top_unknown.slice(0, 15).map(function (x) { return { n: String(x.name || '').toLowerCase(), c: num(x.count, 1), k: { '未识别': 1 } }; }).filter(function (x) { return x.n; });
+  }
+  /* ═══ v5.15: 未知应用发现 ═══
+     二级: 新发现的应用列表(弹层) → 三级: 某一组的判断依据 + 确认/忽略 */
+  S.disc = null; S.discSel = null; S.discForm = null;
+  var DCAT = [['video', '视频'], ['social', '社交'], ['game', '游戏'], ['shopping', '购物'], ['music', '音乐'], ['office', '办公'], ['ai', 'AI'], ['reading', '阅读'], ['news', '资讯'], ['travel', '出行'], ['navigation', '地图'], ['life_service', '生活'], ['finance', '金融'], ['education', '教育'], ['photo', '图片'], ['tool', '工具'], ['browser', '浏览器'], ['download', '下载'], ['unknown', '其他']];
+  var GSRC = { apk: ['本机 App', 'apk'], cert: ['证书', 'cert'], ja4: ['指纹', 'ja4'], domain: ['仅域名', ''] };
+  var GCONF = { high: '把握大', medium: '把握中', low: '待确认' };
+  function loadDisc() { return api.getSafe('/api/discover', null, null).then(function (r) { if (r && r.ok) { S.disc = r; paintDiscEntry(); if (S.discOpen) paintDiscSheet(); } }); }
+  function discEntryHtml() {
+    var r = S.disc, n = r && r.groups ? r.groups.length : 0;
+    var named = r && r.groups ? r.groups.filter(function (g) { return g.guess && g.guess.src !== 'domain'; }).length : 0;
+    return '<button class="disc-entry press" data-act="disc-open">' + gi('purple', 'search') + '<span class="tx"><div class="t">新发现的应用</div><div class="s">' +
+      (!r ? '加载中…' : r.available === false ? '等 DPI 运行一段时间后，规则库认不出的应用会出现在这里' : n ? '规则库里没有的 ' + n + ' 个应用' + (named ? '，已认出 ' + named + ' 个是谁' : '') + ' · 点开确认' : '暂时没有 · 规则库都认得') +
+      '</div></span>' + (n ? '<span class="n">' + n + '</span>' : '') + ico('right', 'chev') + '</button>';
+  }
+  function paintDiscEntry() { var el = $('#disc-entry'); if (el) el.innerHTML = discEntryHtml(); }
+  function discTags(g) {
+    var t = '', gs = g.guess || {};
+    if (g.apk && g.apk.length) t += '<span class="dtag apk">本机 App · ' + esc(g.apk[0].label || g.apk[0].pkg) + '</span>';
+    if (g.company) t += '<span class="dtag cert">证书 · ' + esc(g.company) + '</span>';
+    else if (g.cert && g.cert.org) t += '<span class="dtag cert">证书 · ' + esc(g.cert.org.slice(0, 18)) + '</span>';
+    if (g.family_name) t += '<span class="dtag ja4">指纹 · ' + esc(g.family_name) + '</span>';
+    if (!t) t = '<span class="dtag">仅域名</span>';
+    return t + '<span class="dtag">' + (GCONF[gs.conf] || '待确认') + '</span>';
+  }
+  function devNames(macs) { return (macs || []).map(function (m) { var d = devBy(m); return d ? d.name : m; }); }
+  function discListHtml() {
+    var r = S.disc;
+    if (!r) return '<div class="note">加载中…</div>';
+    var sc = r.apk_scan || {}, gs = r.groups || [];
+    var head = '<div class="dbox" style="margin-bottom:6px"><div class="row2"><span class="k">本机安装包</span><span class="v">' + (sc.app_count ? '已扫描 ' + sc.app_count + ' 个 App · ' + ago(sc.generated_at) : '还没扫描') + (sc.requested ? ' · 排队中' : '') + '</span></div>' +
+      '<div class="row2"><span class="k">服务器证书</span><span class="v">' + (r.cert_probe ? '自动获取中' : '已关闭') + '</span></div>' +
+      '<div class="btns" style="margin:2px 0 0"><button class="btn sec press" data-act="disc-scan">' + ico('refresh') + '立即扫描本机 App</button></div></div>';
+    if (!gs.length) return head + '<div class="note" style="text-align:center;padding:20px 0">' + (r.available === false ? 'dpid 还没产出发现结果（需要 DPI 运行一段时间）' : '暂时没有规则库认不出的应用 🎉') + '</div>';
+    return head + gs.map(function (g) {
+      var gs2 = g.guess || {};
+      return '<button class="dg press" data-disc="' + esc(g.id) + '"><span class="h"><span class="nm">' + esc(gs2.name || (g.suffixes || [])[0] || g.id) + '</span><span class="pill-count">' + num(g.hits) + ' 次</span>' + ico('right', 'chev') + '</span>' +
+        '<span class="d">' + esc((g.suffixes || []).slice(0, 4).join(' · ')) + ((g.suffixes || []).length > 4 ? ' +' + (g.suffixes.length - 4) : '') + '</span>' +
+        '<span class="tags">' + discTags(g) + '<span class="dtag">' + (g.devices || []).length + ' 台设备</span></span></button>';
+    }).join('') + '<div class="note" style="margin-top:8px">' + (r.ignored_n ? '已忽略 ' + r.ignored_n + ' 组 · ' : '') + (r.confirmed_n ? '已确认 ' + r.confirmed_n + ' 组' : '') + '</div>';
+  }
+  function discSheet() {
+    S.discOpen = true; S.discSel = null;
+    sheet('<h3>新发现的应用</h3><div class="sub">规则库认不出的域名会自动聚成"同一个 App"，再从本机安装包、服务器证书、网络指纹里找出它是谁</div><div id="disc-body">' + discListHtml() + '</div>' +
+      '<button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true, kind: 'disc', onClose: function () { S.discOpen = false; S.discSel = null; } });
+    loadDisc();
+  }
+  function discGroup(id) { var gs = (S.disc && S.disc.groups) || []; for (var i = 0; i < gs.length; i++) if (gs[i].id === id) return gs[i]; return null; }
+  function paintDiscSheet() {
+    var el = $('#disc-body'); if (!el) return;
+    if (S.discSel) { var ni = $('#dc-name'); if (ni && document.activeElement === ni) return; if (ni && S.discForm) S.discForm.name = ni.value; var g = discGroup(S.discSel); if (g) { var st = $('#sheet').scrollTop; el.innerHTML = discDetailHtml(g); $('#sheet').scrollTop = st; return; } S.discSel = null; }
+    el.innerHTML = discListHtml();
+  }
+  function discOpenDetail(id) {
+    var g = discGroup(id); if (!g) return;
+    S.discSel = id;
+    var gs = g.guess || {};
+    S.discForm = { name: gs.src === 'domain' ? '' : gs.name || '', cat: 'unknown', sufs: {} };
+    (g.suffixes || []).forEach(function (x) { S.discForm.sufs[x] = true; });
+    (g.cert_siblings || []).forEach(function (x) { if (!(x in S.discForm.sufs)) S.discForm.sufs[x] = false; });
+    $('#disc-body').innerHTML = discDetailHtml(g); $('#sheet').scrollTop = 0;
+  }
+  function kv(k, v) { return '<div class="row2"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>'; }
+  function discDetailHtml(g) {
+    var gs = g.guess || {}, f = S.discForm || { name: '', cat: 'unknown', sufs: {} }, h = '<button class="dback" data-act="disc-back">‹ 返回列表</button>';
+    h += '<div style="text-align:center;margin-bottom:6px"><div style="font-size:19px;font-weight:800">' + esc(gs.name || g.id) + '</div><div class="tags" style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;margin-top:6px">' + discTags(g) + '</div></div>';
+    h += '<div class="dsec">判断依据</div>';
+    // 本机安装包
+    h += '<div class="dbox">' + (g.apk && g.apk.length ? g.apk.map(function (a, i) { return kv(i ? '也可能' : '本机 App', esc(a.label || a.pkg) + '<div class="note mono" style="font-weight:500">' + esc(a.pkg) + ' · 命中 ' + esc((a.suffixes || []).join(', ')) + '</div>'); }).join('') : kv('本机 App', '<span class="note">本机安装包里没找到这些域名</span>')) + '</div>';
+    // 证书
+    var c = g.cert;
+    h += '<div class="dbox" style="margin-top:8px">' + (!c ? kv('服务器证书', '<span class="note">还没获取</span>') : c.err ? kv('服务器证书', '<span class="note">' + esc(c.err) + '</span>') :
+      kv('证书主体', esc(c.org || '（证书没写组织名）') + (g.company ? '<div class="note">→ ' + esc(g.company) + '</div>' : '')) + kv('签发', esc(c.issuer || '—')) + (c.sans && c.sans.length ? kv('同证书域名', '<span class="mono" style="font-size:11.5px;font-weight:500">' + esc(c.sans.slice(0, 8).join(' ')) + (c.sans.length > 8 ? ' …' : '') + '</span>') : '')) +
+      '<div class="btns" style="margin:2px 0 0"><button class="btn sec press" data-act="disc-probe">' + ico('refresh') + (c ? '重新获取证书' : '立即获取证书') + '</button></div></div>';
+    // 指纹
+    h += '<div class="dbox" style="margin-top:8px">' + kv('网络指纹', g.family_name ? esc(g.family_name) + ' 系网络库' + (g.family_conf ? '<span class="note"> · ' + Math.round(num(g.family_conf) * 100) + '%</span>' : '') : '<span class="note">没有匹配到已知家族</span>') +
+      ((g.ja4 || []).length ? kv('JA4', '<span class="mono" style="font-size:11px;font-weight:500">' + esc(g.ja4.slice(0, 2).join(' ')) + '</span>') : '') + '</div>';
+    // 观测
+    h += '<div class="dsec">看到的域名 · ' + num(g.hits) + ' 次</div><div class="dbox">' + (g.domains || []).slice(0, 10).map(function (d) { return kv('<span class="mono" style="color:var(--text-1);font-size:12px">' + esc(d.name) + '</span>', '<span class="note">' + num(d.count) + ' 次</span>'); }).join('') +
+      kv('出现在', esc(devNames(g.devices).join('、') || '—')) + (g.last_seen ? kv('最近', ago(g.last_seen)) : '') + '</div>';
+    // 表单
+    h += '<div class="dsec">确认后加入规则库</div>' +
+      '<label class="field">应用名称<span class="box"><input id="dc-name" maxlength="40" placeholder="比如：小红书" value="' + esc(f.name) + '"></span></label>' +
+      '<div class="note" style="margin:10px 0 6px">分类</div><div class="dchips">' + DCAT.map(function (x) { return '<button class="dchip cat' + (f.cat === x[0] ? ' on' : '') + '" data-dcat="' + x[0] + '">' + x[1] + '</button>'; }).join('') + '</div>' +
+      '<div class="note" style="margin:10px 0 6px">要加入的域名（点选取消）' + ((g.cert_siblings || []).length ? ' · 虚线的是同证书里的兄弟域名' : '') + '</div><div class="dchips">' + Object.keys(f.sufs).map(function (x) { return '<button class="dchip' + (f.sufs[x] ? ' on' : '') + '" data-dsuf="' + esc(x) + '"' + ((g.suffixes || []).indexOf(x) < 0 ? ' style="border-style:dashed"' : '') + '>' + esc(x) + '</button>'; }).join('') + '</div>' +
+      '<div class="btns" style="margin-top:14px"><button class="btn sec press" data-act="disc-ignore">忽略</button><button class="btn pri press" data-act="disc-confirm">确认加入规则库</button></div>';
+    return h;
+  }
+  function discAct(act) {
+    var id = S.discSel, g = id && discGroup(id);
+    if (act === 'disc-open') return discSheet();
+    if (act === 'disc-back') { S.discSel = null; $('#disc-body').innerHTML = discListHtml(); return; }
+    if (act === 'disc-scan') return api.action('apk_scan').then(function (r) { toast(r.detail || '已请求扫描'); loadDisc(); }).catch(function (e) { toast(errText(e), 'err'); });
+    if (!g) return;
+    if (act === 'disc-probe') { toast('正在连接 ' + ((g.domains || [])[0] || {}).name + ' 读取证书…'); return api.action('discover_probe', { id: id }, { timeout: 20000, maxTime: 18 }).then(function () { toast('已获取证书'); }).catch(function (e) { toast(errText(e), 'warn'); }).then(loadDisc); }
+    if (act === 'disc-ignore') return api.action('discover_ignore', { id: id }).then(function () { toast('已忽略'); S.discSel = null; S.disc.groups = S.disc.groups.filter(function (x) { return x.id !== id; }); paintDiscSheet(); paintDiscEntry(); loadDisc(); }).catch(function (e) { toast(errText(e), 'err'); });
+    if (act === 'disc-confirm') {
+      var name = ($('#dc-name').value || '').trim(), f = S.discForm, sufs = Object.keys(f.sufs).filter(function (x) { return f.sufs[x]; });
+      if (!name) { toast('先填应用名称', 'warn'); $('#dc-name').focus(); return; }
+      if (!sufs.length) { toast('至少保留一个域名', 'warn'); return; }
+      return api.action('discover_confirm', { id: id, name: name, category: f.cat, suffixes: sufs.join(',') }).then(function (r) {
+        toast('「' + name + '」已加入规则库'); S.discSel = null; S.disc.groups = S.disc.groups.filter(function (x) { return x.id !== id; }); paintDiscSheet(); paintDiscEntry(); loadDisc();
+      }).catch(function (e) { toast(errText(e), 'err'); });
+    }
   }
   function paintIdent() {
     var el = $('#dpi-ident'); if (!el) return;
@@ -2230,7 +2353,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       (KSU ? sBtn(['cyan', 'doc'], 'JSON 健康面板', 'rules / devices / tokens 的完整性与备份', 'json-health', '打开') : '') +
       sBtn(['purple', 'down'], '导出诊断包', '快照、配置、日志尾部和 tc/iptables/ip 状态', 'debug-bundle', '导出')]);
     // v5.14: 应用识别 —— 强制 QUIC 回落 TCP
-    groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"'))]);
+    groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
+      sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
+      sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
     var cs = S.clsact;
     groups.push(['clsact BPF（实验性）', sItem(['red', 'flask'], '启用 clsact BPF 打标', '在 AOSP offload 之前按源 IP 预设限速 mark；默认关', toggle(c.clsact_bpf_enabled === true, 'data-set="clsact" aria-label="clsact BPF"')) +
       '<div class="row">' + gi('gray', 'layers') + '<span class="tx"><div class="t">clsact BPF 状态</div><div class="s" id="clsact-s">' + (c.clsact_bpf_enabled !== true ? '未启用' : cs ? ['clsact', 'bpf_filter', 'map', 'watchdog'].map(function (k) { return k + (cs[k] ? ' ✓' : ' ✗'); }).join(' · ') : '点「检查」查看') + '</div></span>' +
@@ -2303,6 +2428,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         if (on) { var gw = el.closest('[data-foldkey]'); if (gw && !gw.classList.contains('open')) foldToggle(gw, 'gs'); el.setAttribute('aria-checked', 'false'); toast('填好上限后点「应用」启用'); return; }
         api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭')).catch(rollback); return;
       case 'remote': api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(rollback); return;
+      case 'certprobe': api.action('discover_cert_probe_set', { enabled: String(on) }).then(done()).catch(rollback); return;
       case 'quic': api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); }).catch(rollback); return;
       case 'auth': api.action('auth_required_set', { enabled: String(on) }).then(done()).catch(rollback); return;
       case 'clsact': api.action('clsact_bpf_enabled_set', { enabled: String(on) }).then(done()).then(function () { S.clsact = null; if (S.page === 'settings') renderSettings(false); if (on) setTimeout(clsactCheck, 12000); }).catch(rollback); return;
@@ -2557,6 +2683,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if ((q = t.closest('[data-excl]'))) { excludeApp(q.getAttribute('data-excl'), q.getAttribute('data-name')); return; }
     if ((q = t.closest('[data-exp-min]'))) { S.expMin = +q.getAttribute('data-exp-min'); $$('[data-exp-min]').forEach(function (b) { b.classList.toggle('on', b === q); }); $('#exp-from').value = dtLocal(Date.now() - S.expMin * 60000); $('#exp-to').value = dtLocal(Date.now()); return; }
     if ((q = t.closest('[data-dl]'))) { downloadExport(q.getAttribute('data-dl'), q.getAttribute('data-url')); return; }
+    if ((q = t.closest('[data-disc]'))) { discOpenDetail(q.getAttribute('data-disc')); return; }
+    if ((q = t.closest('[data-dcat]'))) { if (S.discForm) { S.discForm.cat = q.getAttribute('data-dcat'); $$('[data-dcat]').forEach(function (b) { b.classList.toggle('on', b === q); }); } return; }
+    if ((q = t.closest('[data-dsuf]'))) { if (S.discForm) { var sx = q.getAttribute('data-dsuf'); S.discForm.sufs[sx] = !S.discForm.sufs[sx]; q.classList.toggle('on', S.discForm.sufs[sx]); } return; }
     if ((q = t.closest('[data-rule-tpl]'))) { ruleTemplate(q.getAttribute('data-rule-tpl')); return; }
     if ((q = t.closest('[data-ndpi]'))) { ndpiRun(q.getAttribute('data-ndpi'), q); return; }
     if ((q = t.closest('[data-fw-del]'))) { var pk = q.getAttribute('data-fw-del'); api.action('flywheel_exclude_set', { op: 'remove', pkg: pk }).then(function () { toast('已移除 ' + pk); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
@@ -2607,6 +2736,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       case 'self-purge': confirmSheet('清理自学习明细？', '删除 run/self_attrib.*.jsonl 明细（已学到的规则保留）。', '清理').then(function (ok) { if (ok) api.action('self_attrib_purge').then(function (r3) { toast('已清理 · ' + (r3.detail || '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
       // 分析页
       case 'dpi-refresh': loadDpi(true); toast('已刷新'); break;
+      case 'disc-open': case 'disc-back': case 'disc-scan': case 'disc-probe': case 'disc-ignore': case 'disc-confirm': discAct(act); break;
       case 'dpi-rebind': api.action('dpi_rebind').then(function () { toast('已请求 dpid 重新绑定'); setTimeout(function () { loadDpi(true); }, 2500); setTimeout(function () { loadDpi(true); }, 6000); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
       case 'rules-export': case 'rules-import': case 'rules-reset': case 'rules-update': rulesAct(act); break;
       // 设置页
