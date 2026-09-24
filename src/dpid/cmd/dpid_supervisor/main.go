@@ -541,7 +541,20 @@ func runChild(iface string, launchBlind bool, lastRebind *time.Time) bool {
 	periodicTicker := time.NewTicker(3 * time.Second)
 	defer periodicTicker.Stop()
 
+	// v5.12: 先 SIGTERM 让 dpid 走正常退出路径(clearCrashFlag + 删 pid 文件),
+	// 3s 不退再 SIGKILL。旧代码直接 SIGKILL: dpid 每次启动都 armCrashFlag 追加
+	// 时间戳、只在正常退出/健康 5min 后才清, 于是热点抖动时 supervisor 60s 内
+	// 连续 rebind 3 次后, 第 4 次启动的 dpid 会把这些"被杀"误判为崩溃循环 →
+	// ModeCrashLoop 空转最长 30min, 期间 DPI 完全不工作。
 	killAndReap := func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		t := time.NewTimer(3 * time.Second)
+		defer t.Stop()
+		select {
+		case <-exitCh:
+			return
+		case <-t.C:
+		}
 		_ = cmd.Process.Kill()
 		<-exitCh
 	}
