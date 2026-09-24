@@ -424,7 +424,9 @@ func detectUnknownDevices(cfg Config, uc AlertConfig) (int, error) {
 		emitted++
 
 		// Try to post system notification — only if not in quiet hours.
-		if !cfg.DisableNotify && !inQuietHours(time.Now(), uc.UnknownDevice) {
+		// v5.12: 免打扰按真实本地时区判断(旧 time.Now() 在 Android 上是 UTC,
+		// 默认 23-7 免打扰在东八区变成 07:00-15:00: 白天静音、半夜推送)。
+		if !cfg.DisableNotify && !inQuietHours(nowLocal(), uc.UnknownDevice) {
 			title := "HNC · 陌生设备"
 			body := fmt.Sprintf("%s (%s) 已连入热点", hostname, mac)
 			_ = postNotification(title, body)

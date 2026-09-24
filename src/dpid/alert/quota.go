@@ -33,21 +33,19 @@ func detectMonthlyQuota(cfg Config, uc AlertConfig) (int, error) {
 		return 0, nil
 	}
 
-	now := time.Now()
+	// v5.12: 真实本地时区(Android 上 time.Local 恒为 UTC, 旧代码的"自然月"
+	// 实际从北京时间 1 号 08:00 起算)。
+	now := nowLocal()
 	// 自然月窗口(本地时区): 1 号 00:00 至今。
 	monthStart := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 	monthKey := now.Format("200601")
 
-	// 本月合计, 按天滚 sumByMAC(它一次最多跨 2 个文件, 按天迭代覆盖整月)。
+	// 本月合计。v5.12: sumByMAC 已按窗口覆盖的本地∪UTC 日期集合找文件, 一次
+	// 调用覆盖整月; 旧的按天分段 + 两端闭区间会让恰在本地零点的行被相邻两天
+	// 各算一次, 且每段都按本地日期找 UTC 命名的文件, 月初/月末 8 小时读错天。
 	monthly := map[string]uint64{}
-	for day := monthStart; !day.After(now); day = day.AddDate(0, 0, 1) {
-		dayEnd := day.AddDate(0, 0, 1)
-		if dayEnd.After(now) {
-			dayEnd = now
-		}
-		if err := sumByMAC(filepath.Join(cfg.HNCDir, "run"), day, day.Unix(), dayEnd.Unix(), monthly); err != nil {
-			return 0, err
-		}
+	if err := sumByMAC(filepath.Join(cfg.HNCDir, "run"), monthStart.Unix(), now.Unix()+1, monthly); err != nil {
+		return 0, err
 	}
 
 	// 月粒度 dedup: loadRecentAlerts 只读文件尾 50KB(月度告警频率极低,
