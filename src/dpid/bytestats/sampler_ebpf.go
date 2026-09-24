@@ -68,6 +68,14 @@ type netdStatsValue struct {
 // EBPFSampler implements ByteSampler against the netd BPF map.
 type EBPFSampler struct {
 	fd int
+
+	// v5.12: 传给 bpf(2) 的 key/next/val 缓冲区放在(必然堆分配的)sampler
+	// 结构体里。旧代码用 Sample() 的局部变量, 其地址以 uint64 形式写进 attr
+	// 字节数组 —— 局部变量不逃逸时在 goroutine 栈上, 而 Go 栈在增长/GC 缩栈
+	// 时会整体搬迁, 藏在整数里的地址不会被更新, 内核随后按旧地址读写 =
+	// 越界写栈内存(违反 unsafe.Pointer 规则 4)。堆对象不会被移动。
+	key, next netdStatsKey
+	val       netdStatsValue
 }
 
 // NewEBPFSampler opens the pinned BPF map. Returns an error if the map
@@ -109,8 +117,8 @@ func (s *EBPFSampler) Sample() (map[int]ByteCounts, error) {
 	}
 	out := make(map[int]ByteCounts, 256)
 
-	var key netdStatsKey
-	var next netdStatsKey
+	key, next := &s.key, &s.next // v5.12: 堆上缓冲区, 见结构体注释
+	*key, *next = netdStatsKey{}, netdStatsKey{}
 	first := true
 
 	for {
@@ -118,9 +126,9 @@ func (s *EBPFSampler) Sample() (map[int]ByteCounts, error) {
 		if first {
 			keyPtr = nil // BPF_MAP_GET_NEXT_KEY with NULL = start at first
 		} else {
-			keyPtr = unsafe.Pointer(&key)
+			keyPtr = unsafe.Pointer(key)
 		}
-		err := bpfMapGetNextKeyCall(s.fd, keyPtr, unsafe.Pointer(&next))
+		err := bpfMapGetNextKeyCall(s.fd, keyPtr, unsafe.Pointer(next))
 		if err == syscall.ENOENT {
 			// End of map.
 			break
@@ -129,12 +137,13 @@ func (s *EBPFSampler) Sample() (map[int]ByteCounts, error) {
 			return out, fmt.Errorf("bpf(BPF_MAP_GET_NEXT_KEY): %w", err)
 		}
 
-		var val netdStatsValue
-		err = bpfMapLookupElemCall(s.fd, unsafe.Pointer(&next), unsafe.Pointer(&val))
+		s.val = netdStatsValue{}
+		err = bpfMapLookupElemCall(s.fd, unsafe.Pointer(next), unsafe.Pointer(&s.val))
+		val := s.val
 		if err != nil {
 			// Could be that the entry was deleted between get_next_key
 			// and lookup. Skip and continue.
-			key = next
+			*key = *next
 			first = false
 			continue
 		}
@@ -143,7 +152,7 @@ func (s *EBPFSampler) Sample() (map[int]ByteCounts, error) {
 		// uid -5 (-1 cast to uint32 → 4294967291) is "unknown" / special.
 		// Filter out non-real uids: -1, -5 (>4 billion when interpreted unsigned).
 		if uid < 0 || uid > 100000000 {
-			key = next
+			*key = *next
 			first = false
 			continue
 		}
@@ -155,7 +164,7 @@ func (s *EBPFSampler) Sample() (map[int]ByteCounts, error) {
 		bc.TxPackets += val.TxPackets
 		out[uid] = bc
 
-		key = next
+		*key = *next
 		first = false
 	}
 
@@ -177,8 +186,13 @@ type bpfAttrObjGet struct {
 	FileFlags uint32
 }
 
+// bpfPathBuf v5.12: 包级变量强制堆分配(理由同 EBPFSampler.key), 仅启动时
+// 单 goroutine 使用一次。
+var bpfPathBuf []byte
+
 func bpfObjGetCall(path string) (int, error) {
-	cpath := append([]byte(path), 0) // NUL-terminate
+	bpfPathBuf = append([]byte(path), 0) // NUL-terminate
+	cpath := bpfPathBuf
 	attr := bpfAttrObjGet{
 		Pathname: uint64(uintptr(unsafe.Pointer(&cpath[0]))),
 	}
