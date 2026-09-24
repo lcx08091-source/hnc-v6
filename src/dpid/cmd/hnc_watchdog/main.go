@@ -239,6 +239,18 @@ func runAction(name string, args ...string) actionResult {
 	cmd.Env = os.Environ()
 	// Isolate from our own pgrp so action kills don't propagate to us.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// v5.12: 超时时杀整个进程组, 并限定 sh 退出后等待 stdout 管道关闭的时间。
+	// 旧代码只杀 sh 本身, 而 cmd.Output() 要等 stdout 管道的所有写端关闭:
+	// watchdog.sh 的 do_full_init 末尾有未重定向的 "( sleep 15; ... ) &"
+	// 子 shell 继承了这根管道 → 每次 full_init 主循环至少白等 15s+; 若子孙
+	// 进程卡住, 30s 超时也救不回来(Wait 仍阻塞在管道上), 主循环整体停摆。
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
 
 	out, err := cmd.Output()
 	rc := 0
@@ -246,6 +258,12 @@ func runAction(name string, args ...string) actionResult {
 		var ee *exec.ExitError
 		if errors.As(err, &ee) {
 			rc = ee.ExitCode()
+			err = nil
+		} else if errors.Is(err, exec.ErrWaitDelay) {
+			// v5.12: sh 已正常退出, 只是后台子孙仍持有 stdout —— 按成功处理。
+			if cmd.ProcessState != nil {
+				rc = cmd.ProcessState.ExitCode()
+			}
 			err = nil
 		}
 	}
@@ -873,7 +891,9 @@ func handleActive(activeIface string, throttle *restoreThrottle, recoveryRounds 
 func runV6Sync() {
 	cmd := exec.Command(shellPath(), binDir+"/v6_sync.sh", "sync")
 	cmd.Env = os.Environ()
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	// v5.12: nil = /dev/null。io.Discard 会让 exec 建管道 + 拷贝 goroutine,
+	// 脚本里任何继承 stdout 的后台子进程都会让 Run() 阻塞到它退出, 主循环随之卡住。
+	cmd.Stdout, cmd.Stderr = nil, nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	_ = cmd.Run()
 }
@@ -881,7 +901,9 @@ func runV6Sync() {
 func runStatsSample() {
 	cmd := exec.Command(shellPath(), binDir+"/stats_sample.sh")
 	cmd.Env = os.Environ()
-	cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+	// v5.12: nil = /dev/null。io.Discard 会让 exec 建管道 + 拷贝 goroutine,
+	// 脚本里任何继承 stdout 的后台子进程都会让 Run() 阻塞到它退出, 主循环随之卡住。
+	cmd.Stdout, cmd.Stderr = nil, nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	_ = cmd.Run()
 }
@@ -973,7 +995,7 @@ func appLimitApplyLoop() {
 		if _, err := os.Stat(script); err == nil {
 			cmd := exec.Command(shellPath(), script)
 			cmd.Env = os.Environ()
-			cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
+			cmd.Stdout, cmd.Stderr = nil, nil // v5.12: 同 runV6Sync, 不建管道
 			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 			_ = cmd.Run()
 		}
