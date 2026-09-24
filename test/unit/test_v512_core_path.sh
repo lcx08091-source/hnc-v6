@@ -68,3 +68,17 @@ tcm remove wlan2 5 >/dev/null 2>&1
 assert_mock_called "parent 1: prio 105" "应删自己的 prio 105" && \
     assert_mock_not_called "prio 106" "不能删相邻设备 prio 106" && test_pass
 mock_teardown
+
+# ═══ apply_app_limits 不得删除默认类 1:9999(十六进制 0x9999)════
+test_start "apply_app_limits: 清理应用段 class 时不碰默认类 1:9999"
+mock_setup
+echo "wlan2" > "$HNC_TEST_DIR/run/active_iface"
+mock_set_stdout tc "class htb 1:1 root rate 1Gbit ceil 1Gbit
+class htb 1:9999 parent 1:1 leaf 9999: prio 0 rate 1Gbit
+class htb 1:9001 parent 1:1 prio 0 rate 5Mbit
+class htb 1:5 parent 1:1 leaf 1005: prio 0 rate 10Mbit"
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/apply_app_limits.sh" >/dev/null 2>&1
+assert_mock_called "class del dev wlan2 classid 1:9001" "应用段 class 应被清理" && \
+    assert_mock_not_called "classid 1:9999" "默认类 1:9999 绝不能删" && \
+    assert_mock_not_called "classid 1:5" "设备 class 不能删" && test_pass
+mock_teardown
