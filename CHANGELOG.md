@@ -14,6 +14,33 @@
 
 ---
 
+## [5.13.0] - 2026-09-24
+
+**设备识别 / 实时连接 / 流量识别 专项增强**。
+
+### Added
+
+- **被动设备识别**(dpid, `src/dpid/output/devid.go`):抓包放行 DHCP(67/68)、DHCPv6(546/547)、mDNS(5353)、SSDP(1900)、NBNS(137)(cBPF +16 条指令,两种链路类型),解析主机名、DHCP opt60 厂商类 / opt55 参数列表指纹、mDNS `model=` / 服务类型、SSDP UA、NetBIOS 名;再叠加 DNS/SNI 域名信号(captive.apple.com、connectivitycheck、miui、heytap、hicloud…)与 JA4,按信号强度投票得出类型 / 系统 / 品牌 / 型号 / 置信度 + 证据。输出 `run/dpi_devid.json`(15s,有变化才写,重启读回;DHCP 只在接入瞬间出现所以必须持久化)。随机 MAC 设备也能识别。
+- **IP→域名反查表**(`src/dpid/output/ipname.go`):DNS 应答(CNAME 链归到原始问的名字)+ TLS SNI(优先),LRU 4096,输出 `run/dpi_ipname.json`(5s)。
+- **实时连接** `GET /api/connections?mac=`(httpd `api_conn.go`):读 `/proc/net/nf_conntrack`,按设备全部 IP(含 IPv6)过滤,富化域名(dpi_ipname → nDPI ip_to_host)、应用(ip_app_map)、常见端口服务名;两次采样差分出每条连接速率(首次访问时若 `nf_conntrack_acct=0` 尝试打开,对新连接生效);按应用/域名分组汇总;全表解析 1 秒内共享。不带 `mac` 返回每台设备连接数。
+- `/api/devices`、`/api/live?devices=1` 设备项新增 `ident`;hotspotd 没拿到主机名时用 dpid 抓到的 DHCP/mDNS 名字(手动命名仍最高优先)。
+- **未识别域名**:`dpi_state.json` 新增 `top_unknown`(全局 top20 + 每客户端 top5,已过滤 .local/.arpa/纯 IP/基础设施域名)。
+- 新规则文件 `data/dpi_rules.d/45-cn-apps-extra.json`:22 个常见中国应用(携程、12306、虎牙、斗鱼、喜马拉雅、夸克、UC、得物、闲鱼、唯品会、哈啰、贝壳、58 同城、BOSS 直聘、懂车帝、汽车之家、美图、WPS、腾讯会议、网易邮箱、番茄小说、七猫);`dpi_rules.json` 已同步重新生成。
+- WebUI:设备卡「实时连接」摘要 + 2 秒刷新的全部连接弹层(全部 / 活跃 / 按应用);「设备识别」区块(类型、系统、品牌型号、上报名称、服务、把握、证据);设备图标和副标题优先用识别结果;设备列表显示连接数;分析页新增「设备画像」,补库助手优先列未识别域名。
+
+### Changed
+
+- `classifyHost` 改为后缀索引:每次查找 40.6µs → 0.14µs 且零分配;与旧实现在约 9 千个派生主机名上逐条等价。
+- `/api/live` 的设备签名加入主机名 / 低延迟 / 白名单 / 识别结果,这些变化也会触发设备卡重画。
+
+### Internals
+
+- 新测试:DHCP / DHCPv6 / mDNS / SSDP / NBNS 真实报文 + 截断 / 随机篡改不 panic;cBPF 解释器逐端口验证过滤器;devid / ipname / top_unknown / 规则加载;httpd conntrack 解析、速率差分、富化与 ident 合并(`v513_test.go`)。
+- `src/dpid` 全部文件 gofmt。
+- 需要 CI 重编 `hnc_dpid`、`hnc_httpd`。
+
+---
+
 ## [5.12.0] - 2026-09-24
 
 **补齐未完成的功能 + 限速核心路径 / DPI 守护进程专项修复 + 省电优化**。
