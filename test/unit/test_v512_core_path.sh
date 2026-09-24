@@ -177,6 +177,37 @@ HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action check_health 
 assert_eq "0" "$?" "mq child htb 模式应判健康" && test_pass
 mock_teardown
 
+# ═══ watchdog full_restore: restore 因锁竞争失败 → 下轮仍判不健康 ═══
+test_start "watchdog full_restore: restore rc=12 时落 pending, check_health 判不健康"
+mock_setup
+echo "wlan2" > "$HNC_TEST_DIR/run/iface.cache"
+date +%s > "$HNC_TEST_DIR/run/capability_probe_last"
+mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan2"
+mock_set_stdout tc "qdisc htb 1: root refcnt 2 r2q 10 default 0x9999"
+mock_set_stdout iptables "-A HNC_RESTORE -m connmark ! --mark 0x0 -j CONNMARK --restore-mark --nfmask 0xffffff --ctmask 0xffffff"
+echo '{"version":1,"devices":{},"blacklist":["dd:dd:dd:dd:dd:08"],"whitelist":[]}' > "$HNC_TEST_DIR/data/rules.json"
+# 模拟另一个活着的 tc 写者持有 tc_action_lock(租约内)
+mkdir -p "$HNC_TEST_DIR/run/tc_action.lock"
+echo "$$ set_limit $(date +%s)" > "$HNC_TEST_DIR/run/tc_action.lock/owner"
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action full_restore test >/dev/null 2>&1
+rm -rf "$HNC_TEST_DIR/run/tc_action.lock"
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action check_health >/dev/null 2>&1
+hrc=$?
+assert_file_exists "$HNC_TEST_DIR/run/tc_restore_pending" "restore 被锁挡住应落 pending" && \
+    assert_eq "1" "$hrc" "pending 时 check_health 必须判不健康" && test_pass
+mock_teardown
+
+test_start "watchdog full_restore: tc_htb=false 时仍恢复黑名单"
+mock_setup
+echo "wlan2" > "$HNC_TEST_DIR/run/iface.cache"
+date +%s > "$HNC_TEST_DIR/run/capability_probe_last"
+mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan2"
+echo '{"tc_htb": false, "tc_netem": false, "uplink_supported": false}' > "$HNC_TEST_DIR/run/capabilities.json"
+echo '{"version":1,"devices":{},"blacklist":["dd:dd:dd:dd:dd:08"],"whitelist":[]}' > "$HNC_TEST_DIR/data/rules.json"
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action full_restore test >/dev/null 2>&1
+assert_mock_called "HNC_CTRL -m mac --mac-source dd:dd:dd:dd:dd:08 -j DROP" "黑名单 DROP 必须恢复" && test_pass
+mock_teardown
+
 # ═══ device_detect iface: 缓存的接口已消失 → 重新探测 ═══════════
 test_start "device_detect iface: 缓存接口已无 IPv4 时不返回旧值"
 mock_setup

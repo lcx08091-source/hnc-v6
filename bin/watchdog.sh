@@ -272,6 +272,8 @@ check_health() {
 
     # 0. iface 必须有效
     [ -z "$iface" ] && rc=1
+    # v5.12: 上次 full_restore 因锁竞争没把规则(黑名单/mark)补回 → 仍判不健康
+    [ -f "$RUN/tc_restore_pending" ] && rc=1
 
     # 1. TC 根 qdisc 是否为 HTB
     # 注意: 不同 iproute2 版本输出词序不同:
@@ -395,7 +397,12 @@ full_restore() {
         watchdog_mark_tc_unsupported_once tc_htb
         _HEALTH_TS=0
         _HEALTH_RC=0
-        log "RESTORE tc skipped: tc_htb=false; iptables restored only"
+        # v5.12: 上面 iptables init 已 flush HNC_CTRL,黑名单只在 tc_manager restore
+        # 里恢复。旧代码 tc_htb=false 时直接 return → 黑名单设备恢复上网。restore
+        # 自身按能力跳过所有 tc 操作(limit/delay/uplink 均有 capability 门控),
+        # 只做黑名单与 mark 恢复,可以安全调用。
+        sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1 || true
+        log "RESTORE tc skipped: tc_htb=false; iptables + blacklist restored only"
         return 0
     fi
     sh "$HNC_DIR/bin/tc_manager.sh" init "$iface" >> "$LOG" 2>&1
@@ -423,8 +430,19 @@ full_restore() {
     # restore 中途发现锁已易主而主动中止)。这是良性竞争 —— 说明另一个进程
     # 正在正常改 tc 树,不是修复失败。计进 tc_repair 熔断器会让 3 次竞争就
     # 停掉 5 分钟的自动修复能力(语义错配)。只置 _HEALTH_RC=1 让下轮重试。
-    if [ $tc_restore_rc -eq 12 ]; then
-        log "full_restore: tc restore busy/lock lost (rc=12), not counted as repair failure"
+    # v5.12: 上面 iptables init 已把 HNC_MARK / HNC_CTRL(黑名单)整链 flush,只有
+    # restore 才会把 mark 和黑名单加回来。restore 因锁竞争退 12(tc_action_lock)或
+    # 11(gate_lock 超时)时,旧代码"置 _HEALTH_RC=1 让下轮重试"并不成立:紧接着
+    # _HEALTH_TS=0 让缓存失效,Go 版每轮又是新进程 —— 下轮 check_health 看到链都在
+    # 就判健康,黑名单设备从此恢复上网、v6 限速失去 mark,直到下次别的原因触发恢复。
+    # 落一个 pending 标记,check_health 见标记即判不健康,由(已限流的)下轮再恢复。
+    if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
+        echo "$(date +%s 2>/dev/null)" > "$RUN/tc_restore_pending" 2>/dev/null || true
+    else
+        rm -f "$RUN/tc_restore_pending" 2>/dev/null
+    fi
+    if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
+        log "full_restore: tc restore busy/lock lost (rc=$tc_restore_rc), not counted as repair failure; marked pending"
         _HEALTH_RC=1
     elif [ $tc_init_rc -eq 0 ] && [ $tc_restore_rc -eq 0 ]; then
         tc_repair_record 1
@@ -838,7 +856,10 @@ do_full_init() {
     sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
-        log "do_full_init: tc skipped because tc_htb=false; iptables only"
+        # v5.12: 同 full_restore —— 黑名单只在 restore 里恢复,tc_htb=false 也要跑
+        # (restore 内部按能力跳过 tc),否则开机/开热点后黑名单永远不生效。
+        sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1 || true
+        log "do_full_init: tc skipped because tc_htb=false; iptables + blacklist only"
     else
         sh "$HNC_DIR/bin/tc_manager.sh" init "$iface" >> "$LOG" 2>&1
         local tc_init_rc=$?

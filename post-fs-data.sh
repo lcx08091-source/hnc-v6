@@ -51,7 +51,8 @@ rm -rf "$HNC_DIR/run/hnc_json.lock" "$HNC_DIR/run/json.lock" 2>/dev/null
 rm -rf "$HNC_DIR/run/lock" "$HNC_DIR/run/tc_action.lock" "$HNC_DIR/run/v6" 2>/dev/null
 rm -rf "$HNC_DIR"/run/tc_action.lock.stale.* 2>/dev/null
 rm -f "$HNC_DIR"/run/tc_root_owned_* "$HNC_DIR"/run/tc_mq_child_* "$HNC_DIR"/run/tc_ifindex_* \
-      "$HNC_DIR/run/tc_qos_fallback" "$HNC_DIR/run/iface.cache" 2>/dev/null
+      "$HNC_DIR/run/tc_qos_fallback" "$HNC_DIR/run/iface.cache" \
+      "$HNC_DIR/run/tc_restore_pending" 2>/dev/null
 
 # 初始化规则文件 · rc3.1.13 起 auth_required 也在这
 [ ! -f "$HNC_DIR/data/rules.json" ] && cat > "$HNC_DIR/data/rules.json" << 'EOF'
