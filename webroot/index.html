@@ -289,7 +289,7 @@ button.row:active,.row.tap:active{background:var(--input)}
 .ctrl-t{display:flex;align-items:center;gap:6px;font-size:12px;font-weight:800;color:var(--text-2);letter-spacing:.04em}
 .ctrl-t i{width:6px;height:6px;border-radius:50%;background:var(--blue)}
 .ctrl .box{background:var(--card-2)}
-.hold{position:relative;overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:none}
+.hold{position:relative;overflow:hidden;user-select:none;-webkit-user-select:none;touch-action:pan-y}
 .hold .fill{position:absolute;inset:0;background:rgba(255,59,48,.2);transform:scaleX(0);transform-origin:left}
 .hold.run .fill{transform:scaleX(1);transition:transform .8s linear}
 .hold span{position:relative}
@@ -838,6 +838,30 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var f = sheetOnClose; sheetOnClose = null; if (f) try { f(); } catch (_) {}
   }
   $('#scrim').addEventListener('click', closeSheet);
+  /* v5.12: 弹层下拉关闭 —— 在弹层已滚到顶部时往下拖, 超过 90px(或快速下甩)松手即关闭 */
+  (function () {
+    var sh = $('#sheet'), st = null;
+    sh.addEventListener('touchstart', function (e) {
+      if (!sh.classList.contains('show') || sh.scrollTop > 0 || e.touches.length !== 1) return;
+      if (e.target.closest('input,textarea,select,.seg,.toggle')) return;
+      st = { y: e.touches[0].clientY, t: Date.now(), dy: 0 };
+    }, { passive: true });
+    sh.addEventListener('touchmove', function (e) {
+      if (!st) return;
+      st.dy = e.touches[0].clientY - st.y;
+      if (st.dy <= 0 || sh.scrollTop > 0) { if (st.dy < -4) { st = null; sh.style.transform = ''; sh.style.transition = ''; } return; }
+      sh.style.transition = 'none';
+      sh.style.transform = 'translate(-50%,' + Math.round(st.dy) + 'px)';
+      if (e.cancelable) e.preventDefault();
+    }, { passive: false });
+    function end() {
+      if (!st) return;
+      var fast = st.dy > 30 && st.dy / Math.max(1, Date.now() - st.t) > .6, far = st.dy > 90;
+      st = null; sh.style.transition = ''; sh.style.transform = '';
+      if (far || fast) closeSheet();
+    }
+    sh.addEventListener('touchend', end); sh.addEventListener('touchcancel', end);
+  })();
   $('#sheet').addEventListener('click', function (e) { if (e.target.closest('[data-close]')) closeSheet(); });
   document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeSheet(); closeDD(); } });
   function confirmSheet(title, desc, okText, opt) {
@@ -1183,11 +1207,33 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     placeSegs(p); paintHero(false); drawSpark(); paintFresh(); renderOffloadBanner(); paintOnlineHours();
     if (anim1) stagger($('.wrap .wrap', p));
   }
+  /* v5.12: 后台刷新重绘列表时, 保留用户正在编辑的输入(限速/延迟/应用限速框)与焦点。
+   * 此前别的设备一有变化(比如有设备连上热点)整张列表重绘, 刚输入的值被清空、键盘收起。 */
+  function inputKey(inp) {
+    var box = inp.closest('[data-dev],[data-side]'); if (!box) return null;
+    var mac = box.getAttribute('data-dev') || box.getAttribute('data-side'), app = inp.closest('[data-app]');
+    return mac + '|' + (inp.getAttribute('data-f') || (app ? 'app:' + app.getAttribute('data-app') : ''));
+  }
+  function snapInputs(root) {
+    var snap = { vals: {}, focus: null }, ae = document.activeElement;
+    $$('input', root).forEach(function (i) { var k = inputKey(i); if (k && i.value !== i.defaultValue) snap.vals[k] = i.value; });
+    if (ae && ae.tagName === 'INPUT' && root.contains(ae)) { var k = inputKey(ae); if (k) snap.focus = { k: k, a: ae.selectionStart, b: ae.selectionEnd }; }
+    return snap;
+  }
+  function restoreInputs(root, snap) {
+    $$('input', root).forEach(function (i) {
+      var k = inputKey(i); if (!k) return;
+      if (snap.vals[k] != null) i.value = snap.vals[k];
+      if (snap.focus && snap.focus.k === k) { try { i.focus({ preventScroll: true }); if (snap.focus.a != null) i.setSelectionRange(snap.focus.a, snap.focus.b); } catch (_) {} }
+    });
+  }
   function renderDevList(animate) {
     var list = $('#dev-list'); if (!list) return;
+    var snap = snapInputs(list);
     list.innerHTML = devListHtml(); placeSegs(list); paintOnlineHours();
+    restoreInputs(list, snap);
     var lo = $('#list-on'); if (lo) lo.textContent = S.devices.filter(function (d) { return d.online; }).length;
-    if (wide()) { var sd = $('#dev-side'); if (sd && !sd.contains(document.activeElement)) { sd.innerHTML = devSide(); placeSegs(sd); } }
+    if (wide()) { var sd = $('#dev-side'); if (sd && !sd.contains(document.activeElement)) { var ss = snapInputs(sd); sd.innerHTML = devSide(); placeSegs(sd); restoreInputs(sd, ss); } }
     if (animate) stagger(list);
   }
   function paintHero(tw) {
@@ -2212,6 +2258,12 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       L.v += (-k * (L.x - L.tx) - c * L.v) * h; L.x += L.v * h;
       L.sv += (-560 * (L.s - L.ts) - 17 * L.sv) * h; L.s += L.sv * h;
     }
+    // v5.12: 松手后回弹不越过首尾标签超过 6px(此前切到最左/最右时透镜会冲出底栏约 30px), 撞边轻弹回
+    if (!L.drag) {
+      var mxL = (TABS.length - 1) * slotW();
+      if (L.x < -6) { L.x = -6; if (L.v < 0) L.v = -L.v * .25; }
+      else if (L.x > mxL + 6) { L.x = mxL + 6; if (L.v > 0) L.v = -L.v * .25; }
+    }
     paintLens();
     if (!L.drag && Math.abs(L.x - L.tx) < .3 && Math.abs(L.v) < 4 && Math.abs(L.s - L.ts) < .002 && Math.abs(L.sv) < .02) { L.x = L.tx; L.v = 0; L.s = L.ts; L.sv = 0; paintLens(); L.raf = 0; L.last = 0; return; }
     L.raf = requestAnimationFrame(stepLens);
@@ -2429,21 +2481,40 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var bars = $('#bars'); if (!bars) return;
     var col = e.target.closest('.bcol'), old = $('.btip', bars);
     if (old) old.remove(); bars.classList.remove('picking'); $$('.bcol.pk', bars).forEach(function (c) { c.classList.remove('pk'); });
+    // v5.12: 柱子只有几像素宽, 手指很难点中 —— 点在图表区域内任意位置都选离得最近的柱子
+    if (!col && bars.contains(e.target)) {
+      var best = null, bd = 1e9;
+      $$('.bcol', bars).forEach(function (c) { var r = c.getBoundingClientRect(), dx = Math.abs(r.left + r.width / 2 - e.clientX); if (dx < bd) { bd = dx; best = c; } });
+      if (best && bd < 40) col = best;
+    }
     if (col && bars.contains(col)) barTip(col);
   });
   /* 长按封锁(0.8 秒) */
-  var holdT;
+  // v5.12: 手指移动超过 10px(或页面开始滚动 → pointercancel)就取消。此前按住后滑走照样封锁;
+  //        且旧版在 document 上捕获所有 pointerleave, 鼠标划过任意子元素都会误取消。
+  var holdT = 0, holdP = null, swallowClick = false;
+  // 长按生效后, 这次手势结束时产生的 click 一律吞掉; 下一次按下即复位(不按时间算, 按多久都可靠)
+  document.addEventListener('click', function (e) { if (swallowClick) { swallowClick = false; e.stopPropagation(); e.preventDefault(); } }, true);
+  document.addEventListener('pointerdown', function () { swallowClick = false; }, true);
+  function holdCancel() { clearTimeout(holdT); holdT = 0; holdP = null; $$('.hold.run').forEach(function (b) { b.classList.remove('run'); }); }
   document.addEventListener('pointerdown', function (e) {
     var hb = e.target.closest('[data-act="hold"]'); if (!hb || hb.disabled) return;
-    e.preventDefault(); hb.classList.add('run');
     var d = ctxDev(hb).d; if (!d) return;
+    holdCancel(); hb.classList.add('run'); holdP = { id: e.pointerId, x: e.clientX, y: e.clientY };
     holdT = setTimeout(function () {
-      hb.classList.remove('run');
+      holdT = 0; holdP = null; hb.classList.remove('run');
+      // v5.12: 长按触发后吞掉松手时的那次 click —— 封锁后卡片就地重绘, 同一位置变成「解除封锁」,
+      // 手指多按一会儿再松开会点中它 → 刚封锁就被解封(网关确认弹窗时则会点到遮罩关掉弹窗)
+      swallowClick = true;
       if (navigator.vibrate) try { navigator.vibrate(15); } catch (_) {}
       blockDevice(d);
     }, 800);
   });
-  ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (ev) { document.addEventListener(ev, function () { clearTimeout(holdT); $$('.hold.run').forEach(function (b) { b.classList.remove('run'); }); }, true); });
+  document.addEventListener('pointermove', function (e) {
+    if (holdP && e.pointerId === holdP.id && Math.hypot(e.clientX - holdP.x, e.clientY - holdP.y) > 10) holdCancel();
+  }, true);
+  ['pointerup', 'pointercancel'].forEach(function (ev) { document.addEventListener(ev, function (e) { if (holdP && e.pointerId === holdP.id) holdCancel(); }, true); });
+  document.addEventListener('scroll', function () { if (holdP) holdCancel(); }, true);
 
   /* ═════════════════════ 轮询 ═════════════════════
    * 主循环 setTimeout 链; 页面不可见时停, 回前台立刻补一次。
