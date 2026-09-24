@@ -90,7 +90,9 @@ static FILE *g_log = NULL;
 
 static void log_open(void)
 {
-	g_log = fopen(LOG_LAUNCHER, "a");
+	/* v5.12: "e" = O_CLOEXEC。旧 "a" 打开的日志 fd 会被每个 fork+execv 出来的
+	 * hnc_dpid 继承, dpid 全程无意义地持有 launcher 日志 fd。 */
+	g_log = fopen(LOG_LAUNCHER, "ae");
 	if (g_log == NULL)
 		g_log = stderr;
 	setvbuf(g_log, NULL, _IOLBF, 0);
@@ -426,6 +428,15 @@ static int run_supervise_loop(void)
 			continue;
 		}
 
+		/* v5.12: 信号竞态修复。SIGTERM 若落在 fork() 与 spawn_dpid 里
+		 * g_child_pid = pid 赋值之间, on_term_signal 看到 g_child_pid==0 不会
+		 * 转发 SIGTERM; 随后 wait_dpid 的 waitpid 因信号已处理完而不会 EINTR,
+		 * 一直阻塞到 dpid 自己退出 —— launcher 无法停止、dpid 继续运行。
+		 * 赋值之后再检查一次 g_shutdown 补发即可闭合窗口(之后到达的信号由
+		 * handler 直接转发)。 */
+		if (g_shutdown)
+			kill(pid, SIGTERM);
+
 		/* 等子进程退出 */
 		abnormal = wait_dpid(pid, &rc, &signum);
 		if (abnormal < 0) {
@@ -478,8 +489,26 @@ static int run_supervise_loop(void)
 	/* 如果子进程还在, 等它退 */
 	if (g_child_pid > 0) {
 		int status;
-		log_msg("waiting for dpid pid=%d to exit", (int)g_child_pid);
-		waitpid(g_child_pid, &status, 0);
+		int waited;
+		pid_t cpid = (pid_t)g_child_pid;
+		log_msg("waiting for dpid pid=%d to exit", (int)cpid);
+		/* v5.12: 补发 SIGTERM(幂等)并有界等待, 超时 SIGKILL。旧代码无限
+		 * waitpid: 若 SIGTERM 没送达(见上方竞态)或 dpid 卡在退出路径上,
+		 * launcher 永远退不出, service.sh 的停止/重启流程随之挂住。 */
+		kill(cpid, SIGTERM);
+		for (waited = 0; waited < 100; waited++) {	/* 100 × 100ms = 10s */
+			pid_t r = waitpid(cpid, &status, WNOHANG);
+			if (r == cpid || (r < 0 && errno != EINTR))
+				break;
+			usleep(100 * 1000);
+		}
+		if (waited >= 100) {
+			log_msg("dpid pid=%d did not exit in 10s, SIGKILL", (int)cpid);
+			kill(cpid, SIGKILL);
+			while (waitpid(cpid, &status, 0) < 0 && errno == EINTR)
+				;
+		}
+		g_child_pid = 0;
 		unlink(PID_DPID);
 	}
 

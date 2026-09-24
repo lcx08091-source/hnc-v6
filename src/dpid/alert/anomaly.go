@@ -27,8 +27,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
+
+	"hnc.io/dpid/tzlocal"
 )
 
 const (
@@ -58,7 +61,8 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 	if !an.Enabled || an.RatioThreshold <= 0 {
 		return 0, nil
 	}
-	now := time.Now()
+	// v5.12: 用真实本地时区(Android 上 time.Local 恒为 UTC, 见 tzlocal 包)。
+	now := nowLocal()
 	hour := now.Hour()
 
 	// Resolve the history directory. The history sampler writes to
@@ -69,7 +73,8 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 	curHourStart := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location()).Unix()
 	curHourEnd := now.Unix()
 	current := map[string]uint64{}
-	if err := sumByMAC(historyDir, now, curHourStart, curHourEnd, current); err != nil {
+	// v5.12: 窗口改为左闭右开, 右端 +1 让 t==now 的行仍计入当前小时。
+	if err := sumByMAC(historyDir, curHourStart, curHourEnd+1, current); err != nil {
 		// Probably "today's file doesn't exist yet". Not fatal —
 		// nothing to compare against, just exit cleanly.
 		return 0, nil
@@ -90,7 +95,7 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 			AddDate(0, 0, -offset)
 		dayEnd := dayStart.Add(time.Hour)
 		perDay := map[string]uint64{}
-		if err := sumByMAC(historyDir, dayStart, dayStart.Unix(), dayEnd.Unix(), perDay); err != nil {
+		if err := sumByMAC(historyDir, dayStart.Unix(), dayEnd.Unix(), perDay); err != nil {
 			// Day file missing — that day's contribution is zero, just skip
 			// (don't count it in the denominator).
 			continue
@@ -172,33 +177,54 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 	return emitted, nil
 }
 
-// sumByMAC walks the history file(s) that overlap [startTs, endTs] and
+// nowLocal v5.12: 告警侧的"现在", 带真实本地时区。可在测试中替换。
+var nowLocal = func() time.Time { return time.Now().In(tzlocal.Location()) }
+
+// dayFileKeys v5.12: 返回覆盖 [from, to] 所需的 stats 日文件键(YYYYMMDD),
+// 取本地日期与 UTC 日期的并集、去重、升序(与 hnc_httpd v5.11 dayFileKeys 同款)。
+// stats.*.jsonl 按 UTC 日期命名(output/history.go pathFor), 调用方只按本地
+// 日期找文件时, UTC+8 下本地 0-8 点的行落在前一个 UTC 日文件里就读不到。
+// 并集最多多开一个文件, 行再按时间戳过滤, 不漏也不重复计数。
+func dayFileKeys(from, to time.Time) []string {
+	if to.Before(from) {
+		from, to = to, from
+	}
+	seen := map[string]bool{}
+	var keys []string
+	add := func(start, end time.Time) {
+		d := time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, start.Location())
+		for !d.After(end) {
+			k := d.Format("20060102")
+			if !seen[k] {
+				seen[k] = true
+				keys = append(keys, k)
+			}
+			d = d.AddDate(0, 0, 1)
+		}
+	}
+	add(from, to)
+	add(from.UTC(), to.UTC())
+	sort.Strings(keys)
+	return keys
+}
+
+// sumByMAC walks the history file(s) that overlap [startTs, endTs) and
 // accumulates (tx + rx) by MAC.
 //
-// The history sampler writes one file per day. The window may cross
-// midnight (in our use case it doesn't — we pass single-hour windows —
-// but we handle it anyway to keep the helper composable).
-func sumByMAC(dir string, dayHint time.Time, startTs, endTs int64, out map[string]uint64) error {
+// v5.12: 旧实现按调用方传入的 dayHint 的"本地日期"找文件, 而文件按 UTC 日期
+// 命名 → 东八区本地 0-8 点的窗口读错天(当前小时读不到数据、基线取到别的
+// 时段)。改为按窗口覆盖的本地∪UTC 日期集合找文件(dayFileKeys), 并把窗口
+// 改为左闭右开 —— 旧的两端闭区间会让恰好落在边界秒的行在相邻两个窗口里各算
+// 一次(配额按天分段累加时重复计数)。
+func sumByMAC(dir string, startTs, endTs int64, out map[string]uint64) error {
 	if endTs <= startTs {
 		return nil
 	}
-	// Possible files: today and yesterday (if window crosses midnight).
-	files := []string{
-		filepath.Join(dir, "stats."+dayHint.Format("20060102")+".jsonl"),
-	}
-	// Add adjacent day if window crosses the day boundary.
-	startDay := time.Unix(startTs, 0).Format("20060102")
-	endDay := time.Unix(endTs, 0).Format("20060102")
-	if startDay != endDay {
-		files = append(files, filepath.Join(dir, "stats."+startDay+".jsonl"))
-		files = append(files, filepath.Join(dir, "stats."+endDay+".jsonl"))
-	}
-	seenFile := map[string]bool{}
-	for _, p := range files {
-		if seenFile[p] {
-			continue
-		}
-		seenFile[p] = true
+	loc := tzlocal.Location()
+	from := time.Unix(startTs, 0).In(loc)
+	to := time.Unix(endTs-1, 0).In(loc)
+	for _, key := range dayFileKeys(from, to) {
+		p := filepath.Join(dir, "stats."+key+".jsonl")
 		f, err := os.Open(p)
 		if err != nil {
 			continue // missing day = zero contribution
@@ -216,7 +242,7 @@ func sumByMAC(dir string, dayHint time.Time, startTs, endTs int64, out map[strin
 				continue
 			}
 			t := jsonExtractInt(line, `"t":`)
-			if t < startTs || t > endTs {
+			if t < startTs || t >= endTs { // v5.12: 左闭右开
 				continue
 			}
 			mac := jsonExtractString(line, `"mac":"`)

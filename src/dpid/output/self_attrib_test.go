@@ -31,3 +31,34 @@ func TestConnsSignatureOrderIndependent(t *testing.T) {
 		t.Fatal("non-key fields must not affect the signature")
 	}
 }
+
+// v5.12: /proc/net/tcp6 里的 IPv4 映射地址与纯 IPv6 地址, 必须能被抓包侧
+// LookupUID(net.IP.String(), port) 命中。
+func TestLookupUID_CanonicalKeys(t *testing.T) {
+	a := NewSelfAttribAggregator("")
+	cases := []struct {
+		procHex string // /proc/net/tcp6 remote 字段
+		ip      string // 抓包侧 ev.DstIP.String()
+	}{
+		{"0000000000000000FFFF00000100007F:01BB", "127.0.0.1"},
+		{"B80D0120000000000000000001000000:01BB", "2001:db8::1"},
+	}
+	for i, c := range cases {
+		k := canonRemoteKey(parseHexAddr(c.procHex, true))
+		if k == "" {
+			t.Fatalf("case %d: 规范化失败 %q", i, parseHexAddr(c.procHex, true))
+		}
+		a.remoteToUID[k] = 10100 + i
+	}
+	for i, c := range cases {
+		uid, _, ok := a.LookupUID(c.ip, 443)
+		if !ok || uid != 10100+i {
+			t.Errorf("case %d: LookupUID(%s,443) = %d,%v; keys=%v", i, c.ip, uid, ok, a.remoteToUID)
+		}
+	}
+	// IPv4 socket(/proc/net/tcp)也照常命中。
+	a.remoteToUID[canonRemoteKey(parseHexAddr("0101A8C0:0050", false))] = 10200
+	if uid, _, ok := a.LookupUID("192.168.1.1", 80); !ok || uid != 10200 {
+		t.Errorf("IPv4 查找失败: %d %v", uid, ok)
+	}
+}

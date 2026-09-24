@@ -9,12 +9,14 @@ package output
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -817,6 +819,16 @@ func (w *Writer) bumpJA4Locked(c *clientAgg, ja4 string, now int64) {
 		c.JA4 = make(map[string]*fpStat)
 	}
 	lib, libHit := lookupDFP(ja4)
+	// v5.12: JA4 表加上限。hostname/SNI/IP 表早就按 LRU 封顶(maxNamesPerClient /
+	// maxGlobalNames / maxIPsPerClient), 唯独 c.JA4 与 w.globalJA4 无上限: 任何
+	// 热点客户端发随机化 ClientHello(扫描器、恶意/异常客户端)都能让它们随进程
+	// 寿命无限增长, 且 Flush 每 5s 对全表排序, 内存与 CPU 一起涨。
+	if c.JA4[ja4] == nil && len(c.JA4) >= maxNamesPerClient {
+		evictOldestFP(c.JA4)
+	}
+	if w.globalJA4[ja4] == nil && len(w.globalJA4) >= maxGlobalNames {
+		evictOldestFP(w.globalJA4)
+	}
 	if c.JA4[ja4] == nil {
 		c.JA4[ja4] = &fpStat{JA4: ja4}
 		if libHit {
@@ -1082,6 +1094,21 @@ func evictOldestName(m map[string]*nameStat) {
 		}
 	}
 	if oldestKey != "" {
+		delete(m, oldestKey)
+	}
+}
+
+// evictOldestFP v5.12: 删除 LastSeen 最旧的 JA4 条目(与 evictOldestName 同款)。
+func evictOldestFP(m map[string]*fpStat) {
+	var oldestKey string
+	var oldest int64
+	first := true
+	for k, v := range m {
+		if first || v.LastSeen < oldest {
+			oldestKey, oldest, first = k, v.LastSeen, false
+		}
+	}
+	if !first {
 		delete(m, oldestKey)
 	}
 }
@@ -1423,8 +1450,18 @@ func (w *Writer) Flush() error {
 	return atomicWrite(w.path, b, 0o644)
 }
 
+// atomicWriteSeq v5.12: 临时文件名序号, 见 atomicWrite。
+var atomicWriteSeq atomic.Uint64
+
 func atomicWrite(path string, data []byte, mode os.FileMode) error {
-	tmp := path + ".tmp"
+	// v5.12: 临时文件名带 pid + 进程内序号。旧的固定 path+".tmp" 有两类并发
+	// 写者: (1) 进程内 —— 5s 状态 goroutine、rebind 循环、runCapture 的
+	// SetMode 后都会 Flush; (2) 跨进程 —— dpid_supervisor 的
+	// writeWaitingState 与 dpid -write-blind-state 写同一个
+	// dpi_state.json.tmp。两个写者 O_TRUNC 打开同一 inode 各自从 offset 0
+	// 写, 长度不同时得到"新内容 + 旧内容尾巴"的坏 JSON, 再被 rename 成
+	// dpi_state.json → WebUI/守护脚本读到解析失败的状态文件。
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), atomicWriteSeq.Add(1))
 	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
 	if err != nil {
 		return err

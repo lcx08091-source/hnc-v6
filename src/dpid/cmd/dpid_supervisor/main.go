@@ -350,11 +350,17 @@ func writeWaitingState(iface, reason string) {
 	if err != nil {
 		return
 	}
-	tmp := dpiStateFile + ".tmp"
+	// v5.12: 临时文件名带 pid。旧的 dpiStateFile+".tmp" 与 dpid 自己
+	// (output.atomicWrite)写的是同一个临时文件, 而本函数恰在 dpid 仍存活时
+	// (killAndReap 之前)调用 → 两进程交错写出坏 JSON 后被 rename 上线。
+	tmp := fmt.Sprintf("%s.tmp.sup.%d", dpiStateFile, os.Getpid())
 	if err := os.WriteFile(tmp, data, 0o644); err != nil {
+		_ = os.Remove(tmp)
 		return
 	}
-	_ = os.Rename(tmp, dpiStateFile)
+	if err := os.Rename(tmp, dpiStateFile); err != nil {
+		_ = os.Remove(tmp)
+	}
 }
 
 // dpidReportsNetworkDown peeks dpi_state.json for the "network is down" hint
@@ -535,7 +541,20 @@ func runChild(iface string, launchBlind bool, lastRebind *time.Time) bool {
 	periodicTicker := time.NewTicker(3 * time.Second)
 	defer periodicTicker.Stop()
 
+	// v5.12: 先 SIGTERM 让 dpid 走正常退出路径(clearCrashFlag + 删 pid 文件),
+	// 3s 不退再 SIGKILL。旧代码直接 SIGKILL: dpid 每次启动都 armCrashFlag 追加
+	// 时间戳、只在正常退出/健康 5min 后才清, 于是热点抖动时 supervisor 60s 内
+	// 连续 rebind 3 次后, 第 4 次启动的 dpid 会把这些"被杀"误判为崩溃循环 →
+	// ModeCrashLoop 空转最长 30min, 期间 DPI 完全不工作。
 	killAndReap := func() {
+		_ = cmd.Process.Signal(syscall.SIGTERM)
+		t := time.NewTimer(3 * time.Second)
+		defer t.Stop()
+		select {
+		case <-exitCh:
+			return
+		case <-t.C:
+		}
 		_ = cmd.Process.Kill()
 		<-exitCh
 	}

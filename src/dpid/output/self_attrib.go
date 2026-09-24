@@ -36,6 +36,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -285,7 +286,8 @@ func (a *SelfAttribAggregator) SetEnabled(enabled bool, reason string) {
 // remoteToUID a sync.Map but the cost-benefit at 5s replacement cadence
 // is not worth the complexity.
 func (a *SelfAttribAggregator) LookupUID(remoteIP string, remotePort uint16) (uid int, pkg string, ok bool) {
-	key := fmt.Sprintf("%s:%d", remoteIP, remotePort)
+	// v5.12: 用与 sampleOnce 建表相同的规范化键(见 canonRemoteKey)。
+	key := canonIPPort(remoteIP, strconv.Itoa(int(remotePort)))
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	uid, ok = a.remoteToUID[key]
@@ -706,7 +708,16 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 			} else if e.UID > 0 {
 				unknownConns++
 			}
-			newRemoteToUID[e.Remote] = e.UID
+			// v5.12: 表键规范化。旧代码直接用 parseHexAddr 的原样字符串当键:
+			// IPv6 形如 "[2409:8963:e03:0:...]:443"(%x 不补零、不做 :: 压缩),
+			// 而 LookupUID 用 net.IP.String()("2409:8963:e03::...", 无方括号)
+			// 拼键, 永远对不上; 更常见的是 Android Java 应用用双栈 AF_INET6
+			// socket 连 IPv4 服务器, /proc/net/tcp6 里是 ::ffff:a.b.c.d 映射
+			// 地址, 抓包侧看到的却是纯 IPv4 → 自抓包 SNI 归因对大多数 App
+			// 全部落空。统一规范为 "IPv4点分 或 IPv6 规范串:port"。
+			if k := canonRemoteKey(e.Remote); k != "" {
+				newRemoteToUID[k] = e.UID
+			}
 			rows = append(rows, e)
 		}
 	}
@@ -812,6 +823,17 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	a.mu.Unlock()
 
 	m, err := loadPkgUIDs()
+	// v5.12: pm / 文件读取放到锁外。旧代码在持 a.mu 时 exec `pm list packages -s`
+	// (app_process 冷启动 ~1s, system_server 忙时可卡更久且无超时), 期间
+	// LookupUID / ObserveSNI / Snapshot 全部阻塞 —— 自抓包回调跑在抓包
+	// goroutine 里, 阻塞直接变成内核丢包。
+	var sysPkgs map[string]struct{}
+	var sysErr error
+	var excl map[string]struct{}
+	if err == nil {
+		sysPkgs, sysErr = loadSystemPkgs()
+		excl = loadFlywheelExcludePkgs()
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -826,20 +848,34 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	a.pkgCacheErr = ""
 	// Refresh the system-package set on the same cadence. Best-effort: keep the
 	// old set on error.
-	if s, serr := loadSystemPkgs(); serr == nil {
-		a.systemPkgs = s
+	if sysErr == nil {
+		a.systemPkgs = sysPkgs
 	}
 	// v5.7.0-rc33: refresh the flywheel exclusion (built-in ∪ user file) so edits
 	// to flywheel_exclude.json take effect within the pkg-cache TTL without a
 	// dpid restart. Always non-nil (degrades to the built-in seed).
-	a.flywheelExcludePkgs = loadFlywheelExcludePkgs()
+	a.flywheelExcludePkgs = excl
 	return m
+}
+
+// pmTimeout v5.12: pm 调用上限。pm 走 binder 找 system_server, 开机早期或
+// system_server 卡顿时可能长时间不返回; 旧代码无超时, 采样 goroutine 会被
+// 永久挂住(自归因从此停更)。
+const pmTimeout = 20 * time.Second
+
+func pmCommand(args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), pmTimeout)
+	cmd := exec.CommandContext(ctx, "pm", args...)
+	cmd.WaitDelay = 2 * time.Second
+	return cmd, cancel
 }
 
 // loadSystemPkgs runs `pm list packages -s` and returns the set of system
 // package names: lines look like "package:com.android.systemui".
 func loadSystemPkgs() (map[string]struct{}, error) {
-	cmd := exec.Command("pm", "list", "packages", "-s")
+	// v5.12: 加超时(见 pmCommand)。
+	cmd, cancel := pmCommand("list", "packages", "-s")
+	defer cancel()
 	// rc39 (P2-23): nohup-launched dpid may inherit an incomplete Env; without
 	// LD_LIBRARY_PATH the `pm` app_process wrapper can hit a linker error and
 	// return nothing → system-app filtering breaks. Pin the standard lib paths.
@@ -949,7 +985,8 @@ func loadPkgUIDs() (map[int]string, error) {
 	if m, lerr := loadPkgUIDsFromList(); lerr == nil && len(m) > 0 {
 		return m, nil
 	}
-	cmd := exec.Command("pm", "list", "packages", "-U")
+	cmd, cancel := pmCommand("list", "packages", "-U")
+	defer cancel()
 	// rc39 (P2-23): pin LD_LIBRARY_PATH so the pm fallback works under an
 	// incomplete (nohup) Env. (Primary path is packages.list above; this is the
 	// fallback when that's unreadable/empty.)
@@ -1017,7 +1054,11 @@ func parseProcNet(path, proto string, isIPv6 bool) ([]SelfAttribConnRow, error) 
 		}
 		// Skip all-zero remote (UDP server sockets bound to 0.0.0.0:port,
 		// etc.) — they have no remote peer.
-		if strings.HasPrefix(remote, "0.0.0.0:") || strings.HasPrefix(remote, "[::]:") {
+		// v5.12: parseHexAddr 的 IPv6 输出不做 :: 压缩, 全零地址是
+		// "[0:0:0:0:0:0:0:0]:port", 旧的 "[::]:" 前缀永不匹配 → udp6/tcp6
+		// 未连接 socket 全被当成连接写进 JSONL 并计入 TotalConns。
+		if strings.HasPrefix(remote, "0.0.0.0:") || strings.HasPrefix(remote, "[::]:") ||
+			strings.HasPrefix(remote, "[0:0:0:0:0:0:0:0]:") {
 			continue
 		}
 
@@ -1031,6 +1072,30 @@ func parseProcNet(path, proto string, isIPv6 bool) ([]SelfAttribConnRow, error) 
 		})
 	}
 	return out, sc.Err()
+}
+
+// canonRemoteKey v5.12: 把 parseHexAddr 产出的 "a.b.c.d:port" /
+// "[v6]:port" 规范为 canonIPPort 形式; 解析失败返回 ""。
+func canonRemoteKey(hostport string) string {
+	host, port, err := net.SplitHostPort(hostport)
+	if err != nil {
+		return ""
+	}
+	return canonIPPort(host, port)
+}
+
+// canonIPPort v5.12: IPv4-mapped IPv6(::ffff:a.b.c.d)折叠成 IPv4, 其余 IPv6
+// 用 net.IP.String() 的规范写法; 结果形如 "1.2.3.4:443" / "2409:8963::1:443"
+// (键只用于 map 查找, 不需要可逆)。无法解析的 IP 原样保留。
+func canonIPPort(ip, port string) string {
+	if p := net.ParseIP(ip); p != nil {
+		if v4 := p.To4(); v4 != nil {
+			ip = v4.String()
+		} else {
+			ip = p.String()
+		}
+	}
+	return ip + ":" + port
 }
 
 // parseHexAddr converts "0100007F:1F40" (IPv4 little-endian per byte
