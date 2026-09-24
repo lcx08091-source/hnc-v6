@@ -45,9 +45,17 @@ import (
 var (
 	HistoryDir         = "/data/local/hnc/run"
 	HistorySampleEvery = 15 * time.Minute
-	HistoryRetainDays  = 7
-	HistoryFilePrefix  = "stats."
-	HistoryFileSuffix  = ".jsonl"
+	// v5.12: 7 → 32。alert/quota.go 的月度配额按自然月(本地时区 1 号 0 点
+	// 至今)读 stats.YYYYMMDD.jsonl, 旧的 7 天保留期让每月 8 号以后只剩最近
+	// 7 天数据 → 月用量严重少算、配额告警永不触发。32 = 最长自然月 31 天
+	// + 1 天余量(文件按 UTC 日期命名, UTC+8 下本地 1 号 0-8 点的行落在上月
+	// 最后一个 UTC 日文件里)。磁盘估算: 每天 ~400KB(见文件头), 32 天 ≈ 13MB。
+	// 注意: anomaly 的 7 日同时段基线(alert.anomalyBaselineDays)、
+	// /api/dpi_history 的 maxDays=7 都是各自独立的窗口常量, 不随此值变化;
+	// 文件格式也不变(httpd 按设备汇总本月流量会读同一批文件)。
+	HistoryRetainDays = 32
+	HistoryFilePrefix = "stats."
+	HistoryFileSuffix = ".jsonl"
 )
 
 // historySample matches what we serialize to JSONL. Field tags are short to
@@ -318,7 +326,6 @@ func normalizeHistMAC(mac string) string {
 	}
 	return mac
 }
-
 
 // _unused silences "fmt imported but not used" once we drop debug helpers.
 var _ = fmt.Sprintf

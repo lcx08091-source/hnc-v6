@@ -62,6 +62,33 @@ func TestTrimDailyFiles_LocalTZ(t *testing.T) {
 	}
 }
 
+// v5.12: 月度配额(alert/quota.go)要读整个自然月的 stats.*.jsonl, 保留期必须
+// 覆盖最长自然月(31 天)再加 1 天 UTC/本地日期错位余量。
+func TestHistoryRetainCoversCalendarMonth(t *testing.T) {
+	for m := time.January; m <= time.December; m++ {
+		// 取闰年, 覆盖 2 月 29 天
+		daysInMonth := time.Date(2024, m+1, 0, 0, 0, 0, 0, time.UTC).Day()
+		if HistoryRetainDays < daysInMonth+1 {
+			t.Fatalf("HistoryRetainDays=%d < %d 月天数 %d + 1, 月度配额会少算",
+				HistoryRetainDays, m, daysInMonth)
+		}
+	}
+
+	// 实跑一次 trim: 最坏情况(本地 31 号)要回看 31 天前的 UTC 日文件, 必须保留。
+	dir := t.TempDir()
+	now := time.Now()
+	var keep []string
+	for back := 0; back <= 31; back++ {
+		keep = append(keep, mkDaily(t, dir, "stats.", ".jsonl", now, back, true))
+	}
+	trimDailyFiles(dir, "stats.", HistoryRetainDays)
+	for _, p := range keep {
+		if _, err := os.Stat(p); err != nil {
+			t.Errorf("月度配额窗口内的文件被删: %s", p)
+		}
+	}
+}
+
 func TestTrimDailyFiles_UTC(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
