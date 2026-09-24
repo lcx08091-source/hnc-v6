@@ -32,6 +32,11 @@ var tetheringMapCandidates = []string{
 type TetheringStatsSampler struct {
 	fd   int
 	path string
+
+	// v5.12: bpf(2) 缓冲区放堆上, 理由同 EBPFSampler.key(栈搬迁后整数化的
+	// 地址失效)。
+	key, next tetheringStatsKey
+	val       tetheringStatsValue
 }
 
 // tetheringStatsKey is the map key. Layout is 16 bytes; the first 4
@@ -121,8 +126,8 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 	}
 	out := make(map[int]ByteCounts, 64)
 
-	var key tetheringStatsKey
-	var next tetheringStatsKey
+	key, next := &s.key, &s.next // v5.12: 堆上缓冲区
+	*key, *next = tetheringStatsKey{}, tetheringStatsKey{}
 	first := true
 
 	for {
@@ -130,9 +135,9 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 		if first {
 			keyPtr = nil // NULL key → start at first entry
 		} else {
-			keyPtr = unsafe.Pointer(&key)
+			keyPtr = unsafe.Pointer(key)
 		}
-		err := bpfMapGetNextKeyCall(s.fd, keyPtr, unsafe.Pointer(&next))
+		err := bpfMapGetNextKeyCall(s.fd, keyPtr, unsafe.Pointer(next))
 		if err == syscall.ENOENT {
 			break // end of map
 		}
@@ -142,17 +147,18 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 			return out, fmt.Errorf("bpf(BPF_MAP_GET_NEXT_KEY): %w", err)
 		}
 
-		var val tetheringStatsValue
-		err = bpfMapLookupElemCall(s.fd, unsafe.Pointer(&next), unsafe.Pointer(&val))
+		s.val = tetheringStatsValue{}
+		err = bpfMapLookupElemCall(s.fd, unsafe.Pointer(next), unsafe.Pointer(&s.val))
+		val := s.val
 		if err != nil {
-			key = next
+			*key = *next
 			first = false
 			continue
 		}
 
 		uid := int(next.UID)
 		if uid < 0 || uid > 100000000 {
-			key = next
+			*key = *next
 			first = false
 			continue
 		}
@@ -164,7 +170,7 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 		bc.TxPackets += val.TxPackets
 		out[uid] = bc
 
-		key = next
+		*key = *next
 		first = false
 	}
 
