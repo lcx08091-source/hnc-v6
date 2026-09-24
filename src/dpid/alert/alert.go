@@ -23,6 +23,7 @@
 package alert
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -299,7 +300,11 @@ func makeAlertID(kind, mac string, ts int64) string {
 // call. There's no clean fallback that works everywhere, so we just log
 // and rely on the WebUI's bell-badge UX.
 func postNotification(title, body string) error {
-	cmd := exec.Command("cmd", "notification", "post",
+	// v5.12: 10s 超时。`cmd notification` 走 binder, system_server 卡顿时可能
+	// 不返回; 旧代码无超时会把 hnc_watchdog 的告警扫描 goroutine 永久挂住。
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "cmd", "notification", "post",
 		"-S", "bigtext",
 		"-t", title,
 		"hnc_alert",
