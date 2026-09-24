@@ -150,6 +150,21 @@ assert_mock_not_called "ingress pref 1" "mirred 已在, 不应 del pref 1" && \
     assert_mock_not_called "filter add" "mirred 已在, 不应重装" && test_pass
 mock_teardown
 
+# ═══ watchdog action full_init: 延迟 re-restore 不得拖住调用方的 stdout 管道 ═══
+test_start "watchdog action full_init: 被 \$(...) 捕获时不因后台 sleep 15 阻塞"
+mock_setup
+echo "wlan2" > "$HNC_TEST_DIR/run/iface.cache"
+mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan2"
+echo '{"version":1,"devices":{},"blacklist":[],"whitelist":[]}' > "$HNC_TEST_DIR/data/rules.json"
+t0=$(date +%s)
+_out=$(HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action full_init wlan2 192.168.43.1 2>&1)
+t1=$(date +%s)
+# 结束后把状态改掉,让残留的后台子 shell 醒来后什么都不做
+echo "PENDING" > "$HNC_TEST_DIR/run/hnc_state"
+el=$((t1 - t0))
+if [ "$el" -lt 12 ]; then test_pass; else test_fail "full_init 捕获输出耗时 ${el}s(后台子 shell 持有管道)"; fi
+mock_teardown
+
 # ═══ device_detect iface: 缓存的接口已消失 → 重新探测 ═══════════
 test_start "device_detect iface: 缓存接口已无 IPv4 时不返回旧值"
 mock_setup

@@ -886,7 +886,12 @@ do_full_init() {
                 fi
                 ;;
         esac
-    ) &
+    ) </dev/null >/dev/null 2>&1 &
+    # v5.12: ↑ 必须断开 stdio。Go hnc_watchdog 以 `watchdog.sh action full_init`
+    # 调用本函数并用 cmd.Output() 收 stdout:后台子 shell 继承了那根管道,Output()
+    # 要等它 sleep 15 + 整轮 restore 结束才返回;超过 actionTimeout(30s)即判
+    # rc=-1 → "full_init returned rc=-1; staying PENDING" → 下一轮重跑整套 init。
+    # 子 shell 内部的日志本来就显式 >> "$LOG",断开 stdio 不丢输出。
 }
 
 # do_migrate: ACTIVE:<old_iface> → ACTIVE:<new_iface>

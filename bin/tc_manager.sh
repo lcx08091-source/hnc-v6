@@ -2389,7 +2389,9 @@ tc_action_unlock() {
 tc_snapshot_async() {
     local iface="$1"
     [ -x "$HNC_DIR/bin/tc_state_snapshot.sh" ] || return 0
-    ( HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$iface" >/dev/null 2>&1 ) &
+    # v5.12: 重定向放到子 shell 外层 —— 旧写法子 shell 进程本身仍持有调用方的
+    # stdout/stderr 管道,httpd runBin(CombinedOutput)要等快照跑完才返回。
+    ( HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$iface" ) </dev/null >/dev/null 2>&1 &
 }
 
 
