@@ -138,3 +138,13 @@ HNC_DIR="$HNC_TEST_DIR" HNC="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/cleanup_stale
 assert_mock_called "mangle -D HNC_MARK -m mac --mac-source cc:cc:cc:cc:cc:07 -m mark --mark 0 -j MARK --set-mark 0x800007" \
     "陈旧设备的 MAC-only MARK 规则必须删除" && test_pass
 mock_teardown
+
+# ═══ device_detect iface: 缓存的接口已消失 → 重新探测 ═══════════
+test_start "device_detect iface: 缓存接口已无 IPv4 时不返回旧值"
+mock_setup
+echo "wlan9" > "$HNC_TEST_DIR/run/iface.cache"
+mock_set_stdout ip "9: wlan9: <BROADCAST,MULTICAST> mtu 1500 state DOWN"
+mock_set_stdout iptables "   10   800 ACCEPT     all  --  wlan1  rmnet_data0  0.0.0.0/0            0.0.0.0/0"
+out=$(HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/device_detect.sh" iface 2>/dev/null)
+assert_eq "wlan1" "$out" "应重新探测到 wlan1 而不是缓存里已失效的 wlan9" && test_pass
+mock_teardown
