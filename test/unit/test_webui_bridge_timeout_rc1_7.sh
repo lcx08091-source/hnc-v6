@@ -2,7 +2,8 @@
 # Static regression test for v5.2-rc1.7 WebUI bridge timeout and first-paint guard.
 set -eu
 
-ROOT="${1:-.}"
+# v5.12: 被 run_all.sh source 时 $1 是 runner 的参数(如 unit), 不能当仓库根
+ROOT="${HNC_REPO_ROOT:-${1:-.}}"
 HTML="$ROOT/webroot/classic.html"
 [ -f "$HTML" ] || { echo "missing webroot/classic.html" >&2; exit 1; }
 

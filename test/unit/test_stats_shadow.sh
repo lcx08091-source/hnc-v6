@@ -11,7 +11,9 @@ cat > "$TMP_BASE/data/devices.json" <<'JSON'
 {"aa:bb:cc:dd:ee:01":{"ip":"192.168.43.10","mac":"aa:bb:cc:dd:ee:01"},"aa:bb:cc:dd:ee:02":{"ip":"192.168.43.11","mac":"aa:bb:cc:dd:ee:02"}}
 JSON
 
-STATS_ALL_CMD='printf "%s\n" "192.168.43.10 100 50" "192.168.43.11 20 30" "192.168.43.99 999 999"' \
+# v5.12: 采样脚本直接执行 $STATS_ALL_CMD(不 eval), 带引号的 printf 会把引号原样输出 → 改为 cat 临时文件
+printf '%s\n' "192.168.43.10 100 50" "192.168.43.11 20 30" "192.168.43.99 999 999" > "$TMP_BASE/stats_all.in"
+STATS_ALL_CMD="cat $TMP_BASE/stats_all.in" \
   HNC_DIR="$TMP_BASE" HNC_TEST_MODE=1 sh "$ROOT_DIR/bin/stats_shadow_sample.sh"
 
 [ -f "$TMP_BASE/data/stats_shadow_raw.jsonl" ]

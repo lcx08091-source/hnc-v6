@@ -84,6 +84,20 @@ for test_file in $TEST_FILES; do
         echo "$TEST_TOTAL $TEST_PASS $TEST_FAIL $TEST_SKIP" > "$counter_file"
         echo "$TEST_FAILED_NAMES" >> "$counter_file"
     )
+    file_rc=$?
+    # v5.12: 独立风格的测试(不用 test_start, 失败时直接 exit 1)会在写计数文件前
+    # 退出子 shell —— 此前它们的成败都不计入总数, 失败了也显示 ALL PASS。
+    # 没有计数文件时按"整个文件 = 1 个用例"记账, 以退出码判定。
+    if [ ! -f "$counter_file" ]; then
+        TEST_TOTAL=$((TEST_TOTAL + 1))
+        if [ "$file_rc" -eq 0 ]; then
+            TEST_PASS=$((TEST_PASS + 1))
+        else
+            TEST_FAIL=$((TEST_FAIL + 1))
+            TEST_FAILED_NAMES="$TEST_FAILED_NAMES
+  - $rel_path: 独立测试退出码 $file_rc"
+        fi
+    fi
     if [ -f "$counter_file" ]; then
         read -r ftotal fpass ffail fskip < "$counter_file"
         TEST_TOTAL=$((TEST_TOTAL + ftotal))
