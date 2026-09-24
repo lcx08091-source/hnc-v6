@@ -58,6 +58,7 @@ type TokensStore struct {
 	path     string // tokens.json 的绝对路径
 	mu       sync.RWMutex
 	tokens   map[string]Token
+	dirty    bool // v5.12: 内存有未落盘的变化; SaveLoop 只在 dirty 时写盘(此前每 30s 无条件全量重写, 闪存写放大)
 	lastRead int64 // 上次 reload 时的文件 mtime(Unix ns)
 }
 
@@ -228,6 +229,7 @@ func (s *TokensStore) saveAtomicLocked() error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename: %w", err)
 	}
+	s.dirty = false
 	// 更新自己的 mtime cache,避免下次 SyncIfChanged 误重载
 	st, err := os.Stat(s.path)
 	if err == nil {
@@ -304,9 +306,26 @@ func (s *TokensStore) UpdateLastSeen(tokenID string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if t, ok := s.tokens[tokenID]; ok {
-		t.LastSeen = time.Now().Unix()
+		now := time.Now().Unix()
+		// v5.12: last_seen 只用于 60 天硬过期与界面显示, 分钟级精度足够;
+		// 1 分钟内的重复访问不再标脏, 远程页每秒轮询时不会每 30s 触发一次写盘。
+		if now-t.LastSeen < 60 {
+			return
+		}
+		t.LastSeen = now
 		s.tokens[tokenID] = t
+		s.dirty = true
 	}
+}
+
+// FlushIfDirty v5.12: 只在有未落盘变化时写盘(SaveLoop 周期调用)。
+func (s *TokensStore) FlushIfDirty() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.dirty {
+		return nil
+	}
+	return s.saveAtomicLocked()
 }
 
 // Flush 主动把内存写回磁盘。saveLoop 用,logout 用。
@@ -378,7 +397,7 @@ func (s *TokensStore) SaveLoop(stop <-chan struct{}) {
 			}
 			return
 		case <-ticker.C:
-			if err := s.Flush(); err != nil {
+			if err := s.FlushIfDirty(); err != nil {
 				// 非致命,下轮重试
 				fmt.Fprintf(os.Stderr, "periodic flush failed: %v\n", err)
 			}

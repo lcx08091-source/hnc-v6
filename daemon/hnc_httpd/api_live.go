@@ -77,7 +77,7 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	ip := ifaceIPv4(iface)
 	active := hotspotActiveFromState(s.hncDir, iface, ip, online)
 
-	writeJSON(w, http.StatusOK, map[string]interface{}{
+	resp := map[string]interface{}{
 		"hotspot_active":  active,
 		"iface":           iface,
 		"hotspot_iface":   iface,
@@ -89,7 +89,13 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 		"devices_sig":          liveDevicesSig(devices, active, iface),
 		"backend_version":      version,
 		"backend_version_code": versionCode,
-	})
+	}
+	// v5.12: ?devices=1 顺带返回设备列表(与上面汇总同一份快照)。本机 KSU 页
+	// 每次请求都要拉起一个 curl 进程, 合并后每轮轮询从 2 次降到 1 次。
+	if r.URL.Query().Get("devices") == "1" {
+		resp["devices"] = devices
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // currentHotspotIface 走 s.jsonCache 读 rules.json 兜底 —— /api/live 每次轮询

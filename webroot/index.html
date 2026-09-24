@@ -939,8 +939,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     S.spark.push(num(l.rx_bps)); if (S.spark.length > 30) S.spark.shift();
   }
   function loadLive() { return api.get('/api/live', null, { timeout: 7000 }).then(function (l) { applyLive(l); return l; }); }
-  function loadDevices() {
-    return api.get('/api/devices', null, { timeout: 8000 }).then(function (r) {
+  function loadDevices() { return api.get('/api/devices', null, { timeout: 8000 }).then(applyDevices); }
+  function applyDevices(r) {
+    {
       if (typeof r.hotspot_active === 'boolean') S.hotspot.active = r.hotspot_active;
       if (r.hotspot_iface) S.hotspot.iface = r.hotspot_iface;
       if (r.hotspot_ip) S.hotspot.ip = r.hotspot_ip;
@@ -951,6 +952,14 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       S.devLoaded = true;
       if (r.devices_sig) S.sig = r.devices_sig;
       return S.devices;
+    }
+  }
+  /* v5.12: 一次请求同时拿汇总和设备列表(本机桥接每个请求都要拉起一个 curl 进程) */
+  function loadLiveAndDevices() {
+    return api.get('/api/live', { devices: 1 }, { timeout: 8000 }).then(function (l) {
+      applyLive(l);
+      if (Array.isArray(l.devices)) applyDevices(l); else return loadDevices().then(function () { return l; });
+      return l;
     });
   }
   function loadConfig() { return api.get('/api/config').then(function (c) { S.cfg = c || {}; return S.cfg; }); }
@@ -981,8 +990,24 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       S.templates = list.length ? list : DEFAULT_TEMPLATES.slice();
     });
   }
+  /* v5.12: 每台设备本自然月流量(与月度配额告警同源); 开了配额时显示占比 */
+  S.usage = null;
+  function loadUsage() { return api.getSafe('/api/usage_month', null, null).then(function (r) { if (r && r.devices) S.usage = r; paintUsage(); }); }
+  function usageOf(mac) { var u = S.usage && S.usage.devices && S.usage.devices[mac]; return u ? num(u.rx) + num(u.tx) : 0; }
+  function paintUsage() {
+    var q = S.alertCfg && S.alertCfg.monthly_quota, lim = q && q.enabled ? num(q.limit_bytes) : 0;
+    S.devices.forEach(function (d) {
+      var el = document.getElementById('mu-' + d.mac.replace(/:/g, '')); if (!el) return;
+      var v = usageOf(d.mac);
+      el.textContent = v ? ' · 本月 ' + bytes(v) + (lim ? '（配额 ' + Math.round(v / lim * 100) + '%）' : '') : '';
+      var od = S.usage && num(S.usage.oldest_data), since = S.usage && num(S.usage.since);
+      el.title = od && od - since > 2 * 86400 ? '本月数据从 ' + new Date(od * 1000).toLocaleDateString() + ' 起（更早的已被清理）' : '';
+      el.style.color = lim && v >= lim ? 'var(--badge-red)' : lim && v >= lim * num(q.warn_at_pct, 80) / 100 ? 'var(--badge-warn)' : '';
+    });
+  }
   function onlineHoursOf(mac) { var h = S.onlineHours[mac] || S.onlineHours[mac.toUpperCase()]; if (!h) return null; var t = today(); return num(h[t.replace(/-/g, '')] != null ? h[t.replace(/-/g, '')] : h[t]); }
   function paintOnlineHours() {
+    paintUsage();
     S.devices.forEach(function (d) {
       var el = document.getElementById('oh-' + d.mac.replace(/:/g, '')); if (!el) return;
       var h = onlineHoursOf(d.mac); el.textContent = h ? ' · 今日在线 ' + trim0(h.toFixed(1)) + ' 小时' : '';
@@ -1084,7 +1109,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         '<span class="av">' + d.icon + '<span class="dot ' + (d.blocked ? 'blocked' : d.online ? 'online' : 'offline') + '"></span></span>' +
         '<span class="dev-info"><span class="dev-name"><span class="nm">' + esc(d.name) + '</span>' + badges(d) + '</span>' +
           '<span class="dev-meta mono" style="display:block">' + esc(d.ip || '—') + ' · ' + d.mac + '</span>' +
-          '<span class="dev-meta" style="display:block">' + esc(d.online ? (d.vendor || '在线') : meta) + '<span id="oh-' + d.mac.replace(/:/g, '') + '"></span></span>' +
+          '<span class="dev-meta" style="display:block">' + esc(d.online ? (d.vendor || '在线') : meta) + '<span id="oh-' + d.mac.replace(/:/g, '') + '"></span><span id="mu-' + d.mac.replace(/:/g, '') + '"></span></span>' +
           (d.apps.length ? '<span class="dev-apps"><span class="lb">在用</span>' + d.apps.slice(0, 4).map(function (a) { return '<span class="a">' + esc(a.name || a.id) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('') + '</span>' : '') +
         '</span>' +
         (d.online ? '<span class="dev-rate num"><span class="d">↓ <b data-rx>' + r.v + '</b> ' + r.u + '</span><span class="u">↑ <b data-tx>' + t.v + '</b> ' + t.u + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>'
@@ -1925,6 +1950,12 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     keys.forEach(function (k) { if (typeof c[k] === 'boolean') { n++; if (c[k]) ok++; } });
     return n ? ok + ' / ' + n + ' 可用' : '未知';
   }
+  function schedDesc(c) {
+    var a = [];
+    if (c.hotspot_time_enable) a.push((c.hotspot_time_start || '?') + ' – ' + (c.hotspot_time_end || '?'));
+    if (c.hotspot_charging_only) a.push('仅充电时');
+    return a.length ? '已启用 · ' + a.join(' · ') : '按时段 / 充电状态自动开关热点 · 未启用';
+  }
   function remoteUrl() { var i = S.ifaceInfo || {}, h = i.gateway || i.ip || S.hotspot.ip; return h ? 'https://' + h + ':8443' : ''; }
   function renderSettings(anim1) {
     var c = S.cfg || {}, ac = S.alertCfg || {}, mq = ac.monthly_quota || {}, an = ac.anomaly_traffic || {}, sla = S.sla || {}, rs = S.runStatus || {};
@@ -1939,6 +1970,12 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         '<label class="field">开机后延迟<span class="box"><input id="hs-delay" type="number" min="0" max="3600" value="' + esc(c.hotspot_delay_sec == null ? '' : c.hotspot_delay_sec) + '" placeholder="0"><span class="u">秒</span></span></label>' +
         '<div class="btns"><button class="btn sec press" data-act="hs-start">' + ico('power') + '立即开启</button><button class="btn sec press" data-act="hs-stop">立即关闭</button><button class="btn pri press" data-act="hs-save">保存</button></div>',
         toggle(hsAuto, 'data-set="hs-auto" aria-label="开机自动开热点"')) +
+      sFold('hsched', ['purple', 'bolt'], '定时与充电', schedDesc(c),
+        '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">按时段开关热点</div><div class="s">进入时段自动开，离开时段自动关；跨午夜可填 22:00 → 07:00</div></span>' + toggle(c.hotspot_time_enable, 'data-local="sched-time" aria-label="按时段开关热点"') + '</div>' +
+        '<div class="grid2"><label class="field">开始<span class="box"><input id="hs-t-start" type="time" value="' + esc(c.hotspot_time_start || '08:00') + '"></span></label><label class="field">结束<span class="box"><input id="hs-t-end" type="time" value="' + esc(c.hotspot_time_end || '23:00') + '"></span></label></div>' +
+        '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">只在充电时开热点</div><div class="s">拔掉充电器后自动关热点，插上后自动开（同时受时段限制）</div></span>' + toggle(c.hotspot_charging_only, 'data-local="sched-charge" aria-label="只在充电时开热点"') + '</div>' +
+        '<div class="note">只在状态切换的那一刻动作：时段外你手动开的热点不会被反复关掉。开机自启也遵守这里的规则。</div>' +
+        '<button class="btn pri press" data-act="sched-save">保存</button>') +
       sItem(['blue', 'wifi'], '热点接口', '当前热点使用的接口（实时）', val(esc(S.hotspot.iface || '—') + (S.hotspot.active === false ? ' · 未开启' : ''))) +
       sFold('iface', ['cyan', 'wifi'], '热点接口偏好', '默认自动识别；ColorOS 常见 wlan2', '<div style="display:flex;gap:8px">' + inp('iface-pref', c.hotspot_iface || 'auto', '', 'maxlength="15" placeholder="auto" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="iface-save">保存</button></div><div class="note">填 auto 让 HNC 自动识别；手动填接口名（如 wlan2 / ap0）用于识别不准的机型。</div>', val(esc(c.hotspot_iface || 'auto'))) +
       sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val(OFFLOAD_T[S.offload.detail] || S.offload.detail || '—', S.offload.detail === 'ACTIVE' ? 'warn' : 'ok'))]);
@@ -1980,6 +2017,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       sItem(['gray', 'doc'], 'JSON 退回 legacy', '应长期为 0', val(nz(sla.json_legacy_fallback_count), slaCls(sla.json_legacy_fallback_count))) +
       sItem(['gray', 'flask'], '能力降级标记', 'qos_fallback / uplink_unsupported', val([sla.qos_fallback_active ? 'QoS 兼容链路' : '', sla.uplink_unsupported ? '上行不支持' : ''].filter(Boolean).join(' · ') || '无', sla.qos_fallback_active || sla.uplink_unsupported ? 'warn' : 'ok'))]);
     groups.push(['维护', sBtn(['blue', 'refresh'], '重启 HNC 服务', '重跑 post-fs-data.sh + service.sh', 'svc-restart', '重启', 'danger') +
+      sFold('ttl', ['orange', 'refresh'], '离线规则自动清理', num(c.stale_rule_ttl_days, 30) ? '设备离线超过 ' + num(c.stale_rule_ttl_days, 30) + ' 天后，自动删掉它的限速/延迟规则' : '已关闭 · 离线设备的规则永久保留',
+        '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="ttl-days" type="number" min="0" max="3650" value="' + num(c.stale_rule_ttl_days, 30) + '"><span class="u">天</span></span><button class="btn pri press" data-act="ttl-save">保存</button></div><div class="note">填 0 = 永不自动清理。黑名单不受影响。</div>',
+        val(num(c.stale_rule_ttl_days, 30) ? num(c.stale_rule_ttl_days, 30) + ' 天' : '关闭')) +
       sBtn(['orange', 'trash'], '清理缓存', 'hostname_cache · dev_class_cache', 'cache-clear', '清理', 'warn') +
       sBtn(['green', 'down'], '导出规则', '复制 rules.json（限速/延迟/黑名单/模板）', 'rules-json', '导出') +
       (KSU ? sBtn(['cyan', 'doc'], 'JSON 健康面板', 'rules / devices / tokens 的完整性与备份', 'json-health', '打开') : '') +
@@ -2126,7 +2166,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   var ORDER = ['devices', 'apps', 'stats', 'settings'];
   var RENDER = { devices: renderDevices, apps: renderApps, stats: renderStats, settings: renderSettings };
   function onEnter(name) {
-    if (name === 'devices') { paintHero(true); loadOnlineHours(); }
+    if (name === 'devices') { paintHero(true); loadOnlineHours(); loadUsage(); }
     if (name === 'apps') loadApps().then(function () { if (S.page === 'apps') renderApps(false); });
     if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_enabled === true && !S.clsact) clsactCheck(true); });
     schedulePoll(50);
@@ -2273,6 +2313,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       var ta = q.getAttribute('data-act');
       if (q.hasAttribute('data-set')) { setToggleCfg(q.getAttribute('data-set'), q); return; }
       if (q.hasAttribute('data-selftog')) { selfToggle(q, q.getAttribute('data-selftog')); return; }
+      if (q.hasAttribute('data-local')) return;   // v5.12: 表单内开关, 点「保存」才提交
       if (ta === 'wl-mode') { setWhitelistMode(nv, q); return; }
       var tc = ctxDev(q); if (!tc.d) return;
       if (ta === 'sqm') devAct(tc.d.mac, function () { return api.action('rule_sqm', { mac: tc.d.mac, enabled: String(nv) }); }, nv ? '已开启低延迟模式' : '已关闭低延迟模式');
@@ -2349,6 +2390,15 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       case 'aq-save': api.action('alert_config_set', { section: 'monthly_quota', enabled: 'true', limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct').value, 80))) }).then(function () { toast('月度配额已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
       case 'aa-save': api.action('alert_config_set', { section: 'anomaly_traffic', enabled: 'true', ratio: String(num($('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb').value, 50))) }).then(function () { toast('异常检测已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
       case 'gs-apply': gsApply(); break;
+      case 'sched-save':
+        var sT = $('[data-local="sched-time"]').getAttribute('aria-checked') === 'true', sC = $('[data-local="sched-charge"]').getAttribute('aria-checked') === 'true';
+        var st = $('#hs-t-start').value, en = $('#hs-t-end').value;
+        if (sT && !(/^\d\d:\d\d$/.test(st) && /^\d\d:\d\d$/.test(en))) { toast('请填好开始和结束时间', 'err'); break; }
+        var sp = { time_enable: String(sT), charging_only: String(sC) }; if (/^\d\d:\d\d$/.test(st)) sp.start = st; if (/^\d\d:\d\d$/.test(en)) sp.end = en;
+        api.action('hotspot_schedule_set', sp).then(function () { toast(sT || sC ? '已保存 · 下一次检查（约 1 分钟内）开始生效' : '已关闭定时与充电规则'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+      case 'ttl-save':
+        var td = Math.round(num($('#ttl-days').value, -1)); if (td < 0 || td > 3650) { toast('请填 0~3650 天', 'err'); break; }
+        api.action('stale_ttl_set', { days: String(td) }).then(function () { toast(td ? '离线 ' + td + ' 天后自动清理规则' : '已关闭离线规则自动清理'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
       case 'fw-add': var pkg = $('#fw-pkg').value.trim(); if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(pkg)) { toast('包名格式不对', 'err'); break; }
         api.action('flywheel_exclude_set', { op: 'add', pkg: pkg }).then(function () { toast('已排除 ' + pkg + ' · 约 5 分钟内生效'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
       case 'url-copy': copyText(remoteUrl()).then(function (ok) { toast(ok ? '已复制访问地址' : '复制失败', ok ? 'ok' : 'err'); }); break;
@@ -2399,10 +2449,23 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
    * 主循环 setTimeout 链; 页面不可见时停, 回前台立刻补一次。
    * 间隔与旧版一致: 有在线设备 1s / 空闲 1.5~5s / 热点关 3~15s; 设备签名变化后 5 秒内 250ms 快轮询。 */
   var pollT = 0, pollBusy = false, burstUntil = 0, tickN = 0;
+  /* v5.12: 远程浏览器用 /api/events 实时推送(设备接入/离开/规则变化), 空闲时轮询放缓到 15~30 秒 */
+  var es = null;
+  function startSSE() {
+    if (KSU || typeof EventSource === 'undefined' || es || document.hidden) return;
+    try {
+      es = new EventSource('/api/events');
+      es.onopen = function () { S.sse = true; };
+      es.addEventListener('changed', function () { burstUntil = Date.now() + 3000; schedulePoll(0); });
+      es.onerror = function () { S.sse = false; };   // 浏览器会自动重连
+    } catch (_) { es = null; }
+  }
+  function stopSSE() { if (es) { try { es.close(); } catch (_) {} es = null; S.sse = false; } }
   function pollDelay() {
     if (Date.now() < burstUntil) return 250;
     var l = S.live || {}, m = S.refreshMode, on = num(l.online);
     if (!S.connected) return 4000;
+    if (S.sse && (S.page !== 'devices' || l.hotspot_active === false || !on)) return m === 'powersave' ? 30000 : 15000;
     if (S.page !== 'devices') return m === 'powersave' ? 15000 : 5000;
     if (l.hotspot_active === false) return m === 'powersave' ? 15000 : 3000;
     if (!on) return { realtime: 1500, balanced: 2000, powersave: 5000 }[m];
@@ -2413,11 +2476,13 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (pollBusy || document.hidden) { schedulePoll(); return; }
     pollBusy = true; tickN++;
     var prevSig = S.sig, prevShape = shapeOf(), wasOk = S.connected;
-    loadLive().then(function (l) {
+    // 设备页有在线设备时每轮都要刷新单台速率 → 直接用合并请求; 否则只拿汇总, 签名变了再补拉列表
+    var wantDev = !S.devLoaded || (S.page === 'devices' && num((S.live || {}).online) > 0 && (S.refreshMode === 'realtime' || tickN % 2 === 0));
+    (wantDev ? loadLiveAndDevices() : loadLive()).then(function (l) {
       var sigChanged = l.devices_sig && l.devices_sig !== prevSig;
       if (sigChanged) burstUntil = Date.now() + 5000;
-      var needDev = !S.devLoaded || sigChanged || (S.page === 'devices' && num(l.online) > 0 && (S.refreshMode === 'realtime' || tickN % 2 === 0));
-      return (needDev ? loadDevices() : Promise.resolve()).then(function () {
+      var needDev = wantDev || sigChanged;
+      return (needDev && !wantDev ? loadDevices() : Promise.resolve()).then(function () {
         if (l.devices_sig) S.sig = l.devices_sig;
         if (!wasOk) { S.bootErr = ''; if (S.page === 'devices') renderDevices(false); }
         if (S.page === 'devices') {
@@ -2443,10 +2508,10 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     slowT = [setInterval(function () { if (!document.hidden) loadAlerts(); }, 60000),
       setInterval(function () { if (!document.hidden) loadOffload(); }, 60000),
       setInterval(function () { if (!document.hidden && S.page !== 'apps' && S.page !== 'stats') api.getSafe('/api/dpi_state', null, null).then(function (r) { if (r && r.available && r.state) { S.self = r.state.self || null; paintAppsDot(); } }); }, 25000),
-      setInterval(function () { if (!document.hidden && S.page === 'devices') loadOnlineHours(); }, 600000),
+      setInterval(function () { if (!document.hidden && S.page === 'devices') { loadOnlineHours(); loadUsage(); } }, 600000),
       setInterval(function () { if (!document.hidden && S.page === 'stats' && S.aseg === 'stats') refreshStats(); }, 300000)];
   }
-  document.addEventListener('visibilitychange', function () { if (document.hidden) clearTimeout(pollT); else { burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); } });
+  document.addEventListener('visibilitychange', function () { if (document.hidden) { clearTimeout(pollT); stopSSE(); } else { burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); } });
 
   /* ═════════════════════ 启动 ═════════════════════
    * 旧版 bug: health 失败后重试成功只恢复了设备轮询, 配置/能力/告警/offload 全停在默认值。
@@ -2463,7 +2528,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       S.booted = true; S.bootErr = '';
       $('#mode-pill').hidden = false; $('#mode-pill').textContent = KSU ? '本机' : '远程';
       RENDER[S.page](!retry); onEnter(S.page);
-      loadAlerts(); loadOffload(); loadOnlineHours(); startSlowPolls();
+      loadAlerts(); loadOffload(); loadOnlineHours(); loadUsage(); startSlowPolls(); startSSE();
+      api.getSafe('/api/alert_config', null, null).then(function (r) { if (r) { S.alertCfg = r; paintUsage(); } });
       if (retry) toast('已连接 HNC 后端');
     }).catch(function (e) {
       S.connected = false; S.bootErr = errText(e);

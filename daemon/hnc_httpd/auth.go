@@ -16,10 +16,12 @@ package main
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
@@ -125,12 +127,59 @@ func VerifyCookie(store *TokensStore, cookieValue string) (string, Token, error)
 		return "", Token{}, errors.New("token hard expired")
 	}
 
+	// v5.12: 验证结果缓存。远程页每秒轮询, 每个请求都做一次 bcrypt(arm64 约
+	// 100-300ms CPU)会持续占满一个核。缓存键 = sha256(完整 cookie), 值里带
+	// 当时的 token.Hash: 撤销(上面已先判 Revoked)、换密钥(Hash 变)、过期(TTL)
+	// 都会让缓存自然失效; 只有持有完全相同 cookie 的请求才能命中。
+	key := sha256.Sum256([]byte(cookieValue))
+	if verifyCacheHit(key, tokenID, tok.Hash) {
+		return tokenID, tok, nil
+	}
+
 	// 单次 bcrypt 比对(恒定 100ms)
 	if err := bcrypt.CompareHashAndPassword([]byte(tok.Hash), []byte(secret)); err != nil {
 		return "", Token{}, errors.New("secret mismatch")
 	}
+	verifyCachePut(key, tokenID, tok.Hash)
 
 	return tokenID, tok, nil
+}
+
+const verifyCacheTTL = 5 * time.Minute
+const verifyCacheMax = 256
+
+type verifyCacheEntry struct {
+	tokenID string
+	hash    string
+	expires time.Time
+}
+
+var (
+	verifyCacheMu sync.Mutex
+	verifyCache   = map[[32]byte]verifyCacheEntry{}
+)
+
+func verifyCacheHit(key [32]byte, tokenID, hash string) bool {
+	verifyCacheMu.Lock()
+	defer verifyCacheMu.Unlock()
+	e, ok := verifyCache[key]
+	if !ok {
+		return false
+	}
+	if time.Now().After(e.expires) || e.tokenID != tokenID || e.hash != hash {
+		delete(verifyCache, key)
+		return false
+	}
+	return true
+}
+
+func verifyCachePut(key [32]byte, tokenID, hash string) {
+	verifyCacheMu.Lock()
+	defer verifyCacheMu.Unlock()
+	if len(verifyCache) >= verifyCacheMax {
+		verifyCache = map[[32]byte]verifyCacheEntry{} // 超限整体清空: 简单且有界
+	}
+	verifyCache[key] = verifyCacheEntry{tokenID: tokenID, hash: hash, expires: time.Now().Add(verifyCacheTTL)}
 }
 
 // parseCookie 把 "TokenID.Secret" 拆开并做格式校验。
