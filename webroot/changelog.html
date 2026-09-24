@@ -1,3 +1,14 @@
+<!-- v5.14.0 -->
+<div class="cl-section">
+  <div class="cl-title">🎯 v5.14.0: 「正在用」更准 + 认得出 QUIC <span style="font-size:11px;color:var(--t2);font-weight:400">2026-09-24</span></div>
+  <ul class="cl-list">
+    <li><b>「在用」看的是此刻的真实流量</b>: 设备卡上显示「在用 抖音 2.3 MB/s」, 按最近几十秒的实际速率排, 用完一会儿自动淡出; 不再出现一小时前刷过的抖音一直挂着、后台心跳的微信总排第一。</li>
+    <li><b>认得出 QUIC(HTTP/3)了</b>: 抖音、快手、B 站、YouTube 大量走 QUIC, 以前完全看不到域名; 现在能从握手包里解出域名和指纹。另外用 DNS 关联兜底: 设备刚查过某应用的域名, 连到那个地址的流量就算给它。</li>
+    <li><b>广告和统计 SDK 不再冒充应用</b>: 友盟、穿山甲这类几十个 App 共用的组件不再显示成「在用」, 也不会把真应用的归属抢走(应用级限速也跟着更准)。</li>
+    <li><b>新开关: 强制 QUIC 回落 TCP</b>(设置 → 应用识别, 默认关): 识别还是不准时打开, App 会立刻改走 TCP, 域名全看得见; 代价是首包可能慢几十毫秒。</li>
+  </ul>
+</div>
+
 <!-- v5.13.0 -->
 <div class="cl-section">
   <div class="cl-title">🔍 v5.13.0: 设备识别 + 实时连接 + 流量识别增强 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-09-24</span></div>

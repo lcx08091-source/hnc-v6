@@ -14,6 +14,30 @@
 
 ---
 
+## [5.14.0] - 2026-09-24
+
+**「正在使用的应用」准确度专项**。
+
+### Added
+
+- **QUIC Initial 解析**(dpid `capture/quic.go`):cBPF 额外放行 UDP 目的 443 的 long header 包(BuildFilter 67→74 / RawIP 68→75 条;QUIC 放行 snaplen ≥2048,否则 1200 字节的 Initial 被截断无法解密),按 RFC 9001 / 9369 由 DCID 派生 Initial 密钥(QUIC v1、v2、draft-29),去头部保护 + AES-128-GCM 解密,跨包且被打乱切碎的 CRYPTO 帧按 offset 重组(256 并发 / 16KB / 3s),复用现有 ClientHello 解析得到 SNI、ALPN 和 JA4(首字符 `q`);gQUIC Q046 明文 CHLO 取 SNI/UAID。产出与 TCP 相同的 TLS 事件,自动进入应用识别、IP→域名反查与设备识别。RFC 9001 附录 A 向量逐字节验证。
+- **「正在用」**(httpd `live_apps`):按 conntrack 实时速率把每台设备的流量归到应用,指数平滑(τ=20s),取速率最高的几个;dpid 的每应用字节数只来自握手包,不适合判断"正在用"。
+- **DNS 关联**:`dpi_ipname.json` 条目带规则归类(app / category),看不到 SNI 的连接按 DNS 解析结果归到应用;`/api/connections` 同样使用。
+- **强制 QUIC 回落 TCP**:rules.json `quic_block`,`bin/quic_block_sync.sh` 在独立链 `HNC_QUIC`(filter/FORWARD 第 1 位)对热点口 UDP 443 回 REJECT(v4 + v6),新动作 `quic_block_set`;watchdog 在 iptables init / 接口迁移后随白名单一起重同步,cleanup 清理。
+
+### Changed
+
+- 应用分级(dpid `AppTier` / httpd `appTier`):广告、统计 SDK、CDN、云厂商、基础设施不算应用;系统服务只在没有真应用时显示。`ip_app_map.json` 带 category,SDK 命中 2 分钟内不覆盖真应用的 IP 归属(以前后写者胜,共用 IP 被 SDK 抢走,应用级限速跟着错)。
+- `dpi_apps`(「最近」):过滤 SDK,真应用排在系统服务前,10 分钟内出现过的优先。
+- WebUI:设备卡「在用」显示应用 + 实时速率,无实时数据时显示「最近」;设置新增「应用识别」分组。
+
+### Internals
+
+- 新测试:QUIC 密钥派生 / 报文解密 / 乱序重组 / 淘汰 / 篡改与截断不 panic / gQUIC;BPF 放行与丢弃;AppTier、SDK 不抢真应用、ipname 归类;httpd live_apps 平滑衰减与 DNS 关联(`v514_test.go`);`test_quic_block.sh`。
+- 需要 CI 重编 `hnc_dpid`、`hnc_httpd`。
+
+---
+
 ## [5.13.0] - 2026-09-24
 
 **设备识别 / 实时连接 / 流量识别 专项增强**。
