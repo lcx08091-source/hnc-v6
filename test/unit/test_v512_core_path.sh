@@ -82,3 +82,43 @@ assert_mock_called "class del dev wlan2 classid 1:9001" "应用段 class 应被�
     assert_mock_not_called "classid 1:9999" "默认类 1:9999 绝不能删" && \
     assert_mock_not_called "classid 1:5" "设备 class 不能删" && test_pass
 mock_teardown
+
+# ═══ v6_sync: 地址不变但 tc 上 filter 已丢 → 必须重建 ════════════
+V6="$HNC_REPO_ROOT/bin/v6_sync.sh"
+seed_v6_env() {
+    echo "wlan2" > "$HNC_TEST_DIR/run/iface.cache"
+    mkdir -p "$HNC_TEST_DIR/run/v6"
+    mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan2
+2408:1::5 dev wlan2 lladdr aa:bb:cc:dd:ee:05 REACHABLE"
+}
+IPT_MARKED="MARK       all  --  0.0.0.0/0            0.0.0.0/0            MAC aa:bb:cc:dd:ee:05 MARK set 0x800005"
+
+test_start "v6_sync: 旧快照地址相同但 filter 不在 tc 上(热点重开/重启)→ 重建"
+mock_setup
+seed_v6_env
+mock_set_stdout iptables "$IPT_MARKED"
+echo "2408:1::5" > "$HNC_TEST_DIR/run/v6/aa:bb:cc:dd:ee:05"
+HNC_DIR="$HNC_TEST_DIR" sh "$V6" sync >/dev/null 2>&1
+assert_mock_called "filter add dev wlan2 parent 1: protocol ipv6 prio 205 u32 match ip6 dst 2408:1::5/128 flowid 1:5" \
+    "v6 egress filter 必须重建" && test_pass
+mock_teardown
+
+test_start "v6_sync: 状态未变且 filter 仍在 → 不重复重建"
+mock_setup
+seed_v6_env
+mock_set_stdout iptables "$IPT_MARKED"
+mock_set_stdout tc "filter parent 1: protocol ipv6 pref 205 u32 chain 0"
+printf '%s\n%s\n' "#hnc_v6 iface=wlan2 mark=5 ing=0" "2408:1::5" > "$HNC_TEST_DIR/run/v6/aa:bb:cc:dd:ee:05"
+HNC_DIR="$HNC_TEST_DIR" sh "$V6" sync >/dev/null 2>&1
+assert_mock_not_called "filter add" "稳态不应重建" && test_pass
+mock_teardown
+
+test_start "v6_sync: iptables 已无 mark 的孤儿快照 → 按快照里的 mark 删 filter"
+mock_setup
+seed_v6_env
+printf '%s\n%s\n' "#hnc_v6 iface=wlan2 mark=5 ing=1" "2408:1::5" > "$HNC_TEST_DIR/run/v6/aa:bb:cc:dd:ee:05"
+HNC_DIR="$HNC_TEST_DIR" sh "$V6" sync >/dev/null 2>&1
+assert_mock_called "filter del dev wlan2 parent 1: prio 205 protocol ipv6" "孤儿 v6 filter 必须删" && \
+    assert_mock_called "filter del dev ifb0 parent 1: prio 205 protocol ipv6" "ifb0 上的也要删" && \
+    assert_file_not_exists "$HNC_TEST_DIR/run/v6/aa:bb:cc:dd:ee:05" && test_pass
+mock_teardown
