@@ -937,6 +937,38 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 [data-style="apple"] .simdev .s{font-size:13px}
 [data-glass="liquid"] .pu-tile{background:var(--lg-fill-2,var(--input));box-shadow:var(--lg-rim)}
 [data-glass="liquid"] .banner.thin{border-radius:999px}
+/* v5.21: 随机 MAC 合并建议 / VPN 隧道 / 加密 DNS / 统计校准与健康 */
+.tun-i{width:1em;height:1em;vertical-align:-.14em;margin-right:3px;flex:none}
+.mrg{margin:0 12px 12px;padding:10px 12px;border-radius:12px;background:var(--badge-warn-bg);box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--badge-warn) 30%,transparent);display:grid;gap:6px}
+.dev-body>.mrg,.swap>.mrg{margin:0 0 4px}
+.swap>.mrg{margin:0 14px 10px}
+.mrg-t{font-size:13.5px;font-weight:700;color:var(--text);line-height:1.4;display:flex;gap:6px;align-items:flex-start}
+.mrg-t svg{width:16px;height:16px;flex:none;margin-top:2px;color:var(--badge-warn)}
+.mrg-t b{color:var(--badge-warn)}
+.mrg-r{display:flex;flex-wrap:wrap;gap:4px 5px;margin:0;padding:0;list-style:none}
+.mrg-r li{font-size:11.5px;line-height:1.35;padding:2px 7px;border-radius:6px;background:rgba(127,127,127,.13);color:var(--text-2);overflow-wrap:anywhere}
+.mrg-r li.neg{color:var(--badge-red)}
+.mrg .btns .btn{height:34px;font-size:13px}
+.mm-cmp{display:grid;grid-template-columns:1fr auto 1fr;gap:8px;align-items:center;margin:4px 0 10px}
+.mm-cmp>div{border-radius:12px;background:var(--input);padding:9px 10px;min-width:0}
+.mm-cmp .k{font-size:11px;color:var(--text-3)}
+.mm-cmp .n{font-weight:700;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.mm-cmp .m{font:500 11px var(--mono);color:var(--text-3);overflow-wrap:anywhere}
+.mm-cmp>svg{width:18px;height:18px;color:var(--text-3)}
+.mm-row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:4px 10px;align-items:center;padding:9px 0}
+.mm-row+.mm-row{border-top:1px solid var(--divider)}
+.mm-row .t{font-size:13.5px;font-weight:600;min-width:0;overflow-wrap:anywhere}
+.mm-row .s{font-size:12px;color:var(--text-3);grid-column:1/-1;overflow-wrap:anywhere}
+.mm-sub{font-size:12px;font-weight:700;color:var(--text-3);margin:8px 0 2px}
+.pu-cal{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+.pu-cal .badge{font-size:11.5px;padding:3px 8px}
+.pu-ns{font-size:12px;color:var(--text-3)}
+.enc-cnt{display:grid;grid-template-columns:repeat(auto-fit,minmax(96px,1fr));gap:6px;margin-top:8px}
+.enc-cnt>div{border-radius:10px;background:var(--input);padding:6px 8px;min-width:0}
+.enc-cnt .n{font-weight:700;font-size:14px}
+.enc-cnt .l{font-size:10.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sh-kv{margin-top:8px}
+[data-glass="liquid"] .enc-cnt>div,[data-glass="liquid"] .mm-cmp>div{background:var(--lg-fill-2,var(--input));box-shadow:var(--lg-rim)}
 </style>
 </head>
 <body>
@@ -1093,7 +1125,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     x:'<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
     warn:'<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
     trend:'<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
-    eye:'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>'
+    eye:'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
+    tunnel:'<path d="M3 21v-9a9 9 0 0 1 18 0v9"/><path d="M8 21v-8a4 4 0 0 1 8 0v8"/><line x1="1" y1="21" x2="23" y2="21"/>',
+    merge:'<circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 7.5v9"/><path d="M8.3 6.2C12 7 15 8.5 16 10"/>'
   };
   function ico(k, cls) { return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (I[k] || '') + '</svg>'; }
   function gi(color, k) { return '<span class="gi ' + color + '">' + ico(k) + '</span>'; }
@@ -1624,7 +1658,12 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       sim: d.sim === true, quota: d.quota && typeof d.quota === 'object' ? d.quota : null,
       sched: d.schedule && typeof d.schedule === 'object' && Array.isArray(d.schedule.windows) ? d.schedule : null,
       eff: d.effective && typeof d.effective === 'object' ? d.effective : null,
-      atl: Array.isArray(d.app_time_limits) ? d.app_time_limits : [], cblocks: Array.isArray(d.category_blocks) ? d.category_blocks : []
+      atl: Array.isArray(d.app_time_limits) ? d.app_time_limits : [], cblocks: Array.isArray(d.category_blocks) ? d.category_blocks : [],
+      // v5.21: 随机 MAC / 疑似同一设备建议 / 已被合并 / VPN·代理检测(旧后端没有这些字段 → 随机 MAC 按首字节本地管理位推断)
+      rmac: typeof d.randomized_mac === 'boolean' ? d.randomized_mac : d.sim !== true && isRandomMac(mac),
+      merge: d.merge_suggestion && typeof d.merge_suggestion === 'object' && isMac(d.merge_suggestion.old_mac) ? d.merge_suggestion : null,
+      mergedInto: isMac(d.merged_into) ? String(d.merged_into).toLowerCase() : '',
+      vpn: d.vpn && (d.vpn.level === 'likely' || d.vpn.level === 'certain') ? d.vpn : null
     };
     o.idText = identText(o.ident); o.idShort = identText(o.ident, 2);
     if (o.online) { o.rx = num(d.rx_bps); o.tx = num(d.tx_bps); }
@@ -1753,8 +1792,191 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (d.wl) b += '<span class="badge b-ok">白名单</span>';
     b += policyBadges(d);
     if (d.applyError) b += '<span class="badge b-red" title="' + esc(d.applyError) + '">应用出错</span>';
-    if (isRandomMac(d.mac)) b += '<span class="badge b-gray" title="Android/iOS 隐私 Wi-Fi 的随机 MAC, 无法识别厂商">随机 MAC</span>';
+    if (d.vpn) b += vpnBadge(d.vpn);
+    if (d.rmac) b += '<span class="badge b-gray" title="Android/iOS 隐私 Wi-Fi 的随机 MAC，无法识别厂商；换 MAC 后 HNC 会提示合并">随机 MAC</span>';
+    if (d.mergedInto) b += '<span class="badge b-gray" title="这个旧 MAC 已合并到 ' + esc(d.mergedInto) + '">已合并</span>';
     return b;
+  }
+  /* ═══ v5.21: VPN / 代理检测 · 随机 MAC 合并建议 ═══ */
+  function pctTxt(v) { v = num(v); return Math.round((v <= 1 ? v * 100 : v)) + '%'; }
+  function vpnBadge(v) {
+    var sure = v.level === 'certain', tip = (v.reason || (sure ? '协议特征' : '疑似隧道')) + ' · 近 ' + Math.round(num(v.window_sec, 300) / 60) + ' 分钟流量占 ' + pctTxt(v.share) + (v.dst ? ' · 对端 ' + v.dst : '');
+    return '<span class="badge ' + (sure ? 'b-pur' : 'b-warn') + '" title="' + esc(tip) + '">' + ico('tunnel', 'tun-i') + (sure ? '在用 VPN/代理' : '可能在用 VPN/代理') + '</span>';
+  }
+  function vpnNote(d) {
+    var v = d.vpn; if (!v) return '';
+    return '<div class="note' + (v.level === 'certain' ? '' : ' warn') + '" style="padding:0 2px">' + ico('tunnel', 'tun-i') + (v.level === 'certain' ? '在用 VPN/代理' : '可能在用 VPN/代理') + '：近 ' + Math.round(num(v.window_sec, 300) / 60) + ' 分钟 ' + pctTxt(v.share) + ' 的流量（' + bytes(v.bytes) + '）走' + esc(v.reason || '隧道') + (v.dst ? '，对端 <span class="mono">' + esc(v.dst) + '</span>' : '') + '。隧道里是什么应用看不到，按应用限速 / 封锁对它无效</div>';
+  }
+  /* 应用名: 伪应用 _tunnel 显示成「VPN/代理隧道」+ 隧道图标; 返回 HTML */
+  var TUNNEL_ID = '_tunnel';
+  function appNmH(id, name) { return id === TUNNEL_ID ? ico('tunnel', 'tun-i') + 'VPN/代理隧道' : esc(name || id || '未知'); }
+  function mergeScoreTxt(m) { return '匹配 ' + num(m.score) + ' 分'; }
+  function mergeRowHtml(d) {
+    var m = d.merge; if (!m) return '';
+    var nm = m.old_name || m.old_mac, rs = Array.isArray(m.reasons) ? m.reasons : [];
+    return '<div class="mrg" data-merge="' + esc(m.old_mac) + '"><div class="mrg-t">' + ico('merge') + '<span>可能是「' + esc(nm) + '」换了 MAC（<b>' + mergeScoreTxt(m) + '</b>）' + (num(m.old_last_seen) ? '<span class="note" style="font-weight:500;display:block">旧设备 ' + ago(m.old_last_seen) + '离线 · <span class="mono">' + esc(m.old_mac) + '</span></span>' : '') + '</span></div>' +
+      (rs.length ? '<ul class="mrg-r">' + rs.slice(0, 6).map(function (r) { return '<li' + (/不同/.test(r) ? ' class="neg"' : '') + '>' + esc(r) + '</li>'; }).join('') + '</ul>' : '') +
+      '<div class="note">合并后「' + esc(nm) + '」的名称、限速、配额、封锁和历史流量都转到这台设备</div>' +
+      '<div class="btns"><button class="btn sec press" data-act="merge-no">不是</button><button class="btn pri press" data-act="merge-yes">合并</button></div></div>';
+  }
+  /* GET /api/mac_merge: 全部待确认建议 + 已合并的别名表(设置页 / 告警入口用; 设备卡直接用 /api/devices 的 merge_suggestion) */
+  S.mm = null;
+  function loadMacMerge() { return api.getSafe('/api/mac_merge', null, null).then(function (r) { S.mm = r && Array.isArray(r.suggestions) ? r : null; return S.mm; }); }
+  function mmFind(newMac, oldMac) {
+    var s = null, d = devBy(newMac);
+    (S.mm ? S.mm.suggestions : []).forEach(function (x) { if (!s && x.new_mac === newMac && (!oldMac || x.old_mac === oldMac)) s = x; });
+    if (!s && d && d.merge && (!oldMac || d.merge.old_mac === oldMac)) s = Object.assign({ new_mac: newMac, new_name: d.name, randomized: d.rmac }, d.merge);
+    return s;
+  }
+  function mergeSheet(newMac, oldMac, hint, fetched) {
+    newMac = String(newMac || '').toLowerCase();
+    var s = mmFind(newMac, oldMac);
+    if (!s && !fetched) { loadMacMerge().then(function () { if (!hint || $('#sheet').dataset.kind === 'merge') mergeSheet(newMac, oldMac, hint, true); }); if (!hint) return; }
+    if (!s && hint && isMac(hint.old_mac)) s = Object.assign({ new_mac: newMac, stale: true }, hint);
+    if (!s) { sheet('<h3>疑似同一设备换了 MAC</h3><div class="empty">这条建议已经处理过了（已合并或已忽略）</div><button class="btn sec wide press" data-close>关闭</button>', { kind: 'merge' }); return; }
+    var d = devBy(newMac), od = devBy(s.old_mac), nn = (d && d.name) || s.new_name || newMac, on = s.old_name || (od && od.name) || s.old_mac, sc = clamp(num(s.score), 0, 100), rs = Array.isArray(s.reasons) ? s.reasons : [];
+    var oldSeen = num(s.old_last_seen) || (od && !od.online ? od.lastSeen : 0);
+    sheet('<h3>疑似同一设备换了 MAC</h3><div class="sub">手机的「隐私 Wi-Fi 地址」会定期更换 MAC，HNC 会把它当成新设备。下面是判断两者是同一台的线索</div>' +
+      '<div class="mm-cmp"><div><div class="k">旧设备</div><div class="n">' + esc(on) + '</div><div class="m">' + esc(s.old_mac) + '</div><div class="k">' + (oldSeen ? ago(oldSeen) + '离线' : '&nbsp;') + '</div></div>' + ico('right') +
+      '<div><div class="k">新 MAC' + (s.randomized !== false && (!d || d.rmac) ? ' · 随机' : '') + '</div><div class="n">' + esc(nn) + '</div><div class="m">' + esc(newMac) + '</div><div class="k">' + (d && d.online ? '在线' : num(s.new_first_seen) ? ago(s.new_first_seen) + '出现' : '&nbsp;') + '</div></div></div>' +
+      '<div class="qrow"><div class="h"><span class="k">匹配度</span><span class="v">' + sc + ' / 100</span></div><div class="pbar' + (sc >= 60 ? '' : ' warn') + '"><i style="width:' + sc + '%"></i></div></div>' +
+      (rs.length ? '<ul class="mrg-r" style="margin:10px 0">' + rs.map(function (r) { return '<li' + (/不同/.test(r) ? ' class="neg"' : '') + '>' + esc(r) + '</li>'; }).join('') + '</ul>' : '') +
+      '<div class="note" style="margin:6px 0 12px">合并 = 把旧 MAC 的名称、限速 / 延迟 / 黑白名单、配额与分时段、应用限速与时长、封锁项，以及历史流量都转到新 MAC 上；旧 MAC 的规则随后清掉。点「不是」以后不再对这一对提示。' + (s.stale ? '<br>（来自告警，建议可能已经过期）' : '') + '</div>' +
+      '<div class="btns"><button class="btn sec press" id="mm-no">不是同一台</button><button class="btn pri press" id="mm-yes">合并</button></div>', { kind: 'merge' });
+    $('#mm-yes').onclick = function () { doMerge(newMac, s.old_mac, on, false); };
+    $('#mm-no').onclick = function () { dismissMerge(newMac, s.old_mac, on); };
+  }
+  function isConflict(e) { return !!e && (e.status === 409 || (e.body && e.body.error === 'conflict')); }
+  function mergeAfter() {
+    return Promise.all([loadDevices().catch(function () {}), loadAppLimits().catch(function () {}), loadMacMerge(), S.encdns ? loadEncdns() : null]).then(function () {
+      if (S.page === 'devices') renderDevList(false); else if (S.page === 'settings') renderSettings(false);
+    });
+  }
+  function doMerge(to, from, oldName, force) {
+    if (S.busy[to]) { toast('这台设备还有操作在进行', 'warn'); return Promise.resolve(false); }
+    var p = { from_mac: from, to_mac: to }; if (force) p.force = 'true';
+    setBusy(to, true); var b = $('#mm-yes'); if (b) b.disabled = true;
+    return api.action('device_merge', p, { timeout: 30000, maxTime: 28 }).then(function (r) {
+      if ($('#sheet').dataset.kind === 'merge') closeSheet();
+      toast('已合并 · 「' + oldName + '」的名称和规则已转到新 MAC' + (/清理未完成/.test(r.detail || '') ? '（旧 MAC 有残留规则，可手动清）' : ''), /清理未完成/.test(r.detail || '') ? 'warn' : 'ok');
+      return true;
+    }, function (e) {
+      if (isConflict(e)) { mergeConflict(to, from, oldName, e); return false; }
+      toast(errText(e), 'err'); if (b) b.disabled = false; return false;
+    }).then(function (ok) { setBusy(to, false); return mergeAfter().then(function () { return ok; }); });
+  }
+  /* 409: 新 MAC 已有不同的同类设置 —— 讲清楚会覆盖什么, 确认后 force=true(以旧设备设置为准) */
+  function mergeConflict(to, from, oldName, e) {
+    var det = String((e.body && e.body.detail) || e.detail || ''), m = det.match(/设置[:：]\s*([^;；]+)/), what = m ? m[1].trim() : '';
+    var d = devBy(to), nn = d ? d.name : to;
+    return confirmSheet('两台设备的设置不一样', '新 MAC「' + esc(nn) + '」上已经有和「' + esc(oldName) + '」不同的设置' + (what ? '：<b>' + esc(what) + '</b>' : '') + '。<br><br>' +
+      '继续合并会<b>以旧设备的设置为准</b>覆盖这些项（那是你之前花时间配好的）；旧设备没设置的项保留新 MAC 自己的，封锁项和类别封锁取两者并集。', '以旧设备设置为准合并', { safe: true }).then(function (ok) {
+      if (ok) return doMerge(to, from, oldName, true);
+      toast('已取消合并', 'warn'); return false;
+    });
+  }
+  function dismissMerge(to, from, oldName) {
+    return api.action('device_merge_dismiss', { from_mac: from, to_mac: to }).then(function () {
+      if ($('#sheet').dataset.kind === 'merge') closeSheet();
+      toast('好的，不再把它当成「' + oldName + '」');
+    }, function (e) { toast(errText(e), 'err'); }).then(mergeAfter);
+  }
+  function mergeSettingsHtml() {
+    var m = S.mm;
+    if (!m) return sItem(['gray', 'merge'], '设备合并建议', '当前后端不支持（需要新版 hnc_httpd）', val('—'));
+    var sg = m.suggestions || [], al = m.aliases && typeof m.aliases === 'object' ? m.aliases : {}, ak = Object.keys(al).sort();
+    var body = (sg.length ? sg.map(function (s) {
+      var d = devBy(s.new_mac), nn = (d && d.name) || s.new_name || s.new_mac;
+      return '<div class="mm-row"><span class="t">「' + esc(nn) + '」可能是「' + esc(s.old_name || s.old_mac) + '」</span><button class="linkish" data-mm-open="' + esc(s.new_mac + '|' + s.old_mac) + '">查看</button><span class="s">' + mergeScoreTxt(s) + (s.new_online ? ' · 新 MAC 在线' : '') + ((s.reasons || []).length ? ' · ' + esc(s.reasons.slice(0, 2).join(' · ')) : '') + '</span></div>';
+    }).join('') : '<div class="note">暂时没有疑似换了 MAC 的设备</div>') +
+      '<div class="mm-sub">已合并的旧 MAC（' + ak.length + '）</div>' + (ak.length ? ak.map(function (o) {
+        var d = devBy(al[o]);
+        return '<div class="mm-row"><span class="t mono" style="font-size:12px">' + esc(o) + ' → ' + esc(al[o]) + '</span><span></span><span class="s">现在是「' + esc(d ? d.name : al[o]) + '」· 旧 MAC 的历史流量算在新 MAC 上</span></div>';
+      }).join('') : '<div class="note">还没有合并过</div>') +
+      '<div class="note" style="margin-top:8px">手机的「隐私 Wi-Fi 地址」（随机 MAC）会不定期更换。HNC 按主机名、DHCP 指纹、TLS 指纹、常用应用和上下线时间打分，' + num(m.min_score, 40) + ' 分以上给出建议，' + num(m.alert_score, 60) + ' 分以上发提醒。</div>';
+    return sFold('mmerge', ['orange', 'merge'], '设备合并建议', sg.length ? sg.length + ' 条待确认' + (ak.length ? ' · 已合并 ' + ak.length + ' 个旧 MAC' : '') : '随机 MAC 换地址后，把旧设备的名称和规则接过来' + (ak.length ? ' · 已合并 ' + ak.length + ' 个' : ''),
+      body, sg.length ? '<span class="badge b-warn" style="font-size:12px;padding:3px 8px">' + sg.length + '</span>' : val('0'));
+  }
+  /* ═══ v5.21: 加密 DNS 策略(GET /api/encdns + encdns_set) ═══ */
+  S.encdns = null;
+  var ENC_T = { off: '关闭', dot: '拦截 DoT', strict: '严格', inherit: '跟随全局' };
+  function loadEncdns() { return api.getSafe('/api/encdns', null, null).then(function (r) { S.encdns = r && typeof r.policy === 'string' ? r : null; return S.encdns; }); }
+  function encdnsDevPol(mac) { var e = S.encdns; return e && e.devices && e.devices[mac] ? e.devices[mac] : 'inherit'; }
+  function encdnsDevBlock(d) {
+    var e = S.encdns; if (!e || d.sim) return '';
+    var cur = encdnsDevPol(d.mac), g = ENC_T[e.policy] || e.policy || '关闭';
+    return '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--red)"></i>加密 DNS 拦截</div>' + seg('encdns-dev', [['inherit', '跟随全局'], ['off', '关闭'], ['dot', 'DoT'], ['strict', '严格']], cur, 'small') +
+      '<div class="note">' + (cur === 'inherit' ? '跟随全局（' + esc(g) + '）' : cur === 'off' ? '这台设备不拦截（豁免全局设置）' : '单独设为「' + esc(ENC_T[cur] || cur) + '」') + '。如果它把「私人 DNS」设成了指定主机名，拦截会让它断网 —— 那就选「关闭」</div></div>';
+  }
+  function encdnsSettingsHtml() {
+    var e = S.encdns;
+    if (!e) return sItem(['gray', 'shield'], '加密 DNS 拦截', '当前后端不支持（需要新版 hnc_httpd）', val('—'));
+    var pol = ENC_T[e.policy] ? e.policy : 'off', c = e.counters, dp = e.dpid, nDev = Array.isArray(e.device_list) ? e.device_list.length : Object.keys(e.devices || {}).length;
+    var slT = { available: '可用', unavailable: '内核不支持（严格档只按 IP 拦公共 DoH）', unknown: '未检测（首次开启严格档时检测）' }[e.string_layer] || '—';
+    var pk = function (k) { return c && c[k] ? num(c[k].pkts) : 0; };
+    var cnt = c ? '<div class="enc-cnt">' + [['dot', 'DoT / DoQ'], ['doh_ip', 'DoH · IP'], ['doh_sni', 'DoH · SNI'], ['doh_dns', 'DoH · 域名']].map(function (x) { return '<div><div class="n num">' + fmtN(pk(x[0])) + '</div><div class="l">' + x[1] + '</div></div>'; }).join('') + '</div>' +
+        '<div class="note" style="margin-top:4px">已拦下的包数（含客户端重试）· 合计 ' + fmtN(c.total_pkts) + ' 包 · ' + bytes(c.total_bytes) + (num(c.v6_pkts) ? ' · 其中 IPv6 ' + fmtN(c.v6_pkts) : '') + ' · 规则重新同步时清零</div>'
+      : '<div class="note" style="margin-top:6px">' + (e.counters_error ? '拦截计数读取失败：' + esc(e.counters_error) : pol === 'off' ? '开启后这里显示拦截计数' : '暂无拦截计数') + '</div>';
+    var dpT = '';
+    if (dp && typeof dp === 'object') {
+      var rd = Array.isArray(dp.recent_doh) && dp.recent_doh.length ? dp.recent_doh[0] : null, rdd = rd && rd.client_mac ? devBy(rd.client_mac) : null;
+      dpT = 'DPI 观察：明文 DNS ' + fmtN(dp.dns_seen) + ' 次 · DoT 尝试 ' + fmtN(dp.dot_attempts) + (num(dp.dot_flows) ? '（' + num(dp.dot_flows) + ' 条仍在连）' : '') + ' · 疑似 DoH ' + fmtN(dp.doh_suspect) +
+        (rd ? ' · 最近 <span class="mono">' + esc(rd.name || '?') + '</span>' + (rdd ? '（' + esc(rdd.name) + '）' : '') + (num(rd.ts) ? ' ' + ago(rd.ts) : '') : '');
+    }
+    return '<div class="row" style="align-items:flex-start" id="encdns-row">' + gi('red', 'shield') + '<span class="tx"><div class="t">加密 DNS 拦截</div><div class="s">拦下 DoT / 公共 DoH，让设备回落明文 DNS：热点看得到每次解析，应用识别和域名封锁更准</div>' +
+      '<div style="margin-top:8px">' + seg('encdns', [['off', '关闭'], ['dot', '拦截 DoT'], ['strict', '严格']], pol, 'small') + '</div>' +
+      (e.tradeoff ? '<div class="note warn" style="margin-top:6px">' + esc(e.tradeoff) + '</div>' : '') +
+      '<div class="note" style="margin-top:6px">名字层（SNI / 域名匹配）：' + slT + (nDev ? ' · ' + nDev + ' 台设备单独设置（在设备卡里改）' : ' · 可在设备卡里按设备单独设置') + '</div>' + cnt +
+      (dpT ? '<div class="note" style="margin-top:4px">' + dpT + '</div>' : '') + '</span></div>';
+  }
+  function encdnsDetailTxt(r) { var d = String((r && r.detail) || ''); return /no change/.test(d) ? '（未变化）' : /global=pending/.test(d) ? ' · 热点开启后生效' : /string_layer=0/.test(d) ? ' · 内核不支持名字层，只按 IP 拦' : ''; }
+  /* ═══ v5.21: 统计健康(GET /api/stats_health) ═══ */
+  S.sh = null;
+  function loadStatsHealth() { return api.getSafe('/api/stats_health', null, null).then(function (r) { S.sh = r && Array.isArray(r.issues) ? r : null; return S.sh; }); }
+  var SH_LV = { error: 'fail', warn: 'warn', info: 'info' }, OFFK_T = { hw: '硬件分流', bpf: '软件分流（BPF）', unknown: '分流', none: '' };
+  function calFmtPct(p) { p = num(p); return (p > 0 ? '+' : p < 0 ? '−' : '±') + Math.abs(p).toFixed(1) + '%'; }
+  function statsHealthHtml() {
+    var r = S.sh;
+    if (!r) return sItem(['gray', 'heart'], '统计健康', '当前后端不支持（需要新版 hnc_httpd）', val('—'));
+    var is = r.issues || [], nE = is.filter(function (x) { return x.level === 'error'; }).length, nW = is.filter(function (x) { return x.level === 'warn'; }).length;
+    var lv = nE ? 'fail' : nW ? 'warn' : 'ok', gap = r.offload_gap_pct == null ? null : num(r.offload_gap_pct), age = r.last_stats_sample_age == null ? null : num(r.last_stats_sample_age, -1);
+    var calS = { ok: '一致', drift: '有偏差', unavailable: '不可用' }[r.calibration_status] || r.calibration_status || '—';
+    var rows = [
+      ['精确模式', r.precise_mode ? '开' : '关' + (r.ct_poll_fallback ? ' · 10 秒轮询' : '')],
+      ['连接销毁事件', r.ct_events_active ? Math.round(num(r.ct_destroy_events_per_min)) + ' 次/分' : '未订阅'],
+      ['连接字节计数', r.ct_acct === 1 ? '已开启' : r.ct_acct === 0 ? '未开启' : '未知'],
+      ['iptables 计数', r.iptables_stats_ok ? '正常' : r.iptables_stalled ? '停滞' : r.iptables_checked ? '异常' : '未检查'],
+      ['设备流量采样', age == null || age < 0 ? '无记录' : age < 60 ? age + ' 秒前' : Math.round(age / 60) + ' 分钟前'],
+      ['系统时钟', r.clock_sane === false ? '不可信' : '可信'],
+      ['分流漏计', gap == null ? '—' : '≈ ' + Math.round(gap) + '%' + (OFFK_T[r.offload_kind] ? ' · ' + OFFK_T[r.offload_kind] : '')],
+      ['分流兜底', r.offload_guard_active ? '生效中' : (r.offload_guard_mode || '—')],
+      ['系统统计对账', r.netstats_mode === 'off' ? '已关闭' : calS + (r.hnc_vs_netstats_pct != null ? ' · ' + calFmtPct(r.hnc_vs_netstats_pct) : '')]
+    ];
+    var body = (is.length ? '<div class="sc-items">' + is.map(function (x) { var st = SH_LV[x.level] || 'info'; return '<div class="sc-it ' + st + '" data-shid="' + esc(x.id || '') + '"><span class="sc-i">' + SC_ST[st][0] + '</span><div style="min-width:0"><div class="s" style="margin:0;color:var(--text-2);font-size:13px">' + esc(x.text_cn || x.id) + '</div></div></div>'; }).join('') + '</div>' : '<div class="note">没有发现问题 ✓</div>') +
+      '<dl class="kv sh-kv">' + rows.map(function (x) { return '<dt>' + x[0] + '</dt><dd>' + esc(x[1]) + '</dd>'; }).join('') + '</dl>' +
+      '<div class="note" style="margin-top:6px">精确模式 = conntrack 连接销毁事件 + 字节计数都在线，按应用流量不漏短连接。' + (r.checked_at ? ' · ' + ago(r.checked_at) + '检测' : '') + '</div>';
+    var sub = (r.precise_mode ? '精确模式' : '轮询模式') + (gap != null && gap >= 10 ? ' · 分流漏计 ≈ ' + Math.round(gap) + '%' : '') + ' · ' + (lv === 'ok' ? '各统计口径正常' : [nE ? nE + ' 个错误' : '', nW ? nW + ' 个警告' : ''].filter(Boolean).join(' · '));
+    return sFold('sh', [lv === 'fail' ? 'red' : lv === 'warn' ? 'orange' : 'green', 'heart'], '统计健康', sub, body, val(lv === 'ok' ? '正常' : lv === 'fail' ? nE + ' 项错误' : nW + ' 项警告', lv === 'ok' ? 'ok' : lv === 'fail' ? 'bad' : 'warn'));
+  }
+  /* ═══ v5.21: 本月流量 —— 与系统 NetworkStats 对账 ═══ */
+  var CAL_R = { disabled: '未对账（仅 HNC）', pending: '对账中', cycle_changed: '计费周期刚切换' };
+  function calHtml(r) {
+    var c = r.calibration; if (!c || typeof c !== 'object') return '';
+    var chip;
+    if (c.status === 'ok') chip = '<span class="badge b-ok">与系统统计一致' + (c.hnc_vs_netstats_pct != null && !c.low_volume ? ' · ' + calFmtPct(c.hnc_vs_netstats_pct) : '') + '</span>';
+    else if (c.status === 'drift') chip = '<span class="badge b-warn">与系统偏差 ' + calFmtPct(c.hnc_vs_netstats_pct) + '</span>';
+    else chip = '<span class="badge b-gray"' + (c.reason ? ' title="' + esc(c.reason) + '"' : '') + '>' + (CAL_R[c.reason] || '系统统计不可用') + '</span>';
+    if (c.stale && c.status !== 'unavailable') chip += '<span class="badge b-gray">结果已过期</span>';
+    var lines = Array.isArray(c.text_cn) ? c.text_cn : [], off = c.offload_gap_pct != null && num(c.offload_gap_pct) >= 10;
+    return '<div class="pu-cal">' + chip + '<span class="pu-ns">数据来源：' + (r.primary_source === 'netstats' ? '系统统计（与系统设置一致）' : 'HNC 自采') + (num(c.checked_at) ? ' · ' + ago(c.checked_at) + '对账' : '') + '</span></div>' +
+      (lines.length ? '<div class="note warn">' + lines.map(esc).join('<br>') + (off ? '<br>系统统计包含被硬件转发的热点流量，HNC 看不到这部分，热点和设备流量会偏小；可在 设置 → 硬件加速兜底 里让流量走常规路径' : '') + '</div>' : '') +
+      (c.low_volume ? '<div class="note">本期蜂窝流量还太少，偏差仅供参考</div>' : '');
+  }
+  function calSimLine(r, sm) {
+    if (sm.netstats_cycle_used == null) return '';
+    var c = r.calibration || {}, ns = (c.netstats_cell_by_sim || []).filter(function (x) { return num(x.slot) === num(sm.slot); })[0];
+    if (r.primary_source === 'netstats' && sm.hnc_cycle_used != null) return '<div class="pu-ns">系统统计（当前采用）· HNC 自采 ' + bytes(sm.hnc_cycle_used) + '</div>';
+    return '<div class="pu-ns">系统统计 ' + bytes(sm.netstats_cycle_used) + (ns && ns.hnc_vs_netstats_pct != null ? ' · HNC ' + calFmtPct(ns.hnc_vs_netstats_pct) : '') + '</div>';
   }
   /* ═══ v5.19: 配额 / 分时段 / 实际生效 / 应用时长 / 类别封锁 ═══ */
   var GB = 1073741824;
@@ -1963,6 +2185,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var dis = htbOk() ? '' : ' disabled', upDis = upOk() ? '' : ' disabled', dlDis = netemOk() ? '' : ' disabled';
     var h = '<div class="dev-body">';
     if (d.sim) h += '<div class="note warn" style="padding:0 2px">这是模拟设备 · 各项操作只改模拟状态，不会碰 tc / iptables</div>';
+    h += vpnNote(d);
+    if (d.mergedInto) { var mt = devBy(d.mergedInto); h += '<div class="note" style="padding:0 2px">这个旧 MAC 已合并到「' + esc(mt ? mt.name : d.mergedInto) + '」，它的设置和历史流量都算在新 MAC 上</div>'; }
     // 限速
     h += '<div class="ctrl"><div class="ctrl-t"><i></i>限速控制</div>' + effLine(d) +
       (htbOk() ? '' : '<div class="note err">当前内核 / tc 不支持 HTB，限速不可用</div>') +
@@ -1996,6 +2220,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (d.online) h += '<div class="ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;gap:6px;align-items:center"><i style="background:var(--orange)"></i>实时连接</span><button class="linkish" data-act="conns">查看全部</button></div><div data-conn-mini>' + connMiniHtml(d.mac) + '</div></div>';
     // v5.13: 设备识别
     h += identBlock(d);
+    // v5.21: 加密 DNS 按设备覆盖
+    h += encdnsDevBlock(d);
     // 应用限速
     h += '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--green)"></i>按应用限速</div><div data-applim>' + appLimitRows(d) + '</div></div>';
     // v5.19: 应用使用时长 + 限时 / 按类别封锁
@@ -2148,7 +2374,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var map = {}, rows = [];
     items.forEach(function (x) { map[x.app_id] = x; rows.push({ id: x.app_id, name: x.app_id, lim: num(x.down_mbps), it: x }); });
     d.live.concat(d.apps).slice(0, 8).forEach(function (a) {
-      var id = a.id || a.app_id || a.name; if (!id) return;
+      var id = a.id || a.app_id || a.name; if (!id || id.charAt(0) === '_') return;   // v5.21: _tunnel 等伪应用不能按应用限速
       if (map[id]) { rows.forEach(function (r) { if (r.id === id) r.name = a.name || id; }); return; }
       map[id] = 1; rows.push({ id: id, name: a.name || id, lim: 0 });
     });
@@ -2179,7 +2405,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         '</span>' +
         (d.online ? '<span class="dev-rate num"><span class="d">↓ <b data-rx>' + r.v + '</b> ' + r.u + '</span><span class="u">↑ <b data-tx>' + t.v + '</b> ' + t.u + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>'
           : '<span class="dev-rate"><span class="off">' + (d.blocked ? '已阻止' : '离线') + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>') +
-      '</button>' + (wide() ? '' : '<div class="fold"><div><div class="fold-in">' + (open ? devBody(d) : '') + '</div></div></div>') +
+      '</button>' + mergeRowHtml(d) + (wide() ? '' : '<div class="fold"><div><div class="fold-in">' + (open ? devBody(d) : '') + '</div></div></div>') +
     '</article>';
   }
   /* v5.14: 「在用」= 此刻按实时速率排出来的应用(后端 conntrack 平滑); 没有实时数据时退回 DPI 的"最近识别" */
@@ -2200,15 +2426,15 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   function appsLine(d) {
     var cb = callBadge(d);
     if (cb && !d.live.length) return '<span class="lb">正在</span>' + cb;
-    if (d.online && d.live.length) return '<span class="lb">在用</span>' + cb + d.live.slice(0, 3).map(function (a) { return '<span class="a' + (a.system ? ' sys' : '') + '">' + esc(a.name || a.id) + ' <small class="num">' + bpsTxt(a.bps) + '</small></span>'; }).join('');
-    if (d.apps.length) return '<span class="lb">最近</span>' + d.apps.slice(0, 4).map(function (a) { return '<span class="a dim">' + esc(a.name || a.id) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('');
+    if (d.online && d.live.length) return '<span class="lb">在用</span>' + cb + d.live.slice(0, 3).map(function (a) { return '<span class="a' + (a.system ? ' sys' : '') + '">' + appNmH(a.id, a.name) + ' <small class="num">' + bpsTxt(a.bps) + '</small></span>'; }).join('');
+    if (d.apps.length) return '<span class="lb">最近</span>' + d.apps.slice(0, 4).map(function (a) { return '<span class="a dim">' + appNmH(a.id, a.name) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('');
     return '';
   }
   function devSide() {
     var d = devBy(S.sel);
     if (!d) return '<div class="glass empty">点左侧的设备查看和调整规则</div>';
     return '<div class="glass swap" data-side="' + d.mac + '"><div class="side-head"><span class="av">' + d.icon + '<span class="dot ' + (d.blocked ? 'blocked' : d.online ? 'online' : 'offline') + '"></span></span><div style="min-width:0"><div class="t">' + esc(d.name) + '</div><div class="s mono">' + esc(d.ip || '—') + ' · ' + d.mac + '</div></div></div>' +
-      '<div style="padding:10px 14px 12px" class="dev-name">' + (badges(d) || '<span class="badge b-ok">无规则</span>') + '</div>' + devBody(d) + '</div>';
+      '<div style="padding:10px 14px 12px" class="dev-name">' + (badges(d) || '<span class="badge b-ok">无规则</span>') + '</div>' + mergeRowHtml(d) + devBody(d) + '</div>';
   }
   function devListHtml() {
     if (!S.devLoaded) return '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
@@ -2343,7 +2569,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (!apple() || !fxOn('num') || !sameUnit || !/^\d+(\.\d+)?$/.test(str)) { el.textContent = str; return; }
     tween(el, parseFloat(str), (str.split('.')[1] || '').length);
   }
-  function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError, d.sim ? 1 : 0,
+  function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge ? d.merge.old_mac + '/' + d.merge.score : '', d.vpn ? d.vpn.level : '', d.rmac ? 1 : 0, d.mergedInto, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError, d.sim ? 1 : 0,
     d.eff ? [d.eff.reason, d.eff.blocked ? 1 : 0, d.eff.down_mbps, d.eff.up_mbps, d.eff.apply_error || ''].join(',') : '', d.quota ? [d.quota.state, d.quota.applied ? 1 : 0, d.quota.daily_gb, d.quota.monthly_gb, d.quota.action].join(',') : '',
     d.sched ? d.sched.windows.length + ',' + d.sched.active_window_index : '', d.atl.map(function (x) { return x.app_id + (x.exhausted ? '!' : '') + x.minutes; }).join(','), d.cblocks.map(function (x) { return x.category; }).join(',')].join(':'); }).join('|'); }
   function refreshCard(mac) {
@@ -2551,7 +2777,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 
   /* ═════════════════════ 告警 ═════════════════════ */
   var ALERT_KIND = { unknown_device: ['新设备接入', 'var(--orange)', '📶'], anomaly_traffic: ['流量异常', 'var(--red)', '📈'], monthly_quota: ['月度配额', 'var(--purple)', '📊'],
-    device_quota: ['设备超出流量配额', 'var(--red)', '🚦'], phone_quota: ['本机流量套餐', 'var(--orange)', '📱'], app_time_warn: ['应用时长快用完', 'var(--orange)', '⏳'], app_time_exhausted: ['应用时长已用完', 'var(--red)', '⌛'] };
+    device_quota: ['设备超出流量配额', 'var(--red)', '🚦'], phone_quota: ['本机流量套餐', 'var(--orange)', '📱'], app_time_warn: ['应用时长快用完', 'var(--orange)', '⏳'], app_time_exhausted: ['应用时长已用完', 'var(--red)', '⌛'],
+    mac_merge_suggest: ['疑似同一设备换了 MAC', 'var(--orange)', '🔀'] };
   function alertTitle(a) { return (ALERT_KIND[a.kind] || [a.kind || '告警'])[0]; }
   function renderAlertsSheet(keep) {
     var list = (S.alerts.list || []).slice().sort(function (a, b) { return num(b.ts) - num(a.ts); });
@@ -2560,6 +2787,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         var k = ALERT_KIND[a.kind] || ['告警', 'var(--blue)'], d = a.mac ? devBy(a.mac) : null, nm = d ? d.name : (a.mac || '');
         var acts = '';
         if (a.kind === 'unknown_device' && a.mac) acts += '<button class="linkish" data-al="rename">起名</button><button class="linkish" data-al="known">认识它</button><button class="linkish danger" data-al="block">拉黑</button>';
+        if (a.kind === 'mac_merge_suggest' && a.mac) acts += '<button class="linkish" data-al="merge">查看建议</button>';
         if (!a.seen) acts += '<button class="linkish" data-al="seen">已读</button>';
         return '<div class="alrow' + (a.seen && !alertFresh[a.id] ? ' seen' : '') + '" data-alid="' + esc(a.id) + '" data-almac="' + esc(a.mac || '') + '"><i style="background:' + k[1] + '"></i><div style="min-width:0">' +
           '<div style="font-weight:700;font-size:14px">' + (k[2] ? k[2] + ' ' : '') + esc(alertTitle(a)) + (nm ? ' · ' + esc(nm) : '') + '</div>' +
@@ -2587,6 +2815,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var seen = function () { return api.action('alert_mark_seen', { ids: String(id) }).catch(function () {}); };
     var known = function () { return api.action('alert_mark_known', { mac: mac }).catch(function () {}); };
     if (kind === 'seen') return seen().then(loadAlerts);
+    if (kind === 'merge') { var al = (S.alerts.list || []).filter(function (x) { return String(x.id) === String(id); })[0], ex = al && al.extra && typeof al.extra === 'object' ? al.extra : null; seen().then(loadAlerts); mergeSheet(mac, ex && ex.old_mac, ex); return; }
     if (kind === 'known') return Promise.all([known(), seen()]).then(function () { toast('已记为认识的设备'); return loadAlerts(); });
     if (kind === 'rename') { Promise.all([known(), seen()]).then(loadAlerts); renameSheet(mac, d.name === mac ? '' : d.name); return; }
     if (kind === 'block') {
@@ -2812,12 +3041,13 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (c.err) return '<div class="note ' + (/新版/.test(c.err) ? '' : 'err') + '">' + esc(c.err) + '</div>';
     var r = c.r || {}, cfg = r.config || {}, warn = num(cfg.warn_percent, 80), t = r.totals || {}, g = function (k) { return num(t[k] && t[k].total); };
     var h = '<div class="pu-cyc">' + (r.cycle_start ? '计费周期 ' + md(r.cycle_start) + ' – ' + md(num(r.cycle_end) - 1) + ' · 每月 ' + num(r.billing_day || cfg.billing_day, 1) + ' 号起算' : '') + (S.puPeriod !== 'cycle' && r.since ? ' · 当前查看 ' + md(r.since) + ' 起' : '') + '</div>';
+    h += calHtml(r);   // v5.21: 与系统统计对账
     var sims = Array.isArray(r.by_sim) ? r.by_sim : [];
     h += sims.length ? '<div>' + sims.map(function (sm) {
       var lab = num(sm.slot) ? '卡' + num(sm.slot) + (sm.carrier ? ' · ' + sm.carrier : '') : '蜂窝（未知卡）', plan = num(sm.plan_bytes), used = num(sm.cycle_used), pct = sm.used_pct == null ? null : num(sm.used_pct);
       return '<div class="pu-sim"><div class="h"><span class="n">' + esc(lab) + (sm.is_default_data ? '<span class="badge b-acc">上网卡</span>' : '') + '</span><span class="v num">' + bytes(used) + (plan ? '<span style="color:var(--text-3);font-weight:500"> / ' + trim0(gb(plan).toFixed(1)) + ' GB</span>' : '') + '</span></div>' +
         (plan && pct != null ? '<div class="pbar' + (pct >= 100 ? ' over' : pct >= warn ? ' warn' : '') + '"><i style="width:' + clamp(pct, 0, 100).toFixed(1) + '%"></i></div><div class="note' + (pct >= 100 ? ' err' : pct >= warn ? ' warn' : '') + '">本期已用 ' + trim0(pct.toFixed(1)) + '%' + (pct >= 100 ? ' · 已超出套餐 ' + bytes(used - plan) : ' · 剩余 ' + bytes(plan - used)) + '</div>'
-          : '<div class="note">本期已用 · ' + (num(sm.slot) ? '没设套餐，在下方「套餐与计费日」里填' : '没认出是哪张卡') + '</div>') +
+          : '<div class="note">本期已用 · ' + (num(sm.slot) ? '没设套餐，在下方「套餐与计费日」里填' : '没认出是哪张卡') + '</div>') + calSimLine(r, sm) +
         '<div class="note">' + (S.puPeriod === 'cycle' ? '' : '所选时段 ' + bytes(sm.total) + ' · ') + '其中热点 ' + bytes(sm.hotspot_total) + '</div></div>';
     }).join('') + '</div>' : '<div class="note">这段时间还没有蜂窝流量记录</div>';
     h += '<div class="pu-tiles">' + [['蜂窝', g('cellular'), PU_C.cell], ['Wi-Fi', g('wifi'), PU_C.wifi], ['热点', g('hotspot'), PU_C.hotspot]].map(function (x) {
@@ -2845,12 +3075,14 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     h += '<div class="note">本机 = 上游（蜂窝 + Wi-Fi）− 热点设备，是近似值；套餐百分比永远按计费周期算。' + (src.sim_detect && src.sim_detect !== 'ok' ? '没认出当前上网卡，蜂窝流量先记在「未知卡」下。' : '') + (src.error ? ' 采样出错：' + esc(src.error) : '') + '</div>';
     return h;
   }
-  function puSetSummary() { var c = S.puCfg; if (!c) return ''; var a = ['每月 ' + num(c.billing_day, 1) + ' 号']; if (num(c.plan_sim1_gb)) a.push('卡1 ' + trim0(num(c.plan_sim1_gb).toFixed(1)) + ' GB'); if (num(c.plan_sim2_gb)) a.push('卡2 ' + trim0(num(c.plan_sim2_gb).toFixed(1)) + ' GB'); return a.join(' · '); }
+  function puSetSummary() { var c = S.puCfg; if (!c) return ''; var a = ['每月 ' + num(c.billing_day, 1) + ' 号']; if (num(c.plan_sim1_gb)) a.push('卡1 ' + trim0(num(c.plan_sim1_gb).toFixed(1)) + ' GB'); if (num(c.plan_sim2_gb)) a.push('卡2 ' + trim0(num(c.plan_sim2_gb).toFixed(1)) + ' GB'); if (c.use_netstats === 'prefer') a.push('以系统为准'); else if (c.use_netstats === 'off') a.push('仅 HNC'); return a.join(' · '); }
   function puSetHtml() {
     var c = S.puCfg || {};
     return '<div class="grid2"><label class="field">计费日' + inp('pu-bd', c.billing_day || 1, '号', 'type="number" min="1" max="28" inputmode="numeric"') + '</label><label class="field">用到多少提醒' + inp('pu-warn', c.warn_percent || 80, '%', 'type="number" min="1" max="100" inputmode="numeric"') + '</label></div>' +
       '<div class="grid2"><label class="field">卡1 套餐' + inp('pu-p1', num(c.plan_sim1_gb) ? trim0(num(c.plan_sim1_gb).toFixed(2)) : '', 'GB', 'type="number" min="0" step="1" inputmode="decimal" placeholder="没有填 0"') + '</label><label class="field">卡2 套餐' + inp('pu-p2', num(c.plan_sim2_gb) ? trim0(num(c.plan_sim2_gb).toFixed(2)) : '', 'GB', 'type="number" min="0" step="1" inputmode="decimal" placeholder="没有填 0"') + '</label></div>' +
-      '<div class="note">计费日填运营商每月重置流量的那天（1~28）。套餐填 0 = 不设，超过提醒比例会在告警里通知。</div><button class="btn pri press" data-act="pu-save">保存</button>';
+      '<div class="note">计费日填运营商每月重置流量的那天（1~28）。套餐填 0 = 不设，超过提醒比例会在告警里通知。</div><button class="btn pri press" data-act="pu-save">保存</button>' +
+      (c.use_netstats != null ? '<div class="note" style="margin:6px 0 -2px;font-weight:600;color:var(--text-2)">数据来源</div>' + seg('pu-ns', [['auto', '自动'], ['prefer', '以系统为准'], ['off', '仅 HNC']], ['auto', 'prefer', 'off'].indexOf(c.use_netstats) >= 0 ? c.use_netstats : 'auto', 'small') +
+        '<div class="note">自动：显示 HNC 自采的数值，同时与系统「流量使用」对账；以系统为准：卡的本期用量、套餐百分比和提醒改用系统统计（和系统设置里一致）；仅 HNC：不读系统统计。</div>' : '');
   }
   function paintPU() {
     var b = $('#pu-body'); if (b) b.innerHTML = puBodyHtml();
@@ -2897,13 +3129,13 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   }
   /* 按应用的真实流量(横条): 未识别 / 局域网 / SDK·CDN 用灰色, 真应用彩色 */
   function appUsageBars(r, max) {
-    var apps = (r.by_app || []).map(function (a) { return { n: a.name || a.id, v: num(a.up) + num(a.down), t: num(a.active_sec), gray: a.id === '_unknown' || a.id === '_local' || a.sdk }; });
+    var apps = (r.by_app || []).map(function (a) { return { id: a.id, n: a.name || a.id, v: num(a.up) + num(a.down), t: num(a.active_sec), inf: num(a.inferred_bytes), gray: a.id === '_unknown' || a.id === '_local' || a.sdk }; });
     var tot = num(r.total_up) + num(r.total_down);
     if (!tot) return '';
     var top = apps.slice(0, max || 8), rest = sum(apps.slice(max || 8), function (a) { return a.v; }); if (rest > 0) top.push({ n: '其他', v: rest, gray: true });
     var mx = Math.max.apply(null, top.map(function (a) { return a.v; }).concat([1])), unk = apps.filter(function (a) { return a.n === '未识别'; })[0];
-    return '<div class="note" style="margin-bottom:6px">合计 ↓ ' + bytes(r.total_down) + ' · ↑ ' + bytes(r.total_up) + (unk ? ' · 未识别占 ' + Math.round(unk.v / tot * 100) + '%' : '') + '</div>' +
-      top.map(function (a, i) { return '<div class="hbar"><span class="n">' + esc(a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-4)' : HIST_COLORS[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%' + (a.t >= 60 && !a.gray ? '<small>使用 ' + fmtDur(a.t) + '</small>' : '') + '</span></div>'; }).join('');
+    return '<div class="note" style="margin-bottom:6px">合计 ↓ ' + bytes(r.total_down) + ' · ↑ ' + bytes(r.total_up) + (unk ? ' · 未识别占 ' + Math.round(unk.v / tot * 100) + '%' : '') + (num(r.inferred_bytes) > 0 ? ' · 其中 ' + bytes(r.inferred_bytes) + ' 为推测归属' : '') + '</div>' +
+      top.map(function (a, i) { return '<div class="hbar"><span class="n"' + (a.id === TUNNEL_ID ? ' title="VPN/代理隧道：隧道里的应用看不到，按协议特征归到这里"' : '') + '>' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + (a.gray ? 'var(--text-4)' : HIST_COLORS[i % 8]) + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%' + (a.t >= 60 && !a.gray && a.id !== TUNNEL_ID ? '<small>使用 ' + fmtDur(a.t) + '</small>' : '') + (a.inf > 0 ? '<small title="目的地址没有域名，按同一时刻建连的应用推测">含推测 ' + bytes(a.inf) + '</small>' : '') + '</span></div>'; }).join('');
   }
   function paintStatsApps() {
     var el = $('#st-apps'); if (!el) return;
@@ -3057,9 +3289,11 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var c = S.dpiUnk[S.dpiDays];
     if (!c) { el.innerHTML = '<div class="empty">加载中…</div>'; return; }
     if (c.err) { el.innerHTML = '<div class="note" style="padding:12px 14px">' + esc(c.err) + '</div>'; return; }
-    var r = c.r || {}, items = (r.items || []).slice(0, 20), tot = num(r.total_unknown_bytes);
-    if (!items.length) { el.innerHTML = '<div class="empty">' + (tot ? '有 ' + bytes(tot) + ' 未识别流量，但没记下去向' : '这段时间的流量都认出来了 🎉') + '</div>'; return; }
-    el.innerHTML = '<div class="note" style="padding:10px 14px 0">' + ({ 1: '今日', 3: '近 3 天', 7: '近 7 天' }[S.dpiDays] || '') + '未识别共 ' + bytes(tot) + ' · 下面是最多的 ' + items.length + ' 个去向</div>' +
+    var r = c.r || {}, items = (r.items || []).slice(0, 20), tot = num(r.total_unknown_bytes), tb = num(r.tunnel_bytes), ib = num(r.inferred_bytes);
+    // v5.21: 已从「未识别」里分出去的两块 —— VPN/代理隧道、共现推断
+    var split = tb > 0 || ib > 0 ? '<div class="note" style="padding:10px 14px 0">另有 ' + [tb > 0 ? '<b>' + bytes(tb) + '</b> 已归为 ' + ico('tunnel', 'tun-i') + 'VPN 隧道' : '', ib > 0 ? '<b>' + bytes(ib) + '</b> 为推测归属（按同一时刻建连的应用）' : ''].filter(Boolean).join('、') + '，不算在未识别里</div>' : '';
+    if (!items.length) { el.innerHTML = split + '<div class="empty">' + (tot ? '有 ' + bytes(tot) + ' 未识别流量，但没记下去向' : '这段时间的流量都认出来了 🎉') + '</div>'; return; }
+    el.innerHTML = split + '<div class="note" style="padding:10px 14px 0">' + ({ 1: '今日', 3: '近 3 天', 7: '近 7 天' }[S.dpiDays] || '') + '未识别共 ' + bytes(tot) + ' · 下面是最多的 ' + items.length + ' 个去向</div>' +
       items.map(function (u) {
         var ds = devNames(u.macs || []);
         return '<div class="client unk2"><div class="top"><span class="nm">' + esc(u.name_or_ip) + '</span><span class="pill-count">' + bytes(u.bytes) + '</span></div>' +
@@ -3081,14 +3315,14 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var c = S.dpiHist[S.dpiDays];
     if (!c) { el.innerHTML = '<div class="note">加载中…</div>'; return; }
     var r = c.d; if (!r) { el.innerHTML = '<div class="note err">' + esc(c.err || '加载失败') + '</div>'; return; }
-    var apps = (r.by_app || []).map(function (a) { return { n: a.name || a.app_id || '未知', v: num(a.rx) + num(a.tx) }; }).sort(function (a, b) { return b.v - a.v; });
+    var apps = (r.by_app || []).map(function (a) { return { id: a.app_id || a.id, n: a.name || a.app_id || '未知', v: num(a.rx) + num(a.tx) }; }).sort(function (a, b) { return b.v - a.v; });
     var tot = num(r.total_rx) + num(r.total_tx);
     if (!tot) { el.innerHTML = '<div class="note">这段时间没有 DPI 流量记录</div>'; return; }
     var top = apps.slice(0, 7), rest = sum(apps.slice(7), function (a) { return a.v; }); if (rest > 0) top.push({ n: '其他', v: rest });
     var mx = top.length ? top[0].v : 1;
     var hrs = r.by_hour || [], hm = Math.max.apply(null, hrs.map(function (h) { return num(h.rx) + num(h.tx); }).concat([1]));
     el.innerHTML = '<div class="note" style="margin-bottom:6px">合计 ↓ ' + bytes(r.total_rx) + ' · ↑ ' + bytes(r.total_tx) + ' · ' + num(r.sample_count) + ' 个采样</div>' +
-      top.map(function (a, i) { return '<div class="hbar"><span class="n">' + esc(a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + HIST_COLORS[i % 8] + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%</span></div>'; }).join('') +
+      top.map(function (a, i) { return '<div class="hbar"><span class="n">' + appNmH(a.id, a.n) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, a.v / mx * 100).toFixed(1) + '%;background:' + HIST_COLORS[i % 8] + ';animation-delay:' + i * 40 + 'ms"></i></span><span class="v">' + bytes(a.v) + ' · ' + (a.v / tot * 100).toFixed(0) + '%</span></div>'; }).join('') +
       (hrs.length ? '<div class="note" style="margin-top:10px">按小时分布</div><div class="mini-bars">' + hrs.map(function (h, i) { var v = num(h.rx) + num(h.tx); return '<i title="' + i + ':00 · ' + bytes(v) + '" style="height:' + Math.max(1.5, v / hm * 100).toFixed(1) + '%;animation-delay:' + i * 15 + 'ms"></i>'; }).join('') + '</div><div class="mini-axis"><span>0</span><span>6</span><span>12</span><span>18</span><span>23</span></div>' : '');
   }
   function paintClients() {
@@ -3107,7 +3341,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         (d && d.idText ? '<div class="sub">' + d.icon + ' ' + esc(d.idText) + '</div>' : '') +
         '<div class="sub mono">' + esc(ips.slice(0, 2).join(' · ')) + (ips.length > 2 ? ' +' + (ips.length - 2) : '') + ' · DNS ' + num(c.dns_events) + ' · TLS ' + num(c.tls_events) + (c.rx_bytes || c.tx_bytes ? ' · ↓' + bytes(c.rx_bytes) + ' ↑' + bytes(c.tx_bytes) : '') + '</div>' +
         (c.last_sni ? '<div class="sub mono">最近 ' + esc(c.last_sni) + '</div>' : '') +
-        ((c.top_apps || []).length ? '<div class="apps">' + c.top_apps.slice(0, 6).map(function (a) { return '<span class="badge ' + (a.confidence === 'high' ? 'b-acc' : a.confidence === 'low' ? 'b-gray' : 'b-pur') + '">' + esc(a.name || a.id) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('') + '</div>' : '') + '</div>';
+        ((c.top_apps || []).length ? '<div class="apps">' + c.top_apps.slice(0, 6).map(function (a) { return '<span class="badge ' + (a.id === TUNNEL_ID ? 'b-gray' : a.confidence === 'high' ? 'b-acc' : a.confidence === 'low' ? 'b-gray' : 'b-pur') + '">' + appNmH(a.id, a.name) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('') + '</div>' : '') + '</div>';
     }).join('');
   }
   function guessSuffix(host) {
@@ -3345,7 +3579,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       loadSim(),
       loadCaps(),
       loadSelfcheck(),
-      loadAppLimits()
+      loadAppLimits(),
+      loadMacMerge(), loadEncdns(), loadStatsHealth()   // v5.21
     ]);
   }
   /* v5.19: 模拟环境(调试) */
@@ -3451,6 +3686,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       sFold('iface', ['cyan', 'wifi'], '热点接口偏好', '默认自动识别；ColorOS 常见 wlan2', '<div style="display:flex;gap:8px">' + inp('iface-pref', c.hotspot_iface || 'auto', '', 'maxlength="15" placeholder="auto" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="iface-save">保存</button></div><div class="note">填 auto 让 HNC 自动识别；手动填接口名（如 wlan2 / ap0）用于识别不准的机型。</div>', val(esc(c.hotspot_iface || 'auto'))) +
       sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val((OFFLOAD_T[S.offload.detail] || S.offload.detail || '—') + (S.offload.guard && S.offload.guard.fallback_active ? ' · 已兜底' : ''), S.offload.detail === 'ACTIVE' && !(S.offload.guard && S.offload.guard.fallback_active) ? 'warn' : 'ok')) +
       sItem(['red', 'shield'], '网站封锁 · DNS 层', '封锁网站时顺带拦掉该设备对这个域名的 DNS 查询，第一次连接就拦住', val({ available: '可用', unavailable: '内核不支持（只按 IP 拦）', unknown: '首次封锁时检测' }[c.conn_block_dns_layer] || '—', c.conn_block_dns_layer === 'unavailable' ? 'warn' : 'ok'))]);
+    groups.push(['设备', mergeSettingsHtml()]);   // v5.21: 随机 MAC 合并
     // v5.16: 告警总开关 + 新设备接入提醒(后端早就有, 旧新界面都没做设置)
     groups.push(['告警', sItem(['red', 'bolt'], '告警总开关', '关掉后所有提醒都不再产生（已有记录保留）', toggle(ac.enabled !== false, 'data-set="amaster" aria-label="告警总开关"')) +
       sFold('ud', ['blue', 'wifi'], '新设备接入提醒', '陌生设备连上热点时提醒；认识的设备可在告警里点「认识它」',
@@ -3488,12 +3724,12 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       sItem(['orange', 'shield'], 'iptables 规则', 'mangle 表里 HNC 的 MARK 规则', val(num(rs.ipt_rules))) +
       sItem(['blue', 'heart'], 'watchdog', '后台健康检查进程', val(num(rs.watchdog) > 0 ? '正常' : '未运行', num(rs.watchdog) > 0 ? 'ok' : 'bad'))) + scStatusRows()]);
     var nz = function (v) { return v == null ? '未统计' : String(v); }, slaCls = function (v) { return v == null ? '' : num(v) ? 'warn' : 'ok'; };
-    groups.push(['运行健康', !S.sla ? sItem(['gray', 'heart'], '运行健康', '暂无数据', val('—')) :
+    groups.push(['运行健康', statsHealthHtml() + (!S.sla ? sItem(['gray', 'heart'], '运行健康', '暂无数据', val('—')) :
       sItem(['gray', 'refresh'], 'dpid 重启 / 近期崩溃', '累计重启 · 近期崩溃循环', val(nz(sla.dpid_restart_count) + ' / ' + nz(sla.dpid_crash_recent), num(sla.dpid_crash_recent) ? 'warn' : '')) +
       sItem(['gray', 'layers'], 'watchdog 全量重建', 'tc 树被整体重建的次数', val(nz(sla.watchdog_full_restore_count), slaCls(sla.watchdog_full_restore_count))) +
       sItem(['gray', 'tool'], 'tc 修复失败 / 上行失败', '自修复熔断 · 上行 IFB/police 失败', val(nz(sla.tc_repair_fail_count) + ' / ' + nz(sla.uplink_fail_count), sla.tc_repair_fail_count == null && sla.uplink_fail_count == null ? '' : num(sla.tc_repair_fail_count) + num(sla.uplink_fail_count) ? 'warn' : 'ok')) +
       sItem(['gray', 'doc'], 'JSON 退回 legacy', '应长期为 0', val(nz(sla.json_legacy_fallback_count), slaCls(sla.json_legacy_fallback_count))) +
-      sItem(['gray', 'flask'], '能力降级标记', 'qos_fallback / uplink_unsupported', val([sla.qos_fallback_active ? 'QoS 兼容链路' : '', sla.uplink_unsupported ? '上行不支持' : ''].filter(Boolean).join(' · ') || '无', sla.qos_fallback_active || sla.uplink_unsupported ? 'warn' : 'ok'))]);
+      sItem(['gray', 'flask'], '能力降级标记', 'qos_fallback / uplink_unsupported', val([sla.qos_fallback_active ? 'QoS 兼容链路' : '', sla.uplink_unsupported ? '上行不支持' : ''].filter(Boolean).join(' · ') || '无', sla.qos_fallback_active || sla.uplink_unsupported ? 'warn' : 'ok')))]);
     groups.push(['维护', sBtn(['blue', 'refresh'], '重启 HNC 服务', '重跑 post-fs-data.sh + service.sh', 'svc-restart', '重启', 'danger') +
       sFold('ttl', ['orange', 'refresh'], '离线规则自动清理', num(c.stale_rule_ttl_days, 30) ? '设备离线超过 ' + num(c.stale_rule_ttl_days, 30) + ' 天后，自动删掉它的限速/延迟规则' : '已关闭 · 离线设备的规则永久保留',
         '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="ttl-days" type="number" min="0" max="3650" value="' + num(c.stale_rule_ttl_days, 30) + '"><span class="u">天</span></span><button class="btn pri press" data-act="ttl-save">保存</button></div><div class="note">填 0 = 永不自动清理。黑名单不受影响。</div>',
@@ -3506,6 +3742,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
       sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
       (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '（可能误伤其他应用）CDN 地址常被多个应用共用；默认跳过这些地址，打开后也一起限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
+      encdnsSettingsHtml() +
       sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
     var cs = S.clsact;
     var gm = c.clsact_bpf_mode || (c.clsact_bpf_enabled === true ? 'on' : 'auto'), og = c.offload_guard || S.offload.guard || null;
@@ -3990,6 +4227,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
       else if (k === 'qos-mode') setQos('mode', v);
       else if (k === 'qos-scale') setQos('scale', v);
+      else if (k === 'encdns') { api.action('encdns_set', { policy: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { toast('加密 DNS 拦截：' + (ENC_T[v] || v) + encdnsDetailTxt(r)); return loadEncdns(); }).catch(function (e) { toast(errText(e), 'err'); return loadEncdns(); }).then(function () { if (S.page === 'settings') renderSettings(false); }); }
+      else if (k === 'encdns-dev') { var ec = ctxDev(q); if (ec.d) { var ed = ec.d; devAct(ed.mac, function () { return api.action('encdns_set', { scope: 'device', mac: ed.mac, policy: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { return loadEncdns().then(function () { return r; }); }); }, function (r) { return ed.name + ' · 加密 DNS：' + (ENC_T[v] || v) + encdnsDetailTxt(r); }); } }
+      else if (k === 'pu-ns') { api.action('phone_usage_set', { use_netstats: v }).then(function () { toast('流量数据来源：' + q.textContent); if (S.puCfg) S.puCfg.use_netstats = v; S.pu = {}; return refreshPU(true); }).catch(function (e) { toast(errText(e), 'err'); }); }
       else if (k === 'delay-pre') { var cx = ctxDev(q); if (cx.box) { var di = $('[data-f="delay"]', cx.box); if (di) di.value = +v ? v : ''; if (!+v) { $('[data-f="jitter"]', cx.box).value = ''; $('[data-f="loss"]', cx.box).value = ''; } } }
       return;
     }
@@ -4022,6 +4262,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if ((q = t.closest('[data-dcat]'))) { if (S.discForm) { S.discForm.cat = q.getAttribute('data-dcat'); $$('[data-dcat]').forEach(function (b) { b.classList.toggle('on', b === q); }); } return; }
     if ((q = t.closest('[data-dsuf]'))) { if (S.discForm) { var sx = q.getAttribute('data-dsuf'); S.discForm.sufs[sx] = !S.discForm.sufs[sx]; q.classList.toggle('on', S.discForm.sufs[sx]); } return; }
     if ((q = t.closest('[data-rule-tpl]'))) { ruleTemplate(q.getAttribute('data-rule-tpl')); return; }
+    if ((q = t.closest('[data-mm-open]'))) { var mmp = q.getAttribute('data-mm-open').split('|'); mergeSheet(mmp[0], mmp[1]); return; }
     // v5.19: 模拟环境 / 应用限时 / 类别封锁
     if ((q = t.closest('[data-sim-preset]'))) { var spk = q.getAttribute('data-sim-preset'); api.action('sim_preset', { preset: spk }).then(simAfter('已载入预设「' + ((SIM_P[spk] || [spk])[0]) + '」· 模拟环境已开启')).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
     if ((q = t.closest('[data-sim-del]'))) { var sdm = q.getAttribute('data-sim-del'), sdn = q.getAttribute('data-name'); api.action('sim_device_del', { mac: sdm }).then(simAfter('已删除 ' + sdn)).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
@@ -4051,6 +4292,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         break;
       case 'conns': if (d) connSheet(d); break;
       case 'ident-edit': if (d) identSheet(d); break;
+      case 'merge-yes': if (d && d.merge) doMerge(d.mac, d.merge.old_mac, d.merge.old_name || d.merge.old_mac, false); break;
+      case 'merge-no': if (d && d.merge) dismissMerge(d.mac, d.merge.old_mac, d.merge.old_name || d.merge.old_mac); break;
       case 'fx-demo': fxDemo(a.getAttribute('data-demo')); break;
       case 'fx-perf': setLowFx(!PERF.low, false); PERF.strikes = 0; fxRefresh(); toast(PERF.low ? '已切到简化动画' : '已恢复完整动画'); break;
       case 'self-conns': selfConnSheet(); break;
@@ -4286,6 +4529,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       $('#mode-pill').hidden = false; $('#mode-pill').textContent = KSU ? '本机' : '远程';
       RENDER[S.page](!retry); onEnter(S.page);
       loadAlerts(); loadOffload(); loadOnlineHours(); loadUsage(); startSlowPolls(); startSSE();
+      loadEncdns().then(function (e) { if (e) S.devices.forEach(function (x) { if (S.open[x.mac] || S.sel === x.mac) refreshCard(x.mac); }); });   // v5.21: 设备卡的按设备加密 DNS
       api.getSafe('/api/alert_config', null, null).then(function (r) { if (r) { S.alertCfg = r; paintUsage(); } });
       if (retry) toast('已连接 HNC 后端');
     }).catch(function (e) {
