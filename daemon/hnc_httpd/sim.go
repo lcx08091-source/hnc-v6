@@ -122,6 +122,10 @@ type simAcc struct {
 	last       int64 // 已积分到的时刻
 	backfillTo int64 // 早于此刻的部分是首次回填(按作息曲线加权)
 	hours      [24][2]uint64
+	// 使用时长(与 app_time.go 同口径): 主应用属「真应用」档且本步字节过活跃阈值 → 记活跃秒数。
+	// 回填段按作息曲线概率决定这 10 分钟是否在用(否则整夜都算在用), 之后的实时段按速率判定。
+	active            [24]uint32
+	actFirst, actLast int64
 }
 
 type simStore struct {
@@ -292,6 +296,7 @@ func (st *simStore) advanceLocked(now time.Time) {
 			a = &simAcc{day: today, last: midnight, backfillTo: n}
 			st.acc[d.MAC] = a
 		}
+		countsTime := simCountsAppTime(d)
 		for t := a.last; t < n; {
 			dt := int64(simLiveDT)
 			w := 1.0
@@ -312,6 +317,14 @@ func (st *simStore) advanceLocked(now time.Time) {
 			rx, tx := simRate(d, st.f.Seed, float64(t))
 			a.hours[hour][0] += uint64(float64(rx) * w * float64(dt))
 			a.hours[hour][1] += uint64(float64(tx) * w * float64(dt))
+			if countsTime && dt > 0 && appTimeActive(uint64(float64(rx+tx)*w*float64(dt)), int(dt)) &&
+				(t >= a.backfillTo || simHash(st.f.Seed, d.MAC, "act", t/600) < w) {
+				a.active[hour] += uint32(dt)
+				if a.actFirst == 0 {
+					a.actFirst = t
+				}
+				a.actLast = t + dt
+			}
 			t += dt
 		}
 		a.last = n
@@ -323,12 +336,28 @@ func (st *simStore) advanceLocked(now time.Time) {
 	}
 }
 
+// simCountsAppTime 主应用是否计使用时长(与 appTimeStep 一致: 有应用且属「真应用」档)
+func simCountsAppTime(d *simDevice) bool {
+	return d.AppID != "" && appTier(d.Category) == tierApp
+}
+
 // simView 某一刻一台模拟设备的只读快照
 type simView struct {
-	D        simDevice
-	Rx, Tx   int64 // 当前速率 字节/秒
-	Hours    [24][2]uint64
-	Down, Up uint64 // 今日累计
+	D                 simDevice
+	Rx, Tx            int64 // 当前速率 字节/秒
+	Hours             [24][2]uint64
+	Down, Up          uint64 // 今日累计
+	Active            [24]uint32
+	ActFirst, ActLast int64
+}
+
+// ActiveSec 今日主应用活跃秒数
+func (v *simView) ActiveSec() int {
+	n := 0
+	for _, x := range v.Active {
+		n += int(x)
+	}
+	return n
 }
 
 // snapshot 开启时返回所有模拟设备的快照(并推进累计); 关闭时 nil。
@@ -348,6 +377,7 @@ func (st *simStore) snapshot(now time.Time) ([]simView, int64) {
 		v.Rx, v.Tx = simRate(&d, st.f.Seed, float64(now.Unix()))
 		if a := st.acc[d.MAC]; a != nil {
 			v.Hours = a.hours
+			v.Active, v.ActFirst, v.ActLast = a.active, a.actFirst, a.actLast
 			for h := 0; h < 24; h++ {
 				v.Down += a.hours[h][0]
 				v.Up += a.hours[h][1]
@@ -1100,6 +1130,12 @@ func simInterceptAction(s *server, action string, p map[string]string) (actionRe
 		}
 		return actionResp{OK: false, Error: "not found", Detail: "sim device not found: " + mac}, true
 	}
+	if simConfigOnlyActions[action] {
+		// 纯配置类动作: 只写策略文件; 执行层(limitCtl 的 apply、connBlocksEffective、
+		// 时长上限的派生封锁)对模拟 MAC 一律跳过, 所以放行给原处理函数 —— 界面才能
+		// 看到模拟设备的配额/时段/时长上限视图。原函数对模拟 MAC 不跑任何脚本。
+		return actionResp{}, false
+	}
 	n := simCloneDevice(*d)
 	r := simDeviceAction(&n, action, p)
 	if !r.OK || r.Detail == simNoChange {
@@ -1119,6 +1155,15 @@ func simInterceptAction(s *server, action string, p map[string]string) (actionRe
 }
 
 const simNoChange = "\x00sim-nochange"
+
+// simConfigOnlyActions 对已登记的模拟设备放行的动作(见 simInterceptAction)。
+// 前提(均有测试): limit_policy.go 的控制器对模拟 MAC 只算视图不 apply;
+// app_time.go 的三个动作对模拟 MAC 只写 app_controls.json、不重跑 conn_blocks 同步,
+// 且 connBlocksEffective 过滤模拟 MAC。
+var simConfigOnlyActions = map[string]bool{
+	"quota_set": true, "quota_clear": true, "schedule_set": true, "schedule_clear": true,
+	"app_time_limit_set": true, "app_time_limit_del": true, "category_block_set": true,
+}
 
 // simDeviceAction 按原动作的参数校验规则改模拟设备状态(纯内存, 无 I/O)。
 func simDeviceAction(d *simDevice, action string, p map[string]string) actionResp {
@@ -1336,6 +1381,13 @@ func (s *server) apiSim(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		m["today_rx_bytes"], m["today_tx_bytes"] = dn, up
+		var act uint32
+		if a := st.acc[d.MAC]; a != nil && enabled {
+			for h := 0; h < 24; h++ {
+				act += a.active[h]
+			}
+		}
+		m["today_active_sec"] = act
 		devs = append(devs, m)
 	}
 	st.mu.Unlock()

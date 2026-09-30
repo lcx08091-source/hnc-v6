@@ -455,6 +455,9 @@ type puEnv struct {
 	bootID       func() string
 	emitAlert    func(a alert.Alert) error
 	alertsOn     func() bool
+	// 模拟环境(sim_merge.go): 今天模拟设备的热点流量, 客户端视角 [下载, 上传] 按小时;
+	// ok=false 表示关闭。只在 report 里叠加到今天的副本上, 不进 e.day、不落盘、不参与告警。
+	simHotspot func(now time.Time) ([24][2]uint64, bool)
 }
 
 type puState struct {
@@ -708,6 +711,61 @@ func (e *puEngine) days(from, to time.Time) []*puDay {
 	return out
 }
 
+// daysWithSim = days, 再把模拟热点流量叠加到今天那天(副本)上: 热点 += 模拟字节,
+// 上游按蜂窝算(蜂窝 += 同样字节, 记给当前默认数据卡, hotspot_via.cell += ), 本机不变。
+// 返回叠加的合计(客户端视角)与是否叠加过。
+func (e *puEngine) daysWithSim(from, to, now time.Time) ([]*puDay, [2]uint64, bool) {
+	days := e.days(from, to)
+	var tot [2]uint64
+	if e.env.simHotspot == nil || now.Before(puMidnight(from)) || now.After(to) {
+		return days, tot, false
+	}
+	hours, ok := e.env.simHotspot(now)
+	if !ok {
+		return days, tot, false
+	}
+	date := now.Format("20060102")
+	var today *puDay
+	for _, d := range days {
+		if d.Date == date {
+			today = d
+		}
+	}
+	if today == nil {
+		today = newPuDay(date)
+		days = append(days, today) // 今天是区间最后一天, 追加在末尾保持顺序
+	}
+	e.mu.Lock()
+	key := e.sim.key()
+	e.mu.Unlock()
+	for h := 0; h < 24; h++ {
+		v := hours[h]
+		if v == ([2]uint64{}) {
+			continue
+		}
+		puAdd2(&tot, v)
+		hk := strconv.Itoa(h)
+		x := today.Hours[hk]
+		if x == nil {
+			x = &puHour{}
+			today.Hours[hk] = x
+		}
+		puAdd2(&x.Hotspot, v)
+		puAdd2(&x.Cell, v)
+	}
+	if tot == ([2]uint64{}) {
+		return days, tot, true
+	}
+	puAdd2(&today.Hotspot, tot)
+	c := today.Cell[key]
+	puAdd2(&c, tot)
+	today.Cell[key] = c
+	via := today.HsVia[puClassCell]
+	puAdd2(&via, tot)
+	today.HsVia[puClassCell] = via
+	return days, tot, true
+}
+
 // ─── 聚合 ─────────────────────────────────────────────────────────
 
 // puSplitKey "<slot>|<carrier>" → slot, carrier
@@ -877,7 +935,7 @@ func mkRxTx(v [2]uint64) puRxTx { return puRxTx{Rx: v[0], Tx: v[1], Total: v[0] 
 func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 	cfg := puLoadConfig(e.hncDir)
 	period, since := puPeriodStart(period, now, cfg.BillingDay)
-	days := e.days(since, now)
+	days, simTot, simIncluded := e.daysWithSim(since, now, now)
 
 	var cell, wifi, hs, local [2]uint64
 	type dayRow struct {
@@ -921,7 +979,8 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 	agg := puAggSIM(days)
 	cycAgg := agg
 	if period != "cycle" {
-		cycAgg = puAggSIM(e.days(cycleStart, now))
+		cycDays, _, _ := e.daysWithSim(cycleStart, now, now)
+		cycAgg = puAggSIM(cycDays)
 	}
 	e.mu.Lock()
 	curSIM := e.sim
@@ -1038,6 +1097,10 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		},
 		"sources": src,
 	}
+	if simIncluded {
+		resp["sim_included"] = true
+		resp["sim_hotspot"] = mkRxTx(simTot)
+	}
 	if period == "today" {
 		hours := make([]map[string]interface{}, 0, 24)
 		var today *puDay
@@ -1089,8 +1152,9 @@ func (s *server) phoneUsage() *puEngine {
 				b, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
 				return strings.TrimSpace(string(b))
 			},
-			emitAlert: func(a alert.Alert) error { return puAppendAlert(acfg.AlertsJSONLPath, a) },
-			alertsOn:  func() bool { return alert.LoadConfig(acfg.AlertsConfigPath).Enabled },
+			emitAlert:  func(a alert.Alert) error { return puAppendAlert(acfg.AlertsJSONLPath, a) },
+			alertsOn:   func() bool { return alert.LoadConfig(acfg.AlertsConfigPath).Enabled },
+			simHotspot: s.simHotspotHours,
 		})
 	})
 	return puEng

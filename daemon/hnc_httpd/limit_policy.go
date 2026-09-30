@@ -685,17 +685,32 @@ func (c *limitCtl) tick(now time.Time) {
 	}
 	sort.Strings(keys)
 
+	// 模拟设备(sim.go): 有针对它的策略时才取快照; 模拟环境关闭 → nil
+	var simInfo map[string]simLimitInfo
+	for _, m := range keys {
+		if limitSkipMAC(m) {
+			simInfo = simLimitInfos(c.hncDir, now, ms)
+			break
+		}
+	}
+
 	view := map[string]limitView{}
 	for _, mac := range keys {
 		pol := c.policies[mac]
 		sim := limitSkipMAC(mac)
 		var s *ctlDevState
 		if sim {
-			s = &ctlDevState{} // 模拟设备: 只算视图, 不落状态、不 apply
+			// 模拟设备: 只算视图, 不落状态、不 apply。基线 = 模拟设备自己的限速/拉黑状态,
+			// 用量 = 模拟积分(今日) + 估算(本周期此前), 这样界面能看到 warn/exceeded。
+			s = &ctlDevState{}
+			if si, ok := simInfo[mac]; ok {
+				s.Adopted, s.Base = true, si.Base
+				s.Usage = usageAcc{DayKey: dayKey, DayBytes: si.Day, MonthKey: monKey, MonthBytes: si.Month}
+			}
 		} else {
 			s = c.devState(mac)
 		}
-		if rulesOK {
+		if rulesOK && !sim {
 			o := obs[mac]
 			if !s.Adopted || o != s.LastObserved {
 				// 首次 / 外部修改(用户 rule_set、bl_add、模板、清理): 采纳为新基线
@@ -752,6 +767,16 @@ func (c *limitCtl) tick(now time.Time) {
 		}
 		if s.LastErr != "" {
 			v.Effective["apply_error"] = s.LastErr
+		}
+		if sim {
+			// applied/reason 表示「真机上会怎样」; enforced=false 表示实际什么都没下发
+			v.Effective["sim"], v.Effective["enforced"] = true, false
+			if v.Quota != nil {
+				v.Quota["sim"], v.Quota["enforced"] = true, false
+			}
+			if v.Schedule != nil {
+				v.Schedule["sim"] = true
+			}
 		}
 		view[mac] = v
 	}
@@ -931,7 +956,11 @@ func (c *limitCtl) annotateDevices(rows []map[string]interface{}) {
 		if blocked {
 			reason = "block"
 		}
-		row["effective"] = map[string]interface{}{"down_mbps": dn, "up_mbps": up, "blocked": blocked, "reason": reason}
+		eff := map[string]interface{}{"down_mbps": dn, "up_mbps": up, "blocked": blocked, "reason": reason}
+		if row["sim"] == true {
+			eff["sim"], eff["enforced"] = true, false
+		}
+		row["effective"] = eff
 	}
 }
 

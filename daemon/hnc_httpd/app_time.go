@@ -723,6 +723,15 @@ func (s *server) appCtlResync() actionResp {
 	return actionResp{OK: true, Detail: out}
 }
 
+// appCtlResyncFor 模拟设备(sim.go 放行的配置类动作)只存配置、不重跑同步: 它的派生项
+// 在 connBlocksEffective 里本来就被滤掉, 真实设备的展开结果不会变。
+func (s *server) appCtlResyncFor(mac string) actionResp {
+	if dpiCtlSkipMAC(mac) {
+		return actionResp{OK: true, Detail: "模拟设备: 已保存(只显示, 不下发)"}
+	}
+	return s.appCtlResync()
+}
+
 func actionAppTimeLimitSet(s *server, p map[string]string) actionResp {
 	mac := canonMAC(p["mac"])
 	if mac == "" || !validMAC(mac) {
@@ -739,7 +748,7 @@ func actionAppTimeLimitSet(s *server, p map[string]string) actionResp {
 	if minutes == 0 {
 		return actionAppTimeLimitDel(s, p)
 	}
-	if _, ok := s.appKnownUserApp(appID); !ok {
+	if _, ok := s.appKnownUserApp(appID); !ok && !(dpiCtlSkipMAC(mac) && s.simKnownApp(appID)) {
 		return actionResp{OK: false, Error: "bad params", Detail: "unknown app_id (或属于系统/SDK 类, 不计时长)"}
 	}
 	appCtlMu.Lock()
@@ -763,7 +772,7 @@ func actionAppTimeLimitSet(s *server, p map[string]string) actionResp {
 	if err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
-	return s.appCtlResync()
+	return s.appCtlResyncFor(mac)
 }
 
 func actionAppTimeLimitDel(s *server, p map[string]string) actionResp {
@@ -793,7 +802,7 @@ func actionAppTimeLimitDel(s *server, p map[string]string) actionResp {
 	if err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
-	return s.appCtlResync()
+	return s.appCtlResyncFor(mac)
 }
 
 func parseBoolParam(v string) (bool, bool) {
@@ -831,7 +840,7 @@ func actionCategoryBlockSet(s *server, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true|false"}
 	}
 	if en {
-		if _, ok := appBlockableCategories(loadAppCatalog(s.hncDir))[c]; !ok {
+		if _, ok := appBlockableCategories(loadAppCatalog(s.hncDir))[c]; !ok && !(dpiCtlSkipMAC(mac) && s.simKnownCategory(c)) {
 			return actionResp{OK: false, Error: "bad params", Detail: "unknown category (或属于系统/SDK 类, 不可封锁)"}
 		}
 	}
@@ -861,7 +870,7 @@ func actionCategoryBlockSet(s *server, p map[string]string) actionResp {
 	if err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
-	return s.appCtlResync()
+	return s.appCtlResyncFor(mac)
 }
 
 // ─── 设备 API 附加字段 ─────────────────────────────────────────────────
@@ -874,6 +883,7 @@ func (s *server) appControlsByMAC(now time.Time) map[string]map[string]interface
 	}
 	cat := loadAppCatalog(s.hncDir)
 	used := appTimeUsedToday(now)
+	s.simAddAppTimeUsed(used, now) // 模拟设备的已用量(只显示; 关闭时空操作)
 	until := nextLocalMidnight(now).Unix()
 	out := map[string]map[string]interface{}{}
 	get := func(mac string) map[string]interface{} {
@@ -888,11 +898,18 @@ func (s *server) appControlsByMAC(now time.Time) map[string]map[string]interface
 		name, category := l.AppID, ""
 		if a := cat.apps[l.AppID]; a != nil {
 			name, category = a.Name, a.Category
+		} else if dpiCtlSkipMAC(l.MAC) {
+			if a, ok := simFindApp(s.hncDir, l.AppID); ok {
+				name, category = a.Name, a.Cat
+			}
 		}
 		exhausted := l.Minutes > 0 && u >= l.Minutes*60
 		it := map[string]interface{}{"app_id": l.AppID, "name": name, "category": category,
 			"minutes": l.Minutes, "used_sec": u, "used_min": u / 60, "exhausted": exhausted,
 			"enforced": exhausted && !dpiCtlSkipMAC(l.MAC)}
+		if dpiCtlSkipMAC(l.MAC) {
+			it["sim"] = true
+		}
 		if exhausted {
 			it["until"] = until
 		}
@@ -939,9 +956,10 @@ func (s *server) apiAppTime(w http.ResponseWriter, r *http.Request) {
 	var byHour [24]uint64
 	var total uint64
 	since := ""
+	simSec := map[string]uint64{} // 模拟设备贡献的秒数(sim_merge.go)
 	for i := days - 1; i >= 0; i-- {
 		date := now.AddDate(0, 0, -i).Format("20060102")
-		d := appUsageDayCopy(s.hncDir, date)
+		d := s.simMergeAppUsageDay(appUsageDayCopy(s.hncDir, date), date) // 模拟环境: 今天叠加; 关闭时原样
 		if d == nil {
 			continue
 		}
@@ -968,6 +986,9 @@ func (s *server) apiAppTime(w http.ResponseWriter, r *http.Request) {
 					byApp[id] = a
 				}
 				a.sec += uint64(sec)
+				if isSimMAC(mk[:sep]) {
+					simSec[id] += uint64(sec)
+				}
 				a.hours[hi] += uint64(sec)
 				byHour[hi] += uint64(sec)
 				total += uint64(sec)
@@ -997,8 +1018,15 @@ func (s *server) apiAppTime(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = id
 		}
-		apps = append(apps, map[string]interface{}{"id": id, "name": name, "category": m.Category,
-			"active_sec": a.sec, "first_seen": a.first, "last_seen": a.last, "by_hour": a.hours[:]})
+		it := map[string]interface{}{"id": id, "name": name, "category": m.Category,
+			"active_sec": a.sec, "first_seen": a.first, "last_seen": a.last, "by_hour": a.hours[:]}
+		if n := simSec[id]; n > 0 { // 含模拟设备的时长: sim_active_sec; 全部来自模拟设备再加 sim:true
+			it["sim_active_sec"] = n
+			if n == a.sec {
+				it["sim"] = true
+			}
+		}
+		apps = append(apps, it)
 	}
 	sort.Slice(apps, func(i, j int) bool {
 		si, sj := apps[i]["active_sec"].(uint64), apps[j]["active_sec"].(uint64)
@@ -1032,6 +1060,9 @@ func (s *server) apiAppTime(w http.ResponseWriter, r *http.Request) {
 		"categories":      cats,
 		"threshold_bytes": appActiveMinBytes, "tick_sec": int(appUsageEvery / time.Second),
 	}
+	if len(simSec) > 0 {
+		resp["sim_included"] = true
+	}
 	if mac != "" {
 		c := s.appControlsByMAC(now)[mac]
 		if c == nil {
@@ -1049,7 +1080,8 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 	agg := map[string]*appUnknownAgg{}
 	var total uint64
 	for i := days - 1; i >= 0; i-- {
-		d := appUsageDayCopy(s.hncDir, now.AddDate(0, 0, -i).Format("20060102"))
+		date := now.AddDate(0, 0, -i).Format("20060102")
+		d := s.simMergeAppUsageDay(appUsageDayCopy(s.hncDir, date), date) // 模拟环境: 今天叠加; 关闭时原样
 		if d == nil {
 			continue
 		}
@@ -1098,6 +1130,7 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 		keys = keys[:100]
 	}
 	items := make([]map[string]interface{}, 0, len(keys))
+	simIncluded := false
 	for _, k := range keys {
 		a := agg[k]
 		kind := "domain"
@@ -1108,9 +1141,18 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 		if macs == nil {
 			macs = []string{}
 		}
-		items = append(items, map[string]interface{}{"name_or_ip": k, "kind": kind, "sample": a.S,
-			"bytes": a.B, "devices": len(macs), "macs": macs})
+		it := map[string]interface{}{"name_or_ip": k, "kind": kind, "sample": a.S,
+			"bytes": a.B, "devices": len(macs), "macs": macs}
+		if simOnlyMACs(macs) { // 只来自模拟设备的目的(sim_merge.go 造的)
+			it["sim"] = true
+			simIncluded = true
+		}
+		items = append(items, it)
 	}
-	writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "days": days, "items": items,
-		"total_unknown_bytes": total, "cap_per_day": appUnknownMax})
+	resp := map[string]interface{}{"ok": true, "days": days, "items": items,
+		"total_unknown_bytes": total, "cap_per_day": appUnknownMax}
+	if simIncluded {
+		resp["sim_included"] = true
+	}
+	writeJSON(w, http.StatusOK, resp)
 }

@@ -4,7 +4,9 @@
 // 合并点: /api/devices, /api/live(含 ?devices=1), /api/events(SSE 定时推 changed),
 // /api/connections(汇总 counts 与 ?mac= 明细), /api/app_usage, /api/stats(legacy),
 // /api/usage_month, /api/online_hours, /api/dpi_history, /api/dpi_state(clients),
-// /api/app_limits。
+// /api/app_limits, /api/app_time(使用时长 + 时长上限的已用量), /api/dpi_unknown,
+// /api/phone_usage(热点 + 上游蜂窝, 只加在今天的内存副本上, 不落盘),
+// 以及 limit_policy.go 控制器的配额/时段视图(用量取模拟积分, 永不 apply)。
 
 package main
 
@@ -371,19 +373,24 @@ func (s *server) simMergeStats(rangeParam, macFilter string, buckets []Bucket) [
 	return buckets
 }
 
-// simMergeAppUsageDay /api/app_usage: 今天那一天叠加模拟设备的 (小时, mac|app) 累计。
-// d 为 nil(今天还没有真实数据)时新建一天。非今天 / 关闭时原样返回。
+// simMergeAppUsageDay 今天那一天叠加模拟设备: 字节 (小时, mac|app)、使用时长 Active/Seen、
+// 未识别流量 Unknown(按目的聚合)。/api/app_usage、/api/app_time、/api/dpi_unknown 共用。
+// d 为 nil(今天还没有真实数据)时新建一天; 调用方传入的都是副本, 不会写回内存/文件。
+// 非今天 / 关闭时原样返回。
+//
+// 有主应用的模拟设备把 2%~5% 的字节记为「未识别」(和真机一样总有归不上的连接),
+// 无主应用的设备全部记为未识别; 这些字节再按两个目的(一个域名 + 一个裸 IP)聚合。
 func (s *server) simMergeAppUsageDay(d *appUsageDay, date string) *appUsageDay {
 	now := time.Now()
 	if date != now.Format("20060102") {
 		return d
 	}
-	views, _ := s.simViews(now)
+	views, seed := s.simViews(now)
 	if len(views) == 0 {
 		return d
 	}
 	if d == nil {
-		d = &appUsageDay{Date: date, Hours: map[string]map[string][2]uint64{}, Apps: map[string]appUsageMeta{}}
+		d = &appUsageDay{Date: date}
 	}
 	if d.Hours == nil {
 		d.Hours = map[string]map[string][2]uint64{}
@@ -391,26 +398,219 @@ func (s *server) simMergeAppUsageDay(d *appUsageDay, date string) *appUsageDay {
 	if d.Apps == nil {
 		d.Apps = map[string]appUsageMeta{}
 	}
+	add := func(hk, mk string, up, dn uint64) {
+		if up == 0 && dn == 0 {
+			return
+		}
+		if d.Hours[hk] == nil {
+			d.Hours[hk] = map[string][2]uint64{}
+		}
+		c := d.Hours[hk][mk]
+		c[0] += up
+		c[1] += dn
+		d.Hours[hk][mk] = c
+	}
 	for i := range views {
 		v := &views[i]
+		mac := v.D.MAC
 		id, name, cat := simAppIDName(&v.D)
 		d.Apps[id] = appUsageMeta{Name: name, Category: cat}
+		share := simUnknownShare(v, seed)
+		var unk uint64
 		for h := 0; h < 24; h++ {
-			if v.Hours[h][0] == 0 && v.Hours[h][1] == 0 {
+			up, dn := v.Hours[h][1], v.Hours[h][0]
+			if up == 0 && dn == 0 {
 				continue
 			}
 			hk := strconv.Itoa(h)
-			if d.Hours[hk] == nil {
-				d.Hours[hk] = map[string][2]uint64{}
+			uu, ud := uint64(float64(up)*share), uint64(float64(dn)*share)
+			if id != appUnknownID {
+				add(hk, mac+"|"+id, up-uu, dn-ud)
 			}
-			mk := v.D.MAC + "|" + id
-			c := d.Hours[hk][mk]
-			c[0] += v.Hours[h][1] // up
-			c[1] += v.Hours[h][0] // down
-			d.Hours[hk][mk] = c
+			add(hk, mac+"|"+appUnknownID, uu, ud)
+			unk += uu + ud
 		}
+		if unk > 0 {
+			if _, ok := d.Apps[appUnknownID]; !ok {
+				d.Apps[appUnknownID] = appUsageMeta{Name: "未识别"}
+			}
+			for _, u := range simUnknownDests(v, seed, unk) {
+				appUnknownAdd(d, u.ip, u.name, mac, u.bytes)
+			}
+		}
+		if !simCountsAppTime(&v.D) || v.ActiveSec() == 0 {
+			continue
+		}
+		mk := mac + "|" + id
+		if d.Active == nil {
+			d.Active = map[string]map[string]uint32{}
+		}
+		for h := 0; h < 24; h++ {
+			if v.Active[h] == 0 {
+				continue
+			}
+			hk := strconv.Itoa(h)
+			if d.Active[hk] == nil {
+				d.Active[hk] = map[string]uint32{}
+			}
+			d.Active[hk][mk] += v.Active[h]
+		}
+		if d.Seen == nil {
+			d.Seen = map[string][2]int64{}
+		}
+		sv := d.Seen[mk]
+		if sv[0] == 0 || (v.ActFirst > 0 && v.ActFirst < sv[0]) {
+			sv[0] = v.ActFirst
+		}
+		if v.ActLast > sv[1] {
+			sv[1] = v.ActLast
+		}
+		d.Seen[mk] = sv
 	}
 	return d
+}
+
+// simUnknownShare 这台模拟设备今天有多少比例的字节归不上应用
+func simUnknownShare(v *simView, seed int64) float64 {
+	if v.D.AppID == "" {
+		return 1
+	}
+	return 0.02 + 0.03*simHash(seed, v.D.MAC, "ushare", 0)
+}
+
+// 未识别目的的候选(看起来像真机里常见的「归不上」的连接: 上报/推送/图床/自建 CDN)
+var simUnknownDomains = []string{
+	"log-report.appsvc-cn.com", "push-gw.mobile-edge.net", "img.staticres-cdn.cn", "api.hwcloudsvc.cn",
+	"stat.data-collect.net", "dl.update-mirror.cn", "conf.appcfg-center.com", "edge.vodcache-cn.net",
+}
+
+type simUnknownDest struct {
+	name, ip string // name 为空 = 只有 IP(没有反查名)
+	bytes    uint64
+}
+
+// simUnknownDests 把一台设备今天的未识别字节拆成两个目的: 一个有反查名的域名(约 70%)
+// 和一个裸 IP(其余)。按 (seed, mac) 确定, 刷新不跳。
+func simUnknownDests(v *simView, seed int64, total uint64) []simUnknownDest {
+	if total == 0 {
+		return nil
+	}
+	dom := simUnknownDomains[int(simHash(seed, v.D.MAC, "udom", 0)*float64(len(simUnknownDomains)))]
+	a := uint64(float64(total) * 0.7)
+	return []simUnknownDest{
+		{name: dom, ip: simFakeIP(seed, dom), bytes: a},
+		{ip: simFakeIP(seed, v.D.MAC+"/unk"), bytes: total - a},
+	}
+}
+
+// simAddAppTimeUsed 把模拟设备今天的活跃秒数加进 appTimeUsedToday 的结果("mac|app" → 秒)。
+// 只用于显示(appControlsByMAC); 时长上限的派生封锁/告警仍只看真实用量。
+func (s *server) simAddAppTimeUsed(used map[string]int, now time.Time) {
+	views, _ := s.simViews(now)
+	for i := range views {
+		v := &views[i]
+		if simCountsAppTime(&v.D) {
+			if n := v.ActiveSec(); n > 0 {
+				used[v.D.MAC+"|"+v.D.AppID] += n
+			}
+		}
+	}
+}
+
+// simKnownApp 模拟设备的时长上限: 规则库里没有、但模拟应用库/某台模拟设备的主应用是「真应用」也接受
+func (s *server) simKnownApp(appID string) bool {
+	if a, ok := simFindApp(s.hncDir, appID); ok && appTier(a.Cat) == tierApp {
+		return true
+	}
+	st := simFor(s.hncDir)
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	for i := range st.f.Devices {
+		if d := &st.f.Devices[i]; d.AppID == appID && simCountsAppTime(d) {
+			return true
+		}
+	}
+	return false
+}
+
+// simKnownCategory 模拟设备的类别封锁: 模拟应用库里有这个「真应用」类别也接受
+func (s *server) simKnownCategory(c string) bool {
+	if appTier(c) != tierApp {
+		return false
+	}
+	for _, a := range simAppLibrary(s.hncDir) {
+		if a.Cat == c {
+			return true
+		}
+	}
+	for _, a := range simBuiltinApps {
+		if a.Cat == c {
+			return true
+		}
+	}
+	return false
+}
+
+// simHotspotHours /api/phone_usage: 模拟设备今天的热点流量, 客户端视角 [下载, 上传] 按小时
+func (s *server) simHotspotHours(now time.Time) ([24][2]uint64, bool) {
+	var out [24][2]uint64
+	views, _ := s.simViews(now)
+	if len(views) == 0 {
+		return out, false
+	}
+	for i := range views {
+		for h := 0; h < 24; h++ {
+			out[h][0] += views[i].Hours[h][0]
+			out[h][1] += views[i].Hours[h][1]
+		}
+	}
+	return out, true
+}
+
+// simLimitInfo limit_policy.go 控制器用: 模拟设备的手动状态(基线)与今日/本计费周期用量
+type simLimitInfo struct {
+	Base       limitRule
+	Day, Month uint64
+}
+
+// simLimitInfos 模拟设备 → 配额/时段视图的输入。今日 = 内存积分; 本周期此前每天按
+// /api/usage_month 同一估算(simEstDayBytes)。关闭时 nil。
+func simLimitInfos(hncDir string, now, periodStart time.Time) map[string]simLimitInfo {
+	st := simFor(hncDir)
+	views, seed := st.snapshot(now)
+	if len(views) == 0 {
+		return nil
+	}
+	today := localDayStart(now)
+	out := make(map[string]simLimitInfo, len(views))
+	for i := range views {
+		v := &views[i]
+		day := v.Down + v.Up
+		mon := day
+		for t := periodStart; t.Before(today); t = t.AddDate(0, 0, 1) {
+			rx, tx := simEstDayBytes(v, seed, t)
+			mon += uint64(rx + tx)
+		}
+		out[v.D.MAC] = simLimitInfo{
+			Base: limitRule{DownKbit: mbpsToKbit(v.D.LimitDownMbps), UpKbit: mbpsToKbit(v.D.LimitUpMbps), Blocked: v.D.Blocked},
+			Day:  day, Month: mon,
+		}
+	}
+	return out
+}
+
+// simEstDayBytes 过去某一天的估算字节(基准速率 × 作息均值 × 1 天 × 日波动); 被拉黑/离线的设备 0
+func simEstDayBytes(v *simView, seed int64, day time.Time) (rx, tx float64) {
+	if v.D.Blocked || v.D.Offline {
+		return 0, 0
+	}
+	var mean float64
+	for _, w := range simDiurnal {
+		mean += w
+	}
+	mean /= 24
+	f := 0.6 + 0.7*simHash(seed, v.D.MAC, "day", int64(day.Day()))
+	return float64(v.D.RxBps) * mean * 86400 * f, float64(v.D.TxBps) * mean * 86400 * f
 }
 
 // simHistRows /api/dpi_history: 每台模拟设备每小时一行(今天), 落在 [from, to] 内
@@ -461,20 +661,13 @@ func (s *server) simMergeUsageMonth(out map[string]interface{}) map[string]inter
 	if b, err := json.Marshal(out["devices"]); err == nil {
 		_ = json.Unmarshal(b, &devs)
 	}
-	var mean float64
-	for _, w := range simDiurnal {
-		mean += w
-	}
-	mean /= 24
 	for i := range views {
 		v := &views[i]
 		rx, tx := float64(v.Down), float64(v.Up)
-		if !v.D.Blocked && !v.D.Offline {
-			for day := 1; day < now.Day(); day++ {
-				f := 0.6 + 0.7*simHash(seed, v.D.MAC, "day", int64(day))
-				rx += float64(v.D.RxBps) * mean * 86400 * f
-				tx += float64(v.D.TxBps) * mean * 86400 * f
-			}
+		for day := 1; day < now.Day(); day++ {
+			r, t := simEstDayBytes(v, seed, time.Date(now.Year(), now.Month(), day, 0, 0, 0, 0, now.Location()))
+			rx += r
+			tx += t
 		}
 		devs[v.D.MAC] = map[string]interface{}{"rx": uint64(rx), "tx": uint64(tx), "sim": true}
 	}
@@ -573,4 +766,14 @@ func (s *server) simMergeDPIState(raw interface{}) interface{} {
 		clients["sim-"+d.MAC] = cl
 	}
 	return raw
+}
+
+// simOnlyMACs 非空且全部是模拟 MAC
+func simOnlyMACs(macs []string) bool {
+	for _, m := range macs {
+		if !isSimMAC(m) {
+			return false
+		}
+	}
+	return len(macs) > 0
 }

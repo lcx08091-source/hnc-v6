@@ -193,11 +193,16 @@ func TestSimDeviceActionsNeverExec(t *testing.T) {
 		{"app_limit_set", map[string]string{"mac": mac, "app_id": "weixin", "down_mbps": "1"}},
 		{"app_limit_clear", map[string]string{"mac": mac, "app_id": "weixin"}},
 		{"alert_mark_known", map[string]string{"mac": mac}},
-		// 其它 agent 新增的设备级动作也被通用闸门截走(空操作)
-		{"quota_set", map[string]string{"mac": mac, "limit_gb": "5"}},
-		{"schedule_set", map[string]string{"mac": mac}},
-		{"app_time_limit_set", map[string]string{"mac": mac, "app_id": "douyin"}},
-		{"category_block_set", map[string]string{"mac": mac}},
+		// 纯配置类动作(配额/时段/时长上限/类别封锁)放行给原处理函数: 只写策略文件,
+		// 执行层对模拟 MAC 一律跳过 —— 同样不能跑任何脚本
+		{"quota_set", map[string]string{"mac": mac, "daily_gb": "5", "action": "block"}},
+		{"schedule_set", map[string]string{"mac": mac, "windows": `[{"start":"22:00","end":"07:00","block":true}]`}},
+		{"app_time_limit_set", map[string]string{"mac": mac, "app_id": "douyin", "minutes": "30"}},
+		{"category_block_set", map[string]string{"mac": mac, "category": "video", "enabled": "true"}},
+		{"category_block_set", map[string]string{"mac": mac, "category": "video", "enabled": "false"}},
+		{"app_time_limit_del", map[string]string{"mac": mac, "app_id": "douyin"}},
+		{"schedule_clear", map[string]string{"mac": mac}},
+		{"quota_clear", map[string]string{"mac": mac}},
 	}
 	for _, c := range cases {
 		r := dispatchAction(s, c.action, c.p, false)

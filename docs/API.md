@@ -85,6 +85,8 @@ securityHeaders → accessLogMiddleware(含 panic recover)→ authMiddleware →
 | 39 | GET | `/api/metrics` | 需鉴权 | §12 |
 | 40 | POST | `/api/action` | 需鉴权 + CSRF + 写限流 + 全局串行 | §14 |
 
+> v5.19 另注册了 `/api/sim`、`/api/phone_usage`、`/api/app_time`、`/api/dpi_unknown` 四个 GET 路由及一批新 action,见 §18。
+
 (表中 40 行与 `server.go handler()` 里的 40 个 `mux.Handle/HandleFunc` 一一对应;`/static/` 前缀只认两个文件名,`/api/exports/` 前缀按文件名下载。
 未注册的任何路径都会落到 `/` 的 handler:已鉴权 → `404 page not found`(纯文本);未鉴权 → 401/302,因为不在公开白名单。)
 
@@ -485,7 +487,7 @@ Query:
     {
       "id": "unknown_device_aabbccddee01_1789998400",     // string,<kind>_<去冒号 mac>_<整点 unix 秒>(同类同设备同小时同 ID)
       "ts": 1790000000,                                     // unix 秒
-      "kind": "unknown_device",                             // "unknown_device" | "anomaly_traffic" | "monthly_quota"
+      "kind": "unknown_device",                             // "unknown_device" | "anomaly_traffic" | "monthly_quota" | v5.19: "device_quota" | "phone_quota" | "app_time_warn" | "app_time_exhausted"(§18.7)
       "mac": "aa:bb:cc:dd:ee:01",                           // 可选
       "ip": "192.168.43.50",                                // 可选
       "detail": "新设备接入: …",                             // 可选,人类可读
@@ -1746,3 +1748,236 @@ const action = (name, params) => request('POST', '/api/action', { action: name, 
 ## 17. v5.11 审计修复导致的行为差异
 
 正文中标注"v5.11"的行为来自紧随本文档之后的审计修复提交(`daemon/hnc_httpd`),汇总表在该提交中补全。
+
+## 18. v5.19 新增接口与动作
+
+> 来源:`daemon/hnc_httpd/sim.go`、`sim_merge.go`、`phone_usage.go`(+`phone_usage_sim.go`)、`limit_policy.go`、`app_time.go`。
+> 新增 4 个 mux 路由(均需鉴权、只读、GET):`/api/sim`、`/api/phone_usage`、`/api/app_time`、`/api/dpi_unknown`;
+> `/api/action` 新增 `sim_*`(6 个)、`phone_usage_set`、`quota_set/quota_clear/schedule_set/schedule_clear`、
+> `app_time_limit_set/app_time_limit_del/category_block_set`。所有 params 仍是字符串。
+
+### 18.1 模拟环境(调试用):GET `/api/sim` + `sim_*` 动作
+
+- 状态文件 `$HNC/data/sim.json`(`{enabled, devices:[…], seed}`,tmp+rename)。模拟设备 MAC 一律是本地管理地址
+  **`02:5e:00:xx:xx:xx`**(小写冒号),最多 32 台。今日累计(字节/小时、主应用活跃秒数)只在内存里按速率积分,不落盘;
+  速率由 `(时间, seed, mac)` 决定(可复现),`blocked`/`offline` → 0,限速 → 封顶。
+- **开启时(enabled 且至少一台)**,下列只读接口会把模拟设备合并进去,条目形状与真实条目一致并额外带 `"sim": true`:
+  `/api/devices`、`/api/live`、`/api/events`、`/api/connections`、`/api/app_usage`、`/api/stats`(legacy)、`/api/usage_month`、
+  `/api/online_hours`、`/api/dpi_history`、`/api/dpi_state`(`clients["sim-<mac>"]`)、`/api/app_limits`、
+  `/api/app_time`(§18.5)、`/api/dpi_unknown`(§18.6)、`/api/phone_usage`(§18.2),以及 `/api/devices` 的 `quota/schedule/effective`(§18.3)。
+  **关闭时所有接口输出与没有此功能时逐字节一致**。`/api/config.sim_enabled` 反映开关。
+- **安全闸**:任何带 `mac` 的动作,只要 mac 是已登记的模拟设备(或模拟环境开启时任何 `02:5e:00` 前缀),在分发最前面被截走,
+  只改 `sim.json` 里那台设备,**绝不调用脚本 / tc / iptables**。能改模拟状态的:`rule_set`、`template_apply`、`rule_clear`、`bl_add`、`bl_del`、
+  `delay_set`、`delay_clear`、`rule_sqm`、`device_whitelist_set`、`device_rename`、`device_ident_set`、`conn_block_add/del`、`app_limit_set/clear`
+  (校验规则与真实动作相同);其余带 mac 的动作对模拟设备是空操作(`ok:true`,detail「模拟设备: 该动作不影响模拟状态(未触达系统)」)。
+  例外:纯配置类动作 `quota_set/quota_clear/schedule_set/schedule_clear/app_time_limit_set/app_time_limit_del/category_block_set`
+  **放行**给原处理函数(只写策略文件),执行层对 `02:5e:00` 一律跳过,所以界面能看到模拟设备的配额/时段/时长上限视图,但什么都不下发。
+  模拟环境开启时,未登记的 `02:5e:00` MAC → `ok:false, error:"not found"`。
+
+GET `/api/sim`(仅 GET,其他方法 405):
+
+```json
+{
+  "ok": true, "enabled": true, "count": 6, "seed": 123456789,
+  "presets": ["busy", "home", "idle"],
+  "types": ["tv", "phone", "laptop", "tablet", "game", "iot", "pc"],
+  "mac_prefix": "02:5e:00:", "max": 32,
+  "devices": [{
+    "mac": "02:5e:00:1a:2b:3c", "ip": "192.168.43.120", "name": "模拟-客厅电视", "hostname": "MiTV-1A2B",
+    "vendor": "Xiaomi", "type": "tv",
+    "rx_bps": 3145728, "tx_bps": 92160,          // 基准速率 Byte/s(实际速率 = 基准 × (1 ± jitter·噪声))
+    "jitter": 0.2, "app_id": "iqiyi", "app_name": "爱奇艺", "category": "video",
+    "blocked": false, "limit_down_mbps": 0, "limit_up_mbps": 0, "delay_ms": 0, "created": 1790000000,
+    // 以下仅在设置过时出现: jitter_ms, loss_pct, sqm, whitelist, offline, app_limits{app_id:down_mbps}, conn_blocks[], ident{}
+    "cur_rx_bps": 3012345, "cur_tx_bps": 90000,  // 当前实际速率
+    "online": true,
+    "today_rx_bytes": 123456789, "today_tx_bytes": 3456789,
+    "today_active_sec": 18000                    // 主应用今日活跃秒数(与 /api/app_time 同口径)
+  }]
+}
+```
+
+| action | params | 说明 / 成功 detail |
+|---|---|---|
+| `sim_set` | `enabled`(`true/1/on/yes` / `false/0/off/no`) | 开关。`"模拟环境已开启(N 台模拟设备)"` / `"模拟环境已关闭"` |
+| `sim_device_add` | 全部可选:`name`(≤24 字)、`type`(tv\|phone\|laptop\|tablet\|game\|iot\|pc,空=随机)、`rx`/`tx`(Byte/s,可带 `k`=1024/`m`=1048576 后缀,≤1.25e9)、`app`(app_id,`[a-z0-9_-]{1,32}`,空=无应用)、`jitter`(0–1)、`ip`(私网 IPv4)、`vendor`(≤24)、`hostname`(≤32) | 未给的字段按类型模板随机。未知参数 → 400。detail 是 JSON 字符串 `{"mac":"02:5e:00:…","name":"…"}` |
+| `sim_device_update` | `mac` 必填 + 上表字段 + `app_name`(≤32)、`category`(`[a-z0-9_-]{1,32}`)、`blocked`、`offline`、`limit_down_mbps`/`limit_up_mbps`(0–10000)、`delay_ms`(0–5000) | 全部先校验,任一失败整体不改。`"updated <mac>"` |
+| `sim_device_del` | `mac` | `"deleted <mac>"`;不存在 → `not found` |
+| `sim_clear` | — | 删除全部模拟设备(不改开关)。`"cleared N sim device(s)"` |
+| `sim_preset` | `preset`:`home`(6 台晚间家庭)\|`busy`(8 台高负载,含已限速/已拉黑/加延迟各一台)\|`idle`(4 台心跳级,一台离线) | 替换全部模拟设备并**自动开启**。`"已载入预设 <name>(N 台), 模拟环境已开启"` |
+
+### 18.2 本机 / 热点月流量:GET `/api/phone_usage` + `phone_usage_set`
+
+- 数据源:`/proc/net/dev` 每 60 秒差分(整机网卡计数,最接近运营商计费口径)。接口分类:`cell`(`rmnet_data*`/`rmnetN`/`ccmni*`/`seth_lte*`/`wwan*`;
+  不计 `v4-rmnet*`、`r_rmnet*`、`rmnet_ipa*` 等防重复)、`wifi`(`wlan0` 且不是热点口)、`hotspot`(当前热点口,取不到按 `ap*`/`softap*`/`swlan*`)。
+- 本机 ≈ 上游 − 热点(逐方向截 0);上游 = `ip route get 1.1.1.1` 出口,再用增量交叉校验。蜂窝增量记给当前默认数据卡(5 分钟刷新一次;识别不到记 slot 0「蜂窝(未知卡)」)。
+- 存储:`run/phone_usage.YYYYMMDD.json`(保留 400 天)、`run/phone_usage_state.json`、配置 `data/phone_usage_config.json`。
+- Query:`period=cycle|month|today|7d|30d`(默认 `cycle` = 当前计费周期;其它值 → 400 `{"error":"period must be cycle|month|today|7d|30d"}`)。
+
+```json
+{
+  "period": "cycle", "since": 1788192000, "until": 1790000000,
+  "billing_day": 1, "cycle_start": 1788192000, "cycle_end": 1790784000,
+  "config": {"billing_day": 1, "warn_percent": 80, "plan_sim1_gb": 30, "plan_sim2_gb": 0},
+  "totals": {                                   // 全部 {rx, tx, total} 字节; hotspot 是客户端视角 rx=下载 tx=上传
+    "cellular": {"rx": 0, "tx": 0, "total": 0}, "wifi": {…}, "hotspot": {…}, "local": {…}
+  },
+  "hotspot_via": {"cell": {"rx":…,"tx":…,"total":…}, "wifi": {…}, "unknown": {…}},   // 热点流量走的上游
+  "by_sim": [{
+    "slot": 1, "carrier": "中国移动", "carriers": ["中国移动"],
+    "rx": 0, "tx": 0, "total": 0, "local_rx": 0, "local_tx": 0,
+    "hotspot_total": 0,                          // total − local
+    "cycle_used": 0,                             // 本计费周期用量(不论 period)
+    "plan_bytes": 32212254720, "used_pct": 12.3, // 无套餐时 plan_bytes=0, used_pct=null
+    "is_default_data": true
+  }],
+  "by_day": [{"date": "2026-09-30", "cell": 0, "wifi": 0, "hotspot": 0, "local": 0}],
+  "by_hour": [{"h": 0, "cell": 0, "wifi": 0, "hotspot": 0, "local": 0}],   // 仅 period=today,24 项
+  "default_sim": {"slot": 1, "carrier": "中国移动", "sub_id": 1},            // 未探测过为 null
+  "hotspot_by_device": {"endpoint": "/api/usage_month", "note": "…"},
+  "sources": {"sim_detect": "ok|unknown", "sim_source": "settings|isub|getprop|", "ifaces": [{"name":"rmnet_data0","class":"cell"}],
+              "hotspot_iface": "wlan2", "upstream": "cell", "counters": "/proc/net/dev", "last_sample": 1790000000, "error": "…(可选)"},
+  "sim_included": true,                          // 仅模拟环境开启时出现
+  "sim_hotspot": {"rx": 0, "tx": 0, "total": 0}  // 仅模拟环境开启时: 叠加进来的模拟热点字节
+}
+```
+
+- **模拟环境**:模拟设备今天的字节(客户端视角 [下载, 上传])叠加到**今天那天的内存副本**:`totals.hotspot` 与 `totals.cellular` 各加同样字节
+  (上游按蜂窝算,记给当前默认数据卡 → `by_sim[].total/cycle_used/hotspot_total/used_pct` 随之变化)、`hotspot_via.cell`、`by_day` 今天那行、
+  `by_hour`;`local`/`wifi` 不变。**不写入日文件、不参与 `phone_quota` 告警**。关闭时没有 `sim_included`/`sim_hotspot`。
+
+`phone_usage_set`(全部可选,只改传了的;任一非法整体拒绝;一个都没传 → 400):
+
+| param | 取值 |
+|---|---|
+| `billing_day` | 1–28(计费日;设备配额的月周期也用它) |
+| `plan_sim1_gb` / `plan_sim2_gb` | 0–100000(GiB,0 = 无套餐) |
+| `warn_percent` | 1–100(默认 80) |
+
+成功 detail:`"billing_day=1 sim1=30GB sim2=0GB warn=80%"`。
+
+### 18.3 设备流量配额 / 分时段限速:`quota_set` `quota_clear` `schedule_set` `schedule_clear` + `/api/devices` 字段
+
+- 配置 `data/limit_policies.json`,运行状态 `data/limit_ctl_state.json`。控制器每分钟(动作成功后立即 poke)一轮:用量累加 → 配额判定 → 期望规则 →
+  与上次不同才经 `rule_set/rule_clear/bl_add/bl_del` 同一条链路落地。优先级 **block(手动黑名单)> quota > schedule > manual**;
+  配额 throttle 在下层结果上取更严;时段窗口替换手动限速(`down/up=0` = 该时段不限速);覆盖结束恢复到用户的手动基线。
+- 用量 = `devices.json` 计数器差分累加与 `run/stats.YYYYMMDD.jsonl` 同窗口合计取 max;日 = 本地零点,月 = 计费日(§18.2 `billing_day`)起。
+- MAC 必须小写冒号(`quota_set`/`schedule_set` 还拒绝受保护 MAC)。
+
+| action | params | 说明 |
+|---|---|---|
+| `quota_set` | `mac`;`daily_gb`(0–1e6)、`monthly_gb`(0–1e7)至少一个 >0(GiB = 1073741824 字节);`action`=`throttle`(默认)\|`block`;`throttle_mbps`、`throttle_up_mbps`(0 或 0.064–10000) | throttle 缺省 1 / 0.5 Mbps;只给下行时上行 = 下行/2。detail `"quota saved"` |
+| `quota_clear` | `mac` | detail `"cleared"` / `"nothing to clear"` |
+| `schedule_set` | `mac`;`windows` = JSON 数组字符串,1–16 项,每项 `{"days":[0-6…](空=每天, 0=周日),"start":"HH:MM","end":"HH:MM","down_mbps":0,"up_mbps":0,"block":false}` | 未知字段拒绝。`start==end` = 全天;`start>end` = 跨零点(属于开始那天);多窗口取第一个命中的。detail `"schedule saved"` |
+| `schedule_clear` | `mac` | 同 `quota_clear` |
+
+`/api/devices` 每行都新增(`limitCtl.annotateDevices`):
+
+```json
+"quota": {                          // 无配额 → null
+  "daily_gb": 5, "monthly_gb": 0, "action": "throttle", "throttle_mbps": 1, "throttle_up_mbps": 0.5,
+  "used_today": 1234567, "used_month": 98765432,      // 字节(tx+rx)
+  "state": "ok|warn|exceeded", "exceeded_period": "daily|monthly|",
+  "applied": true,                  // 已超限且当前生效原因就是 quota
+  "billing_day": 1, "month_start": 1788192000,
+  "sim": true, "enforced": false    // 仅模拟设备
+},
+"schedule": {                       // 无时段 → null
+  "windows": [ … ], "active_window_index": 0,         // -1 = 当前不在任何窗口
+  "sim": true                       // 仅模拟设备
+},
+"effective": {                      // 每行都有
+  "down_mbps": 1, "up_mbps": 0.5, "blocked": false,
+  "reason": "manual|schedule|quota|block",
+  "apply_error": "…",               // 可选: 上次落地失败
+  "sim": true, "enforced": false    // 仅模拟设备
+}
+```
+
+- 没有策略的设备:`quota=null, schedule=null`,`effective` 由行内 `status/limit_enabled/down_mbps/up_mbps` 给出(reason `manual`/`block`)。
+- **模拟设备**:策略照常保存,控制器只算视图、**永不 apply、不落状态、不发告警**。基线 = 模拟设备自己的限速/拉黑状态;
+  `used_today` = 模拟今日积分字节,`used_month` = 今日 + 本计费周期此前每天的估算(与 `/api/usage_month` 同一估算),
+  所以可以把配额设小来看 `warn/exceeded` 与 `reason:"quota"`;`applied/reason` 表示「真机上会怎样」,`enforced:false` 表示实际什么都没下发。
+- 超限告警 `device_quota` 见 §18.7。
+
+### 18.4 应用时长上限 / 类别封锁动作
+
+配置 `data/app_controls.json`(`{time_limits:[{mac,app_id,minutes,ts}], category_blocks:[{mac,category,ts}]}`)。
+时长用完 / 类别封锁不写 `conn_blocks.json`,而是展开时现算「派生封锁项」(`source:"app_time"`,`until`=本地次日 0 点;`source:"category"`),
+由现有 conn_blocks 机制(IP 层 + DNS 层)落地,过 0 点自动解封。
+
+| action | params | 说明 |
+|---|---|---|
+| `app_time_limit_set` | `mac`(`aa:bb…`/`aa-bb…`)、`app_id`(`[A-Za-z0-9_.-]{1,64}`)、`minutes`(0–1440;**0 = 删除**) | app_id 必须是「真应用」(规则库里有且类别不属系统/SDK,或今天见过);模拟设备另接受模拟应用库里的应用。上限 200 条。成功后重算封锁(结果不变不跑脚本) |
+| `app_time_limit_del` | `mac`、`app_id` | 不存在 → `not found` |
+| `category_block_set` | `mac`、`category`、`enabled`(`true/1/on/yes`/`false/0/off/no`) | 开启时类别必须是规则库里可封锁的「真应用」类别(模拟设备另接受模拟应用库的类别);已是目标状态 → detail `"no change"`。上限 100 条 |
+
+模拟设备(`02:5e:00`):三个动作只写配置,不重跑同步(detail `"模拟设备: 已保存(只显示, 不下发)"`),派生项在生效集合里被滤掉。
+`/api/devices` 有配置的设备行额外带:
+
+```json
+"app_time_limits": [{"app_id": "douyin", "name": "抖音", "category": "video", "minutes": 60,
+                     "used_sec": 3700, "used_min": 61, "exhausted": true, "enforced": true,
+                     "until": 1790006400,          // 仅 exhausted
+                     "sim": true}],                // 仅模拟设备(此时 enforced 恒 false)
+"category_blocks": [{"category": "game", "app_count": 12, "ts": 1790000000, "enforced": true}]
+```
+
+### 18.5 GET `/api/app_time` — 应用使用时长
+
+- 记账(`app_usage.go` 每 10 秒一轮):某 (设备, 应用) 本轮字节 ≥ 8 KB/10 s(按实际间隔折算)且应用属「真应用」档 → 这一轮记为活跃,
+  按 (mac, app, 小时) 累加进 `run/app_usage.YYYYMMDD.json` 的 `active`/`seen`。
+- Query:`mac`(可选,小写冒号;非法 → 400 `{"error":"invalid mac"}`)、`days` 1–31(默认 1,含今天)。
+
+```json
+{
+  "ok": true, "days": 1, "mac": "", "since": "20260930",
+  "total_active_sec": 7200,
+  "apps": [{
+    "id": "douyin", "name": "抖音", "category": "video",
+    "active_sec": 3600, "first_seen": 1789970000, "last_seen": 1790000000,
+    "by_hour": [0, 0, …, 600],            // 24 个数, 秒
+    "sim_active_sec": 3600,               // 仅当含模拟设备的时长
+    "sim": true                           // 仅当全部来自模拟设备
+  }],
+  "by_hour": [{"h": 0, "active_sec": 0}, …],                     // 24 项
+  "categories": [{"id": "video", "apps": [{"id": "douyin", "name": "抖音"}]}],   // 可封锁类别
+  "threshold_bytes": 8192, "tick_sec": 10,
+  "app_time_limits": [ … ], "category_blocks": [ … ],            // 仅传了 mac 时, 形状同 §18.4
+  "sim_included": true                                           // 仅当结果含模拟设备的活跃时长
+}
+```
+
+- **模拟环境**:模拟设备的主应用(属「真应用」档时)按同一阈值积分活跃秒数(实时段按当前速率;首次回填零点至今那段按作息曲线概率决定每 10 分钟是否在用),
+  合并进今天的 `apps/by_hour/total_active_sec`;`app_time_limits` 对模拟设备显示真实的 `used_sec/exhausted`,但 `enforced:false`、不封锁、不发告警。
+
+### 18.6 GET `/api/dpi_unknown` — 未识别流量 Top
+
+- app 归不上的连接按目的聚合(有反查名 → 基础域名,否则 IP),每天最多 300 个目的,每个目的最多记 8 台设备。Query:`days` 1–31(默认 1)。
+
+```json
+{
+  "ok": true, "days": 1, "cap_per_day": 300,
+  "total_unknown_bytes": 123456789,        // 按字节账(含被裁掉的尾部)
+  "items": [{                              // 按 bytes 降序, 最多 100
+    "name_or_ip": "example-cdn.com", "kind": "domain|ip", "sample": "img3.example-cdn.com",
+    "bytes": 12345678, "devices": 2, "macs": ["aa:bb:cc:dd:ee:01"],
+    "sim": true                            // 仅当该目的只来自模拟设备
+  }],
+  "sim_included": true                     // 仅当合并了模拟设备
+}
+```
+
+- **模拟环境**:有主应用的模拟设备把今天 2%–5% 的字节记为未识别(无主应用的设备全部),按 (seed, mac) 确定拆成一个域名(约 70%)+ 一个裸 IP;
+  同样的字节也出现在 `/api/app_usage` 的 `_unknown`(未识别)条目里,所以 `total_unknown_bytes` 与 items 对得上。
+
+### 18.7 新告警 kind(均追加到 `run/alerts.jsonl`,经 §6.1 读取)
+
+| kind | 由谁发 | 去重 | id | extra |
+|---|---|---|---|---|
+| `device_quota` | limit_policy 控制器,设备超出日/月配额时 | 每设备每周期一次 | `device_quota_<去冒号mac>_<daily\|monthly>_<周期键>` | `period`、`period_key`、`used_bytes`、`quota_bytes`、`action` |
+| `phone_quota` | phone_usage,某卡本计费周期用量跨过 `warn_percent` 或 100% 套餐(每 5 分钟检查) | 每卡每档每周期一次(直接越过 100% 时不再补发 warn) | `phone_quota_<warn\|over>_sim<slot>_<周期起 YYYYMMDD>` | `slot`、`carrier`、`level`(warn\|over)、`used_bytes`、`plan_bytes`、`cycle_start`、`warn_percent`(无 `mac`) |
+| `app_time_warn` | app_time,距上限 ≤5 分钟(上限 >5 分钟时) | 每 (设备, 应用, 天) 一次;已用完时不补发 | `app_time_warn_<去冒号mac>_<app_id>_<YYYYMMDD>` | `app_id`、`app_name`、`minutes`、`used_sec`、`until` |
+| `app_time_exhausted` | app_time,今日活跃秒数达到上限(同时开始封锁到次日 0 点) | 同上 | `app_time_exhausted_<去冒号mac>_<app_id>_<YYYYMMDD>` | 同上 |
+
+- 四种都只在告警总开关(`alerts_config.json.enabled`)开启时写入;模拟设备、模拟热点流量都不会触发。
