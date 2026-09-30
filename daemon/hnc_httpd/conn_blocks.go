@@ -32,6 +32,12 @@ type connBlock struct {
 	Value string `json:"value"`
 	Label string `json:"label,omitempty"`
 	Ts    int64  `json:"ts"`
+	// v6.x 派生封锁项(app_time.go, 不落 conn_blocks.json, 每次展开时现算):
+	//   source = "app_time"(应用时长用完, until = 本地次日 0 点自动失效) | "category"(按类别封锁)
+	//   ref    = app_id / category
+	Source string `json:"source,omitempty"`
+	Ref    string `json:"ref,omitempty"`
+	Until  int64  `json:"until,omitempty"`
 }
 
 type connBlockFile struct {
@@ -138,7 +144,7 @@ func (s *server) expandConnBlocks(f connBlockFile) []string {
 
 // connBlockSyncLocked 重新展开; 与现有 flat 不同(或 force)才写文件并跑脚本
 func (s *server) connBlockSyncLocked(force bool) (string, error) {
-	f := readConnBlocks(s.hncDir)
+	f := s.connBlocksEffective(time.Now())
 	content := joinLines(s.expandConnBlocks(f))
 	dnsContent := joinLines(expandConnBlockDomains(f))
 	old, _ := os.ReadFile(connBlocksFlat(s.hncDir))
@@ -165,7 +171,7 @@ func (s *server) connBlockSyncLocked(force bool) (string, error) {
 func (s *server) connBlockRefresh() {
 	connBlockMu.Lock()
 	defer connBlockMu.Unlock()
-	if len(readConnBlocks(s.hncDir).Items) == 0 {
+	if len(s.connBlocksEffective(time.Now()).Items) == 0 {
 		st, err := os.Stat(connBlocksFlat(s.hncDir))
 		st2, err2 := os.Stat(connBlocksDNS(s.hncDir))
 		if (err != nil || st.Size() == 0) && (err2 != nil || st2.Size() == 0) {

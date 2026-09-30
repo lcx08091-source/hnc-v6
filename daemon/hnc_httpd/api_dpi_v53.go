@@ -32,7 +32,7 @@ func (s *server) apiDPIState(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"available": true,
-		"state":     raw,
+		"state":     s.simMergeDPIState(raw), // 模拟环境: clients 追加模拟客户端; 关闭时原样
 	})
 }
 

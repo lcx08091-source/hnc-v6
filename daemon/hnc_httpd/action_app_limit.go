@@ -251,7 +251,7 @@ func (s *server) apiAppLimits(w http.ResponseWriter, r *http.Request) {
 	file := loadAppLimits(s.hncDir)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":    true,
-		"items": file.Items,
+		"items": s.simMergeAppLimits(file.Items), // 模拟环境; 关闭时原样
 	})
 }
 

@@ -256,6 +256,6 @@ func (s *server) apiOnlineHours(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"days":  days,
-		"hours": onlineHoursByMAC(s.hncDir, days),
+		"hours": s.simMergeOnlineHours(onlineHoursByMAC(s.hncDir, days)), // 模拟环境; 关闭时原样
 	})
 }

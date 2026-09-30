@@ -393,6 +393,11 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "method not allowed"})
 		return
 	}
+	// 模拟环境: 模拟设备的连接明细直接合成(不读 conntrack)
+	if simResp, ok := s.simConnections(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac")))); ok {
+		writeJSON(w, http.StatusOK, simResp)
+		return
+	}
 	sn := conntrackSnapshot()
 	base := map[string]interface{}{
 		"ok":       true,
@@ -429,6 +434,7 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 			k := e.key()
 			c["bps"] = c["bps"].(float64) + sn.upBps[k] + sn.dnBps[k]
 		}
+		s.simMergeConnCounts(counts) // 模拟环境; 关闭时不动
 		base["counts"] = counts
 		writeJSON(w, http.StatusOK, base)
 		return
@@ -447,7 +453,8 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 	names := s.loadIPNames()
 	apps := s.loadIPApps()
 	blocked := map[string]bool{}
-	for _, l := range s.expandConnBlocks(connBlockFile{Items: connBlocksFor(s.hncDir, mac)}) {
+	devBlocks := s.connBlocksForWithDerived(mac, time.Now()) // v6.x: 含时长用完 / 类别封锁的派生项(带 source)
+	for _, l := range s.expandConnBlocks(connBlockFile{Items: devBlocks}) {
 		if sp := strings.IndexByte(l, ' '); sp > 0 {
 			blocked[l[sp+1:]] = true
 		}
@@ -561,7 +568,7 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	base["mac"] = mac
 	base["ips"] = ips
-	base["blocks"] = connBlocksFor(s.hncDir, mac)
+	base["blocks"] = devBlocks
 	base["total"] = len(rows)
 	base["conns"] = list
 	base["groups"] = groups

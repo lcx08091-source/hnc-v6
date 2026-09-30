@@ -78,7 +78,7 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 	usageCache.mu.Lock()
 	defer usageCache.mu.Unlock()
 	if usageCache.out != nil && time.Since(usageCache.at) < 60*time.Second {
-		writeJSON(w, http.StatusOK, usageCache.out)
+		writeJSON(w, http.StatusOK, s.simMergeUsageMonth(usageCache.out)) // 模拟环境; 关闭时原样
 		return
 	}
 	now := time.Now()
@@ -128,5 +128,5 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 		"devices":     per,
 	}
 	usageCache.out, usageCache.at = out, now
-	writeJSON(w, http.StatusOK, out)
+	writeJSON(w, http.StatusOK, s.simMergeUsageMonth(out))
 }

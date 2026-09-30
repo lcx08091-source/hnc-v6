@@ -211,7 +211,9 @@ func main() {
 	go srv.AppUsageLoop(stopCh)  // v5.16: 按应用真实流量统计(conntrack 字节差分)
 	go srv.CtEventLoop(stopCh)   // v5.18: conntrack DESTROY 事件, 补短连接/连接尾巴(失败退纯轮询)
 	go srv.CertProbeLoop(stopCh) // v5.15: 未知应用发现 · 后台取证书
+	go srv.limitCtl.Loop(stopCh) // 设备配额 + 分时段限速(每分钟对齐)
 	go srv.RateLoop(stopCh)      // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
+	go srv.PhoneUsageLoop(stopCh) // 本机/热点月度流量: 60s 采 /proc/net/dev, 停机补采落盘
 
 	if haveRemote {
 		if *flagNoTLS {

@@ -76,6 +76,11 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	iface := s.currentHotspotIface()
 	ip := ifaceIPv4(iface)
 	active := hotspotActiveFromState(s.hncDir, iface, ip, online)
+	// 模拟环境开启且有模拟设备: 视为热点在线(否则前端把所有设备画成离线)
+	simLive := s.simActive()
+	if simLive {
+		active = true
+	}
 
 	resp := map[string]interface{}{
 		"hotspot_active":  active,
@@ -92,6 +97,9 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	}
 	// v5.12: ?devices=1 顺带返回设备列表(与上面汇总同一份快照)。本机 KSU 页
 	// 每次请求都要拉起一个 curl 进程, 合并后每轮轮询从 2 次降到 1 次。
+	if simLive {
+		resp["sim"] = true
+	}
 	if r.URL.Query().Get("devices") == "1" {
 		resp["devices"] = devices
 	}

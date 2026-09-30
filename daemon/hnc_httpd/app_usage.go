@@ -47,6 +47,12 @@ type appUsageDay struct {
 	Date  string                          `json:"date"` // YYYYMMDD(本地)
 	Hours map[string]map[string][2]uint64 `json:"hours"`
 	Apps  map[string]appUsageMeta         `json:"apps"`
+	// v6.x 使用时长(app_time.go): hour → "mac|app" → 活跃秒数; "mac|app" → [首次, 最近] 活跃 unix。
+	// 旧文件没有这些字段 → 解出来是 nil, 记账时按需创建(向后兼容)。
+	Active map[string]map[string]uint32 `json:"active,omitempty"`
+	Seen   map[string][2]int64          `json:"seen,omitempty"`
+	// 未识别流量按目的(基础域名 / IP)聚合, 条数有上限(appUnknownMax)
+	Unknown map[string]*appUnknownAgg `json:"unknown,omitempty"`
 }
 
 type appUsageMeta struct {
@@ -109,8 +115,22 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 	events, _, _ := ctEventsDrain()
 	keep := func(src string) bool { _, ok := owner[src]; return ok }
 	deltas := appUsageAcctStep(&appUsage.prev, &appUsage.init, sn.entries, sn.at, events, keep)
+	added := appUsageRecord(appUsage.day, deltas, owner, apps, names, now, appTimeTickSec(now))
+	if len(deltas) > 0 {
+		appUsage.dirty = true
+	}
+	return added
+}
+
+// appUsageRecord 把一轮差分记到当天(调用方持 appUsage.mu; 无 I/O, 单测直接喂)。
+// 字节按 (设备, 应用, 小时) 累加; 同时把本轮每个 (设备, 应用) 的字节交给
+// appTimeStep 记使用时长, 未识别的目的交给 appUnknownAdd 聚合。
+func appUsageRecord(d *appUsageDay, deltas []appUsageDelta, owner map[string]string,
+	apps map[string]ipApp, names map[string]ipName, now time.Time, tickSec int) uint64 {
 	hour := strconv.Itoa(now.Hour())
 	var added uint64
+	tick := map[string]uint64{}
+	cats := map[string]string{}
 	for _, dl := range deltas {
 		mac := owner[dl.Src]
 		id, meta := appUnknownID, appUsageMeta{Name: "未识别"}
@@ -119,7 +139,6 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 		} else if a, ok := appForIP(dl.Dst, apps, names); ok {
 			id, meta = a.ID, appUsageMeta{Name: a.Name, Category: a.Category}
 		}
-		d := appUsage.day
 		if d.Hours[hour] == nil {
 			d.Hours[hour] = map[string][2]uint64{}
 		}
@@ -131,9 +150,14 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 		if old, ok := d.Apps[id]; !ok || old.Name != meta.Name || old.Category != meta.Category {
 			d.Apps[id] = meta
 		}
-		appUsage.dirty = true
 		added += dl.Up + dl.Dn
+		tick[mk] += dl.Up + dl.Dn
+		cats[id] = meta.Category
+		if id == appUnknownID && dl.Dst != "" {
+			appUnknownAdd(d, dl.Dst, names[dl.Dst].Name, mac, dl.Up+dl.Dn)
+		}
 	}
+	appTimeStep(d, tick, cats, now, tickSec)
 	return added
 }
 
@@ -271,7 +295,8 @@ func (s *server) AppUsageLoop(stop <-chan struct{}) {
 			return
 		case now := <-tk.C:
 			s.appUsageTick(now)
-			s.connBlockRefresh() // v5.16: 域名封锁跟随反查表更新 IP
+			s.appTimeEnforce(now) // v6.x: 应用时长上限 → 告警(封锁由下一行的派生封锁项落地)
+			s.connBlockRefresh()  // v5.16: 域名封锁跟随反查表更新 IP
 			if now.Sub(lastFlush) >= appUsageFlush {
 				s.appUsageFlush(now)
 				lastFlush = now
@@ -301,6 +326,7 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 	byDev := map[string]*acc{}
 	var byHour [24]acc
 	meta := map[string]appUsageMeta{}
+	activeByApp := map[string]uint64{}
 	var totUp, totDn uint64
 	since := ""
 	for i := days - 1; i >= 0; i-- {
@@ -314,16 +340,28 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		appUsage.mu.Unlock()
 		if d == nil {
-			if _, err := os.Stat(appUsagePath(s.hncDir, date)); err != nil {
-				continue
+			if _, err := os.Stat(appUsagePath(s.hncDir, date)); err == nil {
+				d = loadAppUsageDay(s.hncDir, date)
 			}
-			d = loadAppUsageDay(s.hncDir, date)
+		}
+		d = s.simMergeAppUsageDay(d, date) // 模拟环境: 今天叠加模拟设备; 关闭时原样
+		if d == nil {
+			continue
 		}
 		if since == "" {
 			since = date
 		}
 		for id, m := range d.Apps {
 			meta[id] = m
+		}
+		for _, cells := range d.Active { // v6.x 使用时长
+			for mk, sec := range cells {
+				sep := strings.IndexByte(mk, '|')
+				if sep < 0 || (mac != "" && mk[:sep] != mac) {
+					continue
+				}
+				activeByApp[mk[sep+1:]] += uint64(sec)
+			}
 		}
 		for h, cells := range d.Hours {
 			hi, _ := strconv.Atoi(h)
@@ -363,7 +401,8 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 			name = id
 		}
 		apps = append(apps, map[string]interface{}{"id": id, "name": name, "category": m.Category,
-			"up": a.up, "down": a.dn, "sdk": appTier(m.Category) == tierHidden})
+			"up": a.up, "down": a.dn, "sdk": appTier(m.Category) == tierHidden,
+			"active_sec": activeByApp[id]})
 	}
 	sort.Slice(apps, func(i, j int) bool {
 		ti := apps[i]["up"].(uint64) + apps[i]["down"].(uint64)

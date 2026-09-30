@@ -73,6 +73,7 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	hb := time.NewTicker(20 * time.Second)
 	defer hb.Stop()
 	ctx := r.Context()
+	simTick := 0
 	for {
 		select {
 		case <-ctx.Done():
@@ -82,6 +83,12 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-poll.C:
+			// 模拟环境: 模拟设备速率一直在变, 每 ~3s 推一次 changed(关闭时不进这里)
+			if s.simActive() {
+				if simTick++; simTick%2 == 0 && !write("event: changed\ndata: {\"reason\":\"sim\"}\n\n") {
+					return
+				}
+			}
 			fi, err := os.Stat(devicesPath)
 			if err != nil {
 				continue

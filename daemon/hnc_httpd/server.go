@@ -63,10 +63,12 @@ type server struct {
 	// v6 review fix: data/run 下 JSON 的 mtime+size 缓存, 服务 /api/live 等
 	// 高频轮询端点 (见 jsoncache.go)。命中时零读盘零解析。
 	jsonCache *jsonFileCache
+	// 设备配额 + 分时段限速控制器(limit_policy.go)
+	limitCtl *limitCtl
 }
 
 func newServer(hncDir string) *server {
-	return &server{
+	s := &server{
 		hncDir:       hncDir,
 		tokens:       NewTokensStore(filepath.Join(hncDir, "data", "remote_tokens.json")),
 		limiter:      NewRateLimiter(),
@@ -75,6 +77,8 @@ func newServer(hncDir string) *server {
 		lastSamples:  make(map[string]rateSample),
 		rates:        make(map[string]rateOut),
 	}
+	s.limitCtl = newLimitCtl(hncDir, &s.actionMu)
+	return s
 }
 
 // checkWriteRate 限每 TokenID 60 写/分钟
@@ -139,6 +143,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/connections", s.apiConnections) // v5.13: 实时连接(conntrack)
 	mux.HandleFunc("/api/discover", s.apiDiscover)       // v5.15: 未知应用发现
 	mux.HandleFunc("/api/app_usage", s.apiAppUsage)      // v5.16: 按应用的真实流量(conntrack)
+	mux.HandleFunc("/api/app_time", s.apiAppTime)        // v6.x: 应用使用时长 + 时长上限/类别封锁(app_time.go)
+	mux.HandleFunc("/api/dpi_unknown", s.apiDPIUnknown)  // v6.x: 未识别流量 Top(教规则用)
+	mux.HandleFunc("/api/phone_usage", s.apiPhoneUsage)  // 本机与热点月度流量(按网络/按卡)
+	mux.HandleFunc("/api/sim", s.apiSim)                 // 模拟环境状态(sim.go)
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
 	// v5.9.9: json-health.html 此前没有路由(死页面), 补上, 与 changelog 同款只读 serve。
@@ -638,6 +646,18 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	for mac := range namesMap {
 		appendRuleOnly(mac, nil)
 	}
+	// 模拟环境(sim_merge.go): 追加模拟设备行(带 "sim":true); 关闭时直接返回
+	out = s.simAppendDevices(out, seen)
+
+	// v6.x: 应用时长上限 / 类别封锁(app_time.go); 只给有配置的设备加这两个字段
+	if ctl := s.appControlsByMAC(time.Now()); len(ctl) > 0 {
+		for _, d := range out {
+			if c := ctl[strings.ToLower(asString(d["mac"]))]; c != nil {
+				d["app_time_limits"] = c["app_time_limits"]
+				d["category_blocks"] = c["category_blocks"]
+			}
+		}
+	}
 
 	// 按 ip 排序稳定前端显示 · rc3 N-9: 数值序 (避免 .10 < .2 字符串序)
 	ipSortKey := func(s string) [4]int {
@@ -661,6 +681,7 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		return false
 	})
 
+	s.limitCtl.annotateDevices(out) // quota / schedule / effective
 	return http.StatusOK, map[string]interface{}{
 		"devices":        out,
 		"whitelist_mode": rulesMap["whitelist_mode"],
@@ -918,6 +939,7 @@ func (s *server) apiStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	buckets := aggregate(rangeParam, raw, daily)
+	buckets = s.simMergeStats(rangeParam, macFilter, buckets) // 模拟环境; 关闭时原样
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"range":   rangeParam,

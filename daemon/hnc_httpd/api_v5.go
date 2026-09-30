@@ -49,6 +49,8 @@ type configResp struct {
 	// v5.18: 按设备域名封锁的 DNS 层(xt_string)能力: "available" | "unavailable" | "unknown"
 	// (unknown = 还没探测过, connblock_sync.sh 首次有域名封锁时探测)。
 	ConnBlockDNSLayer string `json:"conn_block_dns_layer"`
+	// 模拟环境(sim.go)是否开启
+	SimEnabled bool `json:"sim_enabled"`
 	// v5.11: 旧前端一直在读但后端从没返回的字段(刷新后总显示 auto / 默认值)。
 	HotspotIface string `json:"hotspot_iface"`
 	TcQosMode    string `json:"tc_qos_mode"`
@@ -149,6 +151,7 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 	}
 	// rc35: 用户维护的飞轮排除名单(VPN/代理),从 etc/flywheel_exclude.json 读。
 	resp.FlywheelExcludeUser = loadFlywheelExcludeUser(s.hncDir)
+	resp.SimEnabled = s.simOn()
 	// rc3.1.13: 删除 config.json 覆盖分支. config.json 已弃用, 由 post-fs-data.sh
 	// 启动时单向迁移 auth_required 到 rules.json 后删除. 字段单源化让 toggle / 后端
 	// 视角永远一致, 杜绝 rc3.1.9~12 那种"前端 ON 但 middleware 不认"的 skew.

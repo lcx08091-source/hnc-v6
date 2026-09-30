@@ -119,6 +119,8 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	rows = append(rows, s.simHistRows(fromTs, toTs, macFilter)...) // 模拟环境; 关闭时 nil
+
 	// Aggregation pass.
 	byApp := map[string]*appBucket{} // app_id -> bucket
 	byHour := make([]hourBucket, 24) // hour-of-day local time

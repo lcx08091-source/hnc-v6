@@ -227,6 +227,8 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		// hotfix15: a successful write usually changes rules/devices-derived UI state.
 		// Trigger the snapshot loop now instead of waiting for the next tick.
 		s.requestSnapshotRefresh()
+		// 手动规则/策略变更后让配额/时段控制器尽快重算(外部修改会被采纳为新基线)
+		s.limitCtl.Poke()
 	}
 	result := "ok"
 	if !resp.OK {
@@ -265,7 +267,25 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		}
 	}
 
+	// 模拟环境(sim.go): mac 是模拟设备(02:5e:00:*)的任何设备级动作只改 sim 状态,
+	// 绝不调用脚本 / tc / iptables。真实 MAC 只多一次字符串前缀比较。
+	if r, handled := simInterceptAction(s, action, p); handled {
+		return r
+	}
+
 	switch action {
+	case "sim_set": // 模拟环境(sim.go)
+		return actionSimSet(s, p)
+	case "sim_device_add":
+		return actionSimDeviceAdd(s, p)
+	case "sim_device_update":
+		return actionSimDeviceUpdate(s, p)
+	case "sim_device_del":
+		return actionSimDeviceDel(s, p)
+	case "sim_clear":
+		return actionSimClear(s)
+	case "sim_preset":
+		return actionSimPreset(s, p)
 	case "rule_set":
 		return actionRuleSet(hncDir, p)
 	case "rule_clear":
@@ -335,6 +355,12 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionConnBlockAdd(s, p)
 	case "conn_block_del":
 		return actionConnBlockDel(s, p)
+	case "app_time_limit_set": // v6.x app_time.go
+		return actionAppTimeLimitSet(s, p)
+	case "app_time_limit_del":
+		return actionAppTimeLimitDel(s, p)
+	case "category_block_set":
+		return actionCategoryBlockSet(s, p)
 	case "discover_probe":
 		return actionDiscoverProbe(s, p)
 	case "apk_scan":
@@ -385,6 +411,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 	// 与 32MB 日封顶 + 签名去重配合, 给用户一个立即回收磁盘的入口。
 	case "alert_config_set":
 		return actionAlertConfigSet(hncDir, p)
+	case "phone_usage_set": // 本机流量: 计费日 / 每卡套餐 GB / 预警百分比
+		return actionPhoneUsageSet(hncDir, p)
 	case "self_attrib_purge":
 		files, _ := filepath.Glob(filepath.Join(hncDir, "run", "self_attrib.*.jsonl"))
 		for _, f := range files {
@@ -398,6 +426,15 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionClsactRepair(hncDir)
 	case "clsact_bpf_enabled_set":
 		return actionClsactEnabledSet(hncDir, p)
+	// 设备流量配额 + 分时段限速(limit_policy.go)
+	case "quota_set":
+		return s.limitCtl.actionQuotaSet(p)
+	case "quota_clear":
+		return s.limitCtl.actionQuotaClear(p)
+	case "schedule_set":
+		return s.limitCtl.actionScheduleSet(p)
+	case "schedule_clear":
+		return s.limitCtl.actionScheduleClear(p)
 	case "clsact_mode_set": // v5.18: auto | on | off
 		return actionClsactModeSet(hncDir, p)
 	default:
