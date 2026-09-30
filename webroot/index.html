@@ -646,7 +646,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 [data-style="apple"] .btn.dan{background:var(--input);color:var(--red)}
 [data-style="apple"] .btn.ok{background:var(--input);color:var(--green)}
 [data-style="apple"] .btns{gap:10px}
-[data-style="apple"] .chip{background:var(--card);border:0;box-shadow:none;height:34px;font-weight:600}
+[data-style="apple"] .chip{background:var(--input);border:0;box-shadow:none;height:34px;font-weight:600}
 [data-style="apple"] .chip.on{background:var(--blue);box-shadow:none}
 [data-style="apple"] .hint-a,[data-style="apple"] .linkish{font-weight:400;font-size:17px}
 [data-style="apple"] .row .hint-a{color:var(--text-3)}
@@ -714,6 +714,26 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   transform-origin:0 100%;opacity:calc(1 - var(--lt,0));transform:scale(calc(1 - var(--lt,0) * .05))}
 @media (min-width:900px){ [data-style="apple"] .page::before{max-width:1180px} }
 :root.fx-notitle[data-style="apple"] .page::before{display:none}
+/* P2 切页: View Transitions(仅切页期间给 #pages 命名, 不影响主题圆形扩散) */
+:root.vt-page #pages{view-transition-name:hncpages}
+::view-transition-group(hncpages){animation-duration:.46s}
+:root.vt-page::view-transition-old(hncpages){animation:vtOutL .46s var(--q-soft) both}
+:root.vt-page::view-transition-new(hncpages){animation:vtInR .46s var(--q-soft) both}
+:root.vt-page.vt-back::view-transition-old(hncpages){animation:vtOutR .46s var(--q-soft) both;z-index:2}
+:root.vt-page.vt-back::view-transition-new(hncpages){animation:vtInL .46s var(--q-soft) both;z-index:1}
+@keyframes vtInR{from{transform:translateX(100%);box-shadow:-10px 0 30px rgba(0,0,0,.12)}to{transform:none;box-shadow:-10px 0 30px rgba(0,0,0,0)}}
+@keyframes vtOutL{to{transform:translateX(-30%);opacity:.55}}
+@keyframes vtOutR{to{transform:translateX(100%)}}
+@keyframes vtInL{from{transform:translateX(-30%);opacity:.55}to{transform:none;opacity:1}}
+/* P2 弹层: 由 JS 弹簧驱动(style.transform), 关闭动画期间保持可见 */
+.sheet.closing{visibility:visible}
+:root.bgscaled,:root.bgscaled body{background:#000}
+:root.bgscaled .pages{border-radius:calc(var(--bgp,0) * 12px);overflow:hidden;background:var(--bg)}
+:root.bgscaled .header::before{border-radius:calc(var(--bgp,0) * 12px) calc(var(--bgp,0) * 12px) 0 0}
+/* P3 低端机: 去毛玻璃(改实色)、去背景缩放 */
+:root.lowfx .header::before,:root.lowfx .tabbar,:root.lowfx .toast{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
+:root.lowfx[data-style="apple"] .header::before{background:var(--bg)}
+:root.lowfx[data-style="apple"] .tabbar{background:var(--card-solid)}
 .style-pick{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .style-pick button{padding:10px;border-radius:14px;border:2px solid var(--stroke);background:var(--card-2);font-size:12.5px;font-weight:700;display:grid;justify-items:center;gap:8px}
 .style-pick button.on{border-color:var(--blue);color:var(--blue)}
@@ -823,11 +843,19 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   }
   function stagger(root, max) {
     var kids = root ? root.children : [];
+    if (typeof fxOn === 'function' && !fxOn('list')) return;
+    if (document.documentElement.getAttribute('data-style') === 'apple') {   // v5.17: 苹果风 —— 每行 30ms, 最多 8 行(低端机 4 行)
+      var m = document.documentElement.classList.contains('lowfx') ? 4 : 8;
+      for (var j = 0; j < kids.length && j < m; j++) anim(kids[j], [{ opacity: 0, transform: 'translateY(14px)' }, { opacity: 1, transform: 'none' }], { delay: j * 30, duration: 560, fill: 'backwards' });
+      return;
+    }
     for (var i = 0; i < kids.length && i < (max || 14); i++) anim(kids[i], [{ opacity: 0, transform: 'translateY(20px) scale(.96)' }, { opacity: 1, transform: 'none' }], { delay: i * 40, duration: 760, fill: 'backwards' });
   }
   function tween(el, to, dec) {
     if (!el) return;
-    var from = parseFloat(el.textContent) || 0, t0 = performance.now(), dur = motionOn() ? 700 : 0;
+    // v5.17: 「数字滚动」可关; 苹果风 400ms
+    var numOn = typeof fxOn !== 'function' || fxOn('num'), ap = document.documentElement.getAttribute('data-style') === 'apple';
+    var from = parseFloat(el.textContent) || 0, t0 = performance.now(), dur = motionOn() && numOn ? (ap ? 400 : 700) : 0;
     if (!dur || Math.abs(to - from) < Math.pow(10, -dec)) { el.textContent = Number(to).toFixed(dec); return; }
     (function step(t) {
       var k = Math.min(1, (t - t0) / dur), e = 1 - Math.pow(1 - k, 4);
@@ -1026,16 +1054,137 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     clearTimeout(toastT); toastT = setTimeout(function () { t.classList.remove('show'); }, kind === 'err' ? 3600 : 2200);
   }
   var sheetOnClose = null;
+  /* ═════════════════════ v5.17 P3: 低端机自动降级 ═════════════════════
+     启动时测 40 帧; 运行中每段弹簧动画统计掉帧(>34ms 的帧占比 >35%), 连续两段掉帧就自动简化:
+     关掉毛玻璃、背景缩放、共享元素展开, 列表浮现只做前 4 行。可在 设置 → 外观 里恢复。 */
+  // hnc6.lowfx: '1' 已简化 · '0' 用户选了完整(不再自动降级) · '' 自动
+  var PERF = { low: LS.get('hnc6.lowfx', '') === '1', auto: LS.get('hnc6.lowfx', '') === '', frames: 0, slow: 0, strikes: 0, probe: '' };
+  function lowFx() { return PERF.low; }
+  function perfFrame(dt) { PERF.frames++; if (dt > 34) PERF.slow++; }
+  function perfEnd() {
+    if (PERF.frames >= 12) { if (PERF.slow / PERF.frames > .35) PERF.strikes++; else PERF.strikes = Math.max(0, PERF.strikes - 1); if (PERF.strikes >= 2 && !PERF.low && PERF.auto) setLowFx(true, true); }
+    PERF.frames = PERF.slow = 0;
+  }
+  function setLowFx(on, auto) {
+    PERF.low = !!on; if (!auto) PERF.auto = false; LS.set('hnc6.lowfx', on ? '1' : (PERF.auto ? '' : '0')); document.documentElement.classList.toggle('lowfx', !!on);
+    if (auto && on) setTimeout(function () { toast('检测到掉帧，已自动简化动画（可在 设置 → 外观 恢复）', 'warn'); }, 50);
+  }
+  document.documentElement.classList.toggle('lowfx', PERF.low);
+  (function probe() {
+    if (PERF.low || !PERF.auto || !window.requestAnimationFrame) return;
+    var n = 0, t0 = 0, slow = 0, last = 0;
+    requestAnimationFrame(function f(t) {
+      if (last) { if (t - last > 28) slow++; n++; } else t0 = t;
+      last = t;
+      if (n < 40) { requestAnimationFrame(f); return; }
+      var avg = (t - t0) / n, weak = (navigator.hardwareConcurrency || 8) <= 4 && (navigator.deviceMemory || 8) <= 2;
+      PERF.probe = Math.round(1000 / avg) + ' fps';
+      if (avg > 26 || slow > 12 || weak) setLowFx(true, false);
+    });
+  })();
+
+  /* ═════════════════════ v5.17 P2: 可打断的弹簧 + 苹果风弹层 ═════════════════════
+     Spring: 半隐式欧拉积分(每帧 4 个子步), go() 中途改目标时保留当前速度 → 动画可随时打断、衔接连贯。
+     苹果风弹层: 弹层 y 与背景缩放各一根弹簧; 跟手下拉时两者联动, 松手按手指速度回弹或关闭。 */
+  function Spring(p, onFrame, onRest) { this.k = p.k; this.c = p.c; this.x = 0; this.v = 0; this.to = 0; this.raf = 0; this.last = 0; this.onFrame = onFrame; this.onRest = onRest; this.eps = .5; }
+  Spring.prototype.set = function (x) { this.stop(); this.x = this.to = x; this.v = 0; this.onFrame(x); };
+  Spring.prototype.stop = function () { if (this.raf) cancelAnimationFrame(this.raf); this.raf = 0; this.last = 0; };
+  Spring.prototype.go = function (to, v, p) {
+    this.to = to; if (v != null) this.v = v; if (p) { this.k = p.k; this.c = p.c; }
+    if (!motionOn()) { this.x = to; this.v = 0; this.onFrame(to); this.stop(); if (this.onRest) this.onRest(); return; }
+    if (!this.raf) { var me = this; this.raf = requestAnimationFrame(function f(t) { me.step(t); }); }
+  };
+  Spring.prototype.step = function (t) {
+    var dt = this.last ? Math.min(.034, (t - this.last) / 1000) : 1 / 60, n = 4, h = dt / n, me = this;
+    if (this.last) perfFrame(t - this.last);
+    this.last = t;
+    for (var i = 0; i < n; i++) { this.v += (-this.k * (this.x - this.to) - this.c * this.v) * h; this.x += this.v * h; }
+    if (Math.abs(this.x - this.to) < this.eps && Math.abs(this.v) < this.eps * 10) {
+      this.x = this.to; this.v = 0; this.onFrame(this.x); this.raf = 0; this.last = 0; perfEnd(); if (this.onRest) this.onRest(); return;
+    }
+    this.onFrame(this.x);
+    this.raf = requestAnimationFrame(function f(t2) { me.step(t2); });
+  };
+  function springP() { return SPRING[FX.spring] || SPRING.light; }
+  function appleSheet() { return apple() && fxOn('sheet'); }
+  var SM = { open: false, closing: false, h: 600 };
+  var bgEls = function () { return [document.querySelector('.header'), document.getElementById('pages'), document.getElementById('tabbar')]; };
+  // 背景缩放: p=1 完全打开(缩到 0.94、变暗), p=0 复原。以视口中心为原点缩放 —— 顶栏/页面/底栏各自的
+  // transform-origin 换算到同一个视口中心(用 offsetLeft/Top: 不含 transform 的布局位置)
+  function bgOrigins() {
+    var cx = innerWidth / 2, cy = innerHeight / 2;
+    bgEls().forEach(function (el) { if (el) el.style.transformOrigin = (cx - el.offsetLeft) + 'px ' + (cy - el.offsetTop) + 'px'; });
+  }
+  var bgSpring = new Spring({ k: 300, c: 30 }, function (p) {
+    p = Math.max(0, p);
+    var sc = 1 - .06 * Math.min(1, p), on = p > .002, r = document.documentElement;
+    bgEls().forEach(function (el) { if (el) el.style.scale = on ? sc.toFixed(4) : ''; });
+    r.classList.toggle('bgscaled', on);
+    r.style.setProperty('--bgp', Math.min(1, p).toFixed(3));
+    $('#scrim').style.opacity = on ? Math.min(1, p).toFixed(3) : '';
+  }, null);
+  bgSpring.eps = .002;
+  var shSpring = new Spring({ k: 300, c: 30 }, function (y) { $('#sheet').style.transform = 'translate(-50%,' + y.toFixed(1) + 'px)'; }, function () {
+    if (SM.closing) {
+      var sh = $('#sheet'); SM.closing = false; sh.classList.remove('closing'); sh.style.transform = ''; sh.style.transition = '';
+    }
+  });
+  function sheetOpenFx(already) {
+    var sh = $('#sheet');
+    if (!appleSheet()) return false;
+    sh.style.transition = 'none'; SM.closing = false; sh.classList.remove('closing');
+    SM.h = sh.offsetHeight || 600;
+    if (!SM.open) bgOrigins();
+    SM.open = true;
+    var mor = !already && fxOn('morph') && !lowFx() && morphFrom();
+    if (mor) { shSpring.set(0); morphSheet(sh, mor); }
+    else if (already && !shSpring.raf) shSpring.set(0);
+    else { if (!shSpring.raf && !already) shSpring.set(SM.h + 40); shSpring.go(0, null, springP()); }
+    if (!lowFx()) bgSpring.go(1, null, springP()); else { bgSpring.set(0); $('#scrim').style.opacity = ''; }
+    return true;
+  }
+  function sheetCloseFx(v) {
+    var sh = $('#sheet');
+    if (!SM.open || !appleSheet()) { SM.open = false; return false; }
+    SM.open = false; SM.closing = true; sh.classList.add('closing');
+    shSpring.go((SM.h || sh.offsetHeight) + 40, v || 0, springP());
+    bgSpring.go(0, v ? -v / (SM.h || 600) : null, SPRING.light);
+    return true;
+  }
+  /* 共享元素展开: 记下刚点的那一行/卡片, 600ms 内打开的弹层从它的位置和大小"长"出来(裁剪 + 位移, 内容不变形) */
+  var lastTap = null;
+  document.addEventListener('pointerdown', function (e) {
+    // 取离手指最近的可点元素(按钮 / 行 / 卡片), 不要一路找到整个分组卡片
+    var el = e.target.closest && e.target.closest('.chip, .btn, .cn, .dg, .row, .sni-row, .client, .dev-h, [data-act], .dev, .glass');
+    if (!el || el.closest('#sheet') && !el.closest('.cn, .row, .dg, .btn')) { lastTap = null; return; }
+    var r = el.getBoundingClientRect(); lastTap = { r: r, t: performance.now(), rad: parseFloat(getComputedStyle(el).borderRadius) || 12 };
+  }, true);
+  function morphFrom() { return lastTap && performance.now() - lastTap.t < 650 && lastTap.r.width > 20 ? lastTap : null; }
+  function morphSheet(sh, from) {
+    var fr = sh.getBoundingClientRect(), s = from.r, dy = s.top - fr.top;
+    var l = Math.max(0, s.left - fr.left), rgt = Math.max(0, fr.right - s.right), b = Math.max(0, fr.height - s.height);
+    var a = anim(sh, [
+      { transform: 'translate(-50%,' + dy.toFixed(1) + 'px)', clipPath: 'inset(0 ' + rgt.toFixed(1) + 'px ' + b.toFixed(1) + 'px ' + l.toFixed(1) + 'px round ' + from.rad + 'px)' },
+      { transform: 'translate(-50%,0)', clipPath: 'inset(0 0 0 0 round 14px 14px 0 0)' }
+    ], { duration: 450, easing: EASE.q });
+    anim($('#sheet-body'), [{ opacity: 0 }, { opacity: 1 }], { duration: 260, delay: 90, easing: 'ease-out', fill: 'backwards' });
+    lastTap = null;
+    return a;
+  }
   function sheet(html, opt) {
     opt = opt || {};
     var sh = $('#sheet'); sh.classList.toggle('tall', !!opt.tall); sh.dataset.kind = opt.kind || '';
     $('#sheet-body').innerHTML = html; sheetOnClose = opt.onClose || null;
+    var already = sh.classList.contains('show') && !SM.closing;
     $('#scrim').classList.add('show'); sh.classList.add('show'); sh.scrollTop = 0;
     placeSegs(sh);
+    if (!sheetOpenFx(already) && already) anim($('#sheet-body'), [{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' });
+    else if (already && apple()) anim($('#sheet-body'), [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: 'ease-out' });
     return sh;
   }
-  function closeSheet() {
+  function closeSheet(v) {
     $('#scrim').classList.remove('show'); var sh = $('#sheet'); sh.classList.remove('show'); sh.dataset.kind = '';
+    sheetCloseFx(typeof v === 'number' ? v : 0);
     var f = sheetOnClose; sheetOnClose = null; if (f) try { f(); } catch (_) {}
   }
   $('#scrim').addEventListener('click', closeSheet);
@@ -1045,19 +1194,33 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     sh.addEventListener('touchstart', function (e) {
       if (!sh.classList.contains('show') || sh.scrollTop > 0 || e.touches.length !== 1) return;
       if (e.target.closest('input,textarea,select,.seg,.toggle')) return;
-      st = { y: e.touches[0].clientY, t: Date.now(), dy: 0 };
+      st = { y: e.touches[0].clientY, t: Date.now(), dy: 0, ly: e.touches[0].clientY, lt: performance.now(), v: 0, js: appleSheet() && SM.open };
+      if (st.js) { shSpring.stop(); bgSpring.stop(); }
     }, { passive: true });
     sh.addEventListener('touchmove', function (e) {
       if (!st) return;
-      st.dy = e.touches[0].clientY - st.y;
-      if (st.dy <= 0 || sh.scrollTop > 0) { if (st.dy < -4) { st = null; sh.style.transform = ''; sh.style.transition = ''; } return; }
-      sh.style.transition = 'none';
-      sh.style.transform = 'translate(-50%,' + Math.round(st.dy) + 'px)';
+      var cy = e.touches[0].clientY, now = performance.now();
+      st.v = st.v * .3 + (cy - st.ly) / Math.max(1, now - st.lt) * 1000 * .7; st.ly = cy; st.lt = now;   // 手指速度 px/s(平滑)
+      st.dy = cy - st.y;
+      if (st.dy <= 0 || sh.scrollTop > 0) { if (st.dy < -4) { var wasJs = st.js; st = null; if (wasJs) { shSpring.go(0, null, springP()); bgSpring.go(1, null, springP()); } else { sh.style.transform = ''; sh.style.transition = ''; } } return; }
+      if (st.js) {   // v5.17: 苹果风 —— 背景缩放 / 遮罩随拖动距离联动
+        shSpring.set(st.dy); if (!lowFx()) bgSpring.set(Math.max(0, 1 - st.dy / (SM.h || 600)));
+      } else {
+        sh.style.transition = 'none';
+        sh.style.transform = 'translate(-50%,' + Math.round(st.dy) + 'px)';
+      }
       if (e.cancelable) e.preventDefault();
     }, { passive: false });
     function end() {
       if (!st) return;
       var fast = st.dy > 30 && st.dy / Math.max(1, Date.now() - st.t) > .6, far = st.dy > 90;
+      if (st.js) {
+        var v = performance.now() - st.lt < 90 ? st.v : 0, jsFast = v > 600 && st.dy > 20;
+        st = null;
+        if (far || fast || jsFast) closeSheet(Math.max(v, 0));
+        else { shSpring.go(0, v, springP()); if (!lowFx()) bgSpring.go(1, -v / (SM.h || 600), springP()); }
+        return;
+      }
       st = null; sh.style.transition = ''; sh.style.transform = '';
       if (far || fast) closeSheet();
     }
@@ -1157,6 +1320,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       EASE.q = q; EASE.soft = soft; r.style.setProperty('--q', q); r.style.setProperty('--q-soft', soft);
     } catch (_) {}
     r.classList.toggle('fx-nopress', !fxOn('press'));
+    // 弹层开着时关掉了动画 / 切回默认风格: 背景立即复原, 弹层交回 CSS 控制
+    if (SM.open && !appleSheet()) { SM.open = false; shSpring.stop(); bgSpring.set(0); var sh = document.getElementById('sheet'); sh.style.transform = ''; sh.style.transition = ''; }
   }
   function applyTheme() {
     var r = document.documentElement;
@@ -1695,9 +1860,15 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     S.devices.forEach(function (d) {
       var c = document.querySelector('.dev[data-dev="' + d.mac + '"]'); if (!c) return;
       var rx = $('[data-rx]', c), tx = $('[data-tx]', c);
-      if (rx) { var a = bps(d.rx), b = bps(d.tx); rx.textContent = a.v; tx.textContent = b.v; rx.parentNode.lastChild.textContent = ' ' + a.u; tx.parentNode.lastChild.textContent = ' ' + b.u; }
+      if (rx) { var a = bps(d.rx), b = bps(d.tx); rollNum(rx, a.v, a.u); rollNum(tx, b.v, b.u); rx.parentNode.lastChild.textContent = ' ' + a.u; tx.parentNode.lastChild.textContent = ' ' + b.u; }
       var al = $('[data-apps]', c); if (al) { var h = appsLine(d); if (al._h !== h) { al._h = h; al.innerHTML = h; al.hidden = !h; } }
     });
+  }
+  // v5.17: 苹果风「数字滚动」—— 单位没变时从旧值滚到新值; 否则直接替换
+  function rollNum(el, str, unit) {
+    var sameUnit = (el.parentNode.lastChild.textContent || '').trim() === unit;
+    if (!apple() || !fxOn('num') || !sameUnit || !/^\d+(\.\d+)?$/.test(str)) { el.textContent = str; return; }
+    tween(el, parseFloat(str), (str.split('.')[1] || '').length);
   }
   function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError].join(':'); }).join('|'); }
   function refreshCard(mac) {
@@ -2728,7 +2899,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         return '<button class="press' + (S.style === t[0] ? ' on' : '') + '" data-style-pick="' + t[0] + '"><span class="pv" style="background:' + t[2] + '"><i style="width:46%;background:' + t[3] + '"></i><i style="background:' + t[4] + '"></i><i style="width:80%;background:' + t[4] + '"></i></span>' + t[1] + '</button>'; }).join('') + '</div>' +
       '<div class="note" style="margin-bottom:-2px">颜色</div><div class="theme-pick">' + [['auto', '跟随系统', 'linear-gradient(135deg,#F5F5F7 50%,#1c1c1e 50%)'], ['light', '浅色', '#F5F5F7'], ['dark', '深色', '#1c1c1e']].map(function (t) {
         return '<button class="press' + (S.theme === t[0] ? ' on' : '') + '" data-theme-pick="' + t[0] + '"><span class="sw" style="background:' + t[2] + '"></span>' + t[1] + '</button>'; }).join('') + '</div>' +
-      '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">界面动画</div><div class="s">弹簧切页、列表浮现、按压回弹</div></span>' + toggle(S.motion, 'data-set="motion" aria-label="界面动画"') + '</div>')]);
+      '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">界面动画</div><div class="s">弹簧切页、列表浮现、按压回弹</div></span>' + toggle(S.motion, 'data-set="motion" aria-label="界面动画"') + '</div>' + fxSettingsHtml())]);
     var l = S.live || {};
     groups.push(['关于', sItem(['blue', 'info'], '版本', 'HNC 后端 · versionCode ' + esc(l.backend_version_code || '—'), val(esc(l.backend_version || '—'))) +
       sBtn(['green', 'doc'], '更新日志', '查看完整变更记录', 'changelog', '查看') +
@@ -2780,6 +2951,30 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       clearInterval(pairT); tick(); pairT = setInterval(tick, 1000);
     }).catch(function (e) { toast('生成配对码失败：' + errText(e), 'err'); });
   }
+  /* v5.17: 设置 → 外观 → 动画效果 */
+  var FXP_T = { off: '关闭', calm: '克制', std: '标准', lively: '灵动', custom: '自定义' };
+  function fxSettingsHtml() {
+    var pre = fxPreset();
+    return '<div class="note" style="margin:8px 0 -2px">动画效果 · ' + FXP_T[pre] + (S.style === 'apple' ? '' : '（标注「苹果风」的效果在苹果风下才有）') + '</div>' +
+      seg('fxp', [['off', '关闭'], ['calm', '克制'], ['std', '标准'], ['lively', '灵动']], pre, 'small') +
+      FX_LIST.map(function (x) {
+        var dis = !S.motion && x[0] !== 'title' && x[0] !== 'haptic';
+        return '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">' + x[1] + '</div><div class="s">' + x[2] + '</div></span>' + toggle(FX[x[0]], 'data-set="fx-' + x[0] + '" aria-label="' + x[1] + '"' + (dis ? ' disabled' : '')) + '</div>';
+      }).join('') +
+      '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">弹簧手感</div><div class="s">轻快：stiffness 300 / damping 30 · 有弹性：200 / 20</div></span>' + seg('fxspring', [['light', '轻快'], ['bouncy', '有弹性']], FX.spring, 'small') + '</div>' +
+      '<div class="note" style="margin:6px 0 -2px">试一下</div><div class="chips">' + [['sheet', '弹层'], ['page', '切页'], ['list', '列表浮现'], ['num', '数字滚动']].map(function (b) { return '<button class="chip press" data-act="fx-demo" data-demo="' + b[0] + '">' + b[1] + '</button>'; }).join('') + '</div>' +
+      '<div class="note">演示数字：<b class="num" id="fx-num" style="color:var(--text-1)">128.00</b> MB/s</div>' +
+      '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">性能模式</div><div class="s">' + (PERF.low ? '已简化：去掉毛玻璃、背景缩放、共享元素展开，列表只浮现前 4 行' : '完整效果；连续掉帧时会自动简化') + (PERF.probe ? ' · 启动测得 ' + PERF.probe : '') + '</div></span><button class="linkish" data-act="fx-perf">' + (PERF.low ? '恢复完整' : '手动简化') + '</button></div>';
+  }
+  function fxRefresh() { applyTheme(); navSync(); if (S.page === 'settings') renderSettings(false); }
+  function fxDemo(k) {
+    if (k === 'sheet') sheet('<h3>弹层演示</h3><div class="sub">从你点的按钮里长出来；按住往下拖可以关闭，背后的页面会跟着缩放</div>' +
+      '<div class="dbox"><div class="row2"><span class="k">弹簧</span><span class="v">' + (FX.spring === 'bouncy' ? '有弹性 200 / 20' : '轻快 300 / 30') + '</span></div><div class="row2"><span class="k">性能模式</span><span class="v">' + (PERF.low ? '已简化' : '完整') + '</span></div></div>' +
+      '<button class="btn pri wide press" data-close style="margin-top:14px">好的</button>');
+    else if (k === 'page') { go('devices'); setTimeout(function () { go('settings'); }, 1100); }
+    else if (k === 'list') { var w = $('#p-settings .wrap'); stagger(w, 14); }
+    else if (k === 'num') { var el = $('#fx-num'); if (el) tween(el, Math.round(Math.random() * 90000) / 100, 2); }
+  }
   function udParams(on) {
     var qs = Math.round(num($('#ud-qs') && $('#ud-qs').value, 23)), qe = Math.round(num($('#ud-qe') && $('#ud-qe').value, 7)), iv = Math.round(num($('#ud-iv') && $('#ud-iv').value, 30));
     qs = Math.min(23, Math.max(0, qs)); qe = Math.min(23, Math.max(0, qe)); iv = Math.min(1440, Math.max(1, iv));
@@ -2789,8 +2984,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   function setToggleCfg(kind, el) {
     var on = el.getAttribute('aria-checked') === 'true', rollback = function (e) { el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); };
     var done = function (msg) { return function (r) { toast(msg || ((el.getAttribute('aria-label') || '') + (on ? ' 已开启' : ' 已关闭'))); return loadConfig(); }; };
+    if (kind.indexOf('fx-') === 0) { FX[kind.slice(3)] = on; saveFx(); fxRefresh(); return; }
     switch (kind) {
-      case 'motion': S.motion = on; LS.set('hnc6.motion', on ? '1' : '0'); applyTheme(); return;
+      case 'motion': S.motion = on; LS.set('hnc6.motion', on ? '1' : '0'); fxRefresh(); return;
       case 'hs-auto': api.action('hotspot_save', { autostart: on ? 'true' : 'false' }).then(done()).catch(rollback);
         var w = el.closest('[data-foldkey]'); if (on && w && !w.classList.contains('open')) foldToggle(w, 'hs'); return;
       case 'amaster': api.action('alert_config_set', { section: 'master', enabled: String(on) }).then(done()).then(reloadAlertCfg).catch(rollback); return;
@@ -2878,15 +3074,27 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_enabled === true && !S.clsact) clsactCheck(true); });
     schedulePoll(50);
   }
-  var leaving = null;
+  var leaving = null, pageVT = null;
   function go(name) {
     if (ORDER.indexOf(name) < 0) return;
     if (name === S.page) { $('#p-' + name).scrollTo({ top: 0, behavior: 'smooth' }); syncTab(name); return; }
     var from = $('#p-' + S.page), to = $('#p-' + name), dir = ORDER.indexOf(name) > ORDER.indexOf(S.page) ? 1 : -1;
     if (leaving) { leaving.el.classList.remove('on'); if (leaving.a) leaving.a.cancel(); leaving = null; }
     S.page = name; closeDD(); syncTab(name); LS.set('hnc6.page', name); navSync();
+    // v5.17: 苹果风切页 —— View Transitions 推入(新页从右侧进, 旧页后退 30% 并变暗); 不支持时走下面的普通动画
+    if (apple() && fxOn('page') && document.startViewTransition && !lowFx()) {
+      var R = document.documentElement;
+      if (pageVT) try { pageVT.skipTransition(); } catch (_) {}
+      R.classList.add('vt-page'); R.classList.toggle('vt-back', dir < 0);
+      pageVT = document.startViewTransition(function () { to.classList.add('on'); from.classList.remove('on'); RENDER[name](true); navSync(); });
+      var clr = function () { R.classList.remove('vt-page', 'vt-back'); pageVT = null; };
+      pageVT.finished.then(clr, clr);
+      onEnter(name);
+      return;
+    }
     to.classList.add('on');
     RENDER[name](true);
+    if (!fxOn('page')) { from.classList.remove('on'); onEnter(name); return; }
     var a = anim(from, [{ transform: 'none', opacity: 1 }, { transform: 'translateX(' + (-dir * 18) + '%) scale(.95)', opacity: 0 }], { duration: 380, easing: EASE.soft, fill: 'forwards' });
     anim(to, [{ transform: 'translateX(' + (dir * 30) + '%) scale(.97)', opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 800 });
     leaving = { el: from, a: a };
@@ -3038,6 +3246,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       else if (k === 'range') { S.statsRange = v; refreshStats(); }
       else if (k === 'hist') { S.dpiDays = +v; paintDpiHist(); Promise.all([loadDpiHist(S.dpiDays), loadAppUsage(S.dpiDays)]).then(paintDpiHist); }
       else if (k === 'dflt') { S.dpiFilter = v; paintClients(); }
+      else if (k === 'fxp') { if (v === 'off') { S.motion = false; LS.set('hnc6.motion', '0'); } else { S.motion = true; LS.set('hnc6.motion', '1'); FX = Object.assign({}, FX_PRESETS[v]); saveFx(); } fxRefresh(); toast('动画效果：' + FXP_T[v]); }
+      else if (k === 'fxspring') { FX.spring = v; saveFx(); fxRefresh(); }
       else if (k === 'connv') { S.connView = v; paintConnSheet(); }
       else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
       else if (k === 'qos-mode') setQos('mode', v);
@@ -3092,6 +3302,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         break;
       case 'conns': if (d) connSheet(d); break;
       case 'ident-edit': if (d) identSheet(d); break;
+      case 'fx-demo': fxDemo(a.getAttribute('data-demo')); break;
+      case 'fx-perf': setLowFx(!PERF.low, false); PERF.strikes = 0; fxRefresh(); toast(PERF.low ? '已切到简化动画' : '已恢复完整动画'); break;
       case 'self-conns': selfConnSheet(); break;
       case 'apply-limit': devAct(d.mac, function () { return doLimit(d, mbsToMbps(readNum(box, 'down')), mbsToMbps(readNum(box, 'up'))); }, function () { return readNum(box, 'down') || readNum(box, 'up') ? '已应用限速到 ' + d.name : '已清除 ' + d.name + ' 的限速'; }); break;
       case 'clear-limit': devAct(d.mac, function () { return api.action('rule_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的限速'); break;
@@ -3191,6 +3403,12 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   /* 长按封锁(0.8 秒) */
   // v5.12: 手指移动超过 10px(或页面开始滚动 → pointercancel)就取消。此前按住后滑走照样封锁;
   //        且旧版在 document 上捕获所有 pointerleave, 鼠标划过任意子元素都会误取消。
+  // v5.17: 触感反馈 —— 开关 / 分段 / 确认 / 长按开始
+  document.addEventListener('click', function (e) {
+    var t = e.target; if (!t.closest) return;
+    if (t.closest('.toggle')) haptic(10); else if (t.closest('#cf-ok')) haptic(15); else if (t.closest('.seg button, [data-style-pick], [data-theme-pick]')) haptic(6);
+  }, true);
+  document.addEventListener('pointerdown', function (e) { if (e.target.closest && e.target.closest('[data-act="hold"]')) haptic(8); }, true);
   var holdT = 0, holdP = null, swallowClick = false;
   // 长按生效后, 这次手势结束时产生的 click 一律吞掉; 下一次按下即复位(不按时间算, 按多久都可靠)
   document.addEventListener('click', function (e) { if (swallowClick) { swallowClick = false; e.stopPropagation(); e.preventDefault(); } }, true);
