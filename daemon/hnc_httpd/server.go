@@ -146,6 +146,8 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/json-health.html", s.serveWebrootPage("json-health.html"))
 	// v5.11: 新 WebUI 的底栏折射库(Hyalite, MIT)
 	mux.HandleFunc("/hyalite.js", s.serveWebrootPage("hyalite.js"))
+	// v5.19: 全新界面 HNC Glass 预览(示例数据)
+	mux.HandleFunc("/glass.html", s.serveWebrootPage("glass.html"))
 
 	// v4.0 Patch 3.a: 写操作统一 endpoint, 内部白名单 + per-token rate limit + CSRF
 	// 必经 authMiddleware(不允许过渡期匿名写)

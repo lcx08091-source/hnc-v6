@@ -91,6 +91,8 @@ func isPublicPath(p string) bool {
 		"/json-health.html",
 		// v5.11: 新 WebUI 的静态依赖, 同样不含数据(数据接口各自鉴权)
 		"/hyalite.js",
+		// v5.19: 全新界面 HNC Glass 的交互原型(示例数据, 不调 API)
+		"/glass.html",
 		"/api/pair/verify",
 		"/api/pairing/status",
 		"/api/health",
