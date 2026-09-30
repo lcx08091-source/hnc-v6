@@ -173,7 +173,11 @@ for table_chain in "mangle PREROUTING  HNC_RESTORE" \
                    "filter FORWARD     HNC_CTRL"    \
                    "filter FORWARD     HNC_WHITELIST" \
                    "filter FORWARD     HNC_QUIC" \
-                   "filter FORWARD     HNC_CONNBLK"; do
+                   "filter FORWARD     HNC_CONNBLK" \
+                   "filter INPUT       HNC_ENCDNS" \
+                   "filter FORWARD     HNC_ENCDNS" \
+                   "filter FORWARD     HNC_ENCDNS_STRICT" \
+                   "filter FORWARD     HNC_ENCDNS_DOT"; do
     t=$(echo $table_chain | awk '{print $1}')
     c=$(echo $table_chain | awk '{print $2}')
     h=$(echo $table_chain | awk '{print $3}')
@@ -190,7 +194,11 @@ if command -v ip6tables >/dev/null 2>&1; then
                        "filter FORWARD     HNC_CTRL"    \
                        "filter FORWARD     HNC_WHITELIST" \
                        "filter FORWARD     HNC_QUIC" \
-                       "filter FORWARD     HNC_CONNBLK"; do
+                       "filter FORWARD     HNC_CONNBLK" \
+                       "filter INPUT       HNC_ENCDNS" \
+                       "filter FORWARD     HNC_ENCDNS" \
+                       "filter FORWARD     HNC_ENCDNS_STRICT" \
+                       "filter FORWARD     HNC_ENCDNS_DOT"; do
         t=$(echo $table_chain | awk '{print $1}')
         c=$(echo $table_chain | awk '{print $2}')
         h=$(echo $table_chain | awk '{print $3}')

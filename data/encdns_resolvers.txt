@@ -1,0 +1,105 @@
+# encdns_resolvers.txt — 加密 DNS(DoH / DoT / DoQ)公共解析器清单(v5.21)
+#
+# 用途: 「加密 DNS 策略」strict 档(bin/encdns_sync.sh)按这里的主机名与 IP 拦截,
+#       dpid 的 doh_suspect 计数(src/dpid/output/encdns.go 内置同一份名单, 有测试对齐)。
+# 格式: 每行一个条目, # 开头为注释, 空行忽略。
+#   - 主机名(小写, 如 dns.google): 该名字及其全部子域名的明文 DNS 查询被丢弃
+#     (xt_string 匹配 DNS 线格式 qname 后缀), 同时 TLS ClientHello 里 SNI 等于该名字
+#     的 443 连接被 tcp-reset(xt_string 匹配 SNI 扩展里的 "|00|len16|name")。
+#   - IP / CIDR(IPv4 或 IPv6): 发往它的 tcp/udp 443(DoH / DoH3)被 REJECT。
+#     853(DoT / DoQ)不分目的地址, dot 档起就对所有地址拒绝。
+# 注意: 只放「只提供 DNS 服务」的地址。共享 CDN 地址(如 cloudflare-dns.com 解析出的
+#       104.16.x.x)不要写成 IP, 否则会误伤同 IP 上的网站 —— 那类靠 SNI/DNS 名字拦。
+# 扩展: 直接加行即可; 用户自定义副本放 /data/local/hnc/etc/encdns_resolvers.txt
+#       (存在时优先于模块自带的这份)。改完在界面重新保存一次策略(或等 watchdog 重同步)。
+
+# ── Google ──
+dns.google
+dns.google.com
+8.8.8.8
+8.8.4.4
+2001:4860:4860::8888
+2001:4860:4860::8844
+
+# ── Cloudflare ──
+cloudflare-dns.com
+one.one.one.one
+1.1.1.1
+1.0.0.1
+1.1.1.2
+1.0.0.2
+1.1.1.3
+1.0.0.3
+2606:4700:4700::1111
+2606:4700:4700::1001
+2606:4700:4700::1112
+2606:4700:4700::1002
+
+# ── 阿里 AliDNS ──
+dns.alidns.com
+223.5.5.5
+223.6.6.6
+2400:3200::1
+2400:3200:baba::1
+
+# ── 腾讯 DNSPod ──
+doh.pub
+dot.pub
+sm2.doh.pub
+1.12.12.12
+120.53.53.53
+2402:4e00::
+
+# ── 360 ──
+doh.360.cn
+dot.360.cn
+
+# ── Quad9 ──
+dns.quad9.net
+dns9.quad9.net
+dns10.quad9.net
+dns11.quad9.net
+9.9.9.9
+149.112.112.112
+9.9.9.11
+149.112.112.11
+2620:fe::fe
+2620:fe::9
+
+# ── OpenDNS / Cisco ──
+doh.opendns.com
+doh.familyshield.opendns.com
+dns.umbrella.com
+208.67.222.222
+208.67.220.220
+2620:119:35::35
+2620:119:53::53
+
+# ── AdGuard ──
+dns.adguard.com
+dns.adguard-dns.com
+family.adguard-dns.com
+unfiltered.adguard-dns.com
+94.140.14.14
+94.140.15.15
+94.140.14.140
+94.140.14.141
+2a10:50c0::ad1:ff
+2a10:50c0::ad2:ff
+
+# ── NextDNS / ControlD / 其它 ──
+dns.nextdns.io
+45.90.28.0/24
+45.90.30.0/24
+dns.controld.com
+freedns.controld.com
+76.76.2.0/24
+doh.cleanbrowsing.org
+doh.dns.sb
+185.222.222.222
+45.11.45.11
+dns.mullvad.net
+doh.mullvad.net
+194.242.2.2
+dns.twnic.tw
+101.101.101.101

@@ -1981,3 +1981,80 @@ GET `/api/sim`(仅 GET,其他方法 405):
 | `app_time_exhausted` | app_time,今日活跃秒数达到上限(同时开始封锁到次日 0 点) | 同上 | `app_time_exhausted_<去冒号mac>_<app_id>_<YYYYMMDD>` | 同上 |
 
 - 四种都只在告警总开关(`alerts_config.json.enabled`)开启时写入;模拟设备、模拟热点流量都不会触发。
+
+## 19. v5.21 识别准确度:加密 DNS 策略 / VPN·代理检测 / 共现推断
+
+> 来源:`daemon/hnc_httpd/encdns.go`、`traffic_ident.go`、`ct_new_events.go`、`bin/encdns_sync.sh`、`data/encdns_resolvers.txt`、
+> `src/dpid/output/encdns.go`。新增路由 GET `/api/encdns`(鉴权、敏感只读);新增动作 `encdns_set`。
+
+### 19.1 加密 DNS 策略:GET `/api/encdns` + `encdns_set`
+
+配置 `data/encdns.json`:`{"policy":"off|dot|strict","devices":{"<mac>":"off|dot|strict"},"ts":N}`(httpd 写,脚本读)。
+
+| 档位 | 效果 |
+|---|---|
+| `off`(默认) | 不干预 |
+| `dot` | 拒绝 tcp/853(DoT,tcp-reset)与 udp/853(DoQ,端口不可达)→ 私人 DNS「自动」回落明文 53 |
+| `strict` | dot + 公共 DoH:解析器 IP 的 tcp/udp 443 REJECT;解析器主机名的明文 DNS 查询 DROP、TLS SNI 命中的 443 连接 tcp-reset(后两者需 xt_string) |
+
+- 范围:`policy` 作用于热点口上的全部设备;`devices` 按 MAC 覆盖(`off` = 该设备豁免全局)。热点未开时全局部分 `pending`,按 MAC 覆盖照常生效。
+- **取舍**:「私人 DNS = 指定主机名」(严格模式)的设备在 dot/strict 下不会回落,会**整体无法解析(断网)**。响应里的 `tradeoff` 是给界面直接展示的中文说明。
+- 名单:`data/encdns_resolvers.txt`(一行一个主机名 / IP / CIDR;`/data/local/hnc/etc/encdns_resolvers.txt` 优先),dpid 内置同一份(有测试对齐)。
+
+动作 `encdns_set`:
+
+| params | 说明 |
+|---|---|
+| `policy` | 全局:`off\|dot\|strict`;按设备另可 `inherit`(删除覆盖,跟随全局) |
+| `scope` | `global`(默认)\|`device`;带 `mac` 时默认 `device` |
+| `mac` | scope=device 必填;模拟设备(`02:5e:00`)拒绝;覆盖最多 64 台 |
+
+返回 `detail`:脚本最后一行 `ENCDNS=off` 或 `ENCDNS=on global=<off|dot|strict|pending> devices=<n> rules=<n> string_layer=<1|0>`;已是目标状态 → `"no change"`。
+
+GET `/api/encdns`:
+
+```json
+{
+  "ok": true, "policy": "dot", "devices": {"aa:bb:cc:00:00:02": "strict"},
+  "device_list": [{"mac": "aa:bb:cc:00:00:02", "policy": "strict"}],
+  "policies": ["off", "dot", "strict"],
+  "string_layer": "available",            // available|unavailable|unknown(strict 的 SNI/DNS 名字层)
+  "counters": {                            // iptables -nvxL 计数, 每次重同步清零; null = 读取失败(见 counters_error)
+    "chain": true, "v6": true,
+    "dot": {"pkts": 20, "bytes": 1300}, "doh_ip": {"pkts": 11, "bytes": 700},
+    "doh_sni": {"pkts": 1, "bytes": 517}, "doh_dns": {"pkts": 4, "bytes": 300},
+    "total_pkts": 36, "total_bytes": 2817, "v4_pkts": 29, "v6_pkts": 7
+  },
+  "dpid": {"dns_seen": 120, "dot_attempts": 3, "dot_flows": 0, "doh_suspect": 2,
+           "recent_doh": [{"client_mac": "…", "name": "dns.google", "ts": 0}], "since": 0},  // dpi_state.json 的 encdns 块, 可能为 null
+  "tradeoff": "…", "updated_at": 1790000000
+}
+```
+
+`counters.*.pkts` ≈ 被挡下的加密 DNS 尝试次数(tcp-reset 后客户端的重试也计入)。
+
+### 19.2 客户端 VPN / 代理检测:`/api/devices[].vpn`
+
+每台设备最近 5 分钟(按 app_usage 10 秒一轮的连接表差分):
+
+```json
+"vpn": {"level": "none|likely|certain", "reason": "WireGuard(udp 51820)", "share": 0.93, "bytes": 5242880,
+        "dst": "8.8.9.9", "window_sec": 300}
+```
+
+- `certain`:协议特征流(WireGuard 51820 / OpenVPN 1194 / IPsec 500·4500·ESP / L2TP 1701 / PPTP 1723·GRE / WARP 2408 / VPN 服务商域名 / 规则库 vpn·proxy 类)字节占比 ≥ 50%。
+- `likely`:特征流占比 ≥ 20%;或 单个「可疑目的」(无域名且归不上应用的 TLS 443 / QUIC 443 / 非标准端口 TCP / 其它 UDP)占比 ≥ 70%、窗口 ≥ 2 MB、持续 ≥ 2 分钟、其余 ≥ 64 KB 的目的 ≤ 3 个(此时 `dst` = 隧道对端)。
+- 窗口内总字节 < 256 KB 不判(`none`)。
+
+应用归属:特征流、以及判为 likely 的那个对端 IP 上本来记「未识别」的字节,记到伪应用 **`_tunnel`**(name「VPN/代理隧道」, category `tunnel`),
+出现在 `/api/app_usage.by_app`,**不计入应用使用时长**(`/api/app_time` 里没有它)。
+
+### 19.3 共现推断:`inferred_bytes`
+
+目的 IP 无反查名、不在 ip_app_map 的新连接,若同一设备 ±5 秒内新建了某个真应用的连接且只有这一个应用(或它建连数 ≥2 且 ≥ 第二名 2 倍),推测为该应用;
+建连时间来自 conntrack NEW 事件,订阅不上时退回 10 秒轮询粒度(此时要求同一轮唯一应用且 ≥2 条建连)。推测按 (设备, IP) 缓存 10 分钟。
+为了看到建连后 5 秒内的连接,新出现的无名连接字节会**延后一轮(10 秒)**记账。
+
+- `/api/app_usage`:顶层 `inferred_bytes`;`by_app[].inferred_bytes`(该应用字节中推测来的部分,界面可标「推测」)。
+- `/api/dpi_unknown`:新增 `tunnel_bytes`、`inferred_bytes`(已从「未识别」里分出去的两块)。
+- 日文件 `run/app_usage.YYYYMMDD.json` 新增可选字段 `inferred: {"mac|app": [up, down]}`(旧文件兼容)。

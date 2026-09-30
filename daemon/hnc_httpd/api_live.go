@@ -162,6 +162,13 @@ type ifaceDetect struct {
 	BTTether      []string `json:"bt_tether"`
 	Upstream      string   `json:"upstream"`
 	UpstreamClass string   `json:"upstream_class"`
+	// v5.20.1: 热点上游(tethering)与本机出口(可能是 VPN)分开
+	Ts                 int64  `json:"ts"`
+	UpstreamSource     string `json:"upstream_source"`
+	TetherUpstream     string `json:"tether_upstream"`
+	LocalUpstream      string `json:"local_upstream"`
+	LocalUpstreamClass string `json:"local_upstream_class"`
+	VPNActive          bool   `json:"vpn_active"`
 }
 
 func readIfaceDetect(hncDir string) ifaceDetect {

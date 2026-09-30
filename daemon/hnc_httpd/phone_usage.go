@@ -30,6 +30,8 @@
 //   上游判定: `ip route get 1.1.1.1` 的出口(root 无 fwmark 走默认网络), 再用本轮增量
 //   交叉校验(路由说 Wi-Fi 但 Wi-Fi 增量远小于热点增量、蜂窝却够 → 改判蜂窝), 见
 //   puResolveUpstream。
+//   v5.20.1: 手机开 VPN 时 `ip route get` 是 tun0 —— 改为优先用 iface_detect.json 的
+//   tethering 上游(phone_usage_upstream.go); tun* 不计数, 本机经 VPN 的字节计在物理口上。
 //
 // 按卡归属: 每 5 分钟刷新一次"默认数据卡"(phone_usage_sim.go), 本分钟的蜂窝增量
 // 全部记给这张卡; 识别不到记 "0|蜂窝(未知卡)"。
@@ -315,9 +317,10 @@ func puSaveDay(hncDir string, d *puDay) error {
 // ─── 配置 ─────────────────────────────────────────────────────────
 
 type puConfig struct {
-	BillingDay  int                `json:"billing_day"`  // 1-28
-	PlanGB      map[string]float64 `json:"plan_gb"`      // "1"/"2" → GB(0 = 无套餐)
-	WarnPercent int                `json:"warn_percent"` // 1-100
+	BillingDay  int                `json:"billing_day"`            // 1-28
+	PlanGB      map[string]float64 `json:"plan_gb"`                // "1"/"2" → GB(0 = 无套餐)
+	WarnPercent int                `json:"warn_percent"`           // 1-100
+	UseNetstats string             `json:"use_netstats,omitempty"` // v5.21: auto|prefer|off(stats_calibration.go)
 }
 
 func puConfigPath(hncDir string) string {
@@ -339,6 +342,10 @@ func puLoadConfig(hncDir string) puConfig {
 			}
 			if x.WarnPercent >= 1 && x.WarnPercent <= 100 {
 				c.WarnPercent = x.WarnPercent
+			}
+			switch x.UseNetstats {
+			case "auto", "prefer", "off":
+				c.UseNetstats = x.UseNetstats
 			}
 			for k, v := range x.PlanGB {
 				if (k == "1" || k == "2") && v >= 0 && v <= puMaxPlanGB {
@@ -388,15 +395,25 @@ func actionPhoneUsageSet(hncDir string, p map[string]string) actionResp {
 		c.WarnPercent = n
 		changed++
 	}
+	if v, ok := p["use_netstats"]; ok && strings.TrimSpace(v) != "" { // v5.21
+		switch v = strings.ToLower(strings.TrimSpace(v)); v {
+		case "auto", "prefer", "off":
+			c.UseNetstats = v
+			changed++
+		default:
+			return actionResp{OK: false, Error: "bad params", Detail: "use_netstats must be auto|prefer|off"}
+		}
+	}
 	if changed == 0 {
-		return actionResp{OK: false, Error: "bad params", Detail: "nothing to set (billing_day / plan_sim1_gb / plan_sim2_gb / warn_percent)"}
+		return actionResp{OK: false, Error: "bad params", Detail: "nothing to set (billing_day / plan_sim1_gb / plan_sim2_gb / warn_percent / use_netstats)"}
 	}
 	b, _ := json.MarshalIndent(c, "", "  ")
 	if err := discoverWriteAtomic(puConfigPath(hncDir), b); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
-	return actionResp{OK: true, Detail: fmt.Sprintf("billing_day=%d sim1=%gGB sim2=%gGB warn=%d%%",
-		c.BillingDay, c.PlanGB["1"], c.PlanGB["2"], c.WarnPercent)}
+	calKick(hncDir) // v5.21: 计费日/对账模式变了, 后台尽快重新对账
+	return actionResp{OK: true, Detail: fmt.Sprintf("billing_day=%d sim1=%gGB sim2=%gGB warn=%d%% use_netstats=%s",
+		c.BillingDay, c.PlanGB["1"], c.PlanGB["2"], c.WarnPercent, c.netstatsMode())}
 }
 
 // ─── 周期计算 ─────────────────────────────────────────────────────
@@ -452,6 +469,8 @@ type puEnv struct {
 	ifindex      func(name string) int
 	hotspotIface func() string
 	upstream     func() string // 默认路由出口接口名(可空)
+	// v5.20.1: 热点上游 / 本机出口 / VPN(优先于 upstream; nil 时退回 upstream)
+	upstreamInfo func() puUpInfo
 	sim          func() puSIM
 	bootID       func() string
 	emitAlert    func(a alert.Alert) error
@@ -488,6 +507,7 @@ type puEngine struct {
 	sim      puSIM
 	simAt    time.Time
 	lastUp   string // 最近一次判定的热点上游类别
+	lastUpIf puUpInfo
 	lastIfs  []puIfaceInfo
 	lastHS   string
 	lastTick time.Time
@@ -613,11 +633,18 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 	e.lastIfs = ifs
 	hsClient := [2]uint64{hsIf[1], hsIf[0]} // 热点口 tx = 客户端下载
 
-	routeClass := ""
-	if e.env.upstream != nil {
-		up := strings.TrimPrefix(e.env.upstream(), "v4-") // clat 口归到底层 rmnet
-		routeClass = puClassifyIface(up, hs)
+	// v5.20.1: 热点上游优先用 tethering 上游(iface_detect.json); 本机出口是 VPN(tun0)时
+	// 它既不是热点上游也不计流量(tun* 不在分类里; 本机经 VPN 的字节已计在承载它的
+	// 物理蜂窝/Wi-Fi 口上, 不会重复)。
+	var ui puUpInfo
+	if e.env.upstreamInfo != nil {
+		ui = e.env.upstreamInfo()
+	} else if e.env.upstream != nil {
+		ui.Local = e.env.upstream()
 	}
+	ui = ui.normalized()
+	e.lastUpIf = ui
+	routeClass := puClassifyIface(strings.TrimPrefix(ui.routeIface(), "v4-"), hs) // clat 口归到底层 rmnet
 	upstream := puResolveUpstream(routeClass, cell[0]+cell[1], wifi[0]+wifi[1], hsClient[0]+hsClient[1])
 	if upstream != "" {
 		e.lastUp = upstream
@@ -898,6 +925,7 @@ func (e *puEngine) checkAlerts(now time.Time) int {
 	}
 	start := puCycleStart(now, cfg.BillingDay)
 	used := puAggSIM(e.days(start, now))
+	used = puCalPreferUsed(e.hncDir, cfg, start, now, used) // v5.21: prefer → 按系统统计告警
 	e.mu.Lock()
 	if !e.loaded {
 		e.loadState()
@@ -1008,6 +1036,7 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 	simKnown := !e.simAt.IsZero()
 	ifs := append([]puIfaceInfo(nil), e.lastIfs...)
 	lastUp, lastHS, lastErr, lastTick := e.lastUp, e.lastHS, e.lastErr, e.lastTick
+	lastUpIf := e.lastUpIf
 	e.mu.Unlock()
 
 	slots := map[int]bool{}
@@ -1080,7 +1109,11 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		"ifaces":        ifs,
 		"hotspot_iface": lastHS,
 		"upstream":      lastUp,
-		"counters":      "/proc/net/dev",
+		// v5.20.1
+		"tether_upstream": lastUpIf.Tether,
+		"local_upstream":  lastUpIf.Local,
+		"vpn_active":      lastUpIf.VPN,
+		"counters":        "/proc/net/dev",
 	}
 	if !lastTick.IsZero() {
 		src["last_sample"] = lastTick.Unix()
@@ -1103,6 +1136,7 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		"config": map[string]interface{}{
 			"billing_day": cfg.BillingDay, "warn_percent": cfg.WarnPercent,
 			"plan_sim1_gb": cfg.PlanGB["1"], "plan_sim2_gb": cfg.PlanGB["2"],
+			"use_netstats": cfg.netstatsMode(),
 		},
 		"totals": map[string]puRxTx{
 			"cellular": mkRxTx(cell), "wifi": mkRxTx(wifi),
@@ -1122,6 +1156,7 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		resp["sim_included"] = true
 		resp["sim_hotspot"] = mkRxTx(simTot)
 	}
+	puCalAttach(e.hncDir, cfg, cycleStart, now, resp, bySim) // v5.21: 系统 NetworkStats 对账(stats_calibration.go)
 	if period == "today" {
 		hours := make([]map[string]interface{}, 0, 24)
 		var today *puDay
@@ -1168,7 +1203,10 @@ func (s *server) phoneUsage() *puEngine {
 			},
 			hotspotIface: s.currentHotspotIface,
 			upstream:     puDefaultRouteIface,
-			sim:          puDetectSIM,
+			upstreamInfo: func() puUpInfo {
+				return puPickUpstream(readIfaceDetect(hncDir), time.Now().Unix(), puDefaultRouteIface())
+			},
+			sim: puDetectSIM,
 			bootID: func() string {
 				b, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
 				return strings.TrimSpace(string(b))

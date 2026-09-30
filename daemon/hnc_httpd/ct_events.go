@@ -73,6 +73,9 @@ var ctEvents struct {
 	active  bool // 订阅成功且在收
 	lost    bool // 自上次 drain 以来发生过丢事件/缓冲溢出
 	lastErr string
+	// v5.21: 给 /api/stats_health 的累计计数(进程内单调递增, 不随 drain 清零)
+	received uint64
+	lostN    uint64
 }
 
 // ctProtoName 协议号 → /proc/net/nf_conntrack 里的 l4 名字(key 必须对得上)
@@ -208,8 +211,10 @@ func ctEventsPrecise() bool {
 
 func ctEventsPush(ev ctDestroy) {
 	ctEvents.mu.Lock()
+	ctEvents.received++
 	if len(ctEvents.buf) >= ctEventMaxBuffered {
 		ctEvents.lost = true // appUsageTick 长时间没 drain(不应发生), 丢弃并标记
+		ctEvents.lostN++
 	} else {
 		ctEvents.buf = append(ctEvents.buf, ev)
 	}
@@ -290,6 +295,7 @@ func (s *server) CtEventLoop(stop <-chan struct{}) {
 				case errors.Is(rerr, syscall.ENOBUFS):
 					ctEvents.mu.Lock()
 					ctEvents.lost = true
+					ctEvents.lostN++
 					ctEvents.mu.Unlock()
 					continue
 				default:

@@ -463,7 +463,7 @@ func TestSelfcheckColorOSQualcomm(t *testing.T) {
 
 	mustContain(t, "hotspot", expectStatus(t, r, "network", "hotspot_iface", scOK).Value, "wlan2(up)")
 	mustContain(t, "cand", findItem(t, r, "network", "iface_candidates").Value, "wlan1(down)")
-	if u := expectStatus(t, r, "network", "upstream", scOK); u.Value != "rmnet_data1" {
+	if u := expectStatus(t, r, "network", "upstream", scOK); u.Value != "热点上游 rmnet_data1(蜂窝)" {
 		t.Errorf("upstream=%q", u.Value)
 	}
 	teth := findItem(t, r, "network", "tethering")

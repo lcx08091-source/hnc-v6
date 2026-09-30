@@ -294,6 +294,9 @@ type State struct {
 	// 提供; IPNameEntries 是该表当前条目数(含尚未清理的过期条目)。
 	IPNameEntries int `json:"ipname_entries,omitempty"`
 
+	// v5.21: 加密 DNS 观测计数(encdns.go)。
+	EncDNS *EncDNSState `json:"encdns,omitempty"`
+
 	// Conntrack telemetry.
 	ConntrackAvailable bool   `json:"conntrack_available"`
 	ConntrackReadable  bool   `json:"conntrack_readable"`
@@ -458,6 +461,9 @@ type Writer struct {
 	// v5.9.7: 全局活跃流计数(O(1) 维护, 仅 w.mu 内读写)。取代分叉版
 	// enforceGlobalFlowLimit 每包 O(客户端×流) 遍历的热路径回归。
 	totalActiveFlows int
+
+	// v5.21: 加密 DNS 观测计数(encdns.go, 仅 w.mu 内读写)。
+	encdns encdnsStats
 }
 
 func NewWriter(path, version string) *Writer {
@@ -615,6 +621,7 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 	defer w.mu.Unlock()
 	c := w.clientLocked(clientMAC, clientIP, now)
 	c.DNSEvents++
+	w.encdns.dnsSeen++ // v5.21
 	c.LastSeen = now
 	touchIP(c.RemoteIPs, remoteIP, now, maxIPsPerClient)
 	if host != "" {
@@ -669,6 +676,7 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 	defer w.mu.Unlock()
 	c := w.clientLocked(clientMAC, clientIP, now)
 	c.TLSEvents++
+	w.encdns.observeTLS(host, remoteIP, c.ClientMAC, now) // v5.21: DoH 疑似
 	c.LastSeen = now
 	touchIP(c.RemoteIPs, remoteIP, now, maxIPsPerClient)
 	if host != "" {
@@ -1544,6 +1552,7 @@ func (w *Writer) Flush() error {
 	}
 	snap.TotalTxBytes = w.totalTx
 	snap.TotalRxBytes = w.totalRx
+	snap.EncDNS = w.encdns.snapshot(w.startTime.Unix()) // v5.21
 
 	// v5.9.6: 未识别字节占比 (回移自 5.9.91 分叉, 独立于其未完成的 M1 体系):
 	// 总字节 = tx+rx, 已识别 = globalApps 归因字节。占比高 = 规则覆盖差。

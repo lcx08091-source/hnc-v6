@@ -578,6 +578,7 @@ func readObserved(hncDir string) (map[string]limitRule, int, bool) {
 // sumStatsHistory 汇总 run/stats.YYYYMMDD.jsonl 在 [from,to) 的每 MAC tx+rx。
 func sumStatsHistory(hncDir string, from, to time.Time) map[string]uint64 {
 	out := map[string]uint64{}
+	resolve := macAliasResolver(hncDir) // v5.21: 合并过的旧 MAC 用量计入新 MAC 的配额
 	for _, dk := range dayFileKeys(from, to) {
 		f, err := os.Open(filepath.Join(hncDir, "run", "stats."+dk+".jsonl"))
 		if err != nil {
@@ -598,7 +599,7 @@ func sumStatsHistory(hncDir string, from, to time.Time) map[string]uint64 {
 			if row.T < from.Unix() || row.T >= to.Unix() {
 				continue
 			}
-			out[strings.ToLower(row.MAC)] += row.TX + row.RX
+			out[resolve(row.MAC)] += row.TX + row.RX
 		}
 		f.Close()
 	}

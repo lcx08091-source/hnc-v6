@@ -255,6 +255,12 @@ qc_probe() {
     if [ "$force" != "--force" ] && [ -n "$boot" ] && [ "$boot" = "$prev_boot" ]; then
         allow_load=0
     fi
+    # v5.20.1: capability_probe 发现本次开机 qdisc 探测超时过 → 只做 tc 探测, 不再加载模块
+    local load_skip="skipped: already attempted this boot (use --force)"
+    if [ -n "$QDISC_CAPS_NO_LOAD" ] && [ "$force" != "--force" ]; then
+        allow_load=0
+        load_skip="skipped: module loading timed out earlier this boot"
+    fi
 
     trap 'qc_cleanup_dev' EXIT INT TERM
     qc_setup_dev
@@ -285,7 +291,7 @@ qc_probe() {
                     continue
                 fi
             else
-                qc_tried_add "$kind" module_load false "skipped: already attempted this boot (use --force)"
+                qc_tried_add "$kind" module_load false "$load_skip"
             fi
         fi
         skipped="$skipped $kind($(printf '%s' "$perr" | cut -c1-60))"

@@ -636,8 +636,19 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			defer tk.Stop()
 			scan := func() {
 				active := make(map[string]struct{}, 256)
-				r := output.ReadConntrackWith(func(dst string) { active[dst] = struct{}{} })
+				dot := make(map[string]struct{}) // v5.21: 853(DoT/DoQ)连接
+				r := output.ReadConntrackLines(func(line string) {
+					if d := output.ConntrackOrigDst(line); d != "" {
+						active[d] = struct{}{}
+					}
+					if k := output.ConntrackDoTKey(line); k != "" {
+						dot[k] = struct{}{}
+					}
+				})
 				sw.UpdateConntrack(r.Available, r.Readable, r.Path, r.Flows)
+				if r.Readable {
+					sw.ObserveDoTFlows(dot)
+				}
 				ipNames.KeepAlive(active, time.Now())
 			}
 			// Refresh once immediately so the first dpi_state.json has values.

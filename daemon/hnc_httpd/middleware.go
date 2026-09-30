@@ -387,6 +387,7 @@ func isSensitiveReadPath(p string) bool {
 		"/api/self/attrib",
 		"/api/sla",
 		"/api/events",
+		"/api/encdns",
 		"/api/exports":
 		return true
 	}

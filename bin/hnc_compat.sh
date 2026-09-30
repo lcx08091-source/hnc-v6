@@ -12,6 +12,8 @@
 # ── 输出契约(run/)──────────────────────────────────────────────────────────────
 #   run/root_env.json   {"schema":1,"ts","root":"sukisu|kernelsu|ksu_next|apatch|magisk|unknown",
 #                        "root_family":"kernelsu|apatch|magisk|unknown","root_version":"..",
+#                        "root_label":"SukiSU|KernelSU 系(可能为 SukiSU)|..","root_confidence":"high|medium|low|",
+#                        "root_hint":"maybe_sukisu|","root_evidence":["susfs","ksud_major_ge3",..],
 #                        "busybox":"/data/adb/ksu/bin/busybox"|"","module_webui":bool,
 #                        "webui_url":"http://127.0.0.1:8444","sdk":36,"release":"16",
 #                        "soc":"qcom|mtk|...","kernel":"6.6.x","path_missing":[..],
@@ -63,17 +65,47 @@ hnc_root_detect() {
         HNC_ROOT_VER="${MAGISK_VER:-$(magisk -v 2>/dev/null | head -n1)}"
     fi
     HNC_ROOT=$HNC_ROOT_FAMILY
+    HNC_ROOT_CONF=""; HNC_ROOT_EVIDENCE=""; HNC_ROOT_LABEL=""
     if [ "$HNC_ROOT_FAMILY" = kernelsu ]; then
-        # 分支: 看管理器数据目录(廉价)+ ksud 版本串(best-effort, 真机需核实)
-        local kv=""
-        [ -x "$_HC_ADB/ksud" ] && kv=$("$_HC_ADB/ksud" -V 2>/dev/null | head -n1)
+        # v5.20.1: KernelSU 分支识别(best-effort, 按证据强弱):
+        #   强: ksud -V 含 "suki" / SukiSU-Ultra 管理器数据目录 com.sukisu.ultra
+        #   中: ksud --help 有 kpm 子命令 / /data/adb/kpm(KPM 内核补丁模块是 SukiSU 独有于 KSU 系)
+        #   弱: SuSFS(SukiSU 常见但官方 KSU / KSU-Next 也能装)、ksud 主版本 ≥3(官方/Next 仍是 1.x–2.x)
+        #   只有弱证据 → root=kernelsu, root_hint=maybe_sukisu, 显示 "KernelSU 系(可能为 SukiSU)"。
+        #   真机 RMX5010: `ksud -V` = "KernelSU ksud 4.2.0-rc1 (uapi: 2)"(不含 suki)。
+        local kv="" kh="" b strong=0 medium=0 weak=0 maj
+        for b in "$_HC_ADB/ksud" "$_HC_ADB/ksu/bin/ksud"; do
+            [ -x "$b" ] || continue
+            kv=$("$b" -V 2>/dev/null | head -n1)
+            kh=$("$b" --help 2>/dev/null | head -n 80)
+            break
+        done
         [ -z "$HNC_ROOT_VER" ] && HNC_ROOT_VER="$kv"
-        if [ -d "$_HC_APPDATA/com.sukisu.ultra" ] || printf '%s' "$kv" | grep -qi suki; then
-            HNC_ROOT=sukisu
-        elif [ -d "$_HC_APPDATA/com.rifsxd.ksunext" ] || printf '%s' "$kv" | grep -qi next; then
-            HNC_ROOT=ksu_next
+        _hc_ev() { HNC_ROOT_EVIDENCE="$HNC_ROOT_EVIDENCE $1"; }
+        if printf '%s %s' "$kv" "$HNC_ROOT_VER" | grep -qi suki; then strong=1; _hc_ev ksud_version_sukisu; fi
+        if [ -d "$_HC_APPDATA/com.sukisu.ultra" ]; then strong=1; _hc_ev manager_com.sukisu.ultra; fi
+        if printf '%s\n' "$kh" | grep -qiE '^[[:space:]]+kpm([[:space:]]|$)'; then medium=1; _hc_ev ksud_kpm_cmd; fi
+        if [ -d "$_HC_ADB/kpm" ]; then medium=1; _hc_ev adb_kpm_dir; fi
+        if [ -e "$_HC_ADB/ksu/bin/ksu_susfs" ] || [ -d "$_HC_ADB/modules/susfs4ksu" ] || [ -e "$_HC_ADB/ksu/susfs4ksu" ]; then
+            weak=1; _hc_ev susfs
         fi
+        maj=$(printf '%s %s' "$kv" "$HNC_ROOT_VER" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1 | cut -d. -f1)
+        case "$maj" in ''|*[!0-9]*) ;; *) [ "$maj" -ge 3 ] && { weak=1; _hc_ev ksud_major_ge3; } ;; esac
+        if [ "$strong" = 1 ] || [ "$medium" = 1 ]; then
+            HNC_ROOT=sukisu; HNC_ROOT_LABEL=SukiSU
+            [ "$strong" = 1 ] && HNC_ROOT_CONF=high || HNC_ROOT_CONF=medium
+        elif [ -d "$_HC_APPDATA/com.rifsxd.ksunext" ] || printf '%s %s' "$kv" "$HNC_ROOT_VER" | grep -qi next; then
+            HNC_ROOT=ksu_next; HNC_ROOT_LABEL=KernelSU-Next; HNC_ROOT_CONF=high
+        elif [ "$weak" = 1 ]; then
+            HNC_ROOT_CONF=low; HNC_ROOT_LABEL="KernelSU 系(可能为 SukiSU)"
+        else
+            HNC_ROOT_CONF=medium; HNC_ROOT_LABEL=KernelSU
+        fi
+        HNC_ROOT_EVIDENCE=${HNC_ROOT_EVIDENCE# }
     fi
+    case "$HNC_ROOT_FAMILY" in
+        apatch) HNC_ROOT_LABEL=APatch ;; magisk) HNC_ROOT_LABEL=Magisk ;; unknown) HNC_ROOT_LABEL="" ;;
+    esac
     HNC_ROOT_VER=$(printf '%s' "$HNC_ROOT_VER" | tr -d '"\\\r\n')
 }
 
@@ -186,8 +218,9 @@ hnc_write_root_env() {
 $(hnc_path_audit)
 EOF
     mkdir -p "$_HC_RUN" 2>/dev/null
-    printf '{"schema":1,"ts":%s,"root":"%s","root_family":"%s","root_version":"%s","busybox":"%s","module_webui":%s,"webui_url":"%s","sdk":%s,"release":"%s","soc":"%s","kernel":"%s","path_missing":%s,"path_dynamic_only":%s}\n' \
-        "$(date +%s 2>/dev/null || echo 0)" "$HNC_ROOT" "$HNC_ROOT_FAMILY" "$HNC_ROOT_VER" "$bb" "$webui" "$url" \
+    local hint=""; [ "$HNC_ROOT" = kernelsu ] && [ "$HNC_ROOT_CONF" = low ] && hint=maybe_sukisu
+    printf '{"schema":1,"ts":%s,"root":"%s","root_family":"%s","root_version":"%s","root_label":"%s","root_confidence":"%s","root_hint":"%s","root_evidence":%s,"busybox":"%s","module_webui":%s,"webui_url":"%s","sdk":%s,"release":"%s","soc":"%s","kernel":"%s","path_missing":%s,"path_dynamic_only":%s}\n' \
+        "$(date +%s 2>/dev/null || echo 0)" "$HNC_ROOT" "$HNC_ROOT_FAMILY" "$HNC_ROOT_VER" "$HNC_ROOT_LABEL" "$HNC_ROOT_CONF" "$hint" "$(_hc_jlist "$HNC_ROOT_EVIDENCE")" "$bb" "$webui" "$url" \
         "$sdk" "$rel" "$soc" "$kern" "$(_hc_jlist "$missing")" "$(_hc_jlist "$dynmiss")" \
         > "$_HC_RUN/root_env.json.tmp.$$" 2>/dev/null && mv -f "$_HC_RUN/root_env.json.tmp.$$" "$_HC_RUN/root_env.json" 2>/dev/null
     echo "$url" > "$_HC_RUN/webui_url" 2>/dev/null

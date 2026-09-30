@@ -53,6 +53,8 @@ type appUsageDay struct {
 	Seen   map[string][2]int64          `json:"seen,omitempty"`
 	// 未识别流量按目的(基础域名 / IP)聚合, 条数有上限(appUnknownMax)
 	Unknown map[string]*appUnknownAgg `json:"unknown,omitempty"`
+	// v5.21 共现推断(traffic_ident.go): "mac|app" → [up, down], 是 Hours 里该应用字节的子集
+	Inferred map[string][2]uint64 `json:"inferred,omitempty"`
 }
 
 type appUsageMeta struct {
@@ -113,6 +115,8 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 		return 0
 	case clockJump:
 		_, _, _ = ctEventsDrain()
+		_, _ = ctNewDrain()
+		identReset() // v5.21: 窗口/暂缓/推测缓存都按时间算, 跳变后重来
 		appUsage.init = false
 		appUsageAcctStep(&appUsage.prev, &appUsage.init, sn.entries, sn.at, nil, func(src string) bool { _, ok := owner[src]; return ok })
 		appTimeLastTick = time.Time{}
@@ -128,8 +132,19 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 	}
 	events, _, _ := ctEventsDrain()
 	keep := func(src string) bool { _, ok := owner[src]; return ok }
+	// v5.21: 上一轮快照的连接(判「本轮新出现」); acct step 会从旧 map 里删掉有销毁事件的 key, 先记下
+	prevKeys := appUsage.prev
+	oldEv := map[string]bool{}
+	for _, ev := range events {
+		if _, ok := prevKeys[ev.Key]; ok {
+			oldEv[ev.Key] = true
+		}
+	}
 	deltas := appUsageAcctStep(&appUsage.prev, &appUsage.init, sn.entries, sn.at, events, keep)
-	added := appUsageRecord(appUsage.day, deltas, owner, apps, names, now, appTimeTickSec(now))
+	newStarts, _ := ctNewDrain()
+	isNew := func(k string) bool { _, ok := prevKeys[k]; return !ok && !oldEv[k] }
+	ix := identSt.observe(now, deltas, newStarts, isNew, owner, apps, names)
+	added := appUsageRecordIdent(appUsage.day, deltas, owner, apps, names, now, appTimeTickSec(now), ix)
 	if len(deltas) > 0 {
 		appUsage.dirty = true
 	}
@@ -141,15 +156,31 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 // appTimeStep 记使用时长, 未识别的目的交给 appUnknownAdd 聚合。
 func appUsageRecord(d *appUsageDay, deltas []appUsageDelta, owner map[string]string,
 	apps map[string]ipApp, names map[string]ipName, now time.Time, tickSec int) uint64 {
+	return appUsageRecordIdent(d, deltas, owner, apps, names, now, tickSec, nil)
+}
+
+// appUsageRecordIdent v5.21: 同 appUsageRecord, ix 非 nil 时叠加 traffic_ident.go 的
+// 隧道归属(_tunnel)、共现推断(记 d.Inferred)与新连接暂缓(ix.released 在本轮补记)。
+func appUsageRecordIdent(d *appUsageDay, deltas []appUsageDelta, owner map[string]string,
+	apps map[string]ipApp, names map[string]ipName, now time.Time, tickSec int, ix *identCtx) uint64 {
 	hour := strconv.Itoa(now.Hour())
 	var added uint64
 	tick := map[string]uint64{}
 	cats := map[string]string{}
+	if ix != nil && len(ix.released) > 0 {
+		deltas = append(append([]appUsageDelta(nil), ix.released...), deltas...)
+		ix.released = nil
+	}
 	for _, dl := range deltas {
 		mac := owner[dl.Src]
 		id, meta := appUnknownID, appUsageMeta{Name: "未识别"}
+		inferred := false
 		if dl.Dst != "" && (isPrivateIP(dl.Dst) || owner[dl.Dst] != "") {
 			id, meta = appLocalID, appUsageMeta{Name: "局域网"}
+		} else if ix.hold(dl) {
+			continue // 新连接等共现窗口合上, 下一轮随 ix.released 补记
+		} else if xid, xm, xinf, ok := ix.classify(dl, mac); ok {
+			id, meta, inferred = xid, xm, xinf
 		} else if a, ok := appForIP(dl.Dst, apps, names); ok {
 			id, meta = a.ID, appUsageMeta{Name: a.Name, Category: a.Category}
 		}
@@ -161,6 +192,15 @@ func appUsageRecord(d *appUsageDay, deltas []appUsageDelta, owner map[string]str
 		v[0] += dl.Up
 		v[1] += dl.Dn
 		d.Hours[hour][mk] = v
+		if inferred {
+			if d.Inferred == nil {
+				d.Inferred = map[string][2]uint64{}
+			}
+			iv := d.Inferred[mk]
+			iv[0] += dl.Up
+			iv[1] += dl.Dn
+			d.Inferred[mk] = iv
+		}
 		if old, ok := d.Apps[id]; !ok || old.Name != meta.Name || old.Category != meta.Category {
 			d.Apps[id] = meta
 		}
@@ -179,6 +219,7 @@ func appUsageRecord(d *appUsageDay, deltas []appUsageDelta, owner map[string]str
 type appUsageDelta struct {
 	Src, Dst string
 	Up, Dn   uint64
+	Key      string // v5.21: 连接五元组 key(ctEntry.key() 格式), 给 VPN 识别/共现推断用; 单测可留空
 }
 
 func satSub(a, b uint64) uint64 {
@@ -233,7 +274,7 @@ func appUsageAcctStep(prev *map[string][2]uint64, init *bool, entries []ctEntry,
 			delete(*prev, ev.Key)
 		}
 		if du != 0 || dd != 0 {
-			out = append(out, appUsageDelta{Src: ev.Src, Dst: ev.Dst, Up: du, Dn: dd})
+			out = append(out, appUsageDelta{Src: ev.Src, Dst: ev.Dst, Up: du, Dn: dd, Key: ev.Key})
 		}
 	}
 	for i := range entries {
@@ -252,7 +293,7 @@ func appUsageAcctStep(prev *map[string][2]uint64, init *bool, entries []ctEntry,
 			du, dd = satSub(cur[0], p[0]), satSub(cur[1], p[1])
 		}
 		if du != 0 || dd != 0 {
-			out = append(out, appUsageDelta{Src: e.Src, Dst: e.Dst, Up: du, Dn: dd})
+			out = append(out, appUsageDelta{Src: e.Src, Dst: e.Dst, Up: du, Dn: dd, Key: k})
 		}
 	}
 	*prev = next
@@ -337,6 +378,10 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mac"})
 		return
 	}
+	resolve := macAliasResolver(s.hncDir) // v5.21: 合并过的旧 MAC 历史归到新 MAC
+	if mac != "" {
+		mac = resolve(mac)
+	}
 	now := time.Now()
 	type acc struct{ up, dn uint64 }
 	byApp := map[string]*acc{}
@@ -344,7 +389,8 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 	var byHour [24]acc
 	meta := map[string]appUsageMeta{}
 	activeByApp := map[string]uint64{}
-	var totUp, totDn uint64
+	inferredByApp := map[string]uint64{} // v5.21 共现推断的字节
+	var totUp, totDn, totInferred uint64
 	since := ""
 	for i := days - 1; i >= 0; i-- {
 		date := now.AddDate(0, 0, -i).Format("20060102")
@@ -371,10 +417,18 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		for id, m := range d.Apps {
 			meta[id] = m
 		}
+		for mk, v := range d.Inferred {
+			sep := strings.IndexByte(mk, '|')
+			if sep < 0 || (mac != "" && mk[:sep] != mac) {
+				continue
+			}
+			inferredByApp[mk[sep+1:]] += v[0] + v[1]
+			totInferred += v[0] + v[1]
+		}
 		for _, cells := range d.Active { // v6.x 使用时长
 			for mk, sec := range cells {
 				sep := strings.IndexByte(mk, '|')
-				if sep < 0 || (mac != "" && mk[:sep] != mac) {
+				if sep < 0 || (mac != "" && resolve(mk[:sep]) != mac) {
 					continue
 				}
 				activeByApp[mk[sep+1:]] += uint64(sec)
@@ -387,7 +441,7 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 				if sep < 0 {
 					continue
 				}
-				m, id := mk[:sep], mk[sep+1:]
+				m, id := resolve(mk[:sep]), mk[sep+1:]
 				if mac != "" && m != mac {
 					continue
 				}
@@ -419,7 +473,7 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		apps = append(apps, map[string]interface{}{"id": id, "name": name, "category": m.Category,
 			"up": a.up, "down": a.dn, "sdk": appTier(m.Category) == tierHidden,
-			"active_sec": activeByApp[id]})
+			"active_sec": activeByApp[id], "inferred_bytes": inferredByApp[id]})
 	}
 	sort.Slice(apps, func(i, j int) bool {
 		ti := apps[i]["up"].(uint64) + apps[i]["down"].(uint64)
@@ -444,7 +498,8 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok": true, "days": days, "mac": mac, "since": since,
 		"total_up": totUp, "total_down": totDn,
-		"by_app": apps, "by_device": devs, "by_hour": hours,
+		// v5.21: inferred_bytes = 其中按共现推断归到应用的字节(界面标「推测」)
+		"by_app": apps, "by_device": devs, "by_hour": hours, "inferred_bytes": totInferred,
 		"readable": sn.readable, "acct": sn.acct,
 		// v5.18: true = conntrack DESTROY 事件订阅在线(短连接/连接尾巴也计入)
 		"precise": sn.acct && ctEventsPrecise(),

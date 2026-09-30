@@ -396,8 +396,10 @@ migrate_remove_ndpi() {
 migrate_remove_ndpi
 
 # hotfix13: record platform/kernel capability profile for diagnostics and UI fallback hints
-if [ -x $HNC_DIR/bin/capability_probe.sh ]; then
-    ( sh $HNC_DIR/bin/capability_probe.sh >> $HNC_DIR/logs/capabilities.log 2>&1 ) &
+# v5.20.1: -f 而非 -x(cp 丢执行位时也要跑; 用 sh 调用不需要 x 位); 探针内部先写基础能力,
+# 低延迟 qdisc 模块加载带总超时后再补写, 开机很快就有 run/capabilities.json。
+if [ -f $HNC_DIR/bin/capability_probe.sh ]; then
+    ( HNC="$HNC_DIR" sh $HNC_DIR/bin/capability_probe.sh >> $HNC_DIR/logs/capabilities.log 2>&1 ) &
 fi
 
 # v5.5.0: AHNC → HNC migration (idempotent, runs once via marker file)

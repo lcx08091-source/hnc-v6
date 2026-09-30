@@ -146,8 +146,12 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/app_usage", s.apiAppUsage)      // v5.16: 按应用的真实流量(conntrack)
 	mux.HandleFunc("/api/app_time", s.apiAppTime)        // v6.x: 应用使用时长 + 时长上限/类别封锁(app_time.go)
 	mux.HandleFunc("/api/dpi_unknown", s.apiDPIUnknown)  // v6.x: 未识别流量 Top(教规则用)
+	// v5.21: 加密 DNS 策略 + 拦截计数(encdns.go)
+	mux.HandleFunc("/api/encdns", s.apiEncdns)
 	mux.HandleFunc("/api/phone_usage", s.apiPhoneUsage)  // 本机与热点月度流量(按网络/按卡)
+	mux.HandleFunc("/api/stats_health", s.apiStatsHealth) // v5.21: 统计健康(精确模式/iptables/时钟/分流漏计)
 	mux.HandleFunc("/api/sim", s.apiSim)                 // 模拟环境状态(sim.go)
+	mux.HandleFunc("/api/mac_merge", s.apiMacMerge)      // v5.21: 随机 MAC 疑似同一设备建议 + 别名表(mac_merge.go)
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
 	// v5.9.9: json-health.html 此前没有路由(死页面), 补上, 与 changelog 同款只读 serve。
@@ -469,6 +473,8 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	// v5.14: 「正在用」—— conntrack 实时速率按应用平滑后的结果
 	liveApps := s.liveAppsByMAC()
 	liveCalls := liveCallsByMAC() // v5.16: 通话检测(连接表)
+	// v5.21: 客户端 VPN/代理检测(traffic_ident.go)
+	vpnVerdicts := identVPNVerdicts()
 
 	deviceRules, _ := rulesMap["devices"].(map[string]interface{})
 	blacklist, _ := rulesMap["blacklist"].([]interface{})
@@ -559,6 +565,11 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		}
 		if lc := liveCalls[macKey]; lc != nil {
 			merged["live_call"] = lc
+		}
+		if v, ok := vpnVerdicts[macKey]; ok {
+			merged["vpn"] = v
+		} else {
+			merged["vpn"] = vpnVerdict{Level: "none", WindowSec: int(identVPNWindow / time.Second)}
 		}
 
 		// 速率: 只读 RateLoop 发布的快照 (按 macKey 小写索引). 单一采样源 →
@@ -683,6 +694,7 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	})
 
 	s.limitCtl.annotateDevices(out) // quota / schedule / effective
+	s.annotateMacMerge(out, namesMap) // v5.21: randomized_mac / merge_suggestion / merged_into
 	return http.StatusOK, map[string]interface{}{
 		"devices":        out,
 		"whitelist_mode": rulesMap["whitelist_mode"],
@@ -933,10 +945,11 @@ func (s *server) apiStats(w http.ResponseWriter, r *http.Request) {
 	raw := readJSONL(rawPath)
 	daily := readJSONL(dailyPath)
 
-	// 过滤 mac
+	// 过滤 mac(v5.21: 合并过的旧 MAC 的行也算进来; 行本身的 mac 不改, 计数器差分仍按原 MAC 分组)
 	if macFilter != "" {
-		raw = filterByMAC(raw, macFilter)
-		daily = filterByMAC(daily, macFilter)
+		resolve := macAliasResolver(s.hncDir)
+		raw = filterByMACResolved(raw, resolve(macFilter), resolve)
+		daily = filterByMACResolved(daily, resolve(macFilter), resolve)
 	}
 
 	buckets := aggregate(rangeParam, raw, daily)
@@ -1086,6 +1099,17 @@ func filterByMAC(rows []map[string]interface{}, mac string) []map[string]interfa
 	out := make([]map[string]interface{}, 0, len(rows))
 	for _, r := range rows {
 		if m, _ := r["mac"].(string); strings.ToLower(m) == mac {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+// filterByMACResolved 同 filterByMAC, 但按别名解析后的 MAC 比较(v5.21 设备合并)。
+func filterByMACResolved(rows []map[string]interface{}, mac string, resolve func(string) string) []map[string]interface{} {
+	out := make([]map[string]interface{}, 0, len(rows))
+	for _, r := range rows {
+		if m, _ := r["mac"].(string); m != "" && resolve(m) == mac {
 			out = append(out, r)
 		}
 	}

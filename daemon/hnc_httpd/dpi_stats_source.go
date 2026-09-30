@@ -84,6 +84,10 @@ func (s *server) dpiAggregate(rangeParam, macFilter string) ([]Bucket, []Bucket)
 		byHour[i].Label = fmt.Sprintf("%02d:00", i)
 	}
 	byDate := map[string]*dayBucket{}
+	resolve := macAliasResolver(s.hncDir) // v5.21: mac= 过滤包含合并进来的旧 MAC
+	if macFilter != "" {
+		macFilter = resolve(macFilter)
+	}
 
 	// v5.11: dpid 以 UTC 日期命名 stats.YYYYMMDD.jsonl(output/history.go
 	// pathFor), 旧代码按本地日期找文件 → UTC+8 下本地 0-8 点的行落在前一个
@@ -112,7 +116,7 @@ func (s *server) dpiAggregate(rangeParam, macFilter string) ([]Bucket, []Bucket)
 			if err := json.Unmarshal(line, &row); err != nil {
 				continue
 			}
-			if macFilter != "" && strings.ToLower(row.MAC) != macFilter {
+			if macFilter != "" && resolve(row.MAC) != macFilter {
 				continue
 			}
 			ts := time.Unix(row.T, 0).In(loc)
@@ -212,6 +216,7 @@ func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
 	}
 	defer f.Close()
 	cutoff := time.Now().AddDate(0, 0, -days).Format("20060102")
+	resolve := macAliasResolver(hncDir) // v5.21: 合并过的旧 MAC 在线时长算到新 MAC 上
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 8192), 256*1024)
 	for sc.Scan() {
@@ -239,10 +244,13 @@ func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
 		if row.Day < cutoff {
 			continue
 		}
+		row.MAC = resolve(row.MAC)
 		if out[row.MAC] == nil {
 			out[row.MAC] = map[string]int{}
 		}
-		out[row.MAC][row.Day]++ // 每天最多 24 次采样 → 计数即小时数
+		if out[row.MAC][row.Day] < 24 { // 别名合并后新旧 MAC 同一小时都有采样时不超过 24
+			out[row.MAC][row.Day]++ // 每天最多 24 次采样 → 计数即小时数
+		}
 	}
 	return out
 }

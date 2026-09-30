@@ -394,6 +394,7 @@ full_restore() {
     sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     sh "$HNC_DIR/bin/quic_block_sync.sh" >> "$LOG" 2>&1 || true
     sh "$HNC_DIR/bin/connblock_sync.sh" >> "$LOG" 2>&1 || true
+    sh "$HNC_DIR/bin/encdns_sync.sh" >> "$LOG" 2>&1 || true  # v5.21: 加密 DNS 策略
     run_capability_probe_active "$iface"
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
@@ -858,6 +859,7 @@ do_full_init() {
     HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/quic_block_sync.sh" >> "$LOG" 2>&1 || true
     sh "$HNC_DIR/bin/connblock_sync.sh" >> "$LOG" 2>&1 || true
+    HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/encdns_sync.sh" >> "$LOG" 2>&1 || true  # v5.21
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
         # v5.12: 同 full_restore —— 黑名单只在 restore 里恢复,tc_htb=false 也要跑
@@ -975,6 +977,7 @@ do_migrate() {
     sh "$HNC_DIR/bin/whitelist_sync.sh" >> "$LOG" 2>&1 || true
     sh "$HNC_DIR/bin/quic_block_sync.sh" >> "$LOG" 2>&1 || true
     sh "$HNC_DIR/bin/connblock_sync.sh" >> "$LOG" 2>&1 || true
+    sh "$HNC_DIR/bin/encdns_sync.sh" >> "$LOG" 2>&1 || true  # v5.21: 加密 DNS 策略
 }
 
 # ═══════════════════════════════════════════════════════════════════════════

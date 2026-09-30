@@ -17,6 +17,8 @@ const (
 	hncAPMaybeIfaceERE = `^(wlan[1-9][0-9]*|wigig[0-9]+)$`
 	hncUSBTetherERE    = `^(rndis[0-9]+|usb[0-9]+|ncm[0-9]+)$`
 	hncBTTetherERE     = `^bt-pan[0-9]*$`
+	// v5.20.1: VPN 虚拟口 —— 可能是本机出口(root 在 VPN uid 范围内), 但永远不是热点上游
+	hncVPNIfaceERE = `^(tun[0-9]+|tap[0-9]+|ppp[0-9]+|wg[0-9]+|ipsec[0-9a-z_]*|xfrm[0-9]+)$`
 )
 
 var (
@@ -25,7 +27,11 @@ var (
 	hncAPMaybeIfaceRE = regexp.MustCompile(hncAPMaybeIfaceERE)
 	hncUSBTetherRE    = regexp.MustCompile(hncUSBTetherERE)
 	hncBTTetherRE     = regexp.MustCompile(hncBTTetherERE)
+	hncVPNIfaceRE     = regexp.MustCompile(hncVPNIfaceERE)
 )
+
+// isVPNIface VPN 虚拟口(tun/tap/ppp/wg/ipsec/xfrm)
+func isVPNIface(name string) bool { return hncVPNIfaceRE.MatchString(name) }
 
 // isCellIface 蜂窝上游口(跨 SoC)
 func isCellIface(name string) bool { return hncCellIfaceRE.MatchString(name) }

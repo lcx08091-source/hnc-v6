@@ -127,6 +127,8 @@ type scCtx struct {
 	capOnce sync.Once
 	caps    map[string]interface{}
 	capNote string
+	// v5.20.1: capabilities.json 存在但解析失败
+	capCorrupt bool
 }
 
 func (c *scCtx) run(name string, args ...string) (string, bool) {
@@ -269,6 +271,10 @@ func (c *scCtx) capabilities() map[string]interface{} {
 	c.capOnce.Do(func() {
 		path := c.hnc("run", "capabilities.json")
 		m := c.readJSON(path)
+		if m == nil && c.env.Exists(path) {
+			// v5.20.1: 文件在但不是合法 JSON(真机: selinux_avc_denied_recent 写成 "0\n0")
+			c.capCorrupt = true
+		}
 		if m == nil || c.opts.Reprobe {
 			script := c.hnc("bin", "capability_probe.sh")
 			if c.env.Exists(script) {
@@ -604,11 +610,73 @@ func scKernelInfo(rel string) (string, bool) {
 }
 
 type scRoot struct {
-	Impls   []string // KernelSU / SukiSU / Magisk / APatch
-	Version string
-	SuSFS   bool
-	Meta    []string
-	Detail  string
+	Impls    []string // KernelSU / SukiSU / KernelSU-Next / Magisk / APatch
+	Label    string   // 单一实现时的显示名(可能是 "KernelSU 系(可能为 SukiSU)")
+	Evidence []string // KernelSU 分支识别证据
+	Version  string
+	SuSFS    bool
+	Meta     []string
+	Detail   string
+}
+
+var scVerMajorRE = regexp.MustCompile(`(\d+)\.\d+`)
+
+// ksuVariant v5.20.1: KernelSU 分支识别(与 bin/hnc_compat.sh hnc_root_detect 同一套证据):
+//
+//	强: ksud -V 含 "suki" / 管理器数据目录 com.sukisu.ultra
+//	中: ksud --help 有 kpm 子命令 / /data/adb/kpm(KPM 在 KSU 系里是 SukiSU 独有)
+//	弱: SuSFS、ksud 主版本 ≥3(官方 KernelSU / KSU-Next 仍是 1.x–2.x)
+//
+// 只有弱证据 → ("KernelSU", "KernelSU 系(可能为 SukiSU)")。真机 RMX5010 的 ksud -V 是
+// "KernelSU ksud 4.2.0-rc1 (uapi: 2)", 不含 suki。
+func (c *scCtx) ksuVariant(ver string) (name, label string, ev []string) {
+	ex := c.env.Exists
+	strong, medium, weak := false, false, false
+	lv := strings.ToLower(ver)
+	if strings.Contains(lv, "suki") {
+		strong, ev = true, append(ev, "ksud_version_sukisu")
+	}
+	for _, d := range []string{"/data/data/com.sukisu.ultra", "/data/user_de/0/com.sukisu.ultra"} {
+		if ex(d) {
+			strong, ev = true, append(ev, "manager_com.sukisu.ultra")
+			break
+		}
+	}
+	for _, b := range []string{"/data/adb/ksud", "/data/adb/ksu/bin/ksud"} {
+		if !ex(b) {
+			continue
+		}
+		if out, ok := c.run(b, "--help"); ok {
+			for _, ln := range strings.Split(out, "\n") {
+				f := strings.Fields(ln)
+				if len(f) > 0 && strings.EqualFold(f[0], "kpm") && strings.HasPrefix(ln, " ") {
+					medium, ev = true, append(ev, "ksud_kpm_cmd")
+					break
+				}
+			}
+		}
+		break
+	}
+	if ex("/data/adb/kpm") {
+		medium, ev = true, append(ev, "adb_kpm_dir")
+	}
+	if ex("/data/adb/ksu/bin/ksu_susfs") || ex("/data/adb/modules/susfs4ksu") {
+		weak, ev = true, append(ev, "susfs")
+	}
+	if m := scVerMajorRE.FindStringSubmatch(ver); m != nil {
+		if n, err := strconv.Atoi(m[1]); err == nil && n >= 3 {
+			weak, ev = true, append(ev, "ksud_major_ge3")
+		}
+	}
+	switch {
+	case strong || medium:
+		return "SukiSU", "SukiSU", ev
+	case ex("/data/data/com.rifsxd.ksunext") || strings.Contains(lv, "next"):
+		return "KernelSU-Next", "KernelSU-Next", ev
+	case weak:
+		return "KernelSU", "KernelSU 系(可能为 SukiSU)", ev
+	}
+	return "KernelSU", "KernelSU", ev
 }
 
 func (c *scCtx) detectRoot() scRoot {
@@ -629,9 +697,7 @@ func (c *scCtx) detectRoot() scRoot {
 		if v == "" {
 			v = c.env.Getenv("KSU_VER")
 		}
-		if strings.Contains(strings.ToLower(v), "suki") {
-			name = "SukiSU"
-		}
+		name, r.Label, r.Evidence = c.ksuVariant(v)
 		r.Impls = append(r.Impls, name)
 		if v != "" {
 			vers = append(vers, name+" "+v)
@@ -753,6 +819,9 @@ func scSectionSystem(c *scCtx) []scItem {
 		rit.Detail = "未找到 /data/adb/ksu、/data/adb/magisk、/data/adb/ap"
 	case 1:
 		rit.Value = root.Impls[0]
+		if root.Label != "" {
+			rit.Value = root.Label
+		}
 	default:
 		rit.Status = scWarn
 		rit.Value = strings.Join(root.Impls, " + ")
@@ -764,6 +833,9 @@ func scSectionSystem(c *scCtx) []scItem {
 	}
 	if root.SuSFS {
 		dt = append(dt, "SuSFS: 已安装")
+	}
+	if len(root.Evidence) > 0 {
+		dt = append(dt, "分支识别依据: "+strings.Join(root.Evidence, ","))
 	}
 	if len(root.Meta) > 0 {
 		dt = append(dt, "挂载元模块: "+strings.Join(root.Meta, ","))
@@ -829,7 +901,7 @@ func scSectionSystem(c *scCtx) []scItem {
 	hasKSU, hasMagisk := false, false
 	for _, im := range root.Impls {
 		switch im {
-		case "KernelSU", "SukiSU", "APatch":
+		case "KernelSU", "SukiSU", "KernelSU-Next", "APatch":
 			hasKSU = true
 		case "Magisk":
 			hasMagisk = true
@@ -965,6 +1037,44 @@ func scParseQdiscCaps(m map[string]interface{}) (map[string]bool, string) {
 	return res, asString(m["chosen"])
 }
 
+// scQdiscTriedSummary qdisc_caps.json tried[] → "cake(tc_probe 失败, modprobe 失败) · sfq(tc_probe 成功)"
+// 按名字分组、保持出现顺序; proc_modules 只是记录是否已加载, 不列。
+func scQdiscTriedSummary(m map[string]interface{}) string {
+	tried, _ := m["tried"].([]interface{})
+	if len(tried) == 0 {
+		return ""
+	}
+	var order []string
+	parts := map[string][]string{}
+	for _, t := range tried {
+		tm, _ := t.(map[string]interface{})
+		n := asString(tm["name"])
+		if n == "" {
+			continue
+		}
+		meth := asString(tm["method"])
+		if meth == "proc_modules" {
+			continue
+		}
+		if meth == "" {
+			meth = "?"
+		}
+		res := "失败"
+		if ok, _ := tm["ok"].(bool); ok {
+			res = "成功"
+		}
+		if _, seen := parts[n]; !seen {
+			order = append(order, n)
+		}
+		parts[n] = append(parts[n], meth+" "+res)
+	}
+	var out []string
+	for _, n := range order {
+		out = append(out, n+"("+strings.Join(parts[n], ", ")+")")
+	}
+	return scShort(strings.Join(out, " · "), 400)
+}
+
 // scFeatureStatus 支持情况 × 重要性 → 状态(纯函数)
 func scFeatureStatus(state, importance string) string {
 	switch state {
@@ -989,6 +1099,9 @@ func scSectionShaping(c *scCtx) []scItem {
 	if caps == nil {
 		cit.Status, cit.Value = scFail, "缺失"
 		cit.Detail = "run/capabilities.json 不存在或损坏; " + c.capNote
+		if c.capCorrupt {
+			cit.Detail = "run/capabilities.json 存在但不是合法 JSON(旧版探针的计数字段会写坏文件, 升级后自动修复); " + c.capNote
+		}
 		cit.Fix = "重启 HNC 服务或在自检里勾选「重新探测」"
 	} else {
 		ts, _ := toInt64(caps["generated_at"])
@@ -998,6 +1111,12 @@ func scSectionShaping(c *scCtx) []scItem {
 			cit.Value = "时间未知"
 		}
 		cit.Detail = "probe=" + asString(caps["probe"])
+		switch asString(caps["qdisc_probe"]) {
+		case "pending":
+			cit.Detail += "; 低延迟队列探测进行中(基础能力已写出)"
+		case "timeout":
+			cit.Detail += "; 低延迟队列探测超时(本次开机不再尝试加载内核模块)"
+		}
 		if c.capNote != "" {
 			cit.Detail += "; " + c.capNote
 		}
@@ -1052,7 +1171,8 @@ func scSectionShaping(c *scCtx) []scItem {
 	items = append(items, kit)
 
 	mods := c.modules()
-	qd, chosen := scParseQdiscCaps(c.readJSON(c.hnc("run", "qdisc_caps.json")))
+	qcRaw := c.readJSON(c.hnc("run", "qdisc_caps.json"))
+	qd, chosen := scParseQdiscCaps(qcRaw)
 	supported := map[string]bool{}
 	for _, f := range scTCFeatures {
 		state, src := scResolveFeature(f, caps, qd, kc, mods)
@@ -1098,6 +1218,12 @@ func scSectionShaping(c *scCtx) []scItem {
 	default:
 		sqm.Status, sqm.Value = scWarn, "不可用"
 		sqm.Detail = "cake / fq_codel / sfq 均未检测到, 设备「低延迟」开关不起作用"
+	}
+	if tried := scQdiscTriedSummary(qcRaw); tried != "" {
+		if sqm.Detail != "" {
+			sqm.Detail += "; "
+		}
+		sqm.Detail += "尝试记录: " + tried
 	}
 	items = append(items, sqm)
 
@@ -1309,6 +1435,7 @@ func scSectionFirewall(c *scCtx) []scItem {
 
 var (
 	scMtkModRE     = regexp.MustCompile(`(?i)hnat|hw_nat|mtk_ppe|mddp|mtk_hwnat`)
+	scQcomAggModRE = regexp.MustCompile(`^(rmnet_offload|rmnet_perf_tether)$`)
 	scQcomModRE    = regexp.MustCompile(`(?i)^ipa|rmnet_ipa|ipam$|rmnet_offload|rmnet_shs|rmnet_perf`)
 	scSamsungModRE = regexp.MustCompile(`(?i)linkforward|link_forward`)
 	scUnisocModRE  = regexp.MustCompile(`(?i)sipa`)
@@ -1392,6 +1519,14 @@ func scSectionOffload(c *scCtx) []scItem {
 			it.Value = "未检测到"
 		}
 		items = append(items, it)
+	}
+	// v5.20.1: IPA 硬件转发 + rmnet_offload / rmnet_perf_tether 时, 部分热点字节可能不过内核计数点
+	if agg := c.moduleMatching(scQcomAggModRE); len(qd) > 0 && len(agg) > 0 {
+		items = append(items, scItem{ID: "hotspot_counter_bypass", Label: "热点字节计数旁路", Status: scInfo,
+			Value: "可能存在",
+			Detail: "检测到 IPA + " + strings.Join(agg, ",") + ": 硬件/聚合快速路径转发的热点流量可能不经过热点口的内核计数" +
+				"(/proc/net/dev、iptables、tc 统计), 热点用量与限速统计可能偏小; 本项只是提示, 未实测",
+			Fix: "对比系统「数据使用」里的热点用量; 偏差明显时使用统计校准功能(开发中)"})
 	}
 
 	var md []string
@@ -1486,6 +1621,94 @@ func scParseTethering(out string) ([]string, string) {
 	return tethered, up
 }
 
+// scFirstUpstreamIface "[rmnet_data3, v4-rmnet_data3]" → "rmnet_data3"(跳过 clat v4-*)
+func scFirstUpstreamIface(desc string) string {
+	f := strings.FieldsFunc(desc, func(r rune) bool { return r == '[' || r == ']' || r == ',' || r == ' ' || r == '\t' })
+	for _, n := range f {
+		if n != "" && n != "null" && !strings.HasPrefix(n, "v4-") && ifaceNameOK(n) {
+			return n
+		}
+	}
+	return ""
+}
+
+// readIfaceDetectFrom 经 scEnv 读 run/iface_detect.json(测试可注入)
+func readIfaceDetectFrom(c *scCtx) ifaceDetect {
+	var d ifaceDetect
+	b, err := c.env.ReadFile(c.hnc("run", "iface_detect.json"))
+	if err != nil || json.Unmarshal(b, &d) != nil {
+		return ifaceDetect{}
+	}
+	return d
+}
+
+func scUpClassName(n string) string {
+	switch {
+	case n == "":
+		return ""
+	case isVPNIface(n):
+		return "VPN"
+	case isCellIface(n):
+		return "蜂窝"
+	case n == "wlan0":
+		return "Wi-Fi"
+	case hncUSBTetherRE.MatchString(n):
+		return "USB"
+	case strings.HasPrefix(n, "eth"):
+		return "以太网"
+	}
+	return ""
+}
+
+func scWithClass(n string) string {
+	if cl := scUpClassName(n); cl != "" {
+		return n + "(" + cl + ")"
+	}
+	return n
+}
+
+// scUpstreamItem v5.20.1: 热点上游(tethering)与本机出口(可能是 VPN)分开显示。
+// 例: "热点上游 rmnet_data3(蜂窝) · 本机走 VPN tun0"
+func scUpstreamItem(local, tetherUp string, det ifaceDetect) scItem {
+	it := scItem{ID: "upstream", Label: "上游出口", Status: scOK}
+	if tetherUp == "" && det.TetherUpstream != "" && !isVPNIface(det.TetherUpstream) {
+		tetherUp = det.TetherUpstream
+	}
+	vpn := isVPNIface(local) || det.VPNActive
+	phys := ""
+	if vpn && det.Upstream != "" && !isVPNIface(det.Upstream) {
+		phys = det.Upstream // hnc_iface.sh: VPN 下带 default route 的物理口
+	}
+	var parts []string
+	if tetherUp != "" {
+		parts = append(parts, "热点上游 "+scWithClass(tetherUp))
+	}
+	switch {
+	case vpn && local != "":
+		s := "本机走 VPN " + local
+		if tetherUp == "" && phys != "" {
+			s += "(物理出口 " + scWithClass(phys) + ")"
+		}
+		parts = append(parts, s)
+	case vpn:
+		parts = append(parts, "本机走 VPN")
+	case local != "" && tetherUp == "":
+		parts = append(parts, local)
+	case local != "" && local != tetherUp && strings.TrimPrefix(local, "v4-") != tetherUp:
+		parts = append(parts, "本机出口 "+scWithClass(local))
+	}
+	if len(parts) == 0 {
+		it.Status, it.Value = scWarn, "无默认路由"
+		it.Detail = "手机当前没有可用的上网出口"
+		return it
+	}
+	it.Value = strings.Join(parts, " · ")
+	if vpn {
+		it.Detail = "手机开着 VPN: 本机流量经 VPN 隧道(字节计在承载它的物理口上), 热点客户端流量走系统共享上游、不经过手机 VPN; 本月流量按热点上游拆分"
+	}
+	return it
+}
+
 func scSectionNetwork(c *scCtx) []scItem {
 	var items []scItem
 	ifc := c.hotspotIface()
@@ -1526,17 +1749,20 @@ func scSectionNetwork(c *scCtx) []scItem {
 	items = append(items, scItem{ID: "iface_candidates", Label: "候选热点接口", Status: scInfo,
 		Value: strings.Join(cands, ", ")})
 
-	uit := scItem{ID: "upstream", Label: "上游出口"}
-	if out, ok := c.run("ip", "route", "get", "1.1.1.1"); ok && puParseRouteGet(out) != "" {
-		uit.Status, uit.Value = scOK, puParseRouteGet(out)
-	} else {
-		uit.Status, uit.Value = scWarn, "无默认路由"
-		uit.Detail = "手机当前没有可用的上网出口"
+	local := ""
+	if out, ok := c.run("ip", "route", "get", "1.1.1.1"); ok {
+		local = puParseRouteGet(out)
 	}
-	items = append(items, uit)
+	tethOut, tethOK := c.run("dumpsys", "tethering")
+	tetherUp := ""
+	if tethOK {
+		_, desc := scParseTethering(tethOut)
+		tetherUp = scFirstUpstreamIface(desc)
+	}
+	items = append(items, scUpstreamItem(local, tetherUp, readIfaceDetectFrom(c)))
 
 	tit := scItem{ID: "tethering", Label: "系统共享状态", Status: scInfo}
-	if out, ok := c.run("dumpsys", "tethering"); ok && out != "" {
+	if out, ok := tethOut, tethOK; ok && out != "" {
 		tethered, up := scParseTethering(out)
 		if len(tethered) > 0 {
 			tit.Value = "共享中: " + strings.Join(tethered, ", ")
@@ -1871,7 +2097,7 @@ func (c *scCtx) markBase() int64 {
 func scSectionIPv6(c *scCtx) []scItem {
 	ifc := c.hotspotIface()
 	if ifc == "" || !c.env.Exists("/sys/class/net/"+ifc) {
-		return []scItem{{ID: "v6_neigh", Label: "IPv6 邻居", Status: scInfo, Value: "热点未开启, 跳过"}}
+		return []scItem{{ID: "v6_neigh", Label: "IPv6 邻居", Status: scInfo, Value: "热点未开启, 跳过"}, c.v6NeighSubItem()}
 	}
 	out, ok := c.run("ip", "-6", "neigh", "show", "dev", ifc)
 	if !ok || strings.TrimSpace(out) == "" {
@@ -1942,7 +2168,48 @@ func scSectionIPv6(c *scCtx) []scItem {
 		cov.Detail = "这些地址的流量会绕过限速(走默认类)"
 		cov.Fix = "见下方各设备明细"
 	}
-	return append([]scItem{sum, cov}, items...)
+	return append([]scItem{sum, cov, c.v6NeighSubItem()}, items...)
+}
+
+// v6NeighSubItem v5.20.1: run/v6_neigh.json(neigh_v6.go)—— 新 IPv6 地址事件订阅状态
+func (c *scCtx) v6NeighSubItem() scItem {
+	it := scItem{ID: "v6_neigh_sub", Label: "邻居事件订阅"}
+	m := c.readJSON(c.hnc("run", "v6_neigh.json"))
+	if m == nil {
+		it.Status, it.Value = scInfo, "无状态"
+		it.Detail = "run/v6_neigh.json 不存在(httpd 刚启动或热点未开); 60 秒兜底同步不受影响"
+		return it
+	}
+	active, _ := m["active"].(bool)
+	ev, _ := toInt64(m["events"])
+	tr, _ := toInt64(m["triggers"])
+	last, _ := toInt64(m["last_run_at"])
+	var det []string
+	if last > 0 {
+		d := fmt.Sprintf("最近一次同步 %s前", scDur(c.env.Now().Unix()-last))
+		if rc, ok := toInt64(m["last_rc"]); ok && rc != 0 {
+			d += fmt.Sprintf("(退出码 %d)", rc)
+		}
+		det = append(det, d)
+	} else {
+		det = append(det, "尚未触发过同步")
+	}
+	if e := asString(m["err"]); e != "" {
+		det = append(det, "错误: "+scShort(e, 120))
+	}
+	if active {
+		it.Status = scOK
+		it.Value = fmt.Sprintf("在线 · 事件 %d · 触发 %d", ev, tr)
+		if rc, ok := toInt64(m["last_rc"]); ok && rc != 0 && last > 0 {
+			it.Status = scWarn
+		}
+	} else {
+		it.Status = scWarn
+		it.Value = fmt.Sprintf("离线 · 事件 %d · 触发 %d", ev, tr)
+		it.Fix = "新地址改由每 60 秒兜底同步覆盖(最长 1 分钟绕过限速); 在设置里「重启服务」可重新订阅"
+	}
+	it.Detail = strings.Join(det, "; ")
+	return it
 }
 
 // ═══ 时间 ═════════════════════════════════════════════════════════
@@ -1987,6 +2254,8 @@ func scSectionTime(c *scCtx) []scItem {
 	}
 	items = append(items, ait)
 
+	items = append(items, c.clockGuardItem())
+
 	up := scItem{ID: "uptime", Label: "开机时长", Status: scInfo}
 	if f := strings.Fields(c.readTrim("/proc/uptime")); len(f) > 0 {
 		if v, err := strconv.ParseFloat(f[0], 64); err == nil {
@@ -1998,6 +2267,40 @@ func scSectionTime(c *scCtx) []scItem {
 	}
 	items = append(items, up)
 	return items
+}
+
+// clockGuardItem v5.20.1: run/clock_state.json(clock_guard.go, 可信性变化/跳变时写)
+func (c *scCtx) clockGuardItem() scItem {
+	it := scItem{ID: "clock_guard", Label: "时钟守护"}
+	m := c.readJSON(c.hnc("run", "clock_state.json"))
+	if m == nil {
+		it.Status, it.Value = scInfo, "未记录"
+		it.Detail = "run/clock_state.json 不存在(守护尚未运行; 只在时钟可信性变化或跳变时写)"
+		return it
+	}
+	sane, _ := m["sane"].(bool)
+	jumps, _ := toInt64(m["jumps"])
+	var det []string
+	if hw, _ := toInt64(m["high_water"]); hw > 0 {
+		det = append(det, "高水位 "+time.Unix(hw, 0).In(c.env.Now().Location()).Format("2006-01-02 15:04"))
+	}
+	if jumps > 0 {
+		at, _ := toInt64(m["last_jump_at"])
+		dl, _ := toInt64(m["last_jump_secs"])
+		det = append(det, fmt.Sprintf("检测到 %d 次时间跳变, 最近一次 %s前(跳了 %+d 秒), 统计已重建基线", jumps, scDur(c.env.Now().Unix()-at), dl))
+	}
+	if sane {
+		it.Status, it.Value = scOK, "时钟可信"
+		if jumps > 0 {
+			it.Status = scInfo
+			it.Value = fmt.Sprintf("时钟可信 · 跳变 %d 次", jumps)
+		}
+	} else {
+		it.Status, it.Value = scWarn, "时钟不可信, 按天统计已暂停"
+		it.Fix = "打开「自动确定日期和时间」并联网, 时钟恢复后自动继续"
+	}
+	it.Detail = strings.Join(det, "; ")
+	return it
 }
 
 // ═══ 进程与资源 ═══════════════════════════════════════════════════
@@ -2233,6 +2536,85 @@ func scEncryptedDNSSuspects(state map[string]interface{}) (suspects []string, cl
 	return
 }
 
+// scIPNameFreshWindow dpid 启动后多久内"没有映射文件"算正常(文件只在学到新映射后写, 每 10 秒一次)
+const scIPNameFreshWindow = 10 * 60
+
+// procUptime 进程已运行秒数(/proc/<pid>/stat starttime 与 /proc/uptime, USER_HZ=100)
+func (c *scCtx) procUptime(pid int) (int64, bool) {
+	if pid <= 0 {
+		return 0, false
+	}
+	st := c.readTrim(fmt.Sprintf("/proc/%d/stat", pid))
+	i := strings.LastIndexByte(st, ')')
+	if i < 0 {
+		return 0, false
+	}
+	f := strings.Fields(st[i+1:])
+	if len(f) < 20 {
+		return 0, false
+	}
+	start, err := strconv.ParseInt(f[19], 10, 64) // 总第 22 字段
+	if err != nil {
+		return 0, false
+	}
+	uf := strings.Fields(c.readTrim("/proc/uptime"))
+	if len(uf) == 0 {
+		return 0, false
+	}
+	up, err := strconv.ParseFloat(uf[0], 64)
+	if err != nil {
+		return 0, false
+	}
+	secs := int64(up) - start/100
+	if secs < 0 {
+		return 0, false
+	}
+	return secs, true
+}
+
+// ipnameMissing v5.20.1: dpi_ipname.json 不存在时区分"还没学到"与"路径不对"。
+// dpid 的 run 目录来自 etc/dpi_config.json 的 run_dir(缺省 /data/local/hnc/run),
+// httpd(api_conn.go loadIPNames)与自检读 <HNC>/run/dpi_ipname.json。
+func (c *scCtx) ipnameMissing(nit *scItem, pid int, st map[string]interface{}) {
+	want := c.hnc("run")
+	if cfg := c.readJSON(c.hnc("etc", "dpi_config.json")); cfg != nil {
+		if rd := strings.TrimSpace(asString(cfg["run_dir"])); rd != "" && filepath.Clean(rd) != filepath.Clean(want) {
+			nit.Status, nit.Value = scWarn, "文件路径异常"
+			nit.Detail = "dpid 配置 run_dir=" + rd + ", 而界面/自检读 " + filepath.Join(want, "dpi_ipname.json")
+			if c.env.Exists(filepath.Join(rd, "dpi_ipname.json")) {
+				nit.Detail += "(dpid 写的文件在 " + filepath.Join(rd, "dpi_ipname.json") + ")"
+			}
+			nit.Fix = "删掉 etc/dpi_config.json 里的 run_dir(或改成 " + want + ")后重启服务"
+			return
+		}
+	}
+	if pid <= 0 {
+		nit.Status, nit.Value = scInfo, "无(dpid 未运行)"
+		return
+	}
+	events := int64(0)
+	if stats, ok := st["stats"].(map[string]interface{}); ok {
+		d, _ := toInt64(stats["dns_events"])
+		t, _ := toInt64(stats["tls_events"])
+		events = d + t
+	}
+	up, upOK := c.procUptime(pid)
+	switch {
+	case upOK && up < scIPNameFreshWindow:
+		nit.Status, nit.Value = scInfo, "暂无(还没有设备产生 DNS/TLS 流量)"
+		nit.Detail = fmt.Sprintf("dpid 已运行 %s; 学到第一条映射后 10 秒内写出 run/dpi_ipname.json", scDur(up))
+	case events > 0:
+		nit.Status, nit.Value = scWarn, "缺失"
+		nit.Detail = fmt.Sprintf("dpid 已处理 %d 个 DNS/TLS 事件, 但没有写出 run/dpi_ipname.json(写入失败或权限问题?)", events)
+		nit.Fix = "导出诊断包查看 logs/dpid.log; 或在设置里「重启服务」"
+	default:
+		nit.Status, nit.Value = scInfo, "暂无(还没有设备产生 DNS/TLS 流量)"
+		if upOK {
+			nit.Detail = fmt.Sprintf("dpid 已运行 %s, 尚未看到 DNS/TLS 事件", scDur(up))
+		}
+	}
+}
+
 func scSectionIdent(c *scCtx) []scItem {
 	var items []scItem
 	var dp scProcDef
@@ -2289,7 +2671,7 @@ func scSectionIdent(c *scCtx) []scItem {
 			nit.Detail = "尚未学到映射(还没有设备发起 DNS 查询)"
 		}
 	} else {
-		nit.Status, nit.Value = scInfo, "无"
+		c.ipnameMissing(&nit, pid, st)
 	}
 	items = append(items, nit)
 

@@ -36,7 +36,15 @@
 #      "tethered":[..所有 TetheredState 接口..],"local_only":[..LocalHotspotState..],
 #      "wifi_tether":[..],"usb_tether":[..],"bt_tether":[..],"eth_tether":[..],
 #      "upstream":"rmnet_data2","upstream_class":"cell|wifi|eth|usb|other|",
+#      "upstream_source":"tethering|route|route_physical|",
+#      "tether_upstream":"rmnet_data3"(dumpsys tethering 报的共享上游, 热点关/不可用时空),
+#      "local_upstream":"tun0","local_upstream_class":"vpn|cell|wifi|..",(本机默认路由出口,
+#      即 `ip route get 1.1.1.1`; root 在 VPN 的 uid 范围内, 开 VPN 时就是 tun0)
+#      "vpn_active":bool,
 #      "candidates":[..],"sig":"<候选签名>","scope_note":"..."}
+#   v5.20.1: upstream = 热点流量真正走的物理上游 —— 优先 tethering 上游; 否则本机出口;
+#     本机出口是 VPN(tun/ppp/wg…)时取带 default route 的物理口(wlan0 优先, 其次蜂窝)。
+#     热点流量不走手机 VPN(Android 共享走 tethering 上游), 所以不能用 tun0 做热点上游。
 #   run/hotspot_iface       探测成功且值变化时写一行接口名(dpid / hotspotd / clsact 的 hint)
 #   run/iface.cache         同上(非 wlan0 时), 与 device_detect.sh iface 缓存同一文件
 #   USB(rndis0/usb0/ncm0)/ 蓝牙(bt-pan)/ 以太网共享: 只探测并上报, HNC 的限速 /
@@ -78,6 +86,8 @@ HNC_USB_TETHER_ERE='^(rndis[0-9]+|usb[0-9]+|ncm[0-9]+)$'
 HNC_BT_TETHER_ERE='^bt-pan[0-9]*$'
 HNC_ETH_IFACE_ERE='^eth[0-9]+$'
 HNC_P2P_IFACE_ERE='^p2p'
+# v5.20.1: VPN 虚拟口(本机出口可能是它; 永远不是热点上游、也不计流量)
+HNC_VPN_IFACE_ERE='^(tun[0-9]+|tap[0-9]+|ppp[0-9]+|wg[0-9]+|ipsec[0-9a-z_]*|xfrm[0-9]+)$'
 # 永不作为热点/上游的虚拟口
 HNC_IGNORE_IFACE_ERE='^(lo|dummy[0-9]*|v4-.*|tun[0-9]*|ifb[0-9]*|r_rmnet.*|rmnet_(ipa|mhi|usb).*|ip6tnl[0-9]*|sit[0-9]*|gre[0-9]*|gretap[0-9]*|erspan[0-9]*|ip_vti[0-9]*|ip6_vti[0-9]*|ip6gre[0-9]*|bond[0-9]*|umts_dm[0-9]*|clat.*)$'
 
@@ -93,6 +103,36 @@ hnc_iface_class() {
             else if ($0 ~ us) c = "usb"; else if ($0 ~ bt) c = "bt"; else if ($0 ~ et) c = "eth"
             else if ($0 ~ pp) c = "p2p"; else c = "other"
             print c; exit }'
+}
+
+_hi_is_vpn() {
+    [ -n "$1" ] || return 1
+    printf '%s\n' "$1" | grep -qE "$HNC_VPN_IFACE_ERE"
+}
+
+# 上游口的粗分类(json upstream_class / local_upstream_class 用)
+_hi_upclass() {
+    [ -n "$1" ] || { echo ""; return; }
+    if _hi_is_vpn "$1"; then echo vpn; return; fi
+    case "$(hnc_iface_class "${1#v4-}")" in
+        cell) echo cell ;; wifi_sta|ap_maybe) echo wifi ;; eth) echo eth ;; usb) echo usb ;; *) echo other ;;
+    esac
+}
+
+# 本机出口是 VPN 时, 找承载它的物理口: 任意路由表里带 default route、非 VPN/忽略类的口,
+# Wi-Fi STA(wlan0)优先, 其次蜂窝, 再次以太/USB。排除热点口本身。
+_hi_physical_upstream() {
+    local n c best="" bestp=0 p
+    for n in $_HI_DEFRT; do
+        [ "$n" = "$1" ] && continue
+        _hi_is_vpn "$n" && continue
+        c=$(hnc_iface_class "${n#v4-}")
+        case "$c" in
+            wifi_sta) p=4 ;; cell) p=3 ;; eth) p=2 ;; usb|ap_maybe) p=1 ;; *) continue ;;
+        esac
+        if [ "$p" -gt "$bestp" ]; then best="${n#v4-}"; bestp=$p; fi
+    done
+    echo "$best"
 }
 
 # Wi-Fi 类(可作为 Wi-Fi 热点口): ap / ap_maybe / wifi_sta(wlan0, 仅权威来源) / other
@@ -180,16 +220,22 @@ _hi_candidates() {
 }
 
 # ─── 数据源解析 ───────────────────────────────────────────────────────────────
-# 输出 "<iface> <State>" 行
-_hi_tether_states() {
+# 原始 dumpsys 输出(必须在当前 shell 里赋给 _HI_TETHER_RAW, 不能放进 $(...):
+# v5.20.1 修: 旧实现在 `states=$(_hi_tether_states)` 的子 shell 里给 _HI_TETHER_RAW
+# 赋值, 父 shell 永远拿不到 → _hi_tether_upstream 恒空 → upstream 一直退回
+# `ip route get` 的本机出口(开 VPN 时就是 tun0)。
+_hi_tether_raw() {
     local out
     out=$(_hi_to 5 dumpsys tethering 2>/dev/null)
     case "$out" in
         *"State - lastError"*|*"Tether state"*) ;;
         *) out=$(_hi_to 5 dumpsys connectivity tethering 2>/dev/null) ;;
     esac
-    _HI_TETHER_RAW="$out"
-    printf '%s\n' "$out" | awk '
+    printf '%s\n' "$out"
+}
+# 输出 "<iface> <State>" 行(解析 _HI_TETHER_RAW)
+_hi_tether_states() {
+    printf '%s\n' "$_HI_TETHER_RAW" | awk '
         /^[[:space:]]*[A-Za-z0-9_.:@-]+ - [A-Za-z]+State/ {
             sub(/^[[:space:]]+/, ""); split($0, a, " - "); print a[1], a[2] }'
 }
@@ -266,6 +312,7 @@ hnc_iface_detect() {
 
     # 1. Tethering 服务(有候选才跑 dumpsys; 顺便收集 USB/BT/以太共享)
     if [ -n "$cands" ]; then
+        _HI_TETHER_RAW=$(_hi_tether_raw)
         states=$(_hi_tether_states)
         while read -r n st; do
             [ -n "$n" ] || continue
@@ -350,21 +397,28 @@ EOF
     fi
 
     ip=""; [ -n "$HI_IFACE" ] && ip=$(_hi_private_ipv4_of "$HI_IFACE" || _hi_ipv4_of "$HI_IFACE")
-    up="$_HI_UPSTREAM"
-    n=$(_hi_tether_upstream); [ -n "$n" ] && up="$n"
-    upc=""
-    if [ -n "$up" ]; then
-        case "$(hnc_iface_class "${up#v4-}")" in
-            cell) upc=cell ;; wifi_sta|ap_maybe) upc=wifi ;; eth) upc=eth ;; usb) upc=usb ;; *) upc=other ;;
-        esac
+    # v5.20.1: 区分热点上游(tethering)与本机出口(可能是 VPN tun0)
+    local tup lup lupc vpn=false upsrc=""
+    lup="$_HI_UPSTREAM"
+    lupc=$(_hi_upclass "$lup")
+    _hi_is_vpn "$lup" && vpn=true
+    tup=$(_hi_tether_upstream)
+    up=""
+    if [ -n "$tup" ]; then
+        up="$tup"; upsrc=tethering
+    elif [ "$vpn" = true ]; then
+        up=$(_hi_physical_upstream "$HI_IFACE"); [ -n "$up" ] && upsrc=route_physical
+    elif [ -n "$lup" ]; then
+        up="$lup"; upsrc=route
     fi
+    upc=$(_hi_upclass "$up")
     local wl0=false; [ "$HI_IFACE" = wlan0 ] && wl0=true
 
     mkdir -p "$_HI_RUN" 2>/dev/null
-    printf '{"schema":1,"ts":%s,"iface":"%s","method":"%s","authoritative":%s,"ipv4":"%s","wlan0_ap":%s,"override":"%s","override_state":"%s","tethered":%s,"local_only":%s,"wifi_tether":%s,"usb_tether":%s,"bt_tether":%s,"eth_tether":%s,"upstream":"%s","upstream_class":"%s","candidates":%s,"sig":"%s","scope_note":"limits apply to the Wi-Fi hotspot iface only; USB/BT/Ethernet tethering clients are reported but not managed"}\n' \
+    printf '{"schema":1,"ts":%s,"iface":"%s","method":"%s","authoritative":%s,"ipv4":"%s","wlan0_ap":%s,"override":"%s","override_state":"%s","tethered":%s,"local_only":%s,"wifi_tether":%s,"usb_tether":%s,"bt_tether":%s,"eth_tether":%s,"upstream":"%s","upstream_class":"%s","upstream_source":"%s","tether_upstream":"%s","local_upstream":"%s","local_upstream_class":"%s","vpn_active":%s,"candidates":%s,"sig":"%s","scope_note":"limits apply to the Wi-Fi hotspot iface only; USB/BT/Ethernet tethering clients are reported but not managed"}\n' \
         "$(date +%s 2>/dev/null || echo 0)" "$HI_IFACE" "$HI_METHOD" "$HI_AUTH" "$ip" "$wl0" "$ov" "$ov_state" \
         "$(_hi_jlist "$tethered")" "$(_hi_jlist "$local_only")" "$(_hi_jlist "$wifi_t")" "$(_hi_jlist "$usb_t")" \
-        "$(_hi_jlist "$bt_t")" "$(_hi_jlist "$eth_t")" "$up" "$upc" "$(_hi_jlist "$cands")" "$(_hi_sig "$cands" "$ov")" \
+        "$(_hi_jlist "$bt_t")" "$(_hi_jlist "$eth_t")" "$up" "$upc" "$upsrc" "$tup" "$lup" "$lupc" "$vpn" "$(_hi_jlist "$cands")" "$(_hi_sig "$cands" "$ov")" \
         > "$_HI_JSON.tmp.$$" 2>/dev/null && mv -f "$_HI_JSON.tmp.$$" "$_HI_JSON" 2>/dev/null
 
     if [ -n "$HI_IFACE" ]; then
@@ -423,7 +477,7 @@ if [ "${HNC_IFACE_LIB:-0}" != 1 ]; then
         classify) hnc_iface_class "$2" ;;
         patterns)
             echo "cell=$HNC_CELL_IFACE_ERE"; echo "ap=$HNC_AP_IFACE_ERE"; echo "ap_maybe=$HNC_AP_MAYBE_IFACE_ERE"
-            echo "usb=$HNC_USB_TETHER_ERE"; echo "bt=$HNC_BT_TETHER_ERE"; echo "ignore=$HNC_IGNORE_IFACE_ERE" ;;
+            echo "usb=$HNC_USB_TETHER_ERE"; echo "bt=$HNC_BT_TETHER_ERE"; echo "vpn=$HNC_VPN_IFACE_ERE"; echo "ignore=$HNC_IGNORE_IFACE_ERE" ;;
         *) echo "usage: $0 detect|get|info|invalidate|upstream|classify <iface>|patterns" >&2; exit 2 ;;
     esac
 fi

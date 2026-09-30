@@ -18,6 +18,7 @@ func TestIfacePatternsMatchShell(t *testing.T) {
 		"HNC_AP_MAYBE_IFACE_ERE": hncAPMaybeIfaceERE,
 		"HNC_USB_TETHER_ERE":     hncUSBTetherERE,
 		"HNC_BT_TETHER_ERE":      hncBTTetherERE,
+		"HNC_VPN_IFACE_ERE":      hncVPNIfaceERE,
 	}
 	for name, goVal := range want {
 		re := regexp.MustCompile(`(?m)^` + name + `='([^']*)'$`)

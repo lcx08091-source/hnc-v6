@@ -117,7 +117,7 @@ func appTimeStep(d *appUsageDay, tick map[string]uint64, cats map[string]string,
 			continue
 		}
 		id := mk[sep+1:]
-		if id == appUnknownID || id == appLocalID || appTier(cats[id]) != tierApp {
+		if id == appUnknownID || id == appLocalID || id == tunnelAppID || appTier(cats[id]) != tierApp { // v5.21: VPN/代理隧道不算应用时长
 			continue
 		}
 		if !appTimeActive(b, tickSec) {
@@ -231,6 +231,23 @@ func appUsageDayCopy(hncDir, date string) *appUsageDay {
 		return nil
 	}
 	return loadAppUsageDay(hncDir, date)
+}
+
+// aliasUsedKeys v5.21: 把 "mac|app" 键里合并过的旧 MAC 换成新 MAC 并累加 ——
+// 换了随机 MAC 的设备, 今天在旧 MAC 上用掉的时长也计入新 MAC 的时长上限。
+func aliasUsedKeys(hncDir string, used map[string]int) map[string]int {
+	al := loadMACAliases(hncDir)
+	if len(al) == 0 {
+		return used
+	}
+	out := make(map[string]int, len(used))
+	for k, v := range used {
+		if sep := strings.IndexByte(k, '|'); sep > 0 {
+			k = resolveMACAlias(al, k[:sep]) + k[sep:]
+		}
+		out[k] += v
+	}
+	return out
 }
 
 // appTimeUsedToday 今天各 "mac|app" 的活跃秒数(内存里的当天; 跨过 0 点尚未滚动时视为 0)
@@ -502,7 +519,7 @@ func (s *server) connBlockDerived(now time.Time) []connBlock {
 	if len(ctl.TimeLimits) == 0 && len(ctl.CategoryBlocks) == 0 {
 		return nil
 	}
-	return s.connBlockDerivedFrom(ctl, appTimeUsedToday(now), now)
+	return s.connBlockDerivedFrom(ctl, aliasUsedKeys(s.hncDir, appTimeUsedToday(now)), now)
 }
 
 func (s *server) connBlockDerivedFrom(ctl appControlsFile, used map[string]int, now time.Time) []connBlock {
@@ -595,7 +612,7 @@ func (s *server) appTimeEnforce(now time.Time) {
 	if !clockSane(s.hncDir, now) {
 		return
 	}
-	used := appTimeUsedToday(now)
+	used := aliasUsedKeys(s.hncDir, appTimeUsedToday(now))
 	date := now.Format("20060102")
 	cat := loadAppCatalog(s.hncDir)
 	appTimeAlerts.mu.Lock()
@@ -710,7 +727,7 @@ func (s *server) appKnownUserApp(appID string) (string, bool) {
 	appUsage.mu.Lock()
 	defer appUsage.mu.Unlock()
 	if appUsage.day != nil {
-		if m, ok := appUsage.day.Apps[appID]; ok && appID != appUnknownID && appID != appLocalID {
+		if m, ok := appUsage.day.Apps[appID]; ok && appID != appUnknownID && appID != appLocalID && appID != tunnelAppID {
 			return m.Name, appTier(m.Category) == tierApp
 		}
 	}
@@ -887,7 +904,7 @@ func (s *server) appControlsByMAC(now time.Time) map[string]map[string]interface
 		return nil
 	}
 	cat := loadAppCatalog(s.hncDir)
-	used := appTimeUsedToday(now)
+	used := aliasUsedKeys(s.hncDir, appTimeUsedToday(now))
 	s.simAddAppTimeUsed(used, now) // 模拟设备的已用量(只显示; 关闭时空操作)
 	until := nextLocalMidnight(now).Unix()
 	out := map[string]map[string]interface{}{}
@@ -950,6 +967,10 @@ func (s *server) apiAppTime(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid mac"})
 		return
 	}
+	resolve := macAliasResolver(s.hncDir) // v5.21: 合并过的旧 MAC 时长归到新 MAC
+	if mac != "" {
+		mac = resolve(mac)
+	}
 	now := time.Now()
 	type acc struct {
 		sec         uint64
@@ -981,7 +1002,7 @@ func (s *server) apiAppTime(w http.ResponseWriter, r *http.Request) {
 			}
 			for mk, sec := range cells {
 				sep := strings.IndexByte(mk, '|')
-				if sep < 0 || (mac != "" && mk[:sep] != mac) {
+				if sep < 0 || (mac != "" && resolve(mk[:sep]) != mac) {
 					continue
 				}
 				id := mk[sep+1:]
@@ -1001,7 +1022,7 @@ func (s *server) apiAppTime(w http.ResponseWriter, r *http.Request) {
 		}
 		for mk, v := range d.Seen {
 			sep := strings.IndexByte(mk, '|')
-			if sep < 0 || (mac != "" && mk[:sep] != mac) {
+			if sep < 0 || (mac != "" && resolve(mk[:sep]) != mac) {
 				continue
 			}
 			a := byApp[mk[sep+1:]]
@@ -1083,7 +1104,7 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 	days := parseDaysParam(r)
 	now := time.Now()
 	agg := map[string]*appUnknownAgg{}
-	var total uint64
+	var total, tunnelTotal, inferredTotal uint64
 	for i := days - 1; i >= 0; i-- {
 		date := now.AddDate(0, 0, -i).Format("20060102")
 		d := s.simMergeAppUsageDay(appUsageDayCopy(s.hncDir, date), date) // 模拟环境: 今天叠加; 关闭时原样
@@ -1094,8 +1115,13 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 			for mk, v := range cells {
 				if strings.HasSuffix(mk, "|"+appUnknownID) {
 					total += v[0] + v[1]
+				} else if strings.HasSuffix(mk, "|"+tunnelAppID) {
+					tunnelTotal += v[0] + v[1]
 				}
 			}
+		}
+		for _, v := range d.Inferred { // v5.21: 共现推断归到应用的字节(原本会是未识别)
+			inferredTotal += v[0] + v[1]
 		}
 		for k, v := range d.Unknown {
 			if v == nil {
@@ -1155,7 +1181,9 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 		items = append(items, it)
 	}
 	resp := map[string]interface{}{"ok": true, "days": days, "items": items,
-		"total_unknown_bytes": total, "cap_per_day": appUnknownMax}
+		"total_unknown_bytes": total, "cap_per_day": appUnknownMax,
+		// v5.21: 已从「未识别」里分出去的两块: 走 VPN/代理隧道的字节、按共现推断归到应用的字节
+		"tunnel_bytes": tunnelTotal, "inferred_bytes": inferredTotal}
 	if simIncluded {
 		resp["sim_included"] = true
 	}

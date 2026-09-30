@@ -157,6 +157,8 @@ func TestAppUsageAccounting(t *testing.T) {
 	appUsage.mu.Lock()
 	appUsage.day, appUsage.prev, appUsage.init, appUsage.dirty = nil, nil, false, false
 	appUsage.mu.Unlock()
+	identReset() // v5.21 traffic_ident 状态
+	t.Cleanup(identReset)
 	s := newServer(dir)
 	now := time.Date(2026, 9, 24, 14, 5, 0, 0, time.Local)
 	// 第一轮: 已存在的连接只建立基线, 历史字节不算
@@ -166,20 +168,27 @@ func TestAppUsageAccounting(t *testing.T) {
 		t.Fatalf("baseline tick counted %d bytes", got)
 	}
 	// 第二轮: 增量 + 一条新连接(全部字节算进来) + 一条局域网
+	// v5.21: 新出现的无名连接(7.7.7.7)要等共现窗口合上, 字节暂缓到下一轮再记
 	w("ct", line("9.9.9.9", 1000, 6000, 3_000_000)+line("5.5.5.5", 1001, 100, 200)+line("7.7.7.7", 1002, 50, 950)+line("192.168.43.1", 1003, 10, 20))
 	reset()
-	if got := s.appUsageTick(now.Add(10 * time.Second)); got != 1000+2_000_000+1000+30 {
+	if got := s.appUsageTick(now.Add(10 * time.Second)); got != 1000+2_000_000+30 {
 		t.Fatalf("delta bytes = %d", got)
 	}
 	s.appUsageFlush(now.Add(time.Minute))
 	if _, err := os.Stat(appUsagePath(dir, "20260924")); err != nil {
 		t.Fatal("usage file not written")
 	}
-	// 连接计数器归零(连接重建同 key) → 不产生负数/巨大值
+	// 连接计数器归零(连接重建同 key) → 不产生负数/巨大值; 上一轮暂缓的 7.7.7.7 本轮补记(1000)
 	w("ct", line("9.9.9.9", 1000, 10, 10))
 	reset()
-	if got := s.appUsageTick(now.Add(20 * time.Second)); got != 0 {
-		t.Fatalf("counter reset should add 0, got %d", got)
+	if got := s.appUsageTick(now.Add(20 * time.Second)); got != 1000 {
+		t.Fatalf("counter reset should add 0 (+1000 released), got %d", got)
+	}
+	appUsage.mu.Lock()
+	unk := appUsage.day.Hours["14"]["aa:bb:cc:00:00:01|"+appUnknownID]
+	appUsage.mu.Unlock()
+	if unk != [2]uint64{50, 950} {
+		t.Fatalf("unknown bytes = %v", unk)
 	}
 }
 

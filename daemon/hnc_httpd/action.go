@@ -256,6 +256,8 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 			resp.Error == "protected mac",
 			isBadParamErr(resp.Error):
 			status = http.StatusBadRequest
+		case resp.Error == "conflict": // v5.21 device_merge: 目标已有不同设置, 需 force
+			status = http.StatusConflict
 		default:
 			status = http.StatusInternalServerError
 		}
@@ -373,6 +375,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionAppTimeLimitDel(s, p)
 	case "category_block_set":
 		return actionCategoryBlockSet(s, p)
+	case "encdns_set": // v5.21 encdns.go
+		return actionEncdnsSet(s, p)
 	case "discover_probe":
 		return actionDiscoverProbe(s, p)
 	case "apk_scan":
@@ -403,6 +407,10 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionDPIRebind(hncDir, p)
 	case "device_rename":
 		return actionDeviceRename(hncDir, p)
+	case "device_merge": // v5.21: 随机 MAC —— 旧 MAC 的全部设置/历史并到新 MAC(mac_merge_action.go)
+		return actionDeviceMerge(s, p)
+	case "device_merge_dismiss":
+		return actionDeviceMergeDismiss(s, p)
 	case "alert_mark_seen":
 		return actionAlertMarkSeen(hncDir, p)
 	case "alert_mark_known":
@@ -771,6 +779,8 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 		timeoutSec = 90
 	case "whitelist_sync.sh", "dpi_rules_import.sh":
 		timeoutSec = 30
+	case "encdns_sync.sh": // v5.21: strict 档数百条 iptables 规则(每条一次 exec)
+		timeoutSec = 60
 	case "hnc_offload_guard.sh": // v5.18: apply 含 check_offload 5s 采样 + hotspotd IPC
 		timeoutSec = 25
 	}

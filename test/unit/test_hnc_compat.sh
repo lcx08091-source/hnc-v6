@@ -107,6 +107,47 @@ cx_init
 crun root >/dev/null
 assert_eq '"unknown"' "$(jf root_env.json root)" && assert_json_valid "$HNC_TEST_DIR/run/root_env.json" && test_pass
 
+# ─── v5.20.1: SukiSU 识别(真机 RMX5010: ksud -V 不含 "suki")────────────────
+test_start "compat root: real RMX5010 ksud string + SuSFS only → kernelsu, maybe_sukisu, low confidence"
+cx_init
+mkexe "$CX/adb/ksud" "KernelSU ksud 4.2.0-rc1 (uapi: 2)"; mkexe "$CX/adb/ksu/bin/ksu_susfs"; mkexe "$CX/adb/ksu/bin/busybox"
+crun root >/dev/null
+assert_eq '"kernelsu"' "$(jf root_env.json root)" && assert_eq '"maybe_sukisu"' "$(jf root_env.json root_hint)" \
+  && assert_eq '"low"' "$(jf root_env.json root_confidence)" \
+  && assert_contains "$(cat "$HNC_TEST_DIR/run/root_env.json")" '"root_label":"KernelSU 系(可能为 SukiSU)"' \
+  && assert_contains "$(jf root_env.json root_evidence)" '"susfs"' \
+  && assert_contains "$(jf root_env.json root_evidence)" '"ksud_major_ge3"' \
+  && assert_json_valid "$HNC_TEST_DIR/run/root_env.json" && test_pass
+
+test_start "compat root: same ksud + manager com.sukisu.ultra → sukisu (high)"
+cx_init
+mkexe "$CX/adb/ksud" "KernelSU ksud 4.2.0-rc1 (uapi: 2)"; mkdir -p "$CX/appdata/com.sukisu.ultra"
+crun root >/dev/null
+assert_eq '"sukisu"' "$(jf root_env.json root)" && assert_eq '"high"' "$(jf root_env.json root_confidence)" \
+  && assert_eq '""' "$(jf root_env.json root_hint)" && assert_contains "$(jf root_env.json root_evidence)" "manager_com.sukisu.ultra" && test_pass
+
+test_start "compat root: ksud --help lists kpm subcommand (at /data/adb/ksu/bin/ksud) → sukisu (medium)"
+cx_init
+mkdir -p "$CX/adb/ksu/bin"
+cat > "$CX/adb/ksu/bin/ksud" <<'M'
+#!/bin/sh
+case "$1" in
+  -V) echo "KernelSU ksud 4.2.0-rc1 (uapi: 2)" ;;
+  --help) printf 'Usage: ksud <COMMAND>\n\nCommands:\n  module   Manage KernelSU modules\n  kpm      KPM module manager\n  help     Print this message\n' ;;
+esac
+M
+chmod +x "$CX/adb/ksu/bin/ksud"
+crun root >/dev/null
+assert_eq '"sukisu"' "$(jf root_env.json root)" && assert_eq '"medium"' "$(jf root_env.json root_confidence)" \
+  && assert_contains "$(jf root_env.json root_evidence)" "ksud_kpm_cmd" && test_pass
+
+test_start "compat root: plain KernelSU v1.x without markers → kernelsu, no hint"
+cx_init
+mkexe "$CX/adb/ksud" "ksud 1.0.5"
+crun root >/dev/null
+assert_eq '"kernelsu"' "$(jf root_env.json root)" && assert_eq '""' "$(jf root_env.json root_hint)" \
+  && assert_eq '"medium"' "$(jf root_env.json root_confidence)" && assert_eq '[]' "$(jf root_env.json root_evidence)" && test_pass
+
 # ─── SoC ─────────────────────────────────────────────────────────────────
 test_start "compat soc: manufacturer / platform / hardware fallbacks"
 cx_init

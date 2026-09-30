@@ -105,6 +105,10 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 
 	// Collect rows across the requested window.
 	rows := make([]histRow, 0, 1024)
+	resolve := macAliasResolver(s.hncDir) // v5.21: 合并过的旧 MAC 历史归到新 MAC
+	if macFilter != "" {
+		macFilter = resolve(macFilter)
+	}
 	for _, dayKey := range dayFileKeys(windowStart, now) {
 		path := filepath.Join(statsDir, statsFilePrefix+dayKey+statsFileSuffix)
 		readRows := readHistJSONL(path)
@@ -112,7 +116,10 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 			if r.Ts < fromTs || r.Ts > toTs {
 				continue
 			}
-			if macFilter != "" && strings.ToLower(r.MAC) != macFilter {
+			if r.MAC != "" {
+				r.MAC = resolve(r.MAC)
+			}
+			if macFilter != "" && r.MAC != macFilter {
 				continue
 			}
 			rows = append(rows, r)

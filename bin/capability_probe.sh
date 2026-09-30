@@ -15,7 +15,15 @@ mkdir -p "$RUN" "$LOGDIR" 2>/dev/null || true
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CAP] $*"; }
 json_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g; s/$/\\n/' | tr -d '\n' | sed 's/\\n$//'
+    # v5.20.1: 顺带去掉 TAB/其它控制字符(JSON 字符串里裸控制字符非法, Go 解析直接失败)
+    printf '%s' "$1" | tr '\t' ' ' | tr -d '\000-\010\013\014\016-\037' | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g; s/$/\\n/' | tr -d '\n' | sed 's/\\n$//'
+}
+# v5.20.1: 只保留纯数字(给 JSON 数值字段兜底; 空/多行/非数字 → $2 或 0)
+json_int() {
+    case "$1" in
+        ''|*[!0-9]*) echo "${2:-0}" ;;
+        *) echo "$1" ;;
+    esac
 }
 
 find_bin() {
@@ -98,14 +106,44 @@ ensure_ingress_parent() {
     return 1
 }
 
-# v5.20: 低延迟 qdisc 兜底链。先于下面的 fq_codel/cake 探测运行: qdisc_caps.sh 会尝试
-# modprobe/insmod sch_cake / sch_fq_codel / sch_fq(每次开机只试一次), 加载成功后下面
-# 的探测也能看到。结果写 run/qdisc_caps.json; 任何失败都不影响本探针(恒 exit 0)。
+# v5.20: 低延迟 qdisc 兜底链(bin/qdisc_caps.sh: 可能 modprobe/insmod sch_cake 等)。
+# v5.20.1 修真机 "开机 3 分钟 capabilities.json 仍缺失/损坏":
+#   旧实现在写 capabilities.json 之前同步跑 qdisc_caps.sh probe(命令替换, 无总超时),
+#   模块加载在个别 ROM/SELinux 下可能卡很久(每次 modprobe/insmod 最多 8s × 多目录 × 多档,
+#   D 状态时 timeout 也杀不掉) → 基础能力文件迟迟不落盘。现在:
+#   1) 先用上次 qdisc_caps.json 的 chosen(只读, 很快)跑完基础 tc 探测并**先写一次**
+#      capabilities.json("qdisc_probe": "pending");
+#   2) 再带总超时(CAP_QDISC_TIMEOUT, 默认 45s)跑 qdisc_caps.sh probe; 超时则记
+#      run/qdisc_caps_timeout(本次开机后续探测不再尝试加载模块);
+#   3) 若加载了新模块/选择变化, 重测 fq_codel/cake 并重写 capabilities.json。
 QDISC_LOWLAT_CHOSEN=""
+QDISC_PROBE_STATE=skipped
 if [ -f "$HNC/bin/qdisc_caps.sh" ]; then
-    QDISC_LOWLAT_CHOSEN=$(HNC_DIR="$HNC" TC_BIN="$TC_BIN" sh "$HNC/bin/qdisc_caps.sh" probe 2>/dev/null | tail -1 | tr -d '\r\n ')
+    QDISC_LOWLAT_CHOSEN=$(HNC_DIR="$HNC" sh "$HNC/bin/qdisc_caps.sh" chosen 2>/dev/null | tail -1 | tr -d '\r\n ')
+    QDISC_PROBE_STATE=pending
 fi
 case "$QDISC_LOWLAT_CHOSEN" in cake|fq_codel|fq|sfq|pfifo) ;; *) QDISC_LOWLAT_CHOSEN="" ;; esac
+CAP_QDISC_TIMEOUT=$(json_int "$CAP_QDISC_TIMEOUT" 45)
+
+# 带总超时跑命令, stdout 写 $2。纯 shell 轮询(不依赖 timeout applet 的参数方言:
+# 老 busybox 是 -t SECS)。超时 return 124。
+cap_run_bounded() {
+    _cr_secs=$1; _cr_out=$2; shift 2
+    "$@" > "$_cr_out" 2>/dev/null &
+    _cr_pid=$!
+    _cr_i=0
+    while kill -0 "$_cr_pid" 2>/dev/null; do
+        if [ "$_cr_i" -ge "$_cr_secs" ]; then
+            kill -TERM "$_cr_pid" 2>/dev/null
+            sleep 1
+            kill -KILL "$_cr_pid" 2>/dev/null
+            return 124
+        fi
+        sleep 1
+        _cr_i=$((_cr_i + 1))
+    done
+    wait "$_cr_pid"
+}
 
 # Basic tc binary check.
 TC_VERSION=$({ "$TC_BIN" -V 2>&1 || true; } | head -1 | tr '\r\n' ' ' | cut -c1-160)
@@ -220,12 +258,15 @@ UPLINK_MODE=unsupported
 if [ "$UPLINK_SUPPORTED" = true ]; then UPLINK_MODE=ifb_htb; elif [ "$UPLINK_POLICE_SUPPORTED" = true ]; then UPLINK_MODE=police; fi
 DELAY_MODE=unknown
 if [ "$TC_NETEM" = true ] && [ "$TC_HTB" = true ]; then DELAY_MODE=netem; elif [ "$TC_NETEM" = false ] || [ "$TC_HTB" = false ]; then DELAY_MODE=unsupported; fi
-SQM_SUPPORTED=false
-SQM_RECOMMENDED_MODE=off
-if [ "$TC_FQ_CODEL" = true ] || [ "$TC_CAKE" = true ]; then
-    SQM_SUPPORTED=true
-    if [ "$TC_CAKE" = true ]; then SQM_RECOMMENDED_MODE=cake; else SQM_RECOMMENDED_MODE=fq_codel; fi
-fi
+compute_sqm() {
+    SQM_SUPPORTED=false
+    SQM_RECOMMENDED_MODE=off
+    if [ "$TC_FQ_CODEL" = true ] || [ "$TC_CAKE" = true ]; then
+        SQM_SUPPORTED=true
+        if [ "$TC_CAKE" = true ]; then SQM_RECOMMENDED_MODE=cake; else SQM_RECOMMENDED_MODE=fq_codel; fi
+    fi
+}
+compute_sqm
 
 IFACE=""
 [ -f "$RUN/iface.cache" ] && IFACE=$(cat "$RUN/iface.cache" 2>/dev/null | head -1 | tr -d '\r\n')
@@ -240,7 +281,6 @@ case "$QOS_MODE" in precise|precision|strict|accurate) QOS_MODE=precise ;; *) QO
 QOS_FALLBACK_REQUIRED=false
 [ -s "$RUN/tc_qos_fallback" ] && QOS_FALLBACK_REQUIRED=true
 
-NOW=$(date +%s 2>/dev/null || echo 0)
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # rc30.12 新增: fork / launcher / 安全机制 兼容性探测
@@ -313,8 +353,12 @@ fi
 # 最近 24h 内 HNC 相关 AVC denied 计数
 SELINUX_AVC_DENIED_COUNT=0
 if [ -r /dev/kmsg ] || dmesg >/dev/null 2>&1; then
-    SELINUX_AVC_DENIED_COUNT=$(dmesg 2>/dev/null | grep -ciE "avc.*denied.*(hnc|dpid|hotspotd|launcher)" 2>/dev/null || echo 0)
+    # v5.20.1 真机根因: 旧写法 `grep -c ... || echo 0` 在没有匹配时 grep 输出 "0" 且
+    # 退出码 1, 再追加一个 "0" → 值变成 "0\n0", 写进 JSON 数值位 → capabilities.json
+    # 整个解析失败(自检报"不存在或损坏", 即使重新探测也一样)。
+    SELINUX_AVC_DENIED_COUNT=$(dmesg 2>/dev/null | grep -ciE "avc.*denied.*(hnc|dpid|hotspotd|launcher)" 2>/dev/null)
 fi
+SELINUX_AVC_DENIED_COUNT=$(json_int "$(printf '%s' "$SELINUX_AVC_DENIED_COUNT" | head -1 | tr -d '\r ')" 0)
 
 # 当前进程的 Seccomp / NoNewPrivs / CapEff
 SECCOMP_ACTIVE=false
@@ -337,11 +381,14 @@ if [ -r /proc/self/attr/current ]; then
     [ -z "$SU_DOMAIN" ] && SU_DOMAIN="unknown"
 fi
 
+write_caps_json() {
+NOW=$(json_int "$(date +%s 2>/dev/null)" 0)
 TMP="$OUT.tmp.$$"
 cat > "$TMP" <<EOF_JSON
 {
   "schema": 2,
   "generated_at": $NOW,
+  "qdisc_probe": "$(json_escape "$QDISC_PROBE_STATE")",
   "probe": "hotfix17_dummy_sandbox",
   "tc_binary": "$(json_escape "$TC_BIN")",
   "tc_binary_source": "$(case "$TC_BIN" in "$HNC"/*) echo bundled ;; *) echo system ;; esac)",
@@ -418,8 +465,57 @@ cat > "$TMP" <<EOF_JSON
 }
 EOF_JSON
 
-mv -f "$TMP" "$OUT" 2>/dev/null || cp -f "$TMP" "$OUT" 2>/dev/null
+mv -f "$TMP" "$OUT" 2>/dev/null || { cp -f "$TMP" "$OUT" 2>/dev/null; rm -f "$TMP" 2>/dev/null; }
 chmod 644 "$OUT" 2>/dev/null || true
+}
+
+# 第 1 次落盘: 基础能力先写(qdisc_probe=pending), 保证开机后很快就有 capabilities.json
+write_caps_json
+
+# 第 2 步: 带总超时的低延迟 qdisc 兜底链探测, 结果变化时重测并重写
+if [ "$QDISC_PROBE_STATE" = pending ]; then
+    _qc_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null | tr -d '\r\n')
+    _qc_noload=""
+    if [ -n "$_qc_boot" ] && [ "$(cat "$RUN/qdisc_caps_timeout" 2>/dev/null | head -1 | tr -d '\r\n')" = "$_qc_boot" ]; then
+        _qc_noload=1   # 本次开机已超时过一次: 只做 tc 探测, 不再碰内核模块
+    fi
+    _qc_out="$RUN/cap_qdisc_out.$$"
+    _qc_prev="$QDISC_LOWLAT_CHOSEN"
+    HNC_DIR="$HNC"; QDISC_CAPS_NO_LOAD="$_qc_noload"
+    export HNC_DIR TC_BIN QDISC_CAPS_NO_LOAD
+    if cap_run_bounded "$CAP_QDISC_TIMEOUT" "$_qc_out" sh "$HNC/bin/qdisc_caps.sh" probe; then
+        QDISC_PROBE_STATE=done
+    else
+        _qc_rc=$?
+        if [ "$_qc_rc" = 124 ]; then
+            QDISC_PROBE_STATE=timeout
+            [ -n "$_qc_boot" ] && echo "$_qc_boot" > "$RUN/qdisc_caps_timeout" 2>/dev/null
+            log "qdisc_caps.sh probe timed out after ${CAP_QDISC_TIMEOUT}s; module loading disabled for this boot"
+            # 被 KILL 的 qdisc_caps 来不及清理它的一次性 dummy
+            for _qd in $("$IP_BIN" -o link show 2>/dev/null | sed -n 's/^[0-9]*: \(hnc_q_[0-9]*\)[:@].*/\1/p'); do
+                "$IP_BIN" link del "$_qd" >/dev/null 2>&1 || true
+            done
+        else
+            QDISC_PROBE_STATE=done
+        fi
+    fi
+    _qc_new=$(tail -1 "$_qc_out" 2>/dev/null | tr -d '\r\n ')
+    rm -f "$_qc_out" 2>/dev/null
+    case "$_qc_new" in cake|fq_codel|fq|sfq|pfifo) QDISC_LOWLAT_CHOSEN="$_qc_new" ;; esac
+    # 新加载了模块(或选择变化) → 重测 fq_codel/cake(一次性 dummy 仍在, EXIT 时才清理)
+    if [ "$QDISC_LOWLAT_CHOSEN" != "$_qc_prev" ] && [ "$DUMMY_CREATE" = true ] && [ "$TC_BINARY_OK" = true ]; then
+        if probe_root_qdisc fq_codel; then TC_FQ_CODEL=true; TC_FQ_CODEL_ERR=""; else TC_FQ_CODEL=false; TC_FQ_CODEL_ERR=$(last_err); fi
+        if probe_root_qdisc cake; then TC_CAKE=true; TC_CAKE_ERR=""; else TC_CAKE=false; TC_CAKE_ERR=$(last_err); fi
+        if [ "$TC_CAKE" = true ]; then
+            if probe_root_qdisc cake autorate-ingress; then TC_CAKE_AUTORATE=true; TC_CAKE_AUTORATE_ERR=""; else TC_CAKE_AUTORATE=false; TC_CAKE_AUTORATE_ERR=$(last_err); fi
+        else
+            TC_CAKE_AUTORATE=false; TC_CAKE_AUTORATE_ERR="$TC_CAKE_ERR"
+        fi
+        "$TC_BIN" qdisc del dev "$DUMMY" root >/dev/null 2>&1 || true
+        compute_sqm
+    fi
+    write_caps_json
+fi
 
 {
     log "tc=$TC_BIN version=$TC_VERSION dummy=$DUMMY_CREATE htb=$TC_HTB tbf=$TC_TBF fq_codel=$TC_FQ_CODEL cake=$TC_CAKE cake_autorate=$TC_CAKE_AUTORATE netem=$TC_NETEM ifb=$IFB_CREATE mirred=$TC_MIRRED police=$TC_POLICE"

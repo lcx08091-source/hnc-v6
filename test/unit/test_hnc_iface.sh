@@ -230,3 +230,49 @@ tether_state wlan2 TetheredState
 out=$(HNC_DIR="$HNC_TEST_DIR" HNC_SKIP_PATH_HARDENING=1 HNC_SYS_NET="$FX/sys" HNC_PROC_NET_ARP="$FX/arp" \
       PATH="$FX/mock:$PATH" sh "$HNC_TEST_DIR/bin/device_detect.sh" iface 2>/dev/null)
 assert_eq "wlan2" "$out" && assert_file_exists "$HNC_TEST_DIR/run/iface_detect.json" && test_pass
+
+# ─── v5.20.1: 手机开 VPN(本机出口 tun0), 热点上游仍是蜂窝 ─────────────────────
+# 真机 RMX5010: 自检"上游出口"显示 tun0, 而 dumpsys tethering 报 rmnet_data3。
+test_start "hnc_iface VPN: tethering upstream rmnet_data3 wins over local tun0"
+fx_init
+link wlan0 up 192.168.1.20; link wlan2 up 10.201.76.1; link rmnet_data3 up 10.97.46.161; link tun0 up 172.19.0.1
+upstream tun0; defroute rmnet_data3
+tether_state wlan2 TetheredState
+echo "  Current upstream interface(s): [rmnet_data3,v4-rmnet_data3]" >> "$FX/dumpsys_tethering"
+out=$(irun detect)
+assert_eq "wlan2" "$out" "iface" \
+  && assert_eq '"rmnet_data3"' "$(jf upstream)" "upstream = 热点上游" \
+  && assert_eq '"cell"' "$(jf upstream_class)" \
+  && assert_eq '"tethering"' "$(jf upstream_source)" \
+  && assert_eq '"rmnet_data3"' "$(jf tether_upstream)" \
+  && assert_eq '"tun0"' "$(jf local_upstream)" "本机出口" \
+  && assert_eq '"vpn"' "$(jf local_upstream_class)" \
+  && assert_eq 'true' "$(jf vpn_active)" \
+  && assert_json_valid "$HNC_TEST_DIR/run/iface_detect.json" && test_pass
+
+test_start "hnc_iface VPN: no tethering upstream line → physical default-route iface (not tun0)"
+fx_init
+link wlan2 up 10.201.76.1; link rmnet_data3 up 10.97.46.161; link tun0 up 172.19.0.1
+upstream tun0; defroute rmnet_data3
+tether_state wlan2 TetheredState
+out=$(irun detect)
+assert_eq "wlan2" "$out" && assert_eq '"rmnet_data3"' "$(jf upstream)" \
+  && assert_eq '"route_physical"' "$(jf upstream_source)" && assert_eq '""' "$(jf tether_upstream)" \
+  && assert_eq 'true' "$(jf vpn_active)" && assert_eq '"cell"' "$(jf upstream_class)" && test_pass
+
+test_start "hnc_iface VPN: hotspot off, VPN over Wi-Fi STA → upstream wlan0 (wifi preferred over cell)"
+fx_init
+link wlan0 up 192.168.1.20; link rmnet_data3 up 10.97.46.161; link tun0 up 172.19.0.1
+upstream tun0; defroute rmnet_data3; defroute wlan0
+irun detect >/dev/null
+assert_eq '"wlan0"' "$(jf upstream)" && assert_eq '"wifi"' "$(jf upstream_class)" \
+  && assert_eq '"tun0"' "$(jf local_upstream)" && assert_eq 'true' "$(jf vpn_active)" \
+  && assert_json_valid "$HNC_TEST_DIR/run/iface_detect.json" && test_pass
+
+test_start "hnc_iface no VPN: vpn_active=false, upstream_source=route, local_upstream=upstream"
+fx_init
+link wlan0 up 192.168.1.20; link rmnet_data0 up 10.1.1.2
+upstream rmnet_data0
+irun detect >/dev/null
+assert_eq 'false' "$(jf vpn_active)" && assert_eq '"route"' "$(jf upstream_source)" \
+  && assert_eq '"rmnet_data0"' "$(jf local_upstream)" && assert_eq '"rmnet_data0"' "$(jf upstream)" && test_pass
