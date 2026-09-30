@@ -2,6 +2,9 @@ name: Build HNC arm64
 
 # Triggers:
 #   - push to main: full build + zip artifact
+#     v5.16.1 自动发版: module.prop 的 version 对应的 tag 还不存在时, 构建完
+#     直接创建 tag + 正式 Release 并挂 zip(升了版本号推 main = 发版);
+#     tag 已存在(没升版本号)则只构建不发版, 不会重复发。
 #   - pull_request: full build + zip artifact (v5.9.0: 合并前即可验证
 #     C/Go 交叉编译与打包;Release 步骤有条件门,PR 运行不发版)
 #   - workflow_dispatch: manual run from Actions UI。
@@ -106,6 +109,17 @@ jobs:
           elif printf '%s' "$GITHUB_REF" | grep -q '^refs/tags/v'; then
             TAG="$GITHUB_REF_NAME"
             echo "Tag-push mode: release for $TAG"
+          elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
+            # v5.16.1: push main 自动发版 —— 以 module.prop 版本为 tag
+            CAND="$MODULE_VERSION"
+            if ! echo "$CAND" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then
+              echo "module.prop version '$CAND' 格式不合发版规则, 只构建不发版"
+            elif git ls-remote --exit-code origin "refs/tags/$CAND" >/dev/null 2>&1; then
+              echo "tag $CAND 已存在(版本号没升), 只构建不发版"
+            else
+              TAG="$CAND"
+              echo "Auto-release mode: push main, will create tag+release $TAG at $GITHUB_SHA"
+            fi
           else
             echo "No release for this run (build only)"
           fi
@@ -520,10 +534,34 @@ jobs:
       # target_commitish 在当前 commit 上创建它(tag+release 一步完成)。
       # prerelease 判定改用 resolved tag(dispatch 时 github.ref 是 main,
       # 旧的 contains(github.ref,...) 会失真)。
+      # v5.16.1: 发版说明直接取 CHANGELOG.md 里对应版本那一节
+      - name: Extract release notes
+        if: steps.reltag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.reltag.outputs.tag }}
+        run: |
+          VER="${TAG#v}"
+          awk -v v="$VER" '
+            $0 ~ "^## \\[" v "\\]" {on=1; next}
+            on && /^## \[/ {exit}
+            on && /^---[[:space:]]*$/ {exit}
+            on {print}
+          ' CHANGELOG.md > release_notes.md
+          {
+            echo ""
+            echo "**安装**: 下载下面的 \`.zip\`, 用 KernelSU / SukiSU / Magisk 刷入后重启。"
+            echo ""
+            echo "SHA256 见同名 \`.sha256\` 文件。"
+          } >> release_notes.md
+          echo "=== release notes ($(wc -l < release_notes.md) lines) ==="
+          head -20 release_notes.md
+
       - name: Create GitHub Release (tag push or manual release)
         if: steps.reltag.outputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          name: HNC ${{ steps.reltag.outputs.tag }}
+          body_path: release_notes.md
           tag_name: ${{ steps.reltag.outputs.tag }}
           target_commitish: ${{ github.sha }}
           files: |
@@ -534,14 +572,3 @@ jobs:
             ${{ env.TOOLS_ZIP }}
             ${{ env.TOOLS_ZIP }}.sha256
           prerelease: ${{ contains(steps.reltag.outputs.tag, 'alpha') || contains(steps.reltag.outputs.tag, 'beta') || contains(steps.reltag.outputs.tag, 'rc') }}
-          body: |
-            HNC ${{ steps.version.outputs.version }} - automated build.
-            
-            See CHANGELOG.md for changes in this release.
-            
-            **Install**: Download the `.zip` below and install via KernelSU / SukiSU / Magisk Manager.
-            
-            **SHA256**:
-            ```
-            (see attached .sha256 file)
-            ```

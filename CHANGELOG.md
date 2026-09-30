@@ -14,6 +14,17 @@
 
 ---
 
+## [5.16.1] - 2026-09-30
+
+**推 main 自动发正式版**。
+
+### Changed
+
+- CI(`.github/workflows/build.yml`):push 到 main 时,若 `module.prop` 的版本号对应的 tag 还不存在,构建完成后自动创建 tag + 正式 GitHub Release 并挂上模块 zip、sha256 与 DPI 规则包;tag 已存在(版本号没升)则只构建不发版,不会重复发。Release 说明直接取 CHANGELOG.md 里对应版本的那一节。
+- 原因:Actions 里的构建产物(Artifacts)必须登录 GitHub 才能下载,而且是 zip 套 zip,手机上经常下不下来;Release 附件是公开直链,手机浏览器可直接下载。
+
+---
+
 ## [5.16.0] - 2026-09-24
 
 **全量真实统计 + 补齐排查出来的缺口与半成品**(依据一次前后端逐项对账:路由 / 动作 / 配置字段 / dpid 输出 / 脚本调用)。
