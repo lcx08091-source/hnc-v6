@@ -130,6 +130,8 @@ svg{flex:none}
 /* 按压 Q 弹 */
 .press{transition:transform .5s var(--q)}
 .press:active{transform:scale(.965);transition:transform .12s ease-out}
+[data-style="apple"] .press:active{transform:scale(.97);transition:transform .1s ease-out}
+:root.fx-nopress .press:active{transform:none}
 
 /* ── 通用小件 ── */
 .badge{display:inline-flex;align-items:center;gap:3px;font-size:10.5px;font-weight:700;padding:2px 7px;border-radius:6px;white-space:nowrap}
@@ -697,6 +699,21 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 [data-style="apple"] .lens-in .tab{color:var(--blue);font-weight:600}
 [data-style="apple"] .tabbar.drag .lens-in .tab{color:var(--blue)}
 /* 界面风格选择 */
+/* P1 导航: 34pt 大标题随滚动收起成顶栏居中小标题; 顶栏浮在内容之上, 滚动后出现毛玻璃 */
+.htitle{display:none}
+[data-style="apple"] body{padding-top:0}
+[data-style="apple"] .header{position:fixed;top:0;left:0;right:0;height:calc(env(safe-area-inset-top,0px) + 50px);padding:calc(env(safe-area-inset-top,0px) + 4px) 8px 4px 16px;
+  background:transparent;border-bottom:0;-webkit-backdrop-filter:none;backdrop-filter:none}
+[data-style="apple"] .header::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;background:color-mix(in srgb,var(--bg) 76%,transparent);
+  -webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);box-shadow:0 .5px 0 var(--divider);opacity:var(--hp,0)}
+[data-style="apple"] .brand{visibility:hidden}
+[data-style="apple"] .htitle{display:block;position:absolute;left:50%;bottom:13px;font-size:17px;font-weight:600;white-space:nowrap;pointer-events:none;
+  opacity:var(--st,0);transform:translate(-50%,calc((1 - var(--st,0)) * 5px))}
+[data-style="apple"] .page{padding-top:calc(env(safe-area-inset-top,0px) + 50px)}
+[data-style="apple"] .page::before{content:attr(data-title);display:block;max-width:640px;margin:0 auto 4px;padding:0 4px 6px;font-size:34px;font-weight:700;line-height:1.2;letter-spacing:.01em;
+  transform-origin:0 100%;opacity:calc(1 - var(--lt,0));transform:scale(calc(1 - var(--lt,0) * .05))}
+@media (min-width:900px){ [data-style="apple"] .page::before{max-width:1180px} }
+:root.fx-notitle[data-style="apple"] .page::before{display:none}
 .style-pick{display:grid;grid-template-columns:1fr 1fr;gap:10px}
 .style-pick button{padding:10px;border-radius:14px;border:2px solid var(--stroke);background:var(--card-2);font-size:12.5px;font-weight:700;display:grid;justify-items:center;gap:8px}
 .style-pick button.on{border-color:var(--blue);color:var(--blue)}
@@ -711,16 +728,17 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 
 <header class="header">
   <div class="brand"><div class="brand-title">HNC</div><div class="brand-sub">HOTSPOT NETWORK CONTROL</div></div>
+  <div class="htitle" id="htitle" aria-hidden="true"></div>
   <span class="sample" id="mode-pill" hidden></span>
   <button class="hbtn press" id="bell" aria-label="告警"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="hbadge" id="bell-n" hidden>0</span></button>
   <button class="hbtn press" id="theme-btn" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg></button>
 </header>
 
 <main class="pages" id="pages">
-  <section class="page on" id="p-devices" data-page="devices"></section>
-  <section class="page" id="p-apps" data-page="apps"></section>
-  <section class="page" id="p-stats" data-page="stats"></section>
-  <section class="page" id="p-settings" data-page="settings"></section>
+  <section class="page on" id="p-devices" data-page="devices" data-title="设备"></section>
+  <section class="page" id="p-apps" data-page="apps" data-title="应用"></section>
+  <section class="page" id="p-stats" data-page="stats" data-title="分析"></section>
+  <section class="page" id="p-settings" data-page="settings" data-title="设置"></section>
 </main>
 
 <nav class="tabbar" id="tabbar" aria-label="主导航">
@@ -1091,14 +1109,79 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   if (['realtime', 'balanced', 'powersave'].indexOf(S.refreshMode) < 0) S.refreshMode = 'balanced';
   if (['dpi', 'legacy', 'shadow'].indexOf(S.statsSource) < 0) S.statsSource = 'dpi';
 
+  /* ═════════════════════ v5.17: 动画效果(可逐项选择) ═════════════════════
+     title/haptic 不算"动画"(滚动驱动 / 震动), 不受「界面动画」总开关和系统「减少动态效果」影响;
+     其余效果在总开关关闭或系统要求减少动态效果时一律停用。 */
+  var FX_LIST = [
+    ['title', '大标题收起', '滚动时大标题收成顶栏居中小标题（苹果风）'],
+    ['page', '页面切换', '新页面从右侧推入，旧页面后退变暗'],
+    ['sheet', '弹层背景缩放', '弹层弹出时背后页面缩小变暗，可跟手下拉（苹果风）'],
+    ['morph', '共享元素展开', '弹层从你刚点的那一行 / 卡片里长出来（苹果风）'],
+    ['press', '按压回弹', '按下缩小到 0.97，松手弹回'],
+    ['list', '列表浮现', '进入页面时逐行错开浮现'],
+    ['num', '数字滚动', '速率、流量等数字滚动过渡'],
+    ['haptic', '触感反馈', '开关、长按、确认时轻震一下']
+  ];
+  var FX_PRESETS = {
+    calm: { title: true, page: true, sheet: true, morph: false, press: true, list: false, num: true, haptic: true, spring: 'light' },
+    std: { title: true, page: true, sheet: true, morph: true, press: true, list: true, num: true, haptic: true, spring: 'light' },
+    lively: { title: true, page: true, sheet: true, morph: true, press: true, list: true, num: true, haptic: true, spring: 'bouncy' }
+  };
+  var FX = (function () {
+    var d = Object.assign({}, FX_PRESETS.std), o = null;
+    try { o = JSON.parse(LS.get('hnc6.fx', '') || 'null'); } catch (_) {}
+    if (o && typeof o === 'object') FX_LIST.forEach(function (x) { if (typeof o[x[0]] === 'boolean') d[x[0]] = o[x[0]]; });
+    if (o && (o.spring === 'light' || o.spring === 'bouncy')) d.spring = o.spring;
+    return d;
+  })();
+  function saveFx() { LS.set('hnc6.fx', JSON.stringify(FX)); }
+  function fxOn(k) { if (k === 'title' || k === 'haptic') return FX[k] !== false; return motionOn() && FX[k] !== false; }
+  function fxPreset() {
+    if (!S.motion) return 'off';
+    for (var n in FX_PRESETS) { var p = FX_PRESETS[n], same = p.spring === FX.spring; FX_LIST.forEach(function (x) { if (p[x[0]] !== FX[x[0]]) same = false; }); if (same) return n; }
+    return 'custom';
+  }
+  function haptic(ms) { if (fxOn('haptic') && navigator.vibrate) try { navigator.vibrate(ms || 10); } catch (_) {} }
+  /* 弹簧参数 → CSS linear() 曲线。轻: stiffness 300 / damping 30; 弹: 200 / 20(质量 1) */
+  var SPRING = { light: { k: 300, c: 30 }, bouncy: { k: 200, c: 20 } };
+  function springKC(p) {
+    var w = Math.sqrt(p.k), z = p.c / (2 * w), ms = clamp(Math.log(1000) / (z * w) * 1000, 300, 1200);
+    return { curve: springCurve(z, w, ms), ms: Math.round(ms) };
+  }
+  var EASE0 = { q: EASE.q, soft: EASE.soft };
+  function applyMotion() {
+    var r = document.documentElement, q = EASE0.q, soft = EASE0.soft;
+    if (S.style === 'apple') { q = springKC(SPRING[FX.spring] || SPRING.light).curve; soft = springKC(SPRING.light).curve; }
+    try {
+      if (!window.CSS || !CSS.supports('transition-timing-function', q)) return;
+      EASE.q = q; EASE.soft = soft; r.style.setProperty('--q', q); r.style.setProperty('--q-soft', soft);
+    } catch (_) {}
+    r.classList.toggle('fx-nopress', !fxOn('press'));
+  }
   function applyTheme() {
     var r = document.documentElement;
     if (S.theme === 'light' || S.theme === 'dark') r.setAttribute('data-theme', S.theme); else r.removeAttribute('data-theme');
     // v5.17: 界面风格(默认 / 苹果风)。只切视觉与动效, 逻辑共用
     if (S.style === 'apple') r.setAttribute('data-style', 'apple'); else r.removeAttribute('data-style');
     r.classList.toggle('calm', !S.motion);
+    applyMotion();
   }
   function apple() { return S.style === 'apple'; }
+  /* v5.17 P1: 大标题滚动插值 —— --lt 大标题淡出缩小, --st 顶栏小标题浮现, --hp 顶栏毛玻璃出现 */
+  var NAV_T = { devices: '设备', apps: '应用', stats: '分析', settings: '设置' }, navRaf = 0;
+  function navSync() {
+    var hdr = document.querySelector('.header'), ht = document.getElementById('htitle'); if (!hdr || !ht) return;
+    ht.textContent = NAV_T[S.page] || '';
+    var pg = document.getElementById('p-' + S.page), y = pg ? pg.scrollTop : 0, on = apple() && fxOn('title');
+    document.documentElement.classList.toggle('fx-notitle', apple() && !fxOn('title'));
+    var lt = on ? clamp(y / 44, 0, 1) : 1, st = on ? clamp((y - 28) / 14, 0, 1) : 1, hp = on ? clamp((y - 4) / 26, 0, 1) : 1;
+    if (pg) pg.style.setProperty('--lt', lt.toFixed(3));
+    hdr.style.setProperty('--st', st.toFixed(3)); hdr.style.setProperty('--hp', hp.toFixed(3));
+  }
+  document.addEventListener('scroll', function (e) {
+    if (!apple() || !e.target.classList || !e.target.classList.contains('page')) return;
+    if (!navRaf) navRaf = requestAnimationFrame(function () { navRaf = 0; navSync(); });
+  }, true);
   applyTheme();
 
   /* ═════════════════════ 能力 ═════════════════════ */
@@ -2801,7 +2884,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (name === S.page) { $('#p-' + name).scrollTo({ top: 0, behavior: 'smooth' }); syncTab(name); return; }
     var from = $('#p-' + S.page), to = $('#p-' + name), dir = ORDER.indexOf(name) > ORDER.indexOf(S.page) ? 1 : -1;
     if (leaving) { leaving.el.classList.remove('on'); if (leaving.a) leaving.a.cancel(); leaving = null; }
-    S.page = name; closeDD(); syncTab(name); LS.set('hnc6.page', name);
+    S.page = name; closeDD(); syncTab(name); LS.set('hnc6.page', name); navSync();
     to.classList.add('on');
     RENDER[name](true);
     var a = anim(from, [{ transform: 'none', opacity: 1 }, { transform: 'translateX(' + (-dir * 18) + '%) scale(.95)', opacity: 0 }], { duration: 380, easing: EASE.soft, fill: 'forwards' });
