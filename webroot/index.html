@@ -557,6 +557,30 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 .appq .n{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .appq .box{height:34px;padding:0 8px}
 .appq .box input{font-size:13px}
+.appq-n{grid-column:1/-1;margin-top:-2px}
+/* v5.20 自检报告 */
+.sc-meta{text-align:center;font-size:12px;color:var(--text-3);margin:12px 0 0}
+.sc-chips{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:10px 0 12px}
+.sc-chip{border-radius:12px;padding:8px 4px;text-align:center;background:var(--input)}
+.sc-chip b{display:block;font-size:18px;font-weight:800;line-height:1.2;color:var(--text-3)}
+.sc-chip span{font-size:11.5px;color:var(--text-3)}
+.sc-chip.ok.has b{color:var(--badge-ok)} .sc-chip.warn.has{background:var(--badge-warn-bg)} .sc-chip.warn.has b{color:var(--badge-warn)} .sc-chip.fail.has{background:var(--badge-red-bg)} .sc-chip.fail.has b{color:var(--badge-red)}
+.sc-secs{border-radius:14px;background:var(--input)}
+.sc-secs .set-body{gap:0}
+.sc-it{display:grid;grid-template-columns:20px minmax(0,1fr);gap:9px;padding:8px 0}
+.sc-it+.sc-it{border-top:1px solid var(--divider)}
+.sc-i{width:20px;height:20px;border-radius:50%;display:grid;place-items:center;font-size:11.5px;font-weight:800;margin-top:1px;background:var(--badge-gray-bg);color:var(--badge-gray)}
+.sc-it.ok .sc-i{background:var(--badge-ok-bg);color:var(--badge-ok)} .sc-it.warn .sc-i{background:var(--badge-warn-bg);color:var(--badge-warn)} .sc-it.fail .sc-i{background:var(--badge-red-bg);color:var(--badge-red)}
+.sc-l{display:flex;justify-content:space-between;gap:10px;align-items:baseline}
+.sc-l .t{font-size:13.5px;font-weight:600;flex:none;max-width:46%}
+.sc-l .v{font-size:13px;text-align:right;min-width:0;overflow-wrap:anywhere;color:var(--text-2)}
+.sc-it.warn .sc-l .v{color:var(--badge-warn)} .sc-it.fail .sc-l .v{color:var(--badge-red)}
+.sc-it .s{font-size:12px;line-height:1.45;color:var(--text-3);margin-top:2px;overflow-wrap:anywhere}
+.sc-fix{margin-top:6px;padding:7px 10px;border-radius:9px;font-size:12px;line-height:1.45;overflow-wrap:anywhere;background:color-mix(in srgb,var(--blue) 11%,transparent);color:var(--text-1)}
+.sc-fix b{color:var(--blue);margin-right:6px}
+.sc-exp{display:flex;align-items:center;gap:10px;margin-top:14px;padding:10px 12px;border-radius:12px;background:var(--input)}
+.spin{display:inline-block;width:14px;height:14px;border-radius:50%;border:2px solid currentColor;border-right-color:transparent;animation:spin .8s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
 .linkish{color:var(--blue);font-weight:700;font-size:13px}
 .linkish.danger{color:var(--red)}
 .client{padding:12px 14px}
@@ -1544,7 +1568,18 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   function netemOk() { return htbOk() && cap('tc_netem') !== false; }
   function upOk() { return htbOk() && cap('uplink_supported') !== false; }
   function qosFallback() { return cap('qos_fallback_required') === true || /root_htb|htb_root/.test(String(cap('downlink_mode') || '')) || S.cfg.qos_fallback === true; }
-  function sqmLabel() { return cap('tc_cake') === true ? 'CAKE' : cap('tc_fq_codel') === true ? 'fq_codel' : 'sfq'; }
+  var QD_T = { cake: 'CAKE', fq_codel: 'fq_codel', fq: 'fq', sfq: 'sfq', pfifo: 'pfifo' };
+  function qdChosen() { return S.qcaps && S.qcaps.chosen ? String(S.qcaps.chosen) : ''; }
+  function sqmLabel() { var c = qdChosen(); if (c) return QD_T[c] || c; return cap('tc_cake') === true ? 'CAKE' : cap('tc_fq_codel') === true ? 'fq_codel' : 'sfq'; }
+  /* v5.20: 低延迟开关实际用哪个队列(qdisc_caps.sh 实测; 没有实测结果时按旧能力位猜) */
+  function qdiscNote() {
+    var c = qdChosen();
+    if (!c) return S.qcaps ? '内核没有测到可用的低延迟队列，效果有限' : '使用 ' + sqmLabel();
+    if (c === 'cake' || c === 'fq_codel') return '使用 ' + QD_T[c];
+    if (c === 'pfifo') return '内核无 cake / fq_codel / sfq，只有 pfifo，效果有限';
+    return '内核无 cake/fq_codel，使用 ' + (QD_T[c] || c);
+  }
+  var IFM_T = { override: '手动指定', tethering: '系统共享服务', tetherctrl: 'tetherctrl 转发表', wifi_softap: 'WiFi 热点服务', scan: '接口扫描（兜底）', none: '未识别' };
   function offloadRisk() { return (S.offload.detail === 'ACTIVE' || S.offload.detail === 'CAPABLE') && !(S.offload.guard && S.offload.guard.fallback_active); }
 
   /* ═════════════════════ 数据加载 ═════════════════════ */
@@ -1634,7 +1669,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   function loadConfig() { return api.get('/api/config').then(function (c) { S.cfg = c || {}; return S.cfg; }); }
   function loadCaps() {
     return api.get('/api/capabilities').then(function (r) {
-      S.caps = r.capabilities || (r.available === false ? {} : r) || {}; S.capsLoaded = true; return S.caps;
+      S.caps = r.capabilities || (r.available === false ? {} : r) || {}; S.capsLoaded = true;
+      S.qcaps = r.qdisc_caps && typeof r.qdisc_caps === 'object' ? r.qdisc_caps : null;   // v5.20: 低延迟 qdisc 兜底链实测结果
+      return S.caps;
     }).catch(function () { S.caps = {}; S.capsLoaded = true; return {}; });
   }
   function loadOffload() { return api.getSafe('/api/offload_status', null, null).then(function (o) { if (o) S.offload = { active: o.active === true, detail: o.detail || '', guard: o.offload_guard || null }; renderOffloadBanner(); }); }
@@ -1645,7 +1682,13 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       if ($('#sheet').dataset.kind === 'alerts') renderAlertsSheet(true);
     });
   }
-  function loadAppLimits() { return api.getSafe('/api/app_limits', null, { items: [] }).then(function (r) { S.appLimits = r.items || []; }); }
+  function loadAppLimits() {
+    return api.getSafe('/api/app_limits', null, { items: [] }).then(function (r) {
+      S.appLimits = r.items || [];
+      // v5.20: 逃生口「包含共享 CDN IP」; 旧后端没有这个字段 → 设置里不显示开关
+      S.appLimitSharedKnown = typeof r.include_shared_ips === 'boolean'; S.appLimitShared = r.include_shared_ips === true;
+    });
+  }
   function loadOnlineHours() { return api.getSafe('/api/online_hours', { days: 7 }, null).then(function (r) { if (r && r.hours) S.onlineHours = r.hours; paintOnlineHours(); }); }
   function loadTemplates() {
     var local = []; try { local = JSON.parse(LS.get('hnc.templates', '[]')) || []; } catch (_) {}
@@ -1947,7 +1990,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       '<div class="btns"><button class="btn sec press" data-act="clear-delay"' + busy + '>清除</button><button class="btn pri press" data-act="apply-delay"' + busy + (d.sqm ? ' disabled' : dlDis) + '>应用延迟</button></div></div>';
     // 低延迟 / 白名单
     h += '<div class="ctrl" style="gap:0;padding:4px 12px">' +
-      '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">低延迟模式</div><div class="s">给这台设备换 ' + sqmLabel() + ' 队列，游戏/语音更稳' + (d.hasDelay ? '（先清除延迟注入）' : '') + '</div></span>' + toggle(d.sqm, 'data-act="sqm" aria-label="低延迟模式"' + (d.hasDelay || !htbOk() ? ' disabled' : '')) + '</div>' +
+      '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">低延迟模式</div><div class="s">游戏/语音更稳 · <span data-qdisc>' + esc(qdiscNote()) + '</span>' + (d.hasDelay ? '（先清除延迟注入）' : '') + '</div></span>' + toggle(d.sqm, 'data-act="sqm" aria-label="低延迟模式"' + (d.hasDelay || !htbOk() ? ' disabled' : '')) + '</div>' +
       '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">白名单</div><div class="s">开启白名单模式后，只有白名单设备能上网</div></span>' + toggle(d.wl, 'data-act="wl" aria-label="白名单"') + '</div></div>';
     // v5.13: 实时连接(conntrack) —— 展开时拉一次, 「查看全部」打开实时刷新的弹层
     if (d.online) h += '<div class="ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;gap:6px;align-items:center"><i style="background:var(--orange)"></i>实时连接</span><button class="linkish" data-act="conns">查看全部</button></div><div data-conn-mini>' + connMiniHtml(d.mac) + '</div></div>';
@@ -2103,7 +2146,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   function appLimitRows(d) {
     var items = S.appLimits.filter(function (x) { return String(x.mac || '').toLowerCase() === d.mac; });
     var map = {}, rows = [];
-    items.forEach(function (x) { map[x.app_id] = x; rows.push({ id: x.app_id, name: x.app_id, lim: num(x.down_mbps) }); });
+    items.forEach(function (x) { map[x.app_id] = x; rows.push({ id: x.app_id, name: x.app_id, lim: num(x.down_mbps), it: x }); });
     d.live.concat(d.apps).slice(0, 8).forEach(function (a) {
       var id = a.id || a.app_id || a.name; if (!id) return;
       if (map[id]) { rows.forEach(function (r) { if (r.id === id) r.name = a.name || id; }); return; }
@@ -2112,8 +2155,16 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (!rows.length) return '<div class="note">还没识别到这台设备在用的应用（需要 DPI 在运行）</div>';
     return rows.map(function (r) {
       return '<div class="appq" data-app="' + esc(r.id) + '"><span class="n">' + esc(r.name) + '</span><span class="box"><input type="number" min="0" step="0.1" placeholder="不限" value="' + mbpsToMBs(r.lim) + '"><span class="u">MB/s</span></span>' +
-        '<span style="display:flex;gap:10px"><button class="linkish" data-act="applim-save">保存</button>' + (r.lim ? '<button class="linkish danger" data-act="applim-clear">清除</button>' : '') + '</span></div>';
+        '<span style="display:flex;gap:10px"><button class="linkish" data-act="applim-save">保存</button>' + (r.lim ? '<button class="linkish danger" data-act="applim-clear">清除</button>' : '') + '</span>' + appLimNote(r.it) + '</div>';
     }).join('');
+  }
+  /* v5.20: 应用限速按目的 IP 生效; 与其他应用共用的 CDN 地址默认跳过(否则会误伤) */
+  function appLimNote(x) {
+    if (!x || !(num(x.down_mbps) > 0) || x.ip_stats_source === 'sim' || typeof x.ips_total !== 'number') return '';
+    var t = num(x.ips_total), sk = num(x.ips_shared_skipped), l = num(x.ips_limited);
+    if (!t) return '<div class="note appq-n">还没观察到这个应用的服务器地址，它联网后自动生效</div>';
+    if (!l) return '<div class="note warn appq-n">这个应用的地址都与其他应用共用，限速暂未生效' + (sk ? '（跳过 ' + sk + ' 个共享 CDN 地址）' : '') + '</div>';
+    return '<div class="note appq-n">已限速 ' + l + ' 个地址' + (sk ? ' · 跳过 ' + sk + ' 个共享 CDN 地址' : '') + (S.appLimitShared ? ' · 含共享地址' : '') + '</div>';
   }
   function devCard(d) {
     var r = bps(d.rx), t = bps(d.tx), open = !wide() && S.open[d.mac];
@@ -3292,7 +3343,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       api.getSafe('/api/iface_info', null, null).then(function (r) { S.ifaceInfo = r; }),
       api.getSafe('/api/run_status', null, null).then(function (r) { S.runStatus = r; }),
       loadSim(),
-      loadCaps()
+      loadCaps(),
+      loadSelfcheck(),
+      loadAppLimits()
     ]);
   }
   /* v5.19: 模拟环境(调试) */
@@ -3357,11 +3410,29 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     return a.length ? '已启用 · ' + a.join(' · ') : '按时段 / 充电状态自动开关热点 · 未启用';
   }
   function remoteUrl() { var i = S.ifaceInfo || {}, h = i.gateway || i.ip || S.hotspot.ip; return h ? 'https://' + h + ':8443' : ''; }
+  /* v5.20: USB / 蓝牙共享只上报不管控 */
+  function tetherNote(l) {
+    var u = Array.isArray(l.usb_tether) ? l.usb_tether : [], b = Array.isArray(l.bt_tether) ? l.bt_tether : [];
+    if (!u.length && !b.length) return '';
+    var what = [u.length ? 'USB 共享' : '', b.length ? '蓝牙共享' : ''].filter(Boolean).join(' + ');
+    return '<div class="row">' + gi('orange', 'warn') + '<span class="tx"><div class="t">检测到' + what + '</div><div class="s">USB/蓝牙共享的设备不受 HNC 管控：限速、封锁、统计只作用于 WiFi 热点</div></span>' + val(esc(u.concat(b).join(' · ')), 'warn') + '</div>';
+  }
+  /* v5.20: 设备限速叶子默认用 AQM(cake / fq_codel)还是 FIFO 占位; 后端不回显当前档位 → 记本地最后一次设置 */
+  function aqmRowHtml(c) {
+    var q = S.qcaps, ch = qdChosen(), mode = c.tc_leaf_aqm || S.aqmMode || LS.get('hnc6.aqm', 'auto');
+    if (['auto', 'on', 'off'].indexOf(mode) < 0) mode = 'auto';
+    var elig = q ? q.default_leaf_aqm_eligible === true || ch === 'cake' || ch === 'fq_codel' : false;
+    var eff = mode === 'on' || (mode === 'auto' && elig), av = q && Array.isArray(q.available) ? q.available : [];
+    var desc = q ? (av.length ? '内核可用：' + av.map(function (x) { return QD_T[x] || x; }).join(' / ') : '内核没有测到可用的队列') + (ch ? ' · 选定 ' + (QD_T[ch] || ch) : '') + (mode === 'auto' && !elig ? ' · 自动模式只在有 cake / fq_codel 时开启' : '') : '尚未探测（重启 HNC 服务后生成）';
+    return '<div class="row" style="align-items:flex-start" id="aqm-row">' + gi('cyan', 'layers') + '<span class="tx"><div class="t">默认队列 AQM</div><div class="s">限速设备的默认队列用 AQM 减少排队延迟 · 只影响之后新设 / 重设的限速</div>' +
+      '<div style="margin-top:8px">' + seg('aqm-mode', [['auto', '自动'], ['on', '开'], ['off', '关']], mode, 'small') + '</div><div class="note" style="margin-top:6px">' + esc(desc) + '</div></span>' + val(eff ? '开 · ' + esc(ch ? QD_T[ch] || ch : sqmLabel()) : '关', eff ? 'ok' : '') + '</div>';
+  }
   function renderSettings(anim1) {
     var c = S.cfg || {}, ac = S.alertCfg || {}, mq = ac.monthly_quota || {}, an = ac.anomaly_traffic || {}, ud = ac.unknown_device || {}, sla = S.sla || {}, rs = S.runStatus || {};
-    var gsOn = c.global_shaper_enabled === true, hsAuto = c.hotspot_autostart === true;
+    var gsOn = c.global_shaper_enabled === true, hsAuto = c.hotspot_autostart === true, lv = S.live || {};
     var groups = [];
-    groups.push(['诊断', sFold('logs', ['gray', 'doc'], '运行日志', 'service · hotspotd · dpid · iptables/tc 等',
+    var scR = scRep(), scW = scR ? (num((scR.summary || {}).fail) ? 'fail' : num((scR.summary || {}).warn) ? 'warn' : 'ok') : '';
+    groups.push(['诊断', sBtn([scW === 'fail' ? 'red' : scW === 'warn' ? 'orange' : 'green', 'check'], '自检报告', SC.running ? '正在自检…' : scR ? scAgo(scR.generated_at) + '生成 · ' + scSumTxt(scR.summary) : '一键检查限速能力、防火墙、热点、IPv6、时间等，约 20 秒', 'sc-open', scR ? '查看' : '一键自检') + sFold('logs', ['gray', 'doc'], '运行日志', 'service · hotspotd · dpid · iptables/tc 等',
       '<div style="display:flex;gap:8px"><select class="selbox" id="log-file" style="flex:1">' + LOG_FILES.map(function (f) { return '<option' + (f === S.logFile ? ' selected' : '') + '>' + f + '</option>'; }).join('') + '</select><button class="btn sec press" data-act="log-refresh">' + ico('refresh') + '刷新</button><button class="btn sec press" data-act="log-copy">' + ico('copy') + '</button></div>' +
       '<div class="logv" id="logv"><div class="t">展开后自动加载</div></div>')]);
     groups.push(['热点', sFold('hs', ['blue', 'wifi'], '开机自动开热点', '开机后自动开 WiFi 热点；ColorOS 可能不放行命令行开热点',
@@ -3376,7 +3447,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">只在充电时开热点</div><div class="s">拔掉充电器后自动关热点，插上后自动开（同时受时段限制）</div></span>' + toggle(c.hotspot_charging_only, 'data-local="sched-charge" aria-label="只在充电时开热点"') + '</div>' +
         '<div class="note">只在状态切换的那一刻动作：时段外你手动开的热点不会被反复关掉。开机自启也遵守这里的规则。</div>' +
         '<button class="btn pri press" data-act="sched-save">保存</button>') +
-      sItem(['blue', 'wifi'], '热点接口', '当前热点使用的接口（实时）', val(esc(S.hotspot.iface || '—') + (S.hotspot.active === false ? ' · 未开启' : ''))) +
+      sItem(['blue', 'wifi'], '热点接口', '当前热点使用的接口（实时）' + (lv.iface_method ? ' · 识别方式：' + esc(IFM_T[lv.iface_method] || lv.iface_method) : ''), val(esc(S.hotspot.iface || '—') + (S.hotspot.active === false ? ' · 未开启' : ''))) + tetherNote(lv) +
       sFold('iface', ['cyan', 'wifi'], '热点接口偏好', '默认自动识别；ColorOS 常见 wlan2', '<div style="display:flex;gap:8px">' + inp('iface-pref', c.hotspot_iface || 'auto', '', 'maxlength="15" placeholder="auto" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="iface-save">保存</button></div><div class="note">填 auto 让 HNC 自动识别；手动填接口名（如 wlan2 / ap0）用于识别不准的机型。</div>', val(esc(c.hotspot_iface || 'auto'))) +
       sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val((OFFLOAD_T[S.offload.detail] || S.offload.detail || '—') + (S.offload.guard && S.offload.guard.fallback_active ? ' · 已兜底' : ''), S.offload.detail === 'ACTIVE' && !(S.offload.guard && S.offload.guard.fallback_active) ? 'warn' : 'ok')) +
       sItem(['red', 'shield'], '网站封锁 · DNS 层', '封锁网站时顺带拦掉该设备对这个域名的 DNS 查询，第一次连接就拦住', val({ available: '可用', unavailable: '内核不支持（只按 IP 拦）', unknown: '首次封锁时检测' }[c.conn_block_dns_layer] || '—', c.conn_block_dns_layer === 'unavailable' ? 'warn' : 'ok'))]);
@@ -3396,7 +3467,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     groups.push(['全局带宽整形', sFold('gs', ['purple', 'layers'], '启用全局带宽整形', '给整个热点设 WAN 上限 + 智能队列，抗 bufferbloat',
       '<div class="grid2"><label class="field">下行上限' + inp('gs-down', rateToMbps(c.global_shaper_down), 'Mbps', 'type="number" min="0" step="0.1"') + '</label><label class="field">上行上限' + inp('gs-up', rateToMbps(c.global_shaper_up), 'Mbps', 'type="number" min="0" step="0.1"') + '</label></div>' +
       '<div class="note">填宽带/流量套餐实测速度的 85~90%。当前队列：' + sqmLabel() + (htbOk() ? '' : ' · <b>内核不支持 HTB，无法启用</b>') + '</div><button class="btn pri press" data-act="gs-apply">应用</button>',
-      toggle(gsOn, 'data-set="gs" aria-label="全局带宽整形"' + (htbOk() ? '' : ' disabled')))]);
+      toggle(gsOn, 'data-set="gs" aria-label="全局带宽整形"' + (htbOk() ? '' : ' disabled'))) + aqmRowHtml(c)]);
     var fx = c.flywheel_exclude_user || [];
     groups.push(['飞轮排除名单', sFold('fw', ['cyan', 'shield'], '不参与规则学习的应用', 'VPN / 代理会代理别的应用流量，排除后不污染规则 · ' + fx.length + ' 个',
       '<div class="chips">' + (fx.length ? fx.map(function (p) { return '<span class="chip">' + esc(p) + '<button class="linkish danger" data-fw-del="' + esc(p) + '" aria-label="移除">×</button></span>'; }).join('') : '<span class="note">还没有手动排除的应用（内置名单已包含常见 VPN / 代理）</span>') + '</div>' +
@@ -3411,11 +3482,11 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       (remOn || !KSU ? '<div class="row">' + gi('gray', 'link') + '<span class="tx"><div class="t">访问地址</div><div class="s mono">' + esc(rUrl || '无法获取本机 IP · 请确认热点已开启') + '</div></span>' + (rUrl ? '<button class="linkish" data-act="url-copy">复制</button><button class="linkish" data-act="url-share">分享</button>' : '') + '</div>' : '') +
       sBtn(['orange', 'star'], '生成配对码', '远端新设备首次连接用 · 120 秒有效', 'pair-new', '生成') +
       sFold('tokens', ['gray', 'dev'], '已授权设备', '管理能远程访问的设备' + (KSU ? '' : ' · 撤销只能在本机操作'), '<div id="tokens-list" class="note">展开后加载</div>')]);
-    groups.push(['运行状态', !S.runStatus ? sItem(['gray', 'cpu'], '运行状态', '后端暂未提供 /api/run_status', val('—')) :
+    groups.push(['运行状态', (!S.runStatus ? sItem(['gray', 'cpu'], '运行状态', '后端暂未提供 /api/run_status', val('—')) :
       sItem(['green', 'cpu'], 'hotspotd 进程', rs.hotspotd_pid ? 'pid ' + rs.hotspotd_pid + (rs.hotspotd_rss_kb ? ' · ' + Math.round(rs.hotspotd_rss_kb / 1024) + ' MB' : '') : '未运行', val(rs.hotspotd === 'up' ? '运行中' : '未运行', rs.hotspotd === 'up' ? 'ok' : 'bad')) +
       sItem(['purple', 'layers'], 'tc 规则数', 'qdisc + class（热点接口 + IFB）', val(num(rs.tc_rules))) +
       sItem(['orange', 'shield'], 'iptables 规则', 'mangle 表里 HNC 的 MARK 规则', val(num(rs.ipt_rules))) +
-      sItem(['blue', 'heart'], 'watchdog', '后台健康检查进程', val(num(rs.watchdog) > 0 ? '正常' : '未运行', num(rs.watchdog) > 0 ? 'ok' : 'bad'))]);
+      sItem(['blue', 'heart'], 'watchdog', '后台健康检查进程', val(num(rs.watchdog) > 0 ? '正常' : '未运行', num(rs.watchdog) > 0 ? 'ok' : 'bad'))) + scStatusRows()]);
     var nz = function (v) { return v == null ? '未统计' : String(v); }, slaCls = function (v) { return v == null ? '' : num(v) ? 'warn' : 'ok'; };
     groups.push(['运行健康', !S.sla ? sItem(['gray', 'heart'], '运行健康', '暂无数据', val('—')) :
       sItem(['gray', 'refresh'], 'dpid 重启 / 近期崩溃', '累计重启 · 近期崩溃循环', val(nz(sla.dpid_restart_count) + ' / ' + nz(sla.dpid_crash_recent), num(sla.dpid_crash_recent) ? 'warn' : '')) +
@@ -3434,6 +3505,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     // v5.14: 应用识别 —— 强制 QUIC 回落 TCP
     groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
       sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
+      (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '（可能误伤其他应用）CDN 地址常被多个应用共用；默认跳过这些地址，打开后也一起限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
       sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
     var cs = S.clsact;
     var gm = c.clsact_bpf_mode || (c.clsact_bpf_enabled === true ? 'on' : 'auto'), og = c.offload_guard || S.offload.guard || null;
@@ -3547,6 +3619,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         if (on) { var gw = el.closest('[data-foldkey]'); if (gw && !gw.classList.contains('open')) foldToggle(gw, 'gs'); el.setAttribute('aria-checked', 'false'); toast('填好上限后点「应用」启用'); return; }
         api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭')).catch(rollback); return;
       case 'remote': api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(rollback); return;
+      case 'appshared': api.action('app_limit_shared_ips_set', { enabled: String(on) }).then(function () { S.appLimitShared = on; toast(on ? '已包含共享 IP · 同一 CDN 上的其他应用也可能被一起限速' : '已恢复：跳过与其他应用共用的地址'); return loadAppLimits(); }).catch(rollback); return;
       case 'certprobe': api.action('discover_cert_probe_set', { enabled: String(on) }).then(done()).catch(rollback); return;
       case 'sim': simSet(on).catch(rollback); return;
       case 'quic': api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); }).catch(rollback); return;
@@ -3601,6 +3674,131 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       if (!KSU && name) { downloadExport(name, '/api/exports/' + encodeURIComponent(name)); toast('诊断包已生成 · ' + name); return; }
       toast('诊断包已生成');
     }).catch(function (e) { toast(errText(e), 'err'); }).then(function () { btn.disabled = false; });
+  }
+  /* ═════ v5.20: 自检报告(GET /api/selfcheck · action selfcheck_run / selfcheck_export) ═════ */
+  var SC_ST = { ok: ['✓', '正常'], warn: ['!', '警告'], fail: ['✗', '失败'], info: ['·', '信息'] };
+  var SC_RANK = { fail: 3, warn: 2, ok: 1, info: 0 };
+  var SC_IC = { system: 'cpu', shaping: 'gauge', firewall: 'shield', offload: 'rocket', network: 'wifi', ipv6: 'layers', time: 'refresh', process: 'heart', ident: 'search' };
+  var SC = { running: false, t0: 0, timer: 0, waitT: 0, seenAt: 0, redact: LS.get('hnc6.sc-redact', '1') !== '0' };
+  function loadSelfcheck() {
+    return api.getSafe('/api/selfcheck', null, null).then(function (r) {
+      if (r && typeof r === 'object') { S.sc = r; if (r.running && !SC.running) scWaitIdle(); }
+      return r;
+    });
+  }
+  function scRep() { return S.sc && S.sc.available && Array.isArray(S.sc.sections) ? S.sc : null; }
+  function scSec(id) { var r = scRep(); if (!r) return null; for (var i = 0; i < r.sections.length; i++) if (r.sections[i].id === id) return r.sections[i]; return null; }
+  function scFind(sec, id) { var s = scSec(sec); if (!s) return null; var it = s.items || []; for (var i = 0; i < it.length; i++) if (it[i].id === id) return it[i]; return null; }
+  function scStat(st) { return SC_ST[st] ? st : 'info'; }
+  function scWorst(items) { var w = 'info'; (items || []).forEach(function (x) { var s = scStat(x.status); if (SC_RANK[s] > SC_RANK[w]) w = s; }); return w; }
+  function scCount(items) { var c = { ok: 0, warn: 0, fail: 0, info: 0 }; (items || []).forEach(function (x) { c[scStat(x.status)]++; }); return c; }
+  function scSumTxt(s) { s = s || {}; return '✓ ' + num(s.ok) + ' · ! ' + num(s.warn) + ' · ✗ ' + num(s.fail); }
+  function scAgo(ts) { return Date.now() / 1000 - num(ts) < 10 ? '刚刚' : ago(ts); }
+  function scDur(ms) { ms = num(ms); return ms >= 1000 ? (ms / 1000).toFixed(1) + ' 秒' : Math.round(ms) + ' 毫秒'; }
+  function scItemHtml(it) {
+    var st = scStat(it.status);
+    return '<div class="sc-it ' + st + '" data-scid="' + esc(it.id || '') + '"><span class="sc-i" aria-label="' + SC_ST[st][1] + '">' + SC_ST[st][0] + '</span><div style="min-width:0">' +
+      '<div class="sc-l"><span class="t">' + esc(it.label || it.id || '') + '</span><span class="v">' + esc(it.value == null || it.value === '' ? '—' : it.value) + '</span></div>' +
+      (it.detail ? '<div class="s">' + esc(it.detail) + '</div>' : '') + (it.fix ? '<div class="sc-fix"><b>建议</b>' + esc(it.fix) + '</div>' : '') + '</div></div>';
+  }
+  function scBody() {
+    var r = scRep(), h = '', el = SC.running ? Math.floor((Date.now() - SC.t0) / 1000) : 0;
+    h += SC.running ? '<button class="btn pri wide" data-act="sc-run" disabled><span class="spin"></span>正在自检… <span id="sc-el">' + el + '</span> 秒</button><div class="pbar" style="margin-top:8px"><i id="sc-pb" style="width:' + Math.min(95, el / 18 * 100).toFixed(0) + '%;animation:none;transition:width .5s linear"></i></div><div class="note" style="text-align:center;margin-top:6px">大约需要 20 秒，期间可以关掉这个窗口</div>'
+      : '<button class="btn pri wide press" data-act="sc-run">' + ico('check') + (r ? '重新自检' : '一键自检') + '</button>';
+    if (!r) return h + '<div class="note" style="text-align:center;margin-top:14px">' + (SC.running ? '' : '还没有自检记录。自检会检查机型与系统、限速能力、防火墙、硬件加速、热点、IPv6、时间、进程和识别引擎，只读不改任何设置。') + '</div>';
+    var s = r.summary || {};
+    h += '<div class="sc-meta">' + esc(scAgo(r.generated_at)) + '生成 · 耗时 ' + scDur(r.duration_ms) + (r.version ? ' · ' + esc(r.version) : '') + (r.redacted ? ' · 已打码' : '') + '</div>';
+    h += '<div class="sc-chips">' + ['ok', 'warn', 'fail', 'info'].map(function (k) { return '<div class="sc-chip ' + k + (num(s[k]) ? ' has' : '') + '"><b class="num">' + SC_ST[k][0] + ' ' + num(s[k]) + '</b><span>' + SC_ST[k][1] + '</span></div>'; }).join('') + '</div>';
+    if (SC.seenAt !== r.generated_at) {   // 新报告: 含警告 / 失败的分组自动展开, 其余收起
+      SC.seenAt = r.generated_at;
+      r.sections.forEach(function (sec) { var w = scWorst(sec.items); S.open['sc-' + sec.id] = w === 'warn' || w === 'fail'; });
+    }
+    h += '<div class="rows sc-secs">' + r.sections.map(function (sec) {
+      var items = sec.items || [], w = scWorst(items), c = scCount(items);
+      var sub = [c.fail ? c.fail + ' 失败' : '', c.warn ? c.warn + ' 警告' : '', c.ok ? c.ok + ' 正常' : '', c.info ? c.info + ' 信息' : ''].filter(Boolean).join(' · ') + (sec.elapsed_ms != null ? ' · 用时 ' + scDur(sec.elapsed_ms) : '');
+      var badge = w === 'fail' ? '<span class="badge b-red">' + c.fail + ' 项失败</span>' : w === 'warn' ? '<span class="badge b-warn">' + c.warn + ' 项警告</span>' : '<span class="badge b-ok">正常</span>';
+      return sFold('sc-' + sec.id, [w === 'fail' ? 'red' : w === 'warn' ? 'orange' : w === 'ok' ? 'green' : 'gray', SC_IC[sec.id] || 'flask'], esc(sec.title || sec.id), sub,
+        '<div class="sc-items">' + (items.length ? items.map(scItemHtml).join('') : '<div class="note">（无检查项）</div>') + '</div>', badge);
+    }).join('') + '</div>';
+    h += '<div class="sc-exp"><span class="tx" style="flex:1;min-width:0"><div class="t" style="font-size:14px;font-weight:600">打码 MAC / IP</div><div class="note">导出给别人看时建议打开</div></span>' + toggle(SC.redact, 'id="sc-redact" data-local="sc-redact" aria-label="打码 MAC/IP"') + '</div>';
+    h += '<div class="btns" style="margin-top:10px"><button class="btn sec press" data-close style="flex:1">关闭</button><button class="btn pri press" data-act="sc-export" style="flex:1.4">' + ico('down') + '导出报告</button></div>';
+    return h;
+  }
+  function paintSc() {
+    var b = $('#sc-body'); if (!b || $('#sheet').dataset.kind !== 'selfcheck') return;
+    b.innerHTML = scBody(); placeSegs(b);
+  }
+  function scSheet() {
+    sheet('<h3>自检报告</h3><div class="sub">检查这台手机能不能完整支持 HNC 的各项功能</div><div id="sc-body">' + scBody() + '</div>', { tall: true, kind: 'selfcheck', onClose: function () { if (S.page === 'settings') renderSettings(false); } });
+    if (!SC.running) loadSelfcheck().then(paintSc);
+  }
+  function scTick() {
+    clearInterval(SC.timer);
+    SC.timer = setInterval(function () {
+      if (!SC.running) { clearInterval(SC.timer); return; }
+      var s = (Date.now() - SC.t0) / 1000, e = $('#sc-el'), p = $('#sc-pb');
+      if (e) e.textContent = Math.floor(s); if (p) p.style.width = Math.min(95, s / 18 * 100).toFixed(0) + '%';
+    }, 500);
+  }
+  function scDone() { SC.running = false; clearInterval(SC.timer); paintSc(); if (S.page === 'settings' && $('#sheet').dataset.kind !== 'selfcheck') renderSettings(false); }
+  function scBusy(e) { return e && (e.status === 409 || (e.body && e.body.error === 'busy') || /\bbusy\b/.test(String(e.message || ''))); }
+  /* 别处(另一个窗口 / 导出时顺带)正在跑: 每 2 秒看一次, 跑完就刷新 */
+  function scWaitIdle() {
+    if (SC.running) return;
+    SC.running = true; SC.t0 = Date.now(); paintSc(); scTick();
+    var n = 0; clearInterval(SC.waitT);
+    SC.waitT = setInterval(function () {
+      n++;
+      api.getSafe('/api/selfcheck', null, null).then(function (r) {
+        if (r && !r.running) { clearInterval(SC.waitT); S.sc = r; scDone(); }
+        else if (n >= 25) { clearInterval(SC.waitT); scDone(); }
+      });
+    }, 2000);
+  }
+  function scRun() {
+    if (SC.running) return;
+    SC.running = true; SC.t0 = Date.now(); paintSc(); scTick();
+    api.action('selfcheck_run', {}, { timeout: 45000, maxTime: 43 }).then(function (r) {
+      var rep = detailJSON(r);
+      if (rep && Array.isArray(rep.sections)) { rep.available = true; rep.running = false; S.sc = rep; }
+      var s = (rep && rep.summary) || {};
+      toast('自检完成 · ' + scSumTxt(s), num(s.fail) ? 'err' : num(s.warn) ? 'warn' : 'ok');
+      scDone();
+    }).catch(function (e) {
+      SC.running = false; clearInterval(SC.timer);
+      if (scBusy(e)) { toast('自检正在进行，请稍候', 'warn'); scWaitIdle(); return; }
+      toast('自检失败：' + errText(e), 'err'); paintSc();
+    });
+  }
+  function scExport(btn) {
+    var tg = $('#sc-redact'); if (tg) SC.redact = tg.getAttribute('aria-checked') === 'true';
+    LS.set('hnc6.sc-redact', SC.redact ? '1' : '0');
+    btn.disabled = true; toast('正在生成报告…');
+    api.action('selfcheck_export', { redact: SC.redact ? '1' : '0' }, { timeout: 45000, maxTime: 43 }).then(function (r) {
+      var d = detailJSON(r), name = String(d.name || ''), jn = String(d.json_name || ''), okN = /^[A-Za-z0-9._-]+$/;
+      var tag = d.redacted ? '（已打码）' : '（未打码）';
+      if (!okN.test(name)) { toast('报告已生成' + tag); return; }
+      if (KSU) {
+        var files = [name].concat(okN.test(jn) ? [jn] : []);
+        return shell('mkdir -p /sdcard/Download && cp ' + files.map(function (f) { return sq(HNC_DIR + '/exports/' + f); }).join(' ') + ' /sdcard/Download/ && echo ok').then(function () { toast('报告已存到 /sdcard/Download/' + name + tag); });
+      }
+      downloadExport(name, '/api/exports/' + encodeURIComponent(name)); toast('报告已生成 · ' + name + tag);
+    }).catch(function (e) { toast(scBusy(e) ? '自检正在进行，请稍候再导出' : errText(e), scBusy(e) ? 'warn' : 'err'); }).then(function () { btn.disabled = false; });
+  }
+  /* 设置页「运行状态」里的两行: 取自最近一次自检(没有单独的状态接口) */
+  function scStatusRows() {
+    var r = scRep(), when = r ? '来自 ' + scAgo(r.generated_at) + '的自检' : '运行一次自检后显示';
+    var cov = scFind('ipv6', 'v6_uncovered'), nb = scFind('ipv6', 'v6_neigh'), v6v = '—', v6c = '';
+    if (cov) { var cs = scStat(cov.status); v6v = cs === 'ok' ? '全部覆盖' : cs === 'warn' ? cov.value + ' 个未覆盖' : String(cov.value || '').split(/[(（]/)[0]; v6c = cs === 'ok' ? 'ok' : cs === 'warn' || cs === 'fail' ? 'warn' : ''; }
+    else if (nb) v6v = String(nb.value || '').split(/[,，]/)[0];
+    var tsec = scSec('time'), tv = '—', tc = '';
+    if (tsec) {
+      var ck = scFind('time', 'clock'), at = scFind('time', 'auto_time'), tw = scWorst(tsec.items);
+      tv = ck && ck.status === 'fail' ? '系统时间错误' : at && at.status === 'warn' ? '自动时间已关' : tw === 'warn' ? '有警告' : '正常';
+      tc = tw === 'fail' ? 'bad' : tw === 'warn' ? 'warn' : 'ok';
+    }
+    return sItem(['cyan', 'layers'], 'IPv6 新地址跟踪', '设备换了新的 IPv6 临时地址后是否及时纳入限速 · ' + (nb && cov ? esc(nb.value) + ' · ' : '') + when, val(esc(v6v), v6c)) +
+      sItem(['gray', 'refresh'], '系统时间', '按天统计、配额、定时规则都依赖系统时间 · ' + when, val(tv, tc));
   }
   var clCache = null;
   function showChangelog() {
@@ -3786,6 +3984,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       else if (k === 'dflt') { S.dpiFilter = v; paintClients(); }
       else if (k === 'fxp') { if (v === 'off') { S.motion = false; LS.set('hnc6.motion', '0'); } else { S.motion = true; LS.set('hnc6.motion', '1'); FX = Object.assign({}, FX_PRESETS[v]); saveFx(); } fxRefresh(); toast('动画效果：' + FXP_T[v]); }
       else if (k === 'guard-mode') { api.action('clsact_mode_set', { mode: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { var g = detailJSON(r); S.cfg.clsact_bpf_mode = v; if (g && typeof g === 'object') S.cfg.offload_guard = g; S.clsact = null; toast('硬件加速兜底：' + q.textContent); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
+      else if (k === 'aqm-mode') { api.action('tc_leaf_aqm_set', { mode: v }).then(function () { S.aqmMode = v; LS.set('hnc6.aqm', v); toast('默认队列 AQM：' + q.textContent + ' · 之后新设 / 重设的限速生效'); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
       else if (k === 'fxspring') { FX.spring = v; saveFx(); fxRefresh(); }
       else if (k === 'connv') { S.connView = v; paintConnSheet(); }
       else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
@@ -3933,6 +4132,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       case 'rules-json': exportRulesJson(); break;
       case 'json-health': location.href = 'json-health.html'; break;
       case 'debug-bundle': debugBundle(a); break;
+      case 'sc-open': scSheet(); break;
+      case 'sc-run': scRun(); break;
+      case 'sc-export': scExport(a); break;
       case 'clsact-check': clsactCheck(); break;
       case 'clsact-repair': api.action('clsact_repair', {}, { timeout: 20000, maxTime: 18 }).then(function () { toast('已尝试修复'); return clsactCheck(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
       case 'changelog': showChangelog(); break;

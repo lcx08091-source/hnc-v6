@@ -14,6 +14,44 @@
 
 ---
 
+## [5.20.0-rc1] - 2026-09-30
+
+**预览版 · 三版改造之一「可观测与兼容」**:自检报告 + 多机型兼容层 + IPv6 上行空窗 + 时钟健壮性 + 低延迟队列兜底链 / 限速精度 / 按应用限速避开共享 CDN。
+
+### Added
+
+- **自检报告**(设置 → 诊断 → 自检报告,`selfcheck.go` / `selfcheck_api.go`):9 个分区并发、总时长 ≤ 18 秒 —— 设备与系统(ROM / SoC / 内核 / root 方案 / SELinux / WebUI 入口)、限速能力(tc 各 qdisc/filter/action、上行模式、低延迟队列实测)、防火墙(ip(6)tables 各 match、conntrack 计数与事件)、硬件加速(兜底状态、AOSP tether BPF、高通 IPA / 联发科 HWNAT / 三星 / 展锐)、热点与网络(接口与识别方式、上游、共享状态、双卡、热点 IPv6、开热点命令)、IPv6 覆盖(逐台比对 IPv6 地址与已装过滤器)、时间、进程与资源、识别(dpid、未识别占比、私人 DNS)。每项 ✓ / ! / ✗ / · 并附修复建议;全程只读(测试断言不发出任何 add/del 命令)。导出文本 + JSON 到 `exports/`,默认给 MAC / IP 打码。`GET /api/selfcheck`,动作 `selfcheck_run` / `selfcheck_export`。
+- **多机型兼容层**:
+  - 统一热点接口探测 `bin/hnc_iface.sh`(用户设置 → `dumpsys tethering` → 共享防火墙规则 → `dumpsys wifi` 热点接口 → 按名扫描),结果写 `run/iface_detect.json`;识别 USB / 蓝牙 / 以太网共享(只上报,不管控)。设置 → 热点显示识别方式。
+  - 蜂窝 / 热点接口名规则表 shell 与 Go 共用一份(高通 / 联发科 / 三星 / 展锐 / Tensor),有测试防止两边漂移。
+  - 定时开关热点:先探测再按可用命令链依次尝试,记录成功方式(`run/softap_method.json`)。
+  - root 方案识别(SukiSU / KernelSU / KSU-Next / APatch / Magisk)与对应 busybox;Magisk 写 `run/webui_url`(浏览器访问 `http://127.0.0.1:8444`)。
+  - 联发科 HWNAT 检测,兜底选「始终」时尽力关闭(实验性,高通一律跳过)。
+  - 老内核:可选功能静默降级;修连接事件订阅失败每 60 秒刷一条日志。
+- **IPv6 新地址事件驱动**(`neigh_v6.go`):httpd 订阅内核邻居事件,设备出现新的 IPv6 地址约 1 秒内同步该设备的过滤器(500 ms 合并);`v6_sync.sh` 增量补装(不清空重建,无空窗)、消失地址保留 5 分钟后清理、每台最多 16 个地址、加互斥锁。每 60 秒全量对账保留为兜底。
+- **低延迟队列兜底链**(`bin/qdisc_caps.sh`):开机尝试加载 cake / fq_codel / fq,按 cake → fq_codel → fq → sfq → pfifo 选可用的最好一档并记录尝试过程(`run/qdisc_caps.json`,`/api/capabilities.qdisc_caps`);设备低延迟模式显示实际队列。设备默认叶子 AQM(`tc_leaf_aqm` auto / on / off,设置 → 全局带宽整形):auto 只在 cake 或 fq_codel 可用时启用,配了延迟 / 抖动 / 丢包的设备仍用 netem。
+
+### Changed
+
+- **限速精度**(`bin/tc_rate_calc.sh`,tc_manager 与按应用限速共用):< 1 Mbps 的 burst 按速率缩小(最小 2×MTU);100–999 Mbps 取约 20 ms 数据量;显式 quantum(1514..60000,tc 不认时自动退回)。
+- **按应用限速跳过共享 CDN IP**:反查表同时归属其他应用、或规则库标成 CDN / 云的地址不打标记,避免误伤;`/api/app_limits` 带 `ips_total / ips_shared_skipped / ips_limited`,界面提示「跳过 N 个共享地址」、全部共享时提示「限速暂未生效」;可在设置里改回包含共享 IP。
+- **时钟健壮性**(`clock_guard.go` / `bin/hnc_clock.sh`):时间未同步(年份 < 2025 或早于已记录的最晚时间)时,按应用流量 / 本月流量 / 配额与时段 / 应用时长 / shell 统计与清理全部暂停写入;时钟跳变 > 10 分钟时重建计数基线。
+
+### Fixed
+
+- 时钟跑到未来时「清理长期未见设备」可能把全部规则当成过期删除。
+- 已开低延迟的设备再次设置限速时叶子被重置回 netem。
+- `rate_to_mbps_num` 不认 `Gbit`,复用 1 Gbit class 时 burst 被算成 16k。
+
+### 需真机验证
+
+- 自检报告在本机的实际结果(请导出发回,尤其是限速能力、硬件加速、IPv6 覆盖三节)。
+- `qdisc_caps.json` 里 cake / fq_codel 能否被加载;ColorOS 的 tc 是否接受 htb `quantum`。
+- `run/v6_neigh.json` 的 `active` 是否为 true(SELinux 是否允许订阅邻居事件);隐私地址轮换后约 1 秒内 `tc filter show dev ifb0` 出现新地址。
+- 开机时 `run/clock_state.json` 由 `sane:false` 变 `true`,且不出现 1970 / 2000 日期文件。
+
+---
+
 ## [5.19.0-rc2] - 2026-09-30
 
 **预览版**:模拟环境 + 本机/热点月流量(分卡) + 设备流量配额与分时段限速 + 应用使用时长 / 时长上限 / 按类别封锁 / 未识别流量。

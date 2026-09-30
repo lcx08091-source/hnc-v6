@@ -44,6 +44,8 @@ type configResp struct {
 	// v5.18: offload 旁路兜底模式 auto(默认)| on | off, 见 bin/hnc_offload_guard.sh。
 	// 旧装机只有 clsact_bpf_enabled=true 时视为 on。
 	ClsactBpfMode string `json:"clsact_bpf_mode"`
+	// v5.20: 设备默认叶子队列 auto(默认)| on | off, 见 action_qdisc.go / tc_manager.sh
+	TcLeafAqm string `json:"tc_leaf_aqm"`
 	// v5.18: run/offload_guard.json 原样透出(守护进程每 60s 写一次); 没有则 null。
 	OffloadGuard map[string]interface{} `json:"offload_guard"`
 	// v5.18: 按设备域名封锁的 DNS 层(xt_string)能力: "available" | "unavailable" | "unknown"
@@ -71,7 +73,7 @@ type configResp struct {
 }
 
 func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
-	resp := configResp{ClsactBpfMode: "auto"}
+	resp := configResp{ClsactBpfMode: "auto", TcLeafAqm: "auto"}
 	resp.OffloadGuard = readOffloadGuard(s.hncDir)
 	resp.ConnBlockDNSLayer = connBlockDNSLayer(s.hncDir)
 	// rules.json 一次读全部字段 (v5.1: rules.json 同时存 top-level hotspot_* 和 remote_enabled/auth_required)
@@ -84,6 +86,9 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 			resp.RemoteEnabled = boolField(m, "remote_enabled")
 			resp.ClsactBpfMode = clsactModeFromRules(m)
 			resp.ClsactBpfEnabled = resp.ClsactBpfMode == "on"
+			if v, ok := m["tc_leaf_aqm"].(string); ok && (v == "on" || v == "off" || v == "auto") {
+				resp.TcLeafAqm = v
+			}
 			// Autostart: 优先读 hotspot_auto (shell 名), 回退到 hotspot_autostart
 			resp.HotspotAutostart = boolField(m, "hotspot_auto") || boolField(m, "hotspot_autostart")
 			if ssid, ok := m["hotspot_ssid"].(string); ok {

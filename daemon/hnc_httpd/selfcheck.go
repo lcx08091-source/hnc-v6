@@ -1919,7 +1919,7 @@ func scSectionIPv6(c *scCtx) []scItem {
 		miss += bad
 		if bad > 0 {
 			it.Status = scWarn
-			it.Fix = "v6_sync 每 30 秒左右同步一次; 持续未覆盖请在设置里「刷新规则」后重新自检"
+			it.Fix = "新地址出现后约 1 秒自动补上(另有每 60 秒兜底同步); 持续未覆盖请看 run/v6_neigh.json 的 active 是否为 true, 或在设置里「刷新规则」后重新自检"
 		}
 		det = append(det, fmt.Sprintf("class %s, mark 0x%x", d.Class, d.Mark))
 		if d.IP6TMarked {
