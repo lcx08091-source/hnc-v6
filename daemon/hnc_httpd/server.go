@@ -141,14 +141,11 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/app_usage", s.apiAppUsage)      // v5.16: 按应用的真实流量(conntrack)
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
-	// v5.9.9: 另两个磁盘页此前没有路由 —— json-health.html 完全没有入口
-	// (死页面), ndpi-lab.html 只在 KSU WebUI 的 file:// 同目录下能打开,
-	// 远程/浏览器访问 404。两者都补上, 与 changelog 同款只读 serve。
+	// v5.9.9: json-health.html 此前没有路由(死页面), 补上, 与 changelog 同款只读 serve。
+	// (ndpi-lab.html / classic.html 已随 nDPI 实验与旧版界面一并删除)
 	mux.HandleFunc("/json-health.html", s.serveWebrootPage("json-health.html"))
-	mux.HandleFunc("/ndpi-lab.html", s.serveWebrootPage("ndpi-lab.html"))
-	// v5.11: 新 WebUI 的底栏折射库(Hyalite, MIT)与旧版界面
+	// v5.11: 新 WebUI 的底栏折射库(Hyalite, MIT)
 	mux.HandleFunc("/hyalite.js", s.serveWebrootPage("hyalite.js"))
-	mux.HandleFunc("/classic.html", s.serveWebrootPage("classic.html"))
 
 	// v4.0 Patch 3.a: 写操作统一 endpoint, 内部白名单 + per-token rate limit + CSRF
 	// 必经 authMiddleware(不允许过渡期匿名写)
@@ -317,7 +314,7 @@ func (s *server) serveChangelog(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveWebrootPage 返回一个只读 serve 磁盘 webroot/<name> 的 handler。
-// v5.9.9: 抽出来给 json-health.html / ndpi-lab.html 共用(与 serveChangelog
+// v5.9.9: 抽出来给 json-health.html / hyalite.js 共用(与 serveChangelog
 // 同款: 固定磁盘路径 + nosniff, 文件缺失 404)。name 由调用方以字面量给出,
 // 不接受请求参数, 无路径穿越面。
 func (s *server) serveWebrootPage(name string) http.HandlerFunc {
@@ -876,7 +873,8 @@ func (s *server) apiStats(w http.ResponseWriter, r *http.Request) {
 	}
 	macFilter := strings.ToLower(r.URL.Query().Get("mac"))
 	sourceParam := strings.ToLower(r.URL.Query().Get("source"))
-	if sourceParam == "" {
+	// v5.2 shadow 统计已移除: 空值与历史的 source=shadow 一律按 legacy 处理(老客户端不报 400)
+	if sourceParam == "" || sourceParam == "shadow" {
 		sourceParam = "legacy"
 	}
 
@@ -895,10 +893,6 @@ func (s *server) apiStats(w http.ResponseWriter, r *http.Request) {
 
 	rawName := "stats_raw.jsonl"
 	dailyName := "stats_daily.jsonl"
-	if sourceParam == "shadow" {
-		rawName = "stats_shadow_raw.jsonl"
-		dailyName = "stats_shadow_daily.jsonl"
-	}
 	if sourceParam == "dpi" {
 		// v5.10.0 (O2): 统计收口 —— 直接聚合 DPI 归因链的
 		// run/stats.YYYYMMDD.jsonl (HistorySampler 每 15min 一行, 含
@@ -1036,7 +1030,7 @@ func validRange(r string) bool {
 
 func validStatsSource(source string) bool {
 	switch source {
-	case "legacy", "shadow", "dpi":
+	case "legacy", "dpi":
 		return true
 	}
 	return false

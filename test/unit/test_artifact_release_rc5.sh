@@ -2,7 +2,7 @@
 # v5.3.0-rc5 artifact picker regression tests
 #
 # rc30.12.34 (TASK-B2): fixture 跟当前 artifact_sanity_check.sh 必需文件集对齐.
-# baseline rc30.12.30 的 sanity gate 加了 hnc_dpid / dpi_rules.json / nDPI 等 7 个
+# baseline rc30.12.30 的 sanity gate 加了 hnc_dpid / dpi_rules.json 等必需
 # 必需文件, fixture 没跟, 导致这两个 unit test 红灯. 不改业务功能, 只把测试夹具
 # 补全跟得上当前 sanity gate.
 
@@ -16,11 +16,6 @@ daemon/hnc_httpd/hnc_httpd
 bin/hnc_dpid
 bin/dpi_rules_import.sh
 data/dpi_rules.json
-bin/ndpi_lab_probe.sh
-bin/ndpi_lab_status.sh
-bin/ndpi_lab_sample.sh
-data/dpi_ndpi_config.json
-bin/hnc_ndpi_probe
 "
 
 make_minimal_module_zip_rc5() {
@@ -39,7 +34,7 @@ make_minimal_module_zip_rc5() {
     fi
     # rc30.12.34 (TASK-B2): 把当前 sanity 必需的全部文件都拷过来.
     # 之前只拷 module.prop/2 webroot/2 bin 共 5 个, 现在 sanity 要 13 个, 缺 8 个.
-    # 如果 baseline 仓库里缺某个文件 (例如新加的 ndpi 文件还没 commit), 单测会用
+    # 如果 baseline 仓库里缺某个文件 (例如 CI 现编的二进制还没产出), 单测会用
     # 这里的 fallback 生成空占位, 让测试至少不会因为 cp 失败 abort.
     for relpath in $_REQUIRED_FILES_v5_3_rc5; do
         src="$HNC_REPO_ROOT/$relpath"

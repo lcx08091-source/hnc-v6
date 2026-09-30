@@ -15,9 +15,6 @@ bin/mdns_resolve
 # v5.9.7: clsact 加载器也是 CI 现编
 bin/hnc_clsact_ctl
 
-# Pre-built binaries that DO go in git (no source in this repo, can't be CI-built):
-# - bin/hnc_ndpi_probe  (committed)
-
 # Build artifacts
 **/_libs_out/
 **/_obj/

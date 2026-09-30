@@ -129,36 +129,6 @@ if [ -x "$BIN/stats_retention_diag.sh" ]; then
   STATS_RETENTION_PRESENT=true
   STATS_RETENTION_RAW="$(sh "$BIN/stats_retention_diag.sh" json 2>/dev/null)"
 fi
-STATS_SHADOW_RAW=""
-STATS_SHADOW_PRESENT=false
-STATS_SHADOW_ROLLUP_PRESENT=false
-if [ -x "$BIN/stats_shadow_diag.sh" ]; then
-  STATS_SHADOW_PRESENT=true
-  STATS_SHADOW_RAW="$(sh "$BIN/stats_shadow_diag.sh" json 2>/dev/null)"
-fi
-[ -x "$BIN/stats_shadow_rollup.sh" ] && STATS_SHADOW_ROLLUP_PRESENT=true
-
-STATS_SHADOW_CONTROL_RAW=""
-STATS_SHADOW_CONTROL_PRESENT=false
-if [ -x "$BIN/stats_shadow_control.sh" ]; then
-  STATS_SHADOW_CONTROL_PRESENT=true
-  STATS_SHADOW_CONTROL_RAW="$(sh "$BIN/stats_shadow_control.sh" json 2>/dev/null)"
-fi
-
-STATS_SOURCE_RAW=""
-STATS_SOURCE_PRESENT=false
-if [ -x "$BIN/stats_source_diag.sh" ]; then
-  STATS_SOURCE_PRESENT=true
-  STATS_SOURCE_RAW="$(sh "$BIN/stats_source_diag.sh" json 2>/dev/null)"
-fi
-
-STATS_COMPARE_RAW=""
-STATS_COMPARE_PRESENT=false
-if [ -x "$BIN/stats_compare.sh" ]; then
-  STATS_COMPARE_PRESENT=true
-  STATS_COMPARE_RAW="$(sh "$BIN/stats_compare.sh" json 2>/dev/null)"
-fi
-
 STATS_HEALTH_RAW=""
 STATS_HEALTH_PRESENT=false
 if [ -x "$BIN/stats_health_summary.sh" ]; then
@@ -167,116 +137,6 @@ if [ -x "$BIN/stats_health_summary.sh" ]; then
   case "$STATS_HEALTH_RAW" in
     *'"status":"fail"'*) OVERALL="fail" ;;
     *'"status":"warn"'*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-STATS_MIGRATION_READINESS_RAW=""
-STATS_MIGRATION_READINESS_PRESENT=false
-if [ -x "$BIN/stats_migration_readiness.sh" ]; then
-  STATS_MIGRATION_READINESS_PRESENT=true
-  STATS_MIGRATION_READINESS_RAW="$(sh "$BIN/stats_migration_readiness.sh" json 2>/dev/null)"
-  case "$STATS_MIGRATION_READINESS_RAW" in
-    *'"status":"blocked"'*) OVERALL="fail" ;;
-    *'"status":"not_ready"'*|*'"status":"warmup"'*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-
-STATS_V52_RC_RAW=""
-STATS_V52_RC_PRESENT=false
-if [ -x "$BIN/stats_v52_rc_control.sh" ]; then
-  STATS_V52_RC_PRESENT=true
-  STATS_V52_RC_RAW="$(sh "$BIN/stats_v52_rc_control.sh" json 2>/dev/null)"
-  case "$STATS_V52_RC_RAW" in
-    *'"status":"blocked"'*|*'"status":"enabled_not_ready"'*) OVERALL="fail" ;;
-    *'"status":"disabled"'*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-STATS_V52_RC_SMOKE_RAW=""
-STATS_V52_RC_SMOKE_PRESENT=false
-if [ -x "$BIN/stats_v52_rc_smoke.sh" ]; then
-  STATS_V52_RC_SMOKE_PRESENT=true
-  STATS_V52_RC_SMOKE_RAW="$(sh "$BIN/stats_v52_rc_smoke.sh" json 2>/dev/null)"
-  case "$STATS_V52_RC_SMOKE_RAW" in
-    *'"status":"fail"'*) OVERALL="fail" ;;
-    *'"status":"warn"'*|*'"status":"disabled"'*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-STATS_V52_DIAG_BUNDLE_RAW=""
-STATS_V52_DIAG_BUNDLE_PRESENT=false
-if [ -x "$BIN/stats_v52_diag_bundle.sh" ]; then
-  STATS_V52_DIAG_BUNDLE_PRESENT=true
-  STATS_V52_DIAG_BUNDLE_RAW="$(sh "$BIN/stats_v52_diag_bundle.sh" json 2>/dev/null)"
-  case "$STATS_V52_DIAG_BUNDLE_RAW" in
-    *'"status":"fail"'*) OVERALL="fail" ;;
-    *'"status":"warn"'*|*'"status":"disabled"'*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-STATS_V52_DEVICE_CHECK_RAW=""
-STATS_V52_DEVICE_CHECK_PRESENT=false
-if [ -x "$BIN/stats_v52_device_check.sh" ]; then
-  STATS_V52_DEVICE_CHECK_PRESENT=true
-  STATS_V52_DEVICE_CHECK_RAW="$(sh "$BIN/stats_v52_device_check.sh" json 2>/dev/null)"
-  case "$STATS_V52_DEVICE_CHECK_RAW" in
-    *'"status":"fail"'*) OVERALL="fail" ;;
-    *'"status":"warn"'*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-STATS_V52_RC1_SWITCH_RAW=""
-STATS_V52_RC1_SWITCH_PRESENT=false
-if [ -x "$BIN/stats_v52_rc1_switch.sh" ]; then
-  STATS_V52_RC1_SWITCH_PRESENT=true
-  STATS_V52_RC1_SWITCH_RAW="$(sh "$BIN/stats_v52_rc1_switch.sh" json 2>/dev/null)"
-  case "$STATS_V52_RC1_SWITCH_RAW" in
-    *"status":"blocked"*|*"status":"drift"*) OVERALL="fail" ;;
-    *"legacy_default_preserved":false*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-STATS_V52_WEB_STATUS_RAW=""
-STATS_V52_WEB_STATUS_PRESENT=false
-if [ -x "$BIN/stats_v52_web_status.sh" ]; then
-  STATS_V52_WEB_STATUS_PRESENT=true
-  STATS_V52_WEB_STATUS_RAW="$(sh "$BIN/stats_v52_web_status.sh" json 2>/dev/null)"
-  case "$STATS_V52_WEB_STATUS_RAW" in
-    *"severity":"fail"*) OVERALL="fail" ;;
-    *"severity":"warn"*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-STATS_V52_INSTALL_SELFCHECK_RAW=""
-STATS_V52_INSTALL_SELFCHECK_PRESENT=false
-if [ -x "$BIN/stats_v52_install_selfcheck.sh" ]; then
-  STATS_V52_INSTALL_SELFCHECK_PRESENT=true
-  STATS_V52_INSTALL_SELFCHECK_RAW="$(sh "$BIN/stats_v52_install_selfcheck.sh" json 2>/dev/null)"
-  case "$STATS_V52_INSTALL_SELFCHECK_RAW" in
-    *"status":"fail"*) OVERALL="fail" ;;
-    *"status":"warn"*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-STATS_V52_GRAY_REPORT_RAW=""
-STATS_V52_GRAY_REPORT_PRESENT=false
-if [ -x "$BIN/stats_v52_gray_report.sh" ]; then
-  STATS_V52_GRAY_REPORT_PRESENT=true
-  STATS_V52_GRAY_REPORT_RAW="$(sh "$BIN/stats_v52_gray_report.sh" json 2>/dev/null)"
-  case "$STATS_V52_GRAY_REPORT_RAW" in
-    *"status":"fail"*) OVERALL="fail" ;;
-    *"status":"warn"*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
-  esac
-fi
-
-STATS_V52_REVIEW_BUNDLE_RAW=""
-STATS_V52_REVIEW_BUNDLE_PRESENT=false
-if [ -x "$BIN/stats_v52_review_bundle.sh" ]; then
-  STATS_V52_REVIEW_BUNDLE_PRESENT=true
-  STATS_V52_REVIEW_BUNDLE_RAW="$(sh "$BIN/stats_v52_review_bundle.sh" json 2>/dev/null)"
-  case "$STATS_V52_REVIEW_BUNDLE_RAW" in
-    *"status":"fail"*) OVERALL="fail" ;;
-    *"status":"warn"*) [ "$OVERALL" = ok ] && OVERALL="warn" ;;
   esac
 fi
 
@@ -329,37 +189,8 @@ cat <<JSON
     "identity_raw": "$(json_escape "$STATS_IDENTITY_RAW")",
     "has_retention_diag_helper": $STATS_RETENTION_PRESENT,
     "retention_raw": "$(json_escape "$STATS_RETENTION_RAW")",
-    "has_shadow_diag_helper": $STATS_SHADOW_PRESENT,
-    "has_shadow_rollup_helper": $STATS_SHADOW_ROLLUP_PRESENT,
-    "shadow_raw": "$(json_escape "$STATS_SHADOW_RAW")",
-    "has_shadow_control_helper": $STATS_SHADOW_CONTROL_PRESENT,
-    "shadow_control_raw": "$(json_escape "$STATS_SHADOW_CONTROL_RAW")",
-    "has_source_diag_helper": $STATS_SOURCE_PRESENT,
-    "source_raw": "$(json_escape "$STATS_SOURCE_RAW")",
-    "has_compare_helper": $STATS_COMPARE_PRESENT,
-    "compare_raw": "$(json_escape "$STATS_COMPARE_RAW")",
     "has_health_summary_helper": $STATS_HEALTH_PRESENT,
-    "health_summary_raw": "$(json_escape "$STATS_HEALTH_RAW")",
-    "has_migration_readiness_helper": $STATS_MIGRATION_READINESS_PRESENT,
-    "migration_readiness_raw": "$(json_escape "$STATS_MIGRATION_READINESS_RAW")",
-    "has_v52_rc_control_helper": $STATS_V52_RC_PRESENT,
-    "v52_rc_control_raw": "$(json_escape "$STATS_V52_RC_RAW")",
-    "has_v52_rc_smoke_helper": $STATS_V52_RC_SMOKE_PRESENT,
-    "v52_rc_smoke_raw": "$(json_escape "$STATS_V52_RC_SMOKE_RAW")"
-    ,"has_v52_diag_bundle_helper": $STATS_V52_DIAG_BUNDLE_PRESENT,
-    "v52_diag_bundle_raw": "$(json_escape "$STATS_V52_DIAG_BUNDLE_RAW")",
-    "has_v52_device_check_helper": $STATS_V52_DEVICE_CHECK_PRESENT,
-    "v52_device_check_raw": "$(json_escape "$STATS_V52_DEVICE_CHECK_RAW")",
-    "has_v52_rc1_switch_helper": $STATS_V52_RC1_SWITCH_PRESENT,
-    "v52_rc1_switch_raw": "$(json_escape "$STATS_V52_RC1_SWITCH_RAW")",
-    "has_v52_web_status_helper": $STATS_V52_WEB_STATUS_PRESENT,
-    "v52_web_status_raw": "$(json_escape "$STATS_V52_WEB_STATUS_RAW")",
-    "has_v52_install_selfcheck_helper": $STATS_V52_INSTALL_SELFCHECK_PRESENT,
-    "v52_install_selfcheck_raw": "$(json_escape "$STATS_V52_INSTALL_SELFCHECK_RAW")"
-    ,"has_v52_gray_report_helper": $STATS_V52_GRAY_REPORT_PRESENT,
-    "v52_gray_report_raw": "$(json_escape "$STATS_V52_GRAY_REPORT_RAW")"
-    ,"has_v52_review_bundle_helper": $STATS_V52_REVIEW_BUNDLE_PRESENT,
-    "v52_review_bundle_raw": "$(json_escape "$STATS_V52_REVIEW_BUNDLE_RAW")"
+    "health_summary_raw": "$(json_escape "$STATS_HEALTH_RAW")"
   },
   "paths": {
     "json_health_json": "$(json_escape "$RUN/json_health.json")",

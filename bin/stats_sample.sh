@@ -151,37 +151,6 @@ fi
 
 echo "$aggregated" >> "$RAW_FILE"
 
-# hotfix21.7: optional shadow stats stream for the v5.2 migration.
-# Legacy stats remains the source of truth. Shadow stats only runs when one of
-# these opt-in switches is present:
-#   HNC_STATS_SHADOW_ENABLE=1
-#   data/config.json {"stats_shadow_enabled":true}
-#   run/stats_shadow.enabled created by stats_shadow_control.sh enable
-shadow_enabled="${HNC_STATS_SHADOW_ENABLE:-}"
-shadow_reason="env"
-if [ -z "$shadow_enabled" ]; then
-    shadow_reason="config"
-    if [ -f "$HNC_DIR/data/config.json" ] && grep -q '"stats_shadow_enabled"[[:space:]]*:[[:space:]]*true' "$HNC_DIR/data/config.json" 2>/dev/null; then
-        shadow_enabled=1
-    fi
-fi
-if [ -z "$shadow_enabled" ]; then
-    shadow_reason="flag"
-    if [ -f "$HNC_DIR/run/stats_shadow.enabled" ]; then
-        shadow_enabled=1
-    fi
-fi
-case "$shadow_enabled" in
-    1|true|TRUE|yes|YES)
-        if [ -x "$HNC_DIR/bin/stats_shadow_sample.sh" ]; then
-            sh "$HNC_DIR/bin/stats_shadow_sample.sh" >> "$LOG" 2>&1 || log "WARN: shadow sample failed (rc=$?)"
-        else
-            log "WARN: shadow enabled by $shadow_reason but stats_shadow_sample.sh missing"
-        fi
-        ;;
-esac
-
-
 # 设备数量(调试用,不常写日志避免 log 涨)
 lines=$(echo "$aggregated" | wc -l)
 # 每 12 轮(= 1 小时)写一次心跳日志

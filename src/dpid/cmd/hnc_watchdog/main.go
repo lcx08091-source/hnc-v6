@@ -379,108 +379,10 @@ func launcherDaemon() daemonSpec {
 	}
 }
 
-// rc30.3: ndpi_continuous.sh is a shell daemon that fork-loops hnc_ndpi_probe.
-// We supervise it from the Go watchdog instead of inlining it — keeping the
-// CSV→JSON pipeline in shell preserves its battle-tested edge cases (column
-// reordering across ndpiReader versions, awk parsing of QUIC SNI).
-const (
-	ndpiConfigPath = dataDir + "/dpi_ndpi_config.json"
-	ndpiScriptPath = binDir + "/ndpi_continuous.sh"
-	ndpiPidPath    = runDir + "/ndpi_continuous.pid"
-	alertScanEvery = 5 * time.Minute
-)
+const alertScanEvery = 5 * time.Minute
 
-// ndpiEnabledByConfig reads dpi_ndpi_config.json and reports whether nDPI
-// continuous mode should be running. Cheap (file is <1KB).
-func ndpiEnabledByConfig() bool {
-	data, err := os.ReadFile(ndpiConfigPath)
-	if err != nil {
-		return false
-	}
-	// Minimal parse — we only need the `enabled` boolean. Avoid pulling in
-	// encoding/json for a one-line lookup that runs every supervisor round.
-	s := string(data)
-	idx := strings.Index(s, `"enabled"`)
-	if idx < 0 {
-		return false
-	}
-	tail := s[idx+len(`"enabled"`):]
-	// Skip past ":" and whitespace.
-	for i := 0; i < len(tail); i++ {
-		switch tail[i] {
-		case ':', ' ', '\t', '\n', '\r':
-			continue
-		}
-		// First non-whitespace token.
-		return strings.HasPrefix(tail[i:], "true")
-	}
-	return false
-}
-
-// ensureNDPIRunning launches ndpi_continuous.sh when the config has nDPI
-// enabled, and stops it cleanly when disabled. Driven by the main loop
-// every supervision round.
-func ensureNDPIRunning() {
-	enabled := ndpiEnabledByConfig()
-
-	// Check current run state.
-	var alive bool
-	if data, err := os.ReadFile(ndpiPidPath); err == nil {
-		if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 && processAlive(pid) {
-			alive = true
-		}
-	}
-
-	if enabled && !alive {
-		if _, err := os.Stat(ndpiScriptPath); err != nil {
-			// Script missing (older zip without rc28 pipeline). Silent skip.
-			return
-		}
-		if _, err := os.Stat(binDir + "/hnc_ndpi_probe"); err != nil {
-			// Probe binary missing.
-			return
-		}
-		if !cooldownOK("ndpi", 60*time.Second) {
-			return
-		}
-		logf("nDPI: launching ndpi_continuous.sh")
-		cmd := exec.Command(shellPath(), ndpiScriptPath, "start")
-		cmd.Env = os.Environ()
-		out, _ := os.OpenFile(logDir+"/ndpi_continuous.log", os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if out != nil {
-			cmd.Stdout = out
-			cmd.Stderr = out
-		}
-		// v5.5.0-rc4 fix: same ColorOS Go fork EPERM issue as spawnDaemon
-		// (rc3 fixed it there, missed this second spawn path inside
-		// ensureNDPIRunning). Setpgid alone — no Setsid.
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		if err := cmd.Start(); err != nil {
-			logf("nDPI: launch failed: %v", err)
-			if out != nil {
-				out.Close()
-			}
-			return
-		}
-		// ndpi_continuous.sh writes its own pidfile; we don't track this Start()'s
-		// pid because it's `sh start` which itself sets up the long-running shell.
-		go func() {
-			_ = cmd.Wait()
-			if out != nil {
-				out.Close()
-			}
-		}()
-		return
-	}
-
-	if !enabled && alive {
-		logf("nDPI: config disabled, stopping ndpi_continuous.sh")
-		cmd := exec.Command(shellPath(), ndpiScriptPath, "stop")
-		cmd.Env = os.Environ()
-		cmd.Stdout, cmd.Stderr = io.Discard, io.Discard
-		_ = cmd.Run()
-	}
-}
+// v5.18: nDPI 实验(ndpi_continuous.sh + hnc_ndpi_probe)已删除, hnc_dpid 自己
+// 提供 IP→域名(dpi_ipname.json), watchdog 不再监管它。
 
 // lastRestart tracks per-daemon restart timestamps for cooldown enforcement.
 var (
@@ -788,7 +690,6 @@ func mainLoop() {
 		// 活了, 走 short-circuit, 让 launcher 接管 dpid (避免双重 spawn).
 		ensureDaemonRunning(launcherDaemon())
 		ensureDaemonRunning(dpidDaemon())
-		ensureNDPIRunning()
 
 		// rc17 hotspotd dedupe
 		_ = runAction("prune_dup_hotspotd")

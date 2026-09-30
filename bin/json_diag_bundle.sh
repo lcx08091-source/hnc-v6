@@ -96,102 +96,16 @@ if [ -x "$BIN/stats_retention_diag.sh" ]; then
   run_cmd stats_retention_diag_json sh "$BIN/stats_retention_diag.sh" json
   run_cmd stats_retention_diag_text sh "$BIN/stats_retention_diag.sh" text
 fi
-if [ -x "$BIN/stats_shadow_diag.sh" ]; then
-  run_cmd stats_shadow_diag_json sh "$BIN/stats_shadow_diag.sh" json
-  run_cmd stats_shadow_diag_text sh "$BIN/stats_shadow_diag.sh" text
-fi
-if [ -x "$BIN/stats_shadow_control.sh" ]; then
-  run_cmd stats_shadow_control_json sh "$BIN/stats_shadow_control.sh" json
-  run_cmd stats_shadow_control_text sh "$BIN/stats_shadow_control.sh" text
-fi
-if [ -x "$BIN/stats_source_diag.sh" ]; then
-  run_cmd stats_source_diag_json sh "$BIN/stats_source_diag.sh" json
-  run_cmd stats_source_diag_text sh "$BIN/stats_source_diag.sh" text
-fi
-if [ -x "$BIN/stats_compare.sh" ]; then
-  run_cmd stats_compare_json sh "$BIN/stats_compare.sh" json
-  run_cmd stats_compare_text sh "$BIN/stats_compare.sh" text
-fi
 if [ -x "$BIN/stats_health_summary.sh" ]; then
   run_cmd stats_health_summary_json sh "$BIN/stats_health_summary.sh" json
   run_cmd stats_health_summary_text sh "$BIN/stats_health_summary.sh" text
 fi
-if [ -x "$BIN/stats_migration_readiness.sh" ]; then
-  run_cmd stats_migration_readiness_json sh "$BIN/stats_migration_readiness.sh" json
-  run_cmd stats_migration_readiness_text sh "$BIN/stats_migration_readiness.sh" text
-fi
-if [ -x "$BIN/stats_v52_rc_control.sh" ]; then
-  run_cmd stats_v52_rc_control_json sh "$BIN/stats_v52_rc_control.sh" json
-  run_cmd stats_v52_rc_control_text sh "$BIN/stats_v52_rc_control.sh" text
-fi
-if [ -x "$BIN/stats_v52_rc1_switch.sh" ]; then
-  run_cmd stats_v52_rc1_switch_json sh "$BIN/stats_v52_rc1_switch.sh" json
-  run_cmd stats_v52_rc1_switch_text sh "$BIN/stats_v52_rc1_switch.sh" text
-fi
-if [ -x "$BIN/stats_v52_rc_smoke.sh" ]; then
-  run_cmd stats_v52_rc_smoke_json sh "$BIN/stats_v52_rc_smoke.sh" json
-  run_cmd stats_v52_rc_smoke_text sh "$BIN/stats_v52_rc_smoke.sh" text
-fi
-if [ -x "$BIN/stats_v52_diag_bundle.sh" ]; then
-  run_cmd stats_v52_diag_bundle_json sh "$BIN/stats_v52_diag_bundle.sh" json
-  run_cmd stats_v52_diag_bundle_text sh "$BIN/stats_v52_diag_bundle.sh" text
-fi
-if [ -x "$BIN/stats_v52_device_check.sh" ]; then
-  run_cmd stats_v52_device_check_json sh "$BIN/stats_v52_device_check.sh" json
-  run_cmd stats_v52_device_check_text sh "$BIN/stats_v52_device_check.sh" text
-fi
-if [ -x "$BIN/stats_v52_install_selfcheck.sh" ]; then
-  run_cmd stats_v52_install_selfcheck_json sh "$BIN/stats_v52_install_selfcheck.sh" json
-  run_cmd stats_v52_install_selfcheck_text sh "$BIN/stats_v52_install_selfcheck.sh" text
-fi
-if [ -x "$BIN/stats_v52_gray_report.sh" ]; then
-  run_cmd stats_v52_gray_report_json sh "$BIN/stats_v52_gray_report.sh" json
-  run_cmd stats_v52_gray_report_text sh "$BIN/stats_v52_gray_report.sh" text
-  run_cmd stats_v52_gray_report_markdown sh "$BIN/stats_v52_gray_report.sh" markdown
-fi
-if [ -x "$BIN/stats_v52_review_bundle.sh" ]; then
-  run_cmd stats_v52_review_bundle_json sh "$BIN/stats_v52_review_bundle.sh" json
-  run_cmd stats_v52_review_bundle_text sh "$BIN/stats_v52_review_bundle.sh" text
-  run_cmd stats_v52_review_bundle_markdown sh "$BIN/stats_v52_review_bundle.sh" markdown
-fi
 mkdir -p "$OUT/stats_tail" 2>/dev/null
 [ -f "$DATA/stats_raw.jsonl" ] && tail -200 "$DATA/stats_raw.jsonl" > "$OUT/stats_tail/stats_raw.tail.jsonl" 2>/dev/null
 [ -f "$DATA/stats_daily.jsonl" ] && tail -200 "$DATA/stats_daily.jsonl" > "$OUT/stats_tail/stats_daily.tail.jsonl" 2>/dev/null
-[ -f "$DATA/stats_shadow_raw.jsonl" ] && tail -200 "$DATA/stats_shadow_raw.jsonl" > "$OUT/stats_tail/stats_shadow_raw.tail.jsonl" 2>/dev/null
-[ -f "$DATA/stats_shadow_daily.jsonl" ] && tail -200 "$DATA/stats_shadow_daily.jsonl" > "$OUT/stats_tail/stats_shadow_daily.tail.jsonl" 2>/dev/null
 copy_if_exists "$RUN/stats_last_date" "$OUT/run/stats_last_date"
-copy_if_exists "$RUN/stats_shadow_last_date" "$OUT/run/stats_shadow_last_date"
-copy_if_exists "$RUN/stats_shadow.enabled" "$OUT/run/stats_shadow.enabled"
-copy_if_exists "$RUN/stats_webui_source" "$OUT/run/stats_webui_source"
-copy_if_exists "$RUN/stats_v52_rc.enabled" "$OUT/run/stats_v52_rc.enabled"
-copy_if_exists "$RUN/stats_v52_rc1.enabled" "$OUT/run/stats_v52_rc1.enabled"
-copy_if_exists "$RUN/stats_compare.json" "$OUT/run/stats_compare.json"
-copy_if_exists "$RUN/stats_compare.txt" "$OUT/run/stats_compare.txt"
 copy_if_exists "$RUN/stats_health_summary.json" "$OUT/run/stats_health_summary.json"
 copy_if_exists "$RUN/stats_health_summary.txt" "$OUT/run/stats_health_summary.txt"
-copy_if_exists "$RUN/stats_migration_readiness.json" "$OUT/run/stats_migration_readiness.json"
-copy_if_exists "$RUN/stats_migration_readiness.txt" "$OUT/run/stats_migration_readiness.txt"
-copy_if_exists "$RUN/stats_v52_rc_control.json" "$OUT/run/stats_v52_rc_control.json"
-copy_if_exists "$RUN/stats_v52_rc_control.txt" "$OUT/run/stats_v52_rc_control.txt"
-copy_if_exists "$RUN/stats_v52_rc1_switch.json" "$OUT/run/stats_v52_rc1_switch.json"
-copy_if_exists "$RUN/stats_v52_rc1_switch.txt" "$OUT/run/stats_v52_rc1_switch.txt"
-copy_if_exists "$RUN/stats_v52_rc_smoke.json" "$OUT/run/stats_v52_rc_smoke.json"
-copy_if_exists "$RUN/stats_v52_rc_smoke.txt" "$OUT/run/stats_v52_rc_smoke.txt"
-copy_if_exists "$RUN/stats_v52_diag_bundle.json" "$OUT/run/stats_v52_diag_bundle.json"
-copy_if_exists "$RUN/stats_v52_diag_bundle.txt" "$OUT/run/stats_v52_diag_bundle.txt"
-copy_if_exists "$RUN/stats_v52_device_check.json" "$OUT/run/stats_v52_device_check.json"
-copy_if_exists "$RUN/stats_v52_device_check.txt" "$OUT/run/stats_v52_device_check.txt"
-copy_if_exists "$RUN/stats_v52_install_selfcheck.json" "$OUT/run/stats_v52_install_selfcheck.json"
-copy_if_exists "$RUN/stats_v52_install_selfcheck.txt" "$OUT/run/stats_v52_install_selfcheck.txt"
-copy_if_exists "$RUN/stats_v52_gray_report.json" "$OUT/run/stats_v52_gray_report.json"
-copy_if_exists "$RUN/stats_v52_gray_report.txt" "$OUT/run/stats_v52_gray_report.txt"
-copy_if_exists "$RUN/stats_v52_gray_report.md" "$OUT/run/stats_v52_gray_report.md"
-copy_if_exists "$RUN/stats_v52_gray_report_bundle.path" "$OUT/run/stats_v52_gray_report_bundle.path"
-copy_if_exists "$RUN/stats_v52_review_bundle.json" "$OUT/run/stats_v52_review_bundle.json"
-copy_if_exists "$RUN/stats_v52_review_bundle.txt" "$OUT/run/stats_v52_review_bundle.txt"
-copy_if_exists "$RUN/stats_v52_review_bundle.md" "$OUT/run/stats_v52_review_bundle.md"
-copy_if_exists "$RUN/stats_v52_review_bundle.path" "$OUT/run/stats_v52_review_bundle.path"
-copy_if_exists "$RUN/stats_v52_review_bundle_archive.path" "$OUT/run/stats_v52_review_bundle_archive.path"
 
 # Generate TC snapshot if helper exists; do not fail bundle if it is absent.
 if [ -x "$BIN/tc_state_snapshot.sh" ]; then
@@ -250,20 +164,7 @@ done
   echo "  \"has_stats_diag\": $([ -x "$BIN/stats_diag.sh" ] && echo true || echo false),"
   echo "  \"has_stats_identity_diag\": $([ -x "$BIN/stats_identity_diag.sh" ] && echo true || echo false),"
   echo "  \"has_stats_retention_diag\": $([ -x "$BIN/stats_retention_diag.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_shadow_diag\": $([ -x "$BIN/stats_shadow_diag.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_shadow_control\": $([ -x "$BIN/stats_shadow_control.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_shadow_rollup\": $([ -x "$BIN/stats_shadow_rollup.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_source_diag\": $([ -x "$BIN/stats_source_diag.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_compare\": $([ -x "$BIN/stats_compare.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_health_summary\": $([ -x "$BIN/stats_health_summary.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_migration_readiness\": $([ -x "$BIN/stats_migration_readiness.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_v52_rc_control\": $([ -x "$BIN/stats_v52_rc_control.sh" ] && echo true || echo false),"
-  echo '  "has_stats_v52_rc_smoke": '$([ -x "$BIN/stats_v52_rc_smoke.sh" ] && echo true || echo false)', '
-  echo "  \"has_stats_v52_diag_bundle\": $([ -x "$BIN/stats_v52_diag_bundle.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_v52_device_check\": $([ -x "$BIN/stats_v52_device_check.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_v52_rc1_switch\": $([ -x "$BIN/stats_v52_rc1_switch.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_v52_install_selfcheck\": $([ -x "$BIN/stats_v52_install_selfcheck.sh" ] && echo true || echo false),"
-  echo "  \"has_stats_v52_review_bundle\": $([ -x "$BIN/stats_v52_review_bundle.sh" ] && echo true || echo false)"
+  echo "  \"has_stats_health_summary\": $([ -x "$BIN/stats_health_summary.sh" ] && echo true || echo false)"
   echo "}"
 } > "$OUT/manifest.json"
 

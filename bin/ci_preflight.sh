@@ -75,12 +75,12 @@ else
 fi
 
 # 4. Required files
-for f in webroot/index.html webroot/json-health.html webroot/ndpi-lab.html bin/hnc_clsact_watchdog.sh bin/hnc_clsact_sync.sh bin/debug_bundle.sh bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_shadow_sample.sh bin/stats_shadow_rollup.sh bin/stats_shadow_diag.sh bin/stats_shadow_control.sh bin/stats_source_diag.sh bin/stats_compare.sh bin/stats_health_summary.sh bin/stats_migration_readiness.sh bin/stats_v52_rc_control.sh bin/stats_v52_rc_smoke.sh bin/stats_v52_diag_bundle.sh bin/stats_v52_device_check.sh bin/stats_v52_rc1_switch.sh bin/stats_v52_web_status.sh bin/stats_v52_install_selfcheck.sh bin/stats_v52_gray_report.sh bin/stats_v52_review_bundle.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh data/dpi_ndpi_config.json bin/hnc_ndpi_probe; do
+for f in webroot/index.html webroot/json-health.html bin/hnc_clsact_watchdog.sh bin/hnc_clsact_sync.sh bin/debug_bundle.sh bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json; do
   if [ -e "$f" ]; then ok "required file exists: $f"; else warn "required file missing: $f"; fi
 done
 
 # 5. Executable bits, source tree check only.
-for f in service.sh post-fs-data.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_shadow_sample.sh bin/stats_shadow_rollup.sh bin/stats_shadow_diag.sh bin/stats_shadow_control.sh bin/stats_source_diag.sh bin/stats_compare.sh bin/stats_health_summary.sh bin/stats_migration_readiness.sh bin/stats_v52_rc_control.sh bin/stats_v52_rc_smoke.sh bin/stats_v52_diag_bundle.sh bin/stats_v52_device_check.sh bin/stats_v52_rc1_switch.sh bin/stats_v52_web_status.sh bin/stats_v52_install_selfcheck.sh bin/stats_v52_gray_report.sh bin/stats_v52_review_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/ndpi_lab_probe.sh bin/ndpi_lab_status.sh bin/ndpi_lab_sample.sh bin/hnc_ndpi_probe bin/hnc_clsact_ctl bin/hnc_clsact_sync.sh bin/debug_bundle.sh daemon/hnc_httpd/build.sh; do
+for f in service.sh post-fs-data.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/hnc_clsact_ctl bin/hnc_clsact_sync.sh bin/debug_bundle.sh daemon/hnc_httpd/build.sh; do
   [ -e "$f" ] || continue
   if [ -x "$f" ]; then ok "executable: $f"; else fail "not executable: $f"; fi
 done
@@ -159,50 +159,21 @@ else
   warn "bin/json_regression_test.sh missing/skipped"
 fi
 
-# 8b. v5.2 RC WebUI status wiring check
+# 8b. json-health 页面的统计诊断卡片接线检查
+# (v5.2 shadow / RC 灰度 helper 已随统计迁移收尾移除, 这里只查活的 stats_health_summary)
 if [ -f webroot/json-health.html ]; then
-  if grep -q 'v5.2 RC / 灰度状态' webroot/json-health.html && grep -q 'v52_web_status_raw' webroot/json-health.html; then
-    ok "json-health page exposes v5.2 RC gray status"
+  if grep -q 'health_summary_raw' webroot/json-health.html; then
+    ok "json-health page exposes stats health summary"
   else
-    fail "json-health page missing v5.2 RC gray status card"
+    fail "json-health page missing stats health summary card"
   fi
 else
   fail "webroot/json-health.html missing"
 fi
-if [ -x bin/stats_v52_web_status.sh ]; then
-  ok "v5.2 WebUI status helper exists"
+if [ -x bin/stats_health_summary.sh ]; then
+  ok "stats health summary helper exists"
 else
-  fail "bin/stats_v52_web_status.sh missing or not executable"
-fi
-if [ -x bin/stats_v52_install_selfcheck.sh ]; then
-  ok "v5.2 install self-check helper exists"
-  if grep -q 'ROLLBACK_AVAILABLE' bin/stats_v52_install_selfcheck.sh && grep -q 'legacy_default_preserved' bin/stats_v52_install_selfcheck.sh; then
-    ok "v5.2 install self-check verifies rollback and legacy-default safety"
-  else
-    fail "v5.2 install self-check missing rollback/legacy-default guard"
-  fi
-else
-  fail "bin/stats_v52_install_selfcheck.sh missing or not executable"
-fi
-if [ -x bin/stats_v52_gray_report.sh ]; then
-  ok "v5.2 gray observation report helper exists"
-  if grep -q 'stats_v52_install_selfcheck' bin/stats_v52_gray_report.sh && grep -q 'stats_v52_device_check' bin/stats_v52_gray_report.sh && grep -q 'markdown' bin/stats_v52_gray_report.sh; then
-    ok "v5.2 gray report aggregates selfcheck/device checks and markdown output"
-  else
-    fail "v5.2 gray report missing required aggregation/markdown markers"
-  fi
-else
-  fail "bin/stats_v52_gray_report.sh missing or not executable"
-fi
-if [ -x bin/stats_v52_review_bundle.sh ]; then
-  ok "v5.2 scrubbed review bundle helper exists"
-  if grep -q 'redact_stream' bin/stats_v52_review_bundle.sh && grep -q 'stats_v52_gray_report' bin/stats_v52_review_bundle.sh && grep -q 'Claude / Gemini / GPT' bin/stats_v52_review_bundle.sh; then
-    ok "v5.2 review bundle has redaction and gray-report markers"
-  else
-    fail "v5.2 review bundle missing required redaction/review markers"
-  fi
-else
-  fail "bin/stats_v52_review_bundle.sh missing or not executable"
+  fail "bin/stats_health_summary.sh missing or not executable"
 fi
 # 9. Artifact ZIP checks, if supplied.
 if [ -n "$ARTIFACT" ]; then

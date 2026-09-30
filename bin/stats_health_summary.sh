@@ -1,6 +1,9 @@
 #!/system/bin/sh
 # stats_health_summary.sh — HNC hotfix22.2 stats health summary
-# Read-only aggregator for staged v5.2 stats migration.
+# Read-only aggregator for the live (iptables/legacy) stats diagnostics.
+# v6.x: v5.2 shadow/compare/migration/rc helpers were removed; only the three
+# live diag helpers (stats_diag / stats_identity_diag / stats_retention_diag)
+# are aggregated now.
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
@@ -63,6 +66,8 @@ status_of_into() {
       s=${s%%\"*}
       [ -n "$s" ] || s="unknown"
       ;;
+    # stats_diag / stats_identity_diag 不输出 status 字段, 只有 "ok":true
+    *\"ok\":true*) s="ok" ;;
     *) s="unknown" ;;
   esac
   printf '%s' "$s"
@@ -71,38 +76,24 @@ status_of_into() {
 _j="$(helper_json stats_diag.sh)"; DIAG_STATUS=$(status_of_into "$_j")
 _j="$(helper_json stats_identity_diag.sh)"; IDENT_STATUS=$(status_of_into "$_j")
 _j="$(helper_json stats_retention_diag.sh)"; RET_STATUS=$(status_of_into "$_j")
-_j="$(helper_json stats_shadow_diag.sh)"; SHADOW_STATUS=$(status_of_into "$_j")
-_j="$(helper_json stats_shadow_control.sh)"; SHADOW_CONTROL_STATUS=$(status_of_into "$_j")
-_j="$(helper_json stats_source_diag.sh)"; SOURCE_STATUS=$(status_of_into "$_j")
-_j="$(helper_json stats_compare.sh)"; COMPARE_STATUS=$(status_of_into "$_j")
-_j="$(helper_json stats_migration_readiness.sh)"; READINESS_STATUS=$(status_of_into "$_j")
-_j="$(helper_json stats_v52_rc_control.sh)"; V52_RC_STATUS=$(status_of_into "$_j")
-_j="$(helper_json stats_v52_rc_smoke.sh)"; V52_RC_SMOKE_STATUS=$(status_of_into "$_j")
 
 OVERALL="ok"
 RECOMMENDATION="stats diagnostics look healthy"
-for s in "$DIAG_STATUS" "$IDENT_STATUS" "$RET_STATUS" "$SHADOW_STATUS" "$SHADOW_CONTROL_STATUS" "$SOURCE_STATUS" "$COMPARE_STATUS" "$READINESS_STATUS" "$V52_RC_STATUS" "$V52_RC_SMOKE_STATUS"; do
+for s in "$DIAG_STATUS" "$IDENT_STATUS" "$RET_STATUS"; do
   case "$s" in
-    fail|bad|error|blocked|enabled_not_ready) OVERALL="fail" ;;
-    warn|missing|unknown|not_ready|warmup|disabled) [ "$OVERALL" = "ok" ] && OVERALL="warn" ;;
+    fail|bad|error|blocked) OVERALL="fail" ;;
+    warn|missing|unknown) [ "$OVERALL" = "ok" ] && OVERALL="warn" ;;
   esac
 done
 if [ "$OVERALL" = "fail" ]; then
-  RECOMMENDATION="do not switch to new stats; inspect diagnostics bundle first"
+  RECOMMENDATION="stats diagnostics failed; inspect diagnostics bundle first"
 elif [ "$OVERALL" = "warn" ]; then
-  RECOMMENDATION="keep legacy stats active; shadow stats may need more samples or cleanup"
+  RECOMMENDATION="stats diagnostics incomplete; check stats sampler / retention"
 fi
 
 HAS_DIAG=$(present_of stats_diag.sh)
 HAS_ID=$(present_of stats_identity_diag.sh)
 HAS_RET=$(present_of stats_retention_diag.sh)
-HAS_SHADOW=$(present_of stats_shadow_diag.sh)
-HAS_SHADOW_CONTROL=$(present_of stats_shadow_control.sh)
-HAS_SOURCE=$(present_of stats_source_diag.sh)
-HAS_COMPARE=$(present_of stats_compare.sh)
-HAS_READINESS=$(present_of stats_migration_readiness.sh)
-HAS_V52_RC=$(present_of stats_v52_rc_control.sh)
-HAS_V52_RC_SMOKE=$(present_of stats_v52_rc_smoke.sh)
 
 {
   echo "HNC stats health summary"
@@ -111,23 +102,9 @@ HAS_V52_RC_SMOKE=$(present_of stats_v52_rc_smoke.sh)
   echo "stats_diag=$DIAG_STATUS"
   echo "stats_identity=$IDENT_STATUS"
   echo "stats_retention=$RET_STATUS"
-  echo "stats_shadow=$SHADOW_STATUS"
-  echo "stats_shadow_control=$SHADOW_CONTROL_STATUS"
-  echo "stats_source=$SOURCE_STATUS"
-  echo "stats_compare=$COMPARE_STATUS"
-  echo "stats_migration_readiness=$READINESS_STATUS"
-  echo "stats_v52_rc_control=$V52_RC_STATUS"
-  echo "stats_v52_rc_smoke=$V52_RC_SMOKE_STATUS"
   echo "has_stats_diag=$HAS_DIAG"
   echo "has_stats_identity_diag=$HAS_ID"
   echo "has_stats_retention_diag=$HAS_RET"
-  echo "has_stats_shadow_diag=$HAS_SHADOW"
-  echo "has_stats_shadow_control=$HAS_SHADOW_CONTROL"
-  echo "has_stats_source_diag=$HAS_SOURCE"
-  echo "has_stats_compare=$HAS_COMPARE"
-  echo "has_stats_migration_readiness=$HAS_READINESS"
-  echo "has_stats_v52_rc_control=$HAS_V52_RC"
-  echo "has_stats_v52_rc_smoke=$HAS_V52_RC_SMOKE"
 } > "$OUT_TXT"
 
 EO=$(json_escape "$OVERALL")
@@ -135,19 +112,12 @@ ER=$(json_escape "$RECOMMENDATION")
 ED=$(json_escape "$DIAG_STATUS")
 EI=$(json_escape "$IDENT_STATUS")
 ET=$(json_escape "$RET_STATUS")
-ES=$(json_escape "$SHADOW_STATUS")
-ESC=$(json_escape "$SHADOW_CONTROL_STATUS")
-ESO=$(json_escape "$SOURCE_STATUS")
-EC=$(json_escape "$COMPARE_STATUS")
-EM=$(json_escape "$READINESS_STATUS")
-EV=$(json_escape "$V52_RC_STATUS")
-EK=$(json_escape "$V52_RC_SMOKE_STATUS")
 EJ=$(json_escape "$OUT_JSON")
 EX=$(json_escape "$OUT_TXT")
 
-printf '{"ok":true,"status":"%s","recommendation":"%s","helpers":{"stats_diag":%s,"stats_identity_diag":%s,"stats_retention_diag":%s,"stats_shadow_diag":%s,"stats_shadow_control":%s,"stats_source_diag":%s,"stats_compare":%s,"stats_migration_readiness":%s,"stats_v52_rc_control":%s,"stats_v52_rc_smoke":%s},"components":{"stats_diag":"%s","stats_identity":"%s","stats_retention":"%s","stats_shadow":"%s","stats_shadow_control":"%s","stats_source":"%s","stats_compare":"%s","stats_migration_readiness":"%s","stats_v52_rc_control":"%s","stats_v52_rc_smoke":"%s"},"paths":{"json":"%s","text":"%s"}}\n' \
-  "$EO" "$ER" "$HAS_DIAG" "$HAS_ID" "$HAS_RET" "$HAS_SHADOW" "$HAS_SHADOW_CONTROL" "$HAS_SOURCE" "$HAS_COMPARE" "$HAS_READINESS" "$HAS_V52_RC" "$HAS_V52_RC_SMOKE" \
-  "$ED" "$EI" "$ET" "$ES" "$ESC" "$ESO" "$EC" "$EM" "$EV" "$EK" "$EJ" "$EX" > "$OUT_JSON"
+printf '{"ok":true,"status":"%s","recommendation":"%s","helpers":{"stats_diag":%s,"stats_identity_diag":%s,"stats_retention_diag":%s},"components":{"stats_diag":"%s","stats_identity":"%s","stats_retention":"%s"},"paths":{"json":"%s","text":"%s"}}\n' \
+  "$EO" "$ER" "$HAS_DIAG" "$HAS_ID" "$HAS_RET" \
+  "$ED" "$EI" "$ET" "$EJ" "$EX" > "$OUT_JSON"
 
 case "$MODE" in
   text|status) cat "$OUT_TXT" ;;

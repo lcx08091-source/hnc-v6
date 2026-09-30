@@ -86,13 +86,11 @@ func isPublicPath(p string) bool {
 	case "/",
 		"/pair",
 		"/changelog.html",
-		// v5.9.9: 与 changelog.html 同级的两个本机 UI 页(只读 HTML, 不含
+		// v5.9.9: 与 changelog.html 同级的本机 UI 页(只读 HTML, 不含
 		// 设备数据 —— 页面内容自己再调 API, 那些 API 各自鉴权)。
 		"/json-health.html",
-		"/ndpi-lab.html",
-		// v5.11: 新 WebUI 的静态依赖/旧版界面, 同样不含数据(数据接口各自鉴权)
+		// v5.11: 新 WebUI 的静态依赖, 同样不含数据(数据接口各自鉴权)
 		"/hyalite.js",
-		"/classic.html",
 		"/api/pair/verify",
 		"/api/pairing/status",
 		"/api/health",

@@ -76,25 +76,16 @@ function render(data){
   html += `<div class="row"><div class="name">能力探测文件</div><div>${badge(data.has_capabilities?'ok':'missing')}</div></div>`;
   html += `<div class="row"><div class="name">最近诊断包</div><div class="val">${esc(data.last_bundle||'无')}</div></div>`;
   const stats=data.stats||{};
-  const v52=parseRaw(stats.v52_web_status_raw)||parseRaw(stats.v52_rc1_switch_raw)||{};
-  html += `<div class="sectionTitle">v5.2 RC / 灰度状态</div>`;
+  const sh=parseRaw(stats.health_summary_raw)||{};
+  const comp=sh.components||{};
+  html += `<div class="sectionTitle">流量统计诊断</div>`;
   html += `<div class="grid">`;
-  html += `<div class="mini"><div class="k">RC1 状态</div><div class="v">${badge(v52.status||'missing')}</div></div>`;
-  html += `<div class="mini"><div class="k">健康等级</div><div class="v">${badge(v52.severity||v52.status||'unknown')}</div></div>`;
-  html += `<div class="mini"><div class="k">默认统计源</div><div class="v">${esc(v52.default_source||'legacy')}</div></div>`;
-  html += `<div class="mini"><div class="k">legacy 默认保留</div><div class="v">${esc(boolText(v52.legacy_default_preserved))}</div></div>`;
-  html += `<div class="mini"><div class="k">RC flag</div><div class="v">${esc(boolText(v52.rc_enabled))}</div></div>`;
-  html += `<div class="mini"><div class="k">RC1 flag</div><div class="v">${esc(boolText(v52.rc1_enabled))}</div></div>`;
-  html += `<div class="mini"><div class="k">设备门禁可启用</div><div class="v">${esc(boolText(v52.rc_enable_ready))}</div></div>`;
-  html += `<div class="mini"><div class="k">shadow 采样</div><div class="v">${esc(boolText(v52.shadow_effective_enabled))}</div></div>`;
-  html += `</div>`;
-  if(v52.recommendation){ html += `<p class="hint"><b>建议：</b>${esc(v52.recommendation)}</p>`; }
-  html += `<div class="sectionTitle">v5.2 子检查</div>`;
-  html += `<div class="grid">`;
-  for(const pair of [['health','health_status'],['device','device_check_status'],['smoke','smoke_status'],['readiness','readiness_status'],['compare','compare_status'],['source','source_status'],['shadow','shadow_status']]){
-    if(v52[pair[1]]) html += `<div class="mini"><div class="k">${esc(pair[0])}</div><div class="v">${badge(v52[pair[1]])}</div></div>`;
+  html += `<div class="mini"><div class="k">统计健康</div><div class="v">${badge(sh.status||'missing')}</div></div>`;
+  for(const pair of [['采样文件','stats_diag'],['设备身份','stats_identity'],['保留/汇总','stats_retention']]){
+    html += `<div class="mini"><div class="k">${esc(pair[0])}</div><div class="v">${badge(comp[pair[1]]||'missing')}</div></div>`;
   }
   html += `</div>`;
+  if(sh.recommendation){ html += `<p class="hint"><b>建议：</b>${esc(sh.recommendation)}</p>`; }
   html += `<p class="hint">${esc(data.json_doctor_message||'')}</p>`;
   document.getElementById('summaryCard').innerHTML=html;
 }

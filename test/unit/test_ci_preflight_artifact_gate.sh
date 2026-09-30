@@ -6,7 +6,7 @@
 
 # 当前 sanity gate 强制要求的全部文件 (跟 bin/artifact_sanity_check.sh 一致)
 # v5.11: 直接从 artifact_sanity_check.sh 的 "for req in ..." 读必需文件清单,
-# 不再手抄一份(此前手抄清单落后于 gate —— 缺 ndpi-lab.html / clsact 产物等, 测试恒 FAIL)。
+# 不再手抄一份(此前手抄清单落后于 gate —— 缺 clsact 产物等, 测试恒 FAIL)。
 _REQ_FILES=$(sed -n 's/^for req in \(.*\); do$/\1/p' "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh" | head -1)
 [ -n "$_REQ_FILES" ] || _REQ_FILES="webroot/index.html"
 
@@ -31,14 +31,14 @@ PROP
     chmod 755 "$root/bin/json_regression_test.sh"
     cp "$HNC_REPO_ROOT/bin/ci_preflight.sh" "$root/bin/ci_preflight.sh"
     chmod 755 "$root/bin/ci_preflight.sh"
-    # v5.11: 其余 bin/*.sh 用仓库真文件(gate 还会检查 stats_v52_* 等脚本存在且可执行),
-    # json-health.html 也用真文件(gate 检查其中的 v5.2 RC 状态卡)。
+    # v5.11: 其余 bin/*.sh 用仓库真文件(gate 还会检查 stats_health_summary 等脚本存在且可执行),
+    # json-health.html 也用真文件(gate 检查其中的统计诊断卡片)。
     for f in "$HNC_REPO_ROOT"/bin/*.sh; do
         [ -f "$root/bin/$(basename "$f")" ] || { cp "$f" "$root/bin/"; chmod 755 "$root/bin/$(basename "$f")"; }
     done
     cp "$HNC_REPO_ROOT/webroot/json-health.html" "$root/webroot/json-health.html"
     # 源码树里没有 CI 现编的 ARM 二进制: 写一个最小 AArch64 ELF 头(e_machine=0xB7)占位
-    for elf in bin/hnc_dpid bin/hnc_ndpi_probe bin/hnc_clsact_ctl daemon/hnc_httpd/hnc_httpd; do
+    for elf in bin/hnc_dpid bin/hnc_clsact_ctl daemon/hnc_httpd/hnc_httpd; do
         mkdir -p "$(dirname "$root/$elf")"
         # 末尾带上 gate 用 strings 检查的名称/版本标记(dpid 名 + fixture 的 module 版本)
         { printf '\177ELF\002\001\001'; dd if=/dev/zero bs=1 count=11 2>/dev/null; printf '\267\000'; printf '\n%s\n%s\n' "hnc_dpid" "$(sed -n 's/^version=//p' "$root/module.prop")"; } > "$root/$elf"

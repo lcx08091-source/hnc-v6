@@ -299,8 +299,7 @@ sync_runtime_from_moddir() {
     for _b in hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_json hnc_dpid \
               hnc_dpid_supervisor hnc_watchdog \
               hnc_launcher fork_probe \
-              hnc_clsact_ctl \
-              hnc_ndpi_probe ndpiReader hnc_dpid_ndpi; do
+              hnc_clsact_ctl; do
         if [ -f "$HNC_DIR/bin/$_b" ]; then
             chmod 755 "$HNC_DIR/bin/$_b" 2>/dev/null || true
             chcon u:object_r:system_file:s0 "$HNC_DIR/bin/$_b" 2>/dev/null || true
@@ -314,6 +313,61 @@ sync_runtime_from_moddir() {
 }
 
 sync_runtime_from_moddir
+
+# v6.x 升级迁移: nDPI 实验(hnc_ndpi_probe / ndpi_*.sh / ndpi-lab.html)已整体移除,
+# 旧版本机上会残留: 可能仍在跑的 ndpi_continuous.sh 常驻循环 + 其 probe 子进程、
+# 运行期输出(ip_to_host.json 等)、默认配置、以及 cp -rf 不会删除的旧脚本/二进制。
+# 这里一次性清掉。幂等: 文件不存在时每一步都是 no-op, 可每次开机都跑。
+# 必须在 watchdog 启动之前: 旧 hnc_watchdog 读 dpi_ndpi_config.json 决定是否拉起
+# ndpi_continuous.sh —— 配置删了它就不会再拉。
+migrate_remove_ndpi() {
+    _np=$(cat "$RUN/ndpi_continuous.pid" 2>/dev/null)
+    case "$_np" in
+        ''|*[!0-9]*) _np="" ;;
+    esac
+    # 只杀确实是 ndpi_continuous 的进程(pid 可能已被复用)
+    if [ -n "$_np" ] && kill -0 "$_np" 2>/dev/null \
+       && grep -q "ndpi_continuous" "/proc/$_np/cmdline" 2>/dev/null; then
+        kill "$_np" 2>/dev/null
+        sleep 1
+        kill -9 "$_np" 2>/dev/null
+        log "migrate: stopped legacy ndpi_continuous.sh pid=$_np"
+    fi
+    # probe 子进程(ndpi_continuous 的 trap 正常会杀, 这里兜底 SIGKILL 场景)
+    if command -v pkill >/dev/null 2>&1; then
+        pkill -f "$HNC_DIR/bin/hnc_ndpi_probe" 2>/dev/null || true
+    fi
+    _nd_removed=0
+    for _f in "$RUN/ndpi_continuous.pid" "$RUN/ndpi_continuous_current.csv" \
+              "$RUN/ndpi_continuous_pending.csv" "$RUN/quic_dns_observations.json" \
+              "$RUN/ip_to_host.json" "$RUN/ndpi_lab_state.json" \
+              "$RUN/ndpi_lab_sample.txt" "$RUN/ndpi_lab_sample.json" \
+              "$RUN/ndpi_lab_sample_state.json" "$RUN/ndpi_lab_sample_structured.json" \
+              "$HNC_DIR/logs/ndpi_continuous.log" "$HNC_DIR/logs/ndpi_lab.log" \
+              "$HNC_DIR/etc/dpi_ndpi_config.json" "$HNC_DIR/data/dpi_ndpi_config.json" \
+              "$HNC_DIR/bin/hnc_ndpi_probe" "$HNC_DIR/bin/ndpiReader" "$HNC_DIR/bin/hnc_dpid_ndpi" \
+              "$HNC_DIR/bin/ndpi_continuous.sh" "$HNC_DIR/bin/ndpi_lab_probe.sh" \
+              "$HNC_DIR/bin/ndpi_lab_sample.sh" "$HNC_DIR/bin/ndpi_lab_status.sh" \
+              "$HNC_DIR/bin/ndpi_parse_observations.sh" \
+              "$HNC_DIR/webroot/ndpi-lab.html" "$HNC_DIR/webroot/classic.html"; do
+        if [ -e "$_f" ]; then
+            rm -f "$_f" 2>/dev/null && _nd_removed=$((_nd_removed + 1))
+        fi
+    done
+    # 同批移除的 v5.2 shadow/灰度统计脚本与其运行期开关(stats_sample.sh 已不再读)
+    for _f in "$HNC_DIR"/bin/stats_shadow_*.sh "$HNC_DIR"/bin/stats_v52_*.sh "$HNC_DIR"/bin/stats_v52_README.md \
+              "$HNC_DIR/bin/stats_compare.sh" "$HNC_DIR/bin/stats_migration_readiness.sh" \
+              "$HNC_DIR/bin/stats_source_diag.sh" "$RUN/stats_shadow.enabled" \
+              "$RUN/stats_v52_rc.enabled" "$RUN/stats_v52_rc1.enabled"; do
+        if [ -e "$_f" ]; then
+            rm -f "$_f" 2>/dev/null && _nd_removed=$((_nd_removed + 1))
+        fi
+    done
+    [ "$_nd_removed" -gt 0 ] && log "migrate: removed $_nd_removed legacy nDPI/shadow-stats file(s)"
+    return 0
+}
+migrate_remove_ndpi
+
 # hotfix13: record platform/kernel capability profile for diagnostics and UI fallback hints
 if [ -x $HNC_DIR/bin/capability_probe.sh ]; then
     ( sh $HNC_DIR/bin/capability_probe.sh >> $HNC_DIR/logs/capabilities.log 2>&1 ) &
@@ -861,15 +915,6 @@ else
         cp -f "$MODDIR/data/dpi_ja4_fingerprints.json" "$DPID_JA4" 2>/dev/null
         chmod 644 "$DPID_JA4" 2>/dev/null
         log "dpid: installed default dpi_ja4_fingerprints.json to $DPID_JA4"
-    fi
-
-    # rc24.1: optional nDPI-lab bridge config and one-shot sample. Disabled by default;
-    # this repack bundles an Android arm64 hnc_ndpi_probe for availability tests.
-    DPID_NDPI_CONF="$HNC_DIR/etc/dpi_ndpi_config.json"
-    if [ ! -f "$DPID_NDPI_CONF" ] && [ -f "$MODDIR/data/dpi_ndpi_config.json" ]; then
-        cp -f "$MODDIR/data/dpi_ndpi_config.json" "$DPID_NDPI_CONF" 2>/dev/null
-        chmod 644 "$DPID_NDPI_CONF" 2>/dev/null || true
-        log "dpid: installed default dpi_ndpi_config.json to $DPID_NDPI_CONF"
     fi
 
     # rc14: 优先启动 dpid guard / supervisor, 并用独立 dpid_guard.pid 防重复.

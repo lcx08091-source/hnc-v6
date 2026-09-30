@@ -18,7 +18,7 @@ bad() { echo "[FAIL] $1"; fail=1; }
 grep -q 'HNC WebUI v6' "$HTML" && ok "v6 marker present (httpd serves it to remote browsers)" || bad "v6 marker missing"
 [ -f "$ROOT/webroot/hyalite.js" ] && ok "hyalite.js shipped" || bad "webroot/hyalite.js missing"
 [ -f "$ROOT/webroot/LICENSE-hyalite" ] && ok "Hyalite license shipped" || bad "webroot/LICENSE-hyalite missing"
-[ -f "$ROOT/webroot/classic.html" ] && ok "classic UI kept" || bad "webroot/classic.html missing"
+[ ! -e "$ROOT/webroot/classic.html" ] && ok "classic UI removed" || bad "webroot/classic.html should be gone"
 
 if command -v node >/dev/null 2>&1; then
   TMP="${TMPDIR:-/tmp}/hnc_v6_inline.$$.js"

@@ -7,7 +7,6 @@
 // 比 dpid 的抓包更全(dpid 的 BPF 只放行 DNS/TLS 握手, 看不到一般数据流)。
 // 富化:
 //   - 域名: run/dpi_ipname.json(dpid 从 DNS 应答 / TLS SNI 建的 IP→域名表)
-//           → run/ip_to_host.json(nDPI 持续模式, 若开着)
 //   - 应用: run/ip_app_map.json(dpid 规则命中的 IP→应用)
 //   - 服务: 常见端口兜底(DNS / NTP / QUIC / 推送 ...)
 // 速率: 两次读 conntrack 的字节差 / 时间差(需要 nf_conntrack_acct=1; 首次
@@ -291,25 +290,9 @@ type ipName struct {
 	App, AppName, Category string
 }
 
-// loadIPNames 汇总 IP→域名: dpid 的 dpi_ipname.json 优先, nDPI 的 ip_to_host.json 兜底
+// loadIPNames 读 IP→域名: dpid 的 dpi_ipname.json(v6.x 起 nDPI 实验已移除, 不再读 ip_to_host.json)
 func (s *server) loadIPNames() map[string]ipName {
 	out := map[string]ipName{}
-	if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "ip_to_host.json")); err == nil {
-		if root, ok := raw.(map[string]interface{}); ok {
-			var list []interface{}
-			switch v := root["entries"].(type) {
-			case []interface{}:
-				list = v
-			}
-			for _, it := range list {
-				m, _ := it.(map[string]interface{})
-				ip, host := asString(m["ip"]), asString(m["host"])
-				if ip != "" && host != "" {
-					out[ip] = ipName{Name: host, Src: "ndpi"}
-				}
-			}
-		}
-	}
 	if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_ipname.json")); err == nil {
 		if root, ok := raw.(map[string]interface{}); ok {
 			if ents, ok := root["entries"].(map[string]interface{}); ok {

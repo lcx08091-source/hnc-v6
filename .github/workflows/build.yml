@@ -310,21 +310,6 @@ jobs:
           done
           echo "OK: hotspotd + hnc_ipc + mdns_resolve built arm64"
 
-      # ─── Verify remaining source-less prebuilt (hnc_ndpi_probe) ───
-      # hnc_ndpi_probe has no source in this repo, so it stays a committed
-      # prebuilt and cannot be CI-rebuilt.
-      - name: Verify pre-built binaries
-        run: |
-          for bin in bin/hnc_ndpi_probe; do
-            if [ ! -f "$bin" ]; then
-              echo "ERROR: $bin missing — no source in repo, must be committed to git"
-              exit 1
-            fi
-            file "$bin" | grep -q "ARM aarch64" || (echo "ERROR: $bin not arm64"; exit 1)
-            chmod 755 "$bin"
-          done
-          echo "OK: hnc_ndpi_probe present (arm64)"
-
       - name: Fix file permissions
         run: |
           chmod 755 bin/*.sh 2>/dev/null || true
@@ -421,7 +406,6 @@ jobs:
             -x "daemon/**/*.go" \
             -x "daemon/**/*.c" \
             -x "daemon/**/*.h" \
-            -x "patches/*" -x "patches" \
             -x "tools/*" -x "tools" \
             -x "daemon/**/web/*" \
             -x "daemon/**/build.sh" \
@@ -429,9 +413,7 @@ jobs:
             -x "daemon/**/README.md" \
             -x "daemon/**/test_cases.md" \
             -x "*.patch" \
-            -x "BUGSV5-TRIAGE.md" \
             -x "CODE-ARCHITECTURE-REVIEW-*.md" \
-            -x "CODE-REVIEW-V2-*.md" \
             -x "PATCH-NOTES-*.md" \
             -x "MIGRATION-PROPOSAL-*.md" \
             -x "ARCHITECTURE.md" \
@@ -447,8 +429,8 @@ jobs:
           # Lightweight (~15 KB), only needed when expanding DPI rules.
           # v5.9.92: tools/ground_truth/ 于 v5.7.0-m2 导入时被删 —— 该目录已不存在,
           # 下方分支(TOOLS_ZIP 打包/校验/上传)自那以后是死分支。保留结构: 目录
-          # 恢复后自动生效(用途: 自抓 App 流量扩充 DPI 规则库, 见 PATCH-NOTES
-          # -v5.3.0-rc28.1); 恢复: git checkout 4bb6f2b^ -- tools/ground_truth
+          # 恢复后自动生效(用途: 自抓 App 流量扩充 DPI 规则库, 见 git 历史中的
+          # PATCH-NOTES-v5.3.0-rc28.1.md); 恢复: git checkout 4bb6f2b^ -- tools/ground_truth
           if [ -d tools/ground_truth ]; then
             (cd tools/ground_truth && zip -rqX "../../$TOOLS_OUT" .)
             echo "TOOLS_ZIP=$TOOLS_OUT" >> $GITHUB_ENV
