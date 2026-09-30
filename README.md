@@ -129,7 +129,6 @@ Current components include:
 - JA4 fingerprinting
 - Rule-based domain/IP matching
 - Application attribution
-- Optional QUIC Initial analysis through nDPI integration
 
 The DPI subsystem is intended to identify which application or service is
 associated with observed network traffic.
@@ -1119,9 +1118,6 @@ JA4 指纹
 域名/IP 规则匹配
 
 应用归属
-
-可选的 nDPI QUIC Initial 分析
-
 
 DPI 的主要目标是判断观察到的网络流量属于哪个应用或服务。
 

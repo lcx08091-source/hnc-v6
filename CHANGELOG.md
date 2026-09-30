@@ -14,6 +14,51 @@
 
 ---
 
+## [5.18.0] - 2026-09-30
+
+**瘦身版:删除 nDPI 实验与旧统计迁移遗留,硬件加速兜底改为自动,dpid 识别补强,统计与封锁更准**。
+
+### Added
+
+- **硬件加速兜底**(`bin/hnc_offload_guard.sh`,设置 → 硬件加速兜底,`clsact_bpf_mode`: `auto` 默认 / `on` / `off`):
+  - 分析结论:AOSP tether offload 旁路的是**下行**(直接转发到热点口出口,绕过 netfilter:IPv6 限速、iptables 统计、conntrack 字节、FORWARD 封锁全部失效);上行本来就被 HNC 的 pref 1 mirred→ifb 先截走。clsact 打标既拦不住转发,还和 mirred 抢 pref 1,单独开无效。
+  - 真正有效的做法:检测到 offload 正在转发(`check_offload` = ACTIVE)时,经 hotspotd `OFFLOAD_DISABLE_GLOBAL` 把 limit_map 额度写 0 让 AOSP 退回常规路径,每 60 秒重申(system_server 会改写);热点关闭或 tether map 消失连续 3 轮才撤销,撤销后按 rules.json 重新通知受限设备。clsact 打标降为"始终"模式下的附带项(pref 1 未被占用时尽力安装)。
+  - 状态写 `run/offload_guard.json`;`/api/config` 与 `/api/offload_status` 返回 `offload_guard`;新 action `clsact_mode_set`,旧 `clsact_bpf_enabled_set` 保留为别名(true→on / false→off)。兜底生效时不再弹"硬件 offload 可能绕过限速"横幅。
+- **网站封锁 DNS 层**(`bin/connblock_sync.sh` 新链 `HNC_CONNBLK_DNS`):按设备丢弃对被封域名(含子域名)的 DNS 查询(`xt_string` 匹配 DNS 报文里的域名编码,大小写不敏感),网站换新 IP 时第一次连接也能拦住;IP 层保留。对有域名封锁的设备拒绝 DoT(tcp/853)使其退回明文 DNS。内核无 `xt_string` 时静默只做 IP 层;能力写 `run/connblock_caps.json`,设置 → 热点里显示「DNS 层: 可用/不支持」。
+- **按应用流量精确统计**(`ct_events.go`):订阅 conntrack DESTROY 事件(纯 Go netlink),连接结束时补上最后一次采样后的字节,采样间隙里开始又结束的短连接也计入;订阅失败自动退回 10 秒轮询。`/api/app_usage` 新增 `precise`。
+
+### Changed
+
+- **dpid 识别补强**:
+  - TLS ClientHello 跨 TCP 段重组(Chrome 的大 ClientHello 约一半 SNI 落在第二段;首段抓取长度 1024→4096,有界重组表 256 条 / 16KB / 3 秒),首段截断时宽松解析 SNI;标记 ECH,已知 ECH 外层名不写入反查表。
+  - 新增明文 HTTP Host(80 端口请求首包),`src=http`。
+  - DNS:CNAME 链逐跳跟随(映射到原查询名,链尾写 `cname`)、按每条记录 TTL 计算有效期(下限 10 分钟、上限 24 小时)、HTTPS/SVCB 地址提示、截断应答部分解析、DNS over TCP 长度前缀校验。
+  - 活跃连接的远端 IP 自动续期,长连接不会因 DNS TTL 到期丢名字;IPv6 地址统一规范化。
+  - `dpi_ipname.json` 新增 `cname` / `exp`,写盘间隔 5→10 秒且无变化不写;畸形包模糊测试不崩溃。
+- 设置 → 日志:修复除「合并」以外的 13 个日志文件都打不开(前端请求名缺 `.log` 后缀,被白名单拒绝)。
+
+### Removed
+
+- **nDPI 实验**:`bin/hnc_ndpi_probe`(无源码预编译)、`bin/ndpi_*.sh`、`data/dpi_ndpi_config.json`、`webroot/ndpi-lab.html`、httpd 的 `ip_to_host.json` 兜底与路由、dpid 的 nDPI 兜底分类与 hnc_watchdog 拉起逻辑、`dpi_state.json` 的 `ndpi_available/ndpi_entries`。升级时 `service.sh` 的 `migrate_remove_ndpi` 自动停掉仍在运行的持续模式并清理残留文件(可重复执行)。
+- **v5.2 统计迁移遗留**:`bin/stats_shadow_*`、`bin/stats_v52_*`、`stats_compare.sh`、`stats_migration_readiness.sh`、`stats_source_diag.sh` 及对应测试;`stats_sample.sh` 的 shadow 分支;`/api/config` 的 `stats_shadow_enabled`;前端「统计来源」残留代码。
+- `webroot/classic.html`(经典界面)及其入口、`docs/webui-v2/`、过时的补丁说明与评审文档、误提交的 `src/dpid/dpid` 与 `src/dpid/hnc_watchdog` 本地编译产物。
+- 设置里无效的「远程访问鉴权」开关(远程访问一律要求配对,该开关早已不起作用)。
+
+### Fixed
+
+- `hnc_clsact_ctl uninstall` 删除 filter 时不带 kind,会连带删掉 HNC 自己的上行 mirred,导致上行限速静默失效 —— 现在只删 `bpf` 类型。
+- `bin/hnc_clsact_sync.sh`、`bin/debug_bundle.sh` 缺可执行权限(ci_preflight 报错)。
+- 健康汇总把只有 `"ok":true` 的诊断输出判为 unknown,健康页一直显示 warn。
+
+### 需真机验证
+
+- ColorOS 上 hotspotd 写 limit_map 是否被 SELinux / system_server 很快覆盖(看 `logs/offload_guard.log` 与 `slowpath` 字段)。
+- httpd 能否收到 conntrack DESTROY 事件(看 `/api/app_usage` 的 `precise`)。
+- 内核是否有 `xt_string`(看设置里「DNS 层」)。
+- dpid 的 TLS 末段放行(dpid 日志 stats 行 `tls_pending` 涨而 `tls_reasm` 不涨说明没抓到,不影响其它功能)。
+
+---
+
 ## [5.17.0] - 2026-09-30
 
 **苹果风主题(测试版)+ 可逐项开关的动画效果**。默认风格不变,在「设置 → 外观 → 主题与动画」里切到「苹果风」。

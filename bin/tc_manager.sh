@@ -960,23 +960,21 @@ set_global_shaper() {
 # ─── T1 tier: clsact BPF at pref 1 (before AOSP offload pref 2/3) ─────
 # 回移自 5.9.91 分叉并重写: 不再走 /system/bin tc(ColorOS 魔改 tc 会拒
 # ingress 关键字), 改走 hnc_clsact_ctl(netlink 直通 + 裸 bpf(2) 迷你加载器,
-# 负责 ELF 加载/map pin/filter 挂载)。opt-in: rules.json 顶层
-# clsact_bpf_enabled 默认 false, 一切缺失(obj/ctl/开关)静默降级。
+# 负责 ELF 加载/map pin/filter 挂载)。
+# v5.18: 是否安装统一由 hnc_offload_guard.sh clsact_wanted 决定(rules.json 顶层
+# clsact_bpf_mode: on=总装; auto=仅当 offload 兜底已启用; off=不装), 且 pref 1
+# 已被 HNC 上行 mirred 占用时不装(同 prio 不同 kind 内核 EINVAL, 打标也无意义,
+# 见 hnc_offload_guard.sh 文件头)。一切缺失(obj/ctl/脚本)静默降级。
 _hnc_clsact_enabled() {
     [ -f "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact.o" ] || return 1
     [ -x "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact_ctl" ] || return 1
-    if [ -x "${HNC_DIR:-/data/local/hnc}/bin/hnc_json" ]; then
-        if v="$("${HNC_DIR:-/data/local/hnc}/bin/hnc_json" get-top "${HNC_DIR:-/data/local/hnc}/data/rules.json" clsact_bpf_enabled 2>/dev/null)"; then
-            [ "$v" = "true" ] && return 0
-            [ "$v" = "false" ] && return 1
-        fi
-    fi
-    grep -q '"clsact_bpf_enabled"[[:space:]]*:[[:space:]]*true'         "${HNC_DIR:-/data/local/hnc}/data/rules.json" 2>/dev/null
+    [ -f "${HNC_DIR:-/data/local/hnc}/bin/hnc_offload_guard.sh" ] || return 1
+    sh "${HNC_DIR:-/data/local/hnc}/bin/hnc_offload_guard.sh" clsact_wanted "$1" 2>/dev/null
 }
 
 _hnc_install_clsact_bpf() {
     local iface="$1"
-    _hnc_clsact_enabled || return 0
+    _hnc_clsact_enabled "$iface" || return 0
     if "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact_ctl" install "$iface" >> "$LOG" 2>&1; then
         log "clsact BPF installed at pref 1 on $iface"
         # filter 建好(或已在)后把 ip→mark 灌进 map

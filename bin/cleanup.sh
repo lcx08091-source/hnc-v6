@@ -51,6 +51,13 @@ if [ "$MODE" = "safe_release" ]; then
     log "safe_release alias: cleanup resources then respawn service.sh"
 fi
 
+# v5.18: offload 兜底撤销(limit_map 恢复 + 重新通知 hotspotd 受限设备), 否则
+# 模块停掉后 tether offload 会一直被压在慢路径上。必须在杀 hotspotd 之前做
+# (撤销走 hotspotd IPC); hotspotd 没在跑时 hnc_ipc 连不上即静默跳过。
+if { [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; } && [ -f "$HNC_DIR/bin/hnc_offload_guard.sh" ]; then
+    sh "$HNC_DIR/bin/hnc_offload_guard.sh" restore >/dev/null 2>&1 && log "offload guard restored"
+fi
+
 if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
 # ── 1. 停止所有 HNC 进程 (rules 模式跳过) ────────────────────
 # rc3.1.33 修 #20: watchdog 提到首位.
@@ -69,7 +76,7 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
 # 仍活的升级 SIGKILL. SIGKILL 内核直接回收, hotspotd 没机会跑 mdns_worker stop,
 # 但反正我们要 cleanup 全清, 子进程清理路径跑完跑半都无关紧要.
 PIDS_TO_WAIT=""
-for pidfile in sentinel watchdog clsact_wd dpid_guard dpid.monitor dpid.child dpid hotspotd detect api hotspot netmon httpd; do
+for pidfile in sentinel watchdog clsact_wd offload_guard dpid_guard dpid.monitor dpid.child dpid hotspotd detect api hotspot netmon httpd; do
     PID=$(cat "$RUN/${pidfile}.pid" 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         kill "$PID" 2>/dev/null
@@ -111,7 +118,7 @@ done
 #   watchdog.sh, 或其他模块路径含 watchdog). "bin/watchdog.sh" 把误杀面收窄到实际
 #   含 HNC 脚本路径的进程.
 # rc30.0+ : 加入 hnc_dpid_supervisor 和 hnc_watchdog (Go 二进制) 的清理.
-for proc in bin/hnc_launcher bin/hnc_dpid_supervisor bin/hnc_dpid_guard.sh bin/hnc_watchdog bin/hnc_clsact_watchdog.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
+for proc in bin/hnc_launcher bin/hnc_dpid_supervisor bin/hnc_dpid_guard.sh bin/hnc_watchdog bin/hnc_clsact_watchdog.sh bin/hnc_offload_guard.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
     pkill -f "$proc" 2>/dev/null && log "pkill $proc"
 done
 # watchdogfix-v6.1: also stop stale service.sh sentinel shells; otherwise

@@ -31,6 +31,11 @@ func runCBPF(t *testing.T, prog []syscall.SockFilter, pkt []byte) uint32 {
 			}
 			var v uint32
 			switch size {
+			case 0x00: // w
+				if off < 0 || off+4 > len(pkt) {
+					return 0
+				}
+				v = binary.BigEndian.Uint32(pkt[off:])
 			case 0x08: // h
 				if off < 0 || off+2 > len(pkt) {
 					return 0
@@ -60,6 +65,8 @@ func runCBPF(t *testing.T, prog []syscall.SockFilter, pkt []byte) uint32 {
 			switch ins.Code & 0xf0 {
 			case 0x00:
 				a += src
+			case 0x10:
+				a -= src
 			case 0x50:
 				a &= src
 			case 0x70:

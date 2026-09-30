@@ -581,7 +581,7 @@ json_update_top_hnc_json() {
 # 拒绝 → WebUI 报 "save pass failed"; SSID 叫 "true"/"null" 会被写成布尔/null。
 json_top_field_is_string() {
     case "$1" in
-        hotspot_ssid|hotspot_pass|hotspot_iface) return 0 ;;
+        hotspot_ssid|hotspot_pass|hotspot_iface|clsact_bpf_mode) return 0 ;;
     esac
     return 1
 }

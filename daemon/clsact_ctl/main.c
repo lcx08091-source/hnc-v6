@@ -293,7 +293,11 @@ static int bpf_filter_exists(int nlfd, unsigned ifindex)
     return rtnl_talk(nlfd, n) == 0;
 }
 
-/* 删除自己的 pref1 filter(精确 handle, 不动 qdisc 与其他 filter) */
+/* 删除自己的 pref1 filter(精确 handle, 不动 qdisc 与其他 filter)
+ * v5.18: 必须带 TCA_KIND="bpf"。不带 kind 时内核只按 prio/protocol/handle 找,
+ * 而 HNC 上行 mirred 恰好也是 ingress pref 1 protocol all 的 matchall(默认
+ * handle 1) —— 旧版 uninstall 会把它一起删掉, 上行限速静默失效。带 kind 后
+ * 不匹配的 filter 返回 EINVAL, 不会误删。 */
 static int bpf_filter_detach(int nlfd, unsigned ifindex)
 {
     char buf[256];
@@ -311,6 +315,9 @@ static int bpf_filter_detach(int nlfd, unsigned ifindex)
     t->tcm_parent  = TC_H_INGRESS_PARENT;
     t->tcm_info    = (HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
     t->tcm_handle  = HNC_FILTER_HANDLE;
+    if (addattr_l(n, sizeof(buf), TCA_KIND, HNC_FILTER_KIND,
+                  strlen(HNC_FILTER_KIND) + 1) < 0)
+        return -EMSGSIZE;
     return rtnl_talk(nlfd, n);
 }
 

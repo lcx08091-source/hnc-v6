@@ -9,6 +9,7 @@ package output
 
 import (
 	"bufio"
+	"net"
 	"os"
 	"strings"
 )
@@ -31,6 +32,13 @@ type ConntrackReport struct {
 // the entry count. Counting is line-based; we cap at maxConntrackLines to
 // avoid pathological behaviour on huge tables.
 func ReadConntrack() ConntrackReport {
+	return ReadConntrackWith(nil)
+}
+
+// ReadConntrackWith 同 ReadConntrack, onDst 非 nil 时对每条记录的原方向
+// 目的地址(第一个 "dst=" 字段, 即客户端连向的远端)回调一次(v5.18: 供
+// IP→域名表给活跃连接顺延映射)。地址已按 net.IP.String() 规范化。
+func ReadConntrackWith(onDst func(dst string)) ConntrackReport {
 	const maxConntrackLines = 1 << 16 // 65536 flows ought to be enough
 
 	var r ConntrackReport
@@ -63,6 +71,11 @@ func ReadConntrack() ConntrackReport {
 				continue
 			}
 			count++
+			if onDst != nil {
+				if d := conntrackOrigDst(line); d != "" {
+					onDst(d)
+				}
+			}
 			if count >= maxConntrackLines {
 				break
 			}
@@ -80,6 +93,24 @@ func ReadConntrack() ConntrackReport {
 		return r
 	}
 	return r
+}
+
+// conntrackOrigDst 取一行 conntrack 记录里第一个 dst= 的值(原方向目的地址),
+// 规范化成 net.IP.String()。解析不出返回 ""。
+func conntrackOrigDst(line string) string {
+	i := strings.Index(line, " dst=")
+	if i < 0 {
+		return ""
+	}
+	v := line[i+len(" dst="):]
+	if j := strings.IndexByte(v, ' '); j >= 0 {
+		v = v[:j]
+	}
+	ip := net.ParseIP(v)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
 }
 
 // parseConntrackLine is kept for future expansion: rc30 may want to bin

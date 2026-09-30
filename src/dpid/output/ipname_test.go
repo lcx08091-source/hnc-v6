@@ -29,13 +29,17 @@ func TestIPNameDNSAndCNAME(t *testing.T) {
 	if _, ok := tb.Lookup("93.184.216.34", t0.Add(11*time.Minute)); ok {
 		t.Fatal("entry should expire after min TTL when DNS TTL is short")
 	}
-	// 长 TTL 按上限 1h 截断。
-	tb.RecordDNS("long.example.com", []string{"1.1.1.1"}, 86400, t0)
-	if _, ok := tb.Lookup("1.1.1.1", t0.Add(59*time.Minute)); !ok {
-		t.Fatal("long TTL entry should live ~1h")
+	// v5.18: 长 TTL 按自身 TTL 保留(>10 分钟下限), 上限 24h。
+	tb.RecordDNS("long.example.com", []string{"1.1.1.1"}, 7200, t0)
+	if _, ok := tb.Lookup("1.1.1.1", t0.Add(119*time.Minute)); !ok {
+		t.Fatal("TTL 2h entry should live ~2h")
 	}
-	if _, ok := tb.Lookup("1.1.1.1", t0.Add(61*time.Minute)); ok {
-		t.Fatal("long TTL should be capped at 1h")
+	if _, ok := tb.Lookup("1.1.1.1", t0.Add(121*time.Minute)); ok {
+		t.Fatal("TTL 2h entry should expire after its TTL")
+	}
+	tb.RecordDNS("huge.example.com", []string{"1.1.1.2"}, 7*86400, t0)
+	if _, ok := tb.Lookup("1.1.1.2", t0.Add(25*time.Hour)); ok {
+		t.Fatal("TTL should be capped at 24h")
 	}
 }
 
@@ -112,8 +116,8 @@ func TestIPNameFlush(t *testing.T) {
 		t.Fatal(err)
 	}
 	if f.Schema != 1 || f.GeneratedAt != t0.Unix() || len(f.Entries) != 2 ||
-		f.Entries["1.2.3.4"] != (IPNameEntry{Name: "a.example.com", Src: "dns", Ts: t0.Unix()}) ||
-		f.Entries["5.6.7.8"] != (IPNameEntry{Name: "b.example.com", Src: "sni", Ts: t0.Unix()}) {
+		f.Entries["1.2.3.4"] != (IPNameEntry{Name: "a.example.com", Src: "dns", Ts: t0.Unix(), Exp: t0.Unix() + ipNameMinTTL}) ||
+		f.Entries["5.6.7.8"] != (IPNameEntry{Name: "b.example.com", Src: "sni", Ts: t0.Unix(), Exp: t0.Unix() + ipNameSNITTL}) {
 		t.Fatalf("file %s", b)
 	}
 	// 同一映射重复记录(ts 变化 < 60s)不算变化, 不重写。

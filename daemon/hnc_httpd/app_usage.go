@@ -8,15 +8,16 @@
 //
 // 应用归属: 同 /api/connections —— ip_app_map(规则命中)优先, 否则 DNS/SNI
 // 反查表归类(DNS 关联); 都没有记为「未识别」, 目的是局域网的记为「局域网」。
-// 误差: 两次采样之间开始又结束的短连接会漏掉(通常 < 1%); 连接结束前最后
-// 不到 10 秒的字节会丢。
+// 精确模式(v5.18, ct_events.go): 订阅 conntrack DESTROY 事件拿连接最终字节,
+// 补上「两次采样之间开始又结束的短连接」和「连接结束前最后不到 10 秒」这两块。
+// 订阅失败(权限/内核)时退回纯轮询, 那两类误差仍在(通常 < 1%)。API 带 precise。
 //
 // 存储: run/app_usage.YYYYMMDD.json(本地日期), 每分钟落盘一次(有变化才写),
 // 保留 32 天。
 //
 //   GET /api/app_usage?days=1|3|7|30&mac=<可选>
 //     → {total_up, total_down, by_app:[{id,name,category,up,down}], by_hour:[{h,up,down}],
-//        by_device:[{mac,up,down}], days, since, acct}
+//        by_device:[{mac,up,down}], days, since, acct, precise}
 
 package main
 
@@ -105,37 +106,17 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 		appUsage.day = loadAppUsageDay(s.hncDir, date)
 		appUsage.dirty = false
 	}
-	first := !appUsage.init
-	next := make(map[string][2]uint64, len(sn.entries))
+	events, _, _ := ctEventsDrain()
+	keep := func(src string) bool { _, ok := owner[src]; return ok }
+	deltas := appUsageAcctStep(&appUsage.prev, &appUsage.init, sn.entries, sn.at, events, keep)
 	hour := strconv.Itoa(now.Hour())
 	var added uint64
-	for _, e := range sn.entries {
-		mac, ok := owner[e.Src]
-		if !ok {
-			continue
-		}
-		k := e.key()
-		cur := [2]uint64{e.UpB, e.DnB}
-		next[k] = cur
-		var du, dd uint64
-		if p, seen := appUsage.prev[k]; seen {
-			if cur[0] >= p[0] {
-				du = cur[0] - p[0]
-			}
-			if cur[1] >= p[1] {
-				dd = cur[1] - p[1]
-			}
-		} else if !first {
-			// 两次采样之间新建的连接: 它的全部字节都发生在这段时间里
-			du, dd = cur[0], cur[1]
-		}
-		if du == 0 && dd == 0 {
-			continue
-		}
+	for _, dl := range deltas {
+		mac := owner[dl.Src]
 		id, meta := appUnknownID, appUsageMeta{Name: "未识别"}
-		if e.Dst != "" && (isPrivateIP(e.Dst) || owner[e.Dst] != "") {
+		if dl.Dst != "" && (isPrivateIP(dl.Dst) || owner[dl.Dst] != "") {
 			id, meta = appLocalID, appUsageMeta{Name: "局域网"}
-		} else if a, ok := appForIP(e.Dst, apps, names); ok {
+		} else if a, ok := appForIP(dl.Dst, apps, names); ok {
 			id, meta = a.ID, appUsageMeta{Name: a.Name, Category: a.Category}
 		}
 		d := appUsage.day
@@ -144,18 +125,100 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 		}
 		mk := mac + "|" + id
 		v := d.Hours[hour][mk]
-		v[0] += du
-		v[1] += dd
+		v[0] += dl.Up
+		v[1] += dl.Dn
 		d.Hours[hour][mk] = v
 		if old, ok := d.Apps[id]; !ok || old.Name != meta.Name || old.Category != meta.Category {
 			d.Apps[id] = meta
 		}
 		appUsage.dirty = true
-		added += du + dd
+		added += dl.Up + dl.Dn
 	}
-	appUsage.prev = next
-	appUsage.init = true
 	return added
+}
+
+// appUsageDelta 一条连接本轮新增的字节
+type appUsageDelta struct {
+	Src, Dst string
+	Up, Dn   uint64
+}
+
+func satSub(a, b uint64) uint64 {
+	if a >= b {
+		return a - b
+	}
+	return 0
+}
+
+// appUsageAcctStep 纯记账逻辑(无 I/O, 单测直接喂数据)。
+//
+//	prev:   上一轮快照里各连接的 [up, down] 累计(只含 keep 的连接), 本函数会替换它
+//	init:   是否已建立基线; 第一轮只建基线, 历史字节与此前缓冲的事件都不算
+//	entries/snapAt: 本轮 /proc 快照及其开始读取的时间
+//	events: 自上一轮以来收到的 DESTROY 事件(带最终字节)
+//
+// 规则(保证不重复计数):
+//  1. 事件的 key 在 prev 里 → 记「最终 − 上次快照」(连接的尾巴), 并从 prev 删掉;
+//     不在 prev 里 → 这条连接从没被快照看到过, 记它的全部字节。
+//  2. 本轮快照里某 key 有销毁事件且事件晚于快照开始时间 → 快照里这条是已死连接
+//     的旧读数(字节已由事件记完), 跳过、也不进新 prev; 事件早于快照 → 同五元组
+//     新建的连接, 按新连接处理(prev 已被规则 1 删掉 → 记全部字节)。
+//  3. 其余照旧: 在 prev 里记差分(计数器变小按 0), 不在 prev 里(非首轮)记全部。
+func appUsageAcctStep(prev *map[string][2]uint64, init *bool, entries []ctEntry, snapAt time.Time,
+	events []ctDestroy, keep func(src string) bool) []appUsageDelta {
+	next := make(map[string][2]uint64, len(entries))
+	if !*init {
+		for i := range entries {
+			e := &entries[i]
+			if keep(e.Src) {
+				next[e.key()] = [2]uint64{e.UpB, e.DnB}
+			}
+		}
+		*prev, *init = next, true
+		return nil
+	}
+	if *prev == nil {
+		*prev = map[string][2]uint64{}
+	}
+	var out []appUsageDelta
+	dead := map[string]time.Time{}
+	for _, ev := range events {
+		if !ev.HasCnt || !keep(ev.Src) {
+			continue
+		}
+		if t, ok := dead[ev.Key]; !ok || ev.At.After(t) {
+			dead[ev.Key] = ev.At
+		}
+		du, dd := ev.UpB, ev.DnB
+		if p, ok := (*prev)[ev.Key]; ok {
+			du, dd = satSub(ev.UpB, p[0]), satSub(ev.DnB, p[1])
+			delete(*prev, ev.Key)
+		}
+		if du != 0 || dd != 0 {
+			out = append(out, appUsageDelta{Src: ev.Src, Dst: ev.Dst, Up: du, Dn: dd})
+		}
+	}
+	for i := range entries {
+		e := &entries[i]
+		if !keep(e.Src) {
+			continue
+		}
+		k := e.key()
+		if t, ok := dead[k]; ok && t.After(snapAt) {
+			continue // 旧读数, 连接已由事件结清
+		}
+		cur := [2]uint64{e.UpB, e.DnB}
+		next[k] = cur
+		du, dd := cur[0], cur[1] // 两次采样之间新建的连接: 全部字节都发生在这段时间里
+		if p, seen := (*prev)[k]; seen {
+			du, dd = satSub(cur[0], p[0]), satSub(cur[1], p[1])
+		}
+		if du != 0 || dd != 0 {
+			out = append(out, appUsageDelta{Src: e.Src, Dst: e.Dst, Up: du, Dn: dd})
+		}
+	}
+	*prev = next
+	return out
 }
 
 func saveAppUsageDay(hncDir string, d *appUsageDay) error {
@@ -327,5 +390,7 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		"total_up": totUp, "total_down": totDn,
 		"by_app": apps, "by_device": devs, "by_hour": hours,
 		"readable": sn.readable, "acct": sn.acct,
+		// v5.18: true = conntrack DESTROY 事件订阅在线(短连接/连接尾巴也计入)
+		"precise": sn.acct && ctEventsPrecise(),
 	})
 }

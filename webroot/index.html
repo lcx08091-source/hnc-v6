@@ -1362,7 +1362,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   function upOk() { return htbOk() && cap('uplink_supported') !== false; }
   function qosFallback() { return cap('qos_fallback_required') === true || /root_htb|htb_root/.test(String(cap('downlink_mode') || '')) || S.cfg.qos_fallback === true; }
   function sqmLabel() { return cap('tc_cake') === true ? 'CAKE' : cap('tc_fq_codel') === true ? 'fq_codel' : 'sfq'; }
-  function offloadRisk() { return S.offload.detail === 'ACTIVE' || S.offload.detail === 'CAPABLE'; }
+  function offloadRisk() { return (S.offload.detail === 'ACTIVE' || S.offload.detail === 'CAPABLE') && !(S.offload.guard && S.offload.guard.fallback_active); }
 
   /* ═════════════════════ 数据加载 ═════════════════════ */
   var TYPE_T = { phone: '手机', tablet: '平板', pc: '电脑', tv: '电视 / 投屏', iot: '智能设备', console: '游戏机', watch: '手表' };
@@ -1447,7 +1447,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       S.caps = r.capabilities || (r.available === false ? {} : r) || {}; S.capsLoaded = true; return S.caps;
     }).catch(function () { S.caps = {}; S.capsLoaded = true; return {}; });
   }
-  function loadOffload() { return api.getSafe('/api/offload_status', null, null).then(function (o) { if (o) S.offload = { active: o.active === true, detail: o.detail || '' }; renderOffloadBanner(); }); }
+  function loadOffload() { return api.getSafe('/api/offload_status', null, null).then(function (o) { if (o) S.offload = { active: o.active === true, detail: o.detail || '', guard: o.offload_guard || null }; renderOffloadBanner(); }); }
   function loadAlerts() {
     return api.getSafe('/api/alerts', null, null).then(function (a) {
       if (!a) return; S.alerts = { unread: num(a.unread), list: a.alerts || [] };
@@ -1778,7 +1778,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   }
   function renderOffloadBanner() {
     var el = $('#offload-banner'); if (!el) return;
-    var show = S.offload.active && S.offload.detail && S.offload.detail !== 'PENDING' && SS.get('hnc.hw-dismiss') !== S.offload.detail;
+    var show = S.offload.active && S.offload.detail && S.offload.detail !== 'PENDING' && !(S.offload.guard && S.offload.guard.fallback_active) && SS.get('hnc.hw-dismiss') !== S.offload.detail;
     el.hidden = !show;
   }
   function renderDevices(anim1) {
@@ -2762,6 +2762,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 
   /* ═════════════════════ 设置页(原版全部条目, 就地展开) ═════════════════════ */
   var LOG_FILES = ['combined', 'service', 'watchdog', 'hotspot', 'hotspotd', 'dpid', 'dpid_guard', 'httpd', 'tc', 'iptables', 'apply', 'detect', 'stats', 'audit'];
+  var OG_T = { NOMAP: '本机没有系统热点加速，无需兜底', IDLE: '加速存在但没在转发流量，无需兜底', CAPABLE: '支持加速，目前没在转发，继续观察', ACTIVE: '加速正在转发流量', NOHOTSPOT: '热点未开启', UNKNOWN: '未知', SKIPPED: '已关闭' };
   var OFFLOAD_T = { ACTIVE: '正在接管转发', CAPABLE: '可接管（未激活）', IDLE: '空闲', NOMAP: '未发现 offload', PENDING: '检测中' };
   S.alertCfg = null; S.sla = null; S.metrics = null; S.tokens = null; S.runStatus = null; S.clsact = null; S.ifaceInfo = null; S.logText = '';
   function loadSettingsData() {
@@ -2818,7 +2819,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
         '<button class="btn pri press" data-act="sched-save">保存</button>') +
       sItem(['blue', 'wifi'], '热点接口', '当前热点使用的接口（实时）', val(esc(S.hotspot.iface || '—') + (S.hotspot.active === false ? ' · 未开启' : ''))) +
       sFold('iface', ['cyan', 'wifi'], '热点接口偏好', '默认自动识别；ColorOS 常见 wlan2', '<div style="display:flex;gap:8px">' + inp('iface-pref', c.hotspot_iface || 'auto', '', 'maxlength="15" placeholder="auto" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="iface-save">保存</button></div><div class="note">填 auto 让 HNC 自动识别；手动填接口名（如 wlan2 / ap0）用于识别不准的机型。</div>', val(esc(c.hotspot_iface || 'auto'))) +
-      sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val(OFFLOAD_T[S.offload.detail] || S.offload.detail || '—', S.offload.detail === 'ACTIVE' ? 'warn' : 'ok'))]);
+      sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val((OFFLOAD_T[S.offload.detail] || S.offload.detail || '—') + (S.offload.guard && S.offload.guard.fallback_active ? ' · 已兜底' : ''), S.offload.detail === 'ACTIVE' && !(S.offload.guard && S.offload.guard.fallback_active) ? 'warn' : 'ok')) +
+      sItem(['red', 'shield'], '网站封锁 · DNS 层', '封锁网站时顺带拦掉该设备对这个域名的 DNS 查询，第一次连接就拦住', val({ available: '可用', unavailable: '内核不支持（只按 IP 拦）', unknown: '首次封锁时检测' }[c.conn_block_dns_layer] || '—', c.conn_block_dns_layer === 'unavailable' ? 'warn' : 'ok'))]);
     // v5.16: 告警总开关 + 新设备接入提醒(后端早就有, 旧新界面都没做设置)
     groups.push(['告警', sItem(['red', 'bolt'], '告警总开关', '关掉后所有提醒都不再产生（已有记录保留）', toggle(ac.enabled !== false, 'data-set="amaster" aria-label="告警总开关"')) +
       sFold('ud', ['blue', 'wifi'], '新设备接入提醒', '陌生设备连上热点时提醒；认识的设备可在告警里点「认识它」',
@@ -2875,9 +2877,12 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
       sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
     var cs = S.clsact;
-    groups.push(['clsact BPF（实验性）', sItem(['red', 'flask'], '启用 clsact BPF 打标', '在 AOSP offload 之前按源 IP 预设限速 mark；默认关', toggle(c.clsact_bpf_enabled === true, 'data-set="clsact" aria-label="clsact BPF"')) +
-      '<div class="row">' + gi('gray', 'layers') + '<span class="tx"><div class="t">clsact BPF 状态</div><div class="s" id="clsact-s">' + (c.clsact_bpf_enabled !== true ? '未启用' : cs ? ['clsact', 'bpf_filter', 'map', 'watchdog'].map(function (k) { return k + (cs[k] ? ' ✓' : ' ✗'); }).join(' · ') : '点「检查」查看') + '</div></span>' +
-      (c.clsact_bpf_enabled === true ? '<button class="linkish" data-act="clsact-check">检查</button>' + (cs && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') : '') + '</div>']);
+    var gm = c.clsact_bpf_mode || (c.clsact_bpf_enabled === true ? 'on' : 'auto'), og = c.offload_guard || S.offload.guard || null;
+    var ogS = gm === 'off' ? '已关闭：不做任何处理' : !og ? '等待第一次检测（约 1 分钟）' : og.fallback_active ? '兜底生效中：已让系统加速退回常规转发' + (og.since ? '（' + ago(og.since) + '起）' : '') : (OG_T[og.offload_state] || og.offload_state || '—');
+    groups.push(['硬件加速兜底', sItem(['orange', 'rocket'], '防止系统热点加速绕过限速', '自动：检测到加速正在转发流量时，才让它退回常规路径，保证限速 / 封锁 / 统计都生效', '') +
+      '<div class="row" style="padding-top:0">' + seg('guard-mode', [['auto', '自动'], ['on', '始终'], ['off', '关闭']], gm, 'small') + '</div>' +
+      '<div class="row">' + gi(og && og.fallback_active ? 'green' : 'gray', 'layers') + '<span class="tx"><div class="t">当前状态</div><div class="s" id="guard-s">' + esc(ogS) + (og && og.detail && gm !== 'off' ? '<br>' + esc(og.detail) : '') + (og && og.last_check ? ' · ' + ago(og.last_check) + '检测' : '') + '</div></span></div>' +
+      (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? ['clsact', 'bpf_filter', 'map', 'watchdog'].map(function (k) { return k + (cs[k] ? ' ✓' : ' ✗'); }).join(' · ') : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
     groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', (S.style === 'apple' ? '苹果风' : '默认风格') + ' · 浅色 / 深色 / 跟随系统 · 界面动画',
       '<div class="note" style="margin-bottom:-2px">界面风格</div><div class="style-pick">' + [['default', '默认', 'linear-gradient(135deg,#E7ECFF,#F3E9FF)', 'linear-gradient(90deg,#007AFF,#5856D6)', 'rgba(255,255,255,.85)'], ['apple', '苹果风', '#F2F2F7', '#007AFF', '#fff']].map(function (t) {
         return '<button class="press' + (S.style === t[0] ? ' on' : '') + '" data-style-pick="' + t[0] + '"><span class="pv" style="background:' + t[2] + '"><i style="width:46%;background:' + t[3] + '"></i><i style="background:' + t[4] + '"></i><i style="width:80%;background:' + t[4] + '"></i></span>' + t[1] + '</button>'; }).join('') + '</div>' +
@@ -2983,7 +2988,6 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       case 'remote': api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(rollback); return;
       case 'certprobe': api.action('discover_cert_probe_set', { enabled: String(on) }).then(done()).catch(rollback); return;
       case 'quic': api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); }).catch(rollback); return;
-      case 'clsact': api.action('clsact_bpf_enabled_set', { enabled: String(on) }).then(done()).then(function () { S.clsact = null; if (S.page === 'settings') renderSettings(false); if (on) setTimeout(clsactCheck, 12000); }).catch(rollback); return;
     }
   }
   function clsactCheck(quiet) {
@@ -3054,7 +3058,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   function onEnter(name) {
     if (name === 'devices') { paintHero(true); loadOnlineHours(); loadUsage(); }
     if (name === 'apps') loadApps().then(function () { if (S.page === 'apps') renderApps(false); });
-    if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_enabled === true && !S.clsact) clsactCheck(true); });
+    if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_mode === 'on' && !S.clsact) clsactCheck(true); });
     schedulePoll(50);
   }
   var leaving = null, pageVT = null;
@@ -3230,6 +3234,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       else if (k === 'hist') { S.dpiDays = +v; paintDpiHist(); Promise.all([loadDpiHist(S.dpiDays), loadAppUsage(S.dpiDays)]).then(paintDpiHist); }
       else if (k === 'dflt') { S.dpiFilter = v; paintClients(); }
       else if (k === 'fxp') { if (v === 'off') { S.motion = false; LS.set('hnc6.motion', '0'); } else { S.motion = true; LS.set('hnc6.motion', '1'); FX = Object.assign({}, FX_PRESETS[v]); saveFx(); } fxRefresh(); toast('动画效果：' + FXP_T[v]); }
+      else if (k === 'guard-mode') { api.action('clsact_mode_set', { mode: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { var g = detailJSON(r); S.cfg.clsact_bpf_mode = v; if (g && typeof g === 'object') S.cfg.offload_guard = g; S.clsact = null; toast('硬件加速兜底：' + q.textContent); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
       else if (k === 'fxspring') { FX.spring = v; saveFx(); fxRefresh(); }
       else if (k === 'connv') { S.connView = v; paintConnSheet(); }
       else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }

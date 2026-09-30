@@ -28,6 +28,9 @@ const (
 	// 广播/组播, 不走 assignClient, 调用方也不得把它们喂给 RecordFlow /
 	// clientLocked —— 客户端身份只取 DevHint.MAC。
 	EventDevHint
+	// v5.18: 明文 HTTP 请求(TCP/80)的 Host 头。复用 Event.TLS: SNI = Host,
+	// UserAgent = User-Agent, 其余为空。
+	EventHTTP
 )
 
 // DevHint 是一条被动设备识别线索(v5.13)。字段按协议能提供的尽量填,
@@ -48,8 +51,13 @@ type DNSInfo struct {
 	IsResponse bool
 	QName      string
 	QType      uint16
-	Answers    []string
-	TTL        uint32
+	// Answers: A/AAAA 的 IP 字符串与 "CNAME:目标名"(旧格式, 保持兼容)。
+	Answers []string
+	// v5.18: 带 owner 名 / 类型 / 各自 TTL 的应答记录(含 CNAME 与 HTTPS/SVCB
+	// 地址提示), 供 IP→域名表跟随 CNAME 链。最多 dnsMaxRecords 条。
+	Records []output.DNSAnswer
+	// TTL: 地址记录中的最小 TTL(没有地址记录时为 0)。
+	TTL uint32
 }
 
 type TLSInfo struct {
@@ -60,7 +68,14 @@ type TLSInfo struct {
 	// JA4 首字符为 'q'(gQUIC 没有 TLS ClientHello, JA4 为空)。
 	IsQUIC bool
 	// v5.14: gQUIC CHLO 的 UAID 标签(客户端 User-Agent), 仅 gQUIC 填。
+	// v5.18: EventHTTP 时为 HTTP User-Agent 头。
 	UserAgent string
+	// v5.18: ClientHello 带 ECH / ESNI 扩展(可能是 GREASE, 仅作提示)。
+	ECH bool
+	// v5.18: SNI 取自被截断/未收全的 ClientHello(无 JA4)。
+	Partial bool
+	// v5.18: ClientHello 由多个 TCP 段重组而来。
+	Reassembled bool
 }
 
 type Event struct {
@@ -86,6 +101,9 @@ type Event struct {
 	TLS TLSInfo
 	// v5.13: 仅 Kind == EventDevHint 时非 nil。用指针避免每包 Event 值拷贝变大。
 	Dev *DevHint
+
+	// v5.18: IP 头声明的长度超过实际抓到的字节(被 snaplen 截断)。
+	capTrunc bool
 }
 
 const (
@@ -179,6 +197,7 @@ func parseIPv4(ip []byte, dstMAC, srcMAC net.HardwareAddr, ts time.Time) (Event,
 	ev := Event{
 		Time: ts, SrcMAC: srcMAC, DstMAC: dstMAC,
 		SrcIP: srcIP, DstIP: dstIP, Bytes: totalLen,
+		capTrunc: int(binary.BigEndian.Uint16(ip[2:4])) > len(ip),
 	}
 	return parseL4(ev, proto, payload)
 }
@@ -200,7 +219,8 @@ func parseIPv6(ip []byte, dstMAC, srcMAC net.HardwareAddr, ts time.Time) (Event,
 	copy(dstIP, ip[24:40])
 
 	totalLen := 40 + payloadLen
-	if totalLen > len(ip) {
+	capTrunc := totalLen > len(ip)
+	if capTrunc {
 		totalLen = len(ip)
 	}
 	payload := ip[40:totalLen]
@@ -245,6 +265,7 @@ done:
 	ev := Event{
 		Time: ts, SrcMAC: srcMAC, DstMAC: dstMAC,
 		SrcIP: srcIP, DstIP: dstIP, IsIPv6: true, Bytes: totalLen,
+		capTrunc: capTrunc,
 	}
 	return parseL4(ev, nextHdr, payload)
 }
@@ -302,34 +323,51 @@ func parseL4(ev Event, proto byte, payload []byte) (Event, ParseResult) {
 			return ev, ParseMalformed
 		}
 		tcpData := payload[tcpHL:]
+		seq := binary.BigEndian.Uint32(payload[4:8])
 
-		// DNS over TCP.
+		// DNS over TCP(2 字节长度前缀)。SYN/ACK 等空段、以及长应答的续段
+		// 不是错误, 计 ParseIgnore。
 		if ev.DstPort == 53 || ev.SrcPort == 53 {
-			if len(tcpData) > 2 {
-				if d, ok := parseDNS(tcpData[2:]); ok {
-					ev.Kind = EventDNS
-					ev.DNS = d
-					assignClient(&ev, d.IsResponse)
-					return ev, ParseOK
-				}
+			if len(tcpData) == 0 {
+				return ev, ParseIgnore
 			}
-			return ev, ParseMalformed
+			if d, ok := parseDNSTCP(tcpData); ok {
+				ev.Kind = EventDNS
+				ev.DNS = d
+				assignClient(&ev, d.IsResponse)
+				return ev, ParseOK
+			}
+			return ev, ParseIgnore
 		}
 
-		// TLS ClientHello (port 443 + first byte 0x16).
-		if (ev.DstPort == 443 || ev.SrcPort == 443) && len(tcpData) > 0 && tcpData[0] == 0x16 {
-			if sni, alpn, ja4, ok := parseTLSClientHelloFull(tcpData); ok {
+		// v5.18: 客户端 → 443 的 ClientHello(含跨段重组 / 截断容错)。
+		if ev.DstPort == 443 && len(tcpData) > 0 {
+			if info, ok := tlsAsm.handleSegment(&ev, seq, tcpData, ev.Time); ok {
 				ev.Kind = EventTLSClientHello
-				ev.TLS.SNI = sni
-				ev.TLS.ALPN = alpn
-				ev.TLS.JA4 = ja4
+				ev.TLS = info
 				assignClient(&ev, false)
 				return ev, ParseOK
 			}
-			// Fall through to Flow event for byte accounting.
+			if tcpData[0] != 0x16 {
+				// BPF 只为"可能是 ClientHello 末段"的包放行非 0x16 段; 没接上
+				// 重组的直接忽略, 不计入 Flow(与以前 BPF 丢弃它们时口径一致)。
+				return ev, ParseIgnore
+			}
 		}
 
-		// Anything else TCP -> Flow event (rc29).
+		// v5.18: 明文 HTTP 请求的 Host 头(BPF 只放行 TCP/80 且载荷以常见
+		// 方法开头的包)。
+		if ev.DstPort == 80 {
+			if host, ua, ok := parseHTTPRequestHost(tcpData); ok {
+				ev.Kind = EventHTTP
+				ev.TLS = TLSInfo{SNI: host, UserAgent: ua}
+				assignClient(&ev, false)
+				return ev, ParseOK
+			}
+			return ev, ParseIgnore
+		}
+
+		// Anything else TCP (e.g. server→client 0x16 handshake) -> Flow event (rc29).
 		ev.Kind = EventFlow
 		assignClient(&ev, false)
 		return ev, ParseOK
@@ -416,6 +454,9 @@ func assignClient(ev *Event, isResponseToClient bool) {
 	}
 }
 
+// dnsMaxRecords 限制单条 DNS 消息解析的记录数(防恶意包放大 CPU/内存)。
+const dnsMaxRecords = 64
+
 func parseDNS(b []byte) (DNSInfo, bool) {
 	if len(b) < 12 {
 		return DNSInfo{}, false
@@ -445,9 +486,28 @@ func parseDNS(b []byte) (DNSInfo, bool) {
 		return out, true
 	}
 
+	// 应答可能被 snaplen 截断: 能解析多少算多少, 遇到截断就停。
 	var minTTL uint32
-	for i := uint16(0); i < ancount; i++ {
-		_, np, ok := dnsReadName(b, p)
+	haveTTL := false
+	addr := func(owner string, typ uint16, ttl uint32, ip net.IP) {
+		if len(out.Records) >= dnsMaxRecords {
+			return
+		}
+		s := ip.String()
+		if typ == 1 || typ == 28 {
+			out.Answers = append(out.Answers, s)
+		}
+		out.Records = append(out.Records, output.DNSAnswer{Name: owner, Type: typ, TTL: ttl, Value: s})
+		if !haveTTL || ttl < minTTL {
+			minTTL, haveTTL = ttl, true
+		}
+	}
+	n := int(ancount)
+	if n > dnsMaxRecords {
+		n = dnsMaxRecords
+	}
+	for i := 0; i < n; i++ {
+		owner, np, ok := dnsReadName(b, p)
 		if !ok {
 			break
 		}
@@ -462,31 +522,107 @@ func parseDNS(b []byte) (DNSInfo, bool) {
 		if len(b) < p+rdlen {
 			break
 		}
+		rd := b[p : p+rdlen]
 		rdataStart := p
 		p += rdlen
+		owner = strings.ToLower(owner)
 
 		switch atype {
 		case 1: // A
 			if rdlen == 4 {
-				out.Answers = append(out.Answers, net.IPv4(b[rdataStart], b[rdataStart+1], b[rdataStart+2], b[rdataStart+3]).String())
+				addr(owner, 1, ttl, net.IPv4(rd[0], rd[1], rd[2], rd[3]))
 			}
 		case 28: // AAAA
 			if rdlen == 16 {
 				ip := make(net.IP, 16)
-				copy(ip, b[rdataStart:rdataStart+16])
-				out.Answers = append(out.Answers, ip.String())
+				copy(ip, rd)
+				addr(owner, 28, ttl, ip)
 			}
-		case 5: // CNAME
-			if name, _, ok := dnsReadName(b, rdataStart); ok {
-				out.Answers = append(out.Answers, "CNAME:"+strings.ToLower(name))
+		case 5: // CNAME(rdata 可能用压缩指针指回消息前部, 必须在整条消息上解析)
+			if name, _, ok := dnsReadName(b, rdataStart); ok && name != "" {
+				name = strings.ToLower(name)
+				out.Answers = append(out.Answers, "CNAME:"+name)
+				if len(out.Records) < dnsMaxRecords {
+					out.Records = append(out.Records, output.DNSAnswer{Name: owner, Type: 5, TTL: ttl, Value: name})
+				}
 			}
-		}
-		if minTTL == 0 || ttl < minTTL {
-			minTTL = ttl
+		case 64, 65: // SVCB / HTTPS: ipv4hint(4) / ipv6hint(6) 里的地址
+			for _, ip := range svcbAddrHints(rd) {
+				addr(owner, atype, ttl, ip)
+			}
 		}
 	}
 	out.TTL = minTTL
 	return out, true
+}
+
+// svcbAddrHints 从 SVCB/HTTPS RDATA 中取 ipv4hint / ipv6hint 地址(RFC 9460)。
+// RDATA: SvcPriority(2) | TargetName(未压缩) | SvcParams{key(2) len(2) value}*。
+// AliasMode(priority 0)没有参数。任何格式问题返回已取到的部分。
+func svcbAddrHints(rd []byte) []net.IP {
+	if len(rd) < 3 || binary.BigEndian.Uint16(rd[0:2]) == 0 {
+		return nil
+	}
+	p := 2
+	// TargetName: RFC 9460 禁止压缩, 按标签序列跳过。
+	for i := 0; ; i++ {
+		if p >= len(rd) || i > 127 {
+			return nil
+		}
+		l := int(rd[p])
+		p++
+		if l == 0 {
+			break
+		}
+		if l > 63 {
+			return nil
+		}
+		p += l
+	}
+	var out []net.IP
+	for len(rd)-p >= 4 && len(out) < 16 {
+		key := binary.BigEndian.Uint16(rd[p : p+2])
+		vl := int(binary.BigEndian.Uint16(rd[p+2 : p+4]))
+		p += 4
+		if len(rd)-p < vl {
+			break
+		}
+		v := rd[p : p+vl]
+		p += vl
+		switch key {
+		case 4:
+			for len(v) >= 4 && len(out) < 16 {
+				out = append(out, net.IPv4(v[0], v[1], v[2], v[3]))
+				v = v[4:]
+			}
+		case 6:
+			for len(v) >= 16 && len(out) < 16 {
+				ip := make(net.IP, 16)
+				copy(ip, v[:16])
+				out = append(out, ip)
+				v = v[16:]
+			}
+		}
+	}
+	return out
+}
+
+// parseDNSTCP 解析 TCP 上的 DNS(RFC 1035 §4.2.2: 2 字节长度前缀)。只解析
+// 段内第一条消息; 前缀声明的长度超出本段时按截断消息尽力解析。续段(不以
+// 长度前缀开头)通常通不过 qdcount==1 + 名字合法性检查。
+func parseDNSTCP(b []byte) (DNSInfo, bool) {
+	if len(b) < 2+12 {
+		return DNSInfo{}, false
+	}
+	l := int(binary.BigEndian.Uint16(b[0:2]))
+	if l < 12 {
+		return DNSInfo{}, false
+	}
+	msg := b[2:]
+	if len(msg) > l {
+		msg = msg[:l]
+	}
+	return parseDNS(msg)
 }
 
 func dnsReadName(b []byte, off int) (string, int, bool) {
@@ -540,68 +676,113 @@ func dnsReadName(b []byte, off int) (string, int, bool) {
 	return "", 0, false
 }
 
-// parseTLSClientHelloFull extracts SNI + ALPN + JA4 in one pass.
-func parseTLSClientHelloFull(b []byte) (string, []string, string, bool) {
-	sni, alpn, ok := parseTLSClientHello(b)
-	if !ok {
-		return "", nil, "", false
+// parseTLSClientHelloFull extracts SNI + ALPN + JA4 (+ ECH 标记) in one pass.
+// b 必须以 TLS record 头开始且包含完整 ClientHello。
+func parseTLSClientHelloFull(b []byte) (TLSInfo, bool) {
+	ch, ok := parseClientHello(b, false)
+	if !ok || (ch.sni == "" && len(ch.alpn) == 0 && !ch.ech) {
+		return TLSInfo{}, false
 	}
-	in, ok2 := extractJA4Inputs(b)
-	if !ok2 {
-		return sni, alpn, "", true
+	info := TLSInfo{SNI: ch.sni, ALPN: ch.alpn, ECH: ch.ech}
+	if in, ok2 := extractJA4Inputs(b); ok2 {
+		info.JA4 = output.ComputeJA4(in)
 	}
-	return sni, alpn, output.ComputeJA4(in), true
+	return info, true
 }
 
-// parseTLSClientHello (rc20.1 logic, kept for SNI/ALPN-only callers).
+// parseTLSClientHello (rc20.1 接口, 保留给只要 SNI/ALPN 的调用方)。
 func parseTLSClientHello(b []byte) (string, []string, bool) {
-	if len(b) < 5 || b[0] != 0x16 {
+	ch, ok := parseClientHello(b, false)
+	if !ok || (ch.sni == "" && len(ch.alpn) == 0) {
 		return "", nil, false
+	}
+	return ch.sni, ch.alpn, true
+}
+
+// clientHello 是 ClientHello 中我们关心的字段。
+type clientHello struct {
+	sni  string
+	alpn []string
+	// ech: 带 encrypted_client_hello(0xfe0d)或旧 ESNI(0xffce)扩展。注意 Chrome
+	// 对所有连接都发 GREASE ECH, 所以它只是"可能是 ECH 外层"的提示。
+	ech bool
+	// complete: 整个 ClientHello 都在 b 里(否则是 lenient 模式下的截断解析)。
+	complete bool
+}
+
+// TLS 扩展类型。
+const (
+	tlsExtServerName = 0x0000
+	tlsExtALPN       = 0x0010
+	tlsExtECH        = 0xfe0d
+	tlsExtESNI       = 0xffce
+)
+
+// parseClientHello 解析以 TLS record 头开始的 ClientHello。
+//
+// lenient=false: 要求 record / handshake / 扩展区都完整(旧行为)。
+// lenient=true (v5.18): 允许数据被截断 —— ClientHello 跨多个 TCP 段(Chrome
+// 带 X25519MLKEM768 后 ~1.8KB, 必然拆成两段)或被 snaplen 截断时, 只要
+// server_name 扩展完整落在已有字节里就能取到 SNI。扩展走到截断处就停。
+// 任何越界都只返回 ok=false, 不会 panic。
+func parseClientHello(b []byte, lenient bool) (clientHello, bool) {
+	var ch clientHello
+	if len(b) < 9 || b[0] != 0x16 || b[5] != 0x01 {
+		return ch, false
 	}
 	recLen := int(binary.BigEndian.Uint16(b[3:5]))
-	if recLen < 4 || len(b) < 5+recLen {
-		return "", nil, false
+	if recLen < 4 {
+		return ch, false
 	}
-	hs := b[5 : 5+recLen]
-	if len(hs) < 4 || hs[0] != 0x01 {
-		return "", nil, false
+	hsLen := int(b[6])<<16 | int(b[7])<<8 | int(b[8])
+	avail := b[9:]
+	end := hsLen
+	ch.complete = true
+	if recLen < 4+hsLen { // handshake 跨多个 record(极少见)
+		if !lenient {
+			return ch, false
+		}
+		end, ch.complete = recLen-4, false
 	}
-	bodyLen := int(hs[1])<<16 | int(hs[2])<<8 | int(hs[3])
-	if len(hs) < 4+bodyLen {
-		return "", nil, false
+	if len(avail) < end {
+		if !lenient {
+			return ch, false
+		}
+		end, ch.complete = len(avail), false
 	}
-	body := hs[4 : 4+bodyLen]
+	body := avail[:end]
 
-	p := 0
-	if len(body) < p+2+32+1 {
-		return "", nil, false
+	p := 2 + 32 // legacy_version + random
+	if len(body) < p+1 {
+		return ch, false
 	}
-	p += 2 + 32
 	sidLen := int(body[p])
-	p++
-	if len(body) < p+sidLen+2 {
-		return "", nil, false
+	p += 1 + sidLen
+	if len(body) < p+2 {
+		return ch, false
 	}
-	p += sidLen
 	csLen := int(binary.BigEndian.Uint16(body[p : p+2]))
 	p += 2 + csLen
 	if len(body) < p+1 {
-		return "", nil, false
+		return ch, false
 	}
 	cmLen := int(body[p])
 	p += 1 + cmLen
 	if len(body) < p+2 {
-		return "", nil, false
+		return ch, false
 	}
 	extLen := int(binary.BigEndian.Uint16(body[p : p+2]))
 	p += 2
-	if len(body) < p+extLen {
-		return "", nil, false
+	ext := body[p:]
+	if len(ext) < extLen {
+		if !lenient {
+			return ch, false
+		}
+		ch.complete = false
+	} else {
+		ext = ext[:extLen]
 	}
-	ext := body[p : p+extLen]
 
-	var sni string
-	var alpn []string
 	for len(ext) >= 4 {
 		etype := binary.BigEndian.Uint16(ext[0:2])
 		elen := int(binary.BigEndian.Uint16(ext[2:4]))
@@ -613,7 +794,8 @@ func parseTLSClientHello(b []byte) (string, []string, bool) {
 		ext = ext[elen:]
 
 		switch etype {
-		case 0x0000: // server_name
+		case tlsExtServerName:
+			// server_name_list<2> { name_type(1) HostName<2> }
 			if len(data) < 5 {
 				continue
 			}
@@ -625,25 +807,33 @@ func parseTLSClientHello(b []byte) (string, []string, bool) {
 			if len(data) < 3+nameLen {
 				continue
 			}
-			sni = strings.ToLower(string(data[3 : 3+nameLen]))
-		case 0x0010: // ALPN
+			ch.sni = sanitizeServerName(string(data[3 : 3+nameLen]))
+		case tlsExtALPN:
 			if len(data) < 2 {
 				continue
 			}
 			list := data[2:]
-			for len(list) >= 1 {
+			for len(list) >= 1 && len(ch.alpn) < 16 {
 				n := int(list[0])
 				if len(list) < 1+n {
 					break
 				}
-				alpn = append(alpn, string(list[1:1+n]))
+				ch.alpn = append(ch.alpn, string(list[1:1+n]))
 				list = list[1+n:]
 			}
+		case tlsExtECH, tlsExtESNI:
+			ch.ech = true
 		}
 	}
+	return ch, true
+}
 
-	if sni == "" && len(alpn) == 0 {
-		return "", nil, false
+// sanitizeServerName 小写化、去尾点, 不是合法主机名字符集的返回空(防止
+// 恶意/损坏的 SNI 进入输出文件)。
+func sanitizeServerName(s string) string {
+	s = strings.TrimSuffix(strings.ToLower(s), ".")
+	if !validHostname(s) {
+		return ""
 	}
-	return sni, alpn, true
+	return s
 }

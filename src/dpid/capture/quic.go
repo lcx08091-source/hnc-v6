@@ -656,13 +656,15 @@ func parseQUIC(ev Event, udp []byte) (Event, ParseResult) {
 		rec[0], rec[1], rec[2] = 0x16, 0x03, 0x01
 		binary.BigEndian.PutUint16(rec[3:5], uint16(len(hello)))
 		copy(rec[5:], hello)
-		sni, alpn, ja4, ok := parseTLSClientHelloFull(rec)
+		info, ok := parseTLSClientHelloFull(rec)
 		if !ok {
 			return ev, ParseIgnore
 		}
 		ev.Kind = EventTLSClientHello
-		ev.TLS = TLSInfo{SNI: sni, ALPN: alpn, JA4: quicJA4(ja4), IsQUIC: true}
-		if sni != "" {
+		info.JA4 = quicJA4(info.JA4)
+		info.IsQUIC = true
+		ev.TLS = info
+		if info.SNI != "" {
 			quicStats.sni.Add(1)
 		}
 		assignClient(&ev, false)

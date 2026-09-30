@@ -209,6 +209,7 @@ func main() {
 	go srv.writeCounter.GCLoop(stopCh)
 	go srv.OffloadLoop(stopCh)   // rc3.1.26 · 30s 刷 offload_status cache, 避免 apiOffloadStatus 同步跑 check_offload.sh (含 sleep 5)
 	go srv.AppUsageLoop(stopCh)  // v5.16: 按应用真实流量统计(conntrack 字节差分)
+	go srv.CtEventLoop(stopCh)   // v5.18: conntrack DESTROY 事件, 补短连接/连接尾巴(失败退纯轮询)
 	go srv.CertProbeLoop(stopCh) // v5.15: 未知应用发现 · 后台取证书
 	go srv.RateLoop(stopCh)      // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
 

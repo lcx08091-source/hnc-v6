@@ -7,7 +7,8 @@
 #  - 不再用 /system/bin/tc 探测/安装(ColorOS 魔改 tc 会拒 ingress 关键字,
 #    见 daemon/tc_netlink/README.md), 改走 hnc_clsact_ctl(netlink 直通);
 #  - 去掉 set -euo pipefail(toybox sh 不支持 pipefail 的 ROM 上起不来);
-#  - 受 rules.json 顶层 clsact_bpf_enabled 开关门控(默认 false), 关闭即退。
+#  - v5.18: 门控改为 hnc_offload_guard.sh clsact_wanted(clsact_bpf_mode:
+#    on / auto 且兜底已启用; pref 1 被 HNC 上行 mirred 占用时不装), 不满足即退。
 #
 # 用法: hnc_clsact_watchdog.sh                (守护模式, 10s 循环)
 #       hnc_clsact_watchdog.sh repair <iface> (单次修复, 供 httpd 调用)
@@ -19,13 +20,11 @@ CTL="$HNC_DIR/bin/hnc_clsact_ctl"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [clsact-wdg] $*" >> "$LOG_FILE" 2>/dev/null; }
 
 clsact_enabled() {
-    # 与 tc_manager 的 _hnc_clsact_enabled 同语义: obj+ctl 在且开关开
+    # 与 tc_manager 的 _hnc_clsact_enabled 同语义(统一闸门在 offload guard)
     [ -f "$HNC_DIR/bin/hnc_clsact.o" ] || return 1
     [ -x "$CTL" ] || return 1
-    if [ -x "$HNC_DIR/bin/hnc_json" ]; then
-        v=$("$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" clsact_bpf_enabled 2>/dev/null) && [ "$v" = "true" ] && return 0
-    fi
-    grep -q '"clsact_bpf_enabled"[[:space:]]*:[[:space:]]*true' "$HNC_DIR/data/rules.json" 2>/dev/null
+    [ -f "$HNC_DIR/bin/hnc_offload_guard.sh" ] || return 1
+    sh "$HNC_DIR/bin/hnc_offload_guard.sh" clsact_wanted "$1" 2>/dev/null
 }
 
 get_hotspot_iface() {
@@ -79,8 +78,9 @@ check_and_repair() {
 case "${1:-}" in
     repair)
         # 供 httpd actionClsactRepair 调用: 单次修复后退出
-        clsact_enabled || { echo "clsact_bpf not enabled"; exit 0; }
-        check_and_repair "${2:-$(get_hotspot_iface)}"
+        _ri="${2:-$(get_hotspot_iface)}"
+        clsact_enabled "$_ri" || { echo "clsact_bpf not wanted (mode/pref1 mirred)"; exit 0; }
+        check_and_repair "$_ri"
         exit $?
         ;;
 esac
@@ -88,12 +88,12 @@ esac
 # ── 守护模式 ────────────────────────────────────────────────
 log "clsact watchdog starting"
 while true; do
-    if ! clsact_enabled; then
-        # 开关被关掉: 退出(service.sh 重新开启开关时会再拉起)
-        log "clsact_bpf_enabled=false, watchdog exiting"
+    IFACE="$(get_hotspot_iface)"
+    if ! clsact_enabled "$IFACE"; then
+        # 模式不要求 / pref 1 被 mirred 占用: 退出(service.sh 在 mode=on 时会再拉起)
+        log "clsact not wanted (clsact_bpf_mode / pref1 mirred), watchdog exiting"
         exit 0
     fi
-    IFACE="$(get_hotspot_iface)"
     if [ -n "$IFACE" ]; then
         check_and_repair "$IFACE"
     fi

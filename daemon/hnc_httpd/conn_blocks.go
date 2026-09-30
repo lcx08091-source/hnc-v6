@@ -2,12 +2,16 @@
 //
 //   data/conn_blocks.json: {"items":[{"mac","kind":"domain"|"ip","value","label","ts"}]}
 //   run/conn_blocks.flat:  展开后的 "<mac> <ip>" 每行一条, 交给 bin/connblock_sync.sh
+//   run/conn_blocks.dns:   v5.18 DNS 层: "<mac> <domain>" 每行一条(域名封锁项原样)
+//   run/connblock_caps.json: 脚本写的能力探测结果 {"dns_layer":bool,"dns_layer_v6":bool,"checked":ts}
 //
-// 域名封锁按 dpid 的 DNS/SNI 反查表(dpi_ipname.json + nDPI ip_to_host.json)展开:
-// 名字等于该域名或是它的子域名的 IP 全部拦掉。App 换 IP 时反查表会更新, 后台
-// (AppUsageLoop 每 10 秒)重新展开, 结果变了才重跑脚本。
-// 局限: 反查表里还没出现过的新 IP 在第一次连接时拦不住, 直到 DNS/SNI 被看到
-// (通常就是那次连接本身, 几秒后生效)。
+// IP 层: 域名按 dpid 的 DNS/SNI 反查表(run/dpi_ipname.json)展开: 名字等于该域名
+// 或是它的子域名的 IP 全部拦掉。App 换 IP 时反查表会更新, 后台(AppUsageLoop 每
+// 10 秒)重新展开, 结果变了才重跑脚本。局限: 反查表里还没出现过的新 IP 在第一次
+// 连接时拦不住, 直到 DNS/SNI 被看到。
+// DNS 层(v5.18): 同时丢弃这台设备对该域名(及子域名)的 DNS 查询(udp/tcp 53,
+// iptables -m string 匹配 DNS 线格式 qname 后缀), 让新 IP 根本解析不出来, 补上
+// IP 层的首连空窗。内核无 xt_string 时脚本静默退回只有 IP 层。
 
 package main
 
@@ -41,6 +45,53 @@ var connBlockMu sync.Mutex // 串行化读改写 + 展开/同步
 
 func connBlocksPath(hncDir string) string { return filepath.Join(hncDir, "data", "conn_blocks.json") }
 func connBlocksFlat(hncDir string) string { return filepath.Join(hncDir, "run", "conn_blocks.flat") }
+func connBlocksDNS(hncDir string) string  { return filepath.Join(hncDir, "run", "conn_blocks.dns") }
+
+// expandConnBlockDomains 域名封锁项 → 排好序的 "mac domain" 行(DNS 层用)
+func expandConnBlockDomains(f connBlockFile) []string {
+	set := map[string]bool{}
+	for _, it := range f.Items {
+		if it.Kind != "domain" {
+			continue
+		}
+		d := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(it.Value)), ".")
+		if validMAC(it.MAC) && domainRe.MatchString(d) && len(d) <= 253 {
+			set[it.MAC+" "+d] = true
+		}
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// connBlockDNSLayer DNS 层能力: available | unavailable | unknown(还没探测过)
+func connBlockDNSLayer(hncDir string) string {
+	b, err := os.ReadFile(filepath.Join(hncDir, "run", "connblock_caps.json"))
+	if err != nil {
+		return "unknown"
+	}
+	var c struct {
+		DNSLayer *bool `json:"dns_layer"`
+	}
+	if json.Unmarshal(b, &c) != nil || c.DNSLayer == nil {
+		return "unknown"
+	}
+	if *c.DNSLayer {
+		return "available"
+	}
+	return "unavailable"
+}
+
+func joinLines(lines []string) string {
+	s := strings.Join(lines, "\n")
+	if len(lines) > 0 {
+		s += "\n"
+	}
+	return s
+}
 
 func readConnBlocks(hncDir string) connBlockFile {
 	var f connBlockFile
@@ -87,14 +138,17 @@ func (s *server) expandConnBlocks(f connBlockFile) []string {
 
 // connBlockSyncLocked 重新展开; 与现有 flat 不同(或 force)才写文件并跑脚本
 func (s *server) connBlockSyncLocked(force bool) (string, error) {
-	lines := s.expandConnBlocks(readConnBlocks(s.hncDir))
-	content := strings.Join(lines, "\n")
-	if len(lines) > 0 {
-		content += "\n"
-	}
+	f := readConnBlocks(s.hncDir)
+	content := joinLines(s.expandConnBlocks(f))
+	dnsContent := joinLines(expandConnBlockDomains(f))
 	old, _ := os.ReadFile(connBlocksFlat(s.hncDir))
-	if !force && string(old) == content {
+	oldDNS, _ := os.ReadFile(connBlocksDNS(s.hncDir))
+	if !force && string(old) == content && string(oldDNS) == dnsContent {
 		return "", nil
+	}
+	// 先写 DNS 列表再写 flat: 脚本两份都读, 任一变化都重跑
+	if err := discoverWriteAtomic(connBlocksDNS(s.hncDir), []byte(dnsContent)); err != nil {
+		return "", err
 	}
 	if err := discoverWriteAtomic(connBlocksFlat(s.hncDir), []byte(content)); err != nil {
 		return "", err
@@ -112,7 +166,9 @@ func (s *server) connBlockRefresh() {
 	connBlockMu.Lock()
 	defer connBlockMu.Unlock()
 	if len(readConnBlocks(s.hncDir).Items) == 0 {
-		if st, err := os.Stat(connBlocksFlat(s.hncDir)); err != nil || st.Size() == 0 {
+		st, err := os.Stat(connBlocksFlat(s.hncDir))
+		st2, err2 := os.Stat(connBlocksDNS(s.hncDir))
+		if (err != nil || st.Size() == 0) && (err2 != nil || st2.Size() == 0) {
 			return
 		}
 	}

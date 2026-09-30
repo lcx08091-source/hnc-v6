@@ -41,3 +41,7 @@ Thumbs.db
 
 # Claude Code 子任务的临时工作区
 .claude/worktrees/
+# v5.18: 在 src/dpid 下 `go build ./cmd/...` 的本地产物(曾被误提交)
+src/dpid/dpid
+src/dpid/hnc_watchdog
+src/dpid/dpid_supervisor

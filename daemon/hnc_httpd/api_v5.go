@@ -39,13 +39,16 @@ type configResp struct {
 	GlobalShaperUp      string `json:"global_shaper_up,omitempty"`
 	// rc35: 用户维护的飞轮排除名单(VPN/代理),不含内置清单。供设置页展示/增删。
 	FlywheelExcludeUser []string `json:"flywheel_exclude_user,omitempty"`
-	// v5.9.7: clsact BPF (T1 tier, opt-in, 默认关)。设置页开关态。
+	// v5.9.7: clsact BPF (T1 tier)。v5.18 起只读兼容 = (clsact_bpf_mode == "on")。
 	ClsactBpfEnabled bool `json:"clsact_bpf_enabled"`
-	// v5.9.1: v5.2 shadow 统计是否真的在采样(run/stats_shadow.enabled 存在)。
-	// 此前统计页的"统计来源"下拉框允许选"新统计 Shadow",但该灰度装机默认
-	// 从未启用 → /api/stats?source=shadow 读不到文件时静默返回空 → 用户看到
-	// 全 0 空图且无任何解释。前端据此禁用该选项并说明原因。
-	StatsShadowEnabled bool `json:"stats_shadow_enabled"`
+	// v5.18: offload 旁路兜底模式 auto(默认)| on | off, 见 bin/hnc_offload_guard.sh。
+	// 旧装机只有 clsact_bpf_enabled=true 时视为 on。
+	ClsactBpfMode string `json:"clsact_bpf_mode"`
+	// v5.18: run/offload_guard.json 原样透出(守护进程每 60s 写一次); 没有则 null。
+	OffloadGuard map[string]interface{} `json:"offload_guard"`
+	// v5.18: 按设备域名封锁的 DNS 层(xt_string)能力: "available" | "unavailable" | "unknown"
+	// (unknown = 还没探测过, connblock_sync.sh 首次有域名封锁时探测)。
+	ConnBlockDNSLayer string `json:"conn_block_dns_layer"`
 	// v5.11: 旧前端一直在读但后端从没返回的字段(刷新后总显示 auto / 默认值)。
 	HotspotIface string `json:"hotspot_iface"`
 	TcQosMode    string `json:"tc_qos_mode"`
@@ -66,11 +69,9 @@ type configResp struct {
 }
 
 func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
-	resp := configResp{}
-	// v5.9.1: shadow 采样开关是 run/ 下的 marker 文件(见 stats_sample.sh)
-	if _, err := os.Stat(s.hncDir + "/run/stats_shadow.enabled"); err == nil {
-		resp.StatsShadowEnabled = true
-	}
+	resp := configResp{ClsactBpfMode: "auto"}
+	resp.OffloadGuard = readOffloadGuard(s.hncDir)
+	resp.ConnBlockDNSLayer = connBlockDNSLayer(s.hncDir)
 	// rules.json 一次读全部字段 (v5.1: rules.json 同时存 top-level hotspot_* 和 remote_enabled/auth_required)
 	// 兼容两套命名: shell 写 hotspot_auto/_pass/_delay, 旧版 Go 写 hotspot_autostart/_delay_sec
 	if rulesData, err := os.ReadFile(s.hncDir + "/data/rules.json"); err == nil {
@@ -79,7 +80,8 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 			resp.AuthRequired = boolField(m, "auth_required")
 			resp.WhitelistMode = boolField(m, "whitelist_mode")
 			resp.RemoteEnabled = boolField(m, "remote_enabled")
-			resp.ClsactBpfEnabled = boolField(m, "clsact_bpf_enabled")
+			resp.ClsactBpfMode = clsactModeFromRules(m)
+			resp.ClsactBpfEnabled = resp.ClsactBpfMode == "on"
 			// Autostart: 优先读 hotspot_auto (shell 名), 回退到 hotspot_autostart
 			resp.HotspotAutostart = boolField(m, "hotspot_auto") || boolField(m, "hotspot_autostart")
 			if ssid, ok := m["hotspot_ssid"].(string); ok {
@@ -286,13 +288,24 @@ func (s *server) apiIfaceInfo(w http.ResponseWriter, r *http.Request) {
 type offloadResp struct {
 	Active bool   `json:"active"`
 	Detail string `json:"detail"`
+	// v5.18: 兜底状态(同 /api/config 的 offload_guard), 无则 null
+	Guard map[string]interface{} `json:"offload_guard"`
 }
 
 // runOffloadCheck · 跑一次 check_offload.sh 并把结果写入 s.offloadCache
 // 由 OffloadLoop 周期调用 · 30s 一次
 func (s *server) runOffloadCheck() {
-	rc, out := runBin(s.hncDir, "check_offload.sh")
-	_ = rc // check_offload.sh 约定 stdout 带状态关键字, rc 不重要
+	// v5.18: offload guard 守护进程已在 60s 内采样过就直接复用, 不再并行再跑一遍
+	// check_offload.sh(两路同时 sleep 5 采样 stats_map, 白费 CPU)。兜底生效时
+	// guard 报的是被压下去之后的状态(IDLE/CAPABLE), 横幅随之消失 —— 旁路已被打掉。
+	var out string
+	if st, ok := offloadGuardFreshState(s.hncDir, 90*time.Second); ok {
+		out = st
+	} else {
+		rc, o := runBin(s.hncDir, "check_offload.sh")
+		_ = rc // check_offload.sh 约定 stdout 带状态关键字, rc 不重要
+		out = o
+	}
 	out = strings.TrimSpace(out)
 	if out == "" {
 		out = "IDLE"
@@ -342,6 +355,7 @@ func (s *server) apiOffloadStatus(w http.ResponseWriter, r *http.Request) {
 	if !ready {
 		resp = offloadResp{Active: false, Detail: "PENDING"}
 	}
+	resp.Guard = readOffloadGuard(s.hncDir)
 	writeJSON(w, http.StatusOK, resp)
 }
 

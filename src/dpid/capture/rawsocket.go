@@ -45,6 +45,14 @@ type Stats struct {
 	QUICSNI         uint64 // IETF QUIC 产出带 SNI 的 ClientHello
 	GQUICSNI        uint64 // gQUIC Q046 明文 CHLO 取到 SNI
 	GQUICSkipped    uint64 // gQUIC Q050+ 加密 CHLO, 跳过
+
+	// v5.18: 明文 HTTP Host 事件 / TCP ClientHello 截断解析与跨段重组计数。
+	// TLS* 为进程级总数(tls_reasm.go 包级原子量)。
+	HTTPEvents     uint64
+	TLSPartial     uint64 // 截断的 ClientHello 里直接取到 SNI
+	TLSPending     uint64 // 首段挂起等待末段
+	TLSReassembled uint64 // 跨段重组成功
+	TLSGaveUp      uint64 // 重组放弃(段不连续 / 过期 / 超限)
 }
 
 // ARPHRD_* link-layer type constants seen in the wild on Android.
@@ -86,6 +94,7 @@ type Handle struct {
 		tls      atomic.Uint64
 		flow     atomic.Uint64
 		devHint  atomic.Uint64
+		http     atomic.Uint64
 		ignored  atomic.Uint64
 		parseErr atomic.Uint64
 		panics   atomic.Uint64
@@ -175,7 +184,8 @@ func Open(opts Options) (*Handle, error) {
 		snap:    opts.Snaplen,
 		// v5.14: BPF 对 QUIC 分支返回 max(snaplen, quicSnaplen), 缓冲按大者
 		// 分配, 否则 1200+ 字节的 Initial 被 recvfrom 截断、GCM 必然失败。
-		buf:      make([]byte, max(opts.Snaplen, quicSnaplen)+64),
+		// v5.18: ClientHello / HTTP 分支返回 tlsSnaplen, 同理按最大值分配。
+		buf:      make([]byte, max(opts.Snaplen, quicSnaplen, tlsSnaplen)+64),
 		linkType: lt,
 	}, nil
 }
@@ -316,6 +326,12 @@ func (h *Handle) Stats() Stats {
 		QUICSNI:         quicStats.sni.Load(),
 		GQUICSNI:        quicStats.gquicSNI.Load(),
 		GQUICSkipped:    quicStats.gquicSkipped.Load(),
+
+		HTTPEvents:     h.stats.http.Load(),
+		TLSPartial:     tlsStats.partial.Load(),
+		TLSPending:     tlsStats.pending.Load(),
+		TLSReassembled: tlsStats.reassembled.Load(),
+		TLSGaveUp:      tlsStats.gaveUp.Load(),
 	}
 }
 
@@ -438,6 +454,8 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 					h.stats.flow.Add(1)
 				case EventDevHint:
 					h.stats.devHint.Add(1)
+				case EventHTTP:
+					h.stats.http.Add(1)
 				}
 				onEvent(ev)
 			case ParseIgnore:

@@ -53,7 +53,6 @@ securityHeaders → accessLogMiddleware(含 panic recover)→ authMiddleware →
 | 6 | GET | `/api/health` | 公开 | §12 |
 | 7 | GET | `/changelog.html` | 公开 | §13 |
 | 8 | GET | `/json-health.html` | 公开 | §13 |
-| 9 | GET | `/ndpi-lab.html` | 公开 | §13 |
 | 10 | GET | `/api/whoami` | 需鉴权(仅 cookie 身份有意义) | §10 |
 | 11 | GET | `/api/tokens` | 需鉴权 | §10 |
 | 12 | GET | `/api/devices` | 需鉴权 | §2 |
@@ -107,7 +106,7 @@ securityHeaders → accessLogMiddleware(含 panic recover)→ authMiddleware →
 
 ### 1.2 authMiddleware 决策顺序(`middleware.go`)
 
-1. 路径在公开白名单 → 直接放行。白名单:`/`、`/pair`、`/changelog.html`、`/json-health.html`、`/ndpi-lab.html`、`/api/pair/verify`、`/api/pairing/status`(**未注册路由,实际 404**)、`/api/health`、`/api/logout`、以及前缀 `/static/`。
+1. 路径在公开白名单 → 直接放行。白名单:`/`、`/pair`、`/changelog.html`、`/json-health.html`、`/api/pair/verify`、`/api/pairing/status`(**未注册路由,实际 404**)、`/api/health`、`/api/logout`、以及前缀 `/static/`。
 2. 连接来自 loopback:
    - 无 `Origin` 且无 `Referer`:
      - secret 校验通过 → 放行(context 里**没有** token);
@@ -319,7 +318,6 @@ Set-Cookie: hnc_token=<TokenID>.<Secret>; Path=/; Max-Age=2592000; HttpOnly; Sec
 | 链 | 写入方 | 文件 | 行语义 | 口径 |
 |---|---|---|---|---|
 | legacy | `bin/stats_sample.sh`(watchdog 每轮)+ `stats_rollup.sh` | `$HNC/data/stats_raw.jsonl` `{"ts":秒,"mac","rx","tx"}`(**累计计数器**);`$HNC/data/stats_daily.jsonl` `{"date":"YYYY-MM-DD","mac","rx","tx","name"}`(日汇总) | 计数器,需相邻差分 | iptables 全量 |
-| shadow | v5.2 灰度采样(需 `run/stats_shadow.enabled` 存在) | `data/stats_shadow_raw.jsonl` / `stats_shadow_daily.jsonl` | 同 legacy | 同 legacy |
 | dpi | dpid HistorySampler 每 15 分钟 | `$HNC/run/stats.YYYYMMDD.jsonl`(**文件名是 UTC 日期**)`{"t":秒,"mac","app","app_id","cat","tx","rx"}` | 每行即 15 分钟增量 | 只含被 DPI 归因的流量(略小于 iptables);默认只保留 7 天 |
 
 所有 `rx` = 设备下载字节,`tx` = 设备上传字节,单位 **Byte**。
@@ -332,7 +330,7 @@ Query:
 |---|---|---|---|
 | `range` | string | `today` \| `week` \| `month` \| `all` | `today` |
 | `mac` | string | 可选,`xx:xx:xx:xx:xx:xx`(大小写均可,内部转小写) | 空 = 全部设备合计 |
-| `source` | string | `legacy` \| `shadow` \| `dpi`(大小写不敏感) | `legacy`(注意:旧 UI 默认传 `dpi`) |
+| `source` | string | `legacy` \| `dpi`(大小写不敏感;历史值 `shadow` 已移除,按 `legacy` 处理) | `legacy`(注意:旧 UI 默认传 `dpi`) |
 
 错误:`400 {"error":"invalid range"}` / `{"error":"invalid mac"}` / `{"error":"invalid stats source"}`。
 
@@ -422,7 +420,7 @@ Query:
 - `state` 的结构 = `src/dpid/output/state.go` 的 `State`,顶层字段:
   `schema_version, generated_at, version, mode, blind_reason?, interface?, tls_reassembly, ipv6_capture, offload_hint, uptime_s, stats{…},
   devices{key→Device}, clients{key→ClientProfile}?, client_count, top_hostnames?, top_sni?, top_apps?, top_categories?, top_ja4?, top_fingerprints?,
-  unique_hostnames, unique_sni, unique_ja4, l3_enabled, l3_rule_version?, dfp_enabled, dfp_rule_version?, ndpi_available, ndpi_entries?,
+  unique_hostnames, unique_sni, unique_ja4, l3_enabled, l3_rule_version?, dfp_enabled, dfp_rule_version?, ndpi_available(已废弃: nDPI 实验已移除, 恒 false), ndpi_entries?,
   conntrack_available, conntrack_readable, conntrack_path?, conntrack_flows, total_tx_bytes?, total_rx_bytes?, self{SelfState}?, rebind_count,
   health?, stall_seconds?, unidentified_ratio{total_bytes, identified_bytes, …}?, evidence_summary{total, by_source, top_apps?}?,
   unmatched_snis_pending, unmatched_sni_samples?, byte_sampler_source?, app_label_source?, live_label_count?,
@@ -560,7 +558,7 @@ Query:
 
 ### 8.1 GET `/api/config`
 
-读 `$HNC/data/rules.json`(每次读盘,不缓存)+ `run/stats_shadow.enabled` + `etc/flywheel_exclude.json`:
+读 `$HNC/data/rules.json`(每次读盘,不缓存)+ `run/offload_guard.json` + `run/connblock_caps.json` + `etc/flywheel_exclude.json`:
 
 ```json
 {
@@ -574,8 +572,20 @@ Query:
   "global_shaper_down": "100mbit",   // string,omitempty,tc 速率串
   "global_shaper_up": "20mbit",      // string,omitempty
   "flywheel_exclude_user": ["com.v2ray.ang"],  // []string,omitempty,用户自加的飞轮排除包名
-  "clsact_bpf_enabled": false,       // bool
-  "stats_shadow_enabled": false      // bool,run/stats_shadow.enabled 是否存在
+  "clsact_bpf_enabled": false,       // bool,v5.18 起只读兼容 = (clsact_bpf_mode == "on")
+  "clsact_bpf_mode": "auto",         // string,"auto"|"on"|"off";缺失时旧键 clsact_bpf_enabled=true → "on",否则 "auto"
+  "offload_guard": {                 // object|null,run/offload_guard.json 原样(守护每 60s 写);没有则 null
+    "mode": "auto",                  //   生效模式
+    "offload_state": "ACTIVE",       //   NOMAP|IDLE|CAPABLE|ACTIVE|NOHOTSPOT|UNKNOWN|SKIPPED(off 模式)
+    "fallback_active": true,         //   是否正在强制 offload 走慢路径
+    "since": 1790000000,             //   兜底启用时刻(unix 秒),未启用为 0
+    "detail": "检测到 offload 正在旁路限速; 已强制 offload 走慢路径(limit_map=0, 每轮重申)",
+    "last_check": 1790000060,        //   最近一轮时刻(unix 秒)
+    "slowpath": "ok",                //   ok|empty|unavailable|error|n/a(未启用)
+    "clsact": "skipped_pref1_mirred",//   installed|skipped_pref1_mirred|unavailable|failed|off
+    "iface": "wlan2"
+  },
+  "conn_block_dns_layer": "available" // string,按设备域名封锁的 DNS 层:available|unavailable|unknown(尚未探测)
 }
 ```
 
@@ -589,7 +599,8 @@ Query:
 | `auth_required_set` | `enabled`=`true`\|`false` | `json_set.sh top auth_required <v>` | **仅本机 loopback**;远程调用 → `500 {"ok":false,"error":"forbidden","detail":"this action is loopback-only (use the on-device KSU WebUI)"}` |
 | `global_shaper_set` | `enabled`(宽松布尔,同 `rule_sqm`);开启时 `rate_down`/`rate_up`(`"0"` 或 `<n>kbit`/`<n>mbit`,≥64kbit,至少一个非 0) | 关:`device_detect.sh iface` → 有接口则 `tc_manager.sh global_shaper <iface> off 0 0` → `json_set.sh top global_shaper_enabled false`。开:`tc_htb=false` → `unsupported`;无热点接口 → `no hotspot iface`;`tc_manager.sh global_shaper <iface> on <down> <up>` → 依次写 `global_shaper_down`、`global_shaper_up`、`global_shaper_enabled=true`(任一失败回写 enabled=false) | detail `"global shaper on down=… up=…"` / `"global shaper off"` |
 | `flywheel_exclude_set` | 见 §5.4 | | |
-| `clsact_bpf_enabled_set` | `enabled`=`true`\|`false` | 见 §11.3 | |
+| `clsact_bpf_enabled_set` | `enabled`=`true`\|`false` | 见 §11.3(v5.18 起 = `clsact_mode_set` 别名) | |
+| `clsact_mode_set` | `mode`=`auto`\|`on`\|`off` | 见 §11.3 | v5.18 |
 | `alert_config_set` | 见 §6.3 | | |
 
 ## 9. 热点控制
@@ -712,8 +723,10 @@ Query:
 - 后台每 30s 跑一次 `sh bin/check_offload.sh`(脚本含 `sleep 5`),接口只读缓存。
 
 ```json
-{ "active": false, "detail": "IDLE" }
+{ "active": false, "detail": "IDLE", "offload_guard": null }
 ```
+
+- v5.18:offload guard 在 90s 内采样过则直接复用它的 `offload_state`,不再重复跑脚本;兜底生效时这里报的是被压下去之后的状态(横幅随之消失)。`offload_guard` 同 `/api/config`。
 
 - `detail` = 脚本 stdout(trim,空则 `IDLE`),正常为 `NOMAP` / `IDLE` / `ACTIVE` 之一;`active` 仅当 detail(小写)**整词**等于 `active`/`warning`/`bpf_on`/`offload_on` 时为 true。
 - httpd 启动后首轮检查完成前返回 `{"active":false,"detail":"PENDING"}`。
@@ -743,7 +756,10 @@ Query:
 |---|---|---|---|
 | `clsact_check` | — | 读 `run/hnc_state` 取 `ACTIVE:<iface>`(仅小写字母数字);`$HNC/bin/hnc_clsact_ctl check <iface>`(5s)+ `sh -c "pgrep -f hnc_clsact_watchdog"`(3s) | 热点未开 → `500 {"ok":false,"error":"hotspot not active"}`;否则 `{"ok":true,"detail":"{\"ok\":bool,\"clsact\":bool,\"bpf_filter\":bool,\"map\":bool,\"watchdog\":bool,\"iface\":\"ap0\"}"}`(detail 是 JSON 字符串) |
 | `clsact_repair` | — | `sh bin/hnc_clsact_watchdog.sh repair <iface>` | `"clsact repaired"`;失败 `repair failed` |
-| `clsact_bpf_enabled_set` | `enabled`=`true`\|`false` | `json_set.sh top clsact_bpf_enabled <v>`;开:热点在则 `hnc_clsact_watchdog.sh repair <iface>`;关:`hnc_clsact_ctl uninstall <iface>` | 开 `"clsact BPF enabled · watchdog 会在 10s 内完成安装"`(repair 失败也 ok=true,detail 带原因);关 `"clsact BPF disabled · filter 已卸载"` |
+| `clsact_mode_set` | `mode`=`auto`\|`on`\|`off`(大小写不敏感) | `json_set.sh top clsact_bpf_mode <mode>` + `json_set.sh top clsact_bpf_enabled <mode==on>`;再 `sh bin/hnc_offload_guard.sh apply`(25s 超时;auto 含 5s 采样) | 非法 → `bad params`;成功 `{"ok":true,"detail":"<offload_guard 状态 JSON 字符串>"}`;apply 失败仍 ok=true,detail=`"mode=<m> 已保存, 兜底将在 60 秒内按新模式执行"` |
+| `clsact_bpf_enabled_set` | `enabled`=`true`\|`false` | v5.18 起为 `clsact_mode_set` 别名:true→on,false→off | 同 `clsact_mode_set` |
+
+- v5.18 语义(详见 `bin/hnc_offload_guard.sh` 文件头):**auto**(默认)检测到 offload ACTIVE 时经 hotspotd `OFFLOAD_DISABLE_GLOBAL` 强制慢路径并每 60s 重申,热点关闭/tether map 消失连续 3 轮才撤销;**on** 热点在即始终强制 + 尝试 clsact 打标;**off** 不干预并撤销此前施加的一切。clsact 打标仅在 pref 1 未被 HNC 上行 mirred 占用时安装。
 
 ### 11.4 维护 action
 
@@ -833,7 +849,6 @@ Query:
 | `/pair` | 是 | 内嵌 `web/pair.html`(见 §10.2) |
 | `/changelog.html` | 是 | 磁盘 `模块目录/webroot/changelog.html`(每次读盘),缺失 404 |
 | `/json-health.html` | 是 | 磁盘 `模块目录/webroot/json-health.html`,缺失 404 |
-| `/ndpi-lab.html` | 是 | 磁盘 `模块目录/webroot/ndpi-lab.html`,缺失 404(页面本身依赖 `ksu.exec`,远程打开只能看) |
 
 - 静态资源无 ETag/缓存头控制(内嵌文件随二进制更新)。新前端若想被 httpd 托管,需要改 `embed.go` 与 `serveStatic` 的白名单(当前只认两个文件名)。
 
@@ -910,6 +925,7 @@ HTTP 状态码映射(`ok:false` 时):
 | 36 | `clsact_check` | 诊断 §11.3 | — | | ✓ | |
 | 37 | `clsact_repair` | 诊断 | — | | ✓ | |
 | 38 | `clsact_bpf_enabled_set` | 诊断/设置 | enabled | | ✓ | |
+| 38a | `clsact_mode_set` | 设置 §11.3 | mode | | ✓ | |
 
 布尔参数写法差异(照抄即可):`whitelist_set` / `auth_required_set` / `remote_enabled_set` / `clsact_bpf_enabled_set` / `alert_config_set.enabled` / `hotspot_save.autostart`
 **只认** `"true"`/`"false"`;`rule_sqm` / `global_shaper_set` 认 `true/1/on/yes/false/0/off/no/""`;`cleanup_offline_devices.include_rules` 认 `"1"`/`"true"`。
@@ -1707,7 +1723,7 @@ const action = (name, params) => request('POST', '/api/action', { action: name, 
 | GET `/pair`、POST `/api/pair/verify` | `pair.html` | 远程配对专用 |
 | GET `/api/self/attrib` | **无人使用** | 两个前端都没调用,可作为新前端"本机 App 流量明细"数据源 |
 | GET `/api/exports/<name>.zip` | 远程 SPA 列表里给下载链接 | KSU 前端只显示路径(file:// 下不能下载) |
-| GET `/json-health.html`、`/ndpi-lab.html`、`/changelog.html` | 浏览器直接打开 | KSU 前端用相对路径 `fetch('changelog.html')` 读模块目录文件,不经 httpd |
+| GET `/json-health.html`、`/changelog.html` | 浏览器直接打开 | KSU 前端用相对路径 `fetch('changelog.html')` 读模块目录文件,不经 httpd |
 | action `template_apply` | **无人使用** | 前端都直接展开模板调 `rule_set` |
 
 远程 SPA(`web/app.js`)只覆盖了子集:`/api/live`、`/api/capabilities`、`/api/iface_info`、`/api/devices`、`/api/stats`(不传 source → legacy)、`/api/events`、`/api/health`、

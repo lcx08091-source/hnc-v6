@@ -398,6 +398,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionClsactRepair(hncDir)
 	case "clsact_bpf_enabled_set":
 		return actionClsactEnabledSet(hncDir, p)
+	case "clsact_mode_set": // v5.18: auto | on | off
+		return actionClsactModeSet(hncDir, p)
 	default:
 		return actionResp{OK: false, Error: "unknown action"}
 	}
@@ -716,6 +718,8 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 		timeoutSec = 90
 	case "whitelist_sync.sh", "dpi_rules_import.sh":
 		timeoutSec = 30
+	case "hnc_offload_guard.sh": // v5.18: apply 含 check_offload 5s 采样 + hotspotd IPC
+		timeoutSec = 25
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()
@@ -868,37 +872,47 @@ func actionClsactRepair(hncDir string) actionResp {
 	return actionResp{OK: true, Detail: "clsact repaired"}
 }
 
-// actionClsactEnabledSet 开关联动: 开 → 拉起 watchdog(其内部自装 filter+灌
-// map); 关 → 精确卸掉自己的 pref1 filter + unpin(watchdog 10s 内自查退出)。
+// actionClsactEnabledSet 旧开关(v5.9.7)。v5.18 起是 clsact_mode_set 的别名:
+// true → on, false → off(撤销/卸载统一走 offload guard, 不再直接调 ctl uninstall ——
+// 旧版 uninstall 不带 TCA_KIND, 会误删同 pref 的 HNC 上行 mirred)。
 func actionClsactEnabledSet(hncDir string, p map[string]string) actionResp {
 	v := p["enabled"]
 	if v != "true" && v != "false" {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
-	rc, out := runBin(hncDir, "json_set.sh", "top", "clsact_bpf_enabled", v)
-	if rc != 0 {
-		return actionResp{OK: false, Error: "write failed", Detail: out}
-	}
-	iface := readHotspotIfaceName(hncDir)
+	mode := "off"
 	if v == "true" {
-		if iface != "" {
-			// watchdog 幂等: 已在跑则无动作
-			rc2, out2 := runBin(hncDir, "hnc_clsact_watchdog.sh", "repair", iface)
-			if rc2 != 0 {
-				return actionResp{OK: true, Detail: "enabled (initial repair pending watchdog: " + strings.TrimSpace(out2) + ")"}
-			}
-		}
-		return actionResp{OK: true, Detail: "clsact BPF enabled · watchdog 会在 10s 内完成安装"}
+		mode = "on"
 	}
-	// 关: 卸 filter + unpin map(不删 clsact qdisc —— AOSP tether 共用)
-	if iface != "" {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		cmd := hardenCmd(exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "uninstall", iface)) // v5.11: WaitDelay
-		cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
-		_ = cmd.Run()
+	return actionClsactModeSet(hncDir, map[string]string{"mode": mode})
+}
+
+// actionClsactModeSet 写 rules.json 顶层 clsact_bpf_mode(同步写旧键
+// clsact_bpf_enabled = mode==on, 让旧脚本/回滚版本语义一致), 然后立即让
+// offload guard 按新模式跑一轮(on/off 立刻施加/撤销; auto 会采样 5s),
+// Detail 返回 guard 的状态 JSON(同 /api/config 的 offload_guard)。
+func actionClsactModeSet(hncDir string, p map[string]string) actionResp {
+	mode := strings.ToLower(strings.TrimSpace(p["mode"]))
+	switch mode {
+	case "auto", "on", "off":
+	default:
+		return actionResp{OK: false, Error: "bad params", Detail: "mode must be auto|on|off"}
 	}
-	return actionResp{OK: true, Detail: "clsact BPF disabled · filter 已卸载"}
+	if rc, out := runBin(hncDir, "json_set.sh", "top", "clsact_bpf_mode", mode); rc != 0 {
+		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
+	}
+	legacy := "false"
+	if mode == "on" {
+		legacy = "true"
+	}
+	_, _ = runBin(hncDir, "json_set.sh", "top", "clsact_bpf_enabled", legacy)
+	rc, out := runBin(hncDir, "hnc_offload_guard.sh", "apply")
+	st := strings.TrimSpace(lastLine(strings.TrimSpace(out)))
+	if rc != 0 || !strings.HasPrefix(st, "{") {
+		// 模式已写入; guard 守护进程下一轮(≤60s)会按新模式执行
+		return actionResp{OK: true, Detail: "mode=" + mode + " 已保存, 兜底将在 60 秒内按新模式执行"}
+	}
+	return actionResp{OK: true, Detail: st}
 }
 
 // writeActionResp 响应 JSON

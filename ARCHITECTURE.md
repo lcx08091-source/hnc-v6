@@ -97,7 +97,6 @@ HNC 经过 30 多个 rc 迭代,现在的架构是**多层 fallback + 多语言�
 - `AF_PACKET` + cBPF — 抓 wlan2 上的 DNS (UDP/53) 和 TLS ClientHello (TCP/443)
 - SNI 提取 + JA4 指纹 — 即使 ECH/Encrypted ClientHello 也能识别
 - 内置规则库 + 用户可导入规则 — 域名/IP → 应用名映射
-- nDPI 协作(rc30.3+) — 解密 QUIC Initial 提取 SNI,反查表喂给主线
 - 写 `dpi_state.json` 供 WebUI 实时显示
 
 **为什么用 Go**:
@@ -492,7 +491,7 @@ httpd 在内存里算出来的,见下。
   "client_count": 2,
   "top_hostnames": [], "top_sni": [], "top_apps": [], "top_categories": [], "top_ja4": [],
   "l3_enabled": true, "l3_rule_version": "…",
-  "ndpi_available": false,
+  "ndpi_available": false,   // 已废弃(nDPI 实验已移除), 恒 false
   "conntrack_readable": true, "conntrack_flows": 128,
   "total_rx_bytes": 0, "total_tx_bytes": 0,
   "self": { "enabled": false }
@@ -590,7 +589,6 @@ dpid 只认下面 6 个键(`cmd/dpid/main.go:75-82` 的 `Config` 结构体),
 /data/local/hnc/run/watchdog.pid       (hnc_watchdog 自己写, hnc_watchdog/main.go:55)
 /data/local/hnc/run/launcher.pid       (hnc_watchdog spawn launcher 时写, main.go:355 + :579)
 /data/local/hnc/run/detect.pid         (device_detect.sh:507 自己写)
-/data/local/hnc/run/ndpi_continuous.pid(ndpi_continuous.sh, 由 watchdog 监管)
 ```
 
 watchdog 每 N 秒检查这些文件的 mtime 是否新鲜(每个 daemon 自己每 5 秒 touch 一次自己的 pidfile),不新鲜说明卡死,触发重启。Go watchdog 侧的对照表在

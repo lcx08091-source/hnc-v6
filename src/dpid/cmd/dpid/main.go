@@ -3,8 +3,10 @@
 // rc19 adds L2 per-client DNS/SNI attribution:
 // capability probe -> mode decision -> raw AF_PACKET socket -> DNS/TLS events -> per-client metadata -> dpi_state.json.
 //
-// It does NOT do: NFQUEUE, DNS hijacking, QUIC, HTTP parsing,
-// conntrack correlation, automatic limit/mark, or offload modification.
+// It does NOT do: NFQUEUE, DNS hijacking, automatic limit/mark, or offload
+// modification. (v5.14 added QUIC Initial SNI; v5.18 added plain-HTTP Host,
+// multi-segment ClientHello reassembly, and conntrack-driven keep-alive of
+// the IP→name table — dpid is now the only IP→name source, nDPI is gone.)
 // rc20 adds L3 read-only app/category labels from DNS/SNI suffix rules. rc20.1 supports external dpi_rules.json imports.
 package main
 
@@ -33,7 +35,7 @@ import (
 	"hnc.io/dpid/probe"
 )
 
-var version = "0.5.3-rc30.12.3-iface-retry"
+var version = "0.5.3-rc30.12.4-v518-ipname"
 
 const (
 	defaultConfigPath = "/data/local/hnc/etc/dpi_config.json"
@@ -390,8 +392,12 @@ func main() {
 	sw.SetDeviceIdentifier(devID)
 	ipNames := output.NewIPNameTable()
 	ipNames.SetPath(filepath.Join(cfg.RunDir, ipNameFileName))
+	sw.SetIPNameTable(ipNames) // v5.18: RecordFlow 域名兜底(取代 nDPI ip_to_host.json)
 	go flushEvery(ctx, 15*time.Second, "dpi_devid", devID.Flush)
-	go flushEvery(ctx, 5*time.Second, "dpi_ipname", ipNames.Flush)
+	// v5.18: 5s → 10s。表最多 4096 条(~600KB JSON), 且 DNS 应答几乎每秒都
+	// 带来新 IP; 10 秒一写把 JSON 编码 + fsync + httpd 重解析的频率减半,
+	// 新连接的域名最多晚 10 秒出现在连接列表里。
+	go flushEvery(ctx, 10*time.Second, "dpi_ipname", ipNames.Flush)
 
 	// v5.15: 未知应用发现器 —— 规则库认不出的域名按同设备共现聚成组, 并从已知
 	// 应用学习 JA4 → 公司家族。启动读回, 30 秒落盘一次(无变化不写)。
@@ -564,6 +570,7 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 						IgnoredPackets: s.IgnoredPackets,
 						ParseErrors:    s.ParseErrors,
 						IPAppMapSize:   sw.IPAppMapSize(),
+						HTTPEvents:     s.HTTPEvents,
 					})
 					if err := sw.Flush(); err != nil {
 						log.Printf("WARN: flush state: %v", err)
@@ -581,9 +588,10 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 					return
 				case <-tk.C:
 					s := local.Stats()
-					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d devhint=%d ignored=%d perr=%d quic_init=%d quic_ok=%d quic_fail=%d quic_sni=%d gquic_sni=%d gquic_skip=%d",
+					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d devhint=%d ignored=%d perr=%d quic_init=%d quic_ok=%d quic_fail=%d quic_sni=%d gquic_sni=%d gquic_skip=%d http=%d tls_partial=%d tls_pending=%d tls_reasm=%d tls_giveup=%d ipnames=%d",
 						s.Packets, s.KernelDrops, s.DNSEvents, s.TLSEvents, s.FlowEvents, s.DevHintEvents, s.IgnoredPackets, s.ParseErrors,
-						s.QUICInitial, s.QUICDecryptOK, s.QUICDecryptFail, s.QUICSNI, s.GQUICSNI, s.GQUICSkipped) // v5.14: QUIC 计数
+						s.QUICInitial, s.QUICDecryptOK, s.QUICDecryptFail, s.QUICSNI, s.GQUICSNI, s.GQUICSkipped, // v5.14: QUIC 计数
+						s.HTTPEvents, s.TLSPartial, s.TLSPending, s.TLSReassembled, s.TLSGaveUp, ipNames.Len()) // v5.18
 				}
 			}
 		}(h)
@@ -621,19 +629,25 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 		}(h)
 
 		// rc29: conntrack telemetry, refreshed every 15s.
+		// v5.18: 同一次扫描顺带收集活跃连接的远端 IP, 给 IP→域名表里仍在用的
+		// 映射顺延(长连接不因 DNS TTL 到期丢名字)。conntrack 不可读时无影响。
 		go func() {
 			tk := time.NewTicker(15 * time.Second)
 			defer tk.Stop()
+			scan := func() {
+				active := make(map[string]struct{}, 256)
+				r := output.ReadConntrackWith(func(dst string) { active[dst] = struct{}{} })
+				sw.UpdateConntrack(r.Available, r.Readable, r.Path, r.Flows)
+				ipNames.KeepAlive(active, time.Now())
+			}
 			// Refresh once immediately so the first dpi_state.json has values.
-			r := output.ReadConntrack()
-			sw.UpdateConntrack(r.Available, r.Readable, r.Path, r.Flows)
+			scan()
 			for {
 				select {
 				case <-attemptCtx.Done():
 					return
 				case <-tk.C:
-					r := output.ReadConntrack()
-					sw.UpdateConntrack(r.Available, r.Readable, r.Path, r.Flows)
+					scan()
 				}
 			}
 		}()
@@ -646,16 +660,22 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			switch ev.Kind {
 			case capture.EventDNS:
 				sw.RecordDNS(clientMAC, clientIP, remoteIP, ev.DNS.QName, ev.Time)
-				// v5.13: DNS 响应的 A/AAAA → 原始 qname 进反查表。assignClient
-				// 对响应已把 ClientMAC 设为客户端, 这里只需要 qname + answers。
-				if ev.DNS.IsResponse && len(ev.DNS.Answers) > 0 {
-					ipNames.RecordDNS(ev.DNS.QName, ev.DNS.Answers, ev.DNS.TTL, ev.Time)
+				// v5.13: DNS 响应的 A/AAAA → 原始 qname 进反查表。
+				// v5.18: 按记录 owner 跟随 CNAME 链, 每条地址用自己的 TTL,
+				// 并收 HTTPS/SVCB 记录的 ipv4hint/ipv6hint。
+				if ev.DNS.IsResponse && len(ev.DNS.Records) > 0 {
+					ipNames.RecordDNSAnswers(ev.DNS.QName, ev.DNS.Records, ev.Time)
 				}
 			case capture.EventTLSClientHello:
 				sw.RecordTLS(clientMAC, clientIP, remoteIP, ev.TLS.SNI, ev.TLS.JA4, ev.Time)
 				if ev.TLS.SNI != "" {
-					ipNames.RecordSNI(remoteIP, ev.TLS.SNI, ev.Time)
+					// 已知 ECH public_name(外层 SNI)由 RecordConnName 过滤。
+					ipNames.RecordConnName(remoteIP, ev.TLS.SNI, output.IPNameSrcSNI, ev.Time)
 				}
+			case capture.EventHTTP:
+				// v5.18: 明文 HTTP Host 与 SNI 同等看待(都是连接声明的名字)。
+				sw.RecordTLS(clientMAC, clientIP, remoteIP, ev.TLS.SNI, "", ev.Time)
+				ipNames.RecordConnName(remoteIP, ev.TLS.SNI, output.IPNameSrcHTTP, ev.Time)
 			case capture.EventDevHint:
 				// v5.13: 设备识别线索只进识别器, 绝不走 RecordFlow/clientLocked ——
 				// 这些包多为广播/组播, 其 IP 不代表客户端。
@@ -689,8 +709,11 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 				log.Printf("DNS client=%s/%s remote=%s qname=%q qtype=%d resp=%v ttl=%d answers=%d",
 					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.DNS.QName, ev.DNS.QType, ev.DNS.IsResponse, ev.DNS.TTL, len(ev.DNS.Answers))
 			case capture.EventTLSClientHello:
-				log.Printf("TLS-CH client=%s/%s remote=%s sni=%q alpn=%v ja4=%s",
-					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.TLS.SNI, ev.TLS.ALPN, ev.TLS.JA4)
+				log.Printf("TLS-CH client=%s/%s remote=%s sni=%q alpn=%v ja4=%s quic=%v ech=%v partial=%v reasm=%v",
+					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.TLS.SNI, ev.TLS.ALPN, ev.TLS.JA4, ev.TLS.IsQUIC, ev.TLS.ECH, ev.TLS.Partial, ev.TLS.Reassembled)
+			case capture.EventHTTP:
+				log.Printf("HTTP client=%s/%s remote=%s host=%q ua=%q",
+					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.TLS.SNI, ev.TLS.UserAgent)
 			case capture.EventDevHint:
 				if ev.Dev != nil {
 					log.Printf("DEVHINT mac=%s src=%s host=%q vc=%q fp=%q model=%q ua=%q svc=%v",

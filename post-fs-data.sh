@@ -12,7 +12,7 @@
 # 源权限 & ~umask;umask=077 会把仓库里 644 的脚本和 755 的二进制统统压成
 # 0600/0700,而后面的 chmod 覆盖面并不完整(`chmod 755 bin/*.sh` 的 glob 不
 # 递归,漏 bin/diag/diag.sh;二进制 chmod 只覆盖 10 个白名单名字,漏
-# bin/diag/fork_probe、bin/hnc_ndpi_probe)→ 会变成"文件在但不能执行"的静默
+# bin/diag/fork_probe)→ 会变成"文件在但不能执行"的静默
 # 回归,比 0777 更难查。022 足以杀掉 0777 这个根因,敏感目录再单独 chmod 700。
 umask 022
 

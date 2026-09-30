@@ -49,6 +49,8 @@ type Stats struct {
 	IgnoredPackets uint64 `json:"ignored_packets"`
 	ParseErrors    uint64 `json:"parse_errors"`
 	IPAppMapSize   int    `json:"ip_app_map_size,omitempty"` // BUG-011
+	// v5.18: HTTP 明文请求 Host 事件数(TCP/80 首包)。
+	HTTPEvents uint64 `json:"http_events,omitempty"`
 }
 
 type Device struct {
@@ -287,11 +289,10 @@ type State struct {
 	DFPEnabled     bool   `json:"dfp_enabled"`
 	DFPRuleVersion string `json:"dfp_rule_version,omitempty"`
 
-	// rc30.3: nDPI external classifier availability. NDPIAvailable means
-	// ip_to_host.json was read successfully recently (file mtime <5 min old).
-	// NDPIEntries is the count of (ip, host) pairs currently cached.
-	NDPIAvailable bool `json:"ndpi_available"`
-	NDPIEntries   int  `json:"ndpi_entries,omitempty"`
+	// v5.18: nDPI 外部分类器已删除(原 ndpi_available / ndpi_entries 字段
+	// 无消费者, 一并移除)。IP→域名反查改由 dpid 自己的 dpi_ipname.json
+	// 提供; IPNameEntries 是该表当前条目数(含尚未清理的过期条目)。
+	IPNameEntries int `json:"ipname_entries,omitempty"`
 
 	// Conntrack telemetry.
 	ConntrackAvailable bool   `json:"conntrack_available"`
@@ -436,6 +437,8 @@ type Writer struct {
 	devid atomic.Pointer[DeviceIdentifier]
 	// v5.15: 未知应用自动发现器。同 devid: 在释放 w.mu 之后才投递事件。
 	discover atomic.Pointer[Discoverer]
+	// v5.18: dpid 自己的 IP→域名表(RecordFlow 的域名兜底 + 状态里的条目数)。
+	ipNames atomic.Pointer[IPNameTable]
 
 	// rc29 totals
 	totalTx uint64
@@ -539,6 +542,11 @@ func (w *Writer) SetDeviceIdentifier(d *DeviceIdentifier) {
 // 释放 w.mu 之后把 (clientMAC, 域名, JA4, 是否命中规则) 投递给它。传 nil 断开。
 func (w *Writer) SetDiscoverer(d *Discoverer) {
 	w.discover.Store(d)
+}
+
+// SetIPNameTable 接入 v5.18 IP→域名表(取代 nDPI 的 ip_to_host.json 兜底)。传 nil 断开。
+func (w *Writer) SetIPNameTable(t *IPNameTable) {
+	w.ipNames.Store(t)
 }
 
 // IPAppMapSize 返回 IP→app 反查表当前条目数。
@@ -785,17 +793,18 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 	if ok {
 		w.applyRuleHitLocked(c, rule, remoteIPRaw, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
 	} else {
-		// rc30.3: nDPI fallback. The remote IP didn't match our builtin or
-		// external IP matchers — ask the long-running hnc_ndpi_probe pipeline
-		// whether it recently observed a SNI/QUIC ServerName at this IP. If
-		// so, classify by hostname against the same rule set; this lifts the
-		// recognition floor for CDN-shared IPs and brand-new apps without
-		// requiring rule maintenance.
-		//
-		// nDPI is additive: we never reach here when IP matching already won.
-		if host, hostOK := lookupNDPIHost(remoteIPRaw); hostOK {
-			if hostRule, hostRuleOK := classifyHost(host); hostRuleOK {
-				w.applyRuleHitLocked(c, hostRule, "ndpi:"+host, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
+		// v5.18: 域名反查兜底(取代 rc30.3 的 nDPI ip_to_host.json)。远端 IP
+		// 没命中 IP 规则时, 查 dpid 自己的 IP→域名表(DNS 应答 / TLS SNI /
+		// QUIC SNI / HTTP Host), 再按域名规则归类。只在 IP 匹配失败时才走到这里。
+		if t := w.ipNames.Load(); t != nil {
+			if e, hostOK := t.Lookup(remoteIPStr, ts); hostOK {
+				hostRule, hostRuleOK := classifyHost(e.Name)
+				if !hostRuleOK && e.CNAME != "" {
+					hostRule, hostRuleOK = classifyHost(e.CNAME)
+				}
+				if hostRuleOK {
+					w.applyRuleHitLocked(c, hostRule, "ipname:"+e.Name, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
+				}
 			}
 		}
 	}
@@ -1528,11 +1537,11 @@ func (w *Writer) Flush() error {
 	snap.L3RuleVersion = currentL3RuleVersion()
 	snap.DFPEnabled = true
 	snap.DFPRuleVersion = currentDFPRuleVersion()
-	// rc30.3: nDPI status. ndpiAvailable() returns true only when ip_to_host.json
-	// was loaded successfully and is fresh (<5min). Safe to call under w.mu —
-	// ndpi_lookup.go uses its own dedicated lock.
-	snap.NDPIAvailable = ndpiAvailable()
-	snap.NDPIEntries = ndpiEntryCount()
+	// v5.18: IP→域名表条目数。IPNameTable 自带锁, 与 w.mu 无嵌套关系
+	// (IPNameTable 从不回调 Writer), 在 w.mu 内调用安全。
+	if t := w.ipNames.Load(); t != nil {
+		snap.IPNameEntries = t.Len()
+	}
 	snap.TotalTxBytes = w.totalTx
 	snap.TotalRxBytes = w.totalRx
 
