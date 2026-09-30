@@ -93,6 +93,11 @@ detect_up_iface() {
 }
 detect_ap_iface() {
     _up="$1"
+    # v5.20: 走唯一权威探测器(tethering / softap / AP 名扫描), 失败才用旧名单
+    if [ -f "$HNC_DIR/bin/hnc_iface.sh" ]; then
+        _i=$(HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hnc_iface.sh" detect 2>/dev/null)
+        [ -n "$_i" ] && [ "$_i" != "$_up" ] && { echo "$_i"; return; }
+    fi
     for _i in ap0 wlan1 wlan2 wlan3 swlan0 wlan0; do
         [ "$_i" = "$_up" ] && continue
         ip addr show "$_i" 2>/dev/null | grep -q 'inet ' && { echo "$_i"; return; }
@@ -209,38 +214,67 @@ start|start-now)
     [ -z "$AP_PASS" ] && AP_PASS="12345678"
     log "SSID=$AP_SSID"
 
-    # ── 4. 启动热点（多方法兜底 + 自动降级）────────────────
-    # 兼容性顺序:1a start-softap -b any(现代/ColorOS 主力)→ 1b 不带 -b 的旧式
-    # (老 Android / 不认 -b 的 ROM)→ 1c 等 5s 重试 → 2 cmd tethering → 3 svc。
+    # ── 4. 启动热点（先探测再按可用方法链尝试）────────────────
+    # v5.20: 方法链由 bin/hnc_compat.sh hnc_softap_probe 决定(cmd wifi help / cmd -l /
+    # svc wifi 帮助文本), 顺序: softap_band(start-softap -b any, Android 12+/ColorOS 主力)
+    # → softap(不带 -b, Android 11 / 不认 -b 的 ROM)→ tethering_cmd(个别 ROM 的
+    # cmd tethering, 系统 NAT)→ svc_hotspot(个别定制 ROM)。加密类型只试帮助里列出的。
+    # 结果写 run/softap_method.json(自检/WebUI 读)。库缺失时退回旧的固定顺序。
     # 记 START_METHOD:softap_local(系统不共享,需自建 NAT)/ system(原生共享,自带 NAT)。
-    STARTED=0; START_METHOD=""
-
-    # 1a: start-softap -b any（-b any 让固件自选频段,绕开 ColorOS 的 band error 18)
-    for SEC in wpa2 wpa3 wpa3_transition open; do
-        RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" -b any 2>&1)
-        echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC -b any)"; break; }
-    done
-    # 1b: 不带 -b 的旧式(老 Android / ROM 不认 -b 时自动降级)
-    if [ "$STARTED" = "0" ]; then
-        for SEC in wpa2 wpa3 open; do
-            RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" 2>&1)
-            echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC no-b)"; break; }
+    STARTED=0; START_METHOD=""; USED=""
+    if [ -f "$HNC_DIR/bin/hnc_compat.sh" ]; then
+        HNC_COMPAT_LIB=1 . "$HNC_DIR/bin/hnc_compat.sh"
+        hnc_softap_probe
+        CHAIN="$HNC_SOFTAP_CHAIN"
+        log "softap probe: chain=[$CHAIN] sec=[$HNC_SOFTAP_SECS] lohs=$_HC_P_LOHS sdk=$(getprop ro.build.version.sdk 2>/dev/null)"
+        [ -n "$CHAIN" ] || log "softap probe: 本机没有任何可用的命令行开热点方法(Android 10 及以下无 start-softap), 请从系统设置开热点"
+        for M in $CHAIN; do
+            RESULT=$(hnc_softap_try "$M" "$AP_SSID" "$AP_PASS")
+            if [ $? -eq 0 ]; then
+                STARTED=1; USED="$M"
+                case "$M" in softap*) START_METHOD=softap_local ;; *) START_METHOD=system ;; esac
+                log "started via $M${HNC_SOFTAP_SEC_USED:+ (sec=$HNC_SOFTAP_SEC_USED)}"
+                break
+            fi
+            log "method $M failed: $(printf '%s' "$RESULT" | tr '\n' ' ' | cut -c1-160)"
         done
+        # WifiService 刚就绪首次可能失败: 等 5s 对第一种 softap 方法再试一次
+        if [ "$STARTED" = "0" ]; then
+            case " $CHAIN " in
+                *" softap_band "*|*" softap "*)
+                    sleep 5
+                    M=${CHAIN%% *}
+                    RESULT=$(hnc_softap_try "$M" "$AP_SSID" "$AP_PASS") && {
+                        STARTED=1; USED="$M"; START_METHOD=softap_local; log "started via $M (retry)"; }
+                    ;;
+            esac
+        fi
+        if [ "$STARTED" = "1" ]; then
+            hnc_softap_record "$USED" 1 "sec=$HNC_SOFTAP_SEC_USED"
+        else
+            hnc_softap_record "${USED:-${CHAIN%% *}}" 0 "$RESULT"
+        fi
+    else
+        # 旧固定顺序(hnc_compat.sh 缺失时)
+        for SEC in wpa2 wpa3 wpa3_transition open; do
+            RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" -b any 2>&1)
+            echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC -b any)"; break; }
+        done
+        if [ "$STARTED" = "0" ]; then
+            for SEC in wpa2 wpa3 open; do
+                RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" 2>&1)
+                echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC no-b)"; break; }
+            done
+        fi
+        if [ "$STARTED" = "0" ]; then
+            cmd tethering tether wifi 2>/dev/null && { STARTED=1; START_METHOD=system; log "started via cmd tethering (system NAT)"; }
+        fi
+        if [ "$STARTED" = "0" ]; then
+            svc wifi hotspot enable 2>/dev/null && { STARTED=1; START_METHOD=system; log "started via svc (system NAT)"; }
+        fi
     fi
-    # 1c: 等 5s 再试一轮(WifiService 刚就绪首次可能失败)
-    if [ "$STARTED" = "0" ]; then
-        sleep 5
-        RESULT=$(cmd wifi start-softap "$AP_SSID" wpa2 "$AP_PASS" -b any 2>&1)
-        echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (retry -b any)"; }
-    fi
-
-    # 2/3: 系统原生共享(自带 NAT)。ColorOS 无 shell 实现走不到;其他 ROM 可用则用。
-    if [ "$STARTED" = "0" ]; then
-        cmd tethering tether wifi 2>/dev/null && { STARTED=1; START_METHOD=system; log "started via cmd tethering (system NAT)"; }
-    fi
-    if [ "$STARTED" = "0" ]; then
-        svc wifi hotspot enable 2>/dev/null && { STARTED=1; START_METHOD=system; log "started via svc (system NAT)"; }
-    fi
+    # 热点状态变了: 让接口探测器下次重新探测
+    [ -f "$HNC_DIR/bin/hnc_iface.sh" ] && HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hnc_iface.sh" invalidate 2>/dev/null
 
     if [ "$STARTED" = "1" ]; then
         rm -f "$HNC_DIR/run/uplink_unsupported" "$HNC_DIR/run/uplink_fail_count" "$HNC_DIR/run/uplink_unsupported_logged" 2>/dev/null || true
@@ -263,11 +297,14 @@ stop)
         || cmd tethering untether wifi 2>/dev/null \
         || svc wifi hotspot disable 2>/dev/null
     log "Stop command sent"
+    [ -f "$HNC_DIR/bin/hnc_iface.sh" ] && HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hnc_iface.sh" invalidate 2>/dev/null
     ;;
 
 status)
     ison=0
-    for iface in ap0 wlan1 wlan2 wlan3 swlan0; do
+    # v5.20: 先问权威探测器, 再退回旧名单
+    [ -f "$HNC_DIR/bin/hnc_iface.sh" ] && [ -n "$(HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hnc_iface.sh" get 2>/dev/null)" ] && ison=1
+    [ "$ison" = "0" ] && for iface in ap0 wlan1 wlan2 wlan3 swlan0; do
         ip addr show "$iface" 2>/dev/null | grep -q 'inet ' && ison=1 && break
     done
     [ "$ison" = "0" ] && cmd wifi status 2>/dev/null | grep -qi "ap started\|hotspot" && ison=1

@@ -89,5 +89,20 @@ func actionDeviceSQMSet(hncDir string, p map[string]string) actionResp {
 	if rcW, outW := runBin(hncDir, "json_set.sh", "device", mac, "sqm_enabled", val); rcW != 0 {
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(outW)}
 	}
-	return actionResp{OK: true, Detail: "sqm=" + val + " mac=" + mac}
+	detail := "sqm=" + val + " mac=" + mac
+	// v5.20: tc_manager set_sqm 输出 SQM_QDISC=<cake|fq_codel|fq|sfq|netem_kept>(兜底链实际选中的叶子)
+	if q := sqmQdiscFromOutput(out2); q != "" {
+		detail += " qdisc=" + q
+	}
+	return actionResp{OK: true, Detail: detail}
+}
+
+func sqmQdiscFromOutput(out string) string {
+	for _, ln := range strings.Split(out, "\n") {
+		ln = strings.TrimSpace(ln)
+		if strings.HasPrefix(ln, "SQM_QDISC=") {
+			return strings.TrimPrefix(ln, "SQM_QDISC=")
+		}
+	}
+	return ""
 }

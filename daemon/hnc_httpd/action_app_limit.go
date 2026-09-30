@@ -247,11 +247,19 @@ func triggerAppLimitApply(hncDir string) {
 //
 //	GET /api/app_limits
 //	→ {"ok":true,"items":[{"mac":"...","app_id":"...","down_mbps":1.0}, ...]}
+//
+// v5.20: 每条附 ips_total / ips_shared_skipped / ips_limited / ip_stats_source
+// (见 app_limit_shared.go); 顶层 include_shared_ips 反映逃生口开关。
 func (s *server) apiAppLimits(w http.ResponseWriter, r *http.Request) {
 	file := loadAppLimits(s.hncDir)
+	realN := len(file.Items)
+	include := appLimitIncludeShared(s.hncDir)
+	items := s.simMergeAppLimits(file.Items) // 模拟环境; 关闭时原样
+	views := appLimitViews(items, realN, loadIPAppFlat(s.hncDir), ipNameAppMap(s.loadIPNames()), include)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok":    true,
-		"items": s.simMergeAppLimits(file.Items), // 模拟环境; 关闭时原样
+		"ok":                 true,
+		"items":              views,
+		"include_shared_ips": include,
 	})
 }
 

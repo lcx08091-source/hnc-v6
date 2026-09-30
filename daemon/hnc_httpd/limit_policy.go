@@ -388,6 +388,7 @@ type limitCtl struct {
 	histMon  map[string]uint64
 	histAt   time.Time
 	histKey  string
+	guard    clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
 	dirty    bool
 	savedAt  time.Time
 	logged   map[string]string
@@ -638,6 +639,15 @@ func (c *limitCtl) tick(now time.Time) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// v5.20: 时钟不可信(开机未对时 1970/2000、RTC 过期落后高水位)→ 整轮跳过:
+	// dayKey/monthKey 会错 → rollover 把当日/当月配额用量清零并落盘; 分时段窗口
+	// 也会按错的时间下发。保持上一轮已下发的规则与视图不动。
+	c.guard.name = "limit_policy"
+	verdict := c.guard.step(c.hncDir, now)
+	if verdict == clockInsane {
+		return
+	}
+
 	devs, devsOK := c.readDevices()
 	obs, billingDay, rulesOK := readObserved(c.hncDir)
 
@@ -645,6 +655,14 @@ func (c *limitCtl) tick(now time.Time) {
 	ms := billingPeriodStart(now, billingDay)
 	dayKey, monKey := ds.Format("2006-01-02"), ms.Format("2006-01-02")
 
+	// v5.20: 墙钟跳变 → 各设备计数器重建基线(本轮读数只当新基线), 跨跳变的
+	// 增量不记进任何一天; 之后按新时间正常 rollover / 判定分时段。
+	if verdict == clockJump {
+		for _, s := range c.st.Devices {
+			s.Usage.HavePrev = false
+		}
+		c.dirty = true
+	}
 	// 1) 用量(所有非模拟在线设备都累加, 之后才设配额也有当日/当月数据)
 	if devsOK {
 		for mac, o := range devs {

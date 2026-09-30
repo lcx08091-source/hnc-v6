@@ -66,6 +66,7 @@ var appUsage struct {
 	dirty bool
 	prev  map[string][2]uint64 // 连接 key → 上次看到的 [up, down] 累计
 	init  bool
+	guard clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
 }
 
 func appUsagePath(hncDir, date string) string {
@@ -104,6 +105,19 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 
 	appUsage.mu.Lock()
 	defer appUsage.mu.Unlock()
+	// v5.20: 时钟不可信 → 整轮跳过(不消费连接表差分, 不写错日文件);
+	// 跳变 → 重建基线(丢弃跨跳变的差分与积压事件), 不把一大坨字节记进一个桶/错的天。
+	appUsage.guard.name = "app_usage"
+	switch appUsage.guard.step(s.hncDir, now) {
+	case clockInsane:
+		return 0
+	case clockJump:
+		_, _, _ = ctEventsDrain()
+		appUsage.init = false
+		appUsageAcctStep(&appUsage.prev, &appUsage.init, sn.entries, sn.at, nil, func(src string) bool { _, ok := owner[src]; return ok })
+		appTimeLastTick = time.Time{}
+		return 0
+	}
 	date := now.Format("20060102")
 	if appUsage.day == nil || appUsage.day.Date != date {
 		if appUsage.day != nil && appUsage.dirty {
@@ -270,7 +284,10 @@ func (s *server) appUsageFlush(now time.Time) {
 			appUsage.mu.Unlock()
 		}
 	}
-	// 清理 32 天前的文件
+	// 清理 32 天前的文件(v5.20: 时钟不可信时不清, 防跑到未来的时钟把历史全删)
+	if !clockSane(s.hncDir, now) {
+		return
+	}
 	ents, _ := os.ReadDir(filepath.Join(s.hncDir, "run"))
 	cut := now.AddDate(0, 0, -appUsageKeepDays).Format("20060102")
 	for _, e := range ents {

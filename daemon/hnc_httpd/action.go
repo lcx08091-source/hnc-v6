@@ -207,6 +207,15 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// v5.20: 自检(selfcheck_run / selfcheck_export)是只读诊断, 最长 ~20s, 不进
+	// actionMu —— 否则自检期间所有写操作都要排队。自身串行化见 selfcheck_api.go。
+	if resp, ok := dispatchSelfcheckAction(s, req.Action, req.Params); ok {
+		auditLog(s.hncDir, tid, req.Action, redactSensitive(req.Params),
+			map[bool]string{true: "ok", false: "error"}[resp.OK], resp.Error)
+		writeActionResp(w, selfcheckActionStatus(resp), resp)
+		return
+	}
+
 	// hotfix4 → v5.9.0: serialize state-changing actions. The underlying shell
 	// scripts mutate tc, iptables and JSON files in several steps; concurrent
 	// writes from two remote clients can interleave and leave UI/API state out
@@ -328,6 +337,9 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionCacheClear(hncDir)
 	case "debug_bundle":
 		return actionDebugBundle(hncDir)
+	case "selfcheck_run", "selfcheck_export": // v5.20: 正常由 handleAction 在锁外处理, 这里兜底
+		r, _ := dispatchSelfcheckAction(s, action, p)
+		return r
 	case "dpi_rules_reset":
 		return actionDPIRulesReset(hncDir)
 	case "dpi_rules_update":
@@ -401,6 +413,10 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionAppLimitSet(hncDir, p)
 	case "app_limit_clear":
 		return actionAppLimitClear(hncDir, p)
+	case "app_limit_shared_ips_set": // v5.20: 逃生口, 共享 CDN IP 也纳入应用限速
+		return actionAppLimitSharedIPsSet(hncDir, p)
+	case "tc_leaf_aqm_set": // v5.20: 设备默认叶子 auto|on|off
+		return actionTCLeafAQMSet(hncDir, p)
 	// v5.7.0-rc2: candidate approval (走法2). promote → user-approved apex
 	// list dpid force-promotes; reject → shared-infra blocklist.
 	case "candidate_promote":

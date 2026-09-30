@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha1"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/http"
@@ -24,16 +25,20 @@ import (
 func (s *server) apiCapabilities(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.hncDir, "run", "capabilities.json")
 	capRaw, err := s.jsonCache.read(path)
+	// v5.20: 低延迟 qdisc 兜底链(bin/qdisc_caps.sh → run/qdisc_caps.json), 缺失时为 null
+	qdiscCaps := s.readQdiscCaps()
 	if err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"available": false,
-			"error":     err.Error(),
+			"available":  false,
+			"error":      err.Error(),
+			"qdisc_caps": qdiscCaps,
 		})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"available":    true,
 		"capabilities": capRaw,
+		"qdisc_caps":   qdiscCaps,
 	})
 }
 
@@ -95,6 +100,16 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 		"backend_version":      version,
 		"backend_version_code": versionCode,
 	}
+	// v5.20: 探测来源 + USB/蓝牙共享(只上报, 不管控), 供 WebUI/自检展示
+	if d := readIfaceDetect(s.hncDir); d.Method != "" {
+		resp["iface_method"] = d.Method
+		if len(d.USBTether) > 0 {
+			resp["usb_tether"] = d.USBTether
+		}
+		if len(d.BTTether) > 0 {
+			resp["bt_tether"] = d.BTTether
+		}
+	}
 	// v5.12: ?devices=1 顺带返回设备列表(与上面汇总同一份快照)。本机 KSU 页
 	// 每次请求都要拉起一个 curl 进程, 合并后每轮轮询从 2 次降到 1 次。
 	if simLive {
@@ -124,6 +139,10 @@ func (s *server) currentHotspotIface() string {
 			return v
 		}
 	}
+	// v5.20: bin/hnc_iface.sh(唯一权威探测器)的缓存结果
+	if v := readIfaceDetect(hncDir).Iface; v != "" {
+		return v
+	}
 	if raw, err := s.jsonCache.read(filepath.Join(hncDir, "data", "rules.json")); err == nil {
 		if m, ok := raw.(map[string]interface{}); ok {
 			if v, ok := m["hotspot_iface"].(string); ok && strings.TrimSpace(v) != "" {
@@ -132,6 +151,42 @@ func (s *server) currentHotspotIface() string {
 		}
 	}
 	return ""
+}
+
+// ifaceDetect 是 run/iface_detect.json(bin/hnc_iface.sh 写)里 httpd 关心的字段
+type ifaceDetect struct {
+	Iface         string   `json:"iface"`
+	Method        string   `json:"method"`
+	Authoritative bool     `json:"authoritative"`
+	USBTether     []string `json:"usb_tether"`
+	BTTether      []string `json:"bt_tether"`
+	Upstream      string   `json:"upstream"`
+	UpstreamClass string   `json:"upstream_class"`
+}
+
+func readIfaceDetect(hncDir string) ifaceDetect {
+	var d ifaceDetect
+	b, err := os.ReadFile(filepath.Join(hncDir, "run", "iface_detect.json"))
+	if err != nil {
+		return d
+	}
+	if json.Unmarshal(b, &d) != nil || !ifaceNameOK(d.Iface) {
+		return ifaceDetect{}
+	}
+	return d
+}
+
+// ifaceNameOK 与 shell 侧校验同一字符集(空串视为合法 = 未探到)
+func ifaceNameOK(s string) bool {
+	if len(s) > 32 {
+		return false
+	}
+	for _, c := range s {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '_' || c == '.' || c == ':' || c == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func ifaceIPv4(iface string) string {

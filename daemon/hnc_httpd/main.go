@@ -214,6 +214,7 @@ func main() {
 	go srv.limitCtl.Loop(stopCh) // 设备配额 + 分时段限速(每分钟对齐)
 	go srv.RateLoop(stopCh)      // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
 	go srv.PhoneUsageLoop(stopCh) // 本机/热点月度流量: 60s 采 /proc/net/dev, 停机补采落盘
+	go srv.V6NeighLoop(stopCh)    // v5.20: IPv6 新邻居(临时地址轮换)→ 500ms 内 v6_sync.sh sync_macs(失败退 60s 周期)
 
 	if haveRemote {
 		if *flagNoTLS {

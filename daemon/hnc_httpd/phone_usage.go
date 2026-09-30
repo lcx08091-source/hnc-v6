@@ -5,7 +5,7 @@
 // 和运营商计费最接近的口径。
 //
 // 接口分类(puClassifyIface):
-//   - cell    蜂窝: rmnet_data* / rmnetN / ccmni* / seth_lte* / wwan*
+//   - cell    蜂窝: rmnet_data* / rmnetN / ccmni* / seth_lte* / sipa_eth* / wwan*(iface_patterns.go)
 //             不计: v4-rmnet*(clat 464xlat 的 IPv4 虚拟口, 其流量翻译成 IPv6 后
 //             还会再过一次 rmnet_data*, 两边都计就翻倍 —— 统一只计底层 rmnet_data*,
 //             它也正是运营商实际计费的 IPv6 字节), r_rmnet*(反向 rmnet, IMS/WFC),
@@ -60,7 +60,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -86,9 +85,11 @@ const (
 
 // ─── 接口分类 ─────────────────────────────────────────────────────
 
+// v5.20: 蜂窝 / AP 名字表统一到 iface_patterns.go(与 bin/hnc_iface.sh 同一份),
+// 补上展锐 sipa_ethN / seth_*N 与 Android 12+ 双频桥接 ap_br_*。
 var (
-	puCellRE = regexp.MustCompile(`^(rmnet_data\d+|rmnet\d+|ccmni\d+|seth_lte\d+|wwan\d+)$`)
-	puAPRE   = regexp.MustCompile(`^(ap\d*|softap\d*|swlan\d+)$`)
+	puCellRE = hncCellIfaceRE
+	puAPRE   = hncAPIfaceRE
 )
 
 // puClassifyIface 返回 cell / wifi / hotspot / ""(忽略)。hotspotIface 为当前热点口(可空)。
@@ -491,6 +492,7 @@ type puEngine struct {
 	lastHS   string
 	lastTick time.Time
 	lastErr  string
+	guard    clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
 }
 
 func newPuEngine(hncDir string, env puEnv) *puEngine {
@@ -572,6 +574,17 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 			idx = e.env.ifindex(name)
 		}
 		cur[name] = puCtr{Ifindex: idx, Rx: v[0], Tx: v[1]}
+	}
+	// v5.20: 时钟不可信 → 不消费计数器(恢复后差分记到正确的天); 跳变或长时间
+	// 不可信后恢复 → 重建基线, 不把跨跳变的一大坨字节记进一个小时/错的天。
+	e.guard.name = "phone_usage"
+	switch e.guard.step(e.hncDir, now) {
+	case clockInsane:
+		return nil
+	case clockJump:
+		_, e.prev = puStepCounters(nil, cur, false)
+		e.baseline = true
+		return nil
 	}
 	deltas, next := puStepCounters(e.prev, cur, e.baseline)
 	e.prev, e.baseline = next, true
@@ -672,10 +685,15 @@ func (e *puEngine) flush(now time.Time) {
 			e.dirty = false
 		}
 	}
-	if e.loaded {
+	// v5.20: 时钟不可信时不写状态(At 会是错的时间)、不做保留期清理
+	sane := clockSane(e.hncDir, now)
+	if e.loaded && sane {
 		e.saveStateLocked(now)
 	}
 	e.mu.Unlock()
+	if !sane {
+		return
+	}
 	ents, _ := os.ReadDir(filepath.Join(e.hncDir, "run"))
 	cut := now.AddDate(0, 0, -puKeepDays).Format("20060102")
 	for _, en := range ents {
@@ -869,6 +887,9 @@ func puFmtBytes(n uint64) string {
 // checkAlerts 本周期套餐预警。
 func (e *puEngine) checkAlerts(now time.Time) int {
 	if e.env.alertsOn != nil && !e.env.alertsOn() {
+		return 0
+	}
+	if !clockSane(e.hncDir, now) { // v5.20: 周期/去重 key 依赖日期
 		return 0
 	}
 	cfg := puLoadConfig(e.hncDir)

@@ -29,6 +29,12 @@ esac
 
 now=$(date +%s 2>/dev/null) || now=0
 [ "$now" -gt 0 ] || { log "date +%s failed, skip"; exit 0; }
+# v5.20: 时钟不可信(未对时 / 落后高水位)时不判 TTL —— 跑到未来的时钟会把所有
+# 规则都当成"长期未见"删掉。见 hnc_clock.sh。
+if [ -f "$HNC_DIR/bin/hnc_clock.sh" ]; then
+    . "$HNC_DIR/bin/hnc_clock.sh"
+    hnc_clock_sane "$now" || { log "clock not trustworthy (now=$now high_water=$(hnc_clock_hwm)), skip"; exit 0; }
+fi
 threshold=$((now - ttl_days * 86400))
 
 . "$HNC_DIR/bin/hnc_lock.sh" 2>/dev/null || {

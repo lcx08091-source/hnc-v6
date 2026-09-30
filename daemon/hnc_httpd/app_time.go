@@ -590,6 +590,11 @@ func (s *server) appTimeEnforce(now time.Time) {
 	if len(ctl.TimeLimits) == 0 {
 		return
 	}
+	// v5.20: 时钟不可信时不判定/不写 app_time_alerts.json(日期会错成 1970 等,
+	// 把当天已发告警的去重表冲掉)
+	if !clockSane(s.hncDir, now) {
+		return
+	}
 	used := appTimeUsedToday(now)
 	date := now.Format("20060102")
 	cat := loadAppCatalog(s.hncDir)

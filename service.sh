@@ -6,7 +6,10 @@
 # 强制使用系统 PATH,排除 user app(MT 管理器/termux 等)对 awk/sed/grep/tc 的劫持
 # 之前的隐患:如果 user 在 root shell 中调用 service.sh,继承的 PATH 可能含 user app 路径,
 # 导致 HNC 用错版本的命令(行为可能跟系统 toybox 不一致)
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+# v5.20: 末尾追加 /data/local/hnc/bin —— /system/bin 运行期被卸时, 本进程及其全部
+# 子进程(offload_guard / hotspotd 拉起的脚本等)的裸 applet 能落到 /data 副本上
+# (见下方 provision_fallback_tools)。放在最后, 平时仍优先用系统命令。
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 # v5.9.3 BUG-009:service.sh 也会被 magiskd 直接拉起(umask=0),而且 WebUI 的
 # "重启后端"是直接 fork service.sh、根本不经过 post-fs-data.sh,所以这里必须
@@ -44,7 +47,16 @@ provision_fallback_tools() {
     # KSU/Magisk 的 busybox 在 /data,永不被卸且一直在;toybox 的 applet 更少、很多
     # ROM 的 toybox 还不带 awk(我们常驻循环 awk 用得很多)。system 的 busybox/toybox
     # 作兜底(启动时 /system 仍正常,拷到 /data 后即使后续 /system 被卸,副本仍在)。
-    for c in /data/adb/ksu/bin/busybox /data/adb/magisk/busybox /system/xbin/busybox /system/bin/busybox /system/bin/toybox; do
+    # v5.20: 按当前 root 方案排序(KernelSU/SukiSU → ksu, APatch → ap, Magisk → magisk),
+    # 换过 root 方案残留的旧 busybox 排后面; 补上 APatch 的 /data/adb/ap/bin/busybox。
+    _bbl="/data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/busybox /system/xbin/busybox /system/bin/busybox"
+    for _cl in "$MODDIR/bin/hnc_compat.sh" "$HNC_DIR/bin/hnc_compat.sh"; do
+        [ -f "$_cl" ] || continue
+        _bbx=$(HNC_COMPAT_LIB=1 . "$_cl" && hnc_busybox_candidates | tr '\n' ' ')
+        [ -n "$_bbx" ] && _bbl="$_bbx"
+        break
+    done
+    for c in $_bbl /system/bin/toybox; do
         [ -x "$c" ] && { mc="$c"; break; }
     done
     if [ -n "$mc" ] && cp -f "$mc" "$bbdir/.hnc_mc" 2>/dev/null; then
@@ -88,6 +100,21 @@ echo "$MODDIR" > "$RUN/service.path" 2>/dev/null
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [HNC] $1" >> $LOG
 }
+
+# v5.20: 兼容性环境快照 —— root 方案(KernelSU/SukiSU/KSU-Next/APatch/Magisk)、busybox、
+# SoC 厂商、Android 版本、关键命令 PATH 审计 → run/root_env.json(自检/WebUI 读);
+# run/webui_url = http://127.0.0.1:8444(Magisk 没有模块 WebUI: 用浏览器打开, 以登录
+# 密码/配对码登录)。热点接口缓存开机作废, 由 watchdog 首轮重新探测。
+_HNC_COMPAT="$MODDIR/bin/hnc_compat.sh"
+[ -f "$_HNC_COMPAT" ] || _HNC_COMPAT="$HNC_DIR/bin/hnc_compat.sh"
+if [ -f "$_HNC_COMPAT" ]; then
+    HNC_DIR="$HNC_DIR" sh "$_HNC_COMPAT" root >/dev/null 2>&1 || true
+    log "v5.20 compat: $(tr -d '\n' < "$RUN/root_env.json" 2>/dev/null | cut -c1-400)"
+    case "$(cat "$RUN/root_env.json" 2>/dev/null)" in
+        *'"module_webui":false'*) log "v5.20 compat: 当前 root 方案无模块 WebUI, 请用浏览器打开 $(cat "$RUN/webui_url" 2>/dev/null)" ;;
+    esac
+fi
+rm -f "$RUN/iface_detect.json" 2>/dev/null
 
 # H-6 fix (回移自 5.9.91 分叉线): PID TOCTOU protection — verify
 # /proc/$PID/cmdline contains expected binary name before trusting a pidfile

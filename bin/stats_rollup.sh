@@ -36,6 +36,16 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ROLLUP] $*" >> "$LOG" 2>/dev/null || true
 }
 
+# v5.20: 时钟不可信时整轮跳过 —— raw/daily 保留期清理用当前时间算截止点(跑到
+# 未来的时钟会把历史全删), .backup-YYYYMMDD 也会用错的日期。见 hnc_clock.sh。
+if [ -f "$HNC_DIR/bin/hnc_clock.sh" ]; then
+    . "$HNC_DIR/bin/hnc_clock.sh"
+    if ! hnc_clock_sane; then
+        log "clock not trustworthy (now=$(date +%s 2>/dev/null) high_water=$(hnc_clock_hwm)), rollup skipped"
+        exit 0
+    fi
+fi
+
 TARGET_DATE=${1:-$(date -d 'yesterday' +%Y-%m-%d 2>/dev/null)}
 if [ -z "$TARGET_DATE" ]; then
     # date -d 在 toybox 不一定支持,fallback:根据当前时间戳减 86400

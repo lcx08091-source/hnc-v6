@@ -102,6 +102,66 @@ C bionic `fork()+execv()` 不带 `CLONE_VM`, 完全工作.
 
 ---
 
+## 四·五、跨机型适配层(v5.20)
+
+> 以下逻辑只在 RMX5010 / ColorOS 16 上真机验证过; 其他机型的行为来自 AOSP 源码与 fixture 单测, **需真机回报**。
+
+### 热点接口探测 —— `bin/hnc_iface.sh`(唯一权威)
+
+顺序: 用户偏好(rules.json `hotspot_iface`, 接口存在且有 IPv4 才生效)→ `dumpsys tethering`
+(Android 8–10 为 `dumpsys connectivity tethering`)的 `TetheredState` → netd `tetherctrl_FORWARD`
+→ `dumpsys wifi` 的 `mApInterfaceName` → AP 名扫描(`ap0` / `ap_br_*` / `swlan0` / `softap0`, 次选
+`wlan1+` / `wigig0`; 须 UP、RFC1918 IPv4、**没有任何 default route**、不是上游)。非权威来源绝不返回 `wlan0`。
+热点关着时只跑一次 `ip addr` + `ip route`, 不跑 dumpsys。结果写 `run/iface_detect.json`(字段见脚本头),
+`device_detect.sh iface` / `hotspot_autostart.sh` / httpd `currentHotspotIface` 都读它。
+
+| 机型(预期) | 热点口 | 蜂窝上游 |
+|---|---|---|
+| ColorOS / realme / OnePlus(高通) | `wlan2` | `rmnet_dataN` |
+| Pixel(Tensor) | `wlan1` 或 `ap0` | `rmnetN` |
+| Samsung One UI | `swlan0` | `rmnet_dataN`(高通)/ `rmnetN`(Exynos) |
+| 联发科(天玑) | `ap0` | `ccmniN` |
+| 展锐(Unisoc) | `wlan1` / `ap0`(待确认) | `seth_lteN` / `sipa_ethN` |
+| Android 12+ 双频桥接热点 | `ap_br_wlanN` | — |
+
+- **USB(`rndis0`/`usb0`/`ncm0`)/ 蓝牙(`bt-pan`)/ 以太网共享**: 只探测并在 `iface_detect.json`
+  (`usb_tether` / `bt_tether` / `eth_tether`)与 `/api/live` 里上报; **限速、封锁、统计只作用于 Wi-Fi 热点口**,
+  这些共享方式的客户端不在管控范围内。
+- **`wlan0` 本身做 AP 的老机型**(单接口, 开热点时断开 Wi-Fi): 探测器能从 tethering / softap 权威来源
+  认出(`wlan0_ap:true`), 但 watchdog 仍按历史事故保护拒绝在 `wlan0` 上挂规则 —— 此类机型目前不受管控。
+- 蜂窝名字表 shell(`HNC_CELL_IFACE_ERE`)与 Go(`iface_patterns.go`)逐字一致, `go test` 校验。
+
+### 开热点命令(定时热点 / 开机自启)—— `bin/hnc_compat.sh hnc_softap_probe`
+
+先读 `cmd wifi help` / `cmd -l` / `svc wifi` 帮助文本, 再按可用性尝试:
+`start-softap … -b any`(Android 12+)→ `start-softap`(Android 11)→ `cmd tethering tether wifi`(仅个别 ROM)
+→ `svc wifi hotspot enable`(仅个别定制 ROM)。加密类型只试帮助里列出的。**Android 10 及以下没有
+`start-softap`, 命令行无法开热点, 请从系统设置开**。`start-softap` 起的热点不带系统 NAT, HNC 自建 NAT。
+探测与最近一次结果写 `run/softap_method.json`。
+
+### root 方案 —— `bin/hnc_compat.sh root`(service.sh 启动时调用)
+
+识别 KernelSU / SukiSU-Ultra / KernelSU-Next / APatch / Magisk, 选对应 busybox
+(`/data/adb/ksu/bin/busybox` / `/data/adb/ap/bin/busybox` / `/data/adb/magisk/busybox`)作为
+`/system/bin` 被卸时的 applet 兜底源, 写 `run/root_env.json`(含 SoC 厂商、SDK、PATH 审计)。
+**Magisk 没有模块 WebUI**: 用手机浏览器打开 `run/webui_url`(`http://127.0.0.1:8444`), 用登录密码 / 配对码登录。
+注意: `ip` / `iptables` / `tc` / `cmd` / `dumpsys` 是动态链接程序, 依赖 `/system/bin/linker64`, `/system/bin`
+被卸期间任何副本都跑不起来(`root_env.json` 的 `path_dynamic_only` 列出缺失项), 只能等挂载恢复。
+
+### 联发科 HWNAT(实验性)—— `bin/hnc_mtk_hwnat.sh`
+
+仅在 offload 兜底为 **on 模式**时调用; 检测 `/sys/kernel/debug/hnat`、`/proc/hnat`、`/sys/module/*hnat*`、
+`mtk_ppe`、MDDP; 有可写 `hook_toggle` 等开关才写 0, 撤销兜底 / 切回 auto 时写回原值。**高通平台绝不动作**。
+状态见 `run/mtk_hwnat.json` 与 `run/offload_guard.json` 的 `hwnat` 字段。
+
+### 老内核(4.x)降级
+
+cake / fq_codel / IFB / mirred / netem 由 `capability_probe.sh` 探测后按能力跳过; `xt_string`(连接封锁)
+在 `connblock_sync.sh` 首次探测并缓存; clsact BPF 无产物时静默; conntrack 事件订阅失败时 httpd 退纯轮询,
+**只记一次日志**(v5.20 起, 此前每 60 秒一行)。
+
+---
+
 ## 五、报告兼容性的方法
 
 ### 1. 装最新版

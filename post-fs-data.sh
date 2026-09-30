@@ -200,6 +200,13 @@ chmod 644 "$HNC_DIR/data/rules.json" 2>/dev/null
 # (rules.json / device_names.json / devices.json),保留最近 7 天。
 # 防止 HNC 升级 / JSON schema 变更 / 用户误操作导致配置丢失。
 TODAY=$(date +%Y%m%d 2>/dev/null)
+# v5.20: post-fs-data 往往早于 NTP 对时 —— 时钟不可信(1970/2000/落后高水位)时
+# 不建 .backup-<错日期>(跑到未来的日期会按名字排序长期霸占 7 个保留位)。
+if [ -n "$TODAY" ] && [ -f "$HNC_DIR/bin/hnc_clock.sh" ] && \
+   ! HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hnc_clock.sh" sane 2>/dev/null; then
+    echo "[HNC] backup: skipped, clock not trustworthy ($(date +%s 2>/dev/null))" >> "$HNC_DIR/logs/boot.log"
+    TODAY=""
+fi
 if [ -n "$TODAY" ]; then
     BACKUP_DIR="$HNC_DIR/data/.backup-$TODAY"
     if [ ! -d "$BACKUP_DIR" ]; then

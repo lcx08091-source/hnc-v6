@@ -98,6 +98,15 @@ ensure_ingress_parent() {
     return 1
 }
 
+# v5.20: 低延迟 qdisc 兜底链。先于下面的 fq_codel/cake 探测运行: qdisc_caps.sh 会尝试
+# modprobe/insmod sch_cake / sch_fq_codel / sch_fq(每次开机只试一次), 加载成功后下面
+# 的探测也能看到。结果写 run/qdisc_caps.json; 任何失败都不影响本探针(恒 exit 0)。
+QDISC_LOWLAT_CHOSEN=""
+if [ -f "$HNC/bin/qdisc_caps.sh" ]; then
+    QDISC_LOWLAT_CHOSEN=$(HNC_DIR="$HNC" TC_BIN="$TC_BIN" sh "$HNC/bin/qdisc_caps.sh" probe 2>/dev/null | tail -1 | tr -d '\r\n ')
+fi
+case "$QDISC_LOWLAT_CHOSEN" in cake|fq_codel|fq|sfq|pfifo) ;; *) QDISC_LOWLAT_CHOSEN="" ;; esac
+
 # Basic tc binary check.
 TC_VERSION=$({ "$TC_BIN" -V 2>&1 || true; } | head -1 | tr '\r\n' ' ' | cut -c1-160)
 [ -n "$TC_VERSION" ] || TC_VERSION="unknown"
@@ -360,6 +369,8 @@ cat > "$TMP" <<EOF_JSON
   "tc_cake_autorate_ingress_error": "$(json_escape "$TC_CAKE_AUTORATE_ERR")",
   "sqm_supported": $SQM_SUPPORTED,
   "sqm_recommended_mode": "$(json_escape "$SQM_RECOMMENDED_MODE")",
+  "qdisc_lowlat_chosen": "$(json_escape "$QDISC_LOWLAT_CHOSEN")",
+  "qdisc_caps_file": "run/qdisc_caps.json",
   "tc_netem": $TC_NETEM,
   "tc_netem_supported": $TC_NETEM,
   "tc_netem_error": "$(json_escape "$TC_NETEM_ERR")",
@@ -412,7 +423,7 @@ chmod 644 "$OUT" 2>/dev/null || true
 
 {
     log "tc=$TC_BIN version=$TC_VERSION dummy=$DUMMY_CREATE htb=$TC_HTB tbf=$TC_TBF fq_codel=$TC_FQ_CODEL cake=$TC_CAKE cake_autorate=$TC_CAKE_AUTORATE netem=$TC_NETEM ifb=$IFB_CREATE mirred=$TC_MIRRED police=$TC_POLICE"
-    log "modes: downlink=$DOWNLINK_MODE uplink=$UPLINK_MODE delay=$DELAY_MODE sqm=$SQM_RECOMMENDED_MODE qos=$QOS_MODE fallback=$QOS_FALLBACK_REQUIRED iface=$IFACE qdisc=$REAL_QDISC"
+    log "modes: downlink=$DOWNLINK_MODE uplink=$UPLINK_MODE delay=$DELAY_MODE sqm=$SQM_RECOMMENDED_MODE lowlat=${QDISC_LOWLAT_CHOSEN:-unknown} qos=$QOS_MODE fallback=$QOS_FALLBACK_REQUIRED iface=$IFACE qdisc=$REAL_QDISC"
 } | tee "$RAW" 2>/dev/null
 
 

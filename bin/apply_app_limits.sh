@@ -235,6 +235,41 @@ classid_for_index() {
     echo "1:$(printf '%x' $minor)"
 }
 
+# ─── v5.20 Step 4.5: 共享 IP(CDN 多租户)过滤 ─────────────────────────
+# ip_app_map 是"后写者胜", 一个 CDN IP 常同时服务多个 App。给 A 限速时若把
+# 同时承载 B 的 IP 也打上 A 的 mark, B 会被一起限速。判据(与 httpd
+# app_limit_shared.go 的 appLimitSplitShared 同一套规则, 改这里要同步改那边):
+#   dpid 的 IP→域名反查表 run/dpi_ipname.json 对该 IP 归出的 app 非空且 ≠ A
+#   (包括规则库标成 cdn/cloud 的 Akamai/Cloudflare/阿里云等"应用")→ 共享, 跳过。
+# 逃生口: rules.json 顶层 "app_limit_include_shared_ips": true → 不过滤(旧行为)。
+# 每条限速的统计写 run/app_limits_ipstats.flat: <mac> <app> <ips_total> <ips_shared_skipped> <ips_applied>
+. "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh" 2>/dev/null || true
+IPNAME_JSON="$RUN/dpi_ipname.json"
+IPNAME_APP_FLAT="$RUN/.ipname_app.flat.$$"
+IPSTATS_FLAT="$RUN/app_limits_ipstats.flat"
+INCLUDE_SHARED=0
+tr -d '\n' < "$HNC_DIR/data/rules.json" 2>/dev/null | \
+    grep -Eq '"app_limit_include_shared_ips"[[:space:]]*:[[:space:]]*(true|"true"|1|"1"|"on")' && INCLUDE_SHARED=1
+# 首行哨兵: 保证 awk 的 FNR==NR 在第一个文件为空时也不会误吞第二个文件。
+{
+    echo "#sentinel -"
+    tr -d '\n' < "$IPNAME_JSON" 2>/dev/null | \
+        grep -oE '"[0-9A-Fa-f.:]+":\{[^{}]*\}' | \
+        sed -n 's/^"\([^"]*\)":{.*"app":"\([^"]*\)".*/\1 \2/p'
+} > "$IPNAME_APP_FLAT" 2>/dev/null
+: > "$IPSTATS_FLAT.tmp" 2>/dev/null
+trap 'rm -f "$IPNAME_APP_FLAT" "$IPSTATS_FLAT.tmp" 2>/dev/null' EXIT
+
+# split_app_ips <app> → 每行 "K <ip>"(保留)或 "S <ip>"(共享, 跳过)
+split_app_ips() {
+    awk -v want="$1" -v inc="$INCLUDE_SHARED" '
+        FNR == NR { if ($1 !~ /^#/ && $2 != "" && $2 != want) sh[$1] = 1; next }
+        $2 == want {
+            if (seen[$1]++) next
+            if (inc != 1 && ($1 in sh)) print "S " $1; else print "K " $1
+        }' "$IPNAME_APP_FLAT" "$IP_APP_FLAT"
+}
+
 # ─── Step 5: walk limits, build rules ─────────────────────────────────
 
 i=0
@@ -253,9 +288,18 @@ while IFS=' ' read -r MAC APP RATE; do
     fi
 
     # Pull all IPs currently mapped to this app from ip_app_map.flat.
-    APP_IPS=$(awk -v want="$APP" '$2 == want {print $1}' "$IP_APP_FLAT" | sort -u)
+    # v5.20: 同时剔除共享 CDN IP(见 Step 4.5)
+    SPLIT=$(split_app_ips "$APP")
+    APP_IPS=$(echo "$SPLIT" | awk '$1=="K"{print $2}' | sort -u)
+    n_total=$(echo "$SPLIT" | grep -c '^[KS] ')
+    n_shared=$(echo "$SPLIT" | grep -c '^S ')
     if [ -z "$APP_IPS" ]; then
-        log "skip $MAC/$APP: no IPs observed for app yet"
+        echo "$MAC $APP $n_total $n_shared 0" >> "$IPSTATS_FLAT.tmp"
+        if [ "$n_total" -gt 0 ]; then
+            log "skip $MAC/$APP: all $n_total IP(s) are shared with other apps (CDN); set app_limit_include_shared_ips=true to include"
+        else
+            log "skip $MAC/$APP: no IPs observed for app yet"
+        fi
         skipped=$((skipped + 1))
         i=$((i + 1))
         continue
@@ -273,9 +317,22 @@ while IFS=' ' read -r MAC APP RATE; do
 
     # Create a tc class for this (mac, app) under root.
     # Parent is 1:1 to inherit overall root rate; rate=ceil for hard cap.
-    tc class add dev "$IFACE" parent 1:1 classid "$CID" htb \
-        rate "${RATE_MBIT}mbit" ceil "${RATE_MBIT}mbit" \
-        burst 32k cburst 32k 2>/dev/null
+    # v5.20: burst/quantum 与设备限速同一算法(bin/tc_rate_calc.sh, compat 档 ≈20ms);
+    # 旧的固定 32k 在 0.5Mbps 下 ≈0.5 秒量(短时超发), 在 300Mbps 下不足 1ms(跑不满)。
+    # rate 用 kbit 整数(与 tc_manager mbps_to_rate 一致, 避免 "%.2f" 截掉 <10kbit 精度)。
+    RATE_KBIT=$(awk -v v="$RATE" 'BEGIN{k=int(v*1000+0.5); if(k<1)k=1; print k}')
+    APP_BURST=32k; APP_QUANTUM=""
+    if command -v hnc_burst_k >/dev/null 2>&1; then
+        APP_BURST=$(hnc_burst_k "$RATE" compat)
+        APP_QUANTUM=$(hnc_quantum "$RATE")
+    fi
+    if [ -z "$APP_QUANTUM" ] || ! tc class add dev "$IFACE" parent 1:1 classid "$CID" htb \
+        rate "${RATE_KBIT}kbit" ceil "${RATE_KBIT}kbit" \
+        burst "$APP_BURST" cburst "$APP_BURST" quantum "$APP_QUANTUM" 2>/dev/null; then
+        tc class add dev "$IFACE" parent 1:1 classid "$CID" htb \
+            rate "${RATE_KBIT}kbit" ceil "${RATE_KBIT}kbit" \
+            burst "$APP_BURST" cburst "$APP_BURST" 2>/dev/null
+    fi
 
     # Filter: any packet bearing this mark goes to the class.
     tc filter add dev "$IFACE" protocol ip parent 1: prio $FILTER_PRIO \
@@ -292,13 +349,14 @@ while IFS=' ' read -r MAC APP RATE; do
             -j MARK --set-mark "$MARK" 2>/dev/null
     done
 
-    n_ips=$(echo "$APP_IPS" | wc -l)
+    n_ips=$(echo "$APP_IPS" | wc -l | tr -d ' ')
+    echo "$MAC $APP $n_total $n_shared $n_ips" >> "$IPSTATS_FLAT.tmp"
     # v5.9.3 BUG-012:只把真正影响 tc 树的部分(classid + rate)累进签名。
     # 故意不含 n_ips / IP 列表 —— 那些只改 iptables MARK 规则,tc 的
     # class/qdisc/filter 一个字节都不变,算进去会让快照被 dpid 的 IP 抖动带着
     # 每 30s 刷一次,正好是要避免的那种日志噪声。
     APP_SIG="$APP_SIG$CID=$RATE_MBIT,"
-    log "applied $MAC ($CLIENT_IP) / $APP / ${RATE_MBIT}mbit / $n_ips ip(s) / mark=$MARK class=$CID"
+    log "applied $MAC ($CLIENT_IP) / $APP / ${RATE_KBIT}kbit burst=$APP_BURST / $n_ips ip(s) (shared skipped=$n_shared of $n_total, include_shared=$INCLUDE_SHARED) / mark=$MARK class=$CID"
     applied=$((applied + 1))
     i=$((i + 1))
 done < "$LIMITS_FLAT"
@@ -306,6 +364,7 @@ done < "$LIMITS_FLAT"
 # 注:while 用的是重定向 `< "$LIMITS_FLAT"` 而不是管道,循环体在当前 shell 里
 # 跑,所以 APP_SIG / applied / skipped 的累加在这里是可见的。
 log "summary: applied=$applied skipped=$skipped"
+mv -f "$IPSTATS_FLAT.tmp" "$IPSTATS_FLAT" 2>/dev/null || true
 
 # v5.9.3 BUG-012 步骤1:本轮 tc 规则集与上一轮不同才刷快照。
 tc_snapshot_if_changed

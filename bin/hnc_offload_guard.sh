@@ -41,7 +41,9 @@
 #
 # 状态文件 run/offload_guard.json(httpd /api/config 的 offload_guard 原样透出):
 #   {"mode","offload_state","fallback_active","since","detail","last_check",
-#    "slowpath","clsact","iface"}
+#    "slowpath","clsact","iface","hwnat"}
+#   hwnat(v5.20, 仅 on 模式): n/a|none|disabled|skipped_qcom|skipped_not_mtk|detected_no_knob|failed
+#   —— 详见 bin/hnc_mtk_hwnat.sh 与 run/mtk_hwnat.json
 #
 # 用法:
 #   hnc_offload_guard.sh daemon              守护循环(service.sh 拉起)
@@ -116,8 +118,8 @@ write_status() {
     # $1 mode $2 state $3 fallback(0/1) $4 since $5 detail $6 slowpath $7 clsact $8 iface
     local fb=false
     [ "$3" = 1 ] && fb=true
-    printf '{"mode":"%s","offload_state":"%s","fallback_active":%s,"since":%s,"detail":"%s","last_check":%s,"slowpath":"%s","clsact":"%s","iface":"%s"}\n' \
-        "$1" "$2" "$fb" "${4:-0}" "$(json_str "$5")" "$(now_s)" "$6" "$7" "$8" > "$STATUS.tmp" 2>/dev/null \
+    printf '{"mode":"%s","offload_state":"%s","fallback_active":%s,"since":%s,"detail":"%s","last_check":%s,"slowpath":"%s","clsact":"%s","iface":"%s","hwnat":"%s"}\n' \
+        "$1" "$2" "$fb" "${4:-0}" "$(json_str "$5")" "$(now_s)" "$6" "$7" "$8" "${HWNAT_ST:-n/a}" > "$STATUS.tmp" 2>/dev/null \
         && mv -f "$STATUS.tmp" "$STATUS" 2>/dev/null
 }
 
@@ -213,10 +215,25 @@ clsact_wanted() {
 }
 
 # ── 一轮 ─────────────────────────────────────────────────────────────
+# ── MTK HWNAT(v5.20, 实验性)────────────────────────────────────────
+# 只在 on 模式调用 bin/hnc_mtk_hwnat.sh disable(它自己保证: 未检测到 → 不动作,
+# 高通 → 绝不动作); 撤销兜底时 restore(无状态文件时是空操作)。详见该脚本头注释。
+HWNAT="$HNC_DIR/bin/hnc_mtk_hwnat.sh"
+HWNAT_ST="n/a"
+hwnat_disable() {
+    [ -f "$HWNAT" ] || { echo n/a; return 0; }
+    HNC_DIR="$HNC_DIR" sh "$HWNAT" disable 2>/dev/null | tail -n1
+}
+hwnat_restore() {
+    [ -f "$HWNAT" ] && [ -f "$RUN/mtk_hwnat.state" ] && HNC_DIR="$HNC_DIR" sh "$HWNAT" restore >/dev/null 2>&1
+    return 0
+}
+
 do_restore() {
     # $1 iface(可空)
     slowpath_restore
     clsact_remove "$1"
+    hwnat_restore
 }
 
 tick() {
@@ -227,6 +244,8 @@ tick() {
     since=$(st_get since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
     calm=$(st_get calm);   case "$calm" in ''|*[!0-9]*) calm=0 ;; esac
 
+    # 从 on 切到 auto/off: 之前关掉的 MTK HWNAT 立即恢复(auto 不碰 HWNAT)
+    [ "$mode" != on ] && hwnat_restore
     if [ "$mode" = off ]; then
         if [ "$fb" = 1 ] || [ -f "$CLSACT_FLAG" ]; then
             do_restore "$ifc"
@@ -269,6 +288,7 @@ tick() {
     if [ "$want" = 1 ]; then
         sp=$(slowpath_disable)
         cl=$(clsact_apply "$ifc")
+        [ "$mode" = on ] && HWNAT_ST=$(hwnat_disable)
         if [ "$fb" != 1 ]; then
             since=$(now_s)
             log "fallback ON (mode=$mode offload=$state iface=$ifc slowpath=$sp clsact=$cl)"
@@ -282,6 +302,10 @@ tick() {
         esac
         [ "$mode" = auto ] && [ "$state" = ACTIVE ] && detail="检测到 offload 正在旁路限速; $detail"
         [ "$cl" = skipped_pref1_mirred ] && detail="$detail; clsact 打标跳过(pref 1 为 HNC 上行 mirred, 上行本就先于 offload)"
+        case "$HWNAT_ST" in
+            disabled) detail="$detail; 已关闭 MTK HWNAT(实验性)" ;;
+            detected_no_knob) detail="$detail; 检测到 MTK HWNAT 但无运行期开关(限速可能被旁路)" ;;
+        esac
     else
         if [ "$fb" = 1 ]; then
             do_restore "$ifc"

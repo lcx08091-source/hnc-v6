@@ -106,6 +106,25 @@ fi
 ts=$(date +%s 2>/dev/null)
 [ -z "$ts" ] && { log "WARN: date +%s failed"; exit 1; }
 
+# v5.20: 时钟健壮性(hnc_clock.sh, 与 httpd 同规则/同高水位 data/clock_hwm)。
+#   - 不可信(开机未对时 1970/2000、过期 RTC 落后高水位)→ 本轮不采样, 不写
+#     stats_last_date(否则 1970 的采样进 raw、跨日判定触发 1970 的 rollup);
+#   - 跳变 > 10 分钟只记日志: raw 存的是累计值, 没有需要重建的差分基线,
+#     rollup 对计数回退已按复位处理。
+CLOCK_JUMPED=""
+if [ -f "$HNC_DIR/bin/hnc_clock.sh" ]; then
+    . "$HNC_DIR/bin/hnc_clock.sh"
+    if ! hnc_clock_sane "$ts"; then
+        log "WARN: clock not trustworthy (ts=$ts high_water=$(hnc_clock_hwm)), sample skipped"
+        exit 0
+    fi
+    if _jd=$(hnc_clock_jump stats_sample "$ts"); then
+        CLOCK_JUMPED=$_jd
+        log "clock jumped ${_jd}s vs uptime since last sample"
+    fi
+    hnc_clock_note "$ts"
+fi
+
 # 临时文件传 ip_to_mac 给 awk(避免 -v 二次转义)
 MAP_TMP="$HNC_DIR/run/stats_map.$$"
 printf '%s\n' "$ip_to_mac" > "$MAP_TMP"
@@ -169,6 +188,7 @@ today=$(date +%Y-%m-%d 2>/dev/null)
 last_date=$(cat "$MARKER" 2>/dev/null)
 
 if [ -n "$today" ] && [ -n "$last_date" ] && [ "$today" != "$last_date" ]; then
+    [ -n "$CLOCK_JUMPED" ] && log "note: date change coincides with a clock jump (${CLOCK_JUMPED}s)"
     log "date changed: $last_date -> $today, triggering rollup"
     sh "$HNC_DIR/bin/stats_rollup.sh" "$last_date" >> "$LOG" 2>&1 || \
         log "WARN: rollup failed (rc=$?)"

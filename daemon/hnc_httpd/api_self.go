@@ -154,20 +154,18 @@ func (s *server) apiAutoPromoteToggle(w http.ResponseWriter, r *http.Request) {
 // Implemented directly here (vs. calling into capture.DiscoverSelfCandidates)
 // to avoid taking a dependency on the dpid package from hnc_httpd —
 // they ship as separate binaries.
+// v5.20: 蜂窝名字表改用 iface_patterns.go 的跨 SoC 统一表(新增展锐 seth_* / sipa_eth*)。
 var selfPositive = []*regexp.Regexp{
-	regexp.MustCompile(`^rmnet(_data)?\d+$`),
-	regexp.MustCompile(`^ccmni\d+$`),
-	regexp.MustCompile(`^wwan\d+$`),
+	hncCellIfaceRE,
 	regexp.MustCompile(`^wlan0$`),
 	regexp.MustCompile(`^eth\d+$`),
 }
 var selfNegative = []*regexp.Regexp{
 	regexp.MustCompile(`^lo$`),
 	regexp.MustCompile(`^dummy\d*$`),
-	regexp.MustCompile(`^ap\d*$`),
-	regexp.MustCompile(`^softap\d*$`),
-	regexp.MustCompile(`^swlan\d+$`),
-	regexp.MustCompile(`^wlan[1-9]\d*$`),
+	hncAPIfaceRE,
+	regexp.MustCompile(`^softap$`),
+	hncAPMaybeIfaceRE,
 }
 
 func (s *server) apiSelfIfaces(w http.ResponseWriter, r *http.Request) {
@@ -184,6 +182,9 @@ func (s *server) apiSelfIfaces(w http.ResponseWriter, r *http.Request) {
 	apIface := ""
 	if b, err := os.ReadFile(filepath.Join(s.hncDir, "run", "hotspot_iface")); err == nil {
 		apIface = strings.TrimSpace(string(b))
+	}
+	if apIface == "" {
+		apIface = s.currentHotspotIface()
 	}
 
 	entries, err := os.ReadDir("/sys/class/net")

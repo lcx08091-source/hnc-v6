@@ -402,7 +402,7 @@ func (s *server) apiExportFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !isExportArchive(name) {
-		http.Error(w, "must end in .zip or .tar.gz", http.StatusBadRequest)
+		http.Error(w, "must end in .zip or .tar.gz (or be a hnc-selfcheck-*.txt/.json report)", http.StatusBadRequest)
 		return
 	}
 	path := filepath.Join(s.exportsDir(), name)
@@ -411,8 +411,13 @@ func (s *server) apiExportFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctype := "application/zip"
-	if strings.HasSuffix(name, ".tar.gz") {
+	switch {
+	case strings.HasSuffix(name, ".tar.gz"):
 		ctype = "application/gzip"
+	case strings.HasSuffix(name, ".txt"): // v5.20 自检报告
+		ctype = "text/plain; charset=utf-8"
+	case strings.HasSuffix(name, ".json"):
+		ctype = "application/json; charset=utf-8"
 	}
 	w.Header().Set("Content-Type", ctype)
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
@@ -438,6 +443,7 @@ func execCommand(name string, args ...string) (string, error) {
 }
 
 // isExportArchive v5.11: /api/exports 可列出/下载的产物 —— 数据导出 .zip 与诊断包 .tar.gz。
+// v5.20: + 自检报告 hnc-selfcheck-*.txt / .json(见 selfcheck_api.go)。
 func isExportArchive(n string) bool {
-	return strings.HasSuffix(n, ".zip") || strings.HasSuffix(n, ".tar.gz")
+	return strings.HasSuffix(n, ".zip") || strings.HasSuffix(n, ".tar.gz") || isSelfcheckExport(n)
 }

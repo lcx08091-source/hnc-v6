@@ -199,6 +199,11 @@ sqm_preferred_leaf() {
             [ "$fqc" = "false" ] && { echo off; return 0; }
             echo fq_codel ;;
         auto)
+            # v5.20: qdisc_caps 探测(含模块加载)结果优先
+            case "$(lowlat_chosen)" in
+                cake) echo cake; return 0 ;;
+                fq_codel) echo fq_codel; return 0 ;;
+            esac
             rec=$(cap_string_value sqm_recommended_mode 2>/dev/null || echo "")
             if [ "$rec" = "cake" ] && [ "$cake" != "false" ]; then echo cake; return 0; fi
             if [ "$fqc" != "false" ]; then echo fq_codel; return 0; fi
@@ -250,6 +255,117 @@ netem_leaf_replace_zero() {
     tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$lim" 2>/dev/null && return 0
     tc qdisc del dev "$dev" parent "1:$class_id" 2>/dev/null || true
     tc qdisc add dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$lim" 2>/dev/null
+}
+
+# ═══════════════════════════════════════════════════════════════
+# v5.20: 低延迟 qdisc 兜底链 cake → fq_codel → fq → sfq(→ pfifo 不算 AQM)
+# run/qdisc_caps.json 由 bin/qdisc_caps.sh probe 写(capability_probe 开头调用,
+# 会先尝试 modprobe/insmod sch_cake / sch_fq_codel / sch_fq)。这里只读 chosen,
+# 从 chosen 起往下试; json 缺失/chosen=pfifo → 整条链都试(探测可能过期, 多试
+# 几次失败的 tc 调用代价很小)。
+# ═══════════════════════════════════════════════════════════════
+QDISC_CAPS_FILE="$HNC_DIR/run/qdisc_caps.json"
+LEAF_AQM_FILE="$HNC_DIR/run/tc_leaf_aqm"
+LOWLAT_ORDER="cake fq_codel fq sfq"
+LOWLAT_APPLIED=""
+
+lowlat_chosen() {
+    [ -f "$QDISC_CAPS_FILE" ] || return 0
+    local v
+    v=$(tr -d '\n' < "$QDISC_CAPS_FILE" 2>/dev/null | sed -n 's/.*"chosen"[[:space:]]*:[[:space:]]*"\([a-z_]*\)".*/\1/p' | head -1)
+    case "$v" in cake|fq_codel|fq|sfq|pfifo) echo "$v" ;; esac
+}
+
+# 低延迟开关(每设备「低延迟」/ 全局整形默认类)用: 从 chosen 起
+lowlat_chain() {
+    local c k started=0 out=""
+    c=$(lowlat_chosen)
+    case "$c" in ''|pfifo) echo "$LOWLAT_ORDER"; return 0 ;; esac
+    for k in $LOWLAT_ORDER; do
+        [ "$k" = "$c" ] && started=1
+        [ "$started" = 1 ] && out="$out $k"
+    done
+    echo "${out# }"
+}
+
+# 默认叶子(未开低延迟的设备 class / 默认类 1:9999)用: fq_codel 可用时优先 fq_codel
+# (HTB 下的标准叶子, CPU 开销比 cake 低), 否则同 lowlat_chain。
+lowlat_chain_default() {
+    local ch k out=""
+    ch=$(lowlat_chain)
+    case " $ch " in *" fq_codel "*) ;; *) echo "$ch"; return 0 ;; esac
+    for k in $ch; do [ "$k" = fq_codel ] || out="$out $k"; done
+    echo "fq_codel${out}"
+}
+
+# lowlat_leaf_set <dev> <parent 1:N> <handle 不带冒号> [chain] [add|replace]
+# 成功: LOWLAT_APPLIED=<kind>, return 0。链上全失败 return 1(不碰 pfifo)。
+lowlat_leaf_set() {
+    local dev=$1 parent=$2 handle=$3 chain=${4:-} op=${5:-replace} k
+    [ -n "$chain" ] || chain=$(lowlat_chain)
+    LOWLAT_APPLIED=""
+    for k in $chain; do
+        case "$k" in
+            cake)
+                tc qdisc "$op" dev "$dev" parent "$parent" handle "${handle}:" cake besteffort 2>/dev/null \
+                    || tc qdisc "$op" dev "$dev" parent "$parent" handle "${handle}:" cake 2>/dev/null \
+                    || continue ;;
+            fq_codel)
+                tc qdisc "$op" dev "$dev" parent "$parent" handle "${handle}:" fq_codel target 5ms interval 100ms quantum 1514 limit 1024 2>/dev/null \
+                    || tc qdisc "$op" dev "$dev" parent "$parent" handle "${handle}:" fq_codel 2>/dev/null \
+                    || continue ;;
+            fq)
+                tc qdisc "$op" dev "$dev" parent "$parent" handle "${handle}:" fq 2>/dev/null || continue ;;
+            sfq)
+                tc qdisc "$op" dev "$dev" parent "$parent" handle "${handle}:" sfq perturb 10 2>/dev/null || continue ;;
+            *) continue ;;
+        esac
+        LOWLAT_APPLIED=$k
+        return 0
+    done
+    return 1
+}
+
+# 默认类 1:9999 叶子: 已有叶子不动(init 幂等, 不重置队列), 没有才按默认链 add。
+default_class_leaf_ensure() {
+    local dev=$1
+    [ -n "$(tc qdisc show dev "$dev" parent 1:9999 2>/dev/null)" ] && return 0
+    lowlat_leaf_set "$dev" 1:9999 9999 "$(lowlat_chain_default)" add
+}
+
+# tc_leaf_aqm: 设备 class 默认叶子用 AQM(fq_codel/cake…)代替 netem-0ms 占位。
+# 取值 auto(默认)| on | off; run/tc_leaf_aqm 优先, 其次 rules.json 顶层 tc_leaf_aqm。
+#   auto: 仅当 qdisc_caps chosen ∈ {cake, fq_codel} 时开(sfq/fq 不做默认叶子)
+#   on  : 链上任一可用即开; off: 保持旧 netem 占位
+# 用户配了真实延迟/抖动/丢包时叶子一律是 netem(ensure_device_class/set_netem_only 保证)。
+leaf_aqm_mode() {
+    local v
+    v=$(cat "$LEAF_AQM_FILE" 2>/dev/null | head -1 | tr -d '\r\n ' | tr 'A-Z' 'a-z')
+    [ -n "$v" ] || v=$(json_top_string tc_leaf_aqm 2>/dev/null | tr -d '\r\n ' | tr 'A-Z' 'a-z')
+    [ -n "$v" ] || v=$(tr -d '\n' 2>/dev/null < "$RULES_FILE" | sed -nE 's/.*"tc_leaf_aqm"[[:space:]]*:[[:space:]]*(true|false).*/\1/p' | head -1)
+    case "$v" in
+        on|true|1|yes) echo on ;;
+        off|false|0|no|netem) echo off ;;
+        *) echo auto ;;
+    esac
+}
+default_leaf_aqm_enabled() {
+    case "$(leaf_aqm_mode)" in
+        off) return 1 ;;
+        on) return 0 ;;
+    esac
+    case "$(lowlat_chosen)" in cake|fq_codel) return 0 ;; esac
+    return 1
+}
+
+leaf_qdisc_kind_exact() {
+    tc qdisc show dev "$1" parent "1:$2" 2>/dev/null | awk '$1=="qdisc"{print $2; exit}'
+}
+leaf_is_lowlat() {
+    local kind
+    kind=$(leaf_qdisc_kind_exact "$1" "$2")
+    case "$kind" in cake|fq_codel|fq|sfq) return 0 ;; esac
+    return 1
 }
 
 cap_bool_value() {
@@ -443,6 +559,12 @@ _mark_for_class_id() {
 rate_to_mbps_num() {
     local val=$1 n
     case "$val" in
+        *[gG][bB][iI][tT]|*[gG])
+            # v5.20: tc class show 回显 "1Gbit"; 旧实现落到 v+0=1 → 把"不限"类当 1Mbps
+            # 算出 16k burst(ensure_device_class 复用已存 rate 时)。
+            n=$(printf '%s' "$val" | sed 's/[gG][bB][iI][tT]$//; s/[gG]$//')
+            awk -v v="$n" 'BEGIN{printf "%.6f", (v+0)*1000}'
+            ;;
         *[kK][bB][iI][tT]|*[kK][bB][pP][sS]|*[kK])
             n=$(printf '%s' "$val" | sed 's/[kK][bB][iI][tT]$//; s/[kK][bB][pP][sS]$//; s/[kK]$//')
             awk -v v="$n" 'BEGIN{printf "%.6f", (v+0)/1000}'
@@ -476,28 +598,37 @@ mbps_to_rate() {
 # - precise : smaller bucket for root-HTB fallback, closer to requested MB/s.
 # Very high DEFAULT_RATE classes keep a safe 200k bucket to avoid accidental
 # throttling of delay-only/unlimited paths.
+# v5.20: 计算挪到 bin/tc_rate_calc.sh(与 apply_app_limits.sh 共用), 算法说明见该文件头:
+# 1~100Mbps 结果与旧版一致; <1Mbps 下限按速率缩放(不再 16k≈1 秒量);
+# 100~999Mbps 由固定 200k 改为 max(200k, 时间窗量); ≥1000Mbps(DEFAULT_RATE)仍 200k。
+. "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh" 2>/dev/null || true
 burst_for_rate() {
     local mbps mode
     mbps=$(rate_to_mbps_num "$1")
     mode=$(qos_mode)
+    if command -v hnc_burst_k >/dev/null 2>&1; then
+        hnc_burst_k "$mbps" "$mode"
+        return 0
+    fi
+    # tc_rate_calc.sh 缺失时的历史算法兜底
     awk -v v="$mbps" -v m="$mode" '
       BEGIN {
         if (v <= 0) { print "16k"; exit }
         if (v >= 100) { print "200k"; exit }
-        if (m == "precise") {
-          b = int(v * 1.0);
-          if (b < 8) b = 8;
-          if (b > 64) b = 64;
-        } else {
-          b = int(v * 2.5);
-          if (b < 16) b = 16;
-          if (b > 256) b = 256;
-        }
+        if (m == "precise") { b = int(v); if (b < 8) b = 8; if (b > 64) b = 64 }
+        else { b = int(v * 2.5); if (b < 16) b = 16; if (b > 256) b = 256 }
         print b "k"
       }'
 }
 
 qos_class_burst_for_rate() { burst_for_rate "$1"; }
+
+# v5.20: 显式 HTB quantum(clamp 1514..60000), 见 tc_rate_calc.sh。空 = 不显式给。
+quantum_for_rate() {
+    local mbps; mbps=$(rate_to_mbps_num "$1")
+    command -v hnc_quantum >/dev/null 2>&1 || return 0
+    hnc_quantum "$mbps"
+}
 
 # HTB class add-or-change（幂等）
 tc_class_set() {
@@ -708,8 +839,13 @@ ensure_device_class() {
                 return 1
             fi
         fi
-    elif leaf_has_netem "$dev" "$class_id"; then
-        : # keep existing netem-0ms placeholder in default/off mode.
+    elif default_leaf_aqm_enabled && ! leaf_is_lowlat "$dev" "$class_id" && \
+        lowlat_leaf_set "$dev" "1:$class_id" "$leaf_handle" "$(lowlat_chain_default)"; then
+        # v5.20 tc_leaf_aqm: 无真实延迟时, 默认叶子用 AQM 替代 netem-0ms 占位(抗 bufferbloat)。
+        # 已是 AQM 叶子则不重复 replace(避免清空队列); 链全失败落到下面的 netem 占位。
+        log "  Set default leaf ${leaf_handle}: $LOWLAT_APPLIED (tc_leaf_aqm=$(leaf_aqm_mode))"
+    elif leaf_is_lowlat "$dev" "$class_id" || leaf_has_netem "$dev" "$class_id"; then
+        : # keep existing AQM leaf / netem-0ms placeholder.
     else
         if netem_leaf_replace_zero "$dev" "$class_id" "$leaf_handle"; then
             log "  Created leaf netem ${leaf_handle}: (delay 0ms placeholder)"
@@ -743,9 +879,39 @@ ensure_device_class() {
 
 # 仅修改 class 的 rate/ceil/burst（不动 leaf qdisc）
 # v3.3.5：cburst 必须和 burst 一起改，不然 cburst 永远是初始建 class 时的值
+# v5.20: 可选第 5 参数 quantum。先带 quantum 下发; 个别魔改 tc 不认 quantum 时
+# 退回旧参数(不带 quantum), 绝不因为 quantum 让限速整体失败。ceil 恒 = rate(硬上限)。
 set_rate_only() {
-    local dev=$1 class_id=$2 rate=$3 burst=$4
+    local dev=$1 class_id=$2 rate=$3 burst=$4 quantum=${5:-}
+    if [ -n "$quantum" ]; then
+        tc_class_set "$dev" 1:1 "1:$class_id" rate "$rate" ceil "$rate" burst "$burst" cburst "$burst" quantum "$quantum" && return 0
+        log "set_rate_only: quantum $quantum rejected on $dev 1:$class_id; retry without quantum"
+    fi
     tc_class_set "$dev" 1:1 "1:$class_id" rate "$rate" ceil "$rate" burst "$burst" cburst "$burst"
+}
+
+# v5.20: 限速参数计算(纯函数, 无 tc 调用), 供 set_limit 与 calc_class_args 自检共用。
+# 用法: class_args_for <mbps> <down|up> → "effective_mbps rate burst quantum scale fallback"
+# 校准比例(tc_qos_scale 100/85/75)语义: 只在 root-HTB 兜底激活时作用于下行;
+# precise 模式且用户未保存比例时默认 85; 上行(ifb0/police)永不缩放。
+class_args_for() {
+    local mbps=${1:-0} dir=${2:-down} eff scale fb=false
+    qos_root_fallback_active && fb=true
+    if [ "$dir" = "down" ]; then
+        eff=$(qos_effective_mbps_for_downlink "$mbps")
+        scale=100
+        if [ "$fb" = true ]; then
+            local saved; saved=$(cat "$QOS_SCALE_FILE" 2>/dev/null | head -1 | tr -d '\r\n %')
+            [ -n "$saved" ] || saved=$(json_top_string tc_qos_scale 2>/dev/null | tr -d '\r\n %')
+            scale=$(qos_scale_percent)
+            [ -z "$saved" ] && [ "$(qos_mode)" = "precise" ] && scale=85
+        fi
+    else
+        eff=$(awk -v v="$mbps" 'BEGIN{printf "%.6f", v+0}')
+        scale=100
+    fi
+    local q; q=$(quantum_for_rate "$eff")
+    echo "$eff $(mbps_to_rate "$eff") $(burst_for_rate "$eff") ${q:--} $scale $fb"
 }
 
 # 仅修改 leaf netem 参数（不动 class rate）
@@ -787,6 +953,11 @@ set_netem_only() {
         local leaf_kind; leaf_kind=$(sqm_preferred_leaf)
         if [ "$leaf_kind" != "off" ]; then
             sqm_leaf_replace "$dev" "$class_id" "$leaf_handle" "$leaf_kind" && return 0
+        fi
+        # v5.20 tc_leaf_aqm: 清延迟后回到 AQM 默认叶子(而不是 netem-0ms 占位)
+        if default_leaf_aqm_enabled; then
+            leaf_is_lowlat "$dev" "$class_id" && return 0
+            lowlat_leaf_set "$dev" "1:$class_id" "$leaf_handle" "$(lowlat_chain_default)" && return 0
         fi
     fi
 
@@ -851,14 +1022,20 @@ device_sqm_leaf() {
     local leaf_handle
     if [ "$dev" = "$IFB_IFACE" ]; then leaf_handle=$((class_id + 2000)); else leaf_handle=$((class_id + 1000)); fi
     if [ "$want" = on ]; then
-        tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" cake besteffort 2>/dev/null && return 0
-        tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" fq_codel target 5ms interval 100ms quantum 1514 limit 1024 2>/dev/null && return 0
-        # rc24: 内核无 cake/fq_codel 时退 sfq(每流公平,缓解 bufferbloat);init_tc 默认
-        # 叶子也是这么兜底的,sfq 几乎必有。只有连 sfq 都装不上才算真没 AQM。
-        tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" sfq perturb 10 2>/dev/null && return 0
-        return 1   # 内核连 sfq 都没有
+        # v5.20: 按 run/qdisc_caps.json 的 chosen 起走兜底链 cake → fq_codel → fq → sfq
+        # (rc24 起 sfq 兜底;v5.20 在 fq_codel 与 sfq 之间加 fq, 并由 qdisc_caps.sh 先
+        # 尝试加载 sch_cake/sch_fq_codel/sch_fq 模块)。连 sfq 都装不上才算真没 AQM。
+        lowlat_leaf_set "$dev" "1:$class_id" "$leaf_handle" "$(lowlat_chain)" && return 0
+        return 1
     fi
-    # off: 换回按速率缩放的 netem 占位
+    # off: tc_leaf_aqm 开着时默认叶子本就是 AQM → 保持/换回默认链; 否则换回 netem 占位
+    if default_leaf_aqm_enabled; then
+        if leaf_is_lowlat "$dev" "$class_id" && [ "$(leaf_qdisc_kind_exact "$dev" "$class_id")" = "$(lowlat_chain_default | awk '{print $1}')" ]; then
+            LOWLAT_APPLIED=$(leaf_qdisc_kind_exact "$dev" "$class_id")
+            return 0
+        fi
+        lowlat_leaf_set "$dev" "1:$class_id" "$leaf_handle" "$(lowlat_chain_default)" && return 0
+    fi
     netem_leaf_replace_zero "$dev" "$class_id" "$leaf_handle"
     local _mbps; _mbps=$(rate_to_mbps_num "$(tc class show dev "$dev" classid "1:$class_id" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="rate"){print $(i+1); exit}}')")
     tune_leaf_netem_limit "$dev" "$class_id" "$_mbps"
@@ -879,9 +1056,12 @@ set_sqm() {
         fi
         ensure_egress_htb_ready "$iface" "set_sqm" || return 1
         ensure_device_class "$iface" "$class_id" "$ip" || return 1
-        device_sqm_leaf "$iface" "$class_id" on || { log "set_sqm: no cake/fq_codel leaf available on $iface"; echo "SQM_APPLY_MODE=no_aqm"; return 67; }
+        device_sqm_leaf "$iface" "$class_id" on || { log "set_sqm: no cake/fq_codel/fq/sfq leaf available on $iface (chain: $(lowlat_chain))"; echo "SQM_APPLY_MODE=no_aqm"; return 67; }
+        local _sqm_kind="$LOWLAT_APPLIED"
         if class_exists "$IFB_IFACE" "$class_id"; then device_sqm_leaf "$IFB_IFACE" "$class_id" on || true; fi
+        log "set_sqm: leaf=${_sqm_kind:-active_netem_kept} chosen=$(lowlat_chosen)"
         echo "SQM_APPLY_MODE=on"
+        echo "SQM_QDISC=${_sqm_kind:-netem_kept}"
     else
         class_exists "$iface" "$class_id" && device_sqm_leaf "$iface" "$class_id" off || true
         class_exists "$IFB_IFACE" "$class_id" && device_sqm_leaf "$IFB_IFACE" "$class_id" off || true
@@ -904,11 +1084,9 @@ set_sqm() {
 # ═══════════════════════════════════════════════════════════════
 global_shaper_default_leaf() {
     # 默认类 1:9999 叶子升级成最优 AQM(整条链路抗 bufferbloat)
+    # v5.20: 走 qdisc_caps 兜底链(cake → fq_codel → fq → sfq, 从 chosen 起)
     local dev=$1
-    tc qdisc replace dev "$dev" parent 1:9999 handle 9999: cake besteffort 2>/dev/null && return 0
-    tc qdisc replace dev "$dev" parent 1:9999 handle 9999: fq_codel target 5ms interval 100ms quantum 1514 2>/dev/null && return 0
-    tc qdisc replace dev "$dev" parent 1:9999 handle 9999: sfq perturb 10 2>/dev/null && return 0
-    return 1
+    lowlat_leaf_set "$dev" 1:9999 9999 "$(lowlat_chain)"
 }
 set_global_shaper() {
     local iface=$1 want=$2 down_rate=${3:-0} up_rate=${4:-0}
@@ -1545,8 +1723,8 @@ init_tc() {
     fi
     tc class add dev "$iface" parent 1:  classid 1:1    htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null
     tc class add dev "$iface" parent 1:1 classid 1:9999 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null
-    tc qdisc add dev "$iface" parent 1:9999 handle 9999: fq_codel 2>/dev/null \
-        || tc qdisc add dev "$iface" parent 1:9999 handle 9999: sfq perturb 10 2>/dev/null
+    # v5.20: 默认类叶子走 qdisc_caps 默认链(fq_codel 优先 → cake → fq → sfq), 已有叶子不动
+    default_class_leaf_ensure "$iface" || true
 
     if uplink_supported_runtime; then
         # hotfix13: ingress mirred is installed only through install_ingress_mirred().
@@ -1568,8 +1746,7 @@ init_tc() {
         # class 1:1 / 1:9999 add 是幂等的 (已存在会 silent fail, 无害)
         tc class add dev "$IFB_IFACE" parent 1:  classid 1:1    htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null
         tc class add dev "$IFB_IFACE" parent 1:1 classid 1:9999 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null
-        tc qdisc add dev "$IFB_IFACE" parent 1:9999 handle 9999: fq_codel 2>/dev/null \
-            || tc qdisc add dev "$IFB_IFACE" parent 1:9999 handle 9999: sfq perturb 10 2>/dev/null
+        default_class_leaf_ensure "$IFB_IFACE" || true  # v5.20
     else
         log_uplink_unsupported_once "init_tc"
         log "init_tc: skip IFB0 root/classes because uplink is unsupported"
@@ -1618,7 +1795,7 @@ ensure_ifb_root_v1() {
     tc qdisc add dev "$IFB_IFACE" root handle 1: htb default 9999 2>/dev/null || return 1
     tc class add dev "$IFB_IFACE" parent 1:  classid 1:1    htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null || true
     tc class add dev "$IFB_IFACE" parent 1:1 classid 1:9999 htb rate "$DEFAULT_RATE" ceil "$DEFAULT_RATE" burst 200k cburst 200k 2>/dev/null || true
-    tc qdisc add dev "$IFB_IFACE" parent 1:9999 handle 9999: fq_codel 2>/dev/null || tc qdisc add dev "$IFB_IFACE" parent 1:9999 handle 9999: sfq perturb 10 2>/dev/null || true
+    default_class_leaf_ensure "$IFB_IFACE" || true  # v5.20
     log "ensure_ifb_root_v1: rebuilt OK"
     return 0
 }
@@ -1673,16 +1850,20 @@ set_limit() {
     if gt0 "$down_mbps"; then
         ensure_egress_htb_ready "$iface" "set_limit" || return 1
         ensure_device_class "$iface" "$class_id" "$ip" || return 1
-        local dn_effective_mbps; dn_effective_mbps=$(qos_effective_mbps_for_downlink "$down_mbps")
-        local dn_rate;  dn_rate=$(mbps_to_rate "$dn_effective_mbps")
-        local dn_burst; dn_burst=$(burst_for_rate "$dn_effective_mbps")
-        if ! set_rate_only "$iface" "$class_id" "$dn_rate" "$dn_burst"; then
+        # v5.20: rate/burst/quantum 统一由 class_args_for 计算(含校准比例语义)
+        local _dn_args; _dn_args=$(class_args_for "$down_mbps" down)
+        local dn_effective_mbps dn_rate dn_burst dn_quantum
+        dn_effective_mbps=$(echo "$_dn_args" | awk '{print $1}')
+        dn_rate=$(echo "$_dn_args" | awk '{print $2}')
+        dn_burst=$(echo "$_dn_args" | awk '{print $3}')
+        dn_quantum=$(echo "$_dn_args" | awk '{print $4}'); [ "$dn_quantum" = "-" ] && dn_quantum=""
+        if ! set_rate_only "$iface" "$class_id" "$dn_rate" "$dn_burst" "$dn_quantum"; then
             log_error "set_limit: egress rate set failed dev=$iface class=1:$class_id; retrying after HTB self-heal"
             ensure_egress_htb_ready "$iface" "set_limit_rate_retry" && ensure_device_class "$iface" "$class_id" "$ip" && \
-                set_rate_only "$iface" "$class_id" "$dn_rate" "$dn_burst" || { log_error "set_limit: egress rate set failed after retry dev=$iface class=1:$class_id"; return 1; }
+                set_rate_only "$iface" "$class_id" "$dn_rate" "$dn_burst" "$dn_quantum" || { log_error "set_limit: egress rate set failed after retry dev=$iface class=1:$class_id"; return 1; }
         fi
         tune_leaf_netem_limit "$iface" "$class_id" "$dn_effective_mbps"  # rc18: size placeholder queue to the rate
-        log "  Egress 1:$class_id @ $dn_rate burst $dn_burst (requested=${down_mbps}M effective=${dn_effective_mbps}M)"
+        log "  Egress 1:$class_id @ $dn_rate burst $dn_burst quantum ${dn_quantum:-auto} (requested=${down_mbps}M effective=${dn_effective_mbps}M)"
     else
         # 关限速：只重置 rate，保留 leaf netem（可能承载延迟）
         if class_exists "$iface" "$class_id"; then
@@ -1738,7 +1919,8 @@ set_limit() {
         fi
         local up_rate;  up_rate=$(mbps_to_rate "$up_mbps")
         local up_burst; up_burst=$(burst_for_rate "$up_mbps")
-        if ! set_rate_only "$IFB_IFACE" "$class_id" "$up_rate" "$up_burst"; then
+        local up_quantum; up_quantum=$(quantum_for_rate "$up_mbps")  # v5.20
+        if ! set_rate_only "$IFB_IFACE" "$class_id" "$up_rate" "$up_burst" "$up_quantum"; then
             log_error "set_limit: ingress rate set failed, keeping downlink only"
             echo "LIMIT_APPLY_MODE=down_only"
             sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
@@ -2504,6 +2686,17 @@ case "$1" in
         tc_action_unlock
         exit $rc ;;
 
+    calc_class_args)
+        # v5.20 只读自检: 打印某个限速值实际会下发的 HTB 参数(不调用 tc)。
+        # 用法: tc_manager.sh calc_class_args <mbps> [down|up]
+        set -- $(class_args_for "${2:-0}" "${3:-down}")
+        echo "effective_mbps=$1 rate=$2 ceil=$2 burst=$3 cburst=$3 quantum=$4 scale=$5 root_fallback=$6 qos_mode=$(qos_mode)"
+        exit 0 ;;
+    qdisc_caps)
+        # v5.20 只读: 低延迟兜底链的当前决策(读 run/qdisc_caps.json, 不调用 tc)
+        _dl=false; default_leaf_aqm_enabled && _dl=true
+        echo "chosen=$(lowlat_chosen) chain=$(lowlat_chain | tr ' ' ',') default_chain=$(lowlat_chain_default | tr ' ' ',') tc_leaf_aqm=$(leaf_aqm_mode) default_leaf_aqm=$_dl"
+        exit 0 ;;
     status)     show_status "$2" ;;
     snapshot)   sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$2" ;;
     *)

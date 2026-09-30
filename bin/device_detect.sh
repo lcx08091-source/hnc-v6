@@ -80,6 +80,17 @@ socket_query() {
 # 这样的规则。第一个 in 接口就是当前热点接口，这是绝对准确的。
 # tetherctrl 链不存在或为空时再降级到旧的 ARP / 接口扫描方法。
 get_hotspot_iface() {
+    # v5.20: 唯一权威探测器 bin/hnc_iface.sh(偏好 → dumpsys tethering → tetherctrl →
+    # dumpsys wifi softap → AP 名扫描, 并写 run/iface_detect.json)。下面的旧链只在
+    # 该文件缺失(半更新的安装)时兜底。
+    if [ -f "$HNC_DIR/bin/hnc_iface.sh" ]; then
+        HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hnc_iface.sh" get
+        return
+    fi
+    get_hotspot_iface_legacy
+}
+
+get_hotspot_iface_legacy() {
     # 方法 0 (v5.9.92)：用户偏好优先。WebUI「热点接口偏好」保存进 rules.json
     # 顶层 hotspot_iface(auto=空)。此前该字段只写不读、且被 watchdog 每轮覆写
     # —— 保存提示"已保存"但 5 分钟内被探测值冲掉, 是一个假功能。

@@ -252,11 +252,17 @@ func openCtDestroySocket() (int, error) {
 // app_usage 自动走纯轮询。
 func (s *server) CtEventLoop(stop <-chan struct{}) {
 	buf := make([]byte, 256*1024)
+	lastErr := ""
 	for {
 		fd, err := openCtDestroySocket()
 		if err != nil {
 			ctEventsSetState(false, err.Error())
-			log.Printf("app_usage: conntrack destroy events unavailable (%v), polling only", err)
+			// v5.20: 老内核(无 CONFIG_NF_CONNTRACK_EVENTS / nfnetlink)每 60s 重试都失败,
+			// 只在首次与错误变化时记一行, 不再每天刷 1440 行。
+			if err.Error() != lastErr {
+				lastErr = err.Error()
+				log.Printf("app_usage: conntrack destroy events unavailable (%v), polling only (retry every %s, logged once)", err, ctEventRetryAfterFailure)
+			}
 			select {
 			case <-stop:
 				return
@@ -265,6 +271,7 @@ func (s *server) CtEventLoop(stop <-chan struct{}) {
 			}
 		}
 		ctEventsSetState(true, "")
+		lastErr = ""
 		fatal := false
 		for !fatal {
 			select {
