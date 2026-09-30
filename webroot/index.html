@@ -722,16 +722,6 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 @media (min-width:900px){ [data-style="apple"] .page::before{max-width:1180px} }
 :root.fx-notitle[data-style="apple"] .page::before{display:none}
 /* P2 切页: View Transitions(仅切页期间给 #pages 命名, 不影响主题圆形扩散) */
-:root.vt-page #pages{view-transition-name:hncpages}
-::view-transition-group(hncpages){animation-duration:.46s}
-:root.vt-page::view-transition-old(hncpages){animation:vtOutL .46s var(--q-soft) both}
-:root.vt-page::view-transition-new(hncpages){animation:vtInR .46s var(--q-soft) both}
-:root.vt-page.vt-back::view-transition-old(hncpages){animation:vtOutR .46s var(--q-soft) both;z-index:2}
-:root.vt-page.vt-back::view-transition-new(hncpages){animation:vtInL .46s var(--q-soft) both;z-index:1}
-@keyframes vtInR{from{transform:translateX(100%);box-shadow:-10px 0 30px rgba(0,0,0,.12)}to{transform:none;box-shadow:-10px 0 30px rgba(0,0,0,0)}}
-@keyframes vtOutL{to{transform:translateX(-30%);opacity:.55}}
-@keyframes vtOutR{to{transform:translateX(100%)}}
-@keyframes vtInL{from{transform:translateX(-30%);opacity:.55}to{transform:none;opacity:1}}
 /* P2 弹层: 由 JS 弹簧驱动(style.transform), 关闭动画期间保持可见 */
 .sheet.closing{visibility:visible}
 :root.bgscaled,:root.bgscaled body{background:#000}
@@ -741,7 +731,105 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 :root.lowfx .header::before,:root.lowfx .tabbar,:root.lowfx .toast{-webkit-backdrop-filter:none!important;backdrop-filter:none!important}
 :root.lowfx[data-style="apple"] .header::before{background:var(--bg)}
 :root.lowfx[data-style="apple"] .tabbar{background:var(--card-solid)}
-.style-pick{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+/* ═══ v5.19 液态玻璃(data-glass="liquid", 叠在苹果风之上) ═══
+   材质: 白色底 + 极淡的彩色环境光(玻璃要有东西可折射); 功能层(底栏 / 顶栏按钮 / 弹层 / 提示)用 Hyalite 真折射
+   (边缘把背景往里弯、色散、菲涅尔暗边 + 高光); 内容层(卡片)用磨砂玻璃 + 边缘高光, 滚动不卡。低端机全部退回实色。 */
+:root[data-glass="liquid"]{
+  --bg:#F8F9FC; --ap-grouped:#F8F9FC; --card:rgba(255,255,255,.62); --card-2:rgba(255,255,255,.74); --card-solid:#fff;
+  --input:rgba(118,118,128,.10); --ap-inset:rgba(118,118,128,.08); --ap-fill-2:rgba(120,120,128,.18);
+  --lg-fill:rgba(255,255,255,.26); --lg-fill-2:rgba(255,255,255,.5); --lg-tint:rgba(255,255,255,.34);
+  --lg-rim:inset 0 1px 0 rgba(255,255,255,.95),inset 0 -1px 0 rgba(255,255,255,.45),inset 1px 0 0 rgba(255,255,255,.6),inset -1px 0 0 rgba(255,255,255,.6),0 0 0 .5px rgba(20,30,60,.06);
+  --lg-drop:0 12px 32px -10px rgba(30,45,90,.20),0 2px 6px rgba(30,45,90,.06);
+  --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.7) 0%,rgba(255,255,255,.12) 32%,rgba(255,255,255,0) 55%);
+  --amb-1:rgba(70,145,255,.42); --amb-2:rgba(255,110,185,.34); --amb-3:rgba(70,215,185,.32); --amb-4:rgba(255,180,70,.32);
+}
+@media (prefers-color-scheme: dark){
+  :root[data-glass="liquid"]:not([data-theme="light"]){
+    --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,.50); --card-2:rgba(56,56,64,.56); --card-solid:#1C1C1E;
+    --input:rgba(118,118,128,.22); --ap-inset:rgba(118,118,128,.16);
+    --lg-fill:rgba(40,40,48,.30); --lg-fill-2:rgba(60,60,70,.46); --lg-tint:rgba(255,255,255,.12);
+    --lg-rim:inset 0 1px 0 rgba(255,255,255,.26),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.12),inset -1px 0 0 rgba(255,255,255,.12),0 0 0 .5px rgba(0,0,0,.5);
+    --lg-drop:0 14px 36px -10px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
+    --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.03) 32%,rgba(255,255,255,0) 55%);
+    --amb-1:rgba(40,110,255,.34); --amb-2:rgba(210,60,160,.26); --amb-3:rgba(30,170,150,.24); --amb-4:rgba(230,140,40,.20);
+  }
+}
+:root[data-glass="liquid"][data-theme="dark"]{
+  --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,.50); --card-2:rgba(56,56,64,.56); --card-solid:#1C1C1E;
+  --input:rgba(118,118,128,.22); --ap-inset:rgba(118,118,128,.16);
+  --lg-fill:rgba(40,40,48,.30); --lg-fill-2:rgba(60,60,70,.46); --lg-tint:rgba(255,255,255,.12);
+  --lg-rim:inset 0 1px 0 rgba(255,255,255,.26),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.12),inset -1px 0 0 rgba(255,255,255,.12),0 0 0 .5px rgba(0,0,0,.5);
+  --lg-drop:0 14px 36px -10px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
+  --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.03) 32%,rgba(255,255,255,0) 55%);
+  --amb-1:rgba(40,110,255,.34); --amb-2:rgba(210,60,160,.26); --amb-3:rgba(30,170,150,.24); --amb-4:rgba(230,140,40,.20);
+}
+/* 环境光: 白底上四团极淡的色光, 缓慢漂移(减少动态 / 低端机静止) */
+[data-glass="liquid"] .mesh{display:block;inset:-25%;filter:blur(60px) saturate(140%);opacity:1;
+  background:radial-gradient(34% 30% at 14% 10%,var(--amb-1),transparent 70%),radial-gradient(30% 28% at 88% 24%,var(--amb-2),transparent 70%),
+             radial-gradient(34% 30% at 18% 78%,var(--amb-3),transparent 70%),radial-gradient(30% 30% at 86% 92%,var(--amb-4),transparent 70%);
+  animation:lgDrift 38s ease-in-out infinite alternate}
+@keyframes lgDrift{0%{transform:translate3d(0,0,0) rotate(0)}50%{transform:translate3d(3%,-2%,0) rotate(6deg)}100%{transform:translate3d(-3%,2%,0) rotate(-5deg)}}
+:root.calm[data-glass="liquid"] .mesh,:root.lowfx[data-glass="liquid"] .mesh{animation:none}
+/* 内容层卡片: 磨砂玻璃 + 四边高光 + 左上镜面反光; 大圆角 */
+[data-glass="liquid"] .glass{isolation:isolate;background:var(--card);-webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
+  box-shadow:var(--lg-rim),var(--lg-drop);border-radius:22px}
+[data-glass="liquid"] .glass::before{display:block;padding:0;background:var(--lg-sheen);-webkit-mask:none;mask:none;z-index:-1;opacity:.9}
+[data-glass="liquid"] .seg.glass::before,[data-glass="liquid"] .sheet .glass::before{display:none}
+/* 底栏: 一整条真折射的玻璃胶囊; 选中处是一滴清玻璃(透镜), 不再是色块 */
+[data-glass="liquid"] .tabbar{height:64px;border-radius:32px;background:var(--lg-fill);
+  -webkit-backdrop-filter:var(--hyalite, blur(10px) saturate(190%) brightness(1.04));backdrop-filter:var(--hyalite, blur(10px) saturate(190%) brightness(1.04));
+  box-shadow:var(--hyalite-edge, var(--lg-rim)),var(--lg-drop)}
+[data-glass="liquid"] .tabbar::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:var(--lg-sheen);opacity:.8}
+[data-glass="liquid"] .lens{top:5px;height:52px;border-radius:26px;box-shadow:var(--lg-rim),0 4px 14px -4px rgba(30,45,90,.22)}
+[data-glass="liquid"] .lens-tint{background:var(--lg-tint)}
+[data-glass="liquid"] .lens-in{height:52px}
+[data-glass="liquid"] .tab{color:var(--text-1);opacity:.78;font-weight:500}
+[data-glass="liquid"] .lens-in .tab{color:var(--blue);opacity:1;font-weight:600}
+[data-glass="liquid"] .tabbar.drag .lens-tint{opacity:.05}
+/* 顶栏: 边缘渐隐的模糊(iOS 26 滚动边缘效果), 按钮是一颗颗玻璃圆 */
+[data-glass="liquid"] .header::before{bottom:-26px;background:linear-gradient(to bottom,color-mix(in srgb,var(--bg) 92%,transparent) 0%,color-mix(in srgb,var(--bg) 80%,transparent) 55%,color-mix(in srgb,var(--bg) 0%,transparent));box-shadow:none;
+  -webkit-backdrop-filter:blur(14px) saturate(180%);backdrop-filter:blur(14px) saturate(180%);
+  -webkit-mask-image:linear-gradient(to bottom,#000 62%,transparent);mask-image:linear-gradient(to bottom,#000 62%,transparent)}
+[data-glass="liquid"] .hbtn{width:40px;height:40px;margin-left:4px;color:var(--text-1);background:var(--lg-fill);
+  -webkit-backdrop-filter:var(--hyalite, blur(8px) saturate(190%));backdrop-filter:var(--hyalite, blur(8px) saturate(190%));
+  box-shadow:var(--hyalite-edge, var(--lg-rim)),0 6px 16px -6px rgba(30,45,90,.25)}
+[data-glass="liquid"] .hbtn svg{width:20px;height:20px}
+/* 弹层: 悬浮的玻璃面板(四角大圆角、离边 8px), 高磨砂保证文字可读 */
+[data-glass="liquid"] .sheet{bottom:calc(env(safe-area-inset-bottom,0px) + 8px);width:min(640px,calc(100% - 16px));border-radius:34px;padding:10px 18px 22px;
+  background:var(--lg-fill-2);-webkit-backdrop-filter:var(--hyalite, blur(34px) saturate(190%));backdrop-filter:var(--hyalite, blur(34px) saturate(190%));
+  box-shadow:var(--hyalite-edge, var(--lg-rim)),0 24px 60px -12px rgba(20,30,60,.32)}
+[data-glass="liquid"] .sheet .glass{background:rgba(255,255,255,.42);-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:var(--lg-rim)}
+:root[data-glass="liquid"][data-theme="dark"] .sheet .glass{background:rgba(255,255,255,.06)}
+@media (prefers-color-scheme: dark){ :root[data-glass="liquid"]:not([data-theme="light"]) .sheet .glass{background:rgba(255,255,255,.06)} }
+[data-glass="liquid"] .toast{background:var(--lg-fill-2);border-radius:999px;-webkit-backdrop-filter:var(--hyalite, blur(24px) saturate(190%));backdrop-filter:var(--hyalite, blur(24px) saturate(190%));
+  box-shadow:var(--hyalite-edge, var(--lg-rim)),var(--lg-drop)}
+[data-glass="liquid"] .dd-menu{background:var(--lg-fill-2);-webkit-backdrop-filter:blur(30px) saturate(190%);backdrop-filter:blur(30px) saturate(190%);box-shadow:var(--lg-rim),var(--shadow-3);border-radius:20px}
+/* 控件: 胶囊形; 主按钮是蓝色染色玻璃(顶部高光 + 底部暗边), 次要按钮是白玻璃 */
+[data-glass="liquid"] .btn{border-radius:999px}
+[data-glass="liquid"] .btn.pri{background:linear-gradient(180deg,#2B93FF,#0A74F5);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 -1px 0 rgba(0,0,0,.10),inset 0 0 0 .5px rgba(255,255,255,.25),0 8px 20px -8px rgba(0,122,255,.65)}
+[data-glass="liquid"] .btn.sec,[data-glass="liquid"] .btn.dan,[data-glass="liquid"] .btn.ok{background:var(--lg-fill-2);box-shadow:var(--lg-rim)}
+[data-glass="liquid"] .chip{border-radius:999px;background:var(--lg-fill-2);box-shadow:var(--lg-rim)}
+[data-glass="liquid"] .chip.on{background:linear-gradient(180deg,#2B93FF,#0A74F5);box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 6px 14px -6px rgba(0,122,255,.6)}
+[data-glass="liquid"] .seg,[data-glass="liquid"] .seg.glass,[data-glass="liquid"] .seg.small{border-radius:999px;background:var(--input);box-shadow:inset 0 .5px 1px rgba(0,0,0,.06)}
+[data-glass="liquid"] .seg .thumb,[data-glass="liquid"] .seg.small .thumb{border-radius:999px;background:rgba(255,255,255,.92);box-shadow:var(--lg-rim),0 3px 10px rgba(30,45,90,.16)}
+:root[data-glass="liquid"][data-theme="dark"] .seg .thumb{background:rgba(120,120,130,.55)}
+@media (prefers-color-scheme: dark){ :root[data-glass="liquid"]:not([data-theme="light"]) .seg .thumb{background:rgba(120,120,130,.55)} }
+[data-glass="liquid"] .box,[data-glass="liquid"] .selbox,[data-glass="liquid"] .dd-btn{border-radius:14px}
+/* 开关: 按住时滑块变成一颗被拉长的清玻璃(iOS 26) */
+[data-glass="liquid"] .toggle::after{transition:transform .5s var(--q),width .35s var(--q),background-color .25s,box-shadow .25s}
+[data-glass="liquid"] .toggle:active::after{width:38px;background:rgba(255,255,255,.38);-webkit-backdrop-filter:blur(2px) saturate(180%);backdrop-filter:blur(2px) saturate(180%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.95),inset 0 0 0 .5px rgba(255,255,255,.7),0 4px 12px rgba(0,0,0,.18)}
+[data-glass="liquid"] .toggle[aria-checked="true"]:active::after{transform:translateX(9px)}
+/* 按下: 玻璃控件是"鼓起来"(放大), 不是缩下去 */
+[data-glass="liquid"] .hbtn.press:active,[data-glass="liquid"] .chip.press:active{transform:scale(1.1);transition:transform .18s var(--q)}
+[data-glass="liquid"] .hbtn.press,[data-glass="liquid"] .chip.press{transition:transform .55s var(--q)}
+[data-glass="liquid"] .gi{border-radius:9px;box-shadow:inset 0 1px 0 rgba(255,255,255,.4),inset 0 -1px 0 rgba(0,0,0,.08)}
+[data-glass="liquid"] .dev.open{background:var(--card-2)}
+/* 低端机: 全部实色, 不做折射与磨砂 */
+:root.lowfx[data-glass="liquid"] .glass,:root.lowfx[data-glass="liquid"] .hbtn,:root.lowfx[data-glass="liquid"] .sheet,:root.lowfx[data-glass="liquid"] .dd-menu{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:var(--card-solid)}
+:root.lowfx[data-glass="liquid"] .tabbar,:root.lowfx[data-glass="liquid"] .toast{background:var(--card-solid)}
+.style-pick{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
 .style-pick button{padding:10px;border-radius:14px;border:2px solid var(--stroke);background:var(--card-2);font-size:12.5px;font-weight:700;display:grid;justify-items:center;gap:8px}
 .style-pick button.on{border-color:var(--blue);color:var(--blue)}
 .style-pick .pv{width:100%;height:58px;border-radius:9px;display:grid;gap:4px;padding:7px;align-content:start}
@@ -853,10 +941,10 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (typeof fxOn === 'function' && !fxOn('list')) return;
     if (document.documentElement.getAttribute('data-style') === 'apple') {   // v5.17: 苹果风 —— 每行 30ms, 最多 8 行(低端机 4 行)
       var m = document.documentElement.classList.contains('lowfx') ? 4 : 8;
-      for (var j = 0; j < kids.length && j < m; j++) anim(kids[j], [{ opacity: 0, transform: 'translateY(14px)' }, { opacity: 1, transform: 'none' }], { delay: j * 30, duration: 560, fill: 'backwards' });
+      for (var j = 0; j < kids.length && j < m; j++) anim(kids[j], [{ opacity: .25, transform: 'translateY(10px)' }, { opacity: 1, transform: 'none' }], { delay: j * 24, duration: 420, easing: 'cubic-bezier(.2,.8,.2,1)', fill: 'backwards' });
       return;
     }
-    for (var i = 0; i < kids.length && i < (max || 14); i++) anim(kids[i], [{ opacity: 0, transform: 'translateY(20px) scale(.96)' }, { opacity: 1, transform: 'none' }], { delay: i * 40, duration: 760, fill: 'backwards' });
+    for (var i = 0; i < kids.length && i < (max || 14); i++) anim(kids[i], [{ opacity: .2, transform: 'translateY(16px) scale(.97)' }, { opacity: 1, transform: 'none' }], { delay: i * 32, duration: 560, fill: 'backwards' });
   }
   function tween(el, to, dec) {
     if (!el) return;
@@ -1074,6 +1162,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   }
   function setLowFx(on, auto) {
     PERF.low = !!on; if (!auto) PERF.auto = false; LS.set('hnc6.lowfx', on ? '1' : (PERF.auto ? '' : '0')); document.documentElement.classList.toggle('lowfx', !!on);
+    if (typeof liquidGlass === 'function') liquidGlass();
     if (auto && on) setTimeout(function () { toast('检测到掉帧，已自动简化动画（可在 设置 → 外观 恢复）', 'warn'); }, 50);
   }
   document.documentElement.classList.toggle('lowfx', PERF.low);
@@ -1271,7 +1360,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     filter: LS.get('hnc_device_filter', 'recent'), q: '', batch: false, picked: {}, open: {}, sel: null, busy: {},
     refreshMode: LS.get('hnc.refresh-mode', 'balanced'),
     statsRange: 'today', aseg: 'stats', appsSub: 'my',
-    theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', style: LS.get('hnc6.style', 'default') === 'apple' ? 'apple' : 'default',
+    theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', style: ['apple', 'liquid'].indexOf(LS.get('hnc6.style', 'default')) >= 0 ? LS.get('hnc6.style', 'default') : 'default',
     dpi: null, probe: null, dpiHist: {}, dpiDays: 1, dpiFilter: 'all', dpiSpark: { packets: [], dns_events: [], tls_events: [], kernel_drops: [] },
     self: null, selfCfg: {}, logFile: 'combined'
   };
@@ -1283,7 +1372,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
      其余效果在总开关关闭或系统要求减少动态效果时一律停用。 */
   var FX_LIST = [
     ['title', '大标题收起', '滚动时大标题收成顶栏居中小标题（苹果风）'],
-    ['page', '页面切换', '新页面从右侧推入，旧页面后退变暗'],
+    ['page', '页面切换', '切换标签时新页面原地轻快淡入'],
     ['sheet', '弹层背景缩放', '弹层弹出时背后页面缩小变暗，可跟手下拉（苹果风）'],
     ['morph', '共享元素展开', '弹层从你刚点的那一行 / 卡片里长出来（苹果风）'],
     ['press', '按压回弹', '按下缩小到 0.97，松手弹回'],
@@ -1320,7 +1409,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   var EASE0 = { q: EASE.q, soft: EASE.soft };
   function applyMotion() {
     var r = document.documentElement, q = EASE0.q, soft = EASE0.soft;
-    if (S.style === 'apple') { q = springKC(SPRING[FX.spring] || SPRING.light).curve; soft = springKC(SPRING.light).curve; }
+    if (apple()) { q = springKC(SPRING[FX.spring] || SPRING.light).curve; soft = springKC(SPRING.light).curve; }
     try {
       if (!window.CSS || !CSS.supports('transition-timing-function', q)) return;
       EASE.q = q; EASE.soft = soft; r.style.setProperty('--q', q); r.style.setProperty('--q-soft', soft);
@@ -1333,11 +1422,28 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     var r = document.documentElement;
     if (S.theme === 'light' || S.theme === 'dark') r.setAttribute('data-theme', S.theme); else r.removeAttribute('data-theme');
     // v5.17: 界面风格(默认 / 苹果风)。只切视觉与动效, 逻辑共用
-    if (S.style === 'apple') r.setAttribute('data-style', 'apple'); else r.removeAttribute('data-style');
+    if (apple()) r.setAttribute('data-style', 'apple'); else r.removeAttribute('data-style');
+    if (S.style === 'liquid') r.setAttribute('data-glass', 'liquid'); else r.removeAttribute('data-glass');
+    if (typeof liquidGlass === 'function') liquidGlass();
     r.classList.toggle('calm', !S.motion);
     applyMotion();
   }
-  function apple() { return S.style === 'apple'; }
+  function apple() { return S.style === 'apple' || S.style === 'liquid'; }
+  /* v5.19 液态玻璃: 功能层元素挂 Hyalite 真折射(按各自尺寸生成折射贴图); 其它风格 / 低端机 / 非 Chromium 摘掉, 退回 CSS 磨砂 */
+  var LG_OPTS = {
+    tabbar: { bevel: 20, thickness: 34, slope: .9, shape: 'squircle', blur: 2.2, dispersion: 1.8, shade: .22, rim: 1.5, edgeW: 2, edge: .8, light: -30, sat: 1.1, materialize: 420, settle: 120 },
+    hbtn: { bevel: 20, thickness: 22, shape: 'squircle', blur: 1.2, dispersion: 1.6, shade: .25, rim: 1.6, edge: .9, light: -30, materialize: 420 },
+    sheet: { bevel: 26, thickness: 42, slope: .9, shape: 'squircle', blur: 16, dispersion: 1.4, shade: .18, rim: 1.3, edge: .8, light: -30, sat: 1.1, settle: 160 },
+    toast: { bevel: 16, thickness: 22, shape: 'squircle', blur: 10, dispersion: 1.2, shade: .18, rim: 1.2, edge: .8, light: -30 }
+  };
+  var lgOn = false;
+  function lgTargets() { return [['tabbar', $('#tabbar')], ['hbtn', $('#bell')], ['hbtn', $('#theme-btn')], ['sheet', $('#sheet')], ['toast', $('#toast')]]; }
+  function liquidGlass() {
+    var want = S.style === 'liquid' && !!window.Hyalite && !(typeof PERF !== 'undefined' && PERF.low);
+    if (want === lgOn || !window.Hyalite) return;
+    lgOn = want;
+    lgTargets().forEach(function (t) { if (!t[1]) return; try { if (want) Hyalite.attach(t[1], LG_OPTS[t[0]]); else Hyalite.detach(t[1]); } catch (_) {} });
+  }
   /* v5.17 P1: 大标题滚动插值 —— --lt 大标题淡出缩小, --st 顶栏小标题浮现, --hp 顶栏毛玻璃出现 */
   var NAV_T = { devices: '设备', apps: '应用', stats: '分析', settings: '设置' }, navRaf = 0;
   function navSync() {
@@ -2883,8 +2989,8 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
       '<div class="row" style="padding-top:0">' + seg('guard-mode', [['auto', '自动'], ['on', '始终'], ['off', '关闭']], gm, 'small') + '</div>' +
       '<div class="row">' + gi(og && og.fallback_active ? 'green' : 'gray', 'layers') + '<span class="tx"><div class="t">当前状态</div><div class="s" id="guard-s">' + esc(ogS) + (og && og.detail && gm !== 'off' ? '<br>' + esc(og.detail) : '') + (og && og.last_check ? ' · ' + ago(og.last_check) + '检测' : '') + '</div></span></div>' +
       (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? ['clsact', 'bpf_filter', 'map', 'watchdog'].map(function (k) { return k + (cs[k] ? ' ✓' : ' ✗'); }).join(' · ') : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
-    groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', (S.style === 'apple' ? '苹果风' : '默认风格') + ' · 浅色 / 深色 / 跟随系统 · 界面动画',
-      '<div class="note" style="margin-bottom:-2px">界面风格</div><div class="style-pick">' + [['default', '默认', 'linear-gradient(135deg,#E7ECFF,#F3E9FF)', 'linear-gradient(90deg,#007AFF,#5856D6)', 'rgba(255,255,255,.85)'], ['apple', '苹果风', '#F2F2F7', '#007AFF', '#fff']].map(function (t) {
+    groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', ({ apple: '苹果风', liquid: '液态玻璃' }[S.style] || '默认风格') + ' · 浅色 / 深色 / 跟随系统 · 界面动画',
+      '<div class="note" style="margin-bottom:-2px">界面风格</div><div class="style-pick">' + [['default', '默认', 'linear-gradient(135deg,#E7ECFF,#F3E9FF)', 'linear-gradient(90deg,#007AFF,#5856D6)', 'rgba(255,255,255,.85)'], ['apple', '苹果风', '#F2F2F7', '#007AFF', '#fff'], ['liquid', '液态玻璃', 'radial-gradient(60% 60% at 15% 10%,rgba(80,150,255,.35),transparent),radial-gradient(60% 60% at 90% 90%,rgba(255,120,190,.3),transparent),#FAFBFD', 'linear-gradient(180deg,#2B93FF,#0A74F5)', 'rgba(255,255,255,.6);box-shadow:inset 0 1px 0 #fff,0 2px 6px rgba(30,45,90,.12)']].map(function (t) {
         return '<button class="press' + (S.style === t[0] ? ' on' : '') + '" data-style-pick="' + t[0] + '"><span class="pv" style="background:' + t[2] + '"><i style="width:46%;background:' + t[3] + '"></i><i style="background:' + t[4] + '"></i><i style="width:80%;background:' + t[4] + '"></i></span>' + t[1] + '</button>'; }).join('') + '</div>' +
       '<div class="note" style="margin-bottom:-2px">颜色</div><div class="theme-pick">' + [['auto', '跟随系统', 'linear-gradient(135deg,#F5F5F7 50%,#1c1c1e 50%)'], ['light', '浅色', '#F5F5F7'], ['dark', '深色', '#1c1c1e']].map(function (t) {
         return '<button class="press' + (S.theme === t[0] ? ' on' : '') + '" data-theme-pick="' + t[0] + '"><span class="sw" style="background:' + t[2] + '"></span>' + t[1] + '</button>'; }).join('') + '</div>' +
@@ -2944,7 +3050,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
   var FXP_T = { off: '关闭', calm: '克制', std: '标准', lively: '灵动', custom: '自定义' };
   function fxSettingsHtml() {
     var pre = fxPreset();
-    return '<div class="note" style="margin:8px 0 -2px">动画效果 · ' + FXP_T[pre] + (S.style === 'apple' ? '' : '（标注「苹果风」的效果在苹果风下才有）') + '</div>' +
+    return '<div class="note" style="margin:8px 0 -2px">动画效果 · ' + FXP_T[pre] + (apple() ? '' : '（标注「苹果风」的效果在苹果风 / 液态玻璃下才有）') + '</div>' +
       seg('fxp', [['off', '关闭'], ['calm', '克制'], ['std', '标准'], ['lively', '灵动']], pre, 'small') +
       FX_LIST.map(function (x) {
         var dis = !S.motion && x[0] !== 'title' && x[0] !== 'haptic';
@@ -3061,32 +3167,20 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
     if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_mode === 'on' && !S.clsact) clsactCheck(true); });
     schedulePoll(50);
   }
-  var leaving = null, pageVT = null;
   function go(name) {
     if (ORDER.indexOf(name) < 0) return;
     if (name === S.page) { $('#p-' + name).scrollTo({ top: 0, behavior: 'smooth' }); syncTab(name); return; }
     var from = $('#p-' + S.page), to = $('#p-' + name), dir = ORDER.indexOf(name) > ORDER.indexOf(S.page) ? 1 : -1;
-    if (leaving) { leaving.el.classList.remove('on'); if (leaving.a) leaving.a.cancel(); leaving = null; }
     S.page = name; closeDD(); syncTab(name); LS.set('hnc6.page', name); navSync();
-    // v5.17: 苹果风切页 —— View Transitions 推入(新页从右侧进, 旧页后退 30% 并变暗); 不支持时走下面的普通动画
-    if (apple() && fxOn('page') && document.startViewTransition && !lowFx()) {
-      var R = document.documentElement;
-      if (pageVT) try { pageVT.skipTransition(); } catch (_) {}
-      R.classList.add('vt-page'); R.classList.toggle('vt-back', dir < 0);
-      pageVT = document.startViewTransition(function () { to.classList.add('on'); from.classList.remove('on'); RENDER[name](true); navSync(); });
-      var clr = function () { R.classList.remove('vt-page', 'vt-back'); pageVT = null; };
-      pageVT.finished.then(clr, clr);
-      onEnter(name);
-      return;
-    }
-    to.classList.add('on');
+    // v5.19: 标签切换不再用 View Transitions —— 它要先给整个页面区拍快照, 拍照期间渲染冻结(真机上就是
+    // 一段空白), 快照层还在最上层, 会把底栏盖掉一半。iOS 的标签切换本来也不是"推入", 而是原地快速换内容。
+    // 现在: 新页面立刻可见(不透明度从 .35 起, 不会出现整屏空白), 旧页面立刻隐藏(不再两页叠着渲染)。
+    to.classList.add('on'); from.classList.remove('on');
     RENDER[name](true);
-    if (!fxOn('page')) { from.classList.remove('on'); onEnter(name); return; }
-    var a = anim(from, [{ transform: 'none', opacity: 1 }, { transform: 'translateX(' + (-dir * 18) + '%) scale(.95)', opacity: 0 }], { duration: 380, easing: EASE.soft, fill: 'forwards' });
-    anim(to, [{ transform: 'translateX(' + (dir * 30) + '%) scale(.97)', opacity: 0 }, { transform: 'none', opacity: 1 }], { duration: 800 });
-    leaving = { el: from, a: a };
-    var done = function () { if (leaving && leaving.el === from) { from.classList.remove('on'); if (a) a.cancel(); leaving = null; } };
-    if (a) a.onfinish = done; else done();
+    if (fxOn('page') && motionOn()) {
+      if (apple()) anim(to, [{ opacity: .35, transform: 'scale(.985)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' });
+      else anim(to, [{ opacity: .3, transform: 'translateX(' + (dir * 28) + 'px) scale(.985)' }, { opacity: 1, transform: 'none' }], { duration: 420, easing: EASE.soft });
+    }
     onEnter(name);
   }
 
@@ -3170,7 +3264,7 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 
   /* ═════════════════════ 主题(圆形扩散) ═════════════════════ */
   function setStyle(v, x, y) {
-    S.style = v === 'apple' ? 'apple' : 'default'; LS.set('hnc6.style', S.style);
+    S.style = v === 'apple' || v === 'liquid' ? v : 'default'; LS.set('hnc6.style', S.style);
     revealApply(function () { applyTheme(); if (typeof navSync === 'function') navSync(); }, x, y);
     $$('[data-style-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-style-pick') === S.style); });
     setTimeout(function () { placeSegs(); layoutLens(); syncTab(S.page, true); }, 60);
