@@ -195,6 +195,11 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 	if req.Params == nil {
 		req.Params = map[string]string{}
 	}
+	// v5.22: webui_access_set 的自锁检查需要请求源 IP —— 由服务端注入, 覆盖
+	// 客户端可能伪造的同名参数(webui_access.go)。
+	if req.Action == "webui_access_set" {
+		req.Params[webuiClientIPParam] = ipOnly(r.RemoteAddr)
+	}
 
 	// write rate limit: 用 TokenID 作 key
 	// tid 此处必定非空(见上面强制校验)
@@ -246,7 +251,12 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// rc3 修 N-5: 敏感字段(password/secret/token/pin)脱敏后再记 audit
 	// 避免 WiFi 密码明文落盘, 减少 MDLP / 云备份泄漏风险
 	auditParams := redactSensitive(req.Params)
-	auditLog(s.hncDir, tid, req.Action, auditParams, result, resp.Error+resp.Detail)
+	// v5.22: pair_new 的 Detail 是 pair_gen.sh 的 JSON, 含明文 PIN —— 不落审计
+	auditDetail := resp.Error + resp.Detail
+	if req.Action == "pair_new" {
+		auditDetail = resp.Error
+	}
+	auditLog(s.hncDir, tid, req.Action, auditParams, result, auditDetail)
 
 	status := http.StatusOK
 	if !resp.OK {
@@ -256,7 +266,8 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 			resp.Error == "protected mac",
 			isBadParamErr(resp.Error):
 			status = http.StatusBadRequest
-		case resp.Error == "conflict": // v5.21 device_merge: 目标已有不同设置, 需 force
+		case resp.Error == "conflict", // v5.21 device_merge: 目标已有不同设置, 需 force
+			resp.Error == "self_lockout": // v5.22 webui_access_set: 会把请求者自己锁在外面
 			status = http.StatusConflict
 		default:
 			status = http.StatusInternalServerError
@@ -389,6 +400,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionRemoteEnabledSet(hncDir, p)
 	case "hotspot_iface_set":
 		return actionHotspotIfaceSet(hncDir, p)
+	case "webui_access_set": // v5.22: WebUI 访问白名单(webui_access.go + bin/webui_guard.sh)
+		return actionWebUIAccessSet(s, p)
 	case "refresh":
 		return actionRefresh(hncDir)
 	case "pair_new":
@@ -778,6 +791,8 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 	case "debug_bundle.sh", "dpi_rules_update.sh":
 		timeoutSec = 90
 	case "whitelist_sync.sh", "dpi_rules_import.sh":
+		timeoutSec = 30
+	case "webui_guard.sh": // v5.22: 白名单最多 32 条 × v4/v6 每条一次 exec
 		timeoutSec = 30
 	case "encdns_sync.sh": // v5.21: strict 档数百条 iptables 规则(每条一次 exec)
 		timeoutSec = 60

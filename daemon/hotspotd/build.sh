@@ -45,13 +45,19 @@ if [ -n "$ANDROID_NDK" ]; then
     TOOLCHAIN="$ANDROID_NDK/toolchains/llvm/prebuilt/$HOST_TAG"
     CC="$TOOLCHAIN/bin/${TARGET}${API}-clang"
 fi
+# v5.22: 优先用 NDK llvm-strip —— host 的 GNU strip 不认 ARM/AArch64 ELF,
+# 原来的 `strip ... || true` 实际静默失败, 产物从未被 strip。
+STRIP=strip
+[ -n "${TOOLCHAIN:-}" ] && [ -x "$TOOLCHAIN/bin/llvm-strip" ] && STRIP="$TOOLCHAIN/bin/llvm-strip"
 
 # ── v5.0.0-beta.4 hotfix6: 编 third_party libs (zlib, libelf, libbpf) ──
+# v5.22: 按 arch 分目录(与 build_libs.sh 同一规则), 防止 arm 链接到 arm64 的 libbpf.a
 LIBS_OUT="$(cd ../../third_party_build && pwd)/_libs_out"
+[ "$ARCH" != "arm64" ] && LIBS_OUT="$LIBS_OUT/$ARCH"
 if [ ! -f "$LIBS_OUT/lib/libbpf.a" ]; then
     echo ""
     echo "=== Building third_party libs ==="
-    (cd ../../third_party_build && bash build_libs.sh "$ARCH")
+    (cd ../../third_party_build && HNC_LIBS_OUT="$LIBS_OUT" bash build_libs.sh "$ARCH")
 fi
 
 if [ ! -f "$LIBS_OUT/lib/libbpf.a" ]; then
@@ -92,11 +98,13 @@ echo "[build] syntax gate: lsm/hnc_lsm_loader.c (not linked, kept compilable)"
 $CC -fsyntax-only -std=c11 -Wall -Wextra -Wno-unused-parameter \
     -D_GNU_SOURCE -DANDROID -I"$LIBS_OUT/include" lsm/hnc_lsm_loader.c
 
-strip "$OUT" 2>/dev/null || true
+"$STRIP" "$OUT" 2>/dev/null || true
 echo "[build] OK: $(ls -lh "$OUT" | awk '{print $5}')  $OUT"
 
-# 复制到 bin/
+# 复制到 bin/(v5.22: arm64 仍是 bin/ 原路径; arm → bin/armeabi-v7a/,
+# 安装期由 customize.sh 按设备 ABI 覆盖到 bin/)
 BINDIR=../../bin
+[ "$ARCH" = "arm" ] && BINDIR=../../bin/armeabi-v7a
 mkdir -p "$BINDIR"
 cp "$OUT" "$BINDIR/hotspotd"
 chmod 755 "$BINDIR/hotspotd"
@@ -123,7 +131,7 @@ if [ -f mdns_resolve.c ]; then
     $CC -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter \
         -D_GNU_SOURCE -DANDROID -fPIE -pie -pthread \
         -o "$BINDIR/mdns_resolve" mdns_resolve.c
-    strip "$BINDIR/mdns_resolve" 2>/dev/null || true
+    "$STRIP" "$BINDIR/mdns_resolve" 2>/dev/null || true
     chmod 755 "$BINDIR/mdns_resolve"
     echo "[build] OK: $(ls -lh "$BINDIR/mdns_resolve" | awk '{print $5}')  $BINDIR/mdns_resolve"
 fi

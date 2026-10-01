@@ -123,7 +123,7 @@ func TestNetstatsParseVersions(t *testing.T) {
 			}
 		}
 		if got := sumCycle(metered); got != calSlot1Cyc+calSlot2Cyc {
-			t.Errorf("%s: cycle metered %d want %d", c.file, got, calSlot1Cyc+calSlot2Cyc)
+			t.Errorf("%s: cycle metered %d want %d", c.file, got, uint64(calSlot1Cyc+calSlot2Cyc))
 		}
 		// Dev 是 2 倍
 		if got := sumCycle(d.nsSelect("dev", nsUIDAll, "MOBILE")); c.mobileKeys == 2 && got != 2*(calSlot1Cyc+calSlot2Cyc) {

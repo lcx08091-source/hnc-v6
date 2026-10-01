@@ -27,6 +27,7 @@ import (
 	"syscall"
 	"time"
 
+	"hnc.io/dpid/activity"
 	"hnc.io/dpid/apkscan"
 	"hnc.io/dpid/appmeta"
 	"hnc.io/dpid/bytestats"
@@ -36,6 +37,10 @@ import (
 )
 
 var version = "0.5.3-rc30.12.4-v518-ipname"
+
+// v5.22 功耗: hnc_httpd 写的 run/activity.json(热点/在线设备/亮屏/界面)。
+// 文件缺失或过期时一律按基准间隔(旧行为)。
+var actReader *activity.Reader
 
 const (
 	defaultConfigPath = "/data/local/hnc/etc/dpi_config.json"
@@ -242,6 +247,7 @@ func main() {
 		}
 	}()
 
+	actReader = activity.NewReader(cfg.RunDir)
 	armCrashFlag(cfg.RunDir)
 	bumpStartCount(cfg.RunDir) // rc42: 持久 lifetime 启动计数, 供 /api/sla
 
@@ -381,7 +387,10 @@ func main() {
 	// from the kernel, hands them to selfAttrib.RecordBytes which
 	// computes deltas vs the previous sample and exposes them in
 	// dpi_state.json. Backend choice is logged once at startup.
-	go runByteSampler(ctx, selfAttrib)
+	go runByteSampler(ctx, selfAttrib, func() bool {
+		_, err := os.Stat(selfAttribFlag)
+		return err == nil
+	})
 
 	// v5.13: 被动设备识别器 + IP→域名反查表。都自带锁, 跑在顶层 ctx 上,
 	// 跨 capture 重试/重绑存活。设备识别结果启动时从 dpi_devid.json 读回
@@ -486,6 +495,9 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 	iface := pr.APIface
 	attempt := 0
 	rebindCount := 0
+	// v5.22: 接口暂时不在(热点关了)时重试间隔 2s 起翻倍, 上限 30s(确知热点未开 60s),
+	// 不再每 2 秒开一次 AF_PACKET + 写一次 dpi_state.json 空转。
+	var retry time.Duration
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -499,13 +511,15 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 				log.Printf("WARN: %s", reason)
 				sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 				_ = sw.Flush()
-				if !sleepOrDone(ctx, 2*time.Second) {
+				retry = activity.CaptureRetryBackoff(retry, actReader.Get())
+				if !sleepOrDone(ctx, retry) {
 					return nil
 				}
 				continue
 			}
 			return fmt.Errorf("open capture: %w", err)
 		}
+		retry = 0
 
 		// Launch rebind-check goroutine for this capture attempt.
 		// It monitors iface changes and zero-packet conditions.
@@ -553,11 +567,12 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 		}
 
 		go func(local *capture.Handle) {
-			tk := time.NewTicker(5 * time.Second)
-			defer tk.Stop()
+			// v5.22: 基准 5s; 热点上没有在线设备时 30s(activity.StateFlushEvery)
 			for {
+				tk := time.NewTimer(activity.StateFlushEvery(actReader.Get()))
 				select {
 				case <-attemptCtx.Done():
+					tk.Stop()
 					return
 				case <-tk.C:
 					s := local.Stats()
@@ -582,12 +597,20 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 		go func(local *capture.Handle) {
 			tk := time.NewTicker(15 * time.Second)
 			defer tk.Stop()
+			// v5.22: 计数没变就不写日志(空闲时每 15 秒一行纯属写放大), 最多 5 分钟补一行心跳
+			var lastPkts, lastEv uint64
+			var lastLog time.Time
 			for {
 				select {
 				case <-attemptCtx.Done():
 					return
 				case <-tk.C:
 					s := local.Stats()
+					ev := s.DNSEvents + s.TLSEvents + s.FlowEvents + s.DevHintEvents
+					if s.Packets == lastPkts && ev == lastEv && time.Since(lastLog) < 5*time.Minute {
+						continue
+					}
+					lastPkts, lastEv, lastLog = s.Packets, ev, time.Now()
 					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d devhint=%d ignored=%d perr=%d quic_init=%d quic_ok=%d quic_fail=%d quic_sni=%d gquic_sni=%d gquic_skip=%d http=%d tls_partial=%d tls_pending=%d tls_reasm=%d tls_giveup=%d ipnames=%d",
 						s.Packets, s.KernelDrops, s.DNSEvents, s.TLSEvents, s.FlowEvents, s.DevHintEvents, s.IgnoredPackets, s.ParseErrors,
 						s.QUICInitial, s.QUICDecryptOK, s.QUICDecryptFail, s.QUICSNI, s.GQUICSNI, s.GQUICSkipped, // v5.14: QUIC 计数
@@ -653,11 +676,15 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			}
 			// Refresh once immediately so the first dpi_state.json has values.
 			scan()
+			tk.Stop()
+			// v5.22: 基准 15s; 热点上没有在线设备时 60s(activity.ConntrackEvery)
 			for {
+				t := time.NewTimer(activity.ConntrackEvery(actReader.Get()))
 				select {
 				case <-attemptCtx.Done():
+					t.Stop()
 					return
-				case <-tk.C:
+				case <-t.C:
 					scan()
 				}
 			}
@@ -755,7 +782,8 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			log.Printf("WARN: %s", reason)
 			sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 			_ = sw.Flush()
-			if !sleepOrDone(ctx, 2*time.Second) {
+			retry = activity.CaptureRetryBackoff(retry, actReader.Get())
+			if !sleepOrDone(ctx, retry) {
 				return nil
 			}
 			continue
@@ -799,11 +827,12 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 }
 
 func idleWithFlush(ctx context.Context, sw *output.Writer) {
-	tk := time.NewTicker(10 * time.Second)
-	defer tk.Stop()
+	// v5.22: 基准 10s; 确知热点未开/无设备时 30s(仍远小于自检判「卡住」的 180s)
 	for {
+		tk := time.NewTimer(activity.BlindFlushEvery(actReader.Get()))
 		select {
 		case <-ctx.Done():
+			tk.Stop()
 			return
 		case <-tk.C:
 			_ = sw.Flush()
@@ -1004,7 +1033,7 @@ func checkCrashLoop(runDir string) string {
 // fail under memory pressure), we log+skip rather than crashing —
 // next tick will retry. If a backend's Source() is "none", we just
 // don't tick (no point waking up to do nothing).
-func runByteSampler(ctx context.Context, agg *output.SelfAttribAggregator) {
+func runByteSampler(ctx context.Context, agg *output.SelfAttribAggregator, enabled func() bool) {
 	sampler := bytestats.Detect()
 	defer sampler.Close()
 
@@ -1014,20 +1043,28 @@ func runByteSampler(ctx context.Context, agg *output.SelfAttribAggregator) {
 		return // No point ticking forever for nothing.
 	}
 
-	const tickEvery = 5 * time.Second
-	ticker := time.NewTicker(tickEvery)
-	defer ticker.Stop()
-
 	// Tick once immediately so the first dpi_state.json has byte data.
-	doByteSample(sampler, agg, src)
+	if enabled() {
+		doByteSample(sampler, agg, src)
+	}
 
+	// v5.22: 字节只服务于「本机流量归因」(self_capture.enabled)。没开就不采(dumpsys 后端
+	// 每次要 fork + 解析), 60 秒看一次开关; 开着时基准 5s, 熄屏且无界面 30s。
 	for {
+		d := activity.ByteSampleEvery(actReader.Get(), enabled())
+		if d == 0 {
+			d = time.Minute
+		}
+		t := time.NewTimer(d)
 		select {
 		case <-ctx.Done():
+			t.Stop()
 			log.Printf("byteSampler: shutdown (source=%s)", src)
 			return
-		case <-ticker.C:
-			doByteSample(sampler, agg, src)
+		case <-t.C:
+			if enabled() {
+				doByteSample(sampler, agg, src)
+			}
 		}
 	}
 }

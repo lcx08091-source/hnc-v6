@@ -18,8 +18,8 @@
 
   <div class="card">
     <div class="btns">
-      <button id="refreshBtn" onclick="refreshHealth()">刷新状态</button>
-      <button id="exportBtn" onclick="exportBundle()">导出 JSON 诊断包</button>
+      <button id="refreshBtn">刷新状态</button>
+      <button id="exportBtn">导出 JSON 诊断包</button>
     </div>
     <p class="hint">这个页面不会修改 rules.json。导出按钮会生成 <b>/sdcard/Download/hnc-json-debug-*.tar.gz</b>，方便直接发给排障。</p>
   </div>
@@ -40,7 +40,6 @@ function parseRaw(raw){
   if(!raw) return null;
   try{return JSON.parse(String(raw));}catch(e){return null;}
 }
-function boolText(v){return v===true?'是':(v===false?'否':'未知');}
 async function execCmd(cmd){
   if(!window.ksu || !window.ksu.exec){ throw new Error('当前环境没有 window.ksu.exec，请在 KernelSU/SukiSU WebUI 中打开'); }
   const r = await window.ksu.exec(cmd);
@@ -104,6 +103,9 @@ async function exportBundle(){
   }catch(e){ log('导出失败: '+(e.message||e)); }
   finally{btn.disabled=false;}
 }
+// 用脚本绑定而非 onclick="": 经 hnc_httpd 访问时 CSP 只放行内联 <script> 的 hash, 内联事件属性会被拦
+document.getElementById('refreshBtn').addEventListener('click', function(){ refreshHealth(); });
+document.getElementById('exportBtn').addEventListener('click', function(){ exportBundle(); });
 refreshHealth();
 </script>
 </body>

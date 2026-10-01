@@ -1241,23 +1241,24 @@ func puAppendAlert(path string, a alert.Alert) error {
 func (s *server) PhoneUsageLoop(stop <-chan struct{}) {
 	e := s.phoneUsage()
 	e.tick(time.Now())
-	tk := time.NewTicker(puEvery)
-	defer tk.Stop()
 	lastAlert := time.Time{}
+	// v5.22: 基准 puEvery(60s); 热点未开且熄屏无界面 300s(power_sched.go phone_usage)。
+	// 计数器差分, 放慢不丢字节(只是小时桶归属更粗)。
+	last := time.Now()
 	for {
-		select {
-		case <-stop:
+		if !powerWait(stop, "phone_usage", last, nil) {
 			now := time.Now()
 			e.tick(now)
 			e.flush(now)
 			return
-		case now := <-tk.C:
-			e.tick(now)
-			e.flush(now)
-			if now.Sub(lastAlert) >= puSimRefresh {
-				e.checkAlerts(now)
-				lastAlert = now
-			}
+		}
+		now := time.Now()
+		last = now
+		e.tick(now)
+		e.flush(now)
+		if now.Sub(lastAlert) >= puSimRefresh {
+			e.checkAlerts(now)
+			lastAlert = now
 		}
 	}
 }

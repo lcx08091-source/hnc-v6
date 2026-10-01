@@ -75,8 +75,13 @@ else
 fi
 
 # 4. Required files
-for f in webroot/index.html webroot/json-health.html bin/hnc_clsact_watchdog.sh bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json; do
+for f in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/main.js webroot/json-health.html bin/hnc_clsact_watchdog.sh bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json; do
   if [ -e "$f" ]; then ok "required file exists: $f"; else warn "required file missing: $f"; fi
+done
+# v5.22: 安装期 ABI 选择(customize.sh → bin/hnc_arch.sh)缺一不可 —— 缺了 armv7
+# 设备会装上 arm64 二进制(或反之)且毫无提示。
+for f in customize.sh bin/hnc_arch.sh; do
+  if [ -f "$f" ]; then ok "required file exists: $f"; else fail "required file missing: $f (install-time ABI selection)"; fi
 done
 
 # 5. Executable bits, source tree check only.
@@ -121,6 +126,20 @@ else
   # 摘掉 continue-on-error 让真 fail 拦住构建。(artifact 模式对成品 zip 的
   # 同名检查保持 fail 不动 —— 成品必须有。)
   warn "bin/hnc_dpid not present in source tree; CI must build it before packaging"
+fi
+
+# 6a2. v5.22: armeabi-v7a 构建暂存目录(CI 构建期产物, 打 armv7 包用)里的
+# 二进制必须全是 32 位 ARM ELF —— 防止某个构建步骤忘了传 arch 把 arm64 混进去。
+if [ -d bin/armeabi-v7a ]; then
+  if command -v od >/dev/null 2>&1; then
+    for f in bin/armeabi-v7a/*; do
+      [ -f "$f" ] || continue
+      M="$(od -An -tx1 -j18 -N2 "$f" 2>/dev/null | awk '{print $1 " " $2}')"
+      if [ "$M" = "28 00" ]; then ok "armv7 staging is ARM ELF: $f"; else fail "armv7 staging binary is not 32-bit ARM ELF: $f machine='$M'"; fi
+    done
+  else
+    warn "od unavailable; cannot inspect bin/armeabi-v7a architecture"
+  fi
 fi
 
 # 6b. Optional hnc_json_c helper architecture sanity.
@@ -243,9 +262,12 @@ if [ -n "$ARTIFACT" ]; then
         ok "artifact hnc_dpid can be extracted"
         if command -v od >/dev/null 2>&1; then
           DM="$(od -An -tx1 -j18 -N2 "$ZIPTMP.hnc_dpid" 2>/dev/null | awk '{print $1 " " $2}')"
-          case "$DM" in
-            "b7 00") ok "artifact hnc_dpid is AArch64 ELF: $DM" ;;
-            "28 00") warn "artifact hnc_dpid is 32-bit ARM ELF: $DM; expected arm64 package?" ;;
+          # v5.22: HNC_EXPECT_ABI=armeabi-v7a 时 32 位 ARM 才是正确的
+          case "${HNC_EXPECT_ABI:-arm64-v8a}:$DM" in
+            "armeabi-v7a:28 00") ok "artifact hnc_dpid is 32-bit ARM ELF (armv7 package): $DM" ;;
+            "armeabi-v7a:"*) fail "artifact hnc_dpid is not 32-bit ARM ELF in armv7 package: $DM" ;;
+            *":b7 00") ok "artifact hnc_dpid is AArch64 ELF: $DM" ;;
+            *":28 00") warn "artifact hnc_dpid is 32-bit ARM ELF: $DM; expected arm64 package?" ;;
             *) fail "artifact hnc_dpid is not Android ARM/AArch64 ELF: machine='$DM'" ;;
           esac
         else

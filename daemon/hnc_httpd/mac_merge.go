@@ -617,19 +617,19 @@ func macMergeCandidates(f *macMergeFile, newMAC string, aliases map[string]strin
 // ─── 后台循环 ──────────────────────────────────────────────────────────
 
 func (s *server) MacMergeLoop(stop <-chan struct{}) {
-	t := time.NewTicker(macMergeEvery)
-	defer t.Stop()
 	// 启动后稍等, 让 hotspotd/dpid 先把文件刷新一轮
 	first := time.NewTimer(10 * time.Second)
-	defer first.Stop()
-	for {
-		select {
-		case <-stop:
+	select {
+	case <-stop:
+		first.Stop()
+		return
+	case <-first.C:
+	}
+	// v5.22: 基准 macMergeEvery(30s), 按活动状态放慢(power_sched.go mac_merge)
+	for last := time.Now(); ; last = time.Now() {
+		s.macMergeTick(last)
+		if !powerWait(stop, "mac_merge", last, nil) {
 			return
-		case <-first.C:
-			s.macMergeTick(time.Now())
-		case <-t.C:
-			s.macMergeTick(time.Now())
 		}
 	}
 }

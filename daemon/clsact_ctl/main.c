@@ -59,8 +59,22 @@
 
 /* ── 常量 ─────────────────────────────────────────────────────────────── */
 
-/* arm64: bpf syscall 号 (asm-generic) */
-#define SYS_BPF_NO 280
+/* bpf syscall 号: 按架构取(v5.22 加 armeabi-v7a —— 32 位 ARM EABI 上
+ * 280 是 waitid, 硬编码会把 bpf 命令错发给 waitid)。优先用 sysroot 的 __NR_bpf。 */
+#include <sys/syscall.h>
+#if defined(__NR_bpf)
+#  define SYS_BPF_NO __NR_bpf
+#elif defined(__aarch64__)
+#  define SYS_BPF_NO 280
+#elif defined(__arm__)
+#  define SYS_BPF_NO 386
+#elif defined(__x86_64__)
+#  define SYS_BPF_NO 321
+#elif defined(__i386__)
+#  define SYS_BPF_NO 357
+#else
+#  error "unknown arch, define SYS_BPF_NO"
+#endif
 
 #define OBJ_PATH_DEFAULT "/data/local/hnc/bin/hnc_clsact.o"
 #define PIN_DIR          "/sys/fs/bpf/hnc"

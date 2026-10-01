@@ -1,0 +1,5 @@
+fe80::a8bb:ccff:fedd:ee07 dev wlan2 lladdr aa:bb:cc:dd:ee:07 router STALE
+2408:8456:1234::7 dev wlan2 lladdr aa:bb:cc:dd:ee:07 REACHABLE
+2408:8456:1234::66 dev wlan2 lladdr aa:bb:cc:dd:ee:66 REACHABLE
+2408:8456:1234::99 dev wlan2  FAILED
+fe80::1 dev rmnet_data2 INCOMPLETE

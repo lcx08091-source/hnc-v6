@@ -152,6 +152,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/stats_health", s.apiStatsHealth) // v5.21: 统计健康(精确模式/iptables/时钟/分流漏计)
 	mux.HandleFunc("/api/sim", s.apiSim)                 // 模拟环境状态(sim.go)
 	mux.HandleFunc("/api/mac_merge", s.apiMacMerge)      // v5.21: 随机 MAC 疑似同一设备建议 + 别名表(mac_merge.go)
+	mux.HandleFunc("/api/power", s.apiPower)             // v5.22: 功耗自测 + 活动状态 + 各循环当前间隔(power_stats.go)
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
 	// v5.9.9: json-health.html 此前没有路由(死页面), 补上, 与 changelog 同款只读 serve。
@@ -161,6 +162,10 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/hyalite.js", s.serveWebrootPage("hyalite.js"))
 	// v5.19: 全新界面 HNC Glass 预览(示例数据)
 	mux.HandleFunc("/glass.html", s.serveWebrootPage("glass.html"))
+	// v5.22: WebUI 拆分后的样式/脚本(webroot/css/*.css、webroot/js/*.js), 逐个字面量注册
+	for _, a := range webuiAssets {
+		mux.HandleFunc("/"+a, s.serveWebrootPage(a))
+	}
 
 	// v4.0 Patch 3.a: 写操作统一 endpoint, 内部白名单 + per-token rate limit + CSRF
 	// 必经 authMiddleware(不允许过渡期匿名写)
@@ -187,7 +192,9 @@ func (s *server) handler() http.Handler {
 
 	// 中间件链: securityHeaders → accessLog → authMiddleware → mux
 	// securityHeaders 在最外层, auth 失败的 401 响应也带头。
-	return securityHeaders(accessLogMiddleware(s.authMiddleware(mux)))
+	// v5.22: webuiAccessGuard(白名单纵深防御, 防火墙之后的第二层)在鉴权之前,
+	// 被拒客户端连配对页都拿不到。
+	return securityHeaders(accessLogMiddleware(s.webuiAccessGuard(s.authMiddleware(activityTouchMiddleware(mux)))))
 }
 
 // ═══ 静态资源 ═══════════════════════════════════════════════════
@@ -332,21 +339,53 @@ func (s *server) serveChangelog(w http.ResponseWriter, r *http.Request) {
 // v5.9.9: 抽出来给 json-health.html / hyalite.js 共用(与 serveChangelog
 // 同款: 固定磁盘路径 + nosniff, 文件缺失 404)。name 由调用方以字面量给出,
 // 不接受请求参数, 无路径穿越面。
+//
+// v5.22: .css/.js(WebUI 拆分后的静态资源)额外带 Cache-Control: no-cache +
+// Last-Modified —— 浏览器每次用 If-Modified-Since 回源校验(未变 304), 模块升级后
+// 不会拿旧脚本配新页面; 没有构建步骤, 所以不做 ?v= 版本号。HTML 仍一次写完
+// (securityHeaders 要在首个 Write 里看到完整文档才能算内联脚本 hash)。
 func (s *server) serveWebrootPage(name string) http.HandlerFunc {
-	diskPath := "/data/adb/modules/hotspot_network_control/webroot/" + name
+	diskPath := webrootDiskDir + name
 	ctype := "text/html; charset=utf-8"
-	if strings.HasSuffix(name, ".js") {
+	asset := false
+	switch {
+	case strings.HasSuffix(name, ".js"):
 		ctype = "application/javascript; charset=utf-8" // v5.11: hyalite.js(nosniff 下类型错了浏览器会拒绝执行)
+		asset = true
+	case strings.HasSuffix(name, ".css"):
+		ctype = "text/css; charset=utf-8"
+		asset = true
 	}
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		if data, err := os.ReadFile(diskPath); err == nil && len(data) > 0 {
+			if asset {
+				w.Header().Set("Cache-Control", "no-cache")
+				var mod time.Time
+				if st, err := os.Stat(diskPath); err == nil {
+					mod = st.ModTime()
+				}
+				http.ServeContent(w, r, name, mod, bytes.NewReader(data))
+				return
+			}
 			_, _ = w.Write(data)
 			return
 		}
 		http.NotFound(w, r)
 	}
+}
+
+// webrootDiskDir 模块 webroot 的磁盘位置(测试里替换成临时目录)。
+var webrootDiskDir = "/data/adb/modules/hotspot_network_control/webroot/"
+
+// webuiAssets v5.22: webroot/index.html 引用的样式与脚本(相对 webroot)。
+// 与 index.html 的 <link>/<script src> 保持一致(test/unit/test_webui_v6.sh 校验);
+// isPublicPath 按 /css/、/js/ 前缀放行 —— 纯静态代码, 不含任何数据。
+var webuiAssets = []string{
+	"css/base.css", "css/apple.css", "css/liquid.css",
+	"js/core.js", "js/fx.js", "js/devices.js", "js/apps.js",
+	"js/stats.js", "js/settings.js", "js/sheets.js", "js/main.js",
 }
 
 func (s *server) serveStatic(w http.ResponseWriter, r *http.Request) {
@@ -371,8 +410,15 @@ func (s *server) serveStatic(w http.ResponseWriter, r *http.Request) {
 // 是死代码(rc30.12.30 P0.4 删除); 本端点【不在】isPublicPath, 走完整 cookie
 // 鉴权后才能到达, 因此能安全地返回 label —— 远程 SPA 的登出按钮据此复活。
 func (s *server) apiWhoami(w http.ResponseWriter, r *http.Request) {
-	tok, ok := r.Context().Value(ctxKeyToken).(*Token)
-	if !ok || tok == nil {
+	// v5.22: authMiddleware 存的是 Token 值(不是 *Token), 旧断言恒失败 → 恒 401。
+	var tok *Token
+	switch v := r.Context().Value(ctxKeyToken).(type) {
+	case Token:
+		tok = &v
+	case *Token:
+		tok = v
+	}
+	if tok == nil {
 		// 理论不可达(非公开路径 + 鉴权中间件在前), 防御性 401
 		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
 		return
@@ -713,15 +759,12 @@ const (
 // RateLoop — 单一后台速率采样器. 每 2s 读 devices.json, 算每台 rx_bps/tx_bps 发布到
 // s.rates. /api/devices 与 /api/live 都只读 s.rates → hero 与卡片永远同源一致, 速率准.
 func (s *server) RateLoop(stop <-chan struct{}) {
-	s.sampleRatesOnce()
-	tick := time.NewTicker(rateLoopInterval)
-	defer tick.Stop()
-	for {
-		select {
-		case <-stop:
+	// v5.22: 速率只给界面看 —— 有界面 2s, 无界面 20~30s(power_sched.go rate);
+	// 打开界面时活动状态立即翻转, powerWait 马上醒来恢复 2s。
+	for last := time.Now(); ; last = time.Now() {
+		s.sampleRatesOnce()
+		if !powerWait(stop, "rate", last, nil) {
 			return
-		case <-tick.C:
-			s.sampleRatesOnce()
 		}
 	}
 }

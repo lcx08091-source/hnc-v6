@@ -14,6 +14,38 @@
 
 ---
 
+## [5.22.0-rc1] - 2026-10-01
+
+**预览版 · 三版改造之三「性能与维护」**:按活动状态自动降频与功耗自测 + WebUI 拆分模块 + 安全加固 + 32 位 ARM(armv7)安装包。
+
+### Added
+
+- **功耗:按活动状态自动降频**(`power_activity.go` / `power_sched.go` / `bin/hnc_activity.sh`):每 15 秒判断亮屏(背光节点优先,`dumpsys power` / `display` 兜底)、热点是否开启、在线设备数、是否有人在看界面,分为 热点未开 / 无设备 / 后台 / 活跃 四档,写 `run/activity.json`。各后台循环按档位放慢(例如热点未开时按应用流量 10→300 秒、设备合并检测 30→600 秒、dpid 连接表扫描 15→60 秒),**配额 / 分时段 / IPv6 新地址同步 / watchdog 的 60 秒节拍和硬件加速兜底的重申在任何档位都不变**;档位一变立即恢复。顺带修掉几处空转:热点关着时 dpid 守护脚本每 3 秒一轮(约每分钟 200 次 fork)、dpid 找不到热点口时每 2 秒重试并写文件、亮屏时 watchdog 仍反复跑 `cmd power`、未开本机流量归因仍每 5 秒采样。
+- **功耗自测**(`GET /api/power`,自检「进程与资源 → 功耗」):每 5 分钟采样 httpd / hotspotd / dpid / 守护脚本的 CPU 时间与唤醒次数,给出 5 分钟 / 1 小时 / 自启动的 CPU 占用、每小时 CPU 秒、各档位耗电和各循环当前间隔;合计超过 180 CPU 秒/小时报警告。
+- **WebUI 访问控制**(`webui_access`:全部 / 白名单 / 仅本机,`bin/webui_guard.sh`):在防火墙层直接断开不在名单里的设备,Go 层再挡一道;任何模式下都拒绝来自蜂窝接口的连接(此前 8443 在蜂窝 IPv6 公网地址上可达);会把自己锁在外面的设置返回 409 并说明原因;本机 / KSU WebUI 永远放行。
+- **32 位 ARM(armeabi-v7a)安装包**:Release 同时提供 `HNC-<ver>-arm64.zip` 与 `HNC-<ver>-armv7.zip`;Go 与 C 全部二进制支持 armv7,安装时(`customize.sh` / `bin/hnc_arch.sh`)检查设备 ABI,刷错包会中止并提示该刷哪个。
+
+### Changed
+
+- **WebUI 拆分模块**:`index.html` 从 4558 行拆成页面骨架 + `css/base.css · apple.css · liquid.css` + `js/core · fx · devices · apps · stats · settings · sheets · main.js`(普通 `<script>`,KSU 的 file:// 与远程浏览器都能用),行为不变(三种风格 × 明暗 × 各页面的计算样式与拆分前逐项比对一致);首帧脚本提前设置主题与风格,避免闪烁;httpd 为 css / js 提供 `no-cache` + `Last-Modified`。删掉若干未使用的函数与样式,清理注释里无意义的版本前缀。
+- **安全加固**:配对 PIN 防暴力破解(每 IP 10 分钟 5 次,锁定 10 分钟起翻倍、封顶 4 小时;同一配对码累计错 10 次作废;失败写审计并告警 `auth_bruteforce`);配对文件过期时间上限 600 秒;内联脚本 CSP 由 `'unsafe-inline'` 改为 sha256 白名单,补 Referrer-Policy / COOP / `form-action`,`/api/*` 默认不缓存;`pair_new` 返回的明文 PIN 不再写入审计日志。
+- Magisk 安装脚本换成官方模块安装模板(旧版在 Magisk 下无法安装,KernelSU / SukiSU 不受影响)。
+
+### Fixed
+
+- 32 位 ARM 上 bpf 系统调用号写死为 280(实为 `waitid`),Go 与 C 都改为按架构选择。
+- `/api/whoami` 类型断言错误,始终返回 401。
+- json-health 页面按钮经 httpd 访问时被 CSP 拦截;更新日志里失效的「查看历史版本」按钮(历史版本默认全部展开)。
+
+### 需真机验证
+
+- 熄屏 30 分钟前后 `/api/power` 的 CPU 秒/小时;ColorOS 背光节点能否判断亮屏(`screen_source` 应为 backlight)。
+- 远程浏览器打开 WebUI 无 CSP 报错(KSU 内 WebUI 不经过 httpd,不受影响)。
+- WebUI 访问白名单切换后,名单外设备确实连不上、本机始终可用。
+- armv7 包在 32 位 Magisk 设备上的安装与运行(作者没有 32 位设备)。
+
+---
+
 ## [5.21.0-rc1] - 2026-10-01
 
 **预览版 · 三版改造之二「准确性」**:按 v5.20 真机自检报告修复 + MAC 随机化合并 + 加密 DNS 策略 + VPN/代理识别与共现推断 + 系统统计校准 / 硬件分流漏计 / 统计健康。

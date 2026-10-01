@@ -45,3 +45,7 @@ Thumbs.db
 src/dpid/dpid
 src/dpid/hnc_watchdog
 src/dpid/dpid_supervisor
+# v5.22: armeabi-v7a 构建暂存目录 + 打包期写入的 ABI 标记(CI 生成, 不入库)
+bin/armeabi-v7a/
+bin/arm64-v8a/
+bin/hnc_pkg_abi

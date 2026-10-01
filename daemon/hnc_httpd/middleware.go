@@ -49,13 +49,13 @@ const CookieName = "hnc_token"
 // 妥协, WebUI 全面外联 JS 前去不掉。
 func securityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Security-Policy",
-			"default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; "+
-				"img-src 'self' data:; connect-src 'self' http://127.0.0.1:8444; "+
-				"object-src 'none'; base-uri 'self'; frame-ancestors 'none'")
-		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("X-Content-Type-Options", "nosniff")
-		next.ServeHTTP(w, r)
+		// v5.22: 静态安全头 + 按正文定稿的 CSP(HTML 内联脚本走 sha256 白名单,
+		// 不再 'unsafe-inline'), 见 security_headers.go。
+		setStaticSecurityHeaders(w.Header())
+		sw := &secHeaderWriter{ResponseWriter: w, api: strings.HasPrefix(r.URL.Path, "/api/")}
+		next.ServeHTTP(sw, r)
+		// 处理器一个字节都没写(空 200): 头在 net/http 收尾时才发, 这里补定稿
+		sw.finalize(nil, false, http.StatusOK)
 	})
 }
 
@@ -100,6 +100,11 @@ func isPublicPath(p string) bool {
 		return true
 	}
 	if strings.HasPrefix(p, "/static/") {
+		return true
+	}
+	// v5.22: WebUI 拆分后的 /css/*.css、/js/*.js —— 与 hyalite.js 同类的纯静态代码,
+	// 不含数据; 只有 server.go webuiAssets 里逐个注册的文件存在, 其余 404。
+	if strings.HasPrefix(p, "/css/") || strings.HasPrefix(p, "/js/") {
 		return true
 	}
 	return false

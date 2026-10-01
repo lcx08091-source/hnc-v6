@@ -10,6 +10,8 @@
 # 用法:
 #   sh build.sh                # 编两个二进制到当前目录
 #   sh build.sh install        # 编完拷贝到 ../../bin/
+#   sh build.sh install arm    # v5.22: 编 armeabi-v7a, 拷到 ../../bin/armeabi-v7a/
+#                              # (第二个参数 = arch: arm64 默认 | arm)
 #
 # 验证:
 #   编完后做几个 sanity check:
@@ -68,7 +70,13 @@ esac
 # API level 24 = Android 7.0 = 最低支持版本 (HNC 模块自己要求 Android 11+,
 # 但 NDK toolchain 用 24 兼容性最好)
 API=24
-CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG/bin/aarch64-linux-android${API}-clang"
+ARCH="${2:-arm64}"
+case "$ARCH" in
+    arm64) TRIPLE=aarch64-linux-android ;;
+    arm)   TRIPLE=armv7a-linux-androideabi ;;
+    *) echo "ERROR: unsupported arch: $ARCH (arm64|arm)" >&2; exit 1 ;;
+esac
+CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG/bin/${TRIPLE}${API}-clang"
 
 if [ ! -x "$CLANG" ]; then
     echo "ERROR: clang not found at $CLANG" >&2
@@ -83,6 +91,14 @@ echo "Using clang: $CLANG"
 
 cd "$(dirname "$0")"
 
+# v5.22: arm64 产物仍落在本目录(原行为, 这两个文件被 git 跟踪);
+# 其他 arch 落到 out/<arch>/(gitignore), 不覆盖 arm64 的跟踪副本。
+OUT="."
+if [ "$ARCH" != "arm64" ]; then
+    OUT="out/$ARCH"
+    mkdir -p "$OUT"
+fi
+
 COMMON_FLAGS="-O2 -Wall -Wextra -Wno-unused-parameter"
 
 # rc30.12.28: Bionic (Android libc) 在 ARM64 要求 TLS segment 对齐至少 64 字节.
@@ -93,9 +109,9 @@ LDFLAGS_BIONIC="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 echo ""
 echo "Building fork_probe (dynamic)..."
-"$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -o fork_probe fork_probe.c
-file fork_probe
-ls -lh fork_probe
+"$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -o "$OUT/fork_probe" fork_probe.c
+file "$OUT/fork_probe"
+ls -lh "$OUT/fork_probe"
 
 echo ""
 echo "Building hnc_launcher (PIE, dynamic linked)..."
@@ -109,9 +125,9 @@ echo "Building hnc_launcher (PIE, dynamic linked)..."
 # loader 解决 TLS 对齐, 跟 fork_probe 一样能正常跑.
 #
 # 副作用: launcher 大小从 ~700KB 变成 ~7KB (libc 不再嵌入). 不影响功能.
-"$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -o hnc_launcher hnc_launcher.c
-file hnc_launcher
-ls -lh hnc_launcher
+"$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -o "$OUT/hnc_launcher" hnc_launcher.c
+file "$OUT/hnc_launcher"
+ls -lh "$OUT/hnc_launcher"
 
 # rc30.12.28: TLS 对齐诊断 (informational, never fails CI).
 # Bionic ARM64 需要 TLS align >= 64; 默认 toolchain 出 8 字节会 abort.
@@ -121,7 +137,7 @@ echo ""
 echo "TLS alignment diag (informational):"
 (
     set +e
-    readelf -l hnc_launcher 2>/dev/null | grep -A 1 'TLS' | head -3 || true
+    readelf -l "$OUT/hnc_launcher" 2>/dev/null | grep -A 1 'TLS' | head -3 || true
 ) || true
 
 # ─── 4. 简单 sanity check ─────────────────────────────────────────
@@ -134,19 +150,19 @@ echo "Sanity check..."
 # 每次 launcher 想 bump 大版本 (比如 0.2.0) 都得改 build.sh, 是反模式.
 # 改成正则前缀匹配, 接受任意 0.X.Y-rcN(.M)* 形式的版本号.
 for s in "hnc_launcher" "/data/local/hnc/bin/hnc_dpid" "execv failed" "CRASH_LOOP"; do
-    if ! strings hnc_launcher | grep -qF "$s"; then
+    if ! strings "$OUT/hnc_launcher" | grep -qF "$s"; then
         echo "  ERROR: hnc_launcher missing string: $s" >&2
         exit 1
     fi
 done
 # 版本字符串单独用正则匹配 (0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*)
-if ! strings hnc_launcher | grep -qE '^0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*$'; then
+if ! strings "$OUT/hnc_launcher" | grep -qE '^0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*$'; then
     echo "  ERROR: hnc_launcher missing version string matching 0.X.Y-rcN(.M)*" >&2
     exit 1
 fi
 
 for s in "=== fork_probe v1 ===" "FORK FAILED" "EXECV FAILED" "RESULT: C fork+execv WORKS"; do
-    if ! strings fork_probe | grep -qF "$s"; then
+    if ! strings "$OUT/fork_probe" | grep -qF "$s"; then
         echo "  ERROR: fork_probe missing string: $s" >&2
         exit 1
     fi
@@ -159,14 +175,16 @@ echo "  ✓ fork_probe:   all expected strings present"
 
 if [ "${1:-}" = "install" ]; then
     DEST="../../bin"
+    [ "$ARCH" = "arm" ] && DEST="../../bin/armeabi-v7a"
+    mkdir -p "$DEST"
     echo ""
     echo "Installing to $DEST/..."
-    cp -v hnc_launcher "$DEST/"
-    cp -v fork_probe "$DEST/"
+    cp -v "$OUT/hnc_launcher" "$DEST/"
+    cp -v "$OUT/fork_probe" "$DEST/"
     chmod 755 "$DEST/hnc_launcher" "$DEST/fork_probe"
     echo "✓ installed to $DEST/"
 fi
 
 echo ""
 echo "Done. Built artifacts:"
-ls -lh hnc_launcher fork_probe
+ls -lh "$OUT/hnc_launcher" "$OUT/fork_probe"

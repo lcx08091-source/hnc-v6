@@ -663,14 +663,13 @@ func (s *server) probeGroup(g map[string]interface{}) certInfo {
 
 // CertProbeLoop 后台: 每 20 秒最多给一组取证书(还没取过的优先, 失败 6 小时后重试)
 func (s *server) CertProbeLoop(stop <-chan struct{}) {
-	tk := time.NewTicker(20 * time.Second)
-	defer tk.Stop()
+	// v5.22: 基准 20s, 按活动状态放慢(power_sched.go cert_probe)
+	last := time.Now()
 	for {
-		select {
-		case <-stop:
+		if !powerWait(stop, "cert_probe", last, nil) {
 			return
-		case <-tk.C:
 		}
+		last = time.Now()
 		if !certProbeEnabled(s.hncDir) {
 			continue
 		}

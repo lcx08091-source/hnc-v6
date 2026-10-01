@@ -8,7 +8,11 @@
 #
 # Usage:
 #   export ANDROID_NDK=/path/to/android-ndk   # 仅二进制需要; .o 只需 clang
-#   bash build.sh [arch]                      # arch 默认 arm64
+#   bash build.sh [arch]                      # arch 默认 arm64; arm = armeabi-v7a
+#
+# 输出: arm64 → ../../bin/hnc_clsact_ctl(原路径不变);
+#       arm   → ../../bin/armeabi-v7a/hnc_clsact_ctl(v5.22, 安装期由
+#               customize.sh 按 ABI 覆盖到 bin/)。BPF .o 架构无关, 始终在 ../../bin/。
 #
 # SPDX-License-Identifier: GPL-2.0
 
@@ -17,6 +21,10 @@ cd "$(dirname "$0")"
 
 ARCH="${1:-arm64}"
 BINDIR="../../bin"
+case "$ARCH" in
+    arm) OUTBIN="$BINDIR/armeabi-v7a" ;;
+    *)   OUTBIN="$BINDIR" ;;
+esac
 BPF_SRC="../../src/dpid/bpf/hnc_clsact.bpf.c"
 
 mkdir -p "$BINDIR"
@@ -50,7 +58,8 @@ fi
 
 case "$ARCH" in
     arm64)  TARGET=aarch64-linux-android; API=28 ;;
-    *) echo "[build] ERROR: only arm64 supported" >&2; exit 1 ;;
+    arm)    TARGET=armv7a-linux-androideabi; API=28 ;;
+    *) echo "[build] ERROR: only arm64 / arm supported" >&2; exit 1 ;;
 esac
 
 if [ -z "${ANDROID_NDK:-}" ]; then
@@ -72,12 +81,13 @@ if [ ! -x "$CC" ]; then
 fi
 
 CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -DANDROID -static-libgcc -fPIE"
+mkdir -p "$OUTBIN"
 # shellcheck disable=SC2086
-$CC $CFLAGS -o "$BINDIR/hnc_clsact_ctl" main.c -pie
+$CC $CFLAGS -o "$OUTBIN/hnc_clsact_ctl" main.c -pie
 
 if [ -x "$STRIP" ]; then
-    $STRIP "$BINDIR/hnc_clsact_ctl"
+    $STRIP "$OUTBIN/hnc_clsact_ctl"
 fi
-chmod 755 "$BINDIR/hnc_clsact_ctl"
-ls -lh "$BINDIR/hnc_clsact_ctl"
-echo "[build] OK: $BINDIR/hnc_clsact_ctl"
+chmod 755 "$OUTBIN/hnc_clsact_ctl"
+ls -lh "$OUTBIN/hnc_clsact_ctl"
+echo "[build] OK: $OUTBIN/hnc_clsact_ctl"

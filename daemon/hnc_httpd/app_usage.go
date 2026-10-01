@@ -341,24 +341,28 @@ func (s *server) appUsageFlush(now time.Time) {
 	}
 }
 
-// AppUsageLoop 后台采样(10s)与落盘(60s)
+// AppUsageLoop 后台采样(基准 10s, v5.22 按活动状态自适应, 见 power_sched.go)与落盘(60s)
 func (s *server) AppUsageLoop(stop <-chan struct{}) {
-	tk := time.NewTicker(appUsageEvery)
-	defer tk.Stop()
-	lastFlush := time.Now()
+	last := time.Now()
+	lastFlush := last
 	for {
-		select {
-		case <-stop:
+		if !powerWait(stop, "app_usage", last, s.appUsageFlags) {
 			s.appUsageFlush(time.Now())
 			return
-		case now := <-tk.C:
-			s.appUsageTick(now)
-			s.appTimeEnforce(now) // v6.x: 应用时长上限 → 告警(封锁由下一行的派生封锁项落地)
-			s.connBlockRefresh()  // v5.16: 域名封锁跟随反查表更新 IP
-			if now.Sub(lastFlush) >= appUsageFlush {
-				s.appUsageFlush(now)
-				lastFlush = now
-			}
+		}
+		now := time.Now()
+		appTimeSetCapFor(powerCurrent("app_usage"))
+		// 从慢档(>40s)回来的第一轮: 时长按基准 10s 记, 不把整段空闲算成「在用」
+		if now.Sub(last) > 2*appTimeMaxTickSec*time.Second {
+			appTimeResetLast()
+		}
+		last = now
+		s.appUsageTick(now)
+		s.appTimeEnforce(now) // v6.x: 应用时长上限 → 告警(封锁由下一行的派生封锁项落地)
+		s.connBlockRefresh()  // v5.16: 域名封锁跟随反查表更新 IP
+		if now.Sub(lastFlush) >= appUsageFlush {
+			s.appUsageFlush(now)
+			lastFlush = now
 		}
 	}
 }

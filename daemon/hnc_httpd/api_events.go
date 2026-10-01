@@ -68,7 +68,9 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 		lastMod = fi.ModTime().UnixNano()
 	}
 
-	poll := time.NewTicker(1500 * time.Millisecond)
+	// v5.22: 基准 1.5s; 热点未开时 5s(设备表几乎不变, power_sched.go sse_poll)
+	pollEvery, _ := powerInterval("sse_poll", activityNow(), loopFlags{})
+	poll := time.NewTicker(pollEvery)
 	defer poll.Stop()
 	hb := time.NewTicker(20 * time.Second)
 	defer hb.Stop()
@@ -83,6 +85,10 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case <-poll.C:
+			if d, _ := powerInterval("sse_poll", activityNow(), loopFlags{}); d != pollEvery && d > 0 {
+				pollEvery = d
+				poll.Reset(d)
+			}
 			// 模拟环境: 模拟设备速率一直在变, 每 ~3s 推一次 changed(关闭时不进这里)
 			if s.simActive() {
 				if simTick++; simTick%2 == 0 && !write("event: changed\ndata: {\"reason\":\"sim\"}\n\n") {

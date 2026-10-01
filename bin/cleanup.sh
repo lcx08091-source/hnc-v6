@@ -207,6 +207,12 @@ if command -v ip6tables >/dev/null 2>&1; then
         ip6tables -t $t -X $h 2>/dev/null
     done
 fi
+# v5.22: WebUI 访问白名单链(INPUT 上按端口挂的跳转, 上面的 "-D INPUT -j 链" 删不掉,
+# 交给脚本自己拆)。rules 模式不拆: 它是访问控制, 不是用户要清的限速规则。
+if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
+    [ -f "$HNC_DIR/bin/webui_guard.sh" ] && sh "$HNC_DIR/bin/webui_guard.sh" remove >/dev/null 2>&1 \
+        && log "webui_guard removed"
+fi
 log "iptables cleanup done"
 
 # ── 4. 清理临时文件（保留 data/ 目录，用户配置不删）────────

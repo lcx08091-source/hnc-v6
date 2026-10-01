@@ -627,6 +627,17 @@ Query:
 | `hotspot_save` | 全部可选:`ssid`(1–32 **字节** UTF-8,无 <0x20 控制字符)、`password`(8–63 字节 UTF-8,无控制字符)、`delay_sec`(0–3600 整数)、`autostart`(`true`/`false`) | 对每个非空字段依次 `json_set.sh top hotspot_ssid\|hotspot_pass\|hotspot_delay\|hotspot_auto <v>`;**只写 rules.json,不重启热点** | detail `"config saved"`;任一写失败即返回 `save ssid/pass/delay/autostart failed`(之前的字段已写入,非事务) |
 | `hotspot_iface_set` | `iface`:空或 `auto` = 自动;否则 ≤15 字符 `[A-Za-z0-9_.-]` | `json_set.sh top hotspot_iface <iface或空>` | detail `"hotspot iface set to auto"` / `"preferred hotspot iface set to <x>"` |
 
+### 9.2a WebUI 访问白名单(v5.22)
+
+| action | params | 执行 | 返回 |
+|---|---|---|---|
+| `webui_access_set` | `mode`:`all` \| `allowlist` \| `local_only`;`macs`(可选):逗号/空白分隔的 MAC 或 IP(v4/v6),≤32 条,MAC 统一小写冒号格式;省略 `macs` = 保留现有列表,传空串 = 清空 | 写 `data/webui_access.json`(单行 JSON, 0600)→ `bin/webui_guard.sh apply`(filter/INPUT 链 `HNC_WEBUI`,v4+v6,非放行客户端 TCP RST);httpd 同时按同一配置在 HTTP 层拒绝(403 + `Connection: close`) | 成功 detail `"webui access mode=<m> entries=<n>; WEBUI_GUARD=applied …"`;防火墙失败仍 `ok:true`,detail 含 `firewall apply failed, HTTP-level guard active`;非法 mode/条目 400 `bad params`;**远程请求**提交 `local_only`,或 `allowlist` 不含请求者自身 IP/MAC(邻居表反查)→ **409** `error:"self_lockout"`,detail 写明请求者 ip/mac(UI 可据此提示"把本机加入列表") |
+
+- 请求源 IP 由服务端从连接注入(参数 `_client_ip` 由服务端覆盖,客户端传了也无效)。loopback(KSU WebUI / 本机浏览器)永远放行,也不受自锁检查限制。
+- `/api/config` 新字段 `webui_access`:`{"mode":"all","macs":[],"port":8443,"firewall":"applied mode=all entries=0 v4=ok v6=ok ts=…"}`(`firewall` 为 `run/webui_guard.state` 首行,未跑过为空串)。
+- 任何模式下,防火墙都拒绝来自蜂窝上行口(`rmnet+`/`ccmni+`/`wwan+`/`seth_+`/`sipa_eth+`)对 8443/8080/8444 的连接。
+- 配置文件损坏 / mode 非法 → 两层都按 `local_only` 处理(fail-closed)。
+
 - 热点状态本身没有单独的 GET 端点:用 `/api/live`(`hotspot_active/iface/hotspot_ip`)+ `/api/config`(`hotspot_*` 配置)。
 - 空字符串参数一律视为"不修改";无法通过 `hotspot_save` 把 SSID/密码清空。
 
@@ -924,6 +935,7 @@ HTTP 状态码映射(`ok:false` 时):
 | 33 | `remote_enabled_set` | 远程 §10.7 | enabled | ✓ | ✓ | |
 | 34 | `pair_new` | 远程 | — | | ✓ | |
 | 35 | `pair_revoke` | 远程 | token | ✓ | ✓ | |
+| 35a | `webui_access_set` | 远程 v5.22 | mode, macs? | | ✓ | 远程请求不得锁住自己(409 `self_lockout`) |
 | 36 | `clsact_check` | 诊断 §11.3 | — | | ✓ | |
 | 37 | `clsact_repair` | 诊断 | — | | ✓ | |
 | 38 | `clsact_bpf_enabled_set` | 诊断/设置 | enabled | | ✓ | |
@@ -2058,3 +2070,21 @@ GET `/api/encdns`:
 - `/api/app_usage`:顶层 `inferred_bytes`;`by_app[].inferred_bytes`(该应用字节中推测来的部分,界面可标「推测」)。
 - `/api/dpi_unknown`:新增 `tunnel_bytes`、`inferred_bytes`(已从「未识别」里分出去的两块)。
 - 日文件 `run/app_usage.YYYYMMDD.json` 新增可选字段 `inferred: {"mac|app": [up, down]}`(旧文件兼容)。
+
+## 20. v5.22 功耗:GET `/api/power` + `run/activity.json`
+
+> 来源:`daemon/hnc_httpd/power_activity.go`(活动状态)、`power_sched.go`(间隔策略表)、`power_stats.go`(自测采样);
+> shell 侧 `bin/hnc_activity.sh`;dpid 侧 `src/dpid/activity`。鉴权、只读、GET。
+
+- `GET /api/power[?refresh=1]`(`refresh=1` 立即补采一次,距上次 <10s 时忽略):
+  - `activity`:`{ts, level, screen_on, screen_known, screen_source(backlight|power|display|none), hotspot_active, hotspot_iface, clients_online, webui_active, sse_clients, last_api_ago_s, ct_precise, known}`
+  - `level` / `level_label`:`active` 活跃 | `background` 后台(熄屏且无界面)| `no_clients` 热点开着无在线设备 | `hotspot_off` 热点未开 | `unknown`
+  - `processes[]`:`{name, label, pid, alive, cpu_pct_5m, cpu_pct_1h, cpu_pct_since_start, cpu_sec_per_hour, basis(1h|5m|since_start|none), wakeups_per_min, rss_kb, window_5m_s, window_1h_s}`;
+    name ∈ `hnc_httpd`(含它拉起的脚本)、`hotspotd`、`hnc_dpid`、`dpid_guard`、`watchdog`、`offload_guard`、`clsact_wd`。CPU 含已回收子进程与存活后代;`cpu_pct_*` 为单核百分比。
+  - `total`:`{cpu_pct_5m, cpu_pct_1h, cpu_sec_per_hour, wakeups_per_min, rss_kb}`
+  - `by_level[]`:`{level, label, seconds, cpu_sec, cpu_sec_per_hour}`(httpd 启动以来各档位下的合计 CPU,对比亮屏/熄屏用)
+  - `loops[]`:`{name, label, owner(httpd|watchdog|offload_guard|dpid|dpid_guard), base_interval_s, current_interval_s, multiplier, reason, critical, mirror, last_run_ago_s}`
+  - `tips[]`:中文建议;`ts`、`sampled_at`、`sample_every_s`(300)、`samples`
+- 同内容每次采样写 `run/power_stats.json`;自检「进程与资源」新增 `power`(功耗)项。
+- `run/activity.json`:httpd 每 15s 探测,变化或每 60s 写一次;单行 JSON,字段顺序固定(shell 用模式匹配读,勿重排)。
+  超过 180s(shell)/120s(dpid)未更新视为不可信,全部回到基准间隔。

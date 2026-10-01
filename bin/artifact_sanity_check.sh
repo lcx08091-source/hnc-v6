@@ -36,6 +36,20 @@ ANY_MODULE=$(grep -E '(^|/)module\.prop$' "$TMP.entries" | head -1)
 NESTED_ZIPS=$(grep -E '\.zip$' "$TMP.entries" | sed '/^$/d')
 NESTED_COUNT=$(printf '%s\n' "$NESTED_ZIPS" | sed '/^$/d' | wc -l | tr -d ' ')
 
+# v5.22: 期望 ABI —— HNC_EXPECT_ABI 环境变量 > 包内 bin/hnc_pkg_abi > 历史默认 arm64-v8a。
+# arm64 包: AArch64 = OK, 32 位 ARM = WARN(保持旧行为); armv7 包: ARM = OK, 其他 = FAIL。
+EXPECT_ABI="${HNC_EXPECT_ABI:-}"
+if [ -z "$EXPECT_ABI" ] && grep -x 'bin/hnc_pkg_abi' "$TMP.entries" >/dev/null 2>&1; then
+  EXPECT_ABI=$(unzip -p "$ZIP" bin/hnc_pkg_abi 2>/dev/null | head -n 1 | tr -d ' \r\n')
+fi
+[ -n "$EXPECT_ABI" ] || EXPECT_ABI=arm64-v8a
+case "$EXPECT_ABI" in
+  arm64-v8a)   WANT_MACHINE="b7 00" ;;
+  armeabi-v7a) WANT_MACHINE="28 00" ;;
+  *) fail "unknown expected ABI: $EXPECT_ABI"; WANT_MACHINE="?" ;;
+esac
+say "expected ABI=$EXPECT_ABI"
+
 if [ -n "$ROOT_MODULE" ]; then
   ok "module.prop is at ZIP root; package is directly flashable"
 else
@@ -51,7 +65,7 @@ fi
 [ "$NESTED_COUNT" -gt 0 ] && fail "artifact contains nested ZIP(s); use the inner module ZIP or fix packaging: $(printf '%s' "$NESTED_ZIPS" | tr '\n' ' ')" || ok "artifact has no nested ZIP"
 grep -E '\.rej$|\.orig$' "$TMP.entries" >/dev/null && fail "artifact contains .rej/.orig patch residue" || ok "artifact has no .rej/.orig residue"
 grep -E '(^|/)(\.ssh|id_rsa|id_ed25519|.*_ed25519|.*_rsa|.*\.pem)$' "$TMP.entries" >/dev/null && fail "artifact may contain private key/secret files" || ok "artifact has no obvious private key/secret files"
-for req in webroot/index.html webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_watchdog.sh bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh; do
+for req in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/main.js webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.json bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_watchdog.sh bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh customize.sh bin/hnc_arch.sh; do
   grep -x "$req" "$TMP.entries" >/dev/null && ok "required file exists: $req" || fail "required file missing at ZIP root path: $req"
 done
 
@@ -75,8 +89,9 @@ if grep -x 'bin/hnc_dpid' "$TMP.entries" >/dev/null; then
     if command -v od >/dev/null 2>&1; then
       DPID_MACHINE=$(od -An -tx1 -j18 -N2 "$TMP.extract/hnc_dpid" 2>/dev/null | awk '{print $1 " " $2}')
       case "$DPID_MACHINE" in
-        "b7 00") ok "hnc_dpid is AArch64 ELF: machine=$DPID_MACHINE" ;;
-        "28 00") warn "hnc_dpid is 32-bit ARM ELF: machine=$DPID_MACHINE; expected arm64 package?" ;;
+        "$WANT_MACHINE") ok "hnc_dpid matches $EXPECT_ABI: machine=$DPID_MACHINE" ;;
+        "28 00") warn "hnc_dpid is 32-bit ARM ELF: machine=$DPID_MACHINE; expected $EXPECT_ABI package?" ;;
+        "b7 00") fail "hnc_dpid is AArch64 ELF in a $EXPECT_ABI package: machine=$DPID_MACHINE" ;;
         *) fail "hnc_dpid is not Android ARM/AArch64 ELF, machine=$DPID_MACHINE" ;;
       esac
     else
@@ -104,7 +119,7 @@ if grep -x 'daemon/hnc_httpd/hnc_httpd' "$TMP.entries" >/dev/null; then
     ok "hnc_httpd binary can be extracted"
     if command -v od >/dev/null 2>&1; then
       MACHINE=$(od -An -tx1 -j18 -N2 "$TMP.extract/hnc_httpd" 2>/dev/null | awk '{print $1 " " $2}')
-      case "$MACHINE" in "b7 00") ok "hnc_httpd is AArch64 ELF: machine=$MACHINE" ;; "28 00") warn "hnc_httpd is 32-bit ARM ELF: machine=$MACHINE; expected arm64 package?" ;; *) fail "hnc_httpd is not Android ARM/AArch64 ELF, machine=$MACHINE" ;; esac
+      case "$MACHINE" in "$WANT_MACHINE") ok "hnc_httpd matches $EXPECT_ABI: machine=$MACHINE" ;; "28 00") warn "hnc_httpd is 32-bit ARM ELF: machine=$MACHINE; expected $EXPECT_ABI package?" ;; "b7 00") fail "hnc_httpd is AArch64 ELF in a $EXPECT_ABI package: machine=$MACHINE" ;; *) fail "hnc_httpd is not Android ARM/AArch64 ELF, machine=$MACHINE" ;; esac
     else warn "od not available; skipped hnc_httpd ELF machine check"; fi
     if command -v strings >/dev/null 2>&1; then
       strings "$TMP.extract/hnc_httpd" > "$TMP.httpd.strings" 2>/dev/null
@@ -118,6 +133,33 @@ if grep -x 'daemon/hnc_httpd/hnc_httpd' "$TMP.entries" >/dev/null; then
     else warn "strings not available; skipped hnc_httpd version/API symbol checks"; fi
   else fail "hnc_httpd extraction failed or produced empty file"; fi
 fi
+# v5.22: 全部原生二进制 ABI 一致性(混架构是多 ABI
+# 打包最可能出的错: 某个构建步骤忘了传 arch, arm64 产物混进 armv7 包)。
+# (customize.sh / bin/hnc_arch.sh 已并入上方 required file 清单)
+_elf_machine() { # <zip-entry> → "b7 00" / "28 00" / ...
+  unzip -p "$ZIP" "$1" 2>/dev/null | head -c 20 > "$TMP.elfhdr" 2>/dev/null
+  od -An -tx1 -j18 -N2 "$TMP.elfhdr" 2>/dev/null | awk '{print $1 " " $2}'
+}
+if command -v od >/dev/null 2>&1; then
+  for b in bin/hotspotd bin/hnc_ipc bin/mdns_resolve bin/hnc_tc_ingress bin/hnc_clsact_ctl \
+           bin/hnc_launcher bin/fork_probe bin/hnc_dpid bin/hnc_watchdog bin/hnc_dpid_supervisor \
+           daemon/hnc_httpd/hnc_httpd; do
+    grep -x "$b" "$TMP.entries" >/dev/null || continue
+    M=$(_elf_machine "$b")
+    [ "$M" = "$WANT_MACHINE" ] && ok "ABI $EXPECT_ABI: $b" || fail "ABI mismatch: $b machine='$M' (want $WANT_MACHINE for $EXPECT_ABI)"
+  done
+  # 可选的通用包覆盖层 bin/<abi>/*: 每层内二进制必须与该层 ABI 一致
+  for ov in arm64-v8a armeabi-v7a; do
+    case "$ov" in arm64-v8a) OW="b7 00" ;; *) OW="28 00" ;; esac
+    for b in $(grep -E "^bin/$ov/[^/]+$" "$TMP.entries"); do
+      M=$(_elf_machine "$b")
+      [ "$M" = "$OW" ] && ok "overlay ABI $ov: $b" || fail "overlay ABI mismatch: $b machine='$M' (want $OW)"
+    done
+  done
+else
+  warn "od not available; skipped per-binary ABI consistency check"
+fi
+
 say "summary: failures=$FAIL warnings=$WARN"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0

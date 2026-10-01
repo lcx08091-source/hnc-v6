@@ -1,3 +1,15 @@
+<!-- v5.22.0-rc1 -->
+<div class="cl-section">
+  <div class="cl-title">🔋 v5.22.0-rc1(预览版): 更省电 + 更安全 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-10-01</span></div>
+  <ul class="cl-list">
+    <li><b>更省电</b>: 热点没开、没设备连接、熄屏没人看界面时, 后台会自动放慢; 限速、配额、分时段照常准时生效。顺带修掉了几处热点关着时还在空转的地方。</li>
+    <li><b>能看到耗电</b>: 自检里新增「功耗」, 显示各后台进程每小时用了多少 CPU。</li>
+    <li><b>更安全</b>: 配对码防暴力猜测; 可以设置只允许指定设备打开 WebUI; 蜂窝网络上不再能访问到 WebUI。</li>
+    <li><b>支持 32 位手机</b>: 新增 armv7 安装包, 刷错包会提示该刷哪个。</li>
+    <li>界面代码拆成了多个文件, 以后更好维护; 用起来和之前一样。</li>
+  </ul>
+</div>
+
 <!-- v5.21.0-rc1 -->
 <div class="cl-section">
   <div class="cl-title">🎯 v5.21.0-rc1(预览版): 更准 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-10-01</span></div>
@@ -3406,7 +3418,4 @@
 
       </div><!-- /cl-history -->
 
-      <button class="cl-more-btn" id="cl-more-btn" onclick="toggleHistory()">
-        <span id="cl-more-text">查看历史版本</span>
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="6 9 12 15 18 9"/></svg>
-      </button>
+      <!-- 历史版本默认全部展开(应用内显示时内联事件会被过滤, 也受 CSP 限制, 因此不再放折叠按钮) -->

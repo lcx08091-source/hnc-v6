@@ -295,7 +295,6 @@ svg{display:block}
   var $ = function (s, r) { return (r || document).querySelector(s); }, $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
   var LS = { get: function (k, d) { try { var v = localStorage.getItem(k); return v == null ? d : v; } catch (_) { return d; } }, set: function (k, v) { try { localStorage.setItem(k, v); } catch (_) {} } };
   function esc(s) { return String(s).replace(/[&<>"]/g, function (c) { return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]; }); }
-  var calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
   var I = {
     tv: '<rect x="3" y="5" width="18" height="12" rx="2.5"/><path d="M8 21h8M12 17v4"/>',
@@ -489,7 +488,6 @@ svg{display:block}
     el.addEventListener('pointerup', up); el.addEventListener('pointercancel', up);
     el.addEventListener('keydown', function (e) { var d = e.key === 'ArrowRight' ? .05 : e.key === 'ArrowLeft' ? -.05 : 0; if (d) { e.preventDefault(); onV(paintSl(el, +el.getAttribute('data-v') + d), true); } });
   }
-  var retune = 0;
   var SLH = {
     tint: function (v) { GL.tint = +Math.max(.08, Math.min(.98, 1 - v)).toFixed(2); applyTint(); LS.set('hg.tint', GL.tint); },
     refr: function (v, end) { GL.refr = +(v * 2).toFixed(2); LS.set('hg.refr', GL.refr); if (end) hxAll(); },

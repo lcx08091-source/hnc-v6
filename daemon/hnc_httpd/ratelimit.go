@@ -1,7 +1,7 @@
 // ratelimit.go — Patch 2.b per-IP rate limiter (v4_0_design_v2.1 §5)
 //
 // 三类限流分开桶(避免互相影响):
-//   A. PIN verify: 5 次 / 分钟 → 超限锁 10 分钟(防爆破)
+//   A. PIN verify: 5 次 / 10 分钟 → 锁 10 分钟, 再犯指数退避至 4 小时(v5.22, 防爆破)
 //   B. 未鉴权请求: 20 次 / 秒 token bucket(防 DoS)
 //   C. 已鉴权请求: 不限流(可信客户端)
 //
@@ -20,10 +20,19 @@ import (
 )
 
 const (
-	rlMaxEntries       = 512
-	rlPinAttemptsMax   = 5                // PIN 错误次数上限
-	rlPinLockDuration  = 10 * time.Minute // PIN 锁定时长
-	rlPinWindow        = 1 * time.Minute  // PIN 错误计数窗口(独立于 lock)
+	rlMaxEntries      = 512
+	rlPinAttemptsMax  = 5                // PIN 错误次数上限
+	rlPinLockDuration = 10 * time.Minute // PIN 首次锁定时长(之后按 rlPinLockouts 指数退避)
+	// v5.22: 计数窗口 1 分钟 → 10 分钟(5 次 / 10 分钟 / IP)。旧的 1 分钟窗口下
+	// 每分钟只猜 4 次的慢速爆破永远不触发锁定。
+	rlPinWindow = 10 * time.Minute
+	// v5.22: 指数退避 —— 同一 IP 第 n 次被锁, 锁定时长 = rlPinLockDuration * 2^(n-1),
+	// 封顶 rlPinLockMax。退避记忆在最后一次锁定结束后保留 rlPinBackoffMemory,
+	// GC 不回收(否则攻击者等 15 分钟 TTL 让条目被 GC 就能把退避清零)。
+	rlPinLockMax       = 4 * time.Hour
+	rlPinBackoffMemory = 24 * time.Hour
+	// v5.22: 全局窗口独立于 per-IP 窗口(保持 v5.11 的 20 次/分钟语义)
+	rlPinGlobalWindow  = 1 * time.Minute
 	rlUnauthCapacity   = 20.0             // 未鉴权 token bucket 容量
 	rlUnauthRefillRate = 20.0             // 每秒填充 tokens
 	rlEntryTTL         = 15 * time.Minute // GC 门槛
@@ -46,12 +55,16 @@ const (
 	rlPinGlobalMaxPerWindow = 20
 )
 
+// rlNow v5.22: 可替换时钟(测试用 fake clock 验证锁定/退避时长), 生产恒为 time.Now。
+var rlNow = time.Now
+
 // rlEntry 单个 IP 的限流状态
 type rlEntry struct {
 	ip               string
 	pinAttempts      int
 	pinWindowStart   int64
 	pinLockTS        int64 // Unix ts,> now 时处于锁定
+	pinLockouts      int   // v5.22: 累计锁定次数(指数退避), 见 rlPinLockMax
 	unauthTokens     float64
 	unauthLastRefill int64
 	lastSeen         int64
@@ -65,8 +78,35 @@ type RateLimiter struct {
 	// rc3.1.13.2: LRU 全锁时的降级 bucket
 	globalTokens     float64
 	globalLastRefill int64
-	// v5.11: 全局 PIN 尝试滑动窗口(rlPinWindow 内每次消费的 unix 秒, 旧→新)
+	// v5.11: 全局 PIN 尝试滑动窗口(rlPinGlobalWindow 内每次消费的 unix 秒, 旧→新)
 	pinGlobalTS []int64
+	// v5.22: 计数器(只增), 供 pair_guard.go 判断"本次是否刚触发锁定/全局上限"
+	pinLockEvents int64
+	pinGlobalHits int64
+}
+
+// pinLockSeconds v5.22: 第 n 次锁定的时长(秒) = base * 2^(n-1), 封顶 rlPinLockMax。
+func pinLockSeconds(n int) int64 {
+	base := int64(rlPinLockDuration.Seconds())
+	max := int64(rlPinLockMax.Seconds())
+	if n < 1 {
+		n = 1
+	}
+	d := base
+	for i := 1; i < n; i++ {
+		d *= 2
+		if d >= max {
+			return max
+		}
+	}
+	return d
+}
+
+// PinCounters v5.22: 返回 (累计锁定事件数, 累计全局上限拒绝数)。
+func (rl *RateLimiter) PinCounters() (lockEvents, globalHits int64) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.pinLockEvents, rl.pinGlobalHits
 }
 
 // NewRateLimiter 创建空 limiter
@@ -75,7 +115,7 @@ func NewRateLimiter() *RateLimiter {
 		entries:          make(map[string]*list.Element),
 		lru:              list.New(),
 		globalTokens:     rlGlobalCapacity,
-		globalLastRefill: time.Now().Unix(),
+		globalLastRefill: rlNow().Unix(),
 	}
 }
 
@@ -134,7 +174,7 @@ func (rl *RateLimiter) evictOldestLocked(now int64) bool {
 func (rl *RateLimiter) CheckPinVerify(ip string) (allowed bool, retryAfter int64) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	now := time.Now().Unix()
+	now := rlNow().Unix()
 	e := rl.getOrCreate(ip, now)
 	if e == nil {
 		return false, int64(rlPinLockDuration.Seconds())
@@ -166,7 +206,7 @@ func (rl *RateLimiter) CheckPinVerify(ip string) (allowed bool, retryAfter int64
 func (rl *RateLimiter) ConsumePinAttempt(ip string) (allowed bool, retryAfter int64, remaining int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	now := time.Now().Unix()
+	now := rlNow().Unix()
 	e := rl.getOrCreate(ip, now)
 	if e == nil {
 		// LRU 全锁定 / 内存压力 → 拒
@@ -178,14 +218,16 @@ func (rl *RateLimiter) ConsumePinAttempt(ip string) (allowed bool, retryAfter in
 	}
 	// v5.11: 全局上限(见 rlPinGlobalMaxPerWindow)。超额时不消耗 per-IP 名额,
 	// 让合法用户在窗口滑过后仍有完整的 per-IP 次数。
+	gWinSec := int64(rlPinGlobalWindow.Seconds())
 	winSec := int64(rlPinWindow.Seconds())
 	keep := 0
-	for keep < len(rl.pinGlobalTS) && now-rl.pinGlobalTS[keep] >= winSec {
+	for keep < len(rl.pinGlobalTS) && now-rl.pinGlobalTS[keep] >= gWinSec {
 		keep++
 	}
 	rl.pinGlobalTS = rl.pinGlobalTS[keep:]
 	if len(rl.pinGlobalTS) >= rlPinGlobalMaxPerWindow {
-		retry := rl.pinGlobalTS[0] + winSec - now
+		rl.pinGlobalHits++
+		retry := rl.pinGlobalTS[0] + gWinSec - now
 		if retry < 1 {
 			retry = 1
 		}
@@ -200,7 +242,11 @@ func (rl *RateLimiter) ConsumePinAttempt(ip string) (allowed bool, retryAfter in
 	// 原子占用: 计数 +1, 若达到上限立即锁定本次也算 allowed=false
 	e.pinAttempts++
 	if e.pinAttempts >= rlPinAttemptsMax {
-		e.pinLockTS = now + int64(rlPinLockDuration.Seconds())
+		e.pinLockouts++
+		e.pinLockTS = now + pinLockSeconds(e.pinLockouts)
+		e.pinAttempts = 0
+		e.pinWindowStart = 0
+		rl.pinLockEvents++
 		return false, e.pinLockTS - now, 0
 	}
 	return true, 0, rlPinAttemptsMax - e.pinAttempts
@@ -216,7 +262,7 @@ func (rl *RateLimiter) ConsumePinAttempt(ip string) (allowed bool, retryAfter in
 func (rl *RateLimiter) RegisterPinFail(ip string) (locked bool, remaining int) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	now := time.Now().Unix()
+	now := rlNow().Unix()
 	e := rl.getOrCreate(ip, now)
 	if e == nil {
 		return false, 0
@@ -243,6 +289,7 @@ func (rl *RateLimiter) ResetPin(ip string) {
 		e.pinAttempts = 0
 		e.pinLockTS = 0
 		e.pinWindowStart = 0
+		e.pinLockouts = 0
 	}
 }
 
@@ -252,7 +299,7 @@ func (rl *RateLimiter) ResetPin(ip string) {
 func (rl *RateLimiter) CheckUnauth(ip string) (allowed bool, retryAfter int64) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	now := time.Now().Unix()
+	now := rlNow().Unix()
 	e := rl.getOrCreate(ip, now)
 	if e == nil {
 		// LRU 全锁定 → 降级到全局 bucket
@@ -303,7 +350,7 @@ func (rl *RateLimiter) GCLoop(stop <-chan struct{}) {
 func (rl *RateLimiter) gc() {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	now := time.Now().Unix()
+	now := rlNow().Unix()
 	ttlSec := int64(rlEntryTTL.Seconds())
 	// 从尾部扫,删 lastSeen 太老且未锁定的
 	var victims []*list.Element
@@ -311,6 +358,10 @@ func (rl *RateLimiter) gc() {
 		entry := e.Value.(*rlEntry)
 		if entry.pinLockTS > now {
 			continue // 锁定中保留
+		}
+		// v5.22: 退避记忆期内保留(见 rlPinBackoffMemory)
+		if entry.pinLockouts > 0 && now-entry.pinLockTS < int64(rlPinBackoffMemory.Seconds()) {
+			continue
 		}
 		if now-entry.lastSeen > ttlSec {
 			victims = append(victims, e)

@@ -51,6 +51,7 @@
 #   hnc_offload_guard.sh restore             撤销本脚本施加的一切(cleanup.sh 用)
 #   hnc_offload_guard.sh mode                打印生效模式 auto|on|off
 #   hnc_offload_guard.sh clsact_wanted [if]  exit 0 = 该装 clsact(tc_manager/watchdog 用)
+#   hnc_offload_guard.sh plan                跑一轮并打印下一次 sleep 秒数与早醒条件(v5.22 功耗)
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
@@ -68,10 +69,28 @@ CHECK_CMD="${HNC_GUARD_CHECK_CMD:-sh $HNC_DIR/bin/check_offload.sh}"
 SYS_NET="${HNC_SYS_NET:-/sys/class/net}"
 INTERVAL="${HNC_GUARD_INTERVAL:-60}"
 RESTORE_AFTER="${HNC_GUARD_RESTORE_AFTER:-3}"
+# v5.22 功耗: 热点未开/无在线设备且未在兜底时, 完整检测(check_offload.sh 含 sleep 5 采样)
+# 放慢到 IDLE_INTERVAL, 期间每 IDLE_CHUNK 秒用内建命令看 run/activity.json, 一有设备立即检测。
+# 兜底生效(fallback_active)时永远按 INTERVAL(≤60s)重申 —— system_server 会改写 limit_map。
+IDLE_INTERVAL="${HNC_GUARD_IDLE_INTERVAL:-300}"
+IDLE_CHUNK="${HNC_GUARD_IDLE_CHUNK:-30}"
 IFB_IFACE="${IFB_IFACE:-ifb0}"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [offload-guard] $*" >> "$LOG_FILE" 2>/dev/null; }
 now_s() { date +%s 2>/dev/null || echo 0; }
+
+# v5.22: activity.json 读取器(纯内建); 缺失时永不放慢
+if [ -f "$HNC_DIR/bin/hnc_activity.sh" ]; then
+    . "$HNC_DIR/bin/hnc_activity.sh"
+elif [ -f "${0%/*}/hnc_activity.sh" ]; then
+    . "${0%/*}/hnc_activity.sh"
+fi
+command -v hnc_act_load >/dev/null 2>&1 || {
+    hnc_act_load() { ACT_OK=0; return 1; }
+    hnc_act_sleep_until() { sleep "$1"; return 1; }
+}
+GUARD_LAST_MODE=""
+GUARD_LAST_FB=0
 
 # ── 模式解析 ─────────────────────────────────────────────────────────
 guard_mode() {
@@ -253,6 +272,7 @@ tick() {
         fi
         st_save 0 0 0
         write_status off "SKIPPED" 0 0 "已关闭: 不检测、不干预 offload" "n/a" "off" "$ifc"
+        GUARD_LAST_MODE=off; GUARD_LAST_FB=0
         return 0
     fi
 
@@ -322,6 +342,25 @@ tick() {
     fi
     st_save "$fb" "$since" "$calm"
     write_status "$mode" "$state" "$fb" "$since" "$detail" "$sp" "$cl" "$ifc"
+    GUARD_LAST_MODE=$mode; GUARD_LAST_FB=$fb
+}
+
+# v5.22: 本轮之后睡多久 → GUARD_PLAN_TOTAL; 早醒条件 → GUARD_PLAN_WAKE(空 = 普通 sleep)
+# 只在「activity 新鲜 + 热点未开或无在线设备 + 未在兜底」时放慢(与 power_sched.go offload_guard 一致)。
+guard_plan_sleep() {
+    GUARD_PLAN_TOTAL=$INTERVAL
+    GUARD_PLAN_WAKE=""
+    [ "$GUARD_LAST_FB" = 1 ] && return 0
+    hnc_act_load "$(now_s)" || return 0
+    [ "$ACT_OK" = 1 ] || return 0
+    case "$ACT_LEVEL" in
+        hotspot_off|no_clients) ;;
+        *) return 0 ;;
+    esac
+    [ "$IDLE_INTERVAL" -gt "$INTERVAL" ] 2>/dev/null || return 0
+    GUARD_PLAN_TOTAL=$IDLE_INTERVAL
+    # on 模式: 热点一开就要强制慢路径; auto: 没有客户端就不可能有 offload 转发
+    if [ "$GUARD_LAST_MODE" = on ]; then GUARD_PLAN_WAKE=hotspot; else GUARD_PLAN_WAKE=clients; fi
 }
 
 ensure_daemon() {
@@ -343,8 +382,19 @@ case "${1:-}" in
         [ -n "$HNC_TEST_MODE" ] || sleep 20
         while true; do
             tick
-            sleep "$INTERVAL"
+            guard_plan_sleep
+            if [ -n "$GUARD_PLAN_WAKE" ]; then
+                hnc_act_sleep_until "$GUARD_PLAN_TOTAL" "$IDLE_CHUNK" "$GUARD_PLAN_WAKE"
+            else
+                sleep "$INTERVAL"
+            fi
         done
+        ;;
+    plan)
+        # 测试/诊断: 跑一轮并打印「下一次睡多久 早醒条件」
+        tick
+        guard_plan_sleep
+        echo "$GUARD_PLAN_TOTAL ${GUARD_PLAN_WAKE:-none}"
         ;;
     apply)
         tick
@@ -364,7 +414,7 @@ case "${1:-}" in
         exit $?
         ;;
     *)
-        echo "usage: $0 daemon|apply|restore|mode|clsact_wanted [iface]" >&2
+        echo "usage: $0 daemon|apply|restore|mode|clsact_wanted [iface]|plan" >&2
         exit 4
         ;;
 esac

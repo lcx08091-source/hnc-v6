@@ -1,0 +1,164 @@
+/* HNC WebUI · apple.css —— 苹果风(html[data-style="apple"]): 只覆盖视觉与动效, 结构/逻辑与默认风格共用 */
+[data-style="apple"] .press:active{transform:scale(.97);transition:transform .1s ease-out}
+
+/* ═════════════ 苹果风主题(html[data-style="apple"]) ═════════════
+   只覆盖视觉与动效, 结构/逻辑与默认风格共用。规范:
+   8pt 间距 · 34/22/17/13 字号层级 · iOS 分组圆角列表 · 单一强调色 #007AFF ·
+   深色纯黑底 + #1C1C1E 卡片 · 少边框少阴影。 */
+:root[data-style="apple"]{
+  --bg:#F2F2F7; --card:#fff; --card-2:#fff; --card-solid:#fff;
+  --text-1:#000; --text-2:rgba(60,60,67,.78); --text-3:rgba(60,60,67,.6); --text-4:rgba(60,60,67,.3);
+  --stroke:rgba(60,60,67,.12); --stroke-2:rgba(60,60,67,.18);
+  --input:rgba(118,118,128,.12); --divider:rgba(60,60,67,.2);
+  --shadow:none; --shadow-2:none; --shadow-3:0 10px 40px rgba(0,0,0,.14);
+  --scrim:rgba(0,0,0,.3); --lens-glass:rgba(255,255,255,.3);
+  --r-lg:14px; --r-md:12px;
+  --ap-fill-2:rgba(120,120,128,.16); --ap-thumb:#fff; --ap-grouped:#F2F2F7; --ap-inset:#F2F2F7;
+}
+@media (prefers-color-scheme: dark){
+  :root[data-style="apple"]:not([data-theme="light"]){
+    --bg:#000; --card:#1C1C1E; --card-2:#1C1C1E; --card-solid:#1C1C1E;
+    --text-1:#fff; --text-2:rgba(235,235,245,.78); --text-3:rgba(235,235,245,.6); --text-4:rgba(235,235,245,.3);
+    --stroke:rgba(84,84,88,.5); --stroke-2:rgba(84,84,88,.65);
+    --input:rgba(118,118,128,.24); --divider:rgba(84,84,88,.65);
+    --shadow-3:0 10px 40px rgba(0,0,0,.6); --scrim:rgba(0,0,0,.48); --lens-glass:rgba(255,255,255,.12);
+    --ap-fill-2:rgba(120,120,128,.32); --ap-thumb:#636366; --ap-grouped:#000; --ap-inset:#2C2C2E;
+  }
+}
+:root[data-style="apple"][data-theme="dark"]{
+  --bg:#000; --card:#1C1C1E; --card-2:#1C1C1E; --card-solid:#1C1C1E;
+  --text-1:#fff; --text-2:rgba(235,235,245,.78); --text-3:rgba(235,235,245,.6); --text-4:rgba(235,235,245,.3);
+  --stroke:rgba(84,84,88,.5); --stroke-2:rgba(84,84,88,.65);
+  --input:rgba(118,118,128,.24); --divider:rgba(84,84,88,.65);
+  --shadow-3:0 10px 40px rgba(0,0,0,.6); --scrim:rgba(0,0,0,.48); --lens-glass:rgba(255,255,255,.12);
+  --ap-fill-2:rgba(120,120,128,.32); --ap-thumb:#636366; --ap-grouped:#000; --ap-inset:#2C2C2E;
+}
+[data-style="apple"] body{font-size:17px;line-height:1.35;letter-spacing:-.01em}
+[data-style="apple"] .mesh{display:none}
+[data-style="apple"] .num{font-family:var(--font);font-variant-numeric:tabular-nums;letter-spacing:-.01em}
+/* 卡片: 纯色、无描边、无阴影、无高光描边 */
+[data-style="apple"] .glass{border:0;box-shadow:none;border-radius:var(--r-lg)}
+[data-style="apple"] .glass::before{display:none}
+/* 版式: 16px 页边距, 分组之间 28px, 组标题 13px 灰色 */
+[data-style="apple"] .page{padding-left:16px;padding-right:16px}
+[data-style="apple"] .wrap,[data-style="apple"] .cols,[data-style="apple"] .cols>div{gap:8px}
+[data-style="apple"] .sec:not(.btn){font-size:13px;font-weight:400;color:var(--text-3);padding:20px 16px 6px!important;letter-spacing:0}
+[data-style="apple"] .sec:not(.btn) small{font-size:13px;font-weight:400}
+[data-style="apple"] .sec:not(.btn) .r,[data-style="apple"] .sec:not(.btn) .linkish{font-size:13px}
+/* 分组圆角列表: 44pt 行高, 17/13 字号, 缩进分隔线(从文字处开始) */
+[data-style="apple"] .row,[data-style="apple"] .row-h,[data-style="apple"] .card-h{min-height:44px;padding:11px 16px!important;gap:14px}
+[data-style="apple"] .row .t,[data-style="apple"] .row-h .t,[data-style="apple"] .card-h .t{font-size:17px;font-weight:400}
+[data-style="apple"] .row .s,[data-style="apple"] .row-h .s,[data-style="apple"] .card-h .s{font-size:13px;margin-top:2px}
+[data-style="apple"] .row .v{font-size:17px;font-weight:400;color:var(--text-3)}
+[data-style="apple"] .row+.row,[data-style="apple"] .row-wrap+.row-wrap,[data-style="apple"] .row+.row-wrap,[data-style="apple"] .row-wrap+.row{border-top:0}
+[data-style="apple"] .row+.row::before,[data-style="apple"] .row-wrap+.row-wrap::before,[data-style="apple"] .row+.row-wrap::before,[data-style="apple"] .row-wrap+.row::before{
+  content:"";position:absolute;top:0;right:0;left:16px;height:.5px;background:var(--divider);pointer-events:none}
+[data-style="apple"] .row-wrap{position:relative}
+[data-style="apple"] .row:has(>.gi)+.row::before,[data-style="apple"] .row+.row:has(>.gi)::before,[data-style="apple"] .row-wrap+.row-wrap::before,
+[data-style="apple"] .row+.row-wrap::before,[data-style="apple"] .row-wrap+.row::before{left:59px}
+[data-style="apple"] button.row:active,[data-style="apple"] .row-h button:active{background:var(--ap-fill-2)}
+[data-style="apple"] .set-body{padding:0 16px 16px;gap:12px}
+[data-style="apple"] .set-body .row{padding:6px 0!important;min-height:0}
+[data-style="apple"] .set-body .row+.row::before{left:0}
+/* iOS 设置式图标: 29pt 纯色圆角方块 */
+[data-style="apple"] .gi{width:29px;height:29px;border-radius:7px;background:var(--a);box-shadow:none}
+[data-style="apple"] .gi svg{width:17px;height:17px}
+[data-style="apple"] .gi.gray{--a:#8E8E93}
+/* 开关: 51×31 */
+[data-style="apple"] .toggle{width:51px;height:31px;border-radius:16px;background:var(--ap-fill-2)}
+[data-style="apple"] .toggle::after{width:27px;height:27px;border-radius:14px;box-shadow:0 3px 8px rgba(0,0,0,.15),0 3px 1px rgba(0,0,0,.06)}
+[data-style="apple"] .toggle:active::after{width:33px}
+[data-style="apple"] .toggle[aria-checked="true"]{background:var(--green)}
+[data-style="apple"] .toggle[aria-checked="true"]::after{transform:translateX(20px)}
+[data-style="apple"] .toggle[aria-checked="true"]:active::after{transform:translateX(14px)}
+/* 按钮: 纯色、无阴影; 次要按钮用填充色 */
+[data-style="apple"] .btn{height:50px;border-radius:12px;font-size:17px;font-weight:600}
+[data-style="apple"] .btn.pri{background:var(--blue);box-shadow:none}
+[data-style="apple"] .btn.sec{background:var(--input);border:0}
+[data-style="apple"] .btn.dan{background:var(--input);color:var(--red)}
+[data-style="apple"] .btn.ok{background:var(--input);color:var(--green)}
+[data-style="apple"] .btns{gap:10px}
+[data-style="apple"] .chip{background:var(--input);border:0;box-shadow:none;height:34px;font-weight:600}
+[data-style="apple"] .chip.on{background:var(--blue);box-shadow:none}
+[data-style="apple"] .hint-a,[data-style="apple"] .linkish{font-weight:400;font-size:17px}
+[data-style="apple"] .row .hint-a{color:var(--text-3)}
+/* 分段控件: iOS 灰轨 + 白色滑块 */
+[data-style="apple"] .seg,[data-style="apple"] .seg.glass,[data-style="apple"] .seg.small{background:var(--input);border:0;border-radius:9px;padding:2px;box-shadow:none}
+[data-style="apple"] .seg .thumb,[data-style="apple"] .seg.small .thumb{top:2px;bottom:2px;border-radius:7px;background:var(--ap-thumb);box-shadow:0 3px 8px rgba(0,0,0,.12),0 3px 1px rgba(0,0,0,.04)}
+[data-style="apple"] .seg button{height:32px;font-size:13px;font-weight:600;color:var(--text-1)}
+[data-style="apple"] .seg button.on{color:var(--text-1)}
+[data-style="apple"] .seg.small button{height:26px;font-size:12px}
+/* 输入与下拉: 填充色, 无描边 */
+[data-style="apple"] .box,[data-style="apple"] .selbox,[data-style="apple"] .textarea,[data-style="apple"] .out,[data-style="apple"] .logv{border:0;border-radius:10px}
+[data-style="apple"] .box{height:44px}
+[data-style="apple"] .box input{font-family:var(--font);font-weight:400;font-size:17px}
+[data-style="apple"] .field{font-size:13px;font-weight:400}
+[data-style="apple"] .dd-btn{border:0;background:var(--input);font-weight:400;font-size:15px}
+[data-style="apple"] .dd-menu{border:0;border-radius:13px;box-shadow:var(--shadow-3)}
+[data-style="apple"] .search{height:36px;border-radius:10px;background:var(--input);padding:0 10px}
+[data-style="apple"] .search input{font-size:17px}
+/* 设备卡 */
+[data-style="apple"] .dev.open{background:var(--card);box-shadow:none}
+[data-style="apple"] .dev.sel{box-shadow:0 0 0 2px var(--blue)}
+[data-style="apple"] .dev-h{padding:12px 16px}
+[data-style="apple"] .dev-h:active{background:var(--ap-fill-2)}
+[data-style="apple"] .av{border:0;border-radius:10px;width:42px;height:42px}
+[data-style="apple"] .av .dot{border-color:var(--card)}
+[data-style="apple"] .dev-name{font-size:17px;font-weight:600}
+[data-style="apple"] .dev-meta{font-size:13px}
+[data-style="apple"] .hero-v{font-size:28px;font-weight:600}
+[data-style="apple"] .hero-l{font-size:13px;font-weight:400;letter-spacing:0}
+[data-style="apple"] .badge{border-radius:5px;font-weight:600}
+/* 设备卡展开区: iOS 内嵌分组(浅灰块 + 白色输入框) */
+[data-style="apple"] .ctrl{border:0;border-radius:12px;background:var(--ap-inset);padding:14px}
+[data-style="apple"] .ctrl .box{background:var(--card)}
+[data-style="apple"] .ctrl .row{padding:8px 0!important;min-height:0}
+[data-style="apple"] .ctrl .row+.row::before{left:0}
+[data-style="apple"] .ctrl-t{font-size:13px;font-weight:600;letter-spacing:0;color:var(--text-2)}
+[data-style="apple"] .ctrl .btn{height:44px}
+[data-style="apple"] .dev-body{padding:0 12px 14px;gap:10px}
+[data-style="apple"] .hbar .b,[data-style="apple"] .mini-bars i{background:var(--blue)}
+/* 顶栏按钮: 去底色, 蓝色图标 */
+[data-style="apple"] .hbtn{background:none;border:0;box-shadow:none;color:var(--blue);width:36px;height:36px}
+[data-style="apple"] .hbtn svg{width:22px;height:22px}
+/* 弹层: 底部贴边、上方圆角, 与 iOS sheet 一致 */
+[data-style="apple"] .sheet{bottom:0;width:min(640px,100%);border:0;border-radius:14px 14px 0 0;padding:10px 16px calc(env(safe-area-inset-bottom,0px) + 20px);max-height:92vh}
+[data-style="apple"] .sheet h3{font-size:22px;font-weight:600}
+[data-style="apple"] .sheet .sub{font-size:13px}
+[data-style="apple"] .sheet .grab{width:36px;background:var(--text-4);margin:0 auto 14px}
+[data-style="apple"] .toast{border:0;font-weight:600;font-size:15px}
+[data-style="apple"] .theme-pick button{border:0;background:var(--input);box-shadow:0 0 0 2px transparent;font-weight:400}
+[data-style="apple"] .theme-pick button.on{box-shadow:0 0 0 2px var(--blue);color:var(--text-1)}
+[data-style="apple"] .banner{border:0}
+[data-style="apple"] .skel{border:0}
+/* 底栏: 保留液态玻璃透镜, 视觉更克制 —— 灰色选中底 + 蓝色图标 */
+[data-style="apple"] .tabbar{border:0;box-shadow:0 8px 30px rgba(0,0,0,.12);background:color-mix(in srgb,var(--card-solid) 72%,transparent);-webkit-backdrop-filter:blur(24px) saturate(180%);backdrop-filter:blur(24px) saturate(180%)}
+[data-style="apple"] .tab{color:var(--text-3);font-weight:500}
+[data-style="apple"] .lens{box-shadow:none}
+[data-style="apple"] .lens-tint{background:var(--ap-fill-2)}
+[data-style="apple"] .lens-in .tab{color:var(--blue);font-weight:600}
+[data-style="apple"] .tabbar.drag .lens-in .tab{color:var(--blue)}
+[data-style="apple"] body{padding-top:0}
+[data-style="apple"] .header{position:fixed;top:0;left:0;right:0;height:calc(env(safe-area-inset-top,0px) + 50px);padding:calc(env(safe-area-inset-top,0px) + 4px) 8px 4px 16px;
+  background:transparent;border-bottom:0;-webkit-backdrop-filter:none;backdrop-filter:none}
+[data-style="apple"] .header::before{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;background:color-mix(in srgb,var(--bg) 76%,transparent);
+  -webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);box-shadow:0 .5px 0 var(--divider);opacity:var(--hp,0)}
+[data-style="apple"] .brand{visibility:hidden}
+[data-style="apple"] .htitle{display:block;position:absolute;left:50%;bottom:13px;font-size:17px;font-weight:600;white-space:nowrap;pointer-events:none;
+  opacity:var(--st,0);transform:translate(-50%,calc((1 - var(--st,0)) * 5px))}
+[data-style="apple"] .page{padding-top:calc(env(safe-area-inset-top,0px) + 50px)}
+[data-style="apple"] .page::before{content:attr(data-title);display:block;max-width:640px;margin:0 auto 4px;padding:0 4px 6px;font-size:34px;font-weight:700;line-height:1.2;letter-spacing:.01em;
+  transform-origin:0 100%;opacity:calc(1 - var(--lt,0));transform:scale(calc(1 - var(--lt,0) * .05))}
+@media (min-width:900px){ [data-style="apple"] .page::before{max-width:1180px} }
+:root.fx-notitle[data-style="apple"] .page::before{display:none}
+:root.lowfx[data-style="apple"] .header::before{background:var(--bg)}
+:root.lowfx[data-style="apple"] .tabbar{background:var(--card-solid)}
+[data-style="apple"] .style-pick button{border:0;background:var(--input);box-shadow:0 0 0 2px transparent;font-weight:400}
+[data-style="apple"] .style-pick button.on{box-shadow:0 0 0 2px var(--blue);color:var(--text-1)}
+[data-style="apple"] .pu{padding:14px 16px}
+[data-style="apple"] .win{background:var(--ap-inset)}
+[data-style="apple"] .win .box{background:var(--card)}
+[data-style="apple"] .dfold-h .dfs{font-size:13px;font-weight:400}
+[data-style="apple"] .pbar>i{animation:none}
+[data-style="apple"] .simdev .t{font-size:17px;font-weight:400}
+[data-style="apple"] .simdev .s{font-size:13px}

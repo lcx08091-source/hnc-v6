@@ -109,8 +109,10 @@ echo "[build] OK: $OUTDIR/$BIN"
 
 # HNC v5.0 beta.1 集成: 把产物拷到模块 bin/ (daemon/tc_netlink/ -> ../../bin/)
 # 保持跟 daemon/hotspotd/build.sh 相同的习惯 (alpha.2 BINDIR fix)
-if [ "$ARCH" = "arm64" ]; then
+# v5.22: arm(armeabi-v7a) → ../../bin/armeabi-v7a/, 安装期由 customize.sh 覆盖到 bin/
+if [ "$ARCH" = "arm64" ] || [ "$ARCH" = "arm" ]; then
     BINDIR="../../bin"
+    [ "$ARCH" = "arm" ] && BINDIR="../../bin/armeabi-v7a"
     mkdir -p "$BINDIR"
     cp "$OUTDIR/$BIN" "$BINDIR/$BIN"
     chmod 755 "$BINDIR/$BIN"

@@ -959,7 +959,10 @@ func (s *server) StatsCalibrationLoop(stop <-chan struct{}) {
 			}
 		}
 		c.check(time.Now(), s.phoneUsage())
-		t.Reset(calEvery)
+		// v5.22: 基准 calEvery(15m); 热点未开且熄屏无界面 60m(power_sched.go stats_calibration)
+		d, why := powerInterval("stats_calibration", activityNow(), loopFlags{})
+		powerRecord("stats_calibration", d, why, time.Now())
+		t.Reset(d)
 	}
 }
 

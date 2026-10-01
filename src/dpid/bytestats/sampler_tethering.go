@@ -210,7 +210,7 @@ func bpfObjGetInfoCall(fd int) (*bpfMapInfo, error) {
 	binary.NativeEndian.PutUint64(pad[8:16], attrBuf.InfoPtr)
 
 	_, _, errno := syscall.Syscall(
-		sysBPF_arm64,
+		sysBPF,
 		bpfObjGetInfoByFD,
 		uintptr(unsafe.Pointer(&pad[0])),
 		unsafe.Sizeof(attrBuf),

@@ -486,6 +486,7 @@ func (c *limitCtl) Loop(stop <-chan struct{}) {
 			time.Sleep(300 * time.Millisecond) // 合并连发 poke
 		}
 		c.tick(time.Now())
+		powerRecord("limit_policy", time.Minute, "执法: 每分钟对齐, 不随状态变化", time.Now()) // v5.22: 仅供 /api/power 展示
 	}
 }
 

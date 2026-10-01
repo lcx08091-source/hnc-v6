@@ -37,9 +37,8 @@ import (
 const (
 	bpfMapPath = "/sys/fs/bpf/netd_shared/map_netd_app_uid_stats_map"
 
-	// bpf() syscall numbers per Linux ABI. arm64 = 280, amd64 = 321.
-	// We only target arm64 (Android), so hardcode.
-	sysBPF_arm64 = 280
+	// bpf() syscall number: per-arch constant sysBPF in sysbpf_<arch>.go
+	// (v5.22: arm64 = 280, arm EABI = 386, amd64 = 321, 386 = 357).
 
 	// bpf() commands.
 	bpfMapLookupElem  = 1
@@ -204,7 +203,7 @@ func bpfObjGetCall(path string) (int, error) {
 	binary.NativeEndian.PutUint32(pad[12:16], attr.FileFlags)
 
 	r1, _, errno := syscall.Syscall(
-		sysBPF_arm64,
+		sysBPF,
 		bpfObjGet,
 		uintptr(unsafe.Pointer(&pad[0])),
 		unsafe.Sizeof(attr),
@@ -237,7 +236,7 @@ func bpfMapLookupElemCall(mapFD int, key, value unsafe.Pointer) error {
 	binary.NativeEndian.PutUint64(pad[24:32], attr.Flags)
 
 	_, _, errno := syscall.Syscall(
-		sysBPF_arm64,
+		sysBPF,
 		bpfMapLookupElem,
 		uintptr(unsafe.Pointer(&pad[0])),
 		unsafe.Sizeof(attr),
@@ -264,7 +263,7 @@ func bpfMapGetNextKeyCall(mapFD int, key, nextKey unsafe.Pointer) error {
 	binary.NativeEndian.PutUint64(pad[16:24], attr.Value)
 
 	_, _, errno := syscall.Syscall(
-		sysBPF_arm64,
+		sysBPF,
 		bpfMapGetNextKey,
 		uintptr(unsafe.Pointer(&pad[0])),
 		unsafe.Sizeof(attr),

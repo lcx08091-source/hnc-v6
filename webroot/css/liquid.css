@@ -1,0 +1,101 @@
+/* HNC WebUI · liquid.css —— 液态玻璃(html[data-glass="liquid"], 叠在苹果风之上) */
+/* ═══ 液态玻璃(data-glass="liquid", 叠在苹果风之上) ═══
+   材质: 白色底 + 极淡的彩色环境光(玻璃要有东西可折射); 功能层(底栏 / 顶栏按钮 / 弹层 / 提示)用 Hyalite 真折射
+   (边缘把背景往里弯、色散、菲涅尔暗边 + 高光); 内容层(卡片)用磨砂玻璃 + 边缘高光, 滚动不卡。低端机全部退回实色。 */
+:root[data-glass="liquid"]{
+  --bg:#F8F9FC; --ap-grouped:#F8F9FC; --card:rgba(255,255,255,.62); --card-2:rgba(255,255,255,.74); --card-solid:#fff;
+  --input:rgba(118,118,128,.10); --ap-inset:rgba(118,118,128,.08); --ap-fill-2:rgba(120,120,128,.18);
+  --lg-fill:rgba(255,255,255,.26); --lg-fill-2:rgba(255,255,255,.5); --lg-tint:rgba(255,255,255,.34);
+  --lg-rim:inset 0 1px 0 rgba(255,255,255,.95),inset 0 -1px 0 rgba(255,255,255,.45),inset 1px 0 0 rgba(255,255,255,.6),inset -1px 0 0 rgba(255,255,255,.6),0 0 0 .5px rgba(20,30,60,.06);
+  --lg-drop:0 12px 32px -10px rgba(30,45,90,.20),0 2px 6px rgba(30,45,90,.06);
+  --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.7) 0%,rgba(255,255,255,.12) 32%,rgba(255,255,255,0) 55%);
+  --amb-1:rgba(70,145,255,.42); --amb-2:rgba(255,110,185,.34); --amb-3:rgba(70,215,185,.32); --amb-4:rgba(255,180,70,.32);
+}
+@media (prefers-color-scheme: dark){
+  :root[data-glass="liquid"]:not([data-theme="light"]){
+    --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,.50); --card-2:rgba(56,56,64,.56); --card-solid:#1C1C1E;
+    --input:rgba(118,118,128,.22); --ap-inset:rgba(118,118,128,.16);
+    --lg-fill:rgba(40,40,48,.30); --lg-fill-2:rgba(60,60,70,.46); --lg-tint:rgba(255,255,255,.12);
+    --lg-rim:inset 0 1px 0 rgba(255,255,255,.26),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.12),inset -1px 0 0 rgba(255,255,255,.12),0 0 0 .5px rgba(0,0,0,.5);
+    --lg-drop:0 14px 36px -10px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
+    --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.03) 32%,rgba(255,255,255,0) 55%);
+    --amb-1:rgba(40,110,255,.34); --amb-2:rgba(210,60,160,.26); --amb-3:rgba(30,170,150,.24); --amb-4:rgba(230,140,40,.20);
+  }
+}
+:root[data-glass="liquid"][data-theme="dark"]{
+  --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,.50); --card-2:rgba(56,56,64,.56); --card-solid:#1C1C1E;
+  --input:rgba(118,118,128,.22); --ap-inset:rgba(118,118,128,.16);
+  --lg-fill:rgba(40,40,48,.30); --lg-fill-2:rgba(60,60,70,.46); --lg-tint:rgba(255,255,255,.12);
+  --lg-rim:inset 0 1px 0 rgba(255,255,255,.26),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.12),inset -1px 0 0 rgba(255,255,255,.12),0 0 0 .5px rgba(0,0,0,.5);
+  --lg-drop:0 14px 36px -10px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
+  --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.03) 32%,rgba(255,255,255,0) 55%);
+  --amb-1:rgba(40,110,255,.34); --amb-2:rgba(210,60,160,.26); --amb-3:rgba(30,170,150,.24); --amb-4:rgba(230,140,40,.20);
+}
+/* 环境光: 白底上四团极淡的色光, 缓慢漂移(减少动态 / 低端机静止) */
+[data-glass="liquid"] .mesh{display:block;inset:-25%;filter:blur(60px) saturate(140%);opacity:1;
+  background:radial-gradient(34% 30% at 14% 10%,var(--amb-1),transparent 70%),radial-gradient(30% 28% at 88% 24%,var(--amb-2),transparent 70%),
+             radial-gradient(34% 30% at 18% 78%,var(--amb-3),transparent 70%),radial-gradient(30% 30% at 86% 92%,var(--amb-4),transparent 70%);
+  animation:lgDrift 38s ease-in-out infinite alternate}
+:root.calm[data-glass="liquid"] .mesh,:root.lowfx[data-glass="liquid"] .mesh{animation:none}
+/* 内容层卡片: 磨砂玻璃 + 四边高光 + 左上镜面反光; 大圆角 */
+[data-glass="liquid"] .glass{isolation:isolate;background:var(--card);-webkit-backdrop-filter:blur(26px) saturate(190%);backdrop-filter:blur(26px) saturate(190%);
+  box-shadow:var(--lg-rim),var(--lg-drop);border-radius:22px}
+[data-glass="liquid"] .glass::before{display:block;padding:0;background:var(--lg-sheen);-webkit-mask:none;mask:none;z-index:-1;opacity:.9}
+[data-glass="liquid"] .seg.glass::before,[data-glass="liquid"] .sheet .glass::before{display:none}
+/* 底栏: 一整条真折射的玻璃胶囊; 选中处是一滴清玻璃(透镜), 不再是色块 */
+[data-glass="liquid"] .tabbar{height:64px;border-radius:32px;background:var(--lg-fill);
+  -webkit-backdrop-filter:var(--hyalite, blur(10px) saturate(190%) brightness(1.04));backdrop-filter:var(--hyalite, blur(10px) saturate(190%) brightness(1.04));
+  box-shadow:var(--hyalite-edge, var(--lg-rim)),var(--lg-drop)}
+[data-glass="liquid"] .tabbar::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:var(--lg-sheen);opacity:.8}
+[data-glass="liquid"] .lens{top:5px;height:52px;border-radius:26px;box-shadow:var(--lg-rim),0 4px 14px -4px rgba(30,45,90,.22)}
+[data-glass="liquid"] .lens-tint{background:var(--lg-tint)}
+[data-glass="liquid"] .lens-in{height:52px}
+[data-glass="liquid"] .tab{color:var(--text-1);opacity:.78;font-weight:500}
+[data-glass="liquid"] .lens-in .tab{color:var(--blue);opacity:1;font-weight:600}
+[data-glass="liquid"] .tabbar.drag .lens-tint{opacity:.05}
+/* 顶栏: 边缘渐隐的模糊(iOS 26 滚动边缘效果), 按钮是一颗颗玻璃圆 */
+[data-glass="liquid"] .header::before{bottom:-26px;background:linear-gradient(to bottom,color-mix(in srgb,var(--bg) 92%,transparent) 0%,color-mix(in srgb,var(--bg) 80%,transparent) 55%,color-mix(in srgb,var(--bg) 0%,transparent));box-shadow:none;
+  -webkit-backdrop-filter:blur(14px) saturate(180%);backdrop-filter:blur(14px) saturate(180%);
+  -webkit-mask-image:linear-gradient(to bottom,#000 62%,transparent);mask-image:linear-gradient(to bottom,#000 62%,transparent)}
+[data-glass="liquid"] .hbtn{width:40px;height:40px;margin-left:4px;color:var(--text-1);background:var(--lg-fill);
+  -webkit-backdrop-filter:var(--hyalite, blur(8px) saturate(190%));backdrop-filter:var(--hyalite, blur(8px) saturate(190%));
+  box-shadow:var(--hyalite-edge, var(--lg-rim)),0 6px 16px -6px rgba(30,45,90,.25)}
+[data-glass="liquid"] .hbtn svg{width:20px;height:20px}
+/* 弹层: 悬浮的玻璃面板(四角大圆角、离边 8px), 高磨砂保证文字可读 */
+[data-glass="liquid"] .sheet{bottom:calc(env(safe-area-inset-bottom,0px) + 8px);width:min(640px,calc(100% - 16px));border-radius:34px;padding:10px 18px 22px;
+  background:var(--lg-fill-2);-webkit-backdrop-filter:var(--hyalite, blur(34px) saturate(190%));backdrop-filter:var(--hyalite, blur(34px) saturate(190%));
+  box-shadow:var(--hyalite-edge, var(--lg-rim)),0 24px 60px -12px rgba(20,30,60,.32)}
+[data-glass="liquid"] .sheet .glass{background:rgba(255,255,255,.42);-webkit-backdrop-filter:none;backdrop-filter:none;box-shadow:var(--lg-rim)}
+:root[data-glass="liquid"][data-theme="dark"] .sheet .glass{background:rgba(255,255,255,.06)}
+@media (prefers-color-scheme: dark){ :root[data-glass="liquid"]:not([data-theme="light"]) .sheet .glass{background:rgba(255,255,255,.06)} }
+[data-glass="liquid"] .toast{background:var(--lg-fill-2);border-radius:999px;-webkit-backdrop-filter:var(--hyalite, blur(24px) saturate(190%));backdrop-filter:var(--hyalite, blur(24px) saturate(190%));
+  box-shadow:var(--hyalite-edge, var(--lg-rim)),var(--lg-drop)}
+[data-glass="liquid"] .dd-menu{background:var(--lg-fill-2);-webkit-backdrop-filter:blur(30px) saturate(190%);backdrop-filter:blur(30px) saturate(190%);box-shadow:var(--lg-rim),var(--shadow-3);border-radius:20px}
+/* 控件: 胶囊形; 主按钮是蓝色染色玻璃(顶部高光 + 底部暗边), 次要按钮是白玻璃 */
+[data-glass="liquid"] .btn{border-radius:999px}
+[data-glass="liquid"] .btn.pri{background:linear-gradient(180deg,#2B93FF,#0A74F5);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.55),inset 0 -1px 0 rgba(0,0,0,.10),inset 0 0 0 .5px rgba(255,255,255,.25),0 8px 20px -8px rgba(0,122,255,.65)}
+[data-glass="liquid"] .btn.sec,[data-glass="liquid"] .btn.dan,[data-glass="liquid"] .btn.ok{background:var(--lg-fill-2);box-shadow:var(--lg-rim)}
+[data-glass="liquid"] .chip{border-radius:999px;background:var(--lg-fill-2);box-shadow:var(--lg-rim)}
+[data-glass="liquid"] .chip.on{background:linear-gradient(180deg,#2B93FF,#0A74F5);box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 6px 14px -6px rgba(0,122,255,.6)}
+[data-glass="liquid"] .seg,[data-glass="liquid"] .seg.glass,[data-glass="liquid"] .seg.small{border-radius:999px;background:var(--input);box-shadow:inset 0 .5px 1px rgba(0,0,0,.06)}
+[data-glass="liquid"] .seg .thumb,[data-glass="liquid"] .seg.small .thumb{border-radius:999px;background:rgba(255,255,255,.92);box-shadow:var(--lg-rim),0 3px 10px rgba(30,45,90,.16)}
+:root[data-glass="liquid"][data-theme="dark"] .seg .thumb{background:rgba(120,120,130,.55)}
+@media (prefers-color-scheme: dark){ :root[data-glass="liquid"]:not([data-theme="light"]) .seg .thumb{background:rgba(120,120,130,.55)} }
+[data-glass="liquid"] .box,[data-glass="liquid"] .selbox,[data-glass="liquid"] .dd-btn{border-radius:14px}
+/* 开关: 按住时滑块变成一颗被拉长的清玻璃(iOS 26) */
+[data-glass="liquid"] .toggle::after{transition:transform .5s var(--q),width .35s var(--q),background-color .25s,box-shadow .25s}
+[data-glass="liquid"] .toggle:active::after{width:38px;background:rgba(255,255,255,.38);-webkit-backdrop-filter:blur(2px) saturate(180%);backdrop-filter:blur(2px) saturate(180%);
+  box-shadow:inset 0 1px 0 rgba(255,255,255,.95),inset 0 0 0 .5px rgba(255,255,255,.7),0 4px 12px rgba(0,0,0,.18)}
+[data-glass="liquid"] .toggle[aria-checked="true"]:active::after{transform:translateX(9px)}
+/* 按下: 玻璃控件是"鼓起来"(放大), 不是缩下去 */
+[data-glass="liquid"] .hbtn.press:active,[data-glass="liquid"] .chip.press:active{transform:scale(1.1);transition:transform .18s var(--q)}
+[data-glass="liquid"] .hbtn.press,[data-glass="liquid"] .chip.press{transition:transform .55s var(--q)}
+[data-glass="liquid"] .gi{border-radius:9px;box-shadow:inset 0 1px 0 rgba(255,255,255,.4),inset 0 -1px 0 rgba(0,0,0,.08)}
+[data-glass="liquid"] .dev.open{background:var(--card-2)}
+/* 低端机: 全部实色, 不做折射与磨砂 */
+:root.lowfx[data-glass="liquid"] .glass,:root.lowfx[data-glass="liquid"] .hbtn,:root.lowfx[data-glass="liquid"] .sheet,:root.lowfx[data-glass="liquid"] .dd-menu{-webkit-backdrop-filter:none!important;backdrop-filter:none!important;background:var(--card-solid)}
+:root.lowfx[data-glass="liquid"] .tabbar,:root.lowfx[data-glass="liquid"] .toast{background:var(--card-solid)}
+[data-glass="liquid"] .pu-tile{background:var(--lg-fill-2,var(--input));box-shadow:var(--lg-rim)}
+[data-glass="liquid"] .banner.thin{border-radius:999px}
+[data-glass="liquid"] .enc-cnt>div,[data-glass="liquid"] .mm-cmp>div{background:var(--lg-fill-2,var(--input));box-shadow:var(--lg-rim)}

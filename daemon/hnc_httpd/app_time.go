@@ -92,8 +92,8 @@ func appTimeTickSec(now time.Time) int {
 	if sec < 1 {
 		sec = 1
 	}
-	if sec > appTimeMaxTickSec {
-		sec = appTimeMaxTickSec
+	if c := appTimeTickCap(); sec > c { // v5.22: 后台 30s 档时上限随之放宽(power_sched.go)
+		sec = c
 	}
 	return sec
 }

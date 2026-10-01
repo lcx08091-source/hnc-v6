@@ -166,6 +166,19 @@ jobs:
           cd daemon/hnc_httpd && go vet ./... && go test ./...
           cd ../../src/dpid && go vet ./... && go test ./...
 
+      # v5.22: 32 位类型检查(armeabi-v7a)。用 GOOS=linux 而非 android:
+      # android/arm 不支持内部链接, 无 NDK 时 vet 会报 "requires external (cgo)
+      # linking"; 32 位的 int 溢出常量 / 平台相关代码在 linux/arm 上一样能抓到。
+      - name: Go vet 32-bit (GOARCH=arm)
+        env:
+          CGO_ENABLED: '0'
+          GOOS: linux
+          GOARCH: arm
+          GOARM: '7'
+        run: |
+          cd daemon/hnc_httpd && go vet ./...
+          cd ../../src/dpid && go vet ./...
+
       # ─── Build Go components ──────────────────────────────
       - name: Build hnc_httpd (Go)
         env:
@@ -310,6 +323,51 @@ jobs:
           done
           echo "OK: hotspotd + hnc_ipc + mdns_resolve built arm64"
 
+      # ─── v5.22: armeabi-v7a(32 位 ARM)全套二进制 ─────────────
+      # 产物落在 bin/armeabi-v7a/(构建暂存, .gitignore), 打包时派生出
+      # HNC-<ver>-armv7.zip(二进制覆盖到与 arm64 包相同的原路径)。arm64 的
+      # 构建/产物/路径完全不动。Go: android/arm 只支持外部链接, 必须
+      # CGO_ENABLED=1 + NDK armv7a clang(不能 GOOS=linux 静态编: time.Local
+      # 读不到 Android tzdata → 恒为 UTC, 定时/日切全错)。
+      - name: Build armeabi-v7a binaries (Go + C)
+        env:
+          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -e
+          CC7="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
+          test -x "$CC7" || { echo "ERROR: NDK armv7a clang missing: $CC7"; exit 1; }
+          mkdir -p bin/armeabi-v7a
+
+          (cd daemon/hnc_httpd && bash build.sh arm)
+          (cd src/dpid
+           for pair in dpid:hnc_dpid hnc_watchdog:hnc_watchdog dpid_supervisor:hnc_dpid_supervisor; do
+             src=${pair%%:*}; out=${pair#*:}
+             CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
+               go build -trimpath -ldflags="-s -w" -o "../../bin/armeabi-v7a/$out" "./cmd/$src"
+           done)
+          (cd src/launcher && bash build.sh install arm)
+          (cd daemon/tc_netlink && bash build.sh arm)
+          (cd daemon/clsact_ctl && bash build.sh arm)
+          (cd daemon/hotspotd && bash build.sh arm)
+
+          # 与 arm64 一一对应: 缺一个 armv7 包就会混进 arm64 二进制
+          for b in hnc_httpd hnc_dpid hnc_watchdog hnc_dpid_supervisor hnc_launcher fork_probe \
+                   hnc_tc_ingress hnc_clsact_ctl hotspotd hnc_ipc mdns_resolve; do
+            f="bin/armeabi-v7a/$b"
+            test -s "$f" || { echo "ERROR: $f missing"; exit 1; }
+            file "$f" | grep -q "ELF 32-bit LSB .*ARM, EABI5" || { echo "ERROR: $f not armeabi-v7a: $(file "$f")"; exit 1; }
+            chmod 755 "$f"
+          done
+          for b in hnc_watchdog hnc_dpid_supervisor; do
+            file "bin/armeabi-v7a/$b" | grep -q "not stripped" && { echo "ERROR: armv7 $b not stripped"; exit 1; }
+          done
+          strings bin/armeabi-v7a/hnc_httpd | grep -qF "$VERSION" \
+            || { echo "ERROR: armv7 hnc_httpd missing version $VERSION"; exit 1; }
+          ls -lh bin/armeabi-v7a/
+          echo "OK: armeabi-v7a binaries built"
+
       - name: Fix file permissions
         run: |
           chmod 755 bin/*.sh 2>/dev/null || true
@@ -317,6 +375,7 @@ jobs:
           chmod 755 bin/hnc_dpid bin/hnc_launcher bin/fork_probe 2>/dev/null || true
           chmod 755 bin/mdns_resolve 2>/dev/null || true
           chmod 755 daemon/hnc_httpd/hnc_httpd 2>/dev/null || true
+          chmod 755 bin/armeabi-v7a/* 2>/dev/null || true
           chmod 755 post-fs-data.sh service.sh
 
       # ─── Final binary verification ────────────────────────
@@ -372,7 +431,10 @@ jobs:
       - name: Package module zip
         run: |
           OUT="HNC-${{ steps.version.outputs.version_safe }}-arm64.zip"
+          OUT7="HNC-${{ steps.version.outputs.version_safe }}-armv7.zip"
           TOOLS_OUT="hnc-ground-truth-tools.zip"
+          # v5.22: 包 ABI 标记(customize.sh / bin/hnc_arch.sh 安装期据此校验设备)
+          echo arm64-v8a > bin/hnc_pkg_abi
           
           # Clean build artifacts before zipping
           rm -rf daemon/hotspotd/prebuilt
@@ -382,11 +444,16 @@ jobs:
           
           # Main module zip - EXCLUDES tools/ground_truth/ (rc30.12.23+)
           # tools/ground_truth/ is shipped as a separate zip below.
+          # v5.22: webroot/css/*.css 与 webroot/js/*.js(WebUI 拆分后的样式/脚本)随
+          # webroot/ 递归打包 —— 下面的排除规则不得匹配它们; artifact_sanity_check.sh
+          # 的必需文件清单逐个校验(arm64 / armv7 两个包)。
           zip -rqX "$OUT" . \
             -x ".*" \
             -x "*/.*" \
             -x "*.zip" \
             -x ".github/*" \
+            -x "bin/armeabi-v7a/*" -x "bin/armeabi-v7a" \
+            -x "bin/arm64-v8a/*" -x "bin/arm64-v8a" \
             -x "**/_libs_out/*" \
             -x "**/_obj/*" \
             -x "**/build/*" \
@@ -424,6 +491,25 @@ jobs:
           
           echo "OUT_ZIP=$OUT" >> $GITHUB_ENV
           ls -lh "$OUT"
+
+          # v5.22: armv7 包 —— 解开 arm64 包(文件清单/排除规则完全一致),
+          # 把 bin/armeabi-v7a/ 的二进制覆盖到相同的原路径, 改写 ABI 标记后重打。
+          STAGE="$RUNNER_TEMP/hnc_armv7"
+          rm -rf "$STAGE"; mkdir -p "$STAGE"
+          unzip -q "$OUT" -d "$STAGE"
+          for f in bin/armeabi-v7a/*; do
+            n=$(basename "$f")
+            if [ "$n" = hnc_httpd ]; then dst="$STAGE/daemon/hnc_httpd/hnc_httpd"; else dst="$STAGE/bin/$n"; fi
+            [ -f "$dst" ] || { echo "ERROR: armv7 $n has no arm64 counterpart at ${dst#$STAGE/}"; exit 1; }
+            cp -f "$f" "$dst"; chmod 755 "$dst"
+          done
+          # 诊断工具 bin/diag/fork_probe(预提交的 arm64 副本)一并换成 armv7
+          [ -f "$STAGE/bin/diag/fork_probe" ] && cp -f bin/armeabi-v7a/fork_probe "$STAGE/bin/diag/fork_probe"
+          echo armeabi-v7a > "$STAGE/bin/hnc_pkg_abi"
+          (cd "$STAGE" && zip -rqX "$GITHUB_WORKSPACE/$OUT7" .)
+          rm -rf "$STAGE"
+          echo "OUT_ZIP_ARMV7=$OUT7" >> $GITHUB_ENV
+          ls -lh "$OUT7"
           
           # Separate ground-truth tools zip (rc30.12.23+)
           # Lightweight (~15 KB), only needed when expanding DPI rules.
@@ -481,9 +567,17 @@ jobs:
           sha256sum dpi-rules.zip > dpi-rules.zip.sha256
           echo "DPI_RULES_VERSION=$VER" >> $GITHUB_ENV
 
+      # v5.22: 成品 zip 严格校验(按包 ABI 校验每个原生二进制的 ELF 架构,
+      # 防止混架构; 同时覆盖必需文件 / 版本内嵌 / customize.sh)。
+      - name: Artifact sanity (arm64 + armv7 zips)
+        run: |
+          HNC_EXPECT_ABI=arm64-v8a sh bin/artifact_sanity_check.sh "${{ env.OUT_ZIP }}"
+          HNC_EXPECT_ABI=armeabi-v7a sh bin/artifact_sanity_check.sh "${{ env.OUT_ZIP_ARMV7 }}"
+
       - name: Compute SHA256 of zips
         run: |
           sha256sum "${{ env.OUT_ZIP }}" | tee "${{ env.OUT_ZIP }}.sha256"
+          sha256sum "${{ env.OUT_ZIP_ARMV7 }}" | tee "${{ env.OUT_ZIP_ARMV7 }}.sha256"
           if [ -n "${{ env.TOOLS_ZIP }}" ] && [ -f "${{ env.TOOLS_ZIP }}" ]; then
             sha256sum "${{ env.TOOLS_ZIP }}" | tee "${{ env.TOOLS_ZIP }}.sha256"
           fi
@@ -498,6 +592,15 @@ jobs:
             ${{ env.OUT_ZIP }}.sha256
             dpi-rules.zip
             dpi-rules.zip.sha256
+          retention-days: 30
+
+      - name: Upload armv7 module artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: HNC-${{ steps.version.outputs.version_safe }}-armv7
+          path: |
+            ${{ env.OUT_ZIP_ARMV7 }}
+            ${{ env.OUT_ZIP_ARMV7 }}.sha256
           retention-days: 30
 
       - name: Upload ground-truth tools artifact
@@ -533,6 +636,10 @@ jobs:
             echo ""
             echo "**安装**: 下载下面的 \`.zip\`, 用 KernelSU / SukiSU / Magisk 刷入后重启。"
             echo ""
+            echo "- 64 位设备(绝大多数): \`HNC-*-arm64.zip\`"
+            echo "- 32 位 ARM 系统(armeabi-v7a, 仅 Magisk): \`HNC-*-armv7.zip\`"
+            echo "- 刷错包时安装器会提示并中止, 不会装上不能运行的二进制。"
+            echo ""
             echo "SHA256 见同名 \`.sha256\` 文件。"
           } >> release_notes.md
           echo "=== release notes ($(wc -l < release_notes.md) lines) ==="
@@ -549,6 +656,8 @@ jobs:
           files: |
             ${{ env.OUT_ZIP }}
             ${{ env.OUT_ZIP }}.sha256
+            ${{ env.OUT_ZIP_ARMV7 }}
+            ${{ env.OUT_ZIP_ARMV7 }}.sha256
             dpi-rules.zip
             dpi-rules.zip.sha256
             ${{ env.TOOLS_ZIP }}

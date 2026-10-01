@@ -219,6 +219,8 @@ func main() {
 	go srv.StatsCalibrationLoop(stopCh) // v5.21: 与系统 NetworkStats 对账 + 分流漏计检测(15 分钟)
 	go srv.V6NeighLoop(stopCh)    // v5.20: IPv6 新邻居(临时地址轮换)→ 500ms 内 v6_sync.sh sync_macs(失败退 60s 周期)
 	go srv.MacMergeLoop(stopCh)   // v5.21: 随机 MAC 画像 + 疑似同一设备建议(30s)
+	go srv.ActivityLoop(stopCh)     // v5.22: 亮屏/热点/在线设备/界面 → 活动档位 + run/activity.json(15s)
+	go srv.PowerSamplerLoop(stopCh) // v5.22: 自测 CPU/唤醒 → run/power_stats.json(5 分钟)
 
 	if haveRemote {
 		if *flagNoTLS {

@@ -53,6 +53,7 @@ else
         HOST_TAG=$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)
         TOOLCHAIN="$ANDROID_NDK/toolchains/llvm/prebuilt/$HOST_TAG"
         CC="$TOOLCHAIN/bin/${TARGET}${API}-clang"
+        [ -x "$TOOLCHAIN/bin/llvm-strip" ] && STRIP="$TOOLCHAIN/bin/llvm-strip"
     fi
 
     CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -DANDROID $COMMON_DEFS -static-libgcc -fPIE"
@@ -71,7 +72,7 @@ build_one() {
     else
         $CC $CFLAGS -I.. -I../offload -o "$OUT" "$MAIN" $COMMON_SRCS $LDFLAGS
     fi
-    [ "$ARCH" != "host" ] && strip "$OUT" 2>/dev/null || true
+    [ "$ARCH" != "host" ] && "${STRIP:-strip}" "$OUT" 2>/dev/null || true
     ls -lh "$OUT" | awk '{print "         " $5 "  " $9}'
 }
 

@@ -1,47 +1,39 @@
 #!/sbin/sh
-# ================================================================
-#  HNC · Hotspot Network Control
-#  Magisk / KernelSU Module Installer v3.2.0
-#  Author: Claude (Anthropic AI)
-# ================================================================
-SKIPUNZIP=1
+# v5.22: 换成 Magisk 官方 module_installer 模板。
+# 旧版(自写的 v3.2.0 安装脚本)在 Magisk 下 $MODPATH 未定义、ui_print 未定义,
+# 还拷不存在的 api/ —— 且从不调用 install_module, customize.sh 永远不会执行。
+# Magisk App / magisk --install-module 会运行本文件 → install_module → 解压到
+# $MODPATH 并 source customize.sh(按设备 ABI 选二进制)。
+# KernelSU / SukiSU 不运行本文件, 它们直接 source customize.sh。
 
-ui_print ""
-ui_print "  +======================================+"
-ui_print "  |    HNC - Hotspot Network Control     |"
-ui_print "  |    Version 3.1.0                     |"
-ui_print "  |    Author: Claude (Anthropic AI)     |"
-ui_print "  +======================================+"
-ui_print ""
+#################
+# Initialization
+#################
 
-ui_print "  [1/4] 解压模块文件..."
-unzip -o "$ZIPFILE" -x 'META-INF/*' -d "$MODPATH" >&2
+umask 022
 
-ui_print "  [2/4] 设置文件权限..."
-set_perm_recursive "$MODPATH/bin"  root root 0755 0755
-set_perm_recursive "$MODPATH/api"  root root 0755 0755
-set_perm "$MODPATH/service.sh"       root root 0755
-set_perm "$MODPATH/post-fs-data.sh"  root root 0755
+# echo before loading util_functions
+ui_print() { echo "$1"; }
 
-ui_print "  [3/4] 初始化数据目录..."
-mkdir -p /data/local/hnc/{bin,api,data,logs,run}
-cp -f "$MODPATH/bin/"*.sh      /data/local/hnc/bin/ && chmod 755 /data/local/hnc/bin/*.sh
-cp -f "$MODPATH/api/server.sh" /data/local/hnc/api/ && chmod 755 /data/local/hnc/api/server.sh
-[ ! -f /data/local/hnc/data/rules.json ] && cp "$MODPATH/data/rules.json" /data/local/hnc/data/
+require_new_magisk() {
+  ui_print "*******************************"
+  ui_print " Please install Magisk v20.4+! "
+  ui_print "*******************************"
+  exit 1
+}
 
-ui_print "  [4/4] 完成！"
-ui_print ""
-ui_print "  +======================================+"
-ui_print "  |          ** 安 装 成 功 **           |"
-ui_print "  +======================================+"
-ui_print "  |                                      |"
-ui_print "  |  重启后：                             |"
-ui_print "  |   1. 开启手机热点                     |"
-ui_print "  |   2. 打开 SukiSU Ultra / Magisk       |"
-ui_print "  |   3. 找到 HNC 模块                    |"
-ui_print "  |   4. 点「操作」打开 WebUI              |"
-ui_print "  |                                      |"
-ui_print "  |  备用: http://192.168.43.1:8080       |"
-ui_print "  |  HNC v3.2.0 - Claude (Anthropic AI)  |"
-ui_print "  +======================================+"
-ui_print ""
+#########################
+# Load util_functions.sh
+#########################
+
+OUTFD=$2
+ZIPFILE=$3
+
+mount /data 2>/dev/null
+
+[ -f /data/adb/magisk/util_functions.sh ] || require_new_magisk
+. /data/adb/magisk/util_functions.sh
+[ $MAGISK_VER_CODE -lt 20400 ] && require_new_magisk
+
+install_module
+exit 0

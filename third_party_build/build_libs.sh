@@ -9,14 +9,24 @@ ARCH="${1:-arm64}"
 
 case "$ARCH" in
     arm64) TARGET=aarch64-linux-android; API=28 ;;
-    *) echo "Only arm64 supported"; exit 1 ;;
+    arm)   TARGET=armv7a-linux-androideabi; API=28 ;;   # v5.22 armeabi-v7a
+    *) echo "Only arm64 / arm supported"; exit 1 ;;
 esac
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TP_ROOT="$REPO_ROOT/third_party"
 PREBUILT="$REPO_ROOT/third_party_prebuilt"
-OUT="$SCRIPT_DIR/_libs_out"
+# v5.22: 产物按 arch 分目录 —— arm64 保持原路径 _libs_out/(兼容), 其他 arch 用
+# _libs_out/<arch>/。共用一个目录时, 先编的 arm64 libbpf.a 会被 arm 构建"命中缓存"
+# 直接拿去链接 → 架构不符链接失败。可用 HNC_LIBS_OUT 覆盖。
+if [ -n "${HNC_LIBS_OUT:-}" ]; then
+    OUT="$HNC_LIBS_OUT"
+elif [ "$ARCH" = "arm64" ]; then
+    OUT="$SCRIPT_DIR/_libs_out"
+else
+    OUT="$SCRIPT_DIR/_libs_out/$ARCH"
+fi
 HOST_TAG=$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)
 TOOLCHAIN="$ANDROID_NDK/toolchains/llvm/prebuilt/$HOST_TAG"
 CC="$TOOLCHAIN/bin/${TARGET}${API}-clang"

@@ -29,6 +29,17 @@ HNC_DIR=${HNC_DIR:-/data/local/hnc}
 if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
     . "$HNC_DIR/bin/hnc_constants.sh"
 fi
+# v5.22 功耗: run/activity.json 读取器(纯内建); 缺失时退化为「永远活跃」= 旧行为
+if [ -f "$HNC_DIR/bin/hnc_activity.sh" ]; then
+    . "$HNC_DIR/bin/hnc_activity.sh"
+elif [ -f "${0%/*}/hnc_activity.sh" ]; then
+    . "${0%/*}/hnc_activity.sh"
+fi
+command -v hnc_act_load >/dev/null 2>&1 || {
+    hnc_act_load() { ACT_OK=0; ACT_LEVEL=unknown; ACT_SCREEN_OFF=0; ACT_SCREEN_ON=0; ACT_HOTSPOT=1; ACT_CLIENTS=1; ACT_WEBUI=1; return 1; }
+    hnc_act_quiet() { return 1; }
+    hnc_act_sleep_until() { sleep "$1"; return 1; }
+}
 HNC_HTTPS_PORT=${HNC_HTTPS_PORT:-8443}
 HNC_LOOPBACK_PORT=${HNC_LOOPBACK_PORT:-8444}
 HNC_HTTP_REDIR_PORT=${HNC_HTTP_REDIR_PORT:-8080}
@@ -395,6 +406,7 @@ full_restore() {
     sh "$HNC_DIR/bin/quic_block_sync.sh" >> "$LOG" 2>&1 || true
     sh "$HNC_DIR/bin/connblock_sync.sh" >> "$LOG" 2>&1 || true
     sh "$HNC_DIR/bin/encdns_sync.sh" >> "$LOG" 2>&1 || true  # v5.21: 加密 DNS 策略
+    sh "$HNC_DIR/bin/webui_guard.sh" apply >> "$LOG" 2>&1 || true  # v5.22: WebUI 访问白名单自愈(与接口无关, 幂等)
     run_capability_probe_active "$iface"
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
@@ -808,6 +820,13 @@ check_httpd_bind_drift() {
 
 # ── Doze 检测 ────────────────────────────────────────────────
 is_doze() {
+    # v5.22: httpd 探到亮屏就不可能在 Doze —— 省掉每轮 cmd power + dumpsys battery
+    # 两次 binder 调用(PENDING 态每 10 秒一轮, 这是热点关着时 watchdog 最大的开销之一)。
+    # 判新鲜度要多 fork 一次 date, 这里不判: 文件过期(httpd 挂了)时最多是亮屏时
+    # 漏掉「电量 <5% 降频」, 不影响规则正确性。
+    if hnc_act_load && [ "$ACT_SCREEN_ON" = 1 ]; then
+        return 1
+    fi
     cmd power get-idle-mode 2>/dev/null | grep -qiE "^(deep|light)$" && return 0
     local lvl
     lvl=$(dumpsys battery 2>/dev/null | awk '/^[[:space:]]*level:/{print $2; exit}')
@@ -860,6 +879,7 @@ do_full_init() {
     HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/quic_block_sync.sh" >> "$LOG" 2>&1 || true
     sh "$HNC_DIR/bin/connblock_sync.sh" >> "$LOG" 2>&1 || true
     HNC_WL_IFACE="$iface" sh "$HNC_DIR/bin/encdns_sync.sh" >> "$LOG" 2>&1 || true  # v5.21
+    sh "$HNC_DIR/bin/webui_guard.sh" apply >> "$LOG" 2>&1 || true  # v5.22: WebUI 访问白名单自愈(与接口无关, 幂等)
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
         # v5.12: 同 full_restore —— 黑名单只在 restore 里恢复,tc_htb=false 也要跑
@@ -1061,6 +1081,7 @@ PASSIVE_MARKER="$RUN/watchdog_passive.marker"
 # 开机后 1 分钟以上热点才能被使用。ACTIVE 稳态沿用主循环 $INTERVAL(60s)。
 # rc38: 删死变量 PROBE_INTERVAL_ACTIVE(全脚本 0 引用,稳态实际走 $INTERVAL)。
 PROBE_INTERVAL_PENDING=10
+PROBE_INTERVAL_PENDING_QUIET=30   # v5.22: 熄屏无界面且热点未开(与 power_sched.go watchdog_pending 一致)
 
 # rc3.1.5 修: 进 main loop 前立即 ensure httpd_running, 不等第一次 sleep 完.
 # 之前 watchdog 启动后要先 sleep 60-120s 才第一次 ensure httpd, 导致用户点 toggle
@@ -1199,7 +1220,16 @@ while true; do
     else
         # 根据状态决定 sleep 时长
         case "$STATE" in
-            PENDING) sleep $PROBE_INTERVAL_PENDING ;;
+            PENDING)
+                # v5.22 功耗: 热点未开且熄屏无界面 → 最长 30s 才跑一整轮(probe/定时开关/
+                # 子服务检查), 但每 10s 用内建命令看一眼 activity.json, 热点一起来立即进入下一轮。
+                # 其余情况(或 activity 不新鲜)保持 10s。定时开关热点的分钟粒度不受影响(≤30s)。
+                if hnc_act_load "$(date +%s 2>/dev/null)" && [ "$ACT_OK" = 1 ] \
+                   && [ "$ACT_LEVEL" = hotspot_off ] && hnc_act_quiet; then
+                    hnc_act_sleep_until "$PROBE_INTERVAL_PENDING_QUIET" "$PROBE_INTERVAL_PENDING" hotspot
+                else
+                    sleep $PROBE_INTERVAL_PENDING
+                fi ;;
             ACTIVE:*) sleep $INTERVAL ;;
             *) log "WARN: unknown state '$STATE', resetting to PENDING"
                echo "PENDING" > "$STATE_FILE"
@@ -1342,8 +1372,12 @@ while true; do
             LAST_V6_SYNC=$NOW
         fi
 
-        # 流量统计采样
-        if [ $((NOW - LAST_STATS_SAMPLE)) -ge $STATS_INTERVAL ]; then
+        # 流量统计采样(v5.22: 热点开着但没有在线设备时 ×3 = 900s; 设备计数器是累计值, 不丢字节)
+        _stats_iv=$STATS_INTERVAL
+        if hnc_act_load "$NOW" && [ "$ACT_OK" = 1 ] && [ "$ACT_LEVEL" = no_clients ]; then
+            _stats_iv=$((STATS_INTERVAL * 3))
+        fi
+        if [ $((NOW - LAST_STATS_SAMPLE)) -ge $_stats_iv ]; then
             sh "$HNC_DIR/bin/stats_sample.sh" >> "$LOG" 2>&1 || true
             LAST_STATS_SAMPLE=$NOW
         fi

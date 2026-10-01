@@ -55,6 +55,8 @@ type configResp struct {
 	SimEnabled bool `json:"sim_enabled"`
 	// v5.11: 旧前端一直在读但后端从没返回的字段(刷新后总显示 auto / 默认值)。
 	HotspotIface string `json:"hotspot_iface"`
+	// v5.22: WebUI 访问白名单 {mode, macs, port, firewall}(webui_access.go)
+	WebUIAccess webuiAccessView `json:"webui_access"`
 	TcQosMode    string `json:"tc_qos_mode"`
 	TcQosScale   int    `json:"tc_qos_scale"`
 	QosFallback  bool   `json:"qos_fallback"`
@@ -157,6 +159,7 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 	// rc35: 用户维护的飞轮排除名单(VPN/代理),从 etc/flywheel_exclude.json 读。
 	resp.FlywheelExcludeUser = loadFlywheelExcludeUser(s.hncDir)
 	resp.SimEnabled = s.simOn()
+	resp.WebUIAccess = webuiAccessForConfig(s.hncDir)
 	// rc3.1.13: 删除 config.json 覆盖分支. config.json 已弃用, 由 post-fs-data.sh
 	// 启动时单向迁移 auth_required 到 rules.json 后删除. 字段单源化让 toggle / 后端
 	// 视角永远一致, 杜绝 rc3.1.9~12 那种"前端 ON 但 middleware 不认"的 skew.
@@ -342,15 +345,12 @@ func (s *server) runOffloadCheck() {
 // 30s 这个周期覆盖 BPF 采样 5s + 缓冲 · offload 状态变化不频繁 · 误差可接受.
 func (s *server) OffloadLoop(stop <-chan struct{}) {
 	// 启动时立刻跑一次 (异步, 不阻塞 OffloadLoop 外的 main)
-	s.runOffloadCheck()
-	tick := time.NewTicker(30 * time.Second)
-	defer tick.Stop()
-	for {
-		select {
-		case <-stop:
+	// v5.22: 基准 30s; 无界面 120s、热点未开 300s(power_sched.go offload_status)。
+	// 这里只是横幅缓存, 真正的兜底由 hnc_offload_guard.sh 执行, 不受影响。
+	for last := time.Now(); ; last = time.Now() {
+		s.runOffloadCheck()
+		if !powerWait(stop, "offload_status", last, nil) {
 			return
-		case <-tick.C:
-			s.runOffloadCheck()
 		}
 	}
 }

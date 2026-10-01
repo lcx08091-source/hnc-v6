@@ -16,7 +16,8 @@
 //
 // 速率限制(v2.1 §5.1):
 //   - unauthRateLimitMiddleware 包在外:每 IP 20 req/s token bucket
-//   - handlePairVerify 内部: PIN 错 5 次/分钟 锁 10 分钟
+//   - handlePairVerify 内部: 5 次/10 分钟/IP → 锁 10 分钟起指数退避(封顶 4h), 全局 20 次/分钟;
+//     同一配对码累计错 10 次作废; 失败审计 + auth_bruteforce 告警(v5.22, pair_guard.go)
 
 package main
 
@@ -87,6 +88,12 @@ func readPairPending(hncDir string) (*pairPending, error) {
 	}
 
 	now := time.Now().Unix()
+	// v5.22: expiry 上界校验。pair_gen.sh 只写 now+120; 远超的 expiry(手改 / 时钟
+	// 回拨后旧文件 / 写坏)会让一个 6 位 PIN 长期有效, 爆破窗口无界 —— 作废。
+	if expiry-now > pairMaxValiditySec {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("malformed pair_pending (expiry too far in future)")
+	}
 	if now >= expiry {
 		// rc3 修 N-16: 过期顺手清, 否则下次 /api/pair/verify 仍返 expired
 		// 导致用户"刚生成就过期"死循环
@@ -168,13 +175,15 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	submitted := r.FormValue("pin")
 	if len(submitted) != 6 {
 		// 格式错也消费一次名额: 防御 "用错误格式探测限流状态"
-		_, _, rem := s.limiter.ConsumePinAttempt(ip)
+		_, _, rem := s.consumePinAttemptAudited(ip)
+		s.pairRecordFailure(ip, "", "bad pin format")
 		writePairErrorWithRem(w, http.StatusBadRequest, "bad pin format", rem)
 		return
 	}
 	for _, c := range submitted {
 		if c < '0' || c > '9' {
-			_, _, rem := s.limiter.ConsumePinAttempt(ip)
+			_, _, rem := s.consumePinAttemptAudited(ip)
+			s.pairRecordFailure(ip, "", "bad pin format")
 			writePairErrorWithRem(w, http.StatusBadRequest, "bad pin format", rem)
 			return
 		}
@@ -197,7 +206,7 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	// 只有先到的 rlPinAttemptsMax 个能进入下面的 ConstantTimeCompare,
 	// 其他都在这里 429 返回. 旧版本 RegisterPinFail 在比对后才记账, 中
 	// 间存在 race window.
-	consumed, consumedRetry, remaining := s.limiter.ConsumePinAttempt(ip)
+	consumed, consumedRetry, remaining := s.consumePinAttemptAudited(ip)
 	if !consumed {
 		w.Header().Set("Retry-After", int64ToStr(consumedRetry))
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -210,6 +219,11 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	// constant-time 比较 PIN 防 timing attack.
 	// 名额已经在上一步扣过 — 这里只决定 ResetPin (成功) 还是 wrong pin (失败).
 	if subtle.ConstantTimeCompare([]byte(submitted), []byte(pending.PIN)) != 1 {
+		// v5.22: 审计 + 同一配对码累计错误熔断(pair_guard.go)
+		if s.pairRecordFailure(ip, pending.SessionID, "wrong pin") {
+			writePairError(w, http.StatusGone, "pairing code invalidated after too many wrong attempts")
+			return
+		}
 		writePairErrorWithRem(w, http.StatusBadRequest, "wrong pin", remaining)
 		return
 	}
@@ -243,6 +257,8 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 		writePairError(w, http.StatusInternalServerError, "token issue failed")
 		return
 	}
+
+	s.pairRecordSuccess(ip, pending.SessionID, tokenID)
 
 	// 写 pair_success marker 让本机 WebUI 感知
 	if err := writePairSuccess(s.hncDir, pending.SessionID, tokenID, label); err != nil {

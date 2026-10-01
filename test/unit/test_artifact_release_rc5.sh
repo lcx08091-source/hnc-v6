@@ -6,9 +6,12 @@
 # 必需文件, fixture 没跟, 导致这两个 unit test 红灯. 不改业务功能, 只把测试夹具
 # 补全跟得上当前 sanity gate.
 
-# 当前 artifact_sanity_check.sh 强制要求的所有文件 (跟 bin/artifact_sanity_check.sh
-# L54 的 `for req in ...; do` 保持完全一致)
-_REQUIRED_FILES_v5_3_rc5="
+# 当前 artifact_sanity_check.sh 强制要求的所有文件
+# v5.22: 直接从 artifact_sanity_check.sh 的 "for req in ..." 读(与
+# test_ci_preflight_artifact_gate.sh 同法) —— 手抄清单曾落后于 gate(缺 clsact 产物、
+# WebUI 的 css/js), 一有 hnc_httpd 二进制本用例就恒 FAIL。
+_REQUIRED_FILES_v5_3_rc5=$(sed -n 's/^for req in \(.*\); do$/\1/p' "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh" | head -1)
+[ -n "$_REQUIRED_FILES_v5_3_rc5" ] || _REQUIRED_FILES_v5_3_rc5="
 webroot/index.html
 webroot/json-health.html
 bin/capability_probe.sh

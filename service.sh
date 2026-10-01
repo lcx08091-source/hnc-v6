@@ -341,6 +341,35 @@ sync_runtime_from_moddir() {
 
 sync_runtime_from_moddir
 
+# v5.22 (armeabi-v7a): ABI 兜底。正常安装由 customize.sh 选好二进制并删掉
+# bin/<abi>/ 覆盖层; 若安装器没跑 customize.sh(覆盖层随 cp -rf 进了运行目录),
+# 这里按设备 ABI 在 $HNC_DIR 上就地补做一次, 并对包/设备 ABI 不符打日志。
+if [ -f "$HNC_DIR/bin/hnc_arch.sh" ]; then
+    . "$HNC_DIR/bin/hnc_arch.sh"
+    _hnc_dev_abi=$(hnc_arch_device_abi)
+    if [ -d "$HNC_DIR/bin/$_hnc_dev_abi" ]; then
+        if hnc_arch_apply_overlay "$HNC_DIR" "$_hnc_dev_abi" >/dev/null 2>&1; then
+            for _b in "$HNC_DIR/bin/$_hnc_dev_abi"/*; do
+                [ -f "$_b" ] || continue
+                _b=${_b##*/}
+                [ "$_b" = hnc_httpd ] && _b="../daemon/hnc_httpd/hnc_httpd"
+                chcon u:object_r:system_file:s0 "$HNC_DIR/bin/$_b" 2>/dev/null || true
+            done
+            log "v5.22 ABI: applied runtime overlay bin/$_hnc_dev_abi (customize.sh did not run?)"
+        else
+            log "v5.22 ABI WARN: failed to apply runtime overlay bin/$_hnc_dev_abi"
+        fi
+    fi
+    hnc_arch_remove_overlays "$HNC_DIR"
+    _hnc_pkg_abi=$(hnc_arch_pkg_abi "$HNC_DIR")
+    if [ "$_hnc_pkg_abi" = "$_hnc_dev_abi" ]; then
+        log "v5.22 ABI: device=$_hnc_dev_abi binaries=$_hnc_pkg_abi"
+    else
+        log "v5.22 ABI ERROR: device=$_hnc_dev_abi but binaries=$_hnc_pkg_abi — 刷错了安装包? 原生二进制将无法执行"
+    fi
+    unset _hnc_dev_abi _hnc_pkg_abi _b
+fi
+
 # v6.x 升级迁移: nDPI 实验(hnc_ndpi_probe / ndpi_*.sh / ndpi-lab.html)已整体移除,
 # 旧版本机上会残留: 可能仍在跑的 ndpi_continuous.sh 常驻循环 + 其 probe 子进程、
 # 运行期输出(ip_to_host.json 等)、默认配置、以及 cp -rf 不会删除的旧脚本/二进制。
@@ -583,6 +612,14 @@ else
     log "Shell daemon fallback running (PID=$DETECT_SHELL_PID)"
 fi
 prune_duplicate_hotspotd
+
+# ─── v5.22: WebUI 访问白名单落防火墙(必须在 httpd 开监听之前) ────────
+# data/webui_access.json 不存在时 mode=all, 只拒蜂窝上行口; allowlist / local_only
+# 时非白名单客户端在 INPUT 直接 RST。幂等, watchdog 全量恢复时会再跑一次自愈。
+if [ -f "$HNC_DIR/bin/webui_guard.sh" ]; then
+    sh "$HNC_DIR/bin/webui_guard.sh" apply >> "$HNC_DIR/logs/service.log" 2>&1 \
+        || log "v5.22: WARN webui_guard apply failed (HTTP-level guard in hnc_httpd still active)"
+fi
 
 # ─── rc30.12: shell pre-launch hnc_httpd ─────────────────────
 # 跟 rc30.11 区别: 不再 pre-launch supervisor (C launcher 替代了那个角色,

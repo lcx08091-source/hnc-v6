@@ -384,6 +384,32 @@ start_monitor() {
 
 start_monitor
 
+# v5.22 功耗: 监视循环每轮要 fork 约 10 个进程(date/sed/head/cat/ip/grep…), 3 秒一轮 =
+# 热点关着时每分钟 ~200 次 fork, 是 HNC 熄屏耗电的大头。按 run/activity.json(httpd 每 15s
+# 探测, 内建命令读取, 不 fork)放慢: 盲态且热点未开 → 熄屏无界面 15s / 否则 6s;
+# 抓包中但无在线设备 → 6s; 其余(或 activity 不新鲜)仍 3s。netlink 事件文件每轮都看,
+# 热点一起来最迟一个周期内重绑(DPI 识别, 非执法)。
+if [ -f "$HNC_DIR/bin/hnc_activity.sh" ]; then
+    . "$HNC_DIR/bin/hnc_activity.sh"
+elif [ -f "${0%/*}/hnc_activity.sh" ]; then
+    . "${0%/*}/hnc_activity.sh"
+fi
+guard_poll_interval() {
+    # $1 = now(秒); 依赖外层 launch_blind; 结果放 GUARD_POLL(不用 $(...), 免一次 fork)
+    GUARD_POLL=3
+    command -v hnc_act_load >/dev/null 2>&1 || return 0
+    hnc_act_load "$1"
+    [ "$ACT_OK" = 1 ] || return 0
+    if [ "$launch_blind" = 1 ] && [ "$ACT_LEVEL" = hotspot_off ]; then
+        if hnc_act_quiet; then GUARD_POLL=15; else GUARD_POLL=6; fi
+        return 0
+    fi
+    case "$ACT_LEVEL" in
+        hotspot_off|no_clients) GUARD_POLL=6 ;;
+    esac
+    return 0
+}
+
 # Fast retry offsets after startup or after an interface-loss event.
 FAST_DELAYS="0 0.1 0.2 0.5 1 1.5 2"
 fast_index=1
@@ -515,7 +541,7 @@ while true; do
                 fi
             fi
         fi
-        if [ "$age" -lt 5 ]; then sleep_s 0.2; else sleep_s 3; fi
+        if [ "$age" -lt 5 ]; then sleep_s 0.2; else guard_poll_interval "$now"; sleep_s "$GUARD_POLL"; fi
     done
     wait "$child" 2>/dev/null || true
     rm -f "$CHILD_PID_FILE" 2>/dev/null || true
