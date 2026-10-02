@@ -348,6 +348,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionTemplateDel(hncDir, p)
 	case "cache_clear":
 		return actionCacheClear(hncDir)
+	case "dpi_eval_clear": // v5.24 T4: 删除本机样本 / 前台真值 / 评估结果
+		return actionDPIEvalClear(hncDir)
 	case "debug_bundle":
 		return actionDebugBundle(hncDir)
 	case "selfcheck_run", "selfcheck_export": // v5.20: 正常由 handleAction 在锁外处理, 这里兜底

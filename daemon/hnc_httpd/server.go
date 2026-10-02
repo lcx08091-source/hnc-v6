@@ -118,6 +118,7 @@ func (s *server) handler() http.Handler {
 	// v5.3.0-rc12: DPI passive observability (hnc_dpid daemon)
 	mux.HandleFunc("/api/dpi_state", s.apiDPIState)
 	mux.HandleFunc("/api/dpi_probe", s.apiDPIProbe)
+	mux.HandleFunc("/api/dpi_eval", s.apiDPIEval) // v5.24 T4: 本机识别自评(只读)
 	// rc30.4: traffic history (per-app pie + per-hour line chart)
 	mux.HandleFunc("/api/dpi_history", s.apiDPIHistory)
 	// rc30.5: alert log (unknown device detection)
