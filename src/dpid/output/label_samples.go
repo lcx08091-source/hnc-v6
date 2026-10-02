@@ -55,6 +55,8 @@ const (
 	labelSamplesDateLayout   = "20060102"         // 本地日期(文件名用)
 	labelSamplesFileMode     = os.FileMode(0o640) // run/ 下私有, 不放全局可读
 	labelSamplesLineMaxByte  = 4096               // 单样本上限保护(域名 + JA4 远小于此)
+	labelSamplesStatsFile    = "label_samples.stats.json"
+	labelSamplesStatsEvery   = 60 * time.Second // 计数快照落盘间隔(httpd 评估页读它显示跳过 / 丢弃数)
 )
 
 // LabelSampleInput 是调用方(抓包回调)提供的一条原始观测。
@@ -124,6 +126,7 @@ type LabelSamplesWriter struct {
 	capped  bool
 	f       *os.File
 	swept   map[string]bool // 已做过过期清理的日期, 避免同一天反复扫盘
+	started int64           // Run 启动时刻(计数快照的 since)
 
 	mu    sync.Mutex
 	stats LabelSamplesStats
@@ -191,16 +194,50 @@ func (w *LabelSamplesWriter) Observe(in LabelSampleInput) {
 func (w *LabelSamplesWriter) Run(ctx context.Context) {
 	// 启动即做一次过期清理: 进程可能停了一周以上, 重启后要先把旧样本删掉。
 	now := w.now()
+	w.started = now.Unix()
 	w.sweepExpired(now)
 	w.swept[w.dayOf(now)] = true
+	tk := time.NewTicker(labelSamplesStatsEvery)
+	defer tk.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			w.closeFile()
+			w.writeStats()
 			return
+		case <-tk.C:
+			w.writeStats()
 		case s := <-w.ch:
 			w.handle(s)
 		}
+	}
+}
+
+// labelSamplesStatsJSON 是 run/label_samples.stats.json 的内容(v5.24 T4 评估页读取)。
+// 计数从本次写入器启动(since)起累计, dpid 重启或开关重开后归零。
+type labelSamplesStatsJSON struct {
+	Ts            int64  `json:"ts"`
+	Since         int64  `json:"since"`
+	Day           string `json:"day,omitempty"`
+	Written       int64  `json:"written"`
+	Deduped       int64  `json:"deduped"`
+	Dropped       int64  `json:"dropped"`
+	SkippedSystem int64  `json:"skipped_system"`
+	SkippedEmpty  int64  `json:"skipped_empty"`
+	Capped        bool   `json:"capped"`
+}
+
+// writeStats 把计数快照原子写到 run/label_samples.stats.json; 目录不在就算了。
+func (w *LabelSamplesWriter) writeStats() {
+	st := w.Stats()
+	b, err := json.Marshal(labelSamplesStatsJSON{Ts: w.now().Unix(), Since: w.started, Day: w.curDay,
+		Written: st.Written, Deduped: st.Deduped, Dropped: st.Dropped,
+		SkippedSystem: st.SkippedSystem, SkippedEmpty: st.SkippedEmpty, Capped: st.Capped})
+	if err != nil {
+		return
+	}
+	if err := atomicWrite(filepath.Join(w.dir, labelSamplesStatsFile), b, labelSamplesFileMode); err != nil && !os.IsNotExist(err) {
+		log.Printf("label-samples: write stats: %v", err)
 	}
 }
 

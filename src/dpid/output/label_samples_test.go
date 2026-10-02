@@ -449,3 +449,36 @@ func TestLabelSamplesConcurrentObserve(t *testing.T) {
 		t.Errorf("行数 = %d, want 800", n)
 	}
 }
+
+// 计数快照落盘: Run 退出时写 label_samples.stats.json, 字段可被 httpd 直接解析;
+// 过期清理不会误删它。
+func TestLabelSamplesStatsFile(t *testing.T) {
+	w := lsvNew(t)
+	w.now = func() time.Time { return lsvDay1 }
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() { w.Run(ctx); close(done) }()
+	w.Observe(lsvInput(lsvDay1, 1000, "com.x", "a.example.com", "j1"))  // 系统 UID
+	w.Observe(lsvInput(lsvDay1, 10234, "com.x", "a.example.com", "j1")) // 正常
+	deadline := time.Now().Add(3 * time.Second)
+	for w.Stats().Written != 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	<-done
+	b, err := os.ReadFile(filepath.Join(w.dir, labelSamplesStatsFile))
+	if err != nil {
+		t.Fatalf("缺少计数快照: %v", err)
+	}
+	var st labelSamplesStatsJSON
+	if err := json.Unmarshal(b, &st); err != nil {
+		t.Fatal(err)
+	}
+	if st.Written != 1 || st.SkippedSystem != 1 || st.Since != lsvDay1.Unix() || st.Day != w.dayOf(lsvDay1) {
+		t.Errorf("stats.json = %+v", st)
+	}
+	w.sweepExpired(lsvDay2.AddDate(0, 0, 30))
+	if _, err := os.Stat(filepath.Join(w.dir, labelSamplesStatsFile)); err != nil {
+		t.Errorf("过期清理不该删计数快照: %v", err)
+	}
+}

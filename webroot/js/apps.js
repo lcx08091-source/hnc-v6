@@ -113,7 +113,7 @@ function appsSub() {
   }
   var c = S.selfCfg || {};
   return '<div class="sec"><span>追踪开关</span></div><div class="glass rows">' +
-    '<div class="row"><span class="tx"><div class="t">追踪本机应用流量</div><div class="s">按 uid 把本机连接归到应用（dpid 采样，5 秒内生效）</div></span>' + toggle(self && self.enabled, 'data-selftog="toggle" aria-label="追踪本机应用流量"') + '</div>' +
+    '<div class="row"><span class="tx"><div class="t">追踪本机应用流量</div><div class="s">按 uid 把本机连接归到应用（dpid 采样，5 秒内生效）。同时记录「应用 → 域名 / 指纹」样本，用来给识别打分；只存本机、保留 7 天、不上传</div></span>' + toggle(self && self.enabled, 'data-selftog="toggle" aria-label="追踪本机应用流量"') + '</div>' +
     '<div class="row"><span class="tx"><div class="t">已知应用子域自动加入规则</div><div class="s">走法 1：同一应用命中 ≥10 次的新子域自动扩进规则</div></span>' + toggle(c.auto_expand_enabled, 'data-selftog="auto_expand/toggle" aria-label="自动扩展规则"') + '</div>' +
     '<div class="row"><span class="tx"><div class="t">HIGH 候选自动晋级</div><div class="s">走法 2：高置信度的陌生主域名自动写进规则；关闭时只做影子统计</div></span>' + toggle(c.auto_promote_enabled, 'data-selftog="auto_promote/toggle" aria-label="HIGH 自动晋级"') + '</div></div>' +
     '<div class="glass rows"><button class="row" data-act="self-purge">' + gi('orange', 'trash') + '<span class="tx"><div class="t">清理自学习明细数据</div><div class="s">删除 self_attrib 明细（保留已学到的规则）</div></span><span class="hint-a warn">清理</span></button></div>';

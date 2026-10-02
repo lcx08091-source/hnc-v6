@@ -68,7 +68,7 @@
 
 ## 3. 任务拆分(按顺序做,每个任务独立可测)
 
-### T1 · dpid:写本机带标签样本
+### T1 · dpid:写本机带标签样本(✅ v5.24.0-rc1 已完成;计数快照见 `run/label_samples.stats.json`,T4 直接读它取 `skipped_system`)
 **文件**:新建 `src/dpid/output/label_samples.go` + `label_samples_test.go`;在 `self_capture.go` 的 `EventTLSClientHello` 分支里**追加一次调用**(不改原有逻辑,原有 `ObserveSNI` 照常执行)。
 
 **行为**:

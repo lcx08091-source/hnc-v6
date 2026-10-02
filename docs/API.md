@@ -2116,3 +2116,13 @@ GET `/api/encdns`:
 - GET `/api/dns` → `{ok, enabled, active, healthy, state, iface, listen[], port, upstream, upstream_kind, v6:{status,reason}, block_mode, log_queries, log_redact, upstream_config, stats:{queries, cached, blocked, errors, ratelimited, dropped, upstream, upstream_errs, upstream_tcp, servfail, p50_ms, p95_ms, cache_entries}, top_domains_today:[{name,count}], recent?, blocklist:{devices, global}, failopen:{count, last_ts, reason, retry_at}, last_error, last_check, selftest_ms, ip_names}`。
 - GET `/api/dns/log?mac=&limit=` → `{ok, log_queries, log_redact, mac, entries:[…]}`(新→旧,仅开启查询日志时有内容)。两个接口都属于敏感读路径。
 - 实现:转发器监听热点 IP:15353,只对「热点接口 → 网关:53」做 DNAT(`bin/dns_takeover.sh`);上游依次为自定义 / 热点网关 53 / 系统;每 10 秒健康检查,自检失败、上游连续出错、DNAT 不生效或无上游时撤掉 DNAT 放行直连(fail-open)并按退避重试。
+
+## 22. v5.24 本机带标签样本(DPI 3.0 地基)
+
+由 dpid 在「追踪本机应用流量」(`run/self_capture.enabled`)开启时写入,只含本机流量:
+
+- `run/label_samples.YYYYMMDD.jsonl`(本地日期,保留 7 天),每行:`{ts, pkg, uid, sni, ja4, alpn?, dport, quic, ech, partial, rip, rule_id?, rule_name?}`;`rule_*` 为写入时规则库按 SNI 的命中结果。
+- `run/label_samples.YYYYMMDD.capped`:当天超过 20 MB 后出现,此后当天不再写。
+- `run/label_samples.stats.json`:`{ts, since, day, written, deduped, dropped, skipped_system, skipped_empty, capped}`,每分钟更新,计数自写入器启动起累计。
+
+评分接口(`GET /api/dpi_eval`)见 `docs/WORK-v5.24.md` T4,尚未实现。
