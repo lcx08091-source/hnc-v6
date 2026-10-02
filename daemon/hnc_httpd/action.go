@@ -376,6 +376,13 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionUserRuleDel(s, p)
 	case "device_ident_set":
 		return actionDeviceIdentSet(hncDir, p)
+	// v6.x DPI v2: 用户纠正连接归属(fp_user_rules.go)
+	case "dpi_correct":
+		return actionDPICorrect(s, p)
+	case "dpi_correct_list":
+		return actionDPICorrectList(s)
+	case "dpi_correct_del":
+		return actionDPICorrectDel(s, p)
 	case "conn_block_add":
 		return actionConnBlockAdd(s, p)
 	case "conn_block_del":
@@ -388,6 +395,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionCategoryBlockSet(s, p)
 	case "encdns_set": // v5.21 encdns.go
 		return actionEncdnsSet(s, p)
+	case "dns_takeover_set": // DPI v2 dns_takeover.go
+		return actionDNSTakeoverSet(s, p)
 	case "discover_probe":
 		return actionDiscoverProbe(s, p)
 	case "apk_scan":

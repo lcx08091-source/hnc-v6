@@ -706,10 +706,13 @@ ensure_httpd_running() {
     if [ -n "$wpid" ] && ! kill -0 "$wpid" 2>/dev/null; then
         log "httpd dead (was PID $wpid), removing pid file"
         rm -f "$RUN/httpd.pid" "$RUN/httpd_bind_ip"
+        # DPI v2: httpd 被杀/崩溃时来不及撤 DNS 接管的 DNAT → 这里 fail-open(新 httpd 会按配置重下)
+        sh "$HNC_DIR/bin/dns_takeover.sh" remove >> "$LOG" 2>&1 || true
         wpid=""
     elif [ -n "$wpid" ] && ! is_hnc_httpd_pid "$wpid"; then
         log "httpd pid $wpid belongs to another process, clearing stale pid file"
         rm -f "$RUN/httpd.pid" "$RUN/httpd_bind_ip"
+        sh "$HNC_DIR/bin/dns_takeover.sh" remove >> "$LOG" 2>&1 || true
         wpid=""
     fi
 

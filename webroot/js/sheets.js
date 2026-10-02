@@ -56,7 +56,16 @@ function sheet(html, opt) {
   else if (already && apple()) anim($('#sheet-body'), [{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: 'ease-out' });
   return sh;
 }
+/* 弹层收起动画还在跑时, 背后的页面先别重绘(否则卡片在半透明遮罩下跳一下, 苹果风还叠着背景缩放回弹)。
+ * 请求照常立刻发; 只有「把结果画到页面上」这一步等弹层收完。最多等 ~0.5 秒。 */
+var sheetCloseAt = 0;
+function sheetSettled(v) {
+  var left = sheetCloseAt + 460 - performance.now();
+  if ($('#sheet').classList.contains('show') || left <= 0) return Promise.resolve(v);
+  return new Promise(function (res) { setTimeout(function () { res(v); }, Math.min(520, left)); });
+}
 function closeSheet(v) {
+  if ($('#sheet').classList.contains('show')) sheetCloseAt = performance.now();
   $('#scrim').classList.remove('show'); var sh = $('#sheet'); sh.classList.remove('show'); sh.dataset.kind = '';
   sheetCloseFx(typeof v === 'number' ? v : 0);
   var f = sheetOnClose; sheetOnClose = null; if (f) try { f(); } catch (_) {}

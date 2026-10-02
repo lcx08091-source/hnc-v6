@@ -78,6 +78,7 @@ func newServer(hncDir string) *server {
 		rates:        make(map[string]rateOut),
 	}
 	s.limitCtl = newLimitCtl(hncDir, &s.actionMu)
+	ipOwnerConfigure(hncDir) // DPI v2: 离线 IP 归属库路径(ip_owner.go, 首次查询时懒加载)
 	return s
 }
 
@@ -146,8 +147,13 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/app_usage", s.apiAppUsage)      // v5.16: 按应用的真实流量(conntrack)
 	mux.HandleFunc("/api/app_time", s.apiAppTime)        // v6.x: 应用使用时长 + 时长上限/类别封锁(app_time.go)
 	mux.HandleFunc("/api/dpi_unknown", s.apiDPIUnknown)  // v6.x: 未识别流量 Top(教规则用)
+	mux.HandleFunc("/api/dpi_fp", s.apiDPIFP)             // v6.x DPI v2: 学到的指纹 + 用户纠正(fp_learn.go)
+	mux.HandleFunc("/api/fg_timeline", s.apiFgTimeline)  // DPI v2: 前台应用时间线 + 前台分钟数(fg_model.go)
 	// v5.21: 加密 DNS 策略 + 拦截计数(encdns.go)
 	mux.HandleFunc("/api/encdns", s.apiEncdns)
+	// DPI v2: 可选「HNC DNS 接管」状态 / 逐设备查询日志(dns_takeover.go)
+	mux.HandleFunc("/api/dns", s.apiDNS)
+	mux.HandleFunc("/api/dns/log", s.apiDNSLog)
 	mux.HandleFunc("/api/phone_usage", s.apiPhoneUsage)  // 本机与热点月度流量(按网络/按卡)
 	mux.HandleFunc("/api/stats_health", s.apiStatsHealth) // v5.21: 统计健康(精确模式/iptables/时钟/分流漏计)
 	mux.HandleFunc("/api/sim", s.apiSim)                 // 模拟环境状态(sim.go)
@@ -521,6 +527,9 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	liveCalls := liveCallsByMAC() // v5.16: 通话检测(连接表)
 	// v5.21: 客户端 VPN/代理检测(traffic_ident.go)
 	vpnVerdicts := identVPNVerdicts()
+	// DPI v2: 流形态分类「此刻在: 看视频/通话/游戏/下载/浏览」(flow_shape.go)
+	trafficTypes := trafficTypesByMAC()
+	fgViews := fgViewsByMAC(time.Now()) // DPI v2: 前台应用模型(fg_model.go)
 
 	deviceRules, _ := rulesMap["devices"].(map[string]interface{})
 	blacklist, _ := rulesMap["blacklist"].([]interface{})
@@ -612,10 +621,18 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		if lc := liveCalls[macKey]; lc != nil {
 			merged["live_call"] = lc
 		}
+		if fv, ok := fgViews[macKey]; ok {
+			merged["fg"] = fv
+		}
 		if v, ok := vpnVerdicts[macKey]; ok {
 			merged["vpn"] = v
 		} else {
 			merged["vpn"] = vpnVerdict{Level: "none", WindowSec: int(identVPNWindow / time.Second)}
+		}
+		if tt, ok := trafficTypes[macKey]; ok {
+			merged["traffic_type"] = tt
+		} else {
+			merged["traffic_type"] = trafficType{Type: ttUnknown, Label: trafficTypeLabels[ttUnknown]}
 		}
 
 		// 速率: 只读 RateLoop 发布的快照 (按 macKey 小写索引). 单一采样源 →

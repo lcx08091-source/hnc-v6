@@ -221,6 +221,7 @@ func main() {
 	go srv.MacMergeLoop(stopCh)   // v5.21: 随机 MAC 画像 + 疑似同一设备建议(30s)
 	go srv.ActivityLoop(stopCh)     // v5.22: 亮屏/热点/在线设备/界面 → 活动档位 + run/activity.json(15s)
 	go srv.PowerSamplerLoop(stopCh) // v5.22: 自测 CPU/唤醒 → run/power_stats.json(5 分钟)
+	go srv.DNSTakeoverLoop(stopCh)  // DPI v2: 可选 DNS 接管(默认关; 开启时 10s 健康检查, 异常自动撤 DNAT)
 
 	if haveRemote {
 		if *flagNoTLS {
@@ -269,6 +270,8 @@ func main() {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		close(stopCh) // 通知所有 goroutine 停止(SaveLoop 会做最后一次 Flush)
+		// DPI v2: 同步撤掉 DNS 接管的 DNAT(不等 goroutine —— 进程马上退出, 规则留着会让热点设备解析失败)
+		srv.dnsTakeoverShutdown()
 		if httpsSrv != nil {
 			_ = httpsSrv.Shutdown(ctx)
 		}

@@ -310,6 +310,8 @@ func (s *server) loadIPNames() map[string]ipName {
 			}
 		}
 	}
+	// DPI v2: DNS 接管开启时, 解析器的权威答案并入(dns_takeover.go; 未开启时零开销)
+	dnsTKMergeIPNames(s, out)
 	return out
 }
 
@@ -452,6 +454,7 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 	}
 	names := s.loadIPNames()
 	apps := s.loadIPApps()
+	fpSt, now := fpFor(s.hncDir), time.Now() // v6.x DPI v2
 	blocked := map[string]bool{}
 	devBlocks := s.connBlocksForWithDerived(mac, time.Now()) // v6.x: 含时长用完 / 类别封锁的派生项(带 source)
 	for _, l := range s.expandConnBlocks(connBlockFile{Items: devBlocks}) {
@@ -497,14 +500,40 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 			item["name_src"] = n.Src
 			label = n.Name
 		}
-		if a, ok := appForIP(e.Dst, apps, names); ok {
+		// v6.x DPI v2(fp_learn.go): 用户纠正 > 规则库 > 学习指纹; app_src = user|rule|name|fp|seed,
+		// app_conf = 置信度(fp/seed/user), ja4 = 这条连接的 ClientHello 指纹(给「纠正」用)
+		fa, faOK := fpSt.attribute(k, apps, names, now)
+		if fa.JA4 != "" {
+			item["ja4"] = fa.JA4
+		}
+		if faOK {
+			a := fa.App
 			item["app"] = a.Name
 			item["app_id"] = a.ID
+			item["app_src"] = fa.Src
+			if fa.Conf > 0 {
+				item["app_conf"] = round2(fa.Conf)
+			}
 			if appTier(a.Category) == tierHidden {
 				item["sdk"] = true // 广告/统计/CDN: 界面上弱化, 不算"应用"
 			} else {
 				label = a.Name
 			}
+		}
+		// DPI v2: 目的 IP 的归属组织(ip_owner.go); 没名字也没应用时, 消费级运营方归「XX系(未细分)」
+		if !mine[e.Dst] && !isPrivateIP(e.Dst) {
+			if o, ok := ipOwnerLookup(e.Dst); ok {
+				item["owner"] = o.JSON()
+				if label == "" && o.Kind == ipOwnerKindApp {
+					label = o.AppName()
+				}
+			}
+		}
+		// DPI v2: 流形态(flow_shape.go): video_stream / live_stream / voice_call / video_call /
+		// gaming / download / upload / browsing / background / unknown
+		if tt, conf, ok := flowTrafficType(k); ok {
+			item["traffic_type"] = tt
+			item["traffic_conf"] = conf
 		}
 		if svc := wellKnownSvc(e.Proto, e.Dport); svc != "" {
 			item["svc"] = svc
@@ -722,18 +751,35 @@ func appTier(category string) int {
 }
 
 // appForIP: 规则直接命中的 IP(ip_app_map)优先; 否则用 DNS/SNI 反查到的域名归类(DNS 关联)。
+// v6.x DPI v2: 用户纠正规则(fp_user_rules.go, 任意端口的 IP 规则 / 域名规则)排在最前。
 func appForIP(ip string, apps map[string]ipApp, names map[string]ipName) (ipApp, bool) {
+	a, _, ok := appForIPSrc(ip, apps, names)
+	return a, ok
+}
+
+// appForIPSrc 同 appForIP, 另返回来源: user(用户纠正)| rule(ip_app_map)| name(域名归类)
+func appForIPSrc(ip string, apps map[string]ipApp, names map[string]ipName) (ipApp, string, bool) {
+	if dpiUserRulesCur.Load() != nil {
+		if a, ok := dpiUserMatchIP(ip, 0, time.Now()); ok {
+			return a, "user", true
+		}
+		if n, ok := names[ip]; ok && n.Name != "" {
+			if a, ok := dpiUserMatchName(n.Name); ok {
+				return a, "user", true
+			}
+		}
+	}
 	if a, ok := apps[ip]; ok && a.ID != "" {
-		return a, true
+		return a, "rule", true
 	}
 	if n, ok := names[ip]; ok && n.App != "" {
 		name := n.AppName
 		if name == "" {
 			name = n.App
 		}
-		return ipApp{ID: n.App, Name: name, Category: n.Category}, true
+		return ipApp{ID: n.App, Name: name, Category: n.Category}, "name", true
 	}
-	return ipApp{}, false
+	return ipApp{}, "", false
 }
 
 // 「正在用」: 按 conntrack 实时速率把每台设备的流量归到应用, 做指数平滑
@@ -800,6 +846,12 @@ func (s *server) liveAppsByMAC() map[string][]map[string]interface{} {
 				callNow[mac] = c
 			}
 			a, ok := appForIP(e.Dst, apps, names)
+			if !ok && !isPrivateIP(e.Dst) { // v6.x DPI v2: 无域名连接按指纹/用户纠正归属
+				var fa flowAttr
+				if fa, ok = fpFor(s.hncDir).attribute(k, apps, names, sn.at); ok {
+					a = fa.App
+				}
+			}
 			if !ok {
 				continue
 			}

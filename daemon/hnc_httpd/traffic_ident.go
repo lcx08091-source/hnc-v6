@@ -290,6 +290,7 @@ type identCtx struct {
 	names    map[string]ipName
 	sigKey   map[string]bool // 本轮判为签名流的连接 key
 	released []appUsageDelta
+	fp       *fpStore // v6.x DPI v2: 指纹/用户纠正归属(fp_learn.go); nil = 不用
 }
 
 func isLocalDst(dst string, owner map[string]string) bool {

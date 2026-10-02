@@ -37,7 +37,8 @@ function renderApps(anim1) {
       '<div class="foot2"><span class="breathe' + (self && self.enabled ? '' : ' off') + '"></span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + foot + '</span></div></div>' +
     seg('apps-sub', [['my', '我的应用'], ['cand', '候选' + (self && num(self.candidate_high) ? ' ·' + self.candidate_high : '')], ['export', '导出'], ['set', '设置']], S.appsSub) +
     '<div class="subview" id="apps-sub">' + appsSub() + '</div></div>';
-  var p = $('#p-apps'); p.innerHTML = h; placeSegs(p);
+  // 进页面后数据回来的那次重绘(以及开关后的刷新)就地 morph: 此前整页 innerHTML 替换, 把刚开始的浮现动画掐断重来
+  var p = $('#p-apps'); if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h; placeSegs(p);
   if (anim1) stagger($('.wrap', p));
   if (S.appsSub === 'export') loadExports();
 }
@@ -162,13 +163,13 @@ function downloadExport(name, url) {
 }
 function selfToggle(el, path) {
   var on = el.getAttribute('aria-checked') === 'true';
-  el.disabled = true;
+  pend(el, true);
   api.post('/api/self/' + path, { enabled: on }).then(function (r) {
     if (r && r.error) throw new Error(r.error);
     toast((el.getAttribute('aria-label') || '') + (on ? ' 已开启' : ' 已关闭') + (path === 'toggle' && on ? ' · 5 秒内出现数据' : ''));
     if (path !== 'toggle') S.selfCfg[path.split('/')[0] + '_enabled'] = on;
     setTimeout(function () { loadApps().then(function () { if (S.page === 'apps') renderApps(false); }); }, path === 'toggle' ? 5500 : 800);
-  }).catch(function (e) { el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); }).then(function () { el.disabled = false; });
+  }).catch(function (e) { el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); }).then(function () { pend(el, false); });
 }
 function candAct(kind, apex) {
   api.action(kind === 'promote' ? 'candidate_promote' : 'candidate_reject', { apex: apex }).then(function () {

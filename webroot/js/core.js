@@ -94,8 +94,89 @@ function seg(id, opts, cur, cls) {
 function placeSegs(root) {
   $$('.seg', root || document).forEach(function (s) {
     var on = $('button.on', s), th = $('.thumb', s); if (!on || !on.offsetWidth) { if (th) th.style.width = '0px'; return; }
-    th.style.width = on.offsetWidth + 'px'; th.style.transform = 'translateX(' + on.offsetLeft + 'px)';
+    var w = on.offsetWidth + 'px', tf = 'translateX(' + on.offsetLeft + 'px)';
+    if (th.style.width === w && th.style.transform === tf) return;
+    // 新渲染出来的分段控件第一次定位不走过渡 —— 此前每次重绘滑块都从最左边滑过来(一页十几个同时滑)
+    var first = !th.style.transform || th.style.width === '0px';
+    if (first) th.style.transition = 'none';
+    th.style.width = w; th.style.transform = tf;
+    if (first) { void th.offsetWidth; th.style.transition = ''; }
   });
+}
+
+/* ═════════════════════ 就地更新(morph) ═════════════════════
+ * 把新 HTML 合并进现有 DOM, 而不是 innerHTML 整块替换: 节点按 key(data-dev / data-side / data-foldkey / id /
+ * data-app / data-mkey)或「位置 + 标签」复用, 只改变化了的属性和文字。
+ * 好处: 展开的折叠、滚动位置、焦点、正在输入的值、进行中的过渡都不被打断; 进度条/柱子/侧栏这类 CSS 入场
+ * 动画不会因为后台刷新重放; 每次刷新替换的节点从几百上千降到个位数。
+ *  - 输入框: 只有模板里的 value 变了(后端数据变了)才覆盖当前值, 且从不动正在聚焦的框 —— 用户正在填的值保留
+ *  - data-keep: 异步填进来的内容(日志/趋势图/授权列表), 整个子树跳过
+ *  - .pending(或其所在 .seg.pending): 请求进行中的乐观状态, 不被后台刷新改回去(避免开关来回闪)
+ *  - 临时 class(busy / pending / jelly / run)保留 */
+var MORPH_KEEP_CLS = ['busy', 'pending', 'jelly', 'run'];
+function mkey(n) {
+  if (n.nodeType !== 1) return '';
+  var k = n.getAttribute('data-dev') || n.getAttribute('data-side') || n.getAttribute('data-foldkey') || n.id || n.getAttribute('data-app') || n.getAttribute('data-mkey');
+  return k ? n.nodeName + ':' + k : '';
+}
+function morphAttrs(a, b) {
+  var i, at, frozen = a.classList.contains('pending') || !!(a.parentNode && a.parentNode.classList && a.parentNode.classList.contains('pending'));
+  for (i = a.attributes.length - 1; i >= 0; i--) {
+    at = a.attributes[i].name;
+    if (b.hasAttribute(at) || (at === 'style' && a.classList.contains('thumb'))) continue;
+    if (frozen && (at === 'class' || at === 'aria-checked')) continue;
+    a.removeAttribute(at);
+  }
+  for (i = 0; i < b.attributes.length; i++) {
+    at = b.attributes[i];
+    var cur = a.getAttribute(at.name); if (cur === at.value) continue;
+    if (at.name === 'class') {
+      if (frozen) continue;
+      var keep = MORPH_KEEP_CLS.filter(function (c) { return a.classList.contains(c) && !b.classList.contains(c); });
+      a.setAttribute('class', at.value + (keep.length ? ' ' + keep.join(' ') : ''));
+      continue;
+    }
+    if (frozen && at.name === 'aria-checked') continue;
+    if (at.name === 'style' && a.classList.contains('thumb')) continue;
+    a.setAttribute(at.name, at.value);
+    if (a.nodeName === 'INPUT' && at.name === 'value' && a !== document.activeElement) a.value = at.value;
+  }
+  if (a.nodeName === 'INPUT' && (a.type === 'checkbox' || a.type === 'radio')) { var ck = b.hasAttribute('checked'); if (a.defaultChecked !== ck) a.checked = ck; }
+}
+function morphNode(a, b) {
+  if (a.nodeType !== 1) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return a; }
+  if (a.hasAttribute('data-keep')) return a;
+  morphAttrs(a, b);
+  if (a.nodeName !== 'TEXTAREA') morphKids(a, b);
+  return a;
+}
+function morphKids(a, b) {
+  var olds = Array.prototype.slice.call(a.childNodes), news = Array.prototype.slice.call(b.childNodes), keyed = {}, free = [], fi = 0;
+  olds.forEach(function (n) { var k = mkey(n); if (k && !keyed[k]) keyed[k] = n; else free.push(n); });
+  for (var i = 0; i < news.length; i++) {
+    var nn = news[i], k = mkey(nn), m = null;
+    if (k) { m = keyed[k] || null; if (m) delete keyed[k]; }
+    else {
+      // 按位置找第一个同类型的旧节点(往后最多看 3 个: 中间插入/删掉一两块时后面的仍能对上)
+      for (var j = fi; j < free.length && j < fi + 3; j++) { var f = free[j]; if (f && f.nodeName === nn.nodeName && !mkey(f)) { m = f; free[j] = null; fi = j + 1; break; } }
+    }
+    var ref = a.childNodes[i] || null;
+    if (m) { if (m !== ref) a.insertBefore(m, ref); morphNode(m, nn); }
+    else a.insertBefore(nn, ref);
+  }
+  while (a.childNodes.length > news.length) a.removeChild(a.lastChild);
+}
+/* 用 html 更新 el 的内容(el 本身保留) */
+function morph(el, html) {
+  if (!el) return el;
+  var t = document.createElement('div'); t.innerHTML = html; morphKids(el, t); return el;
+}
+/* 用 html(单个根元素)更新 el 本身; 标签不同则整个替换。返回更新后的元素 */
+function morphOuter(el, html) {
+  var t = document.createElement('div'); t.innerHTML = html;
+  var nu = t.firstElementChild; if (!nu) return el;
+  if (nu.nodeName !== el.nodeName) { el.replaceWith(nu); return nu; }
+  return morphNode(el, nu);
 }
 
 /* ═════════════════════ 传输层 ═════════════════════
@@ -261,6 +342,19 @@ var S = {
   self: null, selfCfg: {}, logFile: 'combined'
 };
 if (['recent', 'online_only', 'all', 'offline_rules'].indexOf(S.filter) < 0) S.filter = 'recent';
+/* 折叠状态记在本机(设置分组、「高级」「诊断」、设备卡里的「更多控制」和各小节); 设备卡本身展开与否、自检分组不记 */
+var FOLD_LS = 'hnc6.folds';
+function foldRemembered(k) { return !!k && !isMac(k) && !/^sc-/.test(k); }
+(function () { try { var o = JSON.parse(LS.get(FOLD_LS, '{}')) || {}; Object.keys(o).forEach(function (k) { if (o[k] && foldRemembered(k)) S.open[k] = true; }); } catch (_) {} })();
+function saveFolds(k) {
+  if (!foldRemembered(k)) return;
+  try {
+    var o = JSON.parse(LS.get(FOLD_LS, '{}')) || {};
+    if (S.open[k]) o[k] = 1; else delete o[k];
+    var ks = Object.keys(o); if (ks.length > 300) ks.slice(0, ks.length - 300).forEach(function (x) { delete o[x]; });
+    LS.set(FOLD_LS, JSON.stringify(o));
+  } catch (_) {}
+}
 if (['realtime', 'balanced', 'powersave'].indexOf(S.refreshMode) < 0) S.refreshMode = 'balanced';
 
 /* ═════════════════════ 能力 ═════════════════════ */

@@ -56,6 +56,7 @@ const (
 	// v5.15: 未知应用发现(聚类结果 / JA4 家族学习表)与本机安装包域名索引。
 	discoverFileName  = "dpi_discover.json"
 	ja4FamilyFileName = "dpi_ja4family.json"
+	flowLogFileName   = "dpi_flows.json" // v6.x DPI v2: 每连接 JA4(flowlog.go)
 	apkDomainsFile    = "apk_domains.json"
 	apkScanRequest    = "apk_scan.request"
 	crashFlagFile     = "dpid.crashflag"
@@ -407,6 +408,11 @@ func main() {
 	// 带来新 IP; 10 秒一写把 JSON 编码 + fsync + httpd 重解析的频率减半,
 	// 新连接的域名最多晚 10 秒出现在连接列表里。
 	go flushEvery(ctx, 10*time.Second, "dpi_ipname", ipNames.Flush)
+	// v6.x DPI v2: 每连接 ClientHello 指纹(五元组 → JA4/ALPN/SNI 归类), 给 httpd 的
+	// 指纹学习/无域名识别 join conntrack 用。有界环形缓冲, 有新条目才写。
+	flowLog = output.NewFlowLog()
+	flowLog.SetPath(filepath.Join(cfg.RunDir, flowLogFileName))
+	go flushEvery(ctx, 10*time.Second, "dpi_flows", flowLog.Flush)
 
 	// v5.15: 未知应用发现器 —— 规则库认不出的域名按同设备共现聚成组, 并从已知
 	// 应用学习 JA4 → 公司家族。启动读回, 30 秒落盘一次(无变化不写)。
@@ -443,6 +449,7 @@ func main() {
 	_ = sw.Flush()
 	_ = devID.Flush(time.Now())
 	_ = ipNames.Flush(time.Now())
+	_ = flowLog.Flush(time.Now())
 	_ = disc.Flush(time.Now())
 	clearCrashFlag(cfg.RunDir)
 	log.Printf("hnc_dpid exited cleanly")
@@ -706,6 +713,7 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 				}
 			case capture.EventTLSClientHello:
 				sw.RecordTLS(clientMAC, clientIP, remoteIP, ev.TLS.SNI, ev.TLS.JA4, ev.Time)
+				recordFlowFP(ev, clientMAC, clientIP, remoteIP) // v6.x DPI v2
 				if ev.TLS.SNI != "" {
 					// 已知 ECH public_name(外层 SNI)由 RecordConnName 过滤。
 					ipNames.RecordConnName(remoteIP, ev.TLS.SNI, output.IPNameSrcSNI, ev.Time)

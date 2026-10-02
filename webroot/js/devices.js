@@ -449,7 +449,7 @@ function appLimNote(x) {
   return '<div class="note appq-n">已限速 ' + l + ' 个地址' + (sk ? ' · 跳过 ' + sk + ' 个共享 CDN 地址' : '') + (S.appLimitShared ? ' · 含共享地址' : '') + '</div>';
 }
 function devCard(d) {
-  var r = bps(d.rx), t = bps(d.tx), open = !wide() && S.open[d.mac];
+  var r = bps(d.rx), t = bps(d.tx), open = !wide() && S.open[d.mac], closing = !open && !wide() && S.closingAt && Date.now() - (S.closingAt[d.mac] || 0) < 800;
   var meta = d.online ? (d.ip || '—') : d.blocked ? '已阻止联网' : '最后出现 ' + ago(d.lastSeen);
   return '<article class="glass dev' + (open ? ' open' : '') + (wide() && S.sel === d.mac ? ' sel' : '') + (S.picked[d.mac] ? ' picked' : '') + '" data-dev="' + d.mac + '">' +
     '<button class="dev-h" data-act="toggle-dev" aria-expanded="' + !!open + '"><span class="check">' + ico('check') + '</span>' +
@@ -461,7 +461,7 @@ function devCard(d) {
       '</span>' +
       (d.online ? '<span class="dev-rate num"><span class="d">↓ <b data-rx>' + r.v + '</b> ' + r.u + '</span><span class="u">↑ <b data-tx>' + t.v + '</b> ' + t.u + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>'
         : '<span class="dev-rate"><span class="off">' + (d.blocked ? '已阻止' : '离线') + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>') +
-    '</button>' + mergeRowHtml(d) + (wide() ? '' : '<div class="fold"><div><div class="fold-in">' + (open ? devBody(d) : '') + '</div></div></div>') +
+    '</button>' + mergeRowHtml(d) + (wide() ? '' : '<div class="fold"><div><div class="fold-in">' + (open || closing ? devBody(d) : '') + '</div></div></div>') +
   '</article>';
 }
 /* 「在用」= 此刻按实时速率排出来的应用(后端 conntrack 平滑); 没有实时数据时退回 DPI 的"最近识别" */
@@ -492,9 +492,32 @@ function devSide() {
   return '<div class="glass swap" data-side="' + d.mac + '"><div class="side-head"><span class="av">' + d.icon + '<span class="dot ' + (d.blocked ? 'blocked' : d.online ? 'online' : 'offline') + '"></span></span><div style="min-width:0"><div class="t">' + esc(d.name) + '</div><div class="s mono">' + esc(d.ip || '—') + ' · ' + d.mac + '</div></div></div>' +
     '<div style="padding:10px 14px 12px" class="dev-name">' + (badges(d) || '<span class="badge b-ok">无规则</span>') + '</div>' + mergeRowHtml(d) + devBody(d) + '</div>';
 }
+/* 列表顺序冻结: 有卡片展开着 / 刚在列表里点过 / 刚做完操作的几秒内, 已在屏幕上的卡片保持原来的先后,
+ * 新出现的排到后面。此前封锁一台设备、改个名字, 下一次轮询它就按「在线 / 封锁 / 名字」重排跳到别处,
+ * 手指下面换成了另一张卡。解冻后再按自然顺序重排, 由 renderDevList 做 FLIP 平滑移动。 */
+var listFreezeUntil = 0, resortT = 0;
+function freezeList(ms) {
+  listFreezeUntil = Math.max(listFreezeUntil, Date.now() + (ms || 4000));
+  clearTimeout(resortT); resortT = setTimeout(resortIfNeeded, listFreezeUntil - Date.now() + 80);
+}
+function listFrozen() { return Date.now() < listFreezeUntil || (!wide() && S.devices.some(function (d) { return S.open[d.mac]; })); }
+function screenOrder() { return $$('#dev-list > .dev').map(function (e) { return e.getAttribute('data-dev'); }); }
+function displayOrder(list) {
+  if (!listFrozen()) return list;
+  var cur = screenOrder(); if (!cur.length) return list;
+  var pos = {}; cur.forEach(function (m, i) { pos[m] = i; });
+  var idx = {}; list.forEach(function (d, i) { idx[d.mac] = i; });
+  return list.slice().sort(function (a, b) { return (a.mac in pos ? pos[a.mac] : 1e6 + idx[a.mac]) - (b.mac in pos ? pos[b.mac] : 1e6 + idx[b.mac]); });
+}
+/* 解冻后屏幕上的顺序和自然顺序不一样 → 重排一次(FLIP 动画) */
+function resortIfNeeded() {
+  if (S.page !== 'devices' || listFrozen() || !$('#dev-list')) return;
+  var want = visibleDevs().map(function (d) { return d.mac; }).join('|');
+  if (want !== screenOrder().join('|')) renderDevList(false);
+}
 function devListHtml() {
   if (!S.devLoaded) return '<div class="skel"></div><div class="skel"></div><div class="skel"></div>';
-  var all = visibleDevs();
+  var all = displayOrder(visibleDevs());
   if (all.length) return all.map(devCard).join('');
   var msg = S.hotspot.active === false ? '热点未开启 · 在线设备会显示在这里' : S.q ? '没有匹配的设备，换个关键词试试' : S.filter === 'offline_rules' ? '没有留着规则的离线设备' : '暂无设备 · 连接热点后会出现在这里';
   return '<div class="glass empty">' + msg + '</div>';
@@ -560,38 +583,28 @@ function renderDevices(anim1) {
     '<div class="sec"><span>设备列表</span><span class="r"><span id="list-on">' + on + '</span> 在线 · 共 ' + S.devices.length + '</span></div>' +
     '<div class="dev-list' + (S.batch ? ' batch' : '') + '" id="dev-list">' + devListHtml() + '</div></div>' +
     (wide() ? '<div class="dev-side" id="dev-side">' + devSide() + '</div>' : '') + '</div>';
-  var p = $('#p-devices'); p.innerHTML = h;
+  var p = $('#p-devices');
+  // 已有内容时就地更新(批量模式切换 / 过滤 / 重连): 不丢滚动位置和展开状态, 不重放入场动画
+  if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h;
   placeSegs(p); paintHero(false); drawSpark(); paintFresh(); renderOffloadBanner(); paintOnlineHours();
   if (anim1) stagger($('.wrap .wrap', p));
 }
-/* 后台刷新重绘列表时, 保留用户正在编辑的输入(限速/延迟/应用限速框)与焦点。
- * 此前别的设备一有变化(比如有设备连上热点)整张列表重绘, 刚输入的值被清空、键盘收起。 */
-function inputKey(inp) {
-  var box = inp.closest('[data-dev],[data-side]'); if (!box) return null;
-  var mac = box.getAttribute('data-dev') || box.getAttribute('data-side'), app = inp.closest('[data-app]');
-  return mac + '|' + (inp.getAttribute('data-f') || (app ? 'app:' + app.getAttribute('data-app') : ''));
-}
-function snapInputs(root) {
-  var snap = { vals: {}, focus: null }, ae = document.activeElement;
-  $$('input', root).forEach(function (i) { var k = inputKey(i); if (k && i.value !== i.defaultValue) snap.vals[k] = i.value; });
-  if (ae && ae.tagName === 'INPUT' && root.contains(ae)) { var k = inputKey(ae); if (k) snap.focus = { k: k, a: ae.selectionStart, b: ae.selectionEnd }; }
-  return snap;
-}
-function restoreInputs(root, snap) {
-  $$('input', root).forEach(function (i) {
-    var k = inputKey(i); if (!k) return;
-    if (snap.vals[k] != null) i.value = snap.vals[k];
-    if (snap.focus && snap.focus.k === k) { try { i.focus({ preventScroll: true }); if (snap.focus.a != null) i.setSelectionRange(snap.focus.a, snap.focus.b); } catch (_) {} }
-  });
-}
+/* 列表刷新: 就地 morph(卡片按 data-dev 复用) + FLIP —— 位置变了的卡片从旧位置平滑移过去, 新卡片淡入 */
 function renderDevList(animate) {
   var list = $('#dev-list'); if (!list) return;
-  var snap = snapInputs(list);
-  list.innerHTML = devListHtml(); placeSegs(list); paintOnlineHours(); paintSimBanner();
-  restoreInputs(list, snap);
+  var before = {}, flip = !animate && motionOn() && list.firstElementChild;
+  if (flip) $$('#dev-list > .dev').forEach(function (c) { before[c.getAttribute('data-dev')] = c.getBoundingClientRect().top; });
+  // 卡片元素复用 → 正在输入的框、焦点、光标位置天然保留(此前整表 innerHTML 要先快照再还原)
+  morph(list, devListHtml()); placeSegs(list); paintOnlineHours(); paintSimBanner();
   var lo = $('#list-on'); if (lo) lo.textContent = S.devices.filter(function (d) { return d.online; }).length;
-  if (wide()) { var sd = $('#dev-side'); if (sd && !sd.contains(document.activeElement)) { var ss = snapInputs(sd); sd.innerHTML = devSide(); placeSegs(sd); restoreInputs(sd, ss); } }
-  if (animate) stagger(list);
+  if (wide()) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); placeSegs(sd); } }
+  if (animate) { stagger(list); return; }
+  if (flip) $$('#dev-list > .dev').forEach(function (c) {
+    var m = c.getAttribute('data-dev'), y0 = before[m];
+    if (y0 == null) { anim(c, [{ opacity: 0 }, { opacity: 1 }], { duration: 220, easing: 'ease-out' }); return; }
+    var dy = y0 - c.getBoundingClientRect().top;
+    if (Math.abs(dy) > 2) anim(c, [{ transform: 'translateY(' + dy.toFixed(1) + 'px)' }, { transform: 'none' }], { duration: 320, easing: EASE.soft });
+  });
 }
 function paintHero(tw) {
   var l = S.live || {}, dn = num(l.rx_bps) / 1048576, up = num(l.tx_bps) / 1048576;
@@ -631,25 +644,42 @@ function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge 
 function refreshCard(mac) {
   var d = devBy(mac); if (!d) return;
   var el = document.querySelector('.dev[data-dev="' + mac + '"]');
-  if (el) { var tmp = document.createElement('div'); tmp.innerHTML = devCard(d); var nu = tmp.firstChild; el.replaceWith(nu); placeSegs(nu); paintOnlineHours(); }
-  if (wide() && S.sel === mac) { var sd = $('#dev-side'); if (sd) { sd.innerHTML = devSide(); placeSegs(sd); } }
+  if (el) { el = morphOuter(el, devCard(d)); placeSegs(el); paintOnlineHours(); }
+  if (wide() && S.sel === mac) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); placeSegs(sd); } }
 }
 
 /* ═════════════════════ 设备操作 ═════════════════════ */
 function setBusy(mac, on) {
   if (on) S.busy[mac] = 1; else delete S.busy[mac];
   $$('[data-dev="' + mac + '"] .btn, [data-side="' + mac + '"] .btn').forEach(function (b) { if (b.dataset.act && b.dataset.act !== 'copy-mac' && b.dataset.act !== 'rename') b.disabled = !!on; });
+  $$('.dev[data-dev="' + mac + '"], [data-side="' + mac + '"]').forEach(function (c) { if (on) c.setAttribute('aria-busy', 'true'); else c.removeAttribute('aria-busy'); });
 }
-/* 卡片级动作: 加锁 → 执行 → 拉一次设备 → 就地重绘这张卡 */
-function devAct(mac, fn, okMsg) {
+/* 请求进行中的视觉状态: 按钮 → .busy(禁用 + 稍后出转圈, 防重复提交); 开关 / 分段 → .pending(保持乐观状态, 不被后台刷新改回) */
+function pend(el, on) {
+  if (!el || !el.classList) return;
+  var t = el.matches('.seg button') ? el.parentNode : el, cls = t.classList.contains('toggle') || t.classList.contains('seg') ? 'pending' : 'busy';
+  t.classList.toggle(cls, !!on);
+  if (on) t.setAttribute('aria-busy', 'true'); else t.removeAttribute('aria-busy');
+  if (cls === 'busy' && t.tagName === 'BUTTON') { if (on) { t._wasDis = t.disabled; t.disabled = true; } else if (!t._wasDis) t.disabled = false; }
+}
+/* 通用: 按钮在 promise 结束前保持忙碌状态 */
+function busyWhile(el, p) { pend(el, true); return Promise.resolve(p).then(function (r) { pend(el, false); return r; }, function (e) { pend(el, false); throw e; }); }
+/* 卡片级动作: 加锁 → 执行 → 拉一次设备 → (弹层收起后)就地更新这张卡 → 成功提示
+ * 成功提示和界面变化同时出现; 失败立即提示并按后端真实状态回滚(开关只回滚一次, 不会来回闪)。
+ * 期间列表顺序冻结, 卡片不会因为状态变化被重排到别处。 */
+function devAct(mac, fn, okMsg, src) {
   if (S.busy[mac]) { toast('这台设备还有操作在进行', 'warn'); return Promise.resolve(false); }
-  setBusy(mac, true);
+  setBusy(mac, true); pend(src, true); freezeList(6000);
+  var ok = false, msg = '';
   return Promise.resolve().then(fn).then(function (r) {
-    if (okMsg) toast(typeof okMsg === 'function' ? okMsg(r) : okMsg);
-    return true;
-  }, function (e) { toast(errText(e), 'err'); return false; }).then(function (ok) {
-    setBusy(mac, false);
-    return loadDevices().catch(function () {}).then(function () { refreshCard(mac); updateStatsCounters(); return ok; });
+    ok = true; msg = okMsg ? (typeof okMsg === 'function' ? okMsg(r) : okMsg) : '';
+  }, function (e) { toast(errText(e), 'err'); }).then(function () {
+    return loadDevices().catch(function () {});
+  }).then(sheetSettled).then(function () {
+    setBusy(mac, false); pend(src, false);
+    refreshCard(mac); updateStatsCounters(); freezeList(4000);
+    if (ok && msg) toast(msg);
+    return ok;
   });
 }
 function readNum(ctx, f) { var el = $('[data-f="' + f + '"]', ctx); return el ? num(el.value) : 0; }
@@ -696,8 +726,8 @@ function renameSheet(mac, name, after) {
 }
 function loadTrend(d, box) {
   var el = $('[data-trend]', box); if (!el) return;
-  el.className = ''; el.innerHTML = '<div class="note">加载中…</div>';
-  api.get('/api/dpi_history', { days: 7, mac: d.mac }, { timeout: 12000 }).then(function (r) {
+  el.className = ''; el.setAttribute('data-keep', ''); el.innerHTML = '<div class="note">加载中…</div>';   // data-keep: 后台刷新卡片时不把图表冲掉
+  return api.get('/api/dpi_history', { days: 7, mac: d.mac }, { timeout: 12000 }).then(function (r) {
     var hrs = r.by_hour || [], tot = num(r.total_rx) + num(r.total_tx);
     if (!hrs.length || !tot) { el.innerHTML = '<div class="note">这台设备 7 天内没有 DPI 流量记录</div>'; return; }
     var mx = Math.max.apply(null, hrs.map(function (h) { return num(h.rx) + num(h.tx); })) || 1;
@@ -815,15 +845,15 @@ function doRelease() {
     }).catch(function (e) { toast(errText(e), 'err'); });
   });
 }
-function setQos(kind, v) {
+function setQos(kind, v, el) {
   var p = kind === 'mode' ? { mode: v } : { scale: v };
-  api.action('qos_set', p).then(function () {
+  busyWhile(el, api.action('qos_set', p)).then(function () {
     if (kind === 'mode') { S.cfg.tc_qos_mode = v; LS.set('hnc.qos-mode', v); } else { S.cfg.tc_qos_scale = +v; LS.set('hnc.qos-scale', v); }
     toast(kind === 'mode' ? '限速策略：' + (v === 'precise' ? '精确' : '兼容') + ' · 下次应用规则时生效' : '校准：' + ({ 100: '标准', 85: '稳准', 75: '严格' }[v] || v + '%'));
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
 function setWhitelistMode(on, el) {
-  api.action('whitelist_set', { enabled: on ? 'true' : 'false' }).then(function (r) {
+  busyWhile(el, api.action('whitelist_set', { enabled: on ? 'true' : 'false' })).then(function (r) {
     S.cfg.whitelist_mode = on;
     var cnt = S.devices.filter(function (d) { return d.wl; }).length;
     toast(on ? '白名单模式已开启 · 放行 ' + cnt + ' 台' : '白名单模式已关闭', on && !cnt ? 'warn' : 'ok');

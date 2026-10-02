@@ -36,7 +36,7 @@ function counts() {
 function updateStatsCounters() { $$('#p-stats [data-cnt]').forEach(function (el, i) { var c = counts()[i]; if (c) tween(el, c[0], 0); }); }
 function renderStats(anim1) {
   var h = '<div class="wrap">' + seg('aseg', [['stats', '流量统计'], ['dpi', 'DPI 分析']], S.aseg) + '<div id="aseg-body" class="subview">' + (S.aseg === 'stats' ? statsBody() : dpiBody()) + '</div></div>';
-  var p = $('#p-stats'); p.innerHTML = h; placeSegs(p);
+  var p = $('#p-stats'); if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h; placeSegs(p);
   if (anim1) stagger($('.wrap', p));
   afterAseg();
 }

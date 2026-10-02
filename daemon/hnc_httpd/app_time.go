@@ -117,7 +117,7 @@ func appTimeStep(d *appUsageDay, tick map[string]uint64, cats map[string]string,
 			continue
 		}
 		id := mk[sep+1:]
-		if id == appUnknownID || id == appLocalID || id == tunnelAppID || appTier(cats[id]) != tierApp { // v5.21: VPN/代理隧道不算应用时长
+		if id == appUnknownID || id == appLocalID || id == tunnelAppID || isOrgAppID(id) || appTier(cats[id]) != tierApp { // v5.21: VPN/代理隧道不算应用时长; DPI v2: 「XX系(未细分)」也不算
 			continue
 		}
 		if !appTimeActive(b, tickSec) {
@@ -1104,7 +1104,7 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 	days := parseDaysParam(r)
 	now := time.Now()
 	agg := map[string]*appUnknownAgg{}
-	var total, tunnelTotal, inferredTotal uint64
+	var total, tunnelTotal, inferredTotal, orgTotal uint64
 	for i := days - 1; i >= 0; i-- {
 		date := now.AddDate(0, 0, -i).Format("20060102")
 		d := s.simMergeAppUsageDay(appUsageDayCopy(s.hncDir, date), date) // 模拟环境: 今天叠加; 关闭时原样
@@ -1117,6 +1117,8 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 					total += v[0] + v[1]
 				} else if strings.HasSuffix(mk, "|"+tunnelAppID) {
 					tunnelTotal += v[0] + v[1]
+				} else if sep := strings.IndexByte(mk, '|'); sep >= 0 && isOrgAppID(mk[sep+1:]) {
+					orgTotal += v[0] + v[1] // DPI v2: 按 IP 归属库归到「XX系(未细分)」的字节
 				}
 			}
 		}
@@ -1174,6 +1176,11 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 		}
 		it := map[string]interface{}{"name_or_ip": k, "kind": kind, "sample": a.S,
 			"bytes": a.B, "devices": len(macs), "macs": macs}
+		if a.IP { // DPI v2: 无名 IP 的归属组织标签(云/CDN/运营商等, ip_owner.go)
+			if o, ok := ipOwnerLookup(k); ok {
+				it["owner"] = o.JSON()
+			}
+		}
 		if simOnlyMACs(macs) { // 只来自模拟设备的目的(sim_merge.go 造的)
 			it["sim"] = true
 			simIncluded = true
@@ -1183,7 +1190,9 @@ func (s *server) apiDPIUnknown(w http.ResponseWriter, r *http.Request) {
 	resp := map[string]interface{}{"ok": true, "days": days, "items": items,
 		"total_unknown_bytes": total, "cap_per_day": appUnknownMax,
 		// v5.21: 已从「未识别」里分出去的两块: 走 VPN/代理隧道的字节、按共现推断归到应用的字节
-		"tunnel_bytes": tunnelTotal, "inferred_bytes": inferredTotal}
+		"tunnel_bytes": tunnelTotal, "inferred_bytes": inferredTotal,
+		// DPI v2: 按 IP 归属库归到「XX系(未细分)」生态伪应用的字节(原本会是未识别)
+		"org_bytes": orgTotal}
 	if simIncluded {
 		resp["sim_included"] = true
 	}

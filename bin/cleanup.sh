@@ -213,6 +213,10 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
     [ -f "$HNC_DIR/bin/webui_guard.sh" ] && sh "$HNC_DIR/bin/webui_guard.sh" remove >/dev/null 2>&1 \
         && log "webui_guard removed"
 fi
+# DPI v2: DNS 接管的 DNAT(nat/PREROUTING HNC_DNSTK + filter/INPUT HNC_DNSTK_IN)。
+# 任何模式都拆(fail-open: 设备回到系统 DNS); httpd 仍在且配置开着时会自己补回。
+[ -f "$HNC_DIR/bin/dns_takeover.sh" ] && sh "$HNC_DIR/bin/dns_takeover.sh" remove >/dev/null 2>&1 \
+    && log "dns_takeover rules removed"
 log "iptables cleanup done"
 
 # ── 4. 清理临时文件（保留 data/ 目录，用户配置不删）────────

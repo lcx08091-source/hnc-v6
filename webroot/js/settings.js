@@ -372,15 +372,18 @@ function renderSettings(anim1) {
   var half = 6;
   var h = '<div class="wrap">' + (wide() ? '<div class="cols"><div>' + html.slice(0, half).join('') + '</div><div>' + html.slice(half).join('') + '</div></div>' : html.join('')) +
     '<div class="foot">HNC · Hotspot Network Control' + (l.backend_version ? ' · ' + esc(l.backend_version) : '') + '</div></div>';
-  var p = $('#p-settings'), y = p.scrollTop; p.innerHTML = h; placeSegs(p);
-  if (anim1) { if (wide()) $$('.cols>div', p).forEach(function (x) { stagger(x); }); else stagger($('.wrap', p)); } else p.scrollTop = y;
+  // 操作后的重绘就地 morph: 滚动位置、展开的分组、正在填的输入框都不动, 只改变化了的行
+  var p = $('#p-settings');
+  if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h;
+  placeSegs(p);
+  if (anim1) { if (wide()) $$('.cols>div', p).forEach(function (x) { stagger(x); }); else stagger($('.wrap', p)); }
   if (S.open.logs) loadLog();
   if (S.open.tokens) loadTokens();
 }
 function loadLog() {
   var el = $('#logv'); if (!el) return;
   api.get('/api/logs', { file: S.logFile === 'combined' ? 'combined' : S.logFile + '.log', tail: 300 }, { timeout: 10000 }).then(function (r) {
-    S.logText = r.content || '';
+    S.logText = r.content || ''; el.setAttribute('data-keep', '');
     var lines = S.logText.split('\n').filter(Boolean).slice(-300);
     el.innerHTML = lines.length ? lines.map(function (ln) { var c = /\b(ERR|ERROR|FAIL|FATAL|panic)\b|失败|错误/i.test(ln) ? 'E' : /\bWARN|WARNING\b|警告/i.test(ln) ? 'W' : 'I'; return '<div class="' + c + '">' + esc(ln) + '</div>'; }).join('') : '<div class="t">(空)</div>';
     el.scrollTop = el.scrollHeight;
@@ -390,7 +393,7 @@ function loadTokens() {
   var el = $('#tokens-list'); if (!el) return;
   api.get('/api/tokens').then(function (r) {
     var t = r.tokens || [];
-    el.className = '';
+    el.className = ''; el.setAttribute('data-keep', '');
     el.innerHTML = t.length ? t.map(function (x) {
       return '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">' + esc(x.label || '未命名设备') + '</div><div class="s mono">' + esc(x.ip_hint || '') + ' · ' + (x.last_seen ? new Date(x.last_seen * 1000).toLocaleString() : '从未使用') + ' · ' + esc(String(x.token_id || '').slice(0, 8)) + '</div></span>' +
         (KSU ? '<button class="hint-a danger" data-revoke="' + esc(x.token_id) + '" data-label="' + esc(x.label || '未命名设备') + '">撤销</button>' : '') + '</div>';
@@ -399,7 +402,7 @@ function loadTokens() {
 }
 var pairT = 0;
 function pairNew() {
-  api.action('pair_new').then(function (r) {
+  return api.action('pair_new').then(function (r) {
     var d = detailJSON(r); if (!d.pin) throw new Error('没有拿到配对码');
     var left = num(d.valid_sec, 120), pin = String(d.pin), url = remoteUrl(), link = url ? url + '/pair?prefill=' + encodeURIComponent(pin) : '';
     sheet('<h3>配对码</h3><div class="sub">在新设备的浏览器里打开访问地址，输入这个配对码</div><div class="code num">' + esc(pin.slice(0, 3) + ' ' + pin.slice(3)) + '</div><div class="sub" id="pair-left"></div>' +
@@ -448,30 +451,32 @@ function reloadAlertCfg() { return api.getSafe('/api/alert_config', null, S.aler
 function setToggleCfg(kind, el) {
   var on = el.getAttribute('aria-checked') === 'true', rollback = function (e) { el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); };
   var done = function (msg) { return function (r) { toast(msg || ((el.getAttribute('aria-label') || '') + (on ? ' 已开启' : ' 已关闭'))); return loadConfig(); }; };
+  // 提交期间开关保持 .pending: 不接受再次点击(防重复提交), 后台重绘也不会把它改回旧状态; 失败只回滚一次
+  var run = function (p) { return busyWhile(el, p.catch(rollback)); };
   if (kind.indexOf('fx-') === 0) { FX[kind.slice(3)] = on; saveFx(); fxRefresh(); return; }
   switch (kind) {
     case 'motion': S.motion = on; LS.set('hnc6.motion', on ? '1' : '0'); fxRefresh(); return;
-    case 'hs-auto': api.action('hotspot_save', { autostart: on ? 'true' : 'false' }).then(done()).catch(rollback);
+    case 'hs-auto': run(api.action('hotspot_save', { autostart: on ? 'true' : 'false' }).then(done()));
       var w = el.closest('[data-foldkey]'); if (on && w && !w.classList.contains('open')) foldToggle(w, 'hs'); return;
-    case 'amaster': api.action('alert_config_set', { section: 'master', enabled: String(on) }).then(done()).then(reloadAlertCfg).catch(rollback); return;
-    case 'ud': api.action('alert_config_set', udParams(on)).then(done()).then(reloadAlertCfg).catch(rollback); return;
-    case 'aq': api.action('alert_config_set', { section: 'monthly_quota', enabled: String(on), limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct').value, 80))) }).then(done()).catch(rollback); return;
-    case 'aa': api.action('alert_config_set', { section: 'anomaly_traffic', enabled: String(on), ratio: String(num($('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb').value, 50))) }).then(done()).catch(rollback); return;
+    case 'amaster': run(api.action('alert_config_set', { section: 'master', enabled: String(on) }).then(done()).then(reloadAlertCfg)); return;
+    case 'ud': run(api.action('alert_config_set', udParams(on)).then(done()).then(reloadAlertCfg)); return;
+    case 'aq': run(api.action('alert_config_set', { section: 'monthly_quota', enabled: String(on), limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct').value, 80))) }).then(done())); return;
+    case 'aa': run(api.action('alert_config_set', { section: 'anomaly_traffic', enabled: String(on), ratio: String(num($('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb').value, 50))) }).then(done())); return;
     case 'gs':
       if (on) { var gw = el.closest('[data-foldkey]'); if (gw && !gw.classList.contains('open')) foldToggle(gw, 'gs'); el.setAttribute('aria-checked', 'false'); toast('填好上限后点「应用」启用'); return; }
-      api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭')).catch(rollback); return;
-    case 'remote': api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(rollback); return;
-    case 'appshared': api.action('app_limit_shared_ips_set', { enabled: String(on) }).then(function () { S.appLimitShared = on; toast(on ? '已包含共享 IP · 同一 CDN 上的其他应用也可能被一起限速' : '已恢复：跳过与其他应用共用的地址'); return loadAppLimits(); }).catch(rollback); return;
-    case 'certprobe': api.action('discover_cert_probe_set', { enabled: String(on) }).then(done()).catch(rollback); return;
-    case 'sim': simSet(on).catch(rollback); return;
-    case 'quic': api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); }).catch(rollback); return;
+      run(api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭'))); return;
+    case 'remote': run(api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); })).then(function () { if (S.page === 'settings') renderSettings(false); }); return;
+    case 'appshared': run(api.action('app_limit_shared_ips_set', { enabled: String(on) }).then(function () { S.appLimitShared = on; toast(on ? '已包含共享 IP · 同一 CDN 上的其他应用也可能被一起限速' : '已恢复：跳过与其他应用共用的地址'); return loadAppLimits(); })); return;
+    case 'certprobe': run(api.action('discover_cert_probe_set', { enabled: String(on) }).then(done())); return;
+    case 'sim': run(simSet(on)); return;
+    case 'quic': run(api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); })); return;
   }
 }
 function clsactCheck(quiet) {
   return api.action('clsact_check').then(function (r) { S.clsact = detailJSON(r); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { if (!quiet) toast(errText(e), 'err'); });
 }
 function hsStart() {
-  api.action('hotspot_start').then(function () {
+  return api.action('hotspot_start').then(function () {
     toast('已发出开热点命令，等待系统响应…');
     var n = 0, t = setInterval(function () {
       n++;
@@ -489,16 +494,16 @@ function hsSave() {
   // 修旧版 bug: 旧版漏传 autostart, 每次保存都把「开机自启」关掉
   var p = { autostart: S.cfg.hotspot_autostart === true ? 'true' : 'false' };
   if (ssid) p.ssid = ssid; if (pass) p.password = pass; if (delay) p.delay_sec = String(Math.round(num(delay)));
-  api.action('hotspot_save', p).then(function () { $('#hs-pass').value = ''; toast('热点配置已保存'); return loadConfig(); }).catch(function (e) { toast(errText(e), 'err'); });
+  return api.action('hotspot_save', p).then(function () { $('#hs-pass').value = ''; toast('热点配置已保存'); return loadConfig(); }).catch(function (e) { toast(errText(e), 'err'); });
 }
-function gsApply() {
+function gsApply(btn) {
   var d = num($('#gs-down').value), u = num($('#gs-up').value);
   if (!(d > 0) && !(u > 0)) { toast('至少填一个方向的上限', 'err'); return; }
   var p = { enabled: 'true' }; if (d > 0) p.rate_down = fmtRate(d); if (u > 0) p.rate_up = fmtRate(u);
-  api.action('global_shaper_set', p).then(function (r) { toast('全局带宽整形已启用' + (r.detail ? ' · ' + String(r.detail).slice(0, 60) : '')); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); });
+  busyWhile(btn, api.action('global_shaper_set', p)).then(function (r) { toast('全局带宽整形已启用' + (r.detail ? ' · ' + String(r.detail).slice(0, 60) : '')); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); });
 }
 function exportRulesJson() {
-  api.get('/api/rules_export', null, { timeout: 10000 }).then(function (r) {
+  return api.get('/api/rules_export', null, { timeout: 10000 }).then(function (r) {
     var txt = JSON.stringify(r.rules || r, null, 2);
     sheet('<h3>导出规则</h3><div class="sub">rules.json · ' + (txt.length / 1024).toFixed(1) + ' KB</div><textarea class="textarea" readonly id="rj">' + esc(txt) + '</textarea>' +
       '<div class="btns" style="margin-top:12px"><button class="btn sec press" data-close>关闭</button>' + (KSU ? '<button class="btn sec press" id="rj-save">存到下载</button>' : '<button class="btn sec press" id="rj-dl">下载</button>') + '<button class="btn pri press" id="rj-copy">复制</button></div>', { tall: true });

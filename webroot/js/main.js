@@ -137,7 +137,9 @@ $('#bell').addEventListener('click', openAlerts);
 function foldToggle(el, key) {
   if (!el) return;
   var on = !el.classList.contains('open'); el.classList.toggle('open', on); S.open[key] = on;
-  if (on) { placeSegs(el); anim(el, [{ transform: 'scale(.985)' }, { transform: 'none' }], { duration: 650 }); }
+  // 只保留折叠自身的高度 + 淡入过渡; 此前再叠一个 650ms 的整块缩放, 三个动画同时跑, 看着发飘
+  if (on) placeSegs(el);
+  saveFolds(key);
   return on;
 }
 function ctxDev(a) { var box = a.closest('[data-dev]') || a.closest('[data-side]'); return box ? { box: box, d: devBy(box.getAttribute('data-dev') || box.getAttribute('data-side')) } : { box: null, d: null }; }
@@ -163,6 +165,8 @@ document.addEventListener('click', function (e) {
   if ((q = t.closest('.seg button'))) {
     var sg = q.parentNode, k = sg.getAttribute('data-seg'), v = q.getAttribute('data-v');
     if (q.classList.contains('on') && k !== 'delay-pre') return;
+    if (sg.classList.contains('pending')) return;   // 上一次切换还在提交
+    var sgd = ctxDev(q).d; if (sgd && S.busy[sgd.mac] && k !== 'delay-pre' && k !== 'q-act') { toast('这台设备还有操作在进行', 'warn'); return; }
     $$('button', sg).forEach(function (b) { b.classList.toggle('on', b === q); });
     sg.classList.remove('jelly'); void sg.offsetWidth; sg.classList.add('jelly'); placeSegs(sg.parentNode);
     if (k === 'apps-sub') { S.appsSub = v; var bx = $('#apps-sub'); bx.innerHTML = appsSub(); placeSegs(bx); stagger(bx); if (v === 'export') loadExports(); }
@@ -172,34 +176,37 @@ document.addEventListener('click', function (e) {
     else if (k === 'pu-period') { S.puPeriod = v; refreshPU(); }
     else if (k === 'dflt') { S.dpiFilter = v; paintClients(); }
     else if (k === 'fxp') { if (v === 'off') { S.motion = false; LS.set('hnc6.motion', '0'); } else { S.motion = true; LS.set('hnc6.motion', '1'); FX = Object.assign({}, FX_PRESETS[v]); saveFx(); } fxRefresh(); toast('动画效果：' + FXP_T[v]); }
-    else if (k === 'guard-mode') { api.action('clsact_mode_set', { mode: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { var g = detailJSON(r); S.cfg.clsact_bpf_mode = v; if (g && typeof g === 'object') S.cfg.offload_guard = g; S.clsact = null; toast('硬件加速兜底：' + q.textContent); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
-    else if (k === 'aqm-mode') { api.action('tc_leaf_aqm_set', { mode: v }).then(function () { S.aqmMode = v; LS.set('hnc6.aqm', v); toast('默认队列 AQM：' + q.textContent + ' · 之后新设 / 重设的限速生效'); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
+    else if (k === 'guard-mode') { busyWhile(q, api.action('clsact_mode_set', { mode: v }, { timeout: 30000, maxTime: 28 })).then(function (r) { var g = detailJSON(r); S.cfg.clsact_bpf_mode = v; if (g && typeof g === 'object') S.cfg.offload_guard = g; S.clsact = null; toast('硬件加速兜底：' + q.textContent); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
+    else if (k === 'aqm-mode') { busyWhile(q, api.action('tc_leaf_aqm_set', { mode: v })).then(function () { S.aqmMode = v; LS.set('hnc6.aqm', v); toast('默认队列 AQM：' + q.textContent + ' · 之后新设 / 重设的限速生效'); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
     else if (k === 'fxspring') { FX.spring = v; saveFx(); fxRefresh(); }
     else if (k === 'connv') { S.connView = v; paintConnSheet(); }
     else if (k === 'webacc-mode') { S.webaccMode = v; }
     else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
-    else if (k === 'qos-mode') setQos('mode', v);
-    else if (k === 'qos-scale') setQos('scale', v);
-    else if (k === 'encdns') { api.action('encdns_set', { policy: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { toast('加密 DNS 拦截：' + (ENC_T[v] || v) + encdnsDetailTxt(r)); return loadEncdns(); }).catch(function (e) { toast(errText(e), 'err'); return loadEncdns(); }).then(function () { if (S.page === 'settings') renderSettings(false); }); }
-    else if (k === 'encdns-dev') { var ec = ctxDev(q); if (ec.d) { var ed = ec.d; devAct(ed.mac, function () { return api.action('encdns_set', { scope: 'device', mac: ed.mac, policy: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { return loadEncdns().then(function () { return r; }); }); }, function (r) { return ed.name + ' · 加密 DNS：' + (ENC_T[v] || v) + encdnsDetailTxt(r); }); } }
-    else if (k === 'pu-ns') { api.action('phone_usage_set', { use_netstats: v }).then(function () { toast('流量数据来源：' + q.textContent); if (S.puCfg) S.puCfg.use_netstats = v; S.pu = {}; return refreshPU(true); }).catch(function (e) { toast(errText(e), 'err'); }); }
+    else if (k === 'qos-mode') setQos('mode', v, q);
+    else if (k === 'qos-scale') setQos('scale', v, q);
+    else if (k === 'encdns') { var encOk = false; busyWhile(q, api.action('encdns_set', { policy: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { encOk = true; return loadEncdns().then(function () { return r; }); }, function (e) { toast(errText(e), 'err'); return loadEncdns(); })).then(function (r) { if (S.page === 'settings') renderSettings(false); if (encOk) toast('加密 DNS 拦截：' + (ENC_T[v] || v) + encdnsDetailTxt(r)); }); }
+    else if (k === 'encdns-dev') { var ec = ctxDev(q); if (ec.d) { var ed = ec.d; devAct(ed.mac, function () { return api.action('encdns_set', { scope: 'device', mac: ed.mac, policy: v }, { timeout: 30000, maxTime: 28 }).then(function (r) { return loadEncdns().then(function () { return r; }); }); }, function (r) { return ed.name + ' · 加密 DNS：' + (ENC_T[v] || v) + encdnsDetailTxt(r); }, q); } }
+    else if (k === 'pu-ns') { busyWhile(q, api.action('phone_usage_set', { use_netstats: v })).then(function () { toast('流量数据来源：' + q.textContent); if (S.puCfg) S.puCfg.use_netstats = v; S.pu = {}; return refreshPU(true); }).catch(function (e) { toast(errText(e), 'err'); }); }
     else if (k === 'delay-pre') { var cx = ctxDev(q); if (cx.box) { var di = $('[data-f="delay"]', cx.box); if (di) di.value = +v ? v : ''; if (!+v) { $('[data-f="jitter"]', cx.box).value = ''; $('[data-f="loss"]', cx.box).value = ''; } } }
     return;
   }
   if ((q = t.closest('.toggle'))) {
-    if (q.disabled) return;
+    // 提交中的开关不再响应(防重复提交 / 来回翻); 卡片有别的操作在跑时也先不翻, 免得界面和实际不一致
+    if (q.disabled || q.classList.contains('pending')) return;
+    var tc = ctxDev(q);
+    if (tc.d && S.busy[tc.d.mac]) { toast('这台设备还有操作在进行', 'warn'); return; }
     var nv = q.getAttribute('aria-checked') !== 'true'; q.setAttribute('aria-checked', String(nv));
     var ta = q.getAttribute('data-act');
     if (q.hasAttribute('data-set')) { setToggleCfg(q.getAttribute('data-set'), q); return; }
     if (q.hasAttribute('data-selftog')) { selfToggle(q, q.getAttribute('data-selftog')); return; }
     if (q.hasAttribute('data-local')) return;   // 表单内开关, 点「保存」才提交
     if (ta === 'wl-mode') { setWhitelistMode(nv, q); return; }
-    var tc = ctxDev(q); if (!tc.d) return;
-    if (ta === 'sqm') devAct(tc.d.mac, function () { return api.action('rule_sqm', { mac: tc.d.mac, enabled: String(nv) }); }, nv ? '已开启低延迟模式' : '已关闭低延迟模式');
-    if (ta === 'wl') devAct(tc.d.mac, function () { return api.action('device_whitelist_set', { mac: tc.d.mac, enabled: String(nv) }); }, nv ? tc.d.name + ' 已加入白名单' : tc.d.name + ' 已移出白名单');
+    if (!tc.d) return;
+    if (ta === 'sqm') devAct(tc.d.mac, function () { return api.action('rule_sqm', { mac: tc.d.mac, enabled: String(nv) }); }, nv ? '已开启低延迟模式' : '已关闭低延迟模式', q);
+    if (ta === 'wl') devAct(tc.d.mac, function () { return api.action('device_whitelist_set', { mac: tc.d.mac, enabled: String(nv) }); }, nv ? tc.d.name + ' 已加入白名单' : tc.d.name + ' 已移出白名单', q);
     return;
   }
-  if ((q = t.closest('[data-filter]'))) { S.filter = q.getAttribute('data-filter'); LS.set('hnc_device_filter', S.filter); closeDD(); renderDevices(false); stagger($('#dev-list')); return; }
+  if ((q = t.closest('[data-filter]'))) { S.filter = q.getAttribute('data-filter'); LS.set('hnc_device_filter', S.filter); closeDD(); listFreezeUntil = 0; renderDevList(false); renderDevices(false); return; }
   if ((q = t.closest('[data-style-pick]'))) { var rs = q.getBoundingClientRect(); setStyle(q.getAttribute('data-style-pick'), rs.left + rs.width / 2, rs.top + rs.height / 2); return; }
   if ((q = t.closest('[data-theme-pick]'))) { var r = q.getBoundingClientRect(); setTheme(q.getAttribute('data-theme-pick'), r.left + r.width / 2, r.top + r.height / 2); return; }
   if ((q = t.closest('[data-al]'))) { var row = q.closest('[data-alid]'); alertAction(q.getAttribute('data-al'), row.getAttribute('data-alid'), row.getAttribute('data-almac')); return; }
@@ -239,9 +246,18 @@ document.addEventListener('click', function (e) {
       if (opened && /^(at|cb)-/.test(key)) loadAppTime(key.slice(3)); break;
     case 'toggle-dev':
       if (!d) break;
-      if (S.batch) { if (S.picked[d.mac]) delete S.picked[d.mac]; else S.picked[d.mac] = 1; box.classList.toggle('picked', !!S.picked[d.mac]); var pn = $('#picked-n'); if (pn) pn.textContent = Object.keys(S.picked).length; anim(box, [{ transform: 'scale(.96)' }, { transform: 'none' }], { duration: 550 }); break; }
-      if (wide()) { S.sel = d.mac; $$('.dev.sel').forEach(function (x) { x.classList.remove('sel'); }); box.classList.add('sel'); var sd = $('#dev-side'); sd.innerHTML = devSide(); placeSegs(sd); anim(box, [{ transform: 'scale(.97)' }, { transform: 'none' }], { duration: 550 }); if (d.online) refreshConnMini(d.mac); }
-      else { var fi = $('.fold-in', box); if (!S.open[d.mac]) { fi.innerHTML = devBody(d); } foldToggle(box, d.mac); a.setAttribute('aria-expanded', String(!!S.open[d.mac])); placeSegs(box); if (S.open[d.mac] && d.online) refreshConnMini(d.mac); }
+      if (S.batch) { if (S.picked[d.mac]) delete S.picked[d.mac]; else S.picked[d.mac] = 1; box.classList.toggle('picked', !!S.picked[d.mac]); var pn = $('#picked-n'); if (pn) pn.textContent = Object.keys(S.picked).length; anim(box, [{ transform: 'scale(.97)' }, { transform: 'none' }], { duration: 260, easing: 'ease-out' }); break; }
+      if (wide()) {
+        var same = S.sel === d.mac; S.sel = d.mac; $$('.dev.sel').forEach(function (x) { x.classList.remove('sel'); }); box.classList.add('sel');
+        var sd = $('#dev-side'); if (same) morph(sd, devSide()); else sd.innerHTML = devSide();   // 换设备才播侧栏滑入; 点同一台只就地刷新
+        placeSegs(sd); if (d.online) refreshConnMini(d.mac);
+      }
+      else {
+        var fi = $('.fold-in', box); if (!S.open[d.mac]) { fi.innerHTML = devBody(d); }
+        foldToggle(box, d.mac); a.setAttribute('aria-expanded', String(!!S.open[d.mac])); placeSegs(box);
+        if (S.open[d.mac] && d.online) refreshConnMini(d.mac);
+        if (!S.open[d.mac]) { (S.closingAt = S.closingAt || {})[d.mac] = Date.now(); freezeList(900); }   // 收起动画期间后台刷新不清空卡片内容   // 收起后等折叠动画走完, 再把顺序过时的列表平滑重排
+      }
       break;
     case 'conns': if (d) connSheet(d); break;
     case 'ident-edit': if (d) identSheet(d); break;
@@ -250,19 +266,20 @@ document.addEventListener('click', function (e) {
     case 'fx-demo': fxDemo(a.getAttribute('data-demo')); break;
     case 'fx-perf': setLowFx(!PERF.low, false); PERF.strikes = 0; fxRefresh(); toast(PERF.low ? '已切到简化动画' : '已恢复完整动画'); break;
     case 'self-conns': selfConnSheet(); break;
-    case 'apply-limit': devAct(d.mac, function () { return doLimit(d, mbsToMbps(readNum(box, 'down')), mbsToMbps(readNum(box, 'up'))); }, function () { return readNum(box, 'down') || readNum(box, 'up') ? '已应用限速到 ' + d.name : '已清除 ' + d.name + ' 的限速'; }); break;
-    case 'clear-limit': devAct(d.mac, function () { return api.action('rule_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的限速'); break;
-    case 'apply-delay': devAct(d.mac, function () { return doDelay(d, readNum(box, 'delay'), readNum(box, 'jitter'), readNum(box, 'loss')); }, function () { return readNum(box, 'delay') || readNum(box, 'jitter') || readNum(box, 'loss') ? '已对 ' + d.name + ' 注入延迟' : '已清除延迟'; }); break;
-    case 'clear-delay': devAct(d.mac, function () { return api.action('delay_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的延迟'); break;
-    case 'unblock': devAct(d.mac, function () { return api.action('bl_del', { mac: d.mac }); }, d.name + ' 已解除封锁'); break;
+    case 'apply-limit': var lv = [readNum(box, 'down'), readNum(box, 'up')]; devAct(d.mac, function () { return doLimit(d, mbsToMbps(lv[0]), mbsToMbps(lv[1])); }, lv[0] || lv[1] ? '已应用限速到 ' + d.name : '已清除 ' + d.name + ' 的限速', a); break;
+    case 'clear-limit': devAct(d.mac, function () { return api.action('rule_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的限速', a); break;
+    case 'apply-delay': var dv = [readNum(box, 'delay'), readNum(box, 'jitter'), readNum(box, 'loss')]; devAct(d.mac, function () { return doDelay(d, dv[0], dv[1], dv[2]); }, dv[0] || dv[1] || dv[2] ? '已对 ' + d.name + ' 注入延迟' : '已清除延迟', a); break;
+    case 'clear-delay': devAct(d.mac, function () { return api.action('delay_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的延迟', a); break;
+    case 'unblock': devAct(d.mac, function () { return api.action('bl_del', { mac: d.mac }); }, d.name + ' 已解除封锁', a); break;
     case 'rename': renameSheet(d.mac, d.manual || d.name !== d.mac ? d.name : ''); break;
     case 'copy-mac': copyText(d.mac).then(function (ok) { toast(ok ? '已复制 ' + d.mac : '复制失败', ok ? 'ok' : 'err'); }); break;
-    case 'trend': loadTrend(d, box); break;
+    case 'trend': busyWhile(a, loadTrend(d, box)); break;
     case 'applim-save': case 'applim-clear':
       var row2 = a.closest('[data-app]'), app = row2.getAttribute('data-app'), lim = act === 'applim-clear' ? 0 : mbsToMbps($('input', row2).value);
-      devAct(d.mac, function () { return lim > 0 ? api.action('app_limit_set', { mac: d.mac, app_id: app, down_mbps: trim0(lim.toFixed(3)) }) : api.action('app_limit_clear', { mac: d.mac, app_id: app }); }, lim > 0 ? '已限速 ' + app : app + ' 不再限速').then(function () { return loadAppLimits(); }).then(function () { refreshCard(d.mac); });
+      // 应用限速表先刷新再重绘卡片: 此前卡片先按旧表画一遍, 再按新表画一遍(两次整卡重绘, 保存的值闪回旧值)
+      devAct(d.mac, function () { return (lim > 0 ? api.action('app_limit_set', { mac: d.mac, app_id: app, down_mbps: trim0(lim.toFixed(3)) }) : api.action('app_limit_clear', { mac: d.mac, app_id: app })).then(function (r) { return loadAppLimits().then(function () { return r; }); }); }, lim > 0 ? '已限速 ' + app : app + ' 不再限速', a);
       break;
-    case 'refresh': api.action('refresh', {}, { timeout: 15000, maxTime: 13 }).catch(function () {}).then(function () { return globalRefresh('已刷新 · ' + S.devices.filter(function (x) { return x.online; }).length + ' 台在线'); }); break;
+    case 'refresh': busyWhile(a, api.action('refresh', {}, { timeout: 15000, maxTime: 13 }).catch(function () {})).then(function () { return globalRefresh('已刷新 · ' + S.devices.filter(function (x) { return x.online; }).length + ' 台在线'); }); break;
     case 'clear-all': confirmSheet('清空所有规则', '移除全部限速、延迟、黑名单（设备列表保留）', '清空').then(function (ok) { if (ok) api.action('cleanup_rules', {}, { timeout: 30000, maxTime: 28 }).then(function () { return globalRefresh('已清空所有规则'); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'clean-offline': doCleanOffline(); break;
     case 'release': doRelease(); break;
@@ -277,8 +294,8 @@ document.addEventListener('click', function (e) {
       var qd = readNum(box, 'q-daily'), qm = readNum(box, 'q-month'), qt = mbsToMbps(readNum(box, 'q-thr')), qab = $('[data-seg="q-act"] button.on', box), qa = qab ? qab.getAttribute('data-v') : 'throttle';
       if (!(qd > 0) && !(qm > 0)) { toast('每日或每月至少填一个上限', 'warn'); break; }
       if (qd < 0 || qm < 0) { toast('上限不能是负数', 'err'); break; }
-      devAct(d.mac, function () { var qp = { mac: d.mac, daily_gb: trim0(qd.toFixed(3)), monthly_gb: trim0(qm.toFixed(3)), action: qa }; if (qt > 0) qp.throttle_mbps = trim0(qt.toFixed(3)); return api.action('quota_set', qp); }, '已保存 ' + d.name + ' 的流量配额'); break;
-    case 'quota-clear': devAct(d.mac, function () { return api.action('quota_clear', { mac: d.mac }); }, '已删除流量配额'); break;
+      devAct(d.mac, function () { var qp = { mac: d.mac, daily_gb: trim0(qd.toFixed(3)), monthly_gb: trim0(qm.toFixed(3)), action: qa }; if (qt > 0) qp.throttle_mbps = trim0(qt.toFixed(3)); return api.action('quota_set', qp); }, '已保存 ' + d.name + ' 的流量配额', a); break;
+    case 'quota-clear': devAct(d.mac, function () { return api.action('quota_clear', { mac: d.mac }); }, '已删除流量配额', a); break;
     case 'sched-edit': schedSheet(d); break;
     case 'sched-clear': confirmSheet('清除分时段？', '删除 ' + esc(d.name) + ' 的全部时段，恢复手动限速。', '清除').then(function (ok) { if (ok) devAct(d.mac, function () { return api.action('schedule_clear', { mac: d.mac }); }, '已清除分时段'); }); break;
     case 'pu-save': puSave(); break;
@@ -290,39 +307,39 @@ document.addEventListener('click', function (e) {
     case 'bridge-start': toast('正在拉起 HNC 服务…'); execRaw('nohup sh ' + MOD_DIR + '/service.sh >/dev/null 2>&1 &', 5000).then(function () { setTimeout(function () { boot(true); }, 6000); }); break;
     // 应用页
     case 'export-build': buildExport(a); break;
-    case 'export-list': loadExports(); break;
+    case 'export-list': busyWhile(a, loadExports()); break;
     case 'self-purge': confirmSheet('清理自学习明细？', '删除 run/self_attrib.*.jsonl 明细（已学到的规则保留）。', '清理').then(function (ok) { if (ok) api.action('self_attrib_purge').then(function (r3) { toast('已清理 · ' + (r3.detail || '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     // 分析页
     case 'dpi-refresh': loadDpi(true); toast('已刷新'); break;
     case 'disc-open': case 'disc-back': case 'disc-manage': case 'disc-scan': case 'disc-probe': case 'disc-ignore': case 'disc-confirm': discAct(act); break;
-    case 'dpi-rebind': api.action('dpi_rebind').then(function () { toast('已请求 dpid 重新绑定'); setTimeout(function () { loadDpi(true); }, 2500); setTimeout(function () { loadDpi(true); }, 6000); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'dpi-rebind': busyWhile(a, api.action('dpi_rebind')).then(function () { toast('已请求 dpid 重新绑定'); setTimeout(function () { loadDpi(true); }, 2500); setTimeout(function () { loadDpi(true); }, 6000); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'rules-export': case 'rules-import': case 'rules-reset': case 'rules-update': rulesAct(act); break;
     // 设置页
     case 'log-refresh': S.logFile = $('#log-file').value; loadLog(); break;
     case 'log-copy': copyText(S.logText || '').then(function (ok) { toast(ok ? '日志已复制' : '复制失败', ok ? 'ok' : 'err'); }); break;
-    case 'hs-save': hsSave(); break;
-    case 'hs-start': hsStart(); break;
+    case 'hs-save': busyWhile(a, hsSave()); break;
+    case 'hs-start': busyWhile(a, hsStart()); break;
     case 'hs-stop': confirmSheet('关闭热点？', '已连接的设备会立即断开。', '关闭').then(function (ok) { if (ok) api.action('hotspot_stop').then(function () { toast('已发出关热点命令'); setTimeout(globalRefresh, 2500); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'iface-save': var ifv = $('#iface-pref').value.trim(); if (ifv && ifv !== 'auto' && !/^[A-Za-z0-9_.-]{1,15}$/.test(ifv)) { toast('接口名不合法', 'err'); break; }
-      api.action('hotspot_iface_set', { iface: ifv === 'auto' ? '' : ifv }).then(function () { toast('热点接口偏好：' + (ifv || 'auto')); return loadConfig(); }).then(function () { renderSettings(false); globalRefresh(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'ud-save': api.action('alert_config_set', udParams(true)).then(function () { toast('新设备提醒已保存'); return reloadAlertCfg(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'aq-save': api.action('alert_config_set', { section: 'monthly_quota', enabled: 'true', limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct').value, 80))) }).then(function () { toast('月度配额已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'aa-save': api.action('alert_config_set', { section: 'anomaly_traffic', enabled: 'true', ratio: String(num($('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb').value, 50))) }).then(function () { toast('异常检测已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'gs-apply': gsApply(); break;
+      busyWhile(a, api.action('hotspot_iface_set', { iface: ifv === 'auto' ? '' : ifv })).then(function () { toast('热点接口偏好：' + (ifv || 'auto')); return loadConfig(); }).then(function () { renderSettings(false); globalRefresh(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'ud-save': busyWhile(a, api.action('alert_config_set', udParams(true))).then(function () { toast('新设备提醒已保存'); return reloadAlertCfg(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'aq-save': busyWhile(a, api.action('alert_config_set', { section: 'monthly_quota', enabled: 'true', limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct').value, 80))) })).then(function () { toast('月度配额已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'aa-save': busyWhile(a, api.action('alert_config_set', { section: 'anomaly_traffic', enabled: 'true', ratio: String(num($('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb').value, 50))) })).then(function () { toast('异常检测已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'gs-apply': gsApply(a); break;
     case 'sched-save':
       var sT = $('[data-local="sched-time"]').getAttribute('aria-checked') === 'true', sC = $('[data-local="sched-charge"]').getAttribute('aria-checked') === 'true';
       var st = $('#hs-t-start').value, en = $('#hs-t-end').value;
       if (sT && !(/^\d\d:\d\d$/.test(st) && /^\d\d:\d\d$/.test(en))) { toast('请填好开始和结束时间', 'err'); break; }
       var sp = { time_enable: String(sT), charging_only: String(sC) }; if (/^\d\d:\d\d$/.test(st)) sp.start = st; if (/^\d\d:\d\d$/.test(en)) sp.end = en;
-      api.action('hotspot_schedule_set', sp).then(function () { toast(sT || sC ? '已保存 · 下一次检查（约 1 分钟内）开始生效' : '已关闭定时与充电规则'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+      busyWhile(a, api.action('hotspot_schedule_set', sp)).then(function () { toast(sT || sC ? '已保存 · 下一次检查（约 1 分钟内）开始生效' : '已关闭定时与充电规则'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'ttl-save':
       var td = Math.round(num($('#ttl-days').value, -1)); if (td < 0 || td > 3650) { toast('请填 0~3650 天', 'err'); break; }
-      api.action('stale_ttl_set', { days: String(td) }).then(function () { toast(td ? '离线 ' + td + ' 天后自动清理规则' : '已关闭离线规则自动清理'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+      busyWhile(a, api.action('stale_ttl_set', { days: String(td) })).then(function () { toast(td ? '离线 ' + td + ' 天后自动清理规则' : '已关闭离线规则自动清理'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'fw-add': var pkg = $('#fw-pkg').value.trim(); if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(pkg)) { toast('包名格式不对', 'err'); break; }
-      api.action('flywheel_exclude_set', { op: 'add', pkg: pkg }).then(function () { toast('已排除 ' + pkg + ' · 约 5 分钟内生效'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+      busyWhile(a, api.action('flywheel_exclude_set', { op: 'add', pkg: pkg })).then(function () { toast('已排除 ' + pkg + ' · 约 5 分钟内生效'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'webacc-save': (function () {
       var mode = S.webaccMode || ((S.cfg.webui_access || {}).mode) || 'all', mi = $('#webacc-macs');
-      api.action('webui_access_set', { mode: mode, macs: mi ? mi.value.replace(/[\s，]+/g, ',').replace(/,+/g, ',').replace(/^,|,$/g, '') : '' }).then(function () {
+      busyWhile(a, api.action('webui_access_set', { mode: mode, macs: mi ? mi.value.replace(/[\s，]+/g, ',').replace(/,+/g, ',').replace(/^,|,$/g, '') : '' })).then(function () {
         S.webaccMode = null; toast('WebUI 访问控制：' + ({ all: '全部', allowlist: '白名单', local_only: '仅本机' }[mode] || mode)); return loadConfig();
       }).then(function () { if (S.page === 'settings') renderSettings(false); }).catch(function (e) {
         toast(e && e.status === 409 ? '这样设置会把当前设备锁在外面：请把它加进白名单，或在本机 WebUI 里修改' : errText(e), 'err');
@@ -330,17 +347,17 @@ document.addEventListener('click', function (e) {
     })(); break;
     case 'url-copy': copyText(remoteUrl()).then(function (ok) { toast(ok ? '已复制访问地址' : '复制失败', ok ? 'ok' : 'err'); }); break;
     case 'url-share': if (navigator.share) navigator.share({ title: 'HNC', url: remoteUrl() }).catch(function () {}); else copyText(remoteUrl()).then(function () { toast('已复制访问地址'); }); break;
-    case 'pair-new': pairNew(); break;
+    case 'pair-new': busyWhile(a, pairNew()); break;
     case 'svc-restart': confirmSheet('重启 HNC 服务？', '重跑 post-fs-data.sh + service.sh，期间规则会短暂重建。', '重启').then(function (ok) { if (ok) api.action('restart_service', {}, { timeout: 20000, maxTime: 18 }).then(function () { toast('正在重启…'); setTimeout(function () { location.reload(); }, 2500); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
-    case 'cache-clear': api.action('cache_clear').then(function (r3) { toast('缓存已清理' + (r3.detail ? ' · ' + r3.detail : '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'rules-json': exportRulesJson(); break;
+    case 'cache-clear': busyWhile(a, api.action('cache_clear')).then(function (r3) { toast('缓存已清理' + (r3.detail ? ' · ' + r3.detail : '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'rules-json': busyWhile(a, exportRulesJson()); break;
     case 'json-health': location.href = 'json-health.html'; break;
     case 'debug-bundle': debugBundle(a); break;
     case 'sc-open': scSheet(); break;
     case 'sc-run': scRun(); break;
     case 'sc-export': scExport(a); break;
-    case 'clsact-check': clsactCheck(); break;
-    case 'clsact-repair': api.action('clsact_repair', {}, { timeout: 20000, maxTime: 18 }).then(function () { toast('已尝试修复'); return clsactCheck(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'clsact-check': busyWhile(a, clsactCheck()); break;
+    case 'clsact-repair': busyWhile(a, api.action('clsact_repair', {}, { timeout: 20000, maxTime: 18 })).then(function () { toast('已尝试修复'); return clsactCheck(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'changelog': showChangelog(); break;
     case 'logout': confirmSheet('退出登录？', '这台设备需要重新配对才能访问。', '退出').then(function (ok) { if (ok) api.post('/api/logout', {}).catch(function () {}).then(function () { location.href = '/pair'; }); }); break;
   }
@@ -377,6 +394,8 @@ document.addEventListener('click', function (e) {
   if (t.closest('.toggle')) haptic(10); else if (t.closest('#cf-ok')) haptic(15); else if (t.closest('.seg button, [data-style-pick], [data-theme-pick]')) haptic(6);
 }, true);
 document.addEventListener('pointerdown', function (e) { if (e.target.closest && e.target.closest('[data-act="hold"]')) haptic(8); }, true);
+// 手指在设备列表里 → 这几秒内列表不重排(否则轮询刚好重排时, 点下去的位置已经换成另一台设备)
+document.addEventListener('pointerdown', function (e) { if (e.target.closest && e.target.closest('#dev-list, #dev-side')) freezeList(2500); }, true);
 var holdT = 0, holdP = null, swallowClick = false;
 // 长按生效后, 这次手势结束时产生的 click 一律吞掉; 下一次按下即复位(不按时间算, 按多久都可靠)
 document.addEventListener('click', function (e) { if (swallowClick) { swallowClick = false; e.stopPropagation(); e.preventDefault(); } }, true);

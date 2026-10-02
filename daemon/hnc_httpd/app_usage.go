@@ -55,6 +55,11 @@ type appUsageDay struct {
 	Unknown map[string]*appUnknownAgg `json:"unknown,omitempty"`
 	// v5.21 共现推断(traffic_ident.go): "mac|app" → [up, down], 是 Hours 里该应用字节的子集
 	Inferred map[string][2]uint64 `json:"inferred,omitempty"`
+	// v6.x DPI v2(fp_learn.go): 按指纹(fp/seed)与用户纠正(user)归属的字节, "mac|app" → [up, down],
+	// 都是 Hours 的子集; FPW = Σ 字节×置信度(/api/app_usage 用它算平均置信度)
+	FP   map[string][2]uint64 `json:"fp,omitempty"`
+	FPW  map[string]float64   `json:"fp_w,omitempty"`
+	User map[string][2]uint64 `json:"user,omitempty"`
 }
 
 type appUsageMeta struct {
@@ -104,6 +109,8 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 	}
 	names := s.loadIPNames()
 	apps := s.loadIPApps()
+	fpSt := fpFor(s.hncDir)
+	fpSt.tick(now, names) // v6.x DPI v2: 用户纠正规则 + 摄入 dpi_flows.json(指纹学习), 在 appUsage.mu 外做 I/O
 
 	appUsage.mu.Lock()
 	defer appUsage.mu.Unlock()
@@ -117,6 +124,8 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 		_, _, _ = ctEventsDrain()
 		_, _ = ctNewDrain()
 		identReset() // v5.21: 窗口/暂缓/推测缓存都按时间算, 跳变后重来
+		fgSt.reset(now)
+		flowShapeReset() // DPI v2: 流形态窗口按时间算, 跳变后重来(flow_shape.go)
 		appUsage.init = false
 		appUsageAcctStep(&appUsage.prev, &appUsage.init, sn.entries, sn.at, nil, func(src string) bool { _, ok := owner[src]; return ok })
 		appTimeLastTick = time.Time{}
@@ -144,6 +153,9 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 	newStarts, _ := ctNewDrain()
 	isNew := func(k string) bool { _, ok := prevKeys[k]; return !ok && !oldEv[k] }
 	ix := identSt.observe(now, deltas, newStarts, isNew, owner, apps, names)
+	// v6.x DPI v2: 指纹/用户纠正归属(fp_learn.go)
+	ix.fp = fpSt
+	flowShapeTick(sn.at, sn, events, owner, apps, names) // DPI v2: 流形态分类(flow_shape.go)
 	added := appUsageRecordIdent(appUsage.day, deltas, owner, apps, names, now, appTimeTickSec(now), ix)
 	if len(deltas) > 0 {
 		appUsage.dirty = true
@@ -167,6 +179,7 @@ func appUsageRecordIdent(d *appUsageDay, deltas []appUsageDelta, owner map[strin
 	var added uint64
 	tick := map[string]uint64{}
 	cats := map[string]string{}
+	var fobs []fgObs // DPI v2 前台模型(fg_model.go)的输入: 已定归属的差分
 	if ix != nil && len(ix.released) > 0 {
 		deltas = append(append([]appUsageDelta(nil), ix.released...), deltas...)
 		ix.released = nil
@@ -175,14 +188,27 @@ func appUsageRecordIdent(d *appUsageDay, deltas []appUsageDelta, owner map[strin
 		mac := owner[dl.Src]
 		id, meta := appUnknownID, appUsageMeta{Name: "未识别"}
 		inferred := false
+		attrSrc, attrConf := "", 0.0 // v6.x DPI v2: "fp"/"seed"/"user" 单独计数
 		if dl.Dst != "" && (isPrivateIP(dl.Dst) || owner[dl.Dst] != "") {
 			id, meta = appLocalID, appUsageMeta{Name: "局域网"}
 		} else if ix.hold(dl) {
 			continue // 新连接等共现窗口合上, 下一轮随 ix.released 补记
+		} else if fa, ok := ix.fpClassify(dl); ok { // 用户纠正 > 规则库 > 指纹 > 共现/隧道启发式(fp_learn.go)
+			id, meta, attrSrc, attrConf = fa.App.ID, appUsageMeta{Name: fa.App.Name, Category: fa.App.Category}, fa.Src, fa.Conf
 		} else if xid, xm, xinf, ok := ix.classify(dl, mac); ok {
 			id, meta, inferred = xid, xm, xinf
-		} else if a, ok := appForIP(dl.Dst, apps, names); ok {
+		} else if a, src, ok := appForIPSrc(dl.Dst, apps, names); ok {
 			id, meta = a.ID, appUsageMeta{Name: a.Name, Category: a.Category}
+			if src == "user" {
+				attrSrc = "user"
+			}
+		}
+		// DPI v2(ip_owner.go): 以上都没归上、且目的 IP 没有反查名 → 按 IP 归属库归到
+		// 「XX系(未细分)」伪应用(只限消费级应用运营方; 云/CDN/运营商仍记未识别)。优先级最低。
+		if id == appUnknownID && dl.Dst != "" && names[dl.Dst].Name == "" {
+			if a, ok := orgAppForIP(dl.Dst); ok {
+				id, meta = a.ID, appUsageMeta{Name: a.Name, Category: a.Category}
+			}
 		}
 		if d.Hours[hour] == nil {
 			d.Hours[hour] = map[string][2]uint64{}
@@ -201,6 +227,7 @@ func appUsageRecordIdent(d *appUsageDay, deltas []appUsageDelta, owner map[strin
 			iv[1] += dl.Dn
 			d.Inferred[mk] = iv
 		}
+		appUsageAddSrc(d, mk, attrSrc, attrConf, dl.Up, dl.Dn)
 		if old, ok := d.Apps[id]; !ok || old.Name != meta.Name || old.Category != meta.Category {
 			d.Apps[id] = meta
 		}
@@ -210,8 +237,14 @@ func appUsageRecordIdent(d *appUsageDay, deltas []appUsageDelta, owner map[strin
 		if id == appUnknownID && dl.Dst != "" {
 			appUnknownAdd(d, dl.Dst, names[dl.Dst].Name, mac, dl.Up+dl.Dn)
 		}
+		if ix != nil && mac != "" && id != appUnknownID && id != appLocalID {
+			fobs = append(fobs, fgObs{MAC: mac, ID: id, Name: meta.Name, Category: meta.Category, Key: dl.Key, Up: dl.Up, Dn: dl.Dn, Inferred: inferred})
+		}
 	}
 	appTimeStep(d, tick, cats, now, tickSec)
+	if ix != nil { // 只在真实采样路径(appUsageTick)上推进前台模型
+		fgSt.step(now, fobs, "")
+	}
 	return added
 }
 
@@ -318,6 +351,7 @@ func (s *server) appUsageFlush(now time.Time) {
 		appUsage.dirty = false
 	}
 	appUsage.mu.Unlock()
+	fgSt.flush(now) // DPI v2: 前台时间线落盘 + 清理(fg_model.go; 未 load 过时不写)
 	if d != nil {
 		if err := saveAppUsageDay(s.hncDir, d); err != nil {
 			appUsage.mu.Lock()
@@ -345,6 +379,7 @@ func (s *server) appUsageFlush(now time.Time) {
 func (s *server) AppUsageLoop(stop <-chan struct{}) {
 	last := time.Now()
 	lastFlush := last
+	fgSt.load(s.hncDir, last) // DPI v2: 载入今天已有的前台时间线
 	for {
 		if !powerWait(stop, "app_usage", last, s.appUsageFlags) {
 			s.appUsageFlush(time.Now())
@@ -395,6 +430,7 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 	activeByApp := map[string]uint64{}
 	inferredByApp := map[string]uint64{} // v5.21 共现推断的字节
 	var totUp, totDn, totInferred uint64
+	srcAgg := newAppUsageSrcAgg() // v6.x DPI v2: 指纹/用户纠正字节(fp_learn.go)
 	since := ""
 	for i := days - 1; i >= 0; i-- {
 		date := now.AddDate(0, 0, -i).Format("20060102")
@@ -421,6 +457,7 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		for id, m := range d.Apps {
 			meta[id] = m
 		}
+		srcAgg.addDay(d, mac, resolve)
 		for mk, v := range d.Inferred {
 			sep := strings.IndexByte(mk, '|')
 			if sep < 0 || (mac != "" && mk[:sep] != mac) {
@@ -475,9 +512,9 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		if name == "" {
 			name = id
 		}
-		apps = append(apps, map[string]interface{}{"id": id, "name": name, "category": m.Category,
+		apps = append(apps, srcAgg.annotate(id, map[string]interface{}{"id": id, "name": name, "category": m.Category,
 			"up": a.up, "down": a.dn, "sdk": appTier(m.Category) == tierHidden,
-			"active_sec": activeByApp[id], "inferred_bytes": inferredByApp[id]})
+			"active_sec": activeByApp[id], "inferred_bytes": inferredByApp[id]}))
 	}
 	sort.Slice(apps, func(i, j int) bool {
 		ti := apps[i]["up"].(uint64) + apps[i]["down"].(uint64)
@@ -505,6 +542,8 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		// v5.21: inferred_bytes = 其中按共现推断归到应用的字节(界面标「推测」)
 		"by_app": apps, "by_device": devs, "by_hour": hours, "inferred_bytes": totInferred,
 		"readable": sn.readable, "acct": sn.acct,
+		// v6.x DPI v2: fp_bytes = 按学习指纹归属的字节(界面标「指纹识别」), user_bytes = 按用户纠正归属的字节
+		"fp_bytes": srcAgg.totFP, "user_bytes": srcAgg.totUser,
 		// v5.18: true = conntrack DESTROY 事件订阅在线(短连接/连接尾巴也计入)
 		"precise": sn.acct && ctEventsPrecise(),
 	})

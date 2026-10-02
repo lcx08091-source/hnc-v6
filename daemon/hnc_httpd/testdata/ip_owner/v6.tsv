@@ -1,0 +1,7 @@
+2400:cb00::	2400:cb00:ffff:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
+2400:cb01::	2400:cb01:ffff:ffff:ffff:ffff:ffff:ffff	13335	US	CLOUDFLARENET
+2402:4e00::	2402:4e00:ffff:ffff:ffff:ffff:ffff:ffff	132203	CN	TENCENT
+2402:4e01::	2402:4e01::ffff	99999	XX	OTHER
+bad	line
+2001:db8::	2001:db8:0:0:ffff:ffff:ffff:ffff	45090	CN	TENCENT
+2001:db8:0:1::	2001:db8:0:1:ffff:ffff:ffff:ffff	15169	US	GOOGLE
