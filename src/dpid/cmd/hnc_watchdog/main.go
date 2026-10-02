@@ -61,7 +61,7 @@ const (
 	intervalRecovery  = 30 * time.Second
 	intervalProbe     = 10 * time.Second // PENDING state probe
 	intervalDoze      = 180 * time.Second
-	heartbeatTick     = 5 * time.Second
+	heartbeatTick     = 20 * time.Second // v5.25: 5→20s(接管阈值 120s, 余量足够; 少 540 次写/小时)
 	takeoverStaleSec  = 120
 	logRotateInterval = 6 * time.Hour
 	logMaxBytes       = 1 << 20 // 1 MiB
@@ -547,6 +547,10 @@ var (
 )
 
 func isDoze() bool {
+	// v5.25: 亮屏或有界面在看就不可能 Doze —— 不必每 30 秒 fork 一次 watchdog.sh 问系统。
+	if screenAwake() {
+		return false
+	}
 	dozeCacheMu.Lock()
 	defer dozeCacheMu.Unlock()
 	if !dozeCheckTS.IsZero() && time.Since(dozeCheckTS) < 30*time.Second {
@@ -650,6 +654,7 @@ func mainLoop() {
 	recoveryRounds := 0
 	currentInterval := intervalNormal
 	firstRound := true
+	lastPrune := time.Time{}
 
 	for {
 		if !firstRound {
@@ -657,11 +662,18 @@ func mainLoop() {
 			if isDoze() {
 				interval = intervalDoze
 			}
-			if !sleepUntil(interval) {
+			// v5.25: 定时开关热点的边界 / 充电检查时刻不能睡过头
+			if d := hsSched.maxSleep(time.Now()); d >= 0 && d < interval {
+				interval = d
+			}
+			if ok, _ := sleepOrWake(interval); !ok {
 				return
 			}
 		}
 		firstRound = false
+
+		// v5.25: 定时开关热点 / 只在充电时开热点(旧 Go 版从未调用, 该功能在 Go 版下不生效)
+		hsSched.runIfDue(time.Now())
 
 		// Log rotation, cheap so always run.
 		if time.Since(lastLogRotate) > logRotateInterval {
@@ -691,8 +703,17 @@ func mainLoop() {
 		ensureDaemonRunning(launcherDaemon())
 		ensureDaemonRunning(dpidDaemon())
 
-		// rc17 hotspotd dedupe
-		_ = runAction("prune_dup_hotspotd")
+		// rc17 hotspotd dedupe —— v5.25: 纯防御性清理, 每 10 分钟一次即可(原来每轮 fork 一次 watchdog.sh)
+		if time.Since(lastPrune) >= pruneDupEvery {
+			_ = runAction("prune_dup_hotspotd")
+			lastPrune = time.Now()
+		}
+
+		// v5.25: 热点未开(httpd 的 activity 新鲜可信)→ 兜底探测放宽到 120 秒, 开热点靠网卡事件即时唤醒。
+		// 规则恢复 / 健康检查节拍(热点开着时)不受影响。
+		if currentInterval < intervalIdleProbe && hotspotIdle() {
+			currentInterval = intervalIdleProbe
+		}
 	}
 }
 
@@ -799,6 +820,15 @@ func runV6Sync() {
 	_ = cmd.Run()
 }
 
+// runScript 执行一个 bin/ 下的脚本(stdout/stderr 丢弃, 独立进程组), 同 runV6Sync。
+func runScript(path string, args ...string) {
+	cmd := exec.Command(shellPath(), append([]string{path}, args...)...)
+	cmd.Env = os.Environ()
+	cmd.Stdout, cmd.Stderr = nil, nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	_ = cmd.Run()
+}
+
 func runStatsSample() {
 	cmd := exec.Command(shellPath(), binDir+"/stats_sample.sh")
 	cmd.Env = os.Environ()
@@ -864,6 +894,7 @@ func main() {
 
 	handleSignals()
 	go heartbeatLoop()
+	startLinkWatch() // v5.25: 网卡 / 地址事件即时唤醒主循环(热点开关不再靠 10 秒轮询)
 
 	// rc30.5: alert scanner — detect unknown devices every 5 minutes.
 	// Independent of the main supervision loop so a slow alert pass can't
@@ -893,7 +924,9 @@ func appLimitApplyLoop() {
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
 	for {
-		if _, err := os.Stat(script); err == nil {
+		// v5.25: 热点未开时没有客户端流量可限, 不跑全量 iptables/tc 重建(每 30 秒一次 fork)。
+		// 开热点后下一个 30 秒节拍内恢复; full_init 时规则本身也会重建。
+		if _, err := os.Stat(script); err == nil && !hotspotIdle() {
 			cmd := exec.Command(shellPath(), script)
 			cmd.Env = os.Environ()
 			cmd.Stdout, cmd.Stderr = nil, nil // v5.12: 同 runV6Sync, 不建管道
@@ -917,8 +950,9 @@ func appLimitApplyLoop() {
 func pollDirty(path string) <-chan struct{} {
 	out := make(chan struct{}, 1)
 	go func() {
-		for i := 0; i < 30; i++ {
-			time.Sleep(1 * time.Second)
+		// v5.25: 1 秒 → 3 秒一查(30 秒窗口内唤醒 30 次 → 10 次); 界面改限速后最多慢 2 秒生效。
+		for i := 0; i < 10; i++ {
+			time.Sleep(3 * time.Second)
 			if _, err := os.Stat(path); err == nil {
 				out <- struct{}{}
 				return

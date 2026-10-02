@@ -1084,7 +1084,7 @@ PASSIVE_MARKER="$RUN/watchdog_passive.marker"
 # 开机后 1 分钟以上热点才能被使用。ACTIVE 稳态沿用主循环 $INTERVAL(60s)。
 # rc38: 删死变量 PROBE_INTERVAL_ACTIVE(全脚本 0 引用,稳态实际走 $INTERVAL)。
 PROBE_INTERVAL_PENDING=10
-PROBE_INTERVAL_PENDING_QUIET=30   # v5.22: 熄屏无界面且热点未开(与 power_sched.go watchdog_pending 一致)
+PROBE_INTERVAL_PENDING_QUIET=120  # v5.25: 热点未开(与 power_sched.go watchdog_pending 一致); 每 10s 仍用内建命令早醒检查
 
 # rc3.1.5 修: 进 main loop 前立即 ensure httpd_running, 不等第一次 sleep 完.
 # 之前 watchdog 启动后要先 sleep 60-120s 才第一次 ensure httpd, 导致用户点 toggle
@@ -1228,7 +1228,7 @@ while true; do
                 # 子服务检查), 但每 10s 用内建命令看一眼 activity.json, 热点一起来立即进入下一轮。
                 # 其余情况(或 activity 不新鲜)保持 10s。定时开关热点的分钟粒度不受影响(≤30s)。
                 if hnc_act_load "$(date +%s 2>/dev/null)" && [ "$ACT_OK" = 1 ] \
-                   && [ "$ACT_LEVEL" = hotspot_off ] && hnc_act_quiet; then
+                   && [ "$ACT_LEVEL" = hotspot_off ]; then
                     hnc_act_sleep_until "$PROBE_INTERVAL_PENDING_QUIET" "$PROBE_INTERVAL_PENDING" hotspot
                 else
                     sleep $PROBE_INTERVAL_PENDING

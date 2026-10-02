@@ -20,7 +20,7 @@
 //	v6_neigh          事件   事件驱动 + 60s 兜底, 不变(IPv6 规则同步)
 //	ct_events         事件   不变
 //	─ 镜像(shell / dpid 执行) ─
-//	watchdog_pending  10s    熄屏且无界面 30s(每 10s 只做内建命令的早醒检查), 其余 10s
+//	watchdog_pending  10s    hotspot_off 120s(v5.25 Go 版: 网卡事件即时唤醒 + 定时开关热点边界唤醒), 其余 10s
 //	watchdog_active   60s    不变(规则健康检查/v6 兜底同步/定时开关热点)
 //	offload_guard     60s    热点未开/无客户端且未在兜底: 完整检测 300s(每 60s 早醒检查); 热点+客户端或兜底中: 60s(重申 ≤60s)
 //	stats_sample      300s   no_clients 900s, 其余 300s
@@ -175,8 +175,8 @@ func powerInterval(name string, a Activity, f loopFlags) (time.Duration, string)
 		return base, "固定"
 	// ── 镜像 ──
 	case "watchdog_pending":
-		if lvl == lvlHotspotOff && quiet {
-			return 30 * time.Second, "熄屏无界面: ×3(每 10s 早醒检查热点)"
+		if lvl == lvlHotspotOff {
+			return 120 * time.Second, "热点未开: 开热点由网卡事件即时唤醒, 120s 只是兜底; 定时开关热点在边界时刻精确唤醒"
 		}
 		return base, "基准"
 	case "watchdog_active":

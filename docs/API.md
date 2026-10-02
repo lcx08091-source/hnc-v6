@@ -2128,3 +2128,9 @@ GET `/api/encdns`:
 - `run/self_fg.YYYYMMDD.jsonl`(v5.24.0-rc2):本机前台变化记录 `{ts, pkg, source(activities|window)}`,亮屏且开关开启时每 10 秒探测一次,只记变化,保留 7 天。
 - `GET /api/dpi_eval?days=1|7[&refresh=1]`(v5.24.0-rc2,敏感只读):`{ok, generated_at, days, enabled, samples, apps, capped, skipped_system, sdk_samples, methods:{rule,fp,owner,combined:{samples,predicted,correct,coverage,accuracy,accuracy_na?}}, by_app:[{truth,name,samples,coverage,accuracy}], top_wrong:[{truth,name,pred,pred_name,n}], top_unknown:[{truth,name,n,snis}], fg_truth:{switches_24h,last_pkg,last_ts,source}, note}`。真值 = `data/pkg_app_map.json[pkg]`,不在表里为 `pkg:<包名>`;规则库命中广告 / SDK / CDN 类不计入预测(`sdk_samples`);owner 只算覆盖率。结果缓存 10 分钟并写 `run/dpi_eval.json`。
 - 动作 `dpi_eval_clear`:删除 `label_samples.*`、`self_fg.*`、`dpi_eval.json`。
+
+## 23. v5.25 变更
+
+- `GET /api/dpi_eval`:`methods.*` 增加 `judged`(有标准答案且有预测的样本数,准确率的分母);顶层增加 `unlabeled`(包名不在对照表的样本数,只算覆盖率);`by_app[].accuracy_na` 表示该应用没有标准答案。规则库改从 `etc/dpi_rules.d`、`etc/dpi_rules.json` 读取(回退 `data/`)。
+- `run/clock_state.json` 增加 `hwm_reset`(`auto_time` | `behind_6h`)、`hwm_reset_at`、`hwm_reset_from`。
+- `GET /api/power`:`watchdog_pending` 在 `hotspot_off` 档为 120 秒(Go 版 watchdog 由网卡事件即时唤醒,轮询仅兜底)。

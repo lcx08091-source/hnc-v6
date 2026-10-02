@@ -464,7 +464,7 @@ function evalSumTxt() {
   if (!r.enabled) return '未开启本机流量归因 · 开启后才会采集样本并自评';
   if (!num(r.samples)) return '已开启 · 还没有样本，正常用手机一会儿再看';
   var m = (r.methods || {}).combined || {};
-  return num(r.samples) + ' 条样本 · 综合覆盖 ' + pct100(m.coverage) + '% · 准确 ' + pct100(m.accuracy) + '%';
+  return num(r.samples) + ' 条样本 · 综合覆盖 ' + pct100(m.coverage) + '% · 准确 ' + evalAcc(m);
 }
 function evalFold() {
   return sFold('deval', ['blue', 'gauge'], '识别自评', '<span id="eval-sum">' + esc(evalSumTxt()) + '</span>',
@@ -476,6 +476,8 @@ function loadEval(days, refresh) {
   return api.get('/api/dpi_eval', q, { timeout: 12000 }).then(function (r) { S.eval = r; })
     .catch(function (e) { S.eval = { ok: false, err: errText(e) }; }).then(paintEval);
 }
+/* 准确率: 没有可判对错的样本(全是系统应用等无标准答案的)时显示「—」而不是 0% */
+function evalAcc(m) { return m && m.accuracy_na ? '—' : m && m.judged === 0 ? '—' : pct100(m && m.accuracy) + '%'; }
 var EVAL_M = [['rule', '规则库'], ['fp', '指纹'], ['owner', 'IP 归属']];
 function paintEval() {
   var el = $('#eval-body'), r = S.eval; if (!el || !r) return;
@@ -499,15 +501,14 @@ function paintEval() {
   h += '<div class="eval-nums">' +
     '<div class="en"><b class="num">' + num(r.samples) + '</b><span>样本</span></div>' +
     '<div class="en"><b class="num">' + pct100(comb.coverage) + '<i>%</i></b><span>覆盖率</span></div>' +
-    '<div class="en"><b class="num">' + pct100(comb.accuracy) + '<i>%</i></b><span>准确率</span></div>' +
+    '<div class="en"><b class="num">' + (evalAcc(comb) === '—' ? '—' : pct100(comb.accuracy) + '<i>%</i>') + '</b><span>准确率</span></div>' +
     '<div class="en"><b class="num">' + num(r.apps) + '</b><span>涉及应用</span></div></div>' +
     '<div class="note">覆盖率＝这些连接里 HNC 认出了应用的比例；准确率＝认出来的里面认对的比例。（综合＝用户纠正 &gt; 规则库 &gt; 指纹）</div>';
   // 各方法一行
   h += '<dl class="kv">';
   EVAL_M.forEach(function (x) {
     var mm = m[x[0]] || {};
-    var acc = mm.accuracy_na ? '—' : pct100(mm.accuracy) + '%';
-    h += '<dt>' + x[1] + '</dt><dd class="num">覆盖 ' + pct100(mm.coverage) + '% · 准确 ' + acc + ' <span class="note">(' + num(mm.predicted) + '/' + num(mm.samples) + ')</span></dd>';
+    h += '<dt>' + x[1] + '</dt><dd class="num">覆盖 ' + pct100(mm.coverage) + '% · 准确 ' + evalAcc(mm) + ' <span class="note">(' + num(mm.predicted) + '/' + num(mm.samples) + (mm.judged != null && !mm.accuracy_na ? ' · 可判 ' + num(mm.judged) : '') + ')</span></dd>';
   });
   h += '</dl>';
   if (r.note) h += '<div class="note">' + esc(r.note) + '</div>';
@@ -516,7 +517,7 @@ function paintEval() {
   var tw = Array.isArray(r.top_wrong) ? r.top_wrong.slice(0, 5) : [];
   if (tw.length) {
     h += '<div class="note" style="margin-bottom:-2px">最常认错</div><div class="dbox">' + tw.map(function (x) {
-      return '<div class="row2"><span class="k">' + esc(x.name || x.truth) + ' <span class="note">→ 认成 ' + esc(x.pred_name || x.pred) + '</span></span><span class="v num">' + num(x.n) + ' 次</span></div>';
+      return '<div class="row2"><span class="k" style="min-width:0;overflow-wrap:anywhere">' + esc(x.name || x.truth) + ' <span class="note">→ 认成 ' + esc(x.pred_name || x.pred) + '</span></span><span class="v num" style="white-space:nowrap">' + num(x.n) + ' 次</span></div>';
     }).join('') + '</div>';
   }
   var tu = Array.isArray(r.top_unknown) ? r.top_unknown.slice(0, 5) : [];

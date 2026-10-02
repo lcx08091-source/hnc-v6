@@ -64,6 +64,7 @@ type dpiEvalMethod struct {
 	Samples    int     `json:"samples"`
 	Predicted  int     `json:"predicted"`
 	Correct    int     `json:"correct"`
+	Judged     int     `json:"judged"` // v5.25: 有标准答案(包名在对照表里)且有预测的样本, 准确率的分母
 	Coverage   float64 `json:"coverage"`
 	Accuracy   float64 `json:"accuracy"`
 	AccuracyNA bool    `json:"accuracy_na,omitempty"`
@@ -71,11 +72,12 @@ type dpiEvalMethod struct {
 
 // dpiEvalByApp 单个真值应用的汇总(combined 口径)。
 type dpiEvalByApp struct {
-	Truth    string  `json:"truth"`
-	Name     string  `json:"name"`
-	Samples  int     `json:"samples"`
-	Coverage float64 `json:"coverage"`
-	Accuracy float64 `json:"accuracy"`
+	Truth      string  `json:"truth"`
+	Name       string  `json:"name"`
+	Samples    int     `json:"samples"`
+	Coverage   float64 `json:"coverage"`
+	Accuracy   float64 `json:"accuracy"`
+	AccuracyNA bool    `json:"accuracy_na,omitempty"` // 没有标准答案(包名不在对照表), 只算覆盖率
 }
 
 // dpiEvalWrong 最常认错: 真值被认成 pred 的次数。
@@ -105,7 +107,8 @@ type dpiEvalResult struct {
 	Apps          int                      `json:"apps"`
 	Capped        bool                     `json:"capped"`
 	SkippedSystem int                      `json:"skipped_system"`
-	SDKSamples    int                      `json:"sdk_samples"` // 规则库认成广告 / SDK / CDN 类的样本(不计入规则预测)
+	SDKSamples    int                      `json:"sdk_samples"`
+	Unlabeled     int                      `json:"unlabeled"` // v5.25: 包名不在对照表(多为系统应用)的样本, 只算覆盖率不算准确率 // 规则库认成广告 / SDK / CDN 类的样本(不计入规则预测)
 	Methods       map[string]dpiEvalMethod `json:"methods"`
 	ByApp         []dpiEvalByApp           `json:"by_app"`
 	TopWrong      []dpiEvalWrong           `json:"top_wrong"`
@@ -181,7 +184,9 @@ func ruleMeta(hncDir string) (map[string]string, map[string]bool) {
 			}
 		}
 	}
-	if dir := filepath.Join(hncDir, "data", "dpi_rules.d"); true {
+	// v5.25: dpid 运行时读的是 etc/dpi_rules.d(+ etc/dpi_rules.json), data/ 下是出厂副本。
+	// 旧版只读 data/, 真机上读不到 → 名字全显示成 ID、广告/系统类没被排除(准确率 0%)。
+	for _, dir := range []string{filepath.Join(hncDir, "etc", "dpi_rules.d"), filepath.Join(hncDir, "data", "dpi_rules.d")} {
 		if entries, err := os.ReadDir(dir); err == nil {
 			names := make([]string, 0, len(entries))
 			for _, e := range entries {
@@ -197,8 +202,10 @@ func ruleMeta(hncDir string) (map[string]string, map[string]bool) {
 			}
 		}
 	}
-	if b, err := os.ReadFile(filepath.Join(hncDir, "data", "dpi_rules.json")); err == nil {
-		add(b)
+	for _, f := range []string{filepath.Join(hncDir, "etc", "dpi_rules.json"), filepath.Join(hncDir, "data", "dpi_rules.json")} {
+		if b, err := os.ReadFile(f); err == nil {
+			add(b)
+		}
 	}
 	return out, hidden
 }
@@ -299,8 +306,8 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 
 	// 按真值汇总
 	type appAgg struct {
-		n, predicted, correct int
-		sniCount              map[string]int
+		n, predicted, judged, correct int
+		sniCount                      map[string]int
 	}
 	byTruth := map[string]*appAgg{}
 	// top_wrong: (truth|pred) → n
@@ -312,8 +319,12 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 
 	for _, s := range samples {
 		truth := pmap[s.Pkg]
-		if truth == "" {
+		labeled := truth != ""
+		if !labeled {
+			// 没有标准答案(系统应用 / 未登记的包): 认成什么都无法判对错, 只算覆盖率。
+			// v5.24 把它们一律算错, 真机上系统应用一多准确率就成了 0%。
 			truth = "pkg:" + s.Pkg
+			res.Unlabeled++
 		}
 
 		// 四种预测
@@ -359,6 +370,10 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 				ownerAccuracyNA = true
 				continue
 			}
+			if !labeled {
+				continue
+			}
+			st.Judged++
 			if preds[m] == truth {
 				st.Correct++
 			}
@@ -376,10 +391,13 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 		}
 		if combID != "" {
 			ag.predicted++
-			if combID == truth {
-				ag.correct++
-			} else {
-				wrongN[wpair{truth, combID}]++
+			if labeled {
+				ag.judged++
+				if combID == truth {
+					ag.correct++
+				} else {
+					wrongN[wpair{truth, combID}]++
+				}
 			}
 		}
 	}
@@ -389,11 +407,7 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	for _, m := range methods {
 		st := *stat[m]
 		st.Coverage = ratio(st.Predicted, st.Samples)
-		if st.Samples == 0 || st.Predicted == 0 {
-			st.Accuracy = 0
-		} else {
-			st.Accuracy = ratio(st.Correct, st.Predicted)
-		}
+		st.Accuracy = ratio(st.Correct, st.Judged)
 		if m == "owner" && ownerAccuracyNA {
 			st.AccuracyNA = true
 			st.Accuracy = 0
@@ -406,11 +420,12 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	res.Apps = len(byTruth)
 	for truth, ag := range byTruth {
 		res.ByApp = append(res.ByApp, dpiEvalByApp{
-			Truth:    truth,
-			Name:     lookup(truth),
-			Samples:  ag.n,
-			Coverage: ratio(ag.predicted, ag.n),
-			Accuracy: ratio(ag.correct, ag.predicted),
+			Truth:      truth,
+			Name:       lookup(truth),
+			Samples:    ag.n,
+			Coverage:   ratio(ag.predicted, ag.n),
+			Accuracy:   ratio(ag.correct, ag.judged),
+			AccuracyNA: strings.HasPrefix(truth, "pkg:"),
 		})
 	}
 	sort.Slice(res.ByApp, func(i, j int) bool {
@@ -467,6 +482,12 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 
 	if ownerAccuracyNA {
 		res.Note = "IP 归属(owner)只统计覆盖率: 真值是具体应用, owner 只能认出是哪家公司, 两者无法可靠对应, 故不算准确率。"
+	}
+	if res.Unlabeled > 0 {
+		if res.Note != "" {
+			res.Note += " "
+		}
+		res.Note += strconv.Itoa(res.Unlabeled) + " 条样本来自没有标准答案的应用(多为系统应用, 包名不在对照表里), 只算覆盖率, 不算准确率。"
 	}
 	if res.SDKSamples > 0 {
 		if res.Note != "" {

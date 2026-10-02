@@ -153,10 +153,21 @@ func TestClockHighWaterPersistAndHeal(t *testing.T) {
 	if clockSaneMono(dir, stale, time.Minute) {
 		t.Fatal("stale RTC behind persisted high-water must be insane")
 	}
-	// 高水位本身错(曾跑到未来): 年份合法且持续落后 6 小时 → 自愈
+	// 高水位本身错(曾跑到未来): 年份合法且持续落后 6 小时(按开机时长计)→ 自愈
+	oldBoot, oldAT := clockBootUp, clockAutoTime
+	t.Cleanup(func() { clockBootUp, clockAutoTime = oldBoot, oldAT })
+	clockAutoTime = func() (bool, bool) { return false, false }
+	boot := time.Minute
+	clockBootUp = func() time.Duration { return boot }
+	clockForget(dir)
+	if clockSaneMono(dir, stale, time.Minute) {
+		t.Fatal("stale RTC behind persisted high-water must be insane")
+	}
+	boot = time.Minute + 5*time.Hour
 	if clockSaneMono(dir, stale.Add(5*time.Hour), time.Minute+5*time.Hour) {
 		t.Fatal("should not heal before 6h")
 	}
+	boot = time.Minute + 6*time.Hour
 	if !clockSaneMono(dir, stale.Add(6*time.Hour), time.Minute+6*time.Hour) {
 		t.Fatal("should heal after 6h behind")
 	}
@@ -394,5 +405,41 @@ func TestAppTimeEnforceClockGuard(t *testing.T) {
 	s.appTimeEnforce(now)
 	if strings.Count(readFileStr(filepath.Join(dir, "run", "alerts.jsonl")), `"app_time_warn"`) != 1 {
 		t.Fatal("warn alert missing once clock is sane")
+	}
+}
+
+// v5.25: 系统开着自动时间且开机满 10 分钟 → 落后高水位立即重置(不等 6 小时), 并记录原因。
+func TestClockAutoTimeResetsFutureHighWater(t *testing.T) {
+	dir := clockTestDir(t)
+	oldAT, oldBoot := clockAutoTime, clockBootUp
+	t.Cleanup(func() { clockAutoTime, clockBootUp = oldAT, oldBoot })
+	future := time.Date(2026, 10, 3, 23, 34, 0, 0, time.Local)
+	clockNote(dir, future)
+	clockForget(dir)
+	now := future.Add(-22 * time.Hour)
+
+	// 开机才 2 分钟: 还没到可信时间, 不重置
+	clockAutoTime = func() (bool, bool) { return true, true }
+	clockBootUp = func() time.Duration { return 2 * time.Minute }
+	if clockSaneMono(dir, now, time.Minute) {
+		t.Fatal("开机不足 10 分钟不应直接信任")
+	}
+	// 自动时间关着: 不重置
+	clockAutoTime = func() (bool, bool) { return false, true }
+	clockBootUp = func() time.Duration { return time.Hour }
+	if clockSaneMono(dir, now, 2*time.Minute) {
+		t.Fatal("自动时间关闭时不应直接信任")
+	}
+	// 自动时间开 + 开机 1 小时: 立即重置
+	clockAutoTime = func() (bool, bool) { return true, true }
+	if !clockSaneMono(dir, now, 3*time.Minute) {
+		t.Fatal("自动时间开启且开机满 10 分钟应信任当前时间")
+	}
+	if clockHighWater(dir) != now.Unix() {
+		t.Fatalf("高水位应重置为当前时间, got %d", clockHighWater(dir))
+	}
+	st := readClockState(t, dir)
+	if !strings.Contains(st, `"hwm_reset":"auto_time"`) || !strings.Contains(st, strconv.FormatInt(future.Unix(), 10)) {
+		t.Fatalf("clock_state.json 应记录重置原因与旧高水位: %s", st)
 	}
 }

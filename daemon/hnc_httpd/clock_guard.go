@@ -42,6 +42,10 @@ const (
 	clockBackTolerance   = 10 * time.Minute
 	clockHWMHealAfter    = 6 * time.Hour
 	clockHWMPersistEvery = 5 * time.Minute
+	// clockTrustAfterBoot v5.25: 系统开着「自动确定时间」且开机已满这么久(NTP / 运营商时间
+	// 早该校准过)时, 落后高水位视为「高水位是错的」, 立即重置, 不再干等 6 小时。
+	clockTrustAfterBoot = 10 * time.Minute
+	clockAutoTimeTTL    = 10 * time.Minute
 )
 
 // clockVerdict 一次采样的时钟判定
@@ -70,6 +74,52 @@ var monoStart = time.Now()
 // monoNow 进程内单调时钟(不受墙钟调整影响)
 func monoNow() time.Duration { return time.Since(monoStart) }
 
+// bootUptime v5.25: 开机以来的时长(/proc/uptime, CLOCK_BOOTTIME, 含深睡眠, 不受改时间影响)。
+// 读不到时退回进程单调时钟。用它做高水位自愈计时, httpd 重启不会让 6 小时重新计。
+func bootUptime() time.Duration {
+	b, err := os.ReadFile("/proc/uptime")
+	if err == nil {
+		if f := strings.Fields(string(b)); len(f) > 0 {
+			if v, err := strconv.ParseFloat(f[0], 64); err == nil && v > 0 {
+				return time.Duration(v * float64(time.Second))
+			}
+		}
+	}
+	return monoNow()
+}
+
+// ─── 系统「自动确定时间」开关(缓存, 绝不阻塞调用方) ───────────────────────
+
+var clockAutoTimeState struct {
+	sync.Mutex
+	on, known, running bool
+	at                 time.Time
+}
+
+// clockAutoTime 返回缓存的 settings global auto_time; 过期时后台刷新, 本次仍返回旧值。
+// 测试可替换。
+var clockAutoTime = func() (on, known bool) {
+	st := &clockAutoTimeState
+	st.Lock()
+	defer st.Unlock()
+	if (st.at.IsZero() || time.Since(st.at) > clockAutoTimeTTL) && !st.running {
+		st.running = true
+		go func() {
+			out, ok := puRunCmd("settings", "get", "global", "auto_time")
+			st.Lock()
+			st.running, st.at = false, time.Now()
+			if ok {
+				st.on, st.known = strings.TrimSpace(out) == "1", true
+			}
+			st.Unlock()
+		}()
+	}
+	return st.on, st.known
+}
+
+// clockBootUp 开机时长来源(测试可替换)
+var clockBootUp = bootUptime
+
 // clockSaneAt 纯函数: 年份 ≥ 2025 且不早于高水位(hwm, unix 秒; 0 = 无)减容忍值。
 func clockSaneAt(now time.Time, hwm int64) bool {
 	if now.Year() < clockMinYear {
@@ -92,6 +142,15 @@ type clockDirState struct {
 	jumps       int
 	lastJumpAt  int64
 	lastJumpDlt int64
+	// v5.25: 最近一次高水位重置(给自检显示「为什么恢复了」)
+	resetReason string
+	resetAt     int64
+	resetFrom   int64
+}
+
+func (st *clockDirState) noteReset(reason string, now time.Time) {
+	st.resetReason, st.resetAt, st.resetFrom = reason, now.Unix(), st.hwm
+	st.lastSane = -1 // 强制下一次 publish 写 clock_state.json
 }
 
 var clockStates = struct {
@@ -134,12 +193,26 @@ func clockSaneMono(hncDir string, now time.Time, mono time.Duration) bool {
 	st := clockDirLocked(hncDir)
 	ok := clockSaneAt(now, st.hwm)
 	if !ok && now.Year() >= clockMinYear && st.hwm > 0 {
-		// 年份合法但落后高水位: 可能是高水位本身错了(曾跑到未来)
+		// v5.25: 系统开着自动时间且开机满 10 分钟 → 当前时间可信, 是高水位错了(曾跑到未来)
+		if on, known := clockAutoTime(); on && known && clockBootUp() >= clockTrustAfterBoot {
+			log.Printf("clock: now %s behind high-water %s, but system auto-time is on and uptime %s; trusting system time, resetting high-water",
+				now.Format(time.RFC3339), time.Unix(st.hwm, 0).Format(time.RFC3339), clockBootUp().Round(time.Second))
+			st.noteReset("auto_time", now)
+			st.hwm = now.Unix()
+			st.persist(true)
+			st.behindSince = -1
+			st.publish(true, now)
+			return true
+		}
+		// 年份合法但落后高水位: 可能是高水位本身错了(曾跑到未来)。
+		// v5.25: 计时用开机时长(clockBootUp), httpd 重启不会让 6 小时重新计。
+		boot := clockBootUp()
 		if st.behindSince < 0 {
-			st.behindSince = mono
-		} else if mono-st.behindSince >= clockHWMHealAfter {
+			st.behindSince = boot
+		} else if boot-st.behindSince >= clockHWMHealAfter {
 			log.Printf("clock: now %s stays behind persisted high-water %s for %s, resetting high-water",
 				now.Format(time.RFC3339), time.Unix(st.hwm, 0).Format(time.RFC3339), clockHWMHealAfter)
+			st.noteReset("behind_6h", now)
 			st.hwm = now.Unix()
 			st.persist(true)
 			ok = true
@@ -216,6 +289,9 @@ func (st *clockDirState) writeState(sane bool, now time.Time) {
 		"jumps":          st.jumps,
 		"last_jump_at":   st.lastJumpAt,
 		"last_jump_secs": st.lastJumpDlt,
+		"hwm_reset":      st.resetReason,
+		"hwm_reset_at":   st.resetAt,
+		"hwm_reset_from": st.resetFrom,
 	})
 	_ = discoverWriteAtomic(st.statePath, b)
 }

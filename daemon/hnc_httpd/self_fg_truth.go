@@ -29,8 +29,10 @@ import (
 )
 
 const (
-	// selfFGInterval 探测间隔: 10 秒。
-	selfFGInterval = 10 * time.Second
+	// selfFGInterval 探测间隔: 10 秒起步; 前台一直没变就逐步放慢到 selfFGMaxInterval,
+	// 一变化立即回到 10 秒(v5.25 省电: 每次探测都要 fork 一次 dumpsys)。
+	selfFGInterval    = 10 * time.Second
+	selfFGMaxInterval = 60 * time.Second
 	// selfFGCmdTimeout 单条 dumpsys 命令的超时(§7.2: dumpsys 可能卡住)。
 	selfFGCmdTimeout = 2 * time.Second
 	// selfFGRetainDays 前台真值保留天数, 与样本一致(§2.2)。
@@ -54,34 +56,41 @@ var fgPkgRe = regexp.MustCompile(`([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)+)/`)
 // 与 self_capture.enabled 同开合同关; 熄屏不探测。
 func (s *server) fgTruthLoop(stop <-chan struct{}) {
 	var lastPkg string
-	tk := time.NewTicker(selfFGInterval)
-	defer tk.Stop()
+	iv := selfFGInterval
 	for {
+		t := time.NewTimer(iv)
 		select {
 		case <-stop:
+			t.Stop()
 			return
-		case now := <-tk.C:
-			// 两道门: 本机抓包开关 + 明确亮屏。任一不满足就跳过这一轮。
-			if !selfFGEnabled(s.hncDir) || !screenOnNow() {
-				continue
-			}
-			pkg, src := readForegroundPkg(runDumpsysCmd)
-			if pkg == "" {
-				// 没取到前台包(ColorOS / Android 16 格式不认): 记 none, 不写行,
-				// 让评估页能报告「这台手机取不到前台应用」(§T2)。
-				continue
-			}
-			if pkg == lastPkg {
-				continue // 只在前台包名变化时写
-			}
-			lastPkg = pkg
-			rec := selfFGRecord{Ts: now.Unix(), Pkg: pkg, Source: src}
-			if err := appendSelfFG(s.hncDir, now, rec); err != nil {
-				continue
-			}
-			// 每天首次写入(跨天)顺带做过期清理, 避免每轮都扫盘。
-			sweepSelfFG(s.hncDir, now)
+		case <-activityChanged():
+			// 亮屏 / 熄屏等变化: 回到 10 秒节奏, 马上看一眼
+			t.Stop()
+			iv = selfFGInterval
+			continue
+		case <-t.C:
 		}
+		now := time.Now()
+		// 两道门: 本机抓包开关 + 明确亮屏。任一不满足就跳过这一轮。
+		if !selfFGEnabled(s.hncDir) || !screenOnNow() {
+			iv = selfFGMaxInterval
+			continue
+		}
+		pkg, src := readForegroundPkg(runDumpsysCmd)
+		if pkg == "" || pkg == lastPkg {
+			// 没取到(格式不认)或前台没变: 逐步放慢, 最多 60 秒一次
+			if iv *= 2; iv > selfFGMaxInterval {
+				iv = selfFGMaxInterval
+			}
+			continue
+		}
+		iv = selfFGInterval
+		lastPkg = pkg
+		rec := selfFGRecord{Ts: now.Unix(), Pkg: pkg, Source: src}
+		if err := appendSelfFG(s.hncDir, now, rec); err != nil {
+			continue
+		}
+		sweepSelfFG(s.hncDir, now)
 	}
 }
 

@@ -340,8 +340,8 @@ func TestPowerEnforcementCadenceInvariant(t *testing.T) {
 					t.Errorf("app_usage must stay 10s without ct events @ %s: %v", lvl, d)
 				}
 			}
-			// 定时开关热点依赖 watchdog 每轮调用: PENDING 最长 30s
-			if d, _ := powerInterval("watchdog_pending", a, f); d > 30*time.Second {
+			// v5.25: 开热点靠网卡事件即时唤醒、定时开关热点在边界时刻唤醒, 轮询只是兜底: 最长 120s
+			if d, _ := powerInterval("watchdog_pending", a, f); d > 120*time.Second {
 				t.Errorf("watchdog_pending too slow @ %s: %v", lvl, d)
 			}
 		}
@@ -380,8 +380,8 @@ func TestPowerIntervalTable(t *testing.T) {
 		{"offload_guard", none, ct, 300 * time.Second},
 		{"offload_guard", act, ct, 60 * time.Second},
 		{"stats_sample", none, ct, 900 * time.Second},
-		{"watchdog_pending", off, ct, 30 * time.Second},
-		{"watchdog_pending", offUI, ct, 10 * time.Second},
+		{"watchdog_pending", off, ct, 120 * time.Second},
+		{"watchdog_pending", offUI, ct, 120 * time.Second},
 		{"dpid_conntrack", none, ct, 60 * time.Second},
 		{"dpid_state_flush", bg, ct, 5 * time.Second},
 		{"dpid_bytes", bg, ct, 30 * time.Second},

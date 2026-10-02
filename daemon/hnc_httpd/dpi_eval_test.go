@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -444,5 +445,45 @@ func TestEvalSkippedSystemFromDpidStats(t *testing.T) {
 	appendSample(t, dir, now, evalSample{Ts: now.Unix(), Pkg: "com.d", UID: 10100})
 	if res := evalDPI(dir, 1, now); res.SkippedSystem != 7 {
 		t.Fatalf("skipped_system = %d, want 7", res.SkippedSystem)
+	}
+}
+
+// v5.25: 包名不在对照表(系统应用)的样本只算覆盖率不算准确率; 规则库从 etc/ 读(真机运行时位置)。
+func TestEvalUnlabeledAndEtcRules(t *testing.T) {
+	dir := evalDir(t)
+	now := time.Unix(1_800_000_000, 0)
+	writePkgMap(t, dir, map[string]string{"com.d": "douyin"})
+	b, _ := json.Marshal(map[string]interface{}{"rules": []map[string]string{
+		{"id": "douyin", "app": "抖音", "category": "video"},
+		{"id": "oppo_heytap", "app": "OPPO/HeyTap 服务", "category": "system"},
+		{"id": "weather", "app": "天气", "category": "life_service"},
+	}})
+	if err := os.MkdirAll(filepath.Join(dir, "etc", "dpi_rules.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "etc", "dpi_rules.d", "50-x.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appendSample(t, dir, now, evalSample{Ts: now.Unix(), Pkg: "com.d", UID: 10100, RuleID: "douyin"})
+	appendSample(t, dir, now, evalSample{Ts: now.Unix(), Pkg: "com.coloros.weather2", UID: 10200, RuleID: "weather"})
+	appendSample(t, dir, now, evalSample{Ts: now.Unix(), Pkg: "com.coloros.findmyphone", UID: 10201, RuleID: "oppo_heytap"})
+	res := evalDPI(dir, 1, now)
+	if res.Unlabeled != 2 || res.SDKSamples != 1 {
+		t.Fatalf("unlabeled=%d sdk=%d, want 2/1", res.Unlabeled, res.SDKSamples)
+	}
+	m := res.Methods["rule"]
+	if m.Predicted != 2 || m.Judged != 1 || m.Correct != 1 || m.Accuracy != 1 {
+		t.Fatalf("rule = %+v, want predicted=2 judged=1 correct=1 accuracy=1", m)
+	}
+	if len(res.TopWrong) != 0 {
+		t.Fatalf("没有标准答案的样本不应进最常认错: %+v", res.TopWrong)
+	}
+	for _, a := range res.ByApp {
+		if a.Truth == "douyin" && a.Name != "抖音" {
+			t.Fatalf("应从 etc/ 规则库取到中文名: %+v", a)
+		}
+		if strings.HasPrefix(a.Truth, "pkg:") && !a.AccuracyNA {
+			t.Fatalf("无标准答案的应用应标 accuracy_na: %+v", a)
+		}
 	}
 }

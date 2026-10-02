@@ -2289,6 +2289,16 @@ func (c *scCtx) clockGuardItem() scItem {
 		dl, _ := toInt64(m["last_jump_secs"])
 		det = append(det, fmt.Sprintf("检测到 %d 次时间跳变, 最近一次 %s前(跳了 %+d 秒), 统计已重建基线", jumps, scDur(c.env.Now().Unix()-at), dl))
 	}
+	if r, _ := m["hwm_reset"].(string); r != "" {
+		at, _ := toInt64(m["hwm_reset_at"])
+		from, _ := toInt64(m["hwm_reset_from"])
+		why := map[string]string{"auto_time": "系统已开自动时间, 直接信任系统时间", "behind_6h": "持续落后 6 小时自愈"}[r]
+		if why == "" {
+			why = r
+		}
+		det = append(det, fmt.Sprintf("%s前高水位从 %s 重置(%s; 说明之前时钟曾跑到未来)", scDur(c.env.Now().Unix()-at),
+			time.Unix(from, 0).In(c.env.Now().Location()).Format("01-02 15:04"), why))
+	}
 	if sane {
 		it.Status, it.Value = scOK, "时钟可信"
 		if jumps > 0 {
@@ -2297,7 +2307,7 @@ func (c *scCtx) clockGuardItem() scItem {
 		}
 	} else {
 		it.Status, it.Value = scWarn, "时钟不可信, 按天统计已暂停"
-		it.Fix = "打开「自动确定日期和时间」并联网, 时钟恢复后自动继续"
+		it.Fix = "打开「自动确定日期和时间」并联网: 开机满 10 分钟后会直接信任系统时间并自动继续; 未开自动时间时, 持续落后 6 小时后自愈"
 	}
 	it.Detail = strings.Join(det, "; ")
 	return it
