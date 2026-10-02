@@ -296,7 +296,6 @@ HP=$(pidof hotspotd 2>/dev/null | awk '{print $1}')
 if [ -n "$HP" ] && [ -d "/proc/$HP" ]; then echo HOTSPOTD=up; echo HPID=$HP; echo HRSS=$(awk '/VmRSS/{print $2}' /proc/$HP/status 2>/dev/null); else echo HOTSPOTD=down; fi
 T=0; if [ -n "$IF" ]; then T=$( { tc qdisc show dev "$IF"; tc class show dev "$IF"; tc qdisc show dev ifb0; tc class show dev ifb0; } 2>/dev/null | wc -l); fi; echo TC=$T
 echo IPT=$(iptables -t mangle -S 2>/dev/null | grep -c 0x800000)
-echo WD=$(ps -ef 2>/dev/null | grep -c '[h]nc_watchdog\|[w]atchdog.sh')
 echo IFACE=$IF`
 
 func (s *server) apiRunStatus(w http.ResponseWriter, r *http.Request) {
@@ -312,15 +311,67 @@ func (s *server) apiRunStatus(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	atoi := func(k string) int { n, _ := strconv.Atoi(kv[k]); return n }
+	wd := readWatchdogState(s.hncDir, time.Now())
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"hotspotd":        map[bool]string{true: "up", false: "down"}[kv["HOTSPOTD"] == "up"],
 		"hotspotd_pid":    atoi("HPID"),
 		"hotspotd_rss_kb": atoi("HRSS"),
 		"tc_rules":        atoi("TC"),
 		"ipt_rules":       atoi("IPT"),
-		"watchdog":        atoi("WD"),
+		"watchdog":        wd.count(),
+		"watchdog_kind":   wd.Kind,
+		"watchdog_pid":    wd.PID,
+		"watchdog_hb_age": wd.HeartbeatAge,
 		"iface":           kv["IFACE"],
 	})
+}
+
+// watchdogState v5.25: 看门狗是否在跑。旧实现是 shell 里 `ps -ef | grep -c '[h]nc_watchdog\|[w]atchdog.sh'`,
+// toybox grep 不认 BRE 的 \| 交替 → 恒为 0, 界面一直显示「watchdog 未运行」(实际在跑)。
+// 现在直接看 run/watchdog.pid 指向的进程是否活着且确实是看门狗, 再附上 Go 版心跳的新鲜度。
+type watchdogState struct {
+	PID          int    `json:"pid"`
+	Kind         string `json:"kind"`          // go | shell | ""(没在跑)
+	HeartbeatAge int64  `json:"heartbeat_age"` // 秒; -1 = 无心跳文件(shell 版不写)
+}
+
+func (w watchdogState) count() int {
+	if w.Kind == "" {
+		return 0
+	}
+	return 1
+}
+
+func readWatchdogState(hncDir string, now time.Time) watchdogState {
+	st := watchdogState{HeartbeatAge: -1}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "watchdog.heartbeat")); err == nil {
+		if ts, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil && ts > 0 {
+			st.HeartbeatAge = now.Unix() - ts
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(hncDir, "run", "watchdog.pid"))
+	if err != nil {
+		return st
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || pid <= 0 {
+		return st
+	}
+	cmd, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
+	if err != nil {
+		return st
+	}
+	c := string(cmd)
+	switch {
+	case strings.Contains(c, "hnc_watchdog"):
+		st.PID, st.Kind = pid, "go"
+	case strings.Contains(c, "watchdog.sh"):
+		st.PID, st.Kind = pid, "shell"
+	}
+	if st.Kind != "go" {
+		st.HeartbeatAge = -1 // 心跳只有 Go 版写; shell 版在跑时残留的旧心跳文件没有意义
+	}
+	return st
 }
 
 // GET /api/proc_health → bin/rc17_process_health.sh 的 JSON 原样透传

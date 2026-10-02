@@ -57,7 +57,7 @@ var powerProcDefs = []powerProcDef{
 	{"hotspotd", "hotspotd", "hotspotd", []string{"hotspotd.pid"}, "bin/hotspotd", false},
 	{"hnc_dpid", "hnc_dpid", "dpid", []string{"dpid.child.pid", "dpid.pid"}, "bin/hnc_dpid -config", false},
 	{"dpid_guard", "dpid 守护(shell)", "hnc_dpid_guard", []string{"dpid_guard.pid"}, "hnc_dpid_guard.sh", false},
-	{"watchdog", "watchdog(shell)", "watchdog", []string{"watchdog.pid"}, "bin/watchdog.sh", false},
+	{"watchdog", "watchdog(含它拉起的脚本)", "watchdog", []string{"watchdog.pid"}, "hnc_watchdog", false},
 	{"offload_guard", "offload 兜底(shell)", "hnc_offload_guard", []string{"offload_guard.pid"}, "hnc_offload_guard.sh daemon", false},
 	{"clsact_wd", "clsact 守护(shell)", "hnc_clsact_watchdog", []string{"clsact_wd.pid"}, "hnc_clsact_watchdog.sh", false},
 }

@@ -327,7 +327,8 @@ function renderSettings(anim1) {
     sItem(['green', 'cpu'], 'hotspotd 进程', rs.hotspotd_pid ? 'pid ' + rs.hotspotd_pid + (rs.hotspotd_rss_kb ? ' · ' + Math.round(rs.hotspotd_rss_kb / 1024) + ' MB' : '') : '未运行', val(rs.hotspotd === 'up' ? '运行中' : '未运行', rs.hotspotd === 'up' ? 'ok' : 'bad')) +
     sItem(['purple', 'layers'], 'tc 规则数', 'qdisc + class（热点接口 + IFB）', val(num(rs.tc_rules))) +
     sItem(['orange', 'shield'], 'iptables 规则', 'mangle 表里 HNC 的 MARK 规则', val(num(rs.ipt_rules))) +
-    sItem(['blue', 'heart'], 'watchdog', '后台健康检查进程', val(num(rs.watchdog) > 0 ? '正常' : '未运行', num(rs.watchdog) > 0 ? 'ok' : 'bad'))) + scStatusRows()]);
+    sItem(['blue', 'heart'], '看门狗 watchdog', '规则巡检 / 进程保活 / 定时开关热点' + (rs.watchdog_pid ? ' · pid ' + rs.watchdog_pid + (rs.watchdog_kind === 'shell' ? ' · shell 兜底版' : '') : '') + (num(rs.watchdog_hb_age) > 120 ? ' · 心跳 ' + num(rs.watchdog_hb_age) + ' 秒未更新' : ''),
+      val(num(rs.watchdog) > 0 ? (num(rs.watchdog_hb_age) > 120 ? '可能卡住' : '正常') : '未运行', num(rs.watchdog) > 0 && !(num(rs.watchdog_hb_age) > 120) ? 'ok' : 'bad'))) + scStatusRows()]);
   var nz = function (v) { return v == null ? '未统计' : String(v); }, slaCls = function (v) { return v == null ? '' : num(v) ? 'warn' : 'ok'; };
   groups.push(['运行健康', statsHealthHtml() + (!S.sla ? sItem(['gray', 'heart'], '运行健康', '暂无数据', val('—')) :
     sItem(['gray', 'refresh'], 'dpid 重启 / 近期崩溃', '累计重启 · 近期崩溃循环', val(nz(sla.dpid_restart_count) + ' / ' + nz(sla.dpid_crash_recent), num(sla.dpid_crash_recent) ? 'warn' : '')) +

@@ -65,3 +65,24 @@ func TestNetlinkHasLinkOrAddr(t *testing.T) {
 		t.Fatal("路由事件不应唤醒")
 	}
 }
+
+func TestOnlineMACs(t *testing.T) {
+	now := int64(1_800_000_000)
+	b := []byte(`{"aa:bb:cc:dd:ee:01":{"status":"allowed","last_seen":1799999990},
+	"aa:bb:cc:dd:ee:02":{"status":"blocked","last_seen":1799999990},
+	"aa:bb:cc:dd:ee:03":{"status":"allowed","last_seen":1799990000},
+	"AA:BB:CC:DD:EE:04":{"online":true}}`)
+	got := map[string]bool{}
+	for _, m := range onlineMACs(b, now) {
+		got[m] = true
+	}
+	if len(got) != 2 || !got["aa:bb:cc:dd:ee:01"] || !got["aa:bb:cc:dd:ee:04"] {
+		t.Fatalf("online = %v", got)
+	}
+}
+
+func TestClockSaneNow(t *testing.T) {
+	if clockSaneNow(time.Unix(1_000_000_000, 0)) {
+		t.Fatal("2001 年不可信")
+	}
+}

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hnc.io/dpid/tzlocal"
 	"io"
 	"os"
 	"os/exec"
@@ -780,10 +781,13 @@ func handleActive(activeIface string, throttle *restoreThrottle, recoveryRounds 
 			runV6Sync()
 			*lastV6Sync = now
 		}
-		if now.Sub(*lastStatsSample) >= 30*time.Second {
+		// v5.25: 300 秒(无在线设备 900 秒), 与 shell 版 / power_sched.go 一致; 原来每轮(60 秒)都跑
+		if statsSampleDue(*lastStatsSample, now) {
 			runStatsSample()
 			*lastStatsSample = now
 		}
+		// v5.25: 在线时长采样(Go 版从没做过, 「在线时长」因此恒为空)
+		sampleOnlineHours(now)
 		_ = runAction("httpd_drift")
 		_ = runAction("tc_uplink_healthy")
 		return intervalNormal
@@ -878,6 +882,10 @@ func main() {
 		fmt.Println(version)
 		return
 	}
+
+	// v5.25: Android 上 Go 的 time.Local 恒为 UTC(见 tzlocal 包注释)。httpd 早就设了, 这里一直没设 →
+	// 定时开关热点的时段边界、在线时长的日期、告警免打扰时段都按 UTC 算(东八区差 8 小时)。
+	time.Local = tzlocal.Location()
 
 	openLog()
 	logf("hnc_watchdog %s starting, pid=%d", version, os.Getpid())

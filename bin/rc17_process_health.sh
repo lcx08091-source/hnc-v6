@@ -39,7 +39,9 @@ HTTPD=$(count_proc_by_basename hnc_httpd)
 DPID=$(count_proc_by_basename hnc_dpid)
 HOTSPOTD=$(count_proc_by_basename hotspotd)
 WATCHDOG_TOTAL=$(count_lines '[w]atchdog.sh')
-WATCHDOG_MAIN=$(count_main '/data/local/hnc/bin/watchdog\.sh')
+# v5.25: 真机跑的是 Go 版 bin/hnc_watchdog(shell 版 watchdog.sh 只在缺 Go 二进制时兜底);
+# 旧版只数 watchdog.sh, Go 版在跑时恒为 0。两种都数。
+WATCHDOG_MAIN=$(count_main '/data/local/hnc/bin/(hnc_watchdog|watchdog\.sh)')
 GUARD_TOTAL=$(count_lines '[h]nc_dpid_guard.sh')
 GUARD_MAIN=$(count_main '/data/local/hnc/bin/hnc_dpid_guard\.sh')
 
@@ -56,6 +58,12 @@ DPID_CHILD_PID_OK=false; pid_alive "$DPID_CHILD_PID" && DPID_CHILD_PID_OK=true
 GUARD_PID_OK=false; pid_alive "$GUARD_PID" && GUARD_PID_OK=true
 HOTSPOTD_PID_OK=false; pid_alive "$HOTSPOTD_PID" && HOTSPOTD_PID_OK=true
 WATCHDOG_PID_OK=false; pid_alive "$WATCHDOG_PID" && WATCHDOG_PID_OK=true
+# 看门狗由 service.sh nohup 拉起, 父进程不一定是 1(各家 root 方案的进程收养者不同);
+# 主实例按 PPID=1 没数到、但 pidfile 指向的进程活着且确实是看门狗 → 算 1 个主实例。
+if [ "$WATCHDOG_MAIN" -eq 0 ] && [ "$WATCHDOG_PID_OK" = true ] \
+   && tr '\0' ' ' < "/proc/$WATCHDOG_PID/cmdline" 2>/dev/null | grep -q 'watchdog'; then
+    WATCHDOG_MAIN=1
+fi
 
 STATUS=ok
 DETAIL="主实例正常"

@@ -2134,3 +2134,4 @@ GET `/api/encdns`:
 - `GET /api/dpi_eval`:`methods.*` 增加 `judged`(有标准答案且有预测的样本数,准确率的分母);顶层增加 `unlabeled`(包名不在对照表的样本数,只算覆盖率);`by_app[].accuracy_na` 表示该应用没有标准答案。规则库改从 `etc/dpi_rules.d`、`etc/dpi_rules.json` 读取(回退 `data/`)。
 - `run/clock_state.json` 增加 `hwm_reset`(`auto_time` | `behind_6h`)、`hwm_reset_at`、`hwm_reset_from`。
 - `GET /api/power`:`watchdog_pending` 在 `hotspot_off` 档为 120 秒(Go 版 watchdog 由网卡事件即时唤醒,轮询仅兜底)。
+- `GET /api/run_status`(v5.25.0-rc2):`watchdog` 改为 0/1(按 pidfile + cmdline 判断),新增 `watchdog_kind`(go | shell)、`watchdog_pid`、`watchdog_hb_age`(Go 版心跳秒数,-1 = 不适用)。
