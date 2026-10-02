@@ -222,6 +222,7 @@ func main() {
 	go srv.ActivityLoop(stopCh)     // v5.22: 亮屏/热点/在线设备/界面 → 活动档位 + run/activity.json(15s)
 	go srv.PowerSamplerLoop(stopCh) // v5.22: 自测 CPU/唤醒 → run/power_stats.json(5 分钟)
 	go srv.DNSTakeoverLoop(stopCh)  // DPI v2: 可选 DNS 接管(默认关; 开启时 10s 健康检查, 异常自动撤 DNAT)
+	go srv.fgTruthLoop(stopCh)      // v5.24 T2: 本机前台真值采集(仅本机抓包开启且亮屏时, 10s 探测, 只记变化)
 
 	if haveRemote {
 		if *flagNoTLS {
