@@ -206,10 +206,25 @@ func (w *LabelSamplesWriter) Run(ctx context.Context) {
 			w.writeStats()
 			return
 		case <-tk.C:
+			w.reopenIfRemoved()
 			w.writeStats()
 		case s := <-w.ch:
 			w.handle(s)
 		}
+	}
+}
+
+// reopenIfRemoved 当天文件被外部删掉(WebUI「清除样本」)时关掉旧句柄, 下一条样本重新建文件;
+// 否则会一直往已删除的文件里写, 样本直到换天前都看不见。
+func (w *LabelSamplesWriter) reopenIfRemoved() {
+	if w.f == nil || w.curDay == "" {
+		return
+	}
+	if _, err := os.Stat(w.path(w.curDay, labelSamplesJSONLEXT)); os.IsNotExist(err) {
+		w.closeFile()
+		w.curSize = 0
+		w.capped = false
+		w.bump(func(st *LabelSamplesStats) { st.Capped = false })
 	}
 }
 

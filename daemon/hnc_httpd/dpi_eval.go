@@ -34,8 +34,6 @@ import (
 )
 
 const (
-	// dpiEvalInterval 后台重算间隔(§T4: 每 10 分钟一次)。
-	dpiEvalInterval = 10 * time.Minute
 	// dpiEvalCacheTTL 接口不带 refresh 时, 缓存结果多久内直接复用。
 	dpiEvalCacheTTL = 10 * time.Minute
 	// dpiEvalTopN 「最常认错」「最常认不出」各取前几条。
@@ -83,6 +81,7 @@ type dpiEvalByApp struct {
 // dpiEvalWrong 最常认错: 真值被认成 pred 的次数。
 type dpiEvalWrong struct {
 	Truth    string `json:"truth"`
+	Name     string `json:"name"` // 真值的显示名`
 	Pred     string `json:"pred"`
 	PredName string `json:"pred_name"`
 	N        int    `json:"n"`
@@ -106,6 +105,7 @@ type dpiEvalResult struct {
 	Apps          int                      `json:"apps"`
 	Capped        bool                     `json:"capped"`
 	SkippedSystem int                      `json:"skipped_system"`
+	SDKSamples    int                      `json:"sdk_samples"` // 规则库认成广告 / SDK / CDN 类的样本(不计入规则预测)
 	Methods       map[string]dpiEvalMethod `json:"methods"`
 	ByApp         []dpiEvalByApp           `json:"by_app"`
 	TopWrong      []dpiEvalWrong           `json:"top_wrong"`
@@ -149,12 +149,22 @@ func pkgAppMap(hncDir string) map[string]string {
 // 返回 规则id→中文应用名, 只用于展示(top_wrong 的 pred_name / by_app 的 name)。
 // 评估只读, 绝不改规则库。
 func ruleNameMap(hncDir string) map[string]string {
+	names, _ := ruleMeta(hncDir)
+	return names
+}
+
+// ruleMeta 同时返回 规则id→名字 与「广告 / 统计 SDK / CDN 等隐藏类」规则集合。
+// 隐藏类规则认出的是第三方 SDK / 基础设施, 不是「这个连接属于哪个 App」——
+// 抖音里的广告 SDK 连接被认成「穿山甲」并不是认错, 评估时不算这类预测。
+func ruleMeta(hncDir string) (map[string]string, map[string]bool) {
 	out := map[string]string{}
+	hidden := map[string]bool{}
 	add := func(b []byte) {
 		var f struct {
 			Rules []struct {
-				ID  string `json:"id"`
-				App string `json:"app"`
+				ID       string `json:"id"`
+				App      string `json:"app"`
+				Category string `json:"category"`
 			} `json:"rules"`
 		}
 		if json.Unmarshal(b, &f) != nil {
@@ -164,6 +174,9 @@ func ruleNameMap(hncDir string) map[string]string {
 			if r.ID != "" && r.App != "" {
 				if _, ok := out[r.ID]; !ok {
 					out[r.ID] = r.App
+					if appTier(r.Category) != tierApp {
+						hidden[r.ID] = true
+					}
 				}
 			}
 		}
@@ -187,7 +200,7 @@ func ruleNameMap(hncDir string) map[string]string {
 	if b, err := os.ReadFile(filepath.Join(hncDir, "data", "dpi_rules.json")); err == nil {
 		add(b)
 	}
-	return out
+	return out, hidden
 }
 
 // ─── 预测 ────────────────────────────────────────────────────────────
@@ -249,7 +262,7 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	}
 
 	pmap := pkgAppMap(hncDir)
-	rnames := ruleNameMap(hncDir)
+	rnames, hiddenRules := ruleMeta(hncDir)
 	names := map[string]string{} // 评估过程中动态收集的 预测id→显示名
 	lookup := func(id string) string {
 		if id == "" {
@@ -274,7 +287,7 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	samples, capped, skippedSystem := loadEvalSamples(hncDir, days, cutoff, now)
 
 	res := emptyEvalResult(days, true, "", now)
-	res.SkippedSystem = skippedSystem
+	res.SkippedSystem = skippedSystem + labelStatsSkippedSystem(hncDir)
 	res.Capped = capped
 	res.FGTruth = summarizeSelfFG(hncDir, now)
 
@@ -305,6 +318,10 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 
 		// 四种预测
 		ruleID, ruleName := s.RuleID, ""
+		if hiddenRules[ruleID] {
+			res.SDKSamples++ // 认出的是广告 / SDK / CDN, 不代表 App 本身
+			ruleID = ""
+		}
 		if ruleID != "" {
 			ruleName = rnames[ruleID]
 			if ruleName == "" {
@@ -423,7 +440,7 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	})
 	for i := 0; i < len(wl) && i < dpiEvalTopN; i++ {
 		res.TopWrong = append(res.TopWrong, dpiEvalWrong{
-			Truth: wl[i].p.truth, Pred: wl[i].p.pred,
+			Truth: wl[i].p.truth, Name: lookup(wl[i].p.truth), Pred: wl[i].p.pred,
 			PredName: lookup(wl[i].p.pred), N: wl[i].n,
 		})
 	}
@@ -451,7 +468,29 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	if ownerAccuracyNA {
 		res.Note = "IP 归属(owner)只统计覆盖率: 真值是具体应用, owner 只能认出是哪家公司, 两者无法可靠对应, 故不算准确率。"
 	}
+	if res.SDKSamples > 0 {
+		if res.Note != "" {
+			res.Note += " "
+		}
+		res.Note += "规则库认成广告 / 统计 SDK / CDN 的 " + strconv.Itoa(res.SDKSamples) + " 条样本不算规则预测(那是第三方服务, 不代表 App 本身)。"
+	}
 	return res
+}
+
+// labelStatsSkippedSystem 读 dpid 写的 run/label_samples.stats.json(T1 计数快照)。
+// 系统 UID 在采集端就被跳过、不会进样本文件, 只能从这里拿到数量。读不到返回 0。
+func labelStatsSkippedSystem(hncDir string) int {
+	b, err := os.ReadFile(filepath.Join(hncDir, "run", "label_samples.stats.json"))
+	if err != nil || len(b) > 64<<10 {
+		return 0
+	}
+	var st struct {
+		SkippedSystem int `json:"skipped_system"`
+	}
+	if json.Unmarshal(b, &st) != nil || st.SkippedSystem < 0 {
+		return 0
+	}
+	return st.SkippedSystem
 }
 
 // ratio 安全除法 + 保留两位(与 traffic_ident.go 的 round2 同风格)。
@@ -595,6 +634,10 @@ func evalCompute(hncDir string, days int, now time.Time) dpiEvalResult {
 
 // evalGet 接口入口: 校验 days, 决定用缓存还是重算。
 func evalGet(hncDir string, days int, refresh bool, now time.Time) dpiEvalResult {
+	// 开关状态变了(刚开启 / 关掉本机流量归因), 缓存作废。
+	if r, ok := evalCached(days, now); ok && r.Enabled != selfFGEnabled(hncDir) {
+		refresh = true
+	}
 	if !refresh {
 		if r, ok := evalCached(days, now); ok {
 			return r
@@ -610,27 +653,6 @@ func evalGet(hncDir string, days int, refresh bool, now time.Time) dpiEvalResult
 		}
 	}
 	return evalCompute(hncDir, days, now)
-}
-
-// dpiEvalLoop 后台每 10 分钟重算一次(默认 days=1)。
-// 熄屏且活动档位低时不跑(§T4 + §2.3), 避免占资源。
-func (s *server) dpiEvalLoop(stop <-chan struct{}) {
-	tk := time.NewTicker(dpiEvalInterval)
-	defer tk.Stop()
-	for {
-		select {
-		case <-stop:
-			return
-		case now := <-tk.C:
-			if !selfFGEnabled(s.hncDir) {
-				continue
-			}
-			if activityNow().screenOff() {
-				continue // 熄屏: 跳过这一轮(§T4 + §2.3, 不占资源)
-			}
-			evalCompute(s.hncDir, 1, now)
-		}
-	}
 }
 
 // ─── HTTP ────────────────────────────────────────────────────────────

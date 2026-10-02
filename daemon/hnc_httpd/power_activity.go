@@ -359,6 +359,13 @@ func (p *screenProber) probe() (bool, bool, string) {
 
 // dumpsysScan 跑 dumpsys <service>, 流式读到第一条含 key 的行就结束(杀掉进程), 不缓冲大输出。
 func dumpsysScan(service string, keys []string) (string, error) {
+	return dumpsysScanArgs([]string{service}, keys, screenCmdTimeout)
+}
+
+// dumpsysScanArgs 同 dumpsysScan, 可带多个参数(如 "activity", "activities")与自定义超时。
+// v5.24: 本机前台采集(self_fg_truth.go)复用 —— dumpsys activity/window 全量输出可达数 MB,
+// 每 10 秒读完一遍很耗电, 读到目标行就杀掉进程。
+func dumpsysScanArgs(args []string, keys []string, timeout time.Duration) (string, error) {
 	path := ""
 	for _, d := range []string{"/system/bin/", "/system/xbin/", "/vendor/bin/"} {
 		if st, err := os.Stat(d + "dumpsys"); err == nil && !st.IsDir() {
@@ -373,9 +380,9 @@ func dumpsysScan(service string, keys []string) (string, error) {
 		}
 		path = p
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), screenCmdTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
-	cmd := hardenCmd(exec.CommandContext(ctx, path, service))
+	cmd := hardenCmd(exec.CommandContext(ctx, path, args...))
 	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin"}
 	out, err := cmd.StdoutPipe()
 	if err != nil {

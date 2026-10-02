@@ -482,3 +482,22 @@ func TestLabelSamplesStatsFile(t *testing.T) {
 		t.Errorf("过期清理不该删计数快照: %v", err)
 	}
 }
+
+// 当天文件被外部删除(清除样本)后, 下一条样本写进新文件而不是已删除的句柄。
+func TestLabelSamplesReopenAfterRemoved(t *testing.T) {
+	w := lsvNew(t)
+	if !w.handle(lsvSample(lsvDay1, "com.x", "a.example.com", "j1")) {
+		t.Fatal("应写入")
+	}
+	path := lsvPath(w, lsvDay1, labelSamplesJSONLEXT)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	w.reopenIfRemoved()
+	if !w.handle(lsvSample(lsvDay1, "com.x", "b.example.com", "j1")) {
+		t.Fatal("删除后应能继续写入")
+	}
+	if n := len(lsvLines(t, path)); n != 1 {
+		t.Fatalf("新文件行数 = %d, want 1", n)
+	}
+}

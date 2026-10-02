@@ -401,3 +401,48 @@ func TestEvalComputeWritesFile(t *testing.T) {
 		t.Fatalf("persisted = %+v", r)
 	}
 }
+
+// 规则库认成广告 / SDK / CDN 类的样本不算规则预测(第三方服务, 不代表 App 本身),
+// 单独计 sdk_samples; top_wrong 带真值名字。
+func TestEvalHiddenTierRulesExcluded(t *testing.T) {
+	dir := evalDir(t)
+	now := time.Unix(1_800_000_000, 0)
+	writePkgMap(t, dir, map[string]string{"com.d": "douyin"})
+	b, _ := json.Marshal(map[string]interface{}{"rules": []map[string]string{
+		{"id": "douyin", "app": "抖音", "category": "video"},
+		{"id": "pangle", "app": "穿山甲广告", "category": "ads"},
+		{"id": "toutiao", "app": "今日头条", "category": "news"},
+	}})
+	if err := os.MkdirAll(filepath.Join(dir, "data", "dpi_rules.d"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "dpi_rules.d", "90-test.json"), b, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	appendSample(t, dir, now, evalSample{Ts: now.Unix(), Pkg: "com.d", UID: 10100, RuleID: "pangle"})
+	appendSample(t, dir, now, evalSample{Ts: now.Unix(), Pkg: "com.d", UID: 10100, RuleID: "douyin"})
+	appendSample(t, dir, now, evalSample{Ts: now.Unix(), Pkg: "com.d", UID: 10100, RuleID: "toutiao"})
+	res := evalDPI(dir, 1, now)
+	if res.SDKSamples != 1 {
+		t.Fatalf("sdk_samples = %d, want 1", res.SDKSamples)
+	}
+	if m := res.Methods["rule"]; m.Predicted != 2 || m.Correct != 1 {
+		t.Fatalf("rule = %+v, want predicted=2 correct=1", m)
+	}
+	if len(res.TopWrong) != 1 || res.TopWrong[0].Pred != "toutiao" || res.TopWrong[0].Name != "抖音" {
+		t.Fatalf("top_wrong = %+v", res.TopWrong)
+	}
+}
+
+// 系统 UID 在 dpid 采集端就被跳过, 数量从 run/label_samples.stats.json 读。
+func TestEvalSkippedSystemFromDpidStats(t *testing.T) {
+	dir := evalDir(t)
+	now := time.Unix(1_800_000_000, 0)
+	if err := os.WriteFile(filepath.Join(dir, "run", "label_samples.stats.json"), []byte(`{"skipped_system":7}`), 0o640); err != nil {
+		t.Fatal(err)
+	}
+	appendSample(t, dir, now, evalSample{Ts: now.Unix(), Pkg: "com.d", UID: 10100})
+	if res := evalDPI(dir, 1, now); res.SkippedSystem != 7 {
+		t.Fatalf("skipped_system = %d, want 7", res.SkippedSystem)
+	}
+}

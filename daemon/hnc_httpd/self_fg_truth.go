@@ -20,10 +20,8 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -103,18 +101,19 @@ func screenOnNow() bool {
 // dumpsysRunner 是取 dumpsys 输出的可注入函数(单测替换)。
 type dumpsysRunner func(args ...string) (string, bool)
 
-// runDumpsysCmd 用 hardenCmd + 2s 超时执行 dumpsys, 返回 stdout 与是否成功。
+// runDumpsysCmd 用 dumpsysScanArgs(找系统 dumpsys 路径 + hardenCmd + 2s 超时)执行,
+// 读到第一条含前台关键字的行就杀掉进程, 只返回这一行 —— 解析函数照样适用。
+// 不整份读完: dumpsys activity / window 全量输出可达数 MB, 每 10 秒一次会明显耗电。
 func runDumpsysCmd(args ...string) (string, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), selfFGCmdTimeout)
-	defer cancel()
-	// #nosec G204 — args 来自本文件内固定字面量("activity activities"/"window"),
-	// 不含用户输入; dumpsys 是系统命令。
-	cmd := hardenCmd(exec.CommandContext(ctx, "dumpsys", args...))
-	out, err := cmd.Output()
-	if err != nil || ctx.Err() != nil {
+	keys := []string{"topResumedActivity", "mResumedActivity"}
+	if len(args) > 0 && args[0] == "window" {
+		keys = []string{"mCurrentFocus", "mFocusedApp"}
+	}
+	out, err := dumpsysScanArgs(args, keys, selfFGCmdTimeout)
+	if err != nil || out == "" {
 		return "", false
 	}
-	return string(out), true
+	return out, true
 }
 
 // readForegroundPkg 依次尝试两种取数方式, 第一个成功即用(§T2)。

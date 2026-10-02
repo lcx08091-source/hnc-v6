@@ -467,12 +467,13 @@ function evalSumTxt() {
   return num(r.samples) + ' 条样本 · 综合覆盖 ' + pct100(m.coverage) + '% · 准确 ' + pct100(m.accuracy) + '%';
 }
 function evalFold() {
-  return sFold('deval', ['green', 'flask'], '识别自评', '<span id="eval-sum">' + esc(evalSumTxt()) + '</span>',
+  return sFold('deval', ['blue', 'gauge'], '识别自评', '<span id="eval-sum">' + esc(evalSumTxt()) + '</span>',
     '<div id="eval-body"><div class="note">展开后加载</div></div>');
 }
-function loadEval(days) {
-  var d = days || S.evalDays || 1;
-  return api.get('/api/dpi_eval', { days: d, refresh: 1 }, { timeout: 12000 }).then(function (r) { S.eval = r; })
+function loadEval(days, refresh) {
+  var d = days || S.evalDays || 1, q = { days: d };
+  if (refresh) q.refresh = 1;   // 展开 / 切换范围用 10 分钟缓存, 只有「刷新」按钮才强制重算
+  return api.get('/api/dpi_eval', q, { timeout: 12000 }).then(function (r) { S.eval = r; })
     .catch(function (e) { S.eval = { ok: false, err: errText(e) }; }).then(paintEval);
 }
 var EVAL_M = [['rule', '规则库'], ['fp', '指纹'], ['owner', 'IP 归属']];
@@ -522,14 +523,14 @@ function paintEval() {
   if (tu.length) {
     h += '<div class="note" style="margin-bottom:-2px">最常认不出</div><div class="dbox">' + tu.map(function (x) {
       var snis = Array.isArray(x.snis) ? x.snis.slice(0, 3) : [];
-      return '<div class="row2"><span class="k" style="min-width:0;overflow-wrap:anywhere">' + esc(x.name || x.truth) + (snis.length ? ' <span class="note mono">' + esc(snis.join(' · ')) + '</span>' : '') + '</span><span class="v num">' + num(x.n) + ' 次</span></div>';
+      return '<div class="row2"><span class="k" style="min-width:0;overflow-wrap:anywhere">' + esc(x.name || x.truth) + (snis.length ? '<div class="note mono" style="white-space:normal;overflow-wrap:anywhere;font-size:11px">' + esc(snis.join(' · ')) + '</div>' : '') + '</span><span class="v num" style="white-space:nowrap">' + num(x.n) + ' 次</span></div>';
     }).join('') + '</div>';
   }
   // 前台记录
   var fg = r.fg_truth || {};
   var fgTxt = '24 小时切换 ' + num(fg.switches_24h) + ' 次' + (fg.last_pkg ? ' · 最近 ' + esc(fg.last_pkg) + (fg.last_ts ? '（' + ago(fg.last_ts) + '）' : '') : '');
   if (fg.source === 'none' || !num(fg.switches_24h)) {
-    fgTxt += ' · <b style="color:var(--orange)">这台手机的系统没取到前台应用，v5.25 的前台评估可能不可用</b>';
+    fgTxt = '还没有前台记录。亮屏用一会儿手机后会出现；如果一直没有，说明这台手机的系统取不到前台应用，v5.25 的前台评估可能不可用';
   } else {
     fgTxt += ' · 取数方式 ' + esc(fg.source);
   }

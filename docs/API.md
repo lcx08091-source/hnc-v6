@@ -2125,4 +2125,6 @@ GET `/api/encdns`:
 - `run/label_samples.YYYYMMDD.capped`:当天超过 20 MB 后出现,此后当天不再写。
 - `run/label_samples.stats.json`:`{ts, since, day, written, deduped, dropped, skipped_system, skipped_empty, capped}`,每分钟更新,计数自写入器启动起累计。
 
-评分接口(`GET /api/dpi_eval`)见 `docs/WORK-v5.24.md` T4,尚未实现。
+- `run/self_fg.YYYYMMDD.jsonl`(v5.24.0-rc2):本机前台变化记录 `{ts, pkg, source(activities|window)}`,亮屏且开关开启时每 10 秒探测一次,只记变化,保留 7 天。
+- `GET /api/dpi_eval?days=1|7[&refresh=1]`(v5.24.0-rc2,敏感只读):`{ok, generated_at, days, enabled, samples, apps, capped, skipped_system, sdk_samples, methods:{rule,fp,owner,combined:{samples,predicted,correct,coverage,accuracy,accuracy_na?}}, by_app:[{truth,name,samples,coverage,accuracy}], top_wrong:[{truth,name,pred,pred_name,n}], top_unknown:[{truth,name,n,snis}], fg_truth:{switches_24h,last_pkg,last_ts,source}, note}`。真值 = `data/pkg_app_map.json[pkg]`,不在表里为 `pkg:<包名>`;规则库命中广告 / SDK / CDN 类不计入预测(`sdk_samples`);owner 只算覆盖率。结果缓存 10 分钟并写 `run/dpi_eval.json`。
+- 动作 `dpi_eval_clear`:删除 `label_samples.*`、`self_fg.*`、`dpi_eval.json`。
