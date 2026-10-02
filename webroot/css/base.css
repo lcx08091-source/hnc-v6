@@ -685,3 +685,24 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 .enc-cnt .n{font-weight:700;font-size:14px}
 .enc-cnt .l{font-size:10.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sh-kv{margin-top:8px}
+/* v5.23 设置页「高级」「诊断」折叠分组 + 设备卡「更多控制」 */
+.sgrp{display:grid}
+.sgrp-h{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:13px 16px;border-radius:var(--r-card,18px)}
+.sgrp-h .tx{flex:1;min-width:0;display:grid;gap:2px}
+.sgrp-h b{font-size:15px;font-weight:700;color:var(--text-1)}
+.sgrp-h small{font-size:12px;font-weight:500;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.open>.sgrp-h .chev{transform:rotate(180deg)}
+.sgrp>.fold .fold-in{display:grid;gap:inherit;padding-top:12px}
+.sgrp>.fold .fold-in>div+div{margin-top:14px}
+.more-in{display:grid;gap:10px}
+.fgline{display:flex;flex-wrap:wrap;gap:6px;align-items:center;font-size:12.5px}
+.dev-apps .tt,.fgline .tt{font-size:10.5px;font-weight:600;padding:1px 7px;border-radius:999px;background:rgba(88,86,214,.13);color:var(--indigo,#5856D6)}
+.ap.src{background:rgba(52,199,89,.14);color:var(--green)}
+.ap.own{background:rgba(142,142,147,.16);color:var(--text-2)}
+.fgtl{display:grid;gap:6px}
+.fgtl .bar{position:relative;height:18px;border-radius:6px;background:var(--input);overflow:hidden}
+.fgtl .bar i{position:absolute;top:0;bottom:0;border-radius:3px;opacity:.85}
+.fgtl .ax{display:flex;justify-content:space-between;font-size:10.5px;color:var(--text-3);font-family:var(--mono)}
+.more-in>.ctrl,[data-style] .more-in>.ctrl{background:none;border:0;border-radius:0;padding:10px 0 0;box-shadow:none}
+.more-in>.ctrl+.ctrl{border-top:1px solid var(--divider)}
+#pu-body{transition:opacity .2s}

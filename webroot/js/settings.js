@@ -347,7 +347,7 @@ function renderSettings(anim1) {
   groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
     sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
     (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '（可能误伤其他应用）CDN 地址常被多个应用共用；默认跳过这些地址，打开后也一起限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
-    encdnsSettingsHtml() +
+    encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() +
     sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
   var cs = S.clsact;
   var gm = c.clsact_bpf_mode || (c.clsact_bpf_enabled === true ? 'on' : 'auto'), og = c.offload_guard || S.offload.guard || null;
@@ -368,9 +368,21 @@ function renderSettings(anim1) {
   groups.push(['关于', sItem(['blue', 'info'], '版本', 'HNC 后端 · versionCode ' + esc(l.backend_version_code || '—'), val(esc(l.backend_version || '—'))) +
     sBtn(['green', 'doc'], '更新日志', '查看完整变更记录', 'changelog', '查看') +
     (KSU ? '' : '<button class="row" data-act="logout">' + gi('red', 'lock') + '<span class="tx"><div class="t">退出登录</div><div class="s">清除这台设备的远程访问凭据</div></span><span class="hint-a danger">退出</span></button>')]);
-  var html = groups.map(function (g) { return '<div><div class="sec" style="padding-bottom:8px"><span>' + g[0] + '</span></div><div class="glass rows">' + g[1] + '</div></div>'; });
-  var half = 6;
-  var h = '<div class="wrap">' + (wide() ? '<div class="cols"><div>' + html.slice(0, half).join('') + '</div><div>' + html.slice(half).join('') + '</div></div>' : html.join('')) +
+  // 常用分组直接显示; 不常动的收进「高级」, 排障用的收进「诊断」(折叠状态记在本机)
+  var ADV = ['全局带宽整形', '飞轮排除名单', '刷新与功耗', '硬件加速兜底', '模拟环境（调试）'], DIAG = ['诊断', '运行状态', '运行健康', '维护'];
+  var gHtml = function (g) { return '<div><div class="sec" style="padding-bottom:8px"><span>' + g[0] + '</span></div><div class="glass rows">' + g[1] + '</div></div>'; };
+  var cols = function (list) { if (!wide()) return list.join(''); var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
+  var pick = function (names) { return groups.filter(function (g) { return names.indexOf(g[0]) >= 0; }).map(gHtml); };
+  var about = groups.filter(function (g) { return g[0] === '关于'; }).map(gHtml);
+  var main = groups.filter(function (g) { return g[0] !== '关于' && ADV.indexOf(g[0]) < 0 && DIAG.indexOf(g[0]) < 0; }).map(gHtml);
+  var sgrp = function (key, title, sub, list) {
+    return '<div class="sgrp' + (S.open[key] ? ' open' : '') + '" data-foldkey="' + key + '"><button class="sgrp-h glass press" data-act="fold" data-key="' + key + '"><span class="tx"><b>' + title + '</b><small>' + sub + '</small></span>' + ico('chev', 'chev') + '</button>' +
+      '<div class="fold"><div><div class="fold-in">' + cols(list) + '</div></div></div></div>';
+  };
+  var diagSub = (scR ? '自检：' + scSumTxt(scR.summary) + ' · ' : '') + '日志 · 运行状态 · 维护';
+  var h = '<div class="wrap">' + cols(main) +
+    sgrp('grp-adv', '高级', '整形 · 排除名单 · 刷新 · 加速兜底 · 模拟环境', pick(ADV)) +
+    sgrp('grp-diag', '诊断', esc(diagSub), pick(DIAG)) + about.join('') +
     '<div class="foot">HNC · Hotspot Network Control' + (l.backend_version ? ' · ' + esc(l.backend_version) : '') + '</div></div>';
   // 操作后的重绘就地 morph: 滚动位置、展开的分组、正在填的输入框都不动, 只改变化了的行
   var p = $('#p-settings');
@@ -379,6 +391,70 @@ function renderSettings(anim1) {
   if (anim1) { if (wide()) $$('.cols>div', p).forEach(function (x) { stagger(x); }); else stagger($('.wrap', p)); }
   if (S.open.logs) loadLog();
   if (S.open.tokens) loadTokens();
+  if (S.open.dnst) { if (S.dns) paintDNS(); else loadDNS(); }
+  if (S.open.fpl) { if (S.fpl) paintFP(); else loadFP(); }
+}
+/* ── DPI v2: DNS 接管(可选, 默认关) ── */
+S.dns = null; S.fpl = null;
+function dnsSumTxt() {
+  var r = S.dns; if (!r) return '默认关闭 · 让 HNC 代答热点设备的 DNS，识别更早、封锁更彻底';
+  if (!r.enabled) return '未开启 · 让 HNC 代答热点设备的 DNS，识别更早、封锁更彻底';
+  return r.active && r.healthy ? '运行中 · 今天 ' + num((r.stats || {}).queries) + ' 次查询' : '已开启 · 暂未生效（已自动放行直连）';
+}
+function dnsTakeoverFold() {
+  return sFold('dnst', ['blue', 'shield'], 'DNS 接管（实验）', '<span id="dns-sum">' + esc(dnsSumTxt()) + '</span>', '<div id="dns-body"><div class="note">展开后加载</div></div>',
+    toggle(!!(S.dns && S.dns.enabled), 'data-set="dnst" aria-label="DNS 接管"' + (S.dns ? '' : ' disabled')));
+}
+function loadDNS() {
+  return api.get('/api/dns', null, { timeout: 8000 }).then(function (r) { S.dns = r; }).catch(function (e) { S.dns = { ok: false, err: errText(e) }; }).then(paintDNS);
+}
+var DNS_ST = { selftest: '自检没通过', upstream_errors: '上游 DNS 连续出错', dnat_path: '转发规则没生效', no_upstream: '找不到可用的上游 DNS' };
+function paintDNS() {
+  var el = $('#dns-body'), r = S.dns; if (!el || !r) return;
+  el.setAttribute('data-keep', '');
+  var sm = $('#dns-sum'); if (sm) sm.textContent = dnsSumTxt();
+  var tg = $('[data-set="dnst"]'); if (tg) { tg.removeAttribute('disabled'); if (!tg.closest('.pending')) tg.setAttribute('aria-checked', String(!!r.enabled)); }
+  if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持 DNS 接管）</div>'; return; }
+  var st = r.stats || {}, fo = r.failopen || {}, h = '';
+  if (r.enabled) {
+    h += '<dl class="kv"><dt>状态</dt><dd style="color:' + (r.active && r.healthy ? 'var(--badge-ok)' : 'var(--orange)') + '">' + (r.active && r.healthy ? '运行中' : '未生效 · ' + esc(DNS_ST[fo.reason] || fo.reason || r.last_error || r.state || '检测中')) + '</dd>' +
+      '<dt>上游</dt><dd class="mono">' + esc(r.upstream || '自动') + (r.upstream_kind ? ' · ' + esc(r.upstream_kind) : '') + '</dd>' +
+      '<dt>今天</dt><dd>' + num(st.queries) + ' 次 · 缓存 ' + num(st.cached) + ' · 拦截 ' + num(st.blocked) + '</dd>' +
+      '<dt>耗时</dt><dd class="num">p50 ' + num(st.p50_ms) + 'ms · p95 ' + num(st.p95_ms) + 'ms</dd>' +
+      (num(fo.count) ? '<dt>自动放行</dt><dd>' + num(fo.count) + ' 次' + (fo.last_ts ? ' · 最近 ' + ago(fo.last_ts) : '') + '</dd>' : '') + '</dl>';
+    var td = Array.isArray(r.top_domains_today) ? r.top_domains_today.slice(0, 5) : [];
+    if (td.length) h += '<div class="note">今天查询最多：' + td.map(function (x) { return esc(x.name) + ' ×' + num(x.count); }).join('、') + '</div>';
+  }
+  h += '<div class="note" style="margin:8px 0 -2px">被封锁的域名怎么回</div>' + seg('dns-bm', [['nxdomain', '域名不存在'], ['zero', '返回 0.0.0.0']], r.block_mode || 'nxdomain', 'small') +
+    '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">记录查询日志</div><div class="s">记下每台设备查了哪些域名（只存本机，约 1000 条滚动）</div></span>' + toggle(!!r.log_queries, 'data-set="dnslog" aria-label="记录查询日志"') + '</div>' +
+    '<div class="note">好处：设备一查域名 HNC 就知道它要用哪个应用，比等到 TLS 握手更早；按域名封锁在解析这一步就拦住。<br>风险：HNC 自己的 DNS 出问题时会在约 10 秒内自动放行直连（不会断网，但这段时间解析可能变慢）；设备自己开了加密 DNS（DoH / DoT / 私人 DNS）时接管不到；开启查询日志会留下访问记录。只对热点设备生效，不影响本机。</div>';
+  el.innerHTML = h; placeSegs(el);
+}
+/* ── DPI v2: 识别纠正记录 + 指纹学习 ── */
+function fpFold() {
+  var n = S.fpl && Array.isArray(S.fpl.user_rules) ? S.fpl.user_rules.length : null;
+  return sFold('fpl', ['green', 'flask'], '识别纠正与指纹学习', n == null ? '你纠正过的识别 · HNC 自动学会的 TLS 指纹' : n + ' 条纠正 · ' + num((S.fpl.stats || {}).usable) + ' 个可用指纹', '<div id="fp-body"><div class="note">展开后加载</div></div>');
+}
+function loadFP() {
+  return api.get('/api/dpi_fp', null, { timeout: 8000 }).then(function (r) { S.fpl = r; }).catch(function (e) { S.fpl = { err: errText(e) }; }).then(paintFP);
+}
+var FPK_T = { domain: '域名', ip: 'IP', ja4: '指纹' };
+function paintFP() {
+  var el = $('#fp-body'), r = S.fpl; if (!el || !r) return;
+  el.setAttribute('data-keep', '');
+  if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '</div>'; return; }
+  var ur = Array.isArray(r.user_rules) ? r.user_rules : [], ln = Array.isArray(r.learned) ? r.learned : [], st = r.stats || {};
+  var h = '<div class="note" style="margin-bottom:-2px">你纠正过的（' + ur.length + '）</div>' + (ur.length ? '<div class="dbox">' + ur.map(function (x) {
+    return '<div class="row2"><span class="k" style="color:var(--text-1);min-width:0;overflow-wrap:anywhere"><span class="badge b-acc">' + (FPK_T[x.kind] || esc(x.kind)) + '</span> <span class="mono">' + esc(x.kind === 'ja4' ? String(x.value).slice(0, 18) + '…' : x.value) + '</span> → ' + esc(x.app_name || x.app_id) + (x.expires ? ' <span class="note">· ' + Math.max(0, Math.ceil((num(x.expires) - Date.now() / 1000) / 86400)) + ' 天后过期</span>' : '') + '</span><button class="linkish danger" data-fpdel="' + esc(x.id) + '">撤销</button></div>';
+  }).join('') + '</div>' + (ur.length > 1 ? '<button class="linkish danger" data-fpdel="__all" style="justify-self:start">全部撤销</button>' : '') : '<div class="note">还没有。在设备卡「实时连接 → 点一条连接 → 纠正识别」里添加。</div>');
+  var use = ln.filter(function (x) { return x.usable; });
+  h += '<div class="note" style="margin-bottom:-2px">自动学会的指纹（' + use.length + ' 个可用 / 共 ' + ln.length + ' 个观察中）</div>' +
+    (use.length ? '<div class="dbox">' + use.slice(0, 12).map(function (x) {
+      return '<div class="row2"><span class="k" style="color:var(--text-1)">' + esc(x.name || x.app_id) + ' <span class="note mono">' + esc(String(x.ja4).slice(0, 10)) + ' · ' + esc(x.port_class || '') + '</span></span><span class="v">' + pct100(x.purity) + '% · ' + num(x.devices) + ' 台</span></div>';
+    }).join('') + '</div>' : '<div class="note">还在学习：同一个指纹在 ≥2 台设备上见过 20 次以上、且 90% 都属于同一个应用后才会用来识别。</div>') +
+    '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠指纹认出 ' + num(st.flows_attributed_by_fp) + ' 条。指纹只在域名看不到（ECH / 直连 IP）时兜底，不会覆盖规则库。</div>';
+  el.innerHTML = h;
+  var sw = $('[data-foldkey="fpl"] .s'); if (sw) sw.textContent = ur.length + ' 条纠正 · ' + use.length + ' 个可用指纹';
 }
 function loadLog() {
   var el = $('#logv'); if (!el) return;
@@ -469,6 +545,14 @@ function setToggleCfg(kind, el) {
     case 'appshared': run(api.action('app_limit_shared_ips_set', { enabled: String(on) }).then(function () { S.appLimitShared = on; toast(on ? '已包含共享 IP · 同一 CDN 上的其他应用也可能被一起限速' : '已恢复：跳过与其他应用共用的地址'); return loadAppLimits(); })); return;
     case 'certprobe': run(api.action('discover_cert_probe_set', { enabled: String(on) }).then(done())); return;
     case 'sim': run(simSet(on)); return;
+    case 'dnst':
+      if (!on) { run(api.action('dns_takeover_set', { enabled: 'false' }).then(function () { toast('DNS 接管已关闭 · 设备恢复直连'); return loadDNS(); })); return; }
+      el.setAttribute('aria-checked', 'false');
+      confirmSheet('开启 DNS 接管？', '热点设备的 DNS 查询改由 HNC 代答，识别更早、按域名封锁更彻底。<br>HNC 的 DNS 出问题时约 10 秒内自动放行直连；设备开了私人 DNS / DoH 时接管不到。随时可以关闭。', '开启', { safe: true }).then(function (ok) {
+        if (!ok) return; el.setAttribute('aria-checked', 'true');
+        run(api.action('dns_takeover_set', { enabled: 'true' }).then(function () { toast('DNS 接管已开启 · 约 10 秒内生效'); return loadDNS(); }));
+      }); return;
+    case 'dnslog': run(api.action('dns_takeover_set', { log_queries: String(on) }).then(function () { toast(on ? '已开始记录查询日志' : '已停止记录查询日志'); return loadDNS(); })); return;
     case 'quic': run(api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); })); return;
   }
 }

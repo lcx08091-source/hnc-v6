@@ -181,6 +181,8 @@ document.addEventListener('click', function (e) {
     else if (k === 'fxspring') { FX.spring = v; saveFx(); fxRefresh(); }
     else if (k === 'connv') { S.connView = v; paintConnSheet(); }
     else if (k === 'webacc-mode') { S.webaccMode = v; }
+    else if (k === 'fgdays') { var fgd = devBy(S.fgMac); if (fgd) loadFgTl(fgd, +v); }
+    else if (k === 'dns-bm') { busyWhile(sg, api.action('dns_takeover_set', { block_mode: v })).then(function () { toast('拦截方式：' + q.textContent); return loadDNS(); }).catch(function (e) { toast(errText(e), 'err'); loadDNS(); }); }
     else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
     else if (k === 'qos-mode') setQos('mode', v, q);
     else if (k === 'qos-scale') setQos('scale', v, q);
@@ -236,6 +238,7 @@ document.addEventListener('click', function (e) {
     return;
   }
   if ((q = t.closest('[data-fw-del]'))) { var pk = q.getAttribute('data-fw-del'); api.action('flywheel_exclude_set', { op: 'remove', pkg: pk }).then(function () { toast('已移除 ' + pk); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
+  if ((q = t.closest('[data-fpdel]'))) { var fid = q.getAttribute('data-fpdel'), fall = fid === '__all'; confirmSheet(fall ? '撤销全部识别纠正？' : '撤销这条识别纠正？', '之后这类连接重新按规则库和自动学习来识别。', '撤销').then(function (ok) { if (ok) busyWhile(q, api.action('dpi_correct_del', fall ? { all: 'true' } : { id: fid })).then(function () { toast('已撤销'); return loadFP(); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); return; }
   if ((q = t.closest('[data-revoke]'))) { var tid = q.getAttribute('data-revoke'); confirmSheet('撤销「' + q.getAttribute('data-label') + '」的授权？', '这台设备需要重新配对才能远程访问。', '撤销').then(function (ok) { if (ok) api.action('pair_revoke', { token: tid }).then(function () { toast('已撤销'); loadTokens(); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); return; }
   var a = t.closest('[data-act]'); if (!a || a.disabled) return;
   var act = a.getAttribute('data-act'), cx2 = ctxDev(a), d = cx2.d, box = cx2.box;
@@ -243,6 +246,7 @@ document.addEventListener('click', function (e) {
     case 'dd': var dd = a.closest('.dd'), was = dd.classList.contains('open'); closeDD(); dd.classList.toggle('open', !was); break;
     case 'fold': var key = a.getAttribute('data-key'), fw = a.closest('[data-foldkey="' + key + '"]') || document.getElementById(key); var opened = foldToggle(fw, key);
       if (opened && key === 'logs') loadLog(); if (opened && key === 'tokens') loadTokens();
+      if (opened && key === 'dnst') loadDNS(); if (opened && key === 'fpl') loadFP();
       if (opened && /^(at|cb)-/.test(key)) loadAppTime(key.slice(3)); break;
     case 'toggle-dev':
       if (!d) break;
@@ -261,6 +265,7 @@ document.addEventListener('click', function (e) {
       break;
     case 'conns': if (d) connSheet(d); break;
     case 'ident-edit': if (d) identSheet(d); break;
+    case 'fg-tl': if (d) fgTimelineSheet(d); break;
     case 'merge-yes': if (d && d.merge) doMerge(d.mac, d.merge.old_mac, d.merge.old_name || d.merge.old_mac, false); break;
     case 'merge-no': if (d && d.merge) dismissMerge(d.mac, d.merge.old_mac, d.merge.old_name || d.merge.old_mac); break;
     case 'fx-demo': fxDemo(a.getAttribute('data-demo')); break;

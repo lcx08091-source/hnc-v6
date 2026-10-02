@@ -101,7 +101,9 @@ function puSetHtml() {
       '<div class="note">自动：显示 HNC 自采的数值，同时与系统「流量使用」对账；以系统为准：卡的本期用量、套餐百分比和提醒改用系统统计（和系统设置里一致）；仅 HNC：不读系统统计。</div>' : '');
 }
 function paintPU() {
-  var b = $('#pu-body'); if (b) b.innerHTML = puBodyHtml();
+  // 切换时段时新数据还没回来 → 保留旧内容(变淡)而不是先换成「加载中…」再撑开, 避免整页上下跳; 回来后就地 morph
+  var b = $('#pu-body');
+  if (b) { var waiting = !S.pu[S.puPeriod] && b.querySelector('.pu-tiles'); b.style.opacity = waiting ? '.55' : ''; if (!waiting) morph(b, puBodyHtml()); }
   var ss = $('#pu-set-s'); if (ss) ss.textContent = puSetSummary();
   var st = $('#pu-set'); if (st && !st.contains(document.activeElement) && !st._filled && S.puCfg) { st.innerHTML = puSetHtml(); st._filled = true; }
 }

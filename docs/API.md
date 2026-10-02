@@ -2088,3 +2088,31 @@ GET `/api/encdns`:
 - 同内容每次采样写 `run/power_stats.json`;自检「进程与资源」新增 `power`(功耗)项。
 - `run/activity.json`:httpd 每 15s 探测,变化或每 60s 写一次;单行 JSON,字段顺序固定(shell 用模式匹配读,勿重排)。
   超过 180s(shell)/120s(dpid)未更新视为不可信,全部回到基准间隔。
+
+## 21. v5.23 DPI 二代
+
+### 21.1 TLS 指纹学习 + 纠正识别
+
+- GET `/api/dpi_fp[?all=1]` → `{ok, learned:[{ja4, alpn, port_class, app_id, name, category, purity, support, devices, usable, generic, conf, first_seen, last_seen, top:[{id,name,share}]}], stats:{flows_seen, flows_learned, flows_attributed_by_fp, generic_skipped, entries, usable, binds, seed}, thresholds:{min_support, min_support_multi_device, min_devices, min_purity, half_life_days, user_ip_ttl_days}, user_rules:[…]}`。默认只返回前若干条,`all=1` 全量。学习表存 `data/fp_learned.json`。
+- 动作 `dpi_correct {mac?, dst_ip?, dst_port?, name?, ja4?, app_id, app_name?, category?, kinds?}`:按 `kinds`(默认 `domain,ip,ja4`)各写一条用户规则到 `data/dpi_user_rules.json`;IP 规则 7 天过期;`app_id` 不在规则库时必须带 `app_name`;不能纠正为广告 / 统计 / CDN 类;模拟设备拒绝。没给 `ja4` 时按 `mac + dst_ip + dst_port` 在近期流里查。
+- 动作 `dpi_correct_list` → detail 为 JSON 数组 `[{id, kind(domain|ip|ja4), value, port?, app_id, app_name, category, created, expires?, mac?}]`;`dpi_correct_del {id | all=true}`。
+- `/api/connections?mac=` 每行新增:`app_src`(`user` 你纠正的 / `rule` 规则库 / `name` 域名推断 / `fp` 指纹学习 / `seed` 内置指纹)、`app_conf`(0–1,fp/seed/user)、`ja4`、`owner {key, name, kind}`(IP 归属,见 21.2)、`traffic_type`、`traffic_conf`。
+- `/api/app_usage` 新增 `fp_bytes`、`fp_conf`、`user_bytes`。
+
+### 21.2 IP 归属库
+
+`data/ip_owner.bin`(`tools/build_ip_owner.py` 生成)。`owner.kind`:`app`(应用公司,未识别流量在统计里归到 `_org:<key>`,显示「XX系(未细分)」)/ `cloud` / `cdn` / `carrier`(只标归属,不归类)。`/api/dpi_unknown` 的条目带 `owner`,汇总带 `org_bytes`。
+
+### 21.3 流量形态 + 前台应用
+
+- `/api/devices[].traffic_type {type, label, confidence(0–1), since}`,`type` ∈ `video_stream | live_stream | video_call | voice_call | gaming | download | upload | browsing | background | unknown`。
+- `/api/devices[].fg {state(active|paused|idle|stale|unknown), app_id, name, category, confidence(0–100), since, reasons[], background:[{app_id,name,category,label}], label("正在用：X"), bg_label("后台：A、B"), score, tick_sec, coarse?, stale?, updated}`。
+- GET `/api/fg_timeline?mac=&days=1..8` → `{ok, mac, days, sessions:[{mac, app_id, name, category, start, end, sec, confidence, open}], by_app:[{app_id, name, category, fg_sec, fg_min, sessions, active_sec}], current}`。时间线按天存 `run/fg_timeline.YYYYMMDD.json`。`active_sec` 为按字节阈值算的时长(应用限时用的口径),仅作对照。
+
+### 21.4 DNS 接管(可选,默认关)
+
+- 配置 `data/dns_takeover.json`:`{enabled, block_mode("nxdomain"|"zero"), log_queries, log_redact, upstream("" = 自动), ts}`。
+- 动作 `dns_takeover_set {enabled?, block_mode?, log_queries?, log_redact?, upstream?}`(至少一个),写入后立即同步一次。
+- GET `/api/dns` → `{ok, enabled, active, healthy, state, iface, listen[], port, upstream, upstream_kind, v6:{status,reason}, block_mode, log_queries, log_redact, upstream_config, stats:{queries, cached, blocked, errors, ratelimited, dropped, upstream, upstream_errs, upstream_tcp, servfail, p50_ms, p95_ms, cache_entries}, top_domains_today:[{name,count}], recent?, blocklist:{devices, global}, failopen:{count, last_ts, reason, retry_at}, last_error, last_check, selftest_ms, ip_names}`。
+- GET `/api/dns/log?mac=&limit=` → `{ok, log_queries, log_redact, mac, entries:[…]}`(新→旧,仅开启查询日志时有内容)。两个接口都属于敏感读路径。
+- 实现:转发器监听热点 IP:15353,只对「热点接口 → 网关:53」做 DNAT(`bin/dns_takeover.sh`);上游依次为自定义 / 热点网关 53 / 系统;每 10 秒健康检查,自检失败、上游连续出错、DNAT 不生效或无上游时撤掉 DNAT 放行直连(fail-open)并按退避重试。

@@ -424,7 +424,10 @@ function mapDevice(d) {
     rmac: typeof d.randomized_mac === 'boolean' ? d.randomized_mac : d.sim !== true && isRandomMac(mac),
     merge: d.merge_suggestion && typeof d.merge_suggestion === 'object' && isMac(d.merge_suggestion.old_mac) ? d.merge_suggestion : null,
     mergedInto: isMac(d.merged_into) ? String(d.merged_into).toLowerCase() : '',
-    vpn: d.vpn && (d.vpn.level === 'likely' || d.vpn.level === 'certain') ? d.vpn : null
+    vpn: d.vpn && (d.vpn.level === 'likely' || d.vpn.level === 'certain') ? d.vpn : null,
+    // DPI v2: 前台应用推断 / 此刻的流量形态(旧后端没有 → null)
+    fg: d.fg && typeof d.fg === 'object' && d.fg.state ? d.fg : null,
+    ttype: d.traffic_type && typeof d.traffic_type === 'object' && d.traffic_type.type ? d.traffic_type : null
   };
   o.idText = identText(o.ident); o.idShort = identText(o.ident, 2);
   if (o.online) { o.rx = num(d.rx_bps); o.tx = num(d.tx_bps); }
