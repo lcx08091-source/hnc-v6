@@ -347,7 +347,7 @@ function renderSettings(anim1) {
   groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
     sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
     (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '（可能误伤其他应用）CDN 地址常被多个应用共用；默认跳过这些地址，打开后也一起限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
-    encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() +
+    encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() + evalFold() +
     sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
   var cs = S.clsact;
   var gm = c.clsact_bpf_mode || (c.clsact_bpf_enabled === true ? 'on' : 'auto'), og = c.offload_guard || S.offload.guard || null;
@@ -393,6 +393,7 @@ function renderSettings(anim1) {
   if (S.open.tokens) loadTokens();
   if (S.open.dnst) { if (S.dns) paintDNS(); else loadDNS(); }
   if (S.open.fpl) { if (S.fpl) paintFP(); else loadFP(); }
+  if (S.open.deval) { if (S.eval) paintEval(); else loadEval(); }
 }
 /* ── DPI v2: DNS 接管(可选, 默认关) ── */
 S.dns = null; S.fpl = null;
@@ -455,6 +456,91 @@ function paintFP() {
     '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠指纹认出 ' + num(st.flows_attributed_by_fp) + ' 条。指纹只在域名看不到（ECH / 直连 IP）时兜底，不会覆盖规则库。</div>';
   el.innerHTML = h;
   var sw = $('[data-foldkey="fpl"] .s'); if (sw) sw.textContent = ur.length + ' 条纠正 · ' + use.length + ' 个可用指纹';
+}
+/* ── v5.24 T5: 识别自评(只用这台手机自己的流量当标准答案) ── */
+S.eval = null; S.evalDays = 1;
+function evalSumTxt() {
+  var r = S.eval; if (!r) return '用这台手机自己的流量当标准答案，看 HNC 认得准不准';
+  if (!r.enabled) return '未开启本机流量归因 · 开启后才会采集样本并自评';
+  if (!num(r.samples)) return '已开启 · 还没有样本，正常用手机一会儿再看';
+  var m = (r.methods || {}).combined || {};
+  return num(r.samples) + ' 条样本 · 综合覆盖 ' + pct100(m.coverage) + '% · 准确 ' + pct100(m.accuracy) + '%';
+}
+function evalFold() {
+  return sFold('deval', ['green', 'flask'], '识别自评', '<span id="eval-sum">' + esc(evalSumTxt()) + '</span>',
+    '<div id="eval-body"><div class="note">展开后加载</div></div>');
+}
+function loadEval(days) {
+  var d = days || S.evalDays || 1;
+  return api.get('/api/dpi_eval', { days: d, refresh: 1 }, { timeout: 12000 }).then(function (r) { S.eval = r; })
+    .catch(function (e) { S.eval = { ok: false, err: errText(e) }; }).then(paintEval);
+}
+var EVAL_M = [['rule', '规则库'], ['fp', '指纹'], ['owner', 'IP 归属']];
+function paintEval() {
+  var el = $('#eval-body'), r = S.eval; if (!el || !r) return;
+  el.setAttribute('data-keep', '');
+  var sm = $('#eval-sum'); if (sm) sm.textContent = evalSumTxt();
+  if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持识别自评）</div>'; return; }
+  if (!r.enabled) {
+    el.innerHTML = '<div class="note">「识别自评」要用这台手机自己的流量当标准答案：HNC 一边看它连了哪些网站，一边记下每个连接是哪个 App 发的（靠系统给的 UID → 包名），再回头对比 HNC 自己认得准不准。</div>' +
+      '<div class="note warn">现在本机流量归因没开，所以没有样本。</div>' +
+      '<div class="btns"><button class="btn pri press" data-act="eval-enable">去开启</button></div>' +
+      '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。</div>';
+    return;
+  }
+  var m = r.methods || {}, comb = m.combined || {};
+  var h = '<div class="note" style="margin-bottom:-2px">时间范围</div>' + seg('eval-days', [[1, '24 小时'], [7, '7 天']], r.days || S.evalDays, 'small');
+  if (!num(r.samples)) {
+    h += '<div class="note">还没有样本。正常用手机（刷视频、聊微信）十来分钟，回来点刷新就有了。</div>' + evalFootHtml();
+    el.innerHTML = h; placeSegs(el); return;
+  }
+  // 顶部四个数字
+  h += '<div class="eval-nums">' +
+    '<div class="en"><b class="num">' + num(r.samples) + '</b><span>样本</span></div>' +
+    '<div class="en"><b class="num">' + pct100(comb.coverage) + '<i>%</i></b><span>覆盖率</span></div>' +
+    '<div class="en"><b class="num">' + pct100(comb.accuracy) + '<i>%</i></b><span>准确率</span></div>' +
+    '<div class="en"><b class="num">' + num(r.apps) + '</b><span>涉及应用</span></div></div>' +
+    '<div class="note">覆盖率＝这些连接里 HNC 认出了应用的比例；准确率＝认出来的里面认对的比例。（综合＝用户纠正 &gt; 规则库 &gt; 指纹）</div>';
+  // 各方法一行
+  h += '<dl class="kv">';
+  EVAL_M.forEach(function (x) {
+    var mm = m[x[0]] || {};
+    var acc = mm.accuracy_na ? '—' : pct100(mm.accuracy) + '%';
+    h += '<dt>' + x[1] + '</dt><dd class="num">覆盖 ' + pct100(mm.coverage) + '% · 准确 ' + acc + ' <span class="note">(' + num(mm.predicted) + '/' + num(mm.samples) + ')</span></dd>';
+  });
+  h += '</dl>';
+  if (r.note) h += '<div class="note">' + esc(r.note) + '</div>';
+  if (r.capped) h += '<div class="note warn">今天样本太多，超过单日上限后停止记录了（不影响已有统计）。</div>';
+  // 最常认错 / 最常认不出
+  var tw = Array.isArray(r.top_wrong) ? r.top_wrong.slice(0, 5) : [];
+  if (tw.length) {
+    h += '<div class="note" style="margin-bottom:-2px">最常认错</div><div class="dbox">' + tw.map(function (x) {
+      return '<div class="row2"><span class="k">' + esc(x.name || x.truth) + ' <span class="note">→ 认成 ' + esc(x.pred_name || x.pred) + '</span></span><span class="v num">' + num(x.n) + ' 次</span></div>';
+    }).join('') + '</div>';
+  }
+  var tu = Array.isArray(r.top_unknown) ? r.top_unknown.slice(0, 5) : [];
+  if (tu.length) {
+    h += '<div class="note" style="margin-bottom:-2px">最常认不出</div><div class="dbox">' + tu.map(function (x) {
+      var snis = Array.isArray(x.snis) ? x.snis.slice(0, 3) : [];
+      return '<div class="row2"><span class="k" style="min-width:0;overflow-wrap:anywhere">' + esc(x.name || x.truth) + (snis.length ? ' <span class="note mono">' + esc(snis.join(' · ')) + '</span>' : '') + '</span><span class="v num">' + num(x.n) + ' 次</span></div>';
+    }).join('') + '</div>';
+  }
+  // 前台记录
+  var fg = r.fg_truth || {};
+  var fgTxt = '24 小时切换 ' + num(fg.switches_24h) + ' 次' + (fg.last_pkg ? ' · 最近 ' + esc(fg.last_pkg) + (fg.last_ts ? '（' + ago(fg.last_ts) + '）' : '') : '');
+  if (fg.source === 'none' || !num(fg.switches_24h)) {
+    fgTxt += ' · <b style="color:var(--orange)">这台手机的系统没取到前台应用，v5.25 的前台评估可能不可用</b>';
+  } else {
+    fgTxt += ' · 取数方式 ' + esc(fg.source);
+  }
+  h += '<div class="note" style="margin-bottom:-2px">前台记录（给以后的前台评估用）</div><div class="note">' + fgTxt + '</div>';
+  h += evalFootHtml();
+  el.innerHTML = h; placeSegs(el);
+}
+function evalFootHtml() {
+  return '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。</div>' +
+    '<div class="btns"><button class="btn sec press" data-act="eval-refresh">刷新</button>' +
+    '<button class="btn sec danger press" data-act="eval-clear">清除样本</button></div>';
 }
 function loadLog() {
   var el = $('#logv'); if (!el) return;

@@ -183,6 +183,7 @@ document.addEventListener('click', function (e) {
     else if (k === 'webacc-mode') { S.webaccMode = v; }
     else if (k === 'fgdays') { var fgd = devBy(S.fgMac); if (fgd) loadFgTl(fgd, +v); }
     else if (k === 'dns-bm') { busyWhile(sg, api.action('dns_takeover_set', { block_mode: v })).then(function () { toast('拦截方式：' + q.textContent); return loadDNS(); }).catch(function (e) { toast(errText(e), 'err'); loadDNS(); }); }
+    else if (k === 'eval-days') { S.evalDays = +v; loadEval(S.evalDays); }
     else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
     else if (k === 'qos-mode') setQos('mode', v, q);
     else if (k === 'qos-scale') setQos('scale', v, q);
@@ -247,6 +248,7 @@ document.addEventListener('click', function (e) {
     case 'fold': var key = a.getAttribute('data-key'), fw = a.closest('[data-foldkey="' + key + '"]') || document.getElementById(key); var opened = foldToggle(fw, key);
       if (opened && key === 'logs') loadLog(); if (opened && key === 'tokens') loadTokens();
       if (opened && key === 'dnst') loadDNS(); if (opened && key === 'fpl') loadFP();
+      if (opened && key === 'deval') loadEval();
       if (opened && /^(at|cb)-/.test(key)) loadAppTime(key.slice(3)); break;
     case 'toggle-dev':
       if (!d) break;
@@ -355,6 +357,9 @@ document.addEventListener('click', function (e) {
     case 'pair-new': busyWhile(a, pairNew()); break;
     case 'svc-restart': confirmSheet('重启 HNC 服务？', '重跑 post-fs-data.sh + service.sh，期间规则会短暂重建。', '重启').then(function (ok) { if (ok) api.action('restart_service', {}, { timeout: 20000, maxTime: 18 }).then(function () { toast('正在重启…'); setTimeout(function () { location.reload(); }, 2500); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'cache-clear': busyWhile(a, api.action('cache_clear')).then(function (r3) { toast('缓存已清理' + (r3.detail ? ' · ' + r3.detail : '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'eval-enable': busyWhile(a, api.post('/api/self/toggle', { enabled: true }).then(function (r3) { if (r3 && r3.error) throw new Error(r3.error); return r3; })).then(function () { toast('本机流量归因已开启 · 5 秒后开始采集样本'); return loadEval(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'eval-refresh': busyWhile(a, loadEval()); break;
+    case 'eval-clear': confirmSheet('清除识别自评的样本？', '会删掉本机采集的标签样本、前台记录和自评结果，之后重新开始积累。不影响识别和限速。', '清除').then(function (ok) { if (ok) busyWhile(a, api.action('dpi_eval_clear')).then(function () { toast('已清除样本'); S.eval = null; return loadEval(); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'rules-json': busyWhile(a, exportRulesJson()); break;
     case 'json-health': location.href = 'json-health.html'; break;
     case 'debug-bundle': debugBundle(a); break;

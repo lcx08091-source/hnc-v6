@@ -706,3 +706,9 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 .more-in>.ctrl,[data-style] .more-in>.ctrl{background:none;border:0;border-radius:0;padding:10px 0 0;box-shadow:none}
 .more-in>.ctrl+.ctrl{border-top:1px solid var(--divider)}
 #pu-body{transition:opacity .2s}
+/* v5.24 T5: 识别自评 —— 顶部四个数字 */
+.eval-nums{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin:8px 0 4px}
+.eval-nums .en{background:var(--input);border:1px solid var(--stroke);border-radius:12px;padding:10px 6px;text-align:center;display:flex;flex-direction:column;gap:2px}
+.eval-nums .en b{font-size:19px;color:var(--text-1);line-height:1.1;font-weight:700}
+.eval-nums .en b i{font-size:12px;font-style:normal;opacity:.6;margin-left:1px}
+.eval-nums .en span{font-size:11px;color:var(--text-3)}
