@@ -21,7 +21,7 @@
   - `hnc_dpid`(`src/dpid/`,Go):抓包识别。**本机抓包**在 `src/dpid/cmd/dpid/self_capture.go`,只在标志文件 `run/self_capture.enabled` 存在时运行(WebUI 的「本机流量归因」开关 / `POST /api/self/toggle` 控制)。
   - `hnc_httpd`(`daemon/hnc_httpd/`,Go):HTTP API + 汇总。路由注册在 `server.go`。
   - WebUI:`webroot/js/*.js`,**普通 `<script>`,共享全局作用域,按 index.html 顺序加载**,不要改成 ES module。
-- Go 版本:`go 1.25.0`(见各 `go.mod`)。**必须 `CGO_ENABLED=0`**,目标 `GOOS=android GOARCH=arm64`,同时要能编 `GOARCH=arm GOARM=7`(armv7 包)。**不要新增任何第三方依赖。**
+- Go 版本:httpd 是 `go 1.25.0`,dpid 是 `go 1.22`(以各自 `go.mod` 为准,不要改)。arm64 用 `CGO_ENABLED=0 GOOS=android GOARCH=arm64`;**32 位只做类型检查** `CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7`(android/arm 必须 cgo + NDK 链接,真 armv7 包由 CI 构建)。**不要新增任何第三方依赖。**
 - 代码风格:注释用中文,跟随周边代码的密度与写法;Go 用 `gofmt`。
 
 ### 1.1 现成可用的代码(直接复用,不要重写)
@@ -204,10 +204,10 @@
 # Go:两个模块分别
 (cd daemon/hnc_httpd && gofmt -l . && go vet ./... && go test ./... \
   && CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o /tmp/h64 . \
-  && CGO_ENABLED=0 GOOS=android GOARCH=arm GOARM=7 go build -o /tmp/h32 .)
+  && CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go vet ./...)
 (cd src/dpid && gofmt -l . && go vet ./... && go test ./... \
   && CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build -o /tmp/d64 ./cmd/dpid \
-  && CGO_ENABLED=0 GOOS=android GOARCH=arm GOARM=7 go build -o /tmp/d32 ./cmd/dpid)
+  && CGO_ENABLED=0 GOOS=linux GOARCH=arm GOARM=7 go vet ./...)
 rm -f daemon/hnc_httpd/hnc_httpd     # 编译残留会让测试失败
 
 # 前端语法
