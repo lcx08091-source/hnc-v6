@@ -57,6 +57,64 @@ const (
 	selfRescanInterval = 30 * time.Second
 )
 
+// v5.24 T1: 本机带标签样本工厂(标准答案采集)。
+//
+// 与本机抓包共用同一个开关(run/self_capture.enabled): reconcile 里开关打开时
+// 拉起、关掉时收摊。抓包回调只读指针调 Observe, 因此用 atomic 存, 回调侧不加锁。
+// 生命周期挂在 runSelfCaptures 的 ctx 下: 开关关掉或 dpid 退出都会让 Run 收尾
+// 关闭文件句柄, 所以「抓包关着就不产生任何样本文件」这条验收能成立。
+type labelSamplesHolder struct {
+	w      *output.LabelSamplesWriter
+	cancel context.CancelFunc
+	done   chan struct{}
+}
+
+var labelSamples atomic.Pointer[labelSamplesHolder]
+
+// startLabelSamples 幂等: 已在跑直接返回。只在 reconcile(持 liveMu)里调用。
+func startLabelSamples(ctx context.Context, cfg Config) {
+	if h := labelSamples.Load(); h != nil {
+		select {
+		case <-h.done: // 上次的 Run 已自行退出, 丢掉重开
+			labelSamples.CompareAndSwap(h, nil)
+		default:
+			return
+		}
+	}
+	runCtx, cancel := context.WithCancel(ctx)
+	w := output.NewLabelSamplesWriter(cfg.RunDir)
+	h := &labelSamplesHolder{w: w, cancel: cancel, done: make(chan struct{})}
+	labelSamples.Store(h)
+	go func() {
+		w.Run(runCtx)
+		close(h.done)
+		cancel()
+	}()
+	log.Printf("self-capture: 本机样本工厂已启动(%s/label_samples.<日期>.jsonl)", cfg.RunDir)
+}
+
+// stopLabelSamples 幂等: 没在跑直接返回。只在 reconcile(持 liveMu)里调用。
+// 同步等 Run 退出, 保证关掉开关后不再有写入与残留句柄。
+func stopLabelSamples() {
+	h := labelSamples.Swap(nil)
+	if h == nil {
+		return
+	}
+	h.cancel()
+	<-h.done
+	st := h.w.Stats()
+	log.Printf("self-capture: 本机样本工厂已停止(written=%d dedup=%d drop=%d skip_sys=%d skip_empty=%d capped=%v)",
+		st.Written, st.Deduped, st.Dropped, st.SkippedSystem, st.SkippedEmpty, st.Capped)
+}
+
+// observeLabelSample 把一条 ClientHello 交给样本工厂。
+// 抓包回调专用: 未启用(未开本机抓包)时 h 为 nil, 内部直接返回; 任何情况下都不等 IO。
+func observeLabelSample(in output.LabelSampleInput) {
+	if h := labelSamples.Load(); h != nil {
+		h.w.Observe(in)
+	}
+}
+
 // liveCap is one active per-iface capture goroutine's bookkeeping.
 type liveCap struct {
 	iface     string
@@ -143,6 +201,7 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 		for _, n := range names {
 			cancelOne(n)
 		}
+		stopLabelSamples() // v5.24 T1: 与抓包同进同退
 		pushState()
 	}
 	defer cancelAll()
@@ -164,9 +223,13 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 			for _, n := range names {
 				cancelOne(n)
 			}
+			stopLabelSamples() // v5.24 T1: 开关关掉 → 不再采集样本
 			pushState()
 			return
 		}
+
+		// v5.24 T1: 开关打开 → 拉起本机样本工厂(幂等)。
+		startLabelSamples(ctx, cfg)
 
 		// Flag present — discover ifaces.
 		ap := getAPIface()
@@ -302,7 +365,9 @@ func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib 
 			// connections that established+SNI'd between two 5s
 			// sampler ticks. Both are silent skips — the next
 			// observation of the same conn will catch up.
-			uid, _, ok := selfAttrib.LookupUID(ev.DstIP.String(), ev.DstPort)
+			// v5.24 T1: 第二个返回值 pkg 原本被丢弃, 现在接住给样本工厂用
+			// (LookupUID 内部同一次加锁就带回包名, 不必再调 PkgForUID)。
+			uid, pkg, ok := selfAttrib.LookupUID(ev.DstIP.String(), ev.DstPort)
 			if !ok {
 				return
 			}
@@ -312,6 +377,23 @@ func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib 
 			// unmatched ones for auto-expansion consideration. See
 			// output/auto_expand.go.
 			selfAttrib.ObserveSNI(uid, ev.TLS.SNI, ev.Time.Unix())
+
+			// v5.24 T1: 追加一行「包名 + 这条连接的域名/指纹」带标签样本。
+			// 原有识别路径(上面)完全不变; 这里只多记一份标准答案。
+			// Observe 内部非阻塞(队列满即丢), 且未启用时是空操作。
+			observeLabelSample(output.LabelSampleInput{
+				Time:    ev.Time,
+				UID:     uid,
+				Pkg:     pkg,
+				SNI:     ev.TLS.SNI,
+				JA4:     ev.TLS.JA4,
+				ALPNs:   ev.TLS.ALPN,
+				DPort:   int(ev.DstPort),
+				QUIC:    ev.TLS.IsQUIC,
+				ECH:     ev.TLS.ECH,
+				Partial: ev.TLS.Partial,
+				RIP:     ev.DstIP.String(),
+			})
 		case capture.EventDNS:
 			lc.dnsEvents.Add(1)
 			// DNS attribution intentionally not wired in v5.6 rc1.
