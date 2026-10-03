@@ -111,7 +111,9 @@ run_cmd proc_net_arp   cat /proc/net/arp
 # ── 5. 进程与自检 ──────────────────────────────────────────
 run_cmd ps_hnc         sh -c "ps -A 2>/dev/null | grep -i 'hnc\|hotspotd\|dpid' | grep -v grep"
 [ -x "$BIN/diag.sh" ] && run_cmd diag sh "$BIN/diag.sh"
-[ -x "$BIN/rc17_process_health.sh" ] && run_cmd process_health sh "$BIN/rc17_process_health.sh"
+# v5.26 T3: rc17_process_health.sh 已删; httpd 在调用本脚本前把 Go 版
+# /api/proc_health 快照写到 run/proc_health.json, 这里拷进诊断包。
+[ -f "$RUN/proc_health.json" ] && cp "$RUN/proc_health.json" "$CMD/process_health.json" 2>/dev/null
 [ -x "$BIN/check_offload.sh" ] && run_cmd check_offload sh "$BIN/check_offload.sh"
 [ -x "$BIN/json_health_panel.sh" ] && run_cmd json_health sh "$BIN/json_health_panel.sh"
 # v5.9.9: clsact BPF (T1) 状态也进包 —— 实验功能的排障必需

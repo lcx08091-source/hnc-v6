@@ -28,11 +28,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"hnc.io/dpid/procfind" // v5.26 T3: 进程检测唯一权威
 )
 
 const (
@@ -103,34 +104,7 @@ func osPowerFS() powerFS {
 	}
 }
 
-// procStatFields /proc/<pid>/stat → ppid, utime+stime, cutime+cstime, starttime
-func procStatFields(s string) (ppid int, own, child, start uint64, ok bool) {
-	i := strings.LastIndexByte(s, ')')
-	if i < 0 {
-		return
-	}
-	f := strings.Fields(s[i+1:])
-	// f[0]=state(3) f[1]=ppid(4) f[11]=utime(14) f[12]=stime(15) f[13]=cutime(16) f[14]=cstime(17) f[19]=starttime(22)
-	if len(f) < 20 {
-		return
-	}
-	p, e0 := strconv.Atoi(f[1])
-	u, e1 := strconv.ParseUint(f[11], 10, 64)
-	st, e2 := strconv.ParseUint(f[12], 10, 64)
-	cu, e3 := strconv.ParseInt(f[13], 10, 64) // cutime/cstime 是 long
-	cs, e4 := strconv.ParseInt(f[14], 10, 64)
-	sv, e5 := strconv.ParseUint(f[19], 10, 64)
-	if e0 != nil || e1 != nil || e2 != nil || e3 != nil || e4 != nil || e5 != nil {
-		return
-	}
-	if cu < 0 {
-		cu = 0
-	}
-	if cs < 0 {
-		cs = 0
-	}
-	return p, u + st, uint64(cu + cs), sv, true
-}
+// procStatFields 已并入共享包 procfind.StatFields(v5.26 T3)。
 
 // parseSchedstatSlices /proc/<pid>/task/<tid>/schedstat "run_ns wait_ns timeslices" → timeslices
 func parseSchedstatSlices(s string) (uint64, bool) {
@@ -158,71 +132,25 @@ func (fs powerFS) cmdline(pid int) string {
 	return strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " "))
 }
 
-// procTable 一次扫描 /proc: pid → (ppid, own, child, start)
-type procRow struct {
-	ppid              int
-	own, child, start uint64
+// procFS 适配到共享包 procfind(v5.26 T3: 进程检测唯一权威)。
+func (fs powerFS) procFS() procfind.FS {
+	return procfind.FS{ReadFile: fs.ReadFile, ReadDir: fs.ReadDir, SelfPID: fs.SelfPID}
 }
 
-func (fs powerFS) procTable() map[int]procRow {
-	out := map[int]procRow{}
-	names, err := fs.ReadDir("/proc")
-	if err != nil {
-		return out
-	}
-	for _, n := range names {
-		pid, err := strconv.Atoi(n)
-		if err != nil || pid <= 0 {
-			continue
-		}
-		b, err := fs.ReadFile("/proc/" + n + "/stat")
-		if err != nil {
-			continue
-		}
-		if pp, own, ch, st, ok := procStatFields(string(b)); ok {
-			out[pid] = procRow{pp, own, ch, st}
-		}
-	}
-	return out
+// procTable 一次扫描 /proc: pid → Row(ppid / own / child / start)
+func (fs powerFS) procTable() map[int]procfind.Row {
+	return fs.procFS().Table()
 }
 
-func (fs powerFS) findPID(d powerProcDef, hncDir string, tab map[int]procRow) int {
-	if d.Self && fs.SelfPID > 0 {
-		return fs.SelfPID
-	}
-	for _, f := range d.PIDFiles {
-		pid, err := strconv.Atoi(fs.readTrim(filepath.Join(hncDir, "run", f)))
-		if err != nil || pid <= 0 {
-			continue
-		}
-		if _, ok := tab[pid]; !ok {
-			continue
-		}
-		if cl := fs.cmdline(pid); cl == "" || strings.Contains(cl, d.Key) {
-			return pid
-		}
-	}
-	if d.ScanKey == "" {
-		return 0
-	}
-	pids := make([]int, 0, len(tab))
-	for pid := range tab {
-		pids = append(pids, pid)
-	}
-	sort.Ints(pids)
-	for _, pid := range pids {
-		if strings.Contains(fs.cmdline(pid), d.ScanKey) {
-			return pid
-		}
-	}
-	return 0
+func (fs powerFS) findPID(d powerProcDef, hncDir string, tab map[int]procfind.Row) int {
+	return fs.procFS().FindPID(procfind.Def{Self: d.Self, PIDFiles: d.PIDFiles, Key: d.Key, ScanKey: d.ScanKey}, hncDir, tab)
 }
 
-// descTicks 存活后代进程的 own+child 之和(不含 root 自己)
-func descTicks(root int, tab map[int]procRow) uint64 {
+// descTicks 存活后代进程的 Own+Child 之和(不含 root 自己)
+func descTicks(root int, tab map[int]procfind.Row) uint64 {
 	kids := map[int][]int{}
 	for pid, r := range tab {
-		kids[r.ppid] = append(kids[r.ppid], pid)
+		kids[r.PPID] = append(kids[r.PPID], pid)
 	}
 	var sum uint64
 	seen := map[int]bool{root: true}
@@ -235,7 +163,7 @@ func descTicks(root int, tab map[int]procRow) uint64 {
 		}
 		seen[p] = true
 		r := tab[p]
-		sum += r.own + r.child
+		sum += r.Own + r.Child
 		stack = append(stack, kids[p]...)
 	}
 	return sum
@@ -269,7 +197,7 @@ func takePowerSample(fs powerFS, hncDir string, now time.Time, level string) pow
 		if pid <= 0 || !ok {
 			continue
 		}
-		ps := powerProcSample{PID: pid, Start: r.start, Ticks: r.own + r.child + descTicks(pid, tab)}
+		ps := powerProcSample{PID: pid, Start: r.Start, Ticks: r.Own + r.Child + descTicks(pid, tab)}
 		ps.Slices = fs.threadSlices(pid)
 		ps.RSSKB = scParseVmRSS(fs.readTrim(fmt.Sprintf("/proc/%d/status", pid)))
 		smp.Procs[d.Name] = ps

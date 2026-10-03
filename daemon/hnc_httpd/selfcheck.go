@@ -35,6 +35,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"hnc.io/dpid/procfind" // v5.26 T3: 进程检测唯一权威
 )
 
 const (
@@ -2384,13 +2386,13 @@ func (c *scCtx) findPID(d scProcDef) int {
 			return pid
 		}
 	}
+	// v5.26 T3: pidof 兜底改为 procfind 的 /proc 扫描(共享包, 与 power_stats /
+	// proc_health 同一份实现)。rc30.8 真机事故: toybox pidof 会丢带完整路径
+	// 调用的进程, 表现为 dpid 明明在跑但 pidof 返回空 → 误报「未运行」。
 	if d.Pidof != "" {
-		if out, ok := c.run("pidof", d.Pidof); ok {
-			if f := strings.Fields(out); len(f) > 0 {
-				if pid, err := strconv.Atoi(f[0]); err == nil && c.procAlive(pid, d.Key) {
-					return pid
-				}
-			}
+		fs := procfind.FS{ReadFile: c.env.ReadFile, ReadDir: c.env.ReadDir, SelfPID: c.env.SelfPID}
+		if pid := fs.FindPID(procfind.Def{ScanKey: d.Pidof}, c.env.HNCDir, fs.Table()); pid > 0 {
+			return pid
 		}
 	}
 	return 0

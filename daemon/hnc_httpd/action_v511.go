@@ -21,6 +21,8 @@ import (
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"hnc.io/dpid/procfind" // v5.26 T3: 进程检测唯一权威
 )
 
 // ── 白名单 ────────────────────────────────────────────────────
@@ -169,6 +171,11 @@ func actionDebugBundle(hncDir string) actionResp {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return actionResp{OK: false, Error: "mkdir failed", Detail: err.Error()}
 	}
+	// v5.26 T3: rc17_process_health.sh 已删, 先把 Go 版 proc_health 快照写到
+	// run/proc_health.json, debug_bundle.sh 拷进诊断包(Android 无 curl, 不走 loopback)。
+	if b, err := json.Marshal(buildProcHealth(procfind.New(), hncDir, time.Now())); err == nil {
+		_ = writeFileAtomic(filepath.Join(hncDir, "run", "proc_health.json"), b)
+	}
 	rc, out := runBin(hncDir, "debug_bundle.sh", dir)
 	path := lastLine(strings.TrimSpace(out))
 	if rc != 0 || path == "" {
@@ -291,7 +298,8 @@ func (s *server) apiRulesExport(w http.ResponseWriter, r *http.Request) {
 // runStatusScript 只含常量, 不拼接任何请求参数。
 const runStatusScript = `IF=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -1)
 [ -n "$IF" ] || IF=$(head -1 "$HNC_DIR/run/iface.cache" 2>/dev/null)
-HP=$(pidof hotspotd 2>/dev/null | awk '{print $1}')
+# v5.26 T3: hotspotd PID 由 Go 侧 procfind(pidfile+cmdline 校验)预计算, 经环境变量传入
+HP=${HNC_HP:-}
 [ -n "$HP" ] || HP=$(cat "$HNC_DIR/run/hotspotd.pid" 2>/dev/null)
 if [ -n "$HP" ] && [ -d "/proc/$HP" ]; then echo HOTSPOTD=up; echo HPID=$HP; echo HRSS=$(awk '/VmRSS/{print $2}' /proc/$HP/status 2>/dev/null); else echo HOTSPOTD=down; fi
 T=0; if [ -n "$IF" ]; then T=$( { tc qdisc show dev "$IF"; tc class show dev "$IF"; tc qdisc show dev ifb0; tc class show dev ifb0; } 2>/dev/null | wc -l); fi; echo TC=$T
@@ -301,8 +309,15 @@ echo IFACE=$IF`
 func (s *server) apiRunStatus(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	// v5.26 T3: hotspotd PID 用 procfind 找(替代脚本里的 pidof), 只经环境变量
+	// 传给常量脚本 —— 脚本本体仍不含任何非常量内容。
+	hp := ""
+	pfs := procfind.New()
+	if pid := pfs.FindPID(procfind.Def{PIDFiles: []string{"hotspotd.pid"}, Key: "hotspotd", ScanKey: "bin/hotspotd"}, s.hncDir, pfs.Table()); pid > 0 {
+		hp = strconv.Itoa(pid)
+	}
 	cmd := hardenCmd(exec.CommandContext(ctx, "sh", "-c", runStatusScript))
-	cmd.Env = []string{"HNC_DIR=" + s.hncDir, "PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
+	cmd.Env = []string{"HNC_DIR=" + s.hncDir, "PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin", "HNC_HP=" + hp}
 	out, _ := cmd.Output()
 	kv := map[string]string{}
 	for _, ln := range strings.Split(string(out), "\n") {
@@ -374,21 +389,8 @@ func readWatchdogState(hncDir string, now time.Time) watchdogState {
 	return st
 }
 
-// GET /api/proc_health → bin/rc17_process_health.sh 的 JSON 原样透传
-func (s *server) apiProcHealth(w http.ResponseWriter, r *http.Request) {
-	rc, out := runBin(s.hncDir, "rc17_process_health.sh")
-	out = strings.TrimSpace(out)
-	if i := strings.Index(out, "{"); i > 0 {
-		out = out[i:]
-	}
-	if rc != 0 || !json.Valid([]byte(out)) {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "process health unavailable"})
-		return
-	}
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
-	w.Header().Set("Cache-Control", "no-store")
-	_, _ = w.Write([]byte(out))
-}
+// /api/proc_health 的 Go 实现见 proc_health.go(v5.26 T3 删除了
+// bin/rc17_process_health.sh, 不再透传)。
 
 // ── 小工具 ────────────────────────────────────────────────────
 

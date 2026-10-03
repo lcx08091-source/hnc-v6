@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"hnc.io/dpid/procfind"
 )
 
 // ─── 屏幕状态解析(dumpsys 夹具) ─────────────────────────────────────
@@ -494,11 +496,11 @@ func statLine(pid, ppid int, comm string, ut, st, cut, cst, start uint64) string
 }
 
 func TestProcStatFields(t *testing.T) {
-	pp, own, ch, start, ok := procStatFields(statLine(10, 1, "sh (x) y", 300, 200, 50, 25, 9999))
+	pp, own, ch, start, ok := procfind.StatFields(statLine(10, 1, "sh (x) y", 300, 200, 50, 25, 9999))
 	if !ok || pp != 1 || own != 500 || ch != 75 || start != 9999 {
 		t.Fatalf("got pp=%d own=%d ch=%d start=%d ok=%v", pp, own, ch, start, ok)
 	}
-	if _, _, _, _, ok := procStatFields("garbage"); ok {
+	if _, _, _, _, ok := procfind.StatFields("garbage"); ok {
 		t.Error("garbage should fail")
 	}
 	if n, ok := parseSchedstatSlices("123456 7890 42\n"); !ok || n != 42 {
