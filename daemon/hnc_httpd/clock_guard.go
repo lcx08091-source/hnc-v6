@@ -34,6 +34,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"hnc.io/dpid/clockhwm" // v5.26 T6: 时钟可信规则唯一权威
 )
 
 const (
@@ -120,15 +122,12 @@ var clockAutoTime = func() (on, known bool) {
 // clockBootUp 开机时长来源(测试可替换)
 var clockBootUp = bootUptime
 
-// clockSaneAt 纯函数: 年份 ≥ 2025 且不早于高水位(hwm, unix 秒; 0 = 无)减容忍值。
+// clockSaneAt 纯函数: v5.26 T6 起委托 clockhwm.Sane(唯一权威)。
+// 注: 旧实现按本地年份判 2025 边界, 现统一为 UTC 时间戳(MinUnix)——
+// 本地 2025-01-01 00:00~08:00 时段的行为从 sane 变 insane, 更严格且
+// 与 hnc_clock.sh / hnc_watchdog 完全一致。
 func clockSaneAt(now time.Time, hwm int64) bool {
-	if now.Year() < clockMinYear {
-		return false
-	}
-	if hwm > 0 && now.Unix() < hwm-int64(clockBackTolerance/time.Second) {
-		return false
-	}
-	return true
+	return clockhwm.Sane(now.Unix(), hwm)
 }
 
 // 高水位状态(同一 hncDir 下所有写入器共享; 按目录分开只为测试隔离, 生产只有一个)

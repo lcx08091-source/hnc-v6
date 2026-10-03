@@ -12,20 +12,19 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"hnc.io/dpid/activity"
+
+	"hnc.io/dpid/clockhwm" // v5.26 T6: 时钟可信规则唯一权威
 )
 
 const (
-	statsSampleEvery     = 300 * time.Second // 与 watchdog.sh STATS_INTERVAL / power_sched.go stats_sample 一致
-	onlineHoursEvery     = 3300 * time.Second
-	onlineWindowSec      = 90         // 与 httpd activityOnlineWindow 一致
-	clockMinTS           = 1735689600 // 2025-01-01, 与 bin/hnc_clock.sh 一致
-	clockBackToleranceTS = 600
-	onlineHoursFile      = runDir + "/online_hours.jsonl"
+	statsSampleEvery = 300 * time.Second // 与 watchdog.sh STATS_INTERVAL / power_sched.go stats_sample 一致
+	onlineHoursEvery = 3300 * time.Second
+	onlineWindowSec  = 90 // 与 httpd activityOnlineWindow 一致
+	onlineHoursFile  = runDir + "/online_hours.jsonl"
 )
 
 // statsSampleDue 是否该跑 stats_sample.sh: 300 秒; 热点开着但没有在线设备时 ×3。
@@ -40,16 +39,8 @@ func statsSampleDue(last, now time.Time) bool {
 // clockSaneNow 与 bin/hnc_clock.sh sane 同规则: ≥2025 且不早于高水位 − 600 秒。
 // 时钟不可信时不写在线时长(否则 day 字段会是 1970 之类的错日)。
 func clockSaneNow(now time.Time) bool {
-	u := now.Unix()
-	if u < clockMinTS {
-		return false
-	}
-	if b, err := os.ReadFile(dataDir + "/clock_hwm"); err == nil {
-		if hwm, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil && hwm > 0 && u < hwm-clockBackToleranceTS {
-			return false
-		}
-	}
-	return true
+	// v5.26 T6: 委托 clockhwm(唯一权威, 与 httpd clockSaneAt 同一份)。
+	return clockhwm.Sane(now.Unix(), clockhwm.ReadHWM(dataDir+"/clock_hwm"))
 }
 
 // onlineMACs devices.json 里此刻在线且未被拉黑的设备(纯函数, 便于测试)。
