@@ -16,9 +16,25 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | **前台接待**<br>`hnc_httpd` | `daemon/hnc_httpd/` | Go,约 3.7 万行(不含测试) | 网页界面的后端。收到你的点击 → 检查参数 → 调脚本执行 → 回结果;同时汇总设备、统计、识别结果给界面。端口 8443 / 8444 |
 | **侦察员**<br>`hnc_dpid` | `src/dpid/` | Go,约 2.1 万行 | 抓热点上的网络包头(DNS、TLS 握手、QUIC 首包、HTTP),认出域名和指纹,写给 httpd 用。**只看握手、不看内容** |
 | **门卫**<br>`hotspotd` | `daemon/hotspotd/` | C,约 1.2 万行 | 盯热点开关、谁连上来了(ARP / DHCP / mDNS 拿设备名)、定时任务调度 |
-| **巡逻员**<br>`watchdog.sh` | `bin/watchdog.sh` | Shell | 每 60 秒检查:进程还活着吗、tc 规则还在吗、配额 / 分时段到点了吗;坏了就修 |
-| **侦察员的保镖**<br>`hnc_launcher` | `src/launcher/` | C,约 0.6 千行 | 负责把 dpid 拉起来、挂了重启 |
+| **巡逻员**<br>`hnc_watchdog` | `src/dpid/cmd/hnc_watchdog/` | Go | 每 60 秒检查:进程还活着吗、tc 规则还在吗、配额 / 分时段到点了吗;坏了就修。`bin/watchdog.sh` 只保留被 `action` 调用的修复函数,主循环已是 Go 版(v5.26) |
+| **侦察员的保镖(三选一)**<br>`hnc_dpid_guard` / `dpid_supervisor` / `hnc_launcher` | `bin/hnc_dpid_guard.sh` / `src/dpid/cmd/dpid_supervisor/` / `src/launcher/` | Shell / Go / C | 把 dpid 拉起来、挂了重启。由 `run/dpid_launcher.choice` 指定的「当前守护者」负责,选定后其他守护不再插手(v5.26 T2) |
 | **执行队**<br>各种 `bin/*.sh` | `bin/` | Shell,约 2.3 万行 | 真正去改内核规则的:`tc_manager.sh`(限速 / 延迟队列)、`iptables_manager.sh`(打标记 / 封锁)、`apply_device_rule.sh`(一台设备的完整规则)、各种 `*_sync.sh` |
+
+## 2.5 权威实现表(v5.26 起生效)
+
+同一件事只认这一份实现,别处要么调用它、要么已删除:
+
+| 功能 | 权威实现 | 说明 |
+|---|---|---|
+| 进程检测(pid → 是否 HNC 的进程) | `src/dpid/procfind`(共享包) | Self → pidfile(存活 + cmdline 校验)→ /proc 扫描;httpd 自检 / 功耗统计 / 运行状态 / 进程健康四处共用 |
+| 热点网卡名 | `bin/hnc_iface.sh`(探测器)+ `src/dpid/ifacehint`(读取) | 结果写 `run/iface_detect.json`,10 分钟内新鲜则 dpid 侧全部信它 |
+| 时钟是否可信 | `src/dpid/clockhwm`(共享包) | ≥2025(UTC)且不落后高水位 600 秒;shell 版 `hnc_clock.sh` 保留给脚本,镜像测试锁定常量一致 |
+| 月用量 | `daemon/hnc_httpd` 的 `limitCtl` | 计费月,取防火墙累计与 DPI 合计的较大值;设备卡 / 配额 / 全局告警 / `/api/usage_month` 同源 |
+| 告警写入(`run/alerts.jsonl`) | `src/dpid/alert` 的 `Append`(带 flock) | httpd 与看门狗两个进程并发追加安全 |
+| 看门狗主循环 | `src/dpid/cmd/hnc_watchdog`(Go) | `bin/watchdog.sh` 只提供 `action` |
+| dpid 守护 | `run/dpid_launcher.choice` 指定的那一个 | guard(shell)/ supervisor(Go)/ launcher(C)三选一机制保留,选定后不换手 |
+
+---
 
 ## 3. 开机时发生什么
 
@@ -27,9 +43,9 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
  ├─ post-fs-data.sh   最早阶段:准备目录、拷二进制、设权限(漏设权限 = 功能静默失效,出过两次事故)
  └─ service.sh        系统起来后:
       ├─ 拉起 hotspotd(门卫)
-      ├─ 拉起 hnc_launcher → hnc_dpid(侦察员)
+      ├─ 按 run/dpid_launcher.choice 选定守护者,由它拉起 hnc_dpid(侦察员)
       ├─ 拉起 hnc_httpd(前台)
-      └─ 拉起 watchdog.sh(巡逻员),之后由它负责「谁挂了就拉起谁」
+      └─ 拉起 hnc_watchdog(Go 版巡逻员),之后由它负责「谁挂了就拉起谁」
 ```
 
 ## 4. 三条最重要的链路

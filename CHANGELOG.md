@@ -14,6 +14,33 @@
 
 ---
 
+## [5.26.0-rc1] - 2026-10-04
+
+**预览版 · 去重收口**:v5.25 排查看门狗时发现,好几块功能同时存在 2~5 份实现(Go / shell / C 各写一份),以前只改其中一份,导致功能在真机上悄悄失效。本版目标:**每块功能只留一份「权威实现」,其余要么删掉、要么改成调用它**。不加任何新功能。
+
+### Changed
+
+- **月用量口径统一**(T4):设备卡「本月」、配额进度条、月度配额告警此前是三个不同数字(分别按防火墙计数器/计费月、DPI 历史/自然月、DPI 增量/自然月统计)。现在统一为 limitCtl 的同一口径(计费月起算,取防火墙累计与 DPI 合计的较大值),`/api/usage_month` 顶层新增 `period_start`。**全局月度配额告警改为按计费日起算**(此前是自然月),与设备配额提醒一致;单独设置了设备配额的设备按自己的配额提醒,不重复发全局告警。
+- **/api/proc_health 改为 Go 实现**(T3):JSON 字段与 shell 版完全一致,但不再依赖 `ps -ef` 扫描(Android toybox 的 ps 会丢带完整路径调用的进程,是 rc30.8「dpid 明明在跑却报未运行」的根源)。`bin/rc17_process_health.sh` 删除,诊断包改为内嵌 httpd 生成的同一份快照(`run/proc_health.json`)。
+
+### Fixed
+
+- **自检不再误报进程未运行**(T3):httpd 自检的 pidof 兜底在 Android 上不可靠(toybox pidof 会丢进程),统一改走 `/proc` 扫描(共享包 `procfind`),四处检测(自检/功耗/运行状态/进程健康)同一份实现、同一口径。
+- **dpid 不再绑错网卡**(T5):dpid 侧三处各自探测热点网卡(两处只读 `run/hotspot_iface`,一处带写死的候选名表),ROM 升级后可能各猜各的。现在统一优先信 `hnc_iface.sh` 的权威探测结果(`run/iface_detect.json`,10 分钟内新鲜),全部失灵才各自扫描兜底。
+- **时钟可信判定三处合一**(T6):httpd / shell / 看门狗三份「≥2025 且不落后高水位 600 秒」规则统一为共享包 `clockhwm`(httpd 侧 2025 边界从本地年份改为 UTC,与另两处完全一致)。
+
+### Removed
+
+- **看门狗只留一个主循环**(T1/T2,基线已含):shell 版 `watchdog.sh` 的旧主循环删除,真机只跑 Go 版;dpid 守护由 `run/dpid_launcher.choice` 指定的「当前守护者」负责,选定后其他人不再插手。
+- **告警写入只留一个函数**(T7):往 `run/alerts.jsonl` 追加的 5 份副本统一为 `alert.Append`(带文件锁),httpd 与看门狗并发追加不再有交错风险。
+- **未上线的 C 版 JSON 工具删除**(T8):`hnc_json.c` / `build_hnc_json.sh` / `hnc_json_c_status.sh` 及 `bin/hnc_json` 里全部「先试 C helper」分支 —— CI 从未编译、刷机包里从未有过 `bin/hnc_json_c`,纯死代码。
+
+### Internals
+
+- 新增共享包:`src/dpid/procfind`(进程检测)、`src/dpid/ifacehint`(热点网卡)、`src/dpid/clockhwm`(时钟可信);`src/dpid/alert` 导出 `Append` 及若干辅助函数。详见 `docs/CODEMAP.md` 新增的「权威实现表」。
+
+---
+
 ## [5.25.0-rc2] - 2026-10-03
 
 **预览版 · 看门狗专项**:界面一直显示「watchdog 未运行」,排查后发现看门狗其实在跑,但 Go 版看门狗(真机实际运行的版本)与 shell 版之间有多处功能缺失。

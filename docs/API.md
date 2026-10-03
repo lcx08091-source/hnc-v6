@@ -2135,3 +2135,10 @@ GET `/api/encdns`:
 - `run/clock_state.json` 增加 `hwm_reset`(`auto_time` | `behind_6h`)、`hwm_reset_at`、`hwm_reset_from`。
 - `GET /api/power`:`watchdog_pending` 在 `hotspot_off` 档为 120 秒(Go 版 watchdog 由网卡事件即时唤醒,轮询仅兜底)。
 - `GET /api/run_status`(v5.25.0-rc2):`watchdog` 改为 0/1(按 pidfile + cmdline 判断),新增 `watchdog_kind`(go | shell)、`watchdog_pid`、`watchdog_hb_age`(Go 版心跳秒数,-1 = 不适用)。
+
+## 24. v5.26 变更
+
+- `GET /api/usage_month`:统计周期从**自然月**改为**计费月**(与设备配额同口径,数据源为 limitCtl 的月度累计 = max(防火墙计数器累加, DPI 历史合计));顶层新增 `period_start`(本计费月起点 unix 秒)。`devices.*.rx/tx` 字段不变。刚安装(limitCtl 尚无数据)时回退为扫描 DPI 增量文件的自然月口径,同样带 `period_start`。设备卡「本月」、配额进度条、月度配额告警与此接口从此同源。
+- `GET /api/proc_health`:改为 httpd 的 Go 实现(原为透传 `bin/rc17_process_health.sh`,该脚本已删除)。JSON 字段(schema_version / timestamp / status / detail / counts / pidfiles)完全不变,前端无需改动。
+- `run/dpid_launcher.choice`:当前 dpid 守护者(`guard` | `supervisor` | `launcher`),由 service.sh 在选定守护者时写入,看门狗只认这一份;开机时清空,防止读到上次会话的旧选择。
+- `run/proc_health.json`:导出诊断包时 httpd 预写的进程健康快照(与 `/api/proc_health` 同一份实现)。
