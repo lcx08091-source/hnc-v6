@@ -101,13 +101,6 @@ HAS_LEGACY_FALLBACK_STATUS=false
 [ -x "$BIN/json_legacy_fallback_status.sh" ] && HAS_LEGACY_FALLBACK_STATUS=true
 [ "$LEGACY_FALLBACK_COUNT" != 0 ] && [ "$OVERALL" = ok ] && OVERALL="warn"
 
-HNC_JSON_C_STATUS_RAW=""
-HNC_JSON_C_STATUS_PRESENT=false
-if [ -x "$BIN/hnc_json_c_status.sh" ]; then
-  HNC_JSON_C_STATUS_PRESENT=true
-  HNC_JSON_C_STATUS_RAW="$(sh "$BIN/hnc_json_c_status.sh" 2>/dev/null)"
-fi
-
 
 STATS_DIAG_RAW=""
 STATS_DIAG_PRESENT=false
@@ -177,10 +170,6 @@ cat <<JSON
     "has_status_helper": $HAS_LEGACY_FALLBACK_STATUS,
     "log": "$(json_escape "$RUN/json_legacy_fallback.log")",
     "count_file": "$(json_escape "$RUN/json_legacy_fallback.count")"
-  },
-  "hnc_json_c": {
-    "has_status_helper": $HNC_JSON_C_STATUS_PRESENT,
-    "status_raw": "$(json_escape "$HNC_JSON_C_STATUS_RAW")"
   },
   "stats": {
     "has_diag_helper": $STATS_DIAG_PRESENT,

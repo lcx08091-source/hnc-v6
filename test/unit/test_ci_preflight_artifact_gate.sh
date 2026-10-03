@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# hotfix20.9: artifact checks must catch stale module.prop and host hnc_json_c.
+# hotfix20.9: artifact checks must catch stale module.prop (hnc_json_c checks removed v5.26 T8).
 #
 # rc30.12.34 (TASK-B2): fixture 跟当前 artifact_sanity_check.sh 必需文件集对齐.
 # 同 test_artifact_release_rc5.sh 的修法.
@@ -83,19 +83,5 @@ else
     assert_contains "$out" "artifact version matches source" || return
     test_pass
 
-    test_start "ci_preflight artifact rejects host hnc_json_c"
-    repo="$HNC_TEST_DIR/repo_bad"
-    make_repo_fixture "$repo"
-    mkdir -p "$repo/bin"
-    # Minimal ELF-ish header with e_machine = 0x003e at offset 18 (x86_64 host).
-    { printf '\177ELF'; dd if=/dev/zero bs=1 count=14 2>/dev/null; printf '\076\000'; } > "$repo/bin/hnc_json_c"
-    chmod 755 "$repo/bin/hnc_json_c"
-    # 跟 ok artifact 一样打全 sanity 必需文件 + 多打一个 host hnc_json_c
-    # shellcheck disable=SC2086  # $_REQ_FILES 故意 word splitting
-    (cd "$repo" && zip -q "$HNC_TEST_DIR/bad.zip" module.prop $_REQ_FILES bin/hnc_json_c)
-    out="$(cd "$repo" && rm -f bin/hnc_json_c && sh bin/ci_preflight.sh --artifact "$HNC_TEST_DIR/bad.zip" 2>&1)"
-    rc=$?
-    assert_ne "0" "$rc" "preflight should fail host helper artifact" || return
-    assert_contains "$out" "artifact hnc_json_c is not Android ARM/AArch64 ELF" || return
-    test_pass
+    # v5.26 T8: hnc_json_c(C 版 JSON 助手)已删除, rejects-host-helper 用例随之移除。
 fi

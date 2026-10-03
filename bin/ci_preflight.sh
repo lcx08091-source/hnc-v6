@@ -142,22 +142,8 @@ if [ -d bin/armeabi-v7a ]; then
   fi
 fi
 
-# 6b. Optional hnc_json_c helper architecture sanity.
-# The source tree must not accidentally ship a Linux/x86 helper binary; Android
-# packages should only contain an Android ARM/AArch64 build, or no helper at all.
-if [ -e bin/hnc_json_c ]; then
-  if command -v od >/dev/null 2>&1; then
-    HNC_JSON_C_MACHINE="$(od -An -tx1 -j18 -N2 bin/hnc_json_c 2>/dev/null | awk '{print $1 " " $2}')"
-    case "$HNC_JSON_C_MACHINE" in
-      "b7 00"|"28 00") ok "hnc_json_c looks like Android ARM ELF: $HNC_JSON_C_MACHINE" ;;
-      *) fail "bin/hnc_json_c is not Android ARM/AArch64 ELF: machine='$HNC_JSON_C_MACHINE'" ;;
-    esac
-  else
-    warn "od unavailable; cannot inspect bin/hnc_json_c architecture"
-  fi
-else
-  ok "optional hnc_json_c is absent from source tree; CI may build Android copy"
-fi
+# 6b. (v5.26 T8 删除) hnc_json_c 可选助手检查 —— C 版 JSON 工具从未上线,
+# 源码与打包路径均已移除, 无需再查 ELF 架构。
 
 # 7. Version drift warning: detect very old hotfix strings in live web/go files.
 OLD_HITS="$(grep -R "hotfix4\|hotfix10\|hotfix16\.7\|hotfix17\.3" -n webroot daemon/hnc_httpd 2>/dev/null | head -30)"
@@ -240,7 +226,7 @@ if [ -n "$ARTIFACT" ]; then
 
     # hotfix20.9: artifact-level version and optional C helper checks. This
     # catches the common mistake where CI builds an old module.prop, or a host
-    # x86 hnc_json_c accidentally gets packaged into the Android module.
+    # (v5.26 T8: hnc_json_c 已删, 不再检查打包内容。)
     MOD_ENTRY="$(echo "$LIST" | awk '{print $4}' | grep -E '(^|/)module\.prop$' | head -1)"
     if [ -n "$MOD_ENTRY" ]; then
       unzip -p "$CHECK_ARTIFACT" "$MOD_ENTRY" > "$ZIPTMP.module.prop" 2>/dev/null
@@ -284,21 +270,8 @@ if [ -n "$ARTIFACT" ]; then
       fail "artifact missing bin/hnc_dpid"
     fi
 
-    C_ENTRY="$(echo "$LIST" | awk '{print $4}' | grep -E '(^|/)bin/hnc_json_c$' | head -1)"
-    if [ -n "$C_ENTRY" ]; then
-      unzip -p "$CHECK_ARTIFACT" "$C_ENTRY" > "$ZIPTMP.hnc_json_c" 2>/dev/null
-      if [ -s "$ZIPTMP.hnc_json_c" ] && command -v od >/dev/null 2>&1; then
-        CM="$(od -An -tx1 -j18 -N2 "$ZIPTMP.hnc_json_c" 2>/dev/null | awk '{print $1 " " $2}')"
-        case "$CM" in
-          "b7 00"|"28 00") ok "artifact hnc_json_c is Android ARM ELF: $CM" ;;
-          *) fail "artifact hnc_json_c is not Android ARM/AArch64 ELF: machine='$CM'" ;;
-        esac
-      else
-        fail "artifact hnc_json_c present but cannot inspect ELF machine"
-      fi
-    else
-      ok "artifact has no optional hnc_json_c helper"
-    fi
+    ok "artifact has no hnc_json_c helper (removed in v5.26 T8)"
+
 
     echo "$LIST" | awk '{print $4}' | grep -E '\.zip$' >/dev/null && warn "artifact contains nested zip; verify this is not an Actions outer wrapper" || ok "artifact has no nested zip"
 
@@ -313,7 +286,7 @@ if [ -n "$ARTIFACT" ]; then
       warn "bin/artifact_sanity_check.sh missing; strict artifact sanity gate skipped"
     fi
 
-    rm -f "$ZIPTMP" "$ZIPTMP.module.prop" "$ZIPTMP.hnc_json_c" "$ZIPTMP.hnc_dpid" "$PICK_OUT" 2>/dev/null || true
+    rm -f "$ZIPTMP" "$ZIPTMP.module.prop" "$ZIPTMP.hnc_dpid" "$PICK_OUT" 2>/dev/null || true
   fi
 fi
 

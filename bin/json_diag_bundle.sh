@@ -75,9 +75,6 @@ copy_if_exists "$RUN/json_legacy_fallback.count" "$OUT/run/json_legacy_fallback.
 
 # hnc_json C helper diagnostics are read-only and help verify whether CI packaged
 # an Android ARM helper, whether writes are still opt-in, and what fallback is active.
-if [ -x "$BIN/hnc_json_c_status.sh" ]; then
-  run_cmd hnc_json_c_status sh "$BIN/hnc_json_c_status.sh"
-fi
 if [ -x "$BIN/hnc_json" ]; then
   run_cmd hnc_json_version sh "$BIN/hnc_json" version
 fi
@@ -160,7 +157,7 @@ done
   echo "  \"has_tc_snapshot\": $([ -x "$BIN/tc_state_snapshot.sh" ] && echo true || echo false),"
   echo "  \"has_legacy_fallback_status\": $([ -x "$BIN/json_legacy_fallback_status.sh" ] && echo true || echo false),"
   echo "  \"has_hnc_json\": $([ -x "$BIN/hnc_json" ] && echo true || echo false),"
-  echo "  \"has_hnc_json_c_status\": $([ -x "$BIN/hnc_json_c_status.sh" ] && echo true || echo false),"
+
   echo "  \"has_stats_diag\": $([ -x "$BIN/stats_diag.sh" ] && echo true || echo false),"
   echo "  \"has_stats_identity_diag\": $([ -x "$BIN/stats_identity_diag.sh" ] && echo true || echo false),"
   echo "  \"has_stats_retention_diag\": $([ -x "$BIN/stats_retention_diag.sh" ] && echo true || echo false),"

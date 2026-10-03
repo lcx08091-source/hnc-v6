@@ -18,7 +18,6 @@ set -eu
 SELF="$0"
 BINDIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)"
 JSON_GUARD="$BINDIR/json_guard.sh"
-HNC_JSON_C="$BINDIR/hnc_json_c"
 HNC_BASE="${HNC:-/data/local/hnc}"
 LOCKDIR="$HNC_BASE/run/hnc_json.lock"
 # rc36 (LOCK-1): json_set.sh 用 $HNC/run/json.lock 作全局写锁。历史上 hnc_json 只用
@@ -50,8 +49,6 @@ Usage:
   hnc_json version
 
 Notes:
-  If bin/hnc_json_c exists and is executable, read-only commands may try it first.
-  C write commands are disabled by default and require HNC_JSON_C_WRITE_ENABLE=1.
   Shell implementation remains the fallback for every write path.
 USAGE
 }
@@ -157,66 +154,6 @@ acquire_lock() {
   trap 'exit 143' TERM
 }
 
-hnc_json_c_machine() {
-  # Read ELF e_machine from bytes 18..19.
-  # AArch64 = b7 00, ARM = 28 00, x86_64 host builds = 3e 00.
-  [ -f "$1" ] || return 1
-  od -An -tx1 -j18 -N2 "$1" 2>/dev/null | awk '{print $1 " " $2}'
-}
-
-hnc_json_c_available() {
-  [ "${HNC_JSON_C_DISABLE:-0}" = "1" ] && return 1
-  [ -x "$HNC_JSON_C" ] || return 1
-
-  mach="$(hnc_json_c_machine "$HNC_JSON_C" 2>/dev/null || true)"
-  case "$mach" in
-    "b7 00"|"28 00") : ;;
-    "")
-      # If od is unavailable, fall through to the executable self-test.
-      : ;;
-    *)
-      # Do not try host-built Linux/x86 helpers inside Android modules.
-      # Unit tests may opt in with HNC_JSON_C_ALLOW_HOST=1.
-      [ "${HNC_JSON_C_ALLOW_HOST:-0}" = "1" ] || return 1
-      ;;
-  esac
-
-  "$HNC_JSON_C" version >/dev/null 2>&1 || return 1
-  return 0
-}
-
-hnc_json_c_write_enabled() {
-  # hotfix20.8: keep the optional C helper read-only by default. The C writer
-  # is still useful for controlled experiments, but normal runtime writes stay
-  # on the shell/json_guard path unless explicitly opted in.
-  [ "${HNC_JSON_C_WRITE_ENABLE:-0}" = "1" ]
-}
-
-hnc_json_c_try() {
-  case "${1:-}" in
-    validate|get-top|get|version)
-      hnc_json_c_available || return 127
-      "$HNC_JSON_C" "$@"; return $? ;;
-    set-object-key|object-set|del-object-key|object-del|add-array-unique|array-add-unique|del-array-value|array-del-value|token-revoke|token-revoke-all)
-      # v5.11: 先判写门控再探测 helper。旧顺序先跑 hnc_json_c_available(会 exec 一次
-      # `hnc_json_c version`), 门控关闭(默认)时每次写都白白 fork+exec 一次 C helper;
-      # helper 损坏/卡住时还会拖住本该纯 shell 的写路径。
-      hnc_json_c_write_enabled || return 127
-      hnc_json_c_available || return 127
-      # v5.11: C helper 自身不加锁。显式开启写时也要持有与 shell 写者同一把
-      # json.lock/hnc_json.lock, 否则与 json_set.sh 并发写同一文件会丢更新。
-      # 返回前释放, 失败时后面的 shell 回落路径会重新加锁(mkdir 锁不可重入)。
-      acquire_lock || return 1
-      set +e
-      "$HNC_JSON_C" "$@"
-      _c_rc=$?
-      set -e
-      _release_locks
-      trap - EXIT INT TERM
-      return "$_c_rc" ;;
-    *) return 127 ;;
-  esac
-}
 
 validate_file() {
   f="$1"
@@ -1181,16 +1118,10 @@ cmd="${1:-}"
 case "$cmd" in
   validate)
     [ $# -eq 2 ] || { usage >&2; exit 2; }
-    unset rc
-    hnc_json_c_try validate "$2" || rc=$?
-    case "${rc:-0}" in 0) exit 0 ;; 1|2) exit "$rc" ;; esac
     validate_file "$2"
     ;;
   get-top|get)
     [ $# -eq 3 ] || { usage >&2; exit 2; }
-    unset rc
-    hnc_json_c_try get-top "$2" "$3" || rc=$?
-    case "${rc:-0}" in 0) exit 0 ;; 2|3) exit "$rc" ;; esac
     get_top "$2" "$3"
     ;;
   set-top|set)
@@ -1215,30 +1146,18 @@ case "$cmd" in
     ;;
   set-object-key|object-set)
     [ $# -ge 4 ] && [ $# -le 5 ] || { usage >&2; exit 2; }
-    unset rc
-    hnc_json_c_try set-object-key "$2" "$3" "$4" "${5:-str}" || rc=$?
-    [ "${rc:-0}" = "0" ] && exit 0
     set_object_key "$2" "$3" "$4" "${5:-str}"
     ;;
   del-object-key|object-del)
     [ $# -eq 3 ] || { usage >&2; exit 2; }
-    unset rc
-    hnc_json_c_try del-object-key "$2" "$3" || rc=$?
-    [ "${rc:-0}" = "0" ] && exit 0
     del_object_key "$2" "$3"
     ;;
   add-array-unique|array-add-unique)
     [ $# -eq 4 ] || { usage >&2; exit 2; }
-    unset rc
-    hnc_json_c_try add-array-unique "$2" "$3" "$4" || rc=$?
-    [ "${rc:-0}" = "0" ] && exit 0
     array_add_unique "$2" "$3" "$4"
     ;;
   del-array-value|array-del-value)
     [ $# -eq 4 ] || { usage >&2; exit 2; }
-    unset rc
-    hnc_json_c_try del-array-value "$2" "$3" "$4" || rc=$?
-    [ "${rc:-0}" = "0" ] && exit 0
     array_del_value "$2" "$3" "$4"
     ;;
   set-map-field|map-set-field)
@@ -1247,20 +1166,14 @@ case "$cmd" in
     ;;
   token-revoke)
     [ $# -eq 3 ] || { usage >&2; exit 2; }
-    unset rc
-    hnc_json_c_try token-revoke "$2" "$3" || rc=$?
-    [ "${rc:-0}" = "0" ] && exit 0
     token_revoke "$2" "$3"
     ;;
   token-revoke-all)
     [ $# -eq 2 ] || { usage >&2; exit 2; }
-    unset rc
-    hnc_json_c_try token-revoke-all "$2" || rc=$?
-    [ "${rc:-0}" = "0" ] && exit 0
     token_revoke_all "$2"
     ;;
   version)
-    hnc_json_c_try version >/dev/null 2>&1 && echo "hnc_json hotfix20.8 readonly-c-bridge+c-helper" || echo "hnc_json hotfix20.8 readonly-c-bridge"
+    echo "hnc_json hotfix20.8 shell"
     ;;
   -h|--help|help|"")
     usage
