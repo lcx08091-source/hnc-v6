@@ -33,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -261,7 +262,10 @@ func readDevicesJSON(path string) map[string]hotspotDev {
 
 // ──────────── alert log writer ────────────
 
-func appendAlert(path string, a Alert) error {
+// Append v5.26 T7: 往 run/alerts.jsonl 追加一条告警的唯一权威实现。
+// httpd 与看门狗两个进程会同时追加同一文件, O_APPEND 只保证不覆盖、
+// 不保证整行原子 —— flock(LOCK_EX) 后一次 Write 写完整行再解锁。
+func Append(path string, a Alert) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -274,11 +278,17 @@ func appendAlert(path string, a Alert) error {
 	if err != nil {
 		return err
 	}
-	if _, err := f.Write(append(b, '\n')); err != nil {
-		return err
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		// flock 不可用(如某些 FUSE)时退化为直接写, 与旧行为一致。
+		_, werr := f.Write(append(b, '\n'))
+		return werr
 	}
-	return nil
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_, err = f.Write(append(b, '\n'))
+	return err
 }
+
+func appendAlert(path string, a Alert) error { return Append(path, a) }
 
 // makeAlertID derives a stable-ish ID from kind+mac+coarse-timestamp.
 // Used for dedup if the WebUI gets two GETs at once.

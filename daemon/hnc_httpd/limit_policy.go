@@ -1004,20 +1004,9 @@ func (c *limitCtl) maybeAlert(mac string, s *ctlDevState, q *quotaPolicy, period
 			"action":      q.Action,
 		},
 	}
-	b, err := json.Marshal(a)
-	if err != nil {
-		return
-	}
-	if err := os.MkdirAll(filepath.Dir(acfg.AlertsJSONLPath), 0o755); err != nil {
-		return
-	}
-	f, err := os.OpenFile(acfg.AlertsJSONLPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
+	if err := alert.Append(acfg.AlertsJSONLPath, a); err != nil { // v5.26 T7: 唯一权威(带 flock)
 		log.Printf("limitctl: alert append: %v", err)
-		return
 	}
-	_, _ = f.Write(append(b, '\n'))
-	f.Close()
 }
 
 // annotateDevices 把视图字段并入 /api/devices 每行(nil 安全)。

@@ -80,7 +80,7 @@ func pairAlert(hncDir, ip, reason string, extra map[string]interface{}) bool {
 		Extra:  extra,
 	}
 	cfg := alert.NewConfig(hncDir)
-	if err := puAppendAlert(cfg.AlertsJSONLPath, a); err != nil {
+	if err := alert.Append(cfg.AlertsJSONLPath, a); err != nil {
 		log.Printf("pair_guard: append alert failed: %v", err)
 	}
 	return true

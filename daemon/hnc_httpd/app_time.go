@@ -680,7 +680,7 @@ func (s *server) appTimeEnforce(now time.Time) {
 			Extra: map[string]interface{}{"app_id": l.AppID, "app_name": name, "minutes": l.Minutes,
 				"used_sec": u, "until": nextLocalMidnight(now).Unix()},
 		}
-		_ = appendAlertJSONL(cfg.AlertsJSONLPath, a)
+		_ = alert.Append(cfg.AlertsJSONLPath, a)
 	}
 	if changed {
 		b, _ := json.Marshal(map[string]interface{}{"date": appTimeAlerts.Date, "sent": appTimeAlerts.Sent})
@@ -688,22 +688,7 @@ func (s *server) appTimeEnforce(now time.Time) {
 	}
 }
 
-func appendAlertJSONL(path string, a alert.Alert) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	b, err := json.Marshal(a)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(append(b, '\n'))
-	return err
-}
+// 原 JSONL 追加副本 v5.26 T7 删除: 统一走 alert.Append(带 flock)。
 
 // ─── 动作 ──────────────────────────────────────────────────────────────
 

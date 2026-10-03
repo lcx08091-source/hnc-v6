@@ -875,7 +875,7 @@ func (s *server) macMergeAlert(f *macMergeFile, macs []string, now time.Time) {
 			Extra: map[string]interface{}{"old_mac": best.OldMAC, "score": best.Score, "reasons": best.Reasons,
 				"new_name": newName, "old_name": oldName},
 		}
-		_ = appendAlertJSONL(cfg.AlertsJSONLPath, a)
+		_ = alert.Append(cfg.AlertsJSONLPath, a)
 	}
 }
 

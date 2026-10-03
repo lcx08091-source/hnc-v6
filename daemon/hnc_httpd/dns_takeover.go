@@ -729,7 +729,7 @@ func newDNSTakeover(s *server) *dnsTakeover {
 	}
 	t.emitAlert = func(a alert.Alert) {
 		cfg := alert.NewConfig(s.hncDir)
-		if err := appendAlertJSONL(cfg.AlertsJSONLPath, a); err != nil {
+		if err := alert.Append(cfg.AlertsJSONLPath, a); err != nil {
 			log.Printf("dns_takeover: append alert failed: %v", err)
 		}
 	}

@@ -1211,7 +1211,7 @@ func (s *server) phoneUsage() *puEngine {
 				b, _ := os.ReadFile("/proc/sys/kernel/random/boot_id")
 				return strings.TrimSpace(string(b))
 			},
-			emitAlert:  func(a alert.Alert) error { return puAppendAlert(acfg.AlertsJSONLPath, a) },
+			emitAlert:  func(a alert.Alert) error { return alert.Append(acfg.AlertsJSONLPath, a) },
 			alertsOn:   func() bool { return alert.LoadConfig(acfg.AlertsConfigPath).Enabled },
 			simHotspot: s.simHotspotHours,
 		})
@@ -1219,23 +1219,7 @@ func (s *server) phoneUsage() *puEngine {
 	return puEng
 }
 
-// puAppendAlert 追加到 run/alerts.jsonl(与 dpid alert 包同格式; O_APPEND 单行写, 与 dpid 并发安全)
-func puAppendAlert(path string, a alert.Alert) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	b, err := json.Marshal(a)
-	if err != nil {
-		return err
-	}
-	_, err = f.Write(append(b, '\n'))
-	return err
-}
+// 原套餐告警追加副本 v5.26 T7 删除: 统一走 alert.Append(带 flock)。
 
 // PhoneUsageLoop 每 60 秒采样+落盘, 每 5 分钟检查一次套餐告警; 停机时补采一次并落盘。
 func (s *server) PhoneUsageLoop(stop <-chan struct{}) {

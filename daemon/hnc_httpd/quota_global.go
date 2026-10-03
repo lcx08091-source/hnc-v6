@@ -9,10 +9,7 @@ package main
 // 且是配额判定已用的口径), 全局告警与 API 都从它取数。
 
 import (
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -176,18 +173,9 @@ func (c *limitCtl) checkGlobalQuotaLocked(monKey string, ms time.Time, now time.
 				"warn_level":  kind,
 			},
 		}
-		if err := os.MkdirAll(filepath.Dir(acfg.AlertsJSONLPath), 0o755); err != nil {
+		if err := alert.Append(acfg.AlertsJSONLPath, a); err != nil { // v5.26 T7: 唯一权威(带 flock)
 			continue
 		}
-		f, err := os.OpenFile(acfg.AlertsJSONLPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-		if err != nil {
-			continue
-		}
-		line, err := json.Marshal(a)
-		if err == nil {
-			_, _ = f.Write(append(line, '\n'))
-		}
-		f.Close()
 		if kind == "warn" {
 			if c.st.GlobalAlertWarn == nil {
 				c.st.GlobalAlertWarn = map[string]string{}
