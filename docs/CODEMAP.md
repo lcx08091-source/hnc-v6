@@ -26,13 +26,13 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 
 | 功能 | 权威实现 | 说明 |
 |---|---|---|
-| 进程检测(pid → 是否 HNC 的进程) | `src/dpid/procfind`(共享包) | Self → pidfile(存活 + cmdline 校验)→ /proc 扫描;httpd 自检 / 功耗统计 / 运行状态 / 进程健康四处共用 |
+| 进程检测(pid → 是否 HNC 的进程) | `src/dpid/procfind`(共享包;进程定义表 `procfind.Spec`) | Self → pidfile(存活 + cmdline 校验)→ /proc 扫描;pidfile / 关键字只在 `Spec` 表里定义一次,httpd 自检 / 功耗统计 / 运行状态共用;进程健康(`/api/proc_health`)用同一次 /proc 扫描做计数 |
 | 热点网卡名 | `bin/hnc_iface.sh`(探测器)+ `src/dpid/ifacehint`(读取) | 结果写 `run/iface_detect.json`,10 分钟内新鲜则 dpid 侧全部信它 |
 | 时钟是否可信 | `src/dpid/clockhwm`(共享包) | ≥2025(UTC)且不落后高水位 600 秒;shell 版 `hnc_clock.sh` 保留给脚本,镜像测试锁定常量一致 |
 | 月用量 | `daemon/hnc_httpd` 的 `limitCtl` | 计费月,取防火墙累计与 DPI 合计的较大值;设备卡 / 配额 / 全局告警 / `/api/usage_month` 同源 |
 | 告警写入(`run/alerts.jsonl`) | `src/dpid/alert` 的 `Append`(带 flock) | httpd 与看门狗两个进程并发追加安全 |
 | 看门狗主循环 | `src/dpid/cmd/hnc_watchdog`(Go) | `bin/watchdog.sh` 只提供 `action` |
-| dpid 守护 | `run/dpid_launcher.choice` 指定的那一个 | guard(shell)/ supervisor(Go)/ launcher(C)三选一机制保留,选定后不换手 |
+| dpid 守护 | `run/dpid_launcher.choice` 指定的那一个 | launcher(C)/ guard(shell)/ supervisor(Go)/ direct(直拉)机制保留,选定后不换手;sentinel 救命时改写为 direct |
 
 ---
 

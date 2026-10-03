@@ -26,8 +26,12 @@ test_start "hnc_json_c: 诊断脚本不再引用 status helper"
 test_start "hnc_json_c: gate 测试的 host-helper 用例已移除"
 ! grep -q 'rejects host hnc_json_c' "$HNC_REPO_ROOT/test/unit/test_ci_preflight_artifact_gate.sh" && test_pass || test_fail "gate 用例残留"
 
-test_start "hnc_json_c: 全仓无功能性引用(仅剩 v5.26 T8 注释)"
-if grep -rn 'hnc_json_c' "$HNC_REPO_ROOT/bin/" "$HNC_REPO_ROOT/service.sh" "$HNC_REPO_ROOT/customize.sh" 2>/dev/null | grep -v 'v5.26 T8' | grep -q .; then
+test_start "hnc_json_c: ci_preflight 拒绝打进包里的旧 hnc_json_c"
+grep -q "fail \"artifact contains bin/hnc_json_c" "$HNC_REPO_ROOT/bin/ci_preflight.sh" && test_pass || test_fail "artifact 拒绝检查缺失"
+
+test_start "hnc_json_c: 全仓无功能性引用(仅剩 v5.26 注释 / ci_preflight 的拒绝检查)"
+if grep -rn 'hnc_json_c' "$HNC_REPO_ROOT/bin/" "$HNC_REPO_ROOT/service.sh" "$HNC_REPO_ROOT/customize.sh" 2>/dev/null \
+   | grep -v 'v5.26' | grep -v "^$HNC_REPO_ROOT/bin/ci_preflight.sh:.*grep -qE '(^|/)bin/hnc_json_c\$'" | grep -q .; then
   test_fail "功能性引用残留"
 else
   test_pass

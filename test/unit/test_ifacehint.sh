@@ -25,3 +25,6 @@ test_start "ifacehint: 单测覆盖五种场景"
   && grep -q 'TestReadEmptyIfaceFallsBack' "$HNC_REPO_ROOT/src/dpid/ifacehint/ifacehint_test.go" \
   && grep -q 'TestReadCorruptDetectFallsBack' "$HNC_REPO_ROOT/src/dpid/ifacehint/ifacehint_test.go" \
   && grep -q 'TestReadFutureTsRejected' "$HNC_REPO_ROOT/src/dpid/ifacehint/ifacehint_test.go" && test_pass || test_fail "单测缺失"
+
+test_start "ifacehint: guard.sh json_escape 仍把 Tab 换成空格(防编辑器把 Tab 改成空格)"
+grep -q "$(printf 's/\t/ /g')" "$HNC_REPO_ROOT/bin/hnc_dpid_guard.sh" && test_pass || test_fail "json_escape tab rule lost"

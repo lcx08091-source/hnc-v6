@@ -224,9 +224,8 @@ if [ -n "$ARTIFACT" ]; then
     echo "$LIST" | grep -E 'webroot/index.html$' >/dev/null && ok "artifact contains webroot/index.html" || fail "artifact missing webroot/index.html"
     echo "$LIST" | grep -E 'webroot/json-health.html$' >/dev/null && ok "artifact contains json-health.html" || warn "artifact missing json-health.html"
 
-    # hotfix20.9: artifact-level version and optional C helper checks. This
-    # catches the common mistake where CI builds an old module.prop, or a host
-    # (v5.26 T8: hnc_json_c 已删, 不再检查打包内容。)
+    # hotfix20.9: artifact-level version checks. This catches the common mistake
+    # where CI builds an old module.prop.
     MOD_ENTRY="$(echo "$LIST" | awk '{print $4}' | grep -E '(^|/)module\.prop$' | head -1)"
     if [ -n "$MOD_ENTRY" ]; then
       unzip -p "$CHECK_ARTIFACT" "$MOD_ENTRY" > "$ZIPTMP.module.prop" 2>/dev/null
@@ -270,8 +269,12 @@ if [ -n "$ARTIFACT" ]; then
       fail "artifact missing bin/hnc_dpid"
     fi
 
-    ok "artifact has no hnc_json_c helper (removed in v5.26 T8)"
-
+    # v5.26 T8: C 版 JSON 工具已删, 包里不该再出现它(防旧构建产物被误打进去)。
+    if echo "$LIST" | awk '{print $4}' | grep -qE '(^|/)bin/hnc_json_c$'; then
+      fail "artifact contains bin/hnc_json_c (removed in v5.26; stale build output?)"
+    else
+      ok "artifact has no hnc_json_c helper (removed in v5.26)"
+    fi
 
     echo "$LIST" | awk '{print $4}' | grep -E '\.zip$' >/dev/null && warn "artifact contains nested zip; verify this is not an Actions outer wrapper" || ok "artifact has no nested zip"
 

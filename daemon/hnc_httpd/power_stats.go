@@ -45,22 +45,19 @@ const (
 )
 
 type powerProcDef struct {
-	Name     string
-	Label    string
-	Key      string   // pidfile 校验: cmdline 必含
-	PIDFiles []string // run/ 下
-	ScanKey  string   // pidfile 失效时扫 /proc: cmdline(NUL→空格)必含
-	Self     bool
+	Name  string // = procfind.Spec 的名字(pidfile / 关键字都从那里取)
+	Label string
 }
 
+// v5.26 T3: 进程定义统一在 procfind.Spec, 这里只留展示名。
 var powerProcDefs = []powerProcDef{
-	{"hnc_httpd", "hnc_httpd(含它拉起的脚本)", "httpd", nil, "", true},
-	{"hotspotd", "hotspotd", "hotspotd", []string{"hotspotd.pid"}, "bin/hotspotd", false},
-	{"hnc_dpid", "hnc_dpid", "dpid", []string{"dpid.child.pid", "dpid.pid"}, "bin/hnc_dpid -config", false},
-	{"dpid_guard", "dpid 守护(shell)", "hnc_dpid_guard", []string{"dpid_guard.pid"}, "hnc_dpid_guard.sh", false},
-	{"watchdog", "watchdog(含它拉起的脚本)", "watchdog", []string{"watchdog.pid"}, "hnc_watchdog", false},
-	{"offload_guard", "offload 兜底(shell)", "hnc_offload_guard", []string{"offload_guard.pid"}, "hnc_offload_guard.sh daemon", false},
-	{"clsact_wd", "clsact 守护(shell)", "hnc_clsact_watchdog", []string{"clsact_wd.pid"}, "hnc_clsact_watchdog.sh", false},
+	{"hnc_httpd", "hnc_httpd(含它拉起的脚本)"},
+	{"hotspotd", "hotspotd"},
+	{"hnc_dpid", "hnc_dpid"},
+	{"dpid_guard", "dpid 守护(shell)"},
+	{"watchdog", "watchdog(含它拉起的脚本)"},
+	{"offload_guard", "offload 兜底(shell)"},
+	{"clsact_wd", "clsact 守护(shell)"},
 }
 
 type powerProcSample struct {
@@ -143,7 +140,7 @@ func (fs powerFS) procTable() map[int]procfind.Row {
 }
 
 func (fs powerFS) findPID(d powerProcDef, hncDir string, tab map[int]procfind.Row) int {
-	return fs.procFS().FindPID(procfind.Def{Self: d.Self, PIDFiles: d.PIDFiles, Key: d.Key, ScanKey: d.ScanKey}, hncDir, tab)
+	return fs.procFS().FindPID(procfind.Spec(d.Name), hncDir, tab)
 }
 
 // descTicks 存活后代进程的 Own+Child 之和(不含 root 自己)

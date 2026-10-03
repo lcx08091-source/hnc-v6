@@ -153,3 +153,39 @@ func TestFindPIDPidfileOrder(t *testing.T) {
 		t.Fatalf("second pidfile should be used: %d", pid)
 	}
 }
+
+// v5.26 审查: dpid 已死、只剩 shell guard / Go supervisor 时, 扫描不能把它们认成 dpid。
+func TestSpecDpidScanIgnoresGuards(t *testing.T) {
+	f := newFake()
+	f.files["/proc/200/stat"] = statLine(200, 1, "sh", 1, 1, 0, 0, 10)
+	f.setCmdline(200, "sh /data/local/hnc/bin/hnc_dpid_guard.sh")
+	f.files["/proc/201/stat"] = statLine(201, 1, "hnc_dpid_superv", 1, 1, 0, 0, 10)
+	f.setCmdline(201, "/data/local/hnc/bin/hnc_dpid_supervisor")
+	fs := f.fs(1)
+	if pid := fs.FindPID(Spec("hnc_dpid"), "/data/local/hnc", fs.Table()); pid != 0 {
+		t.Fatalf("guard/supervisor mistaken for dpid: pid=%d", pid)
+	}
+	f.files["/proc/300/stat"] = statLine(300, 200, "hnc_dpid", 1, 1, 0, 0, 10)
+	f.setCmdline(300, "/data/local/hnc/bin/hnc_dpid -config /data/local/hnc/data/dpid.json")
+	fs = f.fs(1)
+	if pid := fs.FindPID(Spec("hnc_dpid"), "/data/local/hnc", fs.Table()); pid != 300 {
+		t.Fatalf("real dpid not found: pid=%d", pid)
+	}
+}
+
+func TestSpecTable(t *testing.T) {
+	for _, n := range SpecNames() {
+		d := Spec(n)
+		if !d.Self && (len(d.PIDFiles) == 0 || d.Key == "" || d.ScanKey == "") {
+			t.Errorf("%s: incomplete spec %+v", n, d)
+		}
+	}
+	d := Spec("hnc_dpid")
+	d.PIDFiles[0] = "mutated"
+	if Spec("hnc_dpid").PIDFiles[0] != "dpid.child.pid" {
+		t.Error("Spec must return a copy")
+	}
+	if Spec("nope").ScanKey != "" {
+		t.Error("unknown spec should be zero")
+	}
+}

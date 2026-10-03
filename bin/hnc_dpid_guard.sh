@@ -147,7 +147,7 @@ sleep_s() {
 
 json_escape() {
     # Small shell-safe JSON string escape for status messages.
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/  / /g'
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g'
 }
 
 write_waiting_state() {

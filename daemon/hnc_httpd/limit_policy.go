@@ -57,6 +57,10 @@ const (
 	limitAuditTID      = "limitctl"
 )
 
+// limitUsageMonthKeep /api/usage_month 最近被请求后, DPI 下限保持计算多久(v5.26 T4)。必须长于
+// limitHistEvery: 下限每 15 分钟才刷新一次, 窗口短于它会让刷新时刻多半已过期 → 接口一直走回退。
+const limitUsageMonthKeep = 30 * time.Minute
+
 // ── 纯数据类型 ────────────────────────────────────────────────
 
 // limitRule 一台设备在 tc/iptables 层的规则。kbit, 0 = 该方向不限速。
@@ -398,8 +402,8 @@ type limitCtl struct {
 	histDay      map[string]uint64
 	histMon      map[string]uint64
 	histMonSplit map[string]rxTxPair // v5.26 T4: 月度 DPI 合计的 rx/tx 拆分
-	histOldest   int64
-	histMonKey   string // 已计算 DPI 下限的计费月 key(空=没算过, usage_month 走回退)               // v5.26 T4: 本计费月 DPI 数据最老一行(oldest_data)
+	histOldest   int64               // v5.26 T4: 本计费月 DPI 数据最老一行(oldest_data)
+	histMonKey   string              // 已计算 DPI 下限的计费月 key(空=没算过, usage_month 走回退)
 	histAt       time.Time
 	histKey      string
 	usageMonthAt time.Time  // v5.26 T4: /api/usage_month 最近一次被请求的时刻
@@ -742,7 +746,7 @@ func (c *limitCtl) tick(now time.Time) {
 	if c.histKey != hk || now.Sub(c.histAt) >= limitHistEvery || now.Before(c.histAt) {
 		// v5.26 T4: DPI 下限不再只服务设备配额 —— 有设备策略、全局告警
 		// 月度配额开启、或最近 5 分钟有人请求过 /api/usage_month, 都要算。
-		if len(c.policies) > 0 || c.globalQuotaOn() || now.Sub(c.usageMonthAt) < 5*time.Minute {
+		if len(c.policies) > 0 || c.globalQuotaOn() || now.Sub(c.usageMonthAt) < limitUsageMonthKeep {
 			c.histDay = sumStatsHistory(c.hncDir, ds, now.Add(time.Second))
 			split, oldest := sumStatsHistorySplit(c.hncDir, ms, now.Add(time.Second))
 			c.histMonSplit, c.histOldest = split, oldest

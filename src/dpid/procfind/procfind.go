@@ -125,8 +125,10 @@ type Def struct {
 	ScanKey  string   // pidfile 全失效时扫 /proc: cmdline 必含(空则不扫)
 }
 
-// FindPID 统一查找: Self → pidfile(tab 中存活 + cmdline 含 Key 或为空)
+// FindPID 统一查找: Self → pidfile(存活 + cmdline 含 Key 或为空)
 // → ScanKey 扫描(升序, cmdline 含 ScanKey, 跳过自己)。找不到返回 0。
+// tab 可为 nil: pidfile 存活改读 /proc/<pid>/stat 判断, 只有走到扫描时才现建进程表
+// (selfcheck 这种只查几个进程的调用方, 多数情况下不必扫全部 /proc)。
 func (fs FS) FindPID(d Def, hncDir string, tab map[int]Row) int {
 	if d.Self && fs.SelfPID > 0 {
 		return fs.SelfPID
@@ -140,7 +142,11 @@ func (fs FS) FindPID(d Def, hncDir string, tab map[int]Row) int {
 		if err != nil || pid <= 0 {
 			continue
 		}
-		if _, ok := tab[pid]; !ok {
+		if tab != nil {
+			if _, ok := tab[pid]; !ok {
+				continue
+			}
+		} else if _, err := fs.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err != nil {
 			continue
 		}
 		if cl := fs.Cmdline(pid); cl == "" || strings.Contains(cl, d.Key) {
@@ -149,6 +155,9 @@ func (fs FS) FindPID(d Def, hncDir string, tab map[int]Row) int {
 	}
 	if d.ScanKey == "" {
 		return 0
+	}
+	if tab == nil {
+		tab = fs.Table()
 	}
 	pids := make([]int, 0, len(tab))
 	for pid := range tab {
@@ -164,4 +173,35 @@ func (fs FS) FindPID(d Def, hncDir string, tab map[int]Row) int {
 		}
 	}
 	return 0
+}
+
+// specs HNC 进程的唯一定义表(v5.26 T3 审查补齐): pidfile / 校验关键字 / 扫描关键字
+// 取自 power_stats 真机验证过的那份。selfcheck、/api/power、/api/run_status 都从这里取,
+// 不再各自维护 —— 旧 selfcheck 的扫描关键字是裸 "hnc_dpid", 会把 hnc_dpid_guard.sh /
+// hnc_dpid_supervisor 误认成 dpid(dpid 已死却报「在跑」)。
+var specs = map[string]Def{
+	"hnc_httpd":     {Self: true, Key: "httpd"},
+	"hotspotd":      {PIDFiles: []string{"hotspotd.pid"}, Key: "hotspotd", ScanKey: "bin/hotspotd"},
+	"hnc_dpid":      {PIDFiles: []string{"dpid.child.pid", "dpid.pid"}, Key: "dpid", ScanKey: "bin/hnc_dpid -config"},
+	"dpid_guard":    {PIDFiles: []string{"dpid_guard.pid"}, Key: "hnc_dpid_guard", ScanKey: "hnc_dpid_guard.sh"},
+	"watchdog":      {PIDFiles: []string{"watchdog.pid"}, Key: "watchdog", ScanKey: "hnc_watchdog"},
+	"offload_guard": {PIDFiles: []string{"offload_guard.pid"}, Key: "hnc_offload_guard", ScanKey: "hnc_offload_guard.sh daemon"},
+	"clsact_wd":     {PIDFiles: []string{"clsact_wd.pid"}, Key: "hnc_clsact_watchdog", ScanKey: "hnc_clsact_watchdog.sh"},
+}
+
+// Spec 按名字取进程定义(返回副本, 调用方改了不影响表)。未知名字 → 零值(找不到任何进程)。
+func Spec(name string) Def {
+	d := specs[name]
+	d.PIDFiles = append([]string(nil), d.PIDFiles...)
+	return d
+}
+
+// SpecNames 定义表里的全部名字(排序, 测试用)。
+func SpecNames() []string {
+	out := make([]string, 0, len(specs))
+	for k := range specs {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
 }

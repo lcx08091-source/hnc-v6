@@ -168,3 +168,30 @@ func TestMonthUsagePrefersBiggerSource(t *testing.T) {
 		t.Fatalf("split 合计应等于权威口径: %+v", split[tMAC])
 	}
 }
+
+// 审查补测: 没有设备配额、也没开全局配额时, 只靠 /api/usage_month 被请求触发计算。
+// 请求后下一轮 tick 就要就绪(不能等 15 分钟的刷新点), 且 5 分钟后再刷新仍保持就绪。
+func TestUsageMonthRequestTriggersHist(t *testing.T) {
+	f := newFixture(t)
+	mid := nowBase()
+	gqFeed(f, tMAC, 0, 500, mid) // 无策略、无全局配额 → 不算 DPI 下限
+	if _, _, _, ok := f.c.MonthUsageSplit(); ok {
+		t.Fatal("no policy / no quota / no request: should not be ready")
+	}
+	f.c.NoteUsageMonthRequest()
+	f.c.mu.Lock()
+	f.c.usageMonthAt = mid.Add(90 * time.Second) // 与喂给 tick 的受控时间对齐(Note 内部用 time.Now)
+	f.c.mu.Unlock()
+	f.c.tick(mid.Add(2 * time.Minute)) // 远未到 limitHistEvery
+	if _, _, _, ok := f.c.MonthUsageSplit(); !ok {
+		t.Fatal("request should force the next tick to compute the DPI floor")
+	}
+	// 下一个 15 分钟刷新点时(请求已过去 ~17 分钟)仍在保持窗口内, 不应退回未就绪
+	f.c.mu.Lock()
+	f.c.usageMonthAt = mid.Add(2 * time.Minute)
+	f.c.mu.Unlock()
+	f.c.tick(mid.Add(2*time.Minute + limitHistEvery))
+	if _, _, _, ok := f.c.MonthUsageSplit(); !ok {
+		t.Fatal("still within limitUsageMonthKeep: should stay ready")
+	}
+}

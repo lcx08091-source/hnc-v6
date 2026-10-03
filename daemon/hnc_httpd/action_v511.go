@@ -313,7 +313,7 @@ func (s *server) apiRunStatus(w http.ResponseWriter, r *http.Request) {
 	// 传给常量脚本 —— 脚本本体仍不含任何非常量内容。
 	hp := ""
 	pfs := procfind.New()
-	if pid := pfs.FindPID(procfind.Def{PIDFiles: []string{"hotspotd.pid"}, Key: "hotspotd", ScanKey: "bin/hotspotd"}, s.hncDir, pfs.Table()); pid > 0 {
+	if pid := pfs.FindPID(procfind.Spec("hotspotd"), s.hncDir, pfs.Table()); pid > 0 {
 		hp = strconv.Itoa(pid)
 	}
 	cmd := hardenCmd(exec.CommandContext(ctx, "sh", "-c", runStatusScript))

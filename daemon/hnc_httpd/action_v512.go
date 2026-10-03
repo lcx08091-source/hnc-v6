@@ -99,8 +99,10 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, s.simMergeUsageMonth(out))
 		return
 	}
-	// 回退: limitCtl 尚无数据(刚安装), 沿用自然月 DPI 合计
-	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
+	// 回退: limitCtl 本计费月的 DPI 下限还没算过(刚安装 / 刚请求), 直接扫 DPI 合计。
+	// 周期同样按计费日起算 —— 回退只换数据源, 不换口径(否则同一张卡忽而自然月忽而计费月)。
+	_, billingDay, _ := readObserved(s.hncDir)
+	start := billingPeriodStart(now, billingDay)
 	type acc struct {
 		RX uint64 `json:"rx"`
 		TX uint64 `json:"tx"`
@@ -143,7 +145,7 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 	out := map[string]interface{}{
 		"month":        now.Format("2006-01"),
 		"since":        start.Unix(),
-		"period_start": start.Unix(), // v5.26 T4: 回退路径=自然月起点
+		"period_start": start.Unix(), // v5.26 T4: 回退路径同为计费月起点
 		"oldest_data":  oldest,       // 若明显晚于 since, 说明月初的数据已被清理(前端据此提示"不完整")
 		"devices":      per,
 	}

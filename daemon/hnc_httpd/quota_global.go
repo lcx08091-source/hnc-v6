@@ -23,14 +23,18 @@ func (c *limitCtl) globalQuotaOn() bool {
 	return uc.MonthlyQuota.Enabled && uc.MonthlyQuota.LimitBytes > 0
 }
 
-// NoteUsageMonthRequest 记录 /api/usage_month 被请求过: 近 5 分钟内 tick
-// 会计算 DPI 下限(histMon), 供该接口与全局配额告警取数。
+// NoteUsageMonthRequest 记录 /api/usage_month 被请求过: 之后 limitUsageMonthKeep 内
+// tick 会计算 DPI 下限(histMon), 供该接口与全局配额告警取数。本计费月还没算过时
+// 让下一轮 tick 立刻算(否则要等 limitHistEvery 的下一个刷新点, 期间接口一直走回退)。
 func (c *limitCtl) NoteUsageMonthRequest() {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	c.usageMonthAt = time.Now()
+	if c.histMonKey == "" {
+		c.histAt = time.Time{}
+	}
 	c.mu.Unlock()
 }
 
@@ -140,23 +144,26 @@ func (c *limitCtl) checkGlobalQuotaLocked(monKey string, ms time.Time, now time.
 		if pol := c.policies[mac]; pol != nil && pol.Quota != nil && pol.Quota.MonthlyGB > 0 {
 			continue
 		}
-		hostname := alert.LookupHostname(acfg.DevicesJSON, mac)
-		if hostname == "" {
-			hostname = mac
-		}
-		var kind, detail string
+		kind := "warn"
 		if u >= limit {
 			kind = "over"
-			detail = fmt.Sprintf("%s 本月已用 %s, 超出配额 %s", hostname, alert.FormatBytes(u), alert.FormatBytes(limit))
-		} else {
-			kind = "warn"
-			detail = fmt.Sprintf("%s 本月已用 %s, 达到配额 %s 的 %d%%", hostname, alert.FormatBytes(u), alert.FormatBytes(limit), q.WarnAtPct)
 		}
+		// 先去重再查主机名: 已发过的设备每轮(60s)都会走到这里, 不必每次读 devices.json
 		if kind == "warn" && c.st.GlobalAlertWarn[mac] == monKey {
 			continue
 		}
 		if kind == "over" && c.st.GlobalAlertOver[mac] == monKey {
 			continue
+		}
+		hostname := alert.LookupHostname(acfg.DevicesJSON, mac)
+		if hostname == "" {
+			hostname = mac
+		}
+		var detail string
+		if kind == "over" {
+			detail = fmt.Sprintf("%s 本月已用 %s, 超出配额 %s", hostname, alert.FormatBytes(u), alert.FormatBytes(limit))
+		} else {
+			detail = fmt.Sprintf("%s 本月已用 %s, 达到配额 %s 的 %d%%", hostname, alert.FormatBytes(u), alert.FormatBytes(limit), q.WarnAtPct)
 		}
 		a := alert.Alert{
 			// 档位入 ID: warn/over 同小时跨档时同一 ID 会让读回侧一条双标已读

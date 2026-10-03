@@ -2318,18 +2318,17 @@ func (c *scCtx) clockGuardItem() scItem {
 // ═══ 进程与资源 ═══════════════════════════════════════════════════
 
 type scProcDef struct {
-	ID, Label, Key string // Key: cmdline 必含的子串(防 PID 复用)
-	PIDFiles       []string
-	Pidof          string
-	Missing        string // 进程不在时的状态
-	Why            string
+	ID, Label string
+	Proc      string // procfind.Spec 的名字(pidfile / cmdline 关键字的唯一定义表)
+	Missing   string // 进程不在时的状态
+	Why       string
 }
 
 var scProcDefs = []scProcDef{
-	{"proc_httpd", "hnc_httpd", "httpd", []string{"httpd.pid"}, "", scFail, ""},
-	{"proc_hotspotd", "hotspotd", "hotspotd", []string{"hotspotd.pid"}, "hotspotd", scFail, "设备发现/流量统计停止"},
-	{"proc_dpid", "hnc_dpid", "dpid", []string{"dpid.child.pid", "dpid.pid"}, "hnc_dpid", scWarn, "应用识别停止"},
-	{"proc_watchdog", "watchdog", "watchdog", []string{"watchdog.pid"}, "hnc_watchdog", scWarn, "规则掉了不会自动恢复"},
+	{"proc_httpd", "hnc_httpd", "hnc_httpd", scFail, ""},
+	{"proc_hotspotd", "hotspotd", "hotspotd", scFail, "设备发现/流量统计停止"},
+	{"proc_dpid", "hnc_dpid", "hnc_dpid", scWarn, "应用识别停止"},
+	{"proc_watchdog", "watchdog", "watchdog", scWarn, "规则掉了不会自动恢复"},
 }
 
 // scParseProcStat /proc/<pid>/stat → utime+stime(ticks)。comm 可含空格/括号, 从最后一个 ')' 后切。
@@ -2364,38 +2363,12 @@ func scParseVmRSS(status string) int64 {
 	return 0
 }
 
-func (c *scCtx) procAlive(pid int, key string) bool {
-	if pid <= 0 {
-		return false
-	}
-	if _, ok := c.read(fmt.Sprintf("/proc/%d/stat", pid)); !ok {
-		return false
-	}
-	cl, _ := c.read(fmt.Sprintf("/proc/%d/cmdline", pid))
-	cl = strings.ReplaceAll(cl, "\x00", " ")
-	return strings.TrimSpace(cl) == "" || strings.Contains(cl, key)
-}
-
-// findPID pidfile(校验 cmdline)→ pidof
+// findPID v5.26 T3: 与 /api/power、/api/run_status 同一份定义表与查找逻辑(procfind):
+// pidfile(存活 + cmdline 校验)→ /proc 扫描。旧版的 pidof 兜底在 toybox 上会丢带完整
+// 路径启动的进程(rc30.8 「dpid 在跑却报未运行」)。
 func (c *scCtx) findPID(d scProcDef) int {
-	if d.ID == "proc_httpd" && c.env.SelfPID > 0 {
-		return c.env.SelfPID
-	}
-	for _, f := range d.PIDFiles {
-		if pid, err := strconv.Atoi(strings.TrimSpace(c.readTrim(c.hnc("run", f)))); err == nil && c.procAlive(pid, d.Key) {
-			return pid
-		}
-	}
-	// v5.26 T3: pidof 兜底改为 procfind 的 /proc 扫描(共享包, 与 power_stats /
-	// proc_health 同一份实现)。rc30.8 真机事故: toybox pidof 会丢带完整路径
-	// 调用的进程, 表现为 dpid 明明在跑但 pidof 返回空 → 误报「未运行」。
-	if d.Pidof != "" {
-		fs := procfind.FS{ReadFile: c.env.ReadFile, ReadDir: c.env.ReadDir, SelfPID: c.env.SelfPID}
-		if pid := fs.FindPID(procfind.Def{ScanKey: d.Pidof}, c.env.HNCDir, fs.Table()); pid > 0 {
-			return pid
-		}
-	}
-	return 0
+	fs := procfind.FS{ReadFile: c.env.ReadFile, ReadDir: c.env.ReadDir, SelfPID: c.env.SelfPID}
+	return fs.FindPID(procfind.Spec(d.Proc), c.env.HNCDir, nil) // nil: 只在 pidfile 都失效时才扫 /proc
 }
 
 func scSectionProcess(c *scCtx) []scItem {

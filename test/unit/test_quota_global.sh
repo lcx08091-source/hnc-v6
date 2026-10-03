@@ -14,7 +14,8 @@ grep -q 'func (c \*limitCtl) MonthUsage()' "$HNC_REPO_ROOT/daemon/hnc_httpd/quot
   && grep -q 'GlobalAlertOver' "$HNC_REPO_ROOT/daemon/hnc_httpd/limit_policy.go" && test_pass || test_fail "limitCtl 权威出口缺失"
 
 test_start "quota_global: tick 的 DPI 下限条件含全局配额与 usage_month 请求"
-grep -q 'globalQuotaOn() || now.Sub(c.usageMonthAt) < 5\*time.Minute' "$HNC_REPO_ROOT/daemon/hnc_httpd/limit_policy.go" \
+grep -q 'globalQuotaOn() || now.Sub(c.usageMonthAt) < limitUsageMonthKeep' "$HNC_REPO_ROOT/daemon/hnc_httpd/limit_policy.go" \
+  && grep -q 'const limitUsageMonthKeep = 30 \* time.Minute' "$HNC_REPO_ROOT/daemon/hnc_httpd/limit_policy.go" \
   && grep -q 'func (c \*limitCtl) NoteUsageMonthRequest' "$HNC_REPO_ROOT/daemon/hnc_httpd/quota_global.go" \
   && grep -q 'NoteUsageMonthRequest()' "$HNC_REPO_ROOT/daemon/hnc_httpd/action_v512.go" && test_pass || test_fail "tick 条件未扩展"
 
