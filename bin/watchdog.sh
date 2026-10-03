@@ -801,17 +801,16 @@ ensure_tc_uplink_healthy() {
 # ═══════════════════════════════════════════════════════════════════════════
 # rc30.1: action mode — invoked by the Go hnc_watchdog binary to execute
 # individual business actions WITHOUT entering any main loop. v5.26: the
-# loop. v5.26: the legacy shell main loop has been removed — running this
-# script without an `action` argument now logs and exits 2. There is no
-# shell fallback; the Go binary is the only main loop.
+# legacy shell main loop has been removed — running this script without an
+# `action` argument now logs and exits 2. There is no shell fallback; the Go
+# binary is the only main loop.
 #
 # Contract:
 #   sh watchdog.sh action <name> [args...]
 #   exit code = action's return code (0 = ok, non-zero = failure)
 #   stdout = action's output (used by callers that parse it, e.g. probe_hotspot)
 #
-# Must be placed AFTER all function definitions, but BEFORE the main loop
-# initialization (which writes pidfiles, state files, and starts logging).
+# Must be placed AFTER all function definitions.
 # ═══════════════════════════════════════════════════════════════════════════
 if [ "${1:-}" = "action" ]; then
     # v5.5.0-rc5 fix: action 子进程的退出是设计上的正常退出, 不是主循环异常崩溃.

@@ -12,7 +12,7 @@
 #   - 两项都没启用 → 清掉状态文件, 什么都不做
 # 时段: HH:MM, 左闭右开; 开始 > 结束 表示跨午夜(如 22:00-07:00)。
 #
-# 调用方: watchdog.sh 主循环每轮一次(开销: 读一次 rules.json + 一个 sysfs 文件)。
+# 调用方: Go 看门狗 bin/hnc_watchdog(power.go hotspotScheduler: 时段边界唤醒 / 充电模式每 60s)。
 #         hotspot_autostart.sh 开机自启前用 --check 询问是否允许。
 # 用法: hotspot_schedule.sh [--check] [--dry-run]
 #   --check    只判断当前是否允许开热点: 允许 exit 0, 不允许 exit 1(不动作)

@@ -1088,7 +1088,10 @@ fi
         # rc30.12.28: 区分 direct vs launcher 模式. 之前只检查 launcher 进程,
         # 如果没有 launcher (DPID_LAUNCHER=DPID_BIN), sentinel 会一直试图启动
         # DPID_BIN 但又把它认作 launcher, 状态机错乱.
-        if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
+        # v5.26 T2: 救命路径已把 choice 改写为 direct 时, sentinel 也按 direct 口径
+        # 只保 dpid, 不再每轮查坏掉的 launcher / 重写 choice。
+        _sent_choice=$(cat "$RUN/dpid_launcher.choice" 2>/dev/null)
+        if [ "$DPID_LAUNCHER" != "$DPID_BIN" ] && [ "$_sent_choice" != "direct" ]; then
             # 1a. launcher 模式 - 检查 launcher 进程 (C / shell guard / Go supervisor 任一)
             LAUNCHER_ALIVE=$(launcher_alive_count)
             if [ "$LAUNCHER_ALIVE" = "0" ]; then

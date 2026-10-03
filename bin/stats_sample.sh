@@ -2,7 +2,7 @@
 # stats_sample.sh — HNC v3.9.1 周期采样器
 #
 # 每 5 min 从 iptables HNC_STATS 读累计字节,按 MAC 聚合后 append 到
-# data/stats_raw.jsonl。watchdog.sh 主循环在每轮末尾调一次。
+# data/stats_raw.jsonl。Go 看门狗 bin/hnc_watchdog 按 duties.go statsSampleDue 节拍调用。
 #
 # 输出格式(单行 JSON,每行一条):
 #   {"ts":<unix>,"mac":"aa:..","rx":<cum_bytes>,"tx":<cum_bytes>}

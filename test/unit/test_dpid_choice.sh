@@ -24,3 +24,7 @@ grep -q 'func readLauncherChoice' "$HNC_REPO_ROOT/src/dpid/cmd/hnc_watchdog/main
 test_start "dpid_choice: 单测文件存在且被 go test 收录"
 [ -f "$HNC_REPO_ROOT/src/dpid/cmd/hnc_watchdog/launcher_choice_test.go" ] \
   && grep -q 'func TestDpidGuardPlan' "$HNC_REPO_ROOT/src/dpid/cmd/hnc_watchdog/launcher_choice_test.go" && test_pass || test_fail "unit test missing"
+
+test_start "dpid_choice: 开机清掉上次会话的 choice, sentinel 认 direct"
+grep -q 'rm -f "$HNC_DIR/run/dpid_launcher.choice"' "$HNC_REPO_ROOT/post-fs-data.sh" \
+  && grep -q '\[ "$_sent_choice" != "direct" \]' "$HNC_REPO_ROOT/service.sh" && test_pass || test_fail "stale choice / sentinel direct"

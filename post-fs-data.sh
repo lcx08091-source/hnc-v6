@@ -53,6 +53,10 @@ rm -rf "$HNC_DIR"/run/tc_action.lock.stale.* 2>/dev/null
 rm -f "$HNC_DIR"/run/tc_root_owned_* "$HNC_DIR"/run/tc_mq_child_* "$HNC_DIR"/run/tc_ifindex_* \
       "$HNC_DIR/run/tc_qos_fallback" "$HNC_DIR/run/iface.cache" \
       "$HNC_DIR/run/tc_restore_pending" 2>/dev/null
+# v5.26 T2: dpid 守护者选择是本次开机的探测结果。上次会话的 choice(尤其 sentinel
+# 救命改写的 direct)不能带进新开机: Go 看门狗比 service.sh 落盘 choice 更早启动,
+# 读到旧 direct 会直拉 dpid, 随后 service.sh 又起 launcher → 双 dpid。缺失时看门狗按旧行为。
+rm -f "$HNC_DIR/run/dpid_launcher.choice" "$HNC_DIR/run/dpid_launcher.choice.tmp" 2>/dev/null
 
 # 初始化规则文件 · rc3.1.13 起 auth_required 也在这
 [ ! -f "$HNC_DIR/data/rules.json" ] && cat > "$HNC_DIR/data/rules.json" << 'EOF'

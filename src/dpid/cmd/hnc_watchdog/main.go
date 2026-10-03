@@ -568,22 +568,22 @@ func ensureDaemonRunning(d daemonSpec) {
 		return
 	}
 
-	// v5.26 T1: DNS 接管 fail-open 从 watchdog.sh ensure_httpd_running 迁来。
-	// httpd 被杀/崩溃时来不及撤 DNS 接管的 DNAT → 这里先撤掉(新 httpd 起来会按
-	// 配置重下)。仅对 httpd 生效; dns_takeover.sh 自身幂等。
-	if d.name == "hnc_httpd" {
-		cmd := exec.Command(shellPath(), hncDir+"/bin/dns_takeover.sh", "remove")
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		_ = cmd.Run()
-	}
-
 	if _, err := os.Stat(launcher); err != nil {
 		// Binary missing — silently skip. service.sh may install it later.
 		return
 	}
 	if !cooldownOK(d.name, d.cooldown) {
 		return
+	}
+
+	// v5.26 T1: DNS 接管 fail-open 从 watchdog.sh ensure_httpd_running 迁来。
+	// httpd 被杀/崩溃时来不及撤 DNS 接管的 DNAT → 重拉前先撤掉(新 httpd 起来会按
+	// 配置重下)。放在冷却之后: 每次重拉只撤一次, 不在冷却期每轮 fork。
+	if d.name == "hnc_httpd" {
+		cmd := exec.Command(shellPath(), hncDir+"/bin/dns_takeover.sh", "remove")
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		_ = cmd.Run()
 	}
 
 	logf("%s: process gone, launching %s", d.name, launcher)
@@ -668,7 +668,7 @@ func findLiveByName(name string) int {
 	return 0
 }
 
-// findLiveByCmdlineSub 在 /proc/*/cmdline 的任意 argv 段里找包含 needle 的
+// findLiveByCmdlineSub 在 /proc/*/cmdline 的任意 argv 段里找执行 needle 的
 // 活进程(排除自己)。findLiveByName 只匹配 comm/argv0, 找不到
 // `sh /data/local/hnc/bin/hnc_dpid_guard.sh` 这种以解释器启动的脚本进程,
 // shell guard 的存活检测必须走这里。
@@ -690,8 +690,10 @@ func findLiveByCmdlineSub(needle string) int {
 		if err != nil {
 			continue
 		}
+		// 只认 argv 段恰为 needle 或以 "/needle" 结尾(真正执行该脚本的进程),
+		// 不误认 `grep hnc_dpid_guard.sh`、`pgrep -f ...` 之类只是提到名字的进程。
 		for _, arg := range strings.Split(string(data), "\x00") {
-			if strings.Contains(arg, needle) {
+			if arg == needle || strings.HasSuffix(arg, "/"+needle) {
 				return pid
 			}
 		}
