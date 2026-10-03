@@ -294,7 +294,7 @@ function renderSettings(anim1) {
       '<label class="field">同一台设备最短提醒间隔' + inp('ud-iv', Math.round(num(ud.min_interval_sec, 1800) / 60), '分钟', 'type="number" min="1" max="1440"') + '</label>' +
       '<div class="note">免打扰时段内只记录、不弹通知；开始 = 结束 表示不设免打扰。</div><button class="btn pri press" data-act="ud-save">保存</button>',
       toggle(ud.enabled !== false, 'data-set="ud" aria-label="新设备接入提醒"')) +
-    sFold('aq', ['orange', 'gauge'], '月度流量配额', '每台设备按自然月累计，超配额提醒',
+    sFold('aq', ['orange', 'gauge'], '月度流量配额', '按计费日起算，与设备卡「本月」同一口径；单独设置了配额的设备按自己的配额提醒',
       '<div class="grid2"><label class="field">配额' + inp('aq-gb', mq.limit_bytes ? trim0((mq.limit_bytes / 1073741824).toFixed(1)) : 10, 'GB/台/月', 'type="number" min="0.1" step="0.1"') + '</label><label class="field">预警' + inp('aq-pct', mq.warn_at_pct || 80, '%', 'type="number" min="1" max="100"') + '</label></div><button class="btn pri press" data-act="aq-save">保存</button>',
       toggle(mq.enabled, 'data-set="aq" aria-label="月度流量配额"')) +
     sFold('aa', ['red', 'heart'], '异常流量检测', '当前小时超过 7 日同时段均值 × 阈值时提醒',

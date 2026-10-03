@@ -345,15 +345,8 @@ func Run(cfg Config) (int, error) {
 		}
 		emitted += n
 	}
-	// v5.9.92: monthly quota detection (schema/config/UI 早已就位, 此前
-	// 唯独缺这个检测函数 —— 用户设了配额永远收不到告警)。
-	if uc.MonthlyQuota.Enabled {
-		n, err := detectMonthlyQuota(cfg, uc)
-		if err != nil {
-			return emitted, err
-		}
-		emitted += n
-	}
+	// v5.26 T4: monthly quota 检测已迁到 httpd 的 limitCtl(与设备配额同一
+	// 数据源/口径), 此处不再做 —— 见 limit_policy.go checkGlobalQuotaLocked。
 	return emitted, nil
 }
 

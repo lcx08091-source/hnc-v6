@@ -1148,7 +1148,7 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		"default_sim": cur,
 		"hotspot_by_device": map[string]interface{}{
 			"endpoint": "/api/usage_month",
-			"note":     "每台热点设备的本自然月 rx/tx 见 /api/usage_month(iptables 统计口径, 自然月而非计费周期)",
+			"note":     "每台热点设备的本月 rx/tx 见 /api/usage_month(v5.26 起为计费月口径, 与设备卡「本月」同源)",
 		},
 		"sources": src,
 	}

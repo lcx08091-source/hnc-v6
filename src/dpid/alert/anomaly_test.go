@@ -65,31 +65,6 @@ func withNow(t *testing.T, now time.Time) {
 
 // 月度配额: 本地 1 号 02:00(= UTC 上月最后一天 18:00)的行必须计入本月,
 // 本地上月最后一天 23:00 的行不得计入。
-func TestDetectMonthlyQuota_LocalMonthBoundary(t *testing.T) {
-	hnc := t.TempDir()
-	run := filepath.Join(hnc, "run")
-	os.MkdirAll(run, 0o755)
-	now := time.Date(2026, 9, 24, 12, 0, 0, 0, cst)
-	withNow(t, now)
-	writeRows(t, run,
-		[3]int64{time.Date(2026, 9, 1, 2, 0, 0, 0, cst).Unix(), 1, 600},
-		[3]int64{time.Date(2026, 8, 31, 23, 0, 0, 0, cst).Unix(), 1, 10000},
-		[3]int64{time.Date(2026, 9, 10, 0, 0, 0, 0, cst).Unix(), 1, 500}, // 本地零点边界行
-	)
-	cfg := NewConfig(hnc)
-	cfg.DisableNotify = true
-	uc := DefaultConfig()
-	uc.MonthlyQuota = QuotaCfg{Enabled: true, LimitBytes: 1000, WarnAtPct: 80}
-	n, err := detectMonthlyQuota(cfg, uc)
-	if err != nil || n != 1 {
-		t.Fatalf("应恰好 1 条告警, n=%d err=%v", n, err)
-	}
-	b, _ := os.ReadFile(cfg.AlertsJSONLPath)
-	if !strings.Contains(string(b), `"used_bytes":1100`) || !strings.Contains(string(b), `"warn_level":"over"`) {
-		t.Fatalf("本月用量应为 1100(不含上月、边界行只计一次): %s", b)
-	}
-}
-
 func TestInQuietHours_UsesGivenLocalHour(t *testing.T) {
 	u := UnknownDevice{QuietHourStart: 23, QuietHourEnd: 7}
 	// 北京时间 02:00 = UTC 18:00: 按本地判断应在免打扰内。

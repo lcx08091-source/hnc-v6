@@ -70,11 +70,14 @@ type usageCacheT struct {
 
 var usageCache usageCacheT
 
-// apiUsageMonth 汇总本自然月(本地时区 1 号 0 点至今)每台设备 rx/tx。
-// 数据源与 src/dpid/alert/quota.go 的月度配额相同: run/stats.YYYYMMDD.jsonl
-// (按 UTC 日期命名, 用 dayFileKeys 覆盖本地∪UTC 日期再按行时间戳过滤)。
-// 读一个月的文件有一定开销, 结果缓存 60 秒。
+// apiUsageMonth 汇总本计费月每台设备 rx/tx。
+// v5.26 T4: 数据源改为 limitCtl.MonthUsage(与设备配额进度条、全局月度
+// 配额告警同一口径 —— max(防火墙计数器累加, DPI 历史下限)), 周期随
+// 计费日; 顶层新增 period_start。limitCtl 尚无数据(刚安装, DPI 下限
+// 还没算过)的设备回退到直接扫 run/stats.YYYYMMDD.jsonl 的旧路径。
+// 结果缓存 60 秒。
 func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
+	s.limitCtl.NoteUsageMonthRequest() // 5 分钟内 tick 会算 DPI 下限
 	usageCache.mu.Lock()
 	defer usageCache.mu.Unlock()
 	if usageCache.out != nil && time.Since(usageCache.at) < 60*time.Second {
@@ -82,13 +85,28 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	now := time.Now()
+	// 权威口径: limitCtl(计费月)
+	devices, periodStart, oldest, ok := s.limitCtl.MonthUsageSplit()
+	if ok {
+		out := map[string]interface{}{
+			"month":        now.Format("2006-01"),
+			"since":        periodStart.Unix(),
+			"period_start": periodStart.Unix(),
+			"oldest_data":  oldest,
+			"devices":      devices,
+		}
+		usageCache.out, usageCache.at = out, now
+		writeJSON(w, http.StatusOK, s.simMergeUsageMonth(out))
+		return
+	}
+	// 回退: limitCtl 尚无数据(刚安装), 沿用自然月 DPI 合计
 	start := time.Date(now.Year(), now.Month(), 1, 0, 0, 0, 0, now.Location())
 	type acc struct {
 		RX uint64 `json:"rx"`
 		TX uint64 `json:"tx"`
 	}
 	per := map[string]*acc{}
-	oldest := int64(0)
+	oldest = int64(0)
 	resolve := macAliasResolver(s.hncDir) // v5.21: 合并过的旧 MAC 历史算到新 MAC 上
 	for _, dk := range dayFileKeys(start, now) {
 		f, err := os.Open(filepath.Join(s.hncDir, "run", "stats."+dk+".jsonl"))
@@ -123,10 +141,11 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 		f.Close()
 	}
 	out := map[string]interface{}{
-		"month":       now.Format("2006-01"),
-		"since":       start.Unix(),
-		"oldest_data": oldest, // 若明显晚于 since, 说明月初的数据已被清理(前端据此提示"不完整")
-		"devices":     per,
+		"month":        now.Format("2006-01"),
+		"since":        start.Unix(),
+		"period_start": start.Unix(), // v5.26 T4: 回退路径=自然月起点
+		"oldest_data":  oldest,       // 若明显晚于 since, 说明月初的数据已被清理(前端据此提示"不完整")
+		"devices":      per,
 	}
 	usageCache.out, usageCache.at = out, now
 	writeJSON(w, http.StatusOK, s.simMergeUsageMonth(out))

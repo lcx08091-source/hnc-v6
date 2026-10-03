@@ -311,6 +311,11 @@ type usageAcc struct {
 	DayBytes   uint64 `json:"day_bytes"`
 	MonthKey   string `json:"month_key"`
 	MonthBytes uint64 `json:"month_bytes"`
+	// v5.26 T4: 月度 rx/tx 拆分, /api/usage_month 用。加字段不改旧字段:
+	// 旧状态文件没有这两项时为 0(过渡月拆分缺失, MonthUsageSplit 会把
+	// 合计记到 rx 上); MonthBytes 仍是配额判定的唯一口径。
+	MonthRx uint64 `json:"month_rx,omitempty"`
+	MonthTx uint64 `json:"month_tx,omitempty"`
 }
 
 // rollover 进入新周期时清零对应累加。
@@ -319,7 +324,7 @@ func (u *usageAcc) rollover(dayKey, monthKey string) {
 		u.DayKey, u.DayBytes = dayKey, 0
 	}
 	if u.MonthKey != monthKey {
-		u.MonthKey, u.MonthBytes = monthKey, 0
+		u.MonthKey, u.MonthBytes, u.MonthRx, u.MonthTx = monthKey, 0, 0, 0
 	}
 }
 
@@ -340,10 +345,12 @@ func (u *usageAcc) add(rx, tx int64, dayKey, monthKey string) {
 		}
 		return uint64(cur) // 复位
 	}
-	delta := d(rx, u.PrevRx) + d(tx, u.PrevTx)
+	drx, dtx := d(rx, u.PrevRx), d(tx, u.PrevTx)
 	u.PrevRx, u.PrevTx = rx, tx
-	u.DayBytes += delta
-	u.MonthBytes += delta
+	u.DayBytes += drx + dtx
+	u.MonthBytes += drx + dtx
+	u.MonthRx += drx
+	u.MonthTx += dtx
 }
 
 // ── 控制器 ────────────────────────────────────────────────────
@@ -362,6 +369,10 @@ type ctlDevState struct {
 type ctlStateFile struct {
 	Version int                     `json:"version"`
 	Devices map[string]*ctlDevState `json:"devices"`
+	// v5.26 T4: 全局告警月度配额的每设备去重(mac → 已发档位的计费月 key)。
+	// 加字段不改旧字段, 旧状态文件自动补 nil。
+	GlobalAlertWarn map[string]string `json:"global_alert_warn,omitempty"`
+	GlobalAlertOver map[string]string `json:"global_alert_over,omitempty"`
 }
 
 // limitView 发布给 /api/devices 的每设备视图。
@@ -381,17 +392,21 @@ type limitCtl struct {
 	hncDir   string
 	actionMu sync.Locker // = &server.actionMu; 锁序: actionMu → mu
 
-	mu       sync.Mutex
-	policies map[string]*devicePolicy
-	st       ctlStateFile
-	histDay  map[string]uint64
-	histMon  map[string]uint64
-	histAt   time.Time
-	histKey  string
-	guard    clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
-	dirty    bool
-	savedAt  time.Time
-	logged   map[string]string
+	mu           sync.Mutex
+	policies     map[string]*devicePolicy
+	st           ctlStateFile
+	histDay      map[string]uint64
+	histMon      map[string]uint64
+	histMonSplit map[string]rxTxPair // v5.26 T4: 月度 DPI 合计的 rx/tx 拆分
+	histOldest   int64
+	histMonKey   string // 已计算 DPI 下限的计费月 key(空=没算过, usage_month 走回退)               // v5.26 T4: 本计费月 DPI 数据最老一行(oldest_data)
+	histAt       time.Time
+	histKey      string
+	usageMonthAt time.Time  // v5.26 T4: /api/usage_month 最近一次被请求的时刻
+	guard        clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
+	dirty        bool
+	savedAt      time.Time
+	logged       map[string]string
 
 	viewMu sync.RWMutex
 	view   map[string]limitView
@@ -614,6 +629,51 @@ func maxU(a, b uint64) uint64 {
 	return b
 }
 
+// rxTxPair v5.26 T4: 月度用量的 rx/tx 拆分(/api/usage_month 需要)。
+type rxTxPair struct {
+	RX, TX uint64
+}
+
+// sumStatsHistorySplit 与 sumStatsHistory 同源同过滤, 但保留 rx/tx 拆分,
+// 并返回窗口内最老一行的时间戳(usage_month 的 oldest_data)。只服务月度:
+// 配额判定仍用合计(sumStatsHistory), 拆分只影响 API 展示。
+func sumStatsHistorySplit(hncDir string, from, to time.Time) (map[string]rxTxPair, int64) {
+	out := map[string]rxTxPair{}
+	oldest := int64(0)
+	resolve := macAliasResolver(hncDir)
+	for _, dk := range dayFileKeys(from, to) {
+		f, err := os.Open(filepath.Join(hncDir, "run", "stats."+dk+".jsonl"))
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+		for sc.Scan() {
+			var row struct {
+				T   int64  `json:"t"`
+				MAC string `json:"mac"`
+				TX  uint64 `json:"tx"`
+				RX  uint64 `json:"rx"`
+			}
+			if json.Unmarshal(sc.Bytes(), &row) != nil || row.MAC == "" {
+				continue
+			}
+			if row.T < from.Unix() || row.T >= to.Unix() {
+				continue
+			}
+			if oldest == 0 || row.T < oldest {
+				oldest = row.T
+			}
+			p := out[resolve(row.MAC)]
+			p.RX += row.RX
+			p.TX += row.TX
+			out[resolve(row.MAC)] = p
+		}
+		f.Close()
+	}
+	return out, oldest
+}
+
 func (c *limitCtl) devState(mac string) *ctlDevState {
 	s := c.st.Devices[mac]
 	if s == nil {
@@ -680,11 +740,19 @@ func (c *limitCtl) tick(now time.Time) {
 	// 2) 历史下限(DPI 增量文件), 15 分钟 / 周期切换时刷新
 	hk := dayKey + "|" + monKey
 	if c.histKey != hk || now.Sub(c.histAt) >= limitHistEvery || now.Before(c.histAt) {
-		if len(c.policies) > 0 {
+		// v5.26 T4: DPI 下限不再只服务设备配额 —— 有设备策略、全局告警
+		// 月度配额开启、或最近 5 分钟有人请求过 /api/usage_month, 都要算。
+		if len(c.policies) > 0 || c.globalQuotaOn() || now.Sub(c.usageMonthAt) < 5*time.Minute {
 			c.histDay = sumStatsHistory(c.hncDir, ds, now.Add(time.Second))
-			c.histMon = sumStatsHistory(c.hncDir, ms, now.Add(time.Second))
+			split, oldest := sumStatsHistorySplit(c.hncDir, ms, now.Add(time.Second))
+			c.histMonSplit, c.histOldest = split, oldest
+			c.histMonKey = monKey
+			c.histMon = make(map[string]uint64, len(split))
+			for m, v := range split {
+				c.histMon[m] = v.RX + v.TX
+			}
 		} else {
-			c.histDay, c.histMon = nil, nil
+			c.histDay, c.histMon, c.histMonSplit, c.histOldest, c.histMonKey = nil, nil, nil, 0, ""
 		}
 		c.histAt, c.histKey = now, hk
 	}
@@ -800,6 +868,9 @@ func (c *limitCtl) tick(now time.Time) {
 		}
 		view[mac] = v
 	}
+	// v5.26 T4: 全局告警月度配额(从 dpid alert.Run 迁来, 与设备配额同源)
+	c.checkGlobalQuotaLocked(monKey, ms, now)
+
 	c.saveStateLocked(now, false)
 
 	c.viewMu.Lock()
