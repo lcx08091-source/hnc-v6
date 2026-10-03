@@ -154,5 +154,7 @@ out=$(drun counters)
   && [ "$out" = '{"present":true,"pkts":15,"v6_present":true,"pkts_v6":5}' ] && test_pass || test_fail "out0=$out0 out=$out"
 
 test_start "dns_takeover: cleanup.sh and watchdog (httpd dead) call remove"
+# v5.26 T1: shell ensure_httpd_running 已删, httpd 死亡时的 remove 由 Go 看门狗
+# ensureDaemonRunning 执行(原 watchdog.sh 两处调用点合并为 Go 一处)。
 grep -q 'dns_takeover.sh" remove' "$HNC_REPO_ROOT/bin/cleanup.sh" \
-  && [ "$(grep -c 'dns_takeover.sh" remove' "$HNC_REPO_ROOT/bin/watchdog.sh")" -ge 2 ] && test_pass || test_fail "remove hook missing"
+  && grep -q 'dns_takeover.sh", "remove' "$HNC_REPO_ROOT/src/dpid/cmd/hnc_watchdog/main.go" && test_pass || test_fail "remove hook missing"

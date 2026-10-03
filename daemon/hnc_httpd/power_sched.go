@@ -1,9 +1,10 @@
 // power_sched.go — v5.22 功耗: 自适应间隔策略 + 循环等待助手。
 //
 // 所有后台循环的「下一轮何时跑」都由 powerInterval(loop, activity, flags) 一处决定,
-// /api/power 原样列出每个循环的基准间隔、当前间隔与原因。shell(watchdog.sh /
-// hnc_offload_guard.sh)与 dpid 读 run/activity.json 按同一张表执行, 这里的「镜像」
-// 条目只用于展示与测试(数值必须与 bin/hnc_activity.sh、src/dpid/activity 保持一致)。
+// /api/power 原样列出每个循环的基准间隔、当前间隔与原因。dpid 与 guard shell
+// (hnc_offload_guard.sh 等)读 run/activity.json 按同一张表执行; 看门狗主循环
+// v5.26 起只由 Go 版 hnc_watchdog(power.go)承担。这里的「镜像」条目只用于展示与
+// 测试(数值必须与 bin/hnc_activity.sh、src/dpid/activity 保持一致)。
 //
 // ── 策略表(档位见 power_activity.go: unknown 一律按基准) ─────────────────────
 //
@@ -19,7 +20,7 @@
 //	limit_policy      60s    每分钟对齐, 任何档位不变(配额/分时段限速执法)
 //	v6_neigh          事件   事件驱动 + 60s 兜底, 不变(IPv6 规则同步)
 //	ct_events         事件   不变
-//	─ 镜像(shell / dpid 执行) ─
+//	─ 镜像(dpid / guard shell 执行; 看门狗主循环 = Go 版 power.go) ─
 //	watchdog_pending  10s    hotspot_off 120s(v5.25 Go 版: 网卡事件即时唤醒 + 定时开关热点边界唤醒), 其余 10s
 //	watchdog_active   60s    不变(规则健康检查/v6 兜底同步/定时开关热点)
 //	offload_guard     60s    热点未开/无客户端且未在兜底: 完整检测 300s(每 60s 早醒检查); 热点+客户端或兜底中: 60s(重申 ≤60s)

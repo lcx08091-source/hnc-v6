@@ -135,7 +135,6 @@ watchdog_mark_uplink_unsupported_once() {
     fi
 }
 
-
 # hotfix17.3: rerun capability probe once hotspot iface is ACTIVE.
 # Early service probe can run before hotspot exists and write unknown/false values.
 CAP_PROBE_MIN_INTERVAL=30
@@ -198,28 +197,10 @@ tc_repair_record() {
     fi
 }
 
-
-# v4.0 Patch 1.6 心跳 + 轮转的最后时间
-# 每 5 分钟至少打一行 "alive" log(即使啥都没发生也有证据 watchdog 活着)
-# 每次主循环也顺便调用一次 log_rotate,防止任何 log 涨爆
-LAST_HEARTBEAT=0
+# v4.0 Patch 1.6 轮转的最后时间(rotate_logs action 用; 心跳已随 shell 主循环移入 Go 版)
 LAST_LOG_ROTATE=0
 LAST_STALE_CLEANUP_DAY=""   # hotfix10: 每天跑一次 stale rules cleanup
-HEARTBEAT_INTERVAL=300    # 5 分钟
 LOG_ROTATE_INTERVAL=300   # 5 分钟看一次(粒度足够,开销低)
-
-heartbeat() {
-    local now; now=$(date +%s)
-    if [ $((now - LAST_HEARTBEAT)) -ge $HEARTBEAT_INTERVAL ]; then
-        local state; state=$(cat "$STATE_FILE" 2>/dev/null || echo "?")
-        local httpd="down"
-        if [ -s "$RUN/httpd.pid" ] && kill -0 "$(cat "$RUN/httpd.pid")" 2>/dev/null; then
-            httpd="ok"
-        fi
-        log "alive state=$state httpd=$httpd"
-        LAST_HEARTBEAT=$now
-    fi
-}
 
 rotate_logs_periodic() {
     local now; now=$(date +%s)
@@ -228,7 +209,6 @@ rotate_logs_periodic() {
         LAST_LOG_ROTATE=$now
     fi
 }
-
 
 cleanup_stale_rules_daily() {
     local day
@@ -470,209 +450,9 @@ full_restore() {
     log "RESTORE complete init_rc=$tc_init_rc restore_rc=$tc_restore_rc"
 }
 
-# ── 子服务存活检查 ──────────────────────────────────────────
-# v3.5.0 P2-4: 防重启风暴 — 60 秒内同一服务最多重启 1 次
-# 之前如果 hotspotd 启动后立刻 crash,会被无限重启,日志疯涨
-# v3.5.0 P1-2:hotspotd 启动参数从 --daemon 改成 -d(hotspotd 实际只识别 -d)
-HOTSPOTD_LAST_RESTART=0
-DETECT_LAST_RESTART=0
-RESTART_COOLDOWN=60  # 秒
-
-# rc2 修 S6: spawn_lock 陈旧检测.
-# 原代码 mkdir 失败直接 skip 本轮, 没有 stale detection — watchdog 上一次
-# 被 SIGKILL (OOM/用户 pkill) 时若正持锁, 目录遗留, 新 watchdog 永远拿不到锁,
-# 所有 daemon 重启动作被永久阻塞. 这里以 mtime 做 60 秒陈旧阈值: 超过就强释放.
-# 返回 0 = 拿到锁, 1 = 被正当持有(他方活跃, skip 本轮).
-SPAWN_LOCK_STALE_SEC=60
-try_spawn_lock() {
-    local lockdir=$1
-    if mkdir "$lockdir" 2>/dev/null; then
-        return 0
-    fi
-    local age
-    age=$(( $(date +%s) - $(stat -c %Y "$lockdir" 2>/dev/null || echo 0) ))
-    if [ "$age" -gt "$SPAWN_LOCK_STALE_SEC" ]; then
-        log "WARN: spawn lock $lockdir stale (${age}s > ${SPAWN_LOCK_STALE_SEC}s), forcibly releasing"
-        rmdir "$lockdir" 2>/dev/null
-        mkdir "$lockdir" 2>/dev/null && return 0
-    fi
-    return 1
-}
-
-# ── v5.3.0-rc12 hnc_dpid 守护 (新增) ─────────────────────────
-# dpid 自带 crash_loop 检测 (60s 内 3 次崩 = 进 crash_loop 模式), 所以
-# 这里只做"PID 文件失效"重拉, 不做激进重启. crash_loop 模式下 daemon
-# 自己 idle 不退出, PID 仍活, 这里不会误重拉.
-#
-# 不像 hotspotd, dpid 是纯观察 daemon, 死了不影响限速/网络功能,
-# 用户也不会立刻察觉. 所以重启策略很保守: 仅在 PID 文件不存在或
-# 进程死了的情况下尝试一次重拉, 失败不重试.
-DPID_LAST_RESTART=0
-ensure_dpid_running() {
-    local dpid_bin="$HNC_DIR/bin/hnc_dpid"
-    local dpid_guard="$HNC_DIR/bin/hnc_dpid_guard.sh"
-    # rc30.0: Go supervisor preferred over shell guard.
-    local dpid_supervisor="$HNC_DIR/bin/hnc_dpid_supervisor"
-    local dpid_launcher="$dpid_bin"
-    local dpid_pid_file="$RUN/dpid.pid"
-    local dpid_guard_pid_file="$RUN/dpid_guard.pid"
-    local watch_pid_file="$dpid_pid_file"
-
-    [ ! -x "$dpid_bin" ] && return 0   # binary 不存在, 视为禁用了 DPI
-    if [ -x "$dpid_supervisor" ]; then
-        dpid_launcher="$dpid_supervisor"
-        watch_pid_file="$dpid_guard_pid_file"
-    elif [ -x "$dpid_guard" ]; then
-        dpid_launcher="$dpid_guard"
-        watch_pid_file="$dpid_guard_pid_file"
-    fi
-
-    # 进程还活就 OK. supervisor/guard 场景只看 dpid_guard.pid, 避免 dpid.pid child 退出导致重复拉.
-    if [ -f "$watch_pid_file" ]; then
-        local dp; dp=$(cat "$watch_pid_file" 2>/dev/null)
-        if [ -n "$dp" ] && kill -0 "$dp" 2>/dev/null; then
-            return 0
-        fi
-    fi
-
-    # rc17: 如果 pidfile 丢了但 supervisor/guard 进程真实存在, 修复 pidfile, 不再重复拉起.
-    if [ "$dpid_launcher" = "$dpid_supervisor" ] || [ "$dpid_launcher" = "$dpid_guard" ]; then
-        local live_gp
-        live_gp=$(ps -ef 2>/dev/null | grep -E '[h]nc_dpid_supervisor|[h]nc_dpid_guard\.sh' | awk 'NR==1{print $2}')
-        if [ -n "$live_gp" ] && kill -0 "$live_gp" 2>/dev/null; then
-            echo "$live_gp" > "$dpid_guard_pid_file" 2>/dev/null || true
-            log "dpid: launcher live without pidfile, repaired pidfile pid=$live_gp"
-            return 0
-        fi
-    fi
-
-    # 冷却防止"反复死反复拉"
-    local now; now=$(date +%s 2>/dev/null) || now=0
-    local since=$((now - DPID_LAST_RESTART))
-    if [ "$DPID_LAST_RESTART" -gt 0 ] && [ "$since" -lt 30 ]; then
-        return 0
-    fi
-
-    log "dpid: process gone, relaunching launcher=$dpid_launcher"
-    rm -f "$watch_pid_file" 2>/dev/null
-    if [ "$dpid_launcher" = "$dpid_supervisor" ] || [ "$dpid_launcher" = "$dpid_guard" ]; then
-        nohup "$dpid_launcher" >> "$HNC_DIR/logs/dpid_guard.log" 2>&1 &
-        echo $! > "$dpid_guard_pid_file"
-        log "dpid: launcher relaunched (PID: $(cat "$dpid_guard_pid_file" 2>/dev/null))"
-    else
-        nohup "$dpid_bin" -config "$HNC_DIR/etc/dpi_config.json" \
-            >> "$HNC_DIR/logs/dpid.log" 2>&1 &
-        echo $! > "$dpid_pid_file"
-        log "dpid: relaunched (PID: $(cat "$dpid_pid_file" 2>/dev/null))"
-    fi
-    DPID_LAST_RESTART=$now
-    return 0
-}
-
-check_services() {
-    local restarted=0
-    local now; now=$(date +%s 2>/dev/null) || now=0
-
-    # ═══════════════════════════════════════════════════════════
-    # v3.5.2 P0-A 修复:优先级检查架构
-    # ═══════════════════════════════════════════════════════════
-    # 之前:两个独立的 if 检查 hotspotd.pid 和 detect.pid,都独立触发重启。
-    # 问题:detect.pid 和 hotspotd.pid 可能存同一个 PID(service.sh 的
-    #      旧逻辑),hotspotd 崩溃后 watchdog 两个 if 都触发 → 同时启动
-    #      C daemon + shell fallback → 并发写 devices.json.tmp → JSON 破损。
-    # 修复:改成优先级架构:
-    #      1) 先检查 hotspotd.pid,如果文件存在且进程活着 → OK,skip detect 检查
-    #      2) hotspotd.pid 文件存在但进程死了 → 重启 hotspotd
-    #      3) hotspotd.pid 文件不存在 → 说明当前是 shell fallback 模式,检查 detect.pid
-    # 这保证在任何一个时刻,watchdog 只关心一个进程,不会"双重复活"。
-    # ═══════════════════════════════════════════════════════════
-    # v4.0.0-patch1.5 重要修正: httpd 拉起逻辑已从本函数移出到 ensure_httpd_running,
-    # 主循环单独调用。之前 hotspotd 健康就 return 0,httpd 永远不被拉起是 bug。
-
-    local hpid; hpid=$(cat "$RUN/hotspotd.pid" 2>/dev/null)
-    if [ -n "$hpid" ]; then
-        # hotspotd 路径
-        if kill -0 "$hpid" 2>/dev/null; then
-            prune_duplicate_hotspotd
-            return 0
-        fi
-        # hotspotd 死了,尝试重启
-        if [ -x "$HNC_DIR/bin/hotspotd" ]; then
-            local since=$((now - HOTSPOTD_LAST_RESTART))
-            if [ $since -lt $RESTART_COOLDOWN ]; then
-                log "hotspotd dead but in cooldown (${since}s < ${RESTART_COOLDOWN}s),skip"
-                return 0
-            fi
-            log "hotspotd dead, restarting (last=${HOTSPOTD_LAST_RESTART})..."
-            local spawnlock="$RUN/daemon.spawn"
-            if ! try_spawn_lock "$spawnlock"; then
-                log "daemon spawn lock held, skip this round"
-                return 0
-            fi
-            "$HNC_DIR/bin/hotspotd" -d >> "$HNC_DIR/logs/hotspotd.log" 2>&1 &
-            sleep 1
-            prune_duplicate_hotspotd
-            rmdir "$spawnlock" 2>/dev/null
-            HOTSPOTD_LAST_RESTART=$now
-            restarted=1
-        else
-            rm -f "$RUN/hotspotd.pid"
-            log "hotspotd binary missing, cleared stale pid file"
-        fi
-        return $restarted
-    fi
-
-    # hotspotd.pid 不存在:shell fallback 模式,检查 detect.pid
-    local det_pid; det_pid=$(cat "$RUN/detect.pid" 2>/dev/null)
-    if [ -n "$det_pid" ] && ! kill -0 "$det_pid" 2>/dev/null; then
-        local since=$((now - DETECT_LAST_RESTART))
-        if [ $since -lt $RESTART_COOLDOWN ]; then
-            log "Detector dead but in cooldown (${since}s),skip"
-        else
-            log "Detector dead, restarting..."
-            local spawnlock="$RUN/daemon.spawn"
-            if try_spawn_lock "$spawnlock"; then
-                sh "$HNC_DIR/bin/device_detect.sh" daemon >> "$HNC_DIR/logs/detect.log" 2>&1 &
-                echo $! > "$RUN/detect.pid"
-                sleep 1
-                rmdir "$spawnlock" 2>/dev/null
-                DETECT_LAST_RESTART=$now
-                restarted=1
-            fi
-        fi
-    elif [ -z "$det_pid" ]; then
-        # rc2 修 S10: 两个 pid 文件都缺的兜底.
-        # 原来: hotspotd.pid 和 detect.pid 都不存在 → 函数 return 0, 什么都不做,
-        #       C daemon / shell fallback 都永远不起来. 真机事故: 用户手动 pkill + rm pid
-        #       后 watchdog 看着在跑但再也不恢复, 必须重启模块.
-        # 现在: 拉 device_detect daemon (自己会尝试起 C daemon, 失败回落 shell).
-        local since=$((now - DETECT_LAST_RESTART))
-        if [ $since -ge $RESTART_COOLDOWN ]; then
-            log "both hotspotd.pid and detect.pid missing, bootstrapping detector"
-            local spawnlock="$RUN/daemon.spawn"
-            if try_spawn_lock "$spawnlock"; then
-                sh "$HNC_DIR/bin/device_detect.sh" daemon >> "$HNC_DIR/logs/detect.log" 2>&1 &
-                echo $! > "$RUN/detect.pid"
-                sleep 1
-                rmdir "$spawnlock" 2>/dev/null
-                DETECT_LAST_RESTART=$now
-                restarted=1
-            fi
-        fi
-    fi
-
-    return $restarted
-}
-
-# ── v4.0.0-patch1.5 ensure_httpd_running ─────────────────────
-# 独立函数,主循环在 PENDING→ACTIVE 转移后 / ACTIVE 稳态每轮调用。
-# 从 check_services 抽出,因为之前嵌在里面会被 "hotspotd 健康 return 0"
-# 提前退出,导致 httpd 永远不被拉起(真机事故 #3)。
-#
-# 行为:
-#   1. httpd.pid 进程死了 → 清 pid 文件,准备重拉
-#   2. httpd.wanted marker 存在 + 进程没跑 → 用当前 iface + IP 拉
-#   3. 校验 iface + IP + RFC1918(跟 patch1.4 的四层校验一致)
+# ── httpd INPUT 防火墙护栏(httpd_drift action 用) ──────────────
+# v4.0.0-patch1.5 从 check_services 抽出。进程拉起/守护逻辑已随 shell
+# 主循环删除移入 Go 版 hnc_watchdog(ensureDaemonRunning), 这里只留 iptables 护栏装/卸。
 httpd_guard_remove() {
     iptables -D INPUT -p tcp --dport "$HNC_HTTPS_PORT" -j HNC_HTTPD_GUARD 2>/dev/null || true
     iptables -F HNC_HTTPD_GUARD 2>/dev/null || true
@@ -693,83 +473,6 @@ httpd_guard_install() {
 }
 
 # hotfix17.8: PID 复用保护。kill -0 只能证明“这个 PID 存在”,不能证明它还是 hnc_httpd。
-is_hnc_httpd_pid() {
-    local pid="$1" cmd
-    [ -n "$pid" ] || return 1
-    [ -r "/proc/$pid/cmdline" ] || return 1
-    cmd=$(tr '\000' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
-    echo "$cmd" | grep -q 'hnc_httpd'
-}
-
-ensure_httpd_running() {
-    local wpid; wpid=$(cat "$RUN/httpd.pid" 2>/dev/null)
-    if [ -n "$wpid" ] && ! kill -0 "$wpid" 2>/dev/null; then
-        log "httpd dead (was PID $wpid), removing pid file"
-        rm -f "$RUN/httpd.pid" "$RUN/httpd_bind_ip"
-        # DPI v2: httpd 被杀/崩溃时来不及撤 DNS 接管的 DNAT → 这里 fail-open(新 httpd 会按配置重下)
-        sh "$HNC_DIR/bin/dns_takeover.sh" remove >> "$LOG" 2>&1 || true
-        wpid=""
-    elif [ -n "$wpid" ] && ! is_hnc_httpd_pid "$wpid"; then
-        log "httpd pid $wpid belongs to another process, clearing stale pid file"
-        rm -f "$RUN/httpd.pid" "$RUN/httpd_bind_ip"
-        sh "$HNC_DIR/bin/dns_takeover.sh" remove >> "$LOG" 2>&1 || true
-        wpid=""
-    fi
-
-    # 不需要拉?退出
-    [ ! -f "$RUN/httpd.wanted" ] && return 0
-    [ -n "$wpid" ] && return 0   # 已经在跑
-
-    local httpd_bin="$HNC_DIR/daemon/hnc_httpd/hnc_httpd"
-    [ -x "$httpd_bin" ] || {
-        log "httpd launch failed: binary missing at $httpd_bin"
-        return 1
-    }
-
-    # v5.0: 检查 remote_enabled 决定是否绑热点 IP
-    # loopback 段永远开 (本机 WebUI 需要)
-    local remote_on
-    remote_on=$(grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' \
-        "$HNC_DIR/data/rules.json" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
-
-    if [ "$remote_on" = "true" ]; then
-        # rc3.1.6: 改绑 0.0.0.0 · 原因: ColorOS tether iface 主机 IP 和 gateway IP 不同
-        # (主机 .67, gateway .1), 单独绑 .67 则连接设备访问 .1 会 ADDRESS_UNREACHABLE.
-        # 0.0.0.0 监听所有接口, .1/.67/任何 IP 都能连. 已有 PIN+cookie 双层鉴权.
-        # 仍然写实际 httpd_bind_ip marker 用当前 iface 的 IP (drift 检测用).
-        local probe_out httpd_iface httpd_ip
-        probe_out=$(probe_valid_hotspot) || {
-            log "httpd launch deferred (remote_on): no valid hotspot yet. starting loopback-only for now."
-            httpd_guard_remove
-            "$httpd_bin" -loopback-port "$HNC_LOOPBACK_PORT" -hnc-dir "$HNC_DIR" \
-                >> "$HNC_DIR/logs/httpd.log" 2>&1 &
-            echo $! > "$RUN/httpd.pid"
-            echo "loopback-only" > "$RUN/httpd_bind_ip"
-            log "httpd launched (PID=$(cat "$RUN/httpd.pid"), loopback-only · 等热点就绪会重启)"
-            return 0
-        }
-        httpd_iface=$(echo "$probe_out" | awk '{print $1}')
-        httpd_ip=$(echo "$probe_out" | awk '{print $2}')
-        httpd_guard_install "$httpd_iface" "$httpd_ip"
-        log "starting httpd on 0.0.0.0:${HNC_HTTPS_PORT} (all ifaces) + loopback:${HNC_LOOPBACK_PORT} (hotspot iface=$httpd_iface ip=$httpd_ip)"
-        "$httpd_bin" -bind 0.0.0.0 -port "$HNC_HTTPS_PORT" -loopback-port "$HNC_LOOPBACK_PORT" \
-            -hnc-dir "$HNC_DIR" -http-port "$HNC_HTTP_REDIR_PORT" \
-            >> "$HNC_DIR/logs/httpd.log" 2>&1 &
-        echo $! > "$RUN/httpd.pid"
-        echo "$httpd_ip" > "$RUN/httpd_bind_ip"
-        log "httpd launched (PID=$(cat "$RUN/httpd.pid"), bound=0.0.0.0:${HNC_HTTPS_PORT} · hotspot ip=$httpd_ip)"
-    else
-        # 仅 loopback, 不需要热点 IP
-        httpd_guard_remove
-        log "starting httpd loopback-only on 127.0.0.1:${HNC_LOOPBACK_PORT}"
-        "$httpd_bin" -loopback-port "$HNC_LOOPBACK_PORT" -hnc-dir "$HNC_DIR" \
-            >> "$HNC_DIR/logs/httpd.log" 2>&1 &
-        echo $! > "$RUN/httpd.pid"
-        echo "loopback-only" > "$RUN/httpd_bind_ip"
-        log "httpd launched (PID=$(cat "$RUN/httpd.pid"), loopback-only)"
-    fi
-}
-
 # ── v4.0.0-patch1.4 httpd IP 漂移检测 ────────────────────────────
 # 场景: httpd 启动时绑 IP=A, 后来热点重启 / IP 续租失败 / tethering 切换
 #       iface IP 变成 B, 但 httpd 还在绑 A 上面。TCP 握手从 B 打到 A
@@ -1003,96 +706,6 @@ do_migrate() {
     sh "$HNC_DIR/bin/encdns_sync.sh" >> "$LOG" 2>&1 || true  # v5.21: 加密 DNS 策略
 }
 
-# ═══════════════════════════════════════════════════════════════════════════
-# rc30.1: action mode — invoked by the Go hnc_watchdog binary to execute
-# individual business actions WITHOUT entering the legacy `while true` main
-# loop. The legacy loop remains intact below as a fallback when this script
-# is invoked directly (no $1) by service.sh on systems where hnc_watchdog
-# binary is absent.
-#
-# Contract:
-#   sh watchdog.sh action <name> [args...]
-#   exit code = action's return code (0 = ok, non-zero = failure)
-#   stdout = action's output (used by callers that parse it, e.g. probe_hotspot)
-#
-# Must be placed AFTER all function definitions, but BEFORE the main loop
-# initialization (which writes pidfiles, state files, and starts logging).
-# ═══════════════════════════════════════════════════════════════════════════
-if [ "${1:-}" = "action" ]; then
-    # v5.5.0-rc5 fix: action 子进程的退出是设计上的正常退出, 不是主循环异常崩溃.
-    # 上面 ~line 238 的 EXIT trap 是为了捕获 mainLoop 异常退出报警, 但每次 Go
-    # runAction 都 fork 这个脚本以 action 模式跑, 子进程跑到 case 里 exit $?
-    # 干净退出时 trap 误以为是主循环崩了, 打 "watchdog EXITED unexpectedly".
-    # PENDING 状态下每 10s tick 跑 probe_hotspot + prune_dup_hotspotd + 偶尔
-    # is_doze, 平均 2-3 个 action subprocess / 10s, 节奏跟日志刷屏完美吻合.
-    # 设这个 flag 让 EXIT trap 在 action 模式下变成 noop, 原本主循环监控完整保留.
-    WDG_CLEAN_EXIT=1
-    shift
-    _action="${1:-}"
-    shift 2>/dev/null || true
-    case "$_action" in
-        probe_hotspot)        probe_valid_hotspot              ; exit $? ;;
-        check_health)         check_health                     ; exit $? ;;
-        full_restore)         full_restore "${1:-go_request}"  ; exit $? ;;
-        full_init)            do_full_init "$1" "$2"           ; exit $? ;;
-        migrate)              do_migrate "$1" "$2" "$3"        ; exit $? ;;
-        cleanup_stale_rules)  cleanup_stale_rules_daily        ; exit $? ;;
-        rotate_logs)          rotate_logs_periodic             ; exit $? ;;
-        capability_probe)     run_capability_probe_active "$1" ; exit $? ;;
-        tc_uplink_healthy)    ensure_tc_uplink_healthy         ; exit $? ;;
-        httpd_drift)          check_httpd_bind_drift           ; exit $? ;;
-        is_doze)              is_doze                          ; exit $? ;;
-        get_iface)            get_iface                        ; exit $? ;;
-        prune_dup_hotspotd)   prune_duplicate_hotspotd         ; exit $? ;;
-        *) echo "watchdog.sh action: unknown command '$_action'" >&2; exit 64 ;;
-    esac
-fi
-
-# ── 主循环 v4.0.0-patch1.5: Defer Init 状态机 ────────────────
-log "=== Watchdog v4.0.0-patch1.5 started (PID=$$) ==="
-echo $$ > "$RUN/watchdog.pid"
-
-# v3.4.1: 彻底删除 ip monitor 事件监听
-# v1.5: 状态机驱动。初始从 $STATE_FILE 读,崩溃重启时能恢复
-INITIAL_STATE=$(cat "$STATE_FILE" 2>/dev/null)
-if [ -z "$INITIAL_STATE" ]; then
-    INITIAL_STATE="PENDING"
-    echo "PENDING" > "$STATE_FILE"
-fi
-log "initial state: $INITIAL_STATE"
-
-RESTORE_COUNT=0
-INTERVAL=$INTERVAL_NORMAL
-RECOVERY_ROUNDS=0
-LAST_V6_SYNC=0
-LAST_STATS_SAMPLE=0
-STATS_INTERVAL=300
-# RESTORE 速率限制(只在 ACTIVE 状态生效)
-RESTORE_WINDOW_START=0
-RESTORE_WINDOW_COUNT=0
-RESTORE_WINDOW_MAX=3
-RESTORE_WINDOW_SEC=300
-RESTORE_WINDOW_SEC_MAX=3600
-RESTORE_CONSEC_WINDOWS=0
-LAST_PASSIVE_EXIT_TS=0
-PASSIVE_MODE=0
-PASSIVE_LOGGED=0
-PASSIVE_MARKER="$RUN/watchdog_passive.marker"
-
-# 探测节流: PENDING 状态下每 10 秒探一次(为了快速启动);
-# PENDING 状态每 10 秒探一次(热点刚开、还没客户端时),避免 60 秒才试一次导致
-# 开机后 1 分钟以上热点才能被使用。ACTIVE 稳态沿用主循环 $INTERVAL(60s)。
-# rc38: 删死变量 PROBE_INTERVAL_ACTIVE(全脚本 0 引用,稳态实际走 $INTERVAL)。
-PROBE_INTERVAL_PENDING=10
-PROBE_INTERVAL_PENDING_QUIET=120  # v5.25: 热点未开(与 power_sched.go watchdog_pending 一致); 每 10s 仍用内建命令早醒检查
-
-# rc3.1.5 修: 进 main loop 前立即 ensure httpd_running, 不等第一次 sleep 完.
-# 之前 watchdog 启动后要先 sleep 60-120s 才第一次 ensure httpd, 导致用户点 toggle
-# 经常撞上"启动窗口"失败 (curl 8444 connection refused).
-# 这个修法让 httpd 在 watchdog 启动后 ~1s 内就上线.
-log "bootstrap: ensure httpd before loop entry"
-ensure_httpd_running 2>/dev/null || log "bootstrap: ensure_httpd_running failed (will retry in loop)"
-
 # ─── v5.1 RC1 主动 uplink health check ─────────────────────────
 # 每 60s 轮询一次, 不触发 full_restore, 直接 inline 修复
 ensure_tc_uplink_healthy() {
@@ -1185,227 +798,54 @@ ensure_tc_uplink_healthy() {
     return 0
 }
 
-
-while true; do
-    # 读当前状态(每轮读,因为 do_full_init / do_migrate 会改文件)
-    STATE=$(cat "$STATE_FILE" 2>/dev/null || echo "PENDING")
-
-    # v5.10.0 (F5): 在线时长小时采样 —— ACTIVE 状态且距上次采样 ≥55min 时,
-    # 把当前在线设备写一行到 run/online_hours.jsonl。聚合侧按 (mac, 日) 去重
-    # 计小时数(见 api_stats.go)。用文件 mtime 做节流, 不依赖额外状态变量。
-    # v5.20: 时钟不可信(未对时/落后高水位)时不写, 否则 day 字段是 1970 等错日
-    if [ "$STATE" = "ACTIVE" ] && HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hnc_clock.sh" sane 2>/dev/null; then
-        _now_s=$(date +%s)
-        _oh_mt=$(stat -c %Y "$RUN/online_hours.jsonl" 2>/dev/null || echo 0)
-        [ "$_oh_mt" -gt 0 ] && _oh_age=$((_now_s - _oh_mt)) || _oh_age=999999
-        if [ "$_oh_age" -ge 3300 ]; then
-            _oh_ts=$_now_s
-            _oh_day=$(date +%Y%m%d)
-            # v5.10.1: 排除 blocked 设备 —— 被拉黑的设备不算"在线"
-            for _m in $(grep -oE '"([0-9a-f]{2}:){5}[0-9a-f]{2}"[^}]*"status":"allowed"' "$HNC_DIR/data/devices.json" 2>/dev/null | grep -oE '"([0-9a-f]{2}:){5}[0-9a-f]{2}"' | tr -d '"' | tr 'A-F' 'a-f' | sort -u); do
-                echo "{\"t\":$_oh_ts,\"day\":\"$_oh_day\",\"mac\":\"$_m\"}" >> "$RUN/online_hours.jsonl" 2>/dev/null || true
-            done
-        fi
-    fi
-
-    # v5.12: 定时开关热点 / 只在充电时开热点(边沿触发, 两项都没启用时几乎零开销)
-    sh "$HNC_DIR/bin/hotspot_schedule.sh" >/dev/null 2>&1 || true
-
-    # rc3.1: service.wanted marker 逻辑已移除 · watchdog 在 cleanup.sh 杀进程
-    # 阶段就已经死了, 这段永远执行不到. restart 改由 cleanup.sh 末尾直接 fork.
-
-    # rc3.1.30 · 首轮跳过 sleep, 立即跑 dispatch.
-    # 配合 post-fs-data.sh 清 hnc_state, 重启后 watchdog 启动即 probe + do_full_init
-    # 不用等 10s (PROBE_INTERVAL_PENDING). 用户开热点后连上客户端立即有规则 · 不会
-    # 出现"前 10s 无限速"的窗口.
-    if [ "${FIRST_ROUND:-1}" = "1" ]; then
-        FIRST_ROUND=0
-    else
-        # 根据状态决定 sleep 时长
-        case "$STATE" in
-            PENDING)
-                # v5.22 功耗: 热点未开且熄屏无界面 → 最长 30s 才跑一整轮(probe/定时开关/
-                # 子服务检查), 但每 10s 用内建命令看一眼 activity.json, 热点一起来立即进入下一轮。
-                # 其余情况(或 activity 不新鲜)保持 10s。定时开关热点的分钟粒度不受影响(≤30s)。
-                if hnc_act_load "$(date +%s 2>/dev/null)" && [ "$ACT_OK" = 1 ] \
-                   && [ "$ACT_LEVEL" = hotspot_off ]; then
-                    hnc_act_sleep_until "$PROBE_INTERVAL_PENDING_QUIET" "$PROBE_INTERVAL_PENDING" hotspot
-                else
-                    sleep $PROBE_INTERVAL_PENDING
-                fi ;;
-            ACTIVE:*) sleep $INTERVAL ;;
-            *) log "WARN: unknown state '$STATE', resetting to PENDING"
-               echo "PENDING" > "$STATE_FILE"
-               STATE="PENDING"
-               sleep $PROBE_INTERVAL_PENDING ;;
-        esac
-    fi
-
-    # Doze 模式: 降频并跳过主动动作
-    cleanup_stale_rules_daily
-
-    if is_doze; then
-        INTERVAL=$INTERVAL_DOZE
-        continue
-    fi
-
-    # ═══ 状态机 dispatch ═══════════════════════════════════════
-    case "$STATE" in
-
-    PENDING)
-        # 没初始化过,探测热点
-        # rc3.1.31 隐患 3 诊断: 记 probe 耗时. reviewer 提醒如果 probe 本身 >3s,
-        # FIRST_ROUND=1 立刻 probe 的效果就被抵消了. 真机 probe_valid_hotspot 只
-        # 调 device_detect.sh iface (读文件 + 少量命令) 预期 <100ms. 若 probe.ms
-        # 持续 >1000ms 需单独优化.
-        _probe_t0=$(date +%s%N 2>/dev/null)
-        probe_out=$(probe_valid_hotspot)
-        probe_rc=$?
-        _probe_t1=$(date +%s%N 2>/dev/null)
-        if [ -n "$_probe_t0" ] && [ -n "$_probe_t1" ]; then
-            _probe_ms=$(( (_probe_t1 - _probe_t0) / 1000000 ))
-            [ "$_probe_ms" -gt 500 ] && log "probe_valid_hotspot slow: ${_probe_ms}ms (rc=$probe_rc)"
-        fi
-        if [ $probe_rc -eq 0 ]; then
-            new_iface=$(echo "$probe_out" | awk '{print $1}')
-            new_ip=$(echo "$probe_out" | awk '{print $2}')
-            do_full_init "$new_iface" "$new_ip"
-            # init 后同轮不做 check_health(规则刚挂,health 缓存无意义)
-            ensure_httpd_running
-        fi
-        # 没探到就继续等,什么都不做
-        ;;
-
-    ACTIVE:*)
-        active_iface="${STATE#ACTIVE:}"
-
-        # 探测当前热点状态
-        probe_out=$(probe_valid_hotspot)
-        probe_rc=$?
-
-        if [ $probe_rc -ne 0 ]; then
-            # 热点关了/消失了: 保持 ACTIVE 状态(用户可能只是临时关),
-            # 不做 migrate(不知道迁移到哪),也不 full_restore(规则挂的
-            # iface 已经 down, 没意义)。下轮再探。
-            # 不 log(避免每 60s 刷屏),除非这是第一次发现
-            # rc2 修 S4: continue 前先跑 check_services/heartbeat/rotate_logs_periodic,
-            #          否则热点关着时这些 housekeeping 全被跳, watchdog 看着像挂了
-            check_services
-            heartbeat
-            rotate_logs_periodic
-            continue
-        fi
-
-        new_iface=$(echo "$probe_out" | awk '{print $1}')
-        new_ip=$(echo "$probe_out" | awk '{print $2}')
-
-        # iface 变了 → 迁移
-        if [ "$new_iface" != "$active_iface" ]; then
-            do_migrate "$active_iface" "$new_iface" "$new_ip"
-            ensure_httpd_running
-            continue
-        fi
-
-        run_capability_probe_active "$new_iface"
-
-        # 稳态: 健康检查 + httpd 维护
-        check_health
-        health_rc=$?
-
-        if [ $health_rc -eq 2 ]; then
-            # 临时故障(xtables busy),跳过本轮
-            INTERVAL=$INTERVAL_NORMAL
-        elif [ $health_rc -ne 0 ]; then
-            # 规则丢了: 走速率限制 → full_restore
-            NOW_RL=$(date +%s)
-            CUR_WINDOW_SEC=$RESTORE_WINDOW_SEC
-            if [ $RESTORE_CONSEC_WINDOWS -gt 0 ]; then
-                CUR_WINDOW_SEC=$((RESTORE_WINDOW_SEC * (1 << RESTORE_CONSEC_WINDOWS)))
-                [ $CUR_WINDOW_SEC -gt $RESTORE_WINDOW_SEC_MAX ] && CUR_WINDOW_SEC=$RESTORE_WINDOW_SEC_MAX
-            fi
-            if [ $((NOW_RL - RESTORE_WINDOW_START)) -ge $CUR_WINDOW_SEC ]; then
-                RESTORE_WINDOW_START=$NOW_RL
-                RESTORE_WINDOW_COUNT=0
-                if [ $PASSIVE_MODE -eq 1 ]; then
-                    if [ $((NOW_RL - LAST_PASSIVE_EXIT_TS)) -lt $((RESTORE_WINDOW_SEC * 2)) ]; then
-                        RESTORE_CONSEC_WINDOWS=$((RESTORE_CONSEC_WINDOWS + 1))
-                        log "exiting passive but re-triggering soon (consec=$RESTORE_CONSEC_WINDOWS)"
-                    else
-                        RESTORE_CONSEC_WINDOWS=0
-                    fi
-                    log "exiting passive mode"
-                    PASSIVE_MODE=0
-                    PASSIVE_LOGGED=0
-                    LAST_PASSIVE_EXIT_TS=$NOW_RL
-                    rm -f "$PASSIVE_MARKER" 2>/dev/null
-                fi
-            fi
-            if [ $PASSIVE_MODE -eq 1 ]; then
-                if [ $PASSIVE_LOGGED -eq 0 ]; then
-                    log "health_fail in passive mode, skipping restore"
-                    PASSIVE_LOGGED=1
-                fi
-                INTERVAL=$INTERVAL_NORMAL
-            else
-                RESTORE_WINDOW_COUNT=$((RESTORE_WINDOW_COUNT+1))
-                RESTORE_COUNT=$((RESTORE_COUNT+1))
-                full_restore "health_fail (total=$RESTORE_COUNT, window=$RESTORE_WINDOW_COUNT/$RESTORE_WINDOW_MAX, win_sec=$CUR_WINDOW_SEC)"
-                if [ $RESTORE_WINDOW_COUNT -ge $RESTORE_WINDOW_MAX ]; then
-                    log "RESTORE window limit hit, entering passive mode"
-                    PASSIVE_MODE=1
-                    touch "$PASSIVE_MARKER" 2>/dev/null
-                fi
-                INTERVAL=$INTERVAL_RECOVERY
-                RECOVERY_ROUNDS=3
-            fi
-        else
-            # health 正常
-            if [ "$RECOVERY_ROUNDS" -gt 0 ]; then
-                RECOVERY_ROUNDS=$((RECOVERY_ROUNDS-1))
-                [ "$RECOVERY_ROUNDS" -eq 0 ] && INTERVAL=$INTERVAL_NORMAL
-            else
-                INTERVAL=$INTERVAL_NORMAL
-            fi
-        fi
-
-        # v6 同步(每 60s 兜底一次)
-        NOW=$(date +%s)
-        if [ $((NOW - LAST_V6_SYNC)) -ge 60 ]; then
-            sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
-            LAST_V6_SYNC=$NOW
-        fi
-
-        # 流量统计采样(v5.22: 热点开着但没有在线设备时 ×3 = 900s; 设备计数器是累计值, 不丢字节)
-        _stats_iv=$STATS_INTERVAL
-        if hnc_act_load "$NOW" && [ "$ACT_OK" = 1 ] && [ "$ACT_LEVEL" = no_clients ]; then
-            _stats_iv=$((STATS_INTERVAL * 3))
-        fi
-        if [ $((NOW - LAST_STATS_SAMPLE)) -ge $_stats_iv ]; then
-            sh "$HNC_DIR/bin/stats_sample.sh" >> "$LOG" 2>&1 || true
-            LAST_STATS_SAMPLE=$NOW
-        fi
-
-        # httpd IP 漂移检测
-        check_httpd_bind_drift
-
-        # httpd 保活(拉起新进程)
-        ensure_httpd_running
-
-        # v5.1 RC1: 主动 uplink 健康检查
-        ensure_tc_uplink_healthy
-        ;;
+# ═══════════════════════════════════════════════════════════════════════════
+# rc30.1: action mode — invoked by the Go hnc_watchdog binary to execute
+# individual business actions WITHOUT entering any main loop. v5.26: the
+# loop. v5.26: the legacy shell main loop has been removed — running this
+# script without an `action` argument now logs and exits 2. There is no
+# shell fallback; the Go binary is the only main loop.
+#
+# Contract:
+#   sh watchdog.sh action <name> [args...]
+#   exit code = action's return code (0 = ok, non-zero = failure)
+#   stdout = action's output (used by callers that parse it, e.g. probe_hotspot)
+#
+# Must be placed AFTER all function definitions, but BEFORE the main loop
+# initialization (which writes pidfiles, state files, and starts logging).
+# ═══════════════════════════════════════════════════════════════════════════
+if [ "${1:-}" = "action" ]; then
+    # v5.5.0-rc5 fix: action 子进程的退出是设计上的正常退出, 不是主循环异常崩溃.
+    # 上面 ~line 238 的 EXIT trap 是为了捕获 mainLoop 异常退出报警, 但每次 Go
+    # runAction 都 fork 这个脚本以 action 模式跑, 子进程跑到 case 里 exit $?
+    # 干净退出时 trap 误以为是主循环崩了, 打 "watchdog EXITED unexpectedly".
+    # PENDING 状态下每 10s tick 跑 probe_hotspot + prune_dup_hotspotd + 偶尔
+    # is_doze, 平均 2-3 个 action subprocess / 10s, 节奏跟日志刷屏完美吻合.
+    # 设这个 flag 让 EXIT trap 在 action 模式下变成 noop, 原本主循环监控完整保留.
+    WDG_CLEAN_EXIT=1
+    shift
+    _action="${1:-}"
+    shift 2>/dev/null || true
+    case "$_action" in
+        probe_hotspot)        probe_valid_hotspot              ; exit $? ;;
+        check_health)         check_health                     ; exit $? ;;
+        full_restore)         full_restore "${1:-go_request}"  ; exit $? ;;
+        full_init)            do_full_init "$1" "$2"           ; exit $? ;;
+        migrate)              do_migrate "$1" "$2" "$3"        ; exit $? ;;
+        cleanup_stale_rules)  cleanup_stale_rules_daily        ; exit $? ;;
+        rotate_logs)          rotate_logs_periodic             ; exit $? ;;
+        capability_probe)     run_capability_probe_active "$1" ; exit $? ;;
+        tc_uplink_healthy)    ensure_tc_uplink_healthy         ; exit $? ;;
+        httpd_drift)          check_httpd_bind_drift           ; exit $? ;;
+        is_doze)              is_doze                          ; exit $? ;;
+        get_iface)            get_iface                        ; exit $? ;;
+        prune_dup_hotspotd)   prune_duplicate_hotspotd         ; exit $? ;;
+        *) echo "watchdog.sh action: unknown command '$_action'" >&2; exit 64 ;;
     esac
+fi
 
-    # 子服务存活检查(hotspotd / device detect, 跟状态无关)
-    check_services
-
-    # v5.3.0-rc12: dpid 存活检查
-    ensure_dpid_running
-
-    # v4.0 Patch 1.6 稳定性卫生
-    heartbeat
-    rotate_logs_periodic
-
-done
-
-# trap EXIT 会 fire 如果执行到这里(不应发生)
+# ── v5.26 T1: 主循环已删除 ─────────────────────────────────────
+# 主循环由 Go 版 bin/hnc_watchdog(rc30.1+)承担; 本脚本只提供 action 业务动作。
+# 不带 action 参数直接运行(旧 service.sh 的 shell 兜底路径)在此明确拒绝。
+WDG_CLEAN_EXIT=1
+log "主循环已由 bin/hnc_watchdog 承担, watchdog.sh 只提供 action (invoked without action, exit 2)"
+exit 2

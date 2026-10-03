@@ -690,9 +690,8 @@ else
             echo $! > "$RUN/watchdog.pid"
             log "watchdog (Go, rc30.1+) started (PID=$(cat $RUN/watchdog.pid 2>/dev/null))"
         else
-            sh "$HNC_DIR/bin/watchdog.sh" >> "$HNC_DIR/logs/watchdog.log" 2>&1 &
-            echo $! > "$RUN/watchdog.pid"
-            log "watchdog (shell fallback) started (PID=$(cat $RUN/watchdog.pid 2>/dev/null))"
+            # v5.26 T1: watchdog.sh 的 shell 主循环已删除, 不再兜底启动。
+            log "FATAL: bin/hnc_watchdog missing, watchdog not started"
         fi
     fi
 fi

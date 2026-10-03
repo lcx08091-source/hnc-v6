@@ -405,10 +405,12 @@ func TestPowerShellMirrorConstants(t *testing.T) {
 		return string(b)
 	}
 	quiet := Activity{Known: true, ScreenKnown: true}
-	wd := read("bin/watchdog.sh")
-	m := regexp.MustCompile(`(?m)^PROBE_INTERVAL_PENDING_QUIET=(\d+)`).FindStringSubmatch(wd)
+	// v5.26 T1: watchdog.sh shell 主循环已删, 镜像常量改为对比 Go 看门狗
+	// power.go 的 intervalIdleProbe(原 shell PROBE_INTERVAL_PENDING_QUIET)。
+	pg := read("src/dpid/cmd/hnc_watchdog/power.go")
+	m := regexp.MustCompile(`intervalIdleProbe\s*=\s*(\d+)\s*\*\s*time\.Second`).FindStringSubmatch(pg)
 	if d, _ := powerInterval("watchdog_pending", quiet, loopFlags{}); m == nil || m[1] != fmt.Sprint(int(d.Seconds())) {
-		t.Errorf("watchdog.sh PROBE_INTERVAL_PENDING_QUIET=%v, Go=%v", m, d)
+		t.Errorf("hnc_watchdog power.go intervalIdleProbe=%v, want=%v", m, d)
 	}
 	og := read("bin/hnc_offload_guard.sh")
 	m = regexp.MustCompile(`HNC_GUARD_IDLE_INTERVAL:-(\d+)`).FindStringSubmatch(og)

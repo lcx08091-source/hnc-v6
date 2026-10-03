@@ -113,5 +113,6 @@ for f in watchdog.sh hnc_offload_guard.sh hnc_dpid_guard.sh hnc_activity.sh; do
 done
 grep -q 'hnc_activity.sh' "$HNC_REPO_ROOT/bin/watchdog.sh" || ok=0
 grep -q 'hnc_activity.sh' "$HNC_REPO_ROOT/bin/hnc_dpid_guard.sh" || ok=0
-grep -q 'PROBE_INTERVAL_PENDING_QUIET' "$HNC_REPO_ROOT/bin/watchdog.sh" || ok=0
+# v5.26 T1: shell 主循环已删, 改查 Go 版 power.go 的 intervalIdleProbe。
+grep -q 'intervalIdleProbe' "$HNC_REPO_ROOT/src/dpid/cmd/hnc_watchdog/power.go" || ok=0
 [ "$ok" = 1 ] && test_pass || test_fail "syntax/wiring"

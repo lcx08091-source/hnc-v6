@@ -15,8 +15,10 @@
 //   - Doze detection, INTERVAL_DOZE handling
 //   - PATH-independent / no /system/bin/* dependency in the supervision loop
 //
-// Falls back gracefully: if /data/local/hnc/bin/hnc_watchdog isn't present,
-// service.sh / cleanup.sh still launch the legacy shell watchdog.sh.
+// v5.26: the legacy shell main loop in watchdog.sh has been removed; the
+// script only serves `action` subcommands forked by this binary. If this
+// binary is missing, service.sh logs FATAL and no watchdog runs (no shell
+// fallback anymore).
 package main
 
 import (
@@ -445,6 +447,16 @@ func ensureDaemonRunning(d daemonSpec) {
 		_ = os.WriteFile(watchPidFile, []byte(strconv.Itoa(live)), 0o644)
 		logf("%s: live without pidfile, repaired (pid=%d)", d.name, live)
 		return
+	}
+
+	// v5.26 T1: DNS 接管 fail-open 从 watchdog.sh ensure_httpd_running 迁来。
+	// httpd 被杀/崩溃时来不及撤 DNS 接管的 DNAT → 这里先撤掉(新 httpd 起来会按
+	// 配置重下)。仅对 httpd 生效; dns_takeover.sh 自身幂等。
+	if d.name == "hnc_httpd" {
+		cmd := exec.Command(shellPath(), hncDir+"/bin/dns_takeover.sh", "remove")
+		cmd.Stdout = io.Discard
+		cmd.Stderr = io.Discard
+		_ = cmd.Run()
 	}
 
 	if _, err := os.Stat(launcher); err != nil {
