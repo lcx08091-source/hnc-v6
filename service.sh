@@ -861,6 +861,21 @@ if [ -z "$LAUNCHER_CHOICE" ] && [ -x "$DPID_SUPERVISOR" ]; then
     log "dpid launcher: hnc_dpid_supervisor (Go, last-resort) — may fail on hardened ROMs"
 fi
 
+# v5.26 T2: 把选定的 dpid 守护者原子写入 run/dpid_launcher.choice。
+# Go 看门狗与 sentinel 都只认这一份, 不再各自猜测谁在管 dpid。
+# (launcher | guard | supervisor | direct)
+case "$LAUNCHER_CHOICE" in
+    c_launcher)     _dpid_choice="launcher" ;;
+    shell_guard)    _dpid_choice="guard" ;;
+    go_supervisor)  _dpid_choice="supervisor" ;;
+    *)              _dpid_choice="direct" ;;
+esac
+printf '%s\n' "$_dpid_choice" > "$RUN/dpid_launcher.choice.tmp" 2>/dev/null \
+    && mv -f "$RUN/dpid_launcher.choice.tmp" "$RUN/dpid_launcher.choice" 2>/dev/null \
+    || printf '%s\n' "$_dpid_choice" > "$RUN/dpid_launcher.choice" 2>/dev/null
+log "dpid launcher choice persisted: $_dpid_choice (raw=$LAUNCHER_CHOICE)"
+unset _dpid_choice
+
 
 if [ ! -x "$DPID_BIN" ]; then
     log "WARN: hnc_dpid binary missing at $DPID_BIN, DPI 功能不可用"
@@ -1095,6 +1110,11 @@ fi
                         echo $! > "$DPID_PID" 2>/dev/null || true
                         sleep 2
                     fi
+                    # v5.26 T2: choice 原子改写为 direct, Go 看门狗随即停止重拉坏掉的
+                    # launcher、只按 direct 口径管 dpid。救命路径本身保留不变。
+                    printf 'direct\n' > "$RUN/dpid_launcher.choice.tmp" 2>/dev/null \
+                        && mv -f "$RUN/dpid_launcher.choice.tmp" "$RUN/dpid_launcher.choice" 2>/dev/null \
+                        || printf 'direct\n' > "$RUN/dpid_launcher.choice" 2>/dev/null
                 elif [ -x "$DPID_LAUNCHER" ]; then
                     log "sentinel: no dpid launcher running, restarting via $DPID_LAUNCHER"
                     nohup "$DPID_LAUNCHER" >> "$HNC_DIR/logs/dpid_guard.log" 2>&1 &

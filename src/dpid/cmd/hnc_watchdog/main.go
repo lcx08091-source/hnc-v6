@@ -382,6 +382,125 @@ func launcherDaemon() daemonSpec {
 	}
 }
 
+// ── v5.26 T2: dpid 守护者唯一权威 = run/dpid_launcher.choice ──────────────
+//
+// service.sh 启动时按机型探测(C launcher > shell guard > Go supervisor >
+// direct)把选择原子写入 run/dpid_launcher.choice; sentinel 的救命路径检测到
+// launcher 反复 abort 时会把 choice 改写为 direct。看门狗每个 tick 读一次,
+// 只监管 choice 指定的那一个守护者, 不再无条件重拉 hnc_launcher(即使
+// service.sh 因兼容性选了别的)。文件缺失/非法时保持旧行为。
+
+// parseLauncherChoice 校验 choice 文件内容, 非法值返回 ""(视同缺失)。
+func parseLauncherChoice(raw string) string {
+	c := strings.TrimSpace(raw)
+	switch c {
+	case "launcher", "guard", "supervisor", "direct":
+		return c
+	default:
+		return ""
+	}
+}
+
+// readLauncherChoiceAt 读取并校验指定路径的 choice 文件(路径可注入, 供单测)。
+func readLauncherChoiceAt(path string) string {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return parseLauncherChoice(string(b))
+}
+
+func readLauncherChoice() string {
+	return readLauncherChoiceAt(runDir + "/dpid_launcher.choice")
+}
+
+// dpidGuardPlan 返回该 choice 下看门狗应监管的对象(纯函数, 供单测):
+//   - launcher:   只监管 hnc_launcher(它负责 dpid)
+//   - guard:      只确保 hnc_dpid_guard.sh 在跑
+//   - supervisor: 只走 dpidDaemon(guardBin 优先启动 hnc_dpid_supervisor)
+//   - direct:     dpidDaemonDirect 直管 dpid(不重拉任何 launcher)
+//   - "":         保持旧行为(launcher + dpidDaemon 两个都管)
+func dpidGuardPlan(choice string) (superviseLauncher, superviseSupervisor, superviseShellGuard, superviseDpidDirect bool) {
+	switch choice {
+	case "launcher":
+		return true, false, false, false
+	case "guard":
+		return false, false, true, false
+	case "supervisor":
+		return false, true, false, false
+	case "direct":
+		return false, false, false, true
+	default:
+		return true, true, false, false
+	}
+}
+
+// dpidDaemonDirect: choice=direct 时的 dpid spec —— 去掉 guardBin,
+// 确保 ensureDaemonRunning 直接拉 hnc_dpid 而不是 hnc_dpid_supervisor。
+func dpidDaemonDirect() daemonSpec {
+	d := dpidDaemon()
+	d.guardBin = ""
+	return d
+}
+
+// ensureShellGuardRunning: choice=guard 时确保 bin/hnc_dpid_guard.sh 在跑。
+func ensureShellGuardRunning() bool {
+	return ensureGuardScriptAt(binDir+"/hnc_dpid_guard.sh", runDir+"/dpid_guard.pid",
+		"hnc_dpid_guard", logDir+"/dpid_guard.log", dpidRestartCD)
+}
+
+// ensureGuardScriptAt 是路径可注入的 shell guard 启动器(供单测):
+// 先认 pidfile, 再按 comm/argv0(cmdline 子串)找活进程并顺手修复 pidfile,
+// 都没有才在冷却窗口允许时拉起。
+func ensureGuardScriptAt(script, pidFile, name, logPath string, cd time.Duration) bool {
+	if data, err := os.ReadFile(pidFile); err == nil {
+		if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 && processAlive(pid) {
+			return true
+		}
+	}
+	if live := findLiveByName(name); live > 0 {
+		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(live)), 0o644)
+		return true
+	}
+	if live := findLiveByCmdlineSub(filepath.Base(script)); live > 0 {
+		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(live)), 0o644)
+		return true
+	}
+	if _, err := os.Stat(script); err != nil {
+		return false
+	}
+	if !cooldownOK(name, cd) {
+		return false
+	}
+	logf("%s: process gone, launching shell guard", name)
+	out, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		out = nil
+	}
+	cmd := exec.Command(shellPath(), script)
+	if out != nil {
+		cmd.Stdout = out
+		cmd.Stderr = out
+	}
+	// 与 spawnDaemon 相同的进程组隔离(Setsid 不能用, ColorOS+SukiSU 会 EPERM)。
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		logf("%s: launch failed: %v", name, err)
+		if out != nil {
+			_ = out.Close()
+		}
+		return false
+	}
+	go func() {
+		_ = cmd.Wait()
+		if out != nil {
+			_ = out.Close()
+		}
+	}()
+	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
+	return true
+}
+
 const alertScanEvery = 5 * time.Minute
 
 // v5.18: nDPI 实验(ndpi_continuous.sh + hnc_ndpi_probe)已删除, hnc_dpid 自己
@@ -549,6 +668,37 @@ func findLiveByName(name string) int {
 	return 0
 }
 
+// findLiveByCmdlineSub 在 /proc/*/cmdline 的任意 argv 段里找包含 needle 的
+// 活进程(排除自己)。findLiveByName 只匹配 comm/argv0, 找不到
+// `sh /data/local/hnc/bin/hnc_dpid_guard.sh` 这种以解释器启动的脚本进程,
+// shell guard 的存活检测必须走这里。
+func findLiveByCmdlineSub(needle string) int {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return 0
+	}
+	mypid := os.Getpid()
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(e.Name())
+		if err != nil || pid <= 0 || pid == mypid {
+			continue
+		}
+		data, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
+		if err != nil {
+			continue
+		}
+		for _, arg := range strings.Split(string(data), "\x00") {
+			if strings.Contains(arg, needle) {
+				return pid
+			}
+		}
+	}
+	return 0
+}
+
 // ─── doze detection ─────────────────────────────────────────────────────
 
 // isDoze defers to watchdog.sh action is_doze (which knows the ColorOS/MIUI
@@ -709,12 +859,26 @@ func mainLoop() {
 		// Daemon supervision (regardless of state)
 		ensureDaemonRunning(hotspotdDaemon())
 		ensureDaemonRunning(httpdDaemon())
-		// v5.5.0-rc6: launcher 监管必须在 dpid 之前, 因为 dpid 的 ensureDaemonRunning
-		// 入口会 findLiveByName("hnc_launcher") 决定要不要 short-circuit. 这一行
-		// 保证 launcher 死后下一 tick 就被拉起来, 紧接着 dpid 检查就能看到 launcher
-		// 活了, 走 short-circuit, 让 launcher 接管 dpid (避免双重 spawn).
-		ensureDaemonRunning(launcherDaemon())
-		ensureDaemonRunning(dpidDaemon())
+		// v5.26 T2: 只监管 run/dpid_launcher.choice 指定的那一个 dpid 守护者
+		// (service.sh 机型探测后落盘, sentinel 救命路径可改写为 direct);
+		// 文件缺失/非法时保持旧行为(launcher + dpid 都管)。
+		superviseLauncher, superviseSupervisor, superviseShellGuard, superviseDpidDirect := dpidGuardPlan(readLauncherChoice())
+		if superviseLauncher {
+			// v5.5.0-rc6: launcher 监管必须在 dpid 之前, 因为 dpid 的 ensureDaemonRunning
+			// 入口会 findLiveByName("hnc_launcher") 决定要不要 short-circuit. 这一行
+			// 保证 launcher 死后下一 tick 就被拉起来, 紧接着 dpid 检查就能看到 launcher
+			// 活了, 走 short-circuit, 让 launcher 接管 dpid (避免双重 spawn).
+			ensureDaemonRunning(launcherDaemon())
+		}
+		if superviseSupervisor {
+			ensureDaemonRunning(dpidDaemon())
+		}
+		if superviseShellGuard {
+			ensureShellGuardRunning()
+		}
+		if superviseDpidDirect {
+			ensureDaemonRunning(dpidDaemonDirect())
+		}
 
 		// rc17 hotspotd dedupe —— v5.25: 纯防御性清理, 每 10 分钟一次即可(原来每轮 fork 一次 watchdog.sh)
 		if time.Since(lastPrune) >= pruneDupEvery {
