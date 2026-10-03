@@ -29,6 +29,8 @@ import (
 	"syscall"
 	"time"
 	"unsafe"
+
+	"hnc.io/dpid/ifacehint" // v5.26 T5: 网卡名唯一权威出口
 )
 
 // ─── constants ────────────────────────────────────────────────────────────
@@ -192,11 +194,11 @@ func getIface() string {
 	if c := readConfig(); c.Iface != "" {
 		return c.Iface
 	}
-	if data, err := os.ReadFile(hotspotHintFile); err == nil {
-		line := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
-		if line != "" {
-			return line
-		}
+	// v5.26 T5: hint 读取改走 ifacehint.Read(优先 hnc_iface.sh 的
+	// iface_detect.json, 回退 hotspot_iface)。旧代码对 hotspot_iface
+	// 只查非空不查字符合法性, 现在统一按 ifacehint 的白名单校验。
+	if s, ok := ifacehint.Read(runDir, time.Now()); ok {
+		return s
 	}
 	for _, c := range []string{"wlan2", "ap0", "ap1", "swlan0", "wlan1", "rndis0"} {
 		if _, err := os.Stat("/sys/class/net/" + c); err == nil {

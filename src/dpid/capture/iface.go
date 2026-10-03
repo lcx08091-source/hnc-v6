@@ -8,6 +8,9 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
+
+	"hnc.io/dpid/ifacehint" // v5.26 T5: 网卡名唯一权威出口
 )
 
 const hncHotspotIfaceFile = "/data/local/hnc/run/hotspot_iface"
@@ -143,20 +146,12 @@ func isExcluded(name string) bool {
 	return false
 }
 
+// readHNCHint v5.26 T5: 改走 ifacehint.Read —— 优先 hnc_iface.sh 的
+// iface_detect.json(10 分钟内新鲜), 回退 hotspot_iface(校验逻辑已挪进
+// ifacehint.validIface, 与原实现一致)。DiscoverAPCandidates 自有的
+// 排序扫描仍是 ok=false 时的兜底。
 func readHNCHint() string {
-	b, err := os.ReadFile(hncHotspotIfaceFile)
-	if err != nil {
-		return ""
-	}
-	s := strings.TrimSpace(string(b))
-	if len(s) == 0 || len(s) > 32 {
-		return ""
-	}
-	for _, r := range s {
-		if !(r == '-' || r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
-			return ""
-		}
-	}
+	s, _ := ifacehint.Read(filepath.Dir(hncHotspotIfaceFile), time.Now())
 	return s
 }
 

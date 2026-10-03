@@ -147,7 +147,7 @@ sleep_s() {
 
 json_escape() {
     # Small shell-safe JSON string escape for status messages.
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g'
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/  / /g'
 }
 
 write_waiting_state() {
@@ -193,11 +193,23 @@ read_json_bool_key() {
 }
 
 get_iface() {
-    local cfg_iface hint detected
+    local cfg_iface hint detected ts now
     cfg_iface=$(read_json_string_key iface "$CONFIG" 2>/dev/null)
     if [ -n "$cfg_iface" ]; then
         printf '%s\n' "$cfg_iface"
         return 0
+    fi
+    # v5.26 T5: 优先 hnc_iface.sh 的权威探测结果 iface_detect.json
+    # (iface 非空且 ts 在 10 分钟内才算数), 与 Go 侧 ifacehint.Read 同口径。
+    if [ -f "$RUN/iface_detect.json" ]; then
+        hint=$(read_json_string_key iface "$RUN/iface_detect.json" 2>/dev/null)
+        ts=$(sed -n 's/.*"ts":\([0-9]*\).*/\1/p' "$RUN/iface_detect.json" 2>/dev/null | head -n1)
+        now=$(date +%s)
+        if [ -n "$hint" ] && [ -n "$ts" ] && [ "$now" -ge "$ts" ] 2>/dev/null \
+           && [ $((now - ts)) -le 600 ] 2>/dev/null; then
+            printf '%s\n' "$hint"
+            return 0
+        fi
     fi
     hint=$(cat "$RUN/hotspot_iface" 2>/dev/null | head -1)
     if [ -n "$hint" ]; then
