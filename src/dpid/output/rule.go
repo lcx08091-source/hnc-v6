@@ -73,6 +73,10 @@ type l3Rule struct {
 	IPv6Matchers  []ipMatcher
 	SubCategories []subCategory
 	Verified      bool // ground_truth.verified
+	// parentID: v5.27 T1 「挂靠」—— 外部规则的 _parent_rule_id(规范化后)。
+	// 只在 compileExternalRules 内部用于把子规则并进父规则, 挂靠完成后
+	// 留在结果里的规则都是独立规则(父不存在 / 成环时保持原样)。
+	parentID string
 }
 
 // ipMatcher is a compiled CIDR + (proto, ports) tuple. Used for both IPv4
@@ -185,6 +189,10 @@ type externalRule struct {
 	IPv6Matchers  []externalIPMatcher    `json:"ipv6_matchers"`
 	SubCategories map[string]externalSub `json:"sub_categories"`
 	GroundTruth   *externalGT            `json:"ground_truth"`
+	// v5.27 T1: 挂靠到另一条规则(规则 id = 应用 id)。自动扩展的子域名
+	// (_auto_expanded.json)、规则库扩充(<id>_v2fly)、导入的规则包(imp_*)
+	// 都用它把后缀并进已有应用, 而不是变成「名字相同、id 不同」的另一个应用。
+	ParentRuleID string `json:"_parent_rule_id"`
 }
 
 type externalMatcher struct {
@@ -500,9 +508,14 @@ func compileExternalRules(in []externalRule) []l3Rule {
 			IPv6Matchers:  ipv6ms,
 			SubCategories: subs,
 			Verified:      verified,
+			parentID:      normalizeRuleID(r.ParentRuleID),
 		}
 		out = append(out, rule)
-		if len(out) >= 1024 {
+		// v5.27: 原来在这里按「编译出的原始条数」截到 1024, 挂靠的子规则
+		// (自动扩展每个子域名一条)会把排在后面的真正应用规则挤掉。改为
+		// 先去重、挂靠, 再对剩下的独立规则截断(见函数末尾)。这里只留一个
+		// 宽松的防失控上限。
+		if len(out) >= maxRawExternalRules {
 			break
 		}
 	}
@@ -522,6 +535,108 @@ func compileExternalRules(in []externalRule) []l3Rule {
 			dedup = append(dedup, r)
 		}
 		out = dedup
+	}
+	// v5.27 T1: 挂靠必须在所有文件合并、按 id 去重之后做 —— 父规则可能被
+	// 后面的文件(99-user-custom 等)整条覆盖, 子规则要并进覆盖后的那条。
+	out = attachChildRules(out)
+	if len(out) > maxCompiledRules {
+		out = out[:maxCompiledRules]
+	}
+	return out
+}
+
+const (
+	// maxCompiledRules: 挂靠之后保留的独立规则上限(与 v5.27 之前的 1024 相同)。
+	maxCompiledRules = 1024
+	// maxRawExternalRules: 编译阶段的防失控上限(含将被挂靠的子规则)。
+	maxRawExternalRules = 65536
+	// maxAttachDepth: 子→父→祖父… 最多跟几层(防成环)。
+	maxAttachDepth = 8
+)
+
+// attachChildRules 把带 parentID 且父规则存在的规则并进父规则(链式挂靠到根),
+// 自身从列表移除:
+//   - 后缀 / IPv4 / IPv6 匹配器追加到父规则(后缀去重), 名字、类别、优先级以父为准;
+//   - 父规则不存在、或挂靠链成环 / 过深 → 保持独立规则(与 v5.27 之前一样);
+//   - 不修改入参切片里父规则的 Suffixes 底层数组(复制后追加)。
+func attachChildRules(in []l3Rule) []l3Rule {
+	hasChild := false
+	for i := range in {
+		if in[i].parentID != "" && in[i].parentID != in[i].ID {
+			hasChild = true
+			break
+		}
+	}
+	if !hasChild {
+		return in
+	}
+	idx := make(map[string]int, len(in))
+	for i := range in {
+		idx[in[i].ID] = i
+	}
+	// root 返回 i 最终挂靠到的规则下标; -1 = 保持独立。
+	root := func(i int) int {
+		cur := i
+		for depth := 0; depth < maxAttachDepth; depth++ {
+			p := in[cur].parentID
+			if p == "" || p == in[cur].ID {
+				if cur == i {
+					return -1
+				}
+				return cur
+			}
+			j, ok := idx[p]
+			if !ok {
+				// 父规则不存在: 挂到链上最后一个存在的祖先(自己没有父 → 独立)。
+				if cur == i {
+					return -1
+				}
+				return cur
+			}
+			if j == i {
+				return -1 // 成环
+			}
+			cur = j
+		}
+		return -1 // 过深, 当成环处理
+	}
+	target := make([]int, len(in))
+	for i := range in {
+		target[i] = root(i)
+	}
+	// 成环的链上每个节点都会返回 -1(环里任一节点出发都回到自己), 链尾挂到环上
+	// 的节点在跟到环时也会因过深返回 -1 —— 都保持独立。
+	extraSuf := map[int][]string{}
+	extraIP := map[int][]ipMatcher{}
+	extraIP6 := map[int][]ipMatcher{}
+	for i, t := range target {
+		if t < 0 || target[t] >= 0 {
+			// 目标自身也要挂靠(理论上 root 已跟到底, 防御性跳过)
+			if t >= 0 {
+				target[i] = -1
+			}
+			continue
+		}
+		extraSuf[t] = append(extraSuf[t], in[i].Suffixes...)
+		extraIP[t] = append(extraIP[t], in[i].IPMatchers...)
+		extraIP6[t] = append(extraIP6[t], in[i].IPv6Matchers...)
+	}
+	out := make([]l3Rule, 0, len(in))
+	for i := range in {
+		if target[i] >= 0 {
+			continue
+		}
+		r := in[i]
+		if add, ok := extraSuf[i]; ok {
+			r.Suffixes = uniqueStrings(append(append(make([]string, 0, len(r.Suffixes)+len(add)), r.Suffixes...), add...))
+			if ips := extraIP[i]; len(ips) > 0 {
+				r.IPMatchers = append(append(make([]ipMatcher, 0, len(r.IPMatchers)+len(ips)), r.IPMatchers...), ips...)
+			}
+			if ips := extraIP6[i]; len(ips) > 0 {
+				r.IPv6Matchers = append(append(make([]ipMatcher, 0, len(r.IPv6Matchers)+len(ips)), r.IPv6Matchers...), ips...)
+			}
+		}
+		out = append(out, r)
 	}
 	return out
 }

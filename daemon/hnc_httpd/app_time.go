@@ -312,6 +312,7 @@ type catalogRawRule struct {
 	Suffixes  []string `json:"suffixes"`
 	NoAttr    bool     `json:"do_not_attribute_to_app"`
 	NoAttrUsr bool     `json:"do_not_attribute_to_user_app"`
+	Parent    string   `json:"_parent_rule_id"` // v5.27 T1 挂靠, 语义同 dpid rule.go
 }
 
 func loadAppCatalog(hncDir string) *appCatalog {
@@ -329,6 +330,7 @@ func loadAppCatalog(hncDir string) *appCatalog {
 		return appCatalogCache.cat
 	}
 	c := &appCatalog{apps: map[string]*catalogApp{}, byCat: map[string][]string{}}
+	parentOf := map[string]string{}
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil || len(b) > 2<<20 {
@@ -366,8 +368,14 @@ func loadAppCatalog(hncDir string) *appCatalog {
 				a.Suffixes = append(a.Suffixes, sfx)
 			}
 			c.apps[id] = a
+			if p := strings.TrimSpace(r.Parent); p != "" && p != id {
+				parentOf[id] = p
+			} else {
+				delete(parentOf, id) // 后写覆盖: 新的同 id 规则不再挂靠
+			}
 		}
 	}
+	attachCatalogChildren(c.apps, parentOf)
 	for id, a := range c.apps {
 		c.byCat[a.Category] = append(c.byCat[a.Category], id)
 	}
@@ -376,6 +384,73 @@ func loadAppCatalog(hncDir string) *appCatalog {
 	}
 	appCatalogCache.key, appCatalogCache.cat = key, c
 	return c
+}
+
+// attachCatalogChildren 与 dpid 的规则挂靠(src/dpid/output/rule.go attachChildRules)
+// 保持一致: 带 _parent_rule_id 且父应用存在的规则, 后缀并进(链式挂靠的)根应用,
+// 自身不再作为独立应用出现; 父不存在 / 成环 → 保持独立。
+func attachCatalogChildren(apps map[string]*catalogApp, parentOf map[string]string) {
+	if len(parentOf) == 0 {
+		return
+	}
+	rootOf := func(id string) string {
+		cur := id
+		for depth := 0; depth < 8; depth++ {
+			p, ok := parentOf[cur]
+			if !ok {
+				break
+			}
+			if _, exists := apps[p]; !exists {
+				break
+			}
+			if p == id {
+				return "" // 成环
+			}
+			cur = p
+		}
+		if _, still := parentOf[cur]; still {
+			if _, exists := apps[parentOf[cur]]; exists {
+				return "" // 过深(环不经过自己)
+			}
+		}
+		if cur == id {
+			return ""
+		}
+		return cur
+	}
+	ids := make([]string, 0, len(parentOf))
+	for id := range parentOf {
+		if _, ok := apps[id]; ok {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	roots := make(map[string]string, len(ids))
+	for _, id := range ids {
+		if r := rootOf(id); r != "" {
+			roots[id] = r
+		}
+	}
+	for _, id := range ids {
+		r, ok := roots[id]
+		if !ok {
+			continue
+		}
+		dst := apps[r]
+		seen := make(map[string]bool, len(dst.Suffixes))
+		for _, s := range dst.Suffixes {
+			seen[s] = true
+		}
+		for _, s := range apps[id].Suffixes {
+			if !seen[s] {
+				seen[s] = true
+				dst.Suffixes = append(dst.Suffixes, s)
+			}
+		}
+	}
+	for id := range roots {
+		delete(apps, id)
+	}
 }
 
 // ─── 配置文件 ──────────────────────────────────────────────────────────
