@@ -348,7 +348,7 @@ function renderSettings(anim1) {
   groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
     sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
     (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '（可能误伤其他应用）CDN 地址常被多个应用共用；默认跳过这些地址，打开后也一起限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
-    encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() + evalFold() +
+    encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() + evalFold() + fgEngineFold() +
     sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
   var cs = S.clsact;
   var gm = c.clsact_bpf_mode || (c.clsact_bpf_enabled === true ? 'on' : 'auto'), og = c.offload_guard || S.offload.guard || null;
@@ -395,6 +395,7 @@ function renderSettings(anim1) {
   if (S.open.dnst) { if (S.dns) paintDNS(); else loadDNS(); }
   if (S.open.fpl) { if (S.fpl) paintFP(); else loadFP(); }
   if (S.open.deval) { if (S.eval) paintEval(); else loadEval(); }
+  if (S.open.fgeng) { if (S.fgcmp) paintFgEngine(); else loadFgEngine(); }
 }
 /* ── DPI v2: DNS 接管(可选, 默认关) ── */
 S.dns = null; S.fpl = null;
@@ -552,6 +553,30 @@ function paintEval() {
   h += '<div class="note" style="margin-bottom:-2px">前台记录（给以后的前台评估用）</div><div class="note">' + fgTxt + '</div>';
   h += evalFootHtml();
   el.innerHTML = h; placeSegs(el);
+}
+/* v5.27 T4: 前台识别引擎(经典 / HMM 实验)+ 过去 24 小时对比 */
+S.fgcmp = null;
+function fgEngineSumTxt() {
+  var r = S.fgcmp; if (!r || r.err) return '经典（打分 + 滞回）· 新引擎（实验）更不容易来回跳';
+  return (r.engine === 'hmm' ? '新（实验）' : '经典') + ' · 过去 24 小时两者一致 ' + num(r.agree_pct) + '%';
+}
+function fgEngineFold() {
+  return sFold('fgeng', ['purple', 'gauge'], '前台识别引擎', '<span id="fgeng-sum">' + esc(fgEngineSumTxt()) + '</span>', '<div id="fgeng-body"><div class="note">展开后加载</div></div>');
+}
+function loadFgEngine() {
+  return api.get('/api/fg_compare', { days: 1 }, { timeout: 8000 }).then(function (r) { S.fgcmp = r; }).catch(function (e) { S.fgcmp = { err: errText(e) }; }).then(paintFgEngine);
+}
+function paintFgEngine() {
+  var el = $('#fgeng-body'), r = S.fgcmp; if (!el || !r) return;
+  el.setAttribute('data-keep', '');
+  var sm = $('#fgeng-sum'); if (sm) sm.textContent = fgEngineSumTxt();
+  if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持）</div>'; return; }
+  var c = r.classic || {}, hm = r.hmm || {};
+  el.innerHTML = seg('fg-engine', [['classic', '经典'], ['hmm', '新（实验）']], r.engine || 'classic', 'small') +
+    (num(r.rounds) ? '<div class="note">过去 24 小时：经典 切换 ' + num(c.switches_per_hour) + ' 次/小时、短于 30 秒的 ' + num(c.short_segments) + ' 段；新 ' + num(hm.switches_per_hour) + ' 次/小时、' + num(hm.short_segments) + ' 段；两者一致 ' + num(r.agree_pct) + '%</div>'
+      : '<div class="note">过去 24 小时还没有热点设备的流量，暂无对比。</div>') +
+    '<div class="note">新引擎更不容易来回跳；切换后前台时间线从此刻起按新引擎记录。只影响「正在用什么」的显示和前台时间线，不影响识别、限速和限时。</div>';
+  placeSegs(el);
 }
 /* v5.27 T3: 学会的启动指纹列表(/api/dpi_startup) */
 S.startup = null; S.startupOpen = false;

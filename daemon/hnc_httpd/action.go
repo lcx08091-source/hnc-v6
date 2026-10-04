@@ -348,6 +348,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionTemplateDel(hncDir, p)
 	case "cache_clear":
 		return actionCacheClear(hncDir)
+	case "dpi_fg_engine": // v5.27 T4: 前台识别引擎 classic | hmm(fg_hmm.go)
+		return actionDPIFgEngine(hncDir, p)
 	case "dpi_eval_clear": // v5.24 T4: 删除本机样本 / 前台真值 / 评估结果
 		return actionDPIEvalClear(hncDir)
 	case "debug_bundle":

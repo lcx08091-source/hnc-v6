@@ -179,11 +179,15 @@ type fgView struct {
 
 type fgDev struct {
 	apps    map[string]*fgApp
-	cur     string
+	cur     string // 经典模型的前台
 	since   time.Time
 	open    bool // 今天的时间线里该设备最后一段是打开的
 	view    fgView
 	lastObs time.Time
+	// v5.27 T4: shown = 显示与时间线跟随的前台(classic 引擎时恒等于 cur, hmm 引擎时 = hmm.cur)
+	shown string
+	hmm   *hmmDev
+	hmmAt time.Time // HMM 上一轮时刻(取这段时间内的启动事件)
 }
 
 type fgSession struct {
@@ -209,11 +213,35 @@ type fgModel struct {
 	dt    float64
 	day   *fgDay
 	dirty bool
-	dir   string // 落盘目录(load 设置; 为空 = 不落盘, 单测用)
+	dir   string     // 落盘目录(load 设置; 为空 = 不落盘, 单测用)
+	cmp   *fgCompare // v5.27 T4: 经典 / HMM 对比统计(fg_hmm.go)
+	// engine v5.27 T4: 返回当前前台引擎; nil = 用 engineCur(load / flush / 切换动作时从
+	// data/dpi_experiment.json 刷新, 每轮 step 不做文件 I/O)
+	engine    func() string
+	engineCur string
+	// started v5.27 T4: (设备, (after, upTo]) 内有启动事件的应用; nil = startupEventsForHMM
+	started func(mac string, after, upTo int64) map[string]bool
 }
 
 func newFgModel() *fgModel {
-	return &fgModel{devs: map[string]*fgDev{}, conns: map[string]*fgConn{}}
+	return &fgModel{devs: map[string]*fgDev{}, conns: map[string]*fgConn{}, cmp: newFgCompare()}
+}
+
+func (m *fgModel) engineLocked() string {
+	if m.engine != nil {
+		return m.engine()
+	}
+	if m.engineCur == "" {
+		return fgEngineClass
+	}
+	return m.engineCur
+}
+
+// setEngine 切换动作写完文件后立即生效(不等下一次 flush)
+func (m *fgModel) setEngine(eng string) {
+	m.mu.Lock()
+	m.engineCur = eng
+	m.mu.Unlock()
 }
 
 // fgSt 全局模型: step 在 appUsage.mu 内调用(锁顺序 appUsage.mu → fgSt.mu); 请求路径只拿 fgSt.mu。
@@ -342,7 +370,7 @@ type fgAgg struct {
 func (m *fgModel) resetLocked(at time.Time) {
 	for mac, d := range m.devs {
 		end := at
-		if a := d.apps[d.cur]; a != nil && !a.lastActive.IsZero() && a.lastActive.Before(at) {
+		if a := d.apps[d.shown]; a != nil && !a.lastActive.IsZero() && a.lastActive.Before(at) {
 			end = a.lastActive
 		}
 		m.closeSessionLocked(mac, d, end)
@@ -350,6 +378,7 @@ func (m *fgModel) resetLocked(at time.Time) {
 	m.devs = map[string]*fgDev{}
 	m.conns = map[string]*fgConn{}
 	m.last = time.Time{}
+	m.cmp.reset() // v5.27 T4: HMM 状态在 devs 里, 随之重置; 对比统计的段起点也重来
 }
 
 func (m *fgModel) reset(at time.Time) {
@@ -543,11 +572,11 @@ func (m *fgModel) stepDevLocked(mac string, d *fgDev, aggs map[string]*fgAgg, no
 		}
 	}
 	for id, a := range d.apps {
-		if id != d.cur && now.Sub(a.lastSeen) > fgAppDrop {
+		if id != d.cur && id != d.shown && (d.hmm == nil || id != d.hmm.cur) && now.Sub(a.lastSeen) > fgAppDrop {
 			delete(d.apps, id)
 		}
 	}
-	m.decideLocked(mac, d, now, dt, level)
+	m.decideLocked(mac, d, now, dt, level, len(aggs) > 0)
 }
 
 func fgRank(d *fgDev) []*fgApp {
@@ -564,7 +593,7 @@ func fgRank(d *fgDev) []*fgApp {
 	return list
 }
 
-func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, level string) {
+func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, level string, traffic bool) {
 	rank := fgRank(d)
 	var top *fgApp
 	if len(rank) > 0 && rank[0].smooth >= fgEnter && rank[0].id != d.cur {
@@ -598,16 +627,27 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 	if d.cur == prev && cur != nil && !curOK {
 		d.cur = ""
 	}
-	if d.cur != prev {
-		if prev != "" {
+	// v5.27 T4: HMM 每轮都算(影子); 引擎 = hmm 时显示与时间线跟随 HMM 的决定。
+	hmmCur := m.hmmStepLocked(mac, d, now, dt)
+	useHMM := m.engineLocked() == fgEngineHMM
+	shown := d.cur
+	if useHMM {
+		shown = hmmCur
+	}
+	if traffic {
+		m.cmp.record(mac, now, dt, d.cur, hmmCur)
+	}
+	if shown != d.shown {
+		if prev := d.shown; prev != "" {
 			end := now
 			if p := d.apps[prev]; p != nil && !p.lastActive.IsZero() {
 				end = p.lastActive
 			}
 			m.closeSessionLocked(mac, d, end)
 		}
-		if d.cur != "" {
-			a := d.apps[d.cur]
+		d.shown = shown
+		if shown != "" {
+			a := d.apps[shown]
 			start := a.activeSince
 			if start.IsZero() || start.After(now) {
 				start = now
@@ -618,24 +658,50 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 		}
 	}
 	d.view = m.buildViewLocked(d, rank, now, dt, level)
-	if d.cur != "" && d.open {
+	if useHMM && d.shown != "" {
+		if a := d.apps[d.shown]; a != nil {
+			d.view.Confidence = hmmConfidence(a, d.hmm.post)
+			d.view.Reasons = append(d.view.Reasons, "HMM 后验 "+strconv.Itoa(int(math.Round(d.hmm.post*100)))+"%")
+		}
+	}
+	if d.shown != "" && d.open {
 		end := now
-		if a := d.apps[d.cur]; a != nil && !a.lastActive.IsZero() {
+		if a := d.apps[d.shown]; a != nil && !a.lastActive.IsZero() {
 			end = a.lastActive
 		}
 		m.extendSessionLocked(mac, end, float64(d.view.Confidence))
 	}
 }
 
-func fgConfidence(a *fgApp, second, dt float64) int {
-	s := math.Min(a.smooth, 100)
-	c := 25 + 0.5*s + 0.5*math.Min(math.Max(a.smooth-second, 0), 50)
-	if !a.f.Active {
-		c *= 0.8
+// hmmStepLocked v5.27 T4: 用本轮各应用的分(a.inst)跑一轮 HMM, 返回 HMM 的前台("" = 无)
+func (m *fgModel) hmmStepLocked(mac string, d *fgDev, now time.Time, dt float64) string {
+	if d.hmm == nil {
+		d.hmm = newHMMDev()
 	}
-	if dt > fgCoarseSec {
-		c -= 10
+	inst := make(map[string]float64, len(d.apps))
+	for id, a := range d.apps {
+		inst[id] = a.inst
 	}
+	var started map[string]bool
+	after := now.Add(-time.Duration(dt * float64(time.Second)))
+	if !d.hmmAt.IsZero() && d.hmmAt.Before(now) {
+		after = d.hmmAt
+	}
+	if m.started != nil {
+		started = m.started(mac, after.Unix(), now.Unix())
+	} else {
+		started = startupEventsForHMM(mac, after.Unix(), now.Unix())
+	}
+	d.hmmAt = now
+	hmmStep(d.hmm, inst, started, dt)
+	if d.hmm.cur != "" && d.apps[d.hmm.cur] == nil {
+		d.hmm.cur = ""
+	}
+	return d.hmm.cur
+}
+
+// fgConfCap 置信度按来源封顶(经典与 HMM 共用)
+func fgConfCap(a *fgApp) float64 {
 	capv := 95.0
 	switch {
 	case fgIsTunnel(a.id):
@@ -648,7 +714,19 @@ func fgConfidence(a *fgApp, second, dt float64) int {
 	if a.f.InfShare > 0.5 {
 		capv = math.Min(capv, 70)
 	}
-	c = math.Max(0, math.Min(c, capv))
+	return capv
+}
+
+func fgConfidence(a *fgApp, second, dt float64) int {
+	s := math.Min(a.smooth, 100)
+	c := 25 + 0.5*s + 0.5*math.Min(math.Max(a.smooth-second, 0), 50)
+	if !a.f.Active {
+		c *= 0.8
+	}
+	if dt > fgCoarseSec {
+		c -= 10
+	}
+	c = math.Max(0, math.Min(c, fgConfCap(a)))
 	return int(math.Round(c))
 }
 
@@ -722,7 +800,7 @@ func fgDisplayName(a *fgApp) string {
 func (m *fgModel) buildViewLocked(d *fgDev, rank []*fgApp, now time.Time, dt float64, level string) fgView {
 	v := fgView{State: "idle", Reasons: []string{}, Background: []fgBg{}, TickSec: int(math.Round(dt)),
 		Coarse: dt > fgCoarseSec, Updated: now.Unix()}
-	if a := d.apps[d.cur]; a != nil {
+	if a := d.apps[d.shown]; a != nil {
 		second := 0.0
 		for _, o := range rank {
 			if o != a {
@@ -748,7 +826,8 @@ func (m *fgModel) buildViewLocked(d *fgDev, rank []*fgApp, now time.Time, dt flo
 	}
 	var names []string
 	for _, o := range rank {
-		if o.id == d.cur || len(v.Background) >= fgBgMax {
+		// 后台列表用经典模型的(排除经典前台); hmm 引擎时也排除正在显示的前台
+		if o.id == d.cur || o.id == d.shown || len(v.Background) >= fgBgMax {
 			continue
 		}
 		if o.lastActive.IsZero() || now.Sub(o.lastActive) > 60*time.Second {
@@ -808,7 +887,7 @@ func (m *fgModel) rollDayLocked(now time.Time) {
 			if s.End > mid.Unix() {
 				l[n-1].End = mid.Unix()
 			}
-			if d.cur != "" && s.End >= mid.Unix()-int64(fgPauseHold/time.Second) {
+			if d.shown != "" && s.End >= mid.Unix()-int64(fgPauseHold/time.Second) {
 				l[n-1].End = mid.Unix() // 仍在用: 旧一天的段延到 0 点, 新一天从 0 点接上
 				re = append(re, reopen{mac, fgSession{App: s.App, Name: s.Name, Cat: s.Cat, Start: mid.Unix(), End: max(mid.Unix(), s.End), Conf: s.Conf, N: 1}})
 			}
@@ -942,6 +1021,8 @@ func (m *fgModel) load(hncDir string, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.dir = hncDir
+	m.cmp.load(hncDir) // v5.27 T4: 对比统计
+	m.engineCur = fgEngineFor(hncDir)
 	date := now.Format("20060102")
 	if d := fgLoadDay(hncDir, date); d != nil {
 		if m.day != nil && m.day.Date == date {
@@ -962,9 +1043,22 @@ func (m *fgModel) flush(now time.Time) {
 		cp = m.day.copy()
 		m.dirty = false
 	}
+	var cmpB []byte // v5.27 T4: 对比统计随 fg 每分钟落盘
+	if dir != "" && m.cmp.dirty {
+		cmpB = m.cmp.snapshot(now)
+		m.cmp.dirty = false
+	}
 	m.mu.Unlock()
 	if dir == "" {
 		return
+	}
+	if cmpB != nil {
+		_ = discoverWriteAtomic(fgCmpPath(dir), cmpB)
+	}
+	if eng := fgEngineFor(dir); eng != "" { // 文件被手工改过也能在一分钟内生效
+		m.mu.Lock()
+		m.engineCur = eng
+		m.mu.Unlock()
 	}
 	if cp != nil {
 		if err := fgSaveDay(dir, cp); err != nil {

@@ -386,6 +386,7 @@ func isSensitiveReadPath(p string) bool {
 		"/api/dpi_probe",
 		"/api/dpi_eval",
 		"/api/dpi_startup",
+		"/api/fg_compare",
 		"/api/alerts",
 		"/api/dpi_history",
 		"/api/app_limits",

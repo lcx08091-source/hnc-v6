@@ -384,7 +384,8 @@ func (s *server) appUsageFlush(now time.Time) {
 func (s *server) AppUsageLoop(stop <-chan struct{}) {
 	last := time.Now()
 	lastFlush := last
-	fgSt.load(s.hncDir, last) // DPI v2: 载入今天已有的前台时间线
+	fgSt.load(s.hncDir, last)  // DPI v2: 载入今天已有的前台时间线
+	setStartupHMMDir(s.hncDir) // v5.27 T4: 前台 HMM 读本目录的启动事件(startup_fp.go)
 	for {
 		if !powerWait(stop, "app_usage", last, s.appUsageFlags) {
 			s.appUsageFlush(time.Now())

@@ -184,6 +184,7 @@ document.addEventListener('click', function (e) {
     else if (k === 'fgdays') { var fgd = devBy(S.fgMac); if (fgd) loadFgTl(fgd, +v); }
     else if (k === 'dns-bm') { busyWhile(sg, api.action('dns_takeover_set', { block_mode: v })).then(function () { toast('拦截方式：' + q.textContent); return loadDNS(); }).catch(function (e) { toast(errText(e), 'err'); loadDNS(); }); }
     else if (k === 'eval-days') { S.evalDays = +v; loadEval(S.evalDays); }
+    else if (k === 'fg-engine') { busyWhile(sg, api.action('dpi_fg_engine', { engine: v })).then(function () { toast('前台识别引擎：' + q.textContent + ' · 时间线从此刻起按它记录'); return loadFgEngine(); }).catch(function (e) { toast(errText(e), 'err'); loadFgEngine(); }); }
     else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
     else if (k === 'qos-mode') setQos('mode', v, q);
     else if (k === 'qos-scale') setQos('scale', v, q);
@@ -249,6 +250,7 @@ document.addEventListener('click', function (e) {
       if (opened && key === 'logs') loadLog(); if (opened && key === 'tokens') loadTokens();
       if (opened && key === 'dnst') loadDNS(); if (opened && key === 'fpl') loadFP();
       if (opened && key === 'deval') loadEval();
+      if (opened && key === 'fgeng') loadFgEngine();
       if (opened && /^(at|cb)-/.test(key)) loadAppTime(key.slice(3)); break;
     case 'toggle-dev':
       if (!d) break;
