@@ -57,6 +57,23 @@ type evalSample struct {
 	DPort  int    `json:"dport"`
 	RIP    string `json:"rip"`
 	RuleID string `json:"rule_id"`
+	QUIC   bool   `json:"quic"`
+	QTP    string `json:"qtp"` // v5.27 T2, 旧样本没有
+}
+
+// dpiEvalQUICMethod v5.27 T2: QUIC 样本上的指纹指标。
+type dpiEvalQUICMethod struct {
+	Coverage float64 `json:"coverage"`
+	Accuracy float64 `json:"accuracy"`
+	Judged   int     `json:"judged"`
+}
+
+// dpiEvalQUIC v5.27 T2: 只统计 quic=true 的样本, 对比「仅 JA4」与「JA4 + 传输参数」。
+type dpiEvalQUIC struct {
+	Samples int               `json:"samples"`
+	JA4Only dpiEvalQUICMethod `json:"fp_ja4_only"`
+	WithQTP dpiEvalQUICMethod `json:"fp_with_qtp"`
+	QTPSeen int               `json:"qtp_samples"` // 其中带 qtp 的样本数
 }
 
 // dpiEvalMethod 单一方法的指标。accuracy_na 为真时前端显示「—」(见 owner)。
@@ -114,6 +131,7 @@ type dpiEvalResult struct {
 	TopWrong      []dpiEvalWrong           `json:"top_wrong"`
 	TopUnknown    []dpiEvalUnknown         `json:"top_unknown"`
 	FGTruth       selfFGSummary            `json:"fg_truth"`
+	QUIC          dpiEvalQUIC              `json:"quic"` // v5.27 T2
 	Note          string                   `json:"note"`
 }
 
@@ -214,19 +232,20 @@ func ruleMeta(hncDir string) (map[string]string, map[string]bool) {
 
 // fpPredict 查指纹学习表得到 fp 预测(空串=无预测)。
 // 直接在 fpStore 上加锁读, 不改指纹逻辑本身。
-func fpPredict(hncDir, ja4, alpn string, dport int, now time.Time) (id, name string) {
+// v5.27 T2: qtp 非空时与识别一样「先 QTP 后回落」(fpStore.verdictForKeysLocked)。
+func fpPredict(hncDir, ja4, alpn string, dport int, qtp string, now time.Time) (id, name string) {
 	if ja4 == "" {
 		return "", ""
 	}
 	st := fpFor(hncDir)
-	key := fpKeyOf(ja4, alpn, fpPortClass(dport))
+	port := fpPortClass(dport)
+	qKey := ""
+	if q := fpCleanQTP(qtp); q != "" {
+		qKey = fpKeyQ(ja4, alpn, port, q)
+	}
 	st.mu.Lock()
 	st.loadLocked()
-	e := st.m[key]
-	var v fpVerdict
-	if e != nil {
-		v = e.verdict(now.Unix())
-	}
+	v, _, _ := st.verdictForKeysLocked(qKey, fpKeyOf(ja4, alpn, port), now.Unix())
 	st.mu.Unlock()
 	if v.Usable && !v.Generic && v.Top != "" && v.Top != fpOtherApp {
 		return v.Top, v.TopName
@@ -316,6 +335,7 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 
 	res.Samples = len(samples)
 	ownerAccuracyNA := false
+	var qJA4, qQTP quicAgg
 
 	for _, s := range samples {
 		truth := pmap[s.Pkg]
@@ -340,9 +360,19 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 			}
 			names[ruleID] = ruleName
 		}
-		fpID, fpName := fpPredict(hncDir, s.JA4, s.ALPN, s.DPort, now)
+		fpID, fpName := fpPredict(hncDir, s.JA4, s.ALPN, s.DPort, s.QTP, now)
 		if fpID != "" {
 			names[fpID] = fpName
+		}
+		if s.QUIC {
+			// v5.27 T2: QUIC 样本上对比「仅 JA4」与「JA4 + 传输参数」
+			res.QUIC.Samples++
+			if s.QTP != "" {
+				res.QUIC.QTPSeen++
+			}
+			ja4ID, _ := fpPredict(hncDir, s.JA4, s.ALPN, s.DPort, "", now)
+			quicTally(&qJA4, ja4ID, truth, labeled)
+			quicTally(&qQTP, fpID, truth, labeled)
 		}
 		ownID, ownName := ownerPredict(s.RIP)
 		if ownID != "" {
@@ -415,6 +445,9 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 		}
 		res.Methods[m] = st
 	}
+
+	res.QUIC.JA4Only = qJA4.method(res.QUIC.Samples)
+	res.QUIC.WithQTP = qQTP.method(res.QUIC.Samples)
 
 	// by_app 列表
 	res.Apps = len(byTruth)
@@ -496,6 +529,27 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 		res.Note += "规则库认成广告 / 统计 SDK / CDN 的 " + strconv.Itoa(res.SDKSamples) + " 条样本不算规则预测(那是第三方服务, 不代表 App 本身)。"
 	}
 	return res
+}
+
+// quicAgg v5.27 T2 QUIC 段的计数
+type quicAgg struct{ predicted, judged, correct int }
+
+func quicTally(a *quicAgg, pred, truth string, labeled bool) {
+	if pred == "" {
+		return
+	}
+	a.predicted++
+	if !labeled {
+		return
+	}
+	a.judged++
+	if pred == truth {
+		a.correct++
+	}
+}
+
+func (a quicAgg) method(samples int) dpiEvalQUICMethod {
+	return dpiEvalQUICMethod{Coverage: ratio(a.predicted, samples), Accuracy: ratio(a.correct, a.judged), Judged: a.judged}
 }
 
 // labelStatsSkippedSystem 读 dpid 写的 run/label_samples.stats.json(T1 计数快照)。

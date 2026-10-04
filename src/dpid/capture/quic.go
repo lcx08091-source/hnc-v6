@@ -37,6 +37,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"hnc.io/dpid/output"
 )
 
 // quicSnaplen: QUIC Initial 至少 1200 字节 UDP 载荷(RFC 9000 §14.1), 默认
@@ -663,6 +665,10 @@ func parseQUIC(ev Event, udp []byte) (Event, ParseResult) {
 		ev.Kind = EventTLSClientHello
 		info.JA4 = quicJA4(info.JA4)
 		info.IsQUIC = true
+		// v5.27 T2: 只读 ClientHello 里的 quic_transport_parameters 扩展。
+		if in, ok := extractJA4Inputs(rec); ok {
+			info.QTP = output.QUICTPFingerprint(in.QUICTP)
+		}
 		ev.TLS = info
 		if info.SNI != "" {
 			quicStats.sni.Add(1)

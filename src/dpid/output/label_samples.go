@@ -71,6 +71,7 @@ type LabelSampleInput struct {
 	ALPNs   []string // 取第一个, 没有则样本省略 alpn 字段
 	DPort   int
 	QUIC    bool
+	QTP     string // v5.27 T2: QUIC 传输参数指纹(非 QUIC 为空)
 	ECH     bool
 	Partial bool
 	RIP     string
@@ -91,6 +92,8 @@ type LabelSample struct {
 	RIP      string `json:"rip"`
 	RuleID   string `json:"rule_id,omitempty"`
 	RuleName string `json:"rule_name,omitempty"`
+	// v5.27 T2: 可选字段, 旧行没有也照常解析。
+	QTP string `json:"qtp,omitempty"`
 }
 
 // LabelSamplesStats 是写入器的计数快照(评估页 / 日志用)。
@@ -181,6 +184,9 @@ func (w *LabelSamplesWriter) Observe(in LabelSampleInput) {
 	}
 	if n := len(in.ALPNs); n > 0 {
 		s.ALPN = in.ALPNs[0]
+	}
+	if in.QUIC && ValidQTP(in.QTP) {
+		s.QTP = in.QTP
 	}
 	select {
 	case w.ch <- s:

@@ -452,7 +452,7 @@ function paintFP() {
   var use = ln.filter(function (x) { return x.usable; });
   h += '<div class="note" style="margin-bottom:-2px">自动学会的指纹（' + use.length + ' 个可用 / 共 ' + ln.length + ' 个观察中）</div>' +
     (use.length ? '<div class="dbox">' + use.slice(0, 12).map(function (x) {
-      return '<div class="row2"><span class="k" style="color:var(--text-1)">' + esc(x.name || x.app_id) + ' <span class="note mono">' + esc(String(x.ja4).slice(0, 10)) + ' · ' + esc(x.port_class || '') + '</span></span><span class="v">' + pct100(x.purity) + '% · ' + num(x.devices) + ' 台</span></div>';
+      return '<div class="row2"><span class="k" style="color:var(--text-1)">' + esc(x.name || x.app_id) + ' <span class="note mono">' + esc(String(x.ja4).slice(0, 10)) + ' · ' + esc(x.port_class || '') + (x.qtp ? ' · ' + esc(String(x.qtp).replace(/^qtp1_/, '').slice(0, 8)) : '') + '</span></span><span class="v">' + pct100(x.purity) + '% · ' + num(x.devices) + ' 台</span></div>';
     }).join('') + '</div>' : '<div class="note">还在学习：同一个指纹在 ≥2 台设备上见过 20 次以上、且 90% 都属于同一个应用后才会用来识别。</div>') +
     '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠指纹认出 ' + num(st.flows_attributed_by_fp) + ' 条。指纹只在域名看不到（ECH / 直连 IP）时兜底，不会覆盖规则库。</div>';
   el.innerHTML = h;
@@ -512,6 +512,12 @@ function paintEval() {
     h += '<dt>' + x[1] + '</dt><dd class="num">覆盖 ' + pct100(mm.coverage) + '% · 准确 ' + evalAcc(mm) + ' <span class="note">(' + num(mm.predicted) + '/' + num(mm.samples) + (mm.judged != null && !mm.accuracy_na ? ' · 可判 ' + num(mm.judged) : '') + ')</span></dd>';
   });
   h += '</dl>';
+  // v5.27 T2: QUIC 样本上「JA4 + 传输参数」与「仅 JA4」对比
+  var qq = r.quic || {};
+  if (num(qq.samples) > 0) {
+    var qw = qq.fp_with_qtp || {}, qj = qq.fp_ja4_only || {};
+    h += '<div class="note">QUIC 指纹（含传输参数）覆盖 ' + pct100(qw.coverage) + '% · 准确 ' + evalAcc(qw) + '（仅 JA4：覆盖 ' + pct100(qj.coverage) + '% · 准确 ' + evalAcc(qj) + '）· ' + num(qq.samples) + ' 条 QUIC 样本</div>';
+  }
   if (r.note) h += '<div class="note">' + esc(r.note) + '</div>';
   if (r.capped) h += '<div class="note warn">今天样本太多，超过单日上限后停止记录了（不影响已有统计）。</div>';
   // 最常认错 / 最常认不出

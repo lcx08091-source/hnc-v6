@@ -150,6 +150,9 @@ type JA4Inputs struct {
 	Extensions []uint16 // raw extension types in ClientHello order
 	ALPNs      []string // ALPN values in ClientHello order
 	SigAlgs    []uint16 // signature_algorithms extension contents
+	// QUICTP: v5.27 T2 quic_transport_parameters(0x0039, 草案版 0xffa5)扩展的
+	// 原始内容(指向 ClientHello 缓冲区, 不复制)。不参与 JA4 计算。
+	QUICTP []byte
 }
 
 // IsGREASE returns true if the given value is one of TLS GREASE markers

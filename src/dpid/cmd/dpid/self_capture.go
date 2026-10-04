@@ -390,6 +390,7 @@ func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib 
 				ALPNs:   ev.TLS.ALPN,
 				DPort:   int(ev.DstPort),
 				QUIC:    ev.TLS.IsQUIC,
+				QTP:     ev.TLS.QTP,
 				ECH:     ev.TLS.ECH,
 				Partial: ev.TLS.Partial,
 				RIP:     ev.DstIP.String(),

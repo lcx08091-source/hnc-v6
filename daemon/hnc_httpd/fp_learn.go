@@ -26,12 +26,16 @@
 // 用户 ja4 纠正 → 学习表 → 种子表(data/fp_seed.json, 默认不发; 学习表判为通用的指纹不用种子)。
 // 连接 → 指纹的绑定在内存里保留到连接 2 小时无流量(上限 16384 条)。
 //
+// v5.27 T2 QUIC 传输参数指纹(qtp): 带 qtp 的 QUIC ClientHello 学到 key
+// fpKeyOf(ja4, alpn, port)+"|"+qtp 下(门槛不变); 识别时先查带 qtp 的 key, 没有 / 不可用 /
+// 判为通用再回落旧 key(旧版学到的 QUIC 条目只读兜底, 随 14 天半衰期自然淘汰)。
+//
 // 持久化: data/fp_learned.json, 有变化时最多 10 分钟写一次(进程被杀最多丢 10 分钟的学习)。
 //
-//	GET /api/dpi_fp[?all=1] → {ok, learned:[{ja4, alpn, port_class, app_id, name, category,
+//	GET /api/dpi_fp[?all=1] → {ok, learned:[{ja4, alpn, port_class, qtp, app_id, name, category,
 //	    purity, support, devices, last_seen, usable, generic, conf, top:[{id,name,share}]}],
-//	    stats:{flows_seen, flows_learned, flows_attributed_by_fp, generic_skipped, entries,
-//	    usable, binds, seed}, thresholds:{...}, user_rules:[...]}
+//	    stats:{flows_seen, flows_learned, flows_attributed_by_fp, flows_attributed_by_qtp,
+//	    generic_skipped, entries, usable, binds, seed}, thresholds:{...}, user_rules:[...]}
 package main
 
 import (
@@ -84,6 +88,7 @@ type fpEntry struct {
 	JA4   string                 `json:"ja4"`
 	ALPN  string                 `json:"alpn,omitempty"`
 	Port  string                 `json:"port"`
+	QTP   string                 `json:"qtp,omitempty"` // v5.27 T2, 旧文件没有
 	Apps  map[string]*fpAppCount `json:"apps"`
 	Total float64                `json:"total"`
 	Devs  map[string]int64       `json:"devs,omitempty"` // MAC 散列前缀 → 最近出现
@@ -111,6 +116,22 @@ func fpPortClass(dport int) string {
 }
 
 func fpKeyOf(ja4, alpn, port string) string { return ja4 + "|" + alpn + "|" + port }
+
+// fpKeyQ v5.27 T2: 带 QUIC 传输参数指纹的 key; qtp 为空时等于旧 key。
+func fpKeyQ(ja4, alpn, port, qtp string) string {
+	if qtp == "" {
+		return fpKeyOf(ja4, alpn, port)
+	}
+	return fpKeyOf(ja4, alpn, port) + "|" + qtp
+}
+
+// fpCleanQTP 只接受 qtp1_ + 12 位十六进制, 其它一律当没有。
+func fpCleanQTP(q string) string {
+	if fpQTPRE.MatchString(q) {
+		return q
+	}
+	return ""
+}
 
 func fpDevKey(mac string) string {
 	h := sha256.Sum256([]byte(strings.ToLower(mac)))
@@ -220,6 +241,7 @@ func (e *fpEntry) verdict(now int64) fpVerdict {
 
 type fpBind struct {
 	fpKey, ja4, mac, dip string
+	qKey, qtp            string // v5.27 T2: 带 qtp 的 key(无 qtp 为空)
 	dport                int
 	ech                  bool
 	ts, seen             int64
@@ -231,6 +253,8 @@ type fpStats struct {
 	FlowsLearned    uint64 `json:"flows_learned"`
 	FlowsAttributed uint64 `json:"flows_attributed_by_fp"`
 	GenericSkipped  uint64 `json:"generic_skipped"`
+	// v5.27 T2: 其中靠「JA4 + QUIC 传输参数」条目归属的连接数
+	FlowsByQTP uint64 `json:"flows_attributed_by_qtp,omitempty"`
 }
 
 type fpSeedEntry struct {
@@ -305,7 +329,8 @@ func (st *fpStore) loadLocked() {
 		if e == nil || e.JA4 == "" || e.Apps == nil {
 			continue
 		}
-		st.m[fpKeyOf(e.JA4, e.ALPN, e.Port)] = e
+		e.QTP = fpCleanQTP(e.QTP)
+		st.m[fpKeyQ(e.JA4, e.ALPN, e.Port, e.QTP)] = e
 	}
 	st.stats = f.Stats
 	st.evictEntriesLocked()
@@ -433,6 +458,7 @@ type fpFlowRec struct {
 	App      string `json:"app"`
 	AppName  string `json:"app_name"`
 	Category string `json:"category"`
+	QTP      string `json:"qtp"` // v5.27 T2
 }
 
 type fpFlowFile struct {
@@ -496,6 +522,14 @@ func (st *fpStore) ingestLocked(boot int64, recs []fpFlowRec, names map[string]i
 		st.stats.FlowsSeen++
 		fk := fpKeyOf(r.JA4, r.ALPN, fpPortClass(r.Dport))
 		b := &fpBind{fpKey: fk, ja4: r.JA4, mac: mac, dip: r.DIP, dport: r.Dport, ech: r.ECHOuter, ts: r.Ts, seen: ts}
+		// v5.27 T2: QUIC 带传输参数指纹 → 学到更细的 key 下(旧 key 不再增长)
+		if q := fpCleanQTP(r.QTP); q != "" && r.Proto == "udp" {
+			b.qtp, b.qKey = q, fpKeyQ(r.JA4, r.ALPN, fpPortClass(r.Dport), q)
+		}
+		lk := fk
+		if b.qKey != "" {
+			lk = b.qKey
+		}
 		if len(st.binds) >= fpMaxBinds {
 			st.pruneBindsLocked(ts, true)
 		}
@@ -509,10 +543,10 @@ func (st *fpStore) ingestLocked(boot int64, recs []fpFlowRec, names map[string]i
 		if dev == "" {
 			dev = r.CIP
 		}
-		e := st.m[fk]
+		e := st.m[lk]
 		if e == nil {
-			e = &fpEntry{JA4: r.JA4, ALPN: r.ALPN, Port: fpPortClass(r.Dport), Upd: r.Ts}
-			st.m[fk] = e
+			e = &fpEntry{JA4: r.JA4, ALPN: r.ALPN, Port: fpPortClass(r.Dport), QTP: b.qtp, Upd: r.Ts}
+			st.m[lk] = e
 		}
 		lt := r.Ts
 		if lt <= 0 || lt > ts {
@@ -612,11 +646,7 @@ func (st *fpStore) fpAttrLocked(key, proto, src, dst string, dport int, names ma
 	if names[dst].Name != "" && !b.ech {
 		return fa, false // 有域名(规则库认不出)的连接不靠指纹猜
 	}
-	e := st.m[b.fpKey]
-	var v fpVerdict
-	if e != nil {
-		v = e.verdict(now)
-	}
+	v, byQTP, qGeneric := st.verdictForBindLocked(b, now)
 	if r, ok := dpiUserMatchJA4(b.ja4); ok && !st.ja4GenericLocked(b.ja4, r.AppID, now) {
 		fa.App, fa.Src, fa.Conf = r.app(), "user", 1
 		return fa, true
@@ -630,10 +660,13 @@ func (st *fpStore) fpAttrLocked(key, proto, src, dst string, dport int, names ma
 		if !b.counted {
 			b.counted = true
 			st.stats.FlowsAttributed++
+			if byQTP {
+				st.stats.FlowsByQTP++
+			}
 		}
 		return fa, true
 	}
-	if v.Generic {
+	if v.Generic || qGeneric {
 		if !b.skipped {
 			b.skipped = true
 			st.stats.GenericSkipped++
@@ -653,6 +686,31 @@ func (st *fpStore) fpAttrLocked(key, proto, src, dst string, dport int, names ma
 		return fa, true
 	}
 	return fa, false
+}
+
+// verdictForBindLocked v5.27 T2「先 QTP 后回落」: 绑定的 ClientHello 有 qtp 时先看带 qtp
+// 的条目, 可用(且非通用)就用它; 没有 / 不可用 / 判为通用 → 回落旧 key。
+// 返回 (采用的 verdict, 是否来自 qtp 条目, qtp 条目是否判为通用)。
+func (st *fpStore) verdictForBindLocked(b *fpBind, now int64) (fpVerdict, bool, bool) {
+	return st.verdictForKeysLocked(b.qKey, b.fpKey, now)
+}
+
+func (st *fpStore) verdictForKeysLocked(qKey, legacyKey string, now int64) (fpVerdict, bool, bool) {
+	qGeneric := false
+	if qKey != "" {
+		if e := st.m[qKey]; e != nil {
+			v := e.verdict(now)
+			if v.Usable && !v.Generic {
+				return v, true, false
+			}
+			qGeneric = v.Generic
+		}
+	}
+	var v fpVerdict
+	if e := st.m[legacyKey]; e != nil {
+		v = e.verdict(now)
+	}
+	return v, false, qGeneric
 }
 
 // ja4GenericLocked: 学习表里该 JA4(所有 ALPN/端口类合计)中不属于 appID 的占比 ≥ 30% 且样本 ≥ 10
@@ -748,7 +806,7 @@ func (s *server) apiDPIFP(w http.ResponseWriter, r *http.Request) {
 			usable++
 		}
 		m := map[string]interface{}{
-			"ja4": e.JA4, "alpn": e.ALPN, "port_class": e.Port,
+			"ja4": e.JA4, "alpn": e.ALPN, "port_class": e.Port, "qtp": e.QTP,
 			"app_id": v.Top, "name": v.TopName, "category": v.TopCat,
 			"purity": round2(v.Purity), "support": math.Round(v.Support*10) / 10, "devices": v.Devices,
 			"last_seen": e.Last, "first_seen": e.First, "usable": v.Usable, "generic": v.Generic,
@@ -785,7 +843,8 @@ func (s *server) apiDPIFP(w http.ResponseWriter, r *http.Request) {
 	stats := map[string]interface{}{
 		"flows_seen": st.stats.FlowsSeen, "flows_learned": st.stats.FlowsLearned,
 		"flows_attributed_by_fp": st.stats.FlowsAttributed, "generic_skipped": st.stats.GenericSkipped,
-		"entries": len(st.m), "usable": usable, "binds": len(st.binds), "seed": len(st.seedLocked()),
+		"flows_attributed_by_qtp": st.stats.FlowsByQTP,
+		"entries":                 len(st.m), "usable": usable, "binds": len(st.binds), "seed": len(st.seedLocked()),
 	}
 	st.mu.Unlock()
 	sort.Slice(rows, func(i, j int) bool {
@@ -795,7 +854,7 @@ func (s *server) apiDPIFP(w http.ResponseWriter, r *http.Request) {
 		if rows[i].support != rows[j].support {
 			return rows[i].support > rows[j].support
 		}
-		return rows[i].m["ja4"].(string)+rows[i].m["port_class"].(string) < rows[j].m["ja4"].(string)+rows[j].m["port_class"].(string)
+		return rows[i].m["ja4"].(string)+rows[i].m["port_class"].(string)+rows[i].m["qtp"].(string) < rows[j].m["ja4"].(string)+rows[j].m["port_class"].(string)+rows[j].m["qtp"].(string)
 	})
 	list := make([]map[string]interface{}, 0, len(rows))
 	for i, rw := range rows {

@@ -76,6 +76,8 @@ type TLSInfo struct {
 	Partial bool
 	// v5.18: ClientHello 由多个 TCP 段重组而来。
 	Reassembled bool
+	// v5.27 T2: QUIC 传输参数指纹(output.QUICTPFingerprint), 只在 QUIC 路径填。
+	QTP string
 }
 
 type Event struct {

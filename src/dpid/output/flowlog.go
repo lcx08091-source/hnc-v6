@@ -50,6 +50,8 @@ type FlowRecord struct {
 	App      string `json:"app,omitempty"`
 	AppName  string `json:"app_name,omitempty"`
 	Category string `json:"category,omitempty"`
+	// v5.27 T2: QUIC 传输参数指纹(qtp1_…), 只有 QUIC ClientHello 才有。
+	QTP string `json:"qtp,omitempty"`
 }
 
 type flowLogFile struct {
@@ -102,6 +104,11 @@ func FlowKey(proto, cip string, sport int, dip string, dport int) string {
 
 // Record 记一个 ClientHello。ja4 为空(截断/gQUIC)不记 —— 没有指纹对学习和识别都没用。
 func (l *FlowLog) Record(mac, cip string, sport int, dip string, dport int, udp bool, ja4 string, alpn []string, sni string, ts time.Time) {
+	l.RecordQTP(mac, cip, sport, dip, dport, udp, ja4, alpn, sni, "", ts)
+}
+
+// RecordQTP 同 Record, 另带 QUIC 传输参数指纹(v5.27 T2; 非 QUIC / 解析失败传 "")。
+func (l *FlowLog) RecordQTP(mac, cip string, sport int, dip string, dport int, udp bool, ja4 string, alpn []string, sni, qtp string, ts time.Time) {
 	if ja4 == "" {
 		return
 	}
@@ -117,6 +124,9 @@ func (l *FlowLog) Record(mac, cip string, sport int, dip string, dport int, udp 
 	rec := FlowRecord{Ts: ts.Unix(), MAC: mac, CIP: cip, Sport: sport, DIP: dip, Dport: dport, Proto: proto, JA4: ja4, SNI: host}
 	if len(alpn) > 0 && len(alpn[0]) <= 32 {
 		rec.ALPN = alpn[0]
+	}
+	if udp && ValidQTP(qtp) {
+		rec.QTP = qtp
 	}
 	if host != "" {
 		if echPublicNames[host] {

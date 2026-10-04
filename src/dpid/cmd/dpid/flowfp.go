@@ -20,5 +20,5 @@ func recordFlowFP(ev capture.Event, clientMAC, clientIP, remoteIP string) {
 	if ev.SrcIP != nil && ev.ClientIP != nil && !ev.SrcIP.Equal(ev.ClientIP) {
 		sport, dport = dport, sport
 	}
-	flowLog.Record(clientMAC, clientIP, sport, remoteIP, dport, ev.IsUDP, ev.TLS.JA4, ev.TLS.ALPN, ev.TLS.SNI, ev.Time)
+	flowLog.RecordQTP(clientMAC, clientIP, sport, remoteIP, dport, ev.IsUDP, ev.TLS.JA4, ev.TLS.ALPN, ev.TLS.SNI, ev.TLS.QTP, ev.Time)
 }

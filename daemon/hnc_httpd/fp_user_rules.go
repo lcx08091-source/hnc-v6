@@ -215,8 +215,10 @@ func dpiUserMatchJA4(ja4 string) (*dpiUserRule, bool) {
 // ─── 动作 ─────────────────────────────────────────────────────────────
 
 var (
-	dpiAppIDRE  = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
-	dpiJA4RE    = regexp.MustCompile(`^[A-Za-z0-9]{10}_[0-9a-f]{12}_[0-9a-f]{12}$`)
+	dpiAppIDRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,64}$`)
+	dpiJA4RE   = regexp.MustCompile(`^[A-Za-z0-9]{10}_[0-9a-f]{12}_[0-9a-f]{12}$`)
+	// v5.27 T2: QUIC 传输参数指纹(src/dpid/output/qtp.go)
+	fpQTPRE     = regexp.MustCompile(`^qtp1_[0-9a-f]{12}$`)
 	dpiDomainRE = regexp.MustCompile(`^[a-z0-9_-]+(\.[a-z0-9_-]+)+$`)
 )
 

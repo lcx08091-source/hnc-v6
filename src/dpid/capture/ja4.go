@@ -122,6 +122,12 @@ func extractJA4Inputs(b []byte) (output.JA4Inputs, bool) {
 					in.SigAlgs = sa
 				}
 			}
+		case 0x0039: // quic_transport_parameters (RFC 9001)
+			in.QUICTP = data
+		case 0xffa5: // quic_transport_parameters (草案版), 正式版优先
+			if in.QUICTP == nil {
+				in.QUICTP = data
+			}
 		case 0x002b: // supported_versions
 			// Take the lowest non-GREASE value here as the negotiated version.
 			// Strictly the highest TLS 1.x value present should win.
