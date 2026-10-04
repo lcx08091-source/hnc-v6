@@ -152,6 +152,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/fg_timeline", s.apiFgTimeline)  // DPI v2: 前台应用时间线 + 前台分钟数(fg_model.go)
 	mux.HandleFunc("/api/dpi_startup", s.apiDPIStartup)  // v5.27 T3: 启动指纹(影子运行, startup_fp.go)
 	mux.HandleFunc("/api/fg_compare", s.apiFgCompare)    // v5.27 T4: 经典 / HMM 前台对比统计(fg_hmm.go)
+	mux.HandleFunc("/api/dpi_rulepack", s.apiDPIRulepack) // v5.27 T6: 我的规则包 摘要 / 导入(rulepack.go)
 	// v5.21: 加密 DNS 策略 + 拦截计数(encdns.go)
 	mux.HandleFunc("/api/encdns", s.apiEncdns)
 	// DPI v2: 可选「HNC DNS 接管」状态 / 逐设备查询日志(dns_takeover.go)

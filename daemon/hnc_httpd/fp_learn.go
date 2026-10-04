@@ -276,6 +276,8 @@ type fpStore struct {
 	flowsKey  string
 	seed      map[string]fpSeedEntry
 	seedKey   string
+	imp       map[string]rulepackFP // v5.27 T6: 导入的指纹(data/fp_imported.json), key = fpKeyQ
+	impKey    string
 	stats     fpStats
 	dirty     bool
 	lastSave  time.Time
@@ -386,6 +388,31 @@ func (st *fpStore) seedLocked() map[string]fpSeedEntry {
 		}
 	}
 	return st.seed
+}
+
+// importedLocked v5.27 T6: 导入的指纹(规则包), 按 mtime 缓存; 广告类 / 不合法的条目不用
+func (st *fpStore) importedLocked() map[string]rulepackFP {
+	p := fpImportedPath(st.hncDir)
+	key := "-"
+	if fi, err := os.Stat(p); err == nil {
+		key = strconv.FormatInt(fi.ModTime().UnixNano(), 10) + ":" + strconv.FormatInt(fi.Size(), 10)
+	}
+	if key == st.impKey {
+		return st.imp
+	}
+	st.impKey, st.imp = key, nil
+	list := rpReadImportedFP(st.hncDir)
+	if len(list) == 0 {
+		return nil
+	}
+	st.imp = make(map[string]rulepackFP, len(list))
+	for _, e := range list {
+		if dpiJA4RE.MatchString(e.JA4) && e.AppID != "" && appTier(e.Category) != tierHidden &&
+			(e.QTP == "" || fpQTPRE.MatchString(e.QTP)) {
+			st.imp[fpKeyQ(e.JA4, e.ALPN, e.Port, e.QTP)] = e
+		}
+	}
+	return st.imp
 }
 
 // evictEntriesLocked 超上限时按最近出现淘汰到 90%
@@ -594,7 +621,7 @@ func fpLabel(r *fpFlowRec, names map[string]ipName) (id, name, cat string, w flo
 // flowAttr 一条连接的应用归属与来源
 type flowAttr struct {
 	App  ipApp
-	Src  string  // user | rule | name | fp | seed
+	Src  string  // user | rule | name | fp | seed | imported(v5.27 规则包)
 	Conf float64 // 0-1; rule/name 为 0(不显示)
 	JA4  string
 }
@@ -680,6 +707,26 @@ func (st *fpStore) fpAttrLocked(key, proto, src, dst string, dport int, names ma
 			st.stats.GenericSkipped++
 		}
 		return fa, false
+	}
+	// v5.27 T6: 导入的指纹 —— 学习表之后、种子表之前(学习表判为通用的已在上面挡掉);
+	// 同样先带 qtp 的 key 再回落旧 key
+	if imp := st.importedLocked(); imp != nil {
+		ie, ok := imp[b.qKey]
+		if !ok || b.qKey == "" {
+			ie, ok = imp[b.fpKey]
+		}
+		if ok {
+			n := ie.App
+			if n == "" {
+				n = ie.AppID
+			}
+			fa.App, fa.Src, fa.Conf = ipApp{ID: ie.AppID, Name: n, Category: ie.Category}, "imported", fpSeedConf
+			if !b.counted {
+				b.counted = true
+				st.stats.FlowsAttributed++
+			}
+			return fa, true
+		}
 	}
 	if se, ok := st.seedLocked()[b.ja4]; ok {
 		n := se.Name
@@ -782,7 +829,7 @@ func (cx *identCtx) fpClassify(dl appUsageDelta) (flowAttr, bool) {
 		return flowAttr{}, false
 	}
 	fa, ok := cx.fp.attribute(dl.Key, cx.apps, cx.names, cx.now)
-	if !ok || (fa.Src != "user" && fa.Src != "fp" && fa.Src != "seed") {
+	if !ok || (fa.Src != "user" && fa.Src != "fp" && fa.Src != "seed" && fa.Src != "imported") {
 		return flowAttr{}, false
 	}
 	return fa, true
@@ -889,7 +936,7 @@ func appUsageAddSrc(d *appUsageDay, mk, src string, conf float64, up, dn uint64)
 		return
 	}
 	switch src {
-	case "fp", "seed":
+	case "fp", "seed", "imported":
 		if d.FP == nil {
 			d.FP = map[string][2]uint64{}
 		}

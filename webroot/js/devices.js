@@ -389,7 +389,7 @@ function connKey(c) { return c.proto + '|' + c.dst + '|' + c.dport + '|' + c.spo
 function srcTag(c) {
   if (!c.app) return '';
   if (c.app_src === 'user') return '<span class="ap src">已纠正</span>';
-  if (c.app_src === 'fp' || c.app_src === 'seed') return '<span class="ap src">指纹识别' + (c.app_conf ? ' ' + pct100(c.app_conf) + '%' : '') + '</span>';
+  if (c.app_src === 'fp' || c.app_src === 'seed' || c.app_src === 'imported') return '<span class="ap src">指纹识别' + (c.app_conf ? ' ' + pct100(c.app_conf) + '%' : '') + '</span>';
   return '';
 }
 function connRow(c) {

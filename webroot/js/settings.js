@@ -348,7 +348,7 @@ function renderSettings(anim1) {
   groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
     sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
     (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '（可能误伤其他应用）CDN 地址常被多个应用共用；默认跳过这些地址，打开后也一起限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
-    encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() + evalFold() + fgEngineFold() +
+    encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() + evalFold() + fgEngineFold() + rulepackFold() +
     sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
   var cs = S.clsact;
   var gm = c.clsact_bpf_mode || (c.clsact_bpf_enabled === true ? 'on' : 'auto'), og = c.offload_guard || S.offload.guard || null;
@@ -396,6 +396,7 @@ function renderSettings(anim1) {
   if (S.open.fpl) { if (S.fpl) paintFP(); else loadFP(); }
   if (S.open.deval) { if (S.eval) paintEval(); else loadEval(); }
   if (S.open.fgeng) { if (S.fgcmp) paintFgEngine(); else loadFgEngine(); }
+  if (S.open.rpack) { if (S.rpack) paintRulepack(); else loadRulepack(); }
 }
 /* ── DPI v2: DNS 接管(可选, 默认关) ── */
 S.dns = null; S.fpl = null;
@@ -577,6 +578,82 @@ function paintFgEngine() {
       : '<div class="note">过去 24 小时还没有热点设备的流量，暂无对比。</div>') +
     '<div class="note">新引擎更不容易来回跳；切换后前台时间线从此刻起按新引擎记录。只影响「正在用什么」的显示和前台时间线，不影响识别、限速和限时。</div>';
   placeSegs(el);
+}
+/* v5.27 T6: 我的规则包(导出 / 导入 / 清除已导入) */
+S.rpack = null; S.rpackRep = null;
+function rulepackSumTxt() {
+  var r = S.rpack; if (!r || r.err) return '把这台手机学到的和你自己加的识别规则打包备份 / 分享';
+  var ex = r.exportable || {}, im = r.imported || {};
+  return '可导出 ' + num(ex.domain_rules) + ' 条域名规则 · ' + num(ex.fingerprints) + ' 个指纹 · ' + num(ex.startup) + ' 个启动指纹' + (num(im.domain_rules) + num(im.fingerprints) + num(im.startup) ? ' · 已导入 ' + num(im.suffixes) + ' 个域名' : '');
+}
+function rulepackFold() {
+  return sFold('rpack', ['green', 'down'], '我的规则包', '<span id="rpack-sum">' + esc(rulepackSumTxt()) + '</span>', '<div id="rpack-body"><div class="note">展开后加载</div></div>');
+}
+function loadRulepack() {
+  return api.get('/api/dpi_rulepack', { summary: 1 }, { timeout: 10000 }).then(function (r) { S.rpack = r; }).catch(function (e) { S.rpack = { err: errText(e) }; }).then(paintRulepack);
+}
+var RPK_SKIP = { conflict: '和本机规则冲突', already_local: '本机已有', public_suffix: '公共后缀', shared_apex: '共享基础设施', bad_suffix: '域名不合法', bad_id: 'id 不合法', bad_category: '类别本机没有', bad_attach: '挂靠目标不合法', bad_ja4: '指纹不合法', bad_qtp: 'QUIC 参数指纹不合法', bad_port: '端口类不合法', bad_alpn: 'ALPN 不合法', bad_value: '数值不合法', bad_token: '启动 token 不合法', too_few_tokens: '启动 token 太少', bad_entry: '格式不对' };
+function rulepackRepHtml(rep) {
+  if (!rep) return '';
+  if (rep.err) return '<div class="note err">' + esc(rep.err) + '</div>';
+  var a = rep.added || {}, m = rep.merged || {}, u = rep.unchanged || {}, sk = rep.skipped || {};
+  var skl = Object.keys(sk).filter(function (k) { return num(sk[k]); }).map(function (k) { return (RPK_SKIP[k] || k) + ' ' + num(sk[k]); });
+  return '<div class="note">导入完成：新增 ' + num(a.suffixes) + ' 个域名（' + num(a.domain_rules) + ' 条规则）· ' + num(a.fingerprints) + ' 个指纹 · ' + num(a.startup) + ' 个启动指纹' +
+    (num(m.suffixes) + num(m.fingerprints) + num(m.startup) ? '；合并 ' + num(m.suffixes) + ' 个域名 · ' + num(m.fingerprints) + ' 个指纹 · ' + num(m.startup) + ' 个启动指纹' : '') +
+    (num(u.suffixes) + num(u.fingerprints) + num(u.startup) ? '；已有未变 ' + num(u.suffixes + u.fingerprints + u.startup) + ' 条' : '') + '</div>' +
+    (skl.length ? '<div class="note warn">跳过：' + esc(skl.join('、')) + '</div>' : '') +
+    (Array.isArray(rep.conflicts) && rep.conflicts.length ? '<div class="note mono" style="font-size:11px;overflow-wrap:anywhere">' + esc(rep.conflicts.slice(0, 5).join(' · ')) + '</div>' : '');
+}
+function paintRulepack() {
+  var el = $('#rpack-body'), r = S.rpack; if (!el || !r) return;
+  el.setAttribute('data-keep', '');
+  var sm = $('#rpack-sum'); if (sm) sm.textContent = rulepackSumTxt();
+  if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持规则包）</div>'; return; }
+  var src = r.sources || {}, ex = r.exportable || {}, im = r.imported || {}, uc = src.user_corrections || {};
+  var pr = function (x) { return num((x || {}).rules); };
+  var h = '<div class="note">可导出：域名规则 ' + num(ex.domain_rules) + ' 条（自动扩展 ' + pr(src.auto_expanded) + ' / 晋升 ' + pr(src.auto_promoted) + ' / 自定义 ' + pr(src.user_custom) + ' / 纠正 ' + num(uc.domain) + '）· 指纹 ' + num(ex.fingerprints) + ' 条 · 启动指纹 ' + num(ex.startup) + ' 个应用</div>' +
+    '<div class="row" style="padding:4px 0;min-height:0"><span class="box" style="flex:1"><input id="rpack-note" maxlength="60" placeholder="备注（可空，例如「家里的手机」）"></span></div>' +
+    '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">包含已导入的</div><div class="s">已导入 ' + num(im.suffixes) + ' 个域名 · ' + num(im.fingerprints) + ' 个指纹 · ' + num(im.startup) + ' 个启动指纹（别人给你的）</div></span>' + toggle(false, 'id="rpack-inc" data-local="rpack-inc" aria-label="包含已导入的"') + '</div>' +
+    '<div class="btns"><button class="btn pri press" data-act="rpack-export">导出</button></div>' +
+    '<div class="note" style="margin-bottom:-2px">导入</div>' +
+    '<div class="row" style="padding:4px 0;min-height:0"><input id="rpack-file" type="file" accept=".json,application/json" style="flex:1;min-width:0"></div>' +
+    '<textarea id="rpack-text" rows="3" placeholder="或者把规则包 JSON 粘贴到这里" style="width:100%;box-sizing:border-box;font-size:12px"></textarea>' +
+    '<div class="btns"><button class="btn sec press" data-act="rpack-import">导入</button>' +
+    (num(im.domain_rules) + num(im.fingerprints) + num(im.startup) ? '<button class="btn sec danger press" data-act="rpack-clear">清除已导入</button>' : '') + '</div>' +
+    '<div id="rpack-rep">' + rulepackRepHtml(S.rpackRep) + '</div>' +
+    '<div class="note">只包含这台手机自己学到的和你自己加的规则，不含模块自带规则，也不含任何设备的 MAC / IP。导入的规则只用来给流量贴应用标签；和本机规则冲突的条目会被跳过。</div>';
+  el.innerHTML = h;
+}
+function rulepackExport(btn) {
+  var note = ($('#rpack-note') || {}).value || '', inc = $('#rpack-inc');
+  var p = { note: note.trim() }; if (inc && inc.getAttribute('aria-checked') === 'true') p.include_imported = '1';
+  btn.disabled = true;
+  return api.action('dpi_rulepack_export', p, { timeout: 20000, maxTime: 18 }).then(function (r) {
+    var d = detailJSON(r), name = String(d.name || '');
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('规则包已生成'); return; }
+    if (KSU) return shell('mkdir -p /sdcard/Download && cp ' + sq(HNC_DIR + '/exports/' + name) + ' /sdcard/Download/ && echo ok').then(function () { toast('规则包已存到 /sdcard/Download/' + name); });
+    downloadExport(name, '/api/exports/' + encodeURIComponent(name)); toast('规则包已生成 · ' + name);
+  }).catch(function (e) { toast(errText(e), 'err'); }).then(function () { btn.disabled = false; });
+}
+function rulepackImport(btn) {
+  var f = $('#rpack-file'), ta = $('#rpack-text');
+  var readTxt = (f && f.files && f.files[0]) ? new Promise(function (ok, no) {
+    var fr = new FileReader(); fr.onload = function () { ok(String(fr.result || '')); }; fr.onerror = function () { no(new Error('读取文件失败')); }; fr.readAsText(f.files[0]);
+  }) : Promise.resolve(ta ? ta.value : '');
+  btn.disabled = true;
+  return readTxt.then(function (txt) {
+    txt = String(txt || '').trim();
+    if (!txt) throw new Error('先选择规则包文件，或把 JSON 粘贴进来');
+    var o; try { o = JSON.parse(txt); } catch (e) { throw new Error('JSON 格式错误：' + e.message); }
+    if (!o || o.format !== 'hnc-rulepack') throw new Error('这不是 HNC 规则包');
+    if (txt.length > 1200 * 1024) throw new Error('规则包超过 1.2 MB');
+    if (KSU && txt.length > 120 * 1024) throw new Error('规则包较大，本机界面传不过去，请在浏览器里打开远程管理页面导入');
+    return api.post('/api/dpi_rulepack', { pack: txt }, { timeout: 30000, maxTime: 28 });
+  }).then(function (rep) {
+    if (rep && rep.ok === false) throw new Error(rep.error || '导入失败');
+    S.rpackRep = rep; toast('规则包已导入'); return loadRulepack();
+  }).catch(function (e) { S.rpackRep = { err: errText(e) }; var rp = $('#rpack-rep'); if (rp) rp.innerHTML = rulepackRepHtml(S.rpackRep); toast(errText(e), 'err'); })
+    .then(function () { btn.disabled = false; });
 }
 /* v5.27 T3: 学会的启动指纹列表(/api/dpi_startup) */
 S.startup = null; S.startupOpen = false;

@@ -251,6 +251,7 @@ document.addEventListener('click', function (e) {
       if (opened && key === 'dnst') loadDNS(); if (opened && key === 'fpl') loadFP();
       if (opened && key === 'deval') loadEval();
       if (opened && key === 'fgeng') loadFgEngine();
+      if (opened && key === 'rpack') loadRulepack();
       if (opened && /^(at|cb)-/.test(key)) loadAppTime(key.slice(3)); break;
     case 'toggle-dev':
       if (!d) break;
@@ -362,6 +363,9 @@ document.addEventListener('click', function (e) {
     case 'eval-enable': busyWhile(a, api.post('/api/self/toggle', { enabled: true }).then(function (r3) { if (r3 && r3.error) throw new Error(r3.error); return r3; })).then(function () { toast('本机流量归因已开启 · 5 秒后开始采集样本'); return loadEval(S.evalDays, true); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-refresh': busyWhile(a, loadEval(S.evalDays, true)); break;
     case 'startup-list': busyWhile(a, toggleStartupList()); break;
+    case 'rpack-export': rulepackExport(a); break;
+    case 'rpack-import': rulepackImport(a); break;
+    case 'rpack-clear': confirmSheet('清除已导入的规则包？', '删除从别人那里导入的全部域名规则、指纹和启动指纹。这台手机自己学到的和你自己加的不受影响。', '清除').then(function (ok) { if (ok) busyWhile(a, api.action('dpi_rulepack_clear')).then(function () { toast('已清除导入的规则'); S.rpackRep = null; return loadRulepack(); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'eval-clear': confirmSheet('清除识别自评的样本？', '会删掉本机采集的标签样本、前台记录和自评结果，之后重新开始积累。不影响识别和限速。', '清除').then(function (ok) { if (ok) busyWhile(a, api.action('dpi_eval_clear')).then(function () { toast('已清除样本'); S.eval = null; return loadEval(S.evalDays, true); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'rules-json': busyWhile(a, exportRulesJson()); break;
     case 'json-health': location.href = 'json-health.html'; break;
