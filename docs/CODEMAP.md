@@ -33,6 +33,13 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | 告警写入(`run/alerts.jsonl`) | `src/dpid/alert` 的 `Append`(带 flock) | httpd 与看门狗两个进程并发追加安全 |
 | 看门狗主循环 | `src/dpid/cmd/hnc_watchdog`(Go) | `bin/watchdog.sh` 只提供 `action` |
 | dpid 守护 | `run/dpid_launcher.choice` 指定的那一个 | launcher(C)/ guard(shell)/ supervisor(Go)/ direct(直拉)机制保留,选定后不换手;sentinel 救命时改写为 direct |
+| 规则目录开机同步(v5.27) | `bin/dpi_rules_sync.sh` | service.sh 只调用它;保留 99 与 `_*.json`,97 只在模块 versionCode 不变时保留;暂存目录 + 两次 mv 换目录,失败不动运行目录 |
+| 规则挂靠(v5.27) | `src/dpid/output/rule.go`(`attachChildRules`) | `_parent_rule_id` 的规则后缀并进父规则(去重 + 合并后再截 1024);httpd 应用目录(`app_time.go` `attachCatalogChildren`)与 `tools/build_pkg_app_map.py` 同一语义 |
+| QUIC 传输参数指纹(v5.27) | `src/dpid/output/qtp.go` | capture 只在 QUIC 路径填 `TLSInfo.QTP`;httpd `fp_learn.go` 先带 QTP 的 key 再回落 |
+| 启动指纹(v5.27) | `daemon/hnc_httpd/startup_fp.go` | 学习(本机样本,30 分钟节流)/ 识别(dpi_flows)/ 交叉验证自评都在这里;影子运行,只产出事件 |
+| 前台 HMM(v5.27) | `daemon/hnc_httpd/fg_hmm.go` | 挂在 `fg_model.go` 每轮上;引擎开关 `data/dpi_experiment.json`;对比统计 `run/fg_compare.json` |
+| 我的规则包(v5.27) | `daemon/hnc_httpd/rulepack.go` | 导出汇总 / 导入校验 / 冲突跳过 / 落地(`_imported.json`、`fp_imported.json`、`startup_fp_imported.json`)/ 清除 |
+| v2fly 规则导入(v5.27) | `tools/import_v2fly.py` + `tools/v2fly_map.json` | 只在开发机跑,产物 `data/dpi_rules.d/46-v2fly-*.json`,之后 `dpi_rules_split.py sync-legacy` |
 
 ---
 

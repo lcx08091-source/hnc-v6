@@ -2142,3 +2142,28 @@ GET `/api/encdns`:
 - `GET /api/proc_health`:改为 httpd 的 Go 实现(原为透传 `bin/rc17_process_health.sh`,该脚本已删除)。JSON 字段(schema_version / timestamp / status / detail / counts / pidfiles)完全不变,前端无需改动。
 - `run/dpid_launcher.choice`:当前 dpid 守护者(`launcher` | `guard` | `supervisor` | `direct`),由 service.sh 在选定守护者时写入;sentinel 救命路径检测到 launcher 反复崩溃时改写为 `direct`。看门狗与 sentinel 都只认这一份;开机时(post-fs-data)清空,防止读到上次会话的旧选择。
 - `run/proc_health.json`:导出诊断包时 httpd 预写的进程健康快照(与 `/api/proc_health` 同一份实现)。
+
+## 25. v5.27 变更
+
+**新接口(都是敏感读路径,含设备数据)**
+
+- GET `/api/dpi_startup` → `{ok, shadow:true, learned:[{app_id, name, starts, tokens:[{t, f, feat?}], feat, usable}], events:[{mac, app_id, name, ts, score(0–100), matched[]}], stats:{samples_read, starts_learned, apps_usable, events_total, last_learn, imported}, thresholds:{…}}`。启动指纹影子运行:只产出事件(内存保留最近 200 个),不改任何连接归属 / 限速 / 限时。学习表 `data/startup_fp.json`(含增量游标)。
+- GET `/api/fg_compare?days=1|7` → `{ok, days, engine("classic"|"hmm"), rounds, agree_rounds, agree_pct, device_hours, classic:{switches, short_segments, switches_per_hour, short_per_hour}, hmm:{同上}}`。小时桶存 `run/fg_compare.json`(保留 7 天,每分钟落盘);`*_per_hour` 按「有流量的设备 × 小时」折算;`short_segments` = 持续 < 30 秒就结束的前台段。
+- GET `/api/dpi_rulepack[?summary=1]` → `{ok, sources:{auto_expanded:{rules,suffixes}, auto_promoted:{…}, user_custom:{…}, user_corrections:{domain, ja4}, fingerprints, startup}, exportable:{domain_rules, suffixes, fingerprints, startup}, imported:{同上}}`。
+- POST `/api/dpi_rulepack` `{pack: "<规则包 JSON 文本>"}`(也接受直接是对象;Content-Type application/json + `X-HNC-CSRF: 1`,上限 1.2 MB,写审计日志)→ `{ok, added:{domain_rules, suffixes, fingerprints, startup}, merged:{…}, unchanged:{…}, skipped:{<原因>: n}, conflicts:["后缀 → 已归 应用", …(≤ 20)], source}`;整包拒绝(format / schema 不对、条数超限)时 400 `{ok:false, error, report}`。跳过原因:`conflict`、`already_local`、`public_suffix`、`shared_apex`、`bad_suffix`、`bad_id`、`bad_category`、`bad_attach`、`bad_ja4`、`bad_qtp`、`bad_port`、`bad_alpn`、`bad_value`、`bad_token`、`too_few_tokens`、`bad_entry`。
+
+**新动作**
+
+- `dpi_fg_engine {engine: "classic"|"hmm"}`:写 `data/dpi_experiment.json` 的 `fg_engine`(保留文件其它键)。`hmm` 时 `/api/devices[].fg` 的前台应用 / 置信度 / since 与前台时间线改由 HMM 决定,`reasons` 多一条「HMM 后验 xx%」;`background` 仍为经典模型的。
+- `dpi_rulepack_export {note?, include_imported?("1")}` → detail `{name, path, counts, bytes}`,文件写到 `exports/hnc-rulepack-YYYYMMDD-HHMMSS.json`,可经 `/api/exports/<name>` 下载。
+- `dpi_rulepack_clear` → 删除 `etc/dpi_rules.d/_imported.json`、`data/fp_imported.json`、`data/startup_fp_imported.json`。
+
+**规则包格式**(`format: "hnc-rulepack"`, `schema: 1`):`{created(YYYY-MM-DD), hnc_version, note, counts:{domain_rules, suffixes, fingerprints, startup}, domain_rules:[{id, app, category, attach_to?, suffixes[], source}], fingerprints:[{ja4, alpn, port("443"|"80"|"other"), qtp?, app_id, app, category, purity, support, source}], startup:[{app_id, app, category, starts, tokens:[{t, f}]}]}`。不含 MAC、IP、UID、包名、设备散列、`_evidence`、秒级时间。导入后域名规则落到 `_imported.json`(id = `imp_<原 id>`,`attach_to` → `_parent_rule_id`,`_source = "rulepack:<note>@<created>"`)。
+
+**已有接口 / 文件新增字段(只加不改)**
+
+- GET `/api/dpi_eval`:新增 `quic:{samples, qtp_samples, fp_ja4_only:{coverage, accuracy, judged}, fp_with_qtp:{…}}`(只统计 `quic=true` 的样本)与 `startup:{days, apps_learned, switches, switch_hit, switch_rate, events, events_correct, event_accuracy, median_lag_sec, note?}`(按天交叉验证,用全部 ≤ 7 天样本,与 `days` 参数无关;不足 2 天只有 `note`)。`methods.fp` 现在「先 QTP 后回落」。
+- GET `/api/dpi_fp`:`learned[]` 每条新增 `qtp`(空 = 旧版 / 非 QUIC 条目);`stats` 新增 `flows_attributed_by_qtp`。
+- `run/dpi_flows.json` 每条、`run/label_samples.*.jsonl` 每行:新增可选 `qtp`(`qtp1_` + 12 位十六进制,只有 QUIC ClientHello 才有)。`data/fp_learned.json` 条目新增可选 `qtp`。
+- 连接归属来源(`/api/connections` 等的 `app_src`)新增 `imported`(导入的规则包指纹)。
+- 规则文件:规则可带 `_parent_rule_id`(挂靠到另一条规则);新出厂 bucket `46-v2fly-a.json`(顶层 `source` 标明数据来源)。
