@@ -46,6 +46,57 @@ func classifyHostLinear(rules []l3Rule, host string) (l3Rule, bool) {
 	return l3Rule{}, false
 }
 
+// linearPrepared 是 classifyHostLinear 的同一算法, 只是把每条后缀的规范化
+// (ToLower/TrimPrefix/TrimSpace)提前做一次、匹配时不拼接字符串。v5.27 规则库
+// 扩充后后缀数涨了 ~5 倍, 原样实现在等价性测试(输入数 × 后缀数)里要跑几十秒、
+// -race 下接近超时; 语义与 classifyHostLinear 逐条一致(assertEquivalent 里抽样核对)。
+type linearPrepared struct {
+	rules []l3Rule
+	sufs  [][]string
+}
+
+func prepareLinear(rules []l3Rule) *linearPrepared {
+	p := &linearPrepared{rules: rules, sufs: make([][]string, len(rules))}
+	for i, r := range rules {
+		for _, suf := range r.Suffixes {
+			p.sufs[i] = append(p.sufs[i], strings.ToLower(strings.TrimPrefix(strings.TrimSpace(suf), ".")))
+		}
+	}
+	return p
+}
+
+func (p *linearPrepared) classify(host string) (l3Rule, bool) {
+	host = normalizeName(host)
+	if host == "" {
+		return l3Rule{}, false
+	}
+	for _, want := range []PriorityClass{PrioritySpecific, PriorityFallback} {
+		bestLen := -1
+		var best l3Rule
+		for i, r := range p.rules {
+			if r.Priority != want {
+				continue
+			}
+			for _, suf := range p.sufs[i] {
+				if suf == "" {
+					continue
+				}
+				n, m := len(host), len(suf)
+				if host == suf || (n > m && host[n-m-1] == '.' && host[n-m:] == suf) {
+					if m > bestLen {
+						bestLen = m
+						best = r
+					}
+				}
+			}
+		}
+		if bestLen >= 0 {
+			return best, true
+		}
+	}
+	return l3Rule{}, false
+}
+
 // classifyHostIndexed 是新实现的纯函数形式(绕过 loadL3Rules 的固定路径)。
 func classifyHostIndexed(idx *hostIndex, rules []l3Rule, host string) (l3Rule, bool) {
 	host = normalizeName(host)
@@ -199,9 +250,21 @@ func assertEquivalent(t *testing.T, name string, rules []l3Rule) {
 	t.Helper()
 	idx := buildHostIndex(rules)
 	inputs := equivalenceInputs(rules, rand.New(rand.NewSource(7)))
+	lin := prepareLinear(rules)
+	// 预处理版与原样实现抽样核对(每 16 个输入取 1 个 + 全部人造边界)
+	for i, h := range inputs {
+		if i%16 != 0 && len(rules) > 64 {
+			continue
+		}
+		a, aok := classifyHostLinear(rules, h)
+		b, bok := lin.classify(h)
+		if aok != bok || a.ID != b.ID {
+			t.Fatalf("%s: prepared linear diverges on %q: (%q,%v) vs (%q,%v)", name, h, a.ID, aok, b.ID, bok)
+		}
+	}
 	mismatch := 0
 	for _, h := range inputs {
-		want, wok := classifyHostLinear(rules, h)
+		want, wok := lin.classify(h)
 		got, gok := classifyHostIndexed(idx, rules, h)
 		if wok != gok || want.ID != got.ID || want.Name != got.Name || want.Category != got.Category {
 			mismatch++

@@ -1,0 +1,10 @@
+{
+  "schema_version": "2.0",
+  "rules_version": "fixture",
+  "rules": [
+    {"id": "exist", "app": "已有应用", "category": "social", "suffixes": ["exist.com"]},
+    {"id": "other", "app": "别的应用", "category": "video", "suffixes": ["other.com"]},
+    {"id": "other_autoexp_x", "app": "别的应用 (自动扩展)", "category": "video", "suffixes": ["childapp.example"], "_parent_rule_id": "other"},
+    {"id": "adsdk", "app": "广告", "category": "ads", "suffixes": ["adsdk.example"]}
+  ]
+}

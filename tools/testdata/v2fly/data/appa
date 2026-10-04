@@ -1,0 +1,23 @@
+# App A(测试夹具)
+include:appa-cdn
+include:appb
+include:loop1
+
+appa.com
+domain:appa.org
+full:api.appa.net
+keyword:appa
+regexp:^appa[0-9]+\.com$
+ads.appa.com @ads
+track.appa.com @ads @cn
+
+# 冲突 / 跳过
+other.com
+sub.other.com
+childapp.example
+com.cn
+github.io
+cdnshared.com
+x.cdnshared.com
+exist.com
+bad_host!.com

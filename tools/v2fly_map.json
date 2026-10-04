@@ -1,0 +1,1505 @@
+{
+ "_comment": "v5.27 T5: v2fly/domain-list-community 清单 → HNC 应用映射(tools/import_v2fly.py 读)。只映射「一个清单 = 一个 App / 服务」的清单; 公司级大清单(tencent / alibaba / bytedance / baidu / google / microsoft / apple / amazon / netease / meta / xiaomi …)不映射。id 已存在 → 并入(<id>_v2fly + _parent_rule_id); skip_include = 不随本清单展开的子清单。exclude = 从本清单里剔除的后缀(及其子域)。特意不映射: bilibili2(色情站, 与哔哩哔哩无关)、momo(台湾 momo 购物, 不是陌陌)、jd(含京东云各地区域名, 别的 App 托管在京东云上会被认成京东)。",
+ "115": {
+  "id": "pan115",
+  "app": "115 网盘",
+  "category": "download"
+ },
+ "2gis": {
+  "id": "map_2gis",
+  "app": "2GIS",
+  "category": "navigation"
+ },
+ "36kr": {
+  "id": "kr36",
+  "app": "36氪",
+  "category": "news"
+ },
+ "4399": {
+  "id": "game4399",
+  "app": "4399 游戏",
+  "category": "game"
+ },
+ "51job": {
+  "id": "job51",
+  "app": "前程无忧",
+  "category": "recruitment"
+ },
+ "abema": {
+  "id": "abema",
+  "app": "ABEMA",
+  "category": "video"
+ },
+ "accuweather": {
+  "id": "accuweather",
+  "app": "AccuWeather",
+  "category": "weather"
+ },
+ "acfun": {
+  "id": "acfun",
+  "app": "AcFun",
+  "category": "video"
+ },
+ "adidas": {
+  "id": "adidas",
+  "app": "adidas",
+  "category": "shopping"
+ },
+ "airbnb": {
+  "id": "airbnb",
+  "app": "Airbnb",
+  "category": "travel"
+ },
+ "airchina": {
+  "id": "airchina",
+  "app": "中国国航",
+  "category": "travel"
+ },
+ "aliyun-drive": {
+  "id": "aliyun_drive",
+  "app": "阿里云盘",
+  "category": "download"
+ },
+ "aljazeera": {
+  "id": "aljazeera",
+  "app": "半岛电视台",
+  "category": "news"
+ },
+ "amap": {
+  "id": "amap",
+  "app": "高德地图",
+  "category": "navigation"
+ },
+ "anthropic": {
+  "id": "anthropic",
+  "app": "Claude",
+  "category": "ai"
+ },
+ "apple-music": {
+  "id": "apple_music",
+  "app": "Apple Music",
+  "category": "music"
+ },
+ "artstation": {
+  "id": "artstation",
+  "app": "ArtStation",
+  "category": "photo"
+ },
+ "aviasales": {
+  "id": "aviasales",
+  "app": "Aviasales",
+  "category": "travel"
+ },
+ "avito": {
+  "id": "avito",
+  "app": "Avito",
+  "category": "shopping"
+ },
+ "bandcamp": {
+  "id": "bandcamp",
+  "app": "Bandcamp",
+  "category": "music"
+ },
+ "bbc": {
+  "id": "bbc",
+  "app": "BBC",
+  "category": "news"
+ },
+ "bestv": {
+  "id": "bestv",
+  "app": "百视通 BesTV",
+  "category": "video"
+ },
+ "bilibili": {
+  "id": "bilibili",
+  "app": "哔哩哔哩",
+  "category": "video"
+ },
+ "blizzard": {
+  "id": "battlenet",
+  "app": "暴雪 Battle.net",
+  "category": "game"
+ },
+ "bloomberg": {
+  "id": "bloomberg",
+  "app": "彭博",
+  "category": "news"
+ },
+ "bluearchive": {
+  "id": "bluearchive",
+  "app": "蔚蓝档案",
+  "category": "game"
+ },
+ "bluesky": {
+  "id": "bluesky",
+  "app": "Bluesky",
+  "category": "social"
+ },
+ "booking": {
+  "id": "booking",
+  "app": "Booking.com",
+  "category": "travel"
+ },
+ "cainiao": {
+  "id": "cainiao",
+  "app": "菜鸟",
+  "category": "life_service"
+ },
+ "canva": {
+  "id": "canva",
+  "app": "Canva 可画",
+  "category": "office"
+ },
+ "chesscom": {
+  "id": "chesscom",
+  "app": "Chess.com",
+  "category": "game"
+ },
+ "ciweimao": {
+  "id": "ciweimao",
+  "app": "刺猬猫阅读",
+  "category": "reading"
+ },
+ "clubhouse": {
+  "id": "clubhouse",
+  "app": "Clubhouse",
+  "category": "social"
+ },
+ "cnbeta": {
+  "id": "cnbeta",
+  "app": "cnBeta",
+  "category": "news"
+ },
+ "cnblogs": {
+  "id": "cnblogs",
+  "app": "博客园",
+  "category": "dev"
+ },
+ "cnn": {
+  "id": "cnn",
+  "app": "CNN",
+  "category": "news"
+ },
+ "coolapk": {
+  "id": "coolapk",
+  "app": "酷安",
+  "category": "social"
+ },
+ "costco": {
+  "id": "costco",
+  "app": "Costco",
+  "category": "shopping"
+ },
+ "coupang": {
+  "id": "coupang",
+  "app": "Coupang",
+  "category": "shopping"
+ },
+ "cowtransfer": {
+  "id": "cowtransfer",
+  "app": "奶牛快传",
+  "category": "download"
+ },
+ "csdn": {
+  "id": "csdn",
+  "app": "CSDN",
+  "category": "dev"
+ },
+ "ctrip": {
+  "id": "ctrip",
+  "app": "携程旅行",
+  "category": "travel"
+ },
+ "curseforge": {
+  "id": "curseforge",
+  "app": "CurseForge",
+  "category": "game"
+ },
+ "cursor": {
+  "id": "cursor",
+  "app": "Cursor",
+  "category": "dev"
+ },
+ "cygames": {
+  "id": "cygames",
+  "app": "Cygames",
+  "category": "game"
+ },
+ "dailymotion": {
+  "id": "dailymotion",
+  "app": "Dailymotion",
+  "category": "video"
+ },
+ "dandanplay": {
+  "id": "dandanplay",
+  "app": "弹弹play",
+  "category": "video"
+ },
+ "dangdang": {
+  "id": "dangdang",
+  "app": "当当",
+  "category": "shopping"
+ },
+ "dazn": {
+  "id": "dazn",
+  "app": "DAZN",
+  "category": "video"
+ },
+ "dcard": {
+  "id": "dcard",
+  "app": "Dcard",
+  "category": "social"
+ },
+ "ddmaicai": {
+  "id": "ddmaicai",
+  "app": "叮咚买菜",
+  "category": "shopping"
+ },
+ "dedao": {
+  "id": "dedao",
+  "app": "得到",
+  "category": "reading"
+ },
+ "deepseek": {
+  "id": "deepseek",
+  "app": "DeepSeek",
+  "category": "ai"
+ },
+ "deezer": {
+  "id": "deezer",
+  "app": "Deezer",
+  "category": "music"
+ },
+ "deppon": {
+  "id": "deppon",
+  "app": "德邦快递",
+  "category": "life_service"
+ },
+ "deviantart": {
+  "id": "deviantart",
+  "app": "DeviantArt",
+  "category": "photo"
+ },
+ "dewu": {
+  "id": "dewu",
+  "app": "得物",
+  "category": "shopping"
+ },
+ "didi": {
+  "id": "didi",
+  "app": "滴滴出行",
+  "category": "navigation"
+ },
+ "digitalocean": {
+  "id": "digitalocean",
+  "app": "DigitalOcean",
+  "category": "cloud"
+ },
+ "dingtalk": {
+  "id": "dingding",
+  "app": "钉钉",
+  "category": "office"
+ },
+ "discord": {
+  "id": "discord",
+  "app": "Discord",
+  "category": "social"
+ },
+ "docker": {
+  "id": "docker",
+  "app": "Docker",
+  "category": "dev"
+ },
+ "dongchedi": {
+  "id": "dongchedi",
+  "app": "懂车帝",
+  "category": "auto"
+ },
+ "douban": {
+  "id": "douban",
+  "app": "豆瓣",
+  "category": "social"
+ },
+ "doubao": {
+  "id": "doubao",
+  "app": "豆包",
+  "category": "ai"
+ },
+ "douyin": {
+  "id": "douyin",
+  "app": "抖音",
+  "category": "video",
+  "exclude": [
+   "qishui.cn",
+   "qishui.com.cn",
+   "qishuimusic.cn",
+   "qishuimusic.com.cn"
+  ]
+ },
+ "douyu": {
+  "id": "douyu",
+  "app": "斗鱼直播",
+  "category": "video"
+ },
+ "dropbox": {
+  "id": "dropbox",
+  "app": "Dropbox",
+  "category": "download"
+ },
+ "duckduckgo": {
+  "id": "duckduckgo",
+  "app": "DuckDuckGo",
+  "category": "browser"
+ },
+ "duitang": {
+  "id": "duitang",
+  "app": "堆糖",
+  "category": "social"
+ },
+ "dw": {
+  "id": "dw",
+  "app": "德国之声",
+  "category": "news"
+ },
+ "ea": {
+  "id": "ea",
+  "app": "EA",
+  "category": "game"
+ },
+ "ebay": {
+  "id": "ebay",
+  "app": "eBay",
+  "category": "shopping"
+ },
+ "economist": {
+  "id": "economist",
+  "app": "经济学人",
+  "category": "news"
+ },
+ "eleme": {
+  "id": "eleme",
+  "app": "饿了么",
+  "category": "shopping"
+ },
+ "elevenlabs": {
+  "id": "elevenlabs",
+  "app": "ElevenLabs",
+  "category": "ai"
+ },
+ "epicgames": {
+  "id": "epic",
+  "app": "Epic Games",
+  "category": "game"
+ },
+ "escapefromtarkov": {
+  "id": "tarkov",
+  "app": "逃离塔科夫",
+  "category": "game"
+ },
+ "evernote": {
+  "id": "evernote",
+  "app": "Evernote",
+  "category": "office"
+ },
+ "facebook": {
+  "id": "facebook",
+  "app": "Facebook",
+  "category": "social"
+ },
+ "faceit": {
+  "id": "faceit",
+  "app": "FACEIT",
+  "category": "game"
+ },
+ "farfetch": {
+  "id": "farfetch",
+  "app": "Farfetch",
+  "category": "shopping"
+ },
+ "fcbox": {
+  "id": "fcbox",
+  "app": "丰巢",
+  "category": "life_service"
+ },
+ "feishu": {
+  "id": "feishu",
+  "app": "飞书",
+  "category": "office"
+ },
+ "fengxing": {
+  "id": "fengxing",
+  "app": "风行视频",
+  "category": "video"
+ },
+ "figma": {
+  "id": "figma",
+  "app": "Figma",
+  "category": "office"
+ },
+ "firefox": {
+  "id": "firefox",
+  "app": "Firefox",
+  "category": "browser"
+ },
+ "flickr": {
+  "id": "flickr",
+  "app": "Flickr",
+  "category": "photo"
+ },
+ "flowus": {
+  "id": "flowus",
+  "app": "FlowUs 息流",
+  "category": "office"
+ },
+ "fqnovel": {
+  "id": "fanqie_novel",
+  "app": "番茄小说",
+  "category": "reading"
+ },
+ "ft": {
+  "id": "ft",
+  "app": "金融时报",
+  "category": "news"
+ },
+ "gaijin": {
+  "id": "gaijin",
+  "app": "Gaijin(战争雷霆)",
+  "category": "game"
+ },
+ "ganji": {
+  "id": "ganji",
+  "app": "赶集网",
+  "category": "life_service"
+ },
+ "garena": {
+  "id": "garena",
+  "app": "Garena",
+  "category": "game"
+ },
+ "gismeteo": {
+  "id": "gismeteo",
+  "app": "Gismeteo",
+  "category": "weather"
+ },
+ "gitee": {
+  "id": "gitee",
+  "app": "Gitee",
+  "category": "code_hosting"
+ },
+ "github": {
+  "id": "github",
+  "app": "GitHub",
+  "category": "dev"
+ },
+ "github-copilot": {
+  "id": "copilot",
+  "app": "GitHub Copilot",
+  "category": "ai"
+ },
+ "gitlab": {
+  "id": "gitlab",
+  "app": "GitLab",
+  "category": "dev"
+ },
+ "gog": {
+  "id": "gog",
+  "app": "GOG",
+  "category": "game"
+ },
+ "goodreads": {
+  "id": "goodreads",
+  "app": "Goodreads",
+  "category": "reading"
+ },
+ "google-gemini": {
+  "id": "gemini",
+  "app": "Gemini",
+  "category": "ai"
+ },
+ "groq": {
+  "id": "groq",
+  "app": "Groq",
+  "category": "ai"
+ },
+ "guokr": {
+  "id": "guokr",
+  "app": "果壳",
+  "category": "social"
+ },
+ "hainanairlines": {
+  "id": "hainanairlines",
+  "app": "海南航空",
+  "category": "travel"
+ },
+ "headhunter": {
+  "id": "headhunter",
+  "app": "HeadHunter",
+  "category": "recruitment"
+ },
+ "heroku": {
+  "id": "heroku",
+  "app": "Heroku",
+  "category": "cloud"
+ },
+ "hotstar": {
+  "id": "hotstar",
+  "app": "Hotstar",
+  "category": "video"
+ },
+ "hoyoverse": {
+  "id": "mihoyo",
+  "app": "米哈游",
+  "category": "game"
+ },
+ "huggingface": {
+  "id": "huggingface",
+  "app": "Hugging Face",
+  "category": "dev"
+ },
+ "hulu": {
+  "id": "hulu",
+  "app": "Hulu",
+  "category": "video"
+ },
+ "humblebundle": {
+  "id": "humblebundle",
+  "app": "Humble Bundle",
+  "category": "game"
+ },
+ "hunantv": {
+  "id": "mango_tv",
+  "app": "芒果 TV",
+  "category": "video"
+ },
+ "hupu": {
+  "id": "hupu",
+  "app": "虎扑",
+  "category": "social"
+ },
+ "huya": {
+  "id": "huya",
+  "app": "虎牙直播",
+  "category": "video"
+ },
+ "ifanr": {
+  "id": "ifanr",
+  "app": "爱范儿",
+  "category": "news"
+ },
+ "ikea": {
+  "id": "ikea",
+  "app": "IKEA 宜家",
+  "category": "shopping"
+ },
+ "imgur": {
+  "id": "imgur",
+  "app": "Imgur",
+  "category": "social"
+ },
+ "inshot": {
+  "id": "inshot",
+  "app": "InShot",
+  "category": "photo"
+ },
+ "instagram": {
+  "id": "instagram",
+  "app": "Instagram",
+  "category": "social"
+ },
+ "iqiyi": {
+  "id": "iqiyi",
+  "app": "爱奇艺",
+  "category": "video"
+ },
+ "itchio": {
+  "id": "itchio",
+  "app": "itch.io",
+  "category": "game"
+ },
+ "jetbrains": {
+  "id": "jetbrains",
+  "app": "JetBrains",
+  "category": "dev"
+ },
+ "jianshu": {
+  "id": "jianshu",
+  "app": "简书",
+  "category": "social"
+ },
+ "jiemian": {
+  "id": "jiemian",
+  "app": "界面新闻",
+  "category": "news"
+ },
+ "jinshuju": {
+  "id": "jinshuju",
+  "app": "金数据",
+  "category": "office"
+ },
+ "jtexpress": {
+  "id": "jtexpress",
+  "app": "极兔速递",
+  "category": "life_service"
+ },
+ "juejin": {
+  "id": "juejin",
+  "app": "稀土掘金",
+  "category": "dev"
+ },
+ "kaggle": {
+  "id": "kaggle",
+  "app": "Kaggle",
+  "category": "dev"
+ },
+ "keep": {
+  "id": "keep",
+  "app": "Keep",
+  "category": "life_service"
+ },
+ "kick": {
+  "id": "kick",
+  "app": "Kick",
+  "category": "video"
+ },
+ "kindle": {
+  "id": "kindle",
+  "app": "Kindle",
+  "category": "reading"
+ },
+ "kkbox": {
+  "id": "kkbox",
+  "app": "KKBOX",
+  "category": "music"
+ },
+ "kktv": {
+  "id": "kktv",
+  "app": "KKTV",
+  "category": "video"
+ },
+ "kuaidi100": {
+  "id": "kuaidi100",
+  "app": "快递100",
+  "category": "life_service"
+ },
+ "kuaikan": {
+  "id": "kuaikan",
+  "app": "快看漫画",
+  "category": "reading"
+ },
+ "kuaishou": {
+  "id": "kuaishou",
+  "app": "快手",
+  "category": "video"
+ },
+ "kugou": {
+  "id": "kugou",
+  "app": "酷狗音乐",
+  "category": "music"
+ },
+ "kurogames": {
+  "id": "kurogames",
+  "app": "库洛游戏",
+  "category": "game"
+ },
+ "kuwo": {
+  "id": "kuwo",
+  "app": "酷我音乐",
+  "category": "music"
+ },
+ "lagou": {
+  "id": "lagou",
+  "app": "拉勾招聘",
+  "category": "recruitment"
+ },
+ "lanzou": {
+  "id": "lanzou",
+  "app": "蓝奏云",
+  "category": "download"
+ },
+ "lark": {
+  "id": "feishu",
+  "app": "飞书",
+  "category": "office"
+ },
+ "lastfm": {
+  "id": "lastfm",
+  "app": "Last.fm",
+  "category": "music"
+ },
+ "le": {
+  "id": "letv",
+  "app": "乐视视频",
+  "category": "video"
+ },
+ "lianjia": {
+  "id": "beike",
+  "app": "贝壳找房",
+  "category": "life_service"
+ },
+ "liepin": {
+  "id": "liepin",
+  "app": "猎聘",
+  "category": "recruitment"
+ },
+ "lihkg": {
+  "id": "lihkg",
+  "app": "LIHKG 连登",
+  "category": "social"
+ },
+ "likee": {
+  "id": "likee",
+  "app": "Likee",
+  "category": "video"
+ },
+ "line": {
+  "id": "line",
+  "app": "LINE",
+  "category": "social"
+ },
+ "linkedin": {
+  "id": "linkedin",
+  "app": "LinkedIn",
+  "category": "social"
+ },
+ "litv": {
+  "id": "litv",
+  "app": "LiTV",
+  "category": "video"
+ },
+ "lizhi": {
+  "id": "lizhi",
+  "app": "荔枝",
+  "category": "music"
+ },
+ "lkcoffee": {
+  "id": "lkcoffee",
+  "app": "瑞幸咖啡",
+  "category": "shopping"
+ },
+ "mafengwo": {
+  "id": "mafengwo",
+  "app": "马蜂窝",
+  "category": "travel"
+ },
+ "manus": {
+  "id": "manus",
+  "app": "Manus",
+  "category": "ai"
+ },
+ "mcdonalds": {
+  "id": "mcdonalds",
+  "app": "麦当劳",
+  "category": "shopping"
+ },
+ "mega": {
+  "id": "mega",
+  "app": "MEGA",
+  "category": "download"
+ },
+ "meitu": {
+  "id": "meitu",
+  "app": "美图秀秀",
+  "category": "photo"
+ },
+ "meituan": {
+  "id": "meituan",
+  "app": "美团",
+  "category": "shopping",
+  "skip_include": [
+   "ddmaicai"
+  ]
+ },
+ "messenger": {
+  "id": "messenger",
+  "app": "Messenger",
+  "category": "social"
+ },
+ "mihoyo": {
+  "id": "mihoyo",
+  "app": "米哈游",
+  "category": "game"
+ },
+ "mihoyo-cn": {
+  "id": "mihoyo",
+  "app": "米哈游",
+  "category": "game"
+ },
+ "miniso": {
+  "id": "miniso",
+  "app": "名创优品",
+  "category": "shopping"
+ },
+ "misskey": {
+  "id": "misskey",
+  "app": "Misskey",
+  "category": "social"
+ },
+ "modrinth": {
+  "id": "modrinth",
+  "app": "Modrinth",
+  "category": "game"
+ },
+ "mogujie": {
+  "id": "mogujie",
+  "app": "蘑菇街",
+  "category": "shopping"
+ },
+ "mojang": {
+  "id": "minecraft",
+  "app": "Minecraft",
+  "category": "game"
+ },
+ "moji": {
+  "id": "moji",
+  "app": "墨迹天气",
+  "category": "weather"
+ },
+ "mubi": {
+  "id": "mubi",
+  "app": "MUBI",
+  "category": "video"
+ },
+ "muji": {
+  "id": "muji",
+  "app": "无印良品",
+  "category": "shopping"
+ },
+ "musixmatch": {
+  "id": "musixmatch",
+  "app": "Musixmatch",
+  "category": "music"
+ },
+ "mytvsuper": {
+  "id": "mytvsuper",
+  "app": "myTV SUPER",
+  "category": "video"
+ },
+ "netlify": {
+  "id": "netlify",
+  "app": "Netlify",
+  "category": "cloud"
+ },
+ "nexon": {
+  "id": "nexon",
+  "app": "Nexon",
+  "category": "game"
+ },
+ "nexusmods": {
+  "id": "nexusmods",
+  "app": "Nexus Mods",
+  "category": "game"
+ },
+ "nga": {
+  "id": "nga",
+  "app": "NGA 玩家社区",
+  "category": "social"
+ },
+ "nhk": {
+  "id": "nhk",
+  "app": "NHK",
+  "category": "news"
+ },
+ "niconico": {
+  "id": "niconico",
+  "app": "niconico",
+  "category": "video"
+ },
+ "nike": {
+  "id": "nike",
+  "app": "Nike",
+  "category": "shopping"
+ },
+ "nikke": {
+  "id": "nikke",
+  "app": "胜利女神:NIKKE",
+  "category": "game"
+ },
+ "nintendo": {
+  "id": "nintendo",
+  "app": "任天堂",
+  "category": "game"
+ },
+ "notion": {
+  "id": "notion",
+  "app": "Notion",
+  "category": "office"
+ },
+ "npmjs": {
+  "id": "npmjs",
+  "app": "npm",
+  "category": "dev"
+ },
+ "nytimes": {
+  "id": "nytimes",
+  "app": "纽约时报",
+  "category": "news"
+ },
+ "okjike": {
+  "id": "okjike",
+  "app": "即刻",
+  "category": "social"
+ },
+ "onedrive": {
+  "id": "onedrive",
+  "app": "OneDrive",
+  "category": "download"
+ },
+ "openai": {
+  "id": "openai",
+  "app": "ChatGPT",
+  "category": "ai"
+ },
+ "openrec": {
+  "id": "openrec",
+  "app": "OPENREC",
+  "category": "video"
+ },
+ "organicmaps": {
+  "id": "organicmaps",
+  "app": "Organic Maps",
+  "category": "navigation"
+ },
+ "origin": {
+  "id": "ea",
+  "app": "EA",
+  "category": "game"
+ },
+ "oschina": {
+  "id": "oschina",
+  "app": "开源中国",
+  "category": "dev"
+ },
+ "osu": {
+  "id": "osu",
+  "app": "osu!",
+  "category": "game"
+ },
+ "ozon": {
+  "id": "ozon",
+  "app": "Ozon",
+  "category": "shopping"
+ },
+ "perplexity": {
+  "id": "perplexity",
+  "app": "Perplexity",
+  "category": "ai"
+ },
+ "pikpak": {
+  "id": "pikpak",
+  "app": "PikPak",
+  "category": "download"
+ },
+ "pinduoduo": {
+  "id": "pinduoduo",
+  "app": "拼多多",
+  "category": "shopping"
+ },
+ "pinterest": {
+  "id": "pinterest",
+  "app": "Pinterest",
+  "category": "social"
+ },
+ "pixiv": {
+  "id": "pixiv",
+  "app": "pixiv",
+  "category": "photo"
+ },
+ "playstation": {
+  "id": "playstation",
+  "app": "PlayStation",
+  "category": "game"
+ },
+ "plutotv": {
+  "id": "plutotv",
+  "app": "Pluto TV",
+  "category": "video"
+ },
+ "pocketcasts": {
+  "id": "pocketcasts",
+  "app": "Pocket Casts",
+  "category": "music"
+ },
+ "poe": {
+  "id": "poe",
+  "app": "Poe",
+  "category": "ai"
+ },
+ "pptv": {
+  "id": "pptv",
+  "app": "PP 视频",
+  "category": "video"
+ },
+ "primevideo": {
+  "id": "prime_video",
+  "app": "Prime Video",
+  "category": "video"
+ },
+ "projectsekai": {
+  "id": "projectsekai",
+  "app": "世界计划",
+  "category": "game"
+ },
+ "ptt": {
+  "id": "ptt",
+  "app": "PTT",
+  "category": "social"
+ },
+ "pubg": {
+  "id": "pubg_global",
+  "app": "PUBG",
+  "category": "game"
+ },
+ "qimao": {
+  "id": "qimao",
+  "app": "七猫免费小说",
+  "category": "reading"
+ },
+ "qingtingfm": {
+  "id": "qingtingfm",
+  "app": "蜻蜓 FM",
+  "category": "music"
+ },
+ "quora": {
+  "id": "quora",
+  "app": "Quora",
+  "category": "social"
+ },
+ "qweather": {
+  "id": "qweather",
+  "app": "和风天气",
+  "category": "weather"
+ },
+ "reddit": {
+  "id": "reddit",
+  "app": "Reddit",
+  "category": "social"
+ },
+ "reuters": {
+  "id": "reuters",
+  "app": "路透社",
+  "category": "news"
+ },
+ "riot": {
+  "id": "riot",
+  "app": "Riot Games",
+  "category": "game"
+ },
+ "roblox": {
+  "id": "roblox",
+  "app": "Roblox",
+  "category": "game"
+ },
+ "rockstar": {
+  "id": "rockstar",
+  "app": "Rockstar Games",
+  "category": "game"
+ },
+ "rumble": {
+  "id": "rumble",
+  "app": "Rumble",
+  "category": "video"
+ },
+ "scmp": {
+  "id": "scmp",
+  "app": "南华早报",
+  "category": "news"
+ },
+ "seasun": {
+  "id": "seasun",
+  "app": "西山居",
+  "category": "game"
+ },
+ "segmentfault": {
+  "id": "segmentfault",
+  "app": "思否",
+  "category": "dev"
+ },
+ "sf-express": {
+  "id": "sf_express",
+  "app": "顺丰速运",
+  "category": "life_service"
+ },
+ "shopee": {
+  "id": "shopee",
+  "app": "Shopee",
+  "category": "shopping"
+ },
+ "shuqi": {
+  "id": "shuqi",
+  "app": "书旗小说",
+  "category": "reading"
+ },
+ "signal": {
+  "id": "signal",
+  "app": "Signal",
+  "category": "social"
+ },
+ "slack": {
+  "id": "slack",
+  "app": "Slack",
+  "category": "office"
+ },
+ "smzdm": {
+  "id": "smzdm",
+  "app": "什么值得买",
+  "category": "shopping"
+ },
+ "snap": {
+  "id": "snapchat",
+  "app": "Snapchat",
+  "category": "social"
+ },
+ "soundcloud": {
+  "id": "soundcloud",
+  "app": "SoundCloud",
+  "category": "music"
+ },
+ "spotify": {
+  "id": "spotify",
+  "app": "Spotify",
+  "category": "music"
+ },
+ "stackexchange": {
+  "id": "stackexchange",
+  "app": "Stack Overflow",
+  "category": "dev"
+ },
+ "starbucks": {
+  "id": "starbucks",
+  "app": "星巴克",
+  "category": "shopping"
+ },
+ "steam": {
+  "id": "steam",
+  "app": "Steam",
+  "category": "game"
+ },
+ "sto-express": {
+  "id": "sto_express",
+  "app": "申通快递",
+  "category": "life_service"
+ },
+ "suning": {
+  "id": "suning",
+  "app": "苏宁易购",
+  "category": "shopping"
+ },
+ "supercell": {
+  "id": "supercell",
+  "app": "Supercell",
+  "category": "game"
+ },
+ "taptap": {
+  "id": "taptap",
+  "app": "TapTap",
+  "category": "game"
+ },
+ "target": {
+  "id": "target",
+  "app": "Target",
+  "category": "shopping"
+ },
+ "teambition": {
+  "id": "teambition",
+  "app": "Teambition",
+  "category": "office"
+ },
+ "teamviewer": {
+  "id": "teamviewer",
+  "app": "TeamViewer",
+  "category": "office"
+ },
+ "telegram": {
+  "id": "telegram",
+  "app": "Telegram",
+  "category": "social"
+ },
+ "terabox": {
+  "id": "terabox",
+  "app": "TeraBox",
+  "category": "download"
+ },
+ "theguardian": {
+  "id": "theguardian",
+  "app": "卫报",
+  "category": "news"
+ },
+ "threads": {
+  "id": "threads",
+  "app": "Threads",
+  "category": "social"
+ },
+ "tidal": {
+  "id": "tidal",
+  "app": "TIDAL",
+  "category": "music"
+ },
+ "tiktok": {
+  "id": "tiktok",
+  "app": "TikTok",
+  "category": "video"
+ },
+ "tmtpost": {
+  "id": "tmtpost",
+  "app": "钛媒体",
+  "category": "news"
+ },
+ "tongcheng": {
+  "id": "tongcheng",
+  "app": "同程旅行",
+  "category": "travel"
+ },
+ "trae": {
+  "id": "trae",
+  "app": "Trae",
+  "category": "dev"
+ },
+ "trello": {
+  "id": "trello",
+  "app": "Trello",
+  "category": "office"
+ },
+ "tubi": {
+  "id": "tubi",
+  "app": "Tubi",
+  "category": "video"
+ },
+ "tumblr": {
+  "id": "tumblr",
+  "app": "Tumblr",
+  "category": "social"
+ },
+ "twitter": {
+  "id": "twitter",
+  "app": "Twitter/X",
+  "category": "social"
+ },
+ "uber": {
+  "id": "uber",
+  "app": "Uber",
+  "category": "travel"
+ },
+ "ubisoft": {
+  "id": "ubisoft",
+  "app": "育碧",
+  "category": "game"
+ },
+ "vercel": {
+  "id": "vercel",
+  "app": "Vercel",
+  "category": "cloud"
+ },
+ "viber": {
+  "id": "viber",
+  "app": "Viber",
+  "category": "social"
+ },
+ "vimeo": {
+  "id": "vimeo",
+  "app": "Vimeo",
+  "category": "video"
+ },
+ "viu": {
+  "id": "viu",
+  "app": "Viu",
+  "category": "video"
+ },
+ "vk": {
+  "id": "vk",
+  "app": "VK",
+  "category": "social"
+ },
+ "volcengine": {
+  "id": "volcengine",
+  "app": "火山引擎",
+  "category": "cloud"
+ },
+ "vultr": {
+  "id": "vultr",
+  "app": "Vultr",
+  "category": "cloud"
+ },
+ "walmart": {
+  "id": "walmart",
+  "app": "Walmart",
+  "category": "shopping"
+ },
+ "wargaming": {
+  "id": "wargaming",
+  "app": "Wargaming",
+  "category": "game"
+ },
+ "wasu": {
+  "id": "wasu",
+  "app": "华数 TV",
+  "category": "video"
+ },
+ "weathercn": {
+  "id": "weathercn",
+  "app": "中国天气",
+  "category": "weather"
+ },
+ "webex": {
+  "id": "webex",
+  "app": "Webex",
+  "category": "office"
+ },
+ "webnovel": {
+  "id": "webnovel",
+  "app": "Webnovel",
+  "category": "reading"
+ },
+ "wenshushu": {
+  "id": "wenshushu",
+  "app": "文叔叔",
+  "category": "download"
+ },
+ "whatsapp": {
+  "id": "whatsapp",
+  "app": "WhatsApp",
+  "category": "social"
+ },
+ "wildberries": {
+  "id": "wildberries",
+  "app": "Wildberries",
+  "category": "shopping"
+ },
+ "windsurf": {
+  "id": "windsurf",
+  "app": "Windsurf",
+  "category": "dev"
+ },
+ "windy": {
+  "id": "windy",
+  "app": "Windy",
+  "category": "weather"
+ },
+ "wish": {
+  "id": "wish",
+  "app": "Wish",
+  "category": "shopping"
+ },
+ "wjx": {
+  "id": "wjx",
+  "app": "问卷星",
+  "category": "office"
+ },
+ "wolai": {
+  "id": "wolai",
+  "app": "我来 wolai",
+  "category": "office"
+ },
+ "wps": {
+  "id": "wps",
+  "app": "WPS Office",
+  "category": "office"
+ },
+ "wsj": {
+  "id": "wsj",
+  "app": "华尔街日报",
+  "category": "news"
+ },
+ "x": {
+  "id": "twitter",
+  "app": "Twitter/X",
+  "category": "social"
+ },
+ "xai": {
+  "id": "xai",
+  "app": "Grok / xAI",
+  "category": "ai"
+ },
+ "xbox": {
+  "id": "xbox",
+  "app": "Xbox",
+  "category": "game",
+  "skip_include": [
+   "asobo",
+   "bethesda",
+   "forza"
+  ]
+ },
+ "xiaoheihe": {
+  "id": "xiaoheihe",
+  "app": "小黑盒",
+  "category": "social"
+ },
+ "xiaohongshu": {
+  "id": "xiaohongshu",
+  "app": "小红书",
+  "category": "social",
+  "skip_include": [
+   "askdiandian"
+  ]
+ },
+ "xiaoyuzhou": {
+  "id": "xiaoyuzhou",
+  "app": "小宇宙",
+  "category": "music"
+ },
+ "ximalaya": {
+  "id": "ximalaya",
+  "app": "喜马拉雅",
+  "category": "music"
+ },
+ "xueqiu": {
+  "id": "xueqiu",
+  "app": "雪球",
+  "category": "social"
+ },
+ "xunlei": {
+  "id": "xunlei",
+  "app": "迅雷",
+  "category": "download"
+ },
+ "yostar": {
+  "id": "yostar",
+  "app": "悠星",
+  "category": "game"
+ },
+ "youku": {
+  "id": "youku",
+  "app": "优酷",
+  "category": "video"
+ },
+ "youzan": {
+  "id": "youzan",
+  "app": "有赞",
+  "category": "shopping"
+ },
+ "yto-express": {
+  "id": "yto_express",
+  "app": "圆通速递",
+  "category": "life_service"
+ },
+ "yundaex": {
+  "id": "yunda_express",
+  "app": "韵达快递",
+  "category": "life_service"
+ },
+ "zaobao": {
+  "id": "zaobao",
+  "app": "联合早报",
+  "category": "news"
+ },
+ "zhihu": {
+  "id": "zhihu",
+  "app": "知乎",
+  "category": "social"
+ },
+ "ziroom": {
+  "id": "ziroom",
+  "app": "自如",
+  "category": "life_service"
+ },
+ "zoom": {
+  "id": "zoom",
+  "app": "Zoom",
+  "category": "office"
+ },
+ "zto-express": {
+  "id": "zto_express",
+  "app": "中通快递",
+  "category": "life_service"
+ }
+}

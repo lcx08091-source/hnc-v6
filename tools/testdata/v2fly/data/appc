@@ -1,0 +1,3 @@
+# 只要 appa-cdn 里带 @cn 的
+include:appa-cdn @cn
+appc.com

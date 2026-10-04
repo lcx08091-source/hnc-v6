@@ -65,6 +65,20 @@ CURATED = {
     "com.tencent.tmgp.sgame": "tencent_wzry_exclusive", # 王者荣耀
     "com.tencent.tmgp.pubgmhd": "tencent_pubgmhd_exclusive",  # 和平精英
     "com.tencent.qqlite": "qq_im",                      # QQ 轻聊版
+    # v5.27 T5: 规则库扩充后有了对应 id、但中文名对不上的官方 App(只放有把握的)。
+    "com.anthropic.claude": "anthropic",                # Claude 官方 App
+    "com.openai.chatgpt": "openai",                     # ChatGPT 官方 App
+    "com.google.android.apps.bard": "gemini",           # Gemini(原 Bard)官方 App
+    "com.twitter.android": "twitter",                   # X (Twitter) 官方 App
+    "jp.pxv.android": "pixiv",                          # pixiv 官方 App
+    "com.larksuite.suite": "feishu",                    # Lark = 飞书国际版
+    "org.thunderdog.challegram": "telegram",            # Telegram X(Telegram 官方第二客户端)
+    "com.sdu.didi.psnger": "didi",                      # 滴滴出行
+    "com.didi.taxi": "didi",                            # 滴滴打车(滴滴出行旧包名)
+    "com.bilibili.app.in": "bilibili",                  # 哔哩哔哩国际版
+    "com.bilibili.app.blue": "bilibili",                # 哔哩哔哩概念版
+    "com.miHoYo.cloudgames.genshin": "mihoyo",          # 云·原神
+    "com.miHoYo.cloudgames.hkrpg": "mihoyo",            # 云·星穹铁道
 }
 
 # 规范化时要剥掉的版本 / 地区后缀(先长后短, 避免「极速版」被「速版」截断)。
@@ -103,6 +117,10 @@ def load_rules():
         for r in d.get("rules", []):
             rid, app = r.get("id", ""), r.get("app", "")
             if not rid:
+                continue
+            if r.get("_parent_rule_id"):
+                # v5.27: 挂靠的子规则(<id>_v2fly / 自动扩展 / 导入)不是独立应用,
+                # dpid 分类结果是父 id; 不能拿它当真值
                 continue
             all_ids.add(rid)
             if app:
