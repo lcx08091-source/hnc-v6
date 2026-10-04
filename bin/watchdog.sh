@@ -137,21 +137,35 @@ watchdog_mark_uplink_unsupported_once() {
 
 # hotfix17.3: rerun capability probe once hotspot iface is ACTIVE.
 # Early service probe can run before hotspot exists and write unknown/false values.
-CAP_PROBE_MIN_INTERVAL=30
+# v5.27: Go 看门狗每轮(热点开着 60 秒)都调 action capability_probe, 旧的 30 秒节流等于
+# 每分钟跑一次完整探测(建临时网卡 / ifb、逐个加 qdisc、qdisc_caps.sh、重写
+# capabilities.json)—— 真机热点空转 1 小时 watchdog 约 530 CPU 秒。能力开机后不会变:
+# 本次开机测过且同一网卡 6 小时内不重测; 网卡变了(热点重建成别的口)或刚开机立即重测。
+# 标记文件格式 "<秒> <网卡>"; 旧格式只有秒数时视为同一网卡(兼容)。
+CAP_PROBE_MIN_INTERVAL=21600
 run_capability_probe_active() {
-    local iface="$1" now last
+    local iface="$1" now last last_if
     [ -n "$iface" ] || return 0
     [ -x "$HNC_DIR/bin/capability_probe.sh" ] || return 0
     ip link show "$iface" >/dev/null 2>&1 || return 0
 
     now=$(date +%s 2>/dev/null || echo 0)
-    last=$(cat "$RUN/capability_probe_last" 2>/dev/null || echo 0)
-    if [ $((now - last)) -lt "$CAP_PROBE_MIN_INTERVAL" ] 2>/dev/null; then
+    read -r last last_if < "$RUN/capability_probe_last" 2>/dev/null
+    case "$last" in ''|*[!0-9]*) last=0 ;; esac
+    [ -n "$last_if" ] || last_if="$iface"
+    # 本次开机还没测过(标记早于开机时刻)→ 必须测: run/ 跨重启保留, 开机早期那次探测
+    # 可能在热点出现前做的(hotfix17.3 的原因)。
+    local up boot_at
+    up=$(cut -d. -f1 /proc/uptime 2>/dev/null)
+    case "$up" in ''|*[!0-9]*) boot_at=0 ;; *) boot_at=$((now - up)) ;; esac
+    if [ "$last_if" = "$iface" ] && [ "$last" -ge "$boot_at" ] 2>/dev/null \
+       && [ "$now" -ge "$last" ] 2>/dev/null \
+       && [ $((now - last)) -lt "$CAP_PROBE_MIN_INTERVAL" ] 2>/dev/null; then
         return 0
     fi
 
     echo "$iface" > "$RUN/iface.cache" 2>/dev/null || true
-    echo "$now" > "$RUN/capability_probe_last" 2>/dev/null || true
+    echo "$now $iface" > "$RUN/capability_probe_last" 2>/dev/null || true
     log "hotfix17.3: running capability_probe for active iface=$iface"
     HNC="$HNC_DIR" sh "$HNC_DIR/bin/capability_probe.sh" >> "$HNC_DIR/logs/capabilities.log" 2>&1 || \
         log "hotfix17.3: capability_probe failed for iface=$iface"
