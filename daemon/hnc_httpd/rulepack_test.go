@@ -513,3 +513,32 @@ func TestRulepackAPIAndExportAction(t *testing.T) {
 		t.Fatalf("clear: %+v", r)
 	}
 }
+
+// 接近 1.2 MB、含大量需要转义字符的规则包, 以 JSON 字符串形式 POST 也能通过请求体上限
+func TestRulepackPostEscapedNearLimit(t *testing.T) {
+	dir := t.TempDir()
+	rpFactory(t, dir)
+	p := rpBase()
+	// 应用名全是引号: 规则包里每个 " 转成 \", 再作为 JSON 字符串 POST 时又各翻一倍
+	name := strings.Repeat(`"`, 60)
+	for i := 0; i < 4000; i++ {
+		p.DomainRules = append(p.DomainRules, rulepackDomain{ID: "app" + strconv.Itoa(i), App: name,
+			Category: "video", Suffixes: []string{"h" + strconv.Itoa(i) + ".escaped.example"}})
+	}
+	pk := rpPackJSON(t, p)
+	if len(pk) > rulepackMaxBody {
+		t.Fatalf("fixture too big: %d", len(pk))
+	}
+	body, _ := json.Marshal(map[string]string{"pack": string(pk)})
+	if len(body) <= rulepackMaxBody+64*1024 {
+		t.Fatalf("fixture should exceed the old limit: %d", len(body))
+	}
+	req := httptest.NewRequest("POST", "/api/dpi_rulepack", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-HNC-CSRF", "1")
+	rec := httptest.NewRecorder()
+	newServer(dir).apiDPIRulepack(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("near-limit escaped pack: %d %.200s", rec.Code, rec.Body.String())
+	}
+}

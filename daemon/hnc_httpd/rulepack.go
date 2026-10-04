@@ -1106,5 +1106,9 @@ func (s *server) apiDPIRulepack(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, http.StatusOK, rep)
-	}, rulepackMaxBody+64*1024)(w, r)
+	}, rulepackMaxRequest)(w, r)
 }
+
+// rulepackMaxRequest 请求体上限: pack 作为 JSON 字符串传时引号 / 反斜杠 / 非 ASCII 都会被转义
+// (最坏 \uXXXX 六倍), 按 6 倍 + 余量放行, 解出来的规则包本身仍按 1.2 MB 校验。
+const rulepackMaxRequest = 6*rulepackMaxBody + 64*1024
