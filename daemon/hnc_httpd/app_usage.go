@@ -110,7 +110,12 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 	names := s.loadIPNames()
 	apps := s.loadIPApps()
 	fpSt := fpFor(s.hncDir)
-	fpSt.tick(now, names) // v6.x DPI v2: 用户纠正规则 + 摄入 dpi_flows.json(指纹学习), 在 appUsage.mu 外做 I/O
+	fresh := fpSt.tick(now, names) // v6.x DPI v2: 用户纠正规则 + 摄入 dpi_flows.json(指纹学习), 在 appUsage.mu 外做 I/O
+	// v5.27 T3 启动指纹(影子运行, 只产出启动事件): 新的 ClientHello 交给识别; 学习最多 30 分钟一次,
+	// 只在本机抓包开着时做。都在 appUsage.mu / fpSt.mu 之外。
+	sfp := startupFor(s.hncDir)
+	sfp.observe(fresh, now)
+	sfp.maybeLearn(now)
 
 	appUsage.mu.Lock()
 	defer appUsage.mu.Unlock()

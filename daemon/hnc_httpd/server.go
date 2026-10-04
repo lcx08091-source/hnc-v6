@@ -150,6 +150,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/dpi_unknown", s.apiDPIUnknown)  // v6.x: 未识别流量 Top(教规则用)
 	mux.HandleFunc("/api/dpi_fp", s.apiDPIFP)             // v6.x DPI v2: 学到的指纹 + 用户纠正(fp_learn.go)
 	mux.HandleFunc("/api/fg_timeline", s.apiFgTimeline)  // DPI v2: 前台应用时间线 + 前台分钟数(fg_model.go)
+	mux.HandleFunc("/api/dpi_startup", s.apiDPIStartup)  // v5.27 T3: 启动指纹(影子运行, startup_fp.go)
 	// v5.21: 加密 DNS 策略 + 拦截计数(encdns.go)
 	mux.HandleFunc("/api/encdns", s.apiEncdns)
 	// DPI v2: 可选「HNC DNS 接管」状态 / 逐设备查询日志(dns_takeover.go)

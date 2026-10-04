@@ -468,7 +468,8 @@ type fpFlowFile struct {
 }
 
 // tick 每轮 app_usage 调用: 刷新用户规则、摄入新的 ClientHello、定期裁剪与落盘。
-func (st *fpStore) tick(now time.Time, names map[string]ipName) {
+// v5.27 T3: 返回本轮新摄入的记录(seq 新于上次), 由调用方在锁外交给启动指纹识别。
+func (st *fpStore) tick(now time.Time, names map[string]ipName) []fpFlowRec {
 	dpiUserRulesRefresh(st.hncDir)
 	var recs []fpFlowRec
 	var boot int64
@@ -491,9 +492,10 @@ func (st *fpStore) tick(now time.Time, names map[string]ipName) {
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	st.loadLocked()
+	var fresh []fpFlowRec
 	if changed {
 		st.flowsKey = key
-		st.ingestLocked(boot, recs, names, now)
+		fresh = st.ingestLocked(boot, recs, names, now)
 	}
 	if now.Sub(st.lastPrune) >= fpPruneEvery {
 		st.lastPrune = now
@@ -502,19 +504,24 @@ func (st *fpStore) tick(now time.Time, names map[string]ipName) {
 	if st.dirty && now.Sub(st.lastSave) >= fpSaveEvery {
 		_ = st.saveLocked(now)
 	}
+	return fresh
 }
 
-func (st *fpStore) ingestLocked(boot int64, recs []fpFlowRec, names map[string]ipName, now time.Time) {
+func (st *fpStore) ingestLocked(boot int64, recs []fpFlowRec, names map[string]ipName, now time.Time) []fpFlowRec {
 	if boot != st.boot {
 		st.boot, st.cursor = boot, 0 // dpid 重启: seq 从头来
 	}
 	ts := now.Unix()
+	var fresh []fpFlowRec
 	for i := range recs {
 		r := &recs[i]
 		if r.Seq <= st.cursor {
 			continue
 		}
 		st.cursor = r.Seq
+		if r.SNI != "" && r.MAC != "" {
+			fresh = append(fresh, *r)
+		}
 		mac := strings.ToLower(r.MAC)
 		if (mac != "" && isSimMAC(mac)) || r.JA4 == "" || r.CIP == "" || r.DIP == "" || (r.Proto != "tcp" && r.Proto != "udp") {
 			continue
@@ -557,6 +564,7 @@ func (st *fpStore) ingestLocked(boot int64, recs []fpFlowRec, names map[string]i
 		st.dirty = true
 	}
 	st.evictEntriesLocked()
+	return fresh
 }
 
 // fpLabel 一个 ClientHello 的学习标签(见文件头)

@@ -518,6 +518,13 @@ function paintEval() {
     var qw = qq.fp_with_qtp || {}, qj = qq.fp_ja4_only || {};
     h += '<div class="note">QUIC 指纹（含传输参数）覆盖 ' + pct100(qw.coverage) + '% · 准确 ' + evalAcc(qw) + '（仅 JA4：覆盖 ' + pct100(qj.coverage) + '% · 准确 ' + evalAcc(qj) + '）· ' + num(qq.samples) + ' 条 QUIC 样本</div>';
   }
+  // v5.27 T3: 启动指纹(影子运行: 只观察, 不改任何识别结果)
+  var su = r.startup;
+  if (su) {
+    h += '<div class="note" style="margin-bottom:-2px">启动指纹（实验 · 只观察，不影响识别）</div><div class="note">学会 ' + num(su.apps_learned) + ' 个应用' +
+      (num(su.days) >= 2 ? ' · 切换识别率 ' + pct100(su.switch_rate) + '% · 事件准确 ' + pct100(su.event_accuracy) + '%' + (num(su.switches) ? '（' + num(su.switch_hit) + '/' + num(su.switches) + ' 次切换）' : '') : ' · ' + esc(su.note || '')) +
+      '</div><button class="linkish" data-act="startup-list" style="justify-self:start">' + (S.startupOpen ? '收起学会的应用' : '查看学会的应用') + '</button><div id="startup-list">' + (S.startupOpen ? startupListHtml() : '') + '</div>';
+  }
   if (r.note) h += '<div class="note">' + esc(r.note) + '</div>';
   if (r.capped) h += '<div class="note warn">今天样本太多，超过单日上限后停止记录了（不影响已有统计）。</div>';
   // 最常认错 / 最常认不出
@@ -545,6 +552,27 @@ function paintEval() {
   h += '<div class="note" style="margin-bottom:-2px">前台记录（给以后的前台评估用）</div><div class="note">' + fgTxt + '</div>';
   h += evalFootHtml();
   el.innerHTML = h; placeSegs(el);
+}
+/* v5.27 T3: 学会的启动指纹列表(/api/dpi_startup) */
+S.startup = null; S.startupOpen = false;
+function startupListHtml() {
+  var r = S.startup; if (!r) return '<div class="note">加载中…</div>';
+  if (r.err) return '<div class="note err">' + esc(r.err) + '</div>';
+  var ln = (Array.isArray(r.learned) ? r.learned : []).filter(function (x) { return x.usable; });
+  if (!ln.length) return '<div class="note">还没有学会的应用：同一个应用要冷启动 3 次以上、且每次都连到 2 个以上它特有的域名才算学会。</div>';
+  return '<div class="dbox">' + ln.slice(0, 20).map(function (x) {
+    return '<div class="row2"><span class="k" style="min-width:0;overflow-wrap:anywhere">' + esc(x.name || x.app_id) + '</span><span class="v num" style="white-space:nowrap">启动 ' + num(Math.round(num(x.starts))) + ' 次 · 特征 ' + num(x.feat) + ' 个</span></div>';
+  }).join('') + '</div><div class="note">累计事件 ' + num((r.stats || {}).events_total) + ' 次（热点设备上认出的「打开了某应用」）</div>';
+}
+function toggleStartupList() {
+  S.startupOpen = !S.startupOpen;
+  var el = $('#startup-list'), b = $('[data-act="startup-list"]');
+  if (b) b.textContent = S.startupOpen ? '收起学会的应用' : '查看学会的应用';
+  if (!el) return Promise.resolve();
+  if (!S.startupOpen) { el.innerHTML = ''; return Promise.resolve(); }
+  el.innerHTML = startupListHtml();
+  return api.get('/api/dpi_startup', null, { timeout: 8000 }).then(function (r) { S.startup = r; }).catch(function (e) { S.startup = { err: errText(e) }; })
+    .then(function () { var e2 = $('#startup-list'); if (e2 && S.startupOpen) e2.innerHTML = startupListHtml(); });
 }
 function evalFootHtml() {
   return '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。</div>' +

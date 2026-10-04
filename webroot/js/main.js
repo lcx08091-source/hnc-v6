@@ -359,6 +359,7 @@ document.addEventListener('click', function (e) {
     case 'cache-clear': busyWhile(a, api.action('cache_clear')).then(function (r3) { toast('缓存已清理' + (r3.detail ? ' · ' + r3.detail : '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-enable': busyWhile(a, api.post('/api/self/toggle', { enabled: true }).then(function (r3) { if (r3 && r3.error) throw new Error(r3.error); return r3; })).then(function () { toast('本机流量归因已开启 · 5 秒后开始采集样本'); return loadEval(S.evalDays, true); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-refresh': busyWhile(a, loadEval(S.evalDays, true)); break;
+    case 'startup-list': busyWhile(a, toggleStartupList()); break;
     case 'eval-clear': confirmSheet('清除识别自评的样本？', '会删掉本机采集的标签样本、前台记录和自评结果，之后重新开始积累。不影响识别和限速。', '清除').then(function (ok) { if (ok) busyWhile(a, api.action('dpi_eval_clear')).then(function () { toast('已清除样本'); S.eval = null; return loadEval(S.evalDays, true); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'rules-json': busyWhile(a, exportRulesJson()); break;
     case 'json-health': location.href = 'json-health.html'; break;
