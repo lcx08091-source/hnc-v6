@@ -892,6 +892,7 @@ function scBody() {
   }).join('') + '</div>';
   h += '<div class="sc-exp"><span class="tx" style="flex:1;min-width:0"><div class="t" style="font-size:14px;font-weight:600">打码 MAC / IP</div><div class="note">导出给别人看时建议打开</div></span>' + toggle(SC.redact, 'id="sc-redact" data-local="sc-redact" aria-label="打码 MAC/IP"') + '</div>';
   h += '<div class="btns" style="margin-top:10px"><button class="btn sec press" data-close style="flex:1">关闭</button><button class="btn pri press" data-act="sc-export" style="flex:1.4">' + ico('down') + '导出报告</button></div>';
+  h += '<div class="btns" style="margin-top:6px"><button class="btn sec press" data-act="compat-report" style="flex:1">' + ico('down') + '导出兼容性报告(脱敏)</button></div>';
   return h;
 }
 function paintSc() {
@@ -982,3 +983,19 @@ function showChangelog() {
   }).catch(function (e) { var b = $('#cl-body'); if (b) b.innerHTML = '<div class="note err">读取 changelog.html 失败：' + esc(errText(e)) + '</div>'; });
 }
 
+
+/* v5.29 T5: 兼容性报告(白名单收集, 不含 MAC/IP/SSID/设备名等) */
+function compatExport(btn) {
+  btn.disabled = true; toast('正在生成兼容性报告…');
+  api.action('compat_report', {}, { timeout: 45000, maxTime: 43 }).then(function (r) {
+    var d = detailJSON(r), name = String(d && d.name || '');
+    if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('报告已生成'); return; }
+    if (KSU) {
+      return shell('mkdir -p /sdcard/Download && cp ' + sq(HNC_DIR + '/exports/' + name) + ' /sdcard/Download/ && echo ok')
+        .then(function () { toast('报告已存到 /sdcard/Download/' + name); });
+    }
+    downloadExport(name, '/api/exports/' + encodeURIComponent(name));
+    toast('报告已生成 · ' + name);
+  }).catch(function (e) { toast(errText(e), 'err'); })
+  .then(function () { btn.disabled = false; });
+}

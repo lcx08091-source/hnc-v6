@@ -445,5 +445,5 @@ func execCommand(name string, args ...string) (string, error) {
 // isExportArchive v5.11: /api/exports 可列出/下载的产物 —— 数据导出 .zip 与诊断包 .tar.gz。
 // v5.20: + 自检报告 hnc-selfcheck-*.txt / .json(见 selfcheck_api.go)。
 func isExportArchive(n string) bool {
-	return strings.HasSuffix(n, ".zip") || strings.HasSuffix(n, ".tar.gz") || isSelfcheckExport(n) || isRulepackExport(n) // v5.27 T6
+	return strings.HasSuffix(n, ".zip") || strings.HasSuffix(n, ".tar.gz") || isSelfcheckExport(n) || isRulepackExport(n) || isCompatExport(n) // v5.29 T5 加兼容性报告
 }

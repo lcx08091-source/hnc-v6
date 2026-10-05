@@ -150,6 +150,8 @@ func dispatchSelfcheckAction(s *server, action string, p map[string]string) (act
 		return actionSelfcheckRun(s.hncDir, p), true
 	case "selfcheck_export":
 		return actionSelfcheckExport(s.hncDir, p), true
+	case "compat_report": // v5.29 T5: 兼容性报告(脱敏, 白名单收集)
+		return actionCompatReport(s), true
 	}
 	return actionResp{}, false
 }
