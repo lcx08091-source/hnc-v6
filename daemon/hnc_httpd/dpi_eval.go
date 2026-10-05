@@ -134,6 +134,7 @@ type dpiEvalResult struct {
 	QUIC          dpiEvalQUIC              `json:"quic"`               // v5.27 T2
 	Startup       *dpiEvalStartup          `json:"startup,omitempty"`  // v5.27 T3
 	Discover      *dpiEvalDiscover         `json:"discover,omitempty"` // v5.28 B1: 新应用发现自评
+	FlowCls       *dpiEvalFlowCls          `json:"flow_cls,omitempty"`  // v5.28 B3: 流量形状猜类别
 	Note          string                   `json:"note"`
 }
 
@@ -452,6 +453,8 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	res.Startup = evalStartup(hncDir, now)
 	// v5.28 B1: 新发现应用(共现聚类)的量化准确率(影子, 只展示)
 	res.Discover = evalDiscover(samples)
+	// v5.28 B3: 流量形状猜类别(影子; 时间切分评估, 见 flow_cls.go)
+	res.FlowCls = evalFlowCls(now)
 	res.QUIC.JA4Only = qJA4.method(res.QUIC.Samples)
 	res.QUIC.WithQTP = qQTP.method(res.QUIC.Samples)
 

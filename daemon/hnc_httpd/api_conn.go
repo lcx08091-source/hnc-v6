@@ -535,6 +535,14 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 			item["traffic_type"] = tt
 			item["traffic_conf"] = conf
 		}
+                // v5.28 B3: 流量形状猜类别(影子, flow_cls.go): 只给规则库/指纹没认出
+                // 应用的行加 cls_category / cls_conf, 不改归属与显示名。
+                if _, hasApp := item["app"]; !hasApp {
+                        if cat, conf, ok := flowClsPredict(k); ok {
+                                item["cls_category"] = cat
+                                item["cls_conf"] = round2(conf)
+                        }
+                }
 		if svc := wellKnownSvc(e.Proto, e.Dport); svc != "" {
 			item["svc"] = svc
 			if label == "" {

@@ -536,6 +536,11 @@ function paintEval() {
       h += '<div class="note">参数对照：' + dvs.map(function (v) { return esc(v.label) + ' ' + pct100(v.purity) + '%/' + pct100(v.completeness) + '%（' + num(v.groups) + ' 组）'; }).join(' · ') + '</div>';
     }
   }
+  // v5.28 B3: 流量形状猜类别(影子运行, 只标注不改变归属)
+  var fc = r.flow_cls;
+  if (fc && num(fc.samples) > 0) {
+    h += '<div class="note">流量形状猜类别：模型 ' + pct100(fc.model_acc) + '% · 手工规则 ' + pct100(fc.manual_acc) + '%（' + num(fc.samples) + ' 条今日考题 · ' + num(fc.classes) + ' 类）</div>';
+  }
   if (r.note) h += '<div class="note">' + esc(r.note) + '</div>';
   if (r.capped) h += '<div class="note warn">今天样本太多，超过单日上限后停止记录了（不影响已有统计）。</div>';
   // 最常认错 / 最常认不出
