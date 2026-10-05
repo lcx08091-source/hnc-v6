@@ -313,6 +313,22 @@ else
     ok "src/hnc_httpd/ 不存在 (P0.1 唯一源码树检查)"
 fi
 
+# 10. v5.28 A4: pitfall lint(老坑规则: 时区 / toybox grep / ps 判活 / 告警
+# 写入 / json_escape Tab)。存量白名单见 bin/pitfall_lint.allow, 只拦新增。
+if [ -f "bin/pitfall_lint.sh" ]; then
+    if sh bin/pitfall_lint.sh "$ROOT" > "$ROOT/.pitfall_lint.$$" 2>&1; then
+        ok "pitfall lint: 0 新增违规"
+        rm -f "$ROOT/.pitfall_lint.$$"
+    else
+        fail "pitfall lint 发现新增违规(规则见 bin/pitfall_lint.sh 文件头):"
+        sed 's/^/        /' "$ROOT/.pitfall_lint.$$"
+        rm -f "$ROOT/.pitfall_lint.$$"
+    fi
+else
+    warn "bin/pitfall_lint.sh 不存在, 跳过 pitfall lint"
+fi
+
 say "summary: failures=$FAIL warnings=$WARN"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0
+
