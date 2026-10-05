@@ -316,14 +316,18 @@ fi
 # 10. v5.28 A4: pitfall lint(老坑规则: 时区 / toybox grep / ps 判活 / 告警
 # 写入 / json_escape Tab)。存量白名单见 bin/pitfall_lint.allow, 只拦新增。
 if [ -f "bin/pitfall_lint.sh" ]; then
-    if sh bin/pitfall_lint.sh "$ROOT" > "$ROOT/.pitfall_lint.$$" 2>&1; then
+    sh bin/pitfall_lint.sh "$ROOT" > "$ROOT/.pitfall_lint.$$" 2>&1
+    _pl_rc=$?
+    if [ "$_pl_rc" -eq 0 ]; then
         ok "pitfall lint: 0 新增违规"
-        rm -f "$ROOT/.pitfall_lint.$$"
-    else
+    elif [ "$_pl_rc" -eq 1 ]; then
         fail "pitfall lint 发现新增违规(规则见 bin/pitfall_lint.sh 文件头):"
         sed 's/^/        /' "$ROOT/.pitfall_lint.$$"
-        rm -f "$ROOT/.pitfall_lint.$$"
+    else
+        # rc=2: 环境 / 用法错误(例如 artifact 测试搭的精简仓库没有 service.sh), 不是违规
+        warn "pitfall lint 无法运行(rc=$_pl_rc): $(head -1 "$ROOT/.pitfall_lint.$$" 2>/dev/null)"
     fi
+    rm -f "$ROOT/.pitfall_lint.$$"
 else
     warn "bin/pitfall_lint.sh 不存在, 跳过 pitfall lint"
 fi
@@ -331,4 +335,3 @@ fi
 say "summary: failures=$FAIL warnings=$WARN"
 [ "$FAIL" -eq 0 ] || exit 1
 exit 0
-

@@ -252,3 +252,43 @@ func TestFcPoolConcurrent(t *testing.T) {
 		t.Fatalf("并发加入后池 = %d, want 2000(封顶)", n)
 	}
 }
+
+// v5.28 审查: 规则库认不出(cat == "")的连接正是要预测的对象, 必须进实时特征表。
+// 原实现对 cat == "" 直接跳过 → 线上 /api/connections 永远没有 cls_category。
+func TestFcLivePredictsUnknownFlow(t *testing.T) {
+	r := rand.New(rand.NewSource(7))
+	var pool []fcSample
+	for i := 0; i < 150; i++ {
+		pool = append(pool,
+			fcSample{vec: fcVecOf(fcJitter(fcVideoFeats(), r), fcSynthFlow(fcVideoFeats(), "tcp", 443)), cat: "视频", ts: 1000},
+			fcSample{vec: fcVecOf(fcJitter(fcGameFeats(), r), fcSynthFlow(fcGameFeats(), "udp", 443)), cat: "游戏", ts: 1000})
+	}
+	m := fcTrain(pool, 2000)
+	if m == nil {
+		t.Fatal("应能训练出模型")
+	}
+	oldSt := fsSt
+	fcModelMu.Lock()
+	oldModel := fcLiveModel
+	fcLiveModel = m
+	fcModelMu.Unlock()
+	defer func() {
+		fsSt = oldSt
+		fcModelMu.Lock()
+		fcLiveModel = oldModel
+		fcModelMu.Unlock()
+	}()
+
+	st := newFSState()
+	fl := &fsFlow{mac: "aa:bb:cc:dd:ee:01", dst: "1.2.3.4", proto: "tcp", dport: 443, cat: ""}
+	for i := 0; i < 6; i++ {
+		fl.samples = append(fl.samples, fsSample{dt: 10, up: 60_000, dn: 3_000_000, upP: 400, dnP: 2500, hasPkts: true})
+	}
+	st.flows["unknown-flow"] = fl
+	fsSt = st
+
+	flowClsTick(time.Now(), t.TempDir())
+	if _, _, ok := flowClsPredict("unknown-flow"); !ok {
+		t.Fatal("规则库认不出的连接应能拿到分类器预测")
+	}
+}

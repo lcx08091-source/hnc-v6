@@ -61,18 +61,24 @@ func TestActionStatsHourBuckets(t *testing.T) {
 		t.Errorf("max_ms = %v, want 20", got)
 	}
 
-	// 13:31 快照: 12 点的桶(起点 12:00)已早于 12:31 → 滚出 1h 窗口
-	s.record("probe_hotspot", 0, nil, 5, base.Add(61*time.Minute)) // 13:31 桶
+	// 13:31 快照: 窗口 12:31~13:31。12:50 那次在窗口内必须计入; 12:30 那次在
+	// 10 分钟桶的容差内(窗口 60~70 分钟)可计可不计。v5.28 审查: 原断言 = 1
+	// 把「跨整点丢数据」的 bug 当成了正确答案。
+	s.record("probe_hotspot", 0, nil, 5, base.Add(61*time.Minute)) // 13:31
 	snap = s.snapshot(base.Add(61 * time.Minute))
+	if got := snap.Actions["probe_hotspot"].Calls1H; got < 2 || got > 3 {
+		t.Errorf("跨小时后 calls_1h = %d, want 2~3(12:50 与 13:31 必计)", got)
+	}
+	snap = s.snapshot(base.Add(120 * time.Minute)) // 14:30: 12:xx 的桶全部滚出
 	if got := snap.Actions["probe_hotspot"].Calls1H; got != 1 {
-		t.Errorf("跨小时后 calls_1h = %d, want 1(旧桶滚出)", got)
+		t.Errorf("14:30 calls_1h = %d, want 1(只剩 13:31)", got)
 	}
 
 	// 25 小时前再记一桶(桶键极老), 再快照应只剩近 24h 的桶(内部淘汰)。
 	old := base.Add(-25 * time.Hour)
 	s.record("probe_hotspot", 0, nil, 1, old)
-	if n := len(s.m["probe_hotspot"].buckets); n > 24 {
-		t.Errorf("桶数 = %d, 应 ≤ 24(懒淘汰)", n)
+	if n := len(s.m["probe_hotspot"].buckets); n > 24*3600/actionBucketSec {
+		t.Errorf("桶数 = %d, 应 ≤ 24 小时的桶数(懒淘汰)", n)
 	}
 }
 
@@ -165,5 +171,23 @@ func TestBudgetFlushInTick(t *testing.T) {
 	// 60 分钟 / 60s 节奏 → 每轮都到 60s 间隔, 60 次落盘
 	if flushed != 60 {
 		t.Errorf("flush 次数 = %d, want 60(每分钟一次)", flushed)
+	}
+}
+
+// v5.28 审查: 「最近 1 小时」跨整点时不能把上一个整点之后的调用丢掉。
+// 旧实现(整点桶 + 只收起点在窗口内的桶)在 11:05 只统计到 11:00 以后的 5 分钟。
+func TestActionStatsWindowAcrossHour(t *testing.T) {
+	s := &actionStats{m: make(map[string]*actionCounter)}
+	base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
+	for m := 6; m < 66; m++ { // 10:06 ~ 11:05 每分钟一次, 共 60 次
+		s.record("probe_hotspot", 0, nil, 10, base.Add(time.Duration(m)*time.Minute))
+	}
+	s.record("tc_uplink_healthy", 127, nil, 5, base.Add(20*time.Minute)) // 10:20 出过 127
+	got := s.snapshot(base.Add(65 * time.Minute))                        // 11:05 查看
+	if n := got.Actions["probe_hotspot"].Calls1H; n < 59 {
+		t.Fatalf("calls_1h = %d, want ≈60(跨整点不应丢掉 10:xx 的调用)", n)
+	}
+	if got.Actions["tc_uplink_healthy"].Fails1H != 1 {
+		t.Fatalf("45 分钟前的 127 应计入 fails_1h")
 	}
 }

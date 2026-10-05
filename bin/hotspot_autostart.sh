@@ -64,7 +64,7 @@ get_rule_num() {
 }
 # 布尔字段
 get_rule_bool() {
-    grep -o "\"$1\"[[:space:]]*:[[:space:]]*\(true\|false\)" "$RULES" 2>/dev/null \
+    grep -oE "\"$1\"[[:space:]]*:[[:space:]]*(true|false)" "$RULES" 2>/dev/null \
         | head -1 | sed 's/.*:[[:space:]]*//'
 }
 
@@ -258,12 +258,12 @@ start|start-now)
         # 旧固定顺序(hnc_compat.sh 缺失时)
         for SEC in wpa2 wpa3 wpa3_transition open; do
             RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" -b any 2>&1)
-            echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC -b any)"; break; }
+            echo "$RESULT" | grep -qiE "started|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC -b any)"; break; }
         done
         if [ "$STARTED" = "0" ]; then
             for SEC in wpa2 wpa3 open; do
                 RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" 2>&1)
-                echo "$RESULT" | grep -qi "started\|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC no-b)"; break; }
+                echo "$RESULT" | grep -qiE "started|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC no-b)"; break; }
             done
         fi
         if [ "$STARTED" = "0" ]; then
@@ -307,7 +307,7 @@ status)
     [ "$ison" = "0" ] && for iface in ap0 wlan1 wlan2 wlan3 swlan0; do
         ip addr show "$iface" 2>/dev/null | grep -q 'inet ' && ison=1 && break
     done
-    [ "$ison" = "0" ] && cmd wifi status 2>/dev/null | grep -qi "ap started\|hotspot" && ison=1
+    [ "$ison" = "0" ] && cmd wifi status 2>/dev/null | grep -qiE "ap started|hotspot" && ison=1
     echo $ison
     ;;
 

@@ -189,7 +189,7 @@ read_json_string_key() {
 read_json_bool_key() {
     local key="$1" file="$2"
     [ -f "$file" ] || return 1
-    sed -n 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*\(true\|false\).*/\1/p' "$file" | head -1
+    sed -nE 's/.*"'"$key"'"[[:space:]]*:[[:space:]]*(true|false).*/\1/p' "$file" | head -1
 }
 
 get_iface() {

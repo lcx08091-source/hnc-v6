@@ -134,7 +134,7 @@ type dpiEvalResult struct {
 	QUIC          dpiEvalQUIC              `json:"quic"`               // v5.27 T2
 	Startup       *dpiEvalStartup          `json:"startup,omitempty"`  // v5.27 T3
 	Discover      *dpiEvalDiscover         `json:"discover,omitempty"` // v5.28 B1: 新应用发现自评
-	FlowCls       *dpiEvalFlowCls          `json:"flow_cls,omitempty"`  // v5.28 B3: 流量形状猜类别
+	FlowCls       *dpiEvalFlowCls          `json:"flow_cls,omitempty"` // v5.28 B3: 流量形状猜类别
 	Note          string                   `json:"note"`
 }
 

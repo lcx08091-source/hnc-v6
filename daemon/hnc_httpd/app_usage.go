@@ -161,7 +161,7 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 	// v6.x DPI v2: 指纹/用户纠正归属(fp_learn.go)
 	ix.fp = fpSt
 	flowShapeTick(sn.at, sn, events, owner, apps, names) // DPI v2: 流形态分类(flow_shape.go)
-	flowClsTick(sn.at, s.hncDir) // v5.28 B3: 流量形状分类器收割/重训(flow_cls.go, 影子)
+	flowClsTick(sn.at, s.hncDir)                         // v5.28 B3: 流量形状分类器收割/重训(flow_cls.go, 影子)
 	added := appUsageRecordIdent(appUsage.day, deltas, owner, apps, names, now, appTimeTickSec(now), ix)
 	if len(deltas) > 0 {
 		appUsage.dirty = true

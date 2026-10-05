@@ -348,12 +348,12 @@ func flowClsTick(now time.Time, hncDir string) {
 	fcPoolMu.Lock()
 	var added []fcSample
 	for k, fl := range fsSt.flows {
-		if fl.cat == "" {
-			continue
-		}
+		// v5.28 审查: 原来这里对 cat == "" 直接 continue —— 而 cat 为空正是「规则库
+		// 认不出」的连接, 也就是分类器要预测的对象, 线上于是永远没有预测。
+		// 没有类别只是不能当训练样本, 照样进实时特征表。
 		f := fsFeaturesOf(fl.samples)
 		if fl.ended {
-			if !fl.fcDone && f.n >= fcMinFeats {
+			if fl.cat != "" && !fl.fcDone && f.n >= fcMinFeats {
 				if cat, ok := bigCatOfCategory(fl.cat); ok {
 					added = append(added, fcSample{
 						vec: fcVecOf(f, fl), cat: cat,

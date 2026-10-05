@@ -3,12 +3,9 @@
 # 清掉一条 = 修掉一个老坑。
 src/dpid/cmd/dpid/main.go:P1:存量: dpid 启动路径按 UTC 可接受(输出文件名/日志不依赖本地时区), 修它要动启动时序, 白名单放行
 src/dpid/cmd/dpid_supervisor/main.go:P1:存量: dpid 启动路径按 UTC 可接受(输出文件名/日志不依赖本地时区), 修它要动启动时序, 白名单放行
-bin/ci_preflight.sh:P2:存量: 该文件的 grep \| 一直在真机跑且命中集已知, 改动需逐条回归, 先白名单
-bin/debug_bundle.sh:P2:存量: 该文件的 grep \| 一直在真机跑且命中集已知, 改动需逐条回归, 先白名单
-bin/device_detect.sh:P2:存量: 该文件的 grep \| 一直在真机跑且命中集已知, 改动需逐条回归, 先白名单
-bin/hnc_dpid_guard.sh:P2:存量: 该文件的 grep \| 一直在真机跑且命中集已知, 改动需逐条回归, 先白名单
-bin/hotspot_autostart.sh:P2:存量: 该文件的 grep \| 一直在真机跑且命中集已知, 改动需逐条回归, 先白名单
-bin/inject_version_to_docs.sh:P2:存量: 该文件的 grep \| 一直在真机跑且命中集已知, 改动需逐条回归, 先白名单
+bin/ci_preflight.sh:P2:只在 CI / 开发机(GNU grep)上跑, 不上手机
+bin/device_detect.sh:P2:误报: 是 case 模式里的字面 | (*\|*), 不是 grep 正则
+bin/inject_version_to_docs.sh:P2:只在 CI / 开发机(GNU grep)上跑, 不上手机
 bin/dpi_rebind.sh:P3:存量: 真机已验证的兜底路径(A3 已把哨兵判活改 /proc, 这里只是历史遗留)
 service.sh:P3:存量: 真机已验证的兜底路径(A3 已把哨兵判活改 /proc, 这里只是历史遗留)
 bin/capability_probe.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测可用; awk gsub 形式不受影响

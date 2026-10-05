@@ -60,8 +60,14 @@ func actionFailed(name string, rc int, err error) bool {
 	return !actionNormalRC[name][rc]
 }
 
-// hourKey at 所属小时的 Unix 秒(整点)。
-func hourKey(at time.Time) int64 { return at.Unix() / 3600 * 3600 }
+// actionBucketSec 记账桶宽。v5.28 审查: 原为整点小时桶, 而「最近 1 小时」只收起点在
+// 窗口内的桶 —— 11:05 时 10:00 桶整个被丢, calls_1h 只剩 5 分钟的数据(自检
+// 「调用偏多」「1 小时内出现 127」都会严重少算)。改为 10 分钟桶, 与窗口有重叠
+// 就计入: 统计窗口为 60~70 分钟, 误差 ≤ 1/6。
+const actionBucketSec = 600
+
+// hourKey at 所属记账桶的起点(Unix 秒, 10 分钟对齐; 名字沿用)。
+func hourKey(at time.Time) int64 { return at.Unix() / actionBucketSec * actionBucketSec }
 
 type actionHour struct {
 	calls   uint64
@@ -159,9 +165,9 @@ func (s *actionStats) snapshot(now time.Time) wdActionOut {
 		if c.hasFail {
 			it.LastFailAt = c.lastFail.Unix()
 		}
-		cutoff := now.Add(-time.Hour)
+		cutoff := now.Add(-time.Hour).Unix()
 		for k, h := range c.buckets {
-			if time.Unix(k, 0).Before(cutoff) {
+			if k+actionBucketSec <= cutoff { // 桶整个在窗口之前
 				continue
 			}
 			it.Calls1H += h.calls

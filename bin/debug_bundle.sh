@@ -109,7 +109,7 @@ run_cmd ip6tables_mangle ip6tables -t mangle -L -n -v
 run_cmd proc_net_arp   cat /proc/net/arp
 
 # ── 5. 进程与自检 ──────────────────────────────────────────
-run_cmd ps_hnc         sh -c "ps -A 2>/dev/null | grep -i 'hnc\|hotspotd\|dpid' | grep -v grep"
+run_cmd ps_hnc         sh -c "ps -A 2>/dev/null | grep -iE 'hnc|hotspotd|dpid' | grep -v grep"
 [ -x "$BIN/diag.sh" ] && run_cmd diag sh "$BIN/diag.sh"
 # v5.26 T3: rc17_process_health.sh 已删; httpd 在调用本脚本前把 Go 版
 # /api/proc_health 快照写到 run/proc_health.json, 这里拷进诊断包。
