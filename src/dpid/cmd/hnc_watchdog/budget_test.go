@@ -36,10 +36,13 @@
 package main
 
 import (
+	"net"
+	"os"
 	"testing"
 	"time"
 
 	"hnc.io/dpid/activity"
+	"hnc.io/dpid/nlroute"
 )
 
 const (
@@ -315,5 +318,118 @@ func TestCapProbeGate(t *testing.T) {
 	g.mark("ap0", now.Add(time.Minute))
 	if g.due("ap0", now.Add(time.Minute+time.Hour)) {
 		t.Error("换网卡后 1h 内不应再探测")
+	}
+}
+
+// ── v5.29 T1: 原生检查开启时的调用预算 ──────────────────────────────
+//
+// 原生路径下, ACTIVE 健康 1 小时里「经 sh 的外部调用」合计 ≤ 70
+// (v6_sync 60 + stats 4 + probe/check_health 对照各 2 + 余量)。
+// probe / check_health / httpd_drift / tc_uplink_healthy 全部走原生
+// 判断(netlink / net / 直接 exec iptables-tc), 不计入 sh 调用。
+//
+// 「改动前会失败」: v5.28 代码没有原生路径, probe+health 一小时就是
+// 120 次 sh(> 70)。
+
+func TestBudgetNativeActiveHealthy(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	withFakeEnv(t, clk, rec)
+
+	// 原生世界: 探测新鲜、qdisc htb、iptables 正常、ifb0+mirred 在。
+	tmp := t.TempDir()
+	oldRun, oldData := natRunDir, natDataDir
+	natRunDir, natDataDir = tmp, tmp
+	t.Cleanup(func() { natRunDir, natDataDir = oldRun, oldData })
+	oldHint, oldByN, oldAddrs, oldQ, oldExec := ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn, nlQdiscListFn, execCommandFn
+	oldShadow := natShadowSt
+	oldHCAt, oldHCRCC, oldHCI := healthCacheAt, healthCacheRC, healthCacheIface
+	healthCacheAt, healthCacheRC, healthCacheIface = time.Time{}, 0, ""
+	natShadowSt = newNativeShadowState()
+	ifaceHintReadFn = func() (string, bool) { return "wlan2", true }
+	netInterfaceByNameFn = func(name string) (*net.Interface, error) {
+		return &net.Interface{Name: name, Index: 5}, nil
+	}
+	netIfAddrsFn = func(*net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.43.1").To4(), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	oldSysIdx := sysIfIndexFn
+	sysIfIndexFn = func(string) (string, error) { return "5", nil }
+	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) {
+		return []nlroute.Qdisc{{Kind: "htb", Handle: 0x10000, Parent: nlroute.TC_H_ROOT}}, nil
+	}
+	execCommandFn = func(name string, args ...string) (string, int, error) {
+		if len(args) > 1 && args[0] == "filter" {
+			return "filter parent ffff: action mirred egress redirect dev ifb0", 0, nil
+		}
+		return "-A HNC_RESTORE -j CONNMARK --restore-mark\n", 0, nil
+	}
+	t.Cleanup(func() {
+		ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn = oldHint, oldByN, oldAddrs
+		nlQdiscListFn, execCommandFn, sysIfIndexFn = oldQ, oldExec, oldSysIdx
+		natShadowSt = oldShadow
+		healthCacheAt, healthCacheRC, healthCacheIface = oldHCAt, oldHCRCC, oldHCI
+	})
+	rec.probeOut = "wlan2 192.168.43.1\n" // 对照的 shell 版结论与原生一致
+
+	ls := newLoopState()
+	st := func(int) wdState { return wdState{kind: stateActive, iface: "wlan2"} }
+	rounds := driveHour(ls, clk, st, intervalNormal)
+	if rounds != 60 {
+		t.Fatalf("rounds = %d, want 60", rounds)
+	}
+
+	// 原生路径生效的直接证据: 这四项的 sh 调用只来自 30 分钟一次的对照
+	if n := rec.counts["probe_hotspot"]; n > 2 {
+		t.Errorf("probe_hotspot sh = %d 次/小时(原生应只剩对照 ≤ 2)", n)
+	}
+	if n := rec.counts["check_health"]; n > 2 {
+		t.Errorf("check_health sh = %d 次/小时(原生应只剩对照 ≤ 2)", n)
+	}
+	if n := rec.counts["httpd_drift"]; n != 0 {
+		t.Errorf("httpd_drift sh = %d(原生判断无文件 → 不动手, 不该调 shell)", n)
+	}
+	if n := rec.counts["tc_uplink_healthy"]; n != 0 {
+		t.Errorf("tc_uplink_healthy sh = %d(原生全绿, 不该调 shell)", n)
+	}
+	if total := rec.total(); total > budgetNativeShTotal {
+		t.Errorf("原生开启时 sh 调用合计 = %d, 超预算 %d", total, budgetNativeShTotal)
+	}
+}
+
+const budgetNativeShTotal = 70
+
+// TestBudgetNativeSwitchFile 原生开关关闭 → 完全走旧路径。
+func TestBudgetNativeSwitchFile(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	withFakeEnv(t, clk, rec)
+
+	tmp := t.TempDir()
+	oldRun, oldData := natRunDir, natDataDir
+	natRunDir, natDataDir = tmp, tmp
+	t.Cleanup(func() { natRunDir, natDataDir = oldRun, oldData })
+	// 原生探测都健康, 但开关文件存在
+	if err := os.WriteFile(tmp+"/wd_native.disabled", []byte("1"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	oldHint, oldQ, oldExec := ifaceHintReadFn, nlQdiscListFn, execCommandFn
+	ifaceHintReadFn = func() (string, bool) { return "wlan2", true }
+	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) {
+		return []nlroute.Qdisc{{Kind: "htb", Handle: 0x10000, Parent: nlroute.TC_H_ROOT}}, nil
+	}
+	execCommandFn = func(string, ...string) (string, int, error) { return "", 0, nil }
+	t.Cleanup(func() { ifaceHintReadFn, nlQdiscListFn, execCommandFn = oldHint, oldQ, oldExec })
+	rec.probeOut = "wlan2 192.168.43.1\n" // 与状态机 iface 一致, 否则每轮 migrate
+
+	ls := newLoopState()
+	st := func(int) wdState { return wdState{kind: stateActive, iface: "wlan2"} }
+	driveHour(ls, clk, st, intervalNormal)
+	// 开关关闭: probe / health 走 shell 每轮一次(60 次/小时, 旧口径)
+	if n := rec.counts["probe_hotspot"]; n != 60 {
+		t.Errorf("probe_hotspot sh = %d, want 60(开关关闭走旧路径)", n)
+	}
+	if n := rec.counts["check_health"]; n != 60 {
+		t.Errorf("check_health sh = %d, want 60(开关关闭走旧路径)", n)
 	}
 }

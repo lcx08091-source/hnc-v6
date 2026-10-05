@@ -888,7 +888,23 @@ func handlePending(_ *restoreThrottle) time.Duration {
 // handleActive ACTIVE:<iface> 状态每轮的职责。aux 携带每轮可变状态
 // (v5.28 A1 抽出, budget_test 用假时钟驱动)。
 func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux) time.Duration {
-	probe := runActionFn("probe_hotspot")
+	// v5.29 T1: probe_hotspot 原生优先(读 ifacehint + net, 不起 sh);
+	// 判不了(探测陈旧 / 无私网 IP)或被对照机制钉回 shell 时走原路径 ——
+	// shell 版会顺带刷新 iface_detect.json 缓存。
+	var probe actionResult
+	if natUse("probe") {
+		r := nativeProbeHotspot()
+		if r.unknown {
+			probe = runActionFn("probe_hotspot")
+		} else if r.ok {
+			probe = actionResult{exitCode: 0, stdout: r.iface + " " + r.ip}
+		} else {
+			probe = actionResult{exitCode: 1}
+		}
+		natShadowProbe(r) // v5.29 T1: 每 30 分钟与 shell 版对一次结论
+	} else {
+		probe = runActionFn("probe_hotspot")
+	}
 	if probe.exitCode != 0 || probe.stdout == "" {
 		// Hotspot down — keep ACTIVE state (user might just have toggled off),
 		// don't migrate or full_restore. Next round will re-probe.
@@ -920,9 +936,20 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		aux.cap.mark(newIface, now)
 	}
 
-	// Health check
-	health := runActionFn("check_health")
-	switch health.exitCode {
+	// Health check — v5.29 T1: 原生(读内核 + 直接 exec iptables)优先;
+	// 判不了或钉回 shell 时走原路径。
+	var healthRC int
+	if natUse("health") {
+		if rc := nativeCheckHealthCached(newIface, now); rc != natHealthUnknown {
+			healthRC = rc
+		} else {
+			healthRC = runActionFn("check_health").exitCode
+		}
+	} else {
+		healthRC = runActionFn("check_health").exitCode
+	}
+	natShadowMaybeCompare(newIface, healthRC)
+	switch healthRC {
 	case 0:
 		// Healthy
 		recovering := aux.recoveryRounds > 0
@@ -946,11 +973,20 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		// tc_uplink_healthy 3 分钟一次(原每轮 60 秒); 恢复期照旧每轮。
 		// 最坏影响: 上行 ingress 重定向丢失最长约 3 分钟被复核发现(原 1 分钟)。
 		if recovering || now.Sub(aux.lastDrift) >= httpdDriftEvery {
-			_ = runActionFn("httpd_drift")
+			// v5.29 T1: Go 先判断「需不需要动手」, 需要才调 shell(check_httpd_bind_drift
+			// 本身是「判断 + 动手」一体, 修 httpd / 撤规则仍走 shell)。
+			if needed, unknown := nativeHttpdDriftNeeded(); needed || unknown || !natUse("drift") {
+				_ = runActionFn("httpd_drift")
+			}
 			aux.lastDrift = now
 		}
 		if recovering || now.Sub(aux.lastUplink) >= tcUplinkEvery {
-			_ = runActionFn("tc_uplink_healthy")
+			// v5.29 T1: 上行链路检查原生化: ifb0 存在性 / 根 qdisc 用 netlink,
+			// mirred 过滤器直接 exec tc(文本判断, 不经 sh)。任一项不满足或
+			// 判不了 → shell 修复路径(含冷却 / 失败计数 / 降级标记, 逻辑不搬)。
+			if ok, unknown := nativeUplinkOK(newIface); !ok || unknown || !natUse("uplink") {
+				_ = runActionFn("tc_uplink_healthy")
+			}
 			aux.lastUplink = now
 		}
 		return intervalNormal

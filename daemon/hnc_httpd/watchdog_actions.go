@@ -66,6 +66,13 @@ func scWatchdogActionsItem(c *scCtx) scItem {
 	}
 	acts, _ := m["actions"].(map[string]interface{})
 	gen, _ := m["generated_at"].(float64)
+	// v5.29 T1: 原生检查与 shell 对照的累计不一致(0/缺省 = 一致)。
+	// 不遮蔽失败判定: 有失败动作时仍以失败为准, mismatch 追加在 Detail。
+	nmm, _ := m["native_mismatch"].(float64)
+	mmNote := ""
+	if nmm > 0 {
+		mmNote = fmt.Sprintf("; 原生检查与 shell 结论不一致 %d 次(已按 shell 处理, 连续 3 次该项退回 shell)", int(nmm))
+	}
 
 	var totalCalls, totalFails float64
 	var weightedMS float64
@@ -107,13 +114,16 @@ func scWatchdogActionsItem(c *scCtx) scItem {
 			avg = weightedMS / totalCalls
 		}
 		it.Value = fmt.Sprintf("%.0f 次 / 小时 · 平均 %.0f 毫秒", totalCalls, avg)
+		if nmm > 0 {
+			it.Status = scWarn
+		}
 		if gen > 0 {
 			age := c.env.Now().Sub(time.Unix(int64(gen), 0))
 			if age > wdActionsStale {
 				it.Detail = fmt.Sprintf("记账已 %.0f 分钟未刷新(看门狗未运行?)", age.Minutes())
 				it.Status = scInfo
 			} else {
-				it.Detail = fmt.Sprintf("%d 个动作, 失败 %d 次", len(names), int64(totalFails))
+				it.Detail = fmt.Sprintf("%d 个动作, 失败 %d 次%s", len(names), int64(totalFails), mmNote)
 			}
 		}
 	}

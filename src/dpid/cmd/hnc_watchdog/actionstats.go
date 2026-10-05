@@ -151,6 +151,9 @@ type wdActionOut struct {
 	GeneratedAt int64                      `json:"generated_at"`
 	Actions     map[string]wdActionOutItem `json:"actions"`
 	Order       []string                   `json:"order"` // 按 calls_1h 降序(前端小表用)
+	// v5.29 T1: 原生检查与 shell 对照的累计不一致次数(0 = 完全一致;
+	// 自检「看门狗动作」行显示)。只读快照, 不参与 actions 合计。
+	NativeMismatch int `json:"native_mismatch,omitempty"`
 }
 
 // snapshot 生成输出结构(1h = 最近 60 分钟, 覆盖可能跨两个整点桶)。
@@ -158,6 +161,9 @@ func (s *actionStats) snapshot(now time.Time) wdActionOut {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := wdActionOut{Schema: 1, GeneratedAt: now.Unix(), Actions: make(map[string]wdActionOutItem, len(s.m))}
+	if wdActionsSnapshotExtra != nil {
+		out.NativeMismatch = wdActionsSnapshotExtra()
+	}
 	for name, c := range s.m {
 		var it wdActionOutItem
 		var total float64
