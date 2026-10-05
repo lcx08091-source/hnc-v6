@@ -1102,6 +1102,7 @@ func main() {
 	handleSignals()
 	go heartbeatLoop()
 	startLinkWatch() // v5.25: 网卡 / 地址事件即时唤醒主循环(热点开关不再靠 10 秒轮询)
+	startOffloadSched() // v5.29 T2: offload / clsact 守护改由 Go 调度(常驻 shell 少 2 个)
 
 	// rc30.5: alert scanner — detect unknown devices every 5 minutes.
 	// Independent of the main supervision loop so a slow alert pass can't

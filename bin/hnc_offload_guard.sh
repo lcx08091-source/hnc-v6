@@ -364,6 +364,11 @@ guard_plan_sleep() {
 }
 
 ensure_daemon() {
+    # v5.29 T2(M3): Go 看门狗接管调度(owner 文件)时, httpd 调 apply 也不
+    # 把 shell 常驻循环拉回来 —— 调度权在 Go, tick 由 plan 动作按需执行。
+    if [ "$(cat "$HNC_DIR/run/offload_guard.owner" 2>/dev/null)" = "watchdog" ]; then
+        return 0
+    fi
     local pid
     pid=$(cat "$PIDFILE" 2>/dev/null)
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && grep -q hnc_offload_guard "/proc/$pid/cmdline" 2>/dev/null; then
@@ -376,6 +381,12 @@ ensure_daemon() {
 
 case "${1:-}" in
     daemon)
+        # v5.29 T2(M3): Go 看门狗已接管(owner=watchdog)时不起循环,
+        # 记一行日志退出 —— service.sh 旧版本 / 手工调用兜底场景。
+        if [ "$(cat "$HNC_DIR/run/offload_guard.owner" 2>/dev/null)" = "watchdog" ]; then
+            log "daemon skipped: owner=watchdog (Go watchdog scheduling)"
+            exit 0
+        fi
         echo $$ > "$PIDFILE" 2>/dev/null
         log "offload guard starting (interval=${INTERVAL}s)"
         # 开机稍等, 让热点/hotspotd 就绪

@@ -138,3 +138,30 @@ printf '{"clsact_bpf_mode":"off"}\n' > "$HNC_TEST_DIR/data/rules.json"
 grun apply >/dev/null
 ! grep -q "install\|uninstall" "$HNC_TEST_DIR/ctl.log" 2>/dev/null && grep -q 'skipped_pref1_mirred' "$HNC_TEST_DIR/logs/offload_guard.log" \
   && test_pass || test_fail "ctl=$(cat "$HNC_TEST_DIR/ctl.log" 2>/dev/null)"
+
+# ── v5.29 T2(M3): owner=watchdog 时 shell 常驻循环让位给 Go 看门狗 ──
+
+test_start "offload guard: owner=watchdog 时 daemon 分支直接退出(不起循环)"
+gseed '{"clsact_bpf_mode":"auto"}'
+echo watchdog > "$HNC_TEST_DIR/run/offload_guard.owner"
+rm -f "$HNC_TEST_DIR/run/offload_guard.pid"
+timeout 10 env HNC_TEST_MODE=1 HNC_DIR="$HNC_TEST_DIR" HNC_SYS_NET="$HNC_TEST_DIR/sysnet" \
+    HNC_GUARD_CHECK_CMD="cat $HNC_TEST_DIR/check_state" PATH="$HNC_TEST_DIR/stub:$PATH" \
+    sh "$GSCRIPT" daemon; rc=$?
+[ $rc -eq 0 ] && [ ! -f "$HNC_TEST_DIR/run/offload_guard.pid" ] && test_pass || test_fail "rc=$rc pidfile_created=$([ -f "$HNC_TEST_DIR/run/offload_guard.pid" ] && echo yes || echo no)"
+
+test_start "offload guard: 无 owner 时 daemon 正常路径(写 pidfile; 测试模式下 tick 后由 ensure 检查)"
+gseed '{"clsact_bpf_mode":"auto"}'
+rm -f "$HNC_TEST_DIR/run/offload_guard.owner" "$HNC_TEST_DIR/run/offload_guard.pid"
+HNC_TEST_MODE=1 HNC_DIR="$HNC_TEST_DIR" HNC_SYS_NET="$HNC_TEST_DIR/sysnet" \
+    HNC_GUARD_CHECK_CMD="cat $HNC_TEST_DIR/check_state" PATH="$HNC_TEST_DIR/stub:$PATH" \
+    timeout 10 sh "$GSCRIPT" plan >/dev/null 2>&1
+rc=$?
+[ $rc -eq 0 ] && test_pass || test_fail "plan rc=$rc(对照: Go 调度也走同一 plan 动作)"
+
+test_start "offload guard: owner=watchdog 时 apply 不把 shell 循环拉回来"
+gseed '{"clsact_bpf_mode":"auto"}'
+echo watchdog > "$HNC_TEST_DIR/run/offload_guard.owner"
+rm -f "$HNC_TEST_DIR/run/offload_guard.pid"
+grun apply >/dev/null 2>&1
+[ ! -f "$HNC_TEST_DIR/run/offload_guard.pid" ] && test_pass || test_fail "apply 拉起了 shell 守护(pidfile 出现)"

@@ -76,6 +76,8 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
 # 仍活的升级 SIGKILL. SIGKILL 内核直接回收, hotspotd 没机会跑 mdns_worker stop,
 # 但反正我们要 cleanup 全清, 子进程清理路径跑完跑半都无关紧要.
 PIDS_TO_WAIT=""
+# v5.29 T2: Go 看门狗接管标记一并清掉, 下次开机按当前状态重新决定。
+rm -f "$HNC_DIR/run/offload_guard.owner" 2>/dev/null
 for pidfile in sentinel watchdog clsact_wd offload_guard dpid_guard dpid.monitor dpid.child dpid hotspotd detect api hotspot netmon httpd; do
     PID=$(cat "$RUN/${pidfile}.pid" 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then

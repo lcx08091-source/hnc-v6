@@ -728,7 +728,15 @@ fi
 # hnc_offload_guard.sh 每 60s 采样一次 offload(check_offload.sh), 检测到 offload
 # 正在旁路限速就经 hotspotd 强制慢路径并周期重申; off 模式下只空转(便于 WebUI
 # 切回 auto/on 时立即生效)。缺 hotspotd/BPF map 时静默降级。
-if [ -f "$HNC_DIR/bin/hnc_offload_guard.sh" ]; then
+# v5.29 T2(M3): Go 看门狗在时接管 offload/clsact 调度(常驻 shell 少 2 个);
+# run/wd_m3.disabled 存在 → 不接管, 保持旧 shell 守护行为(下次开机生效)。
+M3_TAKEOVER=0
+if [ -x "$HNC_DIR/bin/hnc_watchdog" ] && [ ! -f "$RUN/wd_m3.disabled" ]; then
+    echo watchdog > "$RUN/offload_guard.owner" 2>/dev/null
+    M3_TAKEOVER=1
+    log "offload/clsact scheduled by Go watchdog (run/offload_guard.owner=watchdog)"
+fi
+if [ "$M3_TAKEOVER" = "0" ] && [ -f "$HNC_DIR/bin/hnc_offload_guard.sh" ]; then
     OGPID=$(_verify_pid "$RUN/offload_guard.pid" hnc_offload_guard)
     if [ -z "$OGPID" ] || ! kill -0 "$OGPID" 2>/dev/null; then
         nohup sh "$HNC_DIR/bin/hnc_offload_guard.sh" daemon >> "$HNC_DIR/logs/offload_guard.log" 2>&1 < /dev/null &
@@ -740,7 +748,7 @@ fi
 # ─── T1 tier: clsact BPF watchdog(仅 clsact_bpf_mode=on)───────
 # on 模式下 10s 自愈 pref1 BPF filter(netd 重挂 qdisc / 接口重建)。auto 模式由
 # offload guard 每轮顺带修复, 不再单独起守护。脚本内部自带闸门复查, 不需要即退。
-if [ -f "$HNC_DIR/bin/hnc_clsact.o" ] && [ -x "$HNC_DIR/bin/hnc_clsact_ctl" ]; then
+if [ "$M3_TAKEOVER" = "0" ] && [ -f "$HNC_DIR/bin/hnc_clsact.o" ] && [ -x "$HNC_DIR/bin/hnc_clsact_ctl" ]; then
     if [ "$(sh "$HNC_DIR/bin/hnc_offload_guard.sh" mode 2>/dev/null)" = "on" ]; then
         CLSWPID=$(_verify_pid "$RUN/clsact_wd.pid" hnc_clsact_watchdog)
         if [ -z "$CLSWPID" ] || ! kill -0 "$CLSWPID" 2>/dev/null; then
