@@ -2167,3 +2167,29 @@ GET `/api/encdns`:
 - `run/dpi_flows.json` 每条、`run/label_samples.*.jsonl` 每行:新增可选 `qtp`(`qtp1_` + 12 位十六进制,只有 QUIC ClientHello 才有)。`data/fp_learned.json` 条目新增可选 `qtp`。
 - 连接归属来源(`/api/connections` 等的 `app_src`)新增 `imported`(导入的规则包指纹)。
 - 规则文件:规则可带 `_parent_rule_id`(挂靠到另一条规则);新出厂 bucket `46-v2fly-a.json`(顶层 `source` 标明数据来源)。
+
+---
+
+## 26. v5.28 变更
+
+**新字段 / 新段(只加不改,影子运行的不改任何识别结果)**
+
+- GET `/api/power`:新增 `watchdog_actions` 段 —— `{actions: {<动作名>: {calls, fails, last_rc, last_fail_at, total_ms, max_ms, hours: [24 个小时桶]}}, order: [动作名…(按 calls 降序)], stale: true?}`(文件超过 3 分钟未更新时 `stale: true`)。数据源 `run/watchdog_actions.json`(看门狗每分钟原子写)。
+- GET `/api/connections`:规则库 / 指纹没认出应用的行新增可选 `cls_category`(视频 / 游戏 / 通话 / 音乐 / 下载 / 浏览 / 社交)与 `cls_conf`(0–1)。流量形状分类器(`flow_cls.go`),影子:不改归属与显示名;模型 `data/flow_cls.json`,自监督训练。
+- GET `/api/devices[]`:`.fg` 新增可选 `engagement`("interactive" | "passive" | "background",当前前台应用的交互节拍,影子)。
+- GET `/api/fg_timeline`:每段新增可选 `eng`(该段主导节拍);顶层新增 `engagement_mix: {interactive: 秒, passive: 秒, background: 秒}`。
+- GET `/api/dpi_eval`:新增 `discover` 段 —— `{samples(参与的未知域名样本数), groups, avg_size, purity, completeness, hubs, variants: [{label("当前"|"更松"|"更紧"), window_sec, edge_threshold, hub_degree, samples, groups, avg_size, purity, completeness, hubs}], note}`。共现聚类核心复用 `output.ClusterUnknowns`(与线上同一套规则),真值 = 样本包名;参数对照只展示不自动改。
+- GET `/api/dpi_eval`:新增 `flow_cls` 段 —— `{samples(考题数), train_samples, classes, model_acc, manual_acc, manual_samples, note?}`。时间切分(今天之前训练、今天考题),manual_* 是 `flow_shape.go` 手工判类映射到大类后的对照;样本不足(每类 < 50)时只有 note。
+- GET `/api/discover`:每组新增 `suggest` —— `{name, conf("low"|"medium"|"high"), conflict: true?, pkg?, sources: [{src("apk"|"startup"|"cert"|"ja4"|"domain"), name, basis}]}`。来源优先级 apk > 启动指纹 > 证书 > JA4 > 主域;多来源一致 → 置信叠加,分歧 → 取更可信并标 conflict。旧的 `guess` 保留,前端优先用 `suggest`;确认动作不变,仍需用户点。
+
+**新文件 / 新脚本(非 API)**
+
+- `bin/hnc_proc.sh`:service.sh 引入;`pid_matches <pid> <关键字>` / `pidfile_pid_matches <pidfile> <关键字>`(读 `/proc/<pid>/cmdline,与 Go 侧同口径),哨兵判活先查 pidfile,失效才退回 pidof / ps 兜底。
+- `bin/pitfall_lint.sh` + `bin/pitfall_lint.allow`:五条老坑规则(时区 `tzlocal` / toybox grep BRE `\|` / 进程检测 `pidof`+`ps|grep` / 告警直写 `alerts.jsonl` / `json_escape` 的 Tab),存量白名单只拦新增;`bin/ci_preflight.sh` 调用,失败即 preflight 失败。
+- `run/watchdog_actions.json`:看门狗动作记账(见上)。
+- `data/flow_cls.json`:流量形状分类器模型(30 分钟重训,原子写)。
+
+**看门狗节奏变化(不影响 API)**
+
+- 能力探测:启动首轮 / 网卡变化 / ≥ 6 小时一次(Go 侧 `capProbeGate`,与 `capability_probe.sh` 的 6h 节流双保险)。
+- 健康且不在恢复期:`httpd_drift` 5 分钟一次、`tc_uplink_healthy` 3 分钟一次(不健康 / 刚恢复照旧每轮);`check_health` 仍每轮。

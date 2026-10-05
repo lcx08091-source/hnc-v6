@@ -38,6 +38,12 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | QUIC 传输参数指纹(v5.27) | `src/dpid/output/qtp.go` | capture 只在 QUIC 路径填 `TLSInfo.QTP`;httpd `fp_learn.go` 先带 QTP 的 key 再回落 |
 | 启动指纹(v5.27) | `daemon/hnc_httpd/startup_fp.go` | 学习(本机样本,30 分钟节流)/ 识别(dpi_flows)/ 交叉验证自评都在这里;影子运行,只产出事件 |
 | 前台 HMM(v5.27) | `daemon/hnc_httpd/fg_hmm.go` | 挂在 `fg_model.go` 每轮上;引擎开关 `data/dpi_experiment.json`;对比统计 `run/fg_compare.json` |
+| 看门狗动作记账(v5.28) | `src/dpid/cmd/hnc_watchdog/actionstats.go`(`runActionFn` 等) | 每次外部调用的次数 / 失败 / 退出码 / 耗时(24 小时桶),每分钟原子写 `run/watchdog_actions.json`;httpd 转出 `/api/power.watchdog_actions` + 自检行;调用预算测试 `budget_test.go` |
+| 进程判断(shell,v5.28) | `bin/hnc_proc.sh` | `pid_matches` / `pidfile_pid_matches`(读 `/proc/<pid>/cmdline`,与 Go `procfind` 同口径);service.sh 的哨兵函数先查它,pidof / ps 只兜底;`HNC_PROC_ROOT` 可注入测试 |
+| 老坑检查(v5.28) | `bin/pitfall_lint.sh` | 五条规则(时区 / toybox grep BRE `\|` / ps 判活 / 告警直写 / json_escape Tab),存量白名单 `bin/pitfall_lint.allow`;`ci_preflight.sh` 挂钩 |
+| 流量形状分类器(v5.28) | `daemon/hnc_httpd/flow_cls.go` | 分箱朴素贝叶斯,自监督(已认出应用的连接当教材),影子输出 `/api/connections` 的 `cls_category` / `cls_conf`;模型 `data/flow_cls.json`;评估在 `dpi_eval.go` 的 flow_cls 段 |
+| 交互节拍(v5.28) | `daemon/hnc_httpd/fg_engagement.go` | 三态(interactive / passive / background)由 `fgFeat` 判定;`fg_model.go` 写进 fgView 与 fgSession;时间线汇总 `engagement_mix` |
+| 新应用建议名(v5.28) | `daemon/hnc_httpd/api_discover_suggest.go` | `suggestForGroup` 纯函数;来源优先级 apk > 启动指纹 > 证书 > JA4 > 主域;`/api/discover` 每组带 `suggest` |
 | 我的规则包(v5.27) | `daemon/hnc_httpd/rulepack.go` | 导出汇总 / 导入校验 / 冲突跳过 / 落地(`_imported.json`、`fp_imported.json`、`startup_fp_imported.json`)/ 清除 |
 | v2fly 规则导入(v5.27) | `tools/import_v2fly.py` + `tools/v2fly_map.json` | 只在开发机跑,产物 `data/dpi_rules.d/46-v2fly-*.json`,之后 `dpi_rules_split.py sync-legacy` |
 
