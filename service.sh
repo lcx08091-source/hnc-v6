@@ -23,6 +23,13 @@ HNC_DIR=/data/local/hnc
 LOG=$HNC_DIR/logs/service.log
 RUN=$HNC_DIR/run
 
+# v5.28 A3: 哨兵的进程判活改读 /proc/<pid>/cmdline(不再依赖 ps 的输出格式,
+# ColorOS 的 ps 只显示短名字曾造成进程风暴)。pid_matches / pidfile_pid_matches
+# 定义在 bin/hnc_proc.sh; 优先用模块目录的副本, 运行目录副本兜底。
+_HNC_PROC="$MODDIR/bin/hnc_proc.sh"
+[ -f "$_HNC_PROC" ] || _HNC_PROC="$HNC_DIR/bin/hnc_proc.sh"
+[ -f "$_HNC_PROC" ] && . "$_HNC_PROC"
+
 mkdir -p "$HNC_DIR/logs" "$RUN"
 # v5.9.3 BUG-009:run/ 下有 local_admin.secret(middleware 认它就给 root 级
 # 写 API)。secret 文件本身早已是 0600,但目录 0777 且无 sticky 位时,别人
@@ -184,7 +191,15 @@ list_watchdog_pids() {
 }
 
 find_live_watchdog_pid() {
-    local p
+    local p _wp
+    # v5.28 A3: 先认 run/watchdog.pid + /proc/<pid>/cmdline(不依赖 ps 输出格式,
+    # ColorOS 的 ps 只显示短名字曾让哨兵每 30 秒误拉一个新 watchdog)。
+    # pidfile 指向的 pid 被复用成别的进程 → pid_matches 不命中 → 判死走兜底。
+    if pidfile_pid_matches "$RUN/watchdog.pid" hnc_watchdog; then
+        _wp="$(cat "$RUN/watchdog.pid" 2>/dev/null | tr -d ' \r\n')"
+        echo "$_wp"
+        return 0
+    fi
     for p in $(list_watchdog_pids); do
         if is_pid_alive "$p"; then
             echo "$p"
@@ -253,13 +268,26 @@ prune_stale_service_sentinels() {
 launcher_alive_count() {
     local c
     c=0
-    process_by_name_alive hnc_launcher && c=$((c + 1))
-    process_by_name_alive hnc_dpid_supervisor && c=$((c + 1))
-    process_by_name_alive hnc_dpid_guard.sh && c=$((c + 1))
+    # v5.28 A3: 每个 launcher 种类先认自己的 pidfile + /proc cmdline(与 Go 侧
+    # findLiveByCmdlineSub 同口径), pidfile 失效才退回原有 pidof / ps 兜底(保留)。
+    # launcher 只用 run/launcher.pid; supervisor 与 shell guard 共用 run/dpid_guard.pid
+    # (rc14: 二者都自维护 dpid_guard.pid 锁文件)。
+    if pidfile_pid_matches "$RUN/launcher.pid" hnc_launcher || process_by_name_alive hnc_launcher; then
+        c=$((c + 1))
+    fi
+    if pidfile_pid_matches "$RUN/dpid_guard.pid" hnc_dpid_supervisor || process_by_name_alive hnc_dpid_supervisor; then
+        c=$((c + 1))
+    fi
+    if pidfile_pid_matches "$RUN/dpid_guard.pid" hnc_dpid_guard.sh || process_by_name_alive hnc_dpid_guard.sh; then
+        c=$((c + 1))
+    fi
     echo "$c"
 }
 
 dpid_alive() {
+    # v5.28 A3: 先认 run/dpid.pid + /proc cmdline(不依赖 ps 输出格式);
+    # pidfile 失效(进程死了 / pid 被复用 / 文件缺失)才退回 pidof / ps 兜底。
+    pidfile_pid_matches "$RUN/dpid.pid" hnc_dpid && return 0
     process_by_name_alive hnc_dpid
 }
 
