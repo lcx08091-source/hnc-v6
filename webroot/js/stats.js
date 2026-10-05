@@ -405,14 +405,17 @@ function discEntryHtml() {
 }
 function paintDiscEntry() { var el = $('#disc-entry'); if (el) el.innerHTML = discEntryHtml(); }
 function discTags(g) {
-  var t = '', gs = g.guess || {};
+  var t = '', gs = g.guess || {}, sg = g.suggest || {};
+  if (sg.conflict) t += '<span class="dtag">建议有分歧</span>'; // v5.28 B2: 两个中等以上来源名字不同
   if (g.apk && g.apk.length) t += '<span class="dtag apk">本机 App · ' + esc(g.apk[0].label || g.apk[0].pkg) + '</span>';
+  if (sg.sources && sg.sources.some(function (x) { return x.src === 'startup'; })) t += '<span class="dtag ja4">启动指纹</span>';
   if (g.company) t += '<span class="dtag cert">证书 · ' + esc(g.company) + '</span>';
   else if (g.cert && g.cert.org) t += '<span class="dtag cert">证书 · ' + esc(g.cert.org.slice(0, 18)) + '</span>';
   if (g.family_name) t += '<span class="dtag ja4">指纹 · ' + esc(g.family_name) + '</span>';
   if (!t) t = '<span class="dtag">仅域名</span>';
-  return t + '<span class="dtag">' + (GCONF[gs.conf] || '待确认') + '</span>';
+  return t + '<span class="dtag">' + (GCONF[sg.conf || gs.conf] || '待确认') + '</span>';
 }
+var SGSRC = { apk: '本机 App', startup: '启动指纹', cert: '证书', ja4: '网络指纹', domain: '组内域名' };
 function devNames(macs) { return (macs || []).map(function (m) { var d = devBy(m); return d ? d.name : m; }); }
 function discListHtml() {
   var r = S.disc;
@@ -423,8 +426,8 @@ function discListHtml() {
     '<div class="btns" style="margin:2px 0 0"><button class="btn sec press" data-act="disc-scan">' + ico('refresh') + '立即扫描本机 App</button></div></div>';
   if (!gs.length) return head + '<div class="note" style="text-align:center;padding:20px 0">' + (r.available === false ? 'dpid 还没产出发现结果（需要 DPI 运行一段时间）' : '暂时没有规则库认不出的应用 🎉') + '</div>';
   return head + gs.map(function (g) {
-    var gs2 = g.guess || {};
-    return '<button class="dg press" data-disc="' + esc(g.id) + '"><span class="h"><span class="nm">' + esc(gs2.name || (g.suffixes || [])[0] || g.id) + '</span><span class="pill-count">' + num(g.hits) + ' 次</span>' + ico('right', 'chev') + '</span>' +
+    var gs2 = g.guess || {}, sg2 = g.suggest || {};
+    return '<button class="dg press" data-disc="' + esc(g.id) + '"><span class="h"><span class="nm">' + esc(sg2.name || gs2.name || (g.suffixes || [])[0] || g.id) + '</span><span class="pill-count">' + num(g.hits) + ' 次</span>' + ico('right', 'chev') + '</span>' +
       '<span class="d">' + esc((g.suffixes || []).slice(0, 4).join(' · ')) + ((g.suffixes || []).length > 4 ? ' +' + (g.suffixes.length - 4) : '') + '</span>' +
       '<span class="tags">' + discTags(g) + '<span class="dtag">' + (g.devices || []).length + ' 台设备</span></span></button>';
   }).join('') + discManageBtn(r);
@@ -459,16 +462,22 @@ function paintDiscSheet() {
 function discOpenDetail(id) {
   var g = discGroup(id); if (!g) return;
   S.discSel = id;
-  var gs = g.guess || {};
-  S.discForm = { name: gs.src === 'domain' ? '' : gs.name || '', cat: 'unknown', sufs: {} };
+  var gs = g.guess || {}, sg = g.suggest || {};
+  // v5.28 B2: 预填建议名(建议置信度非 low 时优先; 仍是建议, 用户可改)
+  var pre = sg.name && sg.conf !== 'low' ? sg.name : (gs.src === 'domain' ? '' : gs.name || '');
+  S.discForm = { name: pre, cat: 'unknown', sufs: {} };
   (g.suffixes || []).forEach(function (x) { S.discForm.sufs[x] = true; });
   (g.cert_siblings || []).forEach(function (x) { if (!(x in S.discForm.sufs)) S.discForm.sufs[x] = false; });
   $('#disc-body').innerHTML = discDetailHtml(g); $('#sheet').scrollTop = 0;
 }
 function kv(k, v) { return '<div class="row2"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>'; }
 function discDetailHtml(g) {
-  var gs = g.guess || {}, f = S.discForm || { name: '', cat: 'unknown', sufs: {} }, h = '<button class="dback" data-act="disc-back">‹ 返回列表</button>';
-  h += '<div style="text-align:center;margin-bottom:6px"><div style="font-size:19px;font-weight:800">' + esc(gs.name || g.id) + '</div><div class="tags" style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;margin-top:6px">' + discTags(g) + '</div></div>';
+  var gs = g.guess || {}, sg = g.suggest || {}, f = S.discForm || { name: '', cat: 'unknown', sufs: {} }, h = '<button class="dback" data-act="disc-back">‹ 返回列表</button>';
+  h += '<div style="text-align:center;margin-bottom:6px"><div style="font-size:19px;font-weight:800">' + esc(sg.name || gs.name || g.id) + '</div><div class="tags" style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;margin-top:6px">' + discTags(g) + '</div></div>';
+  // v5.28 B2: 综合建议(每个来源一条人话依据; 分歧时提醒人工确认)
+  if (sg.sources && sg.sources.length) {
+    h += '<div class="dsec">综合建议 · ' + (GCONF[sg.conf] || '建议') + '</div><div class="dbox">' + sg.sources.map(function (x) { return kv(SGSRC[x.src] || x.src, esc(x.name) + (x.basis ? '<div class="note" style="font-weight:500">' + esc(x.basis) + '</div>' : '')); }).join('') + (sg.conflict ? '<div class="note warn">两个来源给出的名字不一样，已取更可信的那个，请人工确认</div>' : '') + '</div>';
+  }
   h += '<div class="dsec">判断依据</div>';
   // 本机安装包
   h += '<div class="dbox">' + (g.apk && g.apk.length ? g.apk.map(function (a, i) { return kv(i ? '也可能' : '本机 App', esc(a.label || a.pkg) + '<div class="note mono" style="font-weight:500">' + esc(a.pkg) + ' · 命中 ' + esc((a.suffixes || []).join(', ')) + '</div>'); }).join('') : kv('本机 App', '<span class="note">本机安装包里没找到这些域名</span>')) + '</div>';

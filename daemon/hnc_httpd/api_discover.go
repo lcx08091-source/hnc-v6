@@ -578,6 +578,9 @@ func (s *server) enrichGroup(g map[string]interface{}, ix apkIndex) map[string]i
 		guess = map[string]interface{}{"name": name, "src": "domain", "conf": "low"}
 	}
 	out["guess"] = guess
+	// v5.28 B2: 结构化建议(建议名 + 置信度 + 依据; 含启动指纹来源,
+	// 多来源一致叠加 / 冲突标注)。旧的 guess 保留兼容, 前端优先用 suggest。
+	out["suggest"] = s.buildSuggest(g, ix, apks, company, fam, sufs, time.Now())
 	return out
 }
 
