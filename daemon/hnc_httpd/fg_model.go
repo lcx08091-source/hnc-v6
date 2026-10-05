@@ -175,6 +175,7 @@ type fgView struct {
 	Coarse     bool     `json:"coarse,omitempty"`
 	Stale      bool     `json:"stale,omitempty"`
 	Updated    int64    `json:"updated"`
+	Engagement string   `json:"engagement,omitempty"` // v5.28 B4: 交互节拍(影子, fg_engagement.go)
 }
 
 type fgDev struct {
@@ -198,6 +199,10 @@ type fgSession struct {
 	End   int64   `json:"end"`
 	Conf  float64 `json:"confidence"`
 	N     int     `json:"n,omitempty"`
+	// v5.28 B4: 该段的交互节拍直方图(每轮 +1)与主导标签(影子,
+	// fg_engagement.go)。旧数据缺省零值, 兼容。
+	EngN [3]int `json:"eng_n,omitempty"`
+	Eng  string `json:"eng,omitempty"`
 }
 
 type fgDay struct {
@@ -666,10 +671,14 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 	}
 	if d.shown != "" && d.open {
 		end := now
-		if a := d.apps[d.shown]; a != nil && !a.lastActive.IsZero() {
-			end = a.lastActive
+		eng := ""
+		if a := d.apps[d.shown]; a != nil {
+			eng = fgEngagementOf(a.f) // v5.28 B4: 影子节拍
+			if !a.lastActive.IsZero() {
+				end = a.lastActive
+			}
 		}
-		m.extendSessionLocked(mac, end, float64(d.view.Confidence))
+		m.extendSessionLocked(mac, end, float64(d.view.Confidence), eng)
 	}
 }
 
@@ -810,6 +819,7 @@ func (m *fgModel) buildViewLocked(d *fgDev, rank []*fgApp, now time.Time, dt flo
 		}
 		v.AppID, v.Name, v.Category = a.id, fgDisplayName(a), a.cat
 		v.Confidence = fgConfidence(a, second, dt)
+		v.Engagement = fgEngagementOf(a.f) // v5.28 B4: 影子节拍
 		v.Score = int(math.Round(a.smooth))
 		v.Reasons = fgReasons(a)
 		if !d.since.IsZero() {
@@ -952,7 +962,7 @@ func fgDropShortest(l []fgSession) []fgSession {
 	return append(l[:k:k], l[k+1:]...)
 }
 
-func (m *fgModel) extendSessionLocked(mac string, end time.Time, conf float64) {
+func (m *fgModel) extendSessionLocked(mac string, end time.Time, conf float64, eng string) {
 	if m.day == nil {
 		return
 	}
@@ -967,6 +977,13 @@ func (m *fgModel) extendSessionLocked(mac string, end time.Time, conf float64) {
 	}
 	s.Conf = math.Round((s.Conf*float64(s.N)+conf)/float64(s.N+1)*10) / 10
 	s.N++
+	// v5.28 B4: 每轮把前台应用的节拍记进该段直方图, 主导标签随之更新
+	if i := fgEngIdx(eng); i >= 0 {
+		s.EngN[i]++
+		if d := fgEngDominant(s.EngN); d != "" {
+			s.Eng = d
+		}
+	}
 	m.dirty = true
 }
 
@@ -1188,6 +1205,7 @@ type fgOutSess struct {
 	Sec        int64  `json:"sec"`
 	Confidence int    `json:"confidence"`
 	Open       bool   `json:"open"`
+	Eng        string `json:"eng,omitempty"` // v5.28 B4: 该段主导交互节拍(影子)
 }
 
 type fgOutApp struct {
@@ -1208,6 +1226,7 @@ func (s *server) fgTimelinePayload(m *fgModel, mac string, days int, now time.Ti
 	byApp := map[string]*fgOutApp{}
 	since := ""
 	var total int64
+	var engMix [3]int64 // v5.28 B4: 各节拍段的时长(秒)汇总
 	for i := days - 1; i >= 0; i-- {
 		date := now.AddDate(0, 0, -i).Format("20060102")
 		d, open := m.dayCopy(date)
@@ -1232,7 +1251,10 @@ func (s *server) fgTimelinePayload(m *fgModel, mac string, days int, now time.Ti
 						sec = 0
 					}
 					o := fgOutSess{MAC: dm, AppID: ss.App, Name: ss.Name, Category: ss.Cat, Start: ss.Start, End: ss.End,
-						Sec: sec, Confidence: int(math.Round(ss.Conf)), Open: open[raw] && j == len(l)-1}
+						Sec: sec, Confidence: int(math.Round(ss.Conf)), Open: open[raw] && j == len(l)-1, Eng: ss.Eng}
+					if i := fgEngIdx(ss.Eng); i >= 0 {
+						engMix[i] += sec
+					}
 					sessions = append(sessions, o)
 					a := byApp[ss.App]
 					if a == nil {
@@ -1292,6 +1314,10 @@ func (s *server) fgTimelinePayload(m *fgModel, mac string, days int, now time.Ti
 		"ok": true, "mac": mac, "days": days, "since": since, "now": now.Unix(),
 		"sessions": sessions, "by_app": apps, "total_fg_sec": total,
 		"merge_gap_sec": int(fgMergeGap / time.Second), "keep_days": fgKeepDays + 1,
+		// v5.28 B4: 前台时间线按节拍的时长占比(影子, 供人工判断合理性)
+		"engagement_mix": map[string]int64{
+			"interactive": engMix[0], "passive": engMix[1], "background": engMix[2],
+		},
 	}
 	if mac != "" {
 		views := m.views(now, activityNow().Level, powerCurrent("app_usage"))

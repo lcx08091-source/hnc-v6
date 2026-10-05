@@ -469,7 +469,7 @@ func TestFgSessionBounds(t *testing.T) {
 		}
 		a := &fgApp{id: id, name: id}
 		m.openSessionLocked(fgMAC, d, a, time.Unix(base+int64(i)*1000, 0))
-		m.extendSessionLocked(fgMAC, time.Unix(base+int64(i)*1000+int64(i%7+1)*10, 0), 50)
+		m.extendSessionLocked(fgMAC, time.Unix(base+int64(i)*1000+int64(i%7+1)*10, 0), 50, "passive")
 		m.closeSessionLocked(fgMAC, d, time.Unix(base+int64(i)*1000+int64(i%7+1)*10, 0))
 	}
 	if l := m.day.Devices[fgMAC]; len(l) != fgMaxSessPerDev {
@@ -479,12 +479,12 @@ func TestFgSessionBounds(t *testing.T) {
 	m.day.Devices[fgMAC] = nil
 	a := &fgApp{id: "a", name: "A"}
 	m.openSessionLocked(fgMAC, d, a, time.Unix(base, 0))
-	m.extendSessionLocked(fgMAC, time.Unix(base+300, 0), 80)
+	m.extendSessionLocked(fgMAC, time.Unix(base+300, 0), 80, "passive")
 	m.closeSessionLocked(fgMAC, d, time.Unix(base+300, 0))
 	if s := m.openSessionLocked(fgMAC, d, a, time.Unix(base+400, 0)); s.Unix() != base {
 		t.Fatalf("merge start: %v", s)
 	}
-	m.extendSessionLocked(fgMAC, time.Unix(base+500, 0), 60)
+	m.extendSessionLocked(fgMAC, time.Unix(base+500, 0), 60, "passive")
 	if l := m.day.Devices[fgMAC]; len(l) != 1 || l[0].End != base+500 || l[0].Conf != 70 {
 		t.Fatalf("merged: %+v", l)
 	}
