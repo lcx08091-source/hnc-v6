@@ -9,90 +9,91 @@
 package main
 
 import (
-	"encoding/json"
-	"fmt"
-	"os"
-	"strings"
-	"time"
+        "encoding/json"
+        "fmt"
+        "os"
+        "strings"
+        "time"
 
-	"hnc.io/dpid/activity"
+        "hnc.io/dpid/activity"
 
-	"hnc.io/dpid/clockhwm" // v5.26 T6: 时钟可信规则唯一权威
+        "hnc.io/dpid/clockhwm" // v5.26 T6: 时钟可信规则唯一权威
 )
 
 const (
-	statsSampleEvery = 300 * time.Second // 与 watchdog.sh STATS_INTERVAL / power_sched.go stats_sample 一致
-	onlineHoursEvery = 3300 * time.Second
-	onlineWindowSec  = 90 // 与 httpd activityOnlineWindow 一致
-	onlineHoursFile  = runDir + "/online_hours.jsonl"
+        statsSampleEvery = 300 * time.Second // 与 watchdog.sh STATS_INTERVAL / power_sched.go stats_sample 一致
+        onlineHoursEvery = 3300 * time.Second
+        onlineWindowSec  = 90 // 与 httpd activityOnlineWindow 一致
+        onlineHoursFile  = runDir + "/online_hours.jsonl"
 )
 
 // statsSampleDue 是否该跑 stats_sample.sh: 300 秒; 热点开着但没有在线设备时 ×3。
+// v5.28 A1: activity 快照经由 actSnapshotFn(可注入), budget_test 能模拟「无在线设备」。
 func statsSampleDue(last, now time.Time) bool {
-	iv := statsSampleEvery
-	if s := actReader.Get(); s.OK && s.Level == activity.LevelNoClients {
-		iv *= 3
-	}
-	return now.Sub(last) >= iv
+        iv := statsSampleEvery
+        if s := actSnapshotFn(); s.OK && s.Level == activity.LevelNoClients {
+                iv *= 3
+        }
+        return now.Sub(last) >= iv
 }
 
 // clockSaneNow 与 bin/hnc_clock.sh sane 同规则: ≥2025 且不早于高水位 − 600 秒。
 // 时钟不可信时不写在线时长(否则 day 字段会是 1970 之类的错日)。
 func clockSaneNow(now time.Time) bool {
-	// v5.26 T6: 委托 clockhwm(唯一权威, 与 httpd clockSaneAt 同一份)。
-	return clockhwm.Sane(now.Unix(), clockhwm.ReadHWM(dataDir+"/clock_hwm"))
+        // v5.26 T6: 委托 clockhwm(唯一权威, 与 httpd clockSaneAt 同一份)。
+        return clockhwm.Sane(now.Unix(), clockhwm.ReadHWM(dataDir+"/clock_hwm"))
 }
 
 // onlineMACs devices.json 里此刻在线且未被拉黑的设备(纯函数, 便于测试)。
 // 在线 = online:true 或 last_seen 在 onlineWindowSec 秒内(与 httpd 判定一致)。
 func onlineMACs(b []byte, now int64) []string {
-	var devs map[string]map[string]interface{}
-	if json.Unmarshal(b, &devs) != nil {
-		return nil
-	}
-	var out []string
-	for mac, d := range devs {
-		if st, _ := d["status"].(string); st == "blocked" {
-			continue
-		}
-		on := false
-		if ls, ok := d["last_seen"].(float64); ok {
-			on = ls > 0 && now-int64(ls) < onlineWindowSec
-		} else if v, ok := d["online"].(bool); ok {
-			on = v
-		}
-		if on && len(mac) == 17 {
-			out = append(out, strings.ToLower(mac))
-		}
-	}
-	return out
+        var devs map[string]map[string]interface{}
+        if json.Unmarshal(b, &devs) != nil {
+                return nil
+        }
+        var out []string
+        for mac, d := range devs {
+                if st, _ := d["status"].(string); st == "blocked" {
+                        continue
+                }
+                on := false
+                if ls, ok := d["last_seen"].(float64); ok {
+                        on = ls > 0 && now-int64(ls) < onlineWindowSec
+                } else if v, ok := d["online"].(bool); ok {
+                        on = v
+                }
+                if on && len(mac) == 17 {
+                        out = append(out, strings.ToLower(mac))
+                }
+        }
+        return out
 }
 
 // sampleOnlineHours 热点开着时每 ~55 分钟把在线设备各记一行(格式与 shell 版相同)。
 func sampleOnlineHours(now time.Time) {
-	if st, err := os.Stat(onlineHoursFile); err == nil && now.Sub(st.ModTime()) < onlineHoursEvery {
-		return
-	}
-	if !clockSaneNow(now) {
-		return
-	}
-	b, err := os.ReadFile(dataDir + "/devices.json")
-	if err != nil || len(b) > 8<<20 {
-		return
-	}
-	macs := onlineMACs(b, now.Unix())
-	f, err := os.OpenFile(onlineHoursFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-	day := now.Format("20060102")
-	for _, m := range macs {
-		fmt.Fprintf(f, "{\"t\":%d,\"day\":\"%s\",\"mac\":\"%s\"}\n", now.Unix(), day, m)
-	}
-	if len(macs) == 0 {
-		// 没人在线也要刷新 mtime, 否则下一轮马上又扫一次
-		now2 := time.Now()
-		_ = os.Chtimes(onlineHoursFile, now2, now2)
-	}
+        if st, err := os.Stat(onlineHoursFile); err == nil && now.Sub(st.ModTime()) < onlineHoursEvery {
+                return
+        }
+        if !clockSaneNow(now) {
+                return
+        }
+        b, err := os.ReadFile(dataDir + "/devices.json")
+        if err != nil || len(b) > 8<<20 {
+                return
+        }
+        macs := onlineMACs(b, now.Unix())
+        f, err := os.OpenFile(onlineHoursFile, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+        if err != nil {
+                return
+        }
+        defer f.Close()
+        day := now.Format("20060102")
+        for _, m := range macs {
+                fmt.Fprintf(f, "{\"t\":%d,\"day\":\"%s\",\"mac\":\"%s\"}\n", now.Unix(), day, m)
+        }
+        if len(macs) == 0 {
+                // 没人在线也要刷新 mtime, 否则下一轮马上又扫一次
+                now2 := time.Now()
+                _ = os.Chtimes(onlineHoursFile, now2, now2)
+        }
 }
