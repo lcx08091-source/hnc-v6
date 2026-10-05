@@ -2457,7 +2457,8 @@ func scSectionProcess(c *scCtx) []scItem {
 	if la := c.readTrim("/proc/loadavg"); la != "" {
 		items = append(items, scItem{ID: "loadavg", Label: "系统负载", Status: scInfo, Value: strings.Join(strings.Fields(la)[:3], " ")})
 	}
-	items = append(items, scPowerItem(c)) // v5.22: 功耗汇总(power_stats.go)
+	items = append(items, scPowerItem(c))           // v5.22: 功耗汇总(power_stats.go)
+	items = append(items, scWatchdogActionsItem(c)) // v5.28 A2: 看门狗动作(watchdog_actions.go)
 	return items
 }
 

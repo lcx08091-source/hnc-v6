@@ -481,18 +481,19 @@ func (s *server) powerReport(now time.Time) map[string]interface{} {
 		}
 	}
 	return map[string]interface{}{
-		"ts":             now.Unix(),
-		"sampled_at":     sampledAt,
-		"sample_every_s": int(powerSampleEvery / time.Second),
-		"samples":        len(ring),
-		"activity":       a,
-		"level":          a.computeLevel(),
-		"level_label":    activityLevelLabel[a.computeLevel()],
-		"processes":      procs,
-		"total":          tot,
-		"by_level":       levels,
-		"loops":          loops,
-		"tips":           powerTips(a, procs, tot, f),
+		"ts":               now.Unix(),
+		"sampled_at":       sampledAt,
+		"sample_every_s":   int(powerSampleEvery / time.Second),
+		"samples":          len(ring),
+		"activity":         a,
+		"level":            a.computeLevel(),
+		"level_label":      activityLevelLabel[a.computeLevel()],
+		"processes":        procs,
+		"total":            tot,
+		"by_level":         levels,
+		"loops":            loops,
+		"tips":             powerTips(a, procs, tot, f),
+		"watchdog_actions": readWatchdogActionsRaw(s.hncDir, now), // v5.28 A2: 看门狗动作记账转出(nil = 无数据)
 	}
 }
 
