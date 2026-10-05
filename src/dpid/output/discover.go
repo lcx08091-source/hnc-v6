@@ -528,45 +528,10 @@ func discGroupID(minReg string) string {
 }
 
 func (d *Discoverer) groupsLocked(now int64) []DiscoverGroup {
-	// 1. 强边 + 度数
-	parent := make(map[string]string, len(d.nodes))
-	var find func(string) string
-	find = func(x string) string {
-		p, ok := parent[x]
-		if !ok || p == x {
-			return x
-		}
-		r := find(p)
-		parent[x] = r
-		return r
-	}
-	var strong []discEdgeKey
-	deg := make(map[string]int)
-	for k, e := range d.edges {
-		if discDecay(e.w, e.t, now) >= discEdgeThreshold {
-			strong = append(strong, k)
-			deg[k.a]++
-			deg[k.b]++
-		}
-	}
-	for _, k := range strong {
-		if deg[k.a] > discHubDegree || deg[k.b] > discHubDegree {
-			continue
-		}
-		ra, rb := find(k.a), find(k.b)
-		if ra != rb {
-			if rb < ra {
-				ra, rb = rb, ra
-			}
-			parent[rb] = ra
-		}
-	}
-	// 2. 按根分组
-	byRoot := make(map[string][]*discNode)
-	for reg, n := range d.nodes {
-		r := find(reg)
-		byRoot[r] = append(byRoot[r], n)
-	}
+	// v5.28 B1: 强边过滤 + 枢纽排除 + 并查集合并抽到 discClusterCore
+	// (cluster.go, 纯函数), 供识别自评(dpi_eval discover 段)复用同一套
+	// 聚类决策; Discoverer 行为不变。hubs 线上暂不上报。
+	byRoot, _ := discClusterCore(d.nodes, d.edges, now, discEdgeThreshold, discHubDegree)
 	// 3. 汇总
 	groups := make([]DiscoverGroup, 0, 16)
 	for _, ns := range byRoot {

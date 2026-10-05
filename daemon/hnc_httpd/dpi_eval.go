@@ -131,8 +131,9 @@ type dpiEvalResult struct {
 	TopWrong      []dpiEvalWrong           `json:"top_wrong"`
 	TopUnknown    []dpiEvalUnknown         `json:"top_unknown"`
 	FGTruth       selfFGSummary            `json:"fg_truth"`
-	QUIC          dpiEvalQUIC              `json:"quic"`              // v5.27 T2
-	Startup       *dpiEvalStartup          `json:"startup,omitempty"` // v5.27 T3
+	QUIC          dpiEvalQUIC              `json:"quic"`               // v5.27 T2
+	Startup       *dpiEvalStartup          `json:"startup,omitempty"`  // v5.27 T3
+	Discover      *dpiEvalDiscover         `json:"discover,omitempty"` // v5.28 B1: 新应用发现自评
 	Note          string                   `json:"note"`
 }
 
@@ -449,6 +450,8 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 
 	// v5.27 T3: 启动指纹按天交叉验证(用全部 ≤ 7 天样本, 与 days 无关: 交叉验证至少要 2 天)
 	res.Startup = evalStartup(hncDir, now)
+	// v5.28 B1: 新发现应用(共现聚类)的量化准确率(影子, 只展示)
+	res.Discover = evalDiscover(samples)
 	res.QUIC.JA4Only = qJA4.method(res.QUIC.Samples)
 	res.QUIC.WithQTP = qQTP.method(res.QUIC.Samples)
 

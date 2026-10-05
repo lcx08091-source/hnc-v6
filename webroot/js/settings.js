@@ -527,6 +527,15 @@ function paintEval() {
       (num(su.days) >= 2 ? ' · 切换识别率 ' + pct100(su.switch_rate) + '% · 事件准确 ' + pct100(su.event_accuracy) + '%' + (num(su.switches) ? '（' + num(su.switch_hit) + '/' + num(su.switches) + ' 次切换）' : '') : ' · ' + esc(su.note || '')) +
       '</div><button class="linkish" data-act="startup-list" style="justify-self:start">' + (S.startupOpen ? '收起学会的应用' : '查看学会的应用') + '</button><div id="startup-list">' + (S.startupOpen ? startupListHtml() : '') + '</div>';
   }
+  // v5.28 B1: 新应用发现(影子运行: 共现聚类准确率, 只统计不改动)
+  var dv = r.discover;
+  if (dv && num(dv.samples) > 0) {
+    h += '<div class="note" style="margin-bottom:-2px">新应用发现（实验 · 只统计，不影响识别）</div><div class="note">纯度 ' + pct100(dv.purity) + '% · 完整度 ' + pct100(dv.completeness) + '%（共 ' + num(dv.groups) + ' 组' + (num(dv.hubs) ? ' · 枢纽域名 ' + num(dv.hubs) : '') + '）</div>';
+    var dvs = Array.isArray(dv.variants) ? dv.variants : [];
+    if (dvs.length > 1) {
+      h += '<div class="note">参数对照：' + dvs.map(function (v) { return esc(v.label) + ' ' + pct100(v.purity) + '%/' + pct100(v.completeness) + '%（' + num(v.groups) + ' 组）'; }).join(' · ') + '</div>';
+    }
+  }
   if (r.note) h += '<div class="note">' + esc(r.note) + '</div>';
   if (r.capped) h += '<div class="note warn">今天样本太多，超过单日上限后停止记录了（不影响已有统计）。</div>';
   // 最常认错 / 最常认不出
