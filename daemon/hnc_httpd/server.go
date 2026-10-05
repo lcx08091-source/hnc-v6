@@ -1,8 +1,8 @@
 package main
 
 import (
-	"bytes"
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"log"
 	"net/http"
@@ -103,6 +103,7 @@ func (s *server) handler() http.Handler {
 
 	// 只读 API(被 authMiddleware 保护,2.b 默认 remote_auth_required=false 放行)
 	mux.HandleFunc("/api/health", s.apiHealth)
+	mux.HandleFunc("/api/rollback_ack", s.apiRollbackAck) // v5.29 T3: 横幅「知道了」
 	// v5.9.92: 鉴权身份查询 —— apiHealth 的 rc30.12.30 注释自己给的方案
 	// ("如果未来想恢复 session label, 走独立 /api/whoami 端点 (鉴权)")。
 	// 远程 SPA 的登出按钮因 session_label 删除而恒隐藏, doLogout 白写。
@@ -142,27 +143,27 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/proc_health", s.apiProcHealth)
 	mux.HandleFunc("/api/selfcheck", s.apiSelfcheck) // v5.20: 自检报告(selfcheck.go / selfcheck_api.go)
 	mux.HandleFunc("/api/dpi_rules", s.apiDPIRules)
-	mux.HandleFunc("/api/usage_month", s.apiUsageMonth) // v5.12: 设备本月流量
-	mux.HandleFunc("/api/connections", s.apiConnections) // v5.13: 实时连接(conntrack)
-	mux.HandleFunc("/api/discover", s.apiDiscover)       // v5.15: 未知应用发现
-	mux.HandleFunc("/api/app_usage", s.apiAppUsage)      // v5.16: 按应用的真实流量(conntrack)
-	mux.HandleFunc("/api/app_time", s.apiAppTime)        // v6.x: 应用使用时长 + 时长上限/类别封锁(app_time.go)
-	mux.HandleFunc("/api/dpi_unknown", s.apiDPIUnknown)  // v6.x: 未识别流量 Top(教规则用)
+	mux.HandleFunc("/api/usage_month", s.apiUsageMonth)   // v5.12: 设备本月流量
+	mux.HandleFunc("/api/connections", s.apiConnections)  // v5.13: 实时连接(conntrack)
+	mux.HandleFunc("/api/discover", s.apiDiscover)        // v5.15: 未知应用发现
+	mux.HandleFunc("/api/app_usage", s.apiAppUsage)       // v5.16: 按应用的真实流量(conntrack)
+	mux.HandleFunc("/api/app_time", s.apiAppTime)         // v6.x: 应用使用时长 + 时长上限/类别封锁(app_time.go)
+	mux.HandleFunc("/api/dpi_unknown", s.apiDPIUnknown)   // v6.x: 未识别流量 Top(教规则用)
 	mux.HandleFunc("/api/dpi_fp", s.apiDPIFP)             // v6.x DPI v2: 学到的指纹 + 用户纠正(fp_learn.go)
-	mux.HandleFunc("/api/fg_timeline", s.apiFgTimeline)  // DPI v2: 前台应用时间线 + 前台分钟数(fg_model.go)
-	mux.HandleFunc("/api/dpi_startup", s.apiDPIStartup)  // v5.27 T3: 启动指纹(影子运行, startup_fp.go)
-	mux.HandleFunc("/api/fg_compare", s.apiFgCompare)    // v5.27 T4: 经典 / HMM 前台对比统计(fg_hmm.go)
+	mux.HandleFunc("/api/fg_timeline", s.apiFgTimeline)   // DPI v2: 前台应用时间线 + 前台分钟数(fg_model.go)
+	mux.HandleFunc("/api/dpi_startup", s.apiDPIStartup)   // v5.27 T3: 启动指纹(影子运行, startup_fp.go)
+	mux.HandleFunc("/api/fg_compare", s.apiFgCompare)     // v5.27 T4: 经典 / HMM 前台对比统计(fg_hmm.go)
 	mux.HandleFunc("/api/dpi_rulepack", s.apiDPIRulepack) // v5.27 T6: 我的规则包 摘要 / 导入(rulepack.go)
 	// v5.21: 加密 DNS 策略 + 拦截计数(encdns.go)
 	mux.HandleFunc("/api/encdns", s.apiEncdns)
 	// DPI v2: 可选「HNC DNS 接管」状态 / 逐设备查询日志(dns_takeover.go)
 	mux.HandleFunc("/api/dns", s.apiDNS)
 	mux.HandleFunc("/api/dns/log", s.apiDNSLog)
-	mux.HandleFunc("/api/phone_usage", s.apiPhoneUsage)  // 本机与热点月度流量(按网络/按卡)
+	mux.HandleFunc("/api/phone_usage", s.apiPhoneUsage)   // 本机与热点月度流量(按网络/按卡)
 	mux.HandleFunc("/api/stats_health", s.apiStatsHealth) // v5.21: 统计健康(精确模式/iptables/时钟/分流漏计)
-	mux.HandleFunc("/api/sim", s.apiSim)                 // 模拟环境状态(sim.go)
-	mux.HandleFunc("/api/mac_merge", s.apiMacMerge)      // v5.21: 随机 MAC 疑似同一设备建议 + 别名表(mac_merge.go)
-	mux.HandleFunc("/api/power", s.apiPower)             // v5.22: 功耗自测 + 活动状态 + 各循环当前间隔(power_stats.go)
+	mux.HandleFunc("/api/sim", s.apiSim)                  // 模拟环境状态(sim.go)
+	mux.HandleFunc("/api/mac_merge", s.apiMacMerge)       // v5.21: 随机 MAC 疑似同一设备建议 + 别名表(mac_merge.go)
+	mux.HandleFunc("/api/power", s.apiPower)              // v5.22: 功耗自测 + 活动状态 + 各循环当前间隔(power_stats.go)
 	// v5.0 serve 磁盘 webroot/changelog.html
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
 	// v5.9.9: json-health.html 此前没有路由(死页面), 补上, 与 changelog 同款只读 serve。
@@ -435,7 +436,7 @@ func (s *server) apiWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	tid, _ := r.Context().Value(ctxKeyTokenID).(string)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"token_id":     TokenIDLogPrefix(tid), // 日志前缀形态(前 8 字符), 不回完整 ID
+		"token_id":      TokenIDLogPrefix(tid), // 日志前缀形态(前 8 字符), 不回完整 ID
 		"session_label": tok.Label,
 		"ip_hint":       tok.IPHint,
 		"created":       tok.Created,
@@ -470,6 +471,8 @@ func (s *server) apiHealth(w http.ResponseWriter, r *http.Request) {
 		"status":           "ok",
 		"version":          version,
 		"watchdog_passive": passive,
+		// v5.29 T3: 升级回滚信息(前端顶部横幅; 值域见 rollback.go)
+		"rollback": s.rollbackStatus(),
 	})
 }
 
@@ -760,7 +763,7 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		return false
 	})
 
-	s.limitCtl.annotateDevices(out) // quota / schedule / effective
+	s.limitCtl.annotateDevices(out)   // quota / schedule / effective
 	s.annotateMacMerge(out, namesMap) // v5.21: randomized_mac / merge_suggestion / merged_into
 	return http.StatusOK, map[string]interface{}{
 		"devices":        out,

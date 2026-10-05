@@ -517,7 +517,9 @@ var booting = null;
 function boot(retry) {
   if (booting) return booting;
   if (retry) { S.bootErr = ''; S.connected = false; if (S.page === 'devices') renderDevices(false); if (KSU) loadSecret(true); }
-  booting = api.get('/api/health', null, { timeout: 6000 }).then(function () {
+  booting = api.get('/api/health', null, { timeout: 6000 }).then(function (h) {
+    // v5.29 T3: 升级回滚横幅(数据来自 /api/health 的 rollback 段)
+    try { showRollbackBanner(h && h.rollback); } catch (e) {}
     return Promise.all([loadLive(), loadConfig().catch(function () {}), loadCaps(), loadTemplates(), loadAppLimits()]);
   }).then(function () {
     return loadDevices();
@@ -549,3 +551,33 @@ addEventListener('resize', function () { layoutLens(); syncTab(S.page, true); pl
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () { if (S.theme === 'auto') applyTheme(); });
 boot(false);
 window.__hnc6 = { S: S, go: go, api: api, boot: boot, L: L };   // 调试/截图用
+
+
+// ── v5.29 T3: 升级回滚横幅 ──────────────────────────────────────────
+// 数据: /api/health 的 rollback 段(rollback.go 转出)。rolled 且未 ack 时
+// 显示: 检测到 vX 启动失败, 已自动退回 vY;请把诊断包发给开发者。
+// 「知道了」→ POST /api/rollback_ack(写 data/rollback.ack), 横幅消失。
+function showRollbackBanner(rb) {
+  if (!rb || !rb.rolled || rb.acknowledged) return;
+  var old = document.getElementById('rollback-banner');
+  if (old) old.remove();
+  var bar = document.createElement('div');
+  bar.id = 'rollback-banner';
+  bar.style.cssText = 'position:sticky;top:0;z-index:900;background:#5a3a00;color:#ffd79a;' +
+    'padding:10px 14px;font-size:13px;line-height:1.6;display:flex;gap:10px;align-items:center;flex-wrap:wrap';
+  var txt = document.createElement('span');
+  txt.style.flex = '1';
+  txt.textContent = (rb.from ? '检测到 v' + rb.from + ' 启动失败' : '检测到新版本启动失败') +
+    (rb.to ? ',已自动退回 v' + rb.to : ',已自动回退') + (rb.action ? '(本次仅记录,未回滚)' : '') +
+    ';请把诊断包发给开发者';
+  var okBtn = document.createElement('button');
+  okBtn.textContent = '知道了';
+  okBtn.style.cssText = 'padding:4px 14px;border:0;border-radius:6px;background:#ffd79a;color:#3a2a00;cursor:pointer';
+  okBtn.onclick = function () {
+    api.post('/api/rollback_ack', {}).then(function () { bar.remove(); })
+      .catch(function () { toast('确认失败,请重试'); });
+  };
+  bar.appendChild(txt); bar.appendChild(okBtn);
+  var body = document.body || document.documentElement;
+  body.insertBefore(bar, body.firstChild);
+}

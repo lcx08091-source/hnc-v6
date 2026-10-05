@@ -14,7 +14,19 @@
 # v5.9.3 BUG-009:service.sh 也会被 magiskd 直接拉起(umask=0),而且 WebUI 的
 # "重启后端"是直接 fork service.sh、根本不经过 post-fs-data.sh,所以这里必须
 # 有一份同款的 umask + chmod,不能只在 post-fs-data.sh 收。
-# 取 022 而非 077 的理由见 post-fs-data.sh 同段注释(sync_runtime_from_moddir
+# 取 022 而非 077 的理由见 post-fs-data.sh 同段注释(# v5.29 T3: 升级快照(打包旧运行目录到 .prev) + 钉住检查。
+# rc=3 = 该版本已被钉住(坏版本没换新包) → 整个跳过同步, 直接用 .prev 里
+# 恢复过的旧文件开机。失败(其他非 0)不影响开机: 照常同步。
+_RB=1
+if [ -f "$MODDIR/bin/hnc_rollback.sh" ]; then
+    sh "$MODDIR/bin/hnc_rollback.sh" snapshot "$MODDIR" "$HNC_DIR"; _RB=$?
+    [ "$_RB" = 3 ] && log "rollback: version pinned, skip runtime sync (staying on .prev)"
+else
+    log "rollback WARN: hnc_rollback.sh missing, no upgrade snapshot"
+fi
+if [ "$_RB" != 3 ]; then
+sync_runtime_from_moddir
+fi
 # 的 `cp -rf` 同样不带 -p,077 会把脚本/二进制压到不可执行)。
 umask 022
 
@@ -1171,6 +1183,13 @@ fi
         # rc30.12.29 (P1.7): hnc_httpd / hotspotd 的检查已移除 — 委托给 watchdog.
         # 之前的 sentinel 在这里直接 launch_httpd_safe / nohup hotspotd, 跟 watchdog
         # ensure_httpd_running / check_services 并发, 触发过双进程事故.
+
+        # v5.29 T3: 升级观察期(哨兵是 shell, 不依赖新版 Go 二进制能不能跑)。
+        # snapshot 建了 data/rollback.observing 才有一轮; observe 自己判窗口
+        # (10 分钟)与触发条件(连续 6 败 / 崩溃重启 ≥ 5 → 恢复 .prev + 钉住)。
+        if [ -f "$HNC_DIR/data/rollback.observing" ] && [ -f "$HNC_DIR/bin/hnc_rollback.sh" ]; then
+            sh "$HNC_DIR/bin/hnc_rollback.sh" observe "$HNC_DIR"
+        fi
 
         sleep 30
     done

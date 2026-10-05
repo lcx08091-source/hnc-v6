@@ -2459,6 +2459,7 @@ func scSectionProcess(c *scCtx) []scItem {
 	}
 	items = append(items, scPowerItem(c))           // v5.22: 功耗汇总(power_stats.go)
 	items = append(items, scWatchdogActionsItem(c)) // v5.28 A2: 看门狗动作(watchdog_actions.go)
+	items = append(items, scRollbackItem(c)) // v5.29 T3: 升级状态(回滚横幅的同源数据)
 	return items
 }
 
