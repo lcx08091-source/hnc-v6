@@ -222,7 +222,7 @@ func clsactWantedCached() bool {
 // rulesClsactModeOn rules.json 的 clsact_bpf_mode(guard_mode 的 on 判定,
 // 含旧键兼容)。
 func rulesClsactModeOn() bool {
-	b, err := os.ReadFile(dataDir + "/rules.json")
+	b, err := os.ReadFile(natDataDir + "/rules.json")
 	if err != nil {
 		return false
 	}

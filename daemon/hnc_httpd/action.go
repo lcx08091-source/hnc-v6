@@ -361,6 +361,9 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 	case "selfcheck_run", "selfcheck_export": // v5.20: 正常由 handleAction 在锁外处理, 这里兜底
 		r, _ := dispatchSelfcheckAction(s, action, p)
 		return r
+	case "compat_report", "capture_record", "capture_record_stop": // v5.29 T5/T4: 同上, 锁外分发, 这里兜底
+		r, _ := dispatchSelfcheckAction(s, action, p)
+		return r
 	case "dpi_rules_reset":
 		return actionDPIRulesReset(hncDir)
 	case "dpi_rules_update":
