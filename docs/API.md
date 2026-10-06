@@ -2193,3 +2193,36 @@ GET `/api/encdns`:
 
 - 能力探测:启动首轮 / 网卡变化 / ≥ 6 小时一次(Go 侧 `capProbeGate`,与 `capability_probe.sh` 的 6h 节流双保险)。
 - 健康且不在恢复期:`httpd_drift` 5 分钟一次、`tc_uplink_healthy` 3 分钟一次(不健康 / 刚恢复照旧每轮);`check_health` 仍每轮。
+
+## 27. v5.29 变更
+
+**新 action**
+
+- `compat_report`(无参数):生成 `exports/hnc-compat-YYYYMMDD.json` 并返回 `{name, path, summary:{ok,warn,fail}}`。白名单收集(模块版本 / Android 三键 / 内核 / root 方案 / capabilities / qdisc_caps / offload 三键 / dpid 选择 / 自检状态计数 / 看门狗动作摘要);**不含** MAC / IP / SSID / 密码 / 设备名 / 序列号 / IMEI / token(测试断言)。文件出现在 GET `/api/exports`。
+- `capture_record {minutes}`:`minutes` 1~30(默认 10),写 `run/capture_record.request`,dpid 下一轮(≤2 秒)开始录握手类事件包;返回 status JSON(requested / minutes / privacy 提示)。
+- `capture_record_stop`(无参数):写 `run/capture_record.stop`,dpid 停录并搬运 pcap 到 `exports/`。
+
+**新字段 / 新段**
+
+- GET `/api/health`:
+  - 新增 `rollback` 段 —— `null`(没回滚过)或 `{rolled:true, from, to, reason, at, action("rolled_back"|"recorded_only"|"no_snapshot"), acknowledged(data/rollback.ack 存在), pinned}`;前端顶部横幅 +「知道了」按钮(POST `/api/rollback_ack`)。
+  - 新增 `capture_rec` 段 —— 录制中时 `{recording:true, started_at, minutes, bytes, path}`,未在录时字段消失(文件 `run/capture_rec/status.json`)。
+- POST `/api/rollback_ack`:横幅「知道了」,写 `data/rollback.ack`(0600,空文件存在即语义);已存在时幂等 200。
+- `run/watchdog_actions.json` 顶层新增 `native_mismatch`(对象,键 = 检查项 probe/health,值 = 24 小时内对照不一致次数)—— 进 `/api/power` 的 `watchdog_actions` 段与自检「看门狗动作」行。
+- 新动作名进记账:`offload_guard_plan`(M3 调度,含 30 秒超时与进程组击杀)。
+
+**自检(报告)新增行**
+
+- 「升级状态」(`rollback`):未回滚 = 正常;回滚未确认 = 警告(提示确认横幅 + 导出诊断包);已确认 = 正常。
+
+**开关文件清单(全部「存在即生效」,删掉即恢复)**
+
+- `run/wd_native.disabled`:看门狗四项检查退回纯 shell 路径(对照机制也停)。
+- `run/wd_m3.disabled`:Go 看门狗不接管 offload / clsact 调度,service.sh 下次开机照旧拉两个 shell 守护。
+- `data/rollback.disabled`:回滚只记录(`recorded_only`)不执行。
+- `run/capture_record.request` / `run/capture_record.stop`:录制启停(内容 = 分钟数)。
+
+**行为变化(不影响 API 形状)**
+
+- 看门狗 probe / check_health / httpd_drift / tc_uplink_healthy 的判断改 Go 原生(`nlroute` netlink 只读 + iptables `-S` 直接 exec);每 30 分钟跑一次 shell 版对照,不一致以 shell 为准并计 `native_mismatch`,连续 3 次该项退回 shell。原生全绿时动作调用的预算:sh ≤ 70 次/小时。
+- `service.sh`:Go 看门狗在时写 `run/offload_guard.owner=watchdog`,不再拉起 `hnc_offload_guard.sh daemon` / `hnc_clsact_watchdog.sh` 常驻循环;`hnc_offload_guard.sh` 的 `daemon` / `ensure_daemon` 认 owner 文件让位。cleanup 停止时清 owner。

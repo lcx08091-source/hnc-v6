@@ -16,7 +16,7 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | **前台接待**<br>`hnc_httpd` | `daemon/hnc_httpd/` | Go,约 3.7 万行(不含测试) | 网页界面的后端。收到你的点击 → 检查参数 → 调脚本执行 → 回结果;同时汇总设备、统计、识别结果给界面。端口 8443 / 8444 |
 | **侦察员**<br>`hnc_dpid` | `src/dpid/` | Go,约 2.1 万行 | 抓热点上的网络包头(DNS、TLS 握手、QUIC 首包、HTTP),认出域名和指纹,写给 httpd 用。**只看握手、不看内容** |
 | **门卫**<br>`hotspotd` | `daemon/hotspotd/` | C,约 1.2 万行 | 盯热点开关、谁连上来了(ARP / DHCP / mDNS 拿设备名)、定时任务调度 |
-| **巡逻员**<br>`hnc_watchdog` | `src/dpid/cmd/hnc_watchdog/` | Go | 每 60 秒检查:进程还活着吗、tc 规则还在吗、配额 / 分时段到点了吗;坏了就修。`bin/watchdog.sh` 只保留被 `action` 调用的修复函数,主循环已是 Go 版(v5.26) |
+| **巡逻员**<br>`hnc_watchdog` | `src/dpid/cmd/hnc_watchdog/` | Go | 每 60 秒检查:进程还活着吗、tc 规则还在吗、配额 / 分时段到点了吗;坏了就修。`bin/watchdog.sh` 只保留被 `action` 调用的修复函数,主循环已是 Go 版(v5.26);v5.29 起四项检查的判断原生化(`nlroute` + `native.go`),offload / clsact 两个常驻 shell 守护也并进来调度(`offload_sched.go`) |
 | **侦察员的保镖(三选一)**<br>`hnc_dpid_guard` / `dpid_supervisor` / `hnc_launcher` | `bin/hnc_dpid_guard.sh` / `src/dpid/cmd/dpid_supervisor/` / `src/launcher/` | Shell / Go / C | 把 dpid 拉起来、挂了重启。由 `run/dpid_launcher.choice` 指定的「当前守护者」负责,选定后其他守护不再插手(v5.26 T2) |
 | **执行队**<br>各种 `bin/*.sh` | `bin/` | Shell,约 2.3 万行 | 真正去改内核规则的:`tc_manager.sh`(限速 / 延迟队列)、`iptables_manager.sh`(打标记 / 封锁)、`apply_device_rule.sh`(一台设备的完整规则)、各种 `*_sync.sh` |
 
@@ -46,6 +46,11 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | 新应用建议名(v5.28) | `daemon/hnc_httpd/api_discover_suggest.go` | `suggestForGroup` 纯函数;来源优先级 apk > 启动指纹 > 证书 > JA4 > 主域;`/api/discover` 每组带 `suggest` |
 | 我的规则包(v5.27) | `daemon/hnc_httpd/rulepack.go` | 导出汇总 / 导入校验 / 冲突跳过 / 落地(`_imported.json`、`fp_imported.json`、`startup_fp_imported.json`)/ 清除 |
 | v2fly 规则导入(v5.27) | `tools/import_v2fly.py` + `tools/v2fly_map.json` | 只在开发机跑,产物 `data/dpi_rules.d/46-v2fly-*.json`,之后 `dpi_rules_split.py sync-legacy` |
+| 看门狗检查原生读内核(v5.29) | `src/dpid/nlroute` + `src/dpid/cmd/hnc_watchdog/native.go` | nlroute 纯 syscall 只读 NETLINK_ROUTE(qdisc dump);四项检查(probe / health / httpd drift / uplink)判断在 Go,iptables `-S` 由 Go 直接 exec;30 分钟 shell 对照 + `native_mismatch` + `run/wd_native.disabled` 开关 |
+| offload / clsact 调度(v5.29) | `src/dpid/cmd/hnc_watchdog/offload_sched.go` | plan 动作 + 早醒条件 + 门控 60 秒缓存;`run/offload_guard.owner=watchdog` 时 shell 守护让位;`run/wd_m3.disabled` 开关 |
+| 升级自检 + 自动回滚(v5.29) | `bin/hnc_rollback.sh` + `data/rollback.*` | snapshot / observe(哨兵 30 秒一轮, 只看核心进程)/ 回滚 + 钉住;httpd `rollback.go` 转出横幅 + ack + 自检行;`data/rollback.disabled` 只记录不回滚 |
+| 兼容性报告(v5.29) | `daemon/hnc_httpd/compat_report.go` | action `compat_report`,白名单字段收集(不含 MAC / IP / SSID / 密码 / token),产物 `exports/hnc-compat-*.json` |
+| 流量录制 / 回放(v5.29) | `src/dpid/capture/recorder.go` + `src/dpid/cmd/dpid_replay` | 只录 DNS / TLS ClientHello / QUIC Initial / HTTP 请求头事件包(LINKTYPE_RAW, 20 MB / 分钟数上限);回放复用同一套解析函数, 合成 pcap 期望输出进 `go test` |
 
 ---
 

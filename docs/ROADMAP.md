@@ -14,7 +14,7 @@
 | **v5.26** | 去重收口(rc1 ✅) | 进程检测 / 热点网卡 / 时钟规则 / 月用量 / 告警写入各只留一份「权威实现」(共享包 procfind / ifacehint / clockhwm / limitCtl / alert.Append);看门狗只留 Go 主循环、dpid 守护由 `run/dpid_launcher.choice` 决定;删除从未上线的 C 版 JSON 工具 | 每块功能一处修好即真修好;月用量三处数字统一 |
 | **v5.27** | DPI 新识别器 + 我的规则包(rc1 ✅,工作文档 `docs/WORK-v5.27.md`) | 规则地基:`bin/dpi_rules_sync.sh` 重启保留 99 / `_*.json`、97 跟模块版本走;规则加载器「挂靠」(`_parent_rule_id`),自动扩展子域名并进父应用;**QUIC 传输参数指纹**(`qtp1_…`,只在指纹学习内部细分,先 QTP 后回落);**启动指纹**(影子运行,只产出启动事件 + 按天交叉验证的自评);**HMM 前台**(影子运行,默认经典,可在设置里切换;`/api/fg_compare` 对比来回跳);**规则库扩充**(v2fly 清单,应用 189 → 417,`pkg_app_map` 60 → 80);**导出 / 导入我的规则包**(不含 MAC / IP,冲突跳过,可一键清除) | 识别自评里 QUIC / 启动指纹的数字;前台引擎对比(来回跳次数);导出包在另一台导入后生效 |
 | **v5.28** | 防线 + DPI 自学习(rc1 ✅,工作文档 `docs/WORK-v5.28.md`) | **防线**:看门狗调用预算测试(能力探测节流搬进 Go、健康时附带检查放宽)、动作失败 / 耗时记账(126 / 127 / 超时进自检)、哨兵改用 pidfile + `/proc/<pid>/cmdline` 判进程、老坑自动检查(时区 / toybox grep / ps / 告警写入 / Tab);**自学习**(影子运行):「新发现的应用」聚类准确率自评、自动起名建议、流量形状轻量分类器(与手工规则对比)、交互节拍(人在用 / 在看 / 后台) | 热点空转功耗 < 150 CPU 秒/时;自检「看门狗动作」正常;识别自评里聚类纯度 / 分类器准确率 |
-| **v5.29** | 稳定性 + 迁移 M2/M3 | **迁移**:看门狗每分钟的检查改为 Go 直接读内核(M2)、offload / clsact 两个 shell 守护并进 Go 看门狗(M3);**升级自检 + 自动回滚**(热点 / 限速 / WebUI 异常则退回上一版);**流量录制回放**(真机只录头部与元数据,离线回放做 DPI 回归);兼容性报告标准化(可选匿名导出) | 刷一次故意坏的包验证回滚;用你录的一段流量跑回放 |
+| **v5.29** | 稳定性 + 迁移 M2/M3(rc1 ✅,工作文档 `docs/WORK-v5.29.md`) | **迁移**:看门狗每分钟的检查改为 Go 直接读内核(M2)、offload / clsact 两个 shell 守护并进 Go 看门狗(M3);**升级自检 + 自动回滚**(热点 / 限速 / WebUI 异常则退回上一版);**流量录制回放**(真机只录头部与元数据,离线回放做 DPI 回归);兼容性报告标准化(可选匿名导出) | 刷一次故意坏的包验证回滚;用你录的一段流量跑回放 |
 | **v5.30** | 应用感知 QoS(初版)+ 迁移 M4/M5 | **迁移**:设备发现(hotspotd)Go 化、dpid 守护收成一个(M4 / M5);用识别结果给队列分优先级:通话 / 游戏 > 前台视频 > 浏览 > 后台下载;**默认关闭、可逐台开启**;先不做 QoE 闭环 | 开热点时一台打游戏、一台下载,看延迟抖动 |
 | **v5.31** | 收尾与正式版 | 修真机反馈;瘦身(删 v5.28 下线的旧识别、合并重复的 shell;~~移除 shell 版看门狗主循环~~已在 v5.26 完成);文档;**把 5.19 以来的 rc 收敛成一个正式版** | 真机全功能回归 |
 
@@ -30,8 +30,8 @@
 | 编号 | 迁移什么 | 现在 | 迁成 | 计划版本 | 预期收益 |
 |---|---|---|---|---|---|
 | M1 | 看门狗每轮调用的节流与记账 | 每轮 fork 5 次 `watchdog.sh`,返回码大多被丢弃 | 调用预算测试 + 动作失败 / 耗时记账 + 能力探测节流在 Go | **v5.28 ✅**(A1/A2,预算与记账落地;M2 netlink 读内核仍留 v5.29) | 防止再出「每分钟跑一次重活」;错误可见 |
-| M2 | `probe_hotspot` / `check_health` / `httpd_drift` / `tc_uplink_healthy` | shell 动作,每次起进程跑多条 iptables / tc 命令 | Go 直接读内核(netlink 读 qdisc / 网卡;iptables 一次 `-S` 批量读),shell 版保留为兜底 | v5.29 | 看门狗 → 个位数 CPU 秒/时 |
-| M3 | `hnc_offload_guard.sh`、`hnc_clsact_watchdog.sh` | 两个常驻 shell 循环 | Go 看门狗内的两个任务(共用调度器) | v5.29 | 少 2 个常驻进程 |
+| M2 | `probe_hotspot` / `check_health` / `httpd_drift` / `tc_uplink_healthy` | shell 动作,每次起进程跑多条 iptables / tc 命令 | Go 直接读内核(netlink 读 qdisc / 网卡;iptables 一次 `-S` 批量读),shell 版保留为兜底 | **v5.29 ✅**(nlroute + native.go + 30 分钟对照 + wd_native.disabled 开关) | 看门狗 → 个位数 CPU 秒/时 |
+| M3 | `hnc_offload_guard.sh`、`hnc_clsact_watchdog.sh` | 两个常驻 shell 循环 | Go 看门狗内的两个任务(共用调度器) | **v5.29 ✅**(offload_sched.go + owner 让位 + wd_m3.disabled 开关) | 少 2 个常驻进程 |
 | M4 | 设备发现 `hotspotd`(C) | 独立 C 进程,读 neigh / DHCP / mDNS | Go(netlink 订阅邻居表),mDNS 名字解析照搬 | v5.30 | 少 1 个进程,统一调度 |
 | M5 | dpid 守护(C launcher / shell guard / Go supervisor 三选一 + 哨兵) | 4 层互相盯 | 只留 C launcher(ColorOS 上 Go 起子进程会被拦)+ Go 看门狗;删 shell guard 与哨兵循环 | v5.30 | 守护链 4 层 → 2 层 |
 | M6 | 运行状态与统计的几十个 JSON 文件 | 各写各的,靠原子改名 | SQLite(纯 Go 实现要加依赖、或 cgo + NDK,届时二选一) | 6.0 | 根治并发写与文件损坏 |

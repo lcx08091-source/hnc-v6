@@ -14,6 +14,22 @@
 
 ---
 
+## [5.29.0-rc1] - 2026-10-06
+
+**预览版 · 原生化 + 可靠性**:这一版把 v5.26 实测的「每轮起 sh」开销收掉(看门狗四项检查 + 两个常驻 shell 循环改 Go 调度),并给「刷了坏包」和「不同 ROM 兼容性」两个老大难配上自动回滚与一键脱敏报告;DPI 改动第一次有了录制/回放的自动化回归。
+
+### Added
+
+- **看门狗检查原生化(M2)**:probe / check_health / httpd drift / uplink 四项的「判断」搬进 Go(新 `nlroute` 包纯 syscall 只读 netlink,`native.go` 逐分支对应 shell 语义并注明行号);「动手」仍走 shell。原生全绿时 sh 调用 ≤ 70 次/小时(v5.28 为 120)。每项每 30 分钟跑一次 shell 版对照,不一致以 shell 为准并计 `native_mismatch`(连续 3 次该项退回 shell)。开关:`run/wd_native.disabled`。
+- **offload / clsact 改 Go 调度(M3)**:两个常驻 shell 循环由 Go 看门狗的 `offload_sched.go` 调度(plan 动作 + 早醒条件 + 门控缓存 60 秒 + `hnc_clsact_ctl check` 直接 exec),常驻进程少 2 个。`service.sh` 写 `run/offload_guard.owner=watchdog` 后 shell 守护让位。开关:`run/wd_m3.disabled`(下次开机生效)。
+- **升级自检 + 自动回滚**:升级时把旧运行目录打包到 `.prev/`,开机后 10 分钟观察期(哨兵 shell 每轮查 httpd 活着 + 8444 在听 + 看门狗活着,不依赖 curl/nc);连续 6 次起不来或崩溃重启 ≥ 5 次自动退回上一版、钉住坏版本(换新包自动解钉)。WebUI 顶部横幅告知 +「知道了」;自检新增「升级状态」行。只看核心进程,不看网络规则。开关:`data/rollback.disabled`。
+- **兼容性报告**:action `compat_report` 一键导出脱敏 JSON(模块版本/机型/内核/root 方案/能力布尔/自检状态计数/看门狗动作摘要),白名单式收集,夹具断言 MAC/IP/SSID/密码/IMEI/token 搜不到。
+- **流量录制 / 回放(DPI 回归)**:`capture_record {minutes}`(1~30 分钟,单文件 20 MB 上限,只录 DNS / TLS ClientHello / QUIC Initial / HTTP 请求头事件的原始包)→ `exports/` 里的 pcap;新命令 `dpid_replay` 读 pcap 送进同一套解析函数输出事件 JSON,合成 pcap 的期望输出进 `go test`(以后改解析器,输出变化必须同时更新期望文件)。界面明示:录制内容包含连接设备访问的域名,只存本机、请勿随意分享。
+
+### Changed
+
+- 动作记账新增 `offload_guard_plan`(调度走动作体系)与 `native_mismatch` 顶层字段(对照机制)。
+
 ## [5.28.0-rc1] - 2026-10-05
 
 **预览版 · 防线 + DPI 自学习**:这一版做两件事。**A 防线**:把 v5.26 / v5.27 两次真机事故(热点空转 530 CPU 秒/小时、`tc_uplink_healthy` 静默 127 没人发现)以及更早的进程风暴,各变成一道带回归测试的防线。**B 自学习**:「新发现的应用」的聚类准确率终于有数字(纯度 / 完整度),新应用自动起名有建议与依据,规则库认不出的连接能按流量形状猜大类,前台模型输出「人在用 / 在看 / 后台」的节拍。**B 部分全部影子运行 —— 只算、只展示,不改任何识别结果。**
