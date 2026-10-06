@@ -374,6 +374,8 @@ document.addEventListener('click', function (e) {
     case 'sc-run': scRun(); break;
     case 'sc-export': scExport(a); break;
     case 'compat-report': compatExport(a); break;
+    case 'rec-start': recStart(a); break;
+    case 'rec-stop': recStop(a); break;
     case 'clsact-check': busyWhile(a, clsactCheck()); break;
     case 'clsact-repair': busyWhile(a, api.action('clsact_repair', {}, { timeout: 20000, maxTime: 18 })).then(function () { toast('已尝试修复'); return clsactCheck(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'changelog': showChangelog(); break;

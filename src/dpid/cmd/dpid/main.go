@@ -142,6 +142,11 @@ func main() {
 		log.Fatalf("mkdir run_dir %s: %v", cfg.RunDir, err)
 	}
 
+	// v5.29 T4: 流量录制(只录握手类事件包, 见 capture/recorder.go)。
+	// exports 根 = run_dir 的上两级(run/ 的父目录就是 HNC 根)。
+	_hncRoot := filepath.Dir(filepath.Clean(cfg.RunDir))
+	capture.DefaultRecorder.Store(capture.NewRecorder(_hncRoot, cfg.RunDir))
+
 	if *apkScanOnce {
 		res := appmeta.NewResolver("/data/local/hnc/etc/app_labels.json")
 		sc := apkscan.New(apkscan.Options{OutPath: filepath.Join(cfg.RunDir, apkDomainsFile), Label: res.Display, PerAPKSleep: -1})

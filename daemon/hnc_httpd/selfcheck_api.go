@@ -152,6 +152,11 @@ func dispatchSelfcheckAction(s *server, action string, p map[string]string) (act
 		return actionSelfcheckExport(s.hncDir, p), true
 	case "compat_report": // v5.29 T5: 兼容性报告(脱敏, 白名单收集)
 		return actionCompatReport(s), true
+	case "capture_record", "capture_record_stop": // v5.29 T4: 流量录制
+		if resp, ok := actionCaptureRecordDispatch(s, action, p); ok {
+			return resp, true
+		}
+		return actionResp{}, false
 	}
 	return actionResp{}, false
 }

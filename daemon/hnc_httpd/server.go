@@ -473,6 +473,8 @@ func (s *server) apiHealth(w http.ResponseWriter, r *http.Request) {
 		"watchdog_passive": passive,
 		// v5.29 T3: 升级回滚信息(前端顶部横幅; 值域见 rollback.go)
 		"rollback": s.rollbackStatus(),
+		// v5.29 T4: 流量录制状态(录制结束文件消失, 前端停止轮询)
+		"capture_rec": captureRecordStatus(s.hncDir),
 	})
 }
 

@@ -893,6 +893,8 @@ function scBody() {
   h += '<div class="sc-exp"><span class="tx" style="flex:1;min-width:0"><div class="t" style="font-size:14px;font-weight:600">打码 MAC / IP</div><div class="note">导出给别人看时建议打开</div></span>' + toggle(SC.redact, 'id="sc-redact" data-local="sc-redact" aria-label="打码 MAC/IP"') + '</div>';
   h += '<div class="btns" style="margin-top:10px"><button class="btn sec press" data-close style="flex:1">关闭</button><button class="btn pri press" data-act="sc-export" style="flex:1.4">' + ico('down') + '导出报告</button></div>';
   h += '<div class="btns" style="margin-top:6px"><button class="btn sec press" data-act="compat-report" style="flex:1">' + ico('down') + '导出兼容性报告(脱敏)</button></div>';
+  h += '<div style="margin-top:6px"><button class="btn sec press" data-act="rec-start" style="flex:1">' + ico('rec') + '录制 10 分钟握手流量(DPI 回归)</button></div>';
+  h += '<div id="rec-hint" style="margin-top:4px;font-size:12px;opacity:.7">录制内容包含连接设备访问的域名,只存本机、请勿随意分享。录完自动出现在「导出」列表。</div>';
   return h;
 }
 function paintSc() {
@@ -998,4 +1000,33 @@ function compatExport(btn) {
     toast('报告已生成 · ' + name);
   }).catch(function (e) { toast(errText(e), 'err'); })
   .then(function () { btn.disabled = false; });
+}
+
+/* v5.29 T4: 流量录制(DPI 回归): capture_record / capture_record_stop + 状态轮询 */
+var REC = { timer: 0 };
+function recStart(btn) {
+  api.action('capture_record', { minutes: '10' }, { timeout: 12000 }).then(function () {
+    toast('开始录制(最长 10 分钟)'); recPoll();
+    if (REC.timer) clearInterval(REC.timer);
+    REC.timer = setInterval(recPoll, 5000);
+  }).catch(function (e) { toast(errText(e), 'err'); });
+}
+function recPoll() {
+  api.getSafe('/api/health', null, {}).then(function (h) {
+    var r = h && h.capture_rec;
+    var hint = document.getElementById('rec-hint');
+    if (!r || !r.recording) {
+      if (REC.timer) { clearInterval(REC.timer); REC.timer = 0; }
+      if (hint) hint.textContent = '未在录制。录制内容包含连接设备访问的域名,只存本机、请勿随意分享。';
+      return;
+    }
+    var left = Math.max(0, Math.round((r.minutes * 60 - (Date.now() / 1000 - (r.started_at || 0))) / 60));
+    var mb = (r.bytes || 0) / 1048576;
+    if (hint) hint.textContent = '录制中 · 剩余约 ' + left + ' 分钟 · 已 ' + mb.toFixed(1) + ' MB(上限 20 MB)';
+    if (typeof S !== 'undefined' && S && S.page !== 'settings' && REC.timer) { clearInterval(REC.timer); REC.timer = 0; }
+  });
+}
+function recStop() {
+  api.action('capture_record_stop', {}, { timeout: 12000 }).then(function () { toast('停止中,文件稍后出现在「导出」列表'); recPoll(); })
+    .catch(function (e) { toast(errText(e), 'err'); });
 }

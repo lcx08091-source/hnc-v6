@@ -206,3 +206,14 @@ func classifySubCategory(r l3Rule, remoteIP net.IP, proto matchProto, port uint1
 	}
 	return "", "", false
 }
+
+// LookupHostClass v5.29 T4: dpid_replay 的分类导出(与在机 bumpLabel /
+// self_attrib 用的同一 classifyHost, 不复制逻辑)。hit=false = 没规则文件
+// (开发机)或不匹配。
+func LookupHostClass(host string) (class string, hit bool) {
+	r, ok := classifyHost(host)
+	if !ok {
+		return "", false
+	}
+	return r.Category, true
+}

@@ -443,6 +443,11 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 				// ovnetX = bridged Ether-class all land here.
 				ev, res = parsePacket(h.buf[:n], time.Now())
 			}
+			// v5.29 T4: 录制(只录握手类事件包; 非阻塞, 没在录时是纯 nil 检查)
+			ethLink := linkType != arphrdRawIP && linkType != arphrdNone
+			if rec := DefaultRecorder.Load(); rec != nil {
+				rec.(*Recorder).Offer(ethLink, h.buf[:n], ev)
+			}
 			switch res {
 			case ParseOK:
 				switch ev.Kind {
