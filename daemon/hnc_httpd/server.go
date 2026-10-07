@@ -587,8 +587,9 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 			}
 			if rule, ok := ruleRaw.(map[string]interface{}); ok {
 				// v5.11: +whitelist(设备卡的白名单开关回读; 此前从不返回)
+				// v5.30 T4: +app_qos(按应用分优先级)
 				for _, k := range []string{"mark_id", "down_mbps", "up_mbps", "delay_ms",
-					"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled", "sqm_enabled", "whitelist"} {
+					"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled", "sqm_enabled", "whitelist", "app_qos"} {
 					if v, exists := rule[k]; exists {
 						merged[k] = v
 					}
@@ -677,7 +678,7 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		if rule != nil {
 			// v5.11: 虚行也带 sqm_enabled / whitelist, 离线设备的开关状态不再丢
 			for _, k := range []string{"ip", "mark_id", "down_mbps", "up_mbps", "delay_ms",
-				"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled", "sqm_enabled", "whitelist"} {
+				"jitter_ms", "loss_pct", "limit_enabled", "delay_enabled", "sqm_enabled", "whitelist", "app_qos"} {
 				if v, exists := rule[k]; exists {
 					merged[k] = v
 				}

@@ -118,6 +118,10 @@ func actionDelaySet(hncDir string, p map[string]string) actionResp {
 	// hotfix16.9: fail fast when netem/HTB path is known unsupported.
 	// The current tc_manager netem implementation needs HTB leaf classes.
 	if delay > 0 || jitter > 0 || loss > 0 {
+		// v5.30 T4: 与「按应用分优先级」互斥(两者都要占用下行叶子队列)
+		if deviceAppQosOn(hncDir, mac) {
+			return actionResp{OK: false, Error: "conflict", Detail: "这台设备开着按应用分优先级; 两者都要占用下行队列, 先关掉它再设延迟"}
+		}
 		if supported, known := tcHTBSupported(hncDir); known && !supported {
 			return actionResp{OK: false, Error: "unsupported", Detail: "tc_htb=false; delay path requires HTB leaf classes"}
 		}

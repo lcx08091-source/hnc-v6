@@ -408,6 +408,8 @@ function isJunkName(s) {
   if (!s || /^[0-9]+$/.test(s)) return true;
   return ['null', '(null)', 'nil', 'none', '(none)', 'undefined', 'unknown', 'localhost', 'localhost.localdomain', '*', '-'].indexOf(s.toLowerCase()) >= 0;
 }
+/* v5.30 T4: 按应用分优先级(rules.json devices[mac].app_qos; 旧后端没有这个字段 → 关) */
+function appQosOf(d) { return d.app_qos === true || d.app_qos === 'true'; }
 /* 设备显示名: 主机名 > name > 厂商 > MAC; 手动命名原样用, 其余跳过垃圾名 */
 function devName(d, mac) {
   var hn = d.hostname_src === 'manual' ? d.hostname : (isJunkName(d.hostname) ? '' : d.hostname);
@@ -422,7 +424,7 @@ function mapDevice(d) {
     blocked: d.status === 'blocked', online: active && d.online === true,
     down: num(d.down_mbps), up: num(d.up_mbps), limitOn: d.limit_enabled !== false && (num(d.down_mbps) > 0 || num(d.up_mbps) > 0),
     delay: num(d.delay_ms), jitter: num(d.jitter_ms), loss: num(d.loss_pct),
-    sqm: d.sqm_enabled === true || d.sqm_enabled === 'true', wl: d.whitelist === true || d.whitelist === 'true',
+    sqm: d.sqm_enabled === true || d.sqm_enabled === 'true', wl: d.whitelist === true || d.whitelist === 'true', appQos: appQosOf(d),
     rx: 0, tx: 0, apps: Array.isArray(d.dpi_apps) ? d.dpi_apps : [], live: Array.isArray(d.live_apps) ? d.live_apps : [], call: d.live_call && d.live_call.label ? d.live_call : null,
     limitMode: d.limit_apply_mode || '', delayMode: d.delay_apply_mode || '', applyError: d.apply_error || '',
     mark: d.mark_id, iface: d.iface || '',

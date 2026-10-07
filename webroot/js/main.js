@@ -207,6 +207,7 @@ document.addEventListener('click', function (e) {
     if (ta === 'wl-mode') { setWhitelistMode(nv, q); return; }
     if (!tc.d) return;
     if (ta === 'sqm') devAct(tc.d.mac, function () { return api.action('rule_sqm', { mac: tc.d.mac, enabled: String(nv) }); }, nv ? '已开启低延迟模式' : '已关闭低延迟模式', q);
+    if (ta === 'appqos') devAct(tc.d.mac, function () { return api.action('app_qos_set', { mac: tc.d.mac, enabled: String(nv) }); }, nv ? '已开启按应用分优先级（约 3 秒内生效）' : '已关闭按应用分优先级', q);
     if (ta === 'wl') devAct(tc.d.mac, function () { return api.action('device_whitelist_set', { mac: tc.d.mac, enabled: String(nv) }); }, nv ? tc.d.name + ' 已加入白名单' : tc.d.name + ' 已移出白名单', q);
     return;
   }

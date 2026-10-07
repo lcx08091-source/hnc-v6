@@ -337,6 +337,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionHotspotSave(hncDir, p)
 	case "whitelist_set":
 		return actionWhitelistSet(hncDir, p)
+	case "app_qos_set": // v5.30 T4: 按应用分优先级(action_app_qos.go)
+		return actionAppQosSet(hncDir, p)
 	// v5.11: 新 WebUI(v6) 前后端对齐补齐的动作, 取代旧前端直接 shell 写状态
 	case "device_whitelist_set":
 		return actionDeviceWhitelistSet(hncDir, p)

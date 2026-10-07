@@ -231,6 +231,7 @@ leaf_has_active_netem() {
 
 sqm_leaf_replace() {
     local dev=$1 class_id=$2 leaf_handle=$3 kind=${4:-}
+    app_qos_owns_class "$dev" "$class_id" && return 0  # v5.30 T4: 叶子在子 class 上
     [ -n "$kind" ] || kind=$(sqm_preferred_leaf)
     case "$kind" in
         fq_codel)
@@ -248,6 +249,7 @@ sqm_leaf_replace() {
 
 netem_leaf_replace_zero() {
     local dev=$1 class_id=$2 leaf_handle=$3
+    app_qos_owns_class "$dev" "$class_id" && return 0  # v5.30 T4: 叶子在子 class 上
     # rc18: generous limit (assume high rate) so the unlimited default class is
     # never the bottleneck; per-device classes get this re-tuned to their actual
     # rate by tune_leaf_netem_limit right after set_rate_only.
@@ -302,8 +304,9 @@ lowlat_chain_default() {
 # 成功: LOWLAT_APPLIED=<kind>, return 0。链上全失败 return 1(不碰 pfifo)。
 lowlat_leaf_set() {
     local dev=$1 parent=$2 handle=$3 chain=${4:-} op=${5:-replace} k
-    [ -n "$chain" ] || chain=$(lowlat_chain)
     LOWLAT_APPLIED=""
+    app_qos_owns_class "$dev" "${parent#1:}" && return 0  # v5.30 T4: 叶子在子 class 上
+    [ -n "$chain" ] || chain=$(lowlat_chain)
     for k in $chain; do
         case "$k" in
             cake)
@@ -550,6 +553,19 @@ _class_id_for_mark() {
 }
 _mark_for_class_id() {
     if [ "$1" = "100" ]; then echo 1; else echo "$1"; fi
+}
+
+# v5.30 T4: 应用感知 QoS(默认关, 逐台开; 见 bin/apply_app_qos.sh)。开着的设备
+# class 1:N 下挂了 3 个子 class(实时 / 交互 / 后台), 它成了 HTB 内部节点, 叶子
+# qdisc 由子 class 各自持有 —— 设备级的叶子操作(延迟 netem / SQM / 低延迟叶子)
+# 对它一律跳过(内核对内部节点 graft 叶子会 EINVAL)。
+# run/app_qos.state 每行 "<dev> <class_id>"(apply_app_qos.sh 维护)。文件不存在
+# (默认 = 没有设备开)时只做一次文件判断, 不发任何 tc 命令 —— 关闭时命令序列
+# 与 v5.29 逐条一致(test/unit/test_v530_app_qos.sh 对照 golden)。
+APP_QOS_STATE="$HNC_DIR/run/app_qos.state"
+app_qos_owns_class() {
+    [ -f "$APP_QOS_STATE" ] || return 1
+    grep -qx "$1 $2" "$APP_QOS_STATE" 2>/dev/null
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -826,8 +842,11 @@ ensure_device_class() {
 
     # 3. leaf qdisc: v5.3 adds optional SQM leaf for delay-free classes.
     # Existing active netem must be preserved; real delay/jitter/loss still wins over SQM.
+    # v5.30 T4: 应用感知 QoS 开着的设备, 叶子在 3 个子 class 上(apply_app_qos.sh), 这里不动。
     local leaf_kind; leaf_kind=$(sqm_preferred_leaf)
-    if leaf_has_active_netem "$dev" "$class_id"; then
+    if app_qos_owns_class "$dev" "$class_id"; then
+        log "  Leaf of 1:$class_id managed by app QoS (3 tier classes), skip"
+    elif leaf_has_active_netem "$dev" "$class_id"; then
         : # keep real netem as-is; set_netem_only owns delay parameters.
     elif [ "$leaf_kind" != "off" ]; then
         if sqm_leaf_replace "$dev" "$class_id" "$leaf_handle" "$leaf_kind"; then
@@ -918,6 +937,10 @@ class_args_for() {
 # 参数：dev class_id delay_ms jitter_ms loss
 set_netem_only() {
     local dev=$1 class_id=$2 delay_ms=${3:-0} jitter_ms=${4:-0} loss=${5:-0}
+    if app_qos_owns_class "$dev" "$class_id"; then
+        log "  netem on 1:$class_id skipped: leaf managed by app QoS (turn app QoS off to use delay)"
+        return 0
+    fi
     local leaf_handle
     if [ "$dev" = "$IFB_IFACE" ]; then
         leaf_handle=$((class_id + 2000))
@@ -975,6 +998,7 @@ set_netem_only() {
 # their own queue management.
 tune_leaf_netem_limit() {
     local dev=$1 class_id=$2 mbps=$3
+    app_qos_owns_class "$dev" "$class_id" && return 0  # v5.30 T4
     leaf_has_netem "$dev" "$class_id" || return 0
     leaf_has_active_netem "$dev" "$class_id" && return 0
     local leaf_handle
@@ -2092,6 +2116,10 @@ remove_device() {
     # iptables),fw 兜底匹配不到,直接掉进默认类不限速。mark_id=99 时 prio 200
     # 还会误删应用级限速的 fw filter。
     local prio=$((FILTER_PRIO_BASE + mark_id))
+    # v5.30 T4: 有应用感知 QoS 子 class 时先拆掉(HTB 不许删还有子 class 的 class)
+    if app_qos_owns_class "$iface" "$class_id"; then
+        sh "$HNC_DIR/bin/apply_app_qos.sh" teardown "$iface" "$mark_id" >/dev/null 2>&1 || true
+    fi
     for dev in "$iface" "$IFB_IFACE"; do
         tc filter del dev "$dev" parent 1: prio "$prio"         2>/dev/null || true
         tc filter del dev "$dev" parent 1: pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
@@ -2678,6 +2706,14 @@ case "$1" in
         tc_snapshot_async "$2"
         tc_action_unlock
         exit $rc ;;
+    ensure_class)
+        # v5.30 T4: 应用感知 QoS 要挂在设备 class 下; 没有限速 / 延迟规则的设备没有
+        # class → 只在下行网卡上建(已存在则原样保留 rate / ceil)。$2=iface $3=mark_id $4=ip
+        tc_action_lock ensure_class || exit 12
+        _validate_mark_id "$3" && ensure_device_class "$2" "$(_class_id_for_mark "$3")" "$4"
+        rc=$?
+        tc_action_unlock
+        exit $rc ;;
     remove)
         tc_action_lock remove || exit 12
         remove_device "$2" "$3"
@@ -2700,7 +2736,7 @@ case "$1" in
     status)     show_status "$2" ;;
     snapshot)   sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$2" ;;
     *)
-        echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_sqm|global_shaper|set_all|remove|restore|ensure_ingress|status|snapshot|cleanup}"
+        echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_sqm|global_shaper|set_all|remove|restore|ensure_ingress|ensure_class|status|snapshot|cleanup}"
         echo ""
         echo "v5.1.0-rc1-hotfix17.7: TC writer serialization + state snapshot"
         echo ""

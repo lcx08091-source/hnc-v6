@@ -78,6 +78,11 @@ const cases = {
       if (h.indexOf(want) < 0) { console.log('缺少 ' + want + ': ' + h); process.exit(1); }
     }
   },
+  // T4: app_qos 回读(布尔 / 字符串; 旧后端没有 → 关)
+  app_qos_of() {
+    const c = load(core, ['appQosOf']);
+    eq([c.appQosOf({ app_qos: true }), c.appQosOf({ app_qos: 'true' }), c.appQosOf({}), c.appQosOf({ app_qos: false })], [true, true, false, false], 'appQosOf');
+  },
 };
 
 if (!cases[which]) { console.log('unknown case ' + which); process.exit(2); }

@@ -1132,15 +1132,7 @@ func appLimitApplyLoop() {
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
 	for {
-		// v5.25: 热点未开时没有客户端流量可限, 不跑全量 iptables/tc 重建(每 30 秒一次 fork)。
-		// 开热点后下一个 30 秒节拍内恢复; full_init 时规则本身也会重建。
-		if _, err := os.Stat(script); err == nil && !hotspotIdle() {
-			cmd := exec.Command(shellPath(), script)
-			cmd.Env = os.Environ()
-			cmd.Stdout, cmd.Stderr = nil, nil // v5.12: 同 runV6Sync, 不建管道
-			cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-			_ = cmd.Run()
-		}
+		appApplyOnce(script)
 		// Wait for next tick OR an immediate dirty-marker request.
 		select {
 		case <-stopCh:
@@ -1151,6 +1143,27 @@ func appLimitApplyLoop() {
 		}
 	}
 }
+
+// appApplyOnce appLimitApplyLoop 的一轮: 应用限速脚本, 再加 v5.30 T4 应用感知
+// QoS(关闭时 appQosTick 什么都不做, 不起脚本)。
+// v5.25: 热点未开时没有客户端流量可限, 不跑全量 iptables/tc 重建(每 30 秒一次 fork)。
+// 开热点后下一个 30 秒节拍内恢复; full_init 时规则本身也会重建。
+func appApplyOnce(script string) {
+	if hotspotIdleFn() {
+		return
+	}
+	if _, err := os.Stat(script); err == nil {
+		runScriptFn(script) // v5.12: 同 runV6Sync, 不建管道(runScript 的 stdout/stderr = nil)
+	}
+	iface := ""
+	if st := appQosStateFn(); st.kind == stateActive {
+		iface = st.iface
+	}
+	appQosTick(iface)
+}
+
+// appQosStateFn 读状态机(测试注入, 不读真实 run/hnc_state)。
+var appQosStateFn = readState
 
 // pollDirty returns a channel that fires once the dirty marker appears.
 // We use polling rather than inotify because Android's filesystem layer

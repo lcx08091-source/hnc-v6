@@ -301,14 +301,17 @@ function devBody(d) {
   more += '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--purple)"></i>延迟注入</div>' +
     (netemOk() ? '' : '<div class="note err">当前内核 / tc 不支持 netem，延迟注入不可用</div>') +
     (d.sqm ? '<div class="note warn">已开启低延迟模式，与延迟注入互斥</div>' : '') +
+    (d.appQos ? '<div class="note warn">已开启按应用分优先级，与延迟注入互斥</div>' : '') +
     seg('delay-pre', [[0, '关闭'], [50, '50ms'], [100, '100ms'], [200, '200ms']], [0, 50, 100, 200].indexOf(d.delay) >= 0 ? d.delay : -1, 'small') +
     '<div class="grid2" style="grid-template-columns:1fr 1fr 1fr"><label class="field">延迟<span class="box"><input type="number" min="0" max="10000" placeholder="0" value="' + (d.delay || '') + '" data-f="delay"' + dlDis + '><span class="u">ms</span></span></label>' +
     '<label class="field">抖动<span class="box"><input type="number" min="0" max="5000" placeholder="0" value="' + (d.jitter || '') + '" data-f="jitter"' + dlDis + '><span class="u">ms</span></span></label>' +
     '<label class="field">丢包<span class="box"><input type="number" min="0" max="100" step="0.1" placeholder="0" value="' + (d.loss || '') + '" data-f="loss"' + dlDis + '><span class="u">%</span></span></label></div>' +
-    '<div class="btns"><button class="btn sec press" data-act="clear-delay"' + busy + '>清除</button><button class="btn pri press" data-act="apply-delay"' + busy + (d.sqm ? ' disabled' : dlDis) + '>应用延迟</button></div></div>';
+    '<div class="btns"><button class="btn sec press" data-act="clear-delay"' + busy + '>清除</button><button class="btn pri press" data-act="apply-delay"' + busy + (d.sqm || d.appQos ? ' disabled' : dlDis) + '>应用延迟</button></div></div>';
   // 低延迟 / 白名单
   more += '<div class="ctrl" style="gap:0;padding:4px 0">' +
     '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">低延迟模式</div><div class="s">游戏/语音更稳 · <span data-qdisc>' + esc(qdiscNote()) + '</span>' + (d.hasDelay ? '（先清除延迟注入）' : '') + '</div></span>' + toggle(d.sqm, 'data-act="sqm" aria-label="低延迟模式"' + (d.hasDelay || !htbOk() ? ' disabled' : '')) + '</div>' +
+    // v5.30 T4: 按应用分优先级(默认关, 逐台开)
+    '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">按应用分优先级</div><div class="s">游戏 / 通话 &gt; 视频 / 浏览 &gt; 下载 / 更新 / 云同步 · 只管下载方向' + (d.hasDelay ? '（先清除延迟注入）' : '') + '</div></span>' + toggle(d.appQos, 'data-act="appqos" aria-label="按应用分优先级"' + (d.hasDelay || !htbOk() ? ' disabled' : '')) + '</div>' +
     '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">白名单</div><div class="s">开启白名单模式后，只有白名单设备能上网</div></span>' + toggle(d.wl, 'data-act="wl" aria-label="白名单"') + '</div></div>';
   // 实时连接(conntrack) —— 展开时拉一次, 「查看全部」打开实时刷新的弹层
   if (d.online) h += '<div class="ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;gap:6px;align-items:center"><i style="background:var(--orange)"></i>实时连接</span><button class="linkish" data-act="conns">查看全部</button></div><div data-conn-mini>' + connMiniHtml(d.mac) + '</div></div>';
@@ -322,7 +325,7 @@ function devBody(d) {
   h += appTimeFold(d) + catBlockFold(d);
   // 7 天曲线
   more += '<div class="ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;gap:6px;align-items:center"><i style="background:var(--cyan)"></i>近 7 天 · 每小时流量</span><button class="linkish" data-act="trend">加载</button></div><div data-trend class="note">点「加载」查看这台设备 7 天内各时段的流量分布</div></div>';
-  var on = [d.hasDelay ? '延迟 ' + (d.delay || 0) + 'ms' : '', d.sqm ? '低延迟' : '', d.wl ? '白名单' : ''].filter(Boolean);
+  var on = [d.hasDelay ? '延迟 ' + (d.delay || 0) + 'ms' : '', d.sqm ? '低延迟' : '', d.appQos ? '按应用分优先级' : '', d.wl ? '白名单' : ''].filter(Boolean);
   h += dFold('more-' + d.mac, 'var(--gray,#8E8E93)', '更多控制', esc(on.length ? on.join(' · ') : '延迟注入 · 低延迟 · 白名单 · 识别 · 趋势'), '<div class="more-in">' + more + '</div>');
   // 访问控制 + 其他
   h += (d.blocked ? '<button class="btn ok wide press" data-act="unblock"' + busy + '>✓ 解除封锁</button>'
@@ -719,7 +722,7 @@ function rollNum(el, str, unit) {
   if (!apple() || !fxOn('num') || !sameUnit || !/^\d+(\.\d+)?$/.test(str)) { el.textContent = str; return; }
   tween(el, parseFloat(str), (str.split('.')[1] || '').length);
 }
-function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge ? d.merge.old_mac + '/' + d.merge.score : '', d.vpn ? d.vpn.level : '', d.rmac ? 1 : 0, d.mergedInto, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError, d.sim ? 1 : 0,
+function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge ? d.merge.old_mac + '/' + d.merge.score : '', d.vpn ? d.vpn.level : '', d.rmac ? 1 : 0, d.mergedInto, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.appQos ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError, d.sim ? 1 : 0,
   d.eff ? [d.eff.reason, d.eff.blocked ? 1 : 0, d.eff.down_mbps, d.eff.up_mbps, d.eff.apply_error || ''].join(',') : '', d.quota ? [d.quota.state, d.quota.applied ? 1 : 0, d.quota.daily_gb, d.quota.monthly_gb, d.quota.action].join(',') : '',
   d.sched ? d.sched.windows.length + ',' + d.sched.active_window_index : '', d.atl.map(function (x) { return x.app_id + (x.exhausted ? '!' : '') + x.minutes; }).join(','), d.cblocks.map(function (x) { return x.category; }).join(',')].join(':'); }).join('|'); }
 function refreshCard(mac) {
@@ -779,6 +782,7 @@ function doDelay(d, delay, jitter, loss) {
   if (!(delay > 0) && !(jitter > 0) && !(loss > 0)) return api.action('delay_clear', { mac: d.mac });
   if (!netemOk()) return Promise.reject(new Error('当前内核 / tc 不支持 netem，延迟注入不可用'));
   if (d.sqm) return Promise.reject(new Error('先关闭低延迟模式再注入延迟'));
+  if (d.appQos) return Promise.reject(new Error('先关闭按应用分优先级再注入延迟'));
   return api.action('delay_set', { mac: d.mac, delay_ms: Math.round(delay), jitter_ms: Math.round(jitter), loss_pct: trim0(clamp(loss, 0, 100).toFixed(2)) });
 }
 /* 网关保护: 看起来像路由器/网关的设备, 封锁前多问一句(旧版告警面板里的「拉黑」绕过了这一步) */
