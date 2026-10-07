@@ -164,3 +164,17 @@ func TestActionCompatReportWritesFile(t *testing.T) {
 		t.Fatalf("报告不是合法 JSON")
 	}
 }
+
+// TestCompatReportUsesBuildVersion 真机运行目录里没有 module.prop: 版本取
+// 编译期注入值(rc1 只读 <hnc>/module.prop, 报告里版本恒为空)。
+func TestCompatReportUsesBuildVersion(t *testing.T) {
+	oldV, oldVC := version, versionCode
+	version, versionCode = "v5.29.0-rc1", "5290001"
+	t.Cleanup(func() { version, versionCode = oldV, oldVC })
+	f := newFakeSys(t.TempDir())
+	c := &scCtx{env: f.scEnv(), ctx: context.Background()}
+	rep := buildCompatReport(t.TempDir(), c) // 空目录, 没有 module.prop
+	if rep.Module.Version != "v5.29.0-rc1" || rep.Module.VersionCode != "5290001" {
+		t.Fatalf("module = %+v", rep.Module)
+	}
+}

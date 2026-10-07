@@ -159,9 +159,15 @@ HNC_TEST_MODE=1 HNC_DIR="$HNC_TEST_DIR" HNC_SYS_NET="$HNC_TEST_DIR/sysnet" \
 rc=$?
 [ $rc -eq 0 ] && test_pass || test_fail "plan rc=$rc(对照: Go 调度也走同一 plan 动作)"
 
-test_start "offload guard: owner=watchdog 时 apply 不把 shell 循环拉回来"
+test_start "offload guard: owner=watchdog 时 apply 不把 shell 循环拉回来(无 owner 时会)"
+# 测试模式下 ensure_daemon 从不真起进程, 只看 pidfile 的话新旧代码都通过;
+# 用 HNC_GUARD_SPAWN_LOG 记「这里会起守护」, 并先跑无 owner 的对照组。
 gseed '{"clsact_bpf_mode":"auto"}'
+rm -f "$HNC_TEST_DIR/run/offload_guard.owner" "$HNC_TEST_DIR/spawn.log"
+HNC_GUARD_SPAWN_LOG="$HNC_TEST_DIR/spawn.log" grun apply >/dev/null 2>&1
+_ctl=$(cat "$HNC_TEST_DIR/spawn.log" 2>/dev/null)
 echo watchdog > "$HNC_TEST_DIR/run/offload_guard.owner"
-rm -f "$HNC_TEST_DIR/run/offload_guard.pid"
-grun apply >/dev/null 2>&1
-[ ! -f "$HNC_TEST_DIR/run/offload_guard.pid" ] && test_pass || test_fail "apply 拉起了 shell 守护(pidfile 出现)"
+rm -f "$HNC_TEST_DIR/spawn.log"
+HNC_GUARD_SPAWN_LOG="$HNC_TEST_DIR/spawn.log" grun apply >/dev/null 2>&1
+[ "$_ctl" = spawn ] && [ ! -f "$HNC_TEST_DIR/spawn.log" ] \
+  && test_pass || test_fail "对照(无 owner)=$_ctl; owner=watchdog 时 spawn.log=$(cat "$HNC_TEST_DIR/spawn.log" 2>/dev/null)"

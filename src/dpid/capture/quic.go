@@ -650,6 +650,7 @@ func parseQUIC(ev Event, udp []byte) (Event, ParseResult) {
 		quicStats.initial.Add(1)
 		hello := quicAsm.handleInitial(ev.SrcIP, ev.SrcPort, &h, pkt, p, ev.Time)
 		if hello == nil {
+			ev.asmPending = true // Initial 还没凑齐(录制用, 见 Event.asmPending)
 			continue
 		}
 		// parseTLSClientHelloFull / extractJA4Inputs 期望 TLS record 层数据,

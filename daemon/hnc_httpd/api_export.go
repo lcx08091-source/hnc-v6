@@ -108,9 +108,9 @@ func (s *server) apiExport(w http.ResponseWriter, r *http.Request) {
 	const maxRange = int64(24 * 3600)
 	if req.To-req.From > maxRange {
 		writeJSON(w, http.StatusBadRequest, map[string]interface{}{
-			"error":           "time range too large",
-			"max_range_secs":  maxRange,
-			"requested_secs":  req.To - req.From,
+			"error":          "time range too large",
+			"max_range_secs": maxRange,
+			"requested_secs": req.To - req.From,
 		})
 		return
 	}

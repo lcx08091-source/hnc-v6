@@ -78,14 +78,27 @@ EOF
 # rc3.1.13 起所有活字段统一到 rules.json, config.json 只做单向迁移.
 # (迁移块在下方 cp -rf 后执行, 不依赖目标目录残留脚本)
 
+# v5.29 T3: 升级快照 + 钉住检查, 必须在下面的 cp 之前 —— 本脚本每次开机都
+# 比 service.sh 先把模块文件拷进运行目录, 快照放在 service.sh 里打包到的已经
+# 是新版, 钉住也挡不住这里把坏版本拷回来。rc=3 = 坏版本已钉住且模块没换新包
+# → 跳过 bin/api/webroot/httpd 的同步, 用 .prev 恢复过的旧文件开机。
+_HNC_RB=0
+if [ -f "$MODDIR/bin/hnc_rollback.sh" ]; then
+    HNC_RB_LOG="$HNC_DIR/logs/rollback.log" sh "$MODDIR/bin/hnc_rollback.sh" snapshot "$MODDIR" "$HNC_DIR"
+    _HNC_RB=$?
+fi
+[ "$_HNC_RB" = 3 ] && echo "[HNC] rollback: version pinned, skip runtime sync (staying on .prev)" >> "$HNC_DIR/logs/boot.log"
+
 # Fix #7: 先建目录，再统一复制（去除重复操作）
 mkdir -p "$HNC_DIR/bin" "$HNC_DIR/api" "$HNC_DIR/webroot" "$HNC_DIR/test"
 # v5.9.3 BUG-009:资源目录显式 755(老装机可能是 0777),不收到 700 是为了
 # 保留"非 root 也能只读排查"的余地,这几个目录里没有凭据。
 chmod 755 "$HNC_DIR/bin" "$HNC_DIR/api" "$HNC_DIR/webroot" "$HNC_DIR/test" 2>/dev/null
-cp -rf "$MODDIR"/bin/* "$HNC_DIR/bin/" 2>/dev/null || true
-cp -rf "$MODDIR"/api/* "$HNC_DIR/api/" 2>/dev/null || true
-cp -rf "$MODDIR"/webroot/* "$HNC_DIR/webroot/" 2>/dev/null || true
+if [ "$_HNC_RB" != 3 ]; then
+    cp -rf "$MODDIR"/bin/* "$HNC_DIR/bin/" 2>/dev/null || true
+    cp -rf "$MODDIR"/api/* "$HNC_DIR/api/" 2>/dev/null || true
+    cp -rf "$MODDIR"/webroot/* "$HNC_DIR/webroot/" 2>/dev/null || true
+fi
 # v3.5.0 alpha: 复制测试框架(让 user 能在真机跑 sh test/run_all.sh)
 cp -rf "$MODDIR"/test/* "$HNC_DIR/test/" 2>/dev/null || true
 
@@ -95,7 +108,7 @@ cp -rf "$MODDIR"/test/* "$HNC_DIR/test/" 2>/dev/null || true
 # service.sh 找 $HNC_DIR/daemon/hnc_httpd/hnc_httpd 永远 miss,
 # 结果 remote_enabled=true 也启动不了 httpd (用户报告:浏览器 ERR_CONNECTION_REFUSED)
 # 只 copy 产物 binary,不 copy .c 源 / README / build.sh / web/(web 已 //go:embed 进 binary)
-if [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
+if [ "$_HNC_RB" != 3 ] && [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
     mkdir -p "$HNC_DIR/daemon/hnc_httpd"
     chmod 755 "$HNC_DIR/daemon" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null  # v5.9.3 BUG-009
     if ! cmp -s "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null; then

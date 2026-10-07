@@ -4,6 +4,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -21,7 +22,7 @@ func TestRollbackStatusRecordAndAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(data, "rollback.json"),
-		[]byte(`{"from":"5280001","to":"5290001","reason":"failstreak=6","at":1791204231,"action":"rolled_back"}`), 0o644); err != nil {
+		[]byte(`{"from":"5290001","to":"5280001","reason":"failstreak=6","at":1791204231,"action":"rolled_back"}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	// rollback.pinned 存在 → pinned=true
@@ -30,7 +31,8 @@ func TestRollbackStatusRecordAndAck(t *testing.T) {
 	}
 	s := &server{hncDir: dir}
 	got := s.rollbackStatus()
-	if got == nil || !got.Rolled || got.From != "5280001" || got.To != "5290001" {
+	if got == nil || !got.Rolled || got.From != "5290001" || got.To != "5280001" ||
+		got.FromName != "5.29.0-rc1" || got.ToName != "5.28.0-rc1" {
 		t.Fatalf("got %+v", got)
 	}
 	if !got.Pinned || got.Acknowledged {
@@ -50,13 +52,35 @@ func TestScRollbackItemStates(t *testing.T) {
 	f := newFakeSys(t.TempDir())
 	c := &scCtx{env: f.scEnv()}
 	// readJSON 走 fakeSys 的文件表; os.Stat(ack) 走真文件 —— 两种都喂
-	f.files[f.h("data", "rollback.json")] = `{"from":"5280001","to":"5290001","reason":"failstreak=6","at":1791204231,"action":"rolled_back"}`
-	if it := scRollbackItem(c); it.Status != scWarn {
+	f.files[f.h("data", "rollback.json")] = `{"from":"5290001","to":"5280001","reason":"failstreak=6","at":1791204231,"action":"rolled_back"}`
+	it := scRollbackItem(c)
+	if it.Status != scWarn {
 		t.Fatalf("未 ack 应 WARN, got %v", it.Status)
+	}
+	// rc1: from/to 读反(「检测到 5280001 启动失败, 已退回 5290001」), 且 action
+	// 恒非空 → 回滚成功也追加「本次仅记录未回滚」
+	if it.Value != "已自动退回 5.28.0-rc1" || !strings.Contains(it.Detail, "检测到 5.29.0-rc1 启动失败") ||
+		strings.Contains(it.Detail, "仅记录") {
+		t.Fatalf("rolled_back 文案不对: value=%q detail=%q", it.Value, it.Detail)
+	}
+	f.files[f.h("data", "rollback.json")] = `{"from":"5290001","to":"5280001","reason":"failstreak=6","at":1791204231,"action":"recorded_only"}`
+	if it := scRollbackItem(c); !strings.Contains(it.Detail, "只记录未回滚") || strings.Contains(it.Value, "已自动退回") {
+		t.Fatalf("recorded_only 文案不对: value=%q detail=%q", it.Value, it.Detail)
 	}
 	os.MkdirAll(f.h("data"), 0o755)
 	os.WriteFile(f.h("data", "rollback.ack"), nil, 0o600)
 	if it := scRollbackItem(c); it.Status != scOK {
 		t.Fatalf("已 ack 应 OK, got %v", it.Status)
+	}
+}
+
+func TestVcName(t *testing.T) {
+	for in, want := range map[string]string{
+		"5290001": "5.29.0-rc1", "5180000": "5.18.0", "5271002": "5.27.1-rc2",
+		"unknown": "unknown", "": "", "52900x1": "52900x1",
+	} {
+		if got := vcName(in); got != want {
+			t.Errorf("vcName(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

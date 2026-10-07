@@ -50,13 +50,19 @@ func TC_HMaj(major uint32) uint32 { return major << 16 }
 
 // Qdisc 一条排队规则。
 type Qdisc struct {
-	Kind   string // TCA_KIND, 如 "htb" / "fq_codel" / "mq"
-	Handle uint32 // 句柄, 如 0x00010000 = "1:"
-	Parent uint32 // parent, 0xFFFFFFFF = root; 0xFFFFFFF1 = ingress 特例
+	IfIndex int    // tcmsg.tcm_ifindex(所属网卡)
+	Kind    string // TCA_KIND, 如 "htb" / "fq_codel" / "mq"
+	Handle  uint32 // 句柄, 如 0x00010000 = "1:"
+	Parent  uint32 // parent, 0xFFFFFFFF = root; 0xFFFFFFF1 = ingress 特例
 }
 
 // QdiscList 查询 ifindex 的全部 qdisc。错误时返回 (nil, err)。
 // 一次 socket 生命周期内完成 dump, 读到 NLMSG_DONE 为止。
+//
+// 注意: 内核的 RTM_GETQDISC dump 不按请求里的 tcm_ifindex 过滤, 会回
+// 全部网卡的 qdisc(iproute2 的 `tc qdisc show dev X` 是在用户态按
+// ifindex 筛的)。这里同样在用户态筛 —— 不筛的话别的网卡上的 htb
+// 会让热点口「看起来有 htb」, 真丢了也查不出来。
 func QdiscList(ifindex int) ([]Qdisc, error) {
 	if ifindex <= 0 {
 		return nil, errors.New("nlroute: bad ifindex")
@@ -97,7 +103,7 @@ func QdiscList(ifindex int) ([]Qdisc, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, qs...)
+		out = append(out, keepIfIndex(qs, ifindex)...)
 		if done {
 			return out, nil
 		}
@@ -149,8 +155,9 @@ func parseQdiscMsgs(b []byte) ([]Qdisc, bool, error) {
 			return nil, false, errors.New("nlroute: truncated tcmsg")
 		}
 		q := Qdisc{
-			Handle: native.Uint32(msg[nlMsgHdrLen+8 : nlMsgHdrLen+12]),
-			Parent: native.Uint32(msg[nlMsgHdrLen+12 : nlMsgHdrLen+16]),
+			IfIndex: int(int32(native.Uint32(msg[nlMsgHdrLen+4 : nlMsgHdrLen+8]))),
+			Handle:  native.Uint32(msg[nlMsgHdrLen+8 : nlMsgHdrLen+12]),
+			Parent:  native.Uint32(msg[nlMsgHdrLen+12 : nlMsgHdrLen+16]),
 		}
 		aoff := nlMsgHdrLen + sizeofTcMsg
 		for aoff < len(msg) {
@@ -171,6 +178,17 @@ func parseQdiscMsgs(b []byte) ([]Qdisc, bool, error) {
 		out = append(out, q)
 	}
 	return out, false, nil
+}
+
+// keepIfIndex 只留属于 ifindex 的条目(内核 dump 回的是全部网卡)。
+func keepIfIndex(qs []Qdisc, ifindex int) []Qdisc {
+	var out []Qdisc
+	for _, q := range qs {
+		if q.IfIndex == ifindex {
+			out = append(out, q)
+		}
+	}
+	return out
 }
 
 // alignUp v 到 align 的倍数(netlink NLMSG_ALIGN)。

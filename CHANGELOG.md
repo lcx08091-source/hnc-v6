@@ -20,7 +20,7 @@
 
 ### Added
 
-- **看门狗检查原生化(M2)**:probe / check_health / httpd drift / uplink 四项的「判断」搬进 Go(新 `nlroute` 包纯 syscall 只读 netlink,`native.go` 逐分支对应 shell 语义并注明行号);「动手」仍走 shell。原生全绿时 sh 调用 ≤ 70 次/小时(v5.28 为 120)。每项每 30 分钟跑一次 shell 版对照,不一致以 shell 为准并计 `native_mismatch`(连续 3 次该项退回 shell)。开关:`run/wd_native.disabled`。
+- **看门狗检查原生化(M2)**:probe / check_health / httpd drift / uplink 四项的「判断」搬进 Go(新 `nlroute` 包纯 syscall 只读 netlink,`native.go` 逐分支对应 shell 语义并注明行号);「动手」仍走 shell。原生全绿时 sh 调用 ≤ 70 次/小时(v5.28 为 120)。probe 与 check_health 每 30 分钟跑一次 shell 版对照,不一致以 shell 为准并计 `native_mismatch`(连续 3 次该项退回 shell)。开关:`run/wd_native.disabled`。
 - **offload / clsact 改 Go 调度(M3)**:两个常驻 shell 循环由 Go 看门狗的 `offload_sched.go` 调度(plan 动作 + 早醒条件 + 门控缓存 60 秒 + `hnc_clsact_ctl check` 直接 exec),常驻进程少 2 个。`service.sh` 写 `run/offload_guard.owner=watchdog` 后 shell 守护让位。开关:`run/wd_m3.disabled`(下次开机生效)。
 - **升级自检 + 自动回滚**:升级时把旧运行目录打包到 `.prev/`,开机后 10 分钟观察期(哨兵 shell 每轮查 httpd 活着 + 8444 在听 + 看门狗活着,不依赖 curl/nc);连续 6 次起不来或崩溃重启 ≥ 5 次自动退回上一版、钉住坏版本(换新包自动解钉)。WebUI 顶部横幅告知 +「知道了」;自检新增「升级状态」行。只看核心进程,不看网络规则。开关:`data/rollback.disabled`。
 - **兼容性报告**:action `compat_report` 一键导出脱敏 JSON(模块版本/机型/内核/root 方案/能力布尔/自检状态计数/看门狗动作摘要),白名单式收集,夹具断言 MAC/IP/SSID/密码/IMEI/token 搜不到。
@@ -29,6 +29,23 @@
 ### Changed
 
 - 动作记账新增 `offload_guard_plan`(调度走动作体系)与 `native_mismatch` 顶层字段(对照机制)。
+
+### Fixed
+
+- **审查修复**(rc1 合入前):
+  - **回滚整块没生效**:快照 + 钉住检查被插进了 `service.sh` 文件头的注释中间(在 `MODDIR` 和函数定义之前),开机根本执行不到;而且就算放对,`post-fs-data.sh` 每次开机都比 `service.sh` 先把模块文件拷进运行目录 —— 打进 `.prev` 的已经是新版,钉住也挡不住它把坏版本拷回来。快照与钉住检查移到 `post-fs-data.sh` 的拷贝之前(钉住时跳过 bin / api / webroot / httpd 的同步),`service.sh` 同步前再调一次(同版本是空操作,只为钉住时跳过同步)。补了在沙箱里真跑 `post-fs-data.sh` 的测试。注:从 v5.28 升上来的这一次还没有版本记录,不做快照;从 v5.29 往后的升级才受保护。
+  - 回滚的「崩溃重启」计数:观察期第一轮把 httpd / 看门狗的 pid 都当成一次重启(+2),之后再有 3 次正常重启(如热点 IP 变化让 httpd 重绑)就误回滚。首次看到的 pid 只当基线;pidfile 暂时缺失时保留上一个 pid。
+  - 回滚记录的 from / to 写反,横幅与自检显示成「检测到 v5.28 启动失败,已退回 v5.29」,且因为 action 字段永远非空,回滚成功也追加「本次仅记录,未回滚」。现在 from = 启动失败的新版、to = 退回到的上一版,横幅显示版本名(5.29.0-rc1 而非 5290001),按 rolled_back / recorded_only / no_snapshot 分别措辞,并补上文档要求的「导出诊断包」按钮;新的回滚记录会清掉上一次的「知道了」。回滚恢复文件后补 `chcon system_file`(ColorOS 上 Go 进程 exec system_data_file 报 EPERM)。
+  - 原生检查 `nlroute`:内核 RTM_GETQDISC dump 不按请求的 ifindex 过滤、回的是全部网卡的 qdisc —— 别的网卡上的 htb 会让热点口「看起来有 htb」,真丢了也查不出来。按 tcm_ifindex 在用户态筛(同 iproute2)。
+  - 原生检查的「连续 3 次不一致退回 shell」从没生效:主循环用 `natUse("health")`,退回记在 `"check_health"` 键上。对照那一轮也没按文档「以 shell 结论为准」;原生判不了时到了对照点还会把 shell 跑两遍、拿 shell 跟 shell 比。均已修,并补了驱动真实主循环的测试(旧代码下失败)。
+  - 原生 probe 只认 5 分钟内的 `run/iface_detect.json`(文档要求),不再回退到没有时间戳的 `hotspot_iface`。上行检查与 shell 一致:`ingress` 与 `parent ffff:` 两种写法任一看到 mirred 即可(rc1 只在第一种报错时才试第二种,ColorOS 上第一种可能 rc=0 但输出为空)。
+  - 预算测试读的是真实 `/data/local/hnc/run` 和本机网卡(不密封),在开发机上 `TestBudgetActiveHealthy` 失败(62 > 60);改为全部注入。
+  - M3 clsact 修复从没执行过:`runScriptFn` 把「脚本 repair 网卡」拼成一个参数,sh 去找带空格的文件名。门控补上「pref 1 被上行 mirred 占用就不要」(旧 shell 守护此时直接退出;rc1 在 on 模式 + 上行限速下每 10 秒起一次 sh)。`run/wd_m3.disabled` 打开后 `service.sh` 删掉上次开机留下的 owner 文件,否则 shell 守护一看 owner 就退出、没人跑 offload 兜底。shell 测试「apply 不把守护拉回来」在测试模式下新旧代码都通过(测试模式从不真起进程),改为可失败的写法。
+  - 流量录制:Chrome 带 X25519MLKEM768 的 ClientHello 必然拆两段,首段在重组完成前不产出事件 —— rc1 只录产出事件的包,录下来的文件回放永远拼不出来。现在解析器给「已挂进重组表的握手首段」(TCP ClientHello 首段 / QUIC Initial 未凑齐)打标记,录制器一并录下;补了录制 → 回放的端到端测试。请求文件里的分钟数从没生效(先删文件再读,恒为 10 分钟);20 MB 上限改在写盘协程里硬卡;停止时把已入队的包写完、等搬运完成(测试不再靠 sleep);没在录时 `Offer` 只做一次原子读(rc1 每个包都加锁);空闲时 10 秒看一次请求文件(原 2 秒);没在录时点「停止」留下的 stop 文件不再把下一次录制直接取消;界面补「停止录制」按钮,点开始后等 dpid 接手期间不再立刻显示「未在录制」并停止刷新。
+  - 回放回归测试原来把解析器「什么都没认出来」锁成了正确答案:合成 ClientHello 的 SNI 扩展多了 2 个字节,`dns-tls` 的期望输出只有一行 DNS,`fragmented-ch` 是空文件;测试每次运行还会重写仓库里的 pcap。合成器移到 capture 包复用现成的报文构造器,覆盖单段 TLS 1.3、分段 ClientHello 重组、QUIC v1 Initial(RFC 9001 向量)、跨两个 Initial 的 QUIC ClientHello、ECH 外层;默认只校验文件与生成器一致,`UPDATE_TESTDATA=1` 才写;另加「期望文件必须包含关键事实」的底线测试。
+  - 兼容性报告的模块版本在真机上恒为空(运行目录里没有 `module.prop`),改用编译期注入的版本号。
+  - 4 个改动过的 Go 文件 gofmt 不干净,已格式化。
+  - 文档更正:shell 对照只覆盖 probe 与 check_health(httpd drift / uplink 判断不一致时本来就交给 shell);原生检查的开关是文件 `run/wd_native.disabled`,设置里没有开关。
 
 ## [5.28.0-rc1] - 2026-10-05
 

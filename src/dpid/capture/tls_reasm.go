@@ -166,6 +166,7 @@ func (r *tlsReassembler) handleFirst(ev *Event, seq uint32, data []byte, now tim
 	copy(buf, data)
 	r.m[key] = &tlsAsmEntry{next: seq + uint32(len(data)), need: need, data: buf, first: now}
 	tlsStats.pending.Add(1)
+	ev.asmPending = true
 	return TLSInfo{}, false
 }
 

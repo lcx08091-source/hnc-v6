@@ -170,36 +170,81 @@ func TestOffloadPlanBudgetHotspotEarlyWake(t *testing.T) {
 	}
 }
 
-// ── clsactSched: 门控缓存 60 秒 + 修复调用计数 ────────────────────
+// ── clsactTick: 门控缓存 60 秒 + 修复调用(驱动真实的一轮逻辑) ──────
 
-func TestClsactSchedGateCacheAndRepairs(t *testing.T) {
+type clsactFake struct {
+	gateCalls int
+	checkOK   func(n int) bool
+	scripts   [][]string
+}
+
+func withClsactFake(t *testing.T, iface string, gate bool, f *clsactFake) {
+	t.Helper()
+	oldG, oldC, oldI, oldS := clsactGateFn, clsactCheckFn, clsactIfaceFn, runScriptFn
+	n := 0
+	clsactGateFn = func(string) bool { f.gateCalls++; return gate }
+	clsactIfaceFn = func() string { return iface }
+	clsactCheckFn = func(string) string {
+		n++
+		if f.checkOK != nil && f.checkOK(n) {
+			return `{"ok":true,"qdisc":"clsact","bpf_filter":true}`
+		}
+		return `{"ok":false,"qdisc":"clsact"}`
+	}
+	runScriptFn = func(path string, args ...string) { f.scripts = append(f.scripts, append([]string{path}, args...)) }
+	t.Cleanup(func() { clsactGateFn, clsactCheckFn, clsactIfaceFn, runScriptFn = oldG, oldC, oldI, oldS })
+}
+
+func TestClsactTickGateCacheAndRepairArgs(t *testing.T) {
+	f := &clsactFake{checkOK: func(n int) bool { return n%3 != 0 }} // 每 3 次 check 有一次不 ok
+	withClsactFake(t, "wlan2", true, f)
 	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
 	c := &clsactSched{}
-	gateChecks := 0
 	for off := 0; off <= 600; off += 10 { // 10 分钟
-		now := base.Add(time.Duration(off) * time.Second)
-		if c.gateDue(now) {
-			gateChecks++
-			c.gateOK = true
-			c.lastGate = now
-		}
-		if c.gateOK {
-			c.checks++
-			// 假设每 3 次 check 有一次不 ok → repair
-			if c.checks%3 == 0 {
-				c.repairs++
-			}
-		}
+		clsactTick(c, base.Add(time.Duration(off)*time.Second))
 	}
-	// 600 秒 / 60 秒缓存 → 门控 11 次(含首轮); check 60 次
-	if gateChecks != 11 {
-		t.Fatalf("gate checks = %d, want 11(60 秒缓存)", gateChecks)
+	if f.gateCalls != 11 {
+		t.Fatalf("gate = %d 次, want 11(60 秒缓存)", f.gateCalls)
 	}
-	if c.checks != 61 {
-		t.Fatalf("checks = %d, want 61(0..600 每 10 秒)", c.checks)
+	if c.checks != 61 || len(f.scripts) != 20 {
+		t.Fatalf("checks = %d repairs = %d, want 61 / 20", c.checks, len(f.scripts))
 	}
-	if c.repairs != 20 {
-		t.Fatalf("repairs = %d, want 20", c.repairs)
+	// rc1 把 "脚本 repair 口" 拼成一个参数 → sh 找不到文件, 修复从没执行
+	got := f.scripts[0]
+	if len(got) != 3 || !strings.HasSuffix(got[0], "/hnc_clsact_watchdog.sh") || got[1] != "repair" || got[2] != "wlan2" {
+		t.Fatalf("repair 调用参数 = %q, want [.../hnc_clsact_watchdog.sh repair wlan2]", got)
+	}
+}
+
+func TestClsactTickGateOffNoExec(t *testing.T) {
+	f := &clsactFake{}
+	withClsactFake(t, "wlan2", false, f)
+	c := &clsactSched{}
+	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
+	for off := 0; off < 3600; off += 10 {
+		clsactTick(c, base.Add(time.Duration(off)*time.Second))
+	}
+	if c.checks != 0 || len(f.scripts) != 0 {
+		t.Fatalf("门控不要时不该 check / repair: checks=%d repairs=%d", c.checks, len(f.scripts))
+	}
+}
+
+// TestClsactWantedPref1Mirred on 模式但 pref 1 被上行 mirred 占用 → 不要
+// (旧 shell 守护此时退出; rc1 不判这条, 上行限速 + on 模式每 10 秒起 sh)。
+func TestClsactWantedPref1Mirred(t *testing.T) {
+	if !pref1MirredLine("filter parent ffff: protocol all pref 1 u32 ... action order 1: mirred (Egress Redirect to device ifb0) stolen") {
+		t.Fatal("tc 输出里的 mirred redirect ifb0 应判为占用")
+	}
+	e := newNatTestEnv(t)
+	e.inject(t, "wlan2", nil, func(name string, args ...string) (string, int, error) {
+		return "filter parent ffff: protocol all pref 1 u32 chain 0\n  action order 1: mirred (Egress Redirect to device ifb0) stolen\n", 0, nil
+	})
+	if !pref1HeldByMirred("wlan2") {
+		t.Fatal("pref1 被 mirred 占用应返回 true")
+	}
+	e.inject(t, "wlan2", nil, func(name string, args ...string) (string, int, error) { return "", 0, nil })
+	if pref1HeldByMirred("wlan2") {
+		t.Fatal("无过滤器不算占用")
 	}
 }
 

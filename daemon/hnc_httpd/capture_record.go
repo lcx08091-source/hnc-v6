@@ -1,22 +1,25 @@
 // capture_record.go — v5.29 T4: 流量录制的 httpd 侧(写开关文件 + 状态转出)。
 //
 // dpid 的录制循环(capture/recorder.go)只认文件:
-//   run/capture_record.request  内容 = 分钟数(1~30)→ 开始录
-//   run/capture_record.stop     存在 → 停止并搬运到 exports/
-//   run/capture_rec/status.json 录制中状态(前端显示「录制中/剩余/大小」)
+//
+//	run/capture_record.request  内容 = 分钟数(1~30)→ 开始录
+//	run/capture_record.stop     存在 → 停止并搬运到 exports/
+//	run/capture_rec/status.json 录制中状态(前端显示「录制中/剩余/大小」)
 //
 // action:
-//   capture_record {minutes}  → 写 request(参数校验), 返回状态
-//   capture_record_stop       → 写 stop, 返回状态
+//
+//	capture_record {minutes}  → 写 request(参数校验), 返回状态
+//	capture_record_stop       → 写 stop, 返回状态
+//
 // /api/health 的 capture_rec 段 = status.json 转出(录制结束自动消失)。
 package main
 
 import (
 	"encoding/json"
-	"regexp"
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 )
 
@@ -60,6 +63,13 @@ func actionCaptureRecord(s *server, p map[string]string) actionResp {
 
 // actionCaptureRecordStop POST /api/action capture_record_stop。
 func actionCaptureRecordStop(s *server) actionResp {
+	// 请求还没被 dpid 取走 → 直接撤回请求; 否则写 stop(dpid 空闲时会清掉
+	// 没人认领的 stop, 免得它把下一次录制直接取消)
+	req := filepath.Join(s.hncDir, "run", "capture_record.request")
+	if err := os.Remove(req); err == nil {
+		b, _ := json.Marshal(map[string]interface{}{"recording": false, "cancelled": true})
+		return actionResp{OK: true, Detail: string(b)}
+	}
 	stop := filepath.Join(s.hncDir, "run", "capture_record.stop")
 	if err := os.WriteFile(stop, []byte("1\n"), 0o644); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}

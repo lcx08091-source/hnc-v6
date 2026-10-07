@@ -893,7 +893,7 @@ function scBody() {
   h += '<div class="sc-exp"><span class="tx" style="flex:1;min-width:0"><div class="t" style="font-size:14px;font-weight:600">打码 MAC / IP</div><div class="note">导出给别人看时建议打开</div></span>' + toggle(SC.redact, 'id="sc-redact" data-local="sc-redact" aria-label="打码 MAC/IP"') + '</div>';
   h += '<div class="btns" style="margin-top:10px"><button class="btn sec press" data-close style="flex:1">关闭</button><button class="btn pri press" data-act="sc-export" style="flex:1.4">' + ico('down') + '导出报告</button></div>';
   h += '<div class="btns" style="margin-top:6px"><button class="btn sec press" data-act="compat-report" style="flex:1">' + ico('down') + '导出兼容性报告(脱敏)</button></div>';
-  h += '<div style="margin-top:6px"><button class="btn sec press" data-act="rec-start" style="flex:1">' + ico('rec') + '录制 10 分钟握手流量(DPI 回归)</button></div>';
+  h += '<div class="btns" style="margin-top:6px"><button class="btn sec press" data-act="rec-start" style="flex:2.2">' + ico('flask') + '录制握手流量 10 分钟</button><button class="btn sec press" data-act="rec-stop" style="flex:1">停止</button></div>';
   h += '<div id="rec-hint" style="margin-top:4px;font-size:12px;opacity:.7">录制内容包含连接设备访问的域名,只存本机、请勿随意分享。录完自动出现在「导出」列表。</div>';
   return h;
 }
@@ -1003,10 +1003,12 @@ function compatExport(btn) {
 }
 
 /* v5.29 T4: 流量录制(DPI 回归): capture_record / capture_record_stop + 状态轮询 */
-var REC = { timer: 0 };
+// dpid 空闲时 10 秒才看一次请求文件: 点了开始后的 25 秒内「还没在录」算
+// 正在启动, 继续轮询(rc1 点完立刻查一次, 查到没在录就停轮询并显示「未在录制」)
+var REC = { timer: 0, pendingUntil: 0 };
 function recStart(btn) {
   api.action('capture_record', { minutes: '10' }, { timeout: 12000 }).then(function () {
-    toast('开始录制(最长 10 分钟)'); recPoll();
+    toast('已请求录制(最长 10 分钟)'); REC.pendingUntil = Date.now() + 25000; recPoll();
     if (REC.timer) clearInterval(REC.timer);
     REC.timer = setInterval(recPoll, 5000);
   }).catch(function (e) { toast(errText(e), 'err'); });
@@ -1016,10 +1018,12 @@ function recPoll() {
     var r = h && h.capture_rec;
     var hint = document.getElementById('rec-hint');
     if (!r || !r.recording) {
+      if (Date.now() < REC.pendingUntil) { if (hint) hint.textContent = '等待抓包进程开始录制…'; return; }
       if (REC.timer) { clearInterval(REC.timer); REC.timer = 0; }
       if (hint) hint.textContent = '未在录制。录制内容包含连接设备访问的域名,只存本机、请勿随意分享。';
       return;
     }
+    REC.pendingUntil = 0;
     var left = Math.max(0, Math.round((r.minutes * 60 - (Date.now() / 1000 - (r.started_at || 0))) / 60));
     var mb = (r.bytes || 0) / 1048576;
     if (hint) hint.textContent = '录制中 · 剩余约 ' + left + ' 分钟 · 已 ' + mb.toFixed(1) + ' MB(上限 20 MB)';
@@ -1027,6 +1031,7 @@ function recPoll() {
   });
 }
 function recStop() {
+  REC.pendingUntil = 0;
   api.action('capture_record_stop', {}, { timeout: 12000 }).then(function () { toast('停止中,文件稍后出现在「导出」列表'); recPoll(); })
     .catch(function (e) { toast(errText(e), 'err'); });
 }

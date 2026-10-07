@@ -164,8 +164,12 @@ func buildCompatReport(hncDir string, c *scCtx) *compatReport {
 		Schema:      1,
 		GeneratedAt: time.Now().Unix(),
 	}
-	// 模块版本: 运行目录旁的 module.prop(同步自模块目录)
-	if b, err := os.ReadFile(filepath.Join(hncDir, "module.prop")); err == nil {
+	// 模块版本: 编译期注入的 version / versionCode(build.sh 从 module.prop
+	// 读)。运行目录里并没有 module.prop(post-fs-data / service.sh 都不拷它,
+	// rc1 只读那里, 真机上恒为空); 只有开发构建(version=dev)才回退去读。
+	if version != "dev" {
+		rep.Module = compatModule{Version: compatClean(version), VersionCode: compatClean(versionCode)}
+	} else if b, err := os.ReadFile(filepath.Join(hncDir, "module.prop")); err == nil {
 		rep.Module = compatModule{Version: compatClean(propLine(string(b), "version")), VersionCode: compatClean(propLine(string(b), "versionCode"))}
 	}
 	// Android: getprop 三键 + 内核(/proc/version 首行)

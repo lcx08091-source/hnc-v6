@@ -71,9 +71,14 @@ var (
 	netIfAddrsFn = func(ni *net.Interface) ([]net.Addr, error) { return ni.Addrs() }
 	// sysIfIndexFn 读 /sys/class/net/<口>/ifindex(默认真实; 测试注入)。
 	sysIfIndexFn = readSysIfIndex
-	// ifaceHintReadFn 读权威热点网卡(默认 ifacehint.Read)。
-	ifaceHintReadFn = func() (string, bool) { return ifacehint.Read(natRunDir, time.Now()) }
+	// ifaceHintReadFn 读权威热点网卡: 只认 5 分钟内的 run/iface_detect.json
+	// (不回退 hotspot_iface —— 它没有时间戳, 陈旧了也看不出来)。陈旧 →
+	// 「不确定」→ 调用方退回 shell probe, shell 顺带刷新 iface_detect.json。
+	ifaceHintReadFn = func() (string, bool) { return ifacehint.ReadDetect(natRunDir, nowFn(), natHintFresh) }
 )
+
+// natHintFresh 原生 probe 认可的 iface_detect.json 新鲜度(WORK-v5.29 §T1)。
+const natHintFresh = 5 * time.Minute
 
 // nativeProbeResult probe_hotspot 的原生结论。
 type nativeProbeResult struct {
@@ -366,18 +371,31 @@ func nativeUplinkOK(iface string) (ok, unknown bool) {
 	if iface == "" {
 		iface = "wlan2" // shell: `[ -z "$iface" ] && iface="wlan2"`
 	}
-	out, rc, _ := execCommandFn("tc", "filter", "show", "dev", iface, "ingress")
-	if rc != 0 {
-		out, rc, _ = execCommandFn("tc", "filter", "show", "dev", iface, "parent", "ffff:")
-		if rc != 0 {
-			return false, true
+	// shell: `! show ingress | grep mirred.*ifb0 && ! show parent ffff: | grep ...`
+	// —— 两种写法任一看到就算有。ColorOS 的 tc 对 `ingress` 可能 rc=0 但
+	// 输出为空, 所以第一种没看到(不论 rc)都要再试第二种。
+	out1, rc1, _ := execCommandFn("tc", "filter", "show", "dev", iface, "ingress")
+	if rc1 == 0 && hasMirredIfb0(out1) {
+		return true, false
+	}
+	out2, rc2, _ := execCommandFn("tc", "filter", "show", "dev", iface, "parent", "ffff:")
+	if rc2 == 0 && hasMirredIfb0(out2) {
+		return true, false
+	}
+	if rc1 != 0 && rc2 != 0 {
+		return false, true // 两种写法都跑不动 → 判不了
+	}
+	return false, false
+}
+
+// hasMirredIfb0 同 shell `grep -qiE "mirred.*ifb0"`(同一行内 mirred 在 ifb0 之前)。
+func hasMirredIfb0(out string) bool {
+	for _, ln := range strings.Split(strings.ToLower(out), "\n") {
+		if i := strings.Index(ln, "mirred"); i >= 0 && strings.Contains(ln[i:], "ifb0") {
+			return true
 		}
 	}
-	low := strings.ToLower(out)
-	if !strings.Contains(low, "mirred") || !strings.Contains(low, "ifb0") {
-		return false, false
-	}
-	return true, false
+	return false
 }
 
 // ── 对照机制(nativeShadow) ────────────────────────────────────────
@@ -487,15 +505,16 @@ func natUse(k nativeCheckKind) bool {
 	return !natShadowSt.isReverted(k)
 }
 
-// natShadowMaybeCompare check_health 的对照(每 30 分钟一次): 额外跑一次
-// shell check_health 比结论(0/1/2)。不一致 → 本轮已用原生结论的按 shell
-// 结论纠正(调用方 healthRC 不可变, 这里只记账 + 连续 3 次钉回 shell;
-// 纠正语义: 立即跑 shell 的 full_restore 判定交给下一轮 —— 退回后自然走
-// shell 路径, 最多延迟一轮 60 秒, 与「误判一次的代价」相当)。
-func natShadowMaybeCompare(iface string, nativeRC int) {
+// natShadowHealth check_health 的对照(每 30 分钟一次)。nativeRC 必须是
+// 原生判出来的结论 —— 原生判不了时调用方已经跑过 shell, 不再对照(否则
+// 同一轮 shell 跑两遍、还拿 shell 跟 shell 比)。到点则额外跑一次 shell
+// check_health: 一致 → 清零连续计数; 不一致 → 记 native_mismatch, 本轮
+// 返回 shell 的结论(WORK-v5.29 §T1.6「本轮以 shell 结论为准」); 同项连续
+// 3 次不一致 → 钉回 shell 直到看门狗重启。没到点 → 原样返回 nativeRC。
+func natShadowHealth(iface string, nativeRC int) int {
 	now := nowFn()
 	if !natShadowSt.due(ncHealth, now) {
-		return
+		return nativeRC
 	}
 	res := runActionFn("check_health")
 	agree := res.exitCode == nativeRC
@@ -504,20 +523,24 @@ func natShadowMaybeCompare(iface string, nativeRC int) {
 		logf("native check_health mismatch: native=%d shell=%d (iface=%s) — trusting shell", nativeRC, res.exitCode, iface)
 	}
 	natShadowSt.observe(ncHealth, agree, now)
+	return res.exitCode
 }
 
-// natShadowProbe probe_hotspot 的对照(每 30 分钟一次): 原生结论与 shell
-// 输出的 "<口> <IP>" 比。返回 agree=false 时 nativeMismatchTotal 已 +1。
-func natShadowProbe(r nativeProbeResult) {
+// natShadowProbe probe_hotspot 的对照(每 30 分钟一次), 语义同
+// natShadowHealth: r 必须是原生判出的结论(unknown 时调用方已跑过 shell,
+// 直接返回 nativeRes 不对照); 到点跑 shell, 比 "<口> <IP>", 本轮返回
+// shell 的结果(一致时两者等价)。
+func natShadowProbe(r nativeProbeResult, nativeRes actionResult) actionResult {
+	if r.unknown {
+		return nativeRes
+	}
 	now := nowFn()
 	if !natShadowSt.due(ncProbe, now) {
-		return
+		return nativeRes
 	}
 	res := runActionFn("probe_hotspot")
 	var agree bool
-	if r.unknown {
-		agree = res.exitCode != 0 // 原生判不了, shell 也判不了 → 一致(都「无效」)
-	} else if r.ok {
+	if r.ok {
 		fields := strings.Fields(res.stdout)
 		agree = res.exitCode == 0 && len(fields) >= 2 && fields[0] == r.iface && fields[1] == r.ip
 	} else {
@@ -528,6 +551,7 @@ func natShadowProbe(r nativeProbeResult) {
 		logf("native probe_hotspot mismatch: native(%q %q ok=%v) shell rc=%d out=%q — trusting shell", r.iface, r.ip, r.ok, res.exitCode, res.stdout)
 	}
 	natShadowSt.observe(ncProbe, agree, now)
+	return res
 }
 
 // wdActionsSnapshotExtra actionstats.flush 之外带出的对照计数

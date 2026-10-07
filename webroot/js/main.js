@@ -557,9 +557,17 @@ window.__hnc6 = { S: S, go: go, api: api, boot: boot, L: L };   // 调试/截图
 
 
 // ── v5.29 T3: 升级回滚横幅 ──────────────────────────────────────────
-// 数据: /api/health 的 rollback 段(rollback.go 转出)。rolled 且未 ack 时
-// 显示: 检测到 vX 启动失败, 已自动退回 vY;请把诊断包发给开发者。
-// 「知道了」→ POST /api/rollback_ack(写 data/rollback.ack), 横幅消失。
+// 数据: /api/health 的 rollback 段(rollback.go 转出; from = 启动失败的新版,
+// to = 退回到的上一版)。rolled 且未 ack 时显示, 带「导出诊断包」与「知道了」
+// (POST /api/rollback_ack 写 data/rollback.ack, 横幅消失)。
+function rollbackBannerText(rb) {
+  var bad = rb.from_name || rb.from, good = rb.to_name || rb.to;
+  var t = '检测到 ' + (bad && bad !== 'unknown' ? 'v' + bad : '新版本') + ' 启动失败';
+  if (rb.action === 'recorded_only') t += '(自动回滚已关闭,本次只记录)';
+  else if (rb.action === 'no_snapshot') t += ',但没有上一版的快照,无法自动退回';
+  else t += ',已自动退回 ' + (good && good !== 'unknown' ? 'v' + good : '上一版');
+  return t + ';请把诊断包发给开发者';
+}
 function showRollbackBanner(rb) {
   if (!rb || !rb.rolled || rb.acknowledged) return;
   var old = document.getElementById('rollback-banner');
@@ -570,17 +578,20 @@ function showRollbackBanner(rb) {
     'padding:10px 14px;font-size:13px;line-height:1.6;display:flex;gap:10px;align-items:center;flex-wrap:wrap';
   var txt = document.createElement('span');
   txt.style.flex = '1';
-  txt.textContent = (rb.from ? '检测到 v' + rb.from + ' 启动失败' : '检测到新版本启动失败') +
-    (rb.to ? ',已自动退回 v' + rb.to : ',已自动回退') + (rb.action ? '(本次仅记录,未回滚)' : '') +
-    ';请把诊断包发给开发者';
+  txt.textContent = rollbackBannerText(rb);
+  var btnCss = 'padding:4px 14px;border:0;border-radius:6px;background:#ffd79a;color:#3a2a00;cursor:pointer';
+  var diagBtn = document.createElement('button');
+  diagBtn.textContent = '导出诊断包';
+  diagBtn.setAttribute('data-act', 'debug-bundle');   // 走全局点击分发(settings.js debugBundle)
+  diagBtn.style.cssText = btnCss;
   var okBtn = document.createElement('button');
   okBtn.textContent = '知道了';
-  okBtn.style.cssText = 'padding:4px 14px;border:0;border-radius:6px;background:#ffd79a;color:#3a2a00;cursor:pointer';
+  okBtn.style.cssText = btnCss;
   okBtn.onclick = function () {
     api.post('/api/rollback_ack', {}).then(function () { bar.remove(); })
       .catch(function () { toast('确认失败,请重试'); });
   };
-  bar.appendChild(txt); bar.appendChild(okBtn);
+  bar.appendChild(txt); bar.appendChild(diagBtn); bar.appendChild(okBtn);
   var body = document.body || document.documentElement;
   body.insertBefore(bar, body.firstChild);
 }

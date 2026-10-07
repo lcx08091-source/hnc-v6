@@ -106,6 +106,10 @@ type Event struct {
 
 	// v5.18: IP 头声明的长度超过实际抓到的字节(被 snaplen 截断)。
 	capTrunc bool
+	// v5.29: 本包是握手的前段, 已挂进重组表等后续段(TCP ClientHello 首段 /
+	// QUIC Initial 未凑齐)。只给流量录制用(recorder.go): 这类包本身不产出
+	// 事件, 不录的话回放拼不出分段的 ClientHello。
+	asmPending bool
 }
 
 const (

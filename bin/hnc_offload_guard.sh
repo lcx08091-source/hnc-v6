@@ -374,7 +374,11 @@ ensure_daemon() {
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && grep -q hnc_offload_guard "/proc/$pid/cmdline" 2>/dev/null; then
         return 0
     fi
-    [ -n "$HNC_TEST_MODE" ] && return 0
+    # 测试模式不真起守护; HNC_GUARD_SPAWN_LOG 给测试记一笔「这里会起」
+    if [ -n "$HNC_TEST_MODE" ]; then
+        [ -n "$HNC_GUARD_SPAWN_LOG" ] && echo spawn >> "$HNC_GUARD_SPAWN_LOG"
+        return 0
+    fi
     nohup sh "$0" daemon >> "$LOG_FILE" 2>&1 < /dev/null &
     echo $! > "$PIDFILE" 2>/dev/null
 }

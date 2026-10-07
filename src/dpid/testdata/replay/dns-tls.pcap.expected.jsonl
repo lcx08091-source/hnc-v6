@@ -1,1 +1,2 @@
 {"ts":"2026-10-05T12:00:00Z","kind":"dns","dns":"example.com"}
+{"ts":"2026-10-05T12:00:00.01Z","kind":"tls","sni":"www.example.com","ja4":"t13d0302h2_5559582ccdc4_ef5f37ab036a","alpn":["h2","http/1.1"]}

@@ -52,6 +52,25 @@ func Read(runDir string, now time.Time) (string, bool) {
 	return "", false
 }
 
+// ReadDetect 只读 iface_detect.json(不回退 hotspot_iface), 且要求 ts 在
+// now 前后 window 以内、iface 非空。v5.29 看门狗原生 probe 用: 回退的
+// hotspot_iface 没有时间戳, 拿它当结论会让「探测器很久没跑」无从察觉。
+func ReadDetect(runDir string, now time.Time, window time.Duration) (string, bool) {
+	b, err := os.ReadFile(filepath.Join(runDir, "iface_detect.json"))
+	if err != nil {
+		return "", false
+	}
+	var d detectJSON
+	if json.Unmarshal(b, &d) != nil || d.Iface == "" || !validIface(d.Iface) {
+		return "", false
+	}
+	ts := time.Unix(d.Ts, 0)
+	if now.Add(-window).After(ts) || ts.After(now.Add(window)) {
+		return "", false
+	}
+	return d.Iface, true
+}
+
 // validIface 与 v5.26 前 capture.readHNCHint 的校验一致。
 func validIface(s string) bool {
 	if len(s) == 0 || len(s) > 32 {

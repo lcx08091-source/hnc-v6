@@ -514,6 +514,26 @@ func TestUplinkTCIngressFallbackParentFFFF(t *testing.T) {
 	}
 }
 
+func TestUplinkTCIngressEmptyStillTriesParentFFFF(t *testing.T) {
+	// shell: 两种写法是 && 关系(都没看到才修)。`ingress` rc=0 但输出为空
+	// (部分 ROM 的 tc 不认 ingress 别名却不报错)→ 仍要试 parent ffff:。
+	e := newNatTestEnv(t)
+	e.inject(t, "wlan2", htbRoot(), nil)
+	old := execCommandFn
+	execCommandFn = func(name string, args ...string) (string, int, error) {
+		for _, a := range args {
+			if a == "ingress" {
+				return "", 0, nil
+			}
+		}
+		return "filter parent ffff: flower action mirred egress redirect dev ifb0\n", 0, nil
+	}
+	t.Cleanup(func() { execCommandFn = old })
+	if ok, unknown := nativeUplinkOK("wlan2"); !ok || unknown {
+		t.Fatalf("ok=%v unknown=%v, want true/false", ok, unknown)
+	}
+}
+
 func TestUplinkTCBothFailUnknown(t *testing.T) {
 	// 两种写法都失败 → unknown(退回 shell 判断, 修路径逻辑不搬)
 	e := newNatTestEnv(t)
@@ -557,7 +577,9 @@ func TestShadowMismatchCountAndRevert(t *testing.T) {
 	t.Cleanup(func() { runActionFn, nowFn = oldAct, oldNow })
 
 	for i := 1; i <= 3; i++ {
-		natShadowMaybeCompare("wlan2", natHealthLost) // 原生说丢规则
+		if got := natShadowHealth("wlan2", natHealthLost); got != natHealthOK { // 原生说丢规则
+			t.Fatalf("对照轮应以 shell 结论为准, got %d", got)
+		}
 		cur = cur.Add(31 * time.Minute)
 		if nativeMismatchTotal != i {
 			t.Fatalf("mismatch=%d, want %d", nativeMismatchTotal, i)
@@ -581,13 +603,13 @@ func TestShadowAgreementResetsStreak(t *testing.T) {
 	nowFn = func() time.Time { return cur }
 	runActionFn = func(string, ...string) actionResult { return actionResult{exitCode: 0} }
 	t.Cleanup(func() { runActionFn, nowFn = oldAct, oldNow })
-	natShadowMaybeCompare("wlan2", natHealthLost)
+	natShadowHealth("wlan2", natHealthLost)
 	cur = cur.Add(31 * time.Minute)
-	natShadowMaybeCompare("wlan2", natHealthOK) // 一致
+	natShadowHealth("wlan2", natHealthOK) // 一致
 	cur = cur.Add(31 * time.Minute)
-	natShadowMaybeCompare("wlan2", natHealthLost)
+	natShadowHealth("wlan2", natHealthLost)
 	cur = cur.Add(31 * time.Minute)
-	natShadowMaybeCompare("wlan2", natHealthLost)
+	natShadowHealth("wlan2", natHealthLost)
 	if !natUse(ncHealth) {
 		t.Fatal("只有连续 2 次不一致(中间一致清零), 不应退回")
 	}
@@ -607,9 +629,13 @@ func TestShadowProbeComparesIfaceIP(t *testing.T) {
 		return actionResult{exitCode: 0, stdout: "wlan2 192.168.44.1\n"} // IP 不同
 	}
 	t.Cleanup(func() { runActionFn, nowFn = oldAct, oldNow })
-	natShadowProbe(nativeProbeResult{iface: "wlan2", ip: "192.168.43.1", ok: true})
+	got := natShadowProbe(nativeProbeResult{iface: "wlan2", ip: "192.168.43.1", ok: true},
+		actionResult{exitCode: 0, stdout: "wlan2 192.168.43.1"})
 	if nativeMismatchTotal != 1 {
 		t.Fatalf("mismatch=%d, want 1", nativeMismatchTotal)
+	}
+	if got.stdout != "wlan2 192.168.44.1\n" {
+		t.Fatalf("对照轮应以 shell 输出为准, got %q", got.stdout)
 	}
 }
 

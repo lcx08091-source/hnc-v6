@@ -51,8 +51,10 @@ var (
 	runOffloadPlanFn = runOffloadPlan
 	// clsactCheckFn 直接 exec hnc_clsact_ctl check(默认 execClsactCheck)。
 	clsactCheckFn = execClsactCheck
-	// clsactGateFn 门控「clsact 想不想要」(默认读文件, 不起 sh)。
-	clsactGateFn = clsactWantedCached
+	// clsactGateFn 门控「clsact 想不想要」(默认读文件 + 直接 exec tc, 不起 sh)。
+	clsactGateFn = clsactWanted
+	// clsactIfaceFn 热点口(默认 clsactHotspotIface)。
+	clsactIfaceFn = clsactHotspotIface
 )
 
 // runOffloadPlan 执行 `sh bin/hnc_offload_guard.sh plan`, 30 秒超时, 经
@@ -173,7 +175,7 @@ func offloadLoop() {
 		last = last.Add(offloadWakeEvery)
 		now := nowFn()
 		s := actSnapshotFn()
-		early := offloadEarlyWake(p.wakeMode, s.Level, s.Clients)
+		early := s.OK && offloadEarlyWake(p.wakeMode, s.Level, s.Clients) // 同 shell: 快照不新鲜不早醒
 		if p.advance(now, early) {
 			dur, wake := parseOffloadPlan(runOffloadPlanFn())
 			p.observe(dur, wake, now)
@@ -186,10 +188,11 @@ func offloadLoop() {
 
 // clsactSched clsact 检查状态机。
 type clsactSched struct {
-	lastGate time.Time
-	gateOK   bool
-	checks   int
-	repairs  int // 修复调用次数(测试断言用)
+	lastGate  time.Time
+	gateIface string
+	gateOK    bool
+	checks    int
+	repairs   int // 修复调用次数(测试断言用)
 }
 
 func (c *clsactSched) gateDue(now time.Time) bool {
@@ -206,17 +209,49 @@ func execClsactCheck(iface string) string {
 	return string(b)
 }
 
-// clsactWantedCached 门控(照抄 guard_mode 的语义, 纯读文件):
-// clsact_bpf_mode=on(或旧键 clsact_bpf_enabled=true)且 hnc_clsact.o 与
-// hnc_clsact_ctl 都在。pref1 被上行 mirred 占用的细判留给 repair 侧。
-func clsactWantedCached() bool {
+// clsactWanted 门控, 照抄 hnc_clsact_watchdog.sh 的 clsact_enabled →
+// hnc_offload_guard.sh clsact_wanted(on 模式那一支): hnc_clsact.o 与
+// hnc_clsact_ctl 都在、clsact_bpf_mode=on(或旧键 clsact_bpf_enabled=true),
+// 且热点口 ingress pref 1 没被 HNC 上行 mirred 占用(占用时装不上, 旧 shell
+// 守护直接退出; 不判这一条的话 on 模式 + 上行限速会每 10 秒起一次 sh
+// repair)。结果由调用方缓存 60 秒。
+func clsactWanted(iface string) bool {
 	if _, err := os.Stat(binDir + "/hnc_clsact.o"); err != nil {
 		return false
 	}
 	if _, err := os.Stat(binDir + "/hnc_clsact_ctl"); err != nil {
 		return false
 	}
-	return rulesClsactModeOn()
+	if !rulesClsactModeOn() {
+		return false
+	}
+	return iface == "" || !pref1HeldByMirred(iface)
+}
+
+// pref1HeldByMirred 同 shell pref1_held_by_mirred: 两种写法任一能看到
+// `mirred.*redirect.*ifb0`(不区分大小写)即算占用。直接 exec tc, 不经 sh。
+func pref1HeldByMirred(iface string) bool {
+	for _, args := range [][]string{
+		{"filter", "show", "dev", iface, "ingress"},
+		{"filter", "show", "dev", iface, "parent", "ffff:"},
+	} {
+		if out, rc, _ := execCommandFn("tc", args...); rc == 0 && pref1MirredLine(out) {
+			return true
+		}
+	}
+	return false
+}
+
+// pref1MirredLine 同 `grep -qiE "mirred.*redirect.*ifb0"`(逐行)。
+func pref1MirredLine(out string) bool {
+	for _, ln := range strings.Split(strings.ToLower(out), "\n") {
+		if i := strings.Index(ln, "mirred"); i >= 0 {
+			if j := strings.Index(ln[i:], "redirect"); j >= 0 && strings.Contains(ln[i+j:], "ifb0") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // rulesClsactModeOn rules.json 的 clsact_bpf_mode(guard_mode 的 on 判定,
@@ -264,29 +299,34 @@ func clsactHotspotIface() string {
 	return ""
 }
 
-// clsactLoop 每 10 秒: 门控(缓存 60s)过了才 exec check, 不 ok 才 repair。
+// clsactLoop 每 10 秒一轮 clsactTick。
 func clsactLoop() {
 	c := &clsactSched{}
 	tick := time.NewTicker(clsactCheckEvery)
 	defer tick.Stop()
 	for range tick.C {
-		now := nowFn()
-		if c.gateDue(now) {
-			c.gateOK = clsactGateFn()
-			c.lastGate = now
-		}
-		if !c.gateOK {
-			continue
-		}
-		iface := clsactHotspotIface()
-		if iface == "" {
-			continue
-		}
-		out := clsactCheckFn(iface)
-		if out == "" || !strings.Contains(out, `"ok":true`) {
-			logf("clsact check not ok on %s, repair", iface)
-			runScriptFn(binDir + "/hnc_clsact_watchdog.sh repair " + iface)
-			c.repairs++
-		}
+		clsactTick(c, nowFn())
+	}
+}
+
+// clsactTick 一轮: 门控(缓存 60 秒, 换口立即重判)过了才 exec check,
+// 不 ok 才 `sh hnc_clsact_watchdog.sh repair <口>`(它自己还会再判一次闸门)。
+func clsactTick(c *clsactSched, now time.Time) {
+	iface := clsactIfaceFn()
+	if c.gateDue(now) || iface != c.gateIface {
+		c.gateOK = clsactGateFn(iface)
+		c.lastGate, c.gateIface = now, iface
+	}
+	if !c.gateOK || iface == "" {
+		return
+	}
+	c.checks++
+	out := clsactCheckFn(iface)
+	if !strings.Contains(out, `"ok":true`) {
+		logf("clsact check not ok on %s, repair", iface)
+		// 脚本路径与参数分开传(rc1 拼成一个字符串, sh 去找名叫
+		// "hnc_clsact_watchdog.sh repair wlan2" 的文件, 修复从没执行过)
+		runScriptFn(binDir+"/hnc_clsact_watchdog.sh", "repair", iface)
+		c.repairs++
 	}
 }

@@ -5,15 +5,17 @@
 # 不能起来」(httpd 活着 + 8444 在听 + watchdog 活着), 不看网络规则
 # —— 网络规则会因为各种原因暂时不健康, 拿它做回滚条件会误伤。
 #
-# 用法(service.sh 调用, 也可手工):
+# 用法(post-fs-data.sh / service.sh / 哨兵调用, 也可手工):
 #   hnc_rollback.sh snapshot <moddir> <hncdir>
-#       sync_runtime_from_moddir 之前调: 模块 versionCode 与
+#       post-fs-data.sh 拷模块文件之前调(service.sh 同步前再调一次, 同版本
+#       是空操作, 只为钉住时跳过同步): 模块 versionCode 与
 #       data/runtime_version 不同(= 刚升级)时, 把运行目录 bin/ daemon/
 #       webroot/ 打包到 .prev/(先写临时目录再整体换, 失败不影响开机),
 #       开始观察期; 记录新版本。返回 3 = 已钉住(pinned), 调用方跳过同步。
 #   hnc_rollback.sh observe <hncdir>
-#       观察期内每 30 秒调一次(哨兵): 连续 6 次(3 分钟)httpd 和 watchdog
-#       都起不来, 或任一崩溃重启 ≥ 5 次 → 恢复 .prev/ + 写 rollback.json
+#       观察期内每 30 秒调一次(哨兵): 连续 6 次(3 分钟)核心没起来
+#       (httpd 活 + 8444 在听 + watchdog 活, 任一项不满足即算这轮失败),
+#       或崩溃重启合计 ≥ 5 次(首次看到的 pid 只当基线) → 恢复 .prev/ + 写 rollback.json
 #       + 钉住新版本 + 重启核心进程。data/rollback.disabled 存在时只记录。
 #   hnc_rollback.sh status <hncdir>
 #       打印 rollback.json(诊断 / httpd 转出用)。
@@ -120,15 +122,22 @@ rb_observe() {
     _httpd_pid=$(cat "$_r/httpd.pid" 2>/dev/null | tr -d ' \r\n')
     _wd_pid=$(cat "$_r/watchdog.pid" 2>/dev/null | tr -d ' \r\n')
 
-    # 崩溃重启计数: pid 变了且现在活着 = 重启过一次
+    # 崩溃重启计数: pid 变了且现在活着 = 重启过一次。第一次看到 pid 只记
+    # 基线不计数(快照时 lastpid 清空; 不这样的话健康开机第一轮就 +2, 之后
+    # 再有 3 次正常重启 —— 如热点 IP 变化导致 httpd 重绑 —— 就误回滚)。
+    # pidfile 暂时没有(进程刚被杀、还没重拉)时保留上一个 pid 作基线。
     _rst=$(rb_readnum "$_d/rollback.restarts")
-    if [ -n "$_httpd_pid" ] && [ "$_httpd_pid" != "$(cat "$_d/rollback.lastpid_httpd" 2>/dev/null | tr -d ' \r\n')" ] \
-       && [ "$_httpd_ok" = 1 ]; then _rst=$((_rst + 1)); fi
-    if [ -n "$_wd_pid" ] && [ "$_wd_pid" != "$(cat "$_d/rollback.lastpid_watchdog" 2>/dev/null | tr -d ' \r\n')" ] \
-       && [ "$_wd_ok" = 1 ]; then _rst=$((_rst + 1)); fi
+    _lh=$(cat "$_d/rollback.lastpid_httpd" 2>/dev/null | tr -d ' \r\n')
+    _lw=$(cat "$_d/rollback.lastpid_watchdog" 2>/dev/null | tr -d ' \r\n')
+    if [ -n "$_httpd_pid" ]; then
+        if [ -n "$_lh" ] && [ "$_httpd_pid" != "$_lh" ] && [ "$_httpd_ok" = 1 ]; then _rst=$((_rst + 1)); fi
+        printf '%s' "$_httpd_pid" > "$_d/rollback.lastpid_httpd" 2>/dev/null || true
+    fi
+    if [ -n "$_wd_pid" ]; then
+        if [ -n "$_lw" ] && [ "$_wd_pid" != "$_lw" ] && [ "$_wd_ok" = 1 ]; then _rst=$((_rst + 1)); fi
+        printf '%s' "$_wd_pid" > "$_d/rollback.lastpid_watchdog" 2>/dev/null || true
+    fi
     echo "$_rst" > "$_d/rollback.restarts" 2>/dev/null || true
-    printf '%s' "$_httpd_pid" > "$_d/rollback.lastpid_httpd" 2>/dev/null || true
-    printf '%s' "$_wd_pid" > "$_d/rollback.lastpid_watchdog" 2>/dev/null || true
 
     _fail=0
     [ "$_httpd_ok" = 1 ] && [ "$_port_ok" = 1 ] && [ "$_wd_ok" = 1 ] || _fail=1
@@ -165,15 +174,15 @@ rb_port_listening() {
 # ── 回滚动作 ─────────────────────────────────────────────────────────
 rb_do_rollback() {
     _hnc="$1"; _reason="$2"; _d=$(rb_data "$_hnc"); _r=$(rb_run "$_hnc"); _prev="$_hnc/.prev"
-    _to=$(cat "$_d/runtime_version" 2>/dev/null | tr -d ' \r\n')   # 坏的新版(升级时已写入 runtime_version)
-    [ -n "$_to" ] || _to=unknown
-    _from=$(cat "$_prev/version" 2>/dev/null | tr -d ' \r\n')
-    [ -n "$_from" ] || _from=unknown
+    _bad=$(cat "$_d/runtime_version" 2>/dev/null | tr -d ' \r\n')   # 坏的新版(升级时已写入 runtime_version)
+    [ -n "$_bad" ] || _bad=unknown
+    _good=$(cat "$_prev/version" 2>/dev/null | tr -d ' \r\n')     # .prev 里的上一版
+    [ -n "$_good" ] || _good=unknown
     _at=$(date +%s)
 
     if [ -f "$_d/rollback.disabled" ]; then
         rb_log "rollback: DISABLED — record only (reason=$_reason)"
-        rb_write_record "$_d" "$_from" "$_to" "$_reason" "$_at" "recorded_only"
+        rb_write_record "$_d" "$_bad" "$_good" "$_reason" "$_at" "recorded_only"
         rb_observe_cleanup "$_d"
         return 0
     fi
@@ -183,15 +192,22 @@ rb_do_rollback() {
         cp -a "$_prev/daemon/." "$_hnc/daemon/" 2>/dev/null || true
         cp -a "$_prev/webroot/." "$_hnc/webroot/" 2>/dev/null || true
         chmod 755 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
-        for _b in "$_hnc/bin/"*; do [ -f "$_b" ] && chmod 755 "$_b" 2>/dev/null; done
-        rb_log "rollback: restored .prev (v$_from) over v$_to (reason=$_reason)"
-        rb_write_record "$_d" "$_from" "$_to" "$_reason" "$_at" "rolled_back"
-        printf '%s\n' "$_to" > "$_d/rollback.pinned.tmp" 2>/dev/null \
+        chcon u:object_r:system_file:s0 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
+        # 拷来拷去 SELinux 上下文会变成 system_data_file, ColorOS 上 Go 进程
+        # fork+exec 这种文件报 EPERM(见 service.sh sync_runtime_from_moddir)
+        for _b in "$_hnc/bin/"*; do
+            [ -f "$_b" ] || continue
+            chmod 755 "$_b" 2>/dev/null
+            chcon u:object_r:system_file:s0 "$_b" 2>/dev/null || true
+        done
+        rb_log "rollback: restored .prev (v$_good) over v$_bad (reason=$_reason)"
+        rb_write_record "$_d" "$_bad" "$_good" "$_reason" "$_at" "rolled_back"
+        printf '%s\n' "$_bad" > "$_d/rollback.pinned.tmp" 2>/dev/null \
             && mv -f "$_d/rollback.pinned.tmp" "$_d/rollback.pinned" 2>/dev/null \
-            || printf '%s\n' "$_to" > "$_d/rollback.pinned" 2>/dev/null || true
-        echo "$_from" > "$_d/runtime_version.tmp" 2>/dev/null \
+            || printf '%s\n' "$_bad" > "$_d/rollback.pinned" 2>/dev/null || true
+        echo "$_good" > "$_d/runtime_version.tmp" 2>/dev/null \
             && mv -f "$_d/runtime_version.tmp" "$_d/runtime_version" 2>/dev/null \
-            || echo "$_from" > "$_d/runtime_version" 2>/dev/null || true
+            || echo "$_good" > "$_d/runtime_version" 2>/dev/null || true
         # 重启核心进程: 杀掉, 让外层(service / 哨兵 / 拉起链)用旧二进制重拉
         for _pf in httpd.pid watchdog.pid; do
             _pid=$(cat "$_r/$_pf" 2>/dev/null | tr -d ' \r\n')
@@ -203,13 +219,18 @@ rb_do_rollback() {
         return 0
     fi
     rb_log "rollback WARN: no .prev to restore (reason=$_reason)"
-    rb_write_record "$_d" "$_from" "$_to" "$_reason" "$_at" "no_snapshot"
+    rb_write_record "$_d" "$_bad" "$_good" "$_reason" "$_at" "no_snapshot"
     rb_observe_cleanup "$_d"
     return 1
 }
 
+# rollback.json: from = 启动失败的新版, to = 退回到的上一版(versionCode);
+# action = rolled_back / recorded_only(rollback.disabled)/ no_snapshot。
+# 新记录覆盖旧记录时一并删掉 rollback.ack, 否则上一次的「知道了」会把
+# 这次的横幅也藏掉。
 rb_write_record() {
     _d="$1"; _from="$2"; _to="$3"; _reason="$4"; _at="$5"; _action="$6"
+    rm -f "$_d/rollback.ack" 2>/dev/null || true
     printf '{"from":"%s","to":"%s","reason":"%s","at":%s,"action":"%s"}\n' \
         "$_from" "$_to" "$_reason" "$_at" "$_action" \
         > "$_d/rollback.json.tmp" 2>/dev/null \

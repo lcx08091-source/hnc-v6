@@ -1,0 +1,3 @@
+{"ts":"2026-10-05T12:00:00Z","kind":"quic","sni":"example.com","ja4":"q13d0209an_62ed6f6ca7ad_4d634acda6c0","qtp":"qtp1_dab63f7b92fb","alpn":["alpn"]}
+{"ts":"2026-10-05T12:00:00.02Z","kind":"quic","sni":"quic2.example.com","ja4":"q13d0304h3_55b375c5d22e_4422245e9ae3","qtp":"qtp1_10f697d03c71","alpn":["h3"]}
+{"ts":"2026-10-05T12:00:00.03Z","kind":"tls","sni":"public.example.net","ja4":"t13d0302h2_5559582ccdc4_2d6eb469935a","alpn":["h2"],"ech":true}

@@ -2,6 +2,7 @@ package nlroute
 
 import (
 	"encoding/binary"
+	"net"
 	"testing"
 )
 
@@ -16,10 +17,14 @@ func buildMsg(msgType uint16, payload []byte) []byte {
 	return out
 }
 
-// buildTcMsg handle/parent 的 tcmsg。
+// buildTcMsg handle/parent 的 tcmsg(ifindex 固定 7)。
 func buildTcMsg(handle, parent uint32) []byte {
+	return buildTcMsgIf(7, handle, parent)
+}
+
+func buildTcMsgIf(ifindex int, handle, parent uint32) []byte {
 	p := make([]byte, sizeofTcMsg)
-	binary.LittleEndian.PutUint32(p[4:8], 7) // ifindex
+	binary.LittleEndian.PutUint32(p[4:8], uint32(int32(ifindex)))
 	binary.LittleEndian.PutUint32(p[8:12], handle)
 	binary.LittleEndian.PutUint32(p[12:16], parent)
 	return p
@@ -111,6 +116,46 @@ func TestQdiscListLiveSmoke(t *testing.T) {
 	for _, q := range qs {
 		if q.Kind == "" && q.Handle == 0 && q.Parent == 0 {
 			t.Errorf("空 qdisc 条目: %+v", q)
+		}
+	}
+}
+
+// TestQdiscDumpFilteredByIfIndex 内核 dump 回全部网卡的 qdisc(不按请求的
+// ifindex 过滤)。别的口(ifindex 3)有 root htb、热点口(ifindex 7)只剩
+// fq_codel 时, 查 7 不能被 3 的 htb 冒充成「有 htb」。
+func TestQdiscDumpFilteredByIfIndex(t *testing.T) {
+	m1 := append(buildTcMsgIf(3, 0x00010000, TC_H_ROOT), buildAttr("htb")...)
+	m2 := append(buildTcMsgIf(7, 0, TC_H_ROOT), buildAttr("fq_codel")...)
+	buf := append(append(buildMsg(rtmNewQdisc, m1), buildMsg(rtmNewQdisc, m2)...), buildMsg(nlMsgDone, nil)...)
+	qs, done, err := parseQdiscMsgs(buf)
+	if err != nil || !done || len(qs) != 2 {
+		t.Fatalf("err=%v done=%v qs=%+v", err, done, qs)
+	}
+	if qs[0].IfIndex != 3 || qs[1].IfIndex != 7 {
+		t.Fatalf("ifindex 没解析出来: %+v", qs)
+	}
+	got := keepIfIndex(qs, 7)
+	if len(got) != 1 || got[0].Kind != "fq_codel" {
+		t.Fatalf("查 ifindex 7 应只剩 fq_codel, got %+v", got)
+	}
+}
+
+// TestQdiscListLiveOnlyRequestedIf 本机真 dump: 每个网卡查回来的条目都必须
+// 属于该网卡。
+func TestQdiscListLiveOnlyRequestedIf(t *testing.T) {
+	ifs, err := net.Interfaces()
+	if err != nil || len(ifs) == 0 {
+		t.Skip("no interfaces")
+	}
+	for _, ifc := range ifs {
+		qs, err := QdiscList(ifc.Index)
+		if err != nil {
+			t.Skipf("live netlink 不可用: %v", err)
+		}
+		for _, q := range qs {
+			if q.IfIndex != ifc.Index {
+				t.Errorf("%s(%d) 查回了别的口的 qdisc: %+v", ifc.Name, ifc.Index, q)
+			}
 		}
 	}
 }

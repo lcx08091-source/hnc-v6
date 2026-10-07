@@ -12,7 +12,12 @@
 // 保持 rec-*.pcap, /api/exports 需认这个名字)。
 //
 // 写盘在后台 goroutine; 抓包回调里只做非阻塞入队(select default 丢弃,
-// 照 label_samples.go 的做法)。状态写 run/capture_rec/status.json
+// 照 label_samples.go 的做法)。没在录时 Offer 只是一次原子读(不持锁)。
+//
+// 除了已产出事件的包, 还录「正在重组的握手首段」(Event.asmPending: TCP
+// ClientHello 首段挂进重组表 / QUIC Initial 还没凑齐 CRYPTO 流)——
+// Chrome 带 X25519MLKEM768 的 ClientHello 必然拆两段, 只录产出事件的末段
+// 的话, 回放拼不出来。状态写 run/capture_rec/status.json
 // {recording, started_at, minutes, bytes, path}(前端显示用)。
 //
 // 隐私边界(硬约束): 只录这四类事件的包, 不录完整流量; 界面提示
@@ -36,6 +41,7 @@ const (
 	recMaxFileBytes  = 20 << 20
 	recStatusEvery   = 2 * time.Second
 	recPollEvery     = 2 * time.Second
+	recIdlePollEvery = 10 * time.Second
 	recDefaultMin    = 10
 	recMaxMinutes    = 30
 	recEthernetBytes = 14
@@ -53,20 +59,20 @@ type Recorder struct {
 	hncDir string // exports/ 的根
 	runDir string // run/
 
-	mu     sync.Mutex
-	sess   *recSession
-	closed bool
+	mu   sync.Mutex
+	sess atomic.Pointer[recSession] // 热路径只做 Load; 起停在 mu 内
 
 	startedAt time.Time
 	minutes   int
 }
 
 type recSession struct {
-	path  string
-	f     *os.File
-	queue chan recItem
-	done  chan struct{}
-	bytes atomic.Int64
+	path     string
+	f        *os.File
+	queue    chan recItem
+	done     chan struct{} // 关 = 停止
+	finished chan struct{} // writeLoop 收尾(落盘 + 搬运)完成后关
+	bytes    atomic.Int64
 }
 
 type recItem struct {
@@ -85,16 +91,16 @@ func NewRecorder(hncDir, runDir string) *Recorder {
 // (需要剥 14 字节头); RAWIP/NONE 直接是 IP 包。ev 由调用方已解析好 ——
 // 只录握手类事件。
 func (r *Recorder) Offer(ethernet bool, frame []byte, ev Event) {
-	r.mu.Lock()
-	s := r.sess
-	r.mu.Unlock()
+	s := r.sess.Load()
 	if s == nil {
 		return
 	}
 	switch ev.Kind {
 	case EventDNS, EventTLSClientHello, EventHTTP:
 	default:
-		return
+		if !ev.asmPending { // 正在重组的握手首段也要(否则回放拼不出分段 ClientHello)
+			return
+		}
 	}
 	data := frame
 	if ethernet {
@@ -120,7 +126,7 @@ func (r *Recorder) Offer(ethernet bool, frame []byte, ev Event) {
 func (r *Recorder) Status() map[string]interface{} {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s := r.sess
+	s := r.sess.Load()
 	st := map[string]interface{}{"recording": false}
 	if s != nil {
 		st["recording"] = true
@@ -137,38 +143,46 @@ func (r *Recorder) recDir() string     { return filepath.Join(r.runDir, "capture
 
 func (r *Recorder) pollLoop() {
 	for {
-		time.Sleep(recPollEvery)
-		if r.isClosed() {
-			return
+		// 录制中 2 秒查一次停止条件; 空闲 10 秒看一次请求文件(dpid 常驻,
+		// 不为一个很少用的功能每 2 秒醒一次)
+		if r.sess.Load() != nil {
+			time.Sleep(recPollEvery)
+		} else {
+			time.Sleep(recIdlePollEvery)
 		}
-		r.mu.Lock()
-		s := r.sess
-		r.mu.Unlock()
-		if s != nil {
-			r.pollOnce()
-			continue
-		}
-		// 没在录: 看请求文件(读到即删; stop 同时在 → 取消)
-		req := filepath.Join(r.runDir, "capture_record.request")
-		if _, err := os.Stat(req); err != nil {
-			continue
-		}
-		_ = os.Remove(req) // 读到即删(避免下一轮重复启动)
-		if _, err := os.Stat(filepath.Join(r.runDir, "capture_record.stop")); err == nil {
-			continue // stop 与 request 同时在 → 直接取消
-		}
-		r.start(r.parseRequest())
+		r.pollTick()
 	}
+}
+
+// pollTick 一轮: 在录 → 查停止条件; 没在录 → 看请求文件(测试直接驱动)。
+func (r *Recorder) pollTick() {
+	if r.sess.Load() != nil {
+		r.pollOnce()
+		return
+	}
+	req := filepath.Join(r.runDir, "capture_record.request")
+	stop := filepath.Join(r.runDir, "capture_record.stop")
+	if _, err := os.Stat(req); err != nil {
+		_ = os.Remove(stop) // 没在录也没请求: 残留的 stop 不能留给下一次录制
+		return
+	}
+	// 先读分钟数再删(rc1 先删后读, 分钟数恒为默认 10)
+	minutes := r.parseRequest()
+	if _, err := os.Stat(stop); err == nil {
+		_ = os.Remove(stop) // stop 与 request 同时在 → 直接取消
+		return
+	}
+	r.start(minutes)
 }
 
 // parseRequest 读 request 文件并删之, 返回分钟数(1~30; 坏值/空 = 默认 10)。
 func (r *Recorder) parseRequest() int {
 	req := filepath.Join(r.runDir, "capture_record.request")
 	b, err := os.ReadFile(req)
+	_ = os.Remove(req)
 	if err != nil {
 		return recDefaultMin
 	}
-	_ = os.Remove(req)
 	var v int
 	if n, _ := fmt.Sscanf(string(b), "%d", &v); n == 1 && v >= 1 && v <= recMaxMinutes {
 		return v
@@ -178,31 +192,29 @@ func (r *Recorder) parseRequest() int {
 
 // pollOnce 一轮检查(停止文件 / 到时 / 到量); 测试直接驱动。
 func (r *Recorder) pollOnce() {
-	r.mu.Lock()
-	s := r.sess
-	r.mu.Unlock()
+	s := r.sess.Load()
 	if s == nil {
 		return
 	}
-	_, stopErr := os.Stat(filepath.Join(r.runDir, "capture_record.stop"))
-	if stopErr == nil {
-		os.Remove(filepath.Join(r.runDir, "capture_record.stop"))
+	stop := filepath.Join(r.runDir, "capture_record.stop")
+	if _, err := os.Stat(stop); err == nil {
+		_ = os.Remove(stop)
 		r.finishLocked()
 		return
 	}
-	if s.bytes.Load() >= recMaxFileBytes || time.Now().Sub(r.startedAt) >= time.Duration(r.minutes)*time.Minute {
+	r.mu.Lock()
+	expired := time.Since(r.startedAt) >= time.Duration(r.minutes)*time.Minute
+	r.mu.Unlock()
+	if s.bytes.Load() >= recMaxFileBytes || expired {
 		r.finishLocked()
 	}
 }
 
-func (r *Recorder) isClosed() bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.closed
-}
-
-// Start 手工入口(测试用); 生产走 pollLoop。
+// start 开一个录制会话(生产走 pollTick; 测试直接调)。已在录时不重开。
 func (r *Recorder) start(minutes int) *recSession {
+	if r.sess.Load() != nil {
+		return nil
+	}
 	if err := os.MkdirAll(r.recDir(), 0o700); err != nil {
 		return nil
 	}
@@ -223,17 +235,13 @@ func (r *Recorder) start(minutes int) *recSession {
 		f.Close()
 		return nil
 	}
-	s := &recSession{path: path, f: f, queue: make(chan recItem, recQueueLen), done: make(chan struct{})}
+	s := &recSession{path: path, f: f, queue: make(chan recItem, recQueueLen),
+		done: make(chan struct{}), finished: make(chan struct{})}
 	r.mu.Lock()
-	old := r.sess
-	r.sess = s
 	r.minutes = minutes
 	r.startedAt = time.Now()
+	r.sess.Store(s)
 	r.mu.Unlock()
-	if old != nil {
-		close(old.done)
-		old.f.Close()
-	}
 	go s.writeLoop(r)
 	r.writeStatus()
 	return s
@@ -245,47 +253,67 @@ func (r *Recorder) Stop() {
 	r.finishLocked()
 }
 
+// finishLocked 结束当前会话并等 writeLoop 收尾(落盘 + 搬到 exports/)完成。
+// 名字沿用 rc1; 不要求调用方持锁。
 func (r *Recorder) finishLocked() {
 	r.mu.Lock()
-	s := r.sess
-	r.sess = nil
+	s := r.sess.Swap(nil)
 	r.mu.Unlock()
 	if s == nil {
 		return
 	}
 	close(s.done)
-	// writeLoop 收尾后由 finishSession 落盘 + 搬运
+	<-s.finished
 }
 
 func (s *recSession) writeLoop(r *Recorder) {
+	defer close(s.finished)
 	flushStatus := time.NewTicker(recStatusEvery)
 	defer flushStatus.Stop()
+	broken := false // 写盘出错后不再写(会话照常等停止条件收尾)
+	write := func(it recItem) {
+		if broken {
+			return
+		}
+		// 20 MB 上限在这里硬卡(pollOnce 2 秒一查只负责收尾, 不能指望它不超)
+		if s.bytes.Load()+int64(16+len(it.data)) > recMaxFileBytes {
+			s.bytes.Store(recMaxFileBytes)
+			return
+		}
+		var rh [16]byte
+		binary.LittleEndian.PutUint32(rh[0:4], uint32(it.ts.Unix()))
+		binary.LittleEndian.PutUint32(rh[4:8], uint32(it.ts.Nanosecond()/1000))
+		binary.LittleEndian.PutUint32(rh[8:12], uint32(len(it.data)))
+		binary.LittleEndian.PutUint32(rh[12:16], uint32(len(it.data)))
+		if _, err := s.f.Write(rh[:]); err != nil {
+			broken = true
+			return
+		}
+		if _, err := s.f.Write(it.data); err != nil {
+			broken = true
+			return
+		}
+		s.bytes.Add(int64(16 + len(it.data)))
+	}
 	for {
 		select {
 		case <-s.done:
+			// 停止前已入队的包写完再收尾
+			for {
+				select {
+				case it := <-s.queue:
+					write(it)
+					continue
+				default:
+				}
+				break
+			}
 			s.finish()
 			r.moveOut(s)
 			r.writeStatus()
 			return
 		case it := <-s.queue:
-			var rh [16]byte
-			binary.LittleEndian.PutUint32(rh[0:4], uint32(it.ts.Unix()))
-			binary.LittleEndian.PutUint32(rh[4:8], uint32(it.ts.Nanosecond()/1000))
-			binary.LittleEndian.PutUint32(rh[8:12], uint32(len(it.data)))
-			binary.LittleEndian.PutUint32(rh[12:16], uint32(len(it.data)))
-			if _, err := s.f.Write(rh[:]); err != nil {
-				s.finish()
-				r.moveOut(s)
-				r.writeStatus()
-				return
-			}
-			if _, err := s.f.Write(it.data); err != nil {
-				s.finish()
-				r.moveOut(s)
-				r.writeStatus()
-				return
-			}
-			s.bytes.Add(int64(16 + len(it.data)))
+			write(it)
 		case <-flushStatus.C:
 			r.writeStatus()
 		}

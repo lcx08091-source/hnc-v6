@@ -892,16 +892,18 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	// 判不了(探测陈旧 / 无私网 IP)或被对照机制钉回 shell 时走原路径 ——
 	// shell 版会顺带刷新 iface_detect.json 缓存。
 	var probe actionResult
-	if natUse("probe") {
+	if natUse(ncProbe) {
 		r := nativeProbeHotspot()
 		if r.unknown {
 			probe = runActionFn("probe_hotspot")
-		} else if r.ok {
-			probe = actionResult{exitCode: 0, stdout: r.iface + " " + r.ip}
 		} else {
 			probe = actionResult{exitCode: 1}
+			if r.ok {
+				probe = actionResult{exitCode: 0, stdout: r.iface + " " + r.ip}
+			}
+			// 每 30 分钟与 shell 版对一次结论; 对照那一轮以 shell 为准
+			probe = natShadowProbe(r, probe)
 		}
-		natShadowProbe(r) // v5.29 T1: 每 30 分钟与 shell 版对一次结论
 	} else {
 		probe = runActionFn("probe_hotspot")
 	}
@@ -939,16 +941,15 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	// Health check — v5.29 T1: 原生(读内核 + 直接 exec iptables)优先;
 	// 判不了或钉回 shell 时走原路径。
 	var healthRC int
-	if natUse("health") {
+	if natUse(ncHealth) {
 		if rc := nativeCheckHealthCached(newIface, now); rc != natHealthUnknown {
-			healthRC = rc
+			healthRC = natShadowHealth(newIface, rc) // 对照那一轮以 shell 为准
 		} else {
 			healthRC = runActionFn("check_health").exitCode
 		}
 	} else {
 		healthRC = runActionFn("check_health").exitCode
 	}
-	natShadowMaybeCompare(newIface, healthRC)
 	switch healthRC {
 	case 0:
 		// Healthy
@@ -975,7 +976,7 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		if recovering || now.Sub(aux.lastDrift) >= httpdDriftEvery {
 			// v5.29 T1: Go 先判断「需不需要动手」, 需要才调 shell(check_httpd_bind_drift
 			// 本身是「判断 + 动手」一体, 修 httpd / 撤规则仍走 shell)。
-			if needed, unknown := nativeHttpdDriftNeeded(); needed || unknown || !natUse("drift") {
+			if needed, unknown := nativeHttpdDriftNeeded(); needed || unknown || !natUse(ncDrift) {
 				_ = runActionFn("httpd_drift")
 			}
 			aux.lastDrift = now
@@ -984,7 +985,7 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 			// v5.29 T1: 上行链路检查原生化: ifb0 存在性 / 根 qdisc 用 netlink,
 			// mirred 过滤器直接 exec tc(文本判断, 不经 sh)。任一项不满足或
 			// 判不了 → shell 修复路径(含冷却 / 失败计数 / 降级标记, 逻辑不搬)。
-			if ok, unknown := nativeUplinkOK(newIface); !ok || unknown || !natUse("uplink") {
+			if ok, unknown := nativeUplinkOK(newIface); !ok || unknown || !natUse(ncUplink) {
 				_ = runActionFn("tc_uplink_healthy")
 			}
 			aux.lastUplink = now
@@ -1101,7 +1102,7 @@ func main() {
 
 	handleSignals()
 	go heartbeatLoop()
-	startLinkWatch() // v5.25: 网卡 / 地址事件即时唤醒主循环(热点开关不再靠 10 秒轮询)
+	startLinkWatch()    // v5.25: 网卡 / 地址事件即时唤醒主循环(热点开关不再靠 10 秒轮询)
 	startOffloadSched() // v5.29 T2: offload / clsact 守护改由 Go 调度(常驻 shell 少 2 个)
 
 	// rc30.5: alert scanner — detect unknown devices every 5 minutes.

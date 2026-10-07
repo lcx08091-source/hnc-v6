@@ -125,6 +125,58 @@ func withFakeEnv(t *testing.T, clk *fakeClock, rec *actionRec) {
 		runActionFn, runV6SyncFn, runStatsSampleFn, runScriptFn = oldAct, oldV6, oldStats, oldScript
 		isDozeFn, hotspotIdleFn, actSnapshotFn, nowFn = oldIsDoze, oldIdle, oldActSnap, oldNow
 	})
+	withNativeUnknown(t)
+}
+
+// withNativeUnknown v5.29: 原生检查的外部世界全部隔离成「判不了」(临时
+// run/、无探测文件、netlink / exec 都失败)—— 原生路径一律退回 shell,
+// 旧预算用例因此与机器环境无关(之前读的是真实 /data/local/hnc/run 与
+// 本机网卡)。需要原生世界的用例在此之后自行注入。
+func withNativeUnknown(t *testing.T) {
+	t.Helper()
+	oldRun, oldData := natRunDir, natDataDir
+	oldHint, oldByN, oldAddrs, oldQ, oldExec, oldSys := ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn, nlQdiscListFn, execCommandFn, sysIfIndexFn
+	oldShadow, oldMM := natShadowSt, nativeMismatchTotal
+	oldHCAt, oldHCRC, oldHCI := healthCacheAt, healthCacheRC, healthCacheIface
+	natRunDir, natDataDir = t.TempDir(), t.TempDir()
+	ifaceHintReadFn = func() (string, bool) { return "", false }
+	netInterfaceByNameFn = func(string) (*net.Interface, error) { return nil, os.ErrNotExist }
+	netIfAddrsFn = func(*net.Interface) ([]net.Addr, error) { return nil, os.ErrNotExist }
+	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) { return nil, os.ErrNotExist }
+	execCommandFn = func(string, ...string) (string, int, error) { return "", -1, os.ErrNotExist }
+	sysIfIndexFn = func(string) (string, error) { return "", os.ErrNotExist }
+	natShadowSt, nativeMismatchTotal = newNativeShadowState(), 0
+	healthCacheAt, healthCacheRC, healthCacheIface = time.Time{}, 0, ""
+	t.Cleanup(func() {
+		natRunDir, natDataDir = oldRun, oldData
+		ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn = oldHint, oldByN, oldAddrs
+		nlQdiscListFn, execCommandFn, sysIfIndexFn = oldQ, oldExec, oldSys
+		natShadowSt, nativeMismatchTotal = oldShadow, oldMM
+		healthCacheAt, healthCacheRC, healthCacheIface = oldHCAt, oldHCRC, oldHCI
+	})
+}
+
+// withNativeHealthy 原生世界全绿: 探测新鲜(wlan2 / 192.168.43.1)、根 htb、
+// iptables 正常、ifb0 + mirred 在。
+func withNativeHealthy(t *testing.T) {
+	t.Helper()
+	ifaceHintReadFn = func() (string, bool) { return "wlan2", true }
+	netInterfaceByNameFn = func(name string) (*net.Interface, error) {
+		return &net.Interface{Name: name, Index: 5}, nil
+	}
+	netIfAddrsFn = func(*net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.43.1").To4(), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	sysIfIndexFn = func(string) (string, error) { return "5", nil }
+	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) {
+		return []nlroute.Qdisc{{Kind: "htb", Handle: 0x10000, Parent: nlroute.TC_H_ROOT}}, nil
+	}
+	execCommandFn = func(name string, args ...string) (string, int, error) {
+		if len(args) > 1 && args[0] == "filter" {
+			return "filter parent ffff: action mirred egress redirect dev ifb0", 0, nil
+		}
+		return "-A HNC_RESTORE -j CONNMARK --restore-mark\n", 0, nil
+	}
 }
 
 // driveHour 用 step 间隔驱动 tick 走满 60 分钟(返回 tick 数)。
@@ -335,41 +387,7 @@ func TestBudgetNativeActiveHealthy(t *testing.T) {
 	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
 	rec := newActionRec()
 	withFakeEnv(t, clk, rec)
-
-	// 原生世界: 探测新鲜、qdisc htb、iptables 正常、ifb0+mirred 在。
-	tmp := t.TempDir()
-	oldRun, oldData := natRunDir, natDataDir
-	natRunDir, natDataDir = tmp, tmp
-	t.Cleanup(func() { natRunDir, natDataDir = oldRun, oldData })
-	oldHint, oldByN, oldAddrs, oldQ, oldExec := ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn, nlQdiscListFn, execCommandFn
-	oldShadow := natShadowSt
-	oldHCAt, oldHCRCC, oldHCI := healthCacheAt, healthCacheRC, healthCacheIface
-	healthCacheAt, healthCacheRC, healthCacheIface = time.Time{}, 0, ""
-	natShadowSt = newNativeShadowState()
-	ifaceHintReadFn = func() (string, bool) { return "wlan2", true }
-	netInterfaceByNameFn = func(name string) (*net.Interface, error) {
-		return &net.Interface{Name: name, Index: 5}, nil
-	}
-	netIfAddrsFn = func(*net.Interface) ([]net.Addr, error) {
-		return []net.Addr{&net.IPNet{IP: net.ParseIP("192.168.43.1").To4(), Mask: net.CIDRMask(24, 32)}}, nil
-	}
-	oldSysIdx := sysIfIndexFn
-	sysIfIndexFn = func(string) (string, error) { return "5", nil }
-	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) {
-		return []nlroute.Qdisc{{Kind: "htb", Handle: 0x10000, Parent: nlroute.TC_H_ROOT}}, nil
-	}
-	execCommandFn = func(name string, args ...string) (string, int, error) {
-		if len(args) > 1 && args[0] == "filter" {
-			return "filter parent ffff: action mirred egress redirect dev ifb0", 0, nil
-		}
-		return "-A HNC_RESTORE -j CONNMARK --restore-mark\n", 0, nil
-	}
-	t.Cleanup(func() {
-		ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn = oldHint, oldByN, oldAddrs
-		nlQdiscListFn, execCommandFn, sysIfIndexFn = oldQ, oldExec, oldSysIdx
-		natShadowSt = oldShadow
-		healthCacheAt, healthCacheRC, healthCacheIface = oldHCAt, oldHCRCC, oldHCI
-	})
+	withNativeHealthy(t)
 	rec.probeOut = "wlan2 192.168.43.1\n" // 对照的 shell 版结论与原生一致
 
 	ls := newLoopState()
@@ -404,22 +422,11 @@ func TestBudgetNativeSwitchFile(t *testing.T) {
 	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
 	rec := newActionRec()
 	withFakeEnv(t, clk, rec)
-
-	tmp := t.TempDir()
-	oldRun, oldData := natRunDir, natDataDir
-	natRunDir, natDataDir = tmp, tmp
-	t.Cleanup(func() { natRunDir, natDataDir = oldRun, oldData })
+	withNativeHealthy(t)
 	// 原生探测都健康, 但开关文件存在
-	if err := os.WriteFile(tmp+"/wd_native.disabled", []byte("1"), 0o644); err != nil {
+	if err := os.WriteFile(natRunDir+"/wd_native.disabled", []byte("1"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	oldHint, oldQ, oldExec := ifaceHintReadFn, nlQdiscListFn, execCommandFn
-	ifaceHintReadFn = func() (string, bool) { return "wlan2", true }
-	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) {
-		return []nlroute.Qdisc{{Kind: "htb", Handle: 0x10000, Parent: nlroute.TC_H_ROOT}}, nil
-	}
-	execCommandFn = func(string, ...string) (string, int, error) { return "", 0, nil }
-	t.Cleanup(func() { ifaceHintReadFn, nlQdiscListFn, execCommandFn = oldHint, oldQ, oldExec })
 	rec.probeOut = "wlan2 192.168.43.1\n" // 与状态机 iface 一致, 否则每轮 migrate
 
 	ls := newLoopState()
@@ -431,5 +438,78 @@ func TestBudgetNativeSwitchFile(t *testing.T) {
 	}
 	if n := rec.counts["check_health"]; n != 60 {
 		t.Errorf("check_health sh = %d, want 60(开关关闭走旧路径)", n)
+	}
+}
+
+// TestNativeUnknownNoDoubleShell 原生判不了(探测陈旧 / netlink 失败)→
+// 每轮只跑一次 shell; 30 分钟对照点上也不能再跑第二遍(v5.29 rc1 在对照点
+// 会把 shell 跑两遍, 还拿 shell 跟 shell 比)。
+func TestNativeUnknownNoDoubleShell(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	withFakeEnv(t, clk, rec) // 原生全部「判不了」
+	rec.probeOut = "wlan2 192.168.43.1\n"
+	ls := newLoopState()
+	st := func(int) wdState { return wdState{kind: stateActive, iface: "wlan2"} }
+	driveHour(ls, clk, st, intervalNormal)
+	if n := rec.counts["probe_hotspot"]; n != 60 {
+		t.Errorf("probe_hotspot sh = %d, want 60(每轮一次, 对照点不重复)", n)
+	}
+	if n := rec.counts["check_health"]; n != 60 {
+		t.Errorf("check_health sh = %d, want 60(每轮一次, 对照点不重复)", n)
+	}
+	if nativeMismatchTotal != 0 {
+		t.Errorf("原生判不了不算不一致, native_mismatch = %d", nativeMismatchTotal)
+	}
+}
+
+// TestNativeShadowShellWinsThisRound 对照点上原生说健康、shell 说规则丢了 →
+// 本轮以 shell 为准, 当轮就 full_restore(rc1 只记账, 照用原生结论)。
+func TestNativeShadowShellWinsThisRound(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	withFakeEnv(t, clk, rec)
+	withNativeHealthy(t)
+	rec.probeOut = "wlan2 192.168.43.1\n"
+	rec.rc["check_health"] = 1
+	ls := newLoopState()
+	ls.tick(wdState{kind: stateActive, iface: "wlan2"})
+	if rec.counts["check_health"] != 1 {
+		t.Fatalf("第一轮应跑一次对照, check_health = %d", rec.counts["check_health"])
+	}
+	if rec.counts["full_restore"] != 1 {
+		t.Errorf("对照不一致时本轮应按 shell 结论 full_restore, got %d", rec.counts["full_restore"])
+	}
+	if nativeMismatchTotal != 1 {
+		t.Errorf("native_mismatch = %d, want 1", nativeMismatchTotal)
+	}
+}
+
+// TestNativeRevertAppliesToLoop 同项连续 3 次不一致 → 主循环真的退回
+// shell(每轮跑 shell check_health)。rc1 主循环用 natUse("health"), 而
+// 退回记在 "check_health" 键上, 退回永远不生效。
+func TestNativeRevertAppliesToLoop(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	withFakeEnv(t, clk, rec)
+	withNativeHealthy(t)
+	rec.probeOut = "wlan2 192.168.43.1\n"
+	rec.rc["check_health"] = 2 // shell 每次都说「锁忙」, 原生说健康 → 不一致(后果最轻: 跳过本轮)
+	ls := newLoopState()
+	st := func(int) wdState { return wdState{kind: stateActive, iface: "wlan2"} }
+	driveHour(ls, clk, st, intervalNormal) // 对照点 0 / 30 分 → 2 次不一致
+	if rec.counts["check_health"] != 2 || natShadowSt.isReverted(ncHealth) {
+		t.Fatalf("第一小时: check_health = %d, reverted = %v; want 2 / false", rec.counts["check_health"], natShadowSt.isReverted(ncHealth))
+	}
+	clk.now = clk.now.Add(time.Minute)
+	driveHour(ls, clk, st, intervalNormal) // 60 分对照点第 3 次 → 退回, 之后每轮 shell
+	if !natShadowSt.isReverted(ncHealth) {
+		t.Fatal("连续 3 次不一致后应钉回 shell")
+	}
+	if n := rec.counts["check_health"]; n < 55 {
+		t.Errorf("退回后应每轮跑 shell check_health, 两小时合计只有 %d 次", n)
+	}
+	if n := rec.counts["probe_hotspot"]; n > 4 {
+		t.Errorf("probe 没有不一致, 不该被一起退回: probe_hotspot sh = %d", n)
 	}
 }

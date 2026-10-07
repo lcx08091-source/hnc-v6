@@ -14,19 +14,7 @@
 # v5.9.3 BUG-009:service.sh 也会被 magiskd 直接拉起(umask=0),而且 WebUI 的
 # "重启后端"是直接 fork service.sh、根本不经过 post-fs-data.sh,所以这里必须
 # 有一份同款的 umask + chmod,不能只在 post-fs-data.sh 收。
-# 取 022 而非 077 的理由见 post-fs-data.sh 同段注释(# v5.29 T3: 升级快照(打包旧运行目录到 .prev) + 钉住检查。
-# rc=3 = 该版本已被钉住(坏版本没换新包) → 整个跳过同步, 直接用 .prev 里
-# 恢复过的旧文件开机。失败(其他非 0)不影响开机: 照常同步。
-_RB=1
-if [ -f "$MODDIR/bin/hnc_rollback.sh" ]; then
-    sh "$MODDIR/bin/hnc_rollback.sh" snapshot "$MODDIR" "$HNC_DIR"; _RB=$?
-    [ "$_RB" = 3 ] && log "rollback: version pinned, skip runtime sync (staying on .prev)"
-else
-    log "rollback WARN: hnc_rollback.sh missing, no upgrade snapshot"
-fi
-if [ "$_RB" != 3 ]; then
-sync_runtime_from_moddir
-fi
+# 取 022 而非 077 的理由见 post-fs-data.sh 同段注释(sync_runtime_from_moddir
 # 的 `cp -rf` 同样不带 -p,077 会把脚本/二进制压到不可执行)。
 umask 022
 
@@ -379,7 +367,20 @@ sync_runtime_from_moddir() {
     fi
 }
 
-sync_runtime_from_moddir
+# v5.29 T3: 升级快照 + 钉住检查。真正的快照点在 post-fs-data.sh(它每次开机
+# 都比这里先把模块文件拷进运行目录); 这里再调一次只为两件事: WebUI「重启
+# 后端」直接 fork 本脚本、不经 post-fs-data.sh; 以及钉住时(rc=3)跳过同步,
+# 否则坏版本又被拷回来。同版本重复调用是空操作。失败(其他非 0)照常同步。
+_RB=0
+if [ -f "$MODDIR/bin/hnc_rollback.sh" ]; then
+    HNC_RB_LOG="$HNC_DIR/logs/rollback.log" sh "$MODDIR/bin/hnc_rollback.sh" snapshot "$MODDIR" "$HNC_DIR"
+    _RB=$?
+fi
+if [ "$_RB" = 3 ]; then
+    log "rollback: version pinned, skip runtime sync (staying on .prev)"
+else
+    sync_runtime_from_moddir
+fi
 
 # v5.22 (armeabi-v7a): ABI 兜底。正常安装由 customize.sh 选好二进制并删掉
 # bin/<abi>/ 覆盖层; 若安装器没跑 customize.sh(覆盖层随 cp -rf 进了运行目录),
@@ -747,6 +748,10 @@ if [ -x "$HNC_DIR/bin/hnc_watchdog" ] && [ ! -f "$RUN/wd_m3.disabled" ]; then
     echo watchdog > "$RUN/offload_guard.owner" 2>/dev/null
     M3_TAKEOVER=1
     log "offload/clsact scheduled by Go watchdog (run/offload_guard.owner=watchdog)"
+else
+    # run/ 跨重启保留: 上次开机写的 owner=watchdog 不删的话, 下面拉起的
+    # shell 守护一看 owner 就退出, 开关打开后 offload 兜底反而没人跑了
+    rm -f "$RUN/offload_guard.owner" 2>/dev/null
 fi
 if [ "$M3_TAKEOVER" = "0" ] && [ -f "$HNC_DIR/bin/hnc_offload_guard.sh" ]; then
     OGPID=$(_verify_pid "$RUN/offload_guard.pid" hnc_offload_guard)
@@ -1188,7 +1193,7 @@ fi
         # snapshot 建了 data/rollback.observing 才有一轮; observe 自己判窗口
         # (10 分钟)与触发条件(连续 6 败 / 崩溃重启 ≥ 5 → 恢复 .prev + 钉住)。
         if [ -f "$HNC_DIR/data/rollback.observing" ] && [ -f "$HNC_DIR/bin/hnc_rollback.sh" ]; then
-            sh "$HNC_DIR/bin/hnc_rollback.sh" observe "$HNC_DIR"
+            HNC_RB_LOG="$HNC_DIR/logs/rollback.log" sh "$HNC_DIR/bin/hnc_rollback.sh" observe "$HNC_DIR"
         fi
 
         sleep 30

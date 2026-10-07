@@ -88,3 +88,22 @@ func TestReadFutureTsRejected(t *testing.T) {
 		t.Fatalf("got (%q,%v), want (ap0,true)", s, ok)
 	}
 }
+
+// TestReadDetectNoFallback v5.29: 原生 probe 只认 window 内的探测结果,
+// 陈旧时不能回退到没有时间戳的 hotspot_iface。
+func TestReadDetectNoFallback(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "hotspot_iface", "ap0\n")
+	write(t, dir, "iface_detect.json", `{"schema":1,"ts":`+strconv.FormatInt(tNow.Add(-6*time.Minute).Unix(), 10)+`,"iface":"wlan2"}`)
+	if s, ok := ReadDetect(dir, tNow, 5*time.Minute); ok || s != "" {
+		t.Fatalf("6 分钟前的探测应判陈旧, got (%q,%v)", s, ok)
+	}
+	write(t, dir, "iface_detect.json", `{"schema":1,"ts":`+strconv.FormatInt(tNow.Add(-4*time.Minute).Unix(), 10)+`,"iface":"wlan2"}`)
+	if s, ok := ReadDetect(dir, tNow, 5*time.Minute); !ok || s != "wlan2" {
+		t.Fatalf("4 分钟前的探测应可用, got (%q,%v)", s, ok)
+	}
+	write(t, dir, "iface_detect.json", `{"schema":1,"ts":`+strconv.FormatInt(tNow.Unix(), 10)+`,"iface":""}`)
+	if s, ok := ReadDetect(dir, tNow, 5*time.Minute); ok || s != "" {
+		t.Fatalf("iface 为空不能回退 hotspot_iface, got (%q,%v)", s, ok)
+	}
+}
