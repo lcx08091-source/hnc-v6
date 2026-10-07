@@ -16,7 +16,8 @@
 # 写:
 #   run/app_qos.state —— 每行 "<iface> <class_id>", tc_manager.sh 据此跳过这些
 #                        class 的叶子操作; 没有设备开时删除。
-#   run/app_qos.sig   —— 上次下发的计划签名(没变且子 class 都在 → 不重下发)。
+#   run/app_qos.sig   —— 两行: tc 签名(网卡 + 设备集合)/ 整份计划签名; tc 签名
+#                        没变且子 class 对得上 → 不碰 tc, 计划没变 → 不碰 iptables。
 #
 # 结构(只做下行 = 热点网卡出方向; 上行在 ifb0 上, mirred 早于 iptables, 包上
 # 还没有 mark, 按 mark 分档做不了):
@@ -84,8 +85,8 @@ to_kbit() {
 
 # 设备 class 的 rate / ceil(kbit), 输出 "R C"; class 不在返回 1
 class_rate_ceil() {
-    tc class show dev "$1" classid "1:$2" 2>/dev/null | awk '
-        $1 == "class" { for (i = 1; i <= NF; i++) { if ($i == "rate") r = $(i+1); if ($i == "ceil") c = $(i+1) } }
+    tc class show dev "$1" classid "1:$2" 2>/dev/null | awk -v c0="1:$2" '
+        $1 == "class" && $3 == c0 { for (i = 1; i <= NF; i++) { if ($i == "rate") r = $(i+1); if ($i == "ceil") c = $(i+1) } }
         END { if (r == "") exit 1; if (c == "") c = r; print r, c }'
 }
 
@@ -101,12 +102,24 @@ teardown_dev() {
     log "teardown $iface mid=$mid class=1:$cid"
 }
 
-# 子 class 都还在吗(看门狗 / restore 重建过 tc 树后会丢)
+# 子 class 都在、且 rate / ceil 与父 class 当前的 rate / ceil 对得上吗(看门狗 /
+# restore 重建过 tc 树会丢子 class; 用户改了设备限速 → 要按新 rate 重新分)。
+# $1 = iface, 其余 = mark_id 列表; 只调一次 tc class show。
 children_ok() {
-    local iface=$1 mid=$2 out t
-    out=$(tc class show dev "$iface" parent "1:$(class_for_mid "$mid")" 2>/dev/null)
-    for t in 1 2 3; do
-        echo "$out" | grep -q "class htb 1:$(child_minor "$mid" "$t") " || return 1
+    local iface=$1; shift
+    local all mid cid pr t want got
+    all=$(tc class show dev "$iface" 2>/dev/null)
+    for mid in "$@"; do
+        cid=$(class_for_mid "$mid")
+        pr=$(echo "$all" | awk -v c="1:$cid" '$1 == "class" && $3 == c { for (i = 1; i <= NF; i++) { if ($i == "rate") r = $(i+1); if ($i == "ceil") e = $(i+1) } } END { if (r == "") exit 1; if (e == "") e = r; print r, e }') || return 1
+        for t in 1 2 3; do
+            case $t in 1) want=50 ;; 2) want=35 ;; *) want=15 ;; esac
+            want=$(( $(to_kbit "${pr% *}") * want / 100 )); [ "$want" -lt 1 ] && want=1
+            got=$(echo "$all" | awk -v c="1:$(child_minor "$mid" "$t")" '$1 == "class" && $3 == c { for (i = 1; i <= NF; i++) { if ($i == "rate") r = $(i+1); if ($i == "ceil") e = $(i+1) } } END { if (r == "") exit 1; print r, e }') || return 1
+            # rate 允许 tc 显示时的取整误差(±2%); ceil 须与父 ceil 同
+            awk -v g="$(to_kbit "${got% *}")" -v w="$want" 'BEGIN { d = g - w; if (d < 0) d = -d; exit !(d <= w * 0.02 + 1) }' || return 1
+            [ "$(to_kbit "${got#* }")" = "$(to_kbit "${pr#* }")" ] || return 1
+        done
     done
     return 0
 }
@@ -189,16 +202,21 @@ if [ "${NDEV:-0}" -eq 0 ] && [ ! -f "$STATE" ]; then
     exit 0
 fi
 
-# 计划没变且子 class 都在 → 不重下发(看门狗每 30 秒调一次)
+# tc 只认「网卡 + 哪几台设备」; IP 行(随 dpid 识别结果常变)只影响 iptables。
+# 看门狗每 30 秒调一次: 设备集合没变、子 class 都在且 rate / ceil 对得上 → 不碰 tc
+# (重建要先删再加设备 class 上的过滤器, 会有一瞬间包落进默认类)。
+MIDS=$(awk '$1 == "dev" { print $2 }' "$PLAN" 2>/dev/null | tr '\n' ' ')
+TCSIG=$(printf '%s|%s' "$IFACE" "$MIDS" | cksum | awk '{print $1 "-" $2}')
 NEWSIG=$(cksum < "$PLAN" 2>/dev/null | awk '{print $1 "-" $2}')
-if [ "${NDEV:-0}" -gt 0 ] && [ -f "$STATE" ] && [ "$(cat "$SIG" 2>/dev/null)" = "$NEWSIG" ]; then
-    _all_ok=1
-    for _mid in $(awk '$1 == "dev" { print $2 }' "$PLAN"); do
-        children_ok "$IFACE" "$_mid" || { _all_ok=0; break; }
-    done
-    [ "$_all_ok" = 1 ] && exit 0
+OLD_TCSIG=$(sed -n 1p "$SIG" 2>/dev/null)
+OLD_IPTSIG=$(sed -n 2p "$SIG" 2>/dev/null)
+TC_OK=0
+if [ "${NDEV:-0}" -gt 0 ] && [ -f "$STATE" ] && [ "$OLD_TCSIG" = "$TCSIG" ]; then
+    # shellcheck disable=SC2086
+    children_ok "$IFACE" $MIDS && TC_OK=1
 fi
 
+if [ "$TC_OK" != 1 ]; then
 # 1) 新状态先落盘(tc_manager ensure_class 据此判断叶子归谁)
 OLD_STATE=$(cat "$STATE" 2>/dev/null)
 : > "$STATE.tmp"
@@ -225,11 +243,14 @@ done
 awk '$1 == "dev" { print $2, $4 }' "$PLAN" 2>/dev/null | while read -r mid ip; do
     build_dev "$IFACE" "$mid" "$ip" || true
 done
+fi
 
-# 4) iptables
+# 4) iptables: 计划变了、或跳转被别人清掉了(热点重启时 iptables_manager 清链)才重建
 if [ -f "$STATE" ]; then
-    ipt_build
-    echo "$NEWSIG" > "$SIG"
+    if [ "$OLD_IPTSIG" != "$NEWSIG" ] || ! iptables -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null; then
+        ipt_build
+    fi
+    printf '%s\n%s\n' "$TCSIG" "$NEWSIG" > "$SIG"
 else
     ipt_remove
     rm -f "$SIG"

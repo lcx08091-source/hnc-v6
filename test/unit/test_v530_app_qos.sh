@@ -134,18 +134,48 @@ assert_mock_called "pref 50 handle 0x800001/0x9fffff fw flowid 1:100" && \
 assert_eq "wlan2 100" "$(cat "$AQ_TD/run/app_qos.state")" "state" && test_pass
 mock_teardown
 
-test_start "app_qos: 计划没变且子 class 都在 → 不重下发"
+AQ_CHILDREN="$AQ_CLASS5
+class htb 1:a015 parent 1:5 leaf b015: prio 0 rate 10Mbit ceil 20Mbit burst 1600b cburst 1600b
+class htb 1:a016 parent 1:5 leaf b016: prio 1 rate 7Mbit ceil 20Mbit burst 1600b cburst 1600b
+class htb 1:a017 parent 1:5 leaf b017: prio 2 rate 3Mbit ceil 20Mbit burst 1600b cburst 1600b"
+
+test_start "app_qos: 计划没变且子 class 对得上 → 不碰 tc 也不重建 iptables"
 aq_env; mock_setup
 mock_set_stdout tc "$AQ_CLASS5"
 printf '%s\n' "$AQ_PLAN" > "$AQ_TD/run/app_qos.plan"
 aq_apply
 : > "$MOCK_LOG"
-mock_set_stdout tc "class htb 1:a015 parent 1:5 leaf b015: prio 0 rate 10Mbit ceil 20Mbit
-class htb 1:a016 parent 1:5 leaf b016: prio 1 rate 7Mbit ceil 20Mbit
-class htb 1:a017 parent 1:5 leaf b017: prio 2 rate 3Mbit ceil 20Mbit"
+mock_set_stdout tc "$AQ_CHILDREN"
 aq_apply
-assert_mock_not_called "class change" && assert_mock_not_called "iptables" && \
-    assert_eq "1" "$(wc -l < "$MOCK_LOG" | tr -d ' ')" "只查一次子 class" && test_pass
+assert_mock_not_called "class change" && assert_mock_not_called "filter" && \
+assert_mock_not_called "mangle -A HNC_APP_QOS" && \
+assert_eq "tc|class show dev wlan2
+iptables|-t mangle -C POSTROUTING -j HNC_APP_QOS" "$(cat "$MOCK_LOG")" "只查一次子 class + 一次跳转" && test_pass
+mock_teardown
+
+test_start "app_qos: 只有 IP 行变了 → 只重建 iptables, 不碰 tc(不删过滤器)"
+aq_env; mock_setup
+mock_set_stdout tc "$AQ_CLASS5"
+printf '%s\n' "$AQ_PLAN" > "$AQ_TD/run/app_qos.plan"
+aq_apply
+: > "$MOCK_LOG"
+mock_set_stdout tc "$AQ_CHILDREN"
+printf '%s\nip 1 9.9.9.9\n' "$AQ_PLAN" > "$AQ_TD/run/app_qos.plan"
+aq_apply
+assert_mock_not_called "class change" && assert_mock_not_called "filter del" && \
+assert_mock_called "iptables|-t mangle -A HNC_APP_QOS_IP -s 9.9.9.9 -j MARK --set-xmark 0x200000/0x600000" && test_pass
+mock_teardown
+
+test_start "app_qos: 设备限速改了(父 rate 20→40Mbit)→ 子 class 按新 rate 重分"
+aq_env; mock_setup
+mock_set_stdout tc "$AQ_CLASS5"
+printf '%s\n' "$AQ_PLAN" > "$AQ_TD/run/app_qos.plan"
+aq_apply
+: > "$MOCK_LOG"
+mock_set_stdout tc "$(echo "$AQ_CHILDREN" | sed 's/^class htb 1:5 parent 1:1 leaf 1005: prio 0 rate 20Mbit ceil 20Mbit/class htb 1:5 parent 1:1 leaf 1005: prio 0 rate 40Mbit ceil 40Mbit/')"
+aq_apply
+assert_mock_called "classid 1:a015 htb rate 20000kbit ceil 40Mbit prio 0" && \
+assert_mock_called "classid 1:a017 htb rate 6000kbit ceil 40Mbit prio 2" && test_pass
 mock_teardown
 
 test_start "app_qos: 关掉 → 拆子 class / 过滤器 / iptables, 再让 tc_manager 补叶子"
