@@ -24,6 +24,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -198,16 +199,27 @@ func dayFileKeys(from, to time.Time) []string {
 // onlineHoursDayRE / onlineHoursMACRE v5.11: online_hours.jsonl 坏行兜底解析。
 // bin/watchdog.sh 的 `_oh_ts=$(_now_s)` 把变量当命令执行, 写出的行是
 // {"t":,"day":"YYYYMMDD","mac":"…"} —— 不是合法 JSON, 旧读侧 Unmarshal 失败
-// 即丢弃, /api/online_hours 因此恒为空。聚合只需要 day 与 mac 两个字段,
+// 即丢弃, /api/online_hours 因此恒为空。聚合只需要 day / mac(/ m)字段,
 // 这里对坏行按字段正则提取, 已落盘的历史数据也能恢复。
 var (
 	onlineHoursDayRE = regexp.MustCompile(`"day"\s*:\s*"([0-9]{8})"`)
 	onlineHoursMACRE = regexp.MustCompile(`"mac"\s*:\s*"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})"`)
+	onlineHoursMinRE = regexp.MustCompile(`"m"\s*:\s*([0-9]+)`)
 )
 
-// onlineHoursByMAC 读取 run/online_hours.jsonl(watchdog 每小时采样), 按天
-// 去重后返回每个 mac 的在线小时数: {mac: {day: 小时数}}。
-func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
+const (
+	// onlineLegacyRowMin v5.30 之前的行没有 m 字段: 那时一行 = 一次 ~55 分钟的
+	// 采样, 按 60 分钟算(与旧读侧「一行 1 小时」一致, 历史数据不变)。
+	onlineLegacyRowMin = 60
+	// onlineDayMaxMin 一天最多 24 小时(别名合并后新旧 MAC 同一时段都有记录时不超)。
+	onlineDayMaxMin = 24 * 60
+)
+
+// onlineMinutesByMAC v5.30 T1a: 读取 run/online_hours.jsonl, 返回每个 mac
+// 每天的在线分钟数 {mac: {day: 分钟}}。watchdog 5 分钟采样、按分钟累计,
+// 每 ~55 分钟 / 跨日 / 退出时落一行 {"t","day","mac","m"}; 有 m 按 m 算,
+// 旧行没有 m 按 onlineLegacyRowMin 算。now 注入(测试不读真实时钟)。
+func onlineMinutesByMAC(hncDir string, days int, now time.Time) map[string]map[string]int {
 	out := map[string]map[string]int{}
 	path := filepath.Join(hncDir, "run", "online_hours.jsonl")
 	f, err := os.Open(path)
@@ -215,7 +227,7 @@ func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
 		return out
 	}
 	defer f.Close()
-	cutoff := time.Now().AddDate(0, 0, -days).Format("20060102")
+	cutoff := now.AddDate(0, 0, -days).Format("20060102")
 	resolve := macAliasResolver(hncDir) // v5.21: 合并过的旧 MAC 在线时长算到新 MAC 上
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 8192), 256*1024)
@@ -227,6 +239,7 @@ func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
 		var row struct {
 			Day string `json:"day"`
 			MAC string `json:"mac"`
+			M   *int   `json:"m"`
 		}
 		if err := json.Unmarshal(line, &row); err != nil {
 			// v5.11: 坏行兜底(见 onlineHoursDayRE 注释)
@@ -237,33 +250,74 @@ func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
 			}
 			row.Day = string(dm[1])
 			row.MAC = strings.ToLower(string(mm[1]))
+			row.M = nil
+			if m := onlineHoursMinRE.FindSubmatch(line); m != nil {
+				if v, err := strconv.Atoi(string(m[1])); err == nil {
+					row.M = &v
+				}
+			}
 		}
-		if row.MAC == "" {
+		if row.MAC == "" || row.Day < cutoff {
 			continue
 		}
-		if row.Day < cutoff {
+		mins := onlineLegacyRowMin
+		if row.M != nil {
+			mins = *row.M
+		}
+		if mins <= 0 {
 			continue
 		}
-		row.MAC = resolve(row.MAC)
+		row.MAC = resolve(strings.ToLower(row.MAC))
 		if out[row.MAC] == nil {
 			out[row.MAC] = map[string]int{}
 		}
-		if out[row.MAC][row.Day] < 24 { // 别名合并后新旧 MAC 同一小时都有采样时不超过 24
-			out[row.MAC][row.Day]++ // 每天最多 24 次采样 → 计数即小时数
+		v := out[row.MAC][row.Day] + mins
+		if v > onlineDayMaxMin {
+			v = onlineDayMaxMin
+		}
+		out[row.MAC][row.Day] = v
+	}
+	return out
+}
+
+// onlineNowFn /api/online_hours 的「现在」(测试注入, 不读真实时钟)。
+var onlineNowFn = time.Now
+
+// onlineHoursFromMinutes /api/online_hours 的 hours 字段(兼容旧前端): 分钟 / 60
+// 向下取整 —— 不再「有一行就是 1 小时」; 不足 1 小时的天不出现。
+func onlineHoursFromMinutes(mins map[string]map[string]int) map[string]map[string]int {
+	out := make(map[string]map[string]int, len(mins))
+	for mac, days := range mins {
+		for day, m := range days {
+			if m < 60 {
+				continue
+			}
+			if out[mac] == nil {
+				out[mac] = map[string]int{}
+			}
+			out[mac][day] = m / 60
 		}
 	}
 	return out
 }
 
-// apiOnlineHours GET /api/online_hours?days=7 — 设备在线小时数
+// onlineHoursByMAC 按天的在线小时数(= onlineHoursFromMinutes(onlineMinutesByMAC))。
+func onlineHoursByMAC(hncDir string, days int) map[string]map[string]int {
+	return onlineHoursFromMinutes(onlineMinutesByMAC(hncDir, days, onlineNowFn()))
+}
+
+// apiOnlineHours GET /api/online_hours?days=7 — 设备在线时长
 // (F5: 家长管控场景"今日在线 X 小时")。
 func (s *server) apiOnlineHours(w http.ResponseWriter, r *http.Request) {
 	days := 7
 	if d := r.URL.Query().Get("days"); d == "30" {
 		days = 30
 	}
+	// v5.30 T1a: online_min = 按天在线分钟(新); hours = 分钟 / 60 向下取整(兼容旧前端)。
+	mins := s.simMergeOnlineMinutes(onlineMinutesByMAC(s.hncDir, days, onlineNowFn())) // 模拟环境; 关闭时原样
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"days":  days,
-		"hours": s.simMergeOnlineHours(onlineHoursByMAC(s.hncDir, days)), // 模拟环境; 关闭时原样
+		"days":       days,
+		"hours":      onlineHoursFromMinutes(mins),
+		"online_min": mins,
 	})
 }

@@ -333,7 +333,7 @@ var S = {
   live: null, lastOk: 0, sig: '', hotspot: { active: null, iface: '', ip: '' },
   devices: [], devLoaded: false, cfg: {}, caps: {}, capsLoaded: false,
   offload: { active: false, detail: '' }, alerts: { unread: 0, list: [] },
-  appLimits: [], templates: [], onlineHours: {}, spark: [],
+  appLimits: [], templates: [], onlineMin: {}, spark: [],
   filter: LS.get('hnc_device_filter', 'recent'), q: '', batch: false, picked: {}, open: {}, sel: null, busy: {},
   refreshMode: LS.get('hnc.refresh-mode', 'balanced'),
   statsRange: 'today', aseg: 'stats', appsSub: 'my',
@@ -492,7 +492,16 @@ function loadAppLimits() {
     S.appLimitSharedKnown = typeof r.include_shared_ips === 'boolean'; S.appLimitShared = r.include_shared_ips === true;
   });
 }
-function loadOnlineHours() { return api.getSafe('/api/online_hours', { days: 7 }, null).then(function (r) { if (r && r.hours) S.onlineHours = r.hours; paintOnlineHours(); }); }
+/* v5.30 T1a: 在线时长按分钟(online_min); 旧后端只有 hours(一行算 1 小时)→ 换算成分钟兜底 */
+function onlineMinMap(r) {
+  if (!r) return null;
+  if (r.online_min && typeof r.online_min === 'object') return r.online_min;
+  if (!r.hours || typeof r.hours !== 'object') return null;
+  var out = {};
+  Object.keys(r.hours).forEach(function (mac) { var d = r.hours[mac] || {}; out[mac] = {}; Object.keys(d).forEach(function (k) { out[mac][k] = num(d[k]) * 60; }); });
+  return out;
+}
+function loadOnlineHours() { return api.getSafe('/api/online_hours', { days: 7 }, null).then(function (r) { var m = onlineMinMap(r); if (m) S.onlineMin = m; paintOnlineHours(); }); }
 function loadTemplates() {
   var local = []; try { local = JSON.parse(LS.get('hnc.templates', '[]')) || []; } catch (_) {}
   return api.getSafe('/api/templates', null, {}).then(function (r) {
@@ -520,12 +529,17 @@ function paintUsage() {
     el.style.color = lim && v >= lim ? 'var(--badge-red)' : lim && v >= lim * num(q.warn_at_pct, 80) / 100 ? 'var(--badge-warn)' : '';
   });
 }
-function onlineHoursOf(mac) { var h = S.onlineHours[mac] || S.onlineHours[mac.toUpperCase()]; if (!h) return null; var t = today(); return num(h[t.replace(/-/g, '')] != null ? h[t.replace(/-/g, '')] : h[t]); }
+function onlineMinOf(mac) { var h = S.onlineMin[mac] || S.onlineMin[mac.toUpperCase()]; if (!h) return 0; var t = today(); return num(h[t.replace(/-/g, '')] != null ? h[t.replace(/-/g, '')] : h[t]); }
+/* < 60 分钟显示「N 分钟」, ≥ 60 显示「N.N 小时」, 0 不显示 */
+function onlineText(min) {
+  min = Math.round(num(min)); if (min <= 0) return '';
+  return ' · 今日在线 ' + (min < 60 ? min + ' 分钟' : trim0((min / 60).toFixed(1)) + ' 小时');
+}
 function paintOnlineHours() {
   paintUsage();
   S.devices.forEach(function (d) {
     var el = document.getElementById('oh-' + d.mac.replace(/:/g, '')); if (!el) return;
-    var h = onlineHoursOf(d.mac); el.textContent = h ? ' · 今日在线 ' + trim0(h.toFixed(1)) + ' 小时' : '';
+    el.textContent = onlineText(onlineMinOf(d.mac));
   });
 }
 

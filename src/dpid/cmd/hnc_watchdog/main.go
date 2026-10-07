@@ -933,6 +933,9 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	// Capability probe (lightweight) — v5.28 A1: 启动首轮 / 网卡变化 /
 	// ≥6 小时才探测(原每轮)。shell 侧 capability_probe.sh 的节流保留作双保险。
 	now := nowFn()
+	// v5.30 T1a: 在线时长 5 分钟采样、按分钟累计(热点已确认开着; 不再只在
+	// 健康检查通过的轮次采样 —— 旧版是 case 0 里的 sampleOnlineHours)。
+	onlineAcc.sample(now)
 	if aux.cap.due(newIface, now) {
 		_ = runActionFn("capability_probe", newIface)
 		aux.cap.mark(newIface, now)
@@ -968,8 +971,6 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 			runStatsSampleFn()
 			aux.lastStatsSample = now
 		}
-		// v5.25: 在线时长采样(Go 版从没做过, 「在线时长」因此恒为空)
-		sampleOnlineHours(now)
 		// v5.28 A1: 健康且不在恢复期 → httpd_drift 5 分钟一次、
 		// tc_uplink_healthy 3 分钟一次(原每轮 60 秒); 恢复期照旧每轮。
 		// 最坏影响: 上行 ingress 重定向丢失最长约 3 分钟被复核发现(原 1 分钟)。
@@ -1116,6 +1117,7 @@ func main() {
 	go appLimitApplyLoop()
 
 	mainLoop()
+	onExit() // v5.30 T1a: 未落盘的在线分钟写掉
 	logf("hnc_watchdog exiting normally")
 }
 

@@ -679,8 +679,9 @@ func (s *server) simMergeUsageMonth(out map[string]interface{}) map[string]inter
 	return cp
 }
 
-// simMergeOnlineHours /api/online_hours: 在线的模拟设备今天记 (当前小时+1) 小时
-func (s *server) simMergeOnlineHours(h map[string]map[string]int) map[string]map[string]int {
+// simMergeOnlineMinutes /api/online_hours: 在线的模拟设备今天记 (当前小时+1)×60 分钟
+// (v5.30 T1a 起按分钟; hours 字段由分钟换算, 仍是 当前小时+1)
+func (s *server) simMergeOnlineMinutes(h map[string]map[string]int) map[string]map[string]int {
 	now := time.Now()
 	views, _ := s.simViews(now)
 	day := now.Format("20060102")
@@ -691,7 +692,7 @@ func (s *server) simMergeOnlineHours(h map[string]map[string]int) map[string]map
 		if h == nil {
 			h = map[string]map[string]int{}
 		}
-		h[views[i].D.MAC] = map[string]int{day: now.Hour() + 1}
+		h[views[i].D.MAC] = map[string]int{day: (now.Hour() + 1) * 60}
 	}
 	return h
 }

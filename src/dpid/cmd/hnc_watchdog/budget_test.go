@@ -126,6 +126,7 @@ func withFakeEnv(t *testing.T, clk *fakeClock, rec *actionRec) {
 		isDozeFn, hotspotIdleFn, actSnapshotFn, nowFn = oldIsDoze, oldIdle, oldActSnap, oldNow
 	})
 	withNativeUnknown(t)
+	withTempOnlineAcc(t) // v5.30 T1a: 在线分钟累加器也隔离到临时目录(不读真实 devices.json)
 }
 
 // withNativeUnknown v5.29: 原生检查的外部世界全部隔离成「判不了」(临时
