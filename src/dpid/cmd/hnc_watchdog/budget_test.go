@@ -38,6 +38,7 @@ package main
 import (
 	"net"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -127,6 +128,12 @@ func withFakeEnv(t *testing.T, clk *fakeClock, rec *actionRec) {
 	})
 	withNativeUnknown(t)
 	withTempOnlineAcc(t) // v5.30 T1a: 在线分钟累加器也隔离到临时目录(不读真实 devices.json)
+	// v5.30: 动作记账落盘也指到临时目录(原先 tick 会试着写真实 /data/local/hnc/run)
+	actTmp := filepath.Join(t.TempDir(), "watchdog_actions.json")
+	oldFlush := wdActionsFlushFn
+	wdActionsFlushFn = func(_ string, now time.Time) error { return wdActions.flush(actTmp, now) }
+	t.Cleanup(func() { wdActionsFlushFn = oldFlush })
+	withTempM4Shadow(t) // v5.30 T3: M4 影子同样隔离(假邻居表、临时 run / data)
 }
 
 // withNativeUnknown v5.29: 原生检查的外部世界全部隔离成「判不了」(临时

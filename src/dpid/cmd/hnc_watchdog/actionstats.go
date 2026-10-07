@@ -154,6 +154,10 @@ type wdActionOut struct {
 	// v5.29 T1: 原生检查与 shell 对照的累计不一致次数(0 = 完全一致;
 	// 自检「看门狗动作」行显示)。只读快照, 不参与 actions 合计。
 	NativeMismatch int `json:"native_mismatch,omitempty"`
+	// v5.30 T3: M4 设备发现影子 —— 比对轮数 / 不一致轮数(连续 2 轮的差异才计)。
+	// 明细(含 MAC)在 run/m4_shadow.json, 不放这里(兼容性报告会读本文件)。
+	M4Checks   int `json:"m4_checks,omitempty"`
+	M4Mismatch int `json:"m4_mismatch,omitempty"`
 }
 
 // snapshot 生成输出结构(1h = 最近 60 分钟, 覆盖可能跨两个整点桶)。
@@ -163,6 +167,9 @@ func (s *actionStats) snapshot(now time.Time) wdActionOut {
 	out := wdActionOut{Schema: 1, GeneratedAt: now.Unix(), Actions: make(map[string]wdActionOutItem, len(s.m))}
 	if wdActionsSnapshotExtra != nil {
 		out.NativeMismatch = wdActionsSnapshotExtra()
+	}
+	if wdActionsM4Extra != nil {
+		out.M4Checks, out.M4Mismatch = wdActionsM4Extra()
 	}
 	for name, c := range s.m {
 		var it wdActionOutItem

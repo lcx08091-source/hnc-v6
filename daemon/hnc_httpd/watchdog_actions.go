@@ -73,6 +73,12 @@ func scWatchdogActionsItem(c *scCtx) scItem {
 	if nmm > 0 {
 		mmNote = fmt.Sprintf("; 原生检查与 shell 结论不一致 %d 次(已按 shell 处理, 连续 3 次该项退回 shell)", int(nmm))
 	}
+	// v5.30 T3: M4 设备发现影子(Go 读邻居表 vs hotspotd)。只观察, 不影响状态:
+	// 不一致是给 M4 第二步(替换 hotspotd)攒的对照数据, 明细在 run/m4_shadow.json。
+	if m4c, _ := m["m4_checks"].(float64); m4c > 0 {
+		m4m, _ := m["m4_mismatch"].(float64)
+		mmNote += fmt.Sprintf("; 设备发现影子: 比对 %d 轮, 不一致 %d 轮(只观察, 明细 run/m4_shadow.json)", int(m4c), int(m4m))
+	}
 
 	var totalCalls, totalFails float64
 	var weightedMS float64

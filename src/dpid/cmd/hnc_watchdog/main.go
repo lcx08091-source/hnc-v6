@@ -931,6 +931,8 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	// v5.30 T1a: 在线时长 5 分钟采样、按分钟累计(热点已确认开着; 不再只在
 	// 健康检查通过的轮次采样 —— 旧版是 case 0 里的 sampleOnlineHours)。
 	onlineAcc.sample(now)
+	// v5.30 T3: M4 设备发现影子(5 分钟一轮; 只比对 hotspotd, 不写任何东西给它)
+	m4Shadow.maybeRun(newIface, now)
 	if aux.cap.due(newIface, now) {
 		_ = runActionFn("capability_probe", newIface)
 		aux.cap.mark(newIface, now)
