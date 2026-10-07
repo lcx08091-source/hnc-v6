@@ -14,6 +14,36 @@
 
 ---
 
+## [5.30.0-rc1] - 2026-10-07
+
+**预览版 · 三个用户反馈的 bug + 迁移 M5 / M4(影子)+ 应用感知 QoS 初版**:先修用户截图里的三个问题(在线时长不准、设备名显示 `null`、「新发现的应用」里全是公共 CDN);守护 dpid 的链条从 4 层收成 2 层;设备发现的 Go 版先影子运行攒对照数据;按应用分优先级做了初版(默认关、逐台开)。
+
+### Fixed
+
+- **「今日在线 1 小时」不准**:看门狗原来每 ~55 分钟采样一次,httpd 一行算 1 小时 —— 刚连上 5 分钟、正好赶上采样的设备就显示 1 小时。现在热点开着时每 5 分钟采样(进程内读 `devices.json`,不起 sh)、按分钟累计(本次记的分钟 = 距上次采样的间隔,首次 5、上限 10,Doze 拉长轮次时不少记;跨零点按零点拆到两天),每 ~55 分钟或跨日落一行 `{"t","day","mac","m"}`,看门狗正常退出时把没落盘的写掉。httpd 有 `m` 按 `m` 算、旧行按 60 算(历史数据不变);`/api/online_hours` 新增 `online_min`,`hours` 改为分钟 / 60 向下取整。界面不足 60 分钟显示「N 分钟」。
+- **设备名显示 `null`**:有些设备 DHCP option 12 / mDNS 上报的就是字符串 `null`。统一一张垃圾名表(`null` `(null)` `nil` `none` `(none)` `undefined` `unknown` `localhost` `localhost.localdomain` `*` `-`、空串、纯数字,大小写不敏感),四处都挡:hotspotd(写缓存 / DHCP 解析 / mDNS 结果,旧缓存里的也不回放)、dpid(`cleanHostname`;option 12 是垃圾名时还能退到 option 81)、httpd(输出设备列表前挡存量;MAC 合并建议不把一堆 `null` 当同名)、前端名字兜底链。手动改的名字不过滤。Go 侧只有一份实现(`hnc.io/dpid/hostname`),C / Go / 前端三份名单有一致性检查。
+- **「新发现的应用」把公共 DNS / CDN 当应用**:截图里的 `alibabadns.com`(被起名「Apple 旗下应用」)、`cdngslb.com`(「网易云音乐」)、`qtlcdn.com`(「好游快爆」)、`ksyuncdn.com`、`lanniao.com`、`wechatpay.cn`、`tencentcos.cn`。
+  - 新名单 `data/dpi_rules.d/shared_infra.txt`(随规则目录同步;支持 `cdnhwc*.com` 这类按标签通配);
+  - dpid:名单命中、或「24 小时内 ≥3 台设备访问且与 ≥4 个互不相关的组共现」(频度兜底,不靠名单)的域名不参与合并、不单独成组、不当组名,只作为别的组的附属证据(界面标「公共服务」);频度判定落盘、重启后保留 7 天;
+  - httpd:同一份名单再过一道,剔完没有自己域名的组不显示 —— 升级前已在列表里的这些组直接消失,不用手动忽略;起名证据收紧:证书只有在 SAN 覆盖探测的主机名、且该主机仍属于本组时才算(否则说明原因,后台对新目标重新取证书),共享域不参与「本机 App」/ 证书兄弟域;识别自评与线上一致地排除名单。
+
+### Changed
+
+- **dpid 守护链 4 层 → 2 层(迁移 M5)**:开机只选 C `hnc_launcher`(不能用就直接由看门狗管 dpid,不再选 shell guard / Go supervisor),C launcher 拉起 / 重启 dpid,Go 看门狗盯 launcher;`service.sh` 的哨兵不再判 dpid / launcher(只留看门狗兜底和升级回滚观察)。「launcher 坏了 → 直拉 dpid」的救命路径搬进看门狗(行为照抄;另外同时看 `launcher.log`,且日志要是最近 10 分钟写过的,几天前的旧 abort 不再触发)。判活一律 pidfile + `/proc/<pid>/cmdline`(pid 被复用判死),拉起有冷却,连续「拉起后马上又死」冷却翻倍到 8 分钟封顶。开关:建 `run/wd_m5.disabled` 退回 v5.29 三选一(哨兵每轮读;开机选择下次开机生效)。shell guard / Go supervisor 源码保留一版。
+
+### Added
+
+- **设备发现 Go 影子(迁移 M4 第一步)**:新包 `src/dpid/neigh`(netlink 邻居表 dump / 订阅,纯 syscall,按网卡用户态过滤)。看门狗每 5 分钟用它读热点网卡的邻居表,与 hotspotd 的 `devices.json` 比对(多 / 少 / IP 变化,同一差异连续 2 轮才计),计数进 `watchdog_actions.json` 的 `m4_checks` / `m4_mismatch`,自检「看门狗动作」行显示;明细写 `run/m4_shadow.json`。不写 `devices.json`、不替换 hotspotd 任何功能。开关:`run/wd_m4_shadow.disabled`。
+- **按应用分优先级(应用感知 QoS 初版,默认关、逐台开)**:设备「更多控制」里的开关。开启的设备在它的下行 class 下挂 3 个子 class:实时(游戏 / 通话)> 交互(视频 / 浏览 / 认不出的)> 后台(下载 / 更新 / 云同步),rate 按 50 / 35 / 15 分、ceil 不变 —— 设备总限速不变。分档依据是 dpid 已有的识别类别(只读)。档位用 connmark 空闲的 bit 21–22,只用 `set-xmark` 改这两位、不进 conntrack,原有 mark 位含义不变(位分配见 `bin/apply_app_qos.sh` 头注释与 CODEMAP)。只管下载方向;与延迟模拟互斥(两者都占用下行队列)。关闭时 tc / iptables 命令与 v5.29 逐条一致(有对照 v5.29 命令序列的测试)。开着时看门狗每 30 秒对一次:设备集合没变、子 class 都在且按父 class 当前 rate 分得对就不碰 tc(改了设备限速会按新 rate 重分),识别出的 IP 变了只重建 iptables。
+
+### Internals
+
+- 看门狗新增动作记账名 `m5_spawn_launcher` / `m5_spawn_dpid` / `m5_rescue`;`watchdog_actions.json` 新顶层字段 `m4_checks` / `m4_mismatch`。
+- 新测试工具:`test/js/extract_fns.js`(从 `webroot/js/*.js` 抽真实函数在 node 里跑)、`test/golden/tc_manager_v529_cmds.txt`(v5.29 命令序列,`UPDATE_TESTDATA=1` 才重新生成)、C 侧 `daemon/hotspotd/test/test_hostname_junk.c`(本机 cc 编译运行)。
+- 预算测试:动作记账落盘改到临时目录(原先会试着写真实 `/data/local/hnc/run`)。
+- 已知未改:「新发现的应用」起名的「启动指纹」来源从 v5.28 起没生效过(取组内域名时按字符串取,而 `domains` 是对象数组);改了会新增一个起名来源,本版不动,记为待办。
+- C 改动(hotspotd)本机只用 host gcc 编译 + 跑了单测(另外 3 个已有 C 测试本机编译运行全过),没有用 NDK 交叉编译,交给 CI。
+
 ## [5.29.0-rc1] - 2026-10-06
 
 **预览版 · 原生化 + 可靠性**:这一版把 v5.26 实测的「每轮起 sh」开销收掉(看门狗四项检查 + 两个常驻 shell 循环改 Go 调度),并给「刷了坏包」和「不同 ROM 兼容性」两个老大难配上自动回滚与一键脱敏报告;DPI 改动第一次有了录制/回放的自动化回归。

@@ -17,7 +17,7 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | **侦察员**<br>`hnc_dpid` | `src/dpid/` | Go,约 2.1 万行 | 抓热点上的网络包头(DNS、TLS 握手、QUIC 首包、HTTP),认出域名和指纹,写给 httpd 用。**只看握手、不看内容** |
 | **门卫**<br>`hotspotd` | `daemon/hotspotd/` | C,约 1.2 万行 | 盯热点开关、谁连上来了(ARP / DHCP / mDNS 拿设备名)、定时任务调度 |
 | **巡逻员**<br>`hnc_watchdog` | `src/dpid/cmd/hnc_watchdog/` | Go | 每 60 秒检查:进程还活着吗、tc 规则还在吗、配额 / 分时段到点了吗;坏了就修。`bin/watchdog.sh` 只保留被 `action` 调用的修复函数,主循环已是 Go 版(v5.26);v5.29 起四项检查的判断原生化(`nlroute` + `native.go`),offload / clsact 两个常驻 shell 守护也并进来调度(`offload_sched.go`) |
-| **侦察员的保镖(三选一)**<br>`hnc_dpid_guard` / `dpid_supervisor` / `hnc_launcher` | `bin/hnc_dpid_guard.sh` / `src/dpid/cmd/dpid_supervisor/` / `src/launcher/` | Shell / Go / C | 把 dpid 拉起来、挂了重启。由 `run/dpid_launcher.choice` 指定的「当前守护者」负责,选定后其他守护不再插手(v5.26 T2) |
+| **侦察员的保镖**<br>`hnc_launcher`(C) | `src/launcher/` | C | 把 dpid 拉起来、挂了重启。**v5.30 起(M5)守护链只剩 2 层**: C launcher 管 dpid、Go 看门狗盯 launcher(launcher 坏了看门狗直拉 dpid, 见 `src/dpid/cmd/hnc_watchdog/m5.go`); 开机不再选 shell guard / Go supervisor, 哨兵不再判 dpid。建 `run/wd_m5.disabled` 退回 v5.29 的三选一(`bin/hnc_dpid_guard.sh` / `src/dpid/cmd/dpid_supervisor/` 源码保留一版) |
 | **执行队**<br>各种 `bin/*.sh` | `bin/` | Shell,约 2.3 万行 | 真正去改内核规则的:`tc_manager.sh`(限速 / 延迟队列)、`iptables_manager.sh`(打标记 / 封锁)、`apply_device_rule.sh`(一台设备的完整规则)、各种 `*_sync.sh` |
 
 ## 2.5 权威实现表(v5.26 起生效)
@@ -32,7 +32,7 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | 月用量 | `daemon/hnc_httpd` 的 `limitCtl` | 计费月,取防火墙累计与 DPI 合计的较大值;设备卡 / 配额 / 全局告警 / `/api/usage_month` 同源 |
 | 告警写入(`run/alerts.jsonl`) | `src/dpid/alert` 的 `Append`(带 flock) | httpd 与看门狗两个进程并发追加安全 |
 | 看门狗主循环 | `src/dpid/cmd/hnc_watchdog`(Go) | `bin/watchdog.sh` 只提供 `action` |
-| dpid 守护 | `run/dpid_launcher.choice` 指定的那一个 | launcher(C)/ guard(shell)/ supervisor(Go)/ direct(直拉)机制保留,选定后不换手;sentinel 救命时改写为 direct |
+| dpid 守护 | `run/dpid_launcher.choice` 指定的那一个 | v5.30 M5(默认): 只有 launcher(C)/ direct(看门狗直拉)两种;救命路径在看门狗 `m5.go`(launcher 坏了 → 直拉 dpid + choice 改写 direct);判活 pidfile + `/proc/<pid>/cmdline`,拉起冷却翻倍封顶 8 分钟。`run/wd_m5.disabled` → v5.29 四路(launcher / guard / supervisor / direct)+ 哨兵救命 |
 | 规则目录开机同步(v5.27) | `bin/dpi_rules_sync.sh` | service.sh 只调用它;保留 99 与 `_*.json`,97 只在模块 versionCode 不变时保留;暂存目录 + 两次 mv 换目录,失败不动运行目录 |
 | 规则挂靠(v5.27) | `src/dpid/output/rule.go`(`attachChildRules`) | `_parent_rule_id` 的规则后缀并进父规则(去重 + 合并后再截 1024);httpd 应用目录(`app_time.go` `attachCatalogChildren`)与 `tools/build_pkg_app_map.py` 同一语义 |
 | QUIC 传输参数指纹(v5.27) | `src/dpid/output/qtp.go` | capture 只在 QUIC 路径填 `TLSInfo.QTP`;httpd `fp_learn.go` 先带 QTP 的 key 再回落 |
@@ -51,6 +51,11 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | 升级自检 + 自动回滚(v5.29) | `bin/hnc_rollback.sh` + `data/rollback.*` | snapshot / observe(哨兵 30 秒一轮, 只看核心进程)/ 回滚 + 钉住;httpd `rollback.go` 转出横幅 + ack + 自检行;`data/rollback.disabled` 只记录不回滚 |
 | 兼容性报告(v5.29) | `daemon/hnc_httpd/compat_report.go` | action `compat_report`,白名单字段收集(不含 MAC / IP / SSID / 密码 / token),产物 `exports/hnc-compat-*.json` |
 | 流量录制 / 回放(v5.29) | `src/dpid/capture/recorder.go` + `src/dpid/cmd/dpid_replay` | 只录 DNS / TLS ClientHello / QUIC Initial / HTTP 请求头事件包(LINKTYPE_RAW, 20 MB / 分钟数上限);回放复用同一套解析函数, 合成 pcap 期望输出进 `go test` |
+| 在线时长(v5.30) | 写: `src/dpid/cmd/hnc_watchdog/online_minutes.go`;读: httpd `onlineMinutesByMAC` | 5 分钟采样、按分钟累计、~55 分钟 / 跨日 / 退出时落 `run/online_hours.jsonl` 行 `{"t","day","mac","m"}`;旧行没有 `m` 按 60 |
+| 垃圾主机名(v5.30) | Go: `src/dpid/hostname`(`IsJunk`);C: hotspotd `hnc_hostname_is_junk`;前端 `isJunkName` | 三份同表(`test/unit/test_v530_junk_table_sync.sh` 核对);hotspotd / dpid 源头挡,httpd 挡存量;手动命名不过滤 |
+| 共享基础设施名单(v5.30) | `data/dpi_rules.d/shared_infra.txt` + `src/dpid/output/shared_infra.go`(`ParseSharedInfra` / `Match`,httpd 共用) | 「新发现的应用」里公共 DNS / CDN / 对象存储 / 支付 SDK 不成组、不当名字,只挂在组的 `shared`;频度兜底(≥3 台设备 + ≥4 个不相干组)由 dpid 判,写 `dpi_discover.json` 顶层 `shared_infra`;httpd `api_discover_shared.go` 再过一道 + 证书须 SAN 覆盖 |
+| 邻居表(v5.30) | `src/dpid/neigh` | 纯 syscall 只读 RTM_GETNEIGH dump / RTNLGRP_NEIGH 订阅,按 ifindex 用户态筛;M4 影子(`hnc_watchdog/m4_shadow.go`)5 分钟比对 hotspotd,`m4_mismatch`,明细 `run/m4_shadow.json`,开关 `run/wd_m4_shadow.disabled` |
+| 应用感知 QoS(v5.30) | 计划: `hnc_watchdog/app_qos.go`;下发: `bin/apply_app_qos.sh`;叶子保护: `tc_manager.sh` `app_qos_owns_class` | 默认关(`rules.json` 设备项 `app_qos`);开的设备下行 class 下 3 个子 class(实时 / 交互 / 后台,50/35/15,ceil 不变),见下方 mark 位表 |
 
 ---
 
@@ -61,7 +66,7 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
  ├─ post-fs-data.sh   最早阶段:准备目录、拷二进制、设权限(漏设权限 = 功能静默失效,出过两次事故)
  └─ service.sh        系统起来后:
       ├─ 拉起 hotspotd(门卫)
-      ├─ 按 run/dpid_launcher.choice 选定守护者,由它拉起 hnc_dpid(侦察员)
+      ├─ 选 dpid 守护者写 run/dpid_launcher.choice(v5.30 起只有 C launcher / direct),由它拉起 hnc_dpid(侦察员)
       ├─ 拉起 hnc_httpd(前台)
       └─ 拉起 hnc_watchdog(Go 版巡逻员),之后由它负责「谁挂了就拉起谁」
 ```
@@ -124,6 +129,19 @@ hnc-v6/
 ├─ docs/              API 文档、路线图、本文件
 └─ .github/workflows/build.yml   推 main 自动打包发版
 ```
+
+## 5.5 fwmark / connmark 位分配(v5.30 写清)
+
+CONNMARK save/restore 掩码 `0xffffff`(`iptables_manager.sh`)。Android netd 用 `0x10000–0xdffff` 段做策略路由,HNC 的位都避开它:
+
+| 位 | 值 | 谁用 | 说明 |
+|---|---|---|---|
+| bit 0–6 | mark_id 1..99 | 设备(`iptables_manager.sh` HNC_MARK) | 与 bit 23 组成 `0x800000 + mark_id`;tc 根上 pref 1 的 fw 精确匹配 → 设备 class |
+| bit 23 | `0x800000` | 设备 mark 基数 | — |
+| bit 20 + 低 12 位 | `0x900000 + 序号` | 应用限速(`apply_app_limits.sh` HNC_APP_LIMIT) | 整个 mark 覆盖写(`--set-mark`);tc 根上 prio 200 fw |
+| bit 21–22 | `0x600000` 掩码:`0x200000` 实时 / `0x600000` 后台 / `0` 交互 | 应用感知 QoS(`apply_app_qos.sh`,v5.30) | 只用 `--set-xmark 值/0x600000` 改这两位;规则在 mangle/POSTROUTING 末尾(HNC_SAVE 之后),不进 conntrack;带应用限速位的包不打档位 |
+
+应用感知 QoS 的 tc 号段:子 class `1:a004..1:a18f`(`0xa000 + mark_id×4 + 档位`),叶子句柄 `b004:..b18f:`;设备 class `1:2..1:99` / `1:100`、默认类 `1:9999`(= 0x9999)、应用限速 `0x9001..0x9998` 都不冲突。根上 pref 50 的掩码 fw(`0x800000+mid/0x9fffff`)让带档位位的包也进设备 class。
 
 ## 6. 数据存在哪(手机上)
 

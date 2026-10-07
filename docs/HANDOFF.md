@@ -2,11 +2,13 @@
 
 > 新对话开头让 Claude 先读本文件 + `CLAUDE.md` + `docs/ROADMAP.md` + `docs/WORK-v5.30.md`。
 
-## 当前状态(2026-10-07)
+## 当前状态(2026-10-07,v5.30 由 Claude 直接开发)
 
-- **main = 914d46a = v5.29.0-rc1**(含 v5.28 + 两版的审查修复),已推,CI 会出 `-rc` 预发布包。
-- 开发分支 `claude/environment-config-ydr2ow` 与 main 相同,另加本文件和 `docs/WORK-v5.30.md`。
-- 下一版:**v5.30**,工作文档 `docs/WORK-v5.30.md`(T1 三个用户 bug → T2 迁移 M5 → T3 M4 影子 → T4 应用感知 QoS 初版)。
+- **main = 914d46a = v5.29.0-rc1**(未动)。
+- **v5.30.0-rc1 在分支 `claude/new-session-hoxhbz`**(T1a / T1b / T1b 收口 / T1c / T2 / T3 / T4 / T-last 各一个提交,已推);这一版是用户让 Claude 自己做的(没走 GLM),没有「审查修复」小节。用户说「发」才 fast-forward 到 main。
+- 每个任务的「改动前会失败」证据写在各自提交说明里;第 6 节自检结果见 T-last 提交说明。
+- 仍待真机验收(v5.30):在线时长对刚连的设备显示分钟;`null` 名字消失;「新发现的应用」里没有截图中的 CDN;常驻进程里没有 `hnc_dpid_guard.sh` / `dpid_supervisor`,杀 dpid 30 秒内被 launcher 拉回、杀 launcher 被看门狗拉回;`m4_mismatch` 观察一天(明细 `run/m4_shadow.json`);一台打游戏一台下载,对比「按应用分优先级」开 / 关时的延迟抖动。
+- 已知待办:「新发现的应用」起名的启动指纹来源从 v5.28 起没生效(`api_discover_suggest.go` 用 `strList(g["domains"])` 取对象数组);设备合并不迁移 `app_qos`;应用 QoS 只管下行 / IPv4。
 
 ## 工作流(用户的习惯)
 
@@ -33,5 +35,7 @@
 ## 环境备注
 
 - UI 回归:scratchpad 里的 `build.sh` + `demo/sweep.mjs` + `itest/run.mjs` 在新会话里**不存在**(scratchpad 是会话私有的);需要时重建或只跑 `test/run_all.sh` 里的前端测试。
-- 自检基线:`test/run_all.sh` → 504/505(1 skipped)。
+- 自检基线:v5.29 `test/run_all.sh` → 504/505(1 skipped);**v5.30 → 532/533(1 skipped)**(新增 28 条)。
+- 容器里没有 `/system/bin/sh`(`bin/hnc_json` 等脚本的 shebang),新会话先 `mkdir -p /system/bin && ln -sf /bin/sh /system/bin/sh`,否则 12 条 hnc_json 测试失败。
+- node 在 `/opt/node*/bin`,`run_all.sh` 收窄了 PATH;v5.30 的前端测试(`test/unit/test_v530_frontend.sh`)会自己去那儿找 node。
 - 安全约束:不做 Android 位置伪造、不做 SSL 中间人解密、不注入 / hook 他人设备。

@@ -370,11 +370,12 @@ Query:
 ### 4.2 GET `/api/online_hours` — 设备在线小时数
 
 - Query:`days` = `30` 时统计 30 天,其它任何值(含缺省)= 7 天。
-- 数据:`$HNC/run/online_hours.jsonl`(watchdog 在热点 ACTIVE 时每 ≥55 分钟写一次,每台在线且未拉黑的设备一行 `{"t":秒,"day":"YYYYMMDD","mac":"…"}`)。
-- 响应(`hours[mac][day]` = 当天被采样到的次数 ≈ 在线小时数):
+- 数据:`$HNC/run/online_hours.jsonl`。v5.30 起 watchdog 在热点 ACTIVE 时每 5 分钟采样、按分钟累计,每 ~55 分钟 / 跨日 / 正常退出时每台设备一行 `{"t":秒,"day":"YYYYMMDD","mac":"…","m":分钟}`;v5.30 之前的行没有 `m`,按 60 分钟算(§28)。
+- 响应(v5.30 起 `online_min[mac][day]` = 在线分钟数(每天封顶 1440);`hours` = 分钟 / 60 向下取整,不足 1 小时的天不出现):
 
 ```json
-{ "days": 7, "hours": { "aa:bb:cc:dd:ee:01": { "20260922": 5, "20260923": 2 } } }
+{ "days": 7, "online_min": { "aa:bb:cc:dd:ee:01": { "20260922": 305, "20260923": 25 } },
+  "hours": { "aa:bb:cc:dd:ee:01": { "20260922": 5 } } }
 ```
 
 - 截止规则:`day >= (今天-days).Format("20060102")`(字符串比较)。
@@ -2226,3 +2227,36 @@ GET `/api/encdns`:
 
 - 看门狗 probe / check_health / httpd_drift / tc_uplink_healthy 的判断改 Go 原生(`nlroute` netlink 只读 + iptables `-S` 直接 exec);每 30 分钟跑一次 shell 版对照,不一致以 shell 为准并计 `native_mismatch`,连续 3 次该项退回 shell。原生全绿时动作调用的预算:sh ≤ 70 次/小时。
 - `service.sh`:Go 看门狗在时写 `run/offload_guard.owner=watchdog`,不再拉起 `hnc_offload_guard.sh daemon` / `hnc_clsact_watchdog.sh` 常驻循环;`hnc_offload_guard.sh` 的 `daemon` / `ensure_daemon` 认 owner 文件让位。cleanup 停止时清 owner。
+
+## 28. v5.30 变更
+
+**新 action**
+
+- `app_qos_set {mac, enabled}`:设备「按应用分优先级」(应用感知 QoS 初版)。`enabled` 接受 true/1/on/yes / false/0/off/no。开启时:`tc_htb=false` → `unsupported`;该设备开着延迟 / 抖动 / 丢包 → `conflict`(两者都占用下行叶子队列);没有 mark_id 先 `apply_device_rule.sh alloc_mid`。写 `rules.json` 设备项 `app_qos`,并写 `run/app_limit.dirty` 让看门狗 3 秒内下发。
+- `delay_set`:设备开着 `app_qos` 时设置非零延迟 / 抖动 / 丢包 → `conflict`(反方向互斥)。
+
+**新字段**
+
+- GET `/api/online_hours`:新增 `online_min`(按天在线分钟);`hours` 改为分钟 / 60 向下取整(不再「有一行就是 1 小时」)。见 §4.2。
+- GET `/api/devices`:设备项新增 `app_qos`(来自 `rules.json`;缺省 = 关)。设备的 `hostname` 若是垃圾名(`null` `(null)` `nil` `none` `(none)` `undefined` `unknown` `localhost` `localhost.localdomain` `*` `-`、空、纯数字,大小写不敏感)且不是手动命名,则不输出 `hostname` / `hostname_src`(退回 dpid 识别名 / 厂商 / MAC);`ident.hostname` 同样过滤。
+- GET `/api/discover`:组新增 `shared`(`[{suffix, reason:"list"|"freq", hits, label:"公共服务"}]`,与组强共现的公共 DNS / CDN / 对象存储 / 支付 SDK,只作附属证据);组的 `suffixes` / `domains` / `members` 不再含这些域名,剔完没有自己域名的组不出现;证书不作依据时新增 `cert_unused`(原因文字)。`dpi_discover.json` 顶层新增 `shared_infra`(dpid 判出的共享域,freq 的带 `since`)。
+- `run/watchdog_actions.json` 顶层新增 `m4_checks` / `m4_mismatch`(设备发现影子的比对轮数 / 不一致轮数,同一差异连续 2 轮才计);自检「看门狗动作」行的说明里显示,只观察、不改状态。明细(含 MAC)在 `run/m4_shadow.json`,不进兼容性报告。
+- 看门狗动作记账新动作名:`m5_spawn_launcher` / `m5_spawn_dpid` / `m5_rescue`。
+
+**开关文件清单(全部「存在即生效」,删掉即恢复)**
+
+- `run/wd_m5.disabled`:dpid 守护退回 v5.29 —— 开机三选一(C launcher / shell guard / Go supervisor),哨兵判 dpid / launcher 并负责救命路径;看门狗按 choice 四路监管。哨兵每轮读开关,开机选择下次开机生效。
+- `run/wd_m4_shadow.disabled`:看门狗不跑设备发现影子比对。
+- (配置项,不是开关文件)`rules.json` 设备项 `app_qos: true`:按应用分优先级;缺省 = 关。
+
+**新文件**
+
+- `data/dpi_rules.d/shared_infra.txt` → 运行目录 `etc/dpi_rules.d/shared_infra.txt`:共享基础设施名单(每行一个后缀,`*` 只在一个标签内通配)。规则加载器只读 `*.json`,不受影响。
+- `run/app_qos.plan` / `run/app_qos.state` / `run/app_qos.sig`:应用感知 QoS 的计划 / 已下发设备 / 计划签名(看门狗与 `bin/apply_app_qos.sh` 之间)。
+- `run/m4_shadow.json`:设备发现影子最近一轮明细。
+
+**行为变化(不影响 API 形状)**
+
+- dpid 守护链 4 层 → 2 层(M5):开机只选 C launcher,不能用就 direct(看门狗直拉 dpid);哨兵不再判 dpid / launcher;「launcher 坏了 → 直拉 dpid」救命路径在看门狗(同时看 `launcher.log` 与 `dpid_guard.log`,日志须是 10 分钟内写过的)。判活 pidfile + `/proc/<pid>/cmdline`;拉起冷却 30 秒起、拉起后 2 分钟内又死则翻倍,封顶 8 分钟。
+- 应用感知 QoS 关闭(默认)时,tc / iptables 命令与 v5.29 逐条一致;开启的设备下行 class 下挂 3 个子 class(位分配与号段见 `docs/CODEMAP.md` §5.5)。`tc_manager.sh` 对这些 class 跳过叶子操作(下行延迟 / SQM 不生效,上行照常),新子命令 `ensure_class <iface> <mark_id> <ip>`。
+
