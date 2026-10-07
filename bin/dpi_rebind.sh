@@ -107,7 +107,9 @@ elif [ -x "$LAUNCHER_C" ]; then
     nohup "$LAUNCHER_C" >> "$LOG_DIR/dpid_guard.log" 2>&1 &
     echo $! > "$RUN/dpid_guard.pid"
     echo "ok: C launcher started pid=$(cat "$RUN/dpid_guard.pid" 2>/dev/null) iface=$IFACE"
-elif [ -x "$GUARD" ]; then
+elif [ -x "$GUARD" ] && [ -f "$RUN/wd_m5.disabled" ]; then
+    # v5.30 T2(M5): shell guard 只在退回 v5.29(run/wd_m5.disabled)时才选用;
+    # 默认没有 C launcher 就直拉 dpid(Go 看门狗按 direct 口径盯它)。
     log "C launcher missing; fallback to shell guard"
     nohup sh "$GUARD" >> "$LOG_DIR/dpid_guard.log" 2>&1 &
     echo $! > "$RUN/dpid_guard.pid"

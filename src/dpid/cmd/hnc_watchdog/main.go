@@ -415,7 +415,18 @@ func readLauncherChoiceAt(path string) string {
 }
 
 func readLauncherChoice() string {
-	return readLauncherChoiceAt(runDir + "/dpid_launcher.choice")
+	return readLauncherChoiceAt(m5RunDir + "/dpid_launcher.choice") // m5RunDir 默认 = runDir
+}
+
+// superviseDpid 主循环每轮的 dpid 守护入口(v5.30 T2): M5 开(默认)走
+// superviseDpidM5, 关(run/wd_m5.disabled 存在)走 v5.29 的 superviseDpidLegacy。
+func superviseDpid() {
+	choice := readLauncherChoice()
+	if m5Enabled() {
+		superviseDpidM5(choice, nowFn())
+		return
+	}
+	m5LegacyFn(choice)
 }
 
 // dpidGuardPlan 返回该 choice 下看门狗应监管的对象(纯函数, 供单测):
@@ -841,26 +852,10 @@ func mainLoop() {
 		// Daemon supervision (regardless of state)
 		ensureDaemonRunning(hotspotdDaemon())
 		ensureDaemonRunning(httpdDaemon())
-		// v5.26 T2: 只监管 run/dpid_launcher.choice 指定的那一个 dpid 守护者
-		// (service.sh 机型探测后落盘, sentinel 救命路径可改写为 direct);
-		// 文件缺失/非法时保持旧行为(launcher + dpid 都管)。
-		superviseLauncher, superviseSupervisor, superviseShellGuard, superviseDpidDirect := dpidGuardPlan(readLauncherChoice())
-		if superviseLauncher {
-			// v5.5.0-rc6: launcher 监管必须在 dpid 之前, 因为 dpid 的 ensureDaemonRunning
-			// 入口会 findLiveByName("hnc_launcher") 决定要不要 short-circuit. 这一行
-			// 保证 launcher 死后下一 tick 就被拉起来, 紧接着 dpid 检查就能看到 launcher
-			// 活了, 走 short-circuit, 让 launcher 接管 dpid (避免双重 spawn).
-			ensureDaemonRunning(launcherDaemon())
-		}
-		if superviseSupervisor {
-			ensureDaemonRunning(dpidDaemon())
-		}
-		if superviseShellGuard {
-			ensureShellGuardRunning()
-		}
-		if superviseDpidDirect {
-			ensureDaemonRunning(dpidDaemonDirect())
-		}
+		// v5.26 T2: 只监管 run/dpid_launcher.choice 指定的那一个 dpid 守护者。
+		// v5.30 T2(M5): 默认只盯 C launcher(救命路径也在看门狗, 见 m5.go);
+		// 建 run/wd_m5.disabled 退回 v5.29 的按 choice 四路监管。
+		superviseDpid()
 	}
 }
 
