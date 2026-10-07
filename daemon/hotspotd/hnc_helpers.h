@@ -50,7 +50,7 @@ void hnc_json_escape(const char *src, char *dst, size_t dst_size);
  *
  * 有些设备的 DHCP option 12 / mDNS 上报的就是字符串 "null" 之类,
  * 以前全链路没人过滤 → WebUI 显示设备名 "null"。
- * 与 dpid capture.IsJunkHostname / httpd / 前端 isJunkName 同一张表:
+ * 与 Go hnc.io/dpid/hostname.IsJunk / 前端 isJunkName 同一张表:
  *   去首尾空白、大小写不敏感后为
  *   null (null) nil none (none) undefined unknown localhost
  *   localhost.localdomain * -

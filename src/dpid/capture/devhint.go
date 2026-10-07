@@ -20,6 +20,8 @@ import (
 	"strconv"
 	"strings"
 	"sync/atomic"
+
+	"hnc.io/dpid/hostname"
 )
 
 const (
@@ -654,7 +656,7 @@ func cleanText(s string, max int) string {
 // DHCP 上 option 12 是垃圾名时还能退到 option 81 FQDN。
 func cleanHostname(s string) string {
 	hn := cleanText(strings.TrimSuffix(strings.TrimSpace(s), "."), devHintMaxHostname)
-	if IsJunkHostname(hn) {
+	if hostname.IsJunk(hn) {
 		return ""
 	}
 	return hn

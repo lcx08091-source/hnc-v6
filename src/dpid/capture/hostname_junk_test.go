@@ -1,4 +1,4 @@
-// hostname_junk_test.go — v5.30 T1b: 垃圾主机名当作没有名字。
+// hostname_junk_test.go — v5.30 T1b: 垃圾主机名当作没有名字(名单本身见 hnc.io/dpid/hostname)。
 //
 // 「改动前会失败」: v5.29 cleanHostname 只去不可打印字符, DHCP option 12 =
 // "null" 时 Hostname == "null"(TestDHCPJunkOpt12FallsBackToFQDN /
@@ -9,22 +9,6 @@ import (
 	"net"
 	"testing"
 )
-
-func TestIsJunkHostname(t *testing.T) {
-	for _, s := range []string{"null", "NULL", " Null ", "(null)", "nil", "none", "(none)",
-		"undefined", "unknown", "UNKNOWN", "localhost", "localhost.localdomain",
-		"*", "-", "", "   ", "\t", "0", "12345"} {
-		if !IsJunkHostname(s) {
-			t.Errorf("IsJunkHostname(%q) = false, want true", s)
-		}
-	}
-	for _, s := range []string{"Mi-10", "nullify", "iPhone", "localhost2", "123abc", "a",
-		"Johns-MacBook", "客厅电视", "-x", "none-pc"} {
-		if IsJunkHostname(s) {
-			t.Errorf("IsJunkHostname(%q) = true, want false", s)
-		}
-	}
-}
 
 // dhcpWithOpts DHCP REQUEST, 客户端 clientMAC, 附加给定选项。
 func dhcpWithOpts(opts ...[]byte) []byte {

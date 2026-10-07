@@ -13,22 +13,6 @@ import (
 	"testing"
 )
 
-func TestIsJunkHostnameHTTPD(t *testing.T) {
-	for _, s := range []string{"null", "NULL", " Null ", "(null)", "nil", "none", "(none)",
-		"undefined", "unknown", "UNKNOWN", "localhost", "localhost.localdomain",
-		"*", "-", "", "   ", "\t", "0", "12345"} {
-		if !isJunkHostname(s) {
-			t.Errorf("isJunkHostname(%q) = false", s)
-		}
-	}
-	for _, s := range []string{"Mi-10", "nullify", "iPhone", "localhost2", "123abc", "a",
-		"Johns-MacBook", "客厅电视", "-x", "none-pc"} {
-		if isJunkHostname(s) {
-			t.Errorf("isJunkHostname(%q) = true", s)
-		}
-	}
-}
-
 func writeFileT(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

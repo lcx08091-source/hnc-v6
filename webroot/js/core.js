@@ -402,7 +402,7 @@ function devIcon(d) {
   return '📶';
 }
 /* v5.30 T1b: 垃圾主机名("null" 等)当作没有名字(后端已挡, 这里防御旧后端)。
- * 与 hotspotd / dpid / httpd 同一张表(test/unit/test_v530_junk_table_sync.sh 核对)。 */
+ * 与 hotspotd / Go(hnc.io/dpid/hostname)同一张表(test/unit/test_v530_junk_table_sync.sh 核对)。 */
 function isJunkName(s) {
   s = String(s == null ? '' : s).trim();
   if (!s || /^[0-9]+$/.test(s)) return true;
