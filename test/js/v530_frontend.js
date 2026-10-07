@@ -68,6 +68,16 @@ const cases = {
     eq(c.devName({ hostname: 'null', hostname_src: 'manual' }, mac), 'null', '手动命名不过滤');
     eq(c.devName({ hostname: 'Mi-10', vendor: 'Xiaomi' }, mac), 'Mi-10', '真名照用');
   },
+  // T1c: 组详情里的「公共服务」块
+  disc_shared() {
+    const st = path.join(root, 'webroot/js/stats.js');
+    const c = load(st, ['kv', 'discSharedHtml'], { esc: (x) => String(x) });
+    eq(c.discSharedHtml({}), '', '没有 shared 不显示');
+    const h = c.discSharedHtml({ shared: [{ suffix: 'qtlcdn.com', reason: 'list', label: '公共服务' }, { suffix: 'bridge-cdn.com', reason: 'freq', label: '公共服务' }] });
+    for (const want of ['qtlcdn.com', 'bridge-cdn.com', '公共服务', '多台设备、多个应用都在用', '不作为起名依据']) {
+      if (h.indexOf(want) < 0) { console.log('缺少 ' + want + ': ' + h); process.exit(1); }
+    }
+  },
 };
 
 if (!cases[which]) { console.log('unknown case ' + which); process.exit(2); }

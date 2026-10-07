@@ -424,6 +424,8 @@ func main() {
 	disc := output.NewDiscoverer()
 	disc.SetPath(filepath.Join(cfg.RunDir, discoverFileName))
 	disc.SetFamilyPath(filepath.Join(cfg.RunDir, ja4FamilyFileName))
+	// v5.30 T1c: 共享基础设施名单(公共 DNS / CDN / 对象存储 / 支付 SDK)随规则目录同步
+	disc.SetSharedInfraPath(filepath.Join(filepath.Dir(cfg.RunDir), "etc", "dpi_rules.d", output.SharedInfraFileName))
 	if err := disc.Load(); err != nil {
 		log.Printf("WARN: discover load: %v", err)
 	}

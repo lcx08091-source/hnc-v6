@@ -60,7 +60,9 @@ var discoverParamSets = []struct {
 }
 
 // evalDiscover 纯函数(测试直接调): 样本 → discover 段。
-func evalDiscover(samples []evalSample) *dpiEvalDiscover {
+// si: 共享基础设施名单(v5.30 T1c, 线上 Discoverer 不让它们成组; 这里同样
+// 不进事件流也不进真值表)。nil = 不过滤。
+func evalDiscover(samples []evalSample, si *output.SharedInfra) *dpiEvalDiscover {
 	d := &dpiEvalDiscover{}
 
 	// 1. 未知样本(规则没认出)→ 事件流; 同时累计 域名→包名 计数(真值)。
@@ -69,7 +71,7 @@ func evalDiscover(samples []evalSample) *dpiEvalDiscover {
 	var events []output.ClusterEvent
 	regPkg := map[string]map[string]int{} // 可注册域 → 包名 → 样本数
 	for _, s := range samples {
-		if s.RuleID != "" || s.SNI == "" || s.Pkg == "" {
+		if s.RuleID != "" || s.SNI == "" || s.Pkg == "" || si.Match(s.SNI) {
 			continue
 		}
 		events = append(events, output.ClusterEvent{Dev: "self", Host: s.SNI, JA4: s.JA4, TS: s.Ts})

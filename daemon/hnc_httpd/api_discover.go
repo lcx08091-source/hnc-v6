@@ -443,6 +443,9 @@ func (s *server) discoverGroups() []map[string]interface{} {
 	gs, _ := root["groups"].([]interface{})
 	ign := readIDList(filepath.Join(s.hncDir, "run", "discover_ignored.json"))
 	done := readIDList(filepath.Join(s.hncDir, "run", "discover_confirmed.json"))
+	// v5.30 T1c: 公共 DNS / CDN / 对象存储 / 支付 SDK 剔出组(挂到 shared),
+	// 剔完没有自己域名的组不显示(见 api_discover_shared.go)
+	judge := sharedJudge{si: loadSharedInfra(s.hncDir), extra: sharedFromDiscover(root)}
 	var out []map[string]interface{}
 	for _, g := range gs {
 		m, _ := g.(map[string]interface{})
@@ -450,7 +453,11 @@ func (s *server) discoverGroups() []map[string]interface{} {
 		if id == "" || ign[id] || done[id] {
 			continue
 		}
-		out = append(out, m)
+		fm, ok := filterSharedGroup(m, judge)
+		if !ok {
+			continue
+		}
+		out = append(out, fm)
 	}
 	return out
 }
@@ -498,21 +505,30 @@ func (s *server) enrichGroup(g map[string]interface{}, ix apkIndex) map[string]i
 	company := ""
 	if ci, ok := certGet(s.hncDir, id); ok {
 		out["cert"] = ci
-		if ci.Org != "" && !genericCertOrg.MatchString(ci.Org) {
-			company = companyFromOrg(ci.Org)
-		}
-		// SAN 里的可注册域也拿来查本机 App(同一证书覆盖的兄弟域名)
-		var sib []string
-		for _, san := range ci.SANs {
-			r := registrable(san)
-			if r != "" && !sufSet[r] {
-				sufSet[r] = false // false = 来自证书, 不是组内观测
-				sib = append(sib, r)
+		// v5.30 T1c: 证书只有在覆盖探测的主机名、且该主机仍属于本组时才当证据
+		// (用户截图: alibabadns.com 取到的证书写着 Apple → 被起名「Apple 旗下应用」)。
+		if why := certUsable(ci, sufSet); why != "" {
+			if why != "no-cert" {
+				out["cert_unused"] = why
 			}
-		}
-		if len(sib) > 0 {
-			sort.Strings(sib)
-			out["cert_siblings"] = uniqStrings(sib, 12)
+		} else {
+			if ci.Org != "" && !genericCertOrg.MatchString(ci.Org) {
+				company = companyFromOrg(ci.Org)
+			}
+			// SAN 里的可注册域也拿来查本机 App(同一证书覆盖的兄弟域名); 共享域不算
+			si := loadSharedInfra(s.hncDir)
+			var sib []string
+			for _, san := range ci.SANs {
+				r := registrable(san)
+				if r != "" && !sufSet[r] && !si.Match(r) {
+					sufSet[r] = false // false = 来自证书, 不是组内观测
+					sib = append(sib, r)
+				}
+			}
+			if len(sib) > 0 {
+				sort.Strings(sib)
+				out["cert_siblings"] = uniqStrings(sib, 12)
+			}
 		}
 	}
 	// 本机 App 命中: 组内域权重 2, 证书兄弟域权重 1; SDK 域不计
@@ -679,7 +695,9 @@ func (s *server) CertProbeLoop(stop <-chan struct{}) {
 		now := time.Now().Unix()
 		for _, g := range s.discoverGroups() {
 			id := asString(g["id"])
-			if ci, ok := certGet(s.hncDir, id); ok && (ci.Err == "" || now-ci.Ts < certRetryAfterErr) {
+			// v5.30 T1c: 上次探测的主机已被剔成「公共服务」(不再属于本组)→ 重新探测
+			if ci, ok := certGet(s.hncDir, id); ok && (ci.Err == "" || now-ci.Ts < certRetryAfterErr) &&
+				certHostInGroup(ci, g) {
 				continue
 			}
 			ci := s.probeGroup(g)

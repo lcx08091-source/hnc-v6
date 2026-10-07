@@ -452,7 +452,7 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	// v5.27 T3: 启动指纹按天交叉验证(用全部 ≤ 7 天样本, 与 days 无关: 交叉验证至少要 2 天)
 	res.Startup = evalStartup(hncDir, now)
 	// v5.28 B1: 新发现应用(共现聚类)的量化准确率(影子, 只展示)
-	res.Discover = evalDiscover(samples)
+	res.Discover = evalDiscover(samples, loadSharedInfra(hncDir)) // v5.30 T1c: 与线上一样排除共享基础设施
 	// v5.28 B3: 流量形状猜类别(影子; 时间切分评估, 见 flow_cls.go)
 	res.FlowCls = evalFlowCls(now)
 	res.QUIC.JA4Only = qJA4.method(res.QUIC.Samples)

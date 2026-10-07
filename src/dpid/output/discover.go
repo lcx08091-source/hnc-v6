@@ -159,6 +159,11 @@ type Discoverer struct {
 
 	fam *ja4FamilyTable
 
+	// v5.30 T1c: 共享基础设施(名单文件 + 频度兜底的判定结果, 见 shared_infra.go)
+	infra      sharedInfraFile
+	sticky     map[string]int64 // freq 判定: reg → 判定时刻
+	lastShared []DiscoverShared // 上次 groupsLocked 的顶层清单(Flush 落盘)
+
 	dirty    bool
 	famDirty bool
 
@@ -180,7 +185,20 @@ func NewDiscoverer() *Discoverer {
 		adj:     make(map[string]map[string]*discEdge),
 		wins:    make(map[string]*discWindow),
 		fam:     newJA4FamilyTable(),
+		// 名单路径默认空(只剩频度兜底); dpid main 用 SetSharedInfraPath 指到
+		// etc/dpi_rules.d/shared_infra.txt —— 测试里不碰真实 /data/local/hnc。
+		sticky: make(map[string]int64),
 	}
+}
+
+// SetSharedInfraPath 设置共享基础设施名单路径(v5.30 T1c; "" = 不用名单, 只剩频度兜底)。
+func (d *Discoverer) SetSharedInfraPath(p string) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	d.infra = sharedInfraFile{path: p}
+	d.mu.Unlock()
 }
 
 // SetPath 设置 dpi_discover.json 路径。
@@ -469,6 +487,9 @@ type discoverFile struct {
 	Schema      int             `json:"schema"`
 	GeneratedAt int64           `json:"generated_at"`
 	Groups      []DiscoverGroup `json:"groups"`
+	// v5.30 T1c: 被判为共享基础设施的可注册域(名单 + 频度兜底)。httpd 据此
+	// 再过一道; freq 的判定时刻重启读回(discSharedStickySec 内保持)。
+	SharedInfra []DiscoverShared `json:"shared_infra,omitempty"`
 }
 
 // DiscoverGroup 一个疑似"同一 App"的未识别域名组。
@@ -487,6 +508,9 @@ type DiscoverGroup struct {
 	// Members 组内每个可注册域的明细(最多 64, 按命中降序)。用于重启读回
 	// 恢复节点, WebUI 也可用来展示。
 	Members []DiscoverMember `json:"members"`
+	// Shared v5.30 T1c: 与组内成员强共现的共享基础设施(公共 DNS / CDN / 对象存储
+	// / 支付 SDK), 只作附属证据, 不参与成组和起名。
+	Shared []DiscoverShared `json:"shared,omitempty"`
 }
 
 // DiscoverDomain 组内完整主机名。
@@ -531,7 +555,16 @@ func (d *Discoverer) groupsLocked(now int64) []DiscoverGroup {
 	// v5.28 B1: 强边过滤 + 枢纽排除 + 并查集合并抽到 discClusterCore
 	// (cluster.go, 纯函数), 供识别自评(dpi_eval discover 段)复用同一套
 	// 聚类决策; Discoverer 行为不变。hubs 线上暂不上报。
-	byRoot, _ := discClusterCore(d.nodes, d.edges, now, discEdgeThreshold, discHubDegree)
+	// v5.30 T1c: 先判出共享基础设施(名单 + 频度兜底), 它们不参与合并、不单独
+	// 成组, 只挂到与之强共现的组上作附属证据。
+	shared := classifyShared(d.nodes, d.edges, d.adj, now, d.infra.get(time.Unix(now, 0)), d.sticky)
+	excl := make(map[string]bool, len(shared))
+	for reg := range shared {
+		excl[reg] = true
+	}
+	ns0, es0 := subsetNodes(d.nodes, d.edges, excl)
+	byRoot, _ := discClusterCore(ns0, es0, now, discEdgeThreshold, discHubDegree)
+	d.lastShared = sharedTopList(shared, d.nodes, d.sticky)
 	// 3. 汇总
 	groups := make([]DiscoverGroup, 0, 16)
 	for _, ns := range byRoot {
@@ -539,6 +572,7 @@ func (d *Discoverer) groupsLocked(now int64) []DiscoverGroup {
 		if g.Hits < discMinHits && devCount < discMinDevices {
 			continue
 		}
+		g.Shared = attachShared(ns, shared, d.nodes, d.adj, now)
 		groups = append(groups, g)
 	}
 	sort.Slice(groups, func(i, j int) bool {
@@ -699,12 +733,14 @@ func (d *Discoverer) Flush(now time.Time) error {
 		d.dirty = true
 	}
 	var groups []DiscoverGroup
+	var sharedTop []DiscoverShared
 	var fam *ja4FamilyFile
 	// 家族表变了, 组的 family 标注也可能变 —— 两种脏都重算组; 组内容与上次
 	// 写出的一致则不写(下面按序列化结果比较)。
 	regroup := d.dirty || d.famDirty
 	if regroup {
 		groups = d.groupsLocked(ts)
+		sharedTop = d.lastShared
 		d.dirty = false
 	}
 	if d.famDirty {
@@ -720,9 +756,9 @@ func (d *Discoverer) Flush(now time.Time) error {
 		if groups == nil {
 			groups = []DiscoverGroup{}
 		}
-		gb, err := json.Marshal(groups)
+		gb, err := json.Marshal(discoverFile{Groups: groups, SharedInfra: sharedTop})
 		if err == nil && string(gb) != d.lastGroups {
-			err = writeJSONFile(path, &discoverFile{Schema: 1, GeneratedAt: ts, Groups: groups})
+			err = writeJSONFile(path, &discoverFile{Schema: 1, GeneratedAt: ts, Groups: groups, SharedInfra: sharedTop})
 			if err == nil {
 				d.lastGroups = string(gb)
 			}
@@ -778,6 +814,12 @@ func (d *Discoverer) Load() error {
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	// v5.30 T1c: 频度兜底的判定读回(名单命中的每次都现算, 不用存)
+	for _, sh := range df.SharedInfra {
+		if sh.Reason == sharedReasonFreq && sh.Since > 0 && sh.Suffix != "" {
+			d.sticky[sh.Suffix] = sh.Since
+		}
+	}
 	// 旧的在前: 按 last_seen 升序恢复, 让最新的组处在 LRU 前端。
 	groups := append([]DiscoverGroup(nil), df.Groups...)
 	sort.SliceStable(groups, func(i, j int) bool { return groups[i].LastSeen < groups[j].LastSeen })

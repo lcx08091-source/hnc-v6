@@ -27,7 +27,7 @@ func discSamples() []evalSample {
 }
 
 func TestEvalDiscoverPureAndComplete(t *testing.T) {
-	d := evalDiscover(discSamples())
+	d := evalDiscover(discSamples(), nil)
 	if d == nil {
 		t.Fatal("evalDiscover 不应返回 nil")
 	}
@@ -74,7 +74,7 @@ func TestEvalDiscoverHubCounted(t *testing.T) {
 				evalSample{Ts: base + t0 + 1, Pkg: "com.hub.app", SNI: mkLeaf(i), UID: 10086})
 		}
 	}
-	d := evalDiscover(ss)
+	d := evalDiscover(ss, nil)
 	if d.Hubs < 1 {
 		t.Errorf("hubs = %d, want ≥1(example.net 度数 25 > 24)", d.Hubs)
 	}
@@ -88,7 +88,7 @@ func mkLeaf(i int64) string {
 }
 
 func TestEvalDiscoverEmpty(t *testing.T) {
-	d := evalDiscover(nil)
+	d := evalDiscover(nil, nil)
 	if d == nil {
 		t.Fatal("nil 样本应返回带说明的结果")
 	}
@@ -103,7 +103,7 @@ func TestEvalDiscoverEmpty(t *testing.T) {
 func TestEvalDiscoverOnlyKnownSamples(t *testing.T) {
 	// 规则库认出的样本(rule_id 非空)不参与 —— 与线上一致
 	ss := []evalSample{{Ts: 100, Pkg: "com.a.app", SNI: "api.appa-1.com", RuleID: "r1", UID: 10086}}
-	d := evalDiscover(ss)
+	d := evalDiscover(ss, nil)
 	if d.Samples != 0 {
 		t.Errorf("已知样本不应参与 discover 评估, samples = %d", d.Samples)
 	}

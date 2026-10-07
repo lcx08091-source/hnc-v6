@@ -1,0 +1,84 @@
+# shared_infra.txt — v5.30 T1c: 共享基础设施名单(公共 DNS / CDN / 对象存储 / 支付与通用 SDK)
+#
+# 这些域名被很多应用共用, 和谁一起出现都不说明它属于谁。「新发现的应用」里:
+#   - 不能单独成组, 不能当组名 / 起名依据(本机 App、证书、域名三种线索都不用它);
+#   - 可以作为别的组的附属证据显示, 标「公共服务」。
+# 没写进来的也有兜底: 同一时间窗内被 ≥3 台设备访问、且与 ≥4 个互不相关的组
+# 共现的可注册域, dpid 自动判为共享基础设施(src/dpid/output/shared_infra.go)。
+#
+# 格式: 每行一个域名后缀, # 起注释。主机名等于它或以 ".它" 结尾即命中。
+#   含 * 的行是通配: * 只匹配一个标签里的若干字符(不跨点), 对可注册域比较,
+#   例: cdnhwc*.com 命中 cdnhwc1.com、cdnhwcprov.com, 不命中 a.cdnhwc1.com.cn。
+# 本文件随规则目录同步(模块 data/dpi_rules.d/ → 运行目录 etc/dpi_rules.d/),
+# 规则加载器只读 *.json, 不会把它当规则。
+
+# ── 公共 DNS / DoH ─────────────────────────────────────────────────
+alibabadns.com
+dnspod.cn
+dnspod.com
+dnspod.net
+114dns.com
+dns.google
+cloudflare-dns.com
+quad9.net
+doh.pub
+dns.pub
+onedns.net
+
+# ── CDN / GSLB(国内) ────────────────────────────────────────────────
+cdngslb.com
+alicdn.com
+alikunlun.com
+alikunlun.net
+kunlunca.com
+kunlunsl.com
+qtlcdn.com
+qtlgslb.com
+ksyuncdn.com
+ks-cdn.com
+ksyungslb.com
+lanniao.com
+wscdns.com
+wsglb0.com
+chinanetcenter.com
+cdnhwc*.com
+hwcdn.net
+bdydns.com
+bcebos.com
+jomodns.com
+qcloudcdn.com
+cdn.dnsv1.com
+tdnsv*.com
+dnsv1.com.cn
+
+# ── CDN(海外) ──────────────────────────────────────────────────────
+akamaized.net
+akamaiedge.net
+akamai.net
+edgekey.net
+edgesuite.net
+cloudfront.net
+fastly.net
+fastlylb.net
+cdn77.org
+cloudflare.net
+
+# ── 对象存储 / 云厂商通用域 ──────────────────────────────────────────
+tencentcos.cn
+myqcloud.com
+aliyuncs.com
+amazonaws.com
+myhuaweicloud.com
+
+# ── 支付 / 通用 SDK ─────────────────────────────────────────────────
+wechatpay.cn
+mdap.alipay.com
+mobilegw.alipay.com
+umeng.com
+umengcloud.com
+getui.com
+getui.net
+igexin.com
+jpush.cn
+jiguang.cn
+bugly.qq.com

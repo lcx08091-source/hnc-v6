@@ -471,6 +471,14 @@ function discOpenDetail(id) {
   $('#disc-body').innerHTML = discDetailHtml(g); $('#sheet').scrollTop = 0;
 }
 function kv(k, v) { return '<div class="row2"><span class="k">' + k + '</span><span class="v">' + v + '</span></div>'; }
+/* v5.30 T1c: 与这个组一起出现的公共 DNS / CDN / 对象存储 / 支付 SDK —— 很多应用共用, 只作附属证据 */
+function discSharedHtml(g) {
+  var sh = Array.isArray(g.shared) ? g.shared : [];
+  if (!sh.length) return '';
+  return '<div class="dsec">一起出现的公共服务 · 不算这个应用的域名</div><div class="dbox">' + sh.slice(0, 8).map(function (x) {
+    return kv('<span class="mono" style="color:var(--text-1);font-size:12px">' + esc(x.suffix) + '</span>', '<span class="note">' + esc(x.label || '公共服务') + (x.reason === 'freq' ? ' · 多台设备、多个应用都在用' : '') + '</span>');
+  }).join('') + '<div class="note">公共 DNS / CDN / 云存储 / 支付 SDK 被很多应用共用，不作为起名依据，也不会加入规则库</div></div>';
+}
 function discDetailHtml(g) {
   var gs = g.guess || {}, sg = g.suggest || {}, f = S.discForm || { name: '', cat: 'unknown', sufs: {} }, h = '<button class="dback" data-act="disc-back">‹ 返回列表</button>';
   h += '<div style="text-align:center;margin-bottom:6px"><div style="font-size:19px;font-weight:800">' + esc(sg.name || gs.name || g.id) + '</div><div class="tags" style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;margin-top:6px">' + discTags(g) + '</div></div>';
@@ -484,14 +492,14 @@ function discDetailHtml(g) {
   // 证书
   var c = g.cert;
   h += '<div class="dbox" style="margin-top:8px">' + (!c ? kv('服务器证书', '<span class="note">还没获取</span>') : c.err ? kv('服务器证书', '<span class="note">' + esc(c.err) + '</span>') :
-    kv('证书主体', esc(c.org || '（证书没写组织名）') + (g.company ? '<div class="note">→ ' + esc(g.company) + '</div>' : '')) + kv('签发', esc(c.issuer || '—')) + (c.sans && c.sans.length ? kv('同证书域名', '<span class="mono" style="font-size:11.5px;font-weight:500">' + esc(c.sans.slice(0, 8).join(' ')) + (c.sans.length > 8 ? ' …' : '') + '</span>') : '')) +
+    kv('证书主体', esc(c.org || '（证书没写组织名）') + (g.company ? '<div class="note">→ ' + esc(g.company) + '</div>' : '') + (g.cert_unused ? '<div class="note warn">' + esc(g.cert_unused) + '</div>' : '')) + kv('签发', esc(c.issuer || '—')) + (c.sans && c.sans.length ? kv('同证书域名', '<span class="mono" style="font-size:11.5px;font-weight:500">' + esc(c.sans.slice(0, 8).join(' ')) + (c.sans.length > 8 ? ' …' : '') + '</span>') : '')) +
     '<div class="btns" style="margin:2px 0 0"><button class="btn sec press" data-act="disc-probe">' + ico('refresh') + (c ? '重新获取证书' : '立即获取证书') + '</button></div></div>';
   // 指纹
   h += '<div class="dbox" style="margin-top:8px">' + kv('网络指纹', g.family_name ? esc(g.family_name) + ' 系网络库' + (g.family_conf ? '<span class="note"> · ' + Math.round(num(g.family_conf) * 100) + '%</span>' : '') : '<span class="note">没有匹配到已知家族</span>') +
     ((g.ja4 || []).length ? kv('JA4', '<span class="mono" style="font-size:11px;font-weight:500">' + esc(g.ja4.slice(0, 2).map(function (x) { return typeof x === 'string' ? x : x.ja4 + ' ×' + num(x.count); }).join(' ')) + '</span>') : '') + '</div>';
   // 观测
   h += '<div class="dsec">看到的域名 · ' + num(g.hits) + ' 次</div><div class="dbox">' + (g.domains || []).slice(0, 10).map(function (d) { return kv('<span class="mono" style="color:var(--text-1);font-size:12px">' + esc(d.name) + '</span>', '<span class="note">' + num(d.count) + ' 次</span>'); }).join('') +
-    kv('出现在', esc(devNames(g.devices).join('、') || '—')) + (g.last_seen ? kv('最近', ago(g.last_seen)) : '') + '</div>';
+    kv('出现在', esc(devNames(g.devices).join('、') || '—')) + (g.last_seen ? kv('最近', ago(g.last_seen)) : '') + '</div>' + discSharedHtml(g);
   // 表单
   h += '<div class="dsec">确认后加入规则库</div>' +
     '<label class="field">应用名称<span class="box"><input id="dc-name" maxlength="40" placeholder="比如：小红书" value="' + esc(f.name) + '"></span></label>' +
