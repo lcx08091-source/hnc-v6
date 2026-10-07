@@ -401,10 +401,22 @@ function devIcon(d) {
   if (/phone|iphone|android|xiaomi|redmi|oppo|vivo|huawei|honor|realme|oneplus|samsung|meizu|nubia|iqoo|pixel|mi-|手机/.test(s)) return '📱';
   return '📶';
 }
+/* v5.30 T1b: 垃圾主机名("null" 等)当作没有名字(后端已挡, 这里防御旧后端)。
+ * 与 hotspotd / dpid / httpd 同一张表(test/unit/test_v530_junk_table_sync.sh 核对)。 */
+function isJunkName(s) {
+  s = String(s == null ? '' : s).trim();
+  if (!s || /^[0-9]+$/.test(s)) return true;
+  return ['null', '(null)', 'nil', 'none', '(none)', 'undefined', 'unknown', 'localhost', 'localhost.localdomain', '*', '-'].indexOf(s.toLowerCase()) >= 0;
+}
+/* 设备显示名: 主机名 > name > 厂商 > MAC; 手动命名原样用, 其余跳过垃圾名 */
+function devName(d, mac) {
+  var hn = d.hostname_src === 'manual' ? d.hostname : (isJunkName(d.hostname) ? '' : d.hostname);
+  return hn || (isJunkName(d.name) ? '' : d.name) || d.vendor || mac;
+}
 function mapDevice(d) {
   var mac = String(d.mac || '').toLowerCase();
   var active = S.hotspot.active !== false;
-  var name = d.hostname || d.name || d.vendor || mac;
+  var name = devName(d, mac);
   var o = {
     mac: mac, ip: d.ip || '', name: name, manual: d.hostname_src === 'manual', vendor: d.vendor || '', lastSeen: num(d.last_seen),
     blocked: d.status === 'blocked', online: active && d.online === true,

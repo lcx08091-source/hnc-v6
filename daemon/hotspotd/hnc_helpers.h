@@ -46,6 +46,34 @@ int hnc_should_re_resolve(const char *hostname_src, time_t last_resolve, time_t 
 void hnc_json_escape(const char *src, char *dst, size_t dst_size);
 
 /* ══════════════════════════════════════════════════════════
+ * hostname_is_junk — 垃圾主机名判定 (v5.30 T1b)
+ *
+ * 有些设备的 DHCP option 12 / mDNS 上报的就是字符串 "null" 之类,
+ * 以前全链路没人过滤 → WebUI 显示设备名 "null"。
+ * 与 dpid capture.IsJunkHostname / httpd / 前端 isJunkName 同一张表:
+ *   去首尾空白、大小写不敏感后为
+ *   null (null) nil none (none) undefined unknown localhost
+ *   localhost.localdomain * -
+ *   或为空串 / 纯数字 → 垃圾。
+ * 返回 1 = 垃圾(当作「没有名字」),0 = 可用。NULL 视为垃圾。
+ * 手动命名(device_names.json)不走这里。
+ * ══════════════════════════════════════════════════════════ */
+int hnc_hostname_is_junk(const char *s);
+
+/* ══════════════════════════════════════════════════════════
+ * ns_dhcp_pick_hostname — 从 dumpsys network_stack 输出里挑 hostname (v5.30 T1b)
+ *
+ * 原是 hotspotd.c try_ns_dhcp_resolve 的第 3 段, 搬来做成纯函数便于单测。
+ * 规则(与 v3.7.2 起一致):
+ *   - 按行切分; 行里同时含 mac(大小写不敏感)与 "hostname: " 才算
+ *   - 取到 \r / , / 行尾, 去尾部空格 / tab
+ *   - 多行取最新(ring buffer 越后越新)
+ *   - v5.30: 垃圾名(hnc_hostname_is_junk)跳过, 不覆盖更早的真名
+ * buf 会被就地切分(strtok_r)。返回 1 = 找到(写入 out),0 = 没有(out 不动)。
+ * ══════════════════════════════════════════════════════════ */
+int hnc_ns_dhcp_pick_hostname(char *buf, const char *mac, char *out, size_t outlen);
+
+/* ══════════════════════════════════════════════════════════
  * mac_fallback — MAC 地址兜底 hostname
  *
  * 跟 shell 路径 `echo "$mac" | tr -d ':' | tail -c 9` 对齐:

@@ -9,6 +9,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>  /* v5.30 T1b: strncasecmp */
 #include <ctype.h>
 /* v5.9.0: hnc_run_cmd_timeout 依赖 */
 #include <errno.h>
@@ -26,6 +27,81 @@ int hnc_should_re_resolve(const char *hostname_src, time_t last_resolve, time_t 
     if (strcmp(hostname_src, "mac") == 0) return 1;
     if ((now - last_resolve) >= 60) return 1;
     return 0;
+}
+
+/* ══════════════════════════════════════════════════════════
+ * hostname_is_junk (v5.30 T1b) — 见 hnc_helpers.h
+ * ══════════════════════════════════════════════════════════ */
+static const char *const HNC_JUNK_HOSTNAMES[] = {
+    "null", "(null)", "nil", "none", "(none)", "undefined", "unknown",
+    "localhost", "localhost.localdomain", "*", "-",
+};
+
+int hnc_hostname_is_junk(const char *s) {
+    if (!s) return 1;
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t n = strlen(s);
+    while (n > 0 && isspace((unsigned char)s[n - 1])) n--;
+    if (n == 0) return 1;
+    int digits = 1;
+    for (size_t i = 0; i < n; i++) {
+        if (!isdigit((unsigned char)s[i])) { digits = 0; break; }
+    }
+    if (digits) return 1;
+    for (size_t k = 0; k < sizeof(HNC_JUNK_HOSTNAMES) / sizeof(HNC_JUNK_HOSTNAMES[0]); k++) {
+        if (strlen(HNC_JUNK_HOSTNAMES[k]) == n && strncasecmp(s, HNC_JUNK_HOSTNAMES[k], n) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* 大小写不敏感子串查找(不依赖 GNU strcasestr) */
+static const char *hnc_ci_find(const char *hay, const char *needle) {
+    size_t n = strlen(needle);
+    if (n == 0) return hay;
+    for (; *hay; hay++) {
+        if (strncasecmp(hay, needle, n) == 0) return hay;
+    }
+    return NULL;
+}
+
+/* ══════════════════════════════════════════════════════════
+ * ns_dhcp_pick_hostname (v5.30 T1b) — 见 hnc_helpers.h
+ * ══════════════════════════════════════════════════════════ */
+int hnc_ns_dhcp_pick_hostname(char *buf, const char *mac, char *out, size_t outlen) {
+    if (!buf || !mac || !*mac || !out || outlen == 0) return 0;
+    char latest[HNC_HN_LEN] = "";
+    char *saveptr = NULL;
+    for (char *line = strtok_r(buf, "\n", &saveptr); line != NULL;
+         line = strtok_r(NULL, "\n", &saveptr)) {
+        /* 双锚点匹配 */
+        if (hnc_ci_find(line, mac) == NULL) continue;
+        const char *p = strstr(line, "hostname: ");
+        if (p == NULL) continue;
+        p += 10;  /* 跳过 "hostname: " */
+
+        /* 提取到 \r / , / 行尾 */
+        char hn[HNC_HN_LEN];
+        size_t j = 0;
+        while (*p && *p != '\r' && *p != ',' && j < sizeof(hn) - 1) {
+            hn[j++] = *p++;
+        }
+        hn[j] = '\0';
+        /* 去尾部空格/tab */
+        while (j > 0 && (hn[j - 1] == ' ' || hn[j - 1] == '\t')) {
+            hn[--j] = '\0';
+        }
+        /* v5.30 T1b: option 12 上报 "null" 之类的垃圾名 → 当作没有名字 */
+        if (j > 0 && !hnc_hostname_is_junk(hn)) {
+            strncpy(latest, hn, sizeof(latest) - 1);
+            latest[sizeof(latest) - 1] = '\0';
+        }
+    }
+    if (latest[0] == '\0') return 0;
+    strncpy(out, latest, outlen - 1);
+    out[outlen - 1] = '\0';
+    return 1;
 }
 
 /* ══════════════════════════════════════════════════════════

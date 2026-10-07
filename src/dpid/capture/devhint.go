@@ -650,8 +650,14 @@ func cleanText(s string, max int) string {
 }
 
 // cleanHostname: 主机名只保留可打印字符, 最长 63 字节。
+// v5.30 T1b: "null" / "localhost" / 纯数字之类的垃圾名返回 ""(= 没有名字),
+// DHCP 上 option 12 是垃圾名时还能退到 option 81 FQDN。
 func cleanHostname(s string) string {
-	return cleanText(strings.TrimSuffix(strings.TrimSpace(s), "."), devHintMaxHostname)
+	hn := cleanText(strings.TrimSuffix(strings.TrimSpace(s), "."), devHintMaxHostname)
+	if IsJunkHostname(hn) {
+		return ""
+	}
+	return hn
 }
 
 func firstLabel(s string) string {

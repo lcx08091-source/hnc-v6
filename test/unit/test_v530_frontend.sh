@@ -27,3 +27,5 @@ _v530_case() {
 _v530_case online_text "在线时长 < 60 显示分钟, ≥ 60 显示小时, 0 不显示"
 _v530_case online_min_map "online_min 优先, 旧后端 hours×60 兜底"
 _v530_case online_paint "设备卡片写入「今日在线 N 分钟」"
+_v530_case junk_name "垃圾主机名表(null / localhost / 纯数字 …)"
+_v530_case dev_name "设备名兜底链跳过垃圾名, 手动命名不过滤"

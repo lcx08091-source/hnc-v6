@@ -47,6 +47,27 @@ const cases = {
     eq(els['oh-aabbccddee01'].textContent, ' · 今日在线 5 分钟', '5 分钟设备');
     eq(els['oh-aabbccddee02'].textContent, ' · 今日在线 1.3 小时', '75 分钟设备');
   },
+  // T1b: 垃圾名表(与 C / Go 同一组用例)
+  junk_name() {
+    const c = load(core, ['isJunkName']);
+    for (const s of ['null', 'NULL', ' Null ', '(null)', 'nil', 'none', '(none)', 'undefined', 'unknown', 'UNKNOWN',
+      'localhost', 'localhost.localdomain', '*', '-', '', '   ', '\t', '0', '12345', null, undefined]) {
+      eq(c.isJunkName(s), true, 'junk ' + JSON.stringify(s));
+    }
+    for (const s of ['Mi-10', 'nullify', 'iPhone', 'localhost2', '123abc', 'a', 'Johns-MacBook', '客厅电视', '-x', 'none-pc']) {
+      eq(c.isJunkName(s), false, 'good ' + JSON.stringify(s));
+    }
+  },
+  // T1b: 接线 —— mapDevice 用的 devName 跳过垃圾名, 手动命名不动
+  dev_name() {
+    const c = load(core, ['isJunkName', 'devName']);
+    const mac = 'aa:bb:cc:dd:ee:01';
+    eq(c.devName({ hostname: 'null', hostname_src: 'dhcp', vendor: 'Xiaomi' }, mac), 'Xiaomi', 'null → 厂商');
+    eq(c.devName({ hostname: 'null' }, mac), mac, 'null 无厂商 → MAC');
+    eq(c.devName({ hostname: 'undefined', name: 'Pad' }, mac), 'Pad', '垃圾名 → name');
+    eq(c.devName({ hostname: 'null', hostname_src: 'manual' }, mac), 'null', '手动命名不过滤');
+    eq(c.devName({ hostname: 'Mi-10', vendor: 'Xiaomi' }, mac), 'Mi-10', '真名照用');
+  },
 };
 
 if (!cases[which]) { console.log('unknown case ' + which); process.exit(2); }

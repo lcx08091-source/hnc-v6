@@ -189,7 +189,7 @@ func hostnameKind(src string) string {
 
 func (o *macObs) setHostname(name, src string) {
 	name = strings.TrimSpace(name)
-	if name == "" {
+	if isJunkHostname(name) { // v5.30 T1b: 一堆设备都报 "null" 不能当成「同名 = 同一台」
 		return
 	}
 	switch hostnameKind(src) {

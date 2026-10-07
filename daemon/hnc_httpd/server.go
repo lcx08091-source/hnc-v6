@@ -576,6 +576,9 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 		for k, v := range dev {
 			merged[k] = v
 		}
+		// v5.30 T1b: 存量 devices.json 里的 "null" 之类垃圾名当作没有名字
+		// (下面还能退到 dpid 抓到的名字 / 厂商 / MAC); 手动命名不动。
+		dropJunkHostname(merged)
 		// 叠加 rules.json 里的规则
 		if deviceRules != nil {
 			ruleRaw, ok := deviceRules[mac]

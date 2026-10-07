@@ -647,6 +647,7 @@ func (s *server) dpiIdentByMAC() map[string]map[string]interface{} {
 				id[k] = x
 			}
 		}
+		dropJunkHostname(id) // v5.30 T1b: 旧 dpid 落盘的 "null" 不当名字用
 		if ev, ok := d["evidence"].([]interface{}); ok && len(ev) > 0 {
 			if len(ev) > 8 {
 				ev = ev[:8]

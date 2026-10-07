@@ -94,6 +94,8 @@ int hnc_cache_lookup(const char *mac,
     for (int i = 0; i < HNC_CACHE_MAX_ENTRIES; i++) {
         if (!g_cache[i].active) continue;
         if (mac_eq(g_cache[i].mac, mac)) {
+            /* v5.30 T1b: 旧版本已经写进磁盘缓存的垃圾名(如 "null")不回放 */
+            if (hnc_hostname_is_junk(g_cache[i].hostname)) return 0;
             strncpy(out_hn, g_cache[i].hostname, hn_len - 1);
             out_hn[hn_len - 1] = '\0';
             strncpy(out_src, g_cache[i].src, src_len - 1);
@@ -114,6 +116,8 @@ int hnc_cache_lookup(const char *mac,
 int hnc_cache_update(const char *mac, const char *hostname, const char *src) {
     if (!mac || !hostname || !src) return 0;
     if (!*mac || !*hostname || !*src) return 0;
+    /* v5.30 T1b: "null" 之类的垃圾名不进缓存(否则设备每次重连都回放成 "null") */
+    if (hnc_hostname_is_junk(hostname)) return 0;
 
     time_t now = time(NULL);
 

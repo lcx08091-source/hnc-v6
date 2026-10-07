@@ -1451,7 +1451,12 @@ static int try_mdns_resolve(const char *ip, const char *mac, char *out, size_t o
         out[0] = '\0';
         return 0;
     }
-    return (out[0] != '\0') ? 1 : 0;
+    /* v5.30 T1b: mDNS 回来的垃圾名(如 "null")当作没解析到 */
+    if (hnc_hostname_is_junk(out)) {
+        out[0] = '\0';
+        return 0;
+    }
+    return 1;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -1657,55 +1662,12 @@ static int try_ns_dhcp_resolve(const char *mac, char *out, size_t outlen) {
     waitpid(pid, &status, 0);
 
     /* ── 3. 内存中解析 buffer,找 hostname ──────────────── */
-    /* 策略:strtok_r 按 '\n' 切分,每行检查:
-     *   条件 A: strcasestr(line, mac) != NULL      // MAC 大小写不敏感
-     *   条件 B: strstr(line, "hostname: ") != NULL // 有 hostname 字段
-     *
-     * v3.7.2 修复 P3-22:原版 popen 走 `grep -iF <mac>` 是裸全串匹配,
-     * 理论上可能把包含 MAC 作为其他字段值的行误命中(例如某用户把设备
-     * 手动命名为另一台设备的 MAC 字符串)。新版双锚点约束,匹配精度更高。
-     *
-     * 多行取最新:dumpsys ring buffer 按时间顺序,越后面越新 */
-    char latest_hostname[HN_LEN] = "";
-    char *saveptr = NULL;
-    char *line = strtok_r(buffer, "\n", &saveptr);
-    while (line != NULL) {
-        /* 双锚点匹配 */
-        if (strcasestr(line, mac) != NULL &&
-            strstr(line, "hostname: ") != NULL) {
-
-            const char *p = strstr(line, "hostname: ");
-            p += 10;  /* 跳过 "hostname: " */
-
-            /* 提取到 \r / , / 行尾 */
-            char hn[HN_LEN];
-            size_t j = 0;
-            while (*p && *p != '\r' && *p != ',' && j < sizeof(hn) - 1) {
-                hn[j++] = *p++;
-            }
-            hn[j] = '\0';
-
-            /* 去尾部空格/tab */
-            while (j > 0 && (hn[j-1] == ' ' || hn[j-1] == '\t')) {
-                hn[--j] = '\0';
-            }
-
-            if (j > 0) {
-                strncpy(latest_hostname, hn, sizeof(latest_hostname) - 1);
-                latest_hostname[sizeof(latest_hostname) - 1] = '\0';
-            }
-        }
-        line = strtok_r(NULL, "\n", &saveptr);
-    }
-
+    /* v5.30 T1b: 解析搬到 hnc_helpers.c hnc_ns_dhcp_pick_hostname(纯函数,
+     * 能直接喂 dumpsys 文本单测), 垃圾名(option 12 = "null" 等)在那里挡掉。
+     * 双锚点匹配 / 多行取最新的规则不变。 */
+    int found = hnc_ns_dhcp_pick_hostname(buffer, mac, out, outlen);
     free(buffer);
-
-    if (latest_hostname[0] != '\0') {
-        strncpy(out, latest_hostname, outlen - 1);
-        out[outlen - 1] = '\0';
-        return 1;
-    }
-    return 0;
+    return found;
 }
 
 /* ══════════════════════════════════════════════════════════
@@ -1917,7 +1879,8 @@ int main(int argc, char *argv[]) {
                  * 等更高优先级的结果(如果在查询期间被别的路径改过) */
                 if (strcmp(d->hostname_src, "pending") != 0) continue;
 
-                if (mdns_results[i].success) {
+                /* v5.30 T1b: 垃圾名按失败处理(try_mdns_resolve 已挡, 这里防御) */
+                if (mdns_results[i].success && !hnc_hostname_is_junk(mdns_results[i].hostname)) {
                     strncpy(d->hostname, mdns_results[i].hostname, sizeof(d->hostname)-1);
                     d->hostname[sizeof(d->hostname)-1] = '\0';
                     strncpy(d->hostname_src, "mdns", sizeof(d->hostname_src)-1);
