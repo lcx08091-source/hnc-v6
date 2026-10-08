@@ -185,16 +185,28 @@ function applyTheme() {
   if (apple()) r.setAttribute('data-style', 'apple'); else r.removeAttribute('data-style');
   if (S.style === 'liquid') r.setAttribute('data-glass', 'liquid'); else r.removeAttribute('data-glass');
   if (typeof liquidGlass === 'function') liquidGlass();
+  applyGlassTint();
   r.classList.toggle('calm', !S.motion);
   applyMotion();
 }
+/* 玻璃浓度(液态玻璃专用, 0 清透 … 50 标准 … 100 着色) → <html> 上的 --gx-up / --gx-dn(liquid.css 头注释);
+   标准档两个都删掉 = 旧版数值。与 index.html 首帧脚本同一算法 */
+function glassTintVars(v) { v = clamp(num(v, 50), 0, 100); return { up: v > 50 ? (v - 50) / 50 : 0, dn: v < 50 ? (50 - v) / 50 : 0 }; }
+function applyGlassTint(v) {
+  var r = document.documentElement, g = glassTintVars(v == null ? S.glassTint : v);
+  if (g.up) r.style.setProperty('--gx-up', g.up.toFixed(3)); else r.style.removeProperty('--gx-up');
+  if (g.dn) r.style.setProperty('--gx-dn', g.dn.toFixed(3)); else r.style.removeProperty('--gx-dn');
+}
+var GX_T = [[10, '清透'], [40, '偏清透'], [60, '标准'], [90, '偏着色'], [101, '着色']];
+function glassTintLabel(v) { for (var i = 0; i < GX_T.length; i++) if (v < GX_T[i][0]) return GX_T[i][1]; return '着色'; }
 function apple() { return S.style === 'apple' || S.style === 'liquid'; }
-/* 液态玻璃: 功能层元素挂 Hyalite 真折射(按各自尺寸生成折射贴图); 其它风格 / 低端机 / 非 Chromium 摘掉, 退回 CSS 磨砂 */
+/* 液态玻璃: 功能层元素挂 Hyalite 真折射(按各自尺寸生成折射贴图); 其它风格 / 低端机 / 非 Chromium 摘掉, 退回 CSS 磨砂。
+   v5.30: shade(边缘暗边)、rim(边缘反光)、edge(CSS 描边)各加一档 —— iOS 27 的「暗边 + 更亮高光」, 元素和背景分得更开 */
 var LG_OPTS = {
-  tabbar: { bevel: 20, thickness: 34, slope: .9, shape: 'squircle', blur: 2.2, dispersion: 1.8, shade: .22, rim: 1.5, edgeW: 2, edge: .8, light: -30, sat: 1.1, materialize: 420, settle: 120 },
-  hbtn: { bevel: 20, thickness: 22, shape: 'squircle', blur: 1.2, dispersion: 1.6, shade: .25, rim: 1.6, edge: .9, light: -30, materialize: 420 },
-  sheet: { bevel: 26, thickness: 42, slope: .9, shape: 'squircle', blur: 16, dispersion: 1.4, shade: .18, rim: 1.3, edge: .8, light: -30, sat: 1.1, settle: 160 },
-  toast: { bevel: 16, thickness: 22, shape: 'squircle', blur: 10, dispersion: 1.2, shade: .18, rim: 1.2, edge: .8, light: -30 }
+  tabbar: { bevel: 20, thickness: 34, slope: .9, shape: 'squircle', blur: 2.2, dispersion: 1.8, shade: .3, rim: 1.8, edgeW: 2, edge: 1, light: -30, sat: 1.1, materialize: 420, settle: 120 },
+  hbtn: { bevel: 20, thickness: 22, shape: 'squircle', blur: 1.2, dispersion: 1.6, shade: .32, rim: 1.9, edge: 1.05, light: -30, materialize: 420 },
+  sheet: { bevel: 26, thickness: 42, slope: .9, shape: 'squircle', blur: 16, dispersion: 1.4, shade: .24, rim: 1.6, edge: 1, light: -30, sat: 1.1, settle: 160 },
+  toast: { bevel: 16, thickness: 22, shape: 'squircle', blur: 10, dispersion: 1.2, shade: .24, rim: 1.5, edge: 1, light: -30 }
 };
 var lgOn = false;
 function lgTargets() { return [['tabbar', $('#tabbar')], ['hbtn', $('#bell')], ['hbtn', $('#theme-btn')], ['sheet', $('#sheet')], ['toast', $('#toast')]]; }
@@ -214,6 +226,9 @@ function navSync() {
   var lt = on ? clamp(y / 44, 0, 1) : 1, st = on ? clamp((y - 28) / 14, 0, 1) : 1, hp = on ? clamp((y - 4) / 26, 0, 1) : 1;
   if (pg) pg.style.setProperty('--lt', lt.toFixed(3));
   hdr.style.setProperty('--st', st.toFixed(3)); hdr.style.setProperty('--hp', hp.toFixed(3));
+  // --hs 液态玻璃顶栏变实底(liquid.css): 大标题收起后内容才算滚到顶栏下面; 没有大标题时滚一点就算
+  var hs = clamp((y - (on ? 56 : 8)) / 20, 0, 1);
+  hdr.style.setProperty('--hs', hs.toFixed(3)); hdr.classList.toggle('hs-on', hs > 0);
 }
 document.addEventListener('scroll', function (e) {
   if (!apple() || !e.target.classList || !e.target.classList.contains('page')) return;

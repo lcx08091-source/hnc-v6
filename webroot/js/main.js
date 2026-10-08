@@ -386,7 +386,22 @@ document.addEventListener('click', function (e) {
 document.addEventListener('change', function (e) {
   if (e.target.id === 'log-file') { S.logFile = e.target.value; loadLog(); }
 });
-document.addEventListener('input', function (e) { if (e.target.id === 'q') { S.q = e.target.value; renderDevList(false); } });
+document.addEventListener('input', function (e) {
+  if (e.target.id === 'q') { S.q = e.target.value; renderDevList(false); }
+  else if (e.target.id === 'glass-tint') glassTintInput(e.target, false);
+});
+// 玻璃浓度滑块: 拖动时整页实时跟着变(不存); 松手才存。标准档(50)附近 ±3 吸附, 好拖回原样
+var gxShown = null;
+function glassTintInput(el, commit) {
+  var v = clamp(Math.round(num(el.value, 50)), 0, 100);
+  if (Math.abs(v - 50) <= 3) { v = 50; if (commit) el.value = '50'; }
+  if (v === 50 && gxShown !== null && gxShown !== 50) haptic(6);   // 拖进标准档时轻震一下
+  gxShown = v;
+  applyGlassTint(v);
+  var lb = $('#glass-tint-v'); if (lb) lb.textContent = glassTintLabel(v);
+  if (commit && v !== S.glassTint) { S.glassTint = v; LS.set('hnc6.glass_tint', String(v)); }
+}
+document.addEventListener('change', function (e) { if (e.target.id === 'glass-tint') glassTintInput(e.target, true); });
 document.addEventListener('keydown', function (e) {
   var el = e.target; if (e.key !== 'Enter' || !el.closest) return;
   var box = el.closest('[data-dev],[data-side]'); if (!box || el.tagName !== 'INPUT') return;
@@ -549,7 +564,7 @@ $$('.page').forEach(function (p) { p.classList.toggle('on', p.getAttribute('data
 RENDER[S.page](true);
 layoutLens(); syncTab(S.page, true);
 // 透镜边缘的真折射 + 色散: Hyalite by VII-Cae (MIT), https://github.com/VII-Cae/hyalite--liquid-glass
-if (window.Hyalite) { try { Hyalite.attach(lens, { bevel: 13, thickness: 24, blur: .3, dispersion: 2.6, shade: .28, rim: 1.7, edge: 0, sat: 1.15 }); } catch (_) {} }
+if (window.Hyalite) { try { Hyalite.attach(lens, { bevel: 13, thickness: 24, blur: .3, dispersion: 2.6, shade: .32, rim: 2, edge: 0, sat: 1.15 }); } catch (_) {} }
 wideMQ.addEventListener('change', function () { RENDER[S.page](false); });
 addEventListener('resize', function () { layoutLens(); syncTab(S.page, true); placeSegs(document); drawSpark(); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () { if (S.theme === 'auto') applyTheme(); });

@@ -337,7 +337,7 @@ var S = {
   filter: LS.get('hnc_device_filter', 'recent'), q: '', batch: false, picked: {}, open: {}, sel: null, busy: {},
   refreshMode: LS.get('hnc.refresh-mode', 'balanced'),
   statsRange: 'today', aseg: 'stats', appsSub: 'my',
-  theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', style: ['apple', 'liquid'].indexOf(LS.get('hnc6.style', 'default')) >= 0 ? LS.get('hnc6.style', 'default') : 'default',
+  theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', glassTint: clamp(Math.round(num(LS.get('hnc6.glass_tint', '50'), 50)), 0, 100), style: ['apple', 'liquid'].indexOf(LS.get('hnc6.style', 'default')) >= 0 ? LS.get('hnc6.style', 'default') : 'default',
   dpi: null, probe: null, dpiHist: {}, dpiDays: 1, dpiFilter: 'all', dpiSpark: { packets: [], dns_events: [], tls_events: [], kernel_drops: [] },
   self: null, selfCfg: {}, logFile: 'combined'
 };

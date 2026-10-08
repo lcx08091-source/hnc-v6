@@ -1,34 +1,36 @@
 /* HNC WebUI · liquid.css —— 液态玻璃(html[data-glass="liquid"], 叠在苹果风之上) */
 /* ═══ 液态玻璃(data-glass="liquid", 叠在苹果风之上) ═══
    材质: 白色底 + 极淡的彩色环境光(玻璃要有东西可折射); 功能层(底栏 / 顶栏按钮 / 弹层 / 提示)用 Hyalite 真折射
-   (边缘把背景往里弯、色散、菲涅尔暗边 + 高光); 内容层(卡片)用磨砂玻璃 + 边缘高光, 滚动不卡。低端机全部退回实色。 */
+   (边缘把背景往里弯、色散、菲涅尔暗边 + 高光); 内容层(卡片)用磨砂玻璃 + 边缘高光, 滚动不卡。低端机全部退回实色。
+   v5.30 玻璃浓度(iOS 27 的「清透 ↔ 着色」): 各层填充的不透明度 = 标准值 + --gx-up × (到着色的差) − --gx-dn × (到清透的差);
+   两个量由 fx.js applyGlassTint 按设置里的滑块写在 <html> 上(0–1, 一个为 0), 都为 0 = 标准(即旧版数值)。 */
 :root[data-glass="liquid"]{
-  --bg:#F8F9FC; --ap-grouped:#F8F9FC; --card:rgba(255,255,255,.62); --card-2:rgba(255,255,255,.74); --card-solid:#fff;
+  --bg:#F8F9FC; --ap-grouped:#F8F9FC; --card:rgba(255,255,255,calc(.62 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.24)); --card-2:rgba(255,255,255,calc(.74 + var(--gx-up,0)*.20 - var(--gx-dn,0)*.24)); --card-solid:#fff;
   --input:rgba(118,118,128,.10); --ap-inset:rgba(118,118,128,.08); --ap-fill-2:rgba(120,120,128,.18);
-  --lg-fill:rgba(255,255,255,.26); --lg-fill-2:rgba(255,255,255,.5); --lg-tint:rgba(255,255,255,.34);
-  --lg-rim:inset 0 1px 0 rgba(255,255,255,.95),inset 0 -1px 0 rgba(255,255,255,.45),inset 1px 0 0 rgba(255,255,255,.6),inset -1px 0 0 rgba(255,255,255,.6),0 0 0 .5px rgba(20,30,60,.06);
+  --lg-fill:rgba(255,255,255,calc(.26 + var(--gx-up,0)*.56 - var(--gx-dn,0)*.16)); --lg-fill-2:rgba(255,255,255,calc(.5 + var(--gx-up,0)*.40 - var(--gx-dn,0)*.22)); --lg-tint:rgba(255,255,255,calc(.34 + var(--gx-up,0)*.30 - var(--gx-dn,0)*.16));
+  --lg-rim:inset 0 1px 0 #fff,inset 0 2px 3px -2px rgba(255,255,255,.9),inset 0 -1px 0 rgba(255,255,255,.45),inset 1px 0 0 rgba(255,255,255,.7),inset -1px 0 0 rgba(255,255,255,.7),0 0 0 .5px rgba(20,30,60,.16),0 0 0 1.5px rgba(20,30,60,.04);
   --lg-drop:0 12px 32px -10px rgba(30,45,90,.20),0 2px 6px rgba(30,45,90,.06);
-  --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.7) 0%,rgba(255,255,255,.12) 32%,rgba(255,255,255,0) 55%);
+  --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.84) 0%,rgba(255,255,255,.16) 32%,rgba(255,255,255,0) 55%);
   --amb-1:rgba(70,145,255,.42); --amb-2:rgba(255,110,185,.34); --amb-3:rgba(70,215,185,.32); --amb-4:rgba(255,180,70,.32);
 }
 @media (prefers-color-scheme: dark){
   :root[data-glass="liquid"]:not([data-theme="light"]){
-    --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,.50); --card-2:rgba(56,56,64,.56); --card-solid:#1C1C1E;
+    --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,calc(.50 + var(--gx-up,0)*.38 - var(--gx-dn,0)*.22)); --card-2:rgba(56,56,64,calc(.56 + var(--gx-up,0)*.34 - var(--gx-dn,0)*.22)); --card-solid:#1C1C1E;
     --input:rgba(118,118,128,.22); --ap-inset:rgba(118,118,128,.16);
-    --lg-fill:rgba(40,40,48,.30); --lg-fill-2:rgba(60,60,70,.46); --lg-tint:rgba(255,255,255,.12);
-    --lg-rim:inset 0 1px 0 rgba(255,255,255,.26),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.12),inset -1px 0 0 rgba(255,255,255,.12),0 0 0 .5px rgba(0,0,0,.5);
+    --lg-fill:rgba(40,40,48,calc(.30 + var(--gx-up,0)*.54 - var(--gx-dn,0)*.16)); --lg-fill-2:rgba(60,60,70,calc(.46 + var(--gx-up,0)*.42 - var(--gx-dn,0)*.20)); --lg-tint:rgba(255,255,255,calc(.12 + var(--gx-up,0)*.10 - var(--gx-dn,0)*.06));
+    --lg-rim:inset 0 1px 0 rgba(255,255,255,.38),inset 0 2px 3px -2px rgba(255,255,255,.22),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.16),inset -1px 0 0 rgba(255,255,255,.16),0 0 0 .5px rgba(0,0,0,.72),0 0 0 1.5px rgba(0,0,0,.2);
     --lg-drop:0 14px 36px -10px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
-    --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.03) 32%,rgba(255,255,255,0) 55%);
+    --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.22) 0%,rgba(255,255,255,.04) 32%,rgba(255,255,255,0) 55%);
     --amb-1:rgba(40,110,255,.34); --amb-2:rgba(210,60,160,.26); --amb-3:rgba(30,170,150,.24); --amb-4:rgba(230,140,40,.20);
   }
 }
 :root[data-glass="liquid"][data-theme="dark"]{
-  --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,.50); --card-2:rgba(56,56,64,.56); --card-solid:#1C1C1E;
+  --bg:#040406; --ap-grouped:#040406; --card:rgba(44,44,52,calc(.50 + var(--gx-up,0)*.38 - var(--gx-dn,0)*.22)); --card-2:rgba(56,56,64,calc(.56 + var(--gx-up,0)*.34 - var(--gx-dn,0)*.22)); --card-solid:#1C1C1E;
   --input:rgba(118,118,128,.22); --ap-inset:rgba(118,118,128,.16);
-  --lg-fill:rgba(40,40,48,.30); --lg-fill-2:rgba(60,60,70,.46); --lg-tint:rgba(255,255,255,.12);
-  --lg-rim:inset 0 1px 0 rgba(255,255,255,.26),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.12),inset -1px 0 0 rgba(255,255,255,.12),0 0 0 .5px rgba(0,0,0,.5);
+  --lg-fill:rgba(40,40,48,calc(.30 + var(--gx-up,0)*.54 - var(--gx-dn,0)*.16)); --lg-fill-2:rgba(60,60,70,calc(.46 + var(--gx-up,0)*.42 - var(--gx-dn,0)*.20)); --lg-tint:rgba(255,255,255,calc(.12 + var(--gx-up,0)*.10 - var(--gx-dn,0)*.06));
+  --lg-rim:inset 0 1px 0 rgba(255,255,255,.38),inset 0 2px 3px -2px rgba(255,255,255,.22),inset 0 -1px 0 rgba(255,255,255,.08),inset 1px 0 0 rgba(255,255,255,.16),inset -1px 0 0 rgba(255,255,255,.16),0 0 0 .5px rgba(0,0,0,.72),0 0 0 1.5px rgba(0,0,0,.2);
   --lg-drop:0 14px 36px -10px rgba(0,0,0,.6),0 2px 6px rgba(0,0,0,.3);
-  --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.16) 0%,rgba(255,255,255,.03) 32%,rgba(255,255,255,0) 55%);
+  --lg-sheen:linear-gradient(165deg,rgba(255,255,255,.22) 0%,rgba(255,255,255,.04) 32%,rgba(255,255,255,0) 55%);
   --amb-1:rgba(40,110,255,.34); --amb-2:rgba(210,60,160,.26); --amb-3:rgba(30,170,150,.24); --amb-4:rgba(230,140,40,.20);
 }
 /* 环境光: 白底上四团极淡的色光, 缓慢漂移(减少动态 / 低端机静止) */
@@ -56,7 +58,14 @@
 /* 顶栏: 边缘渐隐的模糊(iOS 26 滚动边缘效果), 按钮是一颗颗玻璃圆 */
 [data-glass="liquid"] .header::before{bottom:-26px;background:linear-gradient(to bottom,color-mix(in srgb,var(--bg) 92%,transparent) 0%,color-mix(in srgb,var(--bg) 80%,transparent) 55%,color-mix(in srgb,var(--bg) 0%,transparent));box-shadow:none;
   -webkit-backdrop-filter:blur(14px) saturate(180%);backdrop-filter:blur(14px) saturate(180%);
-  -webkit-mask-image:linear-gradient(to bottom,#000 62%,transparent);mask-image:linear-gradient(to bottom,#000 62%,transparent)}
+  -webkit-mask-image:linear-gradient(to bottom,#000 62%,transparent);mask-image:linear-gradient(to bottom,#000 62%,transparent);
+  opacity:calc(var(--hp,0) * (1 - var(--hs,0)))}
+/* 内容真正滚到顶栏下面(大标题收起之后): 渐隐边缘换成一条统一的实底顶栏 + 底部细线(iOS 27), 文字不再透出来。
+   --hs 由 fx.js navSync 按滚动距离写; .hs-on 只在 --hs > 0 时挂, 平时不多画一层磨砂 */
+[data-glass="liquid"] .header.hs-on::after{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;
+  background:color-mix(in srgb,var(--bg) 94%,transparent);-webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);
+  box-shadow:0 .5px 0 var(--divider);opacity:var(--hs,0)}
+:root.lowfx[data-glass="liquid"] .header.hs-on::after{-webkit-backdrop-filter:none;backdrop-filter:none;background:var(--bg)}
 [data-glass="liquid"] .hbtn{width:40px;height:40px;margin-left:4px;color:var(--text-1);background:var(--lg-fill);
   -webkit-backdrop-filter:var(--hyalite, blur(8px) saturate(190%));backdrop-filter:var(--hyalite, blur(8px) saturate(190%));
   box-shadow:var(--hyalite-edge, var(--lg-rim)),0 6px 16px -6px rgba(30,45,90,.25)}
@@ -99,3 +108,17 @@
 [data-glass="liquid"] .pu-tile{background:var(--lg-fill-2,var(--input));box-shadow:var(--lg-rim)}
 [data-glass="liquid"] .banner.thin{border-radius:999px}
 [data-glass="liquid"] .enc-cnt>div,[data-glass="liquid"] .mm-cmp>div{background:var(--lg-fill-2,var(--input));box-shadow:var(--lg-rim)}
+/* v5.30 设置 → 外观 → 玻璃浓度: 只在液态玻璃风格下出现; 轨道从浅到深示意「清透 → 着色」, 滑块是一颗白玻璃胶囊, 按住鼓起来 */
+.lg-only{display:none}
+[data-glass="liquid"] .lg-only{display:block}
+.gx-row{display:flex;align-items:center;gap:10px;padding:6px 0 2px;font-size:12px;color:var(--text-2)}
+.gx-range{flex:1;min-width:0;height:30px;margin:0;padding:0;background:none;-webkit-appearance:none;appearance:none;cursor:pointer}
+.gx-range:focus{outline:none}
+.gx-range::-webkit-slider-runnable-track{height:6px;border-radius:3px;background:linear-gradient(90deg,rgba(120,120,128,.12),rgba(120,120,128,.46));box-shadow:inset 0 .5px 1px rgba(0,0,0,.08)}
+.gx-range::-moz-range-track{height:6px;border-radius:3px;background:linear-gradient(90deg,rgba(120,120,128,.12),rgba(120,120,128,.46))}
+.gx-range::-webkit-slider-thumb{-webkit-appearance:none;width:32px;height:22px;margin-top:-8px;border-radius:999px;background:#fff;border:0;
+  box-shadow:var(--lg-rim,0 0 0 .5px rgba(0,0,0,.1)),0 3px 10px rgba(30,45,90,.22);transition:transform .45s var(--q),background-color .2s}
+.gx-range::-moz-range-thumb{width:32px;height:22px;border-radius:999px;background:#fff;border:0;box-shadow:var(--lg-rim,0 0 0 .5px rgba(0,0,0,.1)),0 3px 10px rgba(30,45,90,.22)}
+.gx-range:active::-webkit-slider-thumb{transform:scale(1.2);background:rgba(255,255,255,.6);transition:transform .18s var(--q),background-color .2s}
+/* 系统开了「降低透明度」: 一律按着色处理(盖过滑块写在 <html> 上的值) */
+@media (prefers-reduced-transparency: reduce){ :root[data-glass="liquid"]{--gx-up:1!important;--gx-dn:0!important} }

@@ -21,8 +21,8 @@
 <link rel="stylesheet" href="css/base.css">
 <link rel="stylesheet" href="css/apple.css">
 <link rel="stylesheet" href="css/liquid.css">
-<!-- 首帧前按本地偏好设好主题/风格, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme 一致, 之后由它接管) -->
-<script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'); if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t); if (s === 'apple' || s === 'liquid') r.setAttribute('data-style', 'apple'); if (s === 'liquid') r.setAttribute('data-glass', 'liquid'); if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1') r.classList.add('lowfx'); } catch (_) {} })();</script>
+<!-- 首帧前按本地偏好设好主题/风格/玻璃浓度, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme / applyGlassTint 一致, 之后由它接管) -->
+<script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'); if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t); if (s === 'apple' || s === 'liquid') r.setAttribute('data-style', 'apple'); if (s === 'liquid') r.setAttribute('data-glass', 'liquid'); if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>
 </head>
 <body>
 <div class="mesh" aria-hidden="true"></div>
