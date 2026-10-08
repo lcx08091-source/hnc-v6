@@ -27,6 +27,7 @@
 ### Internals
 
 - 测试:`test/unit/test_v530_frontend.sh` 新增 6 例(浓度 → 变量换算、写 / 删变量、档位名、滑块接线(拖动不存 / 松手存 / 吸附 / 轻震)、CSS 标准档 = 旧版数值且两端不越界、顶栏实底的滚动阈值),在旧代码上都失败。描边 / Hyalite 参数是视觉调参,没有单测;CSS 变量在 Chromium 141 里实测:标准档 / 着色 / 清透三档的卡片、底栏、弹层背景值与设计一致,模拟「降低透明度」时盖过滑块按着色算。
+- 新增 `tools/ui_mock/`:把真实 WebUI 打包成一个灌了假数据的单文件预览页(`fake_api.js` 假接口层 + `build.js` 打包 + `check.js` Playwright 冒烟检查),`tools/` 不进模块包。用法 `node tools/ui_mock/build.js <out.html>`。
 - `THIRD_PARTY_NOTICES.md` 补上 Hyalite(`webroot/hyalite.js`,MIT,VII-Cae)—— 液态玻璃的真折射一直用的这个库,文件里有署名和 `LICENSE-hyalite`,但声明清单漏了。
 
 ## [5.30.0-rc1] - 2026-10-07
