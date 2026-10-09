@@ -14,6 +14,27 @@
 
 ---
 
+## [5.31.0-rc1] - 2026-10-09
+
+**预览版 · 迁移 M4 方案 A:设备发现与名字解析搬进 Go 看门狗**(工作文档 `docs/WORK-v5.31.md`)。
+
+### Changed
+
+- **设备发现(谁在线、IP 是多少)由 Go 看门狗接管**:热点活跃时,看门狗订阅内核邻居表(netlink)实时感知设备上线 / 换 IP / 离开,每 30 秒再做一次全量兜底(事件丢了也能追上),写出与 hotspotd 完全同格式、同字段的 `data/devices.json`。在线语义不变:条目可用就刷新活跃时间,90 秒没动静才判离线(常量与 hotspotd 同名同值);同一设备换 IP 期间新旧表项并存时,按邻居状态挑 IP(REACHABLE > DELAY > PROBE > STALE,同状态取最近一次事件)—— 这是工作文档明确要求的唯一一处行为差异,其余逐字段对齐。
+- **设备名解析(manual → DHCP → mDNS → 缓存 → 厂商 → MAC 六级)同样搬进 Go**:优先级、`hostname_src` 取值、垃圾名(`null` / `localhost` / 纯数字…,复用 v5.30 T1b 的同一张表)过滤与 C 版一致;DHCP 走 `dumpsys network_stack`(直 exec、500ms 超时),mDNS 复用 `bin/mdns_resolve`(-t 800,异步、每秒最多一台);缓存仍读写同一份 `data/hostname_cache.json`(格式不变,只有当前写者写)。厂商表抽出唯一数据源 `src/dpid/devname/oui_table.txt`(`tools/extract_oui.py` 从 C 表生成,Go 用 `go:embed` 读;`test/unit/test_v531_oui_table_sync.sh` 核对两边逐条一致),随机 MAC(LAA 位)跳过厂商表、`data/oui_overrides.json` 用户覆盖优先,都与 C 对齐。
+- **hotspotd 瘦身成硬件加速兜底 + 控制接口**:新参数 `--no-discovery` —— 不扫 ARP、不处理邻居事件、不写 `devices.json`、不写 `hostname_cache.json`、不起 mDNS worker;offload 调度 / BPF limit_map / `OFFLOAD_*` / `GET_DEVICES` 照常(netlink 仍订阅,链路事件继续喂 offload 调度器)。`REFRESH` / `SIGUSR1` 在该模式下改为 touch `run/devices.refresh`,Go 写者每 200ms 看 mtime、变了立刻全量扫一次并写 —— `device_detect.sh scan`「1 秒内 `devices.json` mtime 变了」的判断因此照旧成立。`STATUS` 追加 ` discovery:0`(只增不改),`devices:N` 改为数 `devices.json` 里的设备(读文件数 `"mac":"` 字面量,不解析 Go 的 JSON)。C 版发现代码保留不删。
+- **单写者规则与开关 `data/m4_owner`**:任何时刻 `devices.json` 只有一个写者。开关内容 `go` / `c` 双向可强制,文件不存在 = 用默认(rc 默认 `go`,就 是要在 rc 上验它);内容不认识 = 用默认并记一行日志;看门狗每轮(约 60 秒)读,不用重启手机。切换严格「先停后起」:c→go 先让 hotspotd 带 `--no-discovery` 重启并确认(`STATUS` 回 `discovery:0`,5 次 × 300ms;确认失败回滚并 5 分钟内不重试),再启 Go 写者;go→c 先停 Go 写者(等当前这次写完)再原参数重启 hotspotd;中间几秒没人写,文件保留上一版。`bin/device_detect.sh` 的 shell 兜底在 Go 模式下不写 `devices.json`,拉起 hotspotd 时按 `run/m4_owner.current` 带不带 `--no-discovery`(开机窗口的第一道防线,看门狗首拍再纠偏);v5.30 的影子比对在 Go 模式下停(hotspotd 已不发现,没得比),C 模式照旧。演练模式(`run/wd_m4_drill` 存在):Go 写者只写 `run/devices.go.json`,给模拟设备的「全字段影子比对」用,不碰正式文件。
+- **自检可见**:自检「进程与资源 → 看门狗动作」一行新增「设备发现:Go 版 / C 版(开关 data/m4_owner; Go 写 N 次 / 失败 N 次, 切换 N 次)」;`run/watchdog_actions.json` 相应增加 `m4_owner` / `m4_go_writes` / `m4_go_write_fails` / `m4_switches` 字段,只读快照、不参与动作合计。Go 写者每次落盘在 `run/m4_go_write.log` 记一行时间戳(与 hotspotd.log 的 `JSON written` 行对照,用于「没有两个写者交替写」的验收)。
+
+### Internals
+
+- 新包 `src/dpid/devscan`(设备表纯逻辑:事件 → 表、全量兜底、90 秒离线、多 IP 挑选、`devices.json` 渲染;9 项单测含与 hotspotd 同输入样例的逐字段一致)与 `src/dpid/devname`(六级名字解析 + OUI 数据文件;单测覆盖每级命中 / 跳过、垃圾名、`cache:` 回放、与 C 表锚点一致)。看门狗侧 `m4_owner.go`:owner 状态机、Go 写者运行器(rc30.9 的毫秒级去抖算法逐参数对齐:200ms 硬限速 / 500ms 空闲即写 / 200ms 合并窗口 / 30s 兜底;流量字节 5s TTL、`stats_all` 3s 超时参数分开传不经 shell)。
+- hotspotd C 侧改动:`--no-discovery` 全部门控 + `REFRESH` / `SIGUSR1` 转发 + `STATUS` 追加;新增 `daemon/hotspotd/test/test_no_discovery.c`(host 编译,数设备 / 默认模式,接入 `test/unit/test_v531_no_discovery_c.sh`)。**C 改动未在 NDK 下交叉编译**(本沙箱无 NDK;CI 按 `.github/workflows/build.yml` 编),本机 gcc 完整编译通过。
+- 模拟设备:`test/sim/run_m4_sim_v531.sh`(场景照 WORK §4 T5 写好)+ `TestM4SimV531`(fields / go 两模式,逐字段比 `last_seen` / 字节以外全部;`simnet.sh` 支持 `HNC_SIM_HOTSPOTD_ARGS` 透传)。**本沙箱无 root,未跑**;维护者云端容器 `HNC_SIM=1 sh test/run_all.sh` 跑,报告 `m4_sim_report.txt` + `m4_sim_v531_report.txt`。
+- T0 基线(本沙箱):dpid `go vet ./...` + `go test ./...` + 4 个 android/arm64 交叉编译 + linux/arm vet 全过;`sh test/run_all.sh` 533/548 通过,13 项失败全部是 `bin/hnc_json`(shebang `/system/bin/sh`)在本 Linux 无该解释器所致的环境差异(维护者环境 538/540 全过),非代码回归;`HNC_SIM=1` 需 root 未跑。
+
+---
+
 ## [5.30.0-rc2] - 2026-10-08
 
 **预览版 · 液态玻璃界面跟进 iOS 27 的三处可读性改进**(纯前端,不用重编二进制)。
