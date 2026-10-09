@@ -158,6 +158,12 @@ type wdActionOut struct {
 	// 明细(含 MAC)在 run/m4_shadow.json, 不放这里(兼容性报告会读本文件)。
 	M4Checks   int `json:"m4_checks,omitempty"`
 	M4Mismatch int `json:"m4_mismatch,omitempty"`
+	// v5.31 T1/T3: M4 方案 A —— 设备发现写者("go"/"c"…)与 Go 写者的
+	// 写出次数 / 失败次数 / 切换次数(自检「看门狗动作」行显示)。
+	M4Owner        string `json:"m4_owner,omitempty"`
+	M4GoWrites     uint64 `json:"m4_go_writes,omitempty"`
+	M4GoWriteFails uint64 `json:"m4_go_write_fails,omitempty"`
+	M4Switches     uint64 `json:"m4_switches,omitempty"`
 }
 
 // snapshot 生成输出结构(1h = 最近 60 分钟, 覆盖可能跨两个整点桶)。
@@ -170,6 +176,9 @@ func (s *actionStats) snapshot(now time.Time) wdActionOut {
 	}
 	if wdActionsM4Extra != nil {
 		out.M4Checks, out.M4Mismatch = wdActionsM4Extra()
+	}
+	if wdActionsM4OwnerExtra != nil {
+		out.M4Owner, out.M4GoWrites, out.M4GoWriteFails, out.M4Switches = wdActionsM4OwnerExtra()
 	}
 	for name, c := range s.m {
 		var it wdActionOutItem

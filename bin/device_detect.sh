@@ -506,6 +506,14 @@ do_scan_shell() {
     # $$ 是当前 shell 的 PID,每个 scan 子进程唯一。mv 是原子操作(kernel 保证
     # rename 的原子性),所以谁后 mv 谁赢,但至少每个 tmp 文件本身是完整的 JSON。
     local tmp_out="${DEVICES_FILE}.tmp.$$"
+    # v5.31 T3: M4 方案 A —— Go 看门狗是写者(run/m4_owner.current = go)时,
+    # shell 兜底不许写 devices.json(单写者规则; WORK-v5.31 §4 T3)。
+    # 扫描结果只用于返回计数, 文件保留 Go 写者的版本。
+    if [ "$(cat "$HNC_DIR/run/m4_owner.current" 2>/dev/null)" = "go" ]; then
+        log "shell scan skipped write: m4 owner=go (Go watchdog writes devices.json)"
+        echo "$count"
+        return 0
+    fi
     printf '%s' "$json" > "$tmp_out" && mv "$tmp_out" "$DEVICES_FILE"
     log "shell scan: $count device(s)"
     echo "$count"
@@ -606,7 +614,14 @@ daemon_mode() {
     if [ -x "$HOTSPOTD_BIN" ]; then
         log "Starting C daemon: $HOTSPOTD_BIN"
         # -d: 后台化（自己 fork），写 PID 到 HOTSPOTD_PID
-        "$HOTSPOTD_BIN" -d -l "$HNC_DIR/logs/hotspotd.log"
+        # v5.31 T3: Go 写者模式下带 --no-discovery(设备发现归看门狗, hotspotd
+        # 只留硬件加速兜底)。看门狗首拍也会纠偏(quit/重拉), 这里是开机
+        # 窗口的第一道防线。m4_owner.current 由看门狗每轮写出, 内容是
+        # 解析后的生效值(默认值逻辑只在 Go 一处)。
+        _dd_args="-d"
+        [ "$(cat "$HNC_DIR/run/m4_owner.current" 2>/dev/null)" = "go" ] && \
+            _dd_args="-d --no-discovery"
+        "$HOTSPOTD_BIN" $_dd_args -l "$HNC_DIR/logs/hotspotd.log"
         sleep 2
         if hotspotd_alive; then
             log "C daemon running (PID=$(cat $HOTSPOTD_PID 2>/dev/null))"

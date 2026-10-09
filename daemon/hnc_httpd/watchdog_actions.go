@@ -79,6 +79,18 @@ func scWatchdogActionsItem(c *scCtx) scItem {
 		m4m, _ := m["m4_mismatch"].(float64)
 		mmNote += fmt.Sprintf("; 设备发现影子: 比对 %d 轮, 不一致 %d 轮(只观察, 明细 run/m4_shadow.json)", int(m4c), int(m4m))
 	}
+	// v5.31 T1/T3: M4 方案 A —— 设备发现的写者(Go 看门狗 / hotspotd C 版)。
+	if owner, _ := m["m4_owner"].(string); owner != "" {
+		who := "C 版(hotspotd)"
+		if owner == "go" {
+			who = "Go 版(看门狗)"
+		}
+		w, _ := m["m4_go_writes"].(float64)
+		f, _ := m["m4_go_write_fails"].(float64)
+		sw, _ := m["m4_switches"].(float64)
+		mmNote += fmt.Sprintf("; 设备发现: %s(开关 data/m4_owner; Go 写 %d 次 / 失败 %d 次, 切换 %d 次)",
+			who, int(w), int(f), int(sw))
+	}
 
 	var totalCalls, totalFails float64
 	var weightedMS float64

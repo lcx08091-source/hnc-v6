@@ -173,8 +173,9 @@ hotspotd_cmd() {
         echo "$SIM_IF" > "$hnc/run/hotspot_iface"
         [ -f "$hnc/data/rules.json" ] || echo '{"devices":{}}' > "$hnc/data/rules.json"
         mkdir -p /data/local/hnc 2>/dev/null || die "建不了挂载点 /data/local/hnc"
+        # v5.31 T5: HNC_SIM_HOTSPOTD_ARGS 透传给 hotspotd(Go 模式场景传 --no-discovery)
         HNC_SIM_DIR=$SIM_DIR PATH="$REPO/test/sim/fake:$PATH" \
-            unshare -m --propagation private sh -c 'mount --bind "$1" /data/local/hnc && exec "$2"' sh "$hnc" "$SIM_DIR/bin/hotspotd" \
+            unshare -m --propagation private sh -c 'mount --bind "$1" /data/local/hnc && exec "$2" ${3:-}' sh "$hnc" "$SIM_DIR/bin/hotspotd" "${HNC_SIM_HOTSPOTD_ARGS:-}" \
             > "$SIM_DIR/hotspotd.out" 2>&1 &
         echo $! > "$pidf"
         sleep 1

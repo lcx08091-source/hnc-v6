@@ -150,6 +150,12 @@ static FILE *g_log    = NULL;
 /* ── 信号标志（volatile sig_atomic_t 保证信号安全）────────── */
 static volatile sig_atomic_t g_need_scan   = 1;  /* 1=需要立即补充扫描 */
 static volatile sig_atomic_t g_running     = 1;  /* 0=退出主循环 */
+/* v5.31 T3: --no-discovery —— M4 方案 A 下设备发现由 Go 看门狗接管,
+ * hotspotd 只留硬件加速兜底(offload 调度 / BPF limit_map)和控制接口。
+ * 该模式下: 不扫 ARP、不处理邻居事件、不写 devices.json、不写
+ * hostname_cache.json、不起 mDNS worker; netlink 仍订阅(RTMGRP_LINK
+ * 的链路事件给 offload 调度器用, NEIGH 消息直接丢弃)。 */
+static int g_no_discovery = 0;
 
 /* v5.9.6 P0-3: 正向确认的热点接口缓存
  * 避免每次 netlink/ARP 事件都读文件,只在 refresh 时更新。
@@ -988,6 +994,9 @@ static void nl_process(int fd) {
         }
         if (nlh->nlmsg_type != RTM_NEWNEIGH && nlh->nlmsg_type != RTM_DELNEIGH)
             continue;
+        /* v5.31 T3: --no-discovery 时邻居事件整个丢弃(设备表在 Go 看门狗);
+         * 上面的 RTM_NEWLINK/DELLINK(offload 重探)不受影响。 */
+        if (g_no_discovery) continue;
 
         struct ndmsg *ndm = (struct ndmsg *)NLMSG_DATA(nlh);
         if (ndm->ndm_family != AF_INET) continue;  /* 只处理 IPv4 */
@@ -1145,6 +1154,58 @@ static int unix_server_open(void) {
 }
 
 
+/* v5.31 T4: touch run/devices.refresh —— Go 写者(看门狗 m4_owner)每秒看
+ * 它的 mtime, 变了就立刻全量扫一次并写 devices.json。open(O_CREAT) +
+ * futimens 更新 mtime; 失败只记日志(REFRESH/SIGUSR1 的「立即扫描」是
+ * 加速项, 不是正确性依赖 —— Go 每 30 秒本来就有全量兜底)。 */
+static void touch_refresh_file(void) {
+    const char *p = HNC_DIR "/run/devices.refresh";
+    int fd = open(p, O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) {
+        hlog("WARN: cannot touch %s: %s", p, strerror(errno));
+        return;
+    }
+    struct timespec ts[2];
+    clock_gettime(CLOCK_REALTIME, &ts[0]);
+    ts[1] = ts[0];
+    if (futimens(fd, ts) != 0) {
+        hlog("WARN: futimens %s: %s", p, strerror(errno));
+    }
+    close(fd);
+}
+
+/* v5.31 T4: --no-discovery 时 STATUS 的 devices:N 从 devices.json 数 ——
+ * 不解析 JSON(那是 Go 写者的文件), 数 "mac":" 字面量出现次数
+ * (devices.json 每台设备恰好一个 mac 字段)。devices.json 正常 < 32KB,
+ * 上限 1MB(与 write_json 读 rules.json 的防护一致), 超限/不存在/读失败
+ * → 0。展示用途, 不做正确性判断。路径参数化给单测用(test_no_discovery.c)。 */
+static int count_devices_in_file_at(const char *path) {
+    FILE *f = fopen(path, "r");
+    if (!f) return 0;
+    long sz = 0;
+    if (fseek(f, 0, SEEK_END) == 0) { sz = ftell(f); if (sz < 0) sz = 0; rewind(f); }
+    if (sz <= 0 || sz > 1024 * 1024) { fclose(f); return 0; }
+    char *buf = malloc((size_t)sz + 1);
+    if (!buf) { fclose(f); return 0; }
+    size_t rd = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[rd] = '\0';
+    const char pat[] = "\"mac\":\"";
+    const size_t patlen = sizeof(pat) - 1;
+    int n = 0;
+    const char *p = buf;
+    while ((p = strstr(p, pat)) != NULL) {
+        n++;
+        p += patlen;
+    }
+    free(buf);
+    return n;
+}
+
+static int count_devices_in_file(void) {
+    return count_devices_in_file_at(DEVICES_JSON);
+}
+
 /* hotfix2: send() may legally perform a short write.
  * Use a small helper for IPC responses so GET_DEVICES and status JSON are not truncated
  * when the client/socket buffer is temporarily full. */
@@ -1207,7 +1268,16 @@ static void handle_client(int cfd) {
          * 让主循环疯狂 popen iptables,打满 CPU → 本地 DoS / fork 炸弹风险。
          * 改成把 g_last_stats_update 拨回到"距 now 刚好 MIN_REFRESH_INTERVAL 秒前",
          * 这样 REFRESH 仍然能触发一次 stats 重算(如果距上次 > MIN 秒),
-         * 但高频 REFRESH 不会比自然的 update_traffic_stats 更频繁。 */
+         * 但高频 REFRESH 不会比自然的 update_traffic_stats 更频繁。
+         *
+         * v5.31 T4: --no-discovery 时 REFRESH = touch run/devices.refresh,
+         * Go 写者看到 mtime 变化就立刻全量扫一次并写 devices.json ——
+         * device_detect.sh scan「1 秒内 devices.json mtime 变了」的
+         * 判断在 Go 模式下同样成立。 */
+        if (g_no_discovery) {
+            touch_refresh_file();
+            (void)send_all(cfd, "OK:queued\n", 10);
+        } else {
         g_need_scan = 1;
         {
             time_t now = time(NULL);
@@ -1221,11 +1291,24 @@ static void handle_client(int cfd) {
              * 让 update_traffic_stats 的 TTL 检查自然工作 */
         }
         (void)send_all(cfd, "OK:queued\n", 10);
+        }
     } else if (strcmp(req, "STATUS") == 0) {
+        /* v5.31 T4: --no-discovery 时追加 " discovery:0"(只增不改),
+         * devices:N 改为数 devices.json 里的设备 —— 否则显示 0 台,
+         * device_detect.sh status / 看门狗的确认逻辑(STATUS 回 discovery:0)
+         * 都依赖这个格式。 */
+        if (g_no_discovery) {
+            char resp[160];
+            snprintf(resp, sizeof(resp),
+                     "running:1 devices:%d pid:%d discovery:0\n",
+                     count_devices_in_file(), (int)getpid());
+            (void)send_all(cfd, resp, strlen(resp));
+        } else {
         char resp[128];
         snprintf(resp, sizeof(resp), "running:1 devices:%d pid:%d\n",
                  g_ndev, (int)getpid());
         (void)send_all(cfd, resp, strlen(resp));
+        }
     } else if (strncmp(req, "OFFLOAD_NOTIFY_LIMIT ", 21) == 0) {
         /* v5.0: OFFLOAD_NOTIFY_LIMIT <mac> <0|1>
          * apply_device_rule.sh 在 tc 规则添加/删除后调 */
@@ -1689,11 +1772,12 @@ static void hnc_crash_handler(int sig, siginfo_t *info, void *ctx) {
 }
 
 int main(int argc, char *argv[]) {
-    /* 简单参数：-d 后台化，-l <logfile> */
+    /* 简单参数：-d 后台化，-l <logfile>，--no-discovery(v5.31 T3) */
     int daemonize = 0;
     const char *logpath = LOG_FILE;
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-d") == 0)      daemonize = 1;
+        else if (strcmp(argv[i], "--no-discovery") == 0) g_no_discovery = 1;
         else if (strcmp(argv[i], "-l") == 0 && i+1 < argc) logpath = argv[++i];
     }
 
@@ -1733,6 +1817,12 @@ int main(int argc, char *argv[]) {
     /* 日志 */
     g_log = fopen(logpath, "a");
     hlog("=== hotspotd %s started (PID=%d) ===", daemonize?"daemon":"fg", (int)getpid());
+    if (g_no_discovery) {
+        /* v5.31 T3: 发现搬去 Go 看门狗(m4_owner=go)时看门狗带本参数拉起。
+         * 本进程只剩硬件加速兜底 + 控制接口(OFFLOAD_* / GET_DEVICES /
+         * STATUS / REFRESH→touch run/devices.refresh)。 */
+        hlog("discovery: DISABLED (--no-discovery, owner=go; Go watchdog writes devices.json)");
+    }
     /* v3.5.2 P2-E: g_log 加 FD_CLOEXEC,避免子进程(popen mdns_resolve 等)继承日志 fd */
     if (g_log) fcntl(fileno(g_log), F_SETFD, FD_CLOEXEC);
 
@@ -1763,11 +1853,14 @@ int main(int argc, char *argv[]) {
     /* v3.8.1 A3: 加载持久化 hostname cache
      * 如果文件不存在(首次启动)load 返回 0,正常。
      * 如果加载成功,cache 里的旧记录会在 resolve_hostname 的第 4 级生效,
-     * 让重连设备即使 dumpsys ring buffer 滚出也能显示真名。*/
-    hnc_cache_init(HOSTNAME_CACHE_JSON);
-    int cache_loaded = hnc_cache_load();
-    hlog("hostname cache: loaded %d entries from %s",
-         cache_loaded, HOSTNAME_CACHE_JSON);
+     * 让重连设备即使 dumpsys ring buffer 滚出也能显示真名。
+     * v5.31 T3: --no-discovery 时跳过 —— 不读也不写(Go 写者拥有该文件)。 */
+    if (!g_no_discovery) {
+        hnc_cache_init(HOSTNAME_CACHE_JSON);
+        int cache_loaded = hnc_cache_load();
+        hlog("hostname cache: loaded %d entries from %s",
+             cache_loaded, HOSTNAME_CACHE_JSON);
+    }
 
     /* v3.8.3 D3: 加载用户 OUI 覆盖表
      * 如果文件不存在(用户没写过)load 返回 0,正常。
@@ -1790,7 +1883,10 @@ int main(int argc, char *argv[]) {
      * 如果 worker 启动失败,hlog 警告但不 abort — 主循环可以继续跑,
      * re-resolve 路径会在 enqueue 失败后降级为 mac 兜底。*/
     hnc_mdns_worker_set_resolve_fn(try_mdns_resolve);
-    int worker_rc = hnc_mdns_worker_start();
+    int worker_rc = 0;
+    if (!g_no_discovery) {  /* v5.31 T3: --no-discovery 不起 mDNS worker */
+        worker_rc = hnc_mdns_worker_start();
+    }
     if (worker_rc != 0) {
         hlog("WARN: mdns worker start failed (rc=%d), re-resolve will fall back to mac",
              worker_rc);
@@ -1819,8 +1915,10 @@ int main(int argc, char *argv[]) {
     /* v5.9.6 P0-3: 启动时确认热点接口(可能在 scheduler 之后才可用) */
     refresh_hotspot_iface();
 
-    /* 初始扫描 */
-    scan_arp();
+    /* 初始扫描(v5.31 T3: --no-discovery 时跳过 —— Go 写者已经/将要接管) */
+    if (!g_no_discovery) {
+        scan_arp();
+    }
 
     /* v3.5.0-rc R-1: de-bounce 状态变量
      * dirty_since = 上次 g_dirty 从 0→1 的时刻
@@ -1847,16 +1945,26 @@ int main(int argc, char *argv[]) {
         /* 处理 SIGUSR1 */
         if (g_need_scan) {
             g_need_scan = 0;
-            hlog("SIGUSR1: manual ARP scan triggered");
-            refresh_hotspot_iface();  /* v5.9.6 P0-3: 扫描前刷新热点接口 */
-            scan_arp();
+            if (g_no_discovery) {
+                /* v5.31 T4: Go 模式下 SIGUSR1 = 让 Go 写者立刻全量扫一次。
+                 * touch run/devices.refresh(错误只记日志, 不影响主循环);
+                 * 设备表在 Go 看门狗里, 这里无事可做。 */
+                touch_refresh_file();
+            } else {
+                hlog("SIGUSR1: manual ARP scan triggered");
+                refresh_hotspot_iface();  /* v5.9.6 P0-3: 扫描前刷新热点接口 */
+                scan_arp();
+            }
         }
 
         /* v3.6 Commit 3: 每次 tick 异步解一个 pending 设备的 mDNS
          * 这解决 v3.5.2 遗留的 P0-B 核心:scan_arp/nl_process 里一批新设备
          * 同时上线时,主线程会被 N × 800ms 的同步 popen 阻塞。
-         * 现在新设备只做快速解析,pending 设备由这里每秒处理一个,主线程永不阻塞超过 ~800ms。 */
-        process_pending_mdns();
+         * 现在新设备只做快速解析,pending 设备由这里每秒处理一个,主线程永不阻塞超过 ~800ms。
+         * v5.31 T3: --no-discovery 时没有 pending 设备(不发现), 跳过。 */
+        if (!g_no_discovery) {
+            process_pending_mdns();
+        }
 
         /* v3.8.4: drain 异步 mDNS worker 的结果
          *
