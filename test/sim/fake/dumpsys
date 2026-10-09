@@ -1,0 +1,6 @@
+#!/bin/sh
+# test/sim/fake/dumpsys — 模拟设备用: 冒充 `dumpsys network_stack`, 输出 simnet.sh 记下的 DHCP 事件行。
+# hotspotd 用 execlp("dumpsys", "dumpsys", "network_stack") 调它(simnet.sh 把本目录放在 PATH 最前)。
+[ "${1:-}" = "network_stack" ] || exit 0
+cat "${HNC_SIM_DIR:-/tmp/hnc_sim}/dhcp_events" 2>/dev/null
+exit 0

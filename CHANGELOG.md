@@ -28,6 +28,7 @@
 
 - 测试:`test/unit/test_v530_frontend.sh` 新增 6 例(浓度 → 变量换算、写 / 删变量、档位名、滑块接线(拖动不存 / 松手存 / 吸附 / 轻震)、CSS 标准档 = 旧版数值且两端不越界、顶栏实底的滚动阈值),在旧代码上都失败。描边 / Hyalite 参数是视觉调参,没有单测;CSS 变量在 Chromium 141 里实测:标准档 / 着色 / 清透三档的卡片、底栏、弹层背景值与设计一致,模拟「降低透明度」时盖过滑块按着色算。
 - 新增 `tools/ui_mock/`:把真实 WebUI 打包成一个灌了假数据的单文件预览页(`fake_api.js` 假接口层 + `build.js` 打包 + `check.js` Playwright 冒烟检查),`tools/` 不进模块包。用法 `node tools/ui_mock/build.js <out.html>`。
+- 新增 `test/sim/`「模拟设备」测试台:Linux 网桥当假热点、每台假设备是一个独立网络命名空间(真实出现在内核邻居表里),`fake/dumpsys` 冒充 NetworkStack 的 DHCP 记录(可以故意报 `null`),hotspotd 用本机 gcc 编(不带 BPF)在私有挂载空间里跑。`run_m4_sim.sh` 跑 6 步场景(连上 / 换 IP / 离开 / 悄悄离开 / 回来 / 一次连 5 台),每步用 `TestM4Sim`(走看门狗真实的 M4 影子路径)确认 Go 与 hotspotd 一致且都等于场景期望,并检查垃圾名被挡住。首次结果:全部一致;设备离开后 Go(邻居表)约 6 秒发现、hotspotd 约 117 秒(90 秒离线阈值 + 30 秒检查周期);悄悄离开(没流量去找)两边都发现不了。`run_all` 里设 `HNC_SIM=1` 才跑(要 root + 网络命名空间,约 2 分钟)。
 - `THIRD_PARTY_NOTICES.md` 补上 Hyalite(`webroot/hyalite.js`,MIT,VII-Cae)—— 液态玻璃的真折射一直用的这个库,文件里有署名和 `LICENSE-hyalite`,但声明清单漏了。
 
 ## [5.30.0-rc1] - 2026-10-07
