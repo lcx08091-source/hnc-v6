@@ -169,9 +169,10 @@ gcc -O1 -std=c11 -D_GNU_SOURCE -w -pthread -o /tmp/hotspotd_host \
   daemon/hotspotd/oui_override.c daemon/hotspotd/mdns_worker.c daemon/hotspotd/platform.c \
   daemon/hotspotd/scheduler.c daemon/hotspotd/upstream.c daemon/hotspotd/offload/adapter.c \
   daemon/hotspotd/offload/adapter_null.c daemon/hotspotd/lsm/hnc_lsm_stub.c   # C 改动至少本机编过
-(cd daemon/hotspotd/test && sh build.sh 2>/dev/null || true)                    # 已有 C 单测(有的话跑)
 HNC_SIM=1 sh test/run_all.sh                                                     # 需要 root + 网络命名空间
 ```
+C 单测:`daemon/hotspotd/test/*.c` 目前只有 `test_hostname_junk.c` 接进了 `run_all`(`test/unit/test_v530_hostname_junk_c.sh`,用本机 cc 编);你给 C 加的测试照这个样子接进去。
+
 有 NDK 时按 `.github/workflows/build.yml` 交叉编译 hotspotd;没有就在提交说明写明「C 改动未交叉编译」。
 
 ---
