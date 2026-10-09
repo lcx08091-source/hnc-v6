@@ -8,6 +8,7 @@
 - **v5.30.0-rc1 在分支 `claude/new-session-hoxhbz`**(T1a / T1b / T1b 收口 / T1c / T2 / T3 / T4 / T-last 各一个提交,已推);这一版是用户让 Claude 自己做的(没走 GLM),没有「审查修复」小节。用户说「发」才 fast-forward 到 main。
 - 每个任务的「改动前会失败」证据写在各自提交说明里;第 6 节自检结果见 T-last 提交说明。
 - **v5.30.0-rc2(2026-10-08,同分支)**:用户要的液态玻璃三处改进(学 iOS 27):设置 → 外观「玻璃浓度」滑块(清透 ↔ 着色,标准档 = 旧版数值)、暗边加深 + 高光加亮(CSS 描边与 Hyalite 参数)、滚动时顶栏变统一实底。纯前端。另有 `tools/ui_mock/`:把真实 WebUI 打成灌假数据的单文件预览页(`node tools/ui_mock/build.js <out.html>`;`check.js` 用 Playwright 逐页点一遍、收集报错、截图),给用户先看效果用。
+- **版本安排(2026-10-09 与用户定)**:v5.30 先审再发 rc、真机验收;**v5.31 = 迁移 M4 方案 A**(`docs/WORK-v5.31.md`,交 GLM);**v5.32 = 收尾 + 正式版**(`docs/WORK-v5.32.md`,交 GLM;退路:v5.31 rc 真机有问题就把设备发现默认值改回 C 版,正式版照常发);方案 B(hotspotd 退役)正式版之后。不用为 M4 专门攒一天真机数据。
 - **模拟设备 `test/sim/`(2026-10-09)**:不用手机验设备发现。`sudo bash test/sim/run_m4_sim.sh`(或 `HNC_SIM=1 sh test/run_all.sh`)造假热点 + 假设备,本机编 hotspotd 跑,和 Go 的邻居表视图逐步对照;单独玩用 `bash test/sim/simnet.sh up / add / ip / del / list / down / hotspotd start`。v5.31 迁移 M4 的验收以它为准(真机只看装得上、跑得起、自检正常)。
 - 液态玻璃的真折射用的是第三方前端库 Hyalite(`webroot/hyalite.js`,MIT,作者 VII-Cae,v5.24 之前就在;署名在 `index.html` 头注释与 `main.js`)。
 - 仍待真机验收(v5.30):在线时长对刚连的设备显示分钟;`null` 名字消失;「新发现的应用」里没有截图中的 CDN;常驻进程里没有 `hnc_dpid_guard.sh` / `dpid_supervisor`,杀 dpid 30 秒内被 launcher 拉回、杀 launcher 被看门狗拉回;`m4_mismatch` 观察一天(明细 `run/m4_shadow.json`);一台打游戏一台下载,对比「按应用分优先级」开 / 关时的延迟抖动。
