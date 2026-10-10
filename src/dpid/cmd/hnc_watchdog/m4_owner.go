@@ -61,6 +61,7 @@ func m4OwnerDefaultNow() string {
 
 const (
 	m4WriteHardRateMS = 200              // 距上次写 <200ms 永不写(rc30.9 硬限速)
+	m4IdleTickMS      = 1000             // v5.32 T4: 空闲(无 dirty/待解析名字/在途解析)时主循环 1s 醒一次
 	m4WriteIdleMS     = 500              // 空闲后首事件立即写(rc30.9)
 	m4WriteMergeMS    = 200              // 合并窗口: 200ms 无新事件(rc30.9)
 	m4WriteMaxDirtyMS = 30000            // dirty 兜底 30s(rc30.9)
@@ -364,6 +365,21 @@ type m4GoRunner struct {
 	ifIndexFn   func(string) (int, error)
 	statsCmdFn  func() (map[string][2]int64, error)
 	blacklistFn func() map[string]bool
+
+	// v5.32 T4: 主循环醒来次数(只给测试观察空闲醒拍频率, 生产不读)
+	tickN atomic.Int64
+}
+
+// m4NextTickMS 写者主循环下一拍间隔(v5.32 T4 空闲降频):
+// 有待写变化(dirty, 200ms 去抖窗口)/ 有待解析的名字(pending)/ 在途解析
+// → 200ms; 都没有 → 1 秒。REFRESH / SIGUSR1 的 mtime 检查每拍都做,
+// device_detect.sh scan 依赖的「1 秒内 devices.json mtime 变了」照旧成立
+// (空闲最坏一拍 1s 检测到, 检测到立即全量写)。
+func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
+	if dirty || hasPending || resolving {
+		return m4WriteHardRateMS * time.Millisecond
+	}
+	return m4IdleTickMS * time.Millisecond
 }
 
 // newM4GoRunner 生产构造: 真订阅 / 真 dump / 真命令。drill 见 m4GoRunner.drill。
@@ -508,8 +524,16 @@ func (r *m4GoRunner) run() {
 			firstDirtyMs = lastEventMs
 		}
 	}
-	tick := time.NewTicker(m4WriteHardRateMS * time.Millisecond)
+	tick := time.NewTimer(m4WriteHardRateMS * time.Millisecond)
 	defer tick.Stop()
+	// v5.32 T4: 每圈(含事件分支——事件把 dirty 置位, 去抖窗口需要快拍)
+	// 重置下一拍: 有事 200ms, 空闲 1s。
+	resetTick := func() {
+		inFlightMu.Lock()
+		n := len(inFlight)
+		inFlightMu.Unlock()
+		tick.Reset(m4NextTickMS(dirty, r.table.HasPending(), n > 0))
+	}
 	// v5.31 T4: REFRESH / SIGUSR1 转发 —— hotspotd(--no-discovery)收到就
 	// touch run/devices.refresh, 这里每拍(200ms)看一次 mtime, 变了立刻
 	// 全量扫一次。device_detect.sh scan 的「1 秒内 devices.json mtime
@@ -546,24 +570,27 @@ func (r *m4GoRunner) run() {
 		case es := <-events:
 			// 审查修复: 还不知道热点网卡的 ifindex(0)时不收事件 —— 表的 ifindex 为 0 表示
 			// 「不过滤」, 上游网卡(WiFi 上网时的路由器等)的邻居会被当成热点设备。
+			// (v5.32 T4: 原 continue 跳圈会绕过循环底部的 resetTick, 改嵌套 if)
 			if r.ifIdx == 0 {
 				r.refreshIface()
-				if r.ifIdx == 0 {
-					continue
-				}
 			}
-			changed := false
-			for _, e := range es {
-				if r.table.Apply(e, time.Now()) {
-					changed = true
+			if r.ifIdx != 0 {
+				changed := false
+				for _, e := range es {
+					if r.table.Apply(e, time.Now()) {
+						changed = true
+					}
 				}
-			}
-			if changed {
-				markDirty()
+				if changed {
+					markDirty()
+				}
 			}
 		case <-tick.C:
+			r.tickN.Add(1)
 			now := time.Now()
 			// REFRESH / SIGUSR1(hotspotd touch)→ 立刻全量扫一次并强制写
+			// (v5.32 T4: 原 continue 跳圈会绕过 resetTick; 改成 lastSync=now
+			//  后自然流过 —— 后续 30s 判断不会重复全量, dirty=false 不会写)
 			if refreshDue(now) {
 				if es, err := r.dumpIfFn(r.ifIdx); err == nil {
 					r.table.FullSync(es, now)
@@ -572,7 +599,7 @@ func (r *m4GoRunner) run() {
 				lastWritten = r.writeOut(lastWritten, &lastStatsAt, &lastStatsMap, true)
 				dirty = false
 				firstDirtyMs = 0
-				continue
+				lastSync = now
 			}
 			// 30s: 全量兜底 + 离线检查 + 网卡重建跟上
 			if now.Sub(lastSync) >= m4FullSyncEvery {
@@ -641,6 +668,9 @@ func (r *m4GoRunner) run() {
 				}
 			}
 		}
+		// v5.32 T4: 每圈按当前状态定下一拍(200ms / 1s)。stopCh 的 return
+		// 不经过这里(timer 随 defer Stop 释放)。
+		resetTick()
 	}
 }
 

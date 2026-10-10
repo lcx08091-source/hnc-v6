@@ -373,6 +373,19 @@ func (t *Table) PendingDue(now time.Time) (string, string, bool) {
 	return mac, ip, mac != ""
 }
 
+// HasPending 表里是否还有 pending 设备(还没解析出名字的)。
+// v5.32 T4: 写者主循环用它判断「有待解析的名字」→ 保持 200ms 快拍。
+func (t *Table) HasPending() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, d := range t.devs {
+		if d.HostnameSrc == "pending" {
+			return true
+		}
+	}
+	return false
+}
+
 // ApplyResolution 异步解析完成回填(一次一条)。名字级别 / 取值由调用方
 // (devname)保证与本表语义一致(manual/dhcp/mdns/cache-*/oui/mac)。
 func (t *Table) ApplyResolution(mac, hostname, src string, now time.Time) bool {

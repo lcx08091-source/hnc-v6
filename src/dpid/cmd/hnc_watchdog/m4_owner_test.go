@@ -381,3 +381,65 @@ func TestOwnerDefaultFallbackC(t *testing.T) {
 		t.Fatalf("m4_owner.current 应为 c: %q %v", string(b), err)
 	}
 }
+
+// TestM4NextTickMS v5.32 T4: 主循环下一拍间隔 —— 有事(dirty / 待解析名字 /
+// 在途解析)200ms, 全空闲 1s。改动前固定 200ms(m4WriteHardRateMS)。
+func TestM4NextTickMS(t *testing.T) {
+	busy := m4WriteHardRateMS * time.Millisecond
+	idle := m4IdleTickMS * time.Millisecond
+	cases := []struct {
+		name                string
+		dirty, pending, res bool
+		want                time.Duration
+	}{
+		{"全空闲 → 1s", false, false, false, idle},
+		{"有待写 → 200ms", true, false, false, busy},
+		{"有待解析名字 → 200ms", false, true, false, busy},
+		{"在途解析 → 200ms", false, false, true, busy},
+		{"组合 → 200ms", true, true, true, busy},
+	}
+	for _, c := range cases {
+		if got := m4NextTickMS(c.dirty, c.pending, c.res); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+	if idle <= busy {
+		t.Fatalf("空闲拍(%v)必须比忙拍(%v)慢", idle, busy)
+	}
+}
+
+// TestRunnerIdleWakeRate v5.32 T4: 空闲时主循环醒来次数有上限(注入计数,
+// 不靠 sleep 精确计时 —— 只数醒拍, 不数事件)。3 秒观察窗:
+// 旧代码固定 200ms → 15+ 次; 新代码空闲 1s → 首拍(200ms) + 约 3 次 ≤ 6。
+func TestRunnerIdleWakeRate(t *testing.T) {
+	m4TestEnv(t)
+	r := newM4GoRunner("wlan2", false)
+	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
+	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
+	r.dumpIfFn = func(int) ([]neigh.Entry, error) { return nil, nil } // 空表: 无 pending 无 dirty
+	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
+	r.blacklistFn = func() map[string]bool { return nil }
+	r.ifIndexFn = func(string) (int, error) { return 7, nil }
+	r.table.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.applyHooks()
+	r.start()
+	defer func() {
+		close(r.stopCh)
+		select {
+		case <-r.doneCh:
+		case <-time.After(3 * time.Second):
+			t.Fatal("写者 3 秒内没退出")
+		}
+	}()
+	time.Sleep(3 * time.Second)
+	n := r.tickN.Load()
+	// 空闲: 首拍 200ms + 之后每拍 1s → 3 秒约 3–4 次; 上限 6 给调度余量。
+	// 旧代码(固定 200ms)3 秒至少 14 次, 上限 6 能把两者分开。
+	if n > 6 {
+		t.Fatalf("空闲 3 秒醒了 %d 次(上限 6)—— 空闲降频没生效", n)
+	}
+	if n < 2 {
+		t.Fatalf("3 秒只醒 %d 次 —— 主循环疑似卡死", n)
+	}
+	t.Logf("空闲 3 秒醒 %d 次(旧代码约 15 次)", n)
+}
