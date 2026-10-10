@@ -134,6 +134,7 @@ func withFakeEnv(t *testing.T, clk *fakeClock, rec *actionRec) {
 	wdActionsFlushFn = func(_ string, now time.Time) error { return wdActions.flush(actTmp, now) }
 	t.Cleanup(func() { wdActionsFlushFn = oldFlush })
 	withTempM4Shadow(t) // v5.30 T3: M4 影子同样隔离(假邻居表、临时 run / data)
+	withTempM4Owner(t)  // v5.31 审查修复: 设备发现写者同样隔离(假 hotspotd 控制、临时路径、owner=c)
 }
 
 // withNativeUnknown v5.29: 原生检查的外部世界全部隔离成「判不了」(临时

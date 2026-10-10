@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"syscall"
+	"time"
 )
 
 // ─── netlink / neighbour 常量(不引 golang.org/x/net) ────────────────────
@@ -40,8 +41,12 @@ const (
 
 	sizeofNdMsg = 12 // family(1) pad1(1) pad2(2) ifindex(4) state(2) flags(1) type(1)
 
-	ndaDst    = 1 // NDA_DST
-	ndaLLAddr = 2 // NDA_LLADDR
+	ndaDst       = 1 // NDA_DST
+	ndaLLAddr    = 2 // NDA_LLADDR
+	ndaCacheinfo = 3 // NDA_CACHEINFO: struct nda_cacheinfo{confirmed, used, updated, refcnt} (u32, clock_t, 距今)
+
+	// userHZ clock_t 的单位(Linux / Android 的 USER_HZ 都是 100)。只用来比新旧, 差一点无所谓。
+	userHZTick = 10 * time.Millisecond
 
 	rtmgrpNeigh = 1 << (3 - 1) // RTNLGRP_NEIGH = 3
 )
@@ -69,6 +74,9 @@ type Entry struct {
 	MAC     string // NDA_LLADDR, "aa:bb:cc:dd:ee:ff"; 没有 / 不是 6 字节 → ""
 	State   uint16
 	Deleted bool // 订阅事件里的 RTM_DELNEIGH
+	// ConfirmedAgo 距内核最近一次确认它可达多久(NDA_CACHEINFO.ndm_confirmed; 没有该属性为 0)。
+	// v5.31 审查: 同一 MAC 换 IP 后新旧两条都是 STALE 时, 靠它分新旧。
+	ConfirmedAgo time.Duration
 }
 
 // Usable 有 MAC、且处于有效动态状态(INCOMPLETE / FAILED / NOARP / PERMANENT 不算:
@@ -145,6 +153,10 @@ func ParseMsgs(b []byte) ([]Entry, bool, error) {
 			case ndaLLAddr:
 				if len(v) == 6 {
 					e.MAC = net.HardwareAddr(v).String()
+				}
+			case ndaCacheinfo:
+				if len(v) >= 16 {
+					e.ConfirmedAgo = time.Duration(le.Uint32(v[0:4])) * userHZTick
 				}
 			}
 			aoff += alignUp(alen)

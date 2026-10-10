@@ -129,9 +129,23 @@ func (m *m4OwnerMgr) wireProd() {
 	m.quitHotspotdFn = m4QuitHotspotd
 	m.hotspotdStatusFn = m4HotspotdStatus
 	m.ensureHotspotdFn = func() error {
-		ensureDaemonRunning(hotspotdDaemon())
+		// 审查修复: 切换 / 纠偏是有意的重启, 不受「60 秒内不重复拉起」的崩溃保护限制 ——
+		// 原来刚被看门狗拉起不到 60 秒的 hotspotd 被 QUIT 后拉不起来: hotspotd(连同
+		// 硬件加速兜底)停摆到下一轮, 切换确认失败、再退避 5 分钟。
+		m4ResetCooldown("hotspotd")
+		ensureDaemonFn(hotspotdDaemon())
 		return nil
 	}
+}
+
+// ensureDaemonFn 拉起守护进程(单测替换; 生产 = ensureDaemonRunning)。
+var ensureDaemonFn = ensureDaemonRunning
+
+// m4ResetCooldown 清掉某个守护进程的重拉冷却(见 wireProd)。
+func m4ResetCooldown(name string) {
+	lastRestartMu.Lock()
+	delete(lastRestart, name)
+	lastRestartMu.Unlock()
 }
 
 // readM4Owner 读开关。文件不存在 = 默认; 内容不认识 = 默认 + 日志(去重)。
@@ -162,32 +176,42 @@ func (m *m4OwnerMgr) tick(iface string, now time.Time) {
 	// 每轮把生效值落到 run/, 调用方(device_detect.sh 等)只读这个文件,
 	// 默认值的判断只存在于 Go 这一处(m4OwnerDefault)。
 	_ = os.WriteFile(m4OwnerCurrentFile, []byte(want+"\n"), 0o644)
+	inBackoff := time.Now().Before(m.failBackoffUntil)
+	switched := false
 	if m.owner == "" {
 		// 首拍: want=go 也走切换路径(先停后起) —— 开机时序里
 		// service.sh/device_detect.sh 可能先拉起了不带 --no-discovery 的
 		// hotspotd(读不到 m4_owner.current 或文件是上一次会话的), 这里
 		// 统一纠偏, 保证任何时刻只有一个写者。
-		if want == "go" && time.Now().After(m.failBackoffUntil) {
+		if want == "go" && !inBackoff {
 			m.owner = "c" // 占位成 c, switchOwnerLocked 走 c→go
 			m.switchOwnerLocked("go", now)
+			switched = true
 		} else if want == "go" {
 			m.owner = "c" // 退避窗口内: 先按 c(保守, 不动 hotspotd)
 		} else {
 			m.owner = want
 		}
-	} else if want != m.owner {
-		if time.Now().Before(m.failBackoffUntil) {
-			// 退避窗口内不重试(见 failBackoffUntil 注释); devices.json
-			// 保留当前写者的版本, 下一轮再看。
-		} else {
-			m.switchOwnerLocked(want, now)
-		}
+	} else if want != m.owner && !inBackoff {
+		// 退避窗口内不重试(见 failBackoffUntil 注释); devices.json
+		// 保留当前写者的版本, 下一轮再看。
+		m.switchOwnerLocked(want, now)
+		switched = true
+	}
+	// 审查修复: 每轮核对 hotspotd 实际在不在做发现, 与 owner 不符就纠正。run/m4_owner.current
+	// 开机不清, device_detect.sh 会按上次会话的值拉起 hotspotd —— 上次是 go、这次开关是 c
+	// (正是 v5.32 退路要用的「改回 C 版」)时, 原来首拍直接认定 owner=c、不动 hotspotd、
+	// 也不起 Go 写者: 没有任何人发现设备。
+	if !switched && !inBackoff {
+		m.reconcileLocked(now)
 	}
 	m4OwnerCur.Store(m.owner)
-	// 演练模式(run/wd_m4_drill 存在, T5 场景用): owner=c 时 Go 写者也跑,
-	// 但 writeOut 只写 run/devices.go.json, 不碰 data/devices.json ——
-	// 用于「全字段影子比对」, hotspotd 保持唯一正式写者。
-	drill := fileExists(m4DrillFile)
+	// 演练模式(run/wd_m4_drill 存在, T5 场景用): 只在 owner=c 时生效 —— Go 写者也跑,
+	// 但只写 run/devices.go.json、不写名字缓存, hotspotd 保持唯一正式写者。
+	// 审查修复: 是否演练在起写者时定死(写者里不再每次查文件): 原来删掉开关文件到下一轮
+	// 停写者之间, 演练写者会写正式的 devices.json(两个写者); owner=go 时留着开关文件,
+	// 正式文件则没人写。
+	drill := m.owner != "go" && fileExists(m4DrillFile)
 	if m.owner != "go" && !drill {
 		m.stopGoRunnerLocked("owner != go")
 		return
@@ -196,7 +220,40 @@ func (m *m4OwnerMgr) tick(iface string, now time.Time) {
 		m.stopGoRunnerLocked("热点未激活")
 		return
 	}
-	m.ensureGoRunnerLocked(iface)
+	m.ensureGoRunnerLocked(iface, drill)
+}
+
+// reconcileLocked hotspotd 的实际模式(STATUS 有没有 discovery:0)与 owner 对齐。
+// 问不到 STATUS(没在跑 / 刚退出)不动 —— 主循环的 ensureDaemonRunning 会按当前
+// owner 的参数拉起。
+func (m *m4OwnerMgr) reconcileLocked(now time.Time) {
+	s, err := m.hotspotdStatusFn()
+	if err != nil {
+		return
+	}
+	off := strings.Contains(s, "discovery:0")
+	switch {
+	case m.owner == "c" && off:
+		logf("m4_owner: owner=c 但 hotspotd 在 --no-discovery 下运行(没人发现设备), 按原参数重启")
+		_ = m.quitHotspotdFn()
+		_ = m.ensureHotspotdFn()
+		m4Switches.Add(1)
+	case m.owner == "go" && !off:
+		logf("m4_owner: owner=go 但 hotspotd 仍在做发现(两个写者), 停 Go 写者后带 --no-discovery 重启")
+		m.stopGoRunnerLocked("纠偏")
+		m.owner = "c"
+		m4OwnerCur.Store("c")
+		m.switchOwnerLocked("go", now)
+	}
+}
+
+// hotspotDown 热点没开(主循环探测失败 / PENDING)时调: 停 Go 写者。
+// 审查修复: 原来 tick 只在热点 ACTIVE 时调, 热点关了写者照样每 200ms 醒一次。
+// owner 与 hotspotd 不动 —— 热点再开时 tick 会重新拉起写者。
+func (m *m4OwnerMgr) hotspotDown() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.stopGoRunnerLocked("热点未激活")
 }
 
 // currentOwner 当前生效 owner(无锁读; 未初始化按 c 算, 保守)。
@@ -275,6 +332,8 @@ type m4GoRunner struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 	table  *devscan.Table
+	// drill 演练写者(owner=c 时): 只写 run/devices.go.json、不写名字缓存。起写者时定死。
+	drill bool
 
 	// v5.31 T2: devname 全链解析(手动 → DHCP → mDNS → 缓存 → 厂商 → MAC)。
 	resolver *devname.Resolver
@@ -293,12 +352,13 @@ type m4GoRunner struct {
 	blacklistFn func() map[string]bool
 }
 
-// newM4GoRunner 生产构造: 真订阅 / 真 dump / 真命令。
-func newM4GoRunner(iface string) *m4GoRunner {
+// newM4GoRunner 生产构造: 真订阅 / 真 dump / 真命令。drill 见 m4GoRunner.drill。
+func newM4GoRunner(iface string, drill bool) *m4GoRunner {
 	r := &m4GoRunner{
 		iface:  iface,
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
+		drill:  drill,
 	}
 	r.subscribeFn = func() (m4NeighSource, error) { return neigh.Subscribe() }
 	r.dumpIfFn = neigh.DumpIf
@@ -360,12 +420,12 @@ func (r *m4GoRunner) start() {
 	go r.run()
 }
 
-func (m *m4OwnerMgr) ensureGoRunnerLocked(iface string) {
-	if m.runner != nil && m.runner.iface == iface {
+func (m *m4OwnerMgr) ensureGoRunnerLocked(iface string, drill bool) {
+	if m.runner != nil && m.runner.iface == iface && m.runner.drill == drill {
 		return
 	}
-	m.stopGoRunnerLocked("网卡变了")
-	r := newM4GoRunner(iface)
+	m.stopGoRunnerLocked("网卡或演练模式变了")
+	r := newM4GoRunner(iface, drill)
 	m.runner = r
 	r.start()
 }
@@ -384,6 +444,7 @@ func (m *m4OwnerMgr) stopGoRunnerLocked(reason string) {
 // 1s pending 派发)。退出前把 dirty 的内容补写一次(对齐 C 关机行为)。
 func (r *m4GoRunner) run() {
 	defer close(r.doneCh)
+	monoMs := func() int64 { return time.Now().UnixNano() / int64(time.Millisecond) }
 	events := make(chan []neigh.Entry, 64)
 	src, err := r.subscribeFn()
 	if err != nil {
@@ -413,14 +474,28 @@ func (r *m4GoRunner) run() {
 		lastWritten  []byte
 		lastStatsAt  time.Time
 		lastStatsMap = map[string][2]int64{}
-		lastSync     = time.Now()
-		lastPending  time.Time
-		inFlightMu   sync.Mutex
-		inFlight     = map[string]bool{}
+		// 审查修复: 零值 = 第一拍(200ms)就全量扫一次。原来起写者后要等满 30 秒(或有新
+		// 事件)才认得已在线的设备, 切到 Go / 看门狗重启后设备表空等半分钟。
+		lastSync    time.Time
+		lastPending time.Time
+		inFlightMu  sync.Mutex
+		inFlight    = map[string]bool{}
+		// 审查修复: 异步名字解析回填后要让主循环知道「该写了」—— 原来回填只改了表、
+		// 不置 dirty, 名字一直停在 pending / MAC 尾号, 直到下一个邻居事件才写出去(模拟
+		// 设备场景里一直没写)。resolveWG 让停写者时等在途的解析结束, 免得停了以后它还
+		// 写名字缓存(切回 C 后两个写者)。
+		resolved  = make(chan struct{}, 1)
+		resolveWG sync.WaitGroup
 	)
+	markDirty := func() {
+		dirty = true
+		lastEventMs = monoMs()
+		if firstDirtyMs == 0 {
+			firstDirtyMs = lastEventMs
+		}
+	}
 	tick := time.NewTicker(m4WriteHardRateMS * time.Millisecond)
 	defer tick.Stop()
-	monoMs := func() int64 { return time.Now().UnixNano() / int64(time.Millisecond) }
 	// v5.31 T4: REFRESH / SIGUSR1 转发 —— hotspotd(--no-discovery)收到就
 	// touch run/devices.refresh, 这里每拍(200ms)看一次 mtime, 变了立刻
 	// 全量扫一次。device_detect.sh scan 的「1 秒内 devices.json mtime
@@ -442,11 +517,27 @@ func (r *m4GoRunner) run() {
 	for {
 		select {
 		case <-r.stopCh:
+			resolveWG.Wait() // 在途解析(最长约 1.5 秒: dumpsys 0.5 + mDNS 1)结束后才算停
+			select {
+			case <-resolved:
+				dirty = true
+			default:
+			}
 			if dirty {
 				lastWritten = r.writeOut(lastWritten, &lastStatsAt, &lastStatsMap, true)
 			}
 			return
+		case <-resolved:
+			markDirty()
 		case es := <-events:
+			// 审查修复: 还不知道热点网卡的 ifindex(0)时不收事件 —— 表的 ifindex 为 0 表示
+			// 「不过滤」, 上游网卡(WiFi 上网时的路由器等)的邻居会被当成热点设备。
+			if r.ifIdx == 0 {
+				r.refreshIface()
+				if r.ifIdx == 0 {
+					continue
+				}
+			}
 			changed := false
 			for _, e := range es {
 				if r.table.Apply(e, time.Now()) {
@@ -454,11 +545,7 @@ func (r *m4GoRunner) run() {
 				}
 			}
 			if changed {
-				dirty = true
-				lastEventMs = monoMs()
-				if firstDirtyMs == 0 {
-					firstDirtyMs = lastEventMs
-				}
+				markDirty()
 			}
 		case <-tick.C:
 			now := time.Now()
@@ -477,13 +564,9 @@ func (r *m4GoRunner) run() {
 			if now.Sub(lastSync) >= m4FullSyncEvery {
 				lastSync = now
 				r.refreshIface()
-				if es, err := r.dumpIfFn(r.ifIdx); err == nil {
+				if es, err := r.dumpIfFn(r.ifIdx); err == nil && r.ifIdx != 0 {
 					if r.table.FullSync(es, now) {
-						dirty = true
-						lastEventMs = monoMs()
-						if firstDirtyMs == 0 {
-							firstDirtyMs = lastEventMs
-						}
+						markDirty()
 					}
 				}
 				if r.table.EvictOffline(now) > 0 {
@@ -497,6 +580,9 @@ func (r *m4GoRunner) run() {
 			// hotspotd process_pending_mdns; 解析在 goroutine 里, 不挡事件)
 			if now.Sub(lastPending) >= time.Second {
 				lastPending = now
+				if r.ifIdx == 0 {
+					r.refreshIface() // 网卡还没认出来: 每秒再试一次
+				}
 				if mac, ip, ok := r.table.PendingDue(now); ok {
 					inFlightMu.Lock()
 					busy := inFlight[mac]
@@ -505,14 +591,24 @@ func (r *m4GoRunner) run() {
 					}
 					inFlightMu.Unlock()
 					if !busy {
+						resolveWG.Add(1)
 						go func(mac, ip string) {
+							defer resolveWG.Done()
 							hn, src := r.table.Full(mac, ip)
-							r.table.ApplyResolution(mac, hn, src, time.Now())
+							if r.table.ApplyResolution(mac, hn, src, time.Now()) {
+								select {
+								case resolved <- struct{}{}:
+								default:
+								}
+							}
 							// v5.31 T2: 解析命中 dhcp/mdns 时缓存已
 							// 在 Resolver 里标脏, 这里落一次盘(小文件,
 							// 原子替换; 失败只记日志不计 devices 写失败)
-							if err := r.resolver.CacheSave(); err != nil {
-								logf("m4_owner: hostname_cache 落盘失败: %v", err)
+							// 演练写者不写名字缓存(那时 hotspotd 才是它的写者)。
+							if r.resolver != nil && !r.drill {
+								if err := r.resolver.CacheSave(); err != nil {
+									logf("m4_owner: hostname_cache 落盘失败: %v", err)
+								}
 							}
 							inFlightMu.Lock()
 							delete(inFlight, mac)
@@ -563,7 +659,7 @@ func (r *m4GoRunner) writeOut(lastWritten []byte, lastStatsAt *time.Time, lastSt
 		return lastWritten
 	}
 	out, tmp := m4DevicesJSON, m4DevicesTmpGo
-	if fileExists(m4DrillFile) {
+	if r.drill {
 		out, tmp = m4DrillOut, m4GoOutTmp
 	}
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
@@ -708,8 +804,8 @@ func m4QuitHotspotd() error {
 		if pid <= 0 {
 			return nil
 		}
-		if err := syscall.Kill(pid, 0); err != nil {
-			return nil // 进程不在了
+		if !processAlive(pid) {
+			return nil // 进程不在了(僵尸也算不在, 见 isZombie)
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

@@ -15,11 +15,25 @@ import (
 	"hnc.io/dpid/neigh"
 )
 
-// m4TestEnv 重定向所有路径到临时目录, 返回恢复函数。
+// m4TestEnv 重定向所有路径到临时目录(测试结束全部恢复)。
+// v5.31 审查修复: 原来只恢复 m4OwnerFile, 其余变量留在已删的临时目录; 名字解析的
+// 路径(device_names / hostname_cache / oui_overrides / mdns_resolve)和 Go 写日志
+// 没重定向 —— 测试会读写真实的 /data/local/hnc。
 func m4TestEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	old := m4OwnerFile
+	ptrs := []*string{&m4OwnerFile, &m4OwnerCurrentFile, &m4DevicesJSON, &m4DevicesTmpGo,
+		&m4DrillOut, &m4GoOutTmp, &m4DrillFile, &m4RefreshFile, &m4GoWriteLog,
+		&m4NamesPath, &m4CachePath, &m4OverridesPath, &m4MDNSBin, &rulesJSONPath}
+	old := make([]string, len(ptrs))
+	for i, p := range ptrs {
+		old[i] = *p
+	}
+	t.Cleanup(func() {
+		for i, p := range ptrs {
+			*p = old[i]
+		}
+	})
 	m4OwnerFile = filepath.Join(dir, "m4_owner")
 	m4OwnerCurrentFile = filepath.Join(dir, "m4_owner.current")
 	m4DevicesJSON = filepath.Join(dir, "devices.json")
@@ -28,8 +42,13 @@ func m4TestEnv(t *testing.T) string {
 	m4GoOutTmp = filepath.Join(dir, "run", "devices.go.json.tmp")
 	m4DrillFile = filepath.Join(dir, "run", "wd_m4_drill")
 	m4RefreshFile = filepath.Join(dir, "run", "devices.refresh")
+	m4GoWriteLog = filepath.Join(dir, "run", "m4_go_write.log")
+	m4NamesPath = filepath.Join(dir, "device_names.json")
+	m4CachePath = filepath.Join(dir, "hostname_cache.json")
+	m4OverridesPath = filepath.Join(dir, "oui_overrides.json")
+	m4MDNSBin = filepath.Join(dir, "no_mdns_resolve")
 	rulesJSONPath = filepath.Join(dir, "rules.json")
-	t.Cleanup(func() { m4OwnerFile = old })
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
 	return dir
 }
 
@@ -170,7 +189,7 @@ func TestOwnerTickStartsRunner(t *testing.T) {
 
 func TestRunnerWriteOut(t *testing.T) {
 	m4TestEnv(t)
-	r := newM4GoRunner("wlan2")
+	r := newM4GoRunner("wlan2", false)
 	r.statsCmdFn = func() (map[string][2]int64, error) {
 		return map[string][2]int64{"192.168.43.101": {111, 222}}, nil
 	}
@@ -210,7 +229,7 @@ func TestRunnerWriteOut(t *testing.T) {
 
 func TestRunnerLifecycle(t *testing.T) {
 	m4TestEnv(t)
-	r := newM4GoRunner("wlan2")
+	r := newM4GoRunner("wlan2", false)
 	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
 	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
 	r.dumpIfFn = func(int) ([]neigh.Entry, error) { return nil, nil }
@@ -253,12 +272,18 @@ func TestRefreshTriggersFullSync(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "run"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := newM4GoRunner("wlan2")
+	r := newM4GoRunner("wlan2", false)
 	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
 	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
 	var dumped atomic.Int32 // 写者 goroutine 加、测试主 goroutine 读
+	// 审查修复后写者一起来就全量扫一次: 闸门打开(= 发 refresh)之前 dump 返回空,
+	// 设备只可能经 refresh 触发的那次全量扫出现(30 秒兜底在 2 秒内不会到)。
+	var gate atomic.Bool
 	r.dumpIfFn = func(int) ([]neigh.Entry, error) {
 		dumped.Add(1)
+		if !gate.Load() {
+			return nil, nil
+		}
 		return []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.109"),
 			MAC: "02:5a:00:00:00:09", State: 0x02}}, nil
 	}
@@ -277,6 +302,7 @@ func TestRefreshTriggersFullSync(t *testing.T) {
 	// 没事件、没到 30s —— 只有 refresh 能触发写出(touch = 建文件, mtime=now)。
 	// 等过第一拍(200ms), 保证文件 mtime 严格晚于 lastRefreshM(同毫秒会漏判)。
 	time.Sleep(300 * time.Millisecond)
+	gate.Store(true)
 	if err := os.WriteFile(m4RefreshFile, []byte("refresh\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}

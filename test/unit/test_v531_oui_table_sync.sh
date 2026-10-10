@@ -5,22 +5,22 @@
 # 与库内文件逐字节比对 —— 以后改任一边不同步就失败
 # (仿 test_v530_junk_table_sync.sh)。
 #
-# 注意: 备份必须在 test_start 之后创建 —— test_start 的 setup_test_env 会
-# 先 rm -rf 整个 HNC_TEST_DIR, 备份放里面且建在之前的话会在 cmp 前被删掉。
+# v5.31 审查: 抽到临时文件再比(测试不改仓库文件); 原来直接重写库内数据文件 ——
+# 两边不同步时测试把它「修好」了, 下一次就悄悄通过。临时文件在 test_start 之后建
+# (test_start 的 setup_test_env 会先清空 HNC_TEST_DIR)。
 
 _ot_root="$HNC_REPO_ROOT"
 
 test_start "v5.31 OUI 厂商表: 重新抽取与库内数据文件逐字节一致"
-_ot_save="$HNC_TEST_DIR/oui_backup.txt"
-cp "$_ot_root/src/dpid/devname/oui_table.txt" "$_ot_save" 2>/dev/null
-python3 "$_ot_root/tools/extract_oui.py" >/dev/null 2>&1
+_ot_new="$HNC_TEST_DIR/oui_extracted.txt"
+python3 -I "$_ot_root/tools/extract_oui.py" --out "$_ot_new" >/dev/null 2>&1
 _ot_rc=$?
 if [ "$_ot_rc" != "0" ]; then
     test_fail "extract_oui.py 跑不动(rc=$_ot_rc)"
-elif cmp -s "$_ot_save" "$_ot_root/src/dpid/devname/oui_table.txt"; then
+elif cmp -s "$_ot_new" "$_ot_root/src/dpid/devname/oui_table.txt"; then
     test_pass
 else
-    test_fail "数据文件与 C 表不同步, 已重新生成(需要提交)"
+    test_fail "src/dpid/devname/oui_table.txt 与 C 表不同步(重新生成: python3 tools/extract_oui.py)"
 fi
 
 test_start "v5.31 OUI 厂商表: 条数合理(≥ 400)且 OUI 无重复"

@@ -79,7 +79,7 @@ type device struct {
 // cand 一个 (MAC, IP) 表项的候选状态(换 IP 期间旧表项还在)。
 type cand struct {
 	state     uint16
-	lastEvent time.Time // 同状态取最近一次事件
+	lastEvent time.Time // 同状态取最近一次确认的(内核 NDA_CACHEINFO 的 confirmed; 没有就是事件时刻)
 }
 
 // Table 设备表: MAC(小写)→ 设备, 外加每个 MAC 的候选表项集合。
@@ -196,7 +196,7 @@ func (t *Table) Apply(e neigh.Entry, now time.Time) bool {
 		if ip == "" {
 			return false
 		}
-		return t.applyOnlineLocked(mac, ip, e.State, now)
+		return t.applyOnlineLocked(mac, ip, e.State, now, now.Add(-e.ConfirmedAgo))
 	}
 	// 下线路径
 	if e.State&(nudFailed|nudIncomplete) == 0 {
@@ -223,15 +223,17 @@ func (t *Table) Apply(e neigh.Entry, now time.Time) bool {
 	return false
 }
 
-// applyOnlineLocked 上线或更新(调用方持锁)。
-func (t *Table) applyOnlineLocked(mac, ip string, state uint16, now time.Time) bool {
+// applyOnlineLocked 上线或更新(调用方持锁)。seen = 内核最近一次确认该表项的时刻。
+// v5.31 审查修复: 原来一律记成 now —— 全量扫(起写者 / 30 秒兜底)时新旧两条 STALE 表项
+// 「同状态同时刻」, 挑哪个 IP 看 map 遍历顺序, 换过 IP 的设备随机报旧 IP。
+func (t *Table) applyOnlineLocked(mac, ip string, state uint16, now, seen time.Time) bool {
 	nowUnix := now.Unix()
 	cs := t.cands[mac]
 	if cs == nil {
 		cs = map[string]cand{}
 		t.cands[mac] = cs
 	}
-	cs[ip] = cand{state: state, lastEvent: now}
+	cs[ip] = cand{state: state, lastEvent: seen}
 
 	d := t.devs[mac]
 	if d == nil {
@@ -327,7 +329,7 @@ func (t *Table) FullSync(es []neigh.Entry, now time.Time) bool {
 		if c, ok := t.cands[mac][ip]; ok && c.state == e.State {
 			continue // 已知且未变: 静默 STALE 不刷 last_seen
 		}
-		if t.applyOnlineLocked(mac, ip, e.State, now) {
+		if t.applyOnlineLocked(mac, ip, e.State, now, now.Add(-e.ConfirmedAgo)) {
 			changed = true
 		}
 	}

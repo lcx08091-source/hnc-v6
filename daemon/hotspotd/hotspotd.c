@@ -1890,6 +1890,8 @@ int main(int argc, char *argv[]) {
     if (worker_rc != 0) {
         hlog("WARN: mdns worker start failed (rc=%d), re-resolve will fall back to mac",
              worker_rc);
+    } else if (g_no_discovery) {
+        hlog("mdns worker: skipped (--no-discovery)");  /* v5.31 审查: 原来这里也打印 started, 误导排查 */
     } else {
         hlog("mdns worker: started (queue size %d)", HNC_MDNS_QUEUE_SIZE);
     }

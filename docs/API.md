@@ -2252,7 +2252,7 @@ GET `/api/encdns`:
 
 **v5.31.0-rc1 动作统计与设备发现**
 
-- `run/watchdog_actions.json` 顶层新增 `m4_owner`(`"go"` / `"c"`,当前写者)、`m4_go_writes` / `m4_go_write_fails`(Go 写者写出 / 失败次数)、`m4_switches`(写者切换次数);自检「看门狗动作」行显示「设备发现:Go 版 / C 版(开关 data/m4_owner; Go 写 N 次 / 失败 N 次, 切换 N 次)」。只读快照,不参与动作合计。
+- `run/watchdog_actions.json` 顶层新增 `m4_owner`(`"go"` / `"c"`,当前写者)、`m4_go_writes` / `m4_go_write_fails`(Go 写者写出 / 失败次数)、`m4_switches`(写者切换次数,含审查加的每轮纠偏);自检「看门狗动作」行显示「设备发现:Go 版 / C 版(开关 data/m4_owner; Go 写 N 次 / 失败 N 次, 切换 N 次)」。只读快照,不参与动作合计。
 - hotspotd 控制接口在 Go 模式下的行为:`REFRESH` / `SIGUSR1` → touch `run/devices.refresh`(Go 写者 200ms 内全量扫一次并写);`STATUS` 追加 ` discovery:0`,`devices:N` 从 `devices.json` 数;`GET_DEVICES` / `OFFLOAD_*` 不变。Go 写者每次落盘在 `run/m4_go_write.log` 记一行时间戳。
 - (配置项,不是开关文件)`rules.json` 设备项 `app_qos: true`:按应用分优先级;缺省 = 关。
 

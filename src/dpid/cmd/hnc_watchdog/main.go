@@ -199,7 +199,22 @@ func readHeartbeatAge() int64 {
 }
 
 func processAlive(pid int) bool {
-	return syscall.Kill(pid, 0) == nil
+	return syscall.Kill(pid, 0) == nil && !isZombie(pid)
+}
+
+// isZombie 进程已退出、只是还没被回收(/proc/<pid>/stat 状态 Z)。v5.31 审查修复:
+// 僵尸也能 kill(pid, 0) 成功 —— 被 QUIT 的 hotspotd 在没及时回收的环境里(云端模拟
+// 容器的 init 要几秒才回收)被当成「还活着」, 切换后不重新拉起。
+func isZombie(pid int) bool {
+	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	s := string(b)
+	if i := strings.LastIndexByte(s, ')'); i >= 0 && i+2 < len(s) {
+		return s[i+2] == 'Z'
+	}
+	return false
 }
 
 // ─── action invocation (sh watchdog.sh action <name> [args...]) ─────────
@@ -673,15 +688,17 @@ func findLiveByName(name string) int {
 			continue
 		}
 		// Try /proc/<pid>/comm (short name).
+		// v5.31 审查修复: 僵尸(已退出未回收)不算 —— 与 processAlive 同一标准, 否则刚被
+		// QUIT 的 hotspotd 被当成「活着、只是丢了 pidfile」, 不重新拉起。
 		if data, err := os.ReadFile("/proc/" + e.Name() + "/comm"); err == nil {
-			if strings.TrimSpace(string(data)) == name {
+			if strings.TrimSpace(string(data)) == name && !isZombie(pid) {
 				return pid
 			}
 		}
 		// Try /proc/<pid>/cmdline for nul-separated argv.
 		if data, err := os.ReadFile("/proc/" + e.Name() + "/cmdline"); err == nil {
 			argv0 := strings.SplitN(string(data), "\x00", 2)[0]
-			if filepath.Base(argv0) == name {
+			if filepath.Base(argv0) == name && !isZombie(pid) {
 				return pid
 			}
 		}
@@ -866,6 +883,7 @@ func mainLoop() {
 }
 
 func handlePending(_ *restoreThrottle) time.Duration {
+	m4Owner.hotspotDown() // v5.31 审查修复: 热点没开, Go 写者不空转
 	res := runActionFn("probe_hotspot")
 	if res.exitCode != 0 || res.stdout == "" {
 		return intervalProbe
@@ -911,6 +929,7 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	if probe.exitCode != 0 || probe.stdout == "" {
 		// Hotspot down — keep ACTIVE state (user might just have toggled off),
 		// don't migrate or full_restore. Next round will re-probe.
+		m4Owner.hotspotDown() // v5.31 审查修复: 热点关了停 Go 写者(不空转)
 		return intervalNormal
 	}
 	parts := strings.Fields(probe.stdout)

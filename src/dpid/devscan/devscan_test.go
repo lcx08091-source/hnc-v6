@@ -375,3 +375,24 @@ func itoa(v int64) string {
 }
 
 func hex2(v int) string { return padMAC(v)[:2] }
+
+// v5.31 审查修复: 全量扫时同一 MAC 新旧两条 STALE 表项, 按内核的「最近确认」挑新 IP
+// (原来两条都记成同一时刻, 挑哪个看 map 遍历顺序)。30 次 × 两种顺序, 都要挑新的。
+func TestFullSyncPicksRecentlyConfirmedIP(t *testing.T) {
+	old := neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.102"), MAC: "02:5a:00:00:00:02", State: nudStale, ConfirmedAgo: 5 * time.Minute}
+	cur := neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.112"), MAC: "02:5a:00:00:00:02", State: nudStale, ConfirmedAgo: 3 * time.Second}
+	now := time.Now()
+	for i := 0; i < 30; i++ {
+		for _, es := range [][]neigh.Entry{{old, cur}, {cur, old}} {
+			tb := NewTable("wlan2", 7)
+			tb.FullSync(es, now)
+			var got map[string]Device
+			if err := json.Unmarshal(tb.RenderJSON(nil, nil), &got); err != nil {
+				t.Fatal(err)
+			}
+			if ip := got["02:5a:00:00:00:02"].IP; ip != "192.168.43.112" {
+				t.Fatalf("第 %d 次: 挑了 %s, 应是最近确认的 192.168.43.112", i, ip)
+			}
+		}
+	}
+}

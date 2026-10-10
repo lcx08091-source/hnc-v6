@@ -1,147 +1,119 @@
 #!/bin/bash
-# test/sim/run_m4_sim_v531.sh — v5.31 T5: 模拟设备验收(M4 方案 A)。
-# 前置: run_m4_sim.sh(C 模式不退步, test_v530_sim_m4.sh 跑)不动、照跑; 本脚本补:
+# test/sim/run_m4_sim_v531.sh — v5.31 T5: 模拟设备验收(M4 方案 A)。v5.31 审查时重写:
+# GLM 交来的版本没有在 root 环境跑过 —— 路径没重定向全(看门狗读的是真实 /data/local/hnc)、
+# 不等异步名字解析、设备名 mac_ 不合 simnet 的命名规则、「运行中切换」没有经过看门狗的切换代码。
 #
-#   场景 2「全字段影子」: C 模式下 Go 写者以演练方式只写 run/devices.go.json
-#     (touch run/wd_m4_drill), 每步与 hotspotd 的 devices.json 逐字段比
-#     (last_seen / 字节除外): 集合、ip、hostname、hostname_src、iface、status;
-#     覆盖 DHCP 真名 / 垃圾名 / 不报名字 / 手动名 / 黑名单 / 换 IP。
-#   场景 3「Go 模式全流程」: hotspotd --no-discovery 跑, Go 写 devices.json,
-#     同样 6 步; 断言 hotspotd 从 --no-discovery 起一次都没写(日志里
-#     "discovery: DISABLED" 之后没有 "JSON written")。
-#   场景 4「运行中切换」: 场景中途 c → go → c 各一次; 用两边的写日志
-#     (hotspotd.log 的 "JSON written" / run/m4_go_write.log 的行, 都带时间戳)
-#     检查没有两个写者交替写; 切完结果仍与期望一致。
+#   sudo bash test/sim/run_m4_sim_v531.sh       # 报告: $HNC_SIM_DIR/m4_sim_v531_report.txt
 #
-# 要 root、iproute2、gcc、go(Linux 开发机 / CI; 本沙箱无 root, 由维护者跑)。
-# 报告: $HNC_SIM_DIR/m4_sim_v531_report.txt。
+# 场景(前置: run_m4_sim.sh 的 C 模式对照照跑, 由 test_v530_sim_m4.sh 负责):
+#   2「全字段影子」: hotspotd 正常发现, 一个演练写者只写 run/devices.go.json, 与 hotspotd 的
+#     devices.json 逐字段比(last_seen / 字节除外): 集合、ip、名字(DHCP 真名 / 垃圾名 / 不报 /
+#     手动名)、iface、status(黑名单 / 解除黑名单)、换 IP。
+#   3「Go 模式」: hotspotd 带 --no-discovery, Go 写者写 devices.json; hotspotd 一次都不写。
+#   4「运行中切换」(TestM4SimOwner): 看门狗真实的 owner 管理器在真进程上: 开机纠偏 → c→go
+#     (60 秒冷却内)→ Go 模式新设备 → go→c, 两边写日志不交错。
+#
+# 整个场景在独立的网络 + 挂载命名空间里; 模拟目录绑到 /data/local/hnc, 看门狗代码走正式路径。
+# 要 root、iproute2、gcc、go、unshare; 缺了以 77 退出(当作跳过)。
 set -u
 REPO=$(cd "$(dirname "$0")/../.." && pwd)
 export HNC_SIM_DIR=${HNC_SIM_DIR:-/tmp/hnc_sim}
 
 skip() { echo "SKIP: $*"; exit 77; }
 [ "$(id -u)" = 0 ] || skip "需要 root"
-for c in ip gcc go unshare python3; do command -v "$c" >/dev/null 2>&1 || skip "缺 $c"; done
+for c in ip gcc go unshare mount; do command -v "$c" >/dev/null 2>&1 || skip "缺 $c"; done
 if [ "${HNC_SIM_INNER:-}" != 1 ]; then
     HNC_SIM_INNER=1 exec unshare --net --mount --propagation private bash "$0" "$@"
 fi
 ip link set lo up 2>/dev/null
 
-SIM="bash $REPO/test/sim/simnet.sh"
+SIMNET=$REPO/test/sim/simnet.sh
+SIM="bash $SIMNET"
 HNC=$HNC_SIM_DIR/hnc
 REPORT=$HNC_SIM_DIR/m4_sim_v531_report.txt
 FAILS=0
 mkdir -p "$HNC_SIM_DIR"
 : > "$REPORT"
 say() { echo "$*" | tee -a "$REPORT"; }
-fail() { say "  ✗ $*"; FAILS=$((FAILS+1)); }
+fail() { say "  ✗ $*"; FAILS=$((FAILS + 1)); }
 
 $SIM down >/dev/null 2>&1
 rm -rf "$HNC"
 $SIM up >/dev/null || exit 1
-$SIM hotspotd start >/dev/null || exit 1
-(cd "$REPO/src/dpid" && CGO_ENABLED=0 go test -c -o "$HNC_SIM_DIR/m4sim.test" ./cmd/hnc_watchdog/) || { echo "编译失败"; exit 1; }
-trap '$SIM down >/dev/null 2>&1' EXIT
-
-GHOSTS=""
-expect() {  # 场景期望: $HNC_SIM_DIR/devices + GHOSTS
-    awk 'NF >= 3 { printf "%s %s;", $2, $3 }' "$HNC_SIM_DIR/devices"
-    printf '%s' "$GHOSTS"
+$SIM hotspotd start >/dev/null || exit 1     # 编好 hotspotd, 建好 $HNC 目录树
+mkdir -p /data/local/hnc && mount --bind "$HNC" /data/local/hnc || { echo "绑不了 /data/local/hnc"; exit 1; }
+cp "$HNC_SIM_DIR/bin/hotspotd" "$HNC/bin/hotspotd"   # 看门狗切换 / 纠偏时从这里拉起
+export PATH="$REPO/test/sim/fake:$PATH"              # 假 dumpsys: Go 的名字解析和它拉起的 hotspotd 都用
+(cd "$REPO/src/dpid" && CGO_ENABLED=0 go test -c -o "$HNC_SIM_DIR/m4sim531.test" ./cmd/hnc_watchdog/) || { echo "编译失败"; exit 1; }
+cleanup() {
+    [ -f "$HNC/run/hotspotd.pid" ] && kill "$(cat "$HNC/run/hotspotd.pid")" 2>/dev/null
+    $SIM down >/dev/null 2>&1
 }
+trap cleanup EXIT
 
-# go_check 模式 名称 时限秒 [BLOCKED]: 跑 TestM4SimV531(带名字/黑名单期望)
-go_check() {
-    mode=$1 name=$2 limit=$3 t0=$(date +%s) out=""
-    while :; do
-        out=$(HNC_SIM_IFACE=hncsim0 HNC_SIM_HNC_DIR=$HNC HNC_SIM_MODE=$mode \
-              HNC_SIM_EXPECT="$(expect)" \
-              HNC_SIM_NAMES="$SIM_NAMES" HNC_SIM_BLOCKED="$SIM_BLOCKED" \
-              "$HNC_SIM_DIR/m4sim.test" -test.run '^TestM4SimV531$' -test.count=1 2>&1)
-        [ $? -eq 0 ] && { say "  ✓ $name ($(( $(date +%s) - t0 ))s)"; return 0; }
-        [ $(( $(date +%s) - t0 )) -ge "$limit" ] && { fail "$name: $out"; return 1; }
-        sleep 2
-    done
+expect() { awk 'NF >= 3 { printf "%s %s;", $2, $3 }' "$HNC_SIM_DIR/devices"; }
+NAMES=""
+BLOCKED=""
+# run_test 名称 测试名 [额外环境…]: 跑一次(测试自己在时限内反复比到对上)
+run_test() {
+    name=$1 test=$2; shift 2
+    out=$(env HNC_SIM_IFACE=hncsim0 HNC_SIM_EXPECT="$(expect)" HNC_SIM_NAMES="$NAMES" HNC_SIM_BLOCKED="$BLOCKED" "$@" \
+        "$HNC_SIM_DIR/m4sim531.test" -test.run "^$test\$" -test.count=1 -test.v 2>&1)
+    if echo "$out" | grep -q -- "--- PASS: $test"; then
+        say "  ✓ $name"
+        echo "$out" | grep -E '^\s+m4_sim_v531_test.go:[0-9]+: [0-9]\.' | sed 's/^\s*m4_sim_v531_test.go:[0-9]*: /      /' | tee -a "$REPORT"
+    else
+        fail "$name"
+        echo "$out" | grep -E 'm4_sim_v531_test.go|FAIL|panic' | head -20 | sed 's/^/      /' | tee -a "$REPORT"
+    fi
 }
+hotspotd_pid() { cat "$HNC/run/hotspotd.pid" 2>/dev/null; }
 
-# ════════ 场景 2: C 模式全字段影子(演练输出) ════════
 say "== v5.31 T5 · $(date '+%F %T') =="
-say "场景 2: 全字段影子 —— hotspotd 正常发现, Go 写者只写 run/devices.go.json, 逐字段比"
-touch "$HNC/run/wd_m4_drill"
-
-say "1. 5 台设备(DHCP 真名×1, 垃圾名×2, 不报名字×1, 手动名×1)"
+say "场景 2: 全字段影子 —— hotspotd 正常发现, 演练写者只写 run/devices.go.json, 逐字段比"
 echo '{"02:5a:00:00:00:03":"客厅的Mac"}' > "$HNC/data/device_names.json"
 echo '{"devices":{},"blacklist":["02:5a:00:00:00:04"]}' > "$HNC/data/rules.json"
 $SIM add tv    02:5a:00:00:00:01 192.168.43.101 Redmi-TV >/dev/null
 $SIM add pad   02:5a:00:00:00:02 192.168.43.102 null >/dev/null
-$SIM add mac_  02:5a:00:00:00:03 192.168.43.103 >/dev/null
+$SIM add mbp   02:5a:00:00:00:03 192.168.43.103 >/dev/null
 $SIM add phone 02:5a:00:00:00:04 192.168.43.104 localhost >/dev/null
 $SIM add watch 02:5a:00:00:00:05 192.168.43.105 >/dev/null
-SIM_NAMES='02:5a:00:00:00:01=Redmi-TV@dhcp;02:5a:00:00:00:02=00000002@mac;02:5a:00:00:00:03=客厅的Mac@manual;02:5a:00:00:00:04=00000004@mac;02:5a:00:00:00:05=00000005@mac'
-SIM_BLOCKED='02:5a:00:00:00:04'
-go_check fields "5 台逐字段一致(名字: dhcp/垃圾/手动/垃圾/不报)" 60
-
+NAMES='02:5a:00:00:00:01=Redmi-TV@dhcp;02:5a:00:00:00:02=00000002@mac;02:5a:00:00:00:03=客厅的Mac@manual;02:5a:00:00:00:04=00000004@mac;02:5a:00:00:00:05=00000005@mac'
+BLOCKED='02:5a:00:00:00:04'
+say "1. 5 台(DHCP 真名 / 垃圾名 null / 手动名 / 垃圾名 localhost 且在黑名单 / 不报名字)"
+run_test "5 台逐字段一致" TestM4SimV531 HNC_SIM_MODE=fields
 say "2. pad 换 IP(.102 → .112)"
 $SIM ip pad 192.168.43.112 >/dev/null
-go_check fields "两边都换到新 IP" 30
-
-say "3. 解除黑名单(phone → allowed)"
+run_test "两边都换到新 IP" TestM4SimV531 HNC_SIM_MODE=fields
+say "3. 解除黑名单(phone → allowed; SIGUSR1 让 hotspotd 重扫重写)"
 echo '{"devices":{},"blacklist":[]}' > "$HNC/data/rules.json"
-SIM_BLOCKED=''
-go_check fields "phone 变 allowed" 30
+BLOCKED=''
+kill -USR1 "$(hotspotd_pid)" 2>/dev/null
+# C 版重扫 ARP 时, 换过 IP 的 pad 新旧两条 STALE 表项挑哪个看 /proc/net/arp 顺序(老问题, 可能
+# 报回旧 IP; Go 版按内核的「最近确认」挑)。让 pad 发个包(真实设备在用网时就是这样), 两边都跟上新 IP。
+sleep 1
+$SIM poke pad >/dev/null
+run_test "phone 两边都是 allowed" TestM4SimV531 HNC_SIM_MODE=fields
 
-# ════════ 场景 3: Go 模式全流程 ════════
-say "场景 3: Go 模式全流程 —— hotspotd --no-discovery, Go 写 devices.json"
+say "场景 3: Go 模式 —— hotspotd --no-discovery, Go 写 devices.json"
 $SIM hotspotd stop >/dev/null
-rm -f "$HNC/run/wd_m4_drill" "$HNC/data/devices.json" "$HNC/data/devices.json.tmp."* "$HNC/run/m4_go_write.log"
 HNC_SIM_HOTSPOTD_ARGS="--no-discovery" $SIM hotspotd start >/dev/null || exit 1
-# --no-discovery 真的生效(启动日志有 DISABLED 行)
 $SIM hotspotd log 2>/dev/null | grep -q "discovery: DISABLED" \
     && say "  ✓ hotspotd 以 --no-discovery 启动" || fail "hotspotd 日志没有 discovery: DISABLED"
-
-say "4. 同样 6 步(设备从头来)"
-$SIM del pad >/dev/null 2>&1; $SIM del tv >/dev/null 2>&1; $SIM del mac_ >/dev/null 2>&1; $SIM del phone >/dev/null 2>&1; $SIM del watch >/dev/null 2>&1
-GHOSTS=""
-$SIM add tv    02:5a:00:00:00:01 192.168.43.101 Redmi-TV >/dev/null
-$SIM add pad   02:5a:00:00:00:02 192.168.43.102 null >/dev/null
-$SIM add mac_  02:5a:00:00:00:03 192.168.43.103 >/dev/null
-$SIM add phone 02:5a:00:00:00:04 192.168.43.104 localhost >/dev/null
-$SIM add watch 02:5a:00:00:00:05 192.168.43.105 >/dev/null
-echo '{"02:5a:00:00:00:03":"客厅的Mac"}' > "$HNC/data/device_names.json"
-echo '{"devices":{},"blacklist":["02:5a:00:00:00:04"]}' > "$HNC/data/rules.json"
-SIM_BLOCKED='02:5a:00:00:00:04'
-go_check go "Go 写者 5 台与期望一致" 60
-say "5. Go 模式下换 IP"
-$SIM ip pad 192.168.43.112 >/dev/null
-go_check go "Go 写者换到新 IP" 30
-# hotspotd 从 --no-discovery 起一次都没写
+say "4. Go 写者写出 5 台(名字 / 黑名单同上)"
+run_test "Go 写者 5 台与期望一致" TestM4SimV531 HNC_SIM_MODE=go
+say "5. Go 模式下换 IP(pad .112 → .122)"
+$SIM ip pad 192.168.43.122 >/dev/null
+run_test "Go 写者换到新 IP" TestM4SimV531 HNC_SIM_MODE=go
 if $SIM hotspotd log 2>/dev/null | awk '/discovery: DISABLED/{d=1} d && /JSON written/' | grep -q .; then
     fail "hotspotd 在 --no-discovery 下写过 devices.json(日志有 JSON written)"
 else
-    say "  ✓ hotspotd 在 --no-discovery 下一次都没写(日志无 JSON written)"
+    say "  ✓ hotspotd 在 --no-discovery 下一次都没写"
 fi
 
-# ════════ 场景 4: 运行中切换(c → go → c) ════════
-say "场景 4: 运行中切换 —— c → go → c(用写日志证明没有两个写者交替)"
-say "6. 切回 c: 停 Go(演练开关已移除, 由测试二进制管理), hotspotd 原参数重启"
-# 此时 owner 事实上是 go(场景 3); 切回 c = hotspotd 原参数重启 + Go 写者停
-$SIM hotspotd stop >/dev/null
-HNC_SIM_HOTSPOTD_ARGS="" $SIM hotspotd start >/dev/null
-rm -f "$HNC/data/devices.json"   # 让两边都从空表开始, 看谁在写
-$SIM poke tv >/dev/null
-sleep 8
-# c 写者活了: hotspotd 日志有新的 JSON written; Go 写者已停(没有新的 m4_go_write 行)
-if $SIM hotspotd log 2>/dev/null | tail -50 | grep -q "JSON written"; then
-    say "  ✓ 切回 c 后 hotspotd 恢复写(日志有 JSON written)"
-else
-    fail "切回 c 后 hotspotd 没写(日志无 JSON written)"
-fi
-goline=$HNC/run/m4_go_write.log
-if [ -f "$goline" ] && [ -n "$(find "$goline" -newermt '-20 seconds' 2>/dev/null)" ]; then
-    fail "切回 c 后 Go 写者还在写(m4_go_write.log 有新行)"
-else
-    say "  ✓ 切回 c 后 Go 写者已停写"
-fi
-go_check fields "切回 c 后结果与期望一致" 60 2>/dev/null || true
+say "场景 4: 运行中切换 —— 看门狗的 owner 管理器在真进程上(此时 hotspotd 仍是 --no-discovery)"
+run_test "开机纠偏 → c→go(冷却内)→ Go 模式新设备 → go→c, 写者不交错" TestM4SimOwner \
+    HNC_SIM_OWNER=1 HNC_SIM_SIMNET="$SIMNET" HNC_SIM_OLD_IPS="02:5a:00:00:00:02=192.168.43.102,192.168.43.112"
 
 say "== 结果: $([ "$FAILS" = 0 ] && echo "全部通过" || echo "$FAILS 处不对") · 报告 $REPORT"
 [ "$FAILS" = 0 ]

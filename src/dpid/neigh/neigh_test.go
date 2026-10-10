@@ -6,6 +6,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 // ─── 手工构造报文 ────────────────────────────────────────────────────────
@@ -197,5 +198,29 @@ func TestBuildDumpReq(t *testing.T) {
 	if int(le.Uint32(req[0:4])) != len(req) || le.Uint16(req[4:6]) != rtmGetNeigh ||
 		le.Uint16(req[6:8]) != nlmFRequest|nlmFDump || req[nlMsgHdrLen] != syscall.AF_INET {
 		t.Fatalf("req = % x", req)
+	}
+}
+
+// v5.31 审查: NDA_CACHEINFO 的 ndm_confirmed(clock_t, USER_HZ=100)→ ConfirmedAgo。
+func TestParseCacheinfoConfirmed(t *testing.T) {
+	ci := make([]byte, 16)
+	binary.LittleEndian.PutUint32(ci[0:4], 1234) // confirmed 12.34 秒前
+	binary.LittleEndian.PutUint32(ci[8:12], 99)  // updated(不用)
+	p := ndmsg(syscall.AF_INET, 7, NUDStale)
+	p = append(p, nla(ndaDst, net.ParseIP("192.168.43.112").To4())...)
+	hw, _ := net.ParseMAC("02:5a:00:00:00:02")
+	p = append(p, nla(ndaLLAddr, hw)...)
+	p = append(p, nla(ndaCacheinfo, ci)...)
+	es, _, err := ParseMsgs(nlmsg(rtmNewNeigh, p))
+	if err != nil || len(es) != 1 {
+		t.Fatalf("解析失败: %v %v", es, err)
+	}
+	if es[0].ConfirmedAgo != 12340*time.Millisecond {
+		t.Fatalf("ConfirmedAgo = %v, 想要 12.34s", es[0].ConfirmedAgo)
+	}
+	// 没有 cacheinfo 的(老测试报文 / 截短的)→ 0
+	es, _, _ = ParseMsgs(neighMsg(rtmNewNeigh, 7, NUDStale, "192.168.43.102", "02:5a:00:00:00:02"))
+	if len(es) != 1 || es[0].ConfirmedAgo != 0 {
+		t.Fatalf("没有 cacheinfo 应为 0: %+v", es)
 	}
 }

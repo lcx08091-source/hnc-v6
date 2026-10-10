@@ -6,18 +6,30 @@ C 侧本版不改(仍用编译进二进制的表), test/unit/test_v531_oui_table
 核对两边一致 —— 以后改任一边不同步就失败。
 
 格式: 每行 "<6 位大写 hex OUI>\\t<Vendor>", 按 OUI 升序(C 表本身有序)。
+
+用法: python3 tools/extract_oui.py [--out 文件]   (默认覆盖仓库里的数据文件; 测试传
+--out 写到临时文件再比对 —— v5.31 审查: 原来测试直接重写仓库文件, 不同步时把它「修好」了)。
+路径按脚本所在仓库定位, 不依赖当前目录。
 """
+import os
 import re
 import sys
 
-SRC = "daemon/hotspotd/hnc_helpers.c"
-OUT = "src/dpid/devname/oui_table.txt"
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SRC = os.path.join(ROOT, "daemon/hotspotd/hnc_helpers.c")
+OUT = os.path.join(ROOT, "src/dpid/devname/oui_table.txt")
 
 # { 0x000048, "Epson" },  /  { 0x000048, "Epson" }
 PAT = re.compile(r'\{\s*0x([0-9A-Fa-f]{6})\s*,\s*"([^"]+)"\s*\}')
 
 
 def main() -> int:
+    out = OUT
+    if len(sys.argv) == 3 and sys.argv[1] == "--out":
+        out = sys.argv[2]
+    elif len(sys.argv) != 1:
+        print("用法: extract_oui.py [--out 文件]", file=sys.stderr)
+        return 2
     try:
         text = open(SRC, encoding="utf-8").read()
     except FileNotFoundError:
@@ -44,10 +56,10 @@ def main() -> int:
         print("C 表有重复 OUI", file=sys.stderr)
         return 1
 
-    with open(OUT, "w", encoding="utf-8") as f:
+    with open(out, "w", encoding="utf-8") as f:
         for prefix, vendor in entries:
             f.write(f"{prefix}\t{vendor}\n")
-    print(f"{OUT}: {len(entries)} 条")
+    print(f"{out}: {len(entries)} 条")
     return 0
 
 

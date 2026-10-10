@@ -183,5 +183,7 @@ CONNMARK save/restore 掩码 `0xffffff`(`iptables_manager.sh`)。Android netd �
 | `STATUS` | `running:1 devices:N pid:P` | 追加 ` discovery:0`;`devices:N` 从 `devices.json` 数 |
 | shell 兜底(`device_detect.sh`) | hotspotd 不响应时照旧兜底写 | **不写** `devices.json`(只返回计数) |
 | 切换 | → go:先让 hotspotd 带参重启并确认(`STATUS` 回 `discovery:0`,失败回滚 + 5 分钟退避),再启 Go 写者 | → c:先停 Go 写者(等当前写完),再原参数重启 hotspotd |
+| 每轮纠偏(审查加) | hotspotd 若在 `--no-discovery` 下跑(开机时 `device_detect.sh` 按上次会话的 `m4_owner.current` 拉起)→ 按原参数重启 | hotspotd 若仍在做发现 → 停 Go 写者后带参重启(走切换路径) |
+| 热点没开 | — | 停 Go 写者(不空转),热点再开时重新拉起 |
 
-**演练模式**(`run/wd_m4_drill` 存在):Go 写者只写 `run/devices.go.json`(全字段影子比对用,不碰正式文件)。**Go 写者每次落盘记一行时间戳到 `run/m4_go_write.log`**,与 hotspotd.log 的 `JSON written` 行对照,用于「没有两个写者交替写」的验收。自检「看门狗动作」一行显示当前写者与写 / 失败 / 切换次数(`watchdog_actions.json` 的 `m4_owner` 等字段)。
+**演练模式**(`run/wd_m4_drill` 存在,且只在 C 模式下生效):多起一个 Go 写者,只写 `run/devices.go.json`、不写名字缓存(全字段影子比对用,不碰正式文件);是否演练在起写者时定死。切换 / 纠偏重拉 hotspotd 不受 60 秒崩溃冷却限制;判断进程是否活着时僵尸不算。**Go 写者每次落盘记一行时间戳到 `run/m4_go_write.log`**,与 hotspotd.log 的 `JSON written` 行对照,用于「没有两个写者交替写」的验收。自检「看门狗动作」一行显示当前写者与写 / 失败 / 切换次数(`watchdog_actions.json` 的 `m4_owner` 等字段)。

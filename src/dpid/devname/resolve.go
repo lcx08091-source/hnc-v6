@@ -216,7 +216,11 @@ func LookupManual(mac, namesPath string) (string, bool) {
 		return "", false
 	}
 	key := `"` + strings.ToLower(mac) + `"`
-	s := strings.ToLower(string(b))
+	// 只在「找 MAC」时不分大小写(C 是逐字节 tolower 比较); 名字从原文取, 不能跟着
+	// 变小写(v5.31 审查: 「客厅的Mac」曾变成「客厅的mac」)。只折叠 ASCII 字母,
+	// 字节偏移与原文一一对应。
+	orig := string(b)
+	s := asciiLower(orig)
 	off := 0
 	for {
 		i := strings.Index(s[off:], key)
@@ -241,14 +245,14 @@ func LookupManual(mac, namesPath string) (string, bool) {
 		}
 		p++
 		var out []byte
-		for p < len(s) {
-			c := s[p]
+		for p < len(orig) {
+			c := orig[p]
 			if c == '"' {
 				break
 			}
-			if c == '\\' && p+1 < len(s) {
+			if c == '\\' && p+1 < len(orig) {
 				p++
-				switch s[p] {
+				switch orig[p] {
 				case 'n':
 					out = append(out, '\n')
 				case 'r':
@@ -256,15 +260,15 @@ func LookupManual(mac, namesPath string) (string, bool) {
 				case 't':
 					out = append(out, '\t')
 				case 'u':
-					if p+4 < len(s) {
-						if v, err := strconv.ParseUint(s[p+1:p+5], 16, 32); err == nil {
+					if p+4 < len(orig) {
+						if v, err := strconv.ParseUint(orig[p+1:p+5], 16, 32); err == nil {
 							// 与 C 的对称编解码一致: BMP 内按 UTF-8 编出
 							out = appendRune(out, rune(v))
 							p += 4
 						}
 					}
 				default:
-					out = append(out, s[p]) // \" \\ 等
+					out = append(out, orig[p]) // \" \\ 等
 				}
 				p++
 				continue
@@ -278,6 +282,17 @@ func LookupManual(mac, namesPath string) (string, bool) {
 		}
 		return "", false
 	}
+}
+
+// asciiLower 只把 A–Z 变小写(长度不变, 偏移可与原文对照)。
+func asciiLower(s string) string {
+	b := []byte(s)
+	for i, c := range b {
+		if c >= 'A' && c <= 'Z' {
+			b[i] = c + 'a' - 'A'
+		}
+	}
+	return string(b)
 }
 
 func appendRune(out []byte, r rune) []byte {

@@ -28,10 +28,35 @@
 
 ### Internals
 
-- 新包 `src/dpid/devscan`(设备表纯逻辑:事件 → 表、全量兜底、90 秒离线、多 IP 挑选、`devices.json` 渲染;9 项单测含与 hotspotd 同输入样例的逐字段一致)与 `src/dpid/devname`(六级名字解析 + OUI 数据文件;单测覆盖每级命中 / 跳过、垃圾名、`cache:` 回放、与 C 表锚点一致)。看门狗侧 `m4_owner.go`:owner 状态机、Go 写者运行器(rc30.9 的毫秒级去抖算法逐参数对齐:200ms 硬限速 / 500ms 空闲即写 / 200ms 合并窗口 / 30s 兜底;流量字节 5s TTL、`stats_all` 3s 超时参数分开传不经 shell)。
+- 新包 `src/dpid/devscan`(设备表纯逻辑:事件 → 表、全量兜底、90 秒离线、多 IP 挑选、`devices.json` 渲染;9 项单测含与 hotspotd 同输入样例的逐字段一致)与 `src/dpid/devname`(六级名字解析 + OUI 数据文件;单测覆盖每级命中 / 跳过、垃圾名、`cache:` 回放、与 C 表锚点一致;缓存回放的来源前缀与 C 代码一致是 `cache-`)。看门狗侧 `m4_owner.go`:owner 状态机、Go 写者运行器(rc30.9 的毫秒级去抖算法逐参数对齐:200ms 硬限速 / 500ms 空闲即写 / 200ms 合并窗口 / 30s 兜底;流量字节 5s TTL、`stats_all` 3s 超时参数分开传不经 shell)。
 - hotspotd C 侧改动:`--no-discovery` 全部门控 + `REFRESH` / `SIGUSR1` 转发 + `STATUS` 追加;新增 `daemon/hotspotd/test/test_no_discovery.c`(host 编译,数设备 / 默认模式,接入 `test/unit/test_v531_no_discovery_c.sh`)。**C 改动未在 NDK 下交叉编译**(本沙箱无 NDK;CI 按 `.github/workflows/build.yml` 编),本机 gcc 完整编译通过。
 - 模拟设备:`test/sim/run_m4_sim_v531.sh`(场景照 WORK §4 T5 写好)+ `TestM4SimV531`(fields / go 两模式,逐字段比 `last_seen` / 字节以外全部;`simnet.sh` 支持 `HNC_SIM_HOTSPOTD_ARGS` 透传)。**本沙箱无 root,未跑**;维护者云端容器 `HNC_SIM=1 sh test/run_all.sh` 跑,报告 `m4_sim_report.txt` + `m4_sim_v531_report.txt`。
 - T0 基线(本沙箱):dpid `go vet ./...` + `go test ./...` + 4 个 android/arm64 交叉编译 + linux/arm vet 全过;`sh test/run_all.sh` 533/548 通过,13 项失败全部是 `bin/hnc_json`(shebang `/system/bin/sh`)在本 Linux 无该解释器所致的环境差异(维护者环境 538/540 全过),非代码回归;`HNC_SIM=1` 需 root 未跑。
+
+
+### 审查修复(Claude,合入前)
+
+GLM 交来的 5 个提交在 Claude 的云端容器里套上、跑全套自检和模拟设备后发现以下问题,逐条修复;每条都配了「改动前会失败」的测试(审查前的行为下失败、修复后通过,验证方式见提交说明)。
+
+- **Go 模式下设备名一直卡在 `pending` / MAC 尾号**:异步名字解析做完只改了内存表、没通知写盘,名字要等下一次邻居事件才写出去(GLM 自己写的模拟场景里一直没写出)—— 这一条就会触发 v5.31 工作文档 §8「设备名比 C 版差」的退路。解析回填后立刻标记待写。
+- **手动命名被转成小写**:读 `device_names.json` 时把整个文件转小写再取名字,「客厅的Mac」变「客厅的mac」、「iPad」变「ipad」。改为只在找 MAC 时不分大小写(与 C 一致),名字原样取。
+- **开机 / 退回 C 版后可能没人发现设备**:`run/m4_owner.current` 开机不清,`device_detect.sh` 按上次会话的值拉起 hotspotd;上次是 go、这次开关是 c(正是 v5.32 退路要用的「改回 C 版」)时,看门狗首拍直接认定 C 版、不动 hotspotd、也不起 Go 写者 —— hotspotd 在 `--no-discovery` 下跑,设备表冻结。现在每轮用 `STATUS` 核对 hotspotd 实际在不在做发现,与开关不符就纠正(两个方向都管)。
+- **切换时 hotspotd 可能停摆**:切换先让 hotspotd 退出再重拉,但重拉受「60 秒内不重复拉起」的崩溃保护限制 —— 刚被看门狗拉起不到 60 秒的 hotspotd(连同硬件加速兜底)会停到下一轮,切换确认失败、再退避 5 分钟。切换 / 纠偏是有意的重启,不再受这个冷却限制。
+- **已退出未回收的进程(僵尸)被当成还活着**:按 pidfile 和按名字找进程两处都会认僵尸,被 QUIT 的 hotspotd 没被及时回收时不会重新拉起(模拟环境里稳定复现;真机 init 回收快,不常见)。两处都改为不认僵尸。
+- **演练开关可能造成两个写者**:「是否演练」原来在每次写盘时查文件 —— 删掉开关到下一轮之间,演练写者会写正式的 `devices.json`;Go 版是写者时残留开关,正式文件反而没人写;演练时还会写正式的名字缓存。改为起写者时定死(只在 C 版是写者时才可能演练),演练不写名字缓存。
+- **切回 C 版时 Go 的名字解析还可能在写缓存**:停 Go 写者时没等在途的解析(最长约 1.5 秒),停了以后它还会写 `hostname_cache.json`。停写者现在等它们结束。
+- **刚接管时最多 30 秒设备表是空的 / 换过 IP 的设备随机报旧 IP**:Go 写者起来后要等 30 秒才第一次全量扫(改为立刻扫);全量扫时同一设备新旧两条 STALE 表项被当成同一时刻,挑哪个看 map 遍历顺序。`neigh` 包现在解析内核的 `NDA_CACHEINFO`(多久前确认可达),按「最近确认」挑新 IP。
+- **还不知道热点网卡编号时会收上游网卡的邻居**:编号为 0 在设备表里表示「不过滤」,WiFi 上网时的路由器等会被当成热点设备。编号认出来之前不收事件、每秒重试。
+- **热点关了 Go 写者照样每 200ms 醒一次**:看门狗只在热点开着时管它。现在探测到热点没开就停写者(热点再开时重新拉起)。
+- **测试不密封**:新加的看门狗测试和原有的「调用预算」测试会读写真实的 `/data/local/hnc`(名字解析路径、Go 写日志、开关文件没重定向;临时路径变量测试结束不恢复),预算测试每个还白等 1.2 秒走真实 socket。全部重定向、注入并恢复。
+- **模拟设备场景(T5)重写**:GLM 的版本没在 root 环境跑过 —— 路径没重定向全(看门狗读的是真实 `/data/local/hnc`,所以黑名单、手动名、DHCP 名全对不上)、不等异步名字解析、设备名 `mac_` 不合 simnet 的命名规则、「运行中切换」是脚本自己停起 hotspotd,完全没经过看门狗的切换代码(对 Go 写者的「已停写」检查恒为真)。现在整个场景把模拟目录绑到 `/data/local/hnc`、看门狗走正式路径;新增 `TestM4SimOwner` 用看门狗真实的切换管理器在真进程上走「开机纠偏 → 冷却内 c→go → Go 模式新设备 → go→c」,用两边的写日志确认写者不交错。接进 `run_all`(`test/unit/test_v531_sim_owner.sh`,`HNC_SIM=1` 才跑)。
+- **厂商表同步测试会改仓库文件**:不同步时直接重写 `src/dpid/devname/oui_table.txt`(把问题「修好」,下次就悄悄通过;违反「测试不改仓库文件」),且脚本按当前目录找路径。`tools/extract_oui.py` 加 `--out`、路径按仓库定位,测试抽到临时文件再比。
+- 其它:hotspotd 在 `--no-discovery` 下日志仍打印「mdns worker: started」(实际没起),改为「skipped」;GLM 原有的 refresh 测试在「起写者立刻全量扫」之后会白过,改成只有 refresh 才返回设备。
+- **记下、本版不修**(C 版老问题,v5.32 收尾时再定):C 版 hotspotd 重扫 ARP(开机、用户点「刷新」触发的 SIGUSR1)时,换过 IP 的设备若新旧两条表项都是 STALE,可能报回旧 IP —— 模拟设备稳定复现;Go 版已按内核确认时间挑新 IP。
+
+C 改动用 NDK r27c 交叉编译(arm64 / armv7,不含需要 libbpf 的 BPF 适配器)通过,无新增警告(GLM 的环境没有 NDK)。
+
+模拟设备(本容器,修复后):`run_m4_sim.sh`(C 模式对照,6 步)全过;`run_m4_sim_v531.sh` 场景 2 全字段影子 3 步、场景 3 Go 模式 2 步 + hotspotd 零写入、场景 4 运行中切换 5 步全过(切到 Go / 切回 C 各约 0.5 秒;本场景 Go 写 7 次、hotspotd 写 13 次,无交错)。
 
 ---
 

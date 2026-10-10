@@ -229,3 +229,23 @@ func TestMACFallbackEdge(t *testing.T) {
 		}
 	}
 }
+
+// TestManualKeepsCase 审查修复: 手动名原样保留大小写(只有找 MAC 时不分大小写)。
+// 旧实现把整个文件转小写后再取名字 →「客厅的Mac」变成「客厅的mac」、「iPad」变成「ipad」,
+// 与 C 版(hnc_lookup_manual_name 只在比 MAC 时 tolower)不一致。
+func TestManualKeepsCase(t *testing.T) {
+	r, _ := testResolver(t)
+	if err := os.WriteFile(r.NamesPath,
+		[]byte(`{"02:5A:00:00:00:01":"客厅的Mac","aa:bb:cc:dd:ee:ff":"Bob's iPad AB"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if hn, ok := LookupManual(macA, r.NamesPath); !ok || hn != "客厅的Mac" {
+		t.Fatalf("名字应原样保留大小写: %q %v", hn, ok)
+	}
+	if hn, ok := LookupManual("AA:BB:CC:DD:EE:FF", r.NamesPath); !ok || hn != "Bob's iPad AB" {
+		t.Fatalf("大写 MAC 查询 + 转义: %q %v", hn, ok)
+	}
+	if hn, src := r.Resolve(macA, ""); hn != "客厅的Mac" || src != "manual" {
+		t.Fatalf("Resolve 走手动名也要保留大小写: %q %q", hn, src)
+	}
+}
