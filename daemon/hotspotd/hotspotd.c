@@ -114,6 +114,7 @@ typedef struct {
     time_t  last_seen;
     time_t  last_resolve;               /* v3.5.0-rc R-2: 上次 resolve_hostname 时间,用于改名场景的 60s 时间窗口 re-resolve */
     time_t  pending_since;              /* v3.6 Commit 3: 挂 pending 状态的时间点,process_pending_mdns 读 */
+    time_t  confirmed_at;               /* v5.32 T2: 内核最近确认可达的绝对时间(0=未知); 全量重扫时 IP 只被更近确认的候选改写 */
     int     active;
     int     state;      /* NUD_* from netlink */
 } Device;
@@ -736,99 +737,274 @@ static void write_json(void) {
 }
 
 /* ══════════════════════════════════════════════════════════
-   ARP 补充扫描（/proc/net/arp 读取，用于 SIGUSR1 / 初始化）
+   ARP 补充扫描（用于 SIGUSR1 / 初始化 / ENOBUFS 重同步）
+
+   v5.32 T2: 换过 IP 的设备重扫时可能报回旧 IP —— /proc/net/arp 同一 MAC
+   可能有多行(旧表项还在 STALE), 旧行为按行序"后处理者覆盖" d->ip,
+   行序看内核, 结果看运气。现在:
+     - 首选 netlink RTM_GETNEIGH dump(带 NDA_CACHEINFO, ndm_confirmed
+       是距内核最近确认的 clock_t 滴答, USER_HZ=100), 同一 MAC 多条
+       候选时"更近确认"者才能改写已知设备的 IP —— 与行序无关的单调合并;
+     - netlink 读不了(老内核/权限)退回 /proc/net/arp: 候选没有确认
+       时间(confirmed_at=0), 行为与旧版一致(无条件覆盖, 同 MAC 后行赢)。
+   netlink 事件路径(nl_process)不动: 事件本身就是实时的, 直接覆盖没错。
 ══════════════════════════════════════════════════════════ */
-static void scan_arp(void) {
-    FILE *f = fopen(ARP_PROC, "r");
-    if (!f) return;
 
-    char line[256];
-    int  updated = 0;
-    /* v3.5.2 P2-D: 显式消费 fgets 返回值,不然 -Wunused-result 会报警 */
-    if (fgets(line, sizeof(line), f) == NULL) {
-        fclose(f);
-        return;  /* /proc/net/arp 读不到表头 → 直接退出 */
-    }
+/* 全量扫描的一条候选 */
+typedef struct {
+    char    mac[MAC_STR_LEN];
+    char    ip[IP_STR_LEN];
+    char    iface[IF_LEN];
+    time_t  confirmed_at;  /* 内核最近确认可达的绝对时间; 0=未知(/proc 退路) */
+} NeighCand;
 
-    while (fgets(line, sizeof(line), f)) {
-        char ip[IP_STR_LEN], hw[8], flags[8], mac[MAC_STR_LEN], mask[8], iface[IF_LEN];
-        if (sscanf(line, "%15s %7s %7s %17s %7s %15s",
-                   ip, hw, flags, mac, mask, iface) != 6)
-            continue;
-        /* flags=0x0 表示无效 */
-        if (strcmp(flags, "0x0") == 0) continue;
-        /* 过滤全零 MAC */
-        if (strcmp(mac, "00:00:00:00:00:00") == 0) continue;
-        /* 过滤非热点接口 (v5.9.6 P0-3: 正向确认) */
-        if (!is_confirmed_hotspot_iface(iface)) continue;
+/* dump 时与 nl_process 同口径的"有效"状态(Go 侧 neigh.go nudValid) */
+#define SCAN_NUD_VALID (NUD_REACHABLE | NUD_STALE | NUD_DELAY | NUD_PROBE)
 
-        /* MAC 转小写 */
-        for (int i = 0; mac[i]; i++) mac[i] = tolower((unsigned char)mac[i]);
+/* scan_apply_candidate: 一条候选并入 g_devs。纯逻辑不碰 IO —— host 单测
+ * 直接调(test_scan_arp_ip_select.c)。返回 1=处理了一条有效候选(计数语义
+ * 与旧 scan_arp 的 updated++ 相同)。已知设备的 IP 只在
+ *   c->confirmed_at > d->confirmed_at   (更近确认)
+ * 或 d->confirmed_at == 0               (当前未知, /proc 退路或事件路径建的)
+ * 时才改写, 同时推进 d->confirmed_at —— 单调, 与候选到达顺序无关。 */
+static int scan_apply_candidate(const NeighCand *c, time_t now_t) {
+    if (!c->mac[0] || !c->ip[0]) return 0;
+    if (strcmp(c->mac, "00:00:00:00:00:00") == 0) return 0;
+    if (!is_confirmed_hotspot_iface(c->iface)) return 0;
 
-        Device *d = find_device(mac);
-        time_t now_t = time(NULL);
-        if (!d) {
-            d = alloc_device();
-            strncpy(d->mac, mac, sizeof(d->mac)-1);
-            /* v3.6 Commit 3: scan_arp 不再调同步的 resolve_hostname
-             * (原来每个新设备会 popen mdns_resolve -t 800,N 台设备最坏 N × 800ms
-             * 主线程阻塞,这是 v3.5.2 CHANGELOG 承诺 v3.6 要修的 P0-B 剩余部分)。
-             *
-             * 新流程:快速解析(只 manual + mac 兜底,~1μs),如果是 mac 兜底就
-             * 标 pending,主循环的 process_pending_mdns 下一次 tick 会异步
-             * 调一次 mdns_resolve 把它升级成 mdns 或者确定降级为 mac。
-             *
-             * 用户感知:新设备立刻出现在 WebUI(hostname_src="pending"),1-N 秒后
-             * 变成真名字。比 v3.5.2 的"卡几秒设备才出现"体验更好,而且主线程永远
-             * 不会被一批新设备同时上线阻塞。 */
-            hnc_resolve_hostname_fast(mac, ip, DEVICE_NAMES_JSON,
-                                      d->hostname, sizeof(d->hostname),
-                                      d->hostname_src, sizeof(d->hostname_src));
-            d->last_resolve = now_t;
-            /* 如果 fast 只拿到 mac 兜底,挂 pending 等异步 mdns */
-            if (strcmp(d->hostname_src, "mac") == 0) {
+    char mac[MAC_STR_LEN];
+    strncpy(mac, c->mac, sizeof(mac)-1);
+    mac[sizeof(mac)-1] = '\0';
+    for (int i = 0; mac[i]; i++) mac[i] = tolower((unsigned char)mac[i]);
+
+    Device *d = find_device(mac);
+    if (!d) {
+        d = alloc_device();
+        strncpy(d->mac, mac, sizeof(d->mac)-1);
+        d->mac[sizeof(d->mac)-1] = '\0';
+        /* v3.6 Commit 3: scan_arp 不再调同步的 resolve_hostname
+         * (原来每个新设备会 popen mdns_resolve -t 800,N 台设备最坏 N × 800ms
+         * 主线程阻塞,这是 v3.5.2 CHANGELOG 承诺 v3.6 要修的 P0-B 剩余部分)。
+         *
+         * 新流程:快速解析(只 manual + mac 兜底,~1μs),如果是 mac 兜底就
+         * 标 pending,主循环的 process_pending_mdns 下一次 tick 会异步
+         * 调一次 mdns_resolve 把它升级成 mdns 或者确定降级为 mac。
+         *
+         * 用户感知:新设备立刻出现在 WebUI(hostname_src="pending"),1-N 秒后
+         * 变成真名字。比 v3.5.2 的"卡几秒设备才出现"体验更好,而且主线程永远
+         * 不会被一批新设备同时上线阻塞。 */
+        hnc_resolve_hostname_fast(mac, c->ip, DEVICE_NAMES_JSON,
+                                  d->hostname, sizeof(d->hostname),
+                                  d->hostname_src, sizeof(d->hostname_src));
+        d->last_resolve = now_t;
+        /* 如果 fast 只拿到 mac 兜底,挂 pending 等异步 mdns */
+        if (strcmp(d->hostname_src, "mac") == 0) {
+            strncpy(d->hostname_src, "pending", sizeof(d->hostname_src)-1);
+            d->hostname_src[sizeof(d->hostname_src)-1] = '\0';
+            d->pending_since = now_t;
+        }
+    } else if (hnc_should_re_resolve(d->hostname_src, d->last_resolve, now_t)) {
+        /* v3.5.0-rc R-2 + v3.5.2 P1-A:
+         * re-resolve 条件(hostname_src=="mac" 或窗口过期)以前调完整的
+         * resolve_hostname,其中 mdns 分支最坏阻塞 800ms。
+         *
+         * v3.8.4: 分两步
+         *   1. 先同步调 dhcp_only(只查 manual/dhcp/cache/oui/mac,~35ms),
+         *      大部分情况下 dhcp 或 cache 命中,直接返回真名
+         *   2. 只有 dhcp_only 返回 src=="mac"(所有快速路径都失败)时,
+         *      才 enqueue 到异步 worker 查 mdns
+         *   3. Worker 结果在主循环下一个 tick 通过 drain_results 写回
+         *
+         * 这样 mdns 查询完全不阻塞 scan_arp,但绝大多数设备(有 DHCP hostname 或
+         * cache 记录的)依然是同步解析,延迟不变。*/
+        resolve_hostname_dhcp_only(mac,
+                                   d->hostname, sizeof(d->hostname),
+                                   d->hostname_src, sizeof(d->hostname_src));
+        d->last_resolve = now_t;
+
+        /* 如果 dhcp_only 最终落到 mac 兜底且有 IP,enqueue 异步 mdns 查询 */
+        if (strcmp(d->hostname_src, "mac") == 0 && c->ip[0] != '\0') {
+            if (hnc_mdns_worker_enqueue(mac, c->ip)) {
+                /* 成功入队,标记为 pending-mdns 让 UI 显示"正在查询" */
                 strncpy(d->hostname_src, "pending", sizeof(d->hostname_src)-1);
                 d->hostname_src[sizeof(d->hostname_src)-1] = '\0';
                 d->pending_since = now_t;
             }
-        } else if (hnc_should_re_resolve(d->hostname_src, d->last_resolve, now_t)) {
-            /* v3.5.0-rc R-2 + v3.5.2 P1-A:
-             * re-resolve 条件(hostname_src=="mac" 或窗口过期)以前调完整的
-             * resolve_hostname,其中 mdns 分支最坏阻塞 800ms。
-             *
-             * v3.8.4: 分两步
-             *   1. 先同步调 dhcp_only(只查 manual/dhcp/cache/oui/mac,~35ms),
-             *      大部分情况下 dhcp 或 cache 命中,直接返回真名
-             *   2. 只有 dhcp_only 返回 src=="mac"(所有快速路径都失败)时,
-             *      才 enqueue 到异步 worker 查 mdns
-             *   3. Worker 结果在主循环下一个 tick 通过 drain_results 写回
-             *
-             * 这样 mdns 查询完全不阻塞 scan_arp,但绝大多数设备(有 DHCP hostname 或
-             * cache 记录的)依然是同步解析,延迟不变。*/
-            resolve_hostname_dhcp_only(mac,
-                                       d->hostname, sizeof(d->hostname),
-                                       d->hostname_src, sizeof(d->hostname_src));
-            d->last_resolve = now_t;
+            /* 队列满则保持 mac 兜底,下轮 re-resolve 会再试 */
+        }
+    }
+    /* v5.32 T2 核心: IP 只在候选更近确认时才改写(见函数头注释) */
+    if (d->confirmed_at == 0 || c->confirmed_at > d->confirmed_at) {
+        strncpy(d->ip, c->ip, sizeof(d->ip)-1);
+        d->ip[sizeof(d->ip)-1] = '\0';
+        if (c->confirmed_at > 0) d->confirmed_at = c->confirmed_at;
+    }
+    strncpy(d->iface, c->iface, sizeof(d->iface)-1);
+    d->iface[sizeof(d->iface)-1] = '\0';
+    d->last_seen = now_t;
+    d->active    = 1;
+    d->state     = NUD_STALE; /* 保守估计(候选不携带状态, /proc 也没有) */
+    return 1;
+}
 
-            /* 如果 dhcp_only 最终落到 mac 兜底且有 IP,enqueue 异步 mdns 查询 */
-            if (strcmp(d->hostname_src, "mac") == 0 && ip[0] != '\0') {
-                if (hnc_mdns_worker_enqueue(mac, ip)) {
-                    /* 成功入队,标记为 pending-mdns 让 UI 显示"正在查询" */
-                    strncpy(d->hostname_src, "pending", sizeof(d->hostname_src)-1);
-                    d->hostname_src[sizeof(d->hostname_src)-1] = '\0';
-                    d->pending_since = now_t;
+/* nl_parse_dump_msgs: 解析一段 RTM_GETNEIGH dump 响应 → 候选数组。
+ * 纯解析(host 单测直调): NLMSG 对齐前进, RTM_NEWNEIGH 按 nl_process 同口径
+ * 过滤(family AF_INET + SCAN_NUD_VALID + 6 字节 MAC + 热点 iface),
+ * NDA_CACHEINFO 的 confirmed(u32, 距今 clock_t)换算成绝对时间。
+ * 返回解析出的候选数; 遇到 NLMSG_ERROR 返回 -1。 */
+static int nl_parse_dump_msgs(const char *buf, size_t len, time_t now_t,
+                              NeighCand *out, int max) {
+    int n = 0;
+    size_t off = 0;
+    while (off + sizeof(struct nlmsghdr) <= len) {
+        const struct nlmsghdr *nh = (const struct nlmsghdr *)(buf + off);
+        if (nh->nlmsg_len < sizeof(struct nlmsghdr) ||
+            off + nh->nlmsg_len > len) break;
+        if (nh->nlmsg_type == NLMSG_DONE) break;
+        if (nh->nlmsg_type == NLMSG_ERROR) return -1;
+        if (nh->nlmsg_type == RTM_NEWNEIGH &&
+            nh->nlmsg_len >= NLMSG_LENGTH(sizeof(struct ndmsg)) &&
+            n < max) {
+            const struct ndmsg *ndm = NLMSG_DATA(nh);
+            char ip_str[IP_STR_LEN] = {0};
+            char mac_str[MAC_STR_LEN] = {0};
+            char iface[IF_LEN] = {0};
+            long confirmed_ago = -1; /* 秒; -1 = 无 CACHEINFO */
+            if (ndm->ndm_family == AF_INET &&
+                (ndm->ndm_state & SCAN_NUD_VALID)) {
+                const struct rtattr *rta = NDM_RTA(ndm);
+                int rta_len = NLMSG_PAYLOAD(nh, sizeof(struct ndmsg));
+                for (; RTA_OK(rta, rta_len); rta = RTA_NEXT(rta, rta_len)) {
+                    if (rta->rta_type == NDA_DST &&
+                        rta->rta_len >= RTA_LENGTH(4)) {
+                        struct in_addr *a = (struct in_addr *)RTA_DATA(rta);
+                        if (!inet_ntop(AF_INET, a, ip_str, sizeof(ip_str)))
+                            ip_str[0] = '\0';
+                    } else if (rta->rta_type == NDA_LLADDR &&
+                               rta->rta_len >= RTA_LENGTH(6)) {
+                        const unsigned char *m =
+                            (const unsigned char *)RTA_DATA(rta);
+                        snprintf(mac_str, sizeof(mac_str),
+                                 "%02x:%02x:%02x:%02x:%02x:%02x",
+                                 m[0],m[1],m[2],m[3],m[4],m[5]);
+                    } else if (rta->rta_type == NDA_CACHEINFO &&
+                               rta->rta_len >= RTA_LENGTH(sizeof(struct nda_cacheinfo))) {
+                        const struct nda_cacheinfo *ci =
+                            (const struct nda_cacheinfo *)RTA_DATA(rta);
+                        /* ndm_confirmed: 距最近确认的 clock_t, USER_HZ=100 */
+                        confirmed_ago = (long)(ci->ndm_confirmed / 100u);
+                    }
                 }
-                /* 队列满则保持 mac 兜底,下轮 re-resolve 会再试 */
+                if (ip_str[0] && mac_str[0] &&
+                    strcmp(mac_str, "00:00:00:00:00:00") != 0 &&
+                    if_indextoname(ndm->ndm_ifindex, iface) &&
+                    is_confirmed_hotspot_iface(iface)) {
+                    NeighCand *c = &out[n++];
+                    memset(c, 0, sizeof(*c));
+                    strncpy(c->mac, mac_str, sizeof(c->mac)-1);
+                    strncpy(c->ip, ip_str, sizeof(c->ip)-1);
+                    strncpy(c->iface, iface, sizeof(c->iface)-1);
+                    if (confirmed_ago >= 0 && confirmed_ago < 86400*365)
+                        c->confirmed_at = now_t - (time_t)confirmed_ago;
+                    /* confirmed_ago 异常大(>1 年)当未知, 别把 confirmed_at
+                     * 拉回 1970 附近 */
+                }
             }
         }
-        strncpy(d->ip,    ip,    sizeof(d->ip)-1);
-        strncpy(d->iface, iface, sizeof(d->iface)-1);
-        d->last_seen = now_t;
-        d->active    = 1;
-        d->state     = NUD_STALE; /* 保守估计 */
-        updated++;
+        off += NLMSG_ALIGN(nh->nlmsg_len);
     }
-    fclose(f);
+    return n;
+}
+
+/* nl_dump_neighbors: 发 RTM_GETNEIGH dump, 收满或超时(500ms)返回候选数;
+ * 失败(socket/send/recv 一开始就错)返回 -1 → 调用方退回 /proc/net/arp。
+ * 用独立 socket(不 bind 组, 只收 dump 应答), 不干扰 g_nl_fd 的事件流。 */
+static int nl_dump_neighbors(NeighCand *out, int max) {
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0) return -1;
+    struct sockaddr_nl kernel = { .nl_family = AF_NETLINK };
+    struct {
+        struct nlmsghdr nh;
+        struct ndmsg    nd;
+    } req;
+    memset(&req, 0, sizeof(req));
+    req.nh.nlmsg_len   = NLMSG_LENGTH(sizeof(req.nd));
+    req.nh.nlmsg_type  = RTM_GETNEIGH;
+    req.nh.nlmsg_flags = NLM_F_REQUEST | NLM_F_DUMP;
+    req.nd.ndm_family  = AF_INET;
+    if (sendto(fd, &req, req.nh.nlmsg_len, 0,
+               (struct sockaddr *)&kernel, sizeof(kernel)) < 0) {
+        close(fd);
+        return -1;
+    }
+    time_t now_t = time(NULL);
+    int n = 0;
+    /* 500ms 总预算; NLMSG_DONE / EAGAIN / 超时就收工, 已收的照用 */
+    for (int spin = 0; spin < 50; spin++) {
+        fd_set rf;
+        struct timeval tv = { .tv_sec = 0, .tv_usec = 10000 };
+        FD_ZERO(&rf);
+        FD_SET(fd, &rf);
+        int r = select(fd+1, &rf, NULL, NULL, &tv);
+        if (r <= 0) { /* 超时或错: 没有更多数据 */
+            if (r == 0 && n > 0) break;     /* 已有数据, 10ms 无新消息 → 完 */
+            if (r == 0) continue;           /* 还一条没有, 继续等总预算 */
+            close(fd);
+            return -1;
+        }
+        char buf[16384];
+        ssize_t got = recv(fd, buf, sizeof(buf), 0);
+        if (got <= 0) break;
+        int rc = nl_parse_dump_msgs(buf, (size_t)got, now_t, out + n, max - n);
+        if (rc < 0) { close(fd); return -1; }
+        n += rc;
+        if (n >= max) break;
+        /* NLMSG_DONE 的判断在 parse 里 break 了, 但外层不知道 ——
+         * 收到任何一帧后再等 10ms 没有新数据就认为结束(上面 r==0 分支) */
+    }
+    close(fd);
+    return n;
+}
+
+static void scan_arp(void) {
+    int  updated = 0;
+    time_t now_t = time(NULL);
+
+    NeighCand *cands = malloc(sizeof(NeighCand) * 128);
+    if (!cands) return;
+    int n = nl_dump_neighbors(cands, 128);
+    if (n >= 0) {
+        /* netlink dump 路径: 候选带确认时间, IP 单调合并(见 scan_apply_candidate) */
+        for (int i = 0; i < n; i++)
+            updated += scan_apply_candidate(&cands[i], now_t);
+        free(cands);
+    } else {
+        /* 退回 /proc/net/arp(老内核/权限): confirmed_at=0 → 与旧版行为一致 */
+        free(cands);
+        FILE *f = fopen(ARP_PROC, "r");
+        if (!f) return;
+        char line[256];
+        /* v3.5.2 P2-D: 显式消费 fgets 返回值,不然 -Wunused-result 会报警 */
+        if (fgets(line, sizeof(line), f) == NULL) {
+            fclose(f);
+            return;  /* /proc/net/arp 读不到表头 → 直接退出 */
+        }
+        while (fgets(line, sizeof(line), f)) {
+            char ip[IP_STR_LEN], hw[8], flags[8], mac[MAC_STR_LEN], mask[8], iface[IF_LEN];
+            if (sscanf(line, "%15s %7s %7s %17s %7s %15s",
+                       ip, hw, flags, mac, mask, iface) != 6)
+                continue;
+            /* flags=0x0 表示无效 */
+            if (strcmp(flags, "0x0") == 0) continue;
+            NeighCand c;
+            memset(&c, 0, sizeof(c));
+            strncpy(c.mac, mac, sizeof(c.mac)-1);
+            strncpy(c.ip, ip, sizeof(c.ip)-1);
+            strncpy(c.iface, iface, sizeof(c.iface)-1);
+            updated += scan_apply_candidate(&c, now_t);
+        }
+        fclose(f);
+    }
 
     if (updated) {
         g_dirty = 1;
