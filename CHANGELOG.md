@@ -14,6 +14,43 @@
 
 ---
 
+## [5.32.0-rc1] - 2026-10-10
+
+**预览版 · 收尾与正式版候选**(工作文档 `docs/WORK-v5.32.md`)。不加新功能,把已知的账还清、把「退回 C 版」这条退路练通;**不改设备发现的默认值(仍 `go`)、不删旧代码**,正式版(去掉 `-rc`)等维护者真机回归后由 Claude 发。
+
+### Fixed
+
+- **未知应用建议名:启动指纹来源从未生效过**。`buildSuggest` 对组内 `domains` 误用了只认字符串数组的 `strList`,而真实形态是对象数组(`[{"name": "…"}]`),特征 token 集合永远为空 —— 「本机应用里写死了这些域名」的启动指纹提名一次都没出来过。抽出 `domainNames()`(取每个对象的 `name`,兼容字符串数组;证书探测目标的 `firstHost` 同步复用),`buildSuggest` 换用之。
+- **设备合并丢「按应用分优先级」**。`ruleState` 没有 `app_qos` 字段,旧设备开着它、合并到新 MAC 后静默丢失(限速 / 延迟 / 低延迟 / 白名单 / 黑名单都迁,唯独它不迁)。补齐:读 `rules.json` 的 `app_qos`、迁移块下发 `app_qos_set`(带回滚)、阶段二旧设备清理。布尔开关无冲突可言,下发只写 `rules.json` + 脏标记(看门狗 3 秒内重排计划),不需要设备在线。
+- **扫描计数恒为 1**。`device_detect.sh` 的 SIGUSR1 扫描按「含 `"mac"` 的行数」数设备 —— `devices.json` 是单行紧凑 JSON(C / Go 两个写者都这么写),恒为 1。改为数 `"mac":"` 的出现次数(与 hotspotd `STATUS` 数设备的口径一致,转义 hostname 里的 `"mac"` 不误数),并新增 `count` 子命令独立暴露。
+- **C 版重扫报回旧 IP(v5.31 记下的老问题)**。`SIGUSR1` / 初始化触发的 `scan_arp` 读 `/proc/net/arp`,同一 MAC 换 IP 后旧表项还在(STALE),旧行为按行序「后处理者无条件覆盖」—— 重扫可能把设备改回旧 IP。现在首选 netlink `RTM_GETNEIGH` dump(独立 socket,不干扰事件流),候选带 `NDA_CACHEINFO` 的最近确认时间,已知设备的 IP 只被**更近确认**的候选改写(单调,与行序无关);读不了 netlink(老内核 / 权限)退回 `/proc/net/arp`,行为与旧版完全一致。netlink 事件路径不动(事件本身是实时的,直接覆盖没错)。
+- **一处 gofmt**:`dpid_replay/replay_test.go` 文件尾多余空行;顺带把基线遗留的 5 个未格式化 httpd 文件(注释对齐差异)一并 `gofmt`。
+
+### Changed
+
+- **Go 写者空闲降频**:热点开着时主循环原来固定每 200ms 醒一次,现在「有待写变化 / 有待解析的名字 / 在途解析」时 200ms、全空闲 1 秒(实测空闲 3 秒醒 3 次,旧代码约 15 次)。`REFRESH` / `SIGUSR1`(touch `run/devices.refresh`)的 mtime 检查每拍都做,`device_detect.sh scan` 依赖的「1 秒内 `devices.json` mtime 变了」照旧成立。
+
+### Internals
+
+- **退路演练(T3,不改默认值)**:默认值在测试里可替换、生产仍只写一处 —— 新增包级 `m4OwnerDefaultOverride`(生产永远为空)+ `m4OwnerDefaultNow()`;`readM4Owner` 的缺文件 / 不认识内容两个分支都走它。单测 + 模拟设备场景(`TestM4SimDefaultC`:模拟 v5.31 升级上来的手机 —— 无 `data/m4_owner`、`run/m4_owner.current` 还是上次的 `go`、hotspotd 以 `--no-discovery` 跑 → 默认换成 `c` 后一轮内恢复发现、写出全部设备;再换回 `go` → 切到 Go 版;写日志确认写者不交错)验证「正式版把默认值改成 `c`」这一步改了就能用。
+- 新测试:`test/unit/test_v532_scan_count.sh`(计数 3 项)、`daemon/hotspotd/test/test_scan_arp_ip_select.c`(host 编译,21 项断言:dump 解析 + 单调合并,接入 `test/unit/test_v532_scan_arp_c.sh`)、`test/sim/run_m4_sim_v532.sh` + `test/unit/test_v532_sim_rescan.sh`(T2 场景:换 IP 后不发包直接 `SIGUSR1` 重扫 ×3 + 重启 ×2,每次都是新 IP)、`TestM4NextTickMS` / `TestRunnerIdleWakeRate`(T4)。每个修复都有「改动前会失败」的证据(BASE 干净树上新测试编译失败或行为断言不过,验证输出见提交说明)。
+- hotspotd C 改动(`scan_arp` / `nl_parse_dump_msgs` / `scan_apply_candidate` / `Device.confirmed_at`)本机 gcc 完整编译链接通过(含全部生产文件);**未在 NDK 下交叉编译**(本沙箱无 NDK;CI 按 `.github/workflows/build.yml` 编,审查时 Claude 用 NDK 编)。
+- 模拟设备(T2 / T3 场景)**本沙箱无 root 未跑**;维护者云端容器 `HNC_SIM=1 sh test/run_all.sh` 跑,报告 `m4_sim_v531_report.txt` + `m4_sim_v532_report.txt`。
+- 文档:README(hotspotd / hnc_watchdog 职责与现状一致、新增「升级与回退」段:5.29 自动回滚、`data/m4_owner` 的退路用法)、ROADMAP(v5.32 标 rc1 ✅)、CODEMAP(m4_owner 段补 v5.32 变化)、API.md(devices.json 写者说明修正)。
+
+---
+
+## 5.x 正式版(草稿,等维护者真机回归后发)
+
+相对上一个正式版(5.18 及更早)的变化,面向用户的说明草稿:
+
+- **设备发现与设备名解析换了实现**(v5.31 起,默认 Go 版):设备列表、在线状态、IP 变化、自动起名的行为与 C 版对齐(同一套优先级与垃圾名过滤;厂商表单一数据源)。换来的是:设备表更新不再依赖轮询 ARP(hotspotd),改订阅内核邻居事件;换过 IP 的设备在重扫时不再可能报回旧 IP(v5.32 起 C 版退路也修了)。
+- **退路开关**:真机上若设备发现表现异常,`data/m4_owner` 写 `c` 即回到 v5.30 行为(hotspotd 做 discovery),不重启手机、约 60 秒内生效,不用重装。判定标准见 `docs/WORK-v5.31.md` §8。
+- **按应用分优先级 / 应用限速 / 分时段 / 配额 / 延迟模拟**等功能与 5.18→5.31 之间的各版增量(详见各版 CHANGELOG)。
+- 正式版时再定:设备发现默认值(真机回归结论)、旧代码删除清单(shell 守护兜底、Go supervisor、hotspotd 的发现代码)、方案 B(hotspotd 退役)。
+
+---
+
 ## [5.31.0-rc1] - 2026-10-09
 
 **预览版 · 迁移 M4 方案 A:设备发现与名字解析搬进 Go 看门狗**(工作文档 `docs/WORK-v5.31.md`)。
