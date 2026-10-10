@@ -13,7 +13,12 @@
 #   交换让新表项出现(REACHABLE)。之后不再发包, 等表项 STALE(35 秒)再重扫,
 #   新旧表项状态相同, 只有「最近确认时间」可分胜负 —— 这正是要测的点。
 #
-# 要 root、iproute2、gcc(go 不需要 —— 场景只跑 hotspotd)。
+# T3 场景(5): 退路演练 —— 默认值换成 c(TestM4SimDefaultC): 模拟 v5.31 升级上来
+# 的手机(无 data/m4_owner、run/m4_owner.current 还是上次的 go、hotspotd 以
+# --no-discovery 跑) → 默认 c 后一轮内 hotspotd 恢复发现写出全部设备 → 默认
+# 换回 go → 切到 Go 版; 两边写日志不交错(照 run_m4_sim_v531.sh 场景 4)。
+#
+# 要 root、iproute2、gcc、go、mount。
 # 报告: $HNC_SIM_DIR/m4_sim_v532_report.txt。
 
 set -u
@@ -22,7 +27,7 @@ export HNC_SIM_DIR=${HNC_SIM_DIR:-/tmp/hnc_sim}
 
 skip() { echo "SKIP: $*"; exit 77; }
 [ "$(id -u)" = 0 ] || skip "需要 root"
-for c in ip gcc unshare; do command -v "$c" >/dev/null 2>&1 || skip "缺 $c"; done
+for c in ip gcc go mount unshare; do command -v "$c" >/dev/null 2>&1 || skip "缺 $c"; done
 if [ "${HNC_SIM_INNER:-}" != 1 ]; then
     HNC_SIM_INNER=1 exec unshare --net --mount --propagation private bash "$0" "$@"
 fi
@@ -107,6 +112,41 @@ if [ "$NEIGH_N" -ge 3 ]; then
 else
     say "  (邻居表只有 $NEIGH_N 条同 MAC 表项; GC 比预期快, 场景强度打折)"
 fi
+
+# ── 5. T3 退路演练(要 go): 默认值换成 c 这条路改了就能用 ──────────────
+SIMNET=$REPO/test/sim/simnet.sh
+expect() { awk 'NF >= 3 { printf "%s %s;", $2, $3 }' "$HNC_SIM_DIR/devices"; }
+run_test() {
+    name=$1 test=$2; shift 2
+    out=$(env HNC_SIM_IFACE=hncsim0 HNC_SIM_EXPECT="$(expect)" HNC_SIM_NAMES="$NAMES" HNC_SIM_BLOCKED="" "$@" \
+        "$HNC_SIM_DIR/m4sim532.test" -test.run "^$test\$" -test.count=1 -test.v 2>&1)
+    if echo "$out" | grep -q -- "--- PASS: $test"; then
+        say "  ✓ $name"
+        echo "$out" | grep -E '^\s+m4_sim_v531_test.go:[0-9]+: [0-9]\.' | sed 's/^\s*m4_sim_v531_test.go:[0-9]*: /      /' | tee -a "$REPORT"
+    else
+        fail "$name"
+        echo "$out" | grep -E 'm4_sim_v531_test.go|FAIL|panic' | head -20 | sed 's/^/      /' | tee -a "$REPORT"
+    fi
+}
+
+say "5. T3 退路演练: 默认值换成 c —— 模拟 v5.31 升级上来的手机(无开关文件)"
+# tv 带名字固定在 .122(dhcp_events 里给它一条新 IP 的记录, 名字解析稳定)
+$SIM ip tv 192.168.43.122 Redmi-TV >/dev/null
+sleep 1
+$SIM poke tv >/dev/null
+NAMES='02:5a:00:00:00:01=Redmi-TV@dhcp'
+# 看门狗代码走正式路径: 模拟目录绑到 /data/local/hnc(v531 场景同款)
+mkdir -p /data/local/hnc && mount --bind "$HNC" /data/local/hnc || { fail "绑不了 /data/local/hnc"; }
+cp "$HNC_SIM_DIR/bin/hotspotd" "$HNC/bin/hotspotd"
+export PATH="$REPO/test/sim/fake:$PATH"
+(cd "$REPO/src/dpid" && CGO_ENABLED=0 go test -c -o "$HNC_SIM_DIR/m4sim532.test" ./cmd/hnc_watchdog/) || { fail "测试二进制编译失败"; }
+# 前置: hotspotd 换 --no-discovery(上次会话按 go 拉起的), 没有开关文件, current 还是 go
+$SIM hotspotd stop >/dev/null
+HNC_SIM_HOTSPOTD_ARGS="--no-discovery" $SIM hotspotd start >/dev/null || { fail "hotspotd 起不来"; }
+rm -f "$HNC/data/m4_owner"
+printf 'go\n' > "$HNC/run/m4_owner.current"
+run_test "默认 c → hotspotd 恢复发现写出全部设备 → 默认 go → 切 Go 版; 写者不交错" TestM4SimDefaultC \
+    HNC_SIM_DEFAULT=1 HNC_SIM_SIMNET="$SIMNET"
 
 say "== 结果: $([ "$FAILS" = 0 ] && echo "全部通过" || echo "$FAILS 处不对") · 报告 $REPORT =="
 [ "$FAILS" = 0 ]

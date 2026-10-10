@@ -337,3 +337,47 @@ func (f *fakeNeighSource) Read() ([]neigh.Entry, error) {
 }
 
 func (f *fakeNeighSource) Close() error { close(f.stop); return nil }
+
+// TestOwnerDefaultFallbackC v5.32 T3: 「默认值改回 c」这条路改了就能用。
+// 模拟 v5.31 升级上来的手机: 没有 data/m4_owner, hotspotd 却以
+// --no-discovery 跑着(开机时 device_detect.sh 照 run/m4_owner.current=go
+// 拉起)。默认值换成 c 后: owner=c、hotspotd 被纠正回做发现、Go 写者不起。
+// 「改动前会失败」: 基线(BASE=6dda4518)没有 m4OwnerDefaultOverride,
+// 本测试编译失败(undefined: m4OwnerDefaultOverride)。
+func TestOwnerDefaultFallbackC(t *testing.T) {
+	dir := m4TestEnv(t)
+	m4OwnerDefaultOverride = "c" // 模拟「正式版把 m4OwnerDefault 改成 c」
+	t.Cleanup(func() { m4OwnerDefaultOverride = "" })
+
+	// 1) 没有开关文件 → 默认 c
+	if err := os.Remove(filepath.Join(dir, "m4_owner")); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	if got := (&m4OwnerMgr{}).readM4Owner(); got != "c" {
+		t.Fatalf("默认换成 c 后, 缺开关文件应得 c, 得 %q", got)
+	}
+
+	// 2) 场景: hotspotd 以 --no-discovery 跑(STATUS 带 discovery:0),
+	//    run/m4_owner.current 还是上一次会话的 go —— 开机窗口第一拍。
+	quitN, ensureN := 0, 0
+	m := &m4OwnerMgr{wired: true}
+	m.hotspotdStatusFn = func() (string, error) { return "running:1 devices:0 pid:1 discovery:0\n", nil }
+	m.ensureHotspotdFn = func() error { ensureN++; return nil }
+	m.quitHotspotdFn = func() error { quitN++; return nil }
+	m.tick("lo", time.Now())
+	if m.owner != "c" {
+		t.Fatalf("默认 c + 缺开关: owner 应为 c, 得 %q", m.owner)
+	}
+	if m.runner != nil {
+		t.Fatal("默认 c 时 Go 写者不许起")
+	}
+	// owner=c 而 hotspotd 在 no-discovery → reconcile 纠偏(重启回发现模式)
+	if quitN == 0 || ensureN == 0 {
+		t.Fatalf("应重启 hotspotd 纠偏回发现模式(quit=%d ensure=%d)", quitN, ensureN)
+	}
+	// run/m4_owner.current 每轮都写, 供 device_detect.sh 读
+	b, err := os.ReadFile(filepath.Join(dir, "m4_owner.current"))
+	if err != nil || strings.TrimSpace(string(b)) != "c" {
+		t.Fatalf("m4_owner.current 应为 c: %q %v", string(b), err)
+	}
+}

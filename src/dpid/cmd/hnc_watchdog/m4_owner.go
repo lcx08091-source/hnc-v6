@@ -45,6 +45,20 @@ import (
 // 是 "c"。真机出现 §8 任一问题, v5.32 正式版改回 "c"。
 const m4OwnerDefault = "go"
 
+// m4OwnerDefaultOverride 只在测试里覆盖默认值(v5.32 T3 退路演练: 验证
+// 「正式版把 m4OwnerDefault 改成 c」这一步改了就能用)。生产永远为空 ——
+// 默认值的取值仍只写在一处: 正式版要改默认, 改上面的 m4OwnerDefault 常量,
+// 这里不提供第二条生产路径。
+var m4OwnerDefaultOverride string
+
+// m4OwnerDefaultNow 当前生效的默认值(测试覆盖 > 常量)。
+func m4OwnerDefaultNow() string {
+	if m4OwnerDefaultOverride != "" {
+		return m4OwnerDefaultOverride
+	}
+	return m4OwnerDefault
+}
+
 const (
 	m4WriteHardRateMS = 200              // 距上次写 <200ms 永不写(rc30.9 硬限速)
 	m4WriteIdleMS     = 500              // 空闲后首事件立即写(rc30.9)
@@ -157,13 +171,13 @@ func (m *m4OwnerMgr) readM4Owner() string {
 		return v
 	default:
 		if os.IsNotExist(err) {
-			return m4OwnerDefault
+			return m4OwnerDefaultNow()
 		}
 		if v != m.lastBad {
 			m.lastBad = v
-			logf("m4_owner: 不认识的内容 %q, 用默认 %q", v, m4OwnerDefault)
+			logf("m4_owner: 不认识的内容 %q, 用默认 %q", v, m4OwnerDefaultNow())
 		}
-		return m4OwnerDefault
+		return m4OwnerDefaultNow()
 	}
 }
 

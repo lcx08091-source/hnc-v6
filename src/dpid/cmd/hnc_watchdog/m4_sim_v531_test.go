@@ -421,3 +421,119 @@ func TestM4SimOwner(t *testing.T) {
 	}
 	t.Logf("5. 写者不交错 ✓(本场景 Go 写 %d 次, hotspotd 写 %d 次)", nGo, nC)
 }
+
+// TestM4SimDefaultC v5.32 T3: 「默认值改回 C 版」这条路改了就能用(退路演练,
+// 本版不改真实默认值)。模拟 v5.31 升级上来的手机: 没有 data/m4_owner、
+// run/m4_owner.current 还是上次的 go、hotspotd 以 --no-discovery 跑着。
+// 默认值换成 c(m4OwnerDefaultOverride, 只测试用) → 一轮之内 hotspotd 恢复
+// 发现、写出全部设备; 默认值换回 go → 切到 Go 版。写日志确认写者不交错
+// (照 TestM4SimOwner 第 5 步)。旧代码下失败: 基线没有 m4OwnerDefaultOverride
+// (编译失败); 行为层(不开 override 直接用真实默认 go)则第一步就切去 Go 版,
+// hotspotd 不会恢复发现。
+func TestM4SimDefaultC(t *testing.T) {
+	iface, simnet := os.Getenv("HNC_SIM_IFACE"), os.Getenv("HNC_SIM_SIMNET")
+	if iface == "" || os.Getenv("HNC_SIM_DEFAULT") != "1" || simnet == "" {
+		t.Skip("只在 test/sim/run_m4_sim_v532.sh 里跑(需要模拟设备)")
+	}
+	_, expect, names, _ := simEnv()
+	// 前置(脚本摆好): hotspotd 以 --no-discovery 跑, 没有 data/m4_owner。
+	if !strings.Contains(simStatus(), "discovery:0") {
+		t.Fatalf("前置条件: 脚本应先以 --no-discovery 拉起 hotspotd, STATUS=%q", simStatus())
+	}
+	if _, err := os.Stat(m4OwnerFile); err == nil {
+		t.Fatalf("前置条件: data/m4_owner 应不存在(模拟升级后没有开关文件)")
+	}
+	time.Sleep(1100 * time.Millisecond) // 写日志是秒级, 等过 1 秒再记起点
+	tStart := time.Now().Truncate(time.Second)
+	m := &m4OwnerMgr{}
+	m4Owner = m
+	defer func() {
+		m.hotspotDown()
+		_ = m4QuitHotspotd()
+		m4OwnerCur.Store("c")
+	}()
+	devsOK := func() bool {
+		devs, err := readDevs(m4DevicesJSON)
+		return err == nil && len(simProblems(devs, iface, expect, names, nil)) == 0
+	}
+
+	// 1. 默认值换成 c → 一轮之内 hotspotd 恢复发现、写出全部设备。
+	m4OwnerDefaultOverride = "c"
+	defer func() { m4OwnerDefaultOverride = "" }()
+	tC0 := time.Now()
+	m.tick(iface, time.Now())
+	if m.owner != "c" || m.runner != nil {
+		t.Fatalf("1. 默认 c: owner 应为 c 且 Go 写者不起, owner=%q runner=%v", m.owner, m.runner != nil)
+	}
+	if !waitFor(40*time.Second, discovering) {
+		t.Fatalf("1. hotspotd 应恢复发现, STATUS=%q", simStatus())
+	}
+	if !waitFor(40*time.Second, devsOK) {
+		devs, _ := readDevs(m4DevicesJSON)
+		t.Fatalf("1. hotspotd 应写出全部设备(差异=%v)", simProblems(devs, iface, expect, names, nil))
+	}
+	tC := time.Now()
+	t.Logf("1. 默认→c ✓(恢复发现 %.1f 秒)STATUS=%q", tC.Sub(tC0).Seconds(), simStatus())
+
+	// 2. 默认值换回 go → 切到 Go 版(Go 写者写出全部设备)。
+	_ = os.Remove(m4DevicesJSON) // 切换前删: 之后出现的只能是新写者写的
+	m4OwnerDefaultOverride = ""
+	tGo0 := time.Now()
+	m.tick(iface, time.Now())
+	if m.owner != "go" || !strings.Contains(simStatus(), "discovery:0") {
+		t.Fatalf("2. 应切到 go 且 hotspotd 不做发现: owner=%q STATUS=%q", m.owner, simStatus())
+	}
+	if !waitFor(15*time.Second, devsOK) {
+		devs, _ := readDevs(m4DevicesJSON)
+		t.Fatalf("2. Go 写者应写出全部设备(差异=%v)", simProblems(devs, iface, expect, names, nil))
+	}
+	tGo := time.Now()
+	t.Logf("2. 默认→go ✓(切换 %.1f 秒)", tGo.Sub(tGo0).Seconds())
+
+	// 3. 写者不交错(照 TestM4SimOwner 第 5 步): C 的写只在 [起点, 切 go 开始]
+	//    之内; Go 的写只在 [切 go 开始, 结束] 之内。秒级日志, 两头各放 1 秒。
+	goWrites := logTimes(m4GoWriteLog, "2006-01-02T15:04:05", ": ", func(l string) string {
+		if i := strings.Index(l, ": "); i > 0 {
+			return l[:i]
+		}
+		return ""
+	})
+	cWrites := logTimes(filepath.Join(logDir, "hotspotd.log"), "2006-01-02 15:04:05", "JSON written", func(l string) string {
+		if len(l) >= 21 && l[0] == '[' {
+			return l[1:20]
+		}
+		return ""
+	})
+	nGo, nC := 0, 0
+	for _, w := range goWrites {
+		if !w.Before(tStart) {
+			nGo++
+		}
+	}
+	for _, w := range cWrites {
+		if !w.Before(tStart) {
+			nC++
+		}
+	}
+	if nGo == 0 || nC == 0 {
+		t.Fatalf("3. 写日志里本场景的写记录不全: Go %d 次, hotspotd %d 次", nGo, nC)
+	}
+	sec := time.Second
+	for _, w := range goWrites {
+		if w.Before(tStart) {
+			continue
+		}
+		if w.Before(tGo0.Truncate(sec).Add(-sec)) {
+			t.Errorf("3. Go 在 C 是写者的时候写了 devices.json: %s", w.Format("15:04:05"))
+		}
+	}
+	for _, w := range cWrites {
+		if w.Before(tStart) {
+			continue
+		}
+		if w.After(tGo0.Add(sec)) {
+			t.Errorf("3. hotspotd 在 Go 是写者的时候写了 devices.json: %s", w.Format("15:04:05"))
+		}
+	}
+	t.Logf("3. 写者不交错 ✓(本场景 hotspotd 写 %d 次, Go 写 %d 次)", nC, nGo)
+}
