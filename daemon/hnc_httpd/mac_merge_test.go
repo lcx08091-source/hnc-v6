@@ -182,6 +182,8 @@ func (f *fakeMergeOps) rule(action string, p map[string]string) actionResp {
 		dev()["sqm_enabled"] = p["enabled"] == "true"
 	case "device_whitelist_set":
 		dev()["whitelist"] = p["enabled"] == "true"
+	case "app_qos_set": // v5.32 T1: 按应用分优先级(rules.json 设备键)
+		dev()["app_qos"] = p["enabled"] == "true"
 	case "bl_add":
 		bl = append(bl, mac)
 	case "bl_del":
@@ -768,5 +770,47 @@ func TestAliasAggregationInUsageReads(t *testing.T) {
 	// 时长上限今日用量
 	if u := aliasUsedKeys(dir, map[string]int{mmOld + "|douyin": 600, mmNew + "|douyin": 60}); u[mmNew+"|douyin"] != 660 || len(u) != 1 {
 		t.Errorf("aliasUsedKeys = %v", u)
+	}
+}
+
+// TestDeviceMergeMigratesAppQos v5.32 T1: 设备合并要迁 app_qos(按应用分优先级)。
+// v5.32 之前 ruleState 没这个字段, 旧设备开着 app_qos 合并后静默丢 —— 旧代码下
+// 本测试在「新 MAC 的 rules.json 里找 app_qos」一步失败。
+func TestDeviceMergeMigratesAppQos(t *testing.T) {
+	dir, s, ops := mmFixture(t)
+	// 在 fixture 之上只给旧设备加 app_qos(其余不动)
+	root := mmRead(t, dir, "data/rules.json")
+	od, _ := root["devices"].(map[string]interface{})[mmOld].(map[string]interface{})
+	if od == nil {
+		t.Fatal("fixture: old device entry missing")
+	}
+	od["app_qos"] = true
+	mmWrite(t, dir, "data/rules.json", root)
+
+	r := dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew}, false)
+	if !r.OK {
+		t.Fatalf("merge failed: %+v (calls=%v)", r, ops.calls)
+	}
+	rules := mmRead(t, dir, "data/rules.json")
+	devs, _ := rules["devices"].(map[string]interface{})
+	nd, _ := devs[mmNew].(map[string]interface{})
+	if nd == nil {
+		t.Fatalf("new mac has no rules entry")
+	}
+	if v, _ := nd["app_qos"].(bool); !v {
+		t.Fatalf("app_qos 应迁移到新 MAC: %v", nd)
+	}
+	// 动作清单里要有下发与旧设备清理两条
+	setNew, clearOld := false, false
+	for _, c := range ops.calls {
+		if c == "app_qos_set "+mmNew {
+			setNew = true
+		}
+		if c == "app_qos_set "+mmOld {
+			clearOld = true
+		}
+	}
+	if !setNew || !clearOld {
+		t.Errorf("app_qos_set 调用缺: 新 %v / 旧 %v (calls=%v)", setNew, clearOld, ops.calls)
 	}
 }

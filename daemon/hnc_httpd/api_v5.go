@@ -57,9 +57,9 @@ type configResp struct {
 	HotspotIface string `json:"hotspot_iface"`
 	// v5.22: WebUI 访问白名单 {mode, macs, port, firewall}(webui_access.go)
 	WebUIAccess webuiAccessView `json:"webui_access"`
-	TcQosMode    string `json:"tc_qos_mode"`
-	TcQosScale   int    `json:"tc_qos_scale"`
-	QosFallback  bool   `json:"qos_fallback"`
+	TcQosMode   string          `json:"tc_qos_mode"`
+	TcQosScale  int             `json:"tc_qos_scale"`
+	QosFallback bool            `json:"qos_fallback"`
 	// v5.12: 定时 / 充电热点 与 过期规则清理天数
 	HotspotTimeEnable   bool   `json:"hotspot_time_enable"`
 	HotspotTimeStart    string `json:"hotspot_time_start"`

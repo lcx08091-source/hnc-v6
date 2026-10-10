@@ -207,22 +207,22 @@ func main() {
 	go srv.limiter.GCLoop(stopCh)
 	go srv.pruneLoop(stopCh)
 	go srv.writeCounter.GCLoop(stopCh)
-	go srv.OffloadLoop(stopCh)   // rc3.1.26 · 30s 刷 offload_status cache, 避免 apiOffloadStatus 同步跑 check_offload.sh (含 sleep 5)
-	go srv.AppUsageLoop(stopCh)  // v5.16: 按应用真实流量统计(conntrack 字节差分)
-	go srv.CtEventLoop(stopCh)   // v5.18: conntrack DESTROY 事件, 补短连接/连接尾巴(失败退纯轮询)
+	go srv.OffloadLoop(stopCh)  // rc3.1.26 · 30s 刷 offload_status cache, 避免 apiOffloadStatus 同步跑 check_offload.sh (含 sleep 5)
+	go srv.AppUsageLoop(stopCh) // v5.16: 按应用真实流量统计(conntrack 字节差分)
+	go srv.CtEventLoop(stopCh)  // v5.18: conntrack DESTROY 事件, 补短连接/连接尾巴(失败退纯轮询)
 	// v5.21: conntrack NEW 事件, 共现推断用的精确建连时间(失败退 10s 粒度)
 	go srv.CtNewEventLoop(stopCh)
-	go srv.CertProbeLoop(stopCh) // v5.15: 未知应用发现 · 后台取证书
-	go srv.limitCtl.Loop(stopCh) // 设备配额 + 分时段限速(每分钟对齐)
-	go srv.RateLoop(stopCh)      // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
-	go srv.PhoneUsageLoop(stopCh) // 本机/热点月度流量: 60s 采 /proc/net/dev, 停机补采落盘
+	go srv.CertProbeLoop(stopCh)        // v5.15: 未知应用发现 · 后台取证书
+	go srv.limitCtl.Loop(stopCh)        // 设备配额 + 分时段限速(每分钟对齐)
+	go srv.RateLoop(stopCh)             // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
+	go srv.PhoneUsageLoop(stopCh)       // 本机/热点月度流量: 60s 采 /proc/net/dev, 停机补采落盘
 	go srv.StatsCalibrationLoop(stopCh) // v5.21: 与系统 NetworkStats 对账 + 分流漏计检测(15 分钟)
-	go srv.V6NeighLoop(stopCh)    // v5.20: IPv6 新邻居(临时地址轮换)→ 500ms 内 v6_sync.sh sync_macs(失败退 60s 周期)
-	go srv.MacMergeLoop(stopCh)   // v5.21: 随机 MAC 画像 + 疑似同一设备建议(30s)
-	go srv.ActivityLoop(stopCh)     // v5.22: 亮屏/热点/在线设备/界面 → 活动档位 + run/activity.json(15s)
-	go srv.PowerSamplerLoop(stopCh) // v5.22: 自测 CPU/唤醒 → run/power_stats.json(5 分钟)
-	go srv.DNSTakeoverLoop(stopCh)  // DPI v2: 可选 DNS 接管(默认关; 开启时 10s 健康检查, 异常自动撤 DNAT)
-	go srv.fgTruthLoop(stopCh)      // v5.24 T2: 本机前台真值采集(仅本机抓包开启且亮屏时, 10s 探测, 只记变化)
+	go srv.V6NeighLoop(stopCh)          // v5.20: IPv6 新邻居(临时地址轮换)→ 500ms 内 v6_sync.sh sync_macs(失败退 60s 周期)
+	go srv.MacMergeLoop(stopCh)         // v5.21: 随机 MAC 画像 + 疑似同一设备建议(30s)
+	go srv.ActivityLoop(stopCh)         // v5.22: 亮屏/热点/在线设备/界面 → 活动档位 + run/activity.json(15s)
+	go srv.PowerSamplerLoop(stopCh)     // v5.22: 自测 CPU/唤醒 → run/power_stats.json(5 分钟)
+	go srv.DNSTakeoverLoop(stopCh)      // DPI v2: 可选 DNS 接管(默认关; 开启时 10s 健康检查, 异常自动撤 DNAT)
+	go srv.fgTruthLoop(stopCh)          // v5.24 T2: 本机前台真值采集(仅本机抓包开启且亮屏时, 10s 探测, 只记变化)
 
 	if haveRemote {
 		if *flagNoTLS {

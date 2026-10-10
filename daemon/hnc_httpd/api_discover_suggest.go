@@ -241,7 +241,7 @@ func (s *server) buildSuggest(g map[string]interface{}, ix apkIndex, apks []map[
 	}
 	// 2. 启动指纹: 组内域名(全名)→ token, 与可用应用的特征 token 重合 ≥ 2
 	gtoks := map[string]bool{}
-	for _, d := range strList(g["domains"]) {
+	for _, d := range domainNames(g) {
 		if tok := startupToken(d); tok != "" {
 			gtoks[tok] = true
 		}

@@ -81,8 +81,8 @@ func (s *server) apiSLA(w http.ResponseWriter, r *http.Request) {
 		// JSON 写健康
 		"json_legacy_fallback_count": readInt("json_legacy_fallback.count"),
 		// 能力降级标记(存在=正处于降级)
-		"qos_fallback_active":  marker("tc_qos_fallback"),
-		"uplink_unsupported":   marker("uplink_unsupported"),
+		"qos_fallback_active": marker("tc_qos_fallback"),
+		"uplink_unsupported":  marker("uplink_unsupported"),
 	}
 	setNoStore(w)
 	writeJSON(w, http.StatusOK, resp)

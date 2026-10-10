@@ -163,10 +163,18 @@ do_scan_via_daemon() {
         return 1
     fi
     local cnt
-    cnt=$(awk 'BEGIN{n=0} /"mac"/{n++} END{print n}' "$DEVICES_FILE" 2>/dev/null || echo 0)
+    cnt=$(count_devices_from_json "$DEVICES_FILE")
     log "scan via SIGUSR1: ${cnt} device(s)"
     echo "$cnt"
     return 0
+}
+
+# ── 设备计数(v5.32 T1) ───────────────────────────────────────
+# devices.json 是单行紧凑 JSON(C/Go 两个写者都这么写), 之前按「含 "mac" 的
+# 行数」数恒为 1; 改为数 "mac":" 的出现次数(与 hotspotd STATUS 数设备的
+# 口径一致)。函数独立出来, count 子命令与 do_scan_via_daemon 共用。
+count_devices_from_json() {
+    awk 'BEGIN{n=0} {n+=gsub(/"mac":"/, "x")} END{print n+0}' "$1" 2>/dev/null || echo 0
 }
 
 # ── hostname 缓存 (TTL=600s) ────────────────────────────────
@@ -717,8 +725,12 @@ case "${1:-scan}" in
             echo "shell_daemon pid=${dpid:-none}"
         fi
         ;;
+    count)
+        # v5.32 T1: 数 devices.json 里的设备数(单行 JSON 按出现次数, 不按行)
+        echo "$(count_devices_from_json "$DEVICES_FILE")"
+        ;;
     *)
-        echo "Usage: $0 [scan|daemon|list|iface|status]"
+        echo "Usage: $0 [scan|daemon|list|iface|status|count]"
         exit 1
         ;;
 esac

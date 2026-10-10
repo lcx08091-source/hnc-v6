@@ -88,14 +88,14 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	}
 
 	resp := map[string]interface{}{
-		"hotspot_active":  active,
-		"iface":           iface,
-		"hotspot_iface":   iface,
-		"hotspot_ip":      ip,
-		"online":          online,
-		"total":           total,
-		"rx_bps":          rxBps,
-		"tx_bps":          txBps,
+		"hotspot_active":       active,
+		"iface":                iface,
+		"hotspot_iface":        iface,
+		"hotspot_ip":           ip,
+		"online":               online,
+		"total":                total,
+		"rx_bps":               rxBps,
+		"tx_bps":               txBps,
 		"devices_sig":          liveDevicesSig(devices, active, iface),
 		"backend_version":      version,
 		"backend_version_code": versionCode,

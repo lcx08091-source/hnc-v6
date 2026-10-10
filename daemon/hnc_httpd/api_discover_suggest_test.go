@@ -2,7 +2,11 @@
 package main
 
 import (
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 )
 
 func sg(src, name string, strong, medium bool) sugCand {
@@ -146,4 +150,62 @@ func TestSuggestStartupTokenize(t *testing.T) {
 	if len(cands) == 0 {
 		t.Fatal("两个重合 token 应成为候选(阈值 >= 2)")
 	}
+}
+
+// TestSuggestStartupFromDomainObjects v5.32 T1: enrichGroup 真实数据形态下
+// 启动指纹来源要生效 —— 组的 domains 是对象数组([{"name": "…"}]), 之前
+// buildSuggest 误用 strList(只认字符串数组)拿到的永远是空, 启动指纹起名
+// 从未生效。这里种一张学习表、用真实 server 直调 buildSuggest 验证。
+func TestSuggestStartupFromDomainObjects(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().Unix()
+	// starts=8, token 频率: api 5/8=0.625, cdn 4/8=0.5 都是特征 token(≥0.5),
+	// featApps 要求 ≥2 个特征 —— 刚好可用。
+	fp := map[string]interface{}{
+		"version": 1,
+		"apps": []interface{}{map[string]interface{}{
+			"app_id": "com.ax", "name": "应用A", "starts": float64(8),
+			"tokens": map[string]interface{}{"api.ax.com": float64(5), "cdn.ax.com": float64(4),
+				"img.ax.com": float64(3), "log.ax.com": float64(2)},
+			"last": now, "upd": now,
+		}},
+	}
+	if err := os.WriteFile(filepath.Join(dir, "data", "startup_fp.json"),
+		[]byte(mustJSON(fp)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := newServer(dir)
+	// 组内 domains 是真实形态的对象数组; 其中 2 个与「应用A」特征重合(阈值 ≥2)。
+	g := map[string]interface{}{
+		"domains": []interface{}{
+			map[string]interface{}{"name": "api.ax.com"},
+			map[string]interface{}{"name": "cdn.ax.com"},
+			map[string]interface{}{"name": "static.other-site.com"},
+		},
+	}
+	out := s.buildSuggest(g, apkIndex{}, nil, "", "", nil, time.Now())
+	found := false
+	for _, src := range out.Sources {
+		if src.Src == "startup" && src.Name == "应用A" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("启动指纹来源应提名「应用A」: %+v", out.Sources)
+	}
+	if out.Name != "应用A" {
+		t.Errorf("唯一中等来源应成为建议名, got %q", out.Name)
+	}
+}
+
+// mustJSON 测试辅助: map → JSON 字符串(出错 panic)。
+func mustJSON(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(b)
 }

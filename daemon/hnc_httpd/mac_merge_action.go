@@ -127,6 +127,7 @@ type ruleState struct {
 	sqm      bool
 	wl       bool
 	bl       bool
+	appQos   bool // v5.32 T1: 按应用分优先级(此前合并会丢)
 }
 
 func (r ruleState) delayEq(o ruleState) bool {
@@ -170,6 +171,7 @@ func readRuleStates(hncDir string) (map[string]ruleState, error) {
 			r.delayMs, r.jitterMs, r.loss = 0, 0, "0"
 		}
 		r.sqm, r.wl = truthy(d["sqm_enabled"]), truthy(d["whitelist"])
+		r.appQos = truthy(d["app_qos"])
 		out[strings.ToLower(mac)] = r
 	}
 	bl, _ := root["blacklist"].([]interface{})
@@ -442,7 +444,7 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 				"jitter_ms": strconv.Itoa(r.jitterMs), "loss_pct": r.loss}
 		}
 		steps = append(steps, mergeStep{name: "rules", do: func() error {
-			if !newObs.exists && (oldWant.bl || oldWant.limit || oldWant.delay || oldWant.sqm || oldWant.wl) {
+			if !newObs.exists && (oldWant.bl || oldWant.limit || oldWant.delay || oldWant.sqm || oldWant.wl || oldWant.appQos) {
 				// 新 MAC 原来没有规则条目: 回滚最后把我们建的条目删掉(释放 mark_id)
 				undos = append(undos, func() { ops.rule("rules_device_remove", map[string]string{"mac": to}) })
 			}
@@ -493,6 +495,18 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 				touched = true
 				undos = append(undos, func() {
 					ops.rule("device_whitelist_set", map[string]string{"mac": to, "enabled": "false"})
+				})
+			}
+			// v5.32 T1: 按应用分优先级此前不在 ruleState 里, 合并会静默丢。
+			// 布尔开关无冲突可言; 下发走 app_qos_set(只写 rules.json +
+			// run/app_limit.dirty, 看门狗 3 秒内重排计划, 不需要设备在线)。
+			if oldWant.appQos && !newObs.appQos {
+				if err := run("app_qos_set", map[string]string{"mac": to, "enabled": "true"}); err != nil {
+					return err
+				}
+				touched = true
+				undos = append(undos, func() {
+					ops.rule("app_qos_set", map[string]string{"mac": to, "enabled": "false"})
 				})
 			}
 			if touched || oldObs.exists || oldObs.bl {
@@ -804,6 +818,10 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 	}
 	if oldObs.delay {
 		clearOld("delay_clear", map[string]string{"mac": from})
+	}
+	// v5.32 T1: 旧设备的按应用分优先级也一并关掉(与 sqm/wl 同款清理)
+	if oldObs.appQos {
+		clearOld("app_qos_set", map[string]string{"mac": from, "enabled": "false"})
 	}
 	if oldObs.exists {
 		clearOld("rules_device_remove", map[string]string{"mac": from})

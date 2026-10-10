@@ -476,18 +476,32 @@ func strList(v interface{}) []string {
 
 // firstHost 组里命中最多的完整主机名(证书探测目标)
 func firstHost(g map[string]interface{}) string {
-	if ds, ok := g["domains"].([]interface{}); ok {
-		for _, d := range ds {
-			m, _ := d.(map[string]interface{})
-			if n := asString(m["name"]); n != "" {
-				return n
-			}
-		}
+	if ns := domainNames(g); len(ns) > 0 {
+		return ns[0]
 	}
 	if s := strList(g["suffixes"]); len(s) > 0 {
 		return s[0]
 	}
 	return ""
+}
+
+// domainNames 组里全部完整域名。domains 是对象数组([{"name": "…"}]),
+// v5.32 T1 之前 buildSuggest 里误用 strList(只认字符串数组), 启动指纹
+// 起名因此从未生效 —— 这里统一取每个对象的 name, 并兼容字符串数组形态。
+func domainNames(g map[string]interface{}) []string {
+	var out []string
+	if ds, ok := g["domains"].([]interface{}); ok {
+		for _, d := range ds {
+			if m, ok := d.(map[string]interface{}); ok {
+				if n := asString(m["name"]); n != "" {
+					out = append(out, n)
+				}
+			} else if s := asString(d); s != "" {
+				out = append(out, s)
+			}
+		}
+	}
+	return out
 }
 
 // enrich 给一组加上证书 / 本机 App / 家族线索, 并得出最可能的名字

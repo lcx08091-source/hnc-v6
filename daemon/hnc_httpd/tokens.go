@@ -58,7 +58,7 @@ type TokensStore struct {
 	path     string // tokens.json 的绝对路径
 	mu       sync.RWMutex
 	tokens   map[string]Token
-	dirty    bool // v5.12: 内存有未落盘的变化; SaveLoop 只在 dirty 时写盘(此前每 30s 无条件全量重写, 闪存写放大)
+	dirty    bool  // v5.12: 内存有未落盘的变化; SaveLoop 只在 dirty 时写盘(此前每 30s 无条件全量重写, 闪存写放大)
 	lastRead int64 // 上次 reload 时的文件 mtime(Unix ns)
 }
 
@@ -254,7 +254,6 @@ func (s *TokensStore) PutIfAbsent(tokenID string, t Token) error {
 	s.tokens[tokenID] = t
 	return s.saveAtomicLocked()
 }
-
 
 // Revoke 把 id 标记 revoked=true 并立即持久化。id 不存在返回 false
 // (幂等语义,与旧 json_set.sh token_revoke 的静默行为一致)。
