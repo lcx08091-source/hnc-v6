@@ -175,7 +175,7 @@ Set-Cookie: hnc_token=<TokenID>.<Secret>; Path=/; Max-Age=2592000; HttpOnly; Sec
 ### 2.1 GET `/api/devices` — 设备列表(合并视图)
 
 - 鉴权:需鉴权。无参数。永远 200。
-- 数据来源(每次请求读,经 mtime+size 缓存):`$HNC/data/devices.json`(hotspotd 写,当前发现的客户端)、`$HNC/data/rules.json`(规则)、
+- 数据来源(每次请求读,经 mtime+size 缓存):`$HNC/data/devices.json`(当前写者写:`data/m4_owner=go`(默认)时是 Go 看门狗,`=c` 时是 hotspotd;任何时刻只有一个写者)、`$HNC/data/rules.json`(规则)、
   `$HNC/data/device_names.json`(手动命名)、`$HNC/run/dpi_state.json`(`clients[*].top_apps`)、内存中的 RateLoop 速率快照。
 - 合并规则:
   1. devices.json 每台设备 → 复制其全部字段,再用 `rules.json.devices[mac]`(大小写不敏感)覆盖

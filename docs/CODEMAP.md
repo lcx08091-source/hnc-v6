@@ -186,4 +186,6 @@ CONNMARK save/restore 掩码 `0xffffff`(`iptables_manager.sh`)。Android netd �
 | 每轮纠偏(审查加) | hotspotd 若在 `--no-discovery` 下跑(开机时 `device_detect.sh` 按上次会话的 `m4_owner.current` 拉起)→ 按原参数重启 | hotspotd 若仍在做发现 → 停 Go 写者后带参重启(走切换路径) |
 | 热点没开 | — | 停 Go 写者(不空转),热点再开时重新拉起 |
 
+**v5.32**:Go 写者主循环空闲降频(有事 200ms、全空闲 1 秒;REFRESH / SIGUSR1 的 mtime 检查每拍都做,`device_detect.sh scan` 依赖的「1 秒内 devices.json mtime 变了」照旧成立);hotspotd 的 C 版全量重扫(`scan_arp`)改走 netlink `RTM_GETNEIGH` dump,同一 MAC 多条候选按 `NDA_CACHEINFO` 的最近确认时间单调合并(换过 IP 的设备重扫不再报回旧 IP;读不了 netlink 退回 `/proc/net/arp`,行为同旧版);`device_detect.sh` 新增 `count` 子命令(数 devices.json 设备数,按 `"mac":"` 出现次数,单行 JSON 不再恒为 1)。
+
 **演练模式**(`run/wd_m4_drill` 存在,且只在 C 模式下生效):多起一个 Go 写者,只写 `run/devices.go.json`、不写名字缓存(全字段影子比对用,不碰正式文件);是否演练在起写者时定死。切换 / 纠偏重拉 hotspotd 不受 60 秒崩溃冷却限制;判断进程是否活着时僵尸不算。**Go 写者每次落盘记一行时间戳到 `run/m4_go_write.log`**,与 hotspotd.log 的 `JSON written` 行对照,用于「没有两个写者交替写」的验收。自检「看门狗动作」一行显示当前写者与写 / 失败 / 切换次数(`watchdog_actions.json` 的 `m4_owner` 等字段)。

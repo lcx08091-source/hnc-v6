@@ -468,6 +468,12 @@ You can also access HNC through the relevant KSU WebUI entry.
 > HNC requires root access and modifies system-level networking behavior. Do not install it on a device where you cannot recover from networking configuration changes.
 
 
+Upgrade & Rollback
+
+- Upgrades install over the existing module. Since v5.29 the service start script verifies basic health after an upgrade; if the new version fails to come up, it rolls back to the previous version automatically (see CHANGELOG 5.29).
+- To fall back manually, flash the previous release ZIP (or restore the backup kept under the module directory).
+- Since v5.31 device discovery has a single-writer switch: `data/m4_owner` — `go` (default, the Go watchdog writes `data/devices.json`) or `c` (hotspotd does discovery as before). If the Go writer misbehaves on your device, put `c` into that file and reboot (or wait ~60s for the watchdog); no reinstallation is needed. The fallback rules are defined in docs/WORK-v5.31.md §8.
+- v5.32 keeps that default (`go`) and does not remove the C discovery code; the final 5.x stable release will decide both after real-device regression.
 
 
 ---
@@ -1265,6 +1271,8 @@ Go 语言实现。
 
 运行状态告警
 
+设备发现与名字解析(v5.31 起 devices.json 的默认写者;单写者开关 data/m4_owner, 退路规则见 docs/WORK-v5.31.md §8;v5.32 起空闲时主循环 1 秒醒一次)
+
 
 hnc_launcher
 
@@ -1482,6 +1490,16 @@ http://127.0.0.1:8444/
 
 
 如果需要远程管理，请只在必要时开启 LAN 访问， 并完成 WebUI 的配对/认证流程。
+
+
+---
+
+升级与回退
+
+- 升级直接覆盖安装。v5.29 起服务启动脚本会在升级后做基本健康检查， 新版本起不来会自动回滚到上一个版本(见 CHANGELOG 5.29)。
+- 手动回退：刷回上一个版本的 ZIP(模块目录里也保留了备份)。
+- v5.31 起设备发现有单写者开关 `data/m4_owner`:`go`(默认， Go 看门狗写 `data/devices.json`)或 `c`(hotspotd 照旧做发现)。真机上如果 Go 写者表现异常， 把 `c` 写进该文件并重启(或等看门狗约 60 秒生效)， 不需要重装。「有问题」的判定与退路规则见 docs/WORK-v5.31.md §8。
+- v5.32 保持默认 `go` 不变、保留 C 版发现代码；正式版(去掉 -rc)等维护者真机回归后再决定。
 
 
 ---
