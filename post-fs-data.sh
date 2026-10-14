@@ -57,6 +57,14 @@ rm -f "$HNC_DIR"/run/tc_root_owned_* "$HNC_DIR"/run/tc_mq_child_* "$HNC_DIR"/run
 # 救命改写的 direct)不能带进新开机: Go 看门狗比 service.sh 落盘 choice 更早启动,
 # 读到旧 direct 会直拉 dpid, 随后 service.sh 又起 launcher → 双 dpid。缺失时看门狗按旧行为。
 rm -f "$HNC_DIR/run/dpid_launcher.choice" "$HNC_DIR/run/dpid_launcher.choice.tmp" 2>/dev/null
+# v5.33: 「只留一份」—— 设备发现写者开关 / 影子比对 / 演练、shell 扫描的名字缓存与
+# pid、dpid 守护的旧开关都没有读者了, 旧版本留下的文件清掉(不清也不影响, 只是免得
+# 有人以为改它们还有用)。
+rm -f "$HNC_DIR/data/m4_owner" "$HNC_DIR/run/m4_owner.current" "$HNC_DIR/run/wd_m4_drill" \
+      "$HNC_DIR/run/devices.go.json" "$HNC_DIR/run/devices.go.json.tmp" \
+      "$HNC_DIR/run/m4_shadow.json" "$HNC_DIR/run/wd_m4_shadow.disabled" \
+      "$HNC_DIR/run/hostname_cache" "$HNC_DIR/run/detect.pid" "$HNC_DIR/run/arp_hash" \
+      "$HNC_DIR/run/wd_m5.disabled" 2>/dev/null
 
 # 初始化规则文件 · rc3.1.13 起 auth_required 也在这
 [ ! -f "$HNC_DIR/data/rules.json" ] && cat > "$HNC_DIR/data/rules.json" << 'EOF'

@@ -180,9 +180,9 @@ func (fs FS) FindPID(d Def, hncDir string, tab map[int]Row) int {
 // 不再各自维护 —— 旧 selfcheck 的扫描关键字是裸 "hnc_dpid", 会把 hnc_dpid_guard.sh /
 // hnc_dpid_supervisor 误认成 dpid(dpid 已死却报「在跑」)。
 var specs = map[string]Def{
-	"hnc_httpd":     {Self: true, Key: "httpd"},
-	"hotspotd":      {PIDFiles: []string{"hotspotd.pid"}, Key: "hotspotd", ScanKey: "bin/hotspotd"},
-	"hnc_dpid":      {PIDFiles: []string{"dpid.child.pid", "dpid.pid"}, Key: "dpid", ScanKey: "bin/hnc_dpid -config"},
+	"hnc_httpd": {Self: true, Key: "httpd"},
+	"hotspotd":  {PIDFiles: []string{"hotspotd.pid"}, Key: "hotspotd", ScanKey: "bin/hotspotd"},
+	"hnc_dpid":  {PIDFiles: []string{"dpid.child.pid", "dpid.pid"}, Key: "dpid", ScanKey: "bin/hnc_dpid -config"},
 	// dpid 守护 = C hnc_launcher(v5.33 起唯一一种; 它和 service.sh 都写 dpid_guard.pid,
 	// 看门狗拉起时写 launcher.pid)。原来按 shell guard 的名字认, C launcher 一直认不出。
 	"dpid_guard":    {PIDFiles: []string{"dpid_guard.pid", "launcher.pid"}, Key: "hnc_launcher", ScanKey: "bin/hnc_launcher"},

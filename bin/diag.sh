@@ -145,11 +145,13 @@ NAMES_COUNT=0
 ok "数据文件" "rules=$RULES_COUNT 设备 / devices=$DEV_COUNT 在线 / names=$NAMES_COUNT 命名"
 
 # ── [8/14] hostname 缓存 ────────────────────────────────
-if [ -f "$HNC/run/hostname_cache" ]; then
-    CACHE_LINES=$(wc -l < "$HNC/run/hostname_cache" 2>/dev/null || echo 0)
+# v5.33: shell 扫描的 run/hostname_cache 随 shell 兜底删了; 名字缓存只有 Go 写者的
+# data/hostname_cache.json(DHCP / mDNS 解析出的名字, 设备重连时回放)。
+if [ -f "$HNC/data/hostname_cache.json" ]; then
+    CACHE_LINES=$(grep -oE '"[0-9a-f:]{17}":' "$HNC/data/hostname_cache.json" 2>/dev/null | wc -l)
     ok "hostname 缓存" "$CACHE_LINES 条记录"
 else
-    warn "hostname 缓存" "未生成(扫描尚未运行?)"
+    warn "hostname 缓存" "未生成(还没有设备经 DHCP / mDNS 解析出名字)"
 fi
 
 # ── [9/14] 数据备份(v3.4.9 新增) ────────────────────────

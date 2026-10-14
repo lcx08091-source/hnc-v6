@@ -73,23 +73,11 @@ func scWatchdogActionsItem(c *scCtx) scItem {
 	if nmm > 0 {
 		mmNote = fmt.Sprintf("; 原生检查与 shell 结论不一致 %d 次(已按 shell 处理, 连续 3 次该项退回 shell)", int(nmm))
 	}
-	// v5.30 T3: M4 设备发现影子(Go 读邻居表 vs hotspotd)。只观察, 不影响状态:
-	// 不一致是给 M4 第二步(替换 hotspotd)攒的对照数据, 明细在 run/m4_shadow.json。
-	if m4c, _ := m["m4_checks"].(float64); m4c > 0 {
-		m4m, _ := m["m4_mismatch"].(float64)
-		mmNote += fmt.Sprintf("; 设备发现影子: 比对 %d 轮, 不一致 %d 轮(只观察, 明细 run/m4_shadow.json)", int(m4c), int(m4m))
-	}
-	// v5.31 T1/T3: M4 方案 A —— 设备发现的写者(Go 看门狗 / hotspotd C 版)。
-	if owner, _ := m["m4_owner"].(string); owner != "" {
-		who := "C 版(hotspotd)"
-		if owner == "go" {
-			who = "Go 版(看门狗)"
-		}
-		w, _ := m["m4_go_writes"].(float64)
+	// 设备发现写者(v5.31 起 Go 看门狗; v5.33 起唯一一份)的写出 / 失败次数。只观察,
+	// 不影响状态。v5.30–v5.32 的影子比对(m4_checks)与写者开关(m4_owner)已删。
+	if w, ok := m["m4_go_writes"].(float64); ok {
 		f, _ := m["m4_go_write_fails"].(float64)
-		sw, _ := m["m4_switches"].(float64)
-		mmNote += fmt.Sprintf("; 设备发现: %s(开关 data/m4_owner; Go 写 %d 次 / 失败 %d 次, 切换 %d 次)",
-			who, int(w), int(f), int(sw))
+		mmNote += fmt.Sprintf("; 设备发现(Go 看门狗): 写 %d 次 / 失败 %d 次", int(w), int(f))
 	}
 
 	var totalCalls, totalFails float64

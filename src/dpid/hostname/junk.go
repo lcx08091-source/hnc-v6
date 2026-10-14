@@ -2,8 +2,9 @@
 //
 // 有些设备的 DHCP option 12 / mDNS 上报的就是字符串 "null" 之类, 以前全链路
 // 没人过滤 → WebUI 显示设备名 "null"。dpid(capture.cleanHostname)与 httpd
-// (/api/devices 挡存量)都用这里; hotspotd(C, hnc_hostname_is_junk)与前端
-// (isJunkName)各有一份同表, test/unit/test_v530_junk_table_sync.sh 核对一致。
+// (/api/devices 挡存量)、设备名解析(devname)都用这里; 前端(isJunkName)
+// 另有一份同表, test/unit/test_v530_junk_table_sync.sh 核对一致。(v5.33 起
+// C 版 hotspotd 不再解析名字, 它那份已删。)
 package hostname
 
 import "strings"

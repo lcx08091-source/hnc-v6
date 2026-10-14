@@ -186,15 +186,14 @@ func TestCacheReadWrite(t *testing.T) {
 	}
 }
 
-// TestOUITableMatchesC 与 C 表一致性: 数据文件从 hnc_helpers.c 抽出
-// (tools/extract_oui.py), 这里核对关键锚点 + 全表可载入。
-// 逐条比对在 test/unit/test_v531_oui_table_sync.sh(shell, 直接对 C 源)。
-func TestOUITableMatchesC(t *testing.T) {
+// TestOUITableAnchors 内置表(oui_table.txt, v5.33 起唯一数据源)可载入、
+// 关键锚点在、有序(二分前提)。格式 / 重复检查在 test/unit/test_v531_oui_table_sync.sh。
+func TestOUITableAnchors(t *testing.T) {
 	loadOUI()
 	if len(ouiKeys) < 400 {
 		t.Fatalf("内置表太小: %d", len(ouiKeys))
 	}
-	// 抽查 C 表头尾 + 注释里的知名厂商
+	// 抽查知名厂商
 	anchor := map[string]string{
 		"00:03:93": "Apple",  // C 表首段附近的 Apple
 		"28:6c:07": "Xiaomi", // 注释里点名的厂商

@@ -17,173 +17,30 @@ import (
 	"hnc.io/dpid/neigh"
 )
 
-// withTempM4Owner 预算类测试用: 全局 m4Owner 换成注入版(owner=c、hotspotd 正常),
-// 路径进临时目录 —— 不碰真实 /data/local/hnc, 也不走真实 socket(原来每个预算测试
-// 都在确认切换时白等 1.2 秒)。
-func withTempM4Owner(t *testing.T) {
+// withTempM4Writer 预算类测试用: 全局 m4Writer 换成新的(测试结束停掉并恢复),
+// 路径进临时目录 —— 不碰真实 /data/local/hnc。
+func withTempM4Writer(t *testing.T) {
 	t.Helper()
 	m4TestEnv(t)
-	old, oldCur := m4Owner, m4OwnerCur.Load()
-	m4Owner = &m4OwnerMgr{wired: true,
-		quitHotspotdFn:   func() error { return nil },
-		hotspotdStatusFn: func() (string, error) { return "running:1 devices:0 pid:1\n", nil },
-		ensureHotspotdFn: func() error { return nil },
-	}
-	_ = os.WriteFile(m4OwnerFile, []byte("c\n"), 0o644)
+	old := m4Writer
+	m4Writer = &m4WriterMgr{}
 	t.Cleanup(func() {
-		m4Owner.hotspotDown()
-		m4Owner = old
-		if oldCur == nil {
-			oldCur = "c"
-		}
-		m4OwnerCur.Store(oldCur)
+		m4Writer.hotspotDown()
+		m4Writer = old
 	})
 }
 
 // fakeRunner 一个只会「被停」的写者(看 stop 有没有被调)。
-func fakeRunner(iface string, drill bool) *m4GoRunner {
-	r := &m4GoRunner{iface: iface, drill: drill, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+func fakeRunner(iface string) *m4GoRunner {
+	r := &m4GoRunner{iface: iface, stopCh: make(chan struct{}), doneCh: make(chan struct{})}
 	go func() { <-r.stopCh; close(r.doneCh) }()
 	return r
-}
-
-// 审查修复 1: owner=c 但 hotspotd 在 --no-discovery 下跑(开机时按上次会话的
-// run/m4_owner.current 拉起)→ 按原参数重启; owner=go 但 hotspotd 仍在发现 → 带参重启。
-func TestOwnerReconcilesHotspotdMode(t *testing.T) {
-	m4TestEnv(t)
-	if err := os.WriteFile(m4OwnerFile, []byte("c\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	status := "running:1 devices:3 pid:9 discovery:0\n" // 上次会话按 go 拉起的
-	quits, ensures := 0, 0
-	m := &m4OwnerMgr{wired: true}
-	m.hotspotdStatusFn = func() (string, error) { return status, nil }
-	m.quitHotspotdFn = func() error { quits++; return nil }
-	m.ensureHotspotdFn = func() error {
-		ensures++
-		if m4OwnerCur.Load() == "go" {
-			status = "running:1 devices:3 pid:10 discovery:0\n"
-		} else {
-			status = "running:1 devices:3 pid:10\n"
-		}
-		return nil
-	}
-	m.tick("", time.Now())
-	if m.owner != "c" || quits != 1 || ensures != 1 {
-		t.Fatalf("owner=c 而 hotspotd 不做发现: 应按原参数重启一次, owner=%q quit=%d ensure=%d", m.owner, quits, ensures)
-	}
-	m.tick("", time.Now()) // 已一致: 不再动
-	if quits != 1 {
-		t.Fatalf("一致后不应再重启, quit=%d", quits)
-	}
-	// owner=go 但 hotspotd 被别处按普通参数重拉了(两个写者)→ 带 --no-discovery 重启
-	if err := os.WriteFile(m4OwnerFile, []byte("go\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m.tick("", time.Now()) // c → go 正常切换
-	if m.owner != "go" || !strings.Contains(status, "discovery:0") {
-		t.Fatalf("应切到 go: owner=%q status=%q", m.owner, status)
-	}
-	status = "running:1 devices:3 pid:11\n"
-	q0 := quits
-	m.tick("", time.Now())
-	if m.owner != "go" || quits != q0+1 || !strings.Contains(status, "discovery:0") {
-		t.Fatalf("owner=go 而 hotspotd 在发现: 应带参重启, owner=%q quit=%d status=%q", m.owner, quits-q0, status)
-	}
-	m4OwnerCur.Store("c")
-}
-
-// 审查修复 2: 切换时重拉 hotspotd 不受 60 秒崩溃冷却限制(刚被看门狗拉起的也能切)。
-func TestSwitchRestartBypassesCooldown(t *testing.T) {
-	m4TestEnv(t)
-	oldEnsure := ensureDaemonFn
-	t.Cleanup(func() {
-		ensureDaemonFn = oldEnsure
-		m4ResetCooldown("hotspotd")
-		m4OwnerCur.Store("c")
-	})
-	var allowed []bool
-	ensureDaemonFn = func(d daemonSpec) { allowed = append(allowed, cooldownOK(d.name, d.cooldown)) }
-	lastRestartMu.Lock()
-	lastRestart["hotspotd"] = time.Now() // 看门狗刚拉起过它
-	lastRestartMu.Unlock()
-
-	m := &m4OwnerMgr{}
-	m.wireProd() // 生产接线(只把拉起动作换成记录)
-	m.quitHotspotdFn = func() error { return nil }
-	m.hotspotdStatusFn = func() (string, error) { return "running:1 devices:0 pid:1 discovery:0\n", nil }
-	m.owner = "c"
-	m.switchOwnerLocked("go", time.Now())
-	if len(allowed) == 0 || !allowed[0] {
-		t.Fatalf("切换时重拉 hotspotd 被冷却挡住(allowed=%v): hotspotd 会停摆到下一轮", allowed)
-	}
-}
-
-// 审查修复 3a: owner=c + 演练开关 → 演练写者; 中途删掉开关, 写者在下一轮被停之前
-// 也不能写正式 devices.json(否则两个写者)。
-func TestDrillFixedAtStartNoFormalWrite(t *testing.T) {
-	m4TestEnv(t)
-	if err := os.WriteFile(m4OwnerFile, []byte("c\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(m4DrillFile, []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m := &m4OwnerMgr{wired: true,
-		quitHotspotdFn:   func() error { return nil },
-		hotspotdStatusFn: func() (string, error) { return "running:1 devices:0 pid:1\n", nil },
-		ensureHotspotdFn: func() error { return nil },
-	}
-	m.tick("lo", time.Now())
-	if m.runner == nil {
-		t.Fatal("owner=c + 演练开关应起演练写者")
-	}
-	defer m.hotspotDown()
-	_ = os.Remove(m4DrillFile) // 用户删了开关, 下一轮 tick 之前
-	r := m.runner
-	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, errors.New("no") }
-	at, sm := time.Time{}, map[string][2]int64{}
-	r.writeOut(nil, &at, &sm, true)
-	if _, err := os.Stat(m4DevicesJSON); err == nil {
-		t.Fatal("演练写者写了正式 devices.json(hotspotd 也在写 → 两个写者)")
-	}
-	if _, err := os.Stat(m4DrillOut); err != nil {
-		t.Fatalf("演练写者应写 run/devices.go.json: %v", err)
-	}
-}
-
-// 审查修复 3b: owner=go 时残留的演练开关不生效 —— 正式 devices.json 必须有人写。
-func TestDrillIgnoredWhenOwnerGo(t *testing.T) {
-	m4TestEnv(t)
-	if err := os.WriteFile(m4OwnerFile, []byte("go\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(m4DrillFile, []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	m := &m4OwnerMgr{wired: true,
-		quitHotspotdFn:   func() error { return nil },
-		hotspotdStatusFn: func() (string, error) { return "running:1 devices:0 pid:1 discovery:0\n", nil },
-		ensureHotspotdFn: func() error { return nil },
-	}
-	m.tick("lo", time.Now())
-	defer func() { m.hotspotDown(); m4OwnerCur.Store("c") }()
-	if m.owner != "go" || m.runner == nil {
-		t.Fatalf("应是 go 且起了写者: owner=%q", m.owner)
-	}
-	r := m.runner
-	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, errors.New("no") }
-	at, sm := time.Time{}, map[string][2]int64{}
-	r.writeOut(nil, &at, &sm, true)
-	if _, err := os.Stat(m4DevicesJSON); err != nil {
-		t.Fatalf("owner=go 时应写正式 devices.json(hotspotd 已不发现): %v", err)
-	}
 }
 
 // startTestRunner 起一个全注入的写者(订阅 / dump / 网卡 / 命令都是假的)。
 func startTestRunner(t *testing.T, dump func() []neigh.Entry, idx func() (int, error), full func(mac, ip string) (string, string)) (*m4GoRunner, *fakeNeighSource) {
 	t.Helper()
-	r := newM4GoRunner("wlan2", false)
+	r := newM4GoRunner("wlan2")
 	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
 	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
 	r.dumpIfFn = func(int) ([]neigh.Entry, error) { return dump(), nil }
@@ -327,8 +184,8 @@ func TestHotspotDownStopsRunner(t *testing.T) {
 	rec := newActionRec()
 	withFakeEnv(t, clk, rec)
 	rec.probeRC, rec.probeOut = 1, "" // 热点关了
-	fr := fakeRunner("wlan0", false)
-	m4Owner.runner = fr
+	fr := fakeRunner("wlan0")
+	m4Writer.runner = fr
 	ls := newLoopState()
 	ls.tick(wdState{kind: stateActive, iface: "wlan0"})
 	select {
@@ -336,7 +193,7 @@ func TestHotspotDownStopsRunner(t *testing.T) {
 	default:
 		t.Fatal("热点没开, Go 写者应被停")
 	}
-	if m4Owner.runner != nil {
+	if m4Writer.runner != nil {
 		t.Fatal("停了以后 runner 应为 nil")
 	}
 }

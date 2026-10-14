@@ -1,25 +1,21 @@
-// m4_owner.go — v5.31 T1/T3(迁移 M4 方案 A): 谁拥有设备发现。
+// m4_owner.go — 设备发现写者(v5.31 迁移 M4 方案 A 起; v5.33 起唯一一份)。
 //
-// 两个写者, 任何时刻只许一个在写 data/devices.json:
-//   - owner = "c" : hotspotd(C)照旧发现(邻居表 netlink + /proc/net/arp),
-//     Go 看门狗只跑 v5.30 的影子(m4_shadow.go, 只比对);
-//   - owner = "go": Go 看门狗用 devscan 包发现并写 devices.json,
-//     hotspotd 带 --no-discovery 跑(只留硬件加速兜底和控制接口)。
+// v5.31–v5.32 有两个写者: hotspotd(C)与本看门狗(Go), 开关 data/m4_owner 决定
+// 谁写 data/devices.json, 另有影子比对(m4_shadow.go)和只写 run/devices.go.json 的
+// 演练写者。v5.33 起 C 版发现删除(hotspotd 只剩硬件加速兜底和控制接口), 这里是唯一
+// 的写者: 热点开着就跑, 关了就停。开关、切换、纠偏、影子、演练都已删; 旧版本留下的
+// data/m4_owner / run/m4_owner.current / run/wd_m4_drill 不再读(post-fs-data 清掉)。
 //
-// 开关 data/m4_owner(放 data/ 是要跨重启): 内容 go / c, 双向都能强制;
-// 文件不存在 = 用默认; 内容不认识 = 用默认 + 记一行日志。看门狗每轮读
-// (60 秒内生效), 切换按 WORK-v5.31 §4 T3 的顺序「先停后起」:
-//   - c → go: 先让 hotspotd 带参重启并确认真的停了(STATUS 回 discovery:0),
-//     再启动 Go 写者;
-//   - go → c: 先停 Go 写者(等当前这次写完), 再按原参数重启 hotspotd。
-//     中间几秒没人写可以, devices.json 保留上一版。
+// 写节奏沿用 hotspotd rc30.9 的 sub-second de-bounce: 距上次写 ≥500ms 的首个事件
+// 立即写; 否则等合并窗口(200ms 无新事件)或 30s 兜底; 距上次写 <200ms 硬限速不写。
+// 内容没变不写(省电)。rx/tx 在写前经 `sh bin/iptables_manager.sh stats_all` 刷新
+// (参数分开传, 3s 超时, 5s TTL), TTL 内沿用上一次的数字。
 //
-// 写节奏对齐 hotspotd rc30.9 的 sub-second de-bounce(hotspotd.c 主循环注释):
-// 距上次写 ≥500ms 的首个事件立即写; 否则等合并窗口(200ms 无新事件)或 30s
-// 兜底; 距上次写 <200ms 硬限速不写。内容没变不写(省电)。rx/tx 在写前经
-// `sh bin/iptables_manager.sh stats_all` 刷新(参数分开传, 3s 超时, 5s TTL ——
-// 与 C 的 update_traffic_stats / hnc_run_cmd_timeout(…, 3000) 一致),
-// TTL 内沿用上一次的数字(对齐 C: 设备字段里存的是上次结果)。
+// 「立刻扫一次」(WebUI 刷新): device_detect.sh scan 往 run/devices.refresh 写一个
+// nonce, 写者看到 mtime 变了就全量扫一次、强制写 devices.json, 再把 nonce 写进
+// run/devices.refresh.ack —— 调用方等到自己的 nonce 就知道这次扫描已落盘(v5.33;
+// 原来比 devices.json 的秒级 mtime, 同一秒内写过一次就误判「没刷新」)。hotspotd 的
+// REFRESH / SIGUSR1 只 touch 文件(没有 nonce), 照样触发全量扫。
 package main
 
 import (
@@ -32,7 +28,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"hnc.io/dpid/devname"
@@ -40,51 +35,26 @@ import (
 	"hnc.io/dpid/neigh"
 )
 
-// m4OwnerDefault —— 默认值只写这一处(WORK-v5.31 §4 T3)。
-// T2(名字解析)完成后 rc 默认 go —— 就是要在 rc 上验它; T2 没做完时必须
-// 是 "c"。真机出现 §8 任一问题, v5.32 正式版改回 "c"。
-const m4OwnerDefault = "go"
-
-// m4OwnerDefaultOverride 只在测试里覆盖默认值(v5.32 T3 退路演练: 验证
-// 「正式版把 m4OwnerDefault 改成 c」这一步改了就能用)。生产永远为空 ——
-// 默认值的取值仍只写在一处: 正式版要改默认, 改上面的 m4OwnerDefault 常量,
-// 这里不提供第二条生产路径。
-var m4OwnerDefaultOverride string
-
-// m4OwnerDefaultNow 当前生效的默认值(测试覆盖 > 常量)。
-func m4OwnerDefaultNow() string {
-	if m4OwnerDefaultOverride != "" {
-		return m4OwnerDefaultOverride
-	}
-	return m4OwnerDefault
-}
-
 const (
 	m4WriteHardRateMS = 200              // 距上次写 <200ms 永不写(rc30.9 硬限速)
-	m4IdleTickMS      = 500              // v5.32 T4: 空闲(无 dirty/待解析名字/在途解析)时主循环 500ms 醒一次(审查: 1s 会让 REFRESH 超出 device_detect.sh 的 1 秒窗口)
+	m4IdleTickMS      = 500              // v5.32 T4: 空闲(无 dirty/待解析名字/在途解析)时主循环 500ms 醒一次(REFRESH 要在 1 秒内响应)
 	m4WriteIdleMS     = 500              // 空闲后首事件立即写(rc30.9)
 	m4WriteMergeMS    = 200              // 合并窗口: 200ms 无新事件(rc30.9)
 	m4WriteMaxDirtyMS = 30000            // dirty 兜底 30s(rc30.9)
 	m4StatsTTL        = 5 * time.Second  // 流量字节 5s TTL(C update_traffic_stats)
 	m4StatsTimeout    = 3 * time.Second  // hnc_run_cmd_timeout(..., 3000)
 	m4FullSyncEvery   = 30 * time.Second // 全量 dump 兜底(WORK T1)
-	m4SwitchBackoff   = 5 * time.Minute  // 切换失败后的退避窗口(真实时钟)
+	m4NonceMax        = 64               // run/devices.refresh 里 nonce 的长度上限
 )
 
-// 路径做成变量(单测重定向到临时目录; 仿 m4_shadow 的 m4RunDir/m4DataDir)。
+// 路径做成变量(单测重定向到临时目录)。
 var (
-	m4OwnerFile        = dataDir + "/m4_owner"            // 用户开关(跨重启)
-	m4OwnerCurrentFile = runDir + "/m4_owner.current"     // 看门狗每轮写出, 调用方只读这里
-	m4DevicesJSON      = dataDir + "/devices.json"        // 正式输出
-	m4DevicesTmpGo     = dataDir + "/devices.json.tmp.go" // Go 写者的临时文件(与 C 的 .tmp.<pid> 区分开)
-	m4DrillOut         = runDir + "/devices.go.json"      // 演练输出(只比对不接管)
-	m4GoOutTmp         = runDir + "/devices.go.json.tmp"
-	m4DrillFile        = runDir + "/wd_m4_drill" // 存在 → 演练模式
-	// v5.31 T4: hotspotd(--no-discovery)收到 REFRESH / SIGUSR1 时 touch 这个
-	// 文件, Go 写者看到 mtime 变化就立刻全量扫一次。
-	m4RefreshFile = runDir + "/devices.refresh"
-	// v5.31 T5: Go 写者的写出日志(每写一行时间戳; 运行中切换场景用它证明
-	// 「没有两个写者交替写」)。与 hotspotd.log 的 "JSON written" 行对照。
+	m4DevicesJSON  = dataDir + "/devices.json"        // 输出
+	m4DevicesTmpGo = dataDir + "/devices.json.tmp.go" // 临时文件
+	// v5.31 T4 / v5.33: 「立刻扫一次」的请求与回执(见文件头)。
+	m4RefreshFile    = runDir + "/devices.refresh"
+	m4RefreshAckFile = runDir + "/devices.refresh.ack"
+	// v5.31 T5: 写出日志(每写一行时间戳; 排查「谁在什么时候写了 devices.json」)。
 	m4GoWriteLog = runDir + "/m4_go_write.log"
 
 	// v5.31 T2: devname 解析用到的路径(devname.Resolver 的注入字段)。
@@ -98,239 +68,43 @@ var (
 var (
 	m4GoWrites     atomic.Uint64
 	m4GoWriteFails atomic.Uint64
-	m4Switches     atomic.Uint64
-	// m4OwnerCur 生效 owner 的无锁快照(hotspotdDaemon() 在持锁的切换路径里
-	// 也会被调, 不能回拿 m.mu; 永远 ≥ m.owner 一步)。
-	m4OwnerCur atomic.Value
 )
 
-// m4OwnerStats 供 actionstats.snapshot 带出(写者、Go 写次数 / 失败次数、切换次数)。
-func m4OwnerStats() (owner string, writes, fails, switches uint64) {
-	return m4Owner.currentOwner(), m4GoWrites.Load(), m4GoWriteFails.Load(), m4Switches.Load()
+// m4WriterStats 供 actionstats.snapshot 带出(写出次数 / 失败次数)。
+func m4WriterStats() (writes, fails uint64) {
+	return m4GoWrites.Load(), m4GoWriteFails.Load()
 }
 
-// wdActionsM4OwnerExtra actionstats.snapshot 带出的 M4 方案 A 字段(测试可替换)。
-var wdActionsM4OwnerExtra = m4OwnerStats
+// wdActionsM4WriterExtra actionstats.snapshot 带出的设备发现字段(测试可替换)。
+var wdActionsM4WriterExtra = m4WriterStats
 
-// ─── owner 状态机 ──────────────────────────────────────────────────
+// ─── 写者生命周期 ──────────────────────────────────────────────────
 
-type m4OwnerMgr struct {
-	mu      sync.Mutex
-	owner   string // 生效中: "go" / "c"; "" = 首轮之前
-	runner  *m4GoRunner
-	lastBad string // 上一次读到的坏内容(同一个只记一次日志)
-
-	// 切换失败退避(真实时钟): 确认失败后 5 分钟内不重试同一切换 ——
-	// budget_test 用假时钟连续驱动 tick, 没有退避会每轮都走一遍
-	// confirmDiscoveryOff 的真实 sleep, 测试直接超时; 生产上也是
-	// 防止热点未起来时每 60 秒折腾一次 hotspotd。
-	failBackoffUntil time.Time
-
-	// 注入点(单测替换; 生产为真实现)
-	quitHotspotdFn   func() error           // 让 hotspotd 退出(sock QUIT → 等 pid 消失)
-	hotspotdStatusFn func() (string, error) // 问 hotspotd STATUS
-	ensureHotspotdFn func() error           // 按当前 owner 参数(重新)拉起 hotspotd
-	wired            bool
+type m4WriterMgr struct {
+	mu     sync.Mutex
+	runner *m4GoRunner
 }
 
-var m4Owner = &m4OwnerMgr{}
+var m4Writer = &m4WriterMgr{}
 
-// wireProd 接上生产实现(幂等; 单测在 tick 之前替换注入点)。
-func (m *m4OwnerMgr) wireProd() {
-	if m.wired {
-		return
-	}
-	m.wired = true
-	m.quitHotspotdFn = m4QuitHotspotd
-	m.hotspotdStatusFn = m4HotspotdStatus
-	m.ensureHotspotdFn = func() error {
-		// 审查修复: 切换 / 纠偏是有意的重启, 不受「60 秒内不重复拉起」的崩溃保护限制 ——
-		// 原来刚被看门狗拉起不到 60 秒的 hotspotd 被 QUIT 后拉不起来: hotspotd(连同
-		// 硬件加速兜底)停摆到下一轮, 切换确认失败、再退避 5 分钟。
-		m4ResetCooldown("hotspotd")
-		ensureDaemonFn(hotspotdDaemon())
-		return nil
-	}
-}
-
-// ensureDaemonFn 拉起守护进程(单测替换; 生产 = ensureDaemonRunning)。
-var ensureDaemonFn = ensureDaemonRunning
-
-// m4ResetCooldown 清掉某个守护进程的重拉冷却(见 wireProd)。
-func m4ResetCooldown(name string) {
-	lastRestartMu.Lock()
-	delete(lastRestart, name)
-	lastRestartMu.Unlock()
-}
-
-// readM4Owner 读开关。文件不存在 = 默认; 内容不认识 = 默认 + 日志(去重)。
-func (m *m4OwnerMgr) readM4Owner() string {
-	b, err := os.ReadFile(m4OwnerFile)
-	v := strings.TrimSpace(string(b))
-	switch v {
-	case "go", "c":
-		return v
-	default:
-		if os.IsNotExist(err) {
-			return m4OwnerDefaultNow()
-		}
-		if v != m.lastBad {
-			m.lastBad = v
-			logf("m4_owner: 不认识的内容 %q, 用默认 %q", v, m4OwnerDefaultNow())
-		}
-		return m4OwnerDefaultNow()
-	}
-}
-
-// tick 主循环每轮调用(热点 ACTIVE 时 iface 非空)。
-func (m *m4OwnerMgr) tick(iface string, now time.Time) {
+// tick 主循环每轮调用(热点 ACTIVE 时 iface 非空): 起 / 换网卡重起 / 停写者。
+func (m *m4WriterMgr) tick(iface string, now time.Time) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.wireProd()
-	want := m.readM4Owner()
-	// 每轮把生效值落到 run/, 调用方(device_detect.sh 等)只读这个文件,
-	// 默认值的判断只存在于 Go 这一处(m4OwnerDefault)。
-	_ = os.WriteFile(m4OwnerCurrentFile, []byte(want+"\n"), 0o644)
-	inBackoff := time.Now().Before(m.failBackoffUntil)
-	switched := false
-	if m.owner == "" {
-		// 首拍: want=go 也走切换路径(先停后起) —— 开机时序里
-		// service.sh/device_detect.sh 可能先拉起了不带 --no-discovery 的
-		// hotspotd(读不到 m4_owner.current 或文件是上一次会话的), 这里
-		// 统一纠偏, 保证任何时刻只有一个写者。
-		if want == "go" && !inBackoff {
-			m.owner = "c" // 占位成 c, switchOwnerLocked 走 c→go
-			m.switchOwnerLocked("go", now)
-			switched = true
-		} else if want == "go" {
-			m.owner = "c" // 退避窗口内: 先按 c(保守, 不动 hotspotd)
-		} else {
-			m.owner = want
-		}
-	} else if want != m.owner && !inBackoff {
-		// 退避窗口内不重试(见 failBackoffUntil 注释); devices.json
-		// 保留当前写者的版本, 下一轮再看。
-		m.switchOwnerLocked(want, now)
-		switched = true
-	}
-	// 审查修复: 每轮核对 hotspotd 实际在不在做发现, 与 owner 不符就纠正。run/m4_owner.current
-	// 开机不清, device_detect.sh 会按上次会话的值拉起 hotspotd —— 上次是 go、这次开关是 c
-	// (正是 v5.32 退路要用的「改回 C 版」)时, 原来首拍直接认定 owner=c、不动 hotspotd、
-	// 也不起 Go 写者: 没有任何人发现设备。
-	if !switched && !inBackoff {
-		m.reconcileLocked(now)
-	}
-	m4OwnerCur.Store(m.owner)
-	// 演练模式(run/wd_m4_drill 存在, T5 场景用): 只在 owner=c 时生效 —— Go 写者也跑,
-	// 但只写 run/devices.go.json、不写名字缓存, hotspotd 保持唯一正式写者。
-	// 审查修复: 是否演练在起写者时定死(写者里不再每次查文件): 原来删掉开关文件到下一轮
-	// 停写者之间, 演练写者会写正式的 devices.json(两个写者); owner=go 时留着开关文件,
-	// 正式文件则没人写。
-	drill := m.owner != "go" && fileExists(m4DrillFile)
-	if m.owner != "go" && !drill {
-		m.stopGoRunnerLocked("owner != go")
-		return
-	}
 	if iface == "" {
 		m.stopGoRunnerLocked("热点未激活")
 		return
 	}
-	m.ensureGoRunnerLocked(iface, drill)
+	m.ensureGoRunnerLocked(iface)
 }
 
-// reconcileLocked hotspotd 的实际模式(STATUS 有没有 discovery:0)与 owner 对齐。
-// 问不到 STATUS(没在跑 / 刚退出)不动 —— 主循环的 ensureDaemonRunning 会按当前
-// owner 的参数拉起。
-func (m *m4OwnerMgr) reconcileLocked(now time.Time) {
-	s, err := m.hotspotdStatusFn()
-	if err != nil {
-		return
-	}
-	off := strings.Contains(s, "discovery:0")
-	switch {
-	case m.owner == "c" && off:
-		logf("m4_owner: owner=c 但 hotspotd 在 --no-discovery 下运行(没人发现设备), 按原参数重启")
-		_ = m.quitHotspotdFn()
-		_ = m.ensureHotspotdFn()
-		m4Switches.Add(1)
-	case m.owner == "go" && !off:
-		logf("m4_owner: owner=go 但 hotspotd 仍在做发现(两个写者), 停 Go 写者后带 --no-discovery 重启")
-		m.stopGoRunnerLocked("纠偏")
-		m.owner = "c"
-		m4OwnerCur.Store("c")
-		m.switchOwnerLocked("go", now)
-	}
-}
-
-// hotspotDown 热点没开(主循环探测失败 / PENDING)时调: 停 Go 写者。
-// 审查修复: 原来 tick 只在热点 ACTIVE 时调, 热点关了写者照样每 200ms 醒一次。
-// owner 与 hotspotd 不动 —— 热点再开时 tick 会重新拉起写者。
-func (m *m4OwnerMgr) hotspotDown() {
+// hotspotDown 热点没开(主循环探测失败 / PENDING)时调: 停写者。
+// v5.31 审查修复: 原来 tick 只在热点 ACTIVE 时调, 热点关了写者照样每 200ms 醒一次。
+// 热点再开时 tick 会重新拉起写者。
+func (m *m4WriterMgr) hotspotDown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.stopGoRunnerLocked("热点未激活")
-}
-
-// currentOwner 当前生效 owner(无锁读; 未初始化按 c 算, 保守)。
-func (m *m4OwnerMgr) currentOwner() string {
-	if v, ok := m4OwnerCur.Load().(string); ok && v == "go" {
-		return "go"
-	}
-	return "c"
-}
-
-// isGo 当前生效 owner 是否为 go。
-func (m *m4OwnerMgr) isGo() bool { return m.currentOwner() == "go" }
-
-// switchOwnerLocked 切换(先停后起, 不重叠)。确认失败回滚并保持原 owner。
-func (m *m4OwnerMgr) switchOwnerLocked(to string, now time.Time) {
-	from := m.owner
-	logf("m4_owner: 切换 %s → %s", from, to)
-	if to == "go" {
-		// 1) 先停 C 写者: hotspotd 退出, 换 --no-discovery 参数拉起
-		if err := m.quitHotspotdFn(); err != nil {
-			logf("m4_owner: 停 hotspotd 失败: %v, 保持 %s", err, from)
-			m.failBackoffUntil = time.Now().Add(m4SwitchBackoff)
-			return
-		}
-		m.owner = "go" // hotspotdDaemon() 从无锁快照取参数, 必须同步更新
-		m4OwnerCur.Store(m.owner)
-		_ = m.ensureHotspotdFn()
-		// 2) 确认它真的停了(STATUS 回 discovery:0), 不行就回滚
-		if !m.confirmDiscoveryOff() {
-			logf("m4_owner: hotspotd 未确认停发现(STATUS 无 discovery:0), 回滚为 %s", from)
-			m.owner = from
-			m4OwnerCur.Store(from)
-			_ = m.quitHotspotdFn()
-			_ = m.ensureHotspotdFn()
-			m.failBackoffUntil = time.Now().Add(m4SwitchBackoff)
-			return
-		}
-		m.failBackoffUntil = time.Time{}
-		m4Switches.Add(1)
-		return
-	}
-	// to == "c": 先停 Go 写者(等当前这次写完), 再按原参数重启 hotspotd
-	m.stopGoRunnerLocked("切换回 c")
-	_ = m.quitHotspotdFn()
-	m.owner = "c"
-	m4OwnerCur.Store(m.owner)
-	_ = m.ensureHotspotdFn()
-	m.failBackoffUntil = time.Time{}
-	m4Switches.Add(1)
-}
-
-// confirmDiscoveryOff 确认 hotspotd 真的停止发现(STATUS 带 discovery:0)。
-func (m *m4OwnerMgr) confirmDiscoveryOff() bool {
-	for i := 0; i < 5; i++ {
-		if s, err := m.hotspotdStatusFn(); err == nil && strings.Contains(s, "discovery:0") {
-			return true
-		}
-		if i < 4 {
-			time.Sleep(300 * time.Millisecond)
-		}
-	}
-	return false
 }
 
 // ─── Go 写者运行器 ────────────────────────────────────────────────
@@ -347,8 +121,6 @@ type m4GoRunner struct {
 	stopCh chan struct{}
 	doneCh chan struct{}
 	table  *devscan.Table
-	// drill 演练写者(owner=c 时): 只写 run/devices.go.json、不写名字缓存。起写者时定死。
-	drill bool
 
 	// v5.31 T2: devname 全链解析(手动 → DHCP → mDNS → 缓存 → 厂商 → MAC)。
 	resolver *devname.Resolver
@@ -383,13 +155,12 @@ func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
 	return m4IdleTickMS * time.Millisecond
 }
 
-// newM4GoRunner 生产构造: 真订阅 / 真 dump / 真命令。drill 见 m4GoRunner.drill。
-func newM4GoRunner(iface string, drill bool) *m4GoRunner {
+// newM4GoRunner 生产构造: 真订阅 / 真 dump / 真命令。
+func newM4GoRunner(iface string) *m4GoRunner {
 	r := &m4GoRunner{
 		iface:  iface,
 		stopCh: make(chan struct{}),
 		doneCh: make(chan struct{}),
-		drill:  drill,
 	}
 	r.subscribeFn = func() (m4NeighSource, error) { return neigh.Subscribe() }
 	r.dumpIfFn = neigh.DumpIf
@@ -439,7 +210,7 @@ func (r *m4GoRunner) applyHooks() {
 	r.table.Full = full
 }
 
-// start 由 owner 管理器调用(先解析 ifindex, 失败也照跑 —— 事件不按
+// start 由写者管理器调用(先解析 ifindex, 失败也照跑 —— 事件不按
 // ifindex 过滤时全量兜底会跟上)。
 func (r *m4GoRunner) start() {
 	if r.ifIndexFn != nil {
@@ -451,17 +222,17 @@ func (r *m4GoRunner) start() {
 	go r.run()
 }
 
-func (m *m4OwnerMgr) ensureGoRunnerLocked(iface string, drill bool) {
-	if m.runner != nil && m.runner.iface == iface && m.runner.drill == drill {
+func (m *m4WriterMgr) ensureGoRunnerLocked(iface string) {
+	if m.runner != nil && m.runner.iface == iface {
 		return
 	}
-	m.stopGoRunnerLocked("网卡或演练模式变了")
-	r := newM4GoRunner(iface, drill)
+	m.stopGoRunnerLocked("网卡变了")
+	r := newM4GoRunner(iface)
 	m.runner = r
 	r.start()
 }
 
-func (m *m4OwnerMgr) stopGoRunnerLocked(reason string) {
+func (m *m4WriterMgr) stopGoRunnerLocked(reason string) {
 	if m.runner == nil {
 		return
 	}
@@ -514,7 +285,7 @@ func (r *m4GoRunner) run() {
 		// 审查修复: 异步名字解析回填后要让主循环知道「该写了」—— 原来回填只改了表、
 		// 不置 dirty, 名字一直停在 pending / MAC 尾号, 直到下一个邻居事件才写出去(模拟
 		// 设备场景里一直没写)。resolveWG 让停写者时等在途的解析结束, 免得停了以后它还
-		// 写名字缓存(切回 C 后两个写者)。
+		// 写名字缓存。
 		resolved  = make(chan struct{}, 1)
 		resolveWG sync.WaitGroup
 	)
@@ -543,22 +314,20 @@ func (r *m4GoRunner) run() {
 		tick.Reset(want)
 		period = want
 	}
-	// v5.31 T4: REFRESH / SIGUSR1 转发 —— hotspotd(--no-discovery)收到就
-	// touch run/devices.refresh, 这里每拍(200ms)看一次 mtime, 变了立刻
-	// 全量扫一次。device_detect.sh scan 的「1 秒内 devices.json mtime
-	// 变了」判断因此照旧成立。
+	// 「立刻扫一次」(见文件头): 每拍看一次 run/devices.refresh 的 mtime, 比上次
+	// 见过的新就全量扫一次; 文件内容是调用方的 nonce(hotspotd touch 的为空)。
 	var lastRefreshM = monoMs()
-	refreshDue := func(now time.Time) bool {
+	refreshDue := func() (nonce string, due bool) {
 		fi, err := os.Stat(m4RefreshFile)
 		if err != nil {
-			return false
+			return "", false
 		}
 		m := fi.ModTime().UnixNano() / int64(time.Millisecond)
-		if m > lastRefreshM { // 比上次见过的更新 = 有新的 REFRESH / SIGUSR1
-			lastRefreshM = m
-			return true
+		if m <= lastRefreshM {
+			return "", false
 		}
-		return false
+		lastRefreshM = m
+		return readNonce(m4RefreshFile), true
 	}
 
 	for {
@@ -599,10 +368,10 @@ func (r *m4GoRunner) run() {
 			ticked = true
 			r.tickN.Add(1)
 			now := time.Now()
-			// REFRESH / SIGUSR1(hotspotd touch)→ 立刻全量扫一次并强制写
+			// 「立刻扫一次」→ 全量扫、强制写, 写完回执 nonce
 			// (v5.32 T4: 原 continue 跳圈会绕过 retune; 改成 lastSync=now
 			//  后自然流过 —— 后续 30s 判断不会重复全量, dirty=false 不会写)
-			if refreshDue(now) {
+			if nonce, due := refreshDue(); due {
 				if es, err := r.dumpIfFn(r.ifIdx); err == nil {
 					r.table.FullSync(es, now)
 				}
@@ -611,6 +380,9 @@ func (r *m4GoRunner) run() {
 				dirty = false
 				firstDirtyMs = 0
 				lastSync = now
+				if err := writeAtomic(m4RefreshAckFile, []byte(nonce+"\n")); err != nil {
+					logf("m4_owner: 写刷新回执失败: %v", err)
+				}
 			}
 			// 30s: 全量兜底 + 离线检查 + 网卡重建跟上
 			if now.Sub(lastSync) >= m4FullSyncEvery {
@@ -656,8 +428,7 @@ func (r *m4GoRunner) run() {
 							// v5.31 T2: 解析命中 dhcp/mdns 时缓存已
 							// 在 Resolver 里标脏, 这里落一次盘(小文件,
 							// 原子替换; 失败只记日志不计 devices 写失败)
-							// 演练写者不写名字缓存(那时 hotspotd 才是它的写者)。
-							if r.resolver != nil && !r.drill {
+							if r.resolver != nil {
 								if err := r.resolver.CacheSave(); err != nil {
 									logf("m4_owner: hostname_cache 落盘失败: %v", err)
 								}
@@ -700,8 +471,7 @@ func (r *m4GoRunner) refreshIface() {
 	logf("m4_owner: 热点网卡重建 %s ifindex=%d", r.iface, idx)
 }
 
-// writeOut 渲染 + 原子写。演练开关(run/wd_m4_drill)下写 run/devices.go.json,
-// 只比对不接管。内容没变不写(省电)。
+// writeOut 渲染 + 原子写 data/devices.json。内容没变不写(省电), force 时照写。
 func (r *m4GoRunner) writeOut(lastWritten []byte, lastStatsAt *time.Time, lastStatsMap *map[string][2]int64, force bool) []byte {
 	now := time.Now()
 	if force || now.Sub(*lastStatsAt) >= m4StatsTTL {
@@ -714,15 +484,11 @@ func (r *m4GoRunner) writeOut(lastWritten []byte, lastStatsAt *time.Time, lastSt
 		return lastWritten
 	}
 	out, tmp := m4DevicesJSON, m4DevicesTmpGo
-	if r.drill {
-		out, tmp = m4DrillOut, m4GoOutTmp
-	}
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		m4GoWriteFails.Add(1)
 		logf("m4_owner: 写 %s 失败: %v", tmp, err)
 		return lastWritten
 	}
-	// 演练模式下也记(演练是给 T5 场景对照用的, 正式 / 演练都要可追溯)
 	_ = appendLine(m4GoWriteLog, time.Now().Format("2006-01-02T15:04:05")+": "+out)
 	if err := os.Rename(tmp, out); err != nil {
 		m4GoWriteFails.Add(1)
@@ -819,8 +585,6 @@ var (
 	shBin           = "/system/bin/sh"
 	iptablesMgrPath = binDir + "/iptables_manager.sh"
 	rulesJSONPath   = dataDir + "/rules.json"
-	hotspotdSockP   = runDir + "/hotspotd.sock"
-	hotspotdPidP    = runDir + "/hotspotd.pid"
 )
 
 // appendLine 追加一行(小文件, O_APPEND 单行原子; 失败忽略 —— 只是审计日志)。
@@ -834,60 +598,28 @@ func appendLine(p, line string) error {
 	return err
 }
 
-func fileExists(p string) bool {
-	_, err := os.Stat(p)
-	return err == nil
+// readNonce 读 run/devices.refresh 里的 nonce(一行, 去空白, 超长截断; 读不到 = 空)。
+func readNonce(p string) string {
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	n := string(b)
+	if i := strings.IndexAny(n, "\r\n"); i >= 0 {
+		n = n[:i]
+	}
+	n = strings.TrimSpace(n)
+	if len(n) > m4NonceMax {
+		n = n[:m4NonceMax]
+	}
+	return n
 }
 
-// m4QuitHotspotd sock QUIT → 等 pid 退出(≤5s)→ 兜底 SIGTERM。
-func m4QuitHotspotd() error {
-	if c, err := net.DialTimeout("unix", hotspotdSockP, time.Second); err == nil {
-		_, _ = c.Write([]byte("QUIT\n"))
-		buf := make([]byte, 16)
-		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
-		_, _ = c.Read(buf)
-		c.Close()
+// writeAtomic tmp + rename(回执要么是旧的, 要么是完整的新 nonce)。
+func writeAtomic(p string, b []byte) error {
+	tmp := p + ".tmp"
+	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		return err
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		b, err := os.ReadFile(hotspotdPidP)
-		if err != nil {
-			return nil
-		}
-		pid := 0
-		fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &pid)
-		if pid <= 0 {
-			return nil
-		}
-		if !processAlive(pid) {
-			return nil // 进程不在了(僵尸也算不在, 见 isZombie)
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	b, _ := os.ReadFile(hotspotdPidP)
-	pid := 0
-	fmt.Sscanf(strings.TrimSpace(string(b)), "%d", &pid)
-	if pid > 0 {
-		_ = syscall.Kill(pid, syscall.SIGTERM)
-	}
-	return fmt.Errorf("hotspotd 5 秒内未退出, 已发 SIGTERM")
-}
-
-// m4HotspotdStatus 问 STATUS(2s 超时)。
-func m4HotspotdStatus() (string, error) {
-	c, err := net.DialTimeout("unix", hotspotdSockP, time.Second)
-	if err != nil {
-		return "", err
-	}
-	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(2 * time.Second))
-	if _, err := c.Write([]byte("STATUS\n")); err != nil {
-		return "", err
-	}
-	buf := make([]byte, 256)
-	n, err := c.Read(buf)
-	if err != nil {
-		return "", err
-	}
-	return string(buf[:n]), nil
+	return os.Rename(tmp, p)
 }

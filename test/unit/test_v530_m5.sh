@@ -72,7 +72,9 @@ else
 fi
 
 test_start "m5: shell guard / Go supervisor 在开机脚本与 dpi_rebind 里都没有了"
+# (post-fs-data 开机清掉旧版本留下的 run/wd_m5.disabled 是允许的: 只删不读)
 _left=$(grep -v '^[[:space:]]*#' "$SVC" "$HNC_REPO_ROOT/bin/dpi_rebind.sh" "$HNC_REPO_ROOT/post-fs-data.sh" \
+    | grep -v 'run/wd_m5\.disabled" 2>/dev/null$' \
     | grep -nE 'hnc_dpid_guard|hnc_dpid_supervisor|wd_m5\.disabled|DPID_GUARD"|DPID_SUPERVISOR')
 if [ -z "$_left" ] && [ ! -e "$HNC_REPO_ROOT/bin/hnc_dpid_guard.sh" ] \
    && [ ! -e "$HNC_REPO_ROOT/src/dpid/cmd/dpid_supervisor" ]; then

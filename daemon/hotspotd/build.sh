@@ -18,7 +18,7 @@ ARCH=${1:-arm64}
 # 实为 glibc 版(链接报 __errno_location/__fxstat/dcgettext 等 glibc 符号)。
 # offload(adapter_bpf.c)只用 libbpf 的 bpf() syscall 包装,不需要 libelf/libz,
 # 故拆掉 LSM loader(本就可选/非致命/object 从不随包)即可让 CI 从源码编出 hotspotd。
-SRCS="hotspotd.c hnc_helpers.c hostname_cache.c oui_override.c mdns_worker.c \
+SRCS="hotspotd.c hnc_helpers.c \
       platform.c scheduler.c upstream.c \
       offload/adapter.c offload/adapter_null.c offload/adapter_bpf.c \
       lsm/hnc_lsm_stub.c"

@@ -593,22 +593,14 @@ if [ ! -s "$LOCAL_ADMIN_SECRET" ]; then
     fi
 fi
 
-# ─── 启动设备检测守护进程（v3.0.0：优先 C daemon hotspotd）─
-# device_detect.sh daemon 内部会优先尝试启动 hotspotd(C)；
-# 若二进制不存在则自动回落到原 shell 轮询（向下兼容）
-#
-# v3.5.2 P0-A 修复:detect.pid 和 hotspotd.pid 不再存同一个 PID。
-# - C daemon 成功接管时,只有 hotspotd.pid 有值,detect.pid 不写
-# - shell fallback 时,只有 detect.pid 有值(device_detect.sh 自己写)
-# - watchdog 优先检查 hotspotd.pid,存在时跳过 detect.pid 检查
-# 根本原因:之前两个 pid 指同一 PID,hotspotd 崩掉后 watchdog 两个
-# if 都触发重启,导致 hotspotd C daemon 和 shell fallback 同时运行,
-# 并发写 devices.json.tmp → JSON 损坏(review P0-A)
-log "Starting device detector (C daemon preferred)..."
+# ─── 拉起 hotspotd(硬件加速兜底 + 控制接口)───────────────────
+# v5.33: 设备发现只有 Go 看门狗一份(写 data/devices.json); device_detect.sh daemon
+# 只负责拉起 hotspotd, 不再有 shell 轮询兜底, 也不再写 run/detect.pid。
+# hotspotd 没起来不影响设备列表, 看门狗每轮会再拉。
+log "Starting hotspotd (offload + control socket; device discovery is the Go watchdog's)..."
+rm -f "$RUN/detect.pid" 2>/dev/null
 sh $HNC_DIR/bin/device_detect.sh daemon >> $HNC_DIR/logs/detect.log 2>&1 &
-DETECT_SHELL_PID=$!
-# hotfix10 S11: 固定 sleep 2 在慢启动上会误判 shell fallback。
-# 最多等 5s,每 100ms poll 一次 hotspotd.pid。
+# hotfix10 S11: 最多等 5s,每 100ms poll 一次 hotspotd.pid。
 HPID=""
 i=0
 while [ $i -lt 50 ]; do
@@ -621,15 +613,10 @@ while [ $i -lt 50 ]; do
         i=$((i + 10))
     fi
 done
-# 检查 C daemon 是否接管了（hotspotd.pid 存在且进程活着）
 if [ -n "$HPID" ] && kill -0 "$HPID" 2>/dev/null; then
-    log "C daemon hotspotd running (PID=$HPID)"
-    # v3.5.2 P0-A:不再 echo $HPID > detect.pid。
-    # C daemon 模式下 detect.pid 应当不存在,让 watchdog 看到"没 detect 需要照料"
-    rm -f "$RUN/detect.pid" 2>/dev/null
+    log "hotspotd running (PID=$HPID)"
 else
-    # shell fallback 在 daemon_shell_fallback 里自己写了 detect.pid
-    log "Shell daemon fallback running (PID=$DETECT_SHELL_PID)"
+    log "WARN: hotspotd not up after 5s (watchdog will retry; device list unaffected)"
 fi
 prune_duplicate_hotspotd
 

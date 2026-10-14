@@ -4,9 +4,9 @@
 #
 # 原理: 假热点 = 一个 Linux 网桥(默认 hncsim0, 网关 192.168.43.1/24, 和手机热点一样的网段);
 # 每台假设备 = 一个独立的网络命名空间(netns), 用一对 veth 插在网桥上, 有自己的 MAC / IP。
-# 假设备发包时, 内核的邻居表(ARP)里会真实出现它 —— hotspotd 读 /proc/net/arp + netlink、
-# Go 的 neigh 包 dump 邻居表, 看到的都是真东西, 不是 mock。
-# 「名字」: 手机上 hotspotd 从 `dumpsys network_stack` 的 DHCP 记录里取设备名; 这里用
+# 假设备发包时, 内核的邻居表(ARP)里会真实出现它 —— Go 的 neigh 包订阅 / dump 邻居表,
+# 看到的都是真东西, 不是 mock。
+# 「名字」: 手机上 Go 写者(devname)从 `dumpsys network_stack` 的 DHCP 记录里取设备名; 这里用
 # test/sim/fake/dumpsys 冒充, 它输出 $HNC_SIM_DIR/dhcp_events, add / ip 子命令往里追加记录
 # (可以故意报 null / localhost 这种垃圾名)。
 #
@@ -19,7 +19,7 @@
 #                                                       邻居表几秒后变 FAILED(--quiet 不找, 留成 STALE)
 #   bash test/sim/simnet.sh list                        列出假设备和网关邻居表
 #   bash test/sim/simnet.sh down                        全部拆掉
-#   bash test/sim/simnet.sh hotspotd start|stop|log     在本机编译并跑 hotspotd(见 hotspotd_cmd 注释)
+#   bash test/sim/simnet.sh hotspotd start|stop|log     在本机编译并跑 hotspotd(只剩硬件加速兜底和控制接口)
 #
 # NAME: 小写字母 / 数字, 1–10 个字符(veth 名字长度有限)。状态目录 $HNC_SIM_DIR(默认 /tmp/hnc_sim)。
 set -u
@@ -54,7 +54,7 @@ dev_set() {
     mv "$SIM_DIR/devices.tmp" "$SIM_DIR/devices"
 }
 
-# 冒充 NetworkStack 的 DHCP 事件行(格式见 daemon/hotspotd/hotspotd.c try_ns_dhcp_resolve 注释)
+# 冒充 NetworkStack 的 DHCP 事件行(格式见 src/dpid/devname/resolve.go 的 dumpsys 解析)
 dhcp_event() {
     echo "$(date +%Y-%m-%dT%H:%M:%S) - [$SIM_IF.DHCP] Transmitting DhcpAckPacket with lease clientId: sim, hwAddr: $1, netAddr: $2/24, expTime: 3600,hostname: $3" >> "$SIM_DIR/dhcp_events"
 }
@@ -154,8 +154,8 @@ cmd_down() {
 
 # hotspotd 在本机跑: 用本机 gcc 编(不带 BPF 硬件加速, offload 走 null 适配器), 在私有挂载空间里把
 # $HNC_SIM_DIR/hnc 绑到 /data/local/hnc(hotspotd 的路径写死在代码里), 外面的 /data 不受影响
-# (只会留下一个空的挂载点目录)。热点网卡由 run/hnc_state 的 ACTIVE:<网桥> 告诉它; PATH 里放
-# test/sim/fake, `dumpsys` 和 `iptables_manager.sh stats_all` 都是假的。产出: $HNC_SIM_DIR/hnc/data/devices.json。
+# (只会留下一个空的挂载点目录)。v5.33 起 hotspotd 不再发现设备(只剩硬件加速兜底和控制接口:
+# GET_DEVICES / REFRESH / STATUS / OFFLOAD_*), 设备表由 Go 写者写(见 run_devscan_sim.sh)。
 hotspotd_cmd() {
     hnc=$SIM_DIR/hnc pidf=$SIM_DIR/hotspotd.pid
     case "${1:-}" in
@@ -165,22 +165,20 @@ hotspotd_cmd() {
         mkdir -p "$SIM_DIR/bin" "$hnc/run" "$hnc/data" "$hnc/logs" "$hnc/bin"
         hs=$REPO/daemon/hotspotd
         gcc -O1 -std=c11 -D_GNU_SOURCE -w -pthread -o "$SIM_DIR/bin/hotspotd" \
-            "$hs/hotspotd.c" "$hs/hnc_helpers.c" "$hs/hostname_cache.c" "$hs/oui_override.c" "$hs/mdns_worker.c" \
+            "$hs/hotspotd.c" "$hs/hnc_helpers.c" \
             "$hs/platform.c" "$hs/scheduler.c" "$hs/upstream.c" \
             "$hs/offload/adapter.c" "$hs/offload/adapter_null.c" "$hs/lsm/hnc_lsm_stub.c" || die "hotspotd 编译失败"
-        cp "$REPO/test/sim/fake/iptables_manager.sh" "$hnc/bin/iptables_manager.sh"
         echo "ACTIVE:$SIM_IF" > "$hnc/run/hnc_state"
         echo "$SIM_IF" > "$hnc/run/hotspot_iface"
         [ -f "$hnc/data/rules.json" ] || echo '{"devices":{}}' > "$hnc/data/rules.json"
         mkdir -p /data/local/hnc 2>/dev/null || die "建不了挂载点 /data/local/hnc"
-        # v5.31 T5: HNC_SIM_HOTSPOTD_ARGS 透传给 hotspotd(Go 模式场景传 --no-discovery)
         HNC_SIM_DIR=$SIM_DIR PATH="$REPO/test/sim/fake:$PATH" \
-            unshare -m --propagation private sh -c 'mount --bind "$1" /data/local/hnc && exec "$2" ${3:-}' sh "$hnc" "$SIM_DIR/bin/hotspotd" "${HNC_SIM_HOTSPOTD_ARGS:-}" \
+            unshare -m --propagation private sh -c 'mount --bind "$1" /data/local/hnc && exec "$2"' sh "$hnc" "$SIM_DIR/bin/hotspotd" \
             > "$SIM_DIR/hotspotd.out" 2>&1 &
         echo $! > "$pidf"
         sleep 1
         kill -0 "$(cat "$pidf")" 2>/dev/null || { cat "$SIM_DIR/hotspotd.out" >&2; die "hotspotd 没起来"; }
-        echo "hotspotd 已启动(pid $(cat "$pidf")), 设备表: $hnc/data/devices.json"
+        echo "hotspotd 已启动(pid $(cat "$pidf")), 控制接口: $hnc/run/hotspotd.sock"
         ;;
     stop)
         [ -f "$pidf" ] && kill "$(cat "$pidf")" 2>/dev/null

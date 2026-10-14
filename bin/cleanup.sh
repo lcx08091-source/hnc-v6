@@ -223,9 +223,9 @@ log "iptables cleanup done"
 
 # ── 4. 清理临时文件（保留 data/ 目录，用户配置不删）────────
 rm -f "$RUN"/*.pid "$RUN"/netevt_* "$RUN"/arp_hash "$RUN"/hotspotd.sock "$RUN"/dpid.netlink.event 2>/dev/null
-rm -f "$HNC_DIR/run/hostname_cache" 2>/dev/null  # 缓存可以删
+rm -f "$HNC_DIR/run/hostname_cache" 2>/dev/null  # v5.33 前 shell 扫描的名字缓存(旧版残留)
 rm -rf "$HNC_DIR/run/v6" 2>/dev/null              # v3.4.0：v6_sync 快照目录
-# v3.5.0 P2-5: 清理 device_detect.sh 留下的临时文件(进程异常退出后残留)
+# v3.5.0 P2-5: 清理(v5.33 前)device_detect.sh shell 扫描留下的临时文件
 rm -f "$RUN"/scan_tmp.* "$RUN"/scan_arp.* "$RUN"/.gc_* "$RUN"/.lock_check_* 2>/dev/null
 # v5.9.3 BUG-010:portal(v5.8.9 实验分支,最终未合入 main)的残留。run/ 清理是
 # 白名单式逐项 rm,历来不含 portal_*,三种 mode 一个都清不掉,只有 uninstall.sh

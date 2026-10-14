@@ -1,5 +1,6 @@
-// m4_owner_test.go — v5.31 T1/T3 单测: 去抖纯函数、开关读取、切换安全、
-// 写出路径。路径 / 订阅 / 命令全部注入, 不碰真文件(临时目录)、真 socket。
+// m4_owner_test.go — 设备发现写者单测(v5.31 起): 去抖纯函数、生命周期、写出路径、
+// 「立刻扫一次」与回执。路径 / 订阅 / 命令全部注入, 不碰真文件(临时目录)、真 socket。
+// (v5.33: 写者开关 / 切换 / 默认值退路 / 演练的用例随功能一起删了。)
 package main
 
 import (
@@ -22,8 +23,7 @@ import (
 func m4TestEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	ptrs := []*string{&m4OwnerFile, &m4OwnerCurrentFile, &m4DevicesJSON, &m4DevicesTmpGo,
-		&m4DrillOut, &m4GoOutTmp, &m4DrillFile, &m4RefreshFile, &m4GoWriteLog,
+	ptrs := []*string{&m4DevicesJSON, &m4DevicesTmpGo, &m4RefreshFile, &m4RefreshAckFile, &m4GoWriteLog,
 		&m4NamesPath, &m4CachePath, &m4OverridesPath, &m4MDNSBin, &rulesJSONPath}
 	old := make([]string, len(ptrs))
 	for i, p := range ptrs {
@@ -34,14 +34,10 @@ func m4TestEnv(t *testing.T) string {
 			*p = old[i]
 		}
 	})
-	m4OwnerFile = filepath.Join(dir, "m4_owner")
-	m4OwnerCurrentFile = filepath.Join(dir, "m4_owner.current")
 	m4DevicesJSON = filepath.Join(dir, "devices.json")
 	m4DevicesTmpGo = filepath.Join(dir, "devices.json.tmp.go")
-	m4DrillOut = filepath.Join(dir, "run", "devices.go.json")
-	m4GoOutTmp = filepath.Join(dir, "run", "devices.go.json.tmp")
-	m4DrillFile = filepath.Join(dir, "run", "wd_m4_drill")
 	m4RefreshFile = filepath.Join(dir, "run", "devices.refresh")
+	m4RefreshAckFile = filepath.Join(dir, "run", "devices.refresh.ack")
 	m4GoWriteLog = filepath.Join(dir, "run", "m4_go_write.log")
 	m4NamesPath = filepath.Join(dir, "device_names.json")
 	m4CachePath = filepath.Join(dir, "hostname_cache.json")
@@ -50,16 +46,6 @@ func m4TestEnv(t *testing.T) string {
 	rulesJSONPath = filepath.Join(dir, "rules.json")
 	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
 	return dir
-}
-
-// newTestOwner 注入假的 hotspotd 控制(先 wired=true 挡掉 wireProd 覆盖)。
-func newTestOwner(t *testing.T, statusReply string) *m4OwnerMgr {
-	t.Helper()
-	m := &m4OwnerMgr{wired: true}
-	m.hotspotdStatusFn = func() (string, error) { return statusReply, nil }
-	m.ensureHotspotdFn = func() error { return nil }
-	m.quitHotspotdFn = func() error { return nil }
-	return m
 }
 
 func TestM4ShouldWrite(t *testing.T) {
@@ -86,110 +72,37 @@ func TestM4ShouldWrite(t *testing.T) {
 	}
 }
 
-func TestReadM4Owner(t *testing.T) {
-	dir := m4TestEnv(t)
-	m := &m4OwnerMgr{}
-	// 文件不存在 → 默认(rc 默认 go, 见 m4OwnerDefault)
-	if got := m.readM4Owner(); got != m4OwnerDefault {
-		t.Fatalf("缺文件应回默认 %q, 得 %q", m4OwnerDefault, got)
-	}
-	for _, c := range []struct{ content, want string }{
-		{"go", "go"},
-		{"c", "c"},
-		{" go\n", "go"},
-		{"garbage", m4OwnerDefault},
-		{"", m4OwnerDefault},
-	} {
-		if err := os.WriteFile(filepath.Join(dir, "m4_owner"), []byte(c.content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		if got := m.readM4Owner(); got != c.want {
-			t.Fatalf("内容 %q: 得 %q 要 %q", c.content, got, c.want)
-		}
-	}
-}
-
-func TestHotspotdDaemonArgs(t *testing.T) {
-	m4OwnerCur.Store("c")
-	if got := hotspotdDaemon().args; len(got) != 1 || got[0] != "-d" {
-		t.Fatalf("c 模式不应带 --no-discovery: %v", got)
-	}
-	m4OwnerCur.Store("go")
-	got := hotspotdDaemon().args
-	if len(got) != 2 || got[1] != "--no-discovery" {
-		t.Fatalf("go 模式应带 --no-discovery: %v", got)
-	}
-	m4OwnerCur.Store("c")
-}
-
-func TestOwnerSwitchSafety(t *testing.T) {
+// TestWriterTick v5.33: 没有开关了 —— 热点开着(iface 非空)就起写者, 网卡没变不重起,
+// 热点没了就停。
+func TestWriterTick(t *testing.T) {
 	m4TestEnv(t)
-	// 确认失败(STATUS 没有 discovery:0)→ 回滚, Go 写者不许起
-	m := newTestOwner(t, "running:1 devices:0 pid:1\n")
-	m.owner = "c"
-	m.switchOwnerLocked("go", time.Now())
-	if m.owner != "c" {
-		t.Fatalf("确认失败应回滚, owner = %q", m.owner)
-	}
-	if m.runner != nil {
-		t.Fatal("确认失败时 Go 写者不该启动")
-	}
-	// 确认成功 → owner=go
-	m2 := newTestOwner(t, "running:1 devices:0 pid:1 discovery:0\n")
-	m2.owner = "c"
-	m2.switchOwnerLocked("go", time.Now())
-	if m2.owner != "go" || m4OwnerCur.Load() != "go" {
-		t.Fatalf("确认成功应切到 go, owner=%q cur=%v", m2.owner, m4OwnerCur.Load())
-	}
-	m2.tick("", time.Now()) // 空 iface: 停写者
-	if m2.runner != nil {
-		t.Fatal("空 iface 应停写者")
-	}
-	// go → c: 先停 Go 写者再退 hotspotd —— 退出时 runner 必须已经 nil
-	m2.quitHotspotdFn = func() error {
-		if m2.runner != nil {
-			t.Fatal("切回 c 时, hotspotd 退出前 Go 写者应已停(先停后起)")
-		}
-		return nil
-	}
-	m2.switchOwnerLocked("c", time.Now())
-	if m2.owner != "c" || m2.runner != nil {
-		t.Fatalf("切回 c 失败: owner=%q runner=%v", m2.owner, m2.runner)
-	}
-}
-
-func TestOwnerTickStartsRunner(t *testing.T) {
-	dir := m4TestEnv(t)
-	m := newTestOwner(t, "running:1 devices:0 pid:1 discovery:0\n")
-	if err := os.WriteFile(filepath.Join(dir, "m4_owner"), []byte("go"), 0o644); err != nil {
-		t.Fatal(err)
-	}
+	m := &m4WriterMgr{}
 	m.tick("lo", time.Now())
-	if m.owner != "go" {
-		t.Fatalf("tick 应把 owner 定为 go, 得 %q", m.owner)
-	}
 	if m.runner == nil {
-		t.Fatal("go + ACTIVE iface 应启动 Go 写者")
+		t.Fatal("热点开着应起写者")
 	}
 	r := m.runner
 	m.tick("lo", time.Now())
 	if m.runner != r {
-		t.Fatal("iface 没变不应重启写者")
+		t.Fatal("网卡没变不应重起写者")
 	}
-	// run/m4_owner.current 每轮都写
-	b, err := os.ReadFile(filepath.Join(dir, "m4_owner.current"))
-	if err != nil || string(b) != "go\n" {
-		t.Fatalf("m4_owner.current 应为 go\\n: %q %v", string(b), err)
-	}
-	m.tick("", time.Now()) // 热点没了 → 停写者
+	m.tick("", time.Now())
 	if m.runner != nil {
-		t.Fatal("空 iface 应停 Go 写者")
+		t.Fatal("热点没了应停写者")
+	}
+}
+
+// TestHotspotdDaemonArgs v5.33: hotspotd 本来就不发现了, 看门狗拉它只带 -d
+// (v5.31–v5.32 写者是 Go 时带 --no-discovery)。
+func TestHotspotdDaemonArgs(t *testing.T) {
+	if got := hotspotdDaemon().args; len(got) != 1 || got[0] != "-d" {
+		t.Fatalf("hotspotd 参数应只有 -d: %v", got)
 	}
 }
 
 func TestRunnerWriteOut(t *testing.T) {
 	m4TestEnv(t)
-	r := newM4GoRunner("wlan2", false)
+	r := newM4GoRunner("wlan2")
 	r.statsCmdFn = func() (map[string][2]int64, error) {
 		return map[string][2]int64{"192.168.43.101": {111, 222}}, nil
 	}
@@ -229,7 +142,7 @@ func TestRunnerWriteOut(t *testing.T) {
 
 func TestRunnerLifecycle(t *testing.T) {
 	m4TestEnv(t)
-	r := newM4GoRunner("wlan2", false)
+	r := newM4GoRunner("wlan2")
 	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
 	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
 	r.dumpIfFn = func(int) ([]neigh.Entry, error) { return nil, nil }
@@ -264,15 +177,16 @@ func TestRunnerLifecycle(t *testing.T) {
 	}
 }
 
-// TestRefreshTriggersFullSync v5.31 T4: REFRESH/SIGUSR1 的转发 ——
-// touch run/devices.refresh 后, 写者应在 1 秒内全量扫并写 devices.json
-// (device_detect.sh scan 的「1 秒内 mtime 变了」判断依赖它)。
+// TestRefreshTriggersFullSync v5.31 T4 / v5.33: 「立刻扫一次」—— 往 run/devices.refresh
+// 写 nonce 后, 写者应在 1 秒内全量扫、写 devices.json, 然后把同一个 nonce 写进
+// run/devices.refresh.ack(device_detect.sh scan 等的就是它; 回执出现时 devices.json
+// 必须已经是这次扫描的结果)。「改动前会失败」: v5.32 没有回执文件。
 func TestRefreshTriggersFullSync(t *testing.T) {
 	dir := m4TestEnv(t)
 	if err := os.MkdirAll(filepath.Join(dir, "run"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := newM4GoRunner("wlan2", false)
+	r := newM4GoRunner("wlan2")
 	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
 	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
 	var dumped atomic.Int32 // 写者 goroutine 加、测试主 goroutine 读
@@ -299,25 +213,52 @@ func TestRefreshTriggersFullSync(t *testing.T) {
 		case <-time.After(3 * time.Second):
 		}
 	}()
-	// 没事件、没到 30s —— 只有 refresh 能触发写出(touch = 建文件, mtime=now)。
+	// 没事件、没到 30s —— 只有 refresh 能触发写出。
 	// 等过第一拍(200ms), 保证文件 mtime 严格晚于 lastRefreshM(同毫秒会漏判)。
 	time.Sleep(300 * time.Millisecond)
 	gate.Store(true)
-	if err := os.WriteFile(m4RefreshFile, []byte("refresh\n"), 0o644); err != nil {
+	if err := os.WriteFile(m4RefreshFile, []byte("scan-4242\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
+	t0 := time.Now()
 	for {
-		if dumped.Load() > 0 {
-			if b, err := os.ReadFile(m4DevicesJSON); err == nil &&
-				strings.Contains(string(b), "02:5a:00:00:00:09") {
-				break
+		if b, err := os.ReadFile(m4RefreshAckFile); err == nil && strings.TrimSpace(string(b)) == "scan-4242" {
+			d, _ := os.ReadFile(m4DevicesJSON)
+			if !strings.Contains(string(d), "02:5a:00:00:00:09") {
+				t.Fatalf("回执出现时 devices.json 还不是这次扫描的结果: %s", d)
 			}
+			if took := time.Since(t0); took > time.Second {
+				t.Fatalf("回执用了 %v(上限 1 秒)", took)
+			}
+			return
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("touch refresh 后 2 秒内没有全量扫写出(dumped=%d)", dumped.Load())
+		if time.Since(t0) > 2*time.Second {
+			b, _ := os.ReadFile(m4RefreshAckFile)
+			t.Fatalf("写 nonce 后 2 秒内没有回执(dumped=%d ack=%q)", dumped.Load(), b)
 		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestReadNonce 回执内容: 只取第一行、去空白、超长截断; 没有文件 = 空(hotspotd touch 的)。
+func TestReadNonce(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "refresh")
+	if got := readNonce(p); got != "" {
+		t.Fatalf("没有文件应为空, 得 %q", got)
+	}
+	for in, want := range map[string]string{
+		"":                      "",
+		"abc\n":                 "abc",
+		"  x-1 \r\nsecond\n":    "x-1",
+		strings.Repeat("z", 99): strings.Repeat("z", m4NonceMax),
+	} {
+		if err := os.WriteFile(p, []byte(in), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := readNonce(p); got != want {
+			t.Fatalf("内容 %q: 得 %q 要 %q", in, got, want)
+		}
 	}
 }
 
@@ -337,50 +278,6 @@ func (f *fakeNeighSource) Read() ([]neigh.Entry, error) {
 }
 
 func (f *fakeNeighSource) Close() error { close(f.stop); return nil }
-
-// TestOwnerDefaultFallbackC v5.32 T3: 「默认值改回 c」这条路改了就能用。
-// 模拟 v5.31 升级上来的手机: 没有 data/m4_owner, hotspotd 却以
-// --no-discovery 跑着(开机时 device_detect.sh 照 run/m4_owner.current=go
-// 拉起)。默认值换成 c 后: owner=c、hotspotd 被纠正回做发现、Go 写者不起。
-// 「改动前会失败」: 基线(BASE=6dda4518)没有 m4OwnerDefaultOverride,
-// 本测试编译失败(undefined: m4OwnerDefaultOverride)。
-func TestOwnerDefaultFallbackC(t *testing.T) {
-	dir := m4TestEnv(t)
-	m4OwnerDefaultOverride = "c" // 模拟「正式版把 m4OwnerDefault 改成 c」
-	t.Cleanup(func() { m4OwnerDefaultOverride = "" })
-
-	// 1) 没有开关文件 → 默认 c
-	if err := os.Remove(filepath.Join(dir, "m4_owner")); err != nil && !os.IsNotExist(err) {
-		t.Fatal(err)
-	}
-	if got := (&m4OwnerMgr{}).readM4Owner(); got != "c" {
-		t.Fatalf("默认换成 c 后, 缺开关文件应得 c, 得 %q", got)
-	}
-
-	// 2) 场景: hotspotd 以 --no-discovery 跑(STATUS 带 discovery:0),
-	//    run/m4_owner.current 还是上一次会话的 go —— 开机窗口第一拍。
-	quitN, ensureN := 0, 0
-	m := &m4OwnerMgr{wired: true}
-	m.hotspotdStatusFn = func() (string, error) { return "running:1 devices:0 pid:1 discovery:0\n", nil }
-	m.ensureHotspotdFn = func() error { ensureN++; return nil }
-	m.quitHotspotdFn = func() error { quitN++; return nil }
-	m.tick("lo", time.Now())
-	if m.owner != "c" {
-		t.Fatalf("默认 c + 缺开关: owner 应为 c, 得 %q", m.owner)
-	}
-	if m.runner != nil {
-		t.Fatal("默认 c 时 Go 写者不许起")
-	}
-	// owner=c 而 hotspotd 在 no-discovery → reconcile 纠偏(重启回发现模式)
-	if quitN == 0 || ensureN == 0 {
-		t.Fatalf("应重启 hotspotd 纠偏回发现模式(quit=%d ensure=%d)", quitN, ensureN)
-	}
-	// run/m4_owner.current 每轮都写, 供 device_detect.sh 读
-	b, err := os.ReadFile(filepath.Join(dir, "m4_owner.current"))
-	if err != nil || strings.TrimSpace(string(b)) != "c" {
-		t.Fatalf("m4_owner.current 应为 c: %q %v", string(b), err)
-	}
-}
 
 // TestM4NextTickMS v5.32 T4: 主循环下一拍间隔 —— 有事(dirty / 待解析名字 /
 // 在途解析)200ms, 全空闲 m4IdleTickMS(500ms)。改动前固定 200ms(m4WriteHardRateMS)。
@@ -413,7 +310,7 @@ func TestM4NextTickMS(t *testing.T) {
 // 降频前固定 200ms → 15+ 次; 空闲 500ms(审查改, 见 m4IdleTickMS)→ 约 6 次 ≤ 9。
 func TestRunnerIdleWakeRate(t *testing.T) {
 	m4TestEnv(t)
-	r := newM4GoRunner("wlan2", false)
+	r := newM4GoRunner("wlan2")
 	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
 	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
 	r.dumpIfFn = func(int) ([]neigh.Entry, error) { return nil, nil } // 空表: 无 pending 无 dirty
@@ -452,7 +349,7 @@ func m4IdleRunner(t *testing.T) (*m4GoRunner, *fakeNeighSource, *atomic.Int32) {
 	if err := os.MkdirAll(filepath.Join(dir, "run"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	r := newM4GoRunner("wlan2", false)
+	r := newM4GoRunner("wlan2")
 	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 64), stop: make(chan struct{})}
 	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
 	dumped := &atomic.Int32{}

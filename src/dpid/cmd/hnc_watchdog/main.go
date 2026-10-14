@@ -358,12 +358,9 @@ func httpdDaemon() daemonSpec {
 }
 
 func hotspotdDaemon() daemonSpec {
+	// v5.33: hotspotd 只剩硬件加速兜底(offload 调度 / BPF limit_map)和控制接口,
+	// 设备发现在本看门狗(m4_owner.go)。
 	args := []string{"-d"}
-	// v5.31 T3: M4 方案 A —— Go 写者模式下 hotspotd 只留硬件加速兜底
-	// (offload 调度 / BPF limit_map / 控制接口), 不做发现。
-	if m4Owner.isGo() {
-		args = append(args, "--no-discovery")
-	}
 	return daemonSpec{
 		name:     "hotspotd",
 		binPath:  binDir + "/hotspotd",
@@ -701,7 +698,7 @@ func mainLoop() {
 }
 
 func handlePending(_ *restoreThrottle) time.Duration {
-	m4Owner.hotspotDown() // v5.31 审查修复: 热点没开, Go 写者不空转
+	m4Writer.hotspotDown() // v5.31 审查修复: 热点没开, Go 写者不空转
 	res := runActionFn("probe_hotspot")
 	if res.exitCode != 0 || res.stdout == "" {
 		return intervalProbe
@@ -747,7 +744,7 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	if probe.exitCode != 0 || probe.stdout == "" {
 		// Hotspot down — keep ACTIVE state (user might just have toggled off),
 		// don't migrate or full_restore. Next round will re-probe.
-		m4Owner.hotspotDown() // v5.31 审查修复: 热点关了停 Go 写者(不空转)
+		m4Writer.hotspotDown() // v5.31 审查修复: 热点关了停 Go 写者(不空转)
 		return intervalNormal
 	}
 	parts := strings.Fields(probe.stdout)
@@ -774,13 +771,8 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	// v5.30 T1a: 在线时长 5 分钟采样、按分钟累计(热点已确认开着; 不再只在
 	// 健康检查通过的轮次采样 —— 旧版是 case 0 里的 sampleOnlineHours)。
 	onlineAcc.sample(now)
-	// v5.30 T3 → v5.31 T1/T3: M4 设备发现。owner=go 时 Go 写者接管
-	// (m4_owner.go), 影子比对没有意义(hotspotd 已不发现); owner=c 时
-	// 影子照跑(5 分钟一轮, 只比对 hotspotd, 不写任何东西给它)。
-	m4Owner.tick(newIface, now)
-	if !m4Owner.isGo() {
-		m4Shadow.maybeRun(newIface, now)
-	}
+	// 设备发现(m4_owner.go, v5.33 起唯一一份): 热点开着就跑写者。
+	m4Writer.tick(newIface, now)
 	if aux.cap.due(newIface, now) {
 		_ = runActionFn("capability_probe", newIface)
 		aux.cap.mark(newIface, now)

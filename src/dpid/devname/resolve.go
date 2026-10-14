@@ -1,7 +1,7 @@
 // Package devname —— v5.31 T2(迁移 M4 方案 A): Go 版设备名解析。
 //
-// 优先级与输出和 C 版 hotspotd 完全一致(resolve_hostname, hotspotd.c;
-// WORK-v5.31 §1.1 的 1–6 级):
+// 优先级与输出照搬 C 版 hotspotd 的 resolve_hostname(WORK-v5.31 §1.1 的
+// 1–6 级; v5.33 起 C 版发现已删, 这里是唯一一份):
 //  1. 手动名   data/device_names.json           → hostname_src = "manual"
 //  2. DHCP     exec dumpsys network_stack(500ms) → "dhcp"
 //  3. mDNS     exec bin/mdns_resolve -t 800 <ip> → "mdns"
@@ -10,11 +10,10 @@
 //  6. MAC 兜底 去冒号取后 8 位                    → "mac"
 //
 // 垃圾名(null / localhost / 纯数字 …)在 DHCP、mDNS、缓存回放三处挡
-// (hnc_hostname_is_junk, Go 侧同一张表 hnc.io/dpid/hostname)。
-// 2、3 命中时更新缓存(只有当前写者写, tmp 名与 C 的 .tmp.<pid> 区分)。
-// 5 的用户覆盖(data/oui_overrides.json)优先于内置表, 且不受随机 MAC(LAA)
-// 跳过约束 —— 都与 hnc_lookup_oui 对齐。外部命令参数分开传、带超时,
-// 不经 shell。
+// (hnc.io/dpid/hostname)。2、3 命中时更新缓存。5 的用户覆盖
+// (data/oui_overrides.json)优先于内置表, 且不受随机 MAC(LAA)跳过约束。
+// 内置 OUI 表就是 oui_table.txt(v5.31 从 C 表抽出, v5.33 起是唯一数据源)。
+// 外部命令参数分开传、带超时, 不经 shell。
 package devname
 
 import (
