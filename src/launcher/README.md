@@ -14,7 +14,9 @@ ColorOS 16 + SukiSU 内核组合上,Go runtime 的 `fork+execv` 路径(`CLONE_VM
 | Shell `hnc_dpid_guard.sh` | ✓ | ✓ |
 | **C `hnc_launcher`** | **✓** | ✓ |
 
-C launcher 在所有环境都能工作,所以现在是首选。
+C launcher 在所有环境都能工作,所以现在是首选。v5.33 起 shell guard 与 Go supervisor
+都已删除: C launcher 不能用时走 direct(Go 看门狗直接盯 `hnc_dpid`,见
+`src/dpid/cmd/hnc_watchdog/m5.go`)。
 
 ## 两个程序的关系
 
@@ -22,7 +24,7 @@ C launcher 在所有环境都能工作,所以现在是首选。
 service.sh 启动序:
     1. fork_probe /system/bin/true   ← 探测 C fork+execv 行不行
        └─ exit 0 → 走 C launcher
-       └─ exit !=0 → 降级到 shell guard
+       └─ exit !=0 → direct(看门狗直接盯 hnc_dpid)
 
     2. exec hnc_launcher               ← 长期运行, 守护 hnc_dpid
        └─ fork hnc_dpid

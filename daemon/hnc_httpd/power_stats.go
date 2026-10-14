@@ -54,7 +54,7 @@ var powerProcDefs = []powerProcDef{
 	{"hnc_httpd", "hnc_httpd(含它拉起的脚本)"},
 	{"hotspotd", "hotspotd"},
 	{"hnc_dpid", "hnc_dpid"},
-	{"dpid_guard", "dpid 守护(shell)"},
+	{"dpid_guard", "dpid 守护(C launcher)"},
 	{"watchdog", "watchdog(含它拉起的脚本)"},
 	{"offload_guard", "offload 兜底(shell)"},
 	{"clsact_wd", "clsact 守护(shell)"},

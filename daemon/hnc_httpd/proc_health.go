@@ -23,8 +23,10 @@ type phCounts struct {
 	Hotspotd      int `json:"hotspotd"`
 	WatchdogTotal int `json:"watchdog_total"`
 	WatchdogMain  int `json:"watchdog_main"`
-	GuardTotal    int `json:"dpid_guard_total"`
-	GuardMain     int `json:"dpid_guard_main"`
+	// dpid 守护(v5.33 起只有 C hnc_launcher; 字段名沿用 rc17 的 dpid_guard_*,
+	// 前端不用改)。launcher 多由看门狗拉起(父进程不是 1), 所以不按 PPID==1 数。
+	GuardTotal int `json:"dpid_guard_total"`
+	GuardMain  int `json:"dpid_guard_main"`
 }
 
 type phOut struct {
@@ -103,8 +105,8 @@ func buildProcHealth(fs procfind.FS, hncDir string, now time.Time) phOut {
 	c.Hotspotd = countBase("hotspotd")
 	c.WatchdogTotal = countContains("watchdog.sh")
 	c.WatchdogMain = countMain(binPrefix+"hnc_watchdog", binPrefix+"watchdog.sh")
-	c.GuardTotal = countContains("hnc_dpid_guard.sh")
-	c.GuardMain = countMain(binPrefix + "hnc_dpid_guard.sh")
+	c.GuardTotal = countContains("hnc_launcher")
+	c.GuardMain = countBase("hnc_launcher")
 
 	// 看门狗主实例兜底: 父进程不一定是 1(各家 root 的收养者不同),
 	// PPID==1 没数到、但 pidfile 指向的进程活着且 cmdline 确实是看门狗 → 算 1。
@@ -150,15 +152,15 @@ func buildProcHealth(fs procfind.FS, hncDir string, now time.Time) phOut {
 		warn("watchdog 主实例重复")
 	}
 	if c.GuardMain > 1 {
-		warn("dpid_guard 主实例重复")
+		warn("hnc_launcher 重复")
 	}
 	if c.WatchdogTotal > 3 {
 		warn("watchdog 子进程偏多")
 	}
 	if c.GuardTotal > 6 {
-		warn("dpid_guard 子进程偏多")
+		warn("hnc_launcher 进程偏多")
 	}
-	// rc30.8: dpid_guard pidfile 缺失不升 warn(Go supervisor 可能替代了 guard)
+	// rc30.8: dpid_guard pidfile 缺失不升 warn(choice=direct 时没有 launcher)
 	if !out.Pidfiles["hotspotd"].Alive {
 		warn("hotspotd pidfile 不可用")
 	}

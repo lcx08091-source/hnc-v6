@@ -4,7 +4,7 @@
  * 用途:
  *   service.sh 启动时跑这个探针,看 C fork+execv 在当前 ROM/内核能不能工作.
  *   能工作 → 用 hnc_launcher (C, 最优路径)
- *   不能工作 → 降级到 hnc_dpid_guard.sh (shell, 兼容)
+ *   不能工作 → direct: Go 看门狗直接盯 hnc_dpid (v5.33 起没有 shell guard)
  *
  * 背景:
  *   ColorOS 16 + SukiSU 内核组合上, Go runtime 用 CLONE_VM|CLONE_VFORK 的

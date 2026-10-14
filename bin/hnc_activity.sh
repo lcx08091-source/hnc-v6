@@ -2,7 +2,7 @@
 # hnc_activity.sh — v5.22 功耗: 读 run/activity.json(hnc_httpd 每 15s 探测、≤60s 刷新)
 #
 # 只用 shell 内建(read / case / 参数展开 / 算术), 不 fork —— 循环里每轮都读也几乎零开销。
-# 被 watchdog.sh / hnc_offload_guard.sh / hnc_dpid_guard.sh 以 `.` 引入。
+# 被 watchdog.sh / hnc_offload_guard.sh 以 `.` 引入。
 #
 # activity.json 是单行 JSON, 字段顺序固定(见 daemon/hnc_httpd/power_activity.go Activity):
 #   {"ts":..,"level":"hotspot_off|no_clients|background|active|unknown","screen_on":..,

@@ -29,7 +29,6 @@ type m5World struct {
 	spawns   []string // "bin args… > pidfile"
 	makeLive bool     // 假拉起后进程是否「活着」(写假 /proc)
 	nextPID  int
-	legacy   []string
 	stats    map[string]int
 	statErrs map[string]int
 }
@@ -50,7 +49,7 @@ func withM5World(t *testing.T) *m5World {
 		_ = os.WriteFile(filepath.Join(w.bin, b), []byte("#!fake"), 0o755)
 	}
 	oRun, oLog, oBin, oEtc, oProc := m5RunDir, m5LogDir, m5BinDir, m5EtcDir, m5ProcRoot
-	oSpawn, oLegacy, oNow, oStats, oGates := m5SpawnFn, m5LegacyFn, nowFn, runStatsFn, m5Gates
+	oSpawn, oNow, oStats, oGates := m5SpawnFn, nowFn, runStatsFn, m5Gates
 	m5RunDir, m5LogDir, m5BinDir, m5EtcDir, m5ProcRoot = w.run, w.log, w.bin, w.etc, w.proc
 	m5Gates = map[string]*spawnGate{}
 	nowFn = w.clk.Now
@@ -64,7 +63,6 @@ func withM5World(t *testing.T) *m5World {
 		}
 		return nil
 	}
-	m5LegacyFn = func(choice string) { w.legacy = append(w.legacy, choice) }
 	runStatsFn = func(name string, rc int, err error, _ float64, _ time.Time) {
 		w.stats[name]++
 		if err != nil {
@@ -73,7 +71,7 @@ func withM5World(t *testing.T) *m5World {
 	}
 	t.Cleanup(func() {
 		m5RunDir, m5LogDir, m5BinDir, m5EtcDir, m5ProcRoot = oRun, oLog, oBin, oEtc, oProc
-		m5SpawnFn, m5LegacyFn, nowFn, runStatsFn, m5Gates = oSpawn, oLegacy, oNow, oStats, oGates
+		m5SpawnFn, nowFn, runStatsFn, m5Gates = oSpawn, oNow, oStats, oGates
 	})
 	return w
 }
@@ -109,8 +107,8 @@ func TestM5OnLauncherAliveNothingToDo(t *testing.T) {
 	w.proc1(4242, "/data/local/hnc/bin/hnc_launcher")
 	w.write("dpid_guard.pid", "4242") // service.sh / launcher 自己写的锁文件
 	superviseDpid()
-	if len(w.spawns) != 0 || len(w.legacy) != 0 {
-		t.Fatalf("launcher 活着不该动: spawns=%v legacy=%v", w.spawns, w.legacy)
+	if len(w.spawns) != 0 {
+		t.Fatalf("launcher 活着不该动: spawns=%v", w.spawns)
 	}
 }
 
@@ -129,31 +127,16 @@ func TestM5OnLauncherDeadWatchdogRelaunches(t *testing.T) {
 	}
 }
 
-func TestM5OffUsesLegacyThreeWay(t *testing.T) {
-	w := withM5World(t)
-	w.write(m5SwitchFile, "")
-	for _, c := range []string{"launcher", "guard", "supervisor", "direct"} {
-		w.write("dpid_launcher.choice", c+"\n")
-		superviseDpid()
-	}
-	if strings.Join(w.legacy, ",") != "launcher,guard,supervisor,direct" || len(w.spawns) != 0 {
-		t.Fatalf("开关关闭应全部走 v5.29 四路监管: legacy=%v spawns=%v", w.legacy, w.spawns)
-	}
-}
-
-// 旧值兼容: 关着 M5 开机选的 guard / supervisor, 开关删了也维持 v5.29 监管。
-func TestM5OnLegacyChoiceCompat(t *testing.T) {
-	w := withM5World(t)
+// v5.33: 旧版本留下的 guard / supervisor(v5.29 三选一的值)与非法值一样按缺失处理:
+// launcher 二进制在 → 拉 launcher(不再走已删的 shell guard / Go supervisor)。
+func TestM5OldChoiceValuesTreatedAsMissing(t *testing.T) {
 	for _, c := range []string{"guard", "supervisor", "bogus"} {
+		w := withM5World(t)
 		w.write("dpid_launcher.choice", c+"\n")
 		superviseDpid()
-	}
-	if strings.Join(w.legacy, ",") != "guard,supervisor" {
-		t.Fatalf("legacy=%v(非法值按缺失处理, 不走 legacy)", w.legacy)
-	}
-	// "bogus" = 缺失: launcher 二进制在 → 拉 launcher
-	if len(w.spawns) != 1 || !strings.HasPrefix(w.spawns[0], "hnc_launcher") {
-		t.Fatalf("spawns=%v", w.spawns)
+		if len(w.spawns) != 1 || !strings.HasPrefix(w.spawns[0], "hnc_launcher") {
+			t.Fatalf("choice=%s: 应按缺失处理拉 launcher, spawns=%v", c, w.spawns)
+		}
 	}
 }
 

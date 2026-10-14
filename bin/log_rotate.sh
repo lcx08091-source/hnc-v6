@@ -23,7 +23,7 @@
 #   这个假设只对"每写一行重开一次文件"的 shell 成立,对长驻 daemon 全不成立 ——
 #   hnc_dpid / hnc_httpd / hotspotd / watchdog / launcher 的 stdout/stderr 都是
 #   spawn 那一刻一次性打开的 O_APPEND fd(见 service.sh 的 `>> log 2>&1`、
-#   hnc_dpid_guard.sh、hnc_launcher.c、dpid_supervisor),它们永远不会重新 open。
+#   hnc_launcher.c、看门狗的 spawnDaemon),它们永远不会重新 open。
 #   mv 只改目录项不动 inode → 轮转后 daemon 的 fd 继续往 foo.log.1 里写
 #   (真机实测 dpid 的 fd 1/2 双双指向 dpid.log.1),而 WebUI 日志页读的是那个
 #   空的新 foo.log;再轮两次,`rm -f $f.2` 会 unlink 掉仍被持有的 inode →

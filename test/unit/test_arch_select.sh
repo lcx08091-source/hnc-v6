@@ -14,7 +14,7 @@
 # getprop 用 PATH 前置的假脚本(读 FAKE_ABI / FAKE_ABILIST)。
 
 ROOT="$HNC_REPO_ROOT"
-NATIVE="hotspotd hnc_ipc mdns_resolve hnc_tc_ingress hnc_clsact_ctl hnc_launcher fork_probe hnc_dpid hnc_watchdog hnc_dpid_supervisor"
+NATIVE="hotspotd hnc_ipc mdns_resolve hnc_tc_ingress hnc_clsact_ctl hnc_launcher fork_probe hnc_dpid hnc_watchdog"
 
 # $1 = 路径, $2 = arm64|arm
 mk_elf() {
@@ -182,7 +182,7 @@ FAKE_ABI=armeabi-v7a FAKE_ABILIST=armeabi-v7a,armeabi; export FAKE_ABI FAKE_ABIL
 run_customize "$M"
 sync_like_service "$M" "$H"
 bad=""
-for b in hnc_dpid hnc_watchdog hnc_dpid_supervisor hnc_launcher hnc_ipc hnc_clsact_ctl; do
+for b in hnc_dpid hnc_watchdog hnc_launcher hnc_ipc hnc_clsact_ctl; do
     grep -q "\$HNC_DIR/bin/$b\"" "$ROOT/service.sh" || bad="$bad service.sh-no-longer-uses:$b"
 done
 for b in $NATIVE; do

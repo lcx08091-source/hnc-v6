@@ -2,7 +2,6 @@
 # 只放行基线(13d1861, v5.27.0-rc1)已有的命中; 新增违规照样失败。
 # 清掉一条 = 修掉一个老坑。
 src/dpid/cmd/dpid/main.go:P1:存量: dpid 启动路径按 UTC 可接受(输出文件名/日志不依赖本地时区), 修它要动启动时序, 白名单放行
-src/dpid/cmd/dpid_supervisor/main.go:P1:存量: dpid 启动路径按 UTC 可接受(输出文件名/日志不依赖本地时区), 修它要动启动时序, 白名单放行
 bin/ci_preflight.sh:P2:只在 CI / 开发机(GNU grep)上跑, 不上手机
 bin/device_detect.sh:P2:误报: 是 case 模式里的字面 | (*\|*), 不是 grep 正则
 bin/inject_version_to_docs.sh:P2:只在 CI / 开发机(GNU grep)上跑, 不上手机

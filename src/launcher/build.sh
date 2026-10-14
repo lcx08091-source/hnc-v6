@@ -131,8 +131,8 @@ ls -lh "$OUT/hnc_launcher"
 
 # rc30.12.28: TLS 对齐诊断 (informational, never fails CI).
 # Bionic ARM64 需要 TLS align >= 64; 默认 toolchain 出 8 字节会 abort.
-# 这里只打印, 不 exit. 如果对齐错, 用户装机时 service.sh sentinel 会自动检测
-# 'TLS segment is underaligned' abort 并 fallback 到 shell guard.
+# 这里只打印, 不 exit. 如果对齐错, 用户装机时 service.sh 开机探测 / Go 看门狗
+# 救命路径(m5.go)会检测 'TLS segment is underaligned' abort 并改走 direct.
 echo ""
 echo "TLS alignment diag (informational):"
 (

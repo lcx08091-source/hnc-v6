@@ -9,7 +9,7 @@
 //
 // What's Go-native here (rc30.1):
 //   - Main loop and state machine (PENDING / ACTIVE:iface)
-//   - Daemon lifecycle (hotspotd / hnc_httpd / hnc_dpid_supervisor)
+//   - Daemon lifecycle (hotspotd / hnc_httpd / hnc_launcher → hnc_dpid, m5.go)
 //   - Heartbeat + log rotation + spawn lock
 //   - Restart cooldown bookkeeping (no more silent restart storms)
 //   - Doze detection, INTERVAL_DOZE handling
@@ -339,22 +339,6 @@ type daemonSpec struct {
 	logFile  string
 	pidFile  string
 	cooldown time.Duration
-	// dependsOnSupervisor: this binary is launched indirectly by the dpid
-	// supervisor (which itself spawns dpid). If supervisor missing,
-	// fall back to a direct binPath launch.
-	guardBin string
-}
-
-func dpidDaemon() daemonSpec {
-	return daemonSpec{
-		name:     "hnc_dpid",
-		binPath:  binDir + "/hnc_dpid",
-		args:     []string{"-config", hncDir + "/etc/dpi_config.json"},
-		logFile:  logDir + "/dpid.log",
-		pidFile:  runDir + "/dpid.pid",
-		cooldown: dpidRestartCD,
-		guardBin: binDir + "/hnc_dpid_supervisor", // rc30.0 preferred
-	}
 }
 
 func httpdDaemon() daemonSpec {
@@ -390,36 +374,18 @@ func hotspotdDaemon() daemonSpec {
 	}
 }
 
-// v5.5.0-rc6: hnc_launcher 之前没有 daemon spec, 只在 ensureDaemonRunning
-// 对 dpid 的 short-circuit 里被引用 (rc3 fix: "如果 launcher 活, dpid 不要 spawn").
-// 但 launcher 自己死了**没人拉**. 所以一旦 launcher 在某次启动失败 / 被 OOM /
-// 任何原因消失, Go watchdog 完全感知不到, dpid 也跟着死. 加上 spec 之后,
-// watchdog 跟监管其他 daemon 一样监管 launcher, 死了自动用 spawnDaemon 拉.
-// launcher 重新起来后, launcher 自己会接管 dpid 的 fork, 行为跟现状一致.
-func launcherDaemon() daemonSpec {
-	return daemonSpec{
-		name:     "hnc_launcher",
-		binPath:  binDir + "/hnc_launcher",
-		args:     nil,
-		logFile:  logDir + "/launcher.log",
-		pidFile:  runDir + "/launcher.pid",
-		cooldown: 30 * time.Second,
-	}
-}
-
-// ── v5.26 T2: dpid 守护者唯一权威 = run/dpid_launcher.choice ──────────────
+// ── dpid 守护者 = run/dpid_launcher.choice(v5.26 T2 起唯一权威) ──────────────
 //
-// service.sh 启动时按机型探测(C launcher > shell guard > Go supervisor >
-// direct)把选择原子写入 run/dpid_launcher.choice; sentinel 的救命路径检测到
-// launcher 反复 abort 时会把 choice 改写为 direct。看门狗每个 tick 读一次,
-// 只监管 choice 指定的那一个守护者, 不再无条件重拉 hnc_launcher(即使
-// service.sh 因兼容性选了别的)。文件缺失/非法时保持旧行为。
+// v5.33: dpid 守护只留一条链 —— service.sh 开机测 C hnc_launcher 能不能用,
+// 能用写 launcher, 不能用写 direct; launcher 反复 abort 时看门狗的救命路径
+// (m5.go)把它改写为 direct。v5.29 的 shell guard / Go supervisor 两条备选与
+// 开关 run/wd_m5.disabled 已删, 旧版本留下的 guard / supervisor 值按缺失处理。
 
-// parseLauncherChoice 校验 choice 文件内容, 非法值返回 ""(视同缺失)。
+// parseLauncherChoice 校验 choice 文件内容, 非法值(含旧版的 guard / supervisor)返回 ""(视同缺失)。
 func parseLauncherChoice(raw string) string {
 	c := strings.TrimSpace(raw)
 	switch c {
-	case "launcher", "guard", "supervisor", "direct":
+	case "launcher", "direct":
 		return c
 	default:
 		return ""
@@ -439,102 +405,9 @@ func readLauncherChoice() string {
 	return readLauncherChoiceAt(m5RunDir + "/dpid_launcher.choice") // m5RunDir 默认 = runDir
 }
 
-// superviseDpid 主循环每轮的 dpid 守护入口(v5.30 T2): M5 开(默认)走
-// superviseDpidM5, 关(run/wd_m5.disabled 存在)走 v5.29 的 superviseDpidLegacy。
+// superviseDpid 主循环每轮的 dpid 守护入口(见 m5.go)。
 func superviseDpid() {
-	choice := readLauncherChoice()
-	if m5Enabled() {
-		superviseDpidM5(choice, nowFn())
-		return
-	}
-	m5LegacyFn(choice)
-}
-
-// dpidGuardPlan 返回该 choice 下看门狗应监管的对象(纯函数, 供单测):
-//   - launcher:   只监管 hnc_launcher(它负责 dpid)
-//   - guard:      只确保 hnc_dpid_guard.sh 在跑
-//   - supervisor: 只走 dpidDaemon(guardBin 优先启动 hnc_dpid_supervisor)
-//   - direct:     dpidDaemonDirect 直管 dpid(不重拉任何 launcher)
-//   - "":         保持旧行为(launcher + dpidDaemon 两个都管)
-func dpidGuardPlan(choice string) (superviseLauncher, superviseSupervisor, superviseShellGuard, superviseDpidDirect bool) {
-	switch choice {
-	case "launcher":
-		return true, false, false, false
-	case "guard":
-		return false, false, true, false
-	case "supervisor":
-		return false, true, false, false
-	case "direct":
-		return false, false, false, true
-	default:
-		return true, true, false, false
-	}
-}
-
-// dpidDaemonDirect: choice=direct 时的 dpid spec —— 去掉 guardBin,
-// 确保 ensureDaemonRunning 直接拉 hnc_dpid 而不是 hnc_dpid_supervisor。
-func dpidDaemonDirect() daemonSpec {
-	d := dpidDaemon()
-	d.guardBin = ""
-	return d
-}
-
-// ensureShellGuardRunning: choice=guard 时确保 bin/hnc_dpid_guard.sh 在跑。
-func ensureShellGuardRunning() bool {
-	return ensureGuardScriptAt(binDir+"/hnc_dpid_guard.sh", runDir+"/dpid_guard.pid",
-		"hnc_dpid_guard", logDir+"/dpid_guard.log", dpidRestartCD)
-}
-
-// ensureGuardScriptAt 是路径可注入的 shell guard 启动器(供单测):
-// 先认 pidfile, 再按 comm/argv0(cmdline 子串)找活进程并顺手修复 pidfile,
-// 都没有才在冷却窗口允许时拉起。
-func ensureGuardScriptAt(script, pidFile, name, logPath string, cd time.Duration) bool {
-	if data, err := os.ReadFile(pidFile); err == nil {
-		if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 && processAlive(pid) {
-			return true
-		}
-	}
-	if live := findLiveByName(name); live > 0 {
-		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(live)), 0o644)
-		return true
-	}
-	if live := findLiveByCmdlineSub(filepath.Base(script)); live > 0 {
-		_ = os.WriteFile(pidFile, []byte(strconv.Itoa(live)), 0o644)
-		return true
-	}
-	if _, err := os.Stat(script); err != nil {
-		return false
-	}
-	if !cooldownOK(name, cd) {
-		return false
-	}
-	logf("%s: process gone, launching shell guard", name)
-	out, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
-		out = nil
-	}
-	cmd := exec.Command(shellPath(), script)
-	if out != nil {
-		cmd.Stdout = out
-		cmd.Stderr = out
-	}
-	// 与 spawnDaemon 相同的进程组隔离(Setsid 不能用, ColorOS+SukiSU 会 EPERM)。
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if err := cmd.Start(); err != nil {
-		logf("%s: launch failed: %v", name, err)
-		if out != nil {
-			_ = out.Close()
-		}
-		return false
-	}
-	go func() {
-		_ = cmd.Wait()
-		if out != nil {
-			_ = out.Close()
-		}
-	}()
-	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o644)
-	return true
+	superviseDpidM5(readLauncherChoice(), nowFn())
 }
 
 const alertScanEvery = 5 * time.Minute
@@ -561,32 +434,11 @@ func cooldownOK(name string, cd time.Duration) bool {
 
 // ensureDaemonRunning checks the daemon's pidfile, repairs it if a live
 // process matches, otherwise (re)launches under cooldown.
-//
-// For dpid specifically, prefer launching the supervisor binary (rc30.0)
-// when available; supervisor itself manages the dpid child.
+// (hotspotd / hnc_httpd; dpid 与 hnc_launcher 由 m5.go 管。)
 func ensureDaemonRunning(d daemonSpec) {
-	// v5.5.0-rc3 fix: hnc_launcher (C binary, added in rc30.12) was created
-	// specifically to manage dpid lifecycle, bypassing the ColorOS Go fork
-	// EPERM issue. If launcher is running, IT owns dpid — watchdog must NOT
-	// race it. Without this check, watchdog kept trying to spawn the legacy
-	// hnc_dpid_supervisor (Go binary) which hits the SAME EPERM and crashes.
-	if d.name == "hnc_dpid" {
-		if findLiveByName("hnc_launcher") > 0 {
-			return // launcher is running, it handles dpid; we're done
-		}
-	}
-
-	// Choose launcher: supervisor takes precedence over direct binary for dpid.
 	launcher := d.binPath
 	launcherArgs := d.args
 	watchPidFile := d.pidFile
-	if d.guardBin != "" {
-		if _, err := os.Stat(d.guardBin); err == nil {
-			launcher = d.guardBin
-			launcherArgs = nil
-			watchPidFile = runDir + "/dpid_guard.pid"
-		}
-	}
 
 	// Is the watched pidfile alive?
 	if data, err := os.ReadFile(watchPidFile); err == nil {
@@ -699,39 +551,6 @@ func findLiveByName(name string) int {
 		if data, err := os.ReadFile("/proc/" + e.Name() + "/cmdline"); err == nil {
 			argv0 := strings.SplitN(string(data), "\x00", 2)[0]
 			if filepath.Base(argv0) == name && !isZombie(pid) {
-				return pid
-			}
-		}
-	}
-	return 0
-}
-
-// findLiveByCmdlineSub 在 /proc/*/cmdline 的任意 argv 段里找执行 needle 的
-// 活进程(排除自己)。findLiveByName 只匹配 comm/argv0, 找不到
-// `sh /data/local/hnc/bin/hnc_dpid_guard.sh` 这种以解释器启动的脚本进程,
-// shell guard 的存活检测必须走这里。
-func findLiveByCmdlineSub(needle string) int {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0
-	}
-	mypid := os.Getpid()
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 0 || pid == mypid {
-			continue
-		}
-		data, err := os.ReadFile("/proc/" + e.Name() + "/cmdline")
-		if err != nil {
-			continue
-		}
-		// 只认 argv 段恰为 needle 或以 "/needle" 结尾(真正执行该脚本的进程),
-		// 不误认 `grep hnc_dpid_guard.sh`、`pgrep -f ...` 之类只是提到名字的进程。
-		for _, arg := range strings.Split(string(data), "\x00") {
-			if arg == needle || strings.HasSuffix(arg, "/"+needle) {
 				return pid
 			}
 		}
@@ -875,9 +694,8 @@ func mainLoop() {
 		// Daemon supervision (regardless of state)
 		ensureDaemonRunning(hotspotdDaemon())
 		ensureDaemonRunning(httpdDaemon())
-		// v5.26 T2: 只监管 run/dpid_launcher.choice 指定的那一个 dpid 守护者。
-		// v5.30 T2(M5): 默认只盯 C launcher(救命路径也在看门狗, 见 m5.go);
-		// 建 run/wd_m5.disabled 退回 v5.29 的按 choice 四路监管。
+		// dpid 守护: C launcher 管 dpid, 这里只盯 launcher(choice=direct 时直接盯
+		// dpid), 救命路径也在这里(m5.go)。
 		superviseDpid()
 	}
 }

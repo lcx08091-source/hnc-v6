@@ -132,10 +132,8 @@ chmod 755 "$HNC_DIR"/bin/*.sh
 # 真机 RMX5010 装 beta.1 后 hnc_tc_ingress 权限 644 → 不能 exec →
 # install_ingress_mirred_via_netlink 回落 → 上行限速失败.
 #
-# rc30.8 补: hnc_dpid_supervisor (rc30.0 加) + hnc_watchdog (rc30.1 加).
-# 之前漏掉这两个, 真机 RMX5010 装 rc30.7 后 supervisor 权限 644 → 不能 exec →
-# watchdog 退回老 hnc_dpid_guard.sh, 导致 3 个 guard.sh 实例残留 (本来 supervisor
-# 就是为了消除这个混乱的).
+# rc30.8 补: hnc_watchdog (rc30.1 加) 之前漏掉, 权限 644 → 不能 exec。
+# (v5.33: hnc_dpid_supervisor 已删, 不再在列表里。)
 #
 # rc30.11 关键修复: 这个 chmod 块原来只 chmod $HNC_DIR/bin/, 但
 # post-fs-data.sh 跑时 sync_runtime_from_moddir 还没执行 (那是 service.sh 干的),
@@ -151,7 +149,7 @@ chmod 755 "$HNC_DIR"/bin/*.sh
 for _dir in "$MODDIR/bin" "$HNC_DIR/bin"; do
     [ -d "$_dir" ] || continue
     for _b in hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_json hnc_dpid \
-              hnc_dpid_supervisor hnc_watchdog hnc_launcher fork_probe \
+              hnc_watchdog hnc_launcher fork_probe \
               hnc_clsact_ctl; do
         if [ -f "$_dir/$_b" ]; then
             chmod 755 "$_dir/$_b"

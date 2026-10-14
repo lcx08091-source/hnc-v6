@@ -119,8 +119,8 @@ done
 #   原 "watchdog" 会匹配 cmdline 里任何含 "watchdog" 的进程 (例如用户在编辑器打开
 #   watchdog.sh, 或其他模块路径含 watchdog). "bin/watchdog.sh" 把误杀面收窄到实际
 #   含 HNC 脚本路径的进程.
-# rc30.0+ : 加入 hnc_dpid_supervisor 和 hnc_watchdog (Go 二进制) 的清理.
-for proc in bin/hnc_launcher bin/hnc_dpid_supervisor bin/hnc_dpid_guard.sh bin/hnc_watchdog bin/hnc_clsact_watchdog.sh bin/hnc_offload_guard.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
+# rc30.0+ : 加入 hnc_watchdog (Go 二进制) 的清理(v5.33 删了 dpid supervisor / shell guard).
+for proc in bin/hnc_launcher bin/hnc_watchdog bin/hnc_clsact_watchdog.sh bin/hnc_offload_guard.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
     pkill -f "$proc" 2>/dev/null && log "pkill $proc"
 done
 # watchdogfix-v6.1: also stop stale service.sh sentinel shells; otherwise

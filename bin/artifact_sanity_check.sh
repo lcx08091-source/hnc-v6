@@ -142,7 +142,7 @@ _elf_machine() { # <zip-entry> → "b7 00" / "28 00" / ...
 }
 if command -v od >/dev/null 2>&1; then
   for b in bin/hotspotd bin/hnc_ipc bin/mdns_resolve bin/hnc_tc_ingress bin/hnc_clsact_ctl \
-           bin/hnc_launcher bin/fork_probe bin/hnc_dpid bin/hnc_watchdog bin/hnc_dpid_supervisor \
+           bin/hnc_launcher bin/fork_probe bin/hnc_dpid bin/hnc_watchdog \
            daemon/hnc_httpd/hnc_httpd; do
     grep -x "$b" "$TMP.entries" >/dev/null || continue
     M=$(_elf_machine "$b")

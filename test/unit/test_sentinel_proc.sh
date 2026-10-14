@@ -7,8 +7,9 @@
 #
 # 测的是行为, 不是源码 grep:
 #   - bin/hnc_proc.sh 的 pid_matches / pidfile_pid_matches 直接跑;
-#   - service.sh 的 find_live_watchdog_pid / dpid_alive / launcher_alive_count
-#     从 service.sh 里抽出来跑(awk 按函数名提取, 与线上同一份代码)。
+#   - service.sh 的 find_live_watchdog_pid 从 service.sh 里抽出来跑(awk 按函数名
+#     提取, 与线上同一份代码)。(v5.33: 哨兵早已不判 dpid / launcher, 那两个判活
+#     函数随 shell guard 一起删了; dpid / launcher 判活在 Go 看门狗 m5.go。)
 
 HNC_REPO_ROOT="${HNC_REPO_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}"
 
@@ -43,7 +44,7 @@ HNC_PROC_ROOT="$SENT_PROC" . "$HNC_REPO_ROOT/bin/hnc_proc.sh"
 SENT_FNS="$SENT_TD/sent_fns.sh"
 : > "$SENT_FNS"
 for fn in is_pid_alive process_by_name_alive list_watchdog_pids \
-          find_live_watchdog_pid dpid_alive launcher_alive_count; do
+          find_live_watchdog_pid; do
     awk -v fn="$fn" '
         index($0, fn "() {") == 1 { infn = 1 }
         infn { print }
@@ -75,7 +76,7 @@ cleanup_sent() {
 trap cleanup_sent EXIT INT TERM
 
 # ─────────────────────────────────────────────────────────────────
-test_start "pid_matches: 参数恰好是关键字 / 以 /关键字 结尾(与 Go findLiveByCmdlineSub 同口径)"
+test_start "pid_matches: 参数恰好是关键字 / 以 /关键字 结尾(与 Go m5.go cmdlineHas 同口径)"
 mk_cmd 101 "/data/local/hnc/bin/hnc_watchdog"
 pid_matches 101 hnc_watchdog && \
     { mk_cmd 102 hnc_launcher -d; pid_matches 102 hnc_launcher; } && \
@@ -123,39 +124,6 @@ SENT_REAL_PIDS="$SENT_REAL_PIDS $REALPID"
 export SENT_PS_OUT="root $REALPID 999 1 12:00 ? 00:00:01 hnc_watchdog"
 got=$(find_live_watchdog_pid)
 assert_eq "$REALPID" "$got" "兜底逻辑应找到 ps 里的短名字进程" && test_pass
-
-test_start "dpid_alive: pidfile 对上 → 活(不看 ps)"
-export SENT_PS_OUT=""
-mk_cmd 201 "/data/local/hnc/bin/hnc_dpid" -config /data/local/hnc/etc/dpid.conf
-echo 201 > "$RUN/dpid.pid"
-if dpid_alive; then
-    test_pass
-else
-    test_fail "dpid pidfile 判活失败"
-fi
-
-test_start "dpid_alive: pidfile 失效且 ps/pidof 全盲 → 死(会触发重拉)"
-export SENT_PS_OUT=""
-echo 202 > "$RUN/dpid.pid"
-rm_proc 202
-if dpid_alive; then
-    test_fail "pidfile 失效应判死"
-else
-    test_pass
-fi
-
-test_start "launcher_alive_count: launcher.pid 对上 → ≥1(ps/pidof 全盲)"
-export SENT_PS_OUT=""
-mk_cmd 301 "/data/local/hnc/bin/hnc_launcher"
-echo 301 > "$RUN/launcher.pid"
-c=$(launcher_alive_count)
-[ "$c" -ge 1 ] && test_pass || test_fail "count=$c, want ≥1"
-
-test_start "launcher_alive_count: 无 pidfile 时 ps 短名字兜底仍有效"
-rm -f "$RUN/launcher.pid" "$RUN/dpid_guard.pid"
-export SENT_PS_OUT="root $REALPID 999 1 12:00 ? 00:00:01 hnc_dpid_supervisor"
-c=$(launcher_alive_count)
-[ "$c" -ge 1 ] && test_pass || test_fail "count=$c, want ≥1(ps 兜底)"
 
 test_start "hnc_proc.sh 独立可用: 不依赖 service.sh 的变量"
 if (HNC_PROC_ROOT="$SENT_PROC" . "$HNC_REPO_ROOT/bin/hnc_proc.sh" && pid_matches 101 hnc_watchdog); then

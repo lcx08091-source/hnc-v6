@@ -319,12 +319,11 @@ fi
 
 # 当前使用的 launcher 路径
 SELECTED_LAUNCHER="unknown"
+# v5.33: 只剩 C launcher 与 direct(看门狗直接盯 dpid)两种
 if pidof hnc_launcher >/dev/null 2>&1; then
     SELECTED_LAUNCHER="c_launcher"
-elif pgrep -f "hnc_dpid_guard.sh" >/dev/null 2>&1; then
-    SELECTED_LAUNCHER="shell_guard"
-elif pidof hnc_dpid_supervisor >/dev/null 2>&1; then
-    SELECTED_LAUNCHER="go_supervisor"
+elif [ "$(cat "$HNC/run/dpid_launcher.choice" 2>/dev/null)" = "direct" ]; then
+    SELECTED_LAUNCHER="direct"
 fi
 
 # hnc_launcher 是否存在

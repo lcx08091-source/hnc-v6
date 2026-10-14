@@ -1,7 +1,8 @@
 #!/system/bin/sh
 # dpi_rebind.sh — HNC v5.3.0-rc17
-# Manual DPI rebind helper.  Safe for WebUI button use: stop stale dpid/guard,
-# refresh dpi_config.json with the current hotspot iface, then relaunch guard.
+# Manual DPI rebind helper.  Safe for WebUI button use: restart the dpid child,
+# refresh dpi_config.json with the current hotspot iface; the C launcher (or, in
+# direct mode, this script / the Go watchdog) brings dpid back up.
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
 
@@ -11,7 +12,6 @@ LOG_DIR="$HNC_DIR/logs"
 ETC="$HNC_DIR/etc"
 LOG="$LOG_DIR/dpi_rebind.log"
 CONFIG="$ETC/dpi_config.json"
-GUARD="$HNC_DIR/bin/hnc_dpid_guard.sh"
 LAUNCHER_C="$HNC_DIR/bin/hnc_launcher"
 DPID="$HNC_DIR/bin/hnc_dpid"
 
@@ -61,7 +61,7 @@ if ! printf '%s' "$IFACE" | grep -qE '^[A-Za-z0-9_.:-]{1,32}$'; then
     exit 1
 fi
 log "manual rebind requested iface=$IFACE"
-write_state "$IFACE" "manual DPI rebind requested; restarting guard/capture on $IFACE"
+write_state "$IFACE" "manual DPI rebind requested; restarting capture on $IFACE"
 
 echo "$IFACE" > "$RUN/hotspot_iface" 2>/dev/null || true
 printf '{"iface":"%s","log_level":"info"}\n' "$IFACE" > "$CONFIG" 2>/dev/null || true
@@ -71,20 +71,14 @@ chmod 644 "$CONFIG" 2>/dev/null || true
 # by hnc_watchdog. The OLD rebind killed it (via dpid_guard.pid) and started a
 # COMPETING shell guard → two managers fighting over dpid (one SIGTERMs it, the
 # other treats rc=0 as "stop" and gives up) → dpid dies → user must rebind
-# again, forever. New behaviour: clear crash flags, kill any STALE shell guard /
-# Go supervisor (NOT the C launcher), restart only the dpid CHILD so the C
-# launcher respawns it with the refreshed iface config.
+# again, forever. New behaviour: clear crash flags, restart only the dpid CHILD
+# so the C launcher respawns it with the refreshed iface config. (v5.33: the
+# shell guard / Go supervisor no longer exist.)
 
 # Clear crash flags so the launcher/dpid actually (re)start. The C launcher
 # enters "observe mode" (no restart) while dpid_crashflag exists; dpid has its
 # own dpid.crashflag.
 rm -f "$RUN/dpid_crashflag" "$RUN/dpid.crashflag" 2>/dev/null || true
-
-# Kill stale shell guard / Go supervisor only — leave the C launcher alone.
-for p in $(ps -ef 2>/dev/null | grep -E '[h]nc_dpid_guard\.sh|[h]nc_dpid_supervisor' | awk '{print $2}'); do
-    [ -n "$p" ] && { log "KILL stale launcher pid=$p"; kill -9 "$p" 2>/dev/null || true; }
-done
-rm -rf "$RUN/dpid_guard.lock" 2>/dev/null || true
 
 # Restart only the dpid child; the launcher respawns it with the new config.
 kill_pidfile "$RUN/dpid.child.pid"
@@ -96,9 +90,8 @@ if command -v pidof >/dev/null 2>&1; then
 fi
 sleep 1
 
-# Ensure a launcher is alive. Prefer the C launcher (robust, no /system/bin
-# dependency; hnc_watchdog normally keeps it up). Only fall back to the shell
-# guard if the C launcher binary is missing.
+# Ensure a launcher is alive: the C launcher (robust, no /system/bin dependency;
+# hnc_watchdog normally keeps it up). Without it, start dpid directly.
 if ps -ef 2>/dev/null | grep -q '[h]nc_launcher'; then
     log "C launcher alive; dpid will respawn on iface=$IFACE"
     echo "ok: rebound iface=$IFACE (C launcher respawns dpid within ~2s)"
@@ -107,13 +100,6 @@ elif [ -x "$LAUNCHER_C" ]; then
     nohup "$LAUNCHER_C" >> "$LOG_DIR/dpid_guard.log" 2>&1 &
     echo $! > "$RUN/dpid_guard.pid"
     echo "ok: C launcher started pid=$(cat "$RUN/dpid_guard.pid" 2>/dev/null) iface=$IFACE"
-elif [ -x "$GUARD" ] && [ -f "$RUN/wd_m5.disabled" ]; then
-    # v5.30 T2(M5): shell guard 只在退回 v5.29(run/wd_m5.disabled)时才选用;
-    # 默认没有 C launcher 就直拉 dpid(Go 看门狗按 direct 口径盯它)。
-    log "C launcher missing; fallback to shell guard"
-    nohup sh "$GUARD" >> "$LOG_DIR/dpid_guard.log" 2>&1 &
-    echo $! > "$RUN/dpid_guard.pid"
-    echo "ok: guard restarted pid=$(cat "$RUN/dpid_guard.pid" 2>/dev/null) iface=$IFACE"
 elif [ -x "$DPID" ]; then
     log "no launcher; starting dpid directly"
     nohup "$DPID" -config "$CONFIG" >> "$LOG_DIR/dpid.log" 2>&1 &

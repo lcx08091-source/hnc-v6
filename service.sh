@@ -265,41 +265,10 @@ prune_stale_service_sentinels() {
     rm -f "$RUN/sentinel.pid" 2>/dev/null || true
 }
 
-launcher_alive_count() {
-    local c
-    c=0
-    # v5.28 A3: 每个 launcher 种类先认自己的 pidfile + /proc cmdline(与 Go 侧
-    # findLiveByCmdlineSub 同口径), pidfile 失效才退回原有 pidof / ps 兜底(保留)。
-    # launcher 只用 run/launcher.pid; supervisor 与 shell guard 共用 run/dpid_guard.pid
-    # (rc14: 二者都自维护 dpid_guard.pid 锁文件)。
-    if pidfile_pid_matches "$RUN/launcher.pid" hnc_launcher || process_by_name_alive hnc_launcher; then
-        c=$((c + 1))
-    fi
-    if pidfile_pid_matches "$RUN/dpid_guard.pid" hnc_dpid_supervisor || process_by_name_alive hnc_dpid_supervisor; then
-        c=$((c + 1))
-    fi
-    if pidfile_pid_matches "$RUN/dpid_guard.pid" hnc_dpid_guard.sh || process_by_name_alive hnc_dpid_guard.sh; then
-        c=$((c + 1))
-    fi
-    echo "$c"
-}
-
-dpid_alive() {
-    # v5.28 A3: 先认 run/dpid.pid + /proc cmdline(不依赖 ps 输出格式);
-    # pidfile 失效(进程死了 / pid 被复用 / 文件缺失)才退回 pidof / ps 兜底。
-    pidfile_pid_matches "$RUN/dpid.pid" hnc_dpid && return 0
-    process_by_name_alive hnc_dpid
-}
-
-# v5.30 T2(迁移 M5): dpid 守护链 4 层 → 2 层。默认开: 开机只选 C launcher
-# (不能用就 direct, 不再选 shell guard / Go supervisor), 哨兵不再判 dpid /
-# launcher —— C launcher 管 dpid, Go 看门狗盯 launcher, 「launcher 坏了 → 直拉
-# dpid」的救命路径也在看门狗(src/dpid/cmd/hnc_watchdog/m5.go)。
-# 建 run/wd_m5.disabled 退回 v5.29 三选一 + 哨兵救命路径(哨兵每轮读, 不用重刷模块;
-# 开机选择下次开机生效)。
-m5_enabled() {
-    [ ! -f "$RUN/wd_m5.disabled" ]
-}
+# dpid 守护(v5.30 迁移 M5, v5.33 起只剩这一种): 开机只测 C launcher, 能用就
+# 用它管 dpid, 不能用就 direct; 哨兵不判 dpid / launcher —— Go 看门狗盯 launcher,
+# 「launcher 坏了 → 直拉 dpid」的救命路径也在看门狗(src/dpid/cmd/hnc_watchdog/m5.go)。
+# v5.29 的 shell guard / Go supervisor 与开关 run/wd_m5.disabled 已删。
 
 # Kill old buggy sentinel/service shells before this fixed service starts supervisors.
 # Old sentinels can keep spawning watchdogs while the new service is starting.
@@ -362,7 +331,7 @@ sync_runtime_from_moddir() {
     # chcon system_file:s0: 防止 cp 把 context 改成 system_data_file:s0, 后者
     # 在 ColorOS 16 / SukiSU 上让 Go fork+exec 报 EPERM (真机 RMX5010 实测).
     for _b in hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_json hnc_dpid \
-              hnc_dpid_supervisor hnc_watchdog \
+              hnc_watchdog \
               hnc_launcher fork_probe \
               hnc_clsact_ctl; do
         if [ -f "$HNC_DIR/bin/$_b" ]; then
@@ -852,15 +821,8 @@ fi
 # 进程 60s 内崩 3 次进 crash_loop 模式 — daemon 不再自动重启,
 # 留 dpi_state.json mode=crash_loop, 用户手动清 crashflag 才恢复.
 DPID_BIN="$HNC_DIR/bin/hnc_dpid"
-DPID_GUARD="$HNC_DIR/bin/hnc_dpid_guard.sh"
-# rc30.0: Go supervisor replacing the shell guard. Static binary, no
-# dependency on /system/bin/* tools, immune to post-fs-data namespace
-# transitions that wedged hnc_dpid_guard.sh in rc29.x.
-# rc30.12: Go supervisor 在 ColorOS 16 / SukiSU 内部 fork+exec 被某条
-# 内核策略拦下报 EPERM (验证: C fork+execv 同一环境 100% 工作, 但 Go
-# runtime 用 CLONE_VM|CLONE_VFORK 路径被挡). 故 rc30.12 引入 C launcher
-# 替代 Go supervisor, 优先级翻转: C > shell > Go.
-DPID_SUPERVISOR="$HNC_DIR/bin/hnc_dpid_supervisor"
+# rc30.12: C launcher 管 dpid(Go 进程起子进程在 ColorOS 16 / SukiSU 上会被拦,
+# 报 EPERM; C fork+execv 同一环境正常)。v5.33 起不再有 shell guard / Go supervisor。
 DPID_LAUNCHER_C="$HNC_DIR/bin/hnc_launcher"
 FORK_PROBE="$HNC_DIR/bin/fork_probe"
 DPID_LAUNCHER="$DPID_BIN"
@@ -869,22 +831,12 @@ DPID_PID="$RUN/dpid.pid"
 DPID_GUARD_PID="$RUN/dpid_guard.pid"
 
 find_live_dpid_guard_pid() {
-    # rc30.0: also match supervisor binary name (replaces shell guard).
-    # rc30.12: also match C launcher.
-    ps -ef 2>/dev/null | grep -E '[h]nc_launcher|[h]nc_dpid_supervisor|[h]nc_dpid_guard\.sh' \
-        | awk 'NR==1{print $2}'
+    ps -ef 2>/dev/null | grep -E '[h]nc_launcher' | awk 'NR==1{print $2}'
 }
 
-# rc30.12 launcher priority + auto-probe:
-#   1. hnc_launcher (C binary, optimal)         — needs probe to confirm fork+execv works
-#   2. hnc_dpid_guard.sh (shell, universally compatible)
-#   3. hnc_dpid_supervisor (Go, may EPERM on hardened ROMs)
-#   4. hnc_dpid (direct, last resort)
-#
-# Probe 逻辑: 用 fork_probe 测一下 C fork+execv 能不能跑.
-# 能跑 → C launcher 优雅路径
-# 不能跑 → shell guard 兼容路径 (rc29.x 稳定多年)
-# 都没有 → Go supervisor 兜底 (实测不行, 但保留代码以防有人需要)
+# rc30.12 launcher 探测: 用 fork_probe 测 C fork+execv 能不能跑, 再真跑一下
+# hnc_launcher --version(防二进制本身坏了)。能用 → C launcher 管 dpid;
+# 不能用 → direct(Go 看门狗直接盯 hnc_dpid)。
 LAUNCHER_CHOICE=""
 if [ -x "$DPID_LAUNCHER_C" ] && [ -x "$FORK_PROBE" ]; then
     # 用 /system/bin/true 测试 (它执行后立刻退 0)
@@ -908,33 +860,18 @@ if [ -x "$DPID_LAUNCHER_C" ] && [ -x "$FORK_PROBE" ]; then
         fi
         unset _launcher_test _launcher_test_rc
     else
-        log "dpid launcher: fork_probe FAIL on this device, falling back to shell guard"
+        log "dpid launcher: fork_probe FAIL on this device"
     fi
 fi
 
-if [ -z "$LAUNCHER_CHOICE" ] && m5_enabled; then
-    log "dpid launcher: M5 — C launcher unavailable, direct mode (Go watchdog supervises hnc_dpid; no shell guard / Go supervisor)"
+if [ -z "$LAUNCHER_CHOICE" ]; then
+    log "dpid launcher: C launcher unavailable, direct mode (Go watchdog supervises hnc_dpid)"
 fi
 
-if [ -z "$LAUNCHER_CHOICE" ] && ! m5_enabled && [ -x "$DPID_GUARD" ]; then
-    DPID_LAUNCHER="$DPID_GUARD"
-    LAUNCHER_CHOICE="shell_guard"
-    log "dpid launcher: hnc_dpid_guard.sh (shell, universal fallback)"
-fi
-
-if [ -z "$LAUNCHER_CHOICE" ] && ! m5_enabled && [ -x "$DPID_SUPERVISOR" ]; then
-    DPID_LAUNCHER="$DPID_SUPERVISOR"
-    LAUNCHER_CHOICE="go_supervisor"
-    log "dpid launcher: hnc_dpid_supervisor (Go, last-resort) — may fail on hardened ROMs"
-fi
-
-# v5.26 T2: 把选定的 dpid 守护者原子写入 run/dpid_launcher.choice。
-# Go 看门狗与 sentinel 都只认这一份, 不再各自猜测谁在管 dpid。
-# (launcher | guard | supervisor | direct)
+# v5.26 T2: 把选定的 dpid 守护方式原子写入 run/dpid_launcher.choice。
+# Go 看门狗只认这一份(launcher | direct)。
 case "$LAUNCHER_CHOICE" in
     c_launcher)     _dpid_choice="launcher" ;;
-    shell_guard)    _dpid_choice="guard" ;;
-    go_supervisor)  _dpid_choice="supervisor" ;;
     *)              _dpid_choice="direct" ;;
 esac
 printf '%s\n' "$_dpid_choice" > "$RUN/dpid_launcher.choice.tmp" 2>/dev/null \
@@ -1058,29 +995,10 @@ else
         log "dpid: installed default dpi_ja4_fingerprints.json to $DPID_JA4"
     fi
 
-    # rc14: 优先启动 dpid guard / supervisor, 并用独立 dpid_guard.pid 防重复.
-    # dpid.pid 只给真实 hnc_dpid child 使用, 避免 guard/child 互相覆盖 pidfile.
-    # rc30.0: 同一启动块同时适用 Go supervisor (DPID_SUPERVISOR) 和老 shell guard
-    # (DPID_GUARD). 二者都自维护 dpid_guard.pid 锁文件, 启动方式一致 (nohup &).
-    # rc30.12.28 修 P0 (GPT 三审): 之前判断只匹配 SUPERVISOR/GUARD, C launcher 选中后
-    # 会落到 else 分支直启 hnc_dpid. 后续 sentinel 又会拉 C launcher, 双 dpid 风险.
-    # 现在改成: 任何 launcher (C/shell/Go) 都走统一 launcher 分支, 只有 fallback 到
-    # DPID_BIN (没有 launcher 可用) 才走 direct 模式.
-    # rc11: when using the C launcher (normal/robust path, also enforced by
-    # hnc_watchdog), kill any stale shell guard / Go supervisor left from a
-    # previous session (e.g. an old dpi_rebind that spawned a shell guard). Two
-    # different managers fighting over dpid is fatal (one SIGTERMs it, the other
-    # gives up) → dpid dies and the user has to keep hitting "重新绑定".
-    # v5.30 T2: M5 下 direct 模式同样不留旧 guard / supervisor(它们不再被选用)。
-    if [ "$LAUNCHER_CHOICE" = "c_launcher" ] || m5_enabled; then
-        pkill -f 'hnc_dpid_guard\.sh' 2>/dev/null || true
-        pkill -f 'hnc_dpid_supervisor' 2>/dev/null || true
-    fi
-
+    # rc14: C launcher 用独立的 dpid_guard.pid 防重复(launcher 自己也维护它);
+    # dpid.pid 只给真实 hnc_dpid 用。没有可用的 launcher 才 direct 直启 hnc_dpid。
     if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
         gp=$(_verify_pid "$DPID_GUARD_PID" hnc_launcher)
-        gp=${gp:-$(_verify_pid "$DPID_GUARD_PID" hnc_dpid_guard)}
-        gp=${gp:-$(_verify_pid "$DPID_GUARD_PID" hnc_dpid_supervisor)}
         if [ -n "$gp" ] && kill -0 "$gp" 2>/dev/null; then
             log "hnc_dpid launcher already running (PID=$gp, choice=$LAUNCHER_CHOICE), skip duplicate launch"
         else
@@ -1119,80 +1037,22 @@ fi
 # 三层重叠 — watchdog 已经管 hotspotd / httpd, launcher 已经管 dpid. sentinel 不应
 # 再重复管这些, 否则两个 supervisor 同时重启 → 双进程风险.
 #
-# 收窄后 sentinel 的职责:
-#   1. dpid launcher + LAUNCHER_BROKEN 救命 (保留, 这是 rc30.12.28 真机救命路径,
-#      因为 watchdog 跟 launcher 串在一起, 同样会卡 TLS abort 循环, 需要 sentinel
-#      在更外层兜底跳过 launcher 直拉 dpid)
-#   2. hnc_watchdog 健康 (新核心职责 — watchdog 死了 sentinel 重启它,
-#      watchdog 自己接管 hotspotd / httpd)
+# 收窄后 sentinel 的职责(v5.30 M5 起, 「launcher 坏了 → 直拉 dpid」的救命路径
+# 搬进了 Go 看门狗 m5.go, 哨兵不再判 dpid / launcher):
+#   - hnc_watchdog 健康 (watchdog 死了 sentinel 重启它, watchdog 自己接管
+#     hotspotd / httpd / dpid)
+#   - 升级观察期(v5.29 自动回滚)
 #
 # 委托给 watchdog 不再 sentinel 检查的:
 #   - hnc_httpd  (watchdog.sh ensure_httpd_running)
 #   - hotspotd   (watchdog.sh check_services)
 (
     sleep 15
-    if m5_enabled; then _sent_scope="watchdog(+rollback); dpid->launcher+go-watchdog (M5)"; else _sent_scope="dpid+watchdog"; fi
-    log "sentinel: starting (launcher_choice=$LAUNCHER_CHOICE, dpid_launcher=$DPID_LAUNCHER, scope=$_sent_scope)"
+    log "sentinel: starting (launcher_choice=$LAUNCHER_CHOICE, dpid_launcher=$DPID_LAUNCHER, scope=watchdog(+rollback); dpid->launcher+go-watchdog)"
 
     while true; do
-        # v5.30 T2(M5): 默认不再判 dpid / launcher —— C launcher 管 dpid, Go 看门狗
-        # 盯 launcher, 救命路径也搬进看门狗(m5.go)。建 run/wd_m5.disabled 恢复
-        # 下面 v5.29 的检查(每轮读开关)。
-        if ! m5_enabled; then
-            # 1. dpid launcher 检查 (HANDOFF 红线 — rc30.12.28 真机救命路径, 不动)
-            # rc30.12.28: 区分 direct vs launcher 模式. 之前只检查 launcher 进程,
-            # 如果没有 launcher (DPID_LAUNCHER=DPID_BIN), sentinel 会一直试图启动
-            # DPID_BIN 但又把它认作 launcher, 状态机错乱.
-            # v5.26 T2: 救命路径已把 choice 改写为 direct 时, sentinel 也按 direct 口径
-            # 只保 dpid, 不再每轮查坏掉的 launcher / 重写 choice。
-            _sent_choice=$(cat "$RUN/dpid_launcher.choice" 2>/dev/null)
-            if [ "$DPID_LAUNCHER" != "$DPID_BIN" ] && [ "$_sent_choice" != "direct" ]; then
-                # 1a. launcher 模式 - 检查 launcher 进程 (C / shell guard / Go supervisor 任一)
-                LAUNCHER_ALIVE=$(launcher_alive_count)
-                if [ "$LAUNCHER_ALIVE" = "0" ]; then
-                    # rc30.12.28: 检测 launcher 反复启动失败 (TLS abort 等). 如果 dpid_guard.log
-                    # 最近 60 秒出现 "TLS segment is underaligned" 或类似 abort, 不要再拉 launcher,
-                    # 直接 fallback 到 direct mode 启动 hnc_dpid.
-                    LAUNCHER_BROKEN=0
-                    if [ -f "$HNC_DIR/logs/dpid_guard.log" ]; then
-                        if tail -50 "$HNC_DIR/logs/dpid_guard.log" 2>/dev/null \
-                           | grep -qE 'TLS segment is underaligned|Aborted|cannot execute|error:.*executable'; then
-                            LAUNCHER_BROKEN=1
-                        fi
-                    fi
-                    if [ "$LAUNCHER_BROKEN" = "1" ]; then
-                        # launcher 坏了, 直接拉 dpid (绕过 launcher)
-                        if ! dpid_alive; then
-                            log "sentinel: launcher broken (abort detected), fallback to direct dpid"
-                            nohup "$DPID_BIN" -config "$DPID_CONFIG" >> "$HNC_DIR/logs/dpid.log" 2>&1 &
-                            echo $! > "$DPID_PID" 2>/dev/null || true
-                            sleep 2
-                        fi
-                        # v5.26 T2: choice 原子改写为 direct, Go 看门狗随即停止重拉坏掉的
-                        # launcher、只按 direct 口径管 dpid。救命路径本身保留不变。
-                        printf 'direct\n' > "$RUN/dpid_launcher.choice.tmp" 2>/dev/null \
-                            && mv -f "$RUN/dpid_launcher.choice.tmp" "$RUN/dpid_launcher.choice" 2>/dev/null \
-                            || printf 'direct\n' > "$RUN/dpid_launcher.choice" 2>/dev/null
-                    elif [ -x "$DPID_LAUNCHER" ]; then
-                        log "sentinel: no dpid launcher running, restarting via $DPID_LAUNCHER"
-                        nohup "$DPID_LAUNCHER" >> "$HNC_DIR/logs/dpid_guard.log" 2>&1 &
-                        echo $! > "$DPID_GUARD_PID" 2>/dev/null || true
-                        sleep 2
-                    else
-                        log "sentinel: WARN DPID_LAUNCHER unset or not executable ($DPID_LAUNCHER), skip"
-                    fi
-                fi
-            else
-                # 1b. direct 模式 - 检查 dpid 进程
-                if ! dpid_alive; then
-                    log "sentinel: hnc_dpid not running (direct mode), relaunching"
-                    nohup "$DPID_BIN" -config "$DPID_CONFIG" >> "$HNC_DIR/logs/dpid.log" 2>&1 &
-                    echo $! > "$DPID_PID" 2>/dev/null || true
-                    sleep 2
-                fi
-            fi
-
-        fi
+        # 哨兵不判 dpid / launcher(v5.30 M5 起): C launcher 管 dpid, Go 看门狗盯
+        # launcher, 「launcher 坏了 → 直拉 dpid」的救命路径也在看门狗(m5.go)。
 
         # 2. hnc_watchdog 检查 (新核心职责 — watchdog 死了 sentinel 重启它)
         # rc30.12.29 (P1.7): watchdog 是 hotspotd / httpd / dpid (常规路径) 的 supervisor,
@@ -1222,4 +1082,4 @@ fi
     done
 ) >> "$HNC_DIR/logs/sentinel.log" 2>&1 &
 echo $! > "$RUN/sentinel.pid" 2>/dev/null || true
-log "sentinel started (PID=$(cat "$RUN/sentinel.pid" 2>/dev/null), dpid_launcher=$DPID_LAUNCHER, scope=dpid+watchdog, watchdogfix-v6.1)"
+log "sentinel started (PID=$(cat "$RUN/sentinel.pid" 2>/dev/null), dpid_launcher=$DPID_LAUNCHER, scope=watchdog+rollback, watchdogfix-v6.1)"

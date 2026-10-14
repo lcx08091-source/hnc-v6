@@ -152,7 +152,7 @@ echo ""
 
 echo "── [13] dpid 日志尾部 (最近 20 行) ──────────────────────────"
 # v5.9.3 修 BUG-007 A(同族路径漂移): 实际日志名是 logs/dpid.log
-# (dpid_supervisor/main.go 的 dpidChildLog、hnc_dpid_guard.sh:420 都写这个,
+# (hnc_launcher.c 与 service.sh / 看门狗 direct 模式都写这个,
 # httpd allowedLogs 白名单里也是 dpid.log), 之前写的 hnc_dpid.log 不存在
 # → 本段永远空白. 现在 dpid.log 优先、hnc_dpid.log 兜底.
 DPI_LOG=""

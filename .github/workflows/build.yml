@@ -214,22 +214,6 @@ jobs:
           file ../../bin/hnc_watchdog | grep -q "not stripped" && { echo "ERROR: hnc_watchdog not stripped"; exit 1; }
           chmod 755 ../../bin/hnc_watchdog
 
-      # rc47/audit: hnc_dpid_supervisor is pure Go (./cmd/dpid_supervisor) and
-      # does NOT depend on libbpf, yet CI never built it — it shipped as a stale
-      # committed prebuilt, so the rc38 netlink-debounce fix (and anything since)
-      # never reached users. Rebuild it fresh + stripped every CI run, same as
-      # hnc_dpid / hnc_watchdog.
-      - name: Build hnc_dpid_supervisor (Go)
-        run: |
-          cd src/dpid
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
-            go build -trimpath -ldflags="-s -w" \
-            -o ../../bin/hnc_dpid_supervisor ./cmd/dpid_supervisor
-          ls -lh ../../bin/hnc_dpid_supervisor
-          file ../../bin/hnc_dpid_supervisor | grep -q "ARM aarch64" || exit 1
-          file ../../bin/hnc_dpid_supervisor | grep -q "not stripped" && { echo "ERROR: hnc_dpid_supervisor not stripped"; exit 1; }
-          chmod 755 ../../bin/hnc_dpid_supervisor
-
       # ─── Build app-label dex helper (Java → dex) ──────────
       # Reads real localized PackageManager labels on-device via app_process.
       # Compiled against a public android.jar; @hide bootstrap done by
@@ -342,7 +326,7 @@ jobs:
 
           (cd daemon/hnc_httpd && bash build.sh arm)
           (cd src/dpid
-           for pair in dpid:hnc_dpid hnc_watchdog:hnc_watchdog dpid_supervisor:hnc_dpid_supervisor; do
+           for pair in dpid:hnc_dpid hnc_watchdog:hnc_watchdog; do
              src=${pair%%:*}; out=${pair#*:}
              CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
                go build -trimpath -ldflags="-s -w" -o "../../bin/armeabi-v7a/$out" "./cmd/$src"
@@ -353,16 +337,14 @@ jobs:
           (cd daemon/hotspotd && bash build.sh arm)
 
           # 与 arm64 一一对应: 缺一个 armv7 包就会混进 arm64 二进制
-          for b in hnc_httpd hnc_dpid hnc_watchdog hnc_dpid_supervisor hnc_launcher fork_probe \
+          for b in hnc_httpd hnc_dpid hnc_watchdog hnc_launcher fork_probe \
                    hnc_tc_ingress hnc_clsact_ctl hotspotd hnc_ipc mdns_resolve; do
             f="bin/armeabi-v7a/$b"
             test -s "$f" || { echo "ERROR: $f missing"; exit 1; }
             file "$f" | grep -q "ELF 32-bit LSB .*ARM, EABI5" || { echo "ERROR: $f not armeabi-v7a: $(file "$f")"; exit 1; }
             chmod 755 "$f"
           done
-          for b in hnc_watchdog hnc_dpid_supervisor; do
-            file "bin/armeabi-v7a/$b" | grep -q "not stripped" && { echo "ERROR: armv7 $b not stripped"; exit 1; }
-          done
+          file "bin/armeabi-v7a/hnc_watchdog" | grep -q "not stripped" && { echo "ERROR: armv7 hnc_watchdog not stripped"; exit 1; }
           strings bin/armeabi-v7a/hnc_httpd | grep -qF "$VERSION" \
             || { echo "ERROR: armv7 hnc_httpd missing version $VERSION"; exit 1; }
           ls -lh bin/armeabi-v7a/

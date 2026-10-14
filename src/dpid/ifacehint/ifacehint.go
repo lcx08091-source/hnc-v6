@@ -4,7 +4,8 @@
 // run/iface_detect.json({"schema":1,"ts":..,"iface":"wlan2"|"",..})。
 // dpid 侧此前有三份各自判断(capture.readHNCHint 只读 hotspot_iface、
 // dpid_supervisor.getIface 照抄 guard.sh 的写死候选表、guard.sh 的
-// get_iface), 升级 ROM 后各自猜出不同网卡名。本包统一: 优先
+// get_iface; 后两者 v5.33 已随 shell guard / Go supervisor 删除), 升级 ROM
+// 后各自猜出不同网卡名。本包统一: 优先
 // iface_detect.json(10 分钟内新鲜), 回退 hotspot_iface(格式校验同
 // readHNCHint), 都没有 ok=false —— 调用方各自保留自己的扫描兜底。
 package ifacehint

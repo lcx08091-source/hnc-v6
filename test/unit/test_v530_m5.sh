@@ -1,99 +1,85 @@
 #!/system/bin/sh
-# test/unit/test_v530_m5.sh — v5.30 T2(迁移 M5): service.sh 的开机选择与哨兵分工。
+# test/unit/test_v530_m5.sh — dpid 守护只剩一条链(v5.30 迁移 M5, v5.33 删旧路)。
 #
-# 测的是行为: 从 service.sh 里按标记把真实代码抽出来跑(不改一行), 外部世界
-# (launcher / guard / supervisor 二进制、fork_probe、日志、pidfile)用假的。
-#   - m5_enabled: 开关文件 run/wd_m5.disabled;
-#   - 开机选择(LAUNCHER_CHOICE="" … unset _dpid_choice): C launcher 不能用时,
-#     M5 开 → direct(不选 shell guard / Go supervisor), M5 关 → v5.29 的 guard;
-#   - 哨兵第 1 段(dpid / launcher 检查 + 救命路径): M5 开 → 什么都不做(看门狗
-#     接管), M5 关 → v5.29 行为(launcher 坏了直拉 dpid、choice 改写 direct)。
-# 「改动前会失败」: v5.29 的 service.sh 没有 m5_enabled; 选择段在 M5 开时仍选
-# guard; 哨兵在 M5 开时仍直拉 dpid(下面第 3、5 条)。
+# 测的是行为: 从 service.sh 里按标记把真实开机选择段抽出来跑(不改一行), 外部
+# 世界(hnc_launcher / fork_probe 二进制、日志、run 目录)用假的。
+#   - C launcher 能用 → choice=launcher; 坏了 / 不在 → direct;
+#   - 再也不选 shell guard / Go supervisor(二进制摆在那儿也不选), 也不认
+#     run/wd_m5.disabled;
+#   - 哨兵循环不判 dpid / launcher(救命路径在 Go 看门狗 m5.go);
+#   - dpi_rebind 没 C launcher 时直拉 dpid, 不退回 shell guard。
+# 「改动前会失败」: v5.32 的 service.sh 有 run/wd_m5.disabled 开关, 建了它就选
+# shell guard(下面第 3 条); 哨兵里还留着 M5 关时的 dpid 救命段(第 5 条);
+# dpi_rebind 还有 guard 退路(第 6 条)。
 
 M5_TD="${HNC_TEST_DIR}-m5"
 rm -rf "$M5_TD"
 mkdir -p "$M5_TD/run" "$M5_TD/logs" "$M5_TD/bin"
 SVC="$HNC_REPO_ROOT/service.sh"
 
-# 抽函数 / 代码段(与线上同一份)
-awk 'index($0, "m5_enabled() {") == 1 { f = 1 } f { print } f && $0 == "}" { exit }' "$SVC" > "$M5_TD/fn.sh"
+# 抽代码段(与线上同一份)
 sed -n '/^LAUNCHER_CHOICE=""$/,/^unset _dpid_choice$/p' "$SVC" > "$M5_TD/select.sh"
-sed -n '/# v5.30 T2(M5): 默认不再判 dpid/,/# 2\. hnc_watchdog 检查/p' "$SVC" > "$M5_TD/sentinel1.sh"
+sed -n '/^# ─── rc30.12.16: 进程哨兵循环/,/^) >> "\$HNC_DIR\/logs\/sentinel.log"/p' "$SVC" > "$M5_TD/sentinel.sh"
 
-# 跑开机选择段: $1 = on/off; 只有 shell guard 可用(C launcher 不在)。
+# 跑开机选择段。$1 = launcher 状态: ok / abort / none。
+# 旧 shell guard / Go supervisor 二进制和 wd_m5.disabled 都摆着(旧版本升级上来的样子)。
 m5_select() {
-    rm -f "$M5_TD/run/"*
-    [ "$1" = off ] && : > "$M5_TD/run/wd_m5.disabled"
-    printf '#!/bin/sh\n' > "$M5_TD/bin/hnc_dpid_guard.sh"; chmod +x "$M5_TD/bin/hnc_dpid_guard.sh"
-    printf '#!/bin/sh\n' > "$M5_TD/bin/hnc_dpid_supervisor"; chmod +x "$M5_TD/bin/hnc_dpid_supervisor"
+    rm -f "$M5_TD/run/"* "$M5_TD/bin/"*
+    : > "$M5_TD/run/wd_m5.disabled"
+    printf '#!/bin/sh\n' > "$M5_TD/bin/hnc_dpid_guard.sh"
+    printf '#!/bin/sh\n' > "$M5_TD/bin/hnc_dpid_supervisor"
+    printf '#!/bin/sh\nexit 0\n' > "$M5_TD/bin/fork_probe"
+    case "$1" in
+        ok)    printf '#!/bin/sh\necho "hnc_launcher 1.0"\n' > "$M5_TD/bin/hnc_launcher" ;;
+        abort) printf '#!/bin/sh\necho "FATAL: TLS segment is underaligned"\nexit 134\n' > "$M5_TD/bin/hnc_launcher" ;;
+    esac
+    chmod +x "$M5_TD/bin/"*
     (
         RUN="$M5_TD/run"
         log() { :; }
-        . "$M5_TD/fn.sh"
         DPID_BIN="$M5_TD/bin/hnc_dpid"
         DPID_LAUNCHER="$DPID_BIN"
-        DPID_LAUNCHER_C="$M5_TD/bin/hnc_launcher"   # 不存在
+        DPID_LAUNCHER_C="$M5_TD/bin/hnc_launcher"
         FORK_PROBE="$M5_TD/bin/fork_probe"
         DPID_GUARD="$M5_TD/bin/hnc_dpid_guard.sh"
         DPID_SUPERVISOR="$M5_TD/bin/hnc_dpid_supervisor"
         . "$M5_TD/select.sh"
-        echo "$LAUNCHER_CHOICE|$(cat "$RUN/dpid_launcher.choice" 2>/dev/null)|$DPID_LAUNCHER"
+        echo "$LAUNCHER_CHOICE|$(cat "$RUN/dpid_launcher.choice" 2>/dev/null)|${DPID_LAUNCHER##*/}"
     )
 }
-
-# 跑哨兵第 1 段一轮: $1 = on/off; launcher 死、dpid 死、launcher 日志有 abort。
-m5_sentinel() {
-    rm -f "$M5_TD/run/"* "$M5_TD/spawned"
-    [ "$1" = off ] && : > "$M5_TD/run/wd_m5.disabled"
-    printf 'launcher\n' > "$M5_TD/run/dpid_launcher.choice"
-    printf 'FATAL: TLS segment is underaligned\nAborted\n' > "$M5_TD/logs/dpid_guard.log"
-    printf '#!/bin/sh\necho "$0 $*" >> "%s/spawned"\n' "$M5_TD" > "$M5_TD/bin/hnc_dpid"
-    chmod +x "$M5_TD/bin/hnc_dpid"
-    (
-        RUN="$M5_TD/run"; HNC_DIR="$M5_TD"
-        log() { :; }
-        sleep() { :; }
-        launcher_alive_count() { echo 0; }
-        dpid_alive() { return 1; }
-        . "$M5_TD/fn.sh"
-        DPID_BIN="$M5_TD/bin/hnc_dpid"
-        DPID_LAUNCHER="$M5_TD/bin/hnc_launcher"
-        DPID_CONFIG="$M5_TD/etc/dpi_config.json"
-        DPID_PID="$RUN/dpid.pid"; DPID_GUARD_PID="$RUN/dpid_guard.pid"
-        . "$M5_TD/sentinel1.sh"
-        wait
-    )
-    sleep 1 2>/dev/null
-    echo "$(cat "$M5_TD/run/dpid_launcher.choice" 2>/dev/null)|$([ -f "$M5_TD/spawned" ] && echo spawned || echo none)"
-}
-
-test_start "m5: m5_enabled 按开关文件(默认开)"
-_r1=$( (RUN="$M5_TD/run"; . "$M5_TD/fn.sh"; rm -f "$RUN/wd_m5.disabled"; m5_enabled && echo on || echo off) )
-_r2=$( (RUN="$M5_TD/run"; . "$M5_TD/fn.sh"; : > "$RUN/wd_m5.disabled"; m5_enabled && echo on || echo off) )
-assert_eq "on off" "$_r1 $_r2" "m5_enabled" && test_pass
 
 test_start "m5: 代码段都抽到了(防止标记改名后测试空跑)"
-if [ -s "$M5_TD/fn.sh" ] && grep -q 'FORK_PROBE' "$M5_TD/select.sh" && grep -q 'LAUNCHER_BROKEN' "$M5_TD/sentinel1.sh"; then
+if grep -q 'FORK_PROBE' "$M5_TD/select.sh" && grep -q 'find_live_watchdog_pid' "$M5_TD/sentinel.sh"; then
     test_pass
 else
-    test_fail "fn=$(wc -c < "$M5_TD/fn.sh") select/sentinel 段缺失"
+    test_fail "select=$(wc -c < "$M5_TD/select.sh") sentinel=$(wc -c < "$M5_TD/sentinel.sh") 段缺失"
 fi
 
-test_start "m5: 开 → C launcher 不能用时选 direct, 不选 shell guard / Go supervisor"
-assert_eq "|direct|$M5_TD/bin/hnc_dpid" "$(m5_select on)" "M5 on selection" && test_pass
+test_start "m5: C launcher 能用 → launcher"
+assert_eq "c_launcher|launcher|hnc_launcher" "$(m5_select ok)" "launcher ok" && test_pass
 
-test_start "m5: 关 → 退回 v5.29 三选一(shell guard)"
-assert_eq "shell_guard|guard|$M5_TD/bin/hnc_dpid_guard.sh" "$(m5_select off)" "M5 off selection" && test_pass
+test_start "m5: C launcher 不在 → direct(不选 shell guard / Go supervisor, 不认 wd_m5.disabled)"
+assert_eq "|direct|hnc_dpid" "$(m5_select none)" "launcher missing" && test_pass
 
-test_start "m5: 开 → 哨兵不判 dpid / launcher(救命路径在 Go 看门狗)"
-assert_eq "launcher|none" "$(m5_sentinel on)" "M5 on sentinel" && test_pass
+test_start "m5: C launcher 一跑就 abort → direct"
+assert_eq "|direct|hnc_dpid" "$(m5_select abort)" "launcher abort" && test_pass
 
-test_start "m5: 关 → 哨兵救命路径照旧(直拉 dpid + choice 改写 direct)"
-assert_eq "direct|spawned" "$(m5_sentinel off)" "M5 off sentinel" && test_pass
+test_start "m5: 哨兵循环不判 dpid / launcher(救命路径在 Go 看门狗)"
+if grep -v '^[[:space:]]*#' "$M5_TD/sentinel.sh" | grep -qE 'DPID_LAUNCHER"|DPID_BIN|dpid_launcher\.choice|wd_m5'; then
+    test_fail "sentinel still touches dpid: $(grep -v '^[[:space:]]*#' "$M5_TD/sentinel.sh" | grep -nE 'DPID_LAUNCHER"|DPID_BIN|dpid_launcher\.choice|wd_m5' | head -3)"
+else
+    test_pass
+fi
 
-test_start "m5: dpi_rebind 只在 M5 关时才退回 shell guard"
-grep -q '\[ -x "\$GUARD" \] && \[ -f "\$RUN/wd_m5.disabled" \]' "$HNC_REPO_ROOT/bin/dpi_rebind.sh" \
-    && test_pass || test_fail "dpi_rebind guard fallback not gated by wd_m5.disabled"
+test_start "m5: shell guard / Go supervisor 在开机脚本与 dpi_rebind 里都没有了"
+_left=$(grep -v '^[[:space:]]*#' "$SVC" "$HNC_REPO_ROOT/bin/dpi_rebind.sh" "$HNC_REPO_ROOT/post-fs-data.sh" \
+    | grep -nE 'hnc_dpid_guard|hnc_dpid_supervisor|wd_m5\.disabled|DPID_GUARD"|DPID_SUPERVISOR')
+if [ -z "$_left" ] && [ ! -e "$HNC_REPO_ROOT/bin/hnc_dpid_guard.sh" ] \
+   && [ ! -e "$HNC_REPO_ROOT/src/dpid/cmd/dpid_supervisor" ]; then
+    test_pass
+else
+    test_fail "leftover: $(printf '%s' "$_left" | head -3)"
+fi
+unset _left
 
 rm -rf "$M5_TD"

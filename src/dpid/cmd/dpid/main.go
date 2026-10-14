@@ -120,14 +120,6 @@ const (
 func main() {
 	cfgPath := flag.String("config", defaultConfigPath, "path to dpi_config.json")
 	showVer := flag.Bool("version", false, "print version and exit")
-	// rc29.1: -write-blind-state lets dpid_guard.sh hand off blind/waiting
-	// state writing to dpid itself, so the JSON written matches dpid's schema
-	// (2.0+) instead of the legacy schema-1 shell template. Used while iface
-	// isn't ready, dpid binary is missing, etc.
-	writeBlind := flag.String("write-blind-state", "",
-		"write a single blind-mode dpi_state.json using this reason then exit (0 = full daemon)")
-	blindIface := flag.String("blind-iface", "",
-		"interface name to record in blind-state JSON (optional, used with -write-blind-state)")
 	// v5.15: 一次性扫描本机已装 App 的安装包域名(写 run/apk_domains.json)后退出
 	apkScanOnce := flag.Bool("apk-scan", false, "scan installed APKs for embedded domains once, write apk_domains.json and exit")
 	flag.Parse()
@@ -156,23 +148,6 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Printf("{\"ok\":true,\"app_count\":%d,\"scan_ms\":%d,\"path\":%q}\n", out.AppCount, out.ScanMS, sc.OutPath())
-		return
-	}
-
-	// rc29.1 blind-state writer mode: takes no lock, writes one file, exits.
-	// Multiple guard invocations may race; that's fine because each rewrite
-	// is atomic (Writer.Flush -> tmp + rename) and they're all equivalent
-	// blind states. We don't try to acquire dpid.lock because the real
-	// daemon may be running concurrently for unrelated reasons (e.g. in
-	// disabled mode keeping state fresh).
-	if *writeBlind != "" {
-		statePath := filepath.Join(cfg.RunDir, stateFileName)
-		sw := output.NewWriter(statePath, version)
-		sw.SetMode(string(ModeBlind), *writeBlind, *blindIface, false, false, false)
-		if err := sw.Flush(); err != nil {
-			fmt.Fprintf(os.Stderr, "write-blind-state: %v\n", err)
-			os.Exit(1)
-		}
 		return
 	}
 

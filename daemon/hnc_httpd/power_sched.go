@@ -1,8 +1,8 @@
 // power_sched.go — v5.22 功耗: 自适应间隔策略 + 循环等待助手。
 //
 // 所有后台循环的「下一轮何时跑」都由 powerInterval(loop, activity, flags) 一处决定,
-// /api/power 原样列出每个循环的基准间隔、当前间隔与原因。dpid 与 guard shell
-// (hnc_offload_guard.sh 等)读 run/activity.json 按同一张表执行; 看门狗主循环
+// /api/power 原样列出每个循环的基准间隔、当前间隔与原因。dpid 与 shell 守护
+// (hnc_offload_guard.sh)读 run/activity.json 按同一张表执行; 看门狗主循环
 // v5.26 起只由 Go 版 hnc_watchdog(power.go)承担。这里的「镜像」条目只用于展示与
 // 测试(数值必须与 bin/hnc_activity.sh、src/dpid/activity 保持一致)。
 //
@@ -20,7 +20,7 @@
 //	limit_policy      60s    每分钟对齐, 任何档位不变(配额/分时段限速执法)
 //	v6_neigh          事件   事件驱动 + 60s 兜底, 不变(IPv6 规则同步)
 //	ct_events         事件   不变
-//	─ 镜像(dpid / guard shell 执行; 看门狗主循环 = Go 版 power.go) ─
+//	─ 镜像(dpid / offload guard 执行; 看门狗主循环 = Go 版 power.go) ─
 //	watchdog_pending  10s    hotspot_off 120s(v5.25 Go 版: 网卡事件即时唤醒 + 定时开关热点边界唤醒), 其余 10s
 //	watchdog_active   60s    主循环节拍不变; 健康时附带检查放宽(v5.28 A1): capability_probe 6h / httpd_drift 5m / tc_uplink_healthy 3m; 不健康或恢复期照旧每轮
 //	offload_guard     60s    热点未开/无客户端且未在兜底: 完整检测 300s(每 60s 早醒检查); 热点+客户端或兜底中: 60s(重申 ≤60s)
@@ -28,7 +28,6 @@
 //	dpid_conntrack    15s    hotspot_off/no_clients 60s, 其余 15s
 //	dpid_state_flush  5s     hotspot_off/no_clients 30s, 其余 5s
 //	dpid_bytes        5s     自身归因未开启: 不采; 熄屏且无界面 30s
-//	dpid_guard_poll   3s     hotspot_off: 熄屏无界面 15s / 否则 6s; no_clients 6s(hnc_dpid_guard.sh 每轮 ~10 次 fork)
 //
 // 循环用 powerWait 等待: 档位变化(热点开了/来了设备/打开 WebUI)时立即按新间隔重算,
 // 已经超过新间隔就马上跑, 所以放慢不会拖慢「状态变活跃」后的第一轮。
@@ -75,7 +74,6 @@ var powerLoopDefs = []powerLoopDef{
 	{"dpid_conntrack", "dpid 连接表扫描", "dpid", 15 * time.Second, false, true},
 	{"dpid_state_flush", "dpid 状态落盘", "dpid", 5 * time.Second, false, true},
 	{"dpid_bytes", "dpid 本机按 uid 字节", "dpid", 5 * time.Second, false, true},
-	{"dpid_guard_poll", "dpid 守护监视轮询", "dpid_guard", 3 * time.Second, false, true},
 }
 
 func powerLoopDef0(name string) (powerLoopDef, bool) {
@@ -200,17 +198,6 @@ func powerInterval(name string, a Activity, f loopFlags) (time.Duration, string)
 	case "dpid_state_flush":
 		if lvl == lvlHotspotOff || lvl == lvlNoClients {
 			return 30 * time.Second, "无在线设备: ×6"
-		}
-		return base, "基准"
-	case "dpid_guard_poll":
-		if lvl == lvlHotspotOff {
-			if quiet {
-				return 15 * time.Second, "热点未开(盲态)且熄屏无界面: ×5(netlink 事件文件每轮都看)"
-			}
-			return 6 * time.Second, "热点未开: ×2"
-		}
-		if lvl == lvlNoClients {
-			return 6 * time.Second, "无在线设备: ×2"
 		}
 		return base, "基准"
 	case "dpid_bytes":

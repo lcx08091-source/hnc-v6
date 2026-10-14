@@ -387,8 +387,6 @@ func TestPowerIntervalTable(t *testing.T) {
 		{"dpid_conntrack", none, ct, 60 * time.Second},
 		{"dpid_state_flush", bg, ct, 5 * time.Second},
 		{"dpid_bytes", bg, ct, 30 * time.Second},
-		{"dpid_guard_poll", off, ct, 15 * time.Second},
-		{"dpid_guard_poll", offUI, ct, 6 * time.Second},
 	}
 	for _, c := range cases {
 		if got, why := powerInterval(c.loop, c.a, c.f); got != c.want {
@@ -418,10 +416,6 @@ func TestPowerShellMirrorConstants(t *testing.T) {
 	m = regexp.MustCompile(`HNC_GUARD_IDLE_INTERVAL:-(\d+)`).FindStringSubmatch(og)
 	if d, _ := powerInterval("offload_guard", quiet, loopFlags{}); m == nil || m[1] != fmt.Sprint(int(d.Seconds())) {
 		t.Errorf("offload guard IDLE_INTERVAL=%v, Go=%v", m, d)
-	}
-	dg := read("bin/hnc_dpid_guard.sh")
-	if d, _ := powerInterval("dpid_guard_poll", quiet, loopFlags{}); !strings.Contains(dg, fmt.Sprintf("GUARD_POLL=%d", int(d.Seconds()))) {
-		t.Errorf("dpid guard quiet poll != %v", d)
 	}
 }
 

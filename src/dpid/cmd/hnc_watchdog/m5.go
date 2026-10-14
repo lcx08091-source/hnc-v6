@@ -1,11 +1,11 @@
 // m5.go — v5.30 T2: 迁移 M5, dpid 守护链收缩(4 层 → 2 层)。
 //
-// v5.29 的现状: service.sh 开机在 C hnc_launcher / shell hnc_dpid_guard.sh /
+// v5.29 的做法: service.sh 开机在 C hnc_launcher / shell hnc_dpid_guard.sh /
 // Go hnc_dpid_supervisor 里三选一(写 run/dpid_launcher.choice), 外面还有
 // service.sh 的哨兵循环(30 秒, shell)和本看门狗各自判 dpid / launcher 死活,
-// 「launcher 坏了 → 直拉 dpid」的救命路径在哨兵里。
-//
-// 目标形态(开关 run/wd_m5.disabled 不存在 = 默认):
+// 「launcher 坏了 → 直拉 dpid」的救命路径在哨兵里。v5.30 起默认走下面的形态,
+// v5.33 起只剩这一种(shell guard / Go supervisor、开关 run/wd_m5.disabled 与
+// 哨兵里的 dpid 检查都已删):
 //   - C hnc_launcher 负责拉起 / 重启 dpid(ColorOS 上 Go 进程起子进程可能被拦,
 //     所以 launcher 必须是 C);
 //   - 本看门狗只盯 launcher(launcher 也挂了 → 拉 launcher), 以及 choice=direct
@@ -17,9 +17,8 @@
 //     (哨兵注释写的是「最近 60 秒」, 实现只看末 50 行, 几天前的旧 abort 也算);
 //     同时看 launcher.log(看门狗拉起的 launcher 写这里)与 dpid_guard.log
 //     (service.sh / dpi_rebind 拉起的写这里)。
-//   - service.sh 开机不再选 shell guard / Go supervisor(C launcher 不能用就
-//     direct), 哨兵循环不再判 dpid / launcher(只留看门狗兜底和回滚观察)。
-//     两份代码保留, 开关打开(建 run/wd_m5.disabled)即恢复 v5.29 三选一。
+//   - service.sh 开机只测 C launcher(不能用就 direct), 哨兵循环不判 dpid /
+//     launcher(只留看门狗兜底和回滚观察)。
 //
 // 进程风暴防线(v5.8.8 / v5.28 A3):
 //   - 判活一律 pidfile + /proc/<pid>/cmdline(argv 某段等于名字或以 "/名字"
@@ -30,9 +29,8 @@
 //   - 任何「发现没活 → 拉起」都过 spawnGate: 基础冷却 m5SpawnBase, 拉起后
 //     m5QuickDeath 内又死 = 一次失败, 冷却按 2^失败次数 翻倍, 封顶 m5SpawnMax;
 //     活过 m5QuickDeath 清零。
-//   - choice 是 guard / supervisor(关着 M5 开机选的, 之后又删了开关文件)→
-//     维持 v5.29 的监管方式(那个守护者可能还在跑, 换人会两个守护者抢 dpid),
-//     下次开机 service.sh 按 M5 重新选。
+//   - choice 缺失 / 不认识(含旧版留下的 guard / supervisor): launcher 二进制在
+//     就按 launcher, 不在就 direct。
 package main
 
 import (
@@ -46,8 +44,6 @@ import (
 )
 
 const (
-	m5SwitchFile = "wd_m5.disabled" // 在 run/ 下; 存在 = 退回 v5.29 三选一
-
 	m5SpawnBase    = 30 * time.Second // 拉起基础冷却(与 dpidRestartCD 同)
 	m5SpawnMax     = 8 * time.Minute  // 冷却上限
 	m5QuickDeath   = 2 * time.Minute  // 拉起后这么快又死 = 一次失败
@@ -69,14 +65,7 @@ var (
 	m5RunDir, m5LogDir, m5BinDir, m5EtcDir = runDir, logDir, binDir, hncDir + "/etc"
 	m5ProcRoot                             = "/proc"
 	m5SpawnFn                              = spawnDaemon
-	m5LegacyFn                             = superviseDpidLegacy
 )
-
-// m5Enabled 开关文件不存在 = 启用(默认)。每轮读一次, 退回旧做法不用重刷模块。
-func m5Enabled() bool {
-	_, err := os.Stat(filepath.Join(m5RunDir, m5SwitchFile))
-	return err != nil
-}
 
 // rescuePatterns 与哨兵 grep -qE 'TLS segment is underaligned|Aborted|cannot execute|error:.*executable' 同。
 func rescueLineMatches(line string) bool {
@@ -231,13 +220,9 @@ func m5Gate(name string) *spawnGate {
 
 func m5Pid(name string) string { return filepath.Join(m5RunDir, name) }
 
-// superviseDpidM5 M5 形态下每轮的 dpid 守护(mainLoop 调)。
+// superviseDpidM5 每轮的 dpid 守护(mainLoop 调)。
 func superviseDpidM5(choice string, now time.Time) {
-	switch choice {
-	case "guard", "supervisor":
-		m5LegacyFn(choice) // 旧值兼容(见文件头)
-		return
-	case "direct":
+	if choice == "direct" {
 		m5EnsureDpid(now)
 		return
 	}
@@ -363,25 +348,4 @@ func m5Record(name string, err error, now time.Time) {
 		logf("M5: %s failed: %v", name, err)
 	}
 	runStatsFn(name, rc, err, 0, now)
-}
-
-// superviseDpidLegacy v5.29 的按 choice 四路监管(开关关闭时 / 旧值兼容时用)。
-func superviseDpidLegacy(choice string) {
-	superviseLauncher, superviseSupervisor, superviseShellGuard, superviseDpidDirect := dpidGuardPlan(choice)
-	if superviseLauncher {
-		// v5.5.0-rc6: launcher 监管必须在 dpid 之前, 因为 dpid 的 ensureDaemonRunning
-		// 入口会 findLiveByName("hnc_launcher") 决定要不要 short-circuit. 这一行
-		// 保证 launcher 死后下一 tick 就被拉起来, 紧接着 dpid 检查就能看到 launcher
-		// 活了, 走 short-circuit, 让 launcher 接管 dpid (避免双重 spawn).
-		ensureDaemonRunning(launcherDaemon())
-	}
-	if superviseSupervisor {
-		ensureDaemonRunning(dpidDaemon())
-	}
-	if superviseShellGuard {
-		ensureShellGuardRunning()
-	}
-	if superviseDpidDirect {
-		ensureDaemonRunning(dpidDaemonDirect())
-	}
 }

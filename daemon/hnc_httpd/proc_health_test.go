@@ -164,3 +164,37 @@ func TestBuildProcHealthScriptNotCounted(t *testing.T) {
 		t.Fatalf("status = %q (%s)", out.Status, out.Detail)
 	}
 }
+
+// v5.33: dpid 守护只剩 C hnc_launcher —— dpid_guard_* 数 launcher(看门狗拉起的
+// 父进程不是 1 也算); 两个 launcher → warn。旧版数的是已删的 hnc_dpid_guard.sh,
+// launcher 在跑也报 0。
+func TestBuildProcHealthLauncherCounted(t *testing.T) {
+	f := phFake{files: map[string]string{}}
+	f.setStat(7, 1, "hnc_httpd")
+	f.setCmd(7, "/hnc/daemon/hnc_httpd/hnc_httpd")
+	f.setStat(10, 1, "hotspotd")
+	f.setCmd(10, "/hnc/bin/hotspotd")
+	f.setStat(12, 1, "hnc_watchdog")
+	f.setCmd(12, "/hnc/bin/hnc_watchdog")
+	f.setStat(13, 12, "hnc_launcher") // 看门狗拉起
+	f.setCmd(13, "/hnc/bin/hnc_launcher")
+	f.setStat(11, 13, "hnc_dpid")
+	f.setCmd(11, "/hnc/bin/hnc_dpid -config /hnc/etc/dpi_config.json")
+	f.files["/hnc/run/hotspotd.pid"] = "10\n"
+	f.files["/hnc/run/watchdog.pid"] = "12\n"
+
+	out := buildProcHealth(f.fs(), "/hnc", time.Unix(1, 0))
+	if out.Counts.GuardMain != 1 || out.Counts.GuardTotal != 1 {
+		t.Fatalf("dpid_guard main/total = %d/%d, want 1/1(launcher 父进程是看门狗)", out.Counts.GuardMain, out.Counts.GuardTotal)
+	}
+	if out.Status != "ok" {
+		t.Fatalf("status = %q (%s), want ok", out.Status, out.Detail)
+	}
+
+	f.setStat(14, 1, "hnc_launcher")
+	f.setCmd(14, "/hnc/bin/hnc_launcher")
+	out = buildProcHealth(f.fs(), "/hnc", time.Unix(1, 0))
+	if out.Counts.GuardMain != 2 || out.Status != "warn" || out.Detail != "hnc_launcher 重复" {
+		t.Fatalf("两个 launcher: main=%d status=%q detail=%q, want 2/warn/hnc_launcher 重复", out.Counts.GuardMain, out.Status, out.Detail)
+	}
+}
