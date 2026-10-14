@@ -15,6 +15,8 @@
  *   4. 审查补: 事件路径(真实的 nl_process, 经 socketpair 喂通知)—— 按模拟设备上实测
  *      的内核时序: 新表项回拨 60 秒、旧表项老化 STALE、旧表项被探测 PROBE, 都不许
  *      把 IP 抢回旧的。
+ *   5. 审查补: FAILED 通知不带 MAC(模拟设备上实测)—— 按 IP 认出设备、核实后下线
+ *      或换到它剩下的有效表项; 旧 IP 失效不影响当前 IP。
  *
  * 「改动前会失败」: v5.31 基线里没有这两个函数, 本文件在基线上编译失败
  * (undefined reference)。行为层面的旧代码失败证据在模拟设备场景
@@ -113,7 +115,7 @@ static size_t build_neigh_msg(test_msg *m, const char *ip, const char *mac,
         memcpy(RTA_DATA(a), &ia, 4);
         plen += RTA_ALIGN(a->rta_len);
     }
-    {
+    if (mac) {  /* NULL = 不带链路地址(内核的 FAILED 通知就是这样) */
         struct rtattr *a = (struct rtattr *)(m->payload + plen);
         a->rta_type  = NDA_LLADDR;
         a->rta_len   = RTA_LENGTH(6);
@@ -366,6 +368,53 @@ int main(void) {
             EV("192.168.43.141", NUD_REACHABLE, 0);
             check_str("4f) 旧 IP 重新被确认 → .141", d ? d->ip : "(none)", "192.168.43.141");
             #undef EV
+            close(sv[0]);
+            close(sv[1]);
+        }
+    }
+
+    /* ── 5. FAILED 通知不带 MAC ─────────────────────────────────── */
+    {
+        memset(g_devs, 0, sizeof(g_devs));
+        g_no_discovery = 0;
+        g_need_verify = 0;
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) {
+            printf("  FAIL socketpair\n");
+            g_fail++;
+        } else {
+            #define SEND(ip, mac, st, ticks) do { test_msg m; usleep(20000); \
+                size_t l = build_neigh_msg(&m, ip, mac, st, 1, ticks, AF_INET); \
+                if (send(sv[1], &m, l, 0) < 0) perror("send"); \
+                nl_process(sv[0]); } while (0)
+            const char *ma = "02:5a:00:00:00:51", *mb = "02:5a:00:00:00:52";
+            SEND("192.168.43.151", ma, NUD_REACHABLE, 0);
+            SEND("192.168.43.152", mb, NUD_REACHABLE, 0);
+            Device *da = find_device(ma), *db = find_device(mb);
+            /* 5a) 旧 IP 的 FAILED(不是谁的当前 IP)→ 不惊动任何设备 */
+            SEND("192.168.43.150", NULL, NUD_FAILED, 300);
+            check_long("5a) 旧 IP 失效不待核实", g_need_verify, 0);
+            /* 5b) a 走了: 网关去找它 → FAILED, 通知不带 MAC → a 待核实 */
+            SEND("192.168.43.151", NULL, NUD_FAILED, 800);
+            check_long("5b) 按 IP 认出 a 待核实", da ? da->verify : -1, 1);
+            check_long("5b2) 主循环要做核实扫描", g_need_verify, 1);
+            check_long("5b3) b 不受影响", db ? db->verify : -1, 0);
+            /* 5c) 核实扫描里没有 a 的有效表项 → 下线; b 照旧 */
+            scan_finish_verify();
+            check_long("5c) a 下线", find_device(ma) != NULL, 0);
+            check_long("5c2) b 还在", find_device(mb) != NULL, 1);
+            /* 5d) b 刚换了 IP(新表项还没确认, 仍报 .152), .152 失效 → 核实扫描里见到
+             *     b 的新表项 → 换过去, 不下线 */
+            g_need_verify = 0;
+            SEND("192.168.43.162", mb, NUD_STALE, 6000);
+            check_str("5d) 新表项未确认前仍是 .152", db ? db->ip : "(none)", "192.168.43.152");
+            SEND("192.168.43.152", NULL, NUD_FAILED, 900);
+            NeighCand nb = mk_cand(mb, "192.168.43.162", mono_ms_ll() - 60000);
+            scan_apply_candidate(&nb, now_t);
+            scan_finish_verify();
+            check_long("5d2) b 没下线", find_device(mb) != NULL, 1);
+            check_str("5d3) b 换到 .162", db ? db->ip : "(none)", "192.168.43.162");
+            #undef SEND
             close(sv[0]);
             close(sv[1]);
         }

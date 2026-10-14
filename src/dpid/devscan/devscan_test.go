@@ -419,3 +419,67 @@ func TestFullSyncPicksRecentlyConfirmedIP(t *testing.T) {
 		}
 	}
 }
+
+// evFailed 失效通知: 内核不带链路地址(模拟设备上 `ip monitor neigh` 实测
+// "192.168.43.101 FAILED"), MAC 为空。
+func evFailed(ip string) neigh.Entry {
+	return neigh.Entry{IfIndex: 7, IP: net.ParseIP(ip), State: nudFailed}
+}
+
+// TestFailedWithoutMACOffline v5.32 审查: 设备走了, 网关去找它 → FAILED(不带 MAC)
+// → 按 IP 认出是谁并下线。原来按 MAC 找、找不到就丢, 只能等 90 秒离线。
+func TestFailedWithoutMACOffline(t *testing.T) {
+	tb := newTestTable()
+	tb.Apply(evc(macA, "192.168.43.101", nudReachable, 0), t0)
+	tb.Apply(evc(macB, "192.168.43.102", nudReachable, 0), t0)
+	if !tb.Apply(evFailed("192.168.43.101"), t0.Add(40*time.Second)) {
+		t.Fatal("不带 MAC 的 FAILED 应让认这个 IP 的设备下线")
+	}
+	devs := jsonRender(t, tb)
+	if _, ok := devs[macA]; ok || len(devs) != 1 {
+		t.Fatalf("macA 应下线、macB 不受影响: %v", devs)
+	}
+	// 再来一次(FAILED 表项在内核里还会留一阵, 30 秒兜底会再看到)→ 空操作
+	if tb.Apply(evFailed("192.168.43.101"), t0.Add(41*time.Second)) {
+		t.Fatal("已处理过的 FAILED 再来应是空操作")
+	}
+}
+
+// TestFailedWithoutMACSwitchesToOtherEntry 刚换了 IP、新 IP 还没被确认(仍报旧 IP),
+// 旧 IP 失效 → 换到新 IP, 不下线。
+func TestFailedWithoutMACSwitchesToOtherEntry(t *testing.T) {
+	tb := newTestTable()
+	tb.Apply(evc(macA, "192.168.43.101", nudReachable, 0), t0)
+	tb.Apply(evc(macA, "192.168.43.112", nudStale, 60*time.Second), t0.Add(time.Second))
+	if !tb.Apply(evFailed("192.168.43.101"), t0.Add(9*time.Second)) {
+		t.Fatal("旧 IP 失效应改变表")
+	}
+	if d, ok := jsonRender(t, tb)[macA]; !ok || d.IP != "192.168.43.112" {
+		t.Fatalf("应换到新 IP 且不下线: %+v ok=%v", d, ok)
+	}
+}
+
+// TestDeletedCandidateNotReused 表项被回收(DELNEIGH, 非 FAILED)只去掉候选:
+// 之后当前 IP 失效时不会挑回一条内核里已经没有的表项, 而是下线。
+func TestDeletedCandidateNotReused(t *testing.T) {
+	tb := newTestTable()
+	tb.Apply(evc(macA, "192.168.43.101", nudReachable, 0), t0)
+	tb.Apply(evc(macA, "192.168.43.112", nudReachable, 0), t0.Add(5*time.Second))
+	del := evc(macA, "192.168.43.101", nudStale, 90*time.Second)
+	del.Deleted = true
+	if tb.Apply(del, t0.Add(90*time.Second)) || tb.Count() != 1 {
+		t.Fatal("回收旧表项不该改变表 / 让设备下线")
+	}
+	if !tb.Apply(evFailed("192.168.43.112"), t0.Add(100*time.Second)) || tb.Count() != 0 {
+		t.Fatalf("当前 IP 失效且没有别的表项应下线(设备数 %d)", tb.Count())
+	}
+}
+
+// TestFullSyncFailedWithoutMAC 30 秒兜底的 dump 里看到 FAILED 表项(事件丢了)也要补上。
+func TestFullSyncFailedWithoutMAC(t *testing.T) {
+	tb := newTestTable()
+	tb.Apply(evc(macA, "192.168.43.101", nudReachable, 0), t0)
+	if !tb.FullSync([]neigh.Entry{evFailed("192.168.43.101")}, t0.Add(40*time.Second)) || tb.Count() != 0 {
+		t.Fatalf("dump 里的 FAILED 表项应让设备下线(设备数 %d)", tb.Count())
+	}
+}

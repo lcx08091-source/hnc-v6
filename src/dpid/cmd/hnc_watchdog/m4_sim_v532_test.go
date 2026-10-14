@@ -9,11 +9,14 @@
 //  1. 设备换 IP 后不再用网, 看 75 秒 —— 旧表项会在约 30 秒后从 REACHABLE 老化成 STALE,
 //     内核为此发一条通知(审查时 C 版就是被这条通知改回了旧 IP, 持续到新 IP 自己老化);
 //  2. 网关还有流量去找旧 IP(换 IP 前的连接没断干净)—— 旧表项 DELAY → PROBE → FAILED,
-//     沿途的通知也不许把 IP 改回去。
+//     沿途的通知也不许把 IP 改回去;
+//  3. 设备离开, 网关还去找它 → 表项 DELAY → PROBE → FAILED。FAILED 的通知不带 MAC
+//     (内核在表项失效时不给链路地址), 两边要按 IP 认出是谁并让它下线 —— 审查前两边都
+//     把这条通知丢掉, 只能等 90 秒没有事件才下线。
 //
 // 判定: 每个写者第一次报出新 IP 之后, 不许再报旧 IP; 且换 IP 后 10 秒内要报出新 IP
 // (新表项要等网关确认可达, 约 5 秒 —— 内核建表项时把「确认时间」回拨 60 秒, 在那之前
-// 它比旧 IP 的确认时间还旧)。
+// 它比旧 IP 的确认时间还旧); 设备离开后 20 秒内两边都不再列出它(约 8 秒 FAILED)。
 package main
 
 import (
@@ -126,6 +129,19 @@ func TestM4SimNoFlipBack(t *testing.T) {
 	}
 	watch("2", 15*time.Second)
 
+	t.Logf("3. 设备离开, 网关还去找它(表项 DELAY → PROBE → FAILED, FAILED 通知不带 MAC)")
+	sim("del", "flip") // 不带 --quiet: 网关再往它的 IP 发一个包
+	tLeave := time.Now()
+	gone := map[string]time.Duration{}
+	for time.Since(tLeave) < 25*time.Second && len(gone) < len(ws) {
+		for _, w := range ws {
+			if _, ok := gone[w.name]; !ok && ipOf(w.path) == "" {
+				gone[w.name] = time.Since(tLeave).Truncate(100 * time.Millisecond)
+			}
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+
 	for _, w := range ws {
 		switch {
 		case w.adopted < 0:
@@ -136,7 +152,12 @@ func TestM4SimNoFlipBack(t *testing.T) {
 		if len(w.flips) > 0 {
 			t.Errorf("%s: 报出新 IP 之后又跳回旧 IP %s(%d 次采样, 首次 %s)", w.name, oldIP, len(w.flips), w.flips[0])
 		} else if w.adopted >= 0 {
-			t.Logf("3. %s: 换 IP 后 %v 报出新 IP, 之后没有跳回旧 IP ✓", w.name, w.adopted)
+			t.Logf("4. %s: 换 IP 后 %v 报出新 IP, 之后没有跳回旧 IP ✓", w.name, w.adopted)
+		}
+		if g, ok := gone[w.name]; !ok || g > 20*time.Second {
+			t.Errorf("%s: 设备离开后 25 秒内还列着它(上限 20 秒; 审查前要等 90 秒没事件才下线)", w.name)
+		} else {
+			t.Logf("4. %s: 设备离开后 %v 下线 ✓", w.name, g)
 		}
 	}
 }

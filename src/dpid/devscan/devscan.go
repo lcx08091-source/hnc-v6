@@ -185,8 +185,9 @@ func pickIP(cs map[string]cand) string {
 //   - 非热点 ifindex 忽略; 全零 MAC / 非 IPv4 忽略;
 //   - 表项可用(REACHABLE / STALE / DELAY / PROBE)→ 上线或更新: 刷新
 //     last_seen、重挑 IP、按 60 秒窗口重解析名字;
-//   - 表项不可用(含 RTM_DELNEIGH)→ 只有 FAILED / INCOMPLETE 才真正下线;
-//     其余不动。
+//   - FAILED → 去掉这条候选, 一条不剩才下线(通知不带 MAC 时按 IP 找, 见
+//     failIPLocked; v5.32 审查);
+//   - 表项被回收(RTM_DELNEIGH, 非 FAILED)→ 只去掉这条候选, 不下线、不改 IP。
 func (t *Table) Apply(e neigh.Entry, now time.Time) bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -194,39 +195,64 @@ func (t *Table) Apply(e neigh.Entry, now time.Time) bool {
 		return false // 非热点网卡
 	}
 	mac := normMAC(e.MAC)
-	if mac == "" {
-		return false
-	}
 	ip := entryIP(e)
 	if !e.Deleted && e.Usable() {
-		if ip == "" {
+		if mac == "" || ip == "" {
 			return false
 		}
 		return t.applyOnlineLocked(mac, ip, e.State, now, now.Add(-e.ConfirmedAgo))
 	}
-	// 下线路径
-	if e.State&(nudFailed|nudIncomplete) == 0 {
-		return false // hotspotd: 只有 FAILED / INCOMPLETE 才真正下线
+	// 下线路径: 只有 FAILED(网关去找它, 没人应答)才算。
+	if e.State&nudFailed != 0 {
+		return t.failIPLocked(mac, ip)
 	}
-	d := t.devs[mac]
-	if d == nil {
-		return false
-	}
-	cs := t.cands[mac]
-	if ip != "" {
-		delete(cs, ip)
-	}
-	if len(cs) == 0 {
-		delete(t.devs, mac)
-		delete(t.cands, mac)
-		return true
-	}
-	// 还有别的表项(典型: 换 IP 后新表项在, 旧表项 FAILED): 重挑, 不下线。
-	if best := pickIP(cs); best != "" && best != d.IP {
-		d.IP = best
-		return true
+	// 表项被回收(GC / 网卡清空)但不是 FAILED: 这条候选没了 —— 设备不下线、不改 IP
+	// (对齐 hotspotd), 只是以后重挑 IP 时不再挑一条内核里已经没有的表项。
+	if e.Deleted && mac != "" && ip != "" {
+		delete(t.cands[mac], ip)
 	}
 	return false
+}
+
+// failIPLocked 一条 FAILED(调用方持锁)。v5.32 审查: 内核在表项失效时不带链路地址,
+// 通知里没有 MAC(模拟设备上实测)—— 原来按 MAC 找、找不到就丢, FAILED 从没生效过,
+// 走了的设备只能等 90 秒离线; 换 IP 后旧 IP 被网关探测失效也认不出是谁。现在没有
+// MAC 时按 IP 找: 当前 IP 或候选里有这个 IP 的设备都去掉这条候选; 一条不剩就下线,
+// 否则重挑(典型: 刚换了 IP, 旧 IP 失效 → 用新 IP)。与 hotspotd 的 mark_ip_failed +
+// 核实扫描同一语义。
+func (t *Table) failIPLocked(mac, ip string) bool {
+	if ip == "" {
+		return false
+	}
+	var macs []string
+	if mac != "" {
+		if t.devs[mac] != nil {
+			macs = append(macs, mac)
+		}
+	} else {
+		for m, d := range t.devs {
+			if _, ok := t.cands[m][ip]; ok || d.IP == ip {
+				macs = append(macs, m)
+			}
+		}
+	}
+	changed := false
+	for _, m := range macs {
+		d, cs := t.devs[m], t.cands[m]
+		delete(cs, ip)
+		if len(cs) == 0 {
+			delete(t.devs, m)
+			delete(t.cands, m)
+			changed = true
+			continue
+		}
+		// 还有别的表项(典型: 换 IP 后新表项在, 旧表项 FAILED): 重挑, 不下线。
+		if best := pickIP(cs); best != "" && best != d.IP {
+			d.IP = best
+			changed = true
+		}
+	}
+	return changed
 }
 
 // applyOnlineLocked 上线或更新(调用方持锁)。seen = 内核最近一次确认该表项的时刻。
@@ -305,31 +331,19 @@ func (t *Table) FullSync(es []neigh.Entry, now time.Time) bool {
 	changed := false
 	for _, e := range es {
 		mac := normMAC(e.MAC)
-		if mac == "" {
-			continue
-		}
 		if t.ifIndex != 0 && e.IfIndex != 0 && e.IfIndex != t.ifIndex {
 			continue
 		}
 		ip := entryIP(e)
 		if e.Deleted || !e.Usable() {
-			// FAILED / INCOMPLETE 且该设备当前确实在线 → 补一次下线事件
-			if e.State&(nudFailed|nudIncomplete) == 0 || ip == "" {
-				continue
-			}
-			if d := t.devs[mac]; d != nil {
-				delete(t.cands[mac], ip)
-				if len(t.cands[mac]) == 0 {
-					delete(t.devs, mac)
-					delete(t.cands, mac)
-				} else if best := pickIP(t.cands[mac]); best != "" && best != d.IP {
-					d.IP = best
-				}
+			// FAILED 且还有设备认这个 IP → 补一次 FAILED(事件丢了也能追上; FAILED
+			// 表项不带 MAC, 按 IP 找, 见 failIPLocked)。已处理过的再遇到是空操作。
+			if e.State&nudFailed != 0 && t.failIPLocked(mac, ip) {
 				changed = true
 			}
 			continue
 		}
-		if ip == "" {
+		if mac == "" || ip == "" {
 			continue
 		}
 		if c, ok := t.cands[mac][ip]; ok && c.state == e.State {

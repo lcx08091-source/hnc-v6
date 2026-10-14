@@ -115,6 +115,7 @@ typedef struct {
     time_t  last_resolve;               /* v3.5.0-rc R-2: 上次 resolve_hostname 时间,用于改名场景的 60s 时间窗口 re-resolve */
     time_t  pending_since;              /* v3.6 Commit 3: 挂 pending 状态的时间点,process_pending_mdns 读 */
     long long confirmed_ms;             /* v5.32 T2: 内核最近确认可达的时刻(CLOCK_MONOTONIC 毫秒, 0=未知); 全量重扫时 IP 只被更近确认的候选改写 */
+    int     verify;                     /* v5.32 审查: 当前 IP 的表项 FAILED 了, 待核实 —— 核实扫描里还有它的有效表项就留下(换到最近确认的那条), 没有就下线 */
     int     active;
     int     state;      /* NUD_* from netlink */
 } Device;
@@ -150,6 +151,7 @@ static FILE *g_log    = NULL;
 
 /* ── 信号标志（volatile sig_atomic_t 保证信号安全）────────── */
 static volatile sig_atomic_t g_need_scan   = 1;  /* 1=需要立即补充扫描 */
+static int g_need_verify = 0;  /* v5.32 审查: 有设备的当前 IP 表项 FAILED, 主循环做一次核实扫描 */
 static volatile sig_atomic_t g_running     = 1;  /* 0=退出主循环 */
 /* v5.31 T3: --no-discovery —— M4 方案 A 下设备发现由 Go 看门狗接管,
  * hotspotd 只留硬件加速兜底(offload 调度 / BPF limit_map)和控制接口。
@@ -198,6 +200,7 @@ static Device *alloc_device(void) {
             /* v5.32 审查: 槽位复用时上一台设备的确认时间不能带给新设备 —— 否则
              * 新设备的 IP 被「更近」的旧确认时间挡住, 报成上一台设备的 IP。 */
             g_devs[i].confirmed_ms = 0;
+            g_devs[i].verify = 0;
             return &g_devs[i];
         }
     /* 表满：淘汰最老的条目 */
@@ -881,8 +884,58 @@ static int scan_apply_candidate(const NeighCand *c, time_t now_t) {
     d->iface[sizeof(d->iface)-1] = '\0';
     d->last_seen = now_t;
     d->active    = 1;
+    d->verify    = 0;         /* 还有有效表项 = 还在(见 mark_ip_failed) */
     d->state     = NUD_STALE; /* 保守估计(候选不携带状态, /proc 也没有) */
     return 1;
+}
+
+/* mark_ip_failed: 一条 FAILED 通知(网关去找这个 IP, 没人应答)。内核在表项失效时
+ * 不再带链路地址(NDA_LLADDR), 通知里没有 MAC —— v5.32 审查前这条通知被直接丢掉,
+ * 设备走了只能靠 90 秒没有事件才下线; 换 IP 后旧 IP 失效也认不出是谁。现在按 IP
+ * 找: 当前 IP 就是它的设备(有 MAC 时还要 MAC 对上)标记待核实, 清掉确认时刻(当前
+ * IP 已失效, 核实扫描里它剩下的有效表项挑最近确认的那条)。只是某台设备的旧 IP
+ * 失效时不影响它(当前 IP 不是这个)。返回标记的设备数。 */
+static int mark_ip_failed(const char *ip, const char *mac) {
+    int n = 0;
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        Device *d = &g_devs[i];
+        if (!d->active || strcmp(d->ip, ip) != 0) continue;
+        if (mac && mac[0] && strcasecmp(d->mac, mac) != 0) continue;
+        d->verify = 1;
+        d->confirmed_ms = 0;
+        n++;
+    }
+    return n;
+}
+
+/* scan_finish_verify: 扫描结束后, 待核实但扫描里没见到任何有效表项的设备下线。
+ * 返回下线的设备数。 */
+static int scan_finish_verify(void) {
+    int n = 0;
+    for (int i = 0; i < MAX_DEVICES; i++) {
+        Device *d = &g_devs[i];
+        if (!d->active || !d->verify) continue;
+        d->verify = 0;
+        d->active = 0;
+        hlog("DEL: %s (%s) 表项 FAILED, 邻居表里没有它别的有效表项 → 离线", d->mac, d->ip);
+        n++;
+    }
+    return n;
+}
+
+/* scan_has_verify: 有没有待核实的设备 */
+static int scan_has_verify(void) {
+    for (int i = 0; i < MAX_DEVICES; i++)
+        if (g_devs[i].active && g_devs[i].verify) return 1;
+    return 0;
+}
+
+/* scan_wants: 核实扫描只处理待核实设备的表项(其它设备不刷新 last_seen, 免得
+ * 一条 FAILED 通知把所有静默设备的 90 秒离线计时都推迟) */
+static int scan_wants(const NeighCand *c, int verify_only) {
+    if (!verify_only) return 1;
+    Device *d = find_device(c->mac);
+    return d && d->verify;
 }
 
 /* nl_parse_dump_msgs: 解析一段 RTM_GETNEIGH dump 响应 → 候选数组。
@@ -1011,17 +1064,22 @@ static int nl_dump_neighbors(NeighCand *out, int max) {
     return n;
 }
 
-static void scan_arp(void) {
+/* scan_arp_ex: verify_only=0 全量扫描(启动 / SIGUSR1 / REFRESH / ENOBUFS);
+ * verify_only=1 核实扫描(有设备的当前 IP 表项 FAILED, 见 mark_ip_failed)——
+ * 只看待核实设备的表项。两种都在最后让「待核实但没见到」的设备下线。 */
+static void scan_arp_ex(int verify_only) {
     int  updated = 0;
     time_t now_t = time(NULL);
 
+    if (verify_only && !scan_has_verify()) return;
     NeighCand *cands = malloc(sizeof(NeighCand) * 128);
     if (!cands) return;
     int n = nl_dump_neighbors(cands, 128);
     if (n >= 0) {
         /* netlink dump 路径: 候选带确认时间, IP 单调合并(见 scan_apply_candidate) */
         for (int i = 0; i < n; i++)
-            updated += scan_apply_candidate(&cands[i], now_t);
+            if (scan_wants(&cands[i], verify_only))
+                updated += scan_apply_candidate(&cands[i], now_t);
         free(cands);
     } else {
         /* 退回 /proc/net/arp(老内核/权限): confirmed_ms=0 → 与旧版行为一致 */
@@ -1046,19 +1104,23 @@ static void scan_arp(void) {
             strncpy(c.mac, mac, sizeof(c.mac)-1);
             strncpy(c.ip, ip, sizeof(c.ip)-1);
             strncpy(c.iface, iface, sizeof(c.iface)-1);
-            updated += scan_apply_candidate(&c, now_t);
+            if (scan_wants(&c, verify_only))
+                updated += scan_apply_candidate(&c, now_t);
         }
         fclose(f);
     }
+    updated += scan_finish_verify();
 
     if (updated) {
         g_dirty = 1;
-        hlog("ARP scan: %d entry/entries updated", updated);
+        hlog("%s: %d entry/entries updated", verify_only ? "FAILED 核实扫描" : "ARP scan", updated);
         write_json();
-    } else {
+    } else if (!verify_only) {
         hlog("ARP scan: no new entries");
     }
 }
+
+static void scan_arp(void) { scan_arp_ex(0); }
 
 /* ══════════════════════════════════════════════════════════
    v3.6 Commit 3: 异步 pending mDNS 解析
@@ -1270,22 +1332,24 @@ static void nl_process(int fd) {
             }
         }
 
-        if (!*ip_str || !*mac_str) continue;
+        if (!*ip_str) continue;
 
         if (nlh->nlmsg_type == RTM_DELNEIGH || !(ndm->ndm_state & NUD_VALID)) {
-            /* 设备离线:标记非活跃,不立即删除(给 300s 宽限) */
-            Device *d = find_device(mac_str);
-            if (d) {
-                /* 仅 NUD_FAILED / NUD_INCOMPLETE 才真正移除 */
-                if (ndm->ndm_state & (NUD_FAILED | NUD_INCOMPLETE)) {
-                    d->active = 0;
-                    g_dirty   = 1;
-                    g_last_event = time(NULL);  /* v3.5.0-rc R-1 */
-                    g_last_event_ms = now_ms_mono();  /* rc30.9 */
-                    hlog("DEL: %s (%s) state=0x%x", mac_str, ip_str, ndm->ndm_state);
+            /* 设备离线: 只有 FAILED(网关去找它, 没人应答)才算。v5.32 审查: 失效的表项
+             * 不带链路地址, 通知里没有 MAC —— 原来这里先按 MAC 找、找不到就丢, 等于
+             * 从没生效过, 走了的设备只能靠 90 秒没事件才下线。现在按 IP 找到「当前 IP
+             * 就是它」的设备, 交给核实扫描: 它还有别的有效表项(刚换了 IP)就留下并换过去,
+             * 没有就下线。表项被回收(DELNEIGH, 非 FAILED)不算离线(照旧)。 */
+            if (ndm->ndm_state & NUD_FAILED) {
+                int n = mark_ip_failed(ip_str, mac_str);
+                if (n > 0) {
+                    g_need_verify = 1;
+                    hlog("FAILED: %s%s%s 没人应答, %d 台设备待核实", ip_str,
+                         mac_str[0] ? " " : "", mac_str, n);
                 }
             }
         } else {
+            if (!*mac_str) continue;
             /* 设备上线或更新 */
             Device *d = find_device(mac_str);
             time_t now_t = time(NULL);
@@ -2199,6 +2263,12 @@ int main(int argc, char *argv[]) {
                 refresh_hotspot_iface();  /* v5.9.6 P0-3: 扫描前刷新热点接口 */
                 scan_arp();
             }
+        }
+        /* v5.32 审查: 有设备的当前 IP 表项 FAILED → 核实扫描(见 mark_ip_failed)。
+         * nl_process 置位后回到这里就处理, 不等 select 超时。 */
+        if (g_need_verify) {
+            g_need_verify = 0;
+            if (!g_no_discovery) scan_arp_ex(1);
         }
 
         /* v3.6 Commit 3: 每次 tick 异步解一个 pending 设备的 mDNS
