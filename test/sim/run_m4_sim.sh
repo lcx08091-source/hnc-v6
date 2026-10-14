@@ -71,10 +71,19 @@ check_junk() {
 }
 
 # 离开: 分别记下 Go(邻居表变 FAILED / 消失)和 hotspotd(devices.json 里没了)各用了几秒
+# v5.32 审查: hotspotd 收不到 FAILED 的 MAC(内核通知里不带链路地址), 只能靠「90 秒
+# 没有邻居事件」判离线(每 30 秒查一次)。留下的设备在这一步不发包的话, 它们最后一次
+# 事件只比离开的设备晚二十来秒, 赶上检查的相位就一起过期(约两成概率, 审查时复现),
+# 测的就不是「这一台走了」了。等的时候每 20 秒让留下的设备(第 3 个参数起)各发一个包。
 leave_timing() {
-    mac=$1 addr=$2 t0=$(date +%s) tg="" th=""
+    mac=$1 addr=$2 t0=$(date +%s) tg="" th="" lastpoke=0
+    shift 2
     while [ $(( $(date +%s) - t0 )) -lt 180 ]; do
         now=$(( $(date +%s) - t0 ))
+        if [ $(( now - lastpoke )) -ge 20 ]; then
+            lastpoke=$now
+            for n in "$@"; do $SIM poke "$n" >/dev/null 2>&1; done
+        fi
         [ -z "$tg" ] && ! ip neigh show "$addr" dev hncsim0 | grep -Eq 'REACHABLE|STALE|DELAY|PROBE' && tg=$now
         [ -z "$th" ] && ! grep -q "\"$mac\"" "$HNC/data/devices.json" 2>/dev/null && th=$now
         [ -n "$tg" ] && [ -n "$th" ] && break
@@ -101,7 +110,7 @@ check "两边都换成新 IP" 30
 
 say "3. tv 离开(之后有流量去找它 → 邻居表几秒后 FAILED)"
 $SIM del tv >/dev/null
-leave_timing 02:5a:00:00:00:01 192.168.43.101
+leave_timing 02:5a:00:00:00:01 192.168.43.101 pad mac phone watch pc
 check "两边都移除了 tv" 150
 
 say "4. watch 悄悄离开(没有流量去找它 → 邻居表一直 STALE)"

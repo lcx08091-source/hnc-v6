@@ -366,6 +366,14 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 	if oldWant.delay && newBase.delay && !oldWant.delayEq(newBase) {
 		conflicts = append(conflicts, "延迟")
 	}
+	// v5.32 审查修复: 按应用分优先级与延迟模拟互斥(都占设备的下行叶子队列; app_qos_set /
+	// delay_set 在另一项开着时都拒绝)。旧设备开着一项、新 MAC 开着另一项, 照搬过去会被
+	// 动作拒绝、整个合并回滚 —— 先报冲突; force 时以旧设备为准, 先关掉新 MAC 那一项。
+	qosOffNew := oldWant.delay && !oldWant.appQos && newObs.appQos
+	delayOffNew := oldWant.appQos && !oldWant.delay && newObs.delay
+	if qosOffNew || delayOffNew {
+		conflicts = append(conflicts, "按应用分优先级 / 延迟模拟(两者互斥)")
+	}
 	if names[from] != "" && names[to] != "" && names[from] != names[to] {
 		conflicts = append(conflicts, "名称")
 	}
@@ -468,6 +476,15 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 					}
 				})
 			}
+			if qosOffNew { // force 才走到这里(见冲突检查): 先关新 MAC 的按应用分优先级
+				if err := run("app_qos_set", map[string]string{"mac": to, "enabled": "false"}); err != nil {
+					return err
+				}
+				touched = true
+				undos = append(undos, func() {
+					ops.rule("app_qos_set", map[string]string{"mac": to, "enabled": "true"})
+				})
+			}
 			if oldWant.delay && !(newObs.delay && oldWant.delayEq(newObs)) {
 				if err := run("delay_set", delayParams(to, oldWant)); err != nil {
 					return err
@@ -498,8 +515,15 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 				})
 			}
 			// v5.32 T1: 按应用分优先级此前不在 ruleState 里, 合并会静默丢。
-			// 布尔开关无冲突可言; 下发走 app_qos_set(只写 rules.json +
-			// run/app_limit.dirty, 看门狗 3 秒内重排计划, 不需要设备在线)。
+			// 下发走 app_qos_set(只写 rules.json + run/app_limit.dirty, 看门狗
+			// 3 秒内重排计划, 不需要设备在线); 与延迟模拟的互斥见冲突检查。
+			if delayOffNew { // force 才走到这里(见冲突检查): 先关新 MAC 的延迟模拟
+				if err := run("delay_clear", map[string]string{"mac": to}); err != nil {
+					return err
+				}
+				touched = true
+				undos = append(undos, func() { ops.rule("delay_set", delayParams(to, newObs)) })
+			}
 			if oldWant.appQos && !newObs.appQos {
 				if err := run("app_qos_set", map[string]string{"mac": to, "enabled": "true"}); err != nil {
 					return err

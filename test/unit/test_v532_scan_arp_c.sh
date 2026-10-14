@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # test/unit/test_v532_scan_arp_c.sh — v5.32 T2: hotspotd 全量重扫选最近确认的 IP
-# (nl_parse_dump_msgs / scan_apply_candidate 纯逻辑, 21 项断言)。照
+# (nl_parse_dump_msgs / scan_apply_candidate 纯逻辑, 27 项断言; 第 3 组为审查补的)。照
 # test_v531_no_discovery_c.sh: 本机 cc 编(hotspotd.c 由测试文件 #include,
 # 不出现在命令行), 没有 cc → SKIP。
 

@@ -114,7 +114,7 @@ typedef struct {
     time_t  last_seen;
     time_t  last_resolve;               /* v3.5.0-rc R-2: 上次 resolve_hostname 时间,用于改名场景的 60s 时间窗口 re-resolve */
     time_t  pending_since;              /* v3.6 Commit 3: 挂 pending 状态的时间点,process_pending_mdns 读 */
-    time_t  confirmed_at;               /* v5.32 T2: 内核最近确认可达的绝对时间(0=未知); 全量重扫时 IP 只被更近确认的候选改写 */
+    long long confirmed_ms;             /* v5.32 T2: 内核最近确认可达的时刻(CLOCK_MONOTONIC 毫秒, 0=未知); 全量重扫时 IP 只被更近确认的候选改写 */
     int     active;
     int     state;      /* NUD_* from netlink */
 } Device;
@@ -194,8 +194,12 @@ static Device *find_device(const char *mac) {
 
 static Device *alloc_device(void) {
     for (int i = 0; i < MAX_DEVICES; i++)
-        if (!g_devs[i].active)
+        if (!g_devs[i].active) {
+            /* v5.32 审查: 槽位复用时上一台设备的确认时间不能带给新设备 —— 否则
+             * 新设备的 IP 被「更近」的旧确认时间挡住, 报成上一台设备的 IP。 */
+            g_devs[i].confirmed_ms = 0;
             return &g_devs[i];
+        }
     /* 表满：淘汰最老的条目 */
     Device *oldest = &g_devs[0];
     for (int i = 1; i < MAX_DEVICES; i++)
@@ -745,8 +749,10 @@ static void write_json(void) {
      - 首选 netlink RTM_GETNEIGH dump(带 NDA_CACHEINFO, ndm_confirmed
        是距内核最近确认的 clock_t 滴答, USER_HZ=100), 同一 MAC 多条
        候选时"更近确认"者才能改写已知设备的 IP —— 与行序无关的单调合并;
+       确认时刻记成 CLOCK_MONOTONIC 毫秒(审查: 墙上时钟回拨会让旧记录显得
+       「更新」; 截到秒会让 1 秒内确认的两条打平, 又回到看行序);
      - netlink 读不了(老内核/权限)退回 /proc/net/arp: 候选没有确认
-       时间(confirmed_at=0), 行为与旧版一致(无条件覆盖, 同 MAC 后行赢)。
+       时间(confirmed_ms=0), 行为与旧版一致(无条件覆盖, 同 MAC 后行赢)。
    netlink 事件路径(nl_process)不动: 事件本身就是实时的, 直接覆盖没错。
 ══════════════════════════════════════════════════════════ */
 
@@ -755,8 +761,15 @@ typedef struct {
     char    mac[MAC_STR_LEN];
     char    ip[IP_STR_LEN];
     char    iface[IF_LEN];
-    time_t  confirmed_at;  /* 内核最近确认可达的绝对时间; 0=未知(/proc 退路) */
+    long long confirmed_ms; /* 内核最近确认可达的时刻(CLOCK_MONOTONIC 毫秒); 0=未知(/proc 退路) */
 } NeighCand;
+
+/* 单调时钟毫秒(64 位: now_ms_mono 返回 long, armv7 上开机 24.8 天就溢出) */
+static long long mono_ms_ll(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000L);
+}
 
 /* dump 时与 nl_process 同口径的"有效"状态(Go 侧 neigh.go nudValid) */
 #define SCAN_NUD_VALID (NUD_REACHABLE | NUD_STALE | NUD_DELAY | NUD_PROBE)
@@ -764,9 +777,12 @@ typedef struct {
 /* scan_apply_candidate: 一条候选并入 g_devs。纯逻辑不碰 IO —— host 单测
  * 直接调(test_scan_arp_ip_select.c)。返回 1=处理了一条有效候选(计数语义
  * 与旧 scan_arp 的 updated++ 相同)。已知设备的 IP 只在
- *   c->confirmed_at > d->confirmed_at   (更近确认)
- * 或 d->confirmed_at == 0               (当前未知, /proc 退路或事件路径建的)
- * 时才改写, 同时推进 d->confirmed_at —— 单调, 与候选到达顺序无关。 */
+ *   c->confirmed_ms > d->confirmed_ms   (更近确认)
+ * 或 d->confirmed_ms == 0               (当前未知, /proc 退路或事件路径建的)
+ * 时才改写, 同时推进 d->confirmed_ms —— 单调, 与候选到达顺序无关。
+ * 事件路径(nl_process)改 IP 时不动 confirmed_ms: 同一次 dump 里该 MAC 确认
+ * 最近的那条总会赢(表项的确认时刻只增不减), 事件记的值只影响「谁先谁后」,
+ * 不影响结果(审查时按「事件换 IP → 不发包 → 重扫」写了单测)。 */
 static int scan_apply_candidate(const NeighCand *c, time_t now_t) {
     if (!c->mac[0] || !c->ip[0]) return 0;
     if (strcmp(c->mac, "00:00:00:00:00:00") == 0) return 0;
@@ -834,10 +850,10 @@ static int scan_apply_candidate(const NeighCand *c, time_t now_t) {
         }
     }
     /* v5.32 T2 核心: IP 只在候选更近确认时才改写(见函数头注释) */
-    if (d->confirmed_at == 0 || c->confirmed_at > d->confirmed_at) {
+    if (d->confirmed_ms == 0 || c->confirmed_ms > d->confirmed_ms) {
         strncpy(d->ip, c->ip, sizeof(d->ip)-1);
         d->ip[sizeof(d->ip)-1] = '\0';
-        if (c->confirmed_at > 0) d->confirmed_at = c->confirmed_at;
+        if (c->confirmed_ms > 0) d->confirmed_ms = c->confirmed_ms;
     }
     strncpy(d->iface, c->iface, sizeof(d->iface)-1);
     d->iface[sizeof(d->iface)-1] = '\0';
@@ -850,17 +866,21 @@ static int scan_apply_candidate(const NeighCand *c, time_t now_t) {
 /* nl_parse_dump_msgs: 解析一段 RTM_GETNEIGH dump 响应 → 候选数组。
  * 纯解析(host 单测直调): NLMSG 对齐前进, RTM_NEWNEIGH 按 nl_process 同口径
  * 过滤(family AF_INET + SCAN_NUD_VALID + 6 字节 MAC + 热点 iface),
- * NDA_CACHEINFO 的 confirmed(u32, 距今 clock_t)换算成绝对时间。
- * 返回解析出的候选数; 遇到 NLMSG_ERROR 返回 -1。 */
-static int nl_parse_dump_msgs(const char *buf, size_t len, time_t now_t,
-                              NeighCand *out, int max) {
+ * NDA_CACHEINFO 的 confirmed(u32, 距今 clock_t, USER_HZ=100 即 10ms 一滴答)
+ * 换算成单调时钟毫秒(now_ms 为当前 CLOCK_MONOTONIC 毫秒)。
+ * 返回解析出的候选数; 遇到 NLMSG_ERROR 返回 -1; 见到 NLMSG_DONE 置 *done=1。 */
+static int nl_parse_dump_msgs(const char *buf, size_t len, long long now_ms,
+                              NeighCand *out, int max, int *done) {
     int n = 0;
     size_t off = 0;
     while (off + sizeof(struct nlmsghdr) <= len) {
         const struct nlmsghdr *nh = (const struct nlmsghdr *)(buf + off);
         if (nh->nlmsg_len < sizeof(struct nlmsghdr) ||
             off + nh->nlmsg_len > len) break;
-        if (nh->nlmsg_type == NLMSG_DONE) break;
+        if (nh->nlmsg_type == NLMSG_DONE) {
+            if (done) *done = 1;
+            break;
+        }
         if (nh->nlmsg_type == NLMSG_ERROR) return -1;
         if (nh->nlmsg_type == RTM_NEWNEIGH &&
             nh->nlmsg_len >= NLMSG_LENGTH(sizeof(struct ndmsg)) &&
@@ -869,7 +889,7 @@ static int nl_parse_dump_msgs(const char *buf, size_t len, time_t now_t,
             char ip_str[IP_STR_LEN] = {0};
             char mac_str[MAC_STR_LEN] = {0};
             char iface[IF_LEN] = {0};
-            long confirmed_ago = -1; /* 秒; -1 = 无 CACHEINFO */
+            long long confirmed_ago = -1; /* 毫秒; -1 = 无 CACHEINFO */
             if (ndm->ndm_family == AF_INET &&
                 (ndm->ndm_state & SCAN_NUD_VALID)) {
                 const struct rtattr *rta = NDM_RTA(ndm);
@@ -891,8 +911,8 @@ static int nl_parse_dump_msgs(const char *buf, size_t len, time_t now_t,
                                rta->rta_len >= RTA_LENGTH(sizeof(struct nda_cacheinfo))) {
                         const struct nda_cacheinfo *ci =
                             (const struct nda_cacheinfo *)RTA_DATA(rta);
-                        /* ndm_confirmed: 距最近确认的 clock_t, USER_HZ=100 */
-                        confirmed_ago = (long)(ci->ndm_confirmed / 100u);
+                        /* ndm_confirmed: 距最近确认的 clock_t, USER_HZ=100(10ms) */
+                        confirmed_ago = (long long)ci->ndm_confirmed * 10LL;
                     }
                 }
                 if (ip_str[0] && mac_str[0] &&
@@ -904,10 +924,14 @@ static int nl_parse_dump_msgs(const char *buf, size_t len, time_t now_t,
                     strncpy(c->mac, mac_str, sizeof(c->mac)-1);
                     strncpy(c->ip, ip_str, sizeof(c->ip)-1);
                     strncpy(c->iface, iface, sizeof(c->iface)-1);
-                    if (confirmed_ago >= 0 && confirmed_ago < 86400*365)
-                        c->confirmed_at = now_t - (time_t)confirmed_ago;
-                    /* confirmed_ago 异常大(>1 年)当未知, 别把 confirmed_at
-                     * 拉回 1970 附近 */
+                    if (confirmed_ago >= 0 && confirmed_ago < 86400LL*365*1000) {
+                        long long t = now_ms - confirmed_ago;
+                        /* 开机不久时新表项的确认时刻会早于单调时钟起点
+                         * (内核建表项时回拨 2×base_reachable_time): 仍算「已知,
+                         * 最旧」, 不当未知(未知 = 无条件接受) */
+                        c->confirmed_ms = t > 0 ? t : 1;
+                    }
+                    /* confirmed_ago 异常大(>1 年)当未知 */
                 }
             }
         }
@@ -916,9 +940,10 @@ static int nl_parse_dump_msgs(const char *buf, size_t len, time_t now_t,
     return n;
 }
 
-/* nl_dump_neighbors: 发 RTM_GETNEIGH dump, 收满或超时(500ms)返回候选数;
- * 失败(socket/send/recv 一开始就错)返回 -1 → 调用方退回 /proc/net/arp。
- * 用独立 socket(不 bind 组, 只收 dump 应答), 不干扰 g_nl_fd 的事件流。 */
+/* nl_dump_neighbors: 发 RTM_GETNEIGH dump, 收到 NLMSG_DONE / 收满 / 超时(500ms)
+ * 返回候选数; 失败(socket/send/recv 出错, 或 500ms 内一条应答都没有)返回 -1
+ * → 调用方退回 /proc/net/arp。用独立 socket(不 bind 组, 只收 dump 应答),
+ * 不干扰 g_nl_fd 的事件流。 */
 static int nl_dump_neighbors(NeighCand *out, int max) {
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
     if (fd < 0) return -1;
@@ -937,32 +962,38 @@ static int nl_dump_neighbors(NeighCand *out, int max) {
         close(fd);
         return -1;
     }
-    time_t now_t = time(NULL);
-    int n = 0;
-    /* 500ms 总预算; NLMSG_DONE / EAGAIN / 超时就收工, 已收的照用 */
-    for (int spin = 0; spin < 50; spin++) {
+    long long now_ms = mono_ms_ll();
+    int n = 0, done = 0;
+    /* 500ms 总预算(50 × 10ms); 见到 NLMSG_DONE 即收工。审查: 原来只靠「已收到
+     * 候选后 10ms 没新数据」判断结束 —— 热点上没有设备(候选 0 条)时每次都空等满
+     * 500ms; 收包出错也当成「0 台设备」, 不退回 /proc。 */
+    for (int spin = 0; spin < 50 && !done; spin++) {
         fd_set rf;
         struct timeval tv = { .tv_sec = 0, .tv_usec = 10000 };
         FD_ZERO(&rf);
         FD_SET(fd, &rf);
         int r = select(fd+1, &rf, NULL, NULL, &tv);
-        if (r <= 0) { /* 超时或错: 没有更多数据 */
-            if (r == 0 && n > 0) break;     /* 已有数据, 10ms 无新消息 → 完 */
-            if (r == 0) continue;           /* 还一条没有, 继续等总预算 */
+        if (r < 0) {
+            if (errno == EINTR) continue;   /* SIGUSR1 之类打断, 接着收 */
             close(fd);
             return -1;
         }
+        if (r == 0) continue;               /* 还没到, 继续等总预算 */
         char buf[16384];
-        ssize_t got = recv(fd, buf, sizeof(buf), 0);
-        if (got <= 0) break;
-        int rc = nl_parse_dump_msgs(buf, (size_t)got, now_t, out + n, max - n);
+        ssize_t got = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
+        if (got < 0) {
+            if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) continue;
+            close(fd);
+            return -1;
+        }
+        if (got == 0) break;
+        int rc = nl_parse_dump_msgs(buf, (size_t)got, now_ms, out + n, max - n, &done);
         if (rc < 0) { close(fd); return -1; }
         n += rc;
         if (n >= max) break;
-        /* NLMSG_DONE 的判断在 parse 里 break 了, 但外层不知道 ——
-         * 收到任何一帧后再等 10ms 没有新数据就认为结束(上面 r==0 分支) */
     }
     close(fd);
+    if (!done && n == 0) return -1;         /* 一条应答都没收全: 当读不了, 退回 /proc */
     return n;
 }
 
@@ -979,7 +1010,7 @@ static void scan_arp(void) {
             updated += scan_apply_candidate(&cands[i], now_t);
         free(cands);
     } else {
-        /* 退回 /proc/net/arp(老内核/权限): confirmed_at=0 → 与旧版行为一致 */
+        /* 退回 /proc/net/arp(老内核/权限): confirmed_ms=0 → 与旧版行为一致 */
         free(cands);
         FILE *f = fopen(ARP_PROC, "r");
         if (!f) return;

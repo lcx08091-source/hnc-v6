@@ -58,6 +58,27 @@ wait_ip() {
 }
 # stale_all <秒>: 等邻居表项全部 STALE(不发包)
 stale_all() { say "    (等 $1s 让邻居表项 STALE 化, 不发包)"; sleep "$1"; }
+# 审查补: 场景必须真的让 hotspotd 在多条表项里挑(测试纪律第 12 条)。
+# neigh_n <mac>: 网关邻居表里该 MAC 的有效表项数
+neigh_n() { ip neigh show dev hncsim0 2>/dev/null | grep -i "lladdr $1 " | grep -cE 'REACHABLE|STALE|DELAY|PROBE'; }
+# need_choice <mac>: 重扫前该 MAC 至少两条有效表项, 否则这一轮「没得选」, 记失败
+need_choice() {
+    n=$(neigh_n "$1")
+    if [ "${n:-0}" -ge 2 ]; then
+        say "    (邻居表里该设备 $n 条有效表项, 重扫要挑)"
+    else
+        fail "邻居表里该设备只有 ${n:-0} 条有效表项 —— 这一轮测不到「挑哪条」"
+    fi
+}
+# wait_reach <ip> <秒>: 等网关确认这个 IP 可达(REACHABLE)。刚连上就换 IP 的话, 网关
+# 对旧 IP 的回包探测落空、旧表项直接 FAILED, 邻居表里只剩新 IP(审查时第 1 轮就是这样)。
+wait_reach() {
+    t0=$(date +%s)
+    until ip neigh show "$1" dev hncsim0 2>/dev/null | grep -q REACHABLE; do
+        [ $(( $(date +%s) - t0 )) -ge "$2" ] && return 1
+        sleep 0.5
+    done
+}
 
 $SIM down >/dev/null 2>&1
 rm -rf "$HNC"
@@ -70,7 +91,8 @@ say "== v5.32 T2 模拟设备: C 版重扫不报回旧 IP $(date '+%F %T') =="
 
 say "1. tv 连上(.101)"
 $SIM add tv $MAC 192.168.43.101 Redmi-TV >/dev/null
-wait_ip "$MAC" 192.168.43.101 30 || fail "初始设备没出现" 
+wait_ip "$MAC" 192.168.43.101 30 || fail "初始设备没出现"
+wait_reach 192.168.43.101 15 || fail "网关 15 秒内没确认 .101 可达"
 
 # SIGUSR1 轮: 换 IP → poke 一次 → STALE 化 → 不发包直接 SIGUSR1 重扫
 i=0
@@ -79,6 +101,7 @@ for newip in 192.168.43.111 192.168.43.112 192.168.43.113; do
     say "2.$i 换 IP → $newip, STALE 后 SIGUSR1 重扫(不发包)"
     $SIM ip tv "$newip" >/dev/null
     stale_all 35
+    need_choice "$MAC"
     kill -USR1 "$(cat "$HNC_SIM_DIR/hotspotd.pid" 2>/dev/null)" 2>/dev/null || fail "SIGUSR1 没送达(hotspotd.pid?)"
     if wait_ip "$MAC" "$newip" 10; then
         say "  ✓ SIGUSR1 重扫报的是新 IP $newip"
@@ -94,6 +117,7 @@ for newip in 192.168.43.121 192.168.43.122; do
     say "3.$i 换 IP → $newip, STALE 后重启 hotspotd"
     $SIM ip tv "$newip" >/dev/null
     stale_all 35
+    need_choice "$MAC"
     $SIM hotspotd stop >/dev/null
     $SIM hotspotd start >/dev/null || { fail "hotspotd 重启失败"; break; }
     if wait_ip "$MAC" "$newip" 20; then

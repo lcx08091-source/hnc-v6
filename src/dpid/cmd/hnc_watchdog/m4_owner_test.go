@@ -383,7 +383,7 @@ func TestOwnerDefaultFallbackC(t *testing.T) {
 }
 
 // TestM4NextTickMS v5.32 T4: 主循环下一拍间隔 —— 有事(dirty / 待解析名字 /
-// 在途解析)200ms, 全空闲 1s。改动前固定 200ms(m4WriteHardRateMS)。
+// 在途解析)200ms, 全空闲 m4IdleTickMS(500ms)。改动前固定 200ms(m4WriteHardRateMS)。
 func TestM4NextTickMS(t *testing.T) {
 	busy := m4WriteHardRateMS * time.Millisecond
 	idle := m4IdleTickMS * time.Millisecond
@@ -410,7 +410,7 @@ func TestM4NextTickMS(t *testing.T) {
 
 // TestRunnerIdleWakeRate v5.32 T4: 空闲时主循环醒来次数有上限(注入计数,
 // 不靠 sleep 精确计时 —— 只数醒拍, 不数事件)。3 秒观察窗:
-// 旧代码固定 200ms → 15+ 次; 新代码空闲 1s → 首拍(200ms) + 约 3 次 ≤ 6。
+// 降频前固定 200ms → 15+ 次; 空闲 500ms(审查改, 见 m4IdleTickMS)→ 约 6 次 ≤ 9。
 func TestRunnerIdleWakeRate(t *testing.T) {
 	m4TestEnv(t)
 	r := newM4GoRunner("wlan2", false)
@@ -433,13 +433,137 @@ func TestRunnerIdleWakeRate(t *testing.T) {
 	}()
 	time.Sleep(3 * time.Second)
 	n := r.tickN.Load()
-	// 空闲: 首拍 200ms + 之后每拍 1s → 3 秒约 3–4 次; 上限 6 给调度余量。
-	// 旧代码(固定 200ms)3 秒至少 14 次, 上限 6 能把两者分开。
-	if n > 6 {
-		t.Fatalf("空闲 3 秒醒了 %d 次(上限 6)—— 空闲降频没生效", n)
+	// 空闲: 首拍 200ms + 之后每拍 m4IdleTickMS(500ms)→ 3 秒约 6 次; 上限 9 给
+	// 调度余量。降频前(固定 200ms)3 秒至少 14 次, 上限 9 能把两者分开。
+	if n > 9 {
+		t.Fatalf("空闲 3 秒醒了 %d 次(上限 9)—— 空闲降频没生效", n)
 	}
 	if n < 2 {
 		t.Fatalf("3 秒只醒 %d 次 —— 主循环疑似卡死", n)
 	}
 	t.Logf("空闲 3 秒醒 %d 次(旧代码约 15 次)", n)
+}
+
+// m4IdleRunner 测试辅助: 一个「空表、无事件」的写者(假订阅 / 假 dump / 假命令),
+// 返回 runner、事件源和 dump 计数。调用方负责 defer 停写者(m4StopRunner)。
+func m4IdleRunner(t *testing.T) (*m4GoRunner, *fakeNeighSource, *atomic.Int32) {
+	t.Helper()
+	dir := m4TestEnv(t)
+	if err := os.MkdirAll(filepath.Join(dir, "run"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := newM4GoRunner("wlan2", false)
+	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 64), stop: make(chan struct{})}
+	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
+	dumped := &atomic.Int32{}
+	r.dumpIfFn = func(int) ([]neigh.Entry, error) { dumped.Add(1); return nil, nil }
+	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
+	r.blacklistFn = func() map[string]bool { return nil }
+	r.ifIndexFn = func(string) (int, error) { return 7, nil }
+	r.table.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.applyHooks()
+	return r, src, dumped
+}
+
+func m4StopRunner(t *testing.T, r *m4GoRunner) {
+	close(r.stopCh)
+	select {
+	case <-r.doneCh:
+	case <-time.After(3 * time.Second):
+		t.Fatal("写者 3 秒内没退出")
+	}
+}
+
+// m4WaitCount 等计数超过 base(最多 limit), 返回实际用时与是否等到。
+func m4WaitCount(c *atomic.Int32, base int32, limit time.Duration) (time.Duration, bool) {
+	t0 := time.Now()
+	for time.Since(t0) < limit {
+		if c.Load() > base {
+			return time.Since(t0), true
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	return time.Since(t0), false
+}
+
+// TestRefreshLatencyWhenIdle v5.32 审查修复: 空闲降频后 REFRESH 仍要在 1 秒内反映到
+// devices.json(device_detect.sh do_scan_via_daemon: SIGUSR1 后 sleep 1 比 mtime,
+// 没变就当 hotspotd 卡死、退回 shell 扫描)。最坏情况是 touch 刚好落在一拍之后 ——
+// 这里等到一拍刚过再 touch, 量到全量扫的用时。GLM 版空闲拍 1 秒, 这一步要 ~1 秒,
+// 加上 hotspotd 转发和写盘就超出 device_detect.sh 的 1 秒窗口。
+func TestRefreshLatencyWhenIdle(t *testing.T) {
+	r, _, dumped := m4IdleRunner(t)
+	r.start()
+	defer m4StopRunner(t, r)
+	// 等第一拍的全量扫(lastSync 零值), 之后表空、无事件 = 空闲
+	if _, ok := m4WaitCount(dumped, 0, 2*time.Second); !ok {
+		t.Fatal("第一拍没有全量扫")
+	}
+	// 再等两拍, 保证进入空闲周期; 然后卡在「一拍刚过」的时刻 touch
+	n0 := r.tickN.Load()
+	deadline := time.Now().Add(5 * time.Second)
+	for r.tickN.Load() < n0+2 {
+		if time.Now().After(deadline) {
+			t.Fatal("主循环 5 秒内不到两拍")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	base := dumped.Load()
+	if err := os.WriteFile(m4RefreshFile, []byte("refresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	took, ok := m4WaitCount(dumped, base, 3*time.Second)
+	if !ok {
+		t.Fatal("touch refresh 后 3 秒内没有全量扫")
+	}
+	// 空闲拍 + 调度余量, 必须给 hotspotd 转发 / 写盘 / sleep 1 的抖动留出空间
+	if took > 800*time.Millisecond {
+		t.Fatalf("空闲时 REFRESH 用了 %v 才全量扫(上限 800ms; device_detect.sh 只等 1 秒)", took)
+	}
+	t.Logf("空闲时 REFRESH → 全量扫 %v", took)
+}
+
+// TestRunnerEventStormDoesNotStarveTick v5.32 审查修复: 邻居事件持续不断(间隔 <
+// 200ms)时, 拍子照样要响 —— 去抖写、REFRESH、名字派发、30 秒兜底都在拍子分支里。
+// GLM 版每圈(含事件分支)Reset 定时器, 事件一直来, 拍子就一直被往后推、永远不响:
+// 这期间 touch refresh 不会被处理, devices.json 一次也写不出来。
+func TestRunnerEventStormDoesNotStarveTick(t *testing.T) {
+	r, src, dumped := m4IdleRunner(t)
+	r.start()
+	defer m4StopRunner(t, r)
+	if _, ok := m4WaitCount(dumped, 0, 2*time.Second); !ok {
+		t.Fatal("第一拍没有全量扫")
+	}
+	stopFeed := make(chan struct{})
+	fed := make(chan struct{})
+	go func() {
+		defer close(fed)
+		for i := 0; ; i++ {
+			select {
+			case <-stopFeed:
+				return
+			case <-time.After(40 * time.Millisecond):
+			}
+			ip := net.IPv4(192, 168, 43, byte(100+i%2))
+			select {
+			case src.ch <- []neigh.Entry{{IfIndex: 7, IP: ip, MAC: "02:5a:00:00:00:01", State: 0x02}}:
+			case <-stopFeed:
+				return
+			}
+		}
+	}()
+	defer func() { close(stopFeed); <-fed }()
+	time.Sleep(300 * time.Millisecond) // 事件风暴进行中
+	ticks0 := r.tickN.Load()
+	base := dumped.Load()
+	if err := os.WriteFile(m4RefreshFile, []byte("refresh\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if took, ok := m4WaitCount(dumped, base, 1500*time.Millisecond); !ok {
+		t.Fatalf("事件风暴中 touch refresh, %v 内没有全量扫(拍子被事件饿死; 期间醒拍 %d 次)",
+			took, r.tickN.Load()-ticks0)
+	}
+	if _, err := os.Stat(m4DevicesJSON); err != nil {
+		t.Fatalf("事件风暴中 devices.json 一次也没写出: %v", err)
+	}
 }

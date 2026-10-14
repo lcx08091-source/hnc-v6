@@ -121,6 +121,9 @@ out=$(rbrun status "$HNC")
 # ── v5.29 审查修复 ──────────────────────────────────────────────────
 
 # 桩: pidfile 非空即「活着」(pid 由用例写)
+# v5.32 审查: 用例里的假 pid 一律 > 4194304(Linux pid_max 上限)—— 回滚会对
+# pidfile 里的 pid 真的 kill -9, 写 1005 / 2001 这种小号在容器里会杀掉真实进程
+# (审查时就把 run_all 本身杀了)。
 rbstub_alive() {
     cat > "$HNC/stub/proc_override.sh" <<'STUB'
 pidfile_pid_matches() { [ -s "$1" ]; }
@@ -134,9 +137,9 @@ test_start "rollback: 健康开机首轮 pid 只记基线; 之后 3 次正常重
 rbseed 5290001 5280001
 rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
 rbstub_alive
-echo 1001 > "$HNC/run/httpd.pid"; echo 2001 > "$HNC/run/watchdog.pid"
+echo 90001001 > "$HNC/run/httpd.pid"; echo 90002001 > "$HNC/run/watchdog.pid"
 HNC_RB_PORT_OK=1 rbrun observe "$HNC" >/dev/null 2>&1
-for p in 1002 1003 1004; do
+for p in 90001002 90001003 90001004; do
     echo "$p" > "$HNC/run/httpd.pid"
     HNC_RB_PORT_OK=1 rbrun observe "$HNC" >/dev/null 2>&1
 done
@@ -149,9 +152,9 @@ rbseed 5290001 5280001
 rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
 echo "NEW-BIN-v529" > "$HNC/bin/hnc_watchdog"
 rbstub_alive
-echo 2001 > "$HNC/run/watchdog.pid"
+echo 90002001 > "$HNC/run/watchdog.pid"
 r=0
-for p in 1000 1001 1002 1003 1004 1005; do
+for p in 90001000 90001001 90001002 90001003 90001004 90001005; do
     echo "$p" > "$HNC/run/httpd.pid"
     HNC_RB_PORT_OK=1 rbrun observe "$HNC" >/dev/null 2>&1; r=$?
 done
@@ -163,11 +166,11 @@ test_start "rollback: pidfile 暂时消失再出现新 pid → 仍算一次重�
 rbseed 5290001 5280001
 rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
 rbstub_alive
-echo 1001 > "$HNC/run/httpd.pid"; echo 2001 > "$HNC/run/watchdog.pid"
+echo 90001001 > "$HNC/run/httpd.pid"; echo 90002001 > "$HNC/run/watchdog.pid"
 HNC_RB_PORT_OK=1 rbrun observe "$HNC" >/dev/null 2>&1
 : > "$HNC/run/httpd.pid"                       # 被杀, 还没重拉
 HNC_RB_PORT_OK=0 rbrun observe "$HNC" >/dev/null 2>&1
-echo 1002 > "$HNC/run/httpd.pid"
+echo 90001002 > "$HNC/run/httpd.pid"
 HNC_RB_PORT_OK=1 rbrun observe "$HNC" >/dev/null 2>&1
 [ "$(cat "$HNC/data/rollback.restarts")" = 1 ] \
   && test_pass || test_fail "restarts=$(cat "$HNC/data/rollback.restarts" 2>/dev/null)(应 1)"

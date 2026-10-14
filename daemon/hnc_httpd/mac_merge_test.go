@@ -174,6 +174,10 @@ func (f *fakeMergeOps) rule(action string, p map[string]string) actionResp {
 		dm, _ := strconv.Atoi(p["delay_ms"])
 		jm, _ := strconv.Atoi(p["jitter_ms"])
 		lp, _ := strconv.ParseFloat(p["loss_pct"], 64)
+		// 与真动作一致(action_v5.go actionDelaySet): 开着按应用分优先级时拒绝设延迟
+		if (dm > 0 || jm > 0 || lp > 0) && truthy(d["app_qos"]) {
+			return actionResp{OK: false, Error: "conflict", Detail: "app_qos on"}
+		}
 		d["delay_enabled"], d["delay_ms"], d["jitter_ms"], d["loss_pct"] = true, float64(dm), float64(jm), lp
 	case "delay_clear":
 		d := dev()
@@ -183,7 +187,13 @@ func (f *fakeMergeOps) rule(action string, p map[string]string) actionResp {
 	case "device_whitelist_set":
 		dev()["whitelist"] = p["enabled"] == "true"
 	case "app_qos_set": // v5.32 T1: 按应用分优先级(rules.json 设备键)
-		dev()["app_qos"] = p["enabled"] == "true"
+		d := dev()
+		// 与真动作一致(action_app_qos.go actionAppQosSet): 开着延迟模拟时拒绝开启
+		if p["enabled"] == "true" && (truthy(d["delay_enabled"]) || numOf(d["delay_ms"]) > 0 ||
+			numOf(d["jitter_ms"]) > 0 || numOf(d["loss_pct"]) > 0) {
+			return actionResp{OK: false, Error: "conflict", Detail: "delay on"}
+		}
+		d["app_qos"] = p["enabled"] == "true"
 	case "bl_add":
 		bl = append(bl, mac)
 	case "bl_del":
@@ -785,6 +795,9 @@ func TestDeviceMergeMigratesAppQos(t *testing.T) {
 		t.Fatal("fixture: old device entry missing")
 	}
 	od["app_qos"] = true
+	// 审查修复: 按应用分优先级与延迟模拟互斥(两个真动作都拒绝另一项开着时开启),
+	// fixture 的旧设备开着延迟 —— 「两项都开」是真机上到不了的状态, 这里关掉延迟。
+	od["delay_enabled"], od["delay_ms"], od["jitter_ms"], od["loss_pct"] = false, 0, 0, 0
 	mmWrite(t, dir, "data/rules.json", root)
 
 	r := dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew}, false)
@@ -813,4 +826,85 @@ func TestDeviceMergeMigratesAppQos(t *testing.T) {
 	if !setNew || !clearOld {
 		t.Errorf("app_qos_set 调用缺: 新 %v / 旧 %v (calls=%v)", setNew, clearOld, ops.calls)
 	}
+}
+
+// mmSetDev 改 rules.json 里某台设备的若干键(测试辅助)。
+func mmSetDev(t *testing.T, dir, mac string, kv map[string]interface{}) {
+	t.Helper()
+	root := mmRead(t, dir, "data/rules.json")
+	devs, _ := root["devices"].(map[string]interface{})
+	d, _ := devs[mac].(map[string]interface{})
+	if d == nil {
+		d = map[string]interface{}{"mark_id": 12}
+		devs[mac] = d
+	}
+	for k, v := range kv {
+		d[k] = v
+	}
+	mmWrite(t, dir, "data/rules.json", root)
+}
+
+// TestDeviceMergeAppQosVsDelay v5.32 审查修复: 按应用分优先级与延迟模拟互斥。
+// 旧设备开着一项、新 MAC 开着另一项时, 原实现照样去开 —— 真动作拒绝(conflict),
+// 整个合并回滚成「merge failed」, 带 force 也合并不了。现在先报冲突;
+// force 时以旧设备为准: 先关掉新 MAC 上互斥的那一项再迁。
+func TestDeviceMergeAppQosVsDelay(t *testing.T) {
+	noDelay := map[string]interface{}{"delay_enabled": false, "delay_ms": 0, "jitter_ms": 0, "loss_pct": 0}
+	newDev := func(t *testing.T, dir string) map[string]interface{} {
+		d, _ := mmRead(t, dir, "data/rules.json")["devices"].(map[string]interface{})[mmNew].(map[string]interface{})
+		if d == nil {
+			t.Fatal("new mac has no rules entry")
+		}
+		return d
+	}
+	delayOn := func(d map[string]interface{}) bool {
+		return truthy(d["delay_enabled"]) || numOf(d["delay_ms"]) > 0
+	}
+
+	t.Run("旧 app_qos / 新 延迟", func(t *testing.T) {
+		dir, s, _ := mmFixture(t)
+		mmSetDev(t, dir, mmOld, noDelay)
+		mmSetDev(t, dir, mmOld, map[string]interface{}{"app_qos": true})
+		mmSetDev(t, dir, mmNew, map[string]interface{}{"delay_enabled": true, "delay_ms": 50, "jitter_ms": 0, "loss_pct": 0})
+		r := dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew}, false)
+		if r.OK || r.Error != "conflict" || !strings.Contains(r.Detail, "按应用分优先级") {
+			t.Fatalf("应先报冲突, got %+v", r)
+		}
+		r = dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew, "force": "true"}, false)
+		if !r.OK {
+			t.Fatalf("force 合并应成功(以旧设备为准), got %+v", r)
+		}
+		if d := newDev(t, dir); !truthy(d["app_qos"]) || delayOn(d) {
+			t.Fatalf("force 后新 MAC 应 app_qos 开、延迟关: %v", d)
+		}
+	})
+	t.Run("旧 延迟 / 新 app_qos", func(t *testing.T) {
+		dir, s, _ := mmFixture(t)
+		mmSetDev(t, dir, mmNew, map[string]interface{}{"app_qos": true})
+		r := dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew}, false)
+		if r.OK || r.Error != "conflict" || !strings.Contains(r.Detail, "按应用分优先级") {
+			t.Fatalf("应先报冲突, got %+v", r)
+		}
+		r = dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew, "force": "true"}, false)
+		if !r.OK {
+			t.Fatalf("force 合并应成功(以旧设备为准), got %+v", r)
+		}
+		if d := newDev(t, dir); truthy(d["app_qos"]) || numOf(d["delay_ms"]) != 80 {
+			t.Fatalf("force 后新 MAC 应延迟 80ms、app_qos 关: %v", d)
+		}
+	})
+	t.Run("force 失败回滚: 新 MAC 的延迟恢复", func(t *testing.T) {
+		dir, s, ops := mmFixture(t)
+		mmSetDev(t, dir, mmOld, noDelay)
+		mmSetDev(t, dir, mmOld, map[string]interface{}{"app_qos": true})
+		mmSetDev(t, dir, mmNew, map[string]interface{}{"delay_enabled": true, "delay_ms": 50, "jitter_ms": 0, "loss_pct": 0})
+		ops.failOn["app_qos_set "+mmNew] = true
+		r := dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew, "force": "true"}, false)
+		if r.OK {
+			t.Fatalf("注入失败后合并应失败")
+		}
+		if d := newDev(t, dir); numOf(d["delay_ms"]) != 50 {
+			t.Fatalf("回滚后新 MAC 的延迟应恢复 50ms: %v", d)
+		}
+	})
 }
