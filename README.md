@@ -177,11 +177,11 @@ process.
         │   hotspotd   │      │  hnc_dpid    │      │ hnc_watchdog │
         │      C       │      │      Go      │      │      Go      │
         │              │      │              │      │              │
-        │ Device       │      │ DPI / packet │      │ Process      │
-        │ discovery    │      │ inspection   │      │ supervision  │
-        │ Netlink      │      │ DNS / TLS    │      │ Recovery     │
-        │ DHCP / mDNS  │      │ App rules    │      │ Health       │
-        │ Statistics   │      │              │      │              │
+        │ Offload      │      │ DPI / packet │      │ Supervision  │
+        │ fallback     │      │ inspection   │      │ Recovery     │
+        │ (BPF / tc)   │      │ DNS / TLS    │      │ Health       │
+        │ Control      │      │ App rules    │      │ Device       │
+        │ socket       │      │              │      │ discovery    │
         └──────┬───────┘      └──────────────┘      └──────────────┘
                │
                ▼
@@ -198,19 +198,13 @@ hotspotd
 
 Written in C.
 
-Responsibilities include:
+Since v5.33 it only does:
 
-Hotspot client discovery
+Hardware-offload fallback (offload scheduling / BPF limit map; netlink link events)
 
-Netlink monitoring
+Control socket (GET_DEVICES / REFRESH / STATUS / OFFLOAD_*)
 
-DHCP/mDNS information processing
-
-OUI lookup
-
-Device state management
-
-Traffic statistics
+(Device discovery moved to hnc_watchdog in v5.31; the C discovery code was removed in v5.33.)
 
 
 hnc_dpid
@@ -272,6 +266,8 @@ Health monitoring
 Automatic recovery
 
 Network-change handling
+
+Device discovery and naming (since v5.31; the only writer of data/devices.json since v5.33)
 
 Traffic-control restoration
 
@@ -472,8 +468,8 @@ Upgrade & Rollback
 
 - Upgrades install over the existing module. Since v5.29 the service start script verifies basic health after an upgrade; if the new version fails to come up, it rolls back to the previous version automatically (see CHANGELOG 5.29).
 - To fall back manually, flash the previous release ZIP. (The automatic rollback uses a snapshot of the previous version kept in `/data/local/hnc/.prev`; it is taken at upgrade time and is not meant to be restored by hand.)
-- Since v5.31 device discovery has a single-writer switch: `data/m4_owner` — `go` (default, the Go watchdog writes `data/devices.json`) or `c` (hotspotd does discovery as before). If the Go writer misbehaves on your device, put `c` into that file; the watchdog switches within about a minute (no reboot, no reinstallation). The fallback rules are defined in docs/WORK-v5.31.md §8.
-- v5.32 keeps that default (`go`) and does not remove the C discovery code; the final 5.x stable release will decide both after real-device regression.
+- Device discovery: since v5.33 there is only the Go implementation (the watchdog writes `data/devices.json`). The v5.31–v5.32 switch `data/m4_owner` (and the C discovery code in hotspotd) is gone; if device discovery misbehaves on your phone, flash v5.32 back and use `data/m4_owner` = `c` there.
+- dpid supervision: since v5.33 only the C launcher + the Go watchdog remain (the shell guard, the Go supervisor and `run/wd_m5.disabled` were removed).
 
 
 ---
@@ -1172,10 +1168,10 @@ HNC 并不是单一进程，而是由多个相互协作的组件组成。
         │   hotspotd   │      │  hnc_dpid    │      │ hnc_watchdog │
         │      C       │      │      Go      │      │      Go      │
         │              │      │              │      │              │
-        │ 设备发现     │      │ DPI / 抓包   │      │ 进程守护     │
-        │ Netlink      │      │ DNS / TLS    │      │ 故障恢复     │
-        │ DHCP / mDNS  │      │ 应用识别     │      │ 健康检查     │
-        │ 流量统计     │      │ 规则匹配     │      │              │
+        │ 硬件加速兜底 │      │ DPI / 抓包   │      │ 进程守护     │
+        │ (BPF / tc)   │      │ DNS / TLS    │      │ 故障恢复     │
+        │ 控制接口     │      │ 应用识别     │      │ 健康检查     │
+        │              │      │ 规则匹配     │      │ 设备发现     │
         └──────┬───────┘      └──────────────┘      └──────────────┘
                │
                ▼
@@ -1192,19 +1188,13 @@ hotspotd
 
 C 语言实现。
 
-主要负责：
+v5.33 起只负责：
 
-热点设备发现
+硬件加速兜底(offload 调度 / BPF limit_map;netlink 只听链路变化)
 
-Netlink 监听
+控制接口(GET_DEVICES / REFRESH / STATUS / OFFLOAD_*)
 
-DHCP / mDNS 信息处理
-
-OUI 查询
-
-设备状态管理
-
-流量统计
+(设备发现 v5.31 起搬进 hnc_watchdog,v5.33 删掉了 C 版发现代码。)
 
 
 hnc_dpid
@@ -1271,7 +1261,7 @@ Go 语言实现。
 
 运行状态告警
 
-设备发现与名字解析(v5.31 起 devices.json 的默认写者;单写者开关 data/m4_owner, 退路规则见 docs/WORK-v5.31.md §8;v5.32 起空闲时主循环 0.5 秒醒一次)
+设备发现与名字解析(v5.31 起;v5.33 起是 devices.json 唯一的写者, 开关 data/m4_owner 已删;空闲时主循环 0.5 秒醒一次)
 
 
 hnc_launcher
@@ -1498,8 +1488,8 @@ http://127.0.0.1:8444/
 
 - 升级直接覆盖安装。v5.29 起服务启动脚本会在升级后做基本健康检查， 新版本起不来会自动回滚到上一个版本(见 CHANGELOG 5.29)。
 - 手动回退：刷回上一个版本的 ZIP。(自动回滚用的是升级时存在 `/data/local/hnc/.prev` 的上一版快照, 不用手动去动它。)
-- v5.31 起设备发现有单写者开关 `data/m4_owner`:`go`(默认， Go 看门狗写 `data/devices.json`)或 `c`(hotspotd 照旧做发现)。真机上如果 Go 写者表现异常， 把 `c` 写进该文件， 看门狗约一分钟内切过去(不用重启、不用重装)。「有问题」的判定与退路规则见 docs/WORK-v5.31.md §8。
-- v5.32 保持默认 `go` 不变、保留 C 版发现代码；正式版(去掉 -rc)等维护者真机回归后再决定。
+- 设备发现：v5.33 起只有 Go 版(看门狗写 `data/devices.json`),v5.31–v5.32 的开关 `data/m4_owner` 和 hotspotd 里的 C 版发现代码都删了。真机上设备发现有问题的话，刷回 v5.32,在那一版里往 `data/m4_owner` 写 `c`。
+- dpid 守护：v5.33 起只剩 C launcher + Go 看门狗(shell guard、Go supervisor 和开关 `run/wd_m5.disabled` 已删)。
 
 
 ---

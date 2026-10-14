@@ -175,7 +175,7 @@ Set-Cookie: hnc_token=<TokenID>.<Secret>; Path=/; Max-Age=2592000; HttpOnly; Sec
 ### 2.1 GET `/api/devices` — 设备列表(合并视图)
 
 - 鉴权:需鉴权。无参数。永远 200。
-- 数据来源(每次请求读,经 mtime+size 缓存):`$HNC/data/devices.json`(当前写者写:`data/m4_owner=go`(默认)时是 Go 看门狗,`=c` 时是 hotspotd;任何时刻只有一个写者)、`$HNC/data/rules.json`(规则)、
+- 数据来源(每次请求读,经 mtime+size 缓存):`$HNC/data/devices.json`(v5.33 起只有 Go 看门狗的设备发现写者写;v5.31–v5.32 由开关 `data/m4_owner` 在 Go / hotspotd 之间选)、`$HNC/data/rules.json`(规则)、
   `$HNC/data/device_names.json`(手动命名)、`$HNC/run/dpi_state.json`(`clients[*].top_apps`)、内存中的 RateLoop 速率快照。
 - 合并规则:
   1. devices.json 每台设备 → 复制其全部字段,再用 `rules.json.devices[mac]`(大小写不敏感)覆盖
@@ -2266,4 +2266,30 @@ GET `/api/encdns`:
 
 - dpid 守护链 4 层 → 2 层(M5):开机只选 C launcher,不能用就 direct(看门狗直拉 dpid);哨兵不再判 dpid / launcher;「launcher 坏了 → 直拉 dpid」救命路径在看门狗(同时看 `launcher.log` 与 `dpid_guard.log`,日志须是 10 分钟内写过的)。判活 pidfile + `/proc/<pid>/cmdline`;拉起冷却 30 秒起、拉起后 2 分钟内又死则翻倍,封顶 8 分钟。
 - 应用感知 QoS 关闭(默认)时,tc / iptables 命令与 v5.29 逐条一致;开启的设备下行 class 下挂 3 个子 class(位分配与号段见 `docs/CODEMAP.md` §5.5)。`tc_manager.sh` 对这些 class 跳过叶子操作(下行延迟 / SQM 不生效,上行照常),新子命令 `ensure_class <iface> <mark_id> <ip>`。
+
+## 29. v5.33 变更(重复实现只留一份)
+
+**删除(API 形状不变,只是这些开关 / 字段 / 文件不再有人读写)**
+
+- 开关:`data/m4_owner`(设备发现写者 go / c)、`run/m4_owner.current`、`run/wd_m4_drill`(演练写者 → `run/devices.go.json`)、`run/wd_m4_shadow.disabled` 与影子明细 `run/m4_shadow.json`、`run/wd_m5.disabled`(dpid 守护退回 v5.29 三选一)。post-fs-data 开机清掉旧版本留下的这些文件。
+- `run/watchdog_actions.json` 顶层不再有 `m4_owner` / `m4_switches` / `m4_checks` / `m4_mismatch`;只剩 `m4_go_writes` / `m4_go_write_fails`。自检「看门狗动作」行显示「设备发现(Go 看门狗): 写 N 次 / 失败 N 次」。
+- `run/dpid_launcher.choice` 只认 `launcher` / `direct`;旧版留下的 `guard` / `supervisor` 按缺失处理(launcher 二进制在就按 launcher)。`bin/capability_probe.sh` 的 `selected_launcher` 只报 `c_launcher` / `direct` / `unknown`。
+- shell 扫描兜底的 `run/hostname_cache`、`run/detect.pid` 不再生成。
+
+**hotspotd 控制接口(`run/hotspotd.sock`)**
+
+- 只剩硬件加速兜底 + 控制接口,不再发现设备。`GET_DEVICES` 原样回 `data/devices.json`(Go 写的);`REFRESH` / `SIGUSR1` → touch `run/devices.refresh`;`STATUS` → `running:1 devices:N pid:P`(`N` 数 `devices.json`,不再追加 ` discovery:0`);`OFFLOAD_*` / `QUIT` 不变。旧参数 `--no-discovery` 照收、无作用。
+
+**`device_detect.sh`**
+
+- `scan`:写 nonce(`<pid>-<秒>`)到 `run/devices.refresh`;Go 写者全量扫 + 强制写 `devices.json` 后把同一 nonce 写进 `run/devices.refresh.ack`;`scan` 等到回执(最多约 2 秒)后输出 `devices.json` 的设备数(写者不在时按现有文件数,退出码照样 0)。WebUI「刷新」(`refresh` 动作)走这里。
+- `daemon`:只拉起 hotspotd,不再有 shell 轮询;`status`:hotspotd 不在时输出 `hotspotd not running`(原 `shell_daemon pid=…`)。`list` / `iface` / `count` 不变。
+
+**`/api/proc_health`**
+
+- `counts.dpid_guard_main` / `dpid_guard_total` 改数 C `hnc_launcher`(字段名不变;launcher 多由看门狗拉起、父进程不是 1,所以不按 PPID==1 数)—— 原来数的是 shell guard,launcher 在跑也报 0。两个 launcher 同时在 → `warn`「hnc_launcher 重复」。前端标签「guard」改「launcher」。
+
+**`hnc_dpid`**
+
+- 删 `-write-blind-state` / `-blind-iface` 参数(只有已删的 shell guard 用)。
 

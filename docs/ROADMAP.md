@@ -19,6 +19,7 @@
 | **v5.31** | 迁移 M4 方案 A(rc1 ✅,工作文档 `docs/WORK-v5.31.md`) | 设备发现与名字解析从 hotspotd 搬进 Go 看门狗;hotspotd 瘦身成只管硬件加速兜底(`--no-discovery`);任何时刻只有一个写者;开关 `data/m4_owner`(`go` / `c`)双向、默认值只写在一处(rc 默认 `go`);C 版发现代码保留 | 模拟设备:全字段影子、Go 模式全流程、运行中来回切换(场景照写,`run_m4_sim_v531.sh`);真机:设备列表 / 名字 / 限速与以前一致,开关能退回;「有问题」的定义见工作文档 §8 |
 | **v5.32** | 收尾与正式版候选(rc1 ✅,工作文档 `docs/WORK-v5.32.md`;**不等真机结果**,只出 rc1) | 小 bug 收口(启动指纹起名、合并丢 `app_qos`、扫描计数、gofmt);C 版退路的老问题(重扫 ARP 报回旧 IP);「默认值改回 C 版」的退路在模拟设备上演练;可选省电小项;文档 + 正式版说明草稿。**不改默认值、不删旧代码**(都要靠真机结论)。正式版(去 `-rc`)等维护者真机回归后由 Claude 发;**退路**:真机有 WORK-v5.31 §8 的问题 → 默认值改回 C 版,照常发 | 真机全功能回归(正式版前) |
 
+| **v5.33** | 重复实现只留一份(rc1 ✅,维护者 2026-10-14 决定;**先于真机回归删旧代码**,退路 = 刷回 v5.32) | **设备发现只留 Go 版**:hotspotd 的 C 版发现(邻居表 / ARP / 名字解析 / mDNS worker)删除,hotspotd 只剩硬件加速兜底 + 控制接口;删单写者开关 `data/m4_owner`、影子比对、演练写者;`device_detect.sh` 删 shell 轮询 / ARP 扫描 / 名字解析 / 旧网卡探测链,`scan` 改写 nonce 等 Go 写者回执。**dpid 守护只留一条链**:删 shell guard / Go supervisor / `run/wd_m5.disabled`。厂商表、垃圾名表各少一份(C 那份) | 真机:设备列表 / 名字 / 换 IP / 离开下线与 v5.32 的 Go 版一致;WebUI「刷新」2 秒内回来;常驻进程里没有 `hnc_dpid_guard.sh` / `hnc_dpid_supervisor`;launcher 不能用时 dpid 仍被看门狗拉起 |
 不在 5.x 做(留给 6.0,见 §B 迁移清单 M6–M9):SQLite 数据层、进程收拢、统一策略引擎、场景模式、新界面转正、多台管理、DPI 4.0 的会话理解 / QoE 闭环 / 异常检测。
 
 **可选、待你决定**:精确模式助手 App(独立安卓工程)、匿名共享指纹库(需服务器)。
@@ -33,8 +34,8 @@
 | M1 | 看门狗每轮调用的节流与记账 | 每轮 fork 5 次 `watchdog.sh`,返回码大多被丢弃 | 调用预算测试 + 动作失败 / 耗时记账 + 能力探测节流在 Go | **v5.28 ✅**(A1/A2,预算与记账落地;M2 netlink 读内核仍留 v5.29) | 防止再出「每分钟跑一次重活」;错误可见 |
 | M2 | `probe_hotspot` / `check_health` / `httpd_drift` / `tc_uplink_healthy` | shell 动作,每次起进程跑多条 iptables / tc 命令 | Go 直接读内核(netlink 读 qdisc / 网卡;iptables 一次 `-S` 批量读),shell 版保留为兜底 | **v5.29 ✅**(nlroute + native.go + 30 分钟对照 + wd_native.disabled 开关) | 看门狗 → 个位数 CPU 秒/时 |
 | M3 | `hnc_offload_guard.sh`、`hnc_clsact_watchdog.sh` | 两个常驻 shell 循环 | Go 看门狗内的两个任务(共用调度器) | **v5.29 ✅**(offload_sched.go + owner 让位 + wd_m3.disabled 开关) | 少 2 个常驻进程 |
-| M4 | 设备发现 `hotspotd`(C) | 独立 C 进程,读 neigh / DHCP / mDNS | Go(netlink 订阅邻居表),mDNS 名字解析照搬 | **v5.30 影子 ✅**(`neigh` 包 + 看门狗 5 分钟比对,`m4_mismatch`,开关 `run/wd_m4_shadow.disabled`;模拟设备对照 `test/sim/`);**方案 A ✅ v5.31**(发现 + 名字搬进 Go:新包 `devscan` / `devname` + 看门狗 `m4_owner.go`,hotspotd 带 `--no-discovery` 只留硬件加速兜底,开关 `data/m4_owner`,rc 默认 `go`,退路见 `docs/WORK-v5.32.md`);**方案 B(hotspotd 退役)正式版之后** | 少 1 个进程,统一调度 |
-| M5 | dpid 守护(C launcher / shell guard / Go supervisor 三选一 + 哨兵) | 4 层互相盯 | 只留 C launcher(ColorOS 上 Go 起子进程会被拦)+ Go 看门狗;删 shell guard 与哨兵循环 | **v5.30 ✅**(开机只选 C launcher / direct,哨兵不再判 dpid,救命路径进看门狗;开关 `run/wd_m5.disabled`;shell guard / Go supervisor 源码留一版,下个大版本删) | 守护链 4 层 → 2 层 |
+| M4 | 设备发现 `hotspotd`(C) | 独立 C 进程,读 neigh / DHCP / mDNS | Go(netlink 订阅邻居表),mDNS 名字解析照搬 | **v5.30 影子 ✅**(`neigh` 包 + 看门狗 5 分钟比对,`m4_mismatch`,开关 `run/wd_m4_shadow.disabled`;模拟设备对照 `test/sim/`);**方案 A ✅ v5.31**(发现 + 名字搬进 Go:新包 `devscan` / `devname` + 看门狗 `m4_owner.go`,hotspotd 带 `--no-discovery` 只留硬件加速兜底,开关 `data/m4_owner`,rc 默认 `go`,退路见 `docs/WORK-v5.32.md`);**方案 B(hotspotd 退役)正式版之后**;**v5.33 ✅ C 版发现删除**(hotspotd 只剩硬件加速兜底 + 控制接口,开关 / 影子 / 演练一并删) | 少 1 个进程,统一调度 |
+| M5 | dpid 守护(C launcher / shell guard / Go supervisor 三选一 + 哨兵) | 4 层互相盯 | 只留 C launcher(ColorOS 上 Go 起子进程会被拦)+ Go 看门狗;删 shell guard 与哨兵循环 | **v5.30 ✅**(开机只选 C launcher / direct,哨兵不再判 dpid,救命路径进看门狗;开关 `run/wd_m5.disabled`;**v5.33 ✅ shell guard / Go supervisor 与开关删除**) | 守护链 4 层 → 2 层 |
 | M6 | 运行状态与统计的几十个 JSON 文件 | 各写各的,靠原子改名 | SQLite(纯 Go 实现要加依赖、或 cgo + NDK,届时二选一) | 6.0 | 根治并发写与文件损坏 |
 | M7 | `json_set.sh` / `hnc_json`(所有设置写入) | shell 解析 / 改 JSON | httpd 直接读写(带锁),shell 工具只留只读诊断 | 6.0 | 设置写入不再起 shell |
 | M8 | tc / iptables 规则下发(`tc_manager.sh`、`iptables_manager.sh` 等) | shell 逐条执行 | Go 生成整份规则,`iptables-restore` 一次下发;tc 走 netlink | 6.0 | 规则恢复从秒级到百毫秒级,不再有「半套规则」窗口 |
@@ -156,7 +157,7 @@ v5.29       升级回滚 · 录制回放 · 兼容报告(6.0 地基中的低风�
 v5.30       应用感知 QoS 初版(默认关)
 v5.31       迁移 M4 方案 A(设备发现 + 名字解析进 Go,hotspotd 只留硬件加速兜底)
 v5.32       收尾 → rc1(不等真机);真机回归后发 5.x 正式版(方案 A 有问题就默认退回 C 版,照常发)
-5.x 正式版后 按真机结论删旧代码(shell guard / Go supervisor / hotspotd 发现代码)
+v5.33       重复实现只留一份(维护者决定先删):shell guard / Go supervisor / hotspotd 发现代码 / device_detect.sh shell 兜底
 5.x 正式版后 方案 B:hotspotd 彻底退役(或并入 6.0)
 ——— 以下暂缓 ———
 v6.0        SQLite · 进程收拢 · 策略引擎 + 场景 + 新界面 + 自动限速档

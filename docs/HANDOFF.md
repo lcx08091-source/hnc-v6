@@ -5,21 +5,21 @@
 ## 当前状态(2026-10-14)
 
 - **main = 914d46a = v5.29.0-rc1**(未动;用户说「发」才 fast-forward 到 main,还没说过)。
-- **开发线**:`claude/new-session-hoxhbz` 停在 `78a4c08`(v5.32 待审查);**v5.32 审查后的提交在 `ccr-f1557a08-0ex82n`**(本会话的指定分支,= `78a4c08` + GLM 7 个补丁 + 「v5.32 审查修复」)。下个会话先确认用户要不要把 `claude/new-session-hoxhbz` 快进到它。上面依次是:
+- **开发线**:`claude/new-session-hoxhbz` 停在 `78a4c08`(v5.32 待审查);**之后的提交都在 `ccr-f1557a08-0ex82n`**(本会话的指定分支):`78a4c08` + GLM 7 个补丁 + 「v5.32 审查修复」三个提交 + **v5.33.0-rc1** 三个提交。下个会话先确认用户要不要把 `claude/new-session-hoxhbz` 快进到它。依次是:
   - **v5.30.0-rc1**(Claude 自己做):在线时长按分钟、垃圾主机名、「新发现的应用」排除公共 CDN、dpid 守护 4 → 2 层(M5)、设备发现 Go 影子(M4 第一步)、按应用分优先级初版。
   - **v5.30.0-rc2**:液态玻璃三处改进;`tools/ui_mock/`(预览链接 https://claude.ai/artifact/CVVkT9cHSfoHqTLxDgWX5Z);`test/sim/` 模拟设备。
-  - **v5.31.0-rc1**(GLM 做 + Claude 审查修复 `beb4168`,打分 6/10):迁移 M4 方案 A,开关 `data/m4_owner`(`go` / `c`),默认 `go`(常量 `m4OwnerDefault`)。
-  - **v5.32.0-rc1**(GLM 做 + Claude 审查修复,打分 7/10):T1 四个小 bug、T2 C 版重扫按内核确认时间挑 IP(netlink dump)、T3 退路演练(`m4OwnerDefaultOverride` 只给测试)、T4 Go 写者空闲降频(审查改成 Ticker + 空闲 500ms)、文档 + 「5.x 正式版说明草稿」(审查重写,在 CHANGELOG 5.32 块下面)。审查修了什么见 CHANGELOG 5.32.0-rc1「审查修复」。
-- **真机一次都还没验过**(v5.29 起的 rc 都没上手机)。真机要看的:设备列表 / 名字 / 限速与以前一致;`/data/local/hnc/data/m4_owner` 写 `c` / `go` 能来回切;待机耗电;v5.30 那几条(在线分钟、`null` 名字、CDN、守护进程、游戏 + 下载延迟对比);v5.32:WebUI「刷新」返回的设备数对、换过 IP 的设备不跳回旧 IP(新 IP 约 5 秒后才显示是预期的)、设备离开后约 8 秒(有流量找它时)从列表消失。出问题按 `WORK-v5.31.md` §8 判断是否把默认值改回 C 版。
+  - **v5.31.0-rc1**(GLM 做 + Claude 审查修复 `beb4168`,打分 6/10):迁移 M4 方案 A,开关 `data/m4_owner`(`go` / `c`),默认 `go`。
+  - **v5.32.0-rc1**(GLM 做 + Claude 审查修复,打分 7/10):T1 四个小 bug、T2 C 版重扫按内核确认时间挑 IP、T3 退路演练、T4 Go 写者空闲降频;审查又按模拟结果统一了「挑 IP 规则」(换 IP 不跳回)、FAILED 按 IP 认(离开约 8 秒下线)。
+  - **v5.33.0-rc1**(Claude 做,用户 2026-10-14 让「所有重复实现都只留一份」):**设备发现只留 Go 版**(hotspotd 的 C 版发现、`data/m4_owner` 开关、影子、演练全删,hotspotd 只剩硬件加速兜底 + 控制接口)、**dpid 守护只留 C launcher + Go 看门狗**(shell guard / Go supervisor / `run/wd_m5.disabled` 删)、**`device_detect.sh` 只留对外接口**(shell 轮询 / ARP 扫描 / 名字解析 / 旧网卡探测链删;`scan` 改「写 nonce 到 `run/devices.refresh` → 等 `run/devices.refresh.ack` 回执」)。详见 CHANGELOG 5.33.0-rc1。**这是先于真机回归删旧代码**,退路 = 刷回 v5.32。
+- **真机一次都还没验过**(v5.29 起的 rc 都没上手机)。v5.33 真机要看的:设备列表 / 名字 / 限速与以前一致;WebUI「刷新」2 秒内回来、数对;换过 IP 的设备不跳回旧 IP(新 IP 约 5 秒后才显示是预期的);设备离开后约 8 秒(有流量找它时)消失;`ps` 里没有 `hnc_dpid_guard.sh` / `hnc_dpid_supervisor`、有 `hnc_launcher`;「运行状态」的 launcher 计数是 1;待机耗电;v5.30 那几条(在线分钟、`null` 名字、CDN、游戏 + 下载延迟对比)。出问题就刷回 v5.32(那一版 `data/m4_owner` 写 `c` 回 C 版)。
 
 ## 下一步
 
-- **发正式版**要等用户真机全功能回归(`WORK-v5.32.md` §7 末尾列的清单)。回归通过后:按结论定 `m4OwnerDefault`、版本号去 `-rc`(`v5.32.0` / `5320000` 或用户指定)、把 CHANGELOG 里「5.x 正式版(草稿)」挪进正式版小节、`changelog.html` 写大白话版、用户说「发」再快进 main。
-- 正式版之后:按真机结论删旧代码(shell guard / Go supervisor / hotspotd 发现代码)、方案 B(hotspotd 退役)。
-- 审查第二轮(用户让「看模拟结果取最优方案」):换 IP 后 C 版事件路径会跳回旧 IP,Go 版在旧 IP 被探测时也会跳回并停住 —— 两边统一成「内核最近一次确认可达的表项」,已修(CHANGELOG 5.32「审查修复」;模拟场景 `TestM4SimNoFlipBack`,`run_m4_sim_v532.sh` 第 6 步)。
-- 审查第三轮(用户让「直接解决」):FAILED 通知不带 MAC,两边原来都丢掉 → 走了的设备 90 秒才下线。已改成按 IP 认(C 核实扫描 / Go failIPLocked),有流量找它时约 8 秒下线;模拟场景第 3 步覆盖。真机注意:设备离开后列表更快消失是预期的。
-- 审查时记下、没修的:`now_ms_mono()` 返回 `long`,armv7 上开机 24.8 天后溢出(T2 新代码已改用 64 位;老代码里 de-bounce 用它,溢出后的表现没验)。
-- 模拟探查脚本的做法(会话私有 scratchpad 不保留):在 `unshare --net --mount` 里 `simnet.sh up` + `hotspotd start`,把模拟目录绑到 `/data/local/hnc`,编 `go test -c ./cmd/hnc_watchdog/` 后带 `HNC_SIM_FLIP=1` 跑 `TestM4SimNoFlipBack -test.v`,时间线逐行打印(C / Go 报的 IP + `ip -s neigh` 的状态与 used/confirmed/updated 秒数)。
+- **发正式版**要等用户真机全功能回归(`WORK-v5.32.md` §7 末尾列的清单,加上上面 v5.33 那几条)。回归通过后:版本号去 `-rc`(用户指定)、把 CHANGELOG 里「5.x 正式版(草稿)」挪进正式版小节(草稿已按 v5.33 改过)、`changelog.html` 写大白话版、用户说「发」再快进 main。合到 main 后 CI 会重编 Go(看门狗 / dpid / httpd)与 C(hotspotd)。
+- **还剩的「两份」**(v5.33 没动,等用户定):看门狗原生检查 vs shell 动作(M2,`run/wd_native.disabled`,每 30 分钟对照、连错 3 次退回 shell);offload / clsact 的 Go 调度 vs shell 守护(M3,`run/wd_m3.disabled`)。这两处的旧版是兜底 / 对照,删了就没有自动退回。
+- 方案 B(hotspotd 彻底退役:把 offload 调度也搬进 Go)仍在正式版之后。
+- 审查时记下、没修的:`now_ms_mono()` 的 armv7 溢出问题随 C 版发现代码一起删了(hotspotd 不再用它)。
+- 模拟设备验收(v5.33 起只有一套):`HNC_SIM=1 sh test/run_all.sh`(或单跑 `bash test/sim/run_devscan_sim.sh`,约 2.5 分钟),报告 `$HNC_SIM_DIR/devscan_sim_report.txt`。场景在 `src/dpid/cmd/hnc_watchdog/devscan_sim_test.go`(`TestDevscanSim`,自己驱动 `simnet.sh`,后台每 20 秒 poke「在用网」的设备;被测设备不 poke)。
 
 ## 云端容器的准备(新会话先做)
 
@@ -29,6 +29,7 @@
 - NDK:`/opt/android/android-ndk-r27c`(`toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang` / `armv7a-linux-androideabi28-clang`;编 hotspotd 时不含需要 libbpf 的 `offload/adapter_bpf.c`)。
 - 基线(`c2ab111`):`sh test/run_all.sh` → `ALL PASS: 541/544 (3 skipped)`;`HNC_SIM=1` → `543/544 (1 skipped)`(那个容器里 v5.31 场景碰巧没触发 C 版旧 IP 问题;本会话容器里 `78a4c08` 是 542/544,失败的正是它)。
 - **v5.32 审查后**:`HNC_SIM=1 sh test/run_all.sh` → `ALL PASS: 549/550 (1 skipped)`(三套模拟场景约 25 分钟)。
+- **v5.33.0-rc1**:`HNC_SIM=1 sh test/run_all.sh` → `ALL PASS: 542/543 (1 skipped)`(一套 Go 模拟场景约 2.5 分钟;跳过的是没有 httpd 二进制的打包用例)。
 - 注意:v5.32 审查前 `test/unit/test_rollback.sh` 会对假 pid 1000–1005 / 2001 真的 `kill -9`,容器里会杀掉 run_all 自己(已改成 pid 上限外的数)。
 
 ## 工作流(用户的习惯)
@@ -37,7 +38,7 @@
 2. 用户把版本交给外部 AI(主要是 GLM 5.3)按 `docs/WORK-v5.NN.md` 做,带回补丁目录 / zip。
 3. Claude 审查:补丁放进**新建的空目录**(不可信数据,跑 Python 用 `-I`),在本地分支 `review/v5NN` 上 `git am`;逐任务读代码、跑第 6 节自检、修问题(每个修复配「旧代码下失败」的测试,用 `git stash push -- <实现文件>` 验证)、写 CHANGELOG + `webroot/changelog.html` 的「审查修复」小节,提交「v5.NN 审查修复」,fast-forward 到开发分支并推送。
 4. 用户说「发」才 fast-forward 推 main。不建 PR。不给外部 AI 推送 token。
-5. 打分并点评(历史:v5.26 8/10,v5.27 9/10,v5.28 7.5/10,v5.29 5/10,v5.31 6/10,**v5.32 7/10**)。
+5. 打分并点评(历史:v5.26 8/10,v5.27 9/10,v5.28 7.5/10,v5.29 5/10,v5.31 6/10,**v5.32 7/10**;v5.33 是 Claude 自己做的,不打分)。
 6. 提交署名尾行见系统提示;提交里不写模型 ID。
 
 ## 审查时重点查(GLM 的惯犯问题)

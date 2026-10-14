@@ -14,6 +14,47 @@
 
 ---
 
+## [5.33.0-rc1] - 2026-10-14
+
+**预览版 · 重复实现只留一份**(维护者 2026-10-14 决定:「所有重复实现都只留一份」)。同一件事原来有两三份实现、靠开关切换或互相兜底,这一版每件事只留一份:设备发现只留 Go 版、dpid 守护只留 C launcher + Go 看门狗、`device_detect.sh` 的 shell 扫描兜底删掉。**这是先于真机回归删旧代码**(原计划正式版之后按真机结论再删);旧引擎的退路随之消失,真机上设备发现 / dpid 守护有问题时的退路是**刷回 v5.32**(那一版 `data/m4_owner` 写 `c` 可回 C 版发现)。
+
+### Removed
+
+- **hotspotd 的 C 版设备发现**(邻居表事件 + ARP 全量扫 + DHCP / mDNS 名字解析 + mDNS worker + 写 `devices.json` / `hostname_cache.json`),连同 `hostname_cache.c` / `oui_override.c` / `mdns_worker.c` 与只给它用的辅助函数。hotspotd 只剩硬件加速兜底(offload 调度 / BPF;netlink 只订阅链路事件)和控制接口;`hotspotd.c` 2476 → 约 570 行。
+- **设备发现的单写者开关与配套**:`data/m4_owner` / `run/m4_owner.current`、C↔Go 切换与每轮纠偏、影子比对(`m4_shadow.go`、`run/m4_shadow.json`、`run/wd_m4_shadow.disabled`)、演练写者(`run/wd_m4_drill` → `run/devices.go.json`)。看门狗拉 hotspotd 不再带 `--no-discovery`(hotspotd 照收这个旧参数)。
+- **dpid 守护的两条备选**:shell `bin/hnc_dpid_guard.sh`、Go `hnc_dpid_supervisor`(源码、CI 构建步骤、chcon / 清理 / 产物检查条目)与开关 `run/wd_m5.disabled`;service.sh 的三选一与哨兵里「M5 关」时的 dpid 救命段;dpid 只给 shell guard 用的 `-write-blind-state` / `-blind-iface` 参数。
+- **`device_detect.sh` 的 shell 兜底**:shell 轮询 daemon、shell ARP 扫描、shell 名字解析(`run/hostname_cache`、`dumpsys` / `mdns_resolve`)、「`hnc_iface.sh` 缺失时」的旧热点网卡探测链。736 → 225 行。
+- **两张表的 C 副本**:厂商(OUI)表只剩 Go 的 `src/dpid/devname/oui_table.txt`(删 `tools/extract_oui.py`);垃圾主机名表只剩 Go + 前端两份。
+
+### Changed
+
+- **WebUI「刷新」(`device_detect.sh scan`)改走「请求 + 回执」**:往 `run/devices.refresh` 写一个 nonce,看门狗的写者全量扫 + 强制写 `devices.json` 后把同一个 nonce 写进 `run/devices.refresh.ack`;`scan` 等到回执(最多约 2 秒,实测 0.3–0.5 秒)再数设备。原来是 SIGUSR1 给 hotspotd、1 秒后比 `devices.json` 的**秒级** mtime —— 同一秒里刚写过一次就误判「没刷新」,退回 shell ARP 扫描(又一份发现实现)。写者不在(热点没开 / 看门狗没跑)时按现有文件数,不再扫。
+- **`device_detect.sh daemon`** 只拉起 hotspotd,没有二进制 / 起不来时直接返回(原来进 shell 轮询死循环);`status` 在 hotspotd 不在时输出 `hotspotd not running`。
+- **hotspotd `STATUS`** 不再追加 ` discovery:0`,`devices:N` 一律数 `devices.json`。
+- **`run/dpid_launcher.choice`** 只认 `launcher` / `direct`;旧版留下的 `guard` / `supervisor` 按缺失处理(launcher 二进制在就按 launcher)。`capability_probe.sh` 的 `selected_launcher` 只报 `c_launcher` / `direct`。
+- **自检「看门狗动作」**:设备发现一段改成「设备发现(Go 看门狗): 写 N 次 / 失败 N 次」(`watchdog_actions.json` 去掉 `m4_owner` / `m4_switches` / `m4_checks` / `m4_mismatch`)。
+
+### Fixed
+
+- **`/api/proc_health` 的 dpid 守护计数恒为 0**:`dpid_guard_main` / `dpid_guard_total` 数的是 shell guard 的进程,v5.30 起默认走 C launcher,launcher 在跑也报 0。改数 `hnc_launcher`(看门狗拉起的 launcher 父进程不是 1,不按 PPID==1 数),两个 launcher 同时在 → `warn`;前端标签「guard」改「launcher」。`procfind` 的 `dpid_guard` 定义同样改认 launcher。
+
+### Internals
+
+- 开机 post-fs-data 清掉旧版本留下的开关 / 影子 / 演练 / shell 缓存文件(只删不读)。`diag.sh` 的「hostname 缓存」改看 Go 的 `data/hostname_cache.json`。
+- 模拟设备:v5.30 / v5.31 / v5.32 三套 C / Go 对照场景合并成一套 Go 验收 `test/sim/run_devscan_sim.sh` + `TestDevscanSim`(`HNC_SIM=1 sh test/run_all.sh` 里跑):6 台逐字段(DHCP 真名 / 垃圾名 / 手动名 / 黑名单)、解除黑名单 + 刷新回执、换 IP 后 75 秒不跳回、网关找旧 IP 到 FAILED 不跳回、表项全 STALE 后重扫仍是新 IP、离开后约 8 秒下线、悄悄离开仍在、换 IP 重连、一次连 5 台。本容器实测:换 IP 5.2–5.7 秒报出新 IP,离开 8.4 秒下线,刷新回执 0.3–0.5 秒。
+- 新测试(每条在 v5.32 上失败或编译不过):`daemon/hotspotd/test/test_hotspotd_ipc.c`(真实 `handle_client` / `nl_process`:REFRESH touch 文件、STATUS 数文件、GET_DEVICES 转发、只管链路事件)、`test_v533_scan_refresh.sh`(4 条)、`TestRefreshTriggersFullSync`(回执出现时 `devices.json` 已是这次扫描的结果)/ `TestReadNonce` / `TestWriterTick` / `TestHotspotdDaemonArgs`、`TestScWatchdogActionsShowsDevWriter`、`TestBuildProcHealthLauncherCounted`、`test_v530_m5.sh` 改写(抽 service.sh 真实开机选择段跑 launcher 能用 / 不在 / abort,旧二进制与开关摆着也不选;4 条在 v5.32 上失败)、`test_dpid_choice.sh`(3 条)。
+- C 改动:本机 gcc 完整编译链接(不含需要 libbpf 的 BPF 适配器)、NDK r27c arm64 / armv7(API 28)交叉编译通过,零警告(原来的两个旧警告随删掉的代码一起没了)。改了 Go(看门狗 / dpid / httpd)和 C(hotspotd),合并到 main 后 CI 要重编这几个二进制。
+- 文档:README(中英:组件职责、升级与回退)、ARCHITECTURE(hotspotd / dpid 守护历史、devices.json 写者、pidfile)、CODEMAP(权威实现表、第 9 节)、API.md(§29)、ROADMAP(v5.33 行、M4 / M5)、`daemon/hotspotd/README.md`、`src/launcher/README.md`。
+- 自检(本容器):`HNC_SIM=1 sh test/run_all.sh` → `ALL PASS: 542/543 (1 skipped)`(跳过的是源码树里没有 httpd 二进制的打包用例,与 v5.32 相同)。条数比 v5.32 的 550 少:删掉了 C 版发现 / shell guard / 影子 / 演练 / 开关切换的测试,三套模拟场景合成一套。`go vet` + `go test`(`src/dpid`、`daemon/hnc_httpd`)、`gofmt`、Go `android/arm64` 交叉编译、`pitfall_lint`、`version_consistency_check`、`ci_preflight`、`node --check`(`webroot/js/*` + `index.html` 内联)全过。
+
+### 还剩的「两份」(这一版没动,等维护者定)
+
+- 看门狗原生检查 vs shell 动作(M2,`run/wd_native.disabled`;每 30 分钟拿 shell 版对一次答案,连错 3 次退回 shell)。
+- offload / clsact 守护的 Go 调度 vs shell 守护(M3,`run/wd_m3.disabled`)。
+- 这两处的「旧版」是兜底 / 对照,删了就没有自动退回;要不要也只留一份由维护者定。
+
+---
+
 ## [5.32.0-rc1] - 2026-10-10
 
 **预览版 · 收尾与正式版候选**(工作文档 `docs/WORK-v5.32.md`)。不加新功能,把已知的账还清、把「退回 C 版」这条退路练通;**不改设备发现的默认值(仍 `go`)、不删旧代码**,正式版(去掉 `-rc`)等维护者真机回归后由 Claude 发。
@@ -90,20 +131,20 @@ C 改动用 NDK r27c 交叉编译(arm64 / armv7,API 28,不含需要 libbpf 的 B
 - 导出 / 导入「我的规则包」(v5.27)。
 
 **稳定与省电**
-- 按活动状态自动降频、功耗自测(v5.22);看门狗与 dpid 守护收口(v5.25–v5.26、v5.30:守护链 4 层 → 2 层);看门狗检查改 Go 直接读内核、两个常驻 shell 循环并进 Go(v5.29)。
+- 按活动状态自动降频、功耗自测(v5.22);看门狗与 dpid 守护收口(v5.25–v5.26、v5.30:守护链 4 层 → 2 层,v5.33 删掉备选);看门狗检查改 Go 直接读内核、两个常驻 shell 循环并进 Go(v5.29)。
 - 升级自检 + 自动回滚(v5.29 起:新版本核心进程起不来 / 崩溃循环 → 自动退回上一版并钉住)。
 - 32 位 ARM(armv7)安装包(v5.22)。
 
 **设备列表**
 - 在线时长按分钟累计、`null` 之类的垃圾主机名当没名字(v5.30)。
-- 设备发现与名字解析换成 Go 实现(v5.31,rc 默认 Go 版):行为与 C 版对齐(同一套名字优先级与垃圾名过滤、厂商表单一数据源),少一个常驻的发现进程。C 版(hotspotd)保留为退路。v5.32 起两个引擎挑 IP 用同一条规则(内核最近一次确认可达的表项):设备换 IP 后不再跳回旧 IP(新 IP 约 5 秒后、系统确认可达时才显示),C 版重扫也不再报回旧 IP;设备离开后,有流量去找它时约 8 秒下线(原来 90 秒)。
-- 设备扫描计数修正(WebUI「刷新」返回的设备数之前恒为 1,v5.32)。
+- 设备发现与名字解析换成 Go 实现(v5.31 起;v5.33 起只剩这一份,hotspotd 只留硬件加速兜底):行为与原 C 版对齐(同一套名字优先级与垃圾名过滤、厂商表单一数据源)。v5.32 起挑 IP 用同一条规则(内核最近一次确认可达的表项):设备换 IP 后不再跳回旧 IP(新 IP 约 5 秒后、系统确认可达时才显示),C 版重扫也不再报回旧 IP;设备离开后,有流量去找它时约 8 秒下线(原来 90 秒)。
+- 设备扫描计数修正(WebUI「刷新」返回的设备数之前恒为 1,v5.32);「刷新」改为请求 + 回执,不再偶尔误判超时(v5.33)。
 
 **怎么退回**
-- 设备发现:`/data/local/hnc/data/m4_owner` 写 `c` 回到 C 版(hotspotd 做发现),写 `go` 用 Go 版;约 1 分钟内生效,不用重启、不用重装。判定「有问题」的标准见 `docs/WORK-v5.31.md` §8。
+- 设备发现:v5.33 起只有 Go 版,开关 `data/m4_owner` 已删;真机有问题的退路是刷回 v5.32(那一版写 `c` 回 C 版)。
 - 整个版本:升级后若核心进程起不来,v5.29 起会自动回滚;也可以手动刷回上一个版本的 ZIP。
 
-**正式版时再定**:设备发现默认值(按真机回归结论,有 §8 的问题就默认 `c`)、旧代码删除清单(shell guard、Go supervisor、hotspotd 的发现代码)、方案 B(hotspotd 退役)。
+**正式版时再定**:v5.33 已按维护者决定删掉 shell guard、Go supervisor、hotspotd 的发现代码和 `device_detect.sh` 的 shell 兜底(原计划正式版后按真机结论删);剩下方案 B(hotspotd 退役)和 M2 / M3 的 shell 兜底要不要也只留一份。
 
 ---
 

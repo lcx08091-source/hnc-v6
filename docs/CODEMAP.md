@@ -15,9 +15,9 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 |---|---|---|---|
 | **前台接待**<br>`hnc_httpd` | `daemon/hnc_httpd/` | Go,约 3.7 万行(不含测试) | 网页界面的后端。收到你的点击 → 检查参数 → 调脚本执行 → 回结果;同时汇总设备、统计、识别结果给界面。端口 8443 / 8444 |
 | **侦察员**<br>`hnc_dpid` | `src/dpid/` | Go,约 2.1 万行 | 抓热点上的网络包头(DNS、TLS 握手、QUIC 首包、HTTP),认出域名和指纹,写给 httpd 用。**只看握手、不看内容** |
-| **门卫**<br>`hotspotd` | `daemon/hotspotd/` | C,约 1.2 万行 | v5.31 起:Go 模式(`data/m4_owner=go`,默认)下只留硬件加速兜底(offload 调度 / BPF limit_map / 控制接口),带 `--no-discovery` 跑;C 模式下照旧盯谁连上来了(ARP / DHCP / mDNS 拿设备名) |
+| **门卫**<br>`hotspotd` | `daemon/hotspotd/` | C,约 0.6 万行(含 offload 调度 / BPF 适配器 / 工具;不含工具生成的 vmlinux.h) | v5.33 起只剩硬件加速兜底(offload 调度 / BPF limit_map,netlink 只订阅链路事件)和控制接口(`GET_DEVICES` / `REFRESH` / `STATUS` / `OFFLOAD_*` / `QUIT`)。谁连上来了、叫什么名字归看门狗(见第 9 节);C 版发现(ARP / 邻居表 / DHCP / mDNS)已删 |
 | **巡逻员**<br>`hnc_watchdog` | `src/dpid/cmd/hnc_watchdog/` | Go | 每 60 秒检查:进程还活着吗、tc 规则还在吗、配额 / 分时段到点了吗;坏了就修。`bin/watchdog.sh` 只保留被 `action` 调用的修复函数,主循环已是 Go 版(v5.26);v5.29 起四项检查的判断原生化(`nlroute` + `native.go`),offload / clsact 两个常驻 shell 守护也并进来调度(`offload_sched.go`) |
-| **侦察员的保镖**<br>`hnc_launcher`(C) | `src/launcher/` | C | 把 dpid 拉起来、挂了重启。**v5.30 起(M5)守护链只剩 2 层**: C launcher 管 dpid、Go 看门狗盯 launcher(launcher 坏了看门狗直拉 dpid, 见 `src/dpid/cmd/hnc_watchdog/m5.go`); 开机不再选 shell guard / Go supervisor, 哨兵不再判 dpid。建 `run/wd_m5.disabled` 退回 v5.29 的三选一(`bin/hnc_dpid_guard.sh` / `src/dpid/cmd/dpid_supervisor/` 源码保留一版) |
+| **侦察员的保镖**<br>`hnc_launcher`(C) | `src/launcher/` | C | 把 dpid 拉起来、挂了重启。**守护链只有 2 层**(v5.30 起默认, v5.33 起唯一): C launcher 管 dpid、Go 看门狗盯 launcher(launcher 不能用 / 坏了看门狗直接盯 dpid, 见 `src/dpid/cmd/hnc_watchdog/m5.go`); 哨兵不判 dpid。v5.29 的 shell guard / Go supervisor 与开关 `run/wd_m5.disabled` v5.33 已删 |
 | **执行队**<br>各种 `bin/*.sh` | `bin/` | Shell,约 2.3 万行 | 真正去改内核规则的:`tc_manager.sh`(限速 / 延迟队列)、`iptables_manager.sh`(打标记 / 封锁)、`apply_device_rule.sh`(一台设备的完整规则)、各种 `*_sync.sh` |
 
 ## 2.5 权威实现表(v5.26 起生效)
@@ -32,7 +32,7 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | 月用量 | `daemon/hnc_httpd` 的 `limitCtl` | 计费月,取防火墙累计与 DPI 合计的较大值;设备卡 / 配额 / 全局告警 / `/api/usage_month` 同源 |
 | 告警写入(`run/alerts.jsonl`) | `src/dpid/alert` 的 `Append`(带 flock) | httpd 与看门狗两个进程并发追加安全 |
 | 看门狗主循环 | `src/dpid/cmd/hnc_watchdog`(Go) | `bin/watchdog.sh` 只提供 `action` |
-| dpid 守护 | `run/dpid_launcher.choice` 指定的那一个 | v5.30 M5(默认): 只有 launcher(C)/ direct(看门狗直拉)两种;救命路径在看门狗 `m5.go`(launcher 坏了 → 直拉 dpid + choice 改写 direct);判活 pidfile + `/proc/<pid>/cmdline`,拉起冷却翻倍封顶 8 分钟。`run/wd_m5.disabled` → v5.29 四路(launcher / guard / supervisor / direct)+ 哨兵救命 |
+| dpid 守护 | `run/dpid_launcher.choice` 指定的那一个 | 只有 launcher(C)/ direct(看门狗直拉)两种(v5.33 起旧值 guard / supervisor 按缺失处理);救命路径在看门狗 `m5.go`(launcher 坏了 → 直拉 dpid + choice 改写 direct);判活 pidfile + `/proc/<pid>/cmdline`,拉起冷却翻倍封顶 8 分钟 |
 | 规则目录开机同步(v5.27) | `bin/dpi_rules_sync.sh` | service.sh 只调用它;保留 99 与 `_*.json`,97 只在模块 versionCode 不变时保留;暂存目录 + 两次 mv 换目录,失败不动运行目录 |
 | 规则挂靠(v5.27) | `src/dpid/output/rule.go`(`attachChildRules`) | `_parent_rule_id` 的规则后缀并进父规则(去重 + 合并后再截 1024);httpd 应用目录(`app_time.go` `attachCatalogChildren`)与 `tools/build_pkg_app_map.py` 同一语义 |
 | QUIC 传输参数指纹(v5.27) | `src/dpid/output/qtp.go` | capture 只在 QUIC 路径填 `TLSInfo.QTP`;httpd `fp_learn.go` 先带 QTP 的 key 再回落 |
@@ -52,9 +52,10 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | 兼容性报告(v5.29) | `daemon/hnc_httpd/compat_report.go` | action `compat_report`,白名单字段收集(不含 MAC / IP / SSID / 密码 / token),产物 `exports/hnc-compat-*.json` |
 | 流量录制 / 回放(v5.29) | `src/dpid/capture/recorder.go` + `src/dpid/cmd/dpid_replay` | 只录 DNS / TLS ClientHello / QUIC Initial / HTTP 请求头事件包(LINKTYPE_RAW, 20 MB / 分钟数上限);回放复用同一套解析函数, 合成 pcap 期望输出进 `go test` |
 | 在线时长(v5.30) | 写: `src/dpid/cmd/hnc_watchdog/online_minutes.go`;读: httpd `onlineMinutesByMAC` | 5 分钟采样、按分钟累计、~55 分钟 / 跨日 / 退出时落 `run/online_hours.jsonl` 行 `{"t","day","mac","m"}`;旧行没有 `m` 按 60 |
-| 垃圾主机名(v5.30) | Go: `src/dpid/hostname`(`IsJunk`);C: hotspotd `hnc_hostname_is_junk`;前端 `isJunkName` | 三份同表(`test/unit/test_v530_junk_table_sync.sh` 核对);hotspotd / dpid 源头挡,httpd 挡存量;手动命名不过滤 |
+| 垃圾主机名(v5.30) | Go: `src/dpid/hostname`(`IsJunk`);前端 `isJunkName` | 两份同表(`test/unit/test_v530_junk_table_sync.sh` 核对;C 那份 v5.33 随 C 版发现删了);设备发现 / dpid 源头挡,httpd 挡存量;手动命名不过滤 |
 | 共享基础设施名单(v5.30) | `data/dpi_rules.d/shared_infra.txt` + `src/dpid/output/shared_infra.go`(`ParseSharedInfra` / `Match`,httpd 共用) | 「新发现的应用」里公共 DNS / CDN / 对象存储 / 支付 SDK 不成组、不当名字,只挂在组的 `shared`;频度兜底(≥3 台设备 + ≥4 个不相干组)由 dpid 判,写 `dpi_discover.json` 顶层 `shared_infra`;httpd `api_discover_shared.go` 再过一道 + 证书须 SAN 覆盖 |
-| 邻居表(v5.30) | `src/dpid/neigh` | 纯 syscall 只读 RTM_GETNEIGH dump / RTNLGRP_NEIGH 订阅,按 ifindex 用户态筛;M4 影子(`hnc_watchdog/m4_shadow.go`)5 分钟比对 hotspotd,`m4_mismatch`,明细 `run/m4_shadow.json`,开关 `run/wd_m4_shadow.disabled` |
+| 邻居表(v5.30) | `src/dpid/neigh` | 纯 syscall 只读 RTM_GETNEIGH dump / RTNLGRP_NEIGH 订阅,按 ifindex 用户态筛;设备发现写者(第 9 节)用它(v5.30–v5.32 的 M4 影子比对 v5.33 已删) |
+| 设备发现(v5.33 起唯一) | `src/dpid/cmd/hnc_watchdog/m4_owner.go` + `src/dpid/devscan` + `src/dpid/devname` | 唯一写 `data/devices.json` 的;厂商表 `devname/oui_table.txt` 唯一数据源;hotspotd / `device_detect.sh` 的发现与 shell 兜底已删 |
 | 应用感知 QoS(v5.30) | 计划: `hnc_watchdog/app_qos.go`;下发: `bin/apply_app_qos.sh`;叶子保护: `tc_manager.sh` `app_qos_owns_class` | 默认关(`rules.json` 设备项 `app_qos`);开的设备下行 class 下 3 个子 class(实时 / 交互 / 后台,50/35/15,ceil 不变),见下方 mark 位表 |
 
 ---
@@ -169,23 +170,24 @@ CONNMARK save/restore 掩码 `0xffffff`(`iptables_manager.sh`)。Android netd �
 `daemon/hotspotd/lsm/vmlinux.h`(15.5 万行)是工具生成的内核类型头文件,不是手写代码。
 
 
-## 9. 设备发现的归属与单写者(v5.31,M4 方案 A)
+## 9. 设备发现(v5.31 起 Go 版;v5.33 起唯一一份)
 
-**谁在写 `data/devices.json`**:任何时刻只有一个写者 —— `data/m4_owner` 决定(`go` / `c` 双向;文件不存在 = 默认 `go`;内容不认识 = 默认 + 一行日志;看门狗每轮约 60 秒内生效)。生效值由看门狗每轮落到 `run/m4_owner.current`,shell 侧(`device_detect.sh`)只读这个文件、自己不判断默认值。
+**谁在写 `data/devices.json`**:只有看门狗的设备发现写者(`src/dpid/cmd/hnc_watchdog/m4_owner.go`,
+`devscan` 表 + `devname` 六级名字解析)。热点开着就跑、关了就停。v5.31–v5.32 的单写者开关
+`data/m4_owner`(`go` / `c`)、`run/m4_owner.current`、切换 / 纠偏、影子比对(`m4_shadow.go`)、
+演练写者(`run/wd_m4_drill` → `run/devices.go.json`)和 hotspotd 的 C 版发现 v5.33 都删了
+(旧文件开机由 post-fs-data 清掉)。
 
-| | C 模式(`c`) | Go 模式(`go`,默认) |
-|---|---|---|
-| 写者 | hotspotd(ARP + 邻居表 netlink + 名字解析) | 看门狗 `m4_owner.go`(`devscan` 表 + `devname` 六级解析) |
-| hotspotd 参数 | 不带 `--no-discovery`(行为与 v5.30 一致) | `--no-discovery`:不扫 ARP、不处理邻居事件、不写 `devices.json` / `hostname_cache.json`、不起 mDNS worker;offload / 控制接口照常 |
-| v5.30 影子比对 | 照跑(5 分钟一轮) | 停(hotspotd 已不发现) |
-| `GET_DEVICES` | 原样回 `devices.json` 内容(一样) | 同左,谁写的都一样 |
-| `REFRESH` / `SIGUSR1` | 排一次扫描,回 `OK:queued` | touch `run/devices.refresh`,Go 写者 200ms 内看到 mtime 变化 → 立刻全量扫一次并写;`device_detect.sh scan` 的「1 秒内 mtime 变了」判断照旧成立 |
-| `STATUS` | `running:1 devices:N pid:P` | 追加 ` discovery:0`;`devices:N` 从 `devices.json` 数 |
-| shell 兜底(`device_detect.sh`) | hotspotd 不响应时照旧兜底写 | **不写** `devices.json`(只返回计数) |
-| 切换 | → go:先让 hotspotd 带参重启并确认(`STATUS` 回 `discovery:0`,失败回滚 + 5 分钟退避),再启 Go 写者 | → c:先停 Go 写者(等当前写完),再原参数重启 hotspotd |
-| 每轮纠偏(审查加) | hotspotd 若在 `--no-discovery` 下跑(开机时 `device_detect.sh` 按上次会话的 `m4_owner.current` 拉起)→ 按原参数重启 | hotspotd 若仍在做发现 → 停 Go 写者后带参重启(走切换路径) |
-| 热点没开 | — | 停 Go 写者(不空转),热点再开时重新拉起 |
+| | 现在(v5.33) |
+|---|---|
+| 写者 | 看门狗 `m4_owner.go`:邻居事件去抖写(rc30.9 算法)、30 秒全量兜底 + 90 秒离线检查、名字异步解析 |
+| 「立刻扫一次」 | `device_detect.sh scan` 写 nonce 到 `run/devices.refresh`;写者每拍(≤0.5 秒)看 mtime,全量扫 + 强制写 `devices.json`,再把 nonce 写进 `run/devices.refresh.ack`;`scan` 等到回执(最多约 2 秒)再数设备。hotspotd 的 `REFRESH` / `SIGUSR1` 只 touch 文件(没有 nonce),同样触发全量扫 |
+| hotspotd | 只剩硬件加速兜底 + 控制接口:`GET_DEVICES` 原样回 `devices.json`;`STATUS` = `running:1 devices:N pid:P`(N 数 `devices.json`);旧参数 `--no-discovery` 照收 |
+| `device_detect.sh` | 只剩对外接口(`scan` / `daemon` 只拉 hotspotd / `list` / `iface` / `status` / `count`);shell 轮询 / ARP 扫描 / 名字解析 / 旧网卡探测链已删 |
+| 热点没开 | 停写者(不空转),热点再开时重新拉起 |
+| 自检 | 「看门狗动作」一行显示「设备发现(Go 看门狗): 写 N 次 / 失败 N 次」(`watchdog_actions.json` 的 `m4_go_writes` / `m4_go_write_fails`);每次落盘记一行到 `run/m4_go_write.log` |
+| 模拟设备验收 | `test/sim/run_devscan_sim.sh` + `TestDevscanSim`(`HNC_SIM=1 sh test/run_all.sh`) |
 
 **v5.32**:Go 写者主循环空闲降频(固定节拍 Ticker:有事 200ms、全空闲 500ms;周期只在节拍分支里调,事件分支只许调快 —— 事件再密也推不迟下一拍;REFRESH / SIGUSR1 的 mtime 检查每拍都做,`device_detect.sh scan` 依赖的「1 秒内 devices.json mtime 变了」照旧成立);hotspotd 的 C 版全量重扫(`scan_arp`)改走 netlink `RTM_GETNEIGH` dump(认 `NLMSG_DONE`,收不到应答 / 出错退回 `/proc/net/arp`,行为同旧版),同一 MAC 多条候选按 `NDA_CACHEINFO` 的最近确认时刻(单调时钟毫秒,`Device.confirmed_ms`,槽位复用时清零)单调合并(换过 IP 的设备重扫不再报回旧 IP);**事件路径(`nl_process`)与 Go 版 `devscan.pickIP` 也按同一条规则**(`ip_should_switch`:设备 IP = 内核最近一次确认可达的表项,打平才看状态)—— 旧表项老化 / 被探测的通知不再把 IP 抢回去,新 IP 要等网关确认(约 5 秒)才采用;**FAILED 通知不带 MAC,两边按 IP 认设备**(hotspotd `mark_ip_failed` + 只看待核实设备的核实扫描 `scan_arp_ex(1)`;Go `devscan.failIPLocked`):还有别的有效表项就换过去,没有就下线(有流量去找走了的设备时约 8 秒,原来 90 秒);`device_detect.sh` 新增 `count` 子命令(数 devices.json 设备数,按 `"mac":"` 出现次数,单行 JSON 不再恒为 1)。
 
-**演练模式**(`run/wd_m4_drill` 存在,且只在 C 模式下生效):多起一个 Go 写者,只写 `run/devices.go.json`、不写名字缓存(全字段影子比对用,不碰正式文件);是否演练在起写者时定死。切换 / 纠偏重拉 hotspotd 不受 60 秒崩溃冷却限制;判断进程是否活着时僵尸不算。**Go 写者每次落盘记一行时间戳到 `run/m4_go_write.log`**,与 hotspotd.log 的 `JSON written` 行对照,用于「没有两个写者交替写」的验收。自检「看门狗动作」一行显示当前写者与写 / 失败 / 切换次数(`watchdog_actions.json` 的 `m4_owner` 等字段)。
+(v5.32 那段里 hotspotd 的部分 —— `scan_arp` / `nl_process` / `mark_ip_failed` —— v5.33 已随 C 版发现删除;Go 版 `devscan.pickIP` / `failIPLocked` 的规则不变。)

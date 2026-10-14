@@ -1,54 +1,41 @@
-# HNC hotspotd · rc3.1.15 源码
+# HNC hotspotd
 
-netlink RTGRP_NEIGH 事件驱动的设备发现 daemon，HNC v3.5+ 起默认启用。
+v5.33 起 hotspotd 只剩两件事(设备发现只有 Go 看门狗一份,C 版发现代码已删):
 
-## 本次改动 (rc3.1.15)
+1. **硬件加速兜底** —— offload 调度(`scheduler.c` / `upstream.c` / `platform.c`)与 BPF
+   适配器(`offload/`)。netlink 只订阅链路事件(`RTMGRP_LINK`):换网(WiFi↔4G、VPN 上下线)
+   时即时请求重探主上游。
+2. **控制接口** `run/hotspotd.sock`(0600,root):
 
-第三方 AI review 发现的三项防御深度问题（不是真实可利用漏洞，但代码风格统一 + 防御深度）：
+   | 命令 | 作用 |
+   |---|---|
+   | `GET_DEVICES` | 原样回 `data/devices.json`(看门狗写的) |
+   | `REFRESH` | touch `run/devices.refresh`,看门狗的设备发现写者立刻全量扫一次(`SIGUSR1` 同) |
+   | `STATUS` | `running:1 devices:N pid:P`(N 数 `devices.json`) |
+   | `OFFLOAD_NOTIFY_LIMIT <mac> <0\|1>` / `OFFLOAD_REFRESH` / `OFFLOAD_STATUS` / `OFFLOAD_DISABLE_GLOBAL` / `OFFLOAD_RESTORE_GLOBAL` | offload 调度器 |
+   | `QUIT` | 退出 |
 
-| 文件 | 改动 | 修法 |
-|---|---|---|
-| `hotspotd.c` | `try_mdns_resolve` popen → fork+execlp + ip 防御性验证 | 跟 dumpsys 路径风格统一，未来引入第三方 ip 来源也不变 RCE |
-| `hotspotd.c` | `update_traffic_stats` popen → fork+execlp | 同上风格统一 |
-| `hostname_cache.c` | 反 escape 加 `\uXXXX` BMP 解析 | 写入 (`hnc_json_escape`) 和读出对称，control char 不再变成 6 字符字面量 |
+   旧参数 `--no-discovery`(v5.31–v5.32)照收、无作用。
 
-## GitHub Actions 自动构建
+v5.33 之前的设备发现(邻居表事件 + ARP 全量扫、DHCP / mDNS 名字解析、mDNS worker、
+`hostname_cache.c` / `oui_override.c` / `mdns_worker.c`、写 `devices.json`)整块删除,
+对应能力在 `src/dpid/devscan` / `src/dpid/devname` 与看门狗 `m4_owner.go`。
 
-push 到 main/master 或手动从 Actions 页面 dispatch 即可触发构建。NDK r26d，目标 Android API 21+，arm64-v8a。
+## 构建
 
-构建产物：
-- 每次 push: artifact `hotspotd-arm64`（保留 30 天，从 Actions Run 页面下载）
-- 打 tag (`git tag rc3.1.15 && git push --tags`): 自动发 GitHub Release
-
-要本地构建：
-
-```bash
-export ANDROID_NDK=/path/to/android-ndk-r26d
-bash build.sh arm64
-# 输出: prebuilt/arm64/hotspotd
-```
-
-## 装到 HNC 模块
+CI(`.github/workflows/build.yml`)每次用 NDK 从源码编(arm64 + armv7,链接 libbpf 静态库)。本地:
 
 ```bash
-# 把 GitHub Release 下载的 hotspotd-arm64 推到设备
-adb push hotspotd-arm64 /sdcard/hotspotd
-adb shell su -c 'cp /sdcard/hotspotd /data/adb/modules/hotspot_network_control/bin/hotspotd && chmod 755 /data/adb/modules/hotspot_network_control/bin/hotspotd'
-# 重启服务
-adb shell su -c 'sh /data/adb/modules/hotspot_network_control/service.sh restart'
-# 真机验证不崩溃
-adb shell su -c 'tail -f /data/local/hnc/logs/service.log'
+export ANDROID_NDK=/path/to/android-ndk-r27c
+bash build.sh arm64          # 或 arm
 ```
 
-## 真机长跑验证
+只验逻辑时可以用本机 gcc 编(不带 BPF 适配器,offload 走 null 适配器),见
+`test/sim/simnet.sh` 的 `hotspotd start`。
 
-C 改动比 Go/shell 风险高，建议改完装机后跑 24+h 看：
+## 测试
 
-- `/data/local/hnc/logs/service.log` 没有 `C daemon hotspotd` 反复重启
-- `/data/local/hnc/data/devices.json` mtime 持续更新（设备能被发现）
-- `/data/local/hnc/data/hostname_cache.json` 内容正常（hostname 解析稳）
-- 无 OOM 痕迹（`logcat -d | grep -i 'lowmem\|killed'`）
-
-## 历史 (rc3.1.x 系列)
-
-主仓库已经迭代到 rc3.1.14。hotspotd C 部分跟主仓库 daemon/ 目录同步，但因为 NDK 编译需要独立工作流，分这个 repo 单独管。
+- `test/test_hotspotd_ipc.c`:`#define HNC_TEST_MODE` 后 include `hotspotd.c`,测真实的
+  `handle_client` / `nl_process` / `count_devices_in_file_at`(接进
+  `test/unit/test_v533_hotspotd_ipc_c.sh`,本机没有 cc 时跳过)。
+- `test/test_mdns_parse.c`:`mdns_resolve`(独立二进制,Go 名字解析调用它)的响应解析。

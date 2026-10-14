@@ -641,7 +641,7 @@ do_full_init() {
     # rc3.1.31 Bug B gap 修复 · 冷启动 do_full_init 可能跑在客户端连上热点前,
     # 此时 devices.json 是空的 → restore_rules 拿不到 live IP 走了 rules.json 的
     # stale fallback → tc u32 filter 装到了旧 IP → Mi-10 新 IP 流量不 match.
-    # 15s 后再跑一次 restore, 给 hotspotd 写 devices.json 的时间, get_current_ip
+    # 15s 后再跑一次 restore, 给设备发现写者(v5.33 起只有 Go 看门狗)写 devices.json 的时间, get_current_ip
     # 能拿到真实 IP. restore_rules 幂等 (prio=100+mark_id 每 MAC 唯一, del-before-add,
     # IP 无变化则 no-op 只重复建 filter ~<50ms).
     # subshell 独立, 即便 watchdog 退出也自然降级 (STATE 被 reset 则 case 不匹配).

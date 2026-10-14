@@ -75,7 +75,13 @@ HNC 经过 30 多个 rc 迭代,现在的架构是**多层 fallback + 多语言�
 
 ### 1. `hotspotd` (C, 95KB)
 
-**职责**: 设备识别 + 流量统计 + mDNS/DHCP 解析
+> **v5.33 起**: 设备发现只有 Go 看门狗一份(`src/dpid/cmd/hnc_watchdog/m4_owner.go` +
+> `src/dpid/devscan` / `devname`, 写 `data/devices.json`)。hotspotd 的 C 版发现整块删除,
+> 只剩**硬件加速兜底**(offload 调度 / BPF limit_map, netlink 只订阅链路事件)和
+> **控制接口**(`run/hotspotd.sock`: `GET_DEVICES` 转发 devices.json、`REFRESH` touch
+> `run/devices.refresh`、`STATUS`、`OFFLOAD_*`、`QUIT`)。下面是 v5.30 之前的职责, 留作历史。
+
+**职责**(v5.30 之前): 设备识别 + 流量统计 + mDNS/DHCP 解析
 
 **关键技术**:
 - `netlink RTGRP_NEIGH` — 监听热点接口的 ARP 表变化,**亚秒级**检测新设备
@@ -160,6 +166,12 @@ HNC 经过 30 多个 rc 迭代,现在的架构是**多层 fallback + 多语言�
 ---
 
 ## 三、3 套 fallback 的历史原因
+
+> **v5.33 起只剩一种**: C `hnc_launcher` 管 dpid + Go 看门狗盯 launcher(launcher 不能用 /
+> 坏了 → 看门狗直接盯 dpid, 即 `run/dpid_launcher.choice=direct`, 救命路径见
+> `src/dpid/cmd/hnc_watchdog/m5.go`)。shell guard(`hnc_dpid_guard.sh`)与 Go supervisor
+> (`hnc_dpid_supervisor`)及开关 `run/wd_m5.disabled` 已按维护者「所有重复实现都只留一份」
+> 删除(v5.30 起默认就不走它们)。本节保留当年为什么会有三套的历史。
 
 **为什么有 supervisor 的 C / shell / Go 三个版本?**
 
@@ -256,7 +268,7 @@ while (running) {
 
 ### 自动选择(`fork_probe`)
 
-**rc30.12 引入**, service.sh 启动时跑 `fork_probe` 探测:
+**rc30.12 引入**(v5.33 起只剩「C launcher 或 direct」, 见本节开头), 当年 service.sh 启动时跑 `fork_probe` 探测:
 
 ```sh
 if "$MODDIR/bin/fork_probe" /system/bin/true >/dev/null 2>&1; then
@@ -276,7 +288,8 @@ fi
 - 1% 设备 C launcher 异常 → 自动降级 shell guard(rc1 时代验证过的稳定方案)
 - 万一 shell guard 也异常 → 兜底 Go supervisor(老设备 / 老内核)
 
-**永远不会比 rc30.11 差** — 是这个设计的核心承诺。
+**永远不会比 rc30.11 差** — 是这个设计的核心承诺。(v5.30 起默认只走 C launcher, 不能用时由看门狗
+直接盯 dpid; v5.33 删掉了 shell guard / Go supervisor 两环。)
 
 ---
 
@@ -288,13 +301,12 @@ fi
 [t=0ms]   手机连热点 → 内核 ARP 表新增条目 → wlan2 接口
             ↓ netlink event (RTGRP_NEIGH)
             ↓
-[t=10ms]  hotspotd 收到 netlink event
-          - 查 mDNS (异步 worker, 100ms-1s)
-          - 查 DHCP lease (从 hostapd log)
-          - OUI 数据库查厂商
-          ↓ 写 devices.json
+[t=10ms]  Go 看门狗的设备发现写者收到 netlink event(v5.33 起唯一一份; 之前是 hotspotd)
+          - 快速名字(手动名 / MAC 尾号), 挂 pending
+          - 异步解析: DHCP(dumpsys network_stack)/ mDNS / 缓存 / OUI 厂商
+          ↓ 去抖后写 devices.json
           ↓
-[t=200ms] hotspotd 完成设备识别, 写
+[t=200ms] 写者完成设备识别, 写
           /data/local/hnc/data/devices.json      ← data/, 不是 run/
           - mac=aa:bb:cc, ip=192.168.43.x,
           - hostname=红米K70, hostname_src=oui   ← 厂商进 hostname, 没有 vendor 字段
@@ -319,7 +331,7 @@ fi
 
 **关键点**:
 - **进程间通过 JSON 文件解耦**,不用 socket/pipe(简单 + 可调试)
-- hotspotd 和 dpid 完全并行,**不互相依赖**
+- 设备发现写者(看门狗)和 dpid 完全并行,**不互相依赖**
 - httpd 只是"读 JSON 然后返回 HTTP",**不参与业务**
 
 ---
@@ -333,7 +345,7 @@ fi
      bug, 所以本节的每一行都带 file:line 出处。 -->
 
 **纪律(改代码时请一起改)**: 本节的路径与字段名**以实际代码为准**。任何一次
-改动 `daemon/hotspotd/hotspotd.c` 的 `write_json()`、`src/dpid/output/state.go`
+改动 `src/dpid/devscan/devscan.go` 的 `RenderJSON()`(v5.33 前是 hotspotd.c 的 `write_json()`)、`src/dpid/output/state.go`
 的结构体 tag、或 `daemon/hnc_httpd/server.go` 的 `buildDevicesPayload()`,都要
 在同一个提交里同步本节。写文档时**不要凭印象**,`grep` 一遍再写 —— 下游有真代码
 (诊断脚本、shell 解析、WebUI)按这里的描述去找文件和字段。
@@ -345,21 +357,18 @@ fi
 | `data/` | **可跨重启保留**的状态与用户数据 | `devices.json`、`rules.json`、`device_names.json`、`known_devices.json`、`remote_tokens.json`、`oui.txt` |
 | `run/` | **进程生命周期内**的易失状态 | `dpi_state.json`、`*.pid`、`hotspotd.sock`、`ip_app_map.json`、`self_attrib.*.jsonl`、`local_admin.secret` |
 
-### `data/devices.json` (hotspotd 写, httpd/dpid/shell 读)
+### `data/devices.json` (Go 看门狗写, httpd/dpid/shell 读)
 
 **路径**: `/data/local/hnc/data/devices.json`
-(`hotspotd.c:75` `#define DEVICES_JSON HNC_DIR "/data/devices.json"`)
+(`src/dpid/cmd/hnc_watchdog/m4_owner.go` 的 `m4DevicesJSON`)
 
-**写者(两个,同一套 schema)**:
-
-| 写者 | 位置 | 何时 |
-|---|---|---|
-| `hotspotd` (C) | `hotspotd.c:498-628` `write_json()` | 常态。netlink NEIGH 事件 / 周期扫描后 |
-| `bin/device_detect.sh` | `:312` `do_scan_shell()` → `:478-479` | 兜底。`hotspotd_alive()`(`:55`)为假时 |
-
-两者都是 **tmp + rename 原子写**,tmp 名带 PID 后缀(`hotspotd.c:79`
-`DEVICES_TMP_FMT`;shell 侧 `${DEVICES_FILE}.tmp.$$`)—— 这是 v3.6.1 修的真实
-事故:两个 scan 并发写同一个 tmp,字节交错产出"看着合法但字段错位"的 JSON。
+**写者(v5.33 起只有一个)**: 看门狗的设备发现写者 —— `m4_owner.go` 的 `writeOut()`,
+内容由 `src/dpid/devscan` 的 `RenderJSON()` 渲染。邻居事件去抖后写 / 30 秒全量兜底 /
+`device_detect.sh scan` 写 nonce 到 `run/devices.refresh` 时立刻全量扫并强制写(写完把
+nonce 回执到 `run/devices.refresh.ack`)。内容没变不写。**tmp + rename 原子写**
+(tmp 名 `devices.json.tmp.go`)。v5.33 之前还有 hotspotd 的 `write_json()` 与
+`device_detect.sh` 的 shell 兜底两个写者(v3.6.1 修过两个 scan 并发写同一个 tmp 的事故),
+都已删除。
 
 **读者**: `hnc_httpd` 5 处 —— `server.go:343`(`buildDevicesPayload`)、
 `server.go:589`(`RateLoop` 采速率)、`api_v5.go:174`(反查热点 iface)、
@@ -390,8 +399,8 @@ shell 侧 `apply_device_rule.sh:24`、`apply_app_limits.sh:40`、
 `devices[]` 这些键 —— 旧文档写的那套外层包装从来不存在。热点自身状态由
 `/api/live` 提供(`api_live.go:81-84`),不在这个文件里。
 
-hotspotd 真正写出的字段**只有下面 9 个**(`hotspotd.c:590-605` 的 `fprintf`
-格式串,一个不多一个不少;shell 兜底路径 `device_detect.sh:424` 逐字对齐):
+写者写出的字段**只有下面 9 个**(`devscan.go` 的 `Device` 结构体 / `RenderJSON`,
+字段顺序与名字照搬当年 hotspotd.c 的 `write_json()`,一个不多一个不少):
 
 | 字段 | 类型 | 含义 |
 |---|---|---|
@@ -402,11 +411,11 @@ hotspotd 真正写出的字段**只有下面 9 个**(`hotspotd.c:590-605` 的 `f
 | `iface` | string | 观察到该设备的接口名 |
 | `rx_bytes` | int64 | 累计字节(来自 `HNC_STATS` iptables 计数链) |
 | `tx_bytes` | int64 | 同上 |
-| `status` | string | `allowed` / `blocked`(hotspotd 读 rules.json 黑名单填);shell 兜底路径还会写 `stale` |
+| `status` | string | `allowed` / `blocked`(写者读 rules.json 黑名单填) |
 | `last_seen` | int64 | unix 秒 |
 
 **没有** `vendor` 字段(OUI 查表的结果直接进 `hostname`,并把
-`hostname_src` 置成 `oui`,见 `hnc_helpers.c:1172` 附近的 OUI 表);
+`hostname_src` 置成 `oui`,见 `src/dpid/devname/oui_table.txt`);
 **没有** `first_seen`;**没有** `online` / `rx_bps` / `tx_bps` —— 后三个是
 httpd 在内存里算出来的,见下。
 
@@ -417,7 +426,7 @@ httpd 在内存里算出来的,见下。
 
 | 来源 | 文件 | 叠加的字段 |
 |---|---|---|
-| hotspotd | `data/devices.json` | 上表 9 个原始字段 |
+| 设备发现写者(看门狗) | `data/devices.json` | 上表 9 个原始字段 |
 | 用户规则 | `data/rules.json` 的 `devices.<mac>` | `mark_id` `down_mbps` `up_mbps` `delay_ms` `jitter_ms` `loss_pct` `limit_enabled` `delay_enabled` `sqm_enabled`(`server.go:422-424`) |
 | 手动改名 | `data/device_names.json` | 覆盖 `hostname`,并把 `hostname_src` 置 `manual`(`server.go:433-439`) |
 | httpd 计算 | — | `status`(黑名单判定)、`online`(`last_seen` 在 90s 内)、`rx_bps`/`tx_bps`(`RateLoop` 2s 采样快照)、`dpi_apps`(来自 dpi_state.json 的 per-client top_apps) |
@@ -461,8 +470,8 @@ httpd 在内存里算出来的,见下。
 `etc/dpi_config.json` 的 `run_dir` 覆盖,但没人这么干。
 
 **读者全部按 `run/` 读**:`api_dpi_v53.go:23`(整文件透传给 WebUI)、
-`api_self.go:49`、`api_export.go:139`、`server.go:661`(join `dpi_apps`)、
-`dpid_supervisor/main.go:47`、`src/bin/hnc_dpid_guard.sh:491`。
+`api_self.go:49`、`api_export.go:139`、`server.go:661`(join `dpi_apps`)。
+(v5.33 前还有 `dpid_supervisor/main.go`、`hnc_dpid_guard.sh`, 已删。)
 
 顶层字段来自 `src/dpid/output/state.go:244-298` 的 `State` 结构体:
 
@@ -581,14 +590,13 @@ dpid 只认下面 6 个键(`cmd/dpid/main.go:75-82` 的 `Config` 结构体),
      —— 真实文件名没有 hnc_ 前缀。照旧文档写监控脚本会永远 "pidfile missing"。 -->
 
 ```
-/data/local/hnc/run/hotspotd.pid       (hotspotd 自己写, hotspotd.c:81/1182)
+/data/local/hnc/run/hotspotd.pid       (hotspotd 自己写, hotspotd.c 的 PID_FILE / write_pid)
 /data/local/hnc/run/dpid.pid           (hnc_launcher 写, src/launcher/hnc_launcher.c:64)
-/data/local/hnc/run/dpid_guard.pid     (hnc_launcher / dpid_supervisor 写, hnc_launcher.c:65)
-/data/local/hnc/run/dpid.child.pid     (dpid_supervisor 写, dpid_supervisor/main.go:45)
+/data/local/hnc/run/dpid_guard.pid     (hnc_launcher / service.sh 写, hnc_launcher.c:65)
+/data/local/hnc/run/dpid.child.pid     (旧版 dpid_supervisor 写; v5.33 起没人写, 读者只是兼容着读)
 /data/local/hnc/run/httpd.pid          (httpd 自己写, hnc_httpd/main.go:89)
 /data/local/hnc/run/watchdog.pid       (hnc_watchdog 自己写, hnc_watchdog/main.go:55)
 /data/local/hnc/run/launcher.pid       (hnc_watchdog spawn launcher 时写, main.go:355 + :579)
-/data/local/hnc/run/detect.pid         (device_detect.sh:507 自己写)
 ```
 
 watchdog 每 N 秒检查这些文件的 mtime 是否新鲜(每个 daemon 自己每 5 秒 touch 一次自己的 pidfile),不新鲜说明卡死,触发重启。Go watchdog 侧的对照表在
@@ -603,8 +611,8 @@ watchdog 每 N 秒检查这些文件的 mtime 是否新鲜(每个 daemon 自己�
 **问题**: Go fork+exec 报 EPERM(详见公开笔记)
 
 **处理**:
-1. `fork_probe` 在启动时探测,失败则不用 Go supervisor
-2. `hnc_launcher`(C)替代 Go supervisor
+1. `fork_probe` 在启动时探测, C fork+execv 不行就走 direct(看门狗直接盯 dpid)
+2. `hnc_launcher`(C)替代 Go supervisor(v5.33 起 Go supervisor / shell guard 已删)
 3. `hnc_watchdog` 不直接 fork 子进程,改成调 shell 脚本
 
 ### Snapdragon 8 Elite / kernel 6.6+
@@ -754,7 +762,7 @@ cat /data/local/hnc/data/devices.json | python3 -m json.tool
 
 2. **不要试图用 Go 重写 launcher** — Go runtime fork EPERM 是绝症,在国产 ROM 上无解。C 200 行,够了。
 
-3. **不要删 hnc_dpid_supervisor 或 hnc_dpid_guard.sh** — 它们是 fallback 链的最后两环。占几 MB 不要紧,删了万一其他设备装不上就尴尬了。
+3. **(已过时)「不要删 hnc_dpid_supervisor 或 hnc_dpid_guard.sh」** — v5.30 起默认就不走它们(C launcher 不能用时看门狗直接盯 dpid), v5.33 按维护者「所有重复实现都只留一份」删了。真机上 C launcher 和 direct 都不行时, 退路是刷回 v5.32。
 
 4. **改 dpid Go 代码必须重新交叉编译** — 别忘了 `CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w"`。
 
