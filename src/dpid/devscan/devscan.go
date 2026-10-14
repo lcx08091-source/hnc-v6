@@ -1,10 +1,13 @@
 // Package devscan —— v5.31 T1(迁移 M4 方案 A): Go 版设备发现的核心表逻辑。
 //
 // 语义与 hotspotd(C)对齐: 在线语义(条目可用就刷新 last_seen)、90 秒离线、
-// devices.json 的字段与取值。唯一按 WORK-v5.31 §4 T1 明确要求与 C 不同的地方:
-// 同一 MAC 多个表项(换 IP 期间旧表项还在)按状态挑 IP ——
-// REACHABLE > DELAY > PROBE > STALE, 同状态取最近一次事件
-// (C 是「最后一个事件直接覆盖」, 见 hotspotd.c nl_process)。
+// devices.json 的字段与取值。同一 MAC 多个表项(换 IP 期间旧表项还在)挑 IP:
+// 内核最近一次确认可达的那条(NDA_CACHEINFO 的 confirmed), 打平时才看状态
+// REACHABLE > DELAY > PROBE > STALE。v5.32 审查前是「状态优先」—— 模拟设备上
+// 换 IP 后网关还有流量去找旧 IP 时, 旧表项进 PROBE(排在 STALE 前)就把 IP 抢回去,
+// 旧表项随后 FAILED 的通知不带 MAC、认不出是谁, 设备就一直报着那个失效的 IP。
+// PROBE / DELAY 只说明网关在怀疑这条表项, 不是设备在用它的证据; 只有「确认」是。
+// v5.32 起 hotspotd 的事件路径与全量重扫也按同一条规则(hotspotd.c ip_should_switch)。
 //
 // 本包只做表逻辑(纯内存 + 可注入的解析钩子), 不碰 socket / 文件 / 时钟:
 //   - Apply: 一条邻居表事件(netlink 订阅)→ 表更新;
@@ -147,6 +150,7 @@ func entryIP(e neigh.Entry) string {
 }
 
 // stateRank 状态优先级(WORK-v5.31 §4 T1): REACHABLE > DELAY > PROBE > STALE。
+// v5.32 审查起只在确认时刻打平时用(见 pickIP)。
 func stateRank(s uint16) int {
 	switch s {
 	case nudReachable:
@@ -161,12 +165,14 @@ func stateRank(s uint16) int {
 	return 0
 }
 
-// pickIP 从候选表项里挑 IP: 状态优先级, 同状态取最近一次事件。
+// pickIP 从候选表项里挑 IP: 内核最近一次确认可达的那条; 确认时刻相同再看状态,
+// 再相同取 IP 字典序小的(只为结果确定, 与 map 遍历顺序无关)。
 func pickIP(cs map[string]cand) string {
 	best, bestRank, bestAt := "", -1, time.Time{}
 	for ip, c := range cs {
 		r := stateRank(c.state)
-		if r > bestRank || (r == bestRank && c.lastEvent.After(bestAt)) {
+		if best == "" || c.lastEvent.After(bestAt) ||
+			(c.lastEvent.Equal(bestAt) && (r > bestRank || (r == bestRank && ip < best))) {
 			best, bestRank, bestAt = ip, r, c.lastEvent
 		}
 	}

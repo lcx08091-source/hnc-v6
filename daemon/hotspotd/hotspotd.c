@@ -753,7 +753,11 @@ static void write_json(void) {
        「更新」; 截到秒会让 1 秒内确认的两条打平, 又回到看行序);
      - netlink 读不了(老内核/权限)退回 /proc/net/arp: 候选没有确认
        时间(confirmed_ms=0), 行为与旧版一致(无条件覆盖, 同 MAC 后行赢)。
-   netlink 事件路径(nl_process)不动: 事件本身就是实时的, 直接覆盖没错。
+   v5.32 审查: netlink 事件路径(nl_process)也按同一条规则(ip_should_switch)。
+   原来事件「来一条覆盖一条」, 模拟设备上实测: 换 IP 约 30 秒后旧表项老化成 STALE
+   的通知把 IP 改回旧的(直到新 IP 自己老化才纠正); 网关还有流量去找旧 IP 时, 旧表项
+   PROBE 的通知把 IP 抢回去, 随后 FAILED 的通知不带 MAC、认不出是谁, 设备就一直报着
+   失效的旧 IP。STALE / PROBE 只是老化 / 网关在怀疑, 不是设备在用这个 IP 的证据。
 ══════════════════════════════════════════════════════════ */
 
 /* 全量扫描的一条候选 */
@@ -771,6 +775,26 @@ static long long mono_ms_ll(void) {
     return (long long)ts.tv_sec * 1000LL + (long long)(ts.tv_nsec / 1000000L);
 }
 
+/* confirmed_ms_from: NDA_CACHEINFO 的 ndm_confirmed(距今 clock_t, USER_HZ=100 即
+ * 10ms 一滴答)→ 单调时钟毫秒; 异常大(>1 年)当未知返回 0。开机不久时新表项的
+ * 确认时刻会早于单调时钟起点(内核建表项时把确认时间回拨 2×base_reachable_time,
+ * 模拟设备上实测 60 秒): 仍算「已知, 最旧」, 不当未知(未知 = 无条件接受)。 */
+static long long confirmed_ms_from(long long now_ms, unsigned int ticks) {
+    long long ago = (long long)ticks * 10LL;
+    if (ago >= 86400LL * 365 * 1000) return 0;
+    long long t = now_ms - ago;
+    return t > 0 ? t : 1;
+}
+
+/* ip_should_switch: 已知设备 d 见到同 MAC 另一条表项(确认时刻 conf_ms, 0=未知)时,
+ * IP 要不要换过去 —— 全量重扫与事件路径共用(v5.32 审查; 与 Go devscan pickIP 同一
+ * 规则): 内核最近一次确认可达的那条为准, 只有更近确认才换; 当前 IP 的确认时刻未知
+ * (/proc 退路、旧数据)时照旧接受。新表项刚建时内核把确认时间回拨 60 秒, 所以新 IP
+ * 要等网关确认它可达(约 5 秒)才被采用 —— 与 Go 版一致。 */
+static int ip_should_switch(const Device *d, long long conf_ms) {
+    return d->confirmed_ms == 0 || conf_ms > d->confirmed_ms;
+}
+
 /* dump 时与 nl_process 同口径的"有效"状态(Go 侧 neigh.go nudValid) */
 #define SCAN_NUD_VALID (NUD_REACHABLE | NUD_STALE | NUD_DELAY | NUD_PROBE)
 
@@ -780,9 +804,7 @@ static long long mono_ms_ll(void) {
  *   c->confirmed_ms > d->confirmed_ms   (更近确认)
  * 或 d->confirmed_ms == 0               (当前未知, /proc 退路或事件路径建的)
  * 时才改写, 同时推进 d->confirmed_ms —— 单调, 与候选到达顺序无关。
- * 事件路径(nl_process)改 IP 时不动 confirmed_ms: 同一次 dump 里该 MAC 确认
- * 最近的那条总会赢(表项的确认时刻只增不减), 事件记的值只影响「谁先谁后」,
- * 不影响结果(审查时按「事件换 IP → 不发包 → 重扫」写了单测)。 */
+ * 事件路径(nl_process)按同一规则维护 IP 与 confirmed_ms(ip_should_switch)。 */
 static int scan_apply_candidate(const NeighCand *c, time_t now_t) {
     if (!c->mac[0] || !c->ip[0]) return 0;
     if (strcmp(c->mac, "00:00:00:00:00:00") == 0) return 0;
@@ -850,7 +872,7 @@ static int scan_apply_candidate(const NeighCand *c, time_t now_t) {
         }
     }
     /* v5.32 T2 核心: IP 只在候选更近确认时才改写(见函数头注释) */
-    if (d->confirmed_ms == 0 || c->confirmed_ms > d->confirmed_ms) {
+    if (ip_should_switch(d, c->confirmed_ms)) {
         strncpy(d->ip, c->ip, sizeof(d->ip)-1);
         d->ip[sizeof(d->ip)-1] = '\0';
         if (c->confirmed_ms > 0) d->confirmed_ms = c->confirmed_ms;
@@ -889,7 +911,7 @@ static int nl_parse_dump_msgs(const char *buf, size_t len, long long now_ms,
             char ip_str[IP_STR_LEN] = {0};
             char mac_str[MAC_STR_LEN] = {0};
             char iface[IF_LEN] = {0};
-            long long confirmed_ago = -1; /* 毫秒; -1 = 无 CACHEINFO */
+            long long confirmed_ms = 0;   /* 0 = 无 CACHEINFO(未知) */
             if (ndm->ndm_family == AF_INET &&
                 (ndm->ndm_state & SCAN_NUD_VALID)) {
                 const struct rtattr *rta = NDM_RTA(ndm);
@@ -911,8 +933,7 @@ static int nl_parse_dump_msgs(const char *buf, size_t len, long long now_ms,
                                rta->rta_len >= RTA_LENGTH(sizeof(struct nda_cacheinfo))) {
                         const struct nda_cacheinfo *ci =
                             (const struct nda_cacheinfo *)RTA_DATA(rta);
-                        /* ndm_confirmed: 距最近确认的 clock_t, USER_HZ=100(10ms) */
-                        confirmed_ago = (long long)ci->ndm_confirmed * 10LL;
+                        confirmed_ms = confirmed_ms_from(now_ms, ci->ndm_confirmed);
                     }
                 }
                 if (ip_str[0] && mac_str[0] &&
@@ -924,14 +945,7 @@ static int nl_parse_dump_msgs(const char *buf, size_t len, long long now_ms,
                     strncpy(c->mac, mac_str, sizeof(c->mac)-1);
                     strncpy(c->ip, ip_str, sizeof(c->ip)-1);
                     strncpy(c->iface, iface, sizeof(c->iface)-1);
-                    if (confirmed_ago >= 0 && confirmed_ago < 86400LL*365*1000) {
-                        long long t = now_ms - confirmed_ago;
-                        /* 开机不久时新表项的确认时刻会早于单调时钟起点
-                         * (内核建表项时回拨 2×base_reachable_time): 仍算「已知,
-                         * 最旧」, 不当未知(未知 = 无条件接受) */
-                        c->confirmed_ms = t > 0 ? t : 1;
-                    }
-                    /* confirmed_ago 异常大(>1 年)当未知 */
+                    c->confirmed_ms = confirmed_ms;
                 }
             }
         }
@@ -1236,6 +1250,7 @@ static void nl_process(int fd) {
         /* 提取 NDA_DST（IP）和 NDA_LLADDR（MAC） */
         char ip_str[IP_STR_LEN]   = {0};
         char mac_str[MAC_STR_LEN] = {0};
+        long long conf_ms = 0;  /* v5.32 审查: 该表项最近确认时刻(单调毫秒, 0=未知) */
         struct rtattr *rta = NDM_RTA(ndm);
         int rta_len = NDM_PAYLOAD(nlh);
 
@@ -1248,6 +1263,10 @@ static void nl_process(int fd) {
                 snprintf(mac_str, sizeof(mac_str),
                          "%02x:%02x:%02x:%02x:%02x:%02x",
                          m[0],m[1],m[2],m[3],m[4],m[5]);
+            } else if (rta->rta_type == NDA_CACHEINFO &&
+                       rta->rta_len >= RTA_LENGTH(sizeof(struct nda_cacheinfo))) {
+                const struct nda_cacheinfo *ci = (const struct nda_cacheinfo *)RTA_DATA(rta);
+                conf_ms = confirmed_ms_from(mono_ms_ll(), ci->ndm_confirmed);
             }
         }
 
@@ -1270,6 +1289,15 @@ static void nl_process(int fd) {
             /* 设备上线或更新 */
             Device *d = find_device(mac_str);
             time_t now_t = time(NULL);
+            /* v5.32 审查: 同 MAC 另一个 IP 的通知只有「比当前 IP 更近确认」才改 IP
+             * (ip_should_switch, 与全量重扫 / Go 版同一规则); 旧表项老化 / 被探测的
+             * 通知照样说明设备还在(刷新 last_seen), 但不抢 IP。新设备 / 复用槽位时
+             * confirmed_ms 为 0, 照常接受。 */
+            int same_ip = 0, keep_ip = 0;
+            if (d) {
+                same_ip = strcmp(d->ip, ip_str) == 0;
+                keep_ip = !same_ip && d->ip[0] && !ip_should_switch(d, conf_ms);
+            }
             if (!d) {
                 d = alloc_device();
                 strncpy(d->mac, mac_str, sizeof(d->mac)-1);
@@ -1295,23 +1323,30 @@ static void nl_process(int fd) {
                                            d->hostname_src, sizeof(d->hostname_src));
                 d->last_resolve = now_t;
 
-                if (strcmp(d->hostname_src, "mac") == 0 && ip_str[0] != '\0') {
-                    if (hnc_mdns_worker_enqueue(mac_str, ip_str)) {
+                /* mDNS 问设备当前的 IP(这条通知是旧表项时, 旧 IP 已经没人应答) */
+                const char *qip = keep_ip ? d->ip : ip_str;
+                if (strcmp(d->hostname_src, "mac") == 0 && qip[0] != '\0') {
+                    if (hnc_mdns_worker_enqueue(mac_str, qip)) {
                         strncpy(d->hostname_src, "pending", sizeof(d->hostname_src)-1);
                         d->hostname_src[sizeof(d->hostname_src)-1] = '\0';
                         d->pending_since = now_t;
                     }
                 }
             }
-            strncpy(d->ip,    ip_str, sizeof(d->ip)-1);
+            if (!keep_ip) {
+                strncpy(d->ip, ip_str, sizeof(d->ip)-1);
+                d->ip[sizeof(d->ip)-1] = '\0';
+                if (!same_ip || conf_ms > 0) d->confirmed_ms = conf_ms;
+                d->state = ndm->ndm_state;
+            }
             strncpy(d->iface, iface,  sizeof(d->iface)-1);
             d->last_seen = now_t;
             d->active    = 1;
-            d->state     = ndm->ndm_state;
             g_dirty      = 1;
             g_last_event = now_t;  /* v3.5.0-rc R-1: 更新事件时间戳给 de-bounce 用 */
             g_last_event_ms = now_ms_mono();  /* rc30.9 */
-            hlog("NEW: %s (%s) on %s state=0x%x", mac_str, ip_str, iface, ndm->ndm_state);
+            hlog("NEW: %s (%s) on %s state=0x%x%s%s", mac_str, ip_str, iface, ndm->ndm_state,
+                 keep_ip ? " ip-kept=" : "", keep_ip ? d->ip : "");
         }
     }
     /* drain loop 一轮结束, 再 recv 看是否还有数据 (EAGAIN 时上面 return) */

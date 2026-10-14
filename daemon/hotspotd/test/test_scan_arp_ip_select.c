@@ -12,6 +12,9 @@
  *      与旧行为一致(无条件接受)。
  *   3. 审查补: 槽位复用不带上一台的确认时间 / 10ms 精度(1 秒内确认的两条不打平)/
  *      NLMSG_DONE / 事件换 IP 后不发包重扫。
+ *   4. 审查补: 事件路径(真实的 nl_process, 经 socketpair 喂通知)—— 按模拟设备上实测
+ *      的内核时序: 新表项回拨 60 秒、旧表项老化 STALE、旧表项被探测 PROBE, 都不许
+ *      把 IP 抢回旧的。
  *
  * 「改动前会失败」: v5.31 基线里没有这两个函数, 本文件在基线上编译失败
  * (undefined reference)。行为层面的旧代码失败证据在模拟设备场景
@@ -30,6 +33,7 @@
 #include <arpa/inet.h>
 #include <linux/netlink.h>
 #include <linux/neighbour.h>
+#include <sys/socket.h>
 
 #define HNC_TEST_MODE 1
 #include "../hotspotd.c"
@@ -323,6 +327,48 @@ int main(void) {
         scan_apply_candidate(&f2, now_t);
         scan_apply_candidate(&f1, now_t);   /* 旧表项后到 */
         check_str("3d2) 事件换 IP 后重扫(旧后到)仍是新 IP", df ? df->ip : "(none)", "192.168.43.142");
+    }
+
+    /* ── 4. 事件路径(nl_process)────────────────────────────────── */
+    {
+        memset(g_devs, 0, sizeof(g_devs));
+        g_no_discovery = 0;
+        int sv[2];
+        if (socketpair(AF_UNIX, SOCK_DGRAM, 0, sv) != 0) {
+            printf("  FAIL socketpair\n");
+            g_fail++;
+        } else {
+            const char *mac = "02:5a:00:00:00:41";
+            /* 一条通知: ip / 状态 / 确认时间(多久前, 单位 10ms)。nl_process 用真实的
+             * 单调时钟算确认时刻; 通知之间隔 20ms, 免得「刚确认」的两条打平(打平时
+             * 保留当前 IP —— 真实场景里两条通知相隔数秒)。 */
+            #define EV(ip, st, ticks) do { test_msg m; usleep(20000); \
+                size_t l = build_neigh_msg(&m, ip, mac, st, 1, ticks, AF_INET); \
+                if (send(sv[1], &m, l, 0) < 0) perror("send"); \
+                nl_process(sv[0]); } while (0)
+            Device *d;
+            EV("192.168.43.141", NUD_REACHABLE, 0);
+            d = find_device(mac);
+            check_str("4a) 新设备 .141", d ? d->ip : "(none)", "192.168.43.141");
+            /* 换 IP: 新表项刚建, STALE, 确认时间回拨 60 秒 —— 还没被确认, 不抢 */
+            EV("192.168.43.142", NUD_STALE, 6000);
+            check_str("4b) 新表项未确认前保留 .141", d ? d->ip : "(none)", "192.168.43.141");
+            /* 约 5 秒后网关确认新 IP 可达 */
+            EV("192.168.43.142", NUD_REACHABLE, 0);
+            check_str("4c) 新 IP 被确认 → .142", d ? d->ip : "(none)", "192.168.43.142");
+            /* 约 30 秒后旧表项老化成 STALE(最后确认在 30 秒前)*/
+            EV("192.168.43.141", NUD_STALE, 3000);
+            check_str("4d) 旧表项老化不改回 .141", d ? d->ip : "(none)", "192.168.43.142");
+            /* 网关还有流量去找旧 IP: 旧表项 PROBE(最后确认在 80 秒前)*/
+            EV("192.168.43.141", NUD_PROBE, 8000);
+            check_str("4e) 旧表项被探测不抢回", d ? d->ip : "(none)", "192.168.43.142");
+            /* 设备真的换回 .141 并被确认 → 跟过去 */
+            EV("192.168.43.141", NUD_REACHABLE, 0);
+            check_str("4f) 旧 IP 重新被确认 → .141", d ? d->ip : "(none)", "192.168.43.141");
+            #undef EV
+            close(sv[0]);
+            close(sv[1]);
+        }
     }
 
     printf(g_fail ? "\nFAIL: %d 处不对\n" : "\nok 全部 %d 项通过\n",

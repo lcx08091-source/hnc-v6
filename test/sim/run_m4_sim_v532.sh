@@ -13,6 +13,8 @@
 #   交换让新表项出现(REACHABLE)。之后不再发包, 等表项 STALE(35 秒)再重扫,
 #   新旧表项状态相同, 只有「最近确认时间」可分胜负 —— 这正是要测的点。
 #
+# 场景 6(审查补): 换 IP 后 C / Go 两个写者都不许跳回旧 IP(TestM4SimNoFlipBack)。
+#
 # T3 场景(5): 退路演练 —— 默认值换成 c(TestM4SimDefaultC): 模拟 v5.31 升级上来
 # 的手机(无 data/m4_owner、run/m4_owner.current 还是上次的 go、hotspotd 以
 # --no-discovery 跑) → 默认 c 后一轮内 hotspotd 恢复发现写出全部设备 → 默认
@@ -146,10 +148,10 @@ run_test() {
         "$HNC_SIM_DIR/m4sim532.test" -test.run "^$test\$" -test.count=1 -test.v 2>&1)
     if echo "$out" | grep -q -- "--- PASS: $test"; then
         say "  ✓ $name"
-        echo "$out" | grep -E '^\s+m4_sim_v531_test.go:[0-9]+: [0-9]\.' | sed 's/^\s*m4_sim_v531_test.go:[0-9]*: /      /' | tee -a "$REPORT"
+        echo "$out" | grep -E '^\s+m4_sim_v53[12]_test.go:[0-9]+: [0-9]\.' | sed 's/^\s*m4_sim_v53[12]_test.go:[0-9]*: /      /' | tee -a "$REPORT"
     else
         fail "$name"
-        echo "$out" | grep -E 'm4_sim_v531_test.go|FAIL|panic' | head -20 | sed 's/^/      /' | tee -a "$REPORT"
+        echo "$out" | grep -E 'm4_sim_v53[12]_test.go|FAIL|panic' | tail -40 | sed 's/^/      /' | tee -a "$REPORT"
     fi
 }
 
@@ -171,6 +173,15 @@ rm -f "$HNC/data/m4_owner"
 printf 'go\n' > "$HNC/run/m4_owner.current"
 run_test "默认 c → hotspotd 恢复发现写出全部设备 → 默认 go → 切 Go 版; 写者不交错" TestM4SimDefaultC \
     HNC_SIM_DEFAULT=1 HNC_SIM_SIMNET="$SIMNET"
+
+# ── 6. 审查补: 换 IP 后不许跳回旧 IP(C 事件路径 + Go 写者, 同一邻居表同时比) ──
+# 审查时在这里复现: C 版约 30 秒后被旧表项老化的通知改回旧 IP; 网关还有流量去找旧 IP
+# 时 C 和 Go 都被旧表项 PROBE 的通知抢回旧 IP, 旧表项 FAILED 后一直停在失效的 IP 上。
+say "6. 换 IP 后不许跳回旧 IP(C 与 Go 同一邻居表; 不用网 75 秒 + 网关还去找旧 IP)"
+$SIM hotspotd stop >/dev/null
+$SIM hotspotd start >/dev/null || fail "hotspotd 起不来"
+run_test "两边换 IP 后 10 秒内报出新 IP, 之后不跳回旧 IP" TestM4SimNoFlipBack \
+    HNC_SIM_FLIP=1 HNC_SIM_SIMNET="$SIMNET"
 
 say "== 结果: $([ "$FAILS" = 0 ] && echo "全部通过" || echo "$FAILS 处不对") · 报告 $REPORT =="
 [ "$FAILS" = 0 ]

@@ -10,13 +10,15 @@
   - **v5.30.0-rc2**:液态玻璃三处改进;`tools/ui_mock/`(预览链接 https://claude.ai/artifact/CVVkT9cHSfoHqTLxDgWX5Z);`test/sim/` 模拟设备。
   - **v5.31.0-rc1**(GLM 做 + Claude 审查修复 `beb4168`,打分 6/10):迁移 M4 方案 A,开关 `data/m4_owner`(`go` / `c`),默认 `go`(常量 `m4OwnerDefault`)。
   - **v5.32.0-rc1**(GLM 做 + Claude 审查修复,打分 7/10):T1 四个小 bug、T2 C 版重扫按内核确认时间挑 IP(netlink dump)、T3 退路演练(`m4OwnerDefaultOverride` 只给测试)、T4 Go 写者空闲降频(审查改成 Ticker + 空闲 500ms)、文档 + 「5.x 正式版说明草稿」(审查重写,在 CHANGELOG 5.32 块下面)。审查修了什么见 CHANGELOG 5.32.0-rc1「审查修复」。
-- **真机一次都还没验过**(v5.29 起的 rc 都没上手机)。真机要看的:设备列表 / 名字 / 限速与以前一致;`/data/local/hnc/data/m4_owner` 写 `c` / `go` 能来回切;待机耗电;v5.30 那几条(在线分钟、`null` 名字、CDN、守护进程、游戏 + 下载延迟对比);v5.32:WebUI「刷新」返回的设备数对、换过 IP 的设备刷新后不跳回旧 IP。出问题按 `WORK-v5.31.md` §8 判断是否把默认值改回 C 版。
+- **真机一次都还没验过**(v5.29 起的 rc 都没上手机)。真机要看的:设备列表 / 名字 / 限速与以前一致;`/data/local/hnc/data/m4_owner` 写 `c` / `go` 能来回切;待机耗电;v5.30 那几条(在线分钟、`null` 名字、CDN、守护进程、游戏 + 下载延迟对比);v5.32:WebUI「刷新」返回的设备数对、换过 IP 的设备不跳回旧 IP(新 IP 约 5 秒后才显示是预期的)。出问题按 `WORK-v5.31.md` §8 判断是否把默认值改回 C 版。
 
 ## 下一步
 
 - **发正式版**要等用户真机全功能回归(`WORK-v5.32.md` §7 末尾列的清单)。回归通过后:按结论定 `m4OwnerDefault`、版本号去 `-rc`(`v5.32.0` / `5320000` 或用户指定)、把 CHANGELOG 里「5.x 正式版(草稿)」挪进正式版小节、`changelog.html` 写大白话版、用户说「发」再快进 main。
 - 正式版之后:按真机结论删旧代码(shell guard / Go supervisor / hotspotd 发现代码)、方案 B(hotspotd 退役)。
-- 审查时记下、没修的(都是 v5.32 之前就有的,不在本版范围):hotspotd 收不到 FAILED 事件的 MAC(内核通知不带链路地址)→ 走了的设备要靠 90 秒无事件才下线;C 版事件路径里旧 IP 表项变 STALE 的通知也会把 IP 改回旧的(要等新 IP 的下一个事件纠正),Go 版按确认时间挑没有这个问题;`now_ms_mono()` 返回 `long`,armv7 上开机 24.8 天后溢出(T2 新代码已改用 64 位)。
+- 审查第二轮(用户让「看模拟结果取最优方案」):换 IP 后 C 版事件路径会跳回旧 IP,Go 版在旧 IP 被探测时也会跳回并停住 —— 两边统一成「内核最近一次确认可达的表项」,已修(CHANGELOG 5.32「审查修复」;模拟场景 `TestM4SimNoFlipBack`,`run_m4_sim_v532.sh` 第 6 步)。
+- 审查时记下、没修的(都是 v5.32 之前就有的):hotspotd / Go 写者都收不到 FAILED 通知的 MAC(内核通知不带链路地址)→ 走了的设备要靠 90 秒无事件才下线(改的话两边离线判定一起变);`now_ms_mono()` 返回 `long`,armv7 上开机 24.8 天后溢出(T2 新代码已改用 64 位)。
+- 模拟探查脚本的做法(会话私有 scratchpad 不保留):在 `unshare --net --mount` 里 `simnet.sh up` + `hotspotd start`,把模拟目录绑到 `/data/local/hnc`,编 `go test -c ./cmd/hnc_watchdog/` 后带 `HNC_SIM_FLIP=1` 跑 `TestM4SimNoFlipBack -test.v`,时间线逐行打印(C / Go 报的 IP + `ip -s neigh` 的状态与 used/confirmed/updated 秒数)。
 
 ## 云端容器的准备(新会话先做)
 

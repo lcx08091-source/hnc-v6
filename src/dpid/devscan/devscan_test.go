@@ -95,33 +95,56 @@ func TestApplyIfaceFilter(t *testing.T) {
 	}
 }
 
-func TestApplyIPChangePicksBetterState(t *testing.T) {
+// evc 带「多久前确认」的事件(内核每条邻居通知都带 NDA_CACHEINFO)。
+func evc(mac, ip string, state uint16, confirmedAgo time.Duration) neigh.Entry {
+	e := ev(7, mac, ip, state, false)
+	e.ConfirmedAgo = confirmedAgo
+	return e
+}
+
+// TestApplyIPChangePicksRecentlyConfirmed 换 IP 期间挑「最近一次确认可达」的表项。
+// 确认时间取模拟设备上实测的内核行为(v5.32 审查): 新建表项的确认时间被回拨 60 秒
+// (2 × base_reachable_time); 老化成 STALE 的通知里确认时间就是最后一次确认。
+func TestApplyIPChangePicksRecentlyConfirmed(t *testing.T) {
 	tb := newTestTable()
-	tb.Apply(ev(7, macA, "192.168.43.101", nudReachable, false), t0)
-	// 换 IP: 旧表项还在(STALE), 新表项 REACHABLE → 挑新的
-	tb.Apply(ev(7, macA, "192.168.43.112", nudReachable, false), t0.Add(2*time.Second))
-	tb.Apply(ev(7, macA, "192.168.43.101", nudStale, false), t0.Add(3*time.Second))
+	tb.Apply(evc(macA, "192.168.43.101", nudReachable, 0), t0)
+	// 换 IP: 新表项刚建(STALE, 确认时间回拨 60 秒)—— 还没被确认, 不抢旧 IP
+	tb.Apply(evc(macA, "192.168.43.112", nudStale, 60*time.Second), t0.Add(2*time.Second))
+	if d := jsonRender(t, tb)[macA]; d.IP != "192.168.43.101" {
+		t.Fatalf("新表项还没被确认, 不该抢走旧 IP, 得 %q", d.IP)
+	}
+	// 约 5 秒后网关确认新 IP 可达 → 换过去
+	tb.Apply(evc(macA, "192.168.43.112", nudReachable, 0), t0.Add(7*time.Second))
 	if d := jsonRender(t, tb)[macA]; d.IP != "192.168.43.112" {
-		t.Fatalf("换 IP 后应挑 REACHABLE 的新 IP, 得 %q", d.IP)
+		t.Fatalf("新 IP 被确认后应换过去, 得 %q", d.IP)
 	}
-	// 反过来: 新 IP 只有 STALE, 旧 IP REACHABLE → 保留旧 IP
-	tb2 := newTestTable()
-	tb2.Apply(ev(7, macA, "192.168.43.101", nudReachable, false), t0)
-	tb2.Apply(ev(7, macA, "192.168.43.112", nudStale, false), t0.Add(time.Second))
-	if d := jsonRender(t, tb2)[macA]; d.IP != "192.168.43.101" {
-		t.Fatalf("旧表项 REACHABLE 时不该被 STALE 新表项抢走, 得 %q", d.IP)
+	// 旧表项老化成 STALE(最后确认在 t0)—— 不许换回去
+	tb.Apply(evc(macA, "192.168.43.101", nudStale, 30*time.Second), t0.Add(30*time.Second))
+	if d := jsonRender(t, tb)[macA]; d.IP != "192.168.43.112" {
+		t.Fatalf("旧表项老化通知不该把 IP 改回去, 得 %q", d.IP)
 	}
-	// 同状态取最近一次事件
-	tb2.Apply(ev(7, macA, "192.168.43.101", nudStale, false), t0.Add(9*time.Second))
-	if d := jsonRender(t, tb2)[macA]; d.IP != "192.168.43.101" {
-		t.Fatalf("同状态应取最近一次事件, 得 %q", d.IP)
+}
+
+// TestApplyOldIPProbeDoesNotSteal v5.32 审查(模拟设备复现): 换 IP 后网关还有流量去找
+// 旧 IP, 旧表项 DELAY → PROBE → FAILED。原来按状态优先, PROBE 排在 STALE 前面, 旧 IP
+// 被抢回; FAILED 的通知不带 MAC 认不出是谁, 设备就停在失效的旧 IP 上。
+func TestApplyOldIPProbeDoesNotSteal(t *testing.T) {
+	tb := newTestTable()
+	tb.Apply(evc(macA, "192.168.43.101", nudReachable, 0), t0)
+	tb.Apply(evc(macA, "192.168.43.112", nudReachable, 0), t0.Add(5*time.Second))
+	tb.Apply(evc(macA, "192.168.43.101", nudStale, 30*time.Second), t0.Add(30*time.Second))
+	tb.Apply(evc(macA, "192.168.43.112", nudStale, 30*time.Second), t0.Add(35*time.Second))
+	tb.Apply(evc(macA, "192.168.43.101", nudProbe, 80*time.Second), t0.Add(80*time.Second))
+	if d := jsonRender(t, tb)[macA]; d.IP != "192.168.43.112" {
+		t.Fatalf("旧 IP 进 PROBE 不该把 IP 抢回去, 得 %q", d.IP)
 	}
 }
 
 func TestApplyFailedOldIPOnly(t *testing.T) {
 	tb := newTestTable()
 	tb.Apply(ev(7, macA, "192.168.43.101", nudReachable, false), t0)
-	tb.Apply(ev(7, macA, "192.168.43.112", nudStale, false), t0.Add(time.Second))
+	// 新表项刚建: STALE, 内核把确认时间回拨 60 秒(还没确认过)→ 暂不抢旧 IP
+	tb.Apply(evc(macA, "192.168.43.112", nudStale, 60*time.Second), t0.Add(time.Second))
 	// 旧 IP 的表项 FAILED: 新表项还在 → 不下线, 只是候选少一个, IP 换成新表项
 	if !tb.Apply(ev(7, macA, "192.168.43.101", nudFailed, false), t0.Add(2*time.Second)) {
 		t.Fatal("FAILED 事件应改变表(候选减少)")
