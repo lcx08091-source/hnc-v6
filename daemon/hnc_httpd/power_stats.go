@@ -55,9 +55,7 @@ var powerProcDefs = []powerProcDef{
 	{"hotspotd", "hotspotd"},
 	{"hnc_dpid", "hnc_dpid"},
 	{"dpid_guard", "dpid 守护(C launcher)"},
-	{"watchdog", "watchdog(含它拉起的脚本)"},
-	{"offload_guard", "offload 兜底(shell)"},
-	{"clsact_wd", "clsact 守护(shell)"},
+	{"watchdog", "watchdog(含它拉起的脚本: offload 兜底 / clsact 修复等)"},
 }
 
 type powerProcSample struct {

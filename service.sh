@@ -704,43 +704,10 @@ else
 fi
 
 # ─── v5.18: tether offload 旁路兜底(clsact_bpf_mode: auto 默认 / on / off) ───
-# hnc_offload_guard.sh 每 60s 采样一次 offload(check_offload.sh), 检测到 offload
-# 正在旁路限速就经 hotspotd 强制慢路径并周期重申; off 模式下只空转(便于 WebUI
-# 切回 auto/on 时立即生效)。缺 hotspotd/BPF map 时静默降级。
-# v5.29 T2(M3): Go 看门狗在时接管 offload/clsact 调度(常驻 shell 少 2 个);
-# run/wd_m3.disabled 存在 → 不接管, 保持旧 shell 守护行为(下次开机生效)。
-M3_TAKEOVER=0
-if [ -x "$HNC_DIR/bin/hnc_watchdog" ] && [ ! -f "$RUN/wd_m3.disabled" ]; then
-    echo watchdog > "$RUN/offload_guard.owner" 2>/dev/null
-    M3_TAKEOVER=1
-    log "offload/clsact scheduled by Go watchdog (run/offload_guard.owner=watchdog)"
-else
-    # run/ 跨重启保留: 上次开机写的 owner=watchdog 不删的话, 下面拉起的
-    # shell 守护一看 owner 就退出, 开关打开后 offload 兜底反而没人跑了
-    rm -f "$RUN/offload_guard.owner" 2>/dev/null
-fi
-if [ "$M3_TAKEOVER" = "0" ] && [ -f "$HNC_DIR/bin/hnc_offload_guard.sh" ]; then
-    OGPID=$(_verify_pid "$RUN/offload_guard.pid" hnc_offload_guard)
-    if [ -z "$OGPID" ] || ! kill -0 "$OGPID" 2>/dev/null; then
-        nohup sh "$HNC_DIR/bin/hnc_offload_guard.sh" daemon >> "$HNC_DIR/logs/offload_guard.log" 2>&1 < /dev/null &
-        echo $! > "$RUN/offload_guard.pid"
-        log "offload guard started (PID=$(cat "$RUN/offload_guard.pid"), mode=$(sh "$HNC_DIR/bin/hnc_offload_guard.sh" mode 2>/dev/null))"
-    fi
-fi
-
-# ─── T1 tier: clsact BPF watchdog(仅 clsact_bpf_mode=on)───────
-# on 模式下 10s 自愈 pref1 BPF filter(netd 重挂 qdisc / 接口重建)。auto 模式由
-# offload guard 每轮顺带修复, 不再单独起守护。脚本内部自带闸门复查, 不需要即退。
-if [ "$M3_TAKEOVER" = "0" ] && [ -f "$HNC_DIR/bin/hnc_clsact.o" ] && [ -x "$HNC_DIR/bin/hnc_clsact_ctl" ]; then
-    if [ "$(sh "$HNC_DIR/bin/hnc_offload_guard.sh" mode 2>/dev/null)" = "on" ]; then
-        CLSWPID=$(_verify_pid "$RUN/clsact_wd.pid" hnc_clsact_watchdog)
-        if [ -z "$CLSWPID" ] || ! kill -0 "$CLSWPID" 2>/dev/null; then
-            nohup sh "$HNC_DIR/bin/hnc_clsact_watchdog.sh" >> "$HNC_DIR/logs/clsact_watchdog.log" 2>&1 &
-            echo $! > "$RUN/clsact_wd.pid"
-            log "clsact watchdog started (PID=$(cat "$RUN/clsact_wd.pid"))"
-        fi
-    fi
-fi
+# 检测 / 兜底 / clsact 闸门在 bin/hnc_offload_guard.sh(单次子命令), 由 Go 看门狗
+# (offload_sched.go)按 plan 的节拍调度、on 模式下每 10 秒查一次 clsact。v5.33 删掉了
+# 这里拉起的两个 shell 常驻循环(offload guard daemon / hnc_clsact_watchdog.sh)和
+# 开关 run/wd_m3.disabled、run/offload_guard.owner —— v5.29 起默认就不走它们。
 
 # hotfix10: 启动后延迟清理一次长期未见的离线规则,防止 rules.json 膨胀。
 if [ -x "$HNC_DIR/bin/cleanup_stale_rules.sh" ]; then

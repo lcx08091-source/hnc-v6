@@ -33,6 +33,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"hnc.io/dpid/procfind"
 )
 
 // ── 参数校验正则 ───────────────────────────────────────────────
@@ -938,13 +940,10 @@ func actionClsactCheck(hncDir string) actionResp {
 	hasBPF := strings.Contains(s, `"bpf_filter":true`)
 	hasMap := strings.Contains(s, `"map":true`)
 
-	// watchdog 进程态(脚本自身每 10s 自愈内核态, 进程在即有人管)
-	ctx3, cancel3 := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel3()
-	cmd3 := hardenCmd(exec.CommandContext(ctx3, "sh", "-c", "pgrep -f hnc_clsact_watchdog")) // v5.11: WaitDelay
-	cmd3.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
-	wdOut, _ := cmd3.CombinedOutput()
-	watchdogRunning := len(strings.TrimSpace(string(wdOut))) > 0
+	// 有没有人在管: v5.33 起 clsact 的 10 秒自愈在 Go 看门狗里(hnc_clsact_watchdog.sh
+	// 已删, 原来 pgrep 它的写法在 v5.29 之后恒为 false)。看门狗在 = 有人管。
+	fs := procfind.New()
+	watchdogRunning := fs.FindPID(procfind.Spec("watchdog"), hncDir, fs.Table()) > 0
 
 	result := clsactCheckResult{
 		OK:        hasClsact && hasBPF && hasMap,
@@ -958,14 +957,14 @@ func actionClsactCheck(hncDir string) actionResp {
 	return actionResp{OK: true, Detail: string(jsonBytes)}
 }
 
-// actionClsactRepair 单次修复(调 watchdog 的 repair 子命令 —— v5.9.7 修复了
-// 分叉版把 "repair" 当接口名的死循环 bug)。
+// actionClsactRepair 单次修复: hnc_offload_guard.sh clsact_repair(过 shell 的唯一闸门;
+// v5.33 前是 hnc_clsact_watchdog.sh repair)。
 func actionClsactRepair(hncDir string) actionResp {
 	iface := readHotspotIfaceName(hncDir)
 	if iface == "" {
 		return actionResp{OK: false, Error: "hotspot not active"}
 	}
-	rc, out := runBin(hncDir, "hnc_clsact_watchdog.sh", "repair", iface)
+	rc, out := runBin(hncDir, "hnc_offload_guard.sh", "clsact_repair", iface)
 	if rc != 0 {
 		return actionResp{OK: false, Error: "repair failed", Detail: strings.TrimSpace(out)}
 	}

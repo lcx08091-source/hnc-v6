@@ -45,13 +45,14 @@
 #   hwnat(v5.20, 仅 on 模式): n/a|none|disabled|skipped_qcom|skipped_not_mtk|detected_no_knob|failed
 #   —— 详见 bin/hnc_mtk_hwnat.sh 与 run/mtk_hwnat.json
 #
-# 用法:
-#   hnc_offload_guard.sh daemon              守护循环(service.sh 拉起)
-#   hnc_offload_guard.sh apply               立即按当前模式跑一轮, stdout 末行输出状态 JSON
+# 用法(v5.33 起没有常驻循环, 由 Go 看门狗 offload_sched.go 调度):
+#   hnc_offload_guard.sh plan                跑一轮并打印下一次 sleep 秒数与早醒条件(看门狗每轮调)
+#   hnc_offload_guard.sh apply               立即按当前模式跑一轮, stdout 末行输出状态 JSON(httpd 改模式后调)
 #   hnc_offload_guard.sh restore             撤销本脚本施加的一切(cleanup.sh 用)
 #   hnc_offload_guard.sh mode                打印生效模式 auto|on|off
-#   hnc_offload_guard.sh clsact_wanted [if]  exit 0 = 该装 clsact(tc_manager/watchdog 用)
-#   hnc_offload_guard.sh plan                跑一轮并打印下一次 sleep 秒数与早醒条件(v5.22 功耗)
+#   hnc_offload_guard.sh clsact_wanted [if]  exit 0 = 该装 clsact(tc_manager 用; clsact 的唯一闸门)
+#   hnc_offload_guard.sh clsact_repair [if]  闸门过了且 clsact 状态不全就重装(看门狗 10 秒检查不 ok 时、
+#                                            httpd「修复」按钮调; v5.33 前是 hnc_clsact_watchdog.sh repair)
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
@@ -62,7 +63,6 @@ LOG_FILE="$HNC_DIR/logs/offload_guard.log"
 STATUS="$RUN/offload_guard.json"
 STATE="$RUN/offload_guard.state"
 CLSACT_FLAG="$RUN/offload_guard.clsact"
-PIDFILE="$RUN/offload_guard.pid"
 IPC="$HNC_DIR/bin/hnc_ipc"
 CTL="$HNC_DIR/bin/hnc_clsact_ctl"
 CHECK_CMD="${HNC_GUARD_CHECK_CMD:-sh $HNC_DIR/bin/check_offload.sh}"
@@ -70,10 +70,9 @@ SYS_NET="${HNC_SYS_NET:-/sys/class/net}"
 INTERVAL="${HNC_GUARD_INTERVAL:-60}"
 RESTORE_AFTER="${HNC_GUARD_RESTORE_AFTER:-3}"
 # v5.22 功耗: 热点未开/无在线设备且未在兜底时, 完整检测(check_offload.sh 含 sleep 5 采样)
-# 放慢到 IDLE_INTERVAL, 期间每 IDLE_CHUNK 秒用内建命令看 run/activity.json, 一有设备立即检测。
+# 放慢到 IDLE_INTERVAL, 期间看门狗每 30 秒看一次 run/activity.json, 一有设备立即进下一轮。
 # 兜底生效(fallback_active)时永远按 INTERVAL(≤60s)重申 —— system_server 会改写 limit_map。
 IDLE_INTERVAL="${HNC_GUARD_IDLE_INTERVAL:-300}"
-IDLE_CHUNK="${HNC_GUARD_IDLE_CHUNK:-30}"
 IFB_IFACE="${IFB_IFACE:-ifb0}"
 
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [offload-guard] $*" >> "$LOG_FILE" 2>/dev/null; }
@@ -87,7 +86,6 @@ elif [ -f "${0%/*}/hnc_activity.sh" ]; then
 fi
 command -v hnc_act_load >/dev/null 2>&1 || {
     hnc_act_load() { ACT_OK=0; return 1; }
-    hnc_act_sleep_until() { sleep "$1"; return 1; }
 }
 GUARD_LAST_MODE=""
 GUARD_LAST_FB=0
@@ -363,57 +361,32 @@ guard_plan_sleep() {
     if [ "$GUARD_LAST_MODE" = on ]; then GUARD_PLAN_WAKE=hotspot; else GUARD_PLAN_WAKE=clients; fi
 }
 
-ensure_daemon() {
-    # v5.29 T2(M3): Go 看门狗接管调度(owner 文件)时, httpd 调 apply 也不
-    # 把 shell 常驻循环拉回来 —— 调度权在 Go, tick 由 plan 动作按需执行。
-    if [ "$(cat "$HNC_DIR/run/offload_guard.owner" 2>/dev/null)" = "watchdog" ]; then
-        return 0
-    fi
-    local pid
-    pid=$(cat "$PIDFILE" 2>/dev/null)
-    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && grep -q hnc_offload_guard "/proc/$pid/cmdline" 2>/dev/null; then
-        return 0
-    fi
-    # 测试模式不真起守护; HNC_GUARD_SPAWN_LOG 给测试记一笔「这里会起」
-    if [ -n "$HNC_TEST_MODE" ]; then
-        [ -n "$HNC_GUARD_SPAWN_LOG" ] && echo spawn >> "$HNC_GUARD_SPAWN_LOG"
-        return 0
-    fi
-    nohup sh "$0" daemon >> "$LOG_FILE" 2>&1 < /dev/null &
-    echo $! > "$PIDFILE" 2>/dev/null
+# clsact 状态不全(netd 重挂 qdisc / 接口重建)时重装; 闸门(clsact_wanted)是唯一一份。
+# 输出: ok | not_wanted | installed | skipped_pref1_mirred | unavailable | failed
+clsact_repair() {
+    local ifc="$1"
+    clsact_wanted "$ifc" || { echo not_wanted; return 0; }
+    [ -n "$ifc" ] || { echo unavailable; return 0; }
+    case "$("$CTL" check "$ifc" 2>/dev/null)" in
+        *'"ok":true'*) echo ok; return 0 ;;
+    esac
+    log "clsact state incomplete on $ifc, repairing"
+    local r
+    r=$(clsact_apply "$ifc")
+    [ "$r" = installed ] && log "clsact repaired on $ifc" || log "ERROR: clsact repair on $ifc: $r"
+    echo "$r"
+    [ "$r" = installed ]
 }
 
 case "${1:-}" in
-    daemon)
-        # v5.29 T2(M3): Go 看门狗已接管(owner=watchdog)时不起循环,
-        # 记一行日志退出 —— service.sh 旧版本 / 手工调用兜底场景。
-        if [ "$(cat "$HNC_DIR/run/offload_guard.owner" 2>/dev/null)" = "watchdog" ]; then
-            log "daemon skipped: owner=watchdog (Go watchdog scheduling)"
-            exit 0
-        fi
-        echo $$ > "$PIDFILE" 2>/dev/null
-        log "offload guard starting (interval=${INTERVAL}s)"
-        # 开机稍等, 让热点/hotspotd 就绪
-        [ -n "$HNC_TEST_MODE" ] || sleep 20
-        while true; do
-            tick
-            guard_plan_sleep
-            if [ -n "$GUARD_PLAN_WAKE" ]; then
-                hnc_act_sleep_until "$GUARD_PLAN_TOTAL" "$IDLE_CHUNK" "$GUARD_PLAN_WAKE"
-            else
-                sleep "$INTERVAL"
-            fi
-        done
-        ;;
     plan)
-        # 测试/诊断: 跑一轮并打印「下一次睡多久 早醒条件」
+        # 看门狗每轮调: 跑一轮并打印「下一次睡多久 早醒条件」
         tick
         guard_plan_sleep
         echo "$GUARD_PLAN_TOTAL ${GUARD_PLAN_WAKE:-none}"
         ;;
     apply)
         tick
-        ensure_daemon
         cat "$STATUS" 2>/dev/null
         ;;
     restore)
@@ -428,8 +401,12 @@ case "${1:-}" in
         clsact_wanted "${2:-$(hotspot_iface)}"
         exit $?
         ;;
+    clsact_repair)
+        clsact_repair "${2:-$(hotspot_iface)}"
+        exit $?
+        ;;
     *)
-        echo "usage: $0 daemon|apply|restore|mode|clsact_wanted [iface]|plan" >&2
+        echo "usage: $0 plan|apply|restore|mode|clsact_wanted [iface]|clsact_repair [iface]" >&2
         exit 4
         ;;
 esac

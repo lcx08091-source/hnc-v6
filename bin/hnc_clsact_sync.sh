@@ -77,5 +77,5 @@ emit_entries() {
 
 emit_entries | "$CTL" sync
 rc=$?
-echo "$(date '+%Y-%m-%d %H:%M:%S') [clsact-sync] rc=$rc" >> "$HNC_DIR/logs/clsact_watchdog.log" 2>/dev/null
+echo "$(date '+%Y-%m-%d %H:%M:%S') [clsact-sync] rc=$rc" >> "$HNC_DIR/logs/offload_guard.log" 2>/dev/null  # v5.33: clsact 修复并进 offload guard, 同一份日志
 exit 0

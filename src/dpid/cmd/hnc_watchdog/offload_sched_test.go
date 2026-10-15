@@ -1,4 +1,4 @@
-// offload_sched_test.go — v5.29 T2(M3): offload/clsact 的 Go 调度状态机。
+// offload_sched_test.go — offload/clsact 的 Go 调度状态机(v5.29 T2 M3; v5.33 起唯一一份)。
 package main
 
 import (
@@ -40,7 +40,7 @@ func TestParseOffloadPlanBad(t *testing.T) {
 	}
 }
 
-// ── 早醒条件(照抄 hnc_act_sleep_until 的语义) ───────────────────────
+// ── 早醒条件(v5.33 前 shell 循环用 hnc_act_sleep_until, 同一语义) ──────────
 
 func TestOffloadEarlyWake(t *testing.T) {
 	if !offloadEarlyWake("hotspot", "screen_on", 0) {
@@ -90,32 +90,6 @@ func TestOffloadEarlyWakeTriggersPlan(t *testing.T) {
 	}
 	if p.advance(next, false) {
 		t.Fatal("没到 nextAt 且无早醒 → 不该跑")
-	}
-}
-
-// ── clsact 门控缓存 ─────────────────────────────────────────────────
-
-func TestClsactGateCache(t *testing.T) {
-	c := &clsactSched{}
-	now := time.Now()
-	if !c.gateDue(now) {
-		t.Fatal("初始应 due")
-	}
-	c.gateOK, c.lastGate = true, now
-	if c.gateDue(now.Add(30 * time.Second)) {
-		t.Fatal("60 秒内不该重查门控")
-	}
-	if !c.gateDue(now.Add(61 * time.Second)) {
-		t.Fatal("60 秒后应重查门控")
-	}
-}
-
-// ── m3 开关 ─────────────────────────────────────────────────────────
-
-func TestM3Switch(t *testing.T) {
-	// 沙箱里 run/ 没有 wd_m3.disabled → 接管
-	if m3Disabled() {
-		t.Fatal("无开关文件时不应禁用 M3")
 	}
 }
 
@@ -170,20 +144,18 @@ func TestOffloadPlanBudgetHotspotEarlyWake(t *testing.T) {
 	}
 }
 
-// ── clsactTick: 门控缓存 60 秒 + 修复调用(驱动真实的一轮逻辑) ──────
+// ── clsactTick: 只在 offload guard 说「on 模式装着 clsact」时 check, 不 ok 才修 ──
 
 type clsactFake struct {
-	gateCalls int
-	checkOK   func(n int) bool
-	scripts   [][]string
+	checkOK func(n int) bool
+	scripts [][]string
 }
 
-func withClsactFake(t *testing.T, iface string, gate bool, f *clsactFake) {
+func withClsactFake(t *testing.T, target string, f *clsactFake) {
 	t.Helper()
-	oldG, oldC, oldI, oldS := clsactGateFn, clsactCheckFn, clsactIfaceFn, runScriptFn
+	oldT, oldC, oldS := clsactTargetFn, clsactCheckFn, runScriptFn
 	n := 0
-	clsactGateFn = func(string) bool { f.gateCalls++; return gate }
-	clsactIfaceFn = func() string { return iface }
+	clsactTargetFn = func() string { return target }
 	clsactCheckFn = func(string) string {
 		n++
 		if f.checkOK != nil && f.checkOK(n) {
@@ -192,91 +164,62 @@ func withClsactFake(t *testing.T, iface string, gate bool, f *clsactFake) {
 		return `{"ok":false,"qdisc":"clsact"}`
 	}
 	runScriptFn = func(path string, args ...string) { f.scripts = append(f.scripts, append([]string{path}, args...)) }
-	t.Cleanup(func() { clsactGateFn, clsactCheckFn, clsactIfaceFn, runScriptFn = oldG, oldC, oldI, oldS })
+	t.Cleanup(func() { clsactTargetFn, clsactCheckFn, runScriptFn = oldT, oldC, oldS })
 }
 
-func TestClsactTickGateCacheAndRepairArgs(t *testing.T) {
+// v5.33: 修复走 hnc_offload_guard.sh clsact_repair(hnc_clsact_watchdog.sh 已删)。
+// 「改动前会失败」: v5.32 调的是 hnc_clsact_watchdog.sh repair。
+func TestClsactTickRepairArgs(t *testing.T) {
 	f := &clsactFake{checkOK: func(n int) bool { return n%3 != 0 }} // 每 3 次 check 有一次不 ok
-	withClsactFake(t, "wlan2", true, f)
+	withClsactFake(t, "wlan2", f)
 	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
 	c := &clsactSched{}
 	for off := 0; off <= 600; off += 10 { // 10 分钟
 		clsactTick(c, base.Add(time.Duration(off)*time.Second))
 	}
-	if f.gateCalls != 11 {
-		t.Fatalf("gate = %d 次, want 11(60 秒缓存)", f.gateCalls)
-	}
 	if c.checks != 61 || len(f.scripts) != 20 {
 		t.Fatalf("checks = %d repairs = %d, want 61 / 20", c.checks, len(f.scripts))
 	}
-	// rc1 把 "脚本 repair 口" 拼成一个参数 → sh 找不到文件, 修复从没执行
 	got := f.scripts[0]
-	if len(got) != 3 || !strings.HasSuffix(got[0], "/hnc_clsact_watchdog.sh") || got[1] != "repair" || got[2] != "wlan2" {
-		t.Fatalf("repair 调用参数 = %q, want [.../hnc_clsact_watchdog.sh repair wlan2]", got)
+	if len(got) != 3 || !strings.HasSuffix(got[0], "/hnc_offload_guard.sh") || got[1] != "clsact_repair" || got[2] != "wlan2" {
+		t.Fatalf("repair 调用参数 = %q, want [.../hnc_offload_guard.sh clsact_repair wlan2]", got)
 	}
 }
 
-func TestClsactTickGateOffNoExec(t *testing.T) {
+func TestClsactTickNoTargetNoExec(t *testing.T) {
 	f := &clsactFake{}
-	withClsactFake(t, "wlan2", false, f)
+	withClsactFake(t, "", f)
 	c := &clsactSched{}
 	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
 	for off := 0; off < 3600; off += 10 {
 		clsactTick(c, base.Add(time.Duration(off)*time.Second))
 	}
 	if c.checks != 0 || len(f.scripts) != 0 {
-		t.Fatalf("门控不要时不该 check / repair: checks=%d repairs=%d", c.checks, len(f.scripts))
+		t.Fatalf("guard 没说要盯时不该 check / repair: checks=%d repairs=%d", c.checks, len(f.scripts))
 	}
 }
 
-// TestClsactWantedPref1Mirred on 模式但 pref 1 被上行 mirred 占用 → 不要
-// (旧 shell 守护此时退出; rc1 不判这条, 上行限速 + on 模式每 10 秒起 sh)。
-func TestClsactWantedPref1Mirred(t *testing.T) {
-	if !pref1MirredLine("filter parent ffff: protocol all pref 1 u32 ... action order 1: mirred (Egress Redirect to device ifb0) stolen") {
-		t.Fatal("tc 输出里的 mirred redirect ifb0 应判为占用")
-	}
-	e := newNatTestEnv(t)
-	e.inject(t, "wlan2", nil, func(name string, args ...string) (string, int, error) {
-		return "filter parent ffff: protocol all pref 1 u32 chain 0\n  action order 1: mirred (Egress Redirect to device ifb0) stolen\n", 0, nil
-	})
-	if !pref1HeldByMirred("wlan2") {
-		t.Fatal("pref1 被 mirred 占用应返回 true")
-	}
-	e.inject(t, "wlan2", nil, func(name string, args ...string) (string, int, error) { return "", 0, nil })
-	if pref1HeldByMirred("wlan2") {
-		t.Fatal("无过滤器不算占用")
-	}
-}
-
-// ── rulesClsactModeOn: guard_mode 的 on 判定(含旧键) ──────────────
-
-func TestRulesClsactModeOn(t *testing.T) {
-	old := natDataDir
-	natDataDir = t.TempDir()
-	t.Cleanup(func() { natDataDir = old })
-	write := func(j string) {
-		if err := os.WriteFile(natDataDir+"/rules.json", []byte(j), 0o644); err != nil {
+// clsactTarget: 读 offload guard 的状态文件, 只认 mode=on + clsact=installed。
+func TestClsactTargetFromGuardStatus(t *testing.T) {
+	old := offloadGuardStatusPath
+	offloadGuardStatusPath = t.TempDir() + "/offload_guard.json"
+	t.Cleanup(func() { offloadGuardStatusPath = old })
+	for _, c := range []struct{ json, want string }{
+		{`{"mode":"on","clsact":"installed","iface":"wlan2"}`, "wlan2"},
+		{`{"mode":"on","clsact":"skipped_pref1_mirred","iface":"wlan2"}`, ""},
+		{`{"mode":"auto","clsact":"installed","iface":"wlan2"}`, ""}, // auto 由 plan 每轮顺带修
+		{`{"mode":"off","clsact":"off","iface":"wlan2"}`, ""},
+		{`garbage`, ""},
+	} {
+		if err := os.WriteFile(offloadGuardStatusPath, []byte(c.json), 0o644); err != nil {
 			t.Fatal(err)
 		}
+		if got := clsactTarget(); got != c.want {
+			t.Errorf("%s → %q, want %q", c.json, got, c.want)
+		}
 	}
-	write(`{"clsact_bpf_mode":"on"}`)
-	if !rulesClsactModeOn() {
-		t.Fatal("mode=on 应 true")
-	}
-	write(`{"clsact_bpf_mode":"auto"}`)
-	if rulesClsactModeOn() {
-		t.Fatal("mode=auto 不该走 clsact 独立守护(auto 由 offload guard 顺带)")
-	}
-	write(`{"clsact_bpf_mode":"off"}`)
-	if rulesClsactModeOn() {
-		t.Fatal("mode=off 应 false")
-	}
-	write(`{"clsact_bpf_enabled":true}`)
-	if !rulesClsactModeOn() {
-		t.Fatal("旧键 true → on")
-	}
-	write(`{}`)
-	if rulesClsactModeOn() {
-		t.Fatal("都没有 → false")
+	_ = os.Remove(offloadGuardStatusPath)
+	if got := clsactTarget(); got != "" {
+		t.Errorf("没有状态文件 → %q, want \"\"", got)
 	}
 }

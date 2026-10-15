@@ -11,13 +11,19 @@ act_write() {
         "$1" "$2" "$3" "$4" "$5" "$6" "$7" > "$HNC_TEST_DIR/run/activity.json"
 }
 
-test_start "activity: 解析 + 新鲜度 + quiet"
+test_start "activity: 解析 + 新鲜度"
 NOW=$(date +%s)
 act_write "$NOW" hotspot_off false true false 0 false
-r=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; echo "$ACT_OK $ACT_LEVEL $ACT_SCREEN_OFF $ACT_SCREEN_ON $ACT_HOTSPOT $ACT_CLIENTS $ACT_WEBUI"; hnc_act_quiet && echo quiet' _ "$ACT_LIB" "$NOW")
-exp="1 hotspot_off 1 0 0 0 0
-quiet"
-[ "$r" = "$exp" ] && test_pass || test_fail "got [$r]"
+r=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; echo "$ACT_OK $ACT_LEVEL $ACT_SCREEN_OFF $ACT_SCREEN_ON $ACT_HOTSPOT $ACT_CLIENTS $ACT_WEBUI"' _ "$ACT_LIB" "$NOW")
+[ "$r" = "1 hotspot_off 1 0 0 0 0" ] && test_pass || test_fail "got [$r]"
+
+test_start "activity: 新鲜度上限 120 秒(与 Go activity.MaxAge 一致)"
+NOW=$(date +%s)
+act_write $((NOW - 150)) hotspot_off false true false 0 false
+r=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; echo "$ACT_OK"' _ "$ACT_LIB" "$NOW")
+act_write $((NOW - 100)) hotspot_off false true false 0 false
+r2=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; echo "$ACT_OK"' _ "$ACT_LIB" "$NOW")
+[ "$r" = 0 ] && [ "$r2" = 1 ] && test_pass || test_fail "150 秒前=$r(应 0) 100 秒前=$r2(应 1)"
 
 test_start "activity: 过期 / 缺文件 / 坏文件 → ACT_OK=0 且保守(视为热点开、有设备、有界面)"
 NOW=$(date +%s)
@@ -31,29 +37,13 @@ act_write $((NOW + 3600)) no_clients true true true 0 false
 r4=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; echo "$ACT_OK"' _ "$ACT_LIB" "$NOW")
 [ "$r1" = 0 ] && [ "$r2" = "1 0 1 1 1" ] && [ "$r3" = "1 0" ] && [ "$r4" = 0 ] && test_pass || test_fail "r1=$r1 r2=$r2 r3=$r3 r4=$r4"
 
-test_start "activity: 亮屏 / 界面在看 → 不 quiet; 屏幕未知 → 既不算亮也不算灭"
+test_start "activity: 亮屏 / 有设备; 屏幕未知 → 既不算亮也不算灭"
 NOW=$(date +%s)
 act_write "$NOW" background true true true 2 false
-a=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; hnc_act_quiet && echo q || echo n; echo "$ACT_SCREEN_ON $ACT_CLIENTS"' _ "$ACT_LIB" "$NOW" | tr '\n' ' ')
-act_write "$NOW" active false true true 2 true
-b=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; hnc_act_quiet && echo q || echo n' _ "$ACT_LIB" "$NOW")
+a=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; echo "$ACT_SCREEN_ON $ACT_CLIENTS"' _ "$ACT_LIB" "$NOW")
 act_write "$NOW" active false false true 2 false
-c=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; hnc_act_quiet && echo q || echo n; echo "$ACT_SCREEN_OFF$ACT_SCREEN_ON"' _ "$ACT_LIB" "$NOW" | tr '\n' ' ')
-[ "$a" = "n 1 2 " ] && [ "$b" = n ] && [ "$c" = "n 00 " ] && test_pass || test_fail "a=[$a] b=[$b] c=[$c]"
-
-test_start "activity: hnc_act_sleep_until 热点一起来就提前返回"
-NOW=$(date +%s)
-act_write "$NOW" hotspot_off false true false 0 false
-( sleep 1; act_write "$NOW" no_clients false true true 0 false ) &
-t0=$(date +%s)
-HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_sleep_until 6 1 hotspot' _ "$ACT_LIB"
-rc=$?
-t1=$(date +%s)
-wait
-# clients 条件: 热点开了但没设备 → 不提前, 睡满
-HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_sleep_until 2 1 clients' _ "$ACT_LIB"
-rc2=$?
-[ "$rc" = 0 ] && [ $((t1 - t0)) -le 4 ] && [ "$rc2" = 1 ] && test_pass || test_fail "rc=$rc dt=$((t1 - t0)) rc2=$rc2"
+c=$(HNC_DIR="$HNC_TEST_DIR" sh -c '. "$1"; hnc_act_load "$2"; echo "$ACT_SCREEN_OFF$ACT_SCREEN_ON"' _ "$ACT_LIB" "$NOW")
+[ "$a" = "1 2" ] && [ "$c" = "00" ] && test_pass || test_fail "a=[$a] c=[$c]"
 
 # ── offload guard: 空闲放慢(plan 子命令) ───────────────────────────
 gseed() {

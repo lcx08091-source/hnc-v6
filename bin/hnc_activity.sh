@@ -14,11 +14,14 @@
 # 用法:
 #   hnc_act_load [now]   解析到 ACT_* 变量; 给了 now(秒)时还判新鲜度 → ACT_OK=1
 #                        没文件/解析不了/过期: ACT_OK=0, 其余变量取「保守」值(视为活跃)
-#   hnc_act_quiet        ACT_OK 且 熄屏且无界面 → 0
-#   hnc_act_sleep_until <total> <chunk> <hotspot|clients>
-#                        分段 sleep; 每段后重读文件, 热点开了(或开了且有设备)就提前返回 0
+# (v5.33: 只剩 hnc_act_load。hnc_act_sleep_until 是 shell offload 守护循环的早醒睡眠,
+#  循环删了以后由 Go 看门狗 offload_sched.go 的 offloadEarlyWake 负责; hnc_act_quiet
+#  没有调用者。)
+#
+# 新鲜度上限与 Go 读取器 src/dpid/activity.MaxAge 一致(120 秒; 原来 shell 180、Go 120,
+# 同一份文件两边判新鲜不一样), TestPowerShellMirrorConstants 核对。
 
-HNC_ACT_MAX_AGE=${HNC_ACT_MAX_AGE:-180}
+HNC_ACT_MAX_AGE=${HNC_ACT_MAX_AGE:-120}
 
 hnc_act_load() {
     ACT_OK=0
@@ -64,28 +67,4 @@ hnc_act_load() {
         fi
     fi
     return 0
-}
-
-hnc_act_quiet() {
-    [ "$ACT_OK" = 1 ] && [ "$ACT_SCREEN_OFF" = 1 ] && [ "$ACT_WEBUI" = 0 ]
-}
-
-hnc_act_sleep_until() {
-    _act_total=$1
-    _act_chunk=$2
-    _act_cond=$3
-    _act_slept=0
-    while [ "$_act_slept" -lt "$_act_total" ]; do
-        _act_s=$_act_chunk
-        [ $((_act_total - _act_slept)) -lt "$_act_s" ] && _act_s=$((_act_total - _act_slept))
-        sleep "$_act_s" 2>/dev/null || sleep 1 2>/dev/null
-        _act_slept=$((_act_slept + _act_s))
-        [ "$_act_slept" -ge "$_act_total" ] && break
-        hnc_act_load || continue
-        case "$_act_cond" in
-            hotspot) [ "$ACT_HOTSPOT" = 1 ] && return 0 ;;
-            clients) [ "$ACT_HOTSPOT" = 1 ] && [ "$ACT_CLIENTS" -gt 0 ] 2>/dev/null && return 0 ;;
-        esac
-    done
-    return 1
 }

@@ -417,6 +417,14 @@ func TestPowerShellMirrorConstants(t *testing.T) {
 	if d, _ := powerInterval("offload_guard", quiet, loopFlags{}); m == nil || m[1] != fmt.Sprint(int(d.Seconds())) {
 		t.Errorf("offload guard IDLE_INTERVAL=%v, Go=%v", m, d)
 	}
+	// v5.33: activity.json 的新鲜度上限 shell 与 Go 必须一致(原来 shell 180、Go 120)
+	al := read("bin/hnc_activity.sh")
+	m = regexp.MustCompile(`HNC_ACT_MAX_AGE:-(\d+)`).FindStringSubmatch(al)
+	ga := read("src/dpid/activity/activity.go")
+	g := regexp.MustCompile(`MaxAge\s*=\s*(\d+)\s*\*\s*time\.Second`).FindStringSubmatch(ga)
+	if m == nil || g == nil || m[1] != g[1] {
+		t.Errorf("activity 新鲜度上限: shell %v, Go %v", m, g)
+	}
 }
 
 // ─── powerWait: 档位变化立即重算 ────────────────────────────────────

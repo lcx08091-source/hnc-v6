@@ -139,35 +139,67 @@ grun apply >/dev/null
 ! grep -q "install\|uninstall" "$HNC_TEST_DIR/ctl.log" 2>/dev/null && grep -q 'skipped_pref1_mirred' "$HNC_TEST_DIR/logs/offload_guard.log" \
   && test_pass || test_fail "ctl=$(cat "$HNC_TEST_DIR/ctl.log" 2>/dev/null)"
 
-# ── v5.29 T2(M3): owner=watchdog 时 shell 常驻循环让位给 Go 看门狗 ──
+# ── v5.33: 没有常驻循环(Go 看门狗调度); clsact 修复并进本脚本 ──
 
-test_start "offload guard: owner=watchdog 时 daemon 分支直接退出(不起循环)"
+test_start "offload guard: daemon 子命令已删(回 usage), apply 不起任何后台进程"
 gseed '{"clsact_bpf_mode":"auto"}'
-echo watchdog > "$HNC_TEST_DIR/run/offload_guard.owner"
-rm -f "$HNC_TEST_DIR/run/offload_guard.pid"
 timeout 10 env HNC_TEST_MODE=1 HNC_DIR="$HNC_TEST_DIR" HNC_SYS_NET="$HNC_TEST_DIR/sysnet" \
     HNC_GUARD_CHECK_CMD="cat $HNC_TEST_DIR/check_state" PATH="$HNC_TEST_DIR/stub:$PATH" \
-    sh "$GSCRIPT" daemon; rc=$?
-[ $rc -eq 0 ] && [ ! -f "$HNC_TEST_DIR/run/offload_guard.pid" ] && test_pass || test_fail "rc=$rc pidfile_created=$([ -f "$HNC_TEST_DIR/run/offload_guard.pid" ] && echo yes || echo no)"
-
-test_start "offload guard: 无 owner 时 daemon 正常路径(写 pidfile; 测试模式下 tick 后由 ensure 检查)"
-gseed '{"clsact_bpf_mode":"auto"}'
-rm -f "$HNC_TEST_DIR/run/offload_guard.owner" "$HNC_TEST_DIR/run/offload_guard.pid"
-HNC_TEST_MODE=1 HNC_DIR="$HNC_TEST_DIR" HNC_SYS_NET="$HNC_TEST_DIR/sysnet" \
-    HNC_GUARD_CHECK_CMD="cat $HNC_TEST_DIR/check_state" PATH="$HNC_TEST_DIR/stub:$PATH" \
-    timeout 10 sh "$GSCRIPT" plan >/dev/null 2>&1
-rc=$?
-[ $rc -eq 0 ] && test_pass || test_fail "plan rc=$rc(对照: Go 调度也走同一 plan 动作)"
-
-test_start "offload guard: owner=watchdog 时 apply 不把 shell 循环拉回来(无 owner 时会)"
-# 测试模式下 ensure_daemon 从不真起进程, 只看 pidfile 的话新旧代码都通过;
-# 用 HNC_GUARD_SPAWN_LOG 记「这里会起守护」, 并先跑无 owner 的对照组。
-gseed '{"clsact_bpf_mode":"auto"}'
-rm -f "$HNC_TEST_DIR/run/offload_guard.owner" "$HNC_TEST_DIR/spawn.log"
+    sh "$GSCRIPT" daemon >/dev/null 2>&1; rc=$?
 HNC_GUARD_SPAWN_LOG="$HNC_TEST_DIR/spawn.log" grun apply >/dev/null 2>&1
-_ctl=$(cat "$HNC_TEST_DIR/spawn.log" 2>/dev/null)
-echo watchdog > "$HNC_TEST_DIR/run/offload_guard.owner"
-rm -f "$HNC_TEST_DIR/spawn.log"
-HNC_GUARD_SPAWN_LOG="$HNC_TEST_DIR/spawn.log" grun apply >/dev/null 2>&1
-[ "$_ctl" = spawn ] && [ ! -f "$HNC_TEST_DIR/spawn.log" ] \
-  && test_pass || test_fail "对照(无 owner)=$_ctl; owner=watchdog 时 spawn.log=$(cat "$HNC_TEST_DIR/spawn.log" 2>/dev/null)"
+if [ $rc -eq 4 ] && [ ! -f "$HNC_TEST_DIR/spawn.log" ] && [ ! -f "$HNC_TEST_DIR/run/offload_guard.pid" ] \
+   && ! grep -qE 'ensure_daemon|offload_guard\.owner|while true' "$GSCRIPT"; then
+    test_pass
+else
+    test_fail "daemon rc=$rc(应 4 = usage) spawn=$(cat "$HNC_TEST_DIR/spawn.log" 2>/dev/null)"
+fi
+
+test_start "offload guard: plan 跑一轮并打印「秒数 早醒条件」(Go 看门狗每轮调)"
+gseed '{"clsact_bpf_mode":"auto"}'
+out=$(grun plan | tail -n1)
+echo "$out" | grep -qE '^[0-9]+ (none|hotspot|clients)$' && [ -f "$HNC_TEST_DIR/run/offload_guard.json" ] \
+  && test_pass || test_fail "plan 输出 [$out]"
+
+# 假 hnc_clsact_ctl: check 的结果由 $HNC_DIR/ctl_check 决定, 记下每次调用
+mkctl() {
+    : > "$HNC_TEST_DIR/bin/hnc_clsact.o"
+    cat > "$HNC_TEST_DIR/bin/hnc_clsact_ctl" <<'STUB'
+#!/bin/sh
+echo "$*" >> "$HNC_DIR/ctl.log"
+case "$1" in
+    check) cat "$HNC_DIR/ctl_check" 2>/dev/null ;;
+esac
+exit 0
+STUB
+    chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
+    : > "$HNC_TEST_DIR/ctl.log"
+}
+
+test_start "offload guard: clsact_repair —— 状态全就不动, 不全就重装(on 模式)"
+gseed '{"clsact_bpf_mode":"on"}'
+mkctl
+echo '{"ok":true,"bpf_filter":true}' > "$HNC_TEST_DIR/ctl_check"
+r1=$(grun clsact_repair wlan2)
+n1=$(grep -c install "$HNC_TEST_DIR/ctl.log")
+echo '{"ok":false,"bpf_filter":false}' > "$HNC_TEST_DIR/ctl_check"
+r2=$(grun clsact_repair wlan2; echo "rc=$?")
+grep -q '^install wlan2' "$HNC_TEST_DIR/ctl.log" && n2=1 || n2=0
+[ "$r1" = ok ] && [ "$n1" = 0 ] && echo "$r2" | grep -q '^installed' && echo "$r2" | grep -q 'rc=0' && [ "$n2" = 1 ] \
+  && test_pass || test_fail "r1=$r1 n1=$n1 r2=[$r2] n2=$n2 ctl=$(cat "$HNC_TEST_DIR/ctl.log")"
+
+test_start "offload guard: clsact_repair 守同一道闸门(auto 未兜底 / pref1 被 mirred 占用 → 不装)"
+gseed '{"clsact_bpf_mode":"auto"}'
+mkctl
+echo '{"ok":false,"bpf_filter":false}' > "$HNC_TEST_DIR/ctl_check"
+r1=$(grun clsact_repair wlan2)
+gseed '{"clsact_bpf_mode":"on"}'
+mkctl
+echo '{"ok":false,"bpf_filter":false}' > "$HNC_TEST_DIR/ctl_check"
+echo "mirred (Egress Redirect to device ifb0) stolen" > "$HNC_TEST_DIR/tc_show"
+r2=$(grun clsact_repair wlan2)
+rm -f "$HNC_TEST_DIR/tc_show"
+[ "$r1" = not_wanted ] && [ "$r2" = not_wanted ] && ! grep -q install "$HNC_TEST_DIR/ctl.log" \
+  && test_pass || test_fail "r1=$r1 r2=$r2 ctl=$(cat "$HNC_TEST_DIR/ctl.log")"
+
+test_start "clsact: hnc_clsact_watchdog.sh 已并进 offload guard(不再有第二份闸门 / 热点口探测)"
+[ ! -e "$HNC_REPO_ROOT/bin/hnc_clsact_watchdog.sh" ] && test_pass || test_fail "hnc_clsact_watchdog.sh 还在"

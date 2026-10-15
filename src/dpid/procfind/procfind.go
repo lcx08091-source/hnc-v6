@@ -185,10 +185,9 @@ var specs = map[string]Def{
 	"hnc_dpid":  {PIDFiles: []string{"dpid.child.pid", "dpid.pid"}, Key: "dpid", ScanKey: "bin/hnc_dpid -config"},
 	// dpid 守护 = C hnc_launcher(v5.33 起唯一一种; 它和 service.sh 都写 dpid_guard.pid,
 	// 看门狗拉起时写 launcher.pid)。原来按 shell guard 的名字认, C launcher 一直认不出。
-	"dpid_guard":    {PIDFiles: []string{"dpid_guard.pid", "launcher.pid"}, Key: "hnc_launcher", ScanKey: "bin/hnc_launcher"},
-	"watchdog":      {PIDFiles: []string{"watchdog.pid"}, Key: "watchdog", ScanKey: "hnc_watchdog"},
-	"offload_guard": {PIDFiles: []string{"offload_guard.pid"}, Key: "hnc_offload_guard", ScanKey: "hnc_offload_guard.sh daemon"},
-	"clsact_wd":     {PIDFiles: []string{"clsact_wd.pid"}, Key: "hnc_clsact_watchdog", ScanKey: "hnc_clsact_watchdog.sh"},
+	"dpid_guard": {PIDFiles: []string{"dpid_guard.pid", "launcher.pid"}, Key: "hnc_launcher", ScanKey: "bin/hnc_launcher"},
+	"watchdog":   {PIDFiles: []string{"watchdog.pid"}, Key: "watchdog", ScanKey: "hnc_watchdog"},
+	// v5.33: offload_guard / clsact_wd 两个 shell 常驻循环已删(Go 看门狗调度)。
 }
 
 // Spec 按名字取进程定义(返回副本, 调用方改了不影响表)。未知名字 → 零值(找不到任何进程)。

@@ -182,7 +182,7 @@ FAKE_ABI=armeabi-v7a FAKE_ABILIST=armeabi-v7a,armeabi; export FAKE_ABI FAKE_ABIL
 run_customize "$M"
 sync_like_service "$M" "$H"
 bad=""
-for b in hnc_dpid hnc_watchdog hnc_launcher hnc_ipc hnc_clsact_ctl; do
+for b in hnc_dpid hnc_watchdog hnc_launcher hnc_ipc; do  # v5.33: hnc_clsact_ctl 只由看门狗 / offload guard 调, service.sh 不再直接用
     grep -q "\$HNC_DIR/bin/$b\"" "$ROOT/service.sh" || bad="$bad service.sh-no-longer-uses:$b"
 done
 for b in $NATIVE; do

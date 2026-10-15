@@ -76,9 +76,9 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
 # 仍活的升级 SIGKILL. SIGKILL 内核直接回收, hotspotd 没机会跑 mdns_worker stop,
 # 但反正我们要 cleanup 全清, 子进程清理路径跑完跑半都无关紧要.
 PIDS_TO_WAIT=""
-# v5.29 T2: Go 看门狗接管标记一并清掉, 下次开机按当前状态重新决定。
-rm -f "$HNC_DIR/run/offload_guard.owner" 2>/dev/null
-for pidfile in sentinel watchdog clsact_wd offload_guard dpid_guard dpid.monitor dpid.child dpid hotspotd detect api hotspot netmon httpd; do
+# v5.33: 只列现在还有人写的 pidfile(clsact_wd / offload_guard / detect / api / netmon /
+# dpid.monitor / dpid.child 的写者都早已删除)。
+for pidfile in sentinel watchdog dpid_guard launcher dpid hotspotd hotspot httpd; do
     PID=$(cat "$RUN/${pidfile}.pid" 2>/dev/null)
     if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
         kill "$PID" 2>/dev/null
@@ -120,7 +120,7 @@ done
 #   watchdog.sh, 或其他模块路径含 watchdog). "bin/watchdog.sh" 把误杀面收窄到实际
 #   含 HNC 脚本路径的进程.
 # rc30.0+ : 加入 hnc_watchdog (Go 二进制) 的清理(v5.33 删了 dpid supervisor / shell guard).
-for proc in bin/hnc_launcher bin/hnc_watchdog bin/hnc_clsact_watchdog.sh bin/hnc_offload_guard.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
+for proc in bin/hnc_launcher bin/hnc_watchdog bin/hnc_offload_guard.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
     pkill -f "$proc" 2>/dev/null && log "pkill $proc"
 done
 # watchdogfix-v6.1: also stop stale service.sh sentinel shells; otherwise

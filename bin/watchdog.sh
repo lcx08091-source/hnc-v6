@@ -37,8 +37,6 @@ elif [ -f "${0%/*}/hnc_activity.sh" ]; then
 fi
 command -v hnc_act_load >/dev/null 2>&1 || {
     hnc_act_load() { ACT_OK=0; ACT_LEVEL=unknown; ACT_SCREEN_OFF=0; ACT_SCREEN_ON=0; ACT_HOTSPOT=1; ACT_CLIENTS=1; ACT_WEBUI=1; return 1; }
-    hnc_act_quiet() { return 1; }
-    hnc_act_sleep_until() { sleep "$1"; return 1; }
 }
 HNC_HTTPS_PORT=${HNC_HTTPS_PORT:-8443}
 HNC_LOOPBACK_PORT=${HNC_LOOPBACK_PORT:-8444}

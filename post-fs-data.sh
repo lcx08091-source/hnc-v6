@@ -64,7 +64,8 @@ rm -f "$HNC_DIR/data/m4_owner" "$HNC_DIR/run/m4_owner.current" "$HNC_DIR/run/wd_
       "$HNC_DIR/run/devices.go.json" "$HNC_DIR/run/devices.go.json.tmp" \
       "$HNC_DIR/run/m4_shadow.json" "$HNC_DIR/run/wd_m4_shadow.disabled" \
       "$HNC_DIR/run/hostname_cache" "$HNC_DIR/run/detect.pid" "$HNC_DIR/run/arp_hash" \
-      "$HNC_DIR/run/wd_m5.disabled" 2>/dev/null
+      "$HNC_DIR/run/wd_m5.disabled" "$HNC_DIR/run/wd_m3.disabled" "$HNC_DIR/run/offload_guard.owner" \
+      "$HNC_DIR/run/offload_guard.pid" "$HNC_DIR/run/clsact_wd.pid" 2>/dev/null
 
 # 初始化规则文件 · rc3.1.13 起 auth_required 也在这
 [ ! -f "$HNC_DIR/data/rules.json" ] && cat > "$HNC_DIR/data/rules.json" << 'EOF'
