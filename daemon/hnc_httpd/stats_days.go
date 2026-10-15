@@ -1,24 +1,16 @@
-// dpi_stats_source.go — 统计链路收口 (v5.10.0, O2)。
+// stats_days.go — 按天文件的统计辅助(本地日零点 / UTC 命名的 run/stats.YYYYMMDD.jsonl
+// 文件集合 / 在线分钟)。
 //
-// 背景: "今日流量"柱状图与"应用历史"页此前走两条独立链路 ——
-//   legacy: bin/stats_sample.sh 每 5min 从 iptables 计数采样 →
-//           data/stats_raw.jsonl → /api/stats
-//   dpi:    HistorySampler 每 15min 按应用归因写 →
-//           run/stats.YYYYMMDD.jsonl → /api/dpi_history
-// 两个口径对不上(iptables 全量 vs DPI 只算被归因流量), 用户困惑。
-// 本文件让 /api/stats?source=dpi 直接聚合 DPI 归因链, 统计页默认切到它,
-// 数字与应用历史/设备曲线完全同源; legacy 链保留可选。
-//
-// 关键语义: 不能复用 aggregate()/aggregateToday() —— 它们是【计数器 delta
-// 语义】(legacy raw 是 iptables 累计计数器, 按 mac 排序后相邻做差), 而
-// HistorySampler 的行本身就是 15min 流量增量, 直接按小时/按天累加即可。
+// v5.10.0 曾让 /api/stats?source=dpi 直接聚合 DPI 归因链(本文件原名
+// dpi_stats_source.go), 但界面一直用 legacy(iptables 采样, data/stats_raw.jsonl),
+// dpi 那条只有测试在调。v5.33 删掉了第二个统计源, source=dpi 与历史的
+// source=shadow 一样按 legacy 处理; 应用口径的流量走 /api/dpi_history。
 
 package main
 
 import (
 	"bufio"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,138 +20,6 @@ import (
 	"strings"
 	"time"
 )
-
-// apiStatsDPI 处理 /api/stats?source=dpi。
-func (s *server) apiStatsDPI(w http.ResponseWriter, r *http.Request, rangeParam, macFilter string) {
-	buckets, daily := s.dpiAggregate(rangeParam, macFilter)
-	resp := map[string]interface{}{
-		"range":         rangeParam,
-		"mac":           macFilter,
-		"source":        "dpi",
-		"buckets":       buckets,
-		"daily_buckets": daily,
-	}
-	if len(daily) > 0 {
-		var tr, tx int64
-		for _, b := range daily {
-			tr += b.RX
-			tx += b.TX
-		}
-		resp["total_rx"] = tr
-		resp["total_tx"] = tx
-	}
-	writeJSON(w, http.StatusOK, resp)
-}
-
-// dayBucket 按天聚合的流量桶(内部使用)。
-type dayBucket struct {
-	RX int64
-	TX int64
-}
-
-// dpiAggregate 按 range 聚合 DPI 归因链, 产出与 legacy /api/stats 同形的
-// buckets。today → 24 个小时桶(行是 15min 增量, 直接按小时累加);
-// week/month/all → 按日期桶。daily 桶同时返回供调用方使用。
-func (s *server) dpiAggregate(rangeParam, macFilter string) ([]Bucket, []Bucket) {
-	days := 1
-	switch rangeParam {
-	case "week":
-		days = 7
-	case "month":
-		days = 30
-	case "all":
-		days = 90
-	}
-
-	now := time.Now()
-	loc := now.Location()
-	statsDir := filepath.Join(s.hncDir, "run")
-	// v5.11: 窗口下界取"本地零点"。旧代码用 now.AddDate(0,0,-(days-1)) 当下界
-	// —— 那是 N 天前的【此刻】: days=1 时下界就是 now 本身, 今天所有已发生
-	// 的行都被丢弃 → range=today 恒全 0(统计页默认源就是 dpi); week/month
-	// 首日也只剩当前时刻之后的部分。
-	windowStart := localDayStart(now).AddDate(0, 0, -(days - 1))
-
-	byHour := make([]Bucket, 24)
-	for i := range byHour {
-		byHour[i].Label = fmt.Sprintf("%02d:00", i)
-	}
-	byDate := map[string]*dayBucket{}
-	resolve := macAliasResolver(s.hncDir) // v5.21: mac= 过滤包含合并进来的旧 MAC
-	if macFilter != "" {
-		macFilter = resolve(macFilter)
-	}
-
-	// v5.11: dpid 以 UTC 日期命名 stats.YYYYMMDD.jsonl(output/history.go
-	// pathFor), 旧代码按本地日期找文件 → UTC+8 下本地 0-8 点的行落在前一个
-	// UTC 日文件里读不到。改为按窗口覆盖的(本地∪UTC)日期集合找文件, 每个
-	// 文件只读一次, 再按行时间戳过滤, 不会重复计数。
-	for _, dayKey := range dayFileKeys(windowStart, now) {
-		path := filepath.Join(statsDir, "stats."+dayKey+".jsonl")
-		f, err := os.Open(path)
-		if err != nil {
-			continue // 缺失的天 = 零贡献
-		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-		for sc.Scan() {
-			line := sc.Bytes()
-			if len(line) < 10 {
-				continue
-			}
-			var row struct {
-				T     int64  `json:"t"`
-				MAC   string `json:"mac"`
-				AppID string `json:"app_id"`
-				TX    uint64 `json:"tx"`
-				RX    uint64 `json:"rx"`
-			}
-			if err := json.Unmarshal(line, &row); err != nil {
-				continue
-			}
-			if macFilter != "" && resolve(row.MAC) != macFilter {
-				continue
-			}
-			ts := time.Unix(row.T, 0).In(loc)
-			if ts.Before(windowStart) || ts.After(now) {
-				continue
-			}
-			if rangeParam == "today" {
-				h := ts.Hour()
-				byHour[h].RX += int64(row.RX)
-				byHour[h].TX += int64(row.TX)
-			}
-			dk := ts.Format("2006-01-02")
-			if byDate[dk] == nil {
-				byDate[dk] = &dayBucket{}
-			}
-			byDate[dk].RX += int64(row.RX)
-			byDate[dk].TX += int64(row.TX)
-		}
-		f.Close()
-	}
-
-	if rangeParam == "today" {
-		return byHour, nil
-	}
-
-	out := make([]Bucket, 0, days)
-	for d := days - 1; d >= 0; d-- {
-		dk := now.AddDate(0, 0, -d).Format("2006-01-02")
-		b := Bucket{Label: dk[5:]}
-		if agg, ok := byDate[dk]; ok {
-			b.RX = agg.RX
-			b.TX = agg.TX
-		}
-		out = append(out, b)
-	}
-	daily := make([]Bucket, 0, len(byDate))
-	for dk, agg := range byDate {
-		daily = append(daily, Bucket{Label: dk, RX: agg.RX, TX: agg.TX})
-	}
-	sort.Slice(daily, func(i, j int) bool { return daily[i].Label < daily[j].Label })
-	return out, daily
-}
 
 // localDayStart 返回 t 所在本地日的零点。
 func localDayStart(t time.Time) time.Time {

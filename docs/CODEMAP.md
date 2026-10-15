@@ -167,7 +167,7 @@ CONNMARK save/restore 掩码 `0xffffff`(`iptables_manager.sh`)。Android netd �
 ## 8. 规模参考
 
 业务代码约 10.3 万行(Go 5.85 万、Shell 2.33 万、C 1.45 万、前端 0.57 万),测试约 2.45 万行。
-`daemon/hotspotd/lsm/vmlinux.h`(15.5 万行)是工具生成的内核类型头文件,不是手写代码。
+(v5.33 删掉了 `daemon/hotspotd/lsm/`:15.5 万行工具生成的 `vmlinux.h` 和从没启用过的 BPF LSM guard。)
 
 
 ## 9. 设备发现(v5.31 起 Go 版;v5.33 起唯一一份)

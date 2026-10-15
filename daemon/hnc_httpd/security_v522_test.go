@@ -562,7 +562,7 @@ func TestAPIConfigIncludesWebUIAccess(t *testing.T) {
 func TestSecurityHeadersPresent(t *testing.T) {
 	s := newServer(t.TempDir())
 	h := s.handler()
-	for _, path := range []string{"/api/health", "/pair", "/api/devices", "/", "/static/app.js", "/nope"} {
+	for _, path := range []string{"/api/health", "/pair", "/api/devices", "/", "/js/core.js", "/nope"} {
 		req := httptest.NewRequest(http.MethodGet, path, nil)
 		req.RemoteAddr = "192.168.43.9:1234"
 		rec := httptest.NewRecorder()

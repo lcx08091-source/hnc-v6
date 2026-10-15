@@ -93,8 +93,6 @@ func (s *server) handler() http.Handler {
 
 	// 静态页(/ = dashboard,走 authMiddleware 保护)
 	mux.HandleFunc("/", s.serveIndex)
-	// 静态资源 /static/* 在 authMiddleware 里是 public,无需登录
-	mux.HandleFunc("/static/", s.serveStatic)
 
 	// v4.0 Patch 2.b: 配对页 + 配对 endpoint
 	// 外层 unauthRateLimit 每 IP 20 req/s; PIN 5 次/分钟 锁在 handlePairVerify 内部
@@ -228,9 +226,6 @@ func loadIndexDiskOnce() []byte {
 	return indexDiskBytes
 }
 
-// webuiV6Marker 出现在 webroot/index.html(v6) 的头部注释里。
-const webuiV6Marker = "HNC WebUI v6"
-
 func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -251,87 +246,16 @@ func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 			"object-src 'none'; "+
 			"base-uri 'self'; "+
 			"frame-ancestors 'none'")
-	// rc3.1.8 修: 远端浏览器和本地 KSU WebView 必须 serve 不同 HTML
-	//  - loopback 8444  → webroot/index.html (依赖 window.ksu.exec curl bridge)
-	//  - 远端 0.0.0.0:8443 → embed 的 web/app.html (用同源 fetch 直连 /api/*)
-	// 之前统一 serve webroot/index.html 导致远端加载后 detectKsuLike 失败,
-	// 用户看到 "需要 KernelSU/Magisk WebUI" 卡死页, 硬编码显示 v4.0.0-patch5.0
-	// (rc3.1.x 以来一直没更新). app.html + app.js 原本就是 embed 且能独立工作的
-	// 远端 UI, 只是从未挂到路由上.
-	//
-	// rc30.12.28 修: 本地手机浏览器访问 127.0.0.1:8443 时也是 loopback, 之前同样 serve
-	// KSU 版导致 "需要 KernelSU 或 Magisk WebUI" 白屏. 现在加 UA 检测: loopback 但 UA
-	// 不像 KSU/Magisk WebView 时, 也 serve 浏览器版本.
-	// KSU/SukiSU WebView 的 UA 包含 "KernelSU" 或 file:// 来源, 没有 "Mozilla/5.0";
-	// 而手机浏览器 UA 都带 "Mozilla/5.0" + "Mobile".
-	// v5.11: 新版 WebUI(v6) 同一份页面同时支持 KSU 桥接与浏览器同源 fetch,
-	// 磁盘上的 index.html 带有 v6 标记时, 远程/本机浏览器也直接用它(功能与本机
-	// 一致); 旧版磁盘页面仍按原规则只给 KSU WebView。
-	if data := loadIndexDiskOnce(); data != nil && bytes.Contains(data, []byte(webuiV6Marker)) {
-		_, _ = w.Write(data)
-		return
-	}
-	if !isLoopbackRequest(r) {
-		_, _ = w.Write(indexHTML) // embed: web/app.html
-		return
-	}
-	if !looksLikeKSUWebView(r) {
-		// loopback 但是普通浏览器 (Chrome / Safari / 系统浏览器), 给浏览器版本
-		_, _ = w.Write(indexHTML) // embed: web/app.html
-		return
-	}
-	// 本地 loopback + KSU WebView UA: serve 磁盘上的 KSU bridge 版 UI
-	// 注: 模块实际 install 路径是 /data/adb/modules/hotspot_network_control/webroot/,
-	// 但 data dir (s.hncDir) 是 /data/local/hnc, 两者不同。用 post-fs-data.sh 建 symlink 或
-	// 直接硬编码模块路径(更简单)
-	// rc2 修 G8: 首次 os.ReadFile 后缓存, 后续直接 memcpy 到 response (快 ~100x).
+	// v5.11 起 webroot/index.html(v6)一份页面同时支持 KSU 桥接与浏览器同源 fetch,
+	// 本机 KSU WebView、本机浏览器、远程浏览器都用它。v5.33 删掉了编进二进制的旧版
+	// 页面(web/app.html / app.js / style.css)和按来源 / UA 二选一的逻辑 ——
+	// 磁盘页面读不到只可能是安装不完整, 直接说明, 不再退回旧页面。
 	if data := loadIndexDiskOnce(); data != nil {
 		_, _ = w.Write(data)
 		return
 	}
-	// fallback: 本地也读不到磁盘版就退化到 embed (比丢白屏强)
-	_, _ = w.Write(indexHTML)
-}
-
-// looksLikeKSUWebView 判断请求是不是来自 KSU/SukiSU/Magisk 的内嵌 WebView.
-// rc30.12.28: 之前只看 loopback IP, 把"本机浏览器访问 127.0.0.1"也判成 KSU,
-// 用户看到"需要 KernelSU 或 Magisk WebUI"白屏. 现在加 UA 检测.
-//
-// KSU/SukiSU WebView 的特征:
-//   - UA 含 "Android" 但不像普通浏览器 (没 Chrome 完整 token)
-//   - 部分管理器加 X-KernelSU-Version 之类自定义 header (不强求)
-//   - 没有 Referer (file:// 加载) — 但浏览器首次访问也可能没 Referer
-//
-// 最简单可靠的启发式: 如果 UA 带完整的 Chrome/Safari/Firefox 标识, 一定是浏览器;
-// 否则可能是 WebView (这里宽松一点, 不能确认是浏览器就给 KSU 版兜底, 因为浏览器
-// 还会自动跳 /pair, 不会卡死).
-//
-// rc30.12.28: 反转策略 - 默认假设 loopback 客户端是浏览器 (现在浏览器 WebUI 能用),
-// 只有 UA 明确像 WebView 时才给 KSU 版. KSU WebView 通常 UA 是 "Mozilla/5.0 (Linux; ..."
-// 而手机浏览器是 "Mozilla/5.0 (Linux; Android XX; ... Chrome/..." 含 "Chrome" 关键字.
-func looksLikeKSUWebView(r *http.Request) bool {
-	ua := r.Header.Get("User-Agent")
-	if ua == "" {
-		// 没 UA 当 WebView (curl/wget 也可能这样, 但它们应该走 API 不是 /)
-		return true
-	}
-	// 浏览器特征: 含 Chrome / Edg / Firefox / Safari (不含 wv 的)
-	// WebView 特征: UA 含 "wv" (Android WebView 标识) 或非常短没有 Chrome token
-	if strings.Contains(ua, "; wv)") || strings.Contains(ua, "wv)") {
-		return true
-	}
-	// 标识为完整 Chrome/Firefox 浏览器
-	if strings.Contains(ua, "Chrome/") && !strings.Contains(ua, "; wv") {
-		return false
-	}
-	if strings.Contains(ua, "Firefox/") {
-		return false
-	}
-	if strings.Contains(ua, "Safari/") && !strings.Contains(ua, "Chrome/") {
-		return false
-	}
-	// 其他情况默认 WebView (保守)
-	return true
+	w.WriteHeader(http.StatusServiceUnavailable)
+	_, _ = w.Write([]byte("<!doctype html><meta charset=utf-8><p>HNC WebUI 文件缺失(webroot/index.html),安装不完整,请重新刷入模块。</p>"))
 }
 
 // serveChangelog · v5.0 新增, serve 磁盘 webroot/changelog.html 给 lazy load 用
@@ -397,21 +321,6 @@ var webuiAssets = []string{
 	"css/base.css", "css/apple.css", "css/liquid.css",
 	"js/core.js", "js/fx.js", "js/devices.js", "js/apps.js",
 	"js/stats.js", "js/settings.js", "js/sheets.js", "js/main.js",
-}
-
-func (s *server) serveStatic(w http.ResponseWriter, r *http.Request) {
-	// MVP 阶段静态资源也嵌入二进制,未来可以支持从磁盘 serve
-	name := strings.TrimPrefix(r.URL.Path, "/static/")
-	switch name {
-	case "app.js":
-		w.Header().Set("Content-Type", "application/javascript")
-		_, _ = w.Write(appJS)
-	case "style.css":
-		w.Header().Set("Content-Type", "text/css")
-		_, _ = w.Write(styleCSS)
-	default:
-		http.NotFound(w, r)
-	}
 }
 
 // ═══ API: health check ═════════════════════════════════════════
@@ -982,8 +891,9 @@ func (s *server) apiStats(w http.ResponseWriter, r *http.Request) {
 	}
 	macFilter := strings.ToLower(r.URL.Query().Get("mac"))
 	sourceParam := strings.ToLower(r.URL.Query().Get("source"))
-	// v5.2 shadow 统计已移除: 空值与历史的 source=shadow 一律按 legacy 处理(老客户端不报 400)
-	if sourceParam == "" || sourceParam == "shadow" {
+	// 只有一个统计源(iptables 采样)。v5.2 的 shadow、v5.10–v5.32 的 dpi(v5.33 删)
+	// 与空值一律按 legacy 处理(老客户端不报 400)。
+	if sourceParam == "" || sourceParam == "shadow" || sourceParam == "dpi" {
 		sourceParam = "legacy"
 	}
 
@@ -1002,16 +912,6 @@ func (s *server) apiStats(w http.ResponseWriter, r *http.Request) {
 
 	rawName := "stats_raw.jsonl"
 	dailyName := "stats_daily.jsonl"
-	if sourceParam == "dpi" {
-		// v5.10.0 (O2): 统计收口 —— 直接聚合 DPI 归因链的
-		// run/stats.YYYYMMDD.jsonl (HistorySampler 每 15min 一行, 含
-		// mac/app/tx/rx/t)。注意: 不能走 aggregate()/aggregateToday() ——
-		// 它们是【计数器 delta 语义】(legacy raw 是 iptables 累计计数器,
-		// 按 mac 排序后相邻做差), 而 DPI 行本身就是 15min 流量增量,
-		// 直接累加即可。口径: DPI 链只含被归因流量, 总量比 iptables 略小。
-		s.apiStatsDPI(w, r, rangeParam, macFilter)
-		return
-	}
 	rawPath := filepath.Join(s.hncDir, "data", rawName)
 	dailyPath := filepath.Join(s.hncDir, "data", dailyName)
 
@@ -1141,7 +1041,7 @@ func validRange(r string) bool {
 
 func validStatsSource(source string) bool {
 	switch source {
-	case "legacy", "dpi":
+	case "legacy":
 		return true
 	}
 	return false

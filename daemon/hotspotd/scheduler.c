@@ -12,7 +12,6 @@
 #include "scheduler.h"
 #include "platform.h"
 #include "upstream.h"
-#include "lsm/hnc_lsm_loader.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -629,12 +628,6 @@ static void *worker_main(void *arg)
         }
         pthread_mutex_unlock(&sched.lock);
 
-        /* v5.0.0-beta.4: ifindex 变化时同步通知 LSM guard
-         * (LSM 内部线程安全, 在 sched.lock 之外调用避免锁嵌套) */
-        if (now_ifindex > 0 && now_ifindex != prev_ifindex) {
-            hnc_lsm_update_ifindex((uint32_t)now_ifindex);
-        }
-
         /* 跑 refresh (可能 sleep 5s) */
         if (sched.adapter && sched.adapter->refresh_active) {
             offload_err_t e = sched.adapter->refresh_active();
@@ -735,27 +728,6 @@ int hnc_scheduler_init(void)
             sched.primary_upstream_ifname,
             sched.primary_upstream_ifindex);
 
-    /* v5.0.0-beta.4: 启动 BPF LSM Limit Map Guard
-     *
-     * 仅当 adapter 是 BPF 类型时才有意义 (null adapter 不操作 BPF map).
-     * LSM 拦截 framework 对 limit_map 的 enforce 写, 保证 disable_upstream
-     * 写入的 0 值持久生效, 真正关闭 fast path.
-     *
-     * 任何失败都不致命, hnc_lsm_init 内部状态机自管理. */
-    if (sched.adapter && strcmp(sched.adapter->name, "bpf") == 0) {
-        int lsm_rc = hnc_lsm_init(
-            "/data/local/hnc/bpf/hnc_limit_map_guard.bpf.o",
-            "/sys/fs/bpf/tethering/map_offload_tether_limit_map",
-            (uint32_t)sched.primary_upstream_ifindex);
-        if (lsm_rc == 0) {
-            fprintf(stderr, "[sched] BPF LSM guard ACTIVE\n");
-        } else if (lsm_rc == -2) {
-            fprintf(stderr, "[sched] BPF LSM guard DISABLED (kernel/securityfs unavailable)\n");
-        } else {
-            fprintf(stderr, "[sched] BPF LSM guard FAILED, fallback to passive disable\n");
-        }
-    }
-
     /* v5.0 alpha.3 P0-B: 从 rules.json 重建 limited_macs
      * 如果有限速设备, 触发一次 adapter disable, 重建 BPF offload 屏蔽
      * 这样重启后不需要手动 apply_device_rule.sh, 限速自动恢复 */
@@ -799,9 +771,6 @@ void hnc_scheduler_shutdown(void)
     if (sched.adapter && sched.adapter->shutdown) {
         sched.adapter->shutdown();
     }
-
-    /* v5.0.0-beta.4: 关闭 BPF LSM guard */
-    hnc_lsm_shutdown();
 
     pthread_mutex_destroy(&sched.lock);
     pthread_mutex_destroy(&sched.worker_lock);
@@ -1001,7 +970,7 @@ ok:
         "\"primary_upstream_ifname\":\"%s\","
         "\"worker_running\":%s,"
         "\"worker_last_refresh_ts\":%lld,"
-        "\"worker_refresh_count\":%lld,",
+        "\"worker_refresh_count\":%lld",
         s->adapter_name,
         s->adapter_type,
         s->adapter_gran,
@@ -1019,18 +988,6 @@ ok:
         (long long)s->worker_refresh_count
     );
     if (n < 0 || (size_t)n >= buf_size) return -1;
-
-    /* v5.0.0-beta.4: 追加 LSM 状态片段 */
-    hnc_lsm_status_t lsm_st;
-    hnc_lsm_get_status(&lsm_st);
-    int n2 = hnc_lsm_status_to_json_fragment(&lsm_st, buf + n, buf_size - n);
-    if (n2 < 0) {
-        /* 截断: 至少回滚最后逗号 */
-        if (n > 0 && buf[n - 1] == ',') buf[n - 1] = '\0';
-        n = (int)strlen(buf);
-    } else {
-        n += n2;
-    }
 
     /* 闭合 } */
     if ((size_t)n + 2 >= buf_size) return -1;

@@ -49,3 +49,6 @@ src/dpid/dpid_supervisor
 bin/armeabi-v7a/
 bin/arm64-v8a/
 bin/hnc_pkg_abi
+# v5.33: launcher 在 src/launcher 里本地编的产物(CI 用 install 拷到 bin/)
+src/launcher/fork_probe
+src/launcher/hnc_launcher

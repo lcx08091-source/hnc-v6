@@ -300,22 +300,8 @@ if [ -x "$HNC/bin/fork_probe" ]; then
     fi
 fi
 
-# Go fork+execv 是否工作 (用 gofork_probe 验证, 可能没有)
-GO_FORK_TESTED=false
-GO_FORK_OK=false
-if [ -x "$HNC/bin/diag/gofork_probe" ]; then
-    GO_FORK_TESTED=true
-    if "$HNC/bin/diag/gofork_probe" >/dev/null 2>&1; then
-        GO_FORK_OK=true
-    fi
-fi
-
-# 推断:内核是否拦截 CLONE_VM
-# 如果 C fork ok 但 Go fork 失败, 几乎必然是 CLONE_VM hook 拦截
-KERNEL_BLOCKS_CLONE_VM=false
-if [ "$GO_FORK_TESTED" = "true" ] && [ "$C_FORK_OK" = "true" ] && [ "$GO_FORK_OK" = "false" ]; then
-    KERNEL_BLOCKS_CLONE_VM=true
-fi
+# v5.33: Go fork 探针(gofork_probe)从没被编进包里, go_fork_* / kernel_blocks_clone_vm
+# 恒为 false, 已删; 自检「进程拉起兼容」改看 c_fork_supported。
 
 # 当前使用的 launcher 路径
 SELECTED_LAUNCHER="unknown"
@@ -446,9 +432,6 @@ cat > "$TMP" <<EOF_JSON
 
   "fork_compat_schema": 1,
   "c_fork_supported": $C_FORK_OK,
-  "go_fork_supported": $GO_FORK_OK,
-  "go_fork_tested": $GO_FORK_TESTED,
-  "kernel_blocks_clone_vm": $KERNEL_BLOCKS_CLONE_VM,
   "selected_launcher": "$(json_escape "$SELECTED_LAUNCHER")",
   "fork_probe_present": $FORK_PROBE_PRESENT,
   "hnc_launcher_present": $HNC_LAUNCHER_PRESENT,

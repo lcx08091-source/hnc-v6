@@ -171,7 +171,7 @@ func fixtureColorOSQualcomm(hnc string) *fakeSys {
 		"tc_ingress_supported": true, "tc_clsact_supported": true, "tc_u32_supported": true,
 		"tc_police_supported": true, "tc_mirred": true, "tc_ifb_create": true,
 		"uplink_mode": "ifb_htb", "downlink_mode": "htb", "qdisc_lowlat_chosen": "sfq",
-		"kernel_blocks_clone_vm": true, "selected_launcher": "c_launcher",
+		"c_fork_supported": false, "selected_launcher": "direct",
 		"selinux_avc_denied_recent": 0, "su_domain": "u:r:su:s0",
 	}
 	cb, _ := json.Marshal(caps)

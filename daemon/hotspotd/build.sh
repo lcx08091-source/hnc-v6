@@ -13,15 +13,12 @@ ARCH=${1:-arm64}
 
 # v5.0.0-beta.4 hotfix6: 改用 libbpf, 删除手撸 lsm/hnc_lsm_loader.c 的
 # sys_bpf 实现, 改为 libbpf 标准 API
-# v5.8.7 (audit): LSM guard 暂用 stub(见 lsm/hnc_lsm_stub.c)。真 loader 需
-# libbpf 的 object-loading API → 牵出 libelf+libz;唯一能拿到的 Android 预编译
-# 实为 glibc 版(链接报 __errno_location/__fxstat/dcgettext 等 glibc 符号)。
-# offload(adapter_bpf.c)只用 libbpf 的 bpf() syscall 包装,不需要 libelf/libz,
-# 故拆掉 LSM loader(本就可选/非致命/object 从不随包)即可让 CI 从源码编出 hotspotd。
+# v5.8.7 (audit): offload(adapter_bpf.c)只用 libbpf 的 bpf() syscall 包装,不需要
+# libelf/libz(唯一能拿到的 Android 预编译实为 glibc 版)。BPF LSM guard 当年因此只链 stub,
+# v5.33 整块删了(见下方 build done 前的注释)。
 SRCS="hotspotd.c hnc_helpers.c \
       platform.c scheduler.c upstream.c \
-      offload/adapter.c offload/adapter_null.c offload/adapter_bpf.c \
-      lsm/hnc_lsm_stub.c"
+      offload/adapter.c offload/adapter_null.c offload/adapter_bpf.c"
 OUTDIR=prebuilt/${ARCH}
 OUT=${OUTDIR}/hotspotd
 
@@ -69,7 +66,7 @@ fi
 echo ""
 echo "[build] Compiler: $CC"
 echo "[build] Target:   $ARCH  Output: $OUT"
-echo "[build] libs:     $LIBS_OUT/lib/libbpf.a (libelf/libz not linked — LSM stubbed)"
+echo "[build] libs:     $LIBS_OUT/lib/libbpf.a (libelf/libz not linked)"
 
 $CC \
     -O2 \
@@ -92,11 +89,6 @@ $CC \
 # 包装(bpf.c),不调 bpf_object__*/ring_buffer__*,故链接器不会拉入需要 libelf/libz
 # 的 libbpf.c/elf.c/btf.c 目标 → 无需这两个库(且我们只有 glibc 版,链了反而炸)。
 
-# v5.9.0: hnc_lsm_loader.c 当前不参与链接(SRCS 用的是 lsm/hnc_lsm_stub.c),
-# 但保持可编译 —— 防止将来换回真 loader 时才发现源码早已腐烂。语法坏即构建失败。
-echo "[build] syntax gate: lsm/hnc_lsm_loader.c (not linked, kept compilable)"
-$CC -fsyntax-only -std=c11 -Wall -Wextra -Wno-unused-parameter \
-    -D_GNU_SOURCE -DANDROID -I"$LIBS_OUT/include" lsm/hnc_lsm_loader.c
 
 "$STRIP" "$OUT" 2>/dev/null || true
 echo "[build] OK: $(ls -lh "$OUT" | awk '{print $5}')  $OUT"
@@ -136,10 +128,9 @@ if [ -f mdns_resolve.c ]; then
     echo "[build] OK: $(ls -lh "$BINDIR/mdns_resolve" | awk '{print $5}')  $BINDIR/mdns_resolve"
 fi
 
-# v5.9.92: BPF LSM 编译块【删除】—— 链接的是 stub(v5.8.7 注释: 真 loader
-# 需要 libelf/libz, 无可用的 Android 静态版), 编出的 .o 又被打包排除,
-# 编了也永远没人加载。恢复条件: 真 loader 可编(见 lsm/README.md)时,
-# 与 post-fs-data.sh 的部署块一并恢复。
+# v5.33: BPF LSM limit_map guard 整块删除(lsm/ 目录: 永远返回「关闭」的 stub、
+# 只做语法检查不链接的真 loader、BPF 程序源码与 3.3 MB vmlinux.h)。v5.8.7 起链接的
+# 就是 stub —— 真 loader 需要 libelf/libz, 没有可用的 Android 静态版。要恢复从 git 历史取。
 
 echo ""
 echo "[build] === build done ==="

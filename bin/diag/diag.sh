@@ -16,7 +16,6 @@
 # 两者互补不互相替代; 报兼容性问题时建议两个都跑, 一起发给维护者.
 
 HNC=${HNC:-/data/local/hnc}
-DIAG_BIN="$HNC/bin/diag"
 
 echo "════════════════════════════════════════════════════════════════"
 echo "  HNC Diagnostic Report"
@@ -70,24 +69,12 @@ done
 echo ""
 
 echo "── [6] fork+exec 兼容性测试 (关键) ────────────────────────────"
-echo "  6a. C fork+execv (fork_probe):"
-if [ -x "$DIAG_BIN/fork_probe" ]; then
-    "$DIAG_BIN/fork_probe" /system/bin/true 2>&1 | sed 's/^/    /'
-    echo "    result: $?"
-elif [ -x "$HNC/bin/fork_probe" ]; then
+echo "  6. C fork+execv (fork_probe):"
+if [ -x "$HNC/bin/fork_probe" ]; then
     "$HNC/bin/fork_probe" /system/bin/true 2>&1 | sed 's/^/    /'
     echo "    result: $?"
 else
     echo "    fork_probe MISSING"
-fi
-echo ""
-
-echo "  6b. Go fork+exec (gofork_probe):"
-if [ -x "$DIAG_BIN/gofork_probe" ]; then
-    "$DIAG_BIN/gofork_probe" 2>&1 | sed 's/^/    /'
-    echo "    result: $?"
-else
-    echo "    gofork_probe not compiled (optional, see bin/diag/gofork_probe.go)"
 fi
 echo ""
 

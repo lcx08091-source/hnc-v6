@@ -651,7 +651,7 @@
       return { available: true, capabilities: { tc_htb: true, tc_netem: true, uplink_supported: true, tc_cake: false, tc_fq_codel: false, ifb: true, ifb_supported: true, sqm_supported: true,
         sqm_recommended_mode: 'sfq', tc_ingress_supported: true, tc_clsact_supported: true, tc_u32_supported: true, tc_flower_supported: false, tc_matchall: true, tc_police_supported: true,
         tc_mirred: true, uplink_police_supported: true, downlink_mode: 'per_device_htb', uplink_mode: 'ifb_htb', delay_mode: 'netem_leaf', qos_fallback_required: false,
-        tc_binary: 'bin/tc', tc_binary_source: 'module', tc_version: 'iproute2-6.1.0', c_fork_supported: true, go_fork_supported: true, selected_launcher: 'c', dpid_version: VER, generated_at: T - 7 * 3600 },
+        tc_binary: 'bin/tc', tc_binary_source: 'module', tc_version: 'iproute2-6.1.0', c_fork_supported: true, selected_launcher: 'c_launcher', dpid_version: VER, generated_at: T - 7 * 3600 },
         qdisc_caps: { chosen: 'sfq', available: ['sfq', 'pfifo'], default_leaf_aqm_eligible: false } };
     },
     '/api/templates': function () { return TPL; },

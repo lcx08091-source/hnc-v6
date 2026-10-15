@@ -126,13 +126,6 @@ if [ "$_HNC_RB" != 3 ] && [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
     chmod 755 "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null
 fi
 
-# v5.9.92 (v5.10.1 修正): BPF LSM Limit Map Guard 部署块【删除】。
-# 三方不一致的收口: hotspotd 链接的是恒 DISABLED 的 stub(v5.8.7: 真 loader
-# 需 libelf/libz, 无可用 Android 版); 打包又用 -x "bpf/*" 把 .o 排除在 zip 外
-# → 本块恒为 no-op, 只会误导读者。源码(lsm/*.c)保留作参考, 待真 loader 可编
-# 时恢复此块与 build.sh 编译块。(v5.9.92 的删除曾把本文件改坏, v5.10.1 从
-# git 基线重做。)
-
 chmod 755 "$HNC_DIR"/bin/*.sh
 # v5.0 beta.1 修: 单独 chmod 所有无后缀二进制
 # post-fs-data.sh 原来只 chmod *.sh, 但 bin/ 下的 C 二进制 (hotspotd / hnc_ipc /

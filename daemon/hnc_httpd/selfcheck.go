@@ -925,11 +925,13 @@ func scSectionSystem(c *scCtx) []scItem {
 	}
 	items = append(items, wit)
 
-	if v, ok := c.capBool("kernel_blocks_clone_vm"); ok {
-		fit := scItem{ID: "fork_compat", Label: "进程拉起兼容", Status: scOK, Value: "正常"}
-		if v {
+	// v5.33: 原来看 kernel_blocks_clone_vm(要 Go fork 探针, 从没编进包里, 恒为 false,
+	// 这一项永远显示「正常」)。改看 C fork 探针: 不行时 dpid 由看门狗直接盯(direct)。
+	if v, ok := c.capBool("c_fork_supported"); ok {
+		fit := scItem{ID: "fork_compat", Label: "进程拉起兼容", Status: scOK, Value: "C launcher 可用"}
+		if !v {
 			fit.Status = scInfo
-			fit.Value = "内核拦截 Go fork(CLONE_VM), 已用 C launcher 绕过"
+			fit.Value = "C fork 探测失败, dpid 由看门狗直接拉起(direct)"
 		}
 		if l := c.capStr("selected_launcher"); l != "" {
 			fit.Detail = "launcher=" + l

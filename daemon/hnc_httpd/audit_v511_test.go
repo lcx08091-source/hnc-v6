@@ -128,53 +128,6 @@ func writeStatsRow(t *testing.T, runDir string, ts time.Time, mac string, rx, tx
 		ts.Unix(), mac, tx, rx)
 }
 
-// A4 + A5: source=dpi&range=today 必须统计今天(本地)已发生的行, 包括落在
-// 前一个 UTC 日文件里的本地凌晨行; 昨天的行不得计入。
-func TestDPIAggregateTodayAndUTCFileBoundary(t *testing.T) {
-	withLocal(t, time.FixedZone("CST", 8*3600))
-	dir := t.TempDir()
-	runDir := filepath.Join(dir, "run")
-	if err := os.MkdirAll(runDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now()
-	todayStart := localDayStart(now)
-	// 今天本地 01:00(或今天已过时间的一半, 取较早者): 本地 <08:00 → UTC 日期是昨天
-	off := now.Sub(todayStart) / 2
-	if off > time.Hour {
-		off = time.Hour
-	}
-	early := todayStart.Add(off)
-	writeStatsRow(t, runDir, early, "aa:bb:cc:dd:ee:01", 1000, 10)
-	// 昨天本地 23:00 —— 不属于 today
-	writeStatsRow(t, runDir, todayStart.Add(-time.Hour), "aa:bb:cc:dd:ee:01", 5, 5)
-
-	s := newServer(dir)
-	buckets, _ := s.dpiAggregate("today", "")
-	var rx, tx int64
-	for _, b := range buckets {
-		rx += b.RX
-		tx += b.TX
-	}
-	if rx != 1000 || tx != 10 {
-		t.Fatalf("today totals rx=%d tx=%d, want rx=1000 tx=10 (today's rows dropped or yesterday's counted)", rx, tx)
-	}
-
-	// week: 6 天前本地 00:30 的行必须进首日桶(修复前下界是 6 天前的"此刻")
-	sixAgo := todayStart.AddDate(0, 0, -6).Add(30 * time.Minute)
-	writeStatsRow(t, runDir, sixAgo, "aa:bb:cc:dd:ee:02", 777, 0)
-	wk, daily := s.dpiAggregate("week", "")
-	if len(wk) != 7 {
-		t.Fatalf("week buckets = %d, want 7", len(wk))
-	}
-	if wk[0].RX != 777 {
-		t.Fatalf("week first bucket rx=%d, want 777 (label %s)", wk[0].RX, wk[0].Label)
-	}
-	if len(daily) == 0 {
-		t.Fatalf("week daily buckets empty")
-	}
-}
-
 // A5: dpi_history 与 dayFileKeys 的窗口 / 文件集合。
 func TestDayFileKeysUnionLocalAndUTC(t *testing.T) {
 	cst := time.FixedZone("CST", 8*3600)

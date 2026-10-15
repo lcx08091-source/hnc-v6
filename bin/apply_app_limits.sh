@@ -243,7 +243,7 @@ classid_for_index() {
 #   (包括规则库标成 cdn/cloud 的 Akamai/Cloudflare/阿里云等"应用")→ 共享, 跳过。
 # 逃生口: rules.json 顶层 "app_limit_include_shared_ips": true → 不过滤(旧行为)。
 # 每条限速的统计写 run/app_limits_ipstats.flat: <mac> <app> <ips_total> <ips_shared_skipped> <ips_applied>
-. "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh" 2>/dev/null || true
+. "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh"
 IPNAME_JSON="$RUN/dpi_ipname.json"
 IPNAME_APP_FLAT="$RUN/.ipname_app.flat.$$"
 IPSTATS_FLAT="$RUN/app_limits_ipstats.flat"
@@ -321,11 +321,8 @@ while IFS=' ' read -r MAC APP RATE; do
     # 旧的固定 32k 在 0.5Mbps 下 ≈0.5 秒量(短时超发), 在 300Mbps 下不足 1ms(跑不满)。
     # rate 用 kbit 整数(与 tc_manager mbps_to_rate 一致, 避免 "%.2f" 截掉 <10kbit 精度)。
     RATE_KBIT=$(awk -v v="$RATE" 'BEGIN{k=int(v*1000+0.5); if(k<1)k=1; print k}')
-    APP_BURST=32k; APP_QUANTUM=""
-    if command -v hnc_burst_k >/dev/null 2>&1; then
-        APP_BURST=$(hnc_burst_k "$RATE" compat)
-        APP_QUANTUM=$(hnc_quantum "$RATE")
-    fi
+    APP_BURST=$(hnc_burst_k "$RATE" compat)
+    APP_QUANTUM=$(hnc_quantum "$RATE")
     if [ -z "$APP_QUANTUM" ] || ! tc class add dev "$IFACE" parent 1:1 classid "$CID" htb \
         rate "${RATE_KBIT}kbit" ceil "${RATE_KBIT}kbit" \
         burst "$APP_BURST" cburst "$APP_BURST" quantum "$APP_QUANTUM" 2>/dev/null; then

@@ -485,8 +485,6 @@ jobs:
             [ -f "$dst" ] || { echo "ERROR: armv7 $n has no arm64 counterpart at ${dst#$STAGE/}"; exit 1; }
             cp -f "$f" "$dst"; chmod 755 "$dst"
           done
-          # 诊断工具 bin/diag/fork_probe(预提交的 arm64 副本)一并换成 armv7
-          [ -f "$STAGE/bin/diag/fork_probe" ] && cp -f bin/armeabi-v7a/fork_probe "$STAGE/bin/diag/fork_probe"
           echo armeabi-v7a > "$STAGE/bin/hnc_pkg_abi"
           (cd "$STAGE" && zip -rqX "$GITHUB_WORKSPACE/$OUT7" .)
           rm -rf "$STAGE"

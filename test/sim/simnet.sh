@@ -167,7 +167,7 @@ hotspotd_cmd() {
         gcc -O1 -std=c11 -D_GNU_SOURCE -w -pthread -o "$SIM_DIR/bin/hotspotd" \
             "$hs/hotspotd.c" "$hs/hnc_helpers.c" \
             "$hs/platform.c" "$hs/scheduler.c" "$hs/upstream.c" \
-            "$hs/offload/adapter.c" "$hs/offload/adapter_null.c" "$hs/lsm/hnc_lsm_stub.c" || die "hotspotd 编译失败"
+            "$hs/offload/adapter.c" "$hs/offload/adapter_null.c" || die "hotspotd 编译失败"
         echo "ACTIVE:$SIM_IF" > "$hnc/run/hnc_state"
         echo "$SIM_IF" > "$hnc/run/hotspot_iface"
         [ -f "$hnc/data/rules.json" ] || echo '{"devices":{}}' > "$hnc/data/rules.json"

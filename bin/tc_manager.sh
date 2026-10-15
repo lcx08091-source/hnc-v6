@@ -617,24 +617,14 @@ mbps_to_rate() {
 # v5.20: 计算挪到 bin/tc_rate_calc.sh(与 apply_app_limits.sh 共用), 算法说明见该文件头:
 # 1~100Mbps 结果与旧版一致; <1Mbps 下限按速率缩放(不再 16k≈1 秒量);
 # 100~999Mbps 由固定 200k 改为 max(200k, 时间窗量); ≥1000Mbps(DEFAULT_RATE)仍 200k。
-. "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh" 2>/dev/null || true
+# v5.33: 删掉了「tc_rate_calc.sh 缺失时」的内联历史算法(第二份 burst 公式); 该文件随模块
+# 一起装, 缺了就是安装不完整。
+. "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh"
 burst_for_rate() {
     local mbps mode
     mbps=$(rate_to_mbps_num "$1")
     mode=$(qos_mode)
-    if command -v hnc_burst_k >/dev/null 2>&1; then
-        hnc_burst_k "$mbps" "$mode"
-        return 0
-    fi
-    # tc_rate_calc.sh 缺失时的历史算法兜底
-    awk -v v="$mbps" -v m="$mode" '
-      BEGIN {
-        if (v <= 0) { print "16k"; exit }
-        if (v >= 100) { print "200k"; exit }
-        if (m == "precise") { b = int(v); if (b < 8) b = 8; if (b > 64) b = 64 }
-        else { b = int(v * 2.5); if (b < 16) b = 16; if (b > 256) b = 256 }
-        print b "k"
-      }'
+    hnc_burst_k "$mbps" "$mode"
 }
 
 qos_class_burst_for_rate() { burst_for_rate "$1"; }
@@ -642,7 +632,6 @@ qos_class_burst_for_rate() { burst_for_rate "$1"; }
 # v5.20: 显式 HTB quantum(clamp 1514..60000), 见 tc_rate_calc.sh。空 = 不显式给。
 quantum_for_rate() {
     local mbps; mbps=$(rate_to_mbps_num "$1")
-    command -v hnc_quantum >/dev/null 2>&1 || return 0
     hnc_quantum "$mbps"
 }
 

@@ -5,7 +5,7 @@
 //              → (若 protected) authMiddleware → handler
 //
 // authMiddleware:
-//   1. public 路径直接放行(/pair, /api/pair/verify, /static/*)
+//   1. public 路径直接放行(/pair, /api/pair/verify, /css/*, /js/*)
 //   2. 读 cookie hnc_token,无则 302 /pair(或 API 401)
 //   3. VerifyCookie → O(1) 查 tokens + 单次 bcrypt
 //   4. 失败 → 清 cookie(MaxAge=-1 + Expires=1970 双保险) + 302/401
@@ -66,7 +66,7 @@ func securityHeaders(next http.Handler) http.Handler {
 // 已经被 3 次 (alerts / dpi_history / app_limits 都漏过敏感读白名单).
 //
 // 公共路径分类:
-//  1. UI 入口 (没鉴权就看不到登录页) - /, /pair, /changelog.html, /static/*
+//  1. UI 入口 (没鉴权就看不到登录页) - /, /pair, /changelog.html
 //  2. 鉴权流程本身              - /api/pair/verify, /api/pairing/status
 //  3. 健康检查 / 探活            - /api/health (返回 version + watchdog_passive,
 //     远程 WebUI 顶部探活. rc30.12.30 P0.4 后已删
@@ -97,9 +97,6 @@ func isPublicPath(p string) bool {
 		"/api/pairing/status",
 		"/api/health",
 		"/api/logout":
-		return true
-	}
-	if strings.HasPrefix(p, "/static/") {
 		return true
 	}
 	// v5.22: WebUI 拆分后的 /css/*.css、/js/*.js —— 与 hyalite.js 同类的纯静态代码,
