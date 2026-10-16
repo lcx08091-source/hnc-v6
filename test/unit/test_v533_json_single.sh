@@ -105,3 +105,25 @@ grep -rh 'HNC_JSON_OUTER_LOCK_HELD' "$HNC_REPO_ROOT/bin" | grep -qv '^[[:space:]
 grep -q 'json_legacy_fallback' "$HNC_REPO_ROOT/daemon/hnc_httpd/api_sla.go" "$HNC_REPO_ROOT/webroot/js/settings.js" && bad="$bad sla-field"
 grep -v '^[[:space:]]*#' "$HNC_REPO_ROOT/bin/json_set.sh" | grep -q 'json_update_device_safe\|json_legacy_fallback_warn\|cfg_set)' && bad="$bad legacy-writer"
 [ -z "$bad" ] && test_pass || test_fail "$bad"
+
+# CI(GitHub 的 Linux)上没有 /system/bin/sh, 真机运行期 /system/bin 也可能被卸(SukiSU):
+# JSON 链路里的脚本互相调用必须用 `sh 脚本`, 不能靠 shebang 直接执行。
+# 「改动前会失败」: rc2 首次推 main 时 json_set.sh 直接执行 hnc_json(rc 127,
+# ci_preflight 的 json_regression_test 失败); hnc_json 也直接执行 json_guard.sh。
+test_start "v5.33 JSON 链路不依赖 shebang(#!/system/bin/sh 不存在时照样能写能恢复)"
+B="$HNC_TEST_DIR/nsb/bin"; H="$HNC_TEST_DIR/nsb/hnc"
+mkdir -p "$B" "$H/data/.json_backups" "$H/run"
+for f in json_set.sh json_set_batch.sh json_doctor.sh hnc_json json_guard.sh; do
+    sed '1s|^#!.*|#!/nonexistent/sh|' "$HNC_REPO_ROOT/bin/$f" > "$B/$f"
+    chmod 755 "$B/$f"
+done
+printf '%s' '{"version":1,"devices":{},"blacklist":[]}' > "$H/data/rules.json"
+HNC="$H" sh "$B/json_set.sh" top hotspot_ssid 'a,b' >/dev/null 2>&1; r1=$?
+HNC="$H" sh "$B/json_set.sh" device aa:bb:cc:dd:ee:01 up_mbps 5 >/dev/null 2>&1; r2=$?
+HNC="$H" sh "$B/json_set_batch.sh" device aa:bb:cc:dd:ee:01 note x >/dev/null 2>&1; r3=$?
+v=$(HNC="$H" sh "$B/json_set.sh" device_get aa:bb:cc:dd:ee:01 up_mbps 2>/dev/null)
+cp "$H/data/rules.json" "$H/data/.json_backups/rules.json.20260101-000000.1.bak"
+printf '{"broken":' > "$H/data/rules.json"
+HNC="$H" DATA_DIR="$H/data" RUN_DIR="$H/run" sh "$B/json_doctor.sh" restore rules.json >/dev/null 2>&1; r4=$?
+assert_eq "0 0 0 5 0" "$r1 $r2 $r3 $v $r4" "top / device / batch / device_get / doctor restore" && \
+    assert_json_valid "$H/data/rules.json" && test_pass

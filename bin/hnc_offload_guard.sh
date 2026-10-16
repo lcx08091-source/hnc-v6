@@ -93,8 +93,8 @@ GUARD_LAST_FB=0
 # ── 模式解析 ─────────────────────────────────────────────────────────
 guard_mode() {
     local v=""
-    if [ -x "$HNC_DIR/bin/hnc_json" ]; then
-        v=$("$HNC_DIR/bin/hnc_json" get-top "$RULES" clsact_bpf_mode 2>/dev/null | tr -d '"[:space:]')
+    if [ -f "$HNC_DIR/bin/hnc_json" ]; then
+        v=$(sh "$HNC_DIR/bin/hnc_json" get-top "$RULES" clsact_bpf_mode 2>/dev/null | tr -d '"[:space:]')
     fi
     if [ -z "$v" ]; then
         v=$(grep -o '"clsact_bpf_mode"[[:space:]]*:[[:space:]]*"[a-z]*"' "$RULES" 2>/dev/null | head -n1 | sed 's/.*"\([a-z]*\)"$/\1/')

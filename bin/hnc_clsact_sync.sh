@@ -30,9 +30,9 @@ emit_entries() {
     for mac in $macs; do
         ip=""
         mid=""
-        if [ -x "$HNC_DIR/bin/hnc_json" ]; then
-            ip=$("$HNC_DIR/bin/hnc_json" get-device "$DEVICES" "$mac" ip 2>/dev/null) || ip=""
-            mid=$("$HNC_DIR/bin/hnc_json" get-device "$RULES" "$mac" mark_id 2>/dev/null) || mid=""
+        if [ -f "$HNC_DIR/bin/hnc_json" ]; then
+            ip=$(sh "$HNC_DIR/bin/hnc_json" get-device "$DEVICES" "$mac" ip 2>/dev/null) || ip=""
+            mid=$(sh "$HNC_DIR/bin/hnc_json" get-device "$RULES" "$mac" mark_id 2>/dev/null) || mid=""
         fi
         # hnc_json 不可用时 awk 兜底(与 apply_device_rule.sh get_ip 同款形态:
         # 先定位 mac, 再在尾部找 "ip":"x.x.x.x", 数字段提取)

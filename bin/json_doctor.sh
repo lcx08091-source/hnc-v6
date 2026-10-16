@@ -86,11 +86,7 @@ restore_one() {
     # v5.33: 交给 hnc_json replace —— 持 run/json.lock(与所有 JSON 写者同一把, 不会被
     # 并发写覆盖 / 覆盖掉刚写入的更新)、先备份现有文件(坏的也备份)、原子替换。之前这里
     # 自己实现了一份 json.lock 协议 + 自己备份 + cp/mv。
-    if [ -x "$HNC_JSON" ]; then
-        "$HNC_JSON" replace "$target" < "$bak" || return 1
-    else
-        sh "$HNC_JSON" replace "$target" < "$bak" || return 1
-    fi
+    sh "$HNC_JSON" replace "$target" < "$bak" || return 1   # sh 跑, 不靠 shebang / 执行位
     validate_json "$target"
     rc=$?
     [ "$rc" = "0" ] || { echo "json_doctor: restored file still invalid: $base" >&2; return 1; }

@@ -123,8 +123,9 @@ acquire_lock() {
 validate_file() {
   f="$1"
   [ -f "$f" ] || { echo "hnc_json: missing file: $f" >&2; return 2; }
-  if [ -x "$JSON_GUARD" ]; then
-    "$JSON_GUARD" "$f" >/dev/null
+  if [ -f "$JSON_GUARD" ]; then
+    # sh 跑, 不靠 json_guard.sh 的 shebang(#!/system/bin/sh 运行期可能被卸 / CI 上没有)
+    sh "$JSON_GUARD" "$f" >/dev/null
     return $?
   fi
   awk '

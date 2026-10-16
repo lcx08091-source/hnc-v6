@@ -31,13 +31,10 @@ SCRIPT_DIR=${0%/*}
 HNC_JSON=${HNC_JSON:-$SCRIPT_DIR/hnc_json}
 export HNC
 
-# hnc_json 没有执行位时用 sh 跑(模块解包后权限偶尔丢)
+# 一律用 sh 跑, 不靠文件的 shebang(#!/system/bin/sh): 运行期 /system/bin 可能被卸
+# (SukiSU), CI 的 Linux 上也没有这个路径; 也不靠执行位(模块解包后权限偶尔丢)。
 hj() {
-    if [ -x "$HNC_JSON" ]; then
-        "$HNC_JSON" "$@"
-    else
-        sh "$HNC_JSON" "$@"
-    fi
+    sh "$HNC_JSON" "$@"
 }
 
 # 确保目录和文件存在

@@ -622,7 +622,7 @@ log "All services started. WebUI: open KernelSU manager → modules → HNC"
 
 # ─── 热点自动启动 ────────────────────────────────────────────
 # 读取 rules.json 里的 hotspot_auto 字段（WebUI 控制）
-HOTSPOT_AUTO=$("$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_auto 2>/dev/null \
+HOTSPOT_AUTO=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_auto 2>/dev/null \
     || grep -o '"hotspot_auto"[[:space:]]*:[[:space:]]*[a-z]*' $HNC_DIR/data/rules.json 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
 
 if [ "$HOTSPOT_AUTO" = "true" ]; then

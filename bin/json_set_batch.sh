@@ -50,11 +50,8 @@ while [ "$i" -lt "$npairs" ]; do
     set -- "$@" "$K" "$V" auto
     i=$((i + 1))
 done
-if [ -x "$HNC_JSON" ]; then
-    "$HNC_JSON" set-device-batch "$RULES" "$MAC" "$@"
-else
-    sh "$HNC_JSON" set-device-batch "$RULES" "$MAC" "$@"
-fi
+# 用 sh 跑, 不靠 shebang(#!/system/bin/sh 运行期可能被卸 / CI 上没有)与执行位
+sh "$HNC_JSON" set-device-batch "$RULES" "$MAC" "$@"
 rc=$?
 [ $rc -eq 0 ] || { echo "json_set_batch: hnc_json set-device-batch failed rc=$rc" >&2; exit $rc; }
 exit 0
