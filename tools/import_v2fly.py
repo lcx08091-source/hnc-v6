@@ -27,7 +27,6 @@
 用法:
     python3 tools/import_v2fly.py --src <domain-list-community/data> \\
         --map tools/v2fly_map.json --out data/dpi_rules.d/ [--commit <sha>] [--dry-run]
-    python3 tools/dpi_rules_split.py sync-legacy   # 之后同步派生的 dpi_rules.json
 
 纯标准库。
 """

@@ -35,9 +35,6 @@ fail(){ echo "ERR: $*" >&2; log "ERR: $*"; rm -rf "$WORK" 2>/dev/null; exit 1; }
 current_version() {
     if [ -f "$CUR_VERSION_FILE" ]; then
         cat "$CUR_VERSION_FILE" 2>/dev/null
-    elif [ -f "$HNC_DIR/data/dpi_rules.json" ]; then
-        grep -oE '"rules_version"[[:space:]]*:[[:space:]]*"[^"]*"' "$HNC_DIR/data/dpi_rules.json" 2>/dev/null \
-            | head -1 | sed 's/.*:.*"\([^"]*\)".*/\1/'
     else
         echo "builtin"
     fi

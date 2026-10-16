@@ -141,19 +141,6 @@ func loadRuleDirForTest(t testing.TB) ([]l3Rule, map[string][]externalRule) {
 	return merged, perFile
 }
 
-func loadLegacyRulesForTest(t testing.TB) []l3Rule {
-	t.Helper()
-	b, err := os.ReadFile(filepath.Join(testDataDir, "dpi_rules.json"))
-	if err != nil {
-		t.Fatalf("read dpi_rules.json: %v", err)
-	}
-	var f externalRuleFile
-	if err := json.Unmarshal(b, &f); err != nil {
-		t.Fatalf("parse dpi_rules.json: %v", err)
-	}
-	return append(compileExternalRules(f.Rules), builtinRules...)
-}
-
 func TestRulesDirLoadsCNAppsExtra(t *testing.T) {
 	rules, perFile := loadRuleDirForTest(t)
 	extra, ok := perFile["45-cn-apps-extra.json"]
@@ -282,7 +269,6 @@ func assertEquivalent(t *testing.T, name string, rules []l3Rule) {
 func TestClassifyHostIndexEquivalence(t *testing.T) {
 	dirRules, _ := loadRuleDirForTest(t)
 	assertEquivalent(t, "dpi_rules.d", dirRules)
-	assertEquivalent(t, "dpi_rules.json", loadLegacyRulesForTest(t))
 	assertEquivalent(t, "builtin", builtinRules)
 
 	// 人造边界: 同后缀多规则(先到先得)、Fallback 更长 vs Specific 更短、

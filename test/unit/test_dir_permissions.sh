@@ -11,7 +11,7 @@
 #
 # 本文件锁死的不变量:
 #   1. json_set.sh init_dirs 之后,顶层 / data / logs / run 必须是 700
-#   2. bin / api / webroot 是 755(可执行与静态资源,里面没有凭据)
+#   2. bin / webroot 是 755(可执行与静态资源,里面没有凭据; v5.33 起不再建 api/)
 #   3. 无论调用方的 umask 多松(模拟 magiskd 的 umask 0),结果都不能是 0777
 #
 # 说明:post-fs-data.sh / service.sh 里的同款 chmod 无法在单测里跑
@@ -38,18 +38,18 @@ assert_eq "700" "$(mode_of "$HNC_TEST_DIR")"        "HNC 顶层应为 700" && \
     assert_eq "700" "$(mode_of "$HNC_TEST_DIR/run")"  "run/ 应为 700(local_admin.secret)" && \
     test_pass
 
-test_start "BUG-009: init_dirs keeps bin/api/webroot at 755"
+test_start "BUG-009: init_dirs keeps bin/webroot at 755 (no api/)"
 init_dirs_with_umask 022
 assert_eq "755" "$(mode_of "$HNC_TEST_DIR/bin")"     "bin/ 应为 755" && \
-    assert_eq "755" "$(mode_of "$HNC_TEST_DIR/api")"     "api/ 应为 755" && \
     assert_eq "755" "$(mode_of "$HNC_TEST_DIR/webroot")" "webroot/ 应为 755" && \
+    assert_file_not_exists "$HNC_TEST_DIR/api" "api/ 从来没用过, 不再建" && \
     test_pass
 
 test_start "BUG-009: umask 0 (magiskd) must not leave any 0777 dir"
 # 这是真机上产生 0777 的确切条件:magiskd 把 umask=0 传给 post-fs-data/service。
 init_dirs_with_umask 000
 bad=""
-for d in "" /data /logs /run /bin /api /webroot; do
+for d in "" /data /logs /run /bin /webroot; do
     m=$(mode_of "$HNC_TEST_DIR$d")
     [ "$m" = "777" ] && bad="$bad $HNC_TEST_DIR$d($m)"
 done

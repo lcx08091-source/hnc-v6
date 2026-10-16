@@ -34,7 +34,7 @@ const (
 )
 
 // ja4Company 一家公司: 规则 id 精确表 + 前缀表。写成数据表便于扩展。
-// 规则 id 以 data/dpi_rules.json + data/dpi_rules.d/*.json + 内置规则为准
+// 规则 id 以 data/dpi_rules.d/*.json + 内置规则为准
 // (v5.15 逐条 grep 核对过, 不存在的 id 已删)。
 type ja4Company struct {
 	ID       string

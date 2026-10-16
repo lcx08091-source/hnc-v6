@@ -13,7 +13,11 @@
 # 口径与 Go 侧 findLiveByCmdlineSub(src/dpid/cmd/hnc_watchdog/main.go)一致:
 # cmdline 的某个参数恰好是关键字、或以 /<关键字> 结尾才算命中。
 #
-# 无外部依赖: 纯 shell 内建 + tr(读 cmdline)、cat(pidfile)。不用 ps / pidof。
+# 无外部依赖: 纯 shell 内建 + tr(读 cmdline)、cat(pidfile)。判活不用 ps / pidof
+# (prune_duplicate_hotspotd 列进程用 pidof, 只用来找「多出来的」)。
+#
+# v5.33: service.sh 的 _verify_pid(子串匹配, /proc 里没有该 pid 时还算「对上」)与
+# service.sh / watchdog.sh 各一份的 prune_duplicate_hotspotd 并到这里, 只留一份。
 
 # HNC_PROC_ROOT 只为测试覆盖(默认 /proc)。sourced 时不要覆盖已有值。
 HNC_PROC_ROOT="${HNC_PROC_ROOT:-/proc}"
@@ -51,4 +55,32 @@ pidfile_pid_matches() {
     [ -n "$_hp_pf" ] && [ -f "$_hp_pf" ] || return 1
     _hp_pid="$(cat "$_hp_pf" 2>/dev/null | tr -d ' \r\n')"
     pid_matches "$_hp_pid" "$2"
+}
+
+# pidfile_live_pid <pidfile> <关键字>: pidfile_pid_matches 为真时打印该 pid(否则无输出、返回 1)。
+pidfile_live_pid() {
+    pidfile_pid_matches "$1" "$2" || return 1
+    cat "$1" 2>/dev/null | tr -d ' \r\n'
+}
+
+# prune_duplicate_hotspotd: hotspotd 只留一个(rc17: 手动重启服务 / 看门狗竞态会留下两个)。
+# 留 pidfile 指的那个(活着且确是 hotspotd), 否则留 pidof 列出的第一个并修 pidfile;
+# 其余 kill -9。调用方提供 $RUN 与 log()。
+prune_duplicate_hotspotd() {
+    local keep p seen
+    keep=$(pidfile_live_pid "$RUN/hotspotd.pid" hotspotd)
+    if [ -z "$keep" ]; then
+        keep=$(pidof hotspotd 2>/dev/null | awk '{print $1}')
+        [ -n "$keep" ] && echo "$keep" > "$RUN/hotspotd.pid" 2>/dev/null || true
+    fi
+    seen=0
+    for p in $(pidof hotspotd 2>/dev/null); do
+        [ -z "$p" ] && continue
+        if [ "$p" = "$keep" ] && [ "$seen" -eq 0 ]; then
+            seen=1
+            continue
+        fi
+        log "rc17: killing duplicate hotspotd pid=$p keep=$keep"
+        kill -9 "$p" 2>/dev/null || true
+    done
 }

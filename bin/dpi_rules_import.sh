@@ -7,8 +7,9 @@
 # rc30.12.31 起优先读 etc/dpi_rules.d/*.json (99-user-custom 最后加载、
 # 覆盖策展规则), 且 service.sh 每次开机从模块目录重同步 dpi_rules.d/ ——
 # legacy 单文件在正常情况下永不被读取, 用户导入"成功"却静默无效。
-# 现在导入/安装默认/重置全部改走 99-user-custom.json(99-前缀保证用户
-# 规则最后合并、可覆盖策展集), --export 同时聚合目录与 legacy 单文件。
+# 现在导入/重置全部改走 99-user-custom.json(99-前缀保证用户规则最后合并、
+# 可覆盖策展集)。v5.33: 单文件 dpi_rules.json 删除, --install-default(把整套策展
+# 规则再拷一份进用户文件, 效果等同 --reset)随之删除; --export 只导出用户规则。
 # Safe scope: only writes DPI rule JSON and optionally triggers dpi_rebind.sh.
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
@@ -20,7 +21,6 @@ ETC="$HNC_DIR/etc"
 RUN="$HNC_DIR/run"
 LOG_DIR="$HNC_DIR/logs"
 DST="$ETC/dpi_rules.d/99-user-custom.json"
-DEFAULT="$MODDIR/data/dpi_rules.json"
 LOG="$LOG_DIR/dpi_rules_import.log"
 
 mkdir -p "$ETC" "$ETC/dpi_rules.d" "$RUN" "$LOG_DIR" 2>/dev/null || true
@@ -64,12 +64,9 @@ rebind_dpi(){
 
 case "$1" in
   --export)
-    # v5.9.92: 聚合导出 —— 优先用户导入(99-user-import), 其次旧版自定义
-    # (legacy 单文件), 再退模块默认。目录策展集不导出(那属于模块本体,
+    # 导出用户导入的规则(99-user-custom)。策展集不导出(那属于模块本体,
     # 由 data/dpi_rules.d/ 版本化维护)。
     if [ -f "$DST" ]; then cat "$DST"
-    elif [ -f "$ETC/dpi_rules.json" ]; then cat "$ETC/dpi_rules.json"
-    elif [ -f "$DEFAULT" ]; then cat "$DEFAULT"
     else echo '{"schema_version":"1.0","rules_version":"empty","rules":[]}'; fi
     exit 0
     ;;
@@ -79,19 +76,6 @@ case "$1" in
     log "reset custom rules"
     rebind_dpi
     echo "ok: user-imported DPI rules removed; curated rules active"
-    exit 0
-    ;;
-  --install-default)
-    [ -f "$DEFAULT" ] || fail "default rules not found: $DEFAULT"
-    TMP="$DST.tmp.$$"
-    cp -f "$DEFAULT" "$TMP" || fail "copy default rules failed"
-    validate_rules "$TMP"
-    mv -f "$TMP" "$DST" || fail "install default rules failed"
-    chmod 644 "$DST" 2>/dev/null || true
-    write_state_note "default dpi_rules.json installed"
-    log "installed default rules from $DEFAULT"
-    rebind_dpi
-    echo "ok: installed default DPI rules to $DST"
     exit 0
     ;;
   --stdin|"")

@@ -227,14 +227,7 @@ func (b *dnsBlockSet) counts() (int, int) {
 
 // dnsResolverHosts 加密 DNS 解析器主机名名单(与 encdns_sync.sh 同一份文件与查找顺序)
 func dnsResolverHosts(hncDir string) []string {
-	cands := []string{filepath.Join(hncDir, "etc", "encdns_resolvers.txt")}
-	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "service.path")); err == nil {
-		if p := strings.TrimSpace(string(b)); p != "" {
-			cands = append(cands, filepath.Join(p, "data", "encdns_resolvers.txt"))
-		}
-	}
-	cands = append(cands, filepath.Join(hncDir, "data", "encdns_resolvers.txt"))
-	for _, f := range cands {
+	for _, f := range dataCandidates(hncDir, "encdns_resolvers.txt") {
 		b, err := os.ReadFile(f)
 		if err != nil || len(b) == 0 {
 			continue

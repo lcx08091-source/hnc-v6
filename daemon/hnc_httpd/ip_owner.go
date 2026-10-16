@@ -238,14 +238,10 @@ func ipOwnerCandidates(hncDir string) []string {
 		return []string{p}
 	}
 	if hncDir != "" {
-		out = append(out, filepath.Join(hncDir, "etc", "ip_owner.bin"), filepath.Join(hncDir, "data", "ip_owner.bin"))
-		if b, err := os.ReadFile(filepath.Join(hncDir, "run", "service.path")); err == nil {
-			if v := strings.TrimSpace(string(b)); v != "" {
-				out = append(out, filepath.Join(v, "data", "ip_owner.bin"))
-			}
-		}
+		out = append(out, filepath.Join(hncDir, "etc", "ip_owner.bin"), filepath.Join(hncDir, "data", "ip_owner.bin"),
+			filepath.Join(moduleDir(hncDir), "data", "ip_owner.bin"))
 	}
-	return append(out, "/data/adb/modules/hotspot_network_control/data/ip_owner.bin")
+	return append(out, filepath.Join(defaultModuleDir, "data", "ip_owner.bin"))
 }
 
 // ipOwnerGet 当前库(可能为 nil)

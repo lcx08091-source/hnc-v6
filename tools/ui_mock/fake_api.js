@@ -262,7 +262,7 @@
     auth_required: true, whitelist_mode: false, remote_enabled: true, hotspot_autostart: true, hotspot_ssid: 'HNC-Demo-5G', hotspot_delay_sec: 30,
     hotspot_time_enable: false, hotspot_time_start: '07:00', hotspot_time_end: '23:30', hotspot_charging_only: false, hotspot_iface: '',
     global_shaper_enabled: false, global_shaper_down: '', global_shaper_up: '', flywheel_exclude_user: ['com.example.proxyclient'],
-    clsact_bpf_enabled: false, clsact_bpf_mode: 'auto', tc_leaf_aqm: 'auto', stale_rule_ttl_days: 30, quic_block: false, discover_cert_probe: true,
+    clsact_bpf_mode: 'auto', tc_leaf_aqm: 'auto', stale_rule_ttl_days: 30, quic_block: false, discover_cert_probe: true,
     conn_block_dns_layer: 'available', sim_enabled: false,
     offload_guard: { mode: 'auto', offload_state: 'IDLE', fallback_active: false, since: 0, detail: '加速通道存在，但当前没有转发热点流量', last_check: T - 42, slowpath: 'n/a', clsact: 'off', iface: IFACE },
     webui_access: { mode: 'all', macs: [], port: 8443, firewall: 'applied mode=all entries=0 v4=ok v6=ok' }
@@ -871,7 +871,7 @@
       if (CFG.global_shaper_enabled) { CFG.global_shaper_down = p.rate_down || ''; CFG.global_shaper_up = p.rate_up || ''; return 'global shaper on down=' + (p.rate_down || '0') + ' up=' + (p.rate_up || '0'); }
       return 'global shaper off';
     },
-    clsact_mode_set: function (p) { CFG.clsact_bpf_mode = p.mode; CFG.clsact_bpf_enabled = p.mode === 'on'; CFG.offload_guard.mode = p.mode; CFG.offload_guard.offload_state = p.mode === 'off' ? 'SKIPPED' : 'IDLE'; CFG.offload_guard.last_check = now(); return J(CFG.offload_guard); },
+    clsact_mode_set: function (p) { CFG.clsact_bpf_mode = p.mode; CFG.offload_guard.mode = p.mode; CFG.offload_guard.offload_state = p.mode === 'off' ? 'SKIPPED' : 'IDLE'; CFG.offload_guard.last_check = now(); return J(CFG.offload_guard); },
     clsact_check: function () { return J({ ok: true, clsact: true, bpf_filter: true, map: true, watchdog: true, iface: IFACE }); },
     tc_leaf_aqm_set: function (p) { CFG.tc_leaf_aqm = p.mode; return ''; },
     qos_set: function (p) { if (p.mode) CFG.tc_qos_mode = p.mode; if (p.scale) CFG.tc_qos_scale = +p.scale; return ''; },

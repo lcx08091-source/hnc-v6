@@ -15,17 +15,15 @@ import (
 	"time"
 )
 
-// clsactModeFromRules 生效模式: clsact_bpf_mode ∈ {auto,on,off} 优先;
-// 缺失/非法时旧键 clsact_bpf_enabled=true → on, 否则 auto。
+// clsactModeFromRules 生效模式: clsact_bpf_mode ∈ {auto,on,off}; 缺失/非法 → auto。
+// v5.33: 旧键 clsact_bpf_enabled 由 post-fs-data 开机一次性迁成 clsact_bpf_mode 后删除,
+// 这里(以及 offload guard 脚本、设置页)不再各自兼容它。
 func clsactModeFromRules(m map[string]interface{}) string {
 	if v, ok := m["clsact_bpf_mode"].(string); ok {
 		switch v = strings.ToLower(strings.TrimSpace(v)); v {
 		case "auto", "on", "off":
 			return v
 		}
-	}
-	if boolField(m, "clsact_bpf_enabled") {
-		return "on"
 	}
 	return "auto"
 }

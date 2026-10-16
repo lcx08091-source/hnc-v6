@@ -5,18 +5,20 @@
 // rc20.1->rc28.1.1 binary never read them. rc29 finally reads them so the
 // rule library actually does what its schema promises.
 //
-// External rule paths (probed in order):
-//  1. /data/local/hnc/etc/dpi_rules.d/*.json   (rc30.12.31+, glob + merge)
-//  2. /data/local/hnc/etc/dpi_rules.json       (legacy single file)
-//  3. builtinRules                              (compiled-in fallback)
+// Rule sources:
+//  1. /data/local/hnc/etc/dpi_rules.d/*.json   (glob + merge; service.sh syncs it
+//     from the module's data/dpi_rules.d/ on every boot)
+//  2. builtinRules                              (compiled-in fallback, dir missing/empty)
+//
+// v5.33: the legacy single file etc/dpi_rules.json (installed from the module's
+// data/dpi_rules.json, a byte-identical derived copy of data/dpi_rules.d/) and
+// its loader are gone — the directory is the only external source.
 //
 // rc30.12.31 (TASK-a Stage 2): added dpi_rules.d/ support. Loader globs
 // *.json by filename order (subset prefix 00..99 controls precedence),
 // merges all rules, dedups by id (last write wins, nginx conf.d style) so
 // 99-user-custom.json can reliably override curated rules. A single bad
 // subset file is skipped with a WARN log instead of killing the whole load.
-// If the dir is absent, falls back to the legacy single-file path with
-// 100% identical behavior to rc30.12.30.
 
 package output
 
@@ -32,9 +34,7 @@ import (
 )
 
 const (
-	externalRulesPath = "/data/local/hnc/etc/dpi_rules.json"
-	// rc30.12.31 (TASK-a Stage 2): preferred path. Glob etc/dpi_rules.d/*.json
-	// and merge in filename order. Falls back to externalRulesPath if absent.
+	// Glob etc/dpi_rules.d/*.json and merge in filename order.
 	externalRulesDir = "/data/local/hnc/etc/dpi_rules.d"
 	// rc30.12.31 (TASK-a Stage 2): per-subset file size cap. A bad subset
 	// gets skipped with WARN; cap protects against runaway file growth.
@@ -246,17 +246,13 @@ func currentL3RuleVersion() string {
 	return lr.version
 }
 
-// loadL3Rules dispatches between the new etc/dpi_rules.d/ directory
-// (preferred, rc30.12.31+) and the legacy etc/dpi_rules.json single file.
-// Returns builtinRules on any error path so dpid always has a working set.
-//
-// rc30.12.31 (TASK-a Stage 2): added dpi_rules.d/ dispatch. Behavior on
-// hosts that don't have the dir is byte-for-byte identical to rc30.12.30.
+// loadL3Rules loads etc/dpi_rules.d/; builtinRules when the dir is missing,
+// empty or unusable so dpid always has a working set.
 func loadL3Rules() loadedRules {
 	if lr, ok := loadL3RulesFromDir(); ok {
 		return lr
 	}
-	return loadL3RulesLegacy()
+	return loadedRules{version: "builtin-rc29", rules: builtinRules}
 }
 
 // loadL3RulesFromDir tries the dpi_rules.d/ glob path.
@@ -264,14 +260,12 @@ func loadL3Rules() loadedRules {
 // Returns (rules, true) on success.
 // Returns (_, false) when the directory does not exist, contains no usable
 // subset files, or yields zero compiled rules — in all these cases the
-// caller falls back to loadL3RulesLegacy. A subset file that fails to parse
+// caller falls back to builtinRules. A subset file that fails to parse
 // is skipped with a WARN log but does NOT cause a fallback: partial loads
 // are acceptable, since some rules > zero rules.
 //
 // Cache: keyed on (max child mtime, sum of child sizes) plus the "external-d:"
-// version prefix. The version-prefix check protects against the rare case
-// where a legacy load's (single-file mtime, size) collide with the dir's
-// (aggregate mtime, sum size).
+// version prefix (the initial builtin entry never matches).
 //
 // v5.9.0 two-pass load: this function is on the per-packet classify hot path
 // (RecordDNS/RecordTLS/RecordFlow → classifyHost → loadL3Rules), and the old
@@ -322,10 +316,9 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 	}
 
 	// Cache hit check — BEFORE any read/parse. We require the cached entry
-	// to also have the "external-d:" prefix — otherwise a stale legacy-path
-	// cache entry with coincidentally equal (mtime, size) could be returned
-	// here. (The initial builtin cache entry has mtime=0/size=0 but no
-	// "external-d:" prefix, so an all-stat-failed pass cannot false-hit it.)
+	// to also have the "external-d:" prefix (the initial builtin cache entry
+	// has mtime=0/size=0 but no prefix, so an all-stat-failed pass cannot
+	// false-hit it).
 	ruleCache.Lock()
 	if ruleCache.mtime == aggrMtime && ruleCache.size == aggrSize &&
 		len(ruleCache.val.rules) > 0 &&
@@ -360,7 +353,7 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 		usableFiles++
 	}
 
-	// No usable subset → fall back to legacy. We do NOT cache "empty dir"
+	// No usable subset → builtin. We do NOT cache "empty dir"
 	// because tomorrow the user might drop a subset file in and we want
 	// the next load to pick it up. (This check must stay after the read
 	// pass: stat-time knowledge alone cannot tell usable from unparsable.)
@@ -374,14 +367,13 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 	}
 
 	merged := make([]l3Rule, 0, len(compiled)+len(builtinRules))
-	// External rules first so they win on equal-length suffix matches —
-	// same precedence rule as the legacy single-file path.
+	// External rules first so they win on equal-length suffix matches.
 	merged = append(merged, compiled...)
 	merged = append(merged, builtinRules...)
 
 	version := "external-d:" + strings.Join(versionParts, ",")
 	if len(versionParts) == 0 {
-		version = "external-d:" // unnamed subsets; still distinguishable from "external:"
+		version = "external-d:" // unnamed subsets
 	}
 	lr := loadedRules{version: version, rules: merged}
 
@@ -391,73 +383,6 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 	ruleCache.val = lr
 	ruleCache.Unlock()
 	return lr, true
-}
-
-// loadL3RulesLegacy reads /data/local/hnc/etc/dpi_rules.json with mtime-based
-// caching. Falls back to builtinRules on any error.
-//
-// This is the pre-rc30.12.31 implementation, retained verbatim as the
-// fallback path for hosts that don't have etc/dpi_rules.d/.
-func loadL3RulesLegacy() loadedRules {
-	st, err := os.Stat(externalRulesPath)
-	if err != nil {
-		ruleCache.Lock()
-		defer ruleCache.Unlock()
-		ruleCache.mtime = 0
-		ruleCache.size = 0
-		ruleCache.val = loadedRules{version: "builtin-rc29", rules: builtinRules}
-		return ruleCache.val
-	}
-	mtime := st.ModTime().UnixNano()
-	size := st.Size()
-
-	ruleCache.Lock()
-	if ruleCache.mtime == mtime && ruleCache.size == size && len(ruleCache.val.rules) > 0 &&
-		!strings.HasPrefix(ruleCache.val.version, "external-d:") {
-		v := ruleCache.val
-		ruleCache.Unlock()
-		return v
-	}
-	ruleCache.Unlock()
-
-	b, err := os.ReadFile(externalRulesPath)
-	if err != nil || len(b) == 0 || len(b) > 1024*1024 {
-		ruleCache.Lock()
-		defer ruleCache.Unlock()
-		ruleCache.val = loadedRules{version: "builtin-rc29", rules: builtinRules}
-		ruleCache.mtime = mtime
-		ruleCache.size = size
-		return ruleCache.val
-	}
-
-	var f externalRuleFile
-	if err := json.Unmarshal(b, &f); err != nil {
-		ruleCache.Lock()
-		defer ruleCache.Unlock()
-		ruleCache.val = loadedRules{version: "builtin-rc29+invalid-external", rules: builtinRules}
-		ruleCache.mtime = mtime
-		ruleCache.size = size
-		return ruleCache.val
-	}
-
-	compiled := compileExternalRules(f.Rules)
-
-	version := strings.TrimSpace(f.RulesVersion)
-	if version == "" {
-		version = "external"
-	}
-	merged := make([]l3Rule, 0, len(compiled)+len(builtinRules))
-	// External rules first so they win on equal-length suffix matches.
-	merged = append(merged, compiled...)
-	merged = append(merged, builtinRules...)
-	lr := loadedRules{version: "external:" + version, rules: merged}
-
-	ruleCache.Lock()
-	ruleCache.mtime = mtime
-	ruleCache.size = size
-	ruleCache.val = lr
-	ruleCache.Unlock()
-	return lr
 }
 
 // compileExternalRules turns the loose external schema into compiled l3Rule.
@@ -894,8 +819,8 @@ func uniqueStrings(in []string) []string {
 	return out
 }
 
-// builtinRules is a tiny fallback set used only when no external rules file
-// is present. The real curated rule library ships as data/dpi_rules.json.
+// builtinRules is a tiny fallback set used only when etc/dpi_rules.d/ is
+// missing or unusable. The real curated rule library ships as data/dpi_rules.d/.
 var builtinRules = []l3Rule{
 	{ID: "youtube", Name: "YouTube", Category: "video", Suffixes: []string{"youtube.com", "googlevideo.com", "ytimg.com"}},
 	{ID: "bilibili", Name: "哔哩哔哩", Category: "video", Suffixes: []string{"bilibili.com", "bilivideo.com", "biliapi.net", "biliapi.com"}},

@@ -9,18 +9,18 @@ import (
 	"testing"
 )
 
-// v5.18: clsact_bpf_mode 解析(旧键兼容)
+// v5.18: clsact_bpf_mode 解析。v5.33: 旧键 clsact_bpf_enabled 开机迁移后删除, 这里不再
+// 兼容(「改动前会失败」: v5.32 把只有旧键 true 的配置判成 on)。
 func TestClsactModeFromRules(t *testing.T) {
 	cases := []struct {
 		m    map[string]interface{}
 		want string
 	}{
 		{map[string]interface{}{}, "auto"},
-		{map[string]interface{}{"clsact_bpf_enabled": true}, "on"},
-		{map[string]interface{}{"clsact_bpf_enabled": false}, "auto"},
+		{map[string]interface{}{"clsact_bpf_enabled": true}, "auto"},
 		{map[string]interface{}{"clsact_bpf_enabled": true, "clsact_bpf_mode": "off"}, "off"},
 		{map[string]interface{}{"clsact_bpf_mode": "ON"}, "on"},
-		{map[string]interface{}{"clsact_bpf_mode": "bogus", "clsact_bpf_enabled": true}, "on"},
+		{map[string]interface{}{"clsact_bpf_mode": "bogus", "clsact_bpf_enabled": true}, "auto"},
 	}
 	for _, c := range cases {
 		if got := clsactModeFromRules(c.m); got != c.want {
@@ -36,7 +36,8 @@ func writeStub(t *testing.T, dir, name, body string) {
 	}
 }
 
-// v5.18: clsact_mode_set 校验 + 写 rules + 立即 apply; clsact_bpf_enabled_set 为别名
+// v5.18: clsact_mode_set 校验 + 写 rules + 立即 apply。v5.33: 不再同步写旧键、
+// 旧别名 clsact_bpf_enabled_set 删除。
 func TestClsactModeSetAction(t *testing.T) {
 	dir := t.TempDir()
 	for _, d := range []string{"data", "run", "bin"} {
@@ -52,21 +53,17 @@ func TestClsactModeSetAction(t *testing.T) {
 		t.Fatalf("mode_set on = %+v", r)
 	}
 	log, _ := os.ReadFile(filepath.Join(dir, "run", "json_set.log"))
-	for _, want := range []string{"top clsact_bpf_mode on", "top clsact_bpf_enabled true", "guard apply"} {
+	for _, want := range []string{"top clsact_bpf_mode on", "guard apply"} {
 		if !strings.Contains(string(log), want) {
 			t.Fatalf("missing %q in %q", want, log)
 		}
 	}
-	_ = os.Remove(filepath.Join(dir, "run", "json_set.log"))
-	if r := actionClsactEnabledSet(dir, map[string]string{"enabled": "false"}); !r.OK {
-		t.Fatalf("legacy alias: %+v", r)
+	if strings.Contains(string(log), "clsact_bpf_enabled") {
+		t.Fatalf("v5.33 起不再同步写旧键: %q", log)
 	}
-	log, _ = os.ReadFile(filepath.Join(dir, "run", "json_set.log"))
-	if !strings.Contains(string(log), "top clsact_bpf_mode off") || !strings.Contains(string(log), "top clsact_bpf_enabled false") {
-		t.Fatalf("legacy false should map to off: %q", log)
-	}
-	if r := actionClsactEnabledSet(dir, map[string]string{"enabled": "maybe"}); r.OK {
-		t.Fatal("legacy bad param accepted")
+	s := newServer(dir)
+	if r := dispatchAction(s, "clsact_bpf_enabled_set", map[string]string{"enabled": "true"}, true); r.OK {
+		t.Fatalf("旧别名 clsact_bpf_enabled_set 应已删除: %+v", r)
 	}
 }
 
@@ -76,7 +73,7 @@ func TestConfigOffloadGuardFields(t *testing.T) {
 	for _, d := range []string{"data", "run"} {
 		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
 	}
-	_ = os.WriteFile(filepath.Join(dir, "data", "rules.json"), []byte(`{"clsact_bpf_enabled":true}`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "data", "rules.json"), []byte(`{"clsact_bpf_mode":"on"}`), 0o644)
 	s := newServer(dir)
 	get := func() map[string]interface{} {
 		w := httptest.NewRecorder()
@@ -88,8 +85,8 @@ func TestConfigOffloadGuardFields(t *testing.T) {
 		return m
 	}
 	m := get()
-	if m["clsact_bpf_mode"] != "on" || m["clsact_bpf_enabled"] != true {
-		t.Fatalf("legacy → on: %v", m)
+	if _, ok := m["clsact_bpf_enabled"]; m["clsact_bpf_mode"] != "on" || ok {
+		t.Fatalf("mode on / 不再透出 clsact_bpf_enabled: %v", m)
 	}
 	if v, ok := m["offload_guard"]; !ok || v != nil {
 		t.Fatalf("offload_guard must be null when absent: %v", v)
@@ -105,7 +102,7 @@ func TestConfigOffloadGuardFields(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dir, "run", "connblock_caps.json"), []byte(`{"dns_layer":false,"dns_layer_v6":false,"checked":1}`), 0o644)
 	m = get()
 	g, _ := m["offload_guard"].(map[string]interface{})
-	if m["clsact_bpf_mode"] != "auto" || m["clsact_bpf_enabled"] != false || g == nil || g["fallback_active"] != true || g["offload_state"] != "ACTIVE" {
+	if m["clsact_bpf_mode"] != "auto" || g == nil || g["fallback_active"] != true || g["offload_state"] != "ACTIVE" {
 		t.Fatalf("guard fields: %v", m)
 	}
 	if m["conn_block_dns_layer"] != "unavailable" {

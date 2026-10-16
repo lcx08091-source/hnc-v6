@@ -290,21 +290,6 @@ var appCatalogCache struct {
 	cat *appCatalog
 }
 
-// appCatalogFiles 与 dpid 同源: etc/dpi_rules.d/*.json 优先, 否则 etc/dpi_rules.json,
-// 再否则 data/dpi_rules.json(模块自带的派生文件)
-func appCatalogFiles(hncDir string) []string {
-	if fs, _ := filepath.Glob(filepath.Join(hncDir, "etc", "dpi_rules.d", "*.json")); len(fs) > 0 {
-		sort.Strings(fs)
-		return fs
-	}
-	for _, p := range []string{filepath.Join(hncDir, "etc", "dpi_rules.json"), filepath.Join(hncDir, "data", "dpi_rules.json")} {
-		if _, err := os.Stat(p); err == nil {
-			return []string{p}
-		}
-	}
-	return nil
-}
-
 type catalogRawRule struct {
 	ID        string   `json:"id"`
 	App       string   `json:"app"`
@@ -316,7 +301,7 @@ type catalogRawRule struct {
 }
 
 func loadAppCatalog(hncDir string) *appCatalog {
-	files := appCatalogFiles(hncDir)
+	files := dpiRuleFiles(hncDir) // 与 dpid 同源(hnc_paths.go)
 	var kb strings.Builder
 	for _, f := range files {
 		if st, err := os.Stat(f); err == nil {

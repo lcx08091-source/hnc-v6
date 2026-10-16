@@ -32,15 +32,9 @@ var sharedInfraCache struct {
 	cur   *output.SharedInfra
 }
 
-// sharedInfraPaths 名单查找顺序: 运行目录(随规则同步)> 模块目录 > hncDir/data。
+// sharedInfraPaths 名单查找顺序: 运行目录(随规则同步)> 模块目录 > hncDir/data(hnc_paths.go)。
 func sharedInfraPaths(hncDir string) []string {
-	ps := []string{filepath.Join(hncDir, "etc", "dpi_rules.d", output.SharedInfraFileName)}
-	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "service.path")); err == nil {
-		if p := strings.TrimSpace(string(b)); p != "" {
-			ps = append(ps, filepath.Join(p, "data", "dpi_rules.d", output.SharedInfraFileName))
-		}
-	}
-	return append(ps, filepath.Join(hncDir, "data", "dpi_rules.d", output.SharedInfraFileName))
+	return dataCandidates(hncDir, filepath.Join("dpi_rules.d", output.SharedInfraFileName))
 }
 
 // loadSharedInfra 第一份存在的名单(按 path + mtime + size 缓存)。都没有 → nil。

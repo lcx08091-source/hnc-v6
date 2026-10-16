@@ -184,6 +184,7 @@ pfd_seed() {
     rm -rf "$MOD"; mkdir -p "$MOD/bin" "$MOD/daemon/hnc_httpd" "$MOD/webroot"
     printf 'id=hnc\nversion=vX\nversionCode=%s\n' "$1" > "$MOD/module.prop"
     cp "$HNC_REPO_ROOT/bin/hnc_rollback.sh" "$MOD/bin/"
+    cp "$HNC_REPO_ROOT/bin/hnc_runtime_sync.sh" "$MOD/bin/"   # v5.33: 同步只此一份, post-fs-data 调它
     echo "NEW-BIN" > "$MOD/bin/hnc_watchdog"
     echo "NEW-HTTPD" > "$MOD/daemon/hnc_httpd/hnc_httpd"
     echo "NEW-WEB" > "$MOD/webroot/index.html"

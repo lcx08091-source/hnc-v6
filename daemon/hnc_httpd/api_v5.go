@@ -39,10 +39,8 @@ type configResp struct {
 	GlobalShaperUp      string `json:"global_shaper_up,omitempty"`
 	// rc35: 用户维护的飞轮排除名单(VPN/代理),不含内置清单。供设置页展示/增删。
 	FlywheelExcludeUser []string `json:"flywheel_exclude_user,omitempty"`
-	// v5.9.7: clsact BPF (T1 tier)。v5.18 起只读兼容 = (clsact_bpf_mode == "on")。
-	ClsactBpfEnabled bool `json:"clsact_bpf_enabled"`
 	// v5.18: offload 旁路兜底模式 auto(默认)| on | off, 见 bin/hnc_offload_guard.sh。
-	// 旧装机只有 clsact_bpf_enabled=true 时视为 on。
+	// v5.33: 删只读兼容字段 clsact_bpf_enabled(旧键开机迁移后删除)。
 	ClsactBpfMode string `json:"clsact_bpf_mode"`
 	// v5.20: 设备默认叶子队列 auto(默认)| on | off, 见 action_qdisc.go / tc_manager.sh
 	TcLeafAqm string `json:"tc_leaf_aqm"`
@@ -87,7 +85,6 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 			resp.WhitelistMode = boolField(m, "whitelist_mode")
 			resp.RemoteEnabled = boolField(m, "remote_enabled")
 			resp.ClsactBpfMode = clsactModeFromRules(m)
-			resp.ClsactBpfEnabled = resp.ClsactBpfMode == "on"
 			if v, ok := m["tc_leaf_aqm"].(string); ok && (v == "on" || v == "off" || v == "auto") {
 				resp.TcLeafAqm = v
 			}

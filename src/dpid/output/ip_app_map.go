@@ -115,8 +115,7 @@ func (m *IPAppMap) Record(ip, appID, name, category string, now int64, src strin
 
 const ipAppKeepRealSec = 120
 
-// 应用分级(v5.14)。httpd 的 appTier(daemon/hnc_httpd/api_conn.go)是同一张表的
-// 副本, 改这里要同步改那边。
+// 应用分级(v5.14)。httpd 直接引用这里(v5.33 前 httpd 有一份照抄的副本)。
 const (
 	TierApp    = 0 // 用户能感知的应用: 视频/社交/游戏/购物…
 	TierSystem = 1 // 系统/ROM 服务: 没有真应用时才显示

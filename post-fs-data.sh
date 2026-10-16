@@ -8,7 +8,7 @@
 # v5.9.3 BUG-009:引导脚本继承 magiskd/KSU 的 umask=0,裸 `mkdir -p` 建出来的
 # 目录就是 0777、裸 `>` 建出来的文件就是 0666 —— 仓库里一处 chmod 777 都没有,
 # 真机上那一堆 0777 全是这么来的。这里显式定 umask。
-# 为什么是 022 不是 077:下面 :47-51 的 `cp -rf` 不带 -p,新建文件的权限是
+# 为什么是 022 不是 077:bin/hnc_runtime_sync.sh 的 `cp -rf` 不带 -p,新建文件的权限是
 # 源权限 & ~umask;umask=077 会把仓库里 644 的脚本和 755 的二进制统统压成
 # 0600/0700,而后面的 chmod 覆盖面并不完整(`chmod 755 bin/*.sh` 的 glob 不
 # 递归,漏 bin/diag/diag.sh;二进制 chmod 只覆盖 10 个白名单名字,漏
@@ -67,7 +67,10 @@ rm -f "$HNC_DIR/data/m4_owner" "$HNC_DIR/run/m4_owner.current" "$HNC_DIR/run/wd_
       "$HNC_DIR/run/wd_m5.disabled" "$HNC_DIR/run/wd_m3.disabled" "$HNC_DIR/run/offload_guard.owner" \
       "$HNC_DIR/run/offload_guard.pid" "$HNC_DIR/run/clsact_wd.pid" \
       "$HNC_DIR/run/wd_native.disabled" "$HNC_DIR/run/httpd_bind_ip" "$HNC_DIR/run/httpd.wanted" \
-      "$HNC_DIR/run/json_legacy_fallback.log" "$HNC_DIR/run/json_legacy_fallback.count" 2>/dev/null
+      "$HNC_DIR/run/json_legacy_fallback.log" "$HNC_DIR/run/json_legacy_fallback.count" \
+      "$HNC_DIR/etc/dpi_rules.json" 2>/dev/null
+# 运行目录里从没用过的 api/(模块里就没有)和 test/(测试不进安装包): 空的就删
+rmdir "$HNC_DIR/api" "$HNC_DIR/test" 2>/dev/null
 
 # 初始化规则文件 · rc3.1.13 起 auth_required 也在这
 [ ! -f "$HNC_DIR/data/rules.json" ] && cat > "$HNC_DIR/data/rules.json" << 'EOF'
@@ -75,12 +78,23 @@ rm -f "$HNC_DIR/data/m4_owner" "$HNC_DIR/run/m4_owner.current" "$HNC_DIR/run/wd_
   "version": 1,
   "whitelist_mode": false,
   "auth_required": true,
-  "clsact_bpf_enabled": false,
   "devices": {},
   "blacklist": [],
   "whitelist": []
 }
 EOF
+
+# v5.33: 旧开关键 clsact_bpf_enabled(v5.9.7)一次性迁成 clsact_bpf_mode 后删除。之前
+# httpd / offload guard / 设置页各自「缺 mode 时看旧键」, 切模式时还要同步写旧键。
+if grep -q '"clsact_bpf_enabled"' "$HNC_DIR/data/rules.json" 2>/dev/null; then
+    if ! grep -q '"clsact_bpf_mode"' "$HNC_DIR/data/rules.json" 2>/dev/null; then
+        _cm=auto
+        grep -q '"clsact_bpf_enabled"[[:space:]]*:[[:space:]]*true' "$HNC_DIR/data/rules.json" 2>/dev/null && _cm=on
+        HNC="$HNC_DIR" sh "$MODDIR/bin/hnc_json" set-top "$HNC_DIR/data/rules.json" clsact_bpf_mode "$_cm" str 2>/dev/null
+    fi
+    grep -q '"clsact_bpf_mode"' "$HNC_DIR/data/rules.json" 2>/dev/null && \
+        HNC="$HNC_DIR" sh "$MODDIR/bin/hnc_json" del-object-key "$HNC_DIR/data/rules.json" clsact_bpf_enabled 2>/dev/null
+fi
 
 # rc3.1.13: config.json 弃用 · 不再创建默认
 # 历史上 config.json 承载 auth_required (cfg_set 写) + 4 个死字段
@@ -92,7 +106,7 @@ EOF
 # v5.29 T3: 升级快照 + 钉住检查, 必须在下面的 cp 之前 —— 本脚本每次开机都
 # 比 service.sh 先把模块文件拷进运行目录, 快照放在 service.sh 里打包到的已经
 # 是新版, 钉住也挡不住这里把坏版本拷回来。rc=3 = 坏版本已钉住且模块没换新包
-# → 跳过 bin/api/webroot/httpd 的同步, 用 .prev 恢复过的旧文件开机。
+# → 跳过 bin/webroot/httpd 的同步, 用 .prev 恢复过的旧文件开机。
 _HNC_RB=0
 if [ -f "$MODDIR/bin/hnc_rollback.sh" ]; then
     HNC_RB_LOG="$HNC_DIR/logs/rollback.log" sh "$MODDIR/bin/hnc_rollback.sh" snapshot "$MODDIR" "$HNC_DIR"
@@ -100,78 +114,14 @@ if [ -f "$MODDIR/bin/hnc_rollback.sh" ]; then
 fi
 [ "$_HNC_RB" = 3 ] && echo "[HNC] rollback: version pinned, skip runtime sync (staying on .prev)" >> "$HNC_DIR/logs/boot.log"
 
-# Fix #7: 先建目录，再统一复制（去除重复操作）
-mkdir -p "$HNC_DIR/bin" "$HNC_DIR/api" "$HNC_DIR/webroot" "$HNC_DIR/test"
-# v5.9.3 BUG-009:资源目录显式 755(老装机可能是 0777),不收到 700 是为了
-# 保留"非 root 也能只读排查"的余地,这几个目录里没有凭据。
-chmod 755 "$HNC_DIR/bin" "$HNC_DIR/api" "$HNC_DIR/webroot" "$HNC_DIR/test" 2>/dev/null
-if [ "$_HNC_RB" != 3 ]; then
-    cp -rf "$MODDIR"/bin/* "$HNC_DIR/bin/" 2>/dev/null || true
-    cp -rf "$MODDIR"/api/* "$HNC_DIR/api/" 2>/dev/null || true
-    cp -rf "$MODDIR"/webroot/* "$HNC_DIR/webroot/" 2>/dev/null || true
+# v5.33: 模块 → 运行目录的同步(bin/ webroot/ hnc_httpd + 原生二进制 chmod / chcon)只有
+# bin/hnc_runtime_sync.sh 一份, service.sh 也调它。之前这里还拷从来不存在的 api/ 和不进
+# 安装包的 test/。回滚钉住(rc=3)时只修权限, 不同步。
+if [ "$_HNC_RB" = 3 ]; then
+    sh "$MODDIR/bin/hnc_runtime_sync.sh" perms "$MODDIR" "$HNC_DIR" >> "$HNC_DIR/logs/boot.log" 2>&1
+else
+    sh "$MODDIR/bin/hnc_runtime_sync.sh" sync "$MODDIR" "$HNC_DIR" >> "$HNC_DIR/logs/boot.log" 2>&1
 fi
-# v3.5.0 alpha: 复制测试框架(让 user 能在真机跑 sh test/run_all.sh)
-cp -rf "$MODDIR"/test/* "$HNC_DIR/test/" 2>/dev/null || true
-
-# v4.0.0-patch1.1 hotfix: daemon/hnc_httpd binary 精细 copy
-# post-fs-data.sh 之前只 copy bin/api/webroot/test,漏了 daemon/,
-# 导致 v4.0.0-patch1 的远程访问 binary 根本没进 data 目录,
-# service.sh 找 $HNC_DIR/daemon/hnc_httpd/hnc_httpd 永远 miss,
-# 结果 remote_enabled=true 也启动不了 httpd (用户报告:浏览器 ERR_CONNECTION_REFUSED)
-# 只 copy 产物 binary,不 copy .c 源 / README / build.sh / web/(web 已 //go:embed 进 binary)
-if [ "$_HNC_RB" != 3 ] && [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
-    mkdir -p "$HNC_DIR/daemon/hnc_httpd"
-    chmod 755 "$HNC_DIR/daemon" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null  # v5.9.3 BUG-009
-    if ! cmp -s "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null; then
-        cp -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
-        echo "[HNC] hotfix17.3: refreshed runtime hnc_httpd binary from module" >> "$HNC_DIR/logs/boot.log"
-    fi
-    chmod 755 "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null
-fi
-
-chmod 755 "$HNC_DIR"/bin/*.sh
-# v5.0 beta.1 修: 单独 chmod 所有无后缀二进制
-# post-fs-data.sh 原来只 chmod *.sh, 但 bin/ 下的 C 二进制 (hotspotd / hnc_ipc /
-# hnc_tc_ingress / mdns_resolve) 没 .sh 后缀, 权限不被保证是 755.
-# 真机 RMX5010 装 beta.1 后 hnc_tc_ingress 权限 644 → 不能 exec →
-# install_ingress_mirred_via_netlink 回落 → 上行限速失败.
-#
-# rc30.8 补: hnc_watchdog (rc30.1 加) 之前漏掉, 权限 644 → 不能 exec。
-# (v5.33: hnc_dpid_supervisor 已删, 不再在列表里。)
-#
-# rc30.11 关键修复: 这个 chmod 块原来只 chmod $HNC_DIR/bin/, 但
-# post-fs-data.sh 跑时 sync_runtime_from_moddir 还没执行 (那是 service.sh 干的),
-# /data/local/hnc/bin/ 里文件可能还没拷过来. 真机 RMX5010 装 rc30.10 后碰到
-# supervisor 文件是 644, 导致 Go watchdog fork+exec 报 EPERM, 整个后端起不来.
-# rc30.11 修复: 同时也 chmod $MODDIR/bin/, 这样 sync_runtime_from_moddir 用
-# cp 拷过去时权限就正确, 不依赖 service.sh 后续再 chmod.
-#
-# 另外加 chcon — SukiSU/KSU 给模块目录的文件设的是 u:object_r:system_file:s0,
-# 但 cp 到 /data/local/hnc/bin 后 context 变成 system_data_file:s0, 在 ColorOS 16
-# 这种加固系统上, Go runtime fork+exec system_data_file 的 binary 会被某条
-# 策略拒掉 (现象是 EPERM, 但 AVC log 不打). 强制设回 system_file:s0 兜底.
-for _dir in "$MODDIR/bin" "$HNC_DIR/bin"; do
-    [ -d "$_dir" ] || continue
-    for _b in hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_json hnc_dpid \
-              hnc_watchdog hnc_launcher fork_probe \
-              hnc_clsact_ctl; do
-        if [ -f "$_dir/$_b" ]; then
-            chmod 755 "$_dir/$_b"
-            chcon u:object_r:system_file:s0 "$_dir/$_b" 2>/dev/null || true
-        fi
-    done
-done
-# hnc_httpd 在 daemon/hnc_httpd/ 单独处理
-for _dir in "$MODDIR/daemon/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd"; do
-    if [ -f "$_dir/hnc_httpd" ]; then
-        chmod 755 "$_dir/hnc_httpd"
-        chcon u:object_r:system_file:s0 "$_dir/hnc_httpd" 2>/dev/null || true
-    fi
-done
-chmod 755 "$HNC_DIR/api/server.sh" 2>/dev/null
-chmod 755 "$HNC_DIR/test/run_all.sh" 2>/dev/null
-chmod 755 "$HNC_DIR/test/lib.sh" 2>/dev/null
-chmod 755 "$HNC_DIR"/test/unit/*.sh 2>/dev/null
 
 # rc3.1.13.1 修 P0 (review §1): 单向迁移块必须在 cp -rf 之后,
 # 不能依赖 $HNC_DIR/bin/json_set.sh 的残留版本 (上一版可能不存在 top 子命令).

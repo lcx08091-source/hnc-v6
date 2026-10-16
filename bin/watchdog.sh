@@ -33,6 +33,12 @@ if [ -f "$HNC_DIR/bin/hnc_activity.sh" ]; then
 elif [ -f "${0%/*}/hnc_activity.sh" ]; then
     . "${0%/*}/hnc_activity.sh"
 fi
+# v5.33: prune_duplicate_hotspotd(action prune_dup_hotspotd)与 service.sh 共用 bin/hnc_proc.sh
+if [ -f "$HNC_DIR/bin/hnc_proc.sh" ]; then
+    . "$HNC_DIR/bin/hnc_proc.sh"
+elif [ -f "${0%/*}/hnc_proc.sh" ]; then
+    . "${0%/*}/hnc_proc.sh"
+fi
 command -v hnc_act_load >/dev/null 2>&1 || {
     hnc_act_load() { ACT_OK=0; ACT_LEVEL=unknown; ACT_SCREEN_OFF=0; ACT_SCREEN_ON=0; ACT_HOTSPOT=1; ACT_CLIENTS=1; ACT_WEBUI=1; return 1; }
 }
@@ -44,27 +50,6 @@ RUN=$HNC_DIR/run
 log() {
     [ -d "$(dirname "$LOG")" ] || mkdir -p "$(dirname "$LOG")" 2>/dev/null
     echo "[$(TZ=Asia/Shanghai date '+%H:%M:%S')] [WDG] $1" >> "$LOG" 2>/dev/null || true
-}
-
-# rc17: keep hotspotd single-instance during watchdog self-heal.  Keep the
-# pidfile target when alive; otherwise repair pidfile to the first live process.
-prune_duplicate_hotspotd() {
-    local keep p seen
-    keep=$(cat "$RUN/hotspotd.pid" 2>/dev/null)
-    if [ -z "$keep" ] || ! kill -0 "$keep" 2>/dev/null; then
-        keep=$(pidof hotspotd 2>/dev/null | awk '{print $1}')
-        [ -n "$keep" ] && echo "$keep" > "$RUN/hotspotd.pid" 2>/dev/null || true
-    fi
-    seen=0
-    for p in $(pidof hotspotd 2>/dev/null); do
-        [ -z "$p" ] && continue
-        if [ "$p" = "$keep" ] && [ "$seen" -eq 0 ]; then
-            seen=1
-            continue
-        fi
-        log "rc17: killing duplicate hotspotd pid=$p keep=$keep"
-        kill -9 "$p" 2>/dev/null || true
-    done
 }
 
 # v4.0 Patch 1.6: [ERROR] 前缀便于 grep 故障排查

@@ -327,7 +327,7 @@ function renderSettings(anim1) {
     sItem(['green', 'cpu'], 'hotspotd 进程', rs.hotspotd_pid ? 'pid ' + rs.hotspotd_pid + (rs.hotspotd_rss_kb ? ' · ' + Math.round(rs.hotspotd_rss_kb / 1024) + ' MB' : '') : '未运行', val(rs.hotspotd === 'up' ? '运行中' : '未运行', rs.hotspotd === 'up' ? 'ok' : 'bad')) +
     sItem(['purple', 'layers'], 'tc 规则数', 'qdisc + class（热点接口 + IFB）', val(num(rs.tc_rules))) +
     sItem(['orange', 'shield'], 'iptables 规则', 'mangle 表里 HNC 的 MARK 规则', val(num(rs.ipt_rules))) +
-    sItem(['blue', 'heart'], '看门狗 watchdog', '规则巡检 / 进程保活 / 定时开关热点' + (rs.watchdog_pid ? ' · pid ' + rs.watchdog_pid + (rs.watchdog_kind === 'shell' ? ' · shell 兜底版' : '') : '') + (num(rs.watchdog_hb_age) > 120 ? ' · 心跳 ' + num(rs.watchdog_hb_age) + ' 秒未更新' : ''),
+    sItem(['blue', 'heart'], '看门狗 watchdog', '规则巡检 / 进程保活 / 定时开关热点' + (rs.watchdog_pid ? ' · pid ' + rs.watchdog_pid : '') + (num(rs.watchdog_hb_age) > 120 ? ' · 心跳 ' + num(rs.watchdog_hb_age) + ' 秒未更新' : ''),
       val(num(rs.watchdog) > 0 ? (num(rs.watchdog_hb_age) > 120 ? '可能卡住' : '正常') : '未运行', num(rs.watchdog) > 0 && !(num(rs.watchdog_hb_age) > 120) ? 'ok' : 'bad'))) + scStatusRows()]);
   var nz = function (v) { return v == null ? '未统计' : String(v); }, slaCls = function (v) { return v == null ? '' : num(v) ? 'warn' : 'ok'; };
   groups.push(['运行健康', statsHealthHtml() + (!S.sla ? sItem(['gray', 'heart'], '运行健康', '暂无数据', val('—')) :
@@ -350,7 +350,7 @@ function renderSettings(anim1) {
     encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() + evalFold() + fgEngineFold() + rulepackFold() +
     sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
   var cs = S.clsact;
-  var gm = c.clsact_bpf_mode || (c.clsact_bpf_enabled === true ? 'on' : 'auto'), og = c.offload_guard || S.offload.guard || null;
+  var gm = c.clsact_bpf_mode || 'auto', og = c.offload_guard || S.offload.guard || null;
   var ogS = gm === 'off' ? '已关闭：不做任何处理' : !og ? '等待第一次检测（约 1 分钟）' : og.fallback_active ? '兜底生效中：已让系统加速退回常规转发' + (og.since ? '（' + ago(og.since) + '起）' : '') : (OG_T[og.offload_state] || og.offload_state || '—');
   groups.push(['硬件加速兜底', sItem(['orange', 'rocket'], '防止系统热点加速绕过限速', '自动：检测到加速正在转发流量时，才让它退回常规路径，保证限速 / 封锁 / 统计都生效', '') +
     '<div class="row" style="padding-top:0">' + seg('guard-mode', [['auto', '自动'], ['on', '始终'], ['off', '关闭']], gm, 'small') + '</div>' +

@@ -502,7 +502,7 @@ func TestSimAppLibraryFromRules(t *testing.T) {
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
 	repo, _ := filepath.Abs(filepath.Join("..", ".."))
-	if _, err := os.Stat(filepath.Join(repo, "data", "dpi_rules.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(repo, "data", "dpi_rules.d")); err != nil {
 		t.Skip("repo rules not available")
 	}
 	_ = os.WriteFile(filepath.Join(dir, "run", "service.path"), []byte(repo), 0o644)

@@ -442,9 +442,8 @@ var simLib struct {
 	apps map[string][]simApp
 }
 
-// simAppLibrary 从 DPI 规则库挑出真应用(有域名、分级为 app)。来源依次:
-// <hnc>/etc/dpi_rules.d, <hnc>/data/dpi_rules.d, <MODDIR>/data/dpi_rules.d,
-// <MODDIR>/data/dpi_rules.json; 都没有 → 内置清单。缓存 10 分钟。
+// simAppLibrary 从 DPI 规则库挑出真应用(有域名、分级为 app)。来源与 dpid 同源
+// (hnc_paths.go dpiRuleFiles); 都没有 → 内置清单。缓存 10 分钟。
 func simAppLibrary(hncDir string) []simApp {
 	simLib.mu.Lock()
 	defer simLib.mu.Unlock()
@@ -454,20 +453,7 @@ func simAppLibrary(hncDir string) []simApp {
 	if a, ok := simLib.apps[hncDir]; ok && time.Since(simLib.at[hncDir]) < 10*time.Minute {
 		return a
 	}
-	modDir := "/data/adb/modules/hotspot_network_control"
-	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "service.path")); err == nil {
-		if v := strings.TrimSpace(string(b)); v != "" {
-			modDir = v
-		}
-	}
-	var files []string
-	for _, dir := range []string{filepath.Join(hncDir, "etc", "dpi_rules.d"), filepath.Join(hncDir, "data", "dpi_rules.d"),
-		filepath.Join(modDir, "data", "dpi_rules.d")} {
-		m, _ := filepath.Glob(filepath.Join(dir, "*.json"))
-		sort.Strings(m)
-		files = append(files, m...)
-	}
-	files = append(files, filepath.Join(modDir, "data", "dpi_rules.json"))
+	files := dpiRuleFiles(hncDir)
 	seen := map[string]bool{}
 	var out []simApp
 	for _, f := range files {

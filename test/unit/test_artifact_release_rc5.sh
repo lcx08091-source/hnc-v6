@@ -18,7 +18,7 @@ bin/capability_probe.sh
 daemon/hnc_httpd/hnc_httpd
 bin/hnc_dpid
 bin/dpi_rules_import.sh
-data/dpi_rules.json
+data/dpi_rules.d/00-core-meta.json
 "
 
 make_minimal_module_zip_rc5() {

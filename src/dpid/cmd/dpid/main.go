@@ -32,6 +32,7 @@ import (
 	"hnc.io/dpid/appmeta"
 	"hnc.io/dpid/bytestats"
 	"hnc.io/dpid/capture"
+	"hnc.io/dpid/ifacehint"
 	"hnc.io/dpid/output"
 	"hnc.io/dpid/probe"
 )
@@ -1077,31 +1078,19 @@ func doByteSample(sampler bytestats.ByteSampler, agg *output.SelfAttribAggregato
 	agg.RecordBytes(out, src, time.Now().Unix())
 }
 
-// resolveCurrentIface mirrors the supervisor's getIface() priority chain:
-//  1. cfg.Iface (explicit override)
-//  2. /data/local/hnc/run/hotspot_iface hint file (written by hotspotd)
-//  3. capture.DiscoverAPCandidates() auto-detection
-//  4. fallback scan of well-known AP iface names
-//
-// Returns "" if nothing usable is found.
+// resolveCurrentIface 当前热点网卡: -iface 参数 > ifacehint(唯一权威出口:
+// iface_detect.json 10 分钟内 > hotspot_iface)> capture 扫描(按名字 / 私网 IP / ARP 排序)。
+// v5.33: 删掉这里自己读 hotspot_iface(不校验、不看 iface_detect.json)和写死的候选名单
+// (wlan2 / ap0 / …, 与 capture 的名字排序重复; 还会挑中没开的网卡)。
 func resolveCurrentIface(cfg Config) string {
 	if cfg.Iface != "" {
 		return cfg.Iface
 	}
-	if data, err := os.ReadFile(filepath.Join(cfg.RunDir, "hotspot_iface")); err == nil {
-		line := strings.TrimSpace(strings.SplitN(string(data), "\n", 2)[0])
-		if line != "" {
-			return line
-		}
+	if s, ok := ifacehint.Read(cfg.RunDir, time.Now()); ok {
+		return s
 	}
-	cands, _ := capture.DiscoverAPCandidates()
-	if len(cands) > 0 {
+	if cands, _ := capture.DiscoverAPCandidates(); len(cands) > 0 {
 		return cands[0].Name
-	}
-	for _, name := range []string{"wlan2", "ap0", "ap1", "swlan0", "wlan1", "rndis0"} {
-		if _, err := os.Stat("/sys/class/net/" + name); err == nil {
-			return name
-		}
 	}
 	return ""
 }

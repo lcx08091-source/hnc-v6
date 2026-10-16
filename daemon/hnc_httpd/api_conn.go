@@ -18,6 +18,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"hnc.io/dpid/output"
 	"math"
 	"net"
 	"net/http"
@@ -733,31 +734,15 @@ func actionDeviceIdentSet(hncDir string, p map[string]string) actionResp {
 
 // ─── v5.14: 应用分级 + 「正在用」────────────────────────────────────────
 
-// 应用分级。与 src/dpid/output/ip_app_map.go 的 AppTier 是同一张表, 两边同步改。
+// 应用分级: 直接用 dpid 的那张表(src/dpid/output/ip_app_map.go AppTier)。v5.33 前这里
+// 是一份逐行照抄的副本, 两边要同步改。
 const (
-	tierApp    = 0
-	tierSystem = 1
-	tierHidden = 2
+	tierApp    = output.TierApp
+	tierSystem = output.TierSystem
+	tierHidden = output.TierHidden
 )
 
-func appTier(category string) int {
-	c := strings.ToLower(strings.TrimSpace(category))
-	switch c {
-	case "ads", "ad-sdk", "infrastructure", "third_party_telemetry", "system_telemetry_baseline",
-		"cloud", "cdn", "behavior-marker", "meta-warning", "p2p-unknown", "third_party_financial",
-		"system_chipset":
-		return tierHidden
-	case "system":
-		return tierSystem
-	}
-	if strings.HasPrefix(c, "sdk") {
-		return tierHidden
-	}
-	if strings.HasPrefix(c, "system-") || strings.HasPrefix(c, "system_") {
-		return tierSystem
-	}
-	return tierApp
-}
+func appTier(category string) int { return output.AppTier(category) }
 
 // appForIP: 规则直接命中的 IP(ip_app_map)优先; 否则用 DNS/SNI 反查到的域名归类(DNS 关联)。
 // v6.x DPI v2: 用户纠正规则(fp_user_rules.go, 任意端口的 IP 规则 / 域名规则)排在最前。

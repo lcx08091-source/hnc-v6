@@ -169,7 +169,7 @@ func pkgAppMap(hncDir string) map[string]string {
 	return f.Map
 }
 
-// ruleNameMap 读 data/dpi_rules.d/*.json(退化时再读 dpi_rules.json),
+// ruleNameMap 读与 dpid 同源的规则目录(hnc_paths.go dpiRuleFiles),
 // 返回 规则id→中文应用名, 只用于展示(top_wrong 的 pred_name / by_app 的 name)。
 // 评估只读, 绝不改规则库。
 func ruleNameMap(hncDir string) map[string]string {
@@ -205,25 +205,9 @@ func ruleMeta(hncDir string) (map[string]string, map[string]bool) {
 			}
 		}
 	}
-	// v5.25: dpid 运行时读的是 etc/dpi_rules.d(+ etc/dpi_rules.json), data/ 下是出厂副本。
-	// 旧版只读 data/, 真机上读不到 → 名字全显示成 ID、广告/系统类没被排除(准确率 0%)。
-	for _, dir := range []string{filepath.Join(hncDir, "etc", "dpi_rules.d"), filepath.Join(hncDir, "data", "dpi_rules.d")} {
-		if entries, err := os.ReadDir(dir); err == nil {
-			names := make([]string, 0, len(entries))
-			for _, e := range entries {
-				if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-					names = append(names, e.Name())
-				}
-			}
-			sort.Strings(names)
-			for _, n := range names {
-				if b, err := os.ReadFile(filepath.Join(dir, n)); err == nil {
-					add(b)
-				}
-			}
-		}
-	}
-	for _, f := range []string{filepath.Join(hncDir, "etc", "dpi_rules.json"), filepath.Join(hncDir, "data", "dpi_rules.json")} {
+	// v5.25: dpid 运行时读的是 etc/dpi_rules.d, data/ 下是出厂副本(旧版只读 data/,
+	// 真机上读不到 → 名字全显示成 ID、广告/系统类没被排除, 准确率 0%)。
+	for _, f := range dpiRuleFiles(hncDir) {
 		if b, err := os.ReadFile(f); err == nil {
 			add(b)
 		}

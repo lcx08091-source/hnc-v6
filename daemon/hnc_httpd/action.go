@@ -485,8 +485,6 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionClsactCheck(hncDir)
 	case "clsact_repair":
 		return actionClsactRepair(hncDir)
-	case "clsact_bpf_enabled_set":
-		return actionClsactEnabledSet(hncDir, p)
 	// 设备流量配额 + 分时段限速(limit_policy.go)
 	case "quota_set":
 		return s.limitCtl.actionQuotaSet(p)
@@ -971,23 +969,8 @@ func actionClsactRepair(hncDir string) actionResp {
 	return actionResp{OK: true, Detail: "clsact repaired"}
 }
 
-// actionClsactEnabledSet 旧开关(v5.9.7)。v5.18 起是 clsact_mode_set 的别名:
-// true → on, false → off(撤销/卸载统一走 offload guard, 不再直接调 ctl uninstall ——
-// 旧版 uninstall 不带 TCA_KIND, 会误删同 pref 的 HNC 上行 mirred)。
-func actionClsactEnabledSet(hncDir string, p map[string]string) actionResp {
-	v := p["enabled"]
-	if v != "true" && v != "false" {
-		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
-	}
-	mode := "off"
-	if v == "true" {
-		mode = "on"
-	}
-	return actionClsactModeSet(hncDir, map[string]string{"mode": mode})
-}
-
-// actionClsactModeSet 写 rules.json 顶层 clsact_bpf_mode(同步写旧键
-// clsact_bpf_enabled = mode==on, 让旧脚本/回滚版本语义一致), 然后立即让
+// actionClsactModeSet 写 rules.json 顶层 clsact_bpf_mode(v5.33 起不再同步写旧键
+// clsact_bpf_enabled; v5.18 起的版本都只认 mode), 然后立即让
 // offload guard 按新模式跑一轮(on/off 立刻施加/撤销; auto 会采样 5s),
 // Detail 返回 guard 的状态 JSON(同 /api/config 的 offload_guard)。
 func actionClsactModeSet(hncDir string, p map[string]string) actionResp {
@@ -1000,11 +983,6 @@ func actionClsactModeSet(hncDir string, p map[string]string) actionResp {
 	if rc, out := runBin(hncDir, "json_set.sh", "top", "clsact_bpf_mode", mode); rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 	}
-	legacy := "false"
-	if mode == "on" {
-		legacy = "true"
-	}
-	_, _ = runBin(hncDir, "json_set.sh", "top", "clsact_bpf_enabled", legacy)
 	rc, out := runBin(hncDir, "hnc_offload_guard.sh", "apply")
 	st := strings.TrimSpace(lastLine(strings.TrimSpace(out)))
 	if rc != 0 || !strings.HasPrefix(st, "{") {

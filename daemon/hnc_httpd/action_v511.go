@@ -343,11 +343,13 @@ func (s *server) apiRunStatus(w http.ResponseWriter, r *http.Request) {
 
 // watchdogState v5.25: 看门狗是否在跑。旧实现是 shell 里 `ps -ef | grep -c '[h]nc_watchdog\|[w]atchdog.sh'`,
 // toybox grep 不认 BRE 的 \| 交替 → 恒为 0, 界面一直显示「watchdog 未运行」(实际在跑)。
-// 现在直接看 run/watchdog.pid 指向的进程是否活着且确实是看门狗, 再附上 Go 版心跳的新鲜度。
+// v5.33: 进程查找改用与自检 / 功耗统计同一份的 procfind("watchdog" 规格: watchdog.pid +
+// cmdline 校验, 找不到再按 hnc_watchdog 扫 /proc), 删掉这里自己读 pidfile / cmdline 的
+// 那份和「shell 版」分支(shell 主循环 v5.26 已删, 不会再写 watchdog.pid)。
 type watchdogState struct {
 	PID          int    `json:"pid"`
-	Kind         string `json:"kind"`          // go | shell | ""(没在跑)
-	HeartbeatAge int64  `json:"heartbeat_age"` // 秒; -1 = 无心跳文件(shell 版不写)
+	Kind         string `json:"kind"`          // go | ""(没在跑)
+	HeartbeatAge int64  `json:"heartbeat_age"` // 秒; -1 = 没在跑 / 无心跳文件
 }
 
 func (w watchdogState) count() int {
@@ -357,34 +359,20 @@ func (w watchdogState) count() int {
 	return 1
 }
 
+// watchdogProcFS 测试注入(默认真实 /proc)。
+var watchdogProcFS = procfind.New
+
 func readWatchdogState(hncDir string, now time.Time) watchdogState {
 	st := watchdogState{HeartbeatAge: -1}
+	pid := watchdogProcFS().FindPID(procfind.Spec("watchdog"), hncDir, nil)
+	if pid <= 0 {
+		return st
+	}
+	st.PID, st.Kind = pid, "go"
 	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "watchdog.heartbeat")); err == nil {
 		if ts, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64); err == nil && ts > 0 {
 			st.HeartbeatAge = now.Unix() - ts
 		}
-	}
-	b, err := os.ReadFile(filepath.Join(hncDir, "run", "watchdog.pid"))
-	if err != nil {
-		return st
-	}
-	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 {
-		return st
-	}
-	cmd, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/cmdline")
-	if err != nil {
-		return st
-	}
-	c := string(cmd)
-	switch {
-	case strings.Contains(c, "hnc_watchdog"):
-		st.PID, st.Kind = pid, "go"
-	case strings.Contains(c, "watchdog.sh"):
-		st.PID, st.Kind = pid, "shell"
-	}
-	if st.Kind != "go" {
-		st.HeartbeatAge = -1 // 心跳只有 Go 版写; shell 版在跑时残留的旧心跳文件没有意义
 	}
 	return st
 }

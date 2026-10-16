@@ -7,7 +7,7 @@ v5.24 T3。评估(识别自评)时, 每条本机带标签样本的「真值」= 
 
 数据来源(都是仓库里现成的, 不联网):
   1. src/dpid/appmeta/labels.go 的 curatedLabels: 包名 → 中文显示名。
-  2. data/dpi_rules.json + data/dpi_rules.d/*.json 每条规则的 (app 中文名 → id)。
+  2. data/dpi_rules.d/*.json 每条规则的 (app 中文名 → id)。
 按「中文名」把两者对起来: labels 的中文名 == 规则的 app 名 → 该包归到这个 id。
 
 匹配分三级(从严到宽, 命中即停):
@@ -37,7 +37,6 @@ import sys
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 LABELS_GO = os.path.join(REPO, "src", "dpid", "appmeta", "labels.go")
-RULES_MAIN = os.path.join(REPO, "data", "dpi_rules.json")
 RULES_DIR = os.path.join(REPO, "data", "dpi_rules.d")
 DEFAULT_OUT = os.path.join(REPO, "data", "pkg_app_map.json")
 
@@ -101,13 +100,10 @@ def load_labels(path=LABELS_GO):
 
 
 def load_rules():
-    """返回 (app名 → [id...], 所有 id 集合)。dpi_rules.json 与 dpi_rules.d 合并。"""
+    """返回 (app名 → [id...], 所有 id 集合)。读 data/dpi_rules.d/*.json。"""
     app_to_ids = {}
     all_ids = set()
-    files = []
-    if os.path.exists(RULES_MAIN):
-        files.append(RULES_MAIN)
-    files += sorted(glob.glob(os.path.join(RULES_DIR, "*.json")))
+    files = sorted(glob.glob(os.path.join(RULES_DIR, "*.json")))
     for f in files:
         try:
             d = json.load(open(f, encoding="utf-8"))

@@ -38,7 +38,8 @@ grun() {
 }
 gstatus() { grep -o "\"$1\":[^,}]*" "$HNC_TEST_DIR/run/offload_guard.json" 2>/dev/null | head -n1 | sed 's/^[^:]*://; s/"//g'; }
 
-test_start "offload guard: mode resolution (default auto, legacy enabled → on, explicit mode wins)"
+# v5.33: 旧键 clsact_bpf_enabled 由 post-fs-data 开机迁移后删除, guard 不再兼容(只有旧键 = auto)
+test_start "offload guard: mode resolution (default auto, old clsact_bpf_enabled ignored, explicit mode wins)"
 gseed '{"devices":{}}'
 m1=$(grun mode)
 gseed '{"clsact_bpf_enabled":true}'
@@ -47,7 +48,7 @@ gseed '{"clsact_bpf_enabled":true,"clsact_bpf_mode":"off"}'
 m3=$(grun mode)
 gseed '{"clsact_bpf_mode":"bogus"}'
 m4=$(grun mode)
-[ "$m1" = auto ] && [ "$m2" = on ] && [ "$m3" = off ] && [ "$m4" = auto ] && test_pass || test_fail "m=$m1/$m2/$m3/$m4"
+[ "$m1" = auto ] && [ "$m2" = auto ] && [ "$m3" = off ] && [ "$m4" = auto ] && test_pass || test_fail "m=$m1/$m2/$m3/$m4"
 
 test_start "offload guard: auto + IDLE → no intervention, status written"
 gseed

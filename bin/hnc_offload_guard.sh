@@ -31,9 +31,9 @@
 #               停止增长(我们自己压下去的), 所以「不再 ACTIVE」不能作为撤销依据 ——
 #               撤销条件是热点关闭 / tether map 消失(NOMAP)连续 3 轮(迟滞, 防抖),
 #               下次热点会话重新检测。
-#   on:  热点在就始终强制慢路径 + 尝试 clsact 打标(= 旧 clsact_bpf_enabled=true)。
+#   on:  热点在就始终强制慢路径 + 尝试 clsact 打标(v5.9.7 的 clsact_bpf_enabled=true)。
 #   off: 什么都不做; 若之前由本脚本施加过兜底, 撤销(RESTORE_GLOBAL + 卸 clsact)。
-# 兼容: 缺 clsact_bpf_mode 且旧键 clsact_bpf_enabled=true → on, 否则 auto。
+# 缺 clsact_bpf_mode / 非法 → auto(v5.33: 旧键 clsact_bpf_enabled 由 post-fs-data 开机迁移)。
 #
 # ── 降级 ───────────────────────────────────────────────────────────────
 # 非 GKI / 无 /sys/fs/bpf/tethering(check=NOMAP)/ hotspotd 没跑(hnc_ipc 连不上)
@@ -100,14 +100,9 @@ guard_mode() {
         v=$(grep -o '"clsact_bpf_mode"[[:space:]]*:[[:space:]]*"[a-z]*"' "$RULES" 2>/dev/null | head -n1 | sed 's/.*"\([a-z]*\)"$/\1/')
     fi
     case "$v" in
-        auto|on|off) echo "$v"; return 0 ;;
+        auto|on|off) echo "$v" ;;
+        *) echo auto ;;   # v5.33: 旧键 clsact_bpf_enabled 已在开机时迁移并删除
     esac
-    # 旧键兼容
-    if grep -q '"clsact_bpf_enabled"[[:space:]]*:[[:space:]]*true' "$RULES" 2>/dev/null; then
-        echo on
-    else
-        echo auto
-    fi
 }
 
 # ── 热点接口 ─────────────────────────────────────────────────────────

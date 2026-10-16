@@ -165,14 +165,13 @@ assert_eq "armeabi-v7a" "$d1" "abi 为空时取 abilist 首项" && \
     test_pass
 
 # ─── 4. 装完后 service.sh 的二进制解析 ─────────────
-# 复刻 service.sh sync_runtime_from_moddir 的拷贝(cp -rf bin/* + hnc_httpd 单拷),
-# 然后检查 service.sh 引用的每个原生二进制在运行目录可执行且 ABI 正确。
+# 跑真正的同步脚本(v5.33: bin/hnc_runtime_sync.sh, post-fs-data.sh 与 service.sh 共用;
+# 之前这里复刻 service.sh 的 sync_runtime_from_moddir), 然后检查 service.sh 引用的每个
+# 原生二进制在运行目录可执行且 ABI 正确。
 sync_like_service() { # $1 = MODDIR, $2 = HNC_DIR
-    mkdir -p "$2/bin" "$2/daemon/hnc_httpd"
-    cp -rf "$1/bin/"* "$2/bin/"
-    cp -f "$1/daemon/hnc_httpd/hnc_httpd" "$2/daemon/hnc_httpd/hnc_httpd"
-    chmod 755 "$2/daemon/hnc_httpd/hnc_httpd"
-    for b in $NATIVE; do [ -f "$2/bin/$b" ] && chmod 755 "$2/bin/$b"; done
+    mkdir -p "$1/bin"
+    cp -f "$ROOT/bin/hnc_runtime_sync.sh" "$1/bin/hnc_runtime_sync.sh"
+    HNC_SKIP_PATH_HARDENING=1 sh "$1/bin/hnc_runtime_sync.sh" sync "$1" "$2" >/dev/null 2>&1
 }
 
 test_start "arch: post-install service.sh resolves every native binary (armv7)"

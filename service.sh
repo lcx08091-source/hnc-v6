@@ -14,7 +14,7 @@
 # v5.9.3 BUG-009:service.sh 也会被 magiskd 直接拉起(umask=0),而且 WebUI 的
 # "重启后端"是直接 fork service.sh、根本不经过 post-fs-data.sh,所以这里必须
 # 有一份同款的 umask + chmod,不能只在 post-fs-data.sh 收。
-# 取 022 而非 077 的理由见 post-fs-data.sh 同段注释(sync_runtime_from_moddir
+# 取 022 而非 077 的理由见 post-fs-data.sh 同段注释(bin/hnc_runtime_sync.sh
 # 的 `cp -rf` 同样不带 -p,077 会把脚本/二进制压到不可执行)。
 umask 022
 
@@ -122,42 +122,8 @@ if [ -f "$_HNC_COMPAT" ]; then
 fi
 rm -f "$RUN/iface_detect.json" 2>/dev/null
 
-# H-6 fix (回移自 5.9.91 分叉线): PID TOCTOU protection — verify
-# /proc/$PID/cmdline contains expected binary name before trusting a pidfile
-# value. Prevents killing a recycled PID that now belongs to an unrelated process.
-_verify_pid() {
-    local pidfile="$1" expected="$2"
-    local pid
-    pid=$(cat "$pidfile" 2>/dev/null) || return 1
-    [ -n "$pid" ] || return 1
-    # Verify the process cmdline contains expected binary
-    if [ -f "/proc/$pid/cmdline" ]; then
-        grep -q "$expected" "/proc/$pid/cmdline" 2>/dev/null || return 1
-    fi
-    echo "$pid"
-}
-
-# rc17: keep C hotspot detector single-instance.  A manual service restart or
-# watchdog race may leave two hotspotd processes; keep the pidfile target and
-# remove extra instances before they both write devices.json.
-prune_duplicate_hotspotd() {
-    local keep p seen
-    keep=$(_verify_pid "$RUN/hotspotd.pid" hotspotd)
-    if [ -z "$keep" ] || ! kill -0 "$keep" 2>/dev/null; then
-        keep=$(pidof hotspotd 2>/dev/null | awk '{print $1}')
-        [ -n "$keep" ] && echo "$keep" > "$RUN/hotspotd.pid" 2>/dev/null || true
-    fi
-    seen=0
-    for p in $(pidof hotspotd 2>/dev/null); do
-        [ -z "$p" ] && continue
-        if [ "$p" = "$keep" ] && [ "$seen" -eq 0 ]; then
-            seen=1
-            continue
-        fi
-        log "rc17: killing duplicate hotspotd pid=$p keep=$keep"
-        kill -9 "$p" 2>/dev/null || true
-    done
-}
+# pidfile_live_pid / prune_duplicate_hotspotd: v5.33 起在 bin/hnc_proc.sh(pidfile_live_pid /
+# prune_duplicate_hotspotd), 与 watchdog.sh 共用一份。
 
 # watchdogfix-v6.1: process matching must not depend on ps showing full paths.
 # On ColorOS/SukiSU, ps may show only basename ("hnc_watchdog"/"hnc_launcher"),
@@ -274,76 +240,11 @@ prune_stale_service_sentinels() {
 prune_stale_service_sentinels
 
 log "=== HNC Service Starting ==="
-# hotfix16.2: best-effort repair before reading rules.json in late_start.
-[ -x "$HNC_DIR/bin/rules_repair.sh" ] && HNC=$HNC_DIR sh "$HNC_DIR/bin/rules_repair.sh" >> $LOG 2>&1 || true
 log "Android $(getprop ro.build.version.release) / $(getprop ro.product.brand) $(getprop ro.product.model)"
 
-# hotfix17.3: service start must refresh runtime copy from module files.
-# post-fs-data may not run during manual module restart, leaving /data/local/hnc
-# with an old hnc_httpd binary (observed hotfix4 backend with hotfix17 UI).
-sync_runtime_from_moddir() {
-    log "rc14 runtime sync: MODDIR=$MODDIR -> $HNC_DIR"
-
-    mkdir -p "$HNC_DIR/bin" "$HNC_DIR/webroot" "$HNC_DIR/api" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null || true
-    # v5.9.3 BUG-009:资源目录 755(这里没有凭据);顶层/data/logs/run 的 700
-    # 在脚本开头已经收过。
-    chmod 755 "$HNC_DIR/bin" "$HNC_DIR/webroot" "$HNC_DIR/api" \
-              "$HNC_DIR/daemon" "$HNC_DIR/daemon/hnc_httpd" 2>/dev/null || true
-    cp -rf "$MODDIR/bin/"* "$HNC_DIR/bin/" 2>/dev/null || true
-    cp -rf "$MODDIR/webroot/"* "$HNC_DIR/webroot/" 2>/dev/null || true
-    cp -rf "$MODDIR/api/"* "$HNC_DIR/api/" 2>/dev/null || true
-
-    # rc14: 强制刷新运行时后端，避免旧 hnc_httpd 进程继续占用 8444。
-    # 仅删除 /data/local/hnc 的运行时副本；模块目录里的正式二进制不删除。
-    if [ -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" ]; then
-        log "runtime sync: stopping old hnc_httpd before replacing runtime binary"
-        oldpid=$(_verify_pid "$RUN/httpd.pid" hnc_httpd)
-        [ -n "$oldpid" ] && kill -9 "$oldpid" 2>/dev/null || true
-        if command -v pidof >/dev/null 2>&1; then
-            for p in $(pidof hnc_httpd 2>/dev/null); do
-                [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true
-            done
-        fi
-        rm -f "$RUN/httpd.pid" 2>/dev/null || true
-        rm -f "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
-
-        cp -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
-        chmod 755 "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
-
-        if command -v strings >/dev/null 2>&1; then
-            if strings "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null | grep -q '/api/dpi_state' \
-               && strings "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null | grep -q '/api/dpi_probe'; then
-                log "runtime sync: hnc_httpd refreshed with DPI API routes"
-            else
-                log "ERROR: refreshed hnc_httpd is missing /api/dpi_state or /api/dpi_probe"
-            fi
-        else
-            log "runtime sync: strings not available; skipped DPI API route check"
-        fi
-    else
-        log "runtime sync WARN: module hnc_httpd missing at $MODDIR/daemon/hnc_httpd/hnc_httpd"
-    fi
-
-    chmod 755 "$HNC_DIR/bin/"*.sh 2>/dev/null || true
-    # rc30.11: sync_runtime_from_moddir 把模块 bin/ 拷到 /data/local/hnc/bin/ 后,
-    # 立即 chmod + chcon 兜底. 不能依赖 post-fs-data.sh — 它跑时这步还没发生.
-    # chcon system_file:s0: 防止 cp 把 context 改成 system_data_file:s0, 后者
-    # 在 ColorOS 16 / SukiSU 上让 Go fork+exec 报 EPERM (真机 RMX5010 实测).
-    for _b in hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_json hnc_dpid \
-              hnc_watchdog \
-              hnc_launcher fork_probe \
-              hnc_clsact_ctl; do
-        if [ -f "$HNC_DIR/bin/$_b" ]; then
-            chmod 755 "$HNC_DIR/bin/$_b" 2>/dev/null || true
-            chcon u:object_r:system_file:s0 "$HNC_DIR/bin/$_b" 2>/dev/null || true
-        fi
-    done
-    # hnc_httpd 单独
-    if [ -f "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" ]; then
-        chmod 755 "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
-        chcon u:object_r:system_file:s0 "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
-    fi
-}
+# hotfix17.3: service start must refresh runtime copy from module files —— 手动重启服务
+# (WebUI「重启后端」直接 fork 本脚本)不经 post-fs-data, 运行目录可能还是旧 hnc_httpd。
+# v5.33: 同步本身只有 bin/hnc_runtime_sync.sh 一份(post-fs-data.sh 也调它)。
 
 # v5.29 T3: 升级快照 + 钉住检查。真正的快照点在 post-fs-data.sh(它每次开机
 # 都比这里先把模块文件拷进运行目录); 这里再调一次只为两件事: WebUI「重启
@@ -356,8 +257,9 @@ if [ -f "$MODDIR/bin/hnc_rollback.sh" ]; then
 fi
 if [ "$_RB" = 3 ]; then
     log "rollback: version pinned, skip runtime sync (staying on .prev)"
+    sh "$MODDIR/bin/hnc_runtime_sync.sh" perms "$MODDIR" "$HNC_DIR" >> "$LOG" 2>&1
 else
-    sync_runtime_from_moddir
+    sh "$MODDIR/bin/hnc_runtime_sync.sh" sync "$MODDIR" "$HNC_DIR" >> "$LOG" 2>&1
 fi
 
 # v5.22 (armeabi-v7a): ABI 兜底。正常安装由 customize.sh 选好二进制并删掉
@@ -594,7 +496,7 @@ sh $HNC_DIR/bin/device_detect.sh daemon >> $HNC_DIR/logs/detect.log 2>&1 &
 HPID=""
 i=0
 while [ $i -lt 50 ]; do
-    HPID=$(_verify_pid $RUN/hotspotd.pid hotspotd)
+    HPID=$(pidfile_live_pid $RUN/hotspotd.pid hotspotd)
     [ -n "$HPID" ] && kill -0 "$HPID" 2>/dev/null && break
     if usleep 100000 2>/dev/null; then
         i=$((i + 1))
@@ -650,8 +552,7 @@ fi
 # ─── 启动 Watchdog ──────────────────────────────────────────
 log "Starting watchdog..."
 prune_duplicate_watchdogs "service-prestart"
-WPID=$(_verify_pid "$RUN/watchdog.pid" hnc_watchdog)
-WPID=${WPID:-$(_verify_pid "$RUN/watchdog.pid" watchdog)}
+WPID=$(pidfile_live_pid "$RUN/watchdog.pid" hnc_watchdog)
 if [ -n "$WPID" ] && kill -0 "$WPID" 2>/dev/null; then
     log "watchdog already running (PID=$WPID), skip duplicate launch"
 else
@@ -829,38 +730,11 @@ else
         chmod 644 "$DPID_CONFIG" 2>/dev/null
         log "dpid: installed default dpi_config.json to $DPID_CONFIG"
     fi
-    # rc20.1: install default DPI L3 rules once. Users can later import/update
-    # /data/local/hnc/etc/dpi_rules.json without reflashing the module.
-    # rc29.3: also enforce version upgrade. The old `[ ! -f ]` guard meant
-    # users who installed rc28.1.1 / rc29.0 / rc29.1 already had a stale
-    # dpi_rules.json that never got refreshed even when newer rc shipped a
-    # much more complete one. Concrete user-visible bug: douyinvod.com and
-    # douyincdn.com (抖音 video CDN) weren't matched by the stale rules, so
-    # 抖音 traffic was falling through to bytedance_group fallback ("字节系
-    # 服务") instead of being recognized as "抖音 / video".
-    DPID_RULES="$HNC_DIR/etc/dpi_rules.json"
-    MOD_RULES="$MODDIR/data/dpi_rules.json"
-    if [ ! -f "$DPID_RULES" ] && [ -f "$MOD_RULES" ]; then
-        cp -f "$MOD_RULES" "$DPID_RULES" 2>/dev/null
-        chmod 644 "$DPID_RULES" 2>/dev/null
-        log "dpid: installed default dpi_rules.json to $DPID_RULES"
-    elif [ -f "$DPID_RULES" ] && [ -f "$MOD_RULES" ]; then
-        # rc29.3 upgrade path: compare rules_version. If module ships a different
-        # (presumably newer) version, back up the user's current file and replace.
-        MOD_VER=$(grep -m1 'rules_version' "$MOD_RULES" 2>/dev/null | sed 's/.*"rules_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-        ETC_VER=$(grep -m1 'rules_version' "$DPID_RULES" 2>/dev/null | sed 's/.*"rules_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-        if [ -n "$MOD_VER" ] && [ "$MOD_VER" != "$ETC_VER" ]; then
-            BAK="$DPID_RULES.bak-$(date +%s 2>/dev/null || echo prev)"
-            mv "$DPID_RULES" "$BAK" 2>/dev/null
-            cp -f "$MOD_RULES" "$DPID_RULES" 2>/dev/null
-            chmod 644 "$DPID_RULES" 2>/dev/null
-            log "dpid: upgraded dpi_rules.json: was [$ETC_VER] -> now [$MOD_VER]; user backup at $BAK"
-        fi
-    fi
-
+    # v5.33: 删掉单文件规则 etc/dpi_rules.json 的安装 / 按版本升级(rc20.1 / rc29.3 起)。
+    # 它是 data/dpi_rules.d/ 的逐字节派生副本, dpid 自 rc30.12.31 起有规则目录就不读它;
+    # 旧装机留下的那份由 post-fs-data 清掉。规则唯一来源 = 下面同步的 dpi_rules.d/。
     # rc30.12.31 (TASK-a Stage 2): sync dpi_rules.d/ subset directory if the
-    # module ships one. dpid prefers etc/dpi_rules.d/*.json (globbed + merged)
-    # over the legacy single etc/dpi_rules.json.
+    # module ships one. dpid reads etc/dpi_rules.d/*.json (globbed + merged).
     # v5.27 T1: 同步逻辑搬到 bin/dpi_rules_sync.sh。旧做法每次开机 rm -rf 再复制、
     # 只保留 99-user-custom.json, 把 _auto_expanded / _auto_promoted(学到的规则)
     # 和 97-online-update.json(在线更新)一起删了。现在保留 99 与所有 _*.json,
@@ -893,7 +767,7 @@ else
     # the candidate flywheel to recognize shared infrastructure (CDN / cloud /
     # analytics / push SDK) on first sighting. Soft-install; on a module version
     # bump, back up the user's copy and refresh so the curated lib grows across
-    # updates (same trade-off as dpi_rules.json above).
+    # updates.
     DPID_ENTITY="$HNC_DIR/etc/entity_db.json"
     MOD_ENTITY="$MODDIR/data/entity_db.json"
     if [ ! -f "$DPID_ENTITY" ] && [ -f "$MOD_ENTITY" ]; then
@@ -925,7 +799,7 @@ else
     # rc14: C launcher 用独立的 dpid_guard.pid 防重复(launcher 自己也维护它);
     # dpid.pid 只给真实 hnc_dpid 用。没有可用的 launcher 才 direct 直启 hnc_dpid。
     if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
-        gp=$(_verify_pid "$DPID_GUARD_PID" hnc_launcher)
+        gp=$(pidfile_live_pid "$DPID_GUARD_PID" hnc_launcher)
         if [ -n "$gp" ] && kill -0 "$gp" 2>/dev/null; then
             log "hnc_dpid launcher already running (PID=$gp, choice=$LAUNCHER_CHOICE), skip duplicate launch"
         else
@@ -942,7 +816,7 @@ else
             fi
         fi
     else
-        dp=$(_verify_pid "$DPID_PID" hnc_dpid)
+        dp=$(pidfile_live_pid "$DPID_PID" hnc_dpid)
         if [ -n "$dp" ] && kill -0 "$dp" 2>/dev/null; then
             log "hnc_dpid already running (PID=$dp, direct mode), skip duplicate launch"
         else

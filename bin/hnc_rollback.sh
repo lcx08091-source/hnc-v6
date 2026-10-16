@@ -194,7 +194,7 @@ rb_do_rollback() {
         chmod 755 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         chcon u:object_r:system_file:s0 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         # 拷来拷去 SELinux 上下文会变成 system_data_file, ColorOS 上 Go 进程
-        # fork+exec 这种文件报 EPERM(见 service.sh sync_runtime_from_moddir)
+        # fork+exec 这种文件报 EPERM(见 bin/hnc_runtime_sync.sh)
         for _b in "$_hnc/bin/"*; do
             [ -f "$_b" ] || continue
             chmod 755 "$_b" 2>/dev/null

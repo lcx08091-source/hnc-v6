@@ -157,7 +157,7 @@ reset)
     ;;
 
 init_dirs)
-    mkdir -p "$HNC/bin" "$HNC/api" "$HNC/webroot" "$HNC/data" "$HNC/logs" "$HNC/run"
+    mkdir -p "$HNC/bin" "$HNC/webroot" "$HNC/data" "$HNC/logs" "$HNC/run"
     # v5.9.3 BUG-009:目录权限分级收紧。
     # 顶层 + data/logs/run 存的是 rules.json / tokens.json / local_admin.secret
     # 这类东西,0755 让任何能 traverse 进来的非 root 进程(adb shell uid 2000、
@@ -165,10 +165,10 @@ init_dirs)
     # umask=0,裸 `mkdir -p` 直接建成 0777 —— 无 sticky 位时别人可以 unlink
     # 掉 run/local_admin.secret 再写一个自己的,伪造 X-HNC-Local-Admin 拿到
     # root 级写 API。这里改 700(只有 root 能进)。
-    # bin/api/webroot 是可执行/静态资源,保持 755(HNC 全部组件以 root 运行,
+    # bin/webroot 是可执行/静态资源,保持 755(HNC 全部组件以 root 运行,
     # httpd 与 KSU WebUI 读的都是模块目录而不是这里,755 纯粹是保守选择)。
     chmod 700 "$HNC" "$HNC/data" "$HNC/logs" "$HNC/run" 2>/dev/null
-    chmod 755 "$HNC/bin" "$HNC/api" "$HNC/webroot" 2>/dev/null
+    chmod 755 "$HNC/bin" "$HNC/webroot" 2>/dev/null
     chmod 644 "$RULES"
     echo "HNC dirs initialized"
     ;;
