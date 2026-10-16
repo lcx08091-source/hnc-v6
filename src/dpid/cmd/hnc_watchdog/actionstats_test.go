@@ -19,11 +19,9 @@ func TestActionFailedClassification(t *testing.T) {
 		fail bool
 		why  string
 	}{
-		{"probe_hotspot", 0, nil, false, "热点开着"},
-		{"probe_hotspot", 1, nil, false, "热点没开是正常结果"},
-		{"check_health", 1, nil, false, "规则丢(触发 restore 的正常信号)"},
-		{"check_health", 2, nil, false, "xtables 锁忙"},
-		{"check_health", 3, nil, true, "未知码"},
+		{"iface_detect", 0, nil, false, "探测到热点网卡"},
+		{"iface_detect", 1, nil, false, "热点没开(hnc_iface.sh get 探测不到)是正常结果"},
+		{"iface_detect", 2, nil, true, "用法错误"},
 		{"is_doze", 1, nil, false, "不在 Doze"},
 		{"tc_uplink_healthy", 0, nil, false, "成功"},
 		{"tc_uplink_healthy", 127, nil, true, "v5.26 真机事故: 脚本内命令不存在"},
@@ -47,37 +45,37 @@ func TestActionStatsHourBuckets(t *testing.T) {
 	s := &actionStats{m: make(map[string]*actionCounter)}
 	base := time.Date(2026, 10, 4, 12, 30, 0, 0, time.Local)
 
-	s.record("probe_hotspot", 0, nil, 10, base)                     // 12:30 桶
-	s.record("probe_hotspot", 0, nil, 20, base.Add(20*time.Minute)) // 12:50 桶(同小时)
+	s.record("iface_detect", 0, nil, 10, base)                     // 12:30 桶
+	s.record("iface_detect", 0, nil, 20, base.Add(20*time.Minute)) // 12:50 桶(同小时)
 
 	snap := s.snapshot(base.Add(30 * time.Minute))
-	if got := snap.Actions["probe_hotspot"].Calls1H; got != 2 {
+	if got := snap.Actions["iface_detect"].Calls1H; got != 2 {
 		t.Fatalf("同一小时两次调用 calls_1h = %d, want 2", got)
 	}
-	if got := snap.Actions["probe_hotspot"].AvgMS; got != 15 {
+	if got := snap.Actions["iface_detect"].AvgMS; got != 15 {
 		t.Errorf("avg_ms = %v, want 15", got)
 	}
-	if got := snap.Actions["probe_hotspot"].MaxMS; got != 20 {
+	if got := snap.Actions["iface_detect"].MaxMS; got != 20 {
 		t.Errorf("max_ms = %v, want 20", got)
 	}
 
 	// 13:31 快照: 窗口 12:31~13:31。12:50 那次在窗口内必须计入; 12:30 那次在
 	// 10 分钟桶的容差内(窗口 60~70 分钟)可计可不计。v5.28 审查: 原断言 = 1
 	// 把「跨整点丢数据」的 bug 当成了正确答案。
-	s.record("probe_hotspot", 0, nil, 5, base.Add(61*time.Minute)) // 13:31
+	s.record("iface_detect", 0, nil, 5, base.Add(61*time.Minute)) // 13:31
 	snap = s.snapshot(base.Add(61 * time.Minute))
-	if got := snap.Actions["probe_hotspot"].Calls1H; got < 2 || got > 3 {
+	if got := snap.Actions["iface_detect"].Calls1H; got < 2 || got > 3 {
 		t.Errorf("跨小时后 calls_1h = %d, want 2~3(12:50 与 13:31 必计)", got)
 	}
 	snap = s.snapshot(base.Add(120 * time.Minute)) // 14:30: 12:xx 的桶全部滚出
-	if got := snap.Actions["probe_hotspot"].Calls1H; got != 1 {
+	if got := snap.Actions["iface_detect"].Calls1H; got != 1 {
 		t.Errorf("14:30 calls_1h = %d, want 1(只剩 13:31)", got)
 	}
 
 	// 25 小时前再记一桶(桶键极老), 再快照应只剩近 24h 的桶(内部淘汰)。
 	old := base.Add(-25 * time.Hour)
-	s.record("probe_hotspot", 0, nil, 1, old)
-	if n := len(s.m["probe_hotspot"].buckets); n > 24*3600/actionBucketSec {
+	s.record("iface_detect", 0, nil, 1, old)
+	if n := len(s.m["iface_detect"].buckets); n > 24*3600/actionBucketSec {
 		t.Errorf("桶数 = %d, 应 ≤ 24 小时的桶数(懒淘汰)", n)
 	}
 }
@@ -87,10 +85,10 @@ func TestActionStatsFlushFileFormat(t *testing.T) {
 	s := &actionStats{m: make(map[string]*actionCounter)}
 	base := time.Date(2026, 10, 4, 12, 0, 5, 0, time.Local)
 
-	s.record("check_health", 0, nil, 100, base)
-	s.record("check_health", 0, nil, 300, base)
+	s.record("full_restore", 0, nil, 100, base)
+	s.record("full_restore", 0, nil, 300, base)
 	s.record("tc_uplink_healthy", 127, nil, 50, base) // 失败(v5.26 场景)
-	s.record("probe_hotspot", 1, nil, 30, base)       // 正常非零
+	s.record("iface_detect", 1, nil, 30, base)        // 正常非零
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "watchdog_actions.json")
@@ -112,24 +110,24 @@ func TestActionStatsFlushFileFormat(t *testing.T) {
 	if out.Schema != 1 {
 		t.Errorf("schema = %d, want 1", out.Schema)
 	}
-	ch := out.Actions["check_health"]
+	ch := out.Actions["full_restore"]
 	if ch.Calls1H != 2 || ch.Fails1H != 0 || ch.LastRC != 0 {
-		t.Errorf("check_health = %+v", ch)
+		t.Errorf("full_restore = %+v", ch)
 	}
 	if ch.AvgMS != 200 || ch.MaxMS != 300 {
-		t.Errorf("check_health avg/max = %v/%v, want 200/300", ch.AvgMS, ch.MaxMS)
+		t.Errorf("full_restore avg/max = %v/%v, want 200/300", ch.AvgMS, ch.MaxMS)
 	}
 	up := out.Actions["tc_uplink_healthy"]
 	if up.Fails1H != 1 || up.LastRC != 127 || up.LastFailAt == 0 {
 		t.Errorf("tc_uplink_healthy = %+v, want fails=1 last_rc=127 last_fail_at>0", up)
 	}
-	ph := out.Actions["probe_hotspot"]
+	ph := out.Actions["iface_detect"]
 	if ph.Fails1H != 0 || ph.LastRC != 1 {
-		t.Errorf("probe_hotspot rc=1 不算失败: %+v", ph)
+		t.Errorf("iface_detect rc=1 不算失败: %+v", ph)
 	}
-	// order: calls_1h 降序(check_health 2 → probe/tc 1, 按名字 probe < tc)
-	if len(out.Order) != 3 || out.Order[0] != "check_health" {
-		t.Errorf("order = %v, want check_health 在首位(次数降序)", out.Order)
+	// order: calls_1h 降序(full_restore 2 → iface_detect / tc 1, 按名字)
+	if len(out.Order) != 3 || out.Order[0] != "full_restore" {
+		t.Errorf("order = %v, want full_restore 在首位(次数降序)", out.Order)
 	}
 	if got := out.actionsTotal1H(); got != 4 {
 		t.Errorf("actionsTotal1H = %d, want 4", got)
@@ -180,11 +178,11 @@ func TestActionStatsWindowAcrossHour(t *testing.T) {
 	s := &actionStats{m: make(map[string]*actionCounter)}
 	base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.UTC)
 	for m := 6; m < 66; m++ { // 10:06 ~ 11:05 每分钟一次, 共 60 次
-		s.record("probe_hotspot", 0, nil, 10, base.Add(time.Duration(m)*time.Minute))
+		s.record("iface_detect", 0, nil, 10, base.Add(time.Duration(m)*time.Minute))
 	}
 	s.record("tc_uplink_healthy", 127, nil, 5, base.Add(20*time.Minute)) // 10:20 出过 127
 	got := s.snapshot(base.Add(65 * time.Minute))                        // 11:05 查看
-	if n := got.Actions["probe_hotspot"].Calls1H; n < 59 {
+	if n := got.Actions["iface_detect"].Calls1H; n < 59 {
 		t.Fatalf("calls_1h = %d, want ≈60(跨整点不应丢掉 10:xx 的调用)", n)
 	}
 	if got.Actions["tc_uplink_healthy"].Fails1H != 1 {

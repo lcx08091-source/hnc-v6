@@ -32,3 +32,35 @@ func TestScWatchdogActionsShowsDevWriter(t *testing.T) {
 		t.Fatalf("影子 / 开关已删, 不应再显示: %q", it.Detail)
 	}
 }
+
+// v5.33: 看门狗检查只留 Go 一份, 判不了不再退回 shell —— 记账字段 native_unknown
+// (判不了而跳过的轮数)。偶发几次只在 Detail 里提一句; 达到 scNativeUnknownWarn
+// 标黄并给出处理办法。v5.32 的 native_mismatch(shell 对照)不再认。
+// 「改动前会失败」: v5.32 只认 native_mismatch, native_unknown 再大也是绿的。
+func TestScWatchdogActionsNativeUnknown(t *testing.T) {
+	now := time.Unix(1791000000, 0)
+	doc := func(extra map[string]interface{}) string {
+		m := map[string]interface{}{
+			"schema": 1, "generated_at": now.Unix() - 30,
+			"actions": map[string]interface{}{"tc_uplink_healthy": map[string]interface{}{"calls_1h": 1.0, "fails_1h": 0.0, "avg_ms": 10.0}},
+			"order":   []string{"tc_uplink_healthy"},
+		}
+		for k, v := range extra {
+			m[k] = v
+		}
+		b, _ := json.Marshal(m)
+		return string(b)
+	}
+	it := scWatchdogActionsItem(fixtureWA(t, doc(map[string]interface{}{"native_unknown": 2}), now))
+	if it.Status != scOK || !strings.Contains(it.Detail, "规则健康检查判不了 2 次") {
+		t.Fatalf("偶发: status=%s detail=%q", it.Status, it.Detail)
+	}
+	it = scWatchdogActionsItem(fixtureWA(t, doc(map[string]interface{}{"native_unknown": scNativeUnknownWarn}), now))
+	if it.Status != scWarn || it.Fix == "" {
+		t.Fatalf("达到阈值应标黄并给处理办法: status=%s fix=%q", it.Status, it.Fix)
+	}
+	it = scWatchdogActionsItem(fixtureWA(t, doc(map[string]interface{}{"native_mismatch": 5}), now))
+	if it.Status != scOK || strings.Contains(it.Detail, "shell") {
+		t.Fatalf("旧字段 native_mismatch 不再认: status=%s detail=%q", it.Status, it.Detail)
+	}
+}

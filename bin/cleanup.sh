@@ -239,12 +239,8 @@ rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" 2>/dev/null  # P0-2 锁残留 + rc1
 # v3.9.1: stats 临时文件 + 日期标记(stats_raw / stats_daily 是用户数据,不删)
 rm -f "$RUN"/stats_map.* "$RUN"/rollup_names.* "$RUN"/rollup_agg.* 2>/dev/null
 rm -f "$RUN"/stats_last_date 2>/dev/null
-# v4.0.0-patch1.1: httpd 延迟启动 marker(watchdog 用)
-rm -f "$RUN/httpd.wanted" 2>/dev/null
 # v4.0.0-patch1.3: watchdog passive mode marker
 rm -f "$RUN/watchdog_passive.marker" 2>/dev/null
-# v4.0.0-patch1.4: httpd 绑定 IP marker(IP 漂移检测用)
-rm -f "$RUN/httpd_bind_ip" 2>/dev/null
 # v4.0.0-patch1.5: watchdog Defer Init 状态文件
 # 清掉后下次 watchdog 启动会从 PENDING 重新开始
 rm -f "$RUN/hnc_state" 2>/dev/null

@@ -421,7 +421,7 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 	case "auth_required_set":
 		return actionAuthRequiredSet(hncDir, p)
 	case "remote_enabled_set":
-		return actionRemoteEnabledSet(hncDir, p)
+		return actionRemoteEnabledSet(s, p)
 	case "hotspot_iface_set":
 		return actionHotspotIfaceSet(hncDir, p)
 	case "webui_access_set": // v5.22: WebUI 访问白名单(webui_access.go + bin/webui_guard.sh)

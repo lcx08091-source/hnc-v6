@@ -3,9 +3,11 @@
 // Static Go replacement for the main loop and process management portions
 // of bin/watchdog.sh. The shell script itself remains in the module as
 // `watchdog.sh action <name>`, invoked by this binary to run individual
-// business actions (check_health, full_restore, full_init, migrate, etc.)
-// against iptables/tc. The shell business logic has been hardened over
-// many rc cycles on real devices and is not worth rewriting in Go.
+// business actions (full_restore, full_init, migrate, tc_uplink_healthy,
+// etc.) against iptables/tc. The shell business logic has been hardened over
+// many rc cycles on real devices and is not worth rewriting in Go. The
+// checks that decide when to act (hotspot probe, rules health, uplink) live
+// only in Go since v5.33 (native.go).
 //
 // What's Go-native here (rc30.1):
 //   - Main loop and state machine (PENDING / ACTIVE:iface)
@@ -349,8 +351,11 @@ func httpdDaemon() daemonSpec {
 		// 错配的后果: ensureDaemonRunning 走到 os.Stat(launcher) 时永远 fail,
 		// 进入 "binary missing — silently skip" 的 silent return 分支, watchdog
 		// 永远不会自动重启 httpd, 用户必须手动点 KSU 重新拉起服务. 修复一行.
-		binPath:  hncDir + "/daemon/hnc_httpd/hnc_httpd",
-		args:     nil,
+		binPath: hncDir + "/daemon/hnc_httpd/hnc_httpd",
+		// v5.33: 与 service.sh launch_httpd_safe 同一套参数(之前这里不带参数 = 只开本机
+		// 8444, service.sh 却按 remote_enabled 带 -bind 0.0.0.0 —— httpd 崩一次、被这里
+		// 重拉, 远程访问就没了)。远程端口由 httpd 按 remote_enabled 自己开关。
+		args:     []string{"-hnc-dir", hncDir},
 		logFile:  logDir + "/httpd.log",
 		pidFile:  runDir + "/httpd.pid",
 		cooldown: httpdRestartCD,
@@ -699,13 +704,13 @@ func mainLoop() {
 
 func handlePending(_ *restoreThrottle) time.Duration {
 	m4Writer.hotspotDown() // v5.31 审查修复: 热点没开, Go 写者不空转
-	res := runActionFn("probe_hotspot")
+	res := probeHotspotFn()
 	if res.exitCode != 0 || res.stdout == "" {
 		return intervalProbe
 	}
 	parts := strings.Fields(res.stdout)
 	if len(parts) < 2 {
-		logf("probe_hotspot returned unexpected output: %q", res.stdout)
+		logf("probe_hotspot: unexpected result %q", res.stdout)
 		return intervalProbe
 	}
 	iface, ip := parts[0], parts[1]
@@ -722,25 +727,9 @@ func handlePending(_ *restoreThrottle) time.Duration {
 // handleActive ACTIVE:<iface> 状态每轮的职责。aux 携带每轮可变状态
 // (v5.28 A1 抽出, budget_test 用假时钟驱动)。
 func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux) time.Duration {
-	// v5.29 T1: probe_hotspot 原生优先(读 ifacehint + net, 不起 sh);
-	// 判不了(探测陈旧 / 无私网 IP)或被对照机制钉回 shell 时走原路径 ——
-	// shell 版会顺带刷新 iface_detect.json 缓存。
-	var probe actionResult
-	if natUse(ncProbe) {
-		r := nativeProbeHotspot()
-		if r.unknown {
-			probe = runActionFn("probe_hotspot")
-		} else {
-			probe = actionResult{exitCode: 1}
-			if r.ok {
-				probe = actionResult{exitCode: 0, stdout: r.iface + " " + r.ip}
-			}
-			// 每 30 分钟与 shell 版对一次结论; 对照那一轮以 shell 为准
-			probe = natShadowProbe(r, probe)
-		}
-	} else {
-		probe = runActionFn("probe_hotspot")
-	}
+	// 热点探测(native.go probeHotspot, v5.33 起唯一一份): 读 5 分钟内的
+	// run/iface_detect.json + 网卡地址; 陈旧 / 看不出时跑一次 hnc_iface.sh get 再判。
+	probe := probeHotspotFn()
 	if probe.exitCode != 0 || probe.stdout == "" {
 		// Hotspot down — keep ACTIVE state (user might just have toggled off),
 		// don't migrate or full_restore. Next round will re-probe.
@@ -778,18 +767,9 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		aux.cap.mark(newIface, now)
 	}
 
-	// Health check — v5.29 T1: 原生(读内核 + 直接 exec iptables)优先;
-	// 判不了或钉回 shell 时走原路径。
-	var healthRC int
-	if natUse(ncHealth) {
-		if rc := nativeCheckHealthCached(newIface, now); rc != natHealthUnknown {
-			healthRC = natShadowHealth(newIface, rc) // 对照那一轮以 shell 为准
-		} else {
-			healthRC = runActionFn("check_health").exitCode
-		}
-	} else {
-		healthRC = runActionFn("check_health").exitCode
-	}
+	// 规则健康(native.go checkHealth, v5.33 起唯一一份): 读内核 + 直接 exec
+	// iptables; 判不了按「临时故障」跳过本轮(不误触发 full_restore)。
+	healthRC := checkHealthFn(newIface)
 	switch healthRC {
 	case 0:
 		// Healthy
@@ -808,22 +788,13 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 			runStatsSampleFn()
 			aux.lastStatsSample = now
 		}
-		// v5.28 A1: 健康且不在恢复期 → httpd_drift 5 分钟一次、
-		// tc_uplink_healthy 3 分钟一次(原每轮 60 秒); 恢复期照旧每轮。
-		// 最坏影响: 上行 ingress 重定向丢失最长约 3 分钟被复核发现(原 1 分钟)。
-		if recovering || now.Sub(aux.lastDrift) >= httpdDriftEvery {
-			// v5.29 T1: Go 先判断「需不需要动手」, 需要才调 shell(check_httpd_bind_drift
-			// 本身是「判断 + 动手」一体, 修 httpd / 撤规则仍走 shell)。
-			if needed, unknown := nativeHttpdDriftNeeded(); needed || unknown || !natUse(ncDrift) {
-				_ = runActionFn("httpd_drift")
-			}
-			aux.lastDrift = now
-		}
+		// v5.28 A1: 健康且不在恢复期 → tc_uplink_healthy 3 分钟一次(原每轮 60 秒);
+		// 恢复期照旧每轮。最坏影响: 上行 ingress 重定向丢失最长约 3 分钟被复核发现。
 		if recovering || now.Sub(aux.lastUplink) >= tcUplinkEvery {
-			// v5.29 T1: 上行链路检查原生化: ifb0 存在性 / 根 qdisc 用 netlink,
-			// mirred 过滤器直接 exec tc(文本判断, 不经 sh)。任一项不满足或
-			// 判不了 → shell 修复路径(含冷却 / 失败计数 / 降级标记, 逻辑不搬)。
-			if ok, unknown := nativeUplinkOK(newIface); !ok || unknown || !natUse(ncUplink) {
+			// 上行链路: ifb0 存在性 / 根 qdisc 用 netlink, mirred 过滤器直接 exec tc
+			// (native.go nativeUplinkOK)。任一项不满足或判不了 → shell 修复路径
+			// (含冷却 / 失败计数 / 降级标记, 逻辑不搬)。
+			if ok, unknown := nativeUplinkOK(newIface); !ok || unknown {
 				_ = runActionFn("tc_uplink_healthy")
 			}
 			aux.lastUplink = now

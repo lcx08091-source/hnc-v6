@@ -1,19 +1,17 @@
-// HNC httpd — 远程访问 HTTP 服务器
-// v4.0 Patch 1 MVP: 仅只读 /api/devices 和 /api/stats,无鉴权
-// 绑定到热点接口(ap0 / wlan2 等) 的 IP,不绑 0.0.0.0
+// HNC httpd — 本机 WebUI(127.0.0.1:8444)+ 远程访问(:8443 HTTPS / :8080 跳转)
 //
 // 部署约定:
 //
-//	二进制位于 $HNC_DIR/daemon/hnc_httpd/hnc_httpd (prebuilt arm64)
-//	由 service.sh 在 rules.json.remote_enabled=true 时 fork 启动
+//	二进制位于 $HNC_DIR/daemon/hnc_httpd/hnc_httpd
+//	service.sh 开机拉起、Go 看门狗挂了重拉, 两处参数相同(只有 -hnc-dir)
+//	远程端口按 rules.json 的 remote_enabled 由本进程自己开关(remote_listener.go)
 //	pid 文件 $HNC_DIR/run/httpd.pid
 //	证书 $HNC_DIR/data/httpd_cert.pem + httpd_key.pem (首次自签)
 //	日志 $HNC_DIR/logs/httpd.log
 //
 // 安全不变量:
-//   - NEVER 绑定 0.0.0.0 / :: 任何公共地址
-//   - Patch 1 MVP 无鉴权,但必须只在 ap0 子网能访问
-//   - 不执行任何 shell 命令,只读文件系统
+//   - 远程端口只绑 0.0.0.0 / 私网 IP / loopback, 绝不绑公网 IP 或 ::(validateBindAddress)
+//   - 远程客户端默认拒绝, 要 cookie(rc30.12.18); 本机 loopback 走 X-HNC-Local-Admin
 package main
 
 import (
@@ -31,7 +29,7 @@ import (
 )
 
 var (
-	flagBind         = flag.String("bind", "", "bind address, e.g. 192.168.43.1 (required)")
+	flagBind         = flag.String("bind", "auto", "remote listener address: auto (0.0.0.0 while rules.json remote_enabled=true) | <private IPv4> | none")
 	flagPort         = flag.Int("port", 8443, "HTTPS port")
 	flagHTTPPort     = flag.Int("http-port", 8080, "HTTP port for redirect to HTTPS (0 = disable)")
 	flagLoopbackPort = flag.Int("loopback-port", 8444, "loopback plain HTTP port for local KSU WebUI (0 = disable)")
@@ -69,20 +67,17 @@ func main() {
 		return
 	}
 
-	// v5.0: -bind 不再必填。支持三种启动模式:
-	//   1. 仅 loopback (本机 WebUI)          = 不传 -bind, 只开 127.0.0.1:8444
-	//   2. 仅热点 HTTPS (远程访问, 纯 headless) = 传 -bind + -loopback-port 0
-	//   3. 两者都开                          = 传 -bind (默认行为, 大多场景)
-	haveRemote := *flagBind != ""
+	// v5.33: 远程端口只由 remote_enabled 决定(remote_listener.go), 启动参数只有一套。
+	//   -bind auto(默认)/ <私网 IP>: remote_enabled=true 时开远程端口
+	//   -bind none: 从不开远程端口
+	haveRemote := *flagBind != "none"
 	haveLocal := *flagLoopbackPort > 0
 	if !haveRemote && !haveLocal {
-		fmt.Fprintln(os.Stderr, "error: at least one of -bind or -loopback-port must be set")
+		fmt.Fprintln(os.Stderr, "error: -bind none needs -loopback-port > 0")
 		os.Exit(2)
 	}
-
-	if haveRemote {
-		// 安全不变量: 绝不绑定 0.0.0.0 / :: 任何公共地址
-		// 这里严格白名单,只允许看起来像 ap0 子网 (192.168.x.x / 10.x.x.x) 的 IP
+	if haveRemote && *flagBind != "auto" && *flagBind != "" {
+		// 只允许私网 / loopback / 0.0.0.0, 绝不绑公网
 		if err := validateBindAddress(*flagBind); err != nil {
 			fmt.Fprintln(os.Stderr, "error: invalid bind address:", err)
 			os.Exit(2)
@@ -91,8 +86,8 @@ func main() {
 
 	setupLog(*flagHNCDir)
 
-	log.Printf("hnc_httpd %s starting, remote=%v(%s:%d) loopback=%v(127.0.0.1:%d) tls=%v hnc_dir=%s",
-		version, haveRemote, *flagBind, *flagPort, haveLocal, *flagLoopbackPort, !*flagNoTLS, *flagHNCDir)
+	log.Printf("hnc_httpd %s starting, remote=%s(:%d, follows remote_enabled) loopback=%v(127.0.0.1:%d) tls=%v hnc_dir=%s",
+		version, *flagBind, *flagPort, haveLocal, *flagLoopbackPort, !*flagNoTLS, *flagHNCDir)
 
 	// 写 pid
 	pidFile := *flagHNCDir + "/run/httpd.pid"
@@ -108,72 +103,10 @@ func main() {
 	// 在启动时补处理 —— httpd 不在时无人能用 token 鉴权,故不存在生效窗口。
 	srv.consumeTokenRevokeRequests("startup")
 
-	// rc3.1.14 修 P2 (review §一信息泄漏): 0.0.0.0 + auth_required=false
-	// 联合配置下任何热点用户都能裸读/写 HNC 控制平面. 默认全新装机就是这状态
-	// (rc3.1.13 起 rules.json 模板 auth_required:false). 启动时打一次 WARN
-	// 让用户在 boot.log / WebUI 日志里看到, 提示开 toggle.
-	//
-	// rc30.12.30 (P0.3): forceRemoteAuth=true 的赋值已删. rc30.12.18 默认拒绝
-	// 已经在中间件层强制 cookie 鉴权, 这个变量是 dead state. 只留 SECURITY log.
+	// 远程端口(:8443 + :8080 跳转): 按 remote_enabled 开关, 见 remote_listener.go。
+	// rc3.1.14 的「0.0.0.0 + auth_required=false」SECURITY 提示随之搬到开端口时打。
 	if haveRemote {
-		ip := net.ParseIP(*flagBind)
-		if ip != nil && ip.To4() != nil && ip.To4().IsUnspecified() {
-			if !readAuthRequired(*flagHNCDir) {
-				log.Printf("SECURITY: bind=0.0.0.0 with auth_required=false — rc30.12.18 default-deny enforces cookie auth on remote clients. Local KSU loopback bypass remains via X-HNC-Local-Admin secret.")
-			}
-		}
-	}
-
-	// HTTPS server (远程访问, 仅 haveRemote 时启动)
-	// rc30.12.14: 补全 ReadTimeout / WriteTimeout 防 slowloris / 慢响应耗 goroutine
-	var httpsSrv *http.Server
-	if haveRemote {
-		addr := fmt.Sprintf("%s:%d", *flagBind, *flagPort)
-		httpsSrv = &http.Server{
-			Addr:              addr,
-			Handler:           srv.handler(),
-			ReadHeaderTimeout: 10 * time.Second,
-			ReadTimeout:       30 * time.Second,
-			WriteTimeout:      60 * time.Second,
-			IdleTimeout:       60 * time.Second,
-		}
-	}
-
-	// HTTP → HTTPS 重定向 server(如果启用, 仅 haveRemote)
-	// rc30.12.14: 重定向 server 也加 WriteTimeout. 客户端慢读 redirect 会卡 goroutine.
-	// v6 review fix: 不再信任 r.Host 构造 target —— 攻击者发 Host: evil.com
-	// 会得到 https://evil.com:... 的 301 (开放重定向/钓鱼). 改用连接实际到达的
-	// 本地地址; 拿不到时仅当 Host 是合法 IP 才采用, 否则回退 bind 地址.
-	redirHost := func(r *http.Request) string {
-		if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
-			if h, _, err := net.SplitHostPort(la.String()); err == nil && h != "" {
-				return h
-			}
-		}
-		if h, _, err := net.SplitHostPort(r.Host); err == nil {
-			if ip := net.ParseIP(h); ip != nil {
-				return h
-			}
-		} else if ip := net.ParseIP(r.Host); ip != nil {
-			return r.Host
-		}
-		if *flagBind != "" && *flagBind != "0.0.0.0" && *flagBind != "::" {
-			return *flagBind
-		}
-		return "127.0.0.1"
-	}
-	var httpSrv *http.Server
-	if haveRemote && *flagHTTPPort > 0 && !*flagNoTLS {
-		httpSrv = &http.Server{
-			Addr: fmt.Sprintf("%s:%d", *flagBind, *flagHTTPPort),
-			Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				target := fmt.Sprintf("https://%s:%d", redirHost(r), *flagPort) + r.URL.RequestURI()
-				http.Redirect(w, r, target, http.StatusPermanentRedirect)
-			}),
-			ReadHeaderTimeout: 5 * time.Second,
-			ReadTimeout:       10 * time.Second,
-			WriteTimeout:      10 * time.Second,
-		}
+		srv.remote = newRemoteListener(*flagHNCDir, *flagBind, *flagPort, *flagHTTPPort, *flagNoTLS, srv.handler())
 	}
 
 	// v5.0 loopback HTTP server · 让本机 KSU WebUI 免鉴权访问
@@ -190,12 +123,6 @@ func main() {
 			IdleTimeout:       60 * time.Second,
 		}
 	}
-
-	// 启动
-	// v4.0 Patch 2.b: 区分两个 server 的错误通道,8080 重定向 server 崩不能
-	// 带走主 8443 server(历史事故: wlan2 IP 漂移时 8080 accept4 EINVAL,
-	// 旧版 log.Fatalf 直接退出整个 httpd 进程)
-	httpsErrCh := make(chan error, 1)
 
 	// v4.0 Patch 2.b: 启动后台 goroutine
 	//   - tokens.SaveLoop: 每 30 秒把内存中 last_seen 变动 flush 到磁盘
@@ -224,27 +151,11 @@ func main() {
 	go srv.DNSTakeoverLoop(stopCh)      // DPI v2: 可选 DNS 接管(默认关; 开启时 10s 健康检查, 异常自动撤 DNAT)
 	go srv.fgTruthLoop(stopCh)          // v5.24 T2: 本机前台真值采集(仅本机抓包开启且亮屏时, 10s 探测, 只记变化)
 
-	if haveRemote {
+	if srv.remote != nil {
 		if *flagNoTLS {
-			// Patch 1 开发模式: 纯 HTTP(生产务必关)
 			log.Printf("WARN: TLS disabled (development only)")
-			go func() { httpsErrCh <- httpsSrv.ListenAndServe() }()
-		} else {
-			certPath := *flagHNCDir + "/data/httpd_cert.pem"
-			keyPath := *flagHNCDir + "/data/httpd_key.pem"
-			if err := ensureCert(certPath, keyPath, *flagBind); err != nil {
-				log.Fatalf("cannot ensure cert: %v", err)
-			}
-			go func() { httpsErrCh <- httpsSrv.ListenAndServeTLS(certPath, keyPath) }()
-			if httpSrv != nil {
-				// 8080 重定向 server 崩只 log,不影响主 server
-				go func() {
-					if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-						log.Printf("HTTP redirect server exited: %v (main 8443 server continues)", err)
-					}
-				}()
-			}
 		}
+		go srv.remote.Loop(stopCh)
 	}
 
 	// v5.0 loopback server(非 TLS) — 只监听 127.0.0.1:8444, 给本机 WebUI 用
@@ -262,26 +173,20 @@ func main() {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 
-	select {
-	case err := <-httpsErrCh:
-		// 主 server 崩 → 进程必须退出(监听地址没了,整个 httpd 无法工作)
-		log.Fatalf("HTTPS server exited: %v", err)
-	case sig := <-sigCh:
-		log.Printf("received signal %v, shutting down", sig)
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		close(stopCh) // 通知所有 goroutine 停止(SaveLoop 会做最后一次 Flush)
-		// DPI v2: 同步撤掉 DNS 接管的 DNAT(不等 goroutine —— 进程马上退出, 规则留着会让热点设备解析失败)
-		srv.dnsTakeoverShutdown()
-		if httpsSrv != nil {
-			_ = httpsSrv.Shutdown(ctx)
-		}
-		if httpSrv != nil {
-			_ = httpSrv.Shutdown(ctx)
-		}
-		if loopbackSrv != nil {
-			_ = loopbackSrv.Shutdown(ctx)
-		}
+	// 远程端口的监听失败由 remoteListener 自己重试(v5.33 前 8443 起不来会 log.Fatalf
+	// 让整个进程退出, 本机 8444 也跟着没了), 这里只等信号。
+	sig := <-sigCh
+	log.Printf("received signal %v, shutting down", sig)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	close(stopCh) // 通知所有 goroutine 停止(SaveLoop 会做最后一次 Flush; remoteListener 关远程端口)
+	// DPI v2: 同步撤掉 DNS 接管的 DNAT(不等 goroutine —— 进程马上退出, 规则留着会让热点设备解析失败)
+	srv.dnsTakeoverShutdown()
+	if srv.remote != nil {
+		srv.remote.stop("httpd 退出")
+	}
+	if loopbackSrv != nil {
+		_ = loopbackSrv.Shutdown(ctx)
 	}
 	log.Printf("shutdown complete")
 }

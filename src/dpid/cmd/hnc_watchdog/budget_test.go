@@ -4,14 +4,16 @@
 // loopState.tick(= mainLoop 每轮除睡眠与 daemon 保活外的全部职责),
 // 模拟四个场景各 60 分钟, 断言动作调用次数不超过预算表。
 //
+// 热点探测 / 规则健康(native.go)不起 sh, 场景用例里换成「世界状态」桩
+// (actionRec.probeOut / rc["check_health"]); 真实实现的 sh 开销(探测陈旧时
+// 跑 hnc_iface.sh get, 动作名 iface_detect)由 TestBudgetNative* 单独核对。
+//
 // ── 预算表(次 / 小时, 每个数字的来源) ─────────────────────────────────
 //
 //	ACTIVE、规则健康、无在线设备、亮屏:
-//	  probe_hotspot     ≤ 60   主循环 60s 一轮(budgetProbe)
-//	  check_health      ≤ 60   每轮(budgetHealth)
 //	  capability_probe  ≤ 1    启动首轮 1 次, 之后 6h 一次(budgetCap)
-//	  httpd_drift       ≤ 12   健康时 5 分钟一次(budgetDrift)
-//	  tc_uplink_healthy ≤ 20   健康时 3 分钟一次(budgetUplink)
+//	  tc_uplink_healthy ≤ 20   健康时 3 分钟一次(budgetUplink; 原生判全绿时 0)
+//	  iface_detect      ≤ 12   热点探测结果 5 分钟过期才刷新(budgetIfaceDetect)
 //	  v6_sync.sh        ≤ 60   每轮 60s 一次(budgetV6)
 //	  stats_sample.sh   ≤ 4    无在线设备 → 900s 一次(budgetStats)
 //	  full_restore      =  0   规则一直健康
@@ -22,13 +24,13 @@
 //	  外部进程合计      ≤ 300  budgetTotalActive
 //	ACTIVE、网卡在第 30 分钟从 wlan2 变成 ap0:
 //	  migrate = 1;capability_probe ≤ 2(启动首轮 + 网卡变化)
-//	ACTIVE、check_health 一直返回 1(规则丢了):
+//	ACTIVE、规则健康检查一直返回 1(规则丢了):
 //	  full_restore 受 restoreThrottle 限制: 每个 restore 窗口(最短
 //	  restoreWindowSec=300s)最多 restoreWindowMax=5 次, 窗口翻倍/重置
 //	  不改变「5 次 / ≥300s」这一不变量 → 60 分钟绝对上限
 //	  5×12 = 60(budgetRestore; 假时钟实测 45, 节拍见各窗口的被动模式)
 //	PENDING、热点未开:
-//	  外部进程合计 ≤ 40(120s 兜底探测 30 次 + prune_dup 6 次 + 余量)
+//	  外部进程合计 ≤ 40(120s 兜底探测 30 次 iface_detect + prune_dup 6 次 + 余量)
 //
 // 「改动前会失败」: v5.27 的 Go 代码每轮调 capability_probe(60 次/小时
 // > budgetCap=1), 场景 1 直接 FAIL。提交说明里记录了验证方法(临时把
@@ -47,11 +49,9 @@ import (
 )
 
 const (
-	budgetProbe        = 60
-	budgetHealth       = 60
 	budgetCap          = 1
-	budgetDrift        = 12
 	budgetUplink       = 20
+	budgetIfaceDetect  = 12
 	budgetV6           = 60
 	budgetStats        = 4
 	budgetPrune        = 6
@@ -67,8 +67,9 @@ type fakeClock struct{ now time.Time }
 
 func (c *fakeClock) Now() time.Time { return c.now }
 
-// actionRec 记录 runActionFn 的每次调用; probeOut 决定 probe_hotspot 的
-// 返回(默认 "wlan0 192.168.43.1\n" rc=0), rc 表覆盖某动作的返回码。
+// actionRec 记录 runActionFn 的每次调用(以及 iface_detect); probeOut / probeRC
+// 决定热点探测桩的结论(默认 "wlan0 192.168.43.1" rc=0), rc 表覆盖某动作的
+// 返回码(rc["check_health"] 是规则健康桩的结论, 不计入调用次数)。
 type actionRec struct {
 	counts   map[string]int
 	rc       map[string]int
@@ -90,14 +91,19 @@ func (r *actionRec) call(name string, _ ...string) actionResult {
 	if r.hook != nil {
 		r.hook(name)
 	}
-	if name == "probe_hotspot" {
-		return actionResult{exitCode: r.probeRC, stdout: r.probeOut}
-	}
 	if rc, ok := r.rc[name]; ok {
 		return actionResult{exitCode: rc}
 	}
 	return actionResult{exitCode: 0}
 }
+
+// probe 热点探测的世界状态桩(不起 sh, 不计数)。
+func (r *actionRec) probe() actionResult {
+	return actionResult{exitCode: r.probeRC, stdout: r.probeOut}
+}
+
+// health 规则健康的世界状态桩(不起 sh, 不计数)。
+func (r *actionRec) health(string) int { return r.rc["check_health"] }
 
 func (r *actionRec) total() int {
 	n := 0
@@ -112,7 +118,11 @@ func withFakeEnv(t *testing.T, clk *fakeClock, rec *actionRec) {
 	t.Helper()
 	oldAct, oldV6, oldStats, oldScript := runActionFn, runV6SyncFn, runStatsSampleFn, runScriptFn
 	oldIsDoze, oldIdle, oldActSnap, oldNow := isDozeFn, hotspotIdleFn, actSnapshotFn, nowFn
+	oldProbe, oldHealth, oldDetect := probeHotspotFn, checkHealthFn, ifaceDetectFn
 	runActionFn = rec.call
+	probeHotspotFn = rec.probe
+	checkHealthFn = rec.health
+	ifaceDetectFn = func() { rec.counts["iface_detect"]++ }
 	runV6SyncFn = func() {}
 	runStatsSampleFn = func() {}
 	runScriptFn = func(string, ...string) {}
@@ -125,6 +135,7 @@ func withFakeEnv(t *testing.T, clk *fakeClock, rec *actionRec) {
 	t.Cleanup(func() {
 		runActionFn, runV6SyncFn, runStatsSampleFn, runScriptFn = oldAct, oldV6, oldStats, oldScript
 		isDozeFn, hotspotIdleFn, actSnapshotFn, nowFn = oldIsDoze, oldIdle, oldActSnap, oldNow
+		probeHotspotFn, checkHealthFn, ifaceDetectFn = oldProbe, oldHealth, oldDetect
 	})
 	withNativeUnknown(t)
 	withTempOnlineAcc(t) // v5.30 T1a: 在线分钟累加器也隔离到临时目录(不读真实 devices.json)
@@ -136,16 +147,14 @@ func withFakeEnv(t *testing.T, clk *fakeClock, rec *actionRec) {
 	withTempM4Writer(t) // v5.31 审查修复: 设备发现写者同样隔离(临时路径)
 }
 
-// withNativeUnknown v5.29: 原生检查的外部世界全部隔离成「判不了」(临时
-// run/、无探测文件、netlink / exec 都失败)—— 原生路径一律退回 shell,
-// 旧预算用例因此与机器环境无关(之前读的是真实 /data/local/hnc/run 与
-// 本机网卡)。需要原生世界的用例在此之后自行注入。
+// withNativeUnknown 检查的外部世界全部隔离成「判不了」(临时 run/、无探测
+// 文件、netlink / exec 都失败), 用例因此与机器环境无关(不读真实
+// /data/local/hnc/run 与本机网卡)。需要原生世界的用例在此之后自行注入。
 func withNativeUnknown(t *testing.T) {
 	t.Helper()
 	oldRun, oldData := natRunDir, natDataDir
 	oldHint, oldByN, oldAddrs, oldQ, oldExec, oldSys := ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn, nlQdiscListFn, execCommandFn, sysIfIndexFn
-	oldShadow, oldMM := natShadowSt, nativeMismatchTotal
-	oldHCAt, oldHCRC, oldHCI := healthCacheAt, healthCacheRC, healthCacheIface
+	oldUnknown := nativeUnknownTotal
 	natRunDir, natDataDir = t.TempDir(), t.TempDir()
 	ifaceHintReadFn = func() (string, bool) { return "", false }
 	netInterfaceByNameFn = func(string) (*net.Interface, error) { return nil, os.ErrNotExist }
@@ -153,14 +162,12 @@ func withNativeUnknown(t *testing.T) {
 	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) { return nil, os.ErrNotExist }
 	execCommandFn = func(string, ...string) (string, int, error) { return "", -1, os.ErrNotExist }
 	sysIfIndexFn = func(string) (string, error) { return "", os.ErrNotExist }
-	natShadowSt, nativeMismatchTotal = newNativeShadowState(), 0
-	healthCacheAt, healthCacheRC, healthCacheIface = time.Time{}, 0, ""
+	nativeUnknownTotal = 0
 	t.Cleanup(func() {
 		natRunDir, natDataDir = oldRun, oldData
 		ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn = oldHint, oldByN, oldAddrs
 		nlQdiscListFn, execCommandFn, sysIfIndexFn = oldQ, oldExec, oldSys
-		natShadowSt, nativeMismatchTotal = oldShadow, oldMM
-		healthCacheAt, healthCacheRC, healthCacheIface = oldHCAt, oldHCRC, oldHCI
+		nativeUnknownTotal = oldUnknown
 	})
 }
 
@@ -222,10 +229,7 @@ func TestBudgetActiveHealthy(t *testing.T) {
 	}
 
 	for name, budget := range map[string]int{
-		"probe_hotspot":      budgetProbe,
-		"check_health":       budgetHealth,
 		"capability_probe":   budgetCap,
-		"httpd_drift":        budgetDrift,
 		"tc_uplink_healthy":  budgetUplink,
 		"prune_dup_hotspotd": budgetPrune,
 	} {
@@ -275,7 +279,7 @@ func TestBudgetActiveStatsAndV6(t *testing.T) {
 }
 
 // TestBudgetActiveIfaceSwitch 场景 2: 第 30 分钟网卡 wlan2 → ap0。
-// 状态机口径与生产一致: hnc_state 写的是旧网卡, probe_hotspot 报告新
+// 状态机口径与生产一致: hnc_state 写的是旧网卡, 热点探测报告新
 // 网卡 → migrate 一次 + writeState 同步; writeStateFn 桩负责让下一轮的
 // 状态跟着变(沙箱里 run/ 不可写, writeState 本身会静默失败)。
 func TestBudgetActiveIfaceSwitch(t *testing.T) {
@@ -311,7 +315,7 @@ func TestBudgetActiveIfaceSwitch(t *testing.T) {
 	}
 }
 
-// TestBudgetActiveUnhealthy 场景 3: check_health 一直返回 1。
+// TestBudgetActiveUnhealthy 场景 3: 规则健康检查一直返回 1。
 func TestBudgetActiveUnhealthy(t *testing.T) {
 	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
 	rec := newActionRec()
@@ -332,11 +336,12 @@ func TestBudgetActiveUnhealthy(t *testing.T) {
 }
 
 // TestBudgetPendingHotspotOff 场景 4: PENDING、热点未开 → 120s 兜底探测。
+// 用真实 probeHotspot(世界: 没有新鲜的探测结果)—— 每轮跑一次 iface_detect。
 func TestBudgetPendingHotspotOff(t *testing.T) {
 	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
 	rec := newActionRec()
-	rec.probeRC = 1 // 热点没开, probe_hotspot 非零是正常结果
 	withFakeEnv(t, clk, rec)
+	probeHotspotFn = probeHotspot               // 真实探测; withNativeUnknown 的世界里看不到热点
 	hotspotIdleFn = func() bool { return true } // activity 显示 hotspot_off
 
 	ls := newLoopState()
@@ -348,10 +353,13 @@ func TestBudgetPendingHotspotOff(t *testing.T) {
 	if iv != intervalIdleProbe {
 		t.Fatalf("PENDING + hotspot_off 的 tick 间隔 = %v, want %v", iv, intervalIdleProbe)
 	}
-	rec.counts["probe_hotspot"] = 0
+	rec.counts["iface_detect"] = 0
 	rounds := driveHour(ls, clk, st, intervalIdleProbe)
 	if rounds > 30 {
 		t.Fatalf("rounds = %d, want ≤ 30(120s 兜底)", rounds)
+	}
+	if n := rec.counts["iface_detect"]; n != rounds {
+		t.Errorf("iface_detect = %d, want %d(每轮一次, 不重复)", n, rounds)
 	}
 	if rec.total() > budgetTotalPending {
 		t.Errorf("外部进程合计 = %d, 超预算 %d", rec.total(), budgetTotalPending)
@@ -381,22 +389,39 @@ func TestCapProbeGate(t *testing.T) {
 	}
 }
 
-// ── v5.29 T1: 原生检查开启时的调用预算 ──────────────────────────────
+// ── 检查的真实实现(native.go)的 sh 预算 ─────────────────────────────
 //
-// 原生路径下, ACTIVE 健康 1 小时里「经 sh 的外部调用」合计 ≤ 70
-// (v6_sync 60 + stats 4 + probe/check_health 对照各 2 + 余量)。
-// probe / check_health / httpd_drift / tc_uplink_healthy 全部走原生
-// 判断(netlink / net / 直接 exec iptables-tc), 不计入 sh 调用。
-//
-// 「改动前会失败」: v5.28 代码没有原生路径, probe+health 一小时就是
-// 120 次 sh(> 70)。
+// ACTIVE 健康 1 小时: 热点探测只在 run/iface_detect.json 过期(5 分钟)时跑一次
+// hnc_iface.sh get(iface_detect ≤ 12), 规则健康 / 上行链路全在 Go 里判(0 次 sh);
+// 经 runActionFn / iface_detect 的外部进程合计 ≤ budgetNativeShTotal。
+// v5.33 前同一场景还有每 30 分钟一次的 shell 对照(probe_hotspot / check_health
+// 各 2 次), 原生判不了时每轮退回 shell。
+
+const budgetNativeShTotal = 25 // capability_probe 1 + prune_dup 6 + iface_detect 12 + 余量
+
+// withDetectFreshness 模拟 iface_detect.json 的新鲜度: iface_detect 跑过后
+// natHintFresh 内读得到 iface, 之后过期。
+func withDetectFreshness(rec *actionRec, iface string) {
+	var last time.Time
+	ifaceHintReadFn = func() (string, bool) {
+		if !last.IsZero() && nowFn().Sub(last) < natHintFresh {
+			return iface, true
+		}
+		return "", false
+	}
+	ifaceDetectFn = func() {
+		rec.counts["iface_detect"]++
+		last = nowFn()
+	}
+}
 
 func TestBudgetNativeActiveHealthy(t *testing.T) {
 	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
 	rec := newActionRec()
 	withFakeEnv(t, clk, rec)
 	withNativeHealthy(t)
-	rec.probeOut = "wlan2 192.168.43.1\n" // 对照的 shell 版结论与原生一致
+	withDetectFreshness(rec, "wlan2")
+	probeHotspotFn, checkHealthFn = probeHotspot, checkHealth // 真实实现
 
 	ls := newLoopState()
 	st := func(int) wdState { return wdState{kind: stateActive, iface: "wlan2"} }
@@ -404,120 +429,41 @@ func TestBudgetNativeActiveHealthy(t *testing.T) {
 	if rounds != 60 {
 		t.Fatalf("rounds = %d, want 60", rounds)
 	}
-
-	// 原生路径生效的直接证据: 这四项的 sh 调用只来自 30 分钟一次的对照
-	if n := rec.counts["probe_hotspot"]; n > 2 {
-		t.Errorf("probe_hotspot sh = %d 次/小时(原生应只剩对照 ≤ 2)", n)
-	}
-	if n := rec.counts["check_health"]; n > 2 {
-		t.Errorf("check_health sh = %d 次/小时(原生应只剩对照 ≤ 2)", n)
-	}
-	if n := rec.counts["httpd_drift"]; n != 0 {
-		t.Errorf("httpd_drift sh = %d(原生判断无文件 → 不动手, 不该调 shell)", n)
+	if n := rec.counts["iface_detect"]; n == 0 || n > budgetIfaceDetect {
+		t.Errorf("iface_detect = %d 次/小时, want 1..%d(5 分钟过期才刷新)", n, budgetIfaceDetect)
 	}
 	if n := rec.counts["tc_uplink_healthy"]; n != 0 {
-		t.Errorf("tc_uplink_healthy sh = %d(原生全绿, 不该调 shell)", n)
+		t.Errorf("tc_uplink_healthy sh = %d(上行全绿, 不该调 shell)", n)
+	}
+	if rec.counts["full_restore"] != 0 || rec.counts["migrate"] != 0 {
+		t.Errorf("健康世界不该有 full_restore / migrate: %v", rec.counts)
 	}
 	if total := rec.total(); total > budgetNativeShTotal {
-		t.Errorf("原生开启时 sh 调用合计 = %d, 超预算 %d", total, budgetNativeShTotal)
+		t.Errorf("sh 调用合计 = %d, 超预算 %d: %v", total, budgetNativeShTotal, rec.counts)
 	}
 }
 
-const budgetNativeShTotal = 70
-
-// TestBudgetNativeSwitchFile 原生开关关闭 → 完全走旧路径。
-func TestBudgetNativeSwitchFile(t *testing.T) {
+// TestBudgetNativeHealthUnknownNoShell 规则健康一直判不了(netlink 失败)→
+// 每轮跳过(不 full_restore), 计 native_unknown, 不调任何 shell 检查。
+// 「改动前会失败」: v5.32 判不了每轮退回 shell check_health(60 次 sh)。
+func TestBudgetNativeHealthUnknownNoShell(t *testing.T) {
 	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
 	rec := newActionRec()
 	withFakeEnv(t, clk, rec)
 	withNativeHealthy(t)
-	// 原生探测都健康, 但开关文件存在
-	if err := os.WriteFile(natRunDir+"/wd_native.disabled", []byte("1"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	rec.probeOut = "wlan2 192.168.43.1\n" // 与状态机 iface 一致, 否则每轮 migrate
+	withDetectFreshness(rec, "wlan2")
+	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) { return nil, os.ErrPermission }
+	probeHotspotFn, checkHealthFn = probeHotspot, checkHealth
 
 	ls := newLoopState()
 	st := func(int) wdState { return wdState{kind: stateActive, iface: "wlan2"} }
 	driveHour(ls, clk, st, intervalNormal)
-	// 开关关闭: probe / health 走 shell 每轮一次(60 次/小时, 旧口径)
-	if n := rec.counts["probe_hotspot"]; n != 60 {
-		t.Errorf("probe_hotspot sh = %d, want 60(开关关闭走旧路径)", n)
+	for _, name := range []string{"check_health", "probe_hotspot", "full_restore"} {
+		if n := rec.counts[name]; n != 0 {
+			t.Errorf("%s = %d, want 0", name, n)
+		}
 	}
-	if n := rec.counts["check_health"]; n != 60 {
-		t.Errorf("check_health sh = %d, want 60(开关关闭走旧路径)", n)
-	}
-}
-
-// TestNativeUnknownNoDoubleShell 原生判不了(探测陈旧 / netlink 失败)→
-// 每轮只跑一次 shell; 30 分钟对照点上也不能再跑第二遍(v5.29 rc1 在对照点
-// 会把 shell 跑两遍, 还拿 shell 跟 shell 比)。
-func TestNativeUnknownNoDoubleShell(t *testing.T) {
-	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
-	rec := newActionRec()
-	withFakeEnv(t, clk, rec) // 原生全部「判不了」
-	rec.probeOut = "wlan2 192.168.43.1\n"
-	ls := newLoopState()
-	st := func(int) wdState { return wdState{kind: stateActive, iface: "wlan2"} }
-	driveHour(ls, clk, st, intervalNormal)
-	if n := rec.counts["probe_hotspot"]; n != 60 {
-		t.Errorf("probe_hotspot sh = %d, want 60(每轮一次, 对照点不重复)", n)
-	}
-	if n := rec.counts["check_health"]; n != 60 {
-		t.Errorf("check_health sh = %d, want 60(每轮一次, 对照点不重复)", n)
-	}
-	if nativeMismatchTotal != 0 {
-		t.Errorf("原生判不了不算不一致, native_mismatch = %d", nativeMismatchTotal)
-	}
-}
-
-// TestNativeShadowShellWinsThisRound 对照点上原生说健康、shell 说规则丢了 →
-// 本轮以 shell 为准, 当轮就 full_restore(rc1 只记账, 照用原生结论)。
-func TestNativeShadowShellWinsThisRound(t *testing.T) {
-	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
-	rec := newActionRec()
-	withFakeEnv(t, clk, rec)
-	withNativeHealthy(t)
-	rec.probeOut = "wlan2 192.168.43.1\n"
-	rec.rc["check_health"] = 1
-	ls := newLoopState()
-	ls.tick(wdState{kind: stateActive, iface: "wlan2"})
-	if rec.counts["check_health"] != 1 {
-		t.Fatalf("第一轮应跑一次对照, check_health = %d", rec.counts["check_health"])
-	}
-	if rec.counts["full_restore"] != 1 {
-		t.Errorf("对照不一致时本轮应按 shell 结论 full_restore, got %d", rec.counts["full_restore"])
-	}
-	if nativeMismatchTotal != 1 {
-		t.Errorf("native_mismatch = %d, want 1", nativeMismatchTotal)
-	}
-}
-
-// TestNativeRevertAppliesToLoop 同项连续 3 次不一致 → 主循环真的退回
-// shell(每轮跑 shell check_health)。rc1 主循环用 natUse("health"), 而
-// 退回记在 "check_health" 键上, 退回永远不生效。
-func TestNativeRevertAppliesToLoop(t *testing.T) {
-	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
-	rec := newActionRec()
-	withFakeEnv(t, clk, rec)
-	withNativeHealthy(t)
-	rec.probeOut = "wlan2 192.168.43.1\n"
-	rec.rc["check_health"] = 2 // shell 每次都说「锁忙」, 原生说健康 → 不一致(后果最轻: 跳过本轮)
-	ls := newLoopState()
-	st := func(int) wdState { return wdState{kind: stateActive, iface: "wlan2"} }
-	driveHour(ls, clk, st, intervalNormal) // 对照点 0 / 30 分 → 2 次不一致
-	if rec.counts["check_health"] != 2 || natShadowSt.isReverted(ncHealth) {
-		t.Fatalf("第一小时: check_health = %d, reverted = %v; want 2 / false", rec.counts["check_health"], natShadowSt.isReverted(ncHealth))
-	}
-	clk.now = clk.now.Add(time.Minute)
-	driveHour(ls, clk, st, intervalNormal) // 60 分对照点第 3 次 → 退回, 之后每轮 shell
-	if !natShadowSt.isReverted(ncHealth) {
-		t.Fatal("连续 3 次不一致后应钉回 shell")
-	}
-	if n := rec.counts["check_health"]; n < 55 {
-		t.Errorf("退回后应每轮跑 shell check_health, 两小时合计只有 %d 次", n)
-	}
-	if n := rec.counts["probe_hotspot"]; n > 4 {
-		t.Errorf("probe 没有不一致, 不该被一起退回: probe_hotspot sh = %d", n)
+	if nativeUnknownTotal != 60 {
+		t.Errorf("native_unknown = %d, want 60(每轮一次)", nativeUnknownTotal)
 	}
 }

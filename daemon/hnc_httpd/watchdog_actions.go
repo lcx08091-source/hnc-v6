@@ -34,6 +34,10 @@ const wdActionsStale = 3 * time.Minute
 // 400 是留了余量的告警线。
 const scWatchdogActionsMaxCalls1H = 400
 
+// scNativeUnknownWarn 规则健康检查「判不了」累计到这个次数标黄(主循环 60 秒一轮,
+// 10 次 ≈ 10 分钟没检查成; 偶发一两次是网卡刚消失之类的竞态, 不报)。
+const scNativeUnknownWarn = 10
+
 // readWatchdogActionsRaw 读 run/watchdog_actions.json, 原样转出; 不存在 /
 // 损坏 / generated_at 距 now 超过 wdActionsStale → 顶层 stale:true(否则
 // stale:false)。返回 nil 表示文件不存在(调用方决定怎么呈现)。
@@ -66,12 +70,14 @@ func scWatchdogActionsItem(c *scCtx) scItem {
 	}
 	acts, _ := m["actions"].(map[string]interface{})
 	gen, _ := m["generated_at"].(float64)
-	// v5.29 T1: 原生检查与 shell 对照的累计不一致(0/缺省 = 一致)。
-	// 不遮蔽失败判定: 有失败动作时仍以失败为准, mismatch 追加在 Detail。
-	nmm, _ := m["native_mismatch"].(float64)
+	// 规则健康检查判不了(那一轮跳过)的累计次数(看门狗启动以来)。v5.33 起检查
+	// 只有 Go 一份, 判不了不再退回 shell 版 —— 次数一直涨说明本机 netlink / iptables
+	// 跑不起来, 规则丢了不会自动恢复, 达到阈值标黄。不遮蔽失败判定(有失败动作时
+	// 仍以失败为准, 这条追加在 Detail)。v5.29–v5.32 的 native_mismatch(shell 对照)已删。
+	nmm, _ := m["native_unknown"].(float64)
 	mmNote := ""
 	if nmm > 0 {
-		mmNote = fmt.Sprintf("; 原生检查与 shell 结论不一致 %d 次(已按 shell 处理, 连续 3 次该项退回 shell)", int(nmm))
+		mmNote = fmt.Sprintf("; 规则健康检查判不了 %d 次(那几轮跳过)", int(nmm))
 	}
 	// 设备发现写者(v5.31 起 Go 看门狗; v5.33 起唯一一份)的写出 / 失败次数。只观察,
 	// 不影响状态。v5.30–v5.32 的影子比对(m4_checks)与写者开关(m4_owner)已删。
@@ -120,8 +126,9 @@ func scWatchdogActionsItem(c *scCtx) scItem {
 			avg = weightedMS / totalCalls
 		}
 		it.Value = fmt.Sprintf("%.0f 次 / 小时 · 平均 %.0f 毫秒", totalCalls, avg)
-		if nmm > 0 {
+		if nmm >= scNativeUnknownWarn {
 			it.Status = scWarn
+			it.Fix = "规则健康检查一直判不了: 把 logs/watchdog.log 发给维护者(本机 netlink 或 iptables 跑不起来)"
 		}
 		if gen > 0 {
 			age := c.env.Now().Sub(time.Unix(int64(gen), 0))

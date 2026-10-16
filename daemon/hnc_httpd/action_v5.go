@@ -422,16 +422,18 @@ func actionAuthRequiredSet(hncDir string, p map[string]string) actionResp {
 	return actionSetTopBool(hncDir, "auth_required", p, "", "")
 }
 
-// rc3.1.3 修: actionRemoteEnabledSet · 启停远程访问 :8443.
-// 之前缺这个 action, rules.json 永远无 remote_enabled 字段, httpd 从未绑过 :8443,
-// 导致远程 URL ERR_ADDRESS_UNREACHABLE. 前端"运行中"徽章还是静态虚假状态.
-// 修复: 写 rules.json 顶层 remote_enabled = v.  watchdog 60s 内轮询 check_httpd_bind_drift
-// 检测到 loopback-only -> 热点 IP 漂移后重启 httpd 绑新 IP.
-func actionRemoteEnabledSet(hncDir string, p map[string]string) actionResp {
-	// 写完后等 watchdog 自然触发. 返回提示给用户
-	return actionSetTopBool(hncDir, "remote_enabled", p,
-		"remote access enabled · 约 1 分钟内远程 URL 可访问",
-		"remote access disabled · 约 1 分钟内 :8443 关闭")
+// rc3.1.3 修: actionRemoteEnabledSet · 启停远程访问 :8443(写 rules.json 顶层 remote_enabled)。
+// v5.33: 写完立刻让 remoteListener 重看一次(remote_listener.go), 几秒内生效。之前提示
+// 「约 1 分钟内」靠的是看门狗的 httpd 漂移检查, 那个检查依赖的 run/httpd_bind_ip 从
+// v5.26 起就没人写, 实际要等 httpd 下次重启才生效(而看门狗重启 httpd 又不带远程参数)。
+func actionRemoteEnabledSet(s *server, p map[string]string) actionResp {
+	r := actionSetTopBool(s.hncDir, "remote_enabled", p,
+		"remote access enabled · 几秒内远程 URL 可访问",
+		"remote access disabled · 几秒内 :8443 关闭")
+	if r.OK {
+		s.remote.Kick()
+	}
+	return r
 }
 
 // ────────────────────────────────────────────────────────────────

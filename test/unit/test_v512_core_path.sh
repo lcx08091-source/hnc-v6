@@ -165,20 +165,13 @@ el=$((t1 - t0))
 if [ "$el" -lt 12 ]; then test_pass; else test_fail "full_init 捕获输出耗时 ${el}s(后台子 shell 持有管道)"; fi
 mock_teardown
 
-# ═══ watchdog check_health: mq 子队列下的 HNC htb 视为健康 ═══════
-test_start "watchdog check_health: mq child htb(无 root 字样)不误判为规则丢失"
-mock_setup
-echo "wlan1" > "$HNC_TEST_DIR/run/iface.cache"
-mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan1"
-mock_set_stdout tc "qdisc mq 0: root
-qdisc htb 1: parent :1 r2q 10 default 0x9999 direct_packets_stat 0"
-mock_set_stdout iptables "-A HNC_RESTORE -m connmark ! --mark 0x0 -j CONNMARK --restore-mark --nfmask 0xffffff --ctmask 0xffffff"
-HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action check_health >/dev/null 2>&1
-assert_eq "0" "$?" "mq child htb 模式应判健康" && test_pass
-mock_teardown
+# v5.33: 「mq 子队列下的 HNC htb 视为健康」与「pending 时判不健康」两条规则健康
+# 判据只在 Go 看门狗里一份(shell check_health 已删), 测试见
+# src/dpid/cmd/hnc_watchdog/native_test.go 的 TestHealthNativeMqChildHTBOk /
+# TestHealthNativeRestorePendingLost。
 
 # ═══ watchdog full_restore: restore 因锁竞争失败 → 下轮仍判不健康 ═══
-test_start "watchdog full_restore: restore rc=12 时落 pending, check_health 判不健康"
+test_start "watchdog full_restore: restore rc=12 时落 pending(Go 规则健康检查见标记判不健康)"
 mock_setup
 echo "wlan2" > "$HNC_TEST_DIR/run/iface.cache"
 date +%s > "$HNC_TEST_DIR/run/capability_probe_last"
@@ -191,10 +184,7 @@ mkdir -p "$HNC_TEST_DIR/run/tc_action.lock"
 echo "$$ set_limit $(date +%s)" > "$HNC_TEST_DIR/run/tc_action.lock/owner"
 HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action full_restore test >/dev/null 2>&1
 rm -rf "$HNC_TEST_DIR/run/tc_action.lock"
-HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/watchdog.sh" action check_health >/dev/null 2>&1
-hrc=$?
-assert_file_exists "$HNC_TEST_DIR/run/tc_restore_pending" "restore 被锁挡住应落 pending" && \
-    assert_eq "1" "$hrc" "pending 时 check_health 必须判不健康" && test_pass
+assert_file_exists "$HNC_TEST_DIR/run/tc_restore_pending" "restore 被锁挡住应落 pending" && test_pass
 mock_teardown
 
 test_start "watchdog full_restore: tc_htb=false 时仍恢复黑名单"

@@ -22,7 +22,7 @@
 //	ct_events         事件   不变
 //	─ 镜像(dpid / offload guard 执行; 看门狗主循环 = Go 版 power.go) ─
 //	watchdog_pending  10s    hotspot_off 120s(v5.25 Go 版: 网卡事件即时唤醒 + 定时开关热点边界唤醒), 其余 10s
-//	watchdog_active   60s    主循环节拍不变; 健康时附带检查放宽(v5.28 A1): capability_probe 6h / httpd_drift 5m / tc_uplink_healthy 3m; 不健康或恢复期照旧每轮
+//	watchdog_active   60s    主循环节拍不变; 健康时附带检查放宽(v5.28 A1): capability_probe 6h / tc_uplink_healthy 3m; 不健康或恢复期照旧每轮
 //	offload_guard     60s    热点未开/无客户端且未在兜底: 完整检测 300s(每 60s 早醒检查); 热点+客户端或兜底中: 60s(重申 ≤60s)
 //	stats_sample      300s   no_clients 900s, 其余 300s
 //	dpid_conntrack    15s    hotspot_off/no_clients 60s, 其余 15s
@@ -179,7 +179,7 @@ func powerInterval(name string, a Activity, f loopFlags) (time.Duration, string)
 		}
 		return base, "基准"
 	case "watchdog_active":
-		return base, "执法: 主循环节拍不变; 健康时附带检查: capability_probe 6h / httpd_drift 5m / tc_uplink_healthy 3m(v5.28); 不健康或恢复期照旧每轮"
+		return base, "执法: 主循环节拍不变; 健康时附带检查: capability_probe 6h / tc_uplink_healthy 3m(v5.28); 不健康或恢复期照旧每轮"
 	case "offload_guard":
 		if lvl == lvlHotspotOff || lvl == lvlNoClients {
 			return 300 * time.Second, "热点未开/无设备且未兜底: 完整检测 ×5(每 60s 早醒; 兜底中仍 60s 重申)"

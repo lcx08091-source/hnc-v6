@@ -1,46 +1,38 @@
-// native.go — v5.29 T1(M2): 看门狗四项检查原生化(Go 直接读内核 / 直接
-// exec 命令, 不再每轮起 851 行的 sh watchdog.sh)。
+// native.go — 看门狗的四项检查(v5.29 T1 M2 起 Go 直接读内核 / 直接 exec 命令;
+// v5.33 起是唯一一份: bin/watchdog.sh 的 probe_valid_hotspot / check_health /
+// check_httpd_bind_drift、30 分钟对照、开关 run/wd_native.disabled 都删了)。
 //
-// 对应关系(与 bin/watchdog.sh 逐分支一致, 测试用例名标注 shell 原文行号):
+//	检查              判断函数                 判出「要动手」时
+//	热点探测          probeHotspot            —(结果驱动 PENDING / ACTIVE 状态机)
+//	规则健康          checkHealth             full_restore(shell, 限流见 restoreThrottle)
+//	上行链路          nativeUplinkOK          tc_uplink_healthy(shell: 修 ifb0 / mirred,
+//	                                          冷却 / 失败计数 / 降级标记都在那边)
+//	(httpd 漂移检查已删: 远程端口由 httpd 自己按 remote_enabled 启停, 见 hnc_httpd
+//	 remote_listener.go; v5.26 起 run/httpd_bind_ip 就没人写了, 两份漂移检查都是空转。)
 //
-//	动作             shell 版                        本文件的判断函数
-//	probe_hotspot    probe_valid_hotspot(572 行起)   nativeProbeHotspot
-//	check_health     check_health(271 行起)          nativeCheckHealth
-//	httpd_drift      check_httpd_bind_drift(496 行起) nativeHttpdDriftNeeded
-//	tc_uplink_healthy ensure_tc_uplink_healthy(725 起) nativeUplinkOK
-//
-// 原则(照 WORK-v5.29.md §T1):
-//   - 判断在 Go;「动手」(杀 httpd / 修 ingress / 恢复规则)仍走
-//     runActionFn 让 shell 执行 —— 修复路径的冷却、失败计数、降级标记
-//     逻辑一概不搬;
-//   - 任何 Go 侧判不了(文件缺失 / netlink 失败 / 命令不可执行)→ 返回
-//     「不确定」, 调用方退回 shell 版(shell 版会顺带刷新 iface_detect.json
-//     之类的缓存);
-//   - 对照机制(nativeShadow): 原生版每 30 分钟额外跑一次对应 shell 动作
-//     比结论, 不一致以 shell 为准 + 记 native_mismatch; 同一项连续 3 次
-//     不一致 → 该项退回 shell 直到看门狗重启;
-//   - 开关: run/wd_native.disabled 存在 → 全部退回 shell(现有路径原样)。
+// 原则:
+//   - 判断在 Go;「动手」(恢复规则 / 修上行)仍走 runActionFn 让 shell 执行;
+//   - 热点探测信息(run/iface_detect.json)超过 5 分钟或看不出结果 → 跑一次唯一的热点
+//     网卡探测器 `sh bin/hnc_iface.sh get`(动作名 iface_detect)刷新, 再判一次;
+//   - 规则健康判不了(netlink / iptables 跑不起来)→ 本轮跳过(不误判成规则丢失去
+//     full_restore), 记 native_unknown(run/watchdog_actions.json, 自检「看门狗动作」
+//     一行可见)。原来这种情况退回 shell 版 check_health —— 同样要 tc / iptables, 判不了
+//     的场景两边一样。
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
-	"sync"
+	"syscall"
 	"time"
 
 	"hnc.io/dpid/ifacehint"
 	"hnc.io/dpid/nlroute"
 )
-
-// nativeEnabled 总开关: run/wd_native.disabled 存在 → false。
-func nativeEnabled() bool {
-	_, err := os.Stat(natRunDir + "/wd_native.disabled")
-	return err != nil
-}
 
 // ── 可注入点(native_test 用) ──────────────────────────────────────
 // natRunDir / natDataDir 文件路径根(默认生产 runDir / dataDir; 测试用
@@ -73,25 +65,92 @@ var (
 	sysIfIndexFn = readSysIfIndex
 	// ifaceHintReadFn 读权威热点网卡: 只认 5 分钟内的 run/iface_detect.json
 	// (不回退 hotspot_iface —— 它没有时间戳, 陈旧了也看不出来)。陈旧 →
-	// 「不确定」→ 调用方退回 shell probe, shell 顺带刷新 iface_detect.json。
+	// probeHotspot 跑一次 hnc_iface.sh get 刷新它。
 	ifaceHintReadFn = func() (string, bool) { return ifacehint.ReadDetect(natRunDir, nowFn(), natHintFresh) }
+	// ifaceDetectFn 跑唯一的热点网卡探测器(默认 runIfaceDetect)。
+	ifaceDetectFn = runIfaceDetect
+	// probeHotspotFn / checkHealthFn 主循环用的两项检查(测试替换成「世界状态」)。
+	probeHotspotFn = probeHotspot
+	checkHealthFn  = checkHealth
 )
+
+// ifaceDetectTimeout hnc_iface.sh get 的超时(它会跑 dumpsys / iptables 探测)。
+const ifaceDetectTimeout = 15 * time.Second
+
+// runIfaceDetect `sh bin/hnc_iface.sh get`, 经动作记账(动作名 iface_detect)。
+// 输出不用 —— 它把结论写进 run/iface_detect.json, 调用方重读。
+func runIfaceDetect() {
+	start := nowFn()
+	ctx, cancel := context.WithTimeout(context.Background(), ifaceDetectTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, shellPath(), binDir+"/hnc_iface.sh", "get")
+	cmd.Env = os.Environ()
+	cmd.Stdout, cmd.Stderr = nil, nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		return nil
+	}
+	err := cmd.Run()
+	rc := 0
+	if ee, ok := err.(*exec.ExitError); ok {
+		rc, err = ee.ExitCode(), nil
+	} else if err != nil {
+		rc = -1
+	}
+	runStatsFn("iface_detect", rc, err, nowFn().Sub(start).Seconds()*1000, nowFn())
+}
+
+// probeHotspot 热点探测(v5.33 起唯一一份; 原 shell probe_valid_hotspot):
+// 先用 5 分钟内的探测结果判; 判不了(陈旧 / 没有 / 网卡没私网 IPv4)就跑一次
+// hnc_iface.sh get 刷新, 再判一次。成功 → rc 0 + "<口> <IP>"; 否则 rc 1(热点没开)。
+func probeHotspot() actionResult {
+	r := nativeProbeHotspot()
+	if r.unknown {
+		ifaceDetectFn()
+		r = nativeProbeHotspot()
+	}
+	if r.ok {
+		return actionResult{exitCode: 0, stdout: r.iface + " " + r.ip}
+	}
+	return actionResult{exitCode: 1}
+}
+
+// nativeUnknownTotal 规则健康判不了(本轮跳过)的累计次数 —— 进
+// run/watchdog_actions.json 的 native_unknown, 自检「看门狗动作」一行显示。
+var nativeUnknownTotal int
+
+// checkHealth 规则健康(v5.33 起唯一一份; 原 shell check_health): 0 健康 /
+// 1 规则丢失 → full_restore / 2 临时故障(锁忙等)→ 跳过本轮。判不了按 2 处理并计数。
+func checkHealth(iface string) int {
+	rc := nativeCheckHealth(iface)
+	if rc == natHealthUnknown {
+		nativeUnknownTotal++
+		if nativeUnknownTotal == 1 || nativeUnknownTotal%60 == 0 {
+			logf("check_health: 判不了(netlink / iptables 跑不起来), 本轮跳过 (累计 %d 次)", nativeUnknownTotal)
+		}
+		return natHealthBusy
+	}
+	return rc
+}
 
 // natHintFresh 原生 probe 认可的 iface_detect.json 新鲜度(WORK-v5.29 §T1)。
 const natHintFresh = 5 * time.Minute
 
-// nativeProbeResult probe_hotspot 的原生结论。
+// nativeProbeResult 热点探测的结论(由 probeHotspot 转成 actionResult)。
 type nativeProbeResult struct {
 	iface string // 有效的热点网卡(空 = 无)
 	ip    string // 该网卡上的私网 IPv4
-	ok    bool   // 与 shell "ACTIVE:<iface> <IP>" 语义对齐
-	// unknown = 判断不出来(网卡探测陈旧 / 无私网 IP 等), 调用方退回 shell。
+	ok    bool   // 有效热点: "<iface> <IP>"
+	// unknown = 判断不出来(网卡探测陈旧 / 无私网 IP 等); probeHotspot 刷新探测再判一次。
 	unknown bool
 }
 
-// nativeProbeHotspot 对应 shell probe_valid_hotspot(watchdog.sh:572)。
+// nativeProbeHotspot 照 v5.32 及以前的 shell probe_valid_hotspot 写的(行号见 git 历史)。
 // 分支对应:
-//   - device_detect.sh iface → ifacehint.Read(陈旧即 unknown, 让 shell 顺带刷新);
+//   - device_detect.sh iface → ifacehint.ReadDetect(陈旧即 unknown, probeHotspot 刷新);
 //   - ip -4 addr show <口> → net.InterfaceByName + Addrs;
 //   - 「必须是私网 IPv4」→ ip.IsPrivate() && To4() != nil;
 //   - 输出 "<口> <IP>" → ok=true(网卡非 wlan0 才算, 与 shell get_iface 语义一致)。
@@ -125,9 +184,9 @@ func nativeProbeHotspot() nativeProbeResult {
 	return nativeProbeResult{unknown: true} // 无私网 IPv4
 }
 
-// nativeHealthResult check_health 的原生结论, 语义完全照抄 shell。
+// 规则健康的结论码(语义照抄 v5.32 及以前的 shell check_health)。
 const (
-	natHealthUnknown = -1 // 判不了 → 调用方退回 shell
+	natHealthUnknown = -1 // 判不了 → checkHealth 按「跳过本轮」处理并计数
 	natHealthOK      = 0
 	natHealthLost    = 1 // 规则真丢 → full_restore
 	natHealthBusy    = 2 // 锁忙等临时故障 → 跳过本轮
@@ -149,7 +208,8 @@ func capBool(key string) (bool, bool) {
 	return v, ok
 }
 
-// nativeCheckHealth 对应 shell check_health(watchdog.sh:271), 逐项:
+// nativeCheckHealth 照 v5.32 及以前的 shell check_health 写的(注释里的「shell 行 N」
+// 是当时 watchdog.sh 的行号), 逐项:
 //  0. iface 为空 → 1(shell: `[ -z "$iface" ] && rc=1`);
 //     run/tc_restore_pending 存在 → 1(shell: 行 281);
 //  1. 能力 tc_htb 显式 false → 跳过 tc 检查(watchdog_tc_core_supported,
@@ -161,8 +221,8 @@ func capBool(key string) (bool, bool) {
 //  3. iptables -w 2 -t mangle -S HNC_MARK: rc=2 → 1(链真丢); rc!=0 →
 //     2(锁忙); (HNC_MARK 链空是合法状态 —— 只看命令返回, 不看内容);
 //  4. iptables -w 2 -t mangle -S HNC_RESTORE: rc=2 → 1; rc!=0 → 2;
-//     输出里没有 CONNMARK → 1(shell 行 335: `grep -q 'CONNMARK'`)。
-//     netlink / iptables 执行失败 → unknown(退 shell, 不误判)。
+//     输出里没有 CONNMARK → 1(原 shell 版 `grep -q 'CONNMARK'`)。
+//     netlink / iptables 执行失败 → unknown(不误判)。
 func nativeCheckHealth(iface string) int {
 	if iface == "" {
 		return natHealthLost
@@ -256,86 +316,8 @@ func readFileTrim(p string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-// nativeHttpdDriftNeeded 对应 shell check_httpd_bind_drift
-// (watchdog.sh:496)。Go 只判断「需不需要动手」:
-//   - run/httpd.pid 或 run/httpd_bind_ip 不存在, 或 pid 不活, 或
-//     bind_ip 为空 → 不需要(与 shell 前四个 early-return 一致);
-//   - remote_enabled 显式 false 且 bind != "loopback-only" → 需要
-//     (场景 1: remote 关了但 httpd 还公网绑定);
-//   - remote_enabled 显式 true 且 bind == "loopback-only" → 场景 2:
-//     权威网卡能读到且非 wlan0、网卡上有 IPv4 → 需要; 网卡探测不到 /
-//     是 wlan0 / 无 IP → 不需要(与 shell 的三个 early-return 一致);
-//   - rules.json 读不了 / remote_enabled 缺省 → 不确定(true), 调用方
-//     退回 shell 动作(它 5 分钟才跑一次, 代价可忽略, 宁可保守)。
-func nativeHttpdDriftNeeded() (needed, unknown bool) {
-	pidStr, err := readFileTrim(natRunDir + "/httpd.pid")
-	if err != nil || pidStr == "" {
-		return false, false
-	}
-	pid, err := strconv.Atoi(pidStr)
-	if err != nil || !processAliveFn(pid) {
-		return false, false
-	}
-	bound, err := readFileTrim(natRunDir + "/httpd_bind_ip")
-	if err != nil || bound == "" {
-		return false, false
-	}
-	remote, known := rulesRemoteEnabled()
-	if !known {
-		return true, true
-	}
-	if !remote && bound != "loopback-only" {
-		return true, false
-	}
-	if remote && bound == "loopback-only" {
-		iface, ok := ifaceHintReadFn()
-		if !ok || iface == "" || iface == "wlan0" {
-			return false, false
-		}
-		ni, err := netInterfaceByNameFn(iface)
-		if err != nil {
-			return false, false
-		}
-		for _, a := range addrsOf(ni) {
-			if a.To4() != nil {
-				return true, false
-			}
-		}
-		return false, false
-	}
-	return false, false
-}
-
-// rulesRemoteEnabled data/rules.json 的 remote_enabled(只取这一个键)。
-func rulesRemoteEnabled() (bool, bool) {
-	b, err := os.ReadFile(natDataDir + "/rules.json")
-	if err != nil {
-		return false, false
-	}
-	var m map[string]interface{}
-	if json.Unmarshal(b, &m) != nil {
-		return false, false
-	}
-	v, ok := m["remote_enabled"].(bool)
-	return v, ok
-}
-
-func addrsOf(ni *net.Interface) []net.IP {
-	var out []net.IP
-	addrs, err := netIfAddrsFn(ni)
-	if err != nil {
-		return nil
-	}
-	for _, a := range addrs {
-		if ipn, ok := a.(*net.IPNet); ok {
-			out = append(out, ipn.IP)
-		}
-	}
-	return out
-}
-
-// nativeUplinkOK 对应 shell ensure_tc_uplink_healthy(watchdog.sh:725)
-// 的「判断」部分:
+// nativeUplinkOK 上行链路「需不需要修」(修在 shell ensure_tc_uplink_healthy, 它还管
+// 冷却 / 失败计数 / 降级标记, 修完自己再验证一遍):
 //   - 能力 uplink_supported 显式 false → false(调 shell 动作, 它带
 //     watchdog_mark_uplink_unsupported_once / 清 fail_count 的副作用);
 //   - ifb0 不存在 → false;
@@ -344,8 +326,8 @@ func addrsOf(ni *net.Interface) []net.IP {
 //     exec `tc filter show dev <口> ingress`, 失败(魔改 tc 拒绝 ingress
 //     关键字, ColorOS 坑)再试 `parent ffff:`; 输出含 "mirred" 且含
 //     "ifb0"(grep -iE "mirred.*ifb0" 同义)才算有。
-//     任一步执行失败(能力未知 / netlink / tc 都跑不动)→ unknown, 调用方
-//     退回 shell。
+//     任一步执行失败(netlink / tc 都跑不动)→ unknown, 调用方照样调 shell
+//     (修复路径自己会判)。
 func nativeUplinkOK(iface string) (ok, unknown bool) {
 	if cap, known := capBool("uplink_supported"); known && !cap {
 		return false, false
@@ -398,162 +380,6 @@ func hasMirredIfb0(out string) bool {
 	return false
 }
 
-// ── 对照机制(nativeShadow) ────────────────────────────────────────
-
-const (
-	nativeShadowEvery = 30 * time.Minute
-	nativeMaxMismatch = 3 // 连续不一致 → 该项退回 shell 直到重启
-)
-
-// nativeCheckKind 参与对照的检查项。
-type nativeCheckKind string
-
-const (
-	ncProbe   nativeCheckKind = "probe_hotspot"
-	ncHealth  nativeCheckKind = "check_health"
-	ncDrift   nativeCheckKind = "httpd_drift"
-	ncUplink  nativeCheckKind = "tc_uplink_healthy"
-	natShadow nativeCheckKind = "native_shadow" // 对照本身跑的 shell 动作名(记账用)
-)
-
-// nativeShadowState 每项检查的对照状态(主循环串行使用, 无锁竞争;
-// 互斥锁只为未来并发留的防御)。
-type nativeShadowState struct {
-	mu          sync.Mutex
-	lastRun     map[nativeCheckKind]time.Time
-	mismatchRun map[nativeCheckKind]int  // 连续不一致次数
-	reverted    map[nativeCheckKind]bool // 连续 3 次 → 退回 shell
-}
-
-func newNativeShadowState() *nativeShadowState {
-	return &nativeShadowState{
-		lastRun:     map[nativeCheckKind]time.Time{},
-		mismatchRun: map[nativeCheckKind]int{},
-		reverted:    map[nativeCheckKind]bool{},
-	}
-}
-
-// due 到对照时间了(每 30 分钟), 且该项没有被退回。
-func (s *nativeShadowState) due(k nativeCheckKind, now time.Time) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.reverted[k] {
-		return false
-	}
-	return now.Sub(s.lastRun[k]) >= nativeShadowEvery
-}
-
-// observe 汇报一次对照结果: agree=true 清零连续计数; 不一致 +1,
-// 连续 ≥3 → reverted[k]=true(该项退回 shell 直到看门狗重启)。
-func (s *nativeShadowState) observe(k nativeCheckKind, agree bool, now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.lastRun[k] = now
-	if agree {
-		s.mismatchRun[k] = 0
-		return
-	}
-	s.mismatchRun[k]++
-	if s.mismatchRun[k] >= nativeMaxMismatch {
-		s.reverted[k] = true
-		logf("native check %s: mismatched %d times in a row, reverting to shell until watchdog restart", k, nativeMaxMismatch)
-	}
-}
-
-// isReverted 该项是否已退回 shell。
-func (s *nativeShadowState) isReverted(k nativeCheckKind) bool {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.reverted[k]
-}
-
-// nativeMismatchTotal 对照机制累计不一致数(进 run/watchdog_actions.json
-// 的 native_mismatch 计数; wdActionsFlush 时由 watchActionStatsExtra 带出)。
-var nativeMismatchTotal int
-
-// ── 健康检查的 5 秒缓存(照抄 shell _HEALTH_TS/_HEALTH_RC 语义) ─────
-var (
-	healthCacheMu    sync.Mutex
-	healthCacheAt    time.Time
-	healthCacheRC    int
-	healthCacheIface string
-)
-
-// nativeCheckHealthCached 同一 (iface) 5 秒内重复调用直接用缓存结论
-// (shell: `[ $((now - _HEALTH_TS)) -lt 5 ] && return $_HEALTH_RC`)。
-func nativeCheckHealthCached(iface string, now time.Time) int {
-	healthCacheMu.Lock()
-	defer healthCacheMu.Unlock()
-	if !healthCacheAt.IsZero() && healthCacheIface == iface && now.Sub(healthCacheAt) < 5*time.Second {
-		return healthCacheRC
-	}
-	rc := nativeCheckHealth(iface)
-	healthCacheAt, healthCacheRC, healthCacheIface = now, rc, iface
-	return rc
-}
-
-// ── 对照与开关的入口(handleActive 调用) ─────────────────────────────
-
-// natShadowSt 对照状态实例(主循环串行驱动)。
-var natShadowSt = newNativeShadowState()
-
-// natUse 该项当前是否走原生路径(总开关开着, 且该项没被对照机制钉回 shell)。
-func natUse(k nativeCheckKind) bool {
-	if !nativeEnabled() {
-		return false
-	}
-	return !natShadowSt.isReverted(k)
-}
-
-// natShadowHealth check_health 的对照(每 30 分钟一次)。nativeRC 必须是
-// 原生判出来的结论 —— 原生判不了时调用方已经跑过 shell, 不再对照(否则
-// 同一轮 shell 跑两遍、还拿 shell 跟 shell 比)。到点则额外跑一次 shell
-// check_health: 一致 → 清零连续计数; 不一致 → 记 native_mismatch, 本轮
-// 返回 shell 的结论(WORK-v5.29 §T1.6「本轮以 shell 结论为准」); 同项连续
-// 3 次不一致 → 钉回 shell 直到看门狗重启。没到点 → 原样返回 nativeRC。
-func natShadowHealth(iface string, nativeRC int) int {
-	now := nowFn()
-	if !natShadowSt.due(ncHealth, now) {
-		return nativeRC
-	}
-	res := runActionFn("check_health")
-	agree := res.exitCode == nativeRC
-	if !agree {
-		nativeMismatchTotal++
-		logf("native check_health mismatch: native=%d shell=%d (iface=%s) — trusting shell", nativeRC, res.exitCode, iface)
-	}
-	natShadowSt.observe(ncHealth, agree, now)
-	return res.exitCode
-}
-
-// natShadowProbe probe_hotspot 的对照(每 30 分钟一次), 语义同
-// natShadowHealth: r 必须是原生判出的结论(unknown 时调用方已跑过 shell,
-// 直接返回 nativeRes 不对照); 到点跑 shell, 比 "<口> <IP>", 本轮返回
-// shell 的结果(一致时两者等价)。
-func natShadowProbe(r nativeProbeResult, nativeRes actionResult) actionResult {
-	if r.unknown {
-		return nativeRes
-	}
-	now := nowFn()
-	if !natShadowSt.due(ncProbe, now) {
-		return nativeRes
-	}
-	res := runActionFn("probe_hotspot")
-	var agree bool
-	if r.ok {
-		fields := strings.Fields(res.stdout)
-		agree = res.exitCode == 0 && len(fields) >= 2 && fields[0] == r.iface && fields[1] == r.ip
-	} else {
-		agree = res.exitCode != 0
-	}
-	if !agree {
-		nativeMismatchTotal++
-		logf("native probe_hotspot mismatch: native(%q %q ok=%v) shell rc=%d out=%q — trusting shell", r.iface, r.ip, r.ok, res.exitCode, res.stdout)
-	}
-	natShadowSt.observe(ncProbe, agree, now)
-	return res
-}
-
-// wdActionsSnapshotExtra actionstats.flush 之外带出的对照计数
-// (run/watchdog_actions.json 顶层 native_mismatch 字段)。
-var wdActionsSnapshotExtra = func() int { return nativeMismatchTotal }
+// wdActionsSnapshotExtra actionstats.flush 之外带出的计数
+// (run/watchdog_actions.json 顶层 native_unknown 字段)。
+var wdActionsSnapshotExtra = func() int { return nativeUnknownTotal }

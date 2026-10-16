@@ -1,5 +1,6 @@
-// native_test.go — v5.29 T1: 看门狗原生检查, 用例名与 bin/watchdog.sh 的
-// 分支一一对应(注释标 shell 原文行号; 路径/命令全部注入假实现)。
+// native_test.go — 看门狗的检查(native.go)。v5.29 T1 时用例名与当时 bin/watchdog.sh
+// 的 shell 分支一一对应(注释里的「shell 行 N」是 v5.32 及以前的行号; v5.33 起 shell
+// 版已删, Go 是唯一一份)。路径 / 命令全部注入假实现。
 package main
 
 import (
@@ -28,20 +29,12 @@ func newNatTestEnv(t *testing.T) *natTestEnv {
 	return e
 }
 
-// resetGlobals 重置共享缓存与对照状态(测试间不串)。
+// resetGlobals 重置跨用例的计数(测试间不串)。
 func (e *natTestEnv) resetGlobals(t *testing.T) {
 	t.Helper()
-	oldHCAt, oldHCRCC, oldHCI := healthCacheAt, healthCacheRC, healthCacheIface
-	oldShadow := natShadowSt
-	oldMM := nativeMismatchTotal
-	healthCacheAt, healthCacheRC, healthCacheIface = time.Time{}, 0, ""
-	natShadowSt = newNativeShadowState()
-	nativeMismatchTotal = 0
-	t.Cleanup(func() {
-		healthCacheAt, healthCacheRC, healthCacheIface = oldHCAt, oldHCRCC, oldHCI
-		natShadowSt = oldShadow
-		nativeMismatchTotal = oldMM
-	})
+	oldUnknown := nativeUnknownTotal
+	nativeUnknownTotal = 0
+	t.Cleanup(func() { nativeUnknownTotal = oldUnknown })
 }
 
 // inject 注入探测 / netlink / exec 的假实现并恢复。
@@ -118,7 +111,7 @@ func TestProbeNativeWlan0NotHotspot(t *testing.T) {
 }
 
 func TestProbeNativeStaleHintUnknown(t *testing.T) {
-	// ifacehint 陈旧 / 无 → unknown(调用方退回 shell, shell 会刷新缓存)
+	// ifacehint 陈旧 / 无 → unknown(probeHotspot 跑一次 hnc_iface.sh get 再判)
 	e := newNatTestEnv(t)
 	e.inject(t, "", nil, nil)
 	if r := nativeProbeHotspot(); !r.unknown {
@@ -205,7 +198,7 @@ func TestHealthNativeNoHTBLost(t *testing.T) {
 }
 
 func TestHealthNativeNetlinkFailUnknown(t *testing.T) {
-	// netlink 查不了 → unknown, 退回 shell(不误判丢规则)
+	// netlink 查不了 → unknown(checkHealth 按跳过本轮处理, 不误判丢规则)
 	e := newNatTestEnv(t)
 	e.inject(t, "wlan2", nil, nil)
 	old := nlQdiscListFn
@@ -306,121 +299,6 @@ type fakeExitErr struct{ code int }
 
 func (e *fakeExitErr) Error() string { return "exit status" }
 func (e *fakeExitErr) ExitCode() int { return e.code }
-
-func TestHealthNativeCache5s(t *testing.T) {
-	// shell _HEALTH_TS/_HEALTH_RC: 5 秒内重复调用不重复执行(netlink 只查一次)
-	e := newNatTestEnv(t)
-	calls := 0
-	e.inject(t, "wlan2", nil, nil)
-	old := nlQdiscListFn
-	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) {
-		calls++
-		return htbRoot(), nil
-	}
-	t.Cleanup(func() { nlQdiscListFn = old })
-	e.write(t, "tc_ifindex_wlan2", "5")
-	base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.Local)
-	if rc := nativeCheckHealthCached("wlan2", base); rc != natHealthOK {
-		t.Fatalf("first rc=%d", rc)
-	}
-	if rc := nativeCheckHealthCached("wlan2", base.Add(3*time.Second)); rc != natHealthOK {
-		t.Fatalf("cached rc=%d", rc)
-	}
-	if calls != 1 {
-		t.Fatalf("netlink calls=%d, want 1(缓存生效)", calls)
-	}
-	if rc := nativeCheckHealthCached("wlan2", base.Add(6*time.Second)); rc != natHealthOK {
-		t.Fatalf("expired rc=%d", rc)
-	}
-	if calls != 2 {
-		t.Fatalf("netlink calls=%d, want 2(过期重查)", calls)
-	}
-}
-
-// ── nativeHttpdDriftNeeded(shell check_httpd_bind_drift, 496 行起) ──
-
-func TestDriftNoPidNoAction(t *testing.T) {
-	// shell 行 497-499: 无 pid / 无 bind_ip 文件 → 不动手
-	e := newNatTestEnv(t)
-	e.inject(t, "", nil, nil)
-	if needed, unknown := nativeHttpdDriftNeeded(); needed || unknown {
-		t.Fatalf("needed=%v unknown=%v, want false/false", needed, unknown)
-	}
-}
-
-func TestDriftProcessGoneNoAction(t *testing.T) {
-	// shell 行 502: pid 不存活 → 不动手
-	e := newNatTestEnv(t)
-	e.inject(t, "", nil, nil)
-	e.write(t, "httpd.pid", "12345")
-	old := processAliveFn
-	processAliveFn = func(int) bool { return false }
-	t.Cleanup(func() { processAliveFn = old })
-	if needed, unknown := nativeHttpdDriftNeeded(); needed || unknown {
-		t.Fatalf("needed=%v unknown=%v", needed, unknown)
-	}
-}
-
-func TestDriftRemoteOffStillPublicNeedsAction(t *testing.T) {
-	// shell 场景 1(行 520 附近): remote_enabled!=true 且 bind 不是
-	// loopback-only → 需要动手(调 shell 执行)
-	e := newNatTestEnv(t)
-	e.inject(t, "", nil, nil)
-	e.write(t, "httpd.pid", "12345")
-	e.write(t, "httpd_bind_ip", "0.0.0.0")
-	os.MkdirAll(e.dataDir, 0o755)
-	os.WriteFile(filepath.Join(e.dataDir, "rules.json"), []byte(`{"remote_enabled":false}`), 0o644)
-	old := processAliveFn
-	processAliveFn = func(int) bool { return true }
-	t.Cleanup(func() { processAliveFn = old })
-	if needed, unknown := nativeHttpdDriftNeeded(); !needed || unknown {
-		t.Fatalf("needed=%v unknown=%v, want true/false", needed, unknown)
-	}
-}
-
-func TestDriftRemoteOnLoopbackWlan0NoAction(t *testing.T) {
-	// shell 场景 2(行 530 附近): remote on + loopback-only, 但 iface=wlan0 → 不动手
-	e := newNatTestEnv(t)
-	e.inject(t, "wlan0", nil, nil)
-	e.write(t, "httpd.pid", "12345")
-	e.write(t, "httpd_bind_ip", "loopback-only")
-	os.WriteFile(filepath.Join(e.dataDir, "rules.json"), []byte(`{"remote_enabled":true}`), 0o644)
-	old := processAliveFn
-	processAliveFn = func(int) bool { return true }
-	t.Cleanup(func() { processAliveFn = old })
-	if needed, unknown := nativeHttpdDriftNeeded(); needed || unknown {
-		t.Fatalf("needed=%v unknown=%v, want false/false(wlan0 不是热点口)", needed, unknown)
-	}
-}
-
-func TestDriftRemoteOnLoopbackHotspotIPNeedsAction(t *testing.T) {
-	// shell 场景 2: 热点口有 IPv4 → 需要动手(升级绑定到 0.0.0.0)
-	e := newNatTestEnv(t)
-	e.inject(t, "wlan2", nil, nil)
-	e.write(t, "httpd.pid", "12345")
-	e.write(t, "httpd_bind_ip", "loopback-only")
-	os.WriteFile(filepath.Join(e.dataDir, "rules.json"), []byte(`{"remote_enabled":true}`), 0o644)
-	old := processAliveFn
-	processAliveFn = func(int) bool { return true }
-	t.Cleanup(func() { processAliveFn = old })
-	if needed, unknown := nativeHttpdDriftNeeded(); !needed || unknown {
-		t.Fatalf("needed=%v unknown=%v, want true/false", needed, unknown)
-	}
-}
-
-func TestDriftRulesUnreadableUnknown(t *testing.T) {
-	// rules.json 读不了 / 无该键 → unknown(退回 shell 判断, 不敢瞎动手)
-	e := newNatTestEnv(t)
-	e.inject(t, "", nil, nil)
-	e.write(t, "httpd.pid", "12345")
-	e.write(t, "httpd_bind_ip", "0.0.0.0")
-	old := processAliveFn
-	processAliveFn = func(int) bool { return true }
-	t.Cleanup(func() { processAliveFn = old })
-	if needed, unknown := nativeHttpdDriftNeeded(); !needed || !unknown {
-		t.Fatalf("needed=%v unknown=%v, want true/true", needed, unknown)
-	}
-}
 
 // ── nativeUplinkOK(shell ensure_tc_uplink_healthy, 725 行起) ──
 
@@ -548,106 +426,118 @@ func TestUplinkTCBothFailUnknown(t *testing.T) {
 	}
 }
 
-// ── 开关与对照机制 ──────────────────────────────────────────────────
+// ── probeHotspot / checkHealth(v5.33: 唯一一份, 不再退回 shell) ──────────
 
-func TestNativeSwitchDisabledFile(t *testing.T) {
-	// run/wd_native.disabled 存在 → 全部退回 shell
-	e := newNatTestEnv(t)
-	e.inject(t, "wlan2", htbRoot(), nil)
-	e.write(t, "wd_native.disabled", "")
-	if nativeEnabled() || natUse(ncProbe) || natUse(ncHealth) {
-		t.Fatal("开关文件存在时 natUse 应全部 false")
+// withDetect 把 ifaceDetectFn 换成计数桩; onDetect 模拟 hnc_iface.sh get 刷新
+// run/iface_detect.json 后的世界(可为 nil)。
+func withDetect(t *testing.T, onDetect func()) *int {
+	t.Helper()
+	n := 0
+	old := ifaceDetectFn
+	ifaceDetectFn = func() {
+		n++
+		if onDetect != nil {
+			onDetect()
+		}
 	}
+	t.Cleanup(func() { ifaceDetectFn = old })
+	return &n
 }
 
-func TestShadowMismatchCountAndRevert(t *testing.T) {
-	// 对照: 不一致 → 计数 + 以 shell 为准; 连续 3 次 → 该项退回 shell
-	e := newNatTestEnv(t)
-	e.inject(t, "wlan2", htbRoot(), nil)
-	oldAct, oldNow := runActionFn, nowFn
-	base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.Local)
-	cur := base
-	nowFn = func() time.Time { return cur }
-	runActionFn = func(name string, args ...string) actionResult {
-		if name == "check_health" {
-			return actionResult{exitCode: 0} // shell 说健康
-		}
+// noShellAction 任何 watchdog.sh action 被调用都算失败(v5.32 及以前判不了
+// 会退回 shell probe_hotspot / check_health)。
+func noShellAction(t *testing.T) {
+	t.Helper()
+	old := runActionFn
+	runActionFn = func(name string, _ ...string) actionResult {
+		t.Errorf("不该调 shell action %q", name)
 		return actionResult{exitCode: 0}
 	}
-	t.Cleanup(func() { runActionFn, nowFn = oldAct, oldNow })
-
-	for i := 1; i <= 3; i++ {
-		if got := natShadowHealth("wlan2", natHealthLost); got != natHealthOK { // 原生说丢规则
-			t.Fatalf("对照轮应以 shell 结论为准, got %d", got)
-		}
-		cur = cur.Add(31 * time.Minute)
-		if nativeMismatchTotal != i {
-			t.Fatalf("mismatch=%d, want %d", nativeMismatchTotal, i)
-		}
-		if i < 3 && !natUse(ncHealth) {
-			t.Fatalf("第 %d 次后不应退回", i)
-		}
-	}
-	if natUse(ncHealth) {
-		t.Fatal("连续 3 次不一致后应退回 shell")
-	}
+	t.Cleanup(func() { runActionFn = old })
 }
 
-func TestShadowAgreementResetsStreak(t *testing.T) {
-	// 不一致后一致 → 连续计数清零(不累计误退)
-	e := newNatTestEnv(t)
-	e.inject(t, "wlan2", htbRoot(), nil)
-	oldAct, oldNow := runActionFn, nowFn
-	base := time.Date(2026, 10, 5, 10, 0, 0, 0, time.Local)
-	cur := base
-	nowFn = func() time.Time { return cur }
-	runActionFn = func(string, ...string) actionResult { return actionResult{exitCode: 0} }
-	t.Cleanup(func() { runActionFn, nowFn = oldAct, oldNow })
-	natShadowHealth("wlan2", natHealthLost)
-	cur = cur.Add(31 * time.Minute)
-	natShadowHealth("wlan2", natHealthOK) // 一致
-	cur = cur.Add(31 * time.Minute)
-	natShadowHealth("wlan2", natHealthLost)
-	cur = cur.Add(31 * time.Minute)
-	natShadowHealth("wlan2", natHealthLost)
-	if !natUse(ncHealth) {
-		t.Fatal("只有连续 2 次不一致(中间一致清零), 不应退回")
-	}
-	if nativeMismatchTotal != 3 {
-		t.Fatalf("mismatch=%d, want 3", nativeMismatchTotal)
-	}
-}
-
-func TestShadowProbeComparesIfaceIP(t *testing.T) {
-	// probe 对照: 原生 "wlan2 192.168.43.1" vs shell 输出不一致 → 计数
+func TestProbeHotspotFreshNoDetect(t *testing.T) {
+	// 探测结果新鲜且网卡有私网 IPv4 → 直接成功, 不跑 hnc_iface.sh
 	e := newNatTestEnv(t)
 	e.inject(t, "wlan2", nil, nil)
-	oldAct, oldNow := runActionFn, nowFn
-	cur := time.Date(2026, 10, 5, 10, 0, 0, 0, time.Local)
-	nowFn = func() time.Time { return cur }
-	runActionFn = func(name string, args ...string) actionResult {
-		return actionResult{exitCode: 0, stdout: "wlan2 192.168.44.1\n"} // IP 不同
-	}
-	t.Cleanup(func() { runActionFn, nowFn = oldAct, oldNow })
-	got := natShadowProbe(nativeProbeResult{iface: "wlan2", ip: "192.168.43.1", ok: true},
-		actionResult{exitCode: 0, stdout: "wlan2 192.168.43.1"})
-	if nativeMismatchTotal != 1 {
-		t.Fatalf("mismatch=%d, want 1", nativeMismatchTotal)
-	}
-	if got.stdout != "wlan2 192.168.44.1\n" {
-		t.Fatalf("对照轮应以 shell 输出为准, got %q", got.stdout)
+	noShellAction(t)
+	n := withDetect(t, nil)
+	r := probeHotspot()
+	if r.exitCode != 0 || r.stdout != "wlan2 192.168.43.1" || *n != 0 {
+		t.Fatalf("r=%+v detect=%d", r, *n)
 	}
 }
 
-// ── 快照带出 native_mismatch(actionstats 联动) ─────────────────────
+func TestProbeHotspotStaleRunsDetectOnce(t *testing.T) {
+	// 探测陈旧 → 跑一次 hnc_iface.sh get(刷新 iface_detect.json)再判; 不调 shell action
+	e := newNatTestEnv(t)
+	e.inject(t, "", nil, nil)
+	noShellAction(t)
+	n := withDetect(t, func() { ifaceHintReadFn = func() (string, bool) { return "wlan2", true } })
+	old := netInterfaceByNameFn
+	netInterfaceByNameFn = func(name string) (*net.Interface, error) { return &net.Interface{Name: name, Index: 5}, nil }
+	t.Cleanup(func() { netInterfaceByNameFn = old })
+	r := probeHotspot()
+	if r.exitCode != 0 || r.stdout != "wlan2 192.168.43.1" || *n != 1 {
+		t.Fatalf("r=%+v detect=%d, want ok + 1 次探测", r, *n)
+	}
+}
 
-func TestSnapshotCarriesNativeMismatch(t *testing.T) {
+func TestProbeHotspotStillUnknownIsDown(t *testing.T) {
+	// 刷新后仍看不出(热点没开)→ rc 1, 只探测一次(不循环)
+	e := newNatTestEnv(t)
+	e.inject(t, "", nil, nil)
+	noShellAction(t)
+	n := withDetect(t, nil)
+	r := probeHotspot()
+	if r.exitCode != 1 || r.stdout != "" || *n != 1 {
+		t.Fatalf("r=%+v detect=%d, want rc1 + 1 次探测", r, *n)
+	}
+}
+
+func TestCheckHealthUnknownSkipsRound(t *testing.T) {
+	// 判不了(netlink 失败)→ 按「临时故障」返回 2(主循环跳过本轮, 不 full_restore),
+	// 计 native_unknown; 不再退回 shell check_health。
+	e := newNatTestEnv(t)
+	e.inject(t, "wlan2", nil, nil)
+	noShellAction(t)
+	old := nlQdiscListFn
+	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) { return nil, os.ErrPermission }
+	t.Cleanup(func() { nlQdiscListFn = old })
+	for i := 1; i <= 2; i++ {
+		if rc := checkHealth("wlan2"); rc != natHealthBusy {
+			t.Fatalf("rc=%d want busy(2)", rc)
+		}
+		if nativeUnknownTotal != i {
+			t.Fatalf("native_unknown=%d want %d", nativeUnknownTotal, i)
+		}
+	}
+}
+
+func TestCheckHealthPassThrough(t *testing.T) {
+	// 判得了 → 原样返回(丢规则 1 / 健康 0), 不计 unknown
+	e := newNatTestEnv(t)
+	e.inject(t, "wlan2", []nlroute.Qdisc{{Kind: "fq_codel", Parent: nlroute.TC_H_ROOT}}, nil)
+	noShellAction(t)
+	if rc := checkHealth("wlan2"); rc != natHealthLost || nativeUnknownTotal != 0 {
+		t.Fatalf("rc=%d unknown=%d, want 1 / 0", rc, nativeUnknownTotal)
+	}
+	e.inject(t, "wlan2", htbRoot(), nil)
+	e.write(t, "tc_ifindex_wlan2", "5")
+	if rc := checkHealth("wlan2"); rc != natHealthOK {
+		t.Fatalf("rc=%d want 0", rc)
+	}
+}
+
+// ── 快照带出 native_unknown(actionstats 联动) ─────────────────────
+
+func TestSnapshotCarriesNativeUnknown(t *testing.T) {
 	old := wdActionsSnapshotExtra
 	wdActionsSnapshotExtra = func() int { return 7 }
 	t.Cleanup(func() { wdActionsSnapshotExtra = old })
 	s := &actionStats{}
 	out := s.snapshot(time.Now())
-	if out.NativeMismatch != 7 {
-		t.Fatalf("NativeMismatch=%d, want 7", out.NativeMismatch)
+	if out.NativeUnknown != 7 {
+		t.Fatalf("NativeUnknown=%d, want 7", out.NativeUnknown)
 	}
 }

@@ -16,13 +16,11 @@
 //   - activeAux / loopState: handleActive / mainLoop 的每轮可变状态,
 //     让 budget_test 能不开真循环直接驱动 tick。
 //
-// 节拍变化(其余不变):
-//   - httpd_drift:   健康且不在恢复期 → 5 分钟一次(原每轮 60 秒)。
+// 节拍变化(其余不变; v5.33 起 httpd_drift 已删, 见 native.go 文件头):
 //   - tc_uplink_healthy: 健康且不在恢复期 → 3 分钟一次(原每轮 60 秒)。
-//     最坏影响: 上行 ingress 重定向丢失, 最长约 3 分钟被 check_health
-//     撞见(tc_uplink_healthy 是专项复核, check_health 每轮仍在跑),
-//     原 1 分钟。
-//   - 规则不健康 / 刚恢复(recoveryRounds > 0)时两者照旧每轮执行。
+//     最坏影响: 上行 ingress 重定向丢失最长约 3 分钟才被发现(原 1 分钟;
+//     规则健康检查每轮仍在跑)。
+//   - 规则不健康 / 刚恢复(recoveryRounds > 0)时照旧每轮执行。
 package main
 
 import "time"
@@ -82,14 +80,10 @@ func (g *capProbeGate) mark(iface string, now time.Time) {
 
 // ── 健康时的附带检查节拍(A1) ─────────────────────────────────────────────
 
-const (
-	// httpdDriftEvery 健康时 httpd pidfile 漂移检查的间隔(原每轮 60 秒)。
-	httpdDriftEvery = 5 * time.Minute
-	// tcUplinkEvery 健康时上行限速专项复核的间隔(原每轮 60 秒)。
-	// check_health 每轮仍在跑, 这里只是把「上行为 0 → tc_uplink_healthy
-	// 复核」的专项检查放宽到 3 分钟: 上行重定向丢失最长约 3 分钟被发现(原 1 分钟)。
-	tcUplinkEvery = 3 * time.Minute
-)
+// tcUplinkEvery 健康时上行限速专项复核的间隔(原每轮 60 秒)。规则健康检查
+// 每轮仍在跑, 这里只是把上行链路的专项检查放宽到 3 分钟: 上行重定向丢失最长
+// 约 3 分钟被发现(原 1 分钟)。
+const tcUplinkEvery = 3 * time.Minute
 
 // ── 每轮可变状态(抽出 mainLoop / handleActive 局部变量) ─────────────────
 
@@ -99,7 +93,6 @@ type activeAux struct {
 	recoveryRounds  int
 	lastV6Sync      time.Time
 	lastStatsSample time.Time
-	lastDrift       time.Time
 	lastUplink      time.Time
 	cap             capProbeGate
 }

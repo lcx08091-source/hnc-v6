@@ -20,10 +20,8 @@
 #   3. INTERVAL_RECOVERY 从 10s 改为 30s，避免连续重建
 #   4. full_restore 前先确认 iface 有效，避免在错误接口上跑 init_tc
 #
-# 功耗优化：
-#  1. 周期检查：60s 一次（Doze 时 180s）
-#  2. 健康检查缓存 5s，避免重复 iptables 调用
-#  3. Doze 模式暂停主动检查
+# v5.33: 「判断」(热点探测 / 规则健康 / 上行链路检查)只在 Go 看门狗里一份
+# (src/dpid/cmd/hnc_watchdog/native.go); 本脚本只剩「动手」的 action。
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
 if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
@@ -38,17 +36,10 @@ fi
 command -v hnc_act_load >/dev/null 2>&1 || {
     hnc_act_load() { ACT_OK=0; ACT_LEVEL=unknown; ACT_SCREEN_OFF=0; ACT_SCREEN_ON=0; ACT_HOTSPOT=1; ACT_CLIENTS=1; ACT_WEBUI=1; return 1; }
 }
-HNC_HTTPS_PORT=${HNC_HTTPS_PORT:-8443}
-HNC_LOOPBACK_PORT=${HNC_LOOPBACK_PORT:-8444}
-HNC_HTTP_REDIR_PORT=${HNC_HTTP_REDIR_PORT:-8080}
 # rc30.13.1 cleanup: RULES_FILE 在此文件无引用. 真实读 rules.json 都是
 # 通过 sh "$HNC_DIR/bin/json_set.sh" 子调用 (它自己拼路径). 删 SC2034 死变量.
 LOG=$HNC_DIR/logs/watchdog.log
 RUN=$HNC_DIR/run
-
-INTERVAL_NORMAL=60     # 规则正常时检查间隔
-INTERVAL_RECOVERY=30   # v3.4.1：恢复后加密检查间隔（旧值 10s 太激进）
-INTERVAL_DOZE=180      # Doze 模式
 
 log() {
     [ -d "$(dirname "$LOG")" ] || mkdir -p "$(dirname "$LOG")" 2>/dev/null
@@ -167,7 +158,6 @@ run_capability_probe_active() {
     log "hotfix17.3: running capability_probe for active iface=$iface"
     HNC="$HNC_DIR" sh "$HNC_DIR/bin/capability_probe.sh" >> "$HNC_DIR/logs/capabilities.log" 2>&1 || \
         log "hotfix17.3: capability_probe failed for iface=$iface"
-    _HEALTH_TS=0
 }
 
 # hotfix17.7: TC repair circuit breaker.
@@ -242,121 +232,11 @@ WDG_CLEAN_EXIT=0
 trap 'WDG_CLEAN_EXIT=1; log "received signal, shutting down"; exit 0' TERM INT
 trap '[ "$WDG_CLEAN_EXIT" = "1" ] || log_error "watchdog EXITED unexpectedly (last_state=$(cat $STATE_FILE 2>/dev/null || echo ?))"' EXIT
 
-# v3.4.1：iface 缓存。device_detect.sh iface 在 wlan0/wlan2 之间反复
-# 横跳是 v3.4.0 watchdog 误触发 restore 的主要诱因。这里加 5 分钟缓存
-# 完全屏蔽抖动。
-IFACE_CACHE_TS=0
-IFACE_CACHE_VAL=""
+# 当前热点网卡(full_restore / ensure_tc_uplink_healthy 用)。每个 action 都是
+# 新进程, v3.4.1 起的进程内 5 分钟缓存从没命中过, v5.33 删; 防抖由
+# hnc_iface.sh 的 run/iface_detect.json(TTL + 候选签名)负责。
 get_iface() {
-    local now; now=$(date +%s)
-    if [ -n "$IFACE_CACHE_VAL" ] && [ "$IFACE_CACHE_VAL" != "wlan0" ] \
-       && [ $((now - IFACE_CACHE_TS)) -lt 300 ]; then
-        echo "$IFACE_CACHE_VAL"
-        return
-    fi
-    local v; v=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null)
-    # 只缓存有效结果（非空 + 非 wlan0）
-    if [ -n "$v" ] && [ "$v" != "wlan0" ]; then
-        IFACE_CACHE_VAL="$v"
-        IFACE_CACHE_TS=$now
-    fi
-    echo "$v"
-}
-
-# ── 轻量健康检查（缓存 5s 结果）────────────────────────────
-_HEALTH_TS=0
-_HEALTH_RC=0
-check_health() {
-    local now=$(date +%s)
-    [ $((now - _HEALTH_TS)) -lt 5 ] && return $_HEALTH_RC
-
-    local rc=0
-    local iface=$(get_iface)
-
-    # 0. iface 必须有效
-    [ -z "$iface" ] && rc=1
-    # v5.12: 上次 full_restore 因锁竞争没把规则(黑名单/mark)补回 → 仍判不健康
-    [ -f "$RUN/tc_restore_pending" ] && rc=1
-
-    # 1. TC 根 qdisc 是否为 HTB
-    # 注意: 不同 iproute2 版本输出词序不同:
-    #   老版: qdisc htb 1: dev wlan2 root refcnt ...   (root 在后)
-    #   新版: qdisc htb 1: root refcnt ...              (root 在前, Android 16 / ColorOS)
-    # 不要用 "root.*htb" 这样的有序正则,会导致新版永远匹配失败进 full_restore 死循环。
-    # 要求: 某一行同时包含 "htb" 和 "root"(不限词序)
-    # v4.0.0-patch1.3: 区分"命令失败"和"内容缺失":
-    #   tc qdisc show 正常情况下永远 rc=0(即使 iface 不存在也返回空 + rc=0)
-    #   所以这里只看内容。命令本身失败场景极少,不特殊处理
-    if [ $rc -eq 0 ]; then
-        if watchdog_tc_core_supported; then
-            # v5.12: 也接受 mq 子队列下的 HNC htb(tc_manager try_mq_child_htb 路径:
-            # "qdisc htb 1: parent :1",不含 root)。旧判断要求 htb 行含 root,该模式
-            # 下恒判不健康 → 每轮 full_restore → init_tc 再次 `qdisc replace parent :1`
-            # 把整棵设备 class 树换成空 htb,再由 restore 重建,直到进入 passive。
-            # 与 tc_manager egress_htb_tree_ready 的 '^qdisc htb 1:' 判据对齐。
-            tc qdisc show dev "$iface" 2>/dev/null | grep "htb" | grep -qE "root|^qdisc htb 1: " || rc=1
-            # v5.12: 接口被重建检测。ColorOS 热点关→开会重建同名 wlan2 且 oplus-netd
-            # 立即预装 htb root,上面的检查照样通过,但 HNC 的设备 class/filter 已随
-            # 旧接口消失 → 限速永不恢复。init_tc 记录建树时的 ifindex,变了即判不健康。
-            if [ $rc -eq 0 ] && [ -f "$RUN/tc_ifindex_$iface" ]; then
-                local _idx_now _idx_init
-                _idx_now=$(cat "/sys/class/net/$iface/ifindex" 2>/dev/null)
-                _idx_init=$(cat "$RUN/tc_ifindex_$iface" 2>/dev/null)
-                if [ -n "$_idx_now" ] && [ -n "$_idx_init" ] && [ "$_idx_now" != "$_idx_init" ]; then
-                    log "check_health: $iface ifindex $_idx_init -> $_idx_now (interface recreated), tc rebuild needed"
-                    rc=1
-                fi
-            fi
-        else
-            watchdog_mark_tc_unsupported_once tc_htb
-        fi
-    fi
-
-    # 2+3. iptables 链检查
-    # v4.0.0-patch1.3 重要:
-    #   a) 加 -w 2 等 xtables 锁(最多 2s),避免并发占锁时静默失败返回空
-    #   b) 区分"命令失败(rc>=2)"和"规则缺失(命令 rc=0 但内容缺)":
-    #      - iptables rc=2 = bad parameter (链不存在等"真丢失")
-    #      - iptables rc=4 = resource problem (锁抢不到等临时故障)
-    #      - iptables rc=0 + grep rc=1 = 规则真丢了
-    #      只有 "真丢失" 才应该触发 RESTORE;临时故障 return 2 让主循环 skip 本轮
-    #   c) HNC_MARK 链空是合法状态(用户没限速时),用 -S | rc 判断链存在性,
-    #      不看链内规则数量
-
-    # 2. HNC_MARK 链存在性
-    if [ $rc -eq 0 ]; then
-        iptables -w 2 -t mangle -S HNC_MARK >/dev/null 2>&1
-        local ipt_rc=$?
-        if [ $ipt_rc -eq 2 ]; then
-            rc=1  # 链真丢了
-        elif [ $ipt_rc -ne 0 ]; then
-            # 锁抢不到等临时故障,不 RESTORE,跳过本轮
-            _HEALTH_TS=$now
-            _HEALTH_RC=2
-            return 2
-        fi
-    fi
-
-    # 3. HNC_RESTORE 链必须有 CONNMARK 规则(这个链不允许空,空了就是丢失)
-    if [ $rc -eq 0 ]; then
-        local restore_dump
-        restore_dump=$(iptables -w 2 -t mangle -S HNC_RESTORE 2>/dev/null)
-        local ipt_rc=$?
-        if [ $ipt_rc -eq 2 ]; then
-            rc=1  # 链真丢了
-        elif [ $ipt_rc -ne 0 ]; then
-            # 临时故障,跳过本轮
-            _HEALTH_TS=$now
-            _HEALTH_RC=2
-            return 2
-        else
-            echo "$restore_dump" | grep -q 'CONNMARK' || rc=1
-        fi
-    fi
-
-    _HEALTH_TS=$now
-    _HEALTH_RC=$rc
-    return $rc
+    sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null
 }
 
 # ── 完整恢复 ─────────────────────────────────────────────────
@@ -387,8 +267,6 @@ full_restore() {
     fi
 
     if ! tc_repair_allowed; then
-        _HEALTH_TS=0
-        _HEALTH_RC=0
         return 0
     fi
 
@@ -402,8 +280,6 @@ full_restore() {
     run_capability_probe_active "$iface"
     if ! watchdog_tc_core_supported; then
         watchdog_mark_tc_unsupported_once tc_htb
-        _HEALTH_TS=0
-        _HEALTH_RC=0
         # v5.12: 上面 iptables init 已 flush HNC_CTRL,黑名单只在 tc_manager restore
         # 里恢复。旧代码 tc_htb=false 时直接 return → 黑名单设备恢复上网。restore
         # 自身按能力跳过所有 tc 操作(limit/delay/uplink 均有 capability 门控),
@@ -442,7 +318,8 @@ full_restore() {
     # 11(gate_lock 超时)时,旧代码"置 _HEALTH_RC=1 让下轮重试"并不成立:紧接着
     # _HEALTH_TS=0 让缓存失效,Go 版每轮又是新进程 —— 下轮 check_health 看到链都在
     # 就判健康,黑名单设备从此恢复上网、v6 限速失去 mark,直到下次别的原因触发恢复。
-    # 落一个 pending 标记,check_health 见标记即判不健康,由(已限流的)下轮再恢复。
+    # 落一个 pending 标记,Go 看门狗的规则健康检查(native.go)见标记即判不健康,
+    # 由(已限流的)下轮再恢复。
     if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
         echo "$(date +%s 2>/dev/null)" > "$RUN/tc_restore_pending" 2>/dev/null || true
     else
@@ -450,90 +327,12 @@ full_restore() {
     fi
     if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
         log "full_restore: tc restore busy/lock lost (rc=$tc_restore_rc), not counted as repair failure; marked pending"
-        _HEALTH_RC=1
     elif [ $tc_init_rc -eq 0 ] && [ $tc_restore_rc -eq 0 ]; then
         tc_repair_record 1
-        _HEALTH_RC=0
     else
         tc_repair_record 0
-        _HEALTH_RC=1
     fi
-    _HEALTH_TS=0
     log "RESTORE complete init_rc=$tc_init_rc restore_rc=$tc_restore_rc"
-}
-
-# ── httpd INPUT 防火墙护栏(httpd_drift action 用) ──────────────
-# v4.0.0-patch1.5 从 check_services 抽出。进程拉起/守护逻辑已随 shell
-# 主循环删除移入 Go 版 hnc_watchdog(ensureDaemonRunning), 这里只留 iptables 护栏装/卸。
-httpd_guard_remove() {
-    iptables -D INPUT -p tcp --dport "$HNC_HTTPS_PORT" -j HNC_HTTPD_GUARD 2>/dev/null || true
-    iptables -F HNC_HTTPD_GUARD 2>/dev/null || true
-    iptables -X HNC_HTTPD_GUARD 2>/dev/null || true
-}
-
-httpd_guard_install() {
-    local iface="$1" ip="$2"
-    [ -z "$iface" ] && return 1
-    iptables -N HNC_HTTPD_GUARD 2>/dev/null || true
-    iptables -F HNC_HTTPD_GUARD 2>/dev/null || true
-    iptables -D INPUT -p tcp --dport "$HNC_HTTPS_PORT" -j HNC_HTTPD_GUARD 2>/dev/null || true
-    iptables -I INPUT 1 -p tcp --dport "$HNC_HTTPS_PORT" -j HNC_HTTPD_GUARD 2>/dev/null || true
-    iptables -A HNC_HTTPD_GUARD -i lo -j ACCEPT 2>/dev/null || true
-    iptables -A HNC_HTTPD_GUARD -i "$iface" -j ACCEPT 2>/dev/null || true
-    iptables -A HNC_HTTPD_GUARD -j DROP 2>/dev/null || true
-    log "httpd guard installed: ${HNC_HTTPS_PORT} allowed from hotspot iface=$iface ip=$ip/hotspot iface only; dropped elsewhere"
-}
-
-# hotfix17.8: PID 复用保护。kill -0 只能证明“这个 PID 存在”,不能证明它还是 hnc_httpd。
-# ── v4.0.0-patch1.4 httpd IP 漂移检测 ────────────────────────────
-# 场景: httpd 启动时绑 IP=A, 后来热点重启 / IP 续租失败 / tethering 切换
-#       iface IP 变成 B, 但 httpd 还在绑 A 上面。TCP 握手从 B 打到 A
-#       被 Linux 拒,变成 ERR_CONNECTION_REFUSED。
-# 对策: 每次健康检查对比 $RUN/httpd_bind_ip 和 当前 iface IP。
-#       不等 → pkill httpd,下一轮 ensure_httpd_running 会用新 IP 拉起。
-check_httpd_bind_drift() {
-    [ -f "$RUN/httpd.pid" ]      || return 0
-    [ -f "$RUN/httpd_bind_ip" ]  || return 0
-    local wpid bound_ip
-    wpid=$(cat "$RUN/httpd.pid" 2>/dev/null)
-    [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null || return 0
-    bound_ip=$(cat "$RUN/httpd_bind_ip" 2>/dev/null)
-    [ -z "$bound_ip" ] && return 0
-
-    local remote_on
-    remote_on=$(grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' \
-        "$HNC_DIR/data/rules.json" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
-
-    # v5.3.0-rc8 P0: httpd is launched on 0.0.0.0 when remote is enabled.
-    # Interface IP movement is transparent to a wildcard listener, so do not
-    # kill hnc_httpd for DHCP renewal / tethering IP churn. Only relaunch for
-    # the two real configuration transitions below.
-
-    # Scenario 1: remote toggled OFF, httpd is still public.
-    if [ "$remote_on" != "true" ] && [ "$bound_ip" != "loopback-only" ]; then
-        log "httpd remote disabled by user: closing ${HNC_HTTPS_PORT} listener (loopback stays)"
-        kill -9 "$wpid" 2>/dev/null
-        rm -f "$RUN/httpd.pid" "$RUN/httpd_bind_ip"
-        httpd_guard_remove
-        return 0
-    fi
-
-    # Scenario 2: remote toggled ON, httpd is loopback-only and hotspot exists.
-    if [ "$remote_on" = "true" ] && [ "$bound_ip" = "loopback-only" ]; then
-        local current_iface current_ip
-        current_iface=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null)
-        [ -z "$current_iface" ] && return 0
-        [ "$current_iface" = "wlan0" ] && return 0
-        current_ip=$(ip -4 addr show "$current_iface" 2>/dev/null | \
-            awk '/inet /{split($2,a,"/");print a[1];exit}')
-        [ -z "$current_ip" ] && return 0
-        log "httpd bind upgrade: loopback-only -> 0.0.0.0 (remote_enabled=true, hotspot ip=$current_ip), relaunch"
-        kill -9 "$wpid" 2>/dev/null
-        rm -f "$RUN/httpd.pid" "$RUN/httpd_bind_ip"
-        return 0
-    fi
-
-    return 0
 }
 
 # ── Doze 检测 ────────────────────────────────────────────────
@@ -562,25 +361,6 @@ is_doze() {
 # 重启 watchdog 时读这个文件恢复状态(避免重启就重挂规则)。
 
 STATE_FILE="$RUN/hnc_state"
-
-# probe_valid_hotspot: 严格探测当前是否有合法热点接口
-# 成功: stdout 输出 "<iface> <ip>", 返回 0
-# 失败: 无输出,返回 1
-# 5 道校验:探到 → 非空 → 非 wlan0 → 有 IPv4 → IPv4 是 RFC1918 私网
-probe_valid_hotspot() {
-    local iface ip
-    iface=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null)
-    [ -z "$iface" ]        && return 1
-    [ "$iface" = "wlan0" ] && return 1   # 第二道防线
-    ip=$(ip -4 addr show "$iface" 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]; exit}')
-    [ -z "$ip" ] && return 1
-    case "$ip" in
-        10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) ;;
-        *) return 1 ;;
-    esac
-    echo "$iface $ip"
-    return 0
-}
 
 # do_full_init: PENDING → ACTIVE:<iface>
 # 场景: 从来没 init 过(开机) or 刚刚热点重开。
@@ -631,8 +411,6 @@ do_full_init() {
     else
         log "skip hotspot_iface overwrite: user pref=$_pref, detected=$iface"
     fi
-    # 转移前必须先清健康检查缓存,不然下一轮 check_health 用旧数据
-    _HEALTH_TS=0
     echo "ACTIVE:$iface" > "$STATE_FILE"
     log "STATE entered ACTIVE:$iface"
 
@@ -681,7 +459,6 @@ do_migrate() {
         if [ $tc_init_rc -ne 0 ]; then
             log_error "do_migrate: tc init failed on $new (rc=$tc_init_rc), reverting to PENDING"
             echo "PENDING" > "$STATE_FILE"
-            _HEALTH_TS=0
             return $tc_init_rc
         fi
         sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1
@@ -699,14 +476,9 @@ do_migrate() {
     else
         log "skip hotspot_iface overwrite (migrate): user pref=$_pref, detected=$new"
     fi
-    # 杀 httpd 让下轮 ensure_httpd_running 拿新 IP 重绑
-    local wpid; wpid=$(cat "$RUN/httpd.pid" 2>/dev/null)
-    if [ -n "$wpid" ] && kill -0 "$wpid" 2>/dev/null; then
-        kill -9 "$wpid" 2>/dev/null
-        log "killed old httpd PID=$wpid for rebind"
-    fi
-    rm -f "$RUN/httpd.pid" "$RUN/httpd_bind_ip"
-    _HEALTH_TS=0
+    # v5.33: 不再为「拿新 IP 重绑」杀 httpd —— 远程端口监听 0.0.0.0, 网卡 / IP 变化
+    # 无需重绑(v5.3.0-rc8 起就是 0.0.0.0, 这里一直白杀; 而且看门狗重拉 httpd 时
+    # v5.32 及以前不带远程参数, 一迁移远程访问就没了)。
     echo "ACTIVE:$new" > "$STATE_FILE"
     log "STATE entered ACTIVE:$new"
     # v5.12: 白名单模式的 DROP 规则带 `-i <热点口>`(接口取自 hnc_state)。迁移后
@@ -820,7 +592,10 @@ ensure_tc_uplink_healthy() {
 # Contract:
 #   sh watchdog.sh action <name> [args...]
 #   exit code = action's return code (0 = ok, non-zero = failure)
-#   stdout = action's output (used by callers that parse it, e.g. probe_hotspot)
+#   stdout = action's output (none of the remaining actions is parsed)
+#
+# v5.33: probe_hotspot / check_health / httpd_drift / get_iface were removed —
+# the checks live only in Go (native.go); unknown names exit 64.
 #
 # Must be placed AFTER all function definitions.
 # ═══════════════════════════════════════════════════════════════════════════
@@ -837,8 +612,6 @@ if [ "${1:-}" = "action" ]; then
     _action="${1:-}"
     shift 2>/dev/null || true
     case "$_action" in
-        probe_hotspot)        probe_valid_hotspot              ; exit $? ;;
-        check_health)         check_health                     ; exit $? ;;
         full_restore)         full_restore "${1:-go_request}"  ; exit $? ;;
         full_init)            do_full_init "$1" "$2"           ; exit $? ;;
         migrate)              do_migrate "$1" "$2" "$3"        ; exit $? ;;
@@ -846,9 +619,7 @@ if [ "${1:-}" = "action" ]; then
         rotate_logs)          rotate_logs_periodic             ; exit $? ;;
         capability_probe)     run_capability_probe_active "$1" ; exit $? ;;
         tc_uplink_healthy)    ensure_tc_uplink_healthy         ; exit $? ;;
-        httpd_drift)          check_httpd_bind_drift           ; exit $? ;;
         is_doze)              is_doze                          ; exit $? ;;
-        get_iface)            get_iface                        ; exit $? ;;
         prune_dup_hotspotd)   prune_duplicate_hotspotd         ; exit $? ;;
         *) echo "watchdog.sh action: unknown command '$_action'" >&2; exit 64 ;;
     esac

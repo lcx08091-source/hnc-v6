@@ -32,6 +32,7 @@ type rateOut struct {
 
 type server struct {
 	hncDir       string
+	remote       *remoteListener // 远程端口(remote_listener.go); -bind none 时为 nil
 	tokens       *TokensStore
 	limiter      *RateLimiter
 	writeCounter *WriteCounter // Patch 3.a per-token write rate limit

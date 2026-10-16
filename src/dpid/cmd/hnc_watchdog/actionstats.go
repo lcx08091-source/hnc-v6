@@ -13,12 +13,13 @@
 //   - 0 → 成功;
 //   - 其余非零码按动作的「正常码表」(actionNormalRC)判断 —— 这些码是
 //     业务上的正常结果, 不算失败:
-//     probe_hotspot  1        热点没开(PENDING 每轮探测的正常结果)
-//     check_health   1 / 2    1=规则丢失(触发 full_restore 的正常信号)、2=xtables 锁忙
 //     is_doze        1        不在 Doze
+//     iface_detect   1        热点没开(hnc_iface.sh get 探测不到; 热点探测陈旧时才跑)
 //     其余动作(full_restore / full_init / migrate / cleanup_stale_rules /
-//     rotate_logs / capability_probe / tc_uplink_healthy / httpd_drift /
-//     get_iface / prune_dup_hotspotd)非零即失败。
+//     rotate_logs / capability_probe / tc_uplink_healthy / prune_dup_hotspotd /
+//     iface_detect)非零即失败。
+//     v5.33: probe_hotspot / check_health / httpd_drift / get_iface 四个 shell
+//     动作已删(检查只留 Go 一份, 见 native.go), 它们的正常码表随之删除。
 //
 // 并发: runAction 只在主循环串行调用; 记账结构仍带锁(flush 可被测试并发读)。
 package main
@@ -33,9 +34,8 @@ import (
 
 // actionNormalRC 每个动作「正常非零返回码」表(其余非零码都算失败)。
 var actionNormalRC = map[string]map[int]bool{
-	"probe_hotspot": {1: true},
-	"check_health":  {1: true, 2: true},
-	"is_doze":       {1: true},
+	"is_doze":      {1: true},
+	"iface_detect": {1: true},
 }
 
 const (
@@ -151,9 +151,10 @@ type wdActionOut struct {
 	GeneratedAt int64                      `json:"generated_at"`
 	Actions     map[string]wdActionOutItem `json:"actions"`
 	Order       []string                   `json:"order"` // 按 calls_1h 降序(前端小表用)
-	// v5.29 T1: 原生检查与 shell 对照的累计不一致次数(0 = 完全一致;
-	// 自检「看门狗动作」行显示)。只读快照, 不参与 actions 合计。
-	NativeMismatch int `json:"native_mismatch,omitempty"`
+	// 规则健康检查判不了(netlink / iptables 跑不起来, 那一轮跳过)的累计次数
+	// (看门狗启动以来; 自检「看门狗动作」行显示)。v5.33 起替代 v5.29–v5.32 的
+	// native_mismatch(shell 对照已删)。只读快照, 不参与 actions 合计。
+	NativeUnknown int `json:"native_unknown,omitempty"`
 	// 设备发现写者(m4_owner.go)的写出次数 / 失败次数(自检「看门狗动作」行显示)。
 	// v5.33: C 版发现删除, 影子比对(m4_checks / m4_mismatch)、写者开关(m4_owner)
 	// 与切换次数(m4_switches)随之删除。
@@ -167,7 +168,7 @@ func (s *actionStats) snapshot(now time.Time) wdActionOut {
 	defer s.mu.Unlock()
 	out := wdActionOut{Schema: 1, GeneratedAt: now.Unix(), Actions: make(map[string]wdActionOutItem, len(s.m))}
 	if wdActionsSnapshotExtra != nil {
-		out.NativeMismatch = wdActionsSnapshotExtra()
+		out.NativeUnknown = wdActionsSnapshotExtra()
 	}
 	if wdActionsM4WriterExtra != nil {
 		out.M4GoWrites, out.M4GoWriteFails = wdActionsM4WriterExtra()

@@ -305,7 +305,7 @@ sync_runtime_from_moddir() {
                 [ -n "$p" ] && kill -9 "$p" 2>/dev/null || true
             done
         fi
-        rm -f "$RUN/httpd.pid" "$RUN/httpd_bind_ip" 2>/dev/null || true
+        rm -f "$RUN/httpd.pid" 2>/dev/null || true
         rm -f "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
 
         cp -f "$MODDIR/daemon/hnc_httpd/hnc_httpd" "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
@@ -500,23 +500,14 @@ wait_for_network
 #   不再 init iptables / 不再直接拉 httpd。只做三件事:
 #     1. 建目录 / 初始化 data 文件(已有逻辑,不变)
 #     2. 启动 device_detect daemon
-#     3. 启动 watchdog(它是唯一的状态机,负责探测 + init + 拉 httpd)
-#   如果 remote_enabled=true, 写 httpd.wanted marker, watchdog 探到热点
-#   就绪后自己拉 httpd。service.sh 绝不碰 wlan0。
+#     3. 启动 watchdog(它是唯一的状态机,负责探测 + init + 守护 httpd)
+#   service.sh 绝不碰 wlan0。
 
 log "v4.0.0-patch1.5 Defer Init: iface detection + tc/iptables init delegated to watchdog"
 
-# v5.0: httpd 永远启动 (至少 loopback), 本机 WebUI 依赖它
-# REMOTE_ENABLED 只决定是否同时开热点段 HTTPS
-REMOTE_ENABLED=$("$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" remote_enabled 2>/dev/null \
-    || grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' $HNC_DIR/data/rules.json 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
-if [ "$REMOTE_ENABLED" = "true" ]; then
-    log "remote_enabled=true, httpd.wanted marker set (watchdog will launch httpd with remote+loopback when hotspot ready)"
-else
-    log "remote_enabled=false, httpd loopback-only mode (本机 WebUI 仍可用)"
-fi
-# marker 总是 set — watchdog 看 remote_enabled 再决定是否带 -bind
-touch "$RUN/httpd.wanted" 2>/dev/null
+# v5.0: httpd 永远启动(至少 loopback), 本机 WebUI 依赖它。v5.33: 远程端口
+# (:8443 / :8080)由 httpd 自己按 remote_enabled 开关(remote_listener.go), 这里不再
+# 读 remote_enabled, 也不再写没人读的 run/httpd.wanted。
 
 # ─── rc30.12.18: auth_required 自动迁移到默认拒绝 ────────────────
 # rc30.12.18 起 hnc_httpd 改成"默认拒绝"鉴权 (isPublicPath 白名单 + 其他都要 cookie).
@@ -634,33 +625,16 @@ fi
 # 在 watchdog 起来之前就 ready, 不然 watchdog 检测到 httpd 不在会尝试
 # fork (在 ColorOS 16 上失败).
 
-# rc30.12.16 P0-1 修复: 之前 pre-launch + sentinel 两处硬编码 -bind 0.0.0.0,
-# 完全无视 REMOTE_ENABLED. 现在统一通过 launch_httpd_safe 函数, 读 remote_enabled
-# 决定是否暴露热点段 HTTPS. remote_enabled=false 时只开 loopback (本机 WebUI).
-#
-# rc30.12.19 P2 加固: 上一版用 $REMOTE_ENABLED 全局快照, 用户中途改 remote_enabled=false
-# 之后, 如果 httpd 恰好死掉, sentinel 会用旧快照拉起 0.0.0.0 模式, 30s 窗口内会
-# 跟用户配置不一致. 现在改成每次调用都从 rules.json 实时读, 关闭这个窗口.
+# v5.33: httpd 的启动参数只有一套, 与 Go 看门狗重拉时相同(hnc_watchdog main.go
+# httpdDaemon: 只有 -hnc-dir)。远程端口(:8443 / :8080)由 httpd 自己按 rules.json 的
+# remote_enabled 开关(remote_listener.go)。之前这里按 remote_enabled 决定带不带
+# `-bind 0.0.0.0`, 而看门狗重拉时不带 —— httpd 崩一次远程访问就没了; 设置页切开关
+# 也要等 httpd 下次重启才生效。
 launch_httpd_safe() {
-    # 每次调用都重新读 rules.json (GPT 二审 P2 修复)
-    _remote_now=$("$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" remote_enabled 2>/dev/null \
-        || grep -o '"remote_enabled"[[:space:]]*:[[:space:]]*[a-z]*' "$HNC_DIR/data/rules.json" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
-    if [ "$_remote_now" = "true" ]; then
-        nohup "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" \
-            -bind 0.0.0.0 -port 8443 -loopback-port 8444 \
-            -hnc-dir "$HNC_DIR" -http-port 8080 \
-            >> "$HNC_DIR/logs/httpd.log" 2>&1 &
-        echo $! > "$RUN/httpd.pid" 2>/dev/null || true
-        log "rc30.12.19 launch_httpd_safe: remote+loopback mode (PID=$!, remote_enabled=true)"
-    else
-        nohup "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" \
-            -loopback-port 8444 \
-            -hnc-dir "$HNC_DIR" \
-            >> "$HNC_DIR/logs/httpd.log" 2>&1 &
-        echo $! > "$RUN/httpd.pid" 2>/dev/null || true
-        log "rc30.12.19 launch_httpd_safe: loopback-only mode (PID=$!, remote_enabled=$_remote_now)"
-    fi
-    unset _remote_now
+    nohup "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" -hnc-dir "$HNC_DIR" \
+        >> "$HNC_DIR/logs/httpd.log" 2>&1 &
+    echo $! > "$RUN/httpd.pid" 2>/dev/null || true
+    log "launch_httpd_safe: hnc_httpd started (PID=$!; remote port follows remote_enabled)"
 }
 
 if [ -x "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" ]; then
