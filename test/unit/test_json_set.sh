@@ -1,6 +1,6 @@
 #!/system/bin/sh
 # test/unit/test_json_set.sh — json_set.sh 命令单元测试
-# 覆盖: init_dirs / top / device / bl_add / bl_del / reset / cfg_set / cfg_get / name_set / name_get / top_get
+# 覆盖: init_dirs / top / device / bl_add / bl_del / reset / name_set / name_get / top_get(v5.33: 全部经 hnc_json)
 
 JSON_SET="$HNC_REPO_ROOT/bin/json_set.sh"
 
@@ -88,14 +88,18 @@ test_start "top keeps hotspot_ssid/hotspot_pass as strings even if numeric-looki
 seed_rules
 t_top_string_fields && test_pass
 
-test_start "top string fields stay strings on legacy fallback (no hnc_json)"
+# v5.33: hnc_json 不在 = 安装不完整, 写直接失败, 不再改走 legacy awk writer(v5.32 会成功)
+test_start "top fails without hnc_json (no legacy writer) and leaves rules.json untouched"
 seed_rules
-HNC="$HNC_TEST_DIR" HNC_JSON=/nonexistent/hnc_json sh "$JSON_SET" top hotspot_pass 01234567
+before=$(cat "$HNC_TEST_DIR/data/rules.json")
+HNC="$HNC_TEST_DIR" HNC_JSON=/nonexistent/hnc_json sh "$JSON_SET" top hotspot_pass 01234567 2>/dev/null
 rc=$?
-c=$(tr -d ' \t\r\n' < "$HNC_TEST_DIR/data/rules.json")
-assert_exit_zero "$rc" "legacy write should succeed" && \
-    assert_contains "$c" '"hotspot_pass":"01234567"' "legacy path must also write a string" && \
-    assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
+if [ "$rc" -eq 0 ]; then
+    test_fail "hnc_json 不在时写应失败, 实际 rc=0(legacy writer 还在?)"
+else
+    assert_eq "$before" "$(cat "$HNC_TEST_DIR/data/rules.json")" "rules.json 不得被改" && \
+        assert_file_not_exists "$HNC_TEST_DIR/run/json_legacy_fallback.count" && test_pass
+fi
 
 # ═══ device (设备字段更新) ═══════════════════════════════
 test_start "device adds new device with single field"
@@ -196,36 +200,16 @@ js bl_del aa:bb:cc:dd:ee:01 >/dev/null 2>&1
 js top whitelist_mode true >/dev/null 2>&1
 assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
-# ═══ cfg_set / cfg_get (config.json) ════════════════════
-test_start "cfg_set creates config.json on first call"
-mkdir -p "$HNC_TEST_DIR/data"
-js cfg_set theme dark
-assert_file_exists "$HNC_TEST_DIR/data/config.json" && \
-    assert_json_valid "$HNC_TEST_DIR/data/config.json" && test_pass
-
-test_start "cfg_get returns value set by cfg_set"
-js cfg_set theme dark
-val=$(js cfg_get theme)
-assert_eq "dark" "$val" "should return 'dark'" && test_pass
-
-test_start "cfg_set updates existing key"
-js cfg_set theme dark
-js cfg_set theme light
-val=$(js cfg_get theme)
-assert_eq "light" "$val" "should return 'light'" && test_pass
-
-# v5.11 回归: 旧 sed 实现把 & 当"整个匹配"、| 当分隔符, 值被改写或 sed 报错
-test_start "cfg_set keeps & and | in value and stays valid JSON"
-js cfg_set theme 'a&b|c' >/dev/null 2>&1
-js cfg_set theme 'x&y|z' >/dev/null 2>&1
-val=$(js cfg_get theme)
-assert_eq 'x&y|z' "$val" "value should round-trip" && \
-    assert_json_valid "$HNC_TEST_DIR/data/config.json" && test_pass
-
-test_start "cfg_get returns empty for missing key"
-js cfg_set theme dark
-val=$(js cfg_get nonexistent_key)
-assert_eq "" "$val" "should return empty string" && test_pass
+# ═══ v5.33: cfg_set / cfg_get / device_patch 已删 ════════════
+# cfg_*: config.json 自 rc3.1.13 弃用、middleware 不读; device_patch: 没有调用方,
+# 多字段写用 json_set_batch.sh(一次原子写)。
+test_start "cfg_set / cfg_get / device_patch removed (usage, exit 1, no config.json)"
+seed_rules
+js cfg_set theme dark >/dev/null 2>&1; r1=$?
+js cfg_get theme >/dev/null 2>&1; r2=$?
+js device_patch aa:bb:cc:dd:ee:ff note x >/dev/null 2>&1; r3=$?
+assert_eq "1 1 1" "$r1 $r2 $r3" "removed commands should print usage and exit 1" && \
+    assert_file_not_exists "$HNC_TEST_DIR/data/config.json" && test_pass
 
 # ═══ name_set / name_get / name_del (device_names.json) ═
 test_start "name_set creates device_names.json"
@@ -360,12 +344,13 @@ assert_not_contains "$content" 'ee:01' && \
     assert_contains "$content" 'ee:02' && \
     assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
-test_start "device_patch preserves comma and brace in value"
+test_start "json_set_batch preserves comma and brace in value (auto types)"
 seed_rules '{"version":1,"devices":{},"blacklist":[]}'
-js device_patch aa:bb:cc:dd:ee:ff note 'a,b}c' ip 192.168.43.5
+HNC="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/json_set_batch.sh" device aa:bb:cc:dd:ee:ff note 'a,b}c' ip 192.168.43.5 n 7
 content=$(cat "$HNC_TEST_DIR/data/rules.json")
 assert_contains "$content" '"note": "a,b}c"' && \
     assert_contains "$content" '"ip": "192.168.43.5"' && \
+    assert_contains "$content" '"n": 7' && \
     assert_json_valid "$HNC_TEST_DIR/data/rules.json" && test_pass
 
 # v5.11: 下面两条原写法是 `assert_json_valid ... || test_fail "..."` 然后继续往下跑。
@@ -414,8 +399,6 @@ t_tpl_backslash_n() {
     js tpl_del 'a\nb'
     assert_exit_zero $? "tpl_del should succeed" || return 1
     assert_not_contains "$(cat "$TF")" 'down_mbps' "template must actually be deleted" || return 1
-    assert_file_not_exists "$HNC_TEST_DIR/run/json_legacy_fallback.count" \
-        "hnc_json path should handle it without legacy fallback" || return 1
 }
 test_start "tpl_set/tpl_del handle literal backslash-n in template name"
 t_tpl_backslash_n && test_pass

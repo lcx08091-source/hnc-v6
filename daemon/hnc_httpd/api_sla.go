@@ -11,7 +11,6 @@
 //   dpid_guard.heartbeat        (supervisor 2s 一次; now-ts = 心跳年龄)
 //   tc_repair_fail_count        (watchdog tc 修复连续失败数, 熔断器)
 //   uplink_fail_count           (上行 IFB/police 失败累计)
-//   json_legacy_fallback.count  (JSON 写退回 legacy awk 累计)
 //   tc_qos_fallback / uplink_unsupported (能力降级标记, 存在=降级中)
 
 package main
@@ -78,8 +77,6 @@ func (s *server) apiSLA(w http.ResponseWriter, r *http.Request) {
 		// tc / 上行健康
 		"tc_repair_fail_count": readInt("tc_repair_fail_count"),
 		"uplink_fail_count":    readInt("uplink_fail_count"),
-		// JSON 写健康
-		"json_legacy_fallback_count": readInt("json_legacy_fallback.count"),
 		// 能力降级标记(存在=正处于降级)
 		"qos_fallback_active": marker("tc_qos_fallback"),
 		"uplink_unsupported":  marker("uplink_unsupported"),

@@ -1,17 +1,15 @@
 #!/system/bin/sh
-# HNC hotfix20.8 - unified JSON helper frontend with read-only default C helper
+# hnc_json — HNC 唯一的 JSON 读写工具(纯 shell + awk, 不依赖 python / jq)。
 #
-# This version makes set-top self-contained and safe. It no longer delegates
-# top-level writes back to json_set.sh, so json_set.sh can be migrated to call
-# hnc_json in later hotfixes without creating recursion.
+# v5.33: json_set.sh / json_set_batch.sh / json_doctor.sh 的写都经由本工具, 它们的旧
+# awk 写法、legacy 回退与各自的 json.lock 实现都删了; 本工具是 run/json.lock 的唯一
+# 持有者(之前还有一把内层 run/hnc_json.lock, 一并删)。
 #
-# Usage:
-#   hnc_json validate <file>
-#   hnc_json get-top <file> <key>
-#   hnc_json set-top <file> <key> <value> [str|num|bool|null|json]
-#   hnc_json get-device <file> <mac> <key>
-#   hnc_json set-device <file> <mac> <key> <value> [str|num|bool|null|json]
-#   hnc_json version
+# 写入一律: 校验输入 → 持锁 → 备份(data/.json_backups, 每个文件留 30 份)→ 写候选
+# → 校验候选 → mv 原子替换 → 写后再校验(失败回滚)。
+#
+# Usage: 见 usage()(`hnc_json help`)。退出码: 0 成功 / 1 锁超时或写失败 /
+# 2 参数错、文件缺失或 JSON 非法 / 3 键不存在(读命令的正常空答案)。
 
 set -eu
 
@@ -19,14 +17,8 @@ SELF="$0"
 BINDIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)"
 JSON_GUARD="$BINDIR/json_guard.sh"
 HNC_BASE="${HNC:-/data/local/hnc}"
-LOCKDIR="$HNC_BASE/run/hnc_json.lock"
-# rc36 (LOCK-1): json_set.sh 用 $HNC/run/json.lock 作全局写锁。历史上 hnc_json 只用
-# 自己的 hnc_json.lock,导致直接调 hnc_json 的写者(json_set_batch.sh / service / 等)
-# 与走 json_set.sh 的写者并发写同一 rules.json 时互不见锁。这里让 hnc_json 的写路径
-# 也先抢同一把 json.lock(外层),从而和 json_set.sh 串行;但 json_set.sh 桥接调用
-# hnc_json 时它已持 json.lock(非重入 mkdir 锁会死锁),故用 HNC_JSON_OUTER_LOCK_HELD=1
-# 让被桥接的 hnc_json 跳过外层锁。
-OUTER_LOCKDIR="$HNC_BASE/run/json.lock"
+# 全局写锁(所有 JSON 写者共用一把; mkdir 锁, 写 pid + ts)。
+LOCKDIR="$HNC_BASE/run/json.lock"
 BACKUP_DIR="${JSON_BACKUP_DIR:-$HNC_BASE/data/.json_backups}"
 
 usage() {
@@ -34,22 +26,22 @@ usage() {
 Usage:
   hnc_json validate <file>
   hnc_json get-top <file> <key>
-  hnc_json set-top <file> <key> <value> [str|num|bool|null|json]
+  hnc_json set-top <file> <key> <value> [TYPE]
   hnc_json get-device <file> <mac> <key>
-  hnc_json set-device <file> <mac> <key> <value> [str|num|bool|null|json]
-  hnc_json set-device-batch <file> <mac> <key> <value> <type> [<key> <value> <type> ...]
+  hnc_json set-device <file> <mac> <key> <value> [TYPE]
+  hnc_json set-device-batch <file> <mac> <key> <value> <TYPE> [<key> <value> <TYPE> ...]
+  hnc_json del-device <file> <mac>
   hnc_json get-object-key <file> <key>
-  hnc_json set-object-key <file> <key> <value> [str|num|bool|null|json]
+  hnc_json set-object-key <file> <key> <value> [TYPE]
   hnc_json del-object-key <file> <key>
   hnc_json add-array-unique <file> <key> <value>
   hnc_json del-array-value <file> <key> <value>
-  hnc_json set-map-field <file> <top_key> <entry_key> <field> <value> [str|num|bool|null|json]
-  hnc_json token-revoke <file> <token_id>
-  hnc_json token-revoke-all <file>
+  hnc_json replace <file>            (new content on stdin; validated before commit)
   hnc_json version
 
-Notes:
-  Shell implementation remains the fallback for every write path.
+TYPE: str (default) | num | bool | null | json | auto
+  auto: true/false -> bool, null -> null, -?digits[.digits] -> num, else str
+  str: control characters other than \b \f \n \r \t are dropped.
 USAGE
 }
 
@@ -59,10 +51,7 @@ log_lock_stale() {
     >> "$HNC_BASE/logs/hnc_json.log" 2>/dev/null || true
 }
 
-# rc36 (LOCK-1): dir 参数化,供 hnc_json.lock(内层)与 json.lock(外层)共用。
-# 重要:age 强拆只在 ts 文件存在且 >0 时生效。json_set.sh 持 json.lock 时只写 pid、
-# 不写 ts(ts→0),若按 age 强拆会误拆一个"活着的 json_set.sh 锁"。所以 ts 缺失时
-# 只走 dead-pid 强拆(kill -0),绝不按 age 拆 —— 保证不破坏 json_set.sh 的互斥。
+# 陈旧锁回收: 持锁进程已死 → 拆; 有 ts 且超过 30 秒 → 拆(ts 缺失时只按死进程拆)。
 reclaim_stale_lock_dir() {
   _rd="$1"
   [ -d "$_rd" ] || return 1
@@ -84,7 +73,6 @@ reclaim_stale_lock_dir() {
   fi
   return 1
 }
-reclaim_stale_lock() { reclaim_stale_lock_dir "$LOCKDIR"; }
 
 # Spin-acquire one mkdir lock dir. Writes pid+ts. Returns 0 on acquire, 1 on timeout.
 _acquire_lock_dir() {
@@ -105,20 +93,12 @@ _acquire_lock_dir() {
   return 0
 }
 
-# rc36 (LOCK-1): tracks whether THIS process acquired the outer json.lock so the
-# trap only releases what it owns (never the inner-only / parent-held cases).
-_OUTER_HELD=0
-# v5.11: 本进程是否已持锁。array_add_unique/array_del_value/token_revoke 需要把
-# "读当前值 → 算新值 → set_top 写回" 整段放进锁里(旧实现读在锁外, 两个并发直调
-# hnc_json 的 add-array-unique 会互相覆盖丢一条); mkdir 锁不可重入, 所以 set_top
-# 内部再 acquire_lock 时直接复用。
+# 本进程是否已持锁。array_add_unique / array_del_value 要把「读当前值 → 算新值 →
+# set_top 写回」整段放进锁里(v5.11: 读在锁外时两个并发 add 会互相覆盖丢一条);
+# mkdir 锁不可重入, 所以 set_top 内部再 acquire_lock 时直接复用。
 _LOCK_HELD=0
 _release_locks() {
-  rm -rf "$LOCKDIR" 2>/dev/null || true
-  if [ "$_OUTER_HELD" = "1" ]; then
-    rm -rf "$OUTER_LOCKDIR" 2>/dev/null || true
-  fi
-  _OUTER_HELD=0
+  [ "$_LOCK_HELD" = "1" ] && rm -rf "$LOCKDIR" 2>/dev/null || true
   _LOCK_HELD=0
 }
 
@@ -131,24 +111,9 @@ _on_exit() {
 acquire_lock() {
   [ "$_LOCK_HELD" = "1" ] && return 0
   mkdir -p "$HNC_BASE/run" 2>/dev/null || true
-  # 外层 json.lock:与 json_set.sh 同一把,统一序列化所有 rules.json 写者。
-  # 已被外层(json_set.sh 桥接)持有时跳过,避免非重入死锁。
-  if [ "${HNC_JSON_OUTER_LOCK_HELD:-0}" != "1" ]; then
-    _acquire_lock_dir "$OUTER_LOCKDIR" || return 1
-    _OUTER_HELD=1
-  fi
-  # 内层 hnc_json.lock:保留(向后兼容,且 hnc_json 实例之间二次互斥)。
-  if ! _acquire_lock_dir "$LOCKDIR"; then
-    if [ "$_OUTER_HELD" = "1" ]; then
-      rm -rf "$OUTER_LOCKDIR" 2>/dev/null || true
-      _OUTER_HELD=0
-    fi
-    return 1
-  fi
+  _acquire_lock_dir "$LOCKDIR" || return 1
   _LOCK_HELD=1
-  # v5.11: 旧写法 trap '_release_locks' EXIT INT TERM —— sh 里 INT/TERM 的 trap 执行完
-  # 并不退出, 脚本会在已放锁的状态下继续 mv 写文件, 最后 EXIT 再 rm 一次锁目录
-  # (此时可能已是别的进程的锁)。改为信号只负责 exit, 由 EXIT trap 统一收尾一次。
+  # v5.11: sh 里 INT/TERM 的 trap 执行完并不退出, 放锁只在 EXIT 做一次, 信号只负责 exit。
   trap '_on_exit' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -194,6 +159,13 @@ awk_v() {
 json_literal() {
   typ="${2:-str}"
   v="$1"
+  if [ "$typ" = auto ]; then
+    case "$v" in
+      true|false) typ=bool ;;
+      null) typ=null ;;
+      *) if printf '%s\n' "$v" | grep -Eq '^-?[0-9]+([.][0-9]+)?$'; then typ=num; else typ=str; fi ;;
+    esac
+  fi
   case "$typ" in
     str|string)
       awk 'BEGIN{
@@ -208,6 +180,7 @@ json_literal() {
           else if(c=="\n") out=out "\\n";
           else if(c=="\r") out=out "\\r";
           else if(c=="\t") out=out "\\t";
+          else if(c < " ") continue;   # 其余控制字符丢弃(与 v5.32 前 legacy 写法同口径)
           else out=out c;
         }
         print out "\"";
@@ -610,7 +583,11 @@ set_device_inner() {
     root=skip_ws(1)
     if(n==0 || ch(root)!="{") exit 2
     root_end=value_end(root)
-    if(!find_key(root, root_end, "devices")) exit 3
+    if(!find_key(root, root_end, "devices")){
+      # 没有 devices 对象就建一个(v5.32 前 legacy 写法同样会建)
+      print object_insert(root, root_end, "devices", "{\"" esc_key(mac) "\": {\"" esc_key(key) "\": " lit "}}")
+      exit 0
+    }
     devs_start=skip_ws(fs); devs_end=fe
     if(ch(devs_start)!="{") exit 3
     if(!find_key(devs_start, devs_end, mac)){
@@ -662,8 +639,8 @@ set_device() {
 
 
 del_object_key_inner() {
-  f="$1"; key="$2"
-  awk -v key="$(awk_v "$key")" '
+  f="$1"; key="$2"; parent="${3:-}"
+  awk -v key="$(awk_v "$key")" -v parent="$(awk_v "$parent")" '
   function ch(i){ return substr(s,i,1) }
   function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
   function prev_non_ws(i){ while(i>=1 && ch(i) ~ /[ \t\r\n]/) i--; return i }
@@ -734,7 +711,14 @@ del_object_key_inner() {
     if(n==0 || root>n){ print "{}"; exit 0 }
     if(ch(root)!="{") exit 2
     root_end=value_end(root)
-    if(!find_key(root, root_end, key)){ print s; exit 0 }
+    os=root; oe=root_end
+    if(parent!=""){
+      # 删嵌套对象里的键(del-device: parent = "devices")
+      if(!find_key(root, root_end, parent)){ print s; exit 0 }
+      os=skip_ws(fs); oe=fe
+      if(ch(os)!="{"){ print s; exit 0 }
+    }
+    if(!find_key(os, oe, key)){ print s; exit 0 }
     after=skip_ws(fe); before=prev_non_ws(fk-1)
     if(after<=n && ch(after)==",") out=substr(s,1,fk-1) substr(s,after+1)
     else if(before>=1 && ch(before)==",") out=substr(s,1,before-1) substr(s,fe)
@@ -760,7 +744,7 @@ get_object_key() {
 }
 
 del_object_key() {
-  target="$1"; key="$2"
+  target="$1"; key="$2"; parent="${3:-}"
   [ -n "$key" ] || { echo "hnc_json: empty object key" >&2; return 2; }
   target_dir="$(dirname "$target")"
   target_base="$(basename "$target")"
@@ -772,7 +756,7 @@ del_object_key() {
   bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
   tmp="$target_dir/.$target_base.hnc_json_del.$$"
   cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
-  if ! del_object_key_inner "$target" "$key" > "$tmp"; then
+  if ! del_object_key_inner "$target" "$key" "$parent" > "$tmp"; then
     rm -f "$tmp"
     echo "hnc_json: del-object-key parser failed for $target" >&2
     return 1
@@ -788,6 +772,41 @@ del_object_key() {
 }
 
 
+
+# del-device: 删 devices[<mac>] 整条记录(cleanup_stale_rules.sh 用; 不动黑白名单 / 名字)。
+del_device() {
+  target="$1"; mac="$2"
+  [ -n "$mac" ] || { echo "hnc_json: empty mac" >&2; return 2; }
+  [ -f "$target" ] || return 0
+  del_object_key "$target" "$mac" devices
+}
+
+# replace: 用 stdin 的内容整体替换文件(json_set.sh reset、json_doctor 从备份恢复)。
+# 新内容先校验; 现有文件可以是坏的(恢复场景), 照样先备份再替换。
+replace_file() {
+  target="$1"
+  target_dir="$(dirname "$target")"
+  target_base="$(basename "$target")"
+  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
+  tmp="$target_dir/.$target_base.hnc_json_replace.$$"
+  cat > "$tmp" || { rm -f "$tmp"; return 1; }
+  validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: replacement JSON failed validation" >&2; return 2; }
+  acquire_lock || return 1
+  bak=""
+  if [ -f "$target" ]; then
+    ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
+    bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
+    cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || bak=""
+  fi
+  chmod 600 "$tmp" 2>/dev/null || true
+  mv "$tmp" "$target"
+  validate_file "$target" || {
+    echo "hnc_json: live JSON failed validation after replace, rolling back" >&2
+    [ -n "$bak" ] && [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
+    return 1
+  }
+  prune_backups "$target_base"
+}
 
 array_add_unique() {
   target="$1"; key="$2"; value="$3"
@@ -921,199 +940,6 @@ set_device_batch() {
 
 
 
-set_map_field_inner() {
-  f="$1"; topkey="$2"; entrykey="$3"; field="$4"; lit="$5"
-  awk -v topkey="$(awk_v "$topkey")" -v entrykey="$(awk_v "$entrykey")" -v field="$(awk_v "$field")" -v lit="$lit" '
-  function ch(i){ return substr(s,i,1) }
-  function skip_ws(i){ while(i<=n && ch(i) ~ /[ \t\r\n]/) i++; return i }
-  function parse_string(i,   j,c,out,esc){
-    out=""; esc=0
-    if(ch(i)!="\"") return 0
-    for(j=i+1; j<=n; j++){
-      c=ch(j)
-      if(esc){ out=out c; esc=0; continue }
-      if(c=="\\"){ esc=1; continue }
-      if(c=="\""){ str_val=out; return j+1 }
-      out=out c
-    }
-    return 0
-  }
-  function value_end(i,   j,c,depth,ins,esc,ni){
-    i=skip_ws(i); c=ch(i)
-    if(c=="\""){ ni=parse_string(i); return ni ? ni : n+1 }
-    if(c=="{" || c=="["){
-      depth=0; ins=0; esc=0
-      for(j=i; j<=n; j++){
-        c=ch(j)
-        if(ins){
-          if(esc){esc=0; continue}
-          if(c=="\\"){esc=1; continue}
-          if(c=="\""){ins=0; continue}
-          continue
-        }
-        if(c=="\""){ins=1; continue}
-        if(c=="{" || c=="[") depth++
-        else if(c=="}" || c=="]"){
-          depth--
-          if(depth==0) return j+1
-          if(depth<0) return j
-        }
-      }
-      return n+1
-    }
-    for(j=i; j<=n; j++){
-      c=ch(j)
-      if(c=="," || c=="}" || c=="]" || c ~ /[ \t\r\n]/) return j
-    }
-    return n+1
-  }
-  function find_key(os, oe, target,   i,ni,k,colon,vs,ve,c){
-    fk=fs=fe=0
-    i=skip_ws(os+1)
-    while(i<oe){
-      i=skip_ws(i); c=ch(i)
-      if(c==","){ i++; continue }
-      if(c=="}") return 0
-      if(c!="\"") return 0
-      ni=parse_string(i); if(!ni) return 0
-      k=str_val
-      colon=skip_ws(ni)
-      if(ch(colon) != ":") return 0
-      vs=skip_ws(colon+1); ve=value_end(vs)
-      if(k==target){ fk=i; fs=vs; fe=ve; return 1 }
-      i=ve
-    }
-    return 0
-  }
-  function esc_key(x,   i,c,out){
-    out=""
-    for(i=1;i<=length(x);i++){
-      c=substr(x,i,1)
-      if(c=="\\") out=out "\\\\"
-      else if(c=="\"") out=out "\\\""
-      else out=out c
-    }
-    return out
-  }
-  function object_insert(obj_start, obj_end_excl, k, val,   closepos,inner,tmp,sep){
-    closepos=obj_end_excl-1
-    inner=substr(s,obj_start+1,closepos-obj_start-1)
-    tmp=inner; gsub(/[ \t\r\n]/,"",tmp)
-    sep=(tmp=="" ? "\n  " : ",\n  ")
-    return substr(s,1,closepos-1) sep "\"" esc_key(k) "\": " val substr(s,closepos)
-  }
-  BEGIN{ s="" }
-  { s=s $0 "\n" }
-  END{
-    sub(/\n$/, "", s); n=length(s)
-    root=skip_ws(1)
-    if(n==0 || ch(root)!="{") exit 2
-    root_end=value_end(root)
-    if(!find_key(root, root_end, topkey)) exit 3
-    map_start=skip_ws(fs); map_end=fe
-    if(ch(map_start)!="{") exit 3
-    if(!find_key(map_start, map_end, entrykey)) exit 3
-    entry_start=skip_ws(fs); entry_end=fe
-    if(ch(entry_start)!="{") exit 3
-    if(find_key(entry_start, entry_end, field)){
-      print substr(s,1,fs-1) lit substr(s,fe)
-      exit 0
-    }
-    print object_insert(entry_start, entry_end, field, lit)
-    exit 0
-  }' "$f"
-}
-
-set_map_field() {
-  target="$1"; topkey="$2"; entrykey="$3"; field="$4"; value="$5"; typ="${6:-str}"
-  [ -n "$topkey" ] || { echo "hnc_json: empty top map key" >&2; return 2; }
-  [ -n "$entrykey" ] || { echo "hnc_json: empty map entry key" >&2; return 2; }
-  [ -n "$field" ] || { echo "hnc_json: empty map field" >&2; return 2; }
-  lit="$(json_literal "$value" "$typ")" || return $?
-  target_dir="$(dirname "$target")"
-  target_base="$(basename "$target")"
-  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
-  [ -f "$target" ] || printf '{"version":1,"%s":{}}\n' "$topkey" > "$target"
-  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
-  acquire_lock || return 1
-  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
-  tmp="$target_dir/.$target_base.hnc_json_map.$$"
-  cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
-  case "$typ" in
-    *) awk_lit="$(printf '%s' "$lit" | sed 's/\\/\\\\/g')" ;;
-  esac
-  set +e
-  set_map_field_inner "$target" "$topkey" "$entrykey" "$field" "$awk_lit" > "$tmp"
-  rc=$?
-  set -e
-  if [ "$rc" -ne 0 ]; then
-    rm -f "$tmp"
-    [ "$rc" -eq 3 ] && return 3
-    echo "hnc_json: set-map-field parser failed for $target" >&2
-    return 1
-  fi
-  validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
-  mv "$tmp" "$target"
-  chmod 600 "$target" 2>/dev/null || true
-  validate_file "$target" || {
-    echo "hnc_json: live JSON failed validation after map write, rolling back" >&2
-    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
-    return 1
-  }
-  prune_backups "$target_base"
-}
-
-token_revoke() {
-  target="$1"; token_id="$2"
-  case "$token_id" in
-    *[!A-Za-z0-9_-]*|"") echo "hnc_json: invalid token id" >&2; return 2 ;;
-  esac
-  [ -f "$target" ] || printf '{"version":1,"tokens":{}}\n' > "$target"
-  token_key="$(json_literal "$token_id" str)" || return $?
-  # v5.11: 存在性检查与写回同在锁内
-  acquire_lock || return 1
-  tokens_obj="$(get_top "$target" "tokens" 2>/dev/null || printf '{}')"
-  if ! printf '%s
-' "$tokens_obj" | grep -F "$token_key" >/dev/null 2>&1; then
-    return 0
-  fi
-  set_map_field "$target" "tokens" "$token_id" "revoked" "true" bool
-  rc=$?
-  chmod 600 "$target" 2>/dev/null || true
-  return "$rc"
-}
-
-token_revoke_all() {
-  target="$1"
-  target_dir="$(dirname "$target")"
-  target_base="$(basename "$target")"
-  mkdir -p "$target_dir" "$BACKUP_DIR" 2>/dev/null || true
-  [ -f "$target" ] || printf '{"version":1,"tokens":{}}\n' > "$target"
-  validate_file "$target" || { echo "hnc_json: refusing to write invalid input file: $target" >&2; return 1; }
-  acquire_lock || return 1
-  ts="$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)"
-  bak="$BACKUP_DIR/$target_base.$ts.$$.bak"
-  tmp="$target_dir/.$target_base.hnc_json_token_all.$$"
-  cp -p "$target" "$bak" 2>/dev/null || cp "$target" "$bak" 2>/dev/null || true
-  awk '
-  BEGIN{ins=0;esc=0;buf=""}
-  {
-    line=$0
-    if(!ins){ gsub(/"revoked"[ \t]*:[ \t]*false/, "\"revoked\": true", line) }
-    print line
-  }' "$target" > "$tmp" || { rm -f "$tmp"; return 1; }
-  validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: token-revoke-all candidate failed validation" >&2; return 1; }
-  mv "$tmp" "$target"
-  chmod 600 "$target" 2>/dev/null || true
-  validate_file "$target" || {
-    echo "hnc_json: live JSON failed validation after token revoke all, rolling back" >&2
-    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
-    return 1
-  }
-  prune_backups "$target_base"
-}
-
 cmd="${1:-}"
 case "$cmd" in
   validate)
@@ -1152,6 +978,14 @@ case "$cmd" in
     [ $# -eq 3 ] || { usage >&2; exit 2; }
     del_object_key "$2" "$3"
     ;;
+  del-device|device-del)
+    [ $# -eq 3 ] || { usage >&2; exit 2; }
+    del_device "$2" "$3"
+    ;;
+  replace)
+    [ $# -eq 2 ] || { usage >&2; exit 2; }
+    replace_file "$2"
+    ;;
   add-array-unique|array-add-unique)
     [ $# -eq 4 ] || { usage >&2; exit 2; }
     array_add_unique "$2" "$3" "$4"
@@ -1160,20 +994,8 @@ case "$cmd" in
     [ $# -eq 4 ] || { usage >&2; exit 2; }
     array_del_value "$2" "$3" "$4"
     ;;
-  set-map-field|map-set-field)
-    [ $# -ge 6 ] && [ $# -le 7 ] || { usage >&2; exit 2; }
-    set_map_field "$2" "$3" "$4" "$5" "$6" "${7:-str}"
-    ;;
-  token-revoke)
-    [ $# -eq 3 ] || { usage >&2; exit 2; }
-    token_revoke "$2" "$3"
-    ;;
-  token-revoke-all)
-    [ $# -eq 2 ] || { usage >&2; exit 2; }
-    token_revoke_all "$2"
-    ;;
   version)
-    echo "hnc_json hotfix20.8 shell"
+    echo "hnc_json v5.33 shell"
     ;;
   -h|--help|help|"")
     usage

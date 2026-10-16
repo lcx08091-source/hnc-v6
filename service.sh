@@ -38,7 +38,6 @@ chmod 700 "$HNC_DIR" "$HNC_DIR/logs" "$RUN" 2>/dev/null
 [ -d "$HNC_DIR/data" ] && chmod 700 "$HNC_DIR/data" 2>/dev/null
 # hotfix16.4: clear stale uplink degraded marker on service start; watchdog will re-probe.
 rm -f "$RUN/uplink_unsupported" "$RUN/uplink_fail_count" "$RUN/uplink_unsupported_logged" 2>/dev/null || true
-rm -rf "$RUN/hnc_json.lock" 2>/dev/null || true
 
 # rc13: /system/bin resilience. SukiSU/ColorOS 在运行期会间歇性把 /system/bin 从
 # 模块脚本的挂载命名空间里卸掉 → 裸命令 sleep/head/sh 等 ENOENT,watchdog/

@@ -45,7 +45,10 @@ setup_test_env() {
     mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/logs" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/bin"
     # 复制真实 bin/ 脚本到测试目录
     cp -r "$HNC_REPO_ROOT/bin/"*.sh "$HNC_TEST_DIR/bin/" 2>/dev/null
-    chmod +x "$HNC_TEST_DIR/bin/"*.sh 2>/dev/null
+    # v5.33: JSON 读写只经 bin/hnc_json(无扩展名, 上面的 *.sh 不含它; 真机运行目录
+    # 由 service.sh 整个 bin/ 同步)。之前 json_set.sh 的 legacy 回退掩盖了它的缺席。
+    cp "$HNC_REPO_ROOT/bin/hnc_json" "$HNC_TEST_DIR/bin/" 2>/dev/null
+    chmod +x "$HNC_TEST_DIR/bin/"*.sh "$HNC_TEST_DIR/bin/hnc_json" 2>/dev/null
 }
 
 teardown_test_env() {

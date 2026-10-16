@@ -64,14 +64,6 @@ else
   echo "missing json_guard.sh" > "$CMD/json_guard_missing.txt"
 fi
 
-# Legacy JSON fallback telemetry is read-only and helps decide whether legacy
-# fallback paths can safely be removed in later releases.
-if [ -x "$BIN/json_legacy_fallback_status.sh" ]; then
-  run_cmd json_legacy_fallback_status sh "$BIN/json_legacy_fallback_status.sh" status
-  run_cmd json_legacy_fallback_json sh "$BIN/json_legacy_fallback_status.sh" json
-fi
-copy_if_exists "$RUN/json_legacy_fallback.log" "$OUT/run/json_legacy_fallback.log"
-copy_if_exists "$RUN/json_legacy_fallback.count" "$OUT/run/json_legacy_fallback.count"
 
 # hnc_json (shell) version — v5.26 起只有 shell 实现。
 if [ -x "$BIN/hnc_json" ]; then
@@ -154,7 +146,6 @@ done
   echo "  \"has_json_doctor\": $([ -x "$BIN/json_doctor.sh" ] && echo true || echo false),"
   echo "  \"has_json_guard\": $([ -x "$BIN/json_guard.sh" ] && echo true || echo false),"
   echo "  \"has_tc_snapshot\": $([ -x "$BIN/tc_state_snapshot.sh" ] && echo true || echo false),"
-  echo "  \"has_legacy_fallback_status\": $([ -x "$BIN/json_legacy_fallback_status.sh" ] && echo true || echo false),"
   echo "  \"has_hnc_json\": $([ -x "$BIN/hnc_json" ] && echo true || echo false),"
   echo "  \"has_stats_diag\": $([ -x "$BIN/stats_diag.sh" ] && echo true || echo false),"
   echo "  \"has_stats_identity_diag\": $([ -x "$BIN/stats_identity_diag.sh" ] && echo true || echo false),"

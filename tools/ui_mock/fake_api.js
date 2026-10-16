@@ -707,7 +707,7 @@
       return { file: 'self_attrib.' + ymd(dayAt(0)) + '.jsonl', t: t - 4, conns: C.map(function (c, i) { return { pkg: c[0], uid: c[1], name: c[2], remote: fakeIp(c[2] + i) + ':443', app: c[3], proto: i === 7 ? 'udp' : 'tcp', state: i === 7 ? '' : 'ESTABLISHED' }; }) };
     },
     '/api/exports': function () { return { exports: EXPORTS.map(function (x) { return Object.assign({ download_url: '/api/exports/' + x.name }, x); }) }; },
-    '/api/sla': function () { return { generated_at: now(), dpid_restart_count: 3, dpid_crash_recent: 0, dpid_guard_heartbeat_age_s: 2, watchdog_full_restore_count: 1, tc_repair_fail_count: 0, uplink_fail_count: 0, json_legacy_fallback_count: 0, qos_fallback_active: false, uplink_unsupported: false }; },
+    '/api/sla': function () { return { generated_at: now(), dpid_restart_count: 3, dpid_crash_recent: 0, dpid_guard_heartbeat_age_s: 2, watchdog_full_restore_count: 1, tc_repair_fail_count: 0, uplink_fail_count: 0, qos_fallback_active: false, uplink_unsupported: false }; },
     '/api/metrics': function () { return { instrumented: true, mode: 'snapshot', snapshot_age_ms: 600 + round(Math.random() * 900), json_cache_hits: 18234 + round((Date.now() - PAGE_T0) / 400), json_cache_misses: 412, shell_fallback_count: 0, backend_version: VER }; },
     '/api/iface_info': function () { return { iface: IFACE, ip: GW, gateway: GW, network: '192.168.43.1/24' }; },
     '/api/run_status': function () { return { hotspotd: 'up', hotspotd_pid: 4127, hotspotd_rss_kb: 11840, tc_rules: 46, ipt_rules: 31, watchdog: 1, watchdog_pid: 4203, watchdog_kind: 'go', watchdog_hb_age: 14 }; },

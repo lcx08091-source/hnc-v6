@@ -1,7 +1,7 @@
 #!/system/bin/sh
 # hotfix19.2 regression: json_set.sh top_get should prefer hnc_json get-top,
 # decode JSON string literals back to the historical unquoted output format,
-# and preserve legacy fallback when hnc_json is unavailable.
+# (v5.33: no legacy fallback when hnc_json is unavailable).
 
 set -eu
 
@@ -49,10 +49,13 @@ sf=$(sh "$ROOT/bin/json_set.sh" top_get speed_factor)
 ov=$(sh "$ROOT/bin/json_set.sh" top_get optional_value)
 [ "$ov" = "null" ] || { echo "optional_value mismatch: $ov" >&2; exit 1; }
 
-# Verify legacy fallback still works when hnc_json is missing.
+# v5.33: legacy grep reader removed — without hnc_json the read fails instead of
+# silently using a second reader.
 mv "$ROOT/bin/hnc_json" "$ROOT/bin/hnc_json.off"
-fallback=$(sh "$ROOT/bin/json_set.sh" top_get whitelist_mode 2>/dev/null)
-[ "$fallback" = "true" ] || { echo "fallback mismatch: $fallback" >&2; exit 1; }
+if fallback=$(sh "$ROOT/bin/json_set.sh" top_get whitelist_mode 2>/dev/null); then
+  echo "top_get without hnc_json should fail (legacy reader still present?): $fallback" >&2; exit 1
+fi
+[ -z "$fallback" ] || { echo "no output expected without hnc_json: $fallback" >&2; exit 1; }
 
 rm -rf "$ROOT"
 echo "PASS test_json_set_top_get_hnc_json_bridge"

@@ -52,16 +52,14 @@ sf=$(sh "$ROOT/bin/hnc_json" get-top "$ROOT/data/rules.json" speed_factor)
 ov=$(sh "$ROOT/bin/hnc_json" get-top "$ROOT/data/rules.json" optional_value)
 [ "$ov" = "null" ] || { echo "optional_value mismatch: $ov" >&2; exit 1; }
 
-# Verify the legacy fallback still exists by hiding hnc_json for one write.
+# v5.33: legacy writer removed — hiding hnc_json makes the write fail and leaves
+# rules.json byte-for-byte unchanged.
 mv "$ROOT/bin/hnc_json" "$ROOT/bin/hnc_json.off"
-sh "$ROOT/bin/json_set.sh" top fallback_name 'fallback,ok}'
-if [ -x "$ROOT/bin/json_guard.sh" ]; then
-  sh "$ROOT/bin/json_guard.sh" "$ROOT/data/rules.json" >/dev/null 2>&1 || {
-    echo "fallback write produced invalid JSON" >&2
-    cat "$ROOT/data/rules.json" >&2
-    exit 1
-  }
+before=$(cat "$ROOT/data/rules.json")
+if sh "$ROOT/bin/json_set.sh" top fallback_name 'fallback,ok}' 2>/dev/null; then
+  echo "top without hnc_json should fail (legacy writer still present?)" >&2; exit 1
 fi
+[ "$before" = "$(cat "$ROOT/data/rules.json")" ] || { echo "rules.json changed without hnc_json" >&2; exit 1; }
 
 rm -rf "$ROOT"
 echo "PASS test_json_set_top_hnc_json_bridge"

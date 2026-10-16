@@ -27,7 +27,7 @@
 # gate 传递(v5.9.0):
 #   gate 持有者(如 tc_manager restore)fork 出的子进程(iptables_manager
 #   mark/blacklist_add)需要 mac_lock,而 mac_lock 见 gate 目录会等满 5 秒
-#   退 11 —— gate 持有者调自己的下游必死锁超时。仿 json 子系统的
+#   退 11 —— gate 持有者调自己的下游必死锁超时。仿 v5.32 前 json 子系统的
 #   HNC_JSON_OUTER_LOCK_HELD 先例:持有者 gate_lock 成功后
 #   export HNC_GATE_HELD=<gate 持有者 pid>,mac_lock 仅当该值与 gate/pid
 #   文件内容一致时才豁免门禁等待(防 stale env 冒领别人的 gate);

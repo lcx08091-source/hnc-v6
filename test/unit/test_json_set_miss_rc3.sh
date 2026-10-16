@@ -13,7 +13,9 @@
 #
 # 本文件锁死的不变量:
 #   1. rc=3 → 退出码 0、stdout 为空、count **不增加**、不回退 legacy
-#   2. rc=2 / rc=127 等真故障 → count 仍然增加(这才是有效告警信号)
+#   2. v5.33: legacy reader 与回退计数整体删除 —— rc=2 / rc=127 等真故障原样作为
+#      json_set.sh 的退出码、不输出、不写任何计数文件(v5.32 及以前回退 grep reader
+#      并计数)。
 #
 # 实现说明:用桩 hnc_json(json_set.sh 的 HNC_JSON 是可被环境变量覆盖的)
 # 而不是真 helper,这样退出码是确定的,且不受宿主机有没有 /system/bin/sh、
@@ -105,22 +107,34 @@ done
 assert_eq "0" "$(fb_count)" "10 次未命中后计数仍应为 0(这正是热路径的真实形态)" && \
     test_pass
 
-# ═══ 真故障仍然要计数(反向断言,防止把分流写成"一律不计")═══════
+# ═══ v5.33: 真故障原样报错, 不再回退 legacy reader ═══════════════
 
-test_start "BUG-008: top_get rc=2 (invalid/missing JSON) still counts as fallback"
-seed; make_stub
-js_stub 2 top_get whitelist_mode >/dev/null 2>&1
-assert_eq "1" "$(fb_count)" "rc=2 是真故障,必须计数" && \
-    test_pass
-
-test_start "BUG-008: top_get rc=127 (helper unavailable) still counts as fallback"
-seed; make_stub
-js_stub 127 top_get whitelist_mode >/dev/null 2>&1
-assert_eq "1" "$(fb_count)" "rc=127 是真故障,必须计数" && \
-    test_pass
-
-test_start "BUG-008: rc=2 fallback still returns the real value via legacy reader"
+test_start "v5.33: top_get rc=2 (invalid/missing JSON) → exit 2, no legacy reader"
 seed; make_stub
 out=$(js_stub 2 top_get whitelist_mode 2>/dev/null)
-assert_eq "false" "$out" "回退 legacy reader 后仍要读到真实值" && \
+rc=$?
+assert_eq "2" "$rc" "rc=2 应原样返回" && \
+    assert_eq "" "$out" "不得回退 grep reader 读出值(v5.32 会读出 false)" && \
+    assert_file_not_exists "$HNC_TEST_DIR/run/json_legacy_fallback.count" "回退计数已删" && \
+    test_pass
+
+test_start "v5.33: device_get / name_get rc=127 (helper unavailable) → exit 127"
+seed; make_stub
+js_stub 127 device_get aa:bb:cc:dd:ee:ff mark_id >/dev/null 2>&1
+r1=$?
+js_stub 127 name_get aa:bb:cc:dd:ee:ff >/dev/null 2>&1
+r2=$?
+assert_eq "127 127" "$r1 $r2" "rc=127 应原样返回" && \
+    assert_file_not_exists "$HNC_TEST_DIR/run/json_legacy_fallback.count" "回退计数已删" && \
+    test_pass
+
+test_start "v5.33: write commands fail when hnc_json fails (no legacy writer)"
+seed; make_stub
+before=$(cat "$HNC_TEST_DIR/data/rules.json")
+js_stub 1 top whitelist_mode true >/dev/null 2>&1; r1=$?
+js_stub 1 device aa:bb:cc:dd:ee:ff up_mbps 5 >/dev/null 2>&1; r2=$?
+js_stub 1 bl_add aa:bb:cc:dd:ee:ff >/dev/null 2>&1; r3=$?
+after=$(cat "$HNC_TEST_DIR/data/rules.json")
+assert_eq "1 1 1" "$r1 $r2 $r3" "hnc_json 失败 = 写失败" && \
+    assert_eq "$before" "$after" "rules.json 不得被 legacy writer 改写" && \
     test_pass

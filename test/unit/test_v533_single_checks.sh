@@ -46,3 +46,17 @@ hits=$(grep -rln 'httpd_bind_ip\|httpd\.wanted' "$HNC_REPO_ROOT/bin" "$HNC_REPO_
 [ -n "$hits" ] && bad="$bad readers:$(echo $hits)"
 grep -q 'httpd_bind_ip' "$HNC_REPO_ROOT/post-fs-data.sh" || bad="$bad post-fs-data-stale-rm"
 [ -z "$bad" ] && test_pass || test_fail "$bad"
+
+# 打包检查(artifact_sanity_check.sh, CI 打包后跑)与 ci_preflight 的必需文件清单里, 除 CI
+# 现编的二进制外都必须在源码树里 —— v5.33 第 4 步删 hnc_clsact_watchdog.sh 时漏改这两张
+# 清单, CI 打包检查会以「required file missing」失败。
+test_start "v5.33 必需文件清单: 非 CI 构建产物都在源码树里(删文件时清单要跟着改)"
+built='daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/hnc_clsact_ctl bin/hnc_clsact.o'
+missing=""
+for f in $(sed -n 's/^for req in \(.*\); do$/\1/p' "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh") \
+         $(sed -n '/# 4. Required files/{n;s/^for f in \(.*\); do$/\1/p}' "$HNC_REPO_ROOT/bin/ci_preflight.sh"); do
+    case " $built " in *" $f "*) continue ;; esac
+    [ -e "$HNC_REPO_ROOT/$f" ] || missing="$missing $f"
+done
+n=$(sed -n 's/^for req in \(.*\); do$/\1/p' "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh" | wc -w)
+[ -z "$missing" ] && [ "$n" -gt 10 ] && test_pass || test_fail "清单里有源码树没有的文件:$missing (artifact 清单 $n 项)"

@@ -12,7 +12,7 @@ test_start "hnc_json_c: 源文件与脚本已删除"
 test_start "hnc_json_c: bin/hnc_json 不再引用 C helper"
 [ "$(grep -c 'HNC_JSON_C' "$HNC_REPO_ROOT/bin/hnc_json")" = "0" ] \
   && [ "$(grep -c 'hnc_json_c_try' "$HNC_REPO_ROOT/bin/hnc_json")" = "0" ] \
-  && grep -q 'hnc_json hotfix20.8 shell' "$HNC_REPO_ROOT/bin/hnc_json" && test_pass || test_fail "hnc_json 仍引用 C helper"
+  && grep -q 'hnc_json v5.33 shell' "$HNC_REPO_ROOT/bin/hnc_json" && test_pass || test_fail "hnc_json 仍引用 C helper"
 
 test_start "hnc_json_c: ci_preflight 检查已移除"
 [ "$(grep -c 'HNC_JSON_C_MACHINE' "$HNC_REPO_ROOT/bin/ci_preflight.sh")" = "0" ] \

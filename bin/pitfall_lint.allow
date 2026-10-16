@@ -11,7 +11,6 @@ bin/dpi_rules_import.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测
 bin/json_doctor.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测可用; awk gsub 形式不受影响
 bin/json_export_for_web.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测可用; awk gsub 形式不受影响
 bin/json_health_panel.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测可用; awk gsub 形式不受影响
-bin/json_legacy_fallback_status.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测可用; awk gsub 形式不受影响
 bin/pair_gen.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测可用; awk gsub 形式不受影响
 bin/qdisc_caps.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测可用; awk gsub 形式不受影响
 bin/stats_diag.sh:P5:存量: sed \t 转义在 toybox/GNU/busybox 上实测可用; awk gsub 形式不受影响

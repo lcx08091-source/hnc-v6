@@ -92,14 +92,6 @@ fi
 HAS_CAP=false
 [ -f "$RUN/capabilities.json" ] && HAS_CAP=true
 
-LEGACY_FALLBACK_COUNT=0
-[ -f "$RUN/json_legacy_fallback.count" ] && LEGACY_FALLBACK_COUNT="$(cat "$RUN/json_legacy_fallback.count" 2>/dev/null)"
-case "$LEGACY_FALLBACK_COUNT" in *[!0-9]*|"") LEGACY_FALLBACK_COUNT=0 ;; esac
-LEGACY_FALLBACK_LAST=""
-[ -f "$RUN/json_legacy_fallback.log" ] && LEGACY_FALLBACK_LAST="$(tail -1 "$RUN/json_legacy_fallback.log" 2>/dev/null)"
-HAS_LEGACY_FALLBACK_STATUS=false
-[ -x "$BIN/json_legacy_fallback_status.sh" ] && HAS_LEGACY_FALLBACK_STATUS=true
-[ "$LEGACY_FALLBACK_COUNT" != 0 ] && [ "$OVERALL" = ok ] && OVERALL="warn"
 
 
 STATS_DIAG_RAW=""
@@ -164,13 +156,6 @@ cat <<JSON
     "note": "$(json_escape "$TC_STATE_NOTE")"
   },
   "has_capabilities": $HAS_CAP,
-  "legacy_fallback": {
-    "count": $LEGACY_FALLBACK_COUNT,
-    "last": "$(json_escape "$LEGACY_FALLBACK_LAST")",
-    "has_status_helper": $HAS_LEGACY_FALLBACK_STATUS,
-    "log": "$(json_escape "$RUN/json_legacy_fallback.log")",
-    "count_file": "$(json_escape "$RUN/json_legacy_fallback.count")"
-  },
   "stats": {
     "has_diag_helper": $STATS_DIAG_PRESENT,
     "status_raw": "$(json_escape "$STATS_DIAG_RAW")",

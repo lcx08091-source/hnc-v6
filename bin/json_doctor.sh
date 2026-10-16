@@ -18,6 +18,8 @@ RUN_DIR=${RUN_DIR:-$HNC/run}
 BACKUP_DIR=${JSON_BACKUP_DIR:-$DATA_DIR/.json_backups}
 SCRIPT_DIR=${0%/*}
 GUARD=${JSON_GUARD:-$SCRIPT_DIR/json_guard.sh}
+HNC_JSON=${HNC_JSON:-$SCRIPT_DIR/hnc_json}
+export HNC
 REPORT_JSON=$RUN_DIR/json_health.json
 REPORT_TXT=$RUN_DIR/json_health.txt
 LOCKDIR=$HNC/run/json_doctor.lock
@@ -73,15 +75,6 @@ latest_valid_backup() {
     return 1
 }
 
-safe_backup_current() {
-    target="$1"
-    [ -f "$target" ] || return 0
-    mkdir -p "$BACKUP_DIR" 2>/dev/null || return 0
-    base=$(basename "$target")
-    ts=$(date +%Y%m%d-%H%M%S 2>/dev/null || echo now)
-    cp -p "$target" "$BACKUP_DIR/$base.pre-restore.$ts.$$.bak" 2>/dev/null || true
-}
-
 restore_one() {
     base="$1"
     case " $RESTORE_FILES " in
@@ -90,13 +83,14 @@ restore_one() {
     esac
     bak=$(latest_valid_backup "$base") || { echo "json_doctor: no valid backup found for $base" >&2; return 1; }
     target="$DATA_DIR/$base"
-    safe_backup_current "$target"
-    # v5.11: 旧实现 `cp -p "$bak" "$target"` 就地覆盖, httpd/tc_manager 此刻可能读到
-    # 半个文件。改为先拷到同目录临时文件再 mv 原子替换。
-    rtmp="$target.restore.$$"
-    cp -p "$bak" "$rtmp" 2>/dev/null || { rm -f "$rtmp"; return 1; }
-    chmod 600 "$rtmp" 2>/dev/null || true
-    mv -f "$rtmp" "$target" || { rm -f "$rtmp"; return 1; }
+    # v5.33: 交给 hnc_json replace —— 持 run/json.lock(与所有 JSON 写者同一把, 不会被
+    # 并发写覆盖 / 覆盖掉刚写入的更新)、先备份现有文件(坏的也备份)、原子替换。之前这里
+    # 自己实现了一份 json.lock 协议 + 自己备份 + cp/mv。
+    if [ -x "$HNC_JSON" ]; then
+        "$HNC_JSON" replace "$target" < "$bak" || return 1
+    else
+        sh "$HNC_JSON" replace "$target" < "$bak" || return 1
+    fi
     validate_json "$target"
     rc=$?
     [ "$rc" = "0" ] || { echo "json_doctor: restored file still invalid: $base" >&2; return 1; }
@@ -221,41 +215,14 @@ acquire_lock() {
 
 release_lock() { rm -rf "$LOCKDIR" 2>/dev/null || true; }
 
-# v5.11: restore/repair 改写的是 rules.json 等活文件, 但只持有 json_doctor 自己的锁,
-# 与 json_set.sh / hnc_json 写者(共用 $HNC/run/json.lock)互不见锁: 恢复可能被并发写
-# 覆盖, 或覆盖掉刚写入的更新。这里同时持有 json.lock(与 json_set.sh 同协议: mkdir +
-# pid, 持锁进程已死才回收; 不写 ts, hnc_json 不会按年龄误拆)。
-JSON_LOCKDIR=$HNC/run/json.lock
-JSON_LOCK_HELD=0
-acquire_json_lock() {
-    i=0
-    while ! mkdir "$JSON_LOCKDIR" 2>/dev/null; do
-        i=$((i + 1))
-        [ "$i" -gt 50 ] && return 1
-        oldpid=$(cat "$JSON_LOCKDIR/pid" 2>/dev/null)
-        if [ -n "$oldpid" ] && ! kill -0 "$oldpid" 2>/dev/null; then
-            rm -rf "$JSON_LOCKDIR" 2>/dev/null
-            continue
-        fi
-        sleep 0.1 2>/dev/null || sleep 1
-    done
-    echo $$ > "$JSON_LOCKDIR/pid" 2>/dev/null || true
-    JSON_LOCK_HELD=1
-    return 0
-}
-release_all_locks() {
-    if [ "$JSON_LOCK_HELD" = "1" ]; then
-        rm -rf "$JSON_LOCKDIR" 2>/dev/null || true
-        JSON_LOCK_HELD=0
-    fi
-    release_lock
-}
+release_all_locks() { release_lock; }
+# json_doctor.lock 只让 doctor 之间互斥(两个 repair 同时跑); 写文件时的 run/json.lock
+# 由 hnc_json replace 拿。
 lock_for_write() {
     acquire_lock || return 1
     trap 'release_all_locks' EXIT
     trap 'exit 130' INT
     trap 'exit 143' TERM
-    acquire_json_lock || { echo "json_doctor: json.lock busy (writer active)" >&2; return 1; }
 }
 
 CMD=${1:-status}
