@@ -531,15 +531,17 @@ httpd 在内存里算出来的,见下。
 > **同时**看 `stats.packets` 与 `uptime_s`;WebUI 从 v5.9.3 起在
 > `webroot/index.html` 的徽标处做这个交叉校验。
 
-### `etc/dpi_rules.json` / `etc/dpi_rules.d/*.json` (用户/项目维护, dpid 读)
+### `etc/dpi_rules.d/*.json` (用户/项目维护, dpid 读)
 
-加载顺序(`src/dpid/output/rule.go:33-40`,先命中先用):
+加载顺序(`src/dpid/output/rule.go`):
 
-1. `/data/local/hnc/etc/dpi_rules.d/*.json` —— rc30.12.31+,按文件名序 glob
-   合并,同 id 后写覆盖(nginx `conf.d` 风格,`99-user-custom.json` 能盖掉
-   项目内置规则);单个子集文件坏掉只 WARN 跳过,不影响整体加载
-2. `/data/local/hnc/etc/dpi_rules.json` —— legacy 单文件
-3. 编译进二进制的 `builtinRules` 兜底
+1. `/data/local/hnc/etc/dpi_rules.d/*.json` —— 按文件名序 glob 合并,同 id 后写覆盖
+   (nginx `conf.d` 风格,`99-user-custom.json` 能盖掉项目内置规则);单个子集文件坏掉
+   只 WARN 跳过,不影响整体加载。service.sh 每次开机从模块的 `data/dpi_rules.d/` 同步
+2. 目录不可用时用编译进二进制的 `builtinRules`
+
+(v5.33 删掉了单文件 `etc/dpi_rules.json` / 模块里的 `data/dpi_rules.json`:它是规则目录的
+逐字节派生副本;httpd 读规则统一走 `hnc_paths.go` 的 `dpiRuleFiles`,与 dpid 同源。)
 
 文件结构(`rule.go:170-215` 的结构体 tag):
 
@@ -644,8 +646,7 @@ watchdog 每 N 秒检查这些文件的 mtime 是否新鲜(每个 daemon 自己�
 ├── uninstall.sh
 ├── bin/          ← 脚本 + 小二进制 (hotspotd / hnc_dpid / hnc_launcher / fork_probe / hnc_ipc …)
 ├── daemon/       ← hnc_httpd ELF (daemon/hnc_httpd/hnc_httpd)
-├── api/          ← WebUI 用的 shell API 入口
-├── data/         ← 项目维护的规则/数据 (dpi_rules.json, dpi_rules.d/, oui.txt, entity_db.json …)
+├── data/         ← 项目维护的规则/数据 (dpi_rules.d/, entity_db.json …)
 ├── bpf/          ← eBPF 字节码 (hnc_limit_map_guard.bpf.o)
 ├── webroot/      ← WebUI 静态文件 (index.html / changelog.html …)
 ├── test/         ← 真机可跑的单测
@@ -672,8 +673,7 @@ watchdog 每 N 秒检查这些文件的 mtime 是否新鲜(每个 daemon 自己�
 │   └── oui.txt / entity_db.json / dpi_*.json  ← service.sh 从模块目录同步的只读数据
 ├── etc/     ← 用户可编辑配置 (刷机不覆盖, service.sh:705 起做软迁移)
 │   ├── dpi_config.json
-│   ├── dpi_rules.json        ← legacy 单文件
-│   └── dpi_rules.d/*.json    ← 首选, 99-user-custom.json 可覆盖项目规则
+│   └── dpi_rules.d/*.json    ← 规则唯一来源, 99-user-custom.json 可覆盖项目规则
 ├── run/     ← 易失状态 (重启即弃)
 │   ├── dpi_state.json        ← dpid 写 (**在这里, 不在 data/**)
 │   ├── *.pid                 ← 见上一节的真实文件名清单

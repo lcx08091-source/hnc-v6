@@ -2293,3 +2293,38 @@ GET `/api/encdns`:
 
 - 删 `-write-blind-state` / `-blind-iface` 参数(只有已删的 shell guard 用)。
 
+
+## 30. v5.33.0-rc2 变更(继续只留一份)
+
+**httpd 远程端口与启动参数**
+
+- `hnc_httpd -bind` 默认 `auto`:`rules.json` 的 `remote_enabled=true` 时监听 `0.0.0.0:8443`(+ `:8080` 跳转),false 时关;也可 `-bind <私网 IP>`(同样跟随开关)/ `-bind none`(从不开)。10 秒看一次 `rules.json`(mtime + size 没变不重读;读坏 / 读不到沿用上次结论);监听失败只记日志、下一轮重试(不再退出进程)。
+- action `remote_enabled_set`:写完立刻生效(几秒内),提示文案改为「几秒内远程 URL 可访问 / :8443 关闭」。
+- service.sh 与看门狗拉 httpd 的参数相同:只有 `-hnc-dir`。`run/httpd_bind_ip`、`run/httpd.wanted` 不再有人读写(post-fs-data 开机清掉)。
+
+**看门狗(`run/watchdog_actions.json`)**
+
+- 顶层 `native_mismatch` → `native_unknown`(规则健康检查判不了、那一轮跳过的累计次数,看门狗启动以来)。自检「看门狗动作」:偶发只在 Detail 提一句,≥ 10 次标黄并给处理办法。
+- 新动作名 `iface_detect`(探测结果陈旧时跑 `hnc_iface.sh get`,rc 1 = 热点没开,不算失败);不再有 `probe_hotspot` / `check_health` / `httpd_drift` / `get_iface` 四个动作(`watchdog.sh action` 对它们退 64)。
+- 开关 `run/wd_native.disabled`、`run/wd_m3.disabled`、`run/offload_guard.owner`、`run/offload_guard.pid`、`run/clsact_wd.pid` 删(开机清掉)。
+
+**offload / clsact**
+
+- `bin/hnc_offload_guard.sh` 只剩单次子命令 `plan` / `apply` / `restore` / `mode` / `clsact_wanted [iface]` / `clsact_repair [iface]`(`daemon` 回 usage);`bin/hnc_clsact_watchdog.sh` 删。action `clsact_repair` 走 `clsact_repair`;`clsact_check` 的「有人在管」看 Go 看门狗。
+- `/api/config` 不再有 `clsact_bpf_enabled`(只有 `clsact_bpf_mode`);action `clsact_bpf_enabled_set` 删(用 `clsact_mode_set`)。`rules.json` 里的旧键开机一次性迁成 `clsact_bpf_mode`(true → on,否则 auto;已有 mode 保留)后删除。
+
+**JSON 工具**
+
+- `bin/hnc_json`:新类型 `auto`(true/false → bool、null、数字 → num、其余 str;str 丢弃 \b\f\n\r\t 以外的控制字符);新命令 `del-device <file> <mac>`、`replace <file>`(新内容从 stdin,先校验;现有文件坏了也先备份再替换);`set-device` 没有 `devices` 对象时自建;删 `token-revoke` / `token-revoke-all` / `set-map-field`。锁只有 `run/json.lock`(删 `run/hnc_json.lock`)。
+- `bin/json_set.sh`:删 `cfg_set` / `cfg_get` / `device_patch`(多字段写用 `json_set_batch.sh device <mac> <k> <v> …`);hnc_json 失败 = 命令失败(读命令 rc 3 = 键不存在照旧当空答案、退 0)。`json_doctor.sh restore` 走 `hnc_json replace`。
+- `/api/sla` 删 `json_legacy_fallback_count`;`bin/json_legacy_fallback_status.sh` 删;`json_health_panel.sh` 输出删 `legacy_fallback` 段。
+
+**DPI 规则**
+
+- 删 `data/dpi_rules.json` 与运行目录的 `etc/dpi_rules.json`(开机清掉):规则只来自 `etc/dpi_rules.d/*.json`。`dpi_rules_import.sh`:删 `--install-default`;`--export` 只导出用户导入的规则(`99-user-custom.json`),没有就导出空规则集。
+
+**其他**
+
+- `/api/run_status` 的 `watchdog_kind` 只有 `go` / 空(不再有 `shell`)。
+- `/api/stats?source=` 只有 `legacy`(`dpi` / `shadow` 按 legacy 处理);httpd 不再内嵌旧版远程界面,`/static/` 路由删除,磁盘页面读不到时 `/` 回 503。
+- `run/activity.json` 的 shell 新鲜度上限 180 → 120 秒(与 Go 一致)。

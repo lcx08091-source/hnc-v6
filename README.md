@@ -470,6 +470,8 @@ Upgrade & Rollback
 - To fall back manually, flash the previous release ZIP. (The automatic rollback uses a snapshot of the previous version kept in `/data/local/hnc/.prev`; it is taken at upgrade time and is not meant to be restored by hand.)
 - Device discovery: since v5.33 there is only the Go implementation (the watchdog writes `data/devices.json`). The v5.31–v5.32 switch `data/m4_owner` (and the C discovery code in hotspotd) is gone; if device discovery misbehaves on your phone, flash v5.32 back and use `data/m4_owner` = `c` there.
 - dpid supervision: since v5.33 only the C launcher + the Go watchdog remain (the shell guard, the Go supervisor and `run/wd_m5.disabled` were removed).
+- Watchdog checks and offload / clsact scheduling: since v5.33.0-rc2 only the Go watchdog does them (the shell versions and the switches `run/wd_native.disabled` / `run/wd_m3.disabled` were removed). JSON files are only written through `bin/hnc_json`; DPI rules only come from `data/dpi_rules.d/`. If any of this misbehaves on your phone, flash v5.32 back.
+- Remote access: the HTTPS port (8443) is opened / closed by hnc_httpd itself following the `remote_enabled` setting (takes effect within seconds); a restarted httpd keeps it.
 
 
 ---
@@ -1490,6 +1492,8 @@ http://127.0.0.1:8444/
 - 手动回退：刷回上一个版本的 ZIP。(自动回滚用的是升级时存在 `/data/local/hnc/.prev` 的上一版快照, 不用手动去动它。)
 - 设备发现：v5.33 起只有 Go 版(看门狗写 `data/devices.json`),v5.31–v5.32 的开关 `data/m4_owner` 和 hotspotd 里的 C 版发现代码都删了。真机上设备发现有问题的话，刷回 v5.32,在那一版里往 `data/m4_owner` 写 `c`。
 - dpid 守护：v5.33 起只剩 C launcher + Go 看门狗(shell guard、Go supervisor 和开关 `run/wd_m5.disabled` 已删)。
+- 看门狗巡检、加速兜底调度：v5.33.0-rc2 起只在 Go 看门狗里(shell 版和开关 `run/wd_native.disabled` / `run/wd_m3.disabled` 已删)。JSON 文件只经 `bin/hnc_json` 写;DPI 规则只来自 `data/dpi_rules.d/`。这些在真机上有问题的话，刷回 v5.32。
+- 远程访问：8443 端口由 hnc_httpd 按设置里的「远程访问」开关自己开 / 关(几秒内生效),httpd 重启后照样保持。
 
 
 ---

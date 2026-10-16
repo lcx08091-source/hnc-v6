@@ -39,15 +39,19 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 | 启动指纹(v5.27) | `daemon/hnc_httpd/startup_fp.go` | 学习(本机样本,30 分钟节流)/ 识别(dpi_flows)/ 交叉验证自评都在这里;影子运行,只产出事件 |
 | 前台 HMM(v5.27) | `daemon/hnc_httpd/fg_hmm.go` | 挂在 `fg_model.go` 每轮上;引擎开关 `data/dpi_experiment.json`;对比统计 `run/fg_compare.json` |
 | 看门狗动作记账(v5.28) | `src/dpid/cmd/hnc_watchdog/actionstats.go`(`runActionFn` 等) | 每次外部调用的次数 / 失败 / 退出码 / 耗时(24 小时桶),每分钟原子写 `run/watchdog_actions.json`;httpd 转出 `/api/power.watchdog_actions` + 自检行;调用预算测试 `budget_test.go` |
-| 进程判断(shell,v5.28) | `bin/hnc_proc.sh` | `pid_matches` / `pidfile_pid_matches`(读 `/proc/<pid>/cmdline`,与 Go `procfind` 同口径);service.sh 的哨兵函数先查它,pidof / ps 只兜底;`HNC_PROC_ROOT` 可注入测试 |
+| 进程判断(shell,v5.28) | `bin/hnc_proc.sh` | `pid_matches` / `pidfile_pid_matches` / `pidfile_live_pid`(读 `/proc/<pid>/cmdline`,与 Go `procfind` 同口径)、`prune_duplicate_hotspotd`(v5.33 起 service.sh / watchdog.sh 共用这一份);`HNC_PROC_ROOT` 可注入测试 |
 | 老坑检查(v5.28) | `bin/pitfall_lint.sh` | 五条规则(时区 / toybox grep BRE `\|` / ps 判活 / 告警直写 / json_escape Tab),存量白名单 `bin/pitfall_lint.allow`;`ci_preflight.sh` 挂钩 |
 | 流量形状分类器(v5.28) | `daemon/hnc_httpd/flow_cls.go` | 分箱朴素贝叶斯,自监督(已认出应用的连接当教材),影子输出 `/api/connections` 的 `cls_category` / `cls_conf`;模型 `data/flow_cls.json`;评估在 `dpi_eval.go` 的 flow_cls 段 |
 | 交互节拍(v5.28) | `daemon/hnc_httpd/fg_engagement.go` | 三态(interactive / passive / background)由 `fgFeat` 判定;`fg_model.go` 写进 fgView 与 fgSession;时间线汇总 `engagement_mix` |
 | 新应用建议名(v5.28) | `daemon/hnc_httpd/api_discover_suggest.go` | `suggestForGroup` 纯函数;来源优先级 apk > 启动指纹 > 证书 > JA4 > 主域;`/api/discover` 每组带 `suggest` |
 | 我的规则包(v5.27) | `daemon/hnc_httpd/rulepack.go` | 导出汇总 / 导入校验 / 冲突跳过 / 落地(`_imported.json`、`fp_imported.json`、`startup_fp_imported.json`)/ 清除 |
-| v2fly 规则导入(v5.27) | `tools/import_v2fly.py` + `tools/v2fly_map.json` | 只在开发机跑,产物 `data/dpi_rules.d/46-v2fly-*.json`,之后 `dpi_rules_split.py sync-legacy` |
-| 看门狗检查原生读内核(v5.29) | `src/dpid/nlroute` + `src/dpid/cmd/hnc_watchdog/native.go` | nlroute 纯 syscall 只读 NETLINK_ROUTE(qdisc dump);四项检查(probe / health / httpd drift / uplink)判断在 Go,iptables `-S` 由 Go 直接 exec;30 分钟 shell 对照 + `native_mismatch` + `run/wd_native.disabled` 开关 |
-| offload / clsact 调度(v5.29) | `src/dpid/cmd/hnc_watchdog/offload_sched.go` | plan 动作 + 早醒条件 + 门控 60 秒缓存;`run/offload_guard.owner=watchdog` 时 shell 守护让位;`run/wd_m3.disabled` 开关 |
+| v2fly 规则导入(v5.27) | `tools/import_v2fly.py` + `tools/v2fly_map.json` | 只在开发机跑,产物 `data/dpi_rules.d/46-v2fly-*.json`(v5.33 起不再生成派生单文件) |
+| 看门狗检查(v5.29 起原生,v5.33 起唯一) | `src/dpid/nlroute` + `src/dpid/cmd/hnc_watchdog/native.go` | 热点探测 / 规则健康 / 上行链路三项判断只在 Go(shell 版、30 分钟对照、`run/wd_native.disabled` v5.33 删;httpd 漂移检查整项删);探测陈旧时跑一次 `hnc_iface.sh get`(动作名 `iface_detect`);规则健康判不了 → 跳过本轮 + `native_unknown`;「动手」仍是 `watchdog.sh action` |
+| offload / clsact 调度(v5.29 起,v5.33 起唯一) | `src/dpid/cmd/hnc_watchdog/offload_sched.go` | 按 plan 节拍调 `hnc_offload_guard.sh apply`;clsact 读 `run/offload_guard.json`(mode=on 且 installed)每 10 秒 check,不 ok 调 `clsact_repair`;shell 守护循环 / `hnc_clsact_watchdog.sh` / `run/wd_m3.disabled` v5.33 删;「要不要装」的闸门只在 shell `clsact_wanted` |
+| 远程端口(v5.33) | `daemon/hnc_httpd/remote_listener.go` | `:8443` + `:8080` 跳转按 `rules.json` 的 `remote_enabled` 由 httpd 自己开关(10 秒一看 + `remote_enabled_set` 立刻 Kick);httpd 启动参数只有 `-hnc-dir`(service.sh 与看门狗相同) |
+| JSON 读写(v5.33 起唯一) | `bin/hnc_json` | 所有 JSON 写者经它(校验 → 持 `run/json.lock` → 备份 → 原子替换 → 写后校验);`json_set.sh` / `json_set_batch.sh` / `json_doctor.sh` 只是入口;类型 `auto`、`del-device`、`replace` |
+| 开机同步(v5.33 起唯一) | `bin/hnc_runtime_sync.sh` | 模块 → 运行目录(`bin/` `webroot/` hnc_httpd + 原生二进制 chmod / chcon),post-fs-data.sh 与 service.sh 共用 |
+| httpd 数据文件查找(v5.33) | `daemon/hnc_httpd/hnc_paths.go` | `moduleDir` / `dataCandidates`(etc > 模块 data > hnc data)/ `dpiRuleFiles`(与 dpid 同源的规则目录) |
 | 升级自检 + 自动回滚(v5.29) | `bin/hnc_rollback.sh` + `data/rollback.*` | snapshot / observe(哨兵 30 秒一轮, 只看核心进程)/ 回滚 + 钉住;httpd `rollback.go` 转出横幅 + ack + 自检行;`data/rollback.disabled` 只记录不回滚 |
 | 兼容性报告(v5.29) | `daemon/hnc_httpd/compat_report.go` | action `compat_report`,白名单字段收集(不含 MAC / IP / SSID / 密码 / token),产物 `exports/hnc-compat-*.json` |
 | 流量录制 / 回放(v5.29) | `src/dpid/capture/recorder.go` + `src/dpid/cmd/dpid_replay` | 只录 DNS / TLS ClientHello / QUIC Initial / HTTP 请求头事件包(LINKTYPE_RAW, 20 MB / 分钟数上限);回放复用同一套解析函数, 合成 pcap 期望输出进 `go test` |
@@ -90,7 +94,7 @@ HNC 是一个装在手机里的 root 模块:**开机脚本把几个后台程序�
 hnc_dpid  src/dpid/capture/  抓 DNS / TLS SNI / QUIC / HTTP Host + 算 JA4
   → src/dpid/output/          写 run/ 下的识别结果、流水
 httpd 读进来:
-  traffic_ident.go  域名 → 应用(规则库 data/dpi_rules.json + data/dpi_rules.d/)
+  traffic_ident.go  域名 → 应用(规则库 data/dpi_rules.d/)
   fp_learn.go       TLS 指纹学习 / fp_user_rules.go 你的纠正
   ip_owner.go       IP 属于哪家公司
   flow_shape.go     流量形态(看视频 / 游戏 / 通话…)

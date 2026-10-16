@@ -14,6 +14,54 @@
 
 ---
 
+## [5.33.0-rc2] - 2026-10-16
+
+**预览版 · 继续「只留一份」**(维护者 2026-10-15「继续全面清理」)。rc1 留着等定的两处(M2 看门狗检查、M3 offload / clsact 调度)也只留 Go 一份,再加 JSON 读写、DPI 规则、开机同步、进程判活等零散的「两份」。**仍是先于真机回归删旧代码**,真机有问题的退路是刷回 v5.32(或 rc1)。
+
+### Removed
+
+- **看门狗检查的 shell 版(M2)**:`watchdog.sh` 的 `probe_valid_hotspot` / `check_health` / `check_httpd_bind_drift` / `httpd_guard_*` 与 action `probe_hotspot` / `check_health` / `httpd_drift` / `get_iface`(未知 action 退 64);Go 侧删 30 分钟 shell 对照、「连错 3 次退回 shell」、开关 `run/wd_native.disabled`、5 秒健康缓存。httpd 漂移检查整项删除 —— 它依赖的 `run/httpd_bind_ip` 从 v5.26 起就没人写,Go / shell 两份都是空转。
+- **offload / clsact 的 shell 守护(M3)**:`hnc_offload_guard.sh` 的 daemon 循环、pidfile、`run/offload_guard.owner`;`bin/hnc_clsact_watchdog.sh` 整个删(它的修复并进 `hnc_offload_guard.sh clsact_repair`);开关 `run/wd_m3.disabled`;service.sh 拉起两个 shell 循环的那段。clsact「要不要装」的闸门只留 shell `clsact_wanted` 一份(Go 不再自己判、不再自己探热点口)。
+- **JSON 的 legacy 写法 / 读法**:`json_set.sh` 里约 400 行 awk 状态机 writer 与 grep reader(hnc_json 失败时的回退)、它自己的 `json.lock`、回退计数 `run/json_legacy_fallback.*` 与 `bin/json_legacy_fallback_status.sh`、`/api/sla` 的 `json_legacy_fallback_count`、设置页「JSON 退回 legacy」一行、已弃用的 `cfg_set` / `cfg_get`、没人调用的 `device_patch`;`json_set_batch.sh` 的逐字段串行回退;hnc_json 的内层锁 `hnc_json.lock`、`token-revoke` / `token-revoke-all` / `set-map-field`。`json_set.sh` 1124 → 约 300 行。
+- **DPI 规则单文件 `data/dpi_rules.json`**(247 KB):与 `data/dpi_rules.d/` 的 478 条规则逐条内容相同的派生副本,连同 dpid 的单文件加载器、service.sh 的安装 / 按版本升级、`dpi_rules_import.sh --install-default`、生成它的 `tools/dpi_rules_split.py`。
+- **clsact 旧开关键 `clsact_bpf_enabled`**(v5.9.7):开机一次性迁成 `clsact_bpf_mode` 后删除;`/api/config` 的同名字段、`clsact_bpf_enabled_set` 别名、切模式时同步写旧键、各处「缺 mode 时看旧键」的兼容一并删。
+- **死代码 / 重复文件**:httpd 编进二进制的旧版远程界面(`web/app.html` 等)与 `/static/` 路由(磁盘页面读不到时回 503 说明安装不完整);`/api/stats` 的第二个统计源 `source=dpi`;hotspotd 的 BPF LSM `lsm/` 目录(链接的是永远返回「关闭」的 stub);两份多余的 `fork_probe` 二进制与没编进包的 `gofork_probe`;没有调用者的 `bin/device_class.sh` / `data/oui.txt` / `data/oui_db.json`;tc 限速 burst 的第二份公式;`tools/cleanup-src-hnc_httpd.sh`;运行目录里从没用过的 `api/`、不进安装包的 `test/` 的拷贝;不存在的 `bin/rules_repair.sh` 调用。
+
+### Changed
+
+- **httpd 远程端口自己按开关管**(新 `remote_listener.go`):`:8443`(+ `:8080` 跳转)按 `rules.json` 的 `remote_enabled` 开 / 关,10 秒看一次(文件没变不重读,读坏沿用上次结论),设置页切开关后立刻生效(原提示「约 1 分钟」从不成立 —— 要等 httpd 下次重启);监听失败只记日志下一轮重试,不再 `log.Fatalf` 连带本机 8444 一起退出。`-bind` 默认 `auto`(也可 `<私网 IP>` / `none`)。
+- **httpd 启动参数只有一套**:service.sh 与看门狗都只传 `-hnc-dir`(之前 service.sh 按 `remote_enabled` 带 `-bind 0.0.0.0`、看门狗重拉时不带 —— httpd 崩一次或迁移一次热点网卡,远程访问就没了)。迁移热点网卡不再杀 httpd「重绑 IP」。
+- **看门狗的热点探测**:`run/iface_detect.json` 超过 5 分钟或看不出结果时,跑一次唯一的探测器 `sh bin/hnc_iface.sh get`(动作名 `iface_detect`)再判;热点关着时每轮 1 个进程(原来 shell 版每轮 3 个)。**规则健康判不了**(netlink / iptables 跑不起来)→ 本轮跳过、计 `native_unknown`(`run/watchdog_actions.json`),自检「看门狗动作」累计 ≥ 10 次标黄并给处理办法;不再退回 shell。
+- **JSON**:hnc_json 是 `run/json.lock` 的唯一持有者;新类型 `auto`(替代 json_set.sh / json_set_batch.sh 两份类型推断)、新命令 `del-device` / `replace`;`json_set.sh` 只做参数整理 + 调 hnc_json,hnc_json 失败 = 命令失败(不再静默改走旧写法);`json_doctor.sh restore` 走 `hnc_json replace`。
+- **开机同步只一份** `bin/hnc_runtime_sync.sh`(post-fs-data.sh / service.sh 共用):hnc_httpd 内容变了才换(先停旧进程)。`prune_duplicate_hotspotd` 与 pid 校验并进 `bin/hnc_proc.sh`(service.sh / watchdog.sh 共用)。
+- **httpd 的数据文件查找只一份**(`hnc_paths.go`):DPI 规则目录(原 3 份)、模块目录解析(原 5 份)。httpd 应用分级直接用 dpid 的 `output.AppTier`(原来是照抄副本);`/api/run_status` 的看门狗判活走 procfind。dpid 的热点网卡解析走 `ifacehint`。
+- `activity.json` 新鲜度上限 shell 180 秒 → 120 秒,与 Go 读取器一致。
+
+### Fixed
+
+- **CI 打包检查**:第 4 步删 `bin/hnc_clsact_watchdog.sh` 时漏改 `artifact_sanity_check.sh` / `ci_preflight.sh` 的必需文件清单,CI 打包检查会以「required file missing」失败(分支尚未进 main,CI 没跑到);加了「清单里非 CI 产物都在源码树」的测试。
+- 自检「进程拉起兼容」原来恒显示正常(看的是恒为 false 的 `go_fork_*`),改看 `c_fork_supported`。
+- clsact 状态里「有人在管」原来 `pgrep hnc_clsact_watchdog`(v5.29 起恒为 false),改看 Go 看门狗。
+
+### Internals
+
+- 新测试(每条在 rc1 上失败或编译不过):`test_v533_single_checks.sh`(4)、`test_v533_json_single.sh`(6)、`test_v533_misc_single.sh`(6)、`remote_listener_test.go`(跟随开关 / 坏文件保持 / 端口被占重试 / Kick / TLS)、`TestScWatchdogActionsNativeUnknown`、看门狗 `native_test` / `budget_test` 改写(真实探测 ACTIVE 健康 1 小时 `iface_detect` ≤ 12 次、sh 合计 ≤ 25;规则健康一直判不了 → 不调 shell、不 restore)、`TestResolveCurrentIfaceUsesIfacehint`、`TestReadWatchdogStateProcfind`、`TestServeIndexNoEmbeddedFallback` / `TestStatsSingleSource`、offload / clsact 调度用例。测试框架 `test/lib.sh` 也拷 `bin/hnc_json`(之前只拷 `*.sh`,legacy 回退掩盖了它的缺席)。
+- 自检(本容器):`HNC_SIM=1 sh test/run_all.sh` → 见下方版本收尾提交;`go vet` + `go test`(`src/dpid`、`daemon/hnc_httpd`)、`gofmt`、Go `android/arm64` 交叉编译、`pitfall_lint`、`version_consistency_check`、`ci_preflight`、`node --check` 全过;hotspotd NDK r27c arm64 / armv7 交叉编译。改了 Go(看门狗 / dpid / httpd)和 C(hotspotd 删 LSM),合并到 main 后 CI 要重编。
+
+### 待维护者决定的「两份」(这一版没动)
+
+这些是产品取舍或真机才能判断的,不是纯重复:
+
+- 前台应用判断:经典模型 `fg_model.go` vs HMM `fg_hmm.go`。
+- 未知流量分类:规则 vs 朴素贝叶斯(`flow_cls.go`)。
+- 统计健康:shell 页面(`stats_health_summary.sh` / `json_health_panel.sh`)vs httpd 自检。
+- 诊断工具三份:`bin/diag.sh`、`bin/diag/diag.sh`、`debug_bundle.sh` / `json_diag_bundle.sh`。
+- 上行 ingress:netlink(`hnc_tc_ingress`)vs `tc` 命令兜底。
+- 应用限速的共享 IP 旧行为开关 `app_limit_include_shared_ips`。
+- 保留的镜像(两种语言各一份、有一致性测试):加密 DNS 解析器名单、垃圾主机名表(Go + 前端)、热点网卡名字模式(`hnc_iface.sh` + Go)、root 环境探测(`hnc_compat.sh` + Go)、IPv6 邻居(`neigh_v6.go` vs `neigh` 包)。
+
+---
+
 ## [5.33.0-rc1] - 2026-10-14
 
 **预览版 · 重复实现只留一份**(维护者 2026-10-14 决定:「所有重复实现都只留一份」)。同一件事原来有两三份实现、靠开关切换或互相兜底,这一版每件事只留一份:设备发现只留 Go 版、dpid 守护只留 C launcher + Go 看门狗、`device_detect.sh` 的 shell 扫描兜底删掉。**这是先于真机回归删旧代码**(原计划正式版之后按真机结论再删);旧引擎的退路随之消失,真机上设备发现 / dpid 守护有问题时的退路是**刷回 v5.32**(那一版 `data/m4_owner` 写 `c` 可回 C 版发现)。
