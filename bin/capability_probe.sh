@@ -6,7 +6,7 @@
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/adb/magisk:/data/adb/ksu/bin:$PATH
 
-HNC=${HNC:-/data/local/hnc}
+HNC=${HNC:-${HNC_DIR:-/data/local/hnc}}
 RUN="$HNC/run"
 LOGDIR="$HNC/logs"
 OUT="$RUN/capabilities.json"

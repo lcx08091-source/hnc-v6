@@ -35,7 +35,7 @@ hnc_act_load() {
     _act_f="${HNC_DIR:-/data/local/hnc}/run/activity.json"
     [ -r "$_act_f" ] || return 1
     _act_l=""
-    IFS= read -r _act_l < "$_act_f" 2>/dev/null
+    IFS= read -r _act_l 2>/dev/null < "$_act_f"
     case "$_act_l" in
         '{"ts":'*) ;;
         *) return 1 ;;

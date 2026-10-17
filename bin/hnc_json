@@ -16,7 +16,8 @@ set -eu
 SELF="$0"
 BINDIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)"
 JSON_GUARD="$BINDIR/json_guard.sh"
-HNC_BASE="${HNC:-/data/local/hnc}"
+# v5.33: HNC 没设就认 HNC_DIR(watchdog.sh 等只传 HNC_DIR; 以前落到默认目录, 读写不是同一份)
+HNC_BASE="${HNC:-${HNC_DIR:-/data/local/hnc}}"
 # 全局写锁(所有 JSON 写者共用一把; mkdir 锁, 写 pid + ts)。
 LOCKDIR="$HNC_BASE/run/json.lock"
 BACKUP_DIR="${JSON_BACKUP_DIR:-$HNC_BASE/data/.json_backups}"

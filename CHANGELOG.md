@@ -14,6 +14,28 @@
 
 ---
 
+## [5.33.0-rc3] - 2026-10-17
+
+**预览版 · 删完之后的防回归**(维护者 2026-10-17「删了一大堆过后,防止出现问题,新建一些测试的东西」)。这一版不再删东西:把「删代码最容易留下的坑」—— 调用方漏改、清单漏改、两端约定只改了一端、本地有 CI 没有的环境差异 —— 钉成自动测试,顺手修掉测试查出来的三处。
+
+### Fixed
+
+- **只传 `HNC_DIR` 时读写的不是同一个目录**:watchdog.sh(以及 service.sh 拉起的子脚本)用 `$HNC_DIR` 读 rules.json,但 json_set.sh / json_set_batch.sh / hnc_json / json_doctor.sh 等 10 个脚本只认 `$HNC`,没设就落到默认 `/data/local/hnc` —— 写到别处、下次读不到。真机上两者是同一个目录所以没出事;测试套件(和任何只传 `HNC_DIR` 的调用)一直在往默认目录写 rules.json 与备份。现在 `$HNC` 没设时认 `$HNC_DIR`。
+- **设置页「清理缓存」是空按钮**:它删的是 `cache/hostname_cache` / `cache/dev_class_cache` —— 从来没有谁写过这两个路径(v5.33 前 shell 扫描写在 `run/` 下,`device_class.sh` 已删),永远「removed 0 file(s)」。现在删真正的设备名缓存 `data/hostname_cache.json`,并放 `run/hostname_cache.clear` 让看门狗(设备发现写者)清掉内存里那份(只删文件的话,下次落盘会原样写回去)。按钮改名「清理设备名缓存」,说明手动改的名字不受影响。
+- 第一次跑 `capability_probe` 动作时日志多一行 `cannot open run/capability_probe_last`:`read … < 文件 2>/dev/null` 先做读重定向、失败时 `2>/dev/null` 还没生效。`hnc_clock.sh` / `hnc_activity.sh` 的同样写法一并改成 `2>/dev/null < 文件`。
+
+### Internals
+
+- **`test_v533_guard_refs.sh`(9 条)**:v5.33 删掉的 82 个 shell 函数,发布包里不再调用;脚本互调一律 `sh 脚本`(不靠 shebang),被调的脚本都在;Go 引用的 `bin/` 脚本都在,原生二进制都在 `hnc_runtime_sync.sh` 的 chmod / chcon 清单里、且 CI 会构建;WebUI 的每个 `/api/` 路径都注册了、每个 action 都在 httpd 分发里;看门狗 Go 动作名 ↔ `watchdog.sh` 分发标签双向一致,分发目标函数都有定义;每个看门狗动作在沙箱里真跑一遍,没有「命令不存在 / 打不开 / 语法错」且写的是沙箱;只给 `HNC_DIR` 时 JSON 脚本读写同一个目录;post-fs-data 开机清掉的旧文件没人再读写;测试 UI(`tools/ui_mock`)的假后端只提供 httpd 真有的接口和动作。
+- **`test_v533_ci_emulation.sh`(3 条)**:把仓库拷一份、所有 `#!/system/bin/sh` 改成不存在的解释器,按 `build.yml` 顺序跑 `version_consistency_check` → `ci_preflight`(含 JSON 回归、pitfall lint)→ `inject_version_to_docs` + `--check`。本容器有 `/system/bin/sh`、GitHub runner 没有 —— rc2 首推 main 时 `json_set.sh` 直接执行 `hnc_json` 的 rc 127 在本地永远复现不了,现在能。
+- **`test_v533_boot_rehearsal.sh`(5 条)**:沙箱里真跑 `post-fs-data.sh` + `service.sh`(真实脚本,只把 `/data/local/hnc` 换成沙箱路径;原生二进制、iptables / tc / ip / getprop / ps / pidof / pkill 等都是记账的桩):两个脚本正常跑完、输出与各日志无报错;运行目录同步、v5.33 旧文件清理、clsact 旧键迁移、目录权限;httpd 只带 `-hnc-dir`、看门狗不带参数、hotspotd `-d`、选中 C launcher;规则只同步 `dpi_rules.d/`、管理员密钥 64 位 hex / 0600、`auth_required` 迁移;收尾后沙箱进程一个不剩。真机(有 `/system/build.prop`)上自动跳过。
+- Go:`TestActionCacheClear`(httpd)、`TestCacheClear`(devname)、`TestCacheClearMarker`(看门狗)—— 在 rc2 上失败 / 编译不过。
+- **测试套件不再写 `/data/local/hnc`**(真机上那是用户的运行目录):除了上面 `HNC_DIR` 的修复,`test_hnc_json_set_top.sh` 没设 `HNC`(锁和备份落到默认目录)、靠 shebang 直接执行 hnc_json、不清临时目录,一并改掉。逐个测试文件跑、每跑完一个查 `/data/local/hnc` 有没有新文件:现在 0 个。
+- **模拟设备验收(`TestDevscanSim`)第 7 步在全量套件里偶发失败**(rc2 起;单独跑总是过):后台保活每 20 秒先取名单再逐个 poke,负载高时一轮要好几秒 —— `setKeep("watch", false)` 之后这一轮还可能 poke 到 watch,网关回的 ICMP 把表项推进 DELAY,紧接着设备被拔 → PROBE 无应答 → FAILED,「悄悄离开」变成「有人找它」,十来秒就下线。改成保活一整轮持锁、第 7 步先等在途那轮跑完、再等表项离开 DELAY / PROBE 才拔。在删除前人为补一次 poke 能稳定复现原失败;修后带同样的注入也通过。
+- **守卫本身验过会响**:在仓库副本里故意改回问题共 21 处(调回删掉的函数、改回 shebang 直接执行(直接写路径 / 经变量)、调不存在的脚本、chmod 清单漏一项、Go 调不存在的脚本、UI 调不存在的 action / 路由、动作标签改名、分发目标改名、重定向顺序改回、去掉 `HNC_DIR` 回退、旧文件复活、httpd 带 `-bind`、删 clsact 迁移块、同步漏拷 `bin/`、调已删脚本、旧文件不清、假后端多出接口 / 动作、`hj()` 改回直接执行),每处对应的用例都变红;运行期守卫(动作冒烟、`HNC_DIR` 一致)在 rc2 代码上失败。
+- 测试 UI 用 Playwright 浅色 / 深色整套走一遍(74 张截图)无 console error / 错误字样;假后端「清理缓存」的回执改成真后端的格式。
+- 改了 Go(httpd `cache_clear`、看门狗 `m4_owner`、`devname`),合并到 main 后 CI 要重编。
+
 ## [5.33.0-rc2] - 2026-10-16
 
 **预览版 · 继续「只留一份」**(维护者 2026-10-15「继续全面清理」)。rc1 留着等定的两处(M2 看门狗检查、M3 offload / clsact 调度)也只留 Go 一份,再加 JSON 读写、DPI 规则、开机同步、进程判活等零散的「两份」。**仍是先于真机回归删旧代码**,真机有问题的退路是刷回 v5.32(或 rc1)。

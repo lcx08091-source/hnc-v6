@@ -430,7 +430,7 @@ if [ -f "$RULES_JSON" ]; then
         # v5.9.0: 原来这里是裸 `sed -i` 直改 rules.json —— 绕开 json.lock,
         # 与同期任何 json_set.sh/hnc_json 写者(WebUI 操作、watchdog top 写)
         # 并发时是经典 lost-update。改走 json_set.sh(与全部写者共用锁;
-        # json_set.sh 认 $HNC 而非 $HNC_DIR,true 会被自动推断为 JSON bool)。
+        # json_set.sh 先认 $HNC、没设再认 $HNC_DIR(v5.33),true 会被自动推断为 JSON bool)。
         JSON_SET="$MODDIR/bin/json_set.sh"
         [ -f "$JSON_SET" ] || JSON_SET="$HNC_DIR/bin/json_set.sh"
         if HNC=$HNC_DIR sh "$JSON_SET" top auth_required true >/dev/null 2>&1; then

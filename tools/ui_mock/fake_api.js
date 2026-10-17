@@ -896,7 +896,7 @@
     candidate_promote: function (p) { CANDS.forEach(function (c) { if (c.apex === p.apex) c.promoted = true; }); return 'approved ' + p.apex; },
     candidate_reject: function (p) { CANDS.forEach(function (c) { if (c.apex === p.apex) { c.promoted = false; c.tier = 'shared'; } }); return 'blocklisted ' + p.apex; },
     self_attrib_purge: function () { return '已删除 3 个明细文件'; },
-    cache_clear: function () { return '已清理 2 个缓存文件'; },
+    cache_clear: function () { return 'removed 1 file(s)'; },
     apk_scan: function () { DISC.apk_scan.requested = true; return '已请求扫描，约 1 分钟内完成'; },
     discover_probe: function () { return 'ok'; },
     discover_ignore: function (p) { var g = DISC.groups.filter(function (x) { return x.id === p.id; })[0]; DISC.groups = DISC.groups.filter(function (x) { return x !== g; }); if (g) DISC.ignored.push({ id: g.id, suffixes: g.suffixes }); return ''; },

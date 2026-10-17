@@ -154,12 +154,17 @@ func actionTemplateDel(hncDir string, p map[string]string) actionResp {
 
 // ── 维护 ──────────────────────────────────────────────────────
 
+// actionCacheClear 清设备名缓存 data/hostname_cache.json。v5.33 前删的是
+// cache/hostname_cache 与 cache/dev_class_cache —— 从来没有谁写过这两个路径, 按钮永远
+// 「removed 0」。只删文件不够: 看门狗(设备发现写者)内存里还有一份, 下次落盘会写回去,
+// 所以同时放 run/hostname_cache.clear 让它清内存(它清完删标记; 没在跑就等下次起来)。
 func actionCacheClear(hncDir string) actionResp {
 	n := 0
-	for _, f := range []string{"hostname_cache", "dev_class_cache"} {
-		if err := os.Remove(filepath.Join(hncDir, "cache", f)); err == nil {
-			n++
-		}
+	if err := os.Remove(filepath.Join(hncDir, "data", "hostname_cache.json")); err == nil {
+		n++
+	}
+	if err := os.WriteFile(filepath.Join(hncDir, "run", "hostname_cache.clear"), nil, 0o600); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
 	return actionResp{OK: true, Detail: fmt.Sprintf("removed %d file(s)", n)}
 }
