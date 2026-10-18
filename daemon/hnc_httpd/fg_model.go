@@ -55,6 +55,7 @@
 //        by_app:[{app_id,name,category,fg_sec,fg_min,sessions,active_sec}], total_fg_sec, current}
 //     active_sec = app_time.go 的「字节阈值」口径, 两种时长并列给出。
 //   /api/devices[].fg = fgView(见下)。live_apps 保留不变。
+//   v5.34: fgView.activity = 前台应用此刻在做什么(app_activity.go, 推测)。
 
 package main
 
@@ -120,6 +121,8 @@ type fgObs struct {
 	MAC, ID, Name, Category, Key string
 	Up, Dn                       uint64
 	Inferred                     bool
+	// v5.34: 这条连接的用途标签与来源(app_activity.go 的 appActivityTag; 空 = 不参与)
+	Act, ActSrc string
 }
 
 type fgConn struct {
@@ -149,6 +152,7 @@ type fgApp struct {
 	newAt         []time.Time
 	lead          int
 	f             fgFeat
+	act           appActTrack // v5.34: 应用内活动细分(app_activity.go)
 }
 
 type fgBg struct {
@@ -176,6 +180,8 @@ type fgView struct {
 	Stale      bool     `json:"stale,omitempty"`
 	Updated    int64    `json:"updated"`
 	Engagement string   `json:"engagement,omitempty"` // v5.28 B4: 交互节拍(影子, fg_engagement.go)
+	// v5.34: 前台应用此刻在做什么(app_activity.go, 推测; 判不出时不给)
+	Activity *fgActivity `json:"activity,omitempty"`
 }
 
 type fgDev struct {
@@ -369,6 +375,7 @@ type fgAgg struct {
 	conns         map[string]uint64
 	newTick, rr   int
 	hasConnDetail bool
+	act, actDom   map[string]uint64 // v5.34: 本轮各用途标签的字节 / 其中来自域名规则的
 }
 
 // reset 清空设备状态(时间回退/长间隔/时钟跳变), 打开的会话在 at 收尾
@@ -421,10 +428,16 @@ func (m *fgModel) step(now time.Time, obs []fgObs, level string) {
 		}
 		a := per[o.MAC][o.ID]
 		if a == nil {
-			a = &fgAgg{name: o.Name, cat: o.Category, conns: map[string]uint64{}}
+			a = &fgAgg{name: o.Name, cat: o.Category, conns: map[string]uint64{}, act: map[string]uint64{}, actDom: map[string]uint64{}}
 			per[o.MAC][o.ID] = a
 		}
 		b := o.Up + o.Dn
+		if o.Act != "" {
+			a.act[o.Act] += b
+			if o.ActSrc == "domain" {
+				a.actDom[o.Act] += b
+			}
+		}
 		a.dn += o.Dn
 		a.up += o.Up
 		if o.Inferred {
@@ -570,6 +583,11 @@ func (m *fgModel) stepDevLocked(mac string, d *fgDev, aggs map[string]*fgAgg, no
 			a.contSec = 0
 		}
 		a.f = f
+		if g != nil {
+			a.act.actStep(g.act, g.actDom, dt, id, a.cat)
+		} else {
+			a.act.actStep(nil, nil, dt, id, a.cat)
+		}
 		a.inst = fgScore(f, a.contSec, id, a.cat)
 		a.smooth += alpha * (a.inst - a.smooth)
 		if a.smooth < 0.05 {
@@ -820,6 +838,10 @@ func (m *fgModel) buildViewLocked(d *fgDev, rank []*fgApp, now time.Time, dt flo
 		v.AppID, v.Name, v.Category = a.id, fgDisplayName(a), a.cat
 		v.Confidence = fgConfidence(a, second, dt)
 		v.Engagement = fgEngagementOf(a.f) // v5.28 B4: 影子节拍
+		if r := a.act.result; r != nil && !fgIsTunnel(a.id) {
+			c := *r
+			v.Activity = &c
+		}
 		v.Score = int(math.Round(a.smooth))
 		v.Reasons = fgReasons(a)
 		if !d.since.IsZero() {
@@ -1144,6 +1166,7 @@ func fgApplyStale(v fgView, now time.Time, level string, interval time.Duration)
 	if age := now.Sub(time.Unix(v.Updated, 0)); v.Updated > 0 && age > lim {
 		v.State, v.Stale = "stale", true
 		v.Confidence /= 2
+		v.Activity = nil // 「此刻在做什么」过期了就不说
 		v.Reasons = append(append([]string(nil), v.Reasons...), "数据已 "+strconv.Itoa(int(age/time.Second))+" 秒未更新")
 	}
 	return v

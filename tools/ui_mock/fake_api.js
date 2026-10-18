@@ -80,7 +80,7 @@
       ident: { type: 'phone', os: 'Android', os_ver: '15', brand: '小米', model: 'Xiaomi 14', confidence: 93, hostname: 'Xiaomi-14', hostname_src: 'dhcp',
         evidence: [{ src: 'dhcp', detail: 'option 60 = android-dhcp-15' }, { src: 'hostname', detail: 'Xiaomi-14' }, { src: 'sni', detail: '*.miui.com · *.xiaomi.net' }, { src: 'ja4', detail: 'Android 15 系统 TLS 栈' }] },
       live: [['xiaomi_store', 0.72], ['honor_of_kings', 0.15], ['wechat', 0.09]], hist: ['honor_of_kings', 'wechat', 'douyin', 'genshin', 'xiaomi_store'],
-      fg: { state: 'active', app_id: 'honor_of_kings', name: '王者荣耀', confidence: 0.88, label: '正在用：王者荣耀', bg_label: '后台：应用商店在下载更新',
+      fg: { state: 'active', app_id: 'honor_of_kings', name: '王者荣耀', confidence: 0.88, label: '正在用：王者荣耀', activity: { id: 'gaming', label: '对局中', conf: 0.82, src: 'shape' }, bg_label: '后台：应用商店在下载更新',
         reasons: ['UDP 小包双向持续，每秒 30+ 个包', '包长稳定、间隔均匀（对战特征）', '握手 SNI 命中 *.pvp.qq.com'] },
       traffic_type: { type: 'game', label: '实时对战' }, app_qos: true },
     { mac: '1e:52:a8:0c:77:3d', ip: '192.168.43.45', hostname: 'iPad Air', hostname_src: 'manual', vendor: 'Apple', online: true, mark_id: 5,
@@ -89,7 +89,7 @@
       ident: { type: 'tablet', os: 'iPadOS', os_ver: '18.6', brand: 'Apple', model: 'iPad Air', confidence: 88, hostname: 'iPad', hostname_src: 'mdns',
         services: ['_airplay._tcp', '_companion-link._tcp', '_rdlink._tcp'], evidence: [{ src: 'mdns', detail: '_companion-link._tcp · model=iPad13,16' }, { src: 'dhcp', detail: 'option 55 = 1,121,3,6,15,108,114,119,252' }, { src: 'oui', detail: 'Apple（随机 MAC 前缀已关闭）' }] },
       live: [['douyin', 0.78], ['bilibili', 0.12], ['wechat', 0.05]], hist: ['douyin', 'bilibili', 'wechat', 'xiaohongshu'],
-      fg: { state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.91, label: '正在用：抖音', reasons: ['短视频分段下载：每 8~15 秒一段 1~3 MB', '域名命中 *.douyinvod.com', '上行很少（只看不拍）'] },
+      fg: { state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.91, label: '正在用：抖音', activity: { id: 'video_stream', label: '刷短视频', conf: 0.9, src: 'domain' }, reasons: ['短视频分段下载：每 8~15 秒一段 1~3 MB', '域名命中 *.douyinvod.com', '上行很少（只看不拍）'] },
       traffic_type: { type: 'short_video', label: '刷短视频' },
       app_time_limits: [{ app_id: 'douyin', name: '抖音', category: 'short_video', minutes: 60, used_sec: 3120, used_min: 52, exhausted: false, enforced: true }],
       category_blocks: [{ category: 'game', app_count: 6, ts: T - 3 * 86400, enforced: true }],
@@ -100,7 +100,7 @@
       ident: { type: 'pc', os: 'macOS', os_ver: '15.6', brand: 'Apple', model: 'MacBook Pro', confidence: 90, hostname: 'MacBook-Pro', hostname_src: 'mdns',
         services: ['_ssh._tcp', '_smb._tcp', '_companion-link._tcp'], evidence: [{ src: 'mdns', detail: 'model=Mac15,6' }, { src: 'dhcp', detail: 'macOS DHCP 指纹' }, { src: 'ja4', detail: 'Safari / macOS TLS 栈' }] },
       live: [['tencent_meeting', 0.82], ['feishu', 0.1], ['icloud', 0.05]], hist: ['tencent_meeting', 'feishu', 'wechat', 'icloud'],
-      fg: { state: 'active', app_id: 'tencent_meeting', name: '腾讯会议', confidence: 0.95, label: '正在用：腾讯会议', reasons: ['UDP 音视频流双向对称', '每秒 50 个左右的包、码率稳定', '域名命中 *.meeting.qq.com'] },
+      fg: { state: 'active', app_id: 'tencent_meeting', name: '腾讯会议', confidence: 0.95, label: '正在用：腾讯会议', activity: { id: 'video_call', label: '开会(视频)', conf: 0.86, src: 'shape' }, reasons: ['UDP 音视频流双向对称', '每秒 50 个左右的包、码率稳定', '域名命中 *.meeting.qq.com'] },
       traffic_type: { type: 'call', label: '视频会议' }, live_call: { label: '腾讯会议', kind: 'video', since: T - 23 * 60 } },
     { mac: '5e:20:b7:3a:c4:18', ip: '192.168.43.52', hostname: '任天堂 Switch', hostname_src: 'manual', vendor: 'Nintendo', online: true, mark_id: 6,
       base: [1.8 * MB, 40 * KB], usage8: 7.1 * GB, onlineMin: [88, 120, 64, 302, 245, 0, 90],
@@ -733,7 +733,8 @@
       return o;
     },
     '/api/dpi_fp': function () {
-      return { user_rules: FP_RULES, stats: { usable: 5, flows_seen: 182340, flows_attributed_by_fp: 2311 }, learned: [
+      return { user_rules: FP_RULES, stats: { usable: 5, flows_seen: 182340, flows_attributed_by_fp: 2311, flows_attributed_by_sni: 96512, sni_overrode_ip: 4187 },
+        shared_ip: { window_sec: 600, ips: 214, conflict_ips: 23, share: 0.11, examples: [{ ip: '122.14.229.18', apps: ['抖音', '今日头条', '西瓜视频'] }, { ip: '59.82.9.130', apps: ['淘宝', '优酷'] }] }, learned: [
         { name: '抖音', app_id: 'douyin', ja4: 't13d1516h2_8daaf6152771_e5627efa2ab1', port_class: 'tls443', usable: true, purity: 0.97, devices: 3 },
         { name: '微信', app_id: 'wechat', ja4: 't13d1715h2_5b57614c22b0_7121afd63204', port_class: 'tls443', usable: true, purity: 0.95, devices: 4 },
         { name: 'B站', app_id: 'bilibili', ja4: 'q13d0310h3_55b375c5d22e_cd85d2d88918', port_class: 'quic443', qtp: 'qtp1_7d3c19a0e4b2', usable: true, purity: 0.93, devices: 2 },

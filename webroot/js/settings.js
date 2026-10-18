@@ -458,9 +458,18 @@ function paintFP() {
     (use.length ? '<div class="dbox">' + use.slice(0, 12).map(function (x) {
       return '<div class="row2"><span class="k" style="color:var(--text-1)">' + esc(x.name || x.app_id) + ' <span class="note mono">' + esc(String(x.ja4).slice(0, 10)) + ' · ' + esc(x.port_class || '') + (x.qtp ? ' · ' + esc(String(x.qtp).replace(/^qtp1_/, '').slice(0, 8)) : '') + '</span></span><span class="v">' + pct100(x.purity) + '% · ' + num(x.devices) + ' 台</span></div>';
     }).join('') + '</div>' : '<div class="note">还在学习：同一个指纹在 ≥2 台设备上见过 20 次以上、且 90% 都属于同一个应用后才会用来识别。</div>') +
-    '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠指纹认出 ' + num(st.flows_attributed_by_fp) + ' 条。指纹只在域名看不到（ECH / 直连 IP）时兜底，不会覆盖规则库。</div>';
+    '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠指纹认出 ' + num(st.flows_attributed_by_fp) + ' 条。指纹只在域名看不到（ECH / 直连 IP）时兜底，不会覆盖规则库。</div>' + sharedIpNote(r.shared_ip, st);
   el.innerHTML = h;
   var sw = $('[data-foldkey="fpl"] .s'); if (sw) sw.textContent = ur.length + ' 条纠正 · ' + use.length + ' 个可用指纹';
+}
+/* v5.34: 共享 IP —— 同一个 CDN IP 上同时有几个 App 时, 按每条连接自己的域名归属 */
+function sharedIpNote(sh, st) {
+  if (!sh || !num(sh.ips)) return '';
+  var t = '最近 ' + Math.round(num(sh.window_sec) / 60) + ' 分钟：' + num(sh.ips) + ' 个服务器 IP 里有 ' + num(sh.conflict_ips) + ' 个同时承载多个应用（' + pct100(sh.share) + '%）';
+  if (num(st.flows_attributed_by_sni)) t += ' · 累计 ' + num(st.flows_attributed_by_sni) + ' 条连接按它自己的域名识别，其中 ' + num(st.sni_overrode_ip) + ' 条纠正了按 IP 会认错的结果';
+  var ex = Array.isArray(sh.examples) ? sh.examples.slice(0, 3) : [];
+  if (ex.length) t += '。例如 ' + ex.map(function (x) { return '<span class="mono">' + esc(x.ip) + '</span>：' + (Array.isArray(x.apps) ? x.apps.map(function (a) { return esc(a); }).join(' / ') : ''); }).join('；');
+  return '<div class="note">' + t + '。</div>';
 }
 /* ── v5.24 T5: 识别自评(只用这台手机自己的流量当标准答案) ── */
 S.eval = null; S.evalDays = 1;
