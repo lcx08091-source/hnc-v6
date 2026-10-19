@@ -30,3 +30,30 @@
 - **原因**：注释写「计时用开机时长(clockBootUp), httpd 重启不会让 6 小时重新计」，但起点 `behindSince` 只存在内存里（`clockDirLocked` 新建时 `behindSince: -1`，`run/clock_state.json` 既不写它也不读它），换用开机时长只解决了「深睡眠不计时」，不能跨进程保留起点。
 - **建议修复**：把「开始落后时的开机时长 + boot_id」写进 `run/clock_state.json` 并在 `clockDirLocked` 里读回；或者改注释说明现状。
 
+### A5-003 [P1][疑似] `content query siminfo` 在只剩 PATH 的环境里跑，app_process 起不来，双卡卡槽识别和 netstats 分卡对账可能全部失效
+- **位置**：`daemon/hnc_httpd/phone_usage_sim.go:72`、`daemon/hnc_httpd/phone_usage_sim.go:227-230`；`daemon/hnc_httpd/stats_calibration.go:713`、`daemon/hnc_httpd/stats_calibration.go:906-908`
+- **触发 / 现象**：`/system/bin/content` 是 app_process 包装脚本（`exec app_process ... com.android.commands.content.Content`），Android 10+ 的 `AndroidRuntime::start` 在缺少 `ANDROID_ART_ROOT` / `ANDROID_I18N_ROOT` / `ANDROID_TZDATA_ROOT`（以及 `BOOTCLASSPATH`）时直接 LOG_FATAL。这里把子进程环境整个替换成 `PATH=...`，这些变量都没了，`content query` 很可能每次都失败，`subs` 为空。后果：① `puResolveSIM` 只能靠 `gsm.sim.operator.alpha`「只有一张卡有名字」兜底，双卡都插着的用户蜂窝流量全记到 `0|蜂窝(未知卡)`，`puAlertDecision` 只看卡 1/2，按卡套餐提醒永远不发；② `calMapSlot` 拿不到 subs，`NetstatsCellBySim` 全是 slot 0，`prefer` 模式与分卡漂移都用不上。`settings`（`cmd settings`）、`dumpsys`、`getprop`、`ip` 是原生程序，不受影响，所以问题只出在 `content`。
+- **原因**：
+  ```go
+  cmd := hardenCmd(exec.CommandContext(ctx, path, args...))
+  cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin"}
+  ...
+  puRunCmd("content", "query", "--uri", "content://telephony/siminfo", ...)
+  ```
+  CHANGELOG v5.20 把「`content query content://telephony/siminfo` 在 ColorOS 16 的输出」列为「需真机验证」，自检也没有检查这一项。
+- **还缺的证据**：真机上 `env -i PATH=/system/bin /system/bin/content query --uri content://telephony/siminfo` 是否报 `No ART directory specified with ANDROID_ART_ROOT`；或者看 `/api/phone_usage` 的 `sources.sim_source` 和双卡用户的 `by_sim` 是不是总落在 slot 0。
+- **建议修复**：跑 `content` 时用 `append(os.Environ(), "PATH=...")` 继承 init 给的 ANDROID_* / BOOTCLASSPATH；或者改用原生的 `cmd`/`dumpsys isub` 拿卡槽信息。
+
+### A5-004 [P3][确认] 套餐提醒先记「已发」再发送，`alert.Append` 失败后这一档本周期再也不会补发
+- **位置**：`daemon/hnc_httpd/phone_usage.go:890-897`、`daemon/hnc_httpd/phone_usage.go:958-970`
+- **触发 / 现象**：`run/alerts.jsonl` 暂时写不进（flock 超时、磁盘满、目录权限被改）时，`emitAlert` 返回错误，日志只打一行；但 `puAlertDecision` 已经把 `fired[key]`（越过 100% 时连 warn 档也一起）写好，随后 `saveStateLocked` 落盘，这张卡本周期的 80% / 100% 提醒就丢了。
+- **原因**：
+  ```go
+  fired[key] = nowTs                       // puAlertDecision 里先标记
+  ...
+  if err := e.env.emitAlert(a); err != nil { log.Printf(...); continue }   // 失败不回滚
+  ...
+  if len(outs) > 0 { e.saveStateLocked(now) }
+  ```
+- **建议修复**：发送失败时从 `e.fired` 里删掉对应 key（over 档连同 warn 档），下一轮 5 分钟后重试。
+

@@ -7,6 +7,14 @@
 
 ## 已审文件
 
+- api_dpi_v53.go：无问题（读文件失败走 available=false；readJSON 无大小上限但文件由 dpid 写，属可信本地输入）
+- fg_engagement.go：无问题
+- flow_cls.go：A4-001、A4-002、A4-003；lint 提示 clsBigCats 未使用——核实为死代码，预测只对模型里出现过的类打分，不存在漏接逻辑
+- flow_shape.go：无问题（fsSt 只在 app_usage 单 goroutine 改，fsPub 有锁；流表 16384 上限 + 结束 60 秒清理）
+- app_usage.go：A4-005
+- fp_learn.go：无问题（置信度恒有限，FPW 不会出现 NaN；绑定表有上限与空闲清理）
+- fp_user_rules.go：A4-004
+
 ## Bug
 
 ### A4-001 [P2][确认] 流量形状分类器样本池无上限：生产路径绕过 fcPoolAdd，内存与重训耗时只增不减
@@ -44,4 +52,31 @@
           _ = fcSaveModel(hncDir, m)                // 覆盖已存模型
   ```
 - **建议修复**：把样本池（带上限）和模型一起持久化、启动时读回；或者在已存模型的计数上做增量合并；再加一个最少样本数 / 最少类数门槛，不够就不替换。
+
+### A4-004 [P3][确认] 用户纠正规则文件读失败 / 损坏时当成空表，下一次「纠正」会把整份文件覆盖成只剩新规则
+- **位置**：`daemon/hnc_httpd/fp_user_rules.go:97-108`（readDPIUserRules）、`fp_user_rules.go:385-427`（actionDPICorrect 写回）
+- **触发 / 现象**：`data/dpi_user_rules.json` 被手工改坏（文件头明确说「手工改文件也能跟上」），或读文件遇到非「不存在」的错误（EACCES / EIO）。此时所有用户纠正规则已静默失效；用户随后在界面上再做一次「纠正」，`cur` 为 nil，`kept` 只含本次新增的规则，`writeDPIUserRules` 原子覆盖，原文件里的全部规则永久丢失，没有任何提示。
+- **原因**：
+  ```go
+  b, err := os.ReadFile(dpiUserRulesPath(hncDir))
+  if err != nil || len(b) > 1<<20 { return nil }      // 不区分「不存在」和「读失败 / 超大」
+  if json.Unmarshal(b, &f) != nil { return nil }        // 损坏也当空表
+  ...
+  cur := readDPIUserRules(s.hncDir)                     // 写路径照样用它
+  kept := make([]dpiUserRule, 0, len(cur)+len(add))
+  ```
+  同包里的 `readJSONInto`（action_candidate.go）已经按「损坏 = 报错、不覆盖」处理，这里没跟上。
+- **建议修复**：写路径单独读：文件不存在才当空表；读失败 / 解析失败就拒绝写入并返回错误（或先把坏文件备份成 `.bad`）。
+
+### A4-005 [P3][确认] /api/app_usage 按设备筛选时，「共现推断」字节没走 MAC 合并映射，合并过的旧 MAC 的推断字节被漏掉
+- **位置**：`daemon/hnc_httpd/app_usage.go:471-478`
+- **触发 / 现象**：设备换过 MAC 并已合并（macAliasResolver 把旧 MAC 历史归到新 MAC），查询 `/api/app_usage?mac=<新MAC>`。同一循环里 Hours（字节）和 Active（时长）都用 `resolve()` 把旧 MAC 归到新 MAC，Inferred 却直接比原始 MAC，旧 MAC 名下的推断字节被跳过：`inferred_bytes`（总量与 by_app 每行）偏小，界面上「推测」占比偏低，与同一行的 up/down 口径不一致。
+- **原因**：
+  ```go
+  for mk, v := range d.Inferred {
+      sep := strings.IndexByte(mk, '|')
+      if sep < 0 || (mac != "" && mk[:sep] != mac) {   // 少了 resolve(mk[:sep])
+  ```
+  对照下面的 Active：`if sep < 0 || (mac != "" && resolve(mk[:sep]) != mac)`。
+- **建议修复**：改成 `resolve(mk[:sep]) != mac`，与 Hours / Active / srcAgg 保持一致。
 
