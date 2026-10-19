@@ -2342,3 +2342,24 @@ GET `/api/encdns`:
 - `/api/devices[].fg.activity = {id, label, conf, src}`(判不出 / 视图过期时没有这个字段):前台应用此刻在做什么。`id` ∈ `video_stream live_stream voice_call video_call gaming download upload browsing background`;`label` 是这个应用 / 类别的说法(抖音「刷短视频 / 看直播 / 发视频」、微信「语音通话 / 视频通话 / 聊天 / 朋友圈」、王者荣耀「对局中 / 下载更新 / 在大厅」……);`conf` 0–0.9;`src` = `domain`(域名用途规则)| `shape`(流形态)。只看前台应用自己的连接;实时类(通话 / 游戏)字节少、打分 ×5;新结论连续 2 轮领先才切换。
 - 说法与域名用途在 `data/app_activity.json`(`categories` / `apps.<id>.labels` / `apps.<id>.domains`);`/data/local/hnc/etc/app_activity.json` 整份覆盖。找不到 / 坏了只用通用说法(与 `traffic_type.label` 相同)。
 - 设备卡「正在用 XX」后面显示这个说法(悬停看来源与把握);没有时仍显示整台设备的「此刻在」。
+
+## 32. v5.34.0-rc2 变更(应用内活动细分: 误判修正 + 总开关)
+
+**总开关(默认关)**
+
+- `data/dpi_experiment.json` 新键 `activity_detail`(bool,缺失 = 关;与 `fg_engine` 同一文件,按 mtime 缓存)。关着时不给连接打用途标签、`/api/devices[].fg.activity` 一律没有(读接口时也立即去掉,不等下一轮)。
+- 新动作 `dpi_activity_detail {enabled: 1|0|true|false|on|off}`:原子写该键(保留文件其它键),立即生效;非法值 `ok:false, error:"bad params"`。
+- `GET /api/fg_compare` 新增 `activity_detail`(当前值)。设置页「前台识别引擎」折叠里的「在 App 里干什么(实验)」开 / 关。
+
+**标签白名单 / 冲突降级**
+
+- `data/app_activity.json` 的 `categories.<类别>` 改成和应用一样的结构 `{labels, domain_only?}`(rc1 是 `{tag: 说法}`);新增 `browser` 类别。
+- `labels` 同时是白名单:流形态判出的标签只有在该应用或该类别写了说法时才参与(B站 P2P 的双向 UDP 不再说成「视频通话」;没写说法的类别宁可不说)。`domain_only` 里的标签只认域名用途规则(社交类的直播、抖音 / 快手 / 虎牙的直播)。
+- 允许通话、不允许直播形态的应用(会议 / 社交):UDP 上的直播形态(下行稳定、几乎没上行)算语音通话 —— 会议旁听、通话里对方开摄像头自己关。
+- 域名用途规则命中但流形态判成了别的(看评论时视频 CDN 在预取)→ 仍按域名的标签,但来源降为流形态(`src` = `shape`,把握按 ×0.8 算),不再满分。
+
+**守卫与输出闸门**
+
+- 设备被 HNC 限速(rules.json 设备限速、配额 / 分时段此刻生效、全局整形开着)或该应用被应用限速时:流形态判出的 `video_stream` / `live_stream` 不用(令牌桶把点播削成恒速,像直播);域名规则来的和通话 / 游戏照常。
+- 不输出:采样间隔 > 45 秒(省电档)、设备疑似 / 确定走 VPN(`traffic_ident` 的 likely / certain)、网络共享硬件加速正在旁路(offload guard `ACTIVE`,计数不全)。
+- 说法改成「刷抖音 / 刷快手 / 刷 TikTok」(rc1「刷短视频」);游戏去掉「在大厅」(和匹配中分不开);会议「开会中 / 开会中(有视频)」。设备卡显示「可能在 XX」+ 把握 高(≥ 0.7)/ 中(≥ 0.5)/ 低,不再给百分比。

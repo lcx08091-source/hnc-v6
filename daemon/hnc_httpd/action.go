@@ -354,6 +354,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionCacheClear(hncDir)
 	case "dpi_fg_engine": // v5.27 T4: 前台识别引擎 classic | hmm(fg_hmm.go)
 		return actionDPIFgEngine(hncDir, p)
+	case "dpi_activity_detail": // v5.34.0-rc2: 「在 App 里干什么」总开关(app_activity.go), 默认关
+		return actionDPIActivityDetail(hncDir, p)
 	case "dpi_rulepack_export": // v5.27 T6: 导出「我的规则包」(rulepack.go)
 		return actionDPIRulepackExport(s, p)
 	case "dpi_rulepack_clear": // v5.27 T6: 删除全部已导入的规则包内容

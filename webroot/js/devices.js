@@ -563,10 +563,12 @@ function fgActive(d) { var f = d.fg; return d.online && f && f.state === 'active
 function ttTag(d) { var t = d.ttype; return d.online && t && t.label && t.type !== 'background' ? '<span class="tt">此刻在：' + esc(t.label) + '</span>' : ''; }
 /* v5.34 应用内活动细分: 前台应用自己在做什么(推测); 没有时退回整台设备的「此刻在」 */
 var ACT_SRC = { domain: '按域名', shape: '按流量形态' };
+/* v5.34.0-rc2: 只说「可能在…」+ 高 / 中 / 低, 不给百分比(推测, 不是测量) */
+function actLevel(c) { c = +c || 0; return c >= 0.7 ? '高' : c >= 0.5 ? '中' : '低'; }
 function fgActTag(d, f) {
   var a = f && f.activity;
   if (!a || !a.label) return ttTag(d);
-  return '<span class="tt" title="' + esc('推测 · ' + (ACT_SRC[a.src] || '') + ' · 把握 ' + pct100(a.conf) + '%') + '">' + esc(a.label) + '</span>';
+  return '<span class="tt" title="' + esc('推测 · ' + (ACT_SRC[a.src] || '') + ' · 把握' + actLevel(a.conf)) + '">可能在' + esc(a.label) + ' <small>' + actLevel(a.conf) + '</small></span>';
 }
 function appsLine(d) {
   var cb = callBadge(d), f = fgActive(d);

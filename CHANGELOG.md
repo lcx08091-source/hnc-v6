@@ -14,6 +14,30 @@
 
 ---
 
+## [5.34.0-rc2] - 2026-10-19
+
+**预览版 · 应用内活动细分的误判修正 + 总开关 + 真值采集工具**(维护者 2026-10-19「开始吧 按脚本测试允许 同时让子 Agent 做一个最小化的流量采集 App」)。rc1 的「在 App 里干什么」经四方讨论(对着代码逐条核过)找出几处会说错的地方,这一版修掉,并改成默认关、在设置里打开。
+
+### Changed
+
+- **「在 App 里干什么」默认关**:设置 →「前台识别引擎」折叠里新增「在 App 里干什么(实验)」开 / 关(`dpi_activity_detail` 动作,写 `data/dpi_experiment.json` 的 `activity_detail`)。关着时不计算、接口不返回,关掉立即消失。
+- **措辞**:设备卡显示「可能在看直播」「可能在刷抖音」+ 把握 高 / 中 / 低,不再给百分比(这是推测,不是测量)。抖音 / 快手 / TikTok 的视频改叫「刷抖音 / 刷快手 / 刷 TikTok」;游戏去掉「在大厅」(和匹配中分不开);腾讯会议「开会中 / 开会中(有视频)」。
+
+### Fixed
+
+- **B站「视频通话」**:B站 P2P 的双向 UDP 被流形态判成视频通话,原样显示成「B站 · 视频通话」。现在流形态判出的标签只有在这个应用 / 类别写了说法时才用(`app_activity.json` 的 `labels` 兼作白名单),视频类没有通话 → 不说。
+- **会议旁听 / 通话关摄像头说成「看直播」**:下行稳定、几乎没上行的 UDP 在会议 / 社交类应用里改算语音通话;社交类的直播只认域名(视频号直播)。
+- **HNC 自己限速把点播削成恒速 → 「看直播」**:设备被限速(设备限速、配额 / 分时段生效、全局整形)或该应用被应用限速时,流形态来的视频 / 直播不用;域名来的、通话、游戏照常。
+- **看评论时抖音在预取,照样满分「刷短视频」**:域名规则命中但流形态判成别的 → 仍按域名的标签,但来源降为流形态(把握 ×0.8)。抖音 / 快手 / 虎牙的直播只认拉流域名。
+- **省电档 / VPN / 硬件加速旁路时照样输出**:采样间隔 > 45 秒、设备疑似走 VPN、网络共享硬件加速正在旁路(计数不全)时不显示。
+
+### Internals
+
+- `app_activity.go`:`appActShapeAllowed`(白名单 + `domain_only`)、`appActivityTag` 加类别 / UDP 参数与 `domain_weak`、总开关 `appActEnabled` / `appActEnabledFor` / `actionDPIActivityDetail`、每轮守卫 `appActGuardRefresh`(锁外,关着时不读任何文件)、输出闸门 `appActGate`;`limit_policy.go` 新增 `limitCtl.limitedNow()`;`fg_model.go` 出视图前过闸门、`fgApplyStale` 开关关掉即去掉活动;`/api/fg_compare` 新增 `activity_detail`。`data/app_activity.json` 的 `categories` 改成 `{labels, domain_only}` 结构,新增 `browser` 类别。
+- 新测试 `app_activity_guard_test.go`(在 rc1 上编译不过 / 失败):白名单与 UDP 改判、域名冲突降级、限速守卫(设备 / 应用 / 全局整形 / 配额视图)、输出闸门、总开关读写与接口;`app_activity_test.go` 跟着新签名与说法更新,并检查应用的 `domain_only` 都有对应域名规则。
+- 前端 `settings.js`(开关)、`main.js`(动作)、`devices.js`(「可能在」+ 高中低);测试 UI 假后端支持开关(关掉时设备不带 `activity`)。
+- 改了 Go(httpd),合并到 main 后 CI 要重编。
+
 ## [5.34.0-rc1] - 2026-10-18
 
 **预览版 · 识别更准 + 应用内活动细分**(维护者 2026-10-18「第一条和第二部分细分都做」)。都只用已有的元数据(域名、包大小、节奏),不看内容。

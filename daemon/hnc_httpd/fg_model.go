@@ -681,6 +681,7 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 		}
 	}
 	d.view = m.buildViewLocked(d, rank, now, dt, level)
+	d.view.Activity = appActGate(mac, d.view.Activity, dt) // v5.34.0-rc2: 总开关 / 省电档 / VPN / 旁路 → 不说
 	if useHMM && d.shown != "" {
 		if a := d.apps[d.shown]; a != nil {
 			d.view.Confidence = hmmConfidence(a, d.hmm.post)
@@ -1162,6 +1163,9 @@ func fgApplyStale(v fgView, now time.Time, level string, interval time.Duration)
 	lim := 3 * interval
 	if lim < fgStaleMinSeconds*time.Second {
 		lim = fgStaleMinSeconds * time.Second
+	}
+	if !appActEnabled.Load() {
+		v.Activity = nil // v5.34.0-rc2: 总开关关掉后立即不再返回
 	}
 	if age := now.Sub(time.Unix(v.Updated, 0)); v.Updated > 0 && age > lim {
 		v.State, v.Stale = "stale", true

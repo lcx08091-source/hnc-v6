@@ -467,6 +467,7 @@ func (s *server) apiFgCompare(w http.ResponseWriter, r *http.Request) {
 	out["ok"] = true
 	out["days"] = days
 	out["engine"] = fgEngineFor(s.hncDir)
+	out["activity_detail"] = appActEnabledFor(s.hncDir) // v5.34.0-rc2: 设置页「在 App 里干什么」开关的当前值
 	writeJSON(w, http.StatusOK, out)
 }
 

@@ -89,7 +89,7 @@
       ident: { type: 'tablet', os: 'iPadOS', os_ver: '18.6', brand: 'Apple', model: 'iPad Air', confidence: 88, hostname: 'iPad', hostname_src: 'mdns',
         services: ['_airplay._tcp', '_companion-link._tcp', '_rdlink._tcp'], evidence: [{ src: 'mdns', detail: '_companion-link._tcp · model=iPad13,16' }, { src: 'dhcp', detail: 'option 55 = 1,121,3,6,15,108,114,119,252' }, { src: 'oui', detail: 'Apple（随机 MAC 前缀已关闭）' }] },
       live: [['douyin', 0.78], ['bilibili', 0.12], ['wechat', 0.05]], hist: ['douyin', 'bilibili', 'wechat', 'xiaohongshu'],
-      fg: { state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.91, label: '正在用：抖音', activity: { id: 'video_stream', label: '刷短视频', conf: 0.9, src: 'domain' }, reasons: ['短视频分段下载：每 8~15 秒一段 1~3 MB', '域名命中 *.douyinvod.com', '上行很少（只看不拍）'] },
+      fg: { state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.91, label: '正在用：抖音', activity: { id: 'video_stream', label: '刷抖音', conf: 0.9, src: 'domain' }, reasons: ['短视频分段下载：每 8~15 秒一段 1~3 MB', '域名命中 *.douyinvod.com', '上行很少（只看不拍）'] },
       traffic_type: { type: 'short_video', label: '刷短视频' },
       app_time_limits: [{ app_id: 'douyin', name: '抖音', category: 'short_video', minutes: 60, used_sec: 3120, used_min: 52, exhausted: false, enforced: true }],
       category_blocks: [{ category: 'game', app_count: 6, ts: T - 3 * 86400, enforced: true }],
@@ -100,7 +100,7 @@
       ident: { type: 'pc', os: 'macOS', os_ver: '15.6', brand: 'Apple', model: 'MacBook Pro', confidence: 90, hostname: 'MacBook-Pro', hostname_src: 'mdns',
         services: ['_ssh._tcp', '_smb._tcp', '_companion-link._tcp'], evidence: [{ src: 'mdns', detail: 'model=Mac15,6' }, { src: 'dhcp', detail: 'macOS DHCP 指纹' }, { src: 'ja4', detail: 'Safari / macOS TLS 栈' }] },
       live: [['tencent_meeting', 0.82], ['feishu', 0.1], ['icloud', 0.05]], hist: ['tencent_meeting', 'feishu', 'wechat', 'icloud'],
-      fg: { state: 'active', app_id: 'tencent_meeting', name: '腾讯会议', confidence: 0.95, label: '正在用：腾讯会议', activity: { id: 'video_call', label: '开会(视频)', conf: 0.86, src: 'shape' }, reasons: ['UDP 音视频流双向对称', '每秒 50 个左右的包、码率稳定', '域名命中 *.meeting.qq.com'] },
+      fg: { state: 'active', app_id: 'tencent_meeting', name: '腾讯会议', confidence: 0.95, label: '正在用：腾讯会议', activity: { id: 'video_call', label: '开会中(有视频)', conf: 0.86, src: 'shape' }, reasons: ['UDP 音视频流双向对称', '每秒 50 个左右的包、码率稳定', '域名命中 *.meeting.qq.com'] },
       traffic_type: { type: 'call', label: '视频会议' }, live_call: { label: '腾讯会议', kind: 'video', since: T - 23 * 60 } },
     { mac: '5e:20:b7:3a:c4:18', ip: '192.168.43.52', hostname: '任天堂 Switch', hostname_src: 'manual', vendor: 'Nintendo', online: true, mark_id: 6,
       base: [1.8 * MB, 40 * KB], usage8: 7.1 * GB, onlineMin: [88, 120, 64, 302, 245, 0, 90],
@@ -247,6 +247,7 @@
   function devicesPayload() {
     stepRates();
     var rows = DEVS.slice().sort(function (a, b) { return ipNum(a.ip) - ipNum(b.ip); }).map(devRow);
+    if (!ACT_DETAIL) rows.forEach(function (r) { if (r.fg && r.fg.activity) { r.fg = Object.assign({}, r.fg); delete r.fg.activity; } }); // 总开关关: 后端不给 activity
     return { devices: rows, whitelist_mode: CFG.whitelist_mode, remote_enabled: CFG.remote_enabled, hotspot_active: true, hotspot_iface: IFACE, hotspot_ip: GW, devices_sig: devSig() };
   }
   function liveSummary() {
@@ -294,6 +295,7 @@
   var SELF_ON = { toggle: true, auto_expand: true, auto_promote: false };
   var DNS = { enabled: false, block_mode: 'nxdomain', log_queries: false };
   var FG_ENGINE = 'classic';
+  var ACT_DETAIL = true; // v5.34.0-rc2: 「在 App 里干什么」总开关(真机默认关, mock 开着方便看效果)
   var SIM = { enabled: false };
   var ALIASES = { 'ce:41:7a:09:3b:62': '0a:7f:3c:41:9e:21' };
   var MERGE_DONE = {};
@@ -755,7 +757,7 @@
         top_unknown: [{ name: '番茄小说', truth: 'fanqie', n: 31, snis: ['api.fqnovel.com', 'p3-novel.snssdk-novel.com'] }, { name: '得物', truth: 'dewu', n: 22, snis: ['app.dewu.com'] }],
         fg_truth: { source: 'usagestats', switches_24h: 146, last_pkg: 'com.tencent.mm', last_ts: now() - 120 } };
     },
-    '/api/fg_compare': function () { return { ok: true, engine: FG_ENGINE, rounds: 2880, classic: { switches_per_hour: 7.4, short_segments: 19 }, hmm: { switches_per_hour: 4.1, short_segments: 6 }, agree_pct: 87 }; },
+    '/api/fg_compare': function () { return { ok: true, engine: FG_ENGINE, rounds: 2880, classic: { switches_per_hour: 7.4, short_segments: 19 }, hmm: { switches_per_hour: 4.1, short_segments: 6 }, agree_pct: 87, activity_detail: ACT_DETAIL }; },
     '/api/dpi_rulepack': function () { return { ok: true, exportable: { domain_rules: 38, fingerprints: 12, startup: 7 }, imported: { domain_rules: 0, fingerprints: 0, startup: 0, suffixes: 0 },
       sources: { auto_expanded: { rules: 21 }, auto_promoted: { rules: 6 }, user_custom: { rules: 3 }, user_corrections: { domain: 8 } } }; },
     '/api/dpi_startup': function () { return { ok: true, stats: { events_total: 342 }, learned: [['抖音', 'douyin', 14, 5], ['微信', 'wechat', 22, 4], ['B站', 'bilibili', 9, 4], ['王者荣耀', 'honor_of_kings', 6, 3], ['高德地图', 'amap', 5, 3], ['小红书', 'xiaohongshu', 4, 3], ['淘宝', 'taobao', 3, 2]].map(function (x) { return { name: x[0], app_id: x[1], starts: x[2], feat: x[3], usable: true }; }) }; },
@@ -884,6 +886,7 @@
     },
     dns_takeover_set: function (p) { if (p.enabled != null) DNS.enabled = bool(p.enabled); if (p.block_mode) DNS.block_mode = p.block_mode; if (p.log_queries != null) DNS.log_queries = bool(p.log_queries); return ''; },
     dpi_fg_engine: function (p) { FG_ENGINE = p.engine === 'hmm' ? 'hmm' : 'classic'; return ''; },
+    dpi_activity_detail: function (p) { ACT_DETAIL = String(p.enabled) === '1'; return ''; },
     sim_set: function (p) { SIM.enabled = bool(p.enabled); return SIM.enabled ? '演示模式：模拟环境开关已打开（预览里没有模拟设备）' : '模拟环境已关闭'; },
     sim_preset: function () { SIM.enabled = true; return '演示模式：预设已记下（预览里不生成模拟设备）'; },
     sim_device_add: function (p) { return J({ mac: '02:5e:00:12:34:56', name: p.name || '模拟设备' }); },

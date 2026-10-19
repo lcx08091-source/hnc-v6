@@ -601,7 +601,11 @@ function paintFgEngine() {
   el.innerHTML = seg('fg-engine', [['classic', '经典'], ['hmm', '新（实验）']], r.engine || 'classic', 'small') +
     (num(r.rounds) ? '<div class="note">过去 24 小时：经典 切换 ' + num(c.switches_per_hour) + ' 次/小时、短于 30 秒的 ' + num(c.short_segments) + ' 段；新 ' + num(hm.switches_per_hour) + ' 次/小时、' + num(hm.short_segments) + ' 段；两者一致 ' + num(r.agree_pct) + '%</div>'
       : '<div class="note">过去 24 小时还没有热点设备的流量，暂无对比。</div>') +
-    '<div class="note">新引擎更不容易来回跳；切换后前台时间线从此刻起按新引擎记录。只影响「正在用什么」的显示和前台时间线，不影响识别、限速和限时。</div>';
+    '<div class="note">新引擎更不容易来回跳；切换后前台时间线从此刻起按新引擎记录。只影响「正在用什么」的显示和前台时间线，不影响识别、限速和限时。</div>' +
+    /* v5.34.0-rc2: 「在 App 里干什么」总开关, 默认关 */
+    '<div class="note" style="margin:14px 0 -2px">在 App 里干什么（实验）</div>' +
+    seg('act-detail', [['0', '关'], ['1', '开']], r.activity_detail ? '1' : '0', 'small') +
+    '<div class="note">开启后在「正在用」旁推测这个应用此刻大致在干什么（如「可能在看直播」「可能在语音通话」），只按连接的流量节奏和域名推测，不看内容。设备被限速、走 VPN、硬件加速旁路或省电档时不显示。默认关。</div>';
   placeSegs(el);
 }
 /* v5.27 T6: 我的规则包(导出 / 导入 / 清除已导入) */

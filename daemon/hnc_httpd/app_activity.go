@@ -31,6 +31,7 @@ import (
 	"encoding/json"
 	"math"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -79,14 +80,17 @@ type appActDomain struct {
 	Use    string `json:"use"`
 }
 
+// appActApp 一个应用 / 一个类别的说法。v5.34.0-rc2: labels 同时是「允许的标签」——
+// 流形态判出的标签只有在该应用或该类别写了说法时才参与; domain_only 里的只认域名规则。
 type appActApp struct {
-	Labels  map[string]string `json:"labels"`
-	Domains []appActDomain    `json:"domains"`
+	Labels     map[string]string `json:"labels"`
+	Domains    []appActDomain    `json:"domains,omitempty"`
+	DomainOnly []string          `json:"domain_only,omitempty"`
 }
 
 type appActSet struct {
-	Categories map[string]map[string]string `json:"categories"`
-	Apps       map[string]appActApp         `json:"apps"`
+	Categories map[string]appActApp `json:"categories"`
+	Apps       map[string]appActApp `json:"apps"`
 }
 
 var (
@@ -121,7 +125,7 @@ func appActivityRefresh(hncDir string, now time.Time) {
 	appActCur.Store(appActLoad(path))
 }
 
-// appActLoad 读并清洗规则文件; 读不到 / 太大 / 坏了 → nil(只用通用说法)
+// appActLoad 读并清洗规则文件; 读不到 / 太大 / 坏了 → nil(只用通用说法, 不限制标签)
 func appActLoad(path string) *appActSet {
 	if path == "" {
 		return nil
@@ -134,31 +138,70 @@ func appActLoad(path string) *appActSet {
 	if json.Unmarshal(b, &raw) != nil {
 		return nil
 	}
-	out := &appActSet{Categories: map[string]map[string]string{}, Apps: map[string]appActApp{}}
-	clean := func(m map[string]string) map[string]string {
-		c := map[string]string{}
-		for tag, lbl := range m {
+	out := &appActSet{Categories: map[string]appActApp{}, Apps: map[string]appActApp{}}
+	clean := func(a appActApp) appActApp {
+		c := appActApp{Labels: map[string]string{}}
+		for tag, lbl := range a.Labels {
 			if lbl = strings.TrimSpace(lbl); appActValidTag(tag) && lbl != "" && len([]rune(lbl)) <= 16 {
-				c[tag] = lbl
+				c.Labels[tag] = lbl
 			}
 		}
-		return c
-	}
-	for cat, m := range raw.Categories {
-		out.Categories[strings.ToLower(strings.TrimSpace(cat))] = clean(m)
-	}
-	for id, a := range raw.Apps {
-		ca := appActApp{Labels: clean(a.Labels)}
 		for _, d := range a.Domains {
 			d.Suffix = strings.Trim(strings.ToLower(strings.TrimSpace(d.Suffix)), ".")
 			d.Prefix = strings.ToLower(strings.TrimSpace(d.Prefix))
 			if d.Suffix != "" && strings.Contains(d.Suffix, ".") && appActValidTag(d.Use) {
-				ca.Domains = append(ca.Domains, d)
+				c.Domains = append(c.Domains, d)
 			}
 		}
-		out.Apps[id] = ca
+		for _, t := range a.DomainOnly {
+			if appActValidTag(t) {
+				c.DomainOnly = append(c.DomainOnly, t)
+			}
+		}
+		return c
+	}
+	for cat, a := range raw.Categories {
+		out.Categories[strings.ToLower(strings.TrimSpace(cat))] = clean(a)
+	}
+	for id, a := range raw.Apps {
+		out.Apps[id] = clean(a)
 	}
 	return out
+}
+
+// appActCatOf 类别查表键: 原样; 没有且以 game 开头的按 game
+func appActCatOf(set *appActSet, cat string) (appActApp, bool) {
+	c := strings.ToLower(strings.TrimSpace(cat))
+	if a, ok := set.Categories[c]; ok {
+		return a, true
+	}
+	if strings.HasPrefix(c, "game") {
+		a, ok := set.Categories["game"]
+		return a, ok
+	}
+	return appActApp{}, false
+}
+
+// appActShapeAllowed 流形态判出的 tag 能不能用在这个应用上: 应用或类别写了这个 tag 的说法,
+// 且不在两者的 domain_only 里。没有规则文件时不限制。
+func appActShapeAllowed(set *appActSet, appID, cat, tag string) bool {
+	if set == nil {
+		return true
+	}
+	a, aok := set.Apps[appID]
+	c, cok := appActCatOf(set, cat)
+	has := (aok && a.Labels[tag] != "") || (cok && c.Labels[tag] != "")
+	if !has {
+		return false
+	}
+	for _, x := range [][]string{a.DomainOnly, c.DomainOnly} {
+		for _, t := range x {
+			if t == tag {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // appActDomainUse 按该应用的域名用途规则给主机名打标签(只对归到这个应用的连接用)
@@ -190,20 +233,186 @@ func appActDomainUse(set *appActSet, appID, host string) string {
 }
 
 // appActivityTag 一条连接的用途标签与来源(""=不参与)。shapeType / shapeConf 来自
-// flow_shape.go 对这条连接的判类。
-func appActivityTag(appID, host, shapeType string, shapeConf float64) (tag, src string) {
-	if u := appActDomainUse(appActCur.Load(), appID, host); u != "" {
+// flow_shape.go 对这条连接的判类, udp = 这条连接是 UDP。来源:
+//   - domain: 域名用途规则命中, 且流形态没有判成别的;
+//   - domain_weak: 域名规则命中, 但流形态判成了别的(比如看评论时视频 CDN 在预取)——
+//     仍按域名的标签, 但不当域名证据(置信度按流形态算);
+//   - shape: 流形态, 且这个应用 / 类别允许这个标签(appActShapeAllowed)。
+//     例外: 允许通话、不允许直播形态的应用(会议 / 社交), UDP 上「下行稳定、几乎没上行」的
+//     直播形态算语音通话 —— 会议旁听、通话里对方开摄像头自己关, 都不是在看直播。
+func appActivityTag(appID, cat, host, shapeType string, shapeConf float64, udp bool) (tag, src string) {
+	set := appActCur.Load()
+	shapeOK := appActValidTag(shapeType) && shapeConf >= appActShapeMinConf
+	if u := appActDomainUse(set, appID, host); u != "" {
+		if shapeOK && shapeType != u && shapeType != ttBackground {
+			return u, "domain_weak"
+		}
 		return u, "domain"
 	}
-	if appActValidTag(shapeType) && shapeConf >= appActShapeMinConf {
-		return shapeType, "shape"
+	if !shapeOK {
+		return "", ""
 	}
-	return "", ""
+	t := shapeType
+	if t == ttLive && udp && !appActShapeAllowed(set, appID, cat, ttLive) && appActShapeAllowed(set, appID, cat, ttVoice) {
+		t = ttVoice
+	}
+	if !appActShapeAllowed(set, appID, cat, t) {
+		return "", ""
+	}
+	return t, "shape"
+}
+
+// ─── 总开关与每轮守卫(v5.34.0-rc2) ──────────────────────────────────────────────
+
+// appActEnabled 总开关(data/dpi_experiment.json 的 activity_detail, 默认关)。关着时不打标签、
+// 不输出; 每轮 app_usage 从文件刷新, 动作写完立即生效。
+var appActEnabled atomic.Bool
+
+// appActGuard 本轮的守卫(app_usage 每轮锁外算好)。
+type appActGuard struct {
+	limited    map[string]bool // mac → 正被 HNC 限速(设备限速 / 配额 / 分时段生效 / 全局整形)
+	limitedApp map[string]bool // "mac|app_id" → 应用限速
+	vpn        map[string]bool // mac → 疑似 / 确定走 VPN(traffic_ident.go)
+	offload    bool            // 网络共享硬件加速正在旁路(conntrack 计数停住, 看到的不全)
+}
+
+var appActGuardCur atomic.Pointer[appActGuard]
+
+// appActMaxTickSec 采样间隔超过它(省电档)→ 不输出: 节奏被平均掉, 防抖要等好几分钟
+const appActMaxTickSec = 45.0
+
+var appActExpCache struct {
+	mu       sync.Mutex
+	path     string
+	key      string
+	disabled bool
+}
+
+// appActEnabledFor 读 data/dpi_experiment.json 的 activity_detail(按 mtime 缓存; 缺失 = 关)
+func appActEnabledFor(hncDir string) bool {
+	if hncDir == "" {
+		return false
+	}
+	p := fgExperimentPath(hncDir)
+	key := "-"
+	if fi, err := os.Stat(p); err == nil {
+		key = strconv.FormatInt(fi.ModTime().UnixNano(), 10) + ":" + strconv.FormatInt(fi.Size(), 10)
+	}
+	appActExpCache.mu.Lock()
+	defer appActExpCache.mu.Unlock()
+	if appActExpCache.path == p && appActExpCache.key == key {
+		return !appActExpCache.disabled
+	}
+	on := false
+	if b, err := os.ReadFile(p); err == nil && len(b) <= 64<<10 {
+		var f struct {
+			ActivityDetail bool `json:"activity_detail"`
+		}
+		if json.Unmarshal(b, &f) == nil {
+			on = f.ActivityDetail
+		}
+	}
+	appActExpCache.path, appActExpCache.key, appActExpCache.disabled = p, key, !on
+	return on
+}
+
+// actionDPIActivityDetail 开 / 关「在 App 里干什么」(原子写, 保留文件里的其它键)。
+//
+//	dpi_activity_detail {enabled: 1|0|true|false}
+func actionDPIActivityDetail(hncDir string, p map[string]string) actionResp {
+	var on bool
+	switch strings.ToLower(strings.TrimSpace(p["enabled"])) {
+	case "1", "true", "on":
+		on = true
+	case "0", "false", "off":
+	default:
+		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be 1 or 0"}
+	}
+	path := fgExperimentPath(hncDir)
+	m := map[string]interface{}{}
+	if b, err := os.ReadFile(path); err == nil && len(b) <= 64<<10 {
+		_ = json.Unmarshal(b, &m)
+	}
+	m["activity_detail"] = on
+	b, _ := json.MarshalIndent(m, "", "  ")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return actionResp{OK: false, Error: "mkdir failed", Detail: err.Error()}
+	}
+	if err := writeFileAtomic(path, b); err != nil {
+		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+	}
+	appActEnabled.Store(on)
+	return actionResp{OK: true, Detail: "activity_detail=" + strconv.FormatBool(on)}
+}
+
+// appActGuardRefresh app_usage 每轮(锁外)调用: 刷新总开关; 开着时算守卫(关着不读任何文件)。
+// limitedNow = 限速控制器里配额 / 分时段正在生效的设备(可为 nil)。
+func appActGuardRefresh(hncDir string, limitedNow map[string]bool, now time.Time) {
+	on := appActEnabledFor(hncDir)
+	appActEnabled.Store(on)
+	if !on {
+		appActGuardCur.Store(nil)
+		return
+	}
+	g := &appActGuard{limited: map[string]bool{}, limitedApp: map[string]bool{}, vpn: map[string]bool{}}
+	for mac := range limitedNow {
+		g.limited[mac] = true
+	}
+	if obs, _, ok := readObserved(hncDir); ok {
+		for mac, r := range obs {
+			if r.DownKbit > 0 || r.UpKbit > 0 {
+				g.limited[mac] = true
+			}
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json")); err == nil {
+		var top struct {
+			Shaper interface{} `json:"global_shaper_enabled"`
+		}
+		if json.Unmarshal(b, &top) == nil && truthy(top.Shaper) {
+			g.limited["*"] = true
+		}
+	}
+	for _, it := range loadAppLimits(hncDir).Items {
+		if it.DownMbps > 0 {
+			g.limitedApp[strings.ToLower(it.MAC)+"|"+it.AppID] = true
+		}
+	}
+	for mac, v := range identVPNVerdicts() {
+		if v.Level == "likely" || v.Level == "certain" {
+			g.vpn[mac] = true
+		}
+	}
+	if st, ok := offloadGuardFreshState(hncDir, 3*time.Minute); ok && st == "ACTIVE" {
+		g.offload = true
+	}
+	appActGuardCur.Store(g)
+}
+
+// appActLimited 这台设备 / 这个应用此刻是否被 HNC 限速
+func appActLimited(g *appActGuard, mac, appID string) bool {
+	return g != nil && (g.limited["*"] || g.limited[mac] || g.limitedApp[mac+"|"+appID])
+}
+
+// appActGate 输出闸门: 总开关关着、省电档(采样间隔 > 45 秒)、疑似 VPN、硬件加速旁路 → 不说。
+func appActGate(mac string, a *fgActivity, dt float64) *fgActivity {
+	if a == nil || !appActEnabled.Load() || dt > appActMaxTickSec {
+		return nil
+	}
+	if g := appActGuardCur.Load(); g != nil && (g.offload || g.vpn[mac]) {
+		return nil
+	}
+	return a
 }
 
 // appActForDelta 记账时一条已归属差分的用途标签: 主机名 = 连接自己的 SNI > 目的 IP 反查名,
-// 流形态 = flow_shape.go 本轮对这条连接的判类(它在记账之前跑完)。
-func appActForDelta(ix *identCtx, appID string, dl appUsageDelta, names map[string]ipName) (string, string) {
+// 流形态 = flow_shape.go 本轮对这条连接的判类(它在记账之前跑完)。总开关关着 → 不算;
+// 设备 / 应用被 HNC 限速时, 流形态判出的视频 / 直播不用(令牌桶把点播的突发削成恒速,
+// 正好像直播; 限速低于视频码率时视频规则又永远不中)。
+func appActForDelta(ix *identCtx, mac, appID, cat string, dl appUsageDelta, names map[string]ipName) (string, string) {
+	if !appActEnabled.Load() {
+		return "", ""
+	}
 	host := ""
 	if ix != nil && ix.fp != nil && dl.Key != "" {
 		host = ix.fp.connSNI(dl.Key)
@@ -212,7 +421,11 @@ func appActForDelta(ix *identCtx, appID string, dl appUsageDelta, names map[stri
 		host = names[dl.Dst].Name
 	}
 	tt, ttc, _ := flowTrafficType(dl.Key)
-	return appActivityTag(appID, host, tt, ttc)
+	tag, src := appActivityTag(appID, cat, host, tt, ttc, strings.HasPrefix(dl.Key, "udp|"))
+	if src != "domain" && (tag == ttVideo || tag == ttLive) && appActLimited(appActGuardCur.Load(), mac, appID) {
+		return "", ""
+	}
+	return tag, src
 }
 
 // appActLabel 显示名: 应用专属 > 类别 > 通用
@@ -223,14 +436,8 @@ func appActLabel(appID, cat, tag string) string {
 				return l
 			}
 		}
-		c := strings.ToLower(strings.TrimSpace(cat))
-		if m, ok := set.Categories[c]; ok && m[tag] != "" {
-			return m[tag]
-		}
-		if strings.HasPrefix(c, "game") {
-			if m, ok := set.Categories["game"]; ok && m[tag] != "" {
-				return m[tag]
-			}
+		if c, ok := appActCatOf(set, cat); ok && c.Labels[tag] != "" {
+			return c.Labels[tag]
 		}
 	}
 	return trafficTypeLabels[tag]
