@@ -7,6 +7,16 @@
 
 ## 已审文件
 
+- bin/hnc_constants.sh：全文，无问题
+- bin/hnc_common.sh：全文，无问题（函数基本只有 ahnc_migration.sh 和单测在用）
+- bin/hnc_lock.sh：全文（stale 回收也有「判断 → 删除」非原子的问题，但有 gate 挡着，触发窗口比 hnc_json 小得多，不单独记）
+- bin/hnc_json：全文 → A10-001、A10-002
+- bin/json_set.sh：全文，无问题
+- bin/json_set_batch.sh：全文，无问题
+- bin/apply_device_rule.sh：全文 → A10-003（涉及 bl_del）
+- bin/iptables_manager.sh：全文 → A10-003
+- post-fs-data.sh：全文，无问题
+
 ## Bug
 
 ### A10-001 [P3][确认] hnc_json set-top 每写一次就在文件末尾多留一个空行，文件只增不减
@@ -38,4 +48,17 @@
   ```
   「判断 → 删除」之间没有任何原子性保证，删除的对象可能已经换了主人。
 - **建议修复**：回收时先 `mv "$_ld" "$_ld.stale.$$"`（rename 是原子的），再核对改名后目录里的 pid/ts 是否就是刚才判定为陈旧的那一份，不是就放弃；「缺 pid」分支改为按锁目录 mtime 超过数秒才回收（和 hnc_lock.sh 的做法一致）；释放锁前核对 pid 是否为 `$$`。
+
+### A10-003 [P1][确认] 拉黑时加的按 IP 双向 DROP 不记录 IP；设备离线后解除拉黑只删 MAC 规则，旧 IP 的 DROP 一直留着（本机重连或别的设备分到这个 IP 都会断网）
+- **位置**：`bin/iptables_manager.sh:403-408`、`bin/iptables_manager.sh:431-434`、`bin/apply_device_rule.sh:513-524`
+- **触发 / 现象**：设备 A（IP .50）在线时被拉黑，HNC_CTRL 里加了 `-s .50 -j DROP`、`-d .50 -j DROP`。A 被拉黑后上不了网，通常会断开；Go 设备扫描 90 秒未活跃就把它从 devices.json 剔除（`src/dpid/devscan/devscan.go:361`）。之后用户解除拉黑：`bl_del` 的 `get_ip` 取不到 IP，`get_rule_ip` 只有限过速的设备才有，于是调用 `blacklist_remove "" mac`，只删 MAC 规则，两条 IP DROP 残留。A 重连时 DHCP 多半还给它 .50，A 解除拉黑后仍然完全断网；或者别的设备分到 .50，整机被静默封掉（UI 上不在黑名单里）。残留会一直存在，直到下次热点重建或重启时 init flush HNC_CTRL。restore 路径只按 MAC 重加黑名单（`tc_manager.sh:2430` 传空 IP），所以这类 IP 规则只会来自运行期的 bl_add，也没有任何 GC。
+- **原因**：
+  ```
+  # blacklist_add
+  if [ -n "$ip" ]; then ... $IPT -t filter -A HNC_CTRL -s "$ip" -j DROP; $IPT ... -d "$ip" -j DROP; fi
+  # blacklist_remove
+  if [ -n "$ip" ]; then ipt_del_all ... -s "$ip" -j DROP; ipt_del_all ... -d "$ip" -j DROP; fi
+  ```
+  删除时用的 IP 是解除拉黑那一刻现查的，而不是加规则时用的那个；查不到就整段跳过。
+- **建议修复**：blacklist_remove 改成扫描 `iptables -S HNC_CTRL`，把与该 MAC 相关的 IP 规则都删掉（加规则时可以给 IP 规则带上 `-m comment --comment hnc-bl:<mac>`，或把 IP 记进 rules.json）；更简单的办法是黑名单只用 MAC 规则（restore 路径本来就只按 MAC），去掉按 IP 的 DROP。
 

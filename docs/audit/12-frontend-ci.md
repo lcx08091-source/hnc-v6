@@ -36,3 +36,21 @@
   ```
 - **建议修复**：sheet() 在替换前若旧弹层仍处于打开状态就先调用旧的 sheetOnClose；或 connActSheet / dpiFixSheet 的 onClose 里同样 `clearInterval(connT); connT = null; S.connMac = null`（返回按钮会重新 connSheet，不受影响）。
 
+### A12-003 [P2][确认] JSON 健康面板（json-health.html）必然显示「读取失败」：后端脚本 json_escape 不转义换行，json_doctor 的多行报告让输出变成非法 JSON
+- **位置**：`webroot/json-health.html:49-55`（`JSON.parse(trimmed)`）；根因在 `bin/json_health_panel.sh:13-16,31-33,138`
+- **触发 / 现象**：设置 →「维护」→「JSON 健康面板」（KSU 模式才有入口）。页面执行 `json_health_panel.sh`，其中 `DOC_MSG="$(sh json_doctor.sh status 2>&1)"`，而 `json_doctor.sh status` 最后 `cat "$REPORT_TXT"`，内容固定是多行（"HNC JSON health report\ntime=…\ndata_dir=…"）。`json_escape` 用 sed 逐行处理，`s/\n/ /g` 永远匹配不到行尾换行，于是 `"json_doctor_message": "HNC JSON health report<换行>time=…"` 里带裸换行。本地复现：同样的 json_escape + heredoc 输出，Node `JSON.parse` 报 `Bad control character in string literal`。页面 catch 后只显示「读取失败」，整个面板不可用。
+- **原因**：
+  ```sh
+  json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r/ /g; s/\n/ /g; s/\t/ /g'   # sed 按行处理, \n 不会被替换
+  }
+  "json_doctor_message": "$(json_escape "$DOC_MSG")",
+  ```
+- **建议修复**：json_escape 先 `tr '\n' ' '`（或用 awk 把换行转成 `\n`），json_doctor.sh 里已有正确的 awk 版本可复用；前端可额外对 `JSON.parse` 失败时显示原始输出前几行，便于排障。
+
+### A12-004 [P3][确认] 配对页「最后 1 次机会」提示把 `<b>` 标签原样显示给用户
+- **位置**：`daemon/hnc_httpd/web/pair.html:221`（`showMsg('error', '⚠ PIN 错误,<b>最后 1 次机会</b>,再错就锁 10 分钟')`）、`pair.html:162-165`（showMsg 用 textContent）
+- **触发 / 现象**：远程浏览器配对时 PIN 输错到只剩 1 次机会（`attempts_remaining === 1`），提示框显示字面量「⚠ PIN 错误,<b>最后 1 次机会</b>,再错就锁 10 分钟」。
+- **原因**：`msg.textContent = text;`——showMsg 只按纯文本输出（这是对的，防 XSS），但这一条消息仍按 HTML 写了 `<b>`。
+- **建议修复**：去掉 `<b>` 标签，或单独用 DOM 创建 `<b>` 节点；不要改成 innerHTML。
+

@@ -7,6 +7,13 @@
 
 ## 已审文件
 
+- phone_usage.go（全文）
+- phone_usage_sim.go（全文）
+- phone_usage_upstream.go（全文）
+- clock_guard.go（全文）
+- power_sched.go（全文）
+- stats_calibration.go（全文；netstats 解析在 netstats_parse.go，不在本范围）
+
 ## Bug
 
 ### A5-001 [P2][确认] 跳变检测用 CLOCK_MONOTONIC，熄屏深睡眠一超 10 分钟就把整段本机流量丢掉

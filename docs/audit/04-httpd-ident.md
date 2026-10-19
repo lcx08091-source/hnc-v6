@@ -14,6 +14,9 @@
 - app_usage.go：A4-005
 - fp_learn.go：无问题（置信度恒有限，FPW 不会出现 NaN；绑定表有上限与空闲清理）
 - fp_user_rules.go：A4-004
+- app_time.go：A4-006；lint 提示 app_time.go:704 kind 初值被浪费——核实为无害死赋值（switch 每个分支都赋值或 continue）
+- traffic_ident.go：无问题（identSt 全程在 appUsage.mu 下；各表有上限与按时间清理；暂缓连接的字节在共现窗口合上后随 released 补记）
+- self_fg_truth.go：A4-007
 
 ## Bug
 
@@ -79,4 +82,34 @@
   ```
   对照下面的 Active：`if sep < 0 || (mac != "" && resolve(mk[:sep]) != mac)`。
 - **建议修复**：改成 `resolve(mk[:sep]) != mac`，与 Hours / Active / srcAgg 保持一致。
+
+### A4-006 [P3][确认] 应用时长上限 / 类别封锁配置文件损坏时静默当空表，管控失效，下一次设置会覆盖掉全部旧配置
+- **位置**：`daemon/hnc_httpd/app_time.go:465-471`（loadAppControls），写回见 `app_time.go:821-837`、`851-867`、`914-935`
+- **触发 / 现象**：`data/app_controls.json` 损坏（手工编辑出错、写满盘后残缺等）。`loadAppControls` 忽略解析错误返回空结构：所有设备的时长上限和类别封锁立即静默失效（家长管控「放行」），设备卡上也不再显示；用户随后对任何设备做一次 `app_time_limit_set` / `category_block_set`，就把只含这一条的配置原子写回，原文件里其余设备的配置永久丢失，没有任何提示。
+- **原因**：
+  ```go
+  func loadAppControls(hncDir string) appControlsFile {
+      var f appControlsFile
+      if b, err := os.ReadFile(appControlsPath(hncDir)); err == nil {
+          _ = json.Unmarshal(b, &f)          // 解析错误被丢弃
+      }
+      return f
+  }
+  ```
+  三个动作都是「loadAppControls → 改一条 → saveAppControls」。
+- **建议修复**：区分「文件不存在」与「读 / 解析失败」；写路径遇到后者拒绝写入并报错（或先备份坏文件），读路径在自检 / 告警里提示配置文件损坏。
+
+### A4-007 [P3][确认] 本机前台真值不记录熄屏 / 关采集的时段，评估把这段时间都算成「上一个前台应用在前台」
+- **位置**：`daemon/hnc_httpd/self_fg_truth.go:75-88`（采集循环），消费方 `startup_fp.go:1229-1250`（startupFGMatch）
+- **触发 / 现象**：本机开着「本机流量归因」，用户在 App X 里熄屏（或关掉采集开关），几小时后亮屏。熄屏期间循环直接 `continue`，既不写「熄屏 / 无前台」标记，也不清 `lastPkg`；亮屏后如果前台还是 X 也不会写新行。`startupFGMatch` 用「≤ t 的最后一条记录」当 t 时刻的前台，于是整段熄屏时间都被当成 X 在前台：熄屏期间后台 App 被识别出的启动事件会被判错（或恰好是 X 时被判对），启动指纹交叉验证的 event_accuracy 失真。跨零点同理：当天文件里第一条记录之前的时段没有前台（`cur=""`），上一天延续下来的前台被判成无。
+- **原因**：
+  ```go
+  if !selfFGEnabled(s.hncDir) || !screenOnNow() {
+      iv = selfFGMaxInterval
+      continue                      // 不写标记，lastPkg 保留
+  }
+  pkg, src := readForegroundPkg(runDumpsysCmd)
+  if pkg == "" || pkg == lastPkg { ... continue }
+  ```
+- **建议修复**：进入熄屏 / 关采集时写一条 `pkg:""`（或 source:"screen_off"）的记录并清空 `lastPkg`；消费方把这类记录当作「无前台」。
 

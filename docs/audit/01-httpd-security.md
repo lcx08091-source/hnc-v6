@@ -55,3 +55,16 @@
   ```
 - **建议修复**：remaining 改为 `rlPinAttemptsMax - 1 - e.pinAttempts`（或把锁定判定改为“比对失败后达到上限才锁”，让第 5 次真正可比对）；pair.html 去掉 `<b>` 或改用 DOM 构造。
 
+### A1-003 [P3][确认] 未鉴权请求也会把 WebUI 标成“有人在看”，陌生客户端可让后台循环一直保持高频
+- **位置**：`daemon/hnc_httpd/power_activity.go:169-176`、`daemon/hnc_httpd/middleware.go:174-177`、`daemon/hnc_httpd/server.go:207`、`daemon/hnc_httpd/power_sched.go:96,138-152`
+- **触发 / 现象**：热点上任一未配对客户端（或本机任意无 root 应用访问 127.0.0.1:8444）每 <60s 请求一次 `/`、`/api/health`、`/pair`、`/css/x` 等公开路径，`powerNoteAPIHit` 都会刷新 `webuiLastHit`，`WebUIActive` 恒为 true：RateLoop 维持 2s、offload_status 维持基准周期，熄屏 `quiet` 判定也失效，省电降频永远不生效。注释声称“只有鉴权通过的请求才算有人在看（热点上的陌生客户端扫端口不会让后台一直保持高频）”，与代码不符。
+- **原因**：链路是 `authMiddleware(activityTouchMiddleware(mux))`，而 authMiddleware 对公开路径直接调用 `next`：
+  ```go
+  if isPublicPath(r.URL.Path) {
+      next.ServeHTTP(w, r)   // next = activityTouchMiddleware(mux)，未鉴权也会 powerNoteAPIHit
+      return
+  }
+  ```
+  loopback 缺 secret 时的 `/api/health` 放行分支同理。
+- **建议修复**：在 activityTouchMiddleware 里只对 context 带 TokenID 或已通过 loopback secret 的请求调用 `powerNoteAPIHit`（例如 authMiddleware 在鉴权成功分支设置一个 ctx 标记），公开路径不计入。
+
