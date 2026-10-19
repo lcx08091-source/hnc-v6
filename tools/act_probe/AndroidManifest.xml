@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  HNC 采集 App(io.hnc.probe): 按剧本测试 HNC「应用内活动细分」时, 在测试手机上记录真值 + 对照 HNC 输出。
+  权限只要最少的:
+    INTERNET / ACCESS_NETWORK_STATE  只连用户填的 HNC 地址(绑定 Wi-Fi 网络), 取本机 Wi-Fi IP
+    PACKAGE_USAGE_STATS              前台包名 / Activity(用户在系统设置里手动授权「使用情况访问」)
+    FOREGROUND_SERVICE(+SPECIAL_USE) 剧本运行时熄屏也要继续采样
+    WAKE_LOCK                        熄屏步里 CPU 不睡, 计时与采样不停
+    VIBRATE / POST_NOTIFICATIONS     每步结束震动提示 + 通知栏「下一步」按钮
+  不用无障碍服务、不申请相机 / 麦克风 / 位置 / 存储权限(相机占用靠 CameraManager 可用性回调,
+  录音占用靠 AudioManager.getActiveRecordingConfigurations, 都不需要权限)。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="io.hnc.probe">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="HNC 采集"
+        android:icon="@android:drawable/sym_def_app_icon"
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false"
+        android:theme="@android:style/Theme.Material.Light.DarkActionBar">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".ProbeService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="维护者自测: 按剧本运行时定时记录本机前台应用 / 通话 / 相机 / 麦克风状态作为真值, 熄屏期间也要继续" />
+        </service>
+    </application>
+</manifest>

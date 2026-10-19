@@ -1,0 +1,7 @@
+# 编译产物(APK / dex / class)和调试签名都不提交
+out/
+.keys/
+*.apk
+*.keystore
+*.jks
+*.idsig

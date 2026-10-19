@@ -1,0 +1,21 @@
+{
+  "devices": [
+    {"mac": "aa:bb:cc:00:00:01", "ip": "192.168.43.7", "online": false, "hostname": "旧租约(离线)",
+     "fg": {"state": "stale", "app_id": "", "name": "", "confidence": 0, "updated": 1760000000},
+     "traffic_type": {"type": "unknown", "label": "识别中", "confidence": 0}},
+    {"mac": "aa:bb:cc:00:00:02", "ip": "192.168.43.7", "online": true, "hostname": "test-phone",
+     "rx_bps": 1200000, "tx_bps": 40000,
+     "fg": {"state": "active", "app_id": "douyin", "name": "抖音", "category": "video", "confidence": 82,
+            "since": 1760000100, "reasons": ["sni"], "background": [], "label": "抖音", "score": 80,
+            "tick_sec": 5, "updated": 1760000200,
+            "activity": {"id": "live_stream", "label": "看直播", "conf": 0.72, "src": "domain"}},
+     "traffic_type": {"type": "live_stream", "label": "看直播", "confidence": 0.81, "since": 1760000150},
+     "vpn": {"level": "none", "window_sec": 300}},
+    {"mac": "aa:bb:cc:00:00:03", "ip": "192.168.43.9", "online": true,
+     "fg": {"state": "active", "app_id": "wechat", "name": "微信", "confidence": 60, "updated": 1760000200},
+     "traffic_type": {"type": "browsing", "label": "浏览", "confidence": 0.5}},
+    {"mac": "aa:bb:cc:00:00:04", "ip": "-", "online": false, "rx_bps": 0, "tx_bps": 0, "last_seen": 0, "status": "allowed"}
+  ],
+  "whitelist_mode": false,
+  "remote_enabled": true
+}
