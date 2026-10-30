@@ -11,6 +11,9 @@
 - 开发在分支 `claude/webui-fake-code-audit-RJjFZ`;验证通过后 fast-forward 合并到 `main` 触发 CI(`.github/workflows/build.yml` 只在 push main / tag v* / 手动时构建)。
 - 改了 Go(`daemon/hnc_httpd`、`src/dpid`)或 C(`src/launcher`)需要 CI 重编对应二进制;纯 shell/前端不用重编。
 
+## 进行中:全量审查(2026-10-19 起)
+- 记录在 `docs/AUDIT-v5.33-full.md`。新会话先读它,按「进度」表从第一个未完成项续审;只记录不改代码,每发现一个 bug 就追加并推送。
+
 ## 设备环境(真机)
 - realme RMX5010 / ColorOS Android 16 / 内核 6.6 GKI / SukiSU(Magic Mount 元模块 `magic_mount_rs`,`umount=false`)+ SuSFS。
 - 已知:运行期 `/system/bin` 可能被卸(已加 `/data` 兜底);该内核疑似无 `sch_cake`/`sch_fq_codel`(低延迟退 `sfq`);ColorOS 是否放行 `cmd wifi start-softap` 等需真机验证。
