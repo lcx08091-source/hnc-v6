@@ -1,0 +1,49 @@
+{
+  "schema": "hnc-probe-script/1",
+  "name": "默认剧本 v1(应用内活动细分: 可显示 + 低置信项)",
+  "_doc": "每步: app=包名(\"*\" 或 \"\" = 不限应用), expect=真值活动 id, label=中文说明, minutes=时长, instruction=操作说明。warmup_sec: 每步开头不计入统计的秒数(HNC 活动判定有约 30 秒衰减)。做不了的步(比如没有可下载的更新)直接点『下一步』跳过。",
+  "warmup_sec": 20,
+  "steps": [
+    {"app": "com.tencent.mm", "app_name": "微信", "expect": "voice_call", "label": "微信 · 语音通话", "minutes": 2,
+     "instruction": "和另一台手机打微信语音通话, 接通后保持说话。可以把手机贴耳(熄屏不影响)。"},
+    {"app": "com.tencent.mm", "app_name": "微信", "expect": "video_call", "label": "微信 · 视频通话", "minutes": 2,
+     "instruction": "打微信视频通话, 两边都开着摄像头, 保持画面。"},
+    {"app": "com.tencent.mm", "app_name": "微信", "expect": "browsing", "label": "微信 · 朋友圈", "minutes": 2,
+     "instruction": "打开『发现 → 朋友圈』上下翻看、点开图片; 尽量不要点开视频。"},
+    {"app": "com.tencent.mm", "app_name": "微信", "expect": "video_stream", "label": "微信 · 视频号", "minutes": 2,
+     "instruction": "打开『发现 → 视频号』上下刷视频, 不要进直播。"},
+    {"app": "com.tencent.mm", "app_name": "微信", "expect": "upload", "label": "微信 · 传文件", "minutes": 2,
+     "instruction": "给『文件传输助手』发一个 100MB 以上的文件(或几段原图视频), 发送过程中留在微信前台; 发完再发下一个, 直到本步结束。"},
+
+    {"app": "com.tencent.tmgp.sgame", "app_name": "王者荣耀", "expect": "gaming", "label": "王者荣耀 · 对局中", "minutes": 4,
+     "instruction": "开一局(人机 / 匹配都行), 对局中正常操作; 不开语音。提前进到加载界面再点『下一步』开始计时。"},
+    {"app": "com.tencent.tmgp.sgame", "app_name": "王者荣耀", "expect": "voice_call", "label": "王者荣耀 · 开黑语音", "minutes": 3,
+     "instruction": "和朋友组队, 在房间或对局里打开麦克风和扬声器说话。没有队友就点『下一步』跳过。"},
+    {"app": "com.tencent.tmgp.sgame", "app_name": "王者荣耀", "expect": "download", "label": "王者荣耀 · 下载更新", "minutes": 2,
+     "instruction": "在游戏里下载资源包 / 更新(入口随版本变化, 一般在 设置 → 资源管理 或 登录后的下载提示)。没有可下载内容就点『下一步』跳过。"},
+
+    {"app": "com.tencent.wemeet.app", "app_name": "腾讯会议", "expect": "voice_call", "label": "腾讯会议 · 开会(语音)", "minutes": 2,
+     "instruction": "发起或加入一个会议, 打开麦克风说话, 摄像头保持关闭。"},
+    {"app": "com.tencent.wemeet.app", "app_name": "腾讯会议", "expect": "video_call", "label": "腾讯会议 · 开会(开摄像头)", "minutes": 2,
+     "instruction": "在同一个会议里打开摄像头, 保持视频画面。"},
+
+    {"app": "com.ss.android.ugc.aweme", "app_name": "抖音", "expect": "video_stream", "label": "抖音 · 刷视频", "minutes": 3,
+     "instruction": "打开『推荐』正常上下滑刷短视频, 每条看 5–20 秒; 不要进直播间。"},
+    {"app": "com.ss.android.ugc.aweme", "app_name": "抖音", "expect": "live_stream", "label": "抖音 · 看直播", "minutes": 3,
+     "instruction": "从顶部『直播』入口或推荐流点进一个直播间, 停留观看, 不要滑走。"},
+    {"app": "com.ss.android.ugc.aweme", "app_name": "抖音", "expect": "upload", "label": "抖音 · 发视频", "minutes": 2,
+     "instruction": "选一段 30 秒以上的视频发布(可设『仅自己可见』), 上传过程中留在抖音前台; 发完可再发一条直到本步结束。"},
+
+    {"app": "tv.danmaku.bili", "app_name": "哔哩哔哩", "expect": "video_stream", "label": "B 站 · 看点播", "minutes": 3,
+     "instruction": "打开任意一个 5 分钟以上的视频播放, 不拖进度、不切走。"},
+    {"app": "tv.danmaku.bili", "app_name": "哔哩哔哩", "expect": "live_stream", "label": "B 站 · 看直播", "minutes": 3,
+     "instruction": "进入『直播』频道, 点开任意直播间观看。"},
+    {"app": "tv.danmaku.bili", "app_name": "哔哩哔哩", "expect": "upload", "label": "B 站 · 投稿上传", "minutes": 2,
+     "instruction": "投稿一段视频(可设仅自己可见), 上传过程中留在 B 站前台。"},
+
+    {"app": "", "app_name": "对照", "expect": "idle", "label": "对照 · 什么都不做(熄屏)", "minutes": 2,
+     "instruction": "点『下一步』后立刻锁屏熄屏, 手机放着不动; 震动后再亮屏。期望 HNC 不给活动(或给『后台』)。"},
+    {"app": "*", "app_name": "对照", "expect": "download", "label": "对照 · 后台下载", "minutes": 3,
+     "instruction": "先在浏览器或应用商店开始下载一个大文件(几百 MB), 然后回到桌面不操作、保持亮屏。看 HNC 会不会把后台下载算成某个前台活动。"}
+  ]
+}

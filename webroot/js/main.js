@@ -185,6 +185,7 @@ document.addEventListener('click', function (e) {
     else if (k === 'dns-bm') { busyWhile(sg, api.action('dns_takeover_set', { block_mode: v })).then(function () { toast('拦截方式：' + q.textContent); return loadDNS(); }).catch(function (e) { toast(errText(e), 'err'); loadDNS(); }); }
     else if (k === 'eval-days') { S.evalDays = +v; loadEval(S.evalDays); }
     else if (k === 'fg-engine') { busyWhile(sg, api.action('dpi_fg_engine', { engine: v })).then(function () { toast('前台识别引擎：' + q.textContent + ' · 时间线从此刻起按它记录'); return loadFgEngine(); }).catch(function (e) { toast(errText(e), 'err'); loadFgEngine(); }); }
+    else if (k === 'act-detail') { busyWhile(sg, api.action('dpi_activity_detail', { enabled: v })).then(function () { toast('在 App 里干什么：' + (v === '1' ? '已开启 · 下一轮采样起显示' : '已关闭')); return loadFgEngine(); }).catch(function (e) { toast(errText(e), 'err'); loadFgEngine(); }); }
     else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
     else if (k === 'qos-mode') setQos('mode', v, q);
     else if (k === 'qos-scale') setQos('scale', v, q);

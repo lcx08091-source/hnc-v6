@@ -186,6 +186,33 @@ func TestCacheReadWrite(t *testing.T) {
 	}
 }
 
+// TestCacheClear v5.33: 清空内存 + 删文件; 清完再查是 miss, 没变化的 CacheSave 不重建文件。
+func TestCacheClear(t *testing.T) {
+	r, _ := testResolver(t)
+	r.CacheUpdate(macA, "pixel-8", "dhcp")
+	if err := r.CacheSave(); err != nil {
+		t.Fatal(err)
+	}
+	if err := r.CacheClear(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(r.CachePath); !os.IsNotExist(err) {
+		t.Fatalf("缓存文件应删掉: %v", err)
+	}
+	if _, _, ok := r.cacheLookup(macA); ok {
+		t.Fatal("清空后不该再命中")
+	}
+	if err := r.CacheSave(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(r.CachePath); !os.IsNotExist(err) {
+		t.Fatalf("没有新内容时 CacheSave 不该重建文件: %v", err)
+	}
+	if err := r.CacheClear(); err != nil { // 文件不在也不报错
+		t.Fatalf("重复清理: %v", err)
+	}
+}
+
 // TestOUITableAnchors 内置表(oui_table.txt, v5.33 起唯一数据源)可载入、
 // 关键锚点在、有序(二分前提)。格式 / 重复检查在 test/unit/test_v531_oui_table_sync.sh。
 func TestOUITableAnchors(t *testing.T) {

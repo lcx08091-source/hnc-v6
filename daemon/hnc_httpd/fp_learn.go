@@ -30,12 +30,22 @@
 // fpKeyOf(ja4, alpn, port)+"|"+qtp 下(门槛不变); 识别时先查带 qtp 的 key, 没有 / 不可用 /
 // 判为通用再回落旧 key(旧版学到的 QUIC 条目只读兜底, 随 14 天半衰期自然淘汰)。
 //
+// v5.34 连接自己的 SNI 优先: 五元组绑上的 ClientHello 带着 dpid 当时对 SNI 的规则库归类。
+// 归属顺序里它排在「目的 IP → 域名」全局表之前(用户 IP 规则之后): 全局表一个 IP 只记一个
+// 名字, 国内大厂 CDN 常常一个 IP 同时服务几个 App, 别的 App / 别的设备连同一个 IP 就会被
+// 算成表里那个。SNI 规则库认不出(或 ECH 外层)时照旧走全局表。只认五元组精确命中的绑定,
+// 不用「同设备同目的同端口」的近似绑定(同一台设备可能有两个 App 连同一个 CDN IP)。
+// 共享 IP 统计(/api/dpi_fp 的 shared_ip): 最近 10 分钟的 ClientHello 里, 有多少个目的 IP
+// 出现了属于 ≥ 2 个应用的 SNI —— 全局表在这些 IP 上必然认错一部分。
+//
 // 持久化: data/fp_learned.json, 有变化时最多 10 分钟写一次(进程被杀最多丢 10 分钟的学习)。
 //
 //	GET /api/dpi_fp[?all=1] → {ok, learned:[{ja4, alpn, port_class, qtp, app_id, name, category,
 //	    purity, support, devices, last_seen, usable, generic, conf, top:[{id,name,share}]}],
 //	    stats:{flows_seen, flows_learned, flows_attributed_by_fp, flows_attributed_by_qtp,
-//	    generic_skipped, entries, usable, binds, seed}, thresholds:{...}, user_rules:[...]}
+//	    flows_attributed_by_sni, sni_overrode_ip, generic_skipped, entries, usable, binds, seed},
+//	    shared_ip:{window_sec, ips, conflict_ips, share, examples:[{ip, apps:[name]}]},
+//	    thresholds:{...}, user_rules:[...]}
 package main
 
 import (
@@ -76,6 +86,9 @@ const (
 	fpUserJA4MinSupport   = 10.0
 	fpUserJA4GenericShare = 0.30
 	fpListCap             = 300
+	// v5.34: 共享 IP 统计的窗口(与 dpi_flows.json 保留的时长一致)与示例条数
+	fpSharedWindowSec = 600
+	fpSharedExamples  = 5
 )
 
 type fpAppCount struct {
@@ -246,6 +259,9 @@ type fpBind struct {
 	ech                  bool
 	ts, seen             int64
 	counted, skipped     bool
+	// v5.34: 这条连接自己的 SNI 与 dpid 当时的规则库归类(ECH 外层不记)
+	sni, app, appName, cat string
+	sniCounted             bool
 }
 
 type fpStats struct {
@@ -255,6 +271,9 @@ type fpStats struct {
 	GenericSkipped  uint64 `json:"generic_skipped"`
 	// v5.27 T2: 其中靠「JA4 + QUIC 传输参数」条目归属的连接数
 	FlowsByQTP uint64 `json:"flows_attributed_by_qtp,omitempty"`
+	// v5.34: 按连接自己的 SNI 归属的连接数; 其中与「目的 IP → 域名」全局表的结论不同的
+	FlowsBySNI    uint64 `json:"flows_attributed_by_sni,omitempty"`
+	SNIOverrodeIP uint64 `json:"sni_overrode_ip,omitempty"`
 }
 
 type fpSeedEntry struct {
@@ -556,6 +575,9 @@ func (st *fpStore) ingestLocked(boot int64, recs []fpFlowRec, names map[string]i
 		st.stats.FlowsSeen++
 		fk := fpKeyOf(r.JA4, r.ALPN, fpPortClass(r.Dport))
 		b := &fpBind{fpKey: fk, ja4: r.JA4, mac: mac, dip: r.DIP, dport: r.Dport, ech: r.ECHOuter, ts: r.Ts, seen: ts}
+		if r.SNI != "" && !r.ECHOuter {
+			b.sni, b.app, b.appName, b.cat = strings.ToLower(r.SNI), r.App, r.AppName, r.Category
+		}
 		// v5.27 T2: QUIC 带传输参数指纹 → 学到更细的 key 下(旧 key 不再增长)
 		if q := fpCleanQTP(r.QTP); q != "" && r.Proto == "udp" {
 			b.qtp, b.qKey = q, fpKeyQ(r.JA4, r.ALPN, fpPortClass(r.Dport), q)
@@ -641,7 +663,8 @@ func splitCtKey(key string) (proto, src string, sport int, dst string, dport int
 }
 
 // attribute 按完整优先级给一条连接(ct key)归属:
-// 用户 ip+port > appForIPSrc(用户 ip/domain > ip_app_map > 域名归类) > 用户 ja4 > 学习指纹 > 种子。
+// 用户 ip(+port) > 连接自己的 SNI(用户域名规则 > 规则库, v5.34) >
+// appForIPSrc(用户 ip/domain > ip_app_map > 域名归类) > 用户 ja4 > 学习指纹 > 种子。
 // 返回的 flowAttr.JA4 即使未归属也可能非空(给界面「纠正」用)。
 func (st *fpStore) attribute(key string, apps map[string]ipApp, names map[string]ipName, now time.Time) (flowAttr, bool) {
 	proto, src, _, dst, dport, ok := splitCtKey(key)
@@ -650,6 +673,9 @@ func (st *fpStore) attribute(key string, apps map[string]ipApp, names map[string
 	}
 	if a, ok := dpiUserMatchIP(dst, dport, now); ok {
 		return flowAttr{App: a, Src: "user", Conf: 1}, true
+	}
+	if fa, ok := st.sniAttr(key, dst, apps, names, now); ok {
+		return fa, true
 	}
 	if a, s, ok := appForIPSrc(dst, apps, names); ok {
 		fa := flowAttr{App: a, Src: s}
@@ -664,6 +690,110 @@ func (st *fpStore) attribute(key string, apps map[string]ipApp, names map[string
 	st.mu.Lock()
 	defer st.mu.Unlock()
 	return st.fpAttrLocked(key, proto, src, dst, dport, names, now.Unix())
+}
+
+// sniAttr v5.34: 五元组精确绑上的 ClientHello 有 SNI 且认得出(用户域名规则或规则库归类)→
+// 按它归属(Src "user" / "sni")。认不出 / 没有 / ECH 外层 → false, 由调用方走全局表。
+// 第一次按 SNI 归属时计数, 并记下全局表在这条连接上会不会给出别的应用。
+func (st *fpStore) sniAttr(key, dst string, apps map[string]ipApp, names map[string]ipName, now time.Time) (flowAttr, bool) {
+	st.mu.Lock()
+	b := st.binds[key]
+	if b == nil || b.sni == "" {
+		st.mu.Unlock()
+		return flowAttr{}, false
+	}
+	b.seen = now.Unix()
+	sni, app, appName, cat, ja4, counted := b.sni, b.app, b.appName, b.cat, b.ja4, b.sniCounted
+	st.mu.Unlock()
+	fa := flowAttr{JA4: ja4}
+	if a, ok := dpiUserMatchName(sni); ok {
+		fa.App, fa.Src, fa.Conf = a, "user", 1
+	} else if app != "" {
+		if appName == "" {
+			appName = app
+		}
+		fa.App, fa.Src = ipApp{ID: app, Name: appName, Category: cat}, "sni"
+	} else {
+		return flowAttr{}, false
+	}
+	if !counted {
+		g, _, gok := appForIPSrc(dst, apps, names)
+		st.mu.Lock()
+		if !b.sniCounted {
+			b.sniCounted = true
+			st.stats.FlowsBySNI++
+			if gok && g.ID != fa.App.ID {
+				st.stats.SNIOverrodeIP++
+			}
+			st.dirty = true
+		}
+		st.mu.Unlock()
+	}
+	return fa, true
+}
+
+// connSNI v5.34: 五元组精确绑上的 ClientHello 的 SNI(没有 / ECH 外层为空)。连接列表用它
+// 显示这条连接自己的域名, 而不是「目的 IP → 域名」全局表里别的连接留下的名字。
+func (st *fpStore) connSNI(key string) string {
+	st.mu.Lock()
+	defer st.mu.Unlock()
+	if b := st.binds[key]; b != nil {
+		return b.sni
+	}
+	return ""
+}
+
+// sharedIPLocked v5.34: 最近 fpSharedWindowSec 秒的 ClientHello 里, 目的 IP 上出现的「真应用」
+// 个数(规则库认得出的 SNI, 广告 / SDK / CDN 档不算)。返回有应用的 IP 数、其中 ≥ 2 个应用的
+// IP 数, 以及按应用数从多到少的几个示例。
+func (st *fpStore) sharedIPLocked(now int64) (ips, conflicts int, examples []map[string]interface{}) {
+	byIP := map[string]map[string]string{} // ip → app id → 显示名
+	for _, b := range st.binds {
+		if b.app == "" || now-b.ts > fpSharedWindowSec || appTier(b.cat) == tierHidden || strings.HasPrefix(b.app, "_") {
+			continue
+		}
+		m := byIP[b.dip]
+		if m == nil {
+			m = map[string]string{}
+			byIP[b.dip] = m
+		}
+		n := b.appName
+		if n == "" {
+			n = b.app
+		}
+		m[b.app] = n
+	}
+	type ex struct {
+		ip    string
+		names []string
+	}
+	var exs []ex
+	for ip, m := range byIP {
+		ips++
+		if len(m) < 2 {
+			continue
+		}
+		conflicts++
+		var ns []string
+		for _, n := range m {
+			ns = append(ns, n)
+		}
+		sort.Strings(ns)
+		exs = append(exs, ex{ip, ns})
+	}
+	sort.Slice(exs, func(i, j int) bool {
+		if len(exs[i].names) != len(exs[j].names) {
+			return len(exs[i].names) > len(exs[j].names)
+		}
+		return exs[i].ip < exs[j].ip
+	})
+	for i, e := range exs {
+		if i >= fpSharedExamples {
+			break
+		}
+		examples = append(examples, map[string]interface{}{"ip": e.ip, "apps": e.names})
+	}
+	return
 }
 
 func (st *fpStore) fpAttrLocked(key, proto, src, dst string, dport int, names map[string]ipName, now int64) (flowAttr, bool) {
@@ -822,14 +952,14 @@ func (st *fpStore) findJA4(mac, dstIP string, port int, now time.Time) string {
 	return best.ja4
 }
 
-// fpClassify app_usage 记账用: 只返回 用户规则 / 指纹 / 种子 的归属; 规则库与域名归类的
+// fpClassify app_usage 记账用: 只返回 用户规则 / 连接自己的 SNI(v5.34)/ 指纹 / 种子 的归属; 规则库与域名归类的
 // 交给原有分支(保持共现推断/隧道等逻辑的顺序)。VPN 签名流不碰。
 func (cx *identCtx) fpClassify(dl appUsageDelta) (flowAttr, bool) {
 	if cx == nil || cx.fp == nil || dl.Key == "" || cx.sigKey[dl.Key] {
 		return flowAttr{}, false
 	}
 	fa, ok := cx.fp.attribute(dl.Key, cx.apps, cx.names, cx.now)
-	if !ok || (fa.Src != "user" && fa.Src != "fp" && fa.Src != "seed" && fa.Src != "imported") {
+	if !ok || (fa.Src != "user" && fa.Src != "sni" && fa.Src != "fp" && fa.Src != "seed" && fa.Src != "imported") {
 		return flowAttr{}, false
 	}
 	return fa, true
@@ -895,11 +1025,23 @@ func (s *server) apiDPIFP(w http.ResponseWriter, r *http.Request) {
 		m["top"] = tl
 		rows = append(rows, row{m, v.Usable, v.Support})
 	}
+	sIPs, sConf, sEx := st.sharedIPLocked(ts)
+	sShare := 0.0
+	if sIPs > 0 {
+		sShare = round2(float64(sConf) / float64(sIPs))
+	}
+	if sEx == nil {
+		sEx = []map[string]interface{}{}
+	}
 	stats := map[string]interface{}{
 		"flows_seen": st.stats.FlowsSeen, "flows_learned": st.stats.FlowsLearned,
 		"flows_attributed_by_fp": st.stats.FlowsAttributed, "generic_skipped": st.stats.GenericSkipped,
 		"flows_attributed_by_qtp": st.stats.FlowsByQTP,
-		"entries":                 len(st.m), "usable": usable, "binds": len(st.binds), "seed": len(st.seedLocked()),
+		"flows_attributed_by_sni": st.stats.FlowsBySNI, "sni_overrode_ip": st.stats.SNIOverrodeIP,
+		"entries": len(st.m), "usable": usable, "binds": len(st.binds), "seed": len(st.seedLocked()),
+	}
+	shared := map[string]interface{}{
+		"window_sec": fpSharedWindowSec, "ips": sIPs, "conflict_ips": sConf, "share": sShare, "examples": sEx,
 	}
 	st.mu.Unlock()
 	sort.Slice(rows, func(i, j int) bool {
@@ -919,7 +1061,7 @@ func (s *server) apiDPIFP(w http.ResponseWriter, r *http.Request) {
 		list = append(list, rw.m)
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok": true, "learned": list, "stats": stats,
+		"ok": true, "learned": list, "stats": stats, "shared_ip": shared,
 		"thresholds": map[string]interface{}{
 			"min_support": fpMinSupport, "min_support_multi_device": fpMinSupportMulti, "min_devices": fpMinDevices,
 			"min_purity": fpMinPurity, "half_life_days": fpHalfLifeSec / 86400, "user_ip_ttl_days": int(dpiUserIPTTL / (24 * time.Hour)),

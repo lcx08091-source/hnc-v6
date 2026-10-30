@@ -210,7 +210,7 @@ var FG_ST = { active: '正在用', paused: '暂停中', idle: '空闲', stale: '
 function fgNowHtml(d) {
   var f = d.fg; if (!f) return '';
   var main = f.state === 'active' && f.name ? esc(f.label || '正在用：' + f.name) + ' <small class="num">' + pct100(f.confidence) + '%</small>' : esc(FG_ST[f.state] || f.state);
-  return '<div class="fgline"><b>' + main + '</b>' + ttTag(d) + (f.bg_label ? '<span class="note">' + esc(f.bg_label) + '</span>' : '') +
+  return '<div class="fgline"><b>' + main + '</b>' + (f.state === 'active' ? fgActTag(d, f) : ttTag(d)) + (f.bg_label ? '<span class="note">' + esc(f.bg_label) + '</span>' : '') +
     '<button class="linkish" data-act="fg-tl" style="margin-left:auto">前台时间线</button></div>';
 }
 var FG_COL = ['#007AFF', '#FF2D55', '#34C759', '#FF9500', '#AF52DE', '#5AC8FA', '#FFCC00', '#8E8E93'];
@@ -561,9 +561,18 @@ function catShare(d) {
 function pct100(v) { v = num(v); return Math.round(v <= 1 ? v * 100 : v); }
 function fgActive(d) { var f = d.fg; return d.online && f && f.state === 'active' && f.name ? f : null; }
 function ttTag(d) { var t = d.ttype; return d.online && t && t.label && t.type !== 'background' ? '<span class="tt">此刻在：' + esc(t.label) + '</span>' : ''; }
+/* v5.34 应用内活动细分: 前台应用自己在做什么(推测); 没有时退回整台设备的「此刻在」 */
+var ACT_SRC = { domain: '按域名', shape: '按流量形态' };
+/* v5.34.0-rc2: 只说「可能在…」+ 高 / 中 / 低, 不给百分比(推测, 不是测量) */
+function actLevel(c) { c = +c || 0; return c >= 0.7 ? '高' : c >= 0.5 ? '中' : '低'; }
+function fgActTag(d, f) {
+  var a = f && f.activity;
+  if (!a || !a.label) return ttTag(d);
+  return '<span class="tt" title="' + esc('推测 · ' + (ACT_SRC[a.src] || '') + ' · 把握' + actLevel(a.conf)) + '">可能在' + esc(a.label) + ' <small>' + actLevel(a.conf) + '</small></span>';
+}
 function appsLine(d) {
   var cb = callBadge(d), f = fgActive(d);
-  if (f) return '<span class="lb">正在用</span><span class="a fg">' + appNmH(f.app_id, f.name) + ' <small class="num">' + pct100(f.confidence) + '%</small></span>' + ttTag(d) + cb +
+  if (f) return '<span class="lb">正在用</span><span class="a fg">' + appNmH(f.app_id, f.name) + ' <small class="num">' + pct100(f.confidence) + '%</small></span>' + fgActTag(d, f) + cb +
     d.live.filter(function (a) { return (a.id || a.app_id) !== f.app_id; }).slice(0, 2).map(function (a) { return '<span class="a dim' + (a.system ? ' sys' : '') + '">' + appNmH(a.id, a.name) + '</span>'; }).join('');
   if (cb && !d.live.length) return '<span class="lb">正在</span>' + cb;
   if (d.online && d.live.length) return '<span class="lb">在用</span>' + cb + d.live.slice(0, 3).map(function (a) { return '<span class="a' + (a.system ? ' sys' : '') + '">' + appNmH(a.id, a.name) + ' <small class="num">' + bpsTxt(a.bps) + '</small></span>'; }).join('');

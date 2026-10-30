@@ -339,7 +339,7 @@ function renderSettings(anim1) {
     sFold('ttl', ['orange', 'refresh'], '离线规则自动清理', num(c.stale_rule_ttl_days, 30) ? '设备离线超过 ' + num(c.stale_rule_ttl_days, 30) + ' 天后，自动删掉它的限速/延迟规则' : '已关闭 · 离线设备的规则永久保留',
       '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="ttl-days" type="number" min="0" max="3650" value="' + num(c.stale_rule_ttl_days, 30) + '"><span class="u">天</span></span><button class="btn pri press" data-act="ttl-save">保存</button></div><div class="note">填 0 = 永不自动清理。黑名单不受影响。</div>',
       val(num(c.stale_rule_ttl_days, 30) ? num(c.stale_rule_ttl_days, 30) + ' 天' : '关闭')) +
-    sBtn(['orange', 'trash'], '清理缓存', 'hostname_cache · dev_class_cache', 'cache-clear', '清理', 'warn') +
+    sBtn(['orange', 'trash'], '清理设备名缓存', '忘掉自动记住的设备名（hostname_cache.json），手动改的名字不受影响', 'cache-clear', '清理', 'warn') +
     sBtn(['green', 'down'], '导出规则', '复制 rules.json（限速/延迟/黑名单/模板）', 'rules-json', '导出') +
     (KSU ? sBtn(['cyan', 'doc'], 'JSON 健康面板', 'rules / devices / tokens 的完整性与备份', 'json-health', '打开') : '') +
     sBtn(['purple', 'down'], '导出诊断包', '快照、配置、日志尾部和 tc/iptables/ip 状态', 'debug-bundle', '导出')]);
@@ -458,9 +458,18 @@ function paintFP() {
     (use.length ? '<div class="dbox">' + use.slice(0, 12).map(function (x) {
       return '<div class="row2"><span class="k" style="color:var(--text-1)">' + esc(x.name || x.app_id) + ' <span class="note mono">' + esc(String(x.ja4).slice(0, 10)) + ' · ' + esc(x.port_class || '') + (x.qtp ? ' · ' + esc(String(x.qtp).replace(/^qtp1_/, '').slice(0, 8)) : '') + '</span></span><span class="v">' + pct100(x.purity) + '% · ' + num(x.devices) + ' 台</span></div>';
     }).join('') + '</div>' : '<div class="note">还在学习：同一个指纹在 ≥2 台设备上见过 20 次以上、且 90% 都属于同一个应用后才会用来识别。</div>') +
-    '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠指纹认出 ' + num(st.flows_attributed_by_fp) + ' 条。指纹只在域名看不到（ECH / 直连 IP）时兜底，不会覆盖规则库。</div>';
+    '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠指纹认出 ' + num(st.flows_attributed_by_fp) + ' 条。指纹只在域名看不到（ECH / 直连 IP）时兜底，不会覆盖规则库。</div>' + sharedIpNote(r.shared_ip, st);
   el.innerHTML = h;
   var sw = $('[data-foldkey="fpl"] .s'); if (sw) sw.textContent = ur.length + ' 条纠正 · ' + use.length + ' 个可用指纹';
+}
+/* v5.34: 共享 IP —— 同一个 CDN IP 上同时有几个 App 时, 按每条连接自己的域名归属 */
+function sharedIpNote(sh, st) {
+  if (!sh || !num(sh.ips)) return '';
+  var t = '最近 ' + Math.round(num(sh.window_sec) / 60) + ' 分钟：' + num(sh.ips) + ' 个服务器 IP 里有 ' + num(sh.conflict_ips) + ' 个同时承载多个应用（' + pct100(sh.share) + '%）';
+  if (num(st.flows_attributed_by_sni)) t += ' · 累计 ' + num(st.flows_attributed_by_sni) + ' 条连接按它自己的域名识别，其中 ' + num(st.sni_overrode_ip) + ' 条纠正了按 IP 会认错的结果';
+  var ex = Array.isArray(sh.examples) ? sh.examples.slice(0, 3) : [];
+  if (ex.length) t += '。例如 ' + ex.map(function (x) { return '<span class="mono">' + esc(x.ip) + '</span>：' + (Array.isArray(x.apps) ? x.apps.map(function (a) { return esc(a); }).join(' / ') : ''); }).join('；');
+  return '<div class="note">' + t + '。</div>';
 }
 /* ── v5.24 T5: 识别自评(只用这台手机自己的流量当标准答案) ── */
 S.eval = null; S.evalDays = 1;
@@ -592,7 +601,11 @@ function paintFgEngine() {
   el.innerHTML = seg('fg-engine', [['classic', '经典'], ['hmm', '新（实验）']], r.engine || 'classic', 'small') +
     (num(r.rounds) ? '<div class="note">过去 24 小时：经典 切换 ' + num(c.switches_per_hour) + ' 次/小时、短于 30 秒的 ' + num(c.short_segments) + ' 段；新 ' + num(hm.switches_per_hour) + ' 次/小时、' + num(hm.short_segments) + ' 段；两者一致 ' + num(r.agree_pct) + '%</div>'
       : '<div class="note">过去 24 小时还没有热点设备的流量，暂无对比。</div>') +
-    '<div class="note">新引擎更不容易来回跳；切换后前台时间线从此刻起按新引擎记录。只影响「正在用什么」的显示和前台时间线，不影响识别、限速和限时。</div>';
+    '<div class="note">新引擎更不容易来回跳；切换后前台时间线从此刻起按新引擎记录。只影响「正在用什么」的显示和前台时间线，不影响识别、限速和限时。</div>' +
+    /* v5.34.0-rc2: 「在 App 里干什么」总开关, 默认关 */
+    '<div class="note" style="margin:14px 0 -2px">在 App 里干什么（实验）</div>' +
+    seg('act-detail', [['0', '关'], ['1', '开']], r.activity_detail ? '1' : '0', 'small') +
+    '<div class="note">开启后在「正在用」旁推测这个应用此刻大致在干什么（如「可能在看直播」「可能在语音通话」），只按连接的流量节奏和域名推测，不看内容。设备被限速、走 VPN、硬件加速旁路或省电档时不显示。默认关。</div>';
   placeSegs(el);
 }
 /* v5.27 T6: 我的规则包(导出 / 导入 / 清除已导入) */

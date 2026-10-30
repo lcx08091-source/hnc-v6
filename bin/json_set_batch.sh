@@ -9,7 +9,7 @@
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
-HNC=${HNC:-/data/local/hnc}
+HNC=${HNC:-${HNC_DIR:-/data/local/hnc}}
 RULES=${RULES:-$HNC/data/rules.json}
 SCRIPT_DIR=${0%/*}
 [ "$SCRIPT_DIR" = "$0" ] && SCRIPT_DIR="."

@@ -80,7 +80,7 @@ hnc_clock_jump() {
     case "$up" in ''|*[!0-9]*) return 1 ;; esac
     st="$(_hnc_clock_dir)/run/clock.$name"
     pw=""; pu=""
-    [ -f "$st" ] && read -r pw pu < "$st" 2>/dev/null
+    [ -f "$st" ] && read -r pw pu 2>/dev/null < "$st"
     mkdir -p "$(_hnc_clock_dir)/run" 2>/dev/null
     echo "$now $up" > "$st" 2>/dev/null
     case "$pw" in ''|*[!0-9]*) return 1 ;; esac

@@ -501,6 +501,12 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 			item["name_src"] = n.Src
 			label = n.Name
 		}
+		// v5.34: 这条连接自己的 SNI 优先于全局表(同一个 CDN IP 上可能是别的 App 留下的名字)
+		if sni := fpSt.connSNI(k); sni != "" {
+			item["name"] = sni
+			item["name_src"] = "sni"
+			label = sni
+		}
 		// v6.x DPI v2(fp_learn.go): 用户纠正 > 规则库 > 学习指纹; app_src = user|rule|name|fp|seed,
 		// app_conf = 置信度(fp/seed/user), ja4 = 这条连接的 ClientHello 指纹(给「纠正」用)
 		fa, faOK := fpSt.attribute(k, apps, names, now)

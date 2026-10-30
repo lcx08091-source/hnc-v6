@@ -27,7 +27,7 @@
 #   1 = 有 FAIL
 #   2 = 有 WARN(非致命但需注意)
 
-HNC=${HNC:-/data/local/hnc}
+HNC=${HNC:-${HNC_DIR:-/data/local/hnc}}
 JSON_MODE=0
 [ "$1" = "--json" ] && JSON_MODE=1
 

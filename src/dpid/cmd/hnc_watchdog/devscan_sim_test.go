@@ -108,8 +108,9 @@ func TestDevscanSim(t *testing.T) {
 			t.Fatalf("simnet %v: %v %s", args, err, out)
 		}
 	}
-	// 在用网的设备: 后台每 20 秒 poke 一次
-	var keepMu sync.Mutex
+	// 在用网的设备: 后台每 20 秒 poke 一次。pokeMu 在一整轮 poke 期间持有 —— 名单是这一轮
+	// 开头取的, 负载高时一轮要好几秒, setKeep(false) 之后这一轮还可能 poke 到它(见第 7 步)。
+	var keepMu, pokeMu sync.Mutex
 	keep := map[string]bool{}
 	setKeep := func(name string, on bool) { keepMu.Lock(); keep[name] = on; keepMu.Unlock() }
 	stopKeep := make(chan struct{})
@@ -130,9 +131,11 @@ func TestDevscanSim(t *testing.T) {
 					}
 				}
 				keepMu.Unlock()
+				pokeMu.Lock()
 				for _, n := range names {
 					_ = exec.Command("bash", simnet, "poke", n).Run()
 				}
+				pokeMu.Unlock()
 			}
 		}
 	}()
@@ -313,7 +316,18 @@ func TestDevscanSim(t *testing.T) {
 	waitWant("6", 20*time.Second, want)
 
 	t.Logf("7. watch 悄悄离开(没人找它, 表项一直 STALE)")
+	// 先停 poke、等在途那一轮跑完, 再等表项离开 DELAY / PROBE(刚 poke 过时网关回的 ICMP
+	// 会把表项推进 DELAY, 5 秒后探测; 这时设备已经拔了 → FAILED → 「悄悄离开」变成「有人找它」,
+	// 十来秒就下线 —— 全量套件负载高时这一步因此偶发失败)。
 	setKeep("watch", false)
+	pokeMu.Lock()
+	pokeMu.Unlock()
+	if !waitFor(15*time.Second, func() bool {
+		n := neighOf(watch)
+		return n != "" && !strings.Contains(n, "DELAY") && !strings.Contains(n, "PROBE")
+	}) {
+		t.Fatalf("7. watch 的表项 15 秒内没稳定下来: %s", neighOf(watch))
+	}
 	sim("del", "watch", "--quiet")
 	time.Sleep(15 * time.Second)
 	if _, ok := devs()[watch]; !ok {

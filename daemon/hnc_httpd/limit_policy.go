@@ -882,6 +882,23 @@ func (c *limitCtl) tick(now time.Time) {
 	c.viewMu.Unlock()
 }
 
+// limitedNow 配额 / 分时段此刻正在给哪些设备限速(effective 的 down/up > 0); nil 安全。
+// v5.34.0-rc2: 应用内活动细分据此不信被限速设备的流形态视频 / 直播(app_activity.go)。
+func (c *limitCtl) limitedNow() map[string]bool {
+	if c == nil {
+		return nil
+	}
+	c.viewMu.RLock()
+	defer c.viewMu.RUnlock()
+	out := map[string]bool{}
+	for mac, v := range c.view {
+		if numOf(v.Effective["down_mbps"]) > 0 || numOf(v.Effective["up_mbps"]) > 0 {
+			out[mac] = true
+		}
+	}
+	return out
+}
+
 func kbitToMbps(k int) float64 { return float64(k) / 1000 }
 
 func effView(e effectiveResult) map[string]interface{} {

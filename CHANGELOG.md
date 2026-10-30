@@ -14,6 +14,78 @@
 
 ---
 
+## [5.34.0-rc2] - 2026-10-19
+
+**预览版 · 应用内活动细分的误判修正 + 总开关 + 真值采集工具**(维护者 2026-10-19「开始吧 按脚本测试允许 同时让子 Agent 做一个最小化的流量采集 App」)。rc1 的「在 App 里干什么」经四方讨论(对着代码逐条核过)找出几处会说错的地方,这一版修掉,并改成默认关、在设置里打开。
+
+### Changed
+
+- **「在 App 里干什么」默认关**:设置 →「前台识别引擎」折叠里新增「在 App 里干什么(实验)」开 / 关(`dpi_activity_detail` 动作,写 `data/dpi_experiment.json` 的 `activity_detail`)。关着时不计算、接口不返回,关掉立即消失。
+- **措辞**:设备卡显示「可能在看直播」「可能在刷抖音」+ 把握 高 / 中 / 低,不再给百分比(这是推测,不是测量)。抖音 / 快手 / TikTok 的视频改叫「刷抖音 / 刷快手 / 刷 TikTok」;游戏去掉「在大厅」(和匹配中分不开);腾讯会议「开会中 / 开会中(有视频)」。
+
+### Fixed
+
+- **B站「视频通话」**:B站 P2P 的双向 UDP 被流形态判成视频通话,原样显示成「B站 · 视频通话」。现在流形态判出的标签只有在这个应用 / 类别写了说法时才用(`app_activity.json` 的 `labels` 兼作白名单),视频类没有通话 → 不说。
+- **会议旁听 / 通话关摄像头说成「看直播」**:下行稳定、几乎没上行的 UDP 在会议 / 社交类应用里改算语音通话;社交类的直播只认域名(视频号直播)。
+- **HNC 自己限速把点播削成恒速 → 「看直播」**:设备被限速(设备限速、配额 / 分时段生效、全局整形)或该应用被应用限速时,流形态来的视频 / 直播不用;域名来的、通话、游戏照常。
+- **看评论时抖音在预取,照样满分「刷短视频」**:域名规则命中但流形态判成别的 → 仍按域名的标签,但来源降为流形态(把握 ×0.8)。抖音 / 快手 / 虎牙的直播只认拉流域名。
+- **省电档 / VPN / 硬件加速旁路时照样输出**:采样间隔 > 45 秒、设备疑似走 VPN、网络共享硬件加速正在旁路(计数不全)时不显示。
+
+### Internals
+
+- `app_activity.go`:`appActShapeAllowed`(白名单 + `domain_only`)、`appActivityTag` 加类别 / UDP 参数与 `domain_weak`、总开关 `appActEnabled` / `appActEnabledFor` / `actionDPIActivityDetail`、每轮守卫 `appActGuardRefresh`(锁外,关着时不读任何文件)、输出闸门 `appActGate`;`limit_policy.go` 新增 `limitCtl.limitedNow()`;`fg_model.go` 出视图前过闸门、`fgApplyStale` 开关关掉即去掉活动;`/api/fg_compare` 新增 `activity_detail`。`data/app_activity.json` 的 `categories` 改成 `{labels, domain_only}` 结构,新增 `browser` 类别。
+- 新测试 `app_activity_guard_test.go`(在 rc1 上编译不过 / 失败):白名单与 UDP 改判、域名冲突降级、限速守卫(设备 / 应用 / 全局整形 / 配额视图)、输出闸门、总开关读写与接口;`app_activity_test.go` 跟着新签名与说法更新,并检查应用的 `domain_only` 都有对应域名规则。
+- 前端 `settings.js`(开关)、`main.js`(动作)、`devices.js`(「可能在」+ 高中低);测试 UI 假后端支持开关(关掉时设备不带 `activity`)。
+- 改了 Go(httpd),合并到 main 后 CI 要重编。
+
+### Added(维护者工具,不进模块包)
+
+- **`tools/act_probe/` 采集 App(`io.hnc.probe`,真值记录器)**:装在连着热点的测试手机上,按剧本(默认 18 步约 44 分钟:微信通话 / 视频号 / 朋友圈、抖音刷视频 / 直播 / 发视频、B站、王者对局 / 下载、腾讯会议、熄屏与后台下载对照)提示操作,每 2–5 秒记录本机真实状态(使用情况记录的前台包名与 Activity、音频模式、相机可用性回调、录音占用、亮灭屏),按可导入的标注规则算「此刻真实在干什么」;可选每 10 秒用配对令牌读 HNC 的 `/api/devices` 对照,出按步汇总与混淆计数(含「无输出」列),导出 JSON(不含令牌)。
+- 不抓包、不做中间人、不用无障碍、不申请相机 / 麦克风 / 位置 / 存储权限;连 HNC 用「首次确认证书指纹 + 只认这一个证书和这个 IP」,只装在自己的连接上。测试手机有 root 时可开 root 模式:常驻 su 会话里只跑一条固定的只读 `dumpsys`(白名单精确匹配),多拿到前台 Activity 完整类名、占用相机 / 录音的具体包名、真实音频模式;解析不出就退回免 root 的值。
+- 不用 Gradle:`sh tools/act_probe/build.sh`(SDK build-tools 34 + android-34,调试签名,APK 约 78 KB);`sh tools/act_probe/test.sh`(纯 Java 核心 198 项);`sh tools/act_probe/it_hnc.sh`(可选,要 Go + root:本机起真的 `hnc_httpd`,用 App 原样的 `HncClient` 走证书固定 → 配对 → 带令牌读设备列表,daemon 改鉴权时会在这里暴露;退出时删掉 httpd 生成的私钥)。真机还没跑过。
+- 直播 / 点播 / 上传这类 Activity 类名默认是 7 条「待核实」规则(不生效),要在真机「Activity」页看过后写;腾讯会议包名 `com.tencent.wemeet.app` 待核实。
+
+## [5.34.0-rc1] - 2026-10-18
+
+**预览版 · 识别更准 + 应用内活动细分**(维护者 2026-10-18「第一条和第二部分细分都做」)。都只用已有的元数据(域名、包大小、节奏),不看内容。
+
+### Added
+
+- **应用内活动细分(推测)**:设备卡「正在用 抖音」后面显示它此刻在做什么 ——「刷短视频 / 看直播 / 发视频」、微信「语音通话 / 视频通话 / 聊天 / 朋友圈」、王者荣耀「对局中 / 下载更新 / 在大厅」……(`/api/devices[].fg.activity`)。只看前台应用自己的连接(原来的「此刻在」是整台设备合起来判的):每条连接先按 `data/app_activity.json` 的域名用途规则(抖音点播 `douyinvod.com`、抖音直播拉流 `pull-*.douyincdn.com`、快手直播 `*.pull.yximgs.com`、虎牙直播 `*.flv/hls.huya.com`),再按流形态打标签;按应用累计字节、30 秒衰减,通话 / 游戏字节少、打分 ×5,新结论连续 2 轮领先才切换。说法:23 个常用应用的专属说法 > 9 个类别 > 通用说法;`/data/local/hnc/etc/app_activity.json` 可整份覆盖。不影响归属、限速、时长。
+
+### Changed
+
+- **每条连接按它自己的 SNI 归属**:dpid 本来就给每条连接记了握手时的域名和规则库归类(`run/dpi_flows.json`),但 httpd 记账用的是「目的 IP → 域名」全局表 —— 一个 IP 只记一个名字,国内大厂 CDN 常常一个 IP 同时服务几个 App(抖音 / 头条 / 西瓜、淘宝 / 优酷……),别的 App、别的设备连同一个 IP 就被算成表里那个。现在顺序是「用户 IP 规则 > 连接自己的 SNI(用户域名规则 > 规则库)> 全局表 > 指纹」;SNI 认不出 / ECH 外层时照旧走全局表;只认五元组精确命中的握手,不借用同设备同目的的别的连接。使用时长、前台模型、流量统计、连接列表一致;连接列表显示这条连接自己的域名。
+- **共享 IP 统计**:设置页「指纹识别」显示最近 10 分钟有多少个服务器 IP 同时承载多个应用、举例,以及累计多少条连接按自己的域名识别、其中多少条纠正了按 IP 会认错的结果(`/api/dpi_fp` 的 `shared_ip`、`stats.flows_attributed_by_sni` / `sni_overrode_ip`)。真机跑一段就能看出这个问题有多常见、改了多少。
+
+### Internals
+
+- 新文件 `daemon/hnc_httpd/app_activity.go`、`data/app_activity.json`;`fp_learn.go`(`fpBind` 带 SNI / 归类、`sniAttr`、`connSNI`、`sharedIPLocked`)、`fg_model.go`(`fgObs.Act`、`fgApp.act`、`fgView.Activity`)、`app_usage.go`、`api_conn.go`;前端 `devices.js`(`fgActTag`)、`settings.js`(`sharedIpNote`);假后端同步。
+- 新测试(在 rc3 上编译不过或失败):`fp_sni_test.go`(连接 SNI 压过全局表 / 规则库 IP 规则、认不出与 ECH 退回、近似绑定不借用、用户域名 / IP 规则顺序、统计只计一次、共享 IP 统计与 API、记账分到各自 App —— 在旧代码上抖音那台设备的字节被记到「淘宝」)、`app_activity_test.go`(域名用途按标签边界 + 前缀 + 只对本应用、说法优先级、规则文件里的应用都在规则库、实时类加权 / 防抖 / 衰减 / 混合不下结论、记账时取连接 SNI 与流形态、前台视图带 activity 且过期不带)。故意去掉实时类加权或防抖,对应用例变红。
+- 改了 Go(httpd),合并到 main 后 CI 要重编。
+
+## [5.33.0-rc3] - 2026-10-17
+
+**预览版 · 删完之后的防回归**(维护者 2026-10-17「删了一大堆过后,防止出现问题,新建一些测试的东西」)。这一版不再删东西:把「删代码最容易留下的坑」—— 调用方漏改、清单漏改、两端约定只改了一端、本地有 CI 没有的环境差异 —— 钉成自动测试,顺手修掉测试查出来的三处。
+
+### Fixed
+
+- **只传 `HNC_DIR` 时读写的不是同一个目录**:watchdog.sh(以及 service.sh 拉起的子脚本)用 `$HNC_DIR` 读 rules.json,但 json_set.sh / json_set_batch.sh / hnc_json / json_doctor.sh 等 10 个脚本只认 `$HNC`,没设就落到默认 `/data/local/hnc` —— 写到别处、下次读不到。真机上两者是同一个目录所以没出事;测试套件(和任何只传 `HNC_DIR` 的调用)一直在往默认目录写 rules.json 与备份。现在 `$HNC` 没设时认 `$HNC_DIR`。
+- **设置页「清理缓存」是空按钮**:它删的是 `cache/hostname_cache` / `cache/dev_class_cache` —— 从来没有谁写过这两个路径(v5.33 前 shell 扫描写在 `run/` 下,`device_class.sh` 已删),永远「removed 0 file(s)」。现在删真正的设备名缓存 `data/hostname_cache.json`,并放 `run/hostname_cache.clear` 让看门狗(设备发现写者)清掉内存里那份(只删文件的话,下次落盘会原样写回去)。按钮改名「清理设备名缓存」,说明手动改的名字不受影响。
+- 第一次跑 `capability_probe` 动作时日志多一行 `cannot open run/capability_probe_last`:`read … < 文件 2>/dev/null` 先做读重定向、失败时 `2>/dev/null` 还没生效。`hnc_clock.sh` / `hnc_activity.sh` 的同样写法一并改成 `2>/dev/null < 文件`。
+
+### Internals
+
+- **`test_v533_guard_refs.sh`(9 条)**:v5.33 删掉的 82 个 shell 函数,发布包里不再调用;脚本互调一律 `sh 脚本`(不靠 shebang),被调的脚本都在;Go 引用的 `bin/` 脚本都在,原生二进制都在 `hnc_runtime_sync.sh` 的 chmod / chcon 清单里、且 CI 会构建;WebUI 的每个 `/api/` 路径都注册了、每个 action 都在 httpd 分发里;看门狗 Go 动作名 ↔ `watchdog.sh` 分发标签双向一致,分发目标函数都有定义;每个看门狗动作在沙箱里真跑一遍,没有「命令不存在 / 打不开 / 语法错」且写的是沙箱;只给 `HNC_DIR` 时 JSON 脚本读写同一个目录;post-fs-data 开机清掉的旧文件没人再读写;测试 UI(`tools/ui_mock`)的假后端只提供 httpd 真有的接口和动作。
+- **`test_v533_ci_emulation.sh`(3 条)**:把仓库拷一份、所有 `#!/system/bin/sh` 改成不存在的解释器,按 `build.yml` 顺序跑 `version_consistency_check` → `ci_preflight`(含 JSON 回归、pitfall lint)→ `inject_version_to_docs` + `--check`。本容器有 `/system/bin/sh`、GitHub runner 没有 —— rc2 首推 main 时 `json_set.sh` 直接执行 `hnc_json` 的 rc 127 在本地永远复现不了,现在能。
+- **`test_v533_boot_rehearsal.sh`(5 条)**:沙箱里真跑 `post-fs-data.sh` + `service.sh`(真实脚本,只把 `/data/local/hnc` 换成沙箱路径;原生二进制、iptables / tc / ip / getprop / ps / pidof / pkill 等都是记账的桩):两个脚本正常跑完、输出与各日志无报错;运行目录同步、v5.33 旧文件清理、clsact 旧键迁移、目录权限;httpd 只带 `-hnc-dir`、看门狗不带参数、hotspotd `-d`、选中 C launcher;规则只同步 `dpi_rules.d/`、管理员密钥 64 位 hex / 0600、`auth_required` 迁移;收尾后沙箱进程一个不剩。真机(有 `/system/build.prop`)上自动跳过。
+- Go:`TestActionCacheClear`(httpd)、`TestCacheClear`(devname)、`TestCacheClearMarker`(看门狗)—— 在 rc2 上失败 / 编译不过。
+- **测试套件不再写 `/data/local/hnc`**(真机上那是用户的运行目录):除了上面 `HNC_DIR` 的修复,`test_hnc_json_set_top.sh` 没设 `HNC`(锁和备份落到默认目录)、靠 shebang 直接执行 hnc_json、不清临时目录,一并改掉。逐个测试文件跑、每跑完一个查 `/data/local/hnc` 有没有新文件:现在 0 个。
+- **模拟设备验收(`TestDevscanSim`)第 7 步在全量套件里偶发失败**(rc2 起;单独跑总是过):后台保活每 20 秒先取名单再逐个 poke,负载高时一轮要好几秒 —— `setKeep("watch", false)` 之后这一轮还可能 poke 到 watch,网关回的 ICMP 把表项推进 DELAY,紧接着设备被拔 → PROBE 无应答 → FAILED,「悄悄离开」变成「有人找它」,十来秒就下线。改成保活一整轮持锁、第 7 步先等在途那轮跑完、再等表项离开 DELAY / PROBE 才拔。在删除前人为补一次 poke 能稳定复现原失败;修后带同样的注入也通过。
+- **守卫本身验过会响**:在仓库副本里故意改回问题共 21 处(调回删掉的函数、改回 shebang 直接执行(直接写路径 / 经变量)、调不存在的脚本、chmod 清单漏一项、Go 调不存在的脚本、UI 调不存在的 action / 路由、动作标签改名、分发目标改名、重定向顺序改回、去掉 `HNC_DIR` 回退、旧文件复活、httpd 带 `-bind`、删 clsact 迁移块、同步漏拷 `bin/`、调已删脚本、旧文件不清、假后端多出接口 / 动作、`hj()` 改回直接执行),每处对应的用例都变红;运行期守卫(动作冒烟、`HNC_DIR` 一致)在 rc2 代码上失败。
+- 测试 UI 用 Playwright 浅色 / 深色整套走一遍(74 张截图)无 console error / 错误字样;假后端「清理缓存」的回执改成真后端的格式。
+- 改了 Go(httpd `cache_clear`、看门狗 `m4_owner`、`devname`),合并到 main 后 CI 要重编。
+
 ## [5.33.0-rc2] - 2026-10-16
 
 **预览版 · 继续「只留一份」**(维护者 2026-10-15「继续全面清理」)。rc1 留着等定的两处(M2 看门狗检查、M3 offload / clsact 调度)也只留 Go 一份,再加 JSON 读写、DPI 规则、开机同步、进程判活等零散的「两份」。**仍是先于真机回归删旧代码**,真机有问题的退路是刷回 v5.32(或 rc1)。

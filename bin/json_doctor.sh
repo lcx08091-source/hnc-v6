@@ -11,7 +11,7 @@
 
 set +e
 
-HNC=${HNC:-/data/local/hnc}
+HNC=${HNC:-${HNC_DIR:-/data/local/hnc}}
 MODDIR=${MODDIR:-/data/adb/modules/hotspot_network_control}
 DATA_DIR=${DATA_DIR:-$HNC/data}
 RUN_DIR=${RUN_DIR:-$HNC/run}

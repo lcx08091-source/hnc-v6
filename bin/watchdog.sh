@@ -124,7 +124,7 @@ run_capability_probe_active() {
     ip link show "$iface" >/dev/null 2>&1 || return 0
 
     now=$(date +%s 2>/dev/null || echo 0)
-    read -r last last_if < "$RUN/capability_probe_last" 2>/dev/null
+    read -r last last_if 2>/dev/null < "$RUN/capability_probe_last"
     case "$last" in ''|*[!0-9]*) last=0 ;; esac
     [ -n "$last_if" ] || last_if="$iface"
     # 本次开机还没测过(标记早于开机时刻)→ 必须测: run/ 跨重启保留, 开机早期那次探测
