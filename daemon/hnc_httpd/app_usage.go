@@ -110,7 +110,10 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 	names := s.loadIPNames()
 	apps := s.loadIPApps()
 	fpSt := fpFor(s.hncDir)
-	fresh := fpSt.tick(now, names) // v6.x DPI v2: 用户纠正规则 + 摄入 dpi_flows.json(指纹学习), 在 appUsage.mu 外做 I/O
+	fresh := fpSt.tick(now, names)    // v6.x DPI v2: 用户纠正规则 + 摄入 dpi_flows.json(指纹学习), 在 appUsage.mu 外做 I/O
+	appActivityRefresh(s.hncDir, now) // v5.34: 应用内活动细分的说法 / 域名用途(app_activity.go), 锁外 I/O
+	// v5.34.0-rc2: 「在 App 里干什么」总开关 + 限速 / VPN / 旁路守卫(app_activity.go), 锁外 I/O
+	appActGuardRefresh(s.hncDir, s.limitCtl.limitedNow(), now)
 	// v5.27 T3 启动指纹(影子运行, 只产出启动事件): 新的 ClientHello 交给识别; 学习最多 30 分钟一次,
 	// 只在本机抓包开着时做。都在 appUsage.mu / fpSt.mu 之外。
 	sfp := startupFor(s.hncDir)
@@ -244,7 +247,9 @@ func appUsageRecordIdent(d *appUsageDay, deltas []appUsageDelta, owner map[strin
 			appUnknownAdd(d, dl.Dst, names[dl.Dst].Name, mac, dl.Up+dl.Dn)
 		}
 		if ix != nil && mac != "" && id != appUnknownID && id != appLocalID {
-			fobs = append(fobs, fgObs{MAC: mac, ID: id, Name: meta.Name, Category: meta.Category, Key: dl.Key, Up: dl.Up, Dn: dl.Dn, Inferred: inferred})
+			act, actSrc := appActForDelta(ix, mac, id, meta.Category, dl, names) // v5.34 应用内活动细分(app_activity.go)
+			fobs = append(fobs, fgObs{MAC: mac, ID: id, Name: meta.Name, Category: meta.Category, Key: dl.Key, Up: dl.Up, Dn: dl.Dn, Inferred: inferred,
+				Act: act, ActSrc: actSrc})
 		}
 	}
 	appTimeStep(d, tick, cats, now, tickSec)

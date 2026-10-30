@@ -24,7 +24,7 @@ func m4TestEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	ptrs := []*string{&m4DevicesJSON, &m4DevicesTmpGo, &m4RefreshFile, &m4RefreshAckFile, &m4GoWriteLog,
-		&m4NamesPath, &m4CachePath, &m4OverridesPath, &m4MDNSBin, &rulesJSONPath}
+		&m4CacheClearFile, &m4NamesPath, &m4CachePath, &m4OverridesPath, &m4MDNSBin, &rulesJSONPath}
 	old := make([]string, len(ptrs))
 	for i, p := range ptrs {
 		old[i] = *p
@@ -39,6 +39,7 @@ func m4TestEnv(t *testing.T) string {
 	m4RefreshFile = filepath.Join(dir, "run", "devices.refresh")
 	m4RefreshAckFile = filepath.Join(dir, "run", "devices.refresh.ack")
 	m4GoWriteLog = filepath.Join(dir, "run", "m4_go_write.log")
+	m4CacheClearFile = filepath.Join(dir, "run", "hostname_cache.clear")
 	m4NamesPath = filepath.Join(dir, "device_names.json")
 	m4CachePath = filepath.Join(dir, "hostname_cache.json")
 	m4OverridesPath = filepath.Join(dir, "oui_overrides.json")
@@ -462,5 +463,41 @@ func TestRunnerEventStormDoesNotStarveTick(t *testing.T) {
 	}
 	if _, err := os.Stat(m4DevicesJSON); err != nil {
 		t.Fatalf("事件风暴中 devices.json 一次也没写出: %v", err)
+	}
+}
+
+// TestCacheClearMarker v5.33: WebUI「清理缓存」放 run/hostname_cache.clear → 写者清空
+// 名字缓存(内存 + 文件)并删标记; 之后落盘不会把旧名字写回去。没有标记不动。
+// 「改动前会失败」: 没有 cacheClearIfRequested / Resolver.CacheClear(httpd 删的是从来
+// 没人写过的 cache/hostname_cache)。
+func TestCacheClearMarker(t *testing.T) {
+	m4TestEnv(t)
+	r := newM4GoRunner("wlan2")
+	r.resolver.CacheUpdate("02:5a:00:00:00:01", "pixel-8", "dhcp")
+	if err := r.resolver.CacheSave(); err != nil {
+		t.Fatal(err)
+	}
+	r.cacheClearIfRequested() // 没有标记: 不动
+	if _, err := os.Stat(m4CachePath); err != nil {
+		t.Fatalf("没有标记时缓存不该被删: %v", err)
+	}
+	if err := os.WriteFile(m4CacheClearFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.cacheClearIfRequested()
+	if _, err := os.Stat(m4CachePath); !os.IsNotExist(err) {
+		t.Fatalf("缓存文件应删掉: %v", err)
+	}
+	if _, err := os.Stat(m4CacheClearFile); !os.IsNotExist(err) {
+		t.Fatalf("标记应删掉: %v", err)
+	}
+	// 内存那份也清了: 再落盘不会写回旧名字
+	r.resolver.CacheUpdate("02:5a:00:00:00:02", "ipad", "mdns")
+	if err := r.resolver.CacheSave(); err != nil {
+		t.Fatal(err)
+	}
+	b, _ := os.ReadFile(m4CachePath)
+	if strings.Contains(string(b), "pixel-8") || !strings.Contains(string(b), "ipad") {
+		t.Fatalf("清理后落盘内容不对: %s", b)
 	}
 }

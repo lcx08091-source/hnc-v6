@@ -520,6 +520,23 @@ func (r *Resolver) CacheSave() error {
 	return nil
 }
 
+// CacheClear 清空缓存(内存 + 文件)。WebUI「清理缓存」经 run/hostname_cache.clear 标记
+// 让写者调: 只删文件不够, 内存里那份下次 CacheSave 会原样写回去。
+func (r *Resolver) CacheClear() error {
+	r.cacheMu.Lock()
+	defer r.cacheMu.Unlock()
+	r.cacheTab = map[string]cacheEntry{}
+	r.cacheLoad = true
+	r.cacheDirty = false
+	if r.CachePath == "" {
+		return nil
+	}
+	if err := os.Remove(r.CachePath); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}
+
 // loadCacheLocked 首次访问时读文件(坏了当空, 不修 —— 只有一个写者,
 // 坏文件留给用户看; hnc_cache_load 同样不 crash)。
 func (r *Resolver) loadCacheLocked() error {

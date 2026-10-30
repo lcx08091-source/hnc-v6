@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "_doc": "v5.34 应用内活动细分(daemon/hnc_httpd/app_activity.go)。labels: 用途标签 → 这个应用 / 类别的说法(标签 = video_stream live_stream voice_call video_call gaming download upload browsing background, 每条最多 16 个字)。v5.34.0-rc2 起 labels 同时是白名单: 流形态判出的标签只有该应用或该类别写了说法才参与(没写 = 宁可不说); domain_only 里的标签只认 domains 规则, 不认流形态。domains: 只对归到该应用的连接生效, 主机名(连接自己的 SNI, 没有则用反查名)按标签边界匹配 suffix, 有 prefix 时再要求第一段以它开头, 命中即按 use 打标签(比流形态优先; 流形态判成别的时降为 domain_weak, 不当域名证据)。只收公开、确定的域名规律。默认关闭, 设置页「在 App 里干什么」打开。用户可放一份到 /data/local/hnc/etc/app_activity.json 整份覆盖。",
+  "categories": {
+    "video": { "labels": { "video_stream": "看视频", "live_stream": "看直播", "upload": "上传视频", "browsing": "浏览" } },
+    "music": { "labels": { "video_stream": "听歌", "live_stream": "听歌", "download": "缓存歌曲", "browsing": "选歌" } },
+    "game": { "labels": { "gaming": "对局中", "download": "下载更新", "video_stream": "看游戏视频", "voice_call": "开黑语音" } },
+    "social": { "labels": { "browsing": "聊天 / 刷动态", "video_stream": "看视频", "live_stream": "看直播", "upload": "发图 / 视频", "download": "收文件" }, "domain_only": [ "live_stream" ] },
+    "shopping": { "labels": { "browsing": "逛商品", "live_stream": "看直播带货", "video_stream": "看商品视频" } },
+    "news": { "labels": { "browsing": "看资讯", "video_stream": "看视频" } },
+    "navigation": { "labels": { "browsing": "导航中" } },
+    "office": { "labels": { "video_call": "视频会议", "voice_call": "语音会议", "browsing": "办公", "upload": "传文件", "download": "下载文件" } },
+    "download": { "labels": { "download": "下载中", "upload": "上传中" } },
+    "browser": { "labels": { "browsing": "上网", "video_stream": "看网页视频", "download": "下载文件", "upload": "上传文件" } }
+  },
+  "apps": {
+    "douyin": {
+      "labels": { "video_stream": "刷抖音", "live_stream": "看直播", "upload": "发视频", "browsing": "浏览" },
+      "domains": [
+        { "suffix": "douyinvod.com", "use": "video_stream" },
+        { "suffix": "douyincdn.com", "prefix": "pull-", "use": "live_stream" }
+      ],
+      "domain_only": [ "live_stream" ]
+    },
+    "kuaishou": {
+      "labels": { "video_stream": "刷快手", "live_stream": "看直播", "upload": "发视频", "browsing": "浏览" },
+      "domains": [
+        { "suffix": "pull.yximgs.com", "use": "live_stream" }
+      ],
+      "domain_only": [ "live_stream" ]
+    },
+    "xigua": { "labels": { "video_stream": "看视频", "live_stream": "看直播" } },
+    "tiktok": { "labels": { "video_stream": "刷 TikTok", "live_stream": "看直播", "upload": "发视频" } },
+    "bilibili": { "labels": { "video_stream": "看视频", "live_stream": "看直播", "upload": "投稿上传", "browsing": "浏览" } },
+    "huya": {
+      "labels": { "video_stream": "看直播", "live_stream": "看直播", "browsing": "逛直播间" },
+      "domains": [
+        { "suffix": "flv.huya.com", "use": "live_stream" },
+        { "suffix": "hls.huya.com", "use": "live_stream" }
+      ],
+      "domain_only": [ "live_stream" ]
+    },
+    "douyu": { "labels": { "video_stream": "看直播", "live_stream": "看直播", "browsing": "逛直播间" } },
+    "wechat": { "labels": { "voice_call": "语音通话", "video_call": "视频通话", "browsing": "聊天 / 朋友圈", "video_stream": "看视频号", "live_stream": "看视频号直播", "upload": "发图 / 文件", "download": "收文件" } },
+    "qq_im": { "labels": { "voice_call": "语音通话", "video_call": "视频通话", "browsing": "聊天 / 空间", "upload": "发图 / 文件", "download": "收文件" } },
+    "qywechat": { "labels": { "voice_call": "语音会议", "video_call": "视频会议", "browsing": "办公聊天" } },
+    "tencent_meeting": { "labels": { "video_call": "开会中(有视频)", "voice_call": "开会中" } },
+    "tencent_wzry_exclusive": { "labels": { "gaming": "对局中", "download": "下载更新", "voice_call": "开黑语音" } },
+    "tencent_pubgmhd_exclusive": { "labels": { "gaming": "对局中", "download": "下载更新", "voice_call": "开黑语音" } },
+    "mihoyo": { "labels": { "gaming": "游戏中", "download": "下载更新" } },
+    "xiaohongshu": { "labels": { "browsing": "刷笔记", "video_stream": "看视频笔记", "live_stream": "看直播", "upload": "发笔记" } },
+    "weibo": { "labels": { "browsing": "刷微博", "video_stream": "看视频", "upload": "发微博" } },
+    "zhihu": { "labels": { "browsing": "看问答", "video_stream": "看视频" } },
+    "taobao": { "labels": { "browsing": "逛商品", "live_stream": "看直播带货", "video_stream": "看商品视频" } },
+    "pinduoduo": { "labels": { "browsing": "逛商品", "live_stream": "看直播带货", "video_stream": "看商品视频" } },
+    "jd": { "labels": { "browsing": "逛商品", "live_stream": "看直播带货" } },
+    "netease_music": { "labels": { "video_stream": "听歌", "live_stream": "听歌", "download": "缓存歌曲" } },
+    "qq_music": { "labels": { "video_stream": "听歌", "live_stream": "听歌", "download": "缓存歌曲" } },
+    "baidu_pan": { "labels": { "download": "下载文件", "upload": "上传备份", "video_stream": "在线看视频" } }
+  }
+}

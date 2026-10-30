@@ -6,7 +6,7 @@
 
 set +e
 
-HNC="${HNC:-/data/local/hnc}"
+HNC="${HNC:-${HNC_DIR:-/data/local/hnc}}"
 MODDIR="${MODDIR:-/data/adb/modules/hotspot_network_control}"
 BIN="$HNC/bin"
 RUN="$HNC/run"

@@ -1,0 +1,35 @@
+{
+  "schema": "hnc-probe-rules/1",
+  "name": "默认标注规则 v1",
+  "_doc": "按顺序匹配, 第一条命中的生效; 没有命中 → 真值 = 剧本步的 expect。when 可用: pkg(字符串或数组) pkg_not(数组) activity(正则, 匹配完整类名) in_call camera mic screen_on(布尔) expect(当前剧本步的 expect, 字符串或数组)。信号拿不到 = 不命中。enabled=false 或任何条件写着『待核实』的规则不生效。Activity 类名请在 App 的『Activity』页看到真实值后再填。",
+  "packages": {
+    "com.ss.android.ugc.aweme": {"app": "douyin", "name": "抖音", "verified": true, "note": "与 HNC data/pkg_app_map.json 一致"},
+    "com.tencent.mm": {"app": "wechat", "name": "微信", "verified": true, "note": "与 HNC data/pkg_app_map.json 一致"},
+    "com.tencent.tmgp.sgame": {"app": "tencent_wzry_exclusive", "name": "王者荣耀", "verified": true, "note": "与 HNC data/pkg_app_map.json 一致"},
+    "tv.danmaku.bili": {"app": "bilibili", "name": "哔哩哔哩", "verified": true, "note": "与 HNC data/pkg_app_map.json 一致"},
+    "com.tencent.wemeet.app": {"app": "tencent_meeting", "name": "腾讯会议", "verified": false, "note": "待核实: 包名不在 HNC data/pkg_app_map.json 里, 装上后在『Activity』页确认真实包名"}
+  },
+  "rules": [
+    {"id": "video_call_by_camera", "when": {"in_call": true, "camera": true}, "then": "video_call",
+     "note": "任意应用: 处于通话模式 + 相机被占用 → 视频通话"},
+    {"id": "voice_call_no_camera", "when": {"in_call": true, "camera": false, "pkg_not": ["com.tencent.tmgp.sgame"]}, "then": "voice_call",
+     "note": "任意应用(游戏除外): 处于通话模式 + 相机没占用 → 语音通话。游戏开黑时也会进通话模式, 交给剧本决定(对局中 / 开黑语音)"},
+    {"id": "screen_off_idle", "when": {"screen_on": false, "in_call": false}, "then": "idle",
+     "note": "熄屏且不在通话 → 空闲"},
+
+    {"id": "douyin_live_room", "enabled": false, "when": {"pkg": "com.ss.android.ugc.aweme", "activity": "待核实"}, "then": "live_stream",
+     "note": "待核实: 进抖音直播间后在『Activity』页看真实类名, 填进 activity(正则)并把 enabled 改成 true"},
+    {"id": "douyin_publish", "enabled": false, "when": {"pkg": "com.ss.android.ugc.aweme", "activity": "待核实"}, "then": "upload",
+     "note": "待核实: 抖音发布 / 上传页的类名"},
+    {"id": "wechat_moments", "enabled": false, "when": {"pkg": "com.tencent.mm", "activity": "待核实"}, "then": "browsing",
+     "note": "待核实: 微信朋友圈页的类名"},
+    {"id": "wechat_channels", "enabled": false, "when": {"pkg": "com.tencent.mm", "activity": "待核实"}, "then": "video_stream",
+     "note": "待核实: 微信视频号页的类名(注意视频号直播应为 live_stream)"},
+    {"id": "bili_live_room", "enabled": false, "when": {"pkg": "tv.danmaku.bili", "activity": "待核实"}, "then": "live_stream",
+     "note": "待核实: B 站直播间的类名"},
+    {"id": "bili_upload", "enabled": false, "when": {"pkg": "tv.danmaku.bili", "activity": "待核实"}, "then": "upload",
+     "note": "待核实: B 站投稿页的类名"},
+    {"id": "bili_video_player", "enabled": false, "when": {"pkg": "tv.danmaku.bili", "activity": "待核实"}, "then": "video_stream",
+     "note": "待核实: B 站点播播放页的类名"}
+  ]
+}

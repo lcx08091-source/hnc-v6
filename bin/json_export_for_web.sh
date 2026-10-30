@@ -3,7 +3,7 @@
 # Runs json_diag_bundle.sh and prints a small JSON response with the generated path.
 
 set +e
-HNC="${HNC:-/data/local/hnc}"
+HNC="${HNC:-${HNC_DIR:-/data/local/hnc}}"
 BIN="$HNC/bin"
 RUN="$HNC/run"
 mkdir -p "$RUN" 2>/dev/null

@@ -24,7 +24,7 @@
 # cfg_set / cfg_get 与没人调用的 device_patch —— 全部删除(回退计数在真机上长期为 0,
 # 见 v5.9.3 BUG-008)。hnc_json 跑不起来 = 安装不完整, 命令直接失败、不再静默改走旧写法。
 
-HNC=${HNC:-/data/local/hnc}
+HNC=${HNC:-${HNC_DIR:-/data/local/hnc}}
 RULES=$HNC/data/rules.json
 SCRIPT_DIR=${0%/*}
 [ "$SCRIPT_DIR" = "$0" ] && SCRIPT_DIR="."

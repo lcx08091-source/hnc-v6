@@ -54,6 +54,8 @@ var (
 	// v5.31 T4 / v5.33: 「立刻扫一次」的请求与回执(见文件头)。
 	m4RefreshFile    = runDir + "/devices.refresh"
 	m4RefreshAckFile = runDir + "/devices.refresh.ack"
+	// v5.33: WebUI「清理缓存」(httpd cache_clear)放的标记: 写者每拍看到就清空名字缓存。
+	m4CacheClearFile = runDir + "/hostname_cache.clear"
 	// v5.31 T5: 写出日志(每写一行时间戳; 排查「谁在什么时候写了 devices.json」)。
 	m4GoWriteLog = runDir + "/m4_go_write.log"
 
@@ -384,6 +386,7 @@ func (r *m4GoRunner) run() {
 					logf("m4_owner: 写刷新回执失败: %v", err)
 				}
 			}
+			r.cacheClearIfRequested()
 			// 30s: 全量兜底 + 离线检查 + 网卡重建跟上
 			if now.Sub(lastSync) >= m4FullSyncEvery {
 				lastSync = now
@@ -454,6 +457,23 @@ func (r *m4GoRunner) run() {
 		// stopCh 的 return 不经过这里(ticker 随 defer Stop 释放)。
 		retune(!ticked)
 	}
+}
+
+// cacheClearIfRequested run/hostname_cache.clear 在 → 清空名字缓存(内存 + 文件)再删标记。
+// 只删文件不够: 内存里那份下次 CacheSave 会写回去(v5.33 前「清理缓存」删的是从来没人
+// 写过的 cache/hostname_cache, 永远 removed 0)。
+func (r *m4GoRunner) cacheClearIfRequested() {
+	if _, err := os.Stat(m4CacheClearFile); err != nil {
+		return
+	}
+	if r.resolver != nil {
+		if err := r.resolver.CacheClear(); err != nil {
+			logf("m4_owner: 清理名字缓存失败: %v", err)
+			return
+		}
+	}
+	_ = os.Remove(m4CacheClearFile)
+	logf("m4_owner: 名字缓存已清空(WebUI 清理缓存)")
 }
 
 // refreshIface 同名网卡重建要跟上(hotspotd refresh_hotspot_iface 的教训):

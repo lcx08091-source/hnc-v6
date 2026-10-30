@@ -86,3 +86,32 @@ func TestReadWatchdogStateProcfind(t *testing.T) {
 		t.Fatalf("进程不在时应判没在跑: %+v", st)
 	}
 }
+
+// TestActionCacheClear v5.33: 「清理缓存」删的是真缓存 data/hostname_cache.json, 并放
+// run/hostname_cache.clear 让看门狗清内存那份。「改动前会失败」: 删的是 cache/hostname_cache
+// 与 cache/dev_class_cache(从来没人写过), 真缓存原样留着, 永远 removed 0。
+func TestActionCacheClear(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"data", "run"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := filepath.Join(dir, "data", "hostname_cache.json")
+	if err := os.WriteFile(cache, []byte(`{"02:5a:00:00:00:01":{"h":"pixel-8","s":"dhcp","t":1}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := actionCacheClear(dir)
+	if !r.OK || r.Detail != "removed 1 file(s)" {
+		t.Fatalf("resp = %+v", r)
+	}
+	if _, err := os.Stat(cache); !os.IsNotExist(err) {
+		t.Fatalf("data/hostname_cache.json 应删掉: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "run", "hostname_cache.clear")); err != nil {
+		t.Fatalf("应放 run/hostname_cache.clear 让看门狗清内存: %v", err)
+	}
+	if r := actionCacheClear(dir); !r.OK || r.Detail != "removed 0 file(s)" { // 再点一次: 没有文件也成功
+		t.Fatalf("second resp = %+v", r)
+	}
+}
