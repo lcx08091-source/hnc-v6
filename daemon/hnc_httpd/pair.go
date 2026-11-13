@@ -38,7 +38,49 @@ import (
 type pairPending struct {
 	PIN       string
 	SessionID string
-	Expiry    int64 // Unix ts
+	Expiry    int64       // Unix ts
+	fileInfo  os.FileInfo // identity of the immutable tmp+rename generation read
+}
+
+// claimPairPending takes ownership of exactly the generation the caller read.
+// A concurrent pair_gen.sh may publish a new file between read and rename. In
+// that case restore the newer file with Link (which cannot overwrite another
+// generation) and reject the stale operation. Unique claim names also prevent
+// one request's cleanup from removing another request's in-flight session.
+func claimPairPending(hncDir string, expected os.FileInfo) (string, error) {
+	path := filepath.Join(hncDir, "run", "pair_pending")
+	f, err := os.CreateTemp(filepath.Dir(path), "pair_pending.claimed.*")
+	if err != nil {
+		return "", err
+	}
+	claimed := f.Name()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(claimed)
+		return "", err
+	}
+	if err := os.Rename(path, claimed); err != nil {
+		_ = os.Remove(claimed)
+		return "", err
+	}
+	actual, err := os.Stat(claimed)
+	if err == nil && expected != nil && os.SameFile(expected, actual) &&
+		expected.Size() == actual.Size() && expected.ModTime().Equal(actual.ModTime()) {
+		return claimed, nil
+	}
+	// Never rename back over a newly generated PIN. If restoration fails for
+	// another reason, retain the claim for diagnosis instead of deleting it.
+	if restoreErr := os.Link(claimed, path); restoreErr != nil && !os.IsExist(restoreErr) {
+		log.Printf("WARN: cannot restore changed pairing from %s: %v", claimed, restoreErr)
+		return "", fmt.Errorf("pairing changed; restore failed: %w", restoreErr)
+	}
+	_ = os.Remove(claimed)
+	return "", fmt.Errorf("pairing changed; use the current code")
+}
+
+func discardPairPending(hncDir string, expected os.FileInfo) {
+	if claimed, err := claimPairPending(hncDir, expected); err == nil {
+		_ = os.Remove(claimed)
+	}
 }
 
 // readPairPending 读 $RUN/pair_pending 三行文本
@@ -50,6 +92,10 @@ func readPairPending(hncDir string) (*pairPending, error) {
 		return nil, fmt.Errorf("no active pairing") // 让 handler 返 400
 	}
 	defer f.Close()
+	fileInfo, err := f.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("stat pair_pending: %w", err)
+	}
 
 	sc := bufio.NewScanner(f)
 	var lines []string
@@ -91,17 +137,17 @@ func readPairPending(hncDir string) (*pairPending, error) {
 	// v5.22: expiry 上界校验。pair_gen.sh 只写 now+120; 远超的 expiry(手改 / 时钟
 	// 回拨后旧文件 / 写坏)会让一个 6 位 PIN 长期有效, 爆破窗口无界 —— 作废。
 	if expiry-now > pairMaxValiditySec {
-		_ = os.Remove(path)
+		discardPairPending(hncDir, fileInfo)
 		return nil, fmt.Errorf("malformed pair_pending (expiry too far in future)")
 	}
 	if now >= expiry {
 		// rc3 修 N-16: 过期顺手清, 否则下次 /api/pair/verify 仍返 expired
 		// 导致用户"刚生成就过期"死循环
-		_ = os.Remove(path)
+		discardPairPending(hncDir, fileInfo)
 		return nil, fmt.Errorf("pairing expired")
 	}
 
-	return &pairPending{PIN: pin, SessionID: sid, Expiry: expiry}, nil
+	return &pairPending{PIN: pin, SessionID: sid, Expiry: expiry, fileInfo: fileInfo}, nil
 }
 
 // isPairSessionID 校验 session_id 格式: 8-64 字符 base64url-like
@@ -201,6 +247,10 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 		writePairError(w, status, msg)
 		return
 	}
+	if pairCodeBurned(pending.SessionID) {
+		writePairError(w, http.StatusGone, "pairing code invalidated after too many wrong attempts")
+		return
+	}
 
 	// rc30.12.33 (P0.2): 进入比对前原子占用名额. 并发 N 个错误请求时,
 	// 只有先到的 rlPinAttemptsMax 个能进入下面的 ConstantTimeCompare,
@@ -231,22 +281,22 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	// PIN 对了, 清空计数 (避免下一次正常配对受历史失败影响)
 	s.limiter.ResetPin(ip)
 
-	// v5.11: 先原子"认领"一次性 PIN, 再发 token。旧流程在读 pending 与下方
-	// Remove 之间隔着 IssueToken 的 bcrypt(arm64 上 100-300ms), 同一 PIN 的
-	// 两个并发正确请求都能通过 → 签出两个 token, 一次性 PIN 契约失效。
-	// rename 是原子的: 并发者中只有一个能把 pair_pending 挪走, 其余拿到
-	// ENOENT, 按"无活动配对"处理。非 ENOENT 的 rename 失败(权限等)退回旧
-	// 路径(下方 Remove + truncate 兜底), 不阻断合法配对。
-	pendingPath := filepath.Join(s.hncDir, "run", "pair_pending")
-	claimedPath := pendingPath + ".claimed"
-	if err := os.Rename(pendingPath, claimedPath); err != nil {
+	// Claim only the generation whose PIN was verified. Claim failure is
+	// fail-closed: issuing a token without ownership violates one-time PINs.
+	claimedPath, err := claimPairPending(s.hncDir, pending.fileInfo)
+	if err != nil {
 		if os.IsNotExist(err) {
 			writePairError(w, http.StatusBadRequest, "no active pairing")
 			return
 		}
-		log.Printf("WARN: pair_pending claim rename failed: %v (falling back to remove)", err)
-	} else {
-		defer os.Remove(claimedPath)
+		log.Printf("WARN: pair_pending claim failed: %v", err)
+		writePairError(w, http.StatusBadRequest, "pairing changed or unavailable; retry current code")
+		return
+	}
+	defer os.Remove(claimedPath)
+	if pairCodeBurned(pending.SessionID) || time.Now().Unix() >= pending.Expiry {
+		writePairError(w, http.StatusGone, "pairing code expired or invalidated")
+		return
 	}
 
 	// PIN 对!颁发 token
@@ -266,20 +316,8 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 		// 不阻止用户登入,只是本机 UI 少了通知
 	}
 
-	// 删 pair_pending(防止重用) - 一次性 PIN
-	// rc3.1.34 修 #6: 之前 `_ = os.Remove(...)` 静默. 如果 remove 失败 (磁盘满 /
-	// 文件被并发改名 / 权限错), 同一个 PIN 文件仍能被下一个请求读到 → 理论上
-	// PIN 重放 (rate limit 5 次/分钟内). 本是一次性 PIN 的安全契约破裂.
-	// 现在: log + 强制 truncate 兜底. truncate 把文件清空, 即使 Remove 没成功
-	// 也让 readPending 走 "expired" 路径拒绝.
-	// v5.11: 正常情况下 pending 已在上方被 rename 认领, 这里是 NotExist 空操作。
-	if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
-		log.Printf("WARN: pair_pending remove failed (PIN replay risk): %v, attempting truncate", err)
-		// 兜底: 清空文件内容. readPending 会因 unmarshal 失败拒绝.
-		if tErr := os.WriteFile(pendingPath, []byte(""), 0600); tErr != nil {
-			log.Printf("CRIT: pair_pending truncate also failed: %v · subsequent PINs may replay until next genPair", tErr)
-		}
-	}
+	// Only the unique claimed file belongs to this request. pair_pending may
+	// now contain a new generation and must never be removed here.
 
 	// 清 rate limit 计数
 	s.limiter.ResetPin(ip)

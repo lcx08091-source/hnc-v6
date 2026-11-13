@@ -13,7 +13,9 @@
 /* v5.9.0: hnc_run_cmd_timeout 依赖 */
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <signal.h>
+#include <time.h>
 #include <unistd.h>
 #include <sys/select.h>
 #include <sys/time.h>
@@ -87,10 +89,19 @@ void hnc_json_escape(const char *src, char *dst, size_t dst_size) {
  * hnc_run_cmd_timeout — 带总超时的子进程执行 (v5.9.0)
  * 见 hnc_helpers.h 的接口说明。
  * ══════════════════════════════════════════════════════════ */
+static int64_t monotonic_us(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return -1;
+    return (int64_t)ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+
 int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_ms) {
     if (argv == NULL || argv[0] == NULL || buf == NULL || cap < 2 || timeout_ms <= 0)
         return -1;
     buf[0] = '\0';
+    int64_t started_us = monotonic_us();
+    if (started_us < 0) return -1;
+    int64_t deadline_us = started_us + (int64_t)timeout_ms * 1000;
 
     int pipefd[2];
     if (pipe(pipefd) < 0) return -1;
@@ -121,18 +132,12 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
     int flags = fcntl(pipefd[0], F_GETFL, 0);
     if (flags >= 0) fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
 
-    struct timeval tv_now;
-    gettimeofday(&tv_now, NULL);
-    long deadline_us = (long)tv_now.tv_sec * 1000000L + tv_now.tv_usec
-                       + (long)timeout_ms * 1000L;
-
     size_t got = 0;
     int killed = 0;
     while (got < cap - 1) {
-        gettimeofday(&tv_now, NULL);
-        long now_us = (long)tv_now.tv_sec * 1000000L + tv_now.tv_usec;
-        long remain_us = deadline_us - now_us;
-        if (remain_us <= 0) {
+        int64_t now_us = monotonic_us();
+        int64_t remain_us = deadline_us - now_us;
+        if (now_us < 0 || remain_us <= 0) {
             kill(pid, SIGKILL);
             killed = 1;
             break;
@@ -162,19 +167,37 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
             if (errno == EINTR || errno == EAGAIN) continue;
             break;
         }
-        if (n == 0) break;   /* EOF: 子进程关闭了写端 */
+        if (n == 0) break;   /* EOF 只代表 stdout 关闭, 进程仍需有界等待。 */
         got += (size_t)n;
     }
 
     /* buffer 写满但子进程还在产出 → 杀掉,避免它阻塞在写满的 pipe 上
      * (close 读端后它也会收 SIGPIPE,kill 只是让 waitpid 确定性快返) */
-    if (!killed && got >= cap - 1) kill(pid, SIGKILL);
+    if (!killed && got >= cap - 1) {
+        kill(pid, SIGKILL);
+        killed = 1;
+    }
 
     close(pipefd[0]);
 
     int status;
     pid_t w;
+    while (!killed) {
+        w = waitpid(pid, &status, WNOHANG);
+        if (w == pid || (w < 0 && errno != EINTR)) goto done;
+        int64_t now_us = monotonic_us();
+        int64_t remain_us = deadline_us - now_us;
+        if (now_us < 0 || remain_us <= 0) {
+            kill(pid, SIGKILL);
+            break;
+        }
+        /* stdout 已 EOF 也不能进入无界 waitpid; 复用同一总截止时间。 */
+        struct timespec pause = {.tv_sec = 0,
+            .tv_nsec = (long)((remain_us < 10000 ? remain_us : 10000) * 1000)};
+        nanosleep(&pause, NULL);
+    }
     do { w = waitpid(pid, &status, 0); } while (w < 0 && errno == EINTR);
+done:
     (void)status;
 
     buf[got] = '\0';

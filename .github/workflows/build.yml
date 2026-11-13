@@ -58,6 +58,11 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: daemon/hnc_httpd/go.sum
 
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
       # Android SDK (build-tools d8 + a platform android.jar) for compiling
       # the app-label dex helper (tools/applabel). Used only at build time;
       # only the resulting bin/hnc_applabel.dex ships in the module.
@@ -165,6 +170,12 @@ jobs:
         run: |
           cd daemon/hnc_httpd && go vet ./... && go test ./...
           cd ../../src/dpid && go vet ./... && go test ./...
+
+      - name: Shell, native and WebUI regressions
+        run: |
+          for f in webroot/js/*.js; do node --check "$f"; done
+          node test/webui/request_recovery_test.js
+          sh test/run_all.sh
 
       # v5.22: 32 位类型检查(armeabi-v7a)。用 GOOS=linux 而非 android:
       # android/arm 不支持内部链接, 无 NDK 时 vet 会报 "requires external (cgo)

@@ -12,7 +12,6 @@
 package main
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,24 +20,10 @@ import (
 
 // deviceDelayOn rules.json 里该设备是否开着延迟 / 抖动 / 丢包。
 func deviceDelayOn(hncDir, mac string) bool {
-	b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
-	if err != nil {
-		return false
-	}
-	var r struct {
-		Devices map[string]map[string]interface{} `json:"devices"`
-	}
-	if json.Unmarshal(b, &r) != nil {
-		return false
-	}
-	for k, d := range r.Devices {
-		if !strings.EqualFold(k, mac) {
-			continue
-		}
-		for _, f := range []string{"delay_ms", "jitter_ms", "loss_pct"} {
-			if numFieldGT0(d[f]) {
-				return true
-			}
+	d := readDeviceRule(hncDir, mac)
+	for _, f := range []string{"delay_ms", "jitter_ms", "loss_pct"} {
+		if numFieldGT0(d[f]) {
+			return true
 		}
 	}
 	return false
@@ -46,25 +31,12 @@ func deviceDelayOn(hncDir, mac string) bool {
 
 // deviceAppQosOn rules.json 里该设备是否开着 app_qos。
 func deviceAppQosOn(hncDir, mac string) bool {
-	b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
-	if err != nil {
-		return false
-	}
-	var r struct {
-		Devices map[string]map[string]interface{} `json:"devices"`
-	}
-	if json.Unmarshal(b, &r) != nil {
-		return false
-	}
-	for k, d := range r.Devices {
-		if strings.EqualFold(k, mac) {
-			switch v := d["app_qos"].(type) {
-			case bool:
-				return v
-			case string:
-				return strings.EqualFold(strings.TrimSpace(v), "true")
-			}
-		}
+	d := readDeviceRule(hncDir, mac)
+	switch v := d["app_qos"].(type) {
+	case bool:
+		return v
+	case string:
+		return strings.EqualFold(strings.TrimSpace(v), "true")
 	}
 	return false
 }
@@ -110,7 +82,7 @@ func actionAppQosSet(hncDir string, p map[string]string) actionResp {
 		}
 	}
 	val := strconv.FormatBool(enabled)
-	if rc, out := runBin(hncDir, "json_set.sh", "device", mac, "app_qos", val); rc != 0 {
+	if rc, out := setDeviceRule(hncDir, mac, "app_qos", val); rc != 0 {
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(out)}
 	}
 	// 看门狗 appLimitApplyLoop 见到这个标记 3 秒内重新生成计划并下发

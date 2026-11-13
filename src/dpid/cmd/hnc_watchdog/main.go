@@ -25,8 +25,6 @@ package main
 
 import (
 	"bufio"
-	"context"
-	"errors"
 	"flag"
 	"fmt"
 	"hnc.io/dpid/tzlocal"
@@ -160,7 +158,7 @@ func writeHeartbeat() {
 func acquireLock() bool {
 	if data, err := os.ReadFile(wdPidFile); err == nil {
 		oldPid, _ := strconv.Atoi(strings.TrimSpace(string(data)))
-		if oldPid > 0 && oldPid != os.Getpid() && processAlive(oldPid) {
+		if oldPid > 0 && oldPid != os.Getpid() && pidMatchesName(oldPid, "hnc_watchdog") {
 			age := readHeartbeatAge()
 			if age >= 0 && age < takeoverStaleSec {
 				logf("another watchdog already running pid=%d (heartbeat fresh, %ds)", oldPid, age)
@@ -169,7 +167,7 @@ func acquireLock() bool {
 			logf("watchdog pid=%d alive but heartbeat stale (age=%ds); taking over", oldPid, age)
 			_ = syscall.Kill(oldPid, syscall.SIGTERM)
 			time.Sleep(500 * time.Millisecond)
-			if processAlive(oldPid) {
+			if pidMatchesName(oldPid, "hnc_watchdog") {
 				_ = syscall.Kill(oldPid, syscall.SIGKILL)
 				time.Sleep(300 * time.Millisecond)
 			}
@@ -208,7 +206,7 @@ func processAlive(pid int) bool {
 // 僵尸也能 kill(pid, 0) 成功 —— 被 QUIT 的 hotspotd 在没及时回收的环境里(云端模拟
 // 容器的 init 要几秒才回收)被当成「还活着」, 切换后不重新拉起。
 func isZombie(pid int) bool {
-	b, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	b, err := os.ReadFile(filepath.Join(m5ProcRoot, strconv.Itoa(pid), "stat"))
 	if err != nil {
 		return false
 	}
@@ -251,51 +249,12 @@ func shellPath() string {
 // All other supervision work (process management, heartbeats, state) is
 // pure Go and doesn't touch /system/bin/* tools.
 func runAction(name string, args ...string) actionResult {
-	start := nowFn() // v5.28 A2: 耗时统计
-	ctx, cancel := context.WithTimeout(context.Background(), actionTimeout)
-	defer cancel()
-
+	start := nowFn()
 	cmdArgs := append([]string{wdShell, "action", name}, args...)
-	cmd := exec.CommandContext(ctx, shellPath(), cmdArgs...)
-	cmd.Env = os.Environ()
-	// Isolate from our own pgrp so action kills don't propagate to us.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	// v5.12: 超时时杀整个进程组, 并限定 sh 退出后等待 stdout 管道关闭的时间。
-	// 旧代码只杀 sh 本身, 而 cmd.Output() 要等 stdout 管道的所有写端关闭:
-	// watchdog.sh 的 do_full_init 末尾有未重定向的 "( sleep 15; ... ) &"
-	// 子 shell 继承了这根管道 → 每次 full_init 主循环至少白等 15s+; 若子孙
-	// 进程卡住, 30s 超时也救不回来(Wait 仍阻塞在管道上), 主循环整体停摆。
-	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		}
-		return nil
-	}
-	cmd.WaitDelay = 2 * time.Second
-
-	out, err := cmd.Output()
-	rc := 0
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			rc = ee.ExitCode()
-			err = nil
-		} else if errors.Is(err, exec.ErrWaitDelay) {
-			// v5.12: sh 已正常退出, 只是后台子孙仍持有 stdout —— 按成功处理。
-			if cmd.ProcessState != nil {
-				rc = cmd.ProcessState.ExitCode()
-			}
-			err = nil
-		}
-	}
-	if ctx.Err() == context.DeadlineExceeded {
-		err = fmt.Errorf("action %s timed out after %v", name, actionTimeout)
-		rc = -1
-	}
-	// v5.28 A2: 记账(失败分类见 actionstats.go); runStatsFn 测试可替换。
+	res := runBoundedCommand(actionTimeout, true, shellPath(), cmdArgs...)
 	elapsed := nowFn().Sub(start).Seconds() * 1000
-	runStatsFn(name, rc, err, elapsed, nowFn())
-	return actionResult{exitCode: rc, stdout: strings.TrimSpace(string(out)), err: err}
+	runStatsFn(name, res.exitCode, res.err, elapsed, nowFn())
+	return res
 }
 
 // ─── state machine ──────────────────────────────────────────────────────
@@ -442,13 +401,8 @@ func ensureDaemonRunning(d daemonSpec) {
 	launcherArgs := d.args
 	watchPidFile := d.pidFile
 
-	// Is the watched pidfile alive?
-	if data, err := os.ReadFile(watchPidFile); err == nil {
-		if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 {
-			if processAlive(pid) {
-				return // healthy
-			}
-		}
+	if pidfileAlive(watchPidFile, d.name) > 0 {
+		return
 	}
 	// Pidfile missing or stale, but the actual process might still be alive
 	// under a different name (e.g. user killed pidfile manually).
@@ -470,10 +424,7 @@ func ensureDaemonRunning(d daemonSpec) {
 	// httpd 被杀/崩溃时来不及撤 DNS 接管的 DNAT → 重拉前先撤掉(新 httpd 起来会按
 	// 配置重下)。放在冷却之后: 每次重拉只撤一次, 不在冷却期每轮 fork。
 	if d.name == "hnc_httpd" {
-		cmd := exec.Command(shellPath(), hncDir+"/bin/dns_takeover.sh", "remove")
-		cmd.Stdout = io.Discard
-		cmd.Stderr = io.Discard
-		_ = cmd.Run()
+		runScript(hncDir+"/bin/dns_takeover.sh", "remove")
 	}
 
 	logf("%s: process gone, launching %s", d.name, launcher)
@@ -526,39 +477,8 @@ func spawnDaemon(bin string, args []string, logPath, pidFile string) error {
 	return nil
 }
 
-// findLiveByName scans /proc for a process whose comm or exe basename matches.
-func findLiveByName(name string) int {
-	entries, err := os.ReadDir("/proc")
-	if err != nil {
-		return 0
-	}
-	mypid := os.Getpid()
-	for _, e := range entries {
-		if !e.IsDir() {
-			continue
-		}
-		pid, err := strconv.Atoi(e.Name())
-		if err != nil || pid <= 0 || pid == mypid {
-			continue
-		}
-		// Try /proc/<pid>/comm (short name).
-		// v5.31 审查修复: 僵尸(已退出未回收)不算 —— 与 processAlive 同一标准, 否则刚被
-		// QUIT 的 hotspotd 被当成「活着、只是丢了 pidfile」, 不重新拉起。
-		if data, err := os.ReadFile("/proc/" + e.Name() + "/comm"); err == nil {
-			if strings.TrimSpace(string(data)) == name && !isZombie(pid) {
-				return pid
-			}
-		}
-		// Try /proc/<pid>/cmdline for nul-separated argv.
-		if data, err := os.ReadFile("/proc/" + e.Name() + "/cmdline"); err == nil {
-			argv0 := strings.SplitN(string(data), "\x00", 2)[0]
-			if filepath.Base(argv0) == name && !isZombie(pid) {
-				return pid
-			}
-		}
-	}
-	return 0
-}
+// findLiveByName shares M5's argv identity checks; comm alone is not identity.
+func findLiveByName(name string) int { return procScan(name) }
 
 // ─── doze detection ─────────────────────────────────────────────────────
 
@@ -581,7 +501,7 @@ func isDoze() bool {
 		return dozeCached
 	}
 	res := runAction("is_doze")
-	dozeCached = res.exitCode == 0
+	dozeCached = res.ok()
 	dozeCheckTS = time.Now()
 	return dozeCached
 }
@@ -705,7 +625,7 @@ func mainLoop() {
 func handlePending(_ *restoreThrottle) time.Duration {
 	m4Writer.hotspotDown() // v5.31 审查修复: 热点没开, Go 写者不空转
 	res := probeHotspotFn()
-	if res.exitCode != 0 || res.stdout == "" {
+	if !res.ok() || res.stdout == "" {
 		return intervalProbe
 	}
 	parts := strings.Fields(res.stdout)
@@ -716,8 +636,8 @@ func handlePending(_ *restoreThrottle) time.Duration {
 	iface, ip := parts[0], parts[1]
 	logf("STATE PENDING -> ACTIVE:%s (ip=%s); running full_init", iface, ip)
 	res = runActionFn("full_init", iface, ip)
-	if res.exitCode != 0 {
-		logf("full_init returned rc=%d; staying PENDING", res.exitCode)
+	if !res.ok() {
+		logf("full_init returned rc=%d err=%v; staying PENDING", res.exitCode, res.err)
 		return intervalProbe
 	}
 	writeStateFn(wdState{kind: stateActive, iface: iface})
@@ -730,7 +650,7 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	// 热点探测(native.go probeHotspot, v5.33 起唯一一份): 读 5 分钟内的
 	// run/iface_detect.json + 网卡地址; 陈旧 / 看不出时跑一次 hnc_iface.sh get 再判。
 	probe := probeHotspotFn()
-	if probe.exitCode != 0 || probe.stdout == "" {
+	if !probe.ok() || probe.stdout == "" {
 		// Hotspot down — keep ACTIVE state (user might just have toggled off),
 		// don't migrate or full_restore. Next round will re-probe.
 		m4Writer.hotspotDown() // v5.31 审查修复: 热点关了停 Go 写者(不空转)
@@ -746,10 +666,10 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	if newIface != activeIface {
 		logf("iface changed %s -> %s; migrating", activeIface, newIface)
 		res := runActionFn("migrate", activeIface, newIface, newIP)
-		if res.exitCode == 0 {
+		if res.ok() {
 			writeStateFn(wdState{kind: stateActive, iface: newIface})
 		} else {
-			logf("migrate rc=%d", res.exitCode)
+			logf("migrate rc=%d err=%v", res.exitCode, res.err)
 		}
 		return intervalNormal
 	}
@@ -813,8 +733,8 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		res := runActionFn("full_restore",
 			fmt.Sprintf("health_fail (total=%d, window=%d/%d)",
 				throttle.totalRestores, throttle.windowCount, restoreWindowMax))
-		if res.exitCode != 0 {
-			logf("full_restore rc=%d", res.exitCode)
+		if !res.ok() {
+			logf("full_restore rc=%d err=%v", res.exitCode, res.err)
 		}
 		throttle.onRestoreDone()
 		aux.recoveryRounds = 3
@@ -822,35 +742,21 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	}
 }
 
-// runV6Sync forks bin/v6_sync.sh — independent of watchdog.sh, so just direct exec.
-func runV6Sync() {
-	cmd := exec.Command(shellPath(), binDir+"/v6_sync.sh", "sync")
-	cmd.Env = os.Environ()
-	// v5.12: nil = /dev/null。io.Discard 会让 exec 建管道 + 拷贝 goroutine,
-	// 脚本里任何继承 stdout 的后台子进程都会让 Run() 阻塞到它退出, 主循环随之卡住。
-	cmd.Stdout, cmd.Stderr = nil, nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	_ = cmd.Run()
-}
+// Every synchronous side task has the same deadline and process-group cleanup
+// as business actions; a stuck script must not suspend daemon supervision.
+func runV6Sync() { runScript(binDir+"/v6_sync.sh", "sync") }
 
-// runScript 执行一个 bin/ 下的脚本(stdout/stderr 丢弃, 独立进程组), 同 runV6Sync。
 func runScript(path string, args ...string) {
-	cmd := exec.Command(shellPath(), append([]string{path}, args...)...)
-	cmd.Env = os.Environ()
-	cmd.Stdout, cmd.Stderr = nil, nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	_ = cmd.Run()
+	start := nowFn()
+	res := runBoundedCommand(actionTimeout, false, shellPath(), append([]string{path}, args...)...)
+	name := filepath.Base(path)
+	runStatsFn(name, res.exitCode, res.err, nowFn().Sub(start).Seconds()*1000, nowFn())
+	if !res.ok() {
+		logf("%s: rc=%d err=%v", name, res.exitCode, res.err)
+	}
 }
 
-func runStatsSample() {
-	cmd := exec.Command(shellPath(), binDir+"/stats_sample.sh")
-	cmd.Env = os.Environ()
-	// v5.12: nil = /dev/null。io.Discard 会让 exec 建管道 + 拷贝 goroutine,
-	// 脚本里任何继承 stdout 的后台子进程都会让 Run() 阻塞到它退出, 主循环随之卡住。
-	cmd.Stdout, cmd.Stderr = nil, nil
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	_ = cmd.Run()
-}
+func runStatsSample() { runScript(binDir + "/stats_sample.sh") }
 
 // ─── utility ─────────────────────────────────────────────────────────────
 

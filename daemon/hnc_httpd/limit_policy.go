@@ -551,12 +551,8 @@ func numOf(v interface{}) float64 {
 // readObserved 读 rules.json 当前规则 + billing_day。读/解析失败返回 ok=false
 // (调用方必须跳过 reconcile, 否则会把"读不到"误当"外部清空")。
 func readObserved(hncDir string) (map[string]limitRule, int, bool) {
-	b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
+	root, err := readRulesConfig(hncDir)
 	if err != nil {
-		return nil, 1, false
-	}
-	var root map[string]interface{}
-	if json.Unmarshal(b, &root) != nil {
 		return nil, 1, false
 	}
 	out := map[string]limitRule{}

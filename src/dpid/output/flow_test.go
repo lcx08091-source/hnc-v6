@@ -1,6 +1,10 @@
 package output
 
-import "testing"
+import (
+	"fmt"
+	"testing"
+	"time"
+)
 
 // v5.9.7: O(1) 全局流计数依赖 observe 的 created 标志与 evict 的删除回报,
 // 这里锁定这两个语义(计数漂移会让 enforceGlobalFlowLimitLocked 判错)。
@@ -52,5 +56,54 @@ func TestGlobalEvictBudget(t *testing.T) {
 	}
 	if removed := ft.globalEvict(now, 10); len(ft.flows) != 10 || removed == 0 {
 		t.Fatalf("globalEvict: got %d flows (removed=%d), want 10", len(ft.flows), removed)
+	}
+	if removed := ft.globalEvict(now, 0); len(ft.flows) != 0 || removed != 10 {
+		t.Fatalf("zero budget: got %d flows (removed=%d), want empty", len(ft.flows), removed)
+	}
+}
+
+func TestWriterEnforcesGlobalFlowLimitAcrossClients(t *testing.T) {
+	w := NewWriter("unused", "test")
+	now := time.Unix(1700000010, 0)
+	for client := 0; client < 10; client++ {
+		mac := fmt.Sprintf("aa:bb:cc:dd:ee:%02x", client)
+		ip := fmt.Sprintf("192.168.43.%d", client+2)
+		w.RecordDNS(mac, ip, "192.168.43.1", "example.com", now)
+		for flow := 0; flow < maxFlowsPerClient; flow++ {
+			w.RecordFlow(mac, ip, fmt.Sprintf("203.0.113.%d", flow+1), false, 443, 100, true, now)
+			if w.totalActiveFlows > maxGlobalFlows {
+				t.Fatalf("global limit exceeded: %d > %d", w.totalActiveFlows, maxGlobalFlows)
+			}
+		}
+	}
+	actual := 0
+	for _, c := range w.clients {
+		if c.Flows != nil {
+			actual += len(c.Flows.flows)
+		}
+	}
+	if actual != w.totalActiveFlows || actual != maxGlobalFlows {
+		t.Fatalf("actual=%d counter=%d limit=%d", actual, w.totalActiveFlows, maxGlobalFlows)
+	}
+}
+
+func TestPersistenceAgesWithoutNewPackets(t *testing.T) {
+	ft := newFlowTracker()
+	now := int64(1700000010) // 30-second bucket boundary
+	for i := 0; i < bucketCount; i++ {
+		ft.observe("T|203.0.113.1:443", now+int64(i*bucketSeconds), 100)
+	}
+	f := ft.flows["T|203.0.113.1:443"]
+	if got := f.persistencePct(now + 450); got != 1 {
+		t.Fatalf("setup persistence=%g, want 1", got)
+	}
+	if got := f.persistencePct(now + 540); got != 13.0/16.0 {
+		t.Fatalf("after three empty buckets=%g, want 13/16", got)
+	}
+	if got := f.persistencePct(now + 930); got != 0 {
+		t.Fatalf("expired buckets counted: %g", got)
+	}
+	if got := ft.backgroundShare(now + 3600); got != 0 {
+		t.Fatalf("idle flow still reported as background: %g", got)
 	}
 }

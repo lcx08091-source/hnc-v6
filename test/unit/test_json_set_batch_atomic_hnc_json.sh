@@ -15,11 +15,11 @@ export HNC_JSON="$DIR/bin/hnc_json"
 export HNC_TEST_MODE=1
 MAC="aa:bb:cc:dd:ee:ff"
 sh "$DIR/bin/json_set_batch.sh" device "$MAC" nickname 'Phone, with } brace' note 'quote " and slash \\ 中文' down_mbps 1.5 limit_enabled true
-"$DIR/bin/hnc_json" validate "$RULES"
-NICK=$("$DIR/bin/hnc_json" get-device "$RULES" "$MAC" nickname)
-NOTE=$("$DIR/bin/hnc_json" get-device "$RULES" "$MAC" note)
-DN=$("$DIR/bin/hnc_json" get-device "$RULES" "$MAC" down_mbps)
-LE=$("$DIR/bin/hnc_json" get-device "$RULES" "$MAC" limit_enabled)
+sh "$DIR/bin/hnc_json" validate "$RULES"
+NICK=$(sh "$DIR/bin/hnc_json" get-device "$RULES" "$MAC" nickname)
+NOTE=$(sh "$DIR/bin/hnc_json" get-device "$RULES" "$MAC" note)
+DN=$(sh "$DIR/bin/hnc_json" get-device "$RULES" "$MAC" down_mbps)
+LE=$(sh "$DIR/bin/hnc_json" get-device "$RULES" "$MAC" limit_enabled)
 echo "$NICK" | grep -q 'Phone, with } brace'
 echo "$NOTE" | grep -q 'quote'
 [ "$DN" = "1.5" ]
@@ -30,9 +30,9 @@ echo "$NOTE" | grep -q 'quote'
 NL_VAL=$(printf 'x\ny')
 sh "$DIR/bin/json_set_batch.sh" device "$MAC" note "$NL_VAL" down_mbps 2 || {
   echo "[FAIL] json_set_batch rejected a value containing newline" >&2; exit 1; }
-"$DIR/bin/hnc_json" validate "$RULES"
-NOTE2=$("$DIR/bin/hnc_json" get-device "$RULES" "$MAC" note)
-DN2=$("$DIR/bin/hnc_json" get-device "$RULES" "$MAC" down_mbps)
+sh "$DIR/bin/hnc_json" validate "$RULES"
+NOTE2=$(sh "$DIR/bin/hnc_json" get-device "$RULES" "$MAC" note)
+DN2=$(sh "$DIR/bin/hnc_json" get-device "$RULES" "$MAC" down_mbps)
 [ "$NOTE2" = '"x\ny"' ] || { echo "[FAIL] newline value not stored as JSON \\n: $NOTE2" >&2; exit 1; }
 [ "$DN2" = "2" ] || { echo "[FAIL] down_mbps misaligned: $DN2" >&2; exit 1; }
 rm -rf "$DIR"

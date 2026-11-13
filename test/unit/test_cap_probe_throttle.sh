@@ -3,6 +3,18 @@
 # 旧的 30 秒节流等于每分钟跑一次完整能力探测(真机热点空转 watchdog ≈ 530 CPU 秒/小时)。
 
 cap_stub() {
+    # 新建 CI runner 可能开机不足两分钟。固定 uptime, 避免把测试的
+    #「两分钟前测过」误解释为上次开机的记录。
+    cap_real_cut=$(command -v cut)
+    cat > "$MOCK_BIN_DIR/cut" <<STUB
+#!/bin/sh
+if [ "\$*" = '-d. -f1 /proc/uptime' ]; then
+    echo 86400
+else
+    exec "$cap_real_cut" "\$@"
+fi
+STUB
+    chmod +x "$MOCK_BIN_DIR/cut"
     printf '#!/bin/sh\necho x >> "%s/run/cap_calls"\n' "$HNC_TEST_DIR" > "$HNC_TEST_DIR/bin/capability_probe.sh"
     chmod +x "$HNC_TEST_DIR/bin/capability_probe.sh"
     rm -f "$HNC_TEST_DIR/run/cap_calls" "$HNC_TEST_DIR/run/capability_probe_last"

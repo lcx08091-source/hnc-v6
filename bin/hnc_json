@@ -27,7 +27,7 @@ Usage:
   hnc_json validate <file>
   hnc_json get-top <file> <key>
   hnc_json set-top <file> <key> <value> [TYPE]
-  hnc_json get-device <file> <mac> <key>
+  hnc_json get-device <file> <mac> [key]   (omit key to read the device object)
   hnc_json set-device <file> <mac> <key> <value> [TYPE]
   hnc_json set-device-batch <file> <mac> <key> <value> <TYPE> [<key> <value> <TYPE> ...]
   hnc_json del-device <file> <mac>
@@ -267,9 +267,9 @@ get_top() {
 }
 
 get_device() {
-  f="$1"; mac="$2"; key="$3"
+  f="$1"; mac="$2"; key="${3:-}"
   [ -n "$mac" ] || { echo "hnc_json: empty mac" >&2; return 2; }
-  [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
+  [ $# -lt 3 ] || [ -n "$key" ] || { echo "hnc_json: empty key" >&2; return 2; }
   validate_file "$f" || return $?
   awk -v mac="$(awk_v "$mac")" -v key="$(awk_v "$key")" '
   function ch(i){ return substr(s,i,1) }
@@ -345,6 +345,7 @@ get_device() {
     if(!find_key(devs_start, devs_end, mac)) exit 3
     dev_start=fs; dev_end=fe
     if(ch(skip_ws(dev_start))!="{") exit 3
+    if(key==""){ print substr(s, dev_start, dev_end-dev_start); exit 0 }
     if(!find_key(dev_start, dev_end, key)) exit 3
     v=substr(s, fs, fe-fs)
     gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", v)
@@ -956,8 +957,8 @@ case "$cmd" in
     set_top "$2" "$3" "$4" "${5:-str}"
     ;;
   get-device|device-get)
-    [ $# -eq 4 ] || { usage >&2; exit 2; }
-    get_device "$2" "$3" "$4"
+    [ $# -eq 3 ] || [ $# -eq 4 ] || { usage >&2; exit 2; }
+    shift; get_device "$@"
     ;;
   set-device|device-set)
     [ $# -ge 5 ] && [ $# -le 6 ] || { usage >&2; exit 2; }

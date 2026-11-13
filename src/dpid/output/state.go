@@ -848,7 +848,13 @@ func (w *Writer) enforceGlobalFlowLimitLocked(now int64) {
 		}
 		if c, ok := w.clients[cfc.key]; ok && c.Flows != nil {
 			before := len(c.Flows.flows)
-			c.Flows.globalEvict(now, maxFlowsPerClient)
+			// Each client is already capped at maxFlowsPerClient. Passing
+			// that same cap cannot reduce an over-budget global total.
+			budget := before - (w.totalActiveFlows - maxGlobalFlows)
+			if budget < 0 {
+				budget = 0
+			}
+			c.Flows.globalEvict(now, budget)
 			w.totalActiveFlows -= before - len(c.Flows.flows)
 		}
 	}

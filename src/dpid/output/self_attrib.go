@@ -121,10 +121,12 @@ type SelfAttribAggregator struct {
 	// seen for staleEvictAge.
 	appsByUID map[int]*SelfApp
 
-	// remoteToUID maps "ip:port" → uid for the most recent sample.
-	// The capture-side (TLS/DNS events) consults this on every event
-	// to attribute SNIs to apps.
+	// remoteToUID is a compatibility endpoint index. An endpoint shared
+	// by multiple UIDs maps to -1, never an arbitrary last writer.
 	remoteToUID map[string]int
+	// flowToUID uses protocol + local endpoint + remote endpoint so two
+	// apps connecting to the same CDN remain distinct.
+	flowToUID map[string]int
 
 	// snisByUID tracks distinct SNIs per uid, capped to MaxSNIsPerApp.
 	// v5.8.8 (audit): value is last-seen unix ts so the cap is LRU (evict
@@ -211,6 +213,7 @@ func NewSelfAttribAggregator(jsonlDir string) *SelfAttribAggregator {
 	return &SelfAttribAggregator{
 		appsByUID:        make(map[int]*SelfApp),
 		remoteToUID:      make(map[string]int),
+		flowToUID:        make(map[string]int),
 		snisByUID:        make(map[int]map[string]int64),
 		rulesByUID:       make(map[int]map[string]int),
 		unmatchedSNIs:    make(map[string]map[int]struct{}),
@@ -275,6 +278,7 @@ func (a *SelfAttribAggregator) SetEnabled(enabled bool, reason string) {
 		// disable. But clear the live remote→uid map so capture events
 		// stop attributing.
 		a.remoteToUID = make(map[string]int)
+		a.flowToUID = make(map[string]int)
 	}
 }
 
@@ -291,11 +295,58 @@ func (a *SelfAttribAggregator) LookupUID(remoteIP string, remotePort uint16) (ui
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	uid, ok = a.remoteToUID[key]
-	if !ok {
+	if !ok || uid < 0 {
 		return 0, "", false
 	}
 	pkg = a.pkgCache[uid]
 	return uid, pkg, true
+}
+
+// LookupFlowUID attributes a captured outbound packet using its full
+// transport tuple. A missing or conflicting tuple is unknown; falling
+// back to the remote endpoint could assign a new connection to another app.
+func (a *SelfAttribAggregator) LookupFlowUID(proto, localIP string, localPort uint16, remoteIP string, remotePort uint16) (uid int, pkg string, ok bool) {
+	if localPort == 0 || remotePort == 0 {
+		return 0, "", false
+	}
+	key := selfFlowUIDKey(proto, net.JoinHostPort(localIP, strconv.Itoa(int(localPort))), net.JoinHostPort(remoteIP, strconv.Itoa(int(remotePort))))
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	uid, ok = a.flowToUID[key]
+	if key == "" || !ok || uid < 0 {
+		return 0, "", false
+	}
+	return uid, a.pkgCache[uid], true
+}
+
+func selfFlowUIDKey(proto, local, remote string) string {
+	if proto != "tcp" && proto != "udp" {
+		return ""
+	}
+	l, r := canonRemoteKey(local), canonRemoteKey(remote)
+	if l == "" || r == "" {
+		return ""
+	}
+	return proto + "|" + l + "|" + r
+}
+
+func buildSelfUIDIndexes(rows []SelfAttribConnRow) (remote, flows map[string]int) {
+	remote, flows = make(map[string]int, len(rows)), make(map[string]int, len(rows))
+	add := func(index map[string]int, key string, uid int) {
+		if key == "" {
+			return
+		}
+		if old, ok := index[key]; ok && old != uid {
+			index[key] = -1
+		} else {
+			index[key] = uid
+		}
+	}
+	for _, row := range rows {
+		add(remote, canonRemoteKey(row.Remote), row.UID)
+		add(flows, selfFlowUIDKey(row.Proto, row.Local, row.Remote), row.UID)
+	}
+	return remote, flows
 }
 
 // ByteSample is the per-uid byte counts handed to RecordBytes. Defined
@@ -679,7 +730,6 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 
 	var rows []SelfAttribConnRow
 	seen := make(map[string]bool)
-	newRemoteToUID := make(map[string]int, 128)
 	unknownConns := 0
 
 	for _, src := range []struct {
@@ -698,7 +748,7 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 			continue
 		}
 		for _, e := range entries {
-			key := e.Proto + "|" + e.Local + "|" + e.Remote
+			key := e.Proto + "|" + e.Local + "|" + e.Remote + "|" + strconv.Itoa(e.UID)
 			if seen[key] {
 				continue
 			}
@@ -707,16 +757,6 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 				e.Pkg = pkg
 			} else if e.UID > 0 {
 				unknownConns++
-			}
-			// v5.12: 表键规范化。旧代码直接用 parseHexAddr 的原样字符串当键:
-			// IPv6 形如 "[2409:8963:e03:0:...]:443"(%x 不补零、不做 :: 压缩),
-			// 而 LookupUID 用 net.IP.String()("2409:8963:e03::...", 无方括号)
-			// 拼键, 永远对不上; 更常见的是 Android Java 应用用双栈 AF_INET6
-			// socket 连 IPv4 服务器, /proc/net/tcp6 里是 ::ffff:a.b.c.d 映射
-			// 地址, 抓包侧看到的却是纯 IPv4 → 自抓包 SNI 归因对大多数 App
-			// 全部落空。统一规范为 "IPv4点分 或 IPv6 规范串:port"。
-			if k := canonRemoteKey(e.Remote); k != "" {
-				newRemoteToUID[k] = e.UID
 			}
 			rows = append(rows, e)
 		}
@@ -744,9 +784,12 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 		}
 	}
 
+	// Canonicalize both endpoint and exact-tuple indexes in one snapshot.
+	newRemoteToUID, newFlowToUID := buildSelfUIDIndexes(rows)
 	// Update aggregator
 	a.mu.Lock()
 	a.remoteToUID = newRemoteToUID
+	a.flowToUID = newFlowToUID
 	a.lastTick = now.Unix()
 	a.unknownConns = unknownConns
 

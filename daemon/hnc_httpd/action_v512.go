@@ -40,7 +40,7 @@ func actionHotspotScheduleSet(hncDir string, p map[string]string) actionResp {
 		if !ok {
 			continue
 		}
-		if rc, out := runBin(hncDir, "json_set.sh", "top", kv[1], v); rc != 0 {
+		if rc, out := setRuleTop(hncDir, kv[1], v); rc != 0 {
 			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 		}
 	}
@@ -54,7 +54,7 @@ func actionStaleTTLSet(hncDir string, p map[string]string) actionResp {
 	if err != nil || n < 0 || n > 3650 {
 		return actionResp{OK: false, Error: "bad params", Detail: "days must be 0-3650 (0 = never)"}
 	}
-	if rc, out := runBin(hncDir, "json_set.sh", "top", "stale_rule_ttl_days", strconv.Itoa(n)); rc != 0 {
+	if rc, out := setRuleTop(hncDir, "stale_rule_ttl_days", strconv.Itoa(n)); rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 	}
 	return actionResp{OK: true}

@@ -13,14 +13,14 @@ cat > "$TMP/a.json" <<'JSON'
 {"hotspot_ssid":"我家,客房}","enabled":true,"n":123,"s":"quote \" ok"}
 JSON
 
-"$HNC_JSON" validate "$TMP/a.json" || fail validate
-v="$($HNC_JSON get-top "$TMP/a.json" hotspot_ssid)" || fail get_ssid
+sh "$HNC_JSON" validate "$TMP/a.json" || fail validate
+v="$(sh "$HNC_JSON" get-top "$TMP/a.json" hotspot_ssid)" || fail get_ssid
 case "$v" in '"我家,客房}"') : ;; *) fail "bad hotspot_ssid: $v" ;; esac
 
 cat > "$TMP/bad.json" <<'JSON'
 {"a":"unterminated}
 JSON
-if "$HNC_JSON" validate "$TMP/bad.json"; then
+if sh "$HNC_JSON" validate "$TMP/bad.json"; then
   fail "bad json accepted"
 fi
 

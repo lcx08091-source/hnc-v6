@@ -251,12 +251,20 @@ function bridgeReq(method, path, body, opt, retried) {
 function fetchReq(method, path, body, opt) {
   opt = opt || {};
   var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  var tm = setTimeout(function () { try { ctrl && ctrl.abort(); } catch (_) {} }, opt.timeout || 9000);
+  var tm, timedOut = false;
+  var timeout = new Promise(function (resolve, reject) {
+    tm = setTimeout(function () {
+      timedOut = true;
+      try { ctrl && ctrl.abort(); } catch (_) {}
+      reject(HttpError('请求超时', 0));
+    }, opt.timeout || 9000);
+  });
   var init = { method: method, credentials: 'same-origin', cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, signal: ctrl ? ctrl.signal : undefined };
   if (method === 'POST') { init.headers['Content-Type'] = 'application/json'; init.headers['X-HNC-CSRF'] = '1'; init.body = JSON.stringify(body || {}); }
-  return fetch(path, init).then(function (resp) {
-    clearTimeout(tm);
+  // 超时覆盖响应正文; Promise.race 也让没有 AbortController 的旧 WebView 能释放请求队列。
+  var response = Promise.resolve().then(function () { return fetch(path, init); }).then(function (resp) {
     return resp.text().then(function (txt) {
+      if (timedOut) throw HttpError('请求超时', 0);
       if (resp.status === 401) {
         if (location.pathname.indexOf('/pair') !== 0) setTimeout(function () { location.href = '/pair'; }, 600);
         throw HttpError('需要先配对这台设备', 401);
@@ -265,7 +273,12 @@ function fetchReq(method, path, body, opt) {
       if (!resp.ok) throw HttpError((obj.error || ('HTTP ' + resp.status)) + (obj.detail ? ' · ' + obj.detail : ''), resp.status, obj);
       return obj;
     });
-  }, function (e) { clearTimeout(tm); throw HttpError(e && e.name === 'AbortError' ? '请求超时' : '网络错误 · ' + (e && e.message || e), 0); });
+  });
+  return Promise.race([response, timeout]).then(function (obj) { clearTimeout(tm); return obj; }, function (e) {
+    clearTimeout(tm);
+    if (e && e.status !== undefined) throw e;
+    throw HttpError(e && e.name === 'AbortError' ? '请求超时' : '网络错误 · ' + (e && e.message || e), 0);
+  });
 }
 function req(method, path, body, opt) { return KSU ? bridgeReq(method, path, body, opt) : fetchReq(method, path, body, opt); }
 function qs(params) {

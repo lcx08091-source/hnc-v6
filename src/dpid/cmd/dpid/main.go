@@ -240,20 +240,13 @@ func main() {
 	// rows to /data/local/hnc/run/stats.YYYYMMDD.jsonl for trend graphs.
 	output.HistoryDir = cfg.RunDir
 	historySampler := output.NewHistorySampler(sw)
+	// Prime before capture starts; do not discard the first packets if
+	// scheduling delays the sampling goroutine.
+	historySampler.Tick(time.Now())
+	historyDone := make(chan struct{})
 	go func() {
-		tk := time.NewTicker(output.HistorySampleEvery)
-		defer tk.Stop()
-		// Establish baseline immediately so the first row arrives at the
-		// FIRST scheduled tick, not the second.
-		historySampler.Tick(time.Now())
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case t := <-tk.C:
-				historySampler.Tick(t)
-			}
-		}
+		defer close(historyDone)
+		runHistorySampler(ctx, historySampler, output.HistorySampleEvery)
 	}()
 
 	// rc30.6: IP→app reverse map flusher. Writes /run/ip_app_map.json
@@ -429,6 +422,11 @@ func main() {
 		}
 	}
 
+	cancel()
+	<-historyDone
+	// Capture has stopped now. Flush any packets received after the
+	// sampling loop's final cancellation tick before exiting.
+	historySampler.Tick(time.Now())
 	_ = sw.Flush()
 	_ = devID.Flush(time.Now())
 	_ = ipNames.Flush(time.Now())
@@ -436,6 +434,22 @@ func main() {
 	_ = disc.Flush(time.Now())
 	clearCrashFlag(cfg.RunDir)
 	log.Printf("hnc_dpid exited cleanly")
+}
+
+// runHistorySampler includes a final sample on graceful cancellation so
+// ordinary restarts do not drop the unfinished 15-minute interval.
+func runHistorySampler(ctx context.Context, sampler interface{ Tick(time.Time) }, every time.Duration) {
+	tk := time.NewTicker(every)
+	defer tk.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			sampler.Tick(time.Now())
+			return
+		case t := <-tk.C:
+			sampler.Tick(t)
+		}
+	}
 }
 
 // flushEvery 以固定周期调用 flush(v5.13: dpi_devid / dpi_ipname 共用)。

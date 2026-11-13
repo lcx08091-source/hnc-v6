@@ -35,7 +35,7 @@ func actionHotspotIfaceSet(hncDir string, p map[string]string) actionResp {
 		}
 	}
 
-	rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_iface", iface)
+	rc, out := setRuleTop(hncDir, "hotspot_iface", iface)
 	if rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 	}

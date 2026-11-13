@@ -205,9 +205,12 @@ func (f *flowEntry) persistencePct(nowUnix int64) float64 {
 		return 0
 	}
 	active := 0
-	for i := 0; i < totalWindow; i++ {
-		idx := (f.head - i + bucketCount) % bucketCount
-		if f.buckets[idx].packets > 0 {
+	current := bucketStart(nowUnix)
+	oldest := current - int64(totalWindow-1)*bucketSeconds
+	for _, b := range f.buckets {
+		// No packet arrives to roll the ring when a flow goes idle.
+		// Count only buckets in the current observation window.
+		if b.startUnix >= oldest && b.startUnix <= current && b.packets > 0 {
 			active++
 		}
 	}
@@ -224,6 +227,9 @@ func (ft *flowTracker) backgroundShare(nowUnix int64) float64 {
 	total := 0
 	bg := 0
 	for _, f := range ft.flows {
+		if nowUnix-f.lastSeen > flowMaxIdleSeconds {
+			continue
+		}
 		// Only count flows old enough to be meaningful.
 		if nowUnix-f.firstSeen < bucketSeconds*3 {
 			continue

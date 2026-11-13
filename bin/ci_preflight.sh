@@ -75,7 +75,7 @@ else
 fi
 
 # 4. Required files
-for f in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/main.js webroot/json-health.html bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json; do
+for f in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/main.js webroot/json-health.html bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/json_guard.sh bin/json_set.sh bin/hnc_device_policy.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json; do
   if [ -e "$f" ]; then ok "required file exists: $f"; else warn "required file missing: $f"; fi
 done
 # v5.22: 安装期 ABI 选择(customize.sh → bin/hnc_arch.sh)缺一不可 —— 缺了 armv7
@@ -85,7 +85,7 @@ for f in customize.sh bin/hnc_arch.sh; do
 done
 
 # 5. Executable bits, source tree check only.
-for f in service.sh post-fs-data.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/hnc_clsact_ctl bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh daemon/hnc_httpd/build.sh; do
+for f in service.sh post-fs-data.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/tc_manager.sh bin/hnc_device_policy.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/hnc_clsact_ctl bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh daemon/hnc_httpd/build.sh; do
   [ -e "$f" ] || continue
   if [ -x "$f" ]; then ok "executable: $f"; else fail "not executable: $f"; fi
 done

@@ -980,7 +980,7 @@ func actionClsactModeSet(hncDir string, p map[string]string) actionResp {
 	default:
 		return actionResp{OK: false, Error: "bad params", Detail: "mode must be auto|on|off"}
 	}
-	if rc, out := runBin(hncDir, "json_set.sh", "top", "clsact_bpf_mode", mode); rc != 0 {
+	if rc, out := setRuleTop(hncDir, "clsact_bpf_mode", mode); rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 	}
 	rc, out := runBin(hncDir, "hnc_offload_guard.sh", "apply")

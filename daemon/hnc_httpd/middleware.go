@@ -21,7 +21,6 @@ package main
 import (
 	"context"
 	"crypto/subtle"
-	"encoding/json"
 	"log"
 	"net"
 	"net/http"
@@ -120,14 +119,9 @@ func isPublicPath(p string) bool {
 //	并打 log. 之前 fail-open 在 toggle 已 ON 用户那里, 偶发文件错误瞬间会
 //	短暂打开匿名读权限. 安全方向以"出错时严"为正.
 func readAuthRequired(hncDir string) bool {
-	data, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
+	raw, err := readRulesConfig(hncDir)
 	if err != nil {
-		log.Printf("readAuthRequired: read rules.json failed, fail-closed: %v", err)
-		return true
-	}
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		log.Printf("readAuthRequired: parse rules.json failed, fail-closed: %v", err)
+		log.Printf("readAuthRequired: load rules.json failed, fail-closed: %v", err)
 		return true
 	}
 	v, ok := raw["auth_required"].(bool)

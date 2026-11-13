@@ -218,3 +218,44 @@ rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
 i=0; while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; i=$((i+1)); done
 [ -f "$HNC/data/rollback.json" ] && [ ! -f "$HNC/data/rollback.ack" ] \
   && test_pass || test_fail "ack 仍在: $(ls "$HNC/data")"
+
+test_start "rollback: 真实运行的 watchdog 二进制以新 inode 恢复, 不受 ETXTBSY 影响"
+if [ -x /bin/sleep ]; then
+    rbseed 5290001 5280001
+    rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
+    cp /bin/sleep "$HNC/bin/hnc_watchdog"
+    chmod 755 "$HNC/bin/hnc_watchdog"
+    "$HNC/bin/hnc_watchdog" 30 >/dev/null 2>&1 &
+    real_wd=$!
+    echo "$real_wd" > "$HNC/run/watchdog.pid"
+    sleep 0.05
+    real_wd_started=0
+    kill -0 "$real_wd" 2>/dev/null && real_wd_started=1
+    echo 5 > "$HNC/data/rollback.failstreak"
+    rbrun observe "$HNC" >/dev/null 2>&1; rc=$?
+    kill -9 "$real_wd" 2>/dev/null || true
+    wait "$real_wd" 2>/dev/null || true
+    [ "$real_wd_started" = 1 ] && [ "$rc" = 9 ] \
+      && cmp -s "$HNC/.prev/bin/hnc_watchdog" "$HNC/bin/hnc_watchdog" \
+      && [ "$(cat "$HNC/data/runtime_version")" = 5280001 ] \
+      && [ "$(cat "$HNC/data/rollback.pinned")" = 5290001 ] \
+      && test_pass || test_fail "rc=$rc, active binary did not restore from .prev"
+else
+    test_skip "需要 Linux /bin/sleep 实体二进制"
+fi
+
+test_start "rollback: 文件复制失败不记录成功或钉住, 保留观察期重试"
+rbseed 5290001 5280001
+rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
+echo "NEW-BIN-v529" > "$HNC/bin/hnc_watchdog"
+cat >> "$HNC/stub/proc_override.sh" <<'STUB'
+cp() { return 1; }
+STUB
+echo 5 > "$HNC/data/rollback.failstreak"
+rbrun observe "$HNC" >/dev/null 2>&1; rc=$?
+[ "$rc" = 1 ] \
+  && [ "$(cat "$HNC/bin/hnc_watchdog")" = NEW-BIN-v529 ] \
+  && [ "$(cat "$HNC/data/runtime_version")" = 5290001 ] \
+  && [ ! -f "$HNC/data/rollback.pinned" ] && [ ! -f "$HNC/data/rollback.json" ] \
+  && [ -f "$HNC/data/rollback.observing" ] \
+  && test_pass || test_fail "rc=$rc; failed copy reported rollback success"

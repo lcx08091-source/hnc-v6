@@ -33,7 +33,7 @@ func actionGlobalShaperSet(hncDir string, p map[string]string) actionResp {
 			}
 		}
 		// GS-2: 检查 flag 写入 rc。否则 UI 报"已关闭"但持久化没落 → 重启 restore 又拉起。
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "false"); rc != 0 {
+		if rc, out := setRuleTop(hncDir, "global_shaper_enabled", "false"); rc != 0 {
 			return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(out)}
 		}
 		return actionResp{OK: true, Detail: "global shaper off"}
@@ -75,15 +75,15 @@ func actionGlobalShaperSet(hncDir string, p map[string]string) actionResp {
 	// 持久化(先写参数, 最后写 enabled, 让 restore 永远读到一致快照)。
 	// GS-2: 三次写全部检查 rc。down/up 任一失败 → 显式落 enabled=false 防半状态
 	// (tc 此刻已生效但不持久化;用户见 error 重试),再返回错误。
-	if rc1, out1 := runBin(hncDir, "json_set.sh", "top", "global_shaper_down", rateDown); rc1 != 0 {
-		runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "false")
+	if rc1, out1 := setRuleTop(hncDir, "global_shaper_down", rateDown); rc1 != 0 {
+		setRuleTop(hncDir, "global_shaper_enabled", "false")
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: "down: " + strings.TrimSpace(out1)}
 	}
-	if rc2, out2 := runBin(hncDir, "json_set.sh", "top", "global_shaper_up", rateUp); rc2 != 0 {
-		runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "false")
+	if rc2, out2 := setRuleTop(hncDir, "global_shaper_up", rateUp); rc2 != 0 {
+		setRuleTop(hncDir, "global_shaper_enabled", "false")
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: "up: " + strings.TrimSpace(out2)}
 	}
-	if rcW, outW := runBin(hncDir, "json_set.sh", "top", "global_shaper_enabled", "true"); rcW != 0 {
+	if rcW, outW := setRuleTop(hncDir, "global_shaper_enabled", "true"); rcW != 0 {
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(outW)}
 	}
 	return actionResp{OK: true, Detail: "global shaper on down=" + rateDown + " up=" + rateUp}

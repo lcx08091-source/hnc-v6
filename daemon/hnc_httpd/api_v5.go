@@ -78,59 +78,56 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 	resp.ConnBlockDNSLayer = connBlockDNSLayer(s.hncDir)
 	// rules.json 一次读全部字段 (v5.1: rules.json 同时存 top-level hotspot_* 和 remote_enabled/auth_required)
 	// 兼容两套命名: shell 写 hotspot_auto/_pass/_delay, 旧版 Go 写 hotspot_autostart/_delay_sec
-	if rulesData, err := os.ReadFile(s.hncDir + "/data/rules.json"); err == nil {
-		var m map[string]interface{}
-		if json.Unmarshal(rulesData, &m) == nil {
-			resp.AuthRequired = boolField(m, "auth_required")
-			resp.WhitelistMode = boolField(m, "whitelist_mode")
-			resp.RemoteEnabled = boolField(m, "remote_enabled")
-			resp.ClsactBpfMode = clsactModeFromRules(m)
-			if v, ok := m["tc_leaf_aqm"].(string); ok && (v == "on" || v == "off" || v == "auto") {
-				resp.TcLeafAqm = v
-			}
-			// Autostart: 优先读 hotspot_auto (shell 名), 回退到 hotspot_autostart
-			resp.HotspotAutostart = boolField(m, "hotspot_auto") || boolField(m, "hotspot_autostart")
-			if ssid, ok := m["hotspot_ssid"].(string); ok {
-				resp.HotspotSSID = ssid
-			}
-			// Delay: 优先读 hotspot_delay (shell), 回退到 hotspot_delay_sec
-			if d, ok := m["hotspot_delay"].(float64); ok {
-				resp.HotspotDelaySec = int(d)
-			} else if d, ok := m["hotspot_delay_sec"].(float64); ok {
-				resp.HotspotDelaySec = int(d)
-			}
-			resp.HotspotTimeEnable = boolField(m, "hotspot_time_enable")
-			resp.HotspotChargingOnly = boolField(m, "hotspot_charging_only")
-			resp.QUICBlock = boolField(m, "quic_block")
-			resp.DiscoverCertProbe = true
-			if v, ok := m["discover_cert_probe"].(bool); ok {
-				resp.DiscoverCertProbe = v
-			}
-			resp.HotspotTimeStart, _ = m["hotspot_time_start"].(string)
-			resp.HotspotTimeEnd, _ = m["hotspot_time_end"].(string)
-			resp.StaleRuleTTLDays = 30 // 与 cleanup_stale_rules.sh 缺省一致
-			if v, ok := m["stale_rule_ttl_days"].(float64); ok {
-				resp.StaleRuleTTLDays = int(v)
-			}
-			if v, ok := m["hotspot_iface"].(string); ok {
-				resp.HotspotIface = v
-			}
-			if v, ok := m["tc_qos_mode"].(string); ok {
-				resp.TcQosMode = v
-			}
-			if v, ok := m["tc_qos_scale"].(float64); ok {
-				resp.TcQosScale = int(v)
-			} else if v, ok := m["tc_qos_scale"].(string); ok {
-				resp.TcQosScale, _ = strconv.Atoi(v)
-			}
-			// rc32: 全局带宽整形器状态
-			resp.GlobalShaperEnabled = boolField(m, "global_shaper_enabled")
-			if v, ok := m["global_shaper_down"].(string); ok {
-				resp.GlobalShaperDown = v
-			}
-			if v, ok := m["global_shaper_up"].(string); ok {
-				resp.GlobalShaperUp = v
-			}
+	if m, err := readRulesConfig(s.hncDir); err == nil {
+		resp.AuthRequired = boolField(m, "auth_required")
+		resp.WhitelistMode = boolField(m, "whitelist_mode")
+		resp.RemoteEnabled = boolField(m, "remote_enabled")
+		resp.ClsactBpfMode = clsactModeFromRules(m)
+		if v, ok := m["tc_leaf_aqm"].(string); ok && (v == "on" || v == "off" || v == "auto") {
+			resp.TcLeafAqm = v
+		}
+		// Autostart: 优先读 hotspot_auto (shell 名), 回退到 hotspot_autostart
+		resp.HotspotAutostart = boolField(m, "hotspot_auto") || boolField(m, "hotspot_autostart")
+		if ssid, ok := m["hotspot_ssid"].(string); ok {
+			resp.HotspotSSID = ssid
+		}
+		// Delay: 优先读 hotspot_delay (shell), 回退到 hotspot_delay_sec
+		if d, ok := m["hotspot_delay"].(float64); ok {
+			resp.HotspotDelaySec = int(d)
+		} else if d, ok := m["hotspot_delay_sec"].(float64); ok {
+			resp.HotspotDelaySec = int(d)
+		}
+		resp.HotspotTimeEnable = boolField(m, "hotspot_time_enable")
+		resp.HotspotChargingOnly = boolField(m, "hotspot_charging_only")
+		resp.QUICBlock = boolField(m, "quic_block")
+		resp.DiscoverCertProbe = true
+		if v, ok := m["discover_cert_probe"].(bool); ok {
+			resp.DiscoverCertProbe = v
+		}
+		resp.HotspotTimeStart, _ = m["hotspot_time_start"].(string)
+		resp.HotspotTimeEnd, _ = m["hotspot_time_end"].(string)
+		resp.StaleRuleTTLDays = 30 // 与 cleanup_stale_rules.sh 缺省一致
+		if v, ok := m["stale_rule_ttl_days"].(float64); ok {
+			resp.StaleRuleTTLDays = int(v)
+		}
+		if v, ok := m["hotspot_iface"].(string); ok {
+			resp.HotspotIface = v
+		}
+		if v, ok := m["tc_qos_mode"].(string); ok {
+			resp.TcQosMode = v
+		}
+		if v, ok := m["tc_qos_scale"].(float64); ok {
+			resp.TcQosScale = int(v)
+		} else if v, ok := m["tc_qos_scale"].(string); ok {
+			resp.TcQosScale, _ = strconv.Atoi(v)
+		}
+		// rc32: 全局带宽整形器状态
+		resp.GlobalShaperEnabled = boolField(m, "global_shaper_enabled")
+		if v, ok := m["global_shaper_down"].(string); ok {
+			resp.GlobalShaperDown = v
+		}
+		if v, ok := m["global_shaper_up"].(string); ok {
+			resp.GlobalShaperUp = v
 		}
 	}
 	// v5.11: run/ 下的 QoS 文件优先(与 tc_manager.sh qos_mode_raw 同一优先级)

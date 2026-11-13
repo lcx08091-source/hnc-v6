@@ -62,3 +62,66 @@ func TestLookupUID_CanonicalKeys(t *testing.T) {
 		t.Errorf("IPv4 查找失败: %d %v", uid, ok)
 	}
 }
+
+func TestLookupFlowUIDSeparatesSharedEndpoints(t *testing.T) {
+	a := NewSelfAttribAggregator("")
+	rows := []SelfAttribConnRow{
+		{Proto: "tcp", Local: "10.0.0.1:41000", Remote: "203.0.113.1:443", UID: 10100},
+		{Proto: "tcp", Local: "10.0.0.1:41001", Remote: "203.0.113.1:443", UID: 10200},
+		{Proto: "udp", Local: "10.0.0.1:41000", Remote: "203.0.113.1:443", UID: 10300},
+		{Proto: "tcp", Local: "10.0.0.2:41000", Remote: "203.0.113.1:443", UID: 10400},
+	}
+	a.remoteToUID, a.flowToUID = buildSelfUIDIndexes(rows)
+	a.pkgCache[10100] = "com.example.first"
+	if _, _, ok := a.LookupUID("203.0.113.1", 443); ok {
+		t.Fatal("shared endpoint must be unknown to endpoint-only callers")
+	}
+	for _, tc := range []struct {
+		proto, localIP string
+		port           uint16
+		uid            int
+	}{
+		{"tcp", "10.0.0.1", 41000, 10100},
+		{"tcp", "10.0.0.1", 41001, 10200},
+		{"udp", "10.0.0.1", 41000, 10300},
+		{"tcp", "10.0.0.2", 41000, 10400},
+	} {
+		if uid, _, ok := a.LookupFlowUID(tc.proto, tc.localIP, tc.port, "203.0.113.1", 443); !ok || uid != tc.uid {
+			t.Errorf("%+v: got uid=%d ok=%v", tc, uid, ok)
+		}
+	}
+	if _, _, ok := a.LookupFlowUID("tcp", "10.0.0.1", 41002, "203.0.113.1", 443); ok {
+		t.Fatal("unobserved flow must not fall back to a shared endpoint")
+	}
+	if _, pkg, _ := a.LookupFlowUID("tcp", "10.0.0.1", 41000, "203.0.113.1", 443); pkg != "com.example.first" {
+		t.Fatalf("package=%q", pkg)
+	}
+	a.SetEnabled(false, "test")
+	if _, _, ok := a.LookupFlowUID("tcp", "10.0.0.1", 41000, "203.0.113.1", 443); ok {
+		t.Fatal("disabled capture retained a live flow mapping")
+	}
+}
+
+func TestLookupFlowUIDCanonicalAndConflictingTuples(t *testing.T) {
+	a := NewSelfAttribAggregator("")
+	rows := []SelfAttribConnRow{
+		{Proto: "tcp", Local: "[::ffff:10.0.0.1]:41000", Remote: "[::ffff:203.0.113.1]:443", UID: 10100},
+		{Proto: "tcp", Local: "[2001:0db8::1]:41001", Remote: "[2001:db8::2]:443", UID: 10200},
+		{Proto: "tcp", Local: "10.0.0.1:41002", Remote: "203.0.113.1:443", UID: 10100},
+	}
+	a.remoteToUID, a.flowToUID = buildSelfUIDIndexes(rows)
+	if uid, _, ok := a.LookupFlowUID("tcp", "10.0.0.1", 41000, "203.0.113.1", 443); !ok || uid != 10100 {
+		t.Fatalf("mapped IPv4: uid=%d ok=%v", uid, ok)
+	}
+	if uid, _, ok := a.LookupFlowUID("tcp", "2001:db8::1", 41001, "2001:0db8::2", 443); !ok || uid != 10200 {
+		t.Fatalf("IPv6: uid=%d ok=%v", uid, ok)
+	}
+	if uid, _, ok := a.LookupUID("203.0.113.1", 443); !ok || uid != 10100 {
+		t.Fatalf("same UID across multiple flows is unambiguous: uid=%d ok=%v", uid, ok)
+	}
+	rows = append(rows, SelfAttribConnRow{Proto: "tcp", Local: "10.0.0.1:41000", Remote: "203.0.113.1:443", UID: 10300})
+	a.remoteToUID, a.flowToUID = buildSelfUIDIndexes(rows)
+	if _, _, ok := a.LookupFlowUID("tcp", "10.0.0.1", 41000, "203.0.113.1", 443); ok {
+		t.Fatal("conflicting exact tuple must remain unknown")
+	}
+}

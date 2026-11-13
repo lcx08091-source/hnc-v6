@@ -367,7 +367,11 @@ func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib 
 			// observation of the same conn will catch up.
 			// v5.24 T1: 第二个返回值 pkg 原本被丢弃, 现在接住给样本工厂用
 			// (LookupUID 内部同一次加锁就带回包名, 不必再调 PkgForUID)。
-			uid, pkg, ok := selfAttrib.LookupUID(ev.DstIP.String(), ev.DstPort)
+			proto := "tcp"
+			if ev.IsUDP {
+				proto = "udp"
+			}
+			uid, pkg, ok := selfAttrib.LookupFlowUID(proto, ev.SrcIP.String(), ev.SrcPort, ev.DstIP.String(), ev.DstPort)
 			if !ok {
 				return
 			}
