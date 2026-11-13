@@ -205,6 +205,10 @@ const (
 //
 // 调用者持 Lock
 func (s *TokensStore) saveAtomicLocked() error {
+	// Keep failed commits eligible for SaveLoop retries. Revoke/Prune mutate
+	// memory before saving, so a clean store must become dirty even when the
+	// first write fails; only a successful rename below clears it.
+	s.dirty = true
 	tf := tokensFile{
 		Version: 1,
 		Tokens:  s.tokens,

@@ -150,7 +150,7 @@ rb_observe() {
 
     if [ "$_streak" -ge 6 ] || [ "$_rst" -ge 5 ]; then
         _reason="failstreak=$_streak restarts=$_rst"
-        rb_do_rollback "$_hnc" "$_reason"
+        rb_do_rollback "$_hnc" "$_reason" || return 1
         return 9
     fi
     return 0
@@ -188,9 +188,15 @@ rb_do_rollback() {
     fi
 
     if [ -d "$_prev/bin" ]; then
-        cp -a "$_prev/bin/." "$_hnc/bin/" 2>/dev/null || true
-        cp -a "$_prev/daemon/." "$_hnc/daemon/" 2>/dev/null || true
-        cp -a "$_prev/webroot/." "$_hnc/webroot/" 2>/dev/null || true
+        # -f removes an executable destination when opening it fails with
+        # ETXTBSY, so the restored binary gets a new inode while the old runs.
+        # Keep the observation active on failure; the next round retries.
+        if ! cp -af "$_prev/bin/." "$_hnc/bin/" 2>/dev/null \
+            || ! cp -af "$_prev/daemon/." "$_hnc/daemon/" 2>/dev/null \
+            || ! cp -af "$_prev/webroot/." "$_hnc/webroot/" 2>/dev/null; then
+            rb_log "rollback ERROR: restoring .prev failed; will retry"
+            return 1
+        fi
         chmod 755 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         chcon u:object_r:system_file:s0 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         # 拷来拷去 SELinux 上下文会变成 system_data_file, ColorOS 上 Go 进程

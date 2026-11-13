@@ -103,6 +103,12 @@ func procCmdline(pid int) []byte {
 	return b
 }
 
+// pidMatchesName is shared by all daemon supervision paths. A matching PID
+// number or comm field alone cannot identify a process after PID reuse.
+func pidMatchesName(pid int, name string) bool {
+	return pid > 0 && cmdlineHas(procCmdline(pid), name) && !isZombie(pid)
+}
+
 // pidfileAlive pidfile 里的 pid 还活着且确实是 name(pid 被复用成别的进程 → 0)。
 func pidfileAlive(pidFile, name string) int {
 	b, err := os.ReadFile(pidFile)
@@ -113,7 +119,7 @@ func pidfileAlive(pidFile, name string) int {
 	if err != nil || pid <= 0 {
 		return 0
 	}
-	if cmdlineHas(procCmdline(pid), name) {
+	if pidMatchesName(pid, name) {
 		return pid
 	}
 	return 0
@@ -131,7 +137,7 @@ func procScan(name string) int {
 		if err != nil || pid <= 0 || pid == self {
 			continue
 		}
-		if cmdlineHas(procCmdline(pid), name) {
+		if pidMatchesName(pid, name) {
 			return pid
 		}
 	}

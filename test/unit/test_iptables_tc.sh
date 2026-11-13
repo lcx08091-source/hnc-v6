@@ -28,6 +28,32 @@ rc=$?
 assert_exit_nonzero "$rc" "should fail with empty ip" && test_pass
 mock_teardown
 
+test_start "mark_device does not report a mark when kernel writes fail"
+mock_setup
+mock_set_exit iptables 42
+mock_set_exit ip6tables 42
+out=$(ipt mark 192.168.43.5 aa:bb:cc:dd:ee:ff 1 2>/dev/null)
+rc=$?
+assert_exit_nonzero "$rc" "failed MARK installation must propagate failure" && \
+    assert_eq "" "$out" "failed installation must not emit a success mark" && test_pass
+mock_teardown
+
+test_start "mark_device remembers an early failure even when later writes succeed"
+mock_setup
+cat > "$MOCK_BIN_DIR/iptables" <<'STUB'
+#!/bin/sh
+case " $* " in
+    *" -D "*) exit 1 ;;
+    *" -A HNC_MARK -s "*) exit 42 ;;
+esac
+exit 0
+STUB
+out=$(ipt mark 192.168.43.5 aa:bb:cc:dd:ee:ff 1 2>/dev/null)
+rc=$?
+assert_exit_nonzero "$rc" "a later stats write must not mask an earlier MARK failure" && \
+    assert_eq "" "$out" && test_pass
+mock_teardown
+
 test_start "mark_device generates correct mark hex (mark_id=1 → 0x800001)"
 mock_setup
 ipt mark 192.168.43.5 aa:bb:cc:dd:ee:ff 1 >/dev/null 2>&1

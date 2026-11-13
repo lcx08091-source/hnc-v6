@@ -64,27 +64,13 @@ now_ts() {
 get_ip() {
     local mac=$1
     [ -f "$DEVICES" ] || { echo ""; return; }
-    # 简单 grep + sed: 找 "<mac>": { ... "ip": "x.x.x.x" ... }
-    # devices.json 是单行 JSON, 找 mac 后 60 字符内的 "ip":"..."
+    # 使用结构化读取，不能从 MAC 后无限向后找 IP：本设备没有 IP 时会
+    # 读到下一台设备的地址，给错误设备装 MARK/限速/黑名单。
     local _ip
-    _ip=$(awk -v m="$mac" '
-    BEGIN { found=0 }
-    {
-        idx = index($0, "\"" m "\"")
-        if (idx > 0) {
-            tail = substr($0, idx)
-            if (match(tail, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
-                seg = substr(tail, RSTART, RLENGTH)
-                if (match(seg, /[0-9.]+/)) {
-                    print substr(seg, RSTART, RLENGTH)
-                    found=1
-                    exit
-                }
-            }
-        }
-    }
-    END { if (!found) print "" }
-    ' "$DEVICES")
+    _ip=$(HNC="$HNC_DIR" sh "$HNC_DIR/bin/hnc_json" get-object-key "$DEVICES" "$mac" 2>/dev/null \
+        | awk '{s=s $0} END {if (match(s, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
+            v=substr(s,RSTART,RLENGTH); sub(/^[^:]*:[[:space:]]*"/,"",v); sub(/"$/,"",v); print v
+        }}')
     # v5.8.8 (audit): 只回合法 IPv4,挡掉 1.2.3.4.5 这类畸形(awk 已限 [0-9.]、不可注入,
     # 这里再保证四段合法八位组),否则返回空,调用方按"无 IP"处理。
     if valid_ipv4 "$_ip"; then printf '%s\n' "$_ip"; else echo ""; fi

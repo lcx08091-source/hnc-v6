@@ -29,8 +29,9 @@
 package output
 
 import (
-	"bufio"
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -75,21 +76,27 @@ type historySample struct {
 type HistorySampler struct {
 	w *Writer
 
+	tickMu   sync.Mutex // serialize scheduled and final shutdown samples
 	mu       sync.Mutex
-	lastSnap map[string]uint64 // composite key "mac\x00app_id" → last cumulative bytes (tx+rx)
 	lastTx   map[string]uint64 // separate trackers because we report tx/rx individually
 	lastRx   map[string]uint64
 	lastTick time.Time
+	pending  *historyBatch // owned by tickMu; survives counter resets after a failed write
 	enabled  bool
+}
+
+type historyBatch struct {
+	at      time.Time
+	samples []historySample
+	tx, rx  map[string]uint64
 }
 
 func NewHistorySampler(w *Writer) *HistorySampler {
 	return &HistorySampler{
-		w:        w,
-		lastSnap: make(map[string]uint64),
-		lastTx:   make(map[string]uint64),
-		lastRx:   make(map[string]uint64),
-		enabled:  true,
+		w:       w,
+		lastTx:  make(map[string]uint64),
+		lastRx:  make(map[string]uint64),
+		enabled: true,
 	}
 }
 
@@ -103,6 +110,8 @@ func (h *HistorySampler) SetEnabled(v bool) {
 // starts (or after this sampler was just created) we only snapshot, don't
 // write — we have no baseline to compute deltas against.
 func (h *HistorySampler) Tick(now time.Time) {
+	h.tickMu.Lock()
+	defer h.tickMu.Unlock()
 	h.mu.Lock()
 	enabled := h.enabled
 	firstTick := h.lastTick.IsZero()
@@ -111,12 +120,23 @@ func (h *HistorySampler) Tick(now time.Time) {
 	if !enabled {
 		return
 	}
+	if b := h.pending; b != nil {
+		if err := h.append(b.samples, b.at); err != nil {
+			h.writeError(now, err)
+			return
+		}
+		h.mu.Lock()
+		h.lastTx, h.lastRx, h.lastTick = b.tx, b.rx, b.at
+		h.mu.Unlock()
+		h.pending = nil
+	}
 
-	samples := h.collect(now)
+	samples, nextTx, nextRx := h.collect(now)
 
 	if firstTick {
 		// Establish baseline only.
 		h.mu.Lock()
+		h.lastTx, h.lastRx = nextTx, nextRx
 		h.lastTick = now
 		h.mu.Unlock()
 		return
@@ -124,16 +144,16 @@ func (h *HistorySampler) Tick(now time.Time) {
 
 	if len(samples) > 0 {
 		if err := h.append(samples, now); err != nil {
-			// Log via the writer's path: write a tiny error breadcrumb
-			// to a side-channel file so a borked /data partition doesn't
-			// stop the sampler. Don't go through standard log.Print because
-			// that's already noisy.
-			_ = os.WriteFile(filepath.Join(HistoryDir, "stats.write_err"),
-				[]byte(now.Format(time.RFC3339)+": "+err.Error()+"\n"), 0o644)
+			h.writeError(now, err)
+			// Keep the batch as well as the previous baseline: a client
+			// may disappear or reset its counters before disk recovers.
+			h.pending = &historyBatch{at: now, samples: samples, tx: nextTx, rx: nextRx}
+			return
 		}
 	}
 
 	h.mu.Lock()
+	h.lastTx, h.lastRx = nextTx, nextRx
 	h.lastTick = now
 	h.mu.Unlock()
 
@@ -142,10 +162,15 @@ func (h *HistorySampler) Tick(now time.Time) {
 	h.trimOldFiles(now)
 }
 
+func (h *HistorySampler) writeError(now time.Time, err error) {
+	_ = os.WriteFile(filepath.Join(HistoryDir, "stats.write_err"),
+		[]byte(now.Format(time.RFC3339)+": "+err.Error()+"\n"), 0o644)
+}
+
 // collect walks the Writer's per-client app aggregates, computes byte deltas
 // since the last tick, and returns the rows to append. Holds the writer's
 // mutex for as little time as possible.
-func (h *HistorySampler) collect(now time.Time) []historySample {
+func (h *HistorySampler) collect(now time.Time) ([]historySample, map[string]uint64, map[string]uint64) {
 	h.w.mu.Lock()
 	type snapRow struct {
 		mac, appID, app, cat string
@@ -184,6 +209,14 @@ func (h *HistorySampler) collect(now time.Time) []historySample {
 
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	nextTx := make(map[string]uint64, len(h.lastTx)+len(rows))
+	nextRx := make(map[string]uint64, len(h.lastRx)+len(rows))
+	for k, v := range h.lastTx {
+		nextTx[k] = v
+	}
+	for k, v := range h.lastRx {
+		nextRx[k] = v
+	}
 	for _, r := range rows {
 		key := r.mac + "\x00" + r.appID
 		prevTx := h.lastTx[key]
@@ -204,8 +237,8 @@ func (h *HistorySampler) collect(now time.Time) []historySample {
 		default:
 			dRx = 0
 		}
-		h.lastTx[key] = r.tx
-		h.lastRx[key] = r.rx
+		nextTx[key] = r.tx
+		nextRx[key] = r.rx
 		if dTx == 0 && dRx == 0 {
 			// Skip rows with no activity in the window. Saves bytes.
 			continue
@@ -220,13 +253,20 @@ func (h *HistorySampler) collect(now time.Time) []historySample {
 			RX:    dRx,
 		})
 	}
-	return out
+	return out, nextTx, nextRx
 }
 
 // append writes a batch of samples to today's JSONL file.
 func (h *HistorySampler) append(samples []historySample, now time.Time) error {
 	if len(samples) == 0 {
 		return nil
+	}
+	var batch bytes.Buffer
+	enc := json.NewEncoder(&batch)
+	for _, s := range samples {
+		if err := enc.Encode(s); err != nil {
+			return err
+		}
 	}
 	if err := os.MkdirAll(HistoryDir, 0o755); err != nil {
 		return err
@@ -236,17 +276,23 @@ func (h *HistorySampler) append(samples []historySample, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
-	bw := bufio.NewWriter(f)
-	for _, s := range samples {
-		b, err := json.Marshal(s)
-		if err != nil {
-			continue
-		}
-		bw.Write(b)
-		bw.WriteByte('\n')
+	info, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
 	}
-	return bw.Flush()
+	// dpid is the sole writer of stats.* and Tick is serialized. Restore
+	// the previous length on a partial append so retrying cannot duplicate
+	// rows that happened to reach disk before an I/O failure.
+	if _, err = f.Write(batch.Bytes()); err == nil {
+		err = f.Sync()
+	}
+	if err != nil {
+		rollbackErr := f.Truncate(info.Size())
+		_ = f.Close()
+		return errors.Join(err, rollbackErr)
+	}
+	return f.Close()
 }
 
 // pathFor returns the day's JSONL path. Day boundary is local-time midnight

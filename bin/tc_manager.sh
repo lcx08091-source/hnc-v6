@@ -2503,13 +2503,22 @@ tc_action_lock() {
     local now old age owner owner_pid
     now=$(date +%s 2>/dev/null || echo 0)
     if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
-        echo "$$ $1 $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
+        if ! { printf '%s %s %s\n' "$$" "$1" "$now" > "$TC_ACTION_LOCK/owner.$$" 2>/dev/null \
+            && mv -f "$TC_ACTION_LOCK/owner.$$" "$TC_ACTION_LOCK/owner" 2>/dev/null; }; then
+            rm -f "$TC_ACTION_LOCK/owner.$$" 2>/dev/null
+            rmdir "$TC_ACTION_LOCK" 2>/dev/null
+            return 1
+        fi
         return 0
     fi
     owner=$(cat "$TC_ACTION_LOCK/owner" 2>/dev/null)
     owner_pid=$(echo "$owner" | awk '{print $1}')
     old=$(echo "$owner" | awk '{print $3}')
-    [ -n "$old" ] || old=0
+    # mkdir can succeed before the owner is published. Give that directory
+    # the same stale grace as a dead owner instead of treating it as epoch 0.
+    if [ -z "$old" ]; then
+        old=$(stat -c %Y "$TC_ACTION_LOCK" 2>/dev/null) || return 1
+    fi
     age=$((now - old))
     if [ -n "$owner_pid" ] && kill -0 "$owner_pid" 2>/dev/null; then
         # 持有者活着: 租约内 → busy;租约过期(不续租,视为 hung)→ 回收
@@ -2540,7 +2549,12 @@ tc_action_lock() {
     fi
     rm -rf "$_stale_grave" 2>/dev/null || true
     if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
-        echo "$$ $1 $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
+        if ! { printf '%s %s %s\n' "$$" "$1" "$now" > "$TC_ACTION_LOCK/owner.$$" 2>/dev/null \
+            && mv -f "$TC_ACTION_LOCK/owner.$$" "$TC_ACTION_LOCK/owner" 2>/dev/null; }; then
+            rm -f "$TC_ACTION_LOCK/owner.$$" 2>/dev/null
+            rmdir "$TC_ACTION_LOCK" 2>/dev/null
+            return 1
+        fi
         return 0
     fi
     log "tc_action_lock: busy owner=${owner} requester=$1"
@@ -2563,7 +2577,8 @@ tc_action_lock_renew() {
     [ "$owner_pid" = "$$" ] || return 1
     [ -n "$owner_req" ] || owner_req=restore
     now=$(date +%s 2>/dev/null || echo 0)
-    echo "$$ $owner_req $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || return 1
+    printf '%s %s %s\n' "$$" "$owner_req" "$now" > "$TC_ACTION_LOCK/owner.$$" 2>/dev/null \
+        && mv -f "$TC_ACTION_LOCK/owner.$$" "$TC_ACTION_LOCK/owner" 2>/dev/null || return 1
     return 0
 }
 

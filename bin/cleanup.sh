@@ -222,7 +222,13 @@ fi
 log "iptables cleanup done"
 
 # ── 4. 清理临时文件（保留 data/ 目录，用户配置不删）────────
-rm -f "$RUN"/*.pid "$RUN"/netevt_* "$RUN"/arp_hash "$RUN"/hotspotd.sock "$RUN"/dpid.netlink.event 2>/dev/null
+# rules 模式保留活进程的寻址与互斥资源。unlink Unix socket 后，即使进程
+# 仍活着也无法接受新的 IPC；删除活锁则允许另一个 JSON 写者进入临界区。
+if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
+    rm -f "$RUN"/*.pid "$RUN"/hotspotd.sock 2>/dev/null
+    rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" 2>/dev/null
+fi
+rm -f "$RUN"/netevt_* "$RUN"/arp_hash "$RUN"/dpid.netlink.event 2>/dev/null
 rm -f "$HNC_DIR/run/hostname_cache" 2>/dev/null  # v5.33 前 shell 扫描的名字缓存(旧版残留)
 rm -rf "$HNC_DIR/run/v6" 2>/dev/null              # v3.4.0：v6_sync 快照目录
 # v3.5.0 P2-5: 清理(v5.33 前)device_detect.sh shell 扫描留下的临时文件
@@ -235,7 +241,6 @@ rm -f "$RUN"/scan_tmp.* "$RUN"/scan_arp.* "$RUN"/.gc_* "$RUN"/.lock_check_* 2>/d
 if [ ! -f "$HNC_DIR/bin/portal_manager.sh" ]; then
     rm -f "$RUN/portal_pending.json" "$RUN/portal_sessions.json" 2>/dev/null
 fi
-rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" 2>/dev/null  # P0-2 锁残留 + rc11 hnc_json stale lock
 # v3.9.1: stats 临时文件 + 日期标记(stats_raw / stats_daily 是用户数据,不删)
 rm -f "$RUN"/stats_map.* "$RUN"/rollup_names.* "$RUN"/rollup_agg.* 2>/dev/null
 rm -f "$RUN"/stats_last_date 2>/dev/null

@@ -53,6 +53,15 @@ func connBlocksPath(hncDir string) string { return filepath.Join(hncDir, "data",
 func connBlocksFlat(hncDir string) string { return filepath.Join(hncDir, "run", "conn_blocks.flat") }
 func connBlocksDNS(hncDir string) string  { return filepath.Join(hncDir, "run", "conn_blocks.dns") }
 
+func connBlockDirtyPath(hncDir string) string {
+	return filepath.Join(hncDir, "run", "connblock.dirty")
+}
+
+func connBlockApplyPending(hncDir string) bool {
+	_, err := os.Stat(connBlockDirtyPath(hncDir))
+	return !os.IsNotExist(err)
+}
+
 // expandConnBlockDomains 域名封锁项 → 排好序的 "mac domain" 行(DNS 层用)
 func expandConnBlockDomains(f connBlockFile) []string {
 	set := map[string]bool{}
@@ -149,8 +158,14 @@ func (s *server) connBlockSyncLocked(force bool) (string, error) {
 	dnsContent := joinLines(expandConnBlockDomains(f))
 	old, _ := os.ReadFile(connBlocksFlat(s.hncDir))
 	oldDNS, _ := os.ReadFile(connBlocksDNS(s.hncDir))
-	if !force && string(old) == content && string(oldDNS) == dnsContent {
+	if !force && !connBlockApplyPending(s.hncDir) && string(old) == content && string(oldDNS) == dnsContent {
 		return "", nil
+	}
+	// Published flat files describe desired state, not proof that iptables
+	// accepted it. Persist the retry marker before publishing either file so
+	// failures (including daemon restarts) are retried on the next refresh.
+	if err := discoverWriteAtomic(connBlockDirtyPath(s.hncDir), []byte("pending\n")); err != nil {
+		return "", err
 	}
 	// 先写 DNS 列表再写 flat: 脚本两份都读, 任一变化都重跑
 	if err := discoverWriteAtomic(connBlocksDNS(s.hncDir), []byte(dnsContent)); err != nil {
@@ -164,6 +179,9 @@ func (s *server) connBlockSyncLocked(force bool) (string, error) {
 	if rc != 0 {
 		return out, os.ErrInvalid
 	}
+	if err := os.Remove(connBlockDirtyPath(s.hncDir)); err != nil && !os.IsNotExist(err) {
+		return out, err
+	}
 	return out, nil
 }
 
@@ -171,7 +189,7 @@ func (s *server) connBlockSyncLocked(force bool) (string, error) {
 func (s *server) connBlockRefresh() {
 	connBlockMu.Lock()
 	defer connBlockMu.Unlock()
-	if len(s.connBlocksEffective(time.Now()).Items) == 0 {
+	if !connBlockApplyPending(s.hncDir) && len(s.connBlocksEffective(time.Now()).Items) == 0 {
 		st, err := os.Stat(connBlocksFlat(s.hncDir))
 		st2, err2 := os.Stat(connBlocksDNS(s.hncDir))
 		if (err != nil || st.Size() == 0) && (err2 != nil || st2.Size() == 0) {

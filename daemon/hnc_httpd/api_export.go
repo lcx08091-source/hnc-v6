@@ -283,9 +283,9 @@ func (s *server) addDailyJSONLToZip(zw *zip.Writer, prefix, archiveDir string, f
 	return t
 }
 
-// addDPIRulesToZip copies data/dpi_rules.d/*.json into the zip.
+// addDPIRulesToZip copies the effective runtime etc/dpi_rules.d/*.json into the zip.
 func (s *server) addDPIRulesToZip(zw *zip.Writer) trackInfo {
-	rulesDir := filepath.Join(s.hncDir, "data", "dpi_rules.d")
+	rulesDir := filepath.Join(s.hncDir, "etc", "dpi_rules.d")
 	entries, err := os.ReadDir(rulesDir)
 	if err != nil {
 		return trackInfo{Included: false}

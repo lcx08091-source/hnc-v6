@@ -11,6 +11,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"os"
@@ -221,12 +222,22 @@ func actionDPIRulesUpdate(hncDir string, p map[string]string) actionResp {
 // GET /api/dpi_rules → 当前生效的自定义规则库; POST {rules:"<json>"} → 导入(≤512KB)
 func (s *server) apiDPIRules(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
-		rc, out := runBin(s.hncDir, "dpi_rules_import.sh", "--export")
-		if rc != 0 || !json.Valid([]byte(out)) {
+		// Read the canonical user file directly. runBin is for human-readable
+		// command results and truncates them to 1KB, corrupting larger JSON.
+		path := filepath.Join(s.hncDir, "etc", "dpi_rules.d", "99-user-custom.json")
+		out := []byte(`{"schema_version":"1.0","rules_version":"empty","rules":[]}`)
+		f, err := os.Open(path)
+		if err == nil {
+			out, err = io.ReadAll(io.LimitReader(f, 512*1024+1))
+			_ = f.Close()
+		} else if os.IsNotExist(err) {
+			err = nil
+		}
+		if err != nil || len(out) > 512*1024 || !json.Valid(out) {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "export failed"})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "rules": out, "source": "dpi_rules_import.sh --export"})
+		writeJSON(w, http.StatusOK, map[string]interface{}{"ok": true, "rules": string(out), "source": "etc/dpi_rules.d/99-user-custom.json"})
 		return
 	}
 	s.requireMutationN(func(w http.ResponseWriter, r *http.Request) {

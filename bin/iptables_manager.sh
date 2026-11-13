@@ -240,6 +240,7 @@ init_chains() {
 # ═══════════════════════════════════════════════════════════════
 mark_device() {
     local ip=$1 mac=$2 mark_id=$3
+    local failed=0
     local mark; mark=$(printf "0x%x" $((MARK_BASE + mark_id)))
     [ -z "$ip" ] && { log "WARN: mark called with empty ip, skip"; return 1; }
 
@@ -266,25 +267,30 @@ mark_device() {
     # ── v4 上行：src IP + MAC（最精确）──
     $IPT -t mangle -A HNC_MARK \
         -s "$ip" -m mac --mac-source "$mac" \
-        -j MARK --set-mark "$mark"
+        -j MARK --set-mark "$mark" || failed=1
 
     # ── v4+v6 上行兜底：仅 MAC（应对 IP 未就绪 / v6 无地址依赖）──
     # -m mark --mark 0 确保不重复 mark 已由 HNC_RESTORE 恢复的包
     ipt_dual -t mangle -A HNC_MARK \
         -m mac --mac-source "$mac" -m mark --mark 0 \
-        -j MARK --set-mark "$mark"
+        -j MARK --set-mark "$mark" || failed=1
 
     # ── v4 下行：dst IP ──
     # 不可省：CONNMARK restore 不一定覆盖所有情况（如新连接的第一个回包）
     $IPT -t mangle -A HNC_MARK \
-        -d "$ip" -j MARK --set-mark "$mark"
+        -d "$ip" -j MARK --set-mark "$mark" || failed=1
 
     # ── v4 流量统计 ──
     # v6 无统计，因为需要跟踪动态地址（代价不值）
     ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
     ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
-    $IPT -t mangle -A HNC_STATS -s "$ip" -j RETURN
-    $IPT -t mangle -A HNC_STATS -d "$ip" -j RETURN
+    $IPT -t mangle -A HNC_STATS -s "$ip" -j RETURN || failed=1
+    $IPT -t mangle -A HNC_STATS -d "$ip" -j RETURN || failed=1
+
+    if [ "$failed" != 0 ]; then
+        log_error "Marking $ip ($mac) failed; mark=$mark was not fully applied"
+        return 1
+    fi
 
     echo "$mark"
 }

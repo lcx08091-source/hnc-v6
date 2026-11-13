@@ -20,8 +20,6 @@ package main
 
 import (
 	"log"
-	"os"
-	"path/filepath"
 	"strconv"
 	"sync"
 	"time"
@@ -126,16 +124,20 @@ func (s *server) pairRecordFailure(ip, sid, reason string) bool {
 	if n < pairBurnAfter {
 		return false
 	}
-	pendingPath := filepath.Join(s.hncDir, "run", "pair_pending")
-	if err := os.Remove(pendingPath); err != nil && !os.IsNotExist(err) {
-		_ = os.WriteFile(pendingPath, nil, 0600) // 兜底: 清空 → readPairPending 判 malformed
+	// A failure from the previous session must not burn a newly generated PIN.
+	// Retain the burned sid in memory even when claiming/removing fails.
+	if pending, err := readPairPending(s.hncDir); err == nil && pending.SessionID == sid {
+		discardPairPending(s.hncDir, pending.fileInfo)
 	}
-	pairGuard.mu.Lock()
-	delete(pairGuard.sidFails, sid)
-	pairGuard.mu.Unlock()
 	pairAudit(s.hncDir, ip, "error", "pairing code burned after "+strconv.Itoa(n)+" wrong pins")
 	pairAlert(s.hncDir, ip, "配对码累计输错 "+strconv.Itoa(n)+" 次已作废", map[string]interface{}{"failures": n})
 	return true
+}
+
+func pairCodeBurned(sid string) bool {
+	pairGuard.mu.Lock()
+	defer pairGuard.mu.Unlock()
+	return pairGuard.sidFails[sid] >= pairBurnAfter
 }
 
 // pairRecordSuccess 配对成功: 审计 + 清该 sid 的失败计数。

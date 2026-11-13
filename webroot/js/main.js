@@ -485,6 +485,8 @@ function pollDelay() {
 function schedulePoll(ms) { clearTimeout(pollT); if (document.hidden) return; pollT = setTimeout(pollOnce, ms == null ? pollDelay() : ms); }
 function pollOnce() {
   if (pollBusy || document.hidden) { schedulePoll(); return; }
+  // 初次启动失败或断线后必须重走完整初始化, 不能只恢复 live/devices。
+  if (!S.booted || !S.connected) { boot(false); return; }
   pollBusy = true; tickN++;
   var prevSig = S.sig, prevShape = shapeOf(), wasOk = S.connected;
   // 设备页有在线设备时每轮都要刷新单台速率 → 直接用合并请求; 否则只拿汇总, 签名变了再补拉列表
@@ -535,6 +537,7 @@ document.addEventListener('visibilitychange', function () { if (document.hidden)
 var booting = null;
 function boot(retry) {
   if (booting) return booting;
+  S.booted = false;
   if (retry) { S.bootErr = ''; S.connected = false; if (S.page === 'devices') renderDevices(false); if (KSU) loadSecret(true); }
   booting = api.get('/api/health', null, { timeout: 6000 }).then(function (h) {
     // v5.29 T3: 升级回滚横幅(数据来自 /api/health 的 rollback 段)
