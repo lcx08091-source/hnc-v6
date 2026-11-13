@@ -659,12 +659,8 @@ func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }
 
 // certProbeEnabled: rules.json 顶层 discover_cert_probe, 缺省开启
 func certProbeEnabled(hncDir string) bool {
-	b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
+	m, err := readRulesConfig(hncDir)
 	if err != nil {
-		return true
-	}
-	var m map[string]interface{}
-	if json.Unmarshal(b, &m) != nil {
 		return true
 	}
 	if v, ok := m["discover_cert_probe"].(bool); ok {

@@ -50,7 +50,7 @@ func actionDeviceWhitelistSet(hncDir string, p map[string]string) actionResp {
 	if v != "true" && v != "false" {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
-	rc, out := runBin(hncDir, "json_set.sh", "device", mac, "whitelist", v)
+	rc, out := setDeviceRule(hncDir, mac, "whitelist", v)
 	if rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 	}
@@ -73,7 +73,7 @@ func actionQosSet(hncDir string, p map[string]string) actionResp {
 		if err := writeFileAtomic(filepath.Join(run, "tc_qos_mode"), []byte(mode+"\n")); err != nil {
 			return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 		}
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "tc_qos_mode", mode); rc != 0 {
+		if rc, out := setRuleTop(hncDir, "tc_qos_mode", mode); rc != 0 {
 			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 		}
 	}
@@ -85,7 +85,7 @@ func actionQosSet(hncDir string, p map[string]string) actionResp {
 		if err := writeFileAtomic(filepath.Join(run, "tc_qos_scale"), []byte(strconv.Itoa(n)+"\n")); err != nil {
 			return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 		}
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "tc_qos_scale", strconv.Itoa(n)); rc != 0 {
+		if rc, out := setRuleTop(hncDir, "tc_qos_scale", strconv.Itoa(n)); rc != 0 {
 			return actionResp{OK: false, Error: "write failed", Detail: strings.TrimSpace(out)}
 		}
 	}

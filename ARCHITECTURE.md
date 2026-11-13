@@ -19,6 +19,25 @@ HNC 经过 30 多个 rc 迭代,现在的架构是**多层 fallback + 多语言�
 
 ---
 
+## v5.33 rc4：规则执行与数据归属
+
+本节描述当前规则链路；下文标记为历史的职责说明不代表当前实现。
+
+- HTTP 设备限速操作进入 `apply_device_rule.sh`，负责分配 mark 和保存用户修改。
+- 手动设置通过 `tc_manager.sh apply_device`，恢复通过 `restore_rules`，共同调用
+  `apply_device_runtime`：MARK → 速率/延迟 → 可选 SQM → offload 通知。
+- 公共执行器只改运行规则；恢复不保存用户配置。沿用现有 tc action / gate 锁，
+  恢复在持锁进程内直接调用函数，避免递归执行脚本争用自己的锁。
+- `hnc_device_policy.sh` 统一读取实时设备地址与持久策略，复用 `hnc_json` 的对象定位。
+- HTTP 普通配置读取与顶层/设备字段写入集中在 `rules_config.go`；写入仍经
+  `json_set.sh` / `hnc_json`，高频 API 保留既有 JSON 缓存。
+- `rules.json.hotspot_iface` 是用户偏好；探测结果只进入已有 `run/hnc_state`
+  和接口缓存，由实时 API 展示，watchdog 不再将探测值写回偏好。
+- watchdog 的初始化、恢复、迁移和延迟恢复共用 `restore_device_rules` 处理结果；
+  失败保留既有 `tc_restore_pending`，初始化/迁移在恢复成功后才提交 ACTIVE。
+
+---
+
 ## 一、整体架构图
 
 ```

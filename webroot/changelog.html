@@ -1,3 +1,14 @@
+<!-- v5.33.0-rc4 -->
+<div class="cl-section">
+  <div class="cl-title">🧩 v5.33.0-rc4(预览版): 规则设置与恢复共用执行流程 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-13</span></div>
+  <ul class="cl-list">
+    <li><b>规则应用</b>: 调整限速与重启恢复走同一套流程, 一并保留已有的延迟、丢包和低延迟设置。</li>
+    <li><b>接口偏好</b>: 自动识别继续保持自动, 启动和切换接口不会再把探测结果保存为固定偏好。</li>
+    <li><b>恢复结果</b>: 规则应用失败会正确报告并等待后续恢复, 不会提前显示已完成初始化。</li>
+    <li><b>内部整理</b>: 合并重复的设备策略读取和配置读写逻辑, 保持现有部署方式与配置格式。</li>
+  </ul>
+</div>
+
 <!-- v5.33.0-rc3 -->
 <div class="cl-section">
   <div class="cl-title">🛠️ v5.33.0-rc3(预览版): 规则失败能重试, 重连和恢复更可靠 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-13</span></div>

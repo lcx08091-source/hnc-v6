@@ -35,7 +35,7 @@ func actionTCLeafAQMSet(hncDir string, p map[string]string) actionResp {
 	default:
 		return actionResp{OK: false, Error: "bad params", Detail: "mode must be auto|on|off"}
 	}
-	if rc, out := runBin(hncDir, "json_set.sh", "top", "tc_leaf_aqm", mode); rc != 0 {
+	if rc, out := setRuleTop(hncDir, "tc_leaf_aqm", mode); rc != 0 {
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(out)}
 	}
 	return actionResp{OK: true, Detail: "tc_leaf_aqm=" + mode + " (applies on next limit/restore)"}

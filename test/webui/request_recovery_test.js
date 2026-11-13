@@ -119,9 +119,30 @@ async function bootstrapTests() {
   assert.equal(counts.startSSE, 2);
 }
 
+async function interfaceOwnershipTests() {
+  const state = { hotspot: { iface: 'wlan2', ip: '192.168.43.1' }, spark: [] };
+  let preference = 'auto';
+  const context = {
+    S: state, Date, num: v => Number(v) || 0,
+    api: { get: () => Promise.resolve({ hotspot_iface: preference }) }
+  };
+  vm.createContext(context);
+  vm.runInContext(core.slice(core.indexOf('function applyLive('), core.indexOf('\nfunction loadLive(')), context);
+  vm.runInContext(core.slice(core.indexOf('function loadConfig('), core.indexOf('\nfunction loadCaps(')), context);
+  for (preference of ['auto', 'wlan3', '']) {
+    await context.loadConfig();
+    assert.equal(state.cfg.hotspot_iface, preference, 'configuration retains the user preference');
+    assert.equal(state.hotspot.iface, 'wlan2', 'loading preferences never replaces the runtime interface');
+  }
+  context.applyLive({ hotspot_iface: 'ap0', hotspot_active: true });
+  assert.equal(state.hotspot.iface, 'ap0', 'live status updates the runtime interface');
+  assert.equal(state.cfg.hotspot_iface, '', 'live status never replaces the saved preference');
+}
+
 (async () => {
   await requestTests();
   await bootstrapTests();
+  await interfaceOwnershipTests();
   console.log('PASS: WebUI response deadlines, queued actions and complete automatic recovery');
 })().then(() => { clearTimeout(watchdog); }, error => {
   clearTimeout(watchdog);

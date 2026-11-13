@@ -28,9 +28,10 @@
 #   set_limit <iface> <mark_id> <down_mbps> <up_mbps> [ip]
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+. "$HNC_DIR/bin/hnc_device_policy.sh"
 RULES_FILE=$HNC_DIR/data/rules.json
 # rc3.1.30 Bug B 修复 · restore 时用 devices.json 的实时 IP, rules.json 只作 fallback
-# devices.json 由 hotspotd C daemon 实时维护 (netlink RTGRP_NEIGH),
+# devices.json 由 Go watchdog 设备发现维护,
 # rules.json 里的 ip 字段可能是上次会话的旧值 · 手机热点 NAT 段每次随机.
 DEVICES_FILE=$HNC_DIR/data/devices.json
 LOG=$HNC_DIR/logs/tc.log
@@ -2092,6 +2093,37 @@ set_all() {
     return 0
 }
 
+# 设备运行规则的公共执行路径。调用方持有 tc_action_lock；只改内核和
+# offload 调度状态，不保存 rules.json。手动设置和恢复都从这里应用。
+# <iface> <mac> <mid> <ip> <down> <up> <delay> <jitter> <loss> <sqm>
+apply_device_runtime() {
+    local iface=$1 mac=$2 mid=$3 ip=$4
+    local down=$5 up=$6 delay=$7 jitter=$8 loss=$9 sqm=${10:-false}
+    local rc
+    _validate_mark_id "$mid" || return 1
+    # 保存的延迟可能来自另一套内核能力。与恢复一致, 当前不支持 netem 时
+    # 跳过旧延迟, 保留可用的限速和原配置。
+    if ! tc_delay_supported_runtime; then
+        delay=0; jitter=0; loss=0
+    fi
+    sh "$HNC_DIR/bin/iptables_manager.sh" mark "$ip" "$mac" "$mid" || return $?
+    set_all "$iface" "$mid" "$down" "$up" "$delay" "$jitter" "$loss" "$ip"
+    rc=$?
+    if [ "$rc" -ne 0 ] && [ "$rc" -ne 8 ]; then
+        sh "$HNC_DIR/bin/iptables_manager.sh" unmark "$ip" "$mac" "$mid" >> "$LOG" 2>&1 \
+            || log "apply_device: unmark failed for $mac after tc error"
+        return "$rc"
+    fi
+    if [ "$sqm" = true ]; then
+        set_sqm "$iface" "$mid" on "$ip" || log "apply_device: set_sqm on failed for $mac"
+    fi
+    if [ -x "$HNC_DIR/bin/hnc_ipc" ]; then
+        "$HNC_DIR/bin/hnc_ipc" OFFLOAD_NOTIFY_LIMIT "$mac" 1 >> "$LOG" 2>&1 \
+            || log "apply_device: offload notify failed for $mac (non-fatal)"
+    fi
+    return "$rc"
+}
+
 # ─── 移除设备所有规则 ────────────────────────────────────────
 remove_device() {
     local iface=$1 mark_id=$2
@@ -2120,31 +2152,6 @@ remove_device() {
 }
 
 # ─── 恢复持久化规则 ──────────────────────────────────────────
-# rc3.1.30 Bug B 修复 · 用 MAC 查 devices.json 里当前真实 IP
-# devices.json 由 hotspotd C daemon 实时维护 (netlink RTGRP_NEIGH event-driven).
-# 跟 apply_device_rule.sh 的 get_ip() 同逻辑 · 挪过来避免跨脚本 source 依赖.
-# 找不到时返回空字符串 (调用方需 fallback).
-get_current_ip() {
-    local mac=$1
-    [ -f "$DEVICES_FILE" ] || { echo ""; return; }
-    awk -v m="$mac" '
-    {
-        idx = index($0, "\"" m "\"")
-        if (idx > 0) {
-            tail = substr($0, idx)
-            if (match(tail, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
-                seg = substr(tail, RSTART, RLENGTH)
-                if (match(seg, /[0-9.]+/)) {
-                    print substr(seg, RSTART, RLENGTH)
-                    exit
-                }
-            }
-        }
-    }
-    ' "$DEVICES_FILE"
-}
-
-
 current_iface_prefix24() {
     local iface=$1 ip
     ip=$(ip -4 addr show "$iface" 2>/dev/null | awk '/inet /{split($2,a,"/"); print a[1]; exit}')
@@ -2156,11 +2163,7 @@ ip_prefix24() {
     echo "$1" | awk -F. 'NF==4{print $1"."$2"."$3"."}'
 }
 
-# v3.4.1：彻底移除 python3 依赖。改用纯 awk 解析 rules.json，
-# 正确处理浮点数（v3.3.6 用 grep `[0-9]*` 会把 0.8 截断为 0 这种祖传 bug
-# 已经修复，但仍依赖 python3。某些精简 ROM 没有 python3，restore 直接静默
-# 失败，看起来"重启后规则丢了"。现在用 awk 一遍解析整个 MAC block，
-# 输出 mark_id|ip|down|up|delay|jitter 格式。）
+# 每台设备通过共享 policy reader 读取, 再走与手动设置相同的执行函数。
 restore_rules() {
     log "Restoring rules from $RULES_FILE"
     [ -f "$RULES_FILE" ] || return 0
@@ -2244,10 +2247,8 @@ restore_rules() {
             }
         }
     }' "$RULES_FILE" | sort -u)
-    local restore_fail_streak=0
-    # v5.9.0: 侧信道失败计数(iptables mark / blacklist_add)。此前这些返回值被
-    # 静默丢弃 —— gate/mac 自阻塞时代每台设备的 mark 都超时失败且无人知晓。
-    # 失败不中断循环(尽力恢复其余设备),但计数>0 时 restore 最终 rc=1。
+    local restore_fail_streak=0 restore_device_fail=0
+    # 黑名单与设备应用分开计错；恢复尽量继续处理其余设备, 最终返回失败。
     local restore_side_fail=0
     for mac in $macs; do
         # v5.9.1 P1: 续租失败 = 锁已易主(被陈旧回收交给别人)。必须立即中止:
@@ -2257,89 +2258,12 @@ restore_rules() {
             log_error "restore_rules: 锁已易主, 中止恢复 (mac=$mac)"
             return 12
         fi
-        # v3.4.1：纯 awk 解析。先在 rules.json 里定位 "mac": { ... } 块，
-        # 然后从块里逐字段抽 mark_id/ip/down_mbps/up_mbps/delay_ms/jitter_ms。
-        # 不依赖 python3，浮点数原样保留。
-        # rc3.1.34 修 #11: brace counting 必须跳过 JSON 字符串内的 `{` `}`.
-        # 之前 hostname 含 `{` `}` (DHCP option 12 / mDNS, 罕见但合法字符) 会
-        # 让 depth 计数错位 → block 边界错 → 后续 mark_id 字段抽不到 → 设备
-        # restore 失败 (限速规则丢失). 加 in_string 状态机, 见 `"` 翻转状态,
-        # 字符串内的 brace 不计入 depth. 同时识别 `\"` (转义引号不结束字符串)
-        # 和 `\\` (转义反斜杠).
-        local fields; fields=$(awk -v mac="$mac" '
-        {
-            pat = "\"" mac "\"[[:space:]]*:[[:space:]]*\\{"
-            if (match($0, pat)) {
-                start = RSTART + RLENGTH
-                depth = 1
-                in_string = 0
-                i = start
-                while (i <= length($0) && depth > 0) {
-                    c = substr($0, i, 1)
-                    if (in_string) {
-                        if (c == "\\") {
-                            # 转义序列, 跳过下一字符 (\" \\ 都不算字符串边界)
-                            i++
-                        } else if (c == "\"") {
-                            in_string = 0
-                        }
-                    } else {
-                        if (c == "\"") in_string = 1
-                        else if (c == "{") depth++
-                        else if (c == "}") depth--
-                    }
-                    i++
-                }
-                block = substr($0, start, i - start - 1)
-                mark_id = ""; ip = ""; down = "0"; up = "0"; delay = "0"; jitter = "0"; loss = "0"; sqm = "false"
-                n = split(block, parts, ",")
-                for (j = 1; j <= n; j++) {
-                    if (match(parts[j], /"mark_id"[[:space:]]*:[[:space:]]*[0-9]+/)) {
-                        s = substr(parts[j], RSTART, RLENGTH)
-                        sub(/.*:[[:space:]]*/, "", s); mark_id = s
-                    } else if (match(parts[j], /"ip"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
-                        s = substr(parts[j], RSTART, RLENGTH)
-                        sub(/.*:[[:space:]]*"/, "", s); sub(/"$/, "", s); ip = s
-                    } else if (match(parts[j], /"down_mbps"[[:space:]]*:[[:space:]]*[0-9.]+/)) {
-                        s = substr(parts[j], RSTART, RLENGTH)
-                        sub(/.*:[[:space:]]*/, "", s); down = s
-                    } else if (match(parts[j], /"up_mbps"[[:space:]]*:[[:space:]]*[0-9.]+/)) {
-                        s = substr(parts[j], RSTART, RLENGTH)
-                        sub(/.*:[[:space:]]*/, "", s); up = s
-                    } else if (match(parts[j], /"delay_ms"[[:space:]]*:[[:space:]]*[0-9.]+/)) {
-                        s = substr(parts[j], RSTART, RLENGTH)
-                        sub(/.*:[[:space:]]*/, "", s); delay = s
-                    } else if (match(parts[j], /"jitter_ms"[[:space:]]*:[[:space:]]*[0-9.]+/)) {
-                        s = substr(parts[j], RSTART, RLENGTH)
-                        sub(/.*:[[:space:]]*/, "", s); jitter = s
-                    } else if (match(parts[j], /"loss_pct"[[:space:]]*:[[:space:]]*[0-9.]+/)) {
-                        # rc5.1.1 修 S1: restore_rules 之前忽略了 loss_pct,
-                        # 导致用户设置的丢包率每次重启都被清零 (下面 set_all
-                        # 调用硬编码 "0"). 现在正确解析并传递.
-                        s = substr(parts[j], RSTART, RLENGTH)
-                        sub(/.*:[[:space:]]*/, "", s); loss = s
-                    } else if (match(parts[j], /"sqm_enabled"[[:space:]]*:[[:space:]]*true/)) {
-                        # rc20: 每设备低延迟标志, restore 时一并恢复 AQM 叶子
-                        sqm = "true"
-                    }
-                }
-                if (mark_id != "") {
-                    print mark_id "|" ip "|" down "|" up "|" delay "|" jitter "|" loss "|" sqm
-                    exit
-                }
-            }
-        }' "$RULES_FILE")
-        [ -z "$fields" ] && continue
-
-        local mark_id; mark_id=$(echo "$fields" | cut -d'|' -f1)
-        local ip;      ip=$(echo      "$fields" | cut -d'|' -f2)
-        local down;    down=$(echo    "$fields" | cut -d'|' -f3)
-        local up;      up=$(echo      "$fields" | cut -d'|' -f4)
-        local delay;   delay=$(echo   "$fields" | cut -d'|' -f5)
-        local jitter;  jitter=$(echo  "$fields" | cut -d'|' -f6)
-        local loss;    loss=$(echo    "$fields" | cut -d'|' -f7)
-        local sqm;     sqm=$(echo     "$fields" | cut -d'|' -f8)
-        [ -z "$mark_id" ] && continue
+        local fields
+        fields=$(device_rule_fields "$mac") || continue
+        local mark_id ip down up delay jitter loss sqm
+        IFS='|' read -r mark_id ip down up delay jitter loss sqm <<EOF
+$fields
+EOF
 
         # rc3.1.30 Bug B: 优先用 devices.json 里的实时 IP.
         # 手机热点 NAT 段每次随机 (Ling 实测从 10.41.31.x 漂到 10.206.148.x 漂到
@@ -2349,7 +2273,7 @@ restore_rules() {
         # rc3.1.31: 补 else 分支打 stale log, 方便真机装机后 grep "no live IP" 计数
         # 走 stale 路径的规则数量 · 配合 do_full_init 里 +15s 的 delayed restore,
         # 期望第一次 restore 有若干 stale, 第二次 restore 全部收敛 (客户端已上线).
-        local live_ip; live_ip=$(get_current_ip "$mac")
+        local live_ip; live_ip=$(device_current_ip "$mac")
         if [ -n "$live_ip" ] && [ "$live_ip" != "$ip" ]; then
             log "  IP updated from rules.json($ip) to live($live_ip) for $mac"
             ip="$live_ip"
@@ -2377,35 +2301,30 @@ restore_rules() {
         fi
         if [ "$want_delay" = "1" ] && [ "$delay_supported" = "0" ]; then
             log "  restore skip delay for $mac: tc_netem/tc_htb unsupported"
-            delay=0; jitter=0; loss=0; want_delay=0
+            want_delay=0
         fi
         # rc20: 低延迟需要 HTB 叶子类; tc_htb 不支持就别恢复
-        if [ "$want_sqm" = "1" ] && [ "$limit_supported" = "0" ]; then want_sqm=0; fi
+        if [ "$want_sqm" = "1" ] && [ "$limit_supported" = "0" ]; then want_sqm=0; sqm=false; fi
         if [ "$want_limit" = "0" ] && [ "$want_delay" = "0" ] && [ "$want_sqm" = "0" ]; then
             log "  restore skip tc for $mac: all tc features unsupported or rule is zero"
             continue
         fi
 
         log "Restoring: $mac mark=$mark_id ip=$ip dn=${down}M up=${up}M delay=${delay}ms loss=${loss}%"
-        sh "$HNC_DIR/bin/iptables_manager.sh" mark "$ip" "$mac" "$mark_id"
-        mark_rc=$?
-        if [ "$mark_rc" -ne 0 ]; then
-            restore_side_fail=$((restore_side_fail + 1))
-            log_error "restore_rules: iptables mark failed for $mac rc=$mark_rc (counted, continuing)"
-        fi
-        if set_all "$iface" "$mark_id" "${down:-0}" "${up:-0}" "${delay:-0}" "${jitter:-0}" "${loss:-0}" "$ip"; then
+        apply_device_runtime "$iface" "$mac" "$mark_id" "$ip" \
+            "${down:-0}" "${up:-0}" "${delay:-0}" "${jitter:-0}" "${loss:-0}" "$sqm"
+        local device_rc=$?
+        if [ "$device_rc" -eq 0 ] || [ "$device_rc" -eq 8 ]; then
             restore_fail_streak=0
+            [ "$device_rc" -eq 8 ] && log "restore_rules: partial uplink for $mac; downlink kept"
         else
+            restore_device_fail=$((restore_device_fail + 1))
             restore_fail_streak=$((restore_fail_streak + 1))
-            log_error "restore_rules: failed for $mac mark=$mark_id streak=$restore_fail_streak"
+            log_error "restore_rules: failed for $mac mark=$mark_id rc=$device_rc streak=$restore_fail_streak"
             if [ "$restore_fail_streak" -ge 2 ]; then
                 log_error "restore_rules: abort after 2 consecutive failures to avoid holding gate_lock/UI stall"
                 break
             fi
-        fi
-        # rc20: 恢复每设备「低延迟」AQM 叶子(set_all 之后, 延迟未占叶子时才生效)
-        if [ "$want_sqm" = "1" ]; then
-            set_sqm "$iface" "$mark_id" on "$ip" >/dev/null 2>&1 || log "  restore: set_sqm on failed for $mac"
         fi
     done
 
@@ -2443,9 +2362,9 @@ restore_rules() {
     # T1 tier: ensure clsact BPF filter persists across restore
     _hnc_install_clsact_bpf "$iface"
 
-    if [ "${restore_side_fail:-0}" -gt 0 ]; then
-        log_error "restore_rules: $restore_side_fail side-channel failures (iptables mark/blacklist_add), see errors above"
-        log "Restore complete (with $restore_side_fail side failures)"
+    if [ "$restore_device_fail" -gt 0 ] || [ "$restore_side_fail" -gt 0 ]; then
+        log_error "restore_rules: $restore_device_fail device failures, $restore_side_fail blacklist failures"
+        log "Restore complete (with failures)"
         return 1
     fi
     log "Restore complete"
@@ -2660,6 +2579,14 @@ case "$1" in
         tc_action_unlock
         exit $rc ;;
 
+    apply_device)
+        tc_action_lock apply_device || exit 12
+        shift
+        apply_device_runtime "$@"
+        rc=$?
+        tc_snapshot_async "$1"
+        tc_action_unlock
+        exit $rc ;;
     set_limit)
         tc_action_lock set_limit || exit 12
         set_limit "$2" "$3" "$4" "$5" "$6"
@@ -2740,7 +2667,7 @@ case "$1" in
     status)     show_status "$2" ;;
     snapshot)   sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$2" ;;
     *)
-        echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_sqm|global_shaper|set_all|remove|restore|ensure_ingress|ensure_class|status|snapshot|cleanup}"
+        echo "Usage: tc_manager.sh {init|apply_device|set_limit|set_delay|set_sqm|global_shaper|set_all|remove|restore|ensure_ingress|ensure_class|status|snapshot|cleanup}"
         echo ""
         echo "v5.1.0-rc1-hotfix17.7: TC writer serialization + state snapshot"
         echo ""

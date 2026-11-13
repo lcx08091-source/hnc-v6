@@ -174,7 +174,7 @@ func actionDelaySet(hncDir string, p map[string]string) actionResp {
 				rollbackIP = lookupRuleDeviceField(hncDir, mac, "ip")
 			}
 			runBin(hncDir, "iptables_manager.sh", "unmark", rollbackIP, mac, mid)
-			runBin(hncDir, "json_set.sh", "device", mac, "mark_id", "0")
+			setDeviceRule(hncDir, mac, "mark_id", "0")
 		}
 		return actionResp{OK: false, Error: "netem apply failed", Detail: out3}
 	}
@@ -360,22 +360,22 @@ func actionHotspotSave(hncDir string, p map[string]string) actionResp {
 	// 字段名用 hotspot_auto / hotspot_ssid / hotspot_pass / hotspot_delay
 	// (这是 service.sh:141 + watchdog 实际读的名字, 开机自启动才能生效)
 	if ssid != "" {
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_ssid", ssid); rc != 0 {
+		if rc, out := setRuleTop(hncDir, "hotspot_ssid", ssid); rc != 0 {
 			return actionResp{OK: false, Error: "save ssid failed", Detail: out}
 		}
 	}
 	if pass != "" {
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_pass", pass); rc != 0 {
+		if rc, out := setRuleTop(hncDir, "hotspot_pass", pass); rc != 0 {
 			return actionResp{OK: false, Error: "save pass failed", Detail: out}
 		}
 	}
 	if delayStr != "" {
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_delay", strconv.Itoa(delay)); rc != 0 {
+		if rc, out := setRuleTop(hncDir, "hotspot_delay", strconv.Itoa(delay)); rc != 0 {
 			return actionResp{OK: false, Error: "save delay failed", Detail: out}
 		}
 	}
 	if autostart != "" {
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_auto", autostart); rc != 0 {
+		if rc, out := setRuleTop(hncDir, "hotspot_auto", autostart); rc != 0 {
 			return actionResp{OK: false, Error: "save autostart failed", Detail: out}
 		}
 	}
@@ -394,7 +394,7 @@ func actionSetTopBool(hncDir, key string, p map[string]string, onDetail, offDeta
 	if v != "true" && v != "false" {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
-	rc, out := runBin(hncDir, "json_set.sh", "top", key, v)
+	rc, out := setRuleTop(hncDir, key, v)
 	if rc != 0 {
 		return actionResp{OK: false, Error: "write failed", Detail: out}
 	}

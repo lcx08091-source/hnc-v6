@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# apply_device_rule.sh — Patch 3.b.1 · Go /api/action 调用的应用脚本
+# apply_device_rule.sh — 设备策略修改入口(执行 + 保存用户配置)
 #
 # 设计目标:封装 WebUI applyLimit 的完整链路 (mark + tc set_limit + json 写入)
 # 让 Go httpd 一次 exec 完成"远端设限速→实际生效"
@@ -12,7 +12,7 @@
 #
 # 输出: stdout 行 "ok\n" 或 "error: <reason>\n",exit 0/1
 #
-# 关键差异 vs WebUI 的 applyLimit:
+# mark_id 分配与配置保存由本入口负责；运行规则由 tc_manager 公共执行器应用。
 #   - mid 查 rules.json 复用,不存在则按 MAC 哈希分配 + 线性探测避碰
 #   - IP 从 devices.json 现读 (不信任 caller 传入)
 
@@ -20,6 +20,7 @@
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+. "$HNC_DIR/bin/hnc_device_policy.sh"
 RULES="$HNC_DIR/data/rules.json"
 DEVICES="$HNC_DIR/data/devices.json"
 JSON_SET="$HNC_DIR/bin/json_set.sh"
@@ -60,22 +61,6 @@ now_ts() {
     date +%s 2>/dev/null || echo 0
 }
 
-# ── helper: 读 devices.json 拿 IP ─────────────────────────────────
-get_ip() {
-    local mac=$1
-    [ -f "$DEVICES" ] || { echo ""; return; }
-    # 使用结构化读取，不能从 MAC 后无限向后找 IP：本设备没有 IP 时会
-    # 读到下一台设备的地址，给错误设备装 MARK/限速/黑名单。
-    local _ip
-    _ip=$(HNC="$HNC_DIR" sh "$HNC_DIR/bin/hnc_json" get-object-key "$DEVICES" "$mac" 2>/dev/null \
-        | awk '{s=s $0} END {if (match(s, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
-            v=substr(s,RSTART,RLENGTH); sub(/^[^:]*:[[:space:]]*"/,"",v); sub(/"$/,"",v); print v
-        }}')
-    # v5.8.8 (audit): 只回合法 IPv4,挡掉 1.2.3.4.5 这类畸形(awk 已限 [0-9.]、不可注入,
-    # 这里再保证四段合法八位组),否则返回空,调用方按"无 IP"处理。
-    if valid_ipv4 "$_ip"; then printf '%s\n' "$_ip"; else echo ""; fi
-}
-
 # rules.json fallback IP, used when the device is offline but old IP-specific
 # iptables DROP/MARK rules need cleanup.
 get_rule_ip() {
@@ -86,65 +71,10 @@ get_rule_ip() {
 # ── helper: 读/分配 mark_id ──────────────────────────────────────
 # 1. 优先复用 rules.json 里 devices.<mac>.mark_id
 # 2. 没有就按 MAC 后两字节哈希算起点, 在 1-99 范围线性探测避开已用
-# v5.12: 只在 devices.<mac> 自己的 {...} 块里取 mark_id。
-# 旧实现从 MAC 首次出现处往后找"第一个 mark_id",不限定块边界:设备条目存在但
-# 没有 mark_id(Go 端 device whitelist / sqm_enabled=false 会只写这一个字段)时,
-# 拿到的是文件里【下一台设备】的 mark_id → 两台设备共用同一 tc class / fwmark,
-# 互相串限速。这里按 devices 顶层 key 精确定位,做字符串感知的括号计数。
-# 整个文件先 tr -d 换行,单行 / pretty JSON 都能处理(JSON 字符串内不会有裸换行)。
-rules_device_mid() {
-    local mac=$1
-    [ -f "$RULES" ] || return 0
-    tr -d '\n\r' < "$RULES" 2>/dev/null | awk -v m="$mac" '
-    {
-        s = $0; m = tolower(m)
-        if (!match(s, /"devices"[[:space:]]*:[[:space:]]*\{/)) exit
-        i = RSTART + RLENGTH; n = length(s); depth = 1
-        while (i <= n && depth > 0) {
-            c = substr(s, i, 1)
-            if (c == "\"") {
-                j = i + 1
-                while (j <= n) {
-                    d = substr(s, j, 1)
-                    if (d == "\\") { j += 2; continue }
-                    if (d == "\"") break
-                    j++
-                }
-                key = substr(s, i + 1, j - i - 1)
-                i = j + 1
-                if (depth == 1 && tolower(key) == m) {
-                    rest = substr(s, i)
-                    if (!match(rest, /^[[:space:]]*:[[:space:]]*\{/)) continue
-                    k = i + RLENGTH; bd = 1; ins = 0; st = k
-                    while (k <= n && bd > 0) {
-                        e = substr(s, k, 1)
-                        if (ins) { if (e == "\\") k++; else if (e == "\"") ins = 0 }
-                        else if (e == "\"") ins = 1
-                        else if (e == "{") bd++
-                        else if (e == "}") bd--
-                        k++
-                    }
-                    blk = substr(s, st, k - st)
-                    if (match(blk, /"mark_id"[[:space:]]*:[[:space:]]*[0-9]+/)) {
-                        seg = substr(blk, RSTART, RLENGTH)
-                        sub(/.*:[[:space:]]*/, "", seg)
-                        print seg
-                    }
-                    exit
-                }
-                continue
-            }
-            if (c == "{") depth++
-            else if (c == "}") depth--
-            i++
-        }
-    }'
-}
-
 get_or_assign_mid() {
     local mac=$1
     local existing
-    existing=$(rules_device_mid "$mac")
+    existing=$(device_rule_mid "$mac")
     if [ -n "$existing" ] && [ "$existing" -ge 1 ] && [ "$existing" -le 99 ] 2>/dev/null; then
         echo "$existing"
         return
@@ -255,15 +185,13 @@ js_set_dev_flush() {
 }
 
 # v5.8.8 (audit): 白名单校验进 tc/iptables 的外部字段(防御纵深)。
-# MAC 来自 /api/action(经鉴权但仍是外部输入);IP 由 get_ip 从 devices.json 读
+# MAC 来自 /api/action(经鉴权但仍是外部输入);IP 由 device_current_ip 从 devices.json 读
 # (源头含 DHCP option12/mDNS 任意字节)。变量拼接处均已带引号、无 eval,故非命令
 # 注入;此处再做格式白名单,异常输入直接拒,绝不让怪字符进 tc/iptables 参数。
 valid_mac() {
     printf '%s' "$1" | grep -Eq '^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){5}$'
 }
-valid_ipv4() {
-    printf '%s' "$1" | grep -Eq '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
-}
+
 
 # ── main ─────────────────────────────────────────────────────────
 
@@ -282,7 +210,7 @@ case "$CMD" in
         UP_MBPS=$2
         [ -z "$DN_MBPS" ] && DN_MBPS=0
         [ -z "$UP_MBPS" ] && UP_MBPS=0
-        IP=$(get_ip "$MAC")
+        IP=$(device_current_ip "$MAC")
         if [ -z "$IP" ]; then
             emit_err "device not found in devices.json (mac=$MAC, 设备可能离线或还没被探到)"
         fi
@@ -306,26 +234,23 @@ case "$CMD" in
         sh "$JSON_SET" device "$MAC" last_seen_persist "$(now_ts)" >> "$LOG" 2>&1 || log "WARN: failed to update last_seen_persist for $MAC"
         gate_unlock
         log "limit mac=$MAC ip=$IP mid=$MID dn=${DN_MBPS}mbps up=${UP_MBPS}mbps iface=$IFACE"
-        # 1. iptables mark
-        sh "$IPT" mark "$IP" "$MAC" "$MID" >> "$LOG" 2>&1 \
-            || emit_err "iptables mark failed (mid=$MID, see apply.log)"
-        # 2. tc set_limit
-        # hotfix6: capture tc_manager output so partial uplink failure can still keep
-        # a working downlink limit. This avoids UI freeze/fail on ColorOS IFB/mirred
-        # races when the user sets both download and upload rates.
-        TC_OUT=$(sh "$TC" set_limit "$IFACE" "$MID" "$DN_MBPS" "$UP_MBPS" "$IP" 2>&1)
+        # 读取已有延迟/SQM, 仅替换本次修改的速率。与重启恢复共用完整
+        # MARK → 限速/延迟 → SQM → offload 执行路径, 不在这里另编排一份。
+        POLICY=$(device_rule_fields "$MAC") || emit_err "failed to read device policy"
+        IFS='|' read -r SAVED_MID SAVED_IP SAVED_DN SAVED_UP DELAY_MS JITTER_MS LOSS_PCT SQM <<EOF
+$POLICY
+EOF
+        TC_OUT=$(sh "$TC" apply_device "$IFACE" "$MAC" "$MID" "$IP" \
+            "$DN_MBPS" "$UP_MBPS" "$DELAY_MS" "$JITTER_MS" "$LOSS_PCT" "$SQM" 2>&1)
         TC_RC=$?
-        [ -n "$TC_OUT" ] && log "tc set_limit output rc=$TC_RC: $TC_OUT"
+        [ -n "$TC_OUT" ] && log "tc apply_device output rc=$TC_RC: $TC_OUT"
         # v5.9.7: 限速规则变了, clsact BPF 的 ip→mark map 跟着刷新
         # (未启用时 sync 脚本自检 map pin 缺失即静默退, 零开销)
         [ -x "$HNC_DIR/bin/hnc_clsact_sync.sh" ] &&             sh "$HNC_DIR/bin/hnc_clsact_sync.sh" >> "$LOG" 2>&1 || true
         if [ $TC_RC -ne 0 ] && [ $TC_RC -ne 8 ]; then
-            # hotfix5: avoid half-applied state. The mark was already installed, but
-            # rules.json has not been updated yet; remove the packet mark so traffic
-            # is not left classified into a failed/partial tc setup.
-            log "tc set_limit failed, rolling back iptables mark (mid=$MID)"
-            sh "$IPT" unmark "$IP" "$MAC" "$MID" >> "$LOG" 2>&1 || log "rollback iptables unmark warn (mid=$MID)"
-            emit_err "tc set_limit failed"
+            # 公共执行器负责 tc 失败后的 unmark。锁忙时尚未修改内核,
+            # 此处不能无条件 unmark, 否则会删掉原本正在生效的规则。
+            emit_err "device rule apply failed"
         fi
         PARTIAL_TC=""
         if [ $TC_RC -eq 8 ]; then
@@ -335,8 +260,6 @@ case "$CMD" in
             UP_MBPS=0
             log "tc set_limit partial: uplink failed, downlink kept (mac=$MAC mid=$MID)"
         fi
-        # v5.0: tc 规则就位, 通知 scheduler 决定是否触发 BPF offload disable
-        notify_offload "$MAC" 1
         # 3. 写 rules.json (mark_id 已经在 gate_lock 内写过了, 这里只写其他字段)
         # rc3.1.33 修 #18: js_set_dev 累计失败, 不 fail 但 log + 报告
         js_set_dev ip "$IP"
@@ -368,7 +291,7 @@ case "$CMD" in
         #   → UI 显示"已限速到 0", 用户误解 / 下次 restore 行为乱
         # 幂等: get_or_assign_mid 已分配过直接返回旧值, iptables mark_device 自带
         #       -D 后 -A 清理, 重复调用无副作用. stdout 只出 mid (整数, 供 caller 取).
-        IP=$(get_ip "$MAC")
+        IP=$(device_current_ip "$MAC")
         if [ -z "$IP" ]; then
             emit_err "device not found in devices.json (mac=$MAC)"
         fi
@@ -391,7 +314,7 @@ case "$CMD" in
         ;;
 
     clear)
-        IP=$(get_ip "$MAC")
+        IP=$(device_current_ip "$MAC")
         IFACE=$(sh "$DETECT" iface 2>/dev/null)
         # rc2 修 S12: clear 之前先 device_get 看是否有 mid, 没有就不调 get_or_assign_mid
         # (避免给 "从未限速过的设备" 分配一个立刻丢弃的 mid — 99 个 mid 很稀缺).
@@ -447,7 +370,7 @@ case "$CMD" in
             # v6 filter 不依赖 IP,-s/-d 规则删除失败是幂等无害的。
             UNMARK_IP=$IP
             [ -n "$UNMARK_IP" ] || UNMARK_IP=$(get_rule_ip "$MAC")
-            valid_ipv4 "$UNMARK_IP" || UNMARK_IP=""
+            device_policy_ipv4 "$UNMARK_IP" || UNMARK_IP=""
             sh "$IPT" unmark "$UNMARK_IP" "$MAC" "$MID" >> "$LOG" 2>&1 || log "iptables unmark warn"
         fi
         # 3. 写 rules.json: 清空 down_mbps/up_mbps + limit_enabled=false
@@ -470,7 +393,7 @@ case "$CMD" in
     bl_add)
         # 加黑: iptables blacklist_add + json_set.sh bl_add
         # IP 可能为空(设备已离线),iptables 没 IP 就只挂 MAC drop 规则,仍然有效
-        IP=$(get_ip "$MAC")
+        IP=$(device_current_ip "$MAC")
         log "bl_add mac=$MAC ip=${IP:-(no-ip)}"
         # rc3.1.34 修 #23: 之前 `${IP:-0.0.0.0}` 在离线设备 IP 为空时传字面 0.0.0.0
         # 给 iptables_manager.sh, 装出垃圾规则 `-s 0.0.0.0 -m mac --mac-source ...`,
@@ -497,7 +420,7 @@ case "$CMD" in
         ;;
 
     bl_del)
-        IP=$(get_ip "$MAC")
+        IP=$(device_current_ip "$MAC")
         [ -z "$IP" ] && IP=$(get_rule_ip "$MAC")
         log "bl_del mac=$MAC ip=${IP:-(no-ip)}"
         # rc3.1.34 修 #23: 同 bl_add, 不传 0.0.0.0 字面值

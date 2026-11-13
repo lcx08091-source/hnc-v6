@@ -224,6 +224,19 @@ get_iface() {
     sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null
 }
 
+# 所有恢复入口共用结果处理。未完整恢复时保留既有 pending 标记，
+# 让 Go watchdog 的健康检查知道仍需恢复，成功后才清除。
+restore_device_rules() {
+    sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1
+    local rc=$?
+    if [ "$rc" -eq 0 ]; then
+        rm -f "$RUN/tc_restore_pending" 2>/dev/null
+    else
+        date +%s > "$RUN/tc_restore_pending" 2>/dev/null || true
+    fi
+    return "$rc"
+}
+
 # ── 完整恢复 ─────────────────────────────────────────────────
 full_restore() {
     local reason=$1
@@ -269,7 +282,7 @@ full_restore() {
         # 里恢复。旧代码 tc_htb=false 时直接 return → 黑名单设备恢复上网。restore
         # 自身按能力跳过所有 tc 操作(limit/delay/uplink 均有 capability 门控),
         # 只做黑名单与 mark 恢复,可以安全调用。
-        sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1 || true
+        restore_device_rules || return $?
         log "RESTORE tc skipped: tc_htb=false; iptables + blacklist restored only"
         return 0
     fi
@@ -292,24 +305,12 @@ full_restore() {
     if [ $tc_init_rc -ne 0 ]; then
         log "full_restore: tc init rc=$tc_init_rc, continuing to restore anyway (hotfix1 fallback)"
     fi
-    sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1
+    restore_device_rules
     local tc_restore_rc=$?
     # v5.9.1: rc=12 是 tc_manager 的 busy 约定(拿不到 tc_action_lock,或
     # restore 中途发现锁已易主而主动中止)。这是良性竞争 —— 说明另一个进程
     # 正在正常改 tc 树,不是修复失败。计进 tc_repair 熔断器会让 3 次竞争就
-    # 停掉 5 分钟的自动修复能力(语义错配)。只置 _HEALTH_RC=1 让下轮重试。
-    # v5.12: 上面 iptables init 已把 HNC_MARK / HNC_CTRL(黑名单)整链 flush,只有
-    # restore 才会把 mark 和黑名单加回来。restore 因锁竞争退 12(tc_action_lock)或
-    # 11(gate_lock 超时)时,旧代码"置 _HEALTH_RC=1 让下轮重试"并不成立:紧接着
-    # _HEALTH_TS=0 让缓存失效,Go 版每轮又是新进程 —— 下轮 check_health 看到链都在
-    # 就判健康,黑名单设备从此恢复上网、v6 限速失去 mark,直到下次别的原因触发恢复。
-    # 落一个 pending 标记,Go 看门狗的规则健康检查(native.go)见标记即判不健康,
-    # 由(已限流的)下轮再恢复。
-    if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
-        echo "$(date +%s 2>/dev/null)" > "$RUN/tc_restore_pending" 2>/dev/null || true
-    else
-        rm -f "$RUN/tc_restore_pending" 2>/dev/null
-    fi
+    # 停掉 5 分钟的自动修复能力(语义错配)。保留 pending 让下轮重试。
     if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
         log "full_restore: tc restore busy/lock lost (rc=$tc_restore_rc), not counted as repair failure; marked pending"
     elif [ $tc_init_rc -eq 0 ] && [ $tc_restore_rc -eq 0 ]; then
@@ -318,6 +319,7 @@ full_restore() {
         tc_repair_record 0
     fi
     log "RESTORE complete init_rc=$tc_init_rc restore_rc=$tc_restore_rc"
+    return "$tc_restore_rc"
 }
 
 # ── Doze 检测 ────────────────────────────────────────────────
@@ -367,7 +369,7 @@ do_full_init() {
         watchdog_mark_tc_unsupported_once tc_htb
         # v5.12: 同 full_restore —— 黑名单只在 restore 里恢复,tc_htb=false 也要跑
         # (restore 内部按能力跳过 tc),否则开机/开热点后黑名单永远不生效。
-        sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1 || true
+        restore_device_rules || return $?
         log "do_full_init: tc skipped because tc_htb=false; iptables + blacklist only"
     else
         sh "$HNC_DIR/bin/tc_manager.sh" init "$iface" >> "$LOG" 2>&1
@@ -380,29 +382,17 @@ do_full_init() {
         if [ $tc_init_rc -ne 0 ]; then
             log "do_full_init: tc init rc=$tc_init_rc, continuing to restore (hotfix1 fallback)"
         fi
-        sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1
+        restore_device_rules || return $?
         sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1
     fi
-    # 写 rules.json.hotspot_iface,给 WebUI 显示。
-    # v5.9.92: 用户设置了非 auto 偏好时不覆写 —— 否则"接口暂时消失"的
-    # 瞬间(重启/切换中)探测值会把用户刚保存的偏好冲掉。偏好与探测一致
-    # 时写同值无感; 不一致时尊重偏好(device_detect 探测已读偏好, 探测
-    # 结果 ≠ 偏好仅发生在偏好接口暂时不存在的窗口)。
-    _pref=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_iface 2>/dev/null) || _pref=""
-    _pref=$(printf '%s' "$_pref" | tr -d '[:space:]')
-    case "$_pref" in \"*\") _pref=${_pref#\"}; _pref=${_pref%\"} ;; esac
-    if [ -z "$_pref" ] || [ "$_pref" = "auto" ] || [ "$_pref" = "$iface" ]; then
-        sh "$HNC_DIR/bin/json_set.sh" top hotspot_iface "$iface" >> "$LOG" 2>&1
-    else
-        log "skip hotspot_iface overwrite: user pref=$_pref, detected=$iface"
-    fi
+    # 实时接口只写运行状态；rules.json.hotspot_iface 保留用户的接口偏好。
     echo "ACTIVE:$iface" > "$STATE_FILE"
     log "STATE entered ACTIVE:$iface"
 
     # rc3.1.31 Bug B gap 修复 · 冷启动 do_full_init 可能跑在客户端连上热点前,
     # 此时 devices.json 是空的 → restore_rules 拿不到 live IP 走了 rules.json 的
     # stale fallback → tc u32 filter 装到了旧 IP → Mi-10 新 IP 流量不 match.
-    # 15s 后再跑一次 restore, 给设备发现写者(v5.33 起只有 Go 看门狗)写 devices.json 的时间, get_current_ip
+    # 15s 后再跑一次 restore, 给设备发现写者(v5.33 起只有 Go 看门狗)写 devices.json 的时间, device_current_ip
     # 能拿到真实 IP. restore_rules 幂等 (prio=100+mark_id 每 MAC 唯一, del-before-add,
     # IP 无变化则 no-op 只重复建 filter ~<50ms).
     # subshell 独立, 即便 watchdog 退出也自然降级 (STATE 被 reset 则 case 不匹配).
@@ -413,7 +403,7 @@ do_full_init() {
             ACTIVE:*)
                 echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WDG] delayed re-restore fired (+15s post-init) to refresh stale IPs" >> "$LOG"
                 if watchdog_tc_core_supported; then
-                    sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1
+                    restore_device_rules
                 else
                     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [WDG] delayed re-restore skipped: tc_htb=false" >> "$LOG"
                 fi
@@ -429,7 +419,7 @@ do_full_init() {
 
 # do_migrate: ACTIVE:<old_iface> → ACTIVE:<new_iface>
 # 场景: 热点接口换了(WiFi 热点 → USB tethering 等)
-# 做: cleanup 旧 + init 新 + 杀 httpd 等下轮重拉绑新 IP
+# 做: cleanup 旧 + init 新 + 恢复规则并发布新运行状态
 do_migrate() {
     local old=$1 new=$2 new_ip=$3
     log "STATE ACTIVE:$old -> ACTIVE:$new (ip=$new_ip), migrating"
@@ -446,20 +436,16 @@ do_migrate() {
             echo "PENDING" > "$STATE_FILE"
             return $tc_init_rc
         fi
-        sh "$HNC_DIR/bin/tc_manager.sh" restore >> "$LOG" 2>&1
+        restore_device_rules
+        local tc_restore_rc=$?
+        if [ "$tc_restore_rc" -ne 0 ]; then
+            echo "PENDING" > "$STATE_FILE"
+            return "$tc_restore_rc"
+        fi
         sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1
     else
         watchdog_mark_tc_unsupported_once tc_htb
         log "do_migrate: tc skipped because tc_htb=false"
-    fi
-    # v5.9.92: 同 do_full_init —— 尊重用户偏好, 不无条件覆写
-    _pref=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_iface 2>/dev/null) || _pref=""
-    _pref=$(printf '%s' "$_pref" | tr -d '[:space:]')
-    case "$_pref" in \"*\") _pref=${_pref#\"}; _pref=${_pref%\"} ;; esac
-    if [ -z "$_pref" ] || [ "$_pref" = "auto" ] || [ "$_pref" = "$new" ]; then
-        sh "$HNC_DIR/bin/json_set.sh" top hotspot_iface "$new" >> "$LOG" 2>&1
-    else
-        log "skip hotspot_iface overwrite (migrate): user pref=$_pref, detected=$new"
     fi
     # v5.33: 不再为「拿新 IP 重绑」杀 httpd —— 远程端口监听 0.0.0.0, 网卡 / IP 变化
     # 无需重绑(v5.3.0-rc8 起就是 0.0.0.0, 这里一直白杀; 而且看门狗重拉 httpd 时

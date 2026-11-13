@@ -192,6 +192,22 @@ process.
         │  netlink / kernel interfaces / WLAN  │
         └───────────────────────────────────────┘
 
+Policy application and data ownership (v5.33 rc4)
+
+Manual device rate changes and watchdog restoration share
+`tc_manager.sh:apply_device_runtime`: MARK → rates/delay → optional SQM →
+offload notification. `apply_device_rule.sh` owns mark allocation and saving
+user changes; restoration reads saved policy and rebuilds runtime rules without
+rewriting it. Both paths use `hnc_device_policy.sh` to read device policy and
+current addresses through the existing `hnc_json` tool.
+
+| Data | Owner |
+|---|---|
+| User policy (`data/rules.json`) | User actions through `json_set.sh` / `hnc_json`; HTTP helpers in `rules_config.go` |
+| Discovered clients (`data/devices.json`) | Go watchdog device discovery |
+| Current hotspot interface (`run/hnc_state`, interface caches) | Runtime discovery/watchdog; distinct from the user's interface preference |
+| DPI results and history | `hnc_dpid` |
+
 Core Components
 
 hotspotd

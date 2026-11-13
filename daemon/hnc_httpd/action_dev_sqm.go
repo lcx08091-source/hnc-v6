@@ -59,7 +59,7 @@ func actionDeviceSQMSet(hncDir string, p map[string]string) actionResp {
 	if rcM != 0 || mid == "" || mid == "0" {
 		if !enabled {
 			// 没分配过 mid 且要关 → 无 tc 可改, 仅落 flag=false
-			runBin(hncDir, "json_set.sh", "device", mac, "sqm_enabled", "false")
+			setDeviceRule(hncDir, mac, "sqm_enabled", "false")
 			return actionResp{OK: true, Detail: "sqm off (no class)"}
 		}
 		rc0, out0 := runBin(hncDir, "apply_device_rule.sh", "alloc_mid", mac)
@@ -86,7 +86,7 @@ func actionDeviceSQMSet(hncDir string, p map[string]string) actionResp {
 	if enabled {
 		val = "true"
 	}
-	if rcW, outW := runBin(hncDir, "json_set.sh", "device", mac, "sqm_enabled", val); rcW != 0 {
+	if rcW, outW := setDeviceRule(hncDir, mac, "sqm_enabled", val); rcW != 0 {
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(outW)}
 	}
 	detail := "sqm=" + val + " mac=" + mac

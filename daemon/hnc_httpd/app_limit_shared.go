@@ -17,7 +17,6 @@ package main
 
 import (
 	"bufio"
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,12 +29,8 @@ const (
 
 // appLimitIncludeShared 读 rules.json 顶层逃生口(缺省 false = 跳过共享 IP)。
 func appLimitIncludeShared(hncDir string) bool {
-	b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json"))
+	m, err := readRulesConfig(hncDir)
 	if err != nil {
-		return false
-	}
-	var m map[string]interface{}
-	if json.Unmarshal(b, &m) != nil {
 		return false
 	}
 	switch v := m[appLimitIncludeSharedKey].(type) {
@@ -145,7 +140,7 @@ func actionAppLimitSharedIPsSet(hncDir string, p map[string]string) actionResp {
 	if enabled {
 		val = "true"
 	}
-	if rc, out := runBin(hncDir, "json_set.sh", "top", appLimitIncludeSharedKey, val); rc != 0 {
+	if rc, out := setRuleTop(hncDir, appLimitIncludeSharedKey, val); rc != 0 {
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(out)}
 	}
 	triggerAppLimitApply(hncDir)
