@@ -7,6 +7,7 @@ var RENDER = { devices: renderDevices, apps: renderApps, stats: renderStats, set
 function onEnter(name) {
   if (name === 'devices') { paintHero(true); loadOnlineHours(); loadUsage(); }
   if (name === 'apps') loadApps().then(function () { if (S.page === 'apps') renderApps(false); });
+  if (name === 'stats') { afterAseg(); loadUsage().then(function () { var rk = $('#pu-dev-rank'); if (rk && typeof hsMonthRankHtml === 'function') rk.innerHTML = hsMonthRankHtml(); }); }
   if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_mode === 'on' && !S.clsact) clsactCheck(true); });
   schedulePoll(50);
 }
@@ -37,14 +38,20 @@ function go(name) {
   enterT = setTimeout(function () { onEnter(name); }, 90);
 }
 
-/* ═════════════════════ 底栏: 四主题差异化 120fps 透镜物理引擎 + 边缘体积守恒防越界 ═════════════════════ */
+/* ═════════════════════ 底栏: 微信 / iOS 26 液态玻璃滑动膨胀放大折射引擎 + 根治卡片展开乱滑 ═════════════════════ */
 var TABS = [['devices', '设备', 'dev'], ['apps', '应用', 'apps'], ['stats', '分析', 'stats'], ['settings', '设置', 'gear']];
-var tabsHtml = TABS.map(function (t) { return '<div class="tab" role="tab" tabindex="-1" data-tab="' + t[0] + '">' + ico(t[2]) + t[1] + (t[0] === 'apps' ? '<span class="dot" hidden></span>' : '') + '</div>'; }).join('');
-$('#tabs').innerHTML = tabsHtml; $('#lens-in').innerHTML = '';
+function buildTabItems(filled) {
+  return TABS.map(function (t) {
+    var ic = typeof tabSvg === 'function' ? tabSvg(t[2], filled) : ico(t[2]);
+    return '<div class="tab" role="' + (filled ? 'presentation' : 'tab') + '" tabindex="-1" data-tab="' + t[0] + '">' + ic + t[1] + (t[0] === 'apps' ? '<span class="dot" hidden></span>' : '') + '</div>';
+  }).join('');
+}
+$('#tabs').innerHTML = buildTabItems(false);
+$('#lens-in').innerHTML = buildTabItems(true);
 var bar = $('#tabbar'), lens = $('#lens'), lensIn = $('#lens-in'), tabsEl = $('#tabs');
 var L = { x: 6, v: 0, tx: 6, s: 1, sv: 0, ts: 1, drag: false, down: false, hitIdx: 0, raf: 0, last: 0, gx: 0, moved: 0, fx0: 0, fx: 0, ft: 0, fv: 0, lockT: 0 };
 function lensPhys() {
-  return (typeof themePhys === 'function' ? themePhys() : { mode: 'default', lens: { k: 960, c: 62, dk: 1160, dc: 68, sk: 980, sc: 63, tapV: -.38, dragS: .99, maxSp: 0, dragSp: 0, sqRatio: 0, wallBounce: 0, rigid: false } }).lens;
+  return (typeof themePhys === 'function' ? themePhys() : { mode: 'default', lens: { k: 960, c: 62, dk: 1160, dc: 68, sk: 980, sc: 63, tapV: -.38, dragS: 1.08, maxSp: .12, dragSp: .16, sqRatio: .28, wallBounce: .18, rigid: false } }).lens;
 }
 function pulseCyberLens() {
   if (!lens || !motionOn() || (typeof motionTheme === 'function' && motionTheme() !== 'cyber')) return;
@@ -57,40 +64,52 @@ function pulseCyberLens() {
 function tabGeom() {
   var br = bar.getBoundingClientRect(), tr = tabsEl.getBoundingClientRect();
   var padL = tr.width > 0 ? Math.max(0, tr.left - br.left) : 6;
-  var w = (tr.width > 0 ? tr.width : Math.max(160, bar.clientWidth - 12)) / TABS.length;
+  var totalW = tr.width > 0 ? tr.width : Math.max(160, bar.clientWidth - 12);
+  var w = totalW / TABS.length;
   var minX = padL, maxX = padL + (TABS.length - 1) * w;
-  return { padL: padL, w: w, minX: minX, maxX: maxX };
+  return { padL: padL, w: w, totalW: totalW, minX: minX, maxX: maxX };
 }
 function slotW() { return tabGeom().w; }
 function layoutLens() {
   var g = tabGeom();
   lens.style.width = g.w.toFixed(2) + 'px';
+  if (lensIn) lensIn.style.width = g.totalW.toFixed(2) + 'px';
   var curIdx = Math.max(0, ORDER.indexOf(S.page));
   L.tx = g.padL + curIdx * g.w;
   if (!L.drag && !L.raf) { L.x = L.tx; paintLens(); }
 }
 function paintLens() {
   var g = tabGeom(), lp = lensPhys();
-  var dragOver = lp.rigid ? 0 : (lp.maxSp > .03 ? 3.5 : 1.5);
+  var dragOver = lp.rigid ? 0 : 6;
   var px = L.drag ? clamp(L.x, g.minX - dragOver, g.maxX + dragOver) : clamp(L.x, g.minX, g.maxX);
-  if (lp.rigid || !motionOn() || (typeof lowFx === 'function' && lowFx())) {
+  var relX = px - g.padL;
+  // 动态挖空底层轮廓标签，让液态透镜内部的放大实心折射层独享视野，绝不重影
+  tabsEl.style.setProperty('--ml', Math.max(0, relX + 2).toFixed(1) + 'px');
+  tabsEl.style.setProperty('--mr', Math.min(g.totalW, relX + g.w - 2).toFixed(1) + 'px');
+
+  var sxs = 1, sys = 1;
+  if (!lp.rigid && motionOn() && !(typeof lowFx === 'function' && lowFx())) {
+    var capSp = L.drag ? Math.max(.14, lp.dragSp) : Math.max(.08, lp.maxSp);
+    var rawSp = capSp > 0 ? Math.min(Math.abs(L.v) / (L.drag ? 2400 : 2800), capSp) : 0;
+    var pressInflateX = L.drag ? 1.14 : L.down ? 1.08 : 1.0;
+    var pressInflateY = L.drag ? 1.26 : L.down ? 1.15 : 1.0;
+    sxs = L.s * pressInflateX * (1 + rawSp * .65);
+    sys = L.s * pressInflateY * (1 - rawSp * .22);
+    var tilt = clamp(L.v / 1700, -1, 1);
+    lens.style.setProperty('--lens-v', rawSp.toFixed(3));
+    lens.style.setProperty('--lens-tilt', tilt.toFixed(3));
+  } else {
     lens.style.setProperty('--lens-v', '0');
     lens.style.setProperty('--lens-tilt', '0');
-    lens.style.transform = 'translate3d(' + px.toFixed(2) + 'px,0,0) scale(1,1)';
-    return;
   }
-  var capSp = L.drag ? lp.dragSp : lp.maxSp;
-  var rawSp = capSp > 0 ? Math.min(Math.abs(L.v) / (L.drag ? 2600 : 2900), capSp) : 0;
-  // 边缘防越界体积守恒衰减: 靠近第 1 / 第 4 槽位外沿时平滑收敛水平拉伸，确保 0.0px 绝不溢出底栏
-  var edgeDist = Math.min(Math.max(0, px - g.minX), Math.max(0, g.maxX - px));
-  var edgeGuard = clamp(edgeDist / Math.max(12, g.w * .34), 0, 1);
-  var spX = rawSp * (.15 + .85 * edgeGuard);
-  var baseS = lp.maxSp > .03 ? (1 + (L.s - 1) * (.35 + .65 * edgeGuard)) : L.s;
-  var sxs = baseS * (1 + spX), sys = L.s * (1 - rawSp * lp.sqRatio);
-  var tilt = lp.maxSp > 0 ? clamp(L.v / 1850, -1, 1) : 0;
-  lens.style.setProperty('--lens-v', rawSp.toFixed(3));
-  lens.style.setProperty('--lens-tilt', tilt.toFixed(3));
   lens.style.transform = 'translate3d(' + px.toFixed(2) + 'px,0,0) scale(' + sxs.toFixed(4) + ',' + sys.toFixed(4) + ')';
+  if (lensIn) {
+    // 反向平移以锁定世界坐标系下的 4 个标签位置，同时抵消外层椭圆非等比形变以保持字体不拉伸
+    var invX = 1 / Math.max(.7, sxs), invY = 1 / Math.max(.7, sys);
+    var mag = L.drag ? 1.13 : L.down ? 1.08 : 1.02;
+    lensIn.style.transformOrigin = (relX + g.w * .5).toFixed(1) + 'px 50%';
+    lensIn.style.transform = 'translate3d(' + (-relX).toFixed(2) + 'px,0,0) scale(' + (invX * mag).toFixed(4) + ',' + (invY * mag).toFixed(4) + ')';
+  }
 }
 function stepLens(t) {
   var dt = L.last ? Math.min(.030, (t - L.last) / 1000) : 1 / 120; L.last = t;
@@ -102,15 +121,15 @@ function stepLens(t) {
   }
   if (!L.drag) {
     if (L.x < g.minX) {
-      if (lp.wallBounce && L.v < -45) L.sv -= Math.min(.55, Math.abs(L.v) / 950) * lp.wallBounce;
+      if (lp.wallBounce && L.v < -45) L.sv -= Math.min(.45, Math.abs(L.v) / 1050) * lp.wallBounce;
       L.x = g.minX; if (L.v < 0) L.v = 0;
     } else if (L.x > g.maxX) {
-      if (lp.wallBounce && L.v > 45) L.sv -= Math.min(.55, Math.abs(L.v) / 950) * lp.wallBounce;
+      if (lp.wallBounce && L.v > 45) L.sv -= Math.min(.45, Math.abs(L.v) / 1050) * lp.wallBounce;
       L.x = g.maxX; if (L.v > 0) L.v = 0;
     }
   }
   paintLens();
-  if (!L.drag && Math.abs(L.x - L.tx) < .18 && Math.abs(L.v) < 2.2 && Math.abs(L.s - L.ts) < .0018 && Math.abs(L.sv) < .018) {
+  if (!L.down && !L.drag && Math.abs(L.x - L.tx) < .18 && Math.abs(L.v) < 2.2 && Math.abs(L.s - L.ts) < .0018 && Math.abs(L.sv) < .018) {
     L.x = L.tx; L.v = 0; L.s = L.ts; L.sv = 0; paintLens(); L.raf = 0; L.last = 0; return;
   }
   L.raf = requestAnimationFrame(stepLens);
@@ -125,13 +144,14 @@ bar.addEventListener('pointerdown', function (e) {
   var g = tabGeom(), x = localLensX(e, g), hit = clamp(Math.floor((e.clientX - tabsEl.getBoundingClientRect().left) / g.w), 0, TABS.length - 1);
   L.down = true; L.drag = false; L.hitIdx = hit; L.moved = 0; L.fx0 = L.fx = x; L.ft = performance.now(); L.fv = 0;
   L.gx = Math.abs(x - L.x) < g.w * .55 ? L.x - x : 0;
-  // 轻点死区 (<8px) 内保持槽位正中心零漂移，同时注入主题专属表面张力/微压冲量
+  bar.classList.add('pressing');
+  L.tx = g.padL + hit * g.w;
   markTabBtn(TABS[hit][0]);
   var lp = lensPhys();
   if (motionOn() && fxOn('press') && !(typeof lowFx === 'function' && lowFx())) {
     if (lp.rigid) pulseCyberLens();
-    else if (lp.tapV) { L.sv = lp.tapV; kick(); }
-  }
+    else { L.sv = 0.22; kick(); }
+  } else paintLens();
 });
 bar.addEventListener('pointermove', function (e) {
   if (!L.down) return;
@@ -140,10 +160,10 @@ bar.addEventListener('pointermove', function (e) {
   L.fv = L.fv * .4 + (fx - L.fx) / dt * 1000 * .6; L.fx = fx; L.ft = now;
   L.moved = Math.max(L.moved, Math.abs(fx - L.fx0));
   if (!L.drag) {
-    if (L.moved < 8) return;
-    L.drag = true; L.ts = lp.dragS; bar.classList.add('drag');
+    if (L.moved < 6) return;
+    L.drag = true; L.ts = 1.03; bar.classList.add('drag');
   }
-  var dragPad = lp.rigid ? 0 : 3;
+  var dragPad = lp.rigid ? 0 : 6;
   var raw = clamp(fx + L.gx, g.minX - dragPad, g.maxX + dragPad);
   var prev = idxAtX(L.tx, g), cur = idxAtX(raw, g); L.tx = raw;
   if (cur !== prev) {
@@ -156,9 +176,9 @@ bar.addEventListener('pointermove', function (e) {
 function releaseLens(e) {
   if (!L.down) return;
   var wasDrag = L.drag;
-  L.down = false; L.drag = false; bar.classList.remove('drag');
+  L.down = false; L.drag = false; bar.classList.remove('drag', 'pressing');
   var g = tabGeom(), i;
-  if (!wasDrag || L.moved < 8) {
+  if (!wasDrag || L.moved < 6) {
     i = e && e.clientX != null && e.type !== 'pointercancel'
       ? clamp(Math.floor((e.clientX - tabsEl.getBoundingClientRect().left) / g.w), 0, TABS.length - 1)
       : L.hitIdx;
@@ -183,15 +203,76 @@ function syncTab(name, instant) {
 if (typeof ResizeObserver === 'function') {
   try { new ResizeObserver(function () { layoutLens(); if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets(); }).observe(bar); } catch (_) {}
 }
+/* v5.38.0 根治乱滑: 展开设备卡(.dev)绝不因卡片总高超出底栏而强制大幅滚走页面，仅当卡片标题头本身被底栏遮挡时微调 */
 function ensureAboveTabbar(el) {
   if (!el || !bar) return;
-  var waitMs = !motionOn() ? 30 : (typeof themePhys === 'function' ? themePhys().foldMs : 250);
+  if (el.classList && el.classList.contains('dev')) {
+    var hdr = $('.dev-h', el);
+    if (!hdr) return;
+    var hr = hdr.getBoundingClientRect(), br0 = bar.getBoundingClientRect();
+    if (hr.bottom > br0.top - 8) {
+      var pg0 = $('#p-' + S.page);
+      if (pg0) pg0.scrollBy({ top: Math.min(120, hr.bottom - br0.top + 28), behavior: motionOn() ? 'smooth' : 'auto' });
+    }
+    return;
+  }
+  var waitMs = !motionOn() ? 30 : (typeof themePhys === 'function' ? themePhys().foldMs : 220);
   setTimeout(function () {
     var pg = $('#p-' + S.page); if (!pg) return;
     var er = el.getBoundingClientRect(), br = bar.getBoundingClientRect();
+    if (er.top < 96) return; // 卡片顶部已在视口上半区时绝不向下拽走标题!
     var overlap = er.bottom - (br.top - 16);
-    if (overlap > 0) pg.scrollBy({ top: Math.min(overlap, er.height * .75), behavior: motionOn() ? 'smooth' : 'auto' });
+    if (overlap > 0) pg.scrollBy({ top: Math.min(overlap, 160), behavior: motionOn() ? 'smooth' : 'auto' });
   }, waitMs);
+}
+
+/* ═══ 顶栏热点手机本机 5G / Wi-Fi 信号实时胶囊与四象限诊断弹层 ═══ */
+function paintSignalPill() {
+  var btn = $('#sig-pill'); if (!btn) return;
+  var sig = S.signal;
+  if (!sig || !sig.available) { btn.hidden = true; return; }
+  btn.hidden = false;
+  var q = sig.quality || 'good';
+  btn.className = 'sig-pill press q-' + q;
+  var dbm = sig.mode === 'wifi_sta' ? sig.wifi_rssi_dbm : sig.rsrp_dbm;
+  var ratTxt = sig.rat || (sig.mode === 'wifi_sta' ? 'Wi-Fi' : '5G');
+  btn.innerHTML = cellSvg(sig.bars, sig.mode) + '<span>' + esc(ratTxt) + (dbm ? ' ' + dbm + '<span class="sig-unit">dBm</span>' : '') + '</span>';
+}
+function signalSheet() {
+  var sig = S.signal || {};
+  var ar = S.autorate || (S.cfg && S.cfg.autorate) || {};
+  var isWifi = sig.mode === 'wifi_sta';
+  var dbm = isWifi ? sig.wifi_rssi_dbm : sig.rsrp_dbm;
+  var rtt = num(ar.rtt_ms), dRtt = num(ar.delta_rtt_ms);
+  var quadTitle = '空口通畅 · 射频健康', quadDesc = '当前上游空口信号充足且队列时延平稳，热点客户端可跑满物理带宽。', quadCls = 'b-ok';
+  if (sig.quality === 'weak' || sig.quality === 'critical') {
+    quadTitle = '象限 II · 热点手机自身基站弱信号边缘';
+    quadDesc = '手机当前 RSRP/SINR 处于弱场边缘（α_rf = ' + trim0(num(sig.rf_ceiling_factor, 1).toFixed(2)) + '），建议将手机移至窗边，并开启 5G Autorate 自动压低突发上限防断流。';
+    quadCls = 'b-red';
+  } else if (dRtt > 25) {
+    quadTitle = '象限 III · 信号满格但基站空口晚高峰拥塞';
+    quadDesc = '手机射频信号良好，但上游排队增量时延 +' + Math.round(dRtt) + 'ms，属于运营商基站调度拥塞；5G Autorate 已自动介入退避稳帧。';
+    quadCls = 'b-warn';
+  }
+  var h = '<h3>热点手机实时信号与网络诊断</h3>' +
+    '<div class="sub">零 Modem 唤醒读取 <span class="mono">dumpsys telephony.registry</span> · 联动 5G Autorate</div>' +
+    '<div class="dbox" style="margin-bottom:10px">' +
+      '<div class="row2"><span class="k">当前承载制式</span><span class="v"><span class="badge ' + quadCls + '">' + esc(sig.rat || '未知') + ' · ' + esc(sig.quality_cn || '') + '</span></span></div>' +
+      (sig.carrier ? '<div class="row2"><span class="k">上网卡与出口</span><span class="v">' + esc('卡' + (sig.slot || 1) + ' · ' + sig.carrier) + (sig.upstream_iface ? ' (<span class="mono">' + esc(sig.upstream_iface) + '</span>)' : '') + '</span></div>' : '') +
+      '<div class="row2"><span class="k">' + (isWifi ? 'Wi-Fi RSSI 信号强度' : '5G/LTE RSRP 接收功率') + '</span><span class="v mono">' + (dbm ? dbm + ' dBm' : '—') + (sig.band ? ' · 频段 ' + esc(sig.band) : '') + (sig.bandwidth_mhz ? ' (' + sig.bandwidth_mhz + 'MHz)' : '') + '</span></div>' +
+      (!isWifi && sig.sinr_db != null ? '<div class="row2"><span class="k">SINR 信噪比 / RSRQ</span><span class="v mono">' + sig.sinr_db + ' dB / ' + (sig.rsrq_db || '—') + ' dB</span></div>' : '') +
+      (isWifi && sig.wifi_link_mbps ? '<div class="row2"><span class="k">Wi-Fi 协商速率</span><span class="v mono">' + sig.wifi_link_mbps + ' Mbps</span></div>' : '') +
+      '<div class="row2"><span class="k">Autorate 射频天花板系数 α_rf</span><span class="v mono">' + Math.round(num(sig.rf_ceiling_factor, 1) * 100) + '%</span></div>' +
+      (rtt > 0 ? '<div class="row2"><span class="k">上游实测 RTT / 排队膨胀</span><span class="v mono">' + rtt.toFixed(1) + ' ms (Δ ' + dRtt.toFixed(1) + ' ms)</span></div>' : '') +
+    '</div>' +
+    '<div class="dsec">四象限瓶颈智能归因</div>' +
+    '<div class="dbox"><div style="font-weight:700;margin-bottom:4px">' + quadTitle + '</div><div class="note">' + quadDesc + '</div></div>' +
+    '<div class="btns" style="margin-top:12px"><button class="btn sec press" id="sig-refresh-btn">立即刷新信号</button><button class="btn pri press" data-close>完成</button></div>';
+  sheet(h);
+  var rb = $('#sig-refresh-btn');
+  if (rb) rb.onclick = function () {
+    busyWhile(rb, api.get('/api/signal', { refresh: 1 }).then(function (r) { S.signal = r; paintSignalPill(); signalSheet(); toast('实时信号已刷新'); }));
+  };
 }
 
 /* ═════════════════════ 主题(圆形扩散 / 战术瞬切) ═════════════════════ */
@@ -222,6 +303,7 @@ function revealApply(fn, x, y) {
 function isDark() { var a = document.documentElement.getAttribute('data-theme'); return a === 'dark' || (!a && matchMedia('(prefers-color-scheme: dark)').matches); }
 $('#theme-btn').addEventListener('click', function (e) { setTheme(isDark() ? 'light' : 'dark', e.clientX, e.clientY); });
 $('#bell').addEventListener('click', openAlerts);
+var sigPillEl = $('#sig-pill'); if (sigPillEl) sigPillEl.addEventListener('click', signalSheet);
 
 /* ═════════════════════ 事件委托 ═════════════════════ */
 function foldToggle(el, key) {
@@ -267,7 +349,7 @@ document.addEventListener('click', function (e) {
     var sgd = ctxDev(q).d; if (sgd && S.busy[sgd.mac] && k !== 'delay-pre' && k !== 'q-act') { toast('这台设备还有操作在进行', 'warn'); return; }
     $$('button', sg).forEach(function (b) { b.classList.toggle('on', b === q); });
     sg.classList.remove('jelly'); placeSegs(sg.parentNode);
-    if (k === 'apps-sub') { S.appsSub = v; var bx = $('#apps-sub'); bx.innerHTML = appsSub(); placeSegs(bx); stagger(bx); if (v === 'export') loadExports(); }
+    if (k === 'apps-sub') { S.appsSub = v; var bx = $('#apps-sub'); bx.innerHTML = appsSub(); placeSegs(bx); stagger(bx); if (v === 'rules') { if (typeof paintUnknown === 'function') paintUnknown(); if (S.open.fpl) loadFP(); if (S.open.rpack) loadRulepack(); } }
     else if (k === 'aseg') { S.aseg = v; var ab = $('#aseg-body'); ab.innerHTML = v === 'stats' ? statsBody() : dpiBody(); placeSegs(ab); stagger(ab); afterAseg(); }
     else if (k === 'range') { S.statsRange = v; refreshStats(); }
     else if (k === 'hist') { S.dpiDays = +v; paintDpiHist(); paintUnkTraffic(); Promise.all([loadDpiHist(S.dpiDays), loadAppUsage(S.dpiDays)]).then(paintDpiHist); loadDpiUnk(S.dpiDays).then(paintUnkTraffic); }
@@ -280,6 +362,14 @@ document.addEventListener('click', function (e) {
     else if (k === 'fxspring') { FX.spring = v; saveFx(); fxRefresh(); }
     else if (k === 'connv') { S.connView = v; paintConnSheet(); }
     else if (k === 'webacc-mode') { S.webaccMode = v; }
+    else if (k === 'dev-tab') { var d0 = ctxDev(q).d, b0 = ctxDev(q).box; if (d0 && b0) { S.devTab[d0.mac] = v; if (v === 'quota') atNeed(d0); $$('[data-dev-pane]', b0).forEach(function (pn) { pn.hidden = pn.getAttribute('data-dev-pane') !== v; }); placeSegs(b0); } }
+    else if (k === 'studio-mode') {
+      busyWhile(sg, api.action('self_studio_start', { mode: v, auto_stop_min: '15' }, { timeout: 22000, maxTime: 20 })).then(function () {
+        var mTxt = { smart_screen: '已切换为「亮屏智能常驻」：亮屏无感采集，熄屏零耗电并自动蒸馏', lease_15m: '已开启「15 分钟集中快训」：到期自动蒸馏并退回常驻', off: '已关闭本机自训采集（0 后台唤醒）' }[v] || '已切换自训模式';
+        toast(mTxt);
+        return loadApps();
+      }).then(function () { if (S.page === 'apps') renderApps(false); if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); }).catch(function (e2) { toast(errText(e2), 'err'); if (S.page === 'apps') renderApps(false); if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); });
+    }
     else if (k === 'fgdays') { var fgd = devBy(S.fgMac); if (fgd) loadFgTl(fgd, +v); }
     else if (k === 'dns-bm') { busyWhile(sg, api.action('dns_takeover_set', { block_mode: v })).then(function () { toast('拦截方式：' + q.textContent); return loadDNS(); }).catch(function (e) { toast(errText(e), 'err'); loadDNS(); }); }
     else if (k === 'eval-days') { S.evalDays = +v; loadEval(S.evalDays); }
@@ -355,6 +445,7 @@ document.addEventListener('click', function (e) {
   if ((q = t.closest('[data-fw-del]'))) { var pk = q.getAttribute('data-fw-del'); api.action('flywheel_exclude_set', { op: 'remove', pkg: pk }).then(function () { toast('已移除 ' + pk); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
   if ((q = t.closest('[data-fpdel]'))) { var fid = q.getAttribute('data-fpdel'), fall = fid === '__all'; confirmSheet(fall ? '撤销全部识别纠正？' : '撤销这条识别纠正？', '之后这类连接重新按规则库和自动学习来识别。', '撤销').then(function (ok) { if (ok) busyWhile(q, api.action('dpi_correct_del', fall ? { all: 'true' } : { id: fid })).then(function () { toast('已撤销'); return loadFP(); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); return; }
   if ((q = t.closest('[data-revoke]'))) { var tid = q.getAttribute('data-revoke'); confirmSheet('撤销「' + q.getAttribute('data-label') + '」的授权？', '这台设备需要重新配对才能远程访问。', '撤销').then(function (ok) { if (ok) api.action('pair_revoke', { token: tid }).then(function () { toast('已撤销'); loadTokens(); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); return; }
+  if ((q = t.closest('[data-pu-pre]'))) { var sl = q.getAttribute('data-slot'), gv = q.getAttribute('data-pu-pre'), inpEl = $('#pu-in-plan-' + sl); if (inpEl) inpEl.value = gv === '0' ? '0' : gv; $$('[data-pu-pre][data-slot="' + sl + '"]').forEach(function (b) { b.classList.toggle('on', b === q); }); return; }
   var a = t.closest('[data-act]'); if (!a || a.disabled) return;
   var act = a.getAttribute('data-act'), cx2 = ctxDev(a), d = cx2.d, box = cx2.box;
   switch (act) {
@@ -464,7 +555,42 @@ document.addEventListener('click', function (e) {
     case 'iface-save': var ifv = $('#iface-pref').value.trim(); if (ifv && ifv !== 'auto' && !/^[A-Za-z0-9_.-]{1,15}$/.test(ifv)) { toast('接口名不合法', 'err'); break; }
       busyWhile(a, api.action('hotspot_iface_set', { iface: ifv === 'auto' ? '' : ifv })).then(function () { toast('热点接口偏好：' + (ifv || 'auto')); return loadConfig(); }).then(function () { renderSettings(false); globalRefresh(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'ud-save': busyWhile(a, api.action('alert_config_set', udParams(true))).then(function () { toast('新设备提醒已保存'); return reloadAlertCfg(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'aq-save': busyWhile(a, api.action('alert_config_set', { section: 'monthly_quota', enabled: 'true', limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct').value, 80))) })).then(function () { toast('月度配额已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'aq-save': busyWhile(a, api.action('alert_config_set', { section: 'monthly_quota', enabled: 'true', limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(clamp(Math.round(num($('#aq-pct').value, 80)), 1, 99)) })).then(function () { toast('月度配额已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'ar-save':
+      var dMin = num($('#ar-dmin').value, 24), dMax = num($('#ar-dmax').value, 320), uMin = num($('#ar-umin').value, 8), uMax = num($('#ar-umax').value, 80), rDel = num($('#ar-delta').value, 25);
+      if (dMax < dMin || uMax < uMin) { toast('峰值带宽不能低于保底带宽', 'err'); break; }
+      busyWhile(a, api.action('autorate_set', { autorate_enabled: 'true', down_min_mbps: String(dMin), down_max_mbps: String(dMax), up_min_mbps: String(uMin), up_max_mbps: String(uMax), rtt_delta_ms: String(rDel) })).then(function () { toast('5G 自适应总带宽参数已保存并启用'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'pu-sim-edit':
+      var targetSlot = Math.round(num(a.getAttribute('data-slot'), 0));
+      S.puEditSlot = (S.puEditSlot === targetSlot) ? 0 : targetSlot;
+      paintPU(); break;
+    case 'pu-inline-save':
+      var sSlot = Math.round(num(a.getAttribute('data-slot'), 1));
+      var pIn = $('#pu-in-plan-' + sSlot), bdIn = $('#pu-in-bd-' + sSlot), ancIn = $('#pu-in-anc-' + sSlot);
+      var pVal = pIn && pIn.value.trim() !== '' ? num(pIn.value, 0) : 0;
+      var bdVal = clamp(Math.round(num(bdIn && bdIn.value, (S.puCfg && S.puCfg.billing_day) || 1)), 1, 28);
+      var ancStr = ancIn ? ancIn.value.trim() : '';
+      if (pVal < 0) { toast('套餐容量不能为负数', 'err'); break; }
+      var puParams = { billing_day: String(bdVal) };
+      puParams[sSlot === 1 ? 'plan_sim1_gb' : 'plan_sim2_gb'] = trim0(pVal.toFixed(2));
+      puParams[sSlot === 1 ? 'anchor_sim1_gb' : 'anchor_sim2_gb'] = ancStr === '' ? '-1' : trim0(Math.max(0, num(ancStr)).toFixed(2));
+      busyWhile(a, api.action('phone_usage_set', puParams)).then(function () {
+        S.puEditSlot = 0; S.pu = {};
+        var st0 = $('#pu-set'); if (st0) st0._filled = false;
+        toast('已保存卡' + sSlot + (pVal > 0 ? ' 套餐 ' + pVal + ' GB' : '（不设套餐上限）'));
+        return refreshPU(true);
+      }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'go-rules-hub':
+      S.appsSub = 'rules'; closeSheet(); go('apps'); renderApps(false); break;
+    case 'go-dpi-studio':
+      S.aseg = 'dpi'; closeSheet(); go('stats'); renderStats(false); break;
+    case 'rmac-save':
+      var rAuto = $('#rmac-auto') && $('#rmac-auto').getAttribute('aria-checked') === 'true';
+      busyWhile(a, api.action('rmac_policy_set', {
+        auto_inherit: String(rAuto),
+        auto_inherit_score: String(clamp(Math.round(num($('#rmac-score').value, 85)), 65, 100)),
+        ephemeral_gc_minutes: String(clamp(Math.round(num($('#rmac-gc').value, 30)), 5, 1440))
+      })).then(function () { toast('随机 MAC 无感继承策略已保存'); return Promise.all([loadConfig(), loadDevices().catch(function () {})]); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'aa-save': busyWhile(a, api.action('alert_config_set', { section: 'anomaly_traffic', enabled: 'true', ratio: String(num($('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb').value, 50))) })).then(function () { toast('异常检测已保存'); return api.getSafe('/api/alert_config', null, S.alertCfg); }).then(function (r3) { S.alertCfg = r3; renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'gs-apply': gsApply(a); break;
     case 'sched-save':
@@ -493,12 +619,12 @@ document.addEventListener('click', function (e) {
     case 'cache-clear': busyWhile(a, api.action('cache_clear')).then(function (r3) { toast('缓存已清理' + (r3.detail ? ' · ' + r3.detail : '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-enable': busyWhile(a, api.post('/api/self/toggle', { enabled: true }).then(function (r3) { if (r3 && r3.error) throw new Error(r3.error); return r3; })).then(function () { toast('本机流量归因已开启 · 5 秒后开始采集样本'); return loadEval(S.evalDays, true); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-refresh': busyWhile(a, loadEval(S.evalDays, true)); break;
-    case 'go-self-studio': go('apps'); break;
-    case 'studio-recipe': S.studioRecipeOpen = !S.studioRecipeOpen; if (S.page === 'apps') renderApps(false); break;
+    case 'go-self-studio': S.aseg = 'dpi'; go('stats'); renderStats(false); break;
+    case 'studio-recipe': S.studioRecipeOpen = !S.studioRecipeOpen; if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); else if (S.page === 'apps') renderApps(false); break;
     case 'studio-start': busyWhile(a, api.action('self_studio_start', { mode: 'full', auto_stop_min: '15' }, { timeout: 20000, maxTime: 18 })).then(function () { toast('已开启双路本机真值采集 · 15 分钟后自动停表并蒸馏'); return loadApps(); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'studio-stop': busyWhile(a, api.action('self_studio_start', { mode: 'stop' }, { timeout: 25000, maxTime: 22 }).then(function () { return api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 }); })).then(function (r3) { var d0 = detailJSON(r3) || {}; var fpN = num(d0.exclusive_fps, d0.usable_fp); toast('已停止采集并完成蒸馏' + (fpN ? ' · 专属指纹 ' + fpN + ' 个' : '')); return loadApps(); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'studio-distill':
-    case 'dpi-distill-now': busyWhile(a, api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 })).then(function (r3) { var dj = detailJSON(r3); var d0 = (dj && dj.distill) || dj || {}; toast('本机真值蒸馏完成 · 专属指纹 ' + num(d0.exclusive_fps, d0.usable_fp) + ' 个 · 启动指纹 ' + num(d0.startup_usable, d0.usable_startup) + ' 个'); return Promise.all([loadApps(), S.page === 'settings' ? Promise.all([loadFP(), loadEval(S.evalDays, true), loadRulepack()]) : null]); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'dpi-distill-now': busyWhile(a, api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 })).then(function (r3) { var dj = detailJSON(r3); var d0 = (dj && dj.distill) || dj || {}; toast('本机真值蒸馏完成 · 专属指纹 ' + num(d0.exclusive_fps, d0.usable_fp) + ' 个 · 启动指纹 ' + num(d0.startup_usable, d0.usable_startup) + ' 个'); return Promise.all([loadApps(), S.page === 'settings' ? Promise.all([loadFP(), loadEval(S.evalDays, true), loadRulepack()]) : null]); }).then(function () { if (S.page === 'apps') renderApps(false); if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'studio-export': busyWhile(a, api.action('self_studio_export', { note: '本机真值自训练规则包' }, { timeout: 25000, maxTime: 22 })).then(function (r3) { var dj = detailJSON(r3), nm = String(dj.name || ''); if (nm && /^[A-Za-z0-9._-]+$/.test(nm)) { if (KSU) return shell('mkdir -p /sdcard/Download && cp ' + sq(HNC_DIR + '/exports/' + nm) + ' /sdcard/Download/ && echo ok').then(function () { toast('已蒸馏并存到 /sdcard/Download/' + nm); }); downloadExport(nm, '/api/exports/' + encodeURIComponent(nm)); toast('已蒸馏并导出 ' + nm); } else toast('规则包已生成'); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'startup-list': busyWhile(a, toggleStartupList()); break;
     case 'rpack-export': rulepackExport(a); break;
@@ -664,8 +790,8 @@ function pollOnce() {
     }
     if (S.page === 'apps' && tickN % 5 === 0) loadApps().then(function () {
       if (S.page !== 'apps' || document.querySelector('#p-apps :focus')) return;
-      var sc = $('#p-apps .studio-card');
-      if (sc && typeof selfStudioCardHtml === 'function') morph(sc, selfStudioCardHtml());
+      var sc = $('#p-stats .studio-card') || $('#p-apps .studio-card');
+      if (sc && typeof selfStudioCardHtml === 'function') { sc = morphOuter(sc, selfStudioCardHtml()); placeSegs(sc); }
       if (!document.querySelector('#p-apps .row-wrap.open')) {
         var b = $('#apps-sub'); if (b && S.appsSub !== 'export' && S.appsSub !== 'set') { b.innerHTML = appsSub(); placeSegs(b); }
       }
@@ -1243,48 +1369,10 @@ function showRollbackBanner(rb) {
       renderDevList(false);
       return;
     }
-    var autoBtn = e.target.closest && e.target.closest('[data-act="toggle-lcc-auto"]');
-    if (autoBtn) {
-      S.lccAutoApply = !S.lccAutoApply;
-      $$('[data-act="toggle-lcc-auto"]').forEach(function(b){
-        b.classList.toggle('off', !S.lccAutoApply);
-        b.innerHTML = S.lccAutoApply ? uiSvg('bolt') + ' 松手即下发限速' : '手动点应用生效';
-      });
-      toast(S.lccAutoApply ? '已开启：滑动液态柱松手即自动应用限速' : '已切换为手动点击「应用限速」生效');
-      return;
-    }
-    var pre = e.target.closest && e.target.closest('[data-lcc-preset]');
-    if (pre && S.lccAutoApply) {
-      var box = pre.closest('[data-dev]') || pre.closest('[data-side]');
-      var applyBtn = box && box.querySelector('[data-act="apply-limit"]');
-      if (applyBtn && !applyBtn.disabled) setTimeout(function(){ applyBtn.click(); }, 30);
-    }
     var setLvBtn = e.target.closest && e.target.closest('[data-seg="set-lv"] button');
     if (setLvBtn && S.setQ && S.setQ.trim()) {
       setTimeout(applySetSearch, 0);
     }
-  });
-
-  // 液态柱拖拽松手时，若开启了「松手即下发限速」，自动触发应用限速
-  var draggingBox = null;
-  document.addEventListener('pointerdown', function(e) {
-    var cap = e.target.closest && e.target.closest('[data-lcc-track]');
-    if (cap && !cap.classList.contains('is-dis')) {
-      draggingBox = cap.closest('[data-dev]') || cap.closest('[data-side]');
-    }
-  }, true);
-  document.addEventListener('pointerup', function() {
-    if (draggingBox && S.lccAutoApply) {
-      var box = draggingBox;
-      draggingBox = null;
-      var applyBtn = box.querySelector('[data-act="apply-limit"]');
-      if (applyBtn && !applyBtn.disabled) applyBtn.click();
-    } else {
-      draggingBox = null;
-    }
-  });
-  document.addEventListener('pointercancel', function() {
-    draggingBox = null;
   });
 
   // 设置页实时搜索过滤
@@ -1358,10 +1446,30 @@ function showRollbackBanner(rb) {
     prism:  { tone: 'light', top: 'light', bot: 'light' }
   };
 
+  if (typeof window !== 'undefined' && Array.isArray(window.__HNC_USER_WALLPAPERS)) {
+    window.__HNC_USER_WALLPAPERS.forEach(function (uw) {
+      if (!uw || !uw.id || !uw.src) return;
+      WP_PRESETS[uw.id] = {
+        label: uw.label || uw.id,
+        thumb: 'url("' + uw.src + '") center/cover no-repeat',
+        uri: 'url("' + uw.src + '")',
+        rawSrc: uw.src
+      };
+      if (uw.tones) PRESET_TONES[uw.id] = uw.tones;
+    });
+    if (!LS.get('hnc6.wp_init_v537', '') && window.__HNC_USER_WALLPAPERS[0]) {
+      S.wpId = window.__HNC_USER_WALLPAPERS[0].id;
+      S.wpDim = 10;
+      LS.set('hnc6.wp_id', S.wpId);
+      LS.set('hnc6.wp_dim', '10');
+      LS.set('hnc6.wp_init_v537', '1');
+    }
+  }
+
   function setWpToneAttrs(tones, persist) {
     var r = document.documentElement;
     var topT = (tones && tones.top) || 'dark';
-    var midT = (tones && tones.tone) || 'dark';
+    var midT = (tones && tones.tone) || 'light';
     var botT = (tones && tones.bot) || 'dark';
     r.setAttribute('data-wp-top', topT);
     r.setAttribute('data-wp-tone', midT);
@@ -1370,13 +1478,17 @@ function showRollbackBanner(rb) {
   }
 
   function detectWallpaperTone(rawSrc) {
-    if (S.wpId !== 'custom') {
-      setWpToneAttrs(PRESET_TONES[S.wpId] || PRESET_TONES.aurora, true);
+    if (S.wpId !== 'custom' && PRESET_TONES[S.wpId] && !rawSrc) {
+      setWpToneAttrs(PRESET_TONES[S.wpId], true);
       return;
     }
-    var cached = String(LS.get('hnc6.wp_tones', '') || '').split(',');
-    if (cached.length === 3) setWpToneAttrs({ top: cached[0], tone: cached[1], bot: cached[2] }, false);
-    else setWpToneAttrs({ top: 'dark', tone: 'dark', bot: 'dark' }, false);
+    if (S.wpId !== 'custom' && PRESET_TONES[S.wpId]) {
+      setWpToneAttrs(PRESET_TONES[S.wpId], true);
+    } else {
+      var cached = String(LS.get('hnc6.wp_tones', '') || '').split(',');
+      if (cached.length === 3) setWpToneAttrs({ top: cached[0], tone: cached[1], bot: cached[2] }, false);
+      else setWpToneAttrs({ top: 'dark', tone: 'light', bot: 'dark' }, false);
+    }
     if (!rawSrc) return;
     var im = new Image();
     im.crossOrigin = 'anonymous';
@@ -1387,26 +1499,23 @@ function showRollbackBanner(rb) {
         var ctx = cv.getContext('2d');
         ctx.drawImage(im, 0, 0, W, H);
         var d = ctx.getImageData(0, 0, W, H).data;
-        var sumAll = 0, nAll = 0, sumTop = 0, nTop = 0, sumBot = 0, nBot = 0;
+        var sumMid = 0, nMid = 0, sumTop = 0, nTop = 0, sumBot = 0, nBot = 0;
         for (var y = 0; y < H; y++) {
           for (var x = 0; x < W; x++) {
             var idx = (y * W + x) * 4;
             var lum = 0.2126 * d[idx] + 0.7152 * d[idx + 1] + 0.0722 * d[idx + 2];
-            sumAll += lum; nAll++;
             if (y < 9) { sumTop += lum; nTop++; }
-            if (y >= 27) { sumBot += lum; nBot++; }
+            else if (y < 27) { sumMid += lum; nMid++; }
+            else { sumBot += lum; nBot++; }
           }
         }
         setWpToneAttrs({
-          top: (nTop ? sumTop / nTop : 110) < 168 ? 'dark' : 'light',
-          tone: (nAll ? sumAll / nAll : 110) < 165 ? 'dark' : 'light',
-          bot: (nBot ? sumBot / nBot : 110) < 168 ? 'dark' : 'light'
+          top: (nTop ? sumTop / nTop : 110) < 118 ? 'dark' : 'light',
+          tone: (nMid ? sumMid / nMid : 128) < 108 ? 'dark' : 'light',
+          bot: (nBot ? sumBot / nBot : 110) < 108 ? 'dark' : 'light'
         }, true);
-      } catch (_) {
-        setWpToneAttrs({ top: 'dark', tone: 'dark', bot: 'dark' }, false);
-      }
+      } catch (_) {}
     };
-    im.onerror = function() { setWpToneAttrs({ top: 'dark', tone: 'dark', bot: 'dark' }, false); };
     im.src = rawSrc;
   }
 
@@ -1418,17 +1527,20 @@ function showRollbackBanner(rb) {
       uri = 'url("' + S.wpCustom.replace(/"/g, '\"') + '")';
     } else if (WP_PRESETS[S.wpId] && WP_PRESETS[S.wpId].uri) {
       uri = WP_PRESETS[S.wpId].uri;
+      rawSrc = WP_PRESETS[S.wpId].rawSrc || '';
     }
     if (uri) {
       r.setAttribute('data-has-wp', '1');
+      r.setAttribute('data-has-wallpaper', '1');
       r.classList.add('has-wallpaper');
       r.setAttribute('data-wp-text', S.wpTextMode === 'capsule' ? 'capsule' : 'adaptive');
       r.style.setProperty('--wp-image', uri);
       r.style.setProperty('--wp-blur', clamp(num(S.wpBlur, 0), 0, 24) + 'px');
-      r.style.setProperty('--wp-dim', (clamp(num(S.wpDim, 22), 0, 75) / 100).toFixed(2));
+      r.style.setProperty('--wp-dim', (clamp(num(S.wpDim, 12), 0, 75) / 100).toFixed(2));
       detectWallpaperTone(rawSrc);
     } else {
       r.removeAttribute('data-has-wp');
+      r.removeAttribute('data-has-wallpaper');
       r.classList.remove('has-wallpaper');
       r.removeAttribute('data-wp-text');
       r.removeAttribute('data-wp-tone');
@@ -1780,62 +1892,6 @@ function showRollbackBanner(rb) {
     var prefix = info.kind === 'cdn' ? '公共 CDN · ' : info.kind === 'sdk' ? '共享 SDK · ' : info.kind === 'cloud' ? '公共云网关 · ' : '';
     return '<span class="infra-tag ' + info.kind + '">' + esc(prefix + info.label) + '</span>';
   }
-
-  // 增强「应用 -> 我的应用 -> 未匹配的 SNI」：自动标注公共 CDN / 广告 SDK / 专属业务域
-  var _v10AppsSub = window.appsSub;
-  if (typeof _v10AppsSub === 'function') {
-    window.appsSub = function() {
-      var out = _v10AppsSub();
-      if (S.appsSub === 'my' && out.indexOf('未匹配的 SNI') >= 0) {
-        out = out.replace(/<div class="sni-row"><span class="dw"><span class="d">([^<]+)<\/span><\/span><\/div>/g, function(_, hostEsc) {
-          var raw = hostEsc.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
-          var inf = classifyInfraHost(raw);
-          return '<div class="sni-row' + (inf && inf.shared ? ' is-shared-infra' : '') + '">' +
-            '<span class="dw" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;width:100%">' +
-              '<span class="d mono">' + hostEsc + '</span>' +
-              infraBadgeHtml(inf) +
-            '</span></div>';
-        });
-      }
-      return out;
-    };
-  }
-
-  // 增强「分析 -> DPI 分析 -> 补库助手 (#dpi-unknown)」：自动识别公共 CDN/SDK 并提供一键过滤开关，防止误绑单应用规则
-  window.paintUnknown = function() {
-    var el = $('#dpi-unknown'); if (!el) return;
-    var unk = typeof unknownHints === 'function' ? unknownHints() : null;
-    var list = unk || (typeof domainHints === 'function' ? domainHints() : null);
-    var tt = $('#dpi-unknown-t');
-    if (tt) tt.innerHTML = (unk ? '自动标注公共 CDN / SDK · 避免误绑单应用' : '设备高频域名 · 自动识别公共基础设施');
-    if (!list) { el.innerHTML = '<div class="empty">等待 dpid 数据…</div>'; return; }
-    if (!list.length) { el.innerHTML = '<div class="empty">还没有抓到域名</div>'; return; }
-
-    var sharedCnt = 0;
-    var enriched = list.map(function(u) {
-      var inf = classifyInfraHost(u.n);
-      if (inf && inf.shared) sharedCnt++;
-      return { u: u, inf: inf };
-    });
-    var shown = S.hideSharedUnk ? enriched.filter(function(x){ return !(x.inf && x.inf.shared); }) : enriched;
-
-    var bar = '<div class="sni-row" style="justify-content:space-between;background:var(--input)">' +
-      '<span style="font-size:12px;color:var(--text-2)">共 ' + enriched.length + ' 个候选，已自动识别 <b>' + sharedCnt + '</b> 个公共 CDN/SDK</span>' +
-      '<button type="button" class="wp-mpill press' + (S.hideSharedUnk ? ' on' : '') + '" data-act="toggle-hide-shared">' +
-        (S.hideSharedUnk ? '已隐藏公共 CDN (' + sharedCnt + ')' : '隐藏公共 CDN/SDK') +
-      '</button></div>';
-
-    el.innerHTML = bar + (shown.length ? shown.map(function(x) {
-      var u = x.u, inf = x.inf, isSh = inf && inf.shared;
-      return '<div class="sni-row' + (isSh ? ' is-shared-infra' : '') + '">' +
-        '<span class="dw">' +
-          '<span class="d" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' + esc(u.n) + ' ' + infraBadgeHtml(inf) + '</span>' +
-          '<span class="c">' + Object.keys(u.k).join('/') + ' · ' + u.c + ' 次 · 后缀 ' + esc(guessSuffix(u.n)) + (isSh ? ' · 多应用共用，不建议绑单应用' : '') + '</span>' +
-        '</span>' +
-        (isSh ? '<span class="badge b-gray">已豁免</span>' : '<button class="btn sec press" data-rule-tpl="' + esc(u.n) + '">生成规则</button>') +
-      '</div>';
-    }).join('') : '<div class="empty">过滤公共 CDN/SDK 后暂无剩余未知专属域名</div>');
-  };
 
   document.addEventListener('click', function(e) {
     var tm = e.target.closest && e.target.closest('[data-wp-tmode]');

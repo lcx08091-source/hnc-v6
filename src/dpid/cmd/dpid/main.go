@@ -224,11 +224,13 @@ func main() {
 				cancel()
 				return
 			case syscall.SIGHUP:
-				log.Printf("SIGHUP received (rules reload is rc2)")
+				output.InvalidateRuleCache()
+				log.Printf("SIGHUP received: invalidated DPI rule & compiled FP caches")
 			}
 		}
 	}()
 
+	output.SetCompiledFPPath(cfg.RunDir)
 	actReader = activity.NewReader(cfg.RunDir)
 	armCrashFlag(cfg.RunDir)
 	bumpStartCount(cfg.RunDir) // rc42: 持久 lifetime 启动计数, 供 /api/sla

@@ -351,6 +351,10 @@ case "$CMD" in
         fi
         # v5.0: tc 规则就位, 通知 scheduler 决定是否触发 BPF offload disable
         notify_offload "$MAC" 1
+        # v5.38.0: 立即触发单设备 IPv6 邻居 u32 filter 同步, 消除首次设限速后的 IPv6 下行空窗期
+        if [ -z "${HNC_TEST_MODE:-}" ] && [ -f "$HNC_DIR/bin/v6_sync.sh" ]; then
+            (HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/v6_sync.sh" sync_one "$MAC" >> "$LOG" 2>&1 &)
+        fi
         # 3. 写 rules.json (mark_id 已经在 gate_lock 内写过了, 这里只写其他字段)
         # rc3.1.33 修 #18: js_set_dev 累计失败, 不 fail 但 log + 报告
         js_set_dev ip "$IP"

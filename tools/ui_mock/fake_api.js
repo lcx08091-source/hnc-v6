@@ -13,7 +13,7 @@
   'use strict';
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = META.version || 'v5.36.0', VCODE = String(META.versionCode || '5360000');
+  var VER = META.version || 'v5.38.0', VCODE = String(META.versionCode || '5380000');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 
@@ -75,7 +75,7 @@
   /* ═════════════ 设备(全部虚构; MAC 用本地管理地址) ═════════════ */
   var T = now();
   var DEVS = [
-    { mac: '0a:7f:3c:41:9e:21', ip: '192.168.43.23', hostname: '小米 14', hostname_src: 'manual', vendor: 'Xiaomi', online: true, mark_id: 3,
+    { mac: '0a:7f:3c:41:9e:21', ip: '192.168.43.23', hostname: '小米 14', hostname_src: 'manual', vendor: 'Xiaomi', online: true, mark_id: 3, randomized_mac: true, auto_inherited_from: '6e:19:b4:82:0c:55', auto_inherited_name: '小米 14', auto_inherited_score: 94,
       base: [1.1 * MB, 115 * KB], usage8: 5.2 * GB, onlineMin: [312, 288, 351, 240, 402, 198, 267],
       ident: { type: 'phone', os: 'Android', os_ver: '15', brand: '小米', model: 'Xiaomi 14', confidence: 93, hostname: 'Xiaomi-14', hostname_src: 'dhcp',
         evidence: [{ src: 'dhcp', detail: 'option 60 = android-dhcp-15' }, { src: 'hostname', detail: 'Xiaomi-14' }, { src: 'sni', detail: '*.miui.com · *.xiaomi.net' }, { src: 'ja4', detail: 'Android 15 系统 TLS 栈' }] },
@@ -254,7 +254,7 @@
     var on = 0, rx = 0, tx = 0;
     DEVS.forEach(function (d) { if (d.online) { on++; rx += d.cur[0]; tx += d.cur[1]; } });
     return { hotspot_active: true, iface: IFACE, hotspot_iface: IFACE, hotspot_ip: GW, iface_method: 'tethering', online: on, total: DEVS.length,
-      rx_bps: rx, tx_bps: tx, devices_sig: devSig(), backend_version: VER, backend_version_code: VCODE };
+      rx_bps: rx, tx_bps: tx, devices_sig: devSig(), backend_version: VER, backend_version_code: VCODE, autorate: AUTORATE };
   }
 
   /* ═════════════ 配置 / 告警 / 模板 等全局状态 ═════════════ */
@@ -290,7 +290,8 @@
   ];
   var APP_LIMIT_SHARED = false;
   var ENC = { policy: 'dot', devices: {} };
-  var PU_CFG = { billing_day: 1, warn_percent: 80, plan_sim1_gb: 100, plan_sim2_gb: 20, use_netstats: 'auto' };
+  var MOCK_SIGNAL = { available: true, mode: 'cellular', rat: '5G SA', slot: 1, sub_id: 1, carrier: '中国移动', upstream_iface: 'rmnet_data2', band: 'n78', bandwidth_mhz: 100, rsrp_dbm: -86, rsrq_db: -9, sinr_db: 18, bars: 4, quality: 'excellent', quality_cn: '5G 极佳', rf_ceiling_factor: 1.0, diagnosis: 'ok', diagnosis_cn: '蜂窝射频状态极佳', updated_at: T };
+  var PU_CFG = { billing_day: 1, warn_percent: 80, plan_sim1_gb: 100, plan_sim2_gb: 0, anchor_sim1_gb: 0, anchor_sim2_gb: 0, use_netstats: 'auto' };
   var SELF_ON = { toggle: true, auto_expand: true, auto_promote: false };
   var DNS = { enabled: false, block_mode: 'nxdomain', log_queries: false };
   var FG_ENGINE = 'classic';
@@ -653,9 +654,10 @@
       }
       return h;
     },
-    '/api/live': function (q) { var l = liveSummary(); if (q.devices) { var p = devicesPayload(); l.devices = p.devices; l.whitelist_mode = p.whitelist_mode; l.remote_enabled = p.remote_enabled; } return l; },
+    '/api/signal': function () { MOCK_SIGNAL.updated_at = now(); return clone(MOCK_SIGNAL); },
+    '/api/live': function (q) { var l = liveSummary(); l.signal = clone(MOCK_SIGNAL); if (q.devices) { var p = devicesPayload(); l.devices = p.devices; l.whitelist_mode = p.whitelist_mode; l.remote_enabled = p.remote_enabled; } return l; },
     '/api/devices': function () { return devicesPayload(); },
-    '/api/config': function () { return Object.assign(clone(CFG), { sim_enabled: SIM.enabled }); },
+    '/api/config': function () { return Object.assign({}, CFG, { sim_enabled: SIM.enabled, autorate: AUTORATE, rmac_policy: RMAC_POL, client_isolation_enabled: RMAC_POL.client_isolation }); },
     '/api/capabilities': function () {
       return { available: true, capabilities: { tc_htb: true, tc_netem: true, uplink_supported: true, tc_cake: false, tc_fq_codel: false, ifb: true, ifb_supported: true, sqm_supported: true,
         sqm_recommended_mode: 'sfq', tc_ingress_supported: true, tc_clsact_supported: true, tc_u32_supported: true, tc_flower_supported: false, tc_matchall: true, tc_police_supported: true,
@@ -718,6 +720,7 @@
     '/api/exports': function () { return { exports: EXPORTS.map(function (x) { return Object.assign({ download_url: '/api/exports/' + x.name }, x); }) }; },
     '/api/sla': function () { return { generated_at: now(), dpid_restart_count: 3, dpid_crash_recent: 0, dpid_guard_heartbeat_age_s: 2, watchdog_full_restore_count: 1, tc_repair_fail_count: 0, uplink_fail_count: 0, qos_fallback_active: false, uplink_unsupported: false }; },
     '/api/metrics': function () { return { instrumented: false, mode: 'live-read', backend_version: VER, compat: 'hotfix16.8-live-api' }; },
+    '/api/autorate': function () { AUTORATE.updated_at = now(); return AUTORATE; },
     '/api/iface_info': function () { return { iface: IFACE, ip: GW, gateway: GW, network: '192.168.43.1/24' }; },
     '/api/run_status': function () { return { hotspotd: 'up', hotspotd_pid: 4127, hotspotd_rss_kb: 11840, tc_rules: 46, ipt_rules: 31, watchdog: 1, watchdog_pid: 4203, watchdog_kind: 'go', watchdog_hb_age: 14 }; },
     '/api/sim': function () { return { ok: true, enabled: SIM.enabled, count: SIM.devices.length, seed: 20261008, presets: ['busy', 'home', 'idle'], types: ['tv', 'phone', 'laptop', 'tablet', 'game', 'iot', 'pc'], mac_prefix: '02:5e:00:', max: 32, devices: SIM.devices }; },
@@ -796,7 +799,11 @@
         ok: true,
         generated_at: now(),
         capture: {
-          enabled: !!SELF_ON.toggle,
+          mode: STUDIO_MODE,
+          enabled: STUDIO_MODE !== 'off',
+          capturing_now: STUDIO_MODE !== 'off',
+          screen_on: true,
+          lease_active: STUDIO_MODE === 'lease_15m' && rem > 0,
           auto_expand_enabled: !!SELF_ON.auto_expand,
           auto_promote_enabled: !!SELF_ON.auto_promote,
           lease_rem_sec: rem,
@@ -821,9 +828,12 @@
       };
     }
   };
+  var STUDIO_MODE = 'smart_screen';
   var STUDIO_LEASE = { active: false, until: 0, saved: null };
-  var STUDIO_LAST_DISTILL = null;
-  var STUDIO_STATS = { samples: 386, apps: 14, learned_fp: 19, usable_fp: 12, usable_startup: 7 };
+  var STUDIO_LAST_DISTILL = { ts: T - 420, duration_ms: 42, samples_read: 386, exclusive_fps: 14, startup_usable: 7, nb_trained_samples: 264, nb_classes: 6, dpi_synced: true };
+  var STUDIO_STATS = { samples: 418, apps: 15, learned_fp: 21, usable_fp: 14, usable_startup: 7 };
+  var AUTORATE = { enabled: true, down_min_mbps: 24, down_max_mbps: 320, up_min_mbps: 8, up_max_mbps: 80, rtt_delta_ms: 25, state: 'active', hotspot_iface: IFACE, upstream_iface: 'rmnet_data2', cur_down_mbps: 186, cur_up_mbps: 52, actual_down_mbps: 31.4, actual_up_mbps: 4.8, load_down: 0.17, load_up: 0.09, base_rtt_ms: 24.5, rtt_ms: 31.2, delta_rtt_ms: 6.7, scale_events_up: 18, scale_events_down: 4, updated_at: T };
+  var RMAC_POL = { auto_inherit: true, auto_inherit_score: 85, guard_mode: 'limit', guard_down_mbps: 16, guard_up_mbps: 8, client_isolation: false, ephemeral_gc_minutes: 30 };
   function pushExport(name, size) {
     var t = new Date();
     EXPORTS = EXPORTS.filter(function (x) { return x.name !== name; });
@@ -985,19 +995,58 @@
     dpi_correct_del: function (p) { FP_RULES = bool(p.all) ? [] : FP_RULES.filter(function (x) { return x.id !== p.id; }); return ''; },
     dpi_rules_update: function () { return J({ update_available: 'no', current: '2026.10.02', remote: '2026.10.02' }); },
     dpi_rules_reset: function () { return '已恢复内置规则库（演示）'; },
-    self_studio_start: function (p) {
-      if (p && p.mode === 'stop') {
-        STUDIO_LEASE.active = false; STUDIO_LEASE.until = 0;
-        SELF_ON.toggle = false;
-        if (STUDIO_LEASE.saved) { SELF_ON.auto_expand = STUDIO_LEASE.saved.ae; SELF_ON.auto_promote = STUDIO_LEASE.saved.ap; STUDIO_LEASE.saved = null; }
-        return J({ mode: 'stop', auto_stop_min: 0, lease_rem_sec: 0, dpid_synced: true });
+    autorate_set: function (p) {
+      if (p.autorate_enabled != null) AUTORATE.enabled = bool(p.autorate_enabled);
+      else if (p.enabled != null) AUTORATE.enabled = bool(p.enabled);
+      if (p.down_min_mbps) AUTORATE.down_min_mbps = +p.down_min_mbps;
+      if (p.down_max_mbps) AUTORATE.down_max_mbps = +p.down_max_mbps;
+      if (p.up_min_mbps) AUTORATE.up_min_mbps = +p.up_min_mbps;
+      if (p.up_max_mbps) AUTORATE.up_max_mbps = +p.up_max_mbps;
+      if (p.rtt_delta_ms) AUTORATE.rtt_delta_ms = +p.rtt_delta_ms;
+      AUTORATE.state = AUTORATE.enabled ? 'active' : 'disabled';
+      if (AUTORATE.enabled) {
+        AUTORATE.cur_down_mbps = round((AUTORATE.down_min_mbps + AUTORATE.down_max_mbps) * 0.58);
+        AUTORATE.cur_up_mbps = round((AUTORATE.up_min_mbps + AUTORATE.up_max_mbps) * 0.58);
+        CFG.global_shaper_enabled = true;
       }
-      if (!STUDIO_LEASE.saved) STUDIO_LEASE.saved = { ae: SELF_ON.auto_expand, ap: SELF_ON.auto_promote };
-      SELF_ON.toggle = true; SELF_ON.auto_expand = p.mode !== 'observe'; SELF_ON.auto_promote = p.mode !== 'observe';
+      return '5G autorate ' + (AUTORATE.enabled ? 'on' : 'off');
+    },
+    rmac_policy_set: function (p) {
+      if (p.auto_inherit != null) RMAC_POL.auto_inherit = bool(p.auto_inherit);
+      if (p.auto_inherit_score) RMAC_POL.auto_inherit_score = +p.auto_inherit_score;
+      if (p.guard_mode) RMAC_POL.guard_mode = p.guard_mode;
+      if (p.guard_down_mbps) RMAC_POL.guard_down_mbps = +p.guard_down_mbps;
+      if (p.guard_up_mbps) RMAC_POL.guard_up_mbps = +p.guard_up_mbps;
+      if (p.ephemeral_gc_minutes) RMAC_POL.ephemeral_gc_minutes = +p.ephemeral_gc_minutes;
+      if (p.client_isolation != null) RMAC_POL.client_isolation = bool(p.client_isolation);
+      return 'rmac policy saved';
+    },
+    rmac_trust: function (p) {
+      var d = needDev(p.mac);
+      d.rmac_guarded = false; d.rmac_guard_mode = ''; d.down_mbps = d.up_mbps = 0; d.limit_enabled = false; d.status = 'allowed';
+      return 'trusted ' + d.mac;
+    },
+    client_isolation_set: function (p) {
+      RMAC_POL.client_isolation = bool(p.enabled);
+      return 'client isolation ' + (RMAC_POL.client_isolation ? 'on' : 'off');
+    },
+    self_studio_start: function (p) {
+      var md = (p && p.mode) || 'smart_screen';
+      if (md === 'stop' || md === 'off') {
+        STUDIO_MODE = 'off'; STUDIO_LEASE.active = false; STUDIO_LEASE.until = 0; SELF_ON.toggle = false;
+        return J({ mode: 'off', auto_stop_min: 0, lease_rem_sec: 0, dpid_synced: true });
+      }
+      if (md === 'smart_screen') {
+        STUDIO_MODE = 'smart_screen'; STUDIO_LEASE.active = false; STUDIO_LEASE.until = 0;
+        SELF_ON.toggle = true; SELF_ON.auto_expand = true; SELF_ON.auto_promote = true;
+        return J({ mode: 'smart_screen', auto_stop_min: 0, lease_rem_sec: 0, dpid_synced: true });
+      }
+      STUDIO_MODE = 'lease_15m';
+      SELF_ON.toggle = true; SELF_ON.auto_expand = md !== 'observe'; SELF_ON.auto_promote = md !== 'observe';
       var m = Math.max(1, +p.auto_stop_min || +p.minutes || 15), sec = m * 60;
       STUDIO_LEASE.active = true; STUDIO_LEASE.until = now() + sec;
       STUDIO_STATS.samples += 24;
-      return J({ mode: p.mode || 'full', auto_stop_min: m, lease_rem_sec: sec, dpid_synced: true });
+      return J({ mode: 'lease_15m', auto_stop_min: m, lease_rem_sec: sec, dpid_synced: true });
     },
     self_studio_distill: function () {
       STUDIO_STATS.learned_fp += 2; STUDIO_STATS.usable_fp += 2; STUDIO_STATS.usable_startup += 1;

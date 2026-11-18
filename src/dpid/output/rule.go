@@ -351,6 +351,8 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 	}
 	mixU64(uint64(len(readable)))
 
+	gen := currentRuleReloadGen()
+	mixU64(gen)
 	ruleCache.Lock()
 	if ruleCache.mtime == aggrMtime && ruleCache.size == aggrSize && ruleCache.digest == aggrDigest &&
 		len(ruleCache.val.rules) > 0 &&

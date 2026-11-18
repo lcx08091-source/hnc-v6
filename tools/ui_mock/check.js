@@ -132,10 +132,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       const card = (await page.locator('#dev-list .dev[data-dev="1e:52:a8:0c:77:3d"]').count()) ? '#dev-list .dev[data-dev="1e:52:a8:0c:77:3d"]' : '#dev-list .dev';
       await click(card + ' .dev-h', 1500);
       await page.waitForFunction(() => { const d = document.querySelector('#dev-list .dev.open [data-conn-mini]'); return d && /条/.test(d.textContent); }, null, { timeout: 8000 });
-      // 卡片里的「应用使用时长」「按类别封锁」「更多控制」也展开
-      for (const k of ['at-', 'cb-', 'more-']) {
-        const sel = '#dev-list .dev.open [data-act="fold"][data-key^="' + k + '"]';
-        if (await page.locator(sel).count()) await click(sel, 700);
+      // 切换设备卡片紧凑 3-Tab 抽屉 (限速分流 -> 应用配额 -> 连接画像 -> 限速分流)
+      for (const dt of ['quota', 'conn', 'limit']) {
+        const sel = '#dev-list .dev.open [data-seg="dev-tab"] button[data-v="' + dt + '"]';
+        if (await page.locator(sel).count()) { await click(sel, 500); await checkText('device-tab-' + dt); }
       }
       await page.waitForFunction(() => { const a = document.querySelector('#dev-list .dev.open [data-at]'); return !a || !/加载中/.test(a.textContent); }, null, { timeout: 8000 }).catch(() => {});
       await page.evaluate(() => { const d = document.querySelector('#dev-list .dev.open'); const p = document.querySelector('.page.on'); if (d && p) p.scrollTop += d.getBoundingClientRect().top - 70; });
@@ -154,14 +154,18 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await click('#bell', 1200);   // 告警
       await shot('alerts'); await checkText('alerts'); await closeSheet();
 
-      // ── 应用 ──
-      await tab('apps');
-      await scrollShots('apps-my', 4);
-      for (const sub of ['cand', 'export', 'set']) {
-        await page.evaluate(() => { const p = document.querySelector('.page.on'); if (p) p.scrollTop = 0; });
-        await click('[data-seg="apps-sub"] button[data-v="' + sub + '"]', 1100);
-        await scrollShots('apps-' + sub, 2);
+      // ── 顶栏 5G 实时信号诊断弹层 ──
+      if (await page.locator('#sig-pill').count()) {
+        await click('#sig-pill', 900);
+        await shot('signal-sheet'); await checkText('signal-sheet'); await closeSheet();
       }
+
+      // ── 应用 (活跃应用 + 应用规则中心) ──
+      await tab('apps');
+      await scrollShots('apps-active', 3);
+      await page.evaluate(() => { const p = document.querySelector('.page.on'); if (p) p.scrollTop = 0; });
+      await click('[data-seg="apps-sub"] button[data-v="rules"]', 1100);
+      await scrollShots('apps-rules', 4);
 
       // ── 分析 ──
       await tab('stats');

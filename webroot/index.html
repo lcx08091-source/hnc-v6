@@ -230,91 +230,7 @@
 
 /* Interactive Control Center Liquid Rate Sliders (.lcc-capsule) */
 .lcc-ctrl{gap:10px!important}
-.lcc-hint{font-size:10.5px;font-weight:500;color:var(--text-3)}
-.lcc-grid{
-  display:grid;
-  grid-template-columns:1fr 1fr;
-  gap:10px;
-}
-.lcc-capsule{
-  position:relative;
-  overflow:hidden;
-  height:68px;
-  border-radius:20px;
-  background:rgba(15,23,42,.06);
-  box-shadow:
-    inset 0 1.5px 3px rgba(15,23,42,.08),
-    inset 0 -1px 0 rgba(255,255,255,.75),
-    0 0 0 .5px rgba(255,255,255,.68);
-  cursor:ew-resize;
-  user-select:none;
-  touch-action:pan-y;
-  transition:transform .24s cubic-bezier(.22,1.3,.36,1),box-shadow .22s ease;
-}
-.lcc-capsule.is-dis{opacity:.5;cursor:not-allowed}
-.lcc-capsule.dragging{
-  transform:scale(1.025);
-  box-shadow:
-    inset 0 1.5px 1px #fff,
-    0 12px 26px -10px rgba(0,122,255,.32),
-    0 0 0 1.5px rgba(255,255,255,.95);
-}
-.lcc-fill{
-  position:absolute;
-  inset:0 auto 0 0;
-  width:0%;
-  border-radius:inherit;
-  pointer-events:none;
-  transition:width .16s cubic-bezier(.22,1,.36,1);
-}
-.lcc-capsule.dragging .lcc-fill{transition:none}
-.dn-cap .lcc-fill{
-  background:linear-gradient(90deg,rgba(0,122,255,.28) 0%,rgba(56,189,248,.58) 100%);
-  box-shadow:inset -1.5px 0 0 rgba(255,255,255,.85),0 0 18px rgba(56,189,248,.35);
-}
-.up-cap .lcc-fill{
-  background:linear-gradient(90deg,rgba(168,85,247,.26) 0%,rgba(236,72,153,.54) 100%);
-  box-shadow:inset -1.5px 0 0 rgba(255,255,255,.85),0 0 18px rgba(168,85,247,.35);
-}
-.lcc-content{
-  position:relative;
-  z-index:1;
-  height:100%;
-  padding:11px 13px;
-  display:flex;
-  flex-direction:column;
-  justify-content:space-between;
-  pointer-events:none;
-}
-.lcc-top{display:flex;align-items:baseline;justify-content:space-between;gap:6px}
-.lcc-tag{font-size:11px;font-weight:650;color:var(--text-2)}
-.lcc-val{font-size:16px;font-weight:750;color:var(--text-1);letter-spacing:-.4px}
-.dn-cap.active .lcc-val{color:#0062cc}
-.up-cap.active .lcc-val{color:#8b3dff}
-.lcc-sub{font-size:9.5px;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.lcc-pills{
-  display:flex;
-  flex-wrap:wrap;
-  gap:6px;
-}
-.lcc-pill{
-  flex:1;
-  min-width:54px;
-  height:29px;
-  padding:0 8px;
-  border-radius:999px;
-  font-size:11px;
-  font-weight:600;
-  color:var(--text-2);
-  background:rgba(255,255,255,.48);
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.85),0 0 0 .5px rgba(255,255,255,.65);
-  transition:all .18s ease;
-}
-.lcc-pill.on{
-  background:linear-gradient(160deg,#2b95ff,#007aff);
-  color:#fff;
-  box-shadow:inset 0 1px 0 rgba(255,255,255,.6),0 4px 10px -3px rgba(0,122,255,.45);
-}
+
 
 /* 5. Nested Squircle Bento Architecture (Eliminate Harsh Horizontal Divider Lines) */
 [data-glass="liquid"] .ctrl{
@@ -3747,9 +3663,544 @@ html.has-wallpaper body::after{
     animation:none!important;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PART 8 · HNC v5.37.0 冰晶全透折射壁纸光学系统 & 新特性组件样式
+   1) 彻底消灭自定义壁纸下残留的奶白实心块 (.sheet / .d-panel / .pu-tile / .seg .thumb / .search / .box / .dbox)
+   2) 彻底消灭卡片边缘粉笔白线圈 (.glass::before / inset #fff / --hyalite-edge / 屏幕四边模糊漏白)
+   3) 统一全页面同源冰晶透景材质，晴空雪山与绿叶花影壁纸均通透显色、字迹锐利
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* 8.1 防止壁纸背景高斯模糊在屏幕四边采样透明像素产生白边漏光 */
+#hnc-wallpaper{
+  overflow:hidden!important;
+}
+#hnc-wallpaper .wp-img{
+  inset:-28px!important;
+  width:auto!important;
+  height:auto!important;
+  transform:scale(1.03)!important;
+}
+/* 壁纸护眼遮罩改为纯中性冷墨滤镜，绝不给亮蓝天空/绿叶蒙上奶白雾膜 */
+:root[data-has-wp="1"] #hnc-wallpaper .wp-scrim,
+html.has-wallpaper #hnc-wallpaper .wp-scrim{
+  background:linear-gradient(180deg,
+    rgba(6,12,24,calc(var(--wp-dim,.12) * .72)) 0%,
+    rgba(6,12,24,calc(var(--wp-dim,.12) * .42)) 48%,
+    rgba(6,12,24,calc(var(--wp-dim,.12) * .78)) 100%)!important;
+}
+@media (prefers-color-scheme: dark){
+  :root[data-has-wp="1"]:not([data-theme="light"]) #hnc-wallpaper .wp-scrim,
+  html.has-wallpaper:not([data-theme="light"]) #hnc-wallpaper .wp-scrim{
+    background:rgba(4,9,20,calc(.22 + var(--wp-dim,.18) * .68))!important;
+  }
+}
+:root[data-has-wp="1"][data-theme="dark"] #hnc-wallpaper .wp-scrim,
+html.has-wallpaper[data-theme="dark"] #hnc-wallpaper .wp-scrim{
+  background:rgba(4,9,20,calc(.22 + var(--wp-dim,.18) * .68))!important;
+}
+
+/* 8.2 壁纸态全局根变量：高透光冰晶折射（标准档仅 14% 轻薄底色，86% 真实壁纸色彩直透）+ 零白框描边 */
+:root[data-has-wp="1"]:not([data-style="cyber"]),
+html.has-wallpaper:not([data-style="cyber"]){
+  --stroke:rgba(15,23,42,.08);
+  --stroke-2:rgba(15,23,42,.12);
+  --divider:rgba(15,23,42,.07);
+  --input:rgba(255,255,255,calc(.14 + var(--gx-up,0)*.16 - var(--gx-dn,0)*.06));
+  --card:rgba(255,255,255,calc(.14 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.08))!important;
+  --card-2:rgba(255,255,255,calc(.19 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.09))!important;
+  --lg-fill:rgba(255,255,255,calc(.15 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.08))!important;
+  --lg-fill-2:rgba(244,249,255,calc(.28 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
+  --lg-sub:rgba(255,255,255,calc(.11 + var(--gx-up,0)*.16 - var(--gx-dn,0)*.05))!important;
+  --lg-sub-2:rgba(255,255,255,calc(.13 + var(--gx-up,0)*.16 - var(--gx-dn,0)*.06))!important;
+  --lg-tile-on:rgba(255,255,255,calc(.28 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.10))!important;
+  --lg-rim:inset 0 .5px 0 rgba(255,255,255,.16)!important;
+  --lg-rim-inner:none!important;
+  --lg-drop:0 14px 34px -12px rgba(4,12,28,.22),0 3px 10px -3px rgba(4,12,28,.11)!important;
+}
+@media (prefers-color-scheme: dark){
+  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]),
+  html.has-wallpaper:not([data-theme="light"]):not([data-style="cyber"]){
+    --stroke:rgba(148,197,255,.10);
+    --stroke-2:rgba(148,197,255,.14);
+    --divider:rgba(226,232,240,.08);
+    --input:rgba(10,18,32,calc(.26 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10));
+    --card:rgba(10,18,32,calc(.26 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
+    --card-2:rgba(12,22,38,calc(.34 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.14))!important;
+    --lg-fill:rgba(10,18,32,calc(.28 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
+    --lg-fill-2:rgba(12,22,38,calc(.42 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.16))!important;
+    --lg-sub:rgba(8,15,28,calc(.22 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
+    --lg-sub-2:rgba(8,15,28,calc(.25 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
+    --lg-tile-on:rgba(28,52,88,calc(.42 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
+    --lg-rim:inset 0 .5px 0 rgba(226,242,255,.12)!important;
+    --lg-rim-inner:none!important;
+    --lg-drop:0 18px 40px -12px rgba(0,4,14,.58),0 4px 12px -3px rgba(0,4,14,.34)!important;
+  }
+}
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]),
+html.has-wallpaper[data-theme="dark"]:not([data-style="cyber"]){
+  --stroke:rgba(148,197,255,.10);
+  --stroke-2:rgba(148,197,255,.14);
+  --divider:rgba(226,232,240,.08);
+  --input:rgba(10,18,32,calc(.26 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10));
+  --card:rgba(10,18,32,calc(.26 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
+  --card-2:rgba(12,22,38,calc(.34 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.14))!important;
+  --lg-fill:rgba(10,18,32,calc(.28 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.12))!important;
+  --lg-fill-2:rgba(12,22,38,calc(.42 + var(--gx-up,0)*.26 - var(--gx-dn,0)*.16))!important;
+  --lg-sub:rgba(8,15,28,calc(.22 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
+  --lg-sub-2:rgba(8,15,28,calc(.25 + var(--gx-up,0)*.18 - var(--gx-dn,0)*.10))!important;
+  --lg-tile-on:rgba(28,52,88,calc(.42 + var(--gx-up,0)*.22 - var(--gx-dn,0)*.14))!important;
+  --lg-rim:inset 0 .5px 0 rgba(226,242,255,.12)!important;
+  --lg-rim-inner:none!important;
+  --lg-drop:0 18px 40px -12px rgba(0,4,14,.58),0 4px 12px -3px rgba(0,4,14,.34)!important;
+}
+
+/* 8.3 彻底斩断所有自定义壁纸下的 1px 粉笔白外描边与 mask 锯齿环 */
+:root[data-has-wp="1"]:not([data-style="cyber"]) .glass::before,
+html.has-wallpaper:not([data-style="cyber"]) .glass::before,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .tabbar::before,
+html.has-wallpaper:not([data-style="cyber"]) .tabbar::before,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .sheet::before,
+html.has-wallpaper:not([data-style="cyber"]) .sheet::before{
+  display:none!important;
+  content:none!important;
+  opacity:0!important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) .glass,
+html.has-wallpaper:not([data-style="cyber"]) .glass,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .d-panel,
+html.has-wallpaper:not([data-style="cyber"]) .d-panel{
+  border:0!important;
+  background:var(--card)!important;
+  -webkit-backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(195%) contrast(.93) brightness(1.04)!important;
+  backdrop-filter:blur(calc(18px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(195%) contrast(.93) brightness(1.04)!important;
+  box-shadow:var(--lg-rim),var(--lg-drop)!important;
+}
+@media (prefers-color-scheme: dark){
+  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .glass,
+  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .d-panel{
+    -webkit-backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(190%) contrast(1.02) brightness(.96)!important;
+    backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(190%) contrast(1.02) brightness(.96)!important;
+  }
+}
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .glass,
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .d-panel{
+  -webkit-backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(190%) contrast(1.02) brightness(.96)!important;
+  backdrop-filter:blur(calc(20px + var(--gx-up,0)*8px - var(--gx-dn,0)*6px)) saturate(190%) contrast(1.02) brightness(.96)!important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) .glass:not(.seg)::after{
+  opacity:.24!important;
+}
+
+/* 8.4 统一搜索框 (.search)、快捷胶囊 (.qpill)、分段滑块 (.seg / .thumb)、工具芯片同源冰晶材质，消除上白下黑割裂 */
+:root[data-has-wp="1"]:not([data-style="cyber"]) .search,
+html.has-wallpaper:not([data-style="cyber"]) .search,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .seg:not(.small),
+html.has-wallpaper:not([data-style="cyber"]) .seg:not(.small),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .qpill:not(.on),
+html.has-wallpaper:not([data-style="cyber"]) .qpill:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .chip:not(.on),
+html.has-wallpaper:not([data-style="cyber"]) .chip:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .btn.sec,
+html.has-wallpaper:not([data-style="cyber"]) .btn.sec,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .dd-btn,
+html.has-wallpaper:not([data-style="cyber"]) .dd-btn{
+  border:0!important;
+  background:var(--card)!important;
+  color:var(--text-1)!important;
+  -webkit-backdrop-filter:blur(16px) saturate(190%) contrast(.94)!important;
+  backdrop-filter:blur(16px) saturate(190%) contrast(.94)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.16),0 8px 20px -8px rgba(4,12,28,.20)!important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) .qpill:not(.on) b,
+html.has-wallpaper:not([data-style="cyber"]) .qpill:not(.on) b{
+  background:rgba(15,23,42,.08)!important;
+  color:var(--text-2)!important;
+}
+@media (prefers-color-scheme: dark){
+  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .qpill:not(.on) b{
+    background:rgba(255,255,255,.12)!important;
+    color:rgba(226,232,240,.90)!important;
+  }
+}
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .qpill:not(.on) b{
+  background:rgba(255,255,255,.12)!important;
+  color:rgba(226,232,240,.90)!important;
+}
+/* 卡片内部小分段器与滑块拇指去死白 */
+:root[data-has-wp="1"]:not([data-style="cyber"]) .seg.small,
+html.has-wallpaper:not([data-style="cyber"]) .seg.small{
+  border:0!important;
+  background:var(--lg-sub)!important;
+  box-shadow:none!important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) .seg .thumb,
+html.has-wallpaper:not([data-style="cyber"]) .seg .thumb,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .seg.small .thumb,
+html.has-wallpaper:not([data-style="cyber"]) .seg.small .thumb{
+  border:0!important;
+  background:rgba(255,255,255,.34)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.32),0 2px 8px -2px rgba(4,12,28,.16)!important;
+}
+@media (prefers-color-scheme: dark){
+  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .seg .thumb,
+  :root[data-has-wp="1"]:not([data-theme="light"]):not([data-style="cyber"]) .seg.small .thumb{
+    background:rgba(56,189,248,.22)!important;
+    box-shadow:inset 0 .5px 0 rgba(226,242,255,.22),0 2px 8px -2px rgba(0,0,0,.42)!important;
+  }
+}
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .seg .thumb,
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .seg.small .thumb{
+  background:rgba(56,189,248,.22)!important;
+  box-shadow:inset 0 .5px 0 rgba(226,242,255,.22),0 2px 8px -2px rgba(0,0,0,.42)!important;
+}
+
+/* 8.5 弹层 (.sheet)、下拉菜单 (.dd-menu) 与全部嵌套子面板去白块、去嵌套滤镜闪烁 */
+:root[data-has-wp="1"]:not([data-style="cyber"]) .sheet,
+html.has-wallpaper:not([data-style="cyber"]) .sheet,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .dd-menu,
+html.has-wallpaper:not([data-style="cyber"]) .dd-menu,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .toast,
+html.has-wallpaper:not([data-style="cyber"]) .toast{
+  border:0!important;
+  background:var(--lg-fill-2)!important;
+  -webkit-backdrop-filter:blur(28px) saturate(200%) contrast(.94)!important;
+  backdrop-filter:blur(28px) saturate(200%) contrast(.94)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.20),0 24px 58px -12px rgba(4,12,28,.38)!important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) .sheet .glass,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .dbox,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .sc-it,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .sc-chip,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .pu-tile,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .mm-cmp>div,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .enc-cnt>div,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .wp-sliders,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .wp-pre:not(.on),
+:root[data-has-wp="1"]:not([data-style="cyber"]) .box,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .selbox,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .textarea,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .win,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .mrg,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .av,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .dpi-dev-av,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .simdev-ic,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .bw-card,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .studio-m,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .studio-recipe,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .studio-orb{
+  border-color:transparent!important;
+  background:var(--lg-sub)!important;
+  -webkit-backdrop-filter:none!important;
+  backdrop-filter:none!important;
+  box-shadow:none!important;
+}
+
+/* 8.6 底栏 #tabbar 与 #lens 水滴透镜：彻底清除白色外框与左格死白底，随底部明暗自适应冰晶折射 */
+:root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar.tabbar,
+html.has-wallpaper:not([data-style="cyber"]) #tabbar.tabbar{
+  border:0!important;
+  background:rgba(14,22,38,calc(.34 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.12))!important;
+  -webkit-backdrop-filter:var(--hyalite, blur(20px) saturate(200%) contrast(.96))!important;
+  backdrop-filter:var(--hyalite, blur(20px) saturate(200%) contrast(.96))!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.15),0 16px 38px -10px rgba(2,8,20,.44)!important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar #lens.lens,
+html.has-wallpaper:not([data-style="cyber"]) #tabbar #lens.lens{
+  border:0!important;
+  -webkit-backdrop-filter:none!important;
+  backdrop-filter:none!important;
+  background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*20%) 12%,
+    rgba(125,211,252,.24) 0%,
+    rgba(56,189,248,.12) 55%,
+    rgba(14,165,233,.18) 100%)!important;
+  box-shadow:inset 0 .5px 0 rgba(224,242,255,.24),0 4px 14px -4px rgba(14,165,233,.22)!important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) #tabbar .lens-tint,
+html.has-wallpaper:not([data-style="cyber"]) #tabbar .lens-tint{
+  background:transparent!important;
+  opacity:0!important;
+}
+:root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar.tabbar{
+  background:rgba(240,248,255,calc(.24 + var(--gx-up,0)*.24 - var(--gx-dn,0)*.10))!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.24),0 14px 34px -10px rgba(8,20,46,.22)!important;
+}
+:root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #tabs .tab{
+  color:rgba(15,23,42,.78)!important;
+  text-shadow:none!important;
+}
+:root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #tabs .tab.on,
+:root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #tabs .tab[aria-selected="true"]{
+  color:#0066dc!important;
+  text-shadow:none!important;
+}
+:root[data-has-wp="1"][data-wp-bot="light"]:not([data-theme="dark"]):not([data-style="cyber"]) #tabbar #lens.lens{
+  background:radial-gradient(115% 95% at calc(50% + var(--lens-tilt,0)*20%) 12%,
+    rgba(255,255,255,.26) 0%,
+    rgba(56,189,248,.12) 55%,
+    rgba(0,122,255,.16) 100%)!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.28),0 4px 12px -4px rgba(0,122,255,.18)!important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) .hbtn,
+html.has-wallpaper:not([data-style="cyber"]) .hbtn{
+  border:0!important;
+  box-shadow:inset 0 .5px 0 rgba(255,255,255,.16),0 6px 16px -6px rgba(4,12,28,.28)!important;
+}
+
+/* 8.7 v5.37 新增组件样式：常驻自训模式条、5G Autorate 遥测条与随机 MAC 护栏横幅 */
+.studio-mode-bar{
+  display:flex;
+  align-items:center;
+}
+.studio-mode-bar>.seg{
+  width:100%;
+}
+.ar-pill{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  padding:9px 12px;
+  border-radius:12px;
+  font-size:12px;
+  line-height:1.45;
+  color:var(--text-2);
+  background:var(--lg-sub,var(--input));
+}
+.rmac-guard-bar{
+  border-left:3px solid var(--orange,#FF9500);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PART 9 · HNC v5.38.0 微信/iOS26 液态膨胀放大折射底栏 · 防乱滑锚定 · 信号胶囊与 3-Tab 减负抽屉
+   ═══════════════════════════════════════════════════════════════════════════ */
+/* 9.1 根治展开折叠卡片时浏览器 Scroll Anchoring 自动向下乱滑 */
+.pages, .page, #dev-list, .dev, .fold, .scard {
+  overflow-anchor: none !important;
+}
+
+/* 9.2 顶栏实时本机 5G / Wi-Fi 信号胶囊 */
+.sig-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 30px;
+  padding: 0 9px;
+  border-radius: 999px;
+  border: .5px solid rgba(125,211,252,.26);
+  background: var(--lg-sub, var(--input));
+  color: var(--text-1);
+  font-size: 11.5px;
+  font-weight: 650;
+  letter-spacing: -.01em;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: transform .18s ease, background .2s ease;
+}
+.sig-pill[hidden] { display: none !important; }
+@media (max-width: 440px) {
+  .header .brand { flex: 0 1 auto; margin-right: auto; }
+  .header .brand-sub { display: none; }
+  [data-style="apple"] .header #sig-pill { position: relative; z-index: 2; margin-right: auto; }
+}
+.sig-pill .sig-ic { flex-shrink: 0; }
+.sig-pill.q-excellent, .sig-pill.q-good { color: var(--badge-ok, #16a34a); }
+.sig-pill.q-fair { color: var(--badge-warn, #d97706); }
+.sig-pill.q-weak, .sig-pill.q-critical { color: var(--badge-red, #dc2626); border-color: rgba(239,68,68,.35); }
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill { color: #e0f2fe; background: rgba(15,23,42,.38); border-color: rgba(125,211,252,.28); }
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-excellent,
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-good { color: #4ade80; }
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-fair { color: #fbbf24; }
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-weak,
+:root[data-has-wp="1"][data-wp-top="dark"] .sig-pill.q-critical { color: #f87171; }
+
+/* 9.3 液态玻璃底栏滑动膨胀放大折射透镜 (复刻实机录屏交互) */
+#tabbar.tabbar {
+  overflow: visible !important;
+}
+#tabbar #tabs {
+  -webkit-mask-image: linear-gradient(90deg,
+    #000 0px,
+    #000 var(--ml, -999px),
+    transparent calc(var(--ml, -999px) + 3px),
+    transparent calc(var(--mr, -999px) - 3px),
+    #000 var(--mr, -999px),
+    #000 100%) !important;
+  mask-image: linear-gradient(90deg,
+    #000 0px,
+    #000 var(--ml, -999px),
+    transparent calc(var(--ml, -999px) + 3px),
+    transparent calc(var(--mr, -999px) - 3px),
+    #000 var(--mr, -999px),
+    #000 100%) !important;
+}
+#tabbar #lens.lens {
+  left: 0 !important;
+  overflow: hidden !important;
+  pointer-events: none;
+  z-index: 3 !important;
+  transition: box-shadow .22s ease, background .22s ease;
+}
+#tabbar.pressing #lens.lens,
+#tabbar.drag #lens.lens {
+  background: radial-gradient(120% 110% at calc(50% + var(--lens-tilt,0)*22%) 18%,
+    rgba(255,255,255,.52) 0%,
+    rgba(125,211,252,.28) 48%,
+    rgba(14,165,233,.24) 100%) !important;
+  box-shadow:
+    inset 0 1px 1.5px rgba(255,255,255,.72),
+    inset 0 -1px 2px rgba(14,165,233,.28),
+    0 12px 28px -6px rgba(2,12,32,.36),
+    0 0 0 .5px rgba(186,230,253,.46) !important;
+}
+[data-theme="dark"] #tabbar.pressing #lens.lens,
+[data-theme="dark"] #tabbar.drag #lens.lens {
+  background: radial-gradient(120% 110% at calc(50% + var(--lens-tilt,0)*22%) 18%,
+    rgba(186,230,253,.28) 0%,
+    rgba(56,189,248,.18) 52%,
+    rgba(15,23,42,.42) 100%) !important;
+  box-shadow:
+    inset 0 1px 1.5px rgba(224,242,255,.42),
+    inset 0 -1px 2px rgba(56,189,248,.25),
+    0 14px 32px -6px rgba(0,0,0,.62) !important;
+}
+#tabbar #lens-in {
+  position: absolute;
+  top: 0;
+  left: 0;
+  height: 100% !important;
+  display: grid !important;
+  grid-template-columns: repeat(4, 1fr) !important;
+  align-items: center;
+  will-change: transform;
+  pointer-events: none;
+}
+#tabbar #lens-in .tab {
+  color: var(--accent, #007AFF) !important;
+  font-weight: 700 !important;
+  opacity: 1 !important;
+  transform: scale(1.05);
+  transition: transform .18s cubic-bezier(.22,1,.36,1);
+}
+:root[data-has-wp="1"][data-wp-bot="dark"] #tabbar #lens-in .tab,
+[data-theme="dark"] #tabbar #lens-in .tab {
+  color: #7dd3fc !important;
+}
+#tabbar.pressing #lens-in .tab,
+#tabbar.drag #lens-in .tab {
+  transform: scale(1.15);
+}
+.tab .tab-ic {
+  width: 21px;
+  height: 21px;
+  display: block;
+  margin: 0 auto 2px;
+}
+
+/* 9.4 设备卡片紧凑 3-Tab 抽屉与单行连接速览条 */
+.conn-strip {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 11px;
+  border-radius: 12px;
+  background: var(--lg-sub, var(--input));
+  font-size: 12px;
+  color: var(--text-2);
+}
+.conn-strip [data-conn-mini] {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.conn-strip [data-conn-mini] .cn { display: none; }
+.conn-strip [data-conn-mini] .cn-sum { margin: 0; padding: 0; border: 0; background: none; gap: 10px; font-size: 12px; }
+.conn-strip [data-conn-mini] .note { margin: 0 !important; display: inline; font-size: 12px; }
+.dev-pane { display: grid; gap: 10px; }
+.dev-pane[hidden] { display: none !important; }
+
+/* 9.5 SIM 卡行内一键设套餐与掌厅校准面板 */
+.pu-sim-act {
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  border: .5px solid rgba(59,130,246,.32);
+  background: rgba(59,130,246,.10);
+  color: var(--accent, #007AFF);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pu-sim-editor {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border-radius: 14px;
+  background: var(--lg-sub, var(--input));
+  display: grid;
+  gap: 8px;
+}
+.pu-pre-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.pu-pre-chips button {
+  padding: 4px 10px;
+  border-radius: 999px;
+  border: .5px solid var(--border, rgba(148,163,184,.28));
+  background: var(--card, rgba(255,255,255,.5));
+  color: var(--text-1);
+  font-size: 11.5px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.pu-pre-chips button.on {
+  background: var(--accent, #007AFF);
+  color: #fff;
+  border-color: transparent;
+}
+
+/* 9.6 DPI 与自训驾驶舱覆盖率环与零/少样本引擎状态胶囊 */
+.dpi-algo-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.dpi-algo-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--lg-sub, var(--input));
+  color: var(--text-2);
+}
+.dpi-algo-pill b { color: var(--accent, #007AFF); }
+
+
+/* 9.7 窄屏顶栏防碰撞 · SIM 图标尺寸锁死 · 3格Bento同行收拢 */
+.pu-sim .h .n { display: inline-flex; align-items: center; gap: 5px; flex-wrap: wrap; }
+.pu-sim .h .n svg { width: 15px !important; height: 15px !important; flex-shrink: 0; color: var(--accent, #007AFF); }
+.pu-sim-act { white-space: nowrap; flex-shrink: 0; }
+.cc-bento-row { display: grid !important; grid-template-columns: repeat(3, minmax(0, 1fr)) !important; gap: 8px !important; }
+.cc-bento-row .cc-tile { padding: 9px 8px !important; min-width: 0; }
+.cc-bento-row .cc-txt b { font-size: 12px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.cc-bento-row .cc-txt small { font-size: 10.5px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
+.conn-strip .linkish { font-size: 12px !important; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
+@media (max-width: 440px) {
+  .sig-pill { height: 26px; padding: 0 7px; font-size: 10.5px; gap: 4px; }
+  .sig-pill .sig-unit { display: none; }
+  [data-style="apple"] .header .brand { display: none !important; }
+}
+
 </style>
 <!-- 首帧前按本地偏好设好主题/风格/玻璃浓度, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme / applyGlassTint 一致, 之后由它接管) -->
-<script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'), gm = g('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid', wp = g('hnc6.wp_id'); if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t); if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); } else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber'); if (wp && wp !== 'none' && (wp !== 'custom' || g('hnc6.wp_custom'))) { r.setAttribute('data-has-wp', '1'); r.classList.add('has-wallpaper'); r.setAttribute('data-wp-text', g('hnc6.wp_text_v2') === 'capsule' ? 'capsule' : 'adaptive'); var wts = (g('hnc6.wp_tones') || '').split(','); if (wp === 'prism') wts = ['light', 'light', 'light']; else if (wts.length !== 3) wts = ['dark', 'dark', 'dark']; r.setAttribute('data-wp-top', wts[0]); r.setAttribute('data-wp-tone', wts[1]); r.setAttribute('data-wp-bot', wts[2]); } if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1' && g('hnc6.lowfx_manual') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>
+<script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'), gm = g('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid', wp = g('hnc6.wp_id'); if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t); if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); } else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber'); if (wp && wp !== 'none' && (wp !== 'custom' || g('hnc6.wp_custom'))) { r.setAttribute('data-has-wp', '1'); r.setAttribute('data-has-wallpaper', '1'); r.classList.add('has-wallpaper'); r.setAttribute('data-wp-text', g('hnc6.wp_text_v2') === 'capsule' ? 'capsule' : 'adaptive'); var wts = (g('hnc6.wp_tones') || '').split(','); if (wp === 'prism') wts = ['light', 'light', 'light']; else if (wts.length !== 3) wts = ['dark', 'light', 'dark']; r.setAttribute('data-wp-top', wts[0]); r.setAttribute('data-wp-tone', wts[1]); r.setAttribute('data-wp-bot', wts[2]); } if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1' && g('hnc6.lowfx_manual') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>
 </head>
 <body>
 <div class="mesh" aria-hidden="true"></div><div id="hnc-wallpaper" aria-hidden="true"><div class="wp-img"></div><div class="wp-scrim"></div></div>
@@ -3757,9 +4208,10 @@ html.has-wallpaper body::after{
 <header class="header">
   <div class="brand"><div class="brand-title">HNC</div><div class="brand-sub">HOTSPOT NETWORK CONTROL</div></div>
   <div class="htitle" id="htitle" aria-hidden="true"></div>
+  <button class="sig-pill press" id="sig-pill" type="button" hidden aria-label="热点本机实时信号"></button>
   <span class="sample" id="mode-pill" hidden></span>
-  <button class="hbtn press" id="bell" aria-label="告警"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg><span class="hbadge" id="bell-n" hidden>0</span></button>
-  <button class="hbtn press" id="theme-btn" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 0 1 0 18z" fill="currentColor"/></svg></button>
+  <button class="hbtn press" id="bell" aria-label="告警"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.2a6 6 0 0 0-12 0c0 6.6-2.8 8.6-2.8 8.6h17.6S18 14.8 18 8.2Z" fill="currentColor" fill-opacity=".14"/><path d="M18 8.2a6 6 0 0 0-12 0c0 6.6-2.8 8.6-2.8 8.6h17.6S18 14.8 18 8.2Z"/><path d="M13.8 20.4a2.1 2.1 0 0 1-3.6 0"/></svg><span class="hbadge" id="bell-n" hidden>0</span></button>
+  <button class="hbtn press" id="theme-btn" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.8"/><path d="M12 3.2a8.8 8.8 0 0 1 0 17.6Z" fill="currentColor" fill-opacity=".82" stroke="none"/></svg></button>
 </header>
 
 <main class="pages" id="pages">

@@ -115,6 +115,15 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 	if simLive {
 		resp["sim"] = true
 	}
+	if s.autorate != nil {
+		ar := s.autorate.Snapshot()
+		if ar.Enabled {
+			resp["autorate"] = ar
+		}
+	}
+	if s.signalCtl != nil {
+		resp["signal"] = s.signalCtl.Snapshot(s)
+	}
 	if r.URL.Query().Get("devices") == "1" {
 		resp["devices"] = devices
 	}

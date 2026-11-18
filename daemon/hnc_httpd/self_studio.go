@@ -1,11 +1,12 @@
-// self_studio.go — v5.36.0 「本机真值采集与 DPI 自训练飞轮工作台」(Host Self-Capture Studio)
+// self_studio.go — v5.37.0 「亮屏智能常驻 + 熄屏休眠自动增量蒸馏」统一 DPI 自训练控制器
 //
-// 解决个人用户「手头零外部抓包数据集」痛点:
-//  1) 一键开启本机 wlan0 + rmnet_data* 双路真值采集 + 走法 1(同主域子域扩充) + 走法 2(高纯度新域晋升),
-//     内置可配置的智能省电租约倒计时(默认 15 分钟自动停采并自动触发蒸馏落盘, 停采时还原用户原有飞轮开关);
-//  2) GET /api/self/studio 单次聚合已捕获本机 App 数、域名真值样本数、JA4/QTP 本机可用指纹数、冷启动序列数与流分类器状态;
-//  3) POST /api/action 支持 self_studio_start / self_studio_distill / self_studio_export,
-//     在全局 actionMu 之外异步唤醒 dpid 并调用 DistillPersonalNow + TriggerFlowClsRetrain + 规则库热刷新。
+// 彻底收口旧版 /api/self/* 三散装开关与 Studio 手动会话的锁竞态:
+//  1) 支持三态统一策略 (持久化于 data/self_policy.json, 进程重启不丢失、不泄漏后台抓包):
+//     - smart_screen (默认推荐): 亮屏智能常驻 — 手机亮屏时自动挂载双路真值采集与个人飞轮,
+//       熄屏立即拆除抓包句柄(0 轮询耗电), 并在熄屏静默满 25 秒且有新增样本时自动执行增量蒸馏 + 编译下发 dpid;
+//     - lease_15m (兼容旧参 full / observe): 15 分钟集中快训 — 到期自动增量蒸馏并无损退回原模式(smart_screen 或 off);
+//     - off (兼容旧参 stop): 完全关闭, 0 唤醒。
+//  2) 修复 countLocalUsableArtifacts 未调用 fpFor(hncDir) + fpSt.loadLocked() 的统计与编译隐患。
 package main
 
 import (
@@ -19,17 +20,25 @@ import (
 	"time"
 )
 
-type studioSavedFlags struct {
-	exp bool
-	pro bool
+type selfStudioPolicy struct {
+	Mode            string `json:"mode"` // "smart_screen" | "lease_15m" | "off"
+	PrevMode        string `json:"prev_mode,omitempty"`
+	AutoExpand      bool   `json:"auto_expand"`
+	AutoPromote     bool   `json:"auto_promote"`
+	LeaseEndUnix    int64  `json:"lease_end_unix,omitempty"`
+	LastDistillUnix int64  `json:"last_distill_unix,omitempty"`
+	LastSampleSize  int64  `json:"last_sample_size,omitempty"`
+	UpdatedUnix     int64  `json:"updated_unix"`
 }
 
 var (
 	studioMu          sync.Mutex
+	studioLoadedDir   string
+	studioPolicy      selfStudioPolicy
 	studioLeaseGen    uint64
-	studioAutoStopEnd int64 // unix timestamp; 0 = 常驻不倒计时
 	studioStopTimer   *time.Timer
-	studioSaved       *studioSavedFlags
+	studioQuietTimer  *time.Timer
+	studioDistilling  bool
 	lastStudioDistill *studioDistillSummary
 )
 
@@ -39,10 +48,177 @@ type studioDistillSummary struct {
 	SamplesRead   int      `json:"samples_read"`
 	ExclusiveFPs  int      `json:"exclusive_fps"`
 	StartupUsable int      `json:"startup_usable"`
+	PrototypeApps int      `json:"prototype_apps,omitempty"`
 	NBTrained     int      `json:"nb_trained_samples"`
 	NBClasses     int      `json:"nb_classes"`
 	DPISynced     bool     `json:"dpi_synced"`
 	Hints         []string `json:"hints,omitempty"`
+}
+
+func selfPolicyPath(hncDir string) string {
+	return filepath.Join(hncDir, "data", "self_policy.json")
+}
+
+func selfRuntimePath(hncDir string) string {
+	return filepath.Join(hncDir, "run", "self_runtime.json")
+}
+
+func ensureStudioPolicyLocked(s *server) {
+	if studioLoadedDir == s.hncDir && studioPolicy.Mode != "" {
+		return
+	}
+	studioLoadedDir = s.hncDir
+	if b, err := os.ReadFile(selfPolicyPath(s.hncDir)); err == nil {
+		var p selfStudioPolicy
+		if json.Unmarshal(b, &p) == nil && p.Mode != "" {
+			studioPolicy = p
+			return
+		}
+	}
+	_, selfErr := os.Stat(s.selfFlagPath())
+	_, expErr := os.Stat(s.autoExpandFlagPath())
+	_, proErr := os.Stat(s.autoPromoteFlagPath())
+	mode := "off"
+	if selfErr == nil {
+		mode = "smart_screen"
+	}
+	studioPolicy = selfStudioPolicy{
+		Mode:        mode,
+		PrevMode:    mode,
+		AutoExpand:  expErr == nil || mode == "smart_screen",
+		AutoPromote: proErr == nil || mode == "smart_screen",
+		UpdatedUnix: time.Now().Unix(),
+	}
+}
+
+func saveStudioPolicyLocked(hncDir string) {
+	if b, err := json.MarshalIndent(studioPolicy, "", "  "); err == nil {
+		_ = discoverWriteAtomic(selfPolicyPath(hncDir), append(b, '\n'))
+	}
+}
+
+func screenCurrentlyOn() bool {
+	a := activityNow()
+	if a.Known && a.ScreenKnown {
+		return a.ScreenOn
+	}
+	return true
+}
+
+func reconcileStudioFlagsLocked(s *server, now time.Time) (captureActive bool, screenOn bool, remSec int64) {
+	ensureStudioPolicyLocked(s)
+	nowU := now.Unix()
+	screenOn = screenCurrentlyOn()
+
+	if studioPolicy.Mode == "lease_15m" && studioPolicy.LeaseEndUnix > 0 {
+		if nowU >= studioPolicy.LeaseEndUnix {
+			fb := studioPolicy.PrevMode
+			if fb == "" || fb == "lease_15m" {
+				fb = "smart_screen"
+			}
+			studioPolicy.Mode = fb
+			studioPolicy.LeaseEndUnix = 0
+			saveStudioPolicyLocked(s.hncDir)
+		} else {
+			remSec = studioPolicy.LeaseEndUnix - nowU
+		}
+	}
+
+	switch studioPolicy.Mode {
+	case "smart_screen":
+		captureActive = screenOn
+	case "lease_15m":
+		captureActive = screenOn
+	default:
+		captureActive = false
+	}
+
+	_ = setStudioFlagFile(s.selfFlagPath(), captureActive)
+	_ = setStudioFlagFile(s.autoExpandFlagPath(), captureActive && studioPolicy.AutoExpand)
+	_ = setStudioFlagFile(s.autoPromoteFlagPath(), captureActive && studioPolicy.AutoPromote)
+
+	rt, _ := json.Marshal(map[string]interface{}{
+		"mode":          studioPolicy.Mode,
+		"capture_on":    captureActive,
+		"screen_on":     screenOn,
+		"auto_expand":   studioPolicy.AutoExpand,
+		"auto_promote":  studioPolicy.AutoPromote,
+		"lease_rem_sec": remSec,
+		"updated_unix":  nowU,
+	})
+	_ = discoverWriteAtomic(selfRuntimePath(s.hncDir), rt)
+	return captureActive, screenOn, remSec
+}
+
+// SelfResidentLoop 监听全局亮屏/熄屏状态变化: 亮屏自动恢复常驻真值采集, 熄屏立即挂起抓包并按需静默增量蒸馏。
+func (s *server) SelfResidentLoop(stopCh <-chan struct{}) {
+	studioMu.Lock()
+	_, _, _ = reconcileStudioFlagsLocked(s, time.Now())
+	studioMu.Unlock()
+
+	for {
+		actCh := activityChanged()
+		select {
+		case <-stopCh:
+			return
+		case <-actCh:
+			now := time.Now()
+			studioMu.Lock()
+			ensureStudioPolicyLocked(s)
+			wasCapErr := func() bool { _, e := os.Stat(s.selfFlagPath()); return e == nil }()
+			capNow, screenOn, _ := reconcileStudioFlagsLocked(s, now)
+			needQuietDistill := !screenOn && studioPolicy.Mode != "off" && !studioDistilling &&
+				now.Unix()-studioPolicy.LastDistillUnix >= 900 && hasNewLabelSamplesLocked(s.hncDir)
+			if needQuietDistill && studioQuietTimer == nil {
+				studioQuietTimer = time.AfterFunc(25*time.Second, func() {
+					if screenCurrentlyOn() {
+						studioMu.Lock()
+						studioQuietTimer = nil
+						studioMu.Unlock()
+						return
+					}
+					studioMu.Lock()
+					if studioDistilling {
+						studioMu.Unlock()
+						return
+					}
+					studioDistilling = true
+					studioQuietTimer = nil
+					studioMu.Unlock()
+
+					_, _ = runStudioDistillPipeline(s)
+
+					studioMu.Lock()
+					studioDistilling = false
+					studioPolicy.LastDistillUnix = time.Now().Unix()
+					studioPolicy.LastSampleSize = todaySampleFileSize(s.hncDir)
+					saveStudioPolicyLocked(s.hncDir)
+					studioMu.Unlock()
+				})
+			} else if screenOn && studioQuietTimer != nil {
+				studioQuietTimer.Stop()
+				studioQuietTimer = nil
+			}
+			studioMu.Unlock()
+
+			if wasCapErr != capNow {
+				_ = pokeDPIDStudio(s.hncDir, 450*time.Millisecond)
+			}
+		}
+	}
+}
+
+func todaySampleFileSize(hncDir string) int64 {
+	p := filepath.Join(hncDir, "run", "label_samples."+time.Now().Format("20060102")+".jsonl")
+	if st, err := os.Stat(p); err == nil {
+		return st.Size()
+	}
+	return 0
+}
+
+func hasNewLabelSamplesLocked(hncDir string) bool {
+	sz := todaySampleFileSize(hncDir)
+	return sz-studioPolicy.LastSampleSize >= 2048
 }
 
 func pokeDPIDStudio(hncDir string, waitMax time.Duration) bool {
@@ -104,23 +280,14 @@ func (s *server) apiSelfStudio(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	hncDir := s.hncDir
 
-	_, selfErr := os.Stat(s.selfFlagPath())
-	_, expErr := os.Stat(s.autoExpandFlagPath())
-	_, proErr := os.Stat(s.autoPromoteFlagPath())
-	enabled := selfErr == nil
-	expOn := expErr == nil
-	proOn := proErr == nil
-
 	studioMu.Lock()
-	leaseEnd := studioAutoStopEnd
+	captureActive, screenOn, leaseRem := reconcileStudioFlagsLocked(s, now)
+	curMode := studioPolicy.Mode
+	expOn := studioPolicy.AutoExpand && curMode != "off"
+	proOn := studioPolicy.AutoPromote && curMode != "off"
 	lastD := lastStudioDistill
 	studioMu.Unlock()
-	leaseRem := int64(0)
-	if enabled && leaseEnd > now.Unix() {
-		leaseRem = leaseEnd - now.Unix()
-	}
 
-	// 读取 dpi_state.json 中的 self 实时计数
 	var userApps, activeApps, tlsEvents, dnsEvents, candHigh, expRules, proRules int
 	var activeIfaces []map[string]interface{}
 	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "dpi_state.json")); err == nil && len(b) < 8<<20 {
@@ -145,9 +312,9 @@ func (s *server) apiSelfStudio(w http.ResponseWriter, r *http.Request) {
 		if json.Unmarshal(b, &st) == nil && st.Self != nil {
 			candHigh = st.Self.CandidateHigh
 			expRules = st.Self.AutoExpandedCount
-			proRules = st.Self.AutoPromotedCount
-			if proRules == 0 && st.Self.CandidatePromoted > 0 {
-				proRules = st.Self.CandidatePromoted
+			proRules = st.Self.CandidatePromoted
+			if st.Self.AutoPromotedCount > proRules {
+				proRules = st.Self.AutoPromotedCount
 			}
 			for _, ifc := range st.Self.Interfaces {
 				kind := "other"
@@ -211,7 +378,11 @@ func (s *server) apiSelfStudio(w http.ResponseWriter, r *http.Request) {
 		"ok":           true,
 		"generated_at": now.Unix(),
 		"capture": map[string]interface{}{
-			"enabled":              enabled,
+			"mode":                 curMode,
+			"enabled":              curMode != "off",
+			"capturing_now":        captureActive,
+			"screen_on":            screenOn,
+			"lease_active":         curMode == "lease_15m" && leaseRem > 0,
 			"auto_expand_enabled":  expOn,
 			"auto_promote_enabled": proOn,
 			"lease_rem_sec":        leaseRem,
@@ -259,40 +430,51 @@ func dispatchStudioAction(s *server, action string, p map[string]string) (action
 	}
 }
 
-func stopStudioCaptureLocked(s *server) {
-	studioAutoStopEnd = 0
-	_ = setStudioFlagFile(s.selfFlagPath(), false)
-	if studioSaved != nil {
-		_ = setStudioFlagFile(s.autoExpandFlagPath(), studioSaved.exp)
-		_ = setStudioFlagFile(s.autoPromoteFlagPath(), studioSaved.pro)
-		studioSaved = nil
-	}
-}
-
 func actionSelfStudioStart(s *server, p map[string]string) actionResp {
-	mode := strings.TrimSpace(p["mode"])
-	if mode == "" {
-		mode = "full"
+	rawMode := strings.TrimSpace(p["mode"])
+	if rawMode == "" {
+		rawMode = "smart_screen"
 	}
-	if mode != "full" && mode != "observe" && mode != "stop" {
-		return actionResp{OK: false, Error: "bad params", Detail: "mode must be full, observe, or stop"}
+	var normMode string
+	observeOnly := false
+	switch rawMode {
+	case "smart_screen", "resident_smart":
+		normMode = "smart_screen"
+	case "lease_15m", "full":
+		normMode = "lease_15m"
+	case "observe":
+		normMode = "lease_15m"
+		observeOnly = true
+	case "off", "stop":
+		normMode = "off"
+	default:
+		return actionResp{OK: false, Error: "bad params", Detail: "mode must be smart_screen, lease_15m, full, observe, or off"}
 	}
 
+	now := time.Now()
 	studioMu.Lock()
+	ensureStudioPolicyLocked(s)
 	studioLeaseGen++
 	gen := studioLeaseGen
 	if studioStopTimer != nil {
 		studioStopTimer.Stop()
 		studioStopTimer = nil
 	}
-	studioAutoStopEnd = 0
 
-	if mode == "stop" {
-		stopStudioCaptureLocked(s)
+	if normMode == "off" {
+		studioPolicy.Mode = "off"
+		studioPolicy.PrevMode = "off"
+		studioPolicy.LeaseEndUnix = 0
+		studioPolicy.UpdatedUnix = now.Unix()
+		saveStudioPolicyLocked(s.hncDir)
+		_, _, _ = reconcileStudioFlagsLocked(s, now)
 		studioMu.Unlock()
+		if p["distill"] == "1" {
+			_, _ = runStudioDistillPipeline(s)
+		}
 		woke := pokeDPIDStudio(s.hncDir, 900*time.Millisecond)
 		b, _ := json.Marshal(map[string]interface{}{
-			"mode":          "stop",
+			"mode":          "off",
 			"auto_stop_min": 0,
 			"lease_rem_sec": 0,
 			"dpid_synced":   woke,
@@ -300,70 +482,80 @@ func actionSelfStudioStart(s *server, p map[string]string) actionResp {
 		return actionResp{OK: true, Detail: string(b)}
 	}
 
-	if studioSaved == nil {
-		_, expErr := os.Stat(s.autoExpandFlagPath())
-		_, proErr := os.Stat(s.autoPromoteFlagPath())
-		studioSaved = &studioSavedFlags{exp: expErr == nil, pro: proErr == nil}
-	}
-	if err := setStudioFlagFile(s.selfFlagPath(), true); err != nil {
+	if normMode == "smart_screen" {
+		studioPolicy.Mode = "smart_screen"
+		studioPolicy.PrevMode = "smart_screen"
+		studioPolicy.AutoExpand = true
+		studioPolicy.AutoPromote = true
+		studioPolicy.LeaseEndUnix = 0
+		studioPolicy.UpdatedUnix = now.Unix()
+		saveStudioPolicyLocked(s.hncDir)
+		_, _, _ = reconcileStudioFlagsLocked(s, now)
 		studioMu.Unlock()
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
-	}
-	if err := setStudioFlagFile(s.autoExpandFlagPath(), mode == "full"); err != nil {
-		studioMu.Unlock()
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
-	}
-	if err := setStudioFlagFile(s.autoPromoteFlagPath(), mode == "full"); err != nil {
-		studioMu.Unlock()
-		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+		woke := pokeDPIDStudio(s.hncDir, 900*time.Millisecond)
+		b, _ := json.Marshal(map[string]interface{}{
+			"mode":          "smart_screen",
+			"auto_stop_min": 0,
+			"lease_rem_sec": 0,
+			"dpid_synced":   woke,
+		})
+		return actionResp{OK: true, Detail: string(b)}
 	}
 
-	autoMin := 0
+	// normMode == "lease_15m"
+	if studioPolicy.Mode != "lease_15m" {
+		studioPolicy.PrevMode = studioPolicy.Mode
+		if studioPolicy.PrevMode == "" {
+			studioPolicy.PrevMode = "smart_screen"
+		}
+	}
+	studioPolicy.Mode = "lease_15m"
+	studioPolicy.AutoExpand = !observeOnly
+	studioPolicy.AutoPromote = !observeOnly
+	autoMin := 15
 	if m, err := strconv.Atoi(strings.TrimSpace(p["auto_stop_min"])); err == nil && m >= 1 && m <= 180 {
 		autoMin = m
-	} else if p["auto_stop_min"] == "" {
-		autoMin = 15 // 默认 15 分钟智能省电保护: 到点自动停采并触发蒸馏落盘
 	}
-	if autoMin > 0 {
-		dur := time.Duration(autoMin) * time.Minute
-		studioAutoStopEnd = time.Now().Add(dur).Unix()
-		studioStopTimer = time.AfterFunc(dur, func() {
-			studioMu.Lock()
-			if studioLeaseGen != gen {
-				studioMu.Unlock()
-				return
-			}
-			studioMu.Unlock()
+	dur := time.Duration(autoMin) * time.Minute
+	studioPolicy.LeaseEndUnix = now.Add(dur).Unix()
+	studioPolicy.UpdatedUnix = now.Unix()
+	saveStudioPolicyLocked(s.hncDir)
+	_, _, rem := reconcileStudioFlagsLocked(s, now)
 
-			_, _ = runStudioDistillPipeline(s)
-
-			studioMu.Lock()
-			if studioLeaseGen == gen {
-				stopStudioCaptureLocked(s)
-			}
+	studioStopTimer = time.AfterFunc(dur, func() {
+		studioMu.Lock()
+		if studioLeaseGen != gen {
 			studioMu.Unlock()
-			_ = pokeDPIDStudio(s.hncDir, 600*time.Millisecond)
-			s.requestSnapshotRefresh()
-		})
-	}
-	leaseEnd := studioAutoStopEnd
+			return
+		}
+		studioMu.Unlock()
+
+		_, _ = runStudioDistillPipeline(s)
+
+		studioMu.Lock()
+		if studioLeaseGen == gen {
+			fb := studioPolicy.PrevMode
+			if fb == "" || fb == "lease_15m" {
+				fb = "smart_screen"
+			}
+			studioPolicy.Mode = fb
+			studioPolicy.LeaseEndUnix = 0
+			saveStudioPolicyLocked(s.hncDir)
+			_, _, _ = reconcileStudioFlagsLocked(s, time.Now())
+		}
+		studioMu.Unlock()
+		_ = pokeDPIDStudio(s.hncDir, 600*time.Millisecond)
+	})
 	studioMu.Unlock()
 
 	woke := pokeDPIDStudio(s.hncDir, 900*time.Millisecond)
 	b, _ := json.Marshal(map[string]interface{}{
-		"mode":          mode,
+		"mode":          rawMode,
 		"auto_stop_min": autoMin,
-		"lease_rem_sec": maxInt64(0, leaseEnd-time.Now().Unix()),
+		"lease_rem_sec": rem,
 		"dpid_synced":   woke,
 	})
 	return actionResp{OK: true, Detail: string(b)}
-}
-
-func maxInt64(a, b int64) int64 {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func runStudioDistillPipeline(s *server) (studioDistillSummary, error) {
@@ -372,9 +564,10 @@ func runStudioDistillPipeline(s *server) (studioDistillSummary, error) {
 	now := time.Now()
 	rep, err := s.DistillPersonalNow(now, DistillOptions{LookbackDays: 7, AllowUnmappedPkg: true})
 	nbN, nbCls, _ := TriggerFlowClsRetrain(s.hncDir, now)
+	protoApps := distillFewShotPrototypes(s.hncDir, now)
+	_ = exportCompiledFPForDPID(s.hncDir, now)
 	_ = os.Chtimes(rpRulesDir(s.hncDir), now, now)
 	_ = discoverWriteAtomic(filepath.Join(s.hncDir, "run", "dpi_rules.reload"), []byte(strconv.FormatInt(now.UnixNano(), 10)+"\n"))
-	s.requestSnapshotRefresh()
 
 	sum := studioDistillSummary{
 		Ts:            now.Unix(),
@@ -382,6 +575,7 @@ func runStudioDistillPipeline(s *server) (studioDistillSummary, error) {
 		SamplesRead:   rep.SamplesScanned,
 		ExclusiveFPs:  rep.ExclusiveCount,
 		StartupUsable: rep.StartupUsable,
+		PrototypeApps: protoApps,
 		NBTrained:     nbN,
 		NBClasses:     nbCls,
 		DPISynced:     synced,
@@ -389,6 +583,9 @@ func runStudioDistillPipeline(s *server) (studioDistillSummary, error) {
 	}
 	studioMu.Lock()
 	lastStudioDistill = &sum
+	studioPolicy.LastDistillUnix = now.Unix()
+	studioPolicy.LastSampleSize = todaySampleFileSize(s.hncDir)
+	saveStudioPolicyLocked(s.hncDir)
 	studioMu.Unlock()
 	return sum, err
 }

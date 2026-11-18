@@ -285,18 +285,14 @@ func (s *server) addDailyJSONLToZip(zw *zip.Writer, prefix, archiveDir string, f
 
 // addDPIRulesToZip copies data/dpi_rules.d/*.json into the zip.
 func (s *server) addDPIRulesToZip(zw *zip.Writer) trackInfo {
-	rulesDir := filepath.Join(s.hncDir, "data", "dpi_rules.d")
-	entries, err := os.ReadDir(rulesDir)
-	if err != nil {
+	files := dpiRuleFiles(s.hncDir)
+	if len(files) == 0 {
 		return trackInfo{Included: false}
 	}
 	t := trackInfo{}
-	for _, e := range entries {
-		n := e.Name()
-		if !strings.HasSuffix(n, ".json") {
-			continue
-		}
-		sub, err := addSingleFileToZip(zw, filepath.Join(rulesDir, n), "dpi_rules.d/"+n)
+	for _, fullPath := range files {
+		n := filepath.Base(fullPath)
+		sub, err := addSingleFileToZip(zw, fullPath, "dpi_rules.d/"+n)
 		if err != nil {
 			continue
 		}

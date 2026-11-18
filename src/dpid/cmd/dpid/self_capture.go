@@ -311,34 +311,53 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 	reloadFlagPath := filepath.Join(cfg.RunDir, "dpi_rules.reload")
 	var lastReloadMtime int64
 
+	handleSignals := func() {
+		if st, err := os.Stat(reloadFlagPath); err == nil {
+			if mt := st.ModTime().UnixNano(); mt != lastReloadMtime {
+				lastReloadMtime = mt
+				output.InvalidateRuleCache()
+			}
+		}
+		if _, err := os.Stat(pokePath); err == nil {
+			reconcile()
+			if _, enErr := os.Stat(flagPath); enErr == nil {
+				selfAttrib.SampleNow()
+			}
+			flushLabelSamplesNow()
+			selfAttrib.TriggerExpandNow()
+			liveMu.Lock()
+			pushState()
+			liveMu.Unlock()
+			_ = os.Remove(pokePath)
+		}
+	}
+
+	notifyCh := make(chan string, 16)
+	hasInotify := startRunDirInotify(ctx, cfg.RunDir, notifyCh)
+	fallbackPoll := 30 * time.Second
+	if !hasInotify {
+		fallbackPoll = 500 * time.Millisecond
+	}
 	tk := time.NewTicker(selfRescanInterval)
-	pokeTk := time.NewTicker(80 * time.Millisecond)
+	fbTk := time.NewTicker(fallbackPoll)
 	defer tk.Stop()
-	defer pokeTk.Stop()
+	defer fbTk.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-pokeTk.C:
-			if st, err := os.Stat(reloadFlagPath); err == nil {
-				if mt := st.ModTime().UnixNano(); mt != lastReloadMtime {
-					lastReloadMtime = mt
-					output.InvalidateRuleCache()
-				}
+		case evName := <-notifyCh:
+			if evName == "dpi_rules.reload" || evName == "dpi_fp_compiled.json" {
+				output.InvalidateRuleCache()
 			}
-			if _, err := os.Stat(pokePath); err == nil {
-				reconcile()
-				if _, enErr := os.Stat(flagPath); enErr == nil {
-					selfAttrib.SampleNow()
-				}
-				flushLabelSamplesNow()
-				selfAttrib.TriggerExpandNow()
-				liveMu.Lock()
-				pushState()
-				liveMu.Unlock()
-				_ = os.Remove(pokePath)
-			}
+			reconcile()
+			handleSignals()
+		case <-fbTk.C:
+			handleSignals()
 		case <-tk.C:
+			if actReader != nil && actReader.Get().Quiet {
+				continue
+			}
 			reconcile()
 		}
 	}

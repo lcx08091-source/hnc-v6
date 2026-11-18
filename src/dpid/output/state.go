@@ -459,7 +459,8 @@ type Writer struct {
 	discover atomic.Pointer[Discoverer]
 	// v5.18: dpid 自己的 IP→域名表(RecordFlow 的域名兜底 + 状态里的条目数)。
 	ipNames atomic.Pointer[IPNameTable]
-	dnsRing PendingDNSRing // v5.34: O(1) 256-slot DNS->Connect causality & ECH recovery ring
+	dnsRing PendingDNSRing     // v5.34: O(1) 256-slot DNS->Connect causality & ECH recovery ring
+	causal  *CausalBurstEngine // v5.38.0: 零样本 120ms 门控时间因果突发传播引擎
 
 	// rc29 totals
 	totalTx uint64
@@ -509,6 +510,7 @@ func NewWriter(path, version string) *Writer {
 		IPAppMap:         NewIPAppMap(),
 		// 64/key × 上限 1024 条全局; Trim 由 Flush 低频驱动(maxAge 1h)
 		evidence: NewEvidenceLedger(64, 1024),
+		causal:   NewCausalBurstEngine(),
 	}
 }
 
@@ -647,6 +649,14 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 		bumpName(c.Hostnames, host, now, maxNamesPerClient)
 		bumpName(w.globalDNS, host, now, maxGlobalNames)
 		r, ok := w.bumpLabelLocked(c, host, now, 0)
+		if (!ok || IsECHOuterHost(host)) && ja4 != "" {
+			if cr, cok := MatchCompiledEncrypted(ja4, "", "", "", net.ParseIP(remoteIP), "", 0); cok {
+				r = l3Rule{ID: cr.AppID, Name: cr.AppName, Category: cr.Category, Priority: PrioritySpecific, Verified: true}
+				ok = true
+				bumpLabelWithBytes(c.Apps, r.ID, r.Name, r.Category, "fp:"+ja4, now, 0, true, "", false)
+				bumpLabelWithBytes(w.globalApps, r.ID, r.Name, r.Category, "fp:"+ja4, now, 0, true, "", false)
+			}
+		}
 		if !ok {
 			w.bumpUnknownLocked(c, host, now)
 		}
@@ -709,6 +719,13 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 		// BUG-011 (回移自 5.9.91 分叉): TLS 路径也写 IP→app 反查表 ——
 		// SNI 命中的远端 IP 不必等下一次 flow 命中才进表, 应用级限速
 		// (apply_app_limits.sh 读 ip_app_map) 不再因只靠 flow 路径而漏配。
+		if ok && r.ID != "" && w.causal != nil {
+			ck := c.ClientMAC
+			if ck == "" {
+				ck = clientIP
+			}
+			w.causal.RecordAnchor(ck, ts.UnixMilli(), r, remoteIP, ja4, "")
+		}
 		if remoteIP != "" && w.IPAppMap != nil {
 			if ok && r.ID != "" {
 				w.IPAppMap.Record(remoteIP, r.ID, r.Name, r.Category, now, "tls")
@@ -816,21 +833,48 @@ func (w *Writer) RecordFlow(clientMAC, clientIP, remoteIPRaw string, isUDP bool,
 		})
 	}
 
+	var flowSPLTPrefix string
+	var flowSPLTSig uint64
+	if fe := c.Flows.flows[flowKey]; fe != nil && bytes > 0 {
+		fe.splt.ObserveL4Packet(int(bytes), !txFromClient, ts.UnixNano())
+		if fe.splt.Count >= 4 {
+			flowSPLTPrefix = fe.splt.PrefixKey(isUDP, port)
+			flowSPLTSig = fe.splt.PackSig64(isUDP, port)
+		}
+	}
+
 	if ok {
 		w.applyRuleHitLocked(c, rule, remoteIPRaw, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
 	} else {
-		// v5.18: 域名反查兜底(取代 rc30.3 的 nDPI ip_to_host.json)。远端 IP
-		// 没命中 IP 规则时, 查 dpid 自己的 IP→域名表(DNS 应答 / TLS SNI /
-		// QUIC SNI / HTTP Host), 再按域名规则归类。只在 IP 匹配失败时才走到这里。
+		matchedFallback := false
 		if t := w.ipNames.Load(); t != nil {
 			if e, hostOK := t.Lookup(remoteIPStr, ts); hostOK {
 				hostRule, hostRuleOK := classifyHost(e.Name)
 				if !hostRuleOK && e.CNAME != "" {
 					hostRule, hostRuleOK = classifyHost(e.CNAME)
 				}
-				if hostRuleOK {
+				if hostRuleOK && !IsECHOuterHost(e.Name) {
 					w.applyRuleHitLocked(c, hostRule, "ipname:"+e.Name, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
+					matchedFallback = true
 				}
+			}
+		}
+		// v5.37.0: ECH 隐藏 SNI / 纯 IP 游戏 UDP 流 / 未命中域名流走编译态个人指纹 + SPLT 序列融合识别
+		if !matchedFallback && (flowSPLTSig != 0 || flowSPLTPrefix != "") {
+			if cr, cok := MatchCompiledEncrypted("", "", "", "", remoteIP, flowSPLTPrefix, flowSPLTSig); cok {
+				spltRule := l3Rule{ID: cr.AppID, Name: cr.AppName, Category: cr.Category, Priority: PrioritySpecific, Verified: true}
+				w.applyRuleHitLocked(c, spltRule, "splt:"+cr.PrefixKey, remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
+				matchedFallback = true
+			}
+		}
+		// v5.38.0: 零样本 120ms 门控时间因果突发传播兜底(并发 CDN/QUIC/ECH 盲流自动继承同突发锚点应用)
+		if !matchedFallback && w.causal != nil {
+			ck := c.ClientMAC
+			if ck == "" {
+				ck = clientIP
+			}
+			if cr, cok := w.causal.LookupOrPropagate(ck, flowKey, ts.UnixMilli(), remoteIPStr, "", "", isUDP, port); cok {
+				w.applyRuleHitLocked(c, cr, "causal_burst", remoteIP, remoteIPStr, proto, port, bytes, now, pps, txFromClient)
 			}
 		}
 	}

@@ -262,6 +262,37 @@ function aqmRowHtml(c) {
   return '<div class="row" style="align-items:flex-start" id="aqm-row">' + gi('cyan', 'layers') + '<span class="tx"><div class="t">默认队列 AQM</div><div class="s">限速设备的默认队列用 AQM 减少排队延迟 · 只影响之后新设 / 重设的限速</div>' +
     '<div style="margin-top:8px">' + seg('aqm-mode', [['auto', '自动'], ['on', '开'], ['off', '关']], mode, 'small') + '</div><div class="note" style="margin-top:6px">' + esc(desc) + '</div></span>' + val(eff ? '开 · ' + esc(ch ? QD_T[ch] || ch : sqmLabel()) : '关', eff ? 'ok' : '') + '</div>';
 }
+/* v5.38.0: 上游 5G 信号波动自适应总带宽 (CAKE/HTB Autorate) + 随机 MAC 全栈护栏 */
+function autorateFoldHtml(c) {
+  var ar = c.autorate || S.autorate || {};
+  var on = ar.enabled === true;
+  var stMap = { active: '动态巡航中', backoff: '拥塞退避压制中', sleeping: '空闲零唤醒休眠', disabled: '未启用' };
+  var stTxt = stMap[ar.state] || (on ? '监控中' : '未启用');
+  var rttTxt = on && num(ar.rtt_ms) > 0
+    ? '当前上限 ↓' + num(ar.cur_down_mbps, 120) + ' / ↑' + num(ar.cur_up_mbps, 35) + ' Mbps · 蜂窝 RTT ' + num(ar.rtt_ms) + 'ms (基线 ' + num(ar.base_rtt_ms) + 'ms, Δ' + num(ar.delta_rtt_ms) + 'ms)'
+    : (on ? '等待热点活跃流量触发探测（无流量时自动休眠 0 耗电）' : '实时探测 5G/蜂窝基站排队延迟(Bufferbloat)，信号变弱时自动收紧 HTB/CAKE 总上限，空闲时退回峰值');
+  var body = '<div class="ar-pill"><span class="breathe' + (on && ar.state !== 'sleeping' ? '' : ' off') + '"></span><span><b>' + esc(stTxt) + '</b> · ' + esc(rttTxt) + '</span></div>' +
+    '<div class="grid2"><label class="field">下行保底' + inp('ar-dmin', num(ar.down_min_mbps, 24), 'Mbps', 'type="number" min="1" max="2000" step="1"') + '</label>' +
+    '<label class="field">下行峰值' + inp('ar-dmax', num(ar.down_max_mbps, 320), 'Mbps', 'type="number" min="2" max="2000" step="1"') + '</label></div>' +
+    '<div class="grid2"><label class="field">上行保底' + inp('ar-umin', num(ar.up_min_mbps, 8), 'Mbps', 'type="number" min="1" max="1000" step="1"') + '</label>' +
+    '<label class="field">上行峰值' + inp('ar-umax', num(ar.up_max_mbps, 80), 'Mbps', 'type="number" min="2" max="1000" step="1"') + '</label></div>' +
+    '<label class="field">拥塞退避 RTT 膨胀阈值 (ΔRTT)' + inp('ar-delta', num(ar.rtt_delta_ms, 25), 'ms', 'type="number" min="8" max="200" step="1"') + '</label>' +
+    '<div class="note">直绑上游 <span class="mono">rmnet_data* / ccmni*</span> 蜂窝口做轻量 TCP 握手测距：ΔRTT 超过阈值即刻乘性回退吸收基站排队抖动，无连接活跃时彻底挂起零耗电。</div>' +
+    '<button class="btn pri press" data-act="ar-save"' + (htbOk() ? '' : ' disabled') + '>保存自适应带宽策略</button>';
+  return sFold('autorate', ['blue', 'gauge'], '上游 5G 信号自适应总带宽', on ? stTxt + (num(ar.cur_down_mbps) ? ' · ↓' + num(ar.cur_down_mbps) + '/↑' + num(ar.cur_up_mbps) + 'M' : '') : '随 5G 基站信号波动动态伸缩热点总带宽上限',
+    body, toggle(on, 'data-set="autorate" aria-label="5G 自适应总带宽"' + (htbOk() ? '' : ' disabled')));
+}
+function rmacPolicyHtml(c) {
+  var rp = (c && c.rmac_policy) || {};
+  var body = '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">高置信度老设备自动无感继承</div><div class="s">同一台手机换了随机 MAC 后，指纹匹配得分达标时自动迁移原有限速、配额与设备名；全新陌生设备正常放行，绝不默认限速或断网折腾</div></span>' +
+      toggle(rp.auto_inherit !== false, 'id="rmac-auto" data-local="rmac-auto" aria-label="随机MAC自动无感继承"') + '</div>' +
+    '<div class="grid2"><label class="field">无感继承置信阈值' + inp('rmac-score', num(rp.auto_inherit_score, 85), '分', 'type="number" min="65" max="100"') + '</label>' +
+    '<label class="field">短命随机 MAC 离线回收' + inp('rmac-gc', num(rp.ephemeral_gc_minutes, 30), '分钟', 'type="number" min="5" max="1440"') + '</label></div>' +
+    '<div class="note">离线超过回收时间且无手动规则的短命随机 MAC 会自动清理陈旧邻居表槽位，防止 <span class="mono">mark_id</span> 池耗尽。</div>' +
+    '<button class="btn pri press" data-act="rmac-save">保存随机 MAC 策略</button>';
+  var isoRow = sItem(['indigo', 'isolate'], '热点客户端互访隔离 (AP Isolation)', '在转发层阻断热点内客户端之间的互相扫描与私自投屏，不影响各自正常上网', toggle(rp.client_isolation === true || c.client_isolation_enabled === true, 'data-set="client-iso" aria-label="热点客户端互访隔离"'));
+  return sFold('rmacpol', ['green', 'rmac'], '随机 MAC 无感继承与槽位回收', (rp.auto_inherit !== false ? '≥' + num(rp.auto_inherit_score, 85) + '分无感继承 · 新设备零阻断放行' : '手动合并 · 新设备零阻断放行'), body, val(rp.auto_inherit !== false ? '无感继承' : '手动', rp.auto_inherit !== false ? 'ok' : '')) + isoRow;
+}
 function renderSettings(anim1) {
   var c = S.cfg || {}, ac = S.alertCfg || {}, mq = ac.monthly_quota || {}, an = ac.anomaly_traffic || {}, ud = ac.unknown_device || {}, sla = S.sla || {}, rs = S.runStatus || {};
   var gsOn = c.global_shaper_enabled === true, hsAuto = c.hotspot_autostart === true, lv = S.live || {};
@@ -286,7 +317,7 @@ function renderSettings(anim1) {
     sFold('iface', ['cyan', 'wifi'], '热点接口偏好', '默认自动识别；ColorOS 常见 wlan2', '<div style="display:flex;gap:8px">' + inp('iface-pref', c.hotspot_iface || 'auto', '', 'maxlength="15" placeholder="auto" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="iface-save">保存</button></div><div class="note">填 auto 让 HNC 自动识别；手动填接口名（如 wlan2 / ap0）用于识别不准的机型。</div>', val(esc(c.hotspot_iface || 'auto'))) +
     sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val((OFFLOAD_T[S.offload.detail] || S.offload.detail || '—') + (S.offload.guard && S.offload.guard.fallback_active ? ' · 已兜底' : ''), S.offload.detail === 'ACTIVE' && !(S.offload.guard && S.offload.guard.fallback_active) ? 'warn' : 'ok')) +
     sItem(['red', 'shield'], '网站封锁 · DNS 层', '封锁网站时顺带拦掉该设备对这个域名的 DNS 查询，第一次连接就拦住', val({ available: '可用', unavailable: '内核不支持（只按 IP 拦）', unknown: '首次封锁时检测' }[c.conn_block_dns_layer] || '—', c.conn_block_dns_layer === 'unavailable' ? 'warn' : 'ok'))]);
-  groups.push(['设备', mergeSettingsHtml()]);   // 随机 MAC 合并
+  groups.push(['设备', rmacPolicyHtml(c) + mergeSettingsHtml()]);   // 随机 MAC 无感继承 + 防绕过护栏 + 合并建议
   // 告警总开关 + 新设备接入提醒(后端早就有, 旧新界面都没做设置)
   groups.push(['告警', sItem(['red', 'bolt'], '告警总开关', '关掉后所有提醒都不再产生（已有记录保留）', toggle(ac.enabled !== false, 'data-set="amaster" aria-label="告警总开关"')) +
     sFold('ud', ['blue', 'wifi'], '新设备接入提醒', '陌生设备连上热点时提醒；认识的设备可在告警里点「认识它」',
@@ -295,15 +326,15 @@ function renderSettings(anim1) {
       '<div class="note">免打扰时段内只记录、不弹通知；开始 = 结束 表示不设免打扰。</div><button class="btn pri press" data-act="ud-save">保存</button>',
       toggle(ud.enabled !== false, 'data-set="ud" aria-label="新设备接入提醒"')) +
     sFold('aq', ['orange', 'gauge'], '月度流量配额', '按计费日起算，与设备卡「本月」同一口径；单独设置了配额的设备按自己的配额提醒',
-      '<div class="grid2"><label class="field">配额' + inp('aq-gb', mq.limit_bytes ? trim0((mq.limit_bytes / 1073741824).toFixed(1)) : 10, 'GB/台/月', 'type="number" min="0.1" step="0.1"') + '</label><label class="field">预警' + inp('aq-pct', mq.warn_at_pct || 80, '%', 'type="number" min="1" max="100"') + '</label></div><button class="btn pri press" data-act="aq-save">保存</button>',
+      '<div class="grid2"><label class="field">配额' + inp('aq-gb', mq.limit_bytes ? trim0((mq.limit_bytes / 1073741824).toFixed(1)) : 10, 'GB/台/月', 'type="number" min="0.1" step="0.1"') + '</label><label class="field">预警' + inp('aq-pct', Math.min(99, mq.warn_at_pct || 80), '%', 'type="number" min="1" max="99"') + '</label></div><button class="btn pri press" data-act="aq-save">保存</button>',
       toggle(mq.enabled, 'data-set="aq" aria-label="月度流量配额"')) +
     sFold('aa', ['red', 'heart'], '异常流量检测', '当前小时超过 7 日同时段均值 × 阈值时提醒',
       '<div class="grid2"><label class="field">倍数阈值' + inp('aa-ratio', an.ratio_threshold || 3, '倍', 'type="number" min="1.1" step="0.1"') + '</label><label class="field">最低量' + inp('aa-mb', an.min_bytes ? Math.round(an.min_bytes / 1048576) : 50, 'MB') + '</label></div><button class="btn pri press" data-act="aa-save">保存</button>',
       toggle(an.enabled, 'data-set="aa" aria-label="异常流量检测"'))]);
-  groups.push(['全局带宽整形', sFold('gs', ['purple', 'layers'], '启用全局带宽整形', '给整个热点设 WAN 上限 + 智能队列，抗 bufferbloat',
+  groups.push(['全局带宽整形', autorateFoldHtml(c) + sFold('gs', ['purple', 'layers'], '固定总带宽整形（静态上限）', '适用于 Wi-Fi 中继或信号恒定场景；开启固定上限会自动停用 5G 自适应',
     '<div class="grid2"><label class="field">下行上限' + inp('gs-down', rateToMbps(c.global_shaper_down), 'Mbps', 'type="number" min="0" step="0.1"') + '</label><label class="field">上行上限' + inp('gs-up', rateToMbps(c.global_shaper_up), 'Mbps', 'type="number" min="0" step="0.1"') + '</label></div>' +
     '<div class="note">填宽带/流量套餐实测速度的 85~90%。当前队列：' + sqmLabel() + (htbOk() ? '' : ' · <b>内核不支持 HTB，无法启用</b>') + '</div><button class="btn pri press" data-act="gs-apply">应用</button>',
-    toggle(gsOn, 'data-set="gs" aria-label="全局带宽整形"' + (htbOk() ? '' : ' disabled'))) + aqmRowHtml(c)]);
+    toggle(gsOn && !(c.autorate && c.autorate.enabled), 'data-set="gs" aria-label="全局带宽整形"' + (htbOk() ? '' : ' disabled'))) + aqmRowHtml(c)]);
   var fx = c.flywheel_exclude_user || [];
   groups.push(['飞轮排除名单', sFold('fw', ['cyan', 'shield'], '不参与规则学习的应用', 'VPN / 代理会代理别的应用流量，排除后不污染规则 · ' + fx.length + ' 个',
     '<div class="chips">' + (fx.length ? fx.map(function (p) { return '<span class="chip">' + esc(p) + '<button class="linkish danger" data-fw-del="' + esc(p) + '" aria-label="移除">×</button></span>'; }).join('') : '<span class="note">还没有手动排除的应用（内置名单已包含常见 VPN / 代理）</span>') + '</div>' +
@@ -346,11 +377,12 @@ function renderSettings(anim1) {
     sBtn(['cyan', 'doc'], 'JSON 健康面板', 'rules / devices / tokens 的完整性与备份', 'json-health', '打开') +
     sBtn(['purple', 'down'], '导出诊断包', '快照、配置、日志尾部和 tc/iptables/ip 状态', 'debug-bundle', '导出')]);
   // 应用识别 —— 强制 QUIC 回落 TCP
-  groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
-    sItem(['blue', 'shield'], '自动获取服务器证书', '「新发现的应用」会主动连一次陌生域名读取证书上的公司名（只读证书，不发送数据）', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
-    (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '（可能误伤其他应用）CDN 地址常被多个应用共用；默认跳过这些地址，打开后也一起限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
-    encdnsSettingsHtml() + dnsTakeoverFold() + fpFold() + evalFold() + fgEngineFold() + rulepackFold() +
-    sBtn(['purple', 'search'], '新发现的应用', '规则库认不出的应用 · 确认后加入规则库', 'disc-open', '查看')]);
+  groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会改走 TCP；默认无需开启（v5.38 已支持 QUIC Initial 解密 + 几何特征 + 120ms 因果传播）', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
+    sItem(['blue', 'shield'], '自动获取服务器证书', '「应用规则中心」对陌生域名探读一次公开 TLS 证书组织名辅助聚类', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
+    (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '默认跳过多应用共用 CDN IP 防误伤；打开后一并限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
+    encdnsSettingsHtml() + dnsTakeoverFold() + fgEngineFold() +
+    sBtn(['purple', 'rule_hub'], '应用规则中心', '新发现应用、候选晋级、识别纠正与规则包已统一整合至此', 'go-rules-hub', '前往') +
+    sBtn(['cyan', 'flask'], 'DPI 与自训工作台', '亮屏常驻自训、少样本原型蒸馏与准确率自评已整合至分析页', 'go-dpi-studio', '前往')]);
   var cs = S.clsact;
   var gm = c.clsact_bpf_mode || 'auto', og = c.offload_guard || S.offload.guard || null;
   var ogS = gm === 'off' ? '已关闭：不做任何处理' : !og ? '等待第一次检测（约 1 分钟）' : og.fallback_active ? '兜底生效中：已让系统加速退回常规转发' + (og.since ? '（' + ago(og.since) + '起）' : '') : (OG_T[og.offload_state] || og.offload_state || '—');
@@ -416,16 +448,16 @@ function renderSettings(anim1) {
       'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
       '<span class="badge b-pur">DPI 识别</span>',
       gMap['应用识别'] || ''),
-    scard('scard-qos', ['cyan', 'layers'], '全局带宽整形与队列',
-      (gsOn ? '下行 ' + (rateToMbps(c.global_shaper_down) || '∞') + ' Mbps' : '未启用全局限速') + ' · 默认队列 AQM（' + sqmLabel() + '）',
-      '<span class="badge ' + (gsOn ? 'b-ok' : 'b-gray') + '">' + (gsOn ? '已启用' : '按设备') + '</span>',
+    scard('scard-qos', ['cyan', 'layers'], '5G 自适应整形与全局队列',
+      ((c.autorate && c.autorate.enabled) ? '5G Autorate 动态巡航中' : gsOn ? '静态下行 ' + (rateToMbps(c.global_shaper_down) || '∞') + ' Mbps' : '未启用全局限速') + ' · 默认队列 AQM（' + sqmLabel() + '）',
+      '<span class="badge ' + ((gsOn || (c.autorate && c.autorate.enabled)) ? 'b-ok' : 'b-gray') + '">' + ((c.autorate && c.autorate.enabled) ? '5G 自适应' : gsOn ? '静态整形' : '按设备') + '</span>',
       gMap['全局带宽整形'] || ''),
     scard('scard-guard', ['orange', 'rocket'], '硬件加速兜底',
       esc(ogS),
       '<span class="badge ' + (gm === 'off' ? 'b-gray' : 'b-ok') + '">' + ({ auto: '自动兜底', on: '始终开启', off: '已关闭' }[gm] || '自动') + '</span>',
       gMap['硬件加速兜底'] || ''),
-    scard('scard-devm', ['green', 'merge'], '设备合并与排除名单',
-      '随机 MAC 换地址合并 · 飞轮 VPN 排除（' + fx.length + ' 个）',
+    scard('scard-devm', ['green', 'merge'], '随机 MAC 继承、隔离与合并',
+      '高置信无感继承（新设备不默认限速）· 客户端隔离 · VPN 排除（' + fx.length + ' 个）',
       mmCnt ? '<span class="badge b-warn">' + mmCnt + ' 条建议</span>' : '<span class="badge b-gray">正常</span>',
       (gMap['设备'] || '') + (gMap['飞轮排除名单'] || ''))
   ];
@@ -444,7 +476,7 @@ function renderSettings(anim1) {
       (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
     scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
       '调试模拟设备 · 后端版本 ' + esc(l.backend_version || '—') + ' · 完整更新日志',
-      '<span class="badge b-gray">' + esc(l.backend_version || 'v5.36.0') + '</span>',
+      '<span class="badge b-gray">' + esc(l.backend_version || 'v5.38.0') + '</span>',
       (gMap['模拟环境（调试）'] || '') + (gMap['关于'] || ''))
   ];
   var cols = function (list) { if (!wide()) return '<div class="scard-stack">' + list.join('') + '</div>'; var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
@@ -887,6 +919,17 @@ function setToggleCfg(kind, el) {
     case 'ud': run(api.action('alert_config_set', udParams(on)).then(done()).then(reloadAlertCfg)); return;
     case 'aq': run(api.action('alert_config_set', { section: 'monthly_quota', enabled: String(on), limit_gb: String(num($('#aq-gb').value, 10)), warn_pct: String(Math.round(num($('#aq-pct').value, 80))) }).then(done())); return;
     case 'aa': run(api.action('alert_config_set', { section: 'anomaly_traffic', enabled: String(on), ratio: String(num($('#aa-ratio').value, 3)), min_mb: String(Math.round(num($('#aa-mb').value, 50))) }).then(done())); return;
+    case 'autorate':
+      run(api.action('autorate_set', {
+        autorate_enabled: String(on),
+        down_min_mbps: String(num($('#ar-dmin') && $('#ar-dmin').value, 24)),
+        down_max_mbps: String(num($('#ar-dmax') && $('#ar-dmax').value, 320)),
+        up_min_mbps: String(num($('#ar-umin') && $('#ar-umin').value, 8)),
+        up_max_mbps: String(num($('#ar-umax') && $('#ar-umax').value, 80)),
+        rtt_delta_ms: String(num($('#ar-delta') && $('#ar-delta').value, 25))
+      }).then(done(on ? '5G 自适应总带宽已开启' : '5G 自适应总带宽已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
+    case 'client-iso':
+      run(api.action('client_isolation_set', { enabled: String(on) }).then(done(on ? '热点客户端互访隔离已开启' : '热点客户端互访隔离已关闭')).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
     case 'gs':
       if (on) { var gw = el.closest('[data-foldkey]'); if (gw && !gw.classList.contains('open')) foldToggle(gw, 'gs'); el.setAttribute('aria-checked', 'false'); toast('填好上限后点「应用」启用'); return; }
       run(api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭'))); return;
@@ -1096,7 +1139,7 @@ function loadRemoteChangelog() {
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
     var fallback = '<div class="cl-section" id="cl-history">' +
-      '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(m.version || 'v5.35.0') + ' · iOS 27 光学液态玻璃与本机 DPI 自训练版</div>' +
+      '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(m.version || 'v5.38.0') + ' · 亮屏常驻自训 · 5G 自适应带宽 · 冰晶透景壁纸版</div>' +
       '<ul class="cl-list">' +
         '<li><b>按需远程加载</b>：已移除主文件内嵌的 378 KB 历史更新日志，改为由服务端按需注入 <code>changelog.html</code>，单文件体积直降 35%+。</li>' +
         '<li><b>iOS 27 光学液态玻璃</b>：新增状态驱动边缘导光、晶莹水滴开关拇指、分段滑块水银拉伸形变、顶栏滚动动态折射与深色黑曜石菲涅尔反射。</li>' +

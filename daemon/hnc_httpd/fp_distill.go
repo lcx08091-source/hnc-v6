@@ -577,8 +577,14 @@ func buildConduitPkgSet(hncDir string) map[string]bool {
 
 func loadBrowserSeedJA4(hncDir string) map[string]bool {
 	out := map[string]bool{}
-	b, err := os.ReadFile(filepath.Join(hncDir, "data", "dpi_ja4_fingerprints.json"))
-	if err != nil || len(b) > 512<<10 {
+	var b []byte
+	var err error
+	for _, cand := range dataCandidates(hncDir, "dpi_ja4_fingerprints.json") {
+		if b, err = os.ReadFile(cand); err == nil && len(b) > 0 {
+			break
+		}
+	}
+	if err != nil || len(b) == 0 || len(b) > 512<<10 {
 		return out
 	}
 	var f struct {

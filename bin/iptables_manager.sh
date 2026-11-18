@@ -586,6 +586,7 @@ cleanup() {
         "mangle FORWARD     HNC_STATS"   \
         "mangle POSTROUTING HNC_SAVE"    \
         "filter FORWARD     HNC_CTRL"    \
+        "filter FORWARD     HNC_ISOLATE" \
         "filter FORWARD     HNC_WHITELIST"; do
         set -- $entry
         ipt_dual_del_all -t "$1" -D "$2" -j "$3"
@@ -596,7 +597,7 @@ cleanup() {
         $IPT -t mangle -F "$chain" 2>/dev/null
         $IPT -t mangle -X "$chain" 2>/dev/null
     done
-    for chain in HNC_CTRL HNC_WHITELIST; do
+    for chain in HNC_CTRL HNC_ISOLATE HNC_WHITELIST; do
         $IPT -t filter -F "$chain" 2>/dev/null
         $IPT -t filter -X "$chain" 2>/dev/null
     done
@@ -607,11 +608,26 @@ cleanup() {
             $IP6T -t mangle -F "$chain" 2>/dev/null
             $IP6T -t mangle -X "$chain" 2>/dev/null
         done
-        for chain in HNC_CTRL HNC_WHITELIST; do
+        for chain in HNC_CTRL HNC_ISOLATE HNC_WHITELIST; do
             $IP6T -t filter -F "$chain" 2>/dev/null
             $IP6T -t filter -X "$chain" 2>/dev/null
         done
     fi
+    # v5.37.0: 兜底回收应用限速与应用 QoS 孤儿链
+    for _T in "$IPT" "$([ "$IPV6_OK" = "1" ] && echo "$IP6T")"; do
+        [ -z "$_T" ] && continue
+        for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_QOS_MARK; do
+            for _k in 1 2 3 4; do $_T -t mangle -D FORWARD -j "$_ac" 2>/dev/null || break; done
+        done
+        for _ac in HNC_APP_LIMIT_DOWN HNC_APP_QOS; do
+            for _k in 1 2 3 4; do $_T -t mangle -D POSTROUTING -j "$_ac" 2>/dev/null || break; done
+        done
+        for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS HNC_APP_QOS_IP HNC_APP_QOS_MARK \
+                   $($_T -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}'); do
+            $_T -t mangle -F "$_ac" 2>/dev/null || true
+            $_T -t mangle -X "$_ac" 2>/dev/null || true
+        done
+    done
     rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
     rm -rf "$HNC_DIR/run/stats_v6.lock" 2>/dev/null
 
@@ -1103,6 +1119,24 @@ case "$1" in
         exit $rc ;;
 
     # ═══ 只读 / 只改 counter,不加锁 ═══════════════════════════
+    set_isolation)
+        gate_lock || exit 11
+        _iso_if=$2; _iso_on=$3
+        for _T in "$IPT" "$([ "$IPV6_OK" = "1" ] && echo "$IP6T")"; do
+            [ -z "$_T" ] && continue
+            for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j HNC_ISOLATE 2>/dev/null || break; done
+            $_T -t filter -F HNC_ISOLATE 2>/dev/null || true
+            if [ "$_iso_on" = "on" ] || [ "$_iso_on" = "1" ] || [ "$_iso_on" = "true" ]; then
+                [ -n "$_iso_if" ] || { gate_unlock; exit 1; }
+                $_T -t filter -N HNC_ISOLATE 2>/dev/null || $_T -t filter -F HNC_ISOLATE 2>/dev/null
+                $_T -t filter -A HNC_ISOLATE -i "$_iso_if" -o "$_iso_if" -j DROP 2>/dev/null
+                $_T -t filter -I FORWARD 1 -j HNC_ISOLATE 2>/dev/null
+            else
+                $_T -t filter -X HNC_ISOLATE 2>/dev/null || true
+            fi
+        done
+        gate_unlock
+        exit 0 ;;
     stats)             get_stats "$2" ;;
     ensure_stats)      ensure_stats "$2" ;;
     ensure_stats_online) ensure_stats_online ;;

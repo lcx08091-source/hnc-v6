@@ -197,10 +197,10 @@ func (s *server) shEnvDefault() shEnv {
 		hotspotIface: s.currentHotspotIface,
 		readNetDev:   func() ([]byte, error) { return os.ReadFile("/proc/net/dev") },
 		iptForward: func() (string, error) {
-			return calRunCmd(5*time.Second, "iptables", "-w", "-t", "mangle", "-L", "FORWARD", "-nvx")
+			return calRunCmd(5*time.Second, "iptables", "-w", "2", "-t", "mangle", "-L", "FORWARD", "-nvx")
 		},
 		ip6tForward: func() (string, error) {
-			return calRunCmd(5*time.Second, "ip6tables", "-w", "-t", "mangle", "-L", "FORWARD", "-nvx")
+			return calRunCmd(5*time.Second, "ip6tables", "-w", "2", "-t", "mangle", "-L", "FORWARD", "-nvx")
 		},
 		ctAcct: func() int { return shReadInt("/proc/sys/net/netfilter/nf_conntrack_acct") },
 	}

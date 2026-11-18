@@ -53,44 +53,136 @@ function today() { var d = new Date(); return d.getFullYear() + '-' + pad2(d.get
 function isMac(s) { return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(String(s || '')); }
 function isRandomMac(m) { var c = parseInt(String(m || '').charAt(1), 16); return !isNaN(c) && (c & 2) === 2; }
 
-/* ═════════════════════ 图标 ═════════════════════ */
+/* ═════════════════════ v5.38.0 双层光学矢量图标系统 (24×24 · 1.85px · 零位图) ═════════════════════ */
 var I = {
-  dev:'<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
-  apps:'<rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/>',
-  stats:'<line x1="6" y1="20" x2="6" y2="13"/><line x1="12" y1="20" x2="12" y2="5"/><line x1="18" y1="20" x2="18" y2="10"/>',
-  gear:'<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
-  chev:'<polyline points="6 9 12 15 18 9"/>', right:'<polyline points="9 6 15 12 9 18"/>',
-  search:'<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
-  bolt:'<polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/>',
-  home:'<path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/>',
-  refresh:'<polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>',
-  trash:'<polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/>',
-  power:'<circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="3"/>',
-  check:'<polyline points="20 6 9 17 4 12"/>', box:'<polyline points="9 11 12 14 22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>',
-  star:'<polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>',
-  edit:'<path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z"/>',
-  doc:'<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/><line x1="8" y1="17" x2="13" y2="17"/>',
-  wifi:'<path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><circle cx="12" cy="20" r="1"/>',
-  gauge:'<path d="M12 14l4-4"/><path d="M3.34 19a10 10 0 1 1 17.32 0"/>',
-  shield:'<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/>', globe:'<circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>',
-  cpu:'<rect x="4" y="4" width="16" height="16" rx="2"/><rect x="9" y="9" width="6" height="6"/><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 14h3M1 9h3M1 14h3"/>',
-  heart:'<polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/>', tool:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>',
-  flask:'<path d="M9 2h6M10 2v6L4 20a1 1 0 0 0 .9 1.5h14.2A1 1 0 0 0 20 20L14 8V2"/>', info:'<circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/>',
-  palette:'<circle cx="13.5" cy="6.5" r="1.5"/><circle cx="17.5" cy="10.5" r="1.5"/><circle cx="8.5" cy="7.5" r="1.5"/><circle cx="6.5" cy="12.5" r="1.5"/><path d="M12 2C6.5 2 2 6.5 2 12s4.5 10 10 10c.93 0 1.5-.75 1.5-1.66 0-.43-.18-.83-.44-1.12-.29-.29-.44-.65-.44-1.12a1.64 1.64 0 0 1 1.67-1.67h2c3.05 0 5.56-2.5 5.56-5.56C21.97 6.01 17.46 2 12 2z"/>',
-  rocket:'<path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/>',
-  layers:'<polygon points="12 2 2 7 12 12 22 7 12 2"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/>',
-  down:'<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
-  copy:'<rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-  link:'<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/>',
-  lock:'<rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>',
-  x:'<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>',
-  warn:'<path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
-  trend:'<polyline points="23 6 13.5 15.5 8.5 10.5 1 18"/><polyline points="17 6 23 6 23 12"/>',
-  eye:'<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>',
-  tunnel:'<path d="M3 21v-9a9 9 0 0 1 18 0v9"/><path d="M8 21v-8a4 4 0 0 1 8 0v8"/><line x1="1" y1="21" x2="23" y2="21"/>',
-  merge:'<circle cx="6" cy="5" r="2.5"/><circle cx="6" cy="19" r="2.5"/><circle cx="18" cy="12" r="2.5"/><path d="M6 7.5v9"/><path d="M8.3 6.2C12 7 15 8.5 16 10"/>'
+  dev:'<rect x="2.5" y="3.5" width="19" height="13" rx="2.6" fill="currentColor" fill-opacity=".16"/><rect x="2.5" y="3.5" width="19" height="13" rx="2.6"/><path d="M8.5 20.5h7"/><path d="M12 16.5v4"/>',
+  apps:'<rect x="3.2" y="3.2" width="7.2" height="7.2" rx="2.1" fill="currentColor" fill-opacity=".18"/><rect x="13.6" y="3.2" width="7.2" height="7.2" rx="2.1"/><rect x="3.2" y="13.6" width="7.2" height="7.2" rx="2.1"/><rect x="13.6" y="13.6" width="7.2" height="7.2" rx="2.1" fill="currentColor" fill-opacity=".18"/><rect x="3.2" y="3.2" width="7.2" height="7.2" rx="2.1"/><rect x="13.6" y="13.6" width="7.2" height="7.2" rx="2.1"/>',
+  stats:'<rect x="4" y="12.5" width="3.8" height="7.5" rx="1.2" fill="currentColor" fill-opacity=".18"/><rect x="10.1" y="5.5" width="3.8" height="14.5" rx="1.2" fill="currentColor" fill-opacity=".22"/><rect x="16.2" y="9.5" width="3.8" height="10.5" rx="1.2" fill="currentColor" fill-opacity=".18"/><rect x="4" y="12.5" width="3.8" height="7.5" rx="1.2"/><rect x="10.1" y="5.5" width="3.8" height="14.5" rx="1.2"/><rect x="16.2" y="9.5" width="3.8" height="10.5" rx="1.2"/>',
+  gear:'<circle cx="12" cy="12" r="3.2" fill="currentColor" fill-opacity=".2"/><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  chev:'<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>', right:'<path d="m9.5 6.5 5.5 5.5-5.5 5.5"/>',
+  search:'<circle cx="11" cy="11" r="7.5" fill="currentColor" fill-opacity=".14"/><circle cx="11" cy="11" r="7.5"/><path d="m20.5 20.5-4.2-4.2"/>',
+  bolt:'<polygon points="13.2 2.4 4.2 13.6 11.8 13.6 10.8 21.6 19.8 10.4 12.2 10.4 13.2 2.4" fill="currentColor" fill-opacity=".18"/><polygon points="13.2 2.4 4.2 13.6 11.8 13.6 10.8 21.6 19.8 10.4 12.2 10.4 13.2 2.4"/>',
+  home:'<path d="M3.5 9.5 12 3l8.5 6.5V20a1.8 1.8 0 0 1-1.8 1.8H5.3A1.8 1.8 0 0 1 3.5 20Z" fill="currentColor" fill-opacity=".14"/><path d="M3.5 9.5 12 3l8.5 6.5V20a1.8 1.8 0 0 1-1.8 1.8H5.3A1.8 1.8 0 0 1 3.5 20Z"/><path d="M9.5 21.8V13h5v8.8"/>',
+  refresh:'<path d="M21 4.5v5.5h-5.5"/><path d="M3 19.5V14h5.5"/><path d="M4.2 9.2A8.5 8.5 0 0 1 18.6 6L21 10M3 14l2.4 4A8.5 8.5 0 0 0 19.8 14.8"/>',
+  trash:'<path d="M4 6.5h16"/><path d="M18.2 6.5 17.3 19.6a2 2 0 0 1-2 1.9H8.7a2 2 0 0 1-2-1.9L5.8 6.5" fill="currentColor" fill-opacity=".14"/><path d="M18.2 6.5 17.3 19.6a2 2 0 0 1-2 1.9H8.7a2 2 0 0 1-2-1.9L5.8 6.5"/><path d="M9.2 6.5V4.2a1.2 1.2 0 0 1 1.2-1.2h3.2a1.2 1.2 0 0 1 1.2 1.2v2.3"/><path d="M10 11v6M14 11v6"/>',
+  power:'<circle cx="12" cy="12" r="9" fill="currentColor" fill-opacity=".14"/><path d="M12 3v8"/><path d="M17.6 6.4a8 8 0 1 1-11.2 0"/>',
+  check:'<path d="m20 6.5-10.5 11L4.5 12.5"/>',
+  box:'<rect x="3.5" y="3.5" width="17" height="17" rx="3.2" fill="currentColor" fill-opacity=".14"/><rect x="3.5" y="3.5" width="17" height="17" rx="3.2"/><path d="m8.2 12.2 2.6 2.6 5.2-5.4"/>',
+  star:'<polygon points="12 2.6 14.9 8.5 21.4 9.4 16.7 14 17.8 20.5 12 17.4 6.2 20.5 7.3 14 2.6 9.4 9.1 8.5 12 2.6" fill="currentColor" fill-opacity=".18"/><polygon points="12 2.6 14.9 8.5 21.4 9.4 16.7 14 17.8 20.5 12 17.4 6.2 20.5 7.3 14 2.6 9.4 9.1 8.5 12 2.6"/>',
+  edit:'<path d="M12 20h8.5"/><path d="M16.2 3.8a2.1 2.1 0 0 1 3 3L7.5 18.5l-4 1 1-4Z" fill="currentColor" fill-opacity=".16"/><path d="M16.2 3.8a2.1 2.1 0 0 1 3 3L7.5 18.5l-4 1 1-4Z"/>',
+  doc:'<path d="M14 2.5H6.5A2 2 0 0 0 4.5 4.5v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8Z" fill="currentColor" fill-opacity=".14"/><path d="M14 2.5H6.5A2 2 0 0 0 4.5 4.5v15a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2V8Z"/><path d="M14 2.5V8h5.5"/><path d="M8.5 13h7M8.5 16.8h4.8"/>',
+  wifi:'<path d="M5 12.6a10.5 10.5 0 0 1 14 0"/><path d="M1.8 9a15.5 15.5 0 0 1 20.4 0"/><path d="M8.5 16.2a5.5 5.5 0 0 1 7 0"/><circle cx="12" cy="19.6" r="1.2" fill="currentColor" stroke="none"/>',
+  gauge:'<path d="M4.2 18.5a9 9 0 1 1 15.6 0Z" fill="currentColor" fill-opacity=".15"/><path d="M4.2 18.5a9 9 0 1 1 15.6 0"/><path d="m12 13.5 3.8-4"/><circle cx="12" cy="13.5" r="1.4" fill="currentColor" stroke="none"/>',
+  shield:'<path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".16"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/>',
+  globe:'<circle cx="12" cy="12" r="9.2" fill="currentColor" fill-opacity=".13"/><circle cx="12" cy="12" r="9.2"/><path d="M2.8 12h18.4"/><path d="M12 2.8a14.2 14.2 0 0 1 3.8 9.2 14.2 14.2 0 0 1-3.8 9.2 14.2 14.2 0 0 1-3.8-9.2A14.2 14.2 0 0 1 12 2.8Z"/>',
+  cpu:'<rect x="5" y="5" width="14" height="14" rx="2.4" fill="currentColor" fill-opacity=".15"/><rect x="5" y="5" width="14" height="14" rx="2.4"/><rect x="9" y="9" width="6" height="6" rx="1"/><path d="M9 2v3M15 2v3M9 19v3M15 19v3M19 9h3M19 15h3M2 9h3M2 15h3"/>',
+  heart:'<path d="M21.5 12h-3.8l-2.6 8-5.8-16-2.7 8H2.5"/>',
+  tool:'<path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.5-3.5a5.8 5.8 0 0 1-7.6 7.6l-6.6 6.6a2.1 2.1 0 0 1-3-3l6.6-6.6a5.8 5.8 0 0 1 7.6-7.6Z" fill="currentColor" fill-opacity=".15"/><path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.5-3.5a5.8 5.8 0 0 1-7.6 7.6l-6.6 6.6a2.1 2.1 0 0 1-3-3l6.6-6.6a5.8 5.8 0 0 1 7.6-7.6Z"/>',
+  flask:'<path d="M9 2.5h6M10.2 2.5v5.6L4.4 19.6a1.4 1.4 0 0 0 1.25 2h12.7a1.4 1.4 0 0 0 1.25-2L13.8 8.1V2.5" fill="currentColor" fill-opacity=".14"/><path d="M9 2.5h6M10.2 2.5v5.6L4.4 19.6a1.4 1.4 0 0 0 1.25 2h12.7a1.4 1.4 0 0 0 1.25-2L13.8 8.1V2.5"/><path d="M7.2 14.5h9.6"/>',
+  info:'<circle cx="12" cy="12" r="9.2" fill="currentColor" fill-opacity=".14"/><circle cx="12" cy="12" r="9.2"/><path d="M12 16v-4.2M12 8.2h.01"/>',
+  palette:'<path d="M12 2.8a9.2 9.2 0 0 0 0 18.4c.9 0 1.5-.7 1.5-1.6 0-.4-.16-.8-.42-1.1-.28-.28-.43-.62-.43-1.1a1.6 1.6 0 0 1 1.6-1.6h1.9a5.3 5.3 0 0 0 5.3-5.3C21.45 6.4 17.2 2.8 12 2.8Z" fill="currentColor" fill-opacity=".15"/><path d="M12 2.8a9.2 9.2 0 0 0 0 18.4c.9 0 1.5-.7 1.5-1.6 0-.4-.16-.8-.42-1.1-.28-.28-.43-.62-.43-1.1a1.6 1.6 0 0 1 1.6-1.6h1.9a5.3 5.3 0 0 0 5.3-5.3C21.45 6.4 17.2 2.8 12 2.8Z"/><circle cx="13.5" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="17.2" cy="10.5" r="1.2" fill="currentColor" stroke="none"/><circle cx="8.5" cy="8" r="1.2" fill="currentColor" stroke="none"/><circle cx="6.8" cy="12.5" r="1.2" fill="currentColor" stroke="none"/>',
+  rocket:'<path d="M12 15.2 8.8 12a21 21 0 0 1 2-3.9A12.5 12.5 0 0 1 21.5 2.5c0 2.7-.8 7.3-5.8 10.7a21 21 0 0 1-3.7 2Z" fill="currentColor" fill-opacity=".16"/><path d="M12 15.2 8.8 12a21 21 0 0 1 2-3.9A12.5 12.5 0 0 1 21.5 2.5c0 2.7-.8 7.3-5.8 10.7a21 21 0 0 1-3.7 2Z"/><path d="M4.8 16.4c-1.4 1.2-1.9 4.8-1.9 4.8s3.6-.5 4.8-1.9a2.1 2.1 0 0 0-2.9-2.9Z"/>',
+  layers:'<polygon points="12 2.8 2.8 7.5 12 12.2 21.2 7.5 12 2.8" fill="currentColor" fill-opacity=".18"/><polygon points="12 2.8 2.8 7.5 12 12.2 21.2 7.5 12 2.8"/><path d="m2.8 12.2 9.2 4.7 9.2-4.7"/><path d="m2.8 16.8 9.2 4.7 9.2-4.7"/>',
+  down:'<path d="M20.5 15v3.8a1.8 1.8 0 0 1-1.8 1.8H5.3a1.8 1.8 0 0 1-1.8-1.8V15"/><path d="m7.2 10.2 4.8 4.8 4.8-4.8"/><path d="M12 15V3.2"/>',
+  copy:'<rect x="8.8" y="8.8" width="12.2" height="12.2" rx="2.2" fill="currentColor" fill-opacity=".15"/><rect x="8.8" y="8.8" width="12.2" height="12.2" rx="2.2"/><path d="M5.2 15.2H4.2a1.8 1.8 0 0 1-1.8-1.8V4.6a1.8 1.8 0 0 1 1.8-1.8h8.8a1.8 1.8 0 0 1 1.8 1.8v1"/>',
+  link:'<path d="M10 13a4.8 4.8 0 0 0 7.2.5l2.8-2.8a4.8 4.8 0 0 0-6.8-6.8l-1.6 1.6"/><path d="M14 11a4.8 4.8 0 0 0-7.2-.5L4 13.3a4.8 4.8 0 0 0 6.8 6.8l1.6-1.6"/>',
+  lock:'<rect x="3.8" y="10.8" width="16.4" height="10.4" rx="2.4" fill="currentColor" fill-opacity=".16"/><rect x="3.8" y="10.8" width="16.4" height="10.4" rx="2.4"/><path d="M7.5 10.8V7.2a4.5 4.5 0 0 1 9 0v3.6"/>',
+  x:'<path d="M18 6 6 18M6 6l12 12"/>',
+  warn:'<path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="currentColor" fill-opacity=".16"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9.2v4M12 17h.01"/>',
+  trend:'<path d="m22 6.5-8.8 8.8-4.6-4.6L2 17.3"/><path d="M16 6.5h6v6"/>',
+  eye:'<path d="M1.8 12S5.5 5 12 5s10.2 7 10.2 7-3.7 7-10.2 7S1.8 12 1.8 12Z" fill="currentColor" fill-opacity=".14"/><path d="M1.8 12S5.5 5 12 5s10.2 7 10.2 7-3.7 7-10.2 7S1.8 12 1.8 12Z"/><circle cx="12" cy="12" r="2.8"/>',
+  tunnel:'<path d="M3.2 20.5v-8.5a8.8 8.8 0 0 1 17.6 0v8.5" fill="currentColor" fill-opacity=".14"/><path d="M3.2 20.5v-8.5a8.8 8.8 0 0 1 17.6 0v8.5"/><path d="M8.2 20.5v-7.5a3.8 3.8 0 0 1 7.6 0v7.5"/><path d="M1.5 20.5h21"/>',
+  merge:'<circle cx="6" cy="5.5" r="2.4" fill="currentColor" fill-opacity=".18"/><circle cx="6" cy="18.5" r="2.4" fill="currentColor" fill-opacity=".18"/><circle cx="18" cy="12" r="2.6" fill="currentColor" fill-opacity=".22"/><circle cx="6" cy="5.5" r="2.4"/><circle cx="6" cy="18.5" r="2.4"/><circle cx="18" cy="12" r="2.6"/><path d="M6 8v8M8.4 6.4c3.5.8 5.2 3.2 7 4.4"/>',
+  screen:'<rect x="5.5" y="2.5" width="13" height="19" rx="2.8" fill="currentColor" fill-opacity=".15"/><rect x="5.5" y="2.5" width="13" height="19" rx="2.8"/><path d="M10.5 18.2h3"/>',
+  rmac:'<path d="M16.2 3.5h4.3v4.3"/><path d="M4.2 19.8 20.5 3.5"/><path d="M20.5 16.2v4.3h-4.3"/><path d="m14.8 14.8 5.7 5.7"/><path d="m4.2 4.2 4.8 4.8"/>',
+  isolate:'<circle cx="7" cy="12" r="2.8" fill="currentColor" fill-opacity=".18"/><circle cx="17" cy="12" r="2.8" fill="currentColor" fill-opacity=".18"/><circle cx="7" cy="12" r="2.8"/><circle cx="17" cy="12" r="2.8"/><path d="M12 4.5v15"/>',
+  sim:'<path d="M7 2.8h6.8L18.5 7.5v12.2a1.8 1.8 0 0 1-1.8 1.8H7a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 7 2.8Z" fill="currentColor" fill-opacity=".16"/><path d="M7 2.8h6.8L18.5 7.5v12.2a1.8 1.8 0 0 1-1.8 1.8H7a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 7 2.8Z"/><rect x="8.5" y="11" width="7" height="6.5" rx="1.2"/>',
+  rule_hub:'<circle cx="12" cy="12" r="8.8" fill="currentColor" fill-opacity=".14"/><circle cx="12" cy="12" r="8.8"/><polygon points="12 6.5 15.8 14.8 8.2 14.8" fill="currentColor" fill-opacity=".22"/><polygon points="12 6.5 15.8 14.8 8.2 14.8"/>',
+  signal:'<rect x="3" y="15.5" width="3" height="5" rx="1" fill="currentColor"/><rect x="8" y="12" width="3" height="8.5" rx="1" fill="currentColor"/><rect x="13" y="8.2" width="3" height="12.3" rx="1" fill="currentColor"/><rect x="18" y="4.2" width="3" height="16.3" rx="1" fill="currentColor" fill-opacity=".35"/>'
 };
-function ico(k, cls) { return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">' + (I[k] || '') + '</svg>'; }
+function ico(k, cls) { return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">' + (I[k] || '') + '</svg>'; }
+
+/* 底栏双态光学图标：默认轮廓态 (out) vs 液态透镜内实心镂空态 (fill) */
+var HNC_TAB_SVGS = {
+  dev: {
+    out: '<rect x="2.6" y="3.8" width="18.8" height="12.6" rx="2.6"/><path d="M8.5 20.2h7"/><path d="M12 16.4v3.8"/>',
+    fill: '<path fill="currentColor" stroke="none" fill-rule="evenodd" d="M5.2 3C3.65 3 2.4 4.25 2.4 5.8v8.4C2.4 15.75 3.65 17 5.2 17h5.85v2.3H8.4a.9.9 0 1 0 0 1.8h7.2a.9.9 0 1 0 0-1.8h-2.65V17h5.85c1.55 0 2.8-1.25 2.8-2.8V5.8C21.6 4.25 20.35 3 18.8 3H5.2Zm1.4 3.2a1 1 0 0 1 1-1h8.8a1 1 0 0 1 1 1v5.6a1 1 0 0 1-1 1H7.6a1 1 0 0 1-1-1V6.2Z"/>'
+  },
+  apps: {
+    out: '<rect x="3.3" y="3.3" width="7.2" height="7.2" rx="2.1"/><rect x="13.5" y="3.3" width="7.2" height="7.2" rx="2.1"/><rect x="3.3" y="13.5" width="7.2" height="7.2" rx="2.1"/><rect x="13.5" y="13.5" width="7.2" height="7.2" rx="2.1"/>',
+    fill: '<g fill="currentColor" stroke="none"><rect x="2.9" y="2.9" width="7.8" height="7.8" rx="2.4"/><rect x="13.3" y="2.9" width="7.8" height="7.8" rx="2.4"/><rect x="2.9" y="13.3" width="7.8" height="7.8" rx="2.4"/><rect x="13.3" y="13.3" width="7.8" height="7.8" rx="2.4" fill-opacity=".68"/></g>'
+  },
+  stats: {
+    out: '<rect x="4" y="12.4" width="3.8" height="7.6" rx="1.2"/><rect x="10.1" y="5.2" width="3.8" height="14.8" rx="1.2"/><rect x="16.2" y="9.4" width="3.8" height="10.6" rx="1.2"/>',
+    fill: '<g fill="currentColor" stroke="none"><rect x="3.6" y="12" width="4.4" height="8.4" rx="1.5"/><rect x="9.8" y="4.6" width="4.4" height="15.8" rx="1.5"/><rect x="16" y="8.8" width="4.4" height="11.6" rx="1.5"/></g>'
+  },
+  gear: {
+    out: I.gear,
+    fill: '<path fill="currentColor" stroke="none" fill-rule="evenodd" d="M10.4 2.2a1.8 1.8 0 0 1 3.2 0l.44 1.04a1.4 1.4 0 0 0 1.8.75l1.04-.44a1.8 1.8 0 0 1 2.26 2.26l-.44 1.04a1.4 1.4 0 0 0 .75 1.8l1.04.44a1.8 1.8 0 0 1 0 3.2l-1.04.44a1.4 1.4 0 0 0-.75 1.8l.44 1.04a1.8 1.8 0 0 1-2.26 2.26l-1.04-.44a1.4 1.4 0 0 0-1.8.75l-.44 1.04a1.8 1.8 0 0 1-3.2 0l-.44-1.04a1.4 1.4 0 0 0-1.8-.75l-1.04.44a1.8 1.8 0 0 1-2.26-2.26l.44-1.04a1.4 1.4 0 0 0-.75-1.8l-1.04-.44a1.8 1.8 0 0 1 0-3.2l1.04-.44a1.4 1.4 0 0 0 .75-1.8l-.44-1.04a1.8 1.8 0 0 1 2.26-2.26l1.04.44a1.4 1.4 0 0 0 1.8-.75l.44-1.04ZM12 8.7a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6Z"/>'
+  }
+};
+function tabSvg(k, filled) {
+  var item = HNC_TAB_SVGS[k] || HNC_TAB_SVGS.dev;
+  return '<svg class="tab-ic' + (filled ? ' is-fill' : '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (filled ? item.fill : item.out) + '</svg>';
+}
+
+/* 实时 0..4 格 5G / Wi-Fi 信号阶梯矢量图标 */
+function cellSvg(bars, mode) {
+  var b = clamp(Math.round(num(bars, 0)), 0, 4);
+  if (mode === 'wifi_sta') {
+    var o1 = b >= 1 ? '1' : '.25', o2 = b >= 2 ? '1' : '.25', o3 = b >= 3 ? '1' : '.25';
+    return '<svg class="sig-ic" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round"><path d="M2.2 8.8a15.2 15.2 0 0 1 19.6 0" stroke-opacity="' + o3 + '"/><path d="M5.6 12.8a10.2 10.2 0 0 1 12.8 0" stroke-opacity="' + o2 + '"/><path d="M9 16.8a5.2 5.2 0 0 1 6 0" stroke-opacity="' + o1 + '"/><circle cx="12" cy="20" r="1.4" fill="currentColor" stroke="none"/></svg>';
+  }
+  var hs = [[3, 15.5, 5], [8, 12, 8.5], [13, 8.2, 12.3], [18, 4.2, 16.3]];
+  return '<svg class="sig-ic" width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden="true">' + hs.map(function (x, idx) {
+    var on = idx < b;
+    return '<rect x="' + x[0] + '" y="' + x[1] + '" width="3.2" height="' + x[2] + '" rx="1.1" fill="currentColor" fill-opacity="' + (on ? '1' : '.24') + '"/>';
+  }).join('') + '</svg>';
+}
+
+/* 共享基础设施 CDN / SDK 智能识别字典(供应用规则中心与未识别域名补库共用) */
+var INFRA_EXACT = {
+  'kunlunca.com': ['cdn', '阿里云 CDN'], 'alikunlun.com': ['cdn', '阿里云 CDN'], 'alikunlun.net': ['cdn', '阿里云 CDN'],
+  'alicdn.com': ['cdn', '阿里云公共 CDN'], 'tbcdn.cn': ['cdn', '阿里公共静态资源'], 'mmstat.com': ['sdk', '阿里统计 SDK'],
+  'cdngslb.com': ['cdn', '网宿 GSLB'], 'chinanetcenter.com': ['cdn', '网宿科技 CDN'], 'wscdns.com': ['cdn', '网宿 CDN'], 'wsglb0.com': ['cdn', '网宿 GSLB'],
+  'qtlcdn.com': ['cdn', '网宿海外 CDN'], 'ksyuncdn.com': ['cdn', '金山云 CDN'], 'ks-cdn.com': ['cdn', '金山云 CDN'],
+  'dnsv1.com': ['cdn', '腾讯云 DNSPod/CDN'], 'dnsv1.com.cn': ['cdn', '腾讯云 CDN'], 'smtcdns.net': ['cdn', '腾讯云智能调度'], 'cdntip.com': ['cdn', '腾讯云边缘 CDN'],
+  'myqcloud.com': ['cloud', '腾讯云对象存储'], 'gtimg.cn': ['cdn', '腾讯公共静态 CDN'],
+  'volccdn.com': ['cdn', '火山引擎公共 CDN'], 'bytefcdn.com': ['cdn', '火山边缘融合 CDN'],
+  'bdydns.com': ['cdn', '百度智能云 CDN'], 'jomodns.com': ['cdn', '京东云 CDN'], 'baishan-cloud.net': ['cdn', '白山云 CDN'],
+  'myhuaweicloud.com': ['cloud', '华为云底座'], 'hwcdn.net': ['cdn', '华为云 CDN'],
+  'cloudfront.net': ['cdn', 'AWS CloudFront'], 'akamaiedge.net': ['cdn', 'Akamai CDN'], 'akamaihd.net': ['cdn', 'Akamai HD'],
+  'cdn.cloudflare.net': ['cdn', 'Cloudflare CDN'], 'fastly.net': ['cdn', 'Fastly CDN'],
+  'umeng.com': ['sdk', '友盟统计 SDK'], 'umengcloud.com': ['sdk', '友盟推送 SDK'],
+  'getui.com': ['sdk', '个推推送 SDK'], 'igexin.com': ['sdk', '个推长连接 SDK'], 'jpush.cn': ['sdk', '极光推送 SDK'],
+  'pangolin-sdk-toutiao.com': ['sdk', '穿山甲广告 SDK'], 'pglstatp-toutiao.com': ['sdk', '穿山甲统计 SDK'],
+  'gdt.qq.com': ['sdk', '优量汇广告 SDK'], 'bugly.qq.com': ['sdk', 'Bugly 崩溃上报 SDK'],
+  'doubleclick.net': ['sdk', 'Google Ads SDK'], 'googlesyndication.com': ['sdk', 'Google 广告 SDK'], 'app-measurement.com': ['sdk', 'Firebase 统计 SDK']
+};
+function classifyInfraHost(host) {
+  var h = String(host || '').toLowerCase().replace(/^\.+|\.+$/g, '');
+  if (!h) return null;
+  for (var suf in INFRA_EXACT) {
+    if (h === suf || h.slice(-(suf.length + 1)) === '.' + suf) {
+      var inf = INFRA_EXACT[suf];
+      return { kind: inf[0], label: inf[1], shared: true };
+    }
+  }
+  var parts = h.split('.').filter(Boolean);
+  var reg = parts.length <= 2 ? h : (/^(com|net|org|gov|edu)\.cn$|^co\.(uk|jp)$|^com\.(au|br|hk|tw)$/.test(parts.slice(-2).join('.')) ? parts.slice(-3).join('.') : parts.slice(-2).join('.'));
+  if (/^kunlun[a-z0-9-]*\.(com|net|cn)$/.test(reg)) return { kind: 'cdn', label: '阿里昆仑 CDN 簇', shared: true };
+  if (/^cdnhwc[a-z0-9-]*\.(com|net|cn)$/.test(reg)) return { kind: 'cdn', label: '华为云 CDN 簇', shared: true };
+  if (/^(t?dnsv[0-9a-z-]*|smtcdns[0-9a-z-]*)\.(com|net|cn|com\.cn)$/.test(reg)) return { kind: 'cdn', label: '腾讯 GSLB/CDN 簇', shared: true };
+  if (/(gslb|cdngslb|wsglb|ksyungslb|alikunlun|qiniudns|baishan-cloud|bsclink)/.test(h)) return { kind: 'cdn', label: '公共 GSLB/CDN 调度', shared: true };
+  if (/(^|\.)(cdn[0-9]*|static-cdn|imgcdn|vodcdn)\./.test(h) || /-cdn\.(com|net|cn)$/.test(reg)) return { kind: 'cdn', label: '疑似公共 CDN 节点', shared: true };
+  if (/^(sdk|ads?|adx|track|telemetry|beacon|metrics|stat|crash)\./.test(h)) return { kind: 'sdk', label: '疑似通用统计/广告 SDK', shared: true };
+  return { kind: 'app', label: '可归因专属域名', shared: false };
+}
+function infraBadgeHtml(info) {
+  if (!info) return '';
+  var prefix = info.kind === 'cdn' ? '公共 CDN · ' : info.kind === 'sdk' ? '共享 SDK · ' : info.kind === 'cloud' ? '公共云网关 · ' : '';
+  return '<span class="infra-tag ' + info.kind + '">' + esc(prefix + info.label) + '</span>';
+}
 function gi(color, k) { return '<span class="gi ' + color + '">' + ico(k) + '</span>'; }
 function toggle(on, attrs) { return '<button class="toggle" role="switch" aria-checked="' + !!on + '" ' + (attrs || '') + '></button>'; }
 function seg(id, opts, cur, cls) {
@@ -379,7 +471,7 @@ var S = {
   appLimits: [], templates: [], onlineMin: {}, spark: [],
   filter: LS.get('hnc_device_filter', 'recent'), q: '', batch: false, picked: {}, open: {}, sel: null, busy: {},
   refreshMode: LS.get('hnc.refresh-mode', 'balanced'),
-  statsRange: 'today', aseg: 'stats', appsSub: 'my',
+  statsRange: 'today', aseg: 'stats', appsSub: 'active', devTab: {}, puEditSlot: 0, signal: null,
   theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', glassTint: clamp(Math.round(num(LS.get('hnc6.glass_tint', '50'), 50)), 0, 100), style: (function(){ var sv = LS.get('hnc6.style', 'default'); if (sv === 'apple') sv = 'cyber'; return ['cyber', 'liquid'].indexOf(sv) >= 0 ? sv : 'default'; })(),
   dpi: null, probe: null, dpiHist: {}, dpiDays: 1, dpiFilter: 'all', dpiSpark: { packets: [], dns_events: [], tls_events: [], kernel_drops: [] },
   self: null, selfCfg: {}, logFile: 'combined'
@@ -548,6 +640,11 @@ function mapDevice(d) {
     rmac: typeof d.randomized_mac === 'boolean' ? d.randomized_mac : d.sim !== true && isRandomMac(mac),
     merge: d.merge_suggestion && typeof d.merge_suggestion === 'object' && isMac(d.merge_suggestion.old_mac) ? d.merge_suggestion : null,
     mergedInto: isMac(d.merged_into) ? String(d.merged_into).toLowerCase() : '',
+    autoInhFrom: isMac(d.auto_inherited_from) ? String(d.auto_inherited_from).toLowerCase() : '',
+    autoInhName: d.auto_inherited_name || '',
+    autoInhScore: num(d.auto_inherited_score),
+    rmacGuarded: false,
+    rmacGuardMode: d.rmac_guard_mode || '',
     vpn: d.vpn && (d.vpn.level === 'likely' || d.vpn.level === 'certain') ? d.vpn : null,
     // DPI v2: 前台应用推断 / 此刻的流量形态(旧后端没有 → null)
     fg: d.fg && typeof d.fg === 'object' && d.fg.state ? d.fg : null,
@@ -565,6 +662,8 @@ function applyLive(l) {
   S.live = l; S.lastOk = Date.now(); S.connected = true;
   var act = l.hotspot_active; S.hotspot.active = typeof act === 'boolean' ? act : S.hotspot.active;
   S.hotspot.iface = l.hotspot_iface || l.iface || S.hotspot.iface; S.hotspot.ip = l.hotspot_ip || S.hotspot.ip;
+  if (l && l.autorate && typeof l.autorate === 'object') { S.autorate = l.autorate; if (S.cfg) S.cfg.autorate = l.autorate; }
+  if (l && l.signal && typeof l.signal === 'object') { S.signal = l.signal; if (typeof paintSignalPill === 'function') paintSignalPill(); }
   S.spark.push(num(l.rx_bps)); if (S.spark.length > 30) S.spark.shift();
 }
 function loadLive() { return api.get('/api/live', null, { timeout: 7000 }).then(function (l) { applyLive(l); return l; }); }
@@ -667,4 +766,4 @@ function paintOnlineHours() {
   });
 }
 
-/* === v5.36.0 Pure Duotone Vector SVG Icon System Active === */
+/* === v5.38.0 Optical Duotone Vector SVG Icon System Active === */

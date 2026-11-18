@@ -35,9 +35,11 @@ type configResp struct {
 	HotspotSSID      string `json:"hotspot_ssid,omitempty"`
 	HotspotDelaySec  int    `json:"hotspot_delay_sec,omitempty"`
 	// rc32: 全局带宽整形器 (opt-in, 默认关)。down/up 为 tc 速率字符串 "<n>mbit"/"<n>kbit"。
-	GlobalShaperEnabled bool   `json:"global_shaper_enabled"`
-	GlobalShaperDown    string `json:"global_shaper_down,omitempty"`
-	GlobalShaperUp      string `json:"global_shaper_up,omitempty"`
+	GlobalShaperEnabled bool            `json:"global_shaper_enabled"`
+	GlobalShaperDown    string          `json:"global_shaper_down,omitempty"`
+	GlobalShaperUp      string          `json:"global_shaper_up,omitempty"`
+	Autorate            *autorateStatus `json:"autorate,omitempty"`
+	RMACPolicy          *rmacPolicy     `json:"rmac_policy,omitempty"`
 	// rc35: 用户维护的飞轮排除名单(VPN/代理),不含内置清单。供设置页展示/增删。
 	FlywheelExcludeUser []string `json:"flywheel_exclude_user,omitempty"`
 	// v5.18: offload 旁路兜底模式 auto(默认)| on | off, 见 bin/hnc_offload_guard.sh。
@@ -159,6 +161,12 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 	resp.FlywheelExcludeUser = loadFlywheelExcludeUser(s.hncDir)
 	resp.SimEnabled = s.simOn()
 	resp.WebUIAccess = webuiAccessForConfig(s.hncDir)
+	if s.autorate != nil {
+		ar := s.autorate.Snapshot()
+		resp.Autorate = &ar
+	}
+	rp := loadRMACPolicy(s.hncDir)
+	resp.RMACPolicy = &rp
 	// rc3.1.13: 删除 config.json 覆盖分支. config.json 已弃用, 由 post-fs-data.sh
 	// 启动时单向迁移 auth_required 到 rules.json 后删除. 字段单源化让 toggle / 后端
 	// 视角永远一致, 杜绝 rc3.1.9~12 那种"前端 ON 但 middleware 不认"的 skew.

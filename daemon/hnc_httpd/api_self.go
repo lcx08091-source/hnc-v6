@@ -128,23 +128,51 @@ func (s *server) flipFlagFile(w http.ResponseWriter, r *http.Request, flagPath, 
 // apiSelfToggle is the POST endpoint that flips the self_capture flag.
 // body: {"enabled": true | false}. Empty body / missing key is rejected.
 func (s *server) apiSelfToggle(w http.ResponseWriter, r *http.Request) {
-	s.flipFlagFile(w, r, s.selfFlagPath(),
-		"dpid will pick up the change within 5s on its next sampler tick")
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Enabled *bool `json:"enabled"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Enabled == nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing 'enabled' field"})
+		return
+	}
+	mode := "off"
+	if *body.Enabled {
+		mode = "smart_screen"
+	}
+	_ = actionSelfStudioStart(s, map[string]string{"mode": mode})
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"status":  "ok",
+		"enabled": *body.Enabled,
+		"mode":    mode,
+		"note":    "synced with unified screen-aware resident controller",
+	})
 }
 
-// v5.6.0-rc6: apiAutoExpandToggle flips auto_expand.enabled. Sister
-// endpoint to apiSelfToggle. Separate flag so users can run pure self-
-// capture observation (read-only) without enabling the rule-file writer.
 func (s *server) apiAutoExpandToggle(w http.ResponseWriter, r *http.Request) {
 	s.flipFlagFile(w, r, s.autoExpandFlagPath(),
 		"auto-expander goroutine will pick up the change within 60s on its next tick")
+	studioMu.Lock()
+	ensureStudioPolicyLocked(s)
+	_, err := os.Stat(s.autoExpandFlagPath())
+	studioPolicy.AutoExpand = err == nil
+	saveStudioPolicyLocked(s.hncDir)
+	studioMu.Unlock()
 }
 
-// v5.7.0-rc2: apiAutoPromoteToggle flips auto_promote.enabled, gating
-// brand-new-apex auto-promotion (走法2). Off = shadow mode (stats only).
 func (s *server) apiAutoPromoteToggle(w http.ResponseWriter, r *http.Request) {
 	s.flipFlagFile(w, r, s.autoPromoteFlagPath(),
 		"candidate goroutine will pick up the change within 60s on its next tick")
+	studioMu.Lock()
+	ensureStudioPolicyLocked(s)
+	_, err := os.Stat(s.autoPromoteFlagPath())
+	studioPolicy.AutoPromote = err == nil
+	saveStudioPolicyLocked(s.hncDir)
+	studioMu.Unlock()
 }
 
 // apiSelfIfaces returns the current /sys/class/net enumeration filtered

@@ -226,9 +226,6 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 	// v5.36.0: 本机自训练工作台动作(含最长 1.2s pokeDPIDStudio 等待)在全局 actionMu 外执行,
 	// 避免阻塞局域网设备限速/拉黑并发写操作; 内部由 studioMu / fpStore.mu / sfp.mu 各自保护。
 	if resp, ok := dispatchStudioAction(s, req.Action, req.Params); ok {
-		if resp.OK {
-			s.requestSnapshotRefresh()
-		}
 		st := http.StatusOK
 		if !resp.OK {
 			if resp.Error == "bad params" || isBadParamErr(resp.Error) {
@@ -260,9 +257,6 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return dispatchAction(s, req.Action, req.Params, tid == "loopback")
 	}()
 	if resp.OK {
-		// hotfix15: a successful write usually changes rules/devices-derived UI state.
-		// Trigger the snapshot loop now instead of waiting for the next tick.
-		s.requestSnapshotRefresh()
 		// 手动规则/策略变更后让配额/时段控制器尽快重算(外部修改会被采纳为新基线)
 		s.limitCtl.Poke()
 	}
@@ -346,7 +340,15 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 	case "rule_sqm": // rc20: per-device low-latency (smart queue) toggle
 		return actionDeviceSQMSet(hncDir, p)
 	case "global_shaper_set": // rc32: opt-in global bandwidth shaper (off by default)
-		return actionGlobalShaperSet(hncDir, p)
+		return actionGlobalShaperSet(s, p)
+	case "autorate_set": // v5.37.0: upstream 5G adaptive total bandwidth controller
+		return actionAutorateSet(s, p)
+	case "rmac_policy_set": // v5.37.0: randomized MAC auto-inherit & default guardrail policy
+		return actionRMACPolicySet(s, p)
+	case "rmac_trust": // v5.37.0: trust randomized MAC and lift default guardrail
+		return actionRMACTrust(s, p)
+	case "client_isolation_set": // v5.37.0: AP client-to-client L3 isolation toggle
+		return actionClientIsolationSet(s, p)
 	case "flywheel_exclude_set": // rc35: manage VPN/proxy flywheel exclusion list
 		return actionFlywheelExcludeSet(hncDir, p)
 	case "template_apply":

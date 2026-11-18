@@ -2,16 +2,7 @@ package main
 
 import "strings"
 
-// rc30.12.30 (P2.11): merged from hotfix16_7_compile_compat.go.
-// 之前文件名按 "修第 N 个 bug" 命名 (patch 思维), 应当按功能命名.
-// 跟 action_app_limit.go / action_device_rename.go / action_sqm_v53.go 风格对齐.
-
-// requestSnapshotRefresh: compile compatibility shim (originally hotfix16.7).
-// 一些 hotfix16.6 合并的代码会调用这个函数, 但这个分支没有完整的 snapshot cache
-// 实现. 留成 no-op 让写 actions 能编/能跑.
-func (s *server) requestSnapshotRefresh() {
-	// no-op
-}
+// action_hotspot_iface_set.go — 热点网卡手动指定与自动探测偏好写入
 
 // actionHotspotIfaceSet writes the preferred hotspot interface to rules.json.
 // iface="" or "auto" means automatic detection.

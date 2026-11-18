@@ -941,16 +941,19 @@ func appLimitApplyLoop() {
 		return
 	}
 	tk := time.NewTicker(30 * time.Second)
+	dirtyTk := time.NewTicker(3 * time.Second)
 	defer tk.Stop()
+	defer dirtyTk.Stop()
 	for {
 		appApplyOnce(script)
-		// Wait for next tick OR an immediate dirty-marker request.
 		select {
 		case <-stopCh:
 			return
 		case <-tk.C:
-		case <-pollDirty(dirty):
-			// re-apply right away
+		case <-dirtyTk.C:
+			if _, err := os.Stat(dirty); err != nil {
+				continue
+			}
 		}
 	}
 }

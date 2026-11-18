@@ -65,6 +65,7 @@ var powerLoopDefs = []powerLoopDef{
 	{"stats_calibration", "系统流量对账", "httpd", 15 * time.Minute, false, false},
 	{"limit_policy", "配额/分时段限速", "httpd", time.Minute, true, false},
 	{"v6_neigh", "IPv6 邻居同步(事件+兜底)", "httpd", time.Minute, true, false},
+	{"autorate", "5G 自适应带宽整形", "httpd", 2 * time.Second, false, false},
 	{"activity", "活动状态探测", "httpd", activityProbeEvery, false, false},
 	{"power_sampler", "功耗自测采样", "httpd", powerSampleEvery, false, false},
 	{"watchdog_pending", "watchdog 等热点(PENDING)", "watchdog", 10 * time.Second, false, true},
@@ -170,6 +171,11 @@ func powerInterval(name string, a Activity, f loopFlags) (time.Duration, string)
 		return base, "执法: 每分钟对齐, 不随状态变化"
 	case "v6_neigh":
 		return base, "执法: 事件驱动 + 60s 兜底, 不随状态变化"
+	case "autorate":
+		if lvl == lvlHotspotOff || lvl == lvlNoClients {
+			return 300 * time.Second, "无活跃客户端: 事件驱动挂起真休眠(0 唤醒/0 探测)"
+		}
+		return base, "有在线客户端: 2s 动态追踪(流量空闲自动停发探测包)"
 	case "activity", "power_sampler":
 		return base, "固定"
 	// ── 镜像 ──

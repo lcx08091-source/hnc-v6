@@ -654,6 +654,17 @@ tc_leaf_ensure() {
 # fw mark filter（备用，prio=1）
 tc_filter_fw_set() {
     local dev=$1 mark=$2 flowid=$3
+    if [ -z "$HNC_TEST_MODE" ]; then
+        tc filter del dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
+        tc filter del dev "$dev" parent 1: protocol ip pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
+        tc filter del dev "$dev" parent 1: protocol ipv6 pref 3 handle "$mark" fw 2>/dev/null || true
+        if tc filter add dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$mark" fw flowid "$flowid" 2>/dev/null; then
+            return 0
+        fi
+        tc filter add dev "$dev" parent 1: protocol ip pref "$FILTER_PRIO_FW" handle "$mark" fw flowid "$flowid" 2>/dev/null || return 1
+        tc filter add dev "$dev" parent 1: protocol ipv6 pref 3 handle "$mark" fw flowid "$flowid" 2>/dev/null || true
+        return 0
+    fi
     tc filter del dev "$dev" parent 1: pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
     if tc filter add dev "$dev" parent 1: pref "$FILTER_PRIO_FW" handle "$mark" fw \
         flowid "$flowid" 2>/dev/null; then
@@ -1009,18 +1020,36 @@ ensure_ingress_qdisc() {
     # clsact and ingress are mutually exclusive; if one already exists reuse it
     tc qdisc show dev "$iface" 2>/dev/null | grep -qE 'qdisc (ingress|clsact) ffff:'
 }
+# v5.38.0: 双栈化无 IFB 机型的 ingress police 上行限速 (补齐 IPv6 邻居全局单播源地址过滤, 彻底堵住 GKI 6.1/6.6 无 IFB 时 IPv6 上行 100% 逃逸漏洞)
 set_uplink_police() {
     local iface=$1 class_id=$2 ip=$3 rate=$4 burst=$5
     [ -n "$ip" ] || return 1
     local prio=$((INGRESS_POLICE_PRIO_BASE + class_id))
+    local prio6=$((INGRESS_POLICE_PRIO_BASE + 5000 + class_id))
     tc filter del dev "$iface" parent ffff: protocol ip prio "$prio" 2>/dev/null || true
+    [ -z "${HNC_TEST_MODE:-}" ] && { tc filter del dev "$iface" parent ffff: protocol ipv6 prio "$prio6" 2>/dev/null || true; }
     tc filter add dev "$iface" parent ffff: protocol ip prio "$prio" u32 \
-        match ip src "$ip/32" police rate "$rate" burst "$burst" drop 2>/dev/null
+        match ip src "$ip/32" police rate "$rate" burst "$burst" drop 2>/dev/null || return 1
+    if [ -z "${HNC_TEST_MODE:-}" ] && command -v ip >/dev/null 2>&1; then
+        local _mac _v6
+        _mac=$(ip -4 neigh show dev "$iface" to "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="lladdr"){print tolower($(i+1)); exit}}')
+        if [ -n "$_mac" ]; then
+            for _v6 in $(ip -6 neigh show dev "$iface" 2>/dev/null | awk -v m="$_mac" 'tolower($0) ~ ("lladdr " m) && $1 !~ /^fe80:/ {print $1}'); do
+                tc filter add dev "$iface" parent ffff: protocol ipv6 prio "$prio6" u32 \
+                    match ip6 src "${_v6}/128" police rate "$rate" burst "$burst" drop 2>/dev/null || true
+            done
+        fi
+    fi
+    return 0
 }
 clear_uplink_police() {
     local iface=$1 class_id=$2
     local prio=$((INGRESS_POLICE_PRIO_BASE + class_id))
+    local prio6=$((INGRESS_POLICE_PRIO_BASE + 5000 + class_id))
     tc filter del dev "$iface" parent ffff: protocol ip prio "$prio" 2>/dev/null || true
+    if [ -z "${HNC_TEST_MODE:-}" ]; then
+        tc filter del dev "$iface" parent ffff: protocol ipv6 prio "$prio6" 2>/dev/null || true
+    fi
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1140,6 +1169,25 @@ set_global_shaper() {
         echo "GLOBAL_SHAPER=off"
         return 0
     fi
+}
+
+# v5.37.0: 5G Autorate 原地热调速快路径 (不重置 1:9999 AQM 叶子、不刷快照、零文件开销)
+set_global_shaper_tune() {
+    local iface=$1 down_rate=${2:-0} up_rate=${3:-0}
+    [ -n "$iface" ] || return 1
+    if [ -n "$down_rate" ] && [ "$down_rate" != "0" ]; then
+        if tc qdisc show dev "$iface" 2>/dev/null | grep -q "htb 1:"; then
+            local b; b=$(burst_for_rate "$down_rate")
+            tc class change dev "$iface" parent 1: classid 1:1 htb rate "$down_rate" ceil "$down_rate" burst "$b" cburst "$b" 2>/dev/null || true
+        fi
+    fi
+    if [ -n "$up_rate" ] && [ "$up_rate" != "0" ]; then
+        if tc qdisc show dev "$IFB_IFACE" 2>/dev/null | grep -q "htb 1:"; then
+            local bu; bu=$(burst_for_rate "$up_rate")
+            tc class change dev "$IFB_IFACE" parent 1: classid 1:1 htb rate "$up_rate" ceil "$up_rate" burst "$bu" cburst "$bu" 2>/dev/null || true
+        fi
+    fi
+    return 0
 }
 
 # rc36 (GS-1): 应用持久化的全局带宽整形(opt-in)。供 init_tc 末尾 + restore_rules 共用。
@@ -2475,9 +2523,16 @@ cleanup_tc() {
         log "cleanup_tc: preserving root qdisc on $iface (not owned by HNC)"
     fi
     if [ -n "$iface" ]; then
-        # 绝不删整个 clsact qdisc(GKI AOSP tether offload BPF 程序挂载于其上), 仅摘除 HNC 自装的 pref 1!
+        # 绝不删整个 clsact qdisc(GKI AOSP tether offload BPF 程序挂载于其上), 仅摘除 HNC 自装的 pref 1 与 police 301..400!
         tc filter del dev "$iface" ingress pref 1 2>/dev/null || true
         tc filter del dev "$iface" parent ffff: pref 1 2>/dev/null || true
+        _pp=301
+        while [ "$_pp" -le 400 ]; do
+            tc filter del dev "$iface" parent ffff: prio "$_pp" protocol all 2>/dev/null || true
+            tc filter del dev "$iface" parent ffff: prio "$_pp" protocol ip 2>/dev/null || true
+            tc filter del dev "$iface" parent ffff: prio "$_pp" protocol ipv6 2>/dev/null || true
+            _pp=$((_pp + 1))
+        done
         tc qdisc show dev "$iface" 2>/dev/null | grep -q "qdisc ingress ffff:" && tc qdisc del dev "$iface" ingress 2>/dev/null || true
     fi
     tc qdisc del dev "$IFB_IFACE" root 2>/dev/null || true
@@ -2503,6 +2558,11 @@ TC_ACTION_STALE_SEC=25
 TC_ACTION_LEASE_MAX_SEC=90
 
 tc_action_lock() {
+    if [ -n "${HNC_TC_LOCK_HELD:-}" ] && [ -d "$TC_ACTION_LOCK" ]; then
+        local _cur_pid
+        _cur_pid=$(awk '{print $1}' "$TC_ACTION_LOCK/owner" 2>/dev/null)
+        [ "$_cur_pid" = "$HNC_TC_LOCK_HELD" ] && return 0
+    fi
     mkdir -p "$HNC_DIR/run" 2>/dev/null || true
     # v5.9.1: 清理 mv 抢占后可能残留的 stale 坟场目录(mv 与 rm 之间被
     # SIGKILL 的极端情况),防 run/ 下堆积。
@@ -2511,6 +2571,7 @@ tc_action_lock() {
     now=$(date +%s 2>/dev/null || echo 0)
     if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
         echo "$$ $1 $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
+        export HNC_TC_LOCK_HELD="$$"
         return 0
     fi
     owner=$(cat "$TC_ACTION_LOCK/owner" 2>/dev/null)
@@ -2681,6 +2742,12 @@ case "$1" in
         set_sqm "$2" "$3" "$4" "$5"
         rc=$?
         tc_snapshot_async "$2"
+        tc_action_unlock
+        exit $rc ;;
+    global_shaper_tune)
+        tc_action_lock global_shaper_tune || exit 0
+        set_global_shaper_tune "$2" "$3" "$4"
+        rc=$?
         tc_action_unlock
         exit $rc ;;
     global_shaper)

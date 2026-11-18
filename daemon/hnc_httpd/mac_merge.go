@@ -687,6 +687,7 @@ func (s *server) macMergeTick(now time.Time) {
 	appUsage.mu.Unlock()
 	obs := collectMacObs(s.hncDir, day)
 	s.macMergeStep(now, obs)
+	s.rmacReconcile(now)
 }
 
 // macMergeStep 纯状态推进(测试直接调)。
@@ -989,4 +990,5 @@ func (s *server) annotateMacMerge(rows []map[string]interface{}, names map[strin
 			break
 		}
 	}
+	s.annotateRMACGuard(rows)
 }

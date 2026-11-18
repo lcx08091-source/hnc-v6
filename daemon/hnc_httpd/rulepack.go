@@ -235,11 +235,7 @@ func (l *rpLocal) root(id string) string {
 func rpLoadLocal(hncDir string) *rpLocal {
 	l := &rpLocal{byID: map[string]rpRawRule{}, factory: map[string]map[string]bool{}, owner: map[string]string{},
 		childOwner: map[string][]string{}, cats: map[string]bool{}, blocked: map[string]bool{}}
-	files, _ := filepath.Glob(filepath.Join(rpRulesDir(hncDir), "*.json"))
-	if len(files) == 0 {
-		// 运行目录还没同步(或单测): 用 data/ 下的出厂副本
-		files, _ = filepath.Glob(filepath.Join(hncDir, "data", "dpi_rules.d", "*.json"))
-	}
+	files := dpiRuleFiles(hncDir)
 	sort.Strings(files)
 	order := []string{}
 	for _, f := range files {
@@ -296,7 +292,7 @@ func rpLoadLocal(hncDir string) *rpLocal {
 			}
 		}
 	}
-	for _, p := range []string{filepath.Join(hncDir, "etc", "auto_expand_blocklist.json"), filepath.Join(hncDir, "data", "auto_expand_blocklist.json")} {
+	for _, p := range dataCandidates(hncDir, "auto_expand_blocklist.json") {
 		b, err := os.ReadFile(p)
 		if err != nil || len(b) > 1<<20 {
 			continue

@@ -204,7 +204,7 @@ func (t *IPNameTable) RecordDNSAnswers(qname string, recs []DNSAnswer, ts time.T
 	}
 	cname := ""
 	if final != qn {
-		cname = final
+		cname = BestClassifiedCNAMEHop(qn, cn, final)
 	}
 	addrs := make([]DNSAnswer, 0, len(recs))
 	for _, r := range recs {

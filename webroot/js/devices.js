@@ -29,7 +29,9 @@ function badges(d) {
   b += policyBadges(d);
   if (d.applyError) b += '<span class="badge b-red" title="' + esc(d.applyError) + '">应用出错</span>';
   if (d.vpn) b += vpnBadge(d.vpn);
-  if (d.rmac) b += '<span class="badge b-gray" title="Android/iOS 隐私 Wi-Fi 的随机 MAC，无法识别厂商；换 MAC 后 HNC 会提示合并">随机 MAC</span>';
+  if (d.rmacGuarded) b += '<span class="badge b-warn" title="新接入未知随机 MAC，已自动套用默认管控护栏">随机MAC护栏</span>';
+  else if (d.autoInhFrom) b += '<span class="badge b-ok" title="更换随机 MAC 后已自动无感继承 ' + esc(d.autoInhName || d.autoInhFrom) + ' 的名称与规则（置信度 ' + (d.autoInhScore || 90) + '）">无感继承</span>';
+  else if (d.rmac) b += '<span class="badge b-gray" title="Android/iOS 隐私 Wi-Fi 的随机 MAC；高置信度换地址时自动继承规则">随机 MAC</span>';
   if (d.mergedInto) b += '<span class="badge b-gray" title="这个旧 MAC 已合并到 ' + esc(d.mergedInto) + '">已合并</span>';
   return b;
 }
@@ -293,11 +295,15 @@ function appTimeSheet(d, id, name) {
 function devBody(d) {
   var busy = S.busy[d.mac] ? ' disabled' : '';
   var dis = htbOk() ? '' : ' disabled', upDis = upOk() ? '' : ' disabled', dlDis = netemOk() ? '' : ' disabled';
+  var curTab = (S.devTab && S.devTab[d.mac]) || 'limit';
+  if (curTab === 'quota') atNeed(d);
   var h = '<div class="dev-body">';
   if (d.sim) h += '<div class="note warn" style="padding:0 2px">这是模拟设备 · 各项操作只改模拟状态，不会碰 tc / iptables</div>';
   h += vpnNote(d);
-  if (d.mergedInto) { var mt = devBy(d.mergedInto); h += '<div class="note" style="padding:0 2px">这个旧 MAC 已合并到「' + esc(mt ? mt.name : d.mergedInto) + '」，它的设置和历史流量都算在新 MAC 上</div>'; }
-  // iOS 27 控制中心式 3 格空间 Bento 快捷磁贴
+  if (d.mergedInto) { var mt = devBy(d.mergedInto); h += '<div class="note" style="padding:0 2px">旧随机 MAC 已合并到「' + esc(mt ? mt.name : d.mergedInto) + '」</div>'; }
+  if (d.autoInhFrom) { h += '<div class="note" style="padding:0 2px;color:var(--badge-ok)">已通过指纹自动继承「' + esc(d.autoInhName || d.autoInhFrom) + '」规则（置信 ' + num(d.autoInhScore, 90) + ' 分）</div>'; }
+
+  // 顶部紧凑 3 格 Bento 快捷开关 + 单行连接速览条 + 3-Tab 分段器
   h += '<div class="cc-bento-row">' +
     '<button type="button" class="cc-tile sqm-tile press' + (d.sqm ? ' on sqm-on' : '') + '" data-cc-tog="sqm"' + (d.hasDelay || !htbOk() ? ' disabled' : '') + '>' +
       '<span class="cc-orb">' + bentoSvg('sqm') + '</span>' +
@@ -312,78 +318,70 @@ function devBody(d) {
       '<span class="cc-txt"><b>白名单豁免</b><small>' + (d.wl ? '已加入白名单' : '点击一键豁免') + '</small></span>' +
     '</button>' +
   '</div>';
-  // 纯数字精准带宽限速面板（移除滑动条与闪烁预设胶囊，避免滚动误触与跳变闪烁）
+
+  if (d.online) {
+    h += '<div class="conn-strip"><span data-conn-mini>' + connMiniHtml(d.mac) + '</span><button type="button" class="linkish" data-act="conns">查看全部连接 ›</button></div>';
+  }
+
+  h += seg('dev-tab', [['limit', '限速分流'], ['quota', '应用配额'], ['conn', '连接画像']], curTab, 'small');
+
+  // ── Pane 1: 限速分流 (默认首屏仅保留带宽限速 + 按需折叠弱网延迟，清爽一屏见底) ──
   var dnStr = mbpsToMBs(d.down), upStr = upOk() ? mbpsToMBs(d.up) : '';
   var dnVal = parseFloat(dnStr) || 0, upVal = parseFloat(upStr) || 0;
   var dnEq = dnVal > 0 ? '≈ ' + trim0((dnVal * 8).toFixed(1)) + ' Mbps' : '当前不限速';
   var upEq = !upOk() ? '内核不支持' : (upVal > 0 ? '≈ ' + trim0((upVal * 8).toFixed(1)) + ' Mbps' : '当前不限速');
-  h += '<div class="ctrl lcc-ctrl bw-ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:7px"><i></i>带宽限速</span><button type="button" class="linkish" data-act="tpl">限速模板</button></div>' + effLine(d) +
-    (htbOk() ? '' : '<div class="note err">当前内核 / tc 不支持 HTB，限速不可用</div>') +
-    '<div class="bw-cards">' +
-      '<label class="bw-card dn' + (dnVal > 0 ? ' has-val' : '') + '">' +
-        '<span class="bw-card-top"><span class="bw-dir"><i class="bw-dot dn"></i>↓ 下行上限</span><span class="bw-eq num" data-bw-eq="down">' + dnEq + '</span></span>' +
-        '<span class="box bw-box"><input type="number" inputmode="decimal" min="0" max="1000" step="0.1" placeholder="不限速" value="' + dnStr + '" data-f="down"' + dis + '>' +
-          '<button type="button" class="bw-clr" data-bw-clr="down" aria-label="清空下行"' + (dnStr ? '' : ' hidden') + '>×</button>' +
-          '<span class="u">MB/s</span></span>' +
-      '</label>' +
-      '<label class="bw-card up' + (upVal > 0 ? ' has-val' : '') + (upOk() ? '' : ' is-dis') + '">' +
-        '<span class="bw-card-top"><span class="bw-dir"><i class="bw-dot up"></i>↑ 上行上限</span><span class="bw-eq num" data-bw-eq="up">' + upEq + '</span></span>' +
-        '<span class="box bw-box"><input type="number" inputmode="decimal" min="0" max="1000" step="0.1" placeholder="' + (upOk() ? '不限速' : '不支持') + '" value="' + upStr + '" data-f="up"' + upDis + '>' +
-          '<button type="button" class="bw-clr" data-bw-clr="up" aria-label="清空上行"' + (upStr ? '' : ' hidden') + '>×</button>' +
-          '<span class="u">MB/s</span></span>' +
-      '</label>' +
+  h += '<div class="dev-pane" data-dev-pane="limit"' + (curTab === 'limit' ? '' : ' hidden') + '>' +
+    '<div class="ctrl lcc-ctrl bw-ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:7px"><i></i>双栈带宽限速 (IPv4 + IPv6)</span><button type="button" class="linkish" data-act="tpl">限速模板</button></div>' + effLine(d) +
+      (htbOk() ? '' : '<div class="note err">当前内核 / tc 不支持 HTB，限速不可用</div>') +
+      '<div class="bw-cards">' +
+        '<label class="bw-card dn' + (dnVal > 0 ? ' has-val' : '') + '">' +
+          '<span class="bw-card-top"><span class="bw-dir"><i class="bw-dot dn"></i>↓ 下行上限</span><span class="bw-eq num" data-bw-eq="down">' + dnEq + '</span></span>' +
+          '<span class="box bw-box"><input type="number" inputmode="decimal" min="0" max="1000" step="0.1" placeholder="不限速" value="' + dnStr + '" data-f="down"' + dis + '>' +
+            '<button type="button" class="bw-clr" data-bw-clr="down" aria-label="清空下行"' + (dnStr ? '' : ' hidden') + '>×</button>' +
+            '<span class="u">MB/s</span></span>' +
+        '</label>' +
+        '<label class="bw-card up' + (upVal > 0 ? ' has-val' : '') + (upOk() ? '' : ' is-dis') + '">' +
+          '<span class="bw-card-top"><span class="bw-dir"><i class="bw-dot up"></i>↑ 上行上限</span><span class="bw-eq num" data-bw-eq="up">' + upEq + '</span></span>' +
+          '<span class="box bw-box"><input type="number" inputmode="decimal" min="0" max="1000" step="0.1" placeholder="' + (upOk() ? '不限速' : '不支持') + '" value="' + upStr + '" data-f="up"' + upDis + '>' +
+            '<button type="button" class="bw-clr" data-bw-clr="up" aria-label="清空上行"' + (upStr ? '' : ' hidden') + '>×</button>' +
+            '<span class="u">MB/s</span></span>' +
+        '</label>' +
+      '</div>' +
+      (upOk() && offloadRisk() ? '<div class="note warn">检测到系统 offload（' + esc(S.offload.detail) + '），应用限速时将自动通知 hotspotd 切慢路径</div>' : '') +
+      '<div class="btns"><button class="btn sec press" data-act="clear-limit"' + busy + '>清除</button><button class="btn pri press" data-act="apply-limit"' + busy + dis + '>应用限速</button></div>' +
     '</div>' +
-    '<div class="bw-tip">直接输入数值（留空或填 0 为不限速，输入后按回车或点「应用限速」生效）</div>' +
-    (upOk() && offloadRisk() ? '<div class="note warn">系统硬件 offload（' + esc(S.offload.detail) + '）可能绕过 tc，上行限速可能偏松</div>' : '') +
-    '<div class="btns"><button class="btn sec press" data-act="clear-limit"' + busy + '>清除</button><button class="btn pri press" data-act="apply-limit"' + busy + dis + '>应用限速</button></div></div>';
-  // 流量配额 / 分时段(折叠, 不把卡片撑得太长)
-  if (S.polSupport || d.eff) h += quotaFold(d) + schedFold(d);
-  // 不常用的控制收进「更多控制」: QoS 校准 / 延迟注入 / 低延迟·白名单 / 识别 / 加密 DNS / 7 天曲线
-  var more = '';
-  // QoS 校准(仅 root HTB fallback 时)
-  if (qosFallback()) {
-    var qm = S.cfg.tc_qos_mode || LS.get('hnc.qos-mode', 'compat'), qsc = String(S.cfg.tc_qos_scale || LS.get('hnc.qos-scale', '100'));
-    more += '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--orange)"></i>限速策略 · 已进入 root HTB 兼容链路</div>' +
-      seg('qos-mode', [['precise', '精确'], ['compat', '兼容']], qm, 'small') + seg('qos-scale', [['100', '标准'], ['85', '稳准'], ['75', '严格']], qsc, 'small') +
-      '<div class="note">精确模式减小 burst；校准越严格，实测越接近设定值，但可能略低于目标。</div></div>';
-  }
-  // 延迟
-  more += '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--purple)"></i>延迟注入</div>' +
-    (netemOk() ? '' : '<div class="note err">当前内核 / tc 不支持 netem，延迟注入不可用</div>') +
-    (d.sqm ? '<div class="note warn">已开启低延迟模式，与延迟注入互斥</div>' : '') +
-    (d.appQos ? '<div class="note warn">已开启按应用分优先级，与延迟注入互斥</div>' : '') +
-    seg('delay-pre', [[0, '关闭'], [50, '50ms'], [100, '100ms'], [200, '200ms']], [0, 50, 100, 200].indexOf(d.delay) >= 0 ? d.delay : -1, 'small') +
-    '<div class="grid2" style="grid-template-columns:1fr 1fr 1fr"><label class="field">延迟<span class="box"><input type="number" min="0" max="10000" placeholder="0" value="' + (d.delay || '') + '" data-f="delay"' + dlDis + '><span class="u">ms</span></span></label>' +
-    '<label class="field">抖动<span class="box"><input type="number" min="0" max="5000" placeholder="0" value="' + (d.jitter || '') + '" data-f="jitter"' + dlDis + '><span class="u">ms</span></span></label>' +
-    '<label class="field">丢包<span class="box"><input type="number" min="0" max="100" step="0.1" placeholder="0" value="' + (d.loss || '') + '" data-f="loss"' + dlDis + '><span class="u">%</span></span></label></div>' +
-    '<div class="btns"><button class="btn sec press" data-act="clear-delay"' + busy + '>清除</button><button class="btn pri press" data-act="apply-delay"' + busy + (d.sqm || d.appQos ? ' disabled' : dlDis) + '>应用延迟</button></div></div>';
-  // 低延迟 / 白名单
-  more += '<div class="ctrl" style="gap:0;padding:4px 0">' +
-    '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">低延迟模式</div><div class="s">游戏/语音更稳 · <span data-qdisc>' + esc(qdiscNote()) + '</span>' + (d.hasDelay ? '（先清除延迟注入）' : '') + '</div></span>' + toggle(d.sqm, 'data-act="sqm" aria-label="低延迟模式"' + (d.hasDelay || !htbOk() ? ' disabled' : '')) + '</div>' +
-    // v5.30 T4: 按应用分优先级(默认关, 逐台开)
-    '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">按应用分优先级</div><div class="s">游戏 / 通话 &gt; 视频 / 浏览 &gt; 下载 / 更新 / 云同步 · 只管下载方向' + (d.hasDelay ? '（先清除延迟注入）' : '') + '</div></span>' + toggle(d.appQos, 'data-act="appqos" aria-label="按应用分优先级"' + (d.hasDelay || !htbOk() ? ' disabled' : '')) + '</div>' +
-    '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">白名单</div><div class="s">开启白名单模式后，只有白名单设备能上网</div></span>' + toggle(d.wl, 'data-act="wl" aria-label="白名单"') + '</div></div>';
-  // 实时连接(conntrack) —— 展开时拉一次, 「查看全部」打开实时刷新的弹层
-  if (d.online) h += '<div class="ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;gap:6px;align-items:center"><i style="background:var(--orange)"></i>实时连接</span><button class="linkish" data-act="conns">查看全部</button></div><div data-conn-mini>' + connMiniHtml(d.mac) + '</div></div>';
-  // 设备识别
-  more += identBlock(d);
-  // 加密 DNS 按设备覆盖
-  more += encdnsDevBlock(d);
-  // 应用限速
-  h += '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--green)"></i>按应用限速</div><div data-applim>' + appLimitRows(d) + '</div></div>';
-  // 应用使用时长 + 限时 / 按类别封锁
-  h += appTimeFold(d) + catBlockFold(d);
-  // 7 天曲线
-  more += '<div class="ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;gap:6px;align-items:center"><i style="background:var(--cyan)"></i>近 7 天 · 每小时流量</span><button class="linkish" data-act="trend">加载</button></div><div data-trend class="note">点「加载」查看这台设备 7 天内各时段的流量分布</div></div>';
-  var on = [d.hasDelay ? '延迟 ' + (d.delay || 0) + 'ms' : '', d.sqm ? '低延迟' : '', d.appQos ? '按应用分优先级' : '', d.wl ? '白名单' : ''].filter(Boolean);
-  h += dFold('more-' + d.mac, 'var(--gray,#8E8E93)', '更多控制', esc(on.length ? on.join(' · ') : '延迟注入 · 低延迟 · 白名单 · 识别 · 趋势'), '<div class="more-in">' + more + '</div>');
-  // 访问控制 + 其他
-  h += (d.blocked ? '<button class="btn ok wide press" data-act="unblock"' + busy + '>' + uiSvg('check') + ' 解除封锁</button>'
-    : '<button class="btn dan wide hold" data-act="hold"' + busy + '><i class="fill"></i><span>长按封锁设备</span></button>') +
-    '<div class="btns"><button class="btn sec press" data-act="rename">' + ico('edit') + '重命名</button><button class="btn sec press" data-act="copy-mac">' + ico('copy') + '复制 MAC</button></div>' +
-    '<dl class="kv" style="padding:0 4px"><dt>IP</dt><dd>' + esc(d.ip || '—') + '</dd><dt>MAC</dt><dd>' + esc(d.mac) + '</dd>' +
-    (d.vendor ? '<dt>厂商</dt><dd>' + esc(d.vendor) + '</dd>' : '') + '<dt>最后出现</dt><dd>' + (d.online ? '在线' : ago(d.lastSeen)) + '</dd>' +
-    (d.mark != null && d.mark !== '' ? '<dt>mark</dt><dd>0x' + (0x800000 + num(d.mark)).toString(16) + '</dd>' : '') + (d.applyError ? '<dt>错误</dt><dd style="color:var(--red)">' + esc(d.applyError) + '</dd>' : '') + '</dl>';
+    dFold('dly-' + d.mac, 'var(--purple)', '弱网延迟与丢包注入', d.hasDelay ? ('延迟 ' + (d.delay || 0) + 'ms · 丢包 ' + (d.loss || 0) + '%') : '默认关闭 · 测试用',
+      (netemOk() ? '' : '<div class="note err">当前内核不支持 netem</div>') +
+      (d.sqm || d.appQos ? '<div class="note warn">低延迟 / 应用分流开启时与延迟注入互斥</div>' : '') +
+      seg('delay-pre', [[0, '关闭'], [50, '50ms'], [100, '100ms'], [200, '200ms']], [0, 50, 100, 200].indexOf(d.delay) >= 0 ? d.delay : -1, 'small') +
+      '<div class="grid2" style="grid-template-columns:1fr 1fr 1fr;margin-top:8px"><label class="field">延迟<span class="box"><input type="number" min="0" max="10000" placeholder="0" value="' + (d.delay || '') + '" data-f="delay"' + dlDis + '><span class="u">ms</span></span></label>' +
+      '<label class="field">抖动<span class="box"><input type="number" min="0" max="5000" placeholder="0" value="' + (d.jitter || '') + '" data-f="jitter"' + dlDis + '><span class="u">ms</span></span></label>' +
+      '<label class="field">丢包<span class="box"><input type="number" min="0" max="100" step="0.1" placeholder="0" value="' + (d.loss || '') + '" data-f="loss"' + dlDis + '><span class="u">%</span></span></label></div>' +
+      '<div class="btns" style="margin-top:8px"><button class="btn sec press" data-act="clear-delay"' + busy + '>清除</button><button class="btn pri press" data-act="apply-delay"' + busy + (d.sqm || d.appQos ? ' disabled' : dlDis) + '>应用延迟</button></div>') +
+  '</div>';
+
+  // ── Pane 2: 应用配额 (按应用限速 + 流量配额 + 分时段 + 应用时长/类别封锁) ──
+  h += '<div class="dev-pane" data-dev-pane="quota"' + (curTab === 'quota' ? '' : ' hidden') + '>' +
+    '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--green)"></i>按应用限速</div><div data-applim>' + appLimitRows(d) + '</div></div>' +
+    ((S.polSupport || d.eff) ? quotaFold(d) + schedFold(d) : '') +
+    appTimeFold(d) + catBlockFold(d) +
+  '</div>';
+
+  // ── Pane 3: 连接画像 (设备指纹 + 加密 DNS + 7天趋势 + 改名/封锁/详情) ──
+  h += '<div class="dev-pane" data-dev-pane="conn"' + (curTab === 'conn' ? '' : ' hidden') + '>' +
+    identBlock(d) +
+    encdnsDevBlock(d) +
+    '<div class="ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;gap:6px;align-items:center"><i style="background:var(--cyan)"></i>近 7 天每小时流量</span><button class="linkish" data-act="trend">加载</button></div><div data-trend class="note">点「加载」查看 7 天内各时段流量分布</div></div>' +
+    '<div class="btns"><button class="btn sec press" data-act="rename">' + ico('edit') + '重命名</button><button class="btn sec press" data-act="copy-mac">' + ico('copy') + '复制 MAC</button>' +
+      (d.online ? '<button class="btn sec press" data-act="fg-tl">前台时间线</button>' : '') + '</div>' +
+    (d.blocked ? '<button class="btn ok wide press" data-act="unblock"' + busy + '>' + uiSvg('check') + ' 解除封锁</button>'
+      : '<button class="btn dan wide hold" data-act="hold"' + busy + '><i class="fill"></i><span>长按 0.8s 封锁此设备</span></button>') +
+    '<dl class="kv" style="padding:0 4px"><dt>IP / MAC</dt><dd class="mono">' + esc(d.ip || '—') + ' · ' + esc(d.mac) + '</dd>' +
+      (d.vendor ? '<dt>厂商</dt><dd>' + esc(d.vendor) + '</dd>' : '') +
+      (d.mark != null && d.mark !== '' ? '<dt>流控标记</dt><dd class="mono">0x' + (0x800000 + num(d.mark)).toString(16) + '</dd>' : '') +
+      (d.applyError ? '<dt>错误</dt><dd style="color:var(--red)">' + esc(d.applyError) + '</dd>' : '') + '</dl>' +
+  '</div>';
+
   return h + '</div>';
 }
 var HN_SRC = { dhcp: 'DHCP', dhcpv6: 'DHCPv6', mdns: 'mDNS', nbns: 'NetBIOS', manual: '手动命名', mac: 'MAC' };
@@ -578,6 +576,13 @@ function appLimNote(x) {
   if (!t) return '<div class="note appq-n">还没观察到这个应用的服务器地址，它联网后自动生效</div>';
   if (!l) return '<div class="note warn appq-n">这个应用的地址都与其他应用共用，限速暂未生效' + (sk ? '（跳过 ' + sk + ' 个共享 CDN 地址）' : '') + '</div>';
   return '<div class="note appq-n">已限速 ' + l + ' 个地址' + (sk ? ' · 跳过 ' + sk + ' 个共享 CDN 地址' : '') + (S.appLimitShared ? ' · 含共享地址' : '') + '</div>';
+}
+function rmacGuardBannerHtml(d) {
+  if (!d || !d.rmacGuarded) return '';
+  var mTxt = d.rmacGuardMode === 'quarantine' ? '默认隔离断网' : '默认安全限速';
+  return '<div class="mrg rmac-guard-bar"><div class="mrg-t">' + ico('shield') +
+    '<span>新接入未知随机 MAC · 已自动套用<b>' + mTxt + '</b>护栏<span class="note" style="display:block;font-weight:500">防止手机频繁换随机 MAC 绕过限速或封锁；确认是自家设备可一键放行</span></span></div>' +
+    '<div class="btns"><button class="btn pri press" data-act="rmac-trust">信任此设备并解除护栏</button></div></div>';
 }
 function devCard(d) {
   var r = bps(d.rx), t = bps(d.tx), open = !wide() && S.open[d.mac], closing = !open && !wide() && S.closingAt && Date.now() - (S.closingAt[d.mac] || 0) < 800;

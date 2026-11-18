@@ -16,10 +16,15 @@ function calHtml(r) {
     (c.low_volume ? '<div class="note">本期蜂窝流量还太少，偏差仅供参考</div>' : '');
 }
 function calSimLine(r, sm) {
-  if (sm.netstats_cycle_used == null) return '';
-  var c = r.calibration || {}, ns = (c.netstats_cell_by_sim || []).filter(function (x) { return num(x.slot) === num(sm.slot); })[0];
-  if (r.primary_source === 'netstats' && sm.hnc_cycle_used != null) return '<div class="pu-ns">系统统计（当前采用）· HNC 自采 ' + bytes(sm.hnc_cycle_used) + '</div>';
-  return '<div class="pu-ns">系统统计 ' + bytes(sm.netstats_cycle_used) + (ns && ns.hnc_vs_netstats_pct != null ? ' · HNC ' + calFmtPct(ns.hnc_vs_netstats_pct) : '') + '</div>';
+  var parts = [];
+  if (sm.cycle_used_source === 'carrier_anchor') parts.push('已按掌厅账单校准');
+  else if (sm.cycle_used_source === 'netstats_auto') parts.push('智能检测到硬件分流/半途装机 · 已自动切换系统统计');
+  if (sm.netstats_cycle_used != null) {
+    var c = r.calibration || {}, ns = (c.netstats_cell_by_sim || []).filter(function (x) { return num(x.slot) === num(sm.slot); })[0];
+    if (r.primary_source === 'netstats' && sm.hnc_cycle_used != null) parts.push('系统 NetworkStats ' + bytes(sm.netstats_cycle_used) + ' · HNC 网卡差分 ' + bytes(sm.hnc_cycle_used));
+    else parts.push('系统统计 ' + bytes(sm.netstats_cycle_used) + (ns && ns.hnc_vs_netstats_pct != null ? ' · HNC ' + calFmtPct(ns.hnc_vs_netstats_pct) : ''));
+  }
+  return parts.length ? '<div class="pu-ns">' + parts.join(' · ') + '</div>' : '';
 }
 
 /* ═════════════════════ 分析页 · 流量统计(原版统计页) ═════════════════════ */
@@ -35,7 +40,7 @@ function counts() {
 }
 function updateStatsCounters() { $$('#p-stats [data-cnt]').forEach(function (el, i) { var c = counts()[i]; if (c) tween(el, c[0], 0); }); }
 function renderStats(anim1) {
-  var h = '<div class="wrap">' + seg('aseg', [['stats', '流量统计'], ['dpi', 'DPI 分析']], S.aseg) + '<div id="aseg-body" class="subview">' + (S.aseg === 'stats' ? statsBody() : dpiBody()) + '</div></div>';
+  var h = '<div class="wrap">' + seg('aseg', [['stats', '流量账单'], ['dpi', 'DPI 与自训']], S.aseg) + '<div id="aseg-body" class="subview">' + (S.aseg === 'stats' ? statsBody() : dpiBody()) + '</div></div>';
   var p = $('#p-stats'); if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h; placeSegs(p);
   if (anim1) stagger($('.wrap', p));
   afterAseg();
@@ -60,11 +65,29 @@ function puBodyHtml() {
   h += calHtml(r);   // 与系统统计对账
   var sims = Array.isArray(r.by_sim) ? r.by_sim : [];
   h += sims.length ? '<div>' + sims.map(function (sm) {
-    var lab = num(sm.slot) ? '卡' + num(sm.slot) + (sm.carrier ? ' · ' + sm.carrier : '') : '蜂窝（未知卡）', plan = num(sm.plan_bytes), used = num(sm.cycle_used), pct = sm.used_pct == null ? null : num(sm.used_pct);
-    return '<div class="pu-sim"><div class="h"><span class="n">' + esc(lab) + (sm.is_default_data ? '<span class="badge b-acc">上网卡</span>' : '') + '</span><span class="v num">' + bytes(used) + (plan ? '<span style="color:var(--text-3);font-weight:500"> / ' + trim0(gb(plan).toFixed(1)) + ' GB</span>' : '') + '</span></div>' +
+    var slotN = num(sm.slot), lab = slotN ? '卡' + slotN + (sm.carrier ? ' · ' + sm.carrier : '') : '蜂窝（未知卡）';
+    var plan = num(sm.plan_bytes), planGB = plan ? Number(trim0(gb(plan).toFixed(2))) : 0, used = num(sm.cycle_used), pct = sm.used_pct == null ? null : num(sm.used_pct);
+    var editing = slotN > 0 && S.puEditSlot === slotN;
+    var ancVal = slotN === 1 ? cfg.anchor_sim1_gb : cfg.anchor_sim2_gb;
+    var editBtn = slotN > 0 ? '<button type="button" class="pu-sim-act press" data-act="pu-sim-edit" data-slot="' + slotN + '">' + (editing ? '收起' : (plan ? '改套餐 · 校准' : '+ 设套餐')) + '</button>' : '';
+    var editorHtml = editing ? (
+      '<div class="pu-sim-editor" data-sim-box="' + slotN + '">' +
+        '<div class="note" style="font-weight:600;color:var(--text-1)">快捷设定卡' + slotN + ' 月套餐容量（0 = 不设上限）</div>' +
+        '<div class="pu-pre-chips">' + [0, 30, 50, 100, 200, 300].map(function (g0) {
+          return '<button type="button" class="press' + (Math.abs(planGB - g0) < 0.01 ? ' on' : '') + '" data-pu-pre="' + g0 + '" data-slot="' + slotN + '">' + (g0 ? g0 + ' GB' : '不设套餐') + '</button>';
+        }).join('') + '</div>' +
+        '<div class="grid2">' +
+          '<label class="field">卡' + slotN + ' 套餐上限<span class="box"><input type="number" min="0" step="1" inputmode="decimal" id="pu-in-plan-' + slotN + '" value="' + (planGB || '') + '" placeholder="填 0 为不限"><span class="u">GB</span></span></label>' +
+          '<label class="field">每月计费日<span class="box"><input type="number" min="1" max="28" inputmode="numeric" id="pu-in-bd-' + slotN + '" value="' + num(cfg.billing_day, 1) + '"><span class="u">号</span></span></label>' +
+        '</div>' +
+        '<label class="field">运营商掌厅当前已用校准（可选，解决免流包或半途装机误差）<span class="box"><input type="number" min="0" step="0.01" inputmode="decimal" id="pu-in-anc-' + slotN + '" value="' + (ancVal != null && num(ancVal) > 0 ? trim0(num(ancVal).toFixed(2)) : '') + '" placeholder="留空则按网卡/系统自动统计"><span class="u">GB</span></span></label>' +
+        '<div class="btns"><button type="button" class="btn sec press" data-act="pu-sim-edit" data-slot="0">取消</button><button type="button" class="btn pri press" data-act="pu-inline-save" data-slot="' + slotN + '">保存卡' + slotN + ' 设置</button></div>' +
+      '</div>'
+    ) : '';
+    return '<div class="pu-sim"><div class="h"><span class="n">' + ico('sim') + ' ' + esc(lab) + (sm.is_default_data ? '<span class="badge b-acc">上网卡</span>' : '') + editBtn + '</span><span class="v num">' + bytes(used) + (plan ? '<span style="color:var(--text-3);font-weight:500"> / ' + trim0(gb(plan).toFixed(1)) + ' GB</span>' : '<span style="color:var(--text-3);font-size:12px;font-weight:500"> · 未设套餐</span>') + '</span></div>' +
       (plan && pct != null ? '<div class="pbar' + (pct >= 100 ? ' over' : pct >= warn ? ' warn' : '') + '"><i style="width:' + clamp(pct, 0, 100).toFixed(1) + '%"></i></div><div class="note' + (pct >= 100 ? ' err' : pct >= warn ? ' warn' : '') + '">本期已用 ' + trim0(pct.toFixed(1)) + '%' + (pct >= 100 ? ' · 已超出套餐 ' + bytes(used - plan) : ' · 剩余 ' + bytes(plan - used)) + '</div>'
-        : '<div class="note">本期已用 · ' + (num(sm.slot) ? '没设套餐，在下方「套餐与计费日」里填' : '没认出是哪张卡') + '</div>') + calSimLine(r, sm) +
-      '<div class="note">' + (S.puPeriod === 'cycle' ? '' : '所选时段 ' + bytes(sm.total) + ' · ') + '其中热点 ' + bytes(sm.hotspot_total) + '</div></div>';
+        : '<div class="note">本期已用 ' + bytes(used) + (slotN ? ' · 点上方「+ 设套餐」一键配置套餐容量与免流校准' : ' · 暂未识别卡槽') + '</div>') + calSimLine(r, sm) +
+      '<div class="note">' + (S.puPeriod === 'cycle' ? '' : '所选时段 ' + bytes(sm.total) + ' · ') + '其中热点分摊 ' + bytes(sm.hotspot_total) + '</div>' + editorHtml + '</div>';
   }).join('') + '</div>' : '<div class="note">这段时间还没有蜂窝流量记录</div>';
   h += '<div class="pu-tiles">' + [['蜂窝', g('cellular'), PU_C.cell], ['Wi-Fi', g('wifi'), PU_C.wifi], ['热点', g('hotspot'), PU_C.hotspot]].map(function (x) {
     return '<div class="pu-tile"><div class="l"><i style="background:' + x[2] + '"></i>' + x[0] + '</div><div class="v num">' + bytes(x[1]) + '</div></div>'; }).join('') + '</div>';
@@ -134,8 +157,8 @@ function statsBody() {
     '<div class="sec"><span>按应用 <small id="st-apps-t">' + RANGE_T[S.statsRange] + ' · 真实流量</small></span></div><div class="glass" style="padding:12px 14px" id="st-apps"><div class="note">加载中…</div></div>' +
     '<div class="glass' + (S.open.detail ? ' open' : '') + '" id="detail"><button class="card-h" data-act="fold" data-key="detail"><span class="tx"><div class="t">流量明细</div><div class="s">只列有流量的时段 · 点开查看</div></span>' + ico('chev', 'chev') + '</button>' +
       '<div class="fold"><div><div class="fold-in tbl" id="tbl"></div></div></div></div>' +
-    '<div class="sec"><span>TC 命令参考</span></div>' +
-    '<pre class="glass tcref"><span class="c"># 下行限速 (热点接口 egress)</span>\n<span class="k">tc</span> qdisc add dev ' + esc(S.hotspot.iface || 'wlan2') + ' root handle <span class="h">1:</span> htb default 999\n<span class="k">tc</span> class add dev ' + esc(S.hotspot.iface || 'wlan2') + ' parent <span class="h">1:</span> classid <span class="h">1:14</span> \\\n  htb rate <span class="v">10mbit</span> ceil <span class="v">10mbit</span>\n\n<span class="c"># 上行限速 (ingress 经 IFB)</span>\n<span class="k">tc</span> qdisc add dev ' + esc(S.hotspot.iface || 'wlan2') + ' handle <span class="h">ffff:</span> ingress\n<span class="k">tc</span> filter add dev ' + esc(S.hotspot.iface || 'wlan2') + ' parent <span class="h">ffff:</span> protocol ip \\\n  u32 match u32 0 0 action mirred egress redirect dev ifb0\n\n<span class="c"># 延迟注入 (netem)</span>\n<span class="k">tc</span> qdisc add dev ' + esc(S.hotspot.iface || 'wlan2') + ' parent <span class="h">1:14</span> handle <span class="h">101:</span> \\\n  netem delay <span class="v">200ms 20ms</span> loss <span class="v">1%</span></pre>';
+    '<div class="sec"><span>热点设备本月排行 <small>计费周期口径</small></span></div>' +
+    '<div class="glass" style="padding:12px 14px" id="pu-dev-rank">' + hsMonthRankHtml() + '</div>';
 }
 var RANGE_DAYS = { today: 1, week: 7, month: 30 };
 S.appUsage = {};
@@ -238,6 +261,7 @@ function loadDpi(full) {
     ps.push(loadDpiHist(S.dpiDays)); ps.push(loadAppUsage(S.dpiDays)); ps.push(loadDpiUnk(S.dpiDays));
     if (KSU || S.procHealthOk !== false) ps.push(loadProcHealth());
     ps.push(loadDisc());
+    ps.push(api.getSafe('/api/self/studio', null, null).then(function (r) { if (r) S.studio = r; }));
   }
   return Promise.all(ps).then(function () { if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); paintAppsDot(); });
 }
@@ -249,20 +273,38 @@ function loadDpiHist(days, force) {
 function loadProcHealth() {
   return api.get('/api/proc_health', null, { timeout: 9000 }).then(function (r) { S.proc = r; S.procHealthOk = true; }).catch(function () { S.proc = null; S.procHealthOk = false; });
 }
+function hsMonthRankHtml() {
+  var um = S.usage && S.usage.devices;
+  if (!um) return '<div class="note">加载设备月度用量中…</div>';
+  var list = Object.keys(um).map(function (mac) {
+    var u = um[mac] || {}, d = devBy(mac);
+    return { mac: mac, name: d ? d.name : mac, v: num(u.rx) + num(u.tx), rx: num(u.rx), tx: num(u.tx) };
+  }).filter(function (x) { return x.v > 0; }).sort(function (a, b) { return b.v - a.v; }).slice(0, 8);
+  if (!list.length) return '<div class="note">本计费周期暂无热点设备流量记录</div>';
+  var mx = list[0].v || 1, tot = sum(list, function (x) { return x.v; }) || 1;
+  return list.map(function (x, i) {
+    return '<div class="hbar"><span class="n">' + esc(x.name) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, x.v / mx * 100).toFixed(1) + '%;background:' + HIST_COLORS[i % 8] + '"></i></span><span class="v">' + bytes(x.v) + ' · ' + Math.round(x.v / tot * 100) + '%</span></div>';
+  }).join('');
+}
+
 function dpiBody() {
-  return '<div id="dpi-hero"></div><div class="glass" id="disc-entry" style="margin-top:12px">' + discEntryHtml() + '</div><div class="cols"><div>' +
-      '<div class="sec"><span>流量历史 <small>热点设备 · 按应用</small></span>' + seg('hist', [[1, '今日'], [3, '3 天'], [7, '7 天']], S.dpiDays, 'small') + '</div><div class="glass" style="padding:12px 14px" id="dpi-hist"></div>' +
-      '<div class="sec"><span>活跃设备 <small>应用画像</small></span>' + seg('dflt', [['all', '全部'], ['active', '活跃'], ['high', '高置信']], S.dpiFilter, 'small') + '</div><div class="glass" id="dpi-clients"></div>' +
-      '<div class="sec"><span>设备画像 <small>DHCP / mDNS / 域名被动指纹</small></span></div><div class="glass" id="dpi-ident"></div>' +
+  return '<div id="dpi-hero"></div>' +
+    '<div id="dpi-studio-slot" style="margin-top:12px">' + (typeof selfStudioCardHtml === 'function' ? selfStudioCardHtml() : '') + '</div>' +
+    '<div class="glass" style="margin-top:12px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px">' +
+      '<span style="font-size:12.5px;color:var(--text-2)">新发现应用确认、候选域名晋级与规则库编辑已统一收口至<b>「应用 → 应用规则中心」</b></span>' +
+      '<button type="button" class="btn sec press" data-act="go-rules-hub" style="white-space:nowrap">前往规则中心 ›</button>' +
+    '</div>' +
+    '<div class="cols" style="margin-top:12px"><div>' +
+      '<div class="sec"><span>热点按应用流量历史</span>' + seg('hist', [[1, '今日'], [3, '3 天'], [7, '7 天']], S.dpiDays, 'small') + '</div><div class="glass" style="padding:12px 14px" id="dpi-hist"></div>' +
+      '<div class="sec"><span>活跃客户端画像</span>' + seg('dflt', [['all', '全部'], ['active', '活跃'], ['high', '高置信']], S.dpiFilter, 'small') + '</div><div class="glass" id="dpi-clients"></div>' +
+      '<div class="sec"><span>终端型号被动识别 <small>DHCP / mDNS / 指纹</small></span></div><div class="glass" id="dpi-ident"></div>' +
     '</div><div>' +
-      '<div class="sec"><span>总体状态</span><button class="linkish" data-act="dpi-refresh">刷新</button></div><div class="glass rows" id="dpi-status"></div>' +
-      '<div class="sec"><span>能力探测</span></div><div class="glass rows" id="dpi-probe"></div>' +
-      '<div class="sec"><span>未识别流量 <small>规则库没认出的去向 · 按流量排序</small></span></div><div class="glass" id="dpi-unk2"></div>' +
-      '<div class="sec"><span>补库助手 <small id="dpi-unknown-t">没被规则认出来的域名 · 一键生成规则模板</small></span></div><div class="glass sni" id="dpi-unknown"></div>' +
-      '<div class="sec"><span>DPI 规则库</span></div><div class="glass' + (S.open.rules ? ' open' : '') + '" id="rules"><button class="card-h" data-act="fold" data-key="rules">' + gi('blue', 'doc') + '<span class="tx"><div class="t">导出 / 导入 / 在线更新</div><div class="s">自定义规则 JSON，最大 512 KB</div></span>' + ico('chev', 'chev') + '</button>' +
-        '<div class="fold"><div><div class="fold-in set-body"><textarea class="textarea" id="rules-text" spellcheck="false" placeholder="点「导出」读取当前规则库，或粘贴规则 JSON 后点「导入」"></textarea>' +
-        '<div class="btns" style="flex-wrap:wrap"><button class="btn sec press" data-act="rules-export">导出</button><button class="btn pri press" data-act="rules-import">导入</button></div>' +
-        '<div class="btns" style="flex-wrap:wrap"><button class="btn sec press" data-act="rules-update">检查在线更新</button><button class="btn dan press" data-act="rules-reset">恢复内置</button></div><div class="out" id="rules-out" hidden></div></div></div></div></div>' +
+      '<div class="sec"><span>识别准确率自评与引擎健康</span><button class="linkish" data-act="dpi-refresh">刷新</button></div>' +
+      (typeof evalFold === 'function' ? '<div class="glass rows" style="margin-bottom:12px">' + evalFold() + '</div>' : '') +
+      '<div class="glass rows" id="dpi-status"></div>' +
+      '<div class="sec"><span>内核抓包与分流探测</span></div><div class="glass rows" id="dpi-probe"></div>' +
+      '<div class="sec"><span>未识别去向流量监测</span></div><div class="glass" id="dpi-unk2"></div>' +
+      '<div class="sec"><span>诊断样本导出</span></div>' + (typeof exportDiagBoxHtml === 'function' ? exportDiagBoxHtml() : '') +
     '</div></div>';
 }
 function fmtN(n) { n = num(n); return n >= 1e6 ? (n / 1e6).toFixed(2) + 'M' : n >= 1e4 ? (n / 1e3).toFixed(1) + 'K' : String(Math.round(n)); }
@@ -281,7 +323,15 @@ function paintDpi() {
     '<span class="badge ' + badge[1] + '" style="font-size:12px;padding:5px 10px">' + (badge[1] === 'b-ok' ? '<span class="breathe"></span>&nbsp;' : '') + esc(badge[0]) + '</span></div>' +
     (st ? '<div class="note" style="margin-top:6px">' + esc(st.interface || '—') + ' · 运行 ' + hms(st.uptime_s) + (st.stall_seconds ? ' · 停滞 ' + st.stall_seconds + ' 秒' : '') + (st.blind_reason ? ' · ' + esc(st.blind_reason) : '') + ' · 客户端 ' + num(st.client_count) + '</div>' : '') +
     '<div class="grid">' + [['packets', '已抓包', 'var(--blue)'], ['dns_events', 'DNS 事件', 'var(--cyan)'], ['tls_events', 'TLS 事件', 'var(--purple)'], ['kernel_drops', '内核丢包', 'var(--red)']].map(function (x) {
-      return '<div><div class="n num">' + fmtN(s[x[0]]) + '</div><div class="l">' + x[1] + '</div>' + sparkSvg(S.dpiSpark[x[0]], x[2]) + '</div>'; }).join('') + '</div></div>';
+      return '<div><div class="n num">' + fmtN(s[x[0]]) + '</div><div class="l">' + x[1] + '</div>' + sparkSvg(S.dpiSpark[x[0]], x[2]) + '</div>'; }).join('') + '</div>' +
+    '<div class="dpi-algo-bar">' +
+      '<span class="dpi-algo-pill"><b>零样本</b> 8跳 CNAME 穿透</span>' +
+      '<span class="dpi-algo-pill"><b>零样本</b> 120ms 时间因果突发传播</span>' +
+      '<span class="dpi-algo-pill"><b>抗会话裂变</b> TLSFP + QUIC 几何特征</span>' +
+      '<span class="dpi-algo-pill"><b>K≥1 少样本</b> IDF-Jaccard + SPLT 原型</span>' +
+    '</div></div>';
+  var stSlot = $('#dpi-studio-slot');
+  if (stSlot && !stSlot.contains(document.activeElement) && typeof selfStudioCardHtml === 'function') { morph(stSlot, selfStudioCardHtml()); placeSegs(stSlot); }
   // 状态
   var ur = st && st.unidentified_ratio, p = S.proc;
   $('#dpi-status').innerHTML = !st ? stRow('dpid', esc(S.dpiErr || (r && r.error) || '未运行'), 'bad') :
@@ -547,12 +597,26 @@ function paintIdent() {
 function paintUnknown() {
   var el = $('#dpi-unknown'); if (!el) return;
   var unk = unknownHints(), list = unk || domainHints();
-  var tt = $('#dpi-unknown-t'); if (tt) tt.textContent = unk ? '没被规则认出来的域名 · 一键生成规则模板' : '设备访问最多的域名 · 一键生成规则模板';
+  var tt = $('#dpi-unknown-t'); if (tt) tt.textContent = unk ? '自动标注公共 CDN / SDK · 避免误绑单应用' : '高频域名观察 · 自动识别公共基础设施';
   if (!list) { el.innerHTML = '<div class="empty">等待 dpid 数据…</div>'; return; }
-  if (!list.length) { el.innerHTML = '<div class="empty">还没有抓到域名</div>'; return; }
-  el.innerHTML = list.map(function (u) {
-    return '<div class="sni-row"><span class="dw"><span class="d">' + esc(u.n) + '</span><span class="c">' + Object.keys(u.k).join('/') + ' · ' + u.c + ' 次 · 后缀 ' + esc(guessSuffix(u.n)) + '</span></span><button class="btn sec press" data-rule-tpl="' + esc(u.n) + '">生成规则</button></div>';
-  }).join('');
+  if (!list.length) { el.innerHTML = '<div class="empty">还没有抓到未识别域名</div>'; return; }
+  var sharedCnt = 0;
+  var enriched = list.map(function (u) {
+    var inf = typeof classifyInfraHost === 'function' ? classifyInfraHost(u.n) : null;
+    if (inf && inf.shared) sharedCnt++;
+    return { u: u, inf: inf };
+  });
+  var shown = S.hideSharedUnk ? enriched.filter(function (x) { return !(x.inf && x.inf.shared); }) : enriched;
+  var bar = '<div class="sni-row" style="justify-content:space-between;background:var(--input)">' +
+    '<span style="font-size:12px;color:var(--text-2)">共 ' + enriched.length + ' 个域名，已自动豁免 <b>' + sharedCnt + '</b> 个公共 CDN/SDK</span>' +
+    '<button type="button" class="wp-mpill press' + (S.hideSharedUnk ? ' on' : '') + '" data-act="toggle-hide-shared">' +
+      (S.hideSharedUnk ? '已隐藏公共 CDN (' + sharedCnt + ')' : '隐藏公共 CDN/SDK') +
+    '</button></div>';
+  el.innerHTML = bar + (shown.length ? shown.map(function (x) {
+    var u = x.u, inf = x.inf, isSh = inf && inf.shared;
+    return '<div class="sni-row' + (isSh ? ' is-shared-infra' : '') + '"><span class="dw"><span class="d" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' + esc(u.n) + ' ' + (inf ? infraBadgeHtml(inf) : '') + '</span><span class="c">' + Object.keys(u.k).join('/') + ' · ' + u.c + ' 次 · 后缀 ' + esc(guessSuffix(u.n)) + (isSh ? ' · 多应用共用基础设施' : '') + '</span></span>' +
+      (isSh ? '<span class="badge b-gray">已豁免</span>' : '<button class="btn sec press" data-rule-tpl="' + esc(u.n) + '">生成规则</button>') + '</div>';
+  }).join('') : '<div class="empty">过滤公共 CDN/SDK 后暂无剩余未知专属域名</div>');
 }
 function ruleTemplate(host) {
   var suf = guessSuffix(host), ta = $('#rules-text'); if (!ta || !suf) return;

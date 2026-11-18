@@ -388,13 +388,10 @@ func dnsMergeIPNames(out map[string]ipName, snap map[string]dnsIPName) {
 		}
 		if ok && strings.EqualFold(cur.Name, e.name) {
 			cur.Src = "dns"
-			if e.ts > cur.Ts {
-				cur.Ts = e.ts
-			}
 			out[ip] = cur
 			continue
 		}
-		out[ip] = ipName{Name: e.name, Src: "dns", Ts: e.ts}
+		out[ip] = ipName{Name: e.name, Src: "dns"}
 	}
 }
 

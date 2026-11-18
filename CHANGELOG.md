@@ -1,3 +1,11 @@
+## v5.38.0 (2026-11-18)
+
+- **「应用」与「分析」前后端高内聚重构**：将「本机真值常驻自训工作台」迁入「分析 → DPI 与自训」，并将分散在 3 个页面的新发现应用、飞轮候选、未识别域名纠错与规则包合并为「应用 → 应用规则中心」，配套新增 `/api/apps_overview`、`/api/rules_hub`、`/api/dpi_cockpit` 聚合接口。
+- **双 SIM 套餐卡片内一键直改与智能对账升级**：在「本月流量」每张 SIM 卡行内提供套餐容量、计费日与掌厅校准锚点一键直编；在 `auto` 模式下检测到高通 IPA / 联发科 MDDP 硬件加速漏计或半途安装时自动采用系统 `NetworkStatsService` 权威值。
+- **热点本机 5G / Wi-Fi 信号实时感知 (`signal_monitor.go`)**：零唤醒读取 `dumpsys telephony.registry` (`5G SA/NSA RSRP/SINR`) 与 `cmd wifi status`，联动 `5G Autorate` 弱信号动态预收口与跨制式切换 `BaseRTT` 重锚定，并在顶栏实时展示信号胶囊与四象限卡顿诊断。
+- **零样本 / 极少样本新一代不解密 DPI**：新增去瞬态扩展 `TLSFP` + `QUICGeom` 几何特征、8 跳 DNS CNAME 专属 CDN 回溯、120ms 门控时间因果突发传播引擎 (`CausalBurstEngine`) 以及 `K>=1` 少样本 IDF-Jaccard + SPLT 原型匹配器 (`PrototypeStore`)。
+- **交互与数据面体验根治**：实现液态玻璃底栏按压膨胀放大折射滑块；根治展开设备卡片自动乱滑并将 9 块面板减负为 3-Tab 抽屉；移除陌生随机 MAC 默认限速/默认隔离护栏；全套统一为 `24×24` `1.85px` 双层光学纯矢量 SVG；补齐无 IFB 机型 IPv6 上行 `police` 限速与限速即刻 `v6_sync`。
+
 # HNC 更新日志
 
 > 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) + [Semantic Versioning 2.0.0](https://semver.org/lang/zh-CN/).

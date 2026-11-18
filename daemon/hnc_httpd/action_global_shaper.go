@@ -16,10 +16,19 @@ import "strings"
 //
 // 诚实边界:固定 ceil 对蜂窝(速率乱跳)效果有限;最适合稳定链路(WiFi 中继 / 固定
 // WISP / 光猫)。这是设计如此,不是 bug —— UI 文案已注明。
-func actionGlobalShaperSet(hncDir string, p map[string]string) actionResp {
+func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
+	hncDir := s.hncDir
+	if rawAR, hasAR := p["autorate_enabled"]; hasAR && strings.TrimSpace(rawAR) != "" {
+		if arOn, ok := parseBoolStr(rawAR); ok && arOn {
+			return actionAutorateSet(s, p)
+		}
+	}
 	enabled, ok := parseEnabledParam(p)
 	if !ok {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
+	}
+	if s.autorate != nil {
+		s.autorate.DisableFromStaticShaper()
 	}
 
 	if !enabled {

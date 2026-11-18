@@ -50,6 +50,9 @@ type flowEntry struct {
 	lastBucketStart int64
 	lastBucketPkts  uint32
 	emaPPS          float64
+
+	// v5.37.0: 零堆分配前 10 包 SPLT 序列特征跟踪器
+	splt FlowSPLTTracker
 }
 
 type flowTracker struct {

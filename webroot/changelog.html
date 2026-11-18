@@ -13,6 +13,26 @@
   </defs>
 </svg>
 <div class="cl-section">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-sparkles"/></svg>v5.38.0(正式版): 应用规则中心与 DPI 自训舱双区重构 · 双 SIM 套餐行内直改与掌厅校准 · 本机 5G 实时信号感知 · 零/少样本加密 DPI 进化 · 液态膨胀放大折射底栏 · 无 IFB 双栈限速补齐 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-18</span></div>
+  <ul class="cl-list">
+    <li><b>「应用」与「分析」双区前后端联动重构</b>：将「本机真值常驻自训工作台」迁入「分析 → DPI 与自训」，并将新发现应用、飞轮候选、未识别域名补库、识别纠正与规则包合并为「应用 → 应用规则中心」。</li>
+    <li><b>双 SIM 套餐卡片内一键直改与智能对账</b>：支持每张 SIM 卡行内快捷预设套餐、计费日与掌厅账单校准；<span class="mono">auto</span> 模式下检测到 IPA 硬件分流或半途安装时自动采用系统 <span class="mono">NetworkStats</span> 权威数据。</li>
+    <li><b>热点手机实时 5G / Wi-Fi 信号感知</b>：零唤醒读取 <span class="mono">dumpsys telephony.registry</span> 实时展示 RSRP/SINR 与四象限网络诊断，并联动 <span class="mono">5G Autorate</span> 弱信号预收口与跨制式 RTT 重锚定。</li>
+    <li><b>零样本 / 少样本新一代加密 DPI</b>：新增去瞬态扩展 <span class="mono">TLSFP</span>、<span class="mono">QUICGeom</span>、8 跳 CNAME 链回溯、120ms 门控时间因果突发传播及 K≥1 少样本 IDF-Jaccard/SPLT 原型匹配。</li>
+    <li><b>底栏折射放大滑块、防乱滑与设备卡 3-Tab 减负</b>：复刻按压膨胀放大液态折射滑块；根治点开设备卡自动向下乱滑，移除陌生随机 MAC 默认限速/隔离护栏，并将设备卡内部收拢为清爽 3-Tab 抽屉。</li>
+  </ul>
+</div>
+<div class="cl-section">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-sparkles"/></svg>v5.37.0(正式版): 亮屏智能常驻 DPI 自训练 · 不解密 ECA/SPLT 流序列指纹 · 上游 5G 自适应总带宽 · 随机 MAC 全栈护栏与客户端隔离 · 冰晶透景壁纸重构 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-18</span></div>
+  <ul class="cl-list">
+    <li><b>亮屏智能常驻 DPI 自训练 + inotify 零轮询唤醒</b>: 彻底收口原「应用 → 设置」散装三开关与自训工作台的竞态冲突，统一为「亮屏智能常驻 / 15m 集中快训 / 关闭」单状态机；亮屏自动挂载双路 UID 真值采集，熄屏立即休眠零耗电并在静默 25 秒后自动增量蒸馏；<code>dpid</code> 改用 Linux <code>inotify</code> 事件监听替代 80ms 轮询。</li>
+    <li><b>运营商级不解密 ECA/SPLT 首包序列指纹</b>: 无需 MITM 证书解密，在 <code>dpid</code> 内联零分配提取每条连接前 8 个负载包的方向与包长桶序列（SPLT），联合 JA4、QUIC 传输参数（QTP）与冷启动序列编译下发至 <code>run/dpi_fp_compiled.json</code>，大幅提升 ECH / 无域名加密流与手游 UDP 识别率。</li>
+    <li><b>原子级防火墙批处理 + 上游 5G 自适应总带宽 (Autorate)</b>: <code>apply_app_limits.sh</code> 与 <code>apply_app_qos.sh</code> 升级为单次 <code>iptables-restore --noflush</code> / <code>ip6tables-restore --noflush</code> 原子提交；新增绑定上游蜂窝口的 <code>SO_BINDTODEVICE</code> RTT 膨胀探测与 HTB/CAKE 总带宽动态伸缩控制器，无活跃客户端自动零唤醒休眠。</li>
+    <li><b>随机 MAC 无感自动继承 + 陌生护栏 + 客户端互访隔离</b>: 匹配分 ≥ 85 的换 MAC 设备离线切换后零弹窗自动继承名称、限速、配额与历史流量；支持对陌生随机 MAC 自动套用默认限速/隔离护栏、离线短命随机 MAC 自动回收 <code>mark_id</code> 与邻居表，以及热点客户端 L3 互访隔离（<code>HNC_ISOLATE</code>）。</li>
+    <li><b>自定义壁纸真冰晶透景光学重构与全仓清障</b>: 根除自定义壁纸下弹层、子面板、搜索框与底栏滑块的奶白实心底及 1px 粉笔白边/锯齿边（校准 Hyalite 双通道平滑折射 <code>slope ≤ 0.88</code> 与三区亮度阈值），修复 5 处实机路径偏差并清理冗余死代码。</li>
+  </ul>
+</div>
+<div class="cl-section">
   <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-sparkles"/></svg>v5.36.0(正式版): 纯正双层次矢量 SVG 图标全面回归 · 无界微晶自定义壁纸与烟熏水滴底栏 · 四大主题 120fps 专属物理动效 · 10 路全栈终极加固 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-18</span></div>
   <ul class="cl-list">
     <li><b>纯正双层次矢量 SVG 图标全面回归</b>: 彻底移除全部臃肿位图图标与手机原生 Emoji，换装 Apple SF Symbols / Lucide 双层次纯矢量内联 SVG（8 类终端设备、4 格控制中心 Bento 磁贴、光学棱镜徽章与全套状态微图标），任意分辨率锋利无压字。</li>
@@ -22,7 +42,7 @@
   </ul>
 </div>
 
-<div class="card">
+<div class="cl-section">
   <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-sparkles"/></svg>v5.35.0(正式版): 自定义壁纸光学底座 · 底栏零漂移 · 本机真值 DPI 自训练工作台 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-18</span></div>
   <ul class="cl-list">
     <li><b>自定义壁纸光学底座重构</b>: 根治手机端首帧探针静默误触发 <code>lowfx</code> 锁死纯白实心底、四层浅白雾膜叠乘与 <code>.dev</code> 绘制遏制阻断背景采样问题；新增「液态玻璃 / 经典毛玻璃」双模实时切换与全层级浓度滑杆联动。</li>

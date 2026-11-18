@@ -492,9 +492,8 @@ func loadExistingExpansions() (map[string]autoExpandedRule, error) {
 // We don't need a function here; loadL3Rules() handles it. This is a
 // docstring placeholder for the design intent.
 func invalidateRuleCache() {
-	// Touch the rule cache's reset path. The cache invalidates by
-	// stat-checking the dir each call, so writing a new file in the
-	// dir is sufficient. This function exists as documentation of intent.
+	bumpRuleReloadGen()
+	BumpCompiledFPGen()
 }
 
 

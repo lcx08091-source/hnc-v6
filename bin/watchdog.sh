@@ -311,11 +311,14 @@ full_restore() {
         rm -f "$RUN/tc_restore_pending" 2>/dev/null
         # v5.35.1: HTB 根树重建已清空 v6 u32 过滤器、应用限速 1:900x 子类与 App QoS 1:a00x 子树,
         # 立即失效缓存签名并同步恢复双栈子系统, 避免长达 30s 的规则真空期!
-        rm -f "$RUN/app_limits.full.sig" "$RUN/app_qos.sig" 2>/dev/null
+        rm -f "$RUN/app_limits.full_state.sig" "$RUN/app_qos.sig" 2>/dev/null
         touch "$RUN/app_limit.dirty" 2>/dev/null || true
         [ -f "$HNC_DIR/bin/v6_sync.sh" ] && sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
         [ -f "$HNC_DIR/bin/apply_app_limits.sh" ] && sh "$HNC_DIR/bin/apply_app_limits.sh" >> "$LOG" 2>&1 || true
         [ -f "$HNC_DIR/bin/apply_app_qos.sh" ] && sh "$HNC_DIR/bin/apply_app_qos.sh" >> "$LOG" 2>&1 || true
+        if tr -d '\n' < "$HNC_DIR/data/rules.json" 2>/dev/null | grep -Eq '"client_isolation_enabled"[[:space:]]*:[[:space:]]*(true|"true")'; then
+            sh "$HNC_DIR/bin/iptables_manager.sh" set_isolation "$iface" on >> "$LOG" 2>&1 || true
+        fi
     fi
     if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
         log "full_restore: tc restore busy/lock lost (rc=$tc_restore_rc), not counted as repair failure; marked pending"
@@ -473,6 +476,15 @@ do_migrate() {
     # v5.32 及以前不带远程参数, 一迁移远程访问就没了)。
     echo "ACTIVE:$new" > "$STATE_FILE"
     log "STATE entered ACTIVE:$new"
+    rm -f "$RUN/app_limits.full_state.sig" "$RUN/app_qos.sig" 2>/dev/null
+    if [ -f "$RUN/app_qos.plan" ]; then
+        sed "s/^iface .*/iface $new/" "$RUN/app_qos.plan" > "$RUN/app_qos.plan.mig" 2>/dev/null && mv -f "$RUN/app_qos.plan.mig" "$RUN/app_qos.plan" 2>/dev/null || true
+    fi
+    [ -f "$HNC_DIR/bin/apply_app_limits.sh" ] && sh "$HNC_DIR/bin/apply_app_limits.sh" >> "$LOG" 2>&1 || true
+    [ -f "$HNC_DIR/bin/apply_app_qos.sh" ] && sh "$HNC_DIR/bin/apply_app_qos.sh" >> "$LOG" 2>&1 || true
+    if tr -d '\n' < "$HNC_DIR/data/rules.json" 2>/dev/null | grep -Eq '"client_isolation_enabled"[[:space:]]*:[[:space:]]*(true|"true")'; then
+        sh "$HNC_DIR/bin/iptables_manager.sh" set_isolation "$new" on >> "$LOG" 2>&1 || true
+    fi
     # v5.12: 白名单模式的 DROP 规则带 `-i <热点口>`(接口取自 hnc_state)。迁移后
     # 不重同步,DROP 仍挂在旧接口上,新接口上的非白名单设备全部放行(封锁失效)。
     # 必须在上面写入新 STATE 之后调用,whitelist_mode_on 才能拿到新接口。

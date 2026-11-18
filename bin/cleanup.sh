@@ -160,9 +160,10 @@ for _ifc in $_cand_ifaces wlan2; do
         for _pf in 1 2 50 199 200; do
             tc filter del dev "$_ifc" parent 1: pref "$_pf" 2>/dev/null || true
         done
-        _p=201
+        _p=101
         while [ "$_p" -le 299 ]; do
             tc filter del dev "$_ifc" parent 1: prio "$_p" protocol ipv6 2>/dev/null || true
+            tc filter del dev "$_ifc" parent 1: prio "$_p" protocol ip 2>/dev/null || true
             _p=$((_p + 1))
         done
         tc class show dev "$_ifc" 2>/dev/null | awk '/class htb 1:/{print $3}' | while IFS= read -r _cid; do
@@ -179,6 +180,13 @@ for _ifc in $_cand_ifaces wlan2; do
     # 精确移除 HNC 自装的 ingress pref 1 mirred filter(保留 AOSP clsact qdisc 本身)
     tc filter del dev "$_ifc" ingress pref 1 2>/dev/null || true
     tc filter del dev "$_ifc" parent ffff: pref 1 2>/dev/null || true
+    _pp=301
+    while [ "$_pp" -le 400 ]; do
+        tc filter del dev "$_ifc" parent ffff: prio "$_pp" protocol all 2>/dev/null || true
+        tc filter del dev "$_ifc" parent ffff: prio "$_pp" protocol ip 2>/dev/null || true
+        tc filter del dev "$_ifc" parent ffff: prio "$_pp" protocol ipv6 2>/dev/null || true
+        _pp=$((_pp + 1))
+    done
     tc qdisc show dev "$_ifc" 2>/dev/null | grep -q "qdisc ingress ffff:" && tc qdisc del dev "$_ifc" ingress 2>/dev/null || true
 done
 # 若卸载/全停时热点网卡早已销毁, 兜底解绑 /sys/fs/bpf/hnc 避免内核 eBPF map 泄漏

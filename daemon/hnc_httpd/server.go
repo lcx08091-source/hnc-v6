@@ -66,6 +66,10 @@ type server struct {
 	jsonCache *jsonFileCache
 	// 设备配额 + 分时段限速控制器(limit_policy.go)
 	limitCtl *limitCtl
+	// v5.37.0: 上游 5G 信号波动自适应总带宽控制器(autorate.go)
+	autorate *autorateCtl
+	// v5.38.0: 零唤醒热点本机 5G/Wi-Fi 实时信号质量监测器(signal_monitor.go)
+	signalCtl *signalMonitor
 }
 
 func newServer(hncDir string) *server {
@@ -79,6 +83,8 @@ func newServer(hncDir string) *server {
 		rates:        make(map[string]rateOut),
 	}
 	s.limitCtl = newLimitCtl(hncDir, &s.actionMu)
+	s.autorate = newAutorateCtl(hncDir)
+	s.signalCtl = newSignalMonitor(hncDir)
 	ipOwnerConfigure(hncDir) // DPI v2: 离线 IP 归属库路径(ip_owner.go, 首次查询时懒加载)
 	return s
 }
@@ -115,6 +121,11 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/events", s.apiEvents) // rc44: SSE 推送(仅远程 SPA)
 	mux.HandleFunc("/api/stats", s.apiStats)
 	mux.HandleFunc("/api/templates", s.apiTemplates)
+	mux.HandleFunc("/api/autorate", s.apiAutorate)
+	mux.HandleFunc("/api/signal", s.apiSignal)
+	mux.HandleFunc("/api/apps_overview", s.apiAppsOverview)
+	mux.HandleFunc("/api/rules_hub", s.apiRulesHub)
+	mux.HandleFunc("/api/dpi_cockpit", s.apiDPICockpit)
 	// v5.3.0-rc12: DPI passive observability (hnc_dpid daemon)
 	mux.HandleFunc("/api/dpi_state", s.apiDPIState)
 	mux.HandleFunc("/api/dpi_probe", s.apiDPIProbe)
@@ -163,10 +174,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/sim", s.apiSim)                  // 模拟环境状态(sim.go)
 	mux.HandleFunc("/api/mac_merge", s.apiMacMerge)       // v5.21: 随机 MAC 疑似同一设备建议 + 别名表(mac_merge.go)
 	mux.HandleFunc("/api/power", s.apiPower)              // v5.22: 功耗自测 + 活动状态 + 各循环当前间隔(power_stats.go)
-	// v5.0 serve 磁盘 webroot/changelog.html
-	mux.HandleFunc("/changelog.html", s.serveChangelog)
-	// v5.9.9: json-health.html 此前没有路由(死页面), 补上, 与 changelog 同款只读 serve。
-	// (ndpi-lab.html / classic.html 已随 nDPI 实验与旧版界面一并删除)
+	mux.HandleFunc("/changelog.html", s.serveWebrootPage("changelog.html"))
 	mux.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "/", http.StatusFound)
 	})
@@ -175,8 +183,6 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/dpi_distill", s.requireMutation(s.apiDPIDistill))
 	// v5.11: 新 WebUI 的底栏折射库(Hyalite, MIT)
 	mux.HandleFunc("/hyalite.js", s.serveWebrootPage("hyalite.js"))
-	// v5.19: 全新界面 HNC Glass 预览(示例数据)
-	mux.HandleFunc("/glass.html", s.serveWebrootPage("glass.html"))
 	// v5.22: WebUI 拆分后的样式/脚本(webroot/css/*.css、webroot/js/*.js), 逐个字面量注册
 	for _, a := range webuiAssets {
 		mux.HandleFunc("/"+a, s.serveWebrootPage(a))
@@ -233,6 +239,16 @@ func loadIndexDiskOnce() []byte {
 	return indexDiskBytes
 }
 
+func (s *server) resolveWebrootPath(name string) string {
+	if s != nil && s.hncDir != "" {
+		cand := filepath.Join(s.hncDir, "webroot", name)
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Size() > 0 {
+			return cand
+		}
+	}
+	return webrootDiskDir + name
+}
+
 func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path != "/" {
 		http.NotFound(w, r)
@@ -240,23 +256,12 @@ func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	// rc3.1.13.2 P0-A 深度防御: CSP 限定 script/style 源头, 减小 XSS 爆炸半径.
-	// 内联 script/style 由 webroot/index.html 大量使用, unsafe-inline 必须保留.
-	// 但禁掉 object/base/frame 还是能挡掉一部分 XSS payload (如 <object data=javascript:>).
-	// 真正修法是 esc() (已在 webroot/index.html 全部 ${d.xxx} 注入点加上).
-	w.Header().Set("Content-Security-Policy",
-		"default-src 'self'; "+
-			"script-src 'self' 'unsafe-inline'; "+
-			"style-src 'self' 'unsafe-inline'; "+
-			"img-src 'self' data:; "+
-			"connect-src 'self' http://127.0.0.1:8444; "+
-			"object-src 'none'; "+
-			"base-uri 'self'; "+
-			"frame-ancestors 'none'")
-	// v5.11 起 webroot/index.html(v6)一份页面同时支持 KSU 桥接与浏览器同源 fetch,
-	// 本机 KSU WebView、本机浏览器、远程浏览器都用它。v5.33 删掉了编进二进制的旧版
-	// 页面(web/app.html / app.js / style.css)和按来源 / UA 二选一的逻辑 ——
-	// 磁盘页面读不到只可能是安装不完整, 直接说明, 不再退回旧页面。
+	if p := s.resolveWebrootPath("index.html"); p != webrootDiskDir+"index.html" {
+		if data, err := os.ReadFile(p); err == nil && len(data) > 0 {
+			_, _ = w.Write(data)
+			return
+		}
+	}
 	if data := loadIndexDiskOnce(); data != nil {
 		_, _ = w.Write(data)
 		return
@@ -265,34 +270,12 @@ func (s *server) serveIndex(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("<!doctype html><meta charset=utf-8><p>HNC WebUI 文件缺失(webroot/index.html),安装不完整,请重新刷入模块。</p>"))
 }
 
-// serveChangelog · v5.0 新增, serve 磁盘 webroot/changelog.html 给 lazy load 用
-func (s *server) serveChangelog(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("X-Content-Type-Options", "nosniff")
-	diskPath := "/data/adb/modules/hotspot_network_control/webroot/changelog.html"
-	if data, err := os.ReadFile(diskPath); err == nil && len(data) > 0 {
-		_, _ = w.Write(data)
-		return
-	}
-	http.NotFound(w, r)
-}
-
-// serveWebrootPage 返回一个只读 serve 磁盘 webroot/<name> 的 handler。
-// v5.9.9: 抽出来给 json-health.html / hyalite.js 共用(与 serveChangelog
-// 同款: 固定磁盘路径 + nosniff, 文件缺失 404)。name 由调用方以字面量给出,
-// 不接受请求参数, 无路径穿越面。
-//
-// v5.22: .css/.js(WebUI 拆分后的静态资源)额外带 Cache-Control: no-cache +
-// Last-Modified —— 浏览器每次用 If-Modified-Since 回源校验(未变 304), 模块升级后
-// 不会拿旧脚本配新页面; 没有构建步骤, 所以不做 ?v= 版本号。HTML 仍一次写完
-// (securityHeaders 要在首个 Write 里看到完整文档才能算内联脚本 hash)。
 func (s *server) serveWebrootPage(name string) http.HandlerFunc {
-	diskPath := webrootDiskDir + name
 	ctype := "text/html; charset=utf-8"
 	asset := false
 	switch {
 	case strings.HasSuffix(name, ".js"):
-		ctype = "application/javascript; charset=utf-8" // v5.11: hyalite.js(nosniff 下类型错了浏览器会拒绝执行)
+		ctype = "application/javascript; charset=utf-8"
 		asset = true
 	case strings.HasSuffix(name, ".css"):
 		ctype = "text/css; charset=utf-8"
@@ -301,6 +284,7 @@ func (s *server) serveWebrootPage(name string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", ctype)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
+		diskPath := s.resolveWebrootPath(name)
 		if data, err := os.ReadFile(diskPath); err == nil && len(data) > 0 {
 			if asset {
 				w.Header().Set("Cache-Control", "no-cache")

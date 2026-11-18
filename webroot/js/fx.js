@@ -344,14 +344,6 @@ Spring.prototype.step = function (t) {
 function springP() { return themePhys().sheet; }
 function appleSheet() { return motionOn() && !lowFx(); }
 var SM = { open: false, closing: false, h: 520 };
-var bgEls = function () { return [document.querySelector('.header'), document.getElementById('pages'), document.getElementById('tabbar')]; };
-function bgOrigins() {}
-var bgSpring = new Spring({ k: 360, c: 36 }, function () {
-  var r = document.documentElement;
-  r.classList.remove('bgscaled');
-  r.style.removeProperty('--bgp');
-}, null);
-bgSpring.eps = .002;
 var shSpring = new Spring({ k: 340, c: 32.5 }, function (y) {
   var sh = $('#sheet');
   if (!sh) return;
@@ -424,7 +416,7 @@ function applyMotion() {
   // 弹层打开或收起途中若关闭动画 / 开启低配简化: 立即清理弹簧与内联属性，交回静态 CSS
   if ((SM.open || SM.closing) && !appleSheet()) {
     SM.open = false; SM.closing = false;
-    shSpring.stop(); bgSpring.set(0);
+    shSpring.stop();
     var sh = document.getElementById('sheet'), sc = document.getElementById('scrim');
     if (sh) { sh.classList.remove('closing', 'is-spring', 'is-dragging'); sh.style.transform = ''; sh.style.opacity = ''; sh.style.transition = ''; }
     if (sc) sc.style.opacity = '';
@@ -474,15 +466,15 @@ var LG_OPTS = {
   toast: { bevel: 16, thickness: 22, shape: 'squircle', blur: 10, dispersion: 1.2, shade: .24, rim: 1.5, edge: 1, light: -30 }
 };
 var LG_OPTS_WP = {
-  tabbar: { bevel: 16, thickness: 30, slope: 1.02, shape: 'squircle', blur: 3.8, dispersion: .52, shade: .22, rim: .34, edgeW: 1.0, edge: .16, light: -38, sat: 1.12, materialize: 0, settle: 120 },
-  hbtn: { bevel: 14, thickness: 20, slope: 1.0, shape: 'squircle', blur: 2.2, dispersion: .42, shade: .18, rim: .36, edgeW: 1.0, edge: .16, light: -38, sat: 1.08, materialize: 0 },
-  sheet: { bevel: 22, thickness: 36, slope: .92, shape: 'squircle', blur: 22, dispersion: .45, shade: .16, rim: .42, edge: .18, light: -38, sat: 1.08, settle: 160 },
-  toast: { bevel: 15, thickness: 22, shape: 'squircle', blur: 14, dispersion: .38, shade: .16, rim: .40, edge: .16, light: -38 }
+  tabbar: { bevel: 14, thickness: 22, slope: .86, shape: 'squircle', blur: 3.2, dispersion: .26, shade: .08, rim: .04, edgeW: 0, edge: 0, light: -38, sat: 1.14, materialize: 0, settle: 120 },
+  hbtn: { bevel: 12, thickness: 16, slope: .86, shape: 'squircle', blur: 2.0, dispersion: .22, shade: .08, rim: .04, edgeW: 0, edge: 0, light: -38, sat: 1.10, materialize: 0 },
+  sheet: { bevel: 20, thickness: 28, slope: .88, shape: 'squircle', blur: 18, dispersion: .24, shade: .08, rim: .05, edgeW: 0, edge: 0, light: -38, sat: 1.12, settle: 150 },
+  toast: { bevel: 14, thickness: 18, slope: .88, shape: 'squircle', blur: 12, dispersion: .20, shade: .08, rim: .04, edgeW: 0, edge: 0, light: -38 }
 };
 var lgOn = false;
 function hasWpActive() {
   var r = document.documentElement;
-  return r.getAttribute('data-has-wp') === '1' || r.classList.contains('has-wallpaper');
+  return r.getAttribute('data-has-wp') === '1' || r.getAttribute('data-has-wallpaper') === '1' || r.classList.contains('has-wallpaper');
 }
 function lgOptsFor(kind, g, instant) {
   var wp = hasWpActive(), o = Object.assign({}, LG_OPTS[kind] || {}, wp ? (LG_OPTS_WP[kind] || {}) : {});

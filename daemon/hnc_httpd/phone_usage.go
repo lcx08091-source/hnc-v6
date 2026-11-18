@@ -319,6 +319,9 @@ func puSaveDay(hncDir string, d *puDay) error {
 type puConfig struct {
 	BillingDay  int                `json:"billing_day"`            // 1-28
 	PlanGB      map[string]float64 `json:"plan_gb"`                // "1"/"2" → GB(0 = 无套餐)
+	AnchorGB    map[string]float64 `json:"anchor_gb,omitempty"`    // v5.38.0: 运营商掌厅手动校准锚点 GB
+	AnchorBase  map[string]uint64  `json:"anchor_base,omitempty"`  // v5.38.0: 设置校准锚点时的周期累计基准字节
+	AnchorCycle string             `json:"anchor_cycle,omitempty"` // YYYYMMDD
 	WarnPercent int                `json:"warn_percent"`           // 1-100
 	UseNetstats string             `json:"use_netstats,omitempty"` // v5.21: auto|prefer|off(stats_calibration.go)
 }
@@ -352,6 +355,23 @@ func puLoadConfig(hncDir string) puConfig {
 					c.PlanGB[k] = v
 				}
 			}
+			if len(x.AnchorGB) > 0 {
+				c.AnchorGB = map[string]float64{}
+				for k, v := range x.AnchorGB {
+					if (k == "1" || k == "2") && v >= 0 && v <= puMaxPlanGB {
+						c.AnchorGB[k] = v
+					}
+				}
+			}
+			if len(x.AnchorBase) > 0 {
+				c.AnchorBase = map[string]uint64{}
+				for k, v := range x.AnchorBase {
+					if k == "1" || k == "2" {
+						c.AnchorBase[k] = v
+					}
+				}
+			}
+			c.AnchorCycle = x.AnchorCycle
 		}
 	}
 	return c
@@ -402,6 +422,48 @@ func actionPhoneUsageSet(hncDir string, p map[string]string) actionResp {
 			changed++
 		default:
 			return actionResp{OK: false, Error: "bad params", Detail: "use_netstats must be auto|prefer|off"}
+		}
+	}
+	now := time.Now()
+	cycStr := puCycleStart(now, c.BillingDay).Format("20060102")
+	for slot, key := range map[string]string{"1": "anchor_sim1_gb", "2": "anchor_sim2_gb"} {
+		if v, ok := p[key]; ok {
+			sv := strings.TrimSpace(v)
+			if sv == "" || sv == "-1" || strings.EqualFold(sv, "clear") {
+				if c.AnchorGB != nil {
+					delete(c.AnchorGB, slot)
+				}
+				if c.AnchorBase != nil {
+					delete(c.AnchorBase, slot)
+				}
+				changed++
+				continue
+			}
+			f, err := strconv.ParseFloat(sv, 64)
+			if err != nil || math.IsNaN(f) || f < 0 || f > puMaxPlanGB {
+				return actionResp{OK: false, Error: "bad params", Detail: key + " must be 0-100000 or -1 to clear"}
+			}
+			if c.AnchorGB == nil {
+				c.AnchorGB = map[string]float64{}
+			}
+			if c.AnchorBase == nil {
+				c.AnchorBase = map[string]uint64{}
+			}
+			if c.AnchorCycle != cycStr {
+				c.AnchorGB = map[string]float64{}
+				c.AnchorBase = map[string]uint64{}
+				c.AnchorCycle = cycStr
+			}
+			var baseBytes uint64
+			if puEng != nil {
+				cycDays, _, _ := puEng.daysWithSim(puCycleStart(now, c.BillingDay), now, now)
+				if a := puAggSIM(cycDays)[func() int { n, _ := strconv.Atoi(slot); return n }()]; a != nil {
+					baseBytes = a.Rx + a.Tx
+				}
+			}
+			c.AnchorGB[slot] = f
+			c.AnchorBase[slot] = baseBytes
+			changed++
 		}
 	}
 	if changed == 0 {
@@ -1136,6 +1198,7 @@ func (e *puEngine) report(period string, now time.Time) map[string]interface{} {
 		"config": map[string]interface{}{
 			"billing_day": cfg.BillingDay, "warn_percent": cfg.WarnPercent,
 			"plan_sim1_gb": cfg.PlanGB["1"], "plan_sim2_gb": cfg.PlanGB["2"],
+			"anchor_sim1_gb": cfg.AnchorGB["1"], "anchor_sim2_gb": cfg.AnchorGB["2"],
 			"use_netstats": cfg.netstatsMode(),
 		},
 		"totals": map[string]puRxTx{

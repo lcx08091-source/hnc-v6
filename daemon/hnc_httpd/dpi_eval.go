@@ -156,8 +156,14 @@ func emptyEvalResult(days int, enabled bool, note string, now time.Time) dpiEval
 // pkgAppMap 读 data/pkg_app_map.json(T3 生成), 返回 包名→应用id。
 // 文件缺失 / 损坏返回空 map(不 panic), 此时所有真值都退化成 "pkg:"+pkg。
 func pkgAppMap(hncDir string) map[string]string {
-	b, err := os.ReadFile(filepath.Join(hncDir, "data", "pkg_app_map.json"))
-	if err != nil || len(b) > 4<<20 {
+	var b []byte
+	var err error
+	for _, cand := range dataCandidates(hncDir, "pkg_app_map.json") {
+		if b, err = os.ReadFile(cand); err == nil && len(b) > 0 {
+			break
+		}
+	}
+	if err != nil || len(b) == 0 || len(b) > 4<<20 {
 		return map[string]string{}
 	}
 	var f struct {

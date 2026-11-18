@@ -627,6 +627,7 @@ func calLiveWindow(snaps []calSnap, cur calSnap, uid *nsDump) *calOffloadWin {
 	if base.FwdV6OK && cur.FwdV6OK && cur.FwdV6 >= base.FwdV6 {
 		w.FwdV6Bytes = u64p(cur.FwdV6 - base.FwdV6)
 		fwd += cur.FwdV6 - base.FwdV6
+		fwdOK = true
 	}
 	if fwdOK && enough {
 		w.FwdGapPct = calPct(nt-float64(fwd), nt)
@@ -848,11 +849,11 @@ func (c *calibrator) takeSnap(now time.Time) calSnap {
 		}
 	}
 	if c.env.run != nil {
-		if out, err := c.env.run(5*time.Second, "iptables", "-w", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
+		if out, err := c.env.run(5*time.Second, "iptables", "-w", "2", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
 			_, _, j, ok := calParseIptForward(out)
 			s.FwdV4, s.FwdV4OK = j, ok
 		}
-		if out, err := c.env.run(5*time.Second, "ip6tables", "-w", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
+		if out, err := c.env.run(5*time.Second, "ip6tables", "-w", "2", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
 			p, ok, j, jOK := calParseIptForward(out)
 			if jOK {
 				s.FwdV6, s.FwdV6OK = j, true
@@ -1022,18 +1023,50 @@ func puCalAttach(hncDir string, cfg puConfig, cycleStart, now time.Time, resp ma
 				continue
 			}
 			row["netstats_cycle_used"] = c.Total
-			if mode != "prefer" {
+			hncUsed, _ := row["cycle_used"].(uint64)
+			// v5.38.0: auto 模式下若检测到 IPA/MDDP 硬件加速漏计(OffloadKind=="hw")或装机未满整周期(!WindowFull 且系统统计显著更多),
+			// 自动无感切换本卡周期用量为系统 NetworkStats 权威值(无需手动切 prefer)!
+			autoPromote := mode == "auto" && (r.OffloadKind == "hw" || (!r.WindowFull && c.Total > hncUsed+(64<<20)))
+			if mode != "prefer" && !autoPromote {
 				continue
 			}
-			row["hnc_cycle_used"] = row["cycle_used"]
+			row["hnc_cycle_used"] = hncUsed
 			row["cycle_used"] = c.Total
-			row["cycle_used_source"] = "netstats"
+			if autoPromote {
+				row["cycle_used_source"] = "netstats_auto"
+			} else {
+				row["cycle_used_source"] = "netstats"
+			}
 			if plan, _ := row["plan_bytes"].(uint64); plan > 0 {
 				row["used_pct"] = math.Round(float64(c.Total)*1000/float64(plan)) / 10
 			}
-		}
-		if mode == "prefer" {
 			r.Primary = "netstats"
+		}
+	}
+	// v5.38.0: 运营商手动账单锚点校准(应对定向免流包或半途装机)
+	cycStr := cycleStart.Format("20060102")
+	if cfg.AnchorCycle == cycStr && len(cfg.AnchorGB) > 0 {
+		for _, row := range bySim {
+			slot, _ := row["slot"].(int)
+			sk := strconv.Itoa(slot)
+			agb, hasAnchor := cfg.AnchorGB[sk]
+			if !hasAnchor || slot <= 0 {
+				continue
+			}
+			anchorBytes := uint64(math.Round(agb * puGiB))
+			curUsed, _ := row["cycle_used"].(uint64)
+			base := cfg.AnchorBase[sk]
+			var delta uint64
+			if curUsed > base {
+				delta = curUsed - base
+			}
+			calibrated := anchorBytes + delta
+			row["raw_cycle_used"] = curUsed
+			row["cycle_used"] = calibrated
+			row["cycle_used_source"] = "carrier_anchor"
+			if plan, _ := row["plan_bytes"].(uint64); plan > 0 {
+				row["used_pct"] = math.Round(float64(calibrated)*1000/float64(plan)) / 10
+			}
 		}
 	}
 	resp["primary_source"] = r.Primary
