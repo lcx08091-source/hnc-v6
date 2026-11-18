@@ -1,4 +1,5 @@
 #!/system/bin/sh
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 # connblock_sync.sh — 「封锁这个域名 / IP(仅这台设备)」落到 iptables(v5.16)
 #
 # 来源: WebUI 实时连接里点一条连接 → 封锁。hnc_httpd 把 data/conn_blocks.json
@@ -50,6 +51,39 @@ run() {
     if [ "$DRY" = "1" ]; then echo "DRY: $*"; return 0; fi
     "$@" 2>/dev/null
 }
+
+# 互斥锁: 防止 hnc_httpd 与 watchdog full_restore 并发拆建 HNC_CONNBLK* 链
+CB_LOCK="$HNC_DIR/run/connblock.lock"
+cb_lock() {
+    [ "$DRY" = 1 ] && return 0
+    mkdir -p "$HNC_DIR/run" 2>/dev/null
+    local _n=0 _lp _ts _now
+    while ! mkdir "$CB_LOCK" 2>/dev/null; do
+        _lp=$(cat "$CB_LOCK/pid" 2>/dev/null)
+        _ts=$(cat "$CB_LOCK/ts" 2>/dev/null)
+        _now=$(date +%s 2>/dev/null || echo 0)
+        if [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; then
+            rm -rf "$CB_LOCK" 2>/dev/null
+            continue
+        fi
+        case "$_ts:$_now" in
+            *[!0-9:]*|:*) ;;
+            *) [ "$_ts" -gt 0 ] && [ $((_now - _ts)) -ge 30 ] && rm -rf "$CB_LOCK" 2>/dev/null && continue ;;
+        esac
+        _n=$((_n + 1))
+        [ "$_n" -ge 30 ] && return 1
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    echo "$$" > "$CB_LOCK/pid" 2>/dev/null
+    date +%s > "$CB_LOCK/ts" 2>/dev/null
+    return 0
+}
+cb_unlock() {
+    [ "$DRY" = 1 ] && return 0
+    [ "$(cat "$CB_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$CB_LOCK" 2>/dev/null
+}
+cb_lock || true
+trap 'cb_unlock' EXIT INT TERM
 
 v6=0
 command -v ip6tables >/dev/null 2>&1 && $IP6T -t filter -L -n >/dev/null 2>&1 && v6=1
@@ -136,7 +170,11 @@ while read -r mac ip _; do
         *:*) [ "$v6" = 1 ] || continue; T=$IP6T ;;
         *) T=$IPT ;;
     esac
-    run $T -t filter -A HNC_CONNBLK -m mac --mac-source "$mac" -d "$ip" -j REJECT && n=$((n + 1))
+    if run $T -t filter -A HNC_CONNBLK -m mac --mac-source "$mac" -d "$ip" -j REJECT; then
+        n=$((n + 1))
+    elif run $T -t filter -A HNC_CONNBLK -m mac --mac-source "$mac" -d "$ip" -j DROP; then
+        n=$((n + 1))
+    fi
     [ "$n" -ge "$MAX_RULES" ] && { log "WARN: rule cap $MAX_RULES reached"; break; }
 done < "$FLAT"
 run $IPT -t filter -I FORWARD 1 -j HNC_CONNBLK || log "WARN: v4 link failed"
@@ -144,8 +182,8 @@ run $IPT -t filter -I FORWARD 1 -j HNC_CONNBLK || log "WARN: v4 link failed"
 
 # ── DNS 层 ───────────────────────────────────────────────────────────
 dn=0
-if [ -s "$DNSLIST" ] && [ "$DNS4" = 1 ]; then
-    run $IPT -t filter -N HNC_CONNBLK_DNS
+if [ -s "$DNSLIST" ] && { [ "$DNS4" = 1 ] || [ "$DNS6" = 1 ]; }; then
+    [ "$DNS4" = 1 ] && run $IPT -t filter -N HNC_CONNBLK_DNS
     [ "$DNS6" = 1 ] && run $IP6T -t filter -N HNC_CONNBLK_DNS
     dot_macs=" "
     while read -r mac dom _; do
@@ -153,9 +191,10 @@ if [ -s "$DNSLIST" ] && [ "$DNS4" = 1 ]; then
             [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]) ;;
             *) continue ;;
         esac
+        mac=$(echo "$mac" | tr 'A-F' 'a-f')
         dom=$(echo "$dom" | tr 'A-Z' 'a-z')
         hex=$(dns_hex "$dom") || continue
-        for T in "$IPT" "$([ "$DNS6" = 1 ] && echo "$IP6T")"; do
+        for T in "$([ "$DNS4" = 1 ] && echo "$IPT")" "$([ "$DNS6" = 1 ] && echo "$IP6T")"; do
             [ -n "$T" ] || continue
             for P in udp tcp; do
                 run $T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p "$P" --dport 53 \
@@ -167,14 +206,24 @@ if [ -s "$DNSLIST" ] && [ "$DNS4" = 1 ]; then
             *" $mac "*) ;;
             *)
                 dot_macs="$dot_macs$mac "
-                run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j REJECT --reject-with tcp-reset
-                [ "$DNS6" = 1 ] && run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j REJECT --reject-with tcp-reset
+                if [ "$DNS4" = 1 ]; then
+                    run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j REJECT --reject-with tcp-reset \
+                        || run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j DROP
+                    run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p udp --dport 853 -j REJECT --reject-with icmp-port-unreachable \
+                        || run $IPT -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p udp --dport 853 -j DROP
+                fi
+                if [ "$DNS6" = 1 ]; then
+                    run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j REJECT --reject-with tcp-reset \
+                        || run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p tcp --dport 853 -j DROP
+                    run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p udp --dport 853 -j REJECT --reject-with icmp6-port-unreachable \
+                        || run $IP6T -t filter -A HNC_CONNBLK_DNS -m mac --mac-source "$mac" -p udp --dport 853 -j DROP
+                fi
                 ;;
         esac
         [ "$dn" -ge "$MAX_RULES" ] && { log "WARN: dns rule cap $MAX_RULES reached"; break; }
     done < "$DNSLIST"
     for C in INPUT FORWARD; do
-        run $IPT -t filter -I "$C" 1 -j HNC_CONNBLK_DNS || log "WARN: v4 dns link $C failed"
+        [ "$DNS4" = 1 ] && { run $IPT -t filter -I "$C" 1 -j HNC_CONNBLK_DNS || log "WARN: v4 dns link $C failed"; }
         [ "$DNS6" = 1 ] && { run $IP6T -t filter -I "$C" 1 -j HNC_CONNBLK_DNS || log "WARN: v6 dns link $C failed"; }
     done
 fi

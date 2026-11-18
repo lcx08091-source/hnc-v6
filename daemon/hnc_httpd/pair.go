@@ -91,13 +91,10 @@ func readPairPending(hncDir string) (*pairPending, error) {
 	// v5.22: expiry 上界校验。pair_gen.sh 只写 now+120; 远超的 expiry(手改 / 时钟
 	// 回拨后旧文件 / 写坏)会让一个 6 位 PIN 长期有效, 爆破窗口无界 —— 作废。
 	if expiry-now > pairMaxValiditySec {
-		_ = os.Remove(path)
+		// 严禁在未鉴权无锁读路径按路径 Remove(会 TOCTOU 误删主人刚 tmp+rename 生成的新配对码)
 		return nil, fmt.Errorf("malformed pair_pending (expiry too far in future)")
 	}
 	if now >= expiry {
-		// rc3 修 N-16: 过期顺手清, 否则下次 /api/pair/verify 仍返 expired
-		// 导致用户"刚生成就过期"死循环
-		_ = os.Remove(path)
 		return nil, fmt.Errorf("pairing expired")
 	}
 

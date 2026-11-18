@@ -132,3 +132,22 @@ void offload_set_active_adapter(offload_adapter_t *a)
 {
     s_active = a;
 }
+
+#include <unistd.h>
+
+static int (*s_sleep_fn)(int sec) = NULL;
+
+void offload_set_sleep_fn(int (*fn)(int sec))
+{
+    s_sleep_fn = fn;
+}
+
+int offload_sleep_interruptible(int sec)
+{
+    if (sec <= 0)
+        return 0;
+    if (s_sleep_fn != NULL)
+        return s_sleep_fn(sec);
+    sleep((unsigned int)sec);
+    return 0;
+}

@@ -9,7 +9,8 @@ HNC_DIR=${HNC_DIR:-/data/local/hnc}
 RUN=$HNC_DIR/run
 LOG=$HNC_DIR/logs/service.log
 
-log() { echo "[$(TZ=Asia/Shanghai date '+%H:%M:%S')] [CLEANUP] $1" >> $LOG; }
+mkdir -p "$HNC_DIR/logs" 2>/dev/null
+log() { echo "[$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)] [CLEANUP] $1" >> "$LOG" 2>/dev/null; }
 
 # rc3 修 N-15: mode dispatch
 # rules   - 只清 tc/iptables 规则, 保留进程 + JSON 数据 (WebUI "清空限速规则")
@@ -130,24 +131,60 @@ for svcpat in "hotspot_network_control/service.sh" "/data/adb/hnc/service.sh"; d
 done
 fi  # end MODE=all|restart 的进程清理分支
 
-# ── 2. 清除 TC 规则 ──────────────────────────────────────────
-IFACE=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null || echo wlan2)
-log "Cleaning TC on $IFACE and ifb0..."
-# v5.8.8 (audit): 只在 HNC 拥有该 iface 的 root qdisc 时才删(归属标记由 tc_manager
-# 写,见 tc_root_owned_$iface),避免在 ColorOS 上误删系统/别的模块的 root qdisc。
-# ingress/ifb0 是 HNC 上行整形自建的构件,属 HNC,正常清理。
-if [ -f "$HNC_DIR/run/tc_root_owned_$IFACE" ]; then
-    tc qdisc del dev "$IFACE" root 2>/dev/null
-    rm -f "$HNC_DIR/run/tc_root_owned_$IFACE" 2>/dev/null
-else
-    log "skip root qdisc del on $IFACE (no HNC ownership marker)"
+# ── 2. 清除 TC 规则(覆盖当前活跃接口 + 历史迁移/缓存接口 + mq 子树/复用树残留)──
+IFACE=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null | tr -d '\r\n ')
+_cand_ifaces="$IFACE"
+for _if_f in "$RUN/active_iface" "$RUN/hotspot_iface" "$RUN/iface.cache"; do
+    [ -f "$_if_f" ] && _cand_ifaces="$_cand_ifaces $(head -n 1 "$_if_f" 2>/dev/null | tr -d '\r\n ')"
+done
+for _mk_f in "$RUN"/tc_root_owned_* "$RUN"/tc_mq_child_*; do
+    [ -e "$_mk_f" ] || continue
+    _cand_ifaces="$_cand_ifaces ${_mk_f##*tc_*_*_}"
+done
+[ -n "$IFACE" ] || IFACE=$(printf '%s\n' $_cand_ifaces wlan2 | awk 'NF{print; exit}')
+_seen_if=" "
+for _ifc in $_cand_ifaces wlan2; do
+    case "$_ifc" in ''|*[!a-zA-Z0-9_.-]*) continue ;; esac
+    case "$_seen_if" in *" $_ifc "*) continue ;; esac
+    _seen_if="$_seen_if$_ifc "
+    log "Cleaning TC on $_ifc..."
+    if [ -f "$RUN/tc_root_owned_$_ifc" ]; then
+        tc qdisc del dev "$_ifc" root 2>/dev/null
+        rm -f "$RUN/tc_root_owned_$_ifc" 2>/dev/null
+    elif [ -f "$RUN/tc_mq_child_$_ifc" ]; then
+        # Xiaomi/ColorOS mq 根下挂载的子 HTB(parent :1 / 0:1): 不删系统 mq 根, 精确拆除 HNC 子树
+        tc qdisc del dev "$_ifc" parent :1 2>/dev/null || tc qdisc del dev "$_ifc" parent 0:1 2>/dev/null || true
+        rm -f "$RUN/tc_mq_child_$_ifc" 2>/dev/null
+    else
+        # 复用 OEM htb 1: 根的场景: 不删根, 但逐项拆除 HNC 自建的 filter 与子类(防限速幽灵残留)
+        for _pf in 1 2 50 199 200; do
+            tc filter del dev "$_ifc" parent 1: pref "$_pf" 2>/dev/null || true
+        done
+        _p=201
+        while [ "$_p" -le 299 ]; do
+            tc filter del dev "$_ifc" parent 1: prio "$_p" protocol ipv6 2>/dev/null || true
+            _p=$((_p + 1))
+        done
+        tc class show dev "$_ifc" 2>/dev/null | awk '/class htb 1:/{print $3}' | while IFS= read -r _cid; do
+            case "$_cid" in
+                1:1|1:9999) continue ;;
+                1:*) tc filter del dev "$_ifc" parent "$_cid" 2>/dev/null || true
+                     tc class del dev "$_ifc" classid "$_cid" 2>/dev/null || true ;;
+            esac
+        done
+    fi
+    if [ -x "$HNC_DIR/bin/hnc_clsact_ctl" ]; then
+        "$HNC_DIR/bin/hnc_clsact_ctl" uninstall "$_ifc" >/dev/null 2>&1 && log "clsact BPF filter/map removed on $_ifc"
+    fi
+    # 精确移除 HNC 自装的 ingress pref 1 mirred filter(保留 AOSP clsact qdisc 本身)
+    tc filter del dev "$_ifc" ingress pref 1 2>/dev/null || true
+    tc filter del dev "$_ifc" parent ffff: pref 1 2>/dev/null || true
+    tc qdisc show dev "$_ifc" 2>/dev/null | grep -q "qdisc ingress ffff:" && tc qdisc del dev "$_ifc" ingress 2>/dev/null || true
+done
+# 若卸载/全停时热点网卡早已销毁, 兜底解绑 /sys/fs/bpf/hnc 避免内核 eBPF map 泄漏
+if [ "$MODE" = "all" ] || [ "${HNC_UNINSTALL:-0}" = "1" ]; then
+    rm -rf /sys/fs/bpf/hnc 2>/dev/null || true
 fi
-# v5.9.7: clsact BPF (T1 tier) —— 精确卸自己的 pref1 filter + unpin map。
-# 故意不删 clsact qdisc: AOSP tether offload filter 也挂在它上面。
-if [ -x "$HNC_DIR/bin/hnc_clsact_ctl" ]; then
-    "$HNC_DIR/bin/hnc_clsact_ctl" uninstall "$IFACE" >/dev/null 2>&1 && log "clsact BPF filter/map removed"
-fi
-tc qdisc del dev "$IFACE" ingress 2>/dev/null
 tc qdisc del dev ifb0 root 2>/dev/null
 ip link set ifb0 down 2>/dev/null
 ip link del ifb0 2>/dev/null
@@ -168,47 +205,60 @@ log "TC cleanup done"
 # ── 3. 清除 iptables 规则 ────────────────────────────────────
 # v3.3.4：双栈清理 v4 + v6 所有 HNC 链
 log "Cleaning iptables chains (v4+v6)..."
-for table_chain in "mangle PREROUTING  HNC_RESTORE" \
-                   "mangle FORWARD     HNC_MARK"    \
-                   "mangle FORWARD     HNC_STATS"   \
-                   "mangle POSTROUTING HNC_SAVE"    \
-                   "filter FORWARD     HNC_CTRL"    \
-                   "filter FORWARD     HNC_WHITELIST" \
-                   "filter FORWARD     HNC_QUIC" \
-                   "filter FORWARD     HNC_CONNBLK" \
-                   "filter INPUT       HNC_ENCDNS" \
-                   "filter FORWARD     HNC_ENCDNS" \
-                   "filter FORWARD     HNC_ENCDNS_STRICT" \
-                   "filter FORWARD     HNC_ENCDNS_DOT"; do
-    t=$(echo $table_chain | awk '{print $1}')
-    c=$(echo $table_chain | awk '{print $2}')
-    h=$(echo $table_chain | awk '{print $3}')
-    iptables -t $t -D $c -j $h 2>/dev/null
-    iptables -t $t -F $h 2>/dev/null
-    iptables -t $t -X $h 2>/dev/null
-done
-
-# v6 清理（v3.3.4 新增：完整清理 v6 所有链，不再只清 HNC_MARK）
-if command -v ip6tables >/dev/null 2>&1; then
-    for table_chain in "mangle PREROUTING  HNC_RESTORE" \
-                       "mangle FORWARD     HNC_MARK"    \
-                       "mangle POSTROUTING HNC_SAVE"    \
-                       "filter FORWARD     HNC_CTRL"    \
-                       "filter FORWARD     HNC_WHITELIST" \
-                       "filter FORWARD     HNC_QUIC" \
-                       "filter FORWARD     HNC_CONNBLK" \
-                       "filter INPUT       HNC_ENCDNS" \
-                       "filter FORWARD     HNC_ENCDNS" \
-                       "filter FORWARD     HNC_ENCDNS_STRICT" \
-                       "filter FORWARD     HNC_ENCDNS_DOT"; do
-        t=$(echo $table_chain | awk '{print $1}')
-        c=$(echo $table_chain | awk '{print $2}')
-        h=$(echo $table_chain | awk '{print $3}')
-        ip6tables -t $t -D $c -j $h 2>/dev/null
-        ip6tables -t $t -F $h 2>/dev/null
-        ip6tables -t $t -X $h 2>/dev/null
+# v5.35.0: 双栈幂等拆链（包含 HNC_STATS v6、HNC_APP_LIMIT_UP/DOWN + 二级槽位链 HNC_AL_C*、HNC_APP_QOS_MARK/QOS_IP 与 HNC_CONNBLK_DNS）
+_cleanup_ipt_stack() {
+    _cmd="$1"
+    for _tc in "mangle PREROUTING  HNC_RESTORE" \
+               "mangle FORWARD     HNC_MARK" \
+               "mangle FORWARD     HNC_STATS" \
+               "mangle FORWARD     HNC_APP_LIMIT" \
+               "mangle FORWARD     HNC_APP_LIMIT_UP" \
+               "mangle POSTROUTING HNC_APP_LIMIT_DOWN" \
+               "mangle FORWARD     HNC_APP_QOS_MARK" \
+               "mangle POSTROUTING HNC_APP_QOS" \
+               "mangle POSTROUTING HNC_SAVE" \
+               "filter FORWARD     HNC_CTRL" \
+               "filter FORWARD     HNC_WHITELIST" \
+               "filter FORWARD     HNC_QUIC" \
+               "filter FORWARD     HNC_CONNBLK" \
+               "filter INPUT       HNC_CONNBLK_DNS" \
+               "filter FORWARD     HNC_CONNBLK_DNS" \
+               "filter INPUT       HNC_ENCDNS" \
+               "filter FORWARD     HNC_ENCDNS" \
+               "filter FORWARD     HNC_ENCDNS_STRICT" \
+               "filter FORWARD     HNC_ENCDNS_DOT"; do
+        set -- $_tc
+        _t="$1"; _p="$2"; _h="$3"
+        _n=0
+        while "$_cmd" -w 2 -t "$_t" -D "$_p" -j "$_h" 2>/dev/null; do
+            _n=$((_n + 1))
+            [ "$_n" -ge 32 ] && break
+        done
+        "$_cmd" -w 2 -t "$_t" -F "$_h" 2>/dev/null || true
     done
+    # 二级 -g 子链在父链清空后引用归零，安全清空并删除
+    "$_cmd" -w 2 -t mangle -F HNC_APP_QOS_IP 2>/dev/null || true
+    "$_cmd" -w 2 -t mangle -X HNC_APP_QOS_IP 2>/dev/null || true
+    for _al in $("$_cmd" -w 2 -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}'); do
+        [ -n "$_al" ] || continue
+        "$_cmd" -w 2 -t mangle -F "$_al" 2>/dev/null || true
+        "$_cmd" -w 2 -t mangle -X "$_al" 2>/dev/null || true
+    done
+    for _h in HNC_RESTORE HNC_MARK HNC_STATS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE; do
+        "$_cmd" -w 2 -t mangle -X "$_h" 2>/dev/null || true
+    done
+    for _h in HNC_CTRL HNC_WHITELIST HNC_QUIC HNC_CONNBLK HNC_CONNBLK_DNS HNC_ENCDNS HNC_ENCDNS_STRICT HNC_ENCDNS_DOT; do
+        "$_cmd" -w 2 -t filter -X "$_h" 2>/dev/null || true
+    done
+}
+_cleanup_ipt_stack iptables
+if command -v ip6tables >/dev/null 2>&1; then
+    _cleanup_ipt_stack ip6tables
 fi
+rm -f "$HNC_DIR/run"/app_limits.*.sig "$HNC_DIR/run/app_limits_ipstats.flat" "$HNC_DIR/run/app_limits_inactive.marker" \
+      "$HNC_DIR/run/app_limit.dirty" "$HNC_DIR/run/app_limit.dirty.processing" \
+      "$HNC_DIR/run"/app_qos.state "$HNC_DIR/run"/app_qos.sig "$HNC_DIR/run"/app_qos.plan \
+      "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null || true
 # v5.22: WebUI 访问白名单链(INPUT 上按端口挂的跳转, 上面的 "-D INPUT -j 链" 删不掉,
 # 交给脚本自己拆)。rules 模式不拆: 它是访问控制, 不是用户要清的限速规则。
 if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
@@ -235,9 +285,14 @@ rm -f "$RUN"/scan_tmp.* "$RUN"/scan_arp.* "$RUN"/.gc_* "$RUN"/.lock_check_* 2>/d
 if [ ! -f "$HNC_DIR/bin/portal_manager.sh" ]; then
     rm -f "$RUN/portal_pending.json" "$RUN/portal_sessions.json" 2>/dev/null
 fi
-rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" 2>/dev/null  # P0-2 锁残留 + rc11 hnc_json stale lock
+rm -rf "$RUN/json.lock" "$RUN/hnc_json.lock" "$RUN/lock" "$RUN/tc_action.lock" "$RUN"/tc_action.lock.stale.* \
+       "$RUN/v6_sync.lock" "$RUN/stats_v6.lock" "$RUN/app_limits.lock" "$RUN/app_qos.lock" "$RUN/connblock.lock" 2>/dev/null
 # v3.9.1: stats 临时文件 + 日期标记(stats_raw / stats_daily 是用户数据,不删)
-rm -f "$RUN"/stats_map.* "$RUN"/rollup_names.* "$RUN"/rollup_agg.* 2>/dev/null
+rm -f "$RUN"/stats_map.* "$RUN"/rollup_names.* "$RUN"/rollup_agg.* "$RUN"/.s4.* "$RUN"/.s6.* "$RUN"/.sm.* \
+      "$RUN"/.stats_* "$RUN"/tc_ifindex_* "$RUN/tc_restore_pending" 2>/dev/null
+if [ "$MODE" = "all" ]; then
+    rm -f "$RUN"/conn_blocks.* "$RUN/connblock_caps.json" "$RUN/encdns_caps.json" 2>/dev/null
+fi
 rm -f "$RUN"/stats_last_date 2>/dev/null
 # v4.0.0-patch1.3: watchdog passive mode marker
 rm -f "$RUN/watchdog_passive.marker" 2>/dev/null
@@ -268,7 +323,7 @@ if [ "$MODE" = "restart" ]; then
     done
     if [ -n "$SERVICE_SH" ]; then
         log "restart: respawning $SERVICE_SH"
-        nohup sh "$SERVICE_SH" >> "$LOG" 2>&1 &
+        nohup sh "$SERVICE_SH" </dev/null >> "$LOG" 2>&1 &
         log "service.sh forked, new pid=$!"
     else
         log "ERROR: cannot locate service.sh for restart. 用户需手动 disable/enable 模块恢复"

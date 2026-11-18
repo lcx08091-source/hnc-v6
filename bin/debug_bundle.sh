@@ -13,6 +13,7 @@
 #
 # stdout 只打印最终产物路径(WebUI 直接把它 toast 出来), 其余日志走 stderr。
 
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 set +e
 
 HNC="${HNC:-/data/local/hnc}"
@@ -35,10 +36,11 @@ log() { echo "$*" >&2; }
 
 # 脱敏: 把 password/pass/secret/token/pin/psk 的值替换为 <redacted>。
 # 与 daemon/hnc_httpd/action.go 的 sensitiveKeys 保持同一组 key。
+# POSIX/Toybox 兼容脱敏: 严禁使用 GNU sed 专有的 s///gI 标志(Toybox sed 报错会导致导出文件全部截断为 0 字节!)
 redact() {
     sed -E \
-        -e 's/("(password|pass|secret|token|pin|psk|hotspot_pass)"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"<redacted>"/g' \
-        -e 's/((password|pass|secret|token|pin|psk)[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1<redacted>/gI' \
+        -e 's/("([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk]|hotspot_pass)"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"<redacted>"/g' \
+        -e 's/(([Pp][Aa][Ss][Ss][Ww][Oo][Rr][Dd]|[Pp][Aa][Ss][Ss]|[Ss][Ee][Cc][Rr][Ee][Tt]|[Tt][Oo][Kk][Ee][Nn]|[Pp][Ii][Nn]|[Pp][Ss][Kk])[[:space:]]*=[[:space:]]*)[^[:space:]]+/\1<redacted>/g' \
         -e 's/(X-HNC-Local-Admin:[[:space:]]*)[^[:space:]]+/\1<redacted>/g'
 }
 
@@ -104,8 +106,10 @@ run_cmd ip_link        ip link
     run_cmd tc_ingress  tc filter show dev "$IFACE" ingress
 }
 run_cmd tc_ifb0        tc qdisc show dev ifb0
-run_cmd iptables_mangle iptables -t mangle -L -n -v
-run_cmd ip6tables_mangle ip6tables -t mangle -L -n -v
+run_cmd iptables_mangle iptables -w 2 -t mangle -L -n -v
+run_cmd ip6tables_mangle ip6tables -w 2 -t mangle -L -n -v
+run_cmd iptables_filter iptables -w 2 -t filter -L -n -v
+run_cmd ip6tables_filter ip6tables -w 2 -t filter -L -n -v
 run_cmd proc_net_arp   cat /proc/net/arp
 
 # ── 5. 进程与自检 ──────────────────────────────────────────

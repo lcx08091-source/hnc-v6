@@ -1130,6 +1130,11 @@ func (t *dnsTakeover) tickLocked() {
 	curSig := t.ruleSig
 	t.mu.Unlock()
 	if curSig != sig {
+		if perr != nil {
+			t.removeRulesLocked()
+			t.setState("error", "rebind selftest: "+perr.Error())
+			return
+		}
 		t.applyLocked(iface, listen[0], v4, v6, sig, now)
 		return
 	}

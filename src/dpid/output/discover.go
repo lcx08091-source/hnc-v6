@@ -40,7 +40,7 @@ const (
 	// DefaultDiscoverPath 输出/持久化默认路径。
 	DefaultDiscoverPath = "/data/local/hnc/run/dpi_discover.json"
 
-	discWindowSec      = 5     // 共现窗口(秒)
+	discWindowSec      = 3     // 共现窗口(秒, v7 收紧至 3s 抑制亮屏瞬间后台并发心跳粘连)
 	discWindowMax      = 32    // 每设备窗口最多保留条数
 	discMaxWindows     = 512   // 同时跟踪窗口的设备数上限
 	discEdgeThreshold  = 3.0   // 聚类边权阈值
@@ -69,12 +69,14 @@ const (
 
 // discMultiSuffixes 常见多级公共后缀。与 WebUI guessSuffix 同口径:
 // (com|net|org|gov|edu).cn、co.(uk|jp)、com.(au|br|hk|tw)、(ne|or).jp。
-var discMultiSuffixes = map[string]bool{
-	"com.cn": true, "net.cn": true, "org.cn": true, "gov.cn": true, "edu.cn": true,
-	"co.uk": true, "co.jp": true,
-	"com.au": true, "com.br": true, "com.hk": true, "com.tw": true,
-	"ne.jp": true, "or.jp": true,
-}
+// discMultiSuffixes 与 auto_expand.go compoundTLDs 完全统一（消除双表失步引发的国别后缀坍缩）。
+var discMultiSuffixes = func() map[string]bool {
+	m := make(map[string]bool, len(compoundTLDs))
+	for k := range compoundTLDs {
+		m[k] = true
+	}
+	return m
+}()
 
 // registrableDomain 取主机名的可注册域(eTLD+1)。纯 IP / 空名返回 ""。
 func registrableDomain(host string) string {
@@ -193,9 +195,6 @@ func NewDiscoverer() *Discoverer {
 
 // SetSharedInfraPath 设置共享基础设施名单路径(v5.30 T1c; "" = 不用名单, 只剩频度兜底)。
 func (d *Discoverer) SetSharedInfraPath(p string) {
-	if d == nil {
-		return
-	}
 	d.mu.Lock()
 	d.infra = sharedInfraFile{path: p}
 	d.mu.Unlock()
@@ -203,9 +202,6 @@ func (d *Discoverer) SetSharedInfraPath(p string) {
 
 // SetPath 设置 dpi_discover.json 路径。
 func (d *Discoverer) SetPath(p string) {
-	if d == nil {
-		return
-	}
 	d.mu.Lock()
 	d.path = p
 	d.mu.Unlock()
@@ -213,9 +209,6 @@ func (d *Discoverer) SetPath(p string) {
 
 // SetFamilyPath 设置 dpi_ja4family.json 路径。
 func (d *Discoverer) SetFamilyPath(p string) {
-	if d == nil {
-		return
-	}
 	d.mu.Lock()
 	d.famPath = p
 	d.mu.Unlock()
@@ -224,9 +217,6 @@ func (d *Discoverer) SetFamilyPath(p string) {
 // Observe 投递一次 DNS/SNI 事件。known=true 表示规则已命中(ruleID/category
 // 为命中规则), 此时只用于 JA4 家族学习; known=false 的域名进入聚类。
 func (d *Discoverer) Observe(mac, host, ja4 string, ts time.Time, known bool, ruleID, category string) {
-	if d == nil {
-		return
-	}
 	host = normalizeName(host)
 	if host == "" {
 		return
@@ -538,9 +528,6 @@ type DiscoverMember struct {
 
 // Groups 返回当前聚类结果(已过滤、排序、截断)。供测试与调试。
 func (d *Discoverer) Groups(now time.Time) []DiscoverGroup {
-	if d == nil {
-		return nil
-	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	return d.groupsLocked(now.Unix())
@@ -722,9 +709,6 @@ func topDevs(m map[string]int64, max int) []string {
 // Flush prune 后把 dpi_discover.json 与 dpi_ja4family.json 按需写盘(各自
 // 有变化才写)。签名与 flushEvery 一致。
 func (d *Discoverer) Flush(now time.Time) error {
-	if d == nil {
-		return nil
-	}
 	d.flushMu.Lock()
 	defer d.flushMu.Unlock()
 	ts := now.Unix()
@@ -795,9 +779,6 @@ func writeJSONFile(path string, v any) error {
 // 恢复节点与组: 组内节点之间补一组星形边(权重 discRestoreEdgeW, 时间取
 // generated_at), 重启后组保持合并, 没有新共现则约 24h 后自然散开。
 func (d *Discoverer) Load() error {
-	if d == nil {
-		return nil
-	}
 	d.mu.Lock()
 	path, famPath := d.path, d.famPath
 	d.mu.Unlock()

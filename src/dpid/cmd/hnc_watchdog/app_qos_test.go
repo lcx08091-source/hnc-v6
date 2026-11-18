@@ -45,8 +45,9 @@ func TestBuildAppQosPlan(t *testing.T) {
 	want := "iface wlan2\n" +
 		"dev 5 aa:bb:cc:00:00:05 192.168.43.5\n" + // 在线, 带 IP
 		"dev 7 aa:bb:cc:00:00:07\n" + // "true" / "7" 字符串也认; 不在线没有 IP
-		"ip 1 1.1.1.1\n" + // 游戏 → 实时(重复去掉; IPv6 不进 IPv4 规则)
-		"ip 3 3.3.3.3\n" // 云同步 → 后台; 视频 / 无类别 → 交互(默认档, 不列)
+		"ip 1 1.1.1.1\n" + // 游戏 → 实时(重复去掉)
+		"ip 3 3.3.3.3\n" + // 云同步 → 后台; 视频 / 无类别 → 交互(默认档, 不列)
+		"ip 1 240e::1\n" // v5.34+: 双栈 IPv6 远端实时队列
 	if n != 2 || plan != want {
 		t.Fatalf("n=%d plan=\n%s\nwant\n%s", n, plan, want)
 	}

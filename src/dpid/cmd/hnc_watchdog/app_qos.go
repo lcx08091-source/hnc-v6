@@ -142,25 +142,45 @@ func buildAppQosPlan(rules, devices, ipmap []byte, iface string) (string, int) {
 		} `json:"entries"`
 	}
 	_ = json.Unmarshal(ipmap, &m)
-	tierOf := map[string]int{}
+	type qosIPEntry struct {
+		ip   string
+		tier int
+	}
+	var v4List, v6List []qosIPEntry
+	seenIP := make(map[string]struct{})
 	for _, e := range m.Entries {
-		if net.ParseIP(e.IP).To4() == nil {
+		t := appQosTier(e.Category)
+		if t == qosTierInteractive {
 			continue
 		}
-		if t := appQosTier(e.Category); t != qosTierInteractive {
-			tierOf[e.IP] = t
+		nip := net.ParseIP(strings.TrimSpace(e.IP))
+		if nip == nil || nip.IsLoopback() || nip.IsLinkLocalUnicast() || nip.IsMulticast() || nip.IsUnspecified() {
+			continue
+		}
+		canon := nip.String()
+		if _, dup := seenIP[canon]; dup {
+			continue
+		}
+		seenIP[canon] = struct{}{}
+		if nip.To4() != nil {
+			v4List = append(v4List, qosIPEntry{ip: canon, tier: t})
+		} else {
+			v6List = append(v6List, qosIPEntry{ip: canon, tier: t})
 		}
 	}
-	ips := make([]string, 0, len(tierOf))
-	for ip := range tierOf {
-		ips = append(ips, ip)
+	sort.Slice(v4List, func(i, j int) bool { return v4List[i].ip < v4List[j].ip })
+	sort.Slice(v6List, func(i, j int) bool { return v6List[i].ip < v6List[j].ip })
+	if len(v4List) > appQosMaxIPs {
+		v4List = v4List[:appQosMaxIPs]
 	}
-	sort.Strings(ips)
-	if len(ips) > appQosMaxIPs {
-		ips = ips[:appQosMaxIPs]
+	if len(v6List) > appQosMaxIPs {
+		v6List = v6List[:appQosMaxIPs]
 	}
-	for _, ip := range ips {
-		fmt.Fprintf(&b, "ip %d %s\n", tierOf[ip], ip)
+	for _, item := range v4List {
+		fmt.Fprintf(&b, "ip %d %s\n", item.tier, item.ip)
+	}
+	for _, item := range v6List {
+		fmt.Fprintf(&b, "ip %d %s\n", item.tier, item.ip)
 	}
 	return b.String(), len(ds)
 }

@@ -2468,11 +2468,18 @@ cleanup_tc() {
     if [ -n "$iface" ] && [ -f "$HNC_DIR/run/tc_root_owned_$iface" ]; then
         tc qdisc del dev "$iface" root 2>/dev/null || true
         rm -f "$HNC_DIR/run/tc_root_owned_$iface" 2>/dev/null || true
+    elif [ -n "$iface" ] && [ -f "$HNC_DIR/run/tc_mq_child_$iface" ]; then
+        tc qdisc del dev "$iface" parent :1 2>/dev/null || tc qdisc del dev "$iface" parent 0:1 2>/dev/null || true
+        rm -f "$HNC_DIR/run/tc_mq_child_$iface" 2>/dev/null || true
     else
         log "cleanup_tc: preserving root qdisc on $iface (not owned by HNC)"
     fi
-    tc qdisc del dev "$iface" ingress 2>/dev/null || true
-    tc qdisc del dev "$iface" clsact 2>/dev/null || true
+    if [ -n "$iface" ]; then
+        # 绝不删整个 clsact qdisc(GKI AOSP tether offload BPF 程序挂载于其上), 仅摘除 HNC 自装的 pref 1!
+        tc filter del dev "$iface" ingress pref 1 2>/dev/null || true
+        tc filter del dev "$iface" parent ffff: pref 1 2>/dev/null || true
+        tc qdisc show dev "$iface" 2>/dev/null | grep -q "qdisc ingress ffff:" && tc qdisc del dev "$iface" ingress 2>/dev/null || true
+    fi
     tc qdisc del dev "$IFB_IFACE" root 2>/dev/null || true
     ip link set dev "$IFB_IFACE" down 2>/dev/null || true
     ip link del "$IFB_IFACE" 2>/dev/null || true
@@ -2585,6 +2592,7 @@ tc_action_unlock() {
 
 tc_snapshot_async() {
     local iface="$1"
+    [ "${HNC_SKIP_TC_SNAPSHOT:-0}" = "1" ] && return 0
     [ -x "$HNC_DIR/bin/tc_state_snapshot.sh" ] || return 0
     # v5.12: 重定向放到子 shell 外层 —— 旧写法子 shell 进程本身仍持有调用方的
     # stdout/stderr 管道,httpd runBin(CombinedOutput)要等快照跑完才返回。
@@ -2634,7 +2642,7 @@ case "$1" in
         rc=$?
         unset HNC_GATE_HELD
         gate_unlock
-        tc_snapshot_async "$(cat "$HNC_DIR/run/iface.cache" 2>/dev/null | head -1)"
+        tc_snapshot_async "$(head -n 1 "$HNC_DIR/run/iface.cache" 2>/dev/null)"
         tc_action_unlock
         exit $rc ;;
     ensure_ingress)

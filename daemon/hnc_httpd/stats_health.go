@@ -188,6 +188,7 @@ type shEnv struct {
 	hotspotIface func() string
 	readNetDev   func() ([]byte, error)
 	iptForward   func() (string, error)
+	ip6tForward  func() (string, error)
 	ctAcct       func() int
 }
 
@@ -197,6 +198,9 @@ func (s *server) shEnvDefault() shEnv {
 		readNetDev:   func() ([]byte, error) { return os.ReadFile("/proc/net/dev") },
 		iptForward: func() (string, error) {
 			return calRunCmd(5*time.Second, "iptables", "-w", "-t", "mangle", "-L", "FORWARD", "-nvx")
+		},
+		ip6tForward: func() (string, error) {
+			return calRunCmd(5*time.Second, "ip6tables", "-w", "-t", "mangle", "-L", "FORWARD", "-nvx")
 		},
 		ctAcct: func() int { return shReadInt("/proc/sys/net/netfilter/nf_conntrack_acct") },
 	}
@@ -232,6 +236,15 @@ func statsHealth(hncDir string, env shEnv, st *shState, now time.Time) map[strin
 			_, _, j, ok := calParseIptForward(out)
 			iptJump = ok
 			cur.Ipt, cur.IptOK = j, ok
+		}
+	}
+	if env.ip6tForward != nil {
+		if out6, err := env.ip6tForward(); err == nil {
+			if _, _, j6, ok6 := calParseIptForward(out6); ok6 {
+				cur.Ipt += j6
+				cur.IptOK = true
+				iptJump = true
+			}
 		}
 	}
 

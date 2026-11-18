@@ -3,110 +3,329 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-<title>HNC JSON 健康状态</title>
+<meta name="theme-color" content="#eef3fb" media="(prefers-color-scheme: light)" />
+<meta name="theme-color" content="#07111f" media="(prefers-color-scheme: dark)" />
+<title>HNC JSON 健康面板</title>
 <style>
-:root{--bg:#07111f;--card:rgba(255,255,255,.08);--line:rgba(255,255,255,.12);--text:#eef6ff;--muted:#91a4bd;--ok:#35d07f;--warn:#ffd166;--bad:#ff5c7a;--blue:#4ea1ff;--blue2:#7c5cff}
-*{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 15% 0%,rgba(78,161,255,.24),transparent 35%),radial-gradient(circle at 100% 20%,rgba(124,92,255,.18),transparent 36%),var(--bg);font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color:var(--text);padding:18px}.wrap{max-width:920px;margin:0 auto}.top{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px}.title{font-size:22px;font-weight:800;letter-spacing:.2px}.sub{color:var(--muted);font-size:13px;margin-top:4px}.card{background:var(--card);border:1px solid var(--line);border-radius:22px;box-shadow:0 16px 40px rgba(0,0,0,.22);backdrop-filter:blur(16px);padding:16px;margin:12px 0}.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:11px 0;border-bottom:1px solid rgba(255,255,255,.08)}.row:last-child{border-bottom:0}.name{font-weight:650}.val{color:var(--muted);font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;text-align:right;word-break:break-all}.pill{display:inline-flex;align-items:center;border-radius:999px;padding:6px 10px;font-weight:800;font-size:12px}.ok{background:rgba(53,208,127,.16);color:var(--ok)}.warn{background:rgba(255,209,102,.16);color:var(--warn)}.bad{background:rgba(255,92,122,.16);color:var(--bad)}.unknown{background:rgba(145,164,189,.14);color:var(--muted)}button{border:0;border-radius:15px;padding:11px 13px;color:white;background:linear-gradient(135deg,var(--blue),var(--blue2));font-weight:800;box-shadow:0 10px 26px rgba(78,161,255,.24)}button:disabled{opacity:.55}.btns{display:flex;flex-wrap:wrap;gap:10px}.mono{white-space:pre-wrap;word-break:break-word;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:#cfe1ff;font-size:12px;line-height:1.55}.hint{color:var(--muted);font-size:13px;line-height:1.6}.small{font-size:12px;color:var(--muted)}.sectionTitle{font-size:15px;font-weight:850;margin:14px 0 6px}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}.mini{background:rgba(255,255,255,.055);border:1px solid rgba(255,255,255,.08);border-radius:16px;padding:11px}.mini .k{font-size:12px;color:var(--muted);margin-bottom:6px}.mini .v{font-weight:800;word-break:break-word}@media(max-width:640px){.grid{grid-template-columns:1fr}}
+:root {
+  --bg: #eef3fb;
+  --orb-1: rgba(56, 189, 248, 0.26);
+  --orb-2: rgba(99, 102, 241, 0.18);
+  --card: rgba(255, 255, 255, 0.68);
+  --mini-bg: rgba(15, 23, 42, 0.035);
+  --line: rgba(15, 23, 42, 0.08);
+  --card-bd: rgba(255, 255, 255, 0.84);
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, 0.92), 0 16px 38px -16px rgba(15, 23, 42, 0.12);
+  --blur: 22px;
+  --sat: 175%;
+  --text: #0f172a;
+  --muted: #64748b;
+  --mono-fg: #1e293b;
+  --ok: #16a34a;
+  --ok-bg: rgba(22, 163, 74, 0.13);
+  --warn: #d97706;
+  --warn-bg: rgba(217, 119, 6, 0.14);
+  --bad: #dc2626;
+  --bad-bg: rgba(220, 38, 38, 0.13);
+  --unk-bg: rgba(100, 116, 139, 0.13);
+  --blue: #007aff;
+  --blue2: #5856d6;
+  --btn-sec-bg: rgba(15, 23, 42, 0.06);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #07111f;
+    --orb-1: rgba(78, 161, 255, 0.22);
+    --orb-2: rgba(124, 92, 255, 0.16);
+    --card: rgba(19, 28, 44, 0.72);
+    --mini-bg: rgba(255, 255, 255, 0.045);
+    --line: rgba(255, 255, 255, 0.08);
+    --card-bd: rgba(255, 255, 255, 0.12);
+    --shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 18px 42px -16px rgba(0, 0, 0, 0.48);
+    --text: #eef6ff;
+    --muted: #91a4bd;
+    --mono-fg: #cfe1ff;
+    --ok: #35d07f;
+    --ok-bg: rgba(53, 208, 127, 0.16);
+    --warn: #ffd166;
+    --warn-bg: rgba(255, 209, 102, 0.16);
+    --bad: #ff5c7a;
+    --bad-bg: rgba(255, 92, 122, 0.16);
+    --unk-bg: rgba(145, 164, 189, 0.15);
+    --blue: #4ea1ff;
+    --blue2: #7c5cff;
+    --btn-sec-bg: rgba(255, 255, 255, 0.08);
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #07111f;
+  --orb-1: rgba(78, 161, 255, 0.22);
+  --orb-2: rgba(124, 92, 255, 0.16);
+  --card: rgba(19, 28, 44, 0.72);
+  --mini-bg: rgba(255, 255, 255, 0.045);
+  --line: rgba(255, 255, 255, 0.08);
+  --card-bd: rgba(255, 255, 255, 0.12);
+  --shadow: inset 0 1px 0 rgba(255, 255, 255, 0.12), 0 18px 42px -16px rgba(0, 0, 0, 0.48);
+  --text: #eef6ff;
+  --muted: #91a4bd;
+  --mono-fg: #cfe1ff;
+  --ok: #35d07f;
+  --ok-bg: rgba(53, 208, 127, 0.16);
+  --warn: #ffd166;
+  --warn-bg: rgba(255, 209, 102, 0.16);
+  --bad: #ff5c7a;
+  --bad-bg: rgba(255, 92, 122, 0.16);
+  --unk-bg: rgba(145, 164, 189, 0.15);
+  --blue: #4ea1ff;
+  --blue2: #7c5cff;
+  --btn-sec-bg: rgba(255, 255, 255, 0.08);
+}
+:root[data-style="cyber"] { --blue: #4ea8de; --blue2: #64748b; --sat: 135%; }
+:root[data-glass="frosted"] { --blur: 28px; --sat: 145%; }
+* { box-sizing: border-box; }
+body {
+  margin: 0; min-height: 100vh;
+  background: radial-gradient(circle at 14% 0%, var(--orb-1), transparent 40%), radial-gradient(circle at 96% 18%, var(--orb-2), transparent 42%), var(--bg);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Segoe UI", sans-serif;
+  color: var(--text);
+  padding: max(18px, env(safe-area-inset-top)) max(16px, env(safe-area-inset-right)) max(28px, env(safe-area-inset-bottom)) max(16px, env(safe-area-inset-left));
+}
+.wrap { max-width: 880px; margin: 0 auto; }
+.top { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 14px; }
+.title { font-size: 21px; font-weight: 800; letter-spacing: -0.2px; line-height: 1.25; }
+.sub { color: var(--muted); font-size: 12.5px; margin-top: 4px; line-height: 1.45; }
+.back-pill {
+  display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; white-space: nowrap;
+  padding: 8px 13px; border-radius: 999px; background: var(--card); border: 1px solid var(--card-bd);
+  color: var(--blue); text-decoration: none; font-size: 13px; font-weight: 700; box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+  backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+}
+.card {
+  background: var(--card); border: 1px solid var(--card-bd); border-radius: 22px; box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+  backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+  padding: 16px; margin: 12px 0;
+}
+.row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 0; border-bottom: 1px solid var(--line); }
+.row:last-child { border-bottom: 0; }
+.row-label { min-width: 0; flex: 1 1 auto; }
+.name { font-weight: 650; font-size: 14px; }
+.val { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; text-align: right; min-width: 0; max-width: 58%; overflow-wrap: anywhere; }
+.pill { display: inline-flex; align-items: center; gap: 5px; flex-shrink: 0; white-space: nowrap; border-radius: 999px; padding: 5px 10px; font-weight: 750; font-size: 12px; }
+.pill::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.ok { background: var(--ok-bg); color: var(--ok); }
+.warn { background: var(--warn-bg); color: var(--warn); }
+.bad { background: var(--bad-bg); color: var(--bad); }
+.unknown { background: var(--unk-bg); color: var(--muted); }
+button {
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px; border: 0; border-radius: 14px;
+  padding: 10px 14px; font-size: 13.5px; color: #fff; background: linear-gradient(135deg, var(--blue), var(--blue2));
+  font-weight: 750; cursor: pointer; box-shadow: 0 10px 24px -8px rgba(0, 122, 255, 0.32); transition: opacity 0.18s, transform 0.12s;
+}
+button.sec { color: var(--text); background: var(--btn-sec-bg); border: 1px solid var(--line); box-shadow: none; }
+button:active { transform: scale(0.98); }
+button:disabled { opacity: 0.48; cursor: not-allowed; transform: none; }
+.btns { display: flex; flex-wrap: wrap; gap: 10px; }
+.mono { white-space: pre-wrap; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--mono-fg); font-size: 12px; line-height: 1.55; max-height: 220px; overflow-y: auto; margin-top: 8px; }
+.mono:empty::before { content: "等待操作记录…"; color: var(--muted); }
+.hint { color: var(--muted); font-size: 12.5px; line-height: 1.6; margin: 10px 0 0; }
+.small { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
+.sectionTitle { font-size: 14.5px; font-weight: 800; margin: 15px 0 8px; }
+.grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.mini { background: var(--mini-bg); border: 1px solid var(--line); border-radius: 15px; padding: 11px 12px; }
+.mini .k { font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+.mini .v { font-weight: 750; overflow-wrap: anywhere; }
+@media (max-width: 560px) {
+  .grid { grid-template-columns: 1fr 1fr; }
+  .row.stack-sm { flex-direction: column; align-items: flex-start; gap: 4px; }
+  .row.stack-sm .val { max-width: 100%; text-align: left; }
+}
+@media (max-width: 380px) {
+  .grid { grid-template-columns: 1fr; }
+  .btns button { flex: 1 1 100%; }
+}
 </style>
 </head>
 <body>
 <div class="wrap">
   <div class="top">
-    <div><div class="title">JSON 健康状态</div><div class="sub">HNC hotfix18.6 · 只读检查 / 一键导出诊断包</div></div>
-    <div><a href="index.html" style="color:var(--blue);text-decoration:none;font-size:13px;font-weight:700">← 返回管理页</a></div>
+    <div>
+      <div class="title">JSON 健康面板</div>
+      <div class="sub">HNC v5.36 · 配置完整性只读巡检与诊断包导出</div>
+    </div>
+    <a class="back-pill" href="./">
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg>
+      <span>返回控制台</span>
+    </a>
   </div>
 
   <div class="card">
     <div class="btns">
-      <button id="refreshBtn">刷新状态</button>
-      <button id="exportBtn">导出 JSON 诊断包</button>
+      <button id="refreshBtn" type="button">刷新健康状态</button>
+      <button id="exportBtn" class="sec" type="button">导出 JSON 诊断包</button>
     </div>
-    <p class="hint">这个页面不会修改 rules.json。导出按钮会生成 <b>/sdcard/Download/hnc-json-debug-*.tar.gz</b>，方便直接发给排障。</p>
+    <p class="hint" id="modeHint">本页全程只读，不会修改 <b>rules.json</b>。导出功能会打包生成 <b>/sdcard/Download/hnc-json-debug-*.tar.gz</b> 供排障分析。</p>
   </div>
 
-  <div class="card" id="summaryCard"><div class="hint">正在读取状态...</div></div>
+  <div class="card" id="summaryCard"><div class="hint" style="margin:0">正在读取诊断状态…</div></div>
   <div class="card"><div class="name">执行日志</div><div id="log" class="mono"></div></div>
 </div>
 <script>
-const HNC = '/data/local/hnc';
-function log(msg){ const el=document.getElementById('log'); el.textContent = '['+new Date().toLocaleTimeString()+'] '+msg+'\n'+el.textContent; }
-function badge(v){
-  const s=String(v||'unknown').toLowerCase();
-  let cls=s==='ok'?'ok':(s==='bad'||s==='fail'?'bad':(s==='warn'||s==='missing'?'warn':'unknown'));
-  return `<span class="pill ${cls}">${String(v||'unknown')}</span>`;
-}
-function esc(s){return String(s==null?'':s).replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));}
-function parseRaw(raw){
-  if(!raw) return null;
-  try{return JSON.parse(String(raw));}catch(e){return null;}
-}
-async function execCmd(cmd){
-  if(!window.ksu || !window.ksu.exec){ throw new Error('当前环境没有 window.ksu.exec，请在 KernelSU/SukiSU WebUI 中打开'); }
-  const r = await window.ksu.exec(cmd);
-  if(typeof r === 'string') return r;
-  if(r && typeof r.stdout === 'string') return r.stdout + (r.stderr ? '\n'+r.stderr : '');
-  return JSON.stringify(r);
-}
-async function refreshHealth(){
-  const btn=document.getElementById('refreshBtn'); btn.disabled=true;
-  try{
-    const out=await execCmd(`su -c 'sh ${HNC}/bin/json_health_panel.sh'`);
-    // H-5 (回移自 5.9.91): 找第一个 { 后跟可选空白和 " 的位置, 避免前缀文本含 { 时误匹配
-    let trimmed=out.trim();
-    const jsonStart=trimmed.search(/\{\s*"/);
-    if(jsonStart>=0) trimmed=trimmed.substring(jsonStart);
-    let data=JSON.parse(trimmed);
-    render(data); log('JSON 健康状态刷新完成');
-  }catch(e){
-    document.getElementById('summaryCard').innerHTML='<div class="pill bad">读取失败</div><p class="hint">'+esc(e.message||e)+'</p>';
-    log('刷新失败: '+(e.message||e));
-  }finally{btn.disabled=false;}
-}
-function render(data){
-  const files=data.files||{};
-  let html='';
-  html += `<div class="row"><div><div class="name">整体状态</div><div class="small">json_doctor rc=${esc(data.json_doctor_rc)}</div></div><div>${badge(data.overall)}</div></div>`;
-  for(const k of ['rules.json','device_names.json','templates.json','remote_tokens.json','devices.json']){
-    html += `<div class="row"><div class="name">${esc(k)}</div><div>${badge(files[k])}</div></div>`;
+(function(){
+  try {
+    var r = document.documentElement;
+    var t = localStorage.getItem('hnc6.theme');
+    var s = localStorage.getItem('hnc6.style');
+    var gm = localStorage.getItem('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid';
+    if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t);
+    if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); }
+    else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber');
+  } catch (_) {}
+
+  var HNC = '/data/local/hnc';
+  var hasKSU = !!(window.ksu && typeof window.ksu.exec === 'function');
+  var cbSeq = 0;
+
+  function log(msg) {
+    var el = document.getElementById('log');
+    el.textContent = '[' + new Date().toLocaleTimeString() + '] ' + msg + (el.textContent ? '
+' + el.textContent : '');
   }
-  html += `<div class="row"><div class="name">JSON 备份数量</div><div class="val">${esc(data.backup_count)}</div></div>`;
-  html += `<div class="row"><div class="name">最新备份</div><div class="val">${esc(data.latest_backup||'无')}</div></div>`;
-  html += `<div class="row"><div class="name">TC 状态快照</div><div>${badge(data.has_tc_state?'ok':'missing')}</div></div>`;
-  html += `<div class="row"><div class="name">能力探测文件</div><div>${badge(data.has_capabilities?'ok':'missing')}</div></div>`;
-  html += `<div class="row"><div class="name">最近诊断包</div><div class="val">${esc(data.last_bundle||'无')}</div></div>`;
-  const stats=data.stats||{};
-  const sh=parseRaw(stats.health_summary_raw)||{};
-  const comp=sh.components||{};
-  html += `<div class="sectionTitle">流量统计诊断</div>`;
-  html += `<div class="grid">`;
-  html += `<div class="mini"><div class="k">统计健康</div><div class="v">${badge(sh.status||'missing')}</div></div>`;
-  for(const pair of [['采样文件','stats_diag'],['设备身份','stats_identity'],['保留/汇总','stats_retention']]){
-    html += `<div class="mini"><div class="k">${esc(pair[0])}</div><div class="v">${badge(comp[pair[1]]||'missing')}</div></div>`;
+  function esc(s) {
+    return String(s == null ? '' : s).replace(/[&<>"']/g, function(m) {
+      return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[m];
+    });
   }
-  html += `</div>`;
-  if(sh.recommendation){ html += `<p class="hint"><b>建议：</b>${esc(sh.recommendation)}</p>`; }
-  html += `<p class="hint">${esc(data.json_doctor_message||'')}</p>`;
-  document.getElementById('summaryCard').innerHTML=html;
-}
-async function exportBundle(){
-  const btn=document.getElementById('exportBtn'); btn.disabled=true;
-  try{
-    log('开始导出 JSON 诊断包...');
-    const out=await execCmd(`su -c 'sh ${HNC}/bin/json_export_for_web.sh'`);
-    // H-5 (回移自 5.9.91): 同上,精确探测 JSON 起点
-    let trimmed=out.trim();
-    const jsonStart=trimmed.search(/\{\s*"/);
-    if(jsonStart>=0) trimmed=trimmed.substring(jsonStart);
-    let data=JSON.parse(trimmed);
-    if(data.ok){ log('导出完成: '+data.path); } else { log('导出失败 rc='+data.rc+' '+(data.output||'')); }
-    await refreshHealth();
-  }catch(e){ log('导出失败: '+(e.message||e)); }
-  finally{btn.disabled=false;}
-}
-// 用脚本绑定而非 onclick="": 经 hnc_httpd 访问时 CSP 只放行内联 <script> 的 hash, 内联事件属性会被拦
-document.getElementById('refreshBtn').addEventListener('click', function(){ refreshHealth(); });
-document.getElementById('exportBtn').addEventListener('click', function(){ exportBundle(); });
-refreshHealth();
+  function badge(v) {
+    var s = String(v || 'unknown').toLowerCase();
+    var cls = s === 'ok' ? 'ok' : (s === 'bad' || s === 'fail' || s === 'error' ? 'bad' : (s === 'warn' || s === 'missing' ? 'warn' : 'unknown'));
+    var label = { ok: '正常 (ok)', warn: '告警 (warn)', missing: '缺失 (missing)', bad: '损坏 (bad)', fail: '异常 (fail)', unknown: '未知' }[s] || String(v || 'unknown');
+    return '<span class="pill ' + cls + '">' + esc(label) + '</span>';
+  }
+  function parseRaw(raw) {
+    if (!raw) return null;
+    if (typeof raw === 'object') return raw;
+    try { return JSON.parse(String(raw)); } catch (e) { return null; }
+  }
+  function ksuExec(cmd, timeoutMs) {
+    return new Promise(function(resolve, reject) {
+      if (!hasKSU) { reject(new Error('当前非本机 KSU WebView 环境')); return; }
+      if (window.ksu.exec.length <= 1) {
+        Promise.resolve(window.ksu.exec(cmd)).then(function(r) {
+          if (typeof r === 'string') resolve(r);
+          else if (r && typeof r.stdout === 'string') resolve(r.stdout + (r.stderr ? '
+' + r.stderr : ''));
+          else resolve(JSON.stringify(r || ''));
+        }, reject);
+        return;
+      }
+      var name = '__hnc_jh_cb_' + (++cbSeq) + '_' + Date.now();
+      var timer = setTimeout(function() { delete window[name]; reject(new Error('命令执行超时')); }, timeoutMs || 15000);
+      window[name] = function(code, stdout, stderr) {
+        clearTimeout(timer);
+        delete window[name];
+        if (code !== 0 && !stdout) reject(new Error(stderr || ('exit ' + code)));
+        else resolve(String(stdout || stderr || ''));
+      };
+      try { window.ksu.exec(cmd, name); } catch (e) { clearTimeout(timer); delete window[name]; reject(e); }
+    });
+  }
+  function extractJSON(out) {
+    var trimmed = String(out || '').trim();
+    var jsonStart = trimmed.search(/\{\s*"/);
+    if (jsonStart >= 0) trimmed = trimmed.substring(jsonStart);
+    return JSON.parse(trimmed);
+  }
+
+  async function refreshHealth() {
+    var btn = document.getElementById('refreshBtn');
+    btn.disabled = true;
+    try {
+      if (window.__HNC_MOCK_JSON_HEALTH__) {
+        render(window.__HNC_MOCK_JSON_HEALTH__);
+        log('已加载演示健康诊断摘要');
+        return;
+      }
+      if (!hasKSU) {
+        document.getElementById('exportBtn').disabled = true;
+      }
+      try {
+        var r = await fetch('/api/json_health', { credentials: 'same-origin', cache: 'no-store' });
+        if (r.status === 401 && !hasKSU) { location.href = '/pair'; return; }
+        if (r.ok) {
+          render(await r.json());
+          log('已通过 HTTP /api/json_health 刷新健康状态');
+          return;
+        }
+      } catch (httpErr) {
+        if (!hasKSU) throw httpErr;
+      }
+      var out = await ksuExec("su -c 'sh " + HNC + "/bin/json_health_panel.sh'");
+      render(extractJSON(out));
+      log('已通过本机 KSU Shell 刷新 JSON 健康状态');
+    } catch (e) {
+      document.getElementById('summaryCard').innerHTML = '<div class="pill bad">读取失败</div><p class="hint">' + esc(e.message || e) + '</p>';
+      log('刷新失败: ' + (e.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function render(data) {
+    var files = data.files || {};
+    var tc = data.tc_state || {};
+    var html = '';
+    html += '<div class="row"><div class="row-label"><div class="name">整体状态</div><div class="small">json_doctor rc=' + esc(data.json_doctor_rc) + '</div></div><div>' + badge(data.overall) + '</div></div>';
+    var keys = ['rules.json', 'device_names.json', 'templates.json', 'remote_tokens.json', 'devices.json'];
+    for (var i = 0; i < keys.length; i++) {
+      var k = keys[i];
+      html += '<div class="row"><div class="row-label"><div class="name">' + esc(k) + '</div></div><div>' + badge(files[k]) + '</div></div>';
+    }
+    html += '<div class="row"><div class="row-label"><div class="name">JSON 滚动备份数</div></div><div class="val">' + esc(data.backup_count) + '</div></div>';
+    html += '<div class="row stack-sm"><div class="row-label"><div class="name">最新备份文件</div></div><div class="val">' + esc(data.latest_backup || '无') + '</div></div>';
+    html += '<div class="row"><div class="row-label"><div class="name">TC 状态快照</div>' + (tc.note ? '<div class="small">' + esc(tc.note) + '</div>' : '') + '</div><div>' + badge(data.has_tc_state ? 'ok' : 'missing') + '</div></div>';
+    html += '<div class="row"><div class="row-label"><div class="name">能力探测文件</div></div><div>' + badge(data.has_capabilities ? 'ok' : 'missing') + '</div></div>';
+    html += '<div class="row stack-sm"><div class="row-label"><div class="name">最近导出诊断包</div></div><div class="val">' + esc(data.last_bundle || '无') + '</div></div>';
+
+    var stats = data.stats || {};
+    var sh = parseRaw(stats.health_summary_raw) || {};
+    var comp = sh.components || {};
+    html += '<div class="sectionTitle">流量统计诊断</div>';
+    html += '<div class="grid">';
+    html += '<div class="mini"><div class="k">统计健康总评</div><div class="v">' + badge(sh.status || 'missing') + '</div></div>';
+    var pairs = [['采样文件', 'stats_diag'], ['设备身份', 'stats_identity'], ['保留 / 汇总', 'stats_retention']];
+    for (var j = 0; j < pairs.length; j++) {
+      html += '<div class="mini"><div class="k">' + esc(pairs[j][0]) + '</div><div class="v">' + badge(comp[pairs[j][1]] || 'missing') + '</div></div>';
+    }
+    html += '</div>';
+    if (sh.recommendation) html += '<p class="hint"><b>排障建议：</b>' + esc(sh.recommendation) + '</p>';
+    if (data.json_doctor_message) html += '<p class="hint">' + esc(data.json_doctor_message) + '</p>';
+    document.getElementById('summaryCard').innerHTML = html;
+  }
+
+  async function exportBundle() {
+    if (!hasKSU) return;
+    var btn = document.getElementById('exportBtn');
+    btn.disabled = true;
+    try {
+      log('开始导出 JSON 诊断包…');
+      var out = await ksuExec("su -c 'sh " + HNC + "/bin/json_export_for_web.sh'", 30000);
+      var data = extractJSON(out);
+      if (data.ok) log('导出完成: ' + data.path);
+      else log('导出失败 rc=' + data.rc + ' ' + (data.output || ''));
+      await refreshHealth();
+    } catch (e) {
+      log('导出失败: ' + (e.message || e));
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  document.getElementById('refreshBtn').addEventListener('click', function(){ refreshHealth(); });
+  document.getElementById('exportBtn').addEventListener('click', function(){ exportBundle(); });
+  refreshHealth();
+})();
 </script>
 </body>
 </html>

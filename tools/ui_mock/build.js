@@ -72,7 +72,14 @@ html = html.replace(/<script\s+src="([^"]+)"\s*><\/script>/g, (m, src) => {
   if (src === 'js/core.js') {
     sawCore = true;
     let cl = '';
-    try { cl = read(path.join(WEB, 'changelog.html')); } catch (_) {}
+    try {
+      cl = read(path.join(WEB, 'changelog.html'));
+      if (cl.length > 36000) {
+        var secs = cl.split('<div class="cl-section">');
+        cl = secs.slice(0, 13).join('<div class="cl-section">') +
+          '<div class="note" style="text-align:center;padding:12px 0">单文件交互预览仅内嵌近期 12 个版本记录 · 完整历史记录见模块包 webroot/changelog.html</div>';
+      }
+    } catch (_) {}
     s += '\n<script>/* 界面预览: 内嵌数据(版本号 + changelog.html 副本) */\nwindow.__HNC_MOCK_META = ' + jsStr(meta) + ';\nwindow.__HNC_MOCK_CHANGELOG = ' + jsStr(cl) + ';\n</script>';
     s += '\n<script>/* tools/ui_mock/fake_api.js */\n' + safeJs(read(path.join(__dirname, 'fake_api.js'))) + '\n</script>';
   }

@@ -268,9 +268,6 @@ func TestPairPendingExpiryUpperBound(t *testing.T) {
 	if _, err := readPairPending(dir); err == nil || !strings.Contains(err.Error(), "too far") {
 		t.Fatalf("err = %v, want expiry-too-far rejection", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "run", "pair_pending")); !os.IsNotExist(err) {
-		t.Fatal("over-long pair_pending must be removed")
-	}
 	writePending(t, dir, "123456", "sidNORMAL0001", time.Now().Unix()+120)
 	if _, err := readPairPending(dir); err != nil {
 		t.Fatalf("normal 120s pending rejected: %v", err)

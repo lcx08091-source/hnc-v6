@@ -80,6 +80,19 @@ func tcpFlowKey(src net.IP, sport uint16, dst net.IP, dport uint16) string {
 	return string(b[:])
 }
 
+func tcpFlowKeyEvent(ev *Event) string {
+	if len(ev.SrcMAC) == 6 {
+		var b [42]byte
+		copy(b[0:6], ev.SrcMAC)
+		copy(b[6:22], ev.SrcIP.To16())
+		binary.BigEndian.PutUint16(b[22:], ev.SrcPort)
+		copy(b[24:40], ev.DstIP.To16())
+		binary.BigEndian.PutUint16(b[40:], ev.DstPort)
+		return string(b[:])
+	}
+	return tcpFlowKey(ev.SrcIP, ev.SrcPort, ev.DstIP, ev.DstPort)
+}
+
 func (r *tlsReassembler) expired(e *tlsAsmEntry, now time.Time) bool {
 	return now.Sub(e.first) > r.ttl || now.Before(e.first)
 }
@@ -150,7 +163,7 @@ func (r *tlsReassembler) handleFirst(ev *Event, seq uint32, data []byte, now tim
 	if ev.capTrunc || need > r.maxBytes || len(data) >= need {
 		return TLSInfo{}, false
 	}
-	key := tcpFlowKey(ev.SrcIP, ev.SrcPort, ev.DstIP, ev.DstPort)
+	key := tcpFlowKeyEvent(ev)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if now.Sub(r.lastSweep) > r.ttl || now.Before(r.lastSweep) {
@@ -171,7 +184,7 @@ func (r *tlsReassembler) handleFirst(ev *Event, seq uint32, data []byte, now tim
 }
 
 func (r *tlsReassembler) handleCont(ev *Event, seq uint32, data []byte, now time.Time) (TLSInfo, bool) {
-	key := tcpFlowKey(ev.SrcIP, ev.SrcPort, ev.DstIP, ev.DstPort)
+	key := tcpFlowKeyEvent(ev)
 	r.mu.Lock()
 	e, ok := r.m[key]
 	if !ok {
@@ -185,8 +198,9 @@ func (r *tlsReassembler) handleCont(ev *Event, seq uint32, data []byte, now time
 		return TLSInfo{}, false
 	}
 	if seq != e.next {
-		// 重传(完全落在已收范围内)忽略; 其他(中间段丢失 / 乱序)放弃。
-		if d := e.next - seq; d != 0 && d < 1<<31 && uint32(len(data)) <= d {
+		// RFC 1982 有符号序列号差值比较，防止随机 ISN 在 0xFFFFFFFF 附近回绕时误丢包。
+		diff := int32(e.next - seq)
+		if diff > 0 && int32(len(data)) <= diff {
 			r.mu.Unlock()
 			return TLSInfo{}, false
 		}
@@ -227,7 +241,7 @@ func (r *tlsReassembler) handleCont(ev *Event, seq uint32, data []byte, now time
 
 // drop 移除 ev 所在连接的挂起条目(同一连接又来了新的首段)。
 func (r *tlsReassembler) drop(ev *Event) {
-	key := tcpFlowKey(ev.SrcIP, ev.SrcPort, ev.DstIP, ev.DstPort)
+	key := tcpFlowKeyEvent(ev)
 	r.mu.Lock()
 	delete(r.m, key)
 	r.mu.Unlock()

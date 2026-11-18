@@ -102,7 +102,7 @@ int main(int argc, char **argv)
     }
 
     /* socket */
-    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { perror("hnc_ipc: socket"); return 2; }
 
     /* timeout */
@@ -136,9 +136,16 @@ int main(int argc, char **argv)
         return 3;
     }
 
-    /* send */
-    ssize_t sent = send(fd, cmd, (size_t)cmd_len, 0);
-    if (sent < 0) {
+    /* send all (handle EINTR / short write / EPIPE without SIGPIPE) */
+    size_t sent_off = 0;
+    while (sent_off < (size_t)cmd_len) {
+        ssize_t n = send(fd, cmd + sent_off, (size_t)cmd_len - sent_off, MSG_NOSIGNAL);
+        if (n > 0) {
+            sent_off += (size_t)n;
+            continue;
+        }
+        if (n < 0 && errno == EINTR)
+            continue;
         fprintf(stderr, "hnc_ipc: send: %s\n", strerror(errno));
         close(fd);
         return 4;

@@ -32,7 +32,7 @@ func classifyHost(host string) (l3Rule, bool) {
 		return l3Rule{}, false
 	}
 	lr := loadL3Rules()
-	idx := hostIndexFor(lr.rules)
+	idx := hostIndexFor(lr)
 	if i, ok := idx.lookup(host); ok {
 		return lr.rules[i], true
 	}
@@ -44,33 +44,25 @@ func classifyHost(host string) (l3Rule, bool) {
 // map, 第一个命中的即最长后缀 —— 与 host == suf || HasSuffix(host, "."+suf)
 // 完全同构(后者成立当且仅当 suf 等于 host 在某个 '.' 之后的尾串)。
 type hostIndex struct {
-	rulesPtr *l3Rule // 构建时 rules[0] 的地址 + 长度, 用来判定规则集是否换了
+	rulesSeq uint64
 	rulesLen int
 	bySuffix map[string][2]int32 // [PrioritySpecific, PriorityFallback] → 规则下标, -1 = 无
 }
 
 var hostIndexCache atomic.Pointer[hostIndex]
 
-// hostIndexFor 返回与 rules 对应的索引; 规则重载(loadL3Rules 返回了新切片)
-// 时重建。并发重建是幂等的, 谁后写谁留下, 不影响正确性。
-func hostIndexFor(rules []l3Rule) *hostIndex {
-	var p *l3Rule
-	if len(rules) > 0 {
-		p = &rules[0]
-	}
-	if cur := hostIndexCache.Load(); cur != nil && cur.rulesPtr == p && cur.rulesLen == len(rules) {
+// hostIndexFor 使用单调递增序号 lr.seq 判断规则是否重载（根治切片底层数组复用的 ABA 漏重建漏洞）。
+func hostIndexFor(lr loadedRules) *hostIndex {
+	if cur := hostIndexCache.Load(); cur != nil && cur.rulesSeq != 0 && cur.rulesSeq == lr.seq && cur.rulesLen == len(lr.rules) {
 		return cur
 	}
-	idx := buildHostIndex(rules)
+	idx := buildHostIndex(lr.rules, lr.seq)
 	hostIndexCache.Store(idx)
 	return idx
 }
 
-func buildHostIndex(rules []l3Rule) *hostIndex {
-	idx := &hostIndex{rulesLen: len(rules), bySuffix: make(map[string][2]int32, 1024)}
-	if len(rules) > 0 {
-		idx.rulesPtr = &rules[0]
-	}
+func buildHostIndex(rules []l3Rule, seq uint64) *hostIndex {
+	idx := &hostIndex{rulesSeq: seq, rulesLen: len(rules), bySuffix: make(map[string][2]int32, 1024)}
 	for i := range rules {
 		r := &rules[i]
 		pri := 0

@@ -30,13 +30,16 @@ const (
 
 // fgEngagementOf 纯函数: 一轮特征 → 节拍标签(顺序: 操作 > 后台 > 被动)。
 func fgEngagementOf(f fgFeat) string {
-	if f.NewPerMin >= fgEngInterNewPerMin || f.RR >= fgEngInterRR {
+	nonPeriodic := f.Micro.Periodicity < 0.45
+	if nonPeriodic && (f.NewPerMin >= fgEngInterNewPerMin || f.RR >= fgEngInterRR ||
+		f.Micro.CausalTurns >= 2 || f.Micro.LightTurns >= 1 || (f.Micro.CausalTurns >= 1 && f.Micro.D2CVerified >= 1)) {
 		return "interactive"
 	}
-	if f.Bulk || f.HBShare >= fgEngBgHBShare || f.DnBps+f.UpBps < fgEngBgBps {
+	if f.Micro.Periodicity >= 0.55 || f.LowDSCPShare >= 0.80 || f.Bulk || f.HBShare >= fgEngBgHBShare ||
+		(f.Micro.CausalTurns == 0 && f.DnBps+f.UpBps < fgEngBgBps) {
 		return "background"
 	}
-	if f.DnBps >= fgEngPassiveDnBps {
+	if f.DnBps >= fgEngPassiveDnBps || f.RTDSCPShare >= 0.25 {
 		return "passive"
 	}
 	return "unknown"

@@ -51,13 +51,12 @@ func loadSharedInfra(hncDir string) *output.SharedInfra {
 			c.mu.Unlock()
 			return si
 		}
-		c.mu.Unlock()
 		b, err := os.ReadFile(p)
 		if err != nil {
+			c.mu.Unlock()
 			continue
 		}
 		si := output.ParseSharedInfra(b)
-		c.mu.Lock()
 		c.path, c.mtime, c.size, c.cur = p, st.ModTime().UnixNano(), st.Size(), si
 		c.mu.Unlock()
 		return si

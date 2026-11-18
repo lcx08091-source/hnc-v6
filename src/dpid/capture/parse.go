@@ -58,6 +58,10 @@ type DNSInfo struct {
 	Records []output.DNSAnswer
 	// TTL: 地址记录中的最小 TTL(没有地址记录时为 0)。
 	TTL uint32
+	// v5.34: RFC 9460 Type 65 HTTPS/SVCB 扩展元数据 (用于后 ECH 跨层反解与非标 QUIC 端口发现)
+	ECHConfigIDs []uint8
+	SVCBAlpn     []string
+	SVCBPort     uint16
 }
 
 type TLSInfo struct {
@@ -89,9 +93,12 @@ type Event struct {
 	DstIP   net.IP
 	SrcPort uint16
 	DstPort uint16
-	IsUDP   bool
-	IsIPv6  bool // rc29
-	Bytes   int  // rc29: full IP packet length (for flow byte accounting)
+	IsUDP    bool
+	IsIPv6   bool  // rc29
+	DSCP     uint8 // v5.34: IPv4 TOS>>2 or IPv6 TrafficClass>>2 (RFC 2474, 0..63)
+	TCPFlags uint8 // v5.34: TCP flags (SYN/FIN/RST/ACK) for fast-exit collapse detection
+	UDPSig   string
+	Bytes    int // rc29: full IP packet length (for flow byte accounting)
 
 	// Direction-aware fields.
 	ClientMAC net.HardwareAddr
@@ -202,7 +209,7 @@ func parseIPv4(ip []byte, dstMAC, srcMAC net.HardwareAddr, ts time.Time) (Event,
 
 	ev := Event{
 		Time: ts, SrcMAC: srcMAC, DstMAC: dstMAC,
-		SrcIP: srcIP, DstIP: dstIP, Bytes: totalLen,
+		SrcIP: srcIP, DstIP: dstIP, DSCP: ip[1] >> 2, Bytes: totalLen,
 		capTrunc: int(binary.BigEndian.Uint16(ip[2:4])) > len(ip),
 	}
 	return parseL4(ev, proto, payload)
@@ -268,9 +275,10 @@ func parseIPv6(ip []byte, dstMAC, srcMAC net.HardwareAddr, ts time.Time) (Event,
 	}
 done:
 
+	v6tc := ((ip[0] & 0x0f) << 4) | (ip[1] >> 4)
 	ev := Event{
 		Time: ts, SrcMAC: srcMAC, DstMAC: dstMAC,
-		SrcIP: srcIP, DstIP: dstIP, IsIPv6: true, Bytes: totalLen,
+		SrcIP: srcIP, DstIP: dstIP, IsIPv6: true, DSCP: v6tc >> 2, Bytes: totalLen,
 		capTrunc: capTrunc,
 	}
 	return parseL4(ev, nextHdr, payload)
@@ -313,7 +321,12 @@ func parseL4(ev Event, proto byte, payload []byte) (Event, ParseResult) {
 			return parseQUIC(ev, payload[8:])
 		}
 
-		// Other UDP -> emit as Flow event (rc29).
+		// Other UDP -> emit as Flow event (rc29 + v5.34 RFC 9443 UDP fast-path; skip truncated frames).
+		if !ev.capTrunc && len(payload) > 8 {
+			if sig, _, _, _ := InspectUDPSignature(payload[8:], ev.SrcPort, ev.DstPort); sig != "" {
+				ev.UDPSig = sig
+			}
+		}
 		ev.Kind = EventFlow
 		assignClient(&ev, false)
 		return ev, ParseOK
@@ -328,6 +341,7 @@ func parseL4(ev Event, proto byte, payload []byte) (Event, ParseResult) {
 		if tcpHL < 20 || len(payload) < tcpHL {
 			return ev, ParseMalformed
 		}
+		ev.TCPFlags = payload[13]
 		tcpData := payload[tcpHL:]
 		seq := binary.BigEndian.Uint32(payload[4:8])
 
@@ -552,9 +566,19 @@ func parseDNS(b []byte) (DNSInfo, bool) {
 					out.Records = append(out.Records, output.DNSAnswer{Name: owner, Type: 5, TTL: ttl, Value: name})
 				}
 			}
-		case 64, 65: // SVCB / HTTPS: ipv4hint(4) / ipv6hint(6) 里的地址
-			for _, ip := range svcbAddrHints(rd) {
+		case 64, 65: // SVCB / HTTPS (RFC 9460): ipv4hint/ipv6hint + ECH config_id / ALPN / AltPort
+			ips, echIDs, alpns, altPort := svcbParseFull(rd)
+			for _, ip := range ips {
 				addr(owner, atype, ttl, ip)
+			}
+			if len(echIDs) > 0 && len(out.ECHConfigIDs) < 8 {
+				out.ECHConfigIDs = append(out.ECHConfigIDs, echIDs...)
+			}
+			if len(alpns) > 0 && len(out.SVCBAlpn) == 0 {
+				out.SVCBAlpn = alpns
+			}
+			if altPort > 0 && out.SVCBPort == 0 {
+				out.SVCBPort = altPort
 			}
 		}
 	}
@@ -842,4 +866,85 @@ func sanitizeServerName(s string) string {
 		return ""
 	}
 	return s
+}
+
+// svcbParseFull extracts ipv4hint(4), ipv6hint(6), alpn(1), port(3), and ech(5) config_ids (RFC 9460 & RFC 9849).
+func svcbParseFull(rd []byte) (ips []net.IP, echIDs []uint8, alpns []string, port uint16) {
+	if len(rd) < 3 || binary.BigEndian.Uint16(rd[0:2]) == 0 {
+		return nil, nil, nil, 0
+	}
+	p := 2
+	for i := 0; ; i++ {
+		if p >= len(rd) || i > 127 {
+			return nil, nil, nil, 0
+		}
+		l := int(rd[p])
+		p++
+		if l == 0 {
+			break
+		}
+		if l > 63 {
+			return nil, nil, nil, 0
+		}
+		p += l
+	}
+	for len(rd)-p >= 4 {
+		key := binary.BigEndian.Uint16(rd[p : p+2])
+		vl := int(binary.BigEndian.Uint16(rd[p+2 : p+4]))
+		p += 4
+		if len(rd)-p < vl {
+			break
+		}
+		v := rd[p : p+vl]
+		p += vl
+		switch key {
+		case 1: // alpn list
+			q := 0
+			for q < len(v) && len(alpns) < 6 {
+				al := int(v[q])
+				q++
+				if al == 0 || q+al > len(v) {
+					break
+				}
+				alpns = append(alpns, string(v[q:q+al]))
+				q += al
+			}
+		case 3: // port
+			if len(v) == 2 {
+				port = binary.BigEndian.Uint16(v)
+			}
+		case 4: // ipv4hint
+			for len(v) >= 4 && len(ips) < 16 {
+				ips = append(ips, net.IPv4(v[0], v[1], v[2], v[3]))
+				v = v[4:]
+			}
+		case 5: // ech (ECHConfigList: 2B total_len + {version(2)=0xfe0d, len(2), config_id(1), ...})
+			if len(v) >= 7 {
+				listLen := int(binary.BigEndian.Uint16(v[0:2]))
+				eb := v[2:]
+				if listLen < len(eb) {
+					eb = eb[:listLen]
+				}
+				for len(eb) >= 5 && len(echIDs) < 8 {
+					ver := binary.BigEndian.Uint16(eb[0:2])
+					elen := int(binary.BigEndian.Uint16(eb[2:4]))
+					if elen < 1 || 4+elen > len(eb) {
+						break
+					}
+					if ver == 0xfe0d {
+						echIDs = append(echIDs, eb[4])
+					}
+					eb = eb[4+elen:]
+				}
+			}
+		case 6: // ipv6hint
+			for len(v) >= 16 && len(ips) < 16 {
+				ip := make(net.IP, 16)
+				copy(ip, v[:16])
+				ips = append(ips, ip)
+				v = v[16:]
+			}
+		}
+	}
+	return ips, echIDs, alpns, port
 }

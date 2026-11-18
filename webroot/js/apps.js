@@ -5,12 +5,69 @@
 var APP_COLORS = ['#007AFF', '#FF2D55', '#34C759', '#FF9500', '#AF52DE', '#5856D6', '#00C7BE', '#FF3B30', '#32ADE6', '#A2845E'];
 function appColor(s) { var h = 0; s = String(s || ''); for (var i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return APP_COLORS[Math.abs(h) % APP_COLORS.length]; }
 function appName(a, uid) { return (a.display_name && a.display_name.trim()) || (a.pkg ? a.pkg.split('.').slice(-1)[0] : 'uid ' + uid); }
+S.studio = null; S.studioRecipeOpen = false;
 function loadApps() {
   return Promise.all([
     api.get('/api/dpi_state', null, { timeout: 9000 }).then(function (r) { S.dpi = r; S.self = r && r.available && r.state ? (r.state.self || null) : null; }).catch(function (e) { S.dpiErr = errText(e); }),
     api.getSafe('/api/self', null, {}).then(function (r) { S.selfCfg = r || {}; }),
-    api.getSafe('/api/self/ifaces', null, null).then(function (r) { S.selfIfaces = r; })
+    api.getSafe('/api/self/ifaces', null, null).then(function (r) { S.selfIfaces = r; }),
+    api.getSafe('/api/self/studio', null, null).then(function (r) { S.studio = r; })
   ]).then(paintAppsDot);
+}
+function selfStudioCardHtml() {
+  var st = S.studio || {}, self = S.self || {}, cap = st.capture || {}, cnt = st.counters || {}, lease = st.lease || {};
+  var remSec = num(cap.lease_rem_sec, lease.remaining_sec);
+  var active = remSec > 0 && (cap.enabled !== false || lease.active);
+  var remMin = active ? Math.max(1, Math.ceil(remSec / 60)) : 0;
+  var smp = num(cnt.samples_written, st.samples_today);
+  var appCnt = num(cnt.user_apps, st.samples_apps);
+  var fpUse = num(cnt.usable_fps, st.usable_fp);
+  var domCnt = num(cnt.expanded_rules, st.auto_expanded_rules) + num(cnt.promoted_rules, st.auto_promoted_rules) + num(cnt.candidate_high, self.candidate_high);
+  var suCnt = num(cnt.usable_startups, st.usable_startup);
+  var nbCls = num(cnt.nb_classes_ready);
+  var ifList = [];
+  if (Array.isArray(cap.active_ifaces) && cap.active_ifaces.length) {
+    ifList = cap.active_ifaces.map(function (x) { return x.name; });
+  } else if (S.selfIfaces && Array.isArray(S.selfIfaces.ifaces)) {
+    ifList = S.selfIfaces.ifaces.filter(function (x) { return x.eligible; }).map(function (x) { return x.name; });
+  }
+  var ifTxt = ifList.length ? ifList.slice(0, 3).join(" + ") : "wlan0 + rmnet_data*";
+  var badge = active
+    ? "<span class=\"badge b-ok studio-live-pill\"><span class=\"breathe\" style=\"width:6px;height:6px;margin-right:4px\"></span>采集中 · 剩 " + remMin + " 分钟自动停表蒸馏</span>"
+    : ((cap.enabled || self.enabled) ? "<span class=\"badge b-acc\">本机追踪已开启 · 随时可蒸馏</span>" : "<span class=\"badge b-gray\">零外部数据集 · 本机 UID 真值闭环</span>");
+  var recipe = S.studioRecipeOpen ? (
+    "<div class=\"studio-recipe\">" +
+      "<div class=\"studio-step\"><b>1</b><span>点<b>「一键开启双路自训」</b>：自动接管本机 Wi-Fi 与 5G 蜂窝双网卡（含 <span class=\"mono\">64:ff9b::/96</span> 464XLAT 与双开分身 <span class=\"mono\">uid%100000</span> 归因），同时内置 15 分钟自动停表省电保护。</span></div>" +
+      "<div class=\"studio-step\"><b>2</b><span>依次冷启动常用 App 各刷 15 秒；<b>每次切下一个 App 前先回桌面停顿 4 秒</b>（避开 3 秒共现时间窗串味），Wi-Fi 与 5G 各跑一轮效果最佳。</span></div>" +
+      "<div class=\"studio-step\"><b>3</b><span>回来点<b>「立即蒸馏并同步热点」</b>：经 5 层防 WebView / Cronet 污染过滤，3~6 条样本即可秒级提炼专属 JA4+QTP 指纹、冷启动序列并重训贝叶斯流分类器。</span></div>" +
+      "<div class=\"studio-step\"><b>4</b><span>热点下的手机、平板、电视无需装任何插件，立即共享刚学到的全部识别与分流能力；也可一键导出 <span class=\"mono\">rulepack.json</span> 永久备份。</span></div>" +
+    "</div>"
+  ) : "";
+  return "<div class=\"glass studio-card" + (active ? " is-recording" : "") + "\">" +
+    "<div class=\"studio-head\">" +
+      "<span class=\"studio-orb\">" + studioSvg("prism") + "</span>" +
+      "<div class=\"studio-title-wrap\">" +
+        "<div class=\"studio-title-row\"><b>本机真值采集与 DPI 自训练工作台</b>" + badge + "</div>" +
+        "<div class=\"studio-sub\">无需任何外部抓包数据集 · 用手机内核 <span class=\"mono\">/proc/net</span> UID 真值自产自训，一键反哺热点全设备</div>" +
+      "</div>" +
+    "</div>" +
+    "<div class=\"studio-metrics\">" +
+      "<div class=\"studio-m\"><span class=\"l\">累计真值样本</span><b class=\"num\">" + smp + "</b><small>" + (appCnt ? appCnt + " 个本机应用" : "UID 精确对齐") + "</small></div>" +
+      "<div class=\"studio-m\"><span class=\"l\">专属加密指纹</span><b class=\"num\">" + fpUse + "</b><small>JA4 + QUIC 参数</small></div>" +
+      "<div class=\"studio-m\"><span class=\"l\">冷启动与域名</span><b class=\"num\">" + (suCnt + domCnt) + "</b><small>启动 " + suCnt + " · 域名 " + domCnt + (nbCls ? " · 流模型 " + nbCls + "类" : "") + "</small></div>" +
+      "<div class=\"studio-m\"><span class=\"l\">双路真值网卡</span><b class=\"mono\" style=\"font-size:12.5px\">" + esc(ifTxt) + "</b><small>Wi-Fi + 蜂窝双栈</small></div>" +
+    "</div>" +
+    (st.last_distill && st.last_distill.ts ? "<div class=\"note\" style=\"margin-top:4px\">最近蒸馏：" + esc(ago(st.last_distill.ts)) + " · 扫描 " + num(st.last_distill.samples_read) + " 条样本 · 专属指纹 " + num(st.last_distill.exclusive_fps) + " 个 · 冷启动 " + num(st.last_distill.startup_usable) + " 个</div>" : "") +
+    "<div class=\"studio-actions\">" +
+      (active
+        ? "<button type=\"button\" class=\"btn dan press\" data-act=\"studio-stop\">停止采集并蒸馏</button>"
+        : "<button type=\"button\" class=\"btn pri press\" data-act=\"studio-start\">一键开启双路自训 (15分护航)</button>") +
+      "<button type=\"button\" class=\"btn sec press\" data-act=\"studio-distill\">立即蒸馏并同步热点</button>" +
+      "<button type=\"button\" class=\"btn sec press\" data-act=\"studio-export\">导出规则包</button>" +
+      "<button type=\"button\" class=\"linkish studio-guide-btn\" data-act=\"studio-recipe\">" + (S.studioRecipeOpen ? "收起采训指南" : "零数据 8 分钟采训指南") + "</button>" +
+    "</div>" +
+    recipe +
+  "</div>";
 }
 function paintAppsDot() {
   var on = !!(S.self && num(S.self.candidate_high) > 0);
@@ -35,6 +92,7 @@ function renderApps(anim1) {
       '<div><div class="l">连接数</div><div class="v num">' + sum(rows, function (r) { return num(r.a.active_conns); }) + '</div></div><div class="hero-div"></div>' +
       '<div><div class="l">TLS 抓取</div><div class="v num">' + tls + '</div></div></div>' +
       '<div class="foot2"><span class="breathe' + (self && self.enabled ? '' : ' off') + '"></span><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">' + foot + '</span></div></div>' +
+    selfStudioCardHtml() +
     seg('apps-sub', [['my', '我的应用'], ['cand', '候选' + (self && num(self.candidate_high) ? ' ·' + self.candidate_high : '')], ['export', '导出'], ['set', '设置']], S.appsSub) +
     '<div class="subview" id="apps-sub">' + appsSub() + '</div></div>';
   // 进页面后数据回来的那次重绘(以及开关后的刷新)就地 morph: 此前整页 innerHTML 替换, 把刚开始的浮现动画掐断重来
@@ -122,7 +180,7 @@ function appRow(r, mx) {
   var a = r.a, key = 'app' + r.uid, nm = r.name;
   var snis = (a.top_snis || []).slice(0, 6), rules = (a.top_rules || []).slice(0, 4), hits = a.rule_hit_counts || {};
   var val = r.bytes ? bytes(r.bytes) : num(a.total_conns) + ' 次';
-  return '<div class="row-wrap' + (S.open[key] ? ' open' : '') + '" data-foldkey="' + key + '"><button class="row-h" data-act="fold" data-key="' + key + '">' +
+  return '<div class="row-wrap' + (S.open[key] ? ' open' : '') + '" data-foldkey="' + esc(key) + '"><button class="row-h" data-act="fold" data-key="' + esc(key) + '">' +
     '<span class="appi" style="background:linear-gradient(145deg,' + appColor(a.pkg || nm) + ',color-mix(in srgb,' + appColor(a.pkg || nm) + ' 60%,#000))">' + esc(nm.charAt(0).toUpperCase()) + '</span>' +
     '<span class="tx"><div class="dev-name" style="font-size:14.5px"><span class="nm">' + esc(nm) + '</span>' + (a.flywheel_excluded ? '<span class="badge b-gray">不学习</span>' : '') + '</div>' +
       (r.bytes ? '<div class="bar1"><i style="width:' + Math.max(2, r.bytes / mx * 100).toFixed(1) + '%"></i></div>' : '<div class="s">' + (a.last_seen ? '最近 ' + ago(a.last_seen) : '') + '</div>') + '</span>' +
@@ -152,7 +210,7 @@ function buildExport(btn) {
   api.post('/api/export', { from: Math.floor(f / 1000), to: Math.floor(t / 1000), notes: notes ? [notes] : [] }, { timeout: 90000, maxTime: 85 }).then(function (r) {
     if (r.status !== 'ok') throw new Error(r.error || '打包失败');
     var tr = (r.manifest && r.manifest.tracks) || {};
-    $('#exp-result').innerHTML = '<div class="note" style="margin-top:4px">✓ ' + esc(r.name) + ' · ' + bytes(r.size_bytes) + '<br>' + Object.keys(tr).map(function (k) { return esc(k) + (tr[k].included ? ' ' + tr[k].file_count + ' 个文件' : ' 无'); }).join(' · ') + '</div>';
+    $('#exp-result').innerHTML = '<div class="note" style="margin-top:4px">' + uiSvg('check') + ' ' + esc(r.name) + ' · ' + bytes(r.size_bytes) + '<br>' + Object.keys(tr).map(function (k) { return esc(k) + (tr[k].included ? ' ' + tr[k].file_count + ' 个文件' : ' 无'); }).join(' · ') + '</div>';
     toast('导出完成 · ' + bytes(r.size_bytes)); loadExports();
   }).catch(function (e) { toast(errText(e), 'err'); }).then(function () { btn.disabled = false; btn.lastChild.textContent = '打包导出'; });
 }

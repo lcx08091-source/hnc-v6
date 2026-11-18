@@ -33,7 +33,9 @@
  * Author: Claude (Anthropic AI) + Ling
  */
 
+#ifndef _GNU_SOURCE
 #define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
@@ -57,7 +59,7 @@
  * rc30.12 序列号会让 CI fail. 在 CI workflow 还没改之前, 继续用 rc30.12.x
  * 序列号 (0.1.0-rc30.12.30) 同时兼容 sanity check 和反映 minor change.
  * 等用户改完 .github/workflows/build.yml 后可以 bump 到 0.1.1-rc30.13.x. */
-#define VERSION                 "0.1.0-rc30.12.31"
+#define VERSION                 "0.1.0-rc30.12.32"
 
 #define BIN_DPID                "/data/local/hnc/bin/hnc_dpid"
 #define DPID_CONFIG             "/data/local/hnc/etc/dpi_config.json"
@@ -128,7 +130,7 @@ static int file_exists(const char *path)
 
 static int write_pid_file(const char *path, pid_t pid)
 {
-	FILE *f = fopen(path, "w");
+	FILE *f = fopen(path, "we");
 	if (f == NULL)
 		return -1;
 	fprintf(f, "%d\n", (int)pid);
@@ -138,14 +140,14 @@ static int write_pid_file(const char *path, pid_t pid)
 
 static pid_t read_pid_file(const char *path)
 {
-	FILE *f = fopen(path, "r");
-	pid_t pid = 0;
+	FILE *f = fopen(path, "re");
+	int raw_pid = 0;
 	if (f == NULL)
 		return 0;
-	if (fscanf(f, "%d", (int *)&pid) != 1)
-		pid = 0;
+	if (fscanf(f, "%d", &raw_pid) != 1 || raw_pid <= 0)
+		raw_pid = 0;
 	fclose(f);
-	return pid;
+	return (pid_t)raw_pid;
 }
 
 /* rc30.12.29 (P1.10): pid_alive() 已删除 — check_singleton 改 flock 后不再使用 */
@@ -197,6 +199,20 @@ static int check_singleton(void)
 	return 0;
 }
 
+static void cleanup_singleton_and_log(void)
+{
+	if (g_lock_fd >= 0) {
+		if (read_pid_file(PID_GUARD) == getpid())
+			unlink(PID_GUARD);
+		close(g_lock_fd);
+		g_lock_fd = -1;
+	}
+	if (g_log != NULL && g_log != stderr) {
+		fclose(g_log);
+		g_log = NULL;
+	}
+}
+
 /* ─── Crash loop 保护 ─────────────────────────────────────────────── */
 
 struct crash_tracker {
@@ -213,15 +229,24 @@ static void crash_tracker_init(struct crash_tracker *t)
 /* rc30.12.29 (P1.9): 重写为 "先压缩窗口外, 再追加新崩溃" 的两步语义.
  * 之前是 "滑动窗口里现有几次 + 加新条目 + 滚动覆盖" 三步交错,
  * 在窗口边界滚动时容易让人误读. 行为等价, 代码更直白. */
+static time_t mono_sec(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+		return ts.tv_sec;
+	return time(NULL);
+}
+
 static int crash_tracker_record(struct crash_tracker *t)
 {
-	time_t now = time(NULL);
+	time_t now = mono_sec();
 	int kept = 0;
 	int i;
 
-	/* 1. 压缩: 把窗口内的留下, 窗口外的丢掉 */
+	/* 1. 压缩: 把窗口内的留下, 窗口外的丢掉 (CLOCK_MONOTONIC 防 NTP 跳变) */
 	for (i = 0; i < t->count; i++) {
-		if (now - t->timestamps[i] <= CRASH_WINDOW_SEC)
+		if (now >= t->timestamps[i] &&
+		    now - t->timestamps[i] <= CRASH_WINDOW_SEC)
 			t->timestamps[kept++] = t->timestamps[i];
 	}
 
@@ -241,7 +266,7 @@ static int crash_tracker_record(struct crash_tracker *t)
 
 static void write_crash_flag(void)
 {
-	FILE *f = fopen(CRASH_FLAG, "w");
+	FILE *f = fopen(CRASH_FLAG, "we");
 	if (f) {
 		fprintf(f, "%ld\n", (long)time(NULL));
 		fclose(f);
@@ -252,9 +277,14 @@ static void write_crash_flag(void)
 
 static void on_term_signal(int sig)
 {
+	int saved_errno = errno;
+	pid_t cpid;
+	(void)sig;
 	g_shutdown = 1;
-	if (g_child_pid > 0)
-		kill(g_child_pid, SIGTERM);
+	cpid = (pid_t)g_child_pid;
+	if (cpid > 0)
+		kill(cpid, SIGTERM);
+	errno = saved_errno;
 }
 
 static void on_child_signal(int sig)
@@ -270,12 +300,16 @@ static int install_signal_handlers(void)
 	memset(&sa, 0, sizeof(sa));
 	sa.sa_handler = on_term_signal;
 	sigemptyset(&sa.sa_mask);
+	sigaddset(&sa.sa_mask, SIGTERM);
+	sigaddset(&sa.sa_mask, SIGINT);
+	sigaddset(&sa.sa_mask, SIGHUP);
 	/* 不要 SA_RESTART, 让 waitpid 被信号打断 */
 	if (sigaction(SIGTERM, &sa, NULL) < 0 ||
 	    sigaction(SIGINT, &sa, NULL) < 0 ||
 	    sigaction(SIGHUP, &sa, NULL) < 0)
 		return -1;
 
+	sigemptyset(&sa.sa_mask);
 	sa.sa_handler = on_child_signal;
 	if (sigaction(SIGCHLD, &sa, NULL) < 0)
 		return -1;
@@ -307,12 +341,28 @@ static pid_t spawn_dpid(void)
 	}
 
 	if (pid == 0) {
-		/* 子进程: 重定向 stdout/stderr 到 dpid.log */
-		int fd = open(LOG_DPID, O_WRONLY | O_CREAT | O_APPEND, 0644);
+		/* 子进程: 恢复默认 SIGPIPE/信号掩码 + stdin 绑 /dev/null + stdout/stderr 绑 dpid.log */
+		struct sigaction sa_dfl;
+		sigset_t empty_mask;
+		memset(&sa_dfl, 0, sizeof(sa_dfl));
+		sa_dfl.sa_handler = SIG_DFL;
+		sigemptyset(&sa_dfl.sa_mask);
+		sigaction(SIGPIPE, &sa_dfl, NULL);
+		sigemptyset(&empty_mask);
+		sigprocmask(SIG_SETMASK, &empty_mask, NULL);
+
+		int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
+		if (null_fd >= 0) {
+			dup2(null_fd, STDIN_FILENO);
+			if (null_fd > STDERR_FILENO)
+				close(null_fd);
+		}
+
+		int fd = open(LOG_DPID, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 		if (fd >= 0) {
 			dup2(fd, STDOUT_FILENO);
 			dup2(fd, STDERR_FILENO);
-			if (fd > 2)
+			if (fd > STDERR_FILENO)
 				close(fd);
 		}
 
@@ -422,7 +472,9 @@ static int run_supervise_loop(void)
 			}
 			if (g_shutdown)
 				break;
-			sleep(backoff);
+			sleep((unsigned int)backoff);
+			if (g_shutdown)
+				break;
 			if (backoff < RESTART_BACKOFF_MAX)
 				backoff *= 2;
 			continue;
@@ -471,6 +523,8 @@ static int run_supervise_loop(void)
 			if (g_shutdown)
 				break;
 			sleep(CRASH_COOLDOWN_SEC);
+			if (g_shutdown)
+				break;
 			unlink(CRASH_FLAG);
 			crash_tracker_init(&crashes);
 			backoff = RESTART_BACKOFF_MIN;
@@ -479,7 +533,9 @@ static int run_supervise_loop(void)
 
 		/* 重启 */
 		log_msg("restarting dpid in %ds...", backoff);
-		sleep(backoff);
+		sleep((unsigned int)backoff);
+		if (g_shutdown)
+			break;
 		if (backoff < RESTART_BACKOFF_MAX)
 			backoff *= 2;
 	}
@@ -562,12 +618,16 @@ int main(int argc, char **argv)
 	log_msg("hnc_launcher %s starting (pid=%d)", VERSION, (int)getpid());
 
 	/* 单实例检查 */
-	if (check_singleton() < 0)
+	if (check_singleton() < 0) {
+		if (g_log != NULL && g_log != stderr)
+			fclose(g_log);
 		return 1;
+	}
 
 	if (install_signal_handlers() < 0) {
 		log_msg("failed to install signal handlers: errno=%d %s",
 			errno, strerror(errno));
+		cleanup_singleton_and_log();
 		return 1;
 	}
 
@@ -584,10 +644,13 @@ int main(int argc, char **argv)
 		}
 		if (g_shutdown) {
 			log_msg("crashflag cooldown interrupted by signal; exiting");
+			cleanup_singleton_and_log();
 			return 0;
 		}
 		unlink(CRASH_FLAG);
 	}
 
-	return run_supervise_loop();
+	int rc = run_supervise_loop();
+	cleanup_singleton_and_log();
+	return rc;
 }

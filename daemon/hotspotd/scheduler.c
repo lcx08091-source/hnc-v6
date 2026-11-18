@@ -223,7 +223,7 @@ static int json_bool_true_in_block(const char *block, const char *key)
 
 static int rebuild_from_rules(void)
 {
-    FILE *f = fopen(RULES_JSON_PATH, "r");
+    FILE *f = fopen(RULES_JSON_PATH, "re");
     if (!f) {
         fprintf(stderr, "[sched] rebuild: rules.json not found (%s), skip\n",
                 RULES_JSON_PATH);
@@ -541,6 +541,22 @@ static void trigger_adapter_restore_locked(void)
  * 主线程仍可 request_refresh / shutdown (会在下次循环检测到)
  * ══════════════════════════════════════════════════════════ */
 
+static int scheduler_sleep_interruptible(int sec)
+{
+    if (sec <= 0) return 0;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    ts.tv_sec += sec;
+    pthread_mutex_lock(&sched.worker_lock);
+    while (!sched.worker_should_stop) {
+        int rc = pthread_cond_timedwait(&sched.worker_cond, &sched.worker_lock, &ts);
+        if (rc == ETIMEDOUT) break;
+    }
+    int stopped = sched.worker_should_stop;
+    pthread_mutex_unlock(&sched.worker_lock);
+    return stopped ? -1 : 0;
+}
+
 static void *worker_main(void *arg)
 {
     (void)arg;
@@ -556,7 +572,7 @@ static void *worker_main(void *arg)
         /* timed wait until: should_stop / refresh_requested / 60s timeout */
         if (!sched.worker_should_stop && !sched.worker_refresh_requested) {
             struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
+            clock_gettime(CLOCK_MONOTONIC, &ts);
             ts.tv_sec += next_wait_sec;
             pthread_cond_timedwait(&sched.worker_cond, &sched.worker_lock, &ts);
         }
@@ -697,7 +713,14 @@ int hnc_scheduler_init(void)
     /* 初始化 lock */
     pthread_mutex_init(&sched.lock, NULL);
     pthread_mutex_init(&sched.worker_lock, NULL);
-    pthread_cond_init(&sched.worker_cond, NULL);
+    {
+        pthread_condattr_t cattr;
+        pthread_condattr_init(&cattr);
+        pthread_condattr_setclock(&cattr, CLOCK_MONOTONIC);
+        pthread_cond_init(&sched.worker_cond, &cattr);
+        pthread_condattr_destroy(&cattr);
+    }
+    offload_set_sleep_fn(scheduler_sleep_interruptible);
 
     /* 初次探测上游 (v5.9.0: probe 锁外 / apply 锁内 —— 此时 worker 未启,
      * 单线程本无竞争, 改动纯为四个调用点形态统一) */
@@ -761,7 +784,7 @@ void hnc_scheduler_shutdown(void)
     if (sched.worker_started) {
         pthread_mutex_lock(&sched.worker_lock);
         sched.worker_should_stop = 1;
-        pthread_cond_signal(&sched.worker_cond);
+        pthread_cond_broadcast(&sched.worker_cond);
         pthread_mutex_unlock(&sched.worker_lock);
         pthread_join(sched.worker_tid, NULL);
         sched.worker_started = 0;
@@ -774,6 +797,7 @@ void hnc_scheduler_shutdown(void)
 
     pthread_mutex_destroy(&sched.lock);
     pthread_mutex_destroy(&sched.worker_lock);
+    offload_set_sleep_fn(NULL);
     pthread_cond_destroy(&sched.worker_cond);
 
     sched.initialized = 0;

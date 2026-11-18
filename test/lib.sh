@@ -32,7 +32,9 @@ CURRENT_TEST=""
 # ─── 隔离的 HNC_DIR(每个测试 process 独立)─────────
 # Android 没有 /tmp,用 /data/local/tmp(Android 的标准临时目录)
 # Linux 沙箱用 /tmp,自动选择
-if [ -d /data/local/tmp ]; then
+if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
+    HNC_TEST_DIR="$TMPDIR/hnc_test_$$"
+elif [ -d /data/local/tmp ]; then
     HNC_TEST_DIR="/data/local/tmp/hnc_test_$$"
 elif [ -d /tmp ]; then
     HNC_TEST_DIR="/tmp/hnc_test_$$"

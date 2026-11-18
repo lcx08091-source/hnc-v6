@@ -226,16 +226,20 @@ type externalGT struct {
 
 // loadedRules is the compiled rule set + a version tag for telemetry.
 type loadedRules struct {
+	seq     uint64
 	version string
 	rules   []l3Rule
 }
 
+var ruleSeqGen uint64 = 1
+
 var ruleCache = struct {
 	sync.Mutex
-	mtime int64
-	size  int64
-	val   loadedRules
-}{val: loadedRules{version: "builtin-rc29", rules: builtinRules}}
+	mtime  int64
+	size   int64
+	digest uint64
+	val    loadedRules
+}{val: loadedRules{seq: 1, version: "builtin-rc29", rules: builtinRules}}
 
 // currentL3RuleVersion returns the version tag (refreshing if mtime changed).
 func currentL3RuleVersion() string {
@@ -287,26 +291,57 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 	// Filename prefix (00- .. 99-) controls merge precedence. sort.Strings
 	// gives lexicographic order which matches the proposal's intent
 	// (00-core-meta first, 99-user-custom last so user overrides win).
-	sort.Strings(files)
+	// 显式分层排序: 00..98 内置规则 < _imported.json < _auto_expanded/_auto_promoted < 99-user-custom.json
+	// 修复 '_' (ASCII 0x5F) 排在 '9' (0x39) 之后导致外部导入规则覆盖 99-user-custom 用户自定义规则的问题。
+	ruleFileOrder := func(p string) (int, string) {
+		b := filepath.Base(p)
+		switch {
+		case strings.HasPrefix(b, "99-"):
+			return 4, b
+		case b == "_auto_promoted.json" || b == "_auto_expanded.json":
+			return 3, b
+		case strings.HasPrefix(b, "_"):
+			return 2, b
+		default:
+			return 1, b
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		ti, bi := ruleFileOrder(files[i])
+		tj, bj := ruleFileOrder(files[j])
+		if ti != tj {
+			return ti < tj
+		}
+		return bi < bj
+	})
 
-	// Pass 1: stat only. Every stat-able file feeds the cache key (including
-	// oversized ones — preserves the pre-v5.9.0 key semantics); only files
-	// under the size cap are queued for the read pass.
+	// Pass 1: stat + FNV-1a 结构摘要(含文件数、文件名、大小、纳秒 mtime, 彻底修复删空文件或 mtime 遮蔽漏检)。
 	var (
-		aggrMtime int64
-		aggrSize  int64
-		readable  = make([]string, 0, len(files))
+		aggrMtime  int64
+		aggrSize   int64
+		aggrDigest uint64 = 14695981039346656037
+		readable          = make([]string, 0, len(files))
 	)
+	mixU64 := func(v uint64) {
+		aggrDigest ^= v
+		aggrDigest *= 1099511628211
+	}
 	for _, f := range files {
 		fst, err := os.Stat(f)
 		if err != nil {
 			log.Printf("WARN dpi_rules.d: stat %s err=%v (skipping subset)", f, err)
 			continue
 		}
-		if mt := fst.ModTime().UnixNano(); mt > aggrMtime {
+		mt := fst.ModTime().UnixNano()
+		if mt > aggrMtime {
 			aggrMtime = mt
 		}
 		aggrSize += fst.Size()
+		for _, ch := range []byte(filepath.Base(f)) {
+			mixU64(uint64(ch))
+		}
+		mixU64(uint64(mt))
+		mixU64(uint64(fst.Size()))
 		if fst.Size() > externalRulesSubsetMaxBytes {
 			log.Printf("WARN dpi_rules.d: skip oversized %s (%d bytes > cap %d)",
 				f, fst.Size(), externalRulesSubsetMaxBytes)
@@ -314,13 +349,10 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 		}
 		readable = append(readable, f)
 	}
+	mixU64(uint64(len(readable)))
 
-	// Cache hit check — BEFORE any read/parse. We require the cached entry
-	// to also have the "external-d:" prefix (the initial builtin cache entry
-	// has mtime=0/size=0 but no prefix, so an all-stat-failed pass cannot
-	// false-hit it).
 	ruleCache.Lock()
-	if ruleCache.mtime == aggrMtime && ruleCache.size == aggrSize &&
+	if ruleCache.mtime == aggrMtime && ruleCache.size == aggrSize && ruleCache.digest == aggrDigest &&
 		len(ruleCache.val.rules) > 0 &&
 		strings.HasPrefix(ruleCache.val.version, "external-d:") {
 		v := ruleCache.val
@@ -378,8 +410,11 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 	lr := loadedRules{version: version, rules: merged}
 
 	ruleCache.Lock()
+	ruleSeqGen++
+	lr.seq = ruleSeqGen
 	ruleCache.mtime = aggrMtime
 	ruleCache.size = aggrSize
+	ruleCache.digest = aggrDigest
 	ruleCache.val = lr
 	ruleCache.Unlock()
 	return lr, true

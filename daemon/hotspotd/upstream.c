@@ -25,6 +25,7 @@
 #include <linux/bpf.h>
 
 #include <net/if.h>
+#include <pthread.h>
 
 /* ══════════════════════════════════════════════════════════
  * Tier 1: popen "ip route get 8.8.8.8"
@@ -119,8 +120,16 @@ int upstream_detect_via_ip_route(int *ifindex_out,
  * 由 upstream_detect_primary() 在每次探测前从状态文件刷新。
  * 空字符串表示尚未确认(早期启动)。 */
 static char g_known_hs_iface[IFNAMSIZ] = {0};
+static pthread_mutex_t g_hs_iface_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* 从状态文件读取热点接口名(与 hotspotd.c 的 read_hotspot_iface 同逻辑) */
+static void get_known_hs_iface(char out[IFNAMSIZ])
+{
+    pthread_mutex_lock(&g_hs_iface_lock);
+    memcpy(out, g_known_hs_iface, IFNAMSIZ);
+    out[IFNAMSIZ - 1] = '\0';
+    pthread_mutex_unlock(&g_hs_iface_lock);
+}
+
 static void refresh_known_hs_iface(void)
 {
     char buf[IFNAMSIZ] = {0};
@@ -128,16 +137,14 @@ static void refresh_known_hs_iface(void)
     char line[256];
 
     /* Tier 1: hnc_state — ACTIVE:<iface> */
-    f = fopen("/data/local/hnc/run/hnc_state", "r");
+    f = fopen("/data/local/hnc/run/hnc_state", "re");
     if (f) {
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "ACTIVE:", 7) == 0) {
-                char *nl = strchr(line + 7, '\n');
-                if (nl) *nl = '\0';
-                nl = strchr(line + 7, '\r');
+                char *nl = strpbrk(line + 7, "\r\n");
                 if (nl) *nl = '\0';
                 if (line[7] != '\0') {
-                    strncpy(buf, line + 7, sizeof(buf) - 1);
+                    snprintf(buf, sizeof(buf), "%.*s", (int)sizeof(buf) - 1, line + 7);
                     fclose(f);
                     goto done;
                 }
@@ -146,16 +153,14 @@ static void refresh_known_hs_iface(void)
         fclose(f);
     }
 
-    /* Tier 2: hotspot_iface 文件 */
-    f = fopen("/data/local/hnc/run/hotspot_iface", "r");
+    /* Tier 2: hotspot_iface file */
+    f = fopen("/data/local/hnc/run/hotspot_iface", "re");
     if (f) {
         if (fgets(line, sizeof(line), f)) {
-            char *nl = strchr(line, '\n');
-            if (nl) *nl = '\0';
-            nl = strchr(line, '\r');
+            char *nl = strpbrk(line, "\r\n");
             if (nl) *nl = '\0';
             if (line[0] != '\0') {
-                strncpy(buf, line, sizeof(buf) - 1);
+                snprintf(buf, sizeof(buf), "%.*s", (int)sizeof(buf) - 1, line);
             }
         }
         fclose(f);
@@ -163,28 +168,27 @@ static void refresh_known_hs_iface(void)
 
 done:
     if (buf[0] != '\0') {
-        strncpy(g_known_hs_iface, buf, sizeof(g_known_hs_iface) - 1);
-        g_known_hs_iface[sizeof(g_known_hs_iface) - 1] = '\0';
+        pthread_mutex_lock(&g_hs_iface_lock);
+        snprintf(g_known_hs_iface, sizeof(g_known_hs_iface), "%s", buf);
+        pthread_mutex_unlock(&g_hs_iface_lock);
     }
 }
 
 static int looks_like_uplink_iface(const char *name)
 {
     if (!name) return 0;
-    /* BUG-004: 排除已知热点接口(防止 wlan0 同时被当作上游和热点) */
-    if (g_known_hs_iface[0] != '\0' && strcmp(name, g_known_hs_iface) == 0)
+    char hs_iface[IFNAMSIZ];
+    get_known_hs_iface(hs_iface);
+    if (hs_iface[0] != '\0' && strcmp(name, hs_iface) == 0)
         return 0;
-    /* 已知热点 downstream 名字, 排除 */
     if (strncmp(name, "wlan2", 5) == 0) return 0;
     if (strncmp(name, "ap",    2) == 0) return 0;
     if (strncmp(name, "swlan", 5) == 0) return 0;
 
-    /* 可能 uplink 前缀 */
     if (strncmp(name, "rmnet", 5) == 0) return 1;
     if (strncmp(name, "wwan",  4) == 0) return 1;
     if (strncmp(name, "eth",   3) == 0) return 1;
     if (strncmp(name, "ppp",   3) == 0) return 1;
-    /* Wi-Fi 上行 (手机当 STA 接其他 Wi-Fi, 罕见但存在) */
     if (strncmp(name, "wlan0", 5) == 0) return 1;
     if (strncmp(name, "wlan1", 5) == 0) return 1;
     return 0;
@@ -196,7 +200,7 @@ int upstream_detect_via_proc_route(int *ifindex_out,
 {
     if (!ifindex_out || !ifname_out || ifname_size < 2) return -1;
 
-    FILE *f = fopen("/proc/net/route", "r");
+    FILE *f = fopen("/proc/net/route", "re");
     if (!f) return -1;
 
     char line[512];
@@ -459,7 +463,9 @@ int upstream_detect_via_limit_map(int *ifindex_out,
     unsigned ap0_idx   = if_nametoindex("ap0");       /* 少数 ROM */
     unsigned swlan0_idx = if_nametoindex("swlan0");
     /* BUG-004: 也跳过已知热点接口的 ifindex */
-    unsigned hs_idx = g_known_hs_iface[0] ? if_nametoindex(g_known_hs_iface) : 0;
+    char hs_iface[IFNAMSIZ];
+    get_known_hs_iface(hs_iface);
+    unsigned hs_idx = hs_iface[0] ? if_nametoindex(hs_iface) : 0;
 
     /* 找第一个非 downstream 的 ifindex */
     for (int i = 0; i < count; i++) {
@@ -484,7 +490,7 @@ int upstream_detect_via_limit_map(int *ifindex_out,
         if (strncmp(name, "swlan",  5) == 0) continue;
         if (strncmp(name, "lo",     2) == 0) continue;
         /* BUG-004: 排除已知热点接口 */
-        if (g_known_hs_iface[0] != '\0' && strcmp(name, g_known_hs_iface) == 0) continue;
+        if (hs_iface[0] != '\0' && strcmp(name, hs_iface) == 0) continue;
 
         *ifindex_out = (int)idx;
         snprintf(ifname_out, ifname_size, "%s", name);

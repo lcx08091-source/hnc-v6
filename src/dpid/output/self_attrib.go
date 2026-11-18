@@ -189,6 +189,11 @@ type SelfAttribAggregator struct {
 	// dpi_state for shadow calibration / auto-promote diagnostics.
 	candidateSummary candidateSummary
 
+	remoteIPToUID     map[string]int
+	autoExpandedCount int
+	expandKick        chan struct{}
+	sampleMu          sync.Mutex
+
 	// counters
 	lastTick     int64
 	unknownConns int
@@ -211,6 +216,8 @@ func NewSelfAttribAggregator(jsonlDir string) *SelfAttribAggregator {
 	return &SelfAttribAggregator{
 		appsByUID:        make(map[int]*SelfApp),
 		remoteToUID:      make(map[string]int),
+		remoteIPToUID:    make(map[string]int),
+		expandKick:       make(chan struct{}, 1),
 		snisByUID:        make(map[int]map[string]int64),
 		rulesByUID:       make(map[int]map[string]int),
 		unmatchedSNIs:    make(map[string]map[int]struct{}),
@@ -275,7 +282,34 @@ func (a *SelfAttribAggregator) SetEnabled(enabled bool, reason string) {
 		// disable. But clear the live remote→uid map so capture events
 		// stop attributing.
 		a.remoteToUID = make(map[string]int)
+		a.remoteIPToUID = make(map[string]int)
 	}
+}
+
+// SetAutoExpandedCount records confirmed _auto_expanded.json rule count for Studio telemetry.
+func (a *SelfAttribAggregator) SetAutoExpandedCount(n int) {
+	a.mu.Lock()
+	a.autoExpandedCount = n
+	a.mu.Unlock()
+}
+
+// TriggerExpandNow wakes RunAutoExpander immediately when Studio pokes dpid.
+func (a *SelfAttribAggregator) TriggerExpandNow() {
+	if a == nil || a.expandKick == nil {
+		return
+	}
+	select {
+	case a.expandKick <- struct{}{}:
+	default:
+	}
+}
+
+// SampleNow runs an immediate /proc/net attribution pass when Studio starts or distills.
+func (a *SelfAttribAggregator) SampleNow() {
+	if a == nil {
+		return
+	}
+	_ = a.sampleOnce()
 }
 
 // LookupUID is called from the TLS/DNS capture path. Returns (uid, pkg,
@@ -288,13 +322,19 @@ func (a *SelfAttribAggregator) SetEnabled(enabled bool, reason string) {
 func (a *SelfAttribAggregator) LookupUID(remoteIP string, remotePort uint16) (uid int, pkg string, ok bool) {
 	// v5.12: 用与 sampleOnce 建表相同的规范化键(见 canonRemoteKey)。
 	key := canonIPPort(remoteIP, strconv.Itoa(int(remotePort)))
+	ipKey := canonIPOnly(remoteIP)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	uid, ok = a.remoteToUID[key]
-	if !ok {
+	if !ok && ipKey != "" {
+		if u2, ok2 := a.remoteIPToUID[ipKey]; ok2 && u2 > 0 {
+			uid, ok = u2, true
+		}
+	}
+	if !ok || uid <= 0 {
 		return 0, "", false
 	}
-	pkg = a.pkgCache[uid]
+	pkg = a.resolvePkgByUIDLocked(uid)
 	return uid, pkg, true
 }
 
@@ -440,14 +480,14 @@ func (a *SelfAttribAggregator) drainUnmatchedSNIs() map[string]map[int]struct{} 
 func (a *SelfAttribAggregator) PkgForUID(uid int) string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.pkgCache[uid]
+	return a.resolvePkgByUIDLocked(uid)
 }
 
 // DisplayForUID resolves a uid to its (package, human-label) via the pm cache
 // + appMeta resolver. label is "" if pkg unknown or no resolver. v5.7.
 func (a *SelfAttribAggregator) DisplayForUID(uid int) (pkg, label string) {
 	a.mu.Lock()
-	pkg = a.pkgCache[uid]
+	pkg = a.resolvePkgByUIDLocked(uid)
 	m := a.appMeta
 	a.mu.Unlock()
 	if m != nil && pkg != "" {
@@ -484,7 +524,7 @@ func (a *SelfAttribAggregator) ensureAppLocked(uid int, now int64) *SelfApp {
 	}
 	app = &SelfApp{
 		UID:       uid,
-		Pkg:       a.pkgCache[uid],
+		Pkg:       a.resolvePkgByUIDLocked(uid),
 		FirstSeen: now,
 		LastSeen:  now,
 	}
@@ -616,6 +656,8 @@ func (a *SelfAttribAggregator) Snapshot() *SelfState {
 	s.CandidateHigh = cs.high
 	s.CandidateShared = cs.shared
 	s.CandidatePromoted = cs.promoted
+	s.AutoExpandedCount = a.autoExpandedCount
+	s.AutoPromotedCount = cs.promoted
 	s.CandidateEntityDB = cs.entityDBSize
 	s.AutoPromoteOn = cs.autoPromoteOn
 	if len(cs.samples) > 0 {
@@ -673,13 +715,34 @@ func connsSignature(rows []SelfAttribConnRow) string {
 }
 
 // sampleOnce is one /proc/net pass + JSONL write.
+func resolvePkgInMap(pkgMap map[int]string, uid int) string {
+	if uid <= 0 || pkgMap == nil {
+		return ""
+	}
+	if p := pkgMap[uid]; p != "" {
+		return p
+	}
+	appID := uid % 100000
+	if appID >= 20000 && appID <= 29999 {
+		appID -= 10000
+	}
+	if appID >= 10000 && appID <= 19999 {
+		return pkgMap[appID]
+	}
+	return ""
+}
+
 func (a *SelfAttribAggregator) sampleOnce() error {
+	a.sampleMu.Lock()
+	defer a.sampleMu.Unlock()
+
 	now := time.Now()
 	pkgMap := a.getPkgCache()
 
 	var rows []SelfAttribConnRow
 	seen := make(map[string]bool)
 	newRemoteToUID := make(map[string]int, 128)
+	newRemoteIPToUID := make(map[string]int, 128)
 	unknownConns := 0
 
 	for _, src := range []struct {
@@ -703,20 +766,30 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 				continue
 			}
 			seen[key] = true
-			if pkg, ok := pkgMap[e.UID]; ok {
+			if pkg := resolvePkgInMap(pkgMap, e.UID); pkg != "" {
 				e.Pkg = pkg
 			} else if e.UID > 0 {
 				unknownConns++
 			}
-			// v5.12: 表键规范化。旧代码直接用 parseHexAddr 的原样字符串当键:
-			// IPv6 形如 "[2409:8963:e03:0:...]:443"(%x 不补零、不做 :: 压缩),
-			// 而 LookupUID 用 net.IP.String()("2409:8963:e03::...", 无方括号)
-			// 拼键, 永远对不上; 更常见的是 Android Java 应用用双栈 AF_INET6
-			// socket 连 IPv4 服务器, /proc/net/tcp6 里是 ::ffff:a.b.c.d 映射
-			// 地址, 抓包侧看到的却是纯 IPv4 → 自抓包 SNI 归因对大多数 App
-			// 全部落空。统一规范为 "IPv4点分 或 IPv6 规范串:port"。
+			// v5.36.0: FIN_WAIT1/2, CLOSE, CLOSING 常在内核释放孤儿 socket 后变为 uid=0;
+			// 绝不允许 uid=0 覆盖同一远端 IP:Port 上已有的真实应用 UID (>0)。
 			if k := canonRemoteKey(e.Remote); k != "" {
-				newRemoteToUID[k] = e.UID
+				if prev, exists := newRemoteToUID[k]; !exists || e.UID > 0 || prev <= 0 {
+					if e.UID > 0 || !exists {
+						newRemoteToUID[k] = e.UID
+					}
+				}
+				if e.UID >= 10000 {
+					if host, _, err := net.SplitHostPort(e.Remote); err == nil {
+						if ipk := canonIPOnly(host); ipk != "" {
+							if prevU, has := newRemoteIPToUID[ipk]; !has {
+								newRemoteIPToUID[ipk] = e.UID
+							} else if prevU != e.UID {
+								newRemoteIPToUID[ipk] = -1 // 多应用共享同一远端 IP 时禁用纯 IP 兜底, 绝不串应用
+							}
+						}
+					}
+				}
 			}
 			rows = append(rows, e)
 		}
@@ -747,6 +820,7 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 	// Update aggregator
 	a.mu.Lock()
 	a.remoteToUID = newRemoteToUID
+	a.remoteIPToUID = newRemoteIPToUID
 	a.lastTick = now.Unix()
 	a.unknownConns = unknownConns
 
@@ -772,7 +846,7 @@ func (a *SelfAttribAggregator) sampleOnce() error {
 		if app := a.appsByUID[uid]; app != nil {
 			app.ActiveConns = n
 			if app.Pkg == "" {
-				if pkg, ok := pkgMap[uid]; ok {
+				if pkg := resolvePkgInMap(pkgMap, uid); pkg != "" {
 					app.Pkg = pkg
 				}
 			}
@@ -903,7 +977,7 @@ func loadSystemPkgs() (map[string]struct{}, error) {
 func (a *SelfAttribAggregator) IsSystemUID(uid int) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	pkg := a.pkgCache[uid]
+	pkg := a.resolvePkgByUIDLocked(uid)
 	if pkg == "" || a.systemPkgs == nil {
 		return false
 	}
@@ -918,7 +992,7 @@ func (a *SelfAttribAggregator) IsSystemUID(uid int) bool {
 func (a *SelfAttribAggregator) IsFlywheelExcludedUID(uid int) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	pkg := a.pkgCache[uid]
+	pkg := a.resolvePkgByUIDLocked(uid)
 	if pkg == "" || a.flywheelExcludePkgs == nil {
 		return false
 	}
@@ -1048,8 +1122,9 @@ func parseProcNet(path, proto string, isIPv6 bool) ([]SelfAttribConnRow, error) 
 		stateHex := fields[3]
 		state := tcpStateName(stateHex)
 
-		// Skip TCP LISTEN — meaningless for "who is my app talking to".
-		if proto == "tcp" && stateHex == "0A" {
+		// v5.35.0: Skip TCP LISTEN (0A) and TIME_WAIT (06, kernel emits uid=0 after sock release,
+		// which otherwise overwrites active ESTABLISHED app UIDs on the same CDN IP:443).
+		if proto == "tcp" && (stateHex == "0A" || stateHex == "06") {
 			continue
 		}
 		// Skip all-zero remote (UDP server sockets bound to 0.0.0.0:port,
@@ -1087,15 +1162,29 @@ func canonRemoteKey(hostport string) string {
 // canonIPPort v5.12: IPv4-mapped IPv6(::ffff:a.b.c.d)折叠成 IPv4, 其余 IPv6
 // 用 net.IP.String() 的规范写法; 结果形如 "1.2.3.4:443" / "2409:8963::1:443"
 // (键只用于 map 查找, 不需要可逆)。无法解析的 IP 原样保留。
-func canonIPPort(ip, port string) string {
+func canonIPOnly(ip string) string {
+	ip = strings.Trim(ip, "[]")
 	if p := net.ParseIP(ip); p != nil {
 		if v4 := p.To4(); v4 != nil {
-			ip = v4.String()
-		} else {
-			ip = p.String()
+			return v4.String()
 		}
+		p16 := p.To16()
+		if len(p16) == 16 && p16[0] == 0x00 && p16[1] == 0x64 && p16[2] == 0xff && p16[3] == 0x9b {
+			// RFC 6052 Well-Known Prefix 64:ff9b::/96 (bytes 4..11 == 0) AND
+			// RFC 8215 Local-Use Translation Prefix 64:ff9b:1::/48 (bytes 4..5 == 0x0001, any subnet in 6..11)
+			wellKnown := p16[4] == 0 && p16[5] == 0 && p16[6] == 0 && p16[7] == 0 && p16[8] == 0 && p16[9] == 0 && p16[10] == 0 && p16[11] == 0
+			localUse := p16[4] == 0 && p16[5] == 1
+			if wellKnown || localUse {
+				return net.IPv4(p16[12], p16[13], p16[14], p16[15]).String()
+			}
+		}
+		return p.String()
 	}
-	return ip + ":" + port
+	return ip
+}
+
+func canonIPPort(ip, port string) string {
+	return canonIPOnly(ip) + ":" + port
 }
 
 // parseHexAddr converts "0100007F:1F40" (IPv4 little-endian per byte
@@ -1164,4 +1253,23 @@ func tcpStateName(hex string) string {
 	default:
 		return hex
 	}
+}
+
+// resolvePkgByUIDLocked v5.35.0: Supports Android multi-user / dual-app clone (user 999)
+// and Android 13+ SDK Sandbox (20000..29999 -> appId - 10000) via UserHandle.PER_USER_RANGE = 100000.
+func (a *SelfAttribAggregator) resolvePkgByUIDLocked(uid int) string {
+	if uid <= 0 {
+		return ""
+	}
+	if p := a.pkgCache[uid]; p != "" {
+		return p
+	}
+	appID := uid % 100000
+	if appID >= 20000 && appID <= 29999 {
+		appID -= 10000
+	}
+	if appID >= 10000 && appID <= 19999 {
+		return a.pkgCache[appID]
+	}
+	return ""
 }

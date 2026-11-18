@@ -108,8 +108,9 @@ type LabelSamplesStats struct {
 
 // LabelSamplesWriter 带缓冲的本机样本写入器。零值不可用, 用 NewLabelSamplesWriter。
 type LabelSamplesWriter struct {
-	dir string
-	ch  chan LabelSample
+	dir     string
+	ch      chan LabelSample
+	flushCh chan chan struct{}
 
 	// classify 可替换(单测); 默认用规则库后缀匹配, 在写入时就把命中结果记进样本,
 	// 这样 httpd 端不必再加载 dpid 的规则库。
@@ -141,6 +142,7 @@ func NewLabelSamplesWriter(dir string) *LabelSamplesWriter {
 	return &LabelSamplesWriter{
 		dir:      dir,
 		ch:       make(chan LabelSample, labelSamplesChanCap),
+		flushCh:  make(chan chan struct{}, 2),
 		classify: classifyHost,
 		now:      time.Now,
 		dedupWin: labelSamplesDedupWindow,
@@ -214,6 +216,21 @@ func (w *LabelSamplesWriter) Run(ctx context.Context) {
 		case <-tk.C:
 			w.reopenIfRemoved()
 			w.writeStats()
+		case ack := <-w.flushCh:
+			for {
+				select {
+				case s := <-w.ch:
+					w.handle(s)
+				default:
+					goto drained
+				}
+			}
+		drained:
+			if w.f != nil {
+				_ = w.f.Sync()
+			}
+			w.writeStats()
+			close(ack)
 		case s := <-w.ch:
 			w.handle(s)
 		}
@@ -259,6 +276,22 @@ func (w *LabelSamplesWriter) writeStats() {
 	}
 	if err := atomicWrite(filepath.Join(w.dir, labelSamplesStatsFile), b, labelSamplesFileMode); err != nil && !os.IsNotExist(err) {
 		log.Printf("label-samples: write stats: %v", err)
+	}
+}
+
+// FlushNow 供本机自训练工作台「立即蒸馏」同步排空缓冲并刷新统计快照。
+func (w *LabelSamplesWriter) FlushNow() {
+	if w == nil || w.flushCh == nil {
+		return
+	}
+	ack := make(chan struct{})
+	select {
+	case w.flushCh <- ack:
+		select {
+		case <-ack:
+		case <-time.After(600 * time.Millisecond):
+		}
+	default:
 	}
 }
 

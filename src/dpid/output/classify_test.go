@@ -182,7 +182,7 @@ func TestRulesDirLoadsCNAppsExtra(t *testing.T) {
 		}
 	}
 	// 抽查语义: 新规则命中, 且更长后缀压过集团兜底规则。
-	idx := buildHostIndex(rules)
+	idx := buildHostIndex(rules, 1)
 	for host, want := range map[string]string{
 		"m.ctrip.com":             "ctrip",
 		"kyfw.12306.cn":           "rail_12306",
@@ -235,7 +235,7 @@ func equivalenceInputs(rules []l3Rule, rng *rand.Rand) []string {
 
 func assertEquivalent(t *testing.T, name string, rules []l3Rule) {
 	t.Helper()
-	idx := buildHostIndex(rules)
+	idx := buildHostIndex(rules, 1)
 	inputs := equivalenceInputs(rules, rand.New(rand.NewSource(7)))
 	lin := prepareLinear(rules)
 	// 预处理版与原样实现抽样核对(每 16 个输入取 1 个 + 全部人造边界)
@@ -283,7 +283,7 @@ func TestClassifyHostIndexEquivalence(t *testing.T) {
 		{ID: "weird_pri", Priority: PriorityClass(7), Suffixes: []string{"weird.io"}},
 	}
 	assertEquivalent(t, "synthetic", synthetic)
-	idx := buildHostIndex(synthetic)
+	idx := buildHostIndex(synthetic, 1)
 	for host, want := range map[string]string{
 		"z.a.example.com": "sp_short", // Specific 桶优先, 即使 Fallback 后缀更长
 		"q.dup.net":       "dup1",     // 同后缀先到先得
@@ -303,11 +303,13 @@ func TestClassifyHostIndexEquivalence(t *testing.T) {
 func TestHostIndexRebuildOnReload(t *testing.T) {
 	a := []l3Rule{{ID: "a", Suffixes: []string{"a.com"}}}
 	b := []l3Rule{{ID: "b", Suffixes: []string{"b.com"}}}
-	ia := hostIndexFor(a)
-	if hostIndexFor(a) != ia {
+	la := loadedRules{seq: 1, rules: a}
+	lb := loadedRules{seq: 2, rules: b}
+	ia := hostIndexFor(la)
+	if hostIndexFor(la) != ia {
 		t.Fatal("same rules should reuse index")
 	}
-	ib := hostIndexFor(b)
+	ib := hostIndexFor(lb)
 	if ib == ia {
 		t.Fatal("new rules should rebuild index")
 	}
@@ -345,7 +347,7 @@ func BenchmarkClassifyHostLinear(b *testing.B) {
 func BenchmarkClassifyHostIndexed(b *testing.B) {
 	rules, _ := loadRuleDirForTest(b)
 	hosts := benchHosts(rules)
-	idx := hostIndexFor(rules)
+	idx := hostIndexFor(loadedRules{seq: 1, rules: rules})
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		classifyHostIndexed(idx, rules, hosts[i%len(hosts)])

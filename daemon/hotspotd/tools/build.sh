@@ -24,7 +24,7 @@ TOOL=${2:-all}
 
 # 公共源码 (按需链入)
 # alpha.2: 加 upstream.c (scheduler 依赖)
-COMMON_SRCS="../platform.c ../scheduler.c ../upstream.c ../offload/adapter.c ../offload/adapter_null.c ../offload/adapter_bpf.c"
+COMMON_SRCS="../hnc_helpers.c ../platform.c ../scheduler.c ../upstream.c ../offload/adapter.c ../offload/adapter_null.c ../offload/adapter_bpf.c"
 COMMON_DEFS="-DHNC_HAVE_ADAPTER_BPF"
 
 OUTDIR="prebuilt/${ARCH}"
@@ -33,8 +33,8 @@ mkdir -p "$OUTDIR"
 # 决定 compiler
 if [ "$ARCH" = "host" ]; then
     CC=gcc
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE $COMMON_DEFS"
-    LDFLAGS="-pthread"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 $COMMON_DEFS -fPIE"
+    LDFLAGS="-pie -pthread"
     echo "[build] Host build (Android props will be empty)"
 else
     case "$ARCH" in
@@ -56,8 +56,8 @@ else
         [ -x "$TOOLCHAIN/bin/llvm-strip" ] && STRIP="$TOOLCHAIN/bin/llvm-strip"
     fi
 
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -DANDROID $COMMON_DEFS -static-libgcc -fPIE"
-    LDFLAGS="-pie -pthread"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 $COMMON_DEFS -static-libgcc -fPIE"
+    LDFLAGS="-pie -pthread -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
     echo "[build] Compiler: $CC  Target: $ARCH"
 fi
 

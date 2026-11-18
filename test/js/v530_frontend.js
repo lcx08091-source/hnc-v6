@@ -6,8 +6,8 @@ const vm = require('vm');
 const path = require('path');
 const { load } = require('./extract_fns.js');
 
-const root = process.argv[2];
-const which = process.argv[3];
+const root = process.argv[2] || path.resolve(__dirname, '../..');
+const which = process.argv[3] || '__all__';
 const core = path.join(root, 'webroot/js/core.js');
 const fxjs = path.join(root, 'webroot/js/fx.js');
 const mainjs = path.join(root, 'webroot/js/main.js');
@@ -173,5 +173,6 @@ const cases = {
   },
 };
 
+if (which === '__all__') { Object.keys(cases).forEach(k => cases[k]()); process.exit(0); }
 if (!cases[which]) { console.log('unknown case ' + which); process.exit(2); }
 cases[which]();

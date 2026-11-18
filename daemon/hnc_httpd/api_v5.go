@@ -26,6 +26,7 @@ import (
 
 type configResp struct {
 	AuthRequired  bool `json:"auth_required"`
+	RemoteAuthRequired  bool   `json:"remote_auth_required"`
 	WhitelistMode bool `json:"whitelist_mode"`
 	RemoteEnabled bool `json:"remote_enabled"`
 	// v5.1 P2-1: 字段对齐 shell (rules.json 里实际用 hotspot_auto/_pass/_delay)
@@ -82,6 +83,7 @@ func (s *server) apiConfig(w http.ResponseWriter, r *http.Request) {
 		var m map[string]interface{}
 		if json.Unmarshal(rulesData, &m) == nil {
 			resp.AuthRequired = boolField(m, "auth_required")
+			resp.RemoteAuthRequired = resp.AuthRequired
 			resp.WhitelistMode = boolField(m, "whitelist_mode")
 			resp.RemoteEnabled = boolField(m, "remote_enabled")
 			resp.ClsactBpfMode = clsactModeFromRules(m)

@@ -119,18 +119,18 @@ setup_nat() {
     log "NAT: ap=$ap up=$up(${_t}s 就绪)"
     log "NAT: ap=$ap up=$up,启用 ip_forward + MASQUERADE + FORWARD"
     { echo 1 > /proc/sys/net/ipv4/ip_forward; } 2>/dev/null || sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
-    iptables -t nat -C POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || iptables -t nat -A POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true
-    iptables -C FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || true
-    iptables -C FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -A FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    iptables -w 2 -t nat -C POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || iptables -w 2 -t nat -A POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true
+    iptables -w 2 -C FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || iptables -w 2 -A FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || true
+    iptables -w 2 -C FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -w 2 -A FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
     log "NAT: done (ap=$ap up=$up)"
 }
 teardown_nat() {
     up=$(detect_up_iface)
-    [ -n "$up" ] && iptables -t nat -D POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true
+    [ -n "$up" ] && iptables -w 2 -t nat -D POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true
     ap=$(detect_ap_iface "$up")
     if [ -n "$ap" ] && [ -n "$up" ]; then
-        iptables -D FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || true
-        iptables -D FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+        iptables -w 2 -D FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || true
+        iptables -w 2 -D FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
     fi
     log "NAT: torn down"
 }

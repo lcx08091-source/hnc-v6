@@ -351,6 +351,9 @@ func main() {
 	// extracted SNIs into selfAttrib via LookupUID + RecordSNI. See
 	// self_capture.go for the full lifecycle / failure model.
 	go runSelfCaptures(ctx, cfg, selfAttrib, func() string {
+		if p2 := probe.Run(probe.Options{IfaceOverride: cfg.Iface}); p2.APIface != "" {
+			return p2.APIface
+		}
 		return pr.APIface
 	})
 
@@ -693,13 +696,18 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 				// 并收 HTTPS/SVCB 记录的 ipv4hint/ipv6hint。
 				if ev.DNS.IsResponse && len(ev.DNS.Records) > 0 {
 					ipNames.RecordDNSAnswers(ev.DNS.QName, ev.DNS.Records, ev.Time)
+					output.RecordDNSChainForInfra(ev.DNS.QName, ev.DNS.Records, nil, ev.Time.Unix())
+					sw.RecordDNSAnswersMeta(clientMAC, ev.DNS.QName, ev.DNS.Records, ev.Time)
 				}
 			case capture.EventTLSClientHello:
-				sw.RecordTLS(clientMAC, clientIP, remoteIP, ev.TLS.SNI, ev.TLS.JA4, ev.Time)
+				effSNI := ev.TLS.SNI
+				if recQName := sw.ObserveHandshakeSideChannel(clientMAC, clientIP, remoteIP, ev.TLS.SNI, ev.TLS.IsQUIC, ev.DSCP, ev.DstPort, ev.Time); recQName != "" {
+					effSNI = recQName
+				}
+				sw.RecordTLS(clientMAC, clientIP, remoteIP, effSNI, ev.TLS.JA4, ev.Time)
 				recordFlowFP(ev, clientMAC, clientIP, remoteIP) // v6.x DPI v2
-				if ev.TLS.SNI != "" {
-					// 已知 ECH public_name(外层 SNI)由 RecordConnName 过滤。
-					ipNames.RecordConnName(remoteIP, ev.TLS.SNI, output.IPNameSrcSNI, ev.Time)
+				if effSNI != "" {
+					ipNames.RecordConnName(remoteIP, effSNI, output.IPNameSrcSNI, ev.Time)
 				}
 			case capture.EventHTTP:
 				// v5.18: 明文 HTTP Host 与 SNI 同等看待(都是连接声明的名字)。
@@ -724,6 +732,7 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 					port = ev.SrcPort
 				}
 				sw.RecordFlow(clientMAC, clientIP, remoteIP, ev.IsUDP, port, uint64(ev.Bytes), txFromClient, ev.Time)
+				sw.ObserveFlowSideChannel(clientMAC, clientIP, remoteIP, ev.IsUDP, ev.IsIPv6, ev.SrcPort, ev.DstPort, uint64(ev.Bytes), txFromClient, ev.DSCP, ev.TCPFlags, ev.UDPSig, ev.Time)
 			}
 
 			if !debug {

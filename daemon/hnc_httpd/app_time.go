@@ -55,8 +55,8 @@ const (
 	appCtlMaxLimits    = 200
 	appCtlMaxCatBlocks = 100
 
-	appBlockMaxDomains    = 64  // 单个应用最多展开多少个规则后缀
-	appCatMaxDomains      = 200 // 单个类别最多展开多少个规则后缀
+	appBlockMaxDomains    = 256  // 单个应用最多展开后缀(修复抖音 92 后缀截断漏封 snssdk.com 等)
+	appCatMaxDomains      = 1024 // 单个类别最多展开后缀(video/game/social 达 469~850 个)
 	appBlockMaxExtraNames = 32  // 反查表里归到该应用、但规则后缀没覆盖的名字
 	appBlockMaxIPs        = 64  // ip_app_map(IP 规则命中)里归到该应用的 IP
 
@@ -501,6 +501,28 @@ func appBlockItems(mac, source, ref, label string, until int64, apps []*catalogA
 			}
 		}
 	}
+	// 先按根域归并剔除已被父域覆盖的冗余子域，再稳定排序截断
+	sort.Slice(sfx, func(i, j int) bool {
+		di, dj := strings.Count(sfx[i], "."), strings.Count(sfx[j], ".")
+		if di != dj {
+			return di < dj
+		}
+		return sfx[i] < sfx[j]
+	})
+	pruned := sfx[:0]
+	for _, s := range sfx {
+		sub := false
+		for _, r := range pruned {
+			if s == r || strings.HasSuffix(s, "."+r) {
+				sub = true
+				break
+			}
+		}
+		if !sub {
+			pruned = append(pruned, s)
+		}
+	}
+	sfx = pruned
 	sort.Strings(sfx)
 	if len(sfx) > maxDomains {
 		sfx = sfx[:maxDomains]

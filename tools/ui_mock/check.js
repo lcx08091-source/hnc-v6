@@ -175,12 +175,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await tab('settings');
       await settle(600);
       await scrollShots('settings', 6);
-      await click('[data-act="fold"][data-key="look"]', 1000);   // 外观
+      await click('.sgrp[data-foldkey="scard-look"] > .sgrp-h', 1000);   // 外观折叠卡
       await page.evaluate(() => { const f = document.querySelector('[data-foldkey="look"]'), p = document.querySelector('.page.on'); if (f && p) p.scrollTop += f.getBoundingClientRect().top - 80; });
       await settle(700); await shot('settings-look-1');
       await page.evaluate(() => { const p = document.querySelector('.page.on'); p.scrollTop += p.clientHeight * 0.8; }); await settle(500); await shot('settings-look-2');
       await checkText('settings-look');
-      await click('.sgrp[data-foldkey="grp-diag"] > .sgrp-h', 1000);   // 诊断分组 → 自检报告
+      await click('.sgrp[data-foldkey="scard-diag"] > .sgrp-h', 1000);   // 诊断分组 → 自检报告
       await click('[data-act="sc-open"]', 1500);
       await shot('selfcheck'); await checkText('selfcheck'); await closeSheet();
 

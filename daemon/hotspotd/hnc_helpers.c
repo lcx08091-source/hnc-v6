@@ -6,7 +6,13 @@
  * 一起删除(只留 Go 版, src/dpid/devname), 这里只剩 offload 代码用的两个。
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+
 #include "hnc_helpers.h"
+
+#include <stdint.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -87,13 +93,24 @@ void hnc_json_escape(const char *src, char *dst, size_t dst_size) {
  * hnc_run_cmd_timeout — 带总超时的子进程执行 (v5.9.0)
  * 见 hnc_helpers.h 的接口说明。
  * ══════════════════════════════════════════════════════════ */
+static int64_t hnc_mono_us(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (int64_t)ts.tv_sec * 1000000LL + (int64_t)(ts.tv_nsec / 1000L);
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
+}
+
 int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_ms) {
     if (argv == NULL || argv[0] == NULL || buf == NULL || cap < 2 || timeout_ms <= 0)
         return -1;
     buf[0] = '\0';
 
     int pipefd[2];
-    if (pipe(pipefd) < 0) return -1;
+    /* pipe2(O_CLOEXEC) prevents concurrent multithreaded fork() calls from
+     * inheriting sibling pipe write ends and delaying EOF until timeout. */
+    if (pipe2(pipefd, O_CLOEXEC) < 0) return -1;
 
     pid_t pid = fork();
     if (pid < 0) {
@@ -103,35 +120,43 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
     }
 
     if (pid == 0) {
-        /* 子进程: stdout → pipe, stderr → /dev/null */
+        struct sigaction sa_dfl;
+        memset(&sa_dfl, 0, sizeof(sa_dfl));
+        sa_dfl.sa_handler = SIG_DFL;
+        sigemptyset(&sa_dfl.sa_mask);
+        sigaction(SIGPIPE, &sa_dfl, NULL);
+
         close(pipefd[0]);
         if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
+        if (pipefd[1] != STDOUT_FILENO)
+            close(pipefd[1]);
+
+        int devnull_in = open("/dev/null", O_RDONLY | O_CLOEXEC);
+        if (devnull_in >= 0) {
+            dup2(devnull_in, STDIN_FILENO);
+            if (devnull_in > STDERR_FILENO) close(devnull_in);
         }
-        close(pipefd[1]);
+        int devnull_err = open("/dev/null", O_WRONLY | O_CLOEXEC);
+        if (devnull_err >= 0) {
+            dup2(devnull_err, STDERR_FILENO);
+            if (devnull_err > STDERR_FILENO) close(devnull_err);
+        }
         execvp(argv[0], argv);
         _exit(127);
     }
 
-    /* 父进程: O_NONBLOCK + select 截止循环 (EINTR-safe) */
     close(pipefd[1]);
     int flags = fcntl(pipefd[0], F_GETFL, 0);
     if (flags >= 0) fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
 
-    struct timeval tv_now;
-    gettimeofday(&tv_now, NULL);
-    long deadline_us = (long)tv_now.tv_sec * 1000000L + tv_now.tv_usec
-                       + (long)timeout_ms * 1000L;
+    /* Use 64-bit CLOCK_MONOTONIC microseconds: avoids 32-bit signed long
+     * overflow UB on armeabi-v7a and wall-clock jumps during NITZ/NTP sync. */
+    int64_t deadline_us = hnc_mono_us() + (int64_t)timeout_ms * 1000LL;
 
     size_t got = 0;
     int killed = 0;
     while (got < cap - 1) {
-        gettimeofday(&tv_now, NULL);
-        long now_us = (long)tv_now.tv_sec * 1000000L + tv_now.tv_usec;
-        long remain_us = deadline_us - now_us;
+        int64_t remain_us = deadline_us - hnc_mono_us();
         if (remain_us <= 0) {
             kill(pid, SIGKILL);
             killed = 1;
@@ -142,8 +167,8 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
         FD_ZERO(&rfds);
         FD_SET(pipefd[0], &rfds);
         struct timeval tv = {
-            .tv_sec  = remain_us / 1000000L,
-            .tv_usec = remain_us % 1000000L,
+            .tv_sec  = (time_t)(remain_us / 1000000LL),
+            .tv_usec = (suseconds_t)(remain_us % 1000000LL),
         };
         int ret = select(pipefd[0] + 1, &rfds, NULL, NULL, &tv);
         if (ret < 0) {
@@ -151,7 +176,6 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
             break;
         }
         if (ret == 0) {
-            /* 超时 */
             kill(pid, SIGKILL);
             killed = 1;
             break;
@@ -162,12 +186,10 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
             if (errno == EINTR || errno == EAGAIN) continue;
             break;
         }
-        if (n == 0) break;   /* EOF: 子进程关闭了写端 */
+        if (n == 0) break;
         got += (size_t)n;
     }
 
-    /* buffer 写满但子进程还在产出 → 杀掉,避免它阻塞在写满的 pipe 上
-     * (close 读端后它也会收 SIGPIPE,kill 只是让 waitpid 确定性快返) */
     if (!killed && got >= cap - 1) kill(pid, SIGKILL);
 
     close(pipefd[0]);

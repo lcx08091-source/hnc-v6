@@ -156,23 +156,27 @@ type blocklistData struct {
 // loadBlocklist reads + parses blocklistFile. Missing file is treated as
 // empty (not an error) so deployment is just "drop in the file or don't".
 // Lookups are case-insensitive.
-func loadBlocklist() (map[string]struct{}, error) {
-	out := map[string]struct{}{}
-	data, err := os.ReadFile(blocklistFile)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return out, nil
-		}
-		return out, err
-	}
+var blocklistCache = NewCachedFile(blocklistFile, func(data []byte) (map[string]struct{}, error) {
 	var bd blocklistData
 	if err := json.Unmarshal(data, &bd); err != nil {
-		return out, fmt.Errorf("parse %s: %w", blocklistFile, err)
+		return nil, fmt.Errorf("parse %s: %w", blocklistFile, err)
 	}
+	out := make(map[string]struct{}, len(bd.BlockedApex))
 	for _, a := range bd.BlockedApex {
 		out[strings.ToLower(strings.TrimSpace(a))] = struct{}{}
 	}
 	return out, nil
+})
+
+func loadBlocklist() (map[string]struct{}, error) {
+	m, err := blocklistCache.Get()
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]struct{}{}, nil
+		}
+		return map[string]struct{}{}, err
+	}
+	return m, nil
 }
 
 // autoExpandedRule is one entry in _auto_expanded.json. Embeds the same
@@ -240,6 +244,7 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 	// already-confirmed candidates after a dpid restart.
 	if existing, err := loadExistingExpansions(); err == nil {
 		st.confirmed = existing
+		a.SetAutoExpandedCount(len(existing))
 		log.Printf("auto-expand: loaded %d existing expansions from %s", len(existing), autoExpandOutFile)
 	} else if !os.IsNotExist(err) {
 		log.Printf("auto-expand: failed to read existing %s: %v (starting fresh)", autoExpandOutFile, err)
@@ -266,6 +271,7 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 		select {
 		case <-ctx.Done():
 			return
+		case <-a.expandKick:
 		case <-tk.C:
 			// Drain once; feed BOTH the brand-new-apex candidate accumulator
 			// (always, for shadow calibration) and the same-apex expander below.
@@ -309,6 +315,7 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 				if err := writeExpansions(st); err != nil {
 					log.Printf("auto-expand: write failed: %v", err)
 				} else {
+					a.SetAutoExpandedCount(len(st.confirmed))
 					log.Printf("auto-expand: wrote %s (+%d new, %d total)", autoExpandOutFile, added, len(st.confirmed))
 					st.lastWrittenAt = now
 					// Bust the rule cache so next classifyHost sees new rules.
@@ -488,4 +495,10 @@ func invalidateRuleCache() {
 	// Touch the rule cache's reset path. The cache invalidates by
 	// stat-checking the dir each call, so writing a new file in the
 	// dir is sufficient. This function exists as documentation of intent.
+}
+
+
+// InvalidateRuleCache exports invalidateRuleCache for cross-package hot-reload triggers.
+func InvalidateRuleCache() {
+	invalidateRuleCache()
 }

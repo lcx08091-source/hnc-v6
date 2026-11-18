@@ -309,6 +309,13 @@ full_restore() {
         echo "$(date +%s 2>/dev/null)" > "$RUN/tc_restore_pending" 2>/dev/null || true
     else
         rm -f "$RUN/tc_restore_pending" 2>/dev/null
+        # v5.35.1: HTB 根树重建已清空 v6 u32 过滤器、应用限速 1:900x 子类与 App QoS 1:a00x 子树,
+        # 立即失效缓存签名并同步恢复双栈子系统, 避免长达 30s 的规则真空期!
+        rm -f "$RUN/app_limits.full.sig" "$RUN/app_qos.sig" 2>/dev/null
+        touch "$RUN/app_limit.dirty" 2>/dev/null || true
+        [ -f "$HNC_DIR/bin/v6_sync.sh" ] && sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+        [ -f "$HNC_DIR/bin/apply_app_limits.sh" ] && sh "$HNC_DIR/bin/apply_app_limits.sh" >> "$LOG" 2>&1 || true
+        [ -f "$HNC_DIR/bin/apply_app_qos.sh" ] && sh "$HNC_DIR/bin/apply_app_qos.sh" >> "$LOG" 2>&1 || true
     fi
     if [ $tc_restore_rc -eq 12 ] || [ $tc_restore_rc -eq 11 ]; then
         log "full_restore: tc restore busy/lock lost (rc=$tc_restore_rc), not counted as repair failure; marked pending"

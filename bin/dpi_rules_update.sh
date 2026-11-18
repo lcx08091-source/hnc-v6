@@ -19,6 +19,7 @@
 # 网络注意: 走 api.github.com + github.com(HTTPS)。国内网络可能需要代理 —— 失败
 # 时输出明确错误, 不影响模块其他功能。
 
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 HNC_DIR=${HNC_DIR:-${HNC:-/data/local/hnc}}
 MODDIR=${MODDIR:-/data/adb/modules/hotspot_network_control}
 REPO="${HNC_RULES_REPO:-lcx08091-source/hnc-v6}"
@@ -43,12 +44,12 @@ current_version() {
 fetch_json_field() {
     # $1=json文本 $2=字段名 → 取字符串值(裸字段, 无嵌套)
     printf '%s' "$1" | grep -oE "\"$2\"[[:space:]]*:[[:space:]]*\"[^\"]*\"" \
-        | head -1 | sed "s/^[^:]*:[[:space:]]*\"//; s/\"$//"
+        | head -n 1 | sed "s/^[^:]*:[[:space:]]*\"//; s/\"$//"
 }
 
 rebind_dpi(){
-    if [ -x "$HNC_DIR/bin/dpi_rebind.sh" ]; then
-        iface=$(cat "$HNC_DIR/run/hotspot_iface" 2>/dev/null | head -1)
+    if [ -f "$HNC_DIR/bin/dpi_rebind.sh" ]; then
+        iface=$(head -n 1 "$HNC_DIR/run/hotspot_iface" 2>/dev/null | tr -d ' \r\n')
         [ -z "$iface" ] && iface=wlan2
         sh "$HNC_DIR/bin/dpi_rebind.sh" "$iface" >/dev/null 2>&1 || true
     fi
@@ -73,16 +74,16 @@ get_release_meta() {
     # dpi-rules.zip 附件的下载 URL(browser_url 字段)
     DL_URL=$(printf '%s' "$RELEASE_JSON" \
         | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*dpi-rules\.zip"' \
-        | head -1 | sed 's/.*://; s/"//g')
+        | head -n 1 | sed 's/^"browser_download_url"[[:space:]]*:[[:space:]]*"//; s/"$//')
     SHA_URL=$(printf '%s' "$RELEASE_JSON" \
         | grep -oE '"browser_download_url"[[:space:]]*:[[:space:]]*"[^"]*dpi-rules\.zip\.sha256"' \
-        | head -1 | sed 's/.*://; s/"//g')
+        | head -n 1 | sed 's/^"browser_download_url"[[:space:]]*:[[:space:]]*"//; s/"$//')
 }
 
 case "$1" in
   --check)
     CUR=$(current_version)
-    AVAILABLE=maybe
+    get_release_meta
     if [ "$REMOTE_VERSION" != "$CUR" ]; then AVAILABLE=yes; else AVAILABLE=no; fi
     printf '{"current":"%s","remote":"%s","update_available":"%s"}\n' \
         "$CUR" "$REMOTE_VERSION" "$AVAILABLE"
@@ -90,12 +91,12 @@ case "$1" in
     ;;
   --install)
     CUR=$(current_version)
-    # v5.10.1: 版本比对 —— 与当前版本相同则跳过重装
+    get_release_meta
+    # 先拉取远端 tag_name 再比对(旧代码在 get_release_meta 之前比对空串 $REMOTE_VERSION!)
     if [ "$REMOTE_VERSION" = "$CUR" ]; then
         echo "ok: rules already at $CUR"
         exit 0
     fi
-    get_release_meta
     [ -n "$DL_URL" ] || fail "release $REMOTE_VERSION has no dpi-rules.zip attachment"
     log "install from $DL_URL (current=$CUR remote=$REMOTE_VERSION)"
 
@@ -121,7 +122,7 @@ case "$1" in
     # 是 Python —— Android 无; 最终兜底: 让用户通过 WebUI 导入。检测可用工具。
     if command -v unzip >/dev/null 2>&1; then
         unzip -o -q "$WORK/dpi-rules.zip" -d "$WORK/x" 2>/dev/null || fail "unzip failed"
-        NEWFILE=$(find "$WORK/x" -name 'dpi_rules.json' -o -name '*.json' 2>/dev/null | head -1)
+        NEWFILE=$(find "$WORK/x" \( -name 'dpi_rules.json' -o -name '*.json' \) 2>/dev/null | head -n 1)
         [ -n "$NEWFILE" ] && [ -s "$NEWFILE" ] || fail "zip has no rules json"
         cp -f "$NEWFILE" "$WORK/rules.json" || fail "copy extracted rules failed"
     else
@@ -130,7 +131,7 @@ case "$1" in
 
     validate_rules "$WORK/rules.json" || fail "downloaded rules failed validation"
     NEWVER=$(grep -oE '"rules_version"[[:space:]]*:[[:space:]]*"[^"]*"' "$WORK/rules.json" 2>/dev/null \
-        | head -1 | sed 's/.*:.*"\([^"]*\)".*/\1/')
+        | head -n 1 | sed 's/.*:.*"\([^"]*\)".*/\1/')
     [ -z "$NEWVER" ] && NEWVER="$REMOTE_VERSION"
 
     TMP="$DST.tmp.$$"

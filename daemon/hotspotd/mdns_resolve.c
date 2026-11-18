@@ -271,7 +271,7 @@ static int set_socket_timeout(int fd, int timeout_ms)
 static int try_query(const char *src_ip, const char *target_ip, int timeout_ms,
                      char *out, size_t outlen)
 {
-    int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, IPPROTO_UDP);
     if (fd < 0) { VLOG("socket: %s\n", strerror(errno)); return -1; }
 
     /* 绑定本地 5353 ? — 不绑,因为 mDNS responder 已经占用了。
@@ -293,7 +293,9 @@ static int try_query(const char *src_ip, const char *target_ip, int timeout_ms,
 
     /* 构造 query packet */
     uint8_t pkt[MAX_PKT];
-    uint16_t txid = (uint16_t)(time(NULL) & 0xFFFF);
+    struct timespec ts_id;
+    clock_gettime(CLOCK_MONOTONIC, &ts_id);
+    uint16_t txid = (uint16_t)((ts_id.tv_nsec ^ ((long)getpid() << 8) ^ ts_id.tv_sec) & 0xFFFF);
     int qlen = build_query(src_ip, pkt, sizeof(pkt), txid);
     if (qlen < 0) { VLOG("build_query failed\n"); close(fd); return -1; }
 
@@ -348,6 +350,7 @@ static int try_query(const char *src_ip, const char *target_ip, int timeout_ms,
         socklen_t fromlen = sizeof(from);
         ssize_t n = recvfrom(fd, pkt, sizeof(pkt), 0, (struct sockaddr *)&from, &fromlen);
         if (n < 0) {
+            if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
                 VLOG("recv timeout\n");
             } else {

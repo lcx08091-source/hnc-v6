@@ -491,7 +491,8 @@ static offload_err_t bpf_refresh_active(void)
     }
     BPF_UNLOCK();
 
-    sleep(ACTIVE_SAMPLE_INTERVAL);
+    if (offload_sleep_interruptible(ACTIVE_SAMPLE_INTERVAL) != 0)
+        return OFFLOAD_EAGAIN;
 
     BPF_LOCK();
     uint64_t t2 = stats_total_bytes();

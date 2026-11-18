@@ -29,19 +29,27 @@ BPF_SRC="../../src/dpid/bpf/hnc_clsact.bpf.c"
 
 mkdir -p "$BINDIR"
 
-# ── 1. BPF object ─────────────────────────────────────────────
-BPFCC="${BPFCC:-clang}"
-if ! command -v "$BPFCC" >/dev/null 2>&1; then
-    echo "[build] WARN: $BPFCC not found, skip BPF object build"
-else
-    "$BPFCC" -O2 -g -target bpf -D__TARGET_ARCH_arm64 \
-        -c "$BPF_SRC" -o "$BINDIR/hnc_clsact.o"
-    if [ -f "$BINDIR/hnc_clsact.o" ]; then
-        llvm-strip -g "$BINDIR/hnc_clsact.o" 2>/dev/null \
-          || strip -g "$BINDIR/hnc_clsact.o" 2>/dev/null || true
-        echo "[build] BPF object: $BINDIR/hnc_clsact.o"
-        if command -v file >/dev/null 2>&1; then
-            file "$BINDIR/hnc_clsact.o"
+# ── 1. BPF object (little-endian bpfel + strict -Wall -Wextra -Werror) ──
+if [ "${HNC_SKIP_BPF_BUILD:-0}" != "1" ]; then
+    BPFCC="${BPFCC:-clang}"
+    if ! command -v "$BPFCC" >/dev/null 2>&1; then
+        if [ "$ARCH" = "host" ]; then
+            echo "[build] WARN: $BPFCC not found on host, skip BPF object build"
+        else
+            echo "[build] ERROR: $BPFCC required to build $BINDIR/hnc_clsact.o" >&2
+            exit 1
+        fi
+    else
+        "$BPFCC" -O2 -g -target bpfel -Wall -Wextra -Werror -D__TARGET_ARCH_arm64 \
+            -c "$BPF_SRC" -o "$BINDIR/hnc_clsact.o"
+        if [ -f "$BINDIR/hnc_clsact.o" ]; then
+            llvm-strip -g "$BINDIR/hnc_clsact.o" 2>/dev/null \
+              || strip -g "$BINDIR/hnc_clsact.o" 2>/dev/null || true
+            chmod 644 "$BINDIR/hnc_clsact.o"
+            echo "[build] BPF object: $BINDIR/hnc_clsact.o"
+            if command -v file >/dev/null 2>&1; then
+                file "$BINDIR/hnc_clsact.o"
+            fi
         fi
     fi
 fi
@@ -49,9 +57,9 @@ fi
 # ── 2. hnc_clsact_ctl 二进制 ─────────────────────────────────
 if [ "$ARCH" = "host" ]; then
     CC="${CC:-gcc}"
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
     # shellcheck disable=SC2086
-    $CC $CFLAGS -o /tmp/hnc_clsact_ctl main.c -pie
+    $CC $CFLAGS -o "${HNC_HOST_OUT:-/tmp/hnc_clsact_ctl}" main.c -pie
     echo "[build] Host sanity build OK"
     exit 0
 fi
@@ -80,10 +88,11 @@ if [ ! -x "$CC" ]; then
     exit 1
 fi
 
-CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -DANDROID -static-libgcc -fPIE"
+CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -static-libgcc -fPIE"
+LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 mkdir -p "$OUTBIN"
 # shellcheck disable=SC2086
-$CC $CFLAGS -o "$OUTBIN/hnc_clsact_ctl" main.c -pie
+$CC $CFLAGS -o "$OUTBIN/hnc_clsact_ctl" main.c $LDFLAGS
 
 if [ -x "$STRIP" ]; then
     $STRIP "$OUTBIN/hnc_clsact_ctl"

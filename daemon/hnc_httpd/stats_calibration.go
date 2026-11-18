@@ -853,8 +853,12 @@ func (c *calibrator) takeSnap(now time.Time) calSnap {
 			s.FwdV4, s.FwdV4OK = j, ok
 		}
 		if out, err := c.env.run(5*time.Second, "ip6tables", "-w", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
-			p, ok, _, _ := calParseIptForward(out)
-			s.FwdV6, s.FwdV6OK = p, ok
+			p, ok, j, jOK := calParseIptForward(out)
+			if jOK {
+				s.FwdV6, s.FwdV6OK = j, true
+			} else {
+				s.FwdV6, s.FwdV6OK = p, ok
+			}
 		}
 	}
 	return s

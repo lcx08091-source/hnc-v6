@@ -14,6 +14,8 @@ func TestIsSensitiveReadPath(t *testing.T) {
 		"/api/dpi_state", "/api/dpi_probe", "/api/alerts",
 		"/api/dpi_history", "/api/app_limits",
 		// v6 review 补登: self 归因 / 导出内容 / SLA / SSE 事件流
+		"/api/whoami", "/api/json_health", "/api/self/studio",
+		"/api/phone_usage", "/api/stats_health", "/api/connections", "/api/discover",
 		"/api/self", "/api/self/ifaces", "/api/self/attrib",
 		"/api/sla", "/api/events", "/api/exports",
 		"/api/exports/export-20260822-120000.zip", // 子路径前缀匹配

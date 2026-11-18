@@ -13,7 +13,7 @@
   'use strict';
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = META.version || 'v5.30.0-rc1', VCODE = String(META.versionCode || '5300001');
+  var VER = META.version || 'v5.36.0', VCODE = String(META.versionCode || '5360000');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 
@@ -80,7 +80,7 @@
       ident: { type: 'phone', os: 'Android', os_ver: '15', brand: '小米', model: 'Xiaomi 14', confidence: 93, hostname: 'Xiaomi-14', hostname_src: 'dhcp',
         evidence: [{ src: 'dhcp', detail: 'option 60 = android-dhcp-15' }, { src: 'hostname', detail: 'Xiaomi-14' }, { src: 'sni', detail: '*.miui.com · *.xiaomi.net' }, { src: 'ja4', detail: 'Android 15 系统 TLS 栈' }] },
       live: [['xiaomi_store', 0.72], ['honor_of_kings', 0.15], ['wechat', 0.09]], hist: ['honor_of_kings', 'wechat', 'douyin', 'genshin', 'xiaomi_store'],
-      fg: { state: 'active', app_id: 'honor_of_kings', name: '王者荣耀', confidence: 0.88, label: '正在用：王者荣耀', bg_label: '后台：应用商店在下载更新',
+      fg: { state: 'active', screen_state: 'active', app_id: 'honor_of_kings', name: '王者荣耀', confidence: 0.94, label: '正在用：王者荣耀', evidence_tags: ['DSCP实时标', '触控微突发'], companion: { app_id: 'wechat', name: '微信', mode: 'call', label: '语音开黑中', bps: 64000 }, dual_stack: { v6_pct: 82, qos_cov: 'dual_stack_ok', escape_alert: false, actual_mbps: 1.4 }, bg_label: '后台：应用商店更新（CS1 降权已压制）',
         reasons: ['UDP 小包双向持续，每秒 30+ 个包', '包长稳定、间隔均匀（对战特征）', '握手 SNI 命中 *.pvp.qq.com'] },
       traffic_type: { type: 'game', label: '实时对战' }, app_qos: true },
     { mac: '1e:52:a8:0c:77:3d', ip: '192.168.43.45', hostname: 'iPad Air', hostname_src: 'manual', vendor: 'Apple', online: true, mark_id: 5,
@@ -89,7 +89,7 @@
       ident: { type: 'tablet', os: 'iPadOS', os_ver: '18.6', brand: 'Apple', model: 'iPad Air', confidence: 88, hostname: 'iPad', hostname_src: 'mdns',
         services: ['_airplay._tcp', '_companion-link._tcp', '_rdlink._tcp'], evidence: [{ src: 'mdns', detail: '_companion-link._tcp · model=iPad13,16' }, { src: 'dhcp', detail: 'option 55 = 1,121,3,6,15,108,114,119,252' }, { src: 'oui', detail: 'Apple（随机 MAC 前缀已关闭）' }] },
       live: [['douyin', 0.78], ['bilibili', 0.12], ['wechat', 0.05]], hist: ['douyin', 'bilibili', 'wechat', 'xiaohongshu'],
-      fg: { state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.91, label: '正在用：抖音', reasons: ['短视频分段下载：每 8~15 秒一段 1~3 MB', '域名命中 *.douyinvod.com', '上行很少（只看不拍）'] },
+      fg: { state: 'active', screen_state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.93, label: '正在用：抖音', evidence_tags: ['秒级紧耦合', '触控微突发'], companion: { app_id: 'qqmusic', name: 'QQ音乐', mode: 'audio', label: '后台音频播放', bps: 192000 }, dual_stack: { v6_pct: 88, qos_cov: 'dual_stack_ok', escape_alert: false, limit_mbps: 24, actual_mbps: 16.2 }, reasons: ['DNS->QUIC 握手紧耦合 22ms + 重尾滑动突发 (CV=1.42)', '域名命中 *.douyinvod.com（IPv6 双栈限速已闭合）', 'ABR 虚拟播放缓冲信用保护中'] },
       traffic_type: { type: 'short_video', label: '刷短视频' },
       app_time_limits: [{ app_id: 'douyin', name: '抖音', category: 'short_video', minutes: 60, used_sec: 3120, used_min: 52, exhausted: false, enforced: true }],
       category_blocks: [{ category: 'game', app_count: 6, ts: T - 3 * 86400, enforced: true }],
@@ -100,7 +100,7 @@
       ident: { type: 'pc', os: 'macOS', os_ver: '15.6', brand: 'Apple', model: 'MacBook Pro', confidence: 90, hostname: 'MacBook-Pro', hostname_src: 'mdns',
         services: ['_ssh._tcp', '_smb._tcp', '_companion-link._tcp'], evidence: [{ src: 'mdns', detail: 'model=Mac15,6' }, { src: 'dhcp', detail: 'macOS DHCP 指纹' }, { src: 'ja4', detail: 'Safari / macOS TLS 栈' }] },
       live: [['tencent_meeting', 0.82], ['feishu', 0.1], ['icloud', 0.05]], hist: ['tencent_meeting', 'feishu', 'wechat', 'icloud'],
-      fg: { state: 'active', app_id: 'tencent_meeting', name: '腾讯会议', confidence: 0.95, label: '正在用：腾讯会议', reasons: ['UDP 音视频流双向对称', '每秒 50 个左右的包、码率稳定', '域名命中 *.meeting.qq.com'] },
+      fg: { state: 'active', screen_state: 'active', app_id: 'tencent_meeting', name: '腾讯会议', confidence: 0.96, label: '正在用：腾讯会议', evidence_tags: ['DSCP实时标', 'STUN/SRTP'], dual_stack: { v6_pct: 76, qos_cov: 'dual_stack_ok', escape_alert: false, actual_mbps: 5.8 }, reasons: ['上行携带 WebRTC EF(46)/AF41 原生实时 DSCP 标记', 'RFC 8489 STUN + SRTP 双向 50Hz 对称媒体流', '域名命中 *.meeting.qq.com'] },
       traffic_type: { type: 'call', label: '视频会议' }, live_call: { label: '腾讯会议', kind: 'video', since: T - 23 * 60 } },
     { mac: '5e:20:b7:3a:c4:18', ip: '192.168.43.52', hostname: '任天堂 Switch', hostname_src: 'manual', vendor: 'Nintendo', online: true, mark_id: 6,
       base: [1.8 * MB, 40 * KB], usage8: 7.1 * GB, onlineMin: [88, 120, 64, 302, 245, 0, 90],
@@ -114,7 +114,7 @@
       ident: { type: 'tv', os: 'Android TV', os_ver: '11', brand: '小米', model: 'Redmi 智能电视 X65', confidence: 86, hostname: 'MiTV-AXSU', hostname_src: 'dhcp',
         services: ['_googlecast._tcp', '_miio._udp'], evidence: [{ src: 'mdns', detail: '_googlecast._tcp' }, { src: 'ssdp', detail: 'urn:schemas-upnp-org:device:MediaRenderer:1' }] },
       live: [['iqiyi', 0.95], ['tencent_video', 0.02]], hist: ['iqiyi', 'tencent_video', 'bilibili'],
-      fg: { state: 'active', app_id: 'iqiyi', name: '爱奇艺', confidence: 0.9, label: '正在播：爱奇艺', reasons: ['大块持续下行，码率 15~20 Mbps（4K）', '域名命中 *.iqiyi.com'] },
+      fg: { state: 'active', screen_state: 'idle_audio', app_id: 'iqiyi', name: '爱奇艺', confidence: 0.91, label: '正在播：爱奇艺', evidence_tags: ['缓冲续播'], dual_stack: { v6_pct: 91, qos_cov: 'dual_stack_ok', escape_alert: false, actual_mbps: 18.4 }, reasons: ['4K DASH/HLS 分片下行 18.4 Mbps（IPv6 占 91%）', '无高频触控点按，处于沉浸观看态'] },
       traffic_type: { type: 'video', label: '4K 视频' } },
     { mac: '7e:c4:19:20:5a:8b', ip: '192.168.43.71', hostname: '小爱音箱', hostname_src: 'manual', vendor: 'Xiaomi', online: true, mark_id: 8,
       base: [38 * KB, 6 * KB], usage8: 0.25 * GB, onlineMin: [1380, 1440, 1440, 1440, 1440, 1440, 1440], whitelist: true,
@@ -259,7 +259,7 @@
 
   /* ═════════════ 配置 / 告警 / 模板 等全局状态 ═════════════ */
   var CFG = {
-    auth_required: true, whitelist_mode: false, remote_enabled: true, hotspot_autostart: true, hotspot_ssid: 'HNC-Demo-5G', hotspot_delay_sec: 30,
+    auth_required: true, remote_auth_required: true, whitelist_mode: false, remote_enabled: true, hotspot_autostart: true, hotspot_ssid: 'HNC-Demo-5G', hotspot_delay_sec: 30,
     hotspot_time_enable: false, hotspot_time_start: '07:00', hotspot_time_end: '23:30', hotspot_charging_only: false, hotspot_iface: '',
     global_shaper_enabled: false, global_shaper_down: '', global_shaper_up: '', flywheel_exclude_user: ['com.example.proxyclient'],
     clsact_bpf_mode: 'auto', tc_leaf_aqm: 'auto', stale_rule_ttl_days: 30, quic_block: false, discover_cert_probe: true,
@@ -294,7 +294,8 @@
   var SELF_ON = { toggle: true, auto_expand: true, auto_promote: false };
   var DNS = { enabled: false, block_mode: 'nxdomain', log_queries: false };
   var FG_ENGINE = 'classic';
-  var SIM = { enabled: false };
+  var SIM = { enabled: false, devices: [] };
+  var REC_STATE = { recording: false, minutes: 10, started_at: 0 };
   var ALIASES = { 'ce:41:7a:09:3b:62': '0a:7f:3c:41:9e:21' };
   var MERGE_DONE = {};
   var FP_RULES = [
@@ -643,7 +644,15 @@
     return L.join('\n') + '\n';
   }
   var GET = {
-    '/api/health': function () { return { status: 'ok', version: VER, watchdog_passive: false }; },
+    '/api/health': function () {
+      var h = { status: 'ok', version: VER, watchdog_passive: false };
+      if (REC_STATE.recording) {
+        var elapsed = Math.max(1, now() - REC_STATE.started_at);
+        if (elapsed >= REC_STATE.minutes * 60) REC_STATE.recording = false;
+        else h.capture_rec = { recording: true, minutes: REC_STATE.minutes, started_at: REC_STATE.started_at, bytes: elapsed * 42 * KB };
+      }
+      return h;
+    },
     '/api/live': function (q) { var l = liveSummary(); if (q.devices) { var p = devicesPayload(); l.devices = p.devices; l.whitelist_mode = p.whitelist_mode; l.remote_enabled = p.remote_enabled; } return l; },
     '/api/devices': function () { return devicesPayload(); },
     '/api/config': function () { return Object.assign(clone(CFG), { sim_enabled: SIM.enabled }); },
@@ -708,10 +717,10 @@
     },
     '/api/exports': function () { return { exports: EXPORTS.map(function (x) { return Object.assign({ download_url: '/api/exports/' + x.name }, x); }) }; },
     '/api/sla': function () { return { generated_at: now(), dpid_restart_count: 3, dpid_crash_recent: 0, dpid_guard_heartbeat_age_s: 2, watchdog_full_restore_count: 1, tc_repair_fail_count: 0, uplink_fail_count: 0, qos_fallback_active: false, uplink_unsupported: false }; },
-    '/api/metrics': function () { return { instrumented: true, mode: 'snapshot', snapshot_age_ms: 600 + round(Math.random() * 900), json_cache_hits: 18234 + round((Date.now() - PAGE_T0) / 400), json_cache_misses: 412, shell_fallback_count: 0, backend_version: VER }; },
+    '/api/metrics': function () { return { instrumented: false, mode: 'live-read', backend_version: VER, compat: 'hotfix16.8-live-api' }; },
     '/api/iface_info': function () { return { iface: IFACE, ip: GW, gateway: GW, network: '192.168.43.1/24' }; },
     '/api/run_status': function () { return { hotspotd: 'up', hotspotd_pid: 4127, hotspotd_rss_kb: 11840, tc_rules: 46, ipt_rules: 31, watchdog: 1, watchdog_pid: 4203, watchdog_kind: 'go', watchdog_hb_age: 14 }; },
-    '/api/sim': function () { return { ok: true, enabled: SIM.enabled, count: 0, seed: 20261008, presets: ['busy', 'home', 'idle'], types: ['tv', 'phone', 'laptop', 'tablet', 'game', 'iot', 'pc'], mac_prefix: '02:5e:00:', max: 32, devices: [] }; },
+    '/api/sim': function () { return { ok: true, enabled: SIM.enabled, count: SIM.devices.length, seed: 20261008, presets: ['busy', 'home', 'idle'], types: ['tv', 'phone', 'laptop', 'tablet', 'game', 'iot', 'pc'], mac_prefix: '02:5e:00:', max: 32, devices: SIM.devices }; },
     '/api/selfcheck': function () { return selfcheck(); },
     '/api/mac_merge': function () {
       var sg = DEVS.filter(function (d) { return d.merge_suggestion; }).map(function (d) {
@@ -728,7 +737,7 @@
     '/api/tokens': function () { return { tokens: TOKENS }; },
     '/api/dns': function () {
       var o = clone(DNS);
-      if (DNS.enabled) Object.assign(o, { active: true, healthy: true, state: 'active', upstream: '223.5.5.5', upstream_kind: '运营商下发', stats: { queries: 18420, cached: 11230, blocked: 96, p50_ms: 9, p95_ms: 41 }, failopen: { count: 0 },
+      if (DNS.enabled) Object.assign(o, { ok: true, active: true, healthy: true, state: 'active', iface: IFACE, port: 15353, upstream: GW + ':53', upstream_kind: 'tether', v6: { status: 'active', reason: '' }, ip_names: 128, stats: { queries: 18420, cached: 11230, blocked: 96, servfail: 2, p50_ms: 9, p95_ms: 41, cache_entries: 312 }, failopen: { count: 0 },
         top_domains_today: [{ name: 'v26-dy.douyinvod.com', count: 1820 }, { name: 'data.video.iqiyi.com', count: 1240 }, { name: 'szextshort.weixin.qq.com', count: 960 }] });
       return o;
     },
@@ -750,6 +759,7 @@
         startup: { apps_learned: 7, days: 5, switch_rate: 0.64, event_accuracy: 0.9, switches: 52, switch_hit: 33 },
         discover: { samples: 412, purity: 0.88, completeness: 0.71, groups: 26, hubs: 3 },
         flow_cls: { samples: 640, model_acc: 0.83, manual_acc: 0.71, classes: 7 },
+        lan_self_consistency: { checked_ips: 386, paired_dual_stack: 124, cm_conflict_rate: 0.018, he_v4v6_parity: 0.976, active_escape_alerts: 0 },
         top_wrong: [{ name: '淘宝', truth: 'taobao', pred_name: '支付宝', pred: 'alipay', n: 14 }, { name: '高德地图', truth: 'amap', pred_name: '阿里系 SDK', pred: 'ali_sdk', n: 6 }],
         top_unknown: [{ name: '番茄小说', truth: 'fanqie', n: 31, snis: ['api.fqnovel.com', 'p3-novel.snssdk-novel.com'] }, { name: '得物', truth: 'dewu', n: 22, snis: ['app.dewu.com'] }],
         fg_truth: { source: 'usagestats', switches_24h: 146, last_pkg: 'com.tencent.mm', last_ts: now() - 120 } };
@@ -758,9 +768,67 @@
     '/api/dpi_rulepack': function () { return { ok: true, exportable: { domain_rules: 38, fingerprints: 12, startup: 7 }, imported: { domain_rules: 0, fingerprints: 0, startup: 0, suffixes: 0 },
       sources: { auto_expanded: { rules: 21 }, auto_promoted: { rules: 6 }, user_custom: { rules: 3 }, user_corrections: { domain: 8 } } }; },
     '/api/dpi_startup': function () { return { ok: true, stats: { events_total: 342 }, learned: [['抖音', 'douyin', 14, 5], ['微信', 'wechat', 22, 4], ['B站', 'bilibili', 9, 4], ['王者荣耀', 'honor_of_kings', 6, 3], ['高德地图', 'amap', 5, 3], ['小红书', 'xiaohongshu', 4, 3], ['淘宝', 'taobao', 3, 2]].map(function (x) { return { name: x[0], app_id: x[1], starts: x[2], feat: x[3], usable: true }; }) }; },
+    '/api/whoami': function () { return { ok: true, authenticated: true, token_id: '7f3a9c21', session_label: '演示浏览器 · Safari', label: '演示浏览器 · Safari', ip_hint: '192.168.43.31', created: T - 86400, last_seen: now() }; },
+    '/api/power': function () {
+      return { ts: now(), sample_every_s: 300, samples: 12, level: 'active', level_label: '活跃',
+        total: { cpu_pct_5m: 0.84, cpu_pct_1h: 0.62, cpu_sec_per_hour: 22.3, wakeups_per_min: 38 },
+        processes: [
+          { name: 'hnc_dpid', label: 'hnc_dpid', pid: 4120, alive: true, cpu_pct_5m: 0.41, rss_kb: 18432, wakeups_per_min: 19 },
+          { name: 'hnc_httpd', label: 'hnc_httpd(含它拉起的脚本)', pid: 4118, alive: true, cpu_pct_5m: 0.23, rss_kb: 22528, wakeups_per_min: 9 },
+          { name: 'watchdog', label: 'watchdog', pid: 4125, alive: true, cpu_pct_5m: 0.14, rss_kb: 11264, wakeups_per_min: 6 },
+          { name: 'hotspotd', label: 'hotspotd', pid: 4112, alive: true, cpu_pct_5m: 0.06, rss_kb: 2480, wakeups_per_min: 4 }
+        ], tips: ['当前总 CPU 占用 < 1%，处于极低功耗水平。'] };
+    },
+    '/api/dns/log': function () {
+      var ms = Date.now();
+      return { ok: true, log_queries: !!DNS.log_queries, entries: DNS.log_queries ? [
+        { ts: ms - 4000, mac: DEVS[0].mac, ip: DEVS[0].ip, qname: 'pvp.qq.com', qtype: 'A', rcode: 'NOERROR', answers: ['183.3.226.35'], ms: 11, proto: 'udp', blocked: false },
+        { ts: ms - 9000, mac: DEVS[1].mac, ip: DEVS[1].ip, qname: 'v26-dy.douyinvod.com', qtype: 'AAAA', rcode: 'NOERROR', answers: ['2408:871a:2100::12'], ms: 18, proto: 'udp', blocked: false },
+        { ts: ms - 17000, mac: DEVS[1].mac, ip: DEVS[1].ip, qname: 'dns.google', qtype: 'AAAA', rcode: 'NXDOMAIN', ms: 1, proto: 'udp', blocked: true }
+      ] : [] };
+    },
     '/api/rules_export': function () { return { ok: true, rules: rulesJson() }; },
-    '/api/dpi_rules': function () { return { ok: true, source: 'custom', rules: JSON.stringify({ schema_version: '1.0', rules_version: 'user-' + ymdDash(dayAt(2)), rules: [{ id: 'user_kuaikan', app: '快看漫画', category: 'reading', confidence: 'user', suffixes: ['kkmh.com', 'kuaikanmanhua.com'] }] }, null, 2) }; }
+    '/api/dpi_rules': function () { return { ok: true, source: 'custom', rules: JSON.stringify({ schema_version: '1.0', rules_version: 'user-' + ymdDash(dayAt(2)), rules: [{ id: 'user_kuaikan', app: '快看漫画', category: 'reading', confidence: 'user', suffixes: ['kkmh.com', 'kuaikanmanhua.com'] }] }, null, 2) }; },
+    '/api/self/studio': function () {
+      var rem = STUDIO_LEASE.active ? Math.max(0, STUDIO_LEASE.until - now()) : 0;
+      if (STUDIO_LEASE.active && rem <= 0) STUDIO_LEASE.active = false;
+      return {
+        ok: true,
+        generated_at: now(),
+        capture: {
+          enabled: !!SELF_ON.toggle,
+          auto_expand_enabled: !!SELF_ON.auto_expand,
+          auto_promote_enabled: !!SELF_ON.auto_promote,
+          lease_rem_sec: rem,
+          active_ifaces: [{ name: "wlan0", kind: "wifi", rx_bytes: 184 * MB, tls_events: 142, dns_events: 196 }, { name: "rmnet_data2", kind: "cellular", rx_bytes: 92 * MB, tls_events: 86, dns_events: 110 }],
+          tls_events: 228,
+          dns_events: 306
+        },
+        counters: {
+          user_apps: STUDIO_STATS.apps,
+          active_apps: 5,
+          samples_written: STUDIO_STATS.samples,
+          expanded_rules: 21,
+          promoted_rules: 6,
+          candidate_high: 2,
+          usable_fps: STUDIO_STATS.usable_fp,
+          usable_startups: STUDIO_STATS.usable_startup,
+          nb_pool_samples: 248,
+          nb_classes_ready: 6
+        },
+        rulepack: { domains: 40, fps: STUDIO_STATS.usable_fp, startups: STUDIO_STATS.usable_startup },
+        last_distill: STUDIO_LAST_DISTILL
+      };
+    }
   };
+  var STUDIO_LEASE = { active: false, until: 0, saved: null };
+  var STUDIO_LAST_DISTILL = null;
+  var STUDIO_STATS = { samples: 386, apps: 14, learned_fp: 19, usable_fp: 12, usable_startup: 7 };
+  function pushExport(name, size) {
+    var t = new Date();
+    EXPORTS = EXPORTS.filter(function (x) { return x.name !== name; });
+    EXPORTS.unshift({ name: name, size: size || 48620, modified: ymdDash(t) + 'T' + p2(t.getHours()) + ':' + p2(t.getMinutes()) + ':' + p2(t.getSeconds()) + '+08:00' });
+  }
 
   /* ═════════════ POST /api/action ═════════════ */
   function parseRate(s) { s = String(s || '').toLowerCase(); var n = parseFloat(s); if (!(n > 0)) return 0; return /kbit/.test(s) ? n / 1000 : n; }
@@ -881,16 +949,26 @@
       if (p.use_netstats) PU_CFG.use_netstats = p.use_netstats;
       return 'billing_day=' + PU_CFG.billing_day + ' sim1=' + PU_CFG.plan_sim1_gb + 'GB sim2=' + PU_CFG.plan_sim2_gb + 'GB warn=' + PU_CFG.warn_percent + '%';
     },
-    dns_takeover_set: function (p) { if (p.enabled != null) DNS.enabled = bool(p.enabled); if (p.block_mode) DNS.block_mode = p.block_mode; if (p.log_queries != null) DNS.log_queries = bool(p.log_queries); return ''; },
+    dns_takeover_set: function (p) { if (p.enabled != null) DNS.enabled = bool(p.enabled); if (p.block_mode) DNS.block_mode = p.block_mode; if (p.log_queries != null) DNS.log_queries = bool(p.log_queries); if (p.log_redact != null) DNS.log_redact = bool(p.log_redact); return ''; },
+    auth_required_set: function (p) { var v = bool(p.enabled); CFG.auth_required = v; CFG.remote_auth_required = v; return ''; },
+    clsact_repair: function () { return J({ ok: true, clsact: true, bpf_filter: true, map: true, watchdog: true, iface: IFACE }); },
+    capture_record: function (p) { var m = lim(+p.minutes || 10, 1, 30); REC_STATE = { recording: true, minutes: m, started_at: now() }; return J({ requested: true, recording: true, minutes: m }); },
+    capture_record_stop: function () { REC_STATE.recording = false; var nm = 'rec-' + ymd(dayAt(0)) + '-120000.pcap'; pushExport(nm, 612480); return J({ recording: false, stopping: true, name: nm }); },
+    dpi_eval_clear: function () { return 'cleared eval samples'; },
+    dpi_rulepack_clear: function () { return 'cleared imported rulepack'; },
+    sim_clear: function () { SIM.enabled = false; SIM.devices = []; DEVS = DEVS.filter(function (d) { return !/^02:5e:00:/i.test(d.mac); }); return 'cleared sim devices'; },
+    sim_device_del: function (p) { var m = String(p.mac || '').toLowerCase(); SIM.devices = SIM.devices.filter(function (d) { return d.mac !== m; }); DEVS = DEVS.filter(function (d) { return d.mac.toLowerCase() !== m; }); return 'deleted ' + m; },
+    sim_device_update: function (p) { var d = needDev(p.mac); if (p.name) d.hostname = p.name; return 'updated'; },
+    dpi_correct_list: function () { return J({ rules: FP_RULES }); },
     dpi_fg_engine: function (p) { FG_ENGINE = p.engine === 'hmm' ? 'hmm' : 'classic'; return ''; },
-    sim_set: function (p) { SIM.enabled = bool(p.enabled); return SIM.enabled ? '演示模式：模拟环境开关已打开（预览里没有模拟设备）' : '模拟环境已关闭'; },
-    sim_preset: function () { SIM.enabled = true; return '演示模式：预设已记下（预览里不生成模拟设备）'; },
-    sim_device_add: function (p) { return J({ mac: '02:5e:00:12:34:56', name: p.name || '模拟设备' }); },
+    sim_set: function (p) { SIM.enabled = bool(p.enabled); return SIM.enabled ? '模拟环境已开启(' + SIM.devices.length + ' 台模拟设备)' : '模拟环境已关闭'; },
+    sim_preset: function (p) { SIM.enabled = true; SIM.devices = [{ mac: '02:5e:00:11:22:33', ip: '192.168.43.210', name: '模拟-客厅电视', type: 'tv', online: true, cur_rx_bps: 3145728, cur_tx_bps: 92160 }]; return '已加载预设 ' + (p.preset || 'home'); },
+    sim_device_add: function (p) { var mac = '02:5e:00:12:34:' + p2(10 + SIM.devices.length), nm = p.name || '模拟设备'; SIM.devices.push({ mac: mac, ip: '192.168.43.' + (215 + SIM.devices.length), name: nm, type: p.type || 'phone', online: true, cur_rx_bps: 524288, cur_tx_bps: 65536 }); return J({ mac: mac, name: nm, type: p.type || 'phone' }); },
     selfcheck_run: function () { SC_AT = now(); return J(selfcheck()); },
-    selfcheck_export: function (p) { return J({ name: 'hnc-selfcheck-' + ymd(dayAt(0)) + '.txt', json_name: 'hnc-selfcheck-' + ymd(dayAt(0)) + '.json', redacted: p.redact === '1' }); },
-    compat_report: function () { return J({ name: 'hnc-compat-' + ymd(dayAt(0)) + '.json' }); },
-    debug_bundle: function () { return J({ name: 'hnc-debug-' + ymd(dayAt(0)) + '.zip' }); },
-    dpi_rulepack_export: function () { return J({ name: 'hnc-rulepack-' + ymd(dayAt(0)) + '.json', counts: { domain_rules: 38, fingerprints: 12, startup: 7 } }); },
+    selfcheck_export: function (p) { var nm = 'hnc-selfcheck-' + ymd(dayAt(0)) + '-120000.txt', jn = 'hnc-selfcheck-' + ymd(dayAt(0)) + '-120000.json'; pushExport(nm, 18420); pushExport(jn, 34120); return J({ name: nm, json_name: jn, redacted: p.redact !== '0' }); },
+    compat_report: function () { var nm = 'hnc-compat-' + ymd(dayAt(0)) + '.json'; pushExport(nm, 12840); return J({ name: nm, summary: { ok: 21, warn: 1, fail: 0 } }); },
+    debug_bundle: function () { var nm = 'hnc-debug-' + ymd(dayAt(0)) + '-120000.tar.gz'; pushExport(nm, 428190); return J({ name: nm }); },
+    dpi_rulepack_export: function () { var nm = 'hnc-rulepack-' + ymd(dayAt(0)) + '.json'; pushExport(nm, 26840); return J({ name: nm, counts: { domain_rules: 38, fingerprints: STUDIO_STATS.usable_fp, startup: STUDIO_STATS.usable_startup } }); },
     pair_new: function () { return J({ pin: String(100000 + Math.floor(Math.random() * 899999)), valid_sec: 120 }); },
     pair_revoke: function (p) { TOKENS = TOKENS.filter(function (x) { return x.token_id !== p.token; }); return ''; },
     candidate_promote: function (p) { CANDS.forEach(function (c) { if (c.apex === p.apex) c.promoted = true; }); return 'approved ' + p.apex; },
@@ -898,7 +976,7 @@
     self_attrib_purge: function () { return '已删除 3 个明细文件'; },
     cache_clear: function () { return '已清理 2 个缓存文件'; },
     apk_scan: function () { DISC.apk_scan.requested = true; return '已请求扫描，约 1 分钟内完成'; },
-    discover_probe: function () { return 'ok'; },
+    discover_probe: function (p) { var g = DISC.groups.filter(function (x) { return x.id === p.id; })[0]; var ci = { host: (g && g.domains && g.domains[0] && g.domains[0].name) || 'svc-gw.cn', org: 'Example Cloud Tech Co., Ltd.', issuer: 'DigiCert Global G2 TLS RSA SHA256', sans: g ? g.suffixes : [], ts: now() }; if (g) g.cert = ci; return J(ci); },
     discover_ignore: function (p) { var g = DISC.groups.filter(function (x) { return x.id === p.id; })[0]; DISC.groups = DISC.groups.filter(function (x) { return x !== g; }); if (g) DISC.ignored.push({ id: g.id, suffixes: g.suffixes }); return ''; },
     discover_unignore: function (p) { DISC.ignored = DISC.ignored.filter(function (x) { return x.id !== p.id; }); return ''; },
     discover_confirm: function (p) { DISC.groups = DISC.groups.filter(function (x) { return x.id !== p.id; }); DISC.user_rules.push({ id: 'user_' + p.id, app: p.name, category: p.category, suffixes: String(p.suffixes || '').split(',') }); return ''; },
@@ -906,7 +984,36 @@
     dpi_correct: function (p) { FP_RULES.push({ id: 'fp-u' + (FP_RULES.length + 1), kind: p.name ? 'domain' : 'ip', value: p.name || p.dst_ip, app_id: p.app_id, app_name: p.app_name || p.app_id }); return ''; },
     dpi_correct_del: function (p) { FP_RULES = bool(p.all) ? [] : FP_RULES.filter(function (x) { return x.id !== p.id; }); return ''; },
     dpi_rules_update: function () { return J({ update_available: 'no', current: '2026.10.02', remote: '2026.10.02' }); },
-    dpi_rules_reset: function () { return '✓ 已恢复内置规则库（演示）'; },
+    dpi_rules_reset: function () { return '已恢复内置规则库（演示）'; },
+    self_studio_start: function (p) {
+      if (p && p.mode === 'stop') {
+        STUDIO_LEASE.active = false; STUDIO_LEASE.until = 0;
+        SELF_ON.toggle = false;
+        if (STUDIO_LEASE.saved) { SELF_ON.auto_expand = STUDIO_LEASE.saved.ae; SELF_ON.auto_promote = STUDIO_LEASE.saved.ap; STUDIO_LEASE.saved = null; }
+        return J({ mode: 'stop', auto_stop_min: 0, lease_rem_sec: 0, dpid_synced: true });
+      }
+      if (!STUDIO_LEASE.saved) STUDIO_LEASE.saved = { ae: SELF_ON.auto_expand, ap: SELF_ON.auto_promote };
+      SELF_ON.toggle = true; SELF_ON.auto_expand = p.mode !== 'observe'; SELF_ON.auto_promote = p.mode !== 'observe';
+      var m = Math.max(1, +p.auto_stop_min || +p.minutes || 15), sec = m * 60;
+      STUDIO_LEASE.active = true; STUDIO_LEASE.until = now() + sec;
+      STUDIO_STATS.samples += 24;
+      return J({ mode: p.mode || 'full', auto_stop_min: m, lease_rem_sec: sec, dpid_synced: true });
+    },
+    self_studio_distill: function () {
+      STUDIO_STATS.learned_fp += 2; STUDIO_STATS.usable_fp += 2; STUDIO_STATS.usable_startup += 1;
+      STUDIO_LAST_DISTILL = { ts: now(), duration_ms: 48, samples_read: STUDIO_STATS.samples, exclusive_fps: STUDIO_STATS.usable_fp, startup_usable: STUDIO_STATS.usable_startup, nb_trained_samples: 248, nb_classes: 6, dpi_synced: true };
+      return J(STUDIO_LAST_DISTILL);
+    },
+    dpi_distill_now: function () {
+      STUDIO_STATS.usable_fp += 1;
+      return J({ ok: true, distilled_at: now(), samples_scanned: STUDIO_STATS.samples, exclusive_count: STUDIO_STATS.usable_fp, startup_usable_count: STUDIO_STATS.usable_startup });
+    },
+    flow_cls_retrain: function () { return J({ samples: 248, classes: 6, retrained: true }); },
+    self_studio_export: function () {
+      STUDIO_STATS.usable_fp += 1;
+      var nm = 'hnc-rulepack-' + ymd(dayAt(0)) + '.json'; pushExport(nm, 28410);
+      return J({ name: nm, counts: { domain_rules: 40, fingerprints: STUDIO_STATS.usable_fp, startup: STUDIO_STATS.usable_startup }, distill_exclusive_fps: STUDIO_STATS.usable_fp, distill_startup_apps: STUDIO_STATS.usable_startup });
+    },
     dpi_rebind: function () { return 'rebind requested'; },
     restart_service: function () { return 'restart scheduled'; },
     cleanup_all: function () { return 'safe release scheduled'; }
@@ -928,7 +1035,7 @@
     '/api/self/toggle': function (b) { SELF_ON.toggle = !!(b && b.enabled); return { status: 'ok', enabled: SELF_ON.toggle }; },
     '/api/self/auto_expand/toggle': function (b) { SELF_ON.auto_expand = !!(b && b.enabled); return { status: 'ok', enabled: SELF_ON.auto_expand }; },
     '/api/self/auto_promote/toggle': function (b) { SELF_ON.auto_promote = !!(b && b.enabled); return { status: 'ok', enabled: SELF_ON.auto_promote }; },
-    '/api/dpi_rules': function () { return { ok: true, detail: '✓ 已导入（演示：不会真的改规则库）' }; },
+    '/api/dpi_rules': function () { return { ok: true, detail: '已导入（演示：不会真的改规则库）' }; },
     '/api/dpi_rulepack': function () { return { ok: true, added: { suffixes: 4, domain_rules: 2, fingerprints: 1, startup: 0 }, merged: {}, unchanged: {}, skipped: {} }; },
     '/api/logout': function () { return { ok: true }; },
     '/api/rollback_ack': function () { return { ok: true }; }

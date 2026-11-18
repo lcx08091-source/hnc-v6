@@ -14,20 +14,20 @@ MAC="AA:BB:CC:DD:EE:FF"
 MAC_L="aa:bb:cc:dd:ee:ff"
 NAME='Phone, with } brace, quote " slash \\ 中文'
 sh "$DIR/bin/json_set.sh" name_set "$MAC" "$NAME"
-"$DIR/bin/hnc_json" validate "$DIR/data/device_names.json"
+sh "$DIR/bin/hnc_json" validate "$DIR/data/device_names.json"
 GOT=$(sh "$DIR/bin/json_set.sh" name_get "$MAC_L")
 [ "$GOT" = "$NAME" ] || { echo "name_get mismatch: $GOT" >&2; exit 1; }
-RAW=$("$DIR/bin/hnc_json" get-object-key "$DIR/data/device_names.json" "$MAC_L")
+RAW=$(sh "$DIR/bin/hnc_json" get-object-key "$DIR/data/device_names.json" "$MAC_L")
 echo "$RAW" | grep -q 'Phone, with } brace'
 echo "$RAW" | grep -q '中文'
 sh "$DIR/bin/json_set.sh" name_del "$MAC_L"
-"$DIR/bin/hnc_json" validate "$DIR/data/device_names.json"
-if "$DIR/bin/hnc_json" get-object-key "$DIR/data/device_names.json" "$MAC_L" >/dev/null 2>&1; then
+sh "$DIR/bin/hnc_json" validate "$DIR/data/device_names.json"
+if sh "$DIR/bin/hnc_json" get-object-key "$DIR/data/device_names.json" "$MAC_L" >/dev/null 2>&1; then
   echo "name_del failed to remove key" >&2
   exit 1
 fi
 # Deleting a missing key must stay valid and no-op.
 sh "$DIR/bin/json_set.sh" name_del "$MAC_L"
-"$DIR/bin/hnc_json" validate "$DIR/data/device_names.json"
+sh "$DIR/bin/hnc_json" validate "$DIR/data/device_names.json"
 rm -rf "$DIR"
 echo "test_json_set_names_hnc_json_bridge: OK"

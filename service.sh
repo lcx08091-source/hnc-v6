@@ -83,8 +83,11 @@ provision_fallback_tools() {
         done
         command -v log >/dev/null 2>&1 && log "rc15: provisioned fallback applets from $mc -> $bbdir"
     fi
-    # sh: 脚本是 mksh 方言([[ ]] / (( )) / function),必须用 mksh,不能换 busybox ash
-    if [ -e /system/bin/mksh ] && cp -fL /system/bin/mksh "$bbdir/sh" 2>/dev/null; then
+    # sh: 优先静态 BusyBox ash(.hnc_mc, /system 被卸载时仍不依赖 /system/bin/linker64),
+    # 否则回退复制系统 mksh/sh(HNC 全量运行脚本均已通过严格 POSIX sh/ash 校验)
+    if [ -x "$bbdir/.hnc_mc" ] && "$bbdir/.hnc_mc" ash -c 'exit 0' 2>/dev/null; then
+        ln -sf .hnc_mc "$bbdir/sh" 2>/dev/null
+    elif [ -e /system/bin/mksh ] && cp -fL /system/bin/mksh "$bbdir/sh" 2>/dev/null; then
         chmod 755 "$bbdir/sh" 2>/dev/null
     elif [ -e /system/bin/sh ] && cp -fL /system/bin/sh "$bbdir/sh" 2>/dev/null; then
         chmod 755 "$bbdir/sh" 2>/dev/null
@@ -104,7 +107,7 @@ echo "$MODDIR" > "$RUN/service.path" 2>/dev/null
 # cleanup.sh 和 uninstall.sh, 不在这里.
 
 log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [HNC] $1" >> $LOG
+    echo "[$(date '+%Y-%m-%d %H:%M:%S')] [HNC] $1" >> "$LOG"
 }
 
 # v5.20: 兼容性环境快照 —— root 方案(KernelSU/SukiSU/KSU-Next/APatch/Magisk)、busybox、
@@ -188,7 +191,7 @@ prune_duplicate_watchdogs() {
         *) keep="" ;;
     esac
     if [ -z "$keep" ]; then
-        keep=$(echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -n | head -1)
+        keep=$(echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -n | head -n 1)
     fi
     [ -n "$keep" ] && echo "$keep" > "$RUN/watchdog.pid" 2>/dev/null || true
     log "watchdogfix-v6.1: duplicate watchdogs detected count=$count keep=$keep reason=$reason"
@@ -348,13 +351,13 @@ migrate_remove_ndpi
 # hotfix13: record platform/kernel capability profile for diagnostics and UI fallback hints
 # v5.20.1: -f 而非 -x(cp 丢执行位时也要跑; 用 sh 调用不需要 x 位); 探针内部先写基础能力,
 # 低延迟 qdisc 模块加载带总超时后再补写, 开机很快就有 run/capabilities.json。
-if [ -f $HNC_DIR/bin/capability_probe.sh ]; then
-    ( HNC="$HNC_DIR" sh $HNC_DIR/bin/capability_probe.sh >> $HNC_DIR/logs/capabilities.log 2>&1 ) &
+if [ -f "$HNC_DIR/bin/capability_probe.sh" ]; then
+    ( HNC="$HNC_DIR" sh "$HNC_DIR/bin/capability_probe.sh" >> "$HNC_DIR/logs/capabilities.log" 2>&1 ) &
 fi
 
 # v5.5.0: AHNC → HNC migration (idempotent, runs once via marker file)
-if [ -x $HNC_DIR/bin/ahnc_migration.sh ]; then
-    ( sh $HNC_DIR/bin/ahnc_migration.sh >> $HNC_DIR/logs/migration.log 2>&1 ) &
+if [ -x "$HNC_DIR/bin/ahnc_migration.sh" ]; then
+    ( sh "$HNC_DIR/bin/ahnc_migration.sh" >> "$HNC_DIR/logs/migration.log" 2>&1 ) &
 fi
 
 # 等待系统网络服务就绪
@@ -491,12 +494,12 @@ fi
 # hotspotd 没起来不影响设备列表, 看门狗每轮会再拉。
 log "Starting hotspotd (offload + control socket; device discovery is the Go watchdog's)..."
 rm -f "$RUN/detect.pid" 2>/dev/null
-sh $HNC_DIR/bin/device_detect.sh daemon >> $HNC_DIR/logs/detect.log 2>&1 &
+sh "$HNC_DIR/bin/device_detect.sh" daemon >> "$HNC_DIR/logs/detect.log" 2>&1 &
 # hotfix10 S11: 最多等 5s,每 100ms poll 一次 hotspotd.pid。
 HPID=""
 i=0
 while [ $i -lt 50 ]; do
-    HPID=$(pidfile_live_pid $RUN/hotspotd.pid hotspotd)
+    HPID=$(pidfile_live_pid "$RUN/hotspotd.pid" hotspotd)
     [ -n "$HPID" ] && kill -0 "$HPID" 2>/dev/null && break
     if usleep 100000 2>/dev/null; then
         i=$((i + 1))
@@ -540,7 +543,7 @@ launch_httpd_safe() {
 
 if [ -x "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" ]; then
     HP=$(ps -ef 2>/dev/null | grep '/data/local/hnc/daemon/hnc_httpd/hnc_httpd' \
-         | grep -v grep | awk '{print $2}' | head -1)
+         | grep -v grep | awk '{print $2}' | head -n 1)
     if [ -n "$HP" ] && kill -0 "$HP" 2>/dev/null; then
         log "rc30.12 pre-launch: hnc_httpd already running (PID=$HP)"
     else
@@ -569,7 +572,7 @@ else
         if [ -x "$HNC_DIR/bin/hnc_watchdog" ]; then
             nohup "$HNC_DIR/bin/hnc_watchdog" >> "$HNC_DIR/logs/watchdog.log" 2>&1 &
             echo $! > "$RUN/watchdog.pid"
-            log "watchdog (Go, rc30.1+) started (PID=$(cat $RUN/watchdog.pid 2>/dev/null))"
+            log "watchdog (Go, rc30.1+) started (PID=$(cat "$RUN/watchdog.pid" 2>/dev/null))"
         else
             # v5.26 T1: watchdog.sh 的 shell 主循环已删除, 不再兜底启动。
             log "FATAL: bin/hnc_watchdog missing, watchdog not started"
@@ -623,15 +626,15 @@ log "All services started. WebUI: open KernelSU manager → modules → HNC"
 # ─── 热点自动启动 ────────────────────────────────────────────
 # 读取 rules.json 里的 hotspot_auto 字段（WebUI 控制）
 HOTSPOT_AUTO=$(sh "$HNC_DIR/bin/hnc_json" get-top "$HNC_DIR/data/rules.json" hotspot_auto 2>/dev/null \
-    || grep -o '"hotspot_auto"[[:space:]]*:[[:space:]]*[a-z]*' $HNC_DIR/data/rules.json 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
+    || grep -o '"hotspot_auto"[[:space:]]*:[[:space:]]*[a-z]*' "$HNC_DIR/data/rules.json" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
 
 if [ "$HOTSPOT_AUTO" = "true" ]; then
     log "hotspot_auto=true, launching hotspot_autostart.sh in background..."
     # 延迟 5 秒再启动，确保其他网络服务就绪
-    (sleep 5 && sh $HNC_DIR/bin/hotspot_autostart.sh start) \
-        >> $HNC_DIR/logs/hotspot.log 2>&1 &
-    echo $! > $RUN/hotspot.pid
-    log "Hotspot autostart scheduled (PID: $(cat $RUN/hotspot.pid))"
+    (sleep 5 && sh "$HNC_DIR/bin/hotspot_autostart.sh" start) \
+        >> "$HNC_DIR/logs/hotspot.log" 2>&1 &
+    echo $! > "$RUN/hotspot.pid"
+    log "Hotspot autostart scheduled (PID: $(cat "$RUN/hotspot.pid" 2>/dev/null))"
 else
     log "hotspot_auto=false, skipping autostart"
 fi
@@ -678,7 +681,7 @@ if [ -x "$DPID_LAUNCHER_C" ] && [ -x "$FORK_PROBE" ]; then
         # abort: SIGABRT 6 → exit 134 (128+6) or 蓝端报错文字 "Aborted" / "underaligned"
         if echo "$_launcher_test" | grep -qE 'underaligned|Aborted|cannot execute|error:.*executable'; then
             log "dpid launcher: hnc_launcher binary broken (TLS/Bionic mismatch), skip"
-            log "  diag: $(echo "$_launcher_test" | head -1)"
+            log "  diag: $(echo "$_launcher_test" | head -n 1)"
         elif [ "$_launcher_test_rc" = "134" ] || [ "$_launcher_test_rc" = "137" ]; then
             log "dpid launcher: hnc_launcher aborted (rc=$_launcher_test_rc), skip"
         else
@@ -744,7 +747,7 @@ else
     if [ -d "$MOD_RULES_D" ]; then
         _RSYNC="$MODDIR/bin/dpi_rules_sync.sh"
         [ -f "$_RSYNC" ] || _RSYNC="$HNC_DIR/bin/dpi_rules_sync.sh"
-        if [ -f "$_RSYNC" ] && sh "$_RSYNC" "$MOD_RULES_D" "$DPID_RULES_D" "$MODDIR/module.prop" >> $LOG 2>&1; then
+        if [ -f "$_RSYNC" ] && sh "$_RSYNC" "$MOD_RULES_D" "$DPID_RULES_D" "$MODDIR/module.prop" >> "$LOG" 2>&1; then
             log "dpid: synced dpi_rules.d/ ($(find "$DPID_RULES_D" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l) subset files) to $DPID_RULES_D"
         else
             log "dpid: WARN dpi_rules.d sync failed (see logs/dpi_rules_sync.log); keeping existing $DPID_RULES_D"

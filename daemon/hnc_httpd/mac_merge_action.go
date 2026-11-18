@@ -1037,6 +1037,8 @@ func mergeCtlUsage(dst, src *ctlDevState) {
 		}
 		if u.MonthKey == o.MonthKey {
 			u.MonthBytes += o.MonthBytes
+			u.MonthRx += o.MonthRx
+			u.MonthTx += o.MonthTx
 		}
 	}
 	if dst.AlertedDay == "" {

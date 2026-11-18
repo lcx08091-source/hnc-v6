@@ -124,6 +124,13 @@ type ClientProfile struct {
 	// BackgroundFlowsPct: 0..1, share of flows whose 30s persistence > 80%.
 	// Set by flow.go's persistence detector.
 	BackgroundFlowsPct float64 `json:"background_flows_pct,omitempty"`
+
+	// v5.34: Dual-Stack IPv6 byte counters, OS Uplink DSCP classes, Push-Wake & Micro-Burst Causality
+	V6TxBytes      uint64                    `json:"v6_tx_bytes,omitempty"`
+	V6RxBytes      uint64                    `json:"v6_rx_bytes,omitempty"`
+	LastPushWakeAt int64                     `json:"last_push_wake_at,omitempty"`
+	FlowDSCPClass  map[string]uint8          `json:"flow_dscp_class,omitempty"`
+	AppMicroBursts map[string]AppBurstExport `json:"app_micro_bursts,omitempty"`
 }
 
 // ─── v5.5: self-capture types ──────────────────────────────────────────
@@ -144,6 +151,7 @@ type SelfIfaceState struct {
 	StartedAt int64  `json:"started_at"`
 	Restarts  int64  `json:"restarts"`
 	LastError string `json:"last_error,omitempty"`
+	RxBytes   uint64 `json:"rx_bytes,omitempty"`
 	Packets   uint64 `json:"packets"`
 	TLSEvents uint64 `json:"tls_events"`
 	DNSEvents uint64 `json:"dns_events"`
@@ -233,10 +241,12 @@ type SelfState struct {
 	// SHADOW by default — reports what WOULD be auto-promoted so thresholds can
 	// be calibrated in-vivo. AutoPromoteOn reflects whether
 	// /data/local/hnc/run/auto_promote.enabled is present (rules actually written).
-	CandidatePending  int               `json:"candidate_pending,omitempty"`  // distinct brand-new apexes tracked
-	CandidateHigh     int               `json:"candidate_high,omitempty"`     // apexes at HIGH tier (auto-promotable)
-	CandidateShared   int               `json:"candidate_shared,omitempty"`   // apexes judged shared infra (never attributed)
-	CandidatePromoted int               `json:"candidate_promoted,omitempty"` // rules actually auto-promoted
+	CandidatePending  int               `json:"candidate_pending,omitempty"`   // distinct brand-new apexes tracked
+	CandidateHigh     int               `json:"candidate_high,omitempty"`      // apexes at HIGH tier (auto-promotable)
+	CandidateShared   int               `json:"candidate_shared,omitempty"`    // apexes judged shared infra (never attributed)
+	CandidatePromoted int               `json:"candidate_promoted,omitempty"`  // rules actually auto-promoted
+	AutoExpandedCount int               `json:"auto_expanded_count,omitempty"` // confirmed _auto_expanded.json rules
+	AutoPromotedCount int               `json:"auto_promoted_count,omitempty"` // confirmed _auto_promoted.json rules
 	CandidateEntityDB int               `json:"entity_db_size,omitempty"`     // curated entity-lib entries loaded
 	AutoPromoteOn     bool              `json:"auto_promote_on,omitempty"`
 	CandidateSamples  []CandidateSample `json:"candidate_samples,omitempty"`
@@ -411,6 +421,13 @@ type clientAgg struct {
 
 	// rc29 flow persistence tracker.
 	Flows *flowTracker
+
+	// v5.34 side-channel & micro-burst trackers (bounded to 64 entries per client)
+	V6TxBytes      uint64
+	V6RxBytes      uint64
+	LastPushWakeAt int64
+	FlowDSCP       map[string]uint8
+	MicroBursts    map[string]*MicroBurstTracker
 }
 
 // ─── Writer ────────────────────────────────────────────────────────────
@@ -442,6 +459,7 @@ type Writer struct {
 	discover atomic.Pointer[Discoverer]
 	// v5.18: dpid 自己的 IP→域名表(RecordFlow 的域名兜底 + 状态里的条目数)。
 	ipNames atomic.Pointer[IPNameTable]
+	dnsRing PendingDNSRing // v5.34: O(1) 256-slot DNS->Connect causality & ECH recovery ring
 
 	// rc29 totals
 	totalTx uint64
@@ -1527,6 +1545,11 @@ func (w *Writer) Flush() error {
 			TxBytes:            c.TxBytes,
 			RxBytes:            c.RxBytes,
 			BackgroundFlowsPct: bgPct,
+			V6TxBytes:          c.V6TxBytes,
+			V6RxBytes:          c.V6RxBytes,
+			LastPushWakeAt:     c.LastPushWakeAt,
+			FlowDSCPClass:      cloneFlowDSCP(c.FlowDSCP),
+			AppMicroBursts:     snapshotMicroBursts(c.MicroBursts, snap.GeneratedAt*1000),
 		}
 		snap.Clients[key] = cp
 	}
@@ -1629,4 +1652,199 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+// ─── v5.34 Side-Channel, ECH Recovery & Micro-Burst Ingestion Helpers ──
+
+func (c *clientAgg) getOrCreateBurst(appID string) *MicroBurstTracker {
+	if appID == "" {
+		return nil
+	}
+	if c.MicroBursts == nil {
+		c.MicroBursts = make(map[string]*MicroBurstTracker, 8)
+	}
+	if mb, ok := c.MicroBursts[appID]; ok {
+		return mb
+	}
+	if len(c.MicroBursts) >= 64 {
+		var oldestID string
+		var oldestMs int64
+		for k, v := range c.MicroBursts {
+			if oldestID == "" || v.LastPktMonoMs < oldestMs {
+				oldestID = k
+				oldestMs = v.LastPktMonoMs
+			}
+		}
+		if oldestID != "" {
+			delete(c.MicroBursts, oldestID)
+		}
+	}
+	mb := &MicroBurstTracker{}
+	c.MicroBursts[appID] = mb
+	return mb
+}
+
+func cloneFlowDSCP(m map[string]uint8) map[string]uint8 {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]uint8, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func snapshotMicroBursts(m map[string]*MicroBurstTracker, nowMs int64) map[string]AppBurstExport {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]AppBurstExport, len(m))
+	for k, v := range m {
+		ex := v.Snapshot(nowMs)
+		if ex.CausalTurns > 0 || ex.D2CVerified > 0 || ex.CloseEvents > 0 || ex.D2CImpulse > 0 {
+			out[k] = ex
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// RecordDNSAnswersMeta feeds resolved A/AAAA/HTTPS IPs into the 256-slot D2C & ECH pre-binding ring.
+func (w *Writer) RecordDNSAnswersMeta(clientMAC, qname string, records []DNSAnswer, ts time.Time) {
+	if clientMAC == "" || qname == "" || len(records) == 0 {
+		return
+	}
+	host := normalizeName(qname)
+	if host == "" {
+		return
+	}
+	nowMs := ts.UnixMilli()
+	w.mu.Lock()
+	for _, rr := range records {
+		if rr.Type == 1 || rr.Type == 28 || rr.Type == 64 || rr.Type == 65 {
+			if rr.Value != "" {
+				w.dnsRing.RecordResponse(clientMAC, rr.Value, host, nowMs)
+			}
+		}
+	}
+	w.mu.Unlock()
+}
+
+// ObserveHandshakeSideChannel records DNS->Connect (<150ms) causality, ECH outer-SNI QNAME recovery,
+// and uplink DSCP on TLS/QUIC ClientHello. Returns recovered QNAME when ECH masked the real SNI.
+func (w *Writer) ObserveHandshakeSideChannel(clientMAC, clientIP, remoteIP, sni string, isQUIC bool, dscp uint8, port uint16, ts time.Time) string {
+	nowMs := ts.UnixMilli()
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	dtMs, dnsQName, firstConsume := w.dnsRing.MatchHandshake(clientMAC, remoteIP, nowMs)
+	effHost := normalizeName(sni)
+	recovered := ""
+	if (effHost == "" || IsECHPublicName(effHost)) && dnsQName != "" {
+		effHost = dnsQName
+		recovered = dnsQName
+	}
+
+	c, ok := w.clientLookupLocked(clientMAC, clientIP)
+	if !ok {
+		return recovered
+	}
+	if cls := ClassifyUplinkDSCP(dscp); cls != DSCPNone && remoteIP != "" {
+		if c.FlowDSCP == nil {
+			c.FlowDSCP = make(map[string]uint8, 16)
+		}
+		if len(c.FlowDSCP) < 64 {
+			protoCh := "T"
+			if isQUIC {
+				protoCh = "U"
+			}
+			c.FlowDSCP[protoCh+"|"+remoteIP+":"+portStr(port)] = cls
+		}
+	}
+	if effHost != "" {
+		if r, hit := classifyHost(effHost); hit && r.ID != "" {
+			if mb := c.getOrCreateBurst(r.ID); mb != nil {
+				mb.OnHandshake(nowMs, dtMs, firstConsume, isQUIC)
+			}
+			if recovered != "" && remoteIP != "" && w.IPAppMap != nil {
+				w.IPAppMap.Record(remoteIP, r.ID, r.Name, r.Category, ts.Unix(), "ech_dns")
+			}
+		}
+	}
+	return recovered
+}
+
+// ObserveFlowSideChannel updates V6 byte counters, uplink DSCP map, Push-Wake timestamp,
+// RFC 9443 pure-UDP protocol attribution, and per-(MAC, AppID) MicroBurstTracker.
+func (w *Writer) ObserveFlowSideChannel(clientMAC, clientIP, remoteIP string, isUDP, isIPv6 bool, sport, dport uint16, bytes uint64, txFromClient bool, dscp, tcpFlags uint8, udpSig string, ts time.Time) {
+	port := dport
+	if !txFromClient {
+		port = sport
+	}
+	now := ts.Unix()
+	nowMs := ts.UnixMilli()
+
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	c, ok := w.clientLookupLocked(clientMAC, clientIP)
+	if !ok {
+		return
+	}
+	if isIPv6 && bytes > 0 {
+		if txFromClient {
+			c.V6TxBytes += bytes
+		} else {
+			c.V6RxBytes += bytes
+		}
+	}
+	if !txFromClient && !isUDP && IsPushChannelPort(port) && bytes > 120 {
+		c.LastPushWakeAt = now
+	}
+	protoCh := "T"
+	if isUDP {
+		protoCh = "U"
+	}
+	fkey := protoCh + "|" + remoteIP + ":" + portStr(port)
+	if txFromClient {
+		if cls := ClassifyUplinkDSCP(dscp); cls != DSCPNone {
+			if c.FlowDSCP == nil {
+				c.FlowDSCP = make(map[string]uint8, 16)
+			}
+			if _, exists := c.FlowDSCP[fkey]; exists || len(c.FlowDSCP) < 64 {
+				c.FlowDSCP[fkey] = cls
+			}
+		}
+	}
+
+	// RFC 9443 pure-UDP real-time VoIP / KCP game / WireGuard attribution into IPAppMap
+	var appID string
+	if udpSig != "" && w.IPAppMap != nil && remoteIP != "" {
+		switch udpSig {
+		case "stun", "dtls_srtp":
+			appID = "webrtc_rtc"
+			w.IPAppMap.Record(remoteIP, appID, "实时音视频通话", "voip", now, "udp_sig")
+		case "kcp_game":
+			appID = "realtime_game_udp"
+			w.IPAppMap.Record(remoteIP, appID, "实时竞技手游", "game", now, "udp_sig")
+		case "wireguard":
+			appID = "_tunnel"
+			w.IPAppMap.Record(remoteIP, appID, "WireGuard 隧道", "vpn", now, "udp_sig")
+		}
+	}
+	if appID == "" && w.IPAppMap != nil && remoteIP != "" {
+		w.IPAppMap.mu.Lock()
+		if e := w.IPAppMap.entries[remoteIP]; e != nil {
+			appID = e.AppID
+		}
+		w.IPAppMap.mu.Unlock()
+	}
+	if appID != "" {
+		if mb := c.getOrCreateBurst(appID); mb != nil {
+			mb.OnPacket(nowMs, txFromClient, uint32(bytes), tcpFlags)
+		}
+	}
 }

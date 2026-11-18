@@ -155,11 +155,11 @@ func stateRank(s uint16) int {
 	switch s {
 	case nudReachable:
 		return 4
-	case nudDelay:
-		return 3
-	case nudProbe:
-		return 2
 	case nudStale:
+		return 3
+	case nudDelay:
+		return 2
+	case nudProbe:
 		return 1
 	}
 	return 0
@@ -200,16 +200,31 @@ func (t *Table) Apply(e neigh.Entry, now time.Time) bool {
 		if mac == "" || ip == "" {
 			return false
 		}
-		return t.applyOnlineLocked(mac, ip, e.State, now, now.Add(-e.ConfirmedAgo))
+		seen := t.candidateSeenTimeLocked(mac, ip, e, now)
+		return t.applyOnlineLocked(mac, ip, e.State, now, seen)
 	}
-	// 下线路径: 只有 FAILED(网关去找它, 没人应答)才算。
+	// 下线路径: FAILED(网关去找它, 没人应答)移除候选并按需下线/切 IP。
 	if e.State&nudFailed != 0 {
 		return t.failIPLocked(mac, ip)
 	}
-	// 表项被回收(GC / 网卡清空)但不是 FAILED: 这条候选没了 —— 设备不下线、不改 IP
-	// (对齐 hotspotd), 只是以后重挑 IP 时不再挑一条内核里已经没有的表项。
-	if e.Deleted && mac != "" && ip != "" {
-		delete(t.cands[mac], ip)
+	// 表项被回收(RTM_DELNEIGH, 内核常不带 NDA_LLADDR 即 mac==""): 按 IP 清理所有候选并重挑主 IP。
+	if e.Deleted && ip != "" {
+		changed := false
+		for m, cs := range t.cands {
+			if mac != "" && m != mac {
+				continue
+			}
+			if _, ok := cs[ip]; ok {
+				delete(cs, ip)
+				if d := t.devs[m]; d != nil && len(cs) > 0 {
+					if best := pickIP(cs); best != "" && best != d.IP {
+						d.IP = best
+						changed = true
+					}
+				}
+			}
+		}
+		return changed
 	}
 	return false
 }
@@ -258,6 +273,27 @@ func (t *Table) failIPLocked(mac, ip string) bool {
 // applyOnlineLocked 上线或更新(调用方持锁)。seen = 内核最近一次确认该表项的时刻。
 // v5.31 审查修复: 原来一律记成 now —— 全量扫(起写者 / 30 秒兜底)时新旧两条 STALE 表项
 // 「同状态同时刻」, 挑哪个 IP 看 map 遍历顺序, 换过 IP 的设备随机报旧 IP。
+// candidateSeenTimeLocked 解决免费 ARP 新表项 ndm_confirmed=-60s 惩罚与旧表项 DELAY/PROBE 时钟抖动反超问题:
+// 1. 新建 NUD_STALE 表项(如设备换 IP 发的免费 ARP): 内核 neigh_alloc 把 confirmed 设在 60 秒前, 改用 UpdatedAgo 还原真实到包时刻;
+// 2. 已存在表项进入 STALE/DELAY/PROBE(老化或网关单向探测, 无对端应答): 严格冻结已有 lastEvent, 绝不因通道调度延迟推进时间戳。
+func (t *Table) candidateSeenTimeLocked(mac, ip string, e neigh.Entry, now time.Time) time.Time {
+	prev, exists := t.cands[mac][ip]
+	if e.State&nudReachable != 0 {
+		seen := now.Add(-e.ConfirmedAgo)
+		if exists && seen.Sub(prev.lastEvent) > 0 && seen.Sub(prev.lastEvent) < 250*time.Millisecond && prev.state&nudReachable != 0 {
+			return prev.lastEvent
+		}
+		return seen
+	}
+	if !exists {
+		if e.State&nudStale != 0 && e.HasCacheInfo {
+			return now.Add(-e.UpdatedAgo)
+		}
+		return now.Add(-e.ConfirmedAgo)
+	}
+	return prev.lastEvent
+}
+
 func (t *Table) applyOnlineLocked(mac, ip string, state uint16, now, seen time.Time) bool {
 	nowUnix := now.Unix()
 	cs := t.cands[mac]
@@ -349,7 +385,8 @@ func (t *Table) FullSync(es []neigh.Entry, now time.Time) bool {
 		if c, ok := t.cands[mac][ip]; ok && c.state == e.State {
 			continue // 已知且未变: 静默 STALE 不刷 last_seen
 		}
-		if t.applyOnlineLocked(mac, ip, e.State, now, now.Add(-e.ConfirmedAgo)) {
+		seen := t.candidateSeenTimeLocked(mac, ip, e, now)
+		if t.applyOnlineLocked(mac, ip, e.State, now, seen) {
 			changed = true
 		}
 	}

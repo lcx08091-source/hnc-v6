@@ -585,8 +585,16 @@ func readObserved(hncDir string) (map[string]limitRule, int, bool) {
 	}
 	// v5.19: 结算日与「本月流量」共用一处设置(data/phone_usage_config.json);
 	// 旧版 rules.json 顶层 billing_day 仅作兜底
-	bd := puLoadConfig(hncDir).BillingDay
-	if bd < 1 || bd > 28 {
+	bd := 0
+	if raw, err := os.ReadFile(puConfigPath(hncDir)); err == nil {
+		var cfg struct {
+			BillingDay int `json:"billing_day"`
+		}
+		if json.Unmarshal(raw, &cfg) == nil && cfg.BillingDay >= 1 && cfg.BillingDay <= 31 {
+			bd = cfg.BillingDay
+		}
+	}
+	if bd == 0 {
 		bd = int(numOf(root["billing_day"]))
 	}
 	if bd < 1 || bd > 31 {
@@ -906,7 +914,15 @@ func (c *limitCtl) reconcile(mac string, s *ctlDevState, desired limitRule, onli
 	}
 	var err error
 	if target != cur {
+		// 预写目标状态防 apply 改写 rules.json 后进程崩溃把临时限速误认作手动 Base
+		prevObs := s.LastObserved
+		s.LastObserved = target
+		c.dirty = true
+		c.saveStateLocked(time.Now(), true)
 		err = c.apply(mac, cur, target)
+		if err != nil {
+			s.LastObserved = prevObs
+		}
 	}
 	if o, _, ok := readObserved(c.hncDir); ok {
 		s.LastObserved = o[mac]
@@ -914,6 +930,7 @@ func (c *limitCtl) reconcile(mac string, s *ctlDevState, desired limitRule, onli
 		s.LastObserved = target
 	}
 	c.dirty = true
+	c.saveStateLocked(time.Now(), true)
 	switch {
 	case err != nil:
 		s.LastErr = err.Error()

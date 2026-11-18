@@ -167,7 +167,12 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/changelog.html", s.serveChangelog)
 	// v5.9.9: json-health.html 此前没有路由(死页面), 补上, 与 changelog 同款只读 serve。
 	// (ndpi-lab.html / classic.html 已随 nDPI 实验与旧版界面一并删除)
+	mux.HandleFunc("/index.html", func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "/", http.StatusFound)
+	})
 	mux.HandleFunc("/json-health.html", s.serveWebrootPage("json-health.html"))
+	mux.HandleFunc("/api/json_health", s.apiJSONHealth)
+	mux.HandleFunc("/api/dpi_distill", s.requireMutation(s.apiDPIDistill))
 	// v5.11: 新 WebUI 的底栏折射库(Hyalite, MIT)
 	mux.HandleFunc("/hyalite.js", s.serveWebrootPage("hyalite.js"))
 	// v5.19: 全新界面 HNC Glass 预览(示例数据)
@@ -183,6 +188,7 @@ func (s *server) handler() http.Handler {
 
 	// v5.5: self-capture (own phone's traffic attribution by uid → pkg)
 	mux.HandleFunc("/api/self", s.apiSelf)
+	mux.HandleFunc("/api/self/studio", s.apiSelfStudio) // v5.35.0: 本机真值自训练工作台全景状态
 	// v5.8.2 (audit P2-2): state-changing endpoints go through requireMutation
 	// (POST + application/json + X-HNC-CSRF + body cap), same guard /api/action
 	// uses. These previously decoded raw bodies with no CSRF/content-type/size
@@ -346,8 +352,11 @@ func (s *server) apiWhoami(w http.ResponseWriter, r *http.Request) {
 	}
 	tid, _ := r.Context().Value(ctxKeyTokenID).(string)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":            true,
+		"authenticated": true,
 		"token_id":      TokenIDLogPrefix(tid), // 日志前缀形态(前 8 字符), 不回完整 ID
 		"session_label": tok.Label,
+		"label":         tok.Label,
 		"ip_hint":       tok.IPHint,
 		"created":       tok.Created,
 		"last_seen":     tok.LastSeen,
@@ -1375,4 +1384,55 @@ func (s *server) pruneLoop(stop <-chan struct{}) {
 			doPrune("daily")
 		}
 	}
+}
+
+
+// apiJSONHealth v5.36.0: 为远程浏览器访问 /json-health.html 提供只读 HTTP 诊断摘要
+func (s *server) apiJSONHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"ok": false, "error": "GET only"})
+		return
+	}
+	rc, out := runBin(s.hncDir, "json_health_panel.sh")
+	trimmed := strings.TrimSpace(out)
+	if idx := strings.Index(trimmed, "{"); idx >= 0 {
+		var payload map[string]interface{}
+		if json.Unmarshal([]byte(trimmed[idx:]), &payload) == nil {
+			writeJSON(w, http.StatusOK, payload)
+			return
+		}
+	}
+	files := map[string]string{}
+	overall := "ok"
+	for _, name := range []string{"rules.json", "device_names.json", "templates.json", "remote_tokens.json", "devices.json"} {
+		b, err := os.ReadFile(filepath.Join(s.hncDir, "data", name))
+		if err != nil {
+			files[name] = "missing"
+			if name == "rules.json" {
+				overall = "warn"
+			}
+			continue
+		}
+		var tmp interface{}
+		if json.Unmarshal(b, &tmp) == nil {
+			files[name] = "ok"
+		} else {
+			files[name] = "bad"
+			overall = "fail"
+		}
+	}
+	_, hasTC := os.Stat(filepath.Join(s.hncDir, "run", "tc_state.json"))
+	_, hasCap := os.Stat(filepath.Join(s.hncDir, "run", "capabilities.json"))
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"ok":                  true,
+		"timestamp":           time.Now().Unix(),
+		"overall":             overall,
+		"json_doctor_rc":      strconv.Itoa(rc),
+		"json_doctor_message": trimmed,
+		"files":               files,
+		"backup_count":        0,
+		"latest_backup":       "",
+		"has_tc_state":        hasTC == nil,
+		"has_capabilities":    hasCap == nil,
+	})
 }

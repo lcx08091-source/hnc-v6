@@ -156,7 +156,7 @@ function statsHealthHtml() {
     ['分流兜底', r.offload_guard_active ? '生效中' : (r.offload_guard_mode || '—')],
     ['系统统计对账', r.netstats_mode === 'off' ? '已关闭' : calS + (r.hnc_vs_netstats_pct != null ? ' · ' + calFmtPct(r.hnc_vs_netstats_pct) : '')]
   ];
-  var body = (is.length ? '<div class="sc-items">' + is.map(function (x) { var st = SH_LV[x.level] || 'info'; return '<div class="sc-it ' + st + '" data-shid="' + esc(x.id || '') + '"><span class="sc-i">' + SC_ST[st][0] + '</span><div style="min-width:0"><div class="s" style="margin:0;color:var(--text-2);font-size:13px">' + esc(x.text_cn || x.id) + '</div></div></div>'; }).join('') + '</div>' : '<div class="note">没有发现问题 ✓</div>') +
+  var body = (is.length ? '<div class="sc-items">' + is.map(function (x) { var st = SH_LV[x.level] || 'info'; return '<div class="sc-it ' + st + '" data-shid="' + esc(x.id || '') + '"><span class="sc-i">' + SC_ST[st][0] + '</span><div style="min-width:0"><div class="s" style="margin:0;color:var(--text-2);font-size:13px">' + esc(x.text_cn || x.id) + '</div></div></div>'; }).join('') + '</div>' : '<div class="note">' + uiSvg('check') + ' 没有发现问题</div>') +
     '<dl class="kv sh-kv">' + rows.map(function (x) { return '<dt>' + x[0] + '</dt><dd>' + esc(x[1]) + '</dd>'; }).join('') + '</dl>' +
     '<div class="note" style="margin-top:6px">精确模式 = conntrack 连接销毁事件 + 字节计数都在线，按应用流量不漏短连接。' + (r.checked_at ? ' · ' + ago(r.checked_at) + '检测' : '') + '</div>';
   var sub = (r.precise_mode ? '精确模式' : '轮询模式') + (gap != null && gap >= 10 ? ' · 分流漏计 ≈ ' + Math.round(gap) + '%' : '') + ' · ' + (lv === 'ok' ? '各统计口径正常' : [nE ? nE + ' 个错误' : '', nW ? nW + ' 个警告' : ''].filter(Boolean).join(' · '));
@@ -180,12 +180,12 @@ function loadSettingsData() {
     loadCaps(),
     loadSelfcheck(),
     loadAppLimits(),
-    loadMacMerge(), loadEncdns(), loadStatsHealth()   // v5.21
+    loadMacMerge(), loadEncdns(), loadStatsHealth(), loadWhoami()   // v5.21
   ]);
 }
 /* 模拟环境(调试) */
 S.sim = null;
-var SIM_T = { tv: ['电视', '📺'], phone: ['手机', '📱'], laptop: ['笔记本', '💻'], tablet: ['平板', '📲'], game: ['游戏机', '🎮'], iot: ['智能设备', '💡'], pc: ['电脑', '🖥️'] };
+var SIM_T = { tv: ['电视', devSvg('tv', 'mini')], phone: ['手机', devSvg('phone', 'mini')], laptop: ['笔记本', devSvg('pc', 'mini')], tablet: ['平板', devSvg('tablet', 'mini')], game: ['游戏机', devSvg('console', 'mini')], iot: ['智能设备', devSvg('iot', 'mini')], pc: ['电脑', devSvg('pc', 'mini')] };
 var SIM_P = { home: ['家庭', '晚上一家人：电视追剧 + 几台手机'], busy: ['繁忙', '下载 / 4K / 直播 / 会议，含限速和拉黑'], idle: ['空闲', '只有心跳流量，一台离线'] };
 function loadSim() { return api.getSafe('/api/sim', null, null).then(function (r) { S.sim = r && (r.ok !== false) && Array.isArray(r.devices) ? r : null; if (S.sim) S.cfg.sim_enabled = S.sim.enabled === true; }); }
 function simGroupHtml() {
@@ -194,8 +194,8 @@ function simGroupHtml() {
   var devs = sm.devices || [], mx = num(sm.max, 32), presets = Array.isArray(sm.presets) && sm.presets.length ? sm.presets : ['home', 'busy', 'idle'];
   presets = ['home', 'busy', 'idle'].filter(function (x) { return presets.indexOf(x) >= 0; }).concat(presets.filter(function (x) { return !SIM_P[x]; }));
   var list = devs.length ? devs.map(function (x) {
-    var t = SIM_T[x.type] || ['设备', '📶'], rx = bps(x.online === false ? 0 : num(x.cur_rx_bps, x.rx_bps)), tx = bps(x.online === false ? 0 : num(x.cur_tx_bps, x.tx_bps));
-    return '<div class="simdev"><span style="font-size:20px;width:28px;text-align:center;flex:none">' + t[1] + '</span><span class="tx"><div class="t">' + esc(x.name || x.hostname || x.mac) + '</div><div class="s">' + t[0] + (x.online === false ? ' · 离线' : ' · ↓ ' + rx.v + ' ' + rx.u + ' ↑ ' + tx.v + ' ' + tx.u) + (x.app_name ? ' · ' + esc(x.app_name) : '') + (x.blocked ? ' · 已拉黑' : '') + '</div></span>' +
+    var t = SIM_T[x.type] || ['设备', devSvg('router', 'mini')], rx = bps(x.online === false ? 0 : num(x.cur_rx_bps, x.rx_bps)), tx = bps(x.online === false ? 0 : num(x.cur_tx_bps, x.tx_bps));
+    return '<div class="simdev"><span class="simdev-ic">' + t[1] + '</span><span class="tx"><div class="t">' + esc(x.name || x.hostname || x.mac) + '</div><div class="s">' + t[0] + (x.online === false ? ' · 离线' : ' · ↓ ' + rx.v + ' ' + rx.u + ' ↑ ' + tx.v + ' ' + tx.u) + (x.app_name ? ' · ' + esc(x.app_name) : '') + (x.blocked ? ' · 已拉黑' : '') + '</div></span>' +
       '<button class="linkish danger" data-sim-del="' + esc(x.mac) + '" data-name="' + esc(x.name || x.mac) + '">删除</button></div>';
   }).join('') + '<button class="btn dan press" data-act="sim-clear">清空全部模拟设备</button>' : '<div class="note">还没有模拟设备 · 点上面的预设一键载入，或手动添加</div>';
   return sItem(['purple', 'flask'], '模拟环境', '用虚构设备和流量演示 / 调试界面；模拟设备的操作只改模拟状态，不碰 tc / iptables', toggle(sm.enabled === true, 'data-set="sim" aria-label="模拟环境"')) +
@@ -208,7 +208,7 @@ function simAddSheet() {
   var types = S.sim && Array.isArray(S.sim.types) && S.sim.types.length ? S.sim.types : Object.keys(SIM_T), pick = 'phone';
   sheet('<h3>添加模拟设备</h3><div class="sub">留空的项会随机生成；速率写成 3m / 512k / 字节数</div>' +
     '<label class="field">名称' + inp('sd-name', '', '', 'maxlength="32" placeholder="模拟-客厅电视" style="font-family:var(--font)"') + '</label>' +
-    '<div class="note" style="margin:10px 0 6px">类型</div><div class="dchips" id="sd-type">' + types.map(function (k) { var t = SIM_T[k] || [k, '📶']; return '<button class="dchip cat' + (k === pick ? ' on' : '') + '" data-sdt="' + esc(k) + '">' + t[1] + ' ' + esc(t[0]) + '</button>'; }).join('') + '</div>' +
+    '<div class="note" style="margin:10px 0 6px">类型</div><div class="dchips" id="sd-type">' + types.map(function (k) { var t = SIM_T[k] || [k, devSvg('router', 'mini')]; return '<button class="dchip cat' + (k === pick ? ' on' : '') + '" data-sdt="' + esc(k) + '">' + t[1] + ' ' + esc(t[0]) + '</button>'; }).join('') + '</div>' +
     '<div class="grid2" style="margin-top:12px"><label class="field">下行速率' + inp('sd-rx', '', 'B/s', 'maxlength="16" placeholder="3m" autocapitalize="off"') + '</label><label class="field">上行速率' + inp('sd-tx', '', 'B/s', 'maxlength="16" placeholder="200k" autocapitalize="off"') + '</label></div>' +
     '<label class="field" style="margin-top:10px">应用（规则库 id）' + inp('sd-app', '', '', 'maxlength="32" placeholder="douyin / bilibili / wechat，留空随机" autocapitalize="off" style="font-family:var(--mono)"') + '</label>' +
     '<div class="btns" style="margin-top:14px"><button class="btn sec press" data-close>取消</button><button class="btn pri press" id="sd-ok">添加</button></div>');
@@ -312,10 +312,12 @@ function renderSettings(anim1) {
   groups.push(['刷新与功耗', sFold('rmode', ['green', 'refresh'], '设备页刷新模式', '实时更跟手；省电会降低前台轮询频率', seg('rmode', [['realtime', '实时'], ['balanced', '均衡'], ['powersave', '省电']], S.refreshMode), val({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode])) +
     sItem(['gray', 'info'], '数据新鲜度', '/api/live 最近一次成功返回', val(age == null ? '—' : age <= 2 ? '刚刚' : age + ' 秒前', age != null && age <= 8 ? 'ok' : 'warn'), ' id="fresh-row"') +
     sItem(['gray', 'cpu'], '控制面指标', m.instrumented === false ? '实时读取（未开启埋点）' : 'snapshot ' + (m.snapshot_age_ms != null ? m.snapshot_age_ms + 'ms' : '—') + ' · cache ' + num(m.json_cache_hits) + '/' + num(m.json_cache_misses) + ' · shell 兜底 ' + num(m.shell_fallback_count), val(S.metrics ? '正常' : '—', S.metrics ? 'ok' : '')) +
+    powerFold() +
     sFold('caps', ['gray', 'flask'], '兼容性能力', 'tc / IFB / netem / 队列 / 启动器', '<dl class="kv">' + Object.keys(S.caps || {}).filter(function (k) { var v = S.caps[k]; return v !== null && typeof v !== 'object'; }).sort().map(function (k) { var v = S.caps[k]; return '<dt>' + esc(k) + '</dt><dd style="color:' + (v === true ? 'var(--badge-ok)' : v === false ? 'var(--badge-red)' : 'inherit') + '">' + esc(String(v)) + '</dd>'; }).join('') + '</dl>', val(capsSummary()))]);
   var rUrl = remoteUrl(), remOn = c.remote_enabled === true;
   groups.push(['远程访问', (KSU ? sItem(['blue', 'globe'], '启用远程访问服务', '开启后 :8443 监听，热点内其他设备可用浏览器访问（约 1 分钟生效）', toggle(remOn, 'data-set="remote" aria-label="远程访问服务"')) : sItem(['blue', 'globe'], '远程访问服务', '你正在通过远程访问使用 HNC；开关只能在本机 WebUI 里改', val('已开启', 'ok'))) +
     (remOn || !KSU ? '<div class="row">' + gi('gray', 'link') + '<span class="tx"><div class="t">访问地址</div><div class="s mono">' + esc(rUrl || '无法获取本机 IP · 请确认热点已开启') + '</div></span>' + (rUrl ? '<button class="linkish" data-act="url-copy">复制</button><button class="linkish" data-act="url-share">分享</button>' : '') + '</div>' : '') +
+    (KSU ? sItem(['purple', 'lock'], '远程 PIN 配对鉴权', '安全基线常驻保护 · 局域网浏览器首次访问必须验证 6 位配对码', val('强制开启', 'ok')) : '') +
     sBtn(['orange', 'star'], '生成配对码', '远端新设备首次连接用 · 120 秒有效', 'pair-new', '生成') +
     (c.webui_access ? sFold('webacc', ['red', 'shield'], 'WebUI 访问控制', { all: '热点内所有设备都能打开登录页', allowlist: '只有名单里的设备能连接', local_only: '只有本机能打开' }[c.webui_access.mode || 'all'] || '',
       seg('webacc-mode', [['all', '全部'], ['allowlist', '白名单'], ['local_only', '仅本机']], S.webaccMode || c.webui_access.mode || 'all', 'small') +
@@ -341,7 +343,7 @@ function renderSettings(anim1) {
       val(num(c.stale_rule_ttl_days, 30) ? num(c.stale_rule_ttl_days, 30) + ' 天' : '关闭')) +
     sBtn(['orange', 'trash'], '清理缓存', 'hostname_cache · dev_class_cache', 'cache-clear', '清理', 'warn') +
     sBtn(['green', 'down'], '导出规则', '复制 rules.json（限速/延迟/黑名单/模板）', 'rules-json', '导出') +
-    (KSU ? sBtn(['cyan', 'doc'], 'JSON 健康面板', 'rules / devices / tokens 的完整性与备份', 'json-health', '打开') : '') +
+    sBtn(['cyan', 'doc'], 'JSON 健康面板', 'rules / devices / tokens 的完整性与备份', 'json-health', '打开') +
     sBtn(['purple', 'down'], '导出诊断包', '快照、配置、日志尾部和 tc/iptables/ip 状态', 'debug-bundle', '导出')]);
   // 应用识别 —— 强制 QUIC 回落 TCP
   groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会立刻改走 TCP，看得到域名、识别和限速更准；首包可能慢几十毫秒。识别不准时再打开', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
@@ -355,43 +357,114 @@ function renderSettings(anim1) {
   groups.push(['硬件加速兜底', sItem(['orange', 'rocket'], '防止系统热点加速绕过限速', '自动：检测到加速正在转发流量时，才让它退回常规路径，保证限速 / 封锁 / 统计都生效', '') +
     '<div class="row" style="padding-top:0">' + seg('guard-mode', [['auto', '自动'], ['on', '始终'], ['off', '关闭']], gm, 'small') + '</div>' +
     '<div class="row">' + gi(og && og.fallback_active ? 'green' : 'gray', 'layers') + '<span class="tx"><div class="t">当前状态</div><div class="s" id="guard-s">' + esc(ogS) + (og && og.detail && gm !== 'off' ? '<br>' + esc(og.detail) : '') + (og && og.last_check ? ' · ' + ago(og.last_check) + '检测' : '') + '</div></span></div>' +
-    (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? ['clsact', 'bpf_filter', 'map', 'watchdog'].map(function (k) { return k + (cs[k] ? ' ✓' : ' ✗'); }).join(' · ') : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
-  groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', ({ apple: '苹果风', liquid: '液态玻璃' }[S.style] || '默认风格') + ' · 浅色 / 深色 / 跟随系统 · 界面动画',
-    '<div class="note" style="margin-bottom:-2px">界面风格</div><div class="style-pick">' + [['default', '默认', 'linear-gradient(135deg,#E7ECFF,#F3E9FF)', 'linear-gradient(90deg,#007AFF,#5856D6)', 'rgba(255,255,255,.85)'], ['apple', '苹果风', '#F2F2F7', '#007AFF', '#fff'], ['liquid', '液态玻璃', 'radial-gradient(60% 60% at 15% 10%,rgba(80,150,255,.35),transparent),radial-gradient(60% 60% at 90% 90%,rgba(255,120,190,.3),transparent),#FAFBFD', 'linear-gradient(180deg,#2B93FF,#0A74F5)', 'rgba(255,255,255,.6);box-shadow:inset 0 1px 0 #fff,0 2px 6px rgba(30,45,90,.12)']].map(function (t) {
+    (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? ['clsact', 'bpf_filter', 'map', 'watchdog'].map(function (k) { return k + (cs[k] ? ':正常' : ':异常'); }).join(' · ') : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
+  S.open.look = true; groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', ({ cyber: '赛博机能', liquid: '液态玻璃' }[S.style] || '极简默认') + ' · 浅色 / 深色 / 跟随系统 · 界面动画',
+    '<div class="note" style="margin-bottom:-2px">界面风格</div><div class="style-pick">' + [
+      ['default', '极简默认', 'linear-gradient(145deg,#EEF2F8,#F8FAFC)', 'linear-gradient(90deg,#2563EB,#4F46E5)', '#FFFFFF;box-shadow:0 1px 3px rgba(15,23,42,.08)'],
+      ['cyber', '赛博机能', 'radial-gradient(80% 80% at 85% 15%,rgba(94,164,220,.26),transparent),linear-gradient(145deg,#0B1017,#141E2B)', 'linear-gradient(90deg,#4A88C2,#6BAED6)', 'rgba(19,28,40,.92);border:1px solid rgba(126,163,198,.34)'],
+      ['liquid', '液态玻璃', 'radial-gradient(60% 60% at 15% 10%,rgba(80,150,255,.38),transparent),radial-gradient(60% 60% at 90% 90%,rgba(244,114,182,.32),transparent),#EAF2FD', 'linear-gradient(180deg,#2B93FF,#0A74F5)', 'rgba(255,255,255,.65);box-shadow:inset 0 1px 0 #fff,0 2px 6px rgba(30,45,90,.12)']
+    ].map(function (t) {
       return '<button class="press' + (S.style === t[0] ? ' on' : '') + '" data-style-pick="' + t[0] + '"><span class="pv" style="background:' + t[2] + '"><i style="width:46%;background:' + t[3] + '"></i><i style="background:' + t[4] + '"></i><i style="width:80%;background:' + t[4] + '"></i></span>' + t[1] + '</button>'; }).join('') + '</div>' +
     // v5.30 玻璃浓度(只在液态玻璃风格下显示, liquid.css .lg-only): 往右更不透明, 文字更清楚; 拖动时整页实时预览
-    '<div class="lg-only"><div class="note" style="margin-bottom:-2px">玻璃浓度 · <span id="glass-tint-v">' + glassTintLabel(S.glassTint) + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已简化特效，暂不生效）' : '') + '</div>' +
+    '<div class="lg-only">' +
+    '<div class="note" style="margin-bottom:-2px">光学质感模式（支持自定义壁纸实时切换）</div>' +
+    seg('glass-mode', [['liquid', '液态玻璃 · 光学折射'], ['frosted', '经典毛玻璃 · 均匀柔雾']], S.glassMode || 'liquid', 'small') +
+    '<div class="note" style="margin:6px 0 -2px">玻璃浓度 · <span id="glass-tint-v">' + glassTintLabel(S.glassTint) + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
     '<div class="gx-row"><span>清透</span><input type="range" class="gx-range" id="glass-tint" min="0" max="100" step="1" value="' + S.glassTint + '" aria-label="玻璃浓度"><span>着色</span></div></div>' +
-    '<a class="row" href="glass.html" style="padding:10px 0;min-height:0;text-decoration:none;color:inherit">' + gi('blue', 'palette') + '<span class="tx"><div class="t">预览全新界面 HNC Glass</div><div class="s">重新设计的液态玻璃界面 · 示例数据，不影响现在的设置</div></span>' + ico('right', 'chev') + '</a>' +
     '<div class="note" style="margin-bottom:-2px">颜色</div><div class="theme-pick">' + [['auto', '跟随系统', 'linear-gradient(135deg,#F5F5F7 50%,#1c1c1e 50%)'], ['light', '浅色', '#F5F5F7'], ['dark', '深色', '#1c1c1e']].map(function (t) {
       return '<button class="press' + (S.theme === t[0] ? ' on' : '') + '" data-theme-pick="' + t[0] + '"><span class="sw" style="background:' + t[2] + '"></span>' + t[1] + '</button>'; }).join('') + '</div>' +
-    '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">界面动画</div><div class="s">弹簧切页、列表浮现、按压回弹</div></span>' + toggle(S.motion, 'data-set="motion" aria-label="界面动画"') + '</div>' + fxSettingsHtml())]);
+    (typeof wpSettingsHtml === 'function' ? wpSettingsHtml() : '') + '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">界面动画</div><div class="s">弹簧切页、列表浮现、按压回弹</div></span>' + toggle(S.motion, 'data-set="motion" aria-label="界面动画"') + '</div>' + fxSettingsHtml())]);
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
+  var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
   groups.push(['关于', sItem(['blue', 'info'], '版本', 'HNC 后端 · versionCode ' + esc(l.backend_version_code || '—'), val(esc(l.backend_version || '—'))) +
     sBtn(['green', 'doc'], '更新日志', '查看完整变更记录', 'changelog', '查看') +
-    (KSU ? '' : '<button class="row" data-act="logout">' + gi('red', 'lock') + '<span class="tx"><div class="t">退出登录</div><div class="s">清除这台设备的远程访问凭据</div></span><span class="hint-a danger">退出</span></button>')]);
-  // 常用分组直接显示; 不常动的收进「高级」, 排障用的收进「诊断」(折叠状态记在本机)
-  var ADV = ['全局带宽整形', '飞轮排除名单', '刷新与功耗', '硬件加速兜底', '模拟环境（调试）'], DIAG = ['诊断', '运行状态', '运行健康', '维护'];
-  var gHtml = function (g) { return '<div><div class="sec" style="padding-bottom:8px"><span>' + g[0] + '</span></div><div class="glass rows">' + g[1] + '</div></div>'; };
-  var cols = function (list) { if (!wide()) return list.join(''); var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
-  var pick = function (names) { return groups.filter(function (g) { return names.indexOf(g[0]) >= 0; }).map(gHtml); };
-  var about = groups.filter(function (g) { return g[0] === '关于'; }).map(gHtml);
-  var main = groups.filter(function (g) { return g[0] !== '关于' && ADV.indexOf(g[0]) < 0 && DIAG.indexOf(g[0]) < 0; }).map(gHtml);
-  var sgrp = function (key, title, sub, list) {
-    return '<div class="sgrp' + (S.open[key] ? ' open' : '') + '" data-foldkey="' + key + '"><button class="sgrp-h glass press" data-act="fold" data-key="' + key + '"><span class="tx"><b>' + title + '</b><small>' + sub + '</small></span>' + ico('chev', 'chev') + '</button>' +
-      '<div class="fold"><div><div class="fold-in">' + cols(list) + '</div></div></div></div>';
+    (KSU || (S.whoami && S.whoami.authenticated === false) ? '' : '<button class="row" data-act="logout">' + gi('red', 'lock') + '<span class="tx"><div class="t">退出登录' + (wLabel ? '（' + esc(wLabel) + '）' : '') + '</div><div class="s">清除这台设备的远程访问凭据</div></span><span class="hint-a danger">退出</span></button>')]);
+  // 按级别分类 + 全部收拢为可折叠卡片(默认仅展开「热点」或全折叠，一屏清爽浏览)
+  S.setLv = S.setLv || LS.get('hnc6.set_lv', 'all');
+  var gMap = {}; groups.forEach(function (g) { gMap[g[0]] = g[1]; });
+  var mmCnt = S.mm && Array.isArray(S.mm.suggestions) ? S.mm.suggestions.length : 0;
+  var scard = function (key, ic, title, sub, badgeHtml, rowsHtml) {
+    var isOpen = !!S.open[key];
+    return '<div class="sgrp scard glass' + (isOpen ? ' open' : '') + '" data-foldkey="' + key + '" data-ic-color="' + ic[0] + '">' +
+      '<button class="sgrp-h scard-h press" data-act="fold" data-key="' + key + '">' +
+      gi(ic[0], ic[1]) +
+      '<span class="tx"><b>' + title + '</b><small>' + sub + '</small></span>' +
+      (badgeHtml || '') + ico('chev', 'chev') + '</button>' +
+      '<div class="fold"><div><div class="fold-in"><div class="rows scard-rows">' + rowsHtml + '</div></div></div></div></div>';
   };
-  var diagSub = (scR ? '自检：' + scSumTxt(scR.summary) + ' · ' : '') + '日志 · 运行状态 · 维护';
-  var h = '<div class="wrap">' + cols(main) +
-    sgrp('grp-adv', '高级', '整形 · 排除名单 · 刷新 · 加速兜底 · 模拟环境', pick(ADV)) +
-    sgrp('grp-diag', '诊断', esc(diagSub), pick(DIAG)) + about.join('') +
+  var basicCards = [
+    scard('scard-hs', ['blue', 'wifi'], '热点与接口设置',
+      '接口 ' + esc(S.hotspot.iface || 'wlan2') + ' · ' + (hsAuto ? '开机自启已开' : '手动开启') + ' · 定时与接口偏好',
+      '<span class="badge ' + (S.hotspot.active === false ? 'b-gray' : 'b-ok') + '">' + (S.hotspot.active === false ? '未开启' : '运行中') + '</span>',
+      gMap['热点'] || ''),
+    scard('scard-rem', ['indigo', 'globe'], '远程访问与设备授权',
+      (remOn ? esc(rUrl || ':8443 监听中') : '远程管理已关闭') + ' · 配对码 · 访问白名单',
+      '<span class="badge ' + (remOn ? 'b-ok' : 'b-gray') + '">' + (remOn ? '已开启' : '已关闭') + '</span>',
+      gMap['远程访问'] || ''),
+    scard('scard-look', ['purple', 'palette'], '外观、主题与动效',
+      ({ cyber: '赛博机能', liquid: '液态玻璃' }[S.style] || '极简默认') + ' · ' + ({ auto: '跟随系统', light: '浅色', dark: '深色' }[S.theme] || '浅色') + ' · 自定义壁纸与玻璃折射',
+      '<span class="badge b-acc">' + ({ cyber: '赛博机能', liquid: '液态玻璃' }[S.style] || '极简默认') + '</span>',
+      gMap['外观'] || ''),
+    scard('scard-alert', ['orange', 'bolt'], '告警与配额提醒',
+      '新设备接入提醒 · 月度流量配额 · 异常流量检测',
+      '<span class="badge ' + (ac.enabled !== false ? 'b-ok' : 'b-gray') + '">' + (ac.enabled !== false ? '已开启' : '已关闭') + '</span>',
+      gMap['告警'] || '')
+  ];
+  var advCards = [
+    scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
+      'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
+      '<span class="badge b-pur">DPI 识别</span>',
+      gMap['应用识别'] || ''),
+    scard('scard-qos', ['cyan', 'layers'], '全局带宽整形与队列',
+      (gsOn ? '下行 ' + (rateToMbps(c.global_shaper_down) || '∞') + ' Mbps' : '未启用全局限速') + ' · 默认队列 AQM（' + sqmLabel() + '）',
+      '<span class="badge ' + (gsOn ? 'b-ok' : 'b-gray') + '">' + (gsOn ? '已启用' : '按设备') + '</span>',
+      gMap['全局带宽整形'] || ''),
+    scard('scard-guard', ['orange', 'rocket'], '硬件加速兜底',
+      esc(ogS),
+      '<span class="badge ' + (gm === 'off' ? 'b-gray' : 'b-ok') + '">' + ({ auto: '自动兜底', on: '始终开启', off: '已关闭' }[gm] || '自动') + '</span>',
+      gMap['硬件加速兜底'] || ''),
+    scard('scard-devm', ['green', 'merge'], '设备合并与排除名单',
+      '随机 MAC 换地址合并 · 飞轮 VPN 排除（' + fx.length + ' 个）',
+      mmCnt ? '<span class="badge b-warn">' + mmCnt + ' 条建议</span>' : '<span class="badge b-gray">正常</span>',
+      (gMap['设备'] || '') + (gMap['飞轮排除名单'] || ''))
+  ];
+  var diagCards = [
+    scard('scard-diag', [scW === 'fail' ? 'red' : scW === 'warn' ? 'orange' : 'green', 'check'], '自检报告与运行日志',
+      (scR ? '自检 ' + scSumTxt(scR.summary) : '一键兼容性自检') + ' · 14 类系统与守护日志',
+      scR ? '<span class="badge ' + (scW === 'fail' ? 'b-red' : scW === 'warn' ? 'b-warn' : 'b-ok') + '">' + esc(scSumTxt(scR.summary)) + '</span>' : '<span class="badge b-gray">可自检</span>',
+      gMap['诊断'] || ''),
+    scard('scard-stat', ['blue', 'heart'], '运行状态与统计健康',
+      '守护进程 · tc ' + num(rs.tc_rules) + ' 条 / iptables ' + num(rs.ipt_rules) + ' 条 · 流量对账与 SLA',
+      '<span class="badge ' + (rs.hotspotd === 'up' ? 'b-ok' : 'b-gray') + '">' + (rs.hotspotd === 'up' ? '运行正常' : '状态') + '</span>',
+      (gMap['运行状态'] || '') + (gMap['运行健康'] || '')),
+    scard('scard-maint', ['orange', 'tool'], '维护、备份与轮询功耗',
+      '刷新模式（' + ({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode]) + '）· 服务重启 · 导出规则与诊断包',
+      '<span class="badge b-acc">' + ({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode]) + '</span>',
+      (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
+    scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
+      '调试模拟设备 · 后端版本 ' + esc(l.backend_version || '—') + ' · 完整更新日志',
+      '<span class="badge b-gray">' + esc(l.backend_version || 'v5.36.0') + '</span>',
+      (gMap['模拟环境（调试）'] || '') + (gMap['关于'] || ''))
+  ];
+  var cols = function (list) { if (!wide()) return '<div class="scard-stack">' + list.join('') + '</div>'; var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
+  var lvSec = function (id, title, sub, cards) {
+    var hide = S.setLv !== 'all' && S.setLv !== id ? ' hidden' : '';
+    return '<div class="set-lv-sec" data-lv-sec="' + id + '"' + hide + '>' +
+      '<div class="sec set-lv-hd"><span>' + title + ' <small>' + sub + '</small></span><span class="r">' + cards.length + ' 项</span></div>' +
+      cols(cards) + '</div>';
+  };
+  var anyOpen = ['scard-hs','scard-rem','scard-look','scard-alert','scard-dpi','scard-qos','scard-guard','scard-devm','scard-diag','scard-stat','scard-maint','scard-about'].some(function (k) { return S.open[k]; });
+  var h = '<div class="wrap">' +
+    '<div class="set-top-bar">' + seg('set-lv', [['all', '全部 (12)'], ['basic', '常用 (4)'], ['adv', '进阶 (4)'], ['diag', '诊断 (4)']], S.setLv) +
+    '<div class="set-top-meta"><span class="note">按级别分类折叠 · 点卡片展开对应设置</span><button class="linkish" data-act="set-fold-toggle">' + (anyOpen ? '全部收起' : '展开常用') + '</button></div></div>' +
+    lvSec('basic', '一、基础常用', '热点 · 远程 · 外观 · 告警', basicCards) +
+    lvSec('adv', '二、进阶与识别', 'DPI 识别 · 带宽队列 · 加速兜底 · 设备合并', advCards) +
+    lvSec('diag', '三、诊断与系统', '自检日志 · 运行健康 · 维护备份 · 模拟与关于', diagCards) +
     '<div class="foot">HNC · Hotspot Network Control' + (l.backend_version ? ' · ' + esc(l.backend_version) : '') + '</div></div>';
-  // 操作后的重绘就地 morph: 滚动位置、展开的分组、正在填的输入框都不动, 只改变化了的行
   var p = $('#p-settings');
   if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h;
   placeSegs(p);
-  if (anim1) { if (wide()) $$('.cols>div', p).forEach(function (x) { stagger(x); }); else stagger($('.wrap', p)); }
   if (S.open.logs) loadLog();
   if (S.open.tokens) loadTokens();
   if (S.open.dnst) { if (S.dns) paintDNS(); else loadDNS(); }
@@ -401,7 +474,24 @@ function renderSettings(anim1) {
   if (S.open.rpack) { if (S.rpack) paintRulepack(); else loadRulepack(); }
 }
 /* ── DPI v2: DNS 接管(可选, 默认关) ── */
-S.dns = null; S.fpl = null;
+S.dns = null; S.fpl = null; S.power = null; S.whoami = null;
+function loadWhoami() { return KSU ? Promise.resolve() : api.getSafe('/api/whoami', null, null).then(function (r) { S.whoami = r; }); }
+function loadPower(ref) { return api.getSafe('/api/power', ref ? { refresh: '1' } : null, null).then(function (r) { S.power = r; paintPower(); }); }
+function powerFold() {
+  var p = S.power, tot = p && p.total ? p.total : null;
+  var sub = tot ? ('合计 CPU ' + num(tot.cpu_pct_5m).toFixed(2) + '% · 唤醒 ' + Math.round(num(tot.wakeups_per_min)) + ' 次/分') : '5 大守护进程 CPU% / 唤醒频率 / 内存自测';
+  return sFold('pwr', ['orange', 'cpu'], '守护进程功耗自测', '<span id="pwr-sum">' + esc(sub) + '</span>', '<div id="pwr-body"><div class="note">展开后加载 /api/power 实时采样</div></div>');
+}
+function paintPower() {
+  var el = $('#pwr-body'), p = S.power; if (!el || !p) return;
+  var sm = $('#pwr-sum'); if (sm && p.total) sm.textContent = '合计 CPU ' + num(p.total.cpu_pct_5m).toFixed(2) + '% · 唤醒 ' + Math.round(num(p.total.wakeups_per_min)) + ' 次/分';
+  var ps = Array.isArray(p.processes) ? p.processes : [];
+  var rows = ps.map(function (x) {
+    return '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">' + esc(x.label || x.name) + '</div><div class="s mono">pid ' + (x.pid || '—') + ' · RSS ' + Math.round(num(x.rss_kb) / 1024) + ' MB · 唤醒 ' + Math.round(num(x.wakeups_per_min)) + '/min</div></span>' + val(num(x.cpu_pct_5m).toFixed(2) + '%', num(x.cpu_pct_5m) > 3 ? 'warn' : 'ok') + '</div>';
+  }).join('');
+  var tips = Array.isArray(p.tips) && p.tips.length ? '<div class="note">' + p.tips.map(esc).join('<br>') + '</div>' : '';
+  el.innerHTML = (rows || '<div class="note">暂无采样样本（每 5 分钟自动采样一次）</div>') + tips + '<button class="btn sec wide press" style="margin-top:8px" data-act="pwr-refresh">立即刷新采样</button>';
+}
 function dnsSumTxt() {
   var r = S.dns; if (!r) return '默认关闭 · 让 HNC 代答热点设备的 DNS，识别更早、封锁更彻底';
   if (!r.enabled) return '未开启 · 让 HNC 代答热点设备的 DNS，识别更早、封锁更彻底';
@@ -432,7 +522,8 @@ function paintDNS() {
     if (td.length) h += '<div class="note">今天查询最多：' + td.map(function (x) { return esc(x.name) + ' ×' + num(x.count); }).join('、') + '</div>';
   }
   h += '<div class="note" style="margin:8px 0 -2px">被封锁的域名怎么回</div>' + seg('dns-bm', [['nxdomain', '域名不存在'], ['zero', '返回 0.0.0.0']], r.block_mode || 'nxdomain', 'small') +
-    '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">记录查询日志</div><div class="s">记下每台设备查了哪些域名（只存本机，约 1000 条滚动）</div></span>' + toggle(!!r.log_queries, 'data-set="dnslog" aria-label="记录查询日志"') + '</div>' +
+    '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">记录查询日志</div><div class="s">记下每台设备查了哪些域名（只存本机，约 2000 条滚动）</div></span>' + toggle(!!r.log_queries, 'data-set="dnslog" aria-label="记录查询日志"') + '</div>' +
+    (r.log_queries ? '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">日志隐私脱敏</div><div class="s">开启后只记主域名、不记录完整子域与解析应答 IP</div></span>' + toggle(!!r.log_redact, 'data-set="dnsredact" aria-label="日志隐私脱敏"') + '</div><button class="btn sec wide press" style="margin:6px 0" data-act="dns-log-open">查看最近 DNS 查询明细</button>' : '') +
     '<div class="note">好处：设备一查域名 HNC 就知道它要用哪个应用，比等到 TLS 握手更早；按域名封锁在解析这一步就拦住。<br>风险：HNC 自己的 DNS 出问题时会在约 10 秒内自动放行直连（不会断网，但这段时间解析可能变慢）；设备自己开了加密 DNS（DoH / DoT / 私人 DNS）时接管不到；开启查询日志会留下访问记录。只对热点设备生效，不影响本机。</div>';
   el.innerHTML = h; placeSegs(el);
 }
@@ -475,15 +566,27 @@ function evalFold() {
   return sFold('deval', ['blue', 'gauge'], '识别自评', '<span id="eval-sum">' + esc(evalSumTxt()) + '</span>',
     '<div id="eval-body"><div class="note">展开后加载</div></div>');
 }
+var evalReqSeq = 0;
 function loadEval(days, refresh) {
-  var d = days || S.evalDays || 1, q = { days: d };
+  var seq = ++evalReqSeq, d = days || S.evalDays || 1, q = { days: d };
   if (refresh) q.refresh = 1;   // 展开 / 切换范围用 10 分钟缓存, 只有「刷新」按钮才强制重算
-  return api.get('/api/dpi_eval', q, { timeout: 12000 }).then(function (r) { S.eval = r; })
-    .catch(function (e) { S.eval = { ok: false, err: errText(e) }; }).then(paintEval);
+  return api.get('/api/dpi_eval', q, { timeout: 12000 }).then(function (r) { if (seq === evalReqSeq) S.eval = r; })
+    .catch(function (e) { if (seq === evalReqSeq) S.eval = { ok: false, err: errText(e) }; }).then(function () { if (seq === evalReqSeq) paintEval(); });
 }
 /* 准确率: 没有可判对错的样本(全是系统应用等无标准答案的)时显示「—」而不是 0% */
 function evalAcc(m) { return m && m.accuracy_na ? '—' : m && m.judged === 0 ? '—' : pct100(m && m.accuracy) + '%'; }
 var EVAL_M = [['rule', '规则库'], ['fp', '指纹'], ['owner', 'IP 归属']];
+
+function lanSelfConsistencyHtml(r) {
+  var lc = r && r.lan_self_consistency;
+  if (!lc) return '';
+  var okParity = lc.he_v4v6_parity == null || lc.he_v4v6_parity >= 0.9;
+  var escCnt = num(lc.active_escape_alerts);
+  return '<div class="dbox" style="margin:8px 0"><div class="note" style="margin:0 0 6px;font-weight:600;color:var(--text-1)">热点外部客户端无真值双栈自检（无需开启本机抓包）</div>' +
+    '<div class="row2"><span class="k">DNS ↔ 握手跨模态冲突率（已豁免 ECH）</span><span class="v num">' + (lc.cm_conflict_rate != null ? (lc.cm_conflict_rate * 100).toFixed(1) + '%' : '0.0%') + '</span></div>' +
+    '<div class="row2"><span class="k">Happy Eyeballs IPv4/IPv6 同源一致率</span><span class="v num" style="color:' + (okParity ? 'var(--badge-ok)' : 'var(--badge-warn)') + '">' + (lc.he_v4v6_parity != null ? (lc.he_v4v6_parity * 100).toFixed(1) + '%' : '100%') + '</span></div>' +
+    '<div class="row2"><span class="k">实时 IPv6 应用限速逃逸告警</span><span class="v num" style="color:' + (escCnt > 0 ? 'var(--badge-red)' : 'var(--badge-ok)') + '">' + (escCnt > 0 ? escCnt + ' 台异常' : '0 逃逸（双栈闭合）') + '</span></div></div>';
+}
 function paintEval() {
   var el = $('#eval-body'), r = S.eval; if (!el || !r) return;
   el.setAttribute('data-keep', '');
@@ -493,11 +596,11 @@ function paintEval() {
     el.innerHTML = '<div class="note">「识别自评」要用这台手机自己的流量当标准答案：HNC 一边看它连了哪些网站，一边记下每个连接是哪个 App 发的（靠系统给的 UID → 包名），再回头对比 HNC 自己认得准不准。</div>' +
       '<div class="note warn">现在本机流量归因没开，所以没有样本。</div>' +
       '<div class="btns"><button class="btn pri press" data-act="eval-enable">去开启</button></div>' +
-      '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。</div>';
+      '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。</div>' + lanSelfConsistencyHtml(r);
     return;
   }
   var m = r.methods || {}, comb = m.combined || {};
-  var h = '<div class="note" style="margin-bottom:-2px">时间范围</div>' + seg('eval-days', [[1, '24 小时'], [7, '7 天']], r.days || S.evalDays, 'small');
+  var h = lanSelfConsistencyHtml(r) + '<div class="note" style="margin-bottom:-2px">本机真值评估时间范围</div>' + seg('eval-days', [[1, '24 小时'], [7, '7 天']], r.days || S.evalDays, 'small');
   if (!num(r.samples)) {
     h += '<div class="note">还没有样本。正常用手机（刷视频、聊微信）十来分钟，回来点刷新就有了。</div>' + evalFootHtml();
     el.innerHTML = h; placeSegs(el); return;
@@ -693,9 +796,13 @@ function toggleStartupList() {
     .then(function () { var e2 = $('#startup-list'); if (e2 && S.startupOpen) e2.innerHTML = startupListHtml(); });
 }
 function evalFootHtml() {
-  return '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。</div>' +
-    '<div class="btns"><button class="btn sec press" data-act="eval-refresh">刷新</button>' +
-    '<button class="btn sec danger press" data-act="eval-clear">清除样本</button></div>';
+  return '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。采够样本后可点「立即蒸馏」把本机真值秒级转化为热点指纹与流分类模型。</div>' +
+    '<div class="btns" style="flex-wrap:wrap">' +
+      '<button class="btn pri press" data-act="dpi-distill-now">立即蒸馏训练</button>' +
+      '<button class="btn sec press" data-act="go-self-studio">自训工作台</button>' +
+      '<button class="btn sec press" data-act="eval-refresh">刷新</button>' +
+      '<button class="btn sec danger press" data-act="eval-clear">清除样本</button>' +
+    '</div>';
 }
 function loadLog() {
   var el = $('#logv'); if (!el) return;
@@ -739,16 +846,17 @@ function pairNew() {
 var FXP_T = { off: '关闭', calm: '克制', std: '标准', lively: '灵动', custom: '自定义' };
 function fxSettingsHtml() {
   var pre = fxPreset();
-  return '<div class="note" style="margin:8px 0 -2px">动画效果 · ' + FXP_T[pre] + (apple() ? '' : '（标注「苹果风」的效果在苹果风 / 液态玻璃下才有）') + '</div>' +
-    seg('fxp', [['off', '关闭'], ['calm', '克制'], ['std', '标准'], ['lively', '灵动']], pre, 'small') +
-    FX_LIST.map(function (x) {
+  var details = FX_LIST.map(function (x) {
       var dis = !S.motion && x[0] !== 'title' && x[0] !== 'haptic';
       return '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">' + x[1] + '</div><div class="s">' + x[2] + '</div></span>' + toggle(FX[x[0]], 'data-set="fx-' + x[0] + '" aria-label="' + x[1] + '"' + (dis ? ' disabled' : '')) + '</div>';
     }).join('') +
-    '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">弹簧手感</div><div class="s">轻快：stiffness 300 / damping 30 · 有弹性：200 / 20</div></span>' + seg('fxspring', [['light', '轻快'], ['bouncy', '有弹性']], FX.spring, 'small') + '</div>' +
-    '<div class="note" style="margin:6px 0 -2px">试一下</div><div class="chips">' + [['sheet', '弹层'], ['page', '切页'], ['list', '列表浮现'], ['num', '数字滚动']].map(function (b) { return '<button class="chip press" data-act="fx-demo" data-demo="' + b[0] + '">' + b[1] + '</button>'; }).join('') + '</div>' +
-    '<div class="note">演示数字：<b class="num" id="fx-num" style="color:var(--text-1)">128.00</b> MB/s</div>' +
-    '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">性能模式</div><div class="s">' + (PERF.low ? '已简化：去掉毛玻璃、背景缩放、共享元素展开，列表只浮现前 4 行' : '完整效果；连续掉帧时会自动简化') + (PERF.probe ? ' · 启动测得 ' + PERF.probe : '') + '</div></span><button class="linkish" data-act="fx-perf">' + (PERF.low ? '恢复完整' : '手动简化') + '</button></div>';
+    '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">弹簧手感</div><div class="s">轻快：300 / 30 · 有弹性：200 / 20</div></span>' + seg('fxspring', [['light', '轻快'], ['bouncy', '有弹性']], FX.spring, 'small') + '</div>' +
+    '<div class="note" style="margin:6px 0 -2px">效果演示</div><div class="chips">' + [['sheet', '弹层'], ['page', '切页'], ['list', '列表浮现'], ['num', '数字滚动']].map(function (b) { return '<button class="chip press" data-act="fx-demo" data-demo="' + b[0] + '">' + b[1] + '</button>'; }).join('') + '</div>' +
+    '<div class="note">演示数字：<b class="num" id="fx-num" style="color:var(--text-1)">128.00</b> MB/s</div>';
+  return '<div class="note" style="margin:8px 0 -2px">动画档位 · ' + FXP_T[pre] + '</div>' +
+    seg('fxp', [['off', '关闭'], ['calm', '克制'], ['std', '标准'], ['lively', '灵动']], pre, 'small') +
+    '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">性能模式</div><div class="s">' + (PERF.low ? '已开启简化渲染（最高帧率）' : '高帧率优化已启用') + (PERF.probe ? ' · ' + PERF.probe : '') + '</div></span><button class="linkish" data-act="fx-perf">' + (PERF.low ? '恢复完整' : '手动简化') + '</button></div>' +
+    dFold('fx-more', 'var(--purple)', '展开 8 项动画细节与测试', FXP_T[pre], details);
 }
 function fxRefresh() { applyTheme(); navSync(); if (S.page === 'settings') renderSettings(false); }
 function fxDemo(k) {
@@ -794,6 +902,8 @@ function setToggleCfg(kind, el) {
         run(api.action('dns_takeover_set', { enabled: 'true' }).then(function () { toast('DNS 接管已开启 · 约 10 秒内生效'); return loadDNS(); }));
       }); return;
     case 'dnslog': run(api.action('dns_takeover_set', { log_queries: String(on) }).then(function () { toast(on ? '已开始记录查询日志' : '已停止记录查询日志'); return loadDNS(); })); return;
+    case 'dnsredact': run(api.action('dns_takeover_set', { log_redact: String(on) }).then(function () { toast(on ? '已开启 DNS 日志脱敏' : '已关闭 DNS 日志脱敏'); return loadDNS(); })); return;
+    case 'authreq': run(api.action('auth_required_set', { enabled: String(on) }).then(function () { if (S.cfg) { S.cfg.auth_required = on; S.cfg.remote_auth_required = on; } toast('已同步远程鉴权配置'); })); return;
     case 'quic': run(api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); })); return;
   }
 }
@@ -848,7 +958,7 @@ function debugBundle(btn) {
   }).catch(function (e) { toast(errText(e), 'err'); }).then(function () { btn.disabled = false; });
 }
 /* ═════ 自检报告(GET /api/selfcheck · action selfcheck_run / selfcheck_export) ═════ */
-var SC_ST = { ok: ['✓', '正常'], warn: ['!', '警告'], fail: ['✗', '失败'], info: ['·', '信息'] };
+var SC_ST = { ok: [uiSvg('check'), '正常'], warn: [uiSvg('warn'), '警告'], fail: [uiSvg('cross'), '失败'], info: [uiSvg('info'), '信息'] };
 var SC_RANK = { fail: 3, warn: 2, ok: 1, info: 0 };
 var SC_IC = { system: 'cpu', shaping: 'gauge', firewall: 'shield', offload: 'rocket', network: 'wifi', ipv6: 'layers', time: 'refresh', process: 'heart', ident: 'search' };
 var SC = { running: false, t0: 0, timer: 0, waitT: 0, seenAt: 0, redact: LS.get('hnc6.sc-redact', '1') !== '0' };
@@ -864,7 +974,7 @@ function scFind(sec, id) { var s = scSec(sec); if (!s) return null; var it = s.i
 function scStat(st) { return SC_ST[st] ? st : 'info'; }
 function scWorst(items) { var w = 'info'; (items || []).forEach(function (x) { var s = scStat(x.status); if (SC_RANK[s] > SC_RANK[w]) w = s; }); return w; }
 function scCount(items) { var c = { ok: 0, warn: 0, fail: 0, info: 0 }; (items || []).forEach(function (x) { c[scStat(x.status)]++; }); return c; }
-function scSumTxt(s) { s = s || {}; return '✓ ' + num(s.ok) + ' · ! ' + num(s.warn) + ' · ✗ ' + num(s.fail); }
+function scSumTxt(s) { s = s || {}; return '正常 ' + num(s.ok) + ' · 警告 ' + num(s.warn) + ' · 失败 ' + num(s.fail); }
 function scAgo(ts) { return Date.now() / 1000 - num(ts) < 10 ? '刚刚' : ago(ts); }
 function scDur(ms) { ms = num(ms); return ms >= 1000 ? (ms / 1000).toFixed(1) + ' 秒' : Math.round(ms) + ' 毫秒'; }
 function scItemHtml(it) {
@@ -877,7 +987,12 @@ function scBody() {
   var r = scRep(), h = '', el = SC.running ? Math.floor((Date.now() - SC.t0) / 1000) : 0;
   h += SC.running ? '<button class="btn pri wide" data-act="sc-run" disabled><span class="spin"></span>正在自检… <span id="sc-el">' + el + '</span> 秒</button><div class="pbar" style="margin-top:8px"><i id="sc-pb" style="width:' + Math.min(95, el / 18 * 100).toFixed(0) + '%;animation:none;transition:width .5s linear"></i></div><div class="note" style="text-align:center;margin-top:6px">大约需要 20 秒，期间可以关掉这个窗口</div>'
     : '<button class="btn pri wide press" data-act="sc-run">' + ico('check') + (r ? '重新自检' : '一键自检') + '</button>';
-  if (!r) return h + '<div class="note" style="text-align:center;margin-top:14px">' + (SC.running ? '' : '还没有自检记录。自检会检查机型与系统、限速能力、防火墙、硬件加速、热点、IPv6、时间、进程和识别引擎，只读不改任何设置。') + '</div>';
+  var extraTools = '<div class="btns" style="margin-top:6px"><button class="btn sec press" data-act="compat-report" style="flex:1">' + ico('down') + '导出兼容性报告(脱敏)</button></div>' +
+    '<div class="btns" style="margin-top:6px"><button class="btn sec press" data-act="rec-start" style="flex:2.2">' + ico('flask') + '录制握手流量 10 分钟</button><button class="btn sec press" data-act="rec-stop" style="flex:1">停止</button></div>' +
+    '<div id="rec-hint" style="margin-top:4px;font-size:12px;opacity:.7">录制内容包含连接设备访问的域名,只存本机、请勿随意分享。录完自动出现在「导出」列表。</div>';
+  if (!r) {
+    return h + '<div class="note" style="text-align:center;margin:14px 0 10px">' + (SC.running ? '' : '还没有自检记录。自检会检查机型与系统、限速能力、防火墙、硬件加速、热点、IPv6、时间、进程和识别引擎，只读不改任何设置。') + '</div>' + extraTools;
+  }
   var s = r.summary || {};
   h += '<div class="sc-meta">' + esc(scAgo(r.generated_at)) + '生成 · 耗时 ' + scDur(r.duration_ms) + (r.version ? ' · ' + esc(r.version) : '') + (r.redacted ? ' · 已打码' : '') + '</div>';
   h += '<div class="sc-chips">' + ['ok', 'warn', 'fail', 'info'].map(function (k) { return '<div class="sc-chip ' + k + (num(s[k]) ? ' has' : '') + '"><b class="num">' + SC_ST[k][0] + ' ' + num(s[k]) + '</b><span>' + SC_ST[k][1] + '</span></div>'; }).join('') + '</div>';
@@ -894,9 +1009,7 @@ function scBody() {
   }).join('') + '</div>';
   h += '<div class="sc-exp"><span class="tx" style="flex:1;min-width:0"><div class="t" style="font-size:14px;font-weight:600">打码 MAC / IP</div><div class="note">导出给别人看时建议打开</div></span>' + toggle(SC.redact, 'id="sc-redact" data-local="sc-redact" aria-label="打码 MAC/IP"') + '</div>';
   h += '<div class="btns" style="margin-top:10px"><button class="btn sec press" data-close style="flex:1">关闭</button><button class="btn pri press" data-act="sc-export" style="flex:1.4">' + ico('down') + '导出报告</button></div>';
-  h += '<div class="btns" style="margin-top:6px"><button class="btn sec press" data-act="compat-report" style="flex:1">' + ico('down') + '导出兼容性报告(脱敏)</button></div>';
-  h += '<div class="btns" style="margin-top:6px"><button class="btn sec press" data-act="rec-start" style="flex:2.2">' + ico('flask') + '录制握手流量 10 分钟</button><button class="btn sec press" data-act="rec-stop" style="flex:1">停止</button></div>';
-  h += '<div id="rec-hint" style="margin-top:4px;font-size:12px;opacity:.7">录制内容包含连接设备访问的域名,只存本机、请勿随意分享。录完自动出现在「导出」列表。</div>';
+  h += extraTools;
   return h;
 }
 function paintSc() {
@@ -904,7 +1017,7 @@ function paintSc() {
   b.innerHTML = scBody(); placeSegs(b);
 }
 function scSheet() {
-  sheet('<h3>自检报告</h3><div class="sub">检查这台手机能不能完整支持 HNC 的各项功能</div><div id="sc-body">' + scBody() + '</div>', { tall: true, kind: 'selfcheck', onClose: function () { if (S.page === 'settings') renderSettings(false); } });
+  sheet('<h3>自检报告</h3><div class="sub">检查这台手机能不能完整支持 HNC 的各项功能</div><div id="sc-body">' + scBody() + '</div>', { tall: true, kind: 'selfcheck', onClose: function () { if (REC.timer) { clearInterval(REC.timer); REC.timer = 0; } if (S.page === 'settings') renderSettings(false); } });
   if (!SC.running) loadSelfcheck().then(paintSc);
 }
 function scTick() {
@@ -976,9 +1089,33 @@ function scStatusRows() {
     sItem(['gray', 'refresh'], '系统时间', '按天统计、配额、定时规则都依赖系统时间 · ' + when, val(tv, tc));
 }
 var clCache = null;
+function loadRemoteChangelog() {
+  if (clCache) return Promise.resolve(clCache);
+  if (window.__HNC_REMOTE_CHANGELOG) return Promise.resolve(window.__HNC_REMOTE_CHANGELOG);
+  if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
+  return new Promise(function (resolve) {
+    var m = window.__HNC_MOCK_META || {};
+    var fallback = '<div class="cl-section" id="cl-history">' +
+      '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(m.version || 'v5.35.0') + ' · iOS 27 光学液态玻璃与本机 DPI 自训练版</div>' +
+      '<ul class="cl-list">' +
+        '<li><b>按需远程加载</b>：已移除主文件内嵌的 378 KB 历史更新日志，改为由服务端按需注入 <code>changelog.html</code>，单文件体积直降 35%+。</li>' +
+        '<li><b>iOS 27 光学液态玻璃</b>：新增状态驱动边缘导光、晶莹水滴开关拇指、分段滑块水银拉伸形变、顶栏滚动动态折射与深色黑曜石菲涅尔反射。</li>' +
+        '<li><b>设置页四级卡片折叠</b>：支持「全部 / 常用 / 进阶 / 诊断」四级筛选与 12 张独立液态卡片折叠。</li>' +
+      '</ul></div>';
+    if (location.protocol === 'file:' || window.__HNC_MOCK_META) { resolve(fallback); return; }
+    try {
+      var xhr = new XMLHttpRequest();
+      xhr.open('GET', 'changelog.html', true);
+      xhr.timeout = 4000;
+      xhr.onload = function () { resolve(xhr.status >= 200 && xhr.status < 300 && xhr.responseText ? xhr.responseText : fallback); };
+      xhr.onerror = xhr.ontimeout = function () { resolve(fallback); };
+      xhr.send();
+    } catch (_) { resolve(fallback); }
+  });
+}
 function showChangelog() {
-  sheet('<h3>更新日志</h3><div class="cl-body" id="cl-body"><div class="note" style="text-align:center">加载中…</div></div><button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true });
-  (clCache ? Promise.resolve(clCache) : fetch('changelog.html', { cache: 'no-store' }).then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.text(); })).then(function (txt) {
+  sheet('<h3>更新日志</h3><div class="cl-body" id="cl-body"><div class="note" style="text-align:center">正在按需加载更新日志…</div></div><button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true });
+  loadRemoteChangelog().then(function (txt) {
     clCache = txt;
     var doc = new DOMParser().parseFromString(txt, 'text/html');
     $$('script,iframe,object,embed,form,link,meta,style', doc).forEach(function (n) { n.remove(); });
@@ -1037,3 +1174,4 @@ function recStop() {
   api.action('capture_record_stop', {}, { timeout: 12000 }).then(function () { toast('停止中,文件稍后出现在「导出」列表'); recPoll(); })
     .catch(function (e) { toast(errText(e), 'err'); });
 }
+

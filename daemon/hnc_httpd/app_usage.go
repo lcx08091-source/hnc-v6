@@ -162,6 +162,9 @@ func (s *server) appUsageTick(now time.Time) uint64 {
 	ix.fp = fpSt
 	flowShapeTick(sn.at, sn, events, owner, apps, names) // DPI v2: 流形态分类(flow_shape.go)
 	flowClsTick(sn.at, s.hncDir)                         // v5.28 B3: 流量形状分类器收割/重训(flow_cls.go, 影子)
+	dscpMap, microMap, devHints := loadSidechanSnapshot(s.hncDir)
+	fgSt.setSidechan(microMap, devHints)
+	ix.dscpByMAC = dscpMap
 	added := appUsageRecordIdent(appUsage.day, deltas, owner, apps, names, now, appTimeTickSec(now), ix)
 	if len(deltas) > 0 {
 		appUsage.dirty = true
@@ -244,7 +247,15 @@ func appUsageRecordIdent(d *appUsageDay, deltas []appUsageDelta, owner map[strin
 			appUnknownAdd(d, dl.Dst, names[dl.Dst].Name, mac, dl.Up+dl.Dn)
 		}
 		if ix != nil && mac != "" && id != appUnknownID && id != appLocalID {
-			fobs = append(fobs, fgObs{MAC: mac, ID: id, Name: meta.Name, Category: meta.Category, Key: dl.Key, Up: dl.Up, Dn: dl.Dn, Inferred: inferred})
+			var dscpCls uint8
+			if ix.dscpByMAC != nil {
+				dscpCls = dscpClassForDelta(ix.dscpByMAC[mac], dl.Proto, dl.Dst, dl.Dport)
+			}
+			fobs = append(fobs, fgObs{
+				MAC: mac, ID: id, Name: meta.Name, Category: meta.Category, Key: dl.Key,
+				Up: dl.Up, Dn: dl.Dn, Inferred: inferred,
+				IsIPv6: dl.IsIPv6, Closing: dl.Closing, DSCPClass: dscpCls,
+			})
 		}
 	}
 	appTimeStep(d, tick, cats, now, tickSec)
@@ -259,6 +270,19 @@ type appUsageDelta struct {
 	Src, Dst string
 	Up, Dn   uint64
 	Key      string // v5.21: 连接五元组 key(ctEntry.key() 格式), 给 VPN 识别/共现推断用; 单测可留空
+	Proto    string
+	Dport    int
+	IsIPv6   bool
+	Closing  bool
+}
+
+func isTCPClosingState(st string) bool {
+	switch st {
+	case "CLOSE", "FIN_WAIT", "TIME_WAIT", "CLOSE_WAIT", "LAST_ACK":
+		return true
+	default:
+		return false
+	}
 }
 
 func satSub(a, b uint64) uint64 {
@@ -312,9 +336,8 @@ func appUsageAcctStep(prev *map[string][2]uint64, init *bool, entries []ctEntry,
 			du, dd = satSub(ev.UpB, p[0]), satSub(ev.DnB, p[1])
 			delete(*prev, ev.Key)
 		}
-		if du != 0 || dd != 0 {
-			out = append(out, appUsageDelta{Src: ev.Src, Dst: ev.Dst, Up: du, Dn: dd, Key: ev.Key})
-		}
+		isV6 := strings.Contains(ev.Dst, ":")
+		out = append(out, appUsageDelta{Src: ev.Src, Dst: ev.Dst, Up: du, Dn: dd, Key: ev.Key, Proto: ev.Proto, Dport: ev.Dport, IsIPv6: isV6, Closing: true})
 	}
 	for i := range entries {
 		e := &entries[i]
@@ -331,8 +354,12 @@ func appUsageAcctStep(prev *map[string][2]uint64, init *bool, entries []ctEntry,
 		if p, seen := (*prev)[k]; seen {
 			du, dd = satSub(cur[0], p[0]), satSub(cur[1], p[1])
 		}
-		if du != 0 || dd != 0 {
-			out = append(out, appUsageDelta{Src: e.Src, Dst: e.Dst, Up: du, Dn: dd, Key: k})
+		closing := isTCPClosingState(e.State)
+		if du != 0 || dd != 0 || closing {
+			out = append(out, appUsageDelta{
+				Src: e.Src, Dst: e.Dst, Up: du, Dn: dd, Key: k,
+				Proto: e.Proto, Dport: e.Dport, IsIPv6: e.Family == "ipv6", Closing: closing,
+			})
 		}
 	}
 	*prev = next

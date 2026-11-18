@@ -255,8 +255,7 @@ get_top() {
       if(c==","){i++; continue}
       if(c!="\"") exit 2
       ni=parse_string(i); if(ni==0) exit 2
-      k=str_val; i=skip_ws(ni); if(substr(s,i,1)!=";"){} # no-op for old awk parsing
-      if(substr(s,i,1)!=";"){}
+      k=str_val; i=skip_ws(ni)
       if(substr(s,i,1)!=":") exit 2
       i=skip_ws(i+1); ve=value_end(i); v=substr(s,i,ve-i+1)
       if(k==key){ gsub(/^[ \t\r\n]+|[ \t\r\n]+$/, "", v); print v; exit 0 }
@@ -444,7 +443,7 @@ set_top_inner() {
 # json_doctor 按 basename 找最新有效备份一致, 也不会让 rules.json 的高频写把
 # templates.json / device_names.json 的备份挤光。
 prune_backups() {
-  _pb_keep="${HNC_JSON_BACKUP_KEEP:-30}"
+  _pb_keep="${HNC_JSON_BACKUP_KEEP:-5}"
   case "$_pb_keep" in ''|*[!0-9]*) _pb_keep=30 ;; esac
   # shellcheck disable=SC2012  # 备份名由本脚本生成(<base>.<ts>.<pid>.bak), 无空白
   ls -1t "$BACKUP_DIR/$1".*.bak 2>/dev/null | sed -n "$((_pb_keep + 1)),\$p" | while IFS= read -r _pb_f; do
@@ -486,11 +485,6 @@ set_top() {
   validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
 
   mv "$tmp" "$target"
-  validate_file "$target" || {
-    echo "hnc_json: live JSON failed validation after write, rolling back" >&2
-    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
-    return 1
-  }
   prune_backups "$target_base"
 }
 
@@ -630,11 +624,6 @@ set_device() {
   fi
   validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
   mv "$tmp" "$target"
-  validate_file "$target" || {
-    echo "hnc_json: live JSON failed validation after write, rolling back" >&2
-    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
-    return 1
-  }
   prune_backups "$target_base"
 }
 
@@ -764,11 +753,6 @@ del_object_key() {
   fi
   validate_file "$tmp" || { rm -f "$tmp"; echo "hnc_json: candidate JSON failed validation" >&2; return 1; }
   mv "$tmp" "$target"
-  validate_file "$target" || {
-    echo "hnc_json: live JSON failed validation after delete, rolling back" >&2
-    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
-    return 1
-  }
   prune_backups "$target_base"
 }
 
@@ -921,21 +905,11 @@ set_device_batch() {
       echo "hnc_json: set-device-batch parser failed field=$key" >&2
       return 1
     fi
-    validate_file "$tmp2" || {
-      rm -f "$tmp" "$tmp2"
-      echo "hnc_json: set-device-batch candidate failed validation field=$key" >&2
-      return 1
-    }
     mv "$tmp2" "$tmp"
   done
 
   validate_file "$tmp" || { rm -f "$tmp" "$tmp2"; echo "hnc_json: final batch candidate failed validation" >&2; return 1; }
   mv "$tmp" "$target"
-  validate_file "$target" || {
-    echo "hnc_json: live JSON failed validation after batch write, rolling back" >&2
-    [ -f "$bak" ] && cp -p "$bak" "$target" 2>/dev/null || true
-    return 1
-  }
   prune_backups "$target_base"
 }
 

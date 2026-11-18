@@ -101,10 +101,10 @@ func actionDelaySet(hncDir string, p map[string]string) actionResp {
 	if !macRE.MatchString(mac) {
 		return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
 	}
-	delay, ok1 := atoiClamp(p["delay_ms"], 0, 5000)
+	delay, ok1 := atoiClamp(p["delay_ms"], 0, 10000)
 	jitter, ok2 := atoiClamp(p["jitter_ms"], 0, 5000)
 	if !ok1 || !ok2 {
-		return actionResp{OK: false, Error: "bad params", Detail: "delay_ms/jitter_ms out of range (0-5000)"}
+		return actionResp{OK: false, Error: "bad params", Detail: "delay_ms(0-10000)/jitter_ms(0-5000) out of range"}
 	}
 	lossStr := p["loss_pct"]
 	if !floatRE.MatchString(lossStr) {

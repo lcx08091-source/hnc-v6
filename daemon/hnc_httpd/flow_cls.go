@@ -46,7 +46,9 @@ var bigCatMap = map[string]string{
 	"game":     "游戏",
 	"download": "下载",
 	"social":   "社交",
-	// 通话: 规则库没有可标注的语音通话类别(SNI 时代通话流量无域名),
+	"call":     "通话",
+	"voip":     "通话",
+	// 通话: v5.35.0 支持从高置信 STUN/DTLS-SRTP 流与手工规则入池
 	// 训练池里不会出现这一类, 保留类名是为了和手工判类(voice_call)对齐。
 }
 
@@ -98,7 +100,7 @@ var fcEdges = [fcDims][]float64{
 	{0.35, 0.6, 1.0, 1.5},   // 4  下行速率变异系数
 	{0.35, 0.6, 1.0, 1.5},   // 5  总速率变异系数
 	{4, 5, 6, 7},            // 6  log10(峰值下行 bps)
-	{5.2, 5.9, 6.6, 7.3},    // 7  log10(平均包长 字节) ~160/500/1600/4k/…
+	{2.08, 2.55, 2.95, 3.13}, // 7  log10(平均包长+1 字节) ~120B/350B/890B/1350B (修复旧版误填自然对数 ln 阈值导致全落 0 箱的 Bug)
 	{0, 0.7, 1.4, 2.1, 2.8}, // 8  log10(上行 pps)
 	{0, 0.7, 1.4, 2.1, 2.8}, // 9  log10(下行 pps)
 	{0.7, 1.7, 2.7},         // 10 log10(持续秒) <5s,5-50,50-500,>500
@@ -368,8 +370,10 @@ func flowClsTick(now time.Time, hncDir string) {
 			fresh[k] = fcVecOf(f, fl)
 		}
 	}
-	fcPool = append(fcPool, added...)
 	fcPoolMu.Unlock()
+	for _, smp := range added {
+		fcPoolAdd(smp)
+	}
 
 	fcLiveMu.Lock()
 	fcLive = fresh
@@ -377,25 +381,30 @@ func flowClsTick(now time.Time, hncDir string) {
 
 	fcModelMu.RLock()
 	haveModel := fcLiveModel != nil
+	lastTr := fcLastTrain
 	fcModelMu.RUnlock()
 	if !haveModel {
 		if m := fcLoadModel(hncDir); m != nil {
 			fcModelMu.Lock()
 			fcLiveModel = m
+			haveModel = true
 			fcModelMu.Unlock()
 		}
 	}
-	if !haveModel || now.Sub(fcLastTrain) >= fcRetrainEvery {
+	if !haveModel || now.Sub(lastTr) >= fcRetrainEvery {
 		fcPoolMu.Lock()
 		snap := append([]fcSample(nil), fcPool...)
 		fcPoolMu.Unlock()
 		if m := fcTrain(snap, now.Unix()); m != nil {
 			fcModelMu.Lock()
 			fcLiveModel = m
+			// v5.35.0: 避免冷启动仅 1 条样本就把 fcLastTrain 锁死 30 分钟
+			if len(snap) >= 10 || haveModel {
+				fcLastTrain = now
+			}
 			fcModelMu.Unlock()
-			_ = fcSaveModel(hncDir, m) // 失败只影响持久化, 不影响本次
+			_ = fcSaveModel(hncDir, m)
 		}
-		fcLastTrain = now
 	}
 }
 
@@ -469,3 +478,24 @@ func evalFlowCls(now time.Time) *dpiEvalFlowCls {
 }
 
 const fcEvalMinPerClass = 50 // 每类训练/考题门槛(不足只给说明)
+
+
+// TriggerFlowClsRetrain v5.35.0: 供「本机真值自训练工作台」一键同步重训流形态朴素贝叶斯分类器
+func TriggerFlowClsRetrain(hncDir string, now time.Time) (samples int, classes int, ok bool) {
+	fcPoolMu.Lock()
+	snap := append([]fcSample(nil), fcPool...)
+	fcPoolMu.Unlock()
+	if len(snap) == 0 {
+		return 0, 0, false
+	}
+	m := fcTrain(snap, now.Unix())
+	if m == nil {
+		return len(snap), 0, false
+	}
+	fcModelMu.Lock()
+	fcLiveModel = m
+	fcLastTrain = now
+	fcModelMu.Unlock()
+	_ = fcSaveModel(hncDir, m)
+	return len(snap), len(m.m.NCat), true
+}

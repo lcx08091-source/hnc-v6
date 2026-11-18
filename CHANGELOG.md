@@ -14,6 +14,113 @@
 
 ---
 
+## [5.36.0] - 2026-11-18
+
+**全栈精雕正式版 · 纯正双层次矢量 SVG 图标回归 + 无界微晶自定义壁纸与烟熏水滴悬浮底栏 + 四大主题专属 120fps 物理动效 + 全栈 10 路交叉审计与 GitHub Actions 全绿闭环**。
+
+### Changed
+
+- **回退全部 3D 位图图标，全面回归 Apple SF Symbols / Lucide 双层次纯矢量内联 SVG（`webroot/js/core.js`、`devices.js`、`apps.js`、`stats.js`、`settings.js`、`sheets.js`、`webroot/index.html`）**：
+  - 彻底移除 `v5.35.0` 的 Base64 WebP 3D 图标字典（消除 ~70 KB 位图体积及展开设备卡 Bento 磁贴大图压字重叠），零外部字体、零位图、零手机原生 Emoji；
+  - 重绘 8 类设备终端双层次矢量图标（`devSvg`）、4 枚控制中心 Bento 语义磁贴图标（`bentoSvg`，严格锁定 `32x32` `.cc-orb` + `17x17` SVG 黄金比例）、光学色散棱镜徽章（`studioSvg`）及 15 枚状态微图标（`uiSvg`）。
+- **无界微晶壁纸光学栈与烟熏水滴悬浮底栏重构（`webroot/index.html`、`webroot/js/fx.js`、`webroot/js/main.js`）**：
+  - 消灭自定义壁纸下 `.glass::before` `1.25px` 粉笔白外圈与 `--lg-rim` `0.5px` 亮白描边，改用 `180deg` 顶部微晶受光边缘（`rgba(255,255,255,.22 -> 0)`）自然融入风景壁纸；
+  - 默认切换为无界原生透字排版（`adaptive`），通过 `24x36` Canvas 上/中/下三区独立明暗采样（`data-wp-top` / `data-wp-tone` / `data-wp-bot` 持久化至 `hnc6.wp_tones`），彻底消除「设备」「已更新·刚刚」「设备列表」上的纯白/纯蓝膏药底条；
+  - 为 `Hyalite` 新增壁纸专属低亮边参数 `LG_OPTS_WP`（`rim: .34, edge: .16`）并改为 `detach + attach` 真重绑，解绑 `#lens` 嵌套 `Hyalite`，将 `#tabbar` 重塑为深色烟熏微晶胶囊、`#lens` 重塑为无白芯冰青色水滴光晕，并隐藏壁纸态底部 `body::after` 灰白雾带。
+- **四大视觉模式（液态玻璃 / 经典毛玻璃 / 极简默认 / 赛博霓虹）专属 120fps 物理与动效编排（`webroot/js/fx.js`、`main.js`、`sheets.js`、`webroot/index.html`）**：
+  - 锁定 `.page` 静止容器根除切页水平偏移与 Chromium Backdrop-Root `backdrop-filter` 闪烁；
+  - 实装 6 子步辛欧拉积分底栏透镜弹簧、可打断底部抽屉手势速度继承弹簧、单段水滴流变开关与各主题差异化物理阻尼。
+
+### Fixed
+
+- **Go 守护进程 `hnc_httpd` 与 `dpid` 联调闭环修复（`daemon/hnc_httpd/*.go`、`src/dpid/**/*.go`）**：
+  - 补齐 `fpEntry` / `startupApp` 个人快速蒸馏持久化字段与 `buildStartupModel` 快速可用门控，修复 `flow_cls.go` / `self_studio.go` 结构字段引用、`fcPoolAdd` 容量上限与 `studioLeaseGen` 省电租约还原，将自训练工作台动作移出全局 `actionMu`；
+  - `dpid` 新增 80ms `self_studio.poke` 即时唤醒通道（同步刷新 `/proc/net` 采样、`LabelSamplesWriter.FlushNow` 与子域扩充），加固 `FIN_WAIT*`/`CLOSE` `uid=0` 防覆盖、RFC 8215 `64:ff9b:1::/48` 本地 NAT64 前缀折叠、多网卡 `SrcMAC` TLS 重组隔离与无锁 QUIC Initial 密钥派生；
+  - 同步 `classify_test.go`、`rule_attach_test.go`、`rules_bucket_test.go`、`app_qos_test.go`、`shared_infra.go`、`fg_model.go` 与 `security_v522_test.go` 单测契约，补齐双栈 `ip6tables HNC_STATS` 对账/健康检查及 `/api/json_health` 端点。
+- **C/eBPF 与 Shell 双栈数据面硬化（`daemon/hotspotd/`、`daemon/clsact_ctl/`、`bin/*.sh`、`.github/workflows/build.yml`）**：
+  - 修复 `mdns_resolve` 编译链接缺失、32 位 `armeabi-v7a` 单调时钟微秒溢出、`hotspotd` FD 泄漏与 5s 退出阻塞、`clsact_ctl` `NLM_F_REPLACE` 原子热更新与独立 `tc_egress` 挂载、16KB 页大小对齐及 `hnc_clsact.bpf.c` 双层 VLAN / IPv6 扩展头 NDP 放行；
+  - 修复 `apply_app_limits.sh` / `apply_app_qos.sh` 临时 IPv6 退化清场、`--set-xmark` 位掩码保护、`cleanup.sh` 孤儿进程回收、`stats_rollup.sh` `mawk` 兼容正则及 GitHub Actions `libbpf v1.4.7` 自动兜底拉取。
+
+
+## [5.35.0] - 2026-11-18
+
+### WebUI 光学液态玻璃与交互体验重构
+- **修复自定义壁纸下液态玻璃退化为实心白块 (Issue #1)**：清理旧版首帧探针静默落盘的 `hnc6.lowfx`，修复 `:root[data-has-wp="1"]` 根透明选择器与 `.dev` `content-visibility: auto` 背景采样阻断，下调四层浅白雾膜叠乘不透明度，补齐 `prefers-color-scheme: dark` 自动深色黑曜玻璃，并新增「液态玻璃（光学折射）/ 经典毛玻璃（均匀柔雾）」实时切换开关。
+- **修复底栏点击页面漂移、滑块越界与底部遮挡漏字 (Issue #2)**：移除切页时对 `.page` 的水平 `translate3d` 位移，改为原地纯透明度叠化；重写亚像素 `tabGeom()` 与 8px 点按防抖死区 + 临界阻尼弹簧，根治窄屏第 4 个标签「设置」右侧溢出；将页面底部安全内边距提升至 `148px` 并挂载 `body::after` 防漏字柔雾护盾。
+- **全面清除手机原生 Emoji 并换装 3D 光学玻璃图标**：清除全部 JS 视图与 `changelog.html` 中的原生 Emoji，内置 13 枚定制 3D 磨砂折射光学玻璃图标（8 类终端设备 + 4 枚控制中心 Bento 磁贴 + 1 枚 DPI 光学棱镜徽章）与双色调矢量微图标。
+
+### 本机真值采集与零数据集 DPI 自训练飞轮 (`self_studio` + `fp_distill`)
+- **上线「本机真值采集与 DPI 自训练工作台」**：支持一键开启 Wi-Fi + 5G 蜂窝双路本机真值采集、15 分钟自动停表省电护航、秒级个人指纹蒸馏（`DistillPersonalNow` 5 层防 WebView/Cronet 污染防护，支持 3~6 条样本极速收敛）、贝叶斯流分类器在线重训（`TriggerFlowClsRetrain`）及个人 `rulepack.json` 导出。
+- **本机内核 UID 归因升级 (`self_attrib.go`)**：新增 RFC 6052/6877 `64:ff9b::/96` 464XLAT NAT64 地址折叠、`/proc/net/tcp*` `TIME_WAIT` (`06` 态 `uid=0`) 过滤防覆盖，以及 Android 多用户/双开分身 `uid % 100000` 与 SDK 沙箱包名还原；扩充 60+ 公共 CDN 与第三方广告/推送/风控 SDK 域名防误晋级名单。
+
+### 双栈数据面与控制面加固
+- **双栈流量统计与加密 DNS 完善**：`iptables_manager.sh` 新增 `ip6tables -t mangle HNC_STATS` 双栈客户端流量统计闭环；`connblock_sync.sh` 补齐 `udp/853` (DoQ) 快速 `icmp-port-unreachable` 回退；`cleanup.sh` 与 `hnc_offload_guard.sh` 完善双栈应用限速/QoS 子链无残留清场与 `clsact` 双向健康巡检。
+
+---
+
+## [5.34.0] - 2026-11-18
+
+**架构大版本 · 全链路 IPv6 双栈限速/QoS/eBPF 闭环 + 下一代加密流量 DPI 与多模态前台活跃应用识别引擎**。本版本彻底打通国内 5G 热点 SLAAC / RFC 4941 临时 IPv6 地址下的应用级限速、三档应用感知 QoS 与 `clsact` 双向硬件加速防穿透，并将前台识别从「10 秒字节差分猜测」全面升级为融合 **客户端上行原生 DSCP 侧信道、亚秒级人类触控因果律、主屏焦点/伴随通话双轨因子解耦、连接坍塌秒级退场、威布尔半马尔可夫驻留模型、锁屏休眠保护与后 ECH / 纯 UDP 实时签名** 的新一代引擎。
+
+### Added
+
+- **全链路 IPv6 双栈数据面闭环（`apply_app_limits.sh`、`app_qos.go`、`apply_app_qos.sh`、`hnc_clsact.bpf.c`、`clsact_ctl`、`connblock_sync.sh`）**：
+  - **应用级双栈限速（`bin/apply_app_limits.sh`）**：实施 32 位 `ctmark` 正交位域分区，在 `mangle/FORWARD` 按客户端源 MAC 将客户端槽位号写入 `ctmark[31:24]`（与设备级 `0x00ffffff` 完全正交），在 `mangle/POSTROUTING`（`HNC_SAVE` 之后）采用 `connmark + ip -6 neigh` 二级 `-g` 子链对远端 IPv4/IPv6 应用地址打标 `0x900000+i`（彻底无视 RFC 4941 临时 IPv6 地址轮换，且绝不污染设备级 `CONNMARK`）；`tc` 过滤器升级为 `protocol all prio 2`（含旧 `prio 200` 多协议清理与回退保护）。
+  - **应用感知三档分流双栈支持（`app_qos.go` + `apply_app_qos.sh`）**：移除 `To4() == nil` 纯 IPv4 过滤，拆分为 IPv4（800 条）+ IPv6（800 条）独立配额池；新增 `HNC_APP_QOS_MARK` 为「未开设备总限速、仅开应用分流」的设备自动补齐 `0x800000+mid` 标记，在 `POSTROUTING` 首行过滤 `! -o $IFACE` 并按 `0x9fffff` 位掩码无地址依赖匹配双栈下行包。
+  - **双向双栈 `clsact` eBPF 防穿透（`hnc_clsact.bpf.c` + `clsact_ctl/main.c` + `hnc_clsact_sync.sh`）**：保留 `ip_mark_map` 向后兼容，新增 8 字节对齐 `mac_mark_map` 匹配 `ETH_P_IP` 与 `ETH_P_IPV6`；新增 `SEC("tc_egress")` 热点出方向兜底程序，专门拦截 Android AOSP `tether6` eBPF 从 `rmnet_dataX` 直接 `bpf_redirect` 绕过 `ip6tables HNC_RESTORE` 的下行加速包；`clsact_ctl` 升级支持双 Map 重定位、双向挂载与 `<mac|ip>` 两阶段陈旧键清扫。
+  - **连接阻断双栈加固（`bin/connblock_sync.sh`）**：为 `ip6tables REJECT` 补齐 `DROP` 自动降级（兼容无 `ip6t_REJECT` 裁剪内核），新增 `UDP/853`（DNS-over-QUIC）阻断，解耦 v4/v6 `xt_string` 探测。
+- **客户端上行原生 DSCP 侧信道与反欺骗护栏（`capture/parse.go`、`output/microburst.go`、`fg_model.go`）**：提取第一跳尚未被运营商漂白的 `IPv4 TOS` 与 `IPv6 Traffic Class` 高 6 位 `DSCP`（剥离 `CS6/CS7` 路由控制码点），识别 Apple `NET_SERVICE_TYPE_BK` / Scavenger 后台流（`CS1=8` / `LE=1`，触发 `-28` 分降权与 `<=14` 分硬封顶，确保 iCloud 备份或系统更新绝不抢前台）与 WebRTC/VoIP/游戏实时流（`EF=46` / `VA=44` / `NQB=45` / `AF4x` / `CS4`，附带单流上行速率与并发连接数 P2P 防伪校验）。
+- **亚秒级人类触控因果律与微突发动力学（`output/microburst.go`、`fg_model.go`、`fg_engagement.go`）**：在 `dpid` 内为每个 `(ClientMAC, AppID)` 引入常数内存 `MicroBurstTracker` 与 256 槽 `PendingDNSRing`，实时度量经载荷确认的 `DNS Response -> Connect (<=150ms)` 紧耦合脉冲（含 250ms 手指生理不应期折叠）、4 态请求-响应因果回合（含微信纯文字轻量回合 `LightTurns`）、Finch 指数加权在线 Welford 变异系数 $CV$、8 档对数倍频程间隔熵及一阶/二阶周期定时器锁（精准压制 15s/30s/60s 及双脉冲后台轮询）。
+- **双层正交伴随轨解耦、连接坍塌秒级快退与威布尔半马尔可夫模型（`fg_model.go`、`fg_hmm.go`、`app_usage.go`）**：
+  - 新增 `Companion` 伴随音视频槽位（实时语音通话 `call` 与低交互后台音乐 `audio`），解决「边打微信语音/听歌边刷淘宝」时主屏焦点来回跳变问题；
+  - 捕获 `conntrack` 关闭态跃迁（`CLOSE/FIN_WAIT/TIME_WAIT`）与 `dpid` `TH_FIN/TH_RST` 连接坍塌潮（$
+ho_{	ext{close}} \ge 0.70$），上滑划掉应用后秒级退出前台，同时凭 `playBufSec` 虚拟播放缓冲免疫 ABR 视频分片静默间隙；
+  - 将 `fg_hmm.go` 升级为类别自适应威布尔生存风险率半马尔可夫核（短视频/游戏递减风险率抗干扰，工具/商店递增风险率快退）；
+  - 新增零主动探测三态亮灭屏感知（`active` 亮屏交互 / `idle_audio` 息屏伴随 / `doze` 锁屏休眠 + APNs/FCM 推送唤醒识别），锁屏期间硬锁前台时间线。
+- **后 ECH 跨层反解与 RFC 9443 纯 UDP 实时协议签名（`capture/parse.go`、`capture/udp_sig.go`）**：深度解析 DNS Type 65（`HTTPS/SVCB`）中的 `ech config_id`、`alpn` 与非标端口，在 `cloudflare-ech.com` 遮蔽下自动跨层还原真实请求域名并写入 `ip_app_map`；新增零分配单端口 UDP 签名检测器，精准识别 `STUN`（`0x2112A442`）、`DTLS-SRTP`、`WireGuard` 与手游 `KCP` 帧同步流。
+- **热点外部设备无真值自检与前端可解释意图胶囊（`dpi_sidechan.go`、`devices.js`、`settings.js`）**：新增跨模态冲突率、Happy Eyeballs 双栈一致率与 **IPv6 应用限速逃逸实时告警**；设备卡新增亮灭屏呼吸点、可解释证据微徽章（`DSCP实时标` / `秒级紧耦合` / `触控微突发`）、伴随通话胶囊与 `4px` IPv4/IPv6 双栈实时比例条。
+
+## [5.33.1] - 2026-11-18
+
+**正式封版 · 全新 v11 WebUI 合入主树 + 前后端契约全量对齐 + 8 路蜂群全栈底层深挖修复**。本版本将新版光学液态玻璃与蓝灰赛博机能界面、无光晕自定义壁纸引擎、纯数字精准限速面板及前端公共 CDN 自动识别完整回迁至模块化 `webroot/`，全面打通前后端悬空路由与动作契约，并一次性合入针对 Go 控制面/DPI、C 裸 Netlink 守护进程、tc eBPF 字节码与 Shell 数据面的全量修复与防御性代码瘦身。
+
+### Added
+
+- **自定义背景壁纸与无光晕字色可读性引擎（`webroot/`）**：新增多款高折射内置 SVG 壁纸（深海极光、蓝灰矩阵、暗夜流光、冰川晨雾等）、本地图片自动压缩导入与自定义图片 URL，支持壁纸景深模糊度与护眼暗角调节；彻底废除刺眼的白边发光 `text-shadow`，提供「微磨砂玻璃胶囊托底（零发光光晕）」与「Canvas 采样智能感知壁纸明暗反转字色」双模式。
+- **蓝灰「赛博机能（`cyber`）」主题与升级版 iOS 27「液态玻璃（`liquid`）」**：新增低饱和度冷调蓝灰机能主题（支持浅色/深色自适应），升级液态玻璃顶栏滚动动态折射、晶莹水滴开关回弹、分段滑块水银拉伸形变与设备卡状态驱动边缘导光（在线 / 高吞吐 / 限速整形 / 已封锁）。
+- **前端零延迟公共 CDN / 云底座自动识别徽标与一键过滤**：内置 50+ 国内外多租户公共 CDN、云存储与系统连接探针后缀特征库，在 DPI 未知域名发现与规则列表纯前端实时标注「公共 CDN / 云底座」徽标，支持一键隐藏公共基础设施噪声，防止误绑单应用引发连坐误封。
+- **前后端完整接线补齐（`/api/whoami`、`/api/power`、`/api/dns/log`、`auth_required_set`、`log_redact`）**：
+  - 在设置页「远程访问」卡片新增「远程访问需 PIN 配对鉴权（`auth_required_set`）」开关，并接入 `GET /api/whoami` 按真实登录会话渲染带标签的「退出登录」按钮；
+  - 在「运行状态」接入 `GET /api/power`「守护进程功耗自测」折叠卡，支持查看 5 大守护进程 5 分钟 CPU%、每分钟唤醒次数、RSS 内存与一键即时采样；
+  - 在「DNS 接管」折叠卡新增「日志隐私脱敏（`log_redact`）」开关与「查看最近 DNS 查询明细（`GET /api/dns/log`）」抽屉面板；
+  - 在 `tools/ui_mock/fake_api.js` 全量补齐 `capture_record`、`capture_record_stop`、`clsact_repair`、`dpi_eval_clear`、`dpi_rulepack_clear`、`sim_clear`、`sim_device_del` 等 7 个动作及上述 3 条 GET 路由模拟数据。
+
+### Changed
+
+- **纯数字精准带宽限速面板 + 3 格控制中心 Bento 磁贴（`webroot/js/devices.js`）**：移除易滚动误触和跳变闪烁的滑动条与预设胶囊，改为上下行独立纯数字输入卡（实时换算 `≈ Mbps` 等效带宽、支持一键清空与回车下发），顶部配备「低延迟优先（SQM）」「应用级分流（App QoS）」「白名单豁免」三格快捷磁贴。
+- **顶部双通道流光速率曲线与设置页四级卡片折叠（`webroot/js/settings.js`、`main.js`）**：设备页顶部座舱升级为下行（RX）+ 上行（TX）双通道三次贝塞尔曲线；设置页重构为「全部 / 常用 / 进阶 / 诊断」四级筛选、12 张独立可折叠卡片与实时关键词搜索；DPI 页设备图标统一收敛为精致 18px 线性矢量 SVG。
+- **设备限速模板原子动作对齐与慢动作超时放宽（`devices.js`、`core.js`）**：`applyTemplate` 对真实设备优先调用后端 `template_apply` 原子审计动作；`api.action` 对 `debug_bundle`、`cleanup_all`、`dpi_rules_update`、`capture_record`、`selfcheck_run` 5 类慢动作自动放宽超时至 35 秒，消除前端 12 秒假超时报错。
+
+### Fixed
+
+- **设备发现状态机（`src/dpid/neigh/neigh.go`、`devscan.go`）**：彻底根治 `TestDevscanSim` 阶段 3/4 重负载下设备换 IP 后偶发跳回旧 IP 的悬案 —— 解析内核 `NDA_CACHEINFO.ndm_updated`（`UpdatedAgo`）化解 Linux 内核 `neigh_alloc` 对新建 `NUD_STALE` 表项预设的 `-60s` 初值惩罚；对已存在候选进入 `STALE / DELAY / PROBE` 冻结原有 `lastEvent` 防止消费端 `time.Now()` 调度延迟漂移反超；将 `STALE` 优先级提至单向探测态 `DELAY / PROBE` 之上；支持无 `NDA_LLADDR`（空 MAC）的 `RTM_DELNEIGH` 事件按 IP 精准清理失效候选并重选主 IP。
+- **连接阻断与时长封锁（`conn_blocks.go`、`app_time.go`）**：修复 `expandConnBlocks` 遍历 Go `map` 满 200 个 IP 随机截断导致每 10 秒判定内容变更、反复拆建 `iptables` `HNC_CONNBLK` 链打满 CPU 的缺陷（改为按最近活跃时间戳 `Ts` 降序 + IP 字典序稳定排序后截断）；修复 `appBlockItems` 按字母序硬切前 64 个后缀导致内置抖音（92 个后缀）排在 `ieshuodong.net` 之后的 `snssdk.com`、`zijieapi.com`、`pstatp.com`、`ixiguavideo.com` 等 28 个核心域名 100% 漏封的漏洞（先做父域收敛去重，再将单应用上限扩容至 256、按类别扩容至 1024）。
+- **DNS 接管、月度配额与随机 MAC 合并（`dns_takeover.go`、`limit_policy.go`、`mac_merge_action.go`）**：修复热点切换网段（`curSig != sig`）时跳过 `perr != nil` 自检失败拦截直接强挂 DNAT 导致全网断网 10 秒的缺陷（自检未通立即 Fail-Open 回退直连）；修复 `puLoadConfig` 默认返回 `BillingDay=1` 使 `rules.json` 结算日兜底沦为死代码及 `29..31` 日月度边界计算；在 `limit_policy` `reconcile` 改写 `rules.json` 前后双写状态防止进程收到 `SIGTERM` 重启后将临时时段限速永久污染为手动基线 `Base`；补齐随机 MAC 合并时漏累加的 `MonthRx` 与 `MonthTx` 双字段。
+- **配对鉴权与并发写盘安全（`pair.go`、`action_v511.go`）**：移除 `readPairPending` 中未鉴权请求触发的无锁 `os.Remove(path)`，消除并发场景下误删主人刚生成的新配对码（TOCTOU）；将 `writeFileAtomic` 临时文件从共享进程 PID 命名升级为 `os.CreateTemp` 随机独占文件 + `Sync()` + `Rename()`，消除同进程多协程并发写盘交叉覆写竞态。
+- **DPI 规则优先级、规则包防投毒与自学习上界（`output/rule.go`、`classify.go`、`rulepack.go`、`shared_infra.go`）**：修复 ASCII 排序中 `'_'` (`0x5F`) 排在 `'9'` (`0x39`) 之后导致外部导入规则 `_imported.json` 压制用户手写 `99-user-custom.json` 的优先级反转；为 `ruleCache` 补齐文件数与文件名 FNV-1a 结构摘要并改用单调递增 `seq` 驱动 `matcherCache` 重建（消除删空文件漏重载与 `&rules[0]` 切片底层数组复用 ABA 失明）；为 `rulepackSharedSuffixes` 扩充 `myqcloud.com`、`aliyuncs.com`、`bdydns.com`、`bytefcdn.com` 等 25 个国内多租户云底座保护后缀；限制 `inboundSources` 单目标最多记录 16 个源域名并加固防双域名 CNAME 洗白阈值。
+- **TCP TLS 重组、异常流量告警与前台流分类模型（`tls_reasm.go`、`anomaly.go`、`flow_cls.go`、`fg_model.go`、`fg_hmm.go`）**：改用 RFC 1982 有符号序列号差值修复 TCP 32 位序列号跨 `2^32` 回绕丢包；将 `anomaly.go` 统计窗口修正为左开右闭 `(start, end]` 对齐 15 分钟桶后置时间戳，按有效历史文件天数计算均值并增设 `4 MB` 绝对基线保底下限（消除零流量日幸存者偏差与 10KB 心跳引发的 5000 倍假阳性告警）；将 `flow_cls.go` 第 7 维 `fcEdges[7]` 从自然对数 `ln` 校准回实际特征使用的 `log10(avgPktLen)` 分箱 `{2.08, 2.55, 2.95, 3.13}`；在 `fg_model` / `fg_hmm` 实装 ABR 视频虚拟播放缓冲池（`playBufSec`）、同应用多线程分块下载簇惩罚、新开应用秒切冲量与全网静默 `_none` 收敛加成。
+- **C 裸 Netlink 守护进程与 tc eBPF 数据面（`clsact_ctl/main.c`、`hnc_tc_ingress.c`、`hotspotd.c`、`hnc_clsact.bpf.c`）**：修复 `NLMSG_NEXT(h, n)` 将尾包未对齐字节递减为负数后强转 `unsigned` / `size_t` 引发的 `4GB` 整数回绕栈越界读，补齐 Netlink 多分片循环、`EINTR` 重试与 `NLMSG_ERROR` 长度校验；重构 `clsact_ctl sync` 为「平滑更新活跃 IP + `BPF_MAP_GET_NEXT_KEY` 清扫失效旧 IP」两阶段对账，根治设备离线或取消限速后 DHCP 复用 IP 串限速的幽灵残留；在 `hnc_clsact.bpf.c` 增加 `bpf_skb_pull_data(skb, 34)` 拉平驱动分页线性区防止高速大包穿透限速，并改用掩码写入 `(skb->mark & ~0x00ffffffU) | (*mark & 0x00ffffffU)` 保护高 8 位 OEM 驱动路由标志；将 `hotspotd` 单实例判活升级为内核自动释放的 `flock(LOCK_EX | LOCK_NB)` 并在 `bind()` 前收紧 `umask(0077)`。
+- **Shell 应用限速稳定性（`bin/apply_app_limits.sh`）**：全量补齐 `iptables -w 2` xtables 锁等待（仅在 `-C` 返回码严格等于 `1` 时补挂跳转链，防止撞锁时规则翻倍或整轮蒸发）；将开头的 `rm -f "$DIRTY"` 改为 `mv` 原子摘取 `.processing` 脏标记，避免同步期间新增的 DPI 映射变更丢失；新增配置与映射文件指纹摘要快路径，无变更轮次直接跳过每 30 秒无条件删建 `tc` HTB 类，消除周期性白送满额 `burst` 令牌与 TCP 锯齿抖动。
+
+### Removed
+
+- **移除旧过渡版「苹果风（`apple`）」独立主题选项**：界面风格精简收敛为「极简默认（`default`）」「赛博机能（`cyber`）」「液态玻璃（`liquid`）」三套鲜明视觉体系（旧本地偏好 `apple` 自动平滑迁移至 `cyber`）。
+- **清理 `bin/hnc_json` 写后 6 重冗余 `awk` 校验**：保留写入 `.tmp` 阶段的单次落盘前语法门禁，移除 `rename` 后的二次全量 `awk` 重扫与 `batch` 循环内的逐轮重复校验（单次设备编辑从 6 遍全文件扫描降至 1 遍），并将滚动备份上限从 20 份收敛至 5 份。
+
+### Internals
+
+- **统一泛型文件缓存 `CachedFile[T]`（`daemon/hnc_httpd/filecache.go`）**：将散落在 `discover.go`、`app_Catalog` 等多处的手写 `mtime` 缓存统一收敛为带 `ino + size + mtime` 三元组校验与双重检查锁的泛型 `CachedFile[T]`，消除同秒原子替换漏检与锁外读盘旧快照倒灌（ABA）。
+
 ## [5.33.0-rc2] - 2026-10-16
 
 **预览版 · 继续「只留一份」**(维护者 2026-10-15「继续全面清理」)。rc1 留着等定的两处(M2 看门狗检查、M3 offload / clsact 调度)也只留 Go 一份,再加 JSON 读写、DPI 规则、开机同步、进程判活等零散的「两份」。**仍是先于真机回归删旧代码**,真机有问题的退路是刷回 v5.32(或 rc1)。

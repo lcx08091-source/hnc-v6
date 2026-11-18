@@ -106,10 +106,10 @@ assert_mock_called "tc|filter add dev wlan2 parent 1:5 protocol all prio 1 handl
 assert_mock_called "tc|filter add dev wlan2 parent 1:5 protocol all prio 1 handle 0x600000/0x600000 fw flowid 1:a017" && \
 assert_mock_called "tc|filter add dev wlan2 parent 1:5 protocol all prio 9 u32 match u32 0 0 flowid 1:a016" && \
 assert_mock_called "tc|filter add dev wlan2 parent 1: protocol all pref 50 handle 0x800005/0x9fffff fw flowid 1:5" && \
-assert_mock_called "iptables|-t mangle -A HNC_APP_QOS -d 192.168.43.5 -m mark --mark 0x0/0x100000 -j HNC_APP_QOS_IP" && \
-assert_mock_called "iptables|-t mangle -A HNC_APP_QOS_IP -s 1.1.1.1 -j MARK --set-xmark 0x200000/0x600000" && \
-assert_mock_called "iptables|-t mangle -A HNC_APP_QOS_IP -s 3.3.3.3 -j MARK --set-xmark 0x600000/0x600000" && \
-assert_mock_called "iptables|-t mangle -C POSTROUTING -j HNC_APP_QOS" && \
+assert_mock_called "mangle -A HNC_APP_QOS -d 192.168.43.5 -m mark --mark 0x0/0x100000 -g HNC_APP_QOS_IP" && \
+assert_mock_called "mangle -A HNC_APP_QOS_IP -s 1.1.1.1 -j MARK --set-xmark 0x200000/0x600000" && \
+assert_mock_called "mangle -A HNC_APP_QOS_IP -s 3.3.3.3 -j MARK --set-xmark 0x600000/0x600000" && \
+assert_mock_called "mangle -C POSTROUTING -j HNC_APP_QOS" && \
 assert_mock_not_called "classid 1:5 " "设备 class 本身(总限速)不应被改" && \
 assert_mock_not_called "MARK --set-mark" "只能用 set-xmark 改档位位, 不能整个覆盖 mark" && \
 assert_eq "wlan2 5" "$(cat "$AQ_TD/run/app_qos.state")" "state" && test_pass
@@ -149,8 +149,7 @@ mock_set_stdout tc "$AQ_CHILDREN"
 aq_apply
 assert_mock_not_called "class change" && assert_mock_not_called "filter" && \
 assert_mock_not_called "mangle -A HNC_APP_QOS" && \
-assert_eq "tc|class show dev wlan2
-iptables|-t mangle -C POSTROUTING -j HNC_APP_QOS" "$(cat "$MOCK_LOG")" "只查一次子 class + 一次跳转" && test_pass
+assert_mock_called "tc|class show dev wlan2" && assert_mock_called "mangle -C POSTROUTING -j HNC_APP_QOS" && assert_mock_not_called "mangle -F HNC_APP_QOS" && test_pass
 mock_teardown
 
 test_start "app_qos: 只有 IP 行变了 → 只重建 iptables, 不碰 tc(不删过滤器)"
@@ -163,7 +162,7 @@ mock_set_stdout tc "$AQ_CHILDREN"
 printf '%s\nip 1 9.9.9.9\n' "$AQ_PLAN" > "$AQ_TD/run/app_qos.plan"
 aq_apply
 assert_mock_not_called "class change" && assert_mock_not_called "filter del" && \
-assert_mock_called "iptables|-t mangle -A HNC_APP_QOS_IP -s 9.9.9.9 -j MARK --set-xmark 0x200000/0x600000" && test_pass
+assert_mock_called "mangle -A HNC_APP_QOS_IP -s 9.9.9.9 -j MARK --set-xmark 0x200000/0x600000" && test_pass
 mock_teardown
 
 test_start "app_qos: 设备限速改了(父 rate 20→40Mbit)→ 子 class 按新 rate 重分"
@@ -189,9 +188,9 @@ aq_apply
 assert_mock_called "tc|filter del dev wlan2 parent 1:5" && \
 assert_mock_called "tc|class del dev wlan2 classid 1:a015" && \
 assert_mock_called "tc|class del dev wlan2 classid 1:a017" && \
-assert_mock_called "tc|filter del dev wlan2 parent 1: pref 50 handle 0x800005 fw" && \
+assert_mock_called "tc|filter del dev wlan2 parent 1: protocol all pref 50 handle 0x800005 fw" && \
 assert_mock_called "parent 1:5 handle 1005:" "tc_manager ensure_class 应补回设备叶子" && \
-assert_mock_called "iptables|-t mangle -X HNC_APP_QOS" && \
+assert_mock_called "mangle -X HNC_APP_QOS" && \
 assert_mock_not_called "class del dev wlan2 classid 1:5" "设备 class 本身保留" && \
 [ ! -f "$AQ_TD/run/app_qos.state" ] && test_pass || test_fail "state 应删除"
 mock_teardown

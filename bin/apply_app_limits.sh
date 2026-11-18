@@ -1,34 +1,15 @@
 #!/system/bin/sh
-# apply_app_limits.sh — HNC v5.3.0-rc30.6
+# apply_app_limits.sh — HNC v5.34: Dual-Stack (IPv4 + IPv6) Per-(client_mac, app_id) Downlink Rate Limiter
 #
-# Per-(client_mac, app_id) downlink rate limiter.
-#
-# Reads:
-#   $HNC_DIR/data/app_limits.flat       — user config (one entry per line)
-#                                          <mac> <app_id> <down_mbps>
-#   $HNC_DIR/run/ip_app_map.flat        — dpid's observation (every 30s)
-#                                          <ip> <app_id>
-#   $HNC_DIR/data/devices.json          — hotspotd's active client table
-#                                          (used to resolve mac → client_ip)
-#   $HNC_DIR/run/active_iface           — current hotspot iface (e.g. wlan2)
-#
-# Writes:
-#   iptables -t mangle -A HNC_APP_LIMIT  — MARK rules per (client_ip → app_ip)
-#   tc class add  parent 1:1 classid 1:<id> htb rate <limit>mbit
-#   tc filter add parent 1: prio 200 handle <mark> fw flowid 1:<id>
-#
-# Mark range: APP_MARK_BASE = 0x900000, avoids the 0x800000 range used by
-# per-device limits in iptables_manager.sh / tc_manager.sh.
-#
-# Class id range: 0x9001-0x9998 (v5.12: 避开默认类 1:9999 = 0x9999). Stays away
-# from per-device classes (1:2..1:99, 1:100 — 十六进制解析后均 < 0x9001).
-#
-# Idempotent: full rebuild each call. No state is kept between invocations.
-# Costs ~50ms per call on Pixel-class hw for a handful of limits.
-#
-# Invocation: hnc_watchdog calls every 30s, OR immediately when
-# /run/app_limit.dirty marker is present (set by hnc_httpd after a
-# successful POST /api/action app_limit_set/clear).
+# v5.34 双栈核心架构:
+#   1. 正交位域锚定: 在 mangle/FORWARD (HNC_APP_LIMIT_UP) 按客户端源 MAC 将槽位号 CS (1..254)
+#      写入 ctmark 高 8 位 (0xff000000), 与设备级 CONNMARK_MASK (0x00ffffff) 完全正交不互踩;
+#   2. 下行精准打标: 在 mangle/POSTROUTING (HNC_APP_LIMIT_DOWN, 挂于 HNC_SAVE 之后) 用二级 -g 子链
+#      HNC_AL_C<slot> (connmark 高 8 位主路径 + ip -6 neigh 活跃全球单播地址双保险) 对匹配的远端
+#      IPv4 / IPv6 应用地址写入 0x900000+i, 绝不污染 ctmark[23:0] 的设备级 0x800000+mid;
+#   3. 双栈 tc 过滤器: 使用 protocol all prio 2 fw (兼容回退拆分 protocol ip + ipv6), 让携带
+#      0x900000+i 的 IPv4 (0x0800) 与 IPv6 (0x86dd) 下行包同时进入对应 HTB 限速类;
+#   4. 摘要快路径与原子脏标: 配置与 IP 映射无变化且链/类完好时跳过拆建, 消除每 30 秒令牌桶重置。
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
@@ -41,53 +22,71 @@ DEVICES="$HNC_DIR/data/devices.json"
 DIRTY="$HNC_DIR/run/app_limit.dirty"
 LOG="$HNC_DIR/logs/app_limits.log"
 
-# v5.9.3 BUG-012 步骤1 / BUG-011 连带:两个可观测性文件
-APP_SIG_FILE="$RUN/app_limits.applied.sig"        # 上一轮实际下发的 tc 规则签名
-INACTIVE_MARKER="$RUN/app_limits_inactive.marker" # "配了限速但没生效"的 marker
+APP_SIG_FILE="$RUN/app_limits.applied.sig"
+FULL_SIG_FILE="$RUN/app_limits.full_state.sig"
+INACTIVE_MARKER="$RUN/app_limits_inactive.marker"
 
-APP_MARK_BASE_DEC=9437184   # 0x900000 — fwmark 高位避开 0x800000 device mark
-APP_CLASS_MINOR_BASE=36864  # 0x9000 — tc classid minor in [0x9001, 0x9998]
-# v5.12: 上界收到 0x9998。tc 的 classid 次号按【十六进制】解析,HNC 的默认类
-# "1:9999" 实际是 0x9999=39321,旧上界 65520 把它圈进"应用限速保留段":本脚本
-# 由 hnc_watchdog 每 30s 无条件调用,Step 1 每轮都 `tc class del 1:9999`(默认类
-# 没有 filter 引用,HTB 允许删)→ 未限速设备走 HTB direct 队列,全局带宽整形
-# (1:1 ceil)与默认叶子 AQM 全部失效。0x9001..0x9998 仍有 2456 个槽位,足够。
-APP_CLASS_MINOR_MAX=39320   # 0x9998
-CHAIN=HNC_APP_LIMIT
-FILTER_PRIO=200
+APP_MARK_BASE_DEC=9437184   # 0x900000
+APP_CLASS_MINOR_BASE=36864  # 0x9000
+APP_CLASS_MINOR_MAX=39320   # 0x9998 (避开默认类 1:9999 = 0x9999)
+CHAIN_UP=HNC_APP_LIMIT_UP
+CHAIN_DOWN=HNC_APP_LIMIT_DOWN
+LEGACY_CHAIN=HNC_APP_LIMIT
+FILTER_PRIO=2               # 高于设备级 u32 与 v6_sync (201..299), 防设备级过滤器抢走应用限速包
 
-mkdir -p "$HNC_DIR/logs" 2>/dev/null
+mkdir -p "$HNC_DIR/logs" "$RUN" 2>/dev/null
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
 
-# rotate log if >256 KB
 if [ -f "$LOG" ]; then
     sz=$(stat -c %s "$LOG" 2>/dev/null || echo 0)
     [ "$sz" -gt 262144 ] && mv "$LOG" "${LOG}.1" 2>/dev/null
 fi
 
-# Always clear dirty marker at start — even if we early-exit below.
-rm -f "$DIRTY" 2>/dev/null
+IPT="iptables -w 2"
+IP6T="ip6tables -w 2"
+IPV6_OK=0
+if command -v ip6tables >/dev/null 2>&1 && $IP6T -t mangle -L -n >/dev/null 2>&1; then
+    IPV6_OK=1
+fi
 
-mkdir -p "$RUN" 2>/dev/null
+# 互斥锁: 防止 hnc_watchdog(30s 周期)与 hnc_httpd(保存应用限速即时触发)并发拆建链与 HTB 类
+AL_LOCK="$RUN/app_limits.lock"
+al_lock() {
+    local _n=0 _lp _ts _now
+    while ! mkdir "$AL_LOCK" 2>/dev/null; do
+        _lp=$(cat "$AL_LOCK/pid" 2>/dev/null)
+        _ts=$(cat "$AL_LOCK/ts" 2>/dev/null)
+        _now=$(date +%s 2>/dev/null || echo 0)
+        if [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; then
+            rm -rf "$AL_LOCK" 2>/dev/null
+            continue
+        fi
+        case "$_ts:$_now" in
+            *[!0-9:]*|:*) ;;
+            *) [ "$_ts" -gt 0 ] && [ $((_now - _ts)) -ge 30 ] && rm -rf "$AL_LOCK" 2>/dev/null && continue ;;
+        esac
+        _n=$((_n + 1))
+        [ "$_n" -ge 50 ] && return 1
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    echo "$$" > "$AL_LOCK/pid" 2>/dev/null
+    date +%s > "$AL_LOCK/ts" 2>/dev/null
+    return 0
+}
+al_unlock() {
+    [ "$(cat "$AL_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$AL_LOCK" 2>/dev/null
+}
+if ! al_lock; then
+    log "WARN: app_limits.lock busy, deferring to next cycle"
+    exit 0
+fi
 
-# ─── v5.9.3 BUG-012 步骤1:tc 快照条件触发 ─────────────────────────────
-#
-# 本脚本被 hnc_watchdog 每 30s fork 一次,做的是自己那套 iptables + tc 全量重建
-# (下面 Step 1 删 / Step 5 建),**完全不经过 tc_manager.sh 的命令分发器**,
-# 而 tc_snapshot_async 只挂在那个分发器上 → run/tc_state.json 可以停在几天前
-# (真机实测 9 天),bin/diag.sh / json_health_panel.sh 只判文件存在就报健康。
-#
-# 关键是"条件触发":每 30s 无条件刷会让 logs/tc_state.log 每天多 2880 行。
-# 判据取"本轮下发的 tc 规则签名"(classid=rate 的集合)——
-#   - 只包含真正影响 tc 树的东西,不含 ip_app_map 那些随时抖动的 IP 数量,
-#     否则 dpid 每观测到一个新 IP 就会误触发一次;
-#   - 规则集没变时,删了再原样加回去,tc 树的最终状态一致,快照没有刷新价值。
-#
-# 同步跑而不是 tc_manager.sh 那种 `( ... ) &`:hnc_watchdog 用
-# cmd.Stdout/Stderr = io.Discard,os/exec 会为非 *os.File 的 Writer 建管道,
-# Wait() 要等所有写端关闭 —— 后台子 shell 会继承那两个管道把 Wait 挂住。
+HAD_DIRTY=0
+if [ -f "$DIRTY" ]; then
+    mv -f "$DIRTY" "${DIRTY}.processing" 2>/dev/null && HAD_DIRTY=1
+fi
+
 APP_SIG=""
-
 tc_snapshot_if_changed() {
     prev=$(cat "$APP_SIG_FILE" 2>/dev/null)
     [ "$prev" = "$APP_SIG" ] && return 0
@@ -98,40 +97,87 @@ tc_snapshot_if_changed() {
     return 0
 }
 
-# Locate current iface. Multiple fallbacks because watchdog may not have
-# written run/active_iface yet on a cold boot.
 IFACE=""
-[ -f "$HNC_DIR/run/active_iface" ] && IFACE=$(cat "$HNC_DIR/run/active_iface" 2>/dev/null | head -1 | tr -d '\r\n ')
+[ -f "$HNC_DIR/run/active_iface" ] && IFACE=$(head -n 1 "$HNC_DIR/run/active_iface" 2>/dev/null | tr -d '\r\n ')
 if [ -z "$IFACE" ] && [ -x "$HNC_DIR/bin/device_detect.sh" ]; then
     IFACE=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null | tr -d '\r\n ')
 fi
-[ -z "$IFACE" ] && { log "no iface, exit"; exit 0; }
+if [ -z "$IFACE" ]; then
+    [ "$HAD_DIRTY" = 1 ] && [ ! -f "$DIRTY" ] && mv -f "${DIRTY}.processing" "$DIRTY" 2>/dev/null
+    rm -f "${DIRTY}.processing" 2>/dev/null
+    al_unlock
+    exit 0
+fi
 
-# ─── Step 1: clean up old rules ───────────────────────────────────────
-# Both iptables HNC_APP_LIMIT chain and tc app classes / filters.
-
-ensure_chain() {
-    iptables -t mangle -N $CHAIN 2>/dev/null
-    # Append (not insert) so HNC_APP_LIMIT runs AFTER HNC_MARK in the
-    # FORWARD chain. iptables MARK overwrites the previous mark by default,
-    # so app-level rules win over device-level rules — which matches user
-    # mental model: "I specifically configured 抖音 to 1 Mbps, that should
-    # apply even if the device has its own overall limit".
-    if ! iptables -t mangle -C FORWARD -j $CHAIN 2>/dev/null; then
-        iptables -t mangle -A FORWARD -j $CHAIN 2>/dev/null
-    fi
+app_classes_alive() {
+    local sig cids cid shown
+    sig=$(cat "$APP_SIG_FILE" 2>/dev/null)
+    [ -n "$sig" ] || return 0
+    shown=$(tc class show dev "$IFACE" 2>/dev/null)
+    [ -n "$shown" ] || return 1
+    cids=$(printf '%s' "$sig" | tr ',' '\n' | sed -n 's/=.*//p')
+    for cid in $cids; do
+        printf '%s\n' "$shown" | grep -q "class htb $cid " || return 1
+    done
+    return 0
 }
 
-ensure_chain
-iptables -t mangle -F $CHAIN 2>/dev/null
+# 无变更摘要快路径: 同时校验双栈 FORWARD(UP) + POSTROUTING(DOWN) 跳转链与全部 1:900x HTB 子类均在位
+if [ "$HAD_DIRTY" = 0 ] && [ -s "$LIMITS_FLAT" ] && [ -s "$IP_APP_FLAT" ] && [ -f "$FULL_SIG_FILE" ]; then
+    CUR_FULL_SIG=$(
+        {
+            printf 'iface=%s|v6=%s\n' "$IFACE" "$IPV6_OK"
+            cat "$LIMITS_FLAT" 2>/dev/null
+            cat "$IP_APP_FLAT" 2>/dev/null
+            cat "$DEVICES" 2>/dev/null
+            ip -6 neigh show dev "$IFACE" 2>/dev/null | awk '$1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $NF != "FAILED" && $NF != "INCOMPLETE" {for(i=2;i<NF;i++) if($i=="lladdr") print tolower($1), tolower($(i+1))}' | sort
+        } | cksum | awk '{print $1 "-" $2}'
+    )
+    OLD_FULL_SIG=$(cat "$FULL_SIG_FILE" 2>/dev/null)
+    if [ "$CUR_FULL_SIG" = "$OLD_FULL_SIG" ] \
+       && $IPT -t mangle -C FORWARD -j "$CHAIN_UP" 2>/dev/null \
+       && $IPT -t mangle -C POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null \
+       && { [ "$IPV6_OK" = 0 ] || { $IP6T -t mangle -C FORWARD -j "$CHAIN_UP" 2>/dev/null && $IP6T -t mangle -C POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null; }; } \
+       && tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "htb 1:" \
+       && app_classes_alive; then
+        al_unlock
+        exit 0
+    fi
+fi
 
-# Remove app-range tc classes (0x9001-0x9998 — our reserved minor range).
-tc class show dev "$IFACE" 2>/dev/null | \
-    awk '$1=="class" && $2=="htb" {print $3}' | \
+cleanup_ipt_app_limits() {
+    local T sub c _k
+    for T in "$IPT" "$([ "$IPV6_OK" = 1 ] && echo "$IP6T")"; do
+        [ -z "$T" ] && continue
+        for _k in 1 2 3 4; do $T -t mangle -D FORWARD -j "$LEGACY_CHAIN" 2>/dev/null || break; done
+        for _k in 1 2 3 4; do $T -t mangle -D FORWARD -j "$CHAIN_UP" 2>/dev/null || break; done
+        for _k in 1 2 3 4; do $T -t mangle -D POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null || break; done
+        for sub in "$LEGACY_CHAIN" "$CHAIN_UP" "$CHAIN_DOWN"; do
+            $T -t mangle -F "$sub" 2>/dev/null || true
+        done
+        $T -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}' | while IFS= read -r c; do
+            [ -n "$c" ] || continue
+            $T -t mangle -F "$c" 2>/dev/null || true
+            $T -t mangle -X "$c" 2>/dev/null || true
+        done
+        for sub in "$LEGACY_CHAIN" "$CHAIN_UP" "$CHAIN_DOWN"; do
+            $T -t mangle -X "$sub" 2>/dev/null || true
+        done
+    done
+}
+
+# ─── Step 1: Clean old app-limit chains, filters & HTB classes ─────────
+cleanup_ipt_app_limits
+
+for _p in "$FILTER_PRIO" 200 199; do
+    for _proto in all ip ipv6; do
+        tc filter del dev "$IFACE" parent 1: prio "$_p" protocol "$_proto" 2>/dev/null || true
+    done
+done
+
+tc class show dev "$IFACE" 2>/dev/null | awk '/class htb 1:/ {print $3}' | \
     while IFS= read -r cid; do
-        # cid like "1:9001" with hex minor — convert to decimal for range check.
         minor_hex=$(echo "$cid" | awk -F: '{print $2}')
-        # printf to dec; tolerant of leading 0x or bare hex
         minor_dec=$(printf '%d' "0x$minor_hex" 2>/dev/null)
         [ -z "$minor_dec" ] && continue
         if [ "$minor_dec" -gt "$APP_CLASS_MINOR_BASE" ] && [ "$minor_dec" -le "$APP_CLASS_MINOR_MAX" ]; then
@@ -139,118 +185,92 @@ tc class show dev "$IFACE" 2>/dev/null | \
         fi
     done
 
-# Remove app-range filters (prio 200).
-tc filter del dev "$IFACE" parent 1: prio $FILTER_PRIO 2>/dev/null
-
-# ─── Step 2: read configs ─────────────────────────────────────────────
-
+# ─── Step 2: Check active config & map readiness ───────────────────────
 if [ ! -s "$LIMITS_FLAT" ]; then
-    # No active limits — clean exit, chain stays empty.
-    log "no app_limits configured (cleaned old rules)"
-    # v5.9.3 BUG-011:用户压根没配应用限速,不算"失效",清掉 marker。
-    rm -f "$INACTIVE_MARKER" 2>/dev/null
-    # v5.9.3 BUG-012:上面 Step 1 可能刚删掉了上一轮的 app class/filter,
-    # 空签名 != 上一轮签名时说明 tc 树确实变了,要刷快照。
+    rm -f "$INACTIVE_MARKER" "$FULL_SIG_FILE" "$IPSTATS_FLAT" "${DIRTY}.processing" 2>/dev/null
+    log "no app_limits configured (cleaned old dual-stack rules)"
     tc_snapshot_if_changed
+    al_unlock
     exit 0
 fi
 
-# Bail if dpid hasn't produced an ip→app map yet (e.g. just rebooted).
 if [ ! -s "$IP_APP_FLAT" ]; then
-    # ─── v5.9.3 BUG-011 连带:别再静默失效 ─────────────────────────────
-    # ip_app_map.flat 的唯一生产者是 dpid 主抓包路径上的 IPAppMap.Record;
-    # dpid 一旦选错网卡 / 接口重建后不重绑(BUG-001),这张表就恒空,而这里
-    # 只 log 一行普通句子后 exit 0,对 hnc_watchdog 看起来完全成功。
-    # 用户侧的观感是"应用级限速配了但毫无作用",却完全不知道断在哪一环。
-    # 现在:① 一条固定可 grep 的串 HNC_APP_LIMIT_INACTIVE;
-    #       ② run/ 里落 marker(首次失效的时间戳)+ 连续失效轮次计数,
-    #          让 diag / 人工 cat 能一眼定位到"是 dpid 没产出映射,
-    #          不是限速配置写错了"。30s 一轮,streak×30 秒即失效时长。
     n_cfg=$(grep -c . "$LIMITS_FLAT" 2>/dev/null)
     case "$n_cfg" in *[!0-9]*|'') n_cfg=0 ;; esac
-    # marker 格式(两行,故意保持人眼可读 + 好 parse):
-    #   第 1 行 = 本次连续失效的起始 unix ts(跨轮保留,不被覆盖)
-    #   第 2 行 = 连续失效轮次
     since=$(sed -n '1p' "$INACTIVE_MARKER" 2>/dev/null)
     case "$since" in *[!0-9]*|'') since=$(date +%s 2>/dev/null || echo 0) ;; esac
     streak=$(sed -n '2p' "$INACTIVE_MARKER" 2>/dev/null)
     case "$streak" in *[!0-9]*|'') streak=0 ;; esac
     streak=$((streak + 1))
     printf '%s\n%s\n' "$since" "$streak" > "$INACTIVE_MARKER" 2>/dev/null
-    log "HNC_APP_LIMIT_INACTIVE: ip_app_map.flat empty/missing — 应用级限速未生效 (configured=$n_cfg entries, streak=$streak rounds since=$since, dpid 未产出 IP→APP 映射; 排查: run/dpi_state.json 的 stats.packets 是否在涨)"
+    rm -f "$FULL_SIG_FILE" "${DIRTY}.processing" 2>/dev/null
+    log "HNC_APP_LIMIT_INACTIVE: ip_app_map.flat empty/missing (configured=$n_cfg, streak=$streak)"
     tc_snapshot_if_changed
+    al_unlock
     exit 0
 fi
-# 走到这里说明映射有数据了,清掉失效 marker。
 rm -f "$INACTIVE_MARKER" 2>/dev/null
 
-# ─── Step 3: resolve mac → client_ip from devices.json ────────────────
-#
-# devices.json is JSON; we don't have jq. We extract per-MAC IPs with a
-# tolerant grep+sed — same shape as elsewhere in HNC.
-#
-# Expected key per device:
-#   "aa:bb:cc:dd:ee:01": {"ip":"192.168.43.50", ...}
-#
-# Limitation: we only capture the FIRST ip-field-of-each-mac-record. Good
-# enough — hotspotd stores one IPv4 per MAC.
+# Ensure root HTB 1: exists on $IFACE (pass HNC_SKIP_TC_SNAPSHOT=1 so BUG-012 conditional snapshot stays controlled here)
+if [ -z "$HNC_TEST_MODE" ] && ! tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "htb 1:"; then
+    [ -x "$HNC_DIR/bin/tc_manager.sh" ] && HNC_SKIP_TC_SNAPSHOT=1 sh "$HNC_DIR/bin/tc_manager.sh" init "$IFACE" >/dev/null 2>&1 || true
+fi
 
 resolve_mac_ip() {
-    local mac=$1
+    local mac_lc
+    mac_lc=$(echo "$1" | tr 'A-Z' 'a-z')
     [ -f "$DEVICES" ] || return 1
-    # devices.json shape: { "mac1": { "ip":"...", ... }, "mac2": {...} }
-    # The file is usually one long line (no pretty-print). We scan
-    # left-to-right for the target mac's entry, then capture the FIRST
-    # "ip":"..." occurring AFTER that key.
-    #
-    # Note: a naive awk-per-line search is fragile on a single-line file
-    # because all fields collapse onto one record. Switch to sed-driven
-    # extraction which handles both pretty-printed and minified shapes:
-    #
-    #   1) Find the substring starting at "<mac>":{
-    #   2) Within that, capture the first "ip":"<v4>"
-    sed -n 's/.*"'"$mac"'":{[^}]*"ip":"\([0-9.]*\)".*/\1/p' "$DEVICES" | head -1
+    tr -d '\r\n' < "$DEVICES" 2>/dev/null \
+        | grep -oiE "\"$mac_lc\"[[:space:]]*:[[:space:]]*\{[^}]*\}" \
+        | sed -n 's/.*"ip"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1/p' | head -n 1
 }
 
-# ─── Step 4: build mark-id table (stable order from app_limits.flat) ──
-#
-# We index limits by line number to get a stable, unique mark per (mac,app).
-# That gives us a small mark range (max ~100 entries) and matching tc class
-# minors.
+resolve_mac_ip6s() {
+    local mac_lc
+    mac_lc=$(echo "$1" | tr 'A-Z' 'a-z')
+    ip -6 neigh show dev "$IFACE" 2>/dev/null | awk -v m="$mac_lc" '
+        $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $NF != "FAILED" && $NF != "INCOMPLETE" {
+            for (i = 2; i < NF; i++) {
+                if ($i == "lladdr" && tolower($(i+1)) == m) {
+                    print tolower($1)
+                    if (++n >= 8) exit
+                }
+            }
+        }'
+}
+
+client_online_any() {
+    local mac=$1 v4=$2 v6s=$3 mac_lc
+    [ -n "$v4" ] && return 0
+    [ -n "$v6s" ] && return 0
+    mac_lc=$(echo "$mac" | tr 'A-Z' 'a-z')
+    ip -6 neigh show dev "$IFACE" 2>/dev/null | awk -v m="$mac_lc" '
+        tolower($0) ~ ("lladdr " m) && $NF != "FAILED" { found=1; exit }
+        END { exit !found }'
+}
 
 mark_for_index() {
-    # 32-bit fwmark, no upper-bound issue. index 0-based.
     echo "0x$(printf '%x' $((APP_MARK_BASE_DEC + 1 + $1)))"
 }
 
 classid_for_index() {
-    # tc classid minor MUST fit in 16 bits. v5.12: 用 0x9001-0x9998(不含默认类
-    # 0x9999),最多 2456 条 (mac, app) 限速。1:9001, 1:9002, ..., 1:9998
     local minor=$((APP_CLASS_MINOR_BASE + 1 + $1))
     if [ "$minor" -gt "$APP_CLASS_MINOR_MAX" ]; then
-        # Past the safe window. Drop. apply log will note skipped entries.
         echo ""
         return
     fi
     echo "1:$(printf '%x' $minor)"
 }
 
-# ─── v5.20 Step 4.5: 共享 IP(CDN 多租户)过滤 ─────────────────────────
-# ip_app_map 是"后写者胜", 一个 CDN IP 常同时服务多个 App。给 A 限速时若把
-# 同时承载 B 的 IP 也打上 A 的 mark, B 会被一起限速。判据(与 httpd
-# app_limit_shared.go 的 appLimitSplitShared 同一套规则, 改这里要同步改那边):
-#   dpid 的 IP→域名反查表 run/dpi_ipname.json 对该 IP 归出的 app 非空且 ≠ A
-#   (包括规则库标成 cdn/cloud 的 Akamai/Cloudflare/阿里云等"应用")→ 共享, 跳过。
-# 逃生口: rules.json 顶层 "app_limit_include_shared_ips": true → 不过滤(旧行为)。
-# 每条限速的统计写 run/app_limits_ipstats.flat: <mac> <app> <ips_total> <ips_shared_skipped> <ips_applied>
 . "$HNC_DIR/bin/tc_rate_calc.sh" 2>/dev/null || . "$(dirname "$0")/tc_rate_calc.sh"
 IPNAME_JSON="$RUN/dpi_ipname.json"
 IPNAME_APP_FLAT="$RUN/.ipname_app.flat.$$"
 IPSTATS_FLAT="$RUN/app_limits_ipstats.flat"
+SLOT_MAP="$RUN/.al_slots.$$"
 INCLUDE_SHARED=0
 tr -d '\n' < "$HNC_DIR/data/rules.json" 2>/dev/null | \
     grep -Eq '"app_limit_include_shared_ips"[[:space:]]*:[[:space:]]*(true|"true"|1|"1"|"on")' && INCLUDE_SHARED=1
-# 首行哨兵: 保证 awk 的 FNR==NR 在第一个文件为空时也不会误吞第二个文件。
+
 {
     echo "#sentinel -"
     tr -d '\n' < "$IPNAME_JSON" 2>/dev/null | \
@@ -258,9 +278,9 @@ tr -d '\n' < "$HNC_DIR/data/rules.json" 2>/dev/null | \
         sed -n 's/^"\([^"]*\)":{.*"app":"\([^"]*\)".*/\1 \2/p'
 } > "$IPNAME_APP_FLAT" 2>/dev/null
 : > "$IPSTATS_FLAT.tmp" 2>/dev/null
-trap 'rm -f "$IPNAME_APP_FLAT" "$IPSTATS_FLAT.tmp" 2>/dev/null' EXIT
+: > "$SLOT_MAP" 2>/dev/null
+trap 'rm -f "$IPNAME_APP_FLAT" "$IPSTATS_FLAT.tmp" "$SLOT_MAP" "${DIRTY}.processing" 2>/dev/null; al_unlock' EXIT INT TERM
 
-# split_app_ips <app> → 每行 "K <ip>"(保留)或 "S <ip>"(共享, 跳过)
 split_app_ips() {
     awk -v want="$1" -v inc="$INCLUDE_SHARED" '
         FNR == NR { if ($1 !~ /^#/ && $2 != "" && $2 != want) sh[$1] = 1; next }
@@ -270,35 +290,128 @@ split_app_ips() {
         }' "$IPNAME_APP_FLAT" "$IP_APP_FLAT"
 }
 
-# ─── Step 5: walk limits, build rules ─────────────────────────────────
+chains_ready=0
+ensure_top_chains() {
+    [ "$chains_ready" = 1 ] && return 0
+    local T _rc
+    for T in "$IPT" "$([ "$IPV6_OK" = 1 ] && echo "$IP6T")"; do
+        [ -z "$T" ] && continue
+        $T -t mangle -N "$CHAIN_UP" 2>/dev/null || $T -t mangle -F "$CHAIN_UP"
+        $T -t mangle -N "$CHAIN_DOWN" 2>/dev/null || $T -t mangle -F "$CHAIN_DOWN"
+        $T -t mangle -A "$CHAIN_DOWN" ! -o "$IFACE" -j RETURN
+        $T -t mangle -C FORWARD -j "$CHAIN_UP" 2>/dev/null
+        _rc=$?
+        [ "$_rc" -eq 1 ] && $T -t mangle -A FORWARD -j "$CHAIN_UP" 2>/dev/null
+        $T -t mangle -C POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null
+        _rc=$?
+        if [ "$_rc" -eq 1 ]; then
+            # 必须严格排在 HNC_SAVE 之后(OEM 规则占前排时 -I POSTROUTING 2 会跑到 HNC_SAVE 之前,
+            # 导致 0x900000+i 被写入 ctmark 污染设备级限速)!
+            _save_ln=$($T -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$2 == "HNC_SAVE" {print $1; exit}')
+            if [ -n "$_save_ln" ]; then
+                $T -t mangle -I POSTROUTING $((_save_ln + 1)) -j "$CHAIN_DOWN" 2>/dev/null \
+                    || $T -t mangle -A POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null
+            else
+                $T -t mangle -A POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null
+            fi
+        fi
+    done
+    chains_ready=1
+}
 
+next_slot=1
+get_or_init_client_subchain() {
+    local mac=$1 v4=$2 v6s=$3 slot cs_hex sub v6
+    slot=$(awk -v m="$mac" '$1==m{print $2; exit}' "$SLOT_MAP" 2>/dev/null)
+    if [ -n "$slot" ]; then
+        echo "HNC_AL_C$slot"
+        return 0
+    fi
+    [ "$next_slot" -gt 254 ] && { echo ""; return 1; }
+    ensure_top_chains
+    slot=$next_slot
+    next_slot=$((next_slot + 1))
+    echo "$mac $slot" >> "$SLOT_MAP"
+    cs_hex=$(printf '0x%02x000000' "$slot")
+    sub="HNC_AL_C$slot"
+
+    $IPT -t mangle -N "$sub" 2>/dev/null || $IPT -t mangle -F "$sub"
+    $IPT -t mangle -A "$CHAIN_UP" -i "$IFACE" -m mac --mac-source "$mac" \
+        -j CONNMARK --set-xmark "$cs_hex/0xff000000" 2>/dev/null
+    $IPT -t mangle -A "$CHAIN_DOWN" -m connmark --mark "$cs_hex/0xff000000" -g "$sub" 2>/dev/null
+    [ -n "$v4" ] && $IPT -t mangle -A "$CHAIN_DOWN" -d "$v4" -g "$sub" 2>/dev/null
+
+    if [ "$IPV6_OK" = 1 ]; then
+        $IP6T -t mangle -N "$sub" 2>/dev/null || $IP6T -t mangle -F "$sub"
+        $IP6T -t mangle -A "$CHAIN_UP" -i "$IFACE" -m mac --mac-source "$mac" \
+            -j CONNMARK --set-xmark "$cs_hex/0xff000000" 2>/dev/null
+        $IP6T -t mangle -A "$CHAIN_DOWN" -m connmark --mark "$cs_hex/0xff000000" -g "$sub" 2>/dev/null
+        for v6 in $v6s; do
+            $IP6T -t mangle -A "$CHAIN_DOWN" -d "$v6" -g "$sub" 2>/dev/null
+        done
+    fi
+    echo "$sub"
+}
+
+add_tc_fw_dual() {
+    local mark=$1 cid=$2
+    if tc filter add dev "$IFACE" protocol all parent 1: prio "$FILTER_PRIO" \
+            handle "$mark" fw flowid "$cid" 2>/dev/null; then
+        return 0
+    fi
+    tc filter add dev "$IFACE" protocol ip parent 1: prio "$FILTER_PRIO" \
+        handle "$mark" fw flowid "$cid" 2>/dev/null || return 1
+    if [ "$IPV6_OK" = 1 ]; then
+        tc filter add dev "$IFACE" protocol ipv6 parent 1: prio 199 \
+            handle "$mark" fw flowid "$cid" 2>/dev/null || return 1
+    fi
+    return 0
+}
+
+rollback_app_tc() {
+    local mark=$1 cid=$2
+    tc filter del dev "$IFACE" protocol all parent 1: prio "$FILTER_PRIO" handle "$mark" fw 2>/dev/null || true
+    tc filter del dev "$IFACE" protocol ip parent 1: prio "$FILTER_PRIO" handle "$mark" fw 2>/dev/null || true
+    tc filter del dev "$IFACE" protocol ipv6 parent 1: prio 199 handle "$mark" fw 2>/dev/null || true
+    tc class del dev "$IFACE" classid "$cid" 2>/dev/null || true
+}
+
+# ─── Step 3: Walk limits & emit dual-stack rules ──────────────────────
 i=0
 applied=0
 skipped=0
-while IFS=' ' read -r MAC APP RATE; do
+had_err=0
+while IFS=' ' read -r MAC APP RATE _; do
     [ -z "$MAC" ] && continue
     case "$MAC" in '#'*) continue ;; esac
+    MAC=$(echo "$MAC" | tr 'A-Z' 'a-z')
+    case "$MAC" in
+        [0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]) ;;
+        *) skipped=$((skipped + 1)); continue ;;
+    esac
+    case "$RATE" in
+        ''|*[!0-9.]*|.*|*.*.*) skipped=$((skipped + 1)); continue ;;
+    esac
 
     CLIENT_IP=$(resolve_mac_ip "$MAC")
-    if [ -z "$CLIENT_IP" ]; then
-        log "skip $MAC/$APP: client not online"
+    CLIENT_IP6S=$(resolve_mac_ip6s "$MAC")
+    if ! client_online_any "$MAC" "$CLIENT_IP" "$CLIENT_IP6S"; then
+        log "skip $MAC/$APP: client not online (v4/v6)"
         skipped=$((skipped + 1))
         i=$((i + 1))
         continue
     fi
 
-    # Pull all IPs currently mapped to this app from ip_app_map.flat.
-    # v5.20: 同时剔除共享 CDN IP(见 Step 4.5)
     SPLIT=$(split_app_ips "$APP")
     APP_IPS=$(echo "$SPLIT" | awk '$1=="K"{print $2}' | sort -u)
-    n_total=$(echo "$SPLIT" | grep -c '^[KS] ')
+    n_total=$(echo "$SPLIT" | grep -cE '^[KS] ')
     n_shared=$(echo "$SPLIT" | grep -c '^S ')
     if [ -z "$APP_IPS" ]; then
         echo "$MAC $APP $n_total $n_shared 0" >> "$IPSTATS_FLAT.tmp"
         if [ "$n_total" -gt 0 ]; then
-            log "skip $MAC/$APP: all $n_total IP(s) are shared with other apps (CDN); set app_limit_include_shared_ips=true to include"
+            log "skip $MAC/$APP: all $n_total IP(s) are shared with other apps"
         else
-            log "skip $MAC/$APP: no IPs observed for app yet"
+            log "skip $MAC/$APP: no v4/v6 IPs observed for app yet"
         fi
         skipped=$((skipped + 1))
         i=$((i + 1))
@@ -308,60 +421,79 @@ while IFS=' ' read -r MAC APP RATE; do
     MARK=$(mark_for_index $i)
     CID=$(classid_for_index $i)
     if [ -z "$CID" ]; then
-        log "skip $MAC/$APP: classid space exhausted (>2456 entries)"
+        log "skip $MAC/$APP: classid space exhausted"
         skipped=$((skipped + 1))
         i=$((i + 1))
         continue
     fi
-    RATE_MBIT=$(printf '%.2f' "$RATE")
+    SUB_CHAIN=$(get_or_init_client_subchain "$MAC" "$CLIENT_IP" "$CLIENT_IP6S")
+    if [ -z "$SUB_CHAIN" ]; then
+        log "skip $MAC/$APP: client slot exhausted (>254)"
+        skipped=$((skipped + 1))
+        i=$((i + 1))
+        continue
+    fi
 
-    # Create a tc class for this (mac, app) under root.
-    # Parent is 1:1 to inherit overall root rate; rate=ceil for hard cap.
-    # v5.20: burst/quantum 与设备限速同一算法(bin/tc_rate_calc.sh, compat 档 ≈20ms);
-    # 旧的固定 32k 在 0.5Mbps 下 ≈0.5 秒量(短时超发), 在 300Mbps 下不足 1ms(跑不满)。
-    # rate 用 kbit 整数(与 tc_manager mbps_to_rate 一致, 避免 "%.2f" 截掉 <10kbit 精度)。
+    RATE_MBIT=$(printf '%.2f' "$RATE")
     RATE_KBIT=$(awk -v v="$RATE" 'BEGIN{k=int(v*1000+0.5); if(k<1)k=1; print k}')
     APP_BURST=$(hnc_burst_k "$RATE" compat)
     APP_QUANTUM=$(hnc_quantum "$RATE")
-    if [ -z "$APP_QUANTUM" ] || ! tc class add dev "$IFACE" parent 1:1 classid "$CID" htb \
+    _cls_ok=0
+    if [ -n "$APP_QUANTUM" ] && tc class add dev "$IFACE" parent 1:1 classid "$CID" htb \
         rate "${RATE_KBIT}kbit" ceil "${RATE_KBIT}kbit" \
         burst "$APP_BURST" cburst "$APP_BURST" quantum "$APP_QUANTUM" 2>/dev/null; then
-        tc class add dev "$IFACE" parent 1:1 classid "$CID" htb \
-            rate "${RATE_KBIT}kbit" ceil "${RATE_KBIT}kbit" \
-            burst "$APP_BURST" cburst "$APP_BURST" 2>/dev/null
+        _cls_ok=1
+    elif tc class add dev "$IFACE" parent 1:1 classid "$CID" htb \
+        rate "${RATE_KBIT}kbit" ceil "${RATE_KBIT}kbit" \
+        burst "$APP_BURST" cburst "$APP_BURST" 2>/dev/null; then
+        _cls_ok=1
+    fi
+    if [ "$_cls_ok" != 1 ] || ! add_tc_fw_dual "$MARK" "$CID"; then
+        log "ERROR: tc class/filter setup failed for $MAC/$APP (cid=$CID mark=$MARK), rolling back rule so device limit stays intact"
+        rollback_app_tc "$MARK" "$CID"
+        had_err=1
+        skipped=$((skipped + 1))
+        i=$((i + 1))
+        continue
     fi
 
-    # Filter: any packet bearing this mark goes to the class.
-    tc filter add dev "$IFACE" protocol ip parent 1: prio $FILTER_PRIO \
-        handle "$MARK" fw flowid "$CID" 2>/dev/null
-
-    # iptables MARK: for every (CLIENT_IP, APP_IP) pair, both directions.
-    # We only need downlink (server -> client) to enforce a download cap,
-    # but writing both directions makes the same chain reusable for future
-    # upload caps without rule churn.
+    n_v4=0
+    n_v6=0
     for IP in $APP_IPS; do
-        iptables -t mangle -A $CHAIN -d "$CLIENT_IP" -s "$IP" \
-            -j MARK --set-mark "$MARK" 2>/dev/null
-        iptables -t mangle -A $CHAIN -s "$CLIENT_IP" -d "$IP" \
-            -j MARK --set-mark "$MARK" 2>/dev/null
+        case "$IP" in
+            *[!0-9a-fA-F:./]*|'') continue ;;
+            *:*)
+                if [ "$IPV6_OK" = 1 ]; then
+                    $IP6T -t mangle -A "$SUB_CHAIN" -s "$IP" -j MARK --set-mark "$MARK" 2>/dev/null && n_v6=$((n_v6 + 1))
+                fi
+                ;;
+            *)
+                $IPT -t mangle -A "$SUB_CHAIN" -s "$IP" -j MARK --set-mark "$MARK" 2>/dev/null && n_v4=$((n_v4 + 1))
+                ;;
+        esac
     done
 
-    n_ips=$(echo "$APP_IPS" | wc -l | tr -d ' ')
+    n_ips=$((n_v4 + n_v6))
     echo "$MAC $APP $n_total $n_shared $n_ips" >> "$IPSTATS_FLAT.tmp"
-    # v5.9.3 BUG-012:只把真正影响 tc 树的部分(classid + rate)累进签名。
-    # 故意不含 n_ips / IP 列表 —— 那些只改 iptables MARK 规则,tc 的
-    # class/qdisc/filter 一个字节都不变,算进去会让快照被 dpid 的 IP 抖动带着
-    # 每 30s 刷一次,正好是要避免的那种日志噪声。
     APP_SIG="$APP_SIG$CID=$RATE_MBIT,"
-    log "applied $MAC ($CLIENT_IP) / $APP / ${RATE_KBIT}kbit burst=$APP_BURST / $n_ips ip(s) (shared skipped=$n_shared of $n_total, include_shared=$INCLUDE_SHARED) / mark=$MARK class=$CID"
+    log "applied $MAC (v4=${CLIENT_IP:-none}) / $APP / ${RATE_KBIT}kbit / ips=${n_ips}(v4=$n_v4,v6=$n_v6,shared_skip=$n_shared) / mark=$MARK class=$CID"
     applied=$((applied + 1))
     i=$((i + 1))
 done < "$LIMITS_FLAT"
 
-# 注:while 用的是重定向 `< "$LIMITS_FLAT"` 而不是管道,循环体在当前 shell 里
-# 跑,所以 APP_SIG / applied / skipped 的累加在这里是可见的。
-log "summary: applied=$applied skipped=$skipped"
-mv -f "$IPSTATS_FLAT.tmp" "$IPSTATS_FLAT" 2>/dev/null || true
+if [ "$had_err" = 0 ]; then
+    {
+        printf 'iface=%s|v6=%s\n' "$IFACE" "$IPV6_OK"
+        cat "$LIMITS_FLAT" 2>/dev/null
+        cat "$IP_APP_FLAT" 2>/dev/null
+        cat "$DEVICES" 2>/dev/null
+        ip -6 neigh show dev "$IFACE" 2>/dev/null | awk '$1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $NF != "FAILED" && $NF != "INCOMPLETE" {for(i=2;i<NF;i++) if($i=="lladdr") print tolower($1), tolower($(i+1))}' | sort
+    } | cksum | awk '{print $1 "-" $2}' > "$FULL_SIG_FILE" 2>/dev/null
+else
+    rm -f "$FULL_SIG_FILE" 2>/dev/null
+fi
 
-# v5.9.3 BUG-012 步骤1:本轮 tc 规则集与上一轮不同才刷快照。
+log "summary: applied=$applied skipped=$skipped err=$had_err ipv6=$IPV6_OK"
+mv -f "$IPSTATS_FLAT.tmp" "$IPSTATS_FLAT" 2>/dev/null || true
+rm -f "${DIRTY}.processing" 2>/dev/null
 tc_snapshot_if_changed

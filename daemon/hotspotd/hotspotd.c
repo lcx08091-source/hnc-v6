@@ -40,6 +40,7 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
+#include <sys/file.h>
 #include <sys/select.h>
 #include <sys/types.h>
 #include <sys/time.h>
@@ -73,9 +74,10 @@ static volatile sig_atomic_t g_running      = 1;  /* 0=退出主循环 */
 static void hlog(const char *fmt, ...) {
     if (!g_log) return;
     time_t t = time(NULL);
-    struct tm *tm = localtime(&t);
+    struct tm tm_buf;
     char buf[32];
-    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", tm);
+    localtime_r(&t, &tm_buf);
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M:%S", &tm_buf);
     fprintf(g_log, "[%s] [HOTSPOTD] ", buf);
     va_list ap;
     va_start(ap, fmt);
@@ -146,7 +148,7 @@ static void touch_refresh_file(void) {
  * devices.json 正常 < 32KB, 上限 1MB, 超限/不存在/读失败 → 0。展示用途,
  * 不做正确性判断。路径参数化给单测用。 */
 static int count_devices_in_file_at(const char *path) {
-    FILE *f = fopen(path, "r");
+    FILE *f = fopen(path, "re");
     if (!f) return 0;
     long sz = 0;
     if (fseek(f, 0, SEEK_END) == 0) { sz = ftell(f); if (sz < 0) sz = 0; rewind(f); }
@@ -175,7 +177,7 @@ static int send_all(int fd, const void *buf, size_t len) {
     const char *p = (const char *)buf;
     size_t off = 0;
     while (off < len) {
-        ssize_t n = send(fd, p + off, len - off, 0);
+        ssize_t n = send(fd, p + off, len - off, MSG_NOSIGNAL);
         if (n > 0) {
             off += (size_t)n;
             continue;
@@ -195,8 +197,18 @@ static void handle_client(int cfd) {
     setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv_rd, sizeof(tv_rd));
     setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv_wr, sizeof(tv_wr));
 
+    struct ucred cred;
+    socklen_t clen = sizeof(cred);
+    if (getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0 &&
+        cred.uid != geteuid() && geteuid() == 0) {
+        close(cfd);
+        return;
+    }
     char req[64] = {0};
-    ssize_t n = recv(cfd, req, sizeof(req)-1, 0);
+    ssize_t n;
+    do {
+        n = recv(cfd, req, sizeof(req)-1, 0);
+    } while (n < 0 && errno == EINTR);
     if (n <= 0) { close(cfd); return; }
     req[n] = '\0';
     /* 去尾部空白 */
@@ -205,7 +217,7 @@ static void handle_client(int cfd) {
 
     if (strcmp(req, "GET_DEVICES") == 0) {
         /* 直接发 JSON 文件内容(Go 写者的 devices.json) */
-        FILE *f = fopen(g_devices_path, "r");
+        FILE *f = fopen(g_devices_path, "re");
         if (!f) { (void)send_all(cfd, "{}", 2); }
         else {
             char fbuf[65536];
@@ -245,9 +257,9 @@ static void handle_client(int cfd) {
         hnc_offload_summary_t summ;
         hnc_scheduler_get_summary(&summ);
         char json[2048];
-        int n = hnc_scheduler_summary_to_json(&summ, json, sizeof(json));
-        if (n > 0) {
-            (void)send_all(cfd, json, (size_t)n);
+        int jlen = hnc_scheduler_summary_to_json(&summ, json, sizeof(json));
+        if (jlen > 0) {
+            (void)send_all(cfd, json, (size_t)jlen);
             (void)send_all(cfd, "\n", 1);
         } else {
             (void)send_all(cfd, "ERR:summary serialize\n", 22);
@@ -309,34 +321,25 @@ static int nl_open(void) {
 }
 
 static int unix_server_open(void) {
-    unlink(SOCK_PATH);
     int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
     if (fd < 0) { hlog("ERROR: unix socket: %s", strerror(errno)); return -1; }
 
     struct sockaddr_un su = {.sun_family = AF_UNIX};
     strncpy(su.sun_path, SOCK_PATH, sizeof(su.sun_path)-1);
-    if (bind(fd, (struct sockaddr *)&su, sizeof(su)) < 0) {
+    /* 此时已持有 PID 文件内核级 flock 排他锁，可安全清理死进程残留套接字；
+     * bind 前临时设 umask(0077)，使套接字节点落盘瞬间即为 0600，彻底消除 bind->chmod 竞态窗口 */
+    unlink(SOCK_PATH);
+    mode_t old_mask = umask(0077);
+    int brc = bind(fd, (struct sockaddr *)&su, sizeof(su));
+    umask(old_mask);
+    if (brc < 0) {
         hlog("ERROR: unix bind: %s", strerror(errno));
         close(fd); return -1;
     }
-    /* v3.6.2 P1-2 修复(Gemini 审查发现):socket 权限从 0666 收紧到 0600。
-     *
-     * 旧 0666 的风险:任何能访问 /data/local/hnc/run/ 目录的进程都能连
-     * socket 并发 QUIT(杀 daemon)或高频 REFRESH(本地 DoS)。
-     * /data/local/hnc 的 DAC 是 root:root,按理说普通 App 进不来,但:
-     * 1. 纵深防御原则 — 上层目录权限一旦被意外放开,socket 层也要能挡
-     * 2. 0666 是"所有人可读写",没有语义理由给非 root 进程开放
-     * 3. hotspotd 和所有合法客户端(watchdog / device_detect.sh / apply_device_rule.sh /
-     *    hnc_ipc)都以 root 运行,0600 (仅 owner=root) 完全够用
-     *
-     * 如果未来要让非 root 进程通信,应该显式 chown + chmod 0660,而不是 0666。 */
-    chmod(SOCK_PATH, 0600);
-    /* v3.8.6 纵深防御: 显式 chown 到 root:root,即使创建时 umask 异常
-     * 也保证只有 root 能访问。chown 失败不阻塞启动(本来就是 root 跑) */
-    if (chown(SOCK_PATH, 0, 0) != 0) {
-        hlog("WARN: chown SOCK_PATH failed: %s (continuing)", strerror(errno));
+    if (listen(fd, 8) < 0) {
+        hlog("ERROR: unix listen: %s", strerror(errno));
+        close(fd); return -1;
     }
-    listen(fd, 8);
     return fd;
 }
 
@@ -362,62 +365,48 @@ static void sig_term(int s) { (void)s; g_running      = 0; }
  * 第二个实例 O_EXCL 失败,检测到第一个实例活着 → 干净退出,
  * 不会 unlink 第一个实例的 PID 文件。
  */
+static int g_pid_lock_fd = -1;
+
 static int write_pid(void) {
-    int fd = open(PID_FILE, O_CREAT | O_EXCL | O_WRONLY, 0644);
+    /* v7: 采用内核级 flock 排他锁替代脆弱的 kill(old_pid, 0) 检查，
+     * 彻底杜绝 Android pid_max=32768 下 PID 撞号复用导致永久拒启，进程崩溃内核自动解锁 */
+    int fd = open(PID_FILE, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) {
-        if (errno == EEXIST) {
-            /* 文件已存在,检查里面的 PID 是否还活着 */
-            FILE *rf = fopen(PID_FILE, "r");
-            if (rf) {
-                int old_pid = 0;
-                if (fscanf(rf, "%d", &old_pid) == 1 && old_pid > 0) {
-                    fclose(rf);
-                    if (kill(old_pid, 0) == 0) {
-                        /* 旧进程还活着,不要继续 */
-                        hlog("ERROR: another hotspotd already running (PID=%d), exiting",
-                             old_pid);
-                        return -1;
-                    }
-                    /* 旧进程死了,清理 stale 文件 */
-                    hlog("INFO: stale PID file (dead PID=%d), cleaning up", old_pid);
-                } else {
-                    fclose(rf);
-                    hlog("WARN: PID file exists but unreadable, cleaning up");
-                }
-            }
-            unlink(PID_FILE);
-            /* 重试 O_EXCL 创建 */
-            fd = open(PID_FILE, O_CREAT | O_EXCL | O_WRONLY, 0644);
-            if (fd < 0) {
-                hlog("ERROR: cannot create PID file after cleanup: %s", strerror(errno));
-                return -1;
-            }
-        } else {
-            hlog("ERROR: cannot create PID file: %s", strerror(errno));
-            return -1;
+        hlog("ERROR: cannot open PID file: %s", strerror(errno));
+        return -1;
+    }
+    if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+        close(fd);
+        hlog("ERROR: another hotspotd instance holds PID flock, exiting");
+        return -1;
+    }
+    if (ftruncate(fd, 0) == 0) {
+        char buf[32];
+        int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+        if (write(fd, buf, (size_t)n) != n) {
+            hlog("WARN: write PID file short/failed: %s", strerror(errno));
         }
     }
-    char buf[32];
-    int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
-    if (write(fd, buf, n) != n) {
-        hlog("WARN: write PID file short/failed: %s", strerror(errno));
-    }
-    close(fd);
+    g_pid_lock_fd = fd; /* 随进程生命周期保持打开 */
     return 0;
 }
 
 /* v3.5.2 P1-D: cleanup 时验证 PID 文件里的 PID 是不是自己,
  * 是才删,不是说明别的实例已经 overwrite 了,不要删它的文件 */
 static void cleanup_pid(void) {
-    FILE *rf = fopen(PID_FILE, "r");
-    if (!rf) return;
-    int file_pid = 0;
-    if (fscanf(rf, "%d", &file_pid) == 1 && file_pid == (int)getpid()) {
-        fclose(rf);
-        unlink(PID_FILE);
-    } else {
-        fclose(rf);
-        /* PID 文件里不是自己 → 别的实例,保留 */
+    FILE *rf = fopen(PID_FILE, "re");
+    if (rf) {
+        int file_pid = 0;
+        if (fscanf(rf, "%d", &file_pid) == 1 && file_pid == (int)getpid()) {
+            fclose(rf);
+            unlink(PID_FILE);
+        } else {
+            fclose(rf);
+        }
+    }
+    if (g_pid_lock_fd >= 0) {
+        close(g_pid_lock_fd);
+        g_pid_lock_fd = -1;
     }
 }
 
@@ -426,14 +415,40 @@ static void cleanup_pid(void) {
  * v5.0.0-beta.4 hotfix3: SIGSEGV / SIGBUS / SIGABRT handler
  * 立刻把 fault address 落到 stderr (= log file), 不依赖 tombstone
  * ══════════════════════════════════════════════════════════ */
+static struct sigaction g_orig_sigsegv;
+static struct sigaction g_orig_sigbus;
+static struct sigaction g_orig_sigabrt;
+
 static void hnc_crash_handler(int sig, siginfo_t *info, void *ctx) {
-    (void)info;
-    (void)ctx;
-    /* hotfix2: signal handler 内避免 snprintf/fsync 等非 async-signal-safe 调用。
-     * 这里只写固定短消息,然后恢复默认处理器继续生成 tombstone。 */
-    static const char msg[] = "\n[FATAL] hotspotd crash; re-raising for tombstone\n";
+    int saved_errno = errno;
+    static const char msg[] = "\n[FATAL] hotspotd crash; chaining for tombstone\n";
     (void)write(STDERR_FILENO, msg, sizeof(msg) - 1);
-    signal(sig, SIG_DFL);
+
+    const struct sigaction *orig = NULL;
+    if (sig == SIGSEGV)      orig = &g_orig_sigsegv;
+    else if (sig == SIGBUS)  orig = &g_orig_sigbus;
+    else if (sig == SIGABRT) orig = &g_orig_sigabrt;
+
+    /* Chain to Android Bionic's debuggerd handler if installed so tombstones
+     * capture exact faulting registers/PC; otherwise restore SIG_DFL & unblock. */
+    if (orig && (orig->sa_flags & SA_SIGINFO) && orig->sa_sigaction &&
+        orig->sa_sigaction != hnc_crash_handler) {
+        sigaction(sig, orig, NULL);
+        errno = saved_errno;
+        orig->sa_sigaction(sig, info, ctx);
+    }
+
+    struct sigaction dfl;
+    memset(&dfl, 0, sizeof(dfl));
+    dfl.sa_handler = SIG_DFL;
+    sigemptyset(&dfl.sa_mask);
+    sigaction(sig, &dfl, NULL);
+
+    sigset_t unblk;
+    sigemptyset(&unblk);
+    sigaddset(&unblk, sig);
+    sigprocmask(SIG_UNBLOCK, &unblk, NULL);
+    errno = saved_errno;
     raise(sig);
 }
 
@@ -449,19 +464,25 @@ int main(int argc, char *argv[]) {
 
     /* 后台化 */
     if (daemonize) {
-        if (fork() > 0) exit(0);
-        setsid();
-        if (fork() > 0) exit(0);
-        /* 重定向标准 IO
-         * v5.0 beta.2: stdin/stdout 扔 /dev/null, stderr 重定向到 logpath,
-         * 否则 upstream.c / scheduler.c 的 fprintf(stderr, ...) 日志全部丢黑洞.
-         * 真机 RMX5010 alpha.3-beta.1 期间 Tier3 BPF 反查日志永远看不到就是
-         * 这个 bug — 整整 5 个版本没排到. */
-        int devnull = open("/dev/null", O_RDWR);
-        if (devnull >= 0) { dup2(devnull,0); dup2(devnull,1); close(devnull); }
-        /* stderr 写到日志文件 (同 g_log 路径, 追加模式, line-buffered) */
-        int errfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND, 0644);
-        if (errfd >= 0) { dup2(errfd, 2); close(errfd); }
+        pid_t p1 = fork();
+        if (p1 < 0) { perror("hotspotd: fork1"); return 1; }
+        if (p1 > 0) _exit(0);
+        (void)setsid();
+        pid_t p2 = fork();
+        if (p2 < 0) { perror("hotspotd: fork2"); _exit(1); }
+        if (p2 > 0) _exit(0);
+
+        int devnull = open("/dev/null", O_RDWR | O_CLOEXEC);
+        if (devnull >= 0) {
+            dup2(devnull, STDIN_FILENO);
+            dup2(devnull, STDOUT_FILENO);
+            if (devnull > STDERR_FILENO) close(devnull);
+        }
+        int errfd = open(logpath, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+        if (errfd >= 0) {
+            dup2(errfd, STDERR_FILENO);
+            if (errfd > STDERR_FILENO) close(errfd);
+        }
     }
     /* 行缓冲 stderr, 保证每条 fprintf 立即写磁盘 (不等 4KB 块满)
      * beta.2: daemonize 重定向后 stderr 指日志文件, 默认块缓冲看不到实时日志 */
@@ -475,13 +496,13 @@ int main(int argc, char *argv[]) {
         sa.sa_flags = SA_SIGINFO;
         sigemptyset(&sa.sa_mask);
         sa.sa_sigaction = hnc_crash_handler;
-        sigaction(SIGSEGV, &sa, NULL);
-        sigaction(SIGBUS,  &sa, NULL);
-        sigaction(SIGABRT, &sa, NULL);
+        sigaction(SIGSEGV, &sa, &g_orig_sigsegv);
+        sigaction(SIGBUS,  &sa, &g_orig_sigbus);
+        sigaction(SIGABRT, &sa, &g_orig_sigabrt);
     }
 
     /* 日志 */
-    g_log = fopen(logpath, "a");
+    g_log = fopen(logpath, "ae");
     hlog("=== hotspotd %s started (PID=%d) ===", daemonize?"daemon":"fg", (int)getpid());
     hlog("v5.33: offload + control socket only (device discovery is the Go watchdog's)");
     /* v3.5.2 P2-E: g_log 加 FD_CLOEXEC,避免子进程继承日志 fd */
@@ -495,11 +516,26 @@ int main(int argc, char *argv[]) {
         return 0;  /* 干净退出,不走 cleanup */
     }
 
-    /* 信号 */
-    signal(SIGUSR1, sig_usr1);
-    signal(SIGTERM, sig_term);
-    signal(SIGINT,  sig_term);
-    signal(SIGPIPE, SIG_IGN);
+    /* 信号 (sigaction 无 SA_RESTART, 确保 SIGTERM/SIGINT/SIGHUP 即时打断阻塞调用) */
+    {
+        struct sigaction sa_t, sa_u, sa_ign;
+        memset(&sa_t, 0, sizeof(sa_t));
+        sa_t.sa_handler = sig_term;
+        sigemptyset(&sa_t.sa_mask);
+        sigaction(SIGTERM, &sa_t, NULL);
+        sigaction(SIGINT,  &sa_t, NULL);
+        sigaction(SIGHUP,  &sa_t, NULL);
+
+        memset(&sa_u, 0, sizeof(sa_u));
+        sa_u.sa_handler = sig_usr1;
+        sigemptyset(&sa_u.sa_mask);
+        sigaction(SIGUSR1, &sa_u, NULL);
+
+        memset(&sa_ign, 0, sizeof(sa_ign));
+        sa_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ign.sa_mask);
+        sigaction(SIGPIPE, &sa_ign, NULL);
+    }
 
     /* Netlink socket */
     g_nl_fd = nl_open();
@@ -555,7 +591,7 @@ int main(int argc, char *argv[]) {
             nl_process(g_nl_fd);
 
         if (FD_ISSET(g_srv_fd, &rfds)) {
-            int cfd = accept(g_srv_fd, NULL, NULL);
+            int cfd = accept4(g_srv_fd, NULL, NULL, SOCK_CLOEXEC);
             if (cfd >= 0) handle_client(cfd);
         }
     }

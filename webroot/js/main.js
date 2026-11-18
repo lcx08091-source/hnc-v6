@@ -10,104 +10,193 @@ function onEnter(name) {
   if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_mode === 'on' && !S.clsact) clsactCheck(true); });
   schedulePoll(50);
 }
+var enterT = 0;
+function markTabBtn(name) {
+  $$('#tabs [data-tab]').forEach(function (el) {
+    var on = el.getAttribute('data-tab') === name;
+    el.classList.toggle('on', on);
+    el.setAttribute('aria-selected', String(on));
+    el.tabIndex = on ? 0 : -1;
+  });
+}
 function go(name) {
   if (ORDER.indexOf(name) < 0) return;
-  if (name === S.page) { $('#p-' + name).scrollTo({ top: 0, behavior: 'smooth' }); syncTab(name); return; }
-  var from = $('#p-' + S.page), to = $('#p-' + name), dir = ORDER.indexOf(name) > ORDER.indexOf(S.page) ? 1 : -1;
+  markTabBtn(name);
+  if (name === S.page) { $('#p-' + name).scrollTo({ top: 0, behavior: motionOn() ? 'smooth' : 'auto' }); syncTab(name); return; }
+  var from = $('#p-' + S.page), to = $('#p-' + name);
   S.page = name; closeDD(); syncTab(name); LS.set('hnc6.page', name); navSync();
-  // 标签切换不再用 View Transitions —— 它要先给整个页面区拍快照, 拍照期间渲染冻结(真机上就是
-  // 一段空白), 快照层还在最上层, 会把底栏盖掉一半。iOS 的标签切换本来也不是"推入", 而是原地快速换内容。
-  // 现在: 新页面立刻可见(不透明度从 .35 起, 不会出现整屏空白), 旧页面立刻隐藏(不再两页叠着渲染)。
   to.classList.add('on'); from.classList.remove('on');
-  RENDER[name](true);
-  if (fxOn('page') && motionOn()) {
-    if (apple()) anim(to, [{ opacity: .35, transform: 'scale(.985)' }, { opacity: 1, transform: 'none' }], { duration: 260, easing: 'cubic-bezier(.2,.8,.2,1)' });
-    else anim(to, [{ opacity: .3, transform: 'translateX(' + (dir * 28) + 'px) scale(.985)' }, { opacity: 1, transform: 'none' }], { duration: 420, easing: EASE.soft });
+  if (!to.firstElementChild) {
+    RENDER[name](false);
+  } else {
+    placeSegs(to);
   }
-  onEnter(name);
+  // v5.35 升级: 严禁对 .page 本身施加位移或半透明组隔离(彻底保护子层 .glass backdrop-filter 采样根与零水平漂移)
+  if (typeof runPageEnterFx === 'function') runPageEnterFx(to);
+  clearTimeout(enterT);
+  enterT = setTimeout(function () { onEnter(name); }, 90);
 }
 
-/* ═════════════════════ 底栏: 液态玻璃透镜 + 弹簧物理 ═════════════════════ */
+/* ═════════════════════ 底栏: 四主题差异化 120fps 透镜物理引擎 + 边缘体积守恒防越界 ═════════════════════ */
 var TABS = [['devices', '设备', 'dev'], ['apps', '应用', 'apps'], ['stats', '分析', 'stats'], ['settings', '设置', 'gear']];
-var tabsHtml = TABS.map(function (t) { return '<div class="tab" data-tab="' + t[0] + '">' + ico(t[2]) + t[1] + (t[0] === 'apps' ? '<span class="dot" hidden></span>' : '') + '</div>'; }).join('');
-$('#tabs').innerHTML = tabsHtml; $('#lens-in').innerHTML = tabsHtml;
+var tabsHtml = TABS.map(function (t) { return '<div class="tab" role="tab" tabindex="-1" data-tab="' + t[0] + '">' + ico(t[2]) + t[1] + (t[0] === 'apps' ? '<span class="dot" hidden></span>' : '') + '</div>'; }).join('');
+$('#tabs').innerHTML = tabsHtml; $('#lens-in').innerHTML = '';
 var bar = $('#tabbar'), lens = $('#lens'), lensIn = $('#lens-in'), tabsEl = $('#tabs');
-var L = { x: 0, v: 0, tx: 0, s: 1, sv: 0, ts: 1, drag: false, raf: 0, last: 0, gx: 0, moved: 0, fx0: 0, fx: 0, ft: 0, fv: 0 };
-function slotW() { return tabsEl.clientWidth / TABS.length; }
-function layoutLens() { var w = slotW(); lens.style.width = w + 'px'; lensIn.style.width = (w * TABS.length) + 'px'; }
+var L = { x: 6, v: 0, tx: 6, s: 1, sv: 0, ts: 1, drag: false, down: false, hitIdx: 0, raf: 0, last: 0, gx: 0, moved: 0, fx0: 0, fx: 0, ft: 0, fv: 0, lockT: 0 };
+function lensPhys() {
+  return (typeof themePhys === 'function' ? themePhys() : { mode: 'default', lens: { k: 960, c: 62, dk: 1160, dc: 68, sk: 980, sc: 63, tapV: -.38, dragS: .99, maxSp: 0, dragSp: 0, sqRatio: 0, wallBounce: 0, rigid: false } }).lens;
+}
+function pulseCyberLens() {
+  if (!lens || !motionOn() || (typeof motionTheme === 'function' && motionTheme() !== 'cyber')) return;
+  lens.classList.remove('cy-lens-lock');
+  void lens.offsetWidth;
+  lens.classList.add('cy-lens-lock');
+  clearTimeout(L.lockT);
+  L.lockT = setTimeout(function () { lens.classList.remove('cy-lens-lock'); }, 150);
+}
+function tabGeom() {
+  var br = bar.getBoundingClientRect(), tr = tabsEl.getBoundingClientRect();
+  var padL = tr.width > 0 ? Math.max(0, tr.left - br.left) : 6;
+  var w = (tr.width > 0 ? tr.width : Math.max(160, bar.clientWidth - 12)) / TABS.length;
+  var minX = padL, maxX = padL + (TABS.length - 1) * w;
+  return { padL: padL, w: w, minX: minX, maxX: maxX };
+}
+function slotW() { return tabGeom().w; }
+function layoutLens() {
+  var g = tabGeom();
+  lens.style.width = g.w.toFixed(2) + 'px';
+  var curIdx = Math.max(0, ORDER.indexOf(S.page));
+  L.tx = g.padL + curIdx * g.w;
+  if (!L.drag && !L.raf) { L.x = L.tx; paintLens(); }
+}
 function paintLens() {
-  var w = slotW(), sp = Math.min(Math.abs(L.v) / 2600, .22);
-  var sxs = L.s * (1 + sp), sys = L.s * (1 - sp * .55), mag = 1 + (L.s - 1) * .8, cx = L.x + w / 2;
-  lens.style.transform = 'translateX(' + L.x.toFixed(2) + 'px) scale(' + sxs.toFixed(4) + ',' + sys.toFixed(4) + ')';
-  lensIn.style.transformOrigin = cx.toFixed(1) + 'px 50%';
-  lensIn.style.transform = 'translateX(' + (-L.x).toFixed(2) + 'px) scale(' + (mag / sxs).toFixed(4) + ',' + (mag / sys).toFixed(4) + ')';
-  tabsEl.style.setProperty('--ml', (cx - w * sxs / 2 + 3).toFixed(1) + 'px');
-  tabsEl.style.setProperty('--mr', (cx + w * sxs / 2 - 3).toFixed(1) + 'px');
+  var g = tabGeom(), lp = lensPhys();
+  var dragOver = lp.rigid ? 0 : (lp.maxSp > .03 ? 3.5 : 1.5);
+  var px = L.drag ? clamp(L.x, g.minX - dragOver, g.maxX + dragOver) : clamp(L.x, g.minX, g.maxX);
+  if (lp.rigid || !motionOn() || (typeof lowFx === 'function' && lowFx())) {
+    lens.style.setProperty('--lens-v', '0');
+    lens.style.setProperty('--lens-tilt', '0');
+    lens.style.transform = 'translate3d(' + px.toFixed(2) + 'px,0,0) scale(1,1)';
+    return;
+  }
+  var capSp = L.drag ? lp.dragSp : lp.maxSp;
+  var rawSp = capSp > 0 ? Math.min(Math.abs(L.v) / (L.drag ? 2600 : 2900), capSp) : 0;
+  // 边缘防越界体积守恒衰减: 靠近第 1 / 第 4 槽位外沿时平滑收敛水平拉伸，确保 0.0px 绝不溢出底栏
+  var edgeDist = Math.min(Math.max(0, px - g.minX), Math.max(0, g.maxX - px));
+  var edgeGuard = clamp(edgeDist / Math.max(12, g.w * .34), 0, 1);
+  var spX = rawSp * (.15 + .85 * edgeGuard);
+  var baseS = lp.maxSp > .03 ? (1 + (L.s - 1) * (.35 + .65 * edgeGuard)) : L.s;
+  var sxs = baseS * (1 + spX), sys = L.s * (1 - rawSp * lp.sqRatio);
+  var tilt = lp.maxSp > 0 ? clamp(L.v / 1850, -1, 1) : 0;
+  lens.style.setProperty('--lens-v', rawSp.toFixed(3));
+  lens.style.setProperty('--lens-tilt', tilt.toFixed(3));
+  lens.style.transform = 'translate3d(' + px.toFixed(2) + 'px,0,0) scale(' + sxs.toFixed(4) + ',' + sys.toFixed(4) + ')';
 }
 function stepLens(t) {
-  var dt = L.last ? Math.min(.032, (t - L.last) / 1000) : .016; L.last = t;
-  var k = L.drag ? 900 : 360, c = L.drag ? 52 : 19, n = 4, h = dt / n;   // 拖动时紧跟手指; 松手后欠阻尼, 冲过头再弹回
+  var dt = L.last ? Math.min(.030, (t - L.last) / 1000) : 1 / 120; L.last = t;
+  var lp = lensPhys(), k = L.drag ? lp.dk : lp.k, c = L.drag ? lp.dc : lp.c, n = 6, h = dt / n, g = tabGeom();
   for (var i = 0; i < n; i++) {
     L.v += (-k * (L.x - L.tx) - c * L.v) * h; L.x += L.v * h;
-    L.sv += (-560 * (L.s - L.ts) - 17 * L.sv) * h; L.s += L.sv * h;
+    if (lp.rigid) { L.s = 1; L.sv = 0; }
+    else { L.sv += (-lp.sk * (L.s - L.ts) - lp.sc * L.sv) * h; L.s += L.sv * h; }
   }
-  // 松手后回弹不越过首尾标签超过 6px(此前切到最左/最右时透镜会冲出底栏约 30px), 撞边轻弹回
   if (!L.drag) {
-    var mxL = (TABS.length - 1) * slotW();
-    if (L.x < -6) { L.x = -6; if (L.v < 0) L.v = -L.v * .25; }
-    else if (L.x > mxL + 6) { L.x = mxL + 6; if (L.v > 0) L.v = -L.v * .25; }
+    if (L.x < g.minX) {
+      if (lp.wallBounce && L.v < -45) L.sv -= Math.min(.55, Math.abs(L.v) / 950) * lp.wallBounce;
+      L.x = g.minX; if (L.v < 0) L.v = 0;
+    } else if (L.x > g.maxX) {
+      if (lp.wallBounce && L.v > 45) L.sv -= Math.min(.55, Math.abs(L.v) / 950) * lp.wallBounce;
+      L.x = g.maxX; if (L.v > 0) L.v = 0;
+    }
   }
   paintLens();
-  if (!L.drag && Math.abs(L.x - L.tx) < .3 && Math.abs(L.v) < 4 && Math.abs(L.s - L.ts) < .002 && Math.abs(L.sv) < .02) { L.x = L.tx; L.v = 0; L.s = L.ts; L.sv = 0; paintLens(); L.raf = 0; L.last = 0; return; }
+  if (!L.drag && Math.abs(L.x - L.tx) < .18 && Math.abs(L.v) < 2.2 && Math.abs(L.s - L.ts) < .0018 && Math.abs(L.sv) < .018) {
+    L.x = L.tx; L.v = 0; L.s = L.ts; L.sv = 0; paintLens(); L.raf = 0; L.last = 0; return;
+  }
   L.raf = requestAnimationFrame(stepLens);
 }
 function kick() { if (!motionOn()) { L.x = L.tx; L.s = L.ts; L.v = L.sv = 0; paintLens(); return; } if (!L.raf) { L.last = 0; L.raf = requestAnimationFrame(stepLens); } }
-function idxAt(x) { return clamp(Math.round(x / slotW()), 0, TABS.length - 1); }
-function localX(e) { var r = bar.getBoundingClientRect(); return e.clientX - r.left - 6 - slotW() / 2; }
+function idxAtX(x, g) { g = g || tabGeom(); return clamp(Math.round((x - g.padL) / g.w), 0, TABS.length - 1); }
+function localLensX(e, g) { g = g || tabGeom(); var r = bar.getBoundingClientRect(); return e.clientX - r.left - g.w / 2; }
 bar.addEventListener('pointerdown', function (e) {
+  if (e.button != null && e.button !== 0) return;
+  e.preventDefault();
   try { bar.setPointerCapture(e.pointerId); } catch (_) {}
-  var x = localX(e), w = slotW();
-  L.drag = true; L.moved = 0; L.fx0 = L.fx = x; L.ft = performance.now(); L.fv = 0;
-  L.gx = Math.abs(x - L.x) < w * .5 ? L.x - x : 0;   // 按在透镜上 → 抓住它; 按在别处 → 透镜先弹过去
-  L.tx = clamp(x + L.gx, 0, (TABS.length - 1) * w); L.ts = 1.18;
-  bar.classList.add('drag'); kick();
+  var g = tabGeom(), x = localLensX(e, g), hit = clamp(Math.floor((e.clientX - tabsEl.getBoundingClientRect().left) / g.w), 0, TABS.length - 1);
+  L.down = true; L.drag = false; L.hitIdx = hit; L.moved = 0; L.fx0 = L.fx = x; L.ft = performance.now(); L.fv = 0;
+  L.gx = Math.abs(x - L.x) < g.w * .55 ? L.x - x : 0;
+  // 轻点死区 (<8px) 内保持槽位正中心零漂移，同时注入主题专属表面张力/微压冲量
+  markTabBtn(TABS[hit][0]);
+  var lp = lensPhys();
+  if (motionOn() && fxOn('press') && !(typeof lowFx === 'function' && lowFx())) {
+    if (lp.rigid) pulseCyberLens();
+    else if (lp.tapV) { L.sv = lp.tapV; kick(); }
+  }
 });
 bar.addEventListener('pointermove', function (e) {
-  if (!L.drag) return;
-  var w = slotW(), fx = localX(e), raw = fx + L.gx, max = (TABS.length - 1) * w;
-  // 手指速度(指数平滑), 松手时的惯性用它 —— 不能用透镜自身的弹簧速度
+  if (!L.down) return;
+  var g = tabGeom(), fx = localLensX(e, g), lp = lensPhys();
   var now = performance.now(), dt = Math.max(1, now - L.ft);
   L.fv = L.fv * .4 + (fx - L.fx) / dt * 1000 * .6; L.fx = fx; L.ft = now;
   L.moved = Math.max(L.moved, Math.abs(fx - L.fx0));
-  if (raw < 0) raw = -Math.pow(-raw, .7); else if (raw > max) raw = max + Math.pow(raw - max, .7);   // 边缘橡皮筋
-  var prev = idxAt(L.tx); L.tx = raw;
-  if (idxAt(raw) !== prev && navigator.vibrate) try { navigator.vibrate(6); } catch (_) {}
+  if (!L.drag) {
+    if (L.moved < 8) return;
+    L.drag = true; L.ts = lp.dragS; bar.classList.add('drag');
+  }
+  var dragPad = lp.rigid ? 0 : 3;
+  var raw = clamp(fx + L.gx, g.minX - dragPad, g.maxX + dragPad);
+  var prev = idxAtX(L.tx, g), cur = idxAtX(raw, g); L.tx = raw;
+  if (cur !== prev) {
+    markTabBtn(TABS[cur][0]);
+    pulseCyberLens();
+    if (typeof haptic === 'function') haptic(6);
+  }
   kick();
 });
 function releaseLens(e) {
-  if (!L.drag) return;
-  L.drag = false; bar.classList.remove('drag');
-  // 此前用透镜自身的弹簧速度算惯性 —— 轻点时透镜正以 1000~2200px/s 冲向目标,
-  // 抬手瞬间被当成"甩"多滑一格: 在设备点应用跳到分析、在设置点应用跳到设备(点得越快越容易)。
-  // 现在: 轻点(手指移动 <8px)直接去手指下面的标签; 拖动才用手指速度算惯性, 且最多多滑半格。
-  var w = slotW(), i;
-  if (L.moved < 8) i = idxAt(e && e.clientX != null && e.type !== 'pointercancel' ? localX(e) : L.fx);
-  else {
-    // 只有真正"甩"(手指 >700px/s 且刚动过)才加惯性; 正常速度拖到哪就停哪
+  if (!L.down) return;
+  var wasDrag = L.drag;
+  L.down = false; L.drag = false; bar.classList.remove('drag');
+  var g = tabGeom(), i;
+  if (!wasDrag || L.moved < 8) {
+    i = e && e.clientX != null && e.type !== 'pointercancel'
+      ? clamp(Math.floor((e.clientX - tabsEl.getBoundingClientRect().left) / g.w), 0, TABS.length - 1)
+      : L.hitIdx;
+  } else {
     var fv = performance.now() - L.ft < 120 ? L.fv : 0, af = Math.abs(fv);
-    var fling = af > 700 ? (fv > 0 ? 1 : -1) * Math.min(w * .5, (af - 700) * .06) : 0;
-    i = idxAt(L.tx + fling);
+    var fling = af > 700 ? (fv > 0 ? 1 : -1) * Math.min(g.w * .45, (af - 700) * .05) : 0;
+    i = idxAtX(L.tx + fling, g);
   }
-  L.tx = i * slotW(); L.ts = 1; L.sv -= 2.6;   // 松手瞬间"啵"地缩一下再弹回
+  var prevIdx = ORDER.indexOf(S.page);
+  L.tx = g.padL + i * g.w; L.ts = 1;
+  if (i !== prevIdx) pulseCyberLens();
+  markTabBtn(TABS[i][0]);
   kick(); go(TABS[i][0]);
 }
 bar.addEventListener('pointerup', releaseLens);
 bar.addEventListener('pointercancel', releaseLens);
-function syncTab(name, instant) { L.tx = ORDER.indexOf(name) * slotW(); if (instant) { L.x = L.tx; paintLens(); } else kick(); }
+function syncTab(name, instant) {
+  var g = tabGeom(), idx = Math.max(0, ORDER.indexOf(name));
+  markTabBtn(name); L.tx = g.padL + idx * g.w; L.ts = 1;
+  if (instant) { L.x = L.tx; L.v = 0; L.s = 1; L.sv = 0; paintLens(); } else kick();
+}
+if (typeof ResizeObserver === 'function') {
+  try { new ResizeObserver(function () { layoutLens(); if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets(); }).observe(bar); } catch (_) {}
+}
+function ensureAboveTabbar(el) {
+  if (!el || !bar) return;
+  var waitMs = !motionOn() ? 30 : (typeof themePhys === 'function' ? themePhys().foldMs : 250);
+  setTimeout(function () {
+    var pg = $('#p-' + S.page); if (!pg) return;
+    var er = el.getBoundingClientRect(), br = bar.getBoundingClientRect();
+    var overlap = er.bottom - (br.top - 16);
+    if (overlap > 0) pg.scrollBy({ top: Math.min(overlap, er.height * .75), behavior: motionOn() ? 'smooth' : 'auto' });
+  }, waitMs);
+}
 
-/* ═════════════════════ 主题(圆形扩散) ═════════════════════ */
+/* ═════════════════════ 主题(圆形扩散 / 战术瞬切) ═════════════════════ */
 function setStyle(v, x, y) {
-  S.style = v === 'apple' || v === 'liquid' ? v : 'default'; LS.set('hnc6.style', S.style);
+  S.style = v === 'cyber' || v === 'liquid' ? v : 'default'; LS.set('hnc6.style', S.style);
   revealApply(function () { applyTheme(); if (typeof navSync === 'function') navSync(); }, x, y);
   $$('[data-style-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-style-pick') === S.style); });
   setTimeout(function () { placeSegs(); layoutLens(); syncTab(S.page, true); }, 60);
@@ -117,16 +206,17 @@ function setTheme(t, x, y) {
   revealApply(applyTheme, x, y);
   $$('[data-theme-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-theme-pick') === t); });
 }
-// 圆形扩散切换(主题 / 界面风格共用)
+// 圆形扩散切换(主题 / 界面风格共用; Cyber 采用极速战术快切)
 function revealApply(fn, x, y) {
-  if (document.startViewTransition && motionOn() && x != null) {
+  if (document.startViewTransition && motionOn() && !(typeof lowFx === 'function' && lowFx()) && x != null) {
     var r = Math.hypot(Math.max(x, innerWidth - x), Math.max(y, innerHeight - y));
     var vt = document.startViewTransition(fn);
+    var isCy = S.style === 'cyber';
     vt.ready.then(function () {
       document.documentElement.animate({ clipPath: ['circle(0px at ' + x + 'px ' + y + 'px)', 'circle(' + r + 'px at ' + x + 'px ' + y + 'px)'] },
-        { duration: 600, easing: 'cubic-bezier(.4,0,.2,1)', fill: 'forwards', pseudoElement: '::view-transition-new(root)' });
+        { duration: isCy ? 260 : 480, easing: isCy ? 'cubic-bezier(.08,.94,.16,1)' : 'cubic-bezier(.22,1,.36,1)', fill: 'forwards', pseudoElement: '::view-transition-new(root)' });
     }).catch(function () {});
-    setTimeout(function () { try { vt.skipTransition(); } catch (_) {} }, 1200);   // 保险: 个别 WebView 卡住时强制结束
+    setTimeout(function () { try { vt.skipTransition(); } catch (_) {} }, 1000);
   } else fn();
 }
 function isDark() { var a = document.documentElement.getAttribute('data-theme'); return a === 'dark' || (!a && matchMedia('(prefers-color-scheme: dark)').matches); }
@@ -137,8 +227,16 @@ $('#bell').addEventListener('click', openAlerts);
 function foldToggle(el, key) {
   if (!el) return;
   var on = !el.classList.contains('open'); el.classList.toggle('open', on); S.open[key] = on;
-  // 只保留折叠自身的高度 + 淡入过渡; 此前再叠一个 650ms 的整块缩放, 三个动画同时跑, 看着发飘
-  if (on) placeSegs(el);
+  if (on) {
+    if (motionOn() && typeof motionTheme === 'function' && motionTheme() === 'cyber') {
+      el.classList.remove('cy-fold-pulse');
+      void el.offsetWidth;
+      el.classList.add('cy-fold-pulse');
+      clearTimeout(el._cyFoldT);
+      el._cyFoldT = setTimeout(function () { el.classList.remove('cy-fold-pulse'); }, 180);
+    }
+    placeSegs(el); ensureAboveTabbar(el);
+  }
   saveFolds(key);
   return on;
 }
@@ -168,7 +266,7 @@ document.addEventListener('click', function (e) {
     if (sg.classList.contains('pending')) return;   // 上一次切换还在提交
     var sgd = ctxDev(q).d; if (sgd && S.busy[sgd.mac] && k !== 'delay-pre' && k !== 'q-act') { toast('这台设备还有操作在进行', 'warn'); return; }
     $$('button', sg).forEach(function (b) { b.classList.toggle('on', b === q); });
-    sg.classList.remove('jelly'); void sg.offsetWidth; sg.classList.add('jelly'); placeSegs(sg.parentNode);
+    sg.classList.remove('jelly'); placeSegs(sg.parentNode);
     if (k === 'apps-sub') { S.appsSub = v; var bx = $('#apps-sub'); bx.innerHTML = appsSub(); placeSegs(bx); stagger(bx); if (v === 'export') loadExports(); }
     else if (k === 'aseg') { S.aseg = v; var ab = $('#aseg-body'); ab.innerHTML = v === 'stats' ? statsBody() : dpiBody(); placeSegs(ab); stagger(ab); afterAseg(); }
     else if (k === 'range') { S.statsRange = v; refreshStats(); }
@@ -178,6 +276,7 @@ document.addEventListener('click', function (e) {
     else if (k === 'fxp') { if (v === 'off') { S.motion = false; LS.set('hnc6.motion', '0'); } else { S.motion = true; LS.set('hnc6.motion', '1'); FX = Object.assign({}, FX_PRESETS[v]); saveFx(); } fxRefresh(); toast('动画效果：' + FXP_T[v]); }
     else if (k === 'guard-mode') { busyWhile(q, api.action('clsact_mode_set', { mode: v }, { timeout: 30000, maxTime: 28 })).then(function (r) { var g = detailJSON(r); S.cfg.clsact_bpf_mode = v; if (g && typeof g === 'object') S.cfg.offload_guard = g; S.clsact = null; toast('硬件加速兜底：' + q.textContent); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
     else if (k === 'aqm-mode') { busyWhile(q, api.action('tc_leaf_aqm_set', { mode: v })).then(function () { S.aqmMode = v; LS.set('hnc6.aqm', v); toast('默认队列 AQM：' + q.textContent + ' · 之后新设 / 重设的限速生效'); if (S.page === 'settings') renderSettings(false); }).catch(function (e) { toast(errText(e), 'err'); if (S.page === 'settings') renderSettings(false); }); }
+    else if (k === 'glass-mode') { if (typeof setGlassMode === 'function') setGlassMode(v); toast(v === 'frosted' ? '已切换：经典毛玻璃（均匀高斯柔雾）' : '已切换：iOS 27 液态玻璃（真光学边缘折射）'); }
     else if (k === 'fxspring') { FX.spring = v; saveFx(); fxRefresh(); }
     else if (k === 'connv') { S.connView = v; paintConnSheet(); }
     else if (k === 'webacc-mode') { S.webaccMode = v; }
@@ -185,6 +284,12 @@ document.addEventListener('click', function (e) {
     else if (k === 'dns-bm') { busyWhile(sg, api.action('dns_takeover_set', { block_mode: v })).then(function () { toast('拦截方式：' + q.textContent); return loadDNS(); }).catch(function (e) { toast(errText(e), 'err'); loadDNS(); }); }
     else if (k === 'eval-days') { S.evalDays = +v; loadEval(S.evalDays); }
     else if (k === 'fg-engine') { busyWhile(sg, api.action('dpi_fg_engine', { engine: v })).then(function () { toast('前台识别引擎：' + q.textContent + ' · 时间线从此刻起按它记录'); return loadFgEngine(); }).catch(function (e) { toast(errText(e), 'err'); loadFgEngine(); }); }
+    else if (k === 'set-lv') {
+      S.setLv = v; LS.set('hnc6.set_lv', v);
+      $$('#p-settings [data-lv-sec]').forEach(function (sec) {
+        sec.hidden = (v !== 'all' && sec.getAttribute('data-lv-sec') !== v);
+      });
+    }
     else if (k === 'rmode') { S.refreshMode = v; LS.set('hnc.refresh-mode', v); toast('刷新模式：' + q.textContent); schedulePoll(50); }
     else if (k === 'qos-mode') setQos('mode', v, q);
     else if (k === 'qos-scale') setQos('scale', v, q);
@@ -200,6 +305,13 @@ document.addEventListener('click', function (e) {
     var tc = ctxDev(q);
     if (tc.d && S.busy[tc.d.mac]) { toast('这台设备还有操作在进行', 'warn'); return; }
     var nv = q.getAttribute('aria-checked') !== 'true'; q.setAttribute('aria-checked', String(nv));
+    q.classList.remove('liquid-pop', 'tog-on-fx', 'tog-off-fx');
+    if (motionOn() && !(typeof lowFx === 'function' && lowFx())) {
+      void q.offsetWidth;
+      q.classList.add(nv ? 'tog-on-fx' : 'tog-off-fx');
+      clearTimeout(q._togFxT);
+      q._togFxT = setTimeout(function () { q.classList.remove('tog-on-fx', 'tog-off-fx'); }, 360);
+    }
     var ta = q.getAttribute('data-act');
     if (q.hasAttribute('data-set')) { setToggleCfg(q.getAttribute('data-set'), q); return; }
     if (q.hasAttribute('data-selftog')) { selfToggle(q, q.getAttribute('data-selftog')); return; }
@@ -247,13 +359,31 @@ document.addEventListener('click', function (e) {
   var act = a.getAttribute('data-act'), cx2 = ctxDev(a), d = cx2.d, box = cx2.box;
   switch (act) {
     case 'dd': var dd = a.closest('.dd'), was = dd.classList.contains('open'); closeDD(); dd.classList.toggle('open', !was); break;
-    case 'fold': var key = a.getAttribute('data-key'), fw = a.closest('[data-foldkey="' + key + '"]') || document.getElementById(key); var opened = foldToggle(fw, key);
-      if (opened && key === 'logs') loadLog(); if (opened && key === 'tokens') loadTokens();
-      if (opened && key === 'dnst') loadDNS(); if (opened && key === 'fpl') loadFP();
+    case 'set-fold-toggle':
+      var allCards = $$('#p-settings .scard[data-foldkey]');
+      var visibleCards = allCards.filter(function (c) { var sec = c.closest('[data-lv-sec]'); return !sec || !sec.hidden; });
+      var hasOpen = visibleCards.some(function (c) { return c.classList.contains('open'); });
+      visibleCards.forEach(function (c, idx) {
+        var k2 = c.getAttribute('data-foldkey'), shouldOpen = !hasOpen && (S.setLv !== 'all' || idx < 4);
+        c.classList.toggle('open', shouldOpen); S.open[k2] = shouldOpen; saveFolds(k2);
+        if (shouldOpen) placeSegs(c);
+      });
+      a.textContent = !hasOpen ? '全部收起' : '展开常用';
+      break;
+    case 'fold': var key = a.getAttribute('data-key'), selKey = (window.CSS && CSS.escape) ? CSS.escape(key) : String(key || '').replace(/["\\]/g, '\\$&'), fw = a.closest('[data-foldkey="' + selKey + '"]') || document.getElementById(key); var opened = foldToggle(fw, key);
+      if (opened && (key === 'logs' || key === 'scard-diag') && S.open.logs) loadLog();
+      if (opened && (key === 'tokens' || key === 'scard-rem') && S.open.tokens) loadTokens();
+      if (opened && key === 'dnst') loadDNS(); if (opened && key === 'fpl') loadFP(); if (opened && key === 'pwr') loadPower(false);
       if (opened && key === 'deval') loadEval();
       if (opened && key === 'fgeng') loadFgEngine();
       if (opened && key === 'rpack') loadRulepack();
-      if (opened && /^(at|cb)-/.test(key)) loadAppTime(key.slice(3)); break;
+      if (opened && /^(at|cb)-/.test(key)) loadAppTime(key.slice(3));
+      var ftBtn = $('#p-settings [data-act="set-fold-toggle"]');
+      if (ftBtn) {
+        var anyOp = $$('#p-settings .scard.open').length > 0;
+        ftBtn.textContent = anyOp ? '全部收起' : '展开常用';
+      }
+      break;
     case 'toggle-dev':
       if (!d) break;
       if (S.batch) { if (S.picked[d.mac]) delete S.picked[d.mac]; else S.picked[d.mac] = 1; box.classList.toggle('picked', !!S.picked[d.mac]); var pn = $('#picked-n'); if (pn) pn.textContent = Object.keys(S.picked).length; anim(box, [{ transform: 'scale(.97)' }, { transform: 'none' }], { duration: 260, easing: 'ease-out' }); break; }
@@ -363,6 +493,13 @@ document.addEventListener('click', function (e) {
     case 'cache-clear': busyWhile(a, api.action('cache_clear')).then(function (r3) { toast('缓存已清理' + (r3.detail ? ' · ' + r3.detail : '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-enable': busyWhile(a, api.post('/api/self/toggle', { enabled: true }).then(function (r3) { if (r3 && r3.error) throw new Error(r3.error); return r3; })).then(function () { toast('本机流量归因已开启 · 5 秒后开始采集样本'); return loadEval(S.evalDays, true); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-refresh': busyWhile(a, loadEval(S.evalDays, true)); break;
+    case 'go-self-studio': go('apps'); break;
+    case 'studio-recipe': S.studioRecipeOpen = !S.studioRecipeOpen; if (S.page === 'apps') renderApps(false); break;
+    case 'studio-start': busyWhile(a, api.action('self_studio_start', { mode: 'full', auto_stop_min: '15' }, { timeout: 20000, maxTime: 18 })).then(function () { toast('已开启双路本机真值采集 · 15 分钟后自动停表并蒸馏'); return loadApps(); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'studio-stop': busyWhile(a, api.action('self_studio_start', { mode: 'stop' }, { timeout: 25000, maxTime: 22 }).then(function () { return api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 }); })).then(function (r3) { var d0 = detailJSON(r3) || {}; var fpN = num(d0.exclusive_fps, d0.usable_fp); toast('已停止采集并完成蒸馏' + (fpN ? ' · 专属指纹 ' + fpN + ' 个' : '')); return loadApps(); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'studio-distill':
+    case 'dpi-distill-now': busyWhile(a, api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 })).then(function (r3) { var dj = detailJSON(r3); var d0 = (dj && dj.distill) || dj || {}; toast('本机真值蒸馏完成 · 专属指纹 ' + num(d0.exclusive_fps, d0.usable_fp) + ' 个 · 启动指纹 ' + num(d0.startup_usable, d0.usable_startup) + ' 个'); return Promise.all([loadApps(), S.page === 'settings' ? Promise.all([loadFP(), loadEval(S.evalDays, true), loadRulepack()]) : null]); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'studio-export': busyWhile(a, api.action('self_studio_export', { note: '本机真值自训练规则包' }, { timeout: 25000, maxTime: 22 })).then(function (r3) { var dj = detailJSON(r3), nm = String(dj.name || ''); if (nm && /^[A-Za-z0-9._-]+$/.test(nm)) { if (KSU) return shell('mkdir -p /sdcard/Download && cp ' + sq(HNC_DIR + '/exports/' + nm) + ' /sdcard/Download/ && echo ok').then(function () { toast('已蒸馏并存到 /sdcard/Download/' + nm); }); downloadExport(nm, '/api/exports/' + encodeURIComponent(nm)); toast('已蒸馏并导出 ' + nm); } else toast('规则包已生成'); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'startup-list': busyWhile(a, toggleStartupList()); break;
     case 'rpack-export': rulepackExport(a); break;
     case 'rpack-import': rulepackImport(a); break;
@@ -380,6 +517,16 @@ document.addEventListener('click', function (e) {
     case 'clsact-check': busyWhile(a, clsactCheck()); break;
     case 'clsact-repair': busyWhile(a, api.action('clsact_repair', {}, { timeout: 20000, maxTime: 18 })).then(function () { toast('已尝试修复'); return clsactCheck(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'changelog': showChangelog(); break;
+    case 'pwr-refresh': loadPower(true).then(function () { toast('已刷新守护进程功耗采样'); }); break;
+    case 'dns-log-open':
+      api.get('/api/dns/log', { limit: 60 }).then(function (r) {
+        var es = Array.isArray(r.entries) ? r.entries : [];
+        var rows = es.length ? es.map(function (x) {
+          return '<div class="row" style="padding:7px 0;min-height:0"><span class="tx"><div class="t mono">' + esc(x.qname || x.domain || '—') + '</div><div class="s">' + esc((x.mac || x.ip || '') + (x.qtype ? ' · ' + x.qtype : '') + (x.rcode ? ' · ' + x.rcode : '')) + '</div></span>' + val(x.blocked ? '已拦截' : (x.ms != null ? x.ms + 'ms' : '放行'), x.blocked ? 'warn' : 'ok') + '</div>';
+        }).join('') : '<div class="note">暂无查询记录（确认热点设备正在通过网关发起明文 DNS 查询）</div>';
+        sheet('<h3>最近 DNS 查询日志</h3><div class="sub">来自 /api/dns/log（最多显示最近 60 条）</div><div class="rows">' + rows + '</div><div class="btns" style="margin-top:12px"><button class="btn sec wide press" data-close>关闭</button></div>', { tall: true });
+      }).catch(function (e) { toast('读取 DNS 日志失败：' + errText(e), 'err'); });
+      break;
     case 'logout': confirmSheet('退出登录？', '这台设备需要重新配对才能访问。', '退出').then(function (ok) { if (ok) api.post('/api/logout', {}).catch(function () {}).then(function () { location.href = '/pair'; }); }); break;
   }
 });
@@ -446,7 +593,7 @@ document.addEventListener('pointerdown', function (e) {
     // 长按触发后吞掉松手时的那次 click —— 封锁后卡片就地重绘, 同一位置变成「解除封锁」,
     // 手指多按一会儿再松开会点中它 → 刚封锁就被解封(网关确认弹窗时则会点到遮罩关掉弹窗)
     swallowClick = true;
-    if (navigator.vibrate) try { navigator.vibrate(15); } catch (_) {}
+    if (typeof canVib === 'function' && canVib()) try { navigator.vibrate(15); } catch (_) {}
     blockDevice(d);
   }, 800);
 });
@@ -485,6 +632,8 @@ function pollDelay() {
 function schedulePoll(ms) { clearTimeout(pollT); if (document.hidden) return; pollT = setTimeout(pollOnce, ms == null ? pollDelay() : ms); }
 function pollOnce() {
   if (pollBusy || document.hidden) { schedulePoll(); return; }
+  // 初次启动失败或断线后必须重走完整初始化, 不能只恢复 live/devices。
+  if (!S.booted || !S.connected) { boot(false); return; }
   pollBusy = true; tickN++;
   var prevSig = S.sig, prevShape = shapeOf(), wasOk = S.connected;
   // 设备页有在线设备时每轮都要刷新单台速率 → 直接用合并请求; 否则只拿汇总, 签名变了再补拉列表
@@ -513,7 +662,14 @@ function pollOnce() {
       if (tickN % 5 === 1) loadConnCounts();
       if (tickN % 3 === 0 && !S.connMac) S.devices.forEach(function (x) { if (x.online && (wide() ? S.sel === x.mac : S.open[x.mac])) refreshConnMini(x.mac); });
     }
-    if (S.page === 'apps' && tickN % 5 === 0) loadApps().then(function () { if (S.page === 'apps' && !document.querySelector('#p-apps .open, #p-apps :focus')) { var b = $('#apps-sub'); if (b && S.appsSub !== 'export' && S.appsSub !== 'set') { b.innerHTML = appsSub(); placeSegs(b); } } });
+    if (S.page === 'apps' && tickN % 5 === 0) loadApps().then(function () {
+      if (S.page !== 'apps' || document.querySelector('#p-apps :focus')) return;
+      var sc = $('#p-apps .studio-card');
+      if (sc && typeof selfStudioCardHtml === 'function') morph(sc, selfStudioCardHtml());
+      if (!document.querySelector('#p-apps .row-wrap.open')) {
+        var b = $('#apps-sub'); if (b && S.appsSub !== 'export' && S.appsSub !== 'set') { b.innerHTML = appsSub(); placeSegs(b); }
+      }
+    });
     schedulePoll();
   });
 }
@@ -535,6 +691,7 @@ document.addEventListener('visibilitychange', function () { if (document.hidden)
 var booting = null;
 function boot(retry) {
   if (booting) return booting;
+  S.booted = false;
   if (retry) { S.bootErr = ''; S.connected = false; if (S.page === 'devices') renderDevices(false); if (KSU) loadSecret(true); }
   booting = api.get('/api/health', null, { timeout: 6000 }).then(function (h) {
     // v5.29 T3: 升级回滚横幅(数据来自 /api/health 的 rollback 段)
@@ -546,6 +703,16 @@ function boot(retry) {
     S.booted = true; S.bootErr = '';
     $('#mode-pill').hidden = false; $('#mode-pill').textContent = KSU ? '本机' : '远程';
     RENDER[S.page](!retry); onEnter(S.page);
+    setTimeout(function () {
+      ORDER.forEach(function (pName, idx) {
+        if (pName !== S.page) {
+          setTimeout(function () {
+            var pg = $('#p-' + pName);
+            if (pg && !pg.firstElementChild) RENDER[pName](false);
+          }, (idx + 1) * 90);
+        }
+      });
+    }, 220);
     loadAlerts(); loadOffload(); loadOnlineHours(); loadUsage(); startSlowPolls(); startSSE();
     loadEncdns().then(function (e) { if (e) S.devices.forEach(function (x) { if (S.open[x.mac] || S.sel === x.mac) refreshCard(x.mac); }); });   // 设备卡的按设备加密 DNS
     api.getSafe('/api/alert_config', null, null).then(function (r) { if (r) { S.alertCfg = r; paintUsage(); } });
@@ -563,8 +730,8 @@ if (ORDER.indexOf(saved) >= 0) S.page = saved;
 $$('.page').forEach(function (p) { p.classList.toggle('on', p.getAttribute('data-page') === S.page); });
 RENDER[S.page](true);
 layoutLens(); syncTab(S.page, true);
-// 透镜边缘的真折射 + 色散: Hyalite by VII-Cae (MIT), https://github.com/VII-Cae/hyalite--liquid-glass
-if (window.Hyalite) { try { Hyalite.attach(lens, { bevel: 13, thickness: 24, blur: .3, dispersion: 2.6, shade: .32, rim: 2, edge: 0, sat: 1.15 }); } catch (_) {} }
+// v5.36.0: #lens 作为 #tabbar 内部水滴光晕胶囊不再嵌套挂载二次 Hyalite，根治底栏白蛋与白色折射摩尔纹
+if (window.Hyalite && lens) { try { Hyalite.detach(lens); } catch (_) {} }
 wideMQ.addEventListener('change', function () { RENDER[S.page](false); });
 addEventListener('resize', function () { layoutLens(); syncTab(S.page, true); placeSegs(document); drawSpark(); });
 matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () { if (S.theme === 'auto') applyTheme(); });
@@ -611,3 +778,1108 @@ function showRollbackBanner(rb) {
   var body = document.body || document.documentElement;
   body.insertBefore(bar, body.firstChild);
 }
+
+/* === v5.33.1 Enhancement Layer 1: Optical Spotlight & Control Center Bento Delegation === */
+/* A restrained, pointer-following reflection, with no additional animation loop. */
+(function(){
+ /* Pointer-following radial-gradient disabled to avoid per-frame getBoundingClientRect style recalculation */
+ /* The draggable original tab bar remains draggable; these semantics also make it keyboard-operable. */
+ if (S.sel) refreshConnMini(S.sel);
+ var host=document.getElementById('tabs');host.setAttribute('role','tablist');
+
+  /* ═══ iOS 27 Interactive Liquid Capsule Sliders & Control Center Bento Tiles ═══ */
+  function syncLccFromInput(box, field) {
+    if (!box) return;
+    var inp = box.querySelector('[data-f="' + field + '"]');
+    var cap = box.querySelector('[data-lcc-track="' + field + '"]');
+    var lbl = box.querySelector('[data-lcc-lbl="' + field + '"]');
+    if (!inp || !cap || !lbl) return;
+    var v = parseFloat(inp.value) || 0;
+    var pct = v > 0 ? Math.min(100, Math.max(6, Math.round(Math.sqrt(v / 20) * 100))) : 0;
+    var fill = cap.querySelector('.lcc-fill');
+    if (fill) fill.style.width = pct + '%';
+    cap.classList.toggle('active', v > 0);
+    lbl.textContent = v > 0 ? v + ' MB/s' : '不限速';
+    if (field === 'down') {
+      $$('[data-lcc-preset]', box).forEach(function (b) {
+        b.classList.toggle('on', parseFloat(b.getAttribute('data-lcc-preset')) === v);
+      });
+    }
+  }
+
+  // Dragging across .lcc-capsule directly manipulates rate with non-linear precision (0 ~ 20 MB/s)
+  var lccDrag = null;
+  function updateLccByClientX(clientX) {
+    if (!lccDrag) return;
+    var r = lccDrag.cap.getBoundingClientRect();
+    var ratio = Math.max(0, Math.min(1, (clientX - r.left) / Math.max(1, r.width)));
+    var val = 0;
+    if (ratio > 0.05) {
+      var raw = Math.pow((ratio - 0.04) / 0.96, 2) * 20;
+      val = raw < 2 ? Math.round(raw * 10) / 10 : raw < 6 ? Math.round(raw * 2) / 2 : Math.round(raw);
+      val = Math.max(0.1, Math.min(20, val));
+    }
+    var inp = lccDrag.box.querySelector('[data-f="' + lccDrag.field + '"]');
+    if (inp && !inp.disabled) {
+      inp.value = val > 0 ? String(val) : '';
+      syncLccFromInput(lccDrag.box, lccDrag.field);
+    }
+  }
+  // 1. 零重排 rAF 驱动光学流转高光 (--spot-x / --spot-y) 与 Liquid 微倾张力 / Cyber 战术定位脉冲
+  var spotCtx = null;
+  function writeSpotFrame() {
+    if (!spotCtx) return;
+    spotCtx.raf = 0;
+    var r = spotCtx.rect, g = spotCtx.el;
+    var nx = clamp((spotCtx.cx - r.left) / Math.max(1, r.width), 0, 1);
+    var ny = clamp((spotCtx.cy - r.top) / Math.max(1, r.height), 0, 1);
+    g.style.setProperty('--spot-x', (nx * 100).toFixed(1) + '%');
+    g.style.setProperty('--spot-y', (ny * 100).toFixed(1) + '%');
+    if (spotCtx.tilt) {
+      var ry = ((nx - 0.5) * 2.4).toFixed(2) + 'deg';
+      var rx = ((0.5 - ny) * 1.9).toFixed(2) + 'deg';
+      g.style.setProperty('--tilt-rx', rx);
+      g.style.setProperty('--tilt-ry', ry);
+    }
+  }
+  function clearSpotCtx() {
+    if (!spotCtx) return;
+    if (spotCtx.raf) cancelAnimationFrame(spotCtx.raf);
+    var g = spotCtx.el;
+    g.classList.remove('is-spotting', 'is-gliding', 'is-tilting');
+    g.style.removeProperty('--tilt-rx');
+    g.style.removeProperty('--tilt-ry');
+    spotCtx = null;
+  }
+
+  document.addEventListener('pointerdown', function (e) {
+    var mode = typeof motionTheme === 'function' ? motionTheme() : 'default';
+    if ((mode === 'liquid' || mode === 'cyber') && motionOn() && !(typeof lowFx === 'function' && lowFx())) {
+      var g = e.target.closest && e.target.closest('.glass:not(.seg):not(.search)');
+      if (g && !g.closest('#sheet')) {
+        clearSpotCtx();
+        var gr = g.getBoundingClientRect();
+        if (mode === 'liquid') {
+          var canTilt = fxOn('press') && !g.classList.contains('open') && gr.height < 260 && !e.target.closest('input,textarea,select,.toggle,.seg,[data-lcc-track]');
+          g.classList.add('is-spotting');
+          if (canTilt) g.classList.add('is-tilting');
+          spotCtx = { el: g, rect: gr, pid: e.pointerId, cx: e.clientX, cy: e.clientY, x0: e.clientX, y0: e.clientY, tilt: canTilt, raf: 0 };
+          writeSpotFrame();
+        } else {
+          var px = clamp((e.clientX - gr.left) / Math.max(1, gr.width) * 100, 0, 100).toFixed(1) + '%';
+          var py = clamp((e.clientY - gr.top) / Math.max(1, gr.height) * 100, 0, 100).toFixed(1) + '%';
+          g.style.setProperty('--spot-x', px);
+          g.style.setProperty('--spot-y', py);
+          g.classList.remove('cy-card-ping');
+          void g.offsetWidth;
+          g.classList.add('cy-card-ping');
+          clearTimeout(g._cyPingT);
+          g._cyPingT = setTimeout(function () { g.classList.remove('cy-card-ping'); }, 170);
+        }
+      }
+    }
+    // 2. Liquid Capsule Slider drag start
+    var cap = e.target.closest && e.target.closest('[data-lcc-track]');
+    if (!cap || cap.classList.contains('is-dis')) return;
+    var box = cap.closest('[data-dev]') || cap.closest('[data-side]');
+    var field = cap.getAttribute('data-lcc-track');
+    var inp = box && box.querySelector('[data-f="' + field + '"]');
+    if (!box || !inp || inp.disabled) return;
+    try { cap.setPointerCapture(e.pointerId); } catch (_) {}
+    cap.classList.add('dragging');
+    lccDrag = { cap: cap, box: box, field: field, id: e.pointerId };
+    updateLccByClientX(e.clientX);
+  }, { passive: true });
+
+  document.addEventListener('pointermove', function (e) {
+    if (spotCtx && e.pointerId === spotCtx.pid) {
+      spotCtx.cx = e.clientX;
+      spotCtx.cy = e.clientY;
+      if (!spotCtx.el.classList.contains('is-gliding') && Math.hypot(e.clientX - spotCtx.x0, e.clientY - spotCtx.y0) > 6) {
+        spotCtx.el.classList.add('is-gliding');
+      }
+      if (!spotCtx.raf) spotCtx.raf = requestAnimationFrame(writeSpotFrame);
+    }
+    if (!lccDrag) return;
+    updateLccByClientX(e.clientX);
+  }, { passive: true });
+
+  function endLccDrag() {
+    clearSpotCtx();
+    if (!lccDrag) return;
+    lccDrag.cap.classList.remove('dragging');
+    if (typeof haptic === 'function') haptic(8);
+    lccDrag = null;
+  }
+  document.addEventListener('pointerup', endLccDrag);
+  document.addEventListener('pointercancel', endLccDrag);
+  document.addEventListener('scroll', clearSpotCtx, true);
+
+  // Sync manual input typing back to liquid capsule bars
+  document.addEventListener('input', function (e) {
+    var f = e.target && e.target.getAttribute && e.target.getAttribute('data-f');
+    if (f === 'down' || f === 'up') {
+      var box = e.target.closest('[data-dev]') || e.target.closest('[data-side]');
+      syncLccFromInput(box, f);
+    }
+  });
+
+  // Wire preset pills & Control Center 3-tile Bento toggles
+  document.addEventListener('click', function (e) {
+    var pre = e.target.closest && e.target.closest('[data-lcc-preset]');
+    if (pre) {
+      var box = pre.closest('[data-dev]') || pre.closest('[data-side]');
+      if (!box) return;
+      var v = parseFloat(pre.getAttribute('data-lcc-preset')) || 0;
+      var dnInp = box.querySelector('[data-f="down"]');
+      var upInp = box.querySelector('[data-f="up"]');
+      if (dnInp && !dnInp.disabled) { dnInp.value = v > 0 ? String(v) : ''; syncLccFromInput(box, 'down'); }
+      if (upInp && !upInp.disabled) { upInp.value = v > 0 ? String(Math.max(0.2, +(v * 0.5).toFixed(1))) : ''; syncLccFromInput(box, 'up'); }
+      if (typeof haptic === 'function') haptic(8);
+      return;
+    }
+    var cc = e.target.closest && e.target.closest('[data-cc-tog]');
+    if (cc && !cc.disabled) {
+      var box2 = cc.closest('[data-dev]') || cc.closest('[data-side]');
+      var mac2 = box2 && (box2.getAttribute('data-dev') || box2.getAttribute('data-side'));
+      if (mac2 && S.busy[mac2]) { toast('这台设备还有操作在进行'); return; }
+      var kind = cc.getAttribute('data-cc-tog');
+      var realTog = box2 && box2.querySelector('.toggle[data-act="' + kind + '"]');
+      if (realTog && !realTog.disabled) {
+        realTog.click();
+        var isNowOn = realTog.getAttribute('aria-checked') === 'true';
+        cc.classList.toggle('on', isNowOn);
+        if (kind === 'sqm') cc.classList.toggle('sqm-on', isNowOn);
+        else if (kind === 'appqos') cc.classList.toggle('qos-on', isNowOn);
+        else if (kind === 'wl') cc.classList.toggle('wl-on', isNowOn);
+      }
+    }
+  });
+ function tabState(){host.querySelectorAll('[data-tab]').forEach(function(el){var name=el.getAttribute('data-tab'),on=name===S.page;el.setAttribute('role','tab');el.setAttribute('aria-label',NAV_T[name]);el.setAttribute('aria-selected',String(on));el.setAttribute('aria-controls','p-'+name);el.tabIndex=on?0:-1;});}
+ var originalSync=syncTab;syncTab=function(name,instant){originalSync(name,instant);tabState();};tabState();
+ host.addEventListener('keydown',function(e){var el=e.target.closest('[data-tab]');if(!el)return;var n=ORDER.indexOf(el.getAttribute('data-tab'));if(e.key==='ArrowRight')n=(n+1)%4;else if(e.key==='ArrowLeft')n=(n+3)%4;else if(e.key==='Home')n=0;else if(e.key==='End')n=3;else if(e.key!=='Enter'&&e.key!==' ')return;e.preventDefault();go(ORDER[n]);host.querySelector('[data-tab="'+ORDER[n]+'"]').focus();});
+})();
+
+/* === v5.33.1 Enhancement Layer 2: Dual RX/TX Bezier Sparkline, Filter Pills & Live Settings Search === */
+(function(){
+  'use strict';
+  if (typeof S === 'undefined') return;
+
+  /* ── 新增状态字段：上行历史曲线、快捷胶囊筛选、液态阀门松手即生效、设置页搜索 ── */
+  S.sparkTx = S.sparkTx || [];
+  S.qpill = S.qpill || 'all';
+  S.lccAutoApply = S.lccAutoApply !== false;
+  S.setQ = S.setQ || '';
+
+  // 初始化预置上行速率历史，与 S.spark (下行) 同步长度
+  if (!S.sparkTx.length && Array.isArray(S.spark)) {
+    S.sparkTx = S.spark.map(function(v, i){
+      return Math.max(12000, Math.round(v * (0.09 + 0.03 * Math.sin(i / 2.2))));
+    });
+  }
+
+  // 钩住 applyLive：每次轮询同时记录上行速率 tx_bps
+  var _origApplyLive = window.applyLive;
+  if (typeof _origApplyLive === 'function') {
+    window.applyLive = function(l) {
+      _origApplyLive(l);
+      S.sparkTx.push(num(l && l.tx_bps));
+      if (S.sparkTx.length > 30) S.sparkTx.shift();
+    };
+  }
+
+  /* ── 1. 重构顶部座舱曲线：支持 RX(下行) + TX(上行) 双通道三次贝塞尔流光曲线 ── */
+  window.drawSpark = function() {
+    var el = $('#spark');
+    if (!el) return;
+    var rx = S.spark.length > 1 ? S.spark : [0, 0];
+    var tx = S.sparkTx.length === rx.length ? S.sparkTx : rx.map(function(v, i){
+      return S.sparkTx[i] != null ? S.sparkTx[i] : v * 0.1;
+    });
+    var W = Math.round(el.clientWidth) || 320, H = 52;
+    var peakRx = Math.max.apply(null, rx), peakTx = Math.max.apply(null, tx);
+    var mx = Math.max(peakRx, peakTx) * 1.16 || 1;
+    var st = W / Math.max(1, rx.length - 1);
+
+    function bezierPath(arr) {
+      var pts = arr.map(function(v, i){ return [i * st, H - 4 - (v / mx) * (H - 10)]; });
+      var d = 'M' + pts[0][0].toFixed(1) + ' ' + pts[0][1].toFixed(1);
+      for (var i = 1; i < pts.length; i++) {
+        var cx = (pts[i - 1][0] + pts[i][0]) / 2;
+        d += ' C' + cx.toFixed(1) + ' ' + pts[i - 1][1].toFixed(1) + ',' +
+                    cx.toFixed(1) + ' ' + pts[i][1].toFixed(1) + ',' +
+                    pts[i][0].toFixed(1) + ' ' + pts[i][1].toFixed(1);
+      }
+      return { d: d, last: pts[pts.length - 1] };
+    }
+
+    var pr = bezierPath(rx), pt = bezierPath(tx);
+    el.setAttribute('viewBox', '0 0 ' + W + ' ' + H);
+    el.innerHTML =
+      '<defs>' +
+        '<linearGradient id="sgRx" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--rx)" stop-opacity=".30"/><stop offset="1" stop-color="var(--rx)" stop-opacity="0"/></linearGradient>' +
+        '<linearGradient id="sgTx" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="var(--tx)" stop-opacity=".24"/><stop offset="1" stop-color="var(--tx)" stop-opacity="0"/></linearGradient>' +
+      '</defs>' +
+      '<path d="' + pr.d + ' L' + W + ' ' + H + ' L0 ' + H + ' Z" fill="url(#sgRx)"/>' +
+      '<path d="' + pt.d + ' L' + W + ' ' + H + ' L0 ' + H + ' Z" fill="url(#sgTx)"/>' +
+      '<path d="' + pt.d + '" fill="none" stroke="var(--tx)" stroke-width="1.5" stroke-dasharray="3 2" opacity=".85"/>' +
+      '<path d="' + pr.d + '" fill="none" stroke="var(--rx)" stroke-width="2.2" stroke-linejoin="round"/>' +
+      '<circle cx="' + pr.last[0].toFixed(1) + '" cy="' + pr.last[1].toFixed(1) + '" r="3.5" fill="var(--rx)" stroke="var(--card-solid)" stroke-width="2"/>';
+
+    // 注入或更新曲线上方的双通道图例与峰值 HUD
+    var hud = $('#hero-spark-hud');
+    var peakBps = bps(peakRx);
+    var hudHtml = '<span class="leg"><span><i style="background:var(--rx)"></i>下行实时流</span><span><i style="background:var(--tx)"></i>上行实时流</span></span>' +
+                  '<span class="num">近60秒峰值 <b style="color:var(--text-1)">' + peakBps.v + ' ' + peakBps.u + '</b></span>';
+    if (!hud) {
+      el.insertAdjacentHTML('beforebegin', '<div class="hero-spark-hud" id="hero-spark-hud">' + hudHtml + '</div>');
+    } else {
+      hud.innerHTML = hudHtml;
+    }
+  };
+
+  /* ── 2. 增强 visibleDevs 与快捷筛选胶囊栏 (.quick-pills) ── */
+  var _origVisibleDevs = window.visibleDevs;
+  window.visibleDevs = function() {
+    var list = _origVisibleDevs ? _origVisibleDevs() : S.devices;
+    if (S.qpill === 'online') return list.filter(function(d){ return d.online; });
+    if (S.qpill === 'shaped') return list.filter(function(d){ return d.limitOn || d.down > 0 || d.up > 0; });
+    if (S.qpill === 'sqm')    return list.filter(function(d){ return d.sqm || d.appQos; });
+    if (S.qpill === 'blocked')return list.filter(function(d){ return d.blocked; });
+    if (S.qpill === 'rmac')   return list.filter(function(d){ return d.rmac; });
+    return list;
+  };
+
+  function injectQuickPills() {
+    var searchEl = $('#p-devices .search');
+    if (!searchEl) return;
+    var baseList = _origVisibleDevs ? _origVisibleDevs() : S.devices;
+    var pills = [
+      ['all', '全部', baseList.length],
+      ['online', '在线', baseList.filter(function(d){ return d.online; }).length],
+      ['shaped', '限速中', baseList.filter(function(d){ return d.limitOn || d.down > 0 || d.up > 0; }).length],
+      ['sqm', '低延迟/分流', baseList.filter(function(d){ return d.sqm || d.appQos; }).length],
+      ['blocked', '已封锁', baseList.filter(function(d){ return d.blocked; }).length],
+      ['rmac', '随机MAC', baseList.filter(function(d){ return d.rmac; }).length]
+    ];
+    var html = pills.map(function(p){
+      return '<button type="button" class="qpill press' + (S.qpill === p[0] ? ' on' : '') + '" data-qpill="' + p[0] + '">' +
+               p[1] + '<b>' + p[2] + '</b></button>';
+    }).join('');
+    var bar = $('#qpill-bar');
+    if (!bar) {
+      searchEl.insertAdjacentHTML('afterend', '<div class="quick-pills" id="qpill-bar">' + html + '</div>');
+    } else {
+      bar.innerHTML = html;
+    }
+  }
+
+  /* ── 3. 增强设备卡片：在线带宽负载条 + 4磁贴控制中心 + 液态阀门松手即生效 ── */
+  var _origDevCard = window.devCard;
+  window.devCard = function(d) {
+    var html = _origDevCard(d);
+    if (d.online) {
+      var loadPct = Math.min(100, Math.max(6, Math.round((num(d.rx) + num(d.tx)) / (3.2 * 1048576) * 100)));
+      html = html.replace('</span></button>', '<span class="dev-load-bar"><i style="width:' + loadPct + '%"></i></span></span></button>');
+    }
+    return html;
+  };
+
+  var _origPatchRates = window.patchRates;
+  if (typeof _origPatchRates === 'function') {
+    window.patchRates = function() {
+      _origPatchRates();
+      S.devices.forEach(function(d) {
+        if (!d.online) return;
+        var bar = document.querySelector('.dev[data-dev="' + d.mac + '"] .dev-load-bar > i');
+        if (bar) {
+          var loadPct = Math.min(100, Math.max(6, Math.round((num(d.rx) + num(d.tx)) / (3.2 * 1048576) * 100)));
+          bar.style.width = loadPct + '%';
+        }
+      });
+    };
+  }
+
+  var _origDevBody = window.devBody;
+  window.devBody = function(d) {
+    var html = _origDevBody(d);
+    // 将 3 格控制中心升级为 4 格（新增第 4 格：实时连接流直达磁贴）
+    var nConn = d.online && S.connCounts && S.connCounts[d.mac] && S.connCounts[d.mac].n;
+    var connCount = nConn ? (nConn + ' 条') : (d.online ? '实时' : '离线');
+    var tile4 = '<button type="button" class="cc-tile conn-tile press' + (d.online ? ' on conn-on' : '') + '" data-act="conns"' + (d.online ? '' : ' disabled') + '>' +
+                  '<span class="cc-orb">' + bentoSvg('conns') + '</span>' +
+                  '<span class="cc-txt"><b>实时连接流</b><small><span data-cc-conn="' + esc(d.mac) + '">' + connCount + '</span> · 点按嗅探</small></span>' +
+                '</button>';
+    html = html.replace('<div class="cc-bento-row">', '<div class="cc-bento-row bento-4">')
+               .replace('</button></div><div class="ctrl lcc-ctrl', '</button>' + tile4 + '</div><div class="ctrl lcc-ctrl');
+    return html;
+  };
+
+  var _origPaintConnCounts = window.paintConnCounts;
+  if (typeof _origPaintConnCounts === 'function') {
+    window.paintConnCounts = function() {
+      _origPaintConnCounts();
+      S.devices.forEach(function(d) {
+        var nConn = d.online && S.connCounts && S.connCounts[d.mac] && S.connCounts[d.mac].n;
+        if (!nConn) return;
+        $$('[data-cc-conn="' + d.mac + '"]').forEach(function(el) { el.textContent = nConn + ' 条'; });
+      });
+    };
+  }
+
+  var _origRenderDevices = window.renderDevices;
+  window.renderDevices = function(anim1) {
+    _origRenderDevices(anim1);
+    injectQuickPills();
+    drawSpark();
+  };
+
+  var _origRenderDevList = window.renderDevList;
+  window.renderDevList = function(animate) {
+    _origRenderDevList(animate);
+    injectQuickPills();
+  };
+
+  var _origRefreshCard = window.refreshCard;
+  if (typeof _origRefreshCard === 'function') {
+    window.refreshCard = function(mac) {
+      _origRefreshCard(mac);
+      injectQuickPills();
+    };
+  }
+
+  /* ── 4. 增强应用页：顶部注入本机应用流量构成彩条 (.app-cat-card) ── */
+  var _origAppsSub = window.appsSub;
+  if (typeof _origAppsSub === 'function') {
+    window.appsSub = function() {
+      var html = _origAppsSub();
+      if (S.appsSub === 'my') {
+        var rows = appRows().filter(function(r){ return !r.a.is_system && r.bytes > 0; }).slice(0, 6);
+        var tot = rows.reduce(function(s, r){ return s + r.bytes; }, 0);
+        if (tot > 0) {
+          var barHtml = '<div class="glass app-cat-card">' +
+            '<div style="display:flex;justify-content:space-between;font-size:12px;font-weight:650"><span>本机主力应用流量占比</span><span class="num">Top ' + rows.length + ' · ' + bytes(tot) + '</span></div>' +
+            '<div class="app-cat-bar">' + rows.map(function(r){
+              return '<i style="width:' + (r.bytes / tot * 100).toFixed(1) + '%;background:' + appColor(r.a.pkg || r.name) + '"></i>';
+            }).join('') + '</div>' +
+            '<div class="app-cat-leg">' + rows.map(function(r){
+              return '<span><i style="background:' + appColor(r.a.pkg || r.name) + '"></i>' + esc(r.name) + ' ' + Math.round(r.bytes / tot * 100) + '%</span>';
+            }).join('') + '</div></div>';
+          html = barHtml + html;
+        }
+      }
+      return html;
+    };
+  }
+
+  /* ── 5. 增强分析页 DPI 座舱：注入 SVG 环形识别覆盖率仪表盘 (.dpi-ring-svg) ── */
+  var _origPaintDpi = window.paintDpi;
+  if (typeof _origPaintDpi === 'function') {
+    window.paintDpi = function() {
+      _origPaintDpi();
+      var top = $('#dpi-hero .dpihero .top');
+      var st = S.dpi && S.dpi.available && S.dpi.state;
+      var ur = st && st.unidentified_ratio;
+      if (top && ur && ur.total_bytes && !$('#dpi-cov-ring')) {
+        var cov = clamp(1 - num(ur.ratio), 0, 1), r = 19, c = 2 * Math.PI * r;
+        var ringHtml = '<div class="dpi-ring-wrap" id="dpi-cov-ring">' +
+          '<svg class="dpi-ring-svg" viewBox="0 0 46 46">' +
+            '<circle cx="23" cy="23" r="' + r + '" fill="none" stroke="var(--input)" stroke-width="4.5"/>' +
+            '<circle cx="23" cy="23" r="' + r + '" fill="none" stroke="var(--green)" stroke-width="4.5" stroke-dasharray="' + c.toFixed(1) + '" stroke-dashoffset="' + ((1 - cov) * c).toFixed(1) + '" stroke-linecap="round"/>' +
+          '</svg>' +
+          '<div style="text-align:right"><div class="num" style="font-size:17px;font-weight:800">' + Math.round(cov * 100) + '%</div><div class="note">识别覆盖率</div></div>' +
+        '</div>';
+        top.lastElementChild.insertAdjacentHTML('beforebegin', ringHtml);
+      }
+    };
+  }
+
+  /* ── 6. 增强设置页：顶部实时搜索过滤框 (#set-q)，跨 12 张折叠卡片秒搜 ── */
+  function applySetSearch() {
+    var q = (S.setQ || '').trim().toLowerCase();
+    $$('#p-settings .scard').forEach(function(card) {
+      var match = !q || card.textContent.toLowerCase().indexOf(q) >= 0;
+      card.hidden = !match;
+      if (q && match) {
+        card.classList.add('open');
+        placeSegs(card);
+      }
+    });
+    $$('#p-settings [data-lv-sec]').forEach(function(sec) {
+      if (q) sec.hidden = !$$('.scard:not([hidden])', sec).length;
+      else sec.hidden = (S.setLv !== 'all' && sec.getAttribute('data-lv-sec') !== S.setLv);
+    });
+  }
+
+  var _origRenderSettings = window.renderSettings;
+  if (typeof _origRenderSettings === 'function') {
+    window.renderSettings = function(anim1) {
+      var wasFocused = document.activeElement && document.activeElement.id === 'set-q';
+      var selStart = wasFocused ? document.activeElement.selectionStart : null;
+      var selEnd = wasFocused ? document.activeElement.selectionEnd : null;
+      _origRenderSettings(anim1);
+      var bar = $('#p-settings .set-top-bar');
+      if (bar && !$('#set-q')) {
+        bar.insertAdjacentHTML('afterbegin',
+          '<label class="glass search">' + ico('search') +
+            '<input id="set-q" type="search" placeholder="搜索设置项（如：DNS、QUIC、配对、液态玻璃、自检）" value="' + esc(S.setQ) + '" autocomplete="off">' +
+          '</label>'
+        );
+      }
+      if (S.setQ && S.setQ.trim()) applySetSearch();
+      if (wasFocused && $('#set-q')) {
+        var inpEl = $('#set-q');
+        inpEl.focus();
+        try { if (selStart != null) inpEl.setSelectionRange(selStart, selEnd); } catch (_) {}
+      }
+    };
+  }
+
+  /* ── 7. 绑定新增交互事件（快捷胶囊、设置搜索、液态滑块松手自动下发限速） ── */
+  document.addEventListener('click', function(e) {
+    var qp = e.target.closest && e.target.closest('[data-qpill]');
+    if (qp) {
+      S.qpill = qp.getAttribute('data-qpill');
+      renderDevList(false);
+      return;
+    }
+    var autoBtn = e.target.closest && e.target.closest('[data-act="toggle-lcc-auto"]');
+    if (autoBtn) {
+      S.lccAutoApply = !S.lccAutoApply;
+      $$('[data-act="toggle-lcc-auto"]').forEach(function(b){
+        b.classList.toggle('off', !S.lccAutoApply);
+        b.innerHTML = S.lccAutoApply ? uiSvg('bolt') + ' 松手即下发限速' : '手动点应用生效';
+      });
+      toast(S.lccAutoApply ? '已开启：滑动液态柱松手即自动应用限速' : '已切换为手动点击「应用限速」生效');
+      return;
+    }
+    var pre = e.target.closest && e.target.closest('[data-lcc-preset]');
+    if (pre && S.lccAutoApply) {
+      var box = pre.closest('[data-dev]') || pre.closest('[data-side]');
+      var applyBtn = box && box.querySelector('[data-act="apply-limit"]');
+      if (applyBtn && !applyBtn.disabled) setTimeout(function(){ applyBtn.click(); }, 30);
+    }
+    var setLvBtn = e.target.closest && e.target.closest('[data-seg="set-lv"] button');
+    if (setLvBtn && S.setQ && S.setQ.trim()) {
+      setTimeout(applySetSearch, 0);
+    }
+  });
+
+  // 液态柱拖拽松手时，若开启了「松手即下发限速」，自动触发应用限速
+  var draggingBox = null;
+  document.addEventListener('pointerdown', function(e) {
+    var cap = e.target.closest && e.target.closest('[data-lcc-track]');
+    if (cap && !cap.classList.contains('is-dis')) {
+      draggingBox = cap.closest('[data-dev]') || cap.closest('[data-side]');
+    }
+  }, true);
+  document.addEventListener('pointerup', function() {
+    if (draggingBox && S.lccAutoApply) {
+      var box = draggingBox;
+      draggingBox = null;
+      var applyBtn = box.querySelector('[data-act="apply-limit"]');
+      if (applyBtn && !applyBtn.disabled) applyBtn.click();
+    } else {
+      draggingBox = null;
+    }
+  });
+  document.addEventListener('pointercancel', function() {
+    draggingBox = null;
+  });
+
+  // 设置页实时搜索过滤
+  document.addEventListener('input', function(e) {
+    if (e.target && e.target.id === 'set-q') {
+      S.setQ = e.target.value;
+      applySetSearch();
+    }
+  });
+
+  // 初次挂载立即刷新当前视图
+  if (S.page === 'devices') renderDevices(false);
+  else if (S.page === 'apps') renderApps(false);
+  else if (S.page === 'stats') renderStats(false);
+  else if (S.page === 'settings') renderSettings(false);
+})();
+
+/* === v5.33.1 Enhancement Layer 3: Custom Wallpaper Engine (Zero-Halo Micro-Capsule), Pure Digital Bandwidth & Auto Public CDN Badges === */
+(function(){
+  'use strict';
+  if (typeof S === 'undefined') return;
+
+  function softAnimateContainer(el) {
+    if (!el || typeof motionOn !== 'function' || !motionOn()) return;
+    el.classList.remove('fx-rise');
+    void el.offsetWidth;
+    el.classList.add('fx-rise');
+  }
+
+  /* ── 1. 自定义背景壁纸引擎（内置高折射 SVG 壁纸 + 本地图片压缩导入 + URL + 景深模糊/护眼遮罩） ── */
+  function svgDataUri(svg) {
+    return 'url("data:image/svg+xml;utf8,' + encodeURIComponent(svg) + '")';
+  }
+
+  var WP_PRESETS = {
+    none: { label: '默认无图', thumb: 'linear-gradient(135deg,#e2ecfb,#cbd8ea)', uri: '' },
+    aurora: {
+      label: '深海极光',
+      thumb: 'linear-gradient(135deg,#07192f,#0ea5e9 52%,#2dd4bf)',
+      uri: svgDataUri('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><defs><linearGradient id="g0" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#071326"/><stop offset="50%" stop-color="#0d2847"/><stop offset="100%" stop-color="#091d36"/></linearGradient><linearGradient id="g1" x1="0" y1="0" x2="1" y2="0"><stop offset="0%" stop-color="#38bdf8" stop-opacity="0.75"/><stop offset="50%" stop-color="#2dd4bf" stop-opacity="0.65"/><stop offset="100%" stop-color="#818cf8" stop-opacity="0.7"/></linearGradient><linearGradient id="g2" x1="0" y1="1" x2="1" y2="0"><stop offset="0%" stop-color="#0284c7" stop-opacity="0.6"/><stop offset="100%" stop-color="#34d399" stop-opacity="0.55"/></linearGradient></defs><rect width="1200" height="800" fill="url(#g0)"/><circle cx="240" cy="180" r="280" fill="#0ea5e9" opacity="0.32"/><circle cx="980" cy="640" r="320" fill="#6366f1" opacity="0.28"/><path d="M-100 520 C 260 320, 520 680, 920 390 C 1080 280, 1200 360, 1320 260 L 1320 860 L -100 860 Z" fill="url(#g1)"/><path d="M-80 650 C 310 470, 660 740, 1300 460 L 1300 860 L -80 860 Z" fill="url(#g2)"/></svg>')
+    },
+    slate: {
+      label: '蓝灰矩阵',
+      thumb: 'linear-gradient(135deg,#0b1119,#1e3248 60%,#4a82b0)',
+      uri: svgDataUri('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><defs><linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0a1018"/><stop offset="55%" stop-color="#142232"/><stop offset="100%" stop-color="#0d1724"/></linearGradient><pattern id="grid" width="60" height="60" patternUnits="userSpaceOnUse"><path d="M 60 0 L 0 0 0 60" fill="none" stroke="#5ea4dc" stroke-opacity="0.14" stroke-width="1"/></pattern></defs><rect width="1200" height="800" fill="url(#bg)"/><rect width="1200" height="800" fill="url(#grid)"/><g stroke="#62a5dc" stroke-opacity="0.34" fill="none" stroke-width="2"><polygon points="180,140 360,90 460,250 280,320"/><polygon points="740,180 1020,120 1100,360 830,420"/><polygon points="320,520 640,410 760,670 420,730"/><line x1="360" y1="90" x2="740" y2="180"/><line x1="460" y1="250" x2="640" y2="410"/><line x1="830" y1="420" x2="640" y2="410"/></g><g fill="#5bc2b0" opacity="0.55"><circle cx="360" cy="90" r="6"/><circle cx="460" cy="250" r="6"/><circle cx="740" cy="180" r="6"/><circle cx="830" cy="420" r="6"/><circle cx="640" cy="410" r="7"/></g></svg>')
+    },
+    dusk: {
+      label: '暮光层峦',
+      thumb: 'linear-gradient(160deg,#3b82f6,#a855f7 52%,#fb7185)',
+      uri: svgDataUri('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><defs><linearGradient id="sky" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1d4ed8"/><stop offset="48%" stop-color="#7e22ce"/><stop offset="85%" stop-color="#f43f5e"/><stop offset="100%" stop-color="#fb923c"/></linearGradient></defs><rect width="1200" height="800" fill="url(#sky)"/><circle cx="860" cy="230" r="95" fill="#fde047" opacity="0.72"/><path d="M0 500 L220 360 L450 470 L710 310 L960 450 L1200 340 L1200 800 L0 800 Z" fill="#311042" opacity="0.55"/><path d="M0 590 L180 480 L430 580 L690 440 L940 570 L1200 470 L1200 800 L0 800 Z" fill="#1e1b4b" opacity="0.78"/><path d="M0 680 L290 590 L580 670 L890 580 L1200 650 L1200 800 L0 800 Z" fill="#0f172a"/></svg>')
+    },
+    prism: {
+      label: '流光棱镜',
+      thumb: 'linear-gradient(135deg,#bae6fd,#e9d5ff 50%,#fecdd3)',
+      uri: svgDataUri('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800"><defs><linearGradient id="p0" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#dbeafe"/><stop offset="50%" stop-color="#f3e8ff"/><stop offset="100%" stop-color="#ffe4e6"/></linearGradient><linearGradient id="p1" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#38bdf8" stop-opacity="0.7"/><stop offset="100%" stop-color="#818cf8" stop-opacity="0.65"/></linearGradient><linearGradient id="p2" x1="1" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#f472b6" stop-opacity="0.65"/><stop offset="100%" stop-color="#fb923c" stop-opacity="0.55"/></linearGradient></defs><rect width="1200" height="800" fill="url(#p0)"/><circle cx="260" cy="240" r="240" fill="url(#p1)"/><circle cx="920" cy="260" r="260" fill="url(#p2)"/><circle cx="620" cy="600" r="290" fill="#2dd4bf" opacity="0.42"/><rect x="140" y="120" width="920" height="560" rx="64" fill="none" stroke="#ffffff" stroke-opacity="0.65" stroke-width="6"/></svg>')
+    }
+  };
+
+  S.wpId = LS.get('hnc6.wp_id', 'none');
+  S.wpCustom = LS.get('hnc6.wp_custom', '');
+  S.wpBlur = num(LS.get('hnc6.wp_blur', '0'), 0);
+  S.wpDim = num(LS.get('hnc6.wp_dim', '22'), 22);
+  // v5.36.0: 默认启用无界原生透字排版 ('adaptive')，消除实心白底膏药胶囊；用 wp_text_v2 平滑升级旧缓存
+  S.wpTextMode = LS.get('hnc6.wp_text_v2', '') === 'capsule' ? 'capsule' : 'adaptive';
+  S.hideSharedUnk = LS.get('hnc6.hide_shared_unk', '0') === '1';
+
+  var PRESET_TONES = {
+    aurora: { tone: 'dark', top: 'dark', bot: 'dark' },
+    slate:  { tone: 'dark', top: 'dark', bot: 'dark' },
+    dusk:   { tone: 'dark', top: 'dark', bot: 'dark' },
+    prism:  { tone: 'light', top: 'light', bot: 'light' }
+  };
+
+  function setWpToneAttrs(tones, persist) {
+    var r = document.documentElement;
+    var topT = (tones && tones.top) || 'dark';
+    var midT = (tones && tones.tone) || 'dark';
+    var botT = (tones && tones.bot) || 'dark';
+    r.setAttribute('data-wp-top', topT);
+    r.setAttribute('data-wp-tone', midT);
+    r.setAttribute('data-wp-bot', botT);
+    if (persist) try { LS.set('hnc6.wp_tones', topT + ',' + midT + ',' + botT); } catch (_) {}
+  }
+
+  function detectWallpaperTone(rawSrc) {
+    if (S.wpId !== 'custom') {
+      setWpToneAttrs(PRESET_TONES[S.wpId] || PRESET_TONES.aurora, true);
+      return;
+    }
+    var cached = String(LS.get('hnc6.wp_tones', '') || '').split(',');
+    if (cached.length === 3) setWpToneAttrs({ top: cached[0], tone: cached[1], bot: cached[2] }, false);
+    else setWpToneAttrs({ top: 'dark', tone: 'dark', bot: 'dark' }, false);
+    if (!rawSrc) return;
+    var im = new Image();
+    im.crossOrigin = 'anonymous';
+    im.onload = function() {
+      try {
+        var W = 24, H = 36, cv = document.createElement('canvas');
+        cv.width = W; cv.height = H;
+        var ctx = cv.getContext('2d');
+        ctx.drawImage(im, 0, 0, W, H);
+        var d = ctx.getImageData(0, 0, W, H).data;
+        var sumAll = 0, nAll = 0, sumTop = 0, nTop = 0, sumBot = 0, nBot = 0;
+        for (var y = 0; y < H; y++) {
+          for (var x = 0; x < W; x++) {
+            var idx = (y * W + x) * 4;
+            var lum = 0.2126 * d[idx] + 0.7152 * d[idx + 1] + 0.0722 * d[idx + 2];
+            sumAll += lum; nAll++;
+            if (y < 9) { sumTop += lum; nTop++; }
+            if (y >= 27) { sumBot += lum; nBot++; }
+          }
+        }
+        setWpToneAttrs({
+          top: (nTop ? sumTop / nTop : 110) < 168 ? 'dark' : 'light',
+          tone: (nAll ? sumAll / nAll : 110) < 165 ? 'dark' : 'light',
+          bot: (nBot ? sumBot / nBot : 110) < 168 ? 'dark' : 'light'
+        }, true);
+      } catch (_) {
+        setWpToneAttrs({ top: 'dark', tone: 'dark', bot: 'dark' }, false);
+      }
+    };
+    im.onerror = function() { setWpToneAttrs({ top: 'dark', tone: 'dark', bot: 'dark' }, false); };
+    im.src = rawSrc;
+  }
+
+  window.applyWallpaper = function() {
+    var r = document.documentElement;
+    var uri = '', rawSrc = '';
+    if (S.wpId === 'custom' && S.wpCustom) {
+      rawSrc = S.wpCustom;
+      uri = 'url("' + S.wpCustom.replace(/"/g, '\"') + '")';
+    } else if (WP_PRESETS[S.wpId] && WP_PRESETS[S.wpId].uri) {
+      uri = WP_PRESETS[S.wpId].uri;
+    }
+    if (uri) {
+      r.setAttribute('data-has-wp', '1');
+      r.classList.add('has-wallpaper');
+      r.setAttribute('data-wp-text', S.wpTextMode === 'capsule' ? 'capsule' : 'adaptive');
+      r.style.setProperty('--wp-image', uri);
+      r.style.setProperty('--wp-blur', clamp(num(S.wpBlur, 0), 0, 24) + 'px');
+      r.style.setProperty('--wp-dim', (clamp(num(S.wpDim, 22), 0, 75) / 100).toFixed(2));
+      detectWallpaperTone(rawSrc);
+    } else {
+      r.removeAttribute('data-has-wp');
+      r.classList.remove('has-wallpaper');
+      r.removeAttribute('data-wp-text');
+      r.removeAttribute('data-wp-tone');
+      r.removeAttribute('data-wp-top');
+      r.removeAttribute('data-wp-bot');
+      r.style.removeProperty('--wp-image');
+    }
+    if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets();
+  };
+
+  window.wpSettingsHtml = function() {
+    var hasWp = (S.wpId === 'custom' && !!S.wpCustom) || (S.wpId !== 'none' && !!WP_PRESETS[S.wpId]);
+    var preBtns = Object.keys(WP_PRESETS).map(function(k) {
+      var p = WP_PRESETS[k];
+      return '<button type="button" class="wp-pre press' + (S.wpId === k ? ' on' : '') + '" data-wp-pick="' + k + '">' +
+        '<span class="wp-sw" style="background:' + p.thumb + '"></span>' +
+        '<span>' + p.label + '</span></button>';
+    }).join('');
+    var customBadge = S.wpId === 'custom' && S.wpCustom ? ' · 已启用自定义图' : '';
+    return '<div class="wp-panel" id="wp-panel">' +
+      '<div class="note" style="margin-bottom:-2px">自定义背景壁纸' + customBadge + '（液态玻璃支持实时真光学边缘折射）</div>' +
+      '<div class="wp-presets">' + preBtns + '</div>' +
+      '<div class="wp-actions">' +
+        '<input type="file" id="wp-file" accept="image/*" hidden>' +
+        '<button type="button" class="btn sec press" data-act="wp-upload">本地选图</button>' +
+        '<span class="box"><input id="wp-url-inp" type="url" placeholder="粘贴图片 https:// 直链…" value="' + (S.wpId === 'custom' && /^https?:\/\//.test(S.wpCustom) ? esc(S.wpCustom) : '') + '" style="font-size:12.5px"></span>' +
+        '<button type="button" class="btn sec press" data-act="wp-url-apply">应用链接</button>' +
+      '</div>' +
+      '<div class="wp-sliders" id="wp-sliders"' + (hasWp ? '' : ' hidden') + '>' +
+        '<div class="wp-mode-row"><span class="note" style="margin:0">标题与分组排版（无白边膏药感）</span>' +
+          '<span class="wp-mode-pills">' +
+            '<button type="button" class="wp-mpill press' + (S.wpTextMode !== 'capsule' ? ' on' : '') + '" data-wp-tmode="adaptive">原生透字</button>' +
+            '<button type="button" class="wp-mpill press' + (S.wpTextMode === 'capsule' ? ' on' : '') + '" data-wp-tmode="capsule">轻纱托底</button>' +
+          '</span></div>' +
+        '<div class="note" style="margin-bottom:-2px">背景景深模糊 · <span id="wp-blur-v">' + Math.round(S.wpBlur) + ' px</span>（0 px 可最大化液态玻璃边缘折射细节）</div>' +
+        '<div class="gx-row"><span>清晰</span><input type="range" class="gx-range" id="wp-blur" min="0" max="24" step="1" value="' + Math.round(S.wpBlur) + '" aria-label="背景景深模糊"><span>柔和</span></div>' +
+        '<div class="note" style="margin-bottom:-2px">遮罩护眼浓度 · <span id="wp-dim-v">' + Math.round(S.wpDim) + '%</span>（花哨壁纸调高可保证文字锐利清晰）</div>' +
+        '<div class="gx-row"><span>透亮</span><input type="range" class="gx-range" id="wp-dim" min="0" max="75" step="1" value="' + Math.round(S.wpDim) + '" aria-label="遮罩护眼浓度"><span>护眼</span></div>' +
+      '</div>' +
+    '</div>';
+  };
+
+  function syncWpUi() {
+    var hasWp = (S.wpId === 'custom' && !!S.wpCustom) || (S.wpId !== 'none' && !!WP_PRESETS[S.wpId]);
+    $$('[data-wp-pick]').forEach(function(b) {
+      b.classList.toggle('on', b.getAttribute('data-wp-pick') === S.wpId);
+    });
+    var sl = $('#wp-sliders');
+    if (sl) sl.hidden = !hasWp;
+  }
+
+  /* ── 2. 纯数字带宽输入实时换算与一键清空（零闪烁） ── */
+  function syncBwInput(box, field) {
+    if (!box) return;
+    var inp = box.querySelector('[data-f="' + field + '"]');
+    var eq = box.querySelector('[data-bw-eq="' + field + '"]');
+    var clr = box.querySelector('[data-bw-clr="' + field + '"]');
+    var card = inp && inp.closest('.bw-card');
+    if (!inp) return;
+    var raw = String(inp.value || '').trim();
+    var v = parseFloat(raw) || 0;
+    if (card) card.classList.toggle('has-val', v > 0);
+    if (clr) clr.hidden = !raw.length;
+    if (eq) eq.textContent = v > 0 ? '≈ ' + trim0((v * 8).toFixed(1)) + ' Mbps' : '当前不限速';
+  }
+
+  document.addEventListener('input', function(e) {
+    var t = e.target;
+    if (!t) return;
+    var f = t.getAttribute && t.getAttribute('data-f');
+    if (f === 'down' || f === 'up') {
+      syncBwInput(t.closest('[data-dev]') || t.closest('[data-side]'), f);
+      return;
+    }
+    if (t.id === 'wp-blur') {
+      S.wpBlur = clamp(num(t.value, 0), 0, 24);
+      LS.set('hnc6.wp_blur', String(S.wpBlur));
+      var bv = $('#wp-blur-v'); if (bv) bv.textContent = Math.round(S.wpBlur) + ' px';
+      applyWallpaper();
+      return;
+    }
+    if (t.id === 'wp-dim') {
+      S.wpDim = clamp(num(t.value, 22), 0, 75);
+      LS.set('hnc6.wp_dim', String(S.wpDim));
+      var dv = $('#wp-dim-v'); if (dv) dv.textContent = Math.round(S.wpDim) + '%';
+      applyWallpaper();
+      return;
+    }
+  });
+
+  document.addEventListener('change', function(e) {
+    var t = e.target;
+    if (!t || t.id !== 'wp-file' || !t.files || !t.files[0]) return;
+    var file = t.files[0];
+    var reader = new FileReader();
+    reader.onload = function(ev) {
+      var img = new Image();
+      img.onload = function() {
+        var maxSide = 1600, w = img.width || 800, h = img.height || 600;
+        if (w > maxSide || h > maxSide) {
+          var scale = maxSide / Math.max(w, h);
+          w = Math.round(w * scale);
+          h = Math.round(h * scale);
+        }
+        var cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        var ctx = cv.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        var dataUrl = cv.toDataURL('image/jpeg', 0.84);
+        S.wpCustom = dataUrl;
+        S.wpId = 'custom';
+        try { LS.set('hnc6.wp_custom', dataUrl); LS.set('hnc6.wp_id', 'custom'); } catch (_) {}
+        applyWallpaper();
+        syncWpUi();
+        toast('已应用自定义本地壁纸');
+      };
+      img.onerror = function() { toast('图片格式无法解析', 'err'); };
+      img.src = ev.target.result;
+    };
+    reader.readAsDataURL(file);
+    t.value = '';
+  });
+
+  /* ── 3. 重构 DPI 分析页「活跃设备 (#dpi-clients)」与「设备画像 (#dpi-ident)」为精致紧凑 Bento ── */
+  window.paintClients = function() {
+    var el = $('#dpi-clients');
+    if (!el) return;
+    var st = S.dpi && S.dpi.available && S.dpi.state;
+    var cl = st && st.clients ? Object.keys(st.clients).map(function(k){ return st.clients[k]; }) : [];
+    var nowS = Date.now() / 1000;
+    cl = cl.filter(function(c) {
+      if (S.dpiFilter === 'active') return nowS - num(c.last_seen) < 120;
+      if (S.dpiFilter === 'high') return (c.top_apps || []).some(function(a){ return a.confidence === 'high'; });
+      return true;
+    }).sort(function(a, b){ return num(b.last_seen) - num(a.last_seen); });
+
+    if (!cl.length) {
+      el.innerHTML = '<div class="empty">' + (st ? '没有符合条件的设备' : '等待 dpid 数据…') + '</div>';
+      return;
+    }
+    el.innerHTML = cl.slice(0, 30).map(function(c) {
+      var d = c.client_mac ? devBy(c.client_mac) : null;
+      var ips = c.client_ips && c.client_ips.length ? c.client_ips : [c.client_ip];
+      var iconHtml = d ? d.icon : ico('dev');
+      return '<div class="dpi-client-card">' +
+        '<span class="dpi-dev-av">' + iconHtml + '</span>' +
+        '<div class="dpi-dev-main">' +
+          '<div class="dpi-dev-head">' +
+            '<span class="dpi-dev-nm">' + esc(d ? d.name : (c.last_hostname || c.client_mac || c.client_ip)) +
+              (c.sim || (d && d.sim) ? ' <span class="badge b-sim">模拟</span>' : '') +
+            '</span>' +
+            '<span class="pill-count">' + ago(c.last_seen) + '</span>' +
+          '</div>' +
+          (d && d.idText ? '<div class="dpi-dev-id">' + esc(d.idText) + '</div>' : '') +
+          '<div class="dpi-meta-pills">' +
+            '<span class="dpi-mpill">' + esc(ips[0] || '—') + (ips.length > 1 ? ' +' + (ips.length - 1) : '') + '</span>' +
+            '<span class="dpi-mpill">DNS ' + num(c.dns_events) + ' · TLS ' + num(c.tls_events) + '</span>' +
+            (c.rx_bytes || c.tx_bytes ? '<span class="dpi-mpill">↓' + bytes(c.rx_bytes) + ' ↑' + bytes(c.tx_bytes) + '</span>' : '') +
+            (c.last_sni ? '<span class="dpi-mpill sni">' + esc(c.last_sni) + '</span>' : '') +
+          '</div>' +
+          ((c.top_apps || []).length ? '<div class="apps" style="display:flex;gap:4px;flex-wrap:wrap;margin-top:2px">' +
+            c.top_apps.slice(0, 6).map(function(a) {
+              return '<span class="badge ' + (a.id === TUNNEL_ID ? 'b-gray' : a.confidence === 'high' ? 'b-acc' : a.confidence === 'low' ? 'b-gray' : 'b-pur') + '">' +
+                appNmH(a.id, a.name) + (a.confidence === 'low' ? '?' : '') + '</span>';
+            }).join('') + '</div>' : '') +
+        '</div></div>';
+    }).join('');
+  };
+
+  window.paintIdent = function() {
+    var el = $('#dpi-ident');
+    if (!el) return;
+    var ds = S.devices.filter(function(d){ return d.ident; })
+      .sort(function(a, b){ return (b.online - a.online) || num(b.ident.confidence) - num(a.ident.confidence); });
+    if (!ds.length) {
+      el.innerHTML = '<div class="empty">还没有识别结果 · 设备重新连接热点后会通过 DHCP / mDNS 自动识别</div>';
+      return;
+    }
+    var tot = S.devices.filter(function(d){ return d.online; }).length;
+    var got = ds.filter(function(d){ return d.online; }).length;
+    el.innerHTML = '<div class="note" style="padding:11px 15px 4px">在线 ' + tot + ' 台，已识别 ' + got + ' 台</div>' +
+      ds.slice(0, 30).map(function(d) {
+        var conf = clamp(num(d.ident.confidence), 0, 100);
+        return '<div class="dpi-client-card">' +
+          '<span class="dpi-dev-av">' + d.icon + '</span>' +
+          '<div class="dpi-dev-main">' +
+            '<div class="dpi-dev-head">' +
+              '<span class="dpi-dev-nm">' + esc(d.name) + (d.sim ? ' <span class="badge b-sim">模拟</span>' : '') + '</span>' +
+              '<span class="dpi-conf-wrap"><span class="dpi-conf-track"><i style="width:' + conf + '%"></i></span><span class="pill-count">' + conf + '%</span></span>' +
+            '</div>' +
+            '<div class="dpi-dev-id">' + esc(d.idText || '—') + (d.online ? '' : ' · 离线') + '</div>' +
+            (d.ident.evidence && d.ident.evidence.length ? '<div class="dpi-meta-pills">' +
+              d.ident.evidence.slice(0, 3).map(function(ev) {
+                return '<span class="dpi-mpill">' + esc((EV_SRC[ev.src] || ev.src) + ': ' + ev.detail) + '</span>';
+              }).join('') + '</div>' : '') +
+          '</div></div>';
+      }).join('');
+  };
+
+  /* ── 4. 升级 DPI 环形覆盖率仪表盘生长动画 ── */
+  var _v8PaintDpi = window.paintDpi;
+  if (typeof _v8PaintDpi === 'function') {
+    window.paintDpi = function() {
+      _v8PaintDpi();
+      var ringProg = $('#dpi-cov-ring circle:nth-child(2)');
+      if (ringProg && !ringProg.dataset.animated && typeof motionOn === 'function' && motionOn()) {
+        ringProg.dataset.animated = '1';
+        var targetOff = ringProg.getAttribute('stroke-dashoffset');
+        var dash = ringProg.getAttribute('stroke-dasharray');
+        ringProg.style.strokeDashoffset = dash;
+        ringProg.classList.add('dpi-ring-anim');
+        requestAnimationFrame(function() {
+          requestAnimationFrame(function() {
+            ringProg.style.strokeDashoffset = targetOff;
+          });
+        });
+      }
+    };
+  }
+
+  /* ── 5. 快捷胶囊、分段切换、带宽清空与壁纸交互委托 ── */
+  document.addEventListener('click', function(e) {
+    var clr = e.target.closest && e.target.closest('[data-bw-clr]');
+    if (clr) {
+      e.preventDefault();
+      var fld = clr.getAttribute('data-bw-clr');
+      var box = clr.closest('[data-dev]') || clr.closest('[data-side]');
+      var inp = box && box.querySelector('[data-f="' + fld + '"]');
+      if (inp && !inp.disabled) {
+        inp.value = '';
+        syncBwInput(box, fld);
+        inp.focus();
+      }
+      return;
+    }
+    var wpPick = e.target.closest && e.target.closest('[data-wp-pick]');
+    if (wpPick) {
+      var wid = wpPick.getAttribute('data-wp-pick');
+      S.wpId = wid;
+      LS.set('hnc6.wp_id', wid);
+      applyWallpaper();
+      syncWpUi();
+      toast(wid === 'none' ? '已恢复主题默认背景' : '已切换壁纸：「' + WP_PRESETS[wid].label + '」');
+      return;
+    }
+    var wpUp = e.target.closest && e.target.closest('[data-act="wp-upload"]');
+    if (wpUp) {
+      var wf = $('#wp-file');
+      if (wf) wf.click();
+      return;
+    }
+    var wpUrlBtn = e.target.closest && e.target.closest('[data-act="wp-url-apply"]');
+    if (wpUrlBtn) {
+      var uInp = $('#wp-url-inp');
+      var urlVal = uInp ? uInp.value.trim() : '';
+      if (!urlVal) {
+        S.wpId = 'none';
+        LS.set('hnc6.wp_id', 'none');
+        applyWallpaper();
+        syncWpUi();
+        toast('已清除壁纸链接');
+        return;
+      }
+      if (!/^(https:\/\/|data:image\/)/i.test(urlVal)) {
+        toast('请输入以 https:// 开头的图片直链', 'warn');
+        return;
+      }
+      S.wpCustom = urlVal;
+      S.wpId = 'custom';
+      LS.set('hnc6.wp_custom', urlVal);
+      LS.set('hnc6.wp_id', 'custom');
+      applyWallpaper();
+      syncWpUi();
+      toast('已应用自定义网络壁纸');
+      return;
+    }
+    var qp = e.target.closest && e.target.closest('[data-qpill]');
+    if (qp && typeof stagger === 'function') {
+      requestAnimationFrame(function() {
+        var dl = $('#dev-list');
+        if (dl) stagger(dl, 8);
+      });
+    }
+    var cc = e.target.closest && e.target.closest('.cc-tile');
+    var c0 = cc && cc.closest('.dev, .swap'), m0 = c0 && (c0.getAttribute('data-dev') || c0.getAttribute('data-side'));
+    if (cc && !cc.disabled && !(m0 && S.busy[m0])) {
+      cc.classList.remove('pulse');
+      void cc.offsetWidth;
+      cc.classList.add('pulse');
+    }
+    var segBtn = e.target.closest && e.target.closest('.seg button');
+    if (segBtn) {
+      var sg = segBtn.parentNode;
+      var k = sg && sg.getAttribute('data-seg');
+      if (k === 'dflt') requestAnimationFrame(function(){ softAnimateContainer($('#dpi-clients')); });
+      else if (k === 'hist') requestAnimationFrame(function(){ softAnimateContainer($('#dpi-hist')); softAnimateContainer($('#dpi-unk2')); });
+      else if (k === 'pu-period') requestAnimationFrame(function(){ softAnimateContainer($('#pu-body')); });
+      else if (k === 'range') requestAnimationFrame(function(){ softAnimateContainer($('#bars')); softAnimateContainer($('#st-apps')); });
+    }
+  });
+
+  /* ── 6. 多维特征自动识别公共 CDN / 云网关 / 第三方广告统计 SDK（免手动逐个排查） ── */
+  var INFRA_EXACT = {
+    'alicdn.com': ['cdn', '阿里 CDN'], 'alikunlun.com': ['cdn', '阿里昆仑 CDN'], 'alikunlun.net': ['cdn', '阿里昆仑 CDN'],
+    'aliyuncs.com': ['cloud', '阿里云 OSS'], 'cdngslb.com': ['cdn', 'GSLB 调度'], 'qtlcdn.com': ['cdn', '速腾 CDN'],
+    'ksyuncdn.com': ['cdn', '金山云 CDN'], 'ks-cdn.com': ['cdn', '金山云 CDN'], 'wscdns.com': ['cdn', '网宿 CDN'],
+    'wsglb0.com': ['cdn', '网宿 GSLB'], 'cdn20.com': ['cdn', '网宿 CDN'], 'chinanetcenter.com': ['cdn', '网宿科技'],
+    'hwcdn.net': ['cdn', '华为云 CDN'], 'myhuaweicloud.com': ['cloud', '华为云'], 'bdydns.com': ['cdn', '百度云 CDN'],
+    'bcebos.com': ['cloud', '百度云 BOS'], 'bdstatic.com': ['cdn', '百度静态 CDN'], 'myqcloud.com': ['cloud', '腾讯云 COS'],
+    'qcloudcdn.com': ['cdn', '腾讯云 CDN'], 'dnsv1.com': ['cdn', '腾讯 DNSPod 调度'], 'dnsv1.com.cn': ['cdn', '腾讯调度'],
+    'smtcdns.net': ['cdn', '腾讯智能调度'], 'tcdnvod.com': ['cdn', '腾讯点播 CDN'], 'gtimg.com': ['cdn', '腾讯静态 CDN'],
+    'qpic.cn': ['cdn', '腾讯图床 CDN'], 'akamaized.net': ['cdn', 'Akamai CDN'], 'akamaiedge.net': ['cdn', 'Akamai Edge'],
+    'edgekey.net': ['cdn', 'Akamai CDN'], 'edgesuite.net': ['cdn', 'Akamai CDN'], 'cloudfront.net': ['cdn', 'AWS CloudFront'],
+    'amazonaws.com': ['cloud', 'AWS 云基础设施'], 'fastly.net': ['cdn', 'Fastly CDN'], 'cloudflare.net': ['cdn', 'Cloudflare CDN'],
+    'gstatic.com': ['cdn', 'Google 静态 CDN'], 'googleapis.com': ['cloud', 'Google API 网关'],
+    'bytecdn.com': ['cdn', '字节 CDN'], 'byteimg.com': ['cdn', '字节图床 CDN'], 'pstatp.com': ['cdn', '字节静态 CDN'],
+    'volces.com': ['cloud', '火山引擎云'], 'huoshan-gw.net': ['cloud', '火山/字节共享网关'],
+    'tuiaimg.com': ['sdk', '推啊互动广告 SDK'], 'tuia.cn': ['sdk', '推啊广告 SDK'],
+    'umeng.com': ['sdk', '友盟统计 SDK'], 'umengcloud.com': ['sdk', '友盟云 SDK'],
+    'getui.com': ['sdk', '个推推送 SDK'], 'igexin.com': ['sdk', '个推 SDK'],
+    'jpush.cn': ['sdk', '极光推送 SDK'], 'jiguang.cn': ['sdk', '极光 SDK'],
+    'pangle.io': ['sdk', '穿山甲广告 SDK'], 'appsflyer.com': ['sdk', 'AppsFlyer 归因 SDK'],
+    'adjust.com': ['sdk', 'Adjust 归因 SDK'], 'sentry.io': ['sdk', 'Sentry 监控 SDK'],
+    'bugly.qq.com': ['sdk', '腾讯 Bugly SDK']
+  };
+
+  window.classifyInfraHost = function(host) {
+    var h = String(host || '').toLowerCase().replace(/^\.+|\.+$/g, '');
+    if (!h) return null;
+    for (var suf in INFRA_EXACT) {
+      if (h === suf || h.slice(-(suf.length + 1)) === '.' + suf) {
+        var inf = INFRA_EXACT[suf];
+        return { kind: inf[0], label: inf[1], shared: true };
+      }
+    }
+    var reg = typeof guessSuffix === 'function' ? guessSuffix(h) : h;
+    // 词法结构启发式：自动捕获未入库的阿里 kunlun*、华为 cdnhwc*、腾讯 *dnsv*、各类 *gslb* / *cdn* / sdk.* 节点
+    if (/^kunlun[a-z0-9-]*\.(com|net|cn)$/.test(reg)) return { kind: 'cdn', label: '阿里昆仑 CDN 簇', shared: true };
+    if (/^cdnhwc[a-z0-9-]*\.(com|net|cn)$/.test(reg)) return { kind: 'cdn', label: '华为云 CDN 簇', shared: true };
+    if (/^(t?dnsv[0-9a-z-]*|smtcdns[0-9a-z-]*)\.(com|net|cn|com\.cn)$/.test(reg)) return { kind: 'cdn', label: '腾讯 GSLB/CDN 簇', shared: true };
+    if (/(gslb|cdngslb|wsglb|ksyungslb|alikunlun|qiniudns|baishan-cloud|bsclink)/.test(h)) return { kind: 'cdn', label: '公共 GSLB/CDN 调度', shared: true };
+    if (/(^|\.)(cdn[0-9]*|static-cdn|imgcdn|vodcdn)\./.test(h) || /-cdn\.(com|net|cn)$/.test(reg)) return { kind: 'cdn', label: '疑似公共 CDN 节点', shared: true };
+    if (/^(sdk|ads?|adx|track|telemetry|beacon|metrics|stat|crash)\./.test(h)) return { kind: 'sdk', label: '疑似通用统计/广告 SDK', shared: true };
+    return { kind: 'app', label: '可归因专属域名', shared: false };
+  };
+
+  function infraBadgeHtml(info) {
+    if (!info) return '';
+    var prefix = info.kind === 'cdn' ? '公共 CDN · ' : info.kind === 'sdk' ? '共享 SDK · ' : info.kind === 'cloud' ? '公共云网关 · ' : '';
+    return '<span class="infra-tag ' + info.kind + '">' + esc(prefix + info.label) + '</span>';
+  }
+
+  // 增强「应用 -> 我的应用 -> 未匹配的 SNI」：自动标注公共 CDN / 广告 SDK / 专属业务域
+  var _v10AppsSub = window.appsSub;
+  if (typeof _v10AppsSub === 'function') {
+    window.appsSub = function() {
+      var out = _v10AppsSub();
+      if (S.appsSub === 'my' && out.indexOf('未匹配的 SNI') >= 0) {
+        out = out.replace(/<div class="sni-row"><span class="dw"><span class="d">([^<]+)<\/span><\/span><\/div>/g, function(_, hostEsc) {
+          var raw = hostEsc.replace(/&quot;/g, '"').replace(/&#39;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+          var inf = classifyInfraHost(raw);
+          return '<div class="sni-row' + (inf && inf.shared ? ' is-shared-infra' : '') + '">' +
+            '<span class="dw" style="display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;width:100%">' +
+              '<span class="d mono">' + hostEsc + '</span>' +
+              infraBadgeHtml(inf) +
+            '</span></div>';
+        });
+      }
+      return out;
+    };
+  }
+
+  // 增强「分析 -> DPI 分析 -> 补库助手 (#dpi-unknown)」：自动识别公共 CDN/SDK 并提供一键过滤开关，防止误绑单应用规则
+  window.paintUnknown = function() {
+    var el = $('#dpi-unknown'); if (!el) return;
+    var unk = typeof unknownHints === 'function' ? unknownHints() : null;
+    var list = unk || (typeof domainHints === 'function' ? domainHints() : null);
+    var tt = $('#dpi-unknown-t');
+    if (tt) tt.innerHTML = (unk ? '自动标注公共 CDN / SDK · 避免误绑单应用' : '设备高频域名 · 自动识别公共基础设施');
+    if (!list) { el.innerHTML = '<div class="empty">等待 dpid 数据…</div>'; return; }
+    if (!list.length) { el.innerHTML = '<div class="empty">还没有抓到域名</div>'; return; }
+
+    var sharedCnt = 0;
+    var enriched = list.map(function(u) {
+      var inf = classifyInfraHost(u.n);
+      if (inf && inf.shared) sharedCnt++;
+      return { u: u, inf: inf };
+    });
+    var shown = S.hideSharedUnk ? enriched.filter(function(x){ return !(x.inf && x.inf.shared); }) : enriched;
+
+    var bar = '<div class="sni-row" style="justify-content:space-between;background:var(--input)">' +
+      '<span style="font-size:12px;color:var(--text-2)">共 ' + enriched.length + ' 个候选，已自动识别 <b>' + sharedCnt + '</b> 个公共 CDN/SDK</span>' +
+      '<button type="button" class="wp-mpill press' + (S.hideSharedUnk ? ' on' : '') + '" data-act="toggle-hide-shared">' +
+        (S.hideSharedUnk ? '已隐藏公共 CDN (' + sharedCnt + ')' : '隐藏公共 CDN/SDK') +
+      '</button></div>';
+
+    el.innerHTML = bar + (shown.length ? shown.map(function(x) {
+      var u = x.u, inf = x.inf, isSh = inf && inf.shared;
+      return '<div class="sni-row' + (isSh ? ' is-shared-infra' : '') + '">' +
+        '<span class="dw">' +
+          '<span class="d" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap">' + esc(u.n) + ' ' + infraBadgeHtml(inf) + '</span>' +
+          '<span class="c">' + Object.keys(u.k).join('/') + ' · ' + u.c + ' 次 · 后缀 ' + esc(guessSuffix(u.n)) + (isSh ? ' · 多应用共用，不建议绑单应用' : '') + '</span>' +
+        '</span>' +
+        (isSh ? '<span class="badge b-gray">已豁免</span>' : '<button class="btn sec press" data-rule-tpl="' + esc(u.n) + '">生成规则</button>') +
+      '</div>';
+    }).join('') : '<div class="empty">过滤公共 CDN/SDK 后暂无剩余未知专属域名</div>');
+  };
+
+  document.addEventListener('click', function(e) {
+    var tm = e.target.closest && e.target.closest('[data-wp-tmode]');
+    if (tm) {
+      S.wpTextMode = tm.getAttribute('data-wp-tmode') === 'capsule' ? 'capsule' : 'adaptive';
+      LS.set('hnc6.wp_text_v2', S.wpTextMode);
+      LS.set('hnc6.wp_text', S.wpTextMode);
+      applyWallpaper();
+      $$('[data-wp-tmode]').forEach(function(b){
+        b.classList.toggle('on', b.getAttribute('data-wp-tmode') === S.wpTextMode);
+      });
+      toast(S.wpTextMode === 'capsule' ? '已切换：无边框轻纱微托底' : '已切换：原生无界透字排版');
+      return;
+    }
+    var hs = e.target.closest && e.target.closest('[data-act="toggle-hide-shared"]');
+    if (hs) {
+      S.hideSharedUnk = !S.hideSharedUnk;
+      LS.set('hnc6.hide_shared_unk', S.hideSharedUnk ? '1' : '0');
+      paintUnknown();
+      return;
+    }
+  });
+
+
+  // 四模式实时速率数字过渡支持(Cyber 阶梯跳变 + 冰蓝闪烁 / Default 180ms 利落跳变 / Frosted & Liquid 柔滑过渡)
+  if (typeof window.rollNum === 'function') {
+    window.rollNum = function(el, str, unit) {
+      if (!el) return;
+      var sameUnit = (el.parentNode && el.parentNode.lastChild && el.parentNode.lastChild.textContent || '').trim() === unit;
+      if (!fxOn('num') || !motionOn() || !sameUnit || !/^\d+(\.\d+)?$/.test(str) || el.textContent === str) {
+        el.textContent = str;
+        return;
+      }
+      tween(el, parseFloat(str), (str.split('.')[1] || '').length);
+    };
+  }
+
+  // 初始化壁纸与主题同步，并重新渲染当前页面以立即呈现纯数字带宽面板
+  if (typeof applyTheme === 'function') applyTheme();
+  applyWallpaper();
+  if (S.page === 'devices') renderDevices(false);
+  else if (S.page === 'settings') renderSettings(false);
+  else if (S.page === 'stats' && S.aseg === 'dpi') {
+    paintClients();
+    paintIdent();
+  }
+})();

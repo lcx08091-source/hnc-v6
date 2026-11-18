@@ -134,8 +134,9 @@ type dpiEvalResult struct {
 	QUIC          dpiEvalQUIC              `json:"quic"`               // v5.27 T2
 	Startup       *dpiEvalStartup          `json:"startup,omitempty"`  // v5.27 T3
 	Discover      *dpiEvalDiscover         `json:"discover,omitempty"` // v5.28 B1: 新应用发现自评
-	FlowCls       *dpiEvalFlowCls          `json:"flow_cls,omitempty"` // v5.28 B3: 流量形状猜类别
-	Note          string                   `json:"note"`
+	FlowCls            *dpiEvalFlowCls        `json:"flow_cls,omitempty"`             // v5.28 B3: 流量形状猜类别
+	LANSelfConsistency *dpiLANSelfConsistency `json:"lan_self_consistency,omitempty"` // v5.34: 外部设备无真值双栈与跨模态自检
+	Note               string                 `json:"note"`
 }
 
 func emptyEvalResult(days int, enabled bool, note string, now time.Time) dpiEvalResult {
@@ -439,6 +440,7 @@ func evalDPI(hncDir string, days int, now time.Time) dpiEvalResult {
 	res.Discover = evalDiscover(samples, loadSharedInfra(hncDir)) // v5.30 T1c: 与线上一样排除共享基础设施
 	// v5.28 B3: 流量形状猜类别(影子; 时间切分评估, 见 flow_cls.go)
 	res.FlowCls = evalFlowCls(now)
+	res.LANSelfConsistency = evalLANSelfConsistency(hncDir, now)
 	res.QUIC.JA4Only = qJA4.method(res.QUIC.Samples)
 	res.QUIC.WithQTP = qQTP.method(res.QUIC.Samples)
 

@@ -1,8 +1,10 @@
 id=hotspot_network_control
-name=Hotspot Network Control
-version=v5.33.0-rc2
-versionCode=5330002
-author=Claude (Anthropic AI) + Ling + GPT (audit)
-description=Android 热点带宽/延迟/黑白名单管理 · DPI 流量识别 · 设备级限速/延迟模拟 · 应用级限速 · 远程 WebUI 管理
-updateJson=
+name=Hotspot Network Control (HNC)
+version=v5.36.0
+versionCode=5360000
+author=lcx08091-source
+description=Android 热点网关控制中心 v5.36.0 · 纯矢量双层次 SVG 图标 · 无界微晶壁纸与烟熏水滴底栏 · 四主题 120fps 物理动效 · 本机真值 DPI 自训练飞轮 · 全链路 IPv6 双栈限速与 QoS
+updateJson=https://raw.githubusercontent.com/lcx08091-source/hnc-v6/main/update.json
+minMagisk=24000
 minKernelSU=11485
+minAPatch=10700

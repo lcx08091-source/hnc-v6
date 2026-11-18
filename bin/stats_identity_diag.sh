@@ -12,7 +12,7 @@ RAW_FILE="${HNC_STATS_RAW_FILE:-$DATA/stats_raw.jsonl}"
 MODE="${1:-json}"
 
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r/ /g; s/\n/ /g; s/\t/ /g'
+  printf '%s' "$1" | tr '\r\n\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g'
 }
 
 num_or_zero() {
@@ -32,10 +32,10 @@ trap 'rm -f "$DEV_MAP" "$RAW_MACS" "$DUP_IPS" 2>/dev/null' EXIT INT TERM
 # devices.json is expected to be flat: {"mac":{"ip":"...","mac":"...","online":...},...}
 # Keep this parser intentionally conservative and read-only; it is diagnostics only.
 if [ -f "$DEVICES_FILE" ]; then
-  grep -oE '"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$DEVICES_FILE" 2>/dev/null | \
+  grep -oE '"[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$DEVICES_FILE" 2>/dev/null | \
   while IFS= read -r block; do
-    key_mac=$(echo "$block" | sed -nE 's/^"(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})".*/\1/p' | tr 'A-F' 'a-f')
-    field_mac=$(echo "$block" | sed -nE 's/.*"mac"[[:space:]]*:[[:space:]]*"(([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2})".*/\1/p' | tr 'A-F' 'a-f')
+    key_mac=$(echo "$block" | sed -nE 's/^"([0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])".*/\1/p' | tr 'A-F' 'a-f')
+    field_mac=$(echo "$block" | sed -nE 's/.*"mac"[[:space:]]*:[[:space:]]*"([0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])".*/\1/p' | tr 'A-F' 'a-f')
     ip=$(echo "$block" | sed -nE 's/.*"ip"[[:space:]]*:[[:space:]]*"([0-9]{1,3}(\.[0-9]{1,3}){3})".*/\1/p')
     online=$(echo "$block" | sed -nE 's/.*"online"[[:space:]]*:[[:space:]]*(true|false).*/\1/p')
     [ -z "$field_mac" ] && field_mac="$key_mac"
@@ -46,7 +46,7 @@ fi
 
 # Recent raw MACs. We only need distinct MACs and keep the scan bounded.
 if [ -f "$RAW_FILE" ]; then
-  tail -500 "$RAW_FILE" 2>/dev/null | awk '
+  tail -n 500 "$RAW_FILE" 2>/dev/null | awk '
   function get_str(line, key,    r,s) {
     r="\"" key "\"[[:space:]]*:[[:space:]]*\"[^\"]*\""
     if (match(line, r)) { s=substr(line,RSTART,RLENGTH); sub(/.*:[[:space:]]*\"/,"",s); sub(/\"$/,"",s); return s }
@@ -54,7 +54,7 @@ if [ -f "$RAW_FILE" ]; then
   }
   {
     mac=tolower(get_str($0,"mac"))
-    if (mac ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/ && !(mac in seen)) { seen[mac]=1; print mac }
+    if (mac ~ /^[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]:[0-9a-f][0-9a-f]$/ && !(mac in seen)) { seen[mac]=1; print mac }
   }' > "$RAW_MACS"
 fi
 

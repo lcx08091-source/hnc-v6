@@ -22,7 +22,7 @@ func compileFilesForTest(t *testing.T, files ...string) []l3Rule {
 }
 
 func classifyForTest(rules []l3Rule, host string) string {
-	r, ok := classifyHostIndexed(buildHostIndex(rules), rules, host)
+	r, ok := classifyHostIndexed(buildHostIndex(rules, 1), rules, host)
 	if !ok {
 		return ""
 	}

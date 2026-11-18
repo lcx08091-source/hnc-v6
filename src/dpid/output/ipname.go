@@ -282,8 +282,11 @@ func (t *IPNameTable) putLocked(ip string, e IPNameEntry, expire, now int64) {
 			t.ll.MoveToFront(el)
 			return
 		}
+		if e.CNAME == "" && it.e.CNAME != "" && it.e.Name == e.Name {
+			e.CNAME = it.e.CNAME // 保留前序 DNS 阶段捕获的 CDN CNAME 链铁证，不被后续 SNI 冲掉
+		}
 		if it.e.Name != e.Name || it.e.Src != e.Src {
-			it.expire = expire // 名字/来源换了: 按新来源的时效重算
+			it.expire = expire
 		} else {
 			it.expire = maxI64(it.expire, expire)
 		}

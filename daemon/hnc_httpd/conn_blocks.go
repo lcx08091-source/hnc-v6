@@ -122,15 +122,28 @@ func (s *server) expandConnBlocks(f connBlockFile) []string {
 				names = s.loadIPNames()
 			}
 			d := strings.ToLower(it.Value)
-			n := 0
+			type ipCand struct {
+				ip string
+				ts int64
+			}
+			var cands []ipCand
 			for ip, nm := range names {
 				h := strings.ToLower(nm.Name)
 				if h == d || strings.HasSuffix(h, "."+d) {
-					set[it.MAC+" "+ip] = true
-					if n++; n >= connBlockMaxIPsPerDomain {
-						break
-					}
+					cands = append(cands, ipCand{ip: ip, ts: nm.Ts})
 				}
+			}
+			sort.Slice(cands, func(i, j int) bool {
+				if cands[i].ts != cands[j].ts {
+					return cands[i].ts > cands[j].ts
+				}
+				return cands[i].ip < cands[j].ip
+			})
+			if len(cands) > connBlockMaxIPsPerDomain {
+				cands = cands[:connBlockMaxIPsPerDomain]
+			}
+			for _, c := range cands {
+				set[it.MAC+" "+c.ip] = true
 			}
 		}
 	}

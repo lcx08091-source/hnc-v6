@@ -199,17 +199,26 @@ init_chains() {
     _ensure_chain mangle HNC_MARK
     _ensure_link mangle FORWARD HNC_MARK 1
 
-    # ── HNC_STATS (mangle/FORWARD): 流量字节数 (v4 only) ──────
-    # HNC_STATS 是【累计计数】链, 跟其他规则链不同 —— re-init 时【绝不能 -F】:
-    # watchdog full_restore / do_full_init 会反复调 init, 每次 flush 都把 per-device
-    # 累计字节清零、连 per-IP RETURN 规则一起删. 而 hotspotd 模式下 device_detect
-    # 扫描循环不跑(device_detect.sh 起了 hotspotd 就 return 0 退出)、无人 ensure_stats
-    # 重加规则 → 计数彻底冻结(流量统计页"一直不动"、rx_bytes 归 0 连带速率假).
-    # 故仅在链不存在时新建空链; 已存在则保留累计与规则. per-IP 规则的补/删由
-    # ensure_stats_online 周期对齐(stats_sample 每轮调).
-    $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1 || $IPT -t mangle -N HNC_STATS 2>/dev/null
+    # ── HNC_STATS (mangle/FORWARD): 双栈流量字节计数 (v4 + v6) ──
+    # re-init 时绝不 -F 已有链, 保住在线会话累计字节; 若内核链尚不存在(首次建链或
+    # cleanup 后重启热点), 同步清空 run/stats_v6_map 与 run/stats_v6_retired, 防止
+    # 上一轮会话结转的退休 IPv6 流量幽灵叠加到新热点会话.
+    if ! $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
+        $IPT -t mangle -N HNC_STATS 2>/dev/null
+        rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
+    fi
     $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
-        || $IPT -t mangle -I FORWARD 2 -j HNC_STATS
+        || $IPT -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null \
+        || $IPT -t mangle -A FORWARD -j HNC_STATS
+    if [ "$IPV6_OK" = "1" ]; then
+        if ! $IP6T -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
+            $IP6T -t mangle -N HNC_STATS 2>/dev/null
+            rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
+        fi
+        $IP6T -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
+            || $IP6T -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null \
+            || $IP6T -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
+    fi
 
     # ── HNC_SAVE (mangle/POSTROUTING): MARK → CONNMARK ────────
     # 上行新连接打完 mark 后存入 conntrack，下行回包才能 restore
@@ -279,12 +288,8 @@ mark_device() {
     $IPT -t mangle -A HNC_MARK \
         -d "$ip" -j MARK --set-mark "$mark"
 
-    # ── v4 流量统计 ──
-    # v6 无统计，因为需要跟踪动态地址（代价不值）
-    ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
-    ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
-    $IPT -t mangle -A HNC_STATS -s "$ip" -j RETURN
-    $IPT -t mangle -A HNC_STATS -d "$ip" -j RETURN
+    # ── v4 流量统计(幂等保计数: 已存在则不删重建, 避免改限速时把累计流量清零)──
+    _ensure_v4_stats_ip "$ip" 
 
     echo "$mark"
 }
@@ -373,11 +378,9 @@ unmark_device() {
         -m mac --mac-source "$mac" -m mark --mark 0 \
         -j MARK --set-mark "$mark"
 
-    if [ -n "$ip" ]; then
-        ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
-        ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
-    fi
-
+    # v5.35.1: 取消限速(unmark)时设备往往仍在线, 绝不删 HNC_STATS 计数规则,
+    # 否则取消限速会清零累计字节并冻结统计直至下轮 ensure_stats_online;
+    # 真正离线清理由 ensure_stats_online 双栈同步回收。
     return 0
 }
 
@@ -447,7 +450,7 @@ blacklist_remove() {
 #      但有第 1 条兜底, 应答包不会被误杀。
 whitelist_mode_on() {
     local iface=${1:-}
-    [ -n "$iface" ] || iface=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -1)
+    [ -n "$iface" ] || iface=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -n 1)
     case "$iface" in *[!A-Za-z0-9_.-]*) iface="" ;; esac
     ipt_dual_q -t filter -D HNC_WHITELIST -j DROP
     [ -n "$iface" ] && ipt_dual_q -t filter -D HNC_WHITELIST -i "$iface" -j DROP
@@ -486,20 +489,87 @@ whitelist_remove() {
 # ═══════════════════════════════════════════════════════════════
 # 流量统计（仅 v4）
 # ═══════════════════════════════════════════════════════════════
+# HNC_STATS 轻量互斥锁: 串行化 ensure_stats_online(结转 /128 退休字节 + 删内核规则)
+# 与 stats_all(汇总内核实时字节 + stats_v6_retired), 消除并发读写导致的 2x 翻倍毛刺与归零重扣费。
+STATS_LOCK_DIR="$HNC_DIR/run/stats_v6.lock"
+stats_lock() {
+    mkdir -p "$HNC_DIR/run" 2>/dev/null
+    local _n=0 _lp _ts _now
+    while ! mkdir "$STATS_LOCK_DIR" 2>/dev/null; do
+        _lp=$(cat "$STATS_LOCK_DIR/pid" 2>/dev/null)
+        _ts=$(cat "$STATS_LOCK_DIR/ts" 2>/dev/null)
+        _now=$(date +%s 2>/dev/null || echo 0)
+        if [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; then
+            rm -rf "$STATS_LOCK_DIR" 2>/dev/null
+            continue
+        fi
+        case "$_ts:$_now" in
+            *[!0-9:]*|:*) ;;
+            *) [ "$_ts" -gt 0 ] && [ $((_now - _ts)) -ge 15 ] && rm -rf "$STATS_LOCK_DIR" 2>/dev/null && continue ;;
+        esac
+        _n=$((_n + 1))
+        [ "$_n" -ge 30 ] && return 1
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    echo "$$" > "$STATS_LOCK_DIR/pid" 2>/dev/null
+    date +%s > "$STATS_LOCK_DIR/ts" 2>/dev/null
+    return 0
+}
+
+stats_unlock() {
+    [ "$(cat "$STATS_LOCK_DIR/pid" 2>/dev/null)" = "$$" ] && rm -rf "$STATS_LOCK_DIR" 2>/dev/null
+    return 0
+}
+
+# 幂等维护单 IP 的 v4 HNC_STATS 规则:
+#   - 缺则 -A 补齐(保住已有规则的累计字节, 不因重设限速清零);
+#   - 若历史竞态留下了 >1 条同向重复规则, 仅裁掉多余副本保留 1 条。
+_ensure_v4_stats_ip() {
+    local ip=$1 _cnt _extra
+    [ -z "$ip" ] && return 1
+    $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1 || $IPT -t mangle -N HNC_STATS 2>/dev/null
+    if ! $IPT -t mangle -C HNC_STATS -s "$ip" -j RETURN 2>/dev/null; then
+        $IPT -t mangle -A HNC_STATS -s "$ip" -j RETURN 2>/dev/null || return 1
+    else
+        _cnt=$($IPT -t mangle -S HNC_STATS 2>/dev/null | awk -v t="$ip" '$1=="-A" && $3=="-s" && ($4==t || $4==t"/32") && $NF=="RETURN"{c++} END{print c+0}')
+        _extra=$((_cnt - 1))
+        while [ "$_extra" -gt 0 ]; do
+            $IPT -t mangle -D HNC_STATS -s "$ip" -j RETURN 2>/dev/null || break
+            _extra=$((_extra - 1))
+        done
+    fi
+    if ! $IPT -t mangle -C HNC_STATS -d "$ip" -j RETURN 2>/dev/null; then
+        $IPT -t mangle -A HNC_STATS -d "$ip" -j RETURN 2>/dev/null || return 1
+    else
+        _cnt=$($IPT -t mangle -S HNC_STATS 2>/dev/null | awk -v t="$ip" '$1=="-A" && $3=="-d" && ($4==t || $4==t"/32") && $NF=="RETURN"{c++} END{print c+0}')
+        _extra=$((_cnt - 1))
+        while [ "$_extra" -gt 0 ]; do
+            $IPT -t mangle -D HNC_STATS -d "$ip" -j RETURN 2>/dev/null || break
+            _extra=$((_extra - 1))
+        done
+    fi
+    return 0
+}
+
 get_stats() {
-    local ip=$1
-    # v3.4.4：修复 src/dst 写反 bug。
-    # rx=download=设备是 dst($9),tx=upload=设备是 src($8)
-    local upload; upload=$($IPT -t mangle -L HNC_STATS -nvx 2>/dev/null \
-        | awk -v ip="$ip" 'NF>8 && $8==ip {sum+=$2} END{print sum+0}')
-    local download; download=$($IPT -t mangle -L HNC_STATS -nvx 2>/dev/null \
-        | awk -v ip="$ip" 'NF>8 && $9==ip {sum+=$2} END{print sum+0}')
-    echo "{\"upload_bytes\":$upload,\"download_bytes\":$download}"
+    local ip=$1 line rx=0 tx=0
+    [ -z "$ip" ] && { echo '{"upload_bytes":0,"download_bytes":0}'; return 0; }
+    # 复用双栈 stats_all(兼容 iptables-nft 无 opt 列的 NF==8 输出并合并 IPv6 流量)
+    line=$(stats_all | awk -v ip="$ip" '$1 == ip { print $2, $3; exit }')
+    if [ -n "$line" ]; then
+        rx=${line% *}
+        tx=${line#* }
+    fi
+    echo "{\"upload_bytes\":${tx:-0},\"download_bytes\":${rx:-0}}"
 }
 
 reset_counters() {
+    stats_lock || true
     $IPT -t mangle -Z HNC_STATS 2>/dev/null
-    log "Counters reset"
+    [ "$IPV6_OK" = "1" ] && $IP6T -t mangle -Z HNC_STATS 2>/dev/null
+    rm -f "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
+    stats_unlock
+    log "Counters reset (v4+v6 + retired cleared)"
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -509,19 +579,17 @@ reset_counters() {
 cleanup() {
     log "Cleanup all HNC rules..."
 
-    # 解除 builtin 链上的 jump（v4+v6 双栈）
+    # 解除 builtin 链上的 jump（v4+v6 双栈，循环 -D 清除可能的历史重复挂载）
     for entry in \
         "mangle PREROUTING  HNC_RESTORE" \
         "mangle FORWARD     HNC_MARK"    \
+        "mangle FORWARD     HNC_STATS"   \
         "mangle POSTROUTING HNC_SAVE"    \
         "filter FORWARD     HNC_CTRL"    \
         "filter FORWARD     HNC_WHITELIST"; do
         set -- $entry
-        $IPT -t "$1" -D "$2" -j "$3" 2>/dev/null
-        [ "$IPV6_OK" = "1" ] && $IP6T -t "$1" -D "$2" -j "$3" 2>/dev/null
+        ipt_dual_del_all -t "$1" -D "$2" -j "$3"
     done
-    # HNC_STATS 仅 v4
-    $IPT -t mangle -D FORWARD -j HNC_STATS 2>/dev/null
 
     # flush + delete 所有用户链（v4）
     for chain in HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE; do
@@ -533,9 +601,9 @@ cleanup() {
         $IPT -t filter -X "$chain" 2>/dev/null
     done
 
-    # flush + delete 所有用户链（v6）
+    # flush + delete 所有用户链（v6，含 HNC_STATS）
     if [ "$IPV6_OK" = "1" ]; then
-        for chain in HNC_RESTORE HNC_MARK HNC_SAVE; do
+        for chain in HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE; do
             $IP6T -t mangle -F "$chain" 2>/dev/null
             $IP6T -t mangle -X "$chain" 2>/dev/null
         done
@@ -544,6 +612,8 @@ cleanup() {
             $IP6T -t filter -X "$chain" 2>/dev/null
         done
     fi
+    rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
+    rm -rf "$HNC_DIR/run/stats_v6.lock" 2>/dev/null
 
     log "Cleanup complete"
 }
@@ -572,15 +642,14 @@ cleanup() {
 #     v3.4.3 之前的 get_stats 函数 src/dst 写反了,本版顺手修正。
 
 ensure_stats() {
-    local ip=$1
+    local ip=$1 rc
     [ -z "$ip" ] && return 1
-    # hotfix10 S5: 避免 -C || -A TOCTOU 并发重复 RETURN 规则。
-    # 先清理同 IP 现存重复规则,再追加唯一一对 -s/-d RETURN。
     $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1 || return 1
-    ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
-    ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
-    $IPT -t mangle -A HNC_STATS -s "$ip" -j RETURN 2>/dev/null || return 1
-    $IPT -t mangle -A HNC_STATS -d "$ip" -j RETURN 2>/dev/null || return 1
+    stats_lock || true
+    _ensure_v4_stats_ip "$ip"
+    rc=$?
+    stats_unlock
+    return $rc
 }
 
 # ensure_stats_online — 让 HNC_STATS 的 per-IP 计数规则与当前在线设备【对齐】:
@@ -593,59 +662,357 @@ ensure_stats() {
 #
 # 安全护栏: devices.json 缺失/解析不出任何在线 IP 时【只补不删】(空集不当作
 # "全部离线"去清空整条链, 防 devices.json 半写/损坏瞬间误删所有计数)。
-ensure_stats_online() {
-    local devices_file="$HNC_DIR/data/devices.json"
-    # 确保链 + FORWARD 跳转存在(不 flush)
-    $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1 || $IPT -t mangle -N HNC_STATS 2>/dev/null
-    $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null || $IPT -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null
-    [ -f "$devices_file" ] || return 0
-
-    local online_tmp="$HNC_DIR/run/.stats_online.$$"
-    grep -oE '"ip"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' "$devices_file" 2>/dev/null \
-        | sed -nE 's/.*"([0-9.]+)".*/\1/p' | sort -u > "$online_tmp"
-
-    # 在线 IP 缺则补(幂等, 保累计)
-    while IFS= read -r ip; do
-        [ -z "$ip" ] && continue
-        $IPT -t mangle -C HNC_STATS -s "$ip" -j RETURN 2>/dev/null || $IPT -t mangle -A HNC_STATS -s "$ip" -j RETURN 2>/dev/null
-        $IPT -t mangle -C HNC_STATS -d "$ip" -j RETURN 2>/dev/null || $IPT -t mangle -A HNC_STATS -d "$ip" -j RETURN 2>/dev/null
-    done < "$online_tmp"
-
-    # 已离线的 IP 删掉(防链增长)。空集护栏: online_tmp 为空则只补不删。
-    if [ -s "$online_tmp" ]; then
-        $IPT -t mangle -S HNC_STATS 2>/dev/null \
-            | awk '/-j RETURN/{for(i=1;i<=NF;i++) if($i=="-s"||$i=="-d"){t=$(i+1); sub(/\/32$/,"",t); print t}}' \
-            | sort -u | while IFS= read -r ip; do
-            [ -z "$ip" ] && continue
-            grep -qxF "$ip" "$online_tmp" 2>/dev/null && continue
-            ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
-            ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
-        done
-    fi
-    rm -f "$online_tmp" 2>/dev/null
+# v5.35.0: 双栈 HNC_STATS 计数辅助 — 兼容有无 opt 列的 ip6tables -nvxL 输出
+# AWK 内置 IPv6 规范化片段: 展开 :: 并去除每组前导 0, 消除 ip -6 neigh 与 ip6tables -nvxL 缩写差异
+_IP6_CANON_AWK='
+function canon_ip6(raw,    s, hal, nl, nr, L, R, z, out, i, h) {
+    s = tolower(raw)
+    sub(/\/[0-9]+$/, "", s)
+    sub(/%.*/, "", s)
+    if (s !~ /:/) return s
+    if (index(s, "::") > 0) {
+        split(s, hal, "::")
+        nl = (hal[1] == "") ? 0 : split(hal[1], L, ":")
+        nr = (hal[2] == "") ? 0 : split(hal[2], R, ":")
+        z = 8 - nl - nr
+        out = ""
+        for (i = 1; i <= nl; i++) { h = L[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+        for (i = 1; i <= z; i++)  { out = (out == "" ? "0" : out ":0") }
+        for (i = 1; i <= nr; i++) { h = R[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+        return out
+    }
+    nl = split(s, L, ":")
+    out = ""
+    for (i = 1; i <= nl; i++) { h = L[i]; sub(/^0+/, "", h); if (h == "") h = "0"; out = (out == "" ? h : out ":" h) }
+    return out
 }
+'
 
-stats_all() {
-    $IPT -t mangle -L HNC_STATS -nvx 2>/dev/null | awk '
-    # $IPT -nvx 数据行:
-    #   $1=pkts $2=bytes $3=target $4=prot $5=opt $6=in $7=out $8=source $9=destination
-    # 跳过表头(第 1-2 行)和占位行 0.0.0.0/0 → 0.0.0.0/0
-    $1 ~ /^[0-9]+$/ && NF >= 9 {
-        if ($8 != "0.0.0.0/0" && $9 == "0.0.0.0/0") {
-            # -s ip 规则 = 上传(设备发出)
-            tx[$8] += $2
-            seen[$8] = 1
-        } else if ($8 == "0.0.0.0/0" && $9 != "0.0.0.0/0") {
-            # -d ip 规则 = 下载(设备接收)
-            rx[$9] += $2
-            seen[$9] = 1
+_ip6_stats_dump() {
+    [ "$IPV6_OK" = "1" ] || return 0
+    $IP6T -t mangle -L HNC_STATS -nvx 2>/dev/null | awk "$_IP6_CANON_AWK"'
+    $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 == "RETURN" {
+        b = $2 + 0
+        mac = ""
+        for (i = 4; i <= NF; i++) {
+            if ($i == "MAC" && i < NF) { mac = tolower($(i+1)); break }
+        }
+        if (mac != "") {
+            tx[mac] += b
+            next
+        }
+        for (i = 4; i < NF; i++) {
+            if ($i == "::/0" && $(i+1) != "::/0" && $(i+1) ~ /:/) {
+                raw_dst = tolower($(i+1))
+                sub(/\/128$/, "", raw_dst)
+                dst = canon_ip6(raw_dst)
+                rx[dst] += b
+                if (!(dst in raw_of)) raw_of[dst] = raw_dst
+                break
+            }
         }
     }
     END {
-        for (ip in seen) {
-            printf "%s %d %d\n", ip, rx[ip]+0, tx[ip]+0
-        }
+        for (m in tx) printf "MAC %s %.0f\n", m, tx[m]
+        for (d in rx) printf "DST %s %.0f %s\n", d, rx[d], raw_of[d]
     }'
+}
+
+ensure_stats_online() {
+    local devices_file="$HNC_DIR/data/devices.json"
+    local v6_map="$HNC_DIR/run/stats_v6_map"
+    local v6_ret="$HNC_DIR/run/stats_v6_retired"
+
+    stats_lock || return 0
+    if ! $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
+        $IPT -t mangle -N HNC_STATS 2>/dev/null
+        rm -f "$v6_map" "$v6_ret" 2>/dev/null
+    fi
+    $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
+        || $IPT -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null \
+        || $IPT -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
+    if [ "$IPV6_OK" = "1" ]; then
+        if ! $IP6T -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
+            $IP6T -t mangle -N HNC_STATS 2>/dev/null
+            rm -f "$v6_map" "$v6_ret" 2>/dev/null
+        fi
+        $IP6T -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
+            || $IP6T -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null \
+            || $IP6T -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
+    fi
+    if [ ! -s "$devices_file" ]; then
+        stats_unlock
+        return 0
+    fi
+    # 校验 devices.json 为完整闭合 JSON: 避免半写/截断瞬间误判全部设备离线;
+    # 若为合法空对象 "{}"(最后一台客户端已离线满 90s), 允许继续执行双栈离线清场!
+    local _trimmed_first _trimmed_last _json_valid=0
+    _trimmed_first=$(tr -d ' \t\r\n' < "$devices_file" 2>/dev/null | cut -c1)
+    _trimmed_last=$(tr -d ' \t\r\n' < "$devices_file" 2>/dev/null | awk '{print substr($0, length($0), 1)}')
+    [ "$_trimmed_first" = "{" ] && [ "$_trimmed_last" = "}" ] && _json_valid=1
+    if [ "$_json_valid" != "1" ]; then
+        stats_unlock
+        return 0
+    fi
+
+    local online_tmp="$HNC_DIR/run/.stats_online.$$"
+    local mac_tmp="$HNC_DIR/run/.stats_mac.$$"
+    local on_macs_tmp="$HNC_DIR/run/.stats_onmac.$$"
+    grep -oE '"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$devices_file" 2>/dev/null | \
+    while IFS= read -r blk; do
+        m=$(printf '%s' "$blk" | sed -nE 's/^"([0-9a-fA-F:]{17})".*/\1/p' | tr 'A-F' 'a-f')
+        ip=$(printf '%s' "$blk" | sed -nE 's/.*"ip"[[:space:]]*:[[:space:]]*"([0-9.]+)".*/\1/p')
+        [ -n "$m" ] && [ -n "$ip" ] && printf '%s %s\n' "$ip" "$m"
+    done > "$mac_tmp"
+    awk '{print $2}' "$mac_tmp" | sort -u > "$on_macs_tmp"
+    if [ -s "$mac_tmp" ]; then
+        awk '{print $1}' "$mac_tmp" | sort -u > "$online_tmp"
+    else
+        grep -oE '"ip"[[:space:]]*:[[:space:]]*"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+"' "$devices_file" 2>/dev/null \
+            | sed -nE 's/.*"([0-9.]+)".*/\1/p' | sort -u > "$online_tmp"
+    fi
+
+    while IFS= read -r ip; do
+        [ -z "$ip" ] && continue
+        _ensure_v4_stats_ip "$ip"
+    done < "$online_tmp"
+
+    # 合法 JSON 下(含 "{}" 全员离线): 清理已离线 IPv4 计数规则
+    $IPT -t mangle -S HNC_STATS 2>/dev/null \
+        | awk '/-j RETURN/{for(i=1;i<=NF;i++) if($i=="-s"||$i=="-d"){t=$(i+1); sub(/\/32$/,"",t); print t}}' \
+        | sort -u | while IFS= read -r ip; do
+        [ -z "$ip" ] && continue
+        grep -qxF "$ip" "$online_tmp" 2>/dev/null && continue
+        ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$ip" -j RETURN
+        ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
+    done
+
+    # v5.35.1: IPv6 双栈设备流量计数闭环
+    #   1) 在线 MAC: 幂等维护唯一一条 -m mac 上行计数与活跃邻居 -d <ip6>/128 下行计数;
+    #   2) 在线设备过期的 RFC 4941 临时地址: 先把内核字节结转累加至 stats_v6_retired[mac], 再删 -d 规则, 零漏计零泄漏;
+    #   3) 已离线设备(不在 on_macs_tmp): 同步删除 -m mac 与其名下全部 -d <ip6>/128 规则, 并清空 stats_v6_map/stats_v6_retired,
+    #      保证 v4+v6 同步归零, 杜绝重连时 cur<prev 非对称残留引发 limit_policy 重复扣减配额!
+    if [ "$IPV6_OK" = "1" ]; then
+        local iface neigh_tmp d6_now act_d6_tmp del_d6_tmp _cnt _extra
+        iface=$(cat "$HNC_DIR/run/iface.cache" 2>/dev/null | tr -d '\r\n ')
+        [ -z "$iface" ] && iface=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null | tr -d '\r\n ')
+
+        # 1) 在线 MAC 上行规则补齐 + 去重; 离线 MAC 上行规则清理
+        while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            if ! $IP6T -t mangle -C HNC_STATS -m mac --mac-source "$m" -j RETURN 2>/dev/null; then
+                $IP6T -t mangle -A HNC_STATS -m mac --mac-source "$m" -j RETURN 2>/dev/null
+            else
+                _cnt=$($IP6T -t mangle -S HNC_STATS 2>/dev/null | awk -v m="$m" 'tolower($0) ~ ("--mac-source " m " ") && $NF=="RETURN"{c++} END{print c+0}')
+                _extra=$((_cnt - 1))
+                while [ "$_extra" -gt 0 ]; do
+                    $IP6T -t mangle -D HNC_STATS -m mac --mac-source "$m" -j RETURN 2>/dev/null || break
+                    _extra=$((_extra - 1))
+                done
+            fi
+        done < "$on_macs_tmp"
+
+        $IP6T -t mangle -S HNC_STATS 2>/dev/null \
+            | awk '/--mac-source/ && /-j RETURN/{for(i=1;i<NF;i++) if($i=="--mac-source") print tolower($(i+1))}' \
+            | sort -u | while IFS= read -r m; do
+            [ -z "$m" ] && continue
+            grep -qxF "$m" "$on_macs_tmp" 2>/dev/null && continue
+            ipt_del_all "$IP6T" -t mangle -D HNC_STATS -m mac --mac-source "$m" -j RETURN
+        done
+
+        # 2) 采集当前活跃的全局/ULA IPv6 邻居(仅限在线 MAC)
+        neigh_tmp="$HNC_DIR/run/.stats_n6.$$"
+        act_d6_tmp="$HNC_DIR/run/.stats_act6.$$"
+        del_d6_tmp="$HNC_DIR/run/.stats_del6.$$"
+        d6_now="$HNC_DIR/run/.stats_d6now.$$"
+        : > "$neigh_tmp"
+        if [ -n "$iface" ] && [ -s "$on_macs_tmp" ]; then
+            ip -6 neigh show dev "$iface" 2>/dev/null | awk -v onf="$on_macs_tmp" "$_IP6_CANON_AWK"'
+            BEGIN { while ((getline m < onf) > 0) if (m != "") on[m] = 1; close(onf) }
+            $1 ~ /:/ {
+                a = tolower($1)
+                if (a ~ /^fe80:/ || a ~ /^ff/ || a == "::1" || a == "::") next
+                st = $NF
+                if (st == "FAILED" || st == "INCOMPLETE") next
+                mac = ""
+                for (i = 2; i <= NF; i++) {
+                    if ($i == "lladdr" && i < NF) { mac = tolower($(i+1)); break }
+                }
+                if (mac in on) {
+                    ca = canon_ip6(a)
+                    if (!seen[ca]++) print ca, mac, a
+                }
+            }' > "$neigh_tmp"
+        fi
+
+        while read -r ca m raw_a; do
+            [ -z "$ca" ] && continue
+            if ! $IP6T -t mangle -C HNC_STATS -d "$raw_a/128" -j RETURN 2>/dev/null \
+               && ! $IP6T -t mangle -C HNC_STATS -d "$ca/128" -j RETURN 2>/dev/null; then
+                $IP6T -t mangle -A HNC_STATS -d "$raw_a/128" -j RETURN 2>/dev/null
+            fi
+        done < "$neigh_tmp"
+
+        # 3) 读取当前内核 IPv6 HNC_STATS 计数: 对已不在活跃邻居表中的 /128 规则执行结转或离线淘汰
+        _ip6_stats_dump > "$d6_now"
+        : > "${v6_map}.tmp"
+        : > "${v6_ret}.tmp"
+        : > "$del_d6_tmp"
+        awk -v nf="$neigh_tmp" -v onf="$on_macs_tmp" -v d6="$d6_now" \
+            -v v6m="$v6_map" -v v6r="$v6_ret" \
+            -v out_map="${v6_map}.tmp" -v out_ret="${v6_ret}.tmp" -v out_del="$del_d6_tmp" "$_IP6_CANON_AWK"'
+        BEGIN {
+            while ((getline m < onf) > 0) if (m != "") on[m] = 1
+            close(onf)
+            while ((getline ln < v6m) > 0) {
+                split(ln, a, " ")
+                if (a[1] != "" && a[2] != "") owner[canon_ip6(a[1])] = tolower(a[2])
+            }
+            close(v6m)
+            while ((getline ln < nf) > 0) {
+                split(ln, a, " ")
+                if (a[1] != "" && a[2] != "") {
+                    active[a[1]] = a[2]
+                    owner[a[1]] = a[2]
+                }
+            }
+            close(nf)
+            while ((getline ln < v6r) > 0) {
+                split(ln, a, " ")
+                m = tolower(a[1])
+                if (m in on) {
+                    ret_rx[m] = a[2] + 0
+                    ret_tx[m] = a[3] + 0
+                }
+            }
+            close(v6r)
+            while ((getline ln < d6) > 0) {
+                split(ln, a, " ")
+                if (a[1] != "DST") continue
+                ca = a[2]; b = a[3] + 0; raw_d = (a[4] != "" ? a[4] : a[2])
+                if (ca in active) continue
+                own = owner[ca]
+                if (own != "" && (own in on) && b > 0) {
+                    ret_rx[own] += b
+                }
+                print raw_d > out_del
+                if (raw_d != ca) print ca > out_del
+                delete owner[ca]
+            }
+            close(d6)
+            for (ca in active) {
+                printf "%s %s\n", ca, active[ca] > out_map
+            }
+            for (m in ret_rx) {
+                if ((m in on) && (ret_rx[m] > 0 || ret_tx[m] > 0)) {
+                    printf "%s %.0f %.0f\n", m, ret_rx[m], ret_tx[m] > out_ret
+                }
+            }
+        }'
+        mv -f "${v6_map}.tmp" "$v6_map" 2>/dev/null || : > "$v6_map"
+        mv -f "${v6_ret}.tmp" "$v6_ret" 2>/dev/null || : > "$v6_ret"
+
+        # 4) 从内核链彻底删除已结转/已离线的 -d <ip6>/128 规则(含任何孤立 -d 规则)
+        if [ -s "$del_d6_tmp" ]; then
+            sort -u "$del_d6_tmp" | while IFS= read -r old6; do
+                [ -z "$old6" ] && continue
+                ipt_del_all "$IP6T" -t mangle -D HNC_STATS -d "$old6/128" -j RETURN
+            done
+        fi
+        # 兜底清理 byte=0 或未命中 dump 的残留 -d 规则, 并裁除活跃 /128 的重复副本
+        awk '{print $1}' "$neigh_tmp" > "$act_d6_tmp"
+        $IP6T -t mangle -S HNC_STATS 2>/dev/null \
+            | awk "$_IP6_CANON_AWK"'/-d / && /-j RETURN/{for(i=1;i<NF;i++) if($i=="-d"){raw=$(i+1); sub(/\/128$/,"",raw); print canon_ip6(raw), raw}}' \
+            | awk '{cnt[$1]++; raw[$1]=$2} END{for(c in cnt) print c, cnt[c], raw[c]}' \
+            | while read -r ca cnt raw6; do
+            [ -z "$ca" ] && continue
+            if ! grep -qxF "$ca" "$act_d6_tmp" 2>/dev/null; then
+                ipt_del_all "$IP6T" -t mangle -D HNC_STATS -d "$raw6/128" -j RETURN
+            elif [ "${cnt:-0}" -gt 1 ]; then
+                _extra=$((cnt - 1))
+                while [ "$_extra" -gt 0 ]; do
+                    $IP6T -t mangle -D HNC_STATS -d "$raw6/128" -j RETURN 2>/dev/null || break
+                    _extra=$((_extra - 1))
+                done
+            fi
+        done
+        rm -f "$neigh_tmp" "$act_d6_tmp" "$del_d6_tmp" "$d6_now" 2>/dev/null
+    fi
+
+    rm -f "$online_tmp" "$mac_tmp" "$on_macs_tmp" 2>/dev/null
+    stats_unlock
+}
+
+stats_all() {
+    local devices_file="$HNC_DIR/data/devices.json"
+    local v6_map="$HNC_DIR/run/stats_v6_map"
+    local v6_ret="$HNC_DIR/run/stats_v6_retired"
+    local d4_tmp="$HNC_DIR/run/.s4.$$" d6_tmp="$HNC_DIR/run/.s6.$$" map_tmp="$HNC_DIR/run/.sm.$$"
+
+    stats_lock || true
+    $IPT -t mangle -L HNC_STATS -nvx 2>/dev/null > "$d4_tmp"
+    _ip6_stats_dump > "$d6_tmp"
+    : > "$map_tmp"
+    if [ -f "$devices_file" ]; then
+        grep -oE '"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$devices_file" 2>/dev/null | \
+        while IFS= read -r blk; do
+            m=$(printf '%s' "$blk" | sed -nE 's/^"([0-9a-fA-F:]{17})".*/\1/p' | tr 'A-F' 'a-f')
+            ip=$(printf '%s' "$blk" | sed -nE 's/.*"ip"[[:space:]]*:[[:space:]]*"([0-9.]+)".*/\1/p')
+            [ -n "$m" ] && [ -n "$ip" ] && printf '%s %s\n' "$ip" "$m"
+        done > "$map_tmp"
+    fi
+
+    awk -v d4="$d4_tmp" -v d6="$d6_tmp" -v mp="$map_tmp" -v v6m="$v6_map" -v v6r="$v6_ret" "$_IP6_CANON_AWK"'
+    BEGIN {
+        while ((getline ln < mp) > 0) {
+            split(ln, a, " ")
+            if (a[1] != "" && a[2] != "" && !(a[2] in mac_ip)) mac_ip[a[2]] = a[1]
+        }
+        close(mp)
+        while ((getline ln < v6m) > 0) {
+            split(ln, a, " ")
+            if (a[1] != "" && a[2] != "") ip6_owner[canon_ip6(a[1])] = tolower(a[2])
+        }
+        close(v6m)
+        while ((getline ln < v6r) > 0) {
+            split(ln, a, " ")
+            if (a[1] != "") { ret_rx[tolower(a[1])] = a[2] + 0; ret_tx[tolower(a[1])] = a[3] + 0 }
+        }
+        close(v6r)
+        # 兼容 legacy xtables(含 "--" opt 列, NF>=9, src=f[8] dst=f[9]) 与
+        # Android 14-16 iptables-nft(空 opt 列, NF==8, src=f[7] dst=f[8]):
+        # HNC_STATS 的 IPv4 规则无扩展 match, 末尾两列恒为 <src> <dst>。
+        while ((getline ln < d4) > 0) {
+            n = split(ln, f, " ")
+            if (n >= 8 && f[1] ~ /^[0-9]+$/ && f[2] ~ /^[0-9]+$/ && f[3] == "RETURN") {
+                src = f[n - 1]; dst = f[n]
+                sub(/\/32$/, "", src); sub(/\/32$/, "", dst)
+                if (src != "0.0.0.0/0" && dst == "0.0.0.0/0") { tx[src] += f[2] + 0; seen[src] = 1 }
+                else if (src == "0.0.0.0/0" && dst != "0.0.0.0/0") { rx[dst] += f[2] + 0; seen[dst] = 1 }
+            }
+        }
+        close(d4)
+        while ((getline ln < d6) > 0) {
+            split(ln, a, " ")
+            if (a[1] == "MAC" && (a[2] in mac_ip)) {
+                ip4 = mac_ip[a[2]]; tx[ip4] += a[3] + 0; seen[ip4] = 1
+            } else if (a[1] == "DST") {
+                m = ip6_owner[canon_ip6(a[2])]
+                if (m != "" && (m in mac_ip)) {
+                    ip4 = mac_ip[m]; rx[ip4] += a[3] + 0; seen[ip4] = 1
+                }
+            }
+        }
+        close(d6)
+        for (m in ret_rx) {
+            if (m in mac_ip) {
+                ip4 = mac_ip[m]; rx[ip4] += ret_rx[m]; tx[ip4] += ret_tx[m]; seen[ip4] = 1
+            }
+        }
+        for (ip in seen) printf "%s %.0f %.0f\n", ip, rx[ip] + 0, tx[ip] + 0
+    }'
+    rm -f "$d4_tmp" "$d6_tmp" "$map_tmp" 2>/dev/null
+    stats_unlock
 }
 
 # ─── 命令分发 ────────────────────────────────────────────────

@@ -86,6 +86,13 @@ var rulepackSharedSuffixes = map[string]bool{
 	"herokuapp.com": true, "netlify.app": true, "vercel.app": true, "pages.dev": true, "workers.dev": true,
 	"azurewebsites.net": true, "cloudfront.net": true, "amazonaws.com": true, "fastly.net": true,
 	"akamaized.net": true, "akamaihd.net": true, "web.app": true, "firebaseapp.com": true,
+	// 国内主流多租户云存储 / 公共 CDN 底座保护集(防止外部规则包劫持公共底座连坐误封)
+	"myqcloud.com": true, "qcloudcdn.com": true, "dnsv1.com": true, "smtcdns.net": true,
+	"aliyuncs.com": true, "alicdn.com": true, "alikunlun.com": true, "kunlunca.com": true, "kunlunar.com": true,
+	"bdydns.com": true, "bcebos.com": true, "baidubce.com": true, "jomodns.com": true,
+	"cdnhwc1.com": true, "cdnhwc2.com": true, "cdnhwc3.com": true, "myhuaweicloud.com": true,
+	"volces.com": true, "bytecdn.cn": true, "ksyuncdn.com": true, "qiniudns.com": true,
+	"clouddn.com": true, "upaiyun.com": true, "chinanetcenter.com": true, "wsglb0.com": true, "ovscdns.com": true,
 }
 
 // ─── 包格式 ───────────────────────────────────────────────────────────
@@ -477,7 +484,7 @@ func rpCollect(hncDir string, now time.Time) rpSources {
 	learned, _ := startupFor(hncDir).learnedView(now)
 	cat := loadAppCatalog(hncDir)
 	for _, a := range learned {
-		if !a.Usable || !rulepackIDRE.MatchString(a.AppID) {
+		if !a.Usable || a.Starts < startupMinStarts || !rulepackIDRE.MatchString(a.AppID) {
 			continue
 		}
 		e := startupPackEntry{AppID: a.AppID, App: a.Name, Starts: int(math.Round(a.Starts))}

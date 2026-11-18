@@ -107,11 +107,15 @@ v6_unlock() {
 # 输出每行 "MAC MARK_HEX" 形如 "e2:0d:4a:48:5d:40 0x80003b"
 # ═══════════════════════════════════════════════════════════════
 list_marked_devices() {
-    iptables -t mangle -L HNC_MARK -n 2>/dev/null | awk '
+    local raw
+    # 必须带 -w 2 等待 xtables 锁并校验返回码: 否则并发撞锁返回空串时会被 sync_all 误判为
+    # 「当前没有任何限速设备」而误清空全部在线设备的 IPv6 tc u32 过滤器!
+    raw=$(iptables -w 2 -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
+    printf '%s\n' "$raw" | awk '
     /MAC.*MARK set/ {
         mac=""; mark=""
         for (i=1; i<=NF; i++) {
-            if ($i == "MAC") mac=$(i+1)
+            if ($i == "MAC") mac=tolower($(i+1))
             if ($i == "set" && $(i-1) == "MARK") mark=$(i+1)
         }
         if (mac != "" && mark != "") print mac, mark
@@ -121,11 +125,18 @@ list_marked_devices() {
 # 同一次调用内复用 iptables 读数(sync_all / sync_macs 一次读、逐台用)
 _V6_MARKED_SET=""
 _V6_MARKED=""
+_V6_MARKED_ERR=0
 marked_devices() {
     if [ -z "$_V6_MARKED_SET" ]; then
-        _V6_MARKED=$(list_marked_devices)
+        if _V6_MARKED=$(list_marked_devices); then
+            _V6_MARKED_ERR=0
+        else
+            _V6_MARKED=""
+            _V6_MARKED_ERR=1
+        fi
         _V6_MARKED_SET=1
     fi
+    [ "$_V6_MARKED_ERR" = 1 ] && return 1
     [ -n "$_V6_MARKED" ] && printf '%s\n' "$_V6_MARKED"
     return 0
 }
@@ -218,11 +229,11 @@ sync_one() {
     cur=$(get_v6_addrs "$mac" "$iface")
     prev_all=""
     [ -f "$snap" ] && prev_all=$(cat "$snap" 2>/dev/null)
-    prev_hdr=$(printf '%s\n' "$prev_all" | grep '^#hnc_v6 ' | head -1)
+    prev_hdr=$(printf '%s\n' "$prev_all" | grep '^#hnc_v6 ' | head -n 1)
     prev_list=$(printf '%s\n' "$prev_all" | grep -v '^#' | awk 'NF')
     prev=$(printf '%s\n' "$prev_list" | awk 'NF{print $1}' | sort -u)
-    prev_mark=$(printf '%s\n' "$prev_hdr" | sed -n 's/^#hnc_v6 .* mark=\([0-9]*\).*/\1/p' | head -1)
-    prev_iface=$(printf '%s\n' "$prev_hdr" | sed -n 's/^#hnc_v6 iface=\([^ ]*\).*/\1/p' | head -1)
+    prev_mark=$(printf '%s\n' "$prev_hdr" | sed -n 's/^#hnc_v6 .* mark=\([0-9]*\).*/\1/p' | head -n 1)
+    prev_iface=$(printf '%s\n' "$prev_hdr" | sed -n 's/^#hnc_v6 iface=\([^ ]*\).*/\1/p' | head -n 1)
 
     # 期望集: "<地址> <最近看到>", 当前地址 = now; 旧地址保留原时间戳(旧格式无时间戳
     # 或时间戳在未来(uptime 回退)→ 视为刚看到); 超过宽限的丢弃; 按最近看到降序截断。
@@ -382,8 +393,8 @@ clear_one() {
     # 快照不删 filter → v6 u32 filter 残留;mid 复用给别的设备后,旧设备的 v6 流量
     # 被归进新设备的 class。改为从快照头行取回当时的 mark / iface。
     if [ -f "$snap" ]; then
-        [ -n "$mark_id" ] || mark_id=$(sed -n 's/^#hnc_v6 .* mark=\([0-9]*\).*/\1/p' "$snap" 2>/dev/null | head -1)
-        snap_iface=$(sed -n 's/^#hnc_v6 iface=\([^ ]*\).*/\1/p' "$snap" 2>/dev/null | head -1)
+        [ -n "$mark_id" ] || mark_id=$(sed -n 's/^#hnc_v6 .* mark=\([0-9]*\).*/\1/p' "$snap" 2>/dev/null | head -n 1)
+        snap_iface=$(sed -n 's/^#hnc_v6 iface=\([^ ]*\).*/\1/p' "$snap" 2>/dev/null | head -n 1)
     fi
 
     case "$mark_id" in
@@ -410,7 +421,10 @@ sync_all() {
     [ -z "$iface" ] && { log "WARN: sync_all no iface"; return 1; }
 
     local devices
-    devices=$(marked_devices)
+    if ! devices=$(marked_devices); then
+        log "WARN: sync_all aborted — iptables -w 2 HNC_MARK read failed (xtables lock contention?)"
+        return 1
+    fi
 
     # 没有任何限速设备 → 清理所有孤儿快照后返回
     if [ -z "$devices" ]; then

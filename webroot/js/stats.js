@@ -107,7 +107,7 @@ function paintPU() {
   var ss = $('#pu-set-s'); if (ss) ss.textContent = puSetSummary();
   var st = $('#pu-set'); if (st && !st.contains(document.activeElement) && !st._filled && S.puCfg) { st.innerHTML = puSetHtml(); st._filled = true; }
 }
-function refreshPU(force) { paintPU(); return loadPhoneUsage(S.puPeriod, force).then(function () { if (S.page === 'stats' && S.aseg === 'stats') paintPU(); }); }
+function refreshPU(force) { var seq = ++puRefreshSeq; paintPU(); return loadPhoneUsage(S.puPeriod, force).then(function () { if (seq === puRefreshSeq && S.page === 'stats' && S.aseg === 'stats') paintPU(); }); }
 function puSave() {
   var bd = Math.round(num($('#pu-bd').value)), w = Math.round(num($('#pu-warn').value)), p1 = $('#pu-p1').value.trim(), p2 = $('#pu-p2').value.trim();
   if (!(bd >= 1 && bd <= 28)) { toast('计费日填 1~28', 'err'); return; }
@@ -166,10 +166,16 @@ function paintStatsApps() {
   var h = appUsageBars(r, 8);
   el.innerHTML = h || '<div class="note">' + (r.acct === false ? '内核连接字节计数还没打开，已尝试打开，新连接开始计入' : '这段时间还没有按应用的记录（v5.16 起开始累计）') + '</div>';
 }
+var statsRefreshSeq = 0, puRefreshSeq = 0;
 function refreshStats() {
-  return Promise.all([loadStats('today'), S.statsRange === 'today' || S.statsRange === 'week' ? loadStats('week') : Promise.all([loadStats('week'), loadStats(S.statsRange)])])
-    .then(function () { paintDay(); renderBars(); loadAppUsage(RANGE_DAYS[S.statsRange]).then(paintStatsApps); })
-    .catch(function (e) { var b = $('#bars'); if (b) b.innerHTML = '<div class="empty" style="position:absolute;inset:0;display:grid;place-items:center">' + esc(errText(e)) + '</div>'; });
+  var seq = ++statsRefreshSeq, wantRange = S.statsRange;
+  return Promise.all([loadStats('today'), wantRange === 'today' || wantRange === 'week' ? loadStats('week') : Promise.all([loadStats('week'), loadStats(wantRange)])])
+    .then(function () {
+      if (seq !== statsRefreshSeq) return;
+      paintDay(); renderBars();
+      loadAppUsage(RANGE_DAYS[S.statsRange]).then(function () { if (seq === statsRefreshSeq) paintStatsApps(); });
+    })
+    .catch(function (e) { if (seq !== statsRefreshSeq) return; var b = $('#bars'); if (b) b.innerHTML = '<div class="empty" style="position:absolute;inset:0;display:grid;place-items:center">' + esc(errText(e)) + '</div>'; });
 }
 function paintDay() {
   var t = S.stats.today || [], w = S.stats.week || [];
@@ -288,9 +294,9 @@ function paintDpi() {
   // 探测
   var pr = S.probe;
   $('#dpi-probe').innerHTML = !pr ? stRow('探针', '暂无数据', '') :
-    stRow('AF_PACKET', pr.af_packet_available ? '✓ 可用' : '✗ ' + esc(pr.af_packet_error || '不可用'), pr.af_packet_available ? 'ok' : 'bad') +
+    stRow('AF_PACKET', pr.af_packet_available ? '可用' : '不可用 · ' + esc(pr.af_packet_error || '受限'), pr.af_packet_available ? 'ok' : 'bad') +
     stRow('热点接口', esc(pr.ap_iface || '—'), '', pr.ap_iface_source ? '来源 ' + esc(pr.ap_iface_source) : '') +
-    stRow('Conntrack', pr.conntrack_readable ? '✓ 可读' : '不可读', pr.conntrack_readable ? 'ok' : 'warn', esc(pr.conntrack_path || '')) +
+    stRow('Conntrack', pr.conntrack_readable ? '可读' : '不可读', pr.conntrack_readable ? 'ok' : 'warn', esc(pr.conntrack_path || '')) +
     stRow('BPF Tether Offload', pr.offload_hint ? '可能接管' : '未接管', pr.offload_hint ? 'warn' : 'ok', esc(pr.offload_evidence || ''));
   paintDpiHist(); paintClients(); paintUnknown(); paintUnkTraffic(); paintIdent(); paintDiscEntry();
 }
@@ -310,7 +316,7 @@ function paintUnkTraffic() {
   var r = c.r || {}, items = (r.items || []).slice(0, 20), tot = num(r.total_unknown_bytes), tb = num(r.tunnel_bytes), ib = num(r.inferred_bytes);
   // 已从「未识别」里分出去的两块 —— VPN/代理隧道、共现推断
   var split = tb > 0 || ib > 0 ? '<div class="note" style="padding:10px 14px 0">另有 ' + [tb > 0 ? '<b>' + bytes(tb) + '</b> 已归为 ' + ico('tunnel', 'tun-i') + 'VPN 隧道' : '', ib > 0 ? '<b>' + bytes(ib) + '</b> 为推测归属（按同一时刻建连的应用）' : ''].filter(Boolean).join('、') + '，不算在未识别里</div>' : '';
-  if (!items.length) { el.innerHTML = split + '<div class="empty">' + (tot ? '有 ' + bytes(tot) + ' 未识别流量，但没记下去向' : '这段时间的流量都认出来了 🎉') + '</div>'; return; }
+  if (!items.length) { el.innerHTML = split + '<div class="empty">' + (tot ? '有 ' + bytes(tot) + ' 未识别流量，但没记下去向' : uiSvg('sparkles') + ' 这段时间的流量已全部精准识别') + '</div>'; return; }
   el.innerHTML = split + '<div class="note" style="padding:10px 14px 0">' + ({ 1: '今日', 3: '近 3 天', 7: '近 7 天' }[S.dpiDays] || '') + '未识别共 ' + bytes(tot) + ' · 下面是最多的 ' + items.length + ' 个去向</div>' +
     items.map(function (u) {
       var ds = devNames(u.macs || []);
@@ -399,7 +405,7 @@ function loadDisc() { return api.getSafe('/api/discover', null, null).then(funct
 function discEntryHtml() {
   var r = S.disc, n = r && r.groups ? r.groups.length : 0;
   var named = r && r.groups ? r.groups.filter(function (g) { return g.guess && g.guess.src !== 'domain'; }).length : 0;
-  return '<button class="disc-entry press" data-act="disc-open">' + gi('purple', 'search') + '<span class="tx"><div class="t">新发现的应用</div><div class="s">' +
+  return '<button class="disc-entry press" data-act="disc-open"><span class="studio-orb disc-orb">' + studioSvg('discover') + '</span><span class="tx"><div class="t">新发现的应用</div><div class="s">' +
     (!r ? '加载中…' : r.available === false ? '等 DPI 运行一段时间后，规则库认不出的应用会出现在这里' : n ? '规则库里没有的 ' + n + ' 个应用' + (named ? '，已认出 ' + named + ' 个是谁' : '') + ' · 点开确认' : '暂时没有 · 规则库都认得') +
     '</div></span>' + (n ? '<span class="n">' + n + '</span>' : '') + ico('right', 'chev') + '</button>';
 }
@@ -424,7 +430,7 @@ function discListHtml() {
   var head = '<div class="dbox" style="margin-bottom:6px"><div class="row2"><span class="k">本机安装包</span><span class="v">' + (sc.app_count ? '已扫描 ' + sc.app_count + ' 个 App · ' + ago(sc.generated_at) : '还没扫描') + (sc.requested ? ' · 排队中' : '') + '</span></div>' +
     '<div class="row2"><span class="k">服务器证书</span><span class="v">' + (r.cert_probe ? '自动获取中' : '已关闭') + '</span></div>' +
     '<div class="btns" style="margin:2px 0 0"><button class="btn sec press" data-act="disc-scan">' + ico('refresh') + '立即扫描本机 App</button></div></div>';
-  if (!gs.length) return head + '<div class="note" style="text-align:center;padding:20px 0">' + (r.available === false ? 'dpid 还没产出发现结果（需要 DPI 运行一段时间）' : '暂时没有规则库认不出的应用 🎉') + '</div>';
+  if (!gs.length) return head + '<div class="note" style="text-align:center;padding:20px 0">' + (r.available === false ? 'dpid 还没产出发现结果（需要 DPI 运行一段时间）' : uiSvg('sparkles') + ' 暂时没有规则库认不出的应用') + '</div>';
   return head + gs.map(function (g) {
     var gs2 = g.guess || {}, sg2 = g.suggest || {};
     return '<button class="dg press" data-disc="' + esc(g.id) + '"><span class="h"><span class="nm">' + esc(sg2.name || gs2.name || (g.suffixes || [])[0] || g.id) + '</span><span class="pill-count">' + num(g.hits) + ' 次</span>' + ico('right', 'chev') + '</span>' +
@@ -573,13 +579,13 @@ function rulesAct(act) {
     return confirmSheet('导入规则库？', '会覆盖当前的自定义规则库（内置规则不受影响），dpid 随后自动重载。', '导入', { safe: true }).then(function (ok) {
       if (!ok) return;
       rulesOut('导入中…');
-      api.post('/api/dpi_rules', { rules: txt }, { timeout: 30000, maxTime: 28 }).then(function (r) { if (r.ok === false) throw new Error(r.error || '导入失败'); rulesOut(r.detail || '✓ 已导入'); toast('规则库已导入'); }).catch(function (e) { rulesOut(errText(e), 'err'); });
+      api.post('/api/dpi_rules', { rules: txt }, { timeout: 30000, maxTime: 28 }).then(function (r) { if (r.ok === false) throw new Error(r.error || '导入失败'); rulesOut(r.detail || '已导入'); toast('规则库已导入'); }).catch(function (e) { rulesOut(errText(e), 'err'); });
     });
   }
   if (act === 'rules-reset') {
     return confirmSheet('恢复内置规则库？', '删除自定义规则，回到模块自带的规则库。', '恢复').then(function (ok) {
       if (!ok) return;
-      api.action('dpi_rules_reset', {}, { timeout: 30000, maxTime: 28 }).then(function (r) { rulesOut(r.detail || '✓ 已恢复内置'); ta.value = ''; toast('已恢复内置规则库'); }).catch(function (e) { rulesOut(errText(e), 'err'); });
+      api.action('dpi_rules_reset', {}, { timeout: 30000, maxTime: 28 }).then(function (r) { rulesOut(r.detail || '已恢复内置'); ta.value = ''; toast('已恢复内置规则库'); }).catch(function (e) { rulesOut(errText(e), 'err'); });
     });
   }
   if (act === 'rules-update') {
@@ -591,7 +597,7 @@ function rulesAct(act) {
       return confirmSheet('更新规则库？', '当前 ' + esc(d.current || '—') + '，远端 ' + esc(d.remote) + '。', '更新', { safe: true }).then(function (ok) {
         if (!ok) return;
         rulesOut('正在下载安装…');
-        return api.action('dpi_rules_update', { mode: 'install' }, { timeout: 90000, maxTime: 88 }).then(function (r2) { rulesOut(r2.detail || '✓ 已更新'); toast('规则库已更新'); });
+        return api.action('dpi_rules_update', { mode: 'install' }, { timeout: 90000, maxTime: 88 }).then(function (r2) { rulesOut(r2.detail || '已更新'); toast('规则库已更新'); });
       });
     }).catch(function (e) { rulesOut(errText(e), 'err'); });
   }

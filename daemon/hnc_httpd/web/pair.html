@@ -2,166 +2,250 @@
 <html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>HNC 配对 · Remote Access Pairing</title>
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#eef3fb" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0b111d" media="(prefers-color-scheme: dark)">
+<title>HNC 远程访问配对 · Remote Pairing</title>
 <style>
-* { margin:0; padding:0; box-sizing:border-box; }
+:root {
+  --bg: #eef3fb;
+  --orb-1: rgba(56, 189, 248, 0.30);
+  --orb-2: rgba(99, 102, 241, 0.22);
+  --orb-3: rgba(45, 212, 191, 0.20);
+  --card: rgba(255, 255, 255, 0.68);
+  --card-border: rgba(255, 255, 255, 0.82);
+  --card-rim: inset 0 1px 0 rgba(255, 255, 255, 0.92), 0 20px 48px -18px rgba(15, 23, 42, 0.14);
+  --blur: 24px;
+  --sat: 180%;
+  --text-1: #0f172a;
+  --text-2: #475569;
+  --text-3: #64748b;
+  --input-bg: rgba(15, 23, 42, 0.045);
+  --input-border: rgba(15, 23, 42, 0.12);
+  --accent: #007aff;
+  --accent-2: #5856d6;
+  --accent-ring: rgba(0, 122, 255, 0.20);
+  --btn-fg: #ffffff;
+  --err-bg: rgba(239, 68, 68, 0.10);
+  --err-bd: rgba(239, 68, 68, 0.26);
+  --err-fg: #dc2626;
+  --ok-bg: rgba(0, 122, 255, 0.09);
+  --ok-bd: rgba(0, 122, 255, 0.24);
+  --ok-fg: #0369a1;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #090f1a;
+    --orb-1: rgba(56, 189, 248, 0.20);
+    --orb-2: rgba(129, 140, 248, 0.18);
+    --orb-3: rgba(45, 212, 191, 0.12);
+    --card: rgba(22, 30, 46, 0.72);
+    --card-border: rgba(255, 255, 255, 0.12);
+    --card-rim: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 24px 56px -16px rgba(0, 0, 0, 0.55);
+    --text-1: #f1f5f9;
+    --text-2: #94a3b8;
+    --text-3: #64748b;
+    --input-bg: rgba(0, 0, 0, 0.32);
+    --input-border: rgba(255, 255, 255, 0.14);
+    --accent: #38bdf8;
+    --accent-2: #818cf8;
+    --accent-ring: rgba(56, 189, 248, 0.22);
+    --btn-fg: #08111f;
+    --err-bg: rgba(239, 68, 68, 0.14);
+    --err-bd: rgba(248, 113, 113, 0.32);
+    --err-fg: #fca5a5;
+    --ok-bg: rgba(56, 189, 248, 0.13);
+    --ok-bd: rgba(56, 189, 248, 0.30);
+    --ok-fg: #7dd3fc;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #090f1a;
+  --orb-1: rgba(56, 189, 248, 0.20);
+  --orb-2: rgba(129, 140, 248, 0.18);
+  --orb-3: rgba(45, 212, 191, 0.12);
+  --card: rgba(22, 30, 46, 0.72);
+  --card-border: rgba(255, 255, 255, 0.12);
+  --card-rim: inset 0 1px 0 rgba(255, 255, 255, 0.14), 0 24px 56px -16px rgba(0, 0, 0, 0.55);
+  --text-1: #f1f5f9;
+  --text-2: #94a3b8;
+  --text-3: #64748b;
+  --input-bg: rgba(0, 0, 0, 0.32);
+  --input-border: rgba(255, 255, 255, 0.14);
+  --accent: #38bdf8;
+  --accent-2: #818cf8;
+  --accent-ring: rgba(56, 189, 248, 0.22);
+  --btn-fg: #08111f;
+  --err-bg: rgba(239, 68, 68, 0.14);
+  --err-bd: rgba(248, 113, 113, 0.32);
+  --err-fg: #fca5a5;
+  --ok-bg: rgba(56, 189, 248, 0.13);
+  --ok-bd: rgba(56, 189, 248, 0.30);
+  --ok-fg: #7dd3fc;
+}
+:root[data-style="cyber"] { --accent: #4ea8de; --accent-2: #64748b; --blur: 18px; --sat: 135%; }
+:root[data-glass="frosted"] { --blur: 30px; --sat: 145%; }
+* { margin: 0; padding: 0; box-sizing: border-box; }
 body {
-  font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica,
-               "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+  font-family: system-ui, -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background:
+    radial-gradient(48% 42% at 14% 12%, var(--orb-1) 0%, transparent 72%),
+    radial-gradient(46% 40% at 88% 18%, var(--orb-2) 0%, transparent 72%),
+    radial-gradient(48% 44% at 22% 88%, var(--orb-3) 0%, transparent 74%),
+    var(--bg);
   min-height: 100vh;
-  display: flex; align-items:center; justify-content:center;
-  color: #e2e8f0;
-  padding: 20px;
+  min-height: 100dvh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-1);
+  padding:
+    max(20px, env(safe-area-inset-top))
+    max(16px, env(safe-area-inset-right))
+    max(24px, env(safe-area-inset-bottom))
+    max(16px, env(safe-area-inset-left));
+}
+@media (max-height: 560px) {
+  body { align-items: flex-start; padding-top: max(14px, env(safe-area-inset-top)); }
 }
 .card {
-  background: rgba(255,255,255,0.04);
-  border: 1px solid rgba(255,255,255,0.08);
-  border-radius: 20px;
-  padding: 36px 28px;
-  max-width: 420px;
+  background: var(--card);
+  border: 1px solid var(--card-border);
+  border-radius: 26px;
+  padding: 30px 24px 26px;
+  max-width: 410px;
   width: 100%;
-  box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-  backdrop-filter: blur(16px);
+  box-shadow: var(--card-rim);
+  -webkit-backdrop-filter: blur(var(--blur)) saturate(var(--sat));
+  backdrop-filter: blur(var(--blur)) saturate(var(--sat));
 }
-h1 {
-  font-size: 22px;
-  font-weight: 600;
-  margin-bottom: 8px;
-  background: linear-gradient(90deg, #38bdf8, #818cf8);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
+.brand-head { display: flex; align-items: center; gap: 13px; margin-bottom: 12px; }
+.orb-icon {
+  width: 44px; height: 44px; border-radius: 14px; flex-shrink: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, rgba(56, 189, 248, 0.20), rgba(99, 102, 241, 0.18));
+  border: 1px solid var(--card-border);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.45);
+  color: var(--accent);
 }
-.sub {
-  font-size: 13px;
-  color: #94a3b8;
-  margin-bottom: 24px;
-  line-height: 1.55;
-}
-label {
-  display: block;
-  font-size: 12px;
-  color: #94a3b8;
-  margin-bottom: 8px;
-  font-weight: 500;
-  letter-spacing: 0.3px;
-}
+h1 { font-size: 20px; font-weight: 750; letter-spacing: -0.2px; color: var(--text-1); line-height: 1.25; }
+.badge-sub { font-size: 11px; font-weight: 600; color: var(--text-3); margin-top: 2px; letter-spacing: 0.2px; }
+.sub { font-size: 13px; color: var(--text-2); margin-bottom: 22px; line-height: 1.6; }
+.sub strong { color: var(--text-1); font-weight: 650; }
+label { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--text-2); margin-bottom: 8px; font-weight: 600; }
+label span.ttl { font-weight: 500; color: var(--text-3); }
 input[type="text"] {
-  width: 100%;
-  padding: 14px 16px;
-  font-size: 24px;
-  text-align: center;
-  letter-spacing: 8px;
-  background: rgba(0,0,0,0.3);
-  border: 1px solid rgba(255,255,255,0.12);
-  border-radius: 12px;
-  color: #f1f5f9;
-  font-family: "SF Mono", Menlo, Consolas, monospace;
-  outline: none;
-  transition: border-color 0.2s, box-shadow 0.2s;
+  width: 100%; padding: 14px 12px; font-size: clamp(22px, 6.5vw, 26px);
+  text-align: center; letter-spacing: 0.42em; text-indent: 0.42em;
+  background: var(--input-bg); border: 1px solid var(--input-border); border-radius: 15px;
+  color: var(--text-1); font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-variant-numeric: tabular-nums; outline: none;
+  transition: border-color 0.2s, box-shadow 0.2s, background-color 0.2s;
 }
-input[type="text"]:focus {
-  border-color: #38bdf8;
-  box-shadow: 0 0 0 3px rgba(56,189,248,0.2);
-}
+input[type="text"]::placeholder { color: var(--text-3); opacity: 0.55; }
+input[type="text"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3.5px var(--accent-ring); }
 button {
-  width: 100%;
-  margin-top: 18px;
-  padding: 13px;
-  font-size: 15px;
-  font-weight: 600;
-  color: #0f172a;
-  background: linear-gradient(90deg, #38bdf8, #818cf8);
-  border: none;
-  border-radius: 12px;
-  cursor: pointer;
-  transition: opacity 0.2s, transform 0.1s;
+  width: 100%; margin-top: 16px; padding: 13px 16px; font-size: 15px; font-weight: 700;
+  color: var(--btn-fg); background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border: none; border-radius: 15px; cursor: pointer;
+  box-shadow: 0 10px 24px -8px var(--accent-ring);
+  transition: opacity 0.18s, transform 0.12s;
 }
-button:hover { opacity: 0.9; }
-button:active { transform: scale(0.98); }
-button:disabled { opacity: 0.5; cursor: not-allowed; }
+button:hover { opacity: 0.93; }
+button:active { transform: scale(0.985); }
+button:disabled { opacity: 0.52; cursor: not-allowed; transform: none; }
 .msg {
-  margin-top: 16px;
-  padding: 12px 14px;
-  border-radius: 10px;
-  font-size: 13px;
-  line-height: 1.5;
-  display: none;
+  margin-top: 14px; padding: 11px 13px; border-radius: 13px;
+  font-size: 13px; line-height: 1.5; display: none; align-items: flex-start; gap: 8px;
 }
-.msg.show { display: block; }
-.msg.error {
-  background: rgba(239,68,68,0.1);
-  border: 1px solid rgba(239,68,68,0.3);
-  color: #fca5a5;
-}
-.msg.info {
-  background: rgba(56,189,248,0.1);
-  border: 1px solid rgba(56,189,248,0.3);
-  color: #7dd3fc;
-}
-.footer {
-  margin-top: 24px;
-  font-size: 11px;
-  color: #64748b;
-  text-align: center;
-  line-height: 1.5;
+.msg.show { display: flex; }
+.msg svg { width: 16px; height: 16px; flex-shrink: 0; margin-top: 2px; }
+.msg.error { background: var(--err-bg); border: 1px solid var(--err-bd); color: var(--err-fg); }
+.msg.info { background: var(--ok-bg); border: 1px solid var(--ok-bd); color: var(--ok-fg); }
+.footer { margin-top: 20px; font-size: 11.5px; color: var(--text-3); text-align: center; line-height: 1.55; }
+@media (max-width: 360px) {
+  .card { padding: 22px 18px 20px; border-radius: 22px; }
+  input[type="text"] { letter-spacing: 0.30em; text-indent: 0.30em; }
 }
 </style>
 </head>
 <body>
 <div class="card">
-  <h1>🔐 HNC 远程访问配对</h1>
+  <div class="brand-head">
+    <span class="orb-icon" aria-hidden="true">
+      <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+        <rect x="4" y="11" width="16" height="10" rx="3" fill="currentColor" fill-opacity="0.14"/>
+        <path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+        <circle cx="12" cy="16" r="1.4" fill="currentColor"/>
+      </svg>
+    </span>
+    <div>
+      <h1>HNC 远程访问配对</h1>
+      <div class="badge-sub">Hotspot Network Control · TLS Session Auth</div>
+    </div>
+  </div>
+
   <p class="sub">
-    在手机本机 WebUI 点击 <b style="color:#cbd5e1">"生成配对码"</b>,<br>
-    然后把屏幕上显示的 6 位数字输入下方(120 秒有效)
+    请在手机本机管理界面点击 <strong>「生成配对码」</strong>，随后在下方输入屏幕显示的 6 位数字配对码。
   </p>
 
   <form id="pair-form">
-    <label for="pin">配对码 PIN</label>
-    <input
-      id="pin"
-      name="pin"
-      type="text"
-      inputmode="numeric"
-      pattern="[0-9]{6}"
-      maxlength="6"
-      autocomplete="off"
-      placeholder="······"
-      required
-      autofocus
-    >
+    <label for="pin">
+      <span>6 位数字配对码</span>
+      <span class="ttl">120 秒内有效</span>
+    </label>
+    <input id="pin" name="pin" type="text" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="000000" required autofocus>
     <button type="submit" id="submit-btn">验证并登入</button>
   </form>
 
-  <div class="msg" id="msg"></div>
+  <div class="msg" id="msg" role="status" aria-live="polite"></div>
 
   <p class="footer">
-    此页面仅用于首次配对。配对成功后浏览器会自动跳转到 Dashboard。<br>
-    如果 PIN 过期请回本机重新生成。
+    首次配对验证通过后将自动签发安全会话并跳转至控制台；若配对码过期，请返回手机本机重新生成。
   </p>
 </div>
 
 <script>
 (function(){
+  try {
+    var r = document.documentElement;
+    var t = localStorage.getItem('hnc6.theme');
+    var s = localStorage.getItem('hnc6.style');
+    var gm = localStorage.getItem('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid';
+    if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t);
+    if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); }
+    else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber');
+  } catch (_) {}
+
   var form = document.getElementById('pair-form');
   var pinInput = document.getElementById('pin');
   var btn = document.getElementById('submit-btn');
   var msg = document.getElementById('msg');
 
-  // 只允许数字
+  var ICONS = {
+    info: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="m9 12 2 2 4-4"/></svg>',
+    error: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4.5"/><circle cx="12" cy="16" r="0.6" fill="currentColor"/></svg>'
+  };
+
   pinInput.addEventListener('input', function(e){
-    e.target.value = e.target.value.replace(/[^0-9]/g, '').slice(0,6);
+    e.target.value = e.target.value.replace(/[^0-9]/g, '').slice(0, 6);
   });
 
-  function showMsg(kind, text) {
+  function showMsg(kind, text, boldPart, tailText) {
     msg.className = 'msg show ' + kind;
-    msg.textContent = text;
+    msg.innerHTML = ICONS[kind === 'info' ? 'info' : 'error'] + '<span class="msg-tx"></span>';
+    var tx = msg.querySelector('.msg-tx');
+    if (boldPart) {
+      tx.appendChild(document.createTextNode(text));
+      var b = document.createElement('strong');
+      b.textContent = boldPart;
+      tx.appendChild(b);
+      if (tailText) tx.appendChild(document.createTextNode(tailText));
+    } else {
+      tx.textContent = text;
+    }
   }
 
-  /* v4.0 Patch 2.d: ?prefill=XXXXXX 自动填充 PIN + 自动提交
-   * 主人本机点"复制快捷链接"→ 通过消息 app 发给远端 → 远端点开就自动登录
-   * 格式校验: 必须 6 位数字,其它视为手输模式不自动填 */
   function getPrefillPin(){
     try {
       var m = window.location.search.match(/[?&]prefill=([0-9]{6})(?:&|$)/);
@@ -169,33 +253,31 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
     } catch(e){ return null; }
   }
   var prefillPin = getPrefillPin();
-  if(prefillPin){
+  if (prefillPin) {
     pinInput.value = prefillPin;
-    // 清 URL 里的 prefill (防止返回/刷新/分享时 PIN 暴露)
     try {
       var cleanUrl = window.location.pathname + window.location.hash;
       history.replaceState(null, '', cleanUrl);
     } catch(e){}
-    // 自动提交(给用户 0.5 秒看一眼"正在自动登录")
-    showMsg('info', '检测到配对链接,正在自动登录…');
+    showMsg('info', '已识别快捷配对链接，正在自动验证登入…');
     setTimeout(function(){
-      // 触发 submit 走下面的 submit handler
-      if(form.requestSubmit) form.requestSubmit();
-      else form.dispatchEvent(new Event('submit', {cancelable:true, bubbles:true}));
-    }, 500);
+      if (form.requestSubmit) form.requestSubmit();
+      else form.dispatchEvent(new Event('submit', {cancelable: true, bubbles: true}));
+    }, 450);
   }
 
   form.addEventListener('submit', async function(e) {
     e.preventDefault();
     var pin = pinInput.value.trim();
     if (pin.length !== 6) {
-      showMsg('error', '请输入 6 位数字 PIN');
+      showMsg('error', '请输入完整的 6 位数字配对码');
       return;
     }
 
     btn.disabled = true;
-    btn.textContent = '验证中…';
+    btn.textContent = '正在验证…';
     msg.className = 'msg';
+    var pairedOk = false;
 
     try {
       var body = new URLSearchParams();
@@ -207,52 +289,55 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
         redirect: 'manual'
       });
 
-      // 302: 配对成功
       if (resp.type === 'opaqueredirect' || (resp.status >= 300 && resp.status < 400)) {
-        showMsg('info', '✓ 配对成功,正在跳转…');
-        setTimeout(function(){ window.location.href = '/'; }, 400);
+        pairedOk = true;
+        btn.textContent = '验证通过，正在进入…';
+        showMsg('info', '配对验证通过，正在进入管理控制台…');
+        setTimeout(function(){ window.location.href = '/'; }, 380);
         return;
       }
 
-      // 错误响应
       var data = {};
       try { data = await resp.json(); } catch(_) {}
-      var errMsg = data.error || '未知错误 (HTTP ' + resp.status + ')';
+      var errMsg = data.error || ('请求异常 (HTTP ' + resp.status + ')');
 
       if (resp.status === 429) {
-        var sec = data.locked_for_sec || parseInt(resp.headers.get('Retry-After')) || 600;
+        var sec = data.locked_for_sec || parseInt(resp.headers.get('Retry-After'), 10) || 600;
         var mins = Math.ceil(sec / 60);
-        showMsg('error', '⛔ 尝试次数过多,请 ' + mins + ' 分钟后重试');
+        showMsg('error', '验证尝试过于频繁，请等待约 ' + mins + ' 分钟后重试');
+      } else if (errMsg.indexOf('invalidated') >= 0) {
+        showMsg('error', '该配对码累计输错次数超限已自动作废，请回手机本机重新生成');
       } else if (resp.status === 410 || errMsg.indexOf('expired') >= 0) {
-        showMsg('error', '⏱ 配对码已过期,请回本机重新生成');
+        showMsg('error', '配对码已超过 120 秒有效期，请回手机本机重新生成');
       } else if (errMsg.indexOf('no active') >= 0) {
-        showMsg('error', '当前没有活动配对请求,请先在本机点"生成配对码"');
+        showMsg('error', '当前无活动配对会话，请先在手机本机点击「生成配对码」');
       } else if (errMsg.indexOf('wrong pin') >= 0) {
-        // v4.0 Patch 2.d: 显示剩余次数
         var rem = data.attempts_remaining;
         if (typeof rem === 'number' && rem >= 0) {
           if (rem === 0) {
-            showMsg('error', 'PIN 错误,已达到尝试上限');
+            showMsg('error', '配对码不匹配，已达当前窗口尝试上限');
           } else if (rem === 1) {
-            showMsg('error', '⚠ PIN 错误,<b>最后 1 次机会</b>,再错就锁 10 分钟');
+            showMsg('error', '配对码错误，仅剩 ', '最后 1 次机会', '，再次错误将临时锁定 10 分钟');
           } else {
-            showMsg('error', 'PIN 错误,还有 ' + rem + ' 次机会');
+            showMsg('error', '配对码错误，当前还剩 ' + rem + ' 次尝试机会');
           }
         } else {
-          showMsg('error', 'PIN 错误,请检查后重试');
+          showMsg('error', '配对码错误，请核对本机屏幕上的 6 位数字后重试');
         }
       } else if (errMsg.indexOf('bad pin format') >= 0) {
-        showMsg('error', 'PIN 格式错误(应为 6 位数字)');
+        showMsg('error', '配对码格式无效，请输入 6 位纯数字');
       } else {
         showMsg('error', errMsg);
       }
     } catch(err) {
-      showMsg('error', '网络错误: ' + (err.message || err));
+      showMsg('error', '网络连接失败：' + (err.message || err));
     } finally {
-      btn.disabled = false;
-      btn.textContent = '验证并登入';
-      pinInput.focus();
-      pinInput.select();
+      if (!pairedOk) {
+        btn.disabled = false;
+        btn.textContent = '验证并登入';
+        pinInput.focus();
+        pinInput.select();
+      }
     }
   });
 })();

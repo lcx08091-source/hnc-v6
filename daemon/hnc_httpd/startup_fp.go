@@ -104,12 +104,14 @@ func startupToken(sni string) string {
 // ─── 学习表 ───────────────────────────────────────────────────────────
 
 type startupApp struct {
-	AppID  string             `json:"app_id"`
-	Name   string             `json:"name,omitempty"`
-	Starts float64            `json:"starts"`
-	Tokens map[string]float64 `json:"tokens"`
-	Last   int64              `json:"last"`
-	Upd    int64              `json:"upd"` // 计数衰减到的时刻
+	AppID        string             `json:"app_id"`
+	Name         string             `json:"name,omitempty"`
+	Starts       float64            `json:"starts"`
+	Tokens       map[string]float64 `json:"tokens"`
+	Last         int64              `json:"last"`
+	Upd          int64              `json:"upd"` // 计数衰减到的时刻
+	PersonalFast bool               `json:"personal_fast,omitempty"`
+	PersonalExp  int64              `json:"personal_exp,omitempty"`
 }
 
 func startupDecay(from, to int64) float64 {
@@ -360,6 +362,7 @@ func buildStartupModel(t *startupTable, imported map[string]startupImported, now
 		id, name string
 		starts   float64
 		freq     map[string]float64
+		raw      *startupApp
 	}
 	var cands []cand
 	ids := make([]string, 0, len(t.apps))
@@ -383,7 +386,7 @@ func buildStartupModel(t *startupTable, imported map[string]startupImported, now
 				fr[tok] = math.Min(v, 1)
 			}
 		}
-		cands = append(cands, cand{id, a.Name, starts, fr})
+		cands = append(cands, cand{id, a.Name, starts, fr, a})
 	}
 	impIDs := make([]string, 0, len(imported))
 	for id := range imported {
@@ -400,7 +403,7 @@ func buildStartupModel(t *startupTable, imported map[string]startupImported, now
 				fr[tok] = math.Min(v, 1)
 			}
 		}
-		cands = append(cands, cand{id, im.Name, im.Starts, fr})
+		cands = append(cands, cand{id, im.Name, im.Starts, fr, nil})
 	}
 	shared := map[string]int{}
 	for _, c := range cands {
@@ -417,7 +420,8 @@ func buildStartupModel(t *startupTable, imported map[string]startupImported, now
 				ma.sumF += v
 			}
 		}
-		if ma.starts < startupMinStarts || len(ma.feat) < startupMinFeat {
+		if (ma.starts < startupMinStarts || len(ma.feat) < startupMinFeat) &&
+			!startupAppUsableFast(c.raw, ma, shared, nil, now) {
 			continue
 		}
 		idx := len(m.apps)

@@ -37,9 +37,15 @@ if command -v set_perm_recursive >/dev/null 2>&1; then
     [ -f "$MODPATH/daemon/hnc_httpd/hnc_httpd" ] && set_perm "$MODPATH/daemon/hnc_httpd/hnc_httpd" 0 0 0755
     set_perm "$MODPATH/service.sh" 0 0 0755
     set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
+    [ -f "$MODPATH/uninstall.sh" ] && set_perm "$MODPATH/uninstall.sh" 0 0 0755
+    [ -f "$MODPATH/action.sh" ] && set_perm "$MODPATH/action.sh" 0 0 0755
 else
     chmod -R 755 "$MODPATH/bin" 2>/dev/null
-    chmod 755 "$MODPATH/daemon/hnc_httpd/hnc_httpd" "$MODPATH/service.sh" "$MODPATH/post-fs-data.sh" 2>/dev/null
+    for _s in "$MODPATH/daemon/hnc_httpd/hnc_httpd" "$MODPATH/service.sh" \
+              "$MODPATH/post-fs-data.sh" "$MODPATH/uninstall.sh" "$MODPATH/action.sh"; do
+        [ -f "$_s" ] && chmod 755 "$_s" 2>/dev/null
+    done
+    unset _s
 fi
 # 数据文件不需要 +x(bin/ 下的 .o / .dex / 标记文件)
 for _f in "$MODPATH/bin/hnc_clsact.o" "$MODPATH/bin/hnc_applabel.dex" "$MODPATH/bin/hnc_pkg_abi"; do

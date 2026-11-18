@@ -48,11 +48,15 @@ rm -rf "$HNC_DIR/run/hnc_json.lock" "$HNC_DIR/run/json.lock" 2>/dev/null
 #   - tc_mq_child_* / tc_qos_fallback / tc_ifindex_*: 上次建树方式与接口 ifindex,
 #     跨重启残留会误导 QoS 缩放与 watchdog 的接口重建判断。
 #   - v6/(v6_sync 快照)、iface.cache: 上次会话的地址/接口,开机后必须重新探测。
-rm -rf "$HNC_DIR/run/lock" "$HNC_DIR/run/tc_action.lock" "$HNC_DIR/run/v6" 2>/dev/null
+rm -rf "$HNC_DIR/run/lock" "$HNC_DIR/run/tc_action.lock" "$HNC_DIR/run/v6" \
+       "$HNC_DIR/run/stats_v6.lock" "$HNC_DIR/run/app_limits.lock" \
+       "$HNC_DIR/run/app_qos.lock" "$HNC_DIR/run/connblock.lock" 2>/dev/null
 rm -rf "$HNC_DIR"/run/tc_action.lock.stale.* 2>/dev/null
 rm -f "$HNC_DIR"/run/tc_root_owned_* "$HNC_DIR"/run/tc_mq_child_* "$HNC_DIR"/run/tc_ifindex_* \
       "$HNC_DIR/run/tc_qos_fallback" "$HNC_DIR/run/iface.cache" \
-      "$HNC_DIR/run/tc_restore_pending" 2>/dev/null
+      "$HNC_DIR/run/tc_restore_pending" "$HNC_DIR/run/stats_v6_map" \
+      "$HNC_DIR/run/stats_v6_retired" "$HNC_DIR/run/app_limits.full.sig" \
+      "$HNC_DIR/run/app_qos.sig" "$HNC_DIR/run/app_qos.state" 2>/dev/null
 # v5.26 T2: dpid 守护者选择是本次开机的探测结果。上次会话的 choice(尤其 sentinel
 # 救命改写的 direct)不能带进新开机: Go 看门狗比 service.sh 落盘 choice 更早启动,
 # 读到旧 direct 会直拉 dpid, 随后 service.sh 又起 launcher → 双 dpid。缺失时看门狗按旧行为。
@@ -135,7 +139,7 @@ if [ -f "$HNC_DIR/data/config.json" ] && [ -f "$HNC_DIR/data/rules.json" ]; then
         # rc3.1.13.1: grep -E 兼容 pretty-printed JSON (跨行) 和字符串值 (true/"true"/True/TRUE)
         OLD_AUTH=$(grep -oE '"auth_required"[[:space:]]*:[[:space:]]*"?(true|false|True|TRUE|False|FALSE)"?' \
                    "$HNC_DIR/data/config.json" 2>/dev/null \
-                   | grep -oE '(true|false|True|TRUE|False|FALSE)' | tr 'A-Z' 'a-z' | head -1)
+                   | grep -oE '(true|false|True|TRUE|False|FALSE)' | tr 'A-Z' 'a-z' | head -n 1)
         if [ -n "$OLD_AUTH" ]; then
             JSON_SET="$MODDIR/bin/json_set.sh"
             [ -f "$JSON_SET" ] || JSON_SET="$HNC_DIR/bin/json_set.sh"

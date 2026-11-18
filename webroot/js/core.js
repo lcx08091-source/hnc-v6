@@ -16,15 +16,21 @@ function num(v, d) { var n = parseFloat(v); return isFinite(n) ? n : (d || 0); }
 function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
 function trim0(s) { return String(s).replace(/(\.\d*?[1-9])0+$/, '$1').replace(/\.0+$/, ''); }
 function pad2(n) { return String(n).padStart(2, '0'); }
+var _memLS = { 'hnc6.style': 'liquid', 'hnc6.theme': 'light', 'hnc6.glass_tint': '38' };
 var LS = {
-  get: function (k, d) { try { var v = localStorage.getItem(k); return v == null ? d : v; } catch (_) { return d; } },
-  set: function (k, v) { try { localStorage.setItem(k, v); } catch (_) {} },
-  del: function (k) { try { localStorage.removeItem(k); } catch (_) {} }
+  get: function (k, d) {
+    try { var v = localStorage.getItem(k); if (v != null) return v; } catch (_) { if (Object.prototype.hasOwnProperty.call(_memLS, k)) return _memLS[k]; }
+    return (typeof window !== 'undefined' && window.__HNC_MOCK_META && Object.prototype.hasOwnProperty.call(_memLS, k)) ? _memLS[k] : d;
+  },
+  set: function (k, v) { _memLS[k] = String(v); try { localStorage.setItem(k, v); } catch (_) {} },
+  del: function (k) { delete _memLS[k]; try { localStorage.removeItem(k); } catch (_) {} }
 };
+var _memSS = {};
 var SS = {
-  get: function (k) { try { return sessionStorage.getItem(k); } catch (_) { return null; } },
-  set: function (k, v) { try { sessionStorage.setItem(k, v); } catch (_) {} }
+  get: function (k) { try { var v = sessionStorage.getItem(k); if (v != null) return v; } catch (_) {} return _memSS[k] || null; },
+  set: function (k, v) { _memSS[k] = String(v); try { sessionStorage.setItem(k, v); } catch (_) {} }
 };
+
 var wideMQ = matchMedia('(min-width: 900px)');
 function wide() { return wideMQ.matches; }
 var calm = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -94,13 +100,32 @@ function seg(id, opts, cur, cls) {
 function placeSegs(root) {
   $$('.seg', root || document).forEach(function (s) {
     var on = $('button.on', s), th = $('.thumb', s); if (!on || !on.offsetWidth) { if (th) th.style.width = '0px'; return; }
-    var w = on.offsetWidth + 'px', tf = 'translateX(' + on.offsetLeft + 'px)';
+    var nx = on.offsetLeft, nw = on.offsetWidth, w = nw + 'px', tf = 'translate3d(' + nx + 'px,0,0)';
+    var prevX = th._lx;
     if (th.style.width === w && th.style.transform === tf) return;
-    // 新渲染出来的分段控件第一次定位不走过渡 —— 此前每次重绘滑块都从最左边滑过来(一页十几个同时滑)
-    var first = !th.style.transform || th.style.width === '0px';
-    if (first) th.style.transition = 'none';
+    var first = prevX == null || !th.style.transform || th.style.width === '0px';
+    th._lx = nx;
+    if (first) {
+      th.style.transition = 'none';
+      th.style.width = w; th.style.transform = tf;
+      void th.offsetWidth; th.style.transition = '';
+      return;
+    }
+    var dx = nx - prevX, adx = Math.abs(dx);
+    s.style.setProperty('--seg-dir', dx >= 0 ? '1' : '-1');
     th.style.width = w; th.style.transform = tf;
-    if (first) { void th.offsetWidth; th.style.transition = ''; }
+    if (adx > 6 && th.animate && typeof motionOn === 'function' && motionOn()) {
+      var stretch = Math.min(1.12, 1 + adx / 420), squash = Math.max(0.91, 1 - (stretch - 1) * 0.55);
+      var midX = prevX + dx * 0.52;
+      try {
+        th.animate([
+          { transform: 'translate3d(' + prevX + 'px,0,0) scale(1,1)' },
+          { transform: 'translate3d(' + midX.toFixed(1) + 'px,0,0) scale(' + stretch.toFixed(3) + ',' + squash.toFixed(3) + ')', offset: 0.42 },
+          { transform: 'translate3d(' + (nx + (dx > 0 ? 1.5 : -1.5)).toFixed(1) + 'px,0,0) scale(0.985,1.015)', offset: 0.82 },
+          { transform: tf + ' scale(1,1)' }
+        ], { duration: 340, easing: 'cubic-bezier(.22,1,.36,1)' });
+      } catch (_) {}
+    }
   });
 }
 
@@ -141,7 +166,10 @@ function morphAttrs(a, b) {
     a.setAttribute(at.name, at.value);
     if (a.nodeName === 'INPUT' && at.name === 'value' && a !== document.activeElement) a.value = at.value;
   }
-  if (a.nodeName === 'INPUT' && (a.type === 'checkbox' || a.type === 'radio')) { var ck = b.hasAttribute('checked'); if (a.defaultChecked !== ck) a.checked = ck; }
+  if (a.nodeName === 'INPUT' && (a.type === 'checkbox' || a.type === 'radio')) {
+    var ck = b.hasAttribute('checked');
+    if (a.defaultChecked !== ck) { if (a !== document.activeElement) a.checked = ck; a.defaultChecked = ck; }
+  }
 }
 function morphNode(a, b) {
   if (a.nodeType !== 1) { if (a.nodeValue !== b.nodeValue) a.nodeValue = b.nodeValue; return a; }
@@ -251,12 +279,20 @@ function bridgeReq(method, path, body, opt, retried) {
 function fetchReq(method, path, body, opt) {
   opt = opt || {};
   var ctrl = typeof AbortController !== 'undefined' ? new AbortController() : null;
-  var tm = setTimeout(function () { try { ctrl && ctrl.abort(); } catch (_) {} }, opt.timeout || 9000);
+  var tm, timedOut = false;
+  var timeout = new Promise(function (resolve, reject) {
+    tm = setTimeout(function () {
+      timedOut = true;
+      try { ctrl && ctrl.abort(); } catch (_) {}
+      reject(HttpError('请求超时', 0));
+    }, opt.timeout || 9000);
+  });
   var init = { method: method, credentials: 'same-origin', cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, signal: ctrl ? ctrl.signal : undefined };
   if (method === 'POST') { init.headers['Content-Type'] = 'application/json'; init.headers['X-HNC-CSRF'] = '1'; init.body = JSON.stringify(body || {}); }
-  return fetch(path, init).then(function (resp) {
-    clearTimeout(tm);
+  // 超时覆盖响应正文; Promise.race 也让没有 AbortController 的旧 WebView 能释放请求队列。
+  var response = Promise.resolve().then(function () { return fetch(path, init); }).then(function (resp) {
     return resp.text().then(function (txt) {
+      if (timedOut) throw HttpError('请求超时', 0);
       if (resp.status === 401) {
         if (location.pathname.indexOf('/pair') !== 0) setTimeout(function () { location.href = '/pair'; }, 600);
         throw HttpError('需要先配对这台设备', 401);
@@ -265,7 +301,12 @@ function fetchReq(method, path, body, opt) {
       if (!resp.ok) throw HttpError((obj.error || ('HTTP ' + resp.status)) + (obj.detail ? ' · ' + obj.detail : ''), resp.status, obj);
       return obj;
     });
-  }, function (e) { clearTimeout(tm); throw HttpError(e && e.name === 'AbortError' ? '请求超时' : '网络错误 · ' + (e && e.message || e), 0); });
+  });
+  return Promise.race([response, timeout]).then(function (obj) { clearTimeout(tm); return obj; }, function (e) {
+    clearTimeout(tm);
+    if (e && e.status !== undefined) throw e;
+    throw HttpError(e && e.name === 'AbortError' ? '请求超时' : '网络错误 · ' + (e && e.message || e), 0);
+  });
 }
 function req(method, path, body, opt) { return KSU ? bridgeReq(method, path, body, opt) : fetchReq(method, path, body, opt); }
 function qs(params) {
@@ -288,8 +329,10 @@ var api = {
   action: function (name, params, opt) {
     var p = {}; params = params || {};
     Object.keys(params).forEach(function (k) { if (params[k] !== undefined && params[k] !== null) p[k] = String(params[k]); });
+    var slow = /^(debug_bundle|cleanup_all|dpi_rules_update|capture_record|selfcheck_run|selfcheck_export|compat_report|self_studio_start|self_studio_distill|self_studio_export|dpi_distill_now|flow_cls_retrain|dpi_rulepack_export|device_merge|encdns_set|clsact_mode_set)$/.test(name);
+    var defOpt = slow ? { timeout: 35000, maxTime: 30 } : { timeout: 12000, maxTime: 10 };
     var run = function () {
-      return req('POST', '/api/action', { action: name, params: p }, Object.assign({ timeout: 12000, maxTime: 10 }, opt)).then(function (o) {
+      return req('POST', '/api/action', { action: name, params: p }, Object.assign(defOpt, opt)).then(function (o) {
         if (!o || !o.ok) { var e = HttpError((o && o.error) || '操作失败', 200, o); e.detail = o && o.detail; throw e; }
         return o;
       });
@@ -337,7 +380,7 @@ var S = {
   filter: LS.get('hnc_device_filter', 'recent'), q: '', batch: false, picked: {}, open: {}, sel: null, busy: {},
   refreshMode: LS.get('hnc.refresh-mode', 'balanced'),
   statsRange: 'today', aseg: 'stats', appsSub: 'my',
-  theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', glassTint: clamp(Math.round(num(LS.get('hnc6.glass_tint', '50'), 50)), 0, 100), style: ['apple', 'liquid'].indexOf(LS.get('hnc6.style', 'default')) >= 0 ? LS.get('hnc6.style', 'default') : 'default',
+  theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', glassTint: clamp(Math.round(num(LS.get('hnc6.glass_tint', '50'), 50)), 0, 100), style: (function(){ var sv = LS.get('hnc6.style', 'default'); if (sv === 'apple') sv = 'cyber'; return ['cyber', 'liquid'].indexOf(sv) >= 0 ? sv : 'default'; })(),
   dpi: null, probe: null, dpiHist: {}, dpiDays: 1, dpiFilter: 'all', dpiSpark: { packets: [], dns_events: [], tls_events: [], kernel_drops: [] },
   self: null, selfCfg: {}, logFile: 'combined'
 };
@@ -378,8 +421,74 @@ var IFM_T = { override: '手动指定', tethering: '系统共享服务', tetherc
 function offloadRisk() { return (S.offload.detail === 'ACTIVE' || S.offload.detail === 'CAPABLE') && !(S.offload.guard && S.offload.guard.fallback_active); }
 
 /* ═════════════════════ 数据加载 ═════════════════════ */
+/* HNC v5.36.0 Apple SF Symbols / Lucide Duotone Vector SVG System (Zero Bitmap · Zero Phone Emoji) */
+var HNC_DEV_SVGS = {
+  phone: '<rect x="6" y="2.5" width="12" height="19" rx="3" fill="currentColor" fill-opacity=".14"/><rect x="6" y="2.5" width="12" height="19" rx="3"/><path d="M10.5 5.5h3"/><path d="M10 18.5h4"/>',
+  tablet: '<rect x="4" y="2.5" width="16" height="19" rx="2.8" fill="currentColor" fill-opacity=".14"/><rect x="4" y="2.5" width="16" height="19" rx="2.8"/><circle cx="12" cy="5.2" r=".75" fill="currentColor" stroke="none"/><path d="M9.5 18.5h5"/>',
+  pc: '<path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5V16H4V5.5Z" fill="currentColor" fill-opacity=".14"/><path d="M4 5.5A1.5 1.5 0 0 1 5.5 4h13A1.5 1.5 0 0 1 20 5.5V16H4V5.5Z"/><path d="M2 16h20l-1.2 2.4a1.5 1.5 0 0 1-1.34.83H4.54a1.5 1.5 0 0 1-1.34-.83L2 16Z"/><path d="M10 16h4"/>',
+  tv: '<rect x="2.5" y="4" width="19" height="12.5" rx="2.2" fill="currentColor" fill-opacity=".14"/><rect x="2.5" y="4" width="19" height="12.5" rx="2.2"/><path d="M8 20h8"/><path d="M12 16.5V20"/>',
+  console: '<path d="M6.2 6h11.6a4.2 4.2 0 0 1 4.12 5.02l-.96 4.8a3.2 3.2 0 0 1-5.6 1.42L13.8 15.3h-3.6l-1.56 1.94a3.2 3.2 0 0 1-5.6-1.42l-.96-4.8A4.2 4.2 0 0 1 6.2 6Z" fill="currentColor" fill-opacity=".14"/><path d="M6.2 6h11.6a4.2 4.2 0 0 1 4.12 5.02l-.96 4.8a3.2 3.2 0 0 1-5.6 1.42L13.8 15.3h-3.6l-1.56 1.94a3.2 3.2 0 0 1-5.6-1.42l-.96-4.8A4.2 4.2 0 0 1 6.2 6Z"/><path d="M6.5 11h3M8 9.5v3"/><circle cx="15.5" cy="10" r=".85" fill="currentColor" stroke="none"/><circle cx="17.5" cy="12" r=".85" fill="currentColor" stroke="none"/>',
+  iot: '<rect x="6" y="3" width="12" height="18" rx="5" fill="currentColor" fill-opacity=".14"/><rect x="6" y="3" width="12" height="18" rx="5"/><circle cx="12" cy="8.5" r="2"/><path d="M9.5 15.5a3.5 3.5 0 0 1 5 0"/><circle cx="12" cy="17.5" r=".75" fill="currentColor" stroke="none"/>',
+  watch: '<rect x="6.5" y="6" width="11" height="12" rx="3.2" fill="currentColor" fill-opacity=".14"/><path d="M9 6 9.8 2.5h4.4L15 6"/><path d="m9 18 .8 3.5h4.4L15 18"/><rect x="6.5" y="6" width="11" height="12" rx="3.2"/><path d="M17.5 10v2"/><path d="M12 9.5V12l1.8 1.2"/>',
+  router: '<rect x="3" y="13.5" width="18" height="6.5" rx="2.2" fill="currentColor" fill-opacity=".14"/><rect x="3" y="13.5" width="18" height="6.5" rx="2.2"/><path d="M7.5 13.5 6 6.5"/><path d="M16.5 13.5 18 6.5"/><path d="M9.5 8.5a3.8 3.8 0 0 1 5 0"/><circle cx="7.5" cy="16.8" r=".85" fill="currentColor" stroke="none"/><circle cx="11" cy="16.8" r=".85" fill="currentColor" stroke="none"/><path d="M15 16.8h2.5"/>'
+};
+function devSvg(k, cls) {
+  var body = HNC_DEV_SVGS[k] || HNC_DEV_SVGS.router;
+  return '<svg class="dev-svg' + (cls ? ' ' + cls : '') + '" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + body + '</svg>';
+}
+
+var HNC_BENTO_SVGS = {
+  sqm: '<path d="M13.2 2.5 4.8 13.2h6.1l-.9 8.3 8.4-10.7h-6.1l.9-8.3Z" fill="currentColor" fill-opacity=".22"/><path d="M13.2 2.5 4.8 13.2h6.1l-.9 8.3 8.4-10.7h-6.1l.9-8.3Z"/>',
+  appqos: '<polygon points="12 2.8 2.8 7.5 12 12.2 21.2 7.5 12 2.8" fill="currentColor" fill-opacity=".24"/><polygon points="12 2.8 2.8 7.5 12 12.2 21.2 7.5 12 2.8"/><path d="m2.8 12.2 9.2 4.7 9.2-4.7"/><path d="m2.8 16.8 9.2 4.7 9.2-4.7"/>',
+  wl: '<path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".20"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/><path d="m8.8 12.1 2.2 2.2 4.4-4.6"/>',
+  conns: '<circle cx="12" cy="12" r="9" fill="currentColor" fill-opacity=".18"/><circle cx="12" cy="12" r="9"/><path d="M12 12 18.2 5.8"/><path d="M16.2 12a4.2 4.2 0 1 1-4.2-4.2"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/>'
+};
+function bentoSvg(k) {
+  var body = HNC_BENTO_SVGS[k] || HNC_BENTO_SVGS.conns;
+  return '<svg class="cc-svg" width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + body + '</svg>';
+}
+
+var HNC_STUDIO_SVGS = {
+  prism: '<polygon points="11.2 3.2 3.6 18.8 18.8 18.8" fill="var(--orb-c1,var(--blue))" fill-opacity=".16"/><polygon points="11.2 3.2 11.2 18.8 18.8 18.8" fill="var(--orb-c2,var(--purple))" fill-opacity=".20"/><path d="M1.8 12.2h4.7" stroke="var(--orb-c1,var(--blue))" stroke-width="1.85"/><path d="M15.1 9.8 20.8 6.8" stroke="var(--orb-c1,var(--blue))" stroke-width="1.65"/><path d="M16.3 12.6h4.9" stroke="var(--orb-c2,var(--purple))" stroke-width="1.65"/><path d="M17.3 15.4 21 17.4" stroke="var(--orb-c3,var(--green))" stroke-width="1.65"/><circle cx="21.3" cy="6.5" r="1.2" fill="var(--orb-c1,var(--blue))" stroke="none"/><circle cx="21.7" cy="12.6" r="1.2" fill="var(--orb-c2,var(--purple))" stroke="none"/><circle cx="21.4" cy="17.6" r="1.2" fill="var(--orb-c3,var(--green))" stroke="none"/><polygon points="11.2 3.2 3.6 18.8 18.8 18.8" stroke="var(--orb-c1,var(--blue))" stroke-width="1.75"/><path d="m6.5 12.2 8.6-2.4M6.5 12.2l9.8.4" stroke="var(--orb-c2,var(--purple))" stroke-width="1.3" stroke-opacity=".8"/>',
+  discover: '<circle cx="12" cy="12" r="8.8" fill="var(--orb-c1,var(--blue))" fill-opacity=".13"/><polygon points="12 4.6 5.6 16.8 18.4 16.8" fill="var(--orb-c2,var(--purple))" fill-opacity=".18"/><polygon points="12 4.6 5.6 16.8 18.4 16.8" stroke="var(--orb-c1,var(--blue))" stroke-width="1.75"/><path d="M12 4.6v7.6m0 0-6.4 4.6m6.4-4.6 6.4 4.6" stroke="var(--orb-c2,var(--purple))" stroke-width="1.35" stroke-opacity=".82"/><circle cx="12" cy="12.2" r="1.6" fill="var(--orb-c1,var(--blue))" stroke="none"/><path d="m18.6 4.2.7 1.6 1.6.7-1.6.7-.7 1.6-.7-1.6-1.6-.7 1.6-.7.7-1.6Z" fill="var(--orb-c3,var(--green))" stroke="none"/>'
+};
+function studioSvg(k) {
+  var body = HNC_STUDIO_SVGS[k] || HNC_STUDIO_SVGS.prism;
+  return '<svg class="studio-svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + body + '</svg>';
+}
+
+var HNC_UI_SVGS = {
+  mic: '<rect x="9" y="2.5" width="6" height="11" rx="3" fill="currentColor" fill-opacity=".18"/><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 10.5a6.5 6.5 0 0 0 13 0M12 17v4m-3 0h6"/>',
+  music: '<circle cx="8" cy="18" r="3" fill="currentColor" fill-opacity=".20"/><circle cx="18" cy="16" r="3" fill="currentColor" fill-opacity=".20"/><path d="M11 18V6l10-2v12"/><circle cx="8" cy="18" r="3"/><circle cx="18" cy="16" r="3"/>',
+  phone: '<path d="M22 16.92v3a2 2 0 0 1-2.18 2 19.8 19.8 0 0 1-8.63-3.07 19.5 19.5 0 0 1-6-6A19.8 19.8 0 0 1 2.12 4.18 2 2 0 0 1 4.11 2h3a2 2 0 0 1 2 1.72c.12.96.36 1.9.7 2.81a2 2 0 0 1-.45 2.11L8.09 9.91a16 16 0 0 0 6 6l1.27-1.27a2 2 0 0 1 2.11-.45c.91.34 1.85.58 2.81.7A2 2 0 0 1 22 16.92Z" fill="currentColor" fill-opacity=".18"/>',
+  ban: '<circle cx="12" cy="12" r="9" fill="currentColor" fill-opacity=".14"/><circle cx="12" cy="12" r="9"/><path d="m5.7 5.7 12.6 12.6"/>',
+  warn: '<path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" fill="currentColor" fill-opacity=".16"/><path d="M12 9v4m0 4h.01"/>',
+  check: '<circle cx="12" cy="12" r="9" fill="currentColor" fill-opacity=".16"/><path d="m8.4 12.4 2.3 2.3 4.9-5.1"/>',
+  cross: '<circle cx="12" cy="12" r="9" fill="currentColor" fill-opacity=".15"/><path d="m9.3 9.3 5.4 5.4m0-5.4-5.4 5.4"/>',
+  info: '<circle cx="12" cy="12" r="9" fill="currentColor" fill-opacity=".14"/><path d="M12 11v5m0-8h.01"/>',
+  sparkles: '<path d="m12 3 1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3Z" fill="currentColor" fill-opacity=".20"/><path d="m19 15 .85 2 2 .85-2 .85-.85 2-.85-2-2-.85 2-.85.85-2ZM5.2 16.2l.65 1.5 1.5.65-1.5.65-.65 1.5-.65-1.5-1.5-.65 1.5-.65.65-1.5Z"/>',
+  bolt: '<polygon points="13 2.5 3.8 13.5 11.8 13.5 10.8 21.5 20.2 10.5 12.2 10.5 13 2.5" fill="currentColor" fill-opacity=".20"/>',
+  trend: '<path d="m3 17 6-6 4 4 8-8"/><path d="M15 7h6v6"/>',
+  chart: '<rect x="3.5" y="12" width="4" height="8" rx="1" fill="currentColor" fill-opacity=".20"/><rect x="10" y="7.5" width="4" height="12.5" rx="1" fill="currentColor" fill-opacity=".20"/><rect x="16.5" y="4" width="4" height="16" rx="1" fill="currentColor" fill-opacity=".20"/><path d="M2.5 20h19"/>',
+  traffic: '<path d="M4.2 18a9 9 0 1 1 15.6 0Z" fill="currentColor" fill-opacity=".15"/><path d="M4.2 18a9 9 0 1 1 15.6 0"/><path d="m12 13 3.8-3.8"/><circle cx="12" cy="13" r="1.4" fill="currentColor" stroke="none"/>',
+  hourglass: '<path d="M6.5 3h11M6.5 21h11"/><path d="M7.5 3v3.8a4.5 4.5 0 0 0 2.1 3.8L12 12l-2.4 1.4a4.5 4.5 0 0 0-2.1 3.8V21h9v-3.8a4.5 4.5 0 0 0-2.1-3.8L12 12l2.4-1.4a4.5 4.5 0 0 0 2.1-3.8V3h-9Z" fill="currentColor" fill-opacity=".16"/>',
+  merge: '<circle cx="6" cy="6" r="2.5" fill="currentColor" fill-opacity=".18"/><circle cx="6" cy="18" r="2.5" fill="currentColor" fill-opacity=".18"/><circle cx="18" cy="12" r="2.5" fill="currentColor" fill-opacity=".24"/><path d="M8.5 6.8c3.8.6 4.8 4.1 7 5.2m-7 5.2c3.8-.6 4.8-4.1 7-5.2"/>'
+};
+function uiSvg(name, cls) {
+  var body = HNC_UI_SVGS[name] || HNC_UI_SVGS.sparkles;
+  return '<svg class="ui-ic' + (cls ? ' ' + cls : '') + '" data-ic="' + name + '" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + body + '</svg>';
+}
+
 var TYPE_T = { phone: '手机', tablet: '平板', pc: '电脑', tv: '电视 / 投屏', iot: '智能设备', console: '游戏机', watch: '手表' };
-var TYPE_I = { phone: '📱', tablet: '📲', pc: '💻', tv: '📺', iot: '💡', console: '🎮', watch: '⌚' };
+var TYPE_I = {
+  phone: devSvg('phone'),
+  tablet: devSvg('tablet'),
+  pc: devSvg('pc'),
+  tv: devSvg('tv'),
+  iot: devSvg('iot'),
+  console: devSvg('console'),
+  watch: devSvg('watch')
+};
 /* dpid 被动识别(DHCP / mDNS / 域名指纹) → 「小米 · Android 14 · 手机」 */
 function identText(id, max) {
   if (!id) return '';
@@ -393,13 +502,14 @@ function identText(id, max) {
 function devIcon(d) {
   if (d.ident && TYPE_I[d.ident.type] && num(d.ident.confidence) >= 40) return TYPE_I[d.ident.type];
   var s = (d.name + ' ' + (d.vendor || '') + ' ' + (d.idText || '')).toLowerCase();
-  if (/watch|band|手环|手表/.test(s)) return '⌚';
-  if (/ipad|tablet|pad|平板|tab/.test(s)) return '📲';
-  if (/tv|电视|box|盒子|projector|投影/.test(s)) return '📺';
-  if (/switch|nintendo|playstation|ps[45]|xbox|steam/.test(s)) return '🎮';
-  if (/mac|book|laptop|thinkpad|surface|desktop|pc|windows|dell|lenovo|asus|acer|hp-|legion/.test(s)) return '💻';
-  if (/phone|iphone|android|xiaomi|redmi|oppo|vivo|huawei|honor|realme|oneplus|samsung|meizu|nubia|iqoo|pixel|mi-|手机/.test(s)) return '📱';
-  return '📶';
+  if (/watch|band|手环|手表/.test(s)) return devSvg('watch');
+  if (/ipad|tablet|pad|平板|tab/.test(s)) return devSvg('tablet');
+  if (/tv|电视|box|盒子|projector|投影/.test(s)) return devSvg('tv');
+  if (/switch|nintendo|playstation|ps[45]|xbox|steam/.test(s)) return devSvg('console');
+  if (/mac|book|laptop|thinkpad|surface|desktop|pc|windows|dell|lenovo|asus|acer|hp-|legion/.test(s)) return devSvg('pc');
+  if (/phone|iphone|android|xiaomi|redmi|oppo|vivo|huawei|honor|realme|oneplus|samsung|meizu|nubia|iqoo|pixel|mi-|手机/.test(s)) return devSvg('phone');
+  if (/miiot|aqara|yeelight|mijia|espressif|tuya|iot|smart|音箱|插座|灯|空调|扫地/.test(s)) return devSvg('iot');
+  return devSvg('router');
 }
 /* v5.30 T1b: 垃圾主机名("null" 等)当作没有名字(后端已挡, 这里防御旧后端)。
  * 与 hotspotd / Go(hnc.io/dpid/hostname)同一张表(test/unit/test_v530_junk_table_sync.sh 核对)。 */
@@ -557,3 +667,4 @@ function paintOnlineHours() {
   });
 }
 
+/* === v5.36.0 Pure Duotone Vector SVG Icon System Active === */

@@ -35,8 +35,8 @@ if [ "$ARCH" = "host" ]; then
     # box (error-path behaviour, valgrind, strace comparison against tc).
     # The REAL target is arm64.
     CC="${CC:-gcc}"
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE"
-    LDFLAGS=""
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
+    LDFLAGS="-pie"
     echo "[build] Host build with $CC"
     echo "[build] $CC $CFLAGS -o $OUTDIR/$BIN $SRC $LDFLAGS"
     # shellcheck disable=SC2086
@@ -84,8 +84,8 @@ fi
 # We intentionally do NOT use -static (full static linking) because bionic
 # libc is not designed to be linked statically on Android; dynamic linkage
 # against /system/lib64/libc.so is the blessed path.
-CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -DANDROID -static-libgcc -fPIE"
-LDFLAGS="-pie"
+CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -static-libgcc -fPIE"
+LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 echo "[build] NDK:        $ANDROID_NDK"
 echo "[build] Toolchain:  $TOOLCHAIN"

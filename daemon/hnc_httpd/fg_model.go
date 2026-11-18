@@ -120,6 +120,9 @@ type fgObs struct {
 	MAC, ID, Name, Category, Key string
 	Up, Dn                       uint64
 	Inferred                     bool
+	IsIPv6                       bool
+	Closing                      bool
+	DSCPClass                    uint8 // 0=None, 1=Low(CS1/LE), 2=Interactive, 3=Realtime(EF/AF4x/CS4)
 }
 
 type fgConn struct {
@@ -134,14 +137,24 @@ type fgFeat struct {
 	RR                   int
 	HBShare              float64
 	Conns                int
+	ClosingConns         int
+	CloseRatio           float64
+	FastExit             bool
 	TopShare             float64
 	InfShare             float64
+	V6Share              float64
+	LowDSCPShare         float64
+	IntDSCPShare         float64
+	RTDSCPShare          float64
+	Micro                fgMicroFeat
 	Bulk, Bidir, Active  bool
 }
 
 type fgApp struct {
 	id, name, cat string
 	smooth, inst  float64
+	prevInst      float64
+	playBufSec    float64 // v7 虚拟播放缓冲池剩余秒数（消除 ABR 分片拉流静默期掉前台）
 	contSec       float64
 	activeSince   time.Time
 	lastActive    time.Time
@@ -159,23 +172,45 @@ type fgBg struct {
 }
 
 // fgView /api/devices[].fg
+// fgCompanion v5.34: 正交伴随音视频轨(如边打微信语音/听网易云音乐边刷淘宝, 不抢夺主屏焦点)
+type fgCompanion struct {
+	AppID string `json:"app_id"`
+	Name  string `json:"name"`
+	Mode  string `json:"mode"` // "call" | "audio"
+	Label string `json:"label"`
+	Bps   int64  `json:"bps,omitempty"`
+}
+
+// fgDualStack v5.34: 前台应用实时 IPv6 流量占比与限速逃逸诊断状态
+type fgDualStack struct {
+	V6Pct       int     `json:"v6_pct"`
+	QoSCov      string  `json:"qos_cov,omitempty"` // "dual_stack_ok" | "v6_escape_risk"
+	EscapeAlert bool    `json:"escape_alert,omitempty"`
+	LimitMbps   float64 `json:"limit_mbps,omitempty"`
+	ActualMbps  float64 `json:"actual_mbps,omitempty"`
+}
+
 type fgView struct {
-	State      string   `json:"state"` // active | paused | idle | stale | unknown
-	AppID      string   `json:"app_id"`
-	Name       string   `json:"name"`
-	Category   string   `json:"category"`
-	Confidence int      `json:"confidence"`
-	Since      int64    `json:"since"`
-	Reasons    []string `json:"reasons"`
-	Background []fgBg   `json:"background"`
-	Label      string   `json:"label"`
-	BgLabel    string   `json:"bg_label,omitempty"`
-	Score      int      `json:"score"`
-	TickSec    int      `json:"tick_sec"`
-	Coarse     bool     `json:"coarse,omitempty"`
-	Stale      bool     `json:"stale,omitempty"`
-	Updated    int64    `json:"updated"`
-	Engagement string   `json:"engagement,omitempty"` // v5.28 B4: 交互节拍(影子, fg_engagement.go)
+	State        string       `json:"state"`                  // active | paused | idle | stale | unknown
+	ScreenState  string       `json:"screen_state,omitempty"` // v5.34: active | idle_audio | doze
+	AppID        string       `json:"app_id"`
+	Name         string       `json:"name"`
+	Category     string       `json:"category"`
+	Confidence   int          `json:"confidence"`
+	Since        int64        `json:"since"`
+	Reasons      []string     `json:"reasons"`
+	EvidenceTags []string     `json:"evidence_tags,omitempty"` // v5.34: 极简可解释证据徽章(最多3枚)
+	Companion    *fgCompanion `json:"companion,omitempty"`     // v5.34: 并行伴随通话/音频槽位
+	DualStack    *fgDualStack `json:"dual_stack,omitempty"`    // v5.34: 双栈覆盖与逃逸告警
+	Background   []fgBg       `json:"background"`
+	Label        string       `json:"label"`
+	BgLabel      string       `json:"bg_label,omitempty"`
+	Score        int          `json:"score"`
+	TickSec      int          `json:"tick_sec"`
+	Coarse       bool         `json:"coarse,omitempty"`
+	Stale        bool         `json:"stale,omitempty"`
+	Updated      int64        `json:"updated"`
+	Engagement   string       `json:"engagement,omitempty"` // v5.28 B4: 交互节拍(影子, fg_engagement.go)
 }
 
 type fgDev struct {
@@ -186,9 +221,12 @@ type fgDev struct {
 	view    fgView
 	lastObs time.Time
 	// v5.27 T4: shown = 显示与时间线跟随的前台(classic 引擎时恒等于 cur, hmm 引擎时 = hmm.cur)
-	shown string
-	hmm   *hmmDev
-	hmmAt time.Time // HMM 上一轮时刻(取这段时间内的启动事件)
+	shown        string
+	hmm          *hmmDev
+	hmmAt        time.Time // HMM 上一轮时刻(取这段时间内的启动事件)
+	screenState  string    // "active" | "idle_audio" | "doze"
+	quietSec     float64   // 连续全机静默秒数
+	escapeStreak int       // 连续超限逃逸轮数
 }
 
 type fgSession struct {
@@ -225,7 +263,28 @@ type fgModel struct {
 	engine    func() string
 	engineCur string
 	// started v5.27 T4: (设备, (after, upTo]) 内有启动事件的应用; nil = startupEventsForHMM
-	started func(mac string, after, upTo int64) map[string]bool
+	started  func(mac string, after, upTo int64) map[string]bool
+	sideMB   map[string]map[string]fgMicroFeat
+	sideHint map[string]fgDevSideHint
+}
+
+func (m *fgModel) setSidechan(mb map[string]map[string]fgMicroFeat, hints map[string]fgDevSideHint) {
+	m.mu.Lock()
+	m.sideMB = mb
+	m.sideHint = hints
+	m.mu.Unlock()
+}
+
+func (m *fgModel) countActiveEscapes(now time.Time) int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	n := 0
+	for _, d := range m.devs {
+		if d.view.DualStack != nil && d.view.DualStack.EscapeAlert && now.Unix()-d.view.Updated <= 60 {
+			n++
+		}
+	}
+	return n
 }
 
 func newFgModel() *fgModel {
@@ -328,6 +387,11 @@ func clamp01(x float64) float64 {
 }
 
 // fgScore 本轮分数(纯函数)
+func fgVoipCat(cat string) bool {
+	c := strings.ToLower(strings.TrimSpace(cat))
+	return c == "voip" || c == "social_voip" || c == "call" || strings.Contains(c, "voip")
+}
+
 func fgScore(f fgFeat, contSec float64, id, cat string) float64 {
 	if !f.Active {
 		return 0
@@ -344,6 +408,44 @@ func fgScore(f fgFeat, contSec float64, id, cat string) float64 {
 	}
 	p, _ := fgCatPrior(cat)
 	s += p
+
+	// v5.34 1) 亚秒级人类触控因果律增益 (兼容 H2/H3 单连接多路复用与微信纯文字聊天)
+	mb := f.Micro
+	nonPer := 1.0 - 0.85*clamp01(mb.Periodicity)
+	if mb.CausalTurns > 0 {
+		s += 14.0 * (math.Min(float64(mb.CausalTurns), 3.0) / 3.0) * nonPer
+	}
+	if mb.LightTurns > 0 && s < 32.0 && mb.Periodicity < 0.4 {
+		// 拯救微信/IM 轻量文字互动 (字节极小但具备鲜明上行->下行亚秒级回合)
+		s += 18.0 * math.Min(float64(mb.LightTurns), 2.0) / 2.0
+	}
+	if mb.D2CImpulse > 0.1 {
+		s += 12.0 * clamp01(mb.D2CImpulse) * nonPer
+	}
+	if mb.CausalTurns >= 2 && mb.IBTCV >= 0.75 && mb.IBTEntropy >= 0.40 {
+		// Barabasi 人类重尾非周期奖励
+		s += 8.0 * clamp01((mb.IBTCV-0.5)/1.0)
+	}
+	if mb.Periodicity >= 0.45 {
+		// 机器等间隔定时器 (15s/30s/60s 或双脉冲轮询) 惩罚
+		s -= 26.0 * mb.Periodicity
+	}
+
+	// v5.34 2) 客户端上行原生 DSCP 侧信道修正 + P2P 伪造防欺骗护栏
+	isTunOrSys := fgIsTunnel(id) || appTier(cat) == tierSystem
+	isDlCat := cat == "download" || cat == "app_store"
+	spoofedRT := f.Bulk || f.UpBps > 384*1024 || f.Conns > 12 || isDlCat
+	if f.RTDSCPShare >= 0.25 && !spoofedRT {
+		s += 18.0 * f.RTDSCPShare
+	} else if f.RTDSCPShare >= 0.25 && f.Bulk {
+		s -= 10.0
+	} else if f.IntDSCPShare >= 0.30 && !isTunOrSys && !f.Bulk && !isDlCat {
+		s += 8.0 * f.IntDSCPShare
+	}
+	if f.LowDSCPShare >= 0.50 {
+		s -= 28.0 * f.LowDSCPShare
+	}
+
 	if f.Bulk {
 		s -= fgBulkPenalty
 	}
@@ -356,6 +458,10 @@ func fgScore(f fgFeat, contSec float64, id, cat string) float64 {
 	if f.InfShare > 0.5 {
 		s *= 0.9
 	}
+	// 硬封顶: 客户端 OS 内核显式标记 CS1/LE 后台清道夫流 (>=80%) 绝不超 14 分(稳居后台栏, 永不抢前台)
+	if f.LowDSCPShare >= 0.80 && s > 14.0 {
+		s = 14.0
+	}
 	if s < 0 {
 		s = 0
 	}
@@ -363,12 +469,14 @@ func fgScore(f fgFeat, contSec float64, id, cat string) float64 {
 }
 
 type fgAgg struct {
-	name, cat     string
-	dn, up, hb    uint64
-	inf           uint64
-	conns         map[string]uint64
-	newTick, rr   int
-	hasConnDetail bool
+	name, cat                string
+	dn, up, hb               uint64
+	inf, v6Bytes             uint64
+	lowB, intB, rtB          uint64
+	conns                    map[string]uint64
+	closingKeys              map[string]bool
+	newTick, rr              int
+	hasConnDetail            bool
 }
 
 // reset 清空设备状态(时间回退/长间隔/时钟跳变), 打开的会话在 at 收尾
@@ -421,14 +529,31 @@ func (m *fgModel) step(now time.Time, obs []fgObs, level string) {
 		}
 		a := per[o.MAC][o.ID]
 		if a == nil {
-			a = &fgAgg{name: o.Name, cat: o.Category, conns: map[string]uint64{}}
+			a = &fgAgg{name: o.Name, cat: o.Category, conns: map[string]uint64{}, closingKeys: map[string]bool{}}
 			per[o.MAC][o.ID] = a
 		}
 		b := o.Up + o.Dn
 		a.dn += o.Dn
 		a.up += o.Up
+		if o.IsIPv6 {
+			a.v6Bytes += b
+		}
+		switch o.DSCPClass {
+		case 1:
+			a.lowB += b
+		case 2:
+			a.intB += b
+		case 3:
+			a.rtB += b
+		}
+		if o.Closing && o.Key != "" {
+			a.closingKeys[o.Key] = true
+		}
 		if o.Inferred {
 			a.inf += b
+		}
+		if b == 0 && o.Closing {
+			continue // 纯关闭状态通知不计入活跃新建与心跳统计
 		}
 		var c *fgConn
 		isNew := false
@@ -535,6 +660,9 @@ func (m *fgModel) stepDevLocked(mac string, d *fgDev, aggs map[string]*fgAgg, no
 		a.newAt = a.newAt[i:]
 		g := aggs[id]
 		var f fgFeat
+		if m.sideMB != nil && m.sideMB[mac] != nil {
+			f.Micro = m.sideMB[mac][id]
+		}
 		if g != nil {
 			tot := g.dn + g.up
 			eff := float64(tot-min(g.hb, tot)) / dt
@@ -542,8 +670,21 @@ func (m *fgModel) stepDevLocked(mac string, d *fgDev, aggs map[string]*fgAgg, no
 			if tot > 0 {
 				f.HBShare = float64(g.hb) / float64(tot)
 				f.InfShare = float64(g.inf) / float64(tot)
+				f.V6Share = float64(g.v6Bytes) / float64(tot)
+				f.LowDSCPShare = float64(g.lowB) / float64(tot)
+				f.IntDSCPShare = float64(g.intB) / float64(tot)
+				f.RTDSCPShare = float64(g.rtB) / float64(tot)
 			}
 			f.Conns = len(g.conns)
+			f.ClosingConns = len(g.closingKeys) + f.Micro.CloseEvents
+			activeBase := max(f.Conns, len(g.closingKeys))
+			if activeBase >= 2 && f.ClosingConns >= 2 {
+				f.CloseRatio = math.Min(1.0, float64(f.ClosingConns)/float64(activeBase))
+			}
+			// 连接坍塌潮快退判据: >=2 条活跃连接同步 FIN/RST/CLOSE (>=70%) 且本轮几乎无新增有效吞吐
+			if f.CloseRatio >= 0.70 && eff < fgActiveBps*2 && g.newTick == 0 {
+				f.FastExit = true
+			}
 			var top uint64
 			for _, b := range g.conns {
 				top = max(top, b)
@@ -554,7 +695,9 @@ func (m *fgModel) stepDevLocked(mac string, d *fgDev, aggs map[string]*fgAgg, no
 			f.RR = g.rr
 			f.NewWin = len(a.newAt)
 			f.NewPerMin = float64(f.NewWin) / win * 60
-			f.Active = eff >= fgActiveBps || (g.newTick >= 2 && eff >= fgWeakBps)
+			f.Active = !f.FastExit && (eff >= fgActiveBps || (g.newTick >= 2 && eff >= fgWeakBps) || f.Micro.CausalTurns >= 1 || f.Micro.LightTurns >= 1 || f.Micro.D2CImpulse >= 0.55)
+		} else if f.Micro.CausalTurns >= 1 || f.Micro.LightTurns >= 1 {
+			f.Active = true
 		}
 		if f.Active {
 			if a.lastActive.IsZero() || now.Sub(a.lastActive).Seconds() > gapTol {
@@ -563,15 +706,39 @@ func (m *fgModel) stepDevLocked(mac string, d *fgDev, aggs map[string]*fgAgg, no
 			a.lastActive = now
 			a.contSec = now.Sub(a.activeSince).Seconds()
 			f.Bidir = f.UpBps >= fgBidirUpBps && f.DnBps > 0 && f.UpBps/f.DnBps >= fgBidirRatio && a.contSec >= 20
-			f.Bulk = f.EffBps >= fgBulkBps && f.TopShare >= fgBulkShare && f.DnBps > 0 &&
-				f.UpBps/f.DnBps < fgBulkUpRatio && f.RR == 0 && f.NewWin <= 1 && !fgStreamingCat(a.cat) &&
-				!fgIsTunnel(id) // 隧道天然是单连接, 看不到里面, 不按下载罚
-		} else if !a.lastActive.IsZero() && now.Sub(a.lastActive).Seconds() > gapTol {
-			a.contSec = 0
+			// v7: 同时捕获单连接下载(TopShare>=85%)与多线程分片下载簇(Conns>=2 且极低上下行比、零交互突发)
+			isMultiBulk := f.Conns >= 2 && f.DnBps > 0 && f.UpBps/f.DnBps < 0.035 && f.NewWin <= 2
+			f.Bulk = f.EffBps >= fgBulkBps && (f.TopShare >= fgBulkShare || isMultiBulk) && f.DnBps > 0 &&
+				f.UpBps/f.DnBps < fgBulkUpRatio && f.RR == 0 && !fgStreamingCat(a.cat) &&
+				!fgIsTunnel(id)
+			// v7 虚拟播放缓冲动力学：流媒体高速拉取分片时充入等效播放缓冲，静默解码期线性消耗
+			if fgStreamingCat(a.cat) && f.DnBps >= 350_000 {
+				estPlayRate := 450_000.0 // 约 3.6 Mbps 等效稳态消耗码率
+				a.playBufSec = math.Min(40.0, a.playBufSec+(f.DnBps*dt)/estPlayRate)
+			}
+		} else {
+			if a.playBufSec > 0 {
+				a.playBufSec = math.Max(0, a.playBufSec-dt)
+			}
+			if !a.lastActive.IsZero() && now.Sub(a.lastActive).Seconds() > gapTol && a.playBufSec <= 0 {
+				a.contSec = 0
+			}
 		}
 		a.f = f
+		a.prevInst = a.inst
 		a.inst = fgScore(f, a.contSec, id, a.cat)
-		a.smooth += alpha * (a.inst - a.smooth)
+		if f.FastExit {
+			a.playBufSec = 0
+			a.inst = 0
+			a.smooth *= 0.25 // 上滑划掉应用连接坍塌潮: 1 轮内直接跌破 fgStay(20) 实现秒退
+		} else {
+			// 若流媒体处于 ABR 本地缓冲区播放期（0 网络字节但缓冲池未耗尽），仅对平滑分维持持有基线，不覆盖真实瞬时分 a.inst
+			effInst := a.inst
+			if effInst == 0 && a.playBufSec > 0 {
+				effInst = 24.0
+			}
+			a.smooth += alpha * (effInst - a.smooth)
+		}
 		if a.smooth < 0.05 {
 			a.smooth = 0
 		}
@@ -598,11 +765,95 @@ func fgRank(d *fgDev) []*fgApp {
 	return list
 }
 
+// fgIsCompanionCandidate 判断某应用当前是否处于「伴随通话 / 后台稳态听歌」模式:
+// 当设备同时存在另一个具备明确用户触控交互(RR / 新建连接 / 触控微突发)的应用时, 将伴随流剥离到
+// Companion 槽位, 避免边挂微信语音/听网易云音乐边逛淘宝时两者来回抢夺主屏焦点!
+func fgIsCompanionCandidate(a *fgApp) (string, string, bool) {
+	if a == nil || !a.f.Active && a.playBufSec <= 0 {
+		return "", "", false
+	}
+	if fgVoipCat(a.cat) || (a.f.RTDSCPShare >= 0.25 && !a.f.Bulk && a.f.NewPerMin <= 3.0) ||
+		(a.f.Bidir && a.f.EffBps >= 2000 && a.f.EffBps <= 350_000 && a.f.NewPerMin <= 2.5 && a.contSec >= 15) {
+		return "call", "语音/实时通话", true
+	}
+	if fgMusicCat(a.cat) && a.f.NewPerMin < 2.5 && a.f.RR < 3 && a.f.Micro.CausalTurns <= 1 {
+		return "audio", "后台音频播放", true
+	}
+	return "", "", false
+}
+
+func (m *fgModel) updateScreenStateLocked(mac string, d *fgDev, now time.Time, dt float64) {
+	var totEff float64
+	var totInter int
+	var hasMediaOrCall bool
+	for _, a := range d.apps {
+		totEff += a.f.EffBps
+		totInter += a.f.RR + a.f.Micro.CausalTurns + a.f.Micro.LightTurns
+		if a.f.NewPerMin >= 4.0 && a.f.LowDSCPShare < 0.5 {
+			totInter++
+		}
+		if _, _, ok := fgIsCompanionCandidate(a); ok {
+			hasMediaOrCall = true
+		} else if fgStreamingCat(a.cat) && (a.f.DnBps >= 80_000 || a.playBufSec > 0) {
+			hasMediaOrCall = true
+		}
+	}
+	var pushWake bool
+	if m.sideHint != nil {
+		if h, ok := m.sideHint[mac]; ok && h.LastPushWakeAt > 0 && now.Unix()-h.LastPushWakeAt <= 25 {
+			pushWake = true
+		}
+	}
+	if totEff < 350 && totInter == 0 && !hasMediaOrCall {
+		d.quietSec += dt
+	} else if !pushWake && (totInter >= 1 || hasMediaOrCall || totEff >= fgActiveBps*2) {
+		d.quietSec = 0
+	}
+	switch {
+	case d.quietSec >= 60 && !hasMediaOrCall:
+		d.screenState = "doze"
+	case totInter == 0 && hasMediaOrCall && d.quietSec >= 20:
+		d.screenState = "idle_audio"
+	case totInter >= 1 || totEff >= fgActiveBps:
+		d.screenState = "active"
+	default:
+		if d.screenState == "" {
+			d.screenState = "active"
+		}
+	}
+}
+
 func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, level string, traffic bool) {
+	m.updateScreenStateLocked(mac, d, now, dt)
 	rank := fgRank(d)
+
+	// 正交因子解耦: 若排第 1 的是稳态通话/后台听歌, 而排第 2 的应用正发生明确主屏点按交互, 则将主屏让给交互应用!
+	var focusRank []*fgApp
+	var hasInteractiveOther bool
+	for _, a := range rank {
+		if _, _, isComp := fgIsCompanionCandidate(a); !isComp && a.smooth >= fgEnter &&
+			(a.f.RR >= 2 || a.f.NewPerMin >= 4.0 || a.f.Micro.CausalTurns >= 1 || a.f.Micro.D2CImpulse >= 0.4) {
+			hasInteractiveOther = true
+			break
+		}
+	}
+	for _, a := range rank {
+		if _, _, isComp := fgIsCompanionCandidate(a); isComp && hasInteractiveOther {
+			continue
+		}
+		focusRank = append(focusRank, a)
+	}
+	if len(focusRank) == 0 {
+		focusRank = rank
+	}
+
+	enterThresh := fgEnter
+	if d.screenState == "doze" {
+		enterThresh = 52.0 // 锁屏休眠/推送唤醒期抬高门槛, 拦截后台静默同步篡位
+	}
 	var top *fgApp
-	if len(rank) > 0 && rank[0].smooth >= fgEnter && rank[0].id != d.cur {
-		top = rank[0]
+	if len(focusRank) > 0 && focusRank[0].smooth >= enterThresh && focusRank[0].id != d.cur {
+		top = focusRank[0]
 	}
 	for _, a := range rank {
 		if a == top {
@@ -619,11 +870,20 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 	curOK := false
 	if cur != nil {
 		curScore = cur.smooth
-		curOK = cur.smooth >= fgStay || (!cur.lastActive.IsZero() && now.Sub(cur.lastActive) <= fgPauseHold)
+		if cur.f.FastExit {
+			curOK = false // 上滑关闭连接坍塌潮: 立即闭合会话, 跳过 30s fgPauseHold
+		} else if d.screenState == "doze" && !fgMusicCat(cur.cat) && !fgVoipCat(cur.cat) {
+			curOK = false
+		} else {
+			curOK = cur.smooth >= fgStay || (!cur.lastActive.IsZero() && now.Sub(cur.lastActive) <= fgPauseHold)
+		}
 	}
 	prev := d.cur
 	if top != nil {
-		qualified := top.lead >= fgLeadTicks || (top.smooth >= fgBigMin && top.smooth-curScore >= fgBigMargin)
+		// v7 跨应用负相关交接冲激解锁：旧前台瞬时活动骤降(>75%)且新挑战者具备明确主动交互(RR/双向)时单轮秒切
+		handoverImpulse := cur != nil && cur.prevInst >= 20 && cur.inst <= 0.25*cur.prevInst &&
+			(top.f.RR >= 1 || top.f.Bidir || top.f.NewWin >= 2) && top.inst >= fgEnter
+		qualified := top.lead >= fgLeadTicks || (top.smooth >= fgBigMin && top.smooth-curScore >= fgBigMargin) || handoverImpulse
 		if qualified {
 			d.cur = top.id
 			top.lead = 0
@@ -663,6 +923,27 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 		}
 	}
 	d.view = m.buildViewLocked(d, rank, now, dt, level)
+	if d.view.DualStack != nil && d.shown != "" && m.sideHint != nil {
+		if h, ok := m.sideHint[mac]; ok && h.AppLimitsMbps != nil {
+			if lim := h.AppLimitsMbps[d.shown]; lim > 0 {
+				d.view.DualStack.LimitMbps = lim
+				if d.view.DualStack.V6Pct >= 85 && d.view.DualStack.ActualMbps > math.Max(lim*1.5, 2.0) {
+					d.escapeStreak++
+				} else {
+					d.escapeStreak = 0
+				}
+				if d.escapeStreak >= 2 {
+					d.view.DualStack.EscapeAlert = true
+					d.view.DualStack.QoSCov = "v6_escape_risk"
+					if len(d.view.EvidenceTags) < 3 {
+						d.view.EvidenceTags = append(d.view.EvidenceTags, "v6逃逸告警")
+					} else {
+						d.view.EvidenceTags[2] = "v6逃逸告警"
+					}
+				}
+			}
+		}
+	}
 	if useHMM && d.shown != "" {
 		if a := d.apps[d.shown]; a != nil {
 			d.view.Confidence = hmmConfidence(a, d.hmm.post)
@@ -688,8 +969,28 @@ func (m *fgModel) hmmStepLocked(mac string, d *fgDev, now time.Time, dt float64)
 		d.hmm = newHMMDev()
 	}
 	inst := make(map[string]float64, len(d.apps))
+	cats := make(map[string]string, len(d.apps))
+	fexit := make(map[string]bool)
+	hasCat := false
 	for id, a := range d.apps {
 		inst[id] = a.inst
+		if a.cat != "" {
+			cats[id] = a.cat
+			hasCat = true
+		}
+		if a.f.FastExit {
+			fexit[id] = true
+		}
+	}
+	if hasCat {
+		d.hmm.cats = cats
+	} else {
+		d.hmm.cats = nil
+	}
+	if len(fexit) > 0 {
+		d.hmm.fastExit = fexit
+	} else {
+		d.hmm.fastExit = nil
 	}
 	var started map[string]bool
 	after := now.Add(-time.Duration(dt * float64(time.Second)))
@@ -856,6 +1157,77 @@ func (m *fgModel) buildViewLocked(d *fgDev, rank []*fgApp, now time.Time, dt flo
 		v.Background = append(v.Background, fgBg{AppID: o.id, Name: fgDisplayName(o), Category: o.cat, Label: lbl})
 		names = append(names, fgDisplayName(o))
 	}
+	// v5.34: 提取正交伴随通话/音频槽位 (排除已作为主屏焦点展示的应用)
+	for _, o := range rank {
+		if o.id == v.AppID {
+			continue
+		}
+		if mode, lbl, ok := fgIsCompanionCandidate(o); ok {
+			v.Companion = &fgCompanion{
+				AppID: o.id,
+				Name:  fgDisplayName(o),
+				Mode:  mode,
+				Label: lbl,
+				Bps:   int64(math.Round(o.f.DnBps + o.f.UpBps)),
+			}
+			break
+		}
+	}
+	v.ScreenState = d.screenState
+	if v.ScreenState == "" {
+		if v.State == "active" {
+			v.ScreenState = "active"
+		} else {
+			v.ScreenState = "doze"
+		}
+	}
+
+	// v5.34: 提炼最多 3 枚用户可读微徽章 EvidenceTags & 双栈 IPv6 逃逸自检
+	if a := d.apps[d.shown]; a != nil {
+		var tags []string
+		addTag := func(t string) {
+			if len(tags) < 3 {
+				tags = append(tags, t)
+			}
+		}
+		if a.f.RTDSCPShare >= 0.25 {
+			addTag("DSCP实时标")
+		} else if a.f.IntDSCPShare >= 0.30 {
+			addTag("DSCP交互标")
+		}
+		if a.f.Micro.D2CVerified >= 1 || a.f.Micro.D2CImpulse >= 0.55 {
+			addTag("秒级紧耦合")
+		}
+		if a.f.Micro.CausalTurns >= 1 || a.f.Micro.LightTurns >= 1 || a.f.RR >= 2 {
+			addTag("触控微突发")
+		}
+		if a.playBufSec > 2.0 && !a.f.Active {
+			addTag("缓冲续播")
+		}
+		if len(tags) == 0 && a.f.NewWin >= 2 {
+			addTag("多流并发")
+		}
+
+		v6Pct := int(math.Round(a.f.V6Share * 100))
+		actualMbps := math.Round((a.f.DnBps*8.0/1e6)*10) / 10
+		var limMbps float64
+		if m.sideHint != nil {
+			if h, ok := m.sideHint[d.shown]; !ok {
+				// lookup by device mac in caller below
+				_ = h
+			}
+		}
+		_ = limMbps
+		v.DualStack = &fgDualStack{
+			V6Pct:      v6Pct,
+			QoSCov:     "dual_stack_ok",
+			ActualMbps: actualMbps,
+		}
+		v.EvidenceTags = tags
+	} else if v.ScreenState == "doze" {
+		v.EvidenceTags = []string{"锁屏休眠保护"}
+	}
+
 	if len(names) > 0 {
 		v.BgLabel = "后台：" + strings.Join(names, "、")
 	}

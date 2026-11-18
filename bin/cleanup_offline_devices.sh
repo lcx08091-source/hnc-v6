@@ -62,6 +62,10 @@ gate_lock || {
     emit_err 'gate_lock failed'
     exit 1
 }
+# 传递 gate 持有者 PID: 否则 --include-with-rules 内部调用 apply_device_rule.sh clear ->
+# iptables_manager.sh unmark 会在 mac_lock 等 gate 时自死锁 5s(rc=11), 泄漏内核 HNC_MARK 规则!
+export HNC_GATE_HELD=$$
+trap 'unset HNC_GATE_HELD; gate_unlock' EXIT INT TERM
 
 removed=0
 kept_with_rules=0
@@ -75,16 +79,10 @@ device_has_rule() {
     [ -f "$RULES" ] || return 1
     # v5.11: rules.json 可能是多行格式化的, 逐行 grep 永远匹配不到跨行的块
     # (有规则的设备被当成"无规则"一起清掉) —— 先压成一行; MAC 大小写不敏感。
-    block=$(tr -d '\r\n' < "$RULES" 2>/dev/null | grep -oiE "\"$mac\"[[:space:]]*:[[:space:]]*\\{[^}]*\\}" 2>/dev/null | head -1)
+    block=$(tr -d '\r\n' < "$RULES" 2>/dev/null | grep -oiE "\"$mac\"[[:space:]]*:[[:space:]]*\\{[^{}]*\\}" 2>/dev/null | head -n 1)
     [ -z "$block" ] && return 1
-    # v5.9.1: 字段名修正。rules.json 的限速字段实际是 down_mbps/up_mbps
-    # (见 json_set.sh device 写入与 server.go buildDevicesPayload),
-    # 从来没有 limit_down/limit_up —— 旧正则恒不匹配,导致"有限速规则的
-    # 离线设备"被当成无规则一并清掉,与本脚本 kept_with_rules 的承诺相反。
-    # 数值形态也修正: 这两个字段是裸数字(可含小数)而非带引号字符串。
-    echo "$block" | grep -qE '"(down_mbps|up_mbps)":[[:space:]]*[0-9]*[1-9]' && return 0
-    echo "$block" | grep -qE '"delay_ms":[[:space:]]*[1-9]' && return 0
-    echo "$block" | grep -qE '"whitelist":[[:space:]]*true' && return 0
+    echo "$block" | grep -qE '"(down_mbps|up_mbps|delay_ms|jitter_ms|loss_pct)":[[:space:]]*[0-9.]*[1-9]' && return 0
+    echo "$block" | grep -qE '"(whitelist|sqm_enabled|app_qos)":[[:space:]]*true' && return 0
     return 1
 }
 
@@ -98,10 +96,10 @@ macs=$(grep -oE '"[0-9a-fA-F:]{17}":[[:space:]]*\{' "$DEVICES" 2>/dev/null \
 
 for mac in $macs; do
     # Pull the per-device JSON block.
-    block=$(grep -oE "\"$mac\":[[:space:]]*\\{[^}]*\\}" "$DEVICES" 2>/dev/null | head -1)
+    block=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null | grep -oiE "\"$mac\":[[:space:]]*\\{[^{}]*\\}" 2>/dev/null | head -n 1)
     [ -z "$block" ] && continue
 
-    status=$(printf '%s' "$block" | grep -oE '"status":[[:space:]]*"[^"]*"' | head -1 | sed -E 's/.*"status":[[:space:]]*"([^"]*)".*/\1/')
+    status=$(printf '%s' "$block" | grep -oE '"status":[[:space:]]*"[^"]*"' | head -n 1 | sed -E 's/.*"status":[[:space:]]*"([^"]*)".*/\1/')
 
     if [ "$status" = "online" ]; then
         skipped_online=$((skipped_online + 1))

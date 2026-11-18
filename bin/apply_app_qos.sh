@@ -90,15 +90,52 @@ class_rate_ceil() {
         END { if (r == "") exit 1; if (c == "") c = r; print r, c }'
 }
 
-# 拆一台: 内部过滤器、3 个子 class(叶子随之删除)、根上 pref 50 的 fw。
+# 互斥锁(支持重入): 串行化看门狗全量对齐与 tc_manager remove_device -> teardown
+AQ_LOCK="$RUN/app_qos.lock"
+aq_lock() {
+    [ "${HNC_APP_QOS_LOCK_HELD:-}" = "$$" ] && return 0
+    local _n=0 _lp _ts _now
+    while ! mkdir "$AQ_LOCK" 2>/dev/null; do
+        _lp=$(cat "$AQ_LOCK/pid" 2>/dev/null)
+        _ts=$(cat "$AQ_LOCK/ts" 2>/dev/null)
+        _now=$(date +%s 2>/dev/null || echo 0)
+        if [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; then
+            rm -rf "$AQ_LOCK" 2>/dev/null
+            continue
+        fi
+        case "$_ts:$_now" in
+            *[!0-9:]*|:*) ;;
+            *) [ "$_ts" -gt 0 ] && [ $((_now - _ts)) -ge 30 ] && rm -rf "$AQ_LOCK" 2>/dev/null && continue ;;
+        esac
+        _n=$((_n + 1))
+        [ "$_n" -ge 50 ] && return 1
+        sleep 0.1 2>/dev/null || sleep 1
+    done
+    echo "$$" > "$AQ_LOCK/pid" 2>/dev/null
+    date +%s > "$AQ_LOCK/ts" 2>/dev/null
+    export HNC_APP_QOS_LOCK_HELD=$$
+    return 0
+}
+aq_unlock() {
+    if [ "$(cat "$AQ_LOCK/pid" 2>/dev/null)" = "$$" ]; then
+        rm -rf "$AQ_LOCK" 2>/dev/null
+        unset HNC_APP_QOS_LOCK_HELD
+    fi
+}
+
+# 拆一台: 内部过滤器、3 个子 class(叶子随之删除)、根上 pref 50 的 fw(兼容带/不带 mask 及 ip/ipv6 回退)。
 teardown_dev() {
-    local iface=$1 mid=$2 cid t
+    local iface=$1 mid=$2 cid t dm
     cid=$(class_for_mid "$mid")
+    dm=$(dev_mark "$mid")
     tc filter del dev "$iface" parent "1:$cid" 2>/dev/null || true
     for t in 1 2 3; do
         tc class del dev "$iface" classid "1:$(child_minor "$mid" "$t")" 2>/dev/null || true
     done
-    tc filter del dev "$iface" parent 1: pref "$ROOT_PREF" handle "$(dev_mark "$mid")" fw 2>/dev/null || true
+    tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$dm" fw 2>/dev/null \
+        || tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$dm/0x9fffff" fw 2>/dev/null || true
+    tc filter del dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "$dm" fw 2>/dev/null || true
+    tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF" handle "$dm" fw 2>/dev/null || true
     log "teardown $iface mid=$mid class=1:$cid"
 }
 
@@ -148,46 +185,116 @@ build_dev() {
             || tc qdisc replace dev "$iface" parent "1:$minor" handle "$(leaf_major "$mid" "$t"):" pfifo 2>/dev/null || true
     done
     tc filter del dev "$iface" parent "1:$cid" 2>/dev/null || true
-    tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null
-    tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_FW" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null
-    tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null
-    tc filter del dev "$iface" parent 1: pref "$ROOT_PREF" handle "$(dev_mark "$mid")" fw 2>/dev/null || true
-    tc filter add dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$(dev_mark "$mid")/0x9fffff" fw flowid "1:$cid" 2>/dev/null
+    if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null; then
+        tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null || return 1
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null || true
+    fi
+    if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_FW" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null; then
+        tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_FW" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null || return 1
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null || true
+    fi
+    if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null; then
+        tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || return 1
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || true
+    fi
+    tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$(dev_mark "$mid")" fw 2>/dev/null || true
+    if ! tc filter add dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$(dev_mark "$mid")/0x9fffff" fw flowid "1:$cid" 2>/dev/null; then
+        tc filter add dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "$(dev_mark "$mid")/0x9fffff" fw flowid "1:$cid" 2>/dev/null || return 1
+        tc filter add dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF" handle "$(dev_mark "$mid")/0x9fffff" fw flowid "1:$cid" 2>/dev/null || true
+    fi
     log "built $iface mid=$mid class=1:$cid rate=$rate ceil=$ceil (50/35/15)"
     return 0
 }
 
+IPT=${HNC_IPT:-"iptables -w 2"}
+IP6T=${HNC_IP6T:-"ip6tables -w 2"}
+IPV6_OK=0
+_IPV6_PROBED=0
+# 惰性探测 IPv6 netfilter: 当 QoS 关闭(无计划且无状态)时保持零子进程调用, 绝不空跑 ip6tables
+probe_ipv6() {
+    [ "$_IPV6_PROBED" = 1 ] && return 0
+    _IPV6_PROBED=1
+    if command -v ip6tables >/dev/null 2>&1 && $IP6T -t mangle -L -n >/dev/null 2>&1; then
+        IPV6_OK=1
+    fi
+}
+CHAIN_MARK=HNC_APP_QOS_MARK
+
 ipt_remove() {
-    # 最多删 4 次(重复挂的跳转也清掉; 有上限, 不依赖 -D 失败来退出循环)
-    for _i in 1 2 3 4; do iptables -t mangle -D POSTROUTING -j "$CHAIN" 2>/dev/null || break; done
-    iptables -t mangle -F "$CHAIN" 2>/dev/null; iptables -t mangle -X "$CHAIN" 2>/dev/null
-    iptables -t mangle -F "$CHAIN_IP" 2>/dev/null; iptables -t mangle -X "$CHAIN_IP" 2>/dev/null
+    probe_ipv6
+    local T _i _c
+    for T in "$IPT" "$([ "$IPV6_OK" = 1 ] && echo "$IP6T")"; do
+        [ -z "$T" ] && continue
+        for _i in 1 2 3 4; do $T -t mangle -D POSTROUTING -j "$CHAIN" 2>/dev/null || break; done
+        for _i in 1 2 3 4; do $T -t mangle -D FORWARD -j "$CHAIN_MARK" 2>/dev/null || break; done
+        for _c in "$CHAIN" "$CHAIN_IP" "$CHAIN_MARK"; do
+            $T -t mangle -F "$_c" 2>/dev/null
+            $T -t mangle -X "$_c" 2>/dev/null
+        done
+    done
     return 0
 }
 
-# iptables(IPv4): POSTROUTING 末尾 → HNC_APP_QOS(按设备 IP 选下行包, 跳过带应用
-# 限速位的)→ HNC_APP_QOS_IP(按远端 IP 打档位位)。
+# v5.34 双栈 (IPv4 + IPv6):
+#   1) HNC_APP_QOS_MARK (mangle/FORWARD) 为仅开 QoS 未设总限速的设备兜底补齐 0x800000+mid CONNMARK;
+#   2) HNC_APP_QOS (mangle/POSTROUTING, HNC_SAVE 之后) 首行过滤 ! -o $IFACE (上行 O(1) 退出),
+#      再用 -m mark --mark (0x800000+mid)/0x9fffff 精准锁定目标设备(自动豁免 bit20=1 的 0x900000 应用限速包),
+#      完全不依赖易变 RFC 4941 临时 IPv6 地址!
 ipt_build() {
-    iptables -t mangle -N "$CHAIN" 2>/dev/null || iptables -t mangle -F "$CHAIN"
-    iptables -t mangle -N "$CHAIN_IP" 2>/dev/null || iptables -t mangle -F "$CHAIN_IP"
-    awk '$1 == "dev" && $4 != "" { print $4 }' "$PLAN" | while read -r ip; do
-        iptables -t mangle -A "$CHAIN" -d "$ip" -m mark --mark 0x0/0x100000 -j "$CHAIN_IP"
+    probe_ipv6
+    local T _c
+    for T in "$IPT" "$([ "$IPV6_OK" = 1 ] && echo "$IP6T")"; do
+        [ -z "$T" ] && continue
+        for _c in "$CHAIN_MARK" "$CHAIN" "$CHAIN_IP"; do
+            $T -t mangle -N "$_c" 2>/dev/null || $T -t mangle -F "$_c"
+        done
+        $T -t mangle -A "$CHAIN" ! -o "$IFACE" -j RETURN
     done
+
+    awk '$1 == "dev" { print $2, $3, $4 }' "$PLAN" | while read -r mid mac ip; do
+        dmark=$(dev_mark "$mid")
+        for T in "$IPT" "$([ "$IPV6_OK" = 1 ] && echo "$IP6T")"; do
+            [ -z "$T" ] && continue
+            [ -n "$mac" ] && $T -t mangle -A "$CHAIN_MARK" -i "$IFACE" -m mac --mac-source "$mac"                 -m mark --mark 0 -j MARK --set-xmark "$dmark/0x9fffff" 2>/dev/null
+            $T -t mangle -A "$CHAIN" -m mark --mark "$dmark/0x9fffff" -g "$CHAIN_IP" 2>/dev/null
+        done
+        if [ -n "$ip" ]; then
+            $IPT -t mangle -A "$CHAIN" -d "$ip" -m mark --mark 0x0/0x100000 -g "$CHAIN_IP" 2>/dev/null
+        fi
+    done
+
     awk '$1 == "ip" { print $2, $3 }' "$PLAN" | while read -r tier ip; do
         case "$tier" in 1) bits=$TIER_RT ;; 3) bits=$TIER_BG ;; *) continue ;; esac
-        iptables -t mangle -A "$CHAIN_IP" -s "$ip" -j MARK --set-xmark "$bits/$TIER_MASK"
+        case "$ip" in
+            *:*) [ "$IPV6_OK" = 1 ] && $IP6T -t mangle -A "$CHAIN_IP" -s "$ip" -j MARK --set-xmark "$bits/$TIER_MASK" 2>/dev/null ;;
+            *)   $IPT  -t mangle -A "$CHAIN_IP" -s "$ip" -j MARK --set-xmark "$bits/$TIER_MASK" 2>/dev/null ;;
+        esac
     done
-    iptables -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null || iptables -t mangle -A POSTROUTING -j "$CHAIN"
+
+    for T in "$IPT" "$([ "$IPV6_OK" = 1 ] && echo "$IP6T")"; do
+        [ -z "$T" ] && continue
+        $T -t mangle -C FORWARD -j "$CHAIN_MARK" 2>/dev/null || $T -t mangle -A FORWARD -j "$CHAIN_MARK" 2>/dev/null
+        $T -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null || $T -t mangle -A POSTROUTING -j "$CHAIN" 2>/dev/null
+    done
 }
 
 # ─── teardown 子命令 ──────────────────────────────────────────────────
 if [ "$1" = "teardown" ]; then
     [ -n "$2" ] && [ -n "$3" ] || exit 1
+    aq_lock || exit 1
+    trap 'aq_unlock' EXIT INT TERM
     teardown_dev "$2" "$3"
     cid=$(class_for_mid "$3")
     if [ -f "$STATE" ]; then
-        grep -vx "$2 $cid" "$STATE" > "$STATE.tmp" 2>/dev/null
-        if [ -s "$STATE.tmp" ]; then mv -f "$STATE.tmp" "$STATE"; else rm -f "$STATE.tmp" "$STATE" "$SIG"; fi
+        grep -vx "$2 $cid" "$STATE" > "$STATE.tmp" 2>/dev/null || : > "$STATE.tmp"
+        if [ -s "$STATE.tmp" ]; then
+            mv -f "$STATE.tmp" "$STATE"
+        else
+            rm -f "$STATE.tmp" "$STATE" "$SIG"
+            # 最后一台开启 QoS 的设备被移除时同步拆掉双栈 HNC_APP_QOS* 链与 pref 50 残留!
+            ipt_remove
+            tc filter del dev "$2" parent 1: pref "$ROOT_PREF" 2>/dev/null || true
+        fi
     fi
     exit 0
 fi
@@ -197,62 +304,87 @@ IFACE=$(awk '$1 == "iface" { print $2; exit }' "$PLAN" 2>/dev/null)
 NDEV=$(awk '$1 == "dev"' "$PLAN" 2>/dev/null | wc -l | tr -d ' ')
 [ -n "$IFACE" ] || NDEV=0
 
-# 关闭: 没有设备开、也没有残留状态 → 一条命令都不发
+# 关闭: 没有设备开、也没有残留状态 → 一条命令都不发(不触发 probe_ipv6)
 if [ "${NDEV:-0}" -eq 0 ] && [ ! -f "$STATE" ]; then
     exit 0
 fi
 
+aq_lock || exit 0
+trap 'aq_unlock' EXIT INT TERM
+probe_ipv6
+
 # tc 只认「网卡 + 哪几台设备」; IP 行(随 dpid 识别结果常变)只影响 iptables。
-# 看门狗每 30 秒调一次: 设备集合没变、子 class 都在且 rate / ceil 对得上 → 不碰 tc
-# (重建要先删再加设备 class 上的过滤器, 会有一瞬间包落进默认类)。
 MIDS=$(awk '$1 == "dev" { print $2 }' "$PLAN" 2>/dev/null | tr '\n' ' ')
 TCSIG=$(printf '%s|%s' "$IFACE" "$MIDS" | cksum | awk '{print $1 "-" $2}')
 NEWSIG=$(cksum < "$PLAN" 2>/dev/null | awk '{print $1 "-" $2}')
 OLD_TCSIG=$(sed -n 1p "$SIG" 2>/dev/null)
 OLD_IPTSIG=$(sed -n 2p "$SIG" 2>/dev/null)
 TC_OK=0
+BUILD_ERR=0
 if [ "${NDEV:-0}" -gt 0 ] && [ -f "$STATE" ] && [ "$OLD_TCSIG" = "$TCSIG" ]; then
     # shellcheck disable=SC2086
     children_ok "$IFACE" $MIDS && TC_OK=1
 fi
 
 if [ "$TC_OK" != 1 ]; then
-# 1) 新状态先落盘(tc_manager ensure_class 据此判断叶子归谁)
-OLD_STATE=$(cat "$STATE" 2>/dev/null)
-: > "$STATE.tmp"
-awk '$1 == "dev" { print $2 }' "$PLAN" 2>/dev/null | while read -r mid; do
-    echo "$IFACE $(class_for_mid "$mid")" >> "$STATE.tmp"
-done
-if [ -s "$STATE.tmp" ]; then
-    mv -f "$STATE.tmp" "$STATE"
-else
-    rm -f "$STATE.tmp" "$STATE"
+    # 1) 先写入预期状态供 tc_manager ensure_class 跳过叶子覆盖, 若单设备构建失败则原子回滚该条目
+    OLD_STATE=$(cat "$STATE" 2>/dev/null)
+    : > "$STATE.tmp"
+    awk '$1 == "dev" { print $2 }' "$PLAN" 2>/dev/null | while read -r mid; do
+        case "$mid" in ''|*[!0-9]*) continue ;; esac
+        echo "$IFACE $(class_for_mid "$mid")" >> "$STATE.tmp"
+    done
+    if [ -s "$STATE.tmp" ]; then
+        mv -f "$STATE.tmp" "$STATE"
+    else
+        rm -f "$STATE.tmp" "$STATE"
+    fi
+
+    # 2) 旧状态里有、新计划里没有 → 拆子树并由 tc_manager 恢复原设备叶子 qdisc
+    printf '%s\n' "$OLD_STATE" | while read -r s_if s_cid; do
+        [ -n "$s_if" ] || continue
+        grep -qx "$s_if $s_cid" "$STATE" 2>/dev/null && continue
+        s_mid=$s_cid; [ "$s_cid" = "100" ] && s_mid=1
+        teardown_dev "$s_if" "$s_mid"
+        sh "$TCM" ensure_class "$s_if" "$s_mid" "" >/dev/null 2>&1 || true
+    done
+
+    # 3) 计划里的设备 → 建; 失败时立即回滚半成品子树、剔除 STATE 并让 tc_manager 补回叶子
+    DEV_LIST="$RUN/.aq_devs.$$"
+    awk '$1 == "dev" { print $2, $4 }' "$PLAN" 2>/dev/null > "$DEV_LIST"
+    while read -r mid ip; do
+        case "$mid" in ''|*[!0-9]*) continue ;; esac
+        if ! build_dev "$IFACE" "$mid" "$ip"; then
+            BUILD_ERR=1
+            cid=$(class_for_mid "$mid")
+            log "ERROR: build_dev failed for $IFACE mid=$mid, rolling back partial QoS subtree"
+            teardown_dev "$IFACE" "$mid"
+            if [ -f "$STATE" ]; then
+                grep -vx "$IFACE $cid" "$STATE" > "$STATE.tmp" 2>/dev/null || : > "$STATE.tmp"
+                if [ -s "$STATE.tmp" ]; then mv -f "$STATE.tmp" "$STATE"; else rm -f "$STATE.tmp" "$STATE"; fi
+            fi
+            sh "$TCM" ensure_class "$IFACE" "$mid" "$ip" >/dev/null 2>&1 || true
+        fi
+    done < "$DEV_LIST"
+    rm -f "$DEV_LIST" 2>/dev/null
 fi
 
-# 2) 旧状态里有、新计划里没有(关了 / 换了网卡)→ 拆, 再让 tc_manager 按原设置补回
-#    设备 class 的叶子(拆完它变回叶子, 内核只给了个 pfifo)
-echo "$OLD_STATE" | while read -r s_if s_cid; do
-    [ -n "$s_if" ] || continue
-    grep -qx "$s_if $s_cid" "$STATE" 2>/dev/null && continue
-    s_mid=$s_cid; [ "$s_cid" = "100" ] && s_mid=1
-    teardown_dev "$s_if" "$s_mid"
-    sh "$TCM" ensure_class "$s_if" "$s_mid" "" >/dev/null 2>&1 || true
-done
-
-# 3) 计划里的设备 → 建
-awk '$1 == "dev" { print $2, $4 }' "$PLAN" 2>/dev/null | while read -r mid ip; do
-    build_dev "$IFACE" "$mid" "$ip" || true
-done
-fi
-
-# 4) iptables: 计划变了、或跳转被别人清掉了(热点重启时 iptables_manager 清链)才重建
+# 4) iptables: 同时校验双栈 FORWARD(HNC_APP_QOS_MARK) 与 POSTROUTING(HNC_APP_QOS) 跳转在位
 if [ -f "$STATE" ]; then
-    if [ "$OLD_IPTSIG" != "$NEWSIG" ] || ! iptables -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null; then
+    if [ "$OLD_IPTSIG" != "$NEWSIG" ] \
+       || ! $IPT -t mangle -C FORWARD -j "$CHAIN_MARK" 2>/dev/null \
+       || ! $IPT -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null \
+       || { [ "$IPV6_OK" = 1 ] && { ! $IP6T -t mangle -C FORWARD -j "$CHAIN_MARK" 2>/dev/null || ! $IP6T -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null; }; }; then
         ipt_build
     fi
-    printf '%s\n%s\n' "$TCSIG" "$NEWSIG" > "$SIG"
+    if [ "$BUILD_ERR" = 0 ]; then
+        printf '%s\n%s\n' "$TCSIG" "$NEWSIG" > "$SIG"
+    else
+        rm -f "$SIG" 2>/dev/null
+    fi
 else
     ipt_remove
+    [ -n "$IFACE" ] && tc filter del dev "$IFACE" parent 1: pref "$ROOT_PREF" 2>/dev/null || true
     rm -f "$SIG"
 fi
 exit 0

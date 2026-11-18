@@ -79,7 +79,7 @@ func TestV2flyBucketClassify(t *testing.T) {
 	if _, ok := perFile["46-v2fly-a.json"]; !ok {
 		t.Skip("46-v2fly-a.json not generated")
 	}
-	idx := buildHostIndex(rules)
+	idx := buildHostIndex(rules, 1)
 	for host, want := range map[string]string{
 		"www.bilibili.com":   "bilibili",
 		"i0.hdslb.com":       "bilibili",

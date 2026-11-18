@@ -73,17 +73,20 @@ $CC \
     -std=c11 \
     -Wall \
     -Wextra \
+    -Werror \
     -Wno-unused-parameter \
     -static-libgcc \
     -D_GNU_SOURCE \
     -DANDROID \
+    -D_FILE_OFFSET_BITS=64 \
     -DHNC_HAVE_ADAPTER_BPF \
     -fPIE -pie \
+    -Wl,-z,max-page-size=16384 \
+    -Wl,-z,common-page-size=16384 \
     -pthread \
     -I"$LIBS_OUT/include" \
     -o "$OUT" \
     $SRCS \
-    -Wl,--allow-multiple-definition \
     "$LIBS_OUT/lib/libbpf.a"
 # v5.8.7 (audit): 不再链接 libelf.a/libz.a。hotspotd 仅用 libbpf 的 bpf() syscall
 # 包装(bpf.c),不调 bpf_object__*/ring_buffer__*,故链接器不会拉入需要 libelf/libz
@@ -106,8 +109,7 @@ echo "[build] Copied to $BINDIR/hotspotd"
 echo ""
 echo "=== v5.0 tools build (hnc_ipc) ==="
 if [ -d tools ]; then
-    (cd tools && bash build.sh "$ARCH" hnc_ipc) || \
-        echo "[build] WARN: hnc_ipc build failed"
+    (cd tools && bash build.sh "$ARCH" hnc_ipc)
     if [ -f "tools/prebuilt/${ARCH}/hnc_ipc" ]; then
         cp "tools/prebuilt/${ARCH}/hnc_ipc" "$BINDIR/hnc_ipc"
         chmod 755 "$BINDIR/hnc_ipc"
@@ -120,8 +122,9 @@ fi
 echo ""
 echo "=== mdns_resolve build ==="
 if [ -f mdns_resolve.c ]; then
-    $CC -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter \
-        -D_GNU_SOURCE -DANDROID -fPIE -pie -pthread \
+    $CC -O2 -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter \
+        -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -static-libgcc \
+        -fPIE -pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 -pthread \
         -o "$BINDIR/mdns_resolve" mdns_resolve.c
     "$STRIP" "$BINDIR/mdns_resolve" 2>/dev/null || true
     chmod 755 "$BINDIR/mdns_resolve"

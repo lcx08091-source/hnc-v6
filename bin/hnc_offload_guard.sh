@@ -156,8 +156,10 @@ slowpath_restore() {
     # hnc_scheduler_force_restore_global)。按 rules.json 重新通知, 让 hotspotd 对
     # 仍在限速的设备恢复它自己的 per-upstream disable(与 service.sh 恢复段同款)。
     local mac
-    for mac in $(grep -oE '"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"[^}]*"limit_enabled"[[:space:]]*:[[:space:]]*true' "$RULES" 2>/dev/null \
-                 | grep -oE '^"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"' | tr -d '"'); do
+    for mac in $(tr -d '\r\n' < "$RULES" 2>/dev/null \
+                 | grep -oE '"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"[[:space:]]*:[[:space:]]*\{[^{}]*\}' \
+                 | grep -E '"limit_enabled"[[:space:]]*:[[:space:]]*true' \
+                 | grep -oE '^"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"' | tr -d '"' | tr 'A-F' 'a-f'); do
         "$IPC" OFFLOAD_NOTIFY_LIMIT "$mac" 1 >/dev/null 2>&1 || true
     done
 }
@@ -176,7 +178,7 @@ pref1_held_by_mirred() {
 clsact_artifacts() { [ -f "$HNC_DIR/bin/hnc_clsact.o" ] && [ -x "$CTL" ]; }
 
 clsact_ours_present() {
-    "$CTL" check "$1" 2>/dev/null | grep -q '"bpf_filter":true'
+    "$CTL" check "$1" 2>/dev/null | grep -qE '"(bpf_filter|egress_filter)":true'
 }
 
 # 输出: installed | skipped_pref1_mirred | unavailable | failed
@@ -385,7 +387,8 @@ case "${1:-}" in
         cat "$STATUS" 2>/dev/null
         ;;
     restore)
-        do_restore "$(hotspot_iface)"
+        _rifc=$(hotspot_iface) || _rifc=$(head -n 1 "$RUN/iface.cache" 2>/dev/null | tr -d ' \r\n')
+        do_restore "$_rifc"
         st_save 0 0 0
         rm -f "$STATUS" 2>/dev/null
         ;;

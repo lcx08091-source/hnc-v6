@@ -1387,6 +1387,22 @@ func scSectionFirewall(c *scCtx) []scItem {
 	}
 	items = append(items, hc)
 
+	hsc := scItem{ID: "hnc_stats_chain", Label: "双栈流量统计链"}
+	s4Out, s4OK := c.run("iptables", "-t", "mangle", "-S", "HNC_STATS")
+	s6Out, s6OK := c.run("ip6tables", "-t", "mangle", "-S", "HNC_STATS")
+	switch {
+	case s4OK && s6OK:
+		n4 := strings.Count(s4Out, "\n-A ")
+		n6 := strings.Count(s6Out, "\n-A ")
+		hsc.Status, hsc.Value = scOK, fmt.Sprintf("IPv4(%d) + IPv6(%d) 双栈就绪", n4, n6)
+	case s4OK:
+		hsc.Status, hsc.Value = scInfo, "仅 IPv4 统计链已建立"
+		hsc.Detail = "热点开启且存在 IPv6 邻居后将自动同步 IPv6 统计链"
+	default:
+		hsc.Status, hsc.Value = scInfo, "未建立(热点空闲时正常)"
+	}
+	items = append(items, hsc)
+
 	acct := c.readTrim("/proc/sys/net/netfilter/nf_conntrack_acct")
 	ait := scItem{ID: "conntrack_acct", Label: "conntrack 字节计数", Value: acct}
 	switch acct {
@@ -2730,6 +2746,16 @@ func scSectionIdent(c *scCtx) []scItem {
 		}
 	}
 	items = append(items, eit)
+
+	fst := scItem{ID: "self_studio_flywheel", Label: "本机真值自训练飞轮"}
+	if c.env.Exists(c.hnc("run", "self_capture.enabled")) {
+		fst.Status, fst.Value = scOK, "采集中"
+	} else if raw, ok := c.read(c.hnc("data", "fp_distill_state.json")); ok && len(strings.TrimSpace(raw)) > 2 {
+		fst.Status, fst.Value = scOK, "已就绪(含本机蒸馏记录)"
+	} else {
+		fst.Status, fst.Value = scInfo, "按需开启(「应用」页顶部工作台)"
+	}
+	items = append(items, fst)
 	return items
 }
 

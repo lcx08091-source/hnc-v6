@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -84,6 +85,7 @@ func securityHeaders(next http.Handler) http.Handler {
 func isPublicPath(p string) bool {
 	switch p {
 	case "/",
+		"/index.html",
 		"/pair",
 		"/changelog.html",
 		// v5.9.9: 与 changelog.html 同级的本机 UI 页(只读 HTML, 不含
@@ -388,7 +390,23 @@ func isSensitiveReadPath(p string) bool {
 		"/api/alerts",
 		"/api/dpi_history",
 		"/api/app_limits",
+		"/api/whoami",
+		"/api/json_health",
+		"/api/usage_month",
+		"/api/connections",
+		"/api/discover",
+		"/api/app_usage",
+		"/api/app_time",
+		"/api/dpi_unknown",
+		"/api/dpi_fp",
+		"/api/fg_timeline",
+		"/api/phone_usage",
+		"/api/stats_health",
+		"/api/sim",
+		"/api/mac_merge",
+		"/api/power",
 		"/api/self",
+		"/api/self/studio",
 		"/api/self/ifaces",
 		"/api/self/attrib",
 		"/api/sla",
@@ -513,17 +531,43 @@ func (s *server) localAdminSecretExists() bool {
 //
 // 威胁面有限 (文件 mode 0600 + owner root, 普通进程写不进), 但前端做了后端必须严,
 // 否则下一次某个写者把文件写坏, 整条防线松动. 这是 defense-in-depth.
+var localSecretCache struct {
+	sync.Mutex
+	path  string
+	stamp fileStamp
+	val   string
+}
+
+func readCachedAdminSecret(p string) (string, error) {
+	fi, err := os.Stat(p)
+	if err != nil {
+		return "", err
+	}
+	st := statOf(fi)
+	localSecretCache.Lock()
+	defer localSecretCache.Unlock()
+	if localSecretCache.path == p && localSecretCache.stamp == st && localSecretCache.val != "" {
+		return localSecretCache.val, nil
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return "", err
+	}
+	s := strings.TrimSpace(string(b))
+	localSecretCache.path, localSecretCache.stamp, localSecretCache.val = p, st, s
+	return s, nil
+}
+
 func (s *server) checkLocalAdminSecret(r *http.Request) bool {
 	got := strings.TrimSpace(r.Header.Get("X-HNC-Local-Admin"))
 	if !isValid64Hex(got) {
 		return false
 	}
 	p := filepath.Join(s.hncDir, localAdminSecretRelPath)
-	wantB, err := os.ReadFile(p)
+	want, err := readCachedAdminSecret(p)
 	if err != nil {
 		return false
 	}
-	want := strings.TrimSpace(string(wantB))
 	if !isValid64Hex(want) {
 		// 磁盘 secret 不是合法 64 hex (被截断/写坏), 拒绝. service.sh 应重新生成.
 		log.Printf("checkLocalAdminSecret: on-disk secret invalid (not 64 hex), rejecting all requests until regenerated")

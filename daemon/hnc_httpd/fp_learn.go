@@ -92,9 +92,12 @@ type fpEntry struct {
 	Apps  map[string]*fpAppCount `json:"apps"`
 	Total float64                `json:"total"`
 	Devs  map[string]int64       `json:"devs,omitempty"` // MAC 散列前缀 → 最近出现
-	First int64                  `json:"first"`
-	Last  int64                  `json:"last"`
-	Upd   int64                  `json:"upd"` // 计数衰减到的时刻
+	First        int64                  `json:"first"`
+	Last         int64                  `json:"last"`
+	Upd          int64                  `json:"upd"` // 计数衰减到的时刻
+	PersonalTier string                 `json:"personal_tier,omitempty"`
+	PersonalExp  int64                  `json:"personal_exp,omitempty"`
+	PersonalSNIs int                    `json:"personal_snis,omitempty"`
 }
 
 type fpVerdict struct {
@@ -234,6 +237,7 @@ func (e *fpEntry) verdict(now int64) fpVerdict {
 	if v.Usable {
 		v.Conf = v.Purity * v.Support / (v.Support + 10)
 	}
+	e.applyPersonalVerdict(&v, now)
 	return v
 }
 

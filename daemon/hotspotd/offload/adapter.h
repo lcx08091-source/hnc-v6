@@ -190,4 +190,9 @@ offload_adapter_t *offload_active_adapter(void);
  */
 void offload_set_active_adapter(offload_adapter_t *a);
 
+/* Interruptible sleep hook registered by scheduler so SIGTERM wakes
+ * refresh_active's 5s sample window immediately (<1ms vs 5s hang). */
+void offload_set_sleep_fn(int (*fn)(int sec));
+int  offload_sleep_interruptible(int sec);
+
 #endif /* HNC_OFFLOAD_ADAPTER_H */

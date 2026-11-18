@@ -20,7 +20,6 @@ package output
 
 import (
 	"encoding/json"
-	"os"
 	"strings"
 )
 
@@ -47,20 +46,23 @@ var entitySharedTypes = map[string]struct{}{
 
 // loadEntityDB reads the curated entity library. Keys lowercased; missing or
 // malformed file yields an empty map (feature simply no-ops).
-func loadEntityDB() map[string]entityRec {
-	out := map[string]entityRec{}
-	data, err := os.ReadFile(entityDBFile)
-	if err != nil {
-		return out
-	}
+var entityDBCache = NewCachedFile(entityDBFile, func(data []byte) (map[string]entityRec, error) {
 	var db entityDBData
 	if err := json.Unmarshal(data, &db); err != nil {
-		return out
+		return nil, err
 	}
+	out := make(map[string]entityRec, len(db.Entities))
 	for apex, rec := range db.Entities {
 		out[strings.ToLower(strings.TrimSpace(apex))] = rec
 	}
-	return out
+	return out, nil
+})
+
+func loadEntityDB() map[string]entityRec {
+	if m, err := entityDBCache.Get(); err == nil && m != nil {
+		return m
+	}
+	return map[string]entityRec{}
 }
 
 // entityIsShared reports whether the entity DB classifies apex as shared

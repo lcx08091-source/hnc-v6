@@ -244,7 +244,7 @@ if [ -f "$DAILY_FILE" ]; then
         PRUNE_TMP="${DAILY_FILE}.prune.$$"
         awk -v cutoff="$CUTOFF_DATE" '
         {
-            if (match($0, /"date"[[:space:]]*:[[:space:]]*"[0-9]{4}-[0-9]{2}-[0-9]{2}"/)) {
+            if (match($0, /"date"[[:space:]]*:[[:space:]]*"[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"/)) {
                 s = substr($0, RSTART, RLENGTH)
                 sub(/.*:[[:space:]]*"/, "", s); sub(/"$/, "", s)
                 if (s >= cutoff) print

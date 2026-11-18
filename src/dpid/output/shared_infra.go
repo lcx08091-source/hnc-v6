@@ -26,6 +26,7 @@ import (
 	"os"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -189,17 +190,14 @@ type DiscoverShared struct {
 // nodeListShared 节点本身命中名单, 或节点上见过的主机名全部命中(如名单写的是
 // bugly.qq.com 这种子域、节点是 qq.com)。
 func nodeListShared(n *discNode, si *SharedInfra) bool {
-	if si == nil {
-		return false
-	}
-	if si.Match(n.reg) {
+	if _, ok := IsAutoDetectedInfra(n.reg, si); ok {
 		return true
 	}
-	if len(n.hosts) == 0 {
+	if si == nil || len(n.hosts) == 0 {
 		return false
 	}
 	for h := range n.hosts {
-		if !si.Match(h) {
+		if _, ok := IsAutoDetectedInfra(h, si); !ok {
 			return false
 		}
 	}
@@ -255,7 +253,12 @@ func classifyShared(nodes map[string]*discNode, edges map[discEdgeKey]*discEdge,
 	}
 	cands := map[string]bool{}
 	for reg, n := range nodes {
-		if !excl[reg] && devsInWindow(n, now) >= discSharedMinDevices {
+		if excl[reg] || hasDirectionalityVeto(reg) {
+			continue
+		}
+		// 兼容 1~2 台设备的手机热点常态：多设备候选(>=3 台) 或 单/双设备超高连接度数星型枢纽(>=6 独立簇)进入拓扑检验
+		const discSharedStarMinGroups = 6
+		if devsInWindow(n, now) >= discSharedMinDevices || len(adj[reg]) >= discSharedStarMinGroups {
 			cands[reg] = true
 		}
 	}
@@ -275,6 +278,23 @@ func classifyShared(nodes map[string]*discNode, edges map[discEdgeKey]*discEdge,
 				rootOf[m.reg] = r
 			}
 		}
+		rootAdj := map[string]map[string]bool{}
+		for k, e := range es {
+			if discDecay(e.w, e.t, now) < discSharedEdgeMin {
+				continue
+			}
+			ra, rb := rootOf[k.a], rootOf[k.b]
+			if ra != "" && rb != "" && ra != rb {
+				if rootAdj[ra] == nil {
+					rootAdj[ra] = map[string]bool{}
+				}
+				if rootAdj[rb] == nil {
+					rootAdj[rb] = map[string]bool{}
+				}
+				rootAdj[ra][rb] = true
+				rootAdj[rb][ra] = true
+			}
+		}
 		for c := range cands {
 			groups := map[string]bool{}
 			for nb, e := range adj[c] {
@@ -284,7 +304,15 @@ func classifyShared(nodes map[string]*discNode, edges map[discEdgeKey]*discEdge,
 				}
 				groups[r] = true
 			}
-			if len(groups) >= discSharedMinGroups {
+			if len(groups) < discSharedMinGroups {
+				continue
+			}
+			gList := make([]string, 0, len(groups))
+			for g := range groups {
+				gList = append(gList, g)
+			}
+			// 多设备(>=3 台, >=4 组)直接通过；单/双设备要求连接 >=6 个独立应用簇且邻居互不粘连（LCC < 0.20）
+			if devsInWindow(nodes[c], now) >= discSharedMinDevices || (len(groups) >= 6 && neighborLCC(gList, rootAdj) < 0.20) {
 				out[c] = sharedReasonFreq
 				sticky[c] = now
 			}
@@ -358,4 +386,174 @@ func sharedTopList(shared map[string]string, nodes map[string]*discNode, sticky 
 		out = out[:discSharedMaxOut]
 	}
 	return out
+}
+
+// ── v7 四维零手动公共 CDN / 共享 SDK 自动识别扩展 ─────────────────────────
+//
+// 融合四路正交信号：
+//   1) 统一静态知识库：shared_infra.txt + entity_db.json + auto_expand_blocklist.json + 词法结构启发式；
+//   2) CNAME 跨域有向图汇点晋升（>=2 个异构外部主域 CNAME 指向同一目标主域 → 立即晋升公共 CDN）；
+//   3) 源点方向否决护栏（Directionality Veto：自身子域向外 CNAME 到 CDN 且从不承接外部异构 CNAME 的主域，
+//      一票否决晋升为公共 CDN，彻底防止误伤 qq.com / taobao.com 等甲方业务母域）；
+//   4) 单设备热点星型共现拓扑（邻居簇 >= 4 且局部聚类系数 LCC < 0.20，1 台设备在线即可自动识别共享 SDK）。
+
+var dynCNAMEInfra = struct {
+	sync.RWMutex
+	inboundSources map[string]map[string]bool // targetApex -> set of foreign srcApex
+	outboundCDN    map[string]bool            // srcApex -> true (甲方业务源点保护标记)
+	promotedApex   map[string]int64           // 自动晋升为公共 CDN 的 targetApex -> ts
+	cnameSubHost   map[string]int64           // 具体业务子域(如 img.app.com -> *.kunlun.com) -> ts
+}{
+	inboundSources: map[string]map[string]bool{},
+	outboundCDN:    map[string]bool{},
+	promotedApex:   map[string]int64{},
+	cnameSubHost:   map[string]int64{},
+}
+
+func sameBrandStem(apexA, apexB string) bool {
+	a := strings.Split(apexA, ".")[0]
+	b := strings.Split(apexB, ".")[0]
+	if a == "" || b == "" {
+		return false
+	}
+	return a == b || (len(a) >= 4 && strings.Contains(b, a)) || (len(b) >= 4 && strings.Contains(a, b))
+}
+
+// MatchLexicalInfra 词法启发式捕获未入库的通用 GSLB / 动态编号 CDN 节点（严控误报，不匹配业务主域）。
+func MatchLexicalInfra(host string) bool {
+	h := strings.Trim(strings.ToLower(strings.TrimSpace(host)), ".")
+	if h == "" {
+		return false
+	}
+	reg := registrableDomain(h)
+	if strings.Contains(reg, "cdngslb") || strings.Contains(reg, "wsglb") ||
+		strings.Contains(reg, "ksyungslb") || strings.Contains(reg, "qiniudns") {
+		return true
+	}
+	if strings.HasPrefix(reg, "kunlun") || strings.HasPrefix(reg, "cdnhwc") ||
+		strings.HasPrefix(reg, "tdnsv") || strings.HasPrefix(reg, "smtcdns") {
+		return true
+	}
+	return false
+}
+
+// RecordDNSChainForInfra 在 dpid 捕获 DNS 应答时调用，实时维护跨域 CNAME 拓扑。
+func RecordDNSChainForInfra(qname string, recs []DNSAnswer, si *SharedInfra, now int64) {
+	qn := normalizeName(qname)
+	srcApex := registrableDomain(qn)
+	if qn == "" || srcApex == "" || len(recs) == 0 {
+		return
+	}
+	entityDB := loadEntityDB()
+	blocklist, _ := loadBlocklist()
+
+	isKnownInfra := func(h string) bool {
+		ap := registrableDomain(h)
+		if (si != nil && si.Match(h)) || MatchLexicalInfra(h) || entityIsShared(ap, entityDB) {
+			return true
+		}
+		_, blk := blocklist[ap]
+		return blk
+	}
+
+	dynCNAMEInfra.Lock()
+	defer dynCNAMEInfra.Unlock()
+
+	for _, r := range recs {
+		if r.Type != 5 { // CNAME
+			continue
+		}
+		tgt := normalizeName(r.Value)
+		tgtApex := registrableDomain(tgt)
+		if tgt == "" || tgtApex == "" || tgtApex == srcApex {
+			continue
+		}
+		if isKnownInfra(tgt) || dynCNAMEInfra.promotedApex[tgtApex] > 0 {
+			// 甲方业务源点向外指向已知 CDN：保护源点主域不被误判，同时标记该具体子域为 CDN 承载子域
+			dynCNAMEInfra.outboundCDN[srcApex] = true
+			if len(dynCNAMEInfra.cnameSubHost) < 4096 {
+				dynCNAMEInfra.cnameSubHost[qn] = now
+			}
+		}
+		if !sameBrandStem(srcApex, tgtApex) {
+			srcs := dynCNAMEInfra.inboundSources[tgtApex]
+			if srcs == nil {
+				if len(dynCNAMEInfra.inboundSources) >= 2048 {
+					continue
+				}
+				srcs = map[string]bool{}
+				dynCNAMEInfra.inboundSources[tgtApex] = srcs
+			}
+			if len(srcs) < 16 {
+				srcs[srcApex] = true
+			}
+			// 两个及以上互不隶属的外部业务主域 CNAME 汇入同一目标主域(且目标本身不是已观测到的纯甲方出站源) → 晋升公共 CDN
+			if len(srcs) >= 2 && (!dynCNAMEInfra.outboundCDN[tgtApex] || len(srcs) >= 6) {
+				dynCNAMEInfra.promotedApex[tgtApex] = now
+				dynCNAMEInfra.outboundCDN[srcApex] = true
+				if len(dynCNAMEInfra.cnameSubHost) < 4096 {
+					dynCNAMEInfra.cnameSubHost[qn] = now
+				}
+			}
+		}
+	}
+}
+
+// IsAutoDetectedInfra 综合统一实体库、黑名单、词法规则与 CNAME 汇点拓扑判断主机是否属于共享基础设施。
+func IsAutoDetectedInfra(host string, si *SharedInfra) (string, bool) {
+	h := normalizeName(host)
+	if h == "" {
+		return "", false
+	}
+	if si != nil && si.Match(h) {
+		return sharedReasonList, true
+	}
+	if MatchLexicalInfra(h) {
+		return "lexical", true
+	}
+	ap := registrableDomain(h)
+	if entityIsShared(ap, loadEntityDB()) {
+		return "entity_db", true
+	}
+	if blk, _ := loadBlocklist(); blk != nil {
+		if _, ok := blk[ap]; ok {
+			return "blocklist", true
+		}
+	}
+	dynCNAMEInfra.RLock()
+	_, isProm := dynCNAMEInfra.promotedApex[ap]
+	_, isSub := dynCNAMEInfra.cnameSubHost[h]
+	dynCNAMEInfra.RUnlock()
+	if isProm {
+		return "cname_sink", true
+	}
+	if isSub {
+		return "cname_sub", true
+	}
+	return "", false
+}
+
+// hasDirectionalityVeto 护栏 A：纯甲方源点主域（向外使用 CDN 但从不承接外部异构 CNAME）禁止误判为公共 CDN。
+func hasDirectionalityVeto(apex string) bool {
+	dynCNAMEInfra.RLock()
+	defer dynCNAMEInfra.RUnlock()
+	inCnt := len(dynCNAMEInfra.inboundSources[apex])
+	return inCnt == 0 && dynCNAMEInfra.outboundCDN[apex]
+}
+
+// neighborLCC 计算候选节点邻居簇之间的局部聚类系数，星型公共 SDK/CDN 趋近于 0，同集团业务矩阵偏高。
+func neighborLCC(groupRoots []string, rootAdj map[string]map[string]bool) float64 {
+	k := len(groupRoots)
+	if k < 2 {
+		return 1.0
+	}
+	links := 0
+	for i := 0; i < k; i++ {
+		for j := i + 1; j < k; j++ {
+			if rootAdj[groupRoots[i]][groupRoots[j]] {
+				links++
+			}
+		}
+	}
+	return float64(2*links) / float64(k*(k-1))
 }

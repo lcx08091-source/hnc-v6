@@ -93,6 +93,7 @@
 #define RTNL_REQ_BUF_SIZE         1024    /* per-request scratch buffer      */
 #define RTNL_RECV_BUF_SIZE        8192    /* ACK / NLMSG_ERROR recv buffer   */
 #define RTNL_RECV_TIMEOUT_S       3       /* kernel ACKs are always fast     */
+#define RTNL_MAX_RECV_TRIES       32      /* cap stray unmatched replies     */
 
 /* Return codes — keep in sync with README.md and SPEC. */
 #define RC_OK                     0
@@ -220,8 +221,11 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
     memset(&sa, 0, sizeof(sa));
     sa.nl_family = AF_NETLINK;
 
-    ssize_t sent = sendto(fd, n, n->nlmsg_len, 0,
-                          (struct sockaddr *)&sa, sizeof(sa));
+    ssize_t sent;
+    do {
+        sent = sendto(fd, n, n->nlmsg_len, MSG_NOSIGNAL,
+                      (struct sockaddr *)&sa, sizeof(sa));
+    } while (sent < 0 && errno == EINTR);
     if (sent < 0) {
         LOGE("%s: sendto: %s", what, strerror(errno));
         return -errno;
@@ -231,7 +235,7 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
         return -EIO;
     }
 
-    char         buf[RTNL_RECV_BUF_SIZE];
+    char         buf[RTNL_RECV_BUF_SIZE] __attribute__((aligned(NLMSG_ALIGNTO)));
     struct iovec iov = { .iov_base = buf, .iov_len = sizeof(buf) };
     struct msghdr msg = {
         .msg_name    = &sa,
@@ -240,8 +244,8 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
         .msg_iovlen  = 1,
     };
 
-    /* Loop until we get a reply with matching seq, or I/O fails. */
-    for (;;) {
+    /* Bounded loop until we get a reply with matching seq, or I/O fails. */
+    for (int tries = 0; tries < RTNL_MAX_RECV_TRIES; tries++) {
         ssize_t len = recvmsg(fd, &msg, 0);
         if (len < 0) {
             if (errno == EINTR) continue;
@@ -253,13 +257,18 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
             return -EIO;
         }
 
+        int rem = (int)len;
         struct nlmsghdr *h = (struct nlmsghdr *)buf;
-        for (; NLMSG_OK(h, (size_t)len); h = NLMSG_NEXT(h, len)) {
+        for (; NLMSG_OK(h, rem); h = NLMSG_NEXT(h, rem)) {
             /* Stray multicast or stale reply — skip. */
             if (h->nlmsg_seq != n->nlmsg_seq)
                 continue;
 
             if (h->nlmsg_type == NLMSG_ERROR) {
+                if (h->nlmsg_len < NLMSG_LENGTH(sizeof(struct nlmsgerr))) {
+                    LOGE("%s: truncated NLMSG_ERROR (%u bytes)", what, h->nlmsg_len);
+                    return -EBADMSG;
+                }
                 struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(h);
                 if (err->error == 0)
                     return 0;                       /* success ACK */
@@ -276,6 +285,8 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
         }
         /* No matching seq in this datagram — loop and read more. */
     }
+    LOGE("%s: exceeded %d unmatched netlink replies", what, RTNL_MAX_RECV_TRIES);
+    return -EPROTO;
 }
 
 /* ── Build & send: RTM_NEWQDISC clsact ───────────────────────────────── */

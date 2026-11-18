@@ -65,9 +65,53 @@ const (
 
 // hmmDev 一台设备的 HMM 状态
 type hmmDev struct {
-	logp map[string]float64 // 状态 → log 后验(已归一化)
-	cur  string             // 当前决定("" = 没有前台)
-	post float64            // cur 的后验
+	logp     map[string]float64 // 状态 → log 后验(已归一化)
+	cur      string             // 当前决定("" = 没有前台)
+	post     float64            // cur 的后验
+	dwellSec map[string]float64 // v5.34 HSMM: 各状态已驻留秒数
+	cats     map[string]string  // v5.34 HSMM: 应用类别 (空时严格退化为齐次 exp(-dt/180))
+	fastExit map[string]bool    // v5.34 Fast-Exit: 连接坍塌潮信号
+}
+
+// hmmWeibullStay v5.34 类别自适应威布尔风险率半马尔可夫留存概率:
+//   - 游戏/短视频/直播 (k=0.68, λ=420s): 递减风险率 DFR, 越沉浸越抗后台尖峰干扰;
+//   - 工具/商店/下载 (k=1.55, λ=45s): 递增风险率 IFR, 即用即走快速释放焦点;
+//   - 未指定类别 (cat=="", 单测默认): 严格退化为齐次马尔可夫 exp(-dt / hmmTau)。
+func hmmWeibullStay(cat string, dSec, dt float64, fastExit bool) float64 {
+	if fastExit {
+		return math.Exp(-dt/12.0 - 2.2)
+	}
+	c := strings.ToLower(strings.TrimSpace(cat))
+	if c == "" {
+		return math.Exp(-dt / hmmTau)
+	}
+	k, lam := 1.0, hmmTau
+	switch {
+	case c == "short_video" || c == "short-video" || strings.HasPrefix(c, "live") || strings.HasPrefix(c, "game"):
+		k, lam = 0.68, 420.0
+	case strings.Contains(c, "video"):
+		k, lam = 0.78, 360.0
+	case c == "download" || c == "app_store" || strings.HasPrefix(c, "system"):
+		k, lam = 1.55, 45.0
+	case c == "shopping" || c == "browser" || c == "social" || c == "news" || c == "reading":
+		k, lam = 0.90, 180.0
+	}
+	if k == 1.0 && lam == hmmTau {
+		return math.Exp(-dt / hmmTau)
+	}
+	h1 := math.Pow((dSec+dt)/lam, k)
+	h0 := 0.0
+	if dSec > 0 {
+		h0 = math.Pow(dSec/lam, k)
+	}
+	p := math.Exp(-(h1 - h0))
+	if p < 0.01 {
+		return 0.01
+	}
+	if p > 0.995 {
+		return 0.995
+	}
+	return p
 }
 
 func newHMMDev() *hmmDev {
@@ -146,20 +190,58 @@ func hmmStep(h *hmmDev, inst map[string]float64, started map[string]bool, dt flo
 	}
 	h.normalize()
 
-	// 转移
+	// 转移 (v5.34: 支持类别自适应威布尔风险率 HSMM 与连接坍塌快退; 无类别元数据时严格等价原齐次核)
 	n := len(h.logp)
 	if n > 1 {
-		stay := math.Exp(-dt / hmmTau)
-		for id, v := range h.logp {
-			p := math.Exp(v)
-			np := stay*p + (1-stay)*(1-p)/float64(n-1)
-			h.logp[id] = math.Log(math.Max(np, 1e-300))
+		if len(h.cats) == 0 && len(h.fastExit) == 0 {
+			stay := math.Exp(-dt / hmmTau)
+			for id, v := range h.logp {
+				p := math.Exp(v)
+				np := stay*p + (1-stay)*(1-p)/float64(n-1)
+				h.logp[id] = math.Log(math.Max(np, 1e-300))
+			}
+		} else {
+			if h.dwellSec == nil {
+				h.dwellSec = map[string]float64{}
+			}
+			outMass := 0.0
+			stayP := make(map[string]float64, n)
+			curP := make(map[string]float64, n)
+			for id, v := range h.logp {
+				p := math.Exp(v)
+				curP[id] = p
+				st := math.Exp(-dt / hmmTau)
+				if id != hmmNone {
+					st = hmmWeibullStay(h.cats[id], h.dwellSec[id], dt, h.fastExit[id])
+				}
+				stayP[id] = st
+				outMass += (1.0 - st) * p
+			}
+			shareDenom := float64(n - 1)
+			for id := range h.logp {
+				inflow := (outMass - (1.0-stayP[id])*curP[id]) / shareDenom
+				if inflow < 0 {
+					inflow = 0
+				}
+				np := stayP[id]*curP[id] + inflow
+				h.logp[id] = math.Log(math.Max(np, 1e-300))
+			}
 		}
 	}
-	// 观测
+	// 观测（v7 补齐显式全网静默负证据：当所有候选应用均无瞬时活动且无启动信号时，加速收敛回 _none，消除锁屏僵尸前台）
+	allSilent := len(started) == 0
+	for _, v := range inst {
+		if v >= 1.0 {
+			allSilent = false
+			break
+		}
+	}
 	for id := range h.logp {
 		if id == hmmNone {
 			h.logp[id] += hmmKappa * hmmTheta / 100
+			if allSilent {
+				h.logp[id] += 1.45
+			}
 			continue
 		}
 		h.logp[id] += hmmKappa * inst[id] / 100
@@ -193,7 +275,16 @@ func hmmStep(h *hmmDev, inst map[string]float64, started map[string]bool, dt flo
 	default:
 		h.cur = ""
 	}
+	if h.dwellSec == nil {
+		h.dwellSec = map[string]float64{}
+	}
+	for id := range h.dwellSec {
+		if id != h.cur {
+			delete(h.dwellSec, id)
+		}
+	}
 	if h.cur != "" {
+		h.dwellSec[h.cur] += dt
 		h.post = h.postOf(h.cur)
 	} else {
 		h.post = h.postOf(hmmNone)

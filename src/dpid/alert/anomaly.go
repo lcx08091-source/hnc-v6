@@ -73,8 +73,9 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 	curHourStart := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location()).Unix()
 	curHourEnd := now.Unix()
 	current := map[string]uint64{}
-	// v5.12: 窗口改为左闭右开, 右端 +1 让 t==now 的行仍计入当前小时。
-	if err := sumByMAC(historyDir, curHourStart, curHourEnd+1, current); err != nil {
+	// v8 修正: stats.YYYYMMDD.jsonl 在整刻写入代表过去 15 分钟增量(t=14:00:00 实属 13:45~14:00),
+	// 故排除左端点 curHourStart(+1), 采用 (curHourStart, curHourEnd] 左开右闭窗口。
+	if err := sumByMAC(historyDir, curHourStart+1, curHourEnd+1, current); err != nil {
 		// Probably "today's file doesn't exist yet". Not fatal —
 		// nothing to compare against, just exit cleanly.
 		return 0, nil
@@ -88,30 +89,36 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 	// observation we're testing.)
 	//
 	// baseline[mac] = average of per-day sums for that mac's same-hour window.
-	dayCounts := map[string]int{}
+	validHistoryDays := 0
+	seenAnyHour := map[string]bool{}
 	dayTotals := map[string]uint64{}
 	for offset := 1; offset <= anomalyBaselineDays; offset++ {
 		dayStart := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location()).
 			AddDate(0, 0, -offset)
 		dayEnd := dayStart.Add(time.Hour)
 		perDay := map[string]uint64{}
-		if err := sumByMAC(historyDir, dayStart.Unix(), dayEnd.Unix(), perDay); err != nil {
-			// Day file missing — that day's contribution is zero, just skip
-			// (don't count it in the denominator).
+		if err := sumByMAC(historyDir, dayStart.Unix()+1, dayEnd.Unix()+1, perDay); err != nil {
 			continue
 		}
+		validHistoryDays++
 		for mac, b := range perDay {
 			dayTotals[mac] += b
-			dayCounts[mac]++
+			seenAnyHour[mac] = true
 		}
 	}
+	const minBaselineFloor = 4 * 1024 * 1024 // 4 MB 基线下限保底, 防止历史 10KB 心跳造出 5000x 假阳性
 	baseline := map[string]float64{}
-	for mac, total := range dayTotals {
-		n := dayCounts[mac]
-		if n == 0 {
-			continue
+	if validHistoryDays > 0 {
+		for mac, total := range dayTotals {
+			if !seenAnyHour[mac] {
+				continue
+			}
+			b := float64(total) / float64(validHistoryDays)
+			if b < minBaselineFloor {
+				b = minBaselineFloor
+			}
+			baseline[mac] = b
 		}
-		baseline[mac] = float64(total) / float64(n)
 	}
 
 	// Step 3: evaluate. To keep the alert log from getting hammered when a

@@ -94,7 +94,11 @@ int main(int argc, char **argv)
 	fprintf(stdout, "[3/3] waiting for child...\n");
 	fflush(stdout);
 
-	if (waitpid(pid, &status, 0) < 0) {
+	pid_t w;
+	do {
+		w = waitpid(pid, &status, 0);
+	} while (w < 0 && errno == EINTR);
+	if (w < 0) {
 		fprintf(stderr, "  WAITPID FAILED: errno=%d (%s)\n", errno, strerror(errno));
 		return 1;
 	}

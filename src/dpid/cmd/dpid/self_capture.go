@@ -115,6 +115,12 @@ func observeLabelSample(in output.LabelSampleInput) {
 	}
 }
 
+func flushLabelSamplesNow() {
+	if h := labelSamples.Load(); h != nil && h.w != nil {
+		h.w.FlushNow()
+	}
+}
+
 // liveCap is one active per-iface capture goroutine's bookkeeping.
 type liveCap struct {
 	iface     string
@@ -124,6 +130,7 @@ type liveCap struct {
 
 	// Per-iface counters (atomic so the reconciler can read them under
 	// only its own liveMu, not the capture goroutine's locks).
+	rxBytes   atomic.Uint64
 	packets   atomic.Uint64
 	tlsEvents atomic.Uint64
 	dnsEvents atomic.Uint64
@@ -182,6 +189,7 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 				StartedAt: lc.startedAt,
 				Restarts:  lc.restarts.Load(),
 				LastError: lc.getErr(),
+				RxBytes:   lc.rxBytes.Load(),
 				Packets:   lc.packets.Load(),
 				TLSEvents: lc.tlsEvents.Load(),
 				DNSEvents: lc.dnsEvents.Load(),
@@ -299,12 +307,37 @@ func runSelfCaptures(ctx context.Context, cfg Config, selfAttrib *output.SelfAtt
 	// populated Interfaces[] (rather than empty until first 30s tick).
 	reconcile()
 
+	pokePath := filepath.Join(cfg.RunDir, "self_studio.poke")
+	reloadFlagPath := filepath.Join(cfg.RunDir, "dpi_rules.reload")
+	var lastReloadMtime int64
+
 	tk := time.NewTicker(selfRescanInterval)
+	pokeTk := time.NewTicker(80 * time.Millisecond)
 	defer tk.Stop()
+	defer pokeTk.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-pokeTk.C:
+			if st, err := os.Stat(reloadFlagPath); err == nil {
+				if mt := st.ModTime().UnixNano(); mt != lastReloadMtime {
+					lastReloadMtime = mt
+					output.InvalidateRuleCache()
+				}
+			}
+			if _, err := os.Stat(pokePath); err == nil {
+				reconcile()
+				if _, enErr := os.Stat(flagPath); enErr == nil {
+					selfAttrib.SampleNow()
+				}
+				flushLabelSamplesNow()
+				selfAttrib.TriggerExpandNow()
+				liveMu.Lock()
+				pushState()
+				liveMu.Unlock()
+				_ = os.Remove(pokePath)
+			}
 		case <-tk.C:
 			reconcile()
 		}
@@ -350,6 +383,9 @@ func runOneSelfCapture(ctx context.Context, cfg Config, lc *liveCap, selfAttrib 
 
 	err = h.Run(ctx, func(ev capture.Event) {
 		lc.packets.Add(1)
+		if ev.Bytes > 0 {
+			lc.rxBytes.Add(uint64(ev.Bytes))
+		}
 		switch ev.Kind {
 		case capture.EventTLSClientHello:
 			lc.tlsEvents.Add(1)

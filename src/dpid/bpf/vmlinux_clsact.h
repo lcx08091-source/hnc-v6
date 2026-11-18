@@ -1,9 +1,6 @@
 /* vmlinux_clsact.h — Minimal vmlinux types for clsact BPF program
  *
  * SPDX-License-Identifier: GPL-2.0
- *
- * 只含 hnc_clsact.bpf.c 需要的最小类型定义,避免引入完整 vmlinux.h。
- * (回移自 5.9.91 分叉,补上其缺失的字节序宏——这正是分叉版字节序 bug 的根因)
  */
 #ifndef __VMLINUX_CLSACT_H__
 #define __VMLINUX_CLSACT_H__
@@ -15,30 +12,55 @@ typedef unsigned long long __u64;
 typedef signed int __s32;
 
 /* TC return codes */
+#ifndef TC_ACT_OK
 #define TC_ACT_OK 0
+#endif
+#ifndef TC_ACT_SHOT
 #define TC_ACT_SHOT 2
-
-/* ETH_P_IP */
-#define ETH_P_IP 0x0800
-
-/* BPF map types */
-#define BPF_MAP_TYPE_HASH 1
-
-/* 字节序: eBPF tc 程序里 skb->protocol 是 __be16(网络序)。arm64 恒为小端,
- * 网络序 0x0800 的字节 08 00 以本机 u16 读出是 0x0008 —— 直接 != 0x0800
- * 比较恒真(分叉版 bug: 每个 IPv4 包都在首行被跳过,打标永不执行)。
- * 形态照抄 libbpf bpf_endian.h 的 __bpf_htons。 */
-#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
-#define bpf_htons(x) __builtin_bswap16(x)
-#else
-#define bpf_htons(x) (x)
 #endif
 
-/* 传统 map 定义结构(iproute2 风格, SEC("maps"))。
- * 不用 BTF .maps 风格的原因: 本仓库的 C 工具链没有可链接的 libelf/libz
- * (见 daemon/hotspotd/build.sh 的 v5.8.7 注释), clsact_ctl 是裸 syscall
- * 迷你加载器 —— 传统 map_def 让加载器直接从 ELF "maps" 节读参数,
- * 无需 BTF 解析。内核对所有版本都支持该风格。 */
+/* EtherTypes */
+#ifndef ETH_P_IP
+#define ETH_P_IP      0x0800
+#endif
+#ifndef ETH_P_IPV6
+#define ETH_P_IPV6    0x86DD
+#endif
+#ifndef ETH_P_8021Q
+#define ETH_P_8021Q   0x8100
+#endif
+#ifndef ETH_P_8021AD
+#define ETH_P_8021AD  0x88A8
+#endif
+
+/* IPv6 Next Header / IPPROTO numbers */
+#define IPPROTO_HOPOPTS   0
+#define IPPROTO_TCP       6
+#define IPPROTO_UDP       17
+#define IPPROTO_ROUTING   43
+#define IPPROTO_FRAGMENT  44
+#define IPPROTO_AH        51
+#define IPPROTO_ICMPV6    58
+#define IPPROTO_DSTOPTS   60
+
+/* BPF map types */
+#ifndef BPF_MAP_TYPE_HASH
+#define BPF_MAP_TYPE_HASH 1
+#endif
+
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
+#define bpf_htons(x) __builtin_bswap16(x)
+#elif __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define bpf_htons(x) (x)
+#else
+#error "Unknown __BYTE_ORDER__"
+#endif
+
+#ifndef __always_inline
+#define __always_inline __inline __attribute__((always_inline))
+#endif
+
+/* Legacy iproute2-style map definition (parsed directly by clsact_ctl without libelf/BTF) */
 struct bpf_map_def {
     __u32 type;
     __u32 key_size;
@@ -49,7 +71,17 @@ struct bpf_map_def {
     __u32 numa_node;
 };
 
-/* struct __sk_buff — minimal definition for tc BPF programs */
+/* 8-byte aligned L2 MAC key for dual-stack IPv4 + RFC 4941 IPv6 matching */
+struct mac_key {
+    __u8  mac[6];
+    __u16 pad;
+};
+
+struct vlan_hdr {
+    __u16 h_vlan_TCI;
+    __u16 h_vlan_encapsulated_proto;
+};
+
 struct __sk_buff {
     __u32 len;
     __u32 pkt_type;
@@ -79,10 +111,14 @@ struct __sk_buff {
     __u32 data_meta;
 };
 
-/* struct iphdr — minimal IPv4 header */
 struct iphdr {
+#if __BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__
     __u8 ihl:4;
     __u8 version:4;
+#else
+    __u8 version:4;
+    __u8 ihl:4;
+#endif
     __u8 tos;
     __u16 tot_len;
     __u16 id;
@@ -94,15 +130,15 @@ struct iphdr {
     __u32 daddr;
 };
 
-/* BPF helper: map_lookup_elem (helper ID 1) */
-extern void *bpf_map_lookup_elem(void *map, const void *key);
+/* Direct BPF helper IDs (const + unused avoids .data emission at -O0 and unused warnings) */
+static void *(* const bpf_map_lookup_elem)(void *map, const void *key)
+    __attribute__((unused)) = (void *)1;
+static long (* const bpf_skb_pull_data)(struct __sk_buff *skb, __u32 len)
+    __attribute__((unused)) = (void *)39;
 
-/* BPF map definition macros (normally from bpf_helpers.h) */
 #define __uint(name, val) int (*name)[val]
 #define __type(name, val) typeof(val) *name
 #define __array(name, val) typeof(val) *name[]
-
-/* SEC helper */
 #define SEC(name) __attribute__((section(name), used))
 
 #endif /* __VMLINUX_CLSACT_H__ */

@@ -206,12 +206,28 @@ function appTimeFold(d) {
   return dFold('at-' + d.mac, 'var(--pink,#FF2D55)', '应用使用时长', esc(sum2), fgNowHtml(d) + '<div data-at>' + appTimeInner(d) + '</div>');
 }
 /* DPI v2 前台模型: 「正在用 / 后台」+ 前台时间线入口 */
-var FG_ST = { active: '正在用', paused: '暂停中', idle: '空闲', stale: '数据过期', unknown: '未知' };
+var FG_ST = { active: '正在用', paused: '缓冲保持', idle: '空闲待机', stale: '数据过期', unknown: '未知' };
+var FG_SCR = { active: '亮屏交互', idle_audio: '息屏伴随', doze: '锁屏休眠' };
 function fgNowHtml(d) {
   var f = d.fg; if (!f) return '';
+  var scr = f.screen_state || (f.state === 'active' ? 'active' : 'doze');
   var main = f.state === 'active' && f.name ? esc(f.label || '正在用：' + f.name) + ' <small class="num">' + pct100(f.confidence) + '%</small>' : esc(FG_ST[f.state] || f.state);
-  return '<div class="fgline"><b>' + main + '</b>' + ttTag(d) + (f.bg_label ? '<span class="note">' + esc(f.bg_label) + '</span>' : '') +
-    '<button class="linkish" data-act="fg-tl" style="margin-left:auto">前台时间线</button></div>';
+  var tags = Array.isArray(f.evidence_tags) ? f.evidence_tags.slice(0, 3).map(function (t) {
+    return '<span class="fg-ev-tag' + (/逃逸|告警/.test(t) ? ' warn' : '') + '">' + esc(t) + '</span>';
+  }).join('') : '';
+  var comp = f.companion && f.companion.name ? '<span class="fg-comp-pill">' + (f.companion.mode === 'call' ? uiSvg('mic') + ' ' : uiSvg('music') + ' ') + esc(f.companion.name + ' · ' + (f.companion.label || '伴随流')) + '</span>' : '';
+  var ds = f.dual_stack && typeof f.dual_stack.v6_pct === 'number' ? f.dual_stack : null;
+  var dsHtml = '';
+  if (ds && d.online) {
+    var v6 = clamp(Math.round(ds.v6_pct), 0, 100), v4 = 100 - v6;
+    dsHtml = '<div class="fg-ds-wrap"><div class="fg-ds-meta"><span>双栈协议占比 · IPv4 ' + v4 + '% / IPv6 ' + v6 + '%</span><span>' +
+      (ds.escape_alert ? '<b style="color:var(--badge-red)">' + uiSvg('warn') + ' IPv6 流量超限告警 (' + ds.actual_mbps + 'M > ' + ds.limit_mbps + 'M)</b>' : '双栈策略已同步') +
+      '</span></div><div class="fg-ds-bar' + (ds.escape_alert ? ' is-escape' : '') + '"><i style="width:' + v6 + '%"></i></div></div>';
+  }
+  return '<div class="fg-intent-box"><div class="fg-intent-top"><span class="fg-scr-dot ' + esc(scr) + '" title="' + esc(FG_SCR[scr] || '') + '"></span>' +
+    '<b>' + main + '</b><span class="note" style="margin:0">· ' + esc(FG_SCR[scr] || '在线') + '</span>' + tags + comp + ttTag(d) +
+    '<button class="linkish" data-act="fg-tl" style="margin-left:auto">前台时间线</button></div>' +
+    (f.bg_label ? '<div class="note" style="margin:0">' + esc(f.bg_label) + '</div>' : '') + dsHtml + '</div>';
 }
 var FG_COL = ['#007AFF', '#FF2D55', '#34C759', '#FF9500', '#AF52DE', '#5AC8FA', '#FFCC00', '#8E8E93'];
 function fgTimelineSheet(d, days) {
@@ -221,10 +237,12 @@ function fgTimelineSheet(d, days) {
     '<button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true });
   S.fgMac = d.mac; loadFgTl(d, days);
 }
+var fgTlSeq = 0;
 function loadFgTl(d, days) {
+  var seq = ++fgTlSeq;
   var el0 = $('#fgtl-body'); if (el0 && el0.firstElementChild) el0.style.opacity = '.5';
   api.get('/api/fg_timeline', { mac: d.mac, days: days }, { timeout: 10000 }).then(function (r) {
-    var el = $('#fgtl-body'); if (!el) return;
+    var el = $('#fgtl-body'); if (!el || S.fgMac !== d.mac || seq !== fgTlSeq) return;
     var ss = Array.isArray(r.sessions) ? r.sessions : [], ba = Array.isArray(r.by_app) ? r.by_app : [], col = {};
     ba.forEach(function (x, i) { col[x.app_id] = FG_COL[i % FG_COL.length]; });
     var t1 = Date.now() / 1000, t0 = days === 1 ? new Date(new Date().setHours(0, 0, 0, 0)).getTime() / 1000 : t1 - days * 86400, span = Math.max(1, t1 - t0);
@@ -279,11 +297,43 @@ function devBody(d) {
   if (d.sim) h += '<div class="note warn" style="padding:0 2px">这是模拟设备 · 各项操作只改模拟状态，不会碰 tc / iptables</div>';
   h += vpnNote(d);
   if (d.mergedInto) { var mt = devBy(d.mergedInto); h += '<div class="note" style="padding:0 2px">这个旧 MAC 已合并到「' + esc(mt ? mt.name : d.mergedInto) + '」，它的设置和历史流量都算在新 MAC 上</div>'; }
-  // 限速
-  h += '<div class="ctrl"><div class="ctrl-t"><i></i>限速控制</div>' + effLine(d) +
+  // iOS 27 控制中心式 3 格空间 Bento 快捷磁贴
+  h += '<div class="cc-bento-row">' +
+    '<button type="button" class="cc-tile sqm-tile press' + (d.sqm ? ' on sqm-on' : '') + '" data-cc-tog="sqm"' + (d.hasDelay || !htbOk() ? ' disabled' : '') + '>' +
+      '<span class="cc-orb">' + bentoSvg('sqm') + '</span>' +
+      '<span class="cc-txt"><b>低延迟优先</b><small>' + (d.sqm ? 'SQM 已开启' : '游戏/语音稳帧') + '</small></span>' +
+    '</button>' +
+    '<button type="button" class="cc-tile qos-tile press' + (d.appQos ? ' on qos-on' : '') + '" data-cc-tog="appqos"' + (d.hasDelay || !htbOk() ? ' disabled' : '') + '>' +
+      '<span class="cc-orb">' + bentoSvg('appqos') + '</span>' +
+      '<span class="cc-txt"><b>应用级分流</b><small>' + (d.appQos ? '智能优先中' : '前台优先队列') + '</small></span>' +
+    '</button>' +
+    '<button type="button" class="cc-tile wl-tile press' + (d.wl ? ' on wl-on' : '') + '" data-cc-tog="wl">' +
+      '<span class="cc-orb">' + bentoSvg('wl') + '</span>' +
+      '<span class="cc-txt"><b>白名单豁免</b><small>' + (d.wl ? '已加入白名单' : '点击一键豁免') + '</small></span>' +
+    '</button>' +
+  '</div>';
+  // 纯数字精准带宽限速面板（移除滑动条与闪烁预设胶囊，避免滚动误触与跳变闪烁）
+  var dnStr = mbpsToMBs(d.down), upStr = upOk() ? mbpsToMBs(d.up) : '';
+  var dnVal = parseFloat(dnStr) || 0, upVal = parseFloat(upStr) || 0;
+  var dnEq = dnVal > 0 ? '≈ ' + trim0((dnVal * 8).toFixed(1)) + ' Mbps' : '当前不限速';
+  var upEq = !upOk() ? '内核不支持' : (upVal > 0 ? '≈ ' + trim0((upVal * 8).toFixed(1)) + ' Mbps' : '当前不限速');
+  h += '<div class="ctrl lcc-ctrl bw-ctrl"><div class="ctrl-t" style="justify-content:space-between"><span style="display:flex;align-items:center;gap:7px"><i></i>带宽限速</span><button type="button" class="linkish" data-act="tpl">限速模板</button></div>' + effLine(d) +
     (htbOk() ? '' : '<div class="note err">当前内核 / tc 不支持 HTB，限速不可用</div>') +
-    '<div class="grid2"><label class="field">下行<span class="box"><input type="number" inputmode="decimal" min="0" step="0.1" placeholder="不限" value="' + mbpsToMBs(d.down) + '" data-f="down"' + dis + '><span class="u">MB/s</span></span></label>' +
-    '<label class="field">上行' + (upOk() ? '' : ' · 不支持') + '<span class="box"><input type="number" inputmode="decimal" min="0" step="0.1" placeholder="不限" value="' + (upOk() ? mbpsToMBs(d.up) : '') + '" data-f="up"' + upDis + '><span class="u">MB/s</span></span></label></div>' +
+    '<div class="bw-cards">' +
+      '<label class="bw-card dn' + (dnVal > 0 ? ' has-val' : '') + '">' +
+        '<span class="bw-card-top"><span class="bw-dir"><i class="bw-dot dn"></i>↓ 下行上限</span><span class="bw-eq num" data-bw-eq="down">' + dnEq + '</span></span>' +
+        '<span class="box bw-box"><input type="number" inputmode="decimal" min="0" max="1000" step="0.1" placeholder="不限速" value="' + dnStr + '" data-f="down"' + dis + '>' +
+          '<button type="button" class="bw-clr" data-bw-clr="down" aria-label="清空下行"' + (dnStr ? '' : ' hidden') + '>×</button>' +
+          '<span class="u">MB/s</span></span>' +
+      '</label>' +
+      '<label class="bw-card up' + (upVal > 0 ? ' has-val' : '') + (upOk() ? '' : ' is-dis') + '">' +
+        '<span class="bw-card-top"><span class="bw-dir"><i class="bw-dot up"></i>↑ 上行上限</span><span class="bw-eq num" data-bw-eq="up">' + upEq + '</span></span>' +
+        '<span class="box bw-box"><input type="number" inputmode="decimal" min="0" max="1000" step="0.1" placeholder="' + (upOk() ? '不限速' : '不支持') + '" value="' + upStr + '" data-f="up"' + upDis + '>' +
+          '<button type="button" class="bw-clr" data-bw-clr="up" aria-label="清空上行"' + (upStr ? '' : ' hidden') + '>×</button>' +
+          '<span class="u">MB/s</span></span>' +
+      '</label>' +
+    '</div>' +
+    '<div class="bw-tip">直接输入数值（留空或填 0 为不限速，输入后按回车或点「应用限速」生效）</div>' +
     (upOk() && offloadRisk() ? '<div class="note warn">系统硬件 offload（' + esc(S.offload.detail) + '）可能绕过 tc，上行限速可能偏松</div>' : '') +
     '<div class="btns"><button class="btn sec press" data-act="clear-limit"' + busy + '>清除</button><button class="btn pri press" data-act="apply-limit"' + busy + dis + '>应用限速</button></div></div>';
   // 流量配额 / 分时段(折叠, 不把卡片撑得太长)
@@ -328,7 +378,7 @@ function devBody(d) {
   var on = [d.hasDelay ? '延迟 ' + (d.delay || 0) + 'ms' : '', d.sqm ? '低延迟' : '', d.appQos ? '按应用分优先级' : '', d.wl ? '白名单' : ''].filter(Boolean);
   h += dFold('more-' + d.mac, 'var(--gray,#8E8E93)', '更多控制', esc(on.length ? on.join(' · ') : '延迟注入 · 低延迟 · 白名单 · 识别 · 趋势'), '<div class="more-in">' + more + '</div>');
   // 访问控制 + 其他
-  h += (d.blocked ? '<button class="btn ok wide press" data-act="unblock"' + busy + '>✓ 解除封锁</button>'
+  h += (d.blocked ? '<button class="btn ok wide press" data-act="unblock"' + busy + '>' + uiSvg('check') + ' 解除封锁</button>'
     : '<button class="btn dan wide hold" data-act="hold"' + busy + '><i class="fill"></i><span>长按封锁设备</span></button>') +
     '<div class="btns"><button class="btn sec press" data-act="rename">' + ico('edit') + '重命名</button><button class="btn sec press" data-act="copy-mac">' + ico('copy') + '复制 MAC</button></div>' +
     '<dl class="kv" style="padding:0 4px"><dt>IP</dt><dd>' + esc(d.ip || '—') + '</dd><dt>MAC</dt><dd>' + esc(d.mac) + '</dd>' +
@@ -433,7 +483,10 @@ function dpiFixSheet(d, c, back) {
   var add = function (id, name) { if (!id || !name || id.charAt(0) === '_' || seen[id]) return; seen[id] = 1; cand.push([id, name]); };
   d.live.concat(d.apps).forEach(function (a) { add(a.id || a.app_id, a.name); });
   S.devices.forEach(function (x) { x.live.concat(x.apps).forEach(function (a) { add(a.id || a.app_id, a.name); }); });
-  Object.keys(S.appUsage || {}).forEach(function (k) { var u = S.appUsage[k] && S.appUsage[k].d, m = u && u.apps; if (m && typeof m === 'object') Object.keys(m).forEach(function (id) { add(id, m[id] && m[id].name); }); });
+  Object.keys(S.appUsage || {}).forEach(function (k) {
+    var u = S.appUsage[k] && S.appUsage[k].d;
+    if (u && Array.isArray(u.by_app)) u.by_app.forEach(function (a) { add(a.id || a.app_id, a.name); });
+  });
   cand = cand.slice(0, 30);
   sheet('<h3>纠正识别</h3><div class="sub">' + esc(c.name || c.dst) + (c.app ? ' · 现在识别为「' + esc(c.app) + '」' : ' · 还没识别出来') + '</div>' +
     (cand.length ? '<div class="note" style="margin-bottom:6px">这条连接其实属于</div><div class="dchips" id="fix-pick">' + cand.map(function (x) { return '<button class="dchip cat" data-fix="' + esc(x[0]) + '">' + esc(x[1]) + '</button>'; }).join('') + '</div>' : '') +
@@ -493,7 +546,7 @@ function paintConnSheet() {
     var auto = { app_time: '时长用完', category: '类别封锁' }[b.source];
     var right = auto ? '<span class="badge ' + (b.source === 'category' ? 'b-red' : 'b-warn') + '" title="' + esc(b.source === 'category' ? '在设备卡「按类别封锁」里解除' : '次日 0 点自动恢复，或在「应用使用时长」里修改限时') + '">' + auto + (b.source === 'category' && b.ref ? ' · ' + esc(catLabel(b.ref)) : '') + (num(b.until) ? ' · 至 ' + pad2(new Date(num(b.until) * 1000).getHours()) + ':' + pad2(new Date(num(b.until) * 1000).getMinutes()) : '') + '</span>'
       : '<button class="linkish" data-cbdel="' + esc(b.kind + '|' + b.value) + '">解除</button>';
-    return '<div class="row2"><span class="k" style="color:var(--text-1)">🚫 ' + esc(b.label ? b.label + ' · ' : '') + '<span class="mono">' + esc(b.value) + '</span>' + (b.kind === 'domain' ? '<span class="note"> 及子域名</span>' : '') + '</span>' + right + '</div>'; }).join('') + '</div>' : '';
+    return '<div class="row2"><span class="k" style="color:var(--text-1)">' + uiSvg('ban') + ' ' + esc(b.label ? b.label + ' · ' : '') + '<span class="mono">' + esc(b.value) + '</span>' + (b.kind === 'domain' ? '<span class="note"> 及子域名</span>' : '') + '</span>' + right + '</div>'; }).join('') + '</div>' : '';
   var head = blocks + '<div class="cn-sum"><span>共 <b>' + num(r.total) + '</b> 条' + (num(r.total) > list.length ? '（显示前 ' + list.length + '）' : '') + '</span><span>↓↑ <b>' + bpsTxt(r.bps) + '</b></span><span>累计 <b>' + bytes(num(r.down_bytes) + num(r.up_bytes)) + '</b></span></div>' + connNotes(r);
   if (S.connView === 'group') {
     var gs = r.groups || [], mx = Math.max.apply(null, gs.map(function (g) { return num(g.bps) || num(g.bytes) / 1e6; }).concat([1]));
@@ -529,7 +582,8 @@ function appLimNote(x) {
 function devCard(d) {
   var r = bps(d.rx), t = bps(d.tx), open = !wide() && S.open[d.mac], closing = !open && !wide() && S.closingAt && Date.now() - (S.closingAt[d.mac] || 0) < 800;
   var meta = d.online ? (d.ip || '—') : d.blocked ? '已阻止联网' : '最后出现 ' + ago(d.lastSeen);
-  return '<article class="glass dev' + (open ? ' open' : '') + (wide() && S.sel === d.mac ? ' sel' : '') + (S.picked[d.mac] ? ' picked' : '') + '" data-dev="' + d.mac + '">' +
+  var tintState = d.blocked ? 'blocked' : d.online ? ((num(d.down) > 0 || num(d.up) > 0 || num(d.delay) > 0) ? 'shaped' : (num(d.rx) + num(d.tx) > 524288 ? 'active' : 'online')) : 'offline';
+  return '<article class="glass dev' + (open ? ' open' : '') + (wide() && S.sel === d.mac ? ' sel' : '') + (S.picked[d.mac] ? ' picked' : '') + '" data-dev="' + d.mac + '" data-tint="' + tintState + '">' +
     '<button class="dev-h" data-act="toggle-dev" aria-expanded="' + !!open + '"><span class="check">' + ico('check') + '</span>' +
       '<span class="av">' + d.icon + '<span class="dot ' + (d.blocked ? 'blocked' : d.online ? 'online' : 'offline') + '"></span></span>' +
       '<span class="dev-info"><span class="dev-name"><span class="nm">' + esc(d.name) + '</span>' + badges(d) + '</span>' +
@@ -546,7 +600,7 @@ function devCard(d) {
 function callBadge(d) {
   if (!d.online || !d.call) return '';
   var m = Math.max(0, Math.floor((Date.now() / 1000 - num(d.call.since)) / 60));
-  return '<span class="a call">📞 ' + esc(d.call.label) + (m ? ' ' + m + ' 分钟' : '') + '</span>';
+  return '<span class="a call">' + uiSvg('phone') + ' ' + esc(d.call.label) + (m ? ' ' + m + ' 分钟' : '') + '</span>';
 }
 var CAT_T = { video: '视频', social: '社交', social_voip: '通话', game: '游戏', shopping: '购物', music: '音乐', office: '办公', ai: 'AI', reading: '阅读', news: '资讯', travel: '出行', navigation: '地图', life_service: '生活', download: '下载', browser: '浏览', photo: '图片', finance: '金融', education: '教育', cloud: '云服务', system: '系统' };
 /* 此刻流量按分类的占比(来自「在用」的实时速率) */
@@ -563,8 +617,16 @@ function fgActive(d) { var f = d.fg; return d.online && f && f.state === 'active
 function ttTag(d) { var t = d.ttype; return d.online && t && t.label && t.type !== 'background' ? '<span class="tt">此刻在：' + esc(t.label) + '</span>' : ''; }
 function appsLine(d) {
   var cb = callBadge(d), f = fgActive(d);
-  if (f) return '<span class="lb">正在用</span><span class="a fg">' + appNmH(f.app_id, f.name) + ' <small class="num">' + pct100(f.confidence) + '%</small></span>' + ttTag(d) + cb +
-    d.live.filter(function (a) { return (a.id || a.app_id) !== f.app_id; }).slice(0, 2).map(function (a) { return '<span class="a dim' + (a.system ? ' sys' : '') + '">' + appNmH(a.id, a.name) + '</span>'; }).join('');
+  if (f) {
+    var ev0 = Array.isArray(f.evidence_tags) && f.evidence_tags[0] ? '<span class="fg-mini-tag">' + esc(f.evidence_tags[0]) + '</span>' : '';
+    var cp0 = f.companion && f.companion.name && !cb ? '<span class="a call">' + (f.companion.mode === 'call' ? uiSvg('mic') + ' ' : uiSvg('music') + ' ') + esc(f.companion.name) + '</span>' : '';
+    var v6Tag = f.dual_stack && f.dual_stack.v6_pct >= 50 ? '<span class="a dim">IPv6 ' + Math.round(f.dual_stack.v6_pct) + '%</span>' : '';
+    return '<span class="lb">' + (f.screen_state === 'idle_audio' ? '息屏伴随' : '正在用') + '</span><span class="a fg">' + appNmH(f.app_id, f.name) + ' <small class="num">' + pct100(f.confidence) + '%</small>' + ev0 + '</span>' + cp0 + ttTag(d) + cb + v6Tag +
+      d.live.filter(function (a) { var aid = a.id || a.app_id; return aid !== f.app_id && !(f.companion && aid === f.companion.app_id); }).slice(0, 1).map(function (a) { return '<span class="a dim' + (a.system ? ' sys' : '') + '">' + appNmH(a.id, a.name) + '</span>'; }).join('');
+  }
+  if (d.online && d.fg && d.fg.screen_state === 'doze' && !cb && !d.live.length) {
+    return '<span class="lb">待机</span><span class="a dim">锁屏休眠保护中（抑制后台同步抢前台）</span>';
+  }
   if (cb && !d.live.length) return '<span class="lb">正在</span>' + cb;
   if (d.online && d.live.length) return '<span class="lb">在用</span>' + cb + d.live.slice(0, 3).map(function (a) { return '<span class="a' + (a.system ? ' sys' : '') + '">' + appNmH(a.id, a.name) + ' <small class="num">' + bpsTxt(a.bps) + '</small></span>'; }).join('');
   if (d.apps.length) return '<span class="lb">最近</span>' + d.apps.slice(0, 4).map(function (a) { return '<span class="a dim">' + appNmH(a.id, a.name) + (a.confidence === 'low' ? '?' : '') + '</span>'; }).join('');
@@ -836,9 +898,10 @@ function applyTemplate(targets, t) {
   targets.forEach(function (d) {
     chain = chain.then(function () {
       setBusy(d.mac, true);
-      return doLimit(d, t.down, t.up).then(function () {
+      var limP = (!d.sim && t.name) ? api.action('template_apply', { mac: d.mac, rate_down: t.down > 0 ? fmtRate(t.down) : '0mbit', rate_up: t.up > 0 ? fmtRate(t.up) : '0mbit' }) : doLimit(d, t.down, t.up);
+      return limP.then(function () {
         if (wantDelay) {
-          if (!netemOk() || d.sqm) { skipped++; return; }
+          if (!netemOk() || d.sqm || d.appQos) { skipped++; return; }
           return doDelay(d, t.delay, t.jitter, t.loss);
         }
         if (d.hasDelay) return api.action('delay_clear', { mac: d.mac });
@@ -846,7 +909,7 @@ function applyTemplate(targets, t) {
     });
   });
   return chain.then(function () {
-    toast('「' + t.name + '」已应用 ' + ok + '/' + targets.length + ' 台' + (fail ? ' · 失败 ' + fail : '') + (skipped ? ' · ' + skipped + ' 台跳过延迟（低延迟模式或不支持 netem）' : ''), fail ? 'warn' : 'ok');
+    toast('「' + t.name + '」已应用 ' + ok + '/' + targets.length + ' 台' + (fail ? ' · 失败 ' + fail : '') + (skipped ? ' · ' + skipped + ' 台跳过延迟（已开低延迟/应用优先级或不支持 netem）' : ''), fail ? 'warn' : 'ok');
     return loadDevices().catch(function () {});
   }).then(function () { if (S.page === 'devices') renderDevList(false); });
 }
@@ -945,4 +1008,5 @@ function setWhitelistMode(on, el) {
     if (on && !cnt) setTimeout(function () { toast('提醒：还没有设备在白名单里，热点内设备都将无法上网', 'warn'); }, 2300);
   }).catch(function (e) { if (el) el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); });
 }
+
 

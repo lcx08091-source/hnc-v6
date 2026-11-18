@@ -35,7 +35,7 @@ RESIDUE="$(find . -path './.git' -prune -o \( \
     -name '*.rej' -o -name '*.orig' \
     -o -name '*.bak' -o -name '*.bak.[0-9]*' -o -name '*~' \
     -o -name '.DS_Store' -o -name 'Thumbs.db' \
-  \) -print 2>/dev/null | head -50)"
+  \) -print 2>/dev/null | head -n 50)"
 if [ -n "$RESIDUE" ]; then
   fail "patch/editor residue found (.rej/.orig/.bak/~/.DS_Store/Thumbs.db):"
   say "$RESIDUE"
@@ -44,7 +44,7 @@ else
 fi
 
 # 2. Secrets / accidental home repo files
-SECRET_HITS="$(find . -path './.git' -prune -o \( -path './.ssh/*' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*_ed25519' -o -name '*_rsa' -o -name '*.pem' \) -print 2>/dev/null | head -50)"
+SECRET_HITS="$(find . -path './.git' -prune -o \( -path './.ssh/*' -o -name 'id_rsa' -o -name 'id_ed25519' -o -name '*_ed25519' -o -name '*_rsa' -o -name '*.pem' \) -print 2>/dev/null | head -n 50)"
 if [ -n "$SECRET_HITS" ]; then
   fail "possible private key / .ssh files in repo:"
   say "$SECRET_HITS"
@@ -84,11 +84,21 @@ for f in customize.sh bin/hnc_arch.sh; do
   if [ -f "$f" ]; then ok "required file exists: $f"; else fail "required file missing: $f (install-time ABI selection)"; fi
 done
 
-# 5. Executable bits, source tree check only.
-for f in service.sh post-fs-data.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/hnc_clsact_ctl bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh daemon/hnc_httpd/build.sh; do
+# 5. Executable bits & POSIX sh -n syntax gate, source tree check only.
+for f in customize.sh service.sh post-fs-data.sh uninstall.sh action.sh bin/iptables_manager.sh bin/apply_app_limits.sh bin/apply_app_qos.sh bin/connblock_sync.sh bin/cleanup.sh bin/v6_sync.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/hnc_clsact_ctl bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh daemon/hnc_httpd/build.sh; do
   [ -e "$f" ] || continue
   if [ -x "$f" ]; then ok "executable: $f"; else fail "not executable: $f"; fi
 done
+
+SH_SYNTAX_BAD=0
+for sf in customize.sh post-fs-data.sh service.sh uninstall.sh action.sh bin/*.sh; do
+  [ -f "$sf" ] || continue
+  if ! sh -n "$sf" >/dev/null 2>&1; then
+    fail "sh -n syntax check failed: $sf"
+    SH_SYNTAX_BAD=$((SH_SYNTAX_BAD + 1))
+  fi
+done
+[ "$SH_SYNTAX_BAD" -eq 0 ] && ok "all lifecycle & bin/*.sh scripts pass sh -n" 
 
 # 6. hnc_httpd binary/source sanity
 if [ -f daemon/hnc_httpd/hnc_httpd ]; then
@@ -114,7 +124,7 @@ if [ -f bin/hnc_dpid ]; then
     warn "od unavailable; cannot inspect bin/hnc_dpid architecture"
   fi
   if command -v strings >/dev/null 2>&1; then
-    DPID_MARKERS="$(strings bin/hnc_dpid 2>/dev/null | grep -E '0\.1\.0-rc1\.2-fixed|0\.1\.0-rc1\.3|0\.2\.0-l2-rc19|0\.3\.0-l3-rc20|0\.3\.1-l3-rc20\.1|0\.4\.0-rc23|hnc_dpid' | head -5)"
+    DPID_MARKERS="$(strings bin/hnc_dpid 2>/dev/null | grep -E '0\.1\.0-rc1\.2-fixed|0\.1\.0-rc1\.3|0\.2\.0-l2-rc19|0\.3\.0-l3-rc20|0\.3\.1-l3-rc20\.1|0\.4\.0-rc23|hnc_dpid' | head -n 5)"
     if [ -n "$DPID_MARKERS" ]; then ok "hnc_dpid contains expected version/name marker"; else fail "hnc_dpid missing expected version/name marker"; fi
   else
     warn "strings unavailable; cannot inspect hnc_dpid version/name marker"
@@ -146,7 +156,7 @@ fi
 # 源码与打包路径均已移除, 无需再查 ELF 架构。
 
 # 7. Version drift warning: detect very old hotfix strings in live web/go files.
-OLD_HITS="$(grep -R "hotfix4\|hotfix10\|hotfix16\.7\|hotfix17\.3" -n webroot daemon/hnc_httpd 2>/dev/null | head -30)"
+OLD_HITS="$(grep -R "hotfix4\|hotfix10\|hotfix16\.7\|hotfix17\.3" -n webroot daemon/hnc_httpd 2>/dev/null | head -n 30)"
 if [ -n "$OLD_HITS" ]; then
   warn "old hotfix strings found; verify they are changelog-only, not runtime version:"
   say "$OLD_HITS"
@@ -203,7 +213,7 @@ if [ -n "$ARTIFACT" ]; then
       sh bin/artifact_pick_flashable.sh "$ARTIFACT" "$PICK_DIR" > "$PICK_OUT" 2>&1
       PICK_RC=$?
       cat "$PICK_OUT"
-      PICKED="$(awk -F= '$1=="flashable_artifact"{print $2}' "$PICK_OUT" | tail -1)"
+      PICKED="$(awk -F= '$1=="flashable_artifact"{print $2}' "$PICK_OUT" | tail -n 1)"
       if [ "$PICK_RC" = "0" ] && [ -n "$PICKED" ] && [ -f "$PICKED" ]; then
         CHECK_ARTIFACT="$PICKED"
         [ "$CHECK_ARTIFACT" = "$ARTIFACT" ] && ok "artifact is directly flashable" || warn "using extracted inner flashable artifact for checks: $CHECK_ARTIFACT"
@@ -226,7 +236,7 @@ if [ -n "$ARTIFACT" ]; then
 
     # hotfix20.9: artifact-level version checks. This catches the common mistake
     # where CI builds an old module.prop.
-    MOD_ENTRY="$(echo "$LIST" | awk '{print $4}' | grep -E '(^|/)module\.prop$' | head -1)"
+    MOD_ENTRY="$(echo "$LIST" | awk '{print $4}' | grep -E '(^|/)module\.prop$' | head -n 1)"
     if [ -n "$MOD_ENTRY" ]; then
       unzip -p "$CHECK_ARTIFACT" "$MOD_ENTRY" > "$ZIPTMP.module.prop" 2>/dev/null
       ZIP_VER="$(awk -F= '$1=="version"{print $2; exit}' "$ZIPTMP.module.prop" 2>/dev/null)"
@@ -240,7 +250,7 @@ if [ -n "$ARTIFACT" ]; then
       fail "artifact missing module.prop"
     fi
 
-    DPID_ENTRY="$(echo "$LIST" | awk '{print $4}' | grep -E '(^|/)bin/hnc_dpid$' | head -1)"
+    DPID_ENTRY="$(echo "$LIST" | awk '{print $4}' | grep -E '(^|/)bin/hnc_dpid$' | head -n 1)"
     if [ -n "$DPID_ENTRY" ]; then
       unzip -p "$CHECK_ARTIFACT" "$DPID_ENTRY" > "$ZIPTMP.hnc_dpid" 2>/dev/null
       if [ -s "$ZIPTMP.hnc_dpid" ]; then
@@ -259,7 +269,7 @@ if [ -n "$ARTIFACT" ]; then
           warn "od unavailable; cannot inspect artifact hnc_dpid architecture"
         fi
         if command -v strings >/dev/null 2>&1; then
-          DPID_ART_MARKERS="$(strings "$ZIPTMP.hnc_dpid" 2>/dev/null | grep -E '0\.1\.0-rc1\.2-fixed|0\.1\.0-rc1\.3|0\.2\.0-l2-rc19|0\.3\.0-l3-rc20|0\.3\.1-l3-rc20\.1|0\.4\.0-rc23|hnc_dpid' | head -5)"
+          DPID_ART_MARKERS="$(strings "$ZIPTMP.hnc_dpid" 2>/dev/null | grep -E '0\.1\.0-rc1\.2-fixed|0\.1\.0-rc1\.3|0\.2\.0-l2-rc19|0\.3\.0-l3-rc20|0\.3\.1-l3-rc20\.1|0\.4\.0-rc23|hnc_dpid' | head -n 5)"
           if [ -n "$DPID_ART_MARKERS" ]; then ok "artifact hnc_dpid contains expected version/name marker"; else fail "artifact hnc_dpid missing expected version/name marker"; fi
         fi
       else
@@ -289,6 +299,7 @@ if [ -n "$ARTIFACT" ]; then
       warn "bin/artifact_sanity_check.sh missing; strict artifact sanity gate skipped"
     fi
 
+    rm -rf "$PICK_DIR" 2>/dev/null || true
     rm -f "$ZIPTMP" "$ZIPTMP.module.prop" "$ZIPTMP.hnc_dpid" "$PICK_OUT" 2>/dev/null || true
   fi
 fi
@@ -304,7 +315,7 @@ if [ -d "src/hnc_httpd" ]; then
         echo "[ERROR] src/hnc_httpd/ contains $GO_FILES_IN_SRC .go file(s) — double source tree forbidden since rc30.12.33"
         echo "        唯一权威源在 daemon/hnc_httpd/, src/hnc_httpd/ 不应再包含 .go 源码"
         echo "        修复方式: git rm src/hnc_httpd/*.go (以及 go.mod/go.sum/web/ 等构建产物)"
-        find src/hnc_httpd -maxdepth 2 -type f -name '*.go' | head -10 | sed 's/^/        /'
+        find src/hnc_httpd -maxdepth 2 -type f -name '*.go' | head -n 10 | sed 's/^/        /'
         FAIL=$((FAIL+1))
     else
         ok "src/hnc_httpd/ 不含 .go 源码 (P0.1 唯一源码树检查)"
@@ -325,7 +336,7 @@ if [ -f "bin/pitfall_lint.sh" ]; then
         sed 's/^/        /' "$ROOT/.pitfall_lint.$$"
     else
         # rc=2: 环境 / 用法错误(例如 artifact 测试搭的精简仓库没有 service.sh), 不是违规
-        warn "pitfall lint 无法运行(rc=$_pl_rc): $(head -1 "$ROOT/.pitfall_lint.$$" 2>/dev/null)"
+        warn "pitfall lint 无法运行(rc=$_pl_rc): $(head -n 1 "$ROOT/.pitfall_lint.$$" 2>/dev/null)"
     fi
     rm -f "$ROOT/.pitfall_lint.$$"
 else

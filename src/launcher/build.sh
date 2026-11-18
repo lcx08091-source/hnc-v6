@@ -21,7 +21,23 @@
 
 set -eu
 
+# ─── 0. Host 构建模式 (CI 预检与本地静态审查) ─────────────────────
+if [ "${1:-}" = "host" ]; then
+    cd "$(dirname "$0")"
+    CC="${CC:-gcc}"
+    OUT="${HNC_HOST_OUT:-out/host}"
+    mkdir -p "$OUT"
+    HFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
+    $CC $HFLAGS -pie -o "$OUT/fork_probe" fork_probe.c
+    $CC $HFLAGS -pie -o "$OUT/hnc_launcher" hnc_launcher.c
+    echo "Host build OK: $OUT/hnc_launcher $OUT/fork_probe"
+    exit 0
+fi
+
 # ─── 1. NDK 检查 ──────────────────────────────────────────────────
+if [ -z "${ANDROID_NDK_HOME:-}" ] && [ -n "${ANDROID_NDK:-}" ]; then
+    ANDROID_NDK_HOME="$ANDROID_NDK"
+fi
 
 if [ -z "${ANDROID_NDK_HOME:-}" ]; then
     # 试一下几个常见路径
@@ -76,7 +92,9 @@ case "$ARCH" in
     arm)   TRIPLE=armv7a-linux-androideabi ;;
     *) echo "ERROR: unsupported arch: $ARCH (arm64|arm)" >&2; exit 1 ;;
 esac
-CLANG="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG/bin/${TRIPLE}${API}-clang"
+TOOLCHAIN="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/$HOST_TAG"
+CLANG="$TOOLCHAIN/bin/${TRIPLE}${API}-clang"
+STRIP="$TOOLCHAIN/bin/llvm-strip"
 
 if [ ! -x "$CLANG" ]; then
     echo "ERROR: clang not found at $CLANG" >&2
@@ -99,17 +117,18 @@ if [ "$ARCH" != "arm64" ]; then
     mkdir -p "$OUT"
 fi
 
-COMMON_FLAGS="-O2 -Wall -Wextra -Wno-unused-parameter"
+COMMON_FLAGS="-O2 -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -static-libgcc -fPIE"
 
 # rc30.12.28: Bionic (Android libc) 在 ARM64 要求 TLS segment 对齐至少 64 字节.
 # 默认 toolchain 可能生成 8 字节对齐的 TLS, 导致 "TLS segment is underaligned" abort.
 # 同时 max-page-size 在 Android 16K page 设备上也要设为 65536 才能 mmap 成功.
 # 这两个 ld flag 都是 Android NDK 推荐的标准做法.
-LDFLAGS_BIONIC="-Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+LDFLAGS_BIONIC="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 echo ""
 echo "Building fork_probe (dynamic)..."
 "$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -o "$OUT/fork_probe" fork_probe.c
+[ -x "$STRIP" ] && "$STRIP" "$OUT/fork_probe"
 file "$OUT/fork_probe"
 ls -lh "$OUT/fork_probe"
 
@@ -126,6 +145,7 @@ echo "Building hnc_launcher (PIE, dynamic linked)..."
 #
 # 副作用: launcher 大小从 ~700KB 变成 ~7KB (libc 不再嵌入). 不影响功能.
 "$CLANG" $COMMON_FLAGS $LDFLAGS_BIONIC -o "$OUT/hnc_launcher" hnc_launcher.c
+[ -x "$STRIP" ] && "$STRIP" "$OUT/hnc_launcher"
 file "$OUT/hnc_launcher"
 ls -lh "$OUT/hnc_launcher"
 

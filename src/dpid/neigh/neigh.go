@@ -77,6 +77,8 @@ type Entry struct {
 	// ConfirmedAgo 距内核最近一次确认它可达多久(NDA_CACHEINFO.ndm_confirmed; 没有该属性为 0)。
 	// v5.31 审查: 同一 MAC 换 IP 后新旧两条都是 STALE 时, 靠它分新旧。
 	ConfirmedAgo time.Duration
+	UpdatedAgo   time.Duration
+	HasCacheInfo bool
 }
 
 // Usable 有 MAC、且处于有效动态状态(INCOMPLETE / FAILED / NOARP / PERMANENT 不算:
@@ -156,7 +158,13 @@ func ParseMsgs(b []byte) ([]Entry, bool, error) {
 				}
 			case ndaCacheinfo:
 				if len(v) >= 16 {
-					e.ConfirmedAgo = time.Duration(le.Uint32(v[0:4])) * userHZTick
+					e.HasCacheInfo = true
+					if c := int32(le.Uint32(v[0:4])); c > 0 {
+						e.ConfirmedAgo = time.Duration(c) * userHZTick
+					}
+					if u := int32(le.Uint32(v[8:12])); u > 0 {
+						e.UpdatedAgo = time.Duration(u) * userHZTick
+					}
 				}
 			}
 			aoff += alignUp(alen)

@@ -223,6 +223,26 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// v5.36.0: 本机自训练工作台动作(含最长 1.2s pokeDPIDStudio 等待)在全局 actionMu 外执行,
+	// 避免阻塞局域网设备限速/拉黑并发写操作; 内部由 studioMu / fpStore.mu / sfp.mu 各自保护。
+	if resp, ok := dispatchStudioAction(s, req.Action, req.Params); ok {
+		if resp.OK {
+			s.requestSnapshotRefresh()
+		}
+		st := http.StatusOK
+		if !resp.OK {
+			if resp.Error == "bad params" || isBadParamErr(resp.Error) {
+				st = http.StatusBadRequest
+			} else {
+				st = http.StatusInternalServerError
+			}
+		}
+		auditLog(s.hncDir, tid, req.Action, redactSensitive(req.Params),
+			map[bool]string{true: "ok", false: "error"}[resp.OK], resp.Error)
+		writeActionResp(w, st, resp)
+		return
+	}
+
 	// hotfix4 → v5.9.0: serialize state-changing actions. The underlying shell
 	// scripts mutate tc, iptables and JSON files in several steps; concurrent
 	// writes from two remote clients can interleave and leave UI/API state out
@@ -367,6 +387,9 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return r
 	case "compat_report", "capture_record", "capture_record_stop": // v5.29 T5/T4: 同上, 锁外分发, 这里兜底
 		r, _ := dispatchSelfcheckAction(s, action, p)
+		return r
+	case "self_studio_start", "self_studio_distill", "self_studio_export", "dpi_distill_now", "flow_cls_retrain": // v5.35.0: 本机真值自训练工作台锁外分发兜底
+		r, _ := dispatchStudioAction(s, action, p)
 		return r
 	case "dpi_rules_reset":
 		return actionDPIRulesReset(hncDir)

@@ -546,14 +546,13 @@ func quicTupleKey(ip net.IP, port uint16) string {
 
 // handleInitial 处理一个客户端 Initial 包。ClientHello 完整时返回它的拷贝。
 func (r *quicReassembler) handleInitial(ip net.IP, port uint16, h *quicLongHeader, pkt []byte, p *quicVersionParams, now time.Time) []byte {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	tuple := quicTupleKey(ip, port)
+	key := tuple + string(h.dcid)
 
+	r.mu.Lock()
 	if now.Sub(r.lastSweep) > r.ttl || now.Before(r.lastSweep) {
 		r.sweepLocked(now)
 	}
-	tuple := quicTupleKey(ip, port)
-	key := tuple + string(h.dcid)
 	e := r.m[key]
 	if e != nil && (now.Sub(e.firstSeen) > r.ttl || now.Before(e.firstSeen)) {
 		delete(r.m, key)
@@ -561,16 +560,43 @@ func (r *quicReassembler) handleInitial(ip net.IP, port uint16, h *quicLongHeade
 	}
 	if e == nil {
 		if t, ok := r.finished[tuple]; ok && now.Sub(t) <= r.ttl && !now.Before(t) {
+			r.mu.Unlock()
 			return nil
 		}
 	} else if e.done {
+		r.mu.Unlock()
+		return nil
+	}
+	var k *quicKeys
+	if e != nil {
+		k = e.keys
+	}
+	r.mu.Unlock()
+
+	// v5.36.0: HKDF 密钥派生与 AES-GCM 解密移出全局互斥锁, 避免伪造/多网卡并发包阻塞抓包回调
+	derivedNew := false
+	if k == nil {
+		var ok bool
+		k, ok = deriveQUICClientKeys(p, h.dcid)
+		if !ok {
+			return nil
+		}
+		derivedNew = true
+	}
+	plain, _, ok := quicOpenInitial(pkt, h, k)
+	if !ok {
+		quicStats.decryptFail.Add(1)
 		return nil
 	}
 
-	created := false
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e = r.m[key]
+	if e != nil && e.done {
+		return nil
+	}
 	if e == nil {
-		k, ok := deriveQUICClientKeys(p, h.dcid)
-		if !ok {
+		if !derivedNew {
 			return nil
 		}
 		if len(r.m) >= r.maxEntries {
@@ -581,19 +607,8 @@ func (r *quicReassembler) handleInitial(ip net.IP, port uint16, h *quicLongHeade
 		}
 		e = &quicAsmEntry{keys: k, firstSeen: now}
 		r.m[key] = e
-		created = true
 	}
 	e.lastSeen = now
-
-	plain, _, ok := quicOpenInitial(pkt, h, e.keys)
-	if !ok {
-		quicStats.decryptFail.Add(1)
-		// 首包就失败(伪造 / 非客户端首个 DCID)不留 entry, 免得垃圾包占满表。
-		if created {
-			delete(r.m, key)
-		}
-		return nil
-	}
 	quicStats.decryptOK.Add(1)
 
 	frags, _ := parseQUICFrames(plain)
