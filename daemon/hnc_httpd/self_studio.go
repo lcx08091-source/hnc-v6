@@ -70,8 +70,9 @@ func setStudioFlagFile(path string, on bool) error {
 
 func countLocalUsableArtifacts(hncDir string, rp rpSources, now time.Time) (usableFPs int, usableStartups int) {
 	nowUnix := now.Unix()
-	fpSt := fpStoreFor(hncDir)
+	fpSt := fpFor(hncDir)
 	fpSt.mu.Lock()
+	fpSt.loadLocked()
 	for _, e := range fpSt.m {
 		if e != nil && e.verdict(nowUnix).Usable {
 			usableFPs++

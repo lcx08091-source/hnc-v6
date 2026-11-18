@@ -163,10 +163,8 @@ jobs:
       # 唯一 Go 质量关卡是 preflight 的二进制 strings 检查)。host GOOS 跑。
       - name: Go vet + test (hnc_httpd + dpid)
         run: |
-          (cd daemon/hnc_httpd && go vet ./...)
-          (cd daemon/hnc_httpd && go test ./...)
-          (cd src/dpid && go vet ./...)
-          (cd src/dpid && go test ./...)
+          (cd daemon/hnc_httpd && go vet ./... && go test ./...)
+          (cd src/dpid && go vet ./... && go test ./...)
 
       # v5.22: 32 位类型检查(armeabi-v7a)。用 GOOS=linux 而非 android:
       # android/arm 不支持内部链接, 无 NDK 时 vet 会报 "requires external (cgo)

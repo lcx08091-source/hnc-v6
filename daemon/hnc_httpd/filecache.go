@@ -31,7 +31,7 @@ func NewCachedFile[T any](path string, parse func([]byte) (T, error)) *CachedFil
 func statOf(fi os.FileInfo) fileStamp {
 	var ino uint64
 	if st, ok := fi.Sys().(*syscall.Stat_t); ok {
-		ino = st.Ino
+		ino = uint64(st.Ino)
 	}
 	return fileStamp{ino: ino, size: fi.Size(), mtime: fi.ModTime().UnixNano()}
 }
