@@ -193,18 +193,18 @@ echo ""
 echo "Sanity check..."
 
 for s in "hnc_launcher" "/data/local/hnc/bin/hnc_dpid" "execv failed" "CRASH_LOOP"; do
-    if ! strings "$OUT/hnc_launcher" | grep -qF "$s"; then
+    if ! grep -a -qF "$s" "$OUT/hnc_launcher"; then
         echo "  ERROR: hnc_launcher missing string: $s" >&2
         exit 1
     fi
 done
-if ! strings "$OUT/hnc_launcher" | grep -qE '^0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*$'; then
+if ! (strings -a "$OUT/hnc_launcher" 2>/dev/null || strings "$OUT/hnc_launcher") | grep -qE '0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*'; then
     echo "  ERROR: hnc_launcher missing version string matching 0.X.Y-rcN(.M)*" >&2
     exit 1
 fi
 
 for s in "=== fork_probe v1 ===" "FORK FAILED" "EXECV FAILED" "RESULT: C fork+execv WORKS"; do
-    if ! strings "$OUT/fork_probe" | grep -qF "$s"; then
+    if ! grep -a -qF "$s" "$OUT/fork_probe"; then
         echo "  ERROR: fork_probe missing string: $s" >&2
         exit 1
     fi

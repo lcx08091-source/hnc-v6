@@ -121,9 +121,9 @@ if grep -x 'daemon/hnc_httpd/hnc_httpd' "$TMP.entries" >/dev/null; then
       MACHINE=$(od -An -tx1 -j18 -N2 "$TMP.extract/hnc_httpd" 2>/dev/null | awk '{print $1 " " $2}')
       case "$MACHINE" in "$WANT_MACHINE") ok "hnc_httpd matches $EXPECT_ABI: machine=$MACHINE" ;; "28 00") warn "hnc_httpd is 32-bit ARM ELF: machine=$MACHINE; expected $EXPECT_ABI package?" ;; "b7 00") fail "hnc_httpd is AArch64 ELF in a $EXPECT_ABI package: machine=$MACHINE" ;; *) fail "hnc_httpd is not Android ARM/AArch64 ELF, machine=$MACHINE" ;; esac
     else warn "od not available; skipped hnc_httpd ELF machine check"; fi
-    if command -v strings >/dev/null 2>&1; then
-      (strings -a "$TMP.extract/hnc_httpd" 2>/dev/null || strings "$TMP.extract/hnc_httpd" 2>/dev/null) > "$TMP.httpd.strings"
-      [ -n "$VER" ] && { grep -F "$VER" "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd embeds module version $VER" || fail "hnc_httpd does not embed module version $VER; Go binary may be stale"; }
+    if command -v grep >/dev/null 2>&1; then
+      [ -n "$VER" ] && { grep -a -F "$VER" "$TMP.extract/hnc_httpd" >/dev/null 2>&1 && ok "hnc_httpd embeds module version $VER" || fail "hnc_httpd does not embed module version $VER; Go binary may be stale"; }
+      (strings -a "$TMP.extract/hnc_httpd" 2>/dev/null || strings "$TMP.extract/hnc_httpd" 2>/dev/null) > "$TMP.httpd.strings" 
       case "$VER" in v5.3.*)
         grep -F '/api/dpi_state' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_state" || fail "hnc_httpd missing /api/dpi_state"
         grep -F '/api/dpi_probe' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_probe" || fail "hnc_httpd missing /api/dpi_probe"

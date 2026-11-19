@@ -405,9 +405,10 @@ ensure_top_hooks() {
         $T -t mangle -C POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null
         _rc=$?
         if [ "$_rc" -eq 1 ]; then
+            # v5.40.2: 插入到 HNC_SAVE 之前, 使 [31:24] 单应用标记同步写入 CONNMARK, 防止尾部 HNC_EGRESS_FIX 还原时清零 [31:24]
             _save_ln=$($T -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$2 == "HNC_SAVE" {print $1; exit}')
             if [ -n "$_save_ln" ]; then
-                $T -t mangle -I POSTROUTING $((_save_ln + 1)) -j "$CHAIN_DOWN" 2>/dev/null \
+                $T -t mangle -I POSTROUTING "$_save_ln" -j "$CHAIN_DOWN" 2>/dev/null \
                     || $T -t mangle -A POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null
             else
                 $T -t mangle -A POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null

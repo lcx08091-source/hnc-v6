@@ -1,4 +1,4 @@
-//go:build !linux
+//go:build !linux && !android
 
 // dataplane_netlink_stub.go — 非 Linux 平台跨平台安全编译桩。
 //

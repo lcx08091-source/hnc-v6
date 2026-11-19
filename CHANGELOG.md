@@ -14,6 +14,13 @@
 
 ---
 
+## [5.40.2] - 2026-11-19
+
+### GitHub Actions Go 1.27 编译门禁根治与 RMX5010 P0 护栏补强
+- **Fixed · 根治 `Build hnc_httpd (Go)` 红叉**: 修复 Go 1.27 `arm64` 编译器将纯等值比较字符串（`dataplane_verify_run`）内联折叠为 `MOVZ`/`MOVK` 移位立即数导致构建后 `.rodata` 字面量门禁误报退出的问题；将 `GOFLAGS` 恢复为 `-mod=mod`，补齐 `CGO_ENABLED=0` 失败自动回退 NDK r30 `aarch64-linux-android28-clang`（16KB 页对齐）双保险，并将二进制符号门禁统一升级为原始字节直接核验。
+- **Fixed · 单应用限速与三档 QoS 在 `POSTROUTING` 的标记持久化顺序**: 将 `HNC_APP_LIMIT_DOWN` 与 `HNC_APP_QOS` 插入至 `mangle/POSTROUTING` 的 `HNC_SAVE` 之前，确保 `[31:24]` 应用槽位与 QoS 档位完整写入 `CONNMARK`，避免被尾部 `HNC_EGRESS_FIX` 还原冲刷清零。
+- **Fixed · `hnc_httpd` 单实例排他文件锁与看门狗稳定性修复**: 启动期对 `run/httpd.lock` 加非阻塞 `flock` 排他锁杜绝双实例抢占 `:8443`；修复 `hnc_watchdog` 超时取消时 `cmd.Process` 空指针风险并对齐 `watchdog_passive.marker` 状态文件名。
+
 ## [5.40.1] - 2026-11-19
 
 ### 真机实证实锤修复 (realme RMX5010 / SM8750 / Android 16 / KernelSU) & CI 全绿加固

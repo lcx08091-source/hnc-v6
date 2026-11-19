@@ -59,9 +59,10 @@ func runOffloadPlan() string {
 	cmd.Env = os.Environ()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
-		if cmd.Process != nil {
-			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		if cmd.Process == nil {
+			return nil
 		}
+		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return cmd.Process.Kill()
 	}
 	out, err := cmd.Output()

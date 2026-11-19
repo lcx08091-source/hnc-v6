@@ -89,9 +89,24 @@ func main() {
 	log.Printf("hnc_httpd %s starting, remote=%s(:%d, follows remote_enabled) loopback=%v(127.0.0.1:%d) tls=%v hnc_dir=%s",
 		version, *flagBind, *flagPort, haveLocal, *flagLoopbackPort, !*flagNoTLS, *flagHNCDir)
 
+	// v5.40.2: 进程级非阻塞排他锁防双实例并发抢占 :8443 / 误删存活实例 httpd.pid
+	_ = os.MkdirAll(*flagHNCDir+"/run", 0755)
+	lockFile := *flagHNCDir + "/run/httpd.lock"
+	lockFd, lockErr := syscall.Open(lockFile, syscall.O_CREAT|syscall.O_RDWR|syscall.O_CLOEXEC, 0644)
+	if lockErr == nil {
+		if err := syscall.Flock(lockFd, syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+			log.Printf("FATAL: another hnc_httpd instance already holds %s (%v); exiting cleanly", lockFile, err)
+			_ = syscall.Close(lockFd)
+			os.Exit(0)
+		}
+		defer func() {
+			_ = syscall.Flock(lockFd, syscall.LOCK_UN)
+			_ = syscall.Close(lockFd)
+		}()
+	}
+
 	// 写 pid
 	pidFile := *flagHNCDir + "/run/httpd.pid"
-	_ = os.MkdirAll(*flagHNCDir+"/run", 0755)
 	if err := os.WriteFile(pidFile, []byte(fmt.Sprintf("%d\n", os.Getpid())), 0644); err != nil {
 		log.Printf("WARN: cannot write pid file: %v", err)
 	}

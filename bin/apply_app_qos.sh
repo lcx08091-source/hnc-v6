@@ -457,9 +457,10 @@ ipt_build() {
             fi
         fi
         if ! $T -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null; then
+            # v5.40.2: 插入到 HNC_SAVE 之前, 避免尾部 HNC_EGRESS_FIX (--nfmask 0xffff0000) 覆盖清零 [25:24] 应用 QoS 档位
             _save_ln=$($T -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$2 == "HNC_SAVE" {print $1; exit}')
             if [ -n "$_save_ln" ]; then
-                $T -t mangle -I POSTROUTING $((_save_ln + 1)) -j "$CHAIN" 2>/dev/null \
+                $T -t mangle -I POSTROUTING "$_save_ln" -j "$CHAIN" 2>/dev/null \
                     || $T -t mangle -A POSTROUTING -j "$CHAIN" 2>/dev/null
             else
                 $T -t mangle -A POSTROUTING -j "$CHAIN" 2>/dev/null

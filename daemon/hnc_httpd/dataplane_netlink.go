@@ -1,4 +1,4 @@
-//go:build linux
+//go:build linux || android
 
 // dataplane_netlink.go — HNC v5.40.0 T3: Go 原生 RTNetlink tc 调速引擎 + 双栈 iptables-restore 内存管道提交器。
 //

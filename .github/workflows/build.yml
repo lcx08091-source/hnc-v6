@@ -228,11 +228,22 @@ jobs:
           file hnc_httpd | grep -q "ARM aarch64" || (echo "ERROR: hnc_httpd not arm64"; exit 1)
 
       - name: Build hnc_dpid (Go)
+        env:
+          ANDROID_NDK: ${{ steps.ndk.outputs.path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
         run: |
           cd src/dpid
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+          CC64="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
+          STRIP64="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          if ! GOFLAGS="-mod=mod" CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
             go build -buildvcs=false -trimpath -ldflags="-s -w" \
-            -o ../../bin/hnc_dpid ./cmd/dpid
+            -o ../../bin/hnc_dpid ./cmd/dpid; then
+            echo "WARN: hnc_dpid CGO_ENABLED=0 failed; retrying with CGO_ENABLED=1 NDK clang..." >&2
+            GOFLAGS="-mod=mod" CC="$CC64" CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+              go build -buildvcs=false -trimpath -ldflags="-s -w -extldflags=-Wl,-z,max-page-size=16384" \
+              -o ../../bin/hnc_dpid ./cmd/dpid
+            [ -x "$STRIP64" ] && "$STRIP64" ../../bin/hnc_dpid || true
+          fi
           ls -lh ../../bin/hnc_dpid
           file ../../bin/hnc_dpid | grep -q "ARM aarch64" || exit 1
           chmod 755 ../../bin/hnc_dpid
@@ -241,11 +252,22 @@ jobs:
       # committed prebuilt that CI never rebuilt → shipped stale + unstripped.
       # service.sh prefers this Go watchdog over the shell watchdog.sh.
       - name: Build hnc_watchdog (Go)
+        env:
+          ANDROID_NDK: ${{ steps.ndk.outputs.path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
         run: |
           cd src/dpid
-          CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
+          CC64="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
+          STRIP64="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
+          if ! GOFLAGS="-mod=mod" CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
             go build -buildvcs=false -trimpath -ldflags="-s -w" \
-            -o ../../bin/hnc_watchdog ./cmd/hnc_watchdog
+            -o ../../bin/hnc_watchdog ./cmd/hnc_watchdog; then
+            echo "WARN: hnc_watchdog CGO_ENABLED=0 failed; retrying with CGO_ENABLED=1 NDK clang..." >&2
+            GOFLAGS="-mod=mod" CC="$CC64" CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
+              go build -buildvcs=false -trimpath -ldflags="-s -w -extldflags=-Wl,-z,max-page-size=16384" \
+              -o ../../bin/hnc_watchdog ./cmd/hnc_watchdog
+            [ -x "$STRIP64" ] && "$STRIP64" ../../bin/hnc_watchdog || true
+          fi
           ls -lh ../../bin/hnc_watchdog
           file ../../bin/hnc_watchdog | grep -q "ARM aarch64" || exit 1
           file ../../bin/hnc_watchdog | grep -q "not stripped" && { echo "ERROR: hnc_watchdog not stripped"; exit 1; }
@@ -275,10 +297,8 @@ jobs:
           chmod 644 bin/hnc_applabel.dex
           ls -lh bin/hnc_applabel.dex
           # Sanity: the dex must reference our helper class.
-          if command -v strings >/dev/null 2>&1; then
-            strings bin/hnc_applabel.dex | grep -q "io/hnc/applabel/AppLabel" \
-              || (echo "ERROR: dex missing AppLabel class marker"; exit 1)
-          fi
+          grep -a -q "io/hnc/applabel/AppLabel" bin/hnc_applabel.dex \
+            || (echo "ERROR: dex missing AppLabel class marker"; exit 1)
 
       # ─── Build C launcher (rc30.12 introduced this) ───────
       - name: Build hnc_launcher + fork_probe (C)
@@ -367,11 +387,13 @@ jobs:
           mkdir -p bin/armeabi-v7a
 
           (cd daemon/hnc_httpd && bash build.sh arm)
+          STRIP7="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           (cd src/dpid
            for pair in dpid:hnc_dpid hnc_watchdog:hnc_watchdog; do
              src=${pair%%:*}; out=${pair#*:}
-             CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
-               go build -buildvcs=false -trimpath -ldflags="-s -w" -o "../../bin/armeabi-v7a/$out" "./cmd/$src"
+             GOFLAGS="-mod=mod" CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
+               go build -buildvcs=false -trimpath -ldflags="-s -w -extldflags=-Wl,-z,max-page-size=16384" -o "../../bin/armeabi-v7a/$out" "./cmd/$src"
+             [ -x "$STRIP7" ] && "$STRIP7" "../../bin/armeabi-v7a/$out" || true
            done)
           (cd src/launcher && bash build.sh install arm)
           (cd daemon/tc_netlink && bash build.sh arm)
@@ -387,7 +409,7 @@ jobs:
             chmod 755 "$f"
           done
           file "bin/armeabi-v7a/hnc_watchdog" | grep -q "not stripped" && { echo "ERROR: armv7 hnc_watchdog not stripped"; exit 1; }
-          (strings -a bin/armeabi-v7a/hnc_httpd 2>/dev/null || strings bin/armeabi-v7a/hnc_httpd) | grep -qF "$VERSION" \
+          grep -a -qF "$VERSION" bin/armeabi-v7a/hnc_httpd \
             || { echo "ERROR: armv7 hnc_httpd missing version $VERSION"; exit 1; }
           ls -lh bin/armeabi-v7a/
           echo "OK: armeabi-v7a binaries built"
@@ -409,7 +431,7 @@ jobs:
           echo "Expecting version $VERSION in binaries..."
           
           # hnc_httpd should have main.version injected
-          if ! (strings -a daemon/hnc_httpd/hnc_httpd 2>/dev/null || strings daemon/hnc_httpd/hnc_httpd) | grep -qF "$VERSION"; then
+          if ! grep -a -qF "$VERSION" daemon/hnc_httpd/hnc_httpd; then
             echo "ERROR: hnc_httpd missing version string $VERSION"
             echo "       (build.sh should have injected it via -X main.version=$VERSION)"
             exit 1

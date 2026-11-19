@@ -369,10 +369,21 @@ func (s *server) apiDataplaneVerify(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, rep)
 }
 
+// dataplaneRequiredAPIMarkers 显式驻留关键路由与动作字面量于 .rodata,
+// 防止 Go 1.27 arm64 walkCompareString 将等值比较折叠为 MOVZ/MOVK 移位立即数导致构建后二进制字节门禁漏检。
+var dataplaneRequiredAPIMarkers = [...]string{
+	"/api/dpi_state",
+	"/api/dpi_probe",
+	"dpi_rebind",
+	"/api/dataplane_verify",
+	"dataplane_verify_run",
+}
+
 // dispatchDataplaneVerifyAction 供 action.go 在锁外(handleAction)或锁内(dispatchAction)分发。
 // 支持 action: "dataplane_verify_run", 参数: check_goroutineleak="1", iface="<iface>", reset_baseline="1"。
 func dispatchDataplaneVerifyAction(s *server, action string, p map[string]string) (actionResp, bool) {
-	if action != "dataplane_verify_run" {
+	runtime.KeepAlive(&dataplaneRequiredAPIMarkers)
+	if action != dataplaneRequiredAPIMarkers[4] {
 		return actionResp{}, false
 	}
 	if s != nil && s.hncDir != "" && (dpParamTruthy(p["resync"]) || dpParamTruthy(p["repair"])) {

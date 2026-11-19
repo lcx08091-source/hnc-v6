@@ -60,7 +60,7 @@ const (
 	wdPidFile   = runDir + "/watchdog.pid"
 	spawnLock   = runDir + "/spawn.lock"
 	doztMarker  = runDir + "/doze.marker"
-	passiveMark = runDir + "/passive.marker"
+	passiveMark = runDir + "/watchdog_passive.marker"
 
 	intervalNormal    = 60 * time.Second
 	intervalRecovery  = 30 * time.Second
