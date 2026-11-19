@@ -10,9 +10,15 @@ echo "$*" >> "$IPT_LOG"
 case " $* " in *" -D "*) exit 1 ;; esac
 exit 0
 STUB
+cat > "$HNC_TEST_DIR/ip6t_stub.sh" <<'STUB'
+echo "$*" >> "$IP6T_LOG"
+case " $* " in *" -D "*) exit 1 ;; esac
+exit 0
+STUB
 : > "$HNC_TEST_DIR/ipt.log"
+: > "$HNC_TEST_DIR/ip6t.log"
 }
-crun() { IPT_LOG="$HNC_TEST_DIR/ipt.log" HNC_IPT="sh $HNC_TEST_DIR/ipt_stub.sh" HNC_IP6T="sh $HNC_TEST_DIR/ipt_stub.sh" HNC_DIR="$HNC_TEST_DIR" sh "$CSCRIPT" "$@" 2>/dev/null | tail -1; }
+crun() { IPT_LOG="$HNC_TEST_DIR/ipt.log" IP6T_LOG="$HNC_TEST_DIR/ip6t.log" HNC_IPT="sh $HNC_TEST_DIR/ipt_stub.sh" HNC_IP6T="sh $HNC_TEST_DIR/ip6t_stub.sh" HNC_DIR="$HNC_TEST_DIR" sh "$CSCRIPT" "$@" 2>/dev/null | tail -1; }
 
 test_start "connblock: empty flat → chain removed"
 cseed
@@ -55,9 +61,11 @@ printf 'aa:bb:cc:00:00:01 a.example.com\naa:bb:cc:00:00:01 b.example.org\naa:bb:
 out=$(crun)
 c1=$(grep -c -- "--mac-source aa:bb:cc:00:00:01 -p tcp --dport 853 -j REJECT --reject-with tcp-reset" "$HNC_TEST_DIR/ipt.log")
 c2=$(grep -c -- "--mac-source aa:bb:cc:00:00:02 -p tcp --dport 853 -j REJECT" "$HNC_TEST_DIR/ipt.log")
-[ "$out" = "CONN_BLOCK=on rules=0 dns=3 dns_layer=1" ] && [ "$c1" = 1 ] && [ "$c2" = 1 ] \
+c6_1=$(grep -c -- "--mac-source aa:bb:cc:00:00:01 -p tcp --dport 853 -j REJECT --reject-with tcp-reset" "$HNC_TEST_DIR/ip6t.log")
+c6_2=$(grep -c -- "--mac-source aa:bb:cc:00:00:02 -p tcp --dport 853 -j REJECT" "$HNC_TEST_DIR/ip6t.log")
+[ "$out" = "CONN_BLOCK=on rules=0 dns=3 dns_layer=1" ] && [ "$c1" = 1 ] && [ "$c2" = 1 ] && [ "$c6_1" = 1 ] && [ "$c6_2" = 1 ] \
   && grep -q -- "|01|a|07|example|03|com|00|" "$HNC_TEST_DIR/ipt.log" \
-  && grep -q -- "|03|x-y|02|cn|00|" "$HNC_TEST_DIR/ipt.log" && test_pass || test_fail "out=$out c1=$c1 c2=$c2"
+  && grep -q -- "|03|x-y|02|cn|00|" "$HNC_TEST_DIR/ipt.log" && test_pass || test_fail "out=$out c1=$c1 c2=$c2 c6_1=$c6_1 c6_2=$c6_2"
 
 test_start "connblock dns: malformed domains / macs skipped (no injection)"
 cseed
@@ -71,6 +79,11 @@ test_start "connblock dns: no xt_string → IP layer only, capability recorded u
 cseed
 cat > "$HNC_TEST_DIR/ipt_stub.sh" <<'STUB'
 echo "$*" >> "$IPT_LOG"
+case " $* " in *" -D "*|*" -m string "*) exit 1 ;; esac
+exit 0
+STUB
+cat > "$HNC_TEST_DIR/ip6t_stub.sh" <<'STUB'
+echo "$*" >> "$IP6T_LOG"
 case " $* " in *" -D "*|*" -m string "*) exit 1 ;; esac
 exit 0
 STUB

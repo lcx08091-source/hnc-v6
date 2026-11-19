@@ -86,7 +86,7 @@ cb_lock || true
 trap 'cb_unlock' EXIT INT TERM
 
 v6=0
-command -v ip6tables >/dev/null 2>&1 && $IP6T -t filter -L -n >/dev/null 2>&1 && v6=1
+command -v "${IP6T%% *}" >/dev/null 2>&1 && $IP6T -t filter -L -n >/dev/null 2>&1 && v6=1
 
 for T in "$IPT" "$([ "$v6" = 1 ] && echo "$IP6T")"; do
     [ -n "$T" ] || continue
