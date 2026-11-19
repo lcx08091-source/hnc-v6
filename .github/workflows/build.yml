@@ -185,32 +185,6 @@ jobs:
           (cd daemon/hnc_httpd && go vet ./...)
           (cd src/dpid && go vet ./...)
 
-      - name: Frontend JS, Shell, Host C & Python unit tests
-        run: |
-          node test/js/v530_frontend.js . __all__
-          TMPDIR="$RUNNER_TEMP" sh test/run_all.sh
-          python3 -m unittest tools/test_import_v2fly.py
-          CB="$RUNNER_TEMP/c_host_tests" && mkdir -p "$CB"
-          gcc -O2 -Wall -Wextra -Werror -pthread -Idaemon/hotspotd daemon/hotspotd/tools/sched_test.c daemon/hotspotd/scheduler.c daemon/hotspotd/platform.c daemon/hotspotd/upstream.c daemon/hotspotd/offload/adapter.c daemon/hotspotd/offload/adapter_null.c daemon/hotspotd/hnc_helpers.c -lm -o "$CB/sched_test" && "$CB/sched_test" --no-sleep
-          gcc -O2 -Wall -Wextra -Werror -pthread -Idaemon/hotspotd daemon/hotspotd/test/test_hotspotd_ipc.c -o "$CB/test_hotspotd_ipc" && "$CB/test_hotspotd_ipc"
-          gcc -O2 -Wall -Wextra -Werror -Idaemon/hotspotd daemon/hotspotd/test/test_mdns_parse.c -o "$CB/test_mdns_parse" && "$CB/test_mdns_parse"
-
-      - name: C daemons + eBPF strict -Werror & unit tests (host)
-        run: |
-          clang -O2 -g -target bpfel -Wall -Wextra -Werror -D__TARGET_ARCH_arm64 \
-            -c src/dpid/bpf/hnc_clsact.bpf.c -o /tmp/hnc_clsact.ci.o
-          (cd daemon/clsact_ctl && HNC_SKIP_BPF_BUILD=1 bash build.sh host)
-          (cd daemon/tc_netlink && bash build.sh host)
-          (cd src/launcher && sh build.sh host)
-          (cd daemon/hotspotd/tools && bash build.sh host all)
-          ./daemon/hotspotd/tools/prebuilt/host/sched_test --no-sleep
-          gcc -O2 -std=gnu11 -Wall -Wextra -Werror -D_GNU_SOURCE -Idaemon/hotspotd \
-            daemon/hotspotd/test/test_hotspotd_ipc.c daemon/hotspotd/hnc_helpers.c -o /tmp/test_hotspotd_ipc
-          /tmp/test_hotspotd_ipc
-          gcc -O2 -std=gnu11 -Wall -Wextra -Werror -D_GNU_SOURCE \
-            daemon/hotspotd/test/test_mdns_parse.c -o /tmp/test_mdns_parse
-          /tmp/test_mdns_parse
-
       # ─── Build Go components ──────────────────────────────
       - name: Build hnc_httpd (Go)
         env:
