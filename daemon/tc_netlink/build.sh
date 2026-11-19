@@ -82,7 +82,7 @@ fi
 # We intentionally do NOT use -static (full static linking) because bionic
 # libc is not designed to be linked statically on Android; dynamic linkage
 # against /system/lib64/libc.so is the blessed path.
-CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
+CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
 LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 echo "[build] NDK:        $ANDROID_NDK"

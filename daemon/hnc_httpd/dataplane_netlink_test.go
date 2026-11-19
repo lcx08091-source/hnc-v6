@@ -906,10 +906,10 @@ func TestWave4SecondaryOwnerAppLimitsAndActionDelayClear(t *testing.T) {
 		}
 	}
 	writeProbe("device_detect.sh", "echo wlan2\nexit 0\n")
-	writeProbe("json_set.sh", "if [ "$1" = "device_get" ] && [ "$3" = "mark_id" ]; then echo 5; exit 0; fi\necho false\nexit 0\n")
-	writeProbe("json_set_batch.sh", "echo "json_set_batch $*" >> '"+execLog+"'\nexit 0\n")
-	writeProbe("tc_manager.sh", "echo "tc_manager $*" >> '"+execLog+"'\nexit 0\n")
-	writeProbe("iptables_manager.sh", "echo "iptables_manager $*" >> '"+execLog+"'\nexit 0\n")
+	writeProbe("json_set.sh", "if [ \"$1\" = \"device_get\" ] && [ \"$3\" = \"mark_id\" ]; then echo 5; exit 0; fi\necho false\nexit 0\n")
+	writeProbe("json_set_batch.sh", "echo \"json_set_batch $*\" >> '"+execLog+"'\nexit 0\n")
+	writeProbe("tc_manager.sh", "echo \"tc_manager $*\" >> '"+execLog+"'\nexit 0\n")
+	writeProbe("iptables_manager.sh", "echo \"iptables_manager $*\" >> '"+execLog+"'\nexit 0\n")
 
 	resp := actionDelayClear(dir, map[string]string{"mac": mac})
 	if !resp.OK {

@@ -64,6 +64,19 @@ const (
 )
 
 type Handle struct {
+	// Placed at offset 0 for 32-bit ARM 64-bit atomic alignment.
+	stats struct {
+		packets  atomic.Uint64
+		drops    atomic.Uint64
+		dns      atomic.Uint64
+		tls      atomic.Uint64
+		flow     atomic.Uint64
+		devHint  atomic.Uint64
+		http     atomic.Uint64
+		ignored  atomic.Uint64
+		parseErr atomic.Uint64
+		panics   atomic.Uint64
+	}
 	fd      int
 	ifname  string
 	ifindex int
@@ -87,18 +100,6 @@ type Handle struct {
 	//   65534 = ARPHRD_NONE    (tun used by VPN: Clash, WG, Tailscale)
 	linkType int
 
-	stats struct {
-		packets  atomic.Uint64
-		drops    atomic.Uint64
-		dns      atomic.Uint64
-		tls      atomic.Uint64
-		flow     atomic.Uint64
-		devHint  atomic.Uint64
-		http     atomic.Uint64
-		ignored  atomic.Uint64
-		parseErr atomic.Uint64
-		panics   atomic.Uint64
-	}
 }
 
 // Open creates a raw AF_PACKET socket, attaches cBPF, and binds to iface.
