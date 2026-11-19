@@ -259,7 +259,7 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
 
         int rem = (int)len;
         struct nlmsghdr *h = (struct nlmsghdr *)buf;
-        for (; NLMSG_OK(h, rem); h = NLMSG_NEXT(h, rem)) {
+        for (; rem >= (int)sizeof(*h) && NLMSG_OK(h, (unsigned int)rem); h = NLMSG_NEXT(h, rem)) {
             /* Stray multicast or stale reply — skip. */
             if (h->nlmsg_seq != n->nlmsg_seq)
                 continue;

@@ -157,7 +157,7 @@ static int rtnl_talk(int fd, struct nlmsghdr *req)
 
         int rem = (int)n;
         for (struct nlmsghdr *h = (struct nlmsghdr *)buf;
-             NLMSG_OK(h, rem); h = NLMSG_NEXT(h, rem)) {
+             rem >= (int)sizeof(*h) && NLMSG_OK(h, (unsigned int)rem); h = NLMSG_NEXT(h, rem)) {
             if (h->nlmsg_seq != g_seq)
                 continue;
             if (h->nlmsg_type == NLMSG_ERROR) {
@@ -862,8 +862,8 @@ static int cmd_update(const char *target, const char *markstr)
 {
     char *endp = NULL;
     errno = 0;
-    unsigned long raw_mark = strtoul(markstr, &endp, 0);
-    if (errno != 0 || endp == markstr || *endp != '\0' || raw_mark > 0xffffffffUL) {
+    unsigned long long raw_mark = strtoull(markstr, &endp, 0);
+    if (errno != 0 || endp == markstr || *endp != '\0' || raw_mark > 0xffffffffULL) {
         LOGE("invalid mark: %s", markstr);
         return RC_MAP;
     }
@@ -912,8 +912,8 @@ static int cmd_sync(void)
             continue;
         char *endp = NULL;
         errno = 0;
-        unsigned long raw_m = strtoul(markstr, &endp, 0);
-        if (errno != 0 || endp == markstr || *endp != '\0' || raw_m == 0 || raw_m > 0xffffffffUL)
+        unsigned long long raw_m = strtoull(markstr, &endp, 0);
+        if (errno != 0 || endp == markstr || *endp != '\0' || raw_m == 0 || raw_m > 0xffffffffULL)
             continue;
         uint32_t mark = (uint32_t)raw_m;
 

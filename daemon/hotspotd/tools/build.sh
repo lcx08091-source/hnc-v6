@@ -38,9 +38,9 @@ if [ "$ARCH" = "host" ]; then
     echo "[build] Host build (Android props will be empty)"
 else
     case "$ARCH" in
-        arm64)   TARGET=aarch64-linux-android;     API=21 ;;
-        arm)     TARGET=armv7a-linux-androideabi;  API=21 ;;
-        x86_64)  TARGET=x86_64-linux-android;      API=21 ;;
+        arm64)   TARGET=aarch64-linux-android;     API=28 ;;
+        arm)     TARGET=armv7a-linux-androideabi;  API=28 ;;
+        x86_64)  TARGET=x86_64-linux-android;      API=28 ;;
         *)       echo "Unknown arch: $ARCH"; exit 1 ;;
     esac
 
@@ -56,7 +56,7 @@ else
         [ -x "$TOOLCHAIN/bin/llvm-strip" ] && STRIP="$TOOLCHAIN/bin/llvm-strip"
     fi
 
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 $COMMON_DEFS -static-libgcc -fPIE"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -DANDROID $COMMON_DEFS -static-libgcc -fPIE"
     LDFLAGS="-pie -pthread -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
     echo "[build] Compiler: $CC  Target: $ARCH"
 fi

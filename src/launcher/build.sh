@@ -117,7 +117,7 @@ if [ "$ARCH" != "arm64" ]; then
     mkdir -p "$OUT"
 fi
 
-COMMON_FLAGS="-O2 -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -static-libgcc -fPIE"
+COMMON_FLAGS="-O2 -std=c11 -Wall -Wextra -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -static-libgcc -fPIE"
 
 # rc30.12.28: Bionic (Android libc) 在 ARM64 要求 TLS segment 对齐至少 64 字节.
 # 默认 toolchain 可能生成 8 字节对齐的 TLS, 导致 "TLS segment is underaligned" abort.

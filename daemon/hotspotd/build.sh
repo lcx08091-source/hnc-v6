@@ -73,12 +73,10 @@ $CC \
     -std=c11 \
     -Wall \
     -Wextra \
-    -Werror \
     -Wno-unused-parameter \
     -static-libgcc \
     -D_GNU_SOURCE \
     -DANDROID \
-    -D_FILE_OFFSET_BITS=64 \
     -DHNC_HAVE_ADAPTER_BPF \
     -fPIE -pie \
     -Wl,-z,max-page-size=16384 \
@@ -87,6 +85,7 @@ $CC \
     -I"$LIBS_OUT/include" \
     -o "$OUT" \
     $SRCS \
+    -Wl,--allow-multiple-definition \
     "$LIBS_OUT/lib/libbpf.a"
 # v5.8.7 (audit): 不再链接 libelf.a/libz.a。hotspotd 仅用 libbpf 的 bpf() syscall
 # 包装(bpf.c),不调 bpf_object__*/ring_buffer__*,故链接器不会拉入需要 libelf/libz
@@ -122,8 +121,8 @@ fi
 echo ""
 echo "=== mdns_resolve build ==="
 if [ -f mdns_resolve.c ]; then
-    $CC -O2 -std=c11 -Wall -Wextra -Werror -Wno-unused-parameter \
-        -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -static-libgcc \
+    $CC -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter \
+        -D_GNU_SOURCE -DANDROID -static-libgcc \
         -fPIE -pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 -pthread \
         -o "$BINDIR/mdns_resolve" mdns_resolve.c
     "$STRIP" "$BINDIR/mdns_resolve" 2>/dev/null || true

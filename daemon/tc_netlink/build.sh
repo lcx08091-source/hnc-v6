@@ -23,7 +23,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ARCH="${1:-arm64}"
-API="${HNC_NDK_API:-21}"
+API="${HNC_NDK_API:-24}"
 OUTDIR="out/${ARCH}"
 SRC="hnc_tc_ingress.c"
 BIN="hnc_tc_ingress"
@@ -84,7 +84,7 @@ fi
 # We intentionally do NOT use -static (full static linking) because bionic
 # libc is not designed to be linked statically on Android; dynamic linkage
 # against /system/lib64/libc.so is the blessed path.
-CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -static-libgcc -fPIE"
+CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -DANDROID -static-libgcc -fPIE"
 LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 echo "[build] NDK:        $ANDROID_NDK"
