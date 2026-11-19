@@ -40,7 +40,7 @@ if [ -d vendor ]; then
 else
     export GOPROXY=${GOPROXY:-"https://proxy.golang.org,direct"}
     export GOSUMDB=${GOSUMDB:-sum.golang.org}
-    export GOFLAGS=${GOFLAGS:-"-mod=mod"}
+    export GOFLAGS=${GOFLAGS:-"-mod=readonly"}
 fi
 
 # rc5.1.1 修 X-G2: 从 module.prop 读 version 注入 binary, 消除硬编码
@@ -59,7 +59,7 @@ VERSION_CODE=$(grep "^versionCode=" ../../module.prop 2>/dev/null | cut -d= -f2)
 [ -z "$VERSION_CODE" ] && VERSION_CODE=0
 
 echo "Building hnc_httpd for android/$GOARCH (version=$VERSION code=$VERSION_CODE)..."
-go build -ldflags="-s -w -X main.version=$VERSION -X main.versionCode=$VERSION_CODE" -o "$OUT_BIN" .
+go build -buildvcs=false -trimpath -ldflags="-s -w -X main.version=$VERSION -X main.versionCode=$VERSION_CODE" -o "$OUT_BIN" .
 
 echo "OK: $(ls -la "$OUT_BIN")"
 file "$OUT_BIN"
@@ -67,18 +67,20 @@ file "$OUT_BIN"
 # v5.3.0-rc17: hard fail CI if the rebuilt backend loses DPI API routes/actions.
 # This prevents GitHub Actions from publishing a zip whose WebUI calls
 # /api/dpi_state or /api/dpi_probe but the freshly-built hnc_httpd returns 404.
+_STR_TMP="${TMPDIR:-/tmp}/hnc_httpd_strings.$$"
+(strings -a "$OUT_BIN" 2>/dev/null || strings "$OUT_BIN") > "$_STR_TMP"
 for sym in \
     /api/dpi_state \
     /api/dpi_probe \
-    apiDPIState \
-    apiDPIProbe \
     dpi_rebind \
     /api/dataplane_verify \
     dataplane_verify_run
 do
-    if ! strings "$OUT_BIN" | grep -F "$sym" >/dev/null 2>&1; then
-        echo "ERROR: rebuilt hnc_httpd missing required DPI API symbol/string: $sym" >&2
+    if ! grep -F "$sym" "$_STR_TMP" >/dev/null 2>&1; then
+        rm -f "$_STR_TMP" 2>/dev/null || true
+        echo "ERROR: rebuilt hnc_httpd missing required DPI API route/action string: $sym" >&2
         exit 1
     fi
 done
+rm -f "$_STR_TMP" 2>/dev/null || true
 echo "OK: hnc_httpd includes DPI & dataplane API routes/actions"

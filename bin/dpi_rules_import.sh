@@ -16,7 +16,7 @@
 
 HNC_DIR=${HNC_DIR:-${HNC:-/data/local/hnc}}
 MODDIR=${MODDIR:-$(cat "$HNC_DIR/run/service.path" 2>/dev/null)}
-[ -z "$MODDIR" ] && MODDIR=/data/adb/modules/hotspot_network_control
+if [ -z "$MODDIR" ]; then [ -d /data/adb/modules/hotspot_net_ctl ] && MODDIR=/data/adb/modules/hotspot_net_ctl || MODDIR=/data/adb/modules/hotspot_network_control; fi
 ETC="$HNC_DIR/etc"
 RUN="$HNC_DIR/run"
 LOG_DIR="$HNC_DIR/logs"

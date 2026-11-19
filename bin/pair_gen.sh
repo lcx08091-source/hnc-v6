@@ -3,6 +3,7 @@
 #
 # 用法:
 #   sh pair_gen.sh             → 生成新的 PIN,写 $RUN/pair_pending,输出 JSON
+#   sh pair_gen.sh url         → 生成新的 PIN,输出 http://127.0.0.1:8444/pair?prefill=<PIN> 供 action.sh 免密拉起
 #   sh pair_gen.sh cancel      → 取消当前配对(删 pair_pending)
 #   sh pair_gen.sh status      → 看当前配对状态
 #
@@ -69,7 +70,12 @@ if [ "$1" = "status" ]; then
     exit 0
 fi
 
-# ─── generate (default) ────────────────────────────────────────────
+WANT_URL=0
+if [ "$1" = "url" ]; then
+    WANT_URL=1
+fi
+
+# ─── generate (default | url) ──────────────────────────────────────
 
 # 建目录防御(post-fs-data 应已建,这里再兜底)
 [ ! -d "$RUN" ] && mkdir -p "$RUN" 2>/dev/null
@@ -137,5 +143,16 @@ mv "$TMP" "$PENDING" || emit_err "rename failed"
 find "$RUN" -maxdepth 1 -name "pair_success.*" -type f -mmin +60 -delete 2>/dev/null
 
 # 输出
+if [ "$WANT_URL" = "1" ]; then
+    _base="http://127.0.0.1:8444"
+    if [ -f "$RUN/webui_url" ]; then
+        _u=$(head -n 1 "$RUN/webui_url" 2>/dev/null | tr -d ' \t\r\n')
+        case "$_u" in
+            http://127.0.0.1:*|http://localhost:*) _base="${_u%/}" ;;
+        esac
+    fi
+    printf '%s/pair?prefill=%s\n' "$_base" "$pin"
+    exit 0
+fi
 printf '{"ok":true,"pin":"%s","session_id":"%s","expiry":%d,"valid_sec":%d}\n' \
     "$pin" "$sid" "$expiry" "$VALID_SEC"

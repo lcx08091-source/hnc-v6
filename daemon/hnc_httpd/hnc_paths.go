@@ -9,15 +9,21 @@ import (
 	"strings"
 )
 
-// defaultModuleDir 模块的默认安装位置(run/service.path 不在时用)。
-const defaultModuleDir = "/data/adb/modules/hotspot_network_control"
+// primaryModuleDir 与 defaultModuleDir: module.prop 当前 id=hotspot_net_ctl, 兼容回退历史目录。
+const (
+	primaryModuleDir = "/data/adb/modules/hotspot_net_ctl"
+	defaultModuleDir = "/data/adb/modules/hotspot_network_control"
+)
 
-// moduleDir 模块目录: run/service.path(service.sh 开机写入)> 默认安装位置。
+// moduleDir 模块目录: run/service.path(service.sh 开机写入) > hotspot_net_ctl > 历史 hotspot_network_control。
 func moduleDir(hncDir string) string {
 	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "service.path")); err == nil {
 		if v := strings.TrimSpace(string(b)); v != "" {
 			return v
 		}
+	}
+	if st, err := os.Stat(primaryModuleDir); err == nil && st.IsDir() {
+		return primaryModuleDir
 	}
 	return defaultModuleDir
 }

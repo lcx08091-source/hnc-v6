@@ -1,7 +1,7 @@
 id=hotspot_net_ctl
 name=Hotspot Network Control (HNC)
-version=v5.40.0
-versionCode=5400000
+version=v5.40.1
+versionCode=5400100
 author=HNC Team
-description=Android 热点网关控制中心 v5.40.0 · Go 1.27 + NDK r30 LTS 16KB 页对齐 · Android 13–16 数据面正交限速 9 项根治 · 原生 RTNetlink <80ms 极速下发 · 数据面真机命中核验面板
+description=Android 热点网关控制中心 v5.40.1 · RMX5010/SM8750 真机实证实锤修复 · ColorOS 16 策略路由与 mangle 护栏 · 新旧模块目录防冲突 · Go 1.27 CI 全绿加固
 updateJson=https://raw.githubusercontent.com/lcx08091-source/hnc-v6/main/update.json

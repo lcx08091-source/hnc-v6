@@ -45,7 +45,7 @@ fail() { FAIL=$((FAIL+1)); RESULTS="$RESULTS$1|FAIL|$2
 "; [ $JSON_MODE -eq 0 ] && printf '  \033[31m✗\033[0m %-22s %s\n' "$1" "$2"; }
 
 # rc5.1.1 修 H2: 提前读 VER, 标题能显示实际版本
-MODDIR=/data/adb/modules/hotspot_network_control
+MODDIR=/data/adb/modules/hotspot_net_ctl; [ -d "$MODDIR" ] || MODDIR=/data/adb/modules/hotspot_network_control
 [ -f "$MODDIR/module.prop" ] && VER=$(grep "^version=" "$MODDIR/module.prop" | cut -d= -f2) || VER="unknown"
 
 [ $JSON_MODE -eq 0 ] && {
@@ -58,7 +58,7 @@ MODDIR=/data/adb/modules/hotspot_network_control
 # v3.8.6 修复:module.prop 在 Magisk/KernelSU 模块目录,
 # 不在 $HNC 运行目录。之前检查 $HNC/module.prop 永远 FAIL,
 # 因为 HNC 从 v3.5 开始就没这个文件(只有 bin/data/logs/run)。
-MODDIR=/data/adb/modules/hotspot_network_control
+MODDIR=/data/adb/modules/hotspot_net_ctl; [ -d "$MODDIR" ] || MODDIR=/data/adb/modules/hotspot_network_control
 if [ -d "$HNC" ]; then
     if [ -d "$HNC/bin" ] && [ -d "$HNC/data" ] && [ -f "$MODDIR/module.prop" ]; then
         VER=$(grep "^version=" "$MODDIR/module.prop" | cut -d= -f2)

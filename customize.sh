@@ -52,3 +52,13 @@ for _f in "$MODPATH/bin/hnc_clsact.o" "$MODPATH/bin/hnc_applabel.dex" "$MODPATH/
     [ -f "$_f" ] && chmod 644 "$_f" 2>/dev/null
 done
 unset _f
+
+# v5.40.1: 自动退役历史改名前遗留的 /data/adb/modules/hotspot_network_control 模块目录
+# (RMX5010 真机实证: 新旧两个模块 ID 并存会导致开机双份 service.sh / 双份 hnc_httpd 抢占 :8443)
+_LEGACY_MOD="/data/adb/modules/hotspot_network_control"
+if [ -d "$_LEGACY_MOD" ] && [ "$MODPATH" != "$_LEGACY_MOD" ]; then
+    ui_print "- HNC: 检测到历史旧模块目录 hotspot_network_control，已自动标记停用并安排重启清理"
+    : > "$_LEGACY_MOD/disable" 2>/dev/null || true
+    : > "$_LEGACY_MOD/remove" 2>/dev/null || true
+fi
+unset _LEGACY_MOD

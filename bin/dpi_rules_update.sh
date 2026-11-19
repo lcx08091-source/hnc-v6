@@ -21,7 +21,7 @@
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 HNC_DIR=${HNC_DIR:-${HNC:-/data/local/hnc}}
-MODDIR=${MODDIR:-/data/adb/modules/hotspot_network_control}
+if [ -z "$MODDIR" ]; then [ -d /data/adb/modules/hotspot_net_ctl ] && MODDIR=/data/adb/modules/hotspot_net_ctl || MODDIR=/data/adb/modules/hotspot_network_control; fi
 REPO="${HNC_RULES_REPO:-lcx08091-source/hnc-v6}"
 API_URL="https://api.github.com/repos/$REPO/releases/latest"
 DST="$HNC_DIR/etc/dpi_rules.d/97-online-update.json"

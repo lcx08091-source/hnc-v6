@@ -186,21 +186,34 @@ init_chains() {
     echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
     echo 1 > /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || true
 
-    # ── HNC_RESTORE (mangle/PREROUTING): CONNMARK → MARK ──────
-    # 下行方向已有连接的后续包直接恢复 mark，节省重复查询开销
-    # 对 v6 而言是必需：下行没有 -d 地址规则兜底，全靠这个恢复
+    # ── v5.40.1 HNC_PREROUTE_GUARD (mangle/PREROUTING): 策略路由护栏 ──
+    # RMX5010 / ColorOS 16 真机实证: ip rule 10000(0xc0000/0xd0000) 与 18000-20000(0x0/0x10000)
+    # 检查 [19:16] 位。clsact 入向打标报文已完成 ifb0 上行整形, 进入路由前先清零 [19:16],
+    # 路由完成后在 mangle/FORWARD 由 HNC_RESTORE + HNC_MARK 恢复完整正交设备标。
+    if $IPT -t mangle -S PREROUTING 2>/dev/null | grep -q 'HNC_RESTORE'; then
+        ipt_dual_del_all -t mangle -D PREROUTING -j HNC_RESTORE
+    fi
+    _ensure_chain mangle HNC_PREROUTE_GUARD
+    ipt_dual -t mangle -A HNC_PREROUTE_GUARD \
+        -m mark --mark 0x00800000/0x00800000 \
+        -j MARK --set-xmark 0x0/0x000f0000
+    _ensure_link mangle PREROUTING HNC_PREROUTE_GUARD 1
+
+    # ── HNC_RESTORE (mangle/FORWARD pos 1): CONNMARK → MARK ───
+    # 移入 FORWARD(在 ip rule 路由决策之后执行), 彻底杜绝下行回包在 PREROUTING 提前恢复
+    # [19:16] 导致失配 20000: fwmark 0x0/0x10000 lookup local_network 掉入 unreachable!
     _ensure_chain mangle HNC_RESTORE
     ipt_dual -t mangle -A HNC_RESTORE \
         -m connmark ! --mark "0x0/$CONNMARK_MASK" \
         -j CONNMARK --restore-mark \
         --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
-    _ensure_link mangle PREROUTING HNC_RESTORE 1
+    _ensure_link mangle FORWARD HNC_RESTORE 1
 
-    # ── HNC_MARK (mangle/FORWARD): MAC/IP → MARK ─────────────
+    # ── HNC_MARK (mangle/FORWARD pos 2): MAC/IP → MARK ────────
     _ensure_chain mangle HNC_MARK
-    _ensure_link mangle FORWARD HNC_MARK 1
+    _ensure_link mangle FORWARD HNC_MARK 2
 
-    # ── HNC_STATS (mangle/FORWARD): 双栈流量字节计数 (v4 + v6) ──
+    # ── HNC_STATS (mangle/FORWARD pos 3): 双栈流量字节计数 (v4 + v6) ──
     # re-init 时绝不 -F 已有链, 保住在线会话累计字节; 若内核链尚不存在(首次建链或
     # cleanup 后重启热点), 同步清空 run/stats_v6_map 与 run/stats_v6_retired, 防止
     # 上一轮会话结转的退休 IPv6 流量幽灵叠加到新热点会话.
@@ -209,7 +222,7 @@ init_chains() {
         rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
     fi
     $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
-        || $IPT -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null \
+        || $IPT -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -A FORWARD -j HNC_STATS
     if [ "$IPV6_OK" = "1" ]; then
         if ! $IP6T -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
@@ -217,18 +230,34 @@ init_chains() {
             rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
         fi
         $IP6T -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
-            || $IP6T -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null \
+            || $IP6T -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
             || $IP6T -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
     fi
 
-    # ── HNC_SAVE (mangle/POSTROUTING): MARK → CONNMARK ────────
-    # 上行新连接打完 mark 后存入 conntrack，下行回包才能 restore
+    # ── HNC_SAVE (mangle/POSTROUTING pos 1): MARK → CONNMARK ──
+    # 在厂商链之前第一时间将完整 0xffff0000 标记存入 conntrack
     _ensure_chain mangle HNC_SAVE
     ipt_dual -t mangle -A HNC_SAVE \
         -m mark ! --mark "0x0/$CONNMARK_MASK" \
         -j CONNMARK --save-mark \
         --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
     _ensure_link mangle POSTROUTING HNC_SAVE 1
+
+    # ── v5.40.1 HNC_EGRESS_FIX (mangle/POSTROUTING tail): 修复 bw_mangle 冲刷 ──
+    # RMX5010 真机实证: bw_mangle_POSTROUTING 无接口过滤执行 MARK --set-xmark 0x0/0x100000,
+    # 清零第 20 位导致 mark_id 16..31 下行 HTB fw 失配。挂在 POSTROUTING 末尾且排除 rmnet+,
+    # 既完整恢复热点下行 HTB 标记, 又 100% 保留高通 rmnet_data* QMI 无线电 QoS 标记。
+    _ensure_chain mangle HNC_EGRESS_FIX
+    ipt_dual -t mangle -A HNC_EGRESS_FIX \
+        ! -o rmnet+ -m connmark --mark 0x00800000/0x00800000 \
+        -j CONNMARK --restore-mark \
+        --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
+    $IPT -t mangle -C POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null \
+        || $IPT -t mangle -A POSTROUTING -j HNC_EGRESS_FIX
+    if [ "$IPV6_OK" = "1" ]; then
+        $IP6T -t mangle -C POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null \
+            || $IP6T -t mangle -A POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null
+    fi
 
     # ── HNC_CTRL (filter/FORWARD): 黑名单 DROP ───────────────
     _ensure_chain filter HNC_CTRL
@@ -570,10 +599,13 @@ cleanup() {
 
     # 解除 builtin 链上的 jump（v4+v6 双栈，循环 -D 清除可能的历史重复挂载）
     for entry in \
+        "mangle PREROUTING  HNC_PREROUTE_GUARD" \
         "mangle PREROUTING  HNC_RESTORE" \
+        "mangle FORWARD     HNC_RESTORE" \
         "mangle FORWARD     HNC_MARK"    \
         "mangle FORWARD     HNC_STATS"   \
         "mangle POSTROUTING HNC_SAVE"    \
+        "mangle POSTROUTING HNC_EGRESS_FIX" \
         "filter FORWARD     HNC_CTRL"    \
         "filter FORWARD     HNC_ISOLATE" \
         "filter FORWARD     HNC_WHITELIST"; do
@@ -582,7 +614,7 @@ cleanup() {
     done
 
     # flush + delete 所有用户链（v4）
-    for chain in HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE; do
+    for chain in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE HNC_EGRESS_FIX; do
         $IPT -t mangle -F "$chain" 2>/dev/null
         $IPT -t mangle -X "$chain" 2>/dev/null
     done
@@ -593,7 +625,7 @@ cleanup() {
 
     # flush + delete 所有用户链（v6，含 HNC_STATS）
     if [ "$IPV6_OK" = "1" ]; then
-        for chain in HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE; do
+        for chain in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE HNC_EGRESS_FIX; do
             $IP6T -t mangle -F "$chain" 2>/dev/null
             $IP6T -t mangle -X "$chain" 2>/dev/null
         done

@@ -158,7 +158,7 @@ if [ "$ARCH" != "arm64" ]; then
     mkdir -p "$OUT"
 fi
 
-COMMON_FLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
+COMMON_FLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
 
 # rc30.12.28: Bionic (Android libc) 在 ARM64 要求 TLS segment 对齐至少 64 字节.
 # 同时 max-page-size 在 Android 16K page 设备上设为 16384 以保证 ELF LOAD 段对齐.

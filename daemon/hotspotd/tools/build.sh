@@ -59,7 +59,7 @@ else
         [ -x "$TOOLCHAIN/bin/llvm-strip" ] && STRIP="$TOOLCHAIN/bin/llvm-strip"
     fi
 
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 $COMMON_DEFS -fPIE -pthread"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 $COMMON_DEFS -fPIE -pthread"
     LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
     echo "[build] Compiler: $CC  Target: $ARCH"
 fi

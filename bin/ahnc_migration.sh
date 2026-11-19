@@ -21,7 +21,7 @@
 # Triggered by service.sh on every boot, but uses a marker file to ensure
 # the actual migration runs exactly once.
 
-. /data/adb/modules/hotspot_network_control/bin/hnc_common.sh 2>/dev/null || {
+. /data/adb/modules/hotspot_net_ctl/bin/hnc_common.sh 2>/dev/null || . /data/adb/modules/hotspot_network_control/bin/hnc_common.sh 2>/dev/null || {
     # Standalone fallback — only used if hnc_common.sh is missing
     HNC_DIR=/data/local/hnc
     log() { echo "$(date +'%F %T') ahnc-migration: $*" >&2; }

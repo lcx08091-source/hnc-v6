@@ -232,19 +232,38 @@ var (
 
 func loadIndexDiskOnce() []byte {
 	indexDiskOnce.Do(func() {
-		const diskPath = "/data/adb/modules/hotspot_network_control/webroot/index.html"
-		if data, err := os.ReadFile(diskPath); err == nil && len(data) > 0 {
-			indexDiskBytes = data
+		for _, diskPath := range []string{
+			"/data/adb/modules/hotspot_net_ctl/webroot/index.html",
+			"/data/adb/modules/hotspot_network_control/webroot/index.html",
+		} {
+			if data, err := os.ReadFile(diskPath); err == nil && len(data) > 0 {
+				indexDiskBytes = data
+				return
+			}
 		}
 	})
 	return indexDiskBytes
 }
+
+const defaultWebrootDiskDir = "/data/adb/modules/hotspot_network_control/webroot/"
 
 func (s *server) resolveWebrootPath(name string) string {
 	if s != nil && s.hncDir != "" {
 		cand := filepath.Join(s.hncDir, "webroot", name)
 		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Size() > 0 {
 			return cand
+		}
+		if webrootDiskDir == defaultWebrootDiskDir {
+			modCand := filepath.Join(moduleDir(s.hncDir), "webroot", name)
+			if st, err := os.Stat(modCand); err == nil && !st.IsDir() && st.Size() > 0 {
+				return modCand
+			}
+		}
+	}
+	if webrootDiskDir == defaultWebrootDiskDir {
+		modCand := filepath.Join(primaryModuleDir, "webroot", name)
+		if st, err := os.Stat(modCand); err == nil && !st.IsDir() && st.Size() > 0 {
+			return modCand
 		}
 	}
 	return webrootDiskDir + name

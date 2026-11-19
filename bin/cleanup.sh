@@ -126,7 +126,7 @@ for proc in bin/hnc_launcher bin/hnc_watchdog bin/hnc_offload_guard.sh bin/devic
 done
 # watchdogfix-v6.1: also stop stale service.sh sentinel shells; otherwise
 # cleanup/restart can kill watchdog and an old sentinel immediately recreates it.
-for svcpat in "hotspot_network_control/service.sh" "/data/adb/hnc/service.sh"; do
+for svcpat in "hotspot_net_ctl/service.sh" "hotspot_network_control/service.sh" "/data/adb/hnc/service.sh"; do
     pkill -f "$svcpat" 2>/dev/null && log "pkill service/sentinel $svcpat"
 done
 fi  # end MODE=all|restart 的进程清理分支
@@ -216,7 +216,9 @@ log "Cleaning iptables chains (v4+v6)..."
 # v5.35.0: 双栈幂等拆链（包含 HNC_STATS v6、HNC_APP_LIMIT_UP/DOWN + 二级槽位链 HNC_AL_C*、HNC_APP_QOS_MARK/QOS_IP 与 HNC_CONNBLK_DNS）
 _cleanup_ipt_stack() {
     _cmd="$1"
-    for _tc in "mangle PREROUTING  HNC_RESTORE" \
+    for _tc in "mangle PREROUTING  HNC_PREROUTE_GUARD" \
+               "mangle PREROUTING  HNC_RESTORE" \
+               "mangle FORWARD     HNC_RESTORE" \
                "mangle FORWARD     HNC_MARK" \
                "mangle FORWARD     HNC_STATS" \
                "mangle FORWARD     HNC_APP_LIMIT" \
@@ -225,6 +227,7 @@ _cleanup_ipt_stack() {
                "mangle FORWARD     HNC_APP_QOS_MARK" \
                "mangle POSTROUTING HNC_APP_QOS" \
                "mangle POSTROUTING HNC_SAVE" \
+               "mangle POSTROUTING HNC_EGRESS_FIX" \
                "filter FORWARD     HNC_CTRL" \
                "filter FORWARD     HNC_WHITELIST" \
                "filter FORWARD     HNC_QUIC" \
@@ -252,7 +255,7 @@ _cleanup_ipt_stack() {
         "$_cmd" -w 2 -t mangle -F "$_al" 2>/dev/null || true
         "$_cmd" -w 2 -t mangle -X "$_al" 2>/dev/null || true
     done
-    for _h in HNC_RESTORE HNC_MARK HNC_STATS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE; do
+    for _h in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE HNC_EGRESS_FIX; do
         "$_cmd" -w 2 -t mangle -X "$_h" 2>/dev/null || true
     done
     for _h in HNC_CTRL HNC_WHITELIST HNC_QUIC HNC_CONNBLK HNC_CONNBLK_DNS HNC_ENCDNS HNC_ENCDNS_STRICT HNC_ENCDNS_DOT; do
@@ -322,7 +325,9 @@ if [ "$MODE" = "restart" ]; then
         fi
     fi
     # 路径 2 (兜底): KSU / SukiSU / Magisk 常见安装位置
-    for c in /data/adb/modules/hotspot_network_control/service.sh \
+    for c in /data/adb/modules/hotspot_net_ctl/service.sh \
+             /data/adb/modules_update/hotspot_net_ctl/service.sh \
+             /data/adb/modules/hotspot_network_control/service.sh \
              /data/adb/modules_update/hotspot_network_control/service.sh \
              /data/adb/hnc/service.sh; do
         if [ -z "$SERVICE_SH" ] && [ -f "$c" ]; then

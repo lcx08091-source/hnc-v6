@@ -215,8 +215,12 @@ prune_duplicate_watchdogs() {
 prune_stale_service_sentinels() {
     local self pids p
     self=$$
+    if [ "$MODDIR" != "/data/adb/modules/hotspot_network_control" ] && [ -d "/data/adb/modules/hotspot_network_control" ]; then
+        : > "/data/adb/modules/hotspot_network_control/disable" 2>/dev/null || true
+        : > "/data/adb/modules/hotspot_network_control/remove" 2>/dev/null || true
+    fi
     pids=$(ps -ef 2>/dev/null | awk -v self="$self" '
-        $0 !~ /awk/ && $0 ~ /(hotspot_network_control|\/data\/adb\/hnc)\/service\.sh/ && $2 != self { print $2 }
+        $0 !~ /awk/ && $0 ~ /(hotspot_net_ctl|hotspot_network_control|\/data\/adb\/hnc)\/service\.sh/ && $2 != self { print $2 }
     ')
     [ -z "$pids" ] && return 0
     log "watchdogfix-v6.1: stopping stale service/sentinel pids: $pids"
@@ -541,14 +545,61 @@ launch_httpd_safe() {
     log "launch_httpd_safe: hnc_httpd started (PID=$!; remote port follows remote_enabled)"
 }
 
+# v5.40.1: 基于 /proc/<pid>/cmdline 清理旧模块残留的重复 hnc_httpd 实例 (修复 RMX5010 双 httpd 抢占 :8443)
+prune_duplicate_httpds() {
+    local proot="${HNC_PROC_ROOT:-/proc}"
+    local keep="" d p cmd count=0 all_pids=""
+    keep=$(cat "$RUN/httpd.pid" 2>/dev/null | tr -dc '0-9')
+    for d in "$proot"/[0-9]*; do
+        [ -r "$d/cmdline" ] || continue
+        p=${d##*/}
+        cmd=$(tr '\000' ' ' < "$d/cmdline" 2>/dev/null)
+        case "$cmd" in
+            *hnc_httpd*)
+                case "$cmd" in
+                    *" -port "*|*" -loopback-port "*|*hotspot_network_control*)
+                        kill "$p" 2>/dev/null || true
+                        usleep 100000 2>/dev/null || sleep 1
+                        kill -9 "$p" 2>/dev/null || true
+                        log "v5.40.1: terminated legacy hnc_httpd instance pid=$p"
+                        continue
+                        ;;
+                esac
+                all_pids="$all_pids $p"
+                count=$((count + 1))
+                ;;
+        esac
+    done
+    if [ "$count" -gt 1 ]; then
+        case " $all_pids " in
+            *" $keep "*) ;;
+            *) keep=$(printf '%s\n' $all_pids | sort -n | head -n 1) ;;
+        esac
+        [ -n "$keep" ] && echo "$keep" > "$RUN/httpd.pid" 2>/dev/null || true
+        for p in $all_pids; do
+            [ "$p" = "$keep" ] && continue
+            kill "$p" 2>/dev/null || true
+            usleep 100000 2>/dev/null || sleep 1
+            kill -9 "$p" 2>/dev/null || true
+            log "v5.40.1: terminated duplicate hnc_httpd pid=$p (kept=$keep)"
+        done
+    fi
+}
+
 if [ -x "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" ]; then
-    HP=$(ps -ef 2>/dev/null | grep '/data/local/hnc/daemon/hnc_httpd/hnc_httpd' \
-         | grep -v grep | awk '{print $2}' | head -n 1)
+    prune_duplicate_httpds
+    HP=$(pidfile_live_pid "$RUN/httpd.pid" hnc_httpd 2>/dev/null)
+    if [ -z "$HP" ]; then
+        HP=$(ps -ef 2>/dev/null | grep '/data/local/hnc/daemon/hnc_httpd/hnc_httpd' \
+             | grep -v grep | awk '{print $2}' | head -n 1)
+    fi
     if [ -n "$HP" ] && kill -0 "$HP" 2>/dev/null; then
+        echo "$HP" > "$RUN/httpd.pid" 2>/dev/null || true
         log "rc30.12 pre-launch: hnc_httpd already running (PID=$HP)"
     else
         launch_httpd_safe
         sleep 1
+        prune_duplicate_httpds
     fi
 fi
 

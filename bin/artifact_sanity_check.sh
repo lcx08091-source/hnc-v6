@@ -98,7 +98,7 @@ if grep -x 'bin/hnc_dpid' "$TMP.entries" >/dev/null; then
       warn "od not available; skipped hnc_dpid ELF machine check"
     fi
     if command -v strings >/dev/null 2>&1; then
-      strings "$TMP.extract/hnc_dpid" > "$TMP.dpid.strings" 2>/dev/null
+      (strings -a "$TMP.extract/hnc_dpid" 2>/dev/null || strings "$TMP.extract/hnc_dpid" 2>/dev/null) > "$TMP.dpid.strings"
       if grep -F '0.1.0-rc1.2-fixed' "$TMP.dpid.strings" >/dev/null || grep -F '0.1.0-rc1.3' "$TMP.dpid.strings" >/dev/null || grep -F '0.2.0-l2-rc19' "$TMP.dpid.strings" >/dev/null || grep -F '0.3.0-l3-rc20' "$TMP.dpid.strings" >/dev/null || grep -F '0.3.1-l3-rc20.1' "$TMP.dpid.strings" >/dev/null || grep -F 'hnc_dpid' "$TMP.dpid.strings" >/dev/null; then
         ok "hnc_dpid contains expected version/name marker"
       else
@@ -122,7 +122,7 @@ if grep -x 'daemon/hnc_httpd/hnc_httpd' "$TMP.entries" >/dev/null; then
       case "$MACHINE" in "$WANT_MACHINE") ok "hnc_httpd matches $EXPECT_ABI: machine=$MACHINE" ;; "28 00") warn "hnc_httpd is 32-bit ARM ELF: machine=$MACHINE; expected $EXPECT_ABI package?" ;; "b7 00") fail "hnc_httpd is AArch64 ELF in a $EXPECT_ABI package: machine=$MACHINE" ;; *) fail "hnc_httpd is not Android ARM/AArch64 ELF, machine=$MACHINE" ;; esac
     else warn "od not available; skipped hnc_httpd ELF machine check"; fi
     if command -v strings >/dev/null 2>&1; then
-      strings "$TMP.extract/hnc_httpd" > "$TMP.httpd.strings" 2>/dev/null
+      (strings -a "$TMP.extract/hnc_httpd" 2>/dev/null || strings "$TMP.extract/hnc_httpd" 2>/dev/null) > "$TMP.httpd.strings"
       [ -n "$VER" ] && { grep -F "$VER" "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd embeds module version $VER" || fail "hnc_httpd does not embed module version $VER; Go binary may be stale"; }
       case "$VER" in v5.3.*)
         grep -F '/api/dpi_state' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_state" || fail "hnc_httpd missing /api/dpi_state"

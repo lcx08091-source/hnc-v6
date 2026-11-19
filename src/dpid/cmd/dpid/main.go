@@ -72,12 +72,13 @@ const (
 	appLabelDexName = "hnc_applabel.dex"
 	// appLabelDexModule is the on-device fallback path if dpid's own
 	// directory can't be determined (module id from bin/ahnc_migration.sh).
-	appLabelDexModule = "/data/adb/modules/hotspot_network_control/bin/" + appLabelDexName
+	appLabelDexModulePrimary = "/data/adb/modules/hotspot_net_ctl/bin/" + appLabelDexName
+	appLabelDexModuleLegacy  = "/data/adb/modules/hotspot_network_control/bin/" + appLabelDexName
 )
 
 // resolveAppLabelDex locates the app-label dex helper. Prefers a file next
-// to the running dpid binary (where the module ships it), then the known
-// module path. Returns "" if neither exists, which disables live labels.
+// to the running dpid binary (where the module ships it), then hotspot_net_ctl
+// and legacy hotspot_network_control module paths.
 func resolveAppLabelDex() string {
 	if exe, err := os.Executable(); err == nil {
 		cand := filepath.Join(filepath.Dir(exe), appLabelDexName)
@@ -85,8 +86,10 @@ func resolveAppLabelDex() string {
 			return cand
 		}
 	}
-	if _, err := os.Stat(appLabelDexModule); err == nil {
-		return appLabelDexModule
+	for _, modCand := range []string{appLabelDexModulePrimary, appLabelDexModuleLegacy} {
+		if _, err := os.Stat(modCand); err == nil {
+			return modCand
+		}
 	}
 	return ""
 }

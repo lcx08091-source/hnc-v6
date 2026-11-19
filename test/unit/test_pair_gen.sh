@@ -188,3 +188,13 @@ pg > /dev/null
 [ -f "$old" ] && test_fail "old pair_success not cleaned"
 [ -f "$recent" ] || test_fail "recent pair_success wrongly cleaned"
 test_pass
+
+test_start "pair_gen: url subcommand outputs loopback /pair?prefill=<6-digit PIN>"
+start_fake_httpd
+url_out=$(pg url)
+rc=$?
+assert_eq "0" "$rc" "pair_gen url should succeed"
+echo "$url_out" | grep -qE '^http://127\.0\.0\.1:8444/pair\?prefill=[0-9]{6}$' || test_fail "unexpected pair url: $url_out"
+saved_pin=$(sed -n '1p' "$HNC_TEST_DIR/run/pair_pending")
+assert_eq "http://127.0.0.1:8444/pair?prefill=$saved_pin" "$url_out" "url pin must match pair_pending"
+test_pass

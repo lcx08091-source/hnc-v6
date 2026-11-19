@@ -522,3 +522,25 @@ if [ -n "$MOCK_BIN_DIR" ]; then
     assert_eq "reent_ok" "$_reent_res" "gate_lock 同进程与跨子进程重入保护" && test_pass
     mock_teardown
 fi
+
+# ═══ 14. v5.40.1 RMX5010 真机护栏: HNC_PREROUTE_GUARD + FORWARD HNC_RESTORE + HNC_EGRESS_FIX ═══
+test_start "v5.40.1 RMX5010: HNC_RESTORE 移至 FORWARD 避开 ip rule, HNC_PREROUTE_GUARD 清 [19:16], HNC_EGRESS_FIX 防 bw_mangle 冲刷"
+mock_setup
+for _b in iptables ip6tables; do
+    cat > "$MOCK_BIN_DIR/$_b" <<EOF
+#!/bin/sh
+echo "${_b}|\$*" >> "\$MOCK_LOG"
+case "\$*" in
+    *" -C "*) exit 1 ;;
+esac
+exit 0
+EOF
+    chmod +x "$MOCK_BIN_DIR/$_b"
+done
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/iptables_manager.sh" init >/dev/null 2>&1
+assert_mock_called "HNC_PREROUTE_GUARD -m mark --mark 0x00800000/0x00800000 -j MARK --set-xmark 0x0/0x000f0000" && \
+assert_mock_called "mangle -I FORWARD 1 -j HNC_RESTORE" && \
+assert_mock_called "HNC_EGRESS_FIX ! -o rmnet+ -m connmark --mark 0x00800000/0x00800000 -j CONNMARK --restore-mark --nfmask 0xffff0000 --ctmask 0xffff0000" && \
+assert_mock_called "mangle -A POSTROUTING -j HNC_EGRESS_FIX" && \
+test_pass
+mock_teardown

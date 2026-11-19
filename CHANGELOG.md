@@ -14,6 +14,15 @@
 
 ---
 
+## [5.40.1] - 2026-11-19
+
+### 真机实证实锤修复 (realme RMX5010 / SM8750 / Android 16 / KernelSU) & CI 全绿加固
+- **CI `Build hnc_httpd (Go)` 与 Go 1.27 链接器兼容修复**: 为全部 `go build` 增加 `-buildvcs=false -trimpath` 并默认采用 `-mod=readonly`；修复 Go 1.26/1.27 将 `.gopclntab` 移出 `relro` 后裸 `strings` 默认 `--data` 漏扫导致的构建门禁误判，统一改用 `strings -a` 校验真实路由与动作字面量。
+- **回退 C/eBPF 危险编译选项**: 恢复 `daemon/clsact_ctl/build.sh` 显式小端 `-target bpfel`，移除 `daemon/hotspotd/build.sh` 的 `-Wl,--allow-multiple-definition`，全线恢复 `-Werror` 零警告严格编译。
+- **根治新旧双模块并存打架 (`hotspot_net_ctl` vs 历史 `hotspot_network_control`)**: 安装期 (`customize.sh`) 与启动期 (`post-fs-data.sh` / `service.sh`) 自动检测并禁用/标记清理残留 `hotspot_network_control` 旧模块，按 `/proc/<pid>/cmdline` 精确清理抢占 `:8443` 的重复 `hnc_httpd` 与残留 `sentinel`，并将 20+ 处硬编码模块路径统一收敛至 `hotspot_net_ctl` 优先、旧目录安全回退。
+- **ColorOS 16 / Android 16 策略路由与 `bw_mangle_POSTROUTING` 护栏**: 将 `HNC_RESTORE` 从 `mangle/PREROUTING` 移至 `mangle/FORWARD` 首部，新增 `HNC_PREROUTE_GUARD` 在进入 `ip rule` 前剥离 `[19:16]` 位防止误触 `10000` / `20000` 策略路由规则导致下行掉入 `32000: unreachable`；在 `mangle/POSTROUTING` 尾部追加 `HNC_EGRESS_FIX` (`! -o rmnet+`) 自动修复 `bw_mangle_POSTROUTING` 对第 20 位 (`0x00100000`) 的清零且不触碰高通 5G QMI 标记。
+- **补齐 `bin/pair_gen.sh url` 免密配对链接子命令**: 完整对齐 `action.sh` 调用契约，输出一次性 `/pair?prefill=<PIN>` 本地免密地址。
+
 ## [5.40.0] - 2026-11-19
 
 ### 工具链与运行时现代化升级（T1：Go 1.27 + Android NDK r30 LTS）

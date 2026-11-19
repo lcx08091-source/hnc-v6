@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 )
 
+//go:noinline
 func (s *server) apiDPIState(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.hncDir, "run", "dpi_state.json")
 	raw, err := readJSON(path)
@@ -36,6 +37,7 @@ func (s *server) apiDPIState(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+//go:noinline
 func (s *server) apiDPIProbe(w http.ResponseWriter, r *http.Request) {
 	path := filepath.Join(s.hncDir, "run", "dpid.probe.json")
 	raw, err := readJSON(path)

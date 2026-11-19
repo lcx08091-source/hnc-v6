@@ -306,7 +306,7 @@ function morphOuter(el, html) {
  * 浏览器模式: 同源 fetch + cookie; 401 → /pair 配对页。 */
 var API_BASE = 'http://127.0.0.1:8444';
 var HNC_DIR = '/data/local/hnc';
-var MOD_DIR = '/data/adb/modules/hotspot_network_control';
+var MOD_DIR = '/data/adb/modules/hotspot_net_ctl';
 var KSU = typeof window.ksu !== 'undefined' && window.ksu && typeof window.ksu.exec === 'function';
 var rawCb = 0;
 function execRaw(cmd, timeoutMs) {

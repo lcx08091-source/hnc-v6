@@ -332,6 +332,8 @@ func (s *server) gatherDeviceInfo() map[string]string {
 // detectHNCVersion reads HNC's own module.prop. Best-effort.
 func (s *server) detectHNCVersion() string {
 	for _, p := range []string{
+		filepath.Join(moduleDir(s.hncDir), "module.prop"),
+		"/data/adb/modules/hotspot_net_ctl/module.prop",
 		"/data/adb/modules/hotspot_network_control/module.prop",
 		filepath.Join(s.hncDir, "module.prop"),
 	} {

@@ -19,6 +19,13 @@ umask 022
 MODDIR=${0%/*}
 HNC_DIR=/data/local/hnc
 
+# v5.40.1: 若当前运行在 hotspot_net_ctl, 立即停用并标记移除残留的旧版 hotspot_network_control,
+# 防止紧随其后的 late_start 阶段被旧模块拉起第二份 service.sh 覆盖运行目录。
+if [ "$MODDIR" != "/data/adb/modules/hotspot_network_control" ] && [ -d "/data/adb/modules/hotspot_network_control" ]; then
+    : > "/data/adb/modules/hotspot_network_control/disable" 2>/dev/null || true
+    : > "/data/adb/modules/hotspot_network_control/remove" 2>/dev/null || true
+fi
+
 # 创建持久化数据目录
 mkdir -p "$HNC_DIR/data"
 mkdir -p "$HNC_DIR/logs"

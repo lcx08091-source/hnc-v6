@@ -49,7 +49,9 @@ ps -ef 2>/dev/null | grep -E "hnc_|hotspotd" | grep -v grep
 echo ""
 
 echo "── [4] 模块版本 ───────────────────────────────────────────────"
-if [ -f /data/adb/modules/hotspot_network_control/module.prop ]; then
+if [ -f /data/adb/modules/hotspot_net_ctl/module.prop ]; then
+    cat /data/adb/modules/hotspot_net_ctl/module.prop
+elif [ -f /data/adb/modules/hotspot_network_control/module.prop ]; then
     cat /data/adb/modules/hotspot_network_control/module.prop
 fi
 echo ""

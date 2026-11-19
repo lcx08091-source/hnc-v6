@@ -882,8 +882,12 @@ func scSectionSystem(c *scCtx) []scItem {
 	items = append(items, sit)
 
 	moddir := c.readTrim(c.hnc("run", "service.path"))
-	if moddir == "" && c.env.Exists("/data/adb/modules/hotspot_network_control") {
-		moddir = "/data/adb/modules/hotspot_network_control"
+	if moddir == "" {
+		if c.env.Exists("/data/adb/modules/hotspot_net_ctl") {
+			moddir = "/data/adb/modules/hotspot_net_ctl"
+		} else if c.env.Exists("/data/adb/modules/hotspot_network_control") {
+			moddir = "/data/adb/modules/hotspot_network_control"
+		}
 	}
 	mit := scItem{ID: "module_path", Label: "模块路径", Status: scOK, Value: moddir, Detail: "数据目录: " + c.env.HNCDir}
 	if moddir == "" {

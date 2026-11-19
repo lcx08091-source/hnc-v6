@@ -71,8 +71,8 @@ echo "[build] Compiler: $CC"
 echo "[build] Target:   $ARCH  Output: $OUT"
 echo "[build] libs:     $LIBS_OUT/lib/libbpf.a (libelf/libz not linked)"
 
-CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE -pthread"
-LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE -pthread"
+LDFLAGS="-pie -pthread -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 # shellcheck disable=SC2086
 $CC $CFLAGS \
@@ -80,7 +80,6 @@ $CC $CFLAGS \
     -I"$LIBS_OUT/include" \
     -o "$OUT" \
     $SRCS \
-    -Wl,--allow-multiple-definition \
     "$LIBS_OUT/lib/libbpf.a" \
     $LDFLAGS
 # v5.8.7 (audit): 不再链接 libelf.a/libz.a。hotspotd 仅用 libbpf 的 bpf() syscall
