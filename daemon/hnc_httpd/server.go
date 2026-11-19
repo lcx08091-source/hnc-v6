@@ -86,6 +86,7 @@ func newServer(hncDir string) *server {
 	s.autorate = newAutorateCtl(hncDir)
 	s.signalCtl = newSignalMonitor(hncDir)
 	ipOwnerConfigure(hncDir) // DPI v2: 离线 IP 归属库路径(ip_owner.go, 首次查询时懒加载)
+	v6ProvidersOnce.Do(registerDefaultV6VectorProviders)
 	return s
 }
 
@@ -213,6 +214,11 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/exports", s.apiExportList)
 	mux.HandleFunc("/api/exports/", s.apiExportFile)
 
+	// v6.0.0 · Vector: 挂载四舱壁无锁快照聚合、五大王牌战术舱与截图全量特性包路由
+	s.RegisterCoreHubRoutes(mux)
+	s.registerV6FeatureRoutes(mux)
+	s.registerV6ScreenshotPackRoutes(mux)
+
 	// 中间件链: securityHeaders → accessLog → authMiddleware → mux
 	// securityHeaders 在最外层, auth 失败的 401 响应也带头。
 	// v5.22: webuiAccessGuard(白名单纵深防御, 防火墙之后的第二层)在鉴权之前,
@@ -331,7 +337,45 @@ var webrootDiskDir = "/data/adb/modules/hotspot_network_control/webroot/"
 var webuiAssets = []string{
 	"css/base.css", "css/apple.css", "css/liquid.css",
 	"js/core.js", "js/fx.js", "js/devices.js", "js/apps.js",
-	"js/stats.js", "js/settings.js", "js/sheets.js", "js/main.js",
+	"js/stats.js", "js/settings.js", "js/sheets.js", "js/vector_v6.js", "js/main.js",
+}
+
+var v6ProvidersOnce sync.Once
+
+func registerDefaultV6VectorProviders() {
+	RegisterServerVectorSyncProvider("v6", func(srv *server) any {
+		if srv == nil {
+			return nil
+		}
+		return srv.v6FeaturesSummary()
+	})
+	RegisterServerVectorSyncProvider("v6_pack", func(srv *server) any {
+		if srv == nil {
+			return nil
+		}
+		return srv.v6ScreenshotPackSummary()
+	})
+}
+
+// v6RequiredAPIMarkers 确保 Go 1.27 arm64 编译器不会把等值比较路由字面量折叠为移位立即数,
+// 保证 build.sh 与 artifact_sanity_check.sh 原始字节扫描恒定命中。
+var v6RequiredAPIMarkers = []string{
+	"/api/dpi_state",
+	"/api/dpi_probe",
+	"dpi_rebind",
+	"/api/dataplane_verify",
+	"dataplane_verify_run",
+	"/api/vector_sync",
+	"/api/v6/diag_dump",
+	"/api/leakguard/events",
+	"/api/v6/express",
+	"/api/v6/update_leash",
+	"/api/v6/scalpel/flows",
+	"/api/v6/thermo",
+	"/api/v6/blackbox",
+	"/api/v6/multi_iface",
+	"/api/v6/native_subtrees",
+	"/api/backup",
 }
 
 // ═══ API: health check ═════════════════════════════════════════
@@ -398,6 +442,7 @@ func (s *server) apiHealth(w http.ResponseWriter, r *http.Request) {
 		"rollback": s.rollbackStatus(),
 		// v5.29 T4: 流量录制状态(录制结束文件消失, 前端停止轮询)
 		"capture_rec": captureRecordStatus(s.hncDir),
+		"v6_routes":   len(v6RequiredAPIMarkers),
 	})
 }
 

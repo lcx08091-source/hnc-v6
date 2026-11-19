@@ -33,6 +33,7 @@ function badges(d) {
   else if (d.autoInhFrom) b += '<span class="badge b-ok" title="更换随机 MAC 后已自动无感继承 ' + esc(d.autoInhName || d.autoInhFrom) + ' 的名称与规则（置信度 ' + (d.autoInhScore || 90) + '）">无感继承</span>';
   else if (d.rmac) b += '<span class="badge b-gray" title="Android/iOS 隐私 Wi-Fi 的随机 MAC；高置信度换地址时自动继承规则">随机 MAC</span>';
   if (d.mergedInto) b += '<span class="badge b-gray" title="这个旧 MAC 已合并到 ' + esc(d.mergedInto) + '">已合并</span>';
+  if (typeof v6DeviceBadgesHtml === 'function') b += v6DeviceBadgesHtml(d);
   return b;
 }
 
@@ -320,7 +321,14 @@ function devBody(d) {
   '</div>';
 
   if (d.online) {
-    h += '<div class="conn-strip"><span data-conn-mini>' + connMiniHtml(d.mac) + '</span><button type="button" class="linkish" data-act="conns">查看全部连接 ›</button></div>';
+    h += '<div class="conn-strip"><span data-conn-mini>' + connMiniHtml(d.mac) + '</span>' +
+      '<span style="display:inline-flex;align-items:center;gap:8px;flex-shrink:0">' +
+        '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>五元组手术刀</span></button>' +
+        '<button type="button" class="linkish" data-act="conns">全部连接</button>' +
+      '</span></div>';
+  } else {
+    h += '<div class="conn-strip"><span>五元组流透视 · 秒斩死流或冻结 15 分钟</span>' +
+      '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>五元组手术刀</span></button></div>';
   }
 
   h += seg('dev-tab', [['limit', '限速分流'], ['quota', '应用配额'], ['conn', '连接画像']], curTab, 'small');
@@ -526,7 +534,7 @@ var connT = null;
 function connSheet(d) {
   S.connView = S.connView || 'all';
   sheet('<h3>实时连接 · ' + esc(d.name) + '</h3><div class="sub mono">' + (d.sim ? '<span class="badge b-sim" style="font-family:var(--font)">模拟</span> ' : '') + esc(d.ip || '') + ' · ' + d.mac + '</div>' +
-    '<div style="margin:10px 0 6px">' + seg('connv', [['all', '全部'], ['active', '活跃'], ['group', '按应用']], S.connView, 'small') + '</div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0 6px;flex-wrap:wrap">' + seg('connv', [['all', '全部'], ['active', '活跃'], ['group', '按应用']], S.connView, 'small') + '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>五元组手术台</span></button></div>' +
     '<div id="cn-body"><div class="note">加载中…</div></div><div class="note" style="margin-top:8px">数据来自内核连接表（conntrack），域名来自 DPI 抓到的 DNS / TLS，每 2 秒刷新</div>' +
     '<button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true, kind: 'conns', onClose: function () { clearInterval(connT); connT = null; S.connMac = null; } });
   S.connMac = d.mac;
@@ -714,7 +722,7 @@ function renderDevices(anim1) {
     '<div><div class="hero-l">上行</div><div class="hero-v num"><span id="h-up">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
     '<div class="right"><div class="hero-l"><span class="breathe' + (S.hotspot.active === false ? ' off' : '') + '" id="h-dot"></span><span id="h-state">' + (S.hotspot.active === false ? '热点关' : '在线') + '</span></div><div class="hero-v num"><span id="h-on">' + num(l.online, on) + '</span><span class="u">/ <span id="h-total">' + num(l.total, S.devices.length) + '</span><span class="dw"> 设备</span></span></div></div>' +
     '<svg class="spark" id="spark" aria-label="近 60 秒下行速率"></svg></div>' +
-    '<div class="fresh" id="fresh"></div>' +
+    '<div class="fresh" id="fresh"></div>' + '<div id="v6-dev-strip-mount" style="display:contents">' + (typeof v6DevicesStripHtml === 'function' ? v6DevicesStripHtml() : '') + '</div>' +
     '<label class="glass search">' + ico('search') + '<input id="q" type="search" placeholder="搜索设备 · IP · MAC · 名称" value="' + esc(S.q) + '" autocomplete="off"></label>' +
     '<div class="glass filter"><div class="tx"><div class="t">设备过滤</div><div class="s">' + esc(fl[2]) + '</div></div>' +
       '<div class="dd"><button class="dd-btn press" data-act="dd"><span>' + fl[1] + '</span>' + ico('chev') + '</button><div class="dd-menu">' +

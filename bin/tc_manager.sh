@@ -1241,6 +1241,37 @@ set_global_shaper() {
 }
 
 # v5.37.0: 5G Autorate 原地热调速快路径 (不重置 1:9999 AQM 叶子、不刷快照、零文件开销)
+# v6.0.0 T2: Vector Express 1:10 (prio 0) 浅驻留 fq_codel 特快护航子命令兜底
+set_vector_express() {
+    local iface=$1 mode=${2:-off} bg_pct=${3:-85}
+    [ -n "$iface" ] || return 1
+    if [ "$mode" = "on" ]; then
+        ensure_egress_htb_ready "$iface" || return 1
+        tc class replace dev "$iface" parent 1:1 classid 1:10 htb rate 250mbit ceil "$DEFAULT_RATE" burst 64k cburst 200k prio 0 quantum 1514 2>/dev/null || true
+        tc qdisc replace dev "$iface" parent 1:10 handle 1010: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
+        tc filter replace dev "$iface" parent 1: protocol ip prio 2 handle 0x01000000/0x03000000 fw flowid 1:10 2>/dev/null || true
+        tc filter replace dev "$iface" parent 1: protocol ipv6 prio 4 handle 0x01000000/0x03000000 fw flowid 1:10 2>/dev/null || true
+        if tc qdisc show dev "$IFB_IFACE" 2>/dev/null | grep -q "htb 1:"; then
+            tc class replace dev "$IFB_IFACE" parent 1:1 classid 1:10 htb rate 100mbit ceil "$DEFAULT_RATE" burst 32k cburst 200k prio 0 quantum 1514 2>/dev/null || true
+            tc qdisc replace dev "$IFB_IFACE" parent 1:10 handle 1110: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
+            tc filter replace dev "$IFB_IFACE" parent 1: protocol ip prio 2 handle 0x01000000/0x03000000 fw flowid 1:10 2>/dev/null || true
+            tc filter replace dev "$IFB_IFACE" parent 1: protocol ipv6 prio 4 handle 0x01000000/0x03000000 fw flowid 1:10 2>/dev/null || true
+        fi
+    else
+        tc filter del dev "$iface" parent 1: protocol ip prio 2 2>/dev/null || true
+        tc filter del dev "$iface" parent 1: protocol ipv6 prio 4 2>/dev/null || true
+        tc qdisc del dev "$iface" parent 1:10 2>/dev/null || true
+        tc class del dev "$iface" parent 1:1 classid 1:10 2>/dev/null || true
+        if tc qdisc show dev "$IFB_IFACE" 2>/dev/null | grep -q "htb 1:"; then
+            tc filter del dev "$IFB_IFACE" parent 1: protocol ip prio 2 2>/dev/null || true
+            tc filter del dev "$IFB_IFACE" parent 1: protocol ipv6 prio 4 2>/dev/null || true
+            tc qdisc del dev "$IFB_IFACE" parent 1:10 2>/dev/null || true
+            tc class del dev "$IFB_IFACE" parent 1:1 classid 1:10 2>/dev/null || true
+        fi
+    fi
+    return 0
+}
+
 set_global_shaper_tune() {
     local iface=$1 down_rate=${2:-0} up_rate=${3:-0}
     [ -n "$iface" ] || return 1
@@ -1977,6 +2008,11 @@ ensure_ingress_mirred_v1() {
     return $_mrc
 }
 
+_maybe_v6_sync_in_set_limit() {
+    [ "${HNC_SKIP_INNER_V6_SYNC:-0}" = "1" ] && return 0
+    sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+}
+
 set_limit() {
     local iface=$1 mark_id=$2 down_mbps=${3:-0} up_mbps=${4:-0} ip=${5:-}
     _validate_mark_id "$mark_id" || return 1
@@ -2041,31 +2077,31 @@ set_limit() {
                set_uplink_police "$iface" "$class_id" "$ip" "$(mbps_to_rate "$up_mbps")" "$(burst_for_rate "$up_mbps")"; then
                 log "  Ingress(police) src=$ip @ ${up_mbps}M (IFB unavailable → police fallback)"
                 echo "LIMIT_APPLY_MODE=full_police"
-                sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+                _maybe_v6_sync_in_set_limit
                 return 0
             fi
             log_uplink_unsupported_once "set_limit"
             log "  Ingress skipped: uplink unsupported (no IFB, no police); keeping downlink only"
             echo "LIMIT_APPLY_MODE=down_only"
-            sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+            _maybe_v6_sync_in_set_limit
             return 8
         fi
         if ! ensure_ifb_root_v1; then
             log_error "set_limit: ensure_ifb_root_v1 failed, keeping downlink only"
             echo "LIMIT_APPLY_MODE=down_only"
-            sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+            _maybe_v6_sync_in_set_limit
             return 8
         fi
         if ! ensure_ingress_mirred_v1 "$iface"; then
             log_error "set_limit: ensure_ingress_mirred_v1 failed, keeping downlink only"
             echo "LIMIT_APPLY_MODE=down_only"
-            sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+            _maybe_v6_sync_in_set_limit
             return 8
         fi
         if ! ensure_device_class "$IFB_IFACE" "$class_id" "$ip"; then
             log_error "set_limit: ensure_device_class ifb0 failed, keeping downlink only"
             echo "LIMIT_APPLY_MODE=down_only"
-            sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+            _maybe_v6_sync_in_set_limit
             return 8
         fi
         local up_rate;  up_rate=$(mbps_to_rate "$up_mbps")
@@ -2074,7 +2110,7 @@ set_limit() {
         if ! set_rate_only "$IFB_IFACE" "$class_id" "$up_rate" "$up_burst" "$up_quantum"; then
             log_error "set_limit: ingress rate set failed, keeping downlink only"
             echo "LIMIT_APPLY_MODE=down_only"
-            sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+            _maybe_v6_sync_in_set_limit
             return 8
         fi
         log "  Ingress(ifb0) 1:$class_id @ $up_rate burst $up_burst"
@@ -2092,7 +2128,7 @@ set_limit() {
 
     # v3.4.0：触发 v6 sync，让 IPv6 流量也能被这条限速规则覆盖
     # sync_all 是幂等的，对没有变化的设备零开销
-    sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+    _maybe_v6_sync_in_set_limit
     return 0
 }
 
@@ -2422,11 +2458,13 @@ restore_rules() {
     # 静默丢弃 —— gate/mac 自阻塞时代每台设备的 mark 都超时失败且无人知晓。
     # 失败不中断循环(尽力恢复其余设备),但计数>0 时 restore 最终 rc=1。
     local restore_side_fail=0
+    export HNC_SKIP_INNER_V6_SYNC=1
     for mac in $macs; do
         # v5.9.1 P1: 续租失败 = 锁已易主(被陈旧回收交给别人)。必须立即中止:
         # 继续跑就是无锁写 tc 树,正是这把锁要防的双写者。rc 12 复用 dispatcher
         # 既有的 busy 约定,watchdog 据此判为"竞争"而非"修复失败",不污染熔断。
         if ! tc_action_lock_renew; then
+            unset HNC_SKIP_INNER_V6_SYNC
             log_error "restore_rules: 锁已易主, 中止恢复 (mac=$mac)"
             return 12
         fi
@@ -2581,6 +2619,10 @@ restore_rules() {
             set_sqm "$iface" "$mark_id" on "$ip" >/dev/null 2>&1 || log "  restore: set_sqm on failed for $mac"
         fi
     done
+    unset HNC_SKIP_INNER_V6_SYNC
+    if [ -f "$HNC_DIR/bin/v6_sync.sh" ]; then
+        sh "$HNC_DIR/bin/v6_sync.sh" sync >> "$LOG" 2>&1 || true
+    fi
 
     # 恢复黑名单
     # 修复:旧逐行 in_bl 循环假设 "blacklist": [...] 跨行,但 json_set.sh bl_add
@@ -2891,6 +2933,17 @@ case "$1" in
     global_shaper_tune)
         tc_action_lock global_shaper_tune || exit 0
         set_global_shaper_tune "$2" "$3" "$4"
+        rc=$?
+        tc_action_unlock
+        exit $rc ;;
+    vector_express)
+        _ve_try=0
+        until tc_action_lock vector_express; do
+            _ve_try=$((_ve_try + 1))
+            [ "$_ve_try" -ge 12 ] && exit 0
+            sleep 0.25 2>/dev/null || sleep 1
+        done
+        set_vector_express "$2" "$3" "$4"
         rc=$?
         tc_action_unlock
         exit $rc ;;

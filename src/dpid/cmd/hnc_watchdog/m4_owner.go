@@ -11,11 +11,8 @@
 // 内容没变不写(省电)。rx/tx 在写前经 `sh bin/iptables_manager.sh stats_all` 刷新
 // (参数分开传, 3s 超时, 5s TTL), TTL 内沿用上一次的数字。
 //
-// 「立刻扫一次」(WebUI 刷新): device_detect.sh scan 往 run/devices.refresh 写一个
-// nonce, 写者看到 mtime 变了就全量扫一次、强制写 devices.json, 再把 nonce 写进
-// run/devices.refresh.ack —— 调用方等到自己的 nonce 就知道这次扫描已落盘(v5.33;
-// 原来比 devices.json 的秒级 mtime, 同一秒内写过一次就误判「没刷新」)。hotspotd 的
-// REFRESH / SIGUSR1 只 touch 文件(没有 nonce), 照样触发全量扫。
+// v6.0 加固: 修复 runStatsAll 硬编码 /system/bin/sh 为动态探测可用 sh 解释器路径,
+// 并补齐独立进程组 SIGKILL + WaitDelay 超时收尾保护, 防止孙进程持管道挂死写者协程!
 package main
 
 import (
@@ -28,6 +25,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"hnc.io/dpid/devname"
@@ -99,8 +97,6 @@ func (m *m4WriterMgr) tick(iface string, now time.Time) {
 }
 
 // hotspotDown 热点没开(主循环探测失败 / PENDING)时调: 停写者。
-// v5.31 审查修复: 原来 tick 只在热点 ACTIVE 时调, 热点关了写者照样每 200ms 醒一次。
-// 热点再开时 tick 会重新拉起写者。
 func (m *m4WriterMgr) hotspotDown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -116,7 +112,7 @@ type m4NeighSource interface {
 }
 
 type m4GoRunner struct {
-	// v5.32 T4: 主循环醒来次数(置于 offset 0 保 32 位 ARM 原子对齐)
+	// v5.32 T4: 主循环醒来次数(严格置于 offset 0 保 32 位 ARM 原子对齐)
 	tickN atomic.Int64
 
 	iface  string
@@ -140,15 +136,8 @@ type m4GoRunner struct {
 	ifIndexFn   func(string) (int, error)
 	statsCmdFn  func() (map[string][2]int64, error)
 	blacklistFn func() map[string]bool
-
 }
 
-// m4NextTickMS 写者主循环下一拍间隔(v5.32 T4 空闲降频):
-// 有待写变化(dirty, 200ms 去抖窗口)/ 有待解析的名字(pending)/ 在途解析
-// → 200ms; 都没有 → m4IdleTickMS。REFRESH / SIGUSR1 的 mtime 检查每拍都做:
-// device_detect.sh scan 发 SIGUSR1 后只 sleep 1 秒就比 devices.json 的 mtime,
-// 空闲拍必须明显短于 1 秒(审查: 原定 1 秒时最坏要 1 秒才检测到, 加上 hotspotd
-// 转发和写盘就超时, 退回 shell 扫描)。
 func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
 	if dirty || hasPending || resolving {
 		return m4WriteHardRateMS * time.Millisecond
@@ -211,8 +200,6 @@ func (r *m4GoRunner) applyHooks() {
 	r.table.Full = full
 }
 
-// start 由写者管理器调用(先解析 ifindex, 失败也照跑 —— 事件不按
-// ifindex 过滤时全量兜底会跟上)。
 func (r *m4GoRunner) start() {
 	if r.ifIndexFn != nil {
 		if idx, err := r.ifIndexFn(r.iface); err == nil {
@@ -277,18 +264,12 @@ func (r *m4GoRunner) run() {
 		lastWritten  []byte
 		lastStatsAt  time.Time
 		lastStatsMap = map[string][2]int64{}
-		// 审查修复: 零值 = 第一拍(200ms)就全量扫一次。原来起写者后要等满 30 秒(或有新
-		// 事件)才认得已在线的设备, 切到 Go / 看门狗重启后设备表空等半分钟。
-		lastSync    time.Time
-		lastPending time.Time
-		inFlightMu  sync.Mutex
-		inFlight    = map[string]bool{}
-		// 审查修复: 异步名字解析回填后要让主循环知道「该写了」—— 原来回填只改了表、
-		// 不置 dirty, 名字一直停在 pending / MAC 尾号, 直到下一个邻居事件才写出去(模拟
-		// 设备场景里一直没写)。resolveWG 让停写者时等在途的解析结束, 免得停了以后它还
-		// 写名字缓存。
-		resolved  = make(chan struct{}, 1)
-		resolveWG sync.WaitGroup
+		lastSync     time.Time
+		lastPending  time.Time
+		inFlightMu   sync.Mutex
+		inFlight     = map[string]bool{}
+		resolved     = make(chan struct{}, 1)
+		resolveWG    sync.WaitGroup
 	)
 	markDirty := func() {
 		dirty = true
@@ -297,10 +278,6 @@ func (r *m4GoRunner) run() {
 			firstDirtyMs = lastEventMs
 		}
 	}
-	// v5.32 T4: 有事 200ms、空闲 m4IdleTickMS。审查修复: 用 Ticker, 周期只在拍子分支
-	// 里按状态调; 事件 / 回填分支只许把周期调快, 不许推迟下一拍。原实现每圈(含事件
-	// 分支)Reset 一个 Timer —— 事件间隔 < 200ms 持续到来时拍子一直被往后推、永远不响,
-	// 去抖写、REFRESH、名字派发、30 秒兜底全在拍子分支里, 全被饿死。
 	period := m4WriteHardRateMS * time.Millisecond
 	tick := time.NewTicker(period)
 	defer tick.Stop()
@@ -315,8 +292,6 @@ func (r *m4GoRunner) run() {
 		tick.Reset(want)
 		period = want
 	}
-	// 「立刻扫一次」(见文件头): 每拍看一次 run/devices.refresh 的 mtime, 比上次
-	// 见过的新就全量扫一次; 文件内容是调用方的 nonce(hotspotd touch 的为空)。
 	var lastRefreshM = monoMs()
 	refreshDue := func() (nonce string, due bool) {
 		fi, err := os.Stat(m4RefreshFile)
@@ -335,7 +310,7 @@ func (r *m4GoRunner) run() {
 		ticked := false
 		select {
 		case <-r.stopCh:
-			resolveWG.Wait() // 在途解析(最长约 1.5 秒: dumpsys 0.5 + mDNS 1)结束后才算停
+			resolveWG.Wait()
 			select {
 			case <-resolved:
 				dirty = true
@@ -348,9 +323,6 @@ func (r *m4GoRunner) run() {
 		case <-resolved:
 			markDirty()
 		case es := <-events:
-			// 审查修复: 还不知道热点网卡的 ifindex(0)时不收事件 —— 表的 ifindex 为 0 表示
-			// 「不过滤」, 上游网卡(WiFi 上网时的路由器等)的邻居会被当成热点设备。
-			// (v5.32 T4: 原 continue 跳圈会绕过循环底部的 retune, 改嵌套 if)
 			if r.ifIdx == 0 {
 				r.refreshIface()
 			}
@@ -369,9 +341,6 @@ func (r *m4GoRunner) run() {
 			ticked = true
 			r.tickN.Add(1)
 			now := time.Now()
-			// 「立刻扫一次」→ 全量扫、强制写, 写完回执 nonce
-			// (v5.32 T4: 原 continue 跳圈会绕过 retune; 改成 lastSync=now
-			//  后自然流过 —— 后续 30s 判断不会重复全量, dirty=false 不会写)
 			if nonce, due := refreshDue(); due {
 				if es, err := r.dumpIfFn(r.ifIdx); err == nil {
 					r.table.FullSync(es, now)
@@ -385,7 +354,6 @@ func (r *m4GoRunner) run() {
 					logf("m4_owner: 写刷新回执失败: %v", err)
 				}
 			}
-			// 30s: 全量兜底 + 离线检查 + 网卡重建跟上
 			if now.Sub(lastSync) >= m4FullSyncEvery {
 				lastSync = now
 				r.refreshIface()
@@ -401,12 +369,10 @@ func (r *m4GoRunner) run() {
 					}
 				}
 			}
-			// 1s: pending 派发(最老优先, 喘息 ≥1s, 一次一台 —— 对齐
-			// hotspotd process_pending_mdns; 解析在 goroutine 里, 不挡事件)
 			if now.Sub(lastPending) >= time.Second {
 				lastPending = now
 				if r.ifIdx == 0 {
-					r.refreshIface() // 网卡还没认出来: 每秒再试一次
+					r.refreshIface()
 				}
 				if mac, ip, ok := r.table.PendingDue(now); ok {
 					inFlightMu.Lock()
@@ -426,9 +392,6 @@ func (r *m4GoRunner) run() {
 								default:
 								}
 							}
-							// v5.31 T2: 解析命中 dhcp/mdns 时缓存已
-							// 在 Resolver 里标脏, 这里落一次盘(小文件,
-							// 原子替换; 失败只记日志不计 devices 写失败)
 							if r.resolver != nil {
 								if err := r.resolver.CacheSave(); err != nil {
 									logf("m4_owner: hostname_cache 落盘失败: %v", err)
@@ -441,7 +404,6 @@ func (r *m4GoRunner) run() {
 					}
 				}
 			}
-			// 去抖写(rc30.9 算法, 见文件头)
 			if dirty {
 				if nowMs := monoMs(); m4ShouldWrite(firstDirtyMs, lastEventMs, lastWriteMs, nowMs) {
 					lastWritten = r.writeOut(lastWritten, &lastStatsAt, &lastStatsMap, false)
@@ -451,14 +413,10 @@ func (r *m4GoRunner) run() {
 				}
 			}
 		}
-		// v5.32 T4: 拍子分支按当前状态定周期(200ms / m4IdleTickMS); 其它分支只许调快。
-		// stopCh 的 return 不经过这里(ticker 随 defer Stop 释放)。
 		retune(!ticked)
 	}
 }
 
-// refreshIface 同名网卡重建要跟上(hotspotd refresh_hotspot_iface 的教训):
-// ifindex 变了就换表 + 全量跟上。
 func (r *m4GoRunner) refreshIface() {
 	if r.ifIndexFn == nil {
 		return
@@ -472,7 +430,6 @@ func (r *m4GoRunner) refreshIface() {
 	logf("m4_owner: 热点网卡重建 %s ifindex=%d", r.iface, idx)
 }
 
-// writeOut 渲染 + 原子写 data/devices.json。内容没变不写(省电), force 时照写。
 func (r *m4GoRunner) writeOut(lastWritten []byte, lastStatsAt *time.Time, lastStatsMap *map[string][2]int64, force bool) []byte {
 	now := time.Now()
 	if force || now.Sub(*lastStatsAt) >= m4StatsTTL {
@@ -502,9 +459,6 @@ func (r *m4GoRunner) writeOut(lastWritten []byte, lastStatsAt *time.Time, lastSt
 
 // ─── 纯函数 / 小工具(单测直接测) ─────────────────────────────────
 
-// m4ShouldWrite rc30.9 de-bounce 的纯函数形态(hotspotd.c 主循环注释):
-// 距上次写 ≥500ms 的首个事件立即写; 合并窗口 200ms 无新事件; 30s 兜底;
-// <200ms 硬限速。
 func m4ShouldWrite(firstDirtyMs, lastEventMs, lastWriteMs, nowMs int64) bool {
 	if firstDirtyMs == 0 {
 		return false
@@ -524,7 +478,6 @@ func m4ShouldWrite(firstDirtyMs, lastEventMs, lastWriteMs, nowMs int64) bool {
 	return nowMs-firstDirtyMs >= m4WriteMaxDirtyMS
 }
 
-// macFallback hnc_mac_fallback 的等价实现: 去冒号取后 8 位。
 func macFallback(mac string) string {
 	nc := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(mac)), ":", "")
 	if len(nc) > 8 {
@@ -533,12 +486,45 @@ func macFallback(mac string) string {
 	return nc
 }
 
-// runStatsAll `sh bin/iptables_manager.sh stats_all`(参数分开传, 3s 超时),
+// resolveM4ShellPath 动态探测当前环境可用的 POSIX sh 解释器:
+// 若单测显式覆写了 shBin 且存在则优先使用, 否则依次探测 shellPath()(含 /system/bin/sh
+// 与 /data/local/hnc/bin/sh Magic Mount 兜底副本)、/bin/sh、/usr/bin/sh 与 PATH。
+func resolveM4ShellPath() string {
+	if shBin != "" && shBin != "/system/bin/sh" {
+		if _, err := os.Stat(shBin); err == nil {
+			return shBin
+		}
+	}
+	for _, cand := range []string{shellPath(), "/system/bin/sh", binDir + "/sh", "/bin/sh", "/usr/bin/sh"} {
+		if cand == "" {
+			continue
+		}
+		if _, err := os.Stat(cand); err == nil {
+			return cand
+		}
+	}
+	if p, err := exec.LookPath("sh"); err == nil && p != "" {
+		return p
+	}
+	return shellPath()
+}
+
+// runStatsAll `sh bin/iptables_manager.sh stats_all`(参数分开传, 3s 超时 + 进程组 SIGKILL 隔离),
 // 输出每行 "<ip> <rx> <tx>"。
 func runStatsAll() (map[string][2]int64, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), m4StatsTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, shBin, iptablesMgrPath, "stats_all")
+	cmd := exec.CommandContext(ctx, resolveM4ShellPath(), iptablesMgrPath, "stats_all")
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
@@ -588,7 +574,6 @@ var (
 	rulesJSONPath   = dataDir + "/rules.json"
 )
 
-// appendLine 追加一行(小文件, O_APPEND 单行原子; 失败忽略 —— 只是审计日志)。
 func appendLine(p, line string) error {
 	f, err := os.OpenFile(p, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -599,7 +584,6 @@ func appendLine(p, line string) error {
 	return err
 }
 
-// readNonce 读 run/devices.refresh 里的 nonce(一行, 去空白, 超长截断; 读不到 = 空)。
 func readNonce(p string) string {
 	b, err := os.ReadFile(p)
 	if err != nil {
@@ -616,7 +600,6 @@ func readNonce(p string) string {
 	return n
 }
 
-// writeAtomic tmp + rename(回执要么是旧的, 要么是完整的新 nonce)。
 func writeAtomic(p string, b []byte) error {
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {

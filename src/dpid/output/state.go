@@ -722,6 +722,34 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 				}
 			}
 		}
+		if (!ok || IsECHOuterHost(host)) && IsECHBlindOrOuterSNI(host, IsECHOuterHost(host)) {
+			if verd, vok := DefaultECHBlindEngine.Infer(ECHBlindQuery{
+				ClientIP:  clientIP,
+				RemoteIP:  remoteIP,
+				DstPort:   443,
+				OuterSNI:  host,
+				HasECHExt: IsECHOuterHost(host),
+				JA4:       ja4,
+				Now:       ts,
+			}); vok && verd.AppID != "" {
+				r = l3Rule{ID: verd.AppID, Name: verd.AppName, Category: verd.Category, Priority: PrioritySpecific, Verified: verd.Confidence >= 0.75}
+				ok = true
+				evid := "ech:" + verd.AppID
+				if verd.RealHost != "" {
+					evid = verd.RealHost
+				}
+				bumpLabelWithBytes(c.Apps, r.ID, r.Name, r.Category, evid, now, 0, r.Verified, "", false)
+				bumpLabelWithBytes(w.globalApps, r.ID, r.Name, r.Category, evid, now, 0, r.Verified, "", false)
+				if r.Category != "" {
+					catName := categoryLabel(r.Category)
+					bumpLabelWithBytes(c.Categories, r.Category, catName, "", evid, now, 0, r.Verified, "", false)
+					bumpLabelWithBytes(w.globalCategories, r.Category, catName, "", evid, now, 0, r.Verified, "", false)
+				}
+			}
+		}
+		if ok && r.ID != "" && !IsECHOuterHost(host) && ja4 != "" {
+			DefaultECHBlindEngine.ObserveVerifiedFlow(r.ID, r.Name, r.Category, ja4, false, 443, nil, ts)
+		}
 		if !ok && host != "" && !IsECHOuterHost(host) {
 			w.bumpUnknownLocked(c, host, now)
 		}

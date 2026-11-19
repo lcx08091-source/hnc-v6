@@ -1,13 +1,13 @@
-// Package bytestats - AOSP tethering stats BPF map backend.
+// Package bytestats - AOSP Mainline tethering stats BPF map backend.
 //
-// 回移自 5.9.91 分叉 + v5.9.7 护栏。分叉版假设 map key 前 4 字节是 uid,
-// 但真实 AOSP Tethering map 的 key 布局随 Android 版本变化(已知变体之一是
-// ifindex+MAC, 共 12 字节)—— 假设错误时会把热点转发字节静默记到假 uid
-// (如系统 uid 5/1000), 污染 per-app 归因。护栏:
-//  1. 构造时 BPF_OBJ_GET_INFO 校验实际 key_size/value_size(预期 16/32),
-//     不符即构造失败 → detect.go 自动落 dumpsys;
-//  2. Sample 首次 GET_NEXT_KEY EINVAL(内核拒读布局)同样视为不可用。
-// 因此该 backend 在 schema 不符的设备上会安全自禁用, 绝不出脏数据。
+// v6.0.0 Vector 修复:
+//   - Android 14–16 Mainline Tethering APEX 模块演进后, 统计 BPF map 的
+//     key_size 出现 16 / 20 / 24 字节变体, value_size 出现 32 / 40 / 48 字节变体;
+//     旧版写死 16/32 导致 Android 16 (如 ColorOS 16 / Kernel 6.6) 上直接校验失败、
+//     退化为每 5 秒拉起高开销的 `dumpsys netstats detail` 子进程。
+//   - 缓冲区按最大兼容尺寸 24B Key / 48B Value 置于堆结构体上(严防内核 bpf(2) 越界写栈/堆),
+//     并兼容 16/20/24 × 32/40/48 的合法 Mainline schema 组合; 非法尺寸或首轮 EINVAL
+//     仍安全拒绝并回退。
 
 package bytestats
 
@@ -16,68 +16,92 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"unsafe"
 )
 
-// tetheringMapCandidates are the well-known pinned map paths for AOSP
-// tethering stats. The exact name depends on the BPF program variant
-// loaded by the Tethering module, which varies across Android versions.
+// tetheringMapCandidates lists pinned BPF stats maps across Android 12–16 Mainline.
 var tetheringMapCandidates = []string{
 	"/sys/fs/bpf/tethering/map_tethering_stats_stats_value_map_A",
 	"/sys/fs/bpf/tethering/map_tethering_stats_stats_value_map_B",
+	"/sys/fs/bpf/tethering/map_netd_app_uid_stats_map",
+	"/sys/fs/bpf/tethering/map_netd_stats_map_A",
+	"/sys/fs/bpf/tethering/map_netd_stats_map_B",
+	"/sys/fs/bpf/tethering/map_offload_tether_stats_map",
 }
 
-// TetheringStatsSampler reads AOSP tethering stats from a BPF map.
+// TetheringStatsSampler reads AOSP Mainline tethering stats from a pinned BPF map.
 type TetheringStatsSampler struct {
-	fd   int
-	path string
+	// Placed at offset 0 for 8-byte alignment of uint64 counters on 32-bit ARM.
+	val tetheringStatsValue
 
-	// v5.12: bpf(2) 缓冲区放堆上, 理由同 EBPFSampler.key(栈搬迁后整数化的
-	// 地址失效)。
+	// Heap-resident bpf(2) key buffers sized to max 24B key variant (v5.12 + v6.0.0).
 	key, next tetheringStatsKey
-	val       tetheringStatsValue
+
+	fd        int
+	keySize   uint32
+	valueSize uint32
+	path      string
 }
 
-// tetheringStatsKey is the map key. Layout is 16 bytes; the first 4
-// bytes carry a uid or client identifier (uint32). The exact schema
-// varies by Android version, but the value struct is stable.
+// tetheringStatsKey accommodates 16, 20, or 24 byte Mainline Tethering BPF keys.
+// First uint32 carries uid / client key; trailing words hold tag/counterSet/ifindex/etc.
 type tetheringStatsKey struct {
-	UID  uint32
-	_pad [12]byte // remaining key bytes (iface/counter/etc., ignored for aggregation)
+	UID uint32
+	Ext [5]uint32 // total = 24 bytes (>= max supported keySize 24)
 }
 
-// tetheringStatsValue is the map value: 4×uint64 counters, same layout
-// as netdStatsValue.
+// tetheringStatsValue accommodates 32, 40, or 48 byte Mainline stats values.
+// First 4×uint64 match AOSP stats_value (rxPackets, rxBytes, txPackets, txBytes);
+// Extra0/Extra1 absorb optional error/timestamp counters on 40B and 48B maps.
 type tetheringStatsValue struct {
 	RxPackets uint64
 	RxBytes   uint64
 	TxPackets uint64
 	TxBytes   uint64
+	Extra0    uint64
+	Extra1    uint64
+}
+
+func validTetheringKeySize(sz uint32) bool {
+	return sz == 16 || sz == 20 || sz == 24
+}
+
+func validTetheringValueSize(sz uint32) bool {
+	return sz == 32 || sz == 40 || sz == 48
 }
 
 // discoverTetheringMap finds the AOSP tethering stats BPF map path.
-// Tries known paths first, then falls back to glob-based discovery.
+// Tries known Mainline paths first, then falls back to glob-based discovery
+// (excluding limit/quota control maps whose schema is unrelated to byte stats).
 func discoverTetheringMap() (string, error) {
 	for _, p := range tetheringMapCandidates {
 		if _, err := os.Stat(p); err == nil {
 			return p, nil
 		}
 	}
-	entries, err := filepath.Glob("/sys/fs/bpf/tethering/*stats*")
-	if err == nil && len(entries) > 0 {
-		return entries[0], nil
-	}
-	entries, err = filepath.Glob("/sys/fs/bpf/*tether*stats*")
-	if err == nil && len(entries) > 0 {
-		return entries[0], nil
+	for _, pat := range []string{
+		"/sys/fs/bpf/tethering/*stats*",
+		"/sys/fs/bpf/*tether*stats*",
+	} {
+		entries, err := filepath.Glob(pat)
+		if err != nil {
+			continue
+		}
+		for _, cand := range entries {
+			base := strings.ToLower(filepath.Base(cand))
+			if strings.Contains(base, "limit") {
+				continue
+			}
+			return cand, nil
+		}
 	}
 	return "", fmt.Errorf("tethering stats map not found")
 }
 
-// NewTetheringStatsSampler opens the AOSP tethering stats BPF map.
-// Returns an error if the map cannot be found or opened (permissions,
-// kernel too old, etc.). detect.go treats all errors as "try next backend".
+// NewTetheringStatsSampler opens the AOSP Mainline tethering stats BPF map and
+// validates its keySize (16/20/24) and valueSize (32/40/48).
 func NewTetheringStatsSampler() (*TetheringStatsSampler, error) {
 	path, err := discoverTetheringMap()
 	if err != nil {
@@ -88,24 +112,23 @@ func NewTetheringStatsSampler() (*TetheringStatsSampler, error) {
 		return nil, fmt.Errorf("bpf(BPF_OBJ_GET, %s): %w", path, err)
 	}
 
-	// v5.9.7 护栏: 校验 map 实际 key/value 尺寸, 与我们的解析假设不符
-	// 时拒绝构造 —— 宁可不用, 也不把 ifindex 当 uid 污染归因。
 	info, err := bpfObjGetInfoCall(fd)
 	if err != nil {
-		syscall.Close(fd)
+		_ = syscall.Close(fd)
 		return nil, fmt.Errorf("bpf(BPF_OBJ_GET_INFO_BY_FD, %s): %w", path, err)
 	}
-	const (
-		wantKeySize   = 16 // tetheringStatsKey
-		wantValueSize = 32 // tetheringStatsValue
-	)
-	if info.KeySize != wantKeySize || info.ValueSize != wantValueSize {
-		syscall.Close(fd)
+	if !validTetheringKeySize(info.KeySize) || !validTetheringValueSize(info.ValueSize) {
+		_ = syscall.Close(fd)
 		return nil, fmt.Errorf(
-			"tethering map schema mismatch at %s: key=%d (want %d) value=%d (want %d) — refusing to guess uid layout",
-			path, info.KeySize, wantKeySize, info.ValueSize, wantValueSize)
+			"tethering map schema mismatch at %s: key=%d (want 16/20/24) value=%d (want 32/40/48) — refusing to guess uid layout",
+			path, info.KeySize, info.ValueSize)
 	}
-	return &TetheringStatsSampler{fd: fd, path: path}, nil
+	return &TetheringStatsSampler{
+		fd:        fd,
+		keySize:   info.KeySize,
+		valueSize: info.ValueSize,
+		path:      path,
+	}, nil
 }
 
 func (s *TetheringStatsSampler) Source() string { return "tethering_bpf" }
@@ -126,7 +149,7 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 	}
 	out := make(map[int]ByteCounts, 64)
 
-	key, next := &s.key, &s.next // v5.12: 堆上缓冲区
+	key, next := &s.key, &s.next
 	*key, *next = tetheringStatsKey{}, tetheringStatsKey{}
 	first := true
 
@@ -142,8 +165,7 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 			break // end of map
 		}
 		if err != nil {
-			// EINVAL 在首轮 = 内核拒读该 key 布局 —— 返回错误让上层
-			// 放弃本后端, 而不是吐出空数据冒充成功。
+			// EINVAL on first iteration = kernel rejected key layout.
 			return out, fmt.Errorf("bpf(BPF_MAP_GET_NEXT_KEY): %w", err)
 		}
 
@@ -156,12 +178,14 @@ func (s *TetheringStatsSampler) Sample() (map[int]ByteCounts, error) {
 			continue
 		}
 
-		uid := int(next.UID)
-		if uid < 0 || uid > 100000000 {
+		// Filter out special negative sentinel UIDs (-1 / -5 cast to uint32 > 100_000_000)
+		// safely on both 32-bit ARM and 64-bit ARM64 before converting to int.
+		if next.UID > 100_000_000 {
 			*key = *next
 			first = false
 			continue
 		}
+		uid := int(next.UID)
 
 		bc := out[uid]
 		bc.RxBytes += val.RxBytes
@@ -195,8 +219,7 @@ type bpfMapInfo struct {
 	BtfValueTypeID    uint32
 }
 
-// bpfObjGetInfoCall wraps BPF_OBJ_GET_INFO_BY_FD (cmd 15)。
-// 与 bpfObjGetCall 同款 128B pad 直写 syscall 形态。
+// bpfObjGetInfoCall wraps BPF_OBJ_GET_INFO_BY_FD (cmd 15).
 func bpfObjGetInfoCall(fd int) (*bpfMapInfo, error) {
 	info := bpfMapInfo{}
 	attrBuf := struct {

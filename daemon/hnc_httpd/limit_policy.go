@@ -7,6 +7,8 @@
 //   - 生效: 与 WebUI 完全同一条路径 —— actionRuleSet / actionRuleClear /
 //     actionBLAdd / actionBLDel(→ apply_device_rule.sh → tc/iptables/rules.json),
 //     并持有 s.actionMu, 与用户动作严格串行, tc/iptables/rules.json 三者一致。
+//   - v6.0 锁解耦加固: 配额预警系统通知移出 s.actionMu 锁临界区异步投递并施加 3s 硬超时,
+//     彻底防止 ColorOS 通知服务卡顿冻结整个 WebUI 10 秒!
 //   - 手动基线(base): 控制器不改 rules.json 以外的"真相"。每轮读 rules.json 的
 //     当前规则(obs); 若 obs 与"控制器上次施加后观测到的"(LastObserved)不同,
 //     说明有外部修改(用户 rule_set / 模板 / 清理脚本), 采纳 obs 为新的 base。
@@ -30,6 +32,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -55,11 +58,51 @@ const (
 	defThrottleDownKb  = 1000
 	defThrottleUpKb    = 500
 	limitAuditTID      = "limitctl"
+	quotaNotifyTimeout = 3 * time.Second // v6.0: 锁外异步系统通知硬超时上限
 )
 
 // limitUsageMonthKeep /api/usage_month 最近被请求后, DPI 下限保持计算多久(v5.26 T4)。必须长于
 // limitHistEvery: 下限每 15 分钟才刷新一次, 窗口短于它会让刷新时刻多半已过期 → 接口一直走回退。
 const limitUsageMonthKeep = 30 * time.Minute
+
+type quotaAsyncNotif struct {
+	title string
+	body  string
+}
+
+// quotaNotifyExecFn 系统通知执行钩子(默认走带进程组隔离与 3s 硬超时的 cmd notification; 单测可替换)。
+var quotaNotifyExecFn = defaultQuotaNotifyExec
+
+func defaultQuotaNotifyExec(ctx context.Context, title, body string) error {
+	const cmdBin = "/system/bin/cmd"
+	if _, err := os.Stat(cmdBin); err != nil {
+		return nil
+	}
+	_, err := ExecIsolatedAndroidCmd(
+		ctx,
+		quotaNotifyTimeout,
+		cmdBin,
+		"notification", "post",
+		"-S", "bigtext",
+		"-t", title,
+		"hnc_alert",
+		body,
+	)
+	return err
+}
+
+func dispatchQuotaNotificationsAsync(items []quotaAsyncNotif) {
+	for _, it := range items {
+		item := it
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), quotaNotifyTimeout)
+			defer cancel()
+			if err := quotaNotifyExecFn(ctx, item.title, item.body); err != nil {
+				log.Printf("limitctl: async quota notification error/timeout: %v", err)
+			}
+		}()
+	}
+}
 
 // ── 纯数据类型 ────────────────────────────────────────────────
 
@@ -704,14 +747,26 @@ func (c *limitCtl) logOnce(mac, msg string) {
 	}
 }
 
-// tick 一轮: 用量累加 → 配额判定 → 期望规则 → 必要时 apply → 发布视图。
+// tick 一轮: 用量累加 → 配额判定 → 期望规则 → 必要时 apply → 发布视图 → 锁外异步通知。
 func (c *limitCtl) tick(now time.Time) {
+	actionLocked := false
 	if c.actionMu != nil {
 		c.actionMu.Lock()
-		defer c.actionMu.Unlock()
+		actionLocked = true
 	}
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	muLocked := true
+	unlockAll := func() {
+		if muLocked {
+			c.mu.Unlock()
+			muLocked = false
+		}
+		if actionLocked {
+			c.actionMu.Unlock()
+			actionLocked = false
+		}
+	}
+	defer unlockAll()
 
 	// v5.20: 时钟不可信(开机未对时 1970/2000、RTC 过期落后高水位)→ 整轮跳过:
 	// dayKey/monthKey 会错 → rollover 把当日/当月配额用量清零并落盘; 分时段窗口
@@ -794,6 +849,7 @@ func (c *limitCtl) tick(now time.Time) {
 		}
 	}
 
+	var pendingNotifs []quotaAsyncNotif
 	view := map[string]limitView{}
 	for _, mac := range keys {
 		pol := c.policies[mac]
@@ -835,7 +891,9 @@ func (c *limitCtl) tick(now time.Time) {
 		eff := effectiveRule(s.Base, quotaVerdictOf(q, exceeded), ws, now)
 
 		if exceeded && !sim {
-			c.maybeAlert(mac, s, q, period, dayKey, monKey, usedDay, usedMon, now)
+			if n := c.maybeAlert(mac, s, q, period, dayKey, monKey, usedDay, usedMon, now); n != nil {
+				pendingNotifs = append(pendingNotifs, *n)
+			}
 		}
 
 		if !sim && rulesOK && s.Adopted && eff.Rule != s.LastDesired {
@@ -880,14 +938,26 @@ func (c *limitCtl) tick(now time.Time) {
 		}
 		view[mac] = v
 	}
-	// v5.26 T4: 全局告警月度配额(从 dpid alert.Run 迁来, 与设备配额同源)
-	c.checkGlobalQuotaLocked(monKey, ms, now)
 
 	c.saveStateLocked(now, false)
 
 	c.viewMu.Lock()
 	c.view = view
 	c.viewMu.Unlock()
+
+	// v6.0 锁解耦: 规则落地已完成, 立即释放 s.actionMu!
+	// 后续全局配额检查(checkGlobalQuotaLocked)与设备配额系统通知均在 s.actionMu 锁外执行,
+	// 绝不因 ColorOS cmd notification Binder 卡顿冻结 WebUI 控制面!
+	unlockAll()
+
+	c.mu.Lock()
+	c.checkGlobalQuotaLocked(monKey, ms, now)
+	c.saveStateLocked(now, false)
+	c.mu.Unlock()
+
+	if len(pendingNotifs) > 0 {
+		dispatchQuotaNotificationsAsync(pendingNotifs)
+	}
 }
 
 func kbitToMbps(k int) float64 { return float64(k) / 1000 }
@@ -990,7 +1060,8 @@ func (c *limitCtl) applyViaActions(mac string, from, to limitRule) error {
 	return nil
 }
 
-func (c *limitCtl) maybeAlert(mac string, s *ctlDevState, q *quotaPolicy, period, dayKey, monKey string, usedDay, usedMon uint64, now time.Time) {
+// maybeAlert 写入持久化告警文件并返回待在锁外异步投递的系统通知载荷。
+func (c *limitCtl) maybeAlert(mac string, s *ctlDevState, q *quotaPolicy, period, dayKey, monKey string, usedDay, usedMon uint64, now time.Time) *quotaAsyncNotif {
 	key := dayKey
 	alerted := &s.AlertedDay
 	used, limGB := usedDay, q.DailyGB
@@ -999,13 +1070,14 @@ func (c *limitCtl) maybeAlert(mac string, s *ctlDevState, q *quotaPolicy, period
 		key, alerted, used, limGB, label = monKey, &s.AlertedMonth, usedMon, q.MonthlyGB, "本计费月"
 	}
 	if *alerted == key {
-		return
+		return nil
 	}
 	*alerted = key
 	c.dirty = true
 	acfg := alert.NewConfig(c.hncDir)
-	if !alert.LoadConfig(acfg.AlertsConfigPath).Enabled {
-		return
+	uc := alert.LoadConfig(acfg.AlertsConfigPath)
+	if !uc.Enabled {
+		return nil
 	}
 	act := "限速"
 	if q.Action == "block" {
@@ -1027,10 +1099,15 @@ func (c *limitCtl) maybeAlert(mac string, s *ctlDevState, q *quotaPolicy, period
 	}
 	if err := alert.Append(acfg.AlertsJSONLPath, a); err != nil { // v5.26 T7: 唯一权威(带 flock)
 		log.Printf("limitctl: alert append: %v", err)
+		return nil
+	}
+	return &quotaAsyncNotif{
+		title: "HNC · 设备配额",
+		body:  a.Detail,
 	}
 }
 
-// annotateDevices 把视图字段并入 /api/devices 每行(nil 安全)。
+// annotateDevices 把视图字段并入 /api/devices 的每行(nil 安全)。
 // 无策略的设备按行内 rules 字段给出 effective(reason=manual|block)。
 func (c *limitCtl) annotateDevices(rows []map[string]interface{}) {
 	if c == nil {

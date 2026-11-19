@@ -844,3 +844,73 @@
     grid-template-columns: 1fr;
   }
 }
+/* ==========================================================================
+ * HNC v6.0.0 · Vector — Apple / Frosted 与 Cyber 机能主题专属适配样式
+ * ========================================================================== */
+[data-style="apple"] .v6-kpi,
+[data-style="apple"] .lgd-ctrl-bar,
+[data-style="apple"] .lgd-item,
+[data-style="apple"] .v6-flow-item,
+[data-style="apple"] .v6-tuple-row {
+  border: 0;
+  background: var(--ap-inset, var(--input));
+}
+[data-style="apple"] .lgd-ctrl-bar .v6-num-box,
+[data-style="apple"] .v6-card .v6-num-box {
+  border: 0;
+  background: var(--card);
+}
+[data-style="apple"] .v6-drawer {
+  bottom: 0;
+  width: min(760px, 100%);
+  border: 0;
+  border-radius: 18px 18px 0 0;
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 18px);
+}
+
+/* 赛博机能主题 (data-style="cyber") 锐利折角、战术网格与等宽字体对齐 */
+[data-style="cyber"] .v6-card,
+[data-style="cyber"] .lgd-panel,
+[data-style="cyber"] .v6-top-strip,
+[data-style="cyber"] .v6-dev-banner {
+  border-radius: var(--r-lg, 8px);
+}
+[data-style="cyber"] .v6-kpi,
+[data-style="cyber"] .v6-num-box,
+[data-style="cyber"] .v6-flow-item,
+[data-style="cyber"] .v6-dev-pill,
+[data-style="cyber"] .lgd-ctrl-bar,
+[data-style="cyber"] .lgd-item,
+[data-style="cyber"] .lgd-tchip,
+[data-style="cyber"] .lgd-act-btn,
+[data-style="cyber"] .v6-mini-btn,
+[data-style="cyber"] .v6-tuple-row,
+[data-style="cyber"] .v6-scalpel-entry {
+  border-radius: 5px;
+  background: var(--cy-sub, var(--input));
+  border: 1px solid var(--stroke);
+}
+[data-style="cyber"] .v6-orb {
+  border-radius: 6px;
+  background: var(--cy-sub, var(--input));
+  border: 1px solid var(--stroke-2);
+}
+[data-style="cyber"] .v6-card-t,
+[data-style="cyber"] .v6-top-title b,
+[data-style="cyber"] .lgd-act-btn,
+[data-style="cyber"] .v6-mini-btn {
+  font-family: var(--mono);
+  letter-spacing: .01em;
+}
+[data-style="cyber"] .v6-drawer {
+  border-radius: 10px;
+  background: var(--card-solid);
+  border: 1px solid var(--cy-accent, var(--stroke-2));
+  box-shadow: inset 0 1.5px 0 var(--cy-accent, var(--blue)), var(--shadow-3);
+}
+[data-style="cyber"] .lgd-tchip.on {
+  background: var(--cy-accent-2, var(--blue));
+  border-color: var(--cy-accent, var(--blue));
+  box-shadow: 0 0 10px -2px var(--cy-glow, transparent);
+}
+

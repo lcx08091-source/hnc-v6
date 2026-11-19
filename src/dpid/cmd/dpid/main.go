@@ -1,4 +1,4 @@
-// hnc_dpid: HNC DPI daemon, AppSense-lite rc1.2-fixed.
+// hnc_dpid: HNC DPI daemon, AppSense-lite rc1.2-fixed / v6.0.0 Vector.
 //
 // rc19 adds L2 per-client DNS/SNI attribution:
 // capability probe -> mode decision -> raw AF_PACKET socket -> DNS/TLS events -> per-client metadata -> dpi_state.json.
@@ -7,7 +7,8 @@
 // modification. (v5.14 added QUIC Initial SNI; v5.18 added plain-HTTP Host,
 // multi-segment ClientHello reassembly, and conntrack-driven keep-alive of
 // the IP→name table — dpid is now the only IP→name source, nDPI is gone.)
-// rc20 adds L3 read-only app/category labels from DNS/SNI suffix rules. rc20.1 supports external dpi_rules.json imports.
+// v6.0.0 Vector adds 16KB seqcount_latch shared memory snapshot (shm_vector.bin)
+// and LeakGuard real-time cleartext privacy leak sniffer.
 package main
 
 import (
@@ -16,13 +17,16 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"log"
 	"net"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -33,11 +37,14 @@ import (
 	"hnc.io/dpid/bytestats"
 	"hnc.io/dpid/capture"
 	"hnc.io/dpid/ifacehint"
+	"hnc.io/dpid/leakguard"
 	"hnc.io/dpid/output"
 	"hnc.io/dpid/probe"
+	"hnc.io/dpid/shm"
+	"hnc.io/dpid/tzlocal"
 )
 
-var version = "0.5.3-rc30.12.4-v518-ipname"
+var version = "0.5.4-rc30.12.5-v600-vector"
 
 // v5.22 功耗: hnc_httpd 写的 run/activity.json(热点/在线设备/亮屏/界面)。
 // 文件缺失或过期时一律按基准间隔(旧行为)。
@@ -67,6 +74,10 @@ const (
 
 	debugEventsPerSec = 20
 
+	shmFlowTTLSec      = 60
+	shmOnlineWindowSec = 300
+	shmMaxFlowsPerDev  = 64
+
 	// appLabelDexName is the dex helper shipped alongside the dpid binary
 	// (in the module bin/ dir). Run via app_process to read real PM labels.
 	appLabelDexName = "hnc_applabel.dex"
@@ -75,6 +86,177 @@ const (
 	appLabelDexModulePrimary = "/data/adb/modules/hotspot_net_ctl/bin/" + appLabelDexName
 	appLabelDexModuleLegacy  = "/data/adb/modules/hotspot_network_control/bin/" + appLabelDexName
 )
+
+// shmDevEntry tracks per-device live telemetry for 16KB shm_vector.bin snapshots.
+type shmDevEntry struct {
+	mac      [6]byte
+	ipv4     [4]byte
+	ipv6     [16]byte
+	rxBytes  uint64
+	txBytes  uint64
+	lastSeen int64
+	leakHit  bool
+	flows    map[uint64]int64
+}
+
+// shmRuntimeTracker aggregates downstream client slots without contending on output.Writer.
+type shmRuntimeTracker struct {
+	// Placed at offset 0 for 32-bit ARM 64-bit atomic alignment.
+	conntrackFlows atomic.Uint64
+
+	mu   sync.Mutex
+	devs map[[6]byte]*shmDevEntry
+	poke chan struct{}
+}
+
+func newSHMRuntimeTracker() *shmRuntimeTracker {
+	return &shmRuntimeTracker{
+		devs: make(map[[6]byte]*shmDevEntry, shm.MaxDevices),
+		poke: make(chan struct{}, 1),
+	}
+}
+
+func (t *shmRuntimeTracker) observePacket(macRaw, clientIP, remoteIP string, isUDP bool, port uint16, pktBytes int, txFromClient bool, nowUnix int64) {
+	macBytes, ok := shm.ParseMAC(macRaw)
+	if !ok {
+		return
+	}
+	v4, v6, isV4, isV6 := shm.ParseIPAddr(clientIP)
+	var fhash uint64
+	if remoteIP != "" && port > 0 {
+		h := fnv.New64a()
+		if isUDP {
+			_, _ = h.Write([]byte{'U'})
+		} else {
+			_, _ = h.Write([]byte{'T'})
+		}
+		_, _ = h.Write([]byte(remoteIP))
+		_, _ = h.Write([]byte{byte(port >> 8), byte(port)})
+		fhash = h.Sum64()
+	}
+
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	d := t.devs[macBytes]
+	if d == nil {
+		if len(t.devs) >= shm.MaxDevices {
+			var oldestKey [6]byte
+			var oldestTs int64
+			first := true
+			for k, v := range t.devs {
+				if first || v.lastSeen < oldestTs {
+					oldestKey, oldestTs, first = k, v.lastSeen, false
+				}
+			}
+			if !first {
+				delete(t.devs, oldestKey)
+			}
+		}
+		d = &shmDevEntry{
+			mac:   macBytes,
+			flows: make(map[uint64]int64, 16),
+		}
+		t.devs[macBytes] = d
+	}
+	d.lastSeen = nowUnix
+	if isV4 {
+		d.ipv4 = v4
+	}
+	if isV6 {
+		d.ipv6 = v6
+	}
+	if pktBytes > 0 {
+		if txFromClient {
+			d.txBytes += uint64(pktBytes)
+		} else {
+			d.rxBytes += uint64(pktBytes)
+		}
+	}
+	if fhash != 0 {
+		if _, exists := d.flows[fhash]; !exists && len(d.flows) >= shmMaxFlowsPerDev {
+			for fk, ts := range d.flows {
+				if nowUnix-ts > shmFlowTTLSec {
+					delete(d.flows, fk)
+				}
+			}
+			if len(d.flows) >= shmMaxFlowsPerDev {
+				for fk := range d.flows {
+					delete(d.flows, fk)
+					break
+				}
+			}
+		}
+		d.flows[fhash] = nowUnix
+	}
+}
+
+func (t *shmRuntimeTracker) markLeak(macRaw string) {
+	macBytes, ok := shm.ParseMAC(macRaw)
+	if ok {
+		t.mu.Lock()
+		if d := t.devs[macBytes]; d != nil {
+			d.leakHit = true
+		}
+		t.mu.Unlock()
+	}
+	select {
+	case t.poke <- struct{}{}:
+	default:
+	}
+}
+
+func (t *shmRuntimeTracker) snapshot(nowUnix int64) (slots []shm.DeviceSlot, activeFlows uint32) {
+	t.mu.Lock()
+	slots = make([]shm.DeviceSlot, 0, len(t.devs))
+	var sumFlows uint32
+	for _, d := range t.devs {
+		for fk, ts := range d.flows {
+			if nowUnix-ts > shmFlowTTLSec {
+				delete(d.flows, fk)
+			}
+		}
+		af := uint32(len(d.flows))
+		sumFlows += af
+		var flags uint32
+		if nowUnix-d.lastSeen <= shmOnlineWindowSec {
+			flags |= shm.FlagOnline
+		}
+		if d.ipv4 != ([4]byte{}) {
+			flags |= shm.FlagIPv4
+		}
+		if d.ipv6 != ([16]byte{}) {
+			flags |= shm.FlagIPv6
+		}
+		if d.leakHit {
+			flags |= shm.FlagLeakHit
+		}
+		slots = append(slots, shm.DeviceSlot{
+			MAC:         d.mac,
+			IPv4:        d.ipv4,
+			IPv6:        d.ipv6,
+			RxBytes:     d.rxBytes,
+			TxBytes:     d.txBytes,
+			ActiveFlows: af,
+			Flags:       flags,
+		})
+	}
+	t.mu.Unlock()
+
+	sort.Slice(slots, func(i, j int) bool {
+		totI := slots[i].RxBytes + slots[i].TxBytes
+		totJ := slots[j].RxBytes + slots[j].TxBytes
+		if totI != totJ {
+			return totI > totJ
+		}
+		return string(slots[i].MAC[:]) < string(slots[j].MAC[:])
+	})
+
+	ct := uint32(t.conntrackFlows.Load())
+	if ct > sumFlows {
+		return slots, ct
+	}
+	return slots, sumFlows
+}
 
 // resolveAppLabelDex locates the app-label dex helper. Prefers a file next
 // to the running dpid binary (where the module ships it), then hotspot_net_ctl
@@ -122,6 +304,9 @@ const (
 )
 
 func main() {
+	// P1 timezone pitfall guard: initialize Android local timezone before time.Now() usage.
+	time.Local = tzlocal.Location()
+
 	cfgPath := flag.String("config", defaultConfigPath, "path to dpi_config.json")
 	showVer := flag.Bool("version", false, "print version and exit")
 	// v5.15: 一次性扫描本机已装 App 的安装包域名(写 run/apk_domains.json)后退出
@@ -238,6 +423,53 @@ func main() {
 	armCrashFlag(cfg.RunDir)
 	bumpStartCount(cfg.RunDir) // rc42: 持久 lifetime 启动计数, 供 /api/sla
 
+	// v6.0.0 Vector: LeakGuard 明文隐私嗅探引擎 + 16KB 双槽 seqcount_latch 共享内存快照。
+	shmTracker := newSHMRuntimeTracker()
+	leakEngine := leakguard.NewEngine(cfg.RunDir)
+	seedKnownARPClients(leakEngine)
+	leakEngine.SetAlertHook(func(ev leakguard.LeakEvent) {
+		shmTracker.markLeak(ev.MAC)
+	})
+	leakEngine.Start(ctx)
+	defer func() { _ = leakEngine.Close() }()
+
+	shmWriter, shmErr := shm.OpenWriter(cfg.RunDir)
+	if shmErr != nil {
+		log.Printf("WARN: shm writer unavailable (%s): %v", shm.FilePath(cfg.RunDir), shmErr)
+	} else {
+		defer func() { _ = shmWriter.Close() }()
+		publishSHM := func() {
+			slots, af := shmTracker.snapshot(time.Now().Unix())
+			if werr := shmWriter.Write(shm.MonotonicNs(), af, leakEngine.TotalLeaks(), slots); werr != nil {
+				log.Printf("WARN: shm write: %v", werr)
+			}
+		}
+		publishSHM()
+		go func() {
+			tk := time.NewTicker(time.Second)
+			defer tk.Stop()
+			var quietSkip int
+			for {
+				select {
+				case <-ctx.Done():
+					publishSHM()
+					return
+				case <-shmTracker.poke:
+					publishSHM()
+				case <-tk.C:
+					if actReader != nil && actReader.Get().Quiet {
+						quietSkip++
+						if quietSkip < 5 {
+							continue
+						}
+					}
+					quietSkip = 0
+					publishSHM()
+				}
+			}
+		}()
+	}
+
 	// rc30.4: traffic history sampler. Runs at the top-level ctx so it
 	// survives attempt restarts (interface migration, capture re-open).
 	// First tick after dpid start only establishes a baseline — no row is
@@ -284,35 +516,11 @@ func main() {
 	}
 
 	// v5.5: self-attribution sampler.
-	//
-	// Reads /proc/net/{tcp,tcp6,udp,udp6} every 5s, resolves each
-	// socket's uid via `pm list packages -U` (cached 5min), publishes a
-	// per-uid app aggregation into State.Self via Writer.SetSelf(), and
-	// appends one observation per tick to self_attrib.YYYYMMDD.jsonl.
-	//
-	// Gated by the flag file /data/local/hnc/run/self_capture.enabled:
-	// touch to enable, rm to disable. Re-read on every sampler tick so
-	// changes take effect within 5s without restarting dpid.
-	//
-	// The aggregator is built unconditionally so SetSelf() can be called
-	// from the goroutine on every tick — the WebUI then sees either a
-	// populated `self` block (when enabled) or a stub block with
-	// {enabled: false, reason: ...}.
 	selfAttribFlag := filepath.Join(cfg.RunDir, "self_capture.enabled")
 	selfAttrib := output.NewSelfAttribAggregator(cfg.RunDir)
 
-	// v5.7.0-m2: wire the package→display-name resolver. Curated map
-	// of ~200 popular apps + optional user override at
-	// /data/local/hnc/etc/app_labels.json (hot-reloaded on file mtime
-	// change). Selfattrib.Snapshot calls .Display() per-app to fill
-	// the DisplayName field. No init failure path needed — if override
-	// file is bad JSON we just use the curated map.
 	appLabelsOverride := "/data/local/hnc/etc/app_labels.json"
 	appResolver := appmeta.NewResolver(appLabelsOverride)
-	// Live PackageManager labels: run the app_process dex helper to read the
-	// real, localized system app names for ALL apps (not just the curated
-	// map). Best-effort — if the dex/app_process is unavailable the resolver
-	// transparently falls back to the curated map + prettyFallback.
 	dexPath := resolveAppLabelDex()
 	appResolver.EnableLiveLabels(dexPath, filepath.Join(cfg.RunDir, "app_labels_live.json"))
 	appResolver.StartLiveRefresh(ctx)
@@ -331,8 +539,6 @@ func main() {
 			}
 			return enabled
 		}
-		// Also publish a periodic snapshot into the dpi_state, regardless
-		// of enabled (so WebUI can see "feature exists but is off").
 		go func() {
 			tk := time.NewTicker(5 * time.Second)
 			defer tk.Stop()
@@ -351,10 +557,6 @@ func main() {
 	}()
 
 	// v5.6.0-rc1: self-iface AF_PACKET capture supervisor.
-	// Gated by the same flag file the /proc/net sampler watches
-	// (self_capture.enabled). Reconciles iface list every 30s and feeds
-	// extracted SNIs into selfAttrib via LookupUID + RecordSNI. See
-	// self_capture.go for the full lifecycle / failure model.
 	go runSelfCaptures(ctx, cfg, selfAttrib, func() string {
 		if p2 := probe.Run(probe.Options{IfaceOverride: cfg.Iface}); p2.APIface != "" {
 			return p2.APIface
@@ -362,29 +564,16 @@ func main() {
 		return pr.APIface
 	})
 
-	// v5.6.0-rc2: auto-expander goroutine. Walks unmatched-SNI candidate
-	// queue every 60s and confirms expansions that pass the 3-evidence
-	// test (apex match + uid hit count >= 10 + not blocklisted), writing
-	// to /data/local/hnc/etc/dpi_rules.d/_auto_expanded.json. Gated by
-	// SEPARATE flag (auto_expand.enabled) because this one writes rules
-	// — different risk profile from read-only self_capture. See
-	// output/auto_expand.go for the full design.
+	// v5.6.0-rc2: auto-expander goroutine.
 	go selfAttrib.RunAutoExpander(ctx, cfg.RunDir)
 
-	// v5.7.0-m1: per-uid byte sampler. Detects the best backend at
-	// startup (eBPF preferred, dumpsys fallback, none if neither works)
-	// and ticks every 5s. Each tick reads cumulative byte counters
-	// from the kernel, hands them to selfAttrib.RecordBytes which
-	// computes deltas vs the previous sample and exposes them in
-	// dpi_state.json. Backend choice is logged once at startup.
+	// v5.7.0-m1: per-uid byte sampler.
 	go runByteSampler(ctx, selfAttrib, func() bool {
 		_, err := os.Stat(selfAttribFlag)
 		return err == nil
 	})
 
-	// v5.13: 被动设备识别器 + IP→域名反查表。都自带锁, 跑在顶层 ctx 上,
-	// 跨 capture 重试/重绑存活。设备识别结果启动时从 dpi_devid.json 读回
-	// (DHCP 只在设备接入瞬间出现, 重启 dpid 不能丢); 坏文件忽略。
+	// v5.13: 被动设备识别器 + IP→域名反查表。
 	devID := output.NewDeviceIdentifier()
 	devID.SetPath(filepath.Join(cfg.RunDir, devIDFileName))
 	_ = devID.Load()
@@ -393,22 +582,16 @@ func main() {
 	ipNames.SetPath(filepath.Join(cfg.RunDir, ipNameFileName))
 	sw.SetIPNameTable(ipNames) // v5.18: RecordFlow 域名兜底(取代 nDPI ip_to_host.json)
 	go flushEvery(ctx, 15*time.Second, "dpi_devid", devID.Flush)
-	// v5.18: 5s → 10s。表最多 4096 条(~600KB JSON), 且 DNS 应答几乎每秒都
-	// 带来新 IP; 10 秒一写把 JSON 编码 + fsync + httpd 重解析的频率减半,
-	// 新连接的域名最多晚 10 秒出现在连接列表里。
 	go flushEvery(ctx, 10*time.Second, "dpi_ipname", ipNames.Flush)
-	// v6.x DPI v2: 每连接 ClientHello 指纹(五元组 → JA4/ALPN/SNI 归类), 给 httpd 的
-	// 指纹学习/无域名识别 join conntrack 用。有界环形缓冲, 有新条目才写。
+	// v6.x DPI v2: 每连接 ClientHello 指纹(五元组 → JA4/ALPN/SNI 归类)
 	flowLog = output.NewFlowLog()
 	flowLog.SetPath(filepath.Join(cfg.RunDir, flowLogFileName))
 	go flushEvery(ctx, 10*time.Second, "dpi_flows", flowLog.Flush)
 
-	// v5.15: 未知应用发现器 —— 规则库认不出的域名按同设备共现聚成组, 并从已知
-	// 应用学习 JA4 → 公司家族。启动读回, 30 秒落盘一次(无变化不写)。
+	// v5.15: 未知应用发现器
 	disc := output.NewDiscoverer()
 	disc.SetPath(filepath.Join(cfg.RunDir, discoverFileName))
 	disc.SetFamilyPath(filepath.Join(cfg.RunDir, ja4FamilyFileName))
-	// v5.30 T1c: 共享基础设施名单(公共 DNS / CDN / 对象存储 / 支付 SDK)随规则目录同步
 	disc.SetSharedInfraPath(filepath.Join(filepath.Dir(cfg.RunDir), "etc", "dpi_rules.d", output.SharedInfraFileName))
 	if err := disc.Load(); err != nil {
 		log.Printf("WARN: discover load: %v", err)
@@ -416,8 +599,7 @@ func main() {
 	sw.SetDiscoverer(disc)
 	go flushEvery(ctx, 30*time.Second, "dpi_discover", disc.Flush)
 
-	// v5.15: 本机安装包域名扫描 —— 启动 10 分钟后首轮, 之后每天一轮(文件新鲜则跳过);
-	// httpd 的「立即扫描」写 run/apk_scan.request, 这里 60 秒内接手。
+	// v5.15: 本机安装包域名扫描
 	apkScanner := apkscan.New(apkscan.Options{OutPath: filepath.Join(cfg.RunDir, apkDomainsFile), Label: appResolver.Display})
 	go apkscan.RunDaemon(ctx, apkScanner, apkscan.DaemonOptions{RequestFile: filepath.Join(cfg.RunDir, apkScanRequest)})
 
@@ -426,7 +608,7 @@ func main() {
 		log.Printf("no capture in %s mode; idling for state writes", mode)
 		idleWithFlush(ctx, sw)
 	case ModeOK:
-		if err := runCapture(ctx, cfg, pr, sw, devID, ipNames); err != nil {
+		if err := runCapture(ctx, cfg, pr, sw, devID, ipNames, leakEngine, shmTracker); err != nil {
 			// Capture open/run failure is capability failure, not daemon crash.
 			reason := "open/run capture failed: " + err.Error()
 			log.Printf("ERROR: %s", reason)
@@ -444,6 +626,24 @@ func main() {
 	_ = disc.Flush(time.Now())
 	clearCrashFlag(cfg.RunDir)
 	log.Printf("hnc_dpid exited cleanly")
+}
+
+// seedKnownARPClients primes LeakGuard's known-MAC table from /proc/net/arp at startup.
+func seedKnownARPClients(eng *leakguard.Engine) {
+	if eng == nil {
+		return
+	}
+	b, err := os.ReadFile("/proc/net/arp")
+	if err != nil {
+		return
+	}
+	lines := strings.Split(string(b), "\n")
+	for i := 1; i < len(lines); i++ {
+		fields := strings.Fields(lines[i])
+		if len(fields) >= 4 {
+			eng.RegisterKnownMAC(fields[3])
+		}
+	}
 }
 
 // flushEvery 以固定周期调用 flush(v5.13: dpi_devid / dpi_ipname 共用)。
@@ -489,7 +689,16 @@ func toDeviceHint(h *capture.DevHint) output.DeviceHint {
 	}
 }
 
-func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Writer, devID *output.DeviceIdentifier, ipNames *output.IPNameTable) error {
+func runCapture(
+	ctx context.Context,
+	cfg Config,
+	pr probe.Result,
+	sw *output.Writer,
+	devID *output.DeviceIdentifier,
+	ipNames *output.IPNameTable,
+	leakEngine *leakguard.Engine,
+	shmTracker *shmRuntimeTracker,
+) error {
 	iface := pr.APIface
 	attempt := 0
 	rebindCount := 0
@@ -529,12 +738,7 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 		sw.SetMode(string(ModeOK), "", iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 		_ = sw.Flush()
 
-		// rc40 (P2-20): once capture has run healthily for 5 min, clear the crash
-		// flag. clearCrashFlag was previously only reached on capture-open failure
-		// or clean exit, so a long-healthy dpid later SIGKILLed (OOM / iface flap /
-		// hard kill) left a stale flag → next start could falsely trip
-		// checkCrashLoop → ModeCrashLoop. attemptCtx cancels on rebind, so this
-		// only fires when the SAME capture attempt survived 5 min.
+		// rc40 (P2-20): once capture has run healthily for 5 min, clear the crash flag.
 		go func(ctxLocal context.Context) {
 			t := time.NewTimer(5 * time.Minute)
 			defer t.Stop()
@@ -595,7 +799,6 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 		go func(local *capture.Handle) {
 			tk := time.NewTicker(15 * time.Second)
 			defer tk.Stop()
-			// v5.22: 计数没变就不写日志(空闲时每 15 秒一行纯属写放大), 最多 5 分钟补一行心跳
 			var lastPkts, lastEv uint64
 			var lastLog time.Time
 			for {
@@ -604,21 +807,21 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 					return
 				case <-tk.C:
 					s := local.Stats()
-					ev := s.DNSEvents + s.TLSEvents + s.FlowEvents + s.DevHintEvents
+					ev := s.DNSEvents + s.TLSEvents + s.FlowEvents + s.DevHintEvents + s.HTTPEvents
 					if s.Packets == lastPkts && ev == lastEv && time.Since(lastLog) < 5*time.Minute {
 						continue
 					}
 					lastPkts, lastEv, lastLog = s.Packets, ev, time.Now()
-					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d devhint=%d ignored=%d perr=%d quic_init=%d quic_ok=%d quic_fail=%d quic_sni=%d gquic_sni=%d gquic_skip=%d http=%d tls_partial=%d tls_pending=%d tls_reasm=%d tls_giveup=%d ipnames=%d",
+					log.Printf("stats: pkts=%d drops=%d dns=%d tls=%d flow=%d devhint=%d ignored=%d perr=%d quic_init=%d quic_ok=%d quic_fail=%d quic_sni=%d gquic_sni=%d gquic_skip=%d http=%d leaks=%d lg_drop=%d tls_partial=%d tls_pending=%d tls_reasm=%d tls_giveup=%d ipnames=%d",
 						s.Packets, s.KernelDrops, s.DNSEvents, s.TLSEvents, s.FlowEvents, s.DevHintEvents, s.IgnoredPackets, s.ParseErrors,
-						s.QUICInitial, s.QUICDecryptOK, s.QUICDecryptFail, s.QUICSNI, s.GQUICSNI, s.GQUICSkipped, // v5.14: QUIC 计数
-						s.HTTPEvents, s.TLSPartial, s.TLSPending, s.TLSReassembled, s.TLSGaveUp, ipNames.Len()) // v5.18
+						s.QUICInitial, s.QUICDecryptOK, s.QUICDecryptFail, s.QUICSNI, s.GQUICSNI, s.GQUICSkipped,
+						s.HTTPEvents, leakEngine.TotalLeaks(), leakEngine.DroppedCount(),
+						s.TLSPartial, s.TLSPending, s.TLSReassembled, s.TLSGaveUp, ipNames.Len())
 				}
 			}
 		}(h)
 
-		// BUG-003: 5s health watchdog. Tracks packet progress; if no new
-		// packets for 180s, reports health="degraded" with stall_seconds.
+		// BUG-003: 5s health watchdog.
 		go func(local *capture.Handle) {
 			tk := time.NewTicker(5 * time.Second)
 			defer tk.Stop()
@@ -650,14 +853,12 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 		}(h)
 
 		// rc29: conntrack telemetry, refreshed every 15s.
-		// v5.18: 同一次扫描顺带收集活跃连接的远端 IP, 给 IP→域名表里仍在用的
-		// 映射顺延(长连接不因 DNS TTL 到期丢名字)。conntrack 不可读时无影响。
 		go func() {
 			tk := time.NewTicker(15 * time.Second)
 			defer tk.Stop()
 			scan := func() {
 				active := make(map[string]struct{}, 256)
-				dot := make(map[string]struct{}) // v5.21: 853(DoT/DoQ)连接
+				dot := make(map[string]struct{})
 				r := output.ReadConntrackLines(func(line string) {
 					if d := output.ConntrackOrigDst(line); d != "" {
 						active[d] = struct{}{}
@@ -667,15 +868,16 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 					}
 				})
 				sw.UpdateConntrack(r.Available, r.Readable, r.Path, r.Flows)
+				if r.Readable && r.Flows >= 0 {
+					shmTracker.conntrackFlows.Store(uint64(r.Flows))
+				}
 				if r.Readable {
 					sw.ObserveDoTFlows(dot)
 				}
 				ipNames.KeepAlive(active, time.Now())
 			}
-			// Refresh once immediately so the first dpi_state.json has values.
 			scan()
 			tk.Stop()
-			// v5.22: 基准 15s; 热点上没有在线设备时 60s(activity.ConntrackEvery)
 			for {
 				t := time.NewTimer(activity.ConntrackEvery(actReader.Get()))
 				select {
@@ -692,16 +894,19 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			clientMAC := ev.ClientMAC.String()
 			clientIP := ev.ClientIP.String()
 			remoteIP := ev.RemoteIP.String()
+			nowUnix := ev.Time.Unix()
+
+			if clientMAC != "" && ev.Kind != capture.EventDevHint {
+				leakEngine.RegisterKnownMAC(clientMAC)
+			}
 
 			switch ev.Kind {
 			case capture.EventDNS:
 				sw.RecordDNS(clientMAC, clientIP, remoteIP, ev.DNS.QName, ev.Time)
-				// v5.13: DNS 响应的 A/AAAA → 原始 qname 进反查表。
-				// v5.18: 按记录 owner 跟随 CNAME 链, 每条地址用自己的 TTL,
-				// 并收 HTTPS/SVCB 记录的 ipv4hint/ipv6hint。
+				shmTracker.observePacket(clientMAC, clientIP, remoteIP, ev.IsUDP, 53, ev.Bytes, !ev.DNS.IsResponse, nowUnix)
 				if ev.DNS.IsResponse && len(ev.DNS.Records) > 0 {
 					ipNames.RecordDNSAnswers(ev.DNS.QName, ev.DNS.Records, ev.Time)
-					output.RecordDNSChainForInfra(ev.DNS.QName, ev.DNS.Records, nil, ev.Time.Unix())
+					output.RecordDNSChainForInfra(ev.DNS.QName, ev.DNS.Records, nil, nowUnix)
 					sw.RecordDNSAnswersMeta(clientMAC, ev.DNS.QName, ev.DNS.Records, ev.Time)
 				}
 			case capture.EventTLSClientHello:
@@ -710,27 +915,50 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 					effSNI = recQName
 				}
 				sw.RecordTLS(clientMAC, clientIP, remoteIP, effSNI, ev.TLS.JA4, ev.Time)
+				shmTracker.observePacket(clientMAC, clientIP, remoteIP, ev.IsUDP, ev.DstPort, ev.Bytes, true, nowUnix)
 				recordFlowFP(ev, clientMAC, clientIP, remoteIP) // v6.x DPI v2
 				if effSNI != "" {
 					ipNames.RecordConnName(remoteIP, effSNI, output.IPNameSrcSNI, ev.Time)
 				}
 			case capture.EventHTTP:
-				// v5.18: 明文 HTTP Host 与 SNI 同等看待(都是连接声明的名字)。
-				sw.RecordTLS(clientMAC, clientIP, remoteIP, ev.TLS.SNI, "", ev.Time)
-				ipNames.RecordConnName(remoteIP, ev.TLS.SNI, output.IPNameSrcHTTP, ev.Time)
+				// v5.18: 域名 Host 头同步归因与反查表; v6.0.0: 全量前 4096B 明文请求非阻塞投递 LeakGuard。
+				if ev.TLS.SNI != "" {
+					sw.RecordTLS(clientMAC, clientIP, remoteIP, ev.TLS.SNI, "", ev.Time)
+					ipNames.RecordConnName(remoteIP, ev.TLS.SNI, output.IPNameSrcHTTP, ev.Time)
+				}
+				shmTracker.observePacket(clientMAC, clientIP, remoteIP, false, ev.DstPort, ev.Bytes, true, nowUnix)
+				if ev.HTTP != nil {
+					dstHost := ev.HTTP.Host
+					if dstHost == "" {
+						if e, ok := ipNames.Lookup(remoteIP, ev.Time); ok && e.Name != "" {
+							dstHost = e.Name
+						}
+					}
+					if dstHost == "" {
+						dstHost = ev.HTTP.RawHost
+					}
+					if dstHost == "" {
+						dstHost = remoteIP
+					}
+					leakEngine.SubmitPacket(
+						clientMAC,
+						clientIP,
+						remoteIP,
+						ev.DstPort,
+						ev.HTTP.Method,
+						ev.HTTP.Path,
+						dstHost,
+						ev.HTTP.UserAgent,
+						ev.HTTP.RawPayload,
+						ev.Time,
+					)
+				}
 			case capture.EventDevHint:
-				// v5.13: 设备识别线索只进识别器, 绝不走 RecordFlow/clientLocked ——
-				// 这些包多为广播/组播, 其 IP 不代表客户端。
 				if ev.Dev != nil {
+					leakEngine.RegisterKnownMAC(ev.Dev.MAC)
 					devID.ObserveHint(toDeviceHint(ev.Dev), ev.Time)
 				}
 			case capture.EventFlow:
-				// txFromClient: heuristic — when ClientIP == SrcIP, this packet
-				// went client->remote (uplink). The assignClient() logic in
-				// parse.go always sets ClientIP=SrcIP for non-DNS-response
-				// packets, so for EventFlow this is always true. Bidirectional
-				// byte counts will only be accurate once we also see the
-				// remote->client direction; on hotspot we typically do.
 				port := ev.DstPort
 				txFromClient := ev.SrcIP.Equal(ev.ClientIP)
 				if !txFromClient {
@@ -738,6 +966,7 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 				}
 				sw.RecordFlow(clientMAC, clientIP, remoteIP, ev.IsUDP, port, uint64(ev.Bytes), txFromClient, ev.Time)
 				sw.ObserveFlowSideChannel(clientMAC, clientIP, remoteIP, ev.IsUDP, ev.IsIPv6, ev.SrcPort, ev.DstPort, uint64(ev.Bytes), txFromClient, ev.DSCP, ev.TCPFlags, ev.UDPSig, ev.Time)
+				shmTracker.observePacket(clientMAC, clientIP, remoteIP, ev.IsUDP, port, ev.Bytes, txFromClient, nowUnix)
 			}
 
 			if !debug {
@@ -746,7 +975,6 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			if debugBudget.Add(-1) < 0 {
 				return
 			}
-			// NOTE: debug logs contain full qname/SNI. Formal release/debug bundles must sanitize qname/SNI.
 			switch ev.Kind {
 			case capture.EventDNS:
 				log.Printf("DNS client=%s/%s remote=%s qname=%q qtype=%d resp=%v ttl=%d answers=%d",
@@ -755,8 +983,8 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 				log.Printf("TLS-CH client=%s/%s remote=%s sni=%q alpn=%v ja4=%s quic=%v ech=%v partial=%v reasm=%v",
 					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.TLS.SNI, ev.TLS.ALPN, ev.TLS.JA4, ev.TLS.IsQUIC, ev.TLS.ECH, ev.TLS.Partial, ev.TLS.Reassembled)
 			case capture.EventHTTP:
-				log.Printf("HTTP client=%s/%s remote=%s host=%q ua=%q",
-					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.TLS.SNI, ev.TLS.UserAgent)
+				log.Printf("HTTP client=%s/%s remote=%s:%d host=%q ua=%q",
+					ev.ClientMAC, ev.ClientIP, ev.RemoteIP, ev.DstPort, ev.TLS.SNI, ev.TLS.UserAgent)
 			case capture.EventDevHint:
 				if ev.Dev != nil {
 					log.Printf("DEVHINT mac=%s src=%s host=%q vc=%q fp=%q model=%q ua=%q svc=%v",
@@ -774,7 +1002,6 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 			return nil
 		}
 		if errors.Is(err, capture.ErrRebound) {
-			// Rebind goroutine switched the interface; retry with new iface.
 			iface = h.Iface()
 			log.Printf("capture rebound to %s, retrying (attempt=%d)", iface, attempt+1)
 			if !sleepOrDone(ctx, 500*time.Millisecond) {
@@ -797,11 +1024,6 @@ func runCapture(ctx context.Context, cfg Config, pr probe.Result, sw *output.Wri
 	}
 }
 
-// rc30.12.3-iface-retry: 同步到 bin/hnc_dpid 实际二进制的修复版本.
-// 之前源码只匹配 4 个 syscall errno, 但 Realme / ColorOS 16 / SukiSU 上 AF_PACKET
-// 经常返回字符串错误 ("no such network interface" 等) 而不是 errno, 老逻辑漏判,
-// dpid 直接退出, DPI 盲. 加字符串 fallback 后能正确识别 "接口暂时不在" 类错误,
-// 进入 retry 循环等接口起来.
 func isRecoverableCaptureError(err error) bool {
 	if err == nil {
 		return false
@@ -832,7 +1054,6 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 }
 
 func idleWithFlush(ctx context.Context, sw *output.Writer) {
-	// v5.22: 基准 10s; 确知热点未开/无设备时 30s(仍远小于自检判「卡住」的 180s)
 	for {
 		tk := time.NewTimer(activity.BlindFlushEvery(actReader.Get()))
 		select {
@@ -850,11 +1071,6 @@ func idleUntilSignal(sw *output.Writer) {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
-	// rc40 (P2-30): bound the crash-loop idle so we don't block the launcher's
-	// waitpid forever (which froze its own cooldown/self-heal). After 30min, exit
-	// so the launcher restarts us and we re-evaluate checkCrashLoop — the 60s
-	// crash window will have aged out, so a transient loop self-heals and a
-	// persistent one self-throttles to ~1 attempt / 30min instead of a tight loop.
 	deadline := time.NewTimer(30 * time.Minute)
 	defer deadline.Stop()
 	for {
@@ -987,9 +1203,6 @@ func clearCrashFlag(runDir string) {
 	_ = os.Remove(filepath.Join(runDir, crashFlagFile))
 }
 
-// bumpStartCount increments a persistent lifetime dpid-start counter for
-// /api/sla (rc42). Unlike the crash flag, this is never cleared — it answers
-// "how many times has dpid (re)started over this boot's lifetime". Best-effort.
 func bumpStartCount(runDir string) {
 	path := filepath.Join(runDir, "dpid.start_count")
 	n := int64(0)
@@ -1026,18 +1239,6 @@ func checkCrashLoop(runDir string) string {
 	return ""
 }
 
-// runByteSampler is the v5.7.0-m1 per-uid byte sampler goroutine.
-//
-// On startup it picks the best available backend (eBPF preferred,
-// dumpsys fallback, no-op as last resort). Then ticks every 5s,
-// reading cumulative kernel byte counters per uid and handing them
-// to selfAttrib.RecordBytes, which computes deltas and surfaces them
-// in dpi_state.json.
-//
-// If a backend transiently fails on a given tick (e.g. dumpsys forks
-// fail under memory pressure), we log+skip rather than crashing —
-// next tick will retry. If a backend's Source() is "none", we just
-// don't tick (no point waking up to do nothing).
 func runByteSampler(ctx context.Context, agg *output.SelfAttribAggregator, enabled func() bool) {
 	sampler := bytestats.Detect()
 	defer sampler.Close()
@@ -1045,16 +1246,13 @@ func runByteSampler(ctx context.Context, agg *output.SelfAttribAggregator, enabl
 	src := sampler.Source()
 	if src == "none" {
 		log.Printf("byteSampler: no backend available, byte stats permanently disabled")
-		return // No point ticking forever for nothing.
+		return
 	}
 
-	// Tick once immediately so the first dpi_state.json has byte data.
 	if enabled() {
 		doByteSample(sampler, agg, src)
 	}
 
-	// v5.22: 字节只服务于「本机流量归因」(self_capture.enabled)。没开就不采(dumpsys 后端
-	// 每次要 fork + 解析), 60 秒看一次开关; 开着时基准 5s, 熄屏且无界面 30s。
 	for {
 		d := activity.ByteSampleEvery(actReader.Get(), enabled())
 		if d == 0 {
@@ -1077,14 +1275,9 @@ func runByteSampler(ctx context.Context, agg *output.SelfAttribAggregator, enabl
 func doByteSample(sampler bytestats.ByteSampler, agg *output.SelfAttribAggregator, src string) {
 	raw, err := sampler.Sample()
 	if err != nil {
-		// Don't spam: log only the first error per minute or so. For
-		// now just log every failure; if it becomes noisy we'll add
-		// rate limiting.
 		log.Printf("byteSampler: sample failed (source=%s): %v", src, err)
 		return
 	}
-	// Translate bytestats.ByteCounts → output.ByteSample to keep the
-	// output package free of bytestats imports (no reverse deps).
 	out := make(map[int]output.ByteSample, len(raw))
 	for uid, bc := range raw {
 		out[uid] = output.ByteSample{RxBytes: bc.RxBytes, TxBytes: bc.TxBytes}
@@ -1092,10 +1285,6 @@ func doByteSample(sampler bytestats.ByteSampler, agg *output.SelfAttribAggregato
 	agg.RecordBytes(out, src, time.Now().Unix())
 }
 
-// resolveCurrentIface 当前热点网卡: -iface 参数 > ifacehint(唯一权威出口:
-// iface_detect.json 10 分钟内 > hotspot_iface)> capture 扫描(按名字 / 私网 IP / ARP 排序)。
-// v5.33: 删掉这里自己读 hotspot_iface(不校验、不看 iface_detect.json)和写死的候选名单
-// (wlan2 / ap0 / …, 与 capture 的名字排序重复; 还会挑中没开的网卡)。
 func resolveCurrentIface(cfg Config) string {
 	if cfg.Iface != "" {
 		return cfg.Iface
@@ -1109,8 +1298,6 @@ func resolveCurrentIface(cfg Config) string {
 	return ""
 }
 
-// readIfaceRxBytes returns the kernel rx_bytes counter for the named interface.
-// Returns 0 on any error.
 func readIfaceRxBytes(iface string) uint64 {
 	data, err := os.ReadFile("/sys/class/net/" + iface + "/statistics/rx_bytes")
 	if err != nil {
@@ -1120,21 +1307,13 @@ func readIfaceRxBytes(iface string) uint64 {
 	return n
 }
 
-// rebindCheckLoop monitors the capture interface for changes and triggers
-// a rebind when:
-//   - The resolved iface name differs from the handle's current iface
-//   - The ifindex of the resolved iface differs from the handle's stored ifindex
-//   - packets==0 for 3 consecutive minutes but rx_bytes is growing (meaning
-//     the interface is alive but DPI is not seeing traffic, e.g. offload)
-//
-// Runs every 15s. Exits cleanly on ctx cancellation.
 func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *output.Writer, rebindCount *int) {
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
 	var (
-		zeroPktStart time.Time // when we first saw packets==0
-		lastRxBytes  uint64    // rx_bytes at previous tick
+		zeroPktStart time.Time
+		lastRxBytes  uint64
 	)
 	lastRxBytes = readIfaceRxBytes(h.Iface())
 
@@ -1151,29 +1330,24 @@ func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *out
 			handleIface := h.Iface()
 			handleIfindex := h.CurrentIfindex()
 
-			// Resolve the ifindex of the currently-resolved iface.
 			ifc, err := net.InterfaceByName(currentIface)
 			if err != nil {
-				// Interface doesn't exist yet, retry next tick.
 				continue
 			}
 
 			needRebind := false
 			reason := ""
 
-			// Check 1: iface name changed (e.g. wlan2 → ap0).
 			if currentIface != handleIface {
 				needRebind = true
 				reason = fmt.Sprintf("iface name changed: %s → %s", handleIface, currentIface)
 			}
 
-			// Check 2: ifindex changed (same name, different underlying device).
 			if !needRebind && ifc.Index != handleIfindex {
 				needRebind = true
 				reason = fmt.Sprintf("ifindex changed on %s: %d → %d", currentIface, handleIfindex, ifc.Index)
 			}
 
-			// Check 3: zero packets for 3 consecutive minutes but rx_bytes growing.
 			if !needRebind {
 				s := h.Stats()
 				rxBytes := readIfaceRxBytes(currentIface)
@@ -1202,7 +1376,6 @@ func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *out
 					log.Printf("REBIND OK: now on %s (ifindex=%d, rebind_count=%d)",
 						currentIface, ifc.Index, *rebindCount)
 				}
-				// Reset zero-packet tracker after any rebind attempt.
 				zeroPktStart = time.Time{}
 			}
 		}

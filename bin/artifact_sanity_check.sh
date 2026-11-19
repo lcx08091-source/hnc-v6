@@ -65,7 +65,7 @@ fi
 [ "$NESTED_COUNT" -gt 0 ] && fail "artifact contains nested ZIP(s); use the inner module ZIP or fix packaging: $(printf '%s' "$NESTED_ZIPS" | tr '\n' ' ')" || ok "artifact has no nested ZIP"
 grep -E '\.rej$|\.orig$' "$TMP.entries" >/dev/null && fail "artifact contains .rej/.orig patch residue" || ok "artifact has no .rej/.orig residue"
 grep -E '(^|/)(\.ssh|id_rsa|id_ed25519|.*_ed25519|.*_rsa|.*\.pem)$' "$TMP.entries" >/dev/null && fail "artifact may contain private key/secret files" || ok "artifact has no obvious private key/secret files"
-for req in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/main.js webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json data/ip_owner.bin data/pkg_app_map.json bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_runtime_sync.sh bin/hnc_proc.sh customize.sh bin/hnc_arch.sh; do
+for req in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/vector_v6.js webroot/js/main.js data/dpi_rules.d/96-system-updates-v6.json webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json data/ip_owner.bin data/pkg_app_map.json bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_runtime_sync.sh bin/hnc_proc.sh customize.sh bin/hnc_arch.sh; do
   grep -x "$req" "$TMP.entries" >/dev/null && ok "required file exists: $req" || fail "required file missing at ZIP root path: $req"
 done
 
@@ -123,11 +123,14 @@ if grep -x 'daemon/hnc_httpd/hnc_httpd' "$TMP.entries" >/dev/null; then
     if command -v grep >/dev/null 2>&1; then
       [ -n "$VER" ] && { grep -a -F "$VER" "$TMP.extract/hnc_httpd" >/dev/null 2>&1 && ok "hnc_httpd embeds module version $VER" || fail "hnc_httpd does not embed module version $VER; Go binary may be stale"; }
       (strings -a "$TMP.extract/hnc_httpd" 2>/dev/null || strings "$TMP.extract/hnc_httpd" 2>/dev/null) > "$TMP.httpd.strings" 
-      case "$VER" in v5.3.*)
-        grep -F '/api/dpi_state' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_state" || fail "hnc_httpd missing /api/dpi_state"
-        grep -F '/api/dpi_probe' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_probe" || fail "hnc_httpd missing /api/dpi_probe"
-        grep -F 'apiDPIState' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains apiDPIState" || fail "hnc_httpd missing apiDPIState"
-        grep -F 'apiDPIProbe' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains apiDPIProbe" || fail "hnc_httpd missing apiDPIProbe" ;;
+      case "$VER" in
+        v5.3.*)
+          grep -F '/api/dpi_state' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_state" || fail "hnc_httpd missing /api/dpi_state"
+          grep -F '/api/dpi_probe' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_probe" || fail "hnc_httpd missing /api/dpi_probe" ;;
+        v6.*)
+          for v6sym in /api/vector_sync /api/leakguard/events /api/v6/express /api/v6/blackbox /api/backup; do
+            grep -a -F "$v6sym" "$TMP.extract/hnc_httpd" >/dev/null 2>&1 && ok "hnc_httpd embeds $v6sym" || fail "hnc_httpd missing $v6sym"
+          done ;;
       esac
     else warn "strings not available; skipped hnc_httpd version/API symbol checks"; fi
   else fail "hnc_httpd extraction failed or produced empty file"; fi

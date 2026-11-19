@@ -91,6 +91,11 @@ required = [
     "dpi_rebind",
     "/api/dataplane_verify",
     "dataplane_verify_run",
+    "/api/vector_sync",
+    "/api/leakguard/events",
+    "/api/v6/express",
+    "/api/v6/blackbox",
+    "/api/backup",
 ]
 missing = [s for s in required if s.encode("utf-8") not in data]
 if missing:

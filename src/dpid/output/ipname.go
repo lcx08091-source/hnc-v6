@@ -182,6 +182,18 @@ func (t *IPNameTable) RecordDNSAnswers(qname string, recs []DNSAnswer, ts time.T
 	if qn == "" || len(recs) == 0 {
 		return
 	}
+	var minTTL uint32
+	for _, r := range recs {
+		if r.TTL > 0 && (minTTL == 0 || r.TTL < minTTL) {
+			minTTL = r.TTL
+		}
+	}
+	DefaultECHBlindEngine.RecordSVCB(ECHSVCBHint{
+		QName:      qn,
+		Records:    recs,
+		TTL:        minTTL,
+		ObservedAt: ts,
+	})
 	cn := map[string]string{}
 	for _, r := range recs {
 		if r.Type == 5 {

@@ -28,8 +28,8 @@ const (
 	// 广播/组播, 不走 assignClient, 调用方也不得把它们喂给 RecordFlow /
 	// clientLocked —— 客户端身份只取 DevHint.MAC。
 	EventDevHint
-	// v5.18: 明文 HTTP 请求(TCP/80)的 Host 头。复用 Event.TLS: SNI = Host,
-	// UserAgent = User-Agent, 其余为空。
+	// v5.18 / v6.0.0: 明文 HTTP 请求(任意非 443 TCP 端口): Event.TLS 保留向后兼容
+	// (SNI = 域名 Host, UserAgent = User-Agent), Event.HTTP 携带完整请求行与前 4096B 载荷。
 	EventHTTP
 )
 
@@ -85,14 +85,14 @@ type TLSInfo struct {
 }
 
 type Event struct {
-	Kind    EventKind
-	Time    time.Time
-	SrcMAC  net.HardwareAddr
-	DstMAC  net.HardwareAddr
-	SrcIP   net.IP
-	DstIP   net.IP
-	SrcPort uint16
-	DstPort uint16
+	Kind     EventKind
+	Time     time.Time
+	SrcMAC   net.HardwareAddr
+	DstMAC   net.HardwareAddr
+	SrcIP    net.IP
+	DstIP    net.IP
+	SrcPort  uint16
+	DstPort  uint16
 	IsUDP    bool
 	IsIPv6   bool  // rc29
 	DSCP     uint8 // v5.34: IPv4 TOS>>2 or IPv6 TrafficClass>>2 (RFC 2474, 0..63)
@@ -110,6 +110,8 @@ type Event struct {
 	TLS TLSInfo
 	// v5.13: 仅 Kind == EventDevHint 时非 nil。用指针避免每包 Event 值拷贝变大。
 	Dev *DevHint
+	// v6.0.0: 仅 Kind == EventHTTP 时非 nil, 携带完整请求行与前 4096B 载荷喂给 LeakGuard。
+	HTTP *HTTPInfo
 
 	// v5.18: IP 头声明的长度超过实际抓到的字节(被 snaplen 截断)。
 	capTrunc bool
@@ -375,16 +377,21 @@ func parseL4(ev Event, proto byte, payload []byte) (Event, ParseResult) {
 			}
 		}
 
-		// v5.18: 明文 HTTP 请求的 Host 头(BPF 只放行 TCP/80 且载荷以常见
-		// 方法开头的包)。
-		if ev.DstPort == 80 {
-			if host, ua, ok := parseHTTPRequestHost(tcpData); ok {
-				ev.Kind = EventHTTP
-				ev.TLS = TLSInfo{SNI: host, UserAgent: ua}
-				assignClient(&ev, false)
-				return ev, ParseOK
+		// v5.18 / v6.0.0: 任意非 443 TCP 端口上的明文 HTTP 请求(含 80 与野端口)。
+		if ev.SrcPort != 443 && ev.DstPort != 443 {
+			if hasHTTPMethodPrefix(tcpData) {
+				if req, ok := parseHTTPRequestFull(tcpData); ok {
+					ev.Kind = EventHTTP
+					ev.TLS = TLSInfo{SNI: req.Host, UserAgent: req.UserAgent}
+					ev.HTTP = &req
+					assignClient(&ev, false)
+					return ev, ParseOK
+				}
+				return ev, ParseIgnore
 			}
-			return ev, ParseIgnore
+			if ev.DstPort == 80 {
+				return ev, ParseIgnore
+			}
 		}
 
 		// Anything else TCP (e.g. server→client 0x16 handshake) -> Flow event (rc29).

@@ -14,6 +14,20 @@
 
 ---
 
+## [6.0.0] - 2026-11-19
+
+### HNC v6.0.0 · Vector 零开销架构重塑与五大王牌战术舱正式版
+- **Added · 三级自适应零派生限速引擎 (`dataplane_tier_v6.go` + `hnc_clsact.bpf.c`)**: 构建 `Tier 1 (clsact eBPF EDT + sch_fq)` -> `Tier 2 (Go 常驻 AF_NETLINK RTNetlink + HTB/FQ-CoDel)` -> `Tier 3 (tc -batch + iptables-restore --noflush)` 自动探测与热切换流水线；补齐 `dev_stats_map` 每设备槽位高速计数、上行入站游戏/语音预提权、M8 原生 `1:9001+` 单应用限速子树、`1:a0XX` 延迟联动动态三档 QoS（`50/35/15` <-> `70/20/10`）、`1:fffe` `2.5Gbps` 局域网互传免限速直通快车道与五处 `tc_action.lock` 原子互斥锁统一。
+- **Added · 16KB 页对齐双槽 `seqcount_latch` 共享内存与 Go 1.27 `json/v2` 流式引擎 (`shm/seqlock.go` + `json_v2_codec.go`)**: `/data/local/hnc/run` 开机自动挂载 `32M tmpfs` 实现手机 UFS 闪存零擦写损耗；`hnc_dpid` 与 `hnc_httpd` 通过 16KB 对齐 `mmap` 双槽序列锁实现微秒级无锁状态同步，保留明文 `data/rules.json` 并新增 `GET /api/v6/diag_dump` 可读诊断快照。
+- **Added · 四舱壁防连坐 `HNC Core` 中枢 (`core_hub_v6.go`)**: 新增 `GET /api/vector_sync`（`atomic.Pointer[WorldSnapshot]` `<50ns` 无锁读取）与 `Dataplane` / `DpiShm` / `AndroidBridge` / `Storage` 四大有界熔断隔离舱壁（`Setpgid` 2 秒进程组连根超杀 + 连续超时 45 秒半开熔断 + `CLOCK_BOOTTIME` 单调时钟看门狗耦合），彻底根除 `dumpsys` 同步阻塞、6.5 万行 `nf_conntrack` 全表扫描与 `offload_sched` 30 秒空转唤醒隐患。
+- **Added · 五大王牌新功能与截图全量特性集**:
+  - **`LeakGuard` 明文隐私安检 (`/api/leakguard/*`)**: 全端口 TCP 明文 HTTP 首包非阻塞嗅探 + URL/Gzip 解码 + Go 1.27 `jsontext.Decoder` 12 层深层 `POST` JSON 键值扫描 + Luhn 实证 IMEI/手机号/带正负号经纬度/MAC 完整原文取证、锁屏半脱敏通知与域名+IP 双栈一键封禁。
+  - **`Vector Express` 救护车零排队护航 (`/api/v6/express`)**: 跨设备 `prio 0` (`fq_codel target 2ms`) 游戏/会议微秒级优先转发，并发目的 IP 阈值精准防 P2P/BT 伪装。
+  - **`UpdateLeash` 后台更新温柔拴绳 (`/api/v6/update_leash` + `96-system-updates-v6.json`)**: `200 MB` 满速免死缓冲池保障常规补丁秒下，超额 Windows/Apple/Steam 巨量后台更新自动平滑收束至 `1500 Kbps`。
+  - **`FlowScalpel` 五元组连接手术台 (`/api/v6/scalpel/*`)**: 实时透视五元组连接，纯 Go `AF_NETLINK` `IPCTNL_MSG_CT_DELETE` 免断网单流秒斩 + 5 秒自毁精准 `RST`/`ICMP` 阻断 + 可选 15 分钟四元组冻结。
+  - **`ThermoCruise` 电芯温控巡航 (`/api/v6/thermo`)**: `<50µs` 直读内核 `sysfs` 电芯温度与电量，`3.0°C` 施密特回差防抖，支持外接快充与游戏护航双豁免。
+  - **200ms 卡顿黑匣子 (`/api/v6/blackbox`)、Wi-Fi 7 MLO / USB 多口并管与 `tun0` 防环路守卫 (`/api/v6/multi_iface`)、抗后量子分片 QUIC 重组与抗 TLS 1.3 ECH 四维盲态推断 (`ech_blind.go`)、纯 `epoll` 零轮询抓包 (`rawsocket.go`) 及整机配置 SHA256 一键备份恢复 (`/api/backup`)**。
+
 ## [5.40.3] - 2026-11-19
 
 ### 全仓 NDK r30 Clang C11 `-Werror` 深度清障与双架构打包全链路核验

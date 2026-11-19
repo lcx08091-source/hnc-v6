@@ -7,6 +7,9 @@
 //     offload_guard_plan)跑一轮并拿「下次睡几秒 + 早醒条件」(60 或 300 秒);
 //     睡眠期间每 30 秒看一次 activity 快照, 早醒条件满足就提前进入下一轮。
 //     解析失败按 60 秒。
+//   - v6.0 修复 30 秒死循环 Bug: 记录进入睡眠时的 prevClients, 仅当
+//     `prevClients <= 0 && curClients > 0`("从无客户端变为有客户端上线")时才触发
+//     clients 早醒, 彻底根治「只要有 1 台设备在线就每 30 秒死循环重跑 sleep 5 巡检」!
 //   - clsact: plan / apply 写的状态 run/offload_guard.json 里 mode=on 且
 //     clsact=installed(闸门 clsact_wanted 是 shell 那一份, Go 不再照抄一遍)时,
 //     每 10 秒 Go 直接 exec `hnc_clsact_ctl check <口>`(不经 sh), 输出不含
@@ -35,6 +38,7 @@ const (
 	offloadWakeEvery   = 30 * time.Second // 早醒检查周期(照抄 hnc_act_sleep_until 的 IDLE_CHUNK)
 	offloadMaxSec      = 900              // 与 shell INTERVAL/IDLE_INTERVAL 的上界一致
 	clsactCheckEvery   = 10 * time.Second
+	clsactCheckTimeout = 5 * time.Second
 )
 
 // ── 可注入外部调用 ──────────────────────────────────────────────────
@@ -59,12 +63,13 @@ func runOffloadPlan() string {
 	cmd.Env = os.Environ()
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
-		if cmd.Process == nil {
+		if cmd.Process == nil || cmd.Process.Pid <= 0 {
 			return nil
 		}
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 		return cmd.Process.Kill()
 	}
+	cmd.WaitDelay = 2 * time.Second
 	out, err := cmd.Output()
 	rc := 0
 	if ee, ok := err.(*exec.ExitError); ok {
@@ -100,13 +105,14 @@ func parseOffloadPlan(line string) (time.Duration, string) {
 	return time.Duration(sec) * time.Second, wake
 }
 
-// offloadPlanner offload 调度状态机: 记录上一轮 plan 决定的睡眠计划,
+// offloadPlanner offload 调度状态机: 记录上一轮 plan 决定的睡眠计划及睡眠起点的客户端数,
 // advance(now) 判断现在是否该跑下一轮(睡满 / 早醒 / 首轮)。
 type offloadPlanner struct {
-	started   bool
-	nextAt    time.Time // 下一轮 plan 时刻(睡满时间)
-	wakeMode  string    // hotspot | clients | none
-	planCalls int
+	started     bool
+	nextAt      time.Time // 下一轮 plan 时刻(睡满时间)
+	wakeMode    string    // hotspot | clients | none
+	prevClients int       // 进入本轮睡眠时的客户端数(防已有客户端在线时每 30s 死循环早醒)
+	planCalls   int
 }
 
 // advance 现在该不该跑 plan。early: activity 层面是否已满足早醒条件。
@@ -121,21 +127,28 @@ func (p *offloadPlanner) advance(now time.Time, early bool) bool {
 	return !now.Before(p.nextAt)
 }
 
-// observe 记录本轮 plan 的结论, 算下一轮时刻。
+// observe 记录本轮 plan 的结论(默认睡眠起点无在线客户端), 算下一轮时刻。
 func (p *offloadPlanner) observe(dur time.Duration, wake string, now time.Time) {
+	p.observeWithClients(dur, wake, 0, now)
+}
+
+// observeWithClients 记录本轮 plan 的结论及睡眠起点的客户端数。
+func (p *offloadPlanner) observeWithClients(dur time.Duration, wake string, clients int, now time.Time) {
 	p.planCalls++
 	p.nextAt = now.Add(dur)
 	p.wakeMode = wake
+	p.prevClients = clients
 }
 
-// offloadEarlyWake 早醒条件是否满足(hotspot = 热点开了; clients = 有
-// 在线设备)。level 是 activity 的 level 字符串。
-func offloadEarlyWake(wake, level string, clients int) bool {
+// offloadEarlyWake 早醒条件是否满足:
+//   - hotspot: 热点从关闭变为开启(level 非空且非 hotspot_off);
+//   - clients: 仅当睡眠起点无客户端(prevClients <= 0)且当前出现新客户端上线(curClients > 0)时才提前唤醒!
+func offloadEarlyWake(wake, level string, prevClients, curClients int) bool {
 	switch wake {
 	case "hotspot":
 		return level != "" && level != "hotspot_off"
 	case "clients":
-		return clients > 0
+		return prevClients <= 0 && curClients > 0
 	}
 	return false
 }
@@ -159,10 +172,16 @@ func offloadLoop() {
 		last = last.Add(offloadWakeEvery)
 		now := nowFn()
 		s := actSnapshotFn()
-		early := s.OK && offloadEarlyWake(p.wakeMode, s.Level, s.Clients) // 同 shell: 快照不新鲜不早醒
+		early := s.OK && offloadEarlyWake(p.wakeMode, s.Level, p.prevClients, s.Clients) // 同 shell: 快照不新鲜不早醒
 		if p.advance(now, early) {
 			dur, wake := parseOffloadPlan(runOffloadPlanFn())
-			p.observe(dur, wake, now)
+			curClients := 0
+			if sAfter := actSnapshotFn(); sAfter.OK {
+				curClients = sAfter.Clients
+			} else if s.OK {
+				curClients = s.Clients
+			}
+			p.observeWithClients(dur, wake, curClients, now)
 			last = now.Add(offloadWakeEvery)
 		}
 	}
@@ -176,10 +195,22 @@ type clsactSched struct {
 	repairs int // 修复调用次数(测试断言用)
 }
 
-// execClsactCheck 直接 exec hnc_clsact_ctl check <口>(不经 sh)。
+// execClsactCheck 直接 exec hnc_clsact_ctl check <口>(不经 sh, 带 5s 硬超时防挂死)。
 // 返回输出(空 = 失败)。
 func execClsactCheck(iface string) string {
-	b, err := exec.Command(binDir+"/hnc_clsact_ctl", "check", iface).CombinedOutput()
+	ctx, cancel := context.WithTimeout(context.Background(), clsactCheckTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, binDir+"/hnc_clsact_ctl", "check", iface)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = time.Second
+	b, err := cmd.CombinedOutput()
 	if err != nil {
 		return ""
 	}

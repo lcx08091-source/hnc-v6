@@ -482,7 +482,7 @@ function renderSettings(anim1) {
   var cols = function (list) { if (!wide()) return '<div class="scard-stack">' + list.join('') + '</div>'; var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
   var lvSec = function (id, title, sub, cards) {
     var hide = S.setLv !== 'all' && S.setLv !== id ? ' hidden' : '';
-    var dpvSlot = id === 'diag' ? dpvRenderSettingsSlotHtml() : '';
+    var dpvSlot = id === 'diag' ? dpvRenderSettingsSlotHtml() : (id === 'adv' && typeof v6SettingsSlotHtml === 'function' ? v6SettingsSlotHtml() : '');
     return '<div class="set-lv-sec" data-lv-sec="' + id + '"' + hide + '>' +
       '<div class="sec set-lv-hd"><span>' + title + ' <small>' + sub + '</small></span><span class="r">' + cards.length + ' 项</span></div>' +
       dpvSlot + cols(cards) + '</div>';

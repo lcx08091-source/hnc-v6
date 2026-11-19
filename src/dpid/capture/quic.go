@@ -1,16 +1,15 @@
-// Package capture - quic.go: QUIC(HTTP/3) Initial 包 SNI / JA4 提取。
+// Package capture - quic.go: QUIC(HTTP/3) Initial 包 SNI / JA4 提取与后量子分片重组。
 //
-// v5.14: 以前 cBPF 不放行 UDP/443, HTTP/3 流量的域名完全不可见(Chrome /
-// Android Cronet / 抖音等大量走 QUIC)。现在 BPF 放行"目的端口 443 且首字节
-// 为 long header"的包, 这里在用户态:
+// v5.14+: BPF 放行"目的端口 443 且首字节为 long header"的 UDP 包, 用户态完成:
 //
 //  1. 解析 long header(version / DCID / SCID / token / length);
-//  2. 按 RFC 9001 / RFC 9369 由 DCID 派生客户端 Initial 密钥(HKDF 手写,
-//     go.mod 是 1.22, 没有 crypto/hkdf), 去 header protection、AES-128-GCM
-//     解密 payload;
-//  3. 解析 frames 收集 CRYPTO 帧, 按 (客户端IP, 端口, DCID) 重组 —— Chrome
-//     的 ClientHello 常跨 2~3 个 Initial 且 CRYPTO 帧被故意切碎乱序
-//     ("chaos protection");
+//  2. 按 RFC 9001 / RFC 9369 由客户端首个 DCID(ODCID) 派生客户端 Initial 密钥,
+//     支持 RFC 9000 Appendix A.3 乱序/跨字节边界包号还原, 去 header protection、
+//     AES-128-GCM 解密 payload;
+//  3. 解析 frames 收集 CRYPTO 帧, 支持 Chrome / Android WebView 后量子混合密钥交换
+//     X25519MLKEM768 (0x11ec, ClientHello 约 2.2KB~3.8KB) 跨 2~4 个乱序 UDP 包、
+//     乱序拆碎 CRYPTO 帧("chaos protection")及服务端回包后客户端切换新 DCID 续传
+//     剩余 Initial 分片(RFC 9001 §5.2 仍沿用原始 ODCID 密钥)的无损重组;
 //  4. ClientHello 完整后包一层 5 字节 TLS record 头, 复用 TCP 路径的
 //     parseTLSClientHelloFull(SNI/ALPN/JA4), JA4 首字符改 'q'。
 //
@@ -18,10 +17,10 @@
 // Q050 及以后是加密的, 只计数跳过。
 //
 // 解析失败 / 未完整的 Initial 一律 ParseIgnore, 不产出 EventFlow ——
-// 以前 BPF 根本不放行这些包, 保持"不计 QUIC 字节"的行为不变。
+// 保持"不计 QUIC 握手包流量字节"的行为不变。
 //
 // 重组表是包级单例, 可能被多个 Handle(主抓包 + 自身流量抓包)的 Run
-// goroutine 并发调用, 全部操作在 mutex 内完成。
+// goroutine 并发调用, 全部状态变更在 mutex 内完成, HKDF/AES-GCM 在锁外执行。
 
 package capture
 
@@ -46,16 +45,23 @@ import (
 // max(snaplen, quicSnaplen), Handle 的接收缓冲也按它分配。
 const quicSnaplen = 2048
 
-// QUIC 版本号。
+// QUIC 版本号与后量子混合密钥组标识。
 const (
 	quicV1       uint32 = 0x00000001
 	quicV2       uint32 = 0x6b3343cf
 	quicDraft29  uint32 = 0xff00001d
 	quicMaxCIDLn        = 20
+
+	tlsGroupX25519MLKEM768       uint16 = 0x11ec
+	tlsGroupSecP256r1MLKEM768    uint16 = 0x11eb
+	tlsGroupX25519Kyber768Draft0 uint16 = 0x6399
+	tlsGroupMLKEM512             uint16 = 0x0200
+	tlsGroupMLKEM768             uint16 = 0x0201
+	tlsGroupMLKEM1024            uint16 = 0x0202
 )
 
-// v5.14: QUIC 计数。包级原子量(多个 Handle 共用同一份, Stats() 读出的是
-// 进程级总数)。
+// QUIC 计数。包级原子量(多个 Handle 共用同一份, Stats() 读出的是进程级总数)。
+// 全部字段均为 64 位原子量, 天然满足 32 位 ARM 8 字节对齐要求。
 var quicStats struct {
 	initial      atomic.Uint64 // 识别为客户端 Initial 的 QUIC 包
 	decryptOK    atomic.Uint64
@@ -63,6 +69,13 @@ var quicStats struct {
 	sni          atomic.Uint64 // IETF QUIC 成功产出带 SNI 的 ClientHello
 	gquicSNI     atomic.Uint64 // gQUIC 明文 CHLO 取到 SNI
 	gquicSkipped atomic.Uint64 // gQUIC Q050+ 加密 CHLO, 跳过
+	reassembled  atomic.Uint64 // 跨 2+ 个 Initial 包重组完成的 ClientHello
+	pqInitial    atomic.Uint64 // 含 X25519MLKEM768 等后量子密钥交换的 QUIC ClientHello
+}
+
+// QUICPQStats 返回后量子 QUIC 分片重组统计计数(跨包重组数, 后量子握手数)。
+func QUICPQStats() (reassembled, pqInitial uint64) {
+	return quicStats.reassembled.Load(), quicStats.pqInitial.Load()
 }
 
 type quicVersionParams struct {
@@ -75,18 +88,24 @@ type quicVersionParams struct {
 
 var (
 	quicParamsV1 = &quicVersionParams{
-		salt:     []byte{0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a},
-		keyLabel: "quic key", ivLabel: "quic iv", hpLabel: "quic hp",
+		salt:        []byte{0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17, 0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a},
+		keyLabel:    "quic key",
+		ivLabel:     "quic iv",
+		hpLabel:     "quic hp",
 		initialType: 0,
 	}
 	quicParamsV2 = &quicVersionParams{
-		salt:     []byte{0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9},
-		keyLabel: "quicv2 key", ivLabel: "quicv2 iv", hpLabel: "quicv2 hp",
+		salt:        []byte{0x0d, 0xed, 0xe3, 0xde, 0xf7, 0x00, 0xa6, 0xdb, 0x81, 0x93, 0x81, 0xbe, 0x6e, 0x26, 0x9d, 0xcb, 0xf9, 0xbd, 0x2e, 0xd9},
+		keyLabel:    "quicv2 key",
+		ivLabel:     "quicv2 iv",
+		hpLabel:     "quicv2 hp",
 		initialType: 1, // RFC 9369 §3.2: v2 的 Initial 类型位是 0b01
 	}
 	quicParamsDraft29 = &quicVersionParams{
-		salt:     []byte{0xaf, 0xbf, 0xec, 0x28, 0x99, 0x93, 0xd2, 0x4c, 0x9e, 0x97, 0x86, 0xf1, 0x9c, 0x61, 0x11, 0xe0, 0x43, 0x90, 0xa8, 0x99},
-		keyLabel: "quic key", ivLabel: "quic iv", hpLabel: "quic hp",
+		salt:        []byte{0xaf, 0xbf, 0xec, 0x28, 0x99, 0x93, 0xd2, 0x4c, 0x9e, 0x97, 0x86, 0xf1, 0x9c, 0x61, 0x11, 0xe0, 0x43, 0x90, 0xa8, 0x99},
+		keyLabel:    "quic key",
+		ivLabel:     "quic iv",
+		hpLabel:     "quic hp",
 		initialType: 0,
 	}
 )
@@ -103,7 +122,7 @@ func quicParamsFor(v uint32) *quicVersionParams {
 	return nil
 }
 
-// ── HKDF(RFC 5869 + TLS 1.3 HKDF-Expand-Label, 仅 SHA-256) ──────────────
+// ── HKDF(RFC 5869 + TLS 1.3 HKDF-Expand-Label, SHA-256) ────────────────
 
 func hkdfExtract(salt, ikm []byte) []byte {
 	m := hmac.New(sha256.New, salt)
@@ -170,7 +189,7 @@ func deriveQUICClientKeys(p *quicVersionParams, dcid []byte) (*quicKeys, bool) {
 	return k, true
 }
 
-// ── Long header ─────────────────────────────────────────────────────────
+// ── Long header & RFC 9000 A.3 包号还原 ─────────────────────────────────
 
 // quicReadVarint 读 RFC 9000 §16 变长整数。
 func quicReadVarint(b []byte) (uint64, int, bool) {
@@ -257,9 +276,34 @@ func parseQUICLongHeader(b []byte, p *quicVersionParams) (quicLongHeader, bool) 
 	return h, true
 }
 
+// quicDecodePN 按 RFC 9000 Appendix A.3 由已见最大包号还原被截断的包号。
+// 当客户端使用非零随机起始包号且乱序跨越 1 字节包号边界(如 0xff ↔ 0x100)时,
+// 保证后量子多包 Initial 的每个分片都能算出正确的 AEAD nonce。
+func quicDecodePN(largestPN int64, truncatedPN uint64, pnNBits uint) uint64 {
+	if largestPN < 0 || pnNBits == 0 || pnNBits >= 62 {
+		return truncatedPN
+	}
+	expectedPN := uint64(largestPN) + 1
+	pnWin := uint64(1) << pnNBits
+	pnHWin := pnWin / 2
+	pnMask := pnWin - 1
+	cand := (expectedPN &^ pnMask) | truncatedPN
+	if cand+pnHWin <= expectedPN && cand < (uint64(1)<<62)-pnWin {
+		return cand + pnWin
+	}
+	if cand > expectedPN+pnHWin && cand >= pnWin {
+		return cand - pnWin
+	}
+	return cand
+}
+
 // quicOpenInitial 去 header protection 并解密一个 Initial 包。pkt 是从
 // long header 首字节到 h.end 的切片, 不会被修改(抓包缓冲区会复用)。
 func quicOpenInitial(pkt []byte, h *quicLongHeader, k *quicKeys) ([]byte, uint64, bool) {
+	return quicOpenInitialWithLargest(pkt, h, k, -1)
+}
+
+func quicOpenInitialWithLargest(pkt []byte, h *quicLongHeader, k *quicKeys, largestPN int64) ([]byte, uint64, bool) {
 	// RFC 9001 §5.4.2: sample 取自假定 pn 长 4 字节之后的 16 字节。
 	if h.end > len(pkt) || h.pnOffset+4+16 > h.end {
 		return nil, 0, false
@@ -274,22 +318,35 @@ func quicOpenInitial(pkt []byte, h *quicLongHeader, k *quicKeys) ([]byte, uint64
 	hdr := make([]byte, h.pnOffset+pnLen)
 	copy(hdr, pkt[:h.pnOffset+pnLen])
 	hdr[0] = b0
-	var pn uint64
+	var truncPN uint64
 	for i := 0; i < pnLen; i++ {
 		hdr[h.pnOffset+i] ^= mask[1+i]
-		pn = pn<<8 | uint64(hdr[h.pnOffset+i])
+		truncPN = truncPN<<8 | uint64(hdr[h.pnOffset+i])
 	}
-	// 客户端最初几个 Initial 的 pn 很小, 截断值即完整值, 不做 largest_pn 还原。
-	nonce := make([]byte, len(k.iv))
-	copy(nonce, k.iv)
-	for i := 0; i < 8; i++ {
-		nonce[len(nonce)-1-i] ^= byte(pn >> (8 * i))
+
+	tryOpen := func(pn uint64) ([]byte, bool) {
+		nonce := make([]byte, len(k.iv))
+		copy(nonce, k.iv)
+		for i := 0; i < 8; i++ {
+			nonce[len(nonce)-1-i] ^= byte(pn >> (8 * i))
+		}
+		plain, err := k.aead.Open(nil, nonce, pkt[h.pnOffset+pnLen:h.end], hdr)
+		if err != nil {
+			return nil, false
+		}
+		return plain, true
 	}
-	plain, err := k.aead.Open(nil, nonce, pkt[h.pnOffset+pnLen:h.end], hdr)
-	if err != nil {
-		return nil, 0, false
+
+	candPN := quicDecodePN(largestPN, truncPN, uint(pnLen*8))
+	if plain, ok := tryOpen(candPN); ok {
+		return plain, candPN, true
 	}
-	return plain, pn, true
+	if candPN != truncPN {
+		if plain, ok := tryOpen(truncPN); ok {
+			return plain, truncPN, true
+		}
+	}
+	return nil, 0, false
 }
 
 // ── Frames ──────────────────────────────────────────────────────────────
@@ -378,24 +435,122 @@ func parseQUICFrames(p []byte) ([]quicCryptoFrag, bool) {
 	return frags, true
 }
 
-// ── 重组 ────────────────────────────────────────────────────────────────
+// ── 后量子特征检测 (X25519MLKEM768 / ML-KEM) ─────────────────────────────
+
+func isPQTLSGroup(g uint16) bool {
+	switch g {
+	case tlsGroupX25519MLKEM768, tlsGroupSecP256r1MLKEM768, tlsGroupX25519Kyber768Draft0,
+		tlsGroupMLKEM512, tlsGroupMLKEM768, tlsGroupMLKEM1024:
+		return true
+	}
+	return false
+}
+
+// QUICHasPQKeyExchange 检测裸 TLS ClientHello handshake 消息(不含 5B record 头)
+// 是否携带 X25519MLKEM768 (0x11ec) 等后量子混合密钥交换扩展(supported_groups 或 key_share)。
+func QUICHasPQKeyExchange(hello []byte) bool {
+	if len(hello) < 4 || hello[0] != 0x01 {
+		return false
+	}
+	bodyLen := int(hello[1])<<16 | int(hello[2])<<8 | int(hello[3])
+	if bodyLen < 38 || len(hello) < 4+bodyLen {
+		return false
+	}
+	body := hello[4 : 4+bodyLen]
+	p := 2 + 32 // legacy_version + random
+	if len(body) < p+1 {
+		return false
+	}
+	sidLen := int(body[p])
+	p++
+	if len(body) < p+sidLen+2 {
+		return false
+	}
+	p += sidLen
+	csLen := int(binary.BigEndian.Uint16(body[p : p+2]))
+	p += 2
+	if csLen <= 0 || len(body) < p+csLen+1 {
+		return false
+	}
+	p += csLen
+	cmLen := int(body[p])
+	p++
+	if len(body) < p+cmLen+2 {
+		return false
+	}
+	p += cmLen
+	extLen := int(binary.BigEndian.Uint16(body[p : p+2]))
+	p += 2
+	if len(body) < p+extLen {
+		return false
+	}
+	ext := body[p : p+extLen]
+	for len(ext) >= 4 {
+		etype := binary.BigEndian.Uint16(ext[0:2])
+		elen := int(binary.BigEndian.Uint16(ext[2:4]))
+		ext = ext[4:]
+		if len(ext) < elen {
+			break
+		}
+		edata := ext[:elen]
+		ext = ext[elen:]
+		switch etype {
+		case 0x000a: // supported_groups
+			if len(edata) >= 2 {
+				gl := int(binary.BigEndian.Uint16(edata[0:2]))
+				if gl >= 2 && gl%2 == 0 && len(edata) >= 2+gl {
+					for i := 0; i < gl; i += 2 {
+						if isPQTLSGroup(binary.BigEndian.Uint16(edata[2+i : 4+i])) {
+							return true
+						}
+					}
+				}
+			}
+		case 0x0033: // key_share (ClientHello: client_shares<0..2^16-1>)
+			if len(edata) >= 2 {
+				ksl := int(binary.BigEndian.Uint16(edata[0:2]))
+				if len(edata) >= 2+ksl {
+					ks := edata[2 : 2+ksl]
+					for len(ks) >= 4 {
+						grp := binary.BigEndian.Uint16(ks[0:2])
+						kl := int(binary.BigEndian.Uint16(ks[2:4]))
+						if isPQTLSGroup(grp) {
+							return true
+						}
+						if len(ks) < 4+kl {
+							break
+						}
+						ks = ks[4+kl:]
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ── 重组 (支持 2~4+ 乱序 UDP 包 + ODCID 切换续传 + 区间限额防病态碎片) ───
 
 const (
-	quicAsmMaxEntries = 256
-	quicAsmMaxBytes   = 16 << 10
-	quicAsmTTL        = 3 * time.Second
+	quicAsmMaxEntries   = 256
+	quicAsmMaxBytes     = 16 << 10
+	quicAsmMaxIntervals = 64
+	quicAsmTTL          = 3 * time.Second
 )
 
 type quicAsmEntry struct {
 	keys      *quicKeys
+	tuple     string
 	data      []byte   // 按 CRYPTO offset 就位的字节
 	ivs       [][2]int // 已覆盖区间 [start,end), 有序且不相交
+	largestPN int64    // 已解密最大包号 (-1 表示尚未解密任何包)
+	pktCount  int      // 贡献了有效载荷的 Initial 包数
 	firstSeen time.Time
 	lastSeen  time.Time
 	done      bool // ClientHello 已产出或已放弃, 后续同 key 包直接忽略
 }
 
-// addFrag 把一段 CRYPTO 数据放到位并合并覆盖区间。超过 maxBytes 返回 false。
+// addFrag 把一段 CRYPTO 数据放到位并合并覆盖区间。超过 maxBytes 或离散空洞过多返回 false。
 func (e *quicAsmEntry) addFrag(off uint64, data []byte, maxBytes int) bool {
 	if off > uint64(maxBytes) || off+uint64(len(data)) > uint64(maxBytes) {
 		return false
@@ -415,7 +570,7 @@ func (e *quicAsmEntry) addFrag(off uint64, data []byte, maxBytes int) bool {
 	}
 	copy(e.data[s:t], data)
 	// 合并区间: 把与 [s,t) 相交或相邻的都并进来。
-	out := e.ivs[:0:0]
+	out := make([][2]int, 0, len(e.ivs)+1)
 	inserted := false
 	for _, iv := range e.ivs {
 		switch {
@@ -434,6 +589,9 @@ func (e *quicAsmEntry) addFrag(off uint64, data []byte, maxBytes int) bool {
 	}
 	if !inserted {
 		out = append(out, [2]int{s, t})
+	}
+	if len(out) > quicAsmMaxIntervals {
+		return false
 	}
 	e.ivs = out
 	return true
@@ -472,10 +630,14 @@ type quicReassembler struct {
 	maxBytes   int
 	ttl        time.Duration
 	m          map[string]*quicAsmEntry
-	// finished: (IP, 端口) → ClientHello 完成时刻。服务器回 Initial 后客户端
-	// 改用服务器选的 DCID 发 ACK 用的 Initial, 但密钥仍由原始 DCID 派生,
-	// 用新 DCID 派生必然解密失败 —— 同一四元组已完成就直接忽略, 避免误计
-	// QUICDecryptFail 和白做 HKDF。
+	// byTuple: (IP, 端口) → 当前活跃重组 entry 的主键(tuple+odcid)。
+	// 后量子 X25519MLKEM768 ClientHello 常跨 3~4 个 Initial 包, 服务端收到前两包后
+	// 可能回发 Server Initial 并分配新 SCID, 客户端随后发送的第 3/4 个 Initial 分片
+	// 会把头部的 DCID 切换为服务端新 CID, 但按 RFC 9001 §5.2 仍使用客户端首个 ODCID
+	// 派生的密钥加密! 通过 byTuple 复用原始 ODCID 密钥, 可零失败解密并拼齐全部 2~4 包。
+	byTuple map[string]string
+	// finished: (IP, 端口) → ClientHello 完成时刻。同一四元组已完成就直接忽略后续
+	// ACK Initial, 避免误计 QUICDecryptFail 和重复做 HKDF。
 	finished  map[string]time.Time
 	lastSweep time.Time
 }
@@ -486,17 +648,26 @@ func newQUICReassembler(maxEntries, maxBytes int, ttl time.Duration) *quicReasse
 		maxBytes:   maxBytes,
 		ttl:        ttl,
 		m:          make(map[string]*quicAsmEntry),
+		byTuple:    make(map[string]string),
 		finished:   make(map[string]time.Time),
 	}
 }
 
 var quicAsm = newQUICReassembler(quicAsmMaxEntries, quicAsmMaxBytes, quicAsmTTL)
 
-// sweepLocked 清掉过期 entry / finished 记录。
+// sweepLocked 清掉过期 entry / byTuple / finished 记录。
 func (r *quicReassembler) sweepLocked(now time.Time) {
 	for k, e := range r.m {
 		if now.Sub(e.firstSeen) > r.ttl || now.Before(e.firstSeen) {
+			if e.tuple != "" && r.byTuple[e.tuple] == k {
+				delete(r.byTuple, e.tuple)
+			}
 			delete(r.m, k)
+		}
+	}
+	for tup, k := range r.byTuple {
+		if _, ok := r.m[k]; !ok {
+			delete(r.byTuple, tup)
 		}
 	}
 	for k, t := range r.finished {
@@ -518,6 +689,9 @@ func (r *quicReassembler) evictLRULocked() {
 		}
 	}
 	if !first {
+		if oldE := r.m[oldK]; oldE != nil && oldE.tuple != "" && r.byTuple[oldE.tuple] == oldK {
+			delete(r.byTuple, oldE.tuple)
+		}
 		delete(r.m, oldK)
 	}
 }
@@ -555,17 +729,35 @@ func (r *quicReassembler) handleInitial(ip net.IP, port uint16, h *quicLongHeade
 	}
 	e := r.m[key]
 	if e != nil && (now.Sub(e.firstSeen) > r.ttl || now.Before(e.firstSeen)) {
+		if r.byTuple[tuple] == key {
+			delete(r.byTuple, tuple)
+		}
 		delete(r.m, key)
 		e = nil
 	}
+
+	// 若精确 tuple+dcid 未命中, 检查同一四元组是否有未完成的原始 ODCID 条目(DCID 切换续传)。
+	var tupleFallbackKey string
+	var tupleFallbackKeys *quicKeys
+	largestPN := int64(-1)
 	if e == nil {
 		if t, ok := r.finished[tuple]; ok && now.Sub(t) <= r.ttl && !now.Before(t) {
 			r.mu.Unlock()
 			return nil
 		}
-	} else if e.done {
-		r.mu.Unlock()
-		return nil
+		if origKey, ok := r.byTuple[tuple]; ok && origKey != key {
+			if origE := r.m[origKey]; origE != nil && !origE.done && now.Sub(origE.firstSeen) <= r.ttl && !now.Before(origE.firstSeen) {
+				tupleFallbackKey = origKey
+				tupleFallbackKeys = origE.keys
+				largestPN = origE.largestPN
+			}
+		}
+	} else {
+		if e.done {
+			r.mu.Unlock()
+			return nil
+		}
+		largestPN = e.largestPN
 	}
 	var k *quicKeys
 	if e != nil {
@@ -573,25 +765,46 @@ func (r *quicReassembler) handleInitial(ip net.IP, port uint16, h *quicLongHeade
 	}
 	r.mu.Unlock()
 
-	// v5.36.0: HKDF 密钥派生与 AES-GCM 解密移出全局互斥锁, 避免伪造/多网卡并发包阻塞抓包回调
+	// HKDF 密钥派生与 AES-GCM 解密全部在全局互斥锁外执行。
+	targetKey := key
 	derivedNew := false
-	if k == nil {
-		var ok bool
-		k, ok = deriveQUICClientKeys(p, h.dcid)
+	var plain []byte
+	var pn uint64
+	var ok bool
+
+	if k != nil {
+		plain, pn, ok = quicOpenInitialWithLargest(pkt, h, k, largestPN)
 		if !ok {
+			quicStats.decryptFail.Add(1)
 			return nil
 		}
-		derivedNew = true
-	}
-	plain, _, ok := quicOpenInitial(pkt, h, k)
-	if !ok {
-		quicStats.decryptFail.Add(1)
-		return nil
+	} else {
+		// 若无 Retry token 且存在同四元组未完成的 ODCID 条目, 优先尝试原始 ODCID 密钥(RFC 9001 §5.2)。
+		if tupleFallbackKeys != nil && len(h.token) == 0 {
+			if plain, pn, ok = quicOpenInitialWithLargest(pkt, h, tupleFallbackKeys, largestPN); ok {
+				targetKey = tupleFallbackKey
+				k = tupleFallbackKeys
+			}
+		}
+		// 若非 ODCID 续传(例如含 Retry token 更换了密钥, 或全新连接), 按当前 h.dcid 派生新密钥。
+		if !ok {
+			k, ok = deriveQUICClientKeys(p, h.dcid)
+			if !ok {
+				return nil
+			}
+			plain, pn, ok = quicOpenInitialWithLargest(pkt, h, k, -1)
+			if !ok {
+				quicStats.decryptFail.Add(1)
+				return nil
+			}
+			targetKey = key
+			derivedNew = true
+		}
 	}
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	e = r.m[key]
+	e = r.m[targetKey]
 	if e != nil && e.done {
 		return nil
 	}
@@ -599,36 +812,62 @@ func (r *quicReassembler) handleInitial(ip net.IP, port uint16, h *quicLongHeade
 		if !derivedNew {
 			return nil
 		}
+		// Retry 换新 DCID 重传时淘汰同四元组旧半包条目, 避免白占容量。
+		if tupleFallbackKey != "" && tupleFallbackKey != targetKey {
+			delete(r.m, tupleFallbackKey)
+		}
 		if len(r.m) >= r.maxEntries {
 			r.sweepLocked(now)
 			for len(r.m) >= r.maxEntries {
 				r.evictLRULocked()
 			}
 		}
-		e = &quicAsmEntry{keys: k, firstSeen: now}
-		r.m[key] = e
+		e = &quicAsmEntry{keys: k, tuple: tuple, largestPN: -1, firstSeen: now}
+		r.m[targetKey] = e
+		r.byTuple[tuple] = targetKey
 	}
 	e.lastSeen = now
+	if int64(pn) > e.largestPN {
+		e.largestPN = int64(pn)
+	}
 	quicStats.decryptOK.Add(1)
 
 	frags, _ := parseQUICFrames(plain)
+	if len(frags) > 0 {
+		e.pktCount++
+	}
 	for _, f := range frags {
 		if !e.addFrag(f.off, f.data, r.maxBytes) {
 			e.done, e.data, e.ivs = true, nil, nil
+			if r.byTuple[tuple] == targetKey {
+				delete(r.byTuple, tuple)
+			}
 			return nil
 		}
 	}
 	hello, bad := e.clientHello(r.maxBytes)
 	if bad {
 		e.done, e.data, e.ivs = true, nil, nil
+		if r.byTuple[tuple] == targetKey {
+			delete(r.byTuple, tuple)
+		}
 		return nil
 	}
 	if hello == nil {
 		return nil
 	}
+	if e.pktCount > 1 {
+		quicStats.reassembled.Add(1)
+	}
+	if QUICHasPQKeyExchange(hello) {
+		quicStats.pqInitial.Add(1)
+	}
 	out := append([]byte(nil), hello...)
 	// 完成后由 finished(四元组级)挡住后续 Initial, entry 本身不再占表位。
-	delete(r.m, key)
+	delete(r.m, targetKey)
+	if r.byTuple[tuple] == targetKey {
+		delete(r.byTuple, tuple)
+	}
 	r.markFinishedLocked(tuple, now)
 	return out
 }
@@ -647,8 +886,8 @@ func parseQUIC(ev Event, udp []byte) (Event, ParseResult) {
 	}
 
 	b := udp
-	// 一个 UDP 数据报可能 coalesce 多个 QUIC 包(Initial + 0-RTT 等)。
-	for i := 0; i < 4 && len(b) >= 7 && b[0]&0x80 != 0; i++ {
+	// 一个 UDP 数据报(尤其 GRO/GSO 聚合帧)可能 coalesce 多个 QUIC 包(Initial + 0-RTT 等)。
+	for i := 0; i < 8 && len(b) >= 7 && b[0]&0x80 != 0; i++ {
 		p := quicParamsFor(binary.BigEndian.Uint32(b[1:5]))
 		if p == nil {
 			break
@@ -681,7 +920,7 @@ func parseQUIC(ev Event, udp []byte) (Event, ParseResult) {
 		ev.Kind = EventTLSClientHello
 		info.JA4 = quicJA4(info.JA4)
 		info.IsQUIC = true
-		// v5.27 T2: 只读 ClientHello 里的 quic_transport_parameters 扩展。
+		// 只读 ClientHello 里的 quic_transport_parameters 扩展。
 		if in, ok := extractJA4Inputs(rec); ok {
 			info.QTP = output.QUICTPFingerprint(in.QUICTP)
 		}
@@ -707,7 +946,7 @@ func quicJA4(ja4 string) string {
 // parseGQUIC 处理 Google QUIC。Q046 的 Initial 以 NULL 加密(明文 + 12 字节
 // FNV 哈希), CHLO 消息在 crypto stream 里明文可见: 直接定位 "CHLO" 标签
 // 再按 tag 表取值, 无需精确解析 gQUIC 帧格式。Q047+ (Q050 等) 已改为 Initial
-// 加密, 只计数跳过。Q043 用旧的 public header(首字节无 0x80), BPF 层就不会放行。
+// 加密, 只计数跳过。
 func parseGQUIC(ev Event, udp []byte) (Event, ParseResult) {
 	ver := udp[1:5]
 	for _, c := range ver[1:] {

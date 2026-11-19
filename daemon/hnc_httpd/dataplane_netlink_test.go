@@ -993,3 +993,45 @@ func TestWave4FWDeleteSpecsAndCrossProcessLock(t *testing.T) {
 		t.Fatal("tc_action.lock directory must be removed after unlock()")
 	}
 }
+
+// ── 6. HNC v6.0.0 T2: Vector Express (1:10) & UpdateLeash (1:9990) 字节级编码单测 ──
+
+func TestV6ExpressAndUpdateLeashNetlinkEncoding(t *testing.T) {
+	tick := pschedDefaultTickUsec
+	rootBps := DefaultHTBRootRateBps // 1000 Mbps
+	bgCeilBps := uint64(85_000_000 / 8)
+
+	expMsgs := buildVectorExpressUpsertBatch(4, false, rootBps, bgCeilBps, v6ExpressDefaultMark, DefaultAppQoSMarkMask, tick)
+	if len(expMsgs) != 5 {
+		t.Fatalf("expected 5 Vector Express upsert msgs (class 1:10, leaf fq_codel, fw v4, fw v6, bg 1:9999), got %d", len(expMsgs))
+	}
+
+	// 验证首条消息为 1:10 (0x00010010), parent 1:1 (0x00010001), prio 0
+	if gotH := binary.LittleEndian.Uint32(expMsgs[0][24:28]); gotH != 0x00010010 {
+		t.Fatalf("1:10 handle = 0x%08x, want 0x00010010", gotH)
+	}
+	if gotP := binary.LittleEndian.Uint32(expMsgs[0][28:32]); gotP != rtnlHtbRootCls {
+		t.Fatalf("1:10 parent = 0x%08x, want 0x%08x", gotP, rtnlHtbRootCls)
+	}
+
+	// 验证 UpdateLeash 1:9990 (0x00019990), 默认 1500 Kbps (187,500 B/s), prio 7
+	leashMsgs := buildUpdateLeashUpsertBatch(4, false, 0, v6LeashDefaultMark, DefaultAppQoSMarkMask, tick)
+	if len(leashMsgs) != 4 {
+		t.Fatalf("expected 4 UpdateLeash upsert msgs, got %d", len(leashMsgs))
+	}
+	var dump []byte
+	dump = append(dump, leashMsgs[0]...)
+	done := make([]byte, rtnlMsgHdrLen)
+	binary.LittleEndian.PutUint32(done[0:4], rtnlMsgHdrLen)
+	binary.LittleEndian.PutUint16(done[4:6], rtnlMsgDone)
+	dump = append(dump, done...)
+
+	parsed, err := parseTCClassDumpMsgs(dump, 4)
+	if err != nil {
+		t.Fatalf("parseTCClassDumpMsgs(1:9990) failed: %v", err)
+	}
+	st, ok := parsed["1:9990"]
+	if !ok || st.RateKbit != 1500 || st.CeilKbit != 1500 || st.Prio != 7 {
+		t.Fatalf("unexpected 1:9990 decoded stat: %+v", st)
+	}
+}

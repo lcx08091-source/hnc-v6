@@ -165,8 +165,11 @@ func main() {
 	go srv.PowerSamplerLoop(stopCh)     // v5.22: 自测 CPU/唤醒 → run/power_stats.json(5 分钟)
 	go srv.DNSTakeoverLoop(stopCh)      // DPI v2: 可选 DNS 接管(默认关; 开启时 10s 健康检查, 异常自动撤 DNAT)
 	go srv.fgTruthLoop(stopCh)          // v5.24 T2: 本机前台真值采集(仅本机抓包开启且亮屏时, 10s 探测, 只记变化)
-	go srv.SelfResidentLoop(stopCh)     // v5.37.0: 亮屏智能常驻 DPI 自训 + 熄屏静默增量蒸馏控制器
-	go srv.AutorateLoop(stopCh)         // v5.37.0: 5G 自适应总带宽控制器(无活跃客户端时事件驱动零唤醒真休眠)
+	go srv.SelfResidentLoop(stopCh)       // v5.37.0: 亮屏智能常驻 DPI 自训 + 熄屏静默增量蒸馏控制器
+	go srv.AutorateLoop(stopCh)           // v5.37.0: 5G 自适应总带宽控制器(无活跃客户端时事件驱动零唤醒真休眠)
+	go srv.CoreHubLoop(stopCh)            // v6.0.0: 四舱壁防连坐中枢与 1.5s 无锁 WorldSnapshot 刷新环
+	go srv.StartV6FeatureLoops(stopCh)    // v6.0.0: LeakGuard / Vector Express / UpdateLeash / FlowScalpel / ThermoCruise
+	go srv.StartBlackboxFlightLoop(stopCh) // v6.0.0: 200ms 纯内存卡顿黑匣子飞行记录仪
 
 	if srv.remote != nil {
 		if *flagNoTLS {

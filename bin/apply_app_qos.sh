@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# apply_app_qos.sh — HNC v5.40.0: 应用感知三档 fq_codel QoS 双栈引擎 (32位正交位域 + 单应用限速无损共存)
+# apply_app_qos.sh — HNC v6.0.0: 应用感知三档 fq_codel QoS 双栈引擎 (32位正交位域 + 单应用限速无损共存 + tc_action 协同锁)
 #
 # 正交契约 (T2 第 1 & 8 项):
 #   - [25:24] 0x03000000: Tier 1 实时档 0x01000000/0x03000000 (prio 0, 50% rate)
@@ -8,6 +8,7 @@
 #   - parent 1:<cid> 二级 fw 过滤器挂于 prio 2, 让同设备的单应用限速 app_limits (prio 1, 0xfc000000) 优先匹配;
 #   - iptables 打标前判 -m mark --mark 0x0/0xfc000000, 跳过已被单应用限速打标的包;
 #   - 拆除/更新时若该设备仍有 app_limits 活跃 (run/app_limits.devs), 绝不盲删 prio 1, 并在拆除 app_qos 后自动补回 1:9eXX 默认兜底子类!
+#   - 五锁统一协议: 修改内核 tc 队列树期间协调获取 run/tc_action.lock (兼容 HNC_TC_LOCK_HELD 父子重入与超时防死锁)。
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
@@ -108,7 +109,7 @@ aq_lock() {
         esac
         _n=$((_n + 1))
         [ "$_n" -ge 50 ] && return 1
-        sleep 0.1 2>/dev/null || sleep 1
+        usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
     done
     echo "$$" > "$AQ_LOCK/pid" 2>/dev/null
     date +%s > "$AQ_LOCK/ts" 2>/dev/null
@@ -120,6 +121,102 @@ aq_unlock() {
         rm -rf "$AQ_LOCK" 2>/dev/null
         unset HNC_APP_QOS_LOCK_HELD
     fi
+}
+
+# ── 五锁统一协议: 变更内核 tc 队列树前协调获取 run/tc_action.lock ──
+TC_ACTION_LOCK="$RUN/tc_action.lock"
+GATE_LOCK_DIR="$RUN/lock/gate"
+_AQ_TC_LOCK_OWNED=0
+_AQ_TC_LOCK_REENTRANT=0
+
+_aq_gate_held_by_self() {
+    [ -n "${HNC_GATE_HELD:-}" ] || return 1
+    [ -d "$GATE_LOCK_DIR" ] || return 1
+    [ "$(cat "$GATE_LOCK_DIR/pid" 2>/dev/null)" = "$HNC_GATE_HELD" ]
+}
+
+aq_tc_lock() {
+    [ "$_AQ_TC_LOCK_OWNED" = 1 ] && return 0
+    [ "$_AQ_TC_LOCK_REENTRANT" = 1 ] && return 0
+    if [ -n "${HNC_TC_LOCK_HELD:-}" ] && [ -d "$TC_ACTION_LOCK" ]; then
+        local _cur_pid
+        _cur_pid=$(awk '{print $1}' "$TC_ACTION_LOCK/owner" 2>/dev/null)
+        if [ "$_cur_pid" = "$HNC_TC_LOCK_HELD" ]; then
+            _AQ_TC_LOCK_REENTRANT=1
+            return 0
+        fi
+    fi
+    rm -rf "$TC_ACTION_LOCK".stale.* 2>/dev/null || true
+    local _round=0 _now _owner _opid _ots _age _reclaim _grave _gp
+    while [ "$_round" -lt 40 ]; do
+        if [ -d "$GATE_LOCK_DIR" ] && ! _aq_gate_held_by_self; then
+            if [ "$_round" -ge 20 ]; then
+                _gp=$(cat "$GATE_LOCK_DIR/pid" 2>/dev/null)
+                if [ -n "$_gp" ] && ! kill -0 "$_gp" 2>/dev/null; then
+                    rm -f "$GATE_LOCK_DIR/depth" "$GATE_LOCK_DIR/pid" 2>/dev/null
+                    rmdir "$GATE_LOCK_DIR" 2>/dev/null || true
+                fi
+            fi
+            _round=$((_round + 1))
+            usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || { [ "$_round" -ge 4 ] && break; sleep 1; }
+            continue
+        fi
+        _now=$(date +%s 2>/dev/null || echo 0)
+        if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
+            echo "$$ app_qos $_now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
+            if [ -d "$GATE_LOCK_DIR" ] && ! _aq_gate_held_by_self; then
+                rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
+                _round=$((_round + 1))
+                usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || { [ "$_round" -ge 4 ] && break; sleep 1; }
+                continue
+            fi
+            export HNC_TC_LOCK_HELD="$$"
+            _AQ_TC_LOCK_OWNED=1
+            return 0
+        fi
+        _owner=$(cat "$TC_ACTION_LOCK/owner" 2>/dev/null)
+        _opid=$(printf '%s' "$_owner" | awk '{print $1}')
+        _ots=$(printf '%s' "$_owner" | awk '{print $3}')
+        case "$_ots" in ''|*[!0-9]*) _ots=0 ;; esac
+        if [ "$_ots" -le 0 ]; then
+            _ots=$(stat -c %Y "$TC_ACTION_LOCK" 2>/dev/null || echo 0)
+        fi
+        _age=$((_now - _ots))
+        _reclaim=0
+        if [ -n "$_opid" ] && kill -0 "$_opid" 2>/dev/null; then
+            [ "$_age" -ge 90 ] 2>/dev/null && _reclaim=1
+        else
+            [ "$_age" -ge 25 ] 2>/dev/null && _reclaim=1
+        fi
+        if [ "$_reclaim" = 1 ]; then
+            _grave="${TC_ACTION_LOCK}.stale.$$.$_now"
+            if mv "$TC_ACTION_LOCK" "$_grave" 2>/dev/null; then
+                rm -rf "$_grave" 2>/dev/null || true
+                continue
+            fi
+        fi
+        _round=$((_round + 1))
+        usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || { [ "$_round" -ge 4 ] && break; sleep 1; }
+    done
+    return 1
+}
+
+aq_tc_unlock() {
+    if [ "$_AQ_TC_LOCK_REENTRANT" = 1 ]; then
+        _AQ_TC_LOCK_REENTRANT=0
+        return 0
+    fi
+    [ "$_AQ_TC_LOCK_OWNED" = 1 ] || return 0
+    _AQ_TC_LOCK_OWNED=0
+    if [ -d "$TC_ACTION_LOCK" ]; then
+        local _opid
+        _opid=$(awk '{print $1}' "$TC_ACTION_LOCK/owner" 2>/dev/null)
+        if [ -z "$_opid" ] || [ "$_opid" = "$$" ]; then
+            rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
+        fi
+    fi
+    unset HNC_TC_LOCK_HELD
+    return 0
 }
 
 teardown_dev() {
@@ -472,23 +569,27 @@ ipt_build() {
 if [ "$1" = "teardown" ]; then
     [ -n "$2" ] && [ -n "$3" ] || exit 1
     aq_lock || exit 1
-    trap 'aq_unlock' EXIT INT TERM
+    trap 'aq_tc_unlock; aq_unlock' EXIT INT TERM
+    aq_tc_lock || { log "WARN: tc_action.lock busy on teardown $2 $3"; exit 1; }
     teardown_dev "$2" "$3"
     cid=$(class_for_mid "$3")
+    _need_ipt_rm=0
     if [ -f "$STATE" ]; then
         grep -vx "$2 $cid" "$STATE" > "$STATE.tmp" 2>/dev/null || : > "$STATE.tmp"
         if [ -s "$STATE.tmp" ]; then
             mv -f "$STATE.tmp" "$STATE"
         else
             rm -f "$STATE.tmp" "$STATE" "$SIG"
-            ipt_remove
             tc filter del dev "$2" parent 1: pref "$ROOT_PREF" 2>/dev/null || true
             tc filter del dev "$2" parent 1: pref "$ROOT_PREF_V6" 2>/dev/null || true
+            _need_ipt_rm=1
         fi
     fi
     if [ "${HNC_SKIP_ENSURE_CLASS:-0}" != "1" ] && ! has_applim_on_dev "$2" "$cid"; then
         sh "$TCM" ensure_class "$2" "$3" >/dev/null 2>&1 || true
     fi
+    aq_tc_unlock
+    [ "$_need_ipt_rm" = 1 ] && ipt_remove
     exit 0
 fi
 
@@ -501,7 +602,7 @@ if [ "${NDEV:-0}" -eq 0 ] && [ ! -f "$STATE" ]; then
 fi
 
 aq_lock || exit 0
-trap 'aq_unlock' EXIT INT TERM
+trap 'aq_tc_unlock; aq_unlock' EXIT INT TERM
 probe_ipv6
 
 MIDS=$(awk '$1 == "dev" { print $2 }' "$PLAN" 2>/dev/null | tr '\n' ' ')
@@ -517,6 +618,10 @@ if [ "${NDEV:-0}" -gt 0 ] && [ -f "$STATE" ] && [ "$OLD_TCSIG" = "$TCSIG" ]; the
 fi
 
 if [ "$TC_OK" != 1 ]; then
+    if ! aq_tc_lock; then
+        log "WARN: tc_action.lock busy, deferring app_qos tc rebuild"
+        exit 0
+    fi
     OLD_STATE=$(cat "$STATE" 2>/dev/null)
     : > "$STATE.tmp"
     awk '$1 == "dev" { print $2 }' "$PLAN" 2>/dev/null | while read -r mid; do
@@ -558,6 +663,7 @@ if [ "$TC_OK" != 1 ]; then
         fi
     done < "$DEV_LIST"
     rm -f "$DEV_LIST" 2>/dev/null
+    aq_tc_unlock
 fi
 
 if [ -f "$STATE" ]; then
@@ -575,8 +681,11 @@ if [ -f "$STATE" ]; then
 else
     ipt_remove
     if [ -n "$IFACE" ]; then
-        tc filter del dev "$IFACE" parent 1: pref "$ROOT_PREF" 2>/dev/null || true
-        tc filter del dev "$IFACE" parent 1: pref "$ROOT_PREF_V6" 2>/dev/null || true
+        if aq_tc_lock; then
+            tc filter del dev "$IFACE" parent 1: pref "$ROOT_PREF" 2>/dev/null || true
+            tc filter del dev "$IFACE" parent 1: pref "$ROOT_PREF_V6" 2>/dev/null || true
+            aq_tc_unlock
+        fi
     fi
     rm -f "$SIG"
 fi

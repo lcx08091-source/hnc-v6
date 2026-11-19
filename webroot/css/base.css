@@ -419,12 +419,12 @@ td.lb{font-family:var(--mono);font-weight:700;color:var(--text-1)}
 
 /* ── 底部标签栏: 液态玻璃透镜 ── */
 .tabbar{position:fixed;z-index:60;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 14px);transform:translateX(-50%);
-  width:min(420px,calc(100% - 32px));height:66px;padding:5px;border-radius:33px;
+  width:min(456px,calc(100% - 24px));height:66px;padding:5px;border-radius:33px;
   background:color-mix(in srgb,var(--card-solid) 78%,transparent);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3);
   -webkit-backdrop-filter:blur(18px) saturate(170%);backdrop-filter:blur(18px) saturate(170%);touch-action:none;user-select:none;-webkit-user-select:none;
   animation:navPop .9s var(--q) both .15s}
 @keyframes navPop{from{opacity:0;transform:translateX(-50%) translateY(70px) scale(.9)}to{opacity:1;transform:translateX(-50%)}}
-.tabs,.lens-in{display:grid;grid-template-columns:repeat(4,1fr);height:100%}
+.tabs,.lens-in{display:grid;grid-template-columns:repeat(var(--tab-n,5),1fr);height:100%}
 .tabs{position:relative;z-index:0}
 .tab{display:grid;justify-items:center;align-content:center;gap:3px;font-size:10.5px;font-weight:700;color:var(--text-2);position:relative;transition:opacity .2s}
 .tab svg{width:23px;height:23px}
@@ -712,3 +712,276 @@ button[disabled],.btn[disabled]{opacity:.45;pointer-events:none}
 .eval-nums .en b{font-size:19px;color:var(--text-1);line-height:1.1;font-weight:700}
 .eval-nums .en b i{font-size:12px;font-style:normal;opacity:.6;margin-left:1px}
 .eval-nums .en span{font-size:11px;color:var(--text-3)}
+/* ==========================================================================
+ * HNC v6.0.0 · Vector — LeakGuard 明文隐私安检 + Vector 四大战术舱 + 五元组手术台基础样式
+ * 跨四大主题复用根变量 · 零滑动条 · 零表情符 · 120fps 合成层减负
+ * ========================================================================== */
+.v6-shell{display:grid;gap:12px;min-width:0}
+.v6-top-strip{display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:10px;padding:12px 15px;contain:layout style}
+.v6-top-title{display:flex;align-items:center;gap:10px;min-width:0}
+.v6-brand-tag{font:800 10.5px/1 var(--mono);letter-spacing:.08em;padding:4px 8px;border-radius:6px;background:var(--badge-acc-bg);color:var(--badge-acc);border:1px solid color-mix(in srgb,var(--blue) 22%,transparent);white-space:nowrap}
+.v6-top-title b{font-size:15.5px;font-weight:750;letter-spacing:-.02em;color:var(--text-1)}
+.v6-top-title small{display:block;font-size:11.5px;color:var(--text-3);margin-top:1px}
+.v6-top-right{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+
+/* 几何微发光圆点与等宽徽章 */
+.v6-dot{display:inline-block;width:7.5px;height:7.5px;border-radius:50%;background:var(--text-4);flex:none;vertical-align:middle}
+.v6-dot.ok{background:var(--green);box-shadow:0 0 8px color-mix(in srgb,var(--green) 65%,transparent)}
+.v6-dot.warn{background:var(--orange);box-shadow:0 0 8px color-mix(in srgb,var(--orange) 65%,transparent)}
+.v6-dot.bad{background:var(--red);box-shadow:0 0 9px color-mix(in srgb,var(--red) 70%,transparent)}
+.v6-dot.acc{background:var(--blue);box-shadow:0 0 8px color-mix(in srgb,var(--blue) 65%,transparent)}
+.v6-dot.pur{background:var(--purple);box-shadow:0 0 8px color-mix(in srgb,var(--purple) 65%,transparent)}
+
+.v6-mono-badge{
+  display:inline-flex;align-items:center;gap:5px;
+  font:700 10.5px/1.35 var(--mono);letter-spacing:.03em;
+  padding:2.5px 7px;border-radius:6px;white-space:nowrap;
+  background:var(--input);color:var(--text-2);border:1px solid var(--stroke);
+}
+.v6-mono-badge.b-ok{background:var(--badge-ok-bg);color:var(--badge-ok);border-color:color-mix(in srgb,var(--badge-ok) 25%,transparent)}
+.v6-mono-badge.b-warn{background:var(--badge-warn-bg);color:var(--badge-warn);border-color:color-mix(in srgb,var(--badge-warn) 25%,transparent)}
+.v6-mono-badge.b-bad{background:var(--badge-red-bg);color:var(--badge-red);border-color:color-mix(in srgb,var(--badge-red) 28%,transparent)}
+.v6-mono-badge.b-acc{background:var(--badge-acc-bg);color:var(--badge-acc);border-color:color-mix(in srgb,var(--badge-acc) 25%,transparent)}
+.v6-mono-badge.b-pur{background:var(--badge-pur-bg);color:var(--badge-pur);border-color:color-mix(in srgb,var(--badge-pur) 25%,transparent)}
+
+/* 四大战术舱响应式网格 */
+.v6-grid{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+@media (min-width:900px){
+  .v6-grid{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+}
+.v6-card{padding:15px 16px;display:grid;gap:12px;min-width:0;contain:layout style}
+.v6-card-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.v6-card-title-wrap{display:flex;align-items:center;gap:11px;min-width:0}
+.v6-orb{
+  width:38px;height:38px;border-radius:11px;display:grid;place-items:center;flex:none;
+  background:var(--badge-acc-bg);color:var(--blue);border:1px solid var(--stroke);
+}
+.v6-orb svg{width:19px;height:19px}
+.v6-orb.green{background:var(--badge-ok-bg);color:var(--badge-ok)}
+.v6-orb.orange{background:var(--badge-warn-bg);color:var(--badge-warn)}
+.v6-orb.red{background:var(--badge-red-bg);color:var(--badge-red)}
+.v6-orb.purple{background:var(--badge-pur-bg);color:var(--badge-pur)}
+.v6-card-t{font-size:15px;font-weight:750;letter-spacing:-.015em;color:var(--text-1);display:flex;align-items:center;gap:7px;flex-wrap:wrap}
+.v6-card-s{font-size:12px;color:var(--text-3);margin-top:2px;line-height:1.4}
+
+.v6-kpi-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.v6-kpi-row.k4{grid-template-columns:repeat(4,minmax(0,1fr))}
+@media (max-width:480px){.v6-kpi-row.k4{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.v6-kpi{
+  padding:9px 10px;border-radius:12px;background:var(--input);border:1px solid var(--stroke);
+  display:grid;gap:2px;min-width:0;
+}
+.v6-kpi span{font-size:10.5px;font-weight:600;color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v6-kpi b{font:750 17px/1.2 var(--mono);font-variant-numeric:tabular-nums;color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v6-kpi b small{font:600 11px var(--font);color:var(--text-3);margin-left:2px}
+.v6-kpi.is-bad b{color:var(--badge-red)}
+.v6-kpi.is-warn b{color:var(--badge-warn)}
+.v6-kpi.is-ok b{color:var(--badge-ok)}
+.v6-kpi.is-acc b{color:var(--badge-acc)}
+
+.v6-num-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px}
+@media (max-width:380px){.v6-num-grid{grid-template-columns:1fr}}
+.v6-num-field{display:grid;gap:5px;font-size:11.5px;font-weight:650;color:var(--text-2);min-width:0}
+.v6-num-box{
+  display:flex;align-items:center;height:40px;padding:0 11px;border-radius:11px;
+  background:var(--input);border:1px solid var(--stroke);gap:6px;min-width:0;
+  transition:border-color .18s ease,box-shadow .18s ease;
+}
+.v6-num-box:focus-within{border-color:var(--blue);box-shadow:0 0 0 3px color-mix(in srgb,var(--blue) 16%,transparent)}
+.v6-num-box input[type="number"]{
+  flex:1;min-width:0;border:0;outline:0;background:transparent;
+  font:750 15px var(--mono);font-variant-numeric:tabular-nums;color:var(--text-1);
+}
+.v6-num-box .u{font:600 11.5px var(--mono);color:var(--text-3);flex:none}
+
+/* Vector Express / UpdateLeash / ThermoCruise 内部列表与胶囊 */
+.v6-dev-pills{display:flex;flex-wrap:wrap;gap:6px}
+.v6-dev-pill{
+  display:inline-flex;align-items:center;gap:6px;height:31px;padding:0 10px;border-radius:9px;
+  font-size:12px;font-weight:650;background:var(--input);border:1px solid var(--stroke);color:var(--text-2);
+  transition:background .18s ease,border-color .18s ease,color .18s ease;
+}
+.v6-dev-pill.on{background:var(--badge-ok-bg);color:var(--badge-ok);border-color:color-mix(in srgb,var(--badge-ok) 36%,transparent)}
+.v6-flow-list{display:grid;gap:6px;max-height:240px;overflow-y:auto}
+.v6-flow-item{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  padding:8px 10px;border-radius:10px;background:var(--input);border:1px solid var(--stroke);
+  content-visibility:auto;contain-intrinsic-size:auto 44px;contain:layout style;
+}
+.v6-flow-main{min-width:0;flex:1;display:grid;gap:2px}
+.v6-flow-t{font-size:12.5px;font-weight:650;color:var(--text-1);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.v6-flow-s{font:500 11px var(--mono);color:var(--text-3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v6-mini-btn{
+  height:28px;padding:0 10px;border-radius:8px;font-size:11.5px;font-weight:700;
+  display:inline-flex;align-items:center;gap:5px;white-space:nowrap;
+  background:var(--card-2);border:1px solid var(--stroke-2);color:var(--text-1);
+}
+.v6-mini-btn svg{width:13px;height:13px}
+.v6-mini-btn.pri{background:var(--badge-acc-bg);color:var(--badge-acc);border-color:color-mix(in srgb,var(--blue) 28%,transparent)}
+.v6-mini-btn.ok{background:var(--badge-ok-bg);color:var(--badge-ok);border-color:color-mix(in srgb,var(--green) 28%,transparent)}
+.v6-mini-btn.warn{background:var(--badge-warn-bg);color:var(--badge-warn);border-color:color-mix(in srgb,var(--orange) 28%,transparent)}
+.v6-mini-btn.dan{background:var(--badge-red-bg);color:var(--badge-red);border-color:color-mix(in srgb,var(--red) 28%,transparent)}
+
+.v6-thermo-flags{display:flex;flex-wrap:wrap;gap:6px;align-items:center}
+
+/* 设备页态势快览条 & 手术刀入口按钮 */
+.v6-dev-banner{
+  display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;
+  padding:9px 13px;border-radius:16px;contain:layout style;cursor:pointer;
+}
+.v6-dev-banner-l{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-width:0;font-size:12px;font-weight:650;color:var(--text-2)}
+.v6-scalpel-entry{
+  display:inline-flex;align-items:center;gap:5px;height:28px;padding:0 10px;border-radius:8px;
+  font:700 11.5px var(--font);background:var(--badge-acc-bg);color:var(--badge-acc);
+  border:1px solid color-mix(in srgb,var(--blue) 24%,transparent);white-space:nowrap;
+}
+.v6-scalpel-entry svg{width:13.5px;height:13.5px}
+
+/* ── LeakGuard 明文隐私安检面板 ── */
+.lgd-panel{padding:16px;display:grid;gap:12px;min-width:0;contain:layout style}
+.lgd-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;flex-wrap:wrap}
+.lgd-ctrl-bar{
+  display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;
+  padding:11px 12px;border-radius:14px;background:var(--input);border:1px solid var(--stroke);
+}
+@media (max-width:640px){.lgd-ctrl-bar{grid-template-columns:1fr}}
+.lgd-switches{display:grid;gap:8px;align-content:center}
+.lgd-sw-row{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;font-weight:650;color:var(--text-1)}
+.lgd-sw-row small{display:block;font-size:11px;font-weight:500;color:var(--text-3)}
+.lgd-cfg-box{display:grid;gap:8px}
+.lgd-cfg-acts{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}
+
+.lgd-filter-bar{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.lgd-type-chips{display:flex;gap:5px;flex-wrap:wrap}
+.lgd-tchip{
+  height:27px;padding:0 9px;border-radius:7px;font:700 10.5px var(--mono);
+  background:var(--input);border:1px solid var(--stroke);color:var(--text-2);
+}
+.lgd-tchip.on{background:var(--blue);border-color:var(--blue);color:#fff}
+.lgd-search-mini{
+  display:flex;align-items:center;gap:6px;height:31px;padding:0 10px;border-radius:8px;
+  background:var(--input);border:1px solid var(--stroke);min-width:180px;flex:1;max-width:280px;
+}
+.lgd-search-mini svg{width:14px;height:14px;color:var(--text-3)}
+.lgd-search-mini input{flex:1;min-width:0;border:0;outline:0;background:transparent;font:500 12px var(--mono);color:var(--text-1)}
+
+/* 高密度单行实时告警流 */
+.lgd-stream{
+  display:grid;gap:4px;max-height:540px;overflow-y:auto;
+  border-radius:13px;padding:2px;
+}
+.lgd-item{
+  border-radius:10px;background:var(--input);border:1px solid var(--stroke);overflow:hidden;
+  content-visibility:auto;contain-intrinsic-size:auto 42px;contain:layout style;
+  transition:border-color .16s ease,background-color .16s ease;
+}
+.lgd-item.is-open{border-color:color-mix(in srgb,var(--blue) 45%,var(--stroke));background:var(--card-2)}
+.lgd-item.is-blocked{opacity:.82}
+.lgd-row{
+  display:grid;
+  grid-template-columns:68px minmax(92px,1.05fr) auto minmax(128px,1.45fr) minmax(110px,1.25fr) auto auto;
+  align-items:center;gap:8px;padding:7.5px 10px;min-width:0;cursor:pointer;font-size:12px;
+}
+.lgd-ts{font:600 11px var(--mono);color:var(--text-3);white-space:nowrap}
+.lgd-dev{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:650;color:var(--text-1)}
+.lgd-dev small{font:500 10.5px var(--mono);color:var(--text-3);margin-left:4px}
+.lgd-raw-val{
+  font:750 12px/1.35 var(--mono);padding:2px 7px;border-radius:5px;
+  background:var(--badge-red-bg);color:var(--badge-red);
+  border:1px solid color-mix(in srgb,var(--badge-red) 28%,transparent);
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;
+  user-select:all;-webkit-user-select:all;
+}
+.lgd-host{font:600 11.5px var(--mono);color:var(--text-2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.lgd-cnt{font:750 11px var(--mono);padding:1.5px 6px;border-radius:999px;background:var(--card);border:1px solid var(--stroke);color:var(--text-2);white-space:nowrap}
+.lgd-acts{display:inline-flex;align-items:center;gap:5px;flex:none}
+.lgd-act-btn{
+  height:25px;padding:0 7px;border-radius:6px;font:700 11px var(--font);
+  background:var(--card);border:1px solid var(--stroke-2);color:var(--text-2);white-space:nowrap;
+}
+.lgd-act-btn:hover{color:var(--text-1);border-color:var(--blue)}
+.lgd-act-btn.dan{background:var(--badge-red-bg);color:var(--badge-red);border-color:color-mix(in srgb,var(--red) 26%,transparent)}
+.lgd-act-btn.ok{background:var(--badge-ok-bg);color:var(--badge-ok);border-color:color-mix(in srgb,var(--green) 26%,transparent)}
+.lgd-act-btn.warn{background:var(--badge-warn-bg);color:var(--badge-warn);border-color:color-mix(in srgb,var(--orange) 26%,transparent)}
+
+@media (max-width:860px){
+  .lgd-row{
+    grid-template-columns:62px minmax(0,1fr) auto auto;
+    grid-template-areas:
+      "ts dev badge cnt"
+      "raw raw host host"
+      "acts acts acts acts";
+    row-gap:5px;padding:9px 10px;
+  }
+  .lgd-ts{grid-area:ts}
+  .lgd-dev{grid-area:dev}
+  .lgd-type-cell{grid-area:badge}
+  .lgd-cnt{grid-area:cnt;justify-self:end}
+  .lgd-raw-val{grid-area:raw}
+  .lgd-host{grid-area:host;text-align:right}
+  .lgd-acts{grid-area:acts;justify-content:flex-end;padding-top:2px;border-top:1px dashed var(--divider)}
+}
+
+/* 原始报文取证折叠抽屉 */
+.lgd-forensic{
+  border-top:1px solid var(--divider);padding:10px 12px;background:color-mix(in srgb,var(--bg) 52%,var(--card));
+  display:grid;gap:8px;
+}
+.lgd-forensic[hidden]{display:none!important}
+.lgd-forensic-meta{display:grid;grid-template-columns:auto minmax(0,1fr);gap:4px 10px;font:11.5px/1.45 var(--mono)}
+.lgd-forensic-meta dt{color:var(--text-3);font-weight:700}
+.lgd-forensic-meta dd{margin:0;color:var(--text-1);word-break:break-all;user-select:text;-webkit-user-select:text}
+.lgd-forensic-pre{
+  margin:0;padding:10px 12px;border-radius:9px;
+  background:rgba(10,16,28,.90);color:#e2e8f0;border:1px solid rgba(148,163,184,.22);
+  font:11.5px/1.55 var(--mono);white-space:pre-wrap;word-break:break-all;max-height:240px;overflow:auto;
+  user-select:text;-webkit-user-select:text;
+}
+.lgd-hl{
+  background:rgba(255,59,48,.32);color:#ffd7d5;
+  padding:1px 4px;border-radius:4px;border:1px solid rgba(255,99,88,.65);font-weight:800;
+}
+
+/* ── FlowScalpel 五元组手术台抽屉 ── */
+.v6-drawer-scrim{
+  position:fixed;inset:0;z-index:84;background:var(--scrim);
+  opacity:0;pointer-events:none;transition:opacity .22s ease;
+}
+.v6-drawer-scrim.show{opacity:1;pointer-events:auto}
+.v6-drawer{
+  position:fixed;z-index:85;left:50%;bottom:calc(env(safe-area-inset-bottom,0px) + 10px);
+  width:min(760px,calc(100% - 16px));max-height:88vh;overflow:hidden;
+  display:flex;flex-direction:column;padding:12px 16px 16px;border-radius:26px;
+  background:var(--card-solid);border:1px solid var(--stroke-2);box-shadow:var(--shadow-3);
+  transform:translate3d(-50%,calc(100% + 40px),0);opacity:0;pointer-events:none;
+  transition:transform .26s var(--q-soft),opacity .18s ease;
+}
+.v6-drawer.show{transform:translate3d(-50%,0,0);opacity:1;pointer-events:auto}
+#v6-scalpel-body{display:flex;flex-direction:column;gap:10px;min-height:0;flex:1;overflow:hidden}
+.v6-drawer-head{display:flex;align-items:flex-start;justify-content:space-between;gap:10px}
+.v6-drawer-tools{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.v6-tuple-list{display:grid;gap:6px;overflow-y:auto;min-height:120px;max-height:56vh;padding-right:2px}
+.v6-tuple-row{
+  display:grid;grid-template-columns:auto minmax(0,1fr) auto auto;align-items:center;gap:9px;
+  padding:8.5px 10px;border-radius:11px;background:var(--input);border:1px solid var(--stroke);
+  content-visibility:auto;contain-intrinsic-size:auto 50px;contain:layout style;
+}
+.v6-tuple-5{min-width:0;display:grid;gap:2px}
+.v6-tuple-5 .ep{font:650 11.5px var(--mono);color:var(--text-1);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.v6-tuple-5 .sub5{font-size:11px;color:var(--text-3);display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.v6-tuple-rate{font:650 11px var(--mono);text-align:right;color:var(--text-2);white-space:nowrap}
+.v6-tuple-acts{display:inline-flex;align-items:center;gap:6px;flex:none}
+@media (max-width:640px){
+  .v6-tuple-row{
+    grid-template-columns:auto minmax(0,1fr) auto;
+    grid-template-areas:
+      "proto ep rate"
+      "acts acts acts";
+    row-gap:6px;
+  }
+  .v6-tuple-proto{grid-area:proto}
+  .v6-tuple-5{grid-area:ep}
+  .v6-tuple-rate{grid-area:rate}
+  .v6-tuple-acts{grid-area:acts;justify-content:flex-end;padding-top:4px;border-top:1px dashed var(--divider)}
+}
+

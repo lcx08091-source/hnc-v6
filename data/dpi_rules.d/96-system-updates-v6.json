@@ -1,0 +1,61 @@
+{
+  "schema_version": "2.0",
+  "subset": "96-system-updates-v6",
+  "rules_version": "hnc-curated-v6.0.0-vector#96-system-updates-v6",
+  "rules": [
+    {
+      "id": "windows_update_v6",
+      "app": "Windows 系统更新 / 传递优化",
+      "category": "system-update",
+      "confidence": "high",
+      "suffixes": [
+        "dl.delivery.mp.microsoft.com",
+        "do.dsp.mp.microsoft.com",
+        "tlu.dl.delivery.mp.microsoft.com",
+        "au.download.windowsupdate.com",
+        "fg.ds.b1.download.windowsupdate.com",
+        "emdl.ws.microsoft.com",
+        "windowsupdate.com"
+      ]
+    },
+    {
+      "id": "apple_system_update_v6",
+      "app": "Apple 系统更新 (iOS / macOS)",
+      "category": "system-update",
+      "confidence": "high",
+      "suffixes": [
+        "swcdn.apple.com",
+        "updates.cdn-apple.com",
+        "updates-http.cdn-apple.com",
+        "mesu.apple.com",
+        "gdmf.apple.com",
+        "oscdn.apple.com",
+        "gg.apple.com",
+        "gs.apple.com"
+      ]
+    },
+    {
+      "id": "steam_bulk_update_v6",
+      "app": "Steam 游戏内容大包更新",
+      "category": "system-update",
+      "confidence": "high",
+      "suffixes": [
+        "steamcontent.com",
+        "lancache.steamcontent.com",
+        "cache.steamcontent.com"
+      ]
+    },
+    {
+      "id": "console_rom_ota_v6",
+      "app": "主机与移动系统大包 OTA",
+      "category": "system-update",
+      "confidence": "high",
+      "suffixes": [
+        "ota.googlezip.net",
+        "assets1.xboxlive.com",
+        "assets2.xboxlive.com",
+        "gs2.ww.prod.dl.playstation.net"
+      ]
+    }
+  ]
+}

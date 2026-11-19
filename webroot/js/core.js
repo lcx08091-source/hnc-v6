@@ -98,7 +98,11 @@ var I = {
   isolate:'<circle cx="7" cy="12" r="2.8" fill="currentColor" fill-opacity=".18"/><circle cx="17" cy="12" r="2.8" fill="currentColor" fill-opacity=".18"/><circle cx="7" cy="12" r="2.8"/><circle cx="17" cy="12" r="2.8"/><path d="M12 4.5v15"/>',
   sim:'<path d="M7 2.8h6.8L18.5 7.5v12.2a1.8 1.8 0 0 1-1.8 1.8H7a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 7 2.8Z" fill="currentColor" fill-opacity=".16"/><path d="M7 2.8h6.8L18.5 7.5v12.2a1.8 1.8 0 0 1-1.8 1.8H7a1.8 1.8 0 0 1-1.8-1.8V4.6A1.8 1.8 0 0 1 7 2.8Z"/><rect x="8.5" y="11" width="7" height="6.5" rx="1.2"/>',
   rule_hub:'<circle cx="12" cy="12" r="8.8" fill="currentColor" fill-opacity=".14"/><circle cx="12" cy="12" r="8.8"/><polygon points="12 6.5 15.8 14.8 8.2 14.8" fill="currentColor" fill-opacity=".22"/><polygon points="12 6.5 15.8 14.8 8.2 14.8"/>',
-  signal:'<rect x="3" y="15.5" width="3" height="5" rx="1" fill="currentColor"/><rect x="8" y="12" width="3" height="8.5" rx="1" fill="currentColor"/><rect x="13" y="8.2" width="3" height="12.3" rx="1" fill="currentColor"/><rect x="18" y="4.2" width="3" height="16.3" rx="1" fill="currentColor" fill-opacity=".35"/>'
+  signal:'<rect x="3" y="15.5" width="3" height="5" rx="1" fill="currentColor"/><rect x="8" y="12" width="3" height="8.5" rx="1" fill="currentColor"/><rect x="13" y="8.2" width="3" height="12.3" rx="1" fill="currentColor"/><rect x="18" y="4.2" width="3" height="16.3" rx="1" fill="currentColor" fill-opacity=".35"/>',
+  vector:'<polygon points="12 2.6 20.6 7.5 20.6 16.5 12 21.4 3.4 16.5 3.4 7.5" fill="currentColor" fill-opacity=".15"/><polygon points="12 2.6 20.6 7.5 20.6 16.5 12 21.4 3.4 16.5 3.4 7.5"/><circle cx="12" cy="12" r="2.8"/><path d="M12 2.6v6.6M20.6 16.5l-5.8-3.3M3.4 16.5l5.8-3.3"/>',
+  scalpel:'<path d="m19.6 4.4-9.8 9.8-4.6 1.2 1.2-4.6 9.8-9.8a2.4 2.4 0 0 1 3.4 3.4Z" fill="currentColor" fill-opacity=".16"/><path d="m19.6 4.4-9.8 9.8-4.6 1.2 1.2-4.6 9.8-9.8a2.4 2.4 0 0 1 3.4 3.4Z"/><path d="M3.5 20.5h11"/><path d="m14.5 6.5 3 3"/>',
+  leash:'<rect x="3" y="6.5" width="7.5" height="11" rx="3.6" fill="currentColor" fill-opacity=".15"/><rect x="13.5" y="6.5" width="7.5" height="11" rx="3.6" fill="currentColor" fill-opacity=".15"/><rect x="3" y="6.5" width="7.5" height="11" rx="3.6"/><rect x="13.5" y="6.5" width="7.5" height="11" rx="3.6"/><path d="M8.2 12h7.6"/>',
+  thermo:'<path d="M14 14.76V5.5a2 2 0 1 0-4 0v9.26a4 4 0 1 0 4 0Z" fill="currentColor" fill-opacity=".16"/><path d="M14 14.76V5.5a2 2 0 1 0-4 0v9.26a4 4 0 1 0 4 0Z"/><circle cx="12" cy="17.5" r="1.5" fill="currentColor" stroke="none"/><path d="M16.8 6h2.2M16.8 9.5h1.6"/>'
 };
 function ico(k, cls) { return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">' + (I[k] || '') + '</svg>'; }
 
@@ -111,6 +115,10 @@ var HNC_TAB_SVGS = {
   apps: {
     out: '<rect x="3.3" y="3.3" width="7.2" height="7.2" rx="2.1"/><rect x="13.5" y="3.3" width="7.2" height="7.2" rx="2.1"/><rect x="3.3" y="13.5" width="7.2" height="7.2" rx="2.1"/><rect x="13.5" y="13.5" width="7.2" height="7.2" rx="2.1"/>',
     fill: '<g fill="currentColor" stroke="none"><rect x="2.9" y="2.9" width="7.8" height="7.8" rx="2.4"/><rect x="13.3" y="2.9" width="7.8" height="7.8" rx="2.4"/><rect x="2.9" y="13.3" width="7.8" height="7.8" rx="2.4"/><rect x="13.3" y="13.3" width="7.8" height="7.8" rx="2.4" fill-opacity=".68"/></g>'
+  },
+  vector: {
+    out: '<polygon points="12 2.8 20.4 7.6 20.4 16.4 12 21.2 3.6 16.4 3.6 7.6"/><circle cx="12" cy="12" r="2.6"/><path d="M12 2.8v6.6M20.4 16.4l-5.8-3.2M3.6 16.4l5.8-3.2"/>',
+    fill: '<path fill="currentColor" stroke="none" fill-rule="evenodd" d="M11.15 2.3a1.7 1.7 0 0 1 1.7 0l7.4 4.28a1.7 1.7 0 0 1 .85 1.47v7.9a1.7 1.7 0 0 1-.85 1.47l-7.4 4.28a1.7 1.7 0 0 1-1.7 0l-7.4-4.28a1.7 1.7 0 0 1-.85-1.47v-7.9a1.7 1.7 0 0 1 .85-1.47l7.4-4.28ZM12 8.7a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6Z"/>'
   },
   stats: {
     out: '<rect x="4" y="12.4" width="3.8" height="7.6" rx="1.2"/><rect x="10.1" y="5.2" width="3.8" height="14.8" rx="1.2"/><rect x="16.2" y="9.4" width="3.8" height="10.6" rx="1.2"/>',
@@ -474,7 +482,8 @@ var S = {
   statsRange: 'today', aseg: 'stats', appsSub: 'active', devTab: {}, puEditSlot: 0, signal: null,
   theme: LS.get('hnc6.theme', 'auto'), motion: LS.get('hnc6.motion', '1') !== '0', glassTint: clamp(Math.round(num(LS.get('hnc6.glass_tint', '50'), 50)), 0, 100), style: (function(){ var sv = LS.get('hnc6.style', 'default'); if (sv === 'apple') sv = 'cyber'; return ['cyber', 'liquid'].indexOf(sv) >= 0 ? sv : 'default'; })(),
   dpi: null, probe: null, dpiHist: {}, dpiDays: 1, dpiFilter: 'all', dpiSpark: { packets: [], dns_events: [], tls_events: [], kernel_drops: [] },
-  self: null, selfCfg: {}, logFile: 'combined'
+  self: null, selfCfg: {}, logFile: 'combined',
+  vectorSyncState: 'unknown', vecDevSig: '', coreHealthy: true, coreUptimeSec: 0, bulkheads: null, v6: null
 };
 if (['recent', 'online_only', 'all', 'offline_rules'].indexOf(S.filter) < 0) S.filter = 'recent';
 /* 折叠状态记在本机(设置分组、「高级」「诊断」、设备卡里的「更多控制」和各小节); 设备卡本身展开与否、自检分组不记 */
@@ -767,3 +776,151 @@ function paintOnlineHours() {
 }
 
 /* === v5.38.0 Optical Duotone Vector SVG Icon System Active === */
+
+/* ═════════════════════ v6.0.0 · Vector 聚合快路径 (/api/vector_sync) ═════════════════════
+ * KSU 模式下单次调用同时喂饱顶栏健康度、四大隔离舱壁状态、实时速率与 v6 战术摘要;
+ * 对轻量级 VectorDevice 列表做就地速率/在线态热补丁，不冲掉 /api/devices 的完整画像与配额字段;
+ * 若旧后端返回 404/405/501 则无缝回退原有请求链，确保 100% 向后兼容。 */
+var V6_SYNC_PATH = '/api/vector_sync';
+function computeVecDevSig(arr) {
+  if (!Array.isArray(arr)) return '';
+  return arr.map(function (d) {
+    return [String(d.mac || '').toLowerCase(), d.ip || '', d.online ? 1 : 0, d.status || '', d.limit_enabled ? 1 : 0, num(d.down_mbps), num(d.up_mbps), d.hostname || ''].join(':');
+  }).join('|');
+}
+function patchVectorDevicesInPlace(arr) {
+  if (!S.devLoaded || !Array.isArray(arr) || !Array.isArray(S.devices)) return false;
+  var byMac = {};
+  S.devices.forEach(function (d) { byMac[d.mac] = d; });
+  for (var i = 0; i < arr.length; i++) {
+    var vd = arr[i] || {}, mk = String(vd.mac || '').toLowerCase();
+    if (!mk || !byMac[mk]) return false; // 发现新接入 MAC，需拉一次完整 /api/devices
+  }
+  var seen = {}, active = S.hotspot.active !== false;
+  arr.forEach(function (vd) {
+    var mk = String(vd.mac || '').toLowerCase(), d = byMac[mk];
+    if (!d) return;
+    seen[mk] = 1;
+    if (vd.ip !== undefined) d.ip = vd.ip || '';
+    d.online = active && vd.online === true;
+    d.blocked = vd.status === 'blocked';
+    d.rx = d.online ? num(vd.rx_bps) : 0;
+    d.tx = d.online ? num(vd.tx_bps) : 0;
+  });
+  S.devices.forEach(function (d) {
+    if (!seen[d.mac]) { d.online = false; d.rx = 0; d.tx = 0; }
+  });
+  return true;
+}
+function applyVectorSyncPayload(r) {
+  if (!r || typeof r !== 'object') return {};
+  var got = { health: false, live: false, devices: false, cfg: false, caps: false, alerts: false, offload: false, appLimits: false, templates: false };
+  if (typeof r.healthy === 'boolean') S.coreHealthy = r.healthy;
+  if (r.core_uptime_sec != null) S.coreUptimeSec = num(r.core_uptime_sec);
+  if (r.bulkheads && typeof r.bulkheads === 'object') S.bulkheads = r.bulkheads;
+
+  var hObj = (r.health && typeof r.health === 'object') ? r.health : null;
+  if (hObj || r.rollback || typeof r.healthy === 'boolean') {
+    S.lastHealth = hObj || { ok: r.healthy !== false, rollback: r.rollback, backend_version: r.version || r.backend_version };
+    got.health = true;
+  }
+  var lvObj = (r.live && typeof r.live === 'object') ? r.live : ((r.rx_bps !== undefined || r.hotspot_active !== undefined) ? r : null);
+  var rawDevArr = Array.isArray(r.devices) ? r.devices
+    : (r.devices && typeof r.devices === 'object' && Array.isArray(r.devices.devices) ? r.devices.devices
+    : (lvObj && Array.isArray(lvObj.devices) ? lvObj.devices : null));
+
+  if (lvObj) {
+    var verStr = (hObj && hObj.backend_version) || r.version || r.backend_version || '';
+    if (verStr && !lvObj.backend_version) lvObj.backend_version = verStr;
+    if (rawDevArr && !lvObj.devices_sig) {
+      var vSig = computeVecDevSig(rawDevArr);
+      if (S.vecDevSig && S.vecDevSig !== vSig) lvObj.devices_sig = 'vsync:' + vSig;
+      S.vecDevSig = vSig;
+    }
+    applyLive(lvObj);
+    got.live = true;
+  }
+  if (rawDevArr) {
+    var hasFullMeta = rawDevArr.some(function (x) {
+      return x && (x.ident !== undefined || x.effective !== undefined || x.dpi_apps !== undefined || x.sqm_enabled !== undefined || x.delay_ms !== undefined);
+    });
+    if (hasFullMeta) {
+      applyDevices({
+        devices: rawDevArr,
+        devices_sig: r.devices_sig || (lvObj && lvObj.devices_sig) || '',
+        hotspot_active: lvObj ? lvObj.hotspot_active : r.hotspot_active,
+        hotspot_iface: lvObj ? (lvObj.hotspot_iface || lvObj.iface) : r.hotspot_iface,
+        hotspot_ip: lvObj ? lvObj.hotspot_ip : r.hotspot_ip
+      });
+      got.devices = true;
+    } else if (patchVectorDevicesInPlace(rawDevArr)) {
+      got.devices = true;
+    }
+  }
+  var cfgObj = r.config || r.cfg;
+  if (cfgObj && typeof cfgObj === 'object') {
+    S.cfg = cfgObj;
+    got.cfg = true;
+  }
+  var capObj = r.capabilities || r.caps;
+  if (capObj && typeof capObj === 'object') {
+    S.caps = capObj.capabilities || (capObj.available === false ? {} : capObj) || {};
+    S.capsLoaded = true;
+    if (capObj.qdisc_caps && typeof capObj.qdisc_caps === 'object') S.qcaps = capObj.qdisc_caps;
+    else if (r.qdisc_caps && typeof r.qdisc_caps === 'object') S.qcaps = r.qdisc_caps;
+    got.caps = true;
+  }
+  if (r.alerts && typeof r.alerts === 'object') {
+    S.alerts = { unread: num(r.alerts.unread), list: Array.isArray(r.alerts.alerts) ? r.alerts.alerts : (Array.isArray(r.alerts.list) ? r.alerts.list : []) };
+    var bEl = $('#bell-n');
+    if (bEl) { bEl.hidden = !S.alerts.unread; bEl.textContent = S.alerts.unread > 99 ? '99+' : S.alerts.unread; }
+    got.alerts = true;
+  }
+  var offObj = r.offload_status || r.offload;
+  if (offObj && typeof offObj === 'object') {
+    S.offload = { active: offObj.active === true, detail: offObj.detail || '', guard: offObj.offload_guard || offObj.guard || null };
+    if (typeof renderOffloadBanner === 'function') renderOffloadBanner();
+    got.offload = true;
+  }
+  if (r.app_limits && typeof r.app_limits === 'object') {
+    S.appLimits = Array.isArray(r.app_limits.items) ? r.app_limits.items : (Array.isArray(r.app_limits) ? r.app_limits : []);
+    if (typeof r.app_limits.include_shared_ips === 'boolean') {
+      S.appLimitSharedKnown = true;
+      S.appLimitShared = r.app_limits.include_shared_ips === true;
+    }
+    got.appLimits = true;
+  }
+  if (r.templates && typeof r.templates === 'object') {
+    var tList = [], tSeen = {};
+    Object.keys(r.templates).forEach(function (n) {
+      var t = r.templates[n] || {}; tSeen[n] = 1;
+      tList.push({ name: n, down: num(t.down_mbps), up: num(t.up_mbps), delay: num(t.delay_ms), jitter: num(t.jitter_ms), loss: num(t.loss_pct) });
+    });
+    if (tList.length) S.templates = tList;
+    got.templates = true;
+  }
+  if (typeof v6IngestVectorSync === 'function') {
+    try { v6IngestVectorSync(r); } catch (_) {}
+  }
+  return got;
+}
+
+function loadVectorSync(params) {
+  if (S.vectorSyncState === 'unsupported') {
+    var uErr = new Error('vector_sync unsupported');
+    uErr.status = 404;
+    uErr.isVectorSyncUnsupported = true;
+    return Promise.reject(uErr);
+  }
+  return api.get(V6_SYNC_PATH, params || null, { timeout: 8000 }).then(function (r) {
+    S.vectorSyncState = 'supported';
+    var got = applyVectorSyncPayload(r);
+    return { raw: r, got: got, live: S.live || r.live || r };
+  }, function (e) {
+    if (e && (e.status === 404 || e.status === 405 || e.status === 501)) {
+      S.vectorSyncState = 'unsupported';
+      e.isVectorSyncUnsupported = true;
+    }
+    throw e;
+  });
+}

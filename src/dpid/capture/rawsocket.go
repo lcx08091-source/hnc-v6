@@ -10,10 +10,9 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unsafe"
-
-	"syscall"
 )
 
 // ErrRebound is returned by Run when the capture was switched to a new
@@ -61,6 +60,8 @@ const (
 	arphrdEther = 1     // wlanX, ovnetX, dummyX, ifbX, eth0
 	arphrdRawIP = 519   // rmnet_dataX (Qualcomm cellular)
 	arphrdNone  = 65534 // tun0 (Clash, WireGuard, Tailscale)
+
+	epollDrainBatchMax = 64 // 单次唤醒非阻塞连读上限, 兼顾突发吞吐与控制信号响应
 )
 
 type Handle struct {
@@ -82,24 +83,107 @@ type Handle struct {
 	ifindex int
 	snap    int
 	buf     []byte
-	mu      sync.Mutex // protects fd/ifname/ifindex/linkType/rebound during Rebind
-	rebound bool       // set true by Rebind, checked by Run after EBADF
+	mu      sync.Mutex // protects fd/ifname/ifindex/linkType/rebound/epoll state
+	rebound bool       // set true by Rebind, checked by Run
 	// v5.12: Rebind 换下来的旧 fd 不再立即 close, 挂在这里, 由 Close() 统一关。
-	// 旧实现在 Run 从 h.fd 取出旧 fd、尚未进入 recvfrom 的窗口里就 close 了它,
-	// fd 号可能立刻被本进程别处(状态文件 flush / 读 /proc 等)复用 → Run 对
-	// 一个无关 fd 调 recvfrom: 普通文件得 ENOTSOCK → 被当成致命错误, 整个
-	// capture 退出进入 blind 模式且不再重试; 若复用成了别的 socket 还会偷读数据。
 	retired []int
 
-	// v5.6.0-rc3: link-layer type (ARPHRD_*) read from
-	// /sys/class/net/$iface/type at Open. Determines whether parsePacket
-	// (Ethernet, 14-byte L2 header) or parseRawIPPacket (no L2 header)
-	// is dispatched in Run. Values seen on Android in the wild:
-	//   1     = ARPHRD_ETHER   (wlanX AP-side, wlan0 STA, ovnetX)
-	//   519   = ARPHRD_RAWIP   (Qualcomm rmnet cellular)
-	//   65534 = ARPHRD_NONE    (tun used by VPN: Clash, WG, Tailscale)
+	// v5.6.0-rc3: link-layer type (ARPHRD_*) read from /sys/class/net/$iface/type.
 	linkType int
 
+	// v6.0.0: 纯事件驱动 epoll + 控制唤醒管道 (消除 500ms SO_RCVTIMEO 空闲轮询唤醒)。
+	// Open 创建的实例 openedNative=true, EpollWait 使用 timeout=-1 无限阻塞(空闲期 0 次唤醒),
+	// 由数据包到达、Rebind、Close 或 ctx.Done 写 wakeW 即时唤醒;
+	// 单测直接字面量构造 &Handle{fd: a, ...} 时 openedNative=false, 自动懒初始化 epoll
+	// 并以 100ms 兜底检查直接字段交换(100% 兼容 rawsocket_test.go)。
+	epfd         int
+	epollRegFD   int
+	wakeR        int
+	wakeW        int
+	epollReady   bool
+	openedNative bool
+}
+
+// initEpollStateLocked 为 Handle 初始化 epfd 与非阻塞唤醒管道(调用方需持锁或在发布前调用)。
+func (h *Handle) initEpollStateLocked() bool {
+	if h.epollReady {
+		return h.epfd >= 0
+	}
+	epfd, err := syscall.EpollCreate1(syscall.EPOLL_CLOEXEC)
+	if err != nil {
+		h.epfd, h.epollRegFD, h.wakeR, h.wakeW = -1, -1, -1, -1
+		return false
+	}
+	var pipeFDs [2]int
+	if err := syscall.Pipe2(pipeFDs[:], syscall.O_CLOEXEC|syscall.O_NONBLOCK); err != nil {
+		_ = syscall.Close(epfd)
+		h.epfd, h.epollRegFD, h.wakeR, h.wakeW = -1, -1, -1, -1
+		return false
+	}
+	wakeEv := syscall.EpollEvent{
+		Events: syscall.EPOLLIN,
+		Fd:     int32(pipeFDs[0]),
+	}
+	if err := syscall.EpollCtl(epfd, syscall.EPOLL_CTL_ADD, pipeFDs[0], &wakeEv); err != nil {
+		_ = syscall.Close(pipeFDs[0])
+		_ = syscall.Close(pipeFDs[1])
+		_ = syscall.Close(epfd)
+		h.epfd, h.epollRegFD, h.wakeR, h.wakeW = -1, -1, -1, -1
+		return false
+	}
+	h.epfd = epfd
+	h.epollRegFD = -1
+	h.wakeR = pipeFDs[0]
+	h.wakeW = pipeFDs[1]
+	h.epollReady = true
+	if h.fd >= 0 {
+		h.syncEpollFDLocked(h.fd)
+	}
+	return true
+}
+
+func (h *Handle) syncEpollFDLocked(fd int) {
+	if !h.epollReady || h.epfd < 0 || fd < 0 || h.epollRegFD == fd {
+		return
+	}
+	if h.epollRegFD >= 0 {
+		_ = syscall.EpollCtl(h.epfd, syscall.EPOLL_CTL_DEL, h.epollRegFD, nil)
+		h.epollRegFD = -1
+	}
+	ev := syscall.EpollEvent{
+		Events: syscall.EPOLLIN | syscall.EPOLLERR | syscall.EPOLLHUP,
+		Fd:     int32(fd),
+	}
+	if err := syscall.EpollCtl(h.epfd, syscall.EPOLL_CTL_ADD, fd, &ev); err == nil {
+		h.epollRegFD = fd
+	}
+}
+
+func (h *Handle) pokeWakeLocked() {
+	if h.epollReady && h.wakeW >= 0 {
+		var one [1]byte
+		one[0] = 1
+		_, _ = syscall.Write(h.wakeW, one[:])
+	}
+}
+
+func (h *Handle) pokeWake() {
+	h.mu.Lock()
+	h.pokeWakeLocked()
+	h.mu.Unlock()
+}
+
+func drainWakeFD(wakeR int) {
+	if wakeR < 0 {
+		return
+	}
+	var scratch [32]byte
+	for {
+		n, err := syscall.Read(wakeR, scratch[:])
+		if n <= 0 || err != nil {
+			return
+		}
+	}
 }
 
 // Open creates a raw AF_PACKET socket, attaches cBPF, and binds to iface.
@@ -116,7 +200,7 @@ func Open(opts Options) (*Handle, error) {
 		return nil, fmt.Errorf("lookup iface %s: %w", opts.Iface, err)
 	}
 
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, int(htons(ETH_P_ALL)))
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, int(htons(ETH_P_ALL)))
 	if err != nil {
 		return nil, fmt.Errorf("socket AF_PACKET: %w", err)
 	}
@@ -130,19 +214,7 @@ func Open(opts Options) (*Handle, error) {
 		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, opts.RcvBufBytes)
 	}
 
-	// 500ms timeout allows cooperative shutdown through ctx.
-	tv := syscall.Timeval{Sec: 0, Usec: 500_000}
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
-		return nil, closeFD("set SO_RCVTIMEO", err)
-	}
-
 	// Attach filter before bind so unfiltered packets do not queue on the socket.
-	//
-	// v5.6.0-rc4: choose filter by link layer. RawIP (rmnet, 519) and
-	// tun (NONE, 65534) have no Ethernet header — using the Ether-aware
-	// BuildFilter on these would reject all packets in the kernel BPF
-	// program, leaving recvfrom() permanently silent (the exact bug
-	// observed in rc1-rc3).
 	lt, _ := readLinkType(opts.Iface)
 	var raw []syscall.SockFilter
 	switch lt {
@@ -172,23 +244,26 @@ func Open(opts Options) (*Handle, error) {
 		}
 	}
 
-	// v5.6.0-rc3: detect link type so Run can dispatch to the right
-	// parser. Read failure or unknown type → default to Ethernet (the
-	// historical behavior; main AP capture always opens on Ether-class
-	// wlanX so this preserves bug-for-bug compat).
-	// (v5.6.0-rc4: `lt` was already read above for filter selection.)
-
-	return &Handle{
-		fd:      fd,
-		ifname:  opts.Iface,
-		ifindex: ifc.Index,
-		snap:    opts.Snaplen,
-		// v5.14: BPF 对 QUIC 分支返回 max(snaplen, quicSnaplen), 缓冲按大者
-		// 分配, 否则 1200+ 字节的 Initial 被 recvfrom 截断、GCM 必然失败。
-		// v5.18: ClientHello / HTTP 分支返回 tlsSnaplen, 同理按最大值分配。
-		buf:      make([]byte, max(opts.Snaplen, quicSnaplen, tlsSnaplen)+64),
-		linkType: lt,
-	}, nil
+	h := &Handle{
+		fd:           fd,
+		ifname:       opts.Iface,
+		ifindex:      ifc.Index,
+		snap:         opts.Snaplen,
+		buf:          make([]byte, max(opts.Snaplen, quicSnaplen, tlsSnaplen)+64),
+		linkType:     lt,
+		epfd:         -1,
+		epollRegFD:   -1,
+		wakeR:        -1,
+		wakeW:        -1,
+		openedNative: true,
+	}
+	if !h.initEpollStateLocked() {
+		// 极端裁剪环境若不支持 epoll, 回退阻塞超时模式确保抓包可用。
+		_ = syscall.SetNonblock(fd, false)
+		tv := syscall.Timeval{Sec: 0, Usec: 500_000}
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+	}
+	return h, nil
 }
 
 // readLinkType returns the ARPHRD_* value from /sys/class/net/$iface/type.
@@ -224,9 +299,8 @@ func (h *Handle) CurrentIfindex() int {
 }
 
 // Rebind switches the capture to a different network interface. It creates
-// a new raw socket, attaches the appropriate BPF filter, and atomically
-// swaps the fd so the Run goroutine picks up the new socket on its next
-// recvfrom call (the old fd is closed, causing EBADF → clean exit from Run).
+// a new raw socket, attaches the appropriate BPF filter, atomically swaps the
+// fd, and immediately wakes EpollWait via wakeW so Run returns ErrRebound in 0ms.
 func (h *Handle) Rebind(newIface string) error {
 	ifc, err := net.InterfaceByName(newIface)
 	if err != nil {
@@ -235,16 +309,9 @@ func (h *Handle) Rebind(newIface string) error {
 
 	lt, _ := readLinkType(newIface)
 
-	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, int(htons(ETH_P_ALL)))
+	fd, err := syscall.Socket(syscall.AF_PACKET, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, int(htons(ETH_P_ALL)))
 	if err != nil {
 		return fmt.Errorf("rebind socket: %w", err)
-	}
-
-	// 500ms timeout matches Open().
-	tv := syscall.Timeval{Sec: 0, Usec: 500_000}
-	if err := syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv); err != nil {
-		_ = syscall.Close(fd)
-		return fmt.Errorf("rebind set SO_RCVTIMEO: %w", err)
 	}
 
 	var raw []syscall.SockFilter
@@ -269,11 +336,12 @@ func (h *Handle) Rebind(newIface string) error {
 		return fmt.Errorf("rebind bind %s: %w", newIface, err)
 	}
 
-	// Atomic swap: Run() reads fd under lock, so it will see the new fd.
-	// v5.12: 旧 fd 不在这里 close(见 retired 字段注释)。Run 的 recvfrom 最多
-	// 500ms(SO_RCVTIMEO)后返回, 发现 h.fd 已换即返回 ErrRebound; 旧 fd 由
-	// 调用方随后的 Close() 关闭。
 	h.mu.Lock()
+	if !h.epollReady || h.epfd < 0 {
+		_ = syscall.SetNonblock(fd, false)
+		tv := syscall.Timeval{Sec: 0, Usec: 500_000}
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+	}
 	oldFD := h.fd
 	h.fd = fd
 	h.ifname = newIface
@@ -283,6 +351,8 @@ func (h *Handle) Rebind(newIface string) error {
 	if oldFD >= 0 {
 		h.retired = append(h.retired, oldFD)
 	}
+	h.syncEpollFDLocked(fd)
+	h.pokeWakeLocked()
 	h.mu.Unlock()
 
 	fmt.Fprintf(os.Stderr, "[dpid/capture] rebind: switched to %s (ifindex=%d, linktype=%d)\n", newIface, ifc.Index, lt)
@@ -292,14 +362,31 @@ func (h *Handle) Rebind(newIface string) error {
 func (h *Handle) Close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	h.pokeWakeLocked()
 	if h.fd >= 0 {
 		_ = syscall.Close(h.fd)
 		h.fd = -1
 	}
-	for _, fd := range h.retired { // v5.12
+	for _, fd := range h.retired {
 		_ = syscall.Close(fd)
 	}
 	h.retired = nil
+	if h.epollReady {
+		if h.epfd >= 0 {
+			_ = syscall.Close(h.epfd)
+			h.epfd = -1
+		}
+		if h.wakeR >= 0 {
+			_ = syscall.Close(h.wakeR)
+			h.wakeR = -1
+		}
+		if h.wakeW >= 0 {
+			_ = syscall.Close(h.wakeW)
+			h.wakeW = -1
+		}
+		h.epollRegFD = -1
+		h.epollReady = false
+	}
 }
 
 func (h *Handle) Iface() string {
@@ -344,8 +431,6 @@ type tpacketStats struct {
 }
 
 func (h *Handle) refreshDrops() {
-	// v5.12: 持锁读 fd 并在锁内完成 getsockopt —— 旧代码无锁读 h.fd, 与
-	// Rebind/Close 构成数据竞争, 可能对已关闭(甚至被复用)的 fd 号取统计。
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.fd < 0 {
@@ -368,9 +453,82 @@ func (h *Handle) refreshDrops() {
 	h.stats.drops.Add(uint64(st.Drops))
 }
 
-// Run reads packets until ctx is cancelled. onEvent runs on the capture goroutine;
-// it must not block on I/O.
+func (h *Handle) dispatchCapturedPacket(pktLen int, linkType int, onEvent func(Event)) {
+	h.stats.packets.Add(1)
+	defer func() {
+		if r := recover(); r != nil {
+			c := h.stats.panics.Add(1)
+			if c == 1 || c%1000 == 0 {
+				fmt.Fprintf(os.Stderr, "[dpid/capture] recovered from packet handler panic #%d: %v\n", c, r)
+			}
+		}
+	}()
+	var ev Event
+	var res ParseResult
+	switch linkType {
+	case arphrdRawIP, arphrdNone:
+		ev, res = parseRawIPPacket(h.buf[:pktLen], time.Now())
+	default:
+		ev, res = parsePacket(h.buf[:pktLen], time.Now())
+	}
+	ethLink := linkType != arphrdRawIP && linkType != arphrdNone
+	if rec := DefaultRecorder.Load(); rec != nil {
+		rec.(*Recorder).Offer(ethLink, h.buf[:pktLen], ev)
+	}
+	switch res {
+	case ParseOK:
+		switch ev.Kind {
+		case EventDNS:
+			h.stats.dns.Add(1)
+		case EventTLSClientHello:
+			h.stats.tls.Add(1)
+		case EventFlow:
+			h.stats.flow.Add(1)
+		case EventDevHint:
+			h.stats.devHint.Add(1)
+		case EventHTTP:
+			h.stats.http.Add(1)
+		}
+		onEvent(ev)
+	case ParseIgnore:
+		h.stats.ignored.Add(1)
+	case ParseMalformed:
+		h.stats.parseErr.Add(1)
+	}
+}
+
+// Run reads packets until ctx is cancelled using pure event-driven Linux epoll.
+// onEvent runs on the capture goroutine; it must not block on I/O.
 func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
+	h.mu.Lock()
+	useEpoll := h.initEpollStateLocked()
+	nativeInfiniteWait := h.openedNative
+	h.mu.Unlock()
+
+	if useEpoll {
+		stopWatch := make(chan struct{})
+		defer close(stopWatch)
+		go func() {
+			select {
+			case <-ctx.Done():
+				h.pokeWake()
+			case <-stopWatch:
+			}
+		}()
+		return h.runEpollLoop(ctx, nativeInfiniteWait, onEvent)
+	}
+	return h.runRecvfromFallback(ctx, onEvent)
+}
+
+func (h *Handle) runEpollLoop(ctx context.Context, infiniteWait bool, onEvent func(Event)) error {
+	var events [4]syscall.EpollEvent
+	waitMs := -1
+	if !infiniteWait {
+		// 单测直接构造 &Handle{fd: a} 并在锁内直接改写 h.fd 而不调用 Rebind 时,
+		// 使用 100ms 周期校验确保 TestRun_ReturnsErrReboundAfterSwap 毫秒级返回。
+		waitMs = 100
+	}
+
 	for {
 		if ctx.Err() != nil {
 			return nil
@@ -378,16 +536,112 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 
 		h.mu.Lock()
 		fd := h.fd
-		linkType := h.linkType // v5.12: 与 fd 一起在锁内取, 旧代码无锁读(数据竞争)
+		epfd := h.epfd
+		wakeR := h.wakeR
+		linkType := h.linkType
+		if fd >= 0 && epfd >= 0 {
+			h.syncEpollFDLocked(fd)
+		}
+		h.mu.Unlock()
+
+		if fd < 0 || epfd < 0 {
+			return nil
+		}
+
+		nev, werr := syscall.EpollWait(epfd, events[:], waitMs)
+		h.mu.Lock()
+		swapped := h.fd != fd && h.rebound
+		closedNow := h.fd < 0
+		h.mu.Unlock()
+		if swapped {
+			return ErrRebound
+		}
+		if closedNow || ctx.Err() != nil {
+			return nil
+		}
+		if werr != nil {
+			if errors.Is(werr, syscall.EINTR) || errors.Is(werr, syscall.EAGAIN) {
+				continue
+			}
+			if errors.Is(werr, syscall.EBADF) {
+				h.mu.Lock()
+				wasRebound := h.rebound
+				h.mu.Unlock()
+				if wasRebound {
+					return ErrRebound
+				}
+				return nil
+			}
+			return fmt.Errorf("epoll_wait: %w", werr)
+		}
+		if nev <= 0 {
+			continue
+		}
+
+		pktReady := false
+		for i := 0; i < nev; i++ {
+			evFD := int(events[i].Fd)
+			if evFD == wakeR {
+				drainWakeFD(wakeR)
+			} else if evFD == fd {
+				pktReady = true
+			}
+		}
+		if !pktReady {
+			continue
+		}
+
+		for batch := 0; batch < epollDrainBatchMax; batch++ {
+			if ctx.Err() != nil {
+				return nil
+			}
+			n, _, err := syscall.Recvfrom(fd, h.buf, syscall.MSG_DONTWAIT)
+			h.mu.Lock()
+			swappedNow := h.fd != fd && h.rebound
+			h.mu.Unlock()
+			if swappedNow {
+				return ErrRebound
+			}
+			if err != nil {
+				switch err {
+				case syscall.EAGAIN, syscall.EWOULDBLOCK, syscall.EINTR:
+					batch = epollDrainBatchMax
+					continue
+				case syscall.EBADF:
+					h.mu.Lock()
+					wasRebound := h.rebound
+					h.mu.Unlock()
+					if wasRebound {
+						return ErrRebound
+					}
+					return nil
+				default:
+					return fmt.Errorf("recvfrom: %w", err)
+				}
+			}
+			if n <= 0 {
+				break
+			}
+			h.dispatchCapturedPacket(n, linkType, onEvent)
+		}
+	}
+}
+
+func (h *Handle) runRecvfromFallback(ctx context.Context, onEvent func(Event)) error {
+	for {
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		h.mu.Lock()
+		fd := h.fd
+		linkType := h.linkType
 		h.mu.Unlock()
 		if fd < 0 {
-			return nil // Close() was called
+			return nil
 		}
 
 		n, _, err := syscall.Recvfrom(fd, h.buf, 0)
-		// v5.12: recvfrom 返回后先看 fd 是否已被 Rebind 换掉, 是则按设计返回
-		// ErrRebound(旧实现依赖旧 fd 被 close 产生 EBADF, 但阻塞中的 recvfrom
-		// 不会因 close 被唤醒, 且 close 后的 fd 号复用会导致 ENOTSOCK 致命退出)。
 		h.mu.Lock()
 		swapped := h.fd != fd && h.rebound
 		h.mu.Unlock()
@@ -399,7 +653,6 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 			case syscall.EAGAIN, syscall.EINTR:
 				continue
 			case syscall.EBADF:
-				// fd was closed — check if it was a rebind or a clean shutdown
 				h.mu.Lock()
 				wasRebound := h.rebound
 				h.mu.Unlock()
@@ -414,61 +667,6 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 		if n <= 0 {
 			continue
 		}
-
-		h.stats.packets.Add(1)
-		// A single malformed or hostile packet must never take down the capture
-		// goroutine (and with it the whole dpid process). Wrap parse + onEvent in
-		// a recover: count the panic, log it (rate-limited so a panic-triggering
-		// flood can't spam logs), and keep reading the next packet.
-		func() {
-			defer func() {
-				if r := recover(); r != nil {
-					c := h.stats.panics.Add(1)
-					if c == 1 || c%1000 == 0 {
-						fmt.Fprintf(os.Stderr, "[dpid/capture] recovered from packet handler panic #%d: %v\n", c, r)
-					}
-				}
-			}()
-			// v5.6.0-rc3: dispatch parser by link layer. ARPHRD_RAWIP (519)
-			// on Qualcomm cellular and ARPHRD_NONE (65534) on tun VPN both
-			// deliver bare IP packets — using the Ethernet parser would read
-			// IP header bytes as bogus etherType and silently drop everything.
-			var ev Event
-			var res ParseResult
-			switch linkType {
-			case arphrdRawIP, arphrdNone:
-				ev, res = parseRawIPPacket(h.buf[:n], time.Now())
-			default:
-				// 0 (unknown — fallback), 1 (Ether), or anything else uses
-				// the original Ethernet path. wlan2 = AP mode, wlan0 = STA,
-				// ovnetX = bridged Ether-class all land here.
-				ev, res = parsePacket(h.buf[:n], time.Now())
-			}
-			// v5.29 T4: 录制(只录握手类事件包; 非阻塞, 没在录时是纯 nil 检查)
-			ethLink := linkType != arphrdRawIP && linkType != arphrdNone
-			if rec := DefaultRecorder.Load(); rec != nil {
-				rec.(*Recorder).Offer(ethLink, h.buf[:n], ev)
-			}
-			switch res {
-			case ParseOK:
-				switch ev.Kind {
-				case EventDNS:
-					h.stats.dns.Add(1)
-				case EventTLSClientHello:
-					h.stats.tls.Add(1)
-				case EventFlow:
-					h.stats.flow.Add(1)
-				case EventDevHint:
-					h.stats.devHint.Add(1)
-				case EventHTTP:
-					h.stats.http.Add(1)
-				}
-				onEvent(ev)
-			case ParseIgnore:
-				h.stats.ignored.Add(1)
-			case ParseMalformed:
-				h.stats.parseErr.Add(1)
-			}
-		}()
+		h.dispatchCapturedPacket(n, linkType, onEvent)
 	}
 }

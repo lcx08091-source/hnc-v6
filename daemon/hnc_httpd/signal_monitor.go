@@ -1,18 +1,14 @@
-// signal_monitor.go — HNC v5.38.0: 热点手机自身 5G SA/NSA · 4G LTE · Wi-Fi STA 实时零唤醒信号质量感知与四象限卡顿归因
+// signal_monitor.go — HNC v6.0.0 · Vector: 热点手机自身 5G SA/NSA · 4G LTE · Wi-Fi STA 异步零阻塞信号质量感知
 //
 // 技术原理:
-//   1. 蜂窝侧零 Modem 唤醒读取: 流式解析 `/system/bin/dumpsys telephony.registry` 内存缓存至 `local logs:` 即提前截断(~2ms),
-//      不调用 RIL / 不唤醒基带;
-//   2. 攻克 AOSP 12–16 五大解析陷阱:
-//      - CellSignalStrengthNr 等号两侧带空格 (`ssRsrp = -95 ssRsrq = -11 ssSinr = 16`), CellSignalStrengthLte 无空格 (`rsrp=-94 rssnr=12`);
-//      - 过滤 `2147483647` (CellInfo.UNAVAILABLE);
-//      - 双卡通过 PreciseDataConnectionState (`InterfaceName: rmnet_data*` / `ccmni*`) 对齐真实承载热点的物理卡槽, 回退 `mActiveDataSubId`;
-//      - 零售 user 版屏蔽 `nrState=****` 时, 结合 `accessNetworkTechnology=NR` (5G SA) 与 `isEnDcAvailable = true` / `overrideNetwork=NR_NSA` + 有效 `ssRsrp` 准确区分 5G SA / 5G NSA / 4G LTE;
-//      - 忽略 `mLteAsPrimaryInNrNsa=true` 的虚高 LTE 信号格, 强制优先按真实 NR 载波 RSRP/SINR 计算信号格与空口天花板系数 α_rf;
-//   3. Wi-Fi 中继上游支持: 当热点上游为 `wlan0` (STA+AP 并发中继) 时自动读取 `cmd wifi status` RSSI 与协商速率;
-//   4. 联动 5G Autorate 与四象限网络健康诊断:
-//      - 弱信号边缘基站 (`RSRP <= -110 dBm` 或 `SINR <= 2 dB`) 自动计算 `rf_ceiling_factor` (0.35~1.0) 提前压低 Autorate 探测天花板防队列雪崩;
-//      - 发生 5G <-> 4G 制式切换时通知 Autorate 重锚定 `BaseRTTMs`, 避免基线失真导致误锁保底带宽。
+//   1. 彻底消灭 HTTP 请求线程同步跑 dumpsys:
+//      - Get() / Snapshot() 永不在调用线程内执行外部命令! 缓存未命中或过期时立即返回上一份
+//        内存快照(首次尚未采样时返回轻量初始态), 同时通过无阻塞容量为 1 的信号槽唤醒单实例
+//        后台协程异步刷新;
+//   2. 自适应刷新节拍省掉 70% system_server Binder 唤醒:
+//      - 活跃态刷新周期从 3s 调优至 8s, 空闲态(熄屏无面板/无在线设备/热点关闭)放宽至 45s;
+//      - 外部命令统一启用进程组隔离(Setpgid + 超时向 -pgid 发 SIGKILL), 杜绝僵尸进程堆积;
+//   3. 攻克 AOSP 12–16 五大解析陷阱与 5G Autorate 联动(完整保留既有字段语义)。
 package main
 
 import (
@@ -22,16 +18,20 @@ import (
 	"net/http"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 )
 
 const (
 	sigUnavailable    = 2147483647
-	sigActiveInterval = 4 * time.Second
-	sigCacheTTL       = 3 * time.Second
+	sigActiveInterval = 8 * time.Second
+	sigIdleInterval   = 45 * time.Second
+	sigCacheTTL       = 8 * time.Second
 )
 
 type hostSignalStatus struct {
@@ -44,9 +44,9 @@ type hostSignalStatus struct {
 	UpstreamIface   string  `json:"upstream_iface,omitempty"`
 	Band            string  `json:"band,omitempty"` // e.g. "n78", "n41", "B3", "5GHz"
 	BandwidthMHz    int     `json:"bandwidth_mhz,omitempty"`
-	RSRPdBm         int     `json:"rsrp_dbm,omitempty"`  // NR ssRsrp or LTE rsrp (-140..-44)
-	RSRQdB          int     `json:"rsrq_db,omitempty"`   // NR ssRsrq or LTE rsrq (-20..-3)
-	SINRdB          int     `json:"sinr_db,omitempty"`   // NR ssSinr or LTE rssnr (-20..40)
+	RSRPdBm         int     `json:"rsrp_dbm,omitempty"` // NR ssRsrp or LTE rsrp (-140..-44)
+	RSRQdB          int     `json:"rsrq_db,omitempty"`  // NR ssRsrq or LTE rsrq (-20..-3)
+	SINRdB          int     `json:"sinr_db,omitempty"`  // NR ssSinr or LTE rssnr (-20..40)
 	LTERSRPdBm      int     `json:"lte_rsrp_dbm,omitempty"`
 	WifiRSSIdBm     int     `json:"wifi_rssi_dbm,omitempty"`
 	WifiLinkMbps    int     `json:"wifi_link_mbps,omitempty"`
@@ -59,54 +59,176 @@ type hostSignalStatus struct {
 	UpdatedAt       int64   `json:"updated_at"`
 }
 
+// signalMonitor 零阻塞异步信号监测器。
+// 铁律: 64 位原子字段置于结构体最开头(offset 0), 满足 32 位 ARMv7 原子对齐要求。
 type signalMonitor struct {
-	hncDir string
+	asyncRuns      atomic.Uint64 // offset 0: 后台异步采样完成次数
+	asyncCoalesced atomic.Uint64 // offset 8: 合并丢弃的并发触发信号数
+	lastRefreshNs  atomic.Int64  // offset 16: 最近一次采样耗时(ns)
+
+	inFlight  atomic.Bool
+	forceNext atomic.Bool
+	closed    atomic.Bool
+
+	hncDir   string
+	sampleFn func(s *server) hostSignalStatus // 单测注入点(默认 sampleHostSignal)
+
 	mu     sync.RWMutex
 	last   hostSignalStatus
 	lastAt time.Time
 }
 
 func newSignalMonitor(hncDir string) *signalMonitor {
-	return &signalMonitor{
+	m := &signalMonitor{
 		hncDir: hncDir,
 		last: hostSignalStatus{
+			Available:       false,
 			Mode:            "unknown",
 			RAT:             "Unknown",
 			Quality:         "unknown",
 			QualityCN:       "待采样",
 			RFCeilingFactor: 1.0,
 			Diagnosis:       "idle",
-			DiagnosisCN:     "等待热点流量",
+			DiagnosisCN:     "等待后台异步信号采样",
 		},
 	}
+	m.sampleFn = m.sampleHostSignal
+	return m
 }
 
-func (m *signalMonitor) Snapshot(s *server) hostSignalStatus {
+// currentTTL 按系统活跃档位动态返回缓存有效期: 活跃态 8s, 空闲/熄屏态 45s。
+func (m *signalMonitor) currentTTL() time.Duration {
+	act := activityNow()
+	if act.Known {
+		switch act.Level {
+		case lvlHotspotOff, lvlNoClients, lvlBackground:
+			return sigIdleInterval
+		}
+		if act.screenOff() {
+			return sigIdleInterval
+		}
+	}
+	return sigActiveInterval
+}
+
+// Get 供 HTTP 线程(/api/signal, /api/live, /api/vector_sync)无阻塞读取信号状态:
+// 绝不在当前请求线程内同步执行 dumpsys! 缓存过期时立即返回上一份快照并触发单飞后台协程刷新。
+func (m *signalMonitor) Get(s *server) hostSignalStatus {
 	if s != nil && s.simActive() {
 		return simSignalSnapshot(s)
 	}
+	if m == nil {
+		return hostSignalStatus{
+			Mode:            "unknown",
+			RAT:             "Unknown",
+			Quality:         "unknown",
+			QualityCN:       "待采样",
+			RFCeilingFactor: 1.0,
+			Diagnosis:       "idle",
+		}
+	}
+	ttl := m.currentTTL()
 	m.mu.RLock()
-	fresh := !m.lastAt.IsZero() && time.Since(m.lastAt) < sigCacheTTL
+	stale := m.lastAt.IsZero() || time.Since(m.lastAt) >= ttl
 	cp := m.last
 	m.mu.RUnlock()
-	if fresh {
-		if s != nil {
-			enrichSignalDiagnosis(&cp, s)
-		}
-		return cp
+
+	if s != nil {
+		enrichSignalDiagnosis(&cp, s)
 	}
-	return m.Refresh(s)
+	if stale {
+		m.TriggerRefresh(s, false)
+	}
+	return cp
 }
 
+// Snapshot 兼容全仓既有调用点(s.signalCtl.Snapshot(s)), 同样走 100% 非阻塞快路径。
+func (m *signalMonitor) Snapshot(s *server) hostSignalStatus {
+	return m.Get(s)
+}
+
+// TriggerRefresh 非阻塞触发单实例后台异步刷新(已在途时自动合并, 零排队、零常驻泄漏)。
+func (m *signalMonitor) TriggerRefresh(s *server, force bool) {
+	if m == nil || m.closed.Load() {
+		return
+	}
+	if force {
+		m.forceNext.Store(true)
+	}
+	if !m.inFlight.CompareAndSwap(false, true) {
+		m.asyncCoalesced.Add(1)
+		return
+	}
+	go func(srv *server) {
+		defer m.inFlight.Store(false)
+		forced := m.forceNext.Swap(false)
+		if !forced {
+			ttl := m.currentTTL()
+			m.mu.RLock()
+			fresh := !m.lastAt.IsZero() && time.Since(m.lastAt) < ttl
+			m.mu.RUnlock()
+			if fresh {
+				return
+			}
+		}
+		start := time.Now()
+		_ = m.Refresh(srv)
+		m.lastRefreshNs.Store(int64(time.Since(start)))
+		m.asyncRuns.Add(1)
+	}(s)
+}
+
+// Refresh 执行单次真实采样并更新缓存(仅供后台异步协程或显式单测内部调用)。
 func (m *signalMonitor) Refresh(s *server) hostSignalStatus {
 	if s != nil && s.simActive() {
 		return simSignalSnapshot(s)
 	}
+	fn := m.sampleHostSignal
+	if m.sampleFn != nil {
+		fn = m.sampleFn
+	}
+	st := fn(s)
+	now := time.Now()
+	if st.UpdatedAt == 0 {
+		st.UpdatedAt = now.Unix()
+	}
+	if s != nil {
+		enrichSignalDiagnosis(&st, s)
+	}
+	m.mu.Lock()
+	m.last = st
+	m.lastAt = now
+	m.mu.Unlock()
+	return st
+}
+
+func (m *signalMonitor) sampleHostSignal(s *server) hostSignalStatus {
 	now := time.Now()
 	det := readIfaceDetect(m.hncDir)
 	upIf := det.TetherUpstream
 	if upIf == "" {
 		upIf = det.Upstream
+	}
+
+	// 若服务器已挂载 AndroidBridgeBulkhead, 先检查熔断器状态, 熔断期间直接跳过系统调用保护 system_server。
+	var bridge *Bulkhead
+	if s != nil {
+		bridge = s.CoreHub().AndroidBridgeBulkhead
+		if bridge != nil && bridge.CircuitState() == "open" {
+			return hostSignalStatus{
+				Available:       false,
+				Mode:            "unknown",
+				RAT:             "Unknown",
+				UpstreamIface:   upIf,
+				Bars:            0,
+				Quality:         "unknown",
+				QualityCN:       "桥接熔断保护中",
+				RFCeilingFactor: 1.0,
+				Diagnosis:       "idle",
+				DiagnosisCN:     "Android 服务响应超时，熔断退避中",
+				UpdatedAt:       now.Unix(),
+			}
+		}
 	}
 
 	var st hostSignalStatus
@@ -116,7 +238,17 @@ func (m *signalMonitor) Refresh(s *server) hostSignalStatus {
 		}
 	}
 	if !st.Available {
-		if raw, err := dumpTelephonyRegistryHead(1800 * time.Millisecond); err == nil && raw != "" {
+		if bridge != nil {
+			var raw string
+			_ = bridge.Execute(context.Background(), 1800*time.Millisecond, func(ctx context.Context) error {
+				var derr error
+				raw, derr = dumpTelephonyRegistryHeadCtx(ctx, 1800*time.Millisecond)
+				return derr
+			})
+			if raw != "" {
+				st = parseTelephonyRegistryDump(raw, upIf, now.Unix())
+			}
+		} else if raw, err := dumpTelephonyRegistryHead(1800 * time.Millisecond); err == nil && raw != "" {
 			st = parseTelephonyRegistryDump(raw, upIf, now.Unix())
 		}
 	}
@@ -135,14 +267,6 @@ func (m *signalMonitor) Refresh(s *server) hostSignalStatus {
 			UpdatedAt:       now.Unix(),
 		}
 	}
-	if s != nil {
-		enrichSignalDiagnosis(&st, s)
-	}
-
-	m.mu.Lock()
-	m.last = st
-	m.lastAt = now
-	m.mu.Unlock()
 	return st
 }
 
@@ -203,6 +327,10 @@ func enrichSignalDiagnosis(st *hostSignalStatus, s *server) {
 }
 
 func dumpTelephonyRegistryHead(timeout time.Duration) (string, error) {
+	return dumpTelephonyRegistryHeadCtx(context.Background(), timeout)
+}
+
+func dumpTelephonyRegistryHeadCtx(parentCtx context.Context, timeout time.Duration) (string, error) {
 	bins := []string{"/system/bin/dumpsys", "dumpsys"}
 	var binPath string
 	for _, b := range bins {
@@ -214,10 +342,25 @@ func dumpTelephonyRegistryHead(timeout time.Duration) (string, error) {
 	if binPath == "" {
 		return "", exec.ErrNotFound
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, timeout)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, binPath, "telephony.registry"))
 	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin"}
+	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil && cmd.Process.Pid > 0 {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				return cmd.Process.Kill()
+			}
+			return nil
+		}
+	}
+	cmd.WaitDelay = 400 * time.Millisecond
+
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return "", err
@@ -228,9 +371,11 @@ func dumpTelephonyRegistryHead(timeout time.Duration) (string, error) {
 	var sb strings.Builder
 	sc := bufio.NewScanner(stdout)
 	lines := 0
+	truncated := false
 	for sc.Scan() {
 		line := sc.Text()
 		if strings.HasPrefix(strings.TrimSpace(line), "local logs:") || lines >= 650 {
+			truncated = true
 			cancel()
 			break
 		}
@@ -238,12 +383,17 @@ func dumpTelephonyRegistryHead(timeout time.Duration) (string, error) {
 		sb.WriteByte('\n')
 		lines++
 	}
-	_ = cmd.Wait()
+	waitErr := cmd.Wait()
+	if !truncated && ctx.Err() == context.DeadlineExceeded {
+		return sb.String(), context.DeadlineExceeded
+	}
+	_ = waitErr
 	return sb.String(), nil
 }
 
 func runFastSystemCmd(timeout time.Duration, name string, args ...string) (string, error) {
-	return calRunCmd(timeout, name, args...)
+	out, err := ExecIsolatedAndroidCmd(context.Background(), timeout, name, args...)
+	return string(out), err
 }
 
 var (
@@ -544,12 +694,9 @@ func (s *server) apiSignal(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	force := r.URL.Query().Get("refresh") == "1"
-	var snap hostSignalStatus
-	if force {
-		snap = s.signalCtl.Refresh(s)
-	} else {
-		snap = s.signalCtl.Snapshot(s)
+	if r.URL.Query().Get("refresh") == "1" {
+		s.signalCtl.TriggerRefresh(s, true)
 	}
-	writeJSON(w, http.StatusOK, snap)
+	snap := s.signalCtl.Get(s)
+	WriteJSONv2(w, http.StatusOK, &snap)
 }

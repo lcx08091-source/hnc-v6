@@ -58,6 +58,14 @@
 #define PIN_DIR          "/sys/fs/bpf/hnc"
 #define MAP_PIN          PIN_DIR "/ip_mark_map"
 #define MAC_MAP_PIN      PIN_DIR "/mac_mark_map"
+#define STATS_MAP_PIN    PIN_DIR "/dev_stats_map"
+
+#ifndef BPF_MAP_TYPE_ARRAY
+#define BPF_MAP_TYPE_ARRAY 2
+#endif
+#ifndef BPF_MAP_TYPE_PERCPU_ARRAY
+#define BPF_MAP_TYPE_PERCPU_ARRAY 6
+#endif
 
 #define TC_H_CLSACT_HANDLE   0xFFFF0000U
 #define TC_H_CLSACT_PARENT   0xFFFFFFF1U
@@ -501,7 +509,8 @@ static int get_sym_strtab(struct elf_ctx *c, int symi,
 }
 
 static int create_named_map(struct elf_ctx *c, const char *want_sym,
-                            uint32_t want_ksz, uint32_t want_vsz, int optional)
+                            uint32_t want_type, uint32_t want_ksz, uint32_t want_vsz,
+                            int optional, uint32_t *out_actual_type)
 {
     int mi = sec_index(c, "maps");
     if (mi < 0) {
@@ -541,15 +550,22 @@ static int create_named_map(struct elf_ctx *c, const char *want_sym,
         a.attr.value_size  = d[2];
         a.attr.max_entries = d[3];
         a.attr.map_flags   = d[4];
-        if (a.attr.map_type != BPF_MAP_TYPE_HASH ||
+        if (a.attr.map_type != want_type ||
             a.attr.key_size != want_ksz || a.attr.value_size != want_vsz) {
-            LOGE("unexpected map def %s: type=%u key=%u val=%u",
-                 want_sym, d[0], d[1], d[2]);
+            LOGE("unexpected map def %s: type=%u key=%u val=%u (want type=%u key=%u val=%u)",
+                 want_sym, d[0], d[1], d[2], want_type, want_ksz, want_vsz);
             return -1;
         }
         int fd = sys_bpf(BPF_MAP_CREATE, &a);
+        if (fd < 0 && want_type == BPF_MAP_TYPE_PERCPU_ARRAY &&
+            (errno == EINVAL || errno == EPERM || errno == ENOTSUP)) {
+            a.attr.map_type = BPF_MAP_TYPE_ARRAY;
+            fd = sys_bpf(BPF_MAP_CREATE, &a);
+        }
         if (fd < 0)
             LOGE("BPF_MAP_CREATE(%s): %s", want_sym, strerror(errno));
+        else if (out_actual_type)
+            *out_actual_type = a.attr.map_type;
         return fd;
     }
     if (!optional)
@@ -558,7 +574,7 @@ static int create_named_map(struct elf_ctx *c, const char *want_sym,
 }
 
 static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
-                         int ip_map_fd, int mac_map_fd, int optional)
+                         int ip_map_fd, int mac_map_fd, int stats_map_fd, int optional)
 {
     int pi = sec_index(c, sec_name);
     if (pi < 0) {
@@ -615,6 +631,8 @@ static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
                 target_fd = ip_map_fd;
             else if (strcmp(sname, "mac_mark_map") == 0)
                 target_fd = mac_map_fd;
+            else if (strcmp(sname, "dev_stats_map") == 0)
+                target_fd = stats_map_fd;
             if (target_fd < 0) {
                 LOGE("unresolved map symbol '%s' in %s", sname, sec_name);
                 free(insns);
@@ -862,14 +880,17 @@ static int cmd_install(const char *iface, const char *obj)
     if (elf_load(&c, obj) < 0)
         return RC_BPF;
 
-    int raw_ip_fd = create_named_map(&c, "ip_mark_map", 4, 4, 0);
+    uint32_t ip_type = BPF_MAP_TYPE_HASH;
+    int raw_ip_fd = create_named_map(&c, "ip_mark_map", BPF_MAP_TYPE_HASH, 4U, 4U, 0, &ip_type);
     if (raw_ip_fd < 0) { elf_free(&c); return RC_BPF; }
     int ip_existed = 0;
     int ip_map_fd = get_or_pin_map(raw_ip_fd, MAP_PIN,
-                                   BPF_MAP_TYPE_HASH, 4U, 4U, &ip_existed);
+                                   ip_type, 4U, 4U, &ip_existed);
     if (ip_map_fd < 0) { elf_free(&c); return RC_BPF; }
 
-    int raw_mac_fd = create_named_map(&c, "mac_mark_map", sizeof(struct mac_key), 4, 1);
+    uint32_t mac_type = BPF_MAP_TYPE_HASH;
+    int raw_mac_fd = create_named_map(&c, "mac_mark_map", BPF_MAP_TYPE_HASH,
+                                      (uint32_t)sizeof(struct mac_key), 4U, 1, &mac_type);
     int mac_existed = 0;
     int mac_map_fd = -1;
     if (raw_mac_fd == -1) {
@@ -881,7 +902,7 @@ static int cmd_install(const char *iface, const char *obj)
     }
     if (raw_mac_fd >= 0) {
         mac_map_fd = get_or_pin_map(raw_mac_fd, MAC_MAP_PIN,
-                                    BPF_MAP_TYPE_HASH, (uint32_t)sizeof(struct mac_key), 4U,
+                                    mac_type, (uint32_t)sizeof(struct mac_key), 4U,
                                     &mac_existed);
         if (mac_map_fd < 0) {
             if (!ip_existed) unlink(MAP_PIN);
@@ -891,16 +912,44 @@ static int cmd_install(const char *iface, const char *obj)
         }
     }
 
-    int prog_in = load_prog_sec(&c, "tc", ip_map_fd, mac_map_fd, 0);
-    int prog_eg = (mac_map_fd >= 0) ? load_prog_sec(&c, "tc_egress", ip_map_fd, mac_map_fd, 1) : -1;
+    uint32_t stats_type = BPF_MAP_TYPE_PERCPU_ARRAY;
+    int raw_stats_fd = create_named_map(&c, "dev_stats_map", BPF_MAP_TYPE_PERCPU_ARRAY,
+                                        4U, 24U, 1, &stats_type);
+    int stats_existed = 0;
+    int stats_map_fd = -1;
+    if (raw_stats_fd == -1) {
+        if (!ip_existed) unlink(MAP_PIN);
+        if (mac_map_fd >= 0 && !mac_existed) unlink(MAC_MAP_PIN);
+        close(ip_map_fd);
+        if (mac_map_fd >= 0) close(mac_map_fd);
+        elf_free(&c);
+        return RC_BPF;
+    }
+    if (raw_stats_fd >= 0) {
+        stats_map_fd = get_or_pin_map(raw_stats_fd, STATS_MAP_PIN,
+                                      stats_type, 4U, 24U, &stats_existed);
+        if (stats_map_fd < 0) {
+            if (!ip_existed) unlink(MAP_PIN);
+            if (mac_map_fd >= 0 && !mac_existed) unlink(MAC_MAP_PIN);
+            close(ip_map_fd);
+            if (mac_map_fd >= 0) close(mac_map_fd);
+            elf_free(&c);
+            return RC_BPF;
+        }
+    }
+
+    int prog_in = load_prog_sec(&c, "tc", ip_map_fd, mac_map_fd, stats_map_fd, 0);
+    int prog_eg = (mac_map_fd >= 0) ? load_prog_sec(&c, "tc_egress", ip_map_fd, mac_map_fd, stats_map_fd, 1) : -1;
     elf_free(&c);
 
     if (prog_in < 0) {
         if (prog_eg >= 0) close(prog_eg);
         if (!ip_existed) unlink(MAP_PIN);
         if (mac_map_fd >= 0 && !mac_existed) unlink(MAC_MAP_PIN);
+        if (stats_map_fd >= 0 && !stats_existed) unlink(STATS_MAP_PIN);
         close(ip_map_fd);
         if (mac_map_fd >= 0) close(mac_map_fd);
+        if (stats_map_fd >= 0) close(stats_map_fd);
         return RC_BPF;
     }
 
@@ -910,8 +959,10 @@ static int cmd_install(const char *iface, const char *obj)
         if (prog_eg >= 0) close(prog_eg);
         if (!ip_existed) unlink(MAP_PIN);
         if (mac_map_fd >= 0 && !mac_existed) unlink(MAC_MAP_PIN);
+        if (stats_map_fd >= 0 && !stats_existed) unlink(STATS_MAP_PIN);
         close(ip_map_fd);
         if (mac_map_fd >= 0) close(mac_map_fd);
+        if (stats_map_fd >= 0) close(stats_map_fd);
         return RC_NETLINK;
     }
     int rc = clsact_qdisc_ensure(nlfd, ifindex);
@@ -930,6 +981,7 @@ static int cmd_install(const char *iface, const char *obj)
     if (prog_eg >= 0) close(prog_eg);
     close(ip_map_fd);
     if (mac_map_fd >= 0) close(mac_map_fd);
+    if (stats_map_fd >= 0) close(stats_map_fd);
     return rc == 0 ? RC_OK : RC_NETLINK;
 }
 
@@ -1124,6 +1176,7 @@ static int cmd_uninstall(const char *iface)
     }
     unlink(MAP_PIN);
     unlink(MAC_MAP_PIN);
+    unlink(STATS_MAP_PIN);
     return rc;
 }
 

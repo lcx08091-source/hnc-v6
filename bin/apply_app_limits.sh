@@ -1,7 +1,7 @@
 #!/system/bin/sh
-# apply_app_limits.sh — HNC v5.40.0: 双栈按设备单应用限速引擎 (HTB 父子层级归位 + 32位正交位域 + 双栈 QUIC 回落)
+# apply_app_limits.sh — HNC v6.0.0: 双栈按设备单应用限速引擎 (HTB 父子层级归位 + 32位正交位域 + 原子 QUIC 回落 + tc_action 协同锁)
 #
-# 核心重构 (v5.40.0 T2 第 2、7、8 项):
+# 核心重构 (v5.40.0 ~ v6.0.0 T2):
 #   1. 父子层级归位: 每条单应用限速类 1:9001..9998 严格挂在对应客户端的设备 HTB 类 parent 1:<cid> 下
 #      (若该设备未开整机限速, 自动以全局上限或 1000mbit 创建 1:<cid> 及根 pref 1 handle <dev_mark>/0x00ff0000 fw),
 #      且应用类 ceil 严格钳制 <= 父设备 ceil, 彻底杜绝多个应用限速之和冲破设备总带宽上限!
@@ -10,8 +10,9 @@
 #   3. 防内核 sch_htb 逃逸至 1:9999: 若某台开启单应用限速的设备未开启 app_qos, 自动在 parent 1:<cid> 下创建
 #      默认兜底子类 1:9eXX (0x9e00 + mid, rate=剩余带宽至少 1000kbit, ceil=父设备 ceil, 挂 fq_codel) 及
 #      prio 9 u32 match u32 0 0 兜底过滤器; 若已开启 app_qos, 非受限应用流量自然落入 prio 2/9 的 1:a0XX 三档队列!
-#   4. 受限应用双栈 QUIC 定向回落 TCP: 在 filter 表维护双栈 HNC_QUIC_APPLIM 链, 对受限应用目标 IPv4/IPv6
-#      的 udp --dport 443 返回 REJECT (icmp-port-unreachable / icmp6-port-unreachable)。
+#   4. 受限应用双栈 QUIC 定向回落 TCP (v6.0.0 原子批处理): 构造 *filter + :HNC_QUIC_APPLIM - [0:0] 批处理缓冲,
+#      优先走 iptables-restore / ip6tables-restore -w 2 --noflush 一次性原子提交, 仅失败时回退逐行下发!
+#   5. 五锁统一协议: 修改内核 tc 队列树期间协调获取 run/tc_action.lock (支持 HNC_TC_LOCK_HELD 父子重入与超时防死锁)。
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
@@ -49,7 +50,7 @@ command -v hnc_applim_mark_hex >/dev/null 2>&1 || {
 DEV_MASK="${HNC_MARK_MASK:-0x00ff0000}"
 APPLIM_MASK="${HNC_APPLIM_MASK:-0xfc000000}"
 APP_CLASS_MINOR_BASE=36864  # 0x9000 -> 1:9001..1:9998
-APP_CLASS_MINOR_MAX=39320   # 0x9998 (避开默认类 1:9999 = 0x9999)
+APP_CLASS_MINOR_MAX=39310   # 0x998e (避开 UpdateLeash 1:9990 与默认类 1:9999)
 DEF_CLASS_MINOR_BASE=40448  # 0x9e00 -> 1:9e01..1:9e63 (每设备默认兜底子类)
 DEF_CLASS_MINOR_MAX=40550
 CHAIN_UP=HNC_APP_LIMIT_UP
@@ -126,7 +127,7 @@ al_lock() {
         esac
         _n=$((_n + 1))
         [ "$_n" -ge 50 ] && return 1
-        sleep 0.1 2>/dev/null || sleep 1
+        usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
     done
     echo "$$" > "$AL_LOCK/pid" 2>/dev/null
     date +%s > "$AL_LOCK/ts" 2>/dev/null
@@ -135,6 +136,103 @@ al_lock() {
 al_unlock() {
     [ "$(cat "$AL_LOCK/pid" 2>/dev/null)" = "$$" ] && rm -rf "$AL_LOCK" 2>/dev/null
 }
+
+# ── 五锁统一协议: 变更内核 tc 队列树前协调获取 run/tc_action.lock ──
+TC_ACTION_LOCK="$RUN/tc_action.lock"
+GATE_LOCK_DIR="$RUN/lock/gate"
+_AL_TC_LOCK_OWNED=0
+_AL_TC_LOCK_REENTRANT=0
+
+_al_gate_held_by_self() {
+    [ -n "${HNC_GATE_HELD:-}" ] || return 1
+    [ -d "$GATE_LOCK_DIR" ] || return 1
+    [ "$(cat "$GATE_LOCK_DIR/pid" 2>/dev/null)" = "$HNC_GATE_HELD" ]
+}
+
+al_tc_lock() {
+    [ "$_AL_TC_LOCK_OWNED" = 1 ] && return 0
+    [ "$_AL_TC_LOCK_REENTRANT" = 1 ] && return 0
+    if [ -n "${HNC_TC_LOCK_HELD:-}" ] && [ -d "$TC_ACTION_LOCK" ]; then
+        local _cur_pid
+        _cur_pid=$(awk '{print $1}' "$TC_ACTION_LOCK/owner" 2>/dev/null)
+        if [ "$_cur_pid" = "$HNC_TC_LOCK_HELD" ]; then
+            _AL_TC_LOCK_REENTRANT=1
+            return 0
+        fi
+    fi
+    rm -rf "$TC_ACTION_LOCK".stale.* 2>/dev/null || true
+    local _round=0 _now _owner _opid _ots _age _reclaim _grave _gp
+    while [ "$_round" -lt 40 ]; do
+        if [ -d "$GATE_LOCK_DIR" ] && ! _al_gate_held_by_self; then
+            if [ "$_round" -ge 20 ]; then
+                _gp=$(cat "$GATE_LOCK_DIR/pid" 2>/dev/null)
+                if [ -n "$_gp" ] && ! kill -0 "$_gp" 2>/dev/null; then
+                    rm -f "$GATE_LOCK_DIR/depth" "$GATE_LOCK_DIR/pid" 2>/dev/null
+                    rmdir "$GATE_LOCK_DIR" 2>/dev/null || true
+                fi
+            fi
+            _round=$((_round + 1))
+            usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || { [ "$_round" -ge 4 ] && break; sleep 1; }
+            continue
+        fi
+        _now=$(date +%s 2>/dev/null || echo 0)
+        if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
+            echo "$$ app_limits $_now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
+            if [ -d "$GATE_LOCK_DIR" ] && ! _al_gate_held_by_self; then
+                rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
+                _round=$((_round + 1))
+                usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || { [ "$_round" -ge 4 ] && break; sleep 1; }
+                continue
+            fi
+            export HNC_TC_LOCK_HELD="$$"
+            _AL_TC_LOCK_OWNED=1
+            return 0
+        fi
+        _owner=$(cat "$TC_ACTION_LOCK/owner" 2>/dev/null)
+        _opid=$(printf '%s' "$_owner" | awk '{print $1}')
+        _ots=$(printf '%s' "$_owner" | awk '{print $3}')
+        case "$_ots" in ''|*[!0-9]*) _ots=0 ;; esac
+        if [ "$_ots" -le 0 ]; then
+            _ots=$(stat -c %Y "$TC_ACTION_LOCK" 2>/dev/null || echo 0)
+        fi
+        _age=$((_now - _ots))
+        _reclaim=0
+        if [ -n "$_opid" ] && kill -0 "$_opid" 2>/dev/null; then
+            [ "$_age" -ge 90 ] 2>/dev/null && _reclaim=1
+        else
+            [ "$_age" -ge 25 ] 2>/dev/null && _reclaim=1
+        fi
+        if [ "$_reclaim" = 1 ]; then
+            _grave="${TC_ACTION_LOCK}.stale.$$.$_now"
+            if mv "$TC_ACTION_LOCK" "$_grave" 2>/dev/null; then
+                rm -rf "$_grave" 2>/dev/null || true
+                continue
+            fi
+        fi
+        _round=$((_round + 1))
+        usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || { [ "$_round" -ge 4 ] && break; sleep 1; }
+    done
+    return 1
+}
+
+al_tc_unlock() {
+    if [ "$_AL_TC_LOCK_REENTRANT" = 1 ]; then
+        _AL_TC_LOCK_REENTRANT=0
+        return 0
+    fi
+    [ "$_AL_TC_LOCK_OWNED" = 1 ] || return 0
+    _AL_TC_LOCK_OWNED=0
+    if [ -d "$TC_ACTION_LOCK" ]; then
+        local _opid
+        _opid=$(awk '{print $1}' "$TC_ACTION_LOCK/owner" 2>/dev/null)
+        if [ -z "$_opid" ] || [ "$_opid" = "$$" ]; then
+            rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
+        fi
+    fi
+    unset HNC_TC_LOCK_HELD
+    return 0
+}
+
 if ! al_lock; then
     log "WARN: app_limits.lock busy, deferring to next cycle"
     exit 0
@@ -422,7 +520,9 @@ replay_al_batch_fallback() {
     [ -s "$batch" ] || return 0
     while IFS= read -r line; do
         case "$line" in
-            ''|'# '*'*'|'*mangle'|'*filter'|'COMMIT') continue ;;
+            '*mangle') tbl=mangle; continue ;;
+            '*filter') tbl=filter; continue ;;
+            ''|'# '*'*'|'COMMIT') continue ;;
             :*' - [0:0]')
                 _ch=${line#:}
                 _ch=${_ch%% *}
@@ -468,7 +568,7 @@ reset_tc_app_limits() {
         done
     fi
 
-    # 扫描内核实际存在的 1:9001..9998 与 1:9e01..9e63 兜底清理:
+    # 扫描内核实际存在的 1:9001..998e 与 1:9e01..9e63 兜底清理:
     # 使用临时文件避免管道子 shell 丢失受影响父设备记录, 当状态文件缺失时也能从 parent 1:<cid> 反推补回默认叶子!
     _scan_tmp="$RUN/.al_kscan.$$"
     tc class show dev "$IFACE" 2>/dev/null | awk '$1=="class" && $2=="htb" {
@@ -524,9 +624,18 @@ $IFACE $_pcid $_pmid -"
     fi
 }
 
+if ! al_tc_lock; then
+    [ "$HAD_DIRTY" = 1 ] && [ ! -f "$DIRTY" ] && mv -f "${DIRTY}.processing" "$DIRTY" 2>/dev/null
+    rm -f "${DIRTY}.processing" 2>/dev/null
+    log "WARN: tc_action.lock busy, deferring app_limits refresh"
+    al_unlock
+    exit 0
+fi
+
 if [ ! -s "$LIMITS_FLAT" ]; then
     cleanup_ipt_app_limits
     reset_tc_app_limits 1
+    al_tc_unlock
     rm -f "$INACTIVE_MARKER" "$FULL_SIG_FILE" "$IPSTATS_FLAT" "${DIRTY}.processing" 2>/dev/null
     log "no app_limits configured (cleaned old dual-stack rules and restored device leaves)"
     tc_snapshot_if_changed
@@ -537,6 +646,7 @@ fi
 if [ ! -s "$IP_APP_FLAT" ]; then
     cleanup_ipt_app_limits
     reset_tc_app_limits 1
+    al_tc_unlock
     n_cfg=$(grep -c . "$LIMITS_FLAT" 2>/dev/null)
     case "$n_cfg" in *[!0-9]*|'') n_cfg=0 ;; esac
     since=$(sed -n '1p' "$INACTIVE_MARKER" 2>/dev/null)
@@ -622,6 +732,8 @@ V6_RULES="$RUN/.al_v6_rules.$$"
 V6_BATCH="$RUN/.al_v6_batch.$$"
 QUIC_V4_RULES="$RUN/.al_qv4.$$"
 QUIC_V6_RULES="$RUN/.al_qv6.$$"
+QUIC_V4_BATCH="$RUN/.al_qv4_batch.$$"
+QUIC_V6_BATCH="$RUN/.al_qv6_batch.$$"
 TREE_TMP="$RUN/.al_tree.$$"
 DEVS_TMP="$RUN/.al_devs.$$"
 
@@ -642,7 +754,7 @@ tr -d '\n' < "$RULES" 2>/dev/null | \
 : > "$V6_HDR"; : > "$V6_RULES"
 : > "$QUIC_V4_RULES"; : > "$QUIC_V6_RULES"
 : > "$TREE_TMP"; : > "$DEVS_TMP"
-trap 'rm -f "$IPNAME_APP_FLAT" "$IPSTATS_FLAT.tmp" "$DEV_META_MAP" "$V4_HDR" "$V4_RULES" "$V4_BATCH" "$V6_HDR" "$V6_RULES" "$V6_BATCH" "$QUIC_V4_RULES" "$QUIC_V6_RULES" "$TREE_TMP" "$DEVS_TMP" "${DIRTY}.processing" 2>/dev/null; al_unlock' EXIT INT TERM
+trap 'al_tc_unlock; rm -f "$IPNAME_APP_FLAT" "$IPSTATS_FLAT.tmp" "$DEV_META_MAP" "$V4_HDR" "$V4_RULES" "$V4_BATCH" "$V6_HDR" "$V6_RULES" "$V6_BATCH" "$QUIC_V4_RULES" "$QUIC_V6_RULES" "$QUIC_V4_BATCH" "$QUIC_V6_BATCH" "$TREE_TMP" "$DEVS_TMP" "${DIRTY}.processing" 2>/dev/null; al_unlock' EXIT INT TERM
 
 split_app_ips() {
     awk -v want="$1" -v inc="$INCLUDE_SHARED" '
@@ -1007,15 +1119,28 @@ fi
 if [ "$applied" -gt 0 ] && [ "$batch_top_inited" = 1 ]; then
     sort -u "$DEVS_TMP" > "$AL_DEVS_FILE" 2>/dev/null
     mv -f "$TREE_TMP" "$AL_TREE_FILE" 2>/dev/null
+    al_tc_unlock
+
     used_slots=$((next_client_idx - 1))
+    # v6.0.0: 将 *mangle 与 *filter/HNC_QUIC_APPLIM 合并进单次 iptables-restore --noflush 原子事务,
+    # 彻底消灭多次子进程调用及清空期间的 QUIC 漏流窗口!
     {
         echo "*mangle"
         cat "$V4_HDR"
         cat "$V4_RULES"
         echo "COMMIT"
+        echo "*filter"
+        echo ":$CHAIN_QUIC - [0:0]"
+        if [ -s "$QUIC_V4_RULES" ]; then
+            sort -u "$QUIC_V4_RULES"
+        fi
+        echo "COMMIT"
     } > "$V4_BATCH"
     if ! run_restore_noflush "$IPT_RESTORE_BIN" "$V4_BATCH"; then
         replay_al_batch_fallback "$IPT" "$V4_BATCH" mangle
+    fi
+    if ! $IPT -t filter -C FORWARD -j "$CHAIN_QUIC" 2>/dev/null; then
+        $IPT -t filter -I FORWARD 1 -j "$CHAIN_QUIC" 2>/dev/null || $IPT -t filter -A FORWARD -j "$CHAIN_QUIC" 2>/dev/null || true
     fi
 
     if [ "$IPV6_OK" = 1 ]; then
@@ -1024,29 +1149,15 @@ if [ "$applied" -gt 0 ] && [ "$batch_top_inited" = 1 ]; then
             cat "$V6_HDR"
             cat "$V6_RULES"
             echo "COMMIT"
+            echo "*filter"
+            echo ":$CHAIN_QUIC - [0:0]"
+            if [ -s "$QUIC_V6_RULES" ]; then
+                sort -u "$QUIC_V6_RULES"
+            fi
+            echo "COMMIT"
         } > "$V6_BATCH"
         if ! run_restore_noflush "$IP6T_RESTORE_BIN" "$V6_BATCH"; then
             replay_al_batch_fallback "$IP6T" "$V6_BATCH" mangle
-        fi
-    fi
-
-    # 同步双栈 filter/HNC_QUIC_APPLIM: 定向拒绝受限应用 UDP 443 迫使秒级回退 TCP
-    $IPT -t filter -N "$CHAIN_QUIC" 2>/dev/null || $IPT -t filter -F "$CHAIN_QUIC" 2>/dev/null
-    if [ -s "$QUIC_V4_RULES" ]; then
-        sort -u "$QUIC_V4_RULES" > "${QUIC_V4_RULES}.u"
-        replay_al_batch_fallback "$IPT" "${QUIC_V4_RULES}.u" filter
-        rm -f "${QUIC_V4_RULES}.u" 2>/dev/null
-    fi
-    if ! $IPT -t filter -C FORWARD -j "$CHAIN_QUIC" 2>/dev/null; then
-        $IPT -t filter -I FORWARD 1 -j "$CHAIN_QUIC" 2>/dev/null || $IPT -t filter -A FORWARD -j "$CHAIN_QUIC" 2>/dev/null || true
-    fi
-
-    if [ "$IPV6_OK" = 1 ]; then
-        $IP6T -t filter -N "$CHAIN_QUIC" 2>/dev/null || $IP6T -t filter -F "$CHAIN_QUIC" 2>/dev/null
-        if [ -s "$QUIC_V6_RULES" ]; then
-            sort -u "$QUIC_V6_RULES" > "${QUIC_V6_RULES}.u"
-            replay_al_batch_fallback "$IP6T" "${QUIC_V6_RULES}.u" filter
-            rm -f "${QUIC_V6_RULES}.u" 2>/dev/null
         fi
         if ! $IP6T -t filter -C FORWARD -j "$CHAIN_QUIC" 2>/dev/null; then
             $IP6T -t filter -I FORWARD 1 -j "$CHAIN_QUIC" 2>/dev/null || $IP6T -t filter -A FORWARD -j "$CHAIN_QUIC" 2>/dev/null || true
@@ -1060,8 +1171,9 @@ if [ "$applied" -gt 0 ] && [ "$batch_top_inited" = 1 ]; then
         "$HNC_DIR/bin/hnc_ipc" OFFLOAD_DISABLE_GLOBAL >/dev/null 2>&1 || true
     fi
 else
-    cleanup_ipt_app_limits
     rm -f "$AL_DEVS_FILE" "$AL_TREE_FILE" 2>/dev/null
+    al_tc_unlock
+    cleanup_ipt_app_limits
 fi
 
 if [ "$had_err" = 0 ]; then

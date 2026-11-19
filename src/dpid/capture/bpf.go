@@ -1,4 +1,4 @@
-// Package capture: classic BPF filter for hnc_dpid rc29.
+// Package capture: classic BPF filter for hnc_dpid rc29 / v6.0.0 Vector.
 //
 // rc20.1 was IPv4-only and accepted three patterns:
 //   - UDP/TCP src or dst port 53                      (DNS)
@@ -26,7 +26,7 @@
 // Initial 至少 1200 字节, 截断后 AEAD 无法解密。握手期 long header 包每连接
 // 只有寥寥几个, 1-RTT 数据走 short header, 仍在内核里丢弃。
 //
-// v5.18: TCP 部分扩展(用户态见 tls_reasm.go / http.go):
+// v5.18 / v6.0.0: TCP 部分扩展(用户态见 tls_reasm.go / http.go):
 //   - 客户端 → 443 且首字节 0x16(ClientHello 首段)返回 tlsSnaplen(4096),
 //     默认 snaplen 1024 会截断带后量子密钥交换的 ~1.8KB ClientHello;
 //     服务器 → 443 源端口的 0x16 仍按 snaplen(只用于字节统计);
@@ -34,8 +34,9 @@
 //     的固定结尾(GREASE 扩展 ?A ?A 00 01 00)才放行 —— 这是被拆成多段的
 //     ClientHello 的末段, 每连接最多一个; 其他上行数据仍在内核丢弃。末尾偏移
 //     用 IP 头里的长度字段算(不受以太网最小帧填充影响);
-//   - 客户端 → 80 且载荷前 4 字节是 GET / POST / HEAD / PUT / OPTI / DELE /
-//     PATC(HTTP 请求首包, 每请求一个)返回 tlsSnaplen, 用户态取 Host 头。
+//   - v6.0.0 LeakGuard 野端口明文 HTTP 嗅探: 任意非 443 / 非 53 TCP 端口只要
+//     TCP 载荷前 4 字节匹配 httpMethodWords(GET / POST / HEAD / PUT / OPTI /
+//     DELE / PATC), 同样截取 tlsSnaplen(4096B)上送用户态提取 Host 与隐私泄露载荷!
 
 package capture
 
@@ -76,7 +77,7 @@ func BuildFilterRawIP(snaplen uint32) ([]syscall.SockFilter, error) {
 	return buildFilter(0, snaplen)
 }
 
-// httpMethodWords: TCP 载荷前 4 字节(大端)等于其中之一才放行 TCP/80。
+// httpMethodWords: 非 443 TCP 载荷前 4 字节(大端)等于其中之一时按 tlsSnaplen(4096)放行。
 var httpMethodWords = []uint32{
 	0x47455420, // "GET "
 	0x504f5354, // "POST"
@@ -206,7 +207,7 @@ func buildFilter(l2 uint32, snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("", ld|h|ind, "", "", l2+2) // TCP dst
 	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
 	addInsn("", jmp|jeq|k, "IPV4_TLS_CLI", "", 443)
-	addInsn("", jmp|jeq|k, "IPV4_HTTP", LBL_DROP, 80)
+	gotoL("IPV4_HTTP") // v6.0.0: 任意非 443 TCP 端口检查 HTTP 方法头
 
 	// X = IPHL + TCPHL, 之后 ld ind l2 即 TCP 载荷首字节。
 	v4PayloadX := func(label string) {
@@ -249,7 +250,7 @@ func buildFilter(l2 uint32, snaplen uint32) ([]syscall.SockFilter, error) {
 	addInsn("", ld|h|abs, "", "", l2+42) // TCP dst
 	addInsn("", jmp|jeq|k, LBL_ACCEPT, "", 53)
 	addInsn("", jmp|jeq|k, "IPV6_TLS_CLI", "", 443)
-	addInsn("", jmp|jeq|k, "IPV6_HTTP", LBL_DROP, 80)
+	gotoL("IPV6_HTTP") // v6.0.0: 任意非 443 TCP 端口检查 HTTP 方法头
 
 	// X = l2 + 40 + TCPHL(TCP 载荷首字节的绝对偏移)。
 	v6PayloadX := func(label string) {

@@ -2,11 +2,18 @@
 'use strict';
 
 /* ═════════════════════ 页面切换(方向感知 + 弹簧) ═════════════════════ */
-var ORDER = ['devices', 'apps', 'stats', 'settings'];
-var RENDER = { devices: renderDevices, apps: renderApps, stats: renderStats, settings: renderSettings };
+var ORDER = ['devices', 'apps', 'vector', 'stats', 'settings'];
+var RENDER = {
+  devices: renderDevices,
+  apps: renderApps,
+  vector: function (anim1) { if (typeof renderVectorPage === 'function') renderVectorPage(anim1); },
+  stats: renderStats,
+  settings: renderSettings
+};
 function onEnter(name) {
-  if (name === 'devices') { paintHero(true); loadOnlineHours(); loadUsage(); }
+  if (name === 'devices') { paintHero(true); loadOnlineHours(); loadUsage(); if (typeof v6RefreshSummarySilent === 'function') v6RefreshSummarySilent(); }
   if (name === 'apps') loadApps().then(function () { if (S.page === 'apps') renderApps(false); });
+  if (name === 'vector') { if (typeof onEnterVectorPage === 'function') onEnterVectorPage(); }
   if (name === 'stats') { afterAseg(); loadUsage().then(function () { var rk = $('#pu-dev-rank'); if (rk && typeof hsMonthRankHtml === 'function') rk.innerHTML = hsMonthRankHtml(); }); }
   if (name === 'settings') loadSettingsData().then(function () { if (S.page === 'settings') renderSettings(false); if (S.cfg.clsact_bpf_mode === 'on' && !S.clsact) clsactCheck(true); });
   schedulePoll(50);
@@ -39,11 +46,13 @@ function go(name) {
 }
 
 /* ═════════════════════ 底栏: 微信 / iOS 26 液态玻璃滑动膨胀放大折射引擎 + 根治卡片展开乱滑 ═════════════════════ */
-var TABS = [['devices', '设备', 'dev'], ['apps', '应用', 'apps'], ['stats', '分析', 'stats'], ['settings', '设置', 'gear']];
+var TABS = [['devices', '设备', 'dev'], ['apps', '应用', 'apps'], ['vector', '矢量', 'vector'], ['stats', '分析', 'stats'], ['settings', '设置', 'gear']];
+try { document.documentElement.style.setProperty('--tab-n', String(TABS.length)); } catch (_) {}
 function buildTabItems(filled) {
   return TABS.map(function (t) {
     var ic = typeof tabSvg === 'function' ? tabSvg(t[2], filled) : ico(t[2]);
-    return '<div class="tab" role="' + (filled ? 'presentation' : 'tab') + '" tabindex="-1" data-tab="' + t[0] + '">' + ic + t[1] + (t[0] === 'apps' ? '<span class="dot" hidden></span>' : '') + '</div>';
+    var dotHtml = (t[0] === 'apps' ? '<span class="dot" hidden></span>' : (t[0] === 'vector' ? '<span class="dot v6-tab-dot" hidden></span>' : ''));
+    return '<div class="tab" role="' + (filled ? 'presentation' : 'tab') + '" tabindex="-1" data-tab="' + t[0] + '">' + ic + t[1] + dotHtml + '</div>';
   }).join('');
 }
 $('#tabs').innerHTML = buildTabItems(false);
@@ -303,6 +312,7 @@ function revealApply(fn, x, y) {
 function isDark() { var a = document.documentElement.getAttribute('data-theme'); return a === 'dark' || (!a && matchMedia('(prefers-color-scheme: dark)').matches); }
 $('#theme-btn').addEventListener('click', function (e) { setTheme(isDark() ? 'light' : 'dark', e.clientX, e.clientY); });
 $('#bell').addEventListener('click', openAlerts);
+var v6NavBtnEl = $('#v6-nav-btn'); if (v6NavBtnEl) v6NavBtnEl.addEventListener('click', function () { if (S.page !== 'vector') go('vector'); else if (typeof v6ScrollToLeakGuard === 'function') v6ScrollToLeakGuard(); });
 var sigPillEl = $('#sig-pill'); if (sigPillEl) sigPillEl.addEventListener('click', signalSheet);
 
 /* ═════════════════════ 事件委托 ═════════════════════ */
@@ -764,11 +774,19 @@ function pollOnce() {
   var prevSig = S.sig, prevShape = shapeOf(), wasOk = S.connected;
   // 设备页有在线设备时每轮都要刷新单台速率 → 直接用合并请求; 否则只拿汇总, 签名变了再补拉列表
   var wantDev = !S.devLoaded || (S.page === 'devices' && num((S.live || {}).online) > 0 && (S.refreshMode === 'realtime' || tickN % 2 === 0));
-  (wantDev ? loadLiveAndDevices() : loadLive()).then(function (l) {
+  var syncedDevs = false;
+  var syncOrLive = (S.vectorSyncState === 'supported' && typeof loadVectorSync === 'function')
+    ? loadVectorSync(null).then(function (sr) { syncedDevs = !!(sr.got && sr.got.devices); return sr.live; }, function (err) {
+        if (err && err.isVectorSyncUnsupported) return wantDev ? loadLiveAndDevices().then(function (l0) { syncedDevs = true; return l0; }) : loadLive();
+        throw err;
+      })
+    : (wantDev ? loadLiveAndDevices().then(function (l0) { syncedDevs = true; return l0; }) : loadLive());
+  syncOrLive.then(function (l) {
     var sigChanged = l.devices_sig && l.devices_sig !== prevSig;
     if (sigChanged) burstUntil = Date.now() + 5000;
     var needDev = wantDev || sigChanged;
-    return (needDev && !wantDev ? loadDevices() : Promise.resolve()).then(function () {
+    var mustFetchFullDevs = !S.devLoaded || sigChanged || (needDev && !syncedDevs);
+    return (mustFetchFullDevs ? loadDevices() : Promise.resolve()).then(function () {
       if (l.devices_sig) S.sig = l.devices_sig;
       if (!wasOk) { S.bootErr = ''; if (S.page === 'devices') renderDevices(false); }
       if (S.page === 'devices') {
@@ -782,6 +800,7 @@ function pollOnce() {
     paintFresh();
   }).then(function () {
     pollBusy = false;
+    if (typeof v6OnPollTick === 'function') v6OnPollTick(tickN);
     if (S.page === 'stats' && S.aseg === 'dpi' && tickN % 3 === 0) loadDpi(tickN % 12 === 0);
     // 设备页 —— 每 5 轮刷新各设备连接数; 展开着的在线设备卡每 3 轮刷新连接摘要(弹层开着时由弹层自己 2s 刷)
     if (S.page === 'devices' && num((S.live || {}).online) > 0) {
@@ -809,7 +828,7 @@ function startSlowPolls() {
     setInterval(function () { if (!document.hidden && S.page === 'devices') { loadOnlineHours(); loadUsage(); } }, 600000),
     setInterval(function () { if (!document.hidden && S.page === 'stats' && S.aseg === 'stats') { refreshStats(); refreshPU(true); } }, 300000)];
 }
-document.addEventListener('visibilitychange', function () { if (document.hidden) { clearTimeout(pollT); stopSSE(); } else { burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); } });
+document.addEventListener('visibilitychange', function () { if (typeof v6OnVisibility === 'function') v6OnVisibility(document.hidden); if (document.hidden) { clearTimeout(pollT); stopSSE(); } else { burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); } });
 
 /* ═════════════════════ 启动 ═════════════════════
  * 旧版 bug: health 失败后重试成功只恢复了设备轮询, 配置/能力/告警/offload 全停在默认值。
@@ -819,13 +838,35 @@ function boot(retry) {
   if (booting) return booting;
   S.booted = false;
   if (retry) { S.bootErr = ''; S.connected = false; if (S.page === 'devices') renderDevices(false); if (KSU) loadSecret(true); }
-  booting = api.get('/api/health', null, { timeout: 6000 }).then(function (h) {
-    // v5.29 T3: 升级回滚横幅(数据来自 /api/health 的 rollback 段)
-    try { showRollbackBanner(h && h.rollback); } catch (e) {}
-    return Promise.all([loadLive(), loadConfig().catch(function () {}), loadCaps(), loadTemplates(), loadAppLimits()]);
-  }).then(function () {
-    return loadDevices();
-  }).then(function () {
+  var legacyBootChain = function () {
+    return api.get('/api/health', null, { timeout: 6000 }).then(function (h) {
+      // v5.29 T3: 升级回滚横幅(数据来自 /api/health 的 rollback 段)
+      try { showRollbackBanner(h && h.rollback); } catch (e) {}
+      return Promise.all([loadLive(), loadConfig().catch(function () {}), loadCaps(), loadTemplates(), loadAppLimits()]);
+    }).then(function () {
+      return loadDevices();
+    });
+  };
+  var fastBootChain = function () {
+    if (S.vectorSyncState === 'unsupported' || typeof loadVectorSync !== 'function') return legacyBootChain();
+    return loadVectorSync({ boot: 1, devices: 1 }).then(function (sr) {
+      var g = sr.got || {};
+      try { if (S.lastHealth && S.lastHealth.rollback) showRollbackBanner(S.lastHealth.rollback); } catch (_) {}
+      var rest = [];
+      if (!g.live) rest.push(loadLive());
+      if (!g.cfg) rest.push(loadConfig().catch(function () {}));
+      if (!g.caps) rest.push(loadCaps());
+      if (!g.templates) rest.push(loadTemplates());
+      if (!g.appLimits) rest.push(loadAppLimits());
+      return Promise.all(rest).then(function () {
+        return g.devices ? S.devices : loadDevices();
+      });
+    }, function (err) {
+      if (err && err.isVectorSyncUnsupported) return legacyBootChain();
+      throw err;
+    });
+  };
+  booting = fastBootChain().then(function () {
     S.booted = true; S.bootErr = '';
     $('#mode-pill').hidden = false; $('#mode-pill').textContent = KSU ? '本机' : '远程';
     RENDER[S.page](!retry); onEnter(S.page);
@@ -839,7 +880,9 @@ function boot(retry) {
         }
       });
     }, 220);
-    loadAlerts(); loadOffload(); loadOnlineHours(); loadUsage(); startSlowPolls(); startSSE();
+    loadAlerts(); loadOffload();
+    loadOnlineHours(); loadUsage(); startSlowPolls(); startSSE();
+    if (typeof v6BootInit === 'function') v6BootInit();
     loadEncdns().then(function (e) { if (e) S.devices.forEach(function (x) { if (S.open[x.mac] || S.sel === x.mac) refreshCard(x.mac); }); });   // 设备卡的按设备加密 DNS
     api.getSafe('/api/alert_config', null, null).then(function (r) { if (r) { S.alertCfg = r; paintUsage(); } });
     if (retry) toast('已连接 HNC 后端');
@@ -1387,6 +1430,7 @@ function showRollbackBanner(rb) {
   if (S.page === 'devices') renderDevices(false);
   else if (S.page === 'apps') renderApps(false);
   else if (S.page === 'stats') renderStats(false);
+  else if (S.page === 'vector' && typeof renderVectorPage === 'function') renderVectorPage(false);
   else if (S.page === 'settings') renderSettings(false);
 })();
 

@@ -147,6 +147,40 @@ func tcp4(sport, dport uint16, first byte) []byte {
 	return ip
 }
 
+func tcp4Payload(sport, dport uint16, payload []byte) []byte {
+	ip := make([]byte, 20+20+len(payload))
+	ip[0] = 0x45
+	binary.BigEndian.PutUint16(ip[2:], uint16(len(ip)))
+	ip[8] = 64
+	ip[9] = 6
+	copy(ip[12:16], []byte{192, 168, 43, 20})
+	copy(ip[16:20], []byte{203, 0, 113, 10})
+	binary.BigEndian.PutUint16(ip[20:], sport)
+	binary.BigEndian.PutUint16(ip[22:], dport)
+	ip[32] = 5 << 4
+	copy(ip[40:], payload)
+	return ip
+}
+
+func tcp6Payload(sport, dport uint16, payload []byte) []byte {
+	ip := make([]byte, 40+20+len(payload))
+	ip[0] = 0x60
+	binary.BigEndian.PutUint16(ip[4:], uint16(20+len(payload)))
+	ip[6] = 6
+	ip[7] = 64
+	ip[8] = 0x24
+	ip[9] = 0x09
+	ip[23] = 0x20
+	ip[24] = 0x20
+	ip[25] = 0x01
+	ip[39] = 0x99
+	binary.BigEndian.PutUint16(ip[40:], sport)
+	binary.BigEndian.PutUint16(ip[42:], dport)
+	ip[52] = 5 << 4
+	copy(ip[60:], payload)
+	return ip
+}
+
 var testSrcMAC = []byte{0x3c, 0x22, 0xfb, 0x11, 0x22, 0x33}
 
 func withEther(ip []byte, v6 bool) []byte {
@@ -261,5 +295,68 @@ func TestBPFFilterPorts(t *testing.T) {
 	binary.BigEndian.PutUint16(arp[12:], 0x0806)
 	if runCBPF(t, eth, arp) != 0 {
 		t.Errorf("arp should drop")
+	}
+}
+
+func TestBPFWildPortHTTPAndParserMetadata(t *testing.T) {
+	eth, err := BuildFilter(1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := BuildFilterRawIP(1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-443 wild ports matching HTTP methods must return tlsSnaplen (4096).
+	for _, dport := range []uint16{80, 8000, 8080, 9090, 18080} {
+		for _, method := range []string{"GET ", "POST", "PUT ", "HEAD"} {
+			pay := []byte(method + " /v1/collect?phone=13800138000 HTTP/1.1\r\nHost: sdk.example.com:8080\r\nUser-Agent: CamSDK/2.0\r\n\r\n")
+			p4 := tcp4Payload(50123, dport, pay)
+			p6 := tcp6Payload(50123, dport, pay)
+			if got := runCBPF(t, eth, withEther(p4, false)); got != tlsSnaplen {
+				t.Errorf("v4 eth port %d %s: got %d want %d", dport, method, got, tlsSnaplen)
+			}
+			if got := runCBPF(t, raw, p4); got != tlsSnaplen {
+				t.Errorf("v4 raw port %d %s: got %d want %d", dport, method, got, tlsSnaplen)
+			}
+			if got := runCBPF(t, eth, withEther(p6, true)); got != tlsSnaplen {
+				t.Errorf("v6 eth port %d %s: got %d want %d", dport, method, got, tlsSnaplen)
+			}
+			if got := runCBPF(t, raw, p6); got != tlsSnaplen {
+				t.Errorf("v6 raw port %d %s: got %d want %d", dport, method, got, tlsSnaplen)
+			}
+		}
+	}
+
+	// Port 443 (src or dst) must NEVER enter HTTP method check; HTTP responses & empty ACKs drop.
+	for _, dropCase := range []struct {
+		name string
+		ip   []byte
+		v6   bool
+	}{
+		{"dst 443 GET", tcp4Payload(50123, 443, []byte("GET / HTTP/1.1\r\n")), false},
+		{"src 443 POST", tcp4Payload(443, 50123, []byte("POST / HTTP/1.1\r\n")), false},
+		{"v6 dst 443 PUT", tcp6Payload(50123, 443, []byte("PUT / HTTP/1.1\r\n")), true},
+		{"wild 8080 HTTP response", tcp4Payload(8080, 50123, []byte("HTTP/1.1 200 OK\r\n\r\n")), false},
+		{"wild 8080 binary", tcp4Payload(50123, 8080, []byte{0x01, 0x02, 0x03, 0x04}), false},
+		{"wild 8080 empty ACK", tcp4Payload(50123, 8080, nil), false},
+	} {
+		if got := runCBPF(t, eth, withEther(dropCase.ip, dropCase.v6)); got != 0 {
+			t.Errorf("%s: expected drop (0), got %d", dropCase.name, got)
+		}
+	}
+
+	// Verify parsePacket populates EventHTTP + full HTTPInfo (Method, Path, Host, UserAgent, RawPayload) on wild port 8080.
+	postReq := []byte("POST /v2/report?src=iot HTTP/1.1\r\nHost: leak.camera.example:8080\r\nUser-Agent: IoTCam/3.1\r\nContent-Type: application/json\r\n\r\n{\"mobile\":\"13800138000\"}")
+	ev, res := parsePacket(withEther(tcp4Payload(52000, 8080, postReq), false), v518TS)
+	if res != ParseOK || ev.Kind != EventHTTP || ev.HTTP == nil {
+		t.Fatalf("wild-port HTTP parse failed: res=%v kind=%v http=%v", res, ev.Kind, ev.HTTP)
+	}
+	if ev.HTTP.Method != "POST" || ev.HTTP.Path != "/v2/report?src=iot" || ev.HTTP.Host != "leak.camera.example" || ev.HTTP.UserAgent != "IoTCam/3.1" {
+		t.Fatalf("HTTPInfo metadata mismatch: %+v", ev.HTTP)
+	}
+	if string(ev.HTTP.RawPayload) != string(postReq) {
+		t.Fatalf("HTTPInfo RawPayload mismatch: got %d bytes", len(ev.HTTP.RawPayload))
 	}
 }

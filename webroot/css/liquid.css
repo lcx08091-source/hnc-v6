@@ -122,3 +122,124 @@
 .gx-range:active::-webkit-slider-thumb{transform:scale(1.2);background:rgba(255,255,255,.6);transition:transform .18s var(--q),background-color .2s}
 /* 系统开了「降低透明度」: 一律按着色处理(盖过滑块写在 <html> 上的值) */
 @media (prefers-reduced-transparency: reduce){ :root[data-glass="liquid"]{--gx-up:1!important;--gx-dn:0!important} }
+/* ==========================================================================
+ * HNC v6.0.0 · Vector — 液态玻璃 120fps GPU 合成层减负与壁纸高对比度可读性保护
+ * ========================================================================== */
+[data-glass="liquid"] .glass,
+[data-glass="liquid"] .v6-card,
+[data-glass="liquid"] .lgd-panel,
+[data-glass="liquid"] .sgrp.scard,
+[data-glass="liquid"] .dev {
+  contain: layout style;
+}
+
+/* 卡片内部子组件彻底免除二次嵌套 backdrop-filter，降低 Adreno GPU 离屏合成带宽 */
+[data-glass="liquid"] .v6-kpi,
+[data-glass="liquid"] .v6-num-box,
+[data-glass="liquid"] .v6-flow-item,
+[data-glass="liquid"] .v6-dev-pill,
+[data-glass="liquid"] .v6-mini-btn,
+[data-glass="liquid"] .lgd-ctrl-bar,
+[data-glass="liquid"] .lgd-item,
+[data-glass="liquid"] .lgd-tchip,
+[data-glass="liquid"] .lgd-act-btn,
+[data-glass="liquid"] .lgd-search-mini,
+[data-glass="liquid"] .v6-drawer .v6-tuple-row {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  border: 0;
+  background: rgba(255, 255, 255, .44);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .82), 0 0 0 .5px rgba(255, 255, 255, .58);
+}
+
+:root[data-glass="liquid"][data-theme="dark"] .v6-kpi,
+:root[data-glass="liquid"][data-theme="dark"] .v6-num-box,
+:root[data-glass="liquid"][data-theme="dark"] .v6-flow-item,
+:root[data-glass="liquid"][data-theme="dark"] .v6-dev-pill,
+:root[data-glass="liquid"][data-theme="dark"] .v6-mini-btn,
+:root[data-glass="liquid"][data-theme="dark"] .lgd-ctrl-bar,
+:root[data-glass="liquid"][data-theme="dark"] .lgd-item,
+:root[data-glass="liquid"][data-theme="dark"] .lgd-tchip,
+:root[data-glass="liquid"][data-theme="dark"] .lgd-act-btn,
+:root[data-glass="liquid"][data-theme="dark"] .lgd-search-mini,
+:root[data-glass="liquid"][data-theme="dark"] .v6-drawer .v6-tuple-row {
+  background: rgba(14, 22, 38, .50);
+  box-shadow: inset 0 1px 0 rgba(220, 238, 255, .16), 0 0 0 .5px rgba(190, 225, 255, .12);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-kpi,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-num-box,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-flow-item,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-dev-pill,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-mini-btn,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-ctrl-bar,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-item,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-tchip,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-act-btn,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .lgd-search-mini,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .v6-drawer .v6-tuple-row {
+    background: rgba(14, 22, 38, .50);
+    box-shadow: inset 0 1px 0 rgba(220, 238, 255, .16), 0 0 0 .5px rgba(190, 225, 255, .12);
+  }
+}
+
+[data-glass="liquid"] .v6-drawer,
+[data-glass="frosted"] .v6-drawer {
+  border: 0;
+  border-radius: 32px;
+  background: var(--lg-fill-2);
+  -webkit-backdrop-filter: blur(26px) saturate(190%);
+  backdrop-filter: blur(26px) saturate(190%);
+  box-shadow: var(--lg-rim), 0 24px 58px -12px rgba(16, 32, 68, .34);
+}
+:root.lowfx[data-glass="liquid"] .v6-drawer {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background: var(--card-solid);
+}
+
+/* 自定义花哨壁纸下的高可读性文字对比度保护 (WCAG >= 7:1 光学衬底护栏) */
+:root[data-has-wp="1"][data-glass] .v6-card-t,
+:root[data-has-wp="1"][data-glass] .v6-top-title b,
+:root[data-has-wp="1"][data-glass] .v6-kpi b,
+:root[data-has-wp="1"][data-glass] .lgd-dev,
+:root[data-has-wp="1"][data-glass] .v6-tuple-5 .ep {
+  text-shadow: 0 .5px 0 rgba(255, 255, 255, .46);
+}
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-card-t,
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-top-title b,
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-kpi b,
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .lgd-dev,
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-tuple-5 .ep {
+  text-shadow: 0 1px 2px rgba(2, 6, 18, .62);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .v6-card-t,
+  :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .v6-top-title b,
+  :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .v6-kpi b,
+  :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .lgd-dev,
+  :root[data-has-wp="1"][data-glass]:not([data-theme="light"]) .v6-tuple-5 .ep {
+    text-shadow: 0 1px 2px rgba(2, 6, 18, .62);
+  }
+}
+:root[data-has-wp="1"][data-glass] .lgd-raw-val {
+  background: rgba(190, 24, 24, .18) !important;
+  border: 1px solid rgba(220, 38, 38, .38) !important;
+  font-weight: 800;
+}
+:root[data-has-wp="1"][data-glass][data-theme="dark"] .lgd-raw-val {
+  background: rgba(239, 68, 68, .24) !important;
+  color: #fecaca !important;
+  border-color: rgba(248, 113, 113, .45) !important;
+}
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-kpi,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-num-box,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-flow-item,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .lgd-ctrl-bar,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .lgd-item,
+:root[data-has-wp="1"]:not([data-style="cyber"]) .v6-tuple-row {
+  background: var(--lg-sub, rgba(255, 255, 255, .20)) !important;
+  box-shadow: none !important;
+  border-color: transparent !important;
+}
+

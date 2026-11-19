@@ -1,9 +1,11 @@
-// offload_sched_test.go — offload/clsact 的 Go 调度状态机(v5.29 T2 M3; v5.33 起唯一一份)。
+// offload_sched_test.go — offload/clsact 的 Go 调度状态机与看门狗真脉搏单测(v6.0)。
 package main
 
 import (
 	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -40,36 +42,38 @@ func TestParseOffloadPlanBad(t *testing.T) {
 	}
 }
 
-// ── 早醒条件(v5.33 前 shell 循环用 hnc_act_sleep_until, 同一语义) ──────────
+// ── 早醒条件(v6.0 修复: clients 仅在 0 → >0 上线跃迁时早醒) ──────────
 
 func TestOffloadEarlyWake(t *testing.T) {
-	if !offloadEarlyWake("hotspot", "screen_on", 0) {
+	if !offloadEarlyWake("hotspot", "screen_on", 0, 0) {
 		t.Error("wake=hotspot + 热点开 → 应早醒")
 	}
-	if !offloadEarlyWake("clients", "hotspot_off", 3) {
-		t.Error("wake=clients + 3 台设备 → 应早醒")
+	if !offloadEarlyWake("clients", "hotspot_off", 0, 3) {
+		t.Error("wake=clients + 从 0 台变为 3 台设备 → 应早醒")
 	}
-	if offloadEarlyWake("hotspot", "hotspot_off", 0) {
+	if offloadEarlyWake("clients", "screen_on", 1, 1) {
+		t.Error("wake=clients + 睡眠前已有 1 台设备在线 → 绝不能每 30s 死循环早醒!")
+	}
+	if offloadEarlyWake("clients", "screen_on", 2, 3) {
+		t.Error("wake=clients + 睡眠前已有 2 台设备在线 → 不早醒")
+	}
+	if offloadEarlyWake("hotspot", "hotspot_off", 0, 0) {
 		t.Error("wake=hotspot + 热点没开 → 不早醒")
 	}
-	if offloadEarlyWake("clients", "screen_on", 0) {
+	if offloadEarlyWake("clients", "screen_on", 0, 0) {
 		t.Error("wake=clients + 0 设备 → 不早醒")
 	}
-	if offloadEarlyWake("none", "screen_on", 5) {
+	if offloadEarlyWake("none", "screen_on", 0, 5) {
 		t.Error("wake=none → 永不早醒")
 	}
 }
 
 // ── 预算: 无设备(plan=300 none)时 1 小时 plan 次数 ≤ 15 ────────────
-//
-// 「改动前会失败」的等价物: 若把 300 秒睡成 60 秒(shell daemon 的
-// INTERVAL 而非 IDLE_INTERVAL), 次数会到 60 > 15。
 
 func TestOffloadPlanBudget(t *testing.T) {
 	p := &offloadPlanner{}
 	start := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
 	now := start
-	// 以 30 秒为步(早醒检查粒度)驱动 1 小时, activity 恒「热点未开无设备」
 	for elapsed := time.Duration(0); elapsed < time.Hour; elapsed += offloadWakeEvery {
 		now = start.Add(elapsed)
 		if p.advance(now, false) {
@@ -83,13 +87,52 @@ func TestOffloadPlanBudget(t *testing.T) {
 
 func TestOffloadEarlyWakeTriggersPlan(t *testing.T) {
 	p := &offloadPlanner{}
-	p.observe(300*time.Second, "clients", time.Now())
+	p.observeWithClients(300*time.Second, "clients", 0, time.Now())
 	next := time.Now().Add(200 * time.Second) // 还没到 300 秒
-	if !p.advance(next, true) {
-		t.Fatal("早醒条件满足时应该提前跑 plan")
+	if !p.advance(next, offloadEarlyWake(p.wakeMode, "active", p.prevClients, 1)) {
+		t.Fatal("0 → 1 客户端上线满足早醒条件时应该提前跑 plan")
 	}
 	if p.advance(next, false) {
 		t.Fatal("没到 nextAt 且无早醒 → 不该跑")
+	}
+}
+
+// v6.0 关键回归测试: 1 台客户端持续在线且 plan 返回 "300 clients" 时,
+// 绝不能陷入每 30 秒早醒一次的死循环(旧代码 calls=121, 修复后应为 ~13 次/小时 ≤ 15)!
+func TestOffloadSteadyClientOnlineNo30sDeadLoop(t *testing.T) {
+	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
+	p := &offloadPlanner{}
+	curClients := 1 // 始终有 1 台设备在线
+	for off := 0; off <= 3600; off += 30 {
+		now := base.Add(time.Duration(off) * time.Second)
+		early := offloadEarlyWake(p.wakeMode, "hotspot_off", p.prevClients, curClients)
+		if p.advance(now, early) {
+			p.observeWithClients(300*time.Second, "clients", curClients, now)
+		}
+	}
+	if p.planCalls > 15 {
+		t.Fatalf("steady 1 client online triggered %d plan calls in 1h (want <=15, old bug was ~121)", p.planCalls)
+	}
+}
+
+// v6.0 边界测试: 0 台起步 → 第 60s 上线 1 台(早醒 1 次)→ 后续保持 1 台不再重复早醒。
+func TestOffloadZeroToOneClientWakesOnceThenSleepsFull(t *testing.T) {
+	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
+	p := &offloadPlanner{}
+	for off := 0; off <= 300; off += 30 {
+		now := base.Add(time.Duration(off) * time.Second)
+		curClients := 0
+		if off >= 60 {
+			curClients = 1
+		}
+		early := offloadEarlyWake(p.wakeMode, "active", p.prevClients, curClients)
+		if p.advance(now, early) {
+			p.observeWithClients(300*time.Second, "clients", curClients, now)
+		}
+	}
+	// t=0 首轮(1) + t=60s 客户端上线早醒(2); t=90..300 因 nextAt=t+360s 且 prevClients=1 不再早醒!
+	if p.planCalls != 2 {
+		t.Fatalf("0->1 transition over 300s want exactly 2 plan calls, got %d", p.planCalls)
 	}
 }
 
@@ -106,20 +149,15 @@ func TestClsactCheckOutputJudged(t *testing.T) {
 	}
 }
 
-// ── 预算: 无设备 + plan 回 300 秒 → 1 小时 plan 调用 ≤ 15 ─────────
-// (doc 验收: offload 任务 1 小时 ≤ 60 次 sh, plan 300 秒时 ≤ 15)
-
 func TestOffloadPlanBudgetNoClients(t *testing.T) {
 	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
 	p := &offloadPlanner{}
 	calls := 0
-	// 每 30 秒一次早醒检查(驱动方式与 offloadLoop 相同)
 	for off := 0; off <= 3600; off += 30 {
 		now := base.Add(time.Duration(off) * time.Second)
-		// 无设备: 热点未开, 早醒不触发
 		if p.advance(now, false) {
 			calls++
-			p.observe(300*time.Second, "none", now) // plan: "300 none"
+			p.observe(300*time.Second, "none", now)
 		}
 	}
 	if calls == 0 || calls > 15 {
@@ -133,14 +171,14 @@ func TestOffloadPlanBudgetHotspotEarlyWake(t *testing.T) {
 	calls := 0
 	for off := 0; off <= 3600; off += 30 {
 		now := base.Add(time.Duration(off) * time.Second)
-		// 热点开着 + 一直有设备 → 早醒持续满足
-		if p.advance(now, true) {
+		early := offloadEarlyWake(p.wakeMode, "active", 0, 0)
+		if p.advance(now, early) {
 			calls++
-			p.observe(300*time.Second, "clients", now)
+			p.observe(300*time.Second, "hotspot", now)
 		}
 	}
 	if calls < 60 || calls > 130 {
-		t.Fatalf("plan calls = %d, want ~120(每 30 秒一次早醒)", calls)
+		t.Fatalf("plan calls = %d, want ~120(wake=hotspot 持续开启时每 30 秒早醒)", calls)
 	}
 }
 
@@ -167,14 +205,12 @@ func withClsactFake(t *testing.T, target string, f *clsactFake) {
 	t.Cleanup(func() { clsactTargetFn, clsactCheckFn, runScriptFn = oldT, oldC, oldS })
 }
 
-// v5.33: 修复走 hnc_offload_guard.sh clsact_repair(hnc_clsact_watchdog.sh 已删)。
-// 「改动前会失败」: v5.32 调的是 hnc_clsact_watchdog.sh repair。
 func TestClsactTickRepairArgs(t *testing.T) {
-	f := &clsactFake{checkOK: func(n int) bool { return n%3 != 0 }} // 每 3 次 check 有一次不 ok
+	f := &clsactFake{checkOK: func(n int) bool { return n%3 != 0 }}
 	withClsactFake(t, "wlan2", f)
 	base := time.Date(2026, 10, 5, 12, 0, 0, 0, time.Local)
 	c := &clsactSched{}
-	for off := 0; off <= 600; off += 10 { // 10 分钟
+	for off := 0; off <= 600; off += 10 {
 		clsactTick(c, base.Add(time.Duration(off)*time.Second))
 	}
 	if c.checks != 61 || len(f.scripts) != 20 {
@@ -199,7 +235,6 @@ func TestClsactTickNoTargetNoExec(t *testing.T) {
 	}
 }
 
-// clsactTarget: 读 offload guard 的状态文件, 只认 mode=on + clsact=installed。
 func TestClsactTargetFromGuardStatus(t *testing.T) {
 	old := offloadGuardStatusPath
 	offloadGuardStatusPath = t.TempDir() + "/offload_guard.json"
@@ -207,7 +242,7 @@ func TestClsactTargetFromGuardStatus(t *testing.T) {
 	for _, c := range []struct{ json, want string }{
 		{`{"mode":"on","clsact":"installed","iface":"wlan2"}`, "wlan2"},
 		{`{"mode":"on","clsact":"skipped_pref1_mirred","iface":"wlan2"}`, ""},
-		{`{"mode":"auto","clsact":"installed","iface":"wlan2"}`, ""}, // auto 由 plan 每轮顺带修
+		{`{"mode":"auto","clsact":"installed","iface":"wlan2"}`, ""},
 		{`{"mode":"off","clsact":"off","iface":"wlan2"}`, ""},
 		{`garbage`, ""},
 	} {
@@ -221,5 +256,80 @@ func TestClsactTargetFromGuardStatus(t *testing.T) {
 	_ = os.Remove(offloadGuardStatusPath)
 	if got := clsactTarget(); got != "" {
 		t.Errorf("没有状态文件 → %q, want \"\"", got)
+	}
+}
+
+// ── v6.0 看门狗「脑死亡脉搏正常」根治单测(90s 停刷心跳, 120s 告警退出, Doze 睡眠豁免) ──
+
+func TestWatchdogHeartbeatBoundToMainLoopProgress(t *testing.T) {
+	tmp := t.TempDir()
+	hbTmp := filepath.Join(tmp, "watchdog.heartbeat")
+	alertTmp := filepath.Join(tmp, "alerts.jsonl")
+
+	var fakeMono atomic.Int64
+	fakeMono.Store(int64(10 * time.Second))
+
+	oldMono := wdMonoNowFn
+	oldHB := wdHeartbeatPath
+	oldAlertDir := wdAlertBaseDir
+	oldExit := wdStallExitFn
+	var exitCode atomic.Int32
+	exitCode.Store(-1)
+
+	wdMonoNowFn = fakeMono.Load
+	wdHeartbeatPath = hbTmp
+	wdAlertBaseDir = tmp
+	wdStallExitFn = func(code int) { exitCode.Store(int32(code)) }
+	t.Cleanup(func() {
+		wdMonoNowFn = oldMono
+		wdHeartbeatPath = oldHB
+		wdAlertBaseDir = oldAlertDir
+		wdStallExitFn = oldExit
+		endMainLoopSleep()
+	})
+
+	_ = os.MkdirAll(filepath.Join(tmp, "run"), 0o755)
+	_ = os.MkdirAll(filepath.Join(tmp, "data"), 0o755)
+	_ = alertTmp
+
+	// 1. mainLoop 正常推进(刚推进 10s < 90s) → 允许写 watchdog.heartbeat
+	endMainLoopSleep()
+	touchMainLoopStep()
+	fakeMono.Add(int64(30 * time.Second))
+	if !heartbeatTickOnce() {
+		t.Fatal("fresh mainLoop (<90s) should refresh heartbeat")
+	}
+	if _, err := os.Stat(hbTmp); err != nil {
+		t.Fatalf("expected heartbeat file written: %v", err)
+	}
+
+	// 2. mainLoop 卡死 95s (>= 90s, < 120s) → 停刷 heartbeat, 尚不退出
+	_ = os.Remove(hbTmp)
+	fakeMono.Add(int64(65 * time.Second)) // 累计停滞 95s
+	if heartbeatTickOnce() {
+		t.Fatal("stalled mainLoop (95s >= 90s) MUST NOT refresh heartbeat")
+	}
+	if _, err := os.Stat(hbTmp); err == nil {
+		t.Fatal("heartbeat file should not have been recreated when stalled >=90s")
+	}
+	if exitCode.Load() != -1 {
+		t.Fatalf("should not exit before 120s, got exitCode=%d", exitCode.Load())
+	}
+
+	// 3. mainLoop 卡死 125s (>= 120s) → 记录告警并调用退出钩子交由哨兵干净重拉!
+	fakeMono.Add(int64(30 * time.Second)) // 累计停滞 125s
+	if heartbeatTickOnce() {
+		t.Fatal("stalled mainLoop (125s) must return false")
+	}
+	if exitCode.Load() != 1 {
+		t.Fatalf("expected clean self-exit code 1 on >=120s stall, got %d", exitCode.Load())
+	}
+
+	// 4. Doze 180s 计划内睡眠期间: 即使过去 150s 也不算卡死, 照常刷新心跳且不误退出!
+	exitCode.Store(-1)
+	beginMainLoopSleep(180 * time.Second)
+	fakeMono.Add(int64(150 * time.Second))
+	if !heartbeatTickOnce() || exitCode.Load() != -1 {
+		t.Fatalf("planned 180s Doze sleep must remain healthy at 150s (exitCode=%d)", exitCode.Load())
 	}
 }

@@ -524,15 +524,20 @@ func TestHTTPHostPacketAndBPF(t *testing.T) {
 			t.Errorf("bpf v6 dropped HTTP %s", m)
 		}
 	}
-	// 非请求的 80 端口数据 / 服务器响应 / 其他端口: 丢弃。
+	// 非请求的 80 端口数据 / 服务器响应 / 其他端口非 HTTP 流量: 丢弃。
 	for _, d := range []tcpOpts{
 		{src: v518Client4, dst: v518Server4, sport: 40100, dport: 80, payload: []byte("\x00\x01binary")},
 		{src: v518Server4, dst: v518Client4, sport: 80, dport: 40100, payload: []byte("HTTP/1.1 200 OK\r\n")},
-		{src: v518Client4, dst: v518Server4, sport: 40100, dport: 8081, payload: []byte("GET / HTTP/1.1\r\n")},
+		{src: v518Client4, dst: v518Server4, sport: 40100, dport: 8081, payload: []byte("SSH-2.0-OpenSSH\r\n")},
 	} {
 		if runCBPF(t, eth, v518Ether(tcpPkt(d))) != 0 {
 			t.Errorf("bpf accepted %q sport=%d dport=%d", d.payload, d.sport, d.dport)
 		}
+	}
+	// v6.0 LeakGuard: 非标端口 (8081) 上的明文 HTTP 请求头必须放行供隐私安检嗅探。
+	nonStdHTTP := tcpOpts{src: v518Client4, dst: v518Server4, sport: 40100, dport: 8081, payload: []byte("GET / HTTP/1.1\r\n")}
+	if runCBPF(t, eth, v518Ether(tcpPkt(nonStdHTTP))) != tlsSnaplen {
+		t.Errorf("bpf dropped non-standard port 8081 HTTP request")
 	}
 	// 解析不出 Host 的请求: 忽略, 不产生 Flow。
 	o.payload = []byte("GET / HTTP/1.1\r\n\r\n")

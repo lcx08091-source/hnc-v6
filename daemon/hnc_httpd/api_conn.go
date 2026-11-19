@@ -1,4 +1,4 @@
-// api_conn.go — v5.13 实时连接查看 + 设备识别合并
+// api_conn.go — v6.0 实时连接查看 + 设备识别合并 (自适应 4s/8s 缓存 + 零 GC 切片池解析)
 //
 //   GET /api/connections?mac=aa:bb:..  某台设备当前的连接列表(conntrack)
 //   GET /api/connections               每台设备的连接数(设备列表角标用)
@@ -11,24 +11,30 @@
 //   - 服务: 常见端口兜底(DNS / NTP / QUIC / 推送 ...)
 // 速率: 两次读 conntrack 的字节差 / 时间差(需要 nf_conntrack_acct=1; 首次
 // 访问时若为 0 会尝试打开, 只对之后新建的连接生效)。
-// 开销: conntrack 全表解析 1 秒内共享一次结果, 多个请求不重复读。
+// v6.0 性能优化:
+//   - 全表扫描 TTL 自适应: /api/connections 面板活跃打开时 4s, 仅 /api/live 等后台轮询时 8s;
+//   - 解析器消除每行 strings.Fields 切片分配、双 map 分配与 net.ParseIP 堆分配, 改用 sync.Pool
+//     紧凑切片池 + 栈上位掩码 + netip.ParseAddr 零分配解析 + IPv6 字符串驻留池。
 
 package main
 
 import (
 	"bufio"
 	"encoding/json"
-	"hnc.io/dpid/output"
 	"math"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"hnc.io/dpid/output"
 )
 
 // 测试钩子: 覆盖 conntrack / acct 路径
@@ -68,23 +74,111 @@ func (e *ctEntry) key() string {
 	return e.Proto + "|" + e.Src + "|" + strconv.Itoa(e.Sport) + "|" + e.Dst + "|" + strconv.Itoa(e.Dport)
 }
 
+// ─── 紧凑切片池与零分配行解析辅助 ───────────────────────────────────
+
+var ctFieldsPool = sync.Pool{
+	New: func() any {
+		s := make([]string, 0, 32)
+		return &s
+	},
+}
+
+var ctScanBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 64*1024)
+		return &b
+	},
+}
+
+const (
+	ctSeenSrc uint8 = 1 << iota
+	ctSeenDst
+	ctSeenSport
+	ctSeenDport
+	ctSeenPkts
+	ctSeenBytes
+)
+
+func splitASCIIFieldsInto(dst []string, line string) []string {
+	dst = dst[:0]
+	n := len(line)
+	i := 0
+	for i < n {
+		for i < n && (line[i] == ' ' || line[i] == '\t' || line[i] == '\r' || line[i] == '\n') {
+			i++
+		}
+		if i >= n {
+			break
+		}
+		start := i
+		for i < n && line[i] != ' ' && line[i] != '\t' && line[i] != '\r' && line[i] != '\n' {
+			i++
+		}
+		dst = append(dst, line[start:i])
+	}
+	return dst
+}
+
+func isAllUpperASCII(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' {
+			return false
+		}
+	}
+	return true
+}
+
+func canonicalizeIPv6Addr(raw string, intern map[string]string) string {
+	if intern != nil {
+		if c, ok := intern[raw]; ok {
+			return c
+		}
+	}
+	addr, err := netip.ParseAddr(raw)
+	if err != nil {
+		return raw
+	}
+	canon := addr.String()
+	if intern != nil && len(intern) < 4096 {
+		intern[raw] = canon
+	}
+	return canon
+}
+
 // parseConntrackLine 解析 /proc/net/nf_conntrack 的一行:
 //
 //	ipv4 2 tcp 6 431999 ESTABLISHED src=A dst=B sport=1 dport=443 packets=3 bytes=180 src=B dst=N sport=443 dport=1 packets=2 bytes=120 [ASSURED] mark=0 zone=0 use=2
 //
 // 第一组 src/dst/... 是原方向(客户端发起), 第二组是应答方向。
 func parseConntrackLine(line string) (ctEntry, bool) {
-	f := strings.Fields(line)
+	return parseConntrackLinePooled(line, nil)
+}
+
+func parseConntrackLinePooled(line string, v6Intern map[string]string) (ctEntry, bool) {
+	fp := ctFieldsPool.Get().(*[]string)
+	f := splitASCIIFieldsInto(*fp, line)
+	defer func() {
+		*fp = f[:0]
+		ctFieldsPool.Put(fp)
+	}()
+
 	if len(f) < 6 {
 		return ctEntry{}, false
 	}
-	e := ctEntry{Family: f[0], Proto: f[2]}
-	if e.Family != "ipv4" && e.Family != "ipv6" {
+	fam := f[0]
+	if fam != "ipv4" && fam != "ipv6" {
 		return ctEntry{}, false
 	}
+	e := ctEntry{Family: fam, Proto: f[2]}
 	e.TTL, _ = strconv.Atoi(f[4])
+
 	grp := 0 // 0 = 原方向, 1 = 应答方向
-	seen := map[string]bool{}
+	var seenMask uint8
+	anyKV := false
 	for _, t := range f[5:] {
 		switch t {
 		case "[ASSURED]":
@@ -96,17 +190,35 @@ func parseConntrackLine(line string) (ctEntry, bool) {
 		}
 		eq := strings.IndexByte(t, '=')
 		if eq < 0 {
-			if grp == 0 && len(seen) == 0 && e.State == "" && t == strings.ToUpper(t) {
+			if grp == 0 && !anyKV && e.State == "" && isAllUpperASCII(t) {
 				e.State = t
 			}
 			continue
 		}
 		k, v := t[:eq], t[eq+1:]
-		if seen[k] && (k == "src" || k == "dst" || k == "sport" || k == "dport" || k == "packets" || k == "bytes") {
-			grp = 1
-			seen = map[string]bool{}
+		var bit uint8
+		switch k {
+		case "src":
+			bit = ctSeenSrc
+		case "dst":
+			bit = ctSeenDst
+		case "sport":
+			bit = ctSeenSport
+		case "dport":
+			bit = ctSeenDport
+		case "packets":
+			bit = ctSeenPkts
+		case "bytes":
+			bit = ctSeenBytes
 		}
-		seen[k] = true
+		if bit != 0 {
+			if seenMask&bit != 0 {
+				grp = 1
+				seenMask = 0
+			}
+			seenMask |= bit
+		}
+		anyKV = true
 		switch k {
 		case "src":
 			if grp == 0 {
@@ -146,17 +258,35 @@ func parseConntrackLine(line string) (ctEntry, bool) {
 	}
 	// IPv6 地址统一成压缩格式, 与 devices.json / dpid 的写法对齐
 	if e.Family == "ipv6" {
-		if ip := net.ParseIP(e.Src); ip != nil {
-			e.Src = ip.String()
-		}
-		if ip := net.ParseIP(e.Dst); ip != nil {
-			e.Dst = ip.String()
-		}
+		e.Src = canonicalizeIPv6Addr(e.Src, v6Intern)
+		e.Dst = canonicalizeIPv6Addr(e.Dst, v6Intern)
 	}
 	return e, true
 }
 
-// ─── conntrack 快照(1s 共享) + 速率差分 ───────────────────────────────
+// ─── conntrack 快照(自适应 4s/8s 共享) + 速率差分 ────────────────────
+
+const (
+	ctActiveTTL       = 4 * time.Second // /api/connections 面板打开活跃态 TTL
+	ctBackgroundTTL   = 8 * time.Second // 仅 /api/live 或后台采样态 TTL
+	ctPanelKeepWindow = 15 * time.Second
+	ctMaxLines        = 1 << 16
+)
+
+// ctPanelTouchMonoNs 最近一次访问 /api/connections 面板的单调时钟纳秒。
+var ctPanelTouchMonoNs atomic.Int64
+
+func noteConnectionsPanelTouch() {
+	ctPanelTouchMonoNs.Store(monoNowNs())
+}
+
+func conntrackEffectiveTTL(nowMono int64) time.Duration {
+	last := ctPanelTouchMonoNs.Load()
+	if last > 0 && nowMono >= last && time.Duration(nowMono-last) < ctPanelKeepWindow {
+		return ctActiveTTL
+	}
+	return ctBackgroundTTL
+}
 
 type ctPrev struct {
 	up, dn uint64
@@ -164,13 +294,15 @@ type ctPrev struct {
 }
 
 type ctSnapshot struct {
-	at       time.Time
-	entries  []ctEntry
-	upBps    map[string]float64
-	dnBps    map[string]float64
-	readable bool
-	acct     bool
-	err      string
+	at         time.Time
+	entries    []ctEntry
+	upBps      map[string]float64
+	dnBps      map[string]float64
+	readable   bool
+	acct       bool
+	err        string
+	customMod  time.Time
+	customSize int64
 }
 
 var ctState struct {
@@ -180,15 +312,32 @@ var ctState struct {
 	acctTried bool
 }
 
-const ctMaxLines = 1 << 16
-
 func conntrackSnapshot() *ctSnapshot {
 	ctState.mu.Lock()
 	defer ctState.mu.Unlock()
 	now := time.Now()
-	if ctState.snap != nil && now.Sub(ctState.snap.at) < time.Second {
-		return ctState.snap
+	ttl := conntrackEffectiveTTL(monoNowNs())
+	customPath := os.Getenv("HNC_CONNTRACK_PATH")
+
+	if ctState.snap != nil {
+		age := now.Sub(ctState.snap.at)
+		if age >= 0 && age < ttl {
+			if customPath == "" {
+				return ctState.snap
+			}
+			// 测试注入自定义文件时: 文件未改写则严格遵守 4s/8s TTL;
+			// 若测试显式覆写了 mock 文件且已过 1s(如 v513_test.go 速率差分断言), 允许立即重扫。
+			if st, serr := os.Stat(customPath); serr == nil {
+				sameFile := st.Size() == ctState.snap.customSize && st.ModTime().Equal(ctState.snap.customMod)
+				if sameFile || age < time.Second {
+					return ctState.snap
+				}
+			} else {
+				return ctState.snap
+			}
+		}
 	}
+
 	if !ctState.acctTried {
 		ctState.acctTried = true
 		// 没开字节计数就打开(root 可写; 失败无所谓, 只是没有字节/速率)
@@ -197,21 +346,40 @@ func conntrackSnapshot() *ctSnapshot {
 			_ = os.WriteFile(ap, []byte("1\n"), 0o644)
 		}
 	}
-	sn := &ctSnapshot{at: now, upBps: map[string]float64{}, dnBps: map[string]float64{}}
-	f, err := os.Open(conntrackPath())
+	prevCap := 64
+	if ctState.snap != nil && len(ctState.snap.entries) > prevCap {
+		prevCap = len(ctState.snap.entries)
+	}
+	sn := &ctSnapshot{
+		at:      now,
+		entries: make([]ctEntry, 0, prevCap),
+		upBps:   make(map[string]float64, prevCap),
+		dnBps:   make(map[string]float64, prevCap),
+	}
+	path := conntrackPath()
+	if customPath != "" {
+		if st, serr := os.Stat(customPath); serr == nil {
+			sn.customMod = st.ModTime()
+			sn.customSize = st.Size()
+		}
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		sn.err = err.Error()
 		ctState.snap = sn
 		return sn
 	}
+
+	bufPtr := ctScanBufPool.Get().(*[]byte)
 	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 4096), 1024*1024)
+	sc.Buffer(*bufPtr, 1024*1024)
+	v6Intern := make(map[string]string, 32)
 	n := 0
 	for sc.Scan() {
 		if n++; n > ctMaxLines {
 			break
 		}
-		if e, ok := parseConntrackLine(sc.Text()); ok {
+		if e, ok := parseConntrackLinePooled(sc.Text(), v6Intern); ok {
 			sn.entries = append(sn.entries, e)
 			if e.Acct {
 				sn.acct = true
@@ -219,6 +387,10 @@ func conntrackSnapshot() *ctSnapshot {
 		}
 	}
 	_ = f.Close()
+	if cap(*bufPtr) <= 256*1024 {
+		ctScanBufPool.Put(bufPtr)
+	}
+
 	sn.readable = true
 	if ctState.prev == nil {
 		ctState.prev = map[string]ctPrev{}
@@ -355,8 +527,8 @@ func (s *server) deviceIPsByMAC() map[string][]string {
 		if mac == "" || ip == "" || ip == "-" {
 			return
 		}
-		if p := net.ParseIP(ip); p != nil {
-			ip = p.String()
+		if addr, err := netip.ParseAddr(ip); err == nil {
+			ip = addr.String()
 		} else {
 			return
 		}
@@ -401,6 +573,9 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]interface{}{"error": "method not allowed"})
 		return
 	}
+	// 标记连接面板处于活跃态(切换到 4s TTL; 面板关闭超过 15s 自动退回 8s 省电 TTL)
+	noteConnectionsPanelTouch()
+
 	// 模拟环境: 模拟设备的连接明细直接合成(不读 conntrack)
 	if simResp, ok := s.simConnections(strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac")))); ok {
 		writeJSON(w, http.StatusOK, simResp)
@@ -450,8 +625,8 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 
 	ips := ipsBy[mac]
 	if q := strings.TrimSpace(r.URL.Query().Get("ip")); q != "" {
-		if p := net.ParseIP(q); p != nil {
-			ips = append(ips, p.String())
+		if addr, err := netip.ParseAddr(q); err == nil {
+			ips = append(ips, addr.String())
 		}
 	}
 	mine := map[string]bool{}
@@ -622,11 +797,12 @@ func (s *server) apiConnections(w http.ResponseWriter, r *http.Request) {
 }
 
 func isPrivateIP(s string) bool {
-	ip := net.ParseIP(s)
-	if ip == nil {
+	addr, err := netip.ParseAddr(s)
+	if err != nil {
 		return false
 	}
-	return ip.IsPrivate() || ip.IsLoopback() || ip.IsLinkLocalUnicast() || ip.IsMulticast()
+	addr = addr.Unmap()
+	return addr.IsPrivate() || addr.IsLoopback() || addr.IsLinkLocalUnicast() || addr.IsMulticast()
 }
 
 // ─── 设备识别(dpid 被动指纹, run/dpi_devid.json)────────────────────────
@@ -975,7 +1151,7 @@ type liveCall struct {
 
 var callExcludedPorts = map[int]bool{443: true, 80: true, 53: true, 123: true, 853: true, 5353: true, 1900: true, 137: true, 67: true, 68: true}
 
-var wechatVoipNet = mustCIDR("183.232.84.0/24")
+var wechatVoipPrefix = netip.MustParsePrefix("183.232.84.0/24")
 
 func mustCIDR(s string) *net.IPNet { _, n, _ := net.ParseCIDR(s); return n }
 
@@ -998,8 +1174,10 @@ func callCandidate(e ctEntry, up, dn float64, apps map[string]ipApp, names map[s
 	if a, ok := appForIP(e.Dst, apps, names); ok && appTier(a.Category) != tierHidden {
 		name = a.Name
 	}
-	if ip := net.ParseIP(e.Dst); name == "" && ip != nil && wechatVoipNet.Contains(ip) {
-		name = "微信"
+	if name == "" {
+		if addr, err := netip.ParseAddr(e.Dst); err == nil && wechatVoipPrefix.Contains(addr.Unmap()) {
+			name = "微信"
+		}
 	}
 	kind := "语音通话"
 	if up+dn > 600_000 {

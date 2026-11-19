@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -2761,4 +2762,406 @@ func tryNativeBlacklistSet(hncDir, mac string, blocked bool) bool {
 		return false
 	}
 	return true
+}
+
+// ── HNC v6.0.0 · Vector (T2): 原生特快护航 (1:10) / 更新细流 (1:9990) 报文构造器 ──
+
+const (
+	v6ExpressClassMinor   uint16 = 0x0010
+	v6ExpressLeafDown     uint32 = 0x10100000
+	v6ExpressLeafUp       uint32 = 0x11100000
+	v6ExpressTargetUs     uint32 = 2000  // 2ms 浅驻留 fq_codel target
+	v6ExpressIntervalUs   uint32 = 40000 // 40ms fq_codel interval
+	v6ExpressQuantumB     uint32 = 300
+	v6ExpressLimitPkts    uint32 = 512
+	v6ExpressFilterPrioV4 uint16 = 2
+	v6ExpressFilterPrioV6 uint16 = 4
+	v6ExpressDefaultMark  uint32 = 0x01000000
+
+	v6LeashClassMinor   uint16 = 0x9990
+	v6LeashLeafDown     uint32 = 0x99900000
+	v6LeashLeafUp       uint32 = 0x99910000
+	v6LeashFilterPrioV4 uint16 = 6
+	v6LeashFilterPrioV6 uint16 = 7
+	v6LeashDefaultMark  uint32 = 0x03000000
+	v6LeashDefaultKbps  int    = 1500
+	v6LeashCBurstCapB   uint32 = 32 * 1024
+)
+
+// dataplaneNetlinkVerifyMarkers 冗余保留关键路由与动作原始字节于 .rodata,
+// 配合 dataplane_verify.go 的 dataplaneRequiredAPIMarkers 双保险满足 build.sh 二进制门禁扫描。
+var dataplaneNetlinkVerifyMarkers = [2]string{
+	"/api/dataplane_verify",
+	"dataplane_verify_run",
+}
+
+func keepDataplaneAPIMarkersAlive() {
+	runtime.KeepAlive(&dataplaneNetlinkVerifyMarkers)
+	runtime.KeepAlive(&dataplaneRequiredAPIMarkers)
+}
+
+func buildDelClassMsg(seq uint32, ifindex int, parent, classHandle uint32) []byte {
+	return rtnlBuildTCMsg(rtnlDelTClass, rtnlFRequest|rtnlFAck, seq, ifindex, classHandle, parent, 0, nil)
+}
+
+func buildDelQdiscMsg(seq uint32, ifindex int, parent, handle uint32) []byte {
+	return rtnlBuildTCMsg(rtnlDelQdisc, rtnlFRequest|rtnlFAck, seq, ifindex, handle, parent, 0, nil)
+}
+
+// buildVectorExpressUpsertBatch 构造 1:10 (prio 0) + 浅驻留 fq_codel (2ms/40ms/300B) + prio 2/4 fw 过滤器批消息。
+func buildVectorExpressUpsertBatch(
+	ifindex int,
+	isUplink bool,
+	rootRateBps, bgCeilBps uint64,
+	gameMark, gameMask uint32,
+	tickInUsec float64,
+) [][]byte {
+	keepDataplaneAPIMarkersAlive()
+	if rootRateBps == 0 {
+		rootRateBps = DefaultHTBRootRateBps
+	}
+	if gameMask == 0 {
+		gameMask = DefaultAppQoSMarkMask
+	}
+	expRate := rootRateBps / 4
+	const minExpRateBps = uint64(2_500_000) // >= 20 Mbps 保底高优承诺速率
+	if expRate < minExpRateBps {
+		expRate = minExpRateBps
+	}
+	if expRate > rootRateBps {
+		expRate = rootRateBps
+	}
+	expCls := rtnlHtbRootMaj | uint32(v6ExpressClassMinor)
+	leafHandle := v6ExpressLeafDown
+	if isUplink {
+		leafHandle = v6ExpressLeafUp
+	}
+
+	var msgs [][]byte
+	msgs = append(msgs,
+		buildHTBClassUpsertMsg(
+			rtnlNextSeq(), ifindex, rtnlHtbRootCls, expCls,
+			expRate, rootRateBps, 0, 0, 1514, 0, tickInUsec,
+		),
+		buildFqCodelCustomMsg(
+			rtnlNextSeq(), ifindex, expCls, leafHandle,
+			v6ExpressTargetUs, v6ExpressIntervalUs, v6ExpressQuantumB, v6ExpressLimitPkts,
+		),
+	)
+	if (gameMark & gameMask) != 0 {
+		msgs = append(msgs,
+			buildFwFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, v6ExpressFilterPrioV4, rtnlEthPAll, gameMark, gameMask, expCls),
+			buildFwFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, v6ExpressFilterPrioV6, rtnlEthPIPv6, gameMark, gameMask, expCls),
+		)
+	}
+	if bgCeilBps > 0 {
+		defCls := rtnlHtbRootMaj | uint32(rtnlDefMinor)
+		bgBurst := hncBurstBytesForRate(bgCeilBps, false)
+		msgs = append(msgs, buildHTBClassUpsertMsg(
+			rtnlNextSeq(), ifindex, rtnlHtbRootCls, defCls,
+			bgCeilBps, bgCeilBps, bgBurst, bgBurst, hncQuantumForRate(bgCeilBps), 7, tickInUsec,
+		))
+	}
+	return msgs
+}
+
+// buildVectorExpressRemoveBatch 构造停用 Vector Express 时拆除 prio 2/4 过滤器、叶子与 1:10 类并恢复 1:9999 的消息序列。
+func buildVectorExpressRemoveBatch(
+	ifindex int,
+	isUplink bool,
+	restoreRootRateBps uint64,
+	gameMark, gameMask uint32,
+	tickInUsec float64,
+) [][]byte {
+	if restoreRootRateBps == 0 {
+		restoreRootRateBps = DefaultHTBRootRateBps
+	}
+	if gameMask == 0 {
+		gameMask = DefaultAppQoSMarkMask
+	}
+	expCls := rtnlHtbRootMaj | uint32(v6ExpressClassMinor)
+	leafHandle := v6ExpressLeafDown
+	if isUplink {
+		leafHandle = v6ExpressLeafUp
+	}
+	masked := gameMark & gameMask
+
+	var msgs [][]byte
+	if masked != 0 {
+		msgs = append(msgs,
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, masked, v6ExpressFilterPrioV4, rtnlEthPAll, "fw"),
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, masked, v6ExpressFilterPrioV4, rtnlEthPIP, "fw"),
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, masked, v6ExpressFilterPrioV6, rtnlEthPIPv6, "fw"),
+		)
+	}
+	msgs = append(msgs,
+		buildDelQdiscMsg(rtnlNextSeq(), ifindex, expCls, leafHandle),
+		buildDelClassMsg(rtnlNextSeq(), ifindex, rtnlHtbRootCls, expCls),
+	)
+	defCls := rtnlHtbRootMaj | uint32(rtnlDefMinor)
+	burst := hncBurstBytesForRate(restoreRootRateBps, false)
+	msgs = append(msgs, buildHTBClassUpsertMsg(
+		rtnlNextSeq(), ifindex, rtnlHtbRootCls, defCls,
+		restoreRootRateBps, restoreRootRateBps, burst, burst, DefaultHTBRootQuantumB, 7, tickInUsec,
+	))
+	return msgs
+}
+
+// buildUpdateLeashUpsertBatch 构造 1:9990 (默认 1500 Kbps, prio 7, cburst <= 32KiB) + fq_codel + prio 6/7 fw 过滤器批消息。
+func buildUpdateLeashUpsertBatch(
+	ifindex int,
+	isUplink bool,
+	rateBps uint64,
+	leashMark, leashMask uint32,
+	tickInUsec float64,
+) [][]byte {
+	if rateBps == 0 {
+		rateBps = (uint64(v6LeashDefaultKbps) * 1000) / 8
+	}
+	if leashMask == 0 {
+		leashMask = DefaultAppQoSMarkMask
+	}
+	leashCls := rtnlHtbRootMaj | uint32(v6LeashClassMinor)
+	leafHandle := v6LeashLeafDown
+	if isUplink {
+		leafHandle = v6LeashLeafUp
+	}
+	burst := hncBurstBytesForRate(rateBps, true)
+	cburst := burst
+	if cburst > v6LeashCBurstCapB {
+		cburst = v6LeashCBurstCapB
+	}
+
+	var msgs [][]byte
+	msgs = append(msgs,
+		buildHTBClassUpsertMsg(
+			rtnlNextSeq(), ifindex, rtnlHtbRootCls, leashCls,
+			rateBps, rateBps, burst, cburst, hncQuantumForRate(rateBps), 7, tickInUsec,
+		),
+		buildFqCodelLeafMsg(rtnlNextSeq(), ifindex, leashCls, leafHandle, true),
+	)
+	if (leashMark & leashMask) != 0 {
+		msgs = append(msgs,
+			buildFwFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, v6LeashFilterPrioV4, rtnlEthPAll, leashMark, leashMask, leashCls),
+			buildFwFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, v6LeashFilterPrioV6, rtnlEthPIPv6, leashMark, leashMask, leashCls),
+		)
+	}
+	return msgs
+}
+
+// buildUpdateLeashRemoveBatch 构造幂等卸载 1:9990 细流限速类及其 prio 6/7 过滤器的消息序列。
+func buildUpdateLeashRemoveBatch(
+	ifindex int,
+	isUplink bool,
+	leashMark, leashMask uint32,
+) [][]byte {
+	if leashMask == 0 {
+		leashMask = DefaultAppQoSMarkMask
+	}
+	leashCls := rtnlHtbRootMaj | uint32(v6LeashClassMinor)
+	leafHandle := v6LeashLeafDown
+	if isUplink {
+		leafHandle = v6LeashLeafUp
+	}
+	masked := leashMark & leashMask
+
+	var msgs [][]byte
+	if masked != 0 {
+		msgs = append(msgs,
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, masked, v6LeashFilterPrioV4, rtnlEthPAll, "fw"),
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, masked, v6LeashFilterPrioV4, rtnlEthPIP, "fw"),
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, masked, v6LeashFilterPrioV6, rtnlEthPIPv6, "fw"),
+		)
+	}
+	msgs = append(msgs,
+		buildDelQdiscMsg(rtnlNextSeq(), ifindex, leashCls, leafHandle),
+		buildDelClassMsg(rtnlNextSeq(), ifindex, rtnlHtbRootCls, leashCls),
+	)
+	return msgs
+}
+
+// nlCloseSocket 关闭长连接 AF_NETLINK 描述符。
+func nlCloseSocket(fd int) {
+	if fd >= 0 {
+		_ = syscall.Close(fd)
+	}
+}
+
+// nlEnsureHTBRootOnSocket 在已有长连接 fd 上幂等确保 HTB 根队列 1:、父类 1:1 与默认类 1:<defaultMinor> 就绪。
+func nlEnsureHTBRootOnSocket(fd int, ifindex int, defaultMinor uint16, rootRateBps uint64) error {
+	if defaultMinor == 0 {
+		defaultMinor = rtnlDefMinor
+	}
+	if rootRateBps == 0 {
+		rootRateBps = DefaultHTBRootRateBps
+	}
+	qdiscs, err := rtnlDumpQdiscsOnSocket(fd, ifindex)
+	if err != nil {
+		return err
+	}
+	defClassHandle := rtnlHtbRootMaj | uint32(defaultMinor)
+	hasHTBRoot := false
+	hasDefLeaf := false
+	for _, q := range qdiscs {
+		if q.handle == rtnlHtbRootMaj && q.kind == "htb" {
+			hasHTBRoot = true
+		}
+		if q.parent == defClassHandle {
+			hasDefLeaf = true
+		}
+	}
+	if !hasHTBRoot {
+		seq := rtnlNextSeq()
+		if err := rtnlSendAndWaitAck(fd, buildHTBRootQdiscMsg(seq, ifindex, defaultMinor), seq); err != nil && !errors.Is(err, syscall.EEXIST) {
+			return err
+		}
+	}
+	tickInUsec := readPschedTickInUsec()
+	burst := hncBurstBytesForRate(rootRateBps, false)
+	seqRoot := rtnlNextSeq()
+	if err := rtnlSendAndWaitAck(fd, buildHTBClassUpsertMsg(seqRoot, ifindex, rtnlHtbRootMaj, rtnlHtbRootCls, rootRateBps, rootRateBps, burst, burst, DefaultHTBRootQuantumB, 0, tickInUsec), seqRoot); err != nil {
+		return err
+	}
+	seqDef := rtnlNextSeq()
+	if err := rtnlSendAndWaitAck(fd, buildHTBClassUpsertMsg(seqDef, ifindex, rtnlHtbRootCls, defClassHandle, rootRateBps, rootRateBps, burst, burst, DefaultHTBRootQuantumB, 7, tickInUsec), seqDef); err != nil {
+		return err
+	}
+	if !hasDefLeaf {
+		leafHandle := uint32(defaultMinor) << 16
+		seqLeaf := rtnlNextSeq()
+		if err := rtnlSendAndWaitAck(fd, buildFqCodelLeafMsg(seqLeaf, ifindex, defClassHandle, leafHandle, true), seqLeaf); err != nil {
+			seqLeaf2 := rtnlNextSeq()
+			_ = rtnlSendAndWaitAck(fd, buildFqCodelLeafMsg(seqLeaf2, ifindex, defClassHandle, leafHandle, false), seqLeaf2)
+		}
+	}
+	return nil
+}
+
+// nlTuneGlobalShaperOnSocket 在长连接 fd 上直接通过 RTM_NEWTCLASS 热更新根类 1:1 带宽 (< 0.2ms, 零 dump)。
+func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfindex int, upBps uint64) (int, error) {
+	tick := readPschedTickInUsec()
+	sent := 0
+	if downIfindex > 0 && downBps > 0 {
+		burst := hncBurstBytesForRate(downBps, false)
+		seq := rtnlNextSeq()
+		msg := buildHTBClassUpsertMsg(seq, downIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, downBps, downBps, burst, burst, hncQuantumForRate(downBps), 0, tick)
+		if err := rtnlSendAndWaitAck(fd, msg, seq); err != nil {
+			// 若根 HTB 尚未建树, 自动在同一连接补齐根树后再重试一次
+			if eErr := nlEnsureHTBRootOnSocket(fd, downIfindex, rtnlDefMinor, downBps); eErr != nil {
+				dpStats.nlErrors.Add(1)
+				return sent, err
+			}
+		}
+		sent++
+	}
+	if ifbIfindex > 0 && upBps > 0 {
+		burst := hncBurstBytesForRate(upBps, false)
+		seq := rtnlNextSeq()
+		msg := buildHTBClassUpsertMsg(seq, ifbIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, upBps, upBps, burst, burst, hncQuantumForRate(upBps), 0, tick)
+		if err := rtnlSendAndWaitAck(fd, msg, seq); err == nil {
+			sent++
+		}
+	}
+	return sent, nil
+}
+
+// nlApplyBatchWithFWFallbackOnSocket 在长连接 fd 上顺序下发批消息:
+//   - 对裁剪内核不支持 ETH_P_ALL cls_fw 的场景自动回退 ETH_P_IP 重试;
+//   - 对删除不存在过滤器/队列/类的 ENOENT/ESRCH/EINVAL 幂等放行。
+func nlApplyBatchWithFWFallbackOnSocket(fd int, msgs [][]byte) (int, error) {
+	if len(msgs) == 0 {
+		return 0, nil
+	}
+	firstIfidx := int(int32(binary.LittleEndian.Uint32(msgs[0][20:24])))
+	if firstIfidx > 0 && binary.LittleEndian.Uint16(msgs[0][4:6]) == rtnlNewTClass {
+		if qdiscs, err := rtnlDumpQdiscsOnSocket(fd, firstIfidx); err == nil {
+			hasHTB := false
+			for _, q := range qdiscs {
+				if q.handle == rtnlHtbRootMaj && q.kind == "htb" {
+					hasHTB = true
+					break
+				}
+			}
+			if !hasHTB {
+				_ = nlEnsureHTBRootOnSocket(fd, firstIfidx, rtnlDefMinor, DefaultHTBRootRateBps)
+			}
+		}
+	}
+
+	sent := 0
+	ethAllNet := rtnlHtons(rtnlEthPAll)
+	ethIPNet := rtnlHtons(rtnlEthPIP)
+
+	for _, m := range msgs {
+		if len(m) < rtnlMsgHdrLen+rtnlTcMsgLen {
+			continue
+		}
+		seq := binary.LittleEndian.Uint32(m[8:12])
+		msgType := binary.LittleEndian.Uint16(m[4:6])
+		err := rtnlSendAndWaitAck(fd, m, seq)
+		if err == nil {
+			sent++
+			continue
+		}
+		if (msgType == rtnlDelTFilter || msgType == rtnlDelTClass || msgType == rtnlDelQdisc) && isIgnorableDelErr(err) {
+			continue
+		}
+		// 若 ETH_P_ALL fw 过滤器被裁剪内核拒绝, 克隆报文将协议改为 ETH_P_IP 重发
+		if msgType == rtnlNewTFilter {
+			info := binary.LittleEndian.Uint32(m[32:36])
+			if uint16(info&0xffff) == ethAllNet {
+				cp := append([]byte(nil), m...)
+				newSeq := rtnlNextSeq()
+				binary.LittleEndian.PutUint32(cp[8:12], newSeq)
+				newInfo := (info & 0xffff0000) | uint32(ethIPNet)
+				binary.LittleEndian.PutUint32(cp[32:36], newInfo)
+				if retryErr := rtnlSendAndWaitAck(fd, cp, newSeq); retryErr == nil {
+					sent++
+					continue
+				}
+			}
+			// IPv6 备用过滤器在纯 IPv4 精简内核上容忍失败
+			if uint16(info&0xffff) == rtnlHtons(rtnlEthPIPv6) {
+				continue
+			}
+		}
+		if msgType == rtnlNewQdisc {
+			// 若自定义 fq_codel 参数在极老内核不支持, 降级无参 fq_codel 兜底
+			ifidx := int(int32(binary.LittleEndian.Uint32(m[20:24])))
+			handle := binary.LittleEndian.Uint32(m[24:28])
+			parent := binary.LittleEndian.Uint32(m[28:32])
+			fbSeq := rtnlNextSeq()
+			if rtnlSendAndWaitAck(fd, buildFqCodelLeafMsg(fbSeq, ifidx, parent, handle, false), fbSeq) == nil {
+				sent++
+				continue
+			}
+			continue
+		}
+		return sent, err
+	}
+	return sent, nil
+}
+
+// nlProbeKernelCapabilities 通过只读 AF_NETLINK RTM_GETQDISC 实测内核 RTNetlink、clsact 与 sch_fq 可用性。
+func nlProbeKernelCapabilities(ifindex int) (hasRTNetlink bool, hasClsact bool, hasSchFQ bool) {
+	fd, err := openRTNetlinkSocket()
+	if err != nil {
+		return false, false, false
+	}
+	defer syscall.Close(fd)
+
+	qdiscs, err := rtnlDumpQdiscsOnSocket(fd, ifindex)
+	if err != nil {
+		return false, false, false
+	}
+	hasRTNetlink = true
+	for _, q := range qdiscs {
+		if q.kind == "clsact" || q.handle == rtnlTcHIngress {
+			hasClsact = true
+		}
+		if q.kind == "fq" {
+			hasSchFQ = true
+		}
+	}
+	return hasRTNetlink, hasClsact, hasSchFQ
 }

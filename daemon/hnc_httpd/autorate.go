@@ -675,11 +675,30 @@ func (s *server) autorateStep(cfg autorateConfig) {
 
 	tunedOK := false
 	if needTune {
-		rc, out := runBin(s.hncDir, "tc_manager.sh", "global_shaper_tune", hotspotIface, mbpsToTcRate(nextDown), mbpsToTcRate(nextUp))
-		if rc == 0 {
-			tunedOK = true
-		} else {
-			log.Printf("autorate: global_shaper_tune failed on %s: %s", hotspotIface, strings.TrimSpace(out))
+		hncDir := ctl.hncDir
+		if hncDir == "" {
+			hncDir = s.hncDir
+		}
+		downKbps := int(math.Round(nextDown * 1000))
+		upKbps := int(math.Round(nextUp * 1000))
+		if downKbps < minRateKbit {
+			downKbps = minRateKbit
+		}
+		if upKbps < minRateKbit {
+			upKbps = minRateKbit
+		}
+		if useNativeDataplane(hncDir) {
+			if err := TuneGlobalShaperNative(hncDir, downKbps, upKbps); err == nil {
+				tunedOK = true
+			}
+		}
+		if !tunedOK {
+			rc, out := runBin(s.hncDir, "tc_manager.sh", "global_shaper_tune", hotspotIface, mbpsToTcRate(nextDown), mbpsToTcRate(nextUp))
+			if rc == 0 {
+				tunedOK = true
+			} else {
+				log.Printf("autorate: global_shaper_tune failed on %s: %s", hotspotIface, strings.TrimSpace(out))
+			}
 		}
 	}
 

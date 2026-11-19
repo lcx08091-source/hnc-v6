@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// v5.14: QUIC Initial 解密 / 重组 / gQUIC CHLO 测试。
+// v5.14 + v6.0.0: QUIC Initial 解密 / 后量子 X25519MLKEM768 乱序 2~4 包重组 / DCID 切换 / gQUIC CHLO 测试。
 
 func mustHex(t testing.TB, s string) []byte {
 	t.Helper()
@@ -230,10 +230,14 @@ func appendVarint(b []byte, v uint64) []byte {
 }
 
 // sealQUICInitial 构造受保护的客户端 Initial: AEAD 加密 + header protection。
-// Length 固定用 2 字节 varint(与 RFC 9001 A.2 一致)。
-func sealQUICInitial(t testing.TB, p *quicVersionParams, dcid, scid, token []byte, pn uint64, pnLen int, payload []byte) []byte {
+// keyDCID 允许单独指定派生密钥用的原始 ODCID(传 nil 时默认用 header 里的 dcid),
+// 用于模拟服务端回包后客户端切换 header DCID 但沿用初始密钥的 RFC 9001 §5.2 行为。
+func sealQUICInitialWithKeyDCID(t testing.TB, p *quicVersionParams, headerDCID, keyDCID, scid, token []byte, pn uint64, pnLen int, payload []byte) []byte {
 	t.Helper()
-	k, ok := deriveQUICClientKeys(p, dcid)
+	if keyDCID == nil {
+		keyDCID = headerDCID
+	}
+	k, ok := deriveQUICClientKeys(p, keyDCID)
 	if !ok {
 		t.Fatal("derive")
 	}
@@ -249,8 +253,8 @@ func sealQUICInitial(t testing.TB, p *quicVersionParams, dcid, scid, token []byt
 	b0 := byte(0xc0) | p.initialType<<4 | byte(pnLen-1)
 	hdr := []byte{b0}
 	hdr = binary.BigEndian.AppendUint32(hdr, ver)
-	hdr = append(hdr, byte(len(dcid)))
-	hdr = append(hdr, dcid...)
+	hdr = append(hdr, byte(len(headerDCID)))
+	hdr = append(hdr, headerDCID...)
 	hdr = append(hdr, byte(len(scid)))
 	hdr = append(hdr, scid...)
 	hdr = appendVarint(hdr, uint64(len(token)))
@@ -275,9 +279,13 @@ func sealQUICInitial(t testing.TB, p *quicVersionParams, dcid, scid, token []byt
 	return out
 }
 
+func sealQUICInitial(t testing.TB, p *quicVersionParams, dcid, scid, token []byte, pn uint64, pnLen int, payload []byte) []byte {
+	return sealQUICInitialWithKeyDCID(t, p, dcid, dcid, scid, token, pn, pnLen, payload)
+}
+
 func unprotectedHeaderForTest(t testing.TB, pkt []byte, h *quicLongHeader, k *quicKeys) []byte {
 	var mask [16]byte
-	k.hp.Encrypt(mask[:], pkt[h.pnOffset+4:h.pnOffset+20])
+	k.hp.Encrypt(mask[:], pkt[h.pnOffset+4:pnOffset+20])
 	out := append([]byte(nil), pkt[:h.pnOffset+4]...)
 	out[0] ^= mask[0] & 0x0f
 	pnLen := int(out[0]&3) + 1
@@ -287,7 +295,7 @@ func unprotectedHeaderForTest(t testing.TB, pkt []byte, h *quicLongHeader, k *qu
 	return out[:h.pnOffset+pnLen]
 }
 
-// ── 构造 Chrome 风格的大 ClientHello ─────────────────────────────────────
+// ── 构造 Chrome 风格大 ClientHello 与后量子 X25519MLKEM768 ClientHello ──
 
 func tlsExt(typ uint16, data []byte) []byte {
 	b := binary.BigEndian.AppendUint16(nil, typ)
@@ -315,6 +323,68 @@ func buildQUICClientHello(sni string, padLen int) []byte {
 	ext = append(ext, tlsExt(0x000d, []byte{0x00, 0x04, 0x04, 0x03, 0x08, 0x04})...)
 	ext = append(ext, tlsExt(0x0039, []byte{0x01, 0x04, 0x80, 0x00, 0x75, 0x30, 0x04, 0x04, 0x80, 0x10, 0x00, 0x00})...)
 	ext = append(ext, tlsExt(0x0015, make([]byte, padLen))...)
+	body = binary.BigEndian.AppendUint16(body, uint16(len(ext)))
+	body = append(body, ext...)
+	hs := []byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
+	return append(hs, body...)
+}
+
+// buildPQX25519MLKEM768ClientHello 构造真实 Chrome 131+ / Cronet 风格的后量子
+// X25519MLKEM768 (group 0x11ec, 公钥 1216B = 1184B ML-KEM-768 ek + 32B X25519)
+// QUIC ClientHello, 故意把 server_name 放在大号 key_share 与附加扩展之后(落在第 3~4 个包),
+// 精确复现后量子握手 SNI 跨 3~4 个乱序 UDP 包的场景。
+func buildPQX25519MLKEM768ClientHello(sni string, extraPad int) []byte {
+	body := []byte{0x03, 0x03}
+	body = append(body, bytes.Repeat([]byte{0xcd}, 32)...)
+	body = append(body, 0)                                              // QUIC legacy_session_id = empty
+	body = append(body, 0x00, 0x06, 0x13, 0x01, 0x13, 0x02, 0x13, 0x03) // TLS 1.3 ciphers
+	body = append(body, 0x01, 0x00)                                     // null compression
+
+	var ext []byte
+	ext = append(ext, tlsExt(0x1a1a, nil)...) // GREASE
+
+	// supported_groups: GREASE(0x2a2a), X25519MLKEM768(0x11ec), X25519(0x001d), P-256(0x0017)
+	groups := []byte{
+		0x00, 0x08,
+		0x2a, 0x2a,
+		0x11, 0xec,
+		0x00, 0x1d,
+		0x00, 0x17,
+	}
+	ext = append(ext, tlsExt(0x000a, groups)...)
+
+	// key_share: X25519MLKEM768 (1216 bytes) + X25519 fallback (32 bytes)
+	pqPub := bytes.Repeat([]byte{0x5e}, 1216)
+	x25519Pub := bytes.Repeat([]byte{0x3c}, 32)
+	var shares []byte
+	shares = binary.BigEndian.AppendUint16(shares, tlsGroupX25519MLKEM768)
+	shares = binary.BigEndian.AppendUint16(shares, uint16(len(pqPub)))
+	shares = append(shares, pqPub...)
+	shares = binary.BigEndian.AppendUint16(shares, 0x001d)
+	shares = binary.BigEndian.AppendUint16(shares, uint16(len(x25519Pub)))
+	shares = append(shares, x25519Pub...)
+	ksExt := binary.BigEndian.AppendUint16(nil, uint16(len(shares)))
+	ksExt = append(ksExt, shares...)
+	ext = append(ext, tlsExt(0x0033, ksExt)...)
+
+	// ALPN h3 + supported_versions + signature_algorithms + quic_transport_parameters
+	ext = append(ext, tlsExt(0x0010, []byte{0x00, 0x03, 0x02, 'h', '3'})...)
+	ext = append(ext, tlsExt(0x002b, []byte{0x02, 0x03, 0x04})...)
+	ext = append(ext, tlsExt(0x000d, []byte{0x00, 0x06, 0x04, 0x03, 0x08, 0x04, 0x04, 0x01})...)
+	ext = append(ext, tlsExt(0x0039, []byte{0x01, 0x04, 0x80, 0x00, 0x75, 0x30, 0x04, 0x04, 0x80, 0x10, 0x00, 0x00})...)
+
+	// 附加扩展/PSK 票据模拟体积, 把总大小推到 3300+ 字节(需 4 个 Initial 包), 且让 SNI 落在尾部!
+	if extraPad > 0 {
+		ext = append(ext, tlsExt(0x0015, bytes.Repeat([]byte{0x00}, extraPad))...)
+	}
+
+	// server_name 置于扩展尾部(模拟 Chrome 随机打乱扩展顺序使 SNI 落在第 4 包)
+	sn := []byte{0}
+	sn = binary.BigEndian.AppendUint16(sn, uint16(len(sni)))
+	sn = append(sn, sni...)
+	ext = append(ext, tlsExt(0x0000, append(binary.BigEndian.AppendUint16(nil, uint16(len(sn))), sn...))...)
+	ext = append(ext, tlsExt(0x3a3a, []byte{0x00})...) // BoringSSL 尾部 1B GREASE
+
 	body = binary.BigEndian.AppendUint16(body, uint16(len(ext)))
 	body = append(body, ext...)
 	hs := []byte{0x01, byte(len(body) >> 16), byte(len(body) >> 8), byte(len(body))}
@@ -409,6 +479,100 @@ func TestQUICReassemblyChaos(t *testing.T) {
 	}
 	if got := quicStats.decryptFail.Load() - failBefore; got != 0 {
 		t.Errorf("decryptFail delta=%d want 0", got)
+	}
+}
+
+// TestQUICPostQuantumX25519MLKEM768FourPacketsOutOfOrder 验证后量子 X25519MLKEM768
+// (~3.4KB ClientHello) 跨 4 个乱序 UDP 包、夹杂重叠分片、跨 1 字节包号回绕(0xfe..0x101)
+// 以及服务端提前回包导致第 4 包切换 header DCID 但沿用初始 ODCID 密钥的完整场景。
+func TestQUICPostQuantumX25519MLKEM768FourPacketsOutOfOrder(t *testing.T) {
+	resetQUICState(t)
+	wantSNI := "pq-h3-api.bilibili.com"
+	ch := buildPQX25519MLKEM768ClientHello(wantSNI, 1850)
+	if len(ch) < 3200 {
+		t.Fatalf("expected >=3200B PQ ClientHello, got %d", len(ch))
+	}
+	if !QUICHasPQKeyExchange(ch) {
+		t.Fatal("QUICHasPQKeyExchange failed to detect X25519MLKEM768 (0x11ec)")
+	}
+
+	// 切成 8 个子 CRYPTO 帧并分装进 4 个 UDP Initial 包:
+	//   pkt0(pn=0xfe, 2B pn): [0..420) + [420..920)
+	//   pkt1(pn=0xff, 1B pn): [920..1450) + [1450..1860)
+	//   pkt2(pn=0x100, 1B pn 截断为 0x00!): [1860..2350) + [2350..2780)
+	//   pkt3(pn=0x101, 1B pn 截断为 0x01 + 切换为服务端新 DCID!): [2750..3120)(含 30B 重叠) + [3120..end)
+	f0 := append(cryptoFrame(0, ch[0:420]), cryptoFrame(420, ch[420:920])...)
+	f1 := append(cryptoFrame(920, ch[920:1450]), cryptoFrame(1450, ch[1450:1860])...)
+	f2 := append(cryptoFrame(1860, ch[1860:2350]), cryptoFrame(2350, ch[2350:2780])...)
+	f3 := append(cryptoFrame(2750, ch[2750:3120]), cryptoFrame(3120, ch[3120:])...)
+
+	odcid := []byte{0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88}
+	srvSwitchedDCID := []byte{0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0x01, 0x02}
+	scid := []byte{0x99, 0x88, 0x77, 0x66}
+
+	pk0 := sealQUICInitialWithKeyDCID(t, quicParamsV1, odcid, odcid, scid, nil, 0x00fe, 2, padTo(f0, 1162))
+	pk1 := sealQUICInitialWithKeyDCID(t, quicParamsV1, odcid, odcid, scid, nil, 0x00ff, 1, padTo(f1, 1162))
+	pk2 := sealQUICInitialWithKeyDCID(t, quicParamsV1, odcid, odcid, scid, nil, 0x0100, 1, padTo(f2, 1162))
+	pk3 := sealQUICInitialWithKeyDCID(t, quicParamsV1, srvSwitchedDCID, odcid, scid, nil, 0x0101, 1, padTo(f3, 1162))
+
+	// 以完全乱序 [pk1 -> pk3(新DCID+尾段SNI) -> pk0(首段) -> pk2(补齐中间缺口)] 送入解析器!
+	// 注意 pk1 先以 2B 包号锚定或 pk0 先锚定: 这里测试 pk0(0x00fe) -> pk3(0x0101, 新DCID) -> pk2(0x0100) -> pk1(0x00ff) 乱序到达!
+	order := [][]byte{pk0, pk3, pk2, pk1}
+	ts := time.Unix(8800, 0)
+	reasmBefore, pqBefore := QUICPQStats()
+	failBefore := quicStats.decryptFail.Load()
+
+	for idx := 0; idx < 3; idx++ {
+		ev, res := parsePacket(withEther(udp4(54321, 443, order[idx]), false), ts.Add(time.Duration(idx*10)*time.Millisecond))
+		if res != ParseIgnore {
+			t.Fatalf("step %d should be incomplete ParseIgnore, got res=%v kind=%v", idx, res, ev.Kind)
+		}
+	}
+
+	ev, res := parsePacket(withEther(udp4(54321, 443, order[3]), false), ts.Add(40*time.Millisecond))
+	if res != ParseOK || ev.Kind != EventTLSClientHello {
+		t.Fatalf("final out-of-order PQ packet failed: res=%v kind=%v", res, ev.Kind)
+	}
+	if ev.TLS.SNI != wantSNI {
+		t.Fatalf("SNI=%q want %q", ev.TLS.SNI, wantSNI)
+	}
+	if !ev.TLS.IsQUIC || !strings.HasPrefix(ev.TLS.JA4, "q13d") {
+		t.Errorf("IsQUIC=%v JA4=%q", ev.TLS.IsQUIC, ev.TLS.JA4)
+	}
+	if len(ev.TLS.ALPN) != 1 || ev.TLS.ALPN[0] != "h3" {
+		t.Errorf("ALPN=%v want [h3]", ev.TLS.ALPN)
+	}
+	if gotFail := quicStats.decryptFail.Load() - failBefore; gotFail != 0 {
+		t.Errorf("decryptFail delta=%d want 0 across ODCID switch & PN wrap", gotFail)
+	}
+	reasmAfter, pqAfter := QUICPQStats()
+	if reasmAfter != reasmBefore+1 || pqAfter != pqBefore+1 {
+		t.Errorf("PQ stats mismatch: reasm=%d->%d pq=%d->%d", reasmBefore, reasmAfter, pqBefore, pqAfter)
+	}
+}
+
+// TestQUICPostQuantumReverseOrder3Packets 验证无包号截断回绕时完全逆序 (#3 -> #2 -> #1) 3 包重组。
+func TestQUICPostQuantumReverseOrder3Packets(t *testing.T) {
+	resetQUICState(t)
+	wantSNI := "edge-mlkem768.cloudflare-quic.example.com"
+	ch := buildPQX25519MLKEM768ClientHello(wantSNI, 900)
+	c1, c2 := len(ch)/3, (len(ch)*2)/3
+	dcid := []byte{0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7, 0xa8}
+
+	p1 := sealQUICInitial(t, quicParamsV2, dcid, nil, nil, 1, 2, padTo(cryptoFrame(0, ch[:c1]), 1162))
+	p2 := sealQUICInitial(t, quicParamsV2, dcid, nil, nil, 2, 2, padTo(cryptoFrame(c1, ch[c1:c2]), 1162))
+	p3 := sealQUICInitial(t, quicParamsV2, dcid, nil, nil, 3, 2, padTo(cryptoFrame(c2, ch[c2:]), 1162))
+
+	ts := time.Unix(9100, 0)
+	if _, res := parseRawIPPacket(udp6(55123, 443, p3), ts); res != ParseIgnore {
+		t.Fatalf("p3 first should wait: %v", res)
+	}
+	if _, res := parseRawIPPacket(udp6(55123, 443, p2), ts.Add(5*time.Millisecond)); res != ParseIgnore {
+		t.Fatalf("p2 second should wait: %v", res)
+	}
+	ev, res := parseRawIPPacket(udp6(55123, 443, p1), ts.Add(10*time.Millisecond))
+	if res != ParseOK || ev.TLS.SNI != wantSNI {
+		t.Fatalf("reverse 3-pkt QUIC v2 PQ failed: res=%v sni=%q", res, ev.TLS.SNI)
 	}
 }
 
