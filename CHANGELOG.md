@@ -14,6 +14,34 @@
 
 ---
 
+## [5.40.0] - 2026-11-19
+
+### 工具链与运行时现代化升级（T1：Go 1.27 + Android NDK r30 LTS）
+- **双守护进程全面跃迁至 Go 1.27**：同步升级 `daemon/hnc_httpd` 与 `src/dpid` 工具链至 Go 1.27，默认启用 **Green Tea GC** 低延迟垃圾回收器、原生 **Swiss Tables** 高密度 Map、默认 **`encoding/json` v2** 高吞吐序列化引擎与 `<80B` 小对象快速分配器，显著降低热点高并发连接下的 CPU 抖动与常驻内存开销。
+- **按需协程泄漏诊断与 `pidfd` 看门狗**：接入 Go 1.27 原生 `runtime/pprof` **`goroutineleak`** 零闲置开销按需阻塞协程扫描能力，并将子进程守护升级为 Linux **`pidfd`** 内核文件描述符级看门狗，彻底消除传统 PID 轮询复用竞态。
+- **Android NDK r30 LTS 与 16KB 内存页原生对齐**：C11/eBPF 数据面组件全面升级至 **Android NDK r30 LTS**，统一 `API 28` 编译目标并默认开启 **16KB 页对齐**（`-Wl,-z,max-page-size=16384`），无缝兼容 Android 15/16 新一代 16KB 页大小旗舰内核，保持纯正 `Go + C11/eBPF` 高内聚双栈架构。
+
+### Android 13–16 真机数据面限速 9 项根因根治（T2）
+- **32 位 `skb->mark` 正交高位掩码保护**：重构防火墙与流量控制标记位域，设备级正交标记统一采用 `0x00800000 | (mid << 16)` 配合高位掩码 `0xffff0000`（`--set-xmark` / `--nfmask` / `--ctmask` 及 `tc fw` 掩码匹配），100% 完整保留低 16 位 `0x0000ffff` 给 Android `netd` `netId` 策略路由，根治开启限速后策略路由失效或断流问题。
+- **单应用 HTB 子类层级归位**：将单应用限速 HTB 子类（`1:9001..`）父节点由根类 `1:1`（`1000mbit`）修正挂载至所属客户端设备类 `1:<cid>` 名下，确保单应用分流带宽严格受限于该终端总速率上限。
+- **eBPF `clsact` 着色返回码修正**：`hnc_clsact.bpf.c` 完成数据包标记后统一返回 `TC_ACT_UNSPEC (-1)` 替代原先提前放行的 `TC_ACT_OK`，确保后续 `prio 2` 的 `ifb0` 镜像重定向与 `tc police` 过滤器完整串联执行。
+- **双栈 L2/L3 着色与 `ifb0` 解耦**：将 `mac_mark_map` 与 `ip_mark_map` 的双栈 `clsact` 着色挂载与 `ifb0` 状态解耦，严格隔离 `prio 1`（eBPF 着色）与 `prio 2`（`mirred` 重定向 / `police` 限速）过滤链优先级。
+- **GRO 安全双栈 `tc police` 兜底整形**：为 IPv4/IPv6 双栈 `tc police` 兜底整形器统一配置 `burst >= 64KB`（默认 `128KB`），彻底消除 GRO/GSO 大包聚合场景下的突发误丢包与测速锯齿。
+- **`T+0` 零延迟硬件卸载全链路无崩溃压制**：设备纳入限速管控瞬间同步预置 `tether_limit_map=0`、动态跨版本驱逐 `tether_downstream4_map` / `tether_downstream6_map` 存量加速表项、置位 `tether_offload_disabled=1`，并无内核崩溃风险地联动压制高通 **Qualcomm IPA/ECM** 与联发科 **MediaTek MDDP+HNAT** 硬件快径旁路。
+- **双栈 QUIC（UDP 443）防逃逸管控**：限速与阻断策略同步覆盖 IPv4/IPv6 双栈 `UDP 443`（HTTP/3 QUIC）流量，封堵客户端通过 IPv6 QUIC 绕过整形队列的旁路通道。
+- **设备专属 HTB 类内三档 `fq_codel` 应用 QoS 共存**：重构 `apply_app_qos` 叶子队列编排，使实时对战/语音（EF-P1）、交互视频（AF-P2）与后台下载（Bulk-P3）三档 `fq_codel` 队列在每台受控设备的 HTB 类内协同运作。
+- **新增 `/api/dataplane_verify` 真机内核计数器闭环自检**：优先通过纯 Go 原生 RTNetlink（`RTM_GETTCLASS`）实时读取下行热点口与上行 `ifb0` 全部 HTB 队列字节增量、`overlimits`/`drops`、BPF Map 挂载状态与硬件卸载压制标志，实现零盲猜四态智能根因判定。
+
+### 控制面极速收敛与原子配置持久化（T3）
+- **Go 原生 RTNetlink `tc` + 双栈 `iptables-restore --noflush`（`<80ms`）**：废弃高频外部 `tc` / `iptables` 逐条子进程派生，改由纯 Go 原生 RTNetlink 套接字直驱内核队列，配合 `iptables-restore --noflush` 与 `ip6tables-restore --noflush` 单次原子提交，WebUI 限速生效延迟稳定收敛至 `<80ms`。
+- **进程内加锁原子配置存储**：`hnc_httpd` 配置读写升级为进程内互斥锁保护与临时文件 `fsync + rename` 原子持久化，彻底杜绝高并发请求下的 JSON 截断或配置损坏。
+
+### WebUI 数据面真机核验面板与双架构仿真门禁（T4）
+- **「数据面真机命中核验」面板与逐设备计数器抽屉**：在设置页诊断区与自检报告弹层新增可视化核验面板与逐设备计数器抽屉，直观展示受控设备正交 `MarkHex`（`0x00800000 | (mid << 16)`）、上下行 HTB 字节增量、单应用子类命中明细及按需 Go 1.27 `goroutineleak` 协程泄漏扫描，全量采用 `24×24` `stroke-width="1.85"` 双层光学纯矢量 SVG。
+- **`fake_api.js` 100% 契约同步与双架构 CI 门禁**：`tools/ui_mock/fake_api.js` 完整对齐 `/api/dataplane_verify` 与 `dataplane_verify_run` 动态计数器仿真，`arm64-v8a` / `armeabi-v7a` 双架构 CI 构建与浅/深双色前端巡检门禁全量同步至 `v5.40.0`（`versionCode=5400000`）。
+
+---
+
 ## [5.38.0] - 2026-11-18
 
 - **「应用」与「分析」前后端高内聚重构**：将「本机真值常驻自训工作台」迁入「分析 → DPI 与自训」，并将分散在 3 个页面的新发现应用、飞轮候选、未识别域名纠错与规则包合并为「应用 → 应用规则中心」，配套新增 `/api/apps_overview`、`/api/rules_hub`、`/api/dpi_cockpit` 聚合接口。

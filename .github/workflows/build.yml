@@ -48,14 +48,15 @@ jobs:
       - name: Setup Android NDK
         uses: nttld/setup-ndk@v1
         id: setup-ndk
+        continue-on-error: true
         with:
-          ndk-version: r27c
+          ndk-version: r30
           add-to-path: false
 
       - name: Setup Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.25'
+          go-version: '1.27.x'
           cache-dependency-path: daemon/hnc_httpd/go.sum
 
       - name: Setup Java 17 (for javac -source 8 -bootclasspath)
@@ -76,6 +77,36 @@ jobs:
 
       - name: Install SDK packages (build-tools + platform)
         run: sdkmanager "build-tools;34.0.0" "platforms;android-34"
+
+      - name: Resolve Android NDK path
+        id: ndk
+        env:
+          SETUP_NDK_PATH: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: |
+          set -e
+          NDK_PATH="$SETUP_NDK_PATH"
+          if [ -z "$NDK_PATH" ] \
+             || [ ! -x "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" ] \
+             || [ ! -x "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang" ]; then
+            echo "setup-ndk r30 unavailable or incomplete ('$NDK_PATH'); installing ndk;30.0.16248370 via sdkmanager..."
+            (yes || true) | sdkmanager --install "ndk;30.0.16248370"
+            SDK_ROOT="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
+            if [ -n "$SDK_ROOT" ] && [ -d "$SDK_ROOT/ndk/30.0.16248370" ]; then
+              NDK_PATH="$SDK_ROOT/ndk/30.0.16248370"
+            else
+              NDK_PATH=$(ls -d "$SDK_ROOT"/ndk/30.* 2>/dev/null | sort -V | tail -1 || true)
+            fi
+          fi
+          if [ -z "$NDK_PATH" ] \
+             || [ ! -x "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang" ] \
+             || [ ! -x "$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang" ]; then
+            echo "ERROR: Android NDK r30 API 28 clang compilers not found (NDK_PATH='$NDK_PATH')" >&2
+            exit 1
+          fi
+          echo "Resolved Android NDK path: $NDK_PATH"
+          echo "path=$NDK_PATH" >> "$GITHUB_OUTPUT"
+          echo "ANDROID_NDK=$NDK_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_NDK_HOME=$NDK_PATH" >> "$GITHUB_ENV"
 
       - name: Get version from module.prop
         id: version
@@ -188,8 +219,8 @@ jobs:
       # ─── Build Go components ──────────────────────────────
       - name: Build hnc_httpd (Go)
         env:
-          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK: ${{ steps.ndk.outputs.path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
         run: |
           cd daemon/hnc_httpd
           bash build.sh
@@ -252,7 +283,7 @@ jobs:
       # ─── Build C launcher (rc30.12 introduced this) ───────
       - name: Build hnc_launcher + fork_probe (C)
         env:
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
         run: |
           cd src/launcher
           bash build.sh install
@@ -263,8 +294,8 @@ jobs:
       # ─── Build hnc_tc_ingress (C, no third_party) ─────────
       - name: Build hnc_tc_ingress (C)
         env:
-          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK: ${{ steps.ndk.outputs.path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
         run: |
           cd daemon/tc_netlink
           bash build.sh arm64
@@ -282,8 +313,8 @@ jobs:
       # 现编, 杜绝陈旧产物(与 PKG-1 的历史教训一致)。
       - name: Build hnc_clsact_ctl + BPF object (v5.9.7)
         env:
-          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK: ${{ steps.ndk.outputs.path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
         run: |
           cd daemon/clsact_ctl
           bash build.sh arm64
@@ -299,8 +330,8 @@ jobs:
       # hotspotd + hnc_ipc + mdns_resolve (+ the BPF LSM object) fresh every run.
       - name: Build hotspotd + hnc_ipc + mdns_resolve (C)
         env:
-          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK: ${{ steps.ndk.outputs.path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
         run: |
           if [ ! -f third_party/libbpf/src/libbpf.c ]; then
             echo "third_party/libbpf not populated via submodule; fetching libbpf v1.4.7..."
@@ -326,12 +357,12 @@ jobs:
       # 读不到 Android tzdata → 恒为 UTC, 定时/日切全错)。
       - name: Build armeabi-v7a binaries (Go + C)
         env:
-          ANDROID_NDK: ${{ steps.setup-ndk.outputs.ndk-path }}
-          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+          ANDROID_NDK: ${{ steps.ndk.outputs.path }}
+          ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -e
-          CC7="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi21-clang"
+          CC7="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang"
           test -x "$CC7" || { echo "ERROR: NDK armv7a clang missing: $CC7"; exit 1; }
           mkdir -p bin/armeabi-v7a
 
@@ -503,11 +534,6 @@ jobs:
           ls -lh "$OUT7"
           
           # Separate ground-truth tools zip (rc30.12.23+)
-          # Lightweight (~15 KB), only needed when expanding DPI rules.
-          # v5.9.92: tools/ground_truth/ 于 v5.7.0-m2 导入时被删 —— 该目录已不存在,
-          # 下方分支(TOOLS_ZIP 打包/校验/上传)自那以后是死分支。保留结构: 目录
-          # 恢复后自动生效(用途: 自抓 App 流量扩充 DPI 规则库, 见 git 历史中的
-          # PATCH-NOTES-v5.3.0-rc28.1.md); 恢复: git checkout 4bb6f2b^ -- tools/ground_truth
           if [ -d tools/ground_truth ]; then
             (cd tools/ground_truth && zip -rqX "../../$TOOLS_OUT" .)
             echo "TOOLS_ZIP=$TOOLS_OUT" >> $GITHUB_ENV
@@ -525,10 +551,6 @@ jobs:
           fi
 
       # ─── Build DPI curated-rules update package (v5.10.0, F3) ──
-      # 把 data/dpi_rules.d/ 的策展规则聚合为单文件 dpi_rules.json(带
-      # rules_version 元数据), 与 sha256 一起随 Release 上传。手机端
-      # bin/dpi_rules_update.sh --install 从 Release 拉取并安装为
-      # etc/dpi_rules.d/97-online-update.json(在 99-user 之前合并)。
       - name: Build DPI rules update package
         run: |
           python3 - <<'PY'
@@ -545,8 +567,6 @@ jobs:
           for f in files:
               d = json.load(open(f, encoding="utf-8"))
               out["rules"].extend(d.get("rules", []))
-          # v5.10.1: 产出【真正的 zip】(dpi-rules.zip 内含 dpi_rules.json) ——
-          # v5.10.0 上传的是裸 dpi_rules.json, 与消费脚本期望的名字/格式三重不匹配。
           os.makedirs("build_rules", exist_ok=True)
           with open("build_rules/dpi_rules.json", "w", encoding="utf-8") as fh:
               json.dump(out, fh, ensure_ascii=False, separators=(",", ":"))
@@ -554,7 +574,6 @@ jobs:
               zf.write("build_rules/dpi_rules.json", "dpi_rules.json")
           print("rules packaged:", len(out["rules"]), "entries, version", out["rules_version"])
           PY
-          # sha256 对【zip 本身】计算 —— 消费脚本校验的是下载的 zip
           sha256sum dpi-rules.zip > dpi-rules.zip.sha256
           echo "DPI_RULES_VERSION=rules-${{ steps.version.outputs.version }}" >> $GITHUB_ENV
 
@@ -570,7 +589,9 @@ jobs:
           sha256sum "${{ env.OUT_ZIP }}" | tee "${{ env.OUT_ZIP }}.sha256"
           sha256sum "${{ env.OUT_ZIP_ARMV7 }}" | tee "${{ env.OUT_ZIP_ARMV7 }}.sha256"
           if [ -n "${{ env.TOOLS_ZIP }}" ] && [ -f "${{ env.TOOLS_ZIP }}" ]; then
-            sha256sum "${{ env.TOOLS_ZIP }}" | tee "${{ env.TOOLS_ZIP }}.sha256"
+            TOOLS_SHA="${{ env.TOOLS_ZIP }}.sha256"
+            sha256sum "${{ env.TOOLS_ZIP }}" | tee "$TOOLS_SHA"
+            echo "TOOLS_SHA=$TOOLS_SHA" >> "$GITHUB_ENV"
           fi
 
       # ─── Upload as Actions artifact ───────────────────────
@@ -601,16 +622,10 @@ jobs:
           name: hnc-ground-truth-tools
           path: |
             ${{ env.TOOLS_ZIP }}
-            ${{ env.TOOLS_ZIP }}.sha256
+            ${{ env.TOOLS_SHA }}
           retention-days: 30
 
       # ─── Auto-release: tag push 或 workflow_dispatch 一键发版 ───────
-      # v5.9.0: 条件从 startsWith(github.ref, 'refs/tags/v') 改为 reltag 步骤
-      # 的输出;dispatch 发版时 tag 尚不存在,action-gh-release 会用
-      # target_commitish 在当前 commit 上创建它(tag+release 一步完成)。
-      # prerelease 判定改用 resolved tag(dispatch 时 github.ref 是 main,
-      # 旧的 contains(github.ref,...) 会失真)。
-      # v5.16.1: 发版说明直接取 CHANGELOG.md 里对应版本那一节
       - name: Extract release notes
         if: steps.reltag.outputs.tag != ''
         env:
@@ -652,5 +667,5 @@ jobs:
             dpi-rules.zip
             dpi-rules.zip.sha256
             ${{ env.TOOLS_ZIP }}
-            ${{ env.TOOLS_ZIP }}.sha256
+            ${{ env.TOOLS_SHA }}
           prerelease: ${{ contains(steps.reltag.outputs.tag, 'alpha') || contains(steps.reltag.outputs.tag, 'beta') || contains(steps.reltag.outputs.tag, 'rc') }}

@@ -36,10 +36,21 @@ IFB_IFACE=ifb0
 PRIO_BASE=200    # v6 u32 filter 优先级 = 200 + mark_id（占 201-299 段）
 if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
     . "$HNC_DIR/bin/hnc_constants.sh"
-    MARK_BASE="${HNC_MARK_BASE:-0x800000}"
-else
-    MARK_BASE=0x800000
+elif [ -f "${0%/*}/hnc_constants.sh" ]; then
+    . "${0%/*}/hnc_constants.sh"
 fi
+MARK_BASE="${HNC_MARK_BASE:-0x00800000}"
+command -v hnc_parse_mid_from_mark >/dev/null 2>&1 || {
+    hnc_parse_mid_from_mark() {
+        local _r="${1%%/*}"
+        local _v=$((_r))
+        local _seg=$(( (_v >> 16) & 0xff ))
+        if [ "$_seg" -gt 128 ] && [ "$_seg" -le 227 ]; then echo $((_seg - 128)); return 0; fi
+        local _low=$(( _v & 0xffff ))
+        if [ "$_seg" -eq 128 ] && [ "$_low" -ge 1 ] && [ "$_low" -le 99 ]; then echo "$_low"; return 0; fi
+        return 1
+    }
+}
 
 log() { echo "[$(date '+%H:%M:%S')] [V6] $*" >> "$LOG" 2>/dev/null; }
 
@@ -107,19 +118,34 @@ v6_unlock() {
 # 输出每行 "MAC MARK_HEX" 形如 "e2:0d:4a:48:5d:40 0x80003b"
 # ═══════════════════════════════════════════════════════════════
 list_marked_devices() {
-    local raw
-    # 必须带 -w 2 等待 xtables 锁并校验返回码: 否则并发撞锁返回空串时会被 sync_all 误判为
-    # 「当前没有任何限速设备」而误清空全部在线设备的 IPv6 tc u32 过滤器!
+    local raw parsed
     raw=$(iptables -w 2 -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
-    printf '%s\n' "$raw" | awk '
-    /MAC.*MARK set/ {
+    parsed=$(printf '%s
+' "$raw" | awk '
+    /MAC/ && /MARK/ {
         mac=""; mark=""
         for (i=1; i<=NF; i++) {
             if ($i == "MAC") mac=tolower($(i+1))
-            if ($i == "set" && $(i-1) == "MARK") mark=$(i+1)
+            if (($i == "set" || $i == "xset") && $(i-1) == "MARK") mark=$(i+1)
         }
         if (mac != "" && mark != "") print mac, mark
-    }' | sort -u
+    }' | sort -u)
+    if [ -z "$parsed" ]; then
+        # 同时兼容 iptables -S HNC_MARK 输出 (--mac-source <mac> ... --set-xmark <mark>/<mask>)
+        parsed=$(printf '%s
+' "$raw" | awk '
+        /--mac-source/ && /--set-(x)?mark/ {
+            mac=""; mark=""
+            for (i=1; i<=NF; i++) {
+                if ($i == "--mac-source") mac=tolower($(i+1))
+                if ($i == "--set-xmark" || $i == "--set-mark") mark=$(i+1)
+            }
+            if (mac != "" && mark != "") print mac, mark
+        }' | sort -u)
+    fi
+    [ -n "$parsed" ] && printf '%s
+' "$parsed"
+    return 0
 }
 
 # 同一次调用内复用 iptables 读数(sync_all / sync_macs 一次读、逐台用)
@@ -193,11 +219,10 @@ sync_one() {
         return 0
     fi
 
-    # 0x80003b → 59
-    local mark_id=$((mark_hex))
-    mark_id=$((mark_id - MARK_BASE))
-    if [ "$mark_id" -lt 1 ] || [ "$mark_id" -gt 99 ]; then
-        log "WARN: invalid mark_id $mark_id for $mac (mark=$mark_hex)"
+    local mark_id
+    mark_id=$(hnc_parse_mid_from_mark "$mark_hex" 2>/dev/null) || mark_id=""
+    if [ -z "$mark_id" ] || [ "$mark_id" -lt 1 ] || [ "$mark_id" -gt 99 ]; then
+        log "WARN: invalid mark_id '$mark_id' for $mac (mark=$mark_hex)"
         return 1
     fi
 
@@ -386,8 +411,7 @@ clear_one() {
     local mark_hex mark_id="" snap_iface=""
     mark_hex=$(marked_devices | awk -v m="$mac" '$1==m {print $2; exit}')
     if [ -n "$mark_hex" ]; then
-        mark_id=$((mark_hex))
-        mark_id=$((mark_id - MARK_BASE))
+        mark_id=$(hnc_parse_mid_from_mark "$mark_hex" 2>/dev/null) || mark_id=""
     fi
     # v5.12: iptables 里已没有 mark(sync_all 孤儿清理 / 规则已被删)时,旧实现只删
     # 快照不删 filter → v6 u32 filter 残留;mid 复用给别的设备后,旧设备的 v6 流量
@@ -476,8 +500,8 @@ show_status() {
 
     echo "$devices" | while read -r mac mark_hex; do
         [ -z "$mac" ] && continue
-        local mark_id=$((mark_hex))
-        mark_id=$((mark_id - MARK_BASE))
+        local mark_id
+        mark_id=$(hnc_parse_mid_from_mark "$mark_hex" 2>/dev/null) || continue
         local prio=$((PRIO_BASE + mark_id))
         echo "----------------------------------------"
         echo "Device $mac"

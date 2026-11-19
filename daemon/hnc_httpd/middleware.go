@@ -405,6 +405,7 @@ func isSensitiveReadPath(p string) bool {
 		"/api/fg_timeline",
 		"/api/phone_usage",
 		"/api/stats_health",
+		"/api/dataplane_verify",
 		"/api/sim",
 		"/api/mac_merge",
 		"/api/power",

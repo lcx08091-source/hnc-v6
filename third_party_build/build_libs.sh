@@ -1,11 +1,14 @@
 #!/bin/bash
 # third_party_build/build_libs.sh — FINAL
 # 策略: libelf.a + libz.a 来自预编译 (JiaHuann/libbpf-bootstrap-android, BSD-3),
-# 只需用 NDK clang 编 libbpf 的 21 个 .c
+# 只需用 NDK clang (API 28) 编 libbpf 的 .c 静态对象并归档为 libbpf.a
 
 set -e
 ARCH="${1:-arm64}"
-[ -z "$ANDROID_NDK" ] && { echo "ERROR: ANDROID_NDK env not set"; exit 1; }
+if [ -z "${ANDROID_NDK:-}" ]; then
+    ANDROID_NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+fi
+[ -z "${ANDROID_NDK:-}" ] && { echo "ERROR: ANDROID_NDK env not set"; exit 1; }
 
 case "$ARCH" in
     arm64) TARGET=aarch64-linux-android; API=28 ;;
@@ -33,6 +36,7 @@ CC="$TOOLCHAIN/bin/${TARGET}${API}-clang"
 AR="$TOOLCHAIN/bin/llvm-ar"
 RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
 
+# 纯 -c 编译阶段仅传递编译参数, 严禁传递任何链接器参数
 CFLAGS_COMMON="-O2 -fPIC -D_GNU_SOURCE -Wno-everything"
 
 mkdir -p "$OUT/include/bpf" "$OUT/include/linux" "$OUT/lib"
@@ -76,12 +80,9 @@ if [ ! -f "$OUT/lib/libbpf.a" ]; then
     cp -r "$LIBBPF_INC/uapi/linux"/* "$OUT/include/linux/" 2>/dev/null || true
 
     cd "$LIBBPF_SRC"
-    # v5.8.6 (audit): NDK r27c 的 sanitized UAPI <linux/eventpoll.h> 把 EPOLLIN
+    # v5.8.6 (audit): NDK 的 sanitized UAPI <linux/eventpoll.h> 把 EPOLLIN
     # 等宏定义成 (__poll_t)0xN, 但 NDK 的 <linux/types.h> 剥掉了 __poll_t typedef
     # → libbpf.c / ringbuf.c 编译报 "use of undeclared identifier '__poll_t'".
-    # 补一个无害的宏定义(__poll_t 仅经 EPOLL* 宏间接使用, 定义为 unsigned 即可),
-    # 这是 NDK 编 libbpf 的标准修法。不修则那两个文件不进 libbpf.a, 最终链接
-    # hotspotd 时一堆 undefined symbol(libbpf_set_print/bpf_object__*/ring_buffer__*)。
     LIBBPF_CFLAGS="$CFLAGS_COMMON \
         -I$OUT/include \
         -I$LIBBPF_SRC \
@@ -98,6 +99,7 @@ if [ ! -f "$OUT/lib/libbpf.a" ]; then
             linker.c) echo "  SKIP $src"; continue ;;
         esac
         echo "  CC libbpf/$src"
+        # shellcheck disable=SC2086
         if ! "$CC" $LIBBPF_CFLAGS -c "$src" -o "$LIBBPF_OBJ_DIR/${src%.c}.o"; then
             echo "  [WARN] libbpf/$src failed"
             FAILED=$((FAILED+1))
@@ -106,10 +108,6 @@ if [ ! -f "$OUT/lib/libbpf.a" ]; then
 
     OBJ_COUNT=$(ls "$LIBBPF_OBJ_DIR"/*.o 2>/dev/null | wc -l)
     echo "[build_libs] libbpf: $OBJ_COUNT objects compiled, $FAILED failed"
-    # v5.8.6 (audit): 任何 libbpf 源文件编译失败都 FATAL。之前只看 OBJ_COUNT>=15
-    # 容忍少数失败 → 产出残缺 libbpf.a(缺 libbpf.c/ringbuf.c)→ 真正的报错被推迟到
-    # 链接 hotspotd 时一堆 undefined symbol, 极难定位。现在编译阶段就失败、直接暴露
-    # 真实的 C 编译错误。(linker.c 是有意 SKIP, 不计入 FAILED。)
     if [ "$FAILED" -gt 0 ]; then
         echo "[build_libs] ERROR: $FAILED libbpf source file(s) failed to compile — refusing to"
         echo "             produce an incomplete libbpf.a (would cause undefined-symbol link errors)."

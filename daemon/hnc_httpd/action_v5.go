@@ -44,6 +44,13 @@ func lookupCurrentDeviceIP(hncDir, mac string) string {
 }
 
 func lookupRuleDeviceField(hncDir, mac, field string) string {
+	if useNativeDataplane(hncDir) {
+		v, err := rulesStore.GetDeviceField(hncDir, mac, field)
+		if err != nil {
+			return ""
+		}
+		return strings.TrimSpace(v)
+	}
 	rc, out := runBin(hncDir, "json_set.sh", "device_get", mac, field)
 	if rc != 0 {
 		return ""
@@ -140,24 +147,40 @@ func actionDelaySet(hncDir string, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "no hotspot iface"}
 	}
 
-	// rc3 修 N-1: mark_id 是 per-device, 不是顶层. 用新加的 device_get.
-	rcM, outM := runBin(hncDir, "json_set.sh", "device_get", mac, "mark_id")
-	mid := strings.TrimSpace(outM)
+	// rc3 修 N-1: mark_id 是 per-device, 不是顶层. v5.40.0 真机优先走 rulesStore + 原生双栈防火墙快速通道
+	mid := ""
 	newMid := false
-	if rcM != 0 || mid == "" {
-		// rc2 修 G3: 没分配过 → 调 alloc_mid 专用子命令, 只分配 mid + iptables mark,
-		//          不触 tc 也不写 limit_enabled/down_mbps/up_mbps (之前借 "limit 0 0"
-		//          会污染 rules.json, UI 显示"已限速到 0" 误导用户).
-		rc0, out0 := runBin(hncDir, "apply_device_rule.sh", "alloc_mid", mac)
-		if rc0 != 0 {
-			return actionResp{OK: false, Error: "mid assign failed", Detail: out0}
+	if useNativeDataplane(hncDir) {
+		existMid, _ := rulesStore.GetDeviceField(hncDir, mac, "mark_id")
+		existMid = strings.TrimSpace(existMid)
+		if existMid != "" && existMid != "0" && intRE.MatchString(existMid) {
+			mid = existMid
+		} else {
+			allocN, aErr := rulesStore.AllocMarkID(hncDir, mac)
+			if aErr != nil {
+				return actionResp{OK: false, Error: "mid assign failed", Detail: aErr.Error()}
+			}
+			mid = strconv.Itoa(allocN)
+			newMid = true
+			curIP := lookupCurrentDeviceIP(hncDir, mac)
+			if fwErr := applyDeviceFirewallAtomic(hncDir, iface, mac, curIP, allocN, true, rulesStore.IsBlacklisted(hncDir, mac)); fwErr != nil {
+				return actionResp{OK: false, Error: "mid assign failed", Detail: fwErr.Error()}
+			}
 		}
-		mid = strings.TrimSpace(out0)
-		newMid = true
-		// rc3.1.33 修 #2: alloc_mid stdout 应为纯整数 mid, 白名单确认 (防 awk 错位输出).
-		if !intRE.MatchString(mid) {
-			return actionResp{OK: false, Error: "mid assign failed",
-				Detail: "alloc_mid returned non-integer mid: " + mid}
+	} else {
+		rcM, outM := runBin(hncDir, "json_set.sh", "device_get", mac, "mark_id")
+		mid = strings.TrimSpace(outM)
+		if rcM != 0 || mid == "" {
+			rc0, out0 := runBin(hncDir, "apply_device_rule.sh", "alloc_mid", mac)
+			if rc0 != 0 {
+				return actionResp{OK: false, Error: "mid assign failed", Detail: out0}
+			}
+			mid = strings.TrimSpace(out0)
+			newMid = true
+			if !intRE.MatchString(mid) {
+				return actionResp{OK: false, Error: "mid assign failed",
+					Detail: "alloc_mid returned non-integer mid: " + mid}
+			}
 		}
 	}
 
@@ -191,14 +214,24 @@ func actionDelaySet(hncDir string, p map[string]string) actionResp {
 	// rc38 (DELAY-1): 原子批量写 4 字段(json_set_batch → hnc_json set-device-batch:
 	// 一次校验/备份/锁/提交),避免逐字段写中途失败留半状态。hnc_json 缺失时该脚本
 	// 自动退回逐字段串行(与旧行为等价)。
-	batchArgs := make([]string, 0, 2+2*len(jsonWrites))
-	batchArgs = append(batchArgs, "device", mac)
-	for _, w := range jsonWrites {
-		batchArgs = append(batchArgs, w.field, w.value)
-	}
-	if rc, out := runBin(hncDir, "json_set_batch.sh", batchArgs...); rc != 0 {
-		// tc 已应用但 JSON 写失败。返回失败让 UI 不显示“假成功”，用户可重试收敛。
-		return actionResp{OK: false, Error: "json write failed", Detail: strings.TrimSpace(out)}
+	if useNativeDataplane(hncDir) {
+		fields := make(map[string]interface{}, len(jsonWrites))
+		for _, w := range jsonWrites {
+			fields[w.field] = w.value
+		}
+		if err := rulesStore.SetDeviceBatch(hncDir, mac, fields); err != nil {
+			return actionResp{OK: false, Error: "json write failed", Detail: err.Error()}
+		}
+	} else {
+		batchArgs := make([]string, 0, 2+2*len(jsonWrites))
+		batchArgs = append(batchArgs, "device", mac)
+		for _, w := range jsonWrites {
+			batchArgs = append(batchArgs, w.field, w.value)
+		}
+		if rc, out := runBin(hncDir, "json_set_batch.sh", batchArgs...); rc != 0 {
+			// tc 已应用但 JSON 写失败。返回失败让 UI 不显示“假成功”，用户可重试收敛。
+			return actionResp{OK: false, Error: "json write failed", Detail: strings.TrimSpace(out)}
+		}
 	}
 	return actionResp{OK: true, Detail: "delay injected"}
 }
@@ -215,11 +248,17 @@ func actionDelayClear(hncDir string, p map[string]string) actionResp {
 	}
 	iface := strings.TrimSpace(out)
 	// rc3 修 N-1: 读 per-device mark_id
-	rcM, outM := runBin(hncDir, "json_set.sh", "device_get", mac, "mark_id")
-	if rcM != 0 {
-		log.Printf("WARN: delay_clear device_get mark_id rc=%d out=%q", rcM, outM)
+	mid := ""
+	if useNativeDataplane(hncDir) {
+		v, _ := rulesStore.GetDeviceField(hncDir, mac, "mark_id")
+		mid = strings.TrimSpace(v)
+	} else {
+		rcM, outM := runBin(hncDir, "json_set.sh", "device_get", mac, "mark_id")
+		if rcM != 0 {
+			log.Printf("WARN: delay_clear device_get mark_id rc=%d out=%q", rcM, outM)
+		}
+		mid = strings.TrimSpace(outM)
 	}
-	mid := strings.TrimSpace(outM)
 	if mid == "" {
 		return actionResp{OK: true, Detail: "already cleared (no mid)"}
 	}
@@ -228,18 +267,33 @@ func actionDelayClear(hncDir string, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "mid invalid",
 			Detail: "device_get returned non-integer mid: " + mid}
 	}
+	midInt, _ := strconv.Atoi(mid)
 	hasLimit := deviceHasPositiveLimit(hncDir, mac)
+	hasSecondary := deviceHasNonDelaySecondaryOwner(hncDir, iface, mac, midInt)
 	ip := lookupCurrentDeviceIP(hncDir, mac)
 	if ip == "" {
 		ip = lookupRuleDeviceField(hncDir, mac, "ip")
 	}
 
-	// 有限速时只清 netem，保留 class/rate；delay-only 时清理整套 tc/iptables，避免残留 mark/class。
+	// 有限速时只清 netem，保留 class/rate；
+	// 无整机限速但存在二级子树持有者(sqm / app_qos / app_limits)时，清 netem 并将 1:<cid> 恢复默认 1000mbit，保留 HNC_MARK 与根过滤器；
+	// 纯 delay-only 时清理整套 tc/iptables，避免残留 mark/class。
 	if hasLimit {
 		rc2, out2 := runBin(hncDir, "tc_manager.sh", "set_delay", iface, mid, "0", "0", "0", ip)
 		if rc2 != 0 {
 			return actionResp{OK: false, Error: "netem clear failed", Detail: out2}
 		}
+	} else if hasSecondary {
+		rc2, out2 := runBin(hncDir, "tc_manager.sh", "set_delay", iface, mid, "0", "0", "0", ip)
+		if rc2 != 0 {
+			return actionResp{OK: false, Error: "netem clear failed", Detail: out2}
+		}
+		if !tryNativeResetDeviceRateToDefault(hncDir, iface, mac, ip, midInt) {
+			if rcL, outL := runBin(hncDir, "tc_manager.sh", "set_limit", iface, mid, "0", "0", ip); rcL != 0 {
+				log.Printf("WARN: delay_clear reset default rate failed rc=%d out=%q", rcL, outL)
+			}
+		}
+		markAppLimitsDirtyIfNeeded(hncDir)
 	} else {
 		if rc2, out2 := runBin(hncDir, "tc_manager.sh", "remove", iface, mid); rc2 != 0 {
 			log.Printf("WARN: delay_clear remove tc failed rc=%d out=%q", rc2, out2)
@@ -255,13 +309,23 @@ func actionDelayClear(hncDir string, p map[string]string) actionResp {
 		{"loss_pct", "0"},
 	}
 	// rc38 (DELAY-1): 原子批量写(同 delay_set)。
-	batchArgs := make([]string, 0, 2+2*len(clearFields))
-	batchArgs = append(batchArgs, "device", mac)
-	for _, f := range clearFields {
-		batchArgs = append(batchArgs, f.key, f.val)
-	}
-	if rcJ, outJ := runBin(hncDir, "json_set_batch.sh", batchArgs...); rcJ != 0 {
-		return actionResp{OK: false, Error: "json write failed", Detail: strings.TrimSpace(outJ)}
+	if useNativeDataplane(hncDir) {
+		fields := make(map[string]interface{}, len(clearFields))
+		for _, f := range clearFields {
+			fields[f.key] = f.val
+		}
+		if err := rulesStore.SetDeviceBatch(hncDir, mac, fields); err != nil {
+			return actionResp{OK: false, Error: "json write failed", Detail: err.Error()}
+		}
+	} else {
+		batchArgs := make([]string, 0, 2+2*len(clearFields))
+		batchArgs = append(batchArgs, "device", mac)
+		for _, f := range clearFields {
+			batchArgs = append(batchArgs, f.key, f.val)
+		}
+		if rcJ, outJ := runBin(hncDir, "json_set_batch.sh", batchArgs...); rcJ != 0 {
+			return actionResp{OK: false, Error: "json write failed", Detail: strings.TrimSpace(outJ)}
+		}
 	}
 	return actionResp{OK: true, Detail: "delay cleared"}
 }
@@ -359,24 +423,43 @@ func actionHotspotSave(hncDir string, p map[string]string) actionResp {
 	// rc3 修 N-3: hotspot_autostart.sh 没有 save 子命令, 直接写 rules.json.
 	// 字段名用 hotspot_auto / hotspot_ssid / hotspot_pass / hotspot_delay
 	// (这是 service.sh:141 + watchdog 实际读的名字, 开机自启动才能生效)
-	if ssid != "" {
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_ssid", ssid); rc != 0 {
-			return actionResp{OK: false, Error: "save ssid failed", Detail: out}
+	if useNativeDataplane(hncDir) {
+		batch := map[string]interface{}{}
+		if ssid != "" {
+			batch["hotspot_ssid"] = ssid
 		}
-	}
-	if pass != "" {
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_pass", pass); rc != 0 {
-			return actionResp{OK: false, Error: "save pass failed", Detail: out}
+		if pass != "" {
+			batch["hotspot_pass"] = pass
 		}
-	}
-	if delayStr != "" {
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_delay", strconv.Itoa(delay)); rc != 0 {
-			return actionResp{OK: false, Error: "save delay failed", Detail: out}
+		if delayStr != "" {
+			batch["hotspot_delay"] = delay
 		}
-	}
-	if autostart != "" {
-		if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_auto", autostart); rc != 0 {
-			return actionResp{OK: false, Error: "save autostart failed", Detail: out}
+		if autostart != "" {
+			batch["hotspot_auto"] = (autostart == "true")
+		}
+		if err := rulesStore.SetTopBatch(hncDir, batch); err != nil {
+			return actionResp{OK: false, Error: "save config failed", Detail: err.Error()}
+		}
+	} else {
+		if ssid != "" {
+			if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_ssid", ssid); rc != 0 {
+				return actionResp{OK: false, Error: "save ssid failed", Detail: out}
+			}
+		}
+		if pass != "" {
+			if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_pass", pass); rc != 0 {
+				return actionResp{OK: false, Error: "save pass failed", Detail: out}
+			}
+		}
+		if delayStr != "" {
+			if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_delay", strconv.Itoa(delay)); rc != 0 {
+				return actionResp{OK: false, Error: "save delay failed", Detail: out}
+			}
+		}
+		if autostart != "" {
+			if rc, out := runBin(hncDir, "json_set.sh", "top", "hotspot_auto", autostart); rc != 0 {
+				return actionResp{OK: false, Error: "save autostart failed", Detail: out}
+			}
 		}
 	}
 	return actionResp{OK: true, Detail: "config saved"}
@@ -394,9 +477,15 @@ func actionSetTopBool(hncDir, key string, p map[string]string, onDetail, offDeta
 	if v != "true" && v != "false" {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
-	rc, out := runBin(hncDir, "json_set.sh", "top", key, v)
-	if rc != 0 {
-		return actionResp{OK: false, Error: "write failed", Detail: out}
+	if useNativeDataplane(hncDir) {
+		if err := rulesStore.SetTop(hncDir, key, v == "true"); err != nil {
+			return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
+		}
+	} else {
+		rc, out := runBin(hncDir, "json_set.sh", "top", key, v)
+		if rc != 0 {
+			return actionResp{OK: false, Error: "write failed", Detail: out}
+		}
 	}
 	if v == "true" && onDetail != "" {
 		return actionResp{OK: true, Detail: onDetail}

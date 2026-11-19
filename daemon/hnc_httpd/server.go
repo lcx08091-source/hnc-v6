@@ -152,6 +152,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/run_status", s.apiRunStatus)
 	mux.HandleFunc("/api/proc_health", s.apiProcHealth)
 	mux.HandleFunc("/api/selfcheck", s.apiSelfcheck) // v5.20: 自检报告(selfcheck.go / selfcheck_api.go)
+	mux.HandleFunc("/api/dataplane_verify", s.apiDataplaneVerify) // v5.40.0 T2.9: 数据面命中自检接口
 	mux.HandleFunc("/api/dpi_rules", s.apiDPIRules)
 	mux.HandleFunc("/api/usage_month", s.apiUsageMonth)   // v5.12: 设备本月流量
 	mux.HandleFunc("/api/connections", s.apiConnections)  // v5.13: 实时连接(conntrack)

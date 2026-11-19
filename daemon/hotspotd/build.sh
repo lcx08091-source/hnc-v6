@@ -25,7 +25,10 @@ OUT=${OUTDIR}/hotspotd
 mkdir -p "$OUTDIR"
 
 # ── NDK toolchain ──────────────────────────────────────────────
-if [ -z "$ANDROID_NDK" ] && [ -z "$CC" ]; then
+if [ -z "${ANDROID_NDK:-}" ]; then
+    ANDROID_NDK="${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}"
+fi
+if [ -z "${ANDROID_NDK:-}" ] && [ -z "${CC:-}" ]; then
     echo "[build] ERROR: 请设置 ANDROID_NDK 或 CC"
     exit 1
 fi
@@ -37,7 +40,7 @@ case "$ARCH" in
     *)       echo "Unknown arch: $ARCH"; exit 1 ;;
 esac
 
-if [ -n "$ANDROID_NDK" ]; then
+if [ -n "${ANDROID_NDK:-}" ]; then
     HOST_TAG=$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)
     TOOLCHAIN="$ANDROID_NDK/toolchains/llvm/prebuilt/$HOST_TAG"
     CC="$TOOLCHAIN/bin/${TARGET}${API}-clang"
@@ -54,7 +57,7 @@ LIBS_OUT="$(cd ../../third_party_build && pwd)/_libs_out"
 if [ ! -f "$LIBS_OUT/lib/libbpf.a" ]; then
     echo ""
     echo "=== Building third_party libs ==="
-    (cd ../../third_party_build && HNC_LIBS_OUT="$LIBS_OUT" bash build_libs.sh "$ARCH")
+    (cd ../../third_party_build && ANDROID_NDK="$ANDROID_NDK" HNC_LIBS_OUT="$LIBS_OUT" bash build_libs.sh "$ARCH")
 fi
 
 if [ ! -f "$LIBS_OUT/lib/libbpf.a" ]; then
@@ -68,29 +71,20 @@ echo "[build] Compiler: $CC"
 echo "[build] Target:   $ARCH  Output: $OUT"
 echo "[build] libs:     $LIBS_OUT/lib/libbpf.a (libelf/libz not linked)"
 
-$CC \
-    -O2 \
-    -std=c11 \
-    -Wall \
-    -Wextra \
-    -Wno-unused-parameter \
-    -static-libgcc \
-    -D_GNU_SOURCE \
-    -DANDROID \
+CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE -pthread"
+LDFLAGS="-pie -pthread -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
+
+# shellcheck disable=SC2086
+$CC $CFLAGS \
     -DHNC_HAVE_ADAPTER_BPF \
-    -fPIE -pie \
-    -Wl,-z,max-page-size=16384 \
-    -Wl,-z,common-page-size=16384 \
-    -pthread \
     -I"$LIBS_OUT/include" \
     -o "$OUT" \
     $SRCS \
-    -Wl,--allow-multiple-definition \
-    "$LIBS_OUT/lib/libbpf.a"
+    "$LIBS_OUT/lib/libbpf.a" \
+    $LDFLAGS
 # v5.8.7 (audit): 不再链接 libelf.a/libz.a。hotspotd 仅用 libbpf 的 bpf() syscall
 # 包装(bpf.c),不调 bpf_object__*/ring_buffer__*,故链接器不会拉入需要 libelf/libz
 # 的 libbpf.c/elf.c/btf.c 目标 → 无需这两个库(且我们只有 glibc 版,链了反而炸)。
-
 
 "$STRIP" "$OUT" 2>/dev/null || true
 echo "[build] OK: $(ls -lh "$OUT" | awk '{print $5}')  $OUT"
@@ -108,7 +102,7 @@ echo "[build] Copied to $BINDIR/hotspotd"
 echo ""
 echo "=== v5.0 tools build (hnc_ipc) ==="
 if [ -d tools ]; then
-    (cd tools && bash build.sh "$ARCH" hnc_ipc)
+    (cd tools && ANDROID_NDK="$ANDROID_NDK" bash build.sh "$ARCH" hnc_ipc)
     if [ -f "tools/prebuilt/${ARCH}/hnc_ipc" ]; then
         cp "tools/prebuilt/${ARCH}/hnc_ipc" "$BINDIR/hnc_ipc"
         chmod 755 "$BINDIR/hnc_ipc"
@@ -121,10 +115,10 @@ fi
 echo ""
 echo "=== mdns_resolve build ==="
 if [ -f mdns_resolve.c ]; then
-    $CC -O2 -std=c11 -Wall -Wextra -Wno-unused-parameter \
-        -D_GNU_SOURCE -DANDROID -static-libgcc \
-        -fPIE -pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384 -pthread \
-        -o "$BINDIR/mdns_resolve" mdns_resolve.c
+    # shellcheck disable=SC2086
+    $CC $CFLAGS \
+        -o "$BINDIR/mdns_resolve" mdns_resolve.c \
+        $LDFLAGS
     "$STRIP" "$BINDIR/mdns_resolve" 2>/dev/null || true
     chmod 755 "$BINDIR/mdns_resolve"
     echo "[build] OK: $(ls -lh "$BINDIR/mdns_resolve" | awk '{print $5}')  $BINDIR/mdns_resolve"

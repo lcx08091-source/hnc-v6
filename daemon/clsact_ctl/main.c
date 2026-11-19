@@ -1,9 +1,16 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * hnc_clsact_ctl — HNC Dual-Stack clsact ingress/egress BPF loader & map manager
+ * hnc_clsact_ctl — HNC v5.40.0 Dual-Stack clsact ingress/egress BPF loader & map manager
  *
- * Supports both legacy ip_mark_map (4B IPv4 -> 4B mark) and v5.34 mac_mark_map
+ * Supports both legacy ip_mark_map (4B IPv4 -> 4B mark) and v5.34+ mac_mark_map
  * (8B padded L2 MAC -> 4B mark) + optional SEC("tc_egress") AOSP tether6 bypass guard.
+ *
+ * v5.40.0 orthogonal skb->mark bitfield normalization:
+ *   - [15:0]  0x0000ffffU : Android netd netId / permission bits (preserved untouched)
+ *   - [23:16] 0x00ff0000U : HNC per-device slot mark (0x00800000U | (mid << 16))
+ *   - [31:24] 0xff000000U : HNC App/QoS tier marks (preserved untouched)
+ *   Inputs in update/sync may pass raw mid (1..99), legacy (0x800000 + mid),
+ *   or pre-encoded v5.40.0 orthogonal marks (0x00810000..0x00e30000).
  */
 
 #ifndef _GNU_SOURCE
@@ -62,8 +69,16 @@
 #define HNC_PROG_NAME        "hnc_clsact"
 #define HNC_EGRESS_NAME      "hnc_clsact_eg"
 
+#define HNC_MARK_DEV_MASK    0x00ff0000U
+#define HNC_MARK_DEV_VALID   0x00800000U
+#define HNC_MARK_DROP        0xffffffffU
+
 #ifndef TCA_BPF_FLAG_ACT_DIRECT
 #define TCA_BPF_FLAG_ACT_DIRECT 1
+#endif
+
+#ifndef BPF_OBJ_GET_INFO_BY_FD
+#define BPF_OBJ_GET_INFO_BY_FD 15
 #endif
 
 #define R_BPF_64_64       1
@@ -155,9 +170,16 @@ static int rtnl_talk(int fd, struct nlmsghdr *req)
         if (n == 0)
             return -ECONNRESET;
 
-        int rem = (int)n;
-        for (struct nlmsghdr *h = (struct nlmsghdr *)buf;
-             rem >= (int)sizeof(*h) && NLMSG_OK(h, (unsigned int)rem); h = NLMSG_NEXT(h, rem)) {
+        size_t rem = (size_t)n;
+        for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
+            struct nlmsghdr *h = (struct nlmsghdr *)(buf + off);
+            if (h->nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h->nlmsg_len > rem)
+                break;
+            size_t step = NLMSG_ALIGN(h->nlmsg_len);
+            if (step > rem)
+                step = rem;
+            off += step;
+            rem -= step;
             if (h->nlmsg_seq != g_seq)
                 continue;
             if (h->nlmsg_type == NLMSG_ERROR) {
@@ -238,7 +260,7 @@ static int bpf_filter_attach_dir(int nlfd, unsigned ifindex, uint32_t parent,
     t->tcm_family  = AF_UNSPEC;
     t->tcm_ifindex = (int)ifindex;
     t->tcm_parent  = parent;
-    t->tcm_info    = (HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
+    t->tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
     t->tcm_handle  = HNC_FILTER_HANDLE;
 
     if (addattr_l(n, sizeof(buf), TCA_KIND, HNC_FILTER_KIND,
@@ -283,7 +305,7 @@ static int bpf_filter_exists_dir(int nlfd, unsigned ifindex, uint32_t parent)
     t->tcm_family  = AF_UNSPEC;
     t->tcm_ifindex = (int)ifindex;
     t->tcm_parent  = parent;
-    t->tcm_info    = (HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
+    t->tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
     t->tcm_handle  = HNC_FILTER_HANDLE;
     if (addattr_l(n, sizeof(buf), TCA_KIND, HNC_FILTER_KIND,
                   strlen(HNC_FILTER_KIND) + 1) < 0)
@@ -306,7 +328,7 @@ static int bpf_filter_detach_dir(int nlfd, unsigned ifindex, uint32_t parent)
     t->tcm_family  = AF_UNSPEC;
     t->tcm_ifindex = (int)ifindex;
     t->tcm_parent  = parent;
-    t->tcm_info    = (HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
+    t->tcm_info    = ((uint32_t)HNC_FILTER_PREF << 16) | htons(ETH_P_ALL);
     t->tcm_handle  = HNC_FILTER_HANDLE;
     if (addattr_l(n, sizeof(buf), TCA_KIND, HNC_FILTER_KIND,
                   strlen(HNC_FILTER_KIND) + 1) < 0)
@@ -573,8 +595,8 @@ static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
         for (size_t k = 0; k < nrel; k++) {
             Elf64_Rel rel;
             memcpy(&rel, rel_base + k * sizeof(Elf64_Rel), sizeof(rel));
-            uint32_t sym_idx = ELF64_R_SYM(rel.r_info);
-            uint32_t typ     = ELF64_R_TYPE(rel.r_info);
+            uint32_t sym_idx = (uint32_t)ELF64_R_SYM(rel.r_info);
+            uint32_t typ     = (uint32_t)ELF64_R_TYPE(rel.r_info);
             size_t insn_idx  = (size_t)(rel.r_offset / 8);
             if (typ != R_BPF_64_64 || (rel.r_offset % 8) != 0 ||
                 insn_idx + 1 >= ninsn || sym_idx >= nsym) {
@@ -642,7 +664,20 @@ static int ensure_pin_dir(void)
     return -1;
 }
 
-static int get_or_pin_map(int new_fd, const char *pin_path, int *was_existing)
+static int bpf_map_get_info_by_fd(int fd, struct bpf_map_info *info)
+{
+    union bpf_attr_pad a;
+    memset(&a, 0, sizeof(a));
+    memset(info, 0, sizeof(*info));
+    a.attr.info.bpf_fd   = (uint32_t)fd;
+    a.attr.info.info_len = (uint32_t)sizeof(*info);
+    a.attr.info.info     = (uint64_t)(uintptr_t)info;
+    return sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &a);
+}
+
+static int get_or_pin_map(int new_fd, const char *pin_path,
+                          uint32_t want_type, uint32_t want_ksz, uint32_t want_vsz,
+                          int *was_existing)
 {
     *was_existing = 0;
     if (new_fd < 0)
@@ -652,9 +687,20 @@ static int get_or_pin_map(int new_fd, const char *pin_path, int *was_existing)
     a.attr.pathname = (uint64_t)(uintptr_t)pin_path;
     int old = sys_bpf(BPF_OBJ_GET, &a);
     if (old >= 0) {
-        close(new_fd);
-        *was_existing = 1;
-        return old;
+        struct bpf_map_info info;
+        if (bpf_map_get_info_by_fd(old, &info) == 0 &&
+            info.type == want_type &&
+            info.key_size == want_ksz &&
+            info.value_size == want_vsz) {
+            close(new_fd);
+            *was_existing = 1;
+            return old;
+        }
+        LOGI("pinned map %s schema mismatch (type=%u key=%u val=%u, expected type=%u key=%u val=%u); recreating",
+             pin_path, info.type, info.key_size, info.value_size,
+             want_type, want_ksz, want_vsz);
+        close(old);
+        unlink(pin_path);
     }
     if (ensure_pin_dir() < 0) {
         close(new_fd);
@@ -697,6 +743,64 @@ static int parse_mac_key(const char *s, struct mac_key *out)
         out->mac[i] = (uint8_t)b[i];
     }
     return 0;
+}
+
+/*
+ * 32/64-bit safe mark parser & v5.40.0 orthogonal [23:16] bitfield normalizer:
+ *   - Uses strtoull + 0xffffffffULL (zero tautological-compare warnings on 32-bit armv7a).
+ *   - Raw slot IDs mid (1..99, up to 126)        -> 0x00800000U | (mid << 16)
+ *   - Legacy marks (0x800000 + mid, 1..126)      -> 0x00800000U | (mid << 16)
+ *   - Pre-encoded [23:16] (0x00810000..0x00fe0000, incl. 0x00810000..0x00e30000) -> preserved
+ *   - Hard drop sentinel 0xffffffffU             -> preserved
+ *   - Zero (0)                                   -> preserved only if allow_zero != 0
+ */
+static int parse_and_normalize_mark(const char *markstr, int allow_zero, uint32_t *out)
+{
+    if (!markstr || !out)
+        return -1;
+    while (isspace((unsigned char)*markstr))
+        markstr++;
+    if (*markstr == '\0' || *markstr == '-' || *markstr == '+')
+        return -1;
+
+    char *endp = NULL;
+    errno = 0;
+    unsigned long long raw_ull = strtoull(markstr, &endp, 0);
+    if (errno != 0 || endp == markstr || *endp != '\0' || raw_ull > 0xffffffffULL)
+        return -1;
+
+    uint32_t raw = (uint32_t)raw_ull;
+    if (raw == 0U) {
+        if (!allow_zero)
+            return -1;
+        *out = 0U;
+        return 0;
+    }
+    if (raw == HNC_MARK_DROP) {
+        *out = HNC_MARK_DROP;
+        return 0;
+    }
+    if (raw >= 1U && raw <= 126U) {
+        *out = HNC_MARK_DEV_VALID | (raw << 16);
+        return 0;
+    }
+    if (raw >= (HNC_MARK_DEV_VALID + 1U) && raw <= (HNC_MARK_DEV_VALID + 126U)) {
+        uint32_t mid = raw - HNC_MARK_DEV_VALID;
+        *out = HNC_MARK_DEV_VALID | (mid << 16);
+        return 0;
+    }
+    if ((raw & HNC_MARK_DEV_VALID) != 0U &&
+        (raw & 0x007f0000U) != 0U &&
+        (raw & ~HNC_MARK_DEV_MASK) == 0U) {
+        *out = raw;
+        return 0;
+    }
+    /* Composite mark carrying valid [23:16] device bits: strip non-[23:16] bits */
+    if ((raw & HNC_MARK_DEV_VALID) != 0U && (raw & 0x007f0000U) != 0U) {
+        *out = raw & HNC_MARK_DEV_MASK;
+        return 0;
+    }
+    return -1;
 }
 
 static int bpf_map_elem_update(int map_fd, const void *key, uint32_t mark)
@@ -763,7 +867,8 @@ static int cmd_install(const char *iface, const char *obj)
     int raw_ip_fd = create_named_map(&c, "ip_mark_map", 4, 4, 0);
     if (raw_ip_fd < 0) { elf_free(&c); return RC_BPF; }
     int ip_existed = 0;
-    int ip_map_fd = get_or_pin_map(raw_ip_fd, MAP_PIN, &ip_existed);
+    int ip_map_fd = get_or_pin_map(raw_ip_fd, MAP_PIN,
+                                   BPF_MAP_TYPE_HASH, 4U, 4U, &ip_existed);
     if (ip_map_fd < 0) { elf_free(&c); return RC_BPF; }
 
     int raw_mac_fd = create_named_map(&c, "mac_mark_map", sizeof(struct mac_key), 4, 1);
@@ -777,7 +882,9 @@ static int cmd_install(const char *iface, const char *obj)
         return RC_BPF;
     }
     if (raw_mac_fd >= 0) {
-        mac_map_fd = get_or_pin_map(raw_mac_fd, MAC_MAP_PIN, &mac_existed);
+        mac_map_fd = get_or_pin_map(raw_mac_fd, MAC_MAP_PIN,
+                                    BPF_MAP_TYPE_HASH, (uint32_t)sizeof(struct mac_key), 4U,
+                                    &mac_existed);
         if (mac_map_fd < 0) {
             if (!ip_existed) unlink(MAP_PIN);
             close(ip_map_fd);
@@ -812,12 +919,12 @@ static int cmd_install(const char *iface, const char *obj)
     int rc = clsact_qdisc_ensure(nlfd, ifindex);
     if (rc == 0) {
         int in_rc = bpf_filter_attach_dir(nlfd, ifindex, TC_H_INGRESS_PARENT, prog_in, HNC_PROG_NAME);
-        int eg_rc = -1;
-        /* Always attempt egress attachment even if ingress pref 1 is held by
-         * HNC's matchall->ifb0 filter, so tether6 egress bypass stays guarded. */
-        if (prog_eg >= 0)
-            eg_rc = bpf_filter_attach_dir(nlfd, ifindex, TC_H_EGRESS_PARENT, prog_eg, HNC_EGRESS_NAME);
-        rc = (in_rc == 0 || eg_rc == 0) ? 0 : in_rc;
+        /* Attach optional egress filter as well so tether6 egress bypass stays guarded. */
+        if (prog_eg >= 0) {
+            int eg_rc = bpf_filter_attach_dir(nlfd, ifindex, TC_H_EGRESS_PARENT, prog_eg, HNC_EGRESS_NAME);
+            (void)eg_rc;
+        }
+        rc = in_rc;
     }
 
     close(nlfd);
@@ -860,14 +967,11 @@ static int cmd_check(const char *iface)
 
 static int cmd_update(const char *target, const char *markstr)
 {
-    char *endp = NULL;
-    errno = 0;
-    unsigned long long raw_mark = strtoull(markstr, &endp, 0);
-    if (errno != 0 || endp == markstr || *endp != '\0' || raw_mark > 0xffffffffULL) {
+    uint32_t mark = 0;
+    if (parse_and_normalize_mark(markstr, 1, &mark) < 0) {
         LOGE("invalid mark: %s", markstr);
         return RC_MAP;
     }
-    uint32_t mark = (uint32_t)raw_mark;
     struct mac_key mk;
     if (parse_mac_key(target, &mk) == 0) {
         int mfd = open_pinned_path(MAC_MAP_PIN, 0);
@@ -910,12 +1014,9 @@ static int cmd_sync(void)
         char keystr[64], markstr[64];
         if (sscanf(line, "%63s %63s", keystr, markstr) != 2 || keystr[0] == '#')
             continue;
-        char *endp = NULL;
-        errno = 0;
-        unsigned long long raw_m = strtoull(markstr, &endp, 0);
-        if (errno != 0 || endp == markstr || *endp != '\0' || raw_m == 0 || raw_m > 0xffffffffULL)
+        uint32_t mark = 0;
+        if (parse_and_normalize_mark(markstr, 0, &mark) < 0)
             continue;
-        uint32_t mark = (uint32_t)raw_m;
 
         struct mac_key mk;
         if (parse_mac_key(keystr, &mk) == 0) {
@@ -957,7 +1058,7 @@ static int cmd_sync(void)
     int rem_ip = 0, rem_mac = 0;
     uint32_t cur_ip = 0, next_ip = 0;
     int irc = bpf_map_get_next_any(ip_fd, NULL, &cur_ip);
-    while (irc == 0) {
+    for (int guard = 0; irc == 0 && guard < 1024; guard++) {
         int nrc = bpf_map_get_next_any(ip_fd, &cur_ip, &next_ip);
         int keep = 0;
         for (size_t i = 0; i < active_ip_cnt; i++) {
@@ -974,7 +1075,7 @@ static int cmd_sync(void)
         memset(&cur_m, 0, sizeof(cur_m));
         memset(&next_m, 0, sizeof(next_m));
         int mrc = bpf_map_get_next_any(mac_fd, NULL, &cur_m);
-        while (mrc == 0) {
+        for (int guard = 0; mrc == 0 && guard < 1024; guard++) {
             int nmrc = bpf_map_get_next_any(mac_fd, &cur_m, &next_m);
             int keep = 0;
             for (size_t i = 0; i < active_mac_cnt; i++) {

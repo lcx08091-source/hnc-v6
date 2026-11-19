@@ -21,7 +21,7 @@
 #     - VPN 0x60000+ 段：避开
 #     - system uid 0xc0000+ 段：避开
 #     - 0x800000+ 完全没人用
-#   CONNMARK_MASK 同步扩到 0xffffff（24 位），覆盖整个新段。
+#   CONNMARK_MASK 同步扩到 0xffff0000（24 位），覆盖整个新段。
 #
 # 【v3.3.4 历史】双栈（IPv4 + IPv6）
 #
@@ -77,15 +77,16 @@ log_error() {
 
 if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
     . "$HNC_DIR/bin/hnc_constants.sh"
-    MARK_BASE="${HNC_MARK_BASE:-0x800000}"
-else
-    MARK_BASE=0x800000
+elif [ -f "${0%/*}/hnc_constants.sh" ]; then
+    . "${0%/*}/hnc_constants.sh"
 fi
-# rc30.13.1 cleanup: MARK_BLACKLIST=0xDEAD 是 v3.x 设想的"黑名单专用 mark"但从未启用,
-# 黑名单实际走 filter/HNC_CTRL DROP 而不是 mangle MARK. 删 SC2034 死变量.
-# CONNMARK 掩码：0xffffff 覆盖低 24 位，足以容纳 MARK_BASE(0x800000) + mark_id(1..99)
-# v3.4.1：从 0x1ffff 扩到 0xffffff，配合新 MARK_BASE 避开 Android netd 命名空间
-CONNMARK_MASK=0xffffff
+MARK_BASE="${HNC_MARK_BASE:-0x00800000}"
+DEV_MARK_MASK="${HNC_MARK_MASK:-0x00ff0000}"
+CONNMARK_MASK="${HNC_CONNMARK_MASK:-0xffff0000}"
+command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
+    hnc_dev_mark_hex() { printf '0x%08x
+' $(( 0x00800000 | ($1 << 16) )); }
+}
 
 # rc2 修 S7: 全文件 iptables/ip6tables 走 $IPT/$IP6T, 统一带 -w 2 xtables 锁.
 # 没 -w 时 xtables 被占(watchdog + apply_device_rule 并发常见)会直接 EAGAIN 退,
@@ -190,7 +191,7 @@ init_chains() {
     # 对 v6 而言是必需：下行没有 -d 地址规则兜底，全靠这个恢复
     _ensure_chain mangle HNC_RESTORE
     ipt_dual -t mangle -A HNC_RESTORE \
-        -m connmark ! --mark 0 \
+        -m connmark ! --mark "0x0/$CONNMARK_MASK" \
         -j CONNMARK --restore-mark \
         --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
     _ensure_link mangle PREROUTING HNC_RESTORE 1
@@ -224,7 +225,7 @@ init_chains() {
     # 上行新连接打完 mark 后存入 conntrack，下行回包才能 restore
     _ensure_chain mangle HNC_SAVE
     ipt_dual -t mangle -A HNC_SAVE \
-        -m mark ! --mark 0 \
+        -m mark ! --mark "0x0/$CONNMARK_MASK" \
         -j CONNMARK --save-mark \
         --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
     _ensure_link mangle POSTROUTING HNC_SAVE 1
@@ -249,47 +250,38 @@ init_chains() {
 # ═══════════════════════════════════════════════════════════════
 mark_device() {
     local ip=$1 mac=$2 mark_id=$3
-    local mark; mark=$(printf "0x%x" $((MARK_BASE + mark_id)))
+    local mark; mark=$(hnc_dev_mark_hex "$mark_id") || return 1
     [ -z "$ip" ] && { log "WARN: mark called with empty ip, skip"; return 1; }
 
-    log "Marking $ip ($mac) mark=$mark"
+    log "Marking $ip ($mac) mark=${mark}/${DEV_MARK_MASK}"
 
-    # ── v3.4.11 P1-4 修复:GC 陈旧 IP 规则(DHCP renew 后旧 IP 规则积累) ──
-    # 设备 IP 从 192.168.43.5 → 192.168.43.7 后,旧 IP 的 -s/-d 规则不会自动清,
-    # 长跑几天 HNC_MARK / HNC_STATS 链会越来越长。
-    #
-    # 思路:
-    #   1) 从 HNC_MARK 找出所有 mac source 是当前 mac 的 src 规则,提取 IP 集合
-    #   2) 从 HNC_MARK 找出所有 mark 是当前 mark id 的 dst 规则,提取 IP 集合
-    #   3) 合并去重,删除所有不等于当前 ip 的旧 IP 的 src/dst/stats 规则
-    _gc_stale_ips_for_mac "$mac" "$mark" "$ip"
+    _gc_stale_ips_for_mac "$mac" "$mark" "$ip" "$mark_id"
 
-    # ── 清除可能的旧规则（幂等)──
+    # ── 清除可能的旧规则（幂等，仅限正交 xmark）──
     ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$ip" -m mac --mac-source "$mac" \
-        -j MARK --set-mark "$mark"
-    ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" -j MARK --set-mark "$mark"
+        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+    ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" \
+        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
     ipt_dual_del_all -t mangle -D HNC_MARK \
-        -m mac --mac-source "$mac" -m mark --mark 0 \
-        -j MARK --set-mark "$mark"
+        -m mac --mac-source "$mac" -m mark --mark "0x0/${DEV_MARK_MASK}" \
+        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
 
-    # ── v4 上行：src IP + MAC（最精确）──
+    # ── v4 上行：src IP + MAC（精确正交打标 [23:16]，绝不触碰低 16 位 netd netId）──
     $IPT -t mangle -A HNC_MARK \
         -s "$ip" -m mac --mac-source "$mac" \
-        -j MARK --set-mark "$mark"
+        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
 
-    # ── v4+v6 上行兜底：仅 MAC（应对 IP 未就绪 / v6 无地址依赖）──
-    # -m mark --mark 0 确保不重复 mark 已由 HNC_RESTORE 恢复的包
+    # ── v4+v6 上行兜底：仅 MAC（-m mark --mark 0x0/0x00ff0000 判设备位为空）──
     ipt_dual -t mangle -A HNC_MARK \
-        -m mac --mac-source "$mac" -m mark --mark 0 \
-        -j MARK --set-mark "$mark"
+        -m mac --mac-source "$mac" -m mark --mark "0x0/${DEV_MARK_MASK}" \
+        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
 
     # ── v4 下行：dst IP ──
-    # 不可省：CONNMARK restore 不一定覆盖所有情况（如新连接的第一个回包）
     $IPT -t mangle -A HNC_MARK \
-        -d "$ip" -j MARK --set-mark "$mark"
+        -d "$ip" -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
 
-    # ── v4 流量统计(幂等保计数: 已存在则不删重建, 避免改限速时把累计流量清零)──
-    _ensure_v4_stats_ip "$ip" 
+    # ── v4 流量统计(幂等保计数)──
+    _ensure_v4_stats_ip "$ip"
 
     echo "$mark"
 }
@@ -300,25 +292,20 @@ mark_device() {
 # 行为: 扫描 HNC_MARK / HNC_STATS,删除所有不等于 current_ip 的 src/dst 规则
 # ═══════════════════════════════════════════════════════════════
 _gc_stale_ips_for_mac() {
-    local mac=$1 mark=$2 cur_ip=$3
-    local stale_ips ip_line
+    local mac=$1 mark=$2 cur_ip=$3 mark_id=${4:-0}
+    local stale_ips ip_line mark_short
+    mark_short=$(printf '0x%x' $(( 0x00800000 | (mark_id << 16) )))
 
-    # 步骤 1: 收集所有跟这个 mac/mark 关联的 IP(去重)
-    # $IPT -S 输出格式示例:
-    #   -A HNC_MARK -s 192.168.43.5/32 -m mac --mac-source aa:bb:cc:dd:ee:ff -j MARK --set-xmark 0x800001/0xffffffff
-    #   -A HNC_MARK -d 192.168.43.5/32 -j MARK --set-xmark 0x800001/0xffffffff
-    #
-    # 用 awk 一次提取:
-    #   - 含 --mac-source <mac> 的行 → 取 -s 后的 IP
-    #   - 含 --set-xmark <mark> 但不含 --mac-source 的行 → 取 -d 后的 IP
-    stale_ips=$($IPT -t mangle -S HNC_MARK 2>/dev/null | awk -v m="$mac" -v mk="$mark" '
+    stale_ips=$($IPT -t mangle -S HNC_MARK 2>/dev/null | awk -v m="$mac" -v mk="$mark" -v mks="$mark_short" '
         function strip_cidr(ip) { sub(/\/32$/, "", ip); return ip }
         {
             has_mac = 0; has_mark = 0; src_ip = ""; dst_ip = ""
             for (i = 1; i <= NF; i++) {
-                if ($i == "--mac-source" && $(i+1) == m) has_mac = 1
-                if ($i == "--set-xmark" && index($(i+1), mk) == 1) has_mark = 1
-                if ($i == "--set-mark"  && index($(i+1), mk) == 1) has_mark = 1
+                if ($i == "--mac-source" && tolower($(i+1)) == tolower(m)) has_mac = 1
+                if ($i == "--set-xmark" || $i == "--set-mark") {
+                    tok = tolower($(i+1))
+                    if (index(tok, tolower(mk)) == 1 || index(tok, tolower(mks)) == 1) has_mark = 1
+                }
                 if ($i == "-s") src_ip = strip_cidr($(i+1))
                 if ($i == "-d") dst_ip = strip_cidr($(i+1))
             }
@@ -340,8 +327,9 @@ _gc_stale_ips_for_mac() {
         [ "$old_ip" = "$cur_ip" ] && continue
         log "GC stale IP: $old_ip (mac=$mac mark=$mark)"
         ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$old_ip" -m mac --mac-source "$mac" \
-            -j MARK --set-mark "$mark"
-        ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$old_ip" -j MARK --set-mark "$mark"
+            -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+        ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$old_ip" \
+            -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
         ipt_del_all "$IPT" -t mangle -D HNC_STATS -s "$old_ip" -j RETURN
         ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$old_ip" -j RETURN
     done < "$_gc_tmp"
@@ -354,9 +342,9 @@ _gc_stale_ips_for_mac() {
 # ═══════════════════════════════════════════════════════════════
 unmark_device() {
     local ip=$1 mac=$2 mark_id=$3
-    local mark; mark=$(printf "0x%x" $((MARK_BASE + mark_id)))
+    local mark; mark=$(hnc_dev_mark_hex "$mark_id") || return 0
 
-    log "Unmarking $ip ($mac) mark=$mark"
+    log "Unmarking $ip ($mac) mark=${mark}/${DEV_MARK_MASK}"
 
     # v4.0 Patch 4.b hotfix: unmark 是幂等清理操作 — 规则不存在 == 已清理成功
     # 之前函数最后一条 $IPT -D 失败时 return 非 0,导致 WebUI clearLimit 上报失败给用户
@@ -371,12 +359,13 @@ unmark_device() {
     # 不拼 `-s ""` 这类非法参数。
     if [ -n "$ip" ]; then
         ipt_del_all "$IPT" -t mangle -D HNC_MARK -s "$ip" -m mac --mac-source "$mac" \
-            -j MARK --set-mark "$mark"
-        ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" -j MARK --set-mark "$mark"
+            -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
+        ipt_del_all "$IPT" -t mangle -D HNC_MARK -d "$ip" \
+            -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
     fi
     ipt_dual_del_all -t mangle -D HNC_MARK \
-        -m mac --mac-source "$mac" -m mark --mark 0 \
-        -j MARK --set-mark "$mark"
+        -m mac --mac-source "$mac" -m mark --mark "0x0/${DEV_MARK_MASK}" \
+        -j MARK --set-xmark "${mark}/${DEV_MARK_MASK}"
 
     # v5.35.1: 取消限速(unmark)时设备往往仍在线, 绝不删 HNC_STATS 计数规则,
     # 否则取消限速会清零累计字节并冻结统计直至下轮 ensure_stats_online;
@@ -622,6 +611,9 @@ cleanup() {
         for _ac in HNC_APP_LIMIT_DOWN HNC_APP_QOS; do
             for _k in 1 2 3 4; do $_T -t mangle -D POSTROUTING -j "$_ac" 2>/dev/null || break; done
         done
+        for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j HNC_QUIC_APPLIM 2>/dev/null || break; done
+        $_T -t filter -F HNC_QUIC_APPLIM 2>/dev/null || true
+        $_T -t filter -X HNC_QUIC_APPLIM 2>/dev/null || true
         for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS HNC_APP_QOS_IP HNC_APP_QOS_MARK \
                    $($_T -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}'); do
             $_T -t mangle -F "$_ac" 2>/dev/null || true

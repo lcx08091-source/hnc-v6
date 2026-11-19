@@ -123,18 +123,17 @@ func flushLabelSamplesNow() {
 
 // liveCap is one active per-iface capture goroutine's bookkeeping.
 type liveCap struct {
-	iface     string
-	cancel    context.CancelFunc
-	done      chan struct{} // closed when the capture goroutine exits
-	startedAt int64
-
-	// Per-iface counters (atomic so the reconciler can read them under
-	// only its own liveMu, not the capture goroutine's locks).
+	// Per-iface counters at offset 0 for 32-bit ARM 64-bit atomic alignment.
 	rxBytes   atomic.Uint64
 	packets   atomic.Uint64
 	tlsEvents atomic.Uint64
 	dnsEvents atomic.Uint64
 	restarts  atomic.Int64
+
+	iface     string
+	cancel    context.CancelFunc
+	done      chan struct{} // closed when the capture goroutine exits
+	startedAt int64
 
 	// lastErr is the last open/run error, if any. Surfaced into
 	// SelfIfaceState.LastError so the WebUI can show it without us

@@ -187,13 +187,16 @@ type bpfAttrObjGet struct {
 
 // bpfPathBuf v5.12: 包级变量强制堆分配(理由同 EBPFSampler.key), 仅启动时
 // 单 goroutine 使用一次。
-var bpfPathBuf []byte
+var bpfPathPtr *byte
 
 func bpfObjGetCall(path string) (int, error) {
-	bpfPathBuf = append([]byte(path), 0) // NUL-terminate
-	cpath := bpfPathBuf
+	cptr, err := syscall.BytePtrFromString(path)
+	if err != nil {
+		return -1, err
+	}
+	bpfPathPtr = cptr
 	attr := bpfAttrObjGet{
-		Pathname: uint64(uintptr(unsafe.Pointer(&cpath[0]))),
+		Pathname: uint64(uintptr(unsafe.Pointer(cptr))),
 	}
 	// We need the syscall to see the full union size. Padding to 128 B
 	// (current largest bpf_attr member as of Linux 6.x) is safe.
@@ -205,7 +208,7 @@ func bpfObjGetCall(path string) (int, error) {
 	r1, _, errno := syscall.Syscall(
 		sysBPF,
 		bpfObjGet,
-		uintptr(unsafe.Pointer(&pad[0])),
+		uintptr(unsafe.Pointer(&pad)),
 		unsafe.Sizeof(attr),
 	)
 	if errno != 0 {
@@ -238,7 +241,7 @@ func bpfMapLookupElemCall(mapFD int, key, value unsafe.Pointer) error {
 	_, _, errno := syscall.Syscall(
 		sysBPF,
 		bpfMapLookupElem,
-		uintptr(unsafe.Pointer(&pad[0])),
+		uintptr(unsafe.Pointer(&pad)),
 		unsafe.Sizeof(attr),
 	)
 	if errno != 0 {
@@ -265,7 +268,7 @@ func bpfMapGetNextKeyCall(mapFD int, key, nextKey unsafe.Pointer) error {
 	_, _, errno := syscall.Syscall(
 		sysBPF,
 		bpfMapGetNextKey,
-		uintptr(unsafe.Pointer(&pad[0])),
+		uintptr(unsafe.Pointer(&pad)),
 		unsafe.Sizeof(attr),
 	)
 	if errno != 0 {

@@ -116,6 +116,9 @@ type m4NeighSource interface {
 }
 
 type m4GoRunner struct {
+	// v5.32 T4: 主循环醒来次数(置于 offset 0 保 32 位 ARM 原子对齐)
+	tickN atomic.Int64
+
 	iface  string
 	ifIdx  int
 	stopCh chan struct{}
@@ -138,8 +141,6 @@ type m4GoRunner struct {
 	statsCmdFn  func() (map[string][2]int64, error)
 	blacklistFn func() map[string]bool
 
-	// v5.32 T4: 主循环醒来次数(只给测试观察空闲醒拍频率, 生产不读)
-	tickN atomic.Int64
 }
 
 // m4NextTickMS 写者主循环下一拍间隔(v5.32 T4 空闲降频):

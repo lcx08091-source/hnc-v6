@@ -103,10 +103,10 @@ type Stats struct {
 
 // Scanner 执行扫描。同一时刻只允许一轮(TryLock), 扫描本身单 goroutine。
 type Scanner struct {
+	scanned atomic.Int64 // 累计实际打开扫描的 APK 数(测试断言增量缓存用; 置于 offset 0 保 32 位 ARM 对齐)
 	opt     Options
 	mu      sync.Mutex
 	buf     []byte
-	scanned atomic.Int64 // 累计实际打开扫描的 APK 数(测试断言增量缓存用)
 }
 
 // New 构造 Scanner 并填默认值。

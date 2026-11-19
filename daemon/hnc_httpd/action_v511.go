@@ -303,7 +303,7 @@ HP=${HNC_HP:-}
 [ -n "$HP" ] || HP=$(cat "$HNC_DIR/run/hotspotd.pid" 2>/dev/null)
 if [ -n "$HP" ] && [ -d "/proc/$HP" ]; then echo HOTSPOTD=up; echo HPID=$HP; echo HRSS=$(awk '/VmRSS/{print $2}' /proc/$HP/status 2>/dev/null); else echo HOTSPOTD=down; fi
 T=0; if [ -n "$IF" ]; then T=$( { tc qdisc show dev "$IF"; tc class show dev "$IF"; tc qdisc show dev ifb0; tc class show dev ifb0; } 2>/dev/null | wc -l); fi; echo TC=$T
-echo IPT=$(iptables -t mangle -S 2>/dev/null | grep -c 0x800000)
+echo IPT=$(iptables -t mangle -S 2>/dev/null | grep -E -c '0x(80|008|0*[89a-eA-E][0-9a-fA-F]0000)')
 echo IFACE=$IF`
 
 func (s *server) apiRunStatus(w http.ResponseWriter, r *http.Request) {

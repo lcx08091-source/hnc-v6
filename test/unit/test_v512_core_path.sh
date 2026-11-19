@@ -50,7 +50,7 @@ mock_set_stdout tc "$TC_TREE"
 tcm set_limit wlan2 1 10 0 192.168.43.5 >/dev/null 2>&1
 assert_mock_called "classid 1:100 htb" "mid=1 应映射到 class 1:100" && \
     assert_mock_not_called "classid 1:1 htb" "绝不能改写父类 1:1" && \
-    assert_mock_called "handle 0x800001 fw" "fwmark 仍是 0x800001" && \
+    assert_mock_called "handle 0x00810000/0x00ff0000 fw" "fwmark 使用正交掩码 0x00810000/0x00ff0000" && \
     assert_mock_called "prio 101 u32" "u32 优先级仍按 mark_id=1 → 101" && test_pass
 mock_teardown
 
@@ -91,7 +91,7 @@ seed_v6_env() {
     mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan2
 2408:1::5 dev wlan2 lladdr aa:bb:cc:dd:ee:05 REACHABLE"
 }
-IPT_MARKED="MARK       all  --  0.0.0.0/0            0.0.0.0/0            MAC aa:bb:cc:dd:ee:05 MARK set 0x800005"
+IPT_MARKED="MARK       all  --  0.0.0.0/0            0.0.0.0/0            MAC aa:bb:cc:dd:ee:05 MARK xset 0x00850000/0x00ff0000"
 
 test_start "v6_sync: 旧快照地址相同但 filter 不在 tc 上(热点重开/重启)→ 重建"
 mock_setup
@@ -135,18 +135,18 @@ cat > "$HNC_TEST_DIR/data/rules.json" <<'EOF'
 EOF
 echo '{}' > "$HNC_TEST_DIR/data/devices.json"
 HNC_DIR="$HNC_TEST_DIR" HNC="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/cleanup_stale_rules.sh" >/dev/null 2>&1
-assert_mock_called "mangle -D HNC_MARK -m mac --mac-source cc:cc:cc:cc:cc:07 -m mark --mark 0 -j MARK --set-mark 0x800007" \
+assert_mock_called "mangle -D HNC_MARK -m mac --mac-source cc:cc:cc:cc:cc:07 -m mark --mark 0x0/0x00ff0000 -j MARK --set-xmark 0x00870000/0x00ff0000" \
     "陈旧设备的 MAC-only MARK 规则必须删除" && test_pass
 mock_teardown
 
 # ═══ ensure_ingress: 已有 mirred 时不得反复 del+重装 ════════════
-test_start "ensure_ingress: 识别 iproute2 真实输出的 mirred, 不重装"
+test_start "ensure_ingress: 识别 iproute2 真实输出的 pref 2 mirred, 不重装"
 mock_setup
-mock_set_stdout tc "filter parent ffff: protocol all pref 1 matchall chain 0
-filter parent ffff: protocol all pref 1 matchall chain 0 handle 0x1
+mock_set_stdout tc "filter parent ffff: protocol all pref 2 matchall chain 0
+filter parent ffff: protocol all pref 2 matchall chain 0 handle 0x1
 	action order 1: mirred (Egress Redirect to device ifb0) stolen"
 tcm ensure_ingress wlan2 >/dev/null 2>&1
-assert_mock_not_called "ingress pref 1" "mirred 已在, 不应 del pref 1" && \
+assert_mock_not_called "ingress pref 2" "mirred 已在 pref 2, 不应 del pref 2" && \
     assert_mock_not_called "filter add" "mirred 已在, 不应重装" && test_pass
 mock_teardown
 
@@ -177,7 +177,7 @@ echo "wlan2" > "$HNC_TEST_DIR/run/iface.cache"
 date +%s > "$HNC_TEST_DIR/run/capability_probe_last"
 mock_set_stdout ip "    inet 192.168.43.1/24 scope global wlan2"
 mock_set_stdout tc "qdisc htb 1: root refcnt 2 r2q 10 default 0x9999"
-mock_set_stdout iptables "-A HNC_RESTORE -m connmark ! --mark 0x0 -j CONNMARK --restore-mark --nfmask 0xffffff --ctmask 0xffffff"
+mock_set_stdout iptables "-A HNC_RESTORE -m connmark ! --mark 0x0/0xffff0000 -j CONNMARK --restore-mark --nfmask 0xffff0000 --ctmask 0xffff0000"
 echo '{"version":1,"devices":{},"blacklist":["dd:dd:dd:dd:dd:08"],"whitelist":[]}' > "$HNC_TEST_DIR/data/rules.json"
 # 模拟另一个活着的 tc 写者持有 tc_action_lock(租约内)
 mkdir -p "$HNC_TEST_DIR/run/tc_action.lock"

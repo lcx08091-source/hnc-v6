@@ -27,6 +27,11 @@ IPT="$HNC_DIR/bin/iptables_manager.sh"
 TC="$HNC_DIR/bin/tc_manager.sh"
 DETECT="$HNC_DIR/bin/device_detect.sh"
 LOG="$HNC_DIR/logs/apply.log"
+if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
+    . "$HNC_DIR/bin/hnc_constants.sh"
+elif [ -f "${0%/*}/hnc_constants.sh" ]; then
+    . "${0%/*}/hnc_constants.sh"
+fi
 
 # v5.0: scheduler notify helper
 # tc 规则发生变化后调, 让 scheduler 决定是否触发 BPF disable_upstream
@@ -351,6 +356,7 @@ case "$CMD" in
         fi
         # v5.0: tc 规则就位, 通知 scheduler 决定是否触发 BPF offload disable
         notify_offload "$MAC" 1
+        [ -s "$HNC_DIR/data/app_limits.flat" ] && : > "$HNC_DIR/run/app_limit.dirty" 2>/dev/null || true
         # v5.38.0: 立即触发单设备 IPv6 邻居 u32 filter 同步, 消除首次设限速后的 IPv6 下行空窗期
         if [ -z "${HNC_TEST_MODE:-}" ] && [ -f "$HNC_DIR/bin/v6_sync.sh" ]; then
             (HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/v6_sync.sh" sync_one "$MAC" >> "$LOG" 2>&1 &)
@@ -443,7 +449,14 @@ case "$CMD" in
         num_gt0 "$JITTER_MS" && HAS_DELAY=1
         num_gt0 "$LOSS_PCT" && HAS_DELAY=1
 
-        if [ "$HAS_DELAY" = "1" ]; then
+        _CID_CHK="$MID"; [ "$MID" = "1" ] && _CID_CHK=100
+        HAS_SUBCLASS=0
+        if [ -n "$IFACE" ]; then
+            grep -qx "$IFACE $_CID_CHK" "$HNC_DIR/run/app_qos.state" 2>/dev/null && HAS_SUBCLASS=1
+            grep -qx "$IFACE $_CID_CHK" "$HNC_DIR/run/app_limits.devs" 2>/dev/null && HAS_SUBCLASS=1
+        fi
+
+        if [ "$HAS_DELAY" = "1" ] || [ "$HAS_SUBCLASS" = "1" ]; then
             if [ -n "$IFACE" ] && [ "$IFACE" != "wlan0" ]; then
                 sh "$TC" set_limit "$IFACE" "$MID" 0 0 "$IP" >> "$LOG" 2>&1 \
                     || log "tc set_limit clear-rate warn (mid=$MID, delay preserved)"

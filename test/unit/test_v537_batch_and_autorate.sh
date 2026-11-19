@@ -38,8 +38,8 @@ EOF
 sh "$HNC_DIR/bin/apply_app_limits.sh"
 assert_eq "1" "$(grep -c '^iptables-restore|.*--noflush' "$MOCK_LOG")" "single v4 --noflush commit" &&
 assert_eq "1" "$(grep -c '^ip6tables-restore|.*--noflush' "$MOCK_LOG")" "single v6 --noflush commit" &&
-assert_contains "$(cat "$MOCK_LOG.v4batch")" "-A HNC_AL_C1 -s 203.0.113.10 -j MARK --set-mark 0x900001" "v4 rule in batch" &&
-assert_contains "$(cat "$MOCK_LOG.v6batch")" "-A HNC_AL_C1 -s 2408:8000::10 -j MARK --set-mark 0x900001" "v6 rule in batch" &&
+assert_contains "$(cat "$MOCK_LOG.v4batch")" "-A HNC_AL_C1 -s 203.0.113.10 -j MARK --set-xmark 0x04000000/0xfc000000" "v4 rule in batch" &&
+assert_contains "$(cat "$MOCK_LOG.v6batch")" "-A HNC_AL_C1 -s 2408:8000::10 -j MARK --set-xmark 0x04000000/0xfc000000" "v6 rule in batch" &&
 test_pass
 mock_teardown
 
@@ -53,7 +53,7 @@ chmod +x "$MOCK_BIN_DIR/iptables-restore"
 echo "aa:bb:cc:dd:ee:01 bilibili 5" > "$HNC_DIR/data/app_limits.flat"
 echo "198.51.100.7 bilibili" > "$HNC_DIR/run/ip_app_map.flat"
 sh "$HNC_DIR/bin/apply_app_limits.sh"
-assert_contains "$(cat "$MOCK_LOG")" "-A HNC_AL_C1 -s 198.51.100.7 -j MARK --set-mark 0x900001" "per-rule fallback executed" &&
+assert_contains "$(cat "$MOCK_LOG")" "-A HNC_AL_C1 -s 198.51.100.7 -j MARK --set-xmark 0x04000000/0xfc000000" "per-rule fallback executed" &&
 test_pass
 mock_teardown
 
@@ -85,7 +85,7 @@ ip 3 203.0.113.99
 EOF
 sh "$HNC_DIR/bin/apply_app_qos.sh"
 assert_eq "1" "$(grep -c '^iptables-restore|.*--noflush' "$MOCK_LOG")" "single qos --noflush commit" &&
-assert_contains "$(cat "$MOCK_LOG.qos_v4")" "-A HNC_APP_QOS_IP -s 203.0.113.88 -j MARK --set-xmark 0x200000/0x600000" "RT rule in batch" &&
+assert_contains "$(cat "$MOCK_LOG.qos_v4")" "-A HNC_APP_QOS_IP -s 203.0.113.88 -m mark --mark 0x0/0xfc000000 -j MARK --set-xmark 0x01000000/0x03000000" "RT rule in batch" &&
 test_pass
 mock_teardown
 

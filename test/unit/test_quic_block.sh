@@ -1,42 +1,70 @@
 #!/system/bin/sh
-# v5.14: quic_block_sync.sh —— 强制 QUIC 回落 TCP(UDP 443 → REJECT)
+# test/unit/test_quic_block.sh — 双栈 QUIC 回落开关单测 (IPv4 + IPv6)
 
-QSCRIPT="$HNC_REPO_ROOT/bin/quic_block_sync.sh"
+QB="$HNC_REPO_ROOT/bin/quic_block_sync.sh"
 
-qseed() {  # $1=quic_block
-mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
-printf '{\n  "version": 1,\n  "quic_block": %s,\n  "devices": {}\n}\n' "$1" > "$HNC_TEST_DIR/data/rules.json"
-# iptables 桩: 记录参数; -D 恒失败(否则删除循环不会停), 其余成功
-cat > "$HNC_TEST_DIR/ipt_stub.sh" <<'STUB'
-echo "$*" >> "$IPT_LOG"
-case " $* " in *" -D "*) exit 1 ;; esac
+qseed() {
+    mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs" "$HNC_TEST_DIR/stub"
+    : > "$HNC_TEST_DIR/ipt.log"
+    : > "$HNC_TEST_DIR/ip6t.log"
+    cat > "$HNC_TEST_DIR/stub/iptables" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$HNC_DIR/ipt.log"
+case "$*" in *"-D FORWARD -j HNC_QUIC"*)
+    n=$(grep -c -- '-D FORWARD -j HNC_QUIC' "$HNC_DIR/ipt.log")
+    [ "$n" -le 1 ] && exit 0 || exit 1 ;;
+esac
 exit 0
-STUB
-: > "$HNC_TEST_DIR/ipt.log"
+EOF
+    cat > "$HNC_TEST_DIR/stub/ip6tables" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$HNC_DIR/ip6t.log"
+case "$*" in *"-D FORWARD -j HNC_QUIC"*)
+    n=$(grep -c -- '-D FORWARD -j HNC_QUIC' "$HNC_DIR/ip6t.log")
+    [ "$n" -le 1 ] && exit 0 || exit 1 ;;
+esac
+exit 0
+EOF
+    chmod +x "$HNC_TEST_DIR/stub/iptables" "$HNC_TEST_DIR/stub/ip6tables"
+    [ -n "$1" ] && printf '%s\n' "$1" > "$HNC_TEST_DIR/data/rules.json"
+    [ -n "$2" ] && printf '%s\n' "$2" > "$HNC_TEST_DIR/run/hnc_state"
 }
-qrun() { IPT_LOG="$HNC_TEST_DIR/ipt.log" HNC_IPT="sh $HNC_TEST_DIR/ipt_stub.sh" HNC_IP6T="sh $HNC_TEST_DIR/ipt_stub.sh" HNC_DIR="$HNC_TEST_DIR" sh "$QSCRIPT" "$@" 2>/dev/null | tail -1; }
+qrun() {
+    HNC_DIR="$HNC_TEST_DIR" HNC_IPT="$HNC_TEST_DIR/stub/iptables -w 2" HNC_IP6T="$HNC_TEST_DIR/stub/ip6tables -w 2" \
+        PATH="$HNC_TEST_DIR/stub:$PATH" sh "$QB" "$@"
+}
 
-test_start "quic_block: off → chain removed, no REJECT"
-qseed false
+test_start "quic_block: off → dual-stack chains removed, no REJECT"
+qseed '{"quic_block":false}' "ACTIVE:wlan2"
 out=$(qrun)
-[ "$out" = "QUIC_BLOCK=off" ] && grep -q -- "-X HNC_QUIC" "$HNC_TEST_DIR/ipt.log" && ! grep -q REJECT "$HNC_TEST_DIR/ipt.log" && test_pass || test_fail "out=$out"
+[ "$out" = "QUIC_BLOCK=off" ] \
+    && grep -q -- '-X HNC_QUIC' "$HNC_TEST_DIR/ipt.log" \
+    && grep -q -- '-X HNC_QUIC' "$HNC_TEST_DIR/ip6t.log" \
+    && ! grep -q 'REJECT' "$HNC_TEST_DIR/ipt.log" \
+    && ! grep -q 'REJECT' "$HNC_TEST_DIR/ip6t.log" \
+    && test_pass || test_fail "out=$out v4=$(cat "$HNC_TEST_DIR/ipt.log") v6=$(cat "$HNC_TEST_DIR/ip6t.log")"
 
-test_start "quic_block: on + ACTIVE iface → REJECT udp 443 on hotspot iface, linked first in FORWARD"
-qseed true
-echo "ACTIVE:wlan2" > "$HNC_TEST_DIR/run/hnc_state"
+test_start "quic_block: on + ACTIVE iface → dual-stack REJECT udp 443 (icmp & icmp6), linked first in FORWARD"
+qseed '{"quic_block":true}' "ACTIVE:wlan2"
 out=$(qrun)
 [ "$out" = "QUIC_BLOCK=on iface=wlan2" ] \
-  && grep -q -- "-A HNC_QUIC -i wlan2 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable" "$HNC_TEST_DIR/ipt.log" \
-  && grep -q -- "-I FORWARD 1 -j HNC_QUIC" "$HNC_TEST_DIR/ipt.log" && test_pass || test_fail "out=$out"
+    && grep -q -- '-A HNC_QUIC -i wlan2 -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable' "$HNC_TEST_DIR/ipt.log" \
+    && grep -q -- '-I FORWARD 1 -j HNC_QUIC' "$HNC_TEST_DIR/ipt.log" \
+    && grep -q -- '-A HNC_QUIC -i wlan2 -p udp --dport 443 -j REJECT --reject-with icmp6-port-unreachable' "$HNC_TEST_DIR/ip6t.log" \
+    && grep -q -- '-I FORWARD 1 -j HNC_QUIC' "$HNC_TEST_DIR/ip6t.log" \
+    && test_pass || test_fail "out=$out v4=$(cat "$HNC_TEST_DIR/ipt.log") v6=$(cat "$HNC_TEST_DIR/ip6t.log")"
 
 test_start "quic_block: HNC_WL_IFACE overrides state; multi-line rules.json"
-qseed true
-printf '{\n  "quic_block":\n    true\n}\n' > "$HNC_TEST_DIR/data/rules.json"
-out=$(HNC_WL_IFACE=ap0 qrun)
-[ "$out" = "QUIC_BLOCK=on iface=ap0" ] && test_pass || test_fail "out=$out"
+qseed "$(printf '{\n  "quic_block": true\n}')" "IDLE"
+out=$(HNC_WL_IFACE=ap0 HNC_DIR="$HNC_TEST_DIR" HNC_IPT="$HNC_TEST_DIR/stub/iptables -w 2" HNC_IP6T="$HNC_TEST_DIR/stub/ip6tables -w 2" PATH="$HNC_TEST_DIR/stub:$PATH" sh "$QB")
+[ "$out" = "QUIC_BLOCK=on iface=ap0" ] \
+    && grep -q -- '-i ap0 -p udp --dport 443 -j REJECT' "$HNC_TEST_DIR/ipt.log" \
+    && grep -q -- '-i ap0 -p udp --dport 443 -j REJECT --reject-with icmp6-port-unreachable' "$HNC_TEST_DIR/ip6t.log" \
+    && test_pass || test_fail "out=$out"
 
 test_start "quic_block: on but hotspot down → pending, nothing linked"
-qseed true
-rm -f "$HNC_TEST_DIR/run/hnc_state"
+qseed '{"quic_block":true}' "IDLE"
 out=$(qrun)
-[ "$out" = "QUIC_BLOCK=pending" ] && ! grep -q -- "-I FORWARD" "$HNC_TEST_DIR/ipt.log" && test_pass || test_fail "out=$out"
+[ "$out" = "QUIC_BLOCK=pending" ] && ! grep -q -- '-I FORWARD' "$HNC_TEST_DIR/ipt.log" \
+    && ! grep -q -- '-I FORWARD' "$HNC_TEST_DIR/ip6t.log" \
+    && test_pass || test_fail "out=$out"

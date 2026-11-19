@@ -28,16 +28,17 @@ rc=$?
 assert_exit_nonzero "$rc" "should fail with empty ip" && test_pass
 mock_teardown
 
-test_start "mark_device generates correct mark hex (mark_id=1 → 0x800001)"
+test_start "mark_device generates orthogonal mark hex (mark_id=1 → 0x00810000/0x00ff0000)"
 mock_setup
 ipt mark 192.168.43.5 aa:bb:cc:dd:ee:ff 1 >/dev/null 2>&1
-assert_mock_called "0x800001" "should use 0x800001 for mark_id=1" && test_pass
+assert_mock_called "MARK --set-xmark 0x00810000/0x00ff0000" "should use 0x00810000/0x00ff0000 for mark_id=1" && \
+    assert_mock_not_called "MARK --set-mark" "must never overwrite low 16 netd bits" && test_pass
 mock_teardown
 
-test_start "mark_device generates correct mark hex (mark_id=59 → 0x80003b)"
+test_start "mark_device generates orthogonal mark hex (mark_id=59 → 0x00bb0000/0x00ff0000)"
 mock_setup
 ipt mark 192.168.43.5 aa:bb:cc:dd:ee:ff 59 >/dev/null 2>&1
-assert_mock_called "0x80003b" "should use 0x80003b for mark_id=59" && test_pass
+assert_mock_called "MARK --set-xmark 0x00bb0000/0x00ff0000" "should use 0x00bb0000/0x00ff0000 for mark_id=59" && test_pass
 mock_teardown
 
 test_start "mark_device sets src+mac filter (precise)"
@@ -57,8 +58,8 @@ mock_teardown
 test_start "mark_device gc strips old IPs for same MAC"
 mock_setup
 # 模拟 iptables -S HNC_MARK 输出含旧 IP
-mock_set_stdout iptables "-A HNC_MARK -s 192.168.43.5/32 -m mac --mac-source aa:bb:cc:dd:ee:ff -j MARK --set-xmark 0x800001/0xffffffff
--A HNC_MARK -d 192.168.43.5/32 -j MARK --set-xmark 0x800001/0xffffffff"
+mock_set_stdout iptables "-A HNC_MARK -s 192.168.43.5/32 -m mac --mac-source aa:bb:cc:dd:ee:ff -j MARK --set-xmark 0x00810000/0x00ff0000
+-A HNC_MARK -d 192.168.43.5/32 -j MARK --set-xmark 0x00810000/0x00ff0000"
 ipt mark 192.168.43.99 aa:bb:cc:dd:ee:ff 1 >/dev/null 2>&1
 # GC 应该尝试删除旧 IP 的规则
 assert_mock_called "192.168.43.5" "should reference old IP for cleanup" && test_pass
@@ -171,7 +172,7 @@ tcm init wlan2 >/dev/null 2>&1
 # v5.11: 期望已变更 —— hotfix3 真机验证 ColorOS 的 tc 不认 parent ffff:fff2,
 # 只认 ingress 简写(见 tc_manager.sh 注释), 代码早已改用 "filter add dev <if> ingress"。
 output=$(cat "$MOCK_LOG" 2>/dev/null)
-assert_contains "$output" "filter add dev wlan2 ingress" "clsact: filter must use the ingress alias" && \
+assert_contains "$output" "filter add dev wlan2 ingress prio 2" "clsact: mirred filter must use ingress prio 2" && \
     assert_not_contains "$output" "parent ffff:fff2" "ColorOS tc rejects parent ffff:fff2" && test_pass
 mock_teardown
 

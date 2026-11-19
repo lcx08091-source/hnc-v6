@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"syscall"
 	"testing"
 	"time"
@@ -54,8 +55,8 @@ func TestSchedulerMaxSleepCharge(t *testing.T) {
 func TestNetlinkHasLinkOrAddr(t *testing.T) {
 	mk := func(typ uint16) []byte {
 		b := make([]byte, syscall.NLMSG_HDRLEN)
-		*(*uint32)(ptr(b, 0)) = uint32(syscall.NLMSG_HDRLEN)
-		*(*uint16)(ptr(b, 4)) = typ
+		binary.NativeEndian.PutUint32(b[0:4], uint32(syscall.NLMSG_HDRLEN))
+		binary.NativeEndian.PutUint16(b[4:6], typ)
 		return b
 	}
 	if !netlinkHasLinkOrAddr(mk(syscall.RTM_NEWADDR)) || !netlinkHasLinkOrAddr(mk(syscall.RTM_DELLINK)) {

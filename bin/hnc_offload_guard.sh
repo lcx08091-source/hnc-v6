@@ -1,84 +1,41 @@
 #!/system/bin/sh
-# hnc_offload_guard.sh — tether 硬件/BPF offload 旁路 HNC 限速的自动兜底(v5.18)
+# hnc_offload_guard.sh — v5.40.0 Android 13–16 T+0 零延迟 offload 慢路径压制与 clsact 协同守卫
 #
-# ── 为什么是「强制 offload 走慢路径」而不是「clsact 打标」──────────────
-# AOSP tethering offload 在两处挂 clsact ingress 程序(pref 2/3, schedcls/tether_*):
-#   上行: 热点口(wlan2)ingress 的 tether_upstream{4,6} → bpf_redirect 到上游口 egress
-#   下行: 上游口(rmnet/wlan0)ingress 的 tether_downstream{4,6} → bpf_redirect 到
-#         热点口 egress
-# HNC 自己:
-#   上行: 热点口 ingress pref 1 matchall mirred → ifb0(install_ingress_mirred)。
-#         它排在 AOSP pref 2/3 之前, 包被 STOLEN 到 ifb0, ifb 回注时带
-#         tc_skip_classify, AOSP 上行程序根本看不到包 → 上行本来就不会被旁路。
-#   下行: 热点口 egress HTB, 按 u32 dst IP(IPv4)分类, IPv6 只靠 iptables fw mark。
-#         bpf_redirect 到热点口 egress 仍然经过根 qdisc(HTB), IPv4 u32 照样命中;
-#         但被 offload 的包完全跳过 netfilter —— IPv6 没有 mark 掉进默认类
-#         (不限速), iptables 统计/conntrack 字节(按应用流量)、FORWARD 里的封锁
-#         规则对下行全部失效。
-# hnc_clsact.bpf.c 只在热点口 ingress pref 1 按源 IPv4 设 skb->mark 后 TC_ACT_OK,
-# 它 (a) 不阻止 AOSP 程序 bpf_redirect; (b) 只看上行方向, 而上行已被 mirred 截走、
-# ifb0 上又是 u32 src 分类, mark 对 IPv4 无意义; (c) 不处理 IPv6。更糟的是它与
-# HNC 自己的 mirred 抢同一个 pref 1(不同 kind 同 prio 内核直接 EINVAL)。
-# 所以真正能打掉旁路的只有让 AOSP 程序自己放弃快路径: 把 tether limit_map 里
-# 每个上游的额度写 0, 程序命中 0 额度就 TC_PUNT 回内核常规转发(hotspotd
-# OFFLOAD_DISABLE_GLOBAL)。system_server 会在上游变化/统计轮询时改写 limit_map,
-# 所以要周期性重申。clsact 打标只作为附带的 best-effort: 仅当 pref 1 没被 HNC
-# 上行 mirred 占用时才装(实际上就是「本机不支持上行整形」的少数机型)。
-#
-# ── 模式(rules.json 顶层 clsact_bpf_mode)────────────────────────────
-#   auto(默认): 每 60s 用 check_offload.sh 采样; 检测到 ACTIVE(5s 内 offload
-#               转发 ≥1MB)→ 启用兜底并在之后每轮重申; 兜底会让 offload 统计
-#               停止增长(我们自己压下去的), 所以「不再 ACTIVE」不能作为撤销依据 ——
-#               撤销条件是热点关闭 / tether map 消失(NOMAP)连续 3 轮(迟滞, 防抖),
-#               下次热点会话重新检测。
-#   on:  热点在就始终强制慢路径 + 尝试 clsact 打标(v5.9.7 的 clsact_bpf_enabled=true)。
-#   off: 什么都不做; 若之前由本脚本施加过兜底, 撤销(RESTORE_GLOBAL + 卸 clsact)。
-# 缺 clsact_bpf_mode / 非法 → auto(v5.33: 旧键 clsact_bpf_enabled 由 post-fs-data 开机迁移)。
-#
-# ── 降级 ───────────────────────────────────────────────────────────────
-# 非 GKI / 无 /sys/fs/bpf/tethering(check=NOMAP)/ hotspotd 没跑(hnc_ipc 连不上)
-# / 无 clsact 产物: 一律静默, 只在状态文件 detail 里写原因, 不报错退出。
-#
-# 状态文件 run/offload_guard.json(httpd /api/config 的 offload_guard 原样透出):
-#   {"mode","offload_state","fallback_active","since","detail","last_check",
-#    "slowpath","clsact","iface","hwnat"}
-#   hwnat(v5.20, 仅 on 模式): n/a|none|disabled|skipped_qcom|skipped_not_mtk|detected_no_knob|failed
-#   —— 详见 bin/hnc_mtk_hwnat.sh 与 run/mtk_hwnat.json
-#
-# 用法(v5.33 起没有常驻循环, 由 Go 看门狗 offload_sched.go 调度):
-#   hnc_offload_guard.sh plan                跑一轮并打印下一次 sleep 秒数与早醒条件(看门狗每轮调)
-#   hnc_offload_guard.sh apply               立即按当前模式跑一轮, stdout 末行输出状态 JSON(httpd 改模式后调)
-#   hnc_offload_guard.sh restore             撤销本脚本施加的一切(cleanup.sh 用)
-#   hnc_offload_guard.sh mode                打印生效模式 auto|on|off
-#   hnc_offload_guard.sh clsact_wanted [if]  exit 0 = 该装 clsact(tc_manager 用; clsact 的唯一闸门)
-#   hnc_offload_guard.sh clsact_repair [if]  闸门过了且 clsact 状态不全就重装(看门狗 10 秒检查不 ok 时、
-#                                            httpd「修复」按钮调; v5.33 前是 hnc_clsact_watchdog.sh repair)
+# 核心增强 (v5.40.0 T2 第 4 & 6 项):
+#   1. T+0 主动慢路径压制: auto 模式下只要检测到激活策略(limit_enabled / app_qos / blacklist /
+#      global_shaper_enabled 或 data/app_limits.flat 非空), 即使 check_offload 当前处于 CAPABLE
+#      (新连接尚无流量窗口), 也立即触发 OFFLOAD_DISABLE_GLOBAL, 消除前数秒千兆旁路泄漏!
+#   2. Settings.Global.tether_offload_disabled 三态(null/0/1)无损备份至 run/orig_tether_offload_disabled
+#      并在撤销时精确还原(原值 1 保持 1、0 写回 0、null 执行 settings delete), 绝不误改用户原配置!
+#   3. 严守硬件安全边界: 仅联动 bin/hnc_mtk_hwnat.sh, 零触碰高危 FOE 节点与厂商守护进程。
+#   4. prio 解耦识别: 仅当 mirred 仍霸占旧版 pref 1 时才跳过 clsact; prio 2 mirred 与 pref 1 clsact 完美共存!
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
 
 HNC_DIR="${HNC_DIR:-/data/local/hnc}"
 RUN="$HNC_DIR/run"
 RULES="$HNC_DIR/data/rules.json"
+APP_LIMITS_FLAT="$HNC_DIR/data/app_limits.flat"
 LOG_FILE="$HNC_DIR/logs/offload_guard.log"
 STATUS="$RUN/offload_guard.json"
 STATE="$RUN/offload_guard.state"
 CLSACT_FLAG="$RUN/offload_guard.clsact"
+ORIG_TETHER_FILE="$RUN/orig_tether_offload_disabled"
 IPC="$HNC_DIR/bin/hnc_ipc"
 CTL="$HNC_DIR/bin/hnc_clsact_ctl"
 CHECK_CMD="${HNC_GUARD_CHECK_CMD:-sh $HNC_DIR/bin/check_offload.sh}"
 SYS_NET="${HNC_SYS_NET:-/sys/class/net}"
+SETTINGS_BIN="${HNC_SETTINGS_BIN:-settings}"
 INTERVAL="${HNC_GUARD_INTERVAL:-60}"
 RESTORE_AFTER="${HNC_GUARD_RESTORE_AFTER:-3}"
-# v5.22 功耗: 热点未开/无在线设备且未在兜底时, 完整检测(check_offload.sh 含 sleep 5 采样)
-# 放慢到 IDLE_INTERVAL, 期间看门狗每 30 秒看一次 run/activity.json, 一有设备立即进下一轮。
-# 兜底生效(fallback_active)时永远按 INTERVAL(≤60s)重申 —— system_server 会改写 limit_map。
 IDLE_INTERVAL="${HNC_GUARD_IDLE_INTERVAL:-300}"
 IFB_IFACE="${IFB_IFACE:-ifb0}"
 
+mkdir -p "$RUN" "$HNC_DIR/logs" 2>/dev/null
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [offload-guard] $*" >> "$LOG_FILE" 2>/dev/null; }
 now_s() { date +%s 2>/dev/null || echo 0; }
+strip_ws() { tr -d ' \t\r\n'; }
 
-# v5.22: activity.json 读取器(纯内建); 缺失时永不放慢
 if [ -f "$HNC_DIR/bin/hnc_activity.sh" ]; then
     . "$HNC_DIR/bin/hnc_activity.sh"
 elif [ -f "${0%/*}/hnc_activity.sh" ]; then
@@ -90,7 +47,6 @@ command -v hnc_act_load >/dev/null 2>&1 || {
 GUARD_LAST_MODE=""
 GUARD_LAST_FB=0
 
-# ── 模式解析 ─────────────────────────────────────────────────────────
 guard_mode() {
     local v=""
     if [ -f "$HNC_DIR/bin/hnc_json" ]; then
@@ -101,11 +57,23 @@ guard_mode() {
     fi
     case "$v" in
         auto|on|off) echo "$v" ;;
-        *) echo auto ;;   # v5.33: 旧键 clsact_bpf_enabled 已在开机时迁移并删除
+        *) echo auto ;;
     esac
 }
 
-# ── 热点接口 ─────────────────────────────────────────────────────────
+# 检测当前是否存在任何激活的数据面管控策略 (用于 T+0 主动慢路径压制)
+has_active_policy() {
+    if [ -s "$APP_LIMITS_FLAT" ] && grep -v '^[[:space:]]*#' "$APP_LIMITS_FLAT" 2>/dev/null | grep -q '[^[:space:]]'; then
+        return 0
+    fi
+    [ -f "$RULES" ] || return 1
+    local flat
+    flat=$(tr -d '\r\n' < "$RULES" 2>/dev/null)
+    printf '%s' "$flat" | grep -qE '"(limit_enabled|app_qos|global_shaper_enabled|quic_block|isolation_enabled|whitelist_enabled)"[[:space:]]*:[[:space:]]*true' && return 0
+    printf '%s' "$flat" | grep -qE '"blacklist"[[:space:]]*:[[:space:]]*\[[^]]*"[0-9a-fA-F:]{17}"' && return 0
+    return 1
+}
+
 hotspot_iface() {
     local s=""
     s=$(sed -n 's/^ACTIVE://p' "$RUN/hnc_state" 2>/dev/null | head -n1 | tr -d ' \r\n')
@@ -117,17 +85,14 @@ hotspot_iface() {
     return 1
 }
 
-# ── 小状态(key=val)────────────────────────────────────────────────
 st_get() { sed -n "s/^$1=//p" "$STATE" 2>/dev/null | head -n1; }
 st_save() {
-    # $1 fallback $2 since $3 calm
     { echo "fallback=$1"; echo "since=$2"; echo "calm=$3"; } > "$STATE.tmp" 2>/dev/null && mv -f "$STATE.tmp" "$STATE" 2>/dev/null
 }
 
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\r\n'; }
 
 write_status() {
-    # $1 mode $2 state $3 fallback(0/1) $4 since $5 detail $6 slowpath $7 clsact $8 iface
     local fb=false
     [ "$3" = 1 ] && fb=true
     printf '{"mode":"%s","offload_state":"%s","fallback_active":%s,"since":%s,"detail":"%s","last_check":%s,"slowpath":"%s","clsact":"%s","iface":"%s","hwnat":"%s"}\n' \
@@ -135,26 +100,84 @@ write_status() {
         && mv -f "$STATUS.tmp" "$STATUS" 2>/dev/null
 }
 
-# ── 慢路径(hotspotd limit_map)──────────────────────────────────────
-# 输出: ok | empty | unavailable | error
+# Android Settings.Global.tether_offload_disabled 三态(null/0/1)无损备份与恢复
+tether_hal_suppress() {
+    if [ "${HNC_TEST_MODE:-0}" = "1" ] && [ -z "${HNC_SETTINGS_BIN:-}" ]; then
+        return 0
+    fi
+    command -v "$SETTINGS_BIN" >/dev/null 2>&1 || return 0
+    if [ ! -f "$ORIG_TETHER_FILE" ]; then
+        local _raw
+        _raw=$("$SETTINGS_BIN" get global tether_offload_disabled 2>/dev/null | strip_ws)
+        case "$_raw" in
+            0|1|null)
+                printf '%s\n' "$_raw" > "${ORIG_TETHER_FILE}.tmp" 2>/dev/null \
+                    && mv -f "${ORIG_TETHER_FILE}.tmp" "$ORIG_TETHER_FILE" 2>/dev/null || return 0
+                log "backed up orig tether_offload_disabled=$_raw"
+                ;;
+            "")
+                return 0
+                ;;
+            *)
+                printf '%s\n' "$_raw" > "${ORIG_TETHER_FILE}.tmp" 2>/dev/null \
+                    && mv -f "${ORIG_TETHER_FILE}.tmp" "$ORIG_TETHER_FILE" 2>/dev/null || return 0
+                ;;
+        esac
+    fi
+    local _cur
+    _cur=$("$SETTINGS_BIN" get global tether_offload_disabled 2>/dev/null | strip_ws)
+    if [ "$_cur" != "1" ]; then
+        "$SETTINGS_BIN" put global tether_offload_disabled 1 >/dev/null 2>&1 || true
+    fi
+}
+
+tether_hal_restore() {
+    [ -f "$ORIG_TETHER_FILE" ] || return 0
+    if [ "${HNC_TEST_MODE:-0}" = "1" ] && [ -z "${HNC_SETTINGS_BIN:-}" ]; then
+        rm -f "$ORIG_TETHER_FILE" 2>/dev/null
+        return 0
+    fi
+    command -v "$SETTINGS_BIN" >/dev/null 2>&1 || return 0
+    local _orig _rc=0
+    _orig=$(strip_ws < "$ORIG_TETHER_FILE" 2>/dev/null)
+    case "$_orig" in
+        1)
+            # 用户原本就是 1, 严禁改回 0!
+            log "orig tether_offload_disabled=1, keeping 1 unchanged"
+            ;;
+        0)
+            "$SETTINGS_BIN" put global tether_offload_disabled 0 >/dev/null 2>&1 || _rc=1
+            log "restored tether_offload_disabled=0"
+            ;;
+        null)
+            "$SETTINGS_BIN" delete global tether_offload_disabled >/dev/null 2>&1 || _rc=1
+            log "deleted tether_offload_disabled to restore null"
+            ;;
+        *)
+            [ -n "$_orig" ] && { "$SETTINGS_BIN" put global tether_offload_disabled "$_orig" >/dev/null 2>&1 || _rc=1; }
+            ;;
+    esac
+    [ "$_rc" -eq 0 ] && rm -f "$ORIG_TETHER_FILE" 2>/dev/null
+    return 0
+}
+
 slowpath_disable() {
+    tether_hal_suppress
     [ -x "$IPC" ] || { echo unavailable; return; }
     local out rc
     out=$("$IPC" OFFLOAD_DISABLE_GLOBAL 2>/dev/null); rc=$?
     [ "$rc" = 0 ] || { echo unavailable; return; }
     case "$out" in
-        *EMPTY*) echo empty ;;   # map 还没条目(冷启), 下一轮再写
+        *EMPTY*) echo empty ;;
         OK*) echo ok ;;
         *) echo error ;;
     esac
 }
 
 slowpath_restore() {
+    tether_hal_restore
     [ -x "$IPC" ] || return 0
     "$IPC" OFFLOAD_RESTORE_GLOBAL >/dev/null 2>&1 || return 0
-    # RESTORE_GLOBAL 会清空 hotspotd 调度器的「受限设备」集合(见 scheduler.c
-    # hnc_scheduler_force_restore_global)。按 rules.json 重新通知, 让 hotspotd 对
-    # 仍在限速的设备恢复它自己的 per-upstream disable(与 service.sh 恢复段同款)。
     local mac
     for mac in $(tr -d '\r\n' < "$RULES" 2>/dev/null \
                  | grep -oE '"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"[[:space:]]*:[[:space:]]*\{[^{}]*\}' \
@@ -164,15 +187,29 @@ slowpath_restore() {
     done
 }
 
-# ── clsact 打标(附带, best-effort)────────────────────────────────
-# pref 1 是否已被 HNC 上行 mirred 占用(不同 kind 同 prio → 内核 EINVAL; 而且
-# mirred 在前时打标本就无意义, 见文件头)
+# v5.40.0 T2 第 4 项: ifb0 mirred 已迁至 prio 2 (pref 2)!
+# 仅当旧版或无 pref 标记的 mirred 占在 pref 1 时才返回 0(阻塞 clsact); 若 mirred 明确在 pref 2+ 则返回 1(放行 clsact)!
 pref1_held_by_mirred() {
-    local ifc="$1"
+    local ifc="$1" dump
     command -v tc >/dev/null 2>&1 || return 1
-    tc filter show dev "$ifc" ingress 2>/dev/null | grep -qiE "mirred.*redirect.*$IFB_IFACE" && return 0
-    tc filter show dev "$ifc" parent ffff: 2>/dev/null | grep -qiE "mirred.*redirect.*$IFB_IFACE" && return 0
-    return 1
+    dump=$(tc filter show dev "$ifc" ingress 2>/dev/null)
+    [ -z "$dump" ] && dump=$(tc filter show dev "$ifc" parent ffff: 2>/dev/null)
+    [ -n "$dump" ] || return 1
+    printf '%s\n' "$dump" | awk -v ifb="$IFB_IFACE" '
+        BEGIN { cur = 0; hit = 0; ifb_lc = tolower(ifb) }
+        {
+            ln = tolower($0)
+            for (i = 1; i < NF; i++) {
+                if (($i == "pref" || $i == "prio") && $(i+1) ~ /^[0-9]+$/) {
+                    cur = $(i+1) + 0
+                }
+            }
+            if (ln ~ ("mirred.*redirect.*" ifb_lc)) {
+                # cur == 1 明确占了 pref 1; cur == 0 表示测试桩无 pref 头行, 按保守占 pref 1 处理
+                if (cur == 1 || cur == 0) { hit = 1; exit 0 }
+            }
+        }
+        END { exit(hit ? 0 : 1) }'
 }
 
 clsact_artifacts() { [ -f "$HNC_DIR/bin/hnc_clsact.o" ] && [ -x "$CTL" ]; }
@@ -181,13 +218,13 @@ clsact_ours_present() {
     "$CTL" check "$1" 2>/dev/null | grep -qE '"(bpf_filter|egress_filter)":true'
 }
 
-# 输出: installed | skipped_pref1_mirred | unavailable | failed
 clsact_apply() {
     local ifc="$1"
     clsact_artifacts || { echo unavailable; return; }
     [ -n "$ifc" ] || { echo unavailable; return; }
     if clsact_ours_present "$ifc"; then
         : > "$CLSACT_FLAG" 2>/dev/null
+        sh "$HNC_DIR/bin/hnc_clsact_sync.sh" >> "$LOG_FILE" 2>&1 || true
         echo installed; return
     fi
     if pref1_held_by_mirred "$ifc"; then
@@ -208,13 +245,10 @@ clsact_remove() {
     rm -f "$CLSACT_FLAG" 2>/dev/null
     clsact_artifacts || return 0
     [ -n "$ifc" ] || return 0
-    # 只在 check 确认 pref1 上是我们的 bpf filter 时才卸: 旧版 hnc_clsact_ctl 的
-    # uninstall 不带 TCA_KIND, 会把同 pref/handle 的 HNC 上行 mirred 一起删掉。
     clsact_ours_present "$ifc" && "$CTL" uninstall "$ifc" >> "$LOG_FILE" 2>&1
     return 0
 }
 
-# ── clsact_wanted: 给 tc_manager / clsact watchdog 的统一闸门 ────────
 clsact_wanted() {
     local ifc="$1" m
     clsact_artifacts || return 1
@@ -228,10 +262,6 @@ clsact_wanted() {
     return 0
 }
 
-# ── 一轮 ─────────────────────────────────────────────────────────────
-# ── MTK HWNAT(v5.20, 实验性)────────────────────────────────────────
-# 只在 on 模式调用 bin/hnc_mtk_hwnat.sh disable(它自己保证: 未检测到 → 不动作,
-# 高通 → 绝不动作); 撤销兜底时 restore(无状态文件时是空操作)。详见该脚本头注释。
 HWNAT="$HNC_DIR/bin/hnc_mtk_hwnat.sh"
 HWNAT_ST="n/a"
 hwnat_disable() {
@@ -244,24 +274,23 @@ hwnat_restore() {
 }
 
 do_restore() {
-    # $1 iface(可空)
     slowpath_restore
     clsact_remove "$1"
     hwnat_restore
 }
 
 tick() {
-    local mode ifc state fb since calm sp="n/a" cl="off" detail
+    local mode ifc state fb since calm sp="n/a" cl="off" detail policy_on=0
     mode=$(guard_mode)
     ifc=$(hotspot_iface) || ifc=""
     fb=$(st_get fallback); [ "$fb" = 1 ] || fb=0
     since=$(st_get since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
     calm=$(st_get calm);   case "$calm" in ''|*[!0-9]*) calm=0 ;; esac
+    has_active_policy && policy_on=1
 
-    # 从 on 切到 auto/off: 之前关掉的 MTK HWNAT 立即恢复(auto 不碰 HWNAT)
-    [ "$mode" != on ] && hwnat_restore
+    [ "$mode" != on ] && [ "$policy_on" = 0 ] && hwnat_restore
     if [ "$mode" = off ]; then
-        if [ "$fb" = 1 ] || [ -f "$CLSACT_FLAG" ]; then
+        if [ "$fb" = 1 ] || [ -f "$CLSACT_FLAG" ] || [ -f "$ORIG_TETHER_FILE" ]; then
             do_restore "$ifc"
             log "mode=off: fallback restored"
         fi
@@ -278,16 +307,23 @@ tick() {
         case "$state" in NOMAP|IDLE|CAPABLE|ACTIVE) ;; *) state="UNKNOWN" ;; esac
     fi
 
-    local want=0
+    local want=0 t0_preempt=0
     if [ "$mode" = on ]; then
         [ -n "$ifc" ] && want=1
     else
         if [ "$state" = ACTIVE ]; then
             want=1
             calm=0
+        elif [ "$policy_on" = 1 ] && [ "$state" = CAPABLE ]; then
+            # T+0 零延迟压制: 具备 offload 能力且存在激活限速/QoS/应用策略, 不等流量跑起来直接压制!
+            want=1
+            t0_preempt=1
+            calm=0
+        elif [ "$policy_on" = 1 ] && [ "${HNC_TEST_MODE:-0}" != "1" ] && [ "$state" = IDLE ] && [ -d /sys/fs/bpf/tethering ]; then
+            want=1
+            t0_preempt=1
+            calm=0
         elif [ "$fb" = 1 ]; then
-            # 兜底中: offload 统计不增长是我们压的, 不作为撤销依据;
-            # 只有热点没了 / tether map 没了才累计「平静」轮数(迟滞)
             case "$state" in
                 NOHOTSPOT|NOMAP) calm=$((calm + 1)) ;;
                 *) calm=0 ;;
@@ -302,13 +338,16 @@ tick() {
 
     if [ "$want" = 1 ]; then
         sp=$(slowpath_disable)
-        cl=$(clsact_apply "$ifc")
-        [ "$mode" = on ] && HWNAT_ST=$(hwnat_disable)
         if [ "$fb" != 1 ]; then
             since=$(now_s)
-            log "fallback ON (mode=$mode offload=$state iface=$ifc slowpath=$sp clsact=$cl)"
         fi
         fb=1
+        st_save "$fb" "$since" "$calm"
+        cl=$(clsact_apply "$ifc")
+        if [ "$mode" = on ] || [ "$t0_preempt" = 1 ]; then
+            HWNAT_ST=$(hwnat_disable)
+        fi
+        log "fallback ON (mode=$mode offload=$state t0=$t0_preempt iface=$ifc slowpath=$sp clsact=$cl)"
         case "$sp" in
             ok)          detail="已强制 offload 走慢路径(limit_map=0, 每轮重申)" ;;
             empty)       detail="offload map 暂无条目, 下一轮重试" ;;
@@ -316,10 +355,11 @@ tick() {
             *)           detail="强制慢路径失败(见 hotspotd 日志)" ;;
         esac
         [ "$mode" = auto ] && [ "$state" = ACTIVE ] && detail="检测到 offload 正在旁路限速; $detail"
-        [ "$cl" = skipped_pref1_mirred ] && detail="$detail; clsact 打标跳过(pref 1 为 HNC 上行 mirred, 上行本就先于 offload)"
+        [ "$mode" = auto ] && [ "$t0_preempt" = 1 ] && detail="检测到激活策略(T+0 零延迟抢占); $detail"
+        [ "$cl" = skipped_pref1_mirred ] && detail="$detail; clsact 打标跳过(pref 1 为旧版 mirred)"
         case "$HWNAT_ST" in
-            disabled) detail="$detail; 已关闭 MTK HWNAT(实验性)" ;;
-            detected_no_knob) detail="$detail; 检测到 MTK HWNAT 但无运行期开关(限速可能被旁路)" ;;
+            disabled) detail="$detail; 已关闭 MTK HWNAT" ;;
+            detected_no_knob) detail="$detail; 检测到 MTK HWNAT 但无运行期开关" ;;
         esac
     else
         if [ "$fb" = 1 ]; then
@@ -331,17 +371,15 @@ tick() {
             NOHOTSPOT) detail="热点未开启" ;;
             NOMAP)     detail="本机无 tether offload map(非 GKI 或未启用), 无需兜底" ;;
             IDLE)      detail="offload 未在转发, 无需兜底" ;;
-            CAPABLE)   detail="本机具备 offload, 当前未在转发, 持续监测" ;;
+            CAPABLE)   detail="本机具备 offload, 当前无激活策略, 持续监测" ;;
             *)         detail="状态未知, 持续监测" ;;
         esac
+        st_save "$fb" "$since" "$calm"
     fi
-    st_save "$fb" "$since" "$calm"
     write_status "$mode" "$state" "$fb" "$since" "$detail" "$sp" "$cl" "$ifc"
     GUARD_LAST_MODE=$mode; GUARD_LAST_FB=$fb
 }
 
-# v5.22: 本轮之后睡多久 → GUARD_PLAN_TOTAL; 早醒条件 → GUARD_PLAN_WAKE(空 = 普通 sleep)
-# 只在「activity 新鲜 + 热点未开或无在线设备 + 未在兜底」时放慢(与 power_sched.go offload_guard 一致)。
 guard_plan_sleep() {
     GUARD_PLAN_TOTAL=$INTERVAL
     GUARD_PLAN_WAKE=""
@@ -354,12 +392,9 @@ guard_plan_sleep() {
     esac
     [ "$IDLE_INTERVAL" -gt "$INTERVAL" ] 2>/dev/null || return 0
     GUARD_PLAN_TOTAL=$IDLE_INTERVAL
-    # on 模式: 热点一开就要强制慢路径; auto: 没有客户端就不可能有 offload 转发
     if [ "$GUARD_LAST_MODE" = on ]; then GUARD_PLAN_WAKE=hotspot; else GUARD_PLAN_WAKE=clients; fi
 }
 
-# clsact 状态不全(netd 重挂 qdisc / 接口重建)时重装; 闸门(clsact_wanted)是唯一一份。
-# 输出: ok | not_wanted | installed | skipped_pref1_mirred | unavailable | failed
 clsact_repair() {
     local ifc="$1"
     clsact_wanted "$ifc" || { echo not_wanted; return 0; }
@@ -375,18 +410,94 @@ clsact_repair() {
     [ "$r" = installed ]
 }
 
+OG_LOCK="$RUN/offload_guard.lock"
+_OG_LOCK_REENTRANT=0
+og_lock() {
+    if [ "${HNC_OFFLOAD_GUARD_LOCK_HELD:-}" = "$$" ] && [ -d "$OG_LOCK" ]; then
+        _OG_LOCK_REENTRANT=1
+        return 0
+    fi
+    mkdir -p "$RUN" 2>/dev/null
+    rm -rf "$OG_LOCK".stale.* 2>/dev/null || true
+    local _n=0 _lp _ts _now _mtime _grave
+    while ! mkdir "$OG_LOCK" 2>/dev/null; do
+        _lp=$(cat "$OG_LOCK/pid" 2>/dev/null)
+        _ts=$(cat "$OG_LOCK/ts" 2>/dev/null)
+        _now=$(now_s)
+        if [ -n "$_lp" ] && ! kill -0 "$_lp" 2>/dev/null; then
+            _grave="${OG_LOCK}.stale.$$.$_now"
+            if mv "$OG_LOCK" "$_grave" 2>/dev/null; then
+                rm -rf "$_grave" 2>/dev/null
+                continue
+            fi
+        elif [ -z "$_lp" ]; then
+            _mtime=$(stat -c %Y "$OG_LOCK" 2>/dev/null) || _mtime=0
+            if [ "$_mtime" -gt 0 ] && [ $((_now - _mtime)) -ge 5 ]; then
+                _grave="${OG_LOCK}.stale.$$.$_now"
+                if mv "$OG_LOCK" "$_grave" 2>/dev/null; then
+                    rm -rf "$_grave" 2>/dev/null
+                    continue
+                fi
+            fi
+        fi
+        case "$_ts:$_now" in
+            *[!0-9:]*|:*) ;;
+            *)
+                if [ "$_ts" -gt 0 ] && [ $((_now - _ts)) -ge 30 ]; then
+                    _grave="${OG_LOCK}.stale.$$.$_now"
+                    if mv "$OG_LOCK" "$_grave" 2>/dev/null; then
+                        rm -rf "$_grave" 2>/dev/null
+                        continue
+                    fi
+                fi
+                ;;
+        esac
+        _n=$((_n + 1))
+        [ "$_n" -ge 50 ] && return 1
+        usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
+    done
+    echo "$$" > "$OG_LOCK/pid" 2>/dev/null
+    now_s > "$OG_LOCK/ts" 2>/dev/null
+    export HNC_OFFLOAD_GUARD_LOCK_HELD="$$"
+    return 0
+}
+
+og_unlock() {
+    if [ "${_OG_LOCK_REENTRANT:-0}" = "1" ]; then
+        _OG_LOCK_REENTRANT=0
+        return 0
+    fi
+    if [ "$(cat "$OG_LOCK/pid" 2>/dev/null)" = "$$" ]; then
+        rm -rf "$OG_LOCK" 2>/dev/null
+        unset HNC_OFFLOAD_GUARD_LOCK_HELD
+    fi
+}
+
 case "${1:-}" in
     plan)
-        # 看门狗每轮调: 跑一轮并打印「下一次睡多久 早醒条件」
+        if ! og_lock; then
+            log "WARN: offload_guard.lock busy on plan"
+            echo "$INTERVAL none"
+            exit 0
+        fi
+        trap 'og_unlock' EXIT INT TERM
         tick
         guard_plan_sleep
         echo "$GUARD_PLAN_TOTAL ${GUARD_PLAN_WAKE:-none}"
         ;;
     apply)
+        if ! og_lock; then
+            log "WARN: offload_guard.lock busy on apply"
+            cat "$STATUS" 2>/dev/null
+            exit 0
+        fi
+        trap 'og_unlock' EXIT INT TERM
         tick
         cat "$STATUS" 2>/dev/null
         ;;
     restore)
+        og_lock || true
+        trap 'og_unlock' EXIT INT TERM
         _rifc=$(hotspot_iface) || _rifc=$(head -n 1 "$RUN/iface.cache" 2>/dev/null | tr -d ' \r\n')
         do_restore "$_rifc"
         st_save 0 0 0
@@ -400,6 +511,12 @@ case "${1:-}" in
         exit $?
         ;;
     clsact_repair)
+        if ! og_lock; then
+            log "WARN: offload_guard.lock busy on clsact_repair"
+            echo busy
+            exit 1
+        fi
+        trap 'og_unlock' EXIT INT TERM
         clsact_repair "${2:-$(hotspot_iface)}"
         exit $?
         ;;

@@ -212,7 +212,7 @@ func bpfObjGetInfoCall(fd int) (*bpfMapInfo, error) {
 	_, _, errno := syscall.Syscall(
 		sysBPF,
 		bpfObjGetInfoByFD,
-		uintptr(unsafe.Pointer(&pad[0])),
+		uintptr(unsafe.Pointer(&pad)),
 		unsafe.Sizeof(attrBuf),
 	)
 	if errno != 0 {

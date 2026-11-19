@@ -73,6 +73,13 @@ func numFieldGT0(v interface{}) bool {
 	switch x := v.(type) {
 	case float64:
 		return x > 0
+	case int:
+		return x > 0
+	case int64:
+		return x > 0
+	case json.Number:
+		f, err := x.Float64()
+		return err == nil && f > 0
 	case string:
 		f, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
 		return err == nil && f > 0
@@ -96,6 +103,23 @@ func actionAppQosSet(hncDir string, p map[string]string) actionResp {
 		if deviceDelayOn(hncDir, mac) {
 			return actionResp{OK: false, Error: "conflict", Detail: "这台设备开着延迟模拟; 两者都要占用下行队列, 先关掉延迟模拟再开"}
 		}
+	}
+	val := strconv.FormatBool(enabled)
+	if useNativeDataplane(hncDir) {
+		mid, err := rulesStore.SetDeviceAppQoS(hncDir, mac, enabled)
+		if err != nil {
+			return actionResp{OK: false, Error: "rules.json write failed", Detail: err.Error()}
+		}
+		if enabled && mid >= 1 && mid <= 99 {
+			ip := lookupCurrentDeviceIP(hncDir, mac)
+			if err := applyDeviceFirewallAtomic(hncDir, readHotspotIfaceName(hncDir), mac, ip, mid, true, rulesStore.IsBlacklisted(hncDir, mac)); err != nil {
+				return actionResp{OK: false, Error: "mid assign failed", Detail: err.Error()}
+			}
+		}
+		_ = os.WriteFile(filepath.Join(hncDir, "run", "app_limit.dirty"), nil, 0o644)
+		return actionResp{OK: true, Detail: "app_qos=" + val + " mac=" + mac}
+	}
+	if enabled {
 		// 设备 class 挂在 mark_id 上; 没有就分配(只分配 mid + iptables mark, 不碰限速)
 		rcM, outM := runBin(hncDir, "json_set.sh", "device_get", mac, "mark_id")
 		mid := strings.TrimSpace(outM)
@@ -109,7 +133,6 @@ func actionAppQosSet(hncDir string, p map[string]string) actionResp {
 			}
 		}
 	}
-	val := strconv.FormatBool(enabled)
 	if rc, out := runBin(hncDir, "json_set.sh", "device", mac, "app_qos", val); rc != 0 {
 		return actionResp{OK: false, Error: "rules.json write failed", Detail: strings.TrimSpace(out)}
 	}

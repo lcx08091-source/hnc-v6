@@ -926,11 +926,15 @@ void hnc_scheduler_get_summary(hnc_offload_summary_t *out)
     out->last_refresh_ts         = st.last_refresh_ts;
     out->last_delta_bytes        = st.last_delta_bytes;
     out->globally_disabled       = st.globally_disabled;
-    out->disabled_upstream_count = st.disabled_upstream_count;
     int n = st.disabled_upstream_count;
     int cap = (int)(sizeof(out->disabled_upstream_ifindex) /
                     sizeof(out->disabled_upstream_ifindex[0]));
+    int src_cap = (int)(sizeof(st.disabled_upstream_ifindex) /
+                        sizeof(st.disabled_upstream_ifindex[0]));
+    if (n < 0) n = 0;
     if (n > cap) n = cap;
+    if (n > src_cap) n = src_cap;
+    out->disabled_upstream_count = n;
     for (int i = 0; i < n; i++)
         out->disabled_upstream_ifindex[i] = st.disabled_upstream_ifindex[i];
 
@@ -955,22 +959,29 @@ int hnc_scheduler_summary_to_json(const hnc_offload_summary_t *s,
 {
     if (s == NULL || buf == NULL || buf_size == 0) return -1;
 
+    int dis_cnt = s->disabled_upstream_count;
+    int cap = (int)(sizeof(s->disabled_upstream_ifindex) /
+                    sizeof(s->disabled_upstream_ifindex[0]));
+    if (dis_cnt < 0) dis_cnt = 0;
+    if (dis_cnt > cap) dis_cnt = cap;
+
     /* disabled_upstream_ifindex JSON 数组 */
-    char dis_arr[128] = "[]";
-    if (s->disabled_upstream_count > 0) {
+    char dis_arr[512] = "[]";
+    if (dis_cnt > 0) {
         char *p = dis_arr;
         char *end = dis_arr + sizeof(dis_arr);
         int written = snprintf(p, (size_t)(end - p), "[");
         if (written < 0 || written >= (end - p)) goto trunc;
         p += written;
-        for (int i = 0; i < s->disabled_upstream_count && p < end; i++) {
+        for (int i = 0; i < dis_cnt && p < end; i++) {
             written = snprintf(p, (size_t)(end - p), "%s%d",
                                i ? "," : "",
                                s->disabled_upstream_ifindex[i]);
             if (written < 0 || written >= (end - p)) goto trunc;
             p += written;
         }
-        if (p < end) snprintf(p, (size_t)(end - p), "]");
+        written = snprintf(p, (size_t)(end - p), "]");
+        if (written < 0 || written >= (end - p)) goto trunc;
     }
     goto ok;
 trunc:
@@ -1002,7 +1013,7 @@ ok:
         (long long)s->last_refresh_ts,
         (unsigned long long)s->last_delta_bytes,
         s->globally_disabled ? "true" : "false",
-        s->disabled_upstream_count,
+        dis_cnt,
         dis_arr,
         s->limited_device_count,
         s->primary_upstream_ifindex,

@@ -421,7 +421,7 @@ var api = {
   action: function (name, params, opt) {
     var p = {}; params = params || {};
     Object.keys(params).forEach(function (k) { if (params[k] !== undefined && params[k] !== null) p[k] = String(params[k]); });
-    var slow = /^(debug_bundle|cleanup_all|dpi_rules_update|capture_record|selfcheck_run|selfcheck_export|compat_report|self_studio_start|self_studio_distill|self_studio_export|dpi_distill_now|flow_cls_retrain|dpi_rulepack_export|device_merge|encdns_set|clsact_mode_set)$/.test(name);
+    var slow = /^(debug_bundle|cleanup_all|dpi_rules_update|capture_record|selfcheck_run|selfcheck_export|compat_report|self_studio_start|self_studio_distill|self_studio_export|dpi_distill_now|flow_cls_retrain|dpi_rulepack_export|device_merge|encdns_set|clsact_mode_set|dataplane_verify_run)$/.test(name);
     var defOpt = slow ? { timeout: 35000, maxTime: 30 } : { timeout: 12000, maxTime: 10 };
     var run = function () {
       return req('POST', '/api/action', { action: name, params: p }, Object.assign(defOpt, opt)).then(function (o) {

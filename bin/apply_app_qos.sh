@@ -1,5 +1,13 @@
 #!/system/bin/sh
-# apply_app_qos.sh — HNC v5.37.0: 应用感知 QoS 双栈引擎(原子 --noflush 批处理 + 自动回退)
+# apply_app_qos.sh — HNC v5.40.0: 应用感知三档 fq_codel QoS 双栈引擎 (32位正交位域 + 单应用限速无损共存)
+#
+# 正交契约 (T2 第 1 & 8 项):
+#   - [25:24] 0x03000000: Tier 1 实时档 0x01000000/0x03000000 (prio 0, 50% rate)
+#                         Tier 2 交互默认档 0x00000000/0x03000000 (prio 1, 35% rate, prio 9 u32 兜底)
+#                         Tier 3 后台大流档 0x03000000/0x03000000 (prio 2, 15% rate)
+#   - parent 1:<cid> 二级 fw 过滤器挂于 prio 2, 让同设备的单应用限速 app_limits (prio 1, 0xfc000000) 优先匹配;
+#   - iptables 打标前判 -m mark --mark 0x0/0xfc000000, 跳过已被单应用限速打标的包;
+#   - 拆除/更新时若该设备仍有 app_limits 活跃 (run/app_limits.devs), 绝不盲删 prio 1, 并在拆除 app_qos 后自动补回 1:9eXX 默认兜底子类!
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
@@ -8,18 +16,31 @@ HNC_DIR=${HNC_DIR:-/data/local/hnc}
 RUN="$HNC_DIR/run"
 PLAN="$RUN/app_qos.plan"
 STATE="$RUN/app_qos.state"
+AL_DEVS="$RUN/app_limits.devs"
 SIG="$RUN/app_qos.sig"
 LOG="$HNC_DIR/logs/app_qos.log"
 TCM="$HNC_DIR/bin/tc_manager.sh"
 
+if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
+    . "$HNC_DIR/bin/hnc_constants.sh"
+elif [ -f "${0%/*}/hnc_constants.sh" ]; then
+    . "${0%/*}/hnc_constants.sh"
+fi
+command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
+    hnc_dev_mark_hex() { printf '0x%08x\n' $(( 0x00800000 | ($1 << 16) )); }
+}
+
 CHAIN=HNC_APP_QOS
 CHAIN_IP=HNC_APP_QOS_IP
 CHAIN_MARK=HNC_APP_QOS_MARK
-TIER_MASK=0x600000
-TIER_RT=0x200000
-TIER_BG=0x600000
+DEV_MASK="${HNC_MARK_MASK:-0x00ff0000}"
+TIER_MASK="${HNC_QOS_MASK:-0x03000000}"
+TIER_RT="${HNC_QOS_TIER1:-0x01000000}"
+TIER_BG="${HNC_QOS_TIER3:-0x03000000}"
+APPLIM_MASK="${HNC_APPLIM_MASK:-0xfc000000}"
 ROOT_PREF=50
-INNER_PREF_FW=1
+ROOT_PREF_V6=51
+INNER_PREF_FW=2
 INNER_PREF_ALL=9
 
 mkdir -p "$HNC_DIR/logs" "$RUN" 2>/dev/null
@@ -28,12 +49,45 @@ log() { echo "[$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)] $*" >> "$LOG" 2>/dev/nu
 class_for_mid() { if [ "$1" = "1" ]; then echo 100; else printf '%d' "$1"; fi; }
 child_minor() { printf '%x' $((0xa000 + $1 * 4 + $2)); }
 leaf_major() { printf '%x' $((0xb000 + $1 * 4 + $2)); }
-dev_mark() { printf '0x%x' $((0x800000 + $1)); }
+applim_def_minor() { printf '%x' $((0x9e00 + $1)); }
+dev_mark() { hnc_dev_mark_hex "$1"; }
+
+has_applim_on_dev() {
+    [ -f "$AL_DEVS" ] && grep -qx "$1 $2" "$AL_DEVS" 2>/dev/null
+}
 
 class_rate_ceil() {
     tc class show dev "$1" classid "1:$2" 2>/dev/null | awk -v c0="1:$2" '
         $1 == "class" && $3 == c0 { for (i = 1; i <= NF; i++) { if ($i == "rate") r = $(i+1); if ($i == "ceil") c = $(i+1) } }
         END { if (r == "") exit 1; if (c == "") c = r; print r, c }'
+}
+
+to_kbit() {
+    awk -v v="$1" 'BEGIN{
+        n = v + 0; u = v; sub(/^[0-9.]+/, "", u); u = tolower(u)
+        if (u ~ /^g/) k = n * 1000000; else if (u ~ /^m/) k = n * 1000; else if (u ~ /^k/) k = n; else k = n / 1000
+        k = int(k + 0.5); if (k < 1) k = 1; print k }'
+}
+
+# 当关闭某台设备的 app_qos 但该设备仍有 app_limits 时, 自动恢复 1:9eXX 兜底子类 + prio 9 过滤器, 严防逃逸至 1:9999!
+restore_applim_default_child() {
+    local iface=$1 mid=$2 cid rc ceil ck def_hex
+    cid=$(class_for_mid "$mid")
+    def_hex=$(applim_def_minor "$mid")
+    rc=$(class_rate_ceil "$iface" "$cid") || rc="1000Mbit 1000Mbit"
+    ceil=${rc#* }
+    ck=$(to_kbit "$ceil")
+    local def_rate=$((ck / 2))
+    [ "$def_rate" -lt 1000 ] && def_rate=1000
+    [ "$def_rate" -gt "$ck" ] && def_rate="$ck"
+    tc class change dev "$iface" parent "1:$cid" classid "1:$def_hex" htb rate "${def_rate}kbit" ceil "${ck}kbit" prio 2 2>/dev/null \
+        || tc class add dev "$iface" parent "1:$cid" classid "1:$def_hex" htb rate "${def_rate}kbit" ceil "${ck}kbit" prio 2 2>/dev/null || true
+    tc qdisc replace dev "$iface" parent "1:$def_hex" handle "${def_hex}:" fq_codel 2>/dev/null \
+        || tc qdisc replace dev "$iface" parent "1:$def_hex" handle "${def_hex}:" pfifo 2>/dev/null || true
+    if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null; then
+        tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
+    fi
 }
 
 AQ_LOCK="$RUN/app_qos.lock"
@@ -72,16 +126,23 @@ teardown_dev() {
     local iface=$1 mid=$2 cid t dm
     cid=$(class_for_mid "$mid")
     dm=$(dev_mark "$mid")
-    tc filter del dev "$iface" parent "1:$cid" 2>/dev/null || true
+    if has_applim_on_dev "$iface" "$cid"; then
+        # 该设备仍有单应用限速 prio 1 活跃: 仅精确拆除 prio 2 与 prio 9, 绝不误伤 prio 1!
+        tc filter del dev "$iface" parent "1:$cid" prio "$INNER_PREF_FW" 2>/dev/null || true
+        tc filter del dev "$iface" parent "1:$cid" prio "$INNER_PREF_ALL" 2>/dev/null || true
+    else
+        tc filter del dev "$iface" parent "1:$cid" 2>/dev/null || true
+    fi
     for t in 1 2 3; do
         tc class del dev "$iface" classid "1:$(child_minor "$mid" "$t")" 2>/dev/null || true
     done
-    tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$dm" fw 2>/dev/null \
-        || tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$dm/0x9fffff" fw 2>/dev/null || true
-    tc filter del dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "$dm" fw 2>/dev/null \
-        || tc filter del dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "$dm/0x9fffff" fw 2>/dev/null || true
-    tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF" handle "$dm" fw 2>/dev/null \
-        || tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF" handle "$dm/0x9fffff" fw 2>/dev/null || true
+    tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
+    tc filter del dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
+    tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
+    tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF_V6" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
+    if has_applim_on_dev "$iface" "$cid"; then
+        restore_applim_default_child "$iface" "$mid"
+    fi
     log "teardown $iface mid=$mid class=1:$cid"
 }
 
@@ -135,17 +196,11 @@ children_ok() {
         }'
 }
 
-to_kbit() {
-    awk -v v="$1" 'BEGIN{
-        n = v + 0; u = v; sub(/^[0-9.]+/, "", u); u = tolower(u)
-        if (u ~ /^g/) k = n * 1000000; else if (u ~ /^m/) k = n * 1000; else if (u ~ /^k/) k = n; else k = n / 1000
-        k = int(k + 0.5); if (k < 1) k = 1; print k }'
-}
-
 build_dev() {
-    local iface=$1 mid=$2 ip=$3 cid rc rate ceil rk t r p minor dm
+    local iface=$1 mid=$2 ip=$3 cid rc rate ceil rk t r p minor dm def_hex
     cid=$(class_for_mid "$mid")
     dm=$(dev_mark "$mid")
+    def_hex=$(applim_def_minor "$mid")
     rc=$(class_rate_ceil "$iface" "$cid")
     if [ -z "$rc" ]; then
         sh "$TCM" ensure_class "$iface" "$mid" "$ip" >/dev/null 2>&1
@@ -154,6 +209,17 @@ build_dev() {
     fi
     rate=${rc% *}; ceil=${rc#* }
     rk=$(to_kbit "$rate")
+
+    # 若之前未挂子类, 先摘除 1:<cid> 上的直接叶子 qdisc; 若有 app_limits 1:9eXX 兜底子类, 将其替换为三档 1:a0XX
+    if has_applim_on_dev "$iface" "$cid"; then
+        tc filter del dev "$iface" parent "1:$cid" prio "$INNER_PREF_FW" 2>/dev/null || true
+        tc filter del dev "$iface" parent "1:$cid" prio "$INNER_PREF_ALL" 2>/dev/null || true
+        tc class del dev "$iface" classid "1:$def_hex" 2>/dev/null || true
+    else
+        tc qdisc del dev "$iface" parent "1:$cid" 2>/dev/null || true
+        tc filter del dev "$iface" parent "1:$cid" 2>/dev/null || true
+    fi
+
     for t in 1 2 3; do
         case $t in 1) p=0; r=$((rk * 50 / 100)) ;; 2) p=1; r=$((rk * 35 / 100)) ;; *) p=2; r=$((rk * 15 / 100)) ;; esac
         [ "$r" -lt 1 ] && r=1
@@ -164,7 +230,7 @@ build_dev() {
         tc qdisc replace dev "$iface" parent "1:$minor" handle "$(leaf_major "$mid" "$t"):" fq_codel 2>/dev/null \
             || tc qdisc replace dev "$iface" parent "1:$minor" handle "$(leaf_major "$mid" "$t"):" pfifo 2>/dev/null || true
     done
-    tc filter del dev "$iface" parent "1:$cid" 2>/dev/null || true
+
     if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null; then
         tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null || return 1
         tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null || true
@@ -177,15 +243,18 @@ build_dev() {
         tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || return 1
         tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || true
     fi
-    tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$dm" fw 2>/dev/null || true
+
+    tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
     if [ -z "$HNC_TEST_MODE" ]; then
-        tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$dm/0x9fffff" fw 2>/dev/null || true
-        tc filter del dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "$dm/0x9fffff" fw 2>/dev/null || true
-        tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF" handle "$dm/0x9fffff" fw 2>/dev/null || true
+        tc filter del dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
+        tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
+        tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF_V6" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
     fi
-    if ! tc filter add dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "$dm/0x9fffff" fw flowid "1:$cid" 2>/dev/null; then
-        tc filter add dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "$dm/0x9fffff" fw flowid "1:$cid" 2>/dev/null || return 1
-        tc filter add dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF" handle "$dm/0x9fffff" fw flowid "1:$cid" 2>/dev/null || true
+    if ! tc filter add dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw flowid "1:$cid" 2>/dev/null; then
+        tc filter del dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
+        tc filter add dev "$iface" parent 1: protocol ip pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw flowid "1:$cid" 2>/dev/null || return 1
+        tc filter del dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF_V6" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
+        tc filter add dev "$iface" parent 1: protocol ipv6 pref "$ROOT_PREF_V6" handle "${dm}/${DEV_MASK}" fw flowid "1:$cid" 2>/dev/null || true
     fi
     log "built $iface mid=$mid class=1:$cid rate=$rate ceil=$ceil (50/35/15)"
     return 0
@@ -308,7 +377,7 @@ ipt_build() {
         }')
 
     awk -v iface="$IFACE" -v cm="$CHAIN_MARK" -v ch="$CHAIN" -v ci="$CHAIN_IP" \
-        -v rt="$TIER_RT" -v bg="$TIER_BG" -v tmask="$TIER_MASK" \
+        -v dmask="$DEV_MASK" -v amask="$APPLIM_MASK" -v rt="$TIER_RT" -v bg="$TIER_BG" -v tmask="$TIER_MASK" \
         -v v4f="$v4_batch" -v v6f="$v6_batch" -v has6="$IPV6_OK" -v neigh="$v6_neigh" '
         BEGIN {
             if (has6 == 1 && neigh != "") {
@@ -331,28 +400,29 @@ ipt_build() {
         }
         $1 == "dev" {
             mid = $2 + 0; mac = tolower($3); ip = $4
-            dmark = sprintf("0x%x", 8388608 + mid)
+            dmark = sprintf("0x%08x", 8388608 + mid * 65536)
             if (mac != "") {
-                printf "-A %s -i %s -m mac --mac-source %s -m mark --mark 0 -j MARK --set-xmark %s/0x9fffff\n", cm, iface, mac, dmark > v4f
+                printf "-A %s -i %s -m mac --mac-source %s -m mark --mark 0x0/%s -j MARK --set-xmark %s/%s\n", cm, iface, mac, dmask, dmark, dmask > v4f
                 if (has6 == 1)
-                    printf "-A %s -i %s -m mac --mac-source %s -m mark --mark 0 -j MARK --set-xmark %s/0x9fffff\n", cm, iface, mac, dmark > v6f
+                    printf "-A %s -i %s -m mac --mac-source %s -m mark --mark 0x0/%s -j MARK --set-xmark %s/%s\n", cm, iface, mac, dmask, dmark, dmask > v6f
             }
-            printf "-A %s -m mark --mark %s/0x9fffff -g %s\n", ch, dmark, ci > v4f
+            printf "-A %s -m mark --mark %s/%s -g %s\n", ch, dmark, dmask, ci > v4f
             if (ip != "")
-                printf "-A %s -d %s -m mark --mark 0x0/0x100000 -g %s\n", ch, ip, ci > v4f
+                printf "-A %s -d %s -m mark --mark 0x0/%s -g %s\n", ch, ip, amask, ci > v4f
             if (has6 == 1) {
-                printf "-A %s -m mark --mark %s/0x9fffff -g %s\n", ch, dmark, ci > v6f
+                printf "-A %s -m mark --mark %s/%s -g %s\n", ch, dmark, dmask, ci > v6f
                 for (j = 1; j <= mac6_cnt[mac]; j++)
-                    printf "-A %s -d %s -m mark --mark 0x0/0x100000 -g %s\n", ch, mac6[mac, j], ci > v6f
+                    printf "-A %s -d %s -m mark --mark 0x0/%s -g %s\n", ch, mac6[mac, j], amask, ci > v6f
             }
         }
         $1 == "ip" {
             bits = ($2 == "1") ? rt : (($2 == "3") ? bg : "")
             if (bits == "" || $3 == "") next
+            # 跳过已被单应用限速打标的包 (-m mark --mark 0x0/0xfc000000), 每条规则仅一个 -m mark
             if (index($3, ":") > 0) {
-                if (has6 == 1) printf "-A %s -s %s -j MARK --set-xmark %s/%s\n", ci, $3, bits, tmask > v6f
+                if (has6 == 1) printf "-A %s -s %s -m mark --mark 0x0/%s -j MARK --set-xmark %s/%s\n", ci, $3, amask, bits, tmask > v6f
             } else {
-                printf "-A %s -s %s -j MARK --set-xmark %s/%s\n", ci, $3, bits, tmask > v4f
+                printf "-A %s -s %s -m mark --mark 0x0/%s -j MARK --set-xmark %s/%s\n", ci, $3, amask, bits, tmask > v4f
             }
         }
         END {
@@ -412,7 +482,11 @@ if [ "$1" = "teardown" ]; then
             rm -f "$STATE.tmp" "$STATE" "$SIG"
             ipt_remove
             tc filter del dev "$2" parent 1: pref "$ROOT_PREF" 2>/dev/null || true
+            tc filter del dev "$2" parent 1: pref "$ROOT_PREF_V6" 2>/dev/null || true
         fi
+    fi
+    if [ "${HNC_SKIP_ENSURE_CLASS:-0}" != "1" ] && ! has_applim_on_dev "$2" "$cid"; then
+        sh "$TCM" ensure_class "$2" "$3" >/dev/null 2>&1 || true
     fi
     exit 0
 fi
@@ -459,7 +533,9 @@ if [ "$TC_OK" != 1 ]; then
         grep -qx "$s_if $s_cid" "$STATE" 2>/dev/null && continue
         s_mid=$s_cid; [ "$s_cid" = "100" ] && s_mid=1
         teardown_dev "$s_if" "$s_mid"
-        sh "$TCM" ensure_class "$s_if" "$s_mid" "" >/dev/null 2>&1 || true
+        if ! has_applim_on_dev "$s_if" "$s_cid"; then
+            sh "$TCM" ensure_class "$s_if" "$s_mid" "" >/dev/null 2>&1 || true
+        fi
     done
 
     DEV_LIST="$RUN/.aq_devs.$$"
@@ -475,7 +551,9 @@ if [ "$TC_OK" != 1 ]; then
                 grep -vx "$IFACE $cid" "$STATE" > "$STATE.tmp" 2>/dev/null || : > "$STATE.tmp"
                 if [ -s "$STATE.tmp" ]; then mv -f "$STATE.tmp" "$STATE"; else rm -f "$STATE.tmp" "$STATE"; fi
             fi
-            sh "$TCM" ensure_class "$IFACE" "$mid" "$ip" >/dev/null 2>&1 || true
+            if ! has_applim_on_dev "$IFACE" "$cid"; then
+                sh "$TCM" ensure_class "$IFACE" "$mid" "$ip" >/dev/null 2>&1 || true
+            fi
         fi
     done < "$DEV_LIST"
     rm -f "$DEV_LIST" 2>/dev/null
@@ -495,7 +573,10 @@ if [ -f "$STATE" ]; then
     fi
 else
     ipt_remove
-    [ -n "$IFACE" ] && tc filter del dev "$IFACE" parent 1: pref "$ROOT_PREF" 2>/dev/null || true
+    if [ -n "$IFACE" ]; then
+        tc filter del dev "$IFACE" parent 1: pref "$ROOT_PREF" 2>/dev/null || true
+        tc filter del dev "$IFACE" parent 1: pref "$ROOT_PREF_V6" 2>/dev/null || true
+    fi
     rm -f "$SIG"
 fi
 exit 0

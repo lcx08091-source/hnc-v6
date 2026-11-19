@@ -91,7 +91,7 @@ typedef struct {
     uint64_t last_delta_bytes;
     /* 当前被 disable 的上游 ifindex 列表(per-upstream 模式) */
     int disabled_upstream_count;
-    int disabled_upstream_ifindex[8];
+    int disabled_upstream_ifindex[32];
     /* 全局 disable 是否生效(global 模式) */
     int globally_disabled;
 } offload_status_t;

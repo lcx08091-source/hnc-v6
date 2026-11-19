@@ -1,53 +1,21 @@
-/* offload/adapter_bpf.c — 高通 + AOSP BPF tethering offload adapter
+/* offload/adapter_bpf.c — HNC v5.40.0 AOSP BPF tethering offload adapter
  *
  * 平台覆盖:
- *   - 高通 SDM/SM 系列 + Android 11+ (AOSP BPF tethering)
- *   - 任何"标准 AOSP BPF tethering"的 ROM 实现 (ColorOS/HyperOS/PixelOS/...)
+ *   - 高通 SDM/SM 系列 + 联发科 Dimensity + 展锐/Pixel Android 11–16 (AOSP BPF tethering)
+ *   - 任何带 Mainline Connectivity/Tethering APEX 的 ROM 实现 (ColorOS/HyperOS/PixelOS/OneUI)
  *
- * 不覆盖:
- *   - MTK PPE        (走 adapter_ppe, v5.1)
- *   - 三星 NSS       (走 adapter_nss, v5.2)
- *   - 华为 HiNAT     (待研究)
- *
- * v5.0 alpha.1 实现范围: PER_UPSTREAM 粒度
- *   - disable_upstream(ifindex)  → limit_map[ifindex] = 0
- *   - restore_upstream(ifindex)  → limit_map[ifindex] = U64_MAX
- *   - disable_global / restore_global  遍历所有 entry
- *   - refresh_active             5s 双采样 stats_map, 总流量 >1MB 视为 active
- *
- * v5.x 计划: PER_DEVICE 粒度
- *   - 监听 conntrack NEW 事件
- *   - 删 downstream4/6_map 里目标 IP=被限速设备的 entry
- *   - 强制流量回落 slow path, tc HTB 接管
- *
- * 关键 BPF map 路径 (Android 11+ 稳定, 跨厂):
- *   /sys/fs/bpf/tethering/map_offload_tether_limit_map
- *       schema: u32 (upstream ifindex) → u64 (byte quota)
- *       U64_MAX = 无限额度 (offload 主路径)
- *       0       = 无额度 → BPF 程序返回 TC_ACT_PIPE → tc 接管
- *
- *   /sys/fs/bpf/tethering/map_offload_tether_stats_map
- *       schema: u32 (upstream ifindex) → TetherStatsValue (48 bytes)
- *       struct TetherStatsValue {
- *           u64 rxPackets, rxBytes, rxErrors;
- *           u64 txPackets, txBytes, txErrors;
- *       };
- *
- *   /sys/fs/bpf/tethering/map_offload_tether_error_map
- *       schema: u32 (error code) → u64 (count)
- *       (诊断用, 可选)
- *
- * 真机已验 (RMX5010, SD8 Elite, ColorOS 16, Android 16, kernel 6.6.102):
- *   - bpf_obj_get(limit_map) 在 KSU su context 下成功
- *   - bpf_map_update_elem 写 limit=0 持稳, framework 不立即回写
- *   - 100 次高频写入测试无 race
- *   - 见 HNC v4.x BPF/IPA 研究档案
- *
- * 错误处理策略:
- *   - syscall 返回 -1 → 按 errno 映射到 OFFLOAD_E* (EPERM/EACCES → EPERM,
- *     ENOENT → ENOENT, 其他 → EINTERNAL)
- *   - fd 缓存失效自愈: lookup/update 失败 errno=EBADF 时, 重新 obj_get 一次
- *   - 任何写操作失败 → log + 返错, 不假装成功
+ * v5.40.0 核心升级 (保留 100% offload_adapter_t 接口契约):
+ *   1. 动态 Schema 感知流表清空 (BPF_OBJ_GET_INFO_BY_FD):
+ *      动态读取真实 info.key_size (0 < key_size <= 256, 仅限 HASH / LRU_HASH),
+ *      采用“先 GET_NEXT_KEY 再 DELETE_ELEM + ENOENT 回退重锚 + max_iters 熔断”安全清空
+ *      downstream4_map、upstream4_map、downstream6_map、upstream6_map (无缝免疫
+ *      12B -> 20B/24B Mainline APEX 变更) 与 downstream64_map。
+ *   2. T+0 空表主动预锁 (Zero-Packet-Leak Pre-Seeding):
+ *      当 disable_global 发现 map_offload_tether_limit_map 为空时, 主动扫描
+ *      /sys/class/net 下处于 IFF_UP 的上游候选接口 (rmnet*, ccmni*, wlan*, eth*,
+ *      v4-*, usb*, 排除 lo 及当前热点 AP 口, 最多预写 12 个以严守 max_entries=16),
+ *      通过 if_nametoindex 以 BPF_ANY 预写入 uint64_t quota = 0 (绝不触碰 stats_map,
+ *      防止破坏 BpfCoordinator 的 BPF_NOEXIST 初始化), 并同步清空存量流表!
  *
  * SPDX-License-Identifier: GPL-2.0
  */
@@ -58,24 +26,35 @@
 
 #include "adapter.h"
 
+#include <dirent.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <limits.h>
+#include <net/if.h>
+#include <pthread.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdint.h>
-#include <unistd.h>
-#include <errno.h>
 #include <time.h>
-#include <pthread.h>
+#include <unistd.h>
 
 #include <sys/stat.h>
 #include <sys/syscall.h>
 
 #include <linux/bpf.h>
 
+#ifndef PATH_MAX
+#define PATH_MAX 4096
+#endif
+
+#ifndef BPF_OBJ_GET_INFO_BY_FD
+#define BPF_OBJ_GET_INFO_BY_FD 15
+#endif
+
 /* ══════════════════════════════════════════════════════════
- * bpf() syscall wrapper
- *
- * Android NDK 不带 libbpf, 直接走 syscall(__NR_bpf, ...)
+ * bpf() syscall wrapper (static hnc_bpf_* 命名杜绝与 libbpf.a 符号冲突)
  * ══════════════════════════════════════════════════════════ */
 
 #ifndef __NR_bpf
@@ -92,74 +71,78 @@
 #  endif
 #endif
 
-static inline long sys_bpf(enum bpf_cmd cmd, union bpf_attr *attr, unsigned int size)
+static inline uint64_t hnc_ptr_to_u64(const void *ptr)
+{
+    return (uint64_t)(uintptr_t)ptr;
+}
+
+static inline long hnc_sys_bpf(int cmd, union bpf_attr *attr, unsigned int size)
 {
     return syscall(__NR_bpf, cmd, attr, size);
 }
 
-/* 打开 pinned map → fd (失败返 -1, 设 errno) */
-static int bpf_obj_get(const char *pathname)
+static int hnc_bpf_obj_get(const char *pathname)
 {
     union bpf_attr attr;
     memset(&attr, 0, sizeof(attr));
-    attr.pathname = (uint64_t)(uintptr_t)pathname;
-    long fd = sys_bpf(BPF_OBJ_GET, &attr, sizeof(attr));
-    return (int)fd;
+    attr.pathname = hnc_ptr_to_u64(pathname);
+    return (int)hnc_sys_bpf(BPF_OBJ_GET, &attr, sizeof(attr));
 }
 
-/* lookup_elem (失败 -1, errno) */
-static int bpf_map_lookup_elem(int fd, const void *key, void *value)
+static int hnc_bpf_map_lookup_elem(int fd, const void *key, void *value)
 {
     union bpf_attr attr;
     memset(&attr, 0, sizeof(attr));
     attr.map_fd = (uint32_t)fd;
-    attr.key    = (uint64_t)(uintptr_t)key;
-    attr.value  = (uint64_t)(uintptr_t)value;
-    return (int)sys_bpf(BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
+    attr.key    = hnc_ptr_to_u64(key);
+    attr.value  = hnc_ptr_to_u64(value);
+    return (int)hnc_sys_bpf(BPF_MAP_LOOKUP_ELEM, &attr, sizeof(attr));
 }
 
-/* update_elem (失败 -1, errno) */
-static int bpf_map_update_elem(int fd, const void *key, const void *value,
-                                uint64_t flags)
+static int hnc_bpf_map_update_elem(int fd, const void *key, const void *value,
+                                   uint64_t flags)
 {
     union bpf_attr attr;
     memset(&attr, 0, sizeof(attr));
     attr.map_fd = (uint32_t)fd;
-    attr.key    = (uint64_t)(uintptr_t)key;
-    attr.value  = (uint64_t)(uintptr_t)value;
+    attr.key    = hnc_ptr_to_u64(key);
+    attr.value  = hnc_ptr_to_u64(value);
     attr.flags  = flags;
-    return (int)sys_bpf(BPF_MAP_UPDATE_ELEM, &attr, sizeof(attr));
+    return (int)hnc_sys_bpf(BPF_MAP_UPDATE_ELEM, &attr, sizeof(attr));
 }
 
-/* get_next_key — 用于遍历 map
- *   first call: key=NULL → 拿第一个 key 到 next_key
- *   后续:       key=current → 拿下一个 key 到 next_key
- *   返 -1 errno=ENOENT 表示遍历结束
- */
-static int bpf_map_get_next_key(int fd, const void *key, void *next_key)
+static int hnc_bpf_map_delete_elem(int fd, const void *key)
+{
+    union bpf_attr attr;
+    memset(&attr, 0, sizeof(attr));
+    attr.map_fd = (uint32_t)fd;
+    attr.key    = hnc_ptr_to_u64(key);
+    return (int)hnc_sys_bpf(BPF_MAP_DELETE_ELEM, &attr, sizeof(attr));
+}
+
+static int hnc_bpf_map_get_next_key(int fd, const void *key, void *next_key)
 {
     union bpf_attr attr;
     memset(&attr, 0, sizeof(attr));
     attr.map_fd   = (uint32_t)fd;
-    attr.key      = (uint64_t)(uintptr_t)key;
-    attr.next_key = (uint64_t)(uintptr_t)next_key;
-    return (int)sys_bpf(BPF_MAP_GET_NEXT_KEY, &attr, sizeof(attr));
+    attr.key      = key ? hnc_ptr_to_u64(key) : 0ULL;
+    attr.next_key = hnc_ptr_to_u64(next_key);
+    return (int)hnc_sys_bpf(BPF_MAP_GET_NEXT_KEY, &attr, sizeof(attr));
 }
 
-/* obj_get_info_by_fd — 用于 self_check 验证 schema */
-static int bpf_obj_get_info_by_fd(int fd, void *info, uint32_t *info_len)
+static int hnc_bpf_obj_get_info_by_fd(int fd, struct bpf_map_info *info, uint32_t *info_len)
 {
     union bpf_attr attr;
     memset(&attr, 0, sizeof(attr));
+    memset(info, 0, sizeof(*info));
     attr.info.bpf_fd   = (uint32_t)fd;
     attr.info.info_len = *info_len;
-    attr.info.info     = (uint64_t)(uintptr_t)info;
-    int rc = (int)sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr));
+    attr.info.info     = hnc_ptr_to_u64(info);
+    int rc = (int)hnc_sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr));
     *info_len = attr.info.info_len;
     return rc;
 }
 
-/* errno → offload_err_t */
 static offload_err_t errno_to_offload(int e)
 {
     switch (e) {
@@ -175,15 +158,23 @@ static offload_err_t errno_to_offload(int e)
 }
 
 /* ══════════════════════════════════════════════════════════
- * Map 路径 (Android 11+ 稳定)
+ * Map 路径与常量定义
  * ══════════════════════════════════════════════════════════ */
 
-#define BPF_LIMIT_MAP   "/sys/fs/bpf/tethering/map_offload_tether_limit_map"
-#define BPF_STATS_MAP   "/sys/fs/bpf/tethering/map_offload_tether_stats_map"
-#define BPF_ERROR_MAP   "/sys/fs/bpf/tethering/map_offload_tether_error_map"
+#define BPF_TETHER_DIR          "/sys/fs/bpf/tethering"
+#define BPF_LIMIT_MAP           BPF_TETHER_DIR "/map_offload_tether_limit_map"
+#define BPF_STATS_MAP           BPF_TETHER_DIR "/map_offload_tether_stats_map"
+#define BPF_ERROR_MAP           BPF_TETHER_DIR "/map_offload_tether_error_map"
+#define BPF_LEGACY_R_DOWN6_MAP  "/sys/fs/bpf/map_offload_tether_downstream6_map"
+#define SYSFS_NET_DIR           "/sys/class/net"
 
-/* TetherStatsValue 与 AOSP packages/modules/Connectivity/Tethering/
- * bpf_progs/offload.h 对齐 (48 bytes, 6 个 u64) */
+/* 动态 key_size 安全栈上限与遍历熔断余量 */
+#define HNC_BPF_MAX_KEY_SIZE      256U
+#define HNC_BPF_EVICT_GUARD_EXTRA 64U
+
+/* T+0 空表预锁最多写入 12 个活跃上游接口, 严守 AOSP limit_map max_entries=16 */
+#define HNC_T0_PRESEED_MAX        12U
+
 typedef struct {
     uint64_t rx_packets;
     uint64_t rx_bytes;
@@ -193,65 +184,52 @@ typedef struct {
     uint64_t tx_errors;
 } tether_stats_t;
 
-#define BPF_LIMIT_NONE  ((uint64_t)0xFFFFFFFFFFFFFFFFULL)   /* U64_MAX = 无限额度 */
-#define BPF_LIMIT_ZERO  ((uint64_t)0)                        /* 触发 fallback */
+#define BPF_LIMIT_NONE  ((uint64_t)0xFFFFFFFFFFFFFFFFULL)
+#define BPF_LIMIT_ZERO  ((uint64_t)0ULL)
 
-#define ACTIVE_THRESHOLD_BYTES  (1ULL * 1024 * 1024)         /* 1 MB / 5s = active */
-#define ACTIVE_SAMPLE_INTERVAL  5                             /* 秒 */
-
-/* rc43 (P2-15): 8 → 32。原来 8 个上游同时被禁(多 SIM+VPN+5G+WiFi 齐探)时,
- * 第 9 个会写进 BPF map 但本地集合丢记录 → status() 少报一项。真正的 disable/restore
- * 都直接遍历 BPF limit_map、不依赖本地集合,所以这只是显示瑕疵;把上限抬到 32(=128B,
- * 任何现实场景都用不满)实际消除溢出,比加 disable_global 兜底更简单、零递归风险。 */
+#define ACTIVE_THRESHOLD_BYTES  (1ULL * 1024 * 1024)
+#define ACTIVE_SAMPLE_INTERVAL  5
 #define MAX_DISABLED_UPSTREAMS  32
 
 /* ══════════════════════════════════════════════════════════
- * Adapter 状态 (file-static, 与 hotspotd.c 风格一致)
+ * Adapter 状态 (受 s_lock 互斥保护)
  * ══════════════════════════════════════════════════════════ */
 
 static struct {
     int initialized;
 
-    /* 缓存的 map fd, -1 = 未打开 */
     int fd_limit;
     int fd_stats;
     int fd_error;
 
-    /* refresh_active 缓存 */
     int      cached_active;
     int64_t  cached_refresh_ts;
     uint64_t cached_delta_bytes;
-    uint64_t cached_last_total;        /* 上次采样的 rx+tx 总和, 0 = 未采过 */
+    uint64_t cached_last_total;
 
-    /* 已 disable 的 upstream ifindex 列表
-     * 排序无关, 用于 status() 输出和 restore_global 的反向操作 */
     int disabled_upstream_ifindex[MAX_DISABLED_UPSTREAMS];
     int disabled_upstream_count;
 
-    /* global disable 是否生效 */
     int globally_disabled;
 } s = {
-    .initialized        = 0,
-    .fd_limit           = -1,
-    .fd_stats           = -1,
-    .fd_error           = -1,
-    .cached_active      = 0,
-    .cached_refresh_ts  = 0,
-    .cached_delta_bytes = 0,
-    .cached_last_total  = 0,
+    .initialized             = 0,
+    .fd_limit                = -1,
+    .fd_stats                = -1,
+    .fd_error                = -1,
+    .cached_active           = 0,
+    .cached_refresh_ts       = 0,
+    .cached_delta_bytes      = 0,
+    .cached_last_total       = 0,
     .disabled_upstream_count = 0,
-    .globally_disabled  = 0,
+    .globally_disabled       = 0,
 };
 
-/* v5.1.0-rc1 hotfix: adapter 状态 s 和缓存 fd 可能被 scheduler worker、
- * status API、shutdown 路径并发访问,必须统一加锁。
- */
 static pthread_mutex_t s_lock = PTHREAD_MUTEX_INITIALIZER;
 #define BPF_LOCK()   pthread_mutex_lock(&s_lock)
 #define BPF_UNLOCK() pthread_mutex_unlock(&s_lock)
 
 /* ══════════════════════════════════════════════════════════
- * fd 自愈: 打开 / 重新打开
+ * fd 自愈与集合管理辅助
  * ══════════════════════════════════════════════════════════ */
 
 static int reopen_fd(int *fd, const char *path)
@@ -260,7 +238,7 @@ static int reopen_fd(int *fd, const char *path)
         close(*fd);
         *fd = -1;
     }
-    int new_fd = bpf_obj_get(path);
+    int new_fd = hnc_bpf_obj_get(path);
     if (new_fd < 0) {
         fprintf(stderr, "[bpf] obj_get failed: %s (errno=%d %s)\n",
                 path, errno, strerror(errno));
@@ -270,7 +248,6 @@ static int reopen_fd(int *fd, const char *path)
     return 0;
 }
 
-/* 确保 limit_map fd 可用; 若失效自动重开 */
 static int ensure_limit_fd(void)
 {
     if (s.fd_limit >= 0) return 0;
@@ -282,10 +259,6 @@ static int ensure_stats_fd(void)
     if (s.fd_stats >= 0) return 0;
     return reopen_fd(&s.fd_stats, BPF_STATS_MAP);
 }
-
-/* ══════════════════════════════════════════════════════════
- * 内部小工具: 已 disable 集合管理
- * ══════════════════════════════════════════════════════════ */
 
 static int disabled_set_contains(int ifindex)
 {
@@ -309,7 +282,6 @@ static void disabled_set_remove(int ifindex)
 {
     for (int i = 0; i < s.disabled_upstream_count; i++) {
         if (s.disabled_upstream_ifindex[i] == ifindex) {
-            /* 末尾元素填洞 */
             s.disabled_upstream_ifindex[i] =
                 s.disabled_upstream_ifindex[--s.disabled_upstream_count];
             return;
@@ -318,10 +290,316 @@ static void disabled_set_remove(int ifindex)
 }
 
 /* ══════════════════════════════════════════════════════════
- * stats_map 累计读取
- *
- * 遍历所有 entry, 累加 rxBytes + txBytes, 返回总和。
- * 失败返 0 (调用方需用 last_total != 0 判断是否首次采样)
+ * 核心升级 1: 动态 key_size 安全清空 AOSP Tethering 流表
+ * ══════════════════════════════════════════════════════════ */
+
+static offload_err_t evict_single_flow_map_fd(int map_fd, uint32_t *evicted_out)
+{
+    if (evicted_out)
+        *evicted_out = 0U;
+    if (map_fd < 0)
+        return OFFLOAD_EINTERNAL;
+
+    struct bpf_map_info info;
+    uint32_t info_len = sizeof(info);
+    if (hnc_bpf_obj_get_info_by_fd(map_fd, &info, &info_len) != 0)
+        return errno_to_offload(errno);
+
+    if (info.key_size == 0U || info.key_size > HNC_BPF_MAX_KEY_SIZE)
+        return OFFLOAD_EINVAL;
+
+    if (info.type != BPF_MAP_TYPE_HASH && info.type != BPF_MAP_TYPE_LRU_HASH)
+        return OFFLOAD_EINVAL;
+
+    uint8_t cur_key[HNC_BPF_MAX_KEY_SIZE];
+    uint8_t next_key[HNC_BPF_MAX_KEY_SIZE];
+    memset(cur_key, 0, sizeof(cur_key));
+    memset(next_key, 0, sizeof(next_key));
+
+    if (hnc_bpf_map_get_next_key(map_fd, NULL, cur_key) != 0) {
+        if (errno == ENOENT)
+            return OFFLOAD_OK;
+        return errno_to_offload(errno);
+    }
+
+    uint32_t max_entries = (info.max_entries > 0U && info.max_entries <= 65536U)
+                               ? info.max_entries
+                               : 1024U;
+    uint32_t max_iters = max_entries * 2U + HNC_BPF_EVICT_GUARD_EXTRA;
+    uint32_t evicted = 0U;
+
+    for (uint32_t iter = 0U; iter < max_iters; iter++) {
+        int next_rc  = hnc_bpf_map_get_next_key(map_fd, cur_key, next_key);
+        int next_err = (next_rc != 0) ? errno : 0;
+
+        /* 先缓存 next_key 再删除 cur_key, 防止内核哈希桶退回桶首导致死循环 */
+        if (hnc_bpf_map_delete_elem(map_fd, cur_key) == 0) {
+            evicted++;
+        } else if (errno != ENOENT) {
+            if (evicted_out)
+                *evicted_out = evicted;
+            return errno_to_offload(errno);
+        }
+
+        if (next_rc == 0) {
+            memcpy(cur_key, next_key, info.key_size);
+            continue;
+        }
+
+        if (next_err == ENOENT) {
+            /* 若 cur_key 恰被并发删除或已到表尾, 从 NULL 重锚剩余首键 */
+            if (hnc_bpf_map_get_next_key(map_fd, NULL, cur_key) != 0)
+                break;
+            continue;
+        }
+
+        break;
+    }
+
+    if (evicted_out)
+        *evicted_out = evicted;
+    return OFFLOAD_OK;
+}
+
+static offload_err_t evict_single_flow_map_path(const char *pin_path, uint32_t *evicted_out)
+{
+    if (evicted_out)
+        *evicted_out = 0U;
+    int fd = hnc_bpf_obj_get(pin_path);
+    if (fd < 0)
+        return errno_to_offload(errno);
+
+    offload_err_t rc = evict_single_flow_map_fd(fd, evicted_out);
+    close(fd);
+    return rc;
+}
+
+static uint32_t evict_all_tether_flow_maps(void)
+{
+    static const char *const kFlowMaps[] = {
+        BPF_TETHER_DIR "/map_offload_tether_downstream4_map",
+        BPF_TETHER_DIR "/map_offload_tether_upstream4_map",
+        BPF_TETHER_DIR "/map_offload_tether_downstream6_map",
+        BPF_TETHER_DIR "/map_offload_tether_upstream6_map",
+        BPF_TETHER_DIR "/map_offload_tether_downstream64_map",
+    };
+
+    uint32_t total_evicted = 0U;
+    uint32_t opened = 0U;
+
+    for (size_t i = 0U; i < sizeof(kFlowMaps) / sizeof(kFlowMaps[0]); i++) {
+        uint32_t n = 0U;
+        offload_err_t rc = evict_single_flow_map_path(kFlowMaps[i], &n);
+        if (rc == OFFLOAD_OK) {
+            opened++;
+            total_evicted += n;
+        }
+    }
+
+    /* Android 11 (R) 旧版 netd downstream6 兼容回退 */
+    if (opened == 0U) {
+        uint32_t r_ev = 0U;
+        if (evict_single_flow_map_path(BPF_LEGACY_R_DOWN6_MAP, &r_ev) == OFFLOAD_OK)
+            total_evicted += r_ev;
+    }
+
+    if (total_evicted > 0U)
+        fprintf(stderr, "[bpf] evicted %u cached tethering flow entries\n", total_evicted);
+    return total_evicted;
+}
+
+/* ══════════════════════════════════════════════════════════
+ * 核心升级 2: T+0 空表主动扫描 IFF_UP 上游候选预写 quota=0
+ * ══════════════════════════════════════════════════════════ */
+
+static bool starts_with(const char *str, const char *prefix)
+{
+    return strncmp(str, prefix, strlen(prefix)) == 0;
+}
+
+static void read_active_ap_ifname(char out[IFNAMSIZ])
+{
+    out[0] = '\0';
+    const char *env_ap = getenv("HNC_AP_IFACE");
+    if (env_ap && env_ap[0] != '\0') {
+        snprintf(out, IFNAMSIZ, "%.*s", IFNAMSIZ - 1, env_ap);
+        return;
+    }
+
+    const char *hnc_dir = getenv("HNC_DIR");
+    if (!hnc_dir || hnc_dir[0] == '\0')
+        hnc_dir = "/data/local/hnc";
+
+    char state_path[PATH_MAX];
+    int n = snprintf(state_path, sizeof(state_path), "%s/run/hnc_state", hnc_dir);
+    if (n < 0 || (size_t)n >= sizeof(state_path))
+        return;
+
+    FILE *f = fopen(state_path, "re");
+    if (!f)
+        return;
+
+    char line[128];
+    while (fgets(line, sizeof(line), f)) {
+        if (strncmp(line, "ACTIVE:", 7) == 0) {
+            char *nl = strpbrk(line + 7, "\r\n \t");
+            if (nl) *nl = '\0';
+            if (line[7] != '\0') {
+                snprintf(out, IFNAMSIZ, "%.*s", IFNAMSIZ - 1, line + 7);
+                break;
+            }
+        }
+    }
+    fclose(f);
+}
+
+static int classify_upstream_candidate(const char *ifname, const char *ap_ifname)
+{
+    if (!ifname || ifname[0] == '\0' || ifname[0] == '.')
+        return 0;
+    if (strcmp(ifname, "lo") == 0)
+        return 0;
+    if (ap_ifname && ap_ifname[0] != '\0' && strcmp(ifname, ap_ifname) == 0)
+        return 0;
+
+    if ((!ap_ifname || ap_ifname[0] == '\0') && strcmp(ifname, "wlan2") == 0)
+        return 0;
+
+    if (starts_with(ifname, "ifb") ||
+        starts_with(ifname, "dummy") ||
+        starts_with(ifname, "ap") ||
+        starts_with(ifname, "swlan") ||
+        starts_with(ifname, "softap") ||
+        starts_with(ifname, "p2p") ||
+        starts_with(ifname, "aware") ||
+        starts_with(ifname, "rndis") ||
+        starts_with(ifname, "ncm") ||
+        starts_with(ifname, "bt-pan")) {
+        return 0;
+    }
+
+    if (starts_with(ifname, "rmnet") ||
+        starts_with(ifname, "r_rmnet") ||
+        starts_with(ifname, "ccmni") ||
+        strcmp(ifname, "wlan0") == 0 ||
+        starts_with(ifname, "eth")) {
+        return 1;
+    }
+
+    if (starts_with(ifname, "wlan") ||
+        starts_with(ifname, "v4-") ||
+        starts_with(ifname, "usb")) {
+        return 2;
+    }
+
+    return 0;
+}
+
+static bool is_netdev_iff_up(const char *ifname)
+{
+    char path[PATH_MAX];
+    int n = snprintf(path, sizeof(path), "%s/%s/flags", SYSFS_NET_DIR, ifname);
+    if (n < 0 || (size_t)n >= sizeof(path))
+        return false;
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return false;
+
+    char buf[64];
+    ssize_t r = read(fd, buf, sizeof(buf) - 1U);
+    close(fd);
+    if (r <= 0)
+        return false;
+    buf[r] = '\0';
+
+    char *endp = NULL;
+    errno = 0;
+    unsigned long long flags = strtoull(buf, &endp, 0);
+    if (errno != 0 || endp == buf)
+        return false;
+
+    return ((flags & 0x1ULL) != 0ULL) && ((flags & 0x8ULL) == 0ULL);
+}
+
+typedef struct {
+    uint32_t ifindex;
+    int      prio;
+    char     ifname[IFNAMSIZ];
+} t0_cand_t;
+
+static uint32_t preseed_t0_limit_map_locked(void)
+{
+    struct bpf_map_info info;
+    uint32_t info_len = sizeof(info);
+    uint32_t cap = HNC_T0_PRESEED_MAX;
+
+    if (hnc_bpf_obj_get_info_by_fd(s.fd_limit, &info, &info_len) == 0) {
+        if (info.key_size != sizeof(uint32_t) || info.value_size != sizeof(uint64_t))
+            return 0U;
+        if (info.max_entries > 0U && info.max_entries < cap)
+            cap = info.max_entries;
+    }
+
+    char ap_ifname[IFNAMSIZ];
+    read_active_ap_ifname(ap_ifname);
+
+    DIR *dir = opendir(SYSFS_NET_DIR);
+    if (!dir)
+        return 0U;
+
+    t0_cand_t cands[64];
+    size_t cand_cnt = 0U;
+    struct dirent *de = NULL;
+
+    while ((de = readdir(dir)) != NULL) {
+        int prio = classify_upstream_candidate(de->d_name, ap_ifname);
+        if (prio <= 0)
+            continue;
+        if (!is_netdev_iff_up(de->d_name))
+            continue;
+        unsigned int idx = if_nametoindex(de->d_name);
+        if (idx == 0U)
+            continue;
+
+        bool dup = false;
+        for (size_t k = 0U; k < cand_cnt; k++) {
+            if (cands[k].ifindex == (uint32_t)idx) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup && cand_cnt < (sizeof(cands) / sizeof(cands[0]))) {
+            cands[cand_cnt].ifindex = (uint32_t)idx;
+            cands[cand_cnt].prio    = prio;
+            snprintf(cands[cand_cnt].ifname, IFNAMSIZ, "%.*s", IFNAMSIZ - 1, de->d_name);
+            cand_cnt++;
+        }
+    }
+    closedir(dir);
+
+    const uint64_t zero_quota = BPF_LIMIT_ZERO;
+    uint32_t preseeded = 0U;
+
+    for (int target_prio = 1; target_prio <= 2 && preseeded < cap; target_prio++) {
+        for (size_t i = 0U; i < cand_cnt && preseeded < cap; i++) {
+            if (cands[i].prio != target_prio)
+                continue;
+            uint32_t key = cands[i].ifindex;
+            if (hnc_bpf_map_update_elem(s.fd_limit, &key, &zero_quota, BPF_ANY) == 0) {
+                disabled_set_add((int)key);
+                preseeded++;
+                fprintf(stderr, "[bpf] T+0 pre-seeded quota=0 on %s (ifindex=%u)\n",
+                        cands[i].ifname, key);
+            }
+        }
+    }
+
+    return preseeded;
+}
+
+/* ══════════════════════════════════════════════════════════
+ * stats_map 累计读取 (只读不写!)
  * ══════════════════════════════════════════════════════════ */
 
 static uint64_t stats_total_bytes(void)
@@ -330,25 +608,22 @@ static uint64_t stats_total_bytes(void)
 
     uint32_t key = 0, next_key = 0;
     uint64_t total = 0;
-    int rc;
     int has_prev = 0;
 
-    while (1) {
-        rc = bpf_map_get_next_key(s.fd_stats,
-                                  has_prev ? &key : NULL,
-                                  &next_key);
+    for (int guard = 0; guard < 256; guard++) {
+        int rc = hnc_bpf_map_get_next_key(s.fd_stats,
+                                          has_prev ? &key : NULL,
+                                          &next_key);
         if (rc != 0) {
-            if (errno == ENOENT) break;       /* 遍历结束 */
-            fprintf(stderr, "[bpf] stats get_next_key errno=%d\n", errno);
+            if (errno != ENOENT)
+                fprintf(stderr, "[bpf] stats get_next_key errno=%d\n", errno);
             break;
         }
 
         tether_stats_t v;
         memset(&v, 0, sizeof(v));
-        if (bpf_map_lookup_elem(s.fd_stats, &next_key, &v) == 0) {
+        if (hnc_bpf_map_lookup_elem(s.fd_stats, &next_key, &v) == 0)
             total += v.rx_bytes + v.tx_bytes;
-        }
-        /* 即使 lookup 失败也要继续遍历, 不卡死 */
 
         key = next_key;
         has_prev = 1;
@@ -357,13 +632,11 @@ static uint64_t stats_total_bytes(void)
 }
 
 /* ══════════════════════════════════════════════════════════
- * Adapter 接口实现
+ * Adapter 接口实现 (100% 保持 offload_adapter_t 签名契约)
  * ══════════════════════════════════════════════════════════ */
 
 static int bpf_probe(void)
 {
-    /* 文件存在即匹配; 真正的 bpf_syscall_ok 由 platform_probe 测过,
-     * 这里再独立测一次确保 adapter 自己可达 */
     struct stat st;
     if (stat(BPF_LIMIT_MAP, &st) != 0) return -1;
     return 0;
@@ -384,12 +657,9 @@ static offload_err_t bpf_init(void)
         return ret;
     }
     if (ensure_stats_fd() != 0) {
-        /* stats fd 失败不致命, refresh_active 会再试 */
         fprintf(stderr, "[bpf] init: stats_map open failed, will retry on refresh\n");
     }
-    /* error_map 是 nice-to-have, init 时不强制 */
-    s.fd_error = bpf_obj_get(BPF_ERROR_MAP);
-    /* fd_error < 0 也 OK, status 不强依赖 */
+    s.fd_error = hnc_bpf_obj_get(BPF_ERROR_MAP);
 
     s.initialized = 1;
     fprintf(stderr, "[bpf] init OK (limit_fd=%d stats_fd=%d error_fd=%d)\n",
@@ -412,10 +682,6 @@ static void bpf_shutdown(void)
     BPF_UNLOCK();
 }
 
-/* self_check: 验证 limit_map schema 与编译期假设一致
- * key_size = 4 (u32 ifindex), value_size = 8 (u64 quota)
- * 万一未来 Connectivity APEX 改 schema, 这里报错让 scheduler 回落 null
- */
 static offload_err_t bpf_self_check(void)
 {
     offload_err_t ret = OFFLOAD_OK;
@@ -427,10 +693,9 @@ static offload_err_t bpf_self_check(void)
     }
 
     struct bpf_map_info info;
-    memset(&info, 0, sizeof(info));
     uint32_t info_len = sizeof(info);
 
-    if (bpf_obj_get_info_by_fd(s.fd_limit, &info, &info_len) != 0) {
+    if (hnc_bpf_obj_get_info_by_fd(s.fd_limit, &info, &info_len) != 0) {
         fprintf(stderr, "[bpf] self_check: get_info_by_fd errno=%d\n", errno);
         BPF_UNLOCK();
         return OFFLOAD_EINTERNAL;
@@ -458,33 +723,25 @@ static void bpf_status(offload_status_t *out)
     out->last_delta_bytes  = s.cached_delta_bytes;
     out->globally_disabled = s.globally_disabled;
 
-    out->disabled_upstream_count = s.disabled_upstream_count;
     int n = s.disabled_upstream_count;
     int cap = (int)(sizeof(out->disabled_upstream_ifindex) /
                     sizeof(out->disabled_upstream_ifindex[0]));
+    int src_cap = (int)(sizeof(s.disabled_upstream_ifindex) /
+                        sizeof(s.disabled_upstream_ifindex[0]));
+    if (n < 0) n = 0;
     if (n > cap) n = cap;
+    if (n > src_cap) n = src_cap;
+    out->disabled_upstream_count = n;
     for (int i = 0; i < n; i++)
         out->disabled_upstream_ifindex[i] = s.disabled_upstream_ifindex[i];
     BPF_UNLOCK();
 }
 
-/* refresh_active: 5s 双采样 stats_map
- *
- * 阻塞 ACTIVE_SAMPLE_INTERVAL 秒 (sleep), 调用方应该在专门的 worker
- * 线程或定时器里跑, 不要在主循环。
- *
- * 算法:
- *   first_call: 采样 → 缓存 → 不判定 (active 字段保持原值 0)
- *   后续:       采样 → delta = total - cached_last_total
- *               delta >= 1MB → active=1, 否则 active=0
- *               缓存 total
- */
 static offload_err_t bpf_refresh_active(void)
 {
     BPF_LOCK();
     uint64_t t1 = stats_total_bytes();
     if (t1 == 0 && s.fd_stats < 0) {
-        /* stats_map 不可用 */
         s.cached_active = 0;
         BPF_UNLOCK();
         return OFFLOAD_ENOENT;
@@ -506,14 +763,6 @@ static offload_err_t bpf_refresh_active(void)
     return OFFLOAD_OK;
 }
 
-/* disable_upstream: limit_map[ifindex] = 0 → BPF 程序回落 slow path
- *
- * 行为:
- *   - 首先尝试 BPF_EXIST (仅当 entry 已存在时更新)
- *   - 若 entry 不存在 (errno=ENOENT, framework 还没创建), 用 BPF_ANY 创建
- *     这适配热点上游刚切换的瞬态 race
- *   - 写成功 → 加入 disabled_set, 后续 status() 反映
- */
 static offload_err_t bpf_disable_upstream(int ifindex)
 {
     offload_err_t ret = OFFLOAD_OK;
@@ -524,22 +773,22 @@ static offload_err_t bpf_disable_upstream(int ifindex)
     uint32_t key = (uint32_t)ifindex;
     uint64_t val = BPF_LIMIT_ZERO;
 
-    /* 先 BPF_EXIST (常见路径) */
-    if (bpf_map_update_elem(s.fd_limit, &key, &val, BPF_EXIST) == 0) {
+    if (hnc_bpf_map_update_elem(s.fd_limit, &key, &val, BPF_EXIST) == 0) {
         disabled_set_add(ifindex);
+        (void)evict_all_tether_flow_maps();
         ret = OFFLOAD_OK;
         goto out;
     }
 
     int e1 = errno;
     if (e1 == EBADF) {
-        /* fd 失效自愈 */
         if (reopen_fd(&s.fd_limit, BPF_LIMIT_MAP) != 0) {
             ret = errno_to_offload(errno);
             goto out;
         }
-        if (bpf_map_update_elem(s.fd_limit, &key, &val, BPF_EXIST) == 0) {
+        if (hnc_bpf_map_update_elem(s.fd_limit, &key, &val, BPF_EXIST) == 0) {
             disabled_set_add(ifindex);
+            (void)evict_all_tether_flow_maps();
             ret = OFFLOAD_OK;
             goto out;
         }
@@ -547,9 +796,9 @@ static offload_err_t bpf_disable_upstream(int ifindex)
     }
 
     if (e1 == ENOENT) {
-        /* entry 不存在, 创建 */
-        if (bpf_map_update_elem(s.fd_limit, &key, &val, BPF_ANY) == 0) {
+        if (hnc_bpf_map_update_elem(s.fd_limit, &key, &val, BPF_ANY) == 0) {
             disabled_set_add(ifindex);
+            (void)evict_all_tether_flow_maps();
             ret = OFFLOAD_OK;
             goto out;
         }
@@ -576,7 +825,7 @@ static offload_err_t bpf_restore_upstream(int ifindex)
     uint32_t key = (uint32_t)ifindex;
     uint64_t val = BPF_LIMIT_NONE;
 
-    if (bpf_map_update_elem(s.fd_limit, &key, &val, BPF_EXIST) == 0) {
+    if (hnc_bpf_map_update_elem(s.fd_limit, &key, &val, BPF_EXIST) == 0) {
         disabled_set_remove(ifindex);
         ret = OFFLOAD_OK;
         goto out;
@@ -588,7 +837,7 @@ static offload_err_t bpf_restore_upstream(int ifindex)
             ret = errno_to_offload(errno);
             goto out;
         }
-        if (bpf_map_update_elem(s.fd_limit, &key, &val, BPF_EXIST) == 0) {
+        if (hnc_bpf_map_update_elem(s.fd_limit, &key, &val, BPF_EXIST) == 0) {
             disabled_set_remove(ifindex);
             ret = OFFLOAD_OK;
             goto out;
@@ -597,7 +846,6 @@ static offload_err_t bpf_restore_upstream(int ifindex)
     }
 
     if (e == ENOENT) {
-        /* entry 不在, 那本来就没 disable 状态, 当作成功 */
         disabled_set_remove(ifindex);
         ret = OFFLOAD_OK;
         goto out;
@@ -611,61 +859,65 @@ out:
     return ret;
 }
 
-/* disable_global: 遍历 limit_map 所有 entry, 全写 0
- *
- * 用于 mode=force_disable 或调度器决定彻底关 offload。
- * 遍历期间 framework 可能新增 entry (上游切换), 这是 race, 由后续
- * scheduler health check 负责重新扫描兜底, 这里不做循环重试。
- */
 static offload_err_t bpf_disable_global(void)
 {
     offload_err_t ret = OFFLOAD_OK;
     BPF_LOCK();
     if (ensure_limit_fd() != 0) { ret = errno_to_offload(errno); goto out; }
 
-    uint32_t key = 0, next_key = 0;
+    uint32_t cur_key = 0, next_key = 0;
     uint64_t val = BPF_LIMIT_ZERO;
-    int has_prev = 0;
     int touched = 0;
     int errs = 0;
     int iter_errno = 0;
 
-    while (1) {
-        int rc = bpf_map_get_next_key(s.fd_limit,
-                                       has_prev ? &key : NULL,
-                                       &next_key);
-        if (rc != 0) {
-            if (errno == ENOENT) break;
+    if (hnc_bpf_map_get_next_key(s.fd_limit, NULL, &cur_key) != 0) {
+        if (errno == EBADF && reopen_fd(&s.fd_limit, BPF_LIMIT_MAP) == 0) {
+            if (hnc_bpf_map_get_next_key(s.fd_limit, NULL, &cur_key) == 0)
+                goto scan_existing;
+        }
+        if (errno != ENOENT) {
             iter_errno = errno;
             errs++;
             fprintf(stderr, "[bpf] disable_global get_next_key errno=%d\n", iter_errno);
-            break;
         }
-
-        if (bpf_map_update_elem(s.fd_limit, &next_key, &val, BPF_EXIST) == 0) {
-            disabled_set_add((int)next_key);
-            touched++;
-        } else {
-            errs++;
-            fprintf(stderr, "[bpf] disable_global update ifindex=%u errno=%d\n",
-                    next_key, errno);
+    } else {
+scan_existing:
+        for (int guard = 0; guard < 128; guard++) {
+            int has_next = (hnc_bpf_map_get_next_key(s.fd_limit, &cur_key, &next_key) == 0);
+            if (hnc_bpf_map_update_elem(s.fd_limit, &cur_key, &val, BPF_ANY) == 0) {
+                disabled_set_add((int)cur_key);
+                touched++;
+            } else {
+                errs++;
+                fprintf(stderr, "[bpf] disable_global update ifindex=%u errno=%d\n",
+                        cur_key, errno);
+            }
+            if (!has_next)
+                break;
+            cur_key = next_key;
         }
-
-        key = next_key;
-        has_prev = 1;
     }
 
-    s.globally_disabled = (touched > 0 && errs == 0) ? 1 : s.globally_disabled;
-    fprintf(stderr, "[bpf] disable_global: touched=%d errs=%d\n", touched, errs);
+    /* v5.40.0 T+0 空表主动预锁: 当 limit_map 为空时主动扫描 /sys/class/net 活跃上游预写 quota=0 */
+    uint32_t preseeded = 0U;
+    if (touched == 0 && errs == 0) {
+        preseeded = preseed_t0_limit_map_locked();
+        touched += (int)preseeded;
+    }
 
-    /* v5.9.0: 空 map (touched==0 && errs==0, 冷启 limit_map 未填充) 不再
-     * 报 OK 假成功 —— 返回 EEMPTY 让调度器快重试; globally_disabled 置位
-     * 逻辑不变 (本来就只在 touched>0 时置 1)。 */
-    if (errs == 0 && touched == 0)  ret = OFFLOAD_EEMPTY;
-    else if (errs == 0)             ret = OFFLOAD_OK;
+    /* 同步清空五张存量流表 (downstream4/upstream4/downstream6/upstream6/downstream64) */
+    uint32_t evicted = evict_all_tether_flow_maps();
+
+    s.globally_disabled = (touched > 0 && errs == 0) ? 1 : s.globally_disabled;
+    fprintf(stderr, "[bpf] disable_global: touched=%d (t0_preseeded=%u) evicted=%u errs=%d\n",
+            touched, preseeded, evicted, errs);
+
+    if (errs == 0 && touched == 0)            ret = OFFLOAD_EEMPTY;
+    else if (errs == 0)                       ret = OFFLOAD_OK;
     else if (iter_errno != 0 && touched == 0) ret = errno_to_offload(iter_errno);
-    else if (touched > 0)           ret = OFFLOAD_OK;       /* 部分成功 */
-    else                            ret = OFFLOAD_EINTERNAL;
+    else if (touched > 0)                     ret = OFFLOAD_OK;
+    else                                      ret = OFFLOAD_EINTERNAL;
 out:
     BPF_UNLOCK();
     return ret;
@@ -677,58 +929,53 @@ static offload_err_t bpf_restore_global(void)
     BPF_LOCK();
     if (ensure_limit_fd() != 0) { ret = errno_to_offload(errno); goto out; }
 
-    uint32_t key = 0, next_key = 0;
+    uint32_t cur_key = 0, next_key = 0;
     uint64_t val = BPF_LIMIT_NONE;
-    int has_prev = 0;
     int touched = 0;
     int errs = 0;
     int iter_errno = 0;
 
-    while (1) {
-        int rc = bpf_map_get_next_key(s.fd_limit,
-                                       has_prev ? &key : NULL,
-                                       &next_key);
-        if (rc != 0) {
-            if (errno == ENOENT) break;
+    if (hnc_bpf_map_get_next_key(s.fd_limit, NULL, &cur_key) != 0) {
+        if (errno != ENOENT) {
             iter_errno = errno;
             errs++;
             fprintf(stderr, "[bpf] restore_global get_next_key errno=%d\n", iter_errno);
-            break;
         }
-
-        if (bpf_map_update_elem(s.fd_limit, &next_key, &val, BPF_EXIST) == 0) {
-            disabled_set_remove((int)next_key);
-            touched++;
-        } else {
-            errs++;
-            fprintf(stderr, "[bpf] restore_global update ifindex=%u errno=%d\n",
-                    next_key, errno);
+    } else {
+        for (int guard = 0; guard < 128; guard++) {
+            int has_next = (hnc_bpf_map_get_next_key(s.fd_limit, &cur_key, &next_key) == 0);
+            if (hnc_bpf_map_update_elem(s.fd_limit, &cur_key, &val, BPF_EXIST) == 0) {
+                disabled_set_remove((int)cur_key);
+                touched++;
+            } else if (errno != ENOENT) {
+                errs++;
+                fprintf(stderr, "[bpf] restore_global update ifindex=%u errno=%d\n",
+                        cur_key, errno);
+            }
+            if (!has_next)
+                break;
+            cur_key = next_key;
         }
-
-        key = next_key;
-        has_prev = 1;
     }
 
     if (errs == 0) {
         s.globally_disabled = 0;
-        s.disabled_upstream_count = 0;       /* 整体复位, 跟实际状态对齐 */
+        s.disabled_upstream_count = 0;
     }
     fprintf(stderr, "[bpf] restore_global: touched=%d errs=%d\n", touched, errs);
 
-    /* v5.9.0: 与 disable_global 对称 —— 空 map 返回 EEMPTY (无事可恢复,
-     * 良性; 调度器对 restore 的 EEMPTY 只打日志); 状态复位逻辑不变。 */
-    if (errs == 0 && touched == 0)  ret = OFFLOAD_EEMPTY;
-    else if (errs == 0)             ret = OFFLOAD_OK;
+    if (errs == 0 && touched == 0)            ret = OFFLOAD_EEMPTY;
+    else if (errs == 0)                       ret = OFFLOAD_OK;
     else if (iter_errno != 0 && touched == 0) ret = errno_to_offload(iter_errno);
-    else if (touched > 0)           ret = OFFLOAD_OK;
-    else                            ret = OFFLOAD_EINTERNAL;
+    else if (touched > 0)                     ret = OFFLOAD_OK;
+    else                                      ret = OFFLOAD_EINTERNAL;
 out:
     BPF_UNLOCK();
     return ret;
 }
 
 /* ══════════════════════════════════════════════════════════
- * Adapter 注册
+ * Adapter 注册 (与 adapter.c 中 extern offload_adapter_t adapter_bpf 对齐)
  * ══════════════════════════════════════════════════════════ */
 
 offload_adapter_t adapter_bpf = {
@@ -750,7 +997,6 @@ offload_adapter_t adapter_bpf = {
     .disable_upstream = bpf_disable_upstream,
     .restore_upstream = bpf_restore_upstream,
 
-    /* PER_DEVICE 留 v5.x */
     .disable_device   = NULL,
     .restore_device   = NULL,
 };

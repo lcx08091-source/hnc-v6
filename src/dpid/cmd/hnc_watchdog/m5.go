@@ -20,12 +20,12 @@
 //   - service.sh 开机只测 C launcher(不能用就 direct), 哨兵循环不判 dpid /
 //     launcher(只留看门狗兜底和回滚观察)。
 //
-// 进程风暴防线(v5.8.8 / v5.28 A3):
-//   - 判活一律 pidfile + /proc/<pid>/cmdline(argv 某段等于名字或以 "/名字"
-//     结尾, 与 bin/hnc_proc.sh pid_matches 同口径), pidfile 失效才扫 /proc,
-//     从不调 ps(ColorOS 的 ps 只显示短名字, 当年让哨兵每 30 秒多拉一个进程);
-//     /proc/<pid>/comm 只有 15 字节(hnc_dpid_supervisor → hnc_dpid_superv),
-//     所以不认 comm;
+// 进程风暴防线(v5.8.8 / v5.28 A3 / v5.40 pidfd):
+//   - 若为本看门狗拉起的子进程(*os.Process), 优先通过 Go 1.26+ WithHandle(pidfd)
+//     精确校验同一内核进程实例存活, 彻底免疫极端场景下的数字 PID 回绕复用;
+//   - 若内核不支持 pidfd 或进程由外部拉起, 回退 pidfile + /proc/<pid>/cmdline
+//     (argv 某段等于名字或以 "/名字" 结尾, 与 bin/hnc_proc.sh pid_matches 同口径),
+//     pidfile 失效才扫 /proc, 从不调 ps;
 //   - 任何「发现没活 → 拉起」都过 spawnGate: 基础冷却 m5SpawnBase, 拉起后
 //     m5QuickDeath 内又死 = 一次失败, 冷却按 2^失败次数 翻倍, 封顶 m5SpawnMax;
 //     活过 m5QuickDeath 清零。
@@ -40,6 +40,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -67,6 +68,50 @@ var (
 	m5SpawnFn                              = spawnDaemon
 )
 
+// ── 子进程 *os.Process 句柄跟踪(配合 pidfdProcessAlive 防 PID 回绕) ─────
+
+var (
+	spawnedProcsMu sync.Mutex
+	spawnedProcs   = map[string]*os.Process{}
+)
+
+func trackSpawnedProcess(pidFile string, p *os.Process) {
+	if pidFile == "" {
+		return
+	}
+	spawnedProcsMu.Lock()
+	if p == nil {
+		delete(spawnedProcs, pidFile)
+	} else {
+		spawnedProcs[pidFile] = p
+	}
+	spawnedProcsMu.Unlock()
+}
+
+func lookupSpawnedProcess(pidFile string, pid int) *os.Process {
+	if pidFile == "" || pid <= 0 {
+		return nil
+	}
+	spawnedProcsMu.Lock()
+	p := spawnedProcs[pidFile]
+	spawnedProcsMu.Unlock()
+	if p != nil && p.Pid == pid {
+		return p
+	}
+	return nil
+}
+
+func untrackSpawnedProcess(pidFile string, p *os.Process) {
+	if pidFile == "" || p == nil {
+		return
+	}
+	spawnedProcsMu.Lock()
+	if spawnedProcs[pidFile] == p {
+		delete(spawnedProcs, pidFile)
+	}
+	spawnedProcsMu.Unlock()
+}
+
 // rescuePatterns 与哨兵 grep -qE 'TLS segment is underaligned|Aborted|cannot execute|error:.*executable' 同。
 func rescueLineMatches(line string) bool {
 	if strings.Contains(line, "TLS segment is underaligned") || strings.Contains(line, "Aborted") ||
@@ -79,7 +124,7 @@ func rescueLineMatches(line string) bool {
 	return false
 }
 
-// ── 判活: pidfile + /proc/<pid>/cmdline ─────────────────────────────────
+// ── 判活: pidfd 优先, 回退 pidfile + /proc/<pid>/cmdline ────────────────
 
 // cmdlineHas argv(NUL 分隔)里某段恰为 name 或以 "/name" 结尾。
 func cmdlineHas(raw []byte, name string) bool {
@@ -104,6 +149,7 @@ func procCmdline(pid int) []byte {
 }
 
 // pidfileAlive pidfile 里的 pid 还活着且确实是 name(pid 被复用成别的进程 → 0)。
+// 当持有本看门狗拉起的 *os.Process 句柄时, 优先通过 pidfdProcessAlive 校验内核进程实例。
 func pidfileAlive(pidFile, name string) int {
 	b, err := os.ReadFile(pidFile)
 	if err != nil {
@@ -112,6 +158,17 @@ func pidfileAlive(pidFile, name string) int {
 	pid, err := strconv.Atoi(strings.TrimSpace(string(b)))
 	if err != nil || pid <= 0 {
 		return 0
+	}
+	if proc := lookupSpawnedProcess(pidFile, pid); proc != nil {
+		if alive, supported := pidfdProcessAlive(proc); supported {
+			if !alive {
+				untrackSpawnedProcess(pidFile, proc)
+				return 0
+			}
+			if m5ProcRoot == "/proc" {
+				return pid
+			}
+		}
 	}
 	if cmdlineHas(procCmdline(pid), name) {
 		return pid

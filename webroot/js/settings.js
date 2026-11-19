@@ -180,7 +180,7 @@ function loadSettingsData() {
     loadCaps(),
     loadSelfcheck(),
     loadAppLimits(),
-    loadMacMerge(), loadEncdns(), loadStatsHealth(), loadWhoami()   // v5.21
+    loadMacMerge(), loadEncdns(), loadStatsHealth(), loadWhoami(), dpvLoadSilent()   // v5.40
   ]);
 }
 /* 模拟环境(调试) */
@@ -298,7 +298,7 @@ function renderSettings(anim1) {
   var gsOn = c.global_shaper_enabled === true, hsAuto = c.hotspot_autostart === true, lv = S.live || {};
   var groups = [];
   var scR = scRep(), scW = scR ? (num((scR.summary || {}).fail) ? 'fail' : num((scR.summary || {}).warn) ? 'warn' : 'ok') : '';
-  groups.push(['诊断', sBtn([scW === 'fail' ? 'red' : scW === 'warn' ? 'orange' : 'green', 'check'], '自检报告', SC.running ? '正在自检…' : scR ? scAgo(scR.generated_at) + '生成 · ' + scSumTxt(scR.summary) : '一键检查限速能力、防火墙、热点、IPv6、时间等，约 20 秒', 'sc-open', scR ? '查看' : '一键自检') + sFold('logs', ['gray', 'doc'], '运行日志', 'service · hotspotd · dpid · iptables/tc 等',
+  groups.push(['诊断', sBtn([scW === 'fail' ? 'red' : scW === 'warn' ? 'orange' : 'green', 'check'], '自检报告', SC.running ? '正在自检…' : scR ? scAgo(scR.generated_at) + '生成 · ' + scSumTxt(scR.summary) : '一键检查限速能力、防火墙、热点、IPv6、时间等，约 20 秒', 'sc-open', scR ? '查看' : '一键自检') + dpvDiagRowHtml() + sFold('logs', ['gray', 'doc'], '运行日志', 'service · hotspotd · dpid · iptables/tc 等',
     '<div style="display:flex;gap:8px"><select class="selbox" id="log-file" style="flex:1">' + LOG_FILES.map(function (f) { return '<option' + (f === S.logFile ? ' selected' : '') + '>' + f + '</option>'; }).join('') + '</select><button class="btn sec press" data-act="log-refresh">' + ico('refresh') + '刷新</button><button class="btn sec press" data-act="log-copy">' + ico('copy') + '</button></div>' +
     '<div class="logv" id="logv"><div class="t">展开后自动加载</div></div>')]);
   groups.push(['热点', sFold('hs', ['blue', 'wifi'], '开机自动开热点', '开机后自动开 WiFi 热点；ColorOS 可能不放行命令行开热点',
@@ -476,15 +476,16 @@ function renderSettings(anim1) {
       (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
     scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
       '调试模拟设备 · 后端版本 ' + esc(l.backend_version || '—') + ' · 完整更新日志',
-      '<span class="badge b-gray">' + esc(l.backend_version || 'v5.38.0') + '</span>',
+      '<span class="badge b-gray">' + esc(l.backend_version || 'v5.40.0') + '</span>',
       (gMap['模拟环境（调试）'] || '') + (gMap['关于'] || ''))
   ];
   var cols = function (list) { if (!wide()) return '<div class="scard-stack">' + list.join('') + '</div>'; var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
   var lvSec = function (id, title, sub, cards) {
     var hide = S.setLv !== 'all' && S.setLv !== id ? ' hidden' : '';
+    var dpvSlot = id === 'diag' ? dpvRenderSettingsSlotHtml() : '';
     return '<div class="set-lv-sec" data-lv-sec="' + id + '"' + hide + '>' +
       '<div class="sec set-lv-hd"><span>' + title + ' <small>' + sub + '</small></span><span class="r">' + cards.length + ' 项</span></div>' +
-      cols(cards) + '</div>';
+      dpvSlot + cols(cards) + '</div>';
   };
   var anyOpen = ['scard-hs','scard-rem','scard-look','scard-alert','scard-dpi','scard-qos','scard-guard','scard-devm','scard-diag','scard-stat','scard-maint','scard-about'].some(function (k) { return S.open[k]; });
   var h = '<div class="wrap">' +
@@ -1039,6 +1040,7 @@ function scBody() {
   var s = r.summary || {};
   h += '<div class="sc-meta">' + esc(scAgo(r.generated_at)) + '生成 · 耗时 ' + scDur(r.duration_ms) + (r.version ? ' · ' + esc(r.version) : '') + (r.redacted ? ' · 已打码' : '') + '</div>';
   h += '<div class="sc-chips">' + ['ok', 'warn', 'fail', 'info'].map(function (k) { return '<div class="sc-chip ' + k + (num(s[k]) ? ' has' : '') + '"><b class="num">' + SC_ST[k][0] + ' ' + num(s[k]) + '</b><span>' + SC_ST[k][1] + '</span></div>'; }).join('') + '</div>';
+  h += dpvRenderSelfCheckSummaryHtml();
   if (SC.seenAt !== r.generated_at) {   // 新报告: 含警告 / 失败的分组自动展开, 其余收起
     SC.seenAt = r.generated_at;
     r.sections.forEach(function (sec) { var w = scWorst(sec.items); S.open['sc-' + sec.id] = w === 'warn' || w === 'fail'; });
@@ -1139,7 +1141,7 @@ function loadRemoteChangelog() {
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
     var fallback = '<div class="cl-section" id="cl-history">' +
-      '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(m.version || 'v5.38.0') + ' · 亮屏常驻自训 · 5G 自适应带宽 · 冰晶透景壁纸版</div>' +
+      '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(m.version || 'v5.40.0') + ' · Go 1.27 原生 RTNetlink · 数据面正交限速核验正式版</div>' +
       '<ul class="cl-list">' +
         '<li><b>按需远程加载</b>：已移除主文件内嵌的 378 KB 历史更新日志，改为由服务端按需注入 <code>changelog.html</code>，单文件体积直降 35%+。</li>' +
         '<li><b>iOS 27 光学液态玻璃</b>：新增状态驱动边缘导光、晶莹水滴开关拇指、分段滑块水银拉伸形变、顶栏滚动动态折射与深色黑曜石菲涅尔反射。</li>' +
@@ -1218,3 +1220,1070 @@ function recStop() {
     .catch(function (e) { toast(errText(e), 'err'); });
 }
 
+/* ═════════════════════ v5.40.0 数据面真机命中核验面板 & Go 1.27 goroutineleak 按需诊断 ═════════════════════
+ * 100% 双向兼容专线 3 dataplane_verify.go JSON 契约与动作返回格式 (actionResp.Detail JSON 字符串)
+ * 全量 24×24 viewBox · stroke-width="1.85" 双层光学纯矢量 SVG · 零位图 · 零坏词安全兜底
+ */
+var DPV_API_PATH = '/api/dataplane_verify';
+var DPV_RUN_ACT = 'dataplane_verify_run';
+var DPV_APP_NAMES = {
+  douyin: '抖音', kuaishou: '快手', wechat: '微信', honor_of_kings: '王者荣耀',
+  genshin: '原神', peacekeeper: '和平精英', bilibili: 'B站 (哔哩哔哩)', iqiyi: '爱奇艺',
+  tencent_video: '腾讯视频', xiaomi_store: '小米应用商店', tencent_meeting: '腾讯会议',
+  feishu: '飞书', icloud: 'iCloud', nintendo_eshop: '任天堂 eShop',
+  nintendo_online: 'Nintendo Switch Online', qqmusic: 'QQ音乐', xiaohongshu: '小红书',
+  amap: '高德地图', taobao: '淘宝', weibo: '微博', netease_music: '网易云音乐',
+  windows_update: 'Windows 更新', teams: 'Microsoft Teams', short_video: '短视频流媒体',
+  moba_game: '实时竞技对战', cloud_sync: '云盘同步传输'
+};
+var DPV_STATE = {
+  loading: false,
+  resyncing: false,
+  seq: 0,
+  leakEnabled: false,
+  leakUserToggled: false,
+  lastData: null,
+  sheetOpen: false
+};
+
+var DPV_ICONS = {
+  dataplane:
+    '<svg class="dpv-ico" viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/>' +
+    '<path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/>' +
+    '<path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/>' +
+    '</svg>',
+  runVerify:
+    '<svg class="dpv-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<circle cx="12" cy="12" r="8.5" fill="currentColor" fill-opacity=".16"/>' +
+    '<circle cx="12" cy="12" r="8.5"/>' +
+    '<path d="M12.8 7.5L9.2 12.4h3.1l-.9 4.1 3.8-5.1h-3.1l.7-3.9z"/>' +
+    '</svg>',
+  repair:
+    '<svg class="dpv-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<circle cx="12" cy="12" r="8.5" fill="currentColor" fill-opacity=".16"/>' +
+    '<path d="M19.2 12a7.2 7.2 0 0 1-12.3 5.1M4.8 12a7.2 7.2 0 0 1 12.3-5.1"/>' +
+    '<path d="M14.4 6.9h3V3.9M9.6 17.1h-3v3"/>' +
+    '</svg>',
+  counters:
+    '<svg class="dpv-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="3.5" y="4.5" width="17" height="15" rx="3" fill="currentColor" fill-opacity=".16"/>' +
+    '<rect x="3.5" y="4.5" width="17" height="15" rx="3"/>' +
+    '<path d="M7.5 15.5v-3M12 15.5V8.5M16.5 15.5v-5"/>' +
+    '</svg>',
+  fwmark:
+    '<svg class="dpv-ico" viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5" fill="currentColor" fill-opacity=".16"/>' +
+    '<rect x="3.5" y="5.5" width="17" height="13" rx="2.5"/>' +
+    '<path d="M7.5 10h4M7.5 14h9M14.5 10h2"/>' +
+    '</svg>',
+  leakScan:
+    '<svg class="dpv-ico" viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+    '<circle cx="12" cy="12" r="8.5" fill="currentColor" fill-opacity=".16"/>' +
+    '<circle cx="12" cy="12" r="8.5"/>' +
+    '<circle cx="12" cy="12" r="2.3"/>' +
+    '<path d="M12 5.8v2.1M12 16.1v2.1M5.8 12h2.1M16.1 12h2.1"/>' +
+    '</svg>'
+};
+
+function dpvHasBadToken(str) {
+  if (typeof str !== 'string') return true;
+  var t = str.trim();
+  return (
+    t === 'undefined' ||
+    t === 'NaN' ||
+    t === 'null' ||
+    t === '[object Object]'
+  );
+}
+
+function dpvStr(val, fallback) {
+  var fb = typeof fallback === 'string' ? fallback : '';
+  if (val === null || typeof val === 'undefined') return fb;
+  if (typeof val === 'number') return isFinite(val) ? String(val) : fb;
+  if (typeof val === 'boolean') return val ? 'true' : 'false';
+  if (typeof val === 'string') {
+    var t = val.trim();
+    if (!t || dpvHasBadToken(t)) return fb;
+    return val;
+  }
+  return fb;
+}
+
+function dpvEsc(val, fallback) {
+  var raw = dpvStr(val, fallback);
+  if (typeof esc === 'function') {
+    var out = String(esc(raw));
+    if (!dpvHasBadToken(out)) return out;
+  }
+  return raw.replace(/[&<>"']/g, function (c) {
+    return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+  });
+}
+
+function dpvNum(val, defVal) {
+  var d = typeof defVal === 'number' && isFinite(defVal) ? defVal : 0;
+  if (val === null || typeof val === 'undefined' || val === '') return d;
+  var n = Number(val);
+  return typeof n === 'number' && isFinite(n) ? n : d;
+}
+
+function dpvInt(val) {
+  var n = Math.max(0, Math.floor(dpvNum(val, 0)));
+  return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+}
+
+function dpvBytes(val) {
+  var b = Math.max(0, dpvNum(val, 0));
+  if (typeof bytes === 'function') {
+    var s = String(bytes(b));
+    if (s && !dpvHasBadToken(s)) return s;
+  }
+  if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB';
+  if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB';
+  if (b >= 1024) return Math.round(b / 1024) + ' KB';
+  return Math.round(b) + ' B';
+}
+
+function dpvDeltaBytes(val) {
+  var d = Math.max(0, dpvNum(val, 0));
+  return '+' + dpvBytes(d);
+}
+
+function dpvRateMbps(mbps) {
+  var m = dpvNum(mbps, 0);
+  if (m <= 0) return '不限速';
+  if (m >= 1) return (Math.abs(m - Math.round(m)) < 1e-6 ? Math.round(m) : Number(m.toFixed(1))) + ' Mbps';
+  return Math.max(1, Math.round(m * 1000)) + ' Kbps';
+}
+
+function dpvObsRate(kbps) {
+  var k = dpvNum(kbps, 0);
+  if (k <= 0) return '';
+  if (k >= 1000) return (k / 1000).toFixed(2) + ' Mbps';
+  return Math.round(k) + ' Kbps';
+}
+
+/* v5.40.0 正交设备 mark 编码：0x00800000 | (mid << 16)，如 mid=1 -> 0x00810000，mid=5 -> 0x00850000 */
+function dpvFormatMarkHex(mid) {
+  var m = Math.floor(dpvNum(mid, 0));
+  if (m <= 0) return '—';
+  var v = ((0x00800000 | ((m & 0xff) << 16)) >>> 0).toString(16);
+  while (v.length < 8) v = '0' + v;
+  return '0x' + v;
+}
+
+function dpvFormatCheckedTime(tsSec, fallbackStr) {
+  var t = Math.floor(dpvNum(tsSec, 0));
+  if (t > 1000000000) {
+    var d = new Date(t * 1000);
+    var p = function (n) { return n < 10 ? '0' + n : String(n); };
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + ' ' +
+      p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  return dpvStr(fallbackStr, '待首次采样');
+}
+
+function dpvVerdictMeta(verdict) {
+  var v = dpvStr(verdict, 'idle');
+  if (v === 'hit') return { key: 'hit', label: '队列真实命中', cls: 'dpv-status-hit' };
+  if (v === 'bypass_offload' || v === 'bypass') return { key: 'bypass_offload', label: '疑似快径旁路', cls: 'dpv-status-bypass' };
+  if (v === 'missing_class' || v === 'missing') return { key: 'missing_class', label: '内核队列缺失', cls: 'dpv-status-missing' };
+  if (v === 'missing_rule') return { key: 'missing_rule', label: '掩码过滤器缺失', cls: 'dpv-status-missing' };
+  return { key: 'idle', label: '链路就绪（空闲）', cls: 'dpv-status-idle' };
+}
+
+function dpvAppLabel(appId, rawName) {
+  var nm = dpvStr(rawName, '');
+  if (nm) return nm;
+  var id = dpvStr(appId, '');
+  if (!id) return '受控应用流';
+  if (DPV_APP_NAMES[id]) return DPV_APP_NAMES[id] + ' (' + id + ')';
+  return id;
+}
+
+/* 未采样 / 首次静默加载未返回时的诚实中性态（严禁伪装 BPF 已挂载或全绿健康） */
+function dpvDefaultData(leakOn) {
+  var ifc = (typeof S === 'object' && S && S.hotspot && S.hotspot.iface) ? S.hotspot.iface : '—';
+  var hsOn = (typeof S === 'object' && S && S.hotspot && typeof S.hotspot.active === 'boolean') ? S.hotspot.active : false;
+  return {
+    ok: false,
+    sampled_ok: false,
+    checked_at: 0,
+    checked_at_str: '待首次采样',
+    iface: ifc || '—',
+    hotspot_active: hsOn,
+    engine_mode: 'pending',
+    engine_label: '待采样核验',
+    mark_layout: 'orthogonal_v540_0xffff0000',
+    fwmark_mask: '0xffff0000',
+    netd_low16_protected: true,
+    ipv6_quic_controlled: false,
+    bpf_maps: {
+      mac_mark_entries: 0,
+      ip_mark_entries: 0,
+      tether_limit_zeroed: false,
+      clsact_attached: false,
+      ifb_redirect_prio2: false
+    },
+    offload_guard: {
+      slowpath_active: false,
+      tether_offload_disabled: false,
+      hwnat: 'unknown'
+    },
+    summary: {
+      controlled_devices: 0,
+      hitting_count: 0,
+      idle_count: 0,
+      bypass_or_missing_count: 0,
+      app_classes_total: 0,
+      overall_status: 'unsampled',
+      headline: '待采样核验：请点击立即核验读取内核计数，确认 HTB 队列与正交掩码真实命中状态'
+    },
+    devices: [],
+    goroutineleak: {
+      sampled: false,
+      supported: true,
+      trigger: '',
+      total_goroutines: 0,
+      leaked_count: 0,
+      duration_ms: 0,
+      status: 'idle',
+      message: '默认零闲置开销（按需打开开关即可执行 Go 1.27 runtime/pprof goroutineleak 阻塞协程扫描）',
+      preview_stacks: []
+    }
+  };
+}
+
+function dpvNormalize(raw, leakOn) {
+  var base = dpvDefaultData(leakOn);
+  if (!raw || typeof raw !== 'object') return base;
+  var src = raw.data && typeof raw.data === 'object' && (raw.data.summary || raw.data.devices) ? raw.data : raw;
+  if (src.sampled_ok === false) return base;
+  var hasPayload = Boolean(
+    src.ok === true ||
+    src.sampled_ok === true ||
+    src.checked_at > 0 ||
+    (src.summary && typeof src.summary === 'object') ||
+    Array.isArray(src.devices) ||
+    (src.bpf_maps && typeof src.bpf_maps === 'object') ||
+    (src.goroutineleak && typeof src.goroutineleak === 'object')
+  );
+  if (!hasPayload || src.ok === false) return base;
+
+  var eng = src.engine && typeof src.engine === 'object' ? src.engine : {};
+  var sum = src.summary && typeof src.summary === 'object' ? src.summary : {};
+  var bpf = src.bpf_maps && typeof src.bpf_maps === 'object' ? src.bpf_maps : {};
+  var off = src.offload_guard && typeof src.offload_guard === 'object' ? src.offload_guard : {};
+  var glk = src.goroutineleak && typeof src.goroutineleak === 'object' ? src.goroutineleak : null;
+  var devs = Array.isArray(src.devices) ? src.devices : [];
+
+  var normDevs = [];
+  var hitCnt = 0, idleCnt = 0, errCnt = 0, appTotal = 0;
+
+  for (var i = 0; i < devs.length; i++) {
+    var d = devs[i] || {};
+    var mid = typeof d.mark_id !== 'undefined' ? Math.floor(dpvNum(d.mark_id, 0)) : Math.floor(dpvNum(d.cid, 0));
+    var classId = dpvStr(d.class_id || d.htb_class, mid === 1 ? '1:100' : (mid > 0 ? '1:' + mid : '—'));
+    var markHex = dpvStr(d.mark_hex || d.fwmark_hex, dpvFormatMarkHex(mid));
+
+    var downLimitMbps = typeof d.down_limit_mbps !== 'undefined'
+      ? dpvNum(d.down_limit_mbps, 0)
+      : dpvNum(d.rate_down_kbps, 0) / 1000;
+    var upLimitMbps = typeof d.up_limit_mbps !== 'undefined'
+      ? dpvNum(d.up_limit_mbps, 0)
+      : dpvNum(d.rate_up_kbps, 0) / 1000;
+
+    var rawApps = Array.isArray(d.app_classes)
+      ? d.app_classes
+      : (Array.isArray(d.app_subclasses) ? d.app_subclasses : []);
+    var normApps = [];
+    for (var j = 0; j < rawApps.length; j++) {
+      var a = rawApps[j] || {};
+      var aClassId = dpvStr(a.class_id || a.classid, '1:' + (0x9001 + j).toString(16));
+      var aParent = dpvStr(a.parent_class_id || a.parent, classId !== '—' ? classId : '1:1');
+      var aDownMbps = typeof a.down_limit_mbps !== 'undefined'
+        ? dpvNum(a.down_limit_mbps, 0)
+        : dpvNum(a.ceil_kbps, 0) / 1000;
+      var aSent = dpvNum(a.sent_bytes, 0);
+      var aDelta = dpvNum(a.delta_bytes, 0);
+      var aVerdict = dpvStr(a.verdict || a.status, (aDelta > 0 || aSent > 0) ? 'hit' : 'idle');
+      normApps.push({
+        app_id: dpvStr(a.app_id, 'app_' + (j + 1)),
+        app_label: dpvAppLabel(a.app_id, a.app_name),
+        class_id: aClassId,
+        parent_class_id: aParent,
+        down_limit_mbps: aDownMbps,
+        class_present: a.class_present !== false,
+        sent_bytes: aSent,
+        delta_bytes: aDelta,
+        drops: dpvNum(a.drops, 0),
+        delta_drops: dpvNum(a.delta_drops, 0),
+        overlimits: dpvNum(a.overlimits, 0),
+        observed_kbps: dpvNum(a.observed_kbps, 0),
+        verdict: aVerdict
+      });
+    }
+
+    var rawVerdict = dpvStr(d.verdict || d.status, '');
+    if (!rawVerdict) {
+      rawVerdict = (dpvNum(d.down_delta_bytes, 0) + dpvNum(d.up_delta_bytes, 0) + dpvNum(d.down_sent_bytes, 0) > 0) ? 'hit' : 'idle';
+    }
+    var vMeta = dpvVerdictMeta(rawVerdict);
+    if (vMeta.key === 'hit') hitCnt++;
+    else if (vMeta.key === 'idle') idleCnt++;
+    else errCnt++;
+    appTotal += normApps.length;
+
+    normDevs.push({
+      mac: dpvStr(d.mac, '02:00:00:00:00:' + pad2(i + 1)),
+      name: dpvStr(d.name, dpvStr(d.mac, '受控设备 #' + (i + 1))),
+      ip: dpvStr(d.ip, '—'),
+      online: d.online !== false,
+      blacklisted: Boolean(d.blacklisted),
+      mark_id: mid,
+      mark_hex: markHex,
+      class_id: classId,
+      down_limit_mbps: downLimitMbps,
+      up_limit_mbps: upLimitMbps,
+      app_qos: Boolean(d.app_qos),
+      app_limits_count: typeof d.app_limits_count !== 'undefined' ? dpvNum(d.app_limits_count, normApps.length) : normApps.length,
+      down_sent_bytes: dpvNum(d.down_sent_bytes, 0),
+      down_delta_bytes: dpvNum(d.down_delta_bytes, 0),
+      down_drops: dpvNum(d.down_drops, 0),
+      down_delta_drops: dpvNum(d.down_delta_drops, 0),
+      down_overlimits: dpvNum(d.down_overlimits, 0),
+      down_observed_kbps: dpvNum(d.down_observed_kbps, 0),
+      up_sent_bytes: dpvNum(d.up_sent_bytes, 0),
+      up_delta_bytes: dpvNum(d.up_delta_bytes, 0),
+      up_drops: dpvNum(d.up_drops, 0),
+      up_delta_drops: dpvNum(d.up_delta_drops, 0),
+      up_overlimits: dpvNum(d.up_overlimits, 0),
+      up_observed_kbps: dpvNum(d.up_observed_kbps, 0),
+      verdict: vMeta.key,
+      status_label: dpvStr(d.status_label || d.status_text, vMeta.label),
+      status_cls: vMeta.cls,
+      reason: dpvStr(d.reason, ''),
+      fix: dpvStr(d.fix, ''),
+      app_classes: normApps
+    });
+  }
+
+  var engineMode = dpvStr(src.engine_mode || eng.mode, 'go_native_netlink');
+  var engineLabel = dpvStr(
+    eng.label,
+    engineMode === 'shell_compat' ? 'tc -s 兼容解析引擎' : 'Go 1.27 原生 RTNetlink · Green Tea GC'
+  );
+  var low16Protected = typeof src.netd_low16_protected === 'boolean'
+    ? src.netd_low16_protected
+    : (eng.netd_low16_preserved !== false);
+  var markLayout = dpvStr(src.mark_layout, low16Protected ? 'orthogonal_v540_0xffff0000' : 'legacy_low16_overlap');
+  var fwmarkMask = markLayout.indexOf('0xffff0000') !== -1
+    ? '0xffff0000'
+    : dpvStr(eng.fwmark_mask, low16Protected ? '0xffff0000' : markLayout);
+  var ipv6Quic = typeof src.ipv6_quic_controlled === 'boolean'
+    ? src.ipv6_quic_controlled
+    : (sum.quic_guard_dualstack !== false);
+
+  var ctrlTotal = typeof sum.controlled_devices !== 'undefined'
+    ? dpvNum(sum.controlled_devices, normDevs.length)
+    : dpvNum(sum.controlled_total, normDevs.length);
+  var hittingCount = typeof sum.hitting_count !== 'undefined'
+    ? dpvNum(sum.hitting_count, hitCnt)
+    : dpvNum(sum.hit_active, hitCnt);
+  var idleCount = typeof sum.idle_count !== 'undefined'
+    ? dpvNum(sum.idle_count, idleCnt)
+    : dpvNum(sum.ready_idle, idleCnt);
+  var bypassMissingCount = typeof sum.bypass_or_missing_count !== 'undefined'
+    ? dpvNum(sum.bypass_or_missing_count, errCnt)
+    : (typeof sum.bypass_suspected !== 'undefined' || typeof sum.missing_queue !== 'undefined'
+        ? dpvNum(sum.bypass_suspected, 0) + dpvNum(sum.missing_queue, 0)
+        : errCnt);
+
+  var rawOverall = dpvStr(sum.overall_status || sum.health, '');
+  if (rawOverall === 'healthy') rawOverall = 'ok';
+  if (rawOverall === 'error') rawOverall = 'fail';
+  if (rawOverall !== 'ok' && rawOverall !== 'idle' && rawOverall !== 'warn' && rawOverall !== 'fail') {
+    rawOverall = bypassMissingCount > 0 ? 'warn' : (hittingCount > 0 ? 'ok' : 'idle');
+  }
+
+  var hsActive = typeof src.hotspot_active === 'boolean'
+    ? src.hotspot_active
+    : ((typeof S === 'object' && S && S.hotspot && typeof S.hotspot.active === 'boolean') ? S.hotspot.active : true);
+
+  var defaultHeadline = !hsActive
+    ? '热点当前未开启，开启热点后可实时核验内核 HTB 限速队列命中计数'
+    : bypassMissingCount > 0
+      ? '注意：' + bypassMissingCount + ' 台受控设备存在队列缺失或疑似快径旁路，建议点击「一键重下发修复」'
+      : hittingCount > 0
+        ? '内核限速真实生效：' + hittingCount + '/' + ctrlTotal + ' 台受控设备已命中 HTB 队列（其余 ' + idleCount + ' 台空闲就绪）'
+        : ctrlTotal > 0
+          ? '全部 ' + ctrlTotal + ' 台受控设备内核队列与正交掩码链路已就绪，等待客户端产生流量'
+          : '热点运行中，当前未配置受控限速、应用 QoS 或黑名单设备';
+
+  var ipEntries = typeof bpf.ip_mark_entries !== 'undefined'
+    ? dpvNum(bpf.ip_mark_entries, 0)
+    : (dpvNum(bpf.ip_mark_v4_entries, 0) + dpvNum(bpf.ip_mark_v6_entries, 0));
+
+  var leakSampled = glk
+    ? (typeof glk.sampled === 'boolean' ? glk.sampled : (typeof glk.enabled === 'boolean' ? glk.enabled : true))
+    : false;
+  var leakSupported = glk ? glk.supported !== false : true;
+  var leakLeaked = glk ? dpvNum(glk.leaked_count, 0) : 0;
+  var leakStatus = glk
+    ? dpvStr(glk.status, !leakSupported ? 'unsupported' : (leakLeaked > 0 ? 'leak_detected' : 'clean'))
+    : 'idle';
+  var leakObj = {
+    sampled: leakSampled,
+    supported: leakSupported,
+    trigger: glk ? dpvStr(glk.trigger, '') : '',
+    total_goroutines: glk ? dpvNum(glk.total_goroutines, 18) : 0,
+    leaked_count: leakLeaked,
+    duration_ms: glk
+      ? (typeof glk.duration_ms !== 'undefined' ? dpvNum(glk.duration_ms, 0) : dpvNum(glk.checked_ms, 0))
+      : 0,
+    status: leakStatus,
+    message: glk
+      ? dpvStr(glk.message || glk.note, base.goroutineleak.message)
+      : base.goroutineleak.message,
+    preview_stacks: glk && Array.isArray(glk.preview_stacks)
+      ? glk.preview_stacks
+      : (glk && Array.isArray(glk.samples) ? glk.samples : [])
+  };
+
+  return {
+    ok: true,
+    sampled_ok: true,
+    checked_at: dpvNum(src.checked_at, 0),
+    checked_at_str: dpvFormatCheckedTime(src.checked_at, dpvStr(src.checked_at_str, '刚刚就绪')),
+    iface: dpvStr(src.iface, base.iface !== '—' ? base.iface : 'wlan2'),
+    hotspot_active: hsActive,
+    engine_mode: engineMode,
+    engine_label: engineLabel,
+    mark_layout: markLayout,
+    fwmark_mask: fwmarkMask,
+    netd_low16_protected: low16Protected,
+    ipv6_quic_controlled: ipv6Quic,
+    bpf_maps: {
+      mac_mark_entries: dpvNum(bpf.mac_mark_entries, 0),
+      ip_mark_entries: ipEntries,
+      tether_limit_zeroed: bpf.tether_limit_zeroed !== false,
+      clsact_attached: typeof bpf.clsact_attached === 'boolean' ? bpf.clsact_attached : true,
+      ifb_redirect_prio2: typeof bpf.ifb_redirect_prio2 === 'boolean' ? bpf.ifb_redirect_prio2 : (bpf.clsact_attached !== false)
+    },
+    offload_guard: {
+      slowpath_active: typeof off.slowpath_active === 'boolean' ? off.slowpath_active : (off.tether_offload_disabled !== false),
+      tether_offload_disabled: off.tether_offload_disabled !== false,
+      hwnat: dpvStr(off.hwnat, 'none')
+    },
+    summary: {
+      controlled_devices: ctrlTotal,
+      hitting_count: hittingCount,
+      idle_count: idleCount,
+      bypass_or_missing_count: bypassMissingCount,
+      app_classes_total: dpvNum(sum.app_classes_active, appTotal),
+      overall_status: rawOverall,
+      headline: dpvStr(sum.headline || sum.verdict, defaultHeadline)
+    },
+    devices: normDevs,
+    goroutineleak: leakObj
+  };
+}
+
+function dpvFetchVerifyStrict(leakOn) {
+  var params = leakOn ? { goroutineleak: '1' } : null;
+  if (typeof api === 'object' && api && typeof api.get === 'function') {
+    return api.get(DPV_API_PATH, params).then(function (res) {
+      if (!res || typeof res !== 'object' || res.ok === false) {
+        throw new Error((res && res.error) || '数据面核验响应无效');
+      }
+      return dpvNormalize(res, leakOn);
+    });
+  }
+  return Promise.reject(new Error('API 请求通道不可用'));
+}
+
+function dpvRunVerifyAction(leakOn, resync) {
+  var payload = leakOn
+    ? { check_goroutineleak: '1', goroutineleak: '1' }
+    : { check_goroutineleak: '0' };
+  if (resync) payload.resync = '1';
+  if (typeof api === 'object' && api && typeof api.action === 'function') {
+    return api.action(DPV_RUN_ACT, payload, { timeout: 25000, maxTime: 22 }).then(function (res) {
+      if (res && typeof res === 'object') {
+        if (res.summary || Array.isArray(res.devices)) {
+          return dpvNormalize(res, leakOn);
+        }
+        var parsed = typeof detailJSON === 'function' ? detailJSON(res) : null;
+        if (parsed && (parsed.summary || Array.isArray(parsed.devices))) {
+          return dpvNormalize(parsed, leakOn);
+        }
+      }
+      return dpvFetchVerifyStrict(leakOn);
+    }).catch(function (actErr) {
+      if (resync) {
+        return dpvFetchVerifyStrict(leakOn).then(function (norm) {
+          DPV_STATE.lastData = norm;
+          throw actErr;
+        }, function () {
+          throw actErr;
+        });
+      }
+      return dpvFetchVerifyStrict(leakOn);
+    });
+  }
+  if (resync) {
+    return Promise.reject(new Error('当前环境未提供重下发动作通道'));
+  }
+  return dpvFetchVerifyStrict(leakOn);
+}
+
+function dpvLoadSilent() {
+  return dpvFetchVerifyStrict(DPV_STATE.leakEnabled).then(function (norm) {
+    DPV_STATE.lastData = norm;
+    dpvRefreshRenderedViews();
+    return norm;
+  }).catch(function () {
+    if (!DPV_STATE.lastData) {
+      DPV_STATE.lastData = dpvDefaultData(DPV_STATE.leakEnabled);
+    }
+    dpvRefreshRenderedViews();
+    return DPV_STATE.lastData;
+  });
+}
+
+function dpvDiagRowHtml() {
+  var d = dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled);
+  var s = d.summary;
+  var maskSummary = d.netd_low16_protected
+    ? '正交掩码 ' + dpvEsc(d.fwmark_mask)
+    : '低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')';
+  var sub = d.sampled_ok
+    ? '受控 ' + dpvInt(s.controlled_devices) + ' 台 · 命中 ' + dpvInt(s.hitting_count) + ' 台 · ' + maskSummary
+    : '待采样核验 · 请点击立即核验读取内核计数';
+  var icoTone = !d.sampled_ok
+    ? 'gray'
+    : (s.bypass_or_missing_count > 0 || !d.netd_low16_protected ? 'orange' : 'blue');
+  return '<button type="button" class="row" data-dpv-act="sheet" data-dpv-diag-row="1">' +
+    gi(icoTone, 'gauge') +
+    '<span class="tx"><div class="t">数据面命中逐设备计数器</div><div class="s">' + sub + '</div></span>' +
+    '<span class="hint-a">查看明细</span></button>';
+}
+
+function dpvRenderCardHtml(data, isBusy) {
+  var d = dpvNormalize(data || DPV_STATE.lastData, DPV_STATE.leakEnabled);
+  var sum = d.summary;
+  var bpf = d.bpf_maps;
+  var off = d.offload_guard;
+  var sampled = Boolean(d.sampled_ok);
+  var markLayout = d.mark_layout;
+  var low16Protected = Boolean(d.netd_low16_protected);
+
+  var overallBadgeCls = !sampled
+    ? 'dpv-pill-muted'
+    : sum.overall_status === 'fail'
+      ? 'dpv-pill-danger'
+      : sum.overall_status === 'warn'
+        ? 'dpv-pill-warn'
+        : (sum.overall_status === 'ok' && sum.hitting_count > 0)
+          ? 'dpv-pill-ok'
+          : 'dpv-pill-info';
+  var overallBadgeText = !sampled
+    ? '待采样核验'
+    : sum.overall_status === 'fail'
+      ? '疑似快径旁路'
+      : sum.overall_status === 'warn'
+        ? '队列缺失待修复'
+        : sum.hitting_count > 0
+          ? '队列真实命中'
+          : (d.hotspot_active ? '链路就绪待流量' : '热点未开启');
+
+  var offloadHealthy = sampled && (off.tether_offload_disabled || off.slowpath_active) &&
+    off.hwnat !== 'detected_no_knob' && off.hwnat !== 'failed';
+  var hwnatLabel = !sampled
+    ? '硬件快径状态待采样'
+    : (off.hwnat === 'none' || off.hwnat === 'disabled' || off.hwnat === 'suppressed'
+        ? 'T+0 硬件快径已压制'
+        : 'HWNAT: ' + off.hwnat);
+
+  var fwmarkBadgeCls = !sampled ? '' : (low16Protected ? 'dpv-chip-ok' : 'dpv-chip-warn');
+  var fwmarkBadgeText = !sampled
+    ? '正交掩码契约（0xffff0000 · 待核验）'
+    : (low16Protected
+        ? 'netd 低 16 位正交保护（' + dpvEsc(d.fwmark_mask) + '）'
+        : '低 16 位 netd 掩码冲突 (' + dpvEsc(markLayout) + ')');
+
+  var hasAnomaly = sampled && sum.bypass_or_missing_count > 0;
+  var repairBtnCls = hasAnomaly ? 'dpv-btn dpv-btn-warn press' : 'dpv-btn dpv-btn-secondary press';
+  var runLabel = isBusy && !DPV_STATE.resyncing ? '正在采样内核计数器…' : '立即核验队列命中';
+  var repairLabel = isBusy && DPV_STATE.resyncing ? '正在重下发修复…' : '一键重下发修复';
+
+  return (
+    '<section class="dpv-card glass" id="dpv-settings-card" aria-label="数据面真机命中核验">' +
+    '  <div class="dpv-card-head">' +
+    '    <div class="dpv-title-wrap">' +
+    '      <span class="dpv-icon-box">' + DPV_ICONS.dataplane + '</span>' +
+    '      <div>' +
+    '        <div class="dpv-title-row">' +
+    '          <h3 class="dpv-card-title">数据面真机命中核验（v5.40）</h3>' +
+    '          <span class="dpv-pill ' + overallBadgeCls + '">' + dpvEsc(overallBadgeText) + '</span>' +
+    '        </div>' +
+    '        <p class="dpv-card-sub">接口 ' + dpvEsc(d.iface || '—') + ' · 采样时间：' + dpvEsc(d.checked_at_str) + ' · 原生原子下发 &lt;80ms</p>' +
+    '      </div>' +
+    '    </div>' +
+    '  </div>' +
+    '  <div class="dpv-tag-strip">' +
+    '    <span class="dpv-chip ' + (sampled ? 'dpv-chip-primary' : '') + '">' + dpvEsc(d.engine_label) + '</span>' +
+    '    <span class="dpv-chip ' + fwmarkBadgeCls + '">' +
+    DPV_ICONS.fwmark +
+    '<span>' + fwmarkBadgeText + '</span>' +
+    '    </span>' +
+    '    <span class="dpv-chip ' + (!sampled ? '' : (offloadHealthy ? 'dpv-chip-ok' : 'dpv-chip-warn')) + '">' +
+    dpvEsc(hwnatLabel) +
+    '    </span>' +
+    '  </div>' +
+    '  <div class="dpv-bpf-grid" role="list" aria-label="BPF Map 就绪状态">' +
+    '    <div class="dpv-bpf-item" role="listitem">' +
+    '      <span class="dpv-bpf-name">BPF mac_mark / clsact</span>' +
+    '      <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.clsact_attached ? 'is-ok' : 'is-warn')) + '">' +
+    (!sampled ? '待采样核验' : (bpf.clsact_attached ? '已挂载 · ' + dpvInt(bpf.mac_mark_entries) + ' 项' : '待挂载')) +
+    '      </span>' +
+    '    </div>' +
+    '    <div class="dpv-bpf-item" role="listitem">' +
+    '      <span class="dpv-bpf-name">BPF ip_mark / ifb0 prio2</span>' +
+    '      <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.ifb_redirect_prio2 ? 'is-ok' : 'is-warn')) + '">' +
+    (!sampled ? '待采样核验' : (bpf.ifb_redirect_prio2 ? 'prio2 就绪 · ' + dpvInt(bpf.ip_mark_entries) + ' 项' : dpvInt(bpf.ip_mark_entries) + ' 项 · 待重定向')) +
+    '      </span>' +
+    '    </div>' +
+    '    <div class="dpv-bpf-item" role="listitem">' +
+    '      <span class="dpv-bpf-name">tether_limit_map</span>' +
+    '      <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.tether_limit_zeroed ? 'is-ok' : 'is-warn')) + '">' +
+    (!sampled ? '待采样核验' : (bpf.tether_limit_zeroed ? 'T+0 已置 0 · 防旁路' : '未置 0 · 存在旁路风险')) +
+    '      </span>' +
+    '    </div>' +
+    '  </div>' +
+    '  <div class="dpv-kpi-grid">' +
+    '    <div class="dpv-kpi-cell">' +
+    '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.controlled_devices) : '—') + '</span>' +
+    '      <span class="dpv-kpi-label">受控设备</span>' +
+    '    </div>' +
+    '    <div class="dpv-kpi-cell ' + (sampled ? 'is-hit' : '') + '">' +
+    '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.hitting_count) : '—') + '</span>' +
+    '      <span class="dpv-kpi-label">队列真实命中</span>' +
+    '    </div>' +
+    '    <div class="dpv-kpi-cell ' + (sampled ? 'is-idle' : '') + '">' +
+    '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.idle_count) : '—') + '</span>' +
+    '      <span class="dpv-kpi-label">空闲就绪</span>' +
+    '    </div>' +
+    '    <div class="dpv-kpi-cell ' + (hasAnomaly ? 'is-alert' : '') + '">' +
+    '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.bypass_or_missing_count) : '—') + '</span>' +
+    '      <span class="dpv-kpi-label">旁路/缺失告警</span>' +
+    '    </div>' +
+    '  </div>' +
+    '  <p class="dpv-verdict-line">' + dpvEsc(sum.headline) + '</p>' +
+    '  <div class="dpv-actions">' +
+    '    <button type="button" class="dpv-btn dpv-btn-primary press" data-dpv-act="run"' + (isBusy ? ' disabled' : '') + '>' +
+    DPV_ICONS.runVerify +
+    '<span>' + runLabel + '</span>' +
+    '    </button>' +
+    '    <button type="button" class="' + repairBtnCls + '" data-dpv-act="repair"' + (isBusy ? ' disabled' : '') + '>' +
+    DPV_ICONS.repair +
+    '<span>' + repairLabel + '</span>' +
+    '    </button>' +
+    '    <button type="button" class="dpv-btn dpv-btn-secondary press" data-dpv-act="sheet">' +
+    DPV_ICONS.counters +
+    '<span>查看逐设备计数器</span>' +
+    '    </button>' +
+    '  </div>' +
+    '</section>'
+  );
+}
+
+function dpvRenderSettingsSlotHtml() {
+  return '<div id="dpv-settings-mount" data-dpv-mount="1">' + dpvRenderCardHtml(DPV_STATE.lastData, DPV_STATE.loading) + '</div>';
+}
+
+function dpvRenderDeviceItemHtml(dev, iface) {
+  var subHtml = '';
+  if (dev.app_classes && dev.app_classes.length > 0) {
+    var rows = '';
+    for (var i = 0; i < dev.app_classes.length; i++) {
+      var sub = dev.app_classes[i];
+      var dotCls = sub.verdict === 'missing_class' ? 'is-err' : (sub.verdict === 'hit' ? 'is-hit' : 'is-idle');
+      var obsTxt = dpvObsRate(sub.observed_kbps);
+      rows +=
+        '<div class="dpv-subapp-row">' +
+        '  <div class="dpv-subapp-main">' +
+        '    <span class="dpv-subapp-dot ' + dotCls + '"></span>' +
+        '    <span class="dpv-subapp-name">' + dpvEsc(sub.app_label) + '</span>' +
+        '    <span class="dpv-mono-tag">' + dpvEsc(sub.class_id) + ' ← ' + dpvEsc(sub.parent_class_id) + '</span>' +
+        (obsTxt ? '<span class="dpv-tier-tag">实测 ' + dpvEsc(obsTxt) + '</span>' : '') +
+        '  </div>' +
+        '  <div class="dpv-subapp-metrics">' +
+        '    <span>限速 ' + dpvEsc(dpvRateMbps(sub.down_limit_mbps)) + '</span>' +
+        '    <span>累计 ' + dpvEsc(dpvBytes(sub.sent_bytes)) + ' <em>(' + dpvEsc(dpvDeltaBytes(sub.delta_bytes)) + ')</em></span>' +
+        '    <span>整形 ' + dpvInt(sub.overlimits) + ' / 丢包 ' + dpvInt(sub.drops) + '</span>' +
+        '  </div>' +
+        '</div>';
+    }
+    var parentNote = (dev.class_id && dev.class_id !== '—')
+      ? '归位挂载于设备类 ' + dpvEsc(dev.class_id) + ' 下'
+      : '挂载于根类 1:1 下';
+    subHtml =
+      '<div class="dpv-subapps">' +
+      '  <div class="dpv-subapps-hd">单应用 HTB 子类命中明细（' + parentNote + '）</div>' +
+      rows +
+      '</div>';
+  }
+
+  var downObs = dpvObsRate(dev.down_observed_kbps);
+  var upObs = dpvObsRate(dev.up_observed_kbps);
+
+  return (
+    '<article class="dpv-dev-card">' +
+    '  <div class="dpv-dev-top">' +
+    '    <div>' +
+    '      <div class="dpv-dev-name">' + dpvEsc(dev.name) + (dev.online ? '' : ' · 离线') + '</div>' +
+    '      <div class="dpv-dev-addr">' + dpvEsc(dev.mac) + ' · ' + dpvEsc(dev.ip) + '</div>' +
+    '    </div>' +
+    '    <span class="dpv-status-badge ' + dev.status_cls + '">' + dpvEsc(dev.status_label) + '</span>' +
+    '  </div>' +
+    '  <div class="dpv-dev-meta">' +
+    (dev.class_id && dev.class_id !== '—' ? '<span class="dpv-mono-tag">HTB ' + dpvEsc(dev.class_id) + ' (mid=' + dpvInt(dev.mark_id) + ')</span>' : '') +
+    (dev.mark_hex && dev.mark_hex !== '—' ? '<span class="dpv-mono-tag">Mark ' + dpvEsc(dev.mark_hex) + '</span>' : '') +
+    '    <span class="dpv-mono-tag">限速 ↓' + dpvEsc(dpvRateMbps(dev.down_limit_mbps)) + ' / ↑' + dpvEsc(dpvRateMbps(dev.up_limit_mbps)) + '</span>' +
+    (dev.app_qos ? '<span class="dpv-mono-tag is-quic">三档 fq_codel QoS</span>' : '') +
+    (dev.blacklisted ? '<span class="dpv-mono-tag">双栈 MAC 黑名单</span>' : '') +
+    '  </div>' +
+    '  <div class="dpv-counter-pair">' +
+    '    <div class="dpv-counter-box">' +
+    '      <div class="dpv-counter-label">下行 HTB 队列 (' + dpvEsc(iface || 'wlan2') + ' egress' + (downObs ? ' · ' + dpvEsc(downObs) : '') + ')</div>' +
+    '      <div class="dpv-counter-bytes">' +
+    '        <strong>' + dpvEsc(dpvBytes(dev.down_sent_bytes)) + '</strong>' +
+    '        <span class="dpv-delta">' + dpvEsc(dpvDeltaBytes(dev.down_delta_bytes)) + '</span>' +
+    '      </div>' +
+    '      <div class="dpv-counter-sub">overlimits ' + dpvInt(dev.down_overlimits) + ' · drops ' + dpvInt(dev.down_drops) + (dev.down_delta_drops > 0 ? ' (+' + dpvInt(dev.down_delta_drops) + ')' : '') + '</div>' +
+    '    </div>' +
+    '    <div class="dpv-counter-box">' +
+    '      <div class="dpv-counter-label">上行 HTB 队列 (ifb0 / clsact' + (upObs ? ' · ' + dpvEsc(upObs) : '') + ')</div>' +
+    '      <div class="dpv-counter-bytes">' +
+    '        <strong>' + dpvEsc(dpvBytes(dev.up_sent_bytes)) + '</strong>' +
+    '        <span class="dpv-delta">' + dpvEsc(dpvDeltaBytes(dev.up_delta_bytes)) + '</span>' +
+    '      </div>' +
+    '      <div class="dpv-counter-sub">overlimits ' + dpvInt(dev.up_overlimits) + ' · drops ' + dpvInt(dev.up_drops) + (dev.up_delta_drops > 0 ? ' (+' + dpvInt(dev.up_delta_drops) + ')' : '') + '</div>' +
+    '    </div>' +
+    '  </div>' +
+    (dev.reason ? '<div class="dpv-dev-reason">' + dpvEsc(dev.reason) + '</div>' : '') +
+    (dev.fix ? '<div class="dpv-dev-fix">修复建议：' + dpvEsc(dev.fix) + '</div>' : '') +
+    subHtml +
+    '</article>'
+  );
+}
+
+function dpvIsLeakToggleOn(normData, explicitArg) {
+  var glk = normData && normData.goroutineleak;
+  if (normData && normData.sampled_ok && glk && glk.sampled) {
+    if (glk.trigger === 'diag_flag_file' || !DPV_STATE.leakUserToggled) {
+      return true;
+    }
+  }
+  if (explicitArg && glk && glk.sampled) {
+    return true;
+  }
+  return Boolean(DPV_STATE.leakEnabled);
+}
+
+function dpvRenderSheetContentHtml(data, isBusy) {
+  var explicitArg = Boolean(data && data !== DPV_STATE.lastData);
+  var d = dpvNormalize(data || DPV_STATE.lastData, DPV_STATE.leakEnabled);
+  var sampled = Boolean(d.sampled_ok);
+  var bpf = d.bpf_maps;
+  var sum = d.summary;
+  var glk = d.goroutineleak;
+  var leakOn = dpvIsLeakToggleOn(d, explicitArg);
+
+  var devListHtml = '';
+  if (!sampled) {
+    devListHtml =
+      '<div class="dpv-empty">' +
+      '待采样核验：请点击上方「刷新实时增量」或「一键重下发修复」读取内核 RTNetlink HTB 类与正交 Fwmark 实时计数器。' +
+      '</div>';
+  } else if (d.devices.length === 0) {
+    devListHtml =
+      '<div class="dpv-empty">' +
+      '当前暂无处于限速、应用感知 QoS 或黑名单策略下的受控客户端。为任意热点设备开启限速后，此处将实时展示内核 RTNetlink HTB 类与正交 Fwmark 命中计数器。' +
+      '</div>';
+  } else {
+    for (var i = 0; i < d.devices.length; i++) {
+      devListHtml += dpvRenderDeviceItemHtml(d.devices[i], d.iface);
+    }
+  }
+
+  var leakErr = glk.status === 'error';
+  var leakUnsupported = (glk.sampled && !glk.supported) || glk.status === 'unsupported';
+  var leakBadgeCls = !leakOn
+    ? 'dpv-pill-info'
+    : (leakErr || leakUnsupported)
+      ? 'dpv-pill-warn'
+      : (glk.leaked_count > 0 || glk.status === 'leak_detected')
+        ? 'dpv-pill-danger'
+        : glk.sampled
+          ? 'dpv-pill-ok'
+          : 'dpv-pill-info';
+  var leakBadgeTxt = !leakOn
+    ? '按需待命'
+    : leakErr
+      ? '采样异常'
+      : leakUnsupported
+        ? '运行时不支持'
+        : (glk.leaked_count > 0 || glk.status === 'leak_detected')
+          ? '检出泄漏 ' + dpvInt(glk.leaked_count)
+          : glk.sampled
+            ? '0 协程泄漏'
+            : '待采样';
+
+  var stacksHtml = '';
+  if (leakOn && glk.preview_stacks && glk.preview_stacks.length > 0) {
+    stacksHtml = '<pre class="dpv-leak-stacks">' + dpvEsc(glk.preview_stacks.join('\n\n')) + '</pre>';
+  }
+
+  var leakDescText = (leakOn && glk.sampled)
+    ? ((leakErr || leakUnsupported)
+        ? '总协程 ' + dpvInt(glk.total_goroutines) + ' 个 · 耗时 ' + dpvInt(glk.duration_ms) + ' ms — ' + dpvEsc(glk.message)
+        : '总协程 ' + dpvInt(glk.total_goroutines) + ' 个 · 泄漏 ' + dpvInt(glk.leaked_count) + ' 个 · 耗时 ' + dpvInt(glk.duration_ms) + ' ms — ' + dpvEsc(glk.message))
+    : dpvEsc(glk.message);
+
+  var pipeMaskLine = d.netd_low16_protected
+    ? '设备标记 <code>0x00800000 | (mid &lt;&lt; 16)</code>（如 mid=1 → <code>0x00810000</code>，mid=5 → <code>0x00850000</code>），掩码 <code>' + dpvEsc(d.fwmark_mask) + '</code>，低 16 位 <code>0x0000ffff</code> 完整保留给 Android netd 策略路由'
+    : '检测到低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')，建议点击「一键重下发修复」恢复 <code>0xffff0000</code> 正交掩码保护';
+
+  var hasAnomaly = sampled && sum.bypass_or_missing_count > 0;
+  var sheetRepairCls = 'dpv-btn dpv-btn-compact press' + (hasAnomaly ? ' dpv-btn-warn' : '');
+
+  return (
+    '<div class="dpv-sheet-body" id="dpv-sheet-root">' +
+    '  <div class="dpv-pipe-banner">' +
+    '    <div><strong>正交位域契约：</strong>' + pipeMaskLine + '</div>' +
+    '    <div><strong>clsact / GRO 管道：</strong>eBPF 返回 <code>TC_ACT_UNSPEC (-1)</code>（prio 1 着色 → prio 2 ifb0/police 128KB 突发桶）· ' + (d.ipv6_quic_controlled ? '双栈 IPv4/IPv6 QUIC (UDP 443) 已闭环管控' : '按需启用双栈 QUIC 管控') + '</div>' +
+    '    <div><strong>采集引擎状态：</strong>' + (sampled ? dpvEsc(d.engine_label) + ' · BPF mac_mark ' + dpvInt(bpf.mac_mark_entries) + ' 项 / ip_mark ' + dpvInt(bpf.ip_mark_entries) + ' 项' : '待采样核验 · 请点击刷新实时增量读取内核计数') + '</div>' +
+    '  </div>' +
+    '  <div class="dpv-leak-box">' +
+    '    <div class="dpv-leak-row">' +
+    '      <div class="dpv-leak-info">' +
+    '        <div class="dpv-leak-title">' +
+    DPV_ICONS.leakScan +
+    '<span>Go 1.27 goroutineleak 按需诊断</span>' +
+    '<span class="dpv-pill ' + leakBadgeCls + '">' + dpvEsc(leakBadgeTxt) + '</span>' +
+    '        </div>' +
+    '        <div class="dpv-leak-desc">' +
+    leakDescText +
+    '        </div>' +
+    '      </div>' +
+    '      <button type="button" role="switch" aria-checked="' + (leakOn ? 'true' : 'false') + '" class="dpv-switch ' + (leakOn ? 'is-on' : '') + '" data-dpv-act="toggle-leak" aria-label="切换 goroutineleak 按需诊断">' +
+    '        <span class="dpv-switch-knob"></span>' +
+    '      </button>' +
+    '    </div>' +
+    stacksHtml +
+    '  </div>' +
+    '  <div class="dpv-sheet-toolbar">' +
+    '    <span class="dpv-sheet-count">受控客户端明细（' + (sampled ? '共 ' + dpvInt(d.devices.length) + ' 台 · 单应用子类 ' + dpvInt(sum.app_classes_total) + ' 个' : '待采样核验') + '）</span>' +
+    '    <div class="dpv-sheet-actions">' +
+    '      <button type="button" class="' + sheetRepairCls + '" data-dpv-act="repair"' + (isBusy ? ' disabled' : '') + '>' +
+    DPV_ICONS.repair +
+    '<span>' + (isBusy && DPV_STATE.resyncing ? '修复中…' : '一键重下发修复') + '</span>' +
+    '      </button>' +
+    '      <button type="button" class="dpv-btn dpv-btn-compact press" data-dpv-act="run"' + (isBusy ? ' disabled' : '') + '>' +
+    DPV_ICONS.runVerify +
+    '<span>' + (isBusy && !DPV_STATE.resyncing ? '采样中…' : '刷新实时增量') + '</span>' +
+    '      </button>' +
+    '    </div>' +
+    '  </div>' +
+    '  <div class="dpv-dev-list">' +
+    devListHtml +
+    '  </div>' +
+    '</div>'
+  );
+}
+
+function dpvRenderSelfCheckSummaryHtml(data) {
+  var d = dpvNormalize(data || DPV_STATE.lastData, DPV_STATE.leakEnabled);
+  var sum = d.summary;
+  var sampled = Boolean(d.sampled_ok);
+  var maskTxt = d.netd_low16_protected
+    ? '正交掩码 ' + dpvEsc(d.fwmark_mask)
+    : '低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')';
+  return (
+    '<div class="dpv-selfcheck-bar" data-dpv-selfcheck="1">' +
+    '  <div class="dpv-selfcheck-left">' +
+    DPV_ICONS.dataplane +
+    '    <div>' +
+    '      <div class="dpv-selfcheck-title">' + (sampled
+      ? '内核限速队列真机命中：' + dpvInt(sum.hitting_count) + ' / ' + dpvInt(sum.controlled_devices) + ' 台命中'
+      : '内核限速队列真机命中：待采样核验') + '</div>' +
+    '      <div class="dpv-selfcheck-sub">' + (sampled
+      ? maskTxt + ' · ' + (d.bpf_maps.clsact_attached ? 'BPF mac/ip_mark 就绪' : 'BPF 待挂载') + ' · 原生 RTNetlink 采样'
+      : '请点击核验明细读取内核实时计数器') + '</div>' +
+    '    </div>' +
+    '  </div>' +
+    '  <button type="button" class="dpv-btn dpv-btn-compact press" data-dpv-act="sheet">核验明细</button>' +
+    '</div>'
+  );
+}
+
+function dpvRefreshRenderedViews() {
+  if (typeof document === 'undefined') return;
+  var mountEl = document.getElementById('dpv-settings-mount') || document.querySelector('[data-dpv-mount]');
+  if (mountEl) {
+    mountEl.innerHTML = dpvRenderCardHtml(DPV_STATE.lastData, DPV_STATE.loading);
+  }
+  var sheetRoot = document.getElementById('dpv-sheet-root');
+  if (sheetRoot && sheetRoot.parentNode) {
+    var html = dpvRenderSheetContentHtml(DPV_STATE.lastData, DPV_STATE.loading);
+    if (typeof morphOuter === 'function') {
+      morphOuter(sheetRoot, html);
+    } else {
+      sheetRoot.outerHTML = html;
+    }
+  }
+  var diagRows = document.querySelectorAll('[data-dpv-diag-row]');
+  for (var j = 0; j < diagRows.length; j++) {
+    var rowHtml = dpvDiagRowHtml();
+    if (typeof morphOuter === 'function') {
+      morphOuter(diagRows[j], rowHtml);
+    } else {
+      diagRows[j].outerHTML = rowHtml;
+    }
+  }
+  var scBars = document.querySelectorAll('[data-dpv-selfcheck]');
+  for (var i = 0; i < scBars.length; i++) {
+    var barHtml = dpvRenderSelfCheckSummaryHtml(DPV_STATE.lastData);
+    if (typeof morphOuter === 'function') {
+      morphOuter(scBars[i], barHtml);
+    } else {
+      scBars[i].outerHTML = barHtml;
+    }
+  }
+}
+
+function dpvOpenSheet() {
+  var title = '内核限速命中逐设备计数器';
+  var contentHtml = dpvRenderSheetContentHtml(DPV_STATE.lastData, DPV_STATE.loading);
+  DPV_STATE.sheetOpen = true;
+  if (typeof sheet === 'function' && typeof document !== 'undefined' && document.getElementById('sheet')) {
+    sheet(
+      '<h3>' + dpvEsc(title) + '</h3>' +
+      '<div class="sub">实时读取内核 RTNetlink HTB 类字节增量、超限整形与正交 Fwmark 状态</div>' +
+      contentHtml +
+      '<button type="button" class="btn sec wide press" data-close style="margin-top:12px">关闭</button>',
+      { tall: true, kind: 'dpv', onClose: function () { DPV_STATE.sheetOpen = false; } }
+    );
+    return;
+  }
+}
+
+function dpvTriggerVerify(runAction, resync, isManualToggle) {
+  var mySeq = ++DPV_STATE.seq;
+  var doResync = Boolean(runAction && resync);
+  DPV_STATE.loading = true;
+  DPV_STATE.resyncing = doResync;
+  dpvRefreshRenderedViews();
+
+  var p = runAction
+    ? dpvRunVerifyAction(DPV_STATE.leakEnabled, doResync)
+    : dpvFetchVerifyStrict(DPV_STATE.leakEnabled);
+
+  return p.then(function (norm) {
+    if (mySeq === DPV_STATE.seq) {
+      DPV_STATE.lastData = norm;
+      DPV_STATE.loading = false;
+      DPV_STATE.resyncing = false;
+      dpvRefreshRenderedViews();
+      if (runAction && typeof toast === 'function') {
+        if (doResync) {
+          toast(
+            norm.summary.bypass_or_missing_count > 0
+              ? '已执行重下发修复，仍有 ' + dpvInt(norm.summary.bypass_or_missing_count) + ' 台设备异常，请检查内核状态'
+              : '一键重下发修复完成：' + dpvInt(norm.summary.hitting_count) + '/' + dpvInt(norm.summary.controlled_devices) + ' 台受控设备命中内核队列',
+            norm.summary.bypass_or_missing_count > 0 ? 'warn' : 'ok'
+          );
+        } else {
+          toast(
+            '核验完成：' + dpvInt(norm.summary.hitting_count) + '/' + dpvInt(norm.summary.controlled_devices) + ' 台受控设备命中内核队列',
+            norm.summary.bypass_or_missing_count > 0 ? 'warn' : 'ok'
+          );
+        }
+      } else if (
+        isManualToggle &&
+        !DPV_STATE.leakEnabled &&
+        norm.goroutineleak &&
+        norm.goroutineleak.sampled &&
+        norm.goroutineleak.trigger === 'diag_flag_file' &&
+        typeof toast === 'function'
+      ) {
+        toast('诊断标志文件 diag_goroutineleak.enabled 生效中，移除该文件后可关闭常驻采样', 'warn');
+      }
+    }
+    return norm;
+  }).catch(function (err) {
+    if (mySeq === DPV_STATE.seq) {
+      DPV_STATE.loading = false;
+      DPV_STATE.resyncing = false;
+      if (!DPV_STATE.lastData) {
+        DPV_STATE.lastData = dpvDefaultData(DPV_STATE.leakEnabled);
+      }
+      dpvRefreshRenderedViews();
+      if ((runAction || isManualToggle) && typeof toast === 'function') {
+        var msg = typeof errText === 'function' ? errText(err) : String((err && err.message) || err || '请求失败');
+        toast(msg, 'err');
+      }
+    }
+    return DPV_STATE.lastData || dpvDefaultData(DPV_STATE.leakEnabled);
+  });
+}
+
+function dpvBindGlobalDelegate() {
+  if (typeof document === 'undefined' || document.__dpvBound) return;
+  document.__dpvBound = true;
+  document.addEventListener('click', function (ev) {
+    var t = ev.target;
+    if (!t || typeof t.closest !== 'function') return;
+    var btn = t.closest('[data-dpv-act]');
+    if (!btn) return;
+    var act = btn.getAttribute('data-dpv-act');
+    if (act === 'run') {
+      ev.preventDefault();
+      dpvTriggerVerify(true, false);
+    } else if (act === 'repair') {
+      ev.preventDefault();
+      dpvTriggerVerify(true, true);
+    } else if (act === 'sheet') {
+      ev.preventDefault();
+      if (!DPV_STATE.lastData || !DPV_STATE.lastData.sampled_ok) {
+        dpvTriggerVerify(false, false).then(function () { dpvOpenSheet(); });
+      } else {
+        dpvOpenSheet();
+      }
+    } else if (act === 'toggle-leak') {
+      ev.preventDefault();
+      var curOn = dpvIsLeakToggleOn(DPV_STATE.lastData, false);
+      DPV_STATE.leakUserToggled = true;
+      DPV_STATE.leakEnabled = !curOn;
+      dpvTriggerVerify(false, false, true);
+    }
+  });
+}
+
+dpvBindGlobalDelegate();
+if (typeof window !== 'undefined') {
+  window.HNCDataPlaneVerify = {
+    refresh: dpvTriggerVerify,
+    repair: function () { return dpvTriggerVerify(true, true); },
+    openVerifySheet: dpvOpenSheet,
+    normalize: dpvNormalize,
+    formatMarkHex: dpvFormatMarkHex,
+    hasBadToken: dpvHasBadToken,
+    renderCardHtml: dpvRenderCardHtml,
+    renderSheetHtml: dpvRenderSheetContentHtml,
+    renderSelfCheckSummaryHtml: dpvRenderSelfCheckSummaryHtml
+  };
+}

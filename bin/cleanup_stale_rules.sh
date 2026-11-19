@@ -12,6 +12,11 @@ DEVICES="$HNC_DIR/data/devices.json"
 JSON_SET="$HNC_DIR/bin/json_set.sh"
 APPLY="$HNC_DIR/bin/apply_device_rule.sh"
 LOG="$HNC_DIR/logs/cleanup_stale.log"
+if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
+    . "$HNC_DIR/bin/hnc_constants.sh"
+elif [ -f "${0%/*}/hnc_constants.sh" ]; then
+    . "${0%/*}/hnc_constants.sh"
+fi
 
 log() {
     mkdir -p "$(dirname "$LOG")" 2>/dev/null
@@ -84,6 +89,26 @@ for mac in $(grep -oE '"[0-9a-fA-F:]{17}"[[:space:]]*:' "$RULES" 2>/dev/null \
             || log "WARN: device_remove failed for stale $mac"
     fi
 done
+
+# v5.40.0: 顺手清扫 HNC_MARK 链中不在 rules.json 的历史孤儿设备打标(兼容新旧 mark 编码)
+if command -v hnc_parse_mid_from_mark >/dev/null 2>&1 && [ -f "$HNC_DIR/bin/iptables_manager.sh" ]; then
+    iptables -w 2 -t mangle -S HNC_MARK 2>/dev/null | while IFS= read -r _rline; do
+        case "$_rline" in
+            *"--mac-source "*)
+                _rmac=$(printf '%s
+' "$_rline" | awk '{for(i=1;i<NF;i++) if($i=="--mac-source"){print tolower($(i+1)); exit}}')
+                _rmk=$(printf '%s
+' "$_rline" | awk '{for(i=1;i<NF;i++) if($i=="--set-xmark" || $i=="--set-mark"){print $(i+1); exit}}')
+                if [ -n "$_rmac" ] && [ -n "$_rmk" ] && ! grep -qi ""$_rmac"" "$RULES" 2>/dev/null; then
+                    _rmid=$(hnc_parse_mid_from_mark "$_rmk" 2>/dev/null) || _rmid=""
+                    if [ -n "$_rmid" ]; then
+                        HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/iptables_manager.sh" unmark "" "$_rmac" "$_rmid" >> "$LOG" 2>&1 || true
+                    fi
+                fi
+                ;;
+        esac
+    done
+fi
 
 unset HNC_GATE_HELD
 gate_unlock

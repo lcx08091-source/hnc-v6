@@ -40,7 +40,7 @@ if [ "${HNC_SKIP_BPF_BUILD:-0}" != "1" ]; then
             exit 1
         fi
     else
-        "$BPFCC" -O2 -g -target bpf -Wall -Wextra -D__TARGET_ARCH_arm64 \
+        "$BPFCC" -O2 -g -target bpfel -Wall -Wextra -Werror -D__TARGET_ARCH_arm64 \
             -c "$BPF_SRC" -o "$BINDIR/hnc_clsact.o"
         if [ -f "$BINDIR/hnc_clsact.o" ]; then
             llvm-strip -g "$BINDIR/hnc_clsact.o" 2>/dev/null \
@@ -57,9 +57,10 @@ fi
 # ── 2. hnc_clsact_ctl 二进制 ─────────────────────────────────
 if [ "$ARCH" = "host" ]; then
     CC="${CC:-gcc}"
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
+    LDFLAGS="-pie"
     # shellcheck disable=SC2086
-    $CC $CFLAGS -o "${HNC_HOST_OUT:-/tmp/hnc_clsact_ctl}" main.c -pie
+    $CC $CFLAGS -o "${HNC_HOST_OUT:-/tmp/hnc_clsact_ctl}" main.c $LDFLAGS
     echo "[build] Host sanity build OK"
     exit 0
 fi
@@ -88,7 +89,7 @@ if [ ! -x "$CC" ]; then
     exit 1
 fi
 
-CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -DANDROID -static-libgcc -fPIE"
+CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
 LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 mkdir -p "$OUTBIN"
 # shellcheck disable=SC2086

@@ -356,8 +356,8 @@ echo '{"devices":{}}' > "$HNC_TEST_DIR/data/rules.json"
 run_aal
 st=$(cat "$HNC_TEST_DIR/run/app_limits_ipstats.flat" 2>/dev/null)
 assert_mock_called "43.9 -g HNC_AL_C1" && \
-    assert_mock_called "HNC_AL_C1 -s 1.1.1.1 -j MARK" && \
-    assert_mock_called "HNC_AL_C1 -s 3.3.3.3 -j MARK" && \
+    assert_mock_called "HNC_AL_C1 -s 1.1.1.1 -j MARK --set-xmark 0x04000000/0xfc000000" && \
+    assert_mock_called "HNC_AL_C1 -s 3.3.3.3 -j MARK --set-xmark 0x04000000/0xfc000000" && \
     assert_mock_not_called "2.2.2.2" "akamai_cdn 共享 IP 不能被限速" && \
     assert_mock_not_called "5.5.5.5" "反查为微信的 IP 不能算给 bilibili" && \
     assert_contains "$st" "aa:bb:cc:dd:ee:01 douyin 3 1 2" && \
@@ -371,17 +371,18 @@ seed_app_limits
 echo '{"devices":{},"app_limit_include_shared_ips":true}' > "$HNC_TEST_DIR/data/rules.json"
 run_aal
 assert_mock_called "43.9 -g HNC_AL_C1" && \
-    assert_mock_called "HNC_AL_C1 -s 2.2.2.2 -j MARK" && \
-    assert_mock_called "HNC_AL_C1 -s 5.5.5.5 -j MARK" && \
+    assert_mock_called "HNC_AL_C1 -s 2.2.2.2 -j MARK --set-xmark 0x04000000/0xfc000000" && \
+    assert_mock_called "HNC_AL_C1 -s 5.5.5.5 -j MARK --set-xmark 0x08000000/0xfc000000" && \
     assert_contains "$(cat "$HNC_TEST_DIR/run/app_limits_ipstats.flat")" "douyin 3 0 3" && test_pass
 mock_teardown
 
-test_start "apply_app_limits: 无反查表时不误判, 应用 class 用共享算法的 burst/quantum"
+test_start "apply_app_limits: 无反查表时不误判, 应用 class 挂在客户端父类 parent 1:2 下"
 mock_setup
 seed_app_limits
+echo '{"devices":{}}' > "$HNC_TEST_DIR/data/rules.json"
 rm -f "$HNC_TEST_DIR/run/dpi_ipname.json"
 run_aal
-assert_mock_called "HNC_AL_C1 -s 2.2.2.2 -j MARK" && \
-    assert_mock_called "classid 1:9001 htb rate 2000kbit ceil 2000kbit burst 16k cburst 16k quantum 25000" && \
-    assert_mock_called "classid 1:9002 htb rate 1000kbit ceil 1000kbit burst 16k cburst 16k quantum 12500" && test_pass
+assert_mock_called "HNC_AL_C1 -s 2.2.2.2 -j MARK --set-xmark 0x04000000/0xfc000000" && \
+    assert_mock_called "parent 1:2 classid 1:9001 htb rate 2000kbit ceil 2000kbit prio 0 burst 16k cburst 16k quantum 25000" && \
+    assert_mock_called "parent 1:2 classid 1:9002 htb rate 1000kbit ceil 1000kbit prio 0 burst 16k cburst 16k quantum 12500" && test_pass
 mock_teardown

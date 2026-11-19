@@ -223,6 +223,20 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// v5.40.0 T2.9: 纯只读数据面自检(不带 resync/repair 参数时)在全局写锁 actionMu 外执行, 避免阻塞控制操作
+	if req.Action == "dataplane_verify_run" && !dpParamTruthy(req.Params["resync"]) && !dpParamTruthy(req.Params["repair"]) {
+		if resp, ok := dispatchDataplaneVerifyAction(s, req.Action, req.Params); ok {
+			st := http.StatusOK
+			if !resp.OK {
+				st = http.StatusInternalServerError
+			}
+			auditLog(s.hncDir, tid, req.Action, redactSensitive(req.Params),
+				map[bool]string{true: "ok", false: "error"}[resp.OK], resp.Error)
+			writeActionResp(w, st, resp)
+			return
+		}
+	}
+
 	// v5.36.0: 本机自训练工作台动作(含最长 1.2s pokeDPIDStudio 等待)在全局 actionMu 外执行,
 	// 避免阻塞局域网设备限速/拉黑并发写操作; 内部由 studioMu / fpStore.mu / sfp.mu 各自保护。
 	if resp, ok := dispatchStudioAction(s, req.Action, req.Params); ok {
@@ -389,6 +403,9 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return r
 	case "compat_report", "capture_record", "capture_record_stop": // v5.29 T5/T4: 同上, 锁外分发, 这里兜底
 		r, _ := dispatchSelfcheckAction(s, action, p)
+		return r
+	case "dataplane_verify_run": // v5.40.0 T2.9: 数据面命中自检与可选重同步修复
+		r, _ := dispatchDataplaneVerifyAction(s, action, p)
 		return r
 	case "self_studio_start", "self_studio_distill", "self_studio_export", "dpi_distill_now", "flow_cls_retrain": // v5.35.0: 本机真值自训练工作台锁外分发兜底
 		r, _ := dispatchStudioAction(s, action, p)
@@ -612,6 +629,16 @@ func actionRuleSet(hncDir string, p map[string]string) actionResp {
 		log.Printf("rule_set: uplink unsupported; applying downlink-only mac=%s down=%s", mac, dnMbps)
 	}
 
+	// v5.40.0 T3: 真机优先走 Go 原生 RTNetlink + 双栈 iptables-restore --noflush 快速通道; 任何失败无缝回退脚本
+	if useNativeDataplane(hncDir) {
+		if natDetail, ok := tryNativeRuleSet(hncDir, mac, dnMbps, upMbps); ok {
+			if supported, known := readUplinkCapability(hncDir); known && !supported && rateStringPositive(p["rate_up"]) {
+				return actionResp{OK: true, Detail: "download limit applied; uplink unsupported on this ROM, kept up=0"}
+			}
+			return actionResp{OK: true, Detail: natDetail}
+		}
+	}
+
 	// 一次 exec 完成完整链路 · 传字符串(整数或小数)
 	rc, out := runBin(hncDir, "apply_device_rule.sh", "limit", mac, dnMbps, upMbps)
 	detail := strings.TrimSpace(out)
@@ -633,6 +660,9 @@ func actionRuleClear(hncDir string, p map[string]string) actionResp {
 	mac := p["mac"]
 	if !macRE.MatchString(mac) {
 		return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
+	}
+	if useNativeDataplane(hncDir) && tryNativeRuleClear(hncDir, mac) {
+		return actionResp{OK: true, Detail: "limit cleared"}
 	}
 	rc, out := runBin(hncDir, "apply_device_rule.sh", "clear", mac)
 	if rc != 0 {
@@ -704,6 +734,9 @@ func actionBLAdd(hncDir string, p map[string]string) actionResp {
 		return actionResp{OK: false, Error: "protected mac",
 			Detail: "cannot blacklist host/broadcast/null mac"}
 	}
+	if useNativeDataplane(hncDir) && tryNativeBlacklistSet(hncDir, mac, true) {
+		return actionResp{OK: true, Detail: "blacklisted"}
+	}
 	rc, out := runBin(hncDir, "apply_device_rule.sh", "bl_add", mac)
 	if rc != 0 {
 		return actionResp{OK: false, Error: "apply failed", Detail: strings.TrimSpace(out)}
@@ -717,6 +750,9 @@ func actionBLDel(hncDir string, p map[string]string) actionResp {
 	mac := p["mac"]
 	if !macRE.MatchString(mac) {
 		return actionResp{OK: false, Error: "bad params", Detail: "invalid mac"}
+	}
+	if useNativeDataplane(hncDir) && tryNativeBlacklistSet(hncDir, mac, false) {
+		return actionResp{OK: true, Detail: "removed from blacklist"}
 	}
 	rc, out := runBin(hncDir, "apply_device_rule.sh", "bl_del", mac)
 	if rc != 0 {

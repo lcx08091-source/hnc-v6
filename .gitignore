@@ -32,6 +32,7 @@ bin/hnc_clsact_ctl
 *.rej
 .DS_Store
 Thumbs.db
+/.tmp/
 
 # IDE
 .idea/

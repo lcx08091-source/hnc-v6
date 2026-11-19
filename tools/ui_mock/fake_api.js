@@ -13,7 +13,7 @@
   'use strict';
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = META.version || 'v5.38.0', VCODE = String(META.versionCode || '5380000');
+  var VER = META.version || 'v5.40.0', VCODE = String(META.versionCode || '5400000');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 
@@ -75,7 +75,7 @@
   /* ═════════════ 设备(全部虚构; MAC 用本地管理地址) ═════════════ */
   var T = now();
   var DEVS = [
-    { mac: '0a:7f:3c:41:9e:21', ip: '192.168.43.23', hostname: '小米 14', hostname_src: 'manual', vendor: 'Xiaomi', online: true, mark_id: 3, randomized_mac: true, auto_inherited_from: '6e:19:b4:82:0c:55', auto_inherited_name: '小米 14', auto_inherited_score: 94,
+    { mac: '0a:7f:3c:41:9e:21', ip: '192.168.43.23', hostname: '小米 14', hostname_src: 'manual', vendor: 'Xiaomi', online: true, mark_id: 1, randomized_mac: true, auto_inherited_from: '6e:19:b4:82:0c:55', auto_inherited_name: '小米 14', auto_inherited_score: 94,
       base: [1.1 * MB, 115 * KB], usage8: 5.2 * GB, onlineMin: [312, 288, 351, 240, 402, 198, 267],
       ident: { type: 'phone', os: 'Android', os_ver: '15', brand: '小米', model: 'Xiaomi 14', confidence: 93, hostname: 'Xiaomi-14', hostname_src: 'dhcp',
         evidence: [{ src: 'dhcp', detail: 'option 60 = android-dhcp-15' }, { src: 'hostname', detail: 'Xiaomi-14' }, { src: 'sni', detail: '*.miui.com · *.xiaomi.net' }, { src: 'ja4', detail: 'Android 15 系统 TLS 栈' }] },
@@ -616,7 +616,7 @@
       ['network', '热点', [['iface', '热点接口', 'ok', IFACE + ' · 192.168.43.1/24'], ['dhcp', 'DHCP / 邻居表', 'ok', '9 个租约'], ['upstream', '上游', 'ok', 'rmnet_data2（蜂窝）']]],
       ['ipv6', 'IPv6', [['v6_neigh', 'IPv6 邻居', 'ok', '6 个地址, 4 台设备'], ['v6_uncovered', '未纳入限速的新地址', 'ok', '0']]],
       ['time', '时间', [['clock', '系统时间', 'ok', '正常'], ['auto_time', '自动同步时间', 'ok', '已开启']]],
-      ['process', '进程', [['hotspotd', 'hotspotd', 'ok', '运行中'], ['dpid', 'hnc_dpid', 'ok', '运行中 · 7 小时'], ['watchdog', 'watchdog', 'ok', '心跳正常']]],
+      ['process', '进程', [['hotspotd', 'hotspotd', 'ok', '运行中'], ['dpid', 'hnc_dpid', 'ok', '运行中 · 7 小时'], ['watchdog', 'watchdog', 'ok', 'pidfd 心跳正常'], ['proc_goroutineleak', '协程泄漏检测 (Go 1.27)', 'ok', '0 泄漏 · 当前协程 18', 'Go 1.27 runtime/pprof goroutineleak GC 可达性核验耗时 2 ms']]],
       ['ident', '识别引擎', [['rules', '规则库', 'ok', '2026.10.02 · 3412 条'], ['capture', 'DPI 抓包', 'ok', 'AF_PACKET · ' + IFACE], ['fp', '指纹学习', 'info', '5 个可用指纹']]]
     ];
     var sum = { ok: 0, warn: 0, fail: 0, info: 0 };
@@ -624,6 +624,249 @@
       return { id: s[0], title: s[1], elapsed_ms: 300 + (i * 977) % 2600, items: s[2].map(function (x) { sum[x[2]]++; var o = { id: x[0], label: x[1], status: x[2], value: x[3] }; if (x[4]) o.detail = x[4]; if (x[5]) o.fix = x[5]; return o; }) };
     });
     return { available: true, running: false, generated_at: SC_AT, duration_ms: 18640, version: VER, redacted: false, summary: sum, sections: sections };
+  }
+
+  /* ═════════════ v5.40.0 数据面真机命中核验仿真 (100% 对齐 dataplane_verify.go JSON 契约) ═════════════ */
+  var DPV_SNAP = { lastMs: Date.now() - 3200, runs: 1, resyncs: 0, byKey: {} };
+  function dpvMarkHex(mid) {
+    var m = +mid || 0;
+    if (m <= 0) return '';
+    var hex = (((0x00800000 | ((m & 0xff) << 16)) >>> 0)).toString(16);
+    while (hex.length < 8) hex = '0' + hex;
+    return '0x' + hex;
+  }
+  function dpvClassId(mid) {
+    var m = +mid || 0;
+    if (m <= 0) return '';
+    return m === 1 ? '1:100' : ('1:' + m);
+  }
+  function dataplaneVerifyPayload(opts) {
+    opts = opts || {};
+    stepRates();
+    var nowMs = Date.now();
+    var isResync = !!opts.resync;
+    if (opts.reset_baseline) {
+      DPV_SNAP.byKey = {};
+    }
+    if (isResync) {
+      DPV_SNAP.resyncs += 1;
+    }
+    var dtSec = Math.min(12, Math.max(0.45, (nowMs - DPV_SNAP.lastMs) / 1000));
+    DPV_SNAP.lastMs = nowMs;
+    if (opts.manual || isResync) DPV_SNAP.runs += 1;
+
+    var appByMac = {};
+    APP_LIMITS.forEach(function (al, gIdx) {
+      var m = String(al.mac || '').toLowerCase();
+      if (!m || !(al.down_mbps > 0)) return;
+      appByMac[m] = appByMac[m] || [];
+      appByMac[m].push({ globalIdx: gIdx, app_id: al.app_id, down_mbps: +al.down_mbps });
+    });
+
+    var sortedDevs = DEVS.slice().sort(function (a, b) { return a.mac < b.mac ? -1 : (a.mac > b.mac ? 1 : 0); });
+    var devicesOut = [];
+    var hitCnt = 0, idleCnt = 0, errCnt = 0, onlineMarked = 0;
+
+    sortedDevs.forEach(function (d, idx) {
+      var isBlacklisted = d.status === 'blocked';
+      var hasRateLimit = d.limit_enabled !== false && (d.down_mbps > 0 || d.up_mbps > 0);
+      var hasDelay = (d.delay_ms > 0 || d.jitter_ms > 0 || d.loss_pct > 0);
+      var devApps = appByMac[d.mac] || [];
+      var isControlled = isBlacklisted || hasRateLimit || !!d.app_qos || !!d.sqm_enabled || hasDelay || devApps.length > 0;
+      if (!isControlled) return;
+
+      var mid = (+d.mark_id > 0) ? Math.floor(+d.mark_id) : 0;
+      var cid = mid > 0 ? dpvClassId(mid) : '';
+      var mhex = mid > 0 ? dpvMarkHex(mid) : '';
+      if (d.online && mid > 0) onlineMarked += 1;
+
+      var activeFlow = d.online && !isBlacklisted;
+      var snap = DPV_SNAP.byKey[d.mac];
+      if (!snap) {
+        var seed = idx + 1;
+        snap = {
+          downSent: activeFlow && mid > 0 ? (32845824 * seed) : 0,
+          upSent: activeFlow && mid > 0 ? (6422528 * seed) : 0,
+          downDrops: activeFlow && hasRateLimit && mid > 0 ? (12 * seed) : 0,
+          upDrops: activeFlow && hasRateLimit && mid > 0 ? (2 * seed) : 0,
+          downOver: activeFlow && (hasRateLimit || d.app_qos) && mid > 0 ? (860 * seed) : 0,
+          upOver: activeFlow && hasRateLimit && mid > 0 ? (145 * seed) : 0,
+          appSent: {},
+          appDrops: {},
+          appOver: {}
+        };
+        devApps.forEach(function (ap, j) {
+          snap.appSent[ap.app_id] = activeFlow ? Math.floor(14680064 * (j + 1)) : 0;
+          snap.appDrops[ap.app_id] = activeFlow ? (3 * (j + 1)) : 0;
+          snap.appOver[ap.app_id] = activeFlow ? (310 * (j + 1)) : 0;
+        });
+        DPV_SNAP.byKey[d.mac] = snap;
+      }
+
+      var boost = isResync ? 2.1 : (opts.manual ? 1.65 : 1.0);
+      var rxBps = activeFlow && mid > 0 ? Math.max(82000, d.cur[0] || 640000) : 0;
+      var txBps = activeFlow && mid > 0 ? Math.max(18000, d.cur[1] || 96000) : 0;
+      var downDelta = activeFlow && mid > 0 ? Math.max(49152, round(rxBps * dtSec * boost)) : 0;
+      var upDelta = activeFlow && mid > 0 ? Math.max(12288, round(txBps * dtSec * boost)) : 0;
+      var downDropDelta = activeFlow && hasRateLimit && mid > 0 && (opts.manual || isResync) ? 1 : 0;
+      var upDropDelta = 0;
+
+      snap.downSent += downDelta;
+      snap.upSent += upDelta;
+      snap.downDrops += downDropDelta;
+      snap.upDrops += upDropDelta;
+      if (activeFlow && mid > 0 && (hasRateLimit || d.app_qos)) {
+        snap.downOver += Math.max(4, Math.floor(downDelta / 32768));
+        snap.upOver += Math.max(1, Math.floor(upDelta / 32768));
+      }
+
+      var downObsKbps = activeFlow && mid > 0 ? Math.round((downDelta * 8) / (dtSec * 1000) * 100) / 100 : 0;
+      var upObsKbps = activeFlow && mid > 0 ? Math.round((upDelta * 8) / (dtSec * 1000) * 100) / 100 : 0;
+
+      var anyAppHit = false;
+      var appSentSum = 0, appDeltaSum = 0, appDropsSum = 0, appOverSum = 0;
+      var appClasses = devApps.map(function (ap) {
+        var appCid = '1:' + (0x9001 + ap.globalIdx).toString(16);
+        var baseFlowDelta = downDelta > 0 ? downDelta : (activeFlow ? Math.max(49152, round(480000 * dtSec * boost)) : 0);
+        var aDelta = activeFlow ? Math.max(16384, round(baseFlowDelta * 0.58)) : 0;
+        snap.appSent[ap.app_id] = (snap.appSent[ap.app_id] || 0) + aDelta;
+        if (activeFlow) snap.appOver[ap.app_id] = (snap.appOver[ap.app_id] || 0) + Math.max(2, Math.floor(aDelta / 24576));
+        var aKbps = activeFlow ? Math.round((aDelta * 8) / (dtSec * 1000) * 100) / 100 : 0;
+        var aHit = (aDelta > 0 || snap.appSent[ap.app_id] > 0);
+        if (aHit) anyAppHit = true;
+        appSentSum += snap.appSent[ap.app_id];
+        appDeltaSum += aDelta;
+        appDropsSum += (snap.appDrops[ap.app_id] || 0);
+        appOverSum += (snap.appOver[ap.app_id] || 0);
+        return {
+          app_id: ap.app_id,
+          class_id: appCid,
+          parent_class_id: cid || '1:1',
+          down_limit_mbps: ap.down_mbps,
+          class_present: true,
+          sent_bytes: snap.appSent[ap.app_id],
+          delta_bytes: aDelta,
+          drops: snap.appDrops[ap.app_id] || 0,
+          delta_drops: 0,
+          overlimits: snap.appOver[ap.app_id] || 0,
+          observed_kbps: aKbps,
+          verdict: aHit ? 'hit' : 'idle'
+        };
+      });
+
+      var outDownSent = snap.downSent, outDownDelta = downDelta, outDownDrops = snap.downDrops, outDownOver = snap.downOver;
+      if (!hasRateLimit && !d.app_qos && appClasses.length > 0 && mid <= 0) {
+        outDownSent = appSentSum;
+        outDownDelta = appDeltaSum;
+        outDownDrops = appDropsSum;
+        outDownOver = appOverSum;
+      }
+
+      var verdict = 'idle', statusLabel = '链路就绪（空闲）', reason = '规则链路完整就绪，等待客户端产生流量';
+      if (isBlacklisted) {
+        verdict = 'hit';
+        statusLabel = '黑名单阻断生效';
+        reason = '双栈防火墙 HNC_CTRL MAC 阻断规则已就绪并拦截该设备转发流量';
+      } else if (outDownDelta + upDelta > 0 || outDownSent + snap.upSent > 0 || anyAppHit) {
+        verdict = 'hit';
+        statusLabel = '队列真实命中';
+        var totalMb = ((outDownSent + snap.upSent) / MB).toFixed(2);
+        var shapeCnt = outDownOver + outDownDrops + snap.upOver + snap.upDrops;
+        reason = '内核 HTB 限速队列已真实命中（累计转发 ' + totalMb + ' MB，超限整形/丢包 ' + shapeCnt + ' 次）';
+      } else if (!d.online) {
+        verdict = 'idle';
+        statusLabel = '就绪（设备离线）';
+        reason = '规则链路完整就绪，当前设备离线，重连产生流量后将自动命中队列';
+      }
+
+      if (verdict === 'hit') hitCnt += 1;
+      else if (verdict === 'idle') idleCnt += 1;
+      else errCnt += 1;
+
+      var entry = {
+        mac: d.mac,
+        name: d.hostname || d.mac,
+        ip: d.ip,
+        online: !!d.online,
+        mark_id: mid,
+        mark_hex: mhex,
+        class_id: cid,
+        down_limit_mbps: hasRateLimit ? d.down_mbps : 0,
+        up_limit_mbps: hasRateLimit ? d.up_mbps : 0,
+        app_qos: !!d.app_qos,
+        app_limits_count: devApps.length,
+        down_sent_bytes: outDownSent,
+        down_delta_bytes: outDownDelta,
+        down_drops: outDownDrops,
+        down_delta_drops: downDropDelta,
+        down_overlimits: outDownOver,
+        down_observed_kbps: downObsKbps,
+        up_sent_bytes: snap.upSent,
+        up_delta_bytes: upDelta,
+        up_drops: snap.upDrops,
+        up_delta_drops: upDropDelta,
+        up_overlimits: snap.upOver,
+        up_observed_kbps: upObsKbps,
+        verdict: verdict,
+        status_label: statusLabel,
+        reason: reason,
+        app_classes: appClasses
+      };
+      if (isBlacklisted) entry.blacklisted = true;
+      devicesOut.push(entry);
+    });
+
+    var overall = errCnt > 0 ? 'warn' : (hitCnt > 0 ? 'ok' : 'idle');
+    var headline = hitCnt > 0
+      ? ('内核限速真实生效：' + hitCnt + '/' + devicesOut.length + ' 台受控设备已命中 HTB 队列（其余 ' + idleCnt + ' 台空闲就绪）')
+      : ('全部 ' + devicesOut.length + ' 台受控设备内核队列与正交掩码链路已就绪，等待客户端产生流量');
+
+    var out = {
+      ok: true,
+      checked_at: now(),
+      iface: opts.iface || IFACE,
+      hotspot_active: true,
+      engine_mode: 'go_native_netlink',
+      mark_layout: 'orthogonal_v540_0xffff0000',
+      netd_low16_protected: true,
+      ipv6_quic_controlled: true,
+      bpf_maps: {
+        mac_mark_entries: onlineMarked,
+        ip_mark_entries: onlineMarked,
+        tether_limit_zeroed: true,
+        clsact_attached: true,
+        ifb_redirect_prio2: true
+      },
+      offload_guard: {
+        slowpath_active: true,
+        tether_offload_disabled: true,
+        hwnat: 'disabled'
+      },
+      summary: {
+        controlled_devices: devicesOut.length,
+        hitting_count: hitCnt,
+        idle_count: idleCnt,
+        bypass_or_missing_count: errCnt,
+        overall_status: overall,
+        headline: headline
+      },
+      devices: devicesOut
+    };
+
+    if (opts.goroutineleak) {
+      var totalG = 18 + (DPV_SNAP.runs % 3);
+      out.goroutineleak = {
+        sampled: true,
+        supported: true,
+        trigger: opts.trigger || 'query_param',
+        total_goroutines: totalG,
+        leaked_count: 0,
+        duration_ms: 2,
+        status: 'clean',
+        message: 'Go 1.27 goroutineleak GC 可达性核验通过：0 泄漏（总协程 ' + totalG + '，耗时 2 ms）'
+      };
+    }
+    return out;
   }
 
   /* ═════════════ GET 路由 ═════════════ */
@@ -725,6 +968,7 @@
     '/api/run_status': function () { return { hotspotd: 'up', hotspotd_pid: 4127, hotspotd_rss_kb: 11840, tc_rules: 46, ipt_rules: 31, watchdog: 1, watchdog_pid: 4203, watchdog_kind: 'go', watchdog_hb_age: 14 }; },
     '/api/sim': function () { return { ok: true, enabled: SIM.enabled, count: SIM.devices.length, seed: 20261008, presets: ['busy', 'home', 'idle'], types: ['tv', 'phone', 'laptop', 'tablet', 'game', 'iot', 'pc'], mac_prefix: '02:5e:00:', max: 32, devices: SIM.devices }; },
     '/api/selfcheck': function () { return selfcheck(); },
+    '/api/dataplane_verify': function (q) { return dataplaneVerifyPayload({ goroutineleak: bool(q.goroutineleak), reset_baseline: bool(q.reset_baseline), iface: q.iface, trigger: 'query_param', manual: false }); },
     '/api/mac_merge': function () {
       var sg = DEVS.filter(function (d) { return d.merge_suggestion; }).map(function (d) {
         return Object.assign({ new_mac: d.mac, new_name: d.hostname || d.mac, new_online: d.online, randomized: !!d.randomized_mac, new_first_seen: d.first_seen }, d.merge_suggestion);
@@ -975,6 +1219,22 @@
     sim_preset: function (p) { SIM.enabled = true; SIM.devices = [{ mac: '02:5e:00:11:22:33', ip: '192.168.43.210', name: '模拟-客厅电视', type: 'tv', online: true, cur_rx_bps: 3145728, cur_tx_bps: 92160 }]; return '已加载预设 ' + (p.preset || 'home'); },
     sim_device_add: function (p) { var mac = '02:5e:00:12:34:' + p2(10 + SIM.devices.length), nm = p.name || '模拟设备'; SIM.devices.push({ mac: mac, ip: '192.168.43.' + (215 + SIM.devices.length), name: nm, type: p.type || 'phone', online: true, cur_rx_bps: 524288, cur_tx_bps: 65536 }); return J({ mac: mac, name: nm, type: p.type || 'phone' }); },
     selfcheck_run: function () { SC_AT = now(); return J(selfcheck()); },
+    dataplane_verify_run: function (p) {
+      var isResync = p.resync === '1' || p.repair === '1' || bool(p.resync) || bool(p.repair);
+      if (isResync) {
+        CFG.offload_guard.offload_state = 'IDLE';
+        CFG.offload_guard.fallback_active = true;
+        CFG.offload_guard.last_check = now();
+      }
+      return J(dataplaneVerifyPayload({
+        goroutineleak: bool(p.check_goroutineleak) || bool(p.goroutineleak),
+        reset_baseline: bool(p.reset_baseline) || isResync,
+        resync: isResync,
+        iface: p.iface,
+        trigger: 'action_param',
+        manual: true
+      }));
+    },
     selfcheck_export: function (p) { var nm = 'hnc-selfcheck-' + ymd(dayAt(0)) + '-120000.txt', jn = 'hnc-selfcheck-' + ymd(dayAt(0)) + '-120000.json'; pushExport(nm, 18420); pushExport(jn, 34120); return J({ name: nm, json_name: jn, redacted: p.redact !== '0' }); },
     compat_report: function () { var nm = 'hnc-compat-' + ymd(dayAt(0)) + '.json'; pushExport(nm, 12840); return J({ name: nm, summary: { ok: 21, warn: 1, fail: 0 } }); },
     debug_bundle: function () { var nm = 'hnc-debug-' + ymd(dayAt(0)) + '-120000.tar.gz'; pushExport(nm, 428190); return J({ name: nm }); },

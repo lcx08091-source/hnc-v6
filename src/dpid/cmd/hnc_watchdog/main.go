@@ -442,10 +442,19 @@ func ensureDaemonRunning(d daemonSpec) {
 	launcherArgs := d.args
 	watchPidFile := d.pidFile
 
-	// Is the watched pidfile alive?
+	// Is the watched pidfile alive? (Prefer kernel pidfd handle when spawned by us)
 	if data, err := os.ReadFile(watchPidFile); err == nil {
 		if pid, _ := strconv.Atoi(strings.TrimSpace(string(data))); pid > 0 {
-			if processAlive(pid) {
+			if proc := lookupSpawnedProcess(watchPidFile, pid); proc != nil {
+				if alive, supported := pidfdProcessAlive(proc); supported {
+					if alive {
+						return // healthy (pidfd verified, immune to PID wraparound)
+					}
+					untrackSpawnedProcess(watchPidFile, proc)
+				} else if processAlive(pid) {
+					return // fallback when kernel lacks pidfd
+				}
+			} else if processAlive(pid) {
 				return // healthy
 			}
 		}
@@ -515,6 +524,7 @@ func spawnDaemon(bin string, args []string, logPath, pidFile string) error {
 		}
 		return err
 	}
+	trackSpawnedProcess(pidFile, cmd.Process)
 	// Reap zombie on exit but don't block here.
 	go func() {
 		_ = cmd.Wait()

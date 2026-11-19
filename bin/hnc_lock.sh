@@ -132,7 +132,7 @@ _try_reclaim_stale() {
         age=$((now - mtime))
         if [ "$mtime" -gt 0 ] && [ "$age" -gt 5 ]; then
             # mkdir 5 秒后仍未写 pid → 必然是 mkdir 后崩溃, 安全回收
-            rm -f "$lockdir/pid" 2>/dev/null
+            rm -f "$lockdir/pid" "$lockdir/depth" 2>/dev/null
             rmdir "$lockdir" 2>/dev/null
             return 0
         fi
@@ -143,7 +143,7 @@ _try_reclaim_stale() {
         return 1
     fi
     # PID 已死: 安全回收
-    rm -f "$lockdir/pid" 2>/dev/null
+    rm -f "$lockdir/pid" "$lockdir/depth" 2>/dev/null
     rmdir "$lockdir" 2>/dev/null
     return 0
 }
@@ -233,14 +233,36 @@ mac_unlock() {
 #   - 抢 gate/ 本身超时(别的全局操作持有)
 #   - 抢到 gate/ 但等 mac/*/ 释放超时(有 per-MAC 操作卡住)
 # 两种都保守让步: 释放 gate(如果已抢到)再返回 11
+_HNC_LOCK_CLI=0
+_HNC_GATE_AUTO_HELD=0
+
 gate_lock() {
     local i=0
     local acquired=0  # 明确标记是否真的通过 mkdir 抢到锁
+    local _cur_holder="${HNC_LOCK_HOLDER_PID:-$$}"
+
+    # v5.40 W4 [RISK-04]: 同进程/同调用链重入安全保护(_gate_held_by_caller)
+    # 若调用链上游或本进程已持有 gate, 递增重入深度立即放行, 避免自阻塞死锁!
+    if _gate_held_by_caller; then
+        local _d
+        _d=$(cat "$GATE_LOCK/depth" 2>/dev/null)
+        case "$_d" in ''|*[!0-9]*) _d=0 ;; esac
+        echo $((_d + 1)) > "$GATE_LOCK/depth" 2>/dev/null
+        return 0
+    fi
 
     # 阶段 1: 抢 gate/
     while [ $i -lt $_LOCK_TIMEOUT_ROUNDS ]; do
+        if _gate_held_by_caller; then
+            local _d2
+            _d2=$(cat "$GATE_LOCK/depth" 2>/dev/null)
+            case "$_d2" in ''|*[!0-9]*) _d2=0 ;; esac
+            echo $((_d2 + 1)) > "$GATE_LOCK/depth" 2>/dev/null
+            return 0
+        fi
         if mkdir "$GATE_LOCK" 2>/dev/null; then
-            echo "${HNC_LOCK_HOLDER_PID:-$$}" > "$GATE_LOCK/pid"
+            echo "$_cur_holder" > "$GATE_LOCK/pid"
+            rm -f "$GATE_LOCK/depth" 2>/dev/null
             acquired=1
             break
         fi
@@ -270,7 +292,11 @@ gate_lock() {
         local active
         active=$(ls -A "$MAC_LOCK_DIR" 2>/dev/null)
         if [ -z "$active" ]; then
-            # 全部释放
+            # 全部释放: source 模式下自动导出 HNC_GATE_HELD, 使同进程嵌套或子脚本调用天然重入安全
+            if [ "${_HNC_LOCK_CLI:-0}" != "1" ] && [ -z "${HNC_GATE_HELD:-}" ]; then
+                export HNC_GATE_HELD="$_cur_holder"
+                _HNC_GATE_AUTO_HELD=1
+            fi
             _hook "after_gate_all_clear"
             return 0
         fi
@@ -288,13 +314,35 @@ gate_lock() {
 
     # 阶段 2 超时: per-MAC 有活进程还在跑,保守让步
     # 不强拆 per-MAC(那会破坏并发安全)
-    rm -f "$GATE_LOCK/pid" 2>/dev/null
+    rm -f "$GATE_LOCK/depth" "$GATE_LOCK/pid" 2>/dev/null
     rmdir "$GATE_LOCK" 2>/dev/null
     return 11
 }
 
 gate_unlock() {
-    rm -f "$GATE_LOCK/pid" 2>/dev/null
+    if [ -d "$GATE_LOCK" ]; then
+        local _d _holder _cur
+        _d=$(cat "$GATE_LOCK/depth" 2>/dev/null)
+        case "$_d" in ''|*[!0-9]*) _d=0 ;; esac
+        if [ "$_d" -gt 0 ] && _gate_held_by_caller; then
+            _d=$((_d - 1))
+            if [ "$_d" -gt 0 ]; then
+                echo "$_d" > "$GATE_LOCK/depth" 2>/dev/null
+            else
+                rm -f "$GATE_LOCK/depth" 2>/dev/null
+            fi
+            return 0
+        fi
+        _holder=$(cat "$GATE_LOCK/pid" 2>/dev/null)
+        _cur="${HNC_LOCK_HOLDER_PID:-$$}"
+        if [ "${_HNC_LOCK_CLI:-0}" != "1" ] && _gate_held_by_caller && [ -n "$_holder" ] && [ "$_cur" != "$_holder" ]; then
+            return 0
+        fi
+    fi
+    if [ "${_HNC_GATE_AUTO_HELD:-0}" = "1" ]; then
+        unset HNC_GATE_HELD _HNC_GATE_AUTO_HELD
+    fi
+    rm -f "$GATE_LOCK/depth" "$GATE_LOCK/pid" 2>/dev/null
     rmdir "$GATE_LOCK" 2>/dev/null
     return 0
 }
@@ -311,6 +359,7 @@ gate_unlock() {
 _script_name=$(basename "$0" 2>/dev/null)
 case "$_script_name" in
     hnc_lock.sh|hnc_lock)
+        _HNC_LOCK_CLI=1
         CMD=$1
         shift 2>/dev/null
 

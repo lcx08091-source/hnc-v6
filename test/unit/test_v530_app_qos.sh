@@ -40,9 +40,7 @@ aq_tc_scenario() {
 
 if [ "${UPDATE_TESTDATA:-0}" = "1" ]; then
     mock_setup
-    git -C "$HNC_REPO_ROOT" show "$AQ_V529_COMMIT:bin/tc_manager.sh" > "$AQ_TD.v529.sh" \
-        && aq_tc_scenario "$AQ_TD.v529.sh" > "$AQ_GOLDEN" && echo "  [UPDATE_TESTDATA] regenerated $AQ_GOLDEN"
-    rm -f "$AQ_TD.v529.sh"
+    aq_tc_scenario "$HNC_REPO_ROOT/bin/tc_manager.sh" > "$AQ_GOLDEN" && echo "  [UPDATE_TESTDATA] regenerated $AQ_GOLDEN"
     mock_teardown
 fi
 
@@ -52,7 +50,7 @@ if [ -f "$AQ_GOLDEN" ] && [ "$(wc -l < "$AQ_GOLDEN")" -ge 100 ] \
    && grep -q '^tc|class change dev wlan2 parent 1:1 classid 1:5 htb rate 10000kbit' "$AQ_GOLDEN" \
    && grep -q '^tc|qdisc replace dev wlan2 parent 1:5 handle 1005: netem delay 25ms 10ms' "$AQ_GOLDEN" \
    && grep -q '^tc|qdisc replace dev wlan2 parent 1:5 handle 1005: cake' "$AQ_GOLDEN" \
-   && grep -q '^tc|filter add dev wlan2 parent 1: pref 1 handle 0x800005 fw flowid 1:5' "$AQ_GOLDEN" \
+   && grep -q '^tc|filter add dev wlan2 parent 1: protocol all pref 1 handle 0x00850000/0x00ff0000 fw flowid 1:5' "$AQ_GOLDEN" \
    && grep -q '^tc|class add dev wlan2 parent 1:1 classid 1:100 htb' "$AQ_GOLDEN" \
    && grep -q '^tc|class del dev wlan2 classid 1:5' "$AQ_GOLDEN"; then
     test_pass
@@ -102,13 +100,13 @@ assert_mock_called "tc|class change dev wlan2 parent 1:5 classid 1:a015 htb rate
 assert_mock_called "tc|class change dev wlan2 parent 1:5 classid 1:a016 htb rate 7000kbit ceil 20Mbit prio 1" && \
 assert_mock_called "tc|class change dev wlan2 parent 1:5 classid 1:a017 htb rate 3000kbit ceil 20Mbit prio 2" && \
 assert_mock_called "tc|qdisc replace dev wlan2 parent 1:a015 handle b015: fq_codel" && \
-assert_mock_called "tc|filter add dev wlan2 parent 1:5 protocol all prio 1 handle 0x200000/0x600000 fw flowid 1:a015" && \
-assert_mock_called "tc|filter add dev wlan2 parent 1:5 protocol all prio 1 handle 0x600000/0x600000 fw flowid 1:a017" && \
+assert_mock_called "tc|filter add dev wlan2 parent 1:5 protocol all prio 2 handle 0x01000000/0x03000000 fw flowid 1:a015" && \
+assert_mock_called "tc|filter add dev wlan2 parent 1:5 protocol all prio 2 handle 0x03000000/0x03000000 fw flowid 1:a017" && \
 assert_mock_called "tc|filter add dev wlan2 parent 1:5 protocol all prio 9 u32 match u32 0 0 flowid 1:a016" && \
-assert_mock_called "tc|filter add dev wlan2 parent 1: protocol all pref 50 handle 0x800005/0x9fffff fw flowid 1:5" && \
-assert_mock_called "mangle -A HNC_APP_QOS -d 192.168.43.5 -m mark --mark 0x0/0x100000 -g HNC_APP_QOS_IP" && \
-assert_mock_called "mangle -A HNC_APP_QOS_IP -s 1.1.1.1 -j MARK --set-xmark 0x200000/0x600000" && \
-assert_mock_called "mangle -A HNC_APP_QOS_IP -s 3.3.3.3 -j MARK --set-xmark 0x600000/0x600000" && \
+assert_mock_called "tc|filter add dev wlan2 parent 1: protocol all pref 50 handle 0x00850000/0x00ff0000 fw flowid 1:5" && \
+assert_mock_called "mangle -A HNC_APP_QOS -d 192.168.43.5 -m mark --mark 0x0/0xfc000000 -g HNC_APP_QOS_IP" && \
+assert_mock_called "mangle -A HNC_APP_QOS_IP -s 1.1.1.1 -m mark --mark 0x0/0xfc000000 -j MARK --set-xmark 0x01000000/0x03000000" && \
+assert_mock_called "mangle -A HNC_APP_QOS_IP -s 3.3.3.3 -m mark --mark 0x0/0xfc000000 -j MARK --set-xmark 0x03000000/0x03000000" && \
 assert_mock_called "mangle -C POSTROUTING -j HNC_APP_QOS" && \
 assert_mock_not_called "classid 1:5 " "设备 class 本身(总限速)不应被改" && \
 assert_mock_not_called "MARK --set-mark" "只能用 set-xmark 改档位位, 不能整个覆盖 mark" && \
@@ -130,7 +128,7 @@ mock_set_stdout tc 'class htb 1:100 parent 1:1 leaf 1100: prio 0 rate 8Mbit ceil
 printf 'iface wlan2\ndev 1 aa:bb:cc:00:00:01 192.168.43.1\n' > "$AQ_TD/run/app_qos.plan"
 aq_apply
 assert_mock_called "parent 1:100 classid 1:a005 htb rate 4000kbit ceil 10Mbit prio 0" && \
-assert_mock_called "pref 50 handle 0x800001/0x9fffff fw flowid 1:100" && \
+assert_mock_called "pref 50 handle 0x00810000/0x00ff0000 fw flowid 1:100" && \
 assert_eq "wlan2 100" "$(cat "$AQ_TD/run/app_qos.state")" "state" && test_pass
 mock_teardown
 
@@ -162,7 +160,7 @@ mock_set_stdout tc "$AQ_CHILDREN"
 printf '%s\nip 1 9.9.9.9\n' "$AQ_PLAN" > "$AQ_TD/run/app_qos.plan"
 aq_apply
 assert_mock_not_called "class change" && assert_mock_not_called "filter del" && \
-assert_mock_called "mangle -A HNC_APP_QOS_IP -s 9.9.9.9 -j MARK --set-xmark 0x200000/0x600000" && test_pass
+assert_mock_called "mangle -A HNC_APP_QOS_IP -s 9.9.9.9 -m mark --mark 0x0/0xfc000000 -j MARK --set-xmark 0x01000000/0x03000000" && test_pass
 mock_teardown
 
 test_start "app_qos: 设备限速改了(父 rate 20→40Mbit)→ 子 class 按新 rate 重分"
@@ -188,7 +186,7 @@ aq_apply
 assert_mock_called "tc|filter del dev wlan2 parent 1:5" && \
 assert_mock_called "tc|class del dev wlan2 classid 1:a015" && \
 assert_mock_called "tc|class del dev wlan2 classid 1:a017" && \
-assert_mock_called "tc|filter del dev wlan2 parent 1: protocol all pref 50 handle 0x800005 fw" && \
+assert_mock_called "tc|filter del dev wlan2 parent 1: protocol all pref 50 handle 0x00850000/0x00ff0000 fw" && \
 assert_mock_called "parent 1:5 handle 1005:" "tc_manager ensure_class 应补回设备叶子" && \
 assert_mock_called "mangle -X HNC_APP_QOS" && \
 assert_mock_not_called "class del dev wlan2 classid 1:5" "设备 class 本身保留" && \

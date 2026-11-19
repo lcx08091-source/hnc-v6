@@ -12,12 +12,24 @@ typedef unsigned long long __u64;
 typedef signed int __s32;
 
 /* TC return codes */
+#ifndef TC_ACT_UNSPEC
+#define TC_ACT_UNSPEC (-1)
+#endif
 #ifndef TC_ACT_OK
 #define TC_ACT_OK 0
 #endif
 #ifndef TC_ACT_SHOT
 #define TC_ACT_SHOT 2
 #endif
+
+/* Orthogonal v5.40.0 skb->mark bitfields:
+ *   [15:0]  0x0000ffffU : Reserved untouched for Android netd netId / permission bits
+ *   [23:16] 0x00ff0000U : HNC per-device slot mark (0x00800000U | (mid << 16))
+ *   [31:24] 0xff000000U : Reserved untouched for HNC App/QoS tier marks
+ */
+#define HNC_MARK_DEV_MASK   0x00ff0000U
+#define HNC_MARK_DEV_VALID  0x00800000U
+#define HNC_MARK_DROP       0xffffffffU
 
 /* EtherTypes */
 #ifndef ETH_P_IP

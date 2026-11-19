@@ -2,7 +2,7 @@
 # 交叉编译 hnc_httpd Android 二进制
 # 使用: sh build.sh            # arm64(默认, CGO_ENABLED=0, 产物 ./hnc_httpd)
 #       sh build.sh arm        # v5.22: armeabi-v7a, 产物 ../../bin/armeabi-v7a/hnc_httpd
-# 需要: Go 1.25+;arm 另需 Android NDK(ANDROID_NDK / ANDROID_NDK_HOME)——
+# 需要: Go 1.27+;arm 另需 Android NDK(ANDROID_NDK / ANDROID_NDK_HOME)——
 #   Go 的 android/arm 不支持内部链接(“requires external (cgo) linking”),
 #   必须 CGO_ENABLED=1 + NDK clang 外部链接。不用 GOOS=linux 静态编:
 #   那样 time.Local 读不到 Android tzdata(恒为 UTC), 定时/日切全错。
@@ -22,7 +22,7 @@ case "$HNC_ARCH" in
         _ndk="${ANDROID_NDK:-${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}}"
         [ -n "$_ndk" ] && [ -d "$_ndk" ] || { echo "ERROR: arm build needs ANDROID_NDK" >&2; exit 1; }
         _host="$(uname -s | tr '[:upper:]' '[:lower:]')-$(uname -m)"
-        export CC="$_ndk/toolchains/llvm/prebuilt/$_host/bin/armv7a-linux-androideabi21-clang"
+        export CC="$_ndk/toolchains/llvm/prebuilt/$_host/bin/armv7a-linux-androideabi28-clang"
         [ -x "$CC" ] || { echo "ERROR: NDK clang not found: $CC" >&2; exit 1; }
         mkdir -p ../../bin/armeabi-v7a
         OUT_BIN=../../bin/armeabi-v7a/hnc_httpd
@@ -72,11 +72,13 @@ for sym in \
     /api/dpi_probe \
     apiDPIState \
     apiDPIProbe \
-    dpi_rebind
+    dpi_rebind \
+    /api/dataplane_verify \
+    dataplane_verify_run
 do
     if ! strings "$OUT_BIN" | grep -F "$sym" >/dev/null 2>&1; then
         echo "ERROR: rebuilt hnc_httpd missing required DPI API symbol/string: $sym" >&2
         exit 1
     fi
 done
-echo "OK: hnc_httpd includes DPI API routes/actions"
+echo "OK: hnc_httpd includes DPI & dataplane API routes/actions"

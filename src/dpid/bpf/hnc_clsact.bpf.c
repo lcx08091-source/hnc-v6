@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* hnc_clsact.bpf.c — HNC Dual-Stack Bidirectional clsact BPF program
+/* hnc_clsact.bpf.c — HNC v5.40.0 Dual-Stack Bidirectional clsact BPF program
  *
  * Verifier hardened for Linux 5.10 / 5.15 / 6.1 / 6.6 (arm64 + armv7):
  *   - Strict __always_inline helpers (no BPF-to-BPF .text relocations).
@@ -7,9 +7,13 @@
  *   - 2-byte aligned packet reads (safe on armv7 NET_IP_ALIGN=2 without
  *     CONFIG_HAVE_EFFICIENT_UNALIGNED_ACCESS).
  *   - Constant-offset 2-layer VLAN (802.1Q / 802.1ad QinQ) header unwrap.
- *   - Bounded 4-layer IPv6 extension header walker exempting ICMPv6 NDP/MLD
+ *   - Bounded 4-layer IPv6 extension header walker exempting ICMPv6 NDP/RA/MLDv2
  *     control packets (types 130..137, 143) so rate-limited clients never drop
- *     Neighbor Solicitation / Advertisement or MLDv2 (Hop-by-Hop) under load.
+ *     Router/Neighbor Solicitation/Advertisement or MLDv2 under load.
+ *   - Orthogonal [23:16] skb->mark bitfield write preserving low 16-bit Android
+ *     netd netId [15:0] and high 8-bit App/QoS marks [31:24].
+ *   - Always returns TC_ACT_UNSPEC (-1) after marking so clsact continues
+ *     evaluating prio 2 matchall->mirred (ifb0) or police filters.
  */
 
 #include "vmlinux_clsact.h"
@@ -43,18 +47,27 @@ static __always_inline void copy_mac_key(struct mac_key *key, const __u8 *addr)
     key->pad = 0;
 }
 
+static __always_inline int apply_dev_mark(struct __sk_buff *skb, __u32 mark_val)
+{
+    if (mark_val == HNC_MARK_DROP)
+        return TC_ACT_SHOT;
+    if ((mark_val & 0x00ff0000U) != 0U)
+        skb->mark = (skb->mark & ~0x00ff0000U) | (mark_val & 0x00ff0000U);
+    return TC_ACT_UNSPEC;
+}
+
 /* Walk up to 4 IPv6 extension headers (HBH, Routing, Fragment, DestOpts, AH)
- * and return 1 if the packet is an ICMPv6 NDP/MLD control frame (130..137, 143)
+ * and return 1 if the packet is an ICMPv6 NDP/RA/MLDv2 control frame (130..137, 143)
  * that must not be throttled or dropped in a congested client HTB leaf. */
 static __always_inline int is_ipv6_ndp_ctrl(struct __sk_buff *skb, __u32 l3_off)
 {
     __u32 base_off = l3_off & 0x3eU;
-    __u32 pull_v6 = (base_off + 40U) & 0x7fU;
     const __u8 *data = (const __u8 *)(long)skb->data;
     const __u8 *data_end = (const __u8 *)(long)skb->data_end;
     const __u8 *v6h = data + base_off;
 
     if (v6h + 40 > data_end) {
+        __u32 pull_v6 = (base_off + 40U) & 0x7fU;
         if (skb->len < pull_v6 || bpf_skb_pull_data(skb, pull_v6) < 0)
             return 0;
         data = (const __u8 *)(long)skb->data;
@@ -213,39 +226,37 @@ int hnc_clsact_ingress(struct __sk_buff *skb)
     __u32 l3_off = 14;
 
     if (parse_l2_hdr(skb, 1, &key, &h_proto, &l3_off) < 0)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (h_proto == bpf_htons(ETH_P_IPV6) && is_ipv6_ndp_ctrl(skb, l3_off))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     __u32 *m_mac = bpf_map_lookup_elem(&mac_mark_map, &key);
-    if (m_mac && *m_mac != 0) {
-        skb->mark = (skb->mark & ~0x00ffffffU) | (*m_mac & 0x00ffffffU);
-        return TC_ACT_OK;
-    }
+    if (m_mac && *m_mac != 0)
+        return apply_dev_mark(skb, *m_mac);
 
     if (h_proto == bpf_htons(ETH_P_IP)) {
         __u32 ip_off = l3_off & 0x3eU;
-        __u32 need = ip_off + 20U;
         const __u8 *data = (const __u8 *)(long)skb->data;
         const __u8 *data_end = (const __u8 *)(long)skb->data_end;
         const __u8 *nh = data + ip_off;
 
         if (nh + 20 > data_end) {
+            __u32 need = ip_off + 20U;
             if (skb->len < need || bpf_skb_pull_data(skb, need) < 0)
-                return TC_ACT_OK;
+                return TC_ACT_UNSPEC;
             data = (const __u8 *)(long)skb->data;
             data_end = (const __u8 *)(long)skb->data_end;
             nh = data + ip_off;
             if (nh + 20 > data_end)
-                return TC_ACT_OK;
+                return TC_ACT_UNSPEC;
         }
 
         /* Byte 0 of IPv4 header is always (version << 4) | ihl on wire;
          * reading nh[0] avoids 4-byte struct iphdr alignment UB at L2+14/22. */
         __u8 ver_ihl = nh[0];
         if ((ver_ihl >> 4) != 4 || (ver_ihl & 0x0fU) < 5)
-            return TC_ACT_OK;
+            return TC_ACT_UNSPEC;
 
         __u32 src_ip = 0;
         const __u16 *sip = (const __u16 *)(nh + 12);
@@ -255,31 +266,31 @@ int hnc_clsact_ingress(struct __sk_buff *skb)
 
         __u32 *m_ip = bpf_map_lookup_elem(&ip_mark_map, &src_ip);
         if (m_ip && *m_ip != 0)
-            skb->mark = (skb->mark & ~0x00ffffffU) | (*m_ip & 0x00ffffffU);
+            return apply_dev_mark(skb, *m_ip);
     }
 
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }
 
 SEC("tc_egress")
 int hnc_clsact_egress(struct __sk_buff *skb)
 {
-    if ((skb->mark & 0x00800000U) != 0)
-        return TC_ACT_OK;
+    if ((skb->mark & HNC_MARK_DEV_VALID) != 0)
+        return TC_ACT_UNSPEC;
 
     struct mac_key key = { .pad = 0 };
     __u16 h_proto = 0;
     __u32 l3_off = 14;
 
     if (parse_l2_hdr(skb, 0, &key, &h_proto, &l3_off) < 0)
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     if (h_proto == bpf_htons(ETH_P_IPV6) && is_ipv6_ndp_ctrl(skb, l3_off))
-        return TC_ACT_OK;
+        return TC_ACT_UNSPEC;
 
     __u32 *m_mac = bpf_map_lookup_elem(&mac_mark_map, &key);
     if (m_mac && *m_mac != 0)
-        skb->mark = (skb->mark & ~0x00ffffffU) | (*m_mac & 0x00ffffffU);
+        return apply_dev_mark(skb, *m_mac);
 
-    return TC_ACT_OK;
+    return TC_ACT_UNSPEC;
 }

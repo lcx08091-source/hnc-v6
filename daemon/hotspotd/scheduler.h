@@ -71,7 +71,7 @@ typedef struct {
     uint64_t last_delta_bytes;
     int      globally_disabled;
     int      disabled_upstream_count;
-    int      disabled_upstream_ifindex[8];
+    int      disabled_upstream_ifindex[32];
 
     /* Scheduler 内部状态 */
     int      limited_device_count;

@@ -2064,7 +2064,7 @@ func scIPv6Coverage(neigh map[string][]string, marks map[string]int64, ip6marks 
 		d := scV6Dev{MAC: mac, Addrs: neigh[mac]}
 		_, d.IP6TMarked = ip6marks[mac]
 		mk, ok := marks[mac]
-		id := mk - markBase
+		id := scDecodeDeviceMarkID(mk, markBase)
 		if !ok || id < 1 || id > 99 {
 			res = append(res, d)
 			continue
@@ -2102,6 +2102,27 @@ func scParseClasses(out string) map[string]bool {
 		res[m[1]] = true
 	}
 	return res
+}
+
+// scDecodeDeviceMarkID 同时兼容 v5.40.0 正交高位编码 0x00800000|(mid<<16) 与旧式 0x800000+mid。
+func scDecodeDeviceMarkID(mk, markBase int64) int64 {
+	if mk <= 0 {
+		return 0
+	}
+	diff := mk - markBase
+	if diff >= 1 && diff <= 99 {
+		return diff
+	}
+	if (mk & 0xffff) == 0 {
+		devByte := (mk >> 16) & 0xff
+		if devByte > 0x80 {
+			ortID := devByte - 0x80
+			if ortID >= 1 && ortID <= 99 {
+				return ortID
+			}
+		}
+	}
+	return 0
 }
 
 func (c *scCtx) markBase() int64 {
@@ -2478,6 +2499,9 @@ func scSectionProcess(c *scCtx) []scItem {
 	items = append(items, scPowerItem(c))           // v5.22: 功耗汇总(power_stats.go)
 	items = append(items, scWatchdogActionsItem(c)) // v5.28 A2: 看门狗动作(watchdog_actions.go)
 	items = append(items, scRollbackItem(c))        // v5.29 T3: 升级状态(回滚横幅的同源数据)
+	if glItem, ok := scGoroutineLeakItem(c); ok {   // v5.40.0 T1: 仅当诊断开关文件存在时附带协程泄漏检测
+		items = append(items, glItem)
+	}
 	return items
 }
 

@@ -162,3 +162,685 @@
 [data-style="apple"] .pbar>i{animation:none}
 [data-style="apple"] .simdev .t{font-size:17px;font-weight:400}
 [data-style="apple"] .simdev .s{font-size:13px}
+
+/* ==========================================================================
+ * HNC v5.40.0 (versionCode=5400000) — 数据面真机命中核验响应式样式
+ * 原生复用 base.css / apple.css / liquid.css 跨主题设计变量（浅色/深色/赛博/液态玻璃）
+ * ========================================================================== */
+
+.dpv-card {
+  --dpv-surface: var(--card, rgba(255, 255, 255, 0.88));
+  --dpv-surface-2: var(--input, rgba(120, 120, 128, 0.08));
+  --dpv-border: var(--stroke, rgba(60, 60, 67, 0.12));
+  --dpv-text: var(--text-1, #1c1c1e);
+  --dpv-muted: var(--text-2, #636366);
+  --dpv-subtle: var(--text-3, #8e8e93);
+  --dpv-accent: var(--blue, #007aff);
+  --dpv-ok: var(--badge-ok, #1f9d55);
+  --dpv-ok-bg: var(--badge-ok-bg, rgba(52, 199, 89, 0.14));
+  --dpv-info: var(--badge-acc, #007aff);
+  --dpv-info-bg: var(--badge-acc-bg, rgba(0, 122, 255, 0.12));
+  --dpv-warn: var(--badge-warn, #c96a00);
+  --dpv-warn-bg: var(--badge-warn-bg, rgba(255, 149, 0, 0.15));
+  --dpv-danger: var(--badge-red, #d72b2b);
+  --dpv-danger-bg: var(--badge-red-bg, rgba(255, 59, 48, 0.14));
+
+  padding: 16px;
+  margin: 0 0 12px;
+  color: var(--dpv-text);
+}
+
+.dpv-sheet-body,
+.dpv-selfcheck-bar {
+  --dpv-surface: var(--card-2, rgba(255, 255, 255, 0.92));
+  --dpv-surface-2: var(--input, rgba(120, 120, 128, 0.08));
+  --dpv-border: var(--stroke, rgba(60, 60, 67, 0.12));
+  --dpv-text: var(--text-1, #1c1c1e);
+  --dpv-muted: var(--text-2, #636366);
+  --dpv-subtle: var(--text-3, #8e8e93);
+  --dpv-accent: var(--blue, #007aff);
+  --dpv-ok: var(--badge-ok, #1f9d55);
+  --dpv-ok-bg: var(--badge-ok-bg, rgba(52, 199, 89, 0.14));
+  --dpv-info: var(--badge-acc, #007aff);
+  --dpv-info-bg: var(--badge-acc-bg, rgba(0, 122, 255, 0.12));
+  --dpv-warn: var(--badge-warn, #c96a00);
+  --dpv-warn-bg: var(--badge-warn-bg, rgba(255, 149, 0, 0.15));
+  --dpv-danger: var(--badge-red, #d72b2b);
+  --dpv-danger-bg: var(--badge-red-bg, rgba(255, 59, 48, 0.14));
+}
+
+.dpv-ico {
+  flex-shrink: 0;
+  display: inline-block;
+  vertical-align: middle;
+}
+
+.dpv-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.dpv-title-wrap {
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  min-width: 0;
+}
+
+.dpv-icon-box {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--dpv-info-bg);
+  color: var(--dpv-accent);
+  flex-shrink: 0;
+}
+
+.dpv-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dpv-card-title {
+  margin: 0;
+  font-size: 15.5px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+  color: var(--dpv-text);
+}
+
+.dpv-card-sub {
+  margin: 3px 0 0;
+  font-size: 12px;
+  color: var(--dpv-muted);
+}
+
+.dpv-pill,
+.dpv-status-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2.5px 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.dpv-pill-ok,
+.dpv-status-hit {
+  background: var(--dpv-ok-bg);
+  color: var(--dpv-ok);
+}
+
+.dpv-pill-info,
+.dpv-status-idle {
+  background: var(--dpv-info-bg);
+  color: var(--dpv-info);
+}
+
+.dpv-pill-warn,
+.dpv-status-bypass {
+  background: var(--dpv-warn-bg);
+  color: var(--dpv-warn);
+}
+
+.dpv-pill-danger,
+.dpv-status-missing {
+  background: var(--dpv-danger-bg);
+  color: var(--dpv-danger);
+}
+
+.dpv-pill-muted {
+  background: var(--dpv-surface-2);
+  color: var(--dpv-muted);
+}
+
+.dpv-tag-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+  margin-top: 12px;
+}
+
+.dpv-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 10px;
+  border-radius: 9px;
+  font-size: 11.5px;
+  font-weight: 550;
+  background: var(--dpv-surface-2);
+  color: var(--dpv-text);
+  border: 1px solid var(--dpv-border);
+}
+
+.dpv-chip-primary {
+  color: var(--dpv-info);
+  background: var(--dpv-info-bg);
+  border-color: transparent;
+}
+
+.dpv-chip-ok {
+  color: var(--dpv-ok);
+}
+
+.dpv-chip-warn {
+  color: var(--dpv-warn);
+}
+
+.dpv-bpf-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.dpv-bpf-item {
+  background: var(--dpv-surface-2);
+  border-radius: 11px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.dpv-bpf-name {
+  font-size: 11px;
+  color: var(--dpv-muted);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+
+.dpv-bpf-val {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dpv-bpf-val.is-ok {
+  color: var(--dpv-ok);
+}
+
+.dpv-bpf-val.is-warn {
+  color: var(--dpv-warn);
+}
+
+.dpv-bpf-val.is-muted {
+  color: var(--dpv-muted);
+}
+
+.dpv-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dpv-kpi-cell {
+  background: var(--dpv-surface-2);
+  border-radius: 12px;
+  padding: 10px 8px;
+  text-align: center;
+}
+
+.dpv-kpi-num {
+  display: block;
+  font-size: 18px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  color: var(--dpv-text);
+}
+
+.dpv-kpi-cell.is-hit .dpv-kpi-num {
+  color: var(--dpv-ok);
+}
+
+.dpv-kpi-cell.is-idle .dpv-kpi-num {
+  color: var(--dpv-info);
+}
+
+.dpv-kpi-cell.is-alert .dpv-kpi-num {
+  color: var(--dpv-danger);
+}
+
+.dpv-kpi-label {
+  display: block;
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--dpv-muted);
+}
+
+.dpv-verdict-line {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--dpv-muted);
+}
+
+.dpv-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(148px, 1fr));
+  gap: 9px;
+  margin-top: 13px;
+}
+
+.dpv-btn {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 12px;
+  min-height: 40px;
+  padding: 8px 13px;
+  font-size: 13px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  text-align: center;
+  transition: transform 0.12s ease, opacity 0.15s ease;
+}
+
+.dpv-btn:active {
+  transform: scale(0.985);
+}
+
+.dpv-btn:disabled {
+  opacity: 0.58;
+  cursor: default;
+}
+
+.dpv-btn-primary {
+  background: var(--dpv-accent);
+  color: #ffffff;
+}
+
+.dpv-btn-secondary {
+  background: var(--dpv-surface-2);
+  color: var(--dpv-text);
+  border-color: var(--dpv-border);
+}
+
+.dpv-btn-warn {
+  background: var(--dpv-warn-bg);
+  color: var(--dpv-warn);
+  border-color: var(--dpv-warn);
+}
+
+.dpv-btn-compact {
+  min-height: 32px;
+  padding: 5px 11px;
+  font-size: 12px;
+  border-radius: 9px;
+  background: var(--dpv-info-bg);
+  color: var(--dpv-info);
+}
+
+.dpv-btn-compact.dpv-btn-warn {
+  background: var(--dpv-warn-bg);
+  color: var(--dpv-warn);
+  border-color: var(--dpv-warn);
+}
+
+/* ---------- Sheet 抽屉与逐设备明细 ---------- */
+.dpv-sheet-body {
+  color: var(--dpv-text);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 8px;
+}
+
+.dpv-pipe-banner {
+  background: var(--dpv-surface-2);
+  border: 1px solid var(--dpv-border);
+  border-radius: 13px;
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--dpv-muted);
+}
+
+.dpv-pipe-banner strong {
+  color: var(--dpv-text);
+}
+
+.dpv-leak-box {
+  background: var(--dpv-surface-2);
+  border: 1px solid var(--dpv-border);
+  border-radius: 13px;
+  padding: 11px 12px;
+}
+
+.dpv-leak-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dpv-leak-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.dpv-leak-title {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dpv-leak-desc {
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: var(--dpv-muted);
+  line-height: 1.45;
+}
+
+.dpv-leak-stacks {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.08);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow-x: auto;
+  color: var(--dpv-danger);
+}
+
+.dpv-switch {
+  width: 46px;
+  height: 27px;
+  border-radius: 999px;
+  border: none;
+  padding: 2px;
+  background: rgba(120, 120, 128, 0.32);
+  cursor: pointer;
+  position: relative;
+  flex-shrink: 0;
+  transition: background 0.18s ease;
+}
+
+.dpv-switch.is-on {
+  background: var(--green, #34c759);
+}
+
+.dpv-switch-knob {
+  display: block;
+  width: 23px;
+  height: 23px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+  transition: transform 0.18s ease;
+}
+
+.dpv-switch.is-on .dpv-switch-knob {
+  transform: translateX(19px);
+}
+
+.dpv-sheet-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dpv-sheet-actions {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dpv-sheet-count {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--dpv-muted);
+}
+
+.dpv-dev-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.dpv-dev-card {
+  background: var(--dpv-surface);
+  border: 1px solid var(--dpv-border);
+  border-radius: 14px;
+  padding: 12px;
+}
+
+.dpv-dev-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.dpv-dev-name {
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.dpv-dev-addr {
+  margin-top: 2px;
+  font-size: 11.5px;
+  color: var(--dpv-muted);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+
+.dpv-dev-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 9px;
+}
+
+.dpv-mono-tag,
+.dpv-tier-tag {
+  font-size: 11px;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: var(--dpv-surface-2);
+  color: var(--dpv-text);
+  font-family: var(--mono, ui-monospace, SFMono-Regular, Menlo, Consolas, monospace);
+}
+
+.dpv-mono-tag.is-quic,
+.dpv-tier-tag {
+  color: var(--dpv-info);
+  background: var(--dpv-info-bg);
+}
+
+.dpv-counter-pair {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.dpv-counter-box {
+  background: var(--dpv-surface-2);
+  border-radius: 10px;
+  padding: 8px 10px;
+}
+
+.dpv-counter-label {
+  font-size: 11px;
+  color: var(--dpv-muted);
+}
+
+.dpv-counter-bytes {
+  margin-top: 3px;
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.dpv-counter-bytes strong {
+  font-size: 14.5px;
+}
+
+.dpv-delta {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--dpv-ok);
+}
+
+.dpv-counter-sub {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--dpv-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dpv-dev-reason {
+  margin-top: 8px;
+  font-size: 11.5px;
+  line-height: 1.45;
+  color: var(--dpv-muted);
+}
+
+.dpv-dev-fix {
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-radius: 8px;
+  background: var(--dpv-warn-bg);
+  color: var(--dpv-warn);
+  font-size: 11.5px;
+  font-weight: 550;
+}
+
+.dpv-subapps {
+  margin-top: 10px;
+  padding-top: 9px;
+  border-top: 1px dashed var(--dpv-border);
+}
+
+.dpv-subapps-hd {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--dpv-muted);
+  margin-bottom: 6px;
+}
+
+.dpv-subapp-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 0;
+  font-size: 11.5px;
+}
+
+.dpv-subapp-main {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dpv-subapp-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--dpv-info);
+}
+
+.dpv-subapp-dot.is-hit {
+  background: var(--dpv-ok);
+}
+
+.dpv-subapp-dot.is-err {
+  background: var(--dpv-danger);
+}
+
+.dpv-subapp-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  color: var(--dpv-muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.dpv-subapp-metrics em {
+  font-style: normal;
+  color: var(--dpv-ok);
+  font-weight: 600;
+}
+
+.dpv-empty {
+  padding: 22px 14px;
+  text-align: center;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--dpv-muted);
+  background: var(--dpv-surface-2);
+  border-radius: 12px;
+}
+
+/* ---------- 自检弹层联动条 ---------- */
+.dpv-selfcheck-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: var(--dpv-surface-2);
+  border: 1px solid var(--dpv-border);
+  margin: 8px 0;
+  color: var(--dpv-text);
+}
+
+.dpv-selfcheck-left {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+}
+
+.dpv-selfcheck-left .dpv-ico {
+  color: var(--dpv-accent);
+}
+
+.dpv-selfcheck-title {
+  font-size: 12.5px;
+  font-weight: 600;
+}
+
+.dpv-selfcheck-sub {
+  font-size: 11px;
+  color: var(--dpv-muted);
+}
+
+
+@media (max-width: 640px) {
+  .dpv-bpf-grid {
+    grid-template-columns: 1fr;
+  }
+  .dpv-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .dpv-actions,
+  .dpv-counter-pair {
+    grid-template-columns: 1fr;
+  }
+}

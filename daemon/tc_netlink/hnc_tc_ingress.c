@@ -1,57 +1,40 @@
 /* SPDX-License-Identifier: GPL-2.0 */
 /*
- * hnc_tc_ingress.c — Install tc clsact + matchall + mirred via raw rtnetlink
+ * hnc_tc_ingress.c — Install tc clsact + matchall->mirred / dual-stack police via raw rtnetlink
  *
- * Purpose
- * -------
- * HNC needs the following two tc operations on the hotspot uplink iface to
- * steer ingress traffic to an IFB device (so HTB can shape uplink):
+ * Purpose (HNC v5.40.0)
+ * ---------------------
+ * 1. Primary IFB steering path (decoupled from prio 1 clsact BPF):
+ *        tc qdisc  add dev <iface> clsact
+ *        tc filter replace dev <iface> ingress prio <prio> protocol all matchall \
+ *            action mirred egress redirect dev <ifb_iface>
+ *    Default <prio> is 2 so prio 1 remains exclusively reserved for `hnc_clsact.o`
+ *    (which marks packets in skb->mark[23:16] and returns TC_ACT_UNSPEC).
  *
- *     tc qdisc  add dev <iface> clsact
- *     tc filter add dev <iface> ingress prio <prio> protocol all matchall \
- *         action mirred egress redirect dev <ifb_iface>
+ * 2. Dual-stack GRO-safe `tc police` fallback (for GKI 6.1/6.6 kernels without IFB/mirred
+ *    and ROMs whose /system/bin/tc rejects the "ingress" parent keyword):
+ *        hnc_tc_ingress police <iface> <rate> [prio] [all|ip|ipv6|dual] [src_ip]
+ *        hnc_tc_ingress police-del <iface> <prio> [all|ip|ipv6|dual]
+ *    Enforces GRO-safe `burst = max(rate_bytes_per_sec / 8, 65536)` (>= 64 KB)
+ *    and `mtu = 65535` across ETH_P_ALL or ETH_P_IP + ETH_P_IPV6.
  *
- * On ColorOS 16 / realme GT 7 Pro, /system/bin/tc is a ROM-customised binary
- * whose user-space pre-validation rejects the "ingress" parent keyword during
- * the 30–45 s window between `wlan2` coming UP and `oplus-netd` finishing its
- * own qdisc-tree init. The kernel itself always accepts the netlink message,
- * so bypassing /system/bin/tc and talking rtnetlink directly gets us a clean
- * install at T+0 instead of T+30 s.
- *
- * Usage
- * -----
+ * Legacy CLI Compatibility (100% preserved)
+ * -----------------------------------------
  *     hnc_tc_ingress <iface> <ifb_iface> [prio]
  *
- *     prio defaults to 1; range [1..65535].
- *
- * Return codes
- * ------------
+ * Return codes:
  *     0   installed OK, or already present (idempotent EEXIST)
  *     1   iface not found           (if_nametoindex == 0)
  *     2   ifb_iface not found
  *     3   netlink error             (socket/send/recv/kernel errno)
  *     4   CLI / usage error
- *
- * stderr carries human-readable log lines; stdout is left empty so callers
- * can capture it without noise.
- *
- * Dependencies
- * ------------
- * Pure libc + Linux uapi headers only. No libnl, no libmnl, no libbpf.
- * Targets Android arm64 via NDK r27c (aarch64-linux-android21-clang); also
- * compiles on any Linux host with kernel headers ≥ 4.14.
- *
- * Style note
- * ----------
- * addattr_l / addattr_nest / addattr_nest_end are patterned after iproute2's
- * lib/libnetlink.c (GPL-2.0), which is what the canonical `tc` userspace
- * uses to build the exact same messages.
  */
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
 
+#include <ctype.h>
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -74,28 +57,28 @@
 
 /* ── Constants ───────────────────────────────────────────────────────── */
 
-/*
- * TC_H_CLSACT | TC_H_MIN_INGRESS == 0xFFFFFFF1 | 0x0000FFF2 == 0xFFFFFFF2.
- *
- * This is the "ingress" virtual parent used by `tc filter add dev X ingress`.
- * Defined literally so we don't depend on both macros being exported by
- * whatever version of <linux/pkt_sched.h> the NDK sysroot ships.
- */
+#define HNC_TC_H_CLSACT_PARENT    0xFFFFFFF1U
 #define HNC_TC_H_INGRESS_PARENT   0xFFFFFFF2U
-
-/*
- * Conventional clsact qdisc handle: major=0xFFFF, minor=0x0000. The kernel
- * rewrites this internally anyway (see net/sched/sch_ingress.c), but iproute2
- * emits this exact value so we do too — fewer cross-kernel surprises.
- */
 #define HNC_TC_H_CLSACT_HANDLE    0xFFFF0000U
 
-#define RTNL_REQ_BUF_SIZE         1024    /* per-request scratch buffer      */
-#define RTNL_RECV_BUF_SIZE        8192    /* ACK / NLMSG_ERROR recv buffer   */
-#define RTNL_RECV_TIMEOUT_S       3       /* kernel ACKs are always fast     */
-#define RTNL_MAX_RECV_TRIES       32      /* cap stray unmatched replies     */
+/* Default mirred priority = 2 to yield prio 1 to hnc_clsact BPF */
+#define HNC_DEFAULT_MIRRED_PRIO   2
+#define HNC_DEFAULT_POLICE_PRIO   300
 
-/* Return codes — keep in sync with README.md and SPEC. */
+/* Minimum GRO-safe police burst (64 KiB) and super-frame MTU (65535 B) */
+#define HNC_POLICE_MIN_BURST      65536ULL
+#define HNC_POLICE_MTU            65535U
+
+#ifndef TCA_POLICE_RATE64
+#define TCA_POLICE_RATE64         8
+#endif
+
+#define RTNL_REQ_BUF_SIZE         4096    /* accommodates 256-entry rtab + u32/matchall */
+#define RTNL_RECV_BUF_SIZE        8192    /* ACK / NLMSG_ERROR recv buffer              */
+#define RTNL_RECV_TIMEOUT_S       3       /* kernel ACKs are always fast                */
+#define RTNL_MAX_RECV_TRIES       32      /* cap stray unmatched replies                */
+
+/* Return codes — keep in sync with README.md and tc_manager.sh */
 #define RC_OK                     0
 #define RC_IFACE_NOT_FOUND        1
 #define RC_IFB_NOT_FOUND          2
@@ -109,68 +92,190 @@
 #define LOGI(fmt, ...) \
     fprintf(stderr, "hnc_tc_ingress: " fmt "\n", ##__VA_ARGS__)
 
-/* ── rtnetlink nlattr builders ───────────────────────────────────────── */
+/* ── Union-backed rtnetlink request buffer (C11 provenance clean) ────── */
 
-/* Address of the next rtattr slot inside an in-progress nlmsghdr. */
-#define NLMSG_TAIL(nmsg) \
-    ((struct rtattr *)(((char *)(nmsg)) + NLMSG_ALIGN((nmsg)->nlmsg_len)))
+union nl_tc_req {
+    struct {
+        struct nlmsghdr n;
+        struct tcmsg    t;
+        char            buf[RTNL_REQ_BUF_SIZE];
+    } m;
+    unsigned char raw[sizeof(struct nlmsghdr) + sizeof(struct tcmsg) + RTNL_REQ_BUF_SIZE];
+};
 
-/*
- * Append a flat attribute (type, data, alen) to the message at `n`, which is
- * backed by a buffer of total size `maxlen`. Returns 0 on success or -1 on
- * overflow (errno = EMSGSIZE).
- */
-static int addattr_l(struct nlmsghdr *n, size_t maxlen, int type,
-                     const void *data, size_t alen)
+static int req_addattr_l(union nl_tc_req *req, int type,
+                         const void *data, size_t alen)
 {
-    size_t        len = RTA_LENGTH(alen);
-    struct rtattr *rta;
+    size_t len     = RTA_LENGTH(alen);
+    size_t cur_off = NLMSG_ALIGN(req->m.n.nlmsg_len);
+    size_t new_len = cur_off + RTA_ALIGN(len);
 
-    if (NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len) > maxlen) {
+    if (new_len > sizeof(req->raw)) {
         errno = EMSGSIZE;
         return -1;
     }
-    rta = NLMSG_TAIL(n);
+    struct rtattr *rta = (struct rtattr *)(req->raw + cur_off);
     rta->rta_type = (unsigned short)type;
     rta->rta_len  = (unsigned short)len;
     if (alen > 0 && data != NULL)
         memcpy(RTA_DATA(rta), data, alen);
-    n->nlmsg_len = (uint32_t)(NLMSG_ALIGN(n->nlmsg_len) + RTA_ALIGN(len));
+    req->m.n.nlmsg_len = (uint32_t)new_len;
     return 0;
 }
 
-/*
- * Open a nested attribute. The returned pointer must later be passed to
- * addattr_nest_end() to patch the length once the contents are written.
- * Returns NULL on overflow (errno set by addattr_l).
- *
- * NOTE: `type` is written verbatim — caller decides whether to OR in
- * NLA_F_NESTED. iproute2's wire convention for tc filters is to set that
- * flag only on TCA_ACT_OPTIONS, leaving TCA_OPTIONS / TCA_MATCHALL_ACT /
- * action-index nests with the plain type. We mirror that exactly so the
- * bytes we emit are byte-identical to `tc` for every kernel that `tc` works
- * against.
- */
-static struct rtattr *addattr_nest(struct nlmsghdr *n, size_t maxlen, int type)
+static size_t req_nest_begin(union nl_tc_req *req, int type)
 {
-    struct rtattr *nest = NLMSG_TAIL(n);
-
-    if (addattr_l(n, maxlen, type, NULL, 0) < 0)
-        return NULL;
-    return nest;
+    size_t off = NLMSG_ALIGN(req->m.n.nlmsg_len);
+    if (req_addattr_l(req, type, NULL, 0) < 0)
+        return 0;
+    return off;
 }
 
-/* Patch nest->rta_len to cover everything written after addattr_nest(). */
-static void addattr_nest_end(struct nlmsghdr *n, struct rtattr *nest)
+static void req_nest_end(union nl_tc_req *req, size_t off)
 {
-    nest->rta_len = (unsigned short)((char *)NLMSG_TAIL(n) - (char *)nest);
+    struct rtattr *nest = (struct rtattr *)(req->raw + off);
+    size_t end_off = NLMSG_ALIGN(req->m.n.nlmsg_len);
+    nest->rta_len = (unsigned short)(end_off - off);
+}
+
+/* ── Unsigned integer & rate parsers (32/64-bit armv7a/arm64 safe) ───── */
+
+static int parse_prio_arg(const char *s, int *out_prio)
+{
+    if (!s || *s == '\0' || *s == '-' || *s == '+')
+        return -1;
+    char *endp = NULL;
+    errno = 0;
+    unsigned long long v = strtoull(s, &endp, 10);
+    if (errno != 0 || endp == s || *endp != '\0' || v < 1ULL || v > 65535ULL)
+        return -1;
+    *out_prio = (int)v;
+    return 0;
+}
+
+static int parse_rate_bytes_per_sec(const char *s, uint64_t *out_Bps)
+{
+    if (!s || !out_Bps)
+        return -1;
+    while (isspace((unsigned char)*s))
+        s++;
+    if (*s == '\0' || *s == '-' || *s == '+')
+        return -1;
+
+    char *endp = NULL;
+    errno = 0;
+    unsigned long long val = strtoull(s, &endp, 10);
+    if (errno != 0 || endp == s || val == 0ULL || val > 0xffffffffffffULL)
+        return -1;
+
+    uint64_t bps_bytes = 0;
+    if (*endp == '\0' || strcasecmp(endp, "Bps") == 0 || strcmp(endp, "B") == 0) {
+        bps_bytes = (uint64_t)val;
+    } else if (strcasecmp(endp, "bit") == 0) {
+        bps_bytes = (uint64_t)val / 8ULL;
+    } else if (strcasecmp(endp, "kbit") == 0) {
+        bps_bytes = ((uint64_t)val * 1000ULL) / 8ULL;
+    } else if (strcasecmp(endp, "mbit") == 0) {
+        bps_bytes = ((uint64_t)val * 1000000ULL) / 8ULL;
+    } else if (strcasecmp(endp, "gbit") == 0) {
+        bps_bytes = ((uint64_t)val * 1000000000ULL) / 8ULL;
+    } else if (strcasecmp(endp, "kbps") == 0) {
+        bps_bytes = (uint64_t)val * 1000ULL;
+    } else if (strcasecmp(endp, "mbps") == 0) {
+        bps_bytes = (uint64_t)val * 1000000ULL;
+    } else {
+        return -1;
+    }
+
+    if (bps_bytes == 0ULL)
+        bps_bytes = 1ULL;
+    *out_Bps = bps_bytes;
+    return 0;
+}
+
+/* Pure C11 64x64->128 unsigned arithmetic (32-bit armeabi-v7a safe, pure uint64_t) */
+typedef struct {
+    uint64_t hi;
+    uint64_t lo;
+} hnc_u128_t;
+
+static hnc_u128_t mul64x64_u128(uint64_t a, uint64_t b)
+{
+    uint64_t a0 = a & 0xffffffffULL;
+    uint64_t a1 = a >> 32;
+    uint64_t b0 = b & 0xffffffffULL;
+    uint64_t b1 = b >> 32;
+
+    uint64_t p00 = a0 * b0;
+    uint64_t p01 = a0 * b1;
+    uint64_t p10 = a1 * b0;
+    uint64_t p11 = a1 * b1;
+
+    uint64_t mid = (p00 >> 32) + (p01 & 0xffffffffULL) + (p10 & 0xffffffffULL);
+    hnc_u128_t res;
+    res.lo = (p00 & 0xffffffffULL) | (mid << 32);
+    res.hi = p11 + (p01 >> 32) + (p10 >> 32) + (mid >> 32);
+    return res;
+}
+
+static uint32_t div_u128_u64_sat32(hnc_u128_t num, uint64_t den)
+{
+    if (den == 0ULL || num.hi >= den)
+        return 0xffffffffU;
+    if (num.hi == 0ULL) {
+        uint64_t q0 = num.lo / den;
+        return (q0 > 0xffffffffULL) ? 0xffffffffU : (uint32_t)q0;
+    }
+
+    uint64_t rem = num.hi;
+    uint64_t q   = 0ULL;
+    unsigned int bit = 64U;
+    while (bit-- > 0U) {
+        uint64_t carry = rem >> 63;
+        rem = (rem << 1) | ((num.lo >> bit) & 1ULL);
+        if (carry != 0ULL || rem >= den) {
+            rem -= den;
+            q |= (1ULL << bit);
+        }
+    }
+    return (q > 0xffffffffULL) ? 0xffffffffU : (uint32_t)q;
+}
+
+static uint32_t calc_psched_ticks(uint64_t rate_Bps, uint64_t bytes)
+{
+    static uint32_t t2us = 0, us2t = 0;
+    if (t2us == 0 || us2t == 0) {
+        t2us = 1000U;
+        us2t = 64U;
+        FILE *fp = fopen("/proc/net/psched", "re");
+        if (fp) {
+            unsigned int a = 0, b = 0;
+            if (fscanf(fp, "%08x %08x", &a, &b) == 2 && a > 0U && b > 0U) {
+                t2us = a;
+                us2t = b;
+            }
+            fclose(fp);
+        }
+    }
+    if (rate_Bps == 0ULL)
+        return 1U;
+
+    hnc_u128_t num = mul64x64_u128(bytes, 1000000ULL * (uint64_t)t2us);
+    hnc_u128_t den = mul64x64_u128(rate_Bps, (uint64_t)us2t);
+    while (den.hi != 0ULL) {
+        num.lo = (num.lo >> 1) | (num.hi << 63);
+        num.hi >>= 1;
+        den.lo = (den.lo >> 1) | (den.hi << 63);
+        den.hi >>= 1;
+    }
+    uint32_t ticks = div_u128_u64_sat32(num, den.lo);
+    return (ticks == 0U) ? 1U : ticks;
 }
 
 /* ── rtnetlink socket I/O ────────────────────────────────────────────── */
 
-static uint32_t g_seq;  /* per-process sequence counter, seeded in rtnl_open */
+static uint32_t g_seq;
 
-/* Open + bind an AF_NETLINK/NETLINK_ROUTE socket. Returns fd or -1. */
 static int rtnl_open(void)
 {
     int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
@@ -182,40 +287,26 @@ static int rtnl_open(void)
     struct sockaddr_nl sa;
     memset(&sa, 0, sizeof(sa));
     sa.nl_family = AF_NETLINK;
-    /* nl_pid = 0 → kernel auto-assigns to our PID; good enough for one-shot. */
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         LOGE("bind(AF_NETLINK): %s", strerror(errno));
         close(fd);
         return -1;
     }
 
-    /* Defensive recv timeout — kernel ACKs in µs; anything slow is a bug. */
     struct timeval tv = { .tv_sec = RTNL_RECV_TIMEOUT_S, .tv_usec = 0 };
     (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     if (g_seq == 0) {
-        g_seq = (uint32_t)(time(NULL) ^ ((uint32_t)getpid() << 16));
+        g_seq = (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16);
         if (g_seq == 0) g_seq = 1;
     }
     return fd;
 }
 
-/*
- * Send one already-filled request and wait for the single NLMSG_ERROR reply
- * that NLM_F_ACK guarantees.
- *
- * Return value:
- *     0              kernel ACKed with err->error == 0
- *     0              kernel returned -EEXIST (treated as idempotent success)
- *     negative errno kernel rejected the request, or I/O failed
- *
- * `what` is purely a log tag ("clsact qdisc add", etc.).
- */
-static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
+static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what, int ignore_enoent)
 {
-    /* Stamp the request right before sending so seq is monotonic. */
     n->nlmsg_seq = ++g_seq;
-    n->nlmsg_pid = 0;   /* reply routed back to our bound nl_pid */
+    n->nlmsg_pid = 0;
 
     struct sockaddr_nl sa;
     memset(&sa, 0, sizeof(sa));
@@ -244,7 +335,6 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
         .msg_iovlen  = 1,
     };
 
-    /* Bounded loop until we get a reply with matching seq, or I/O fails. */
     for (int tries = 0; tries < RTNL_MAX_RECV_TRIES; tries++) {
         ssize_t len = recvmsg(fd, &msg, 0);
         if (len < 0) {
@@ -257,10 +347,16 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
             return -EIO;
         }
 
-        int rem = (int)len;
-        struct nlmsghdr *h = (struct nlmsghdr *)buf;
-        for (; rem >= (int)sizeof(*h) && NLMSG_OK(h, (unsigned int)rem); h = NLMSG_NEXT(h, rem)) {
-            /* Stray multicast or stale reply — skip. */
+        size_t rem = (size_t)len;
+        for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
+            struct nlmsghdr *h = (struct nlmsghdr *)(buf + off);
+            if (h->nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h->nlmsg_len > rem)
+                break;
+            size_t step = NLMSG_ALIGN(h->nlmsg_len);
+            if (step > rem)
+                step = rem;
+            off += step;
+            rem -= step;
             if (h->nlmsg_seq != n->nlmsg_seq)
                 continue;
 
@@ -270,20 +366,18 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
                     return -EBADMSG;
                 }
                 struct nlmsgerr *err = (struct nlmsgerr *)NLMSG_DATA(h);
-                if (err->error == 0)
-                    return 0;                       /* success ACK */
-                if (err->error == -EEXIST)
-                    return 0;                       /* idempotent  */
+                if (err->error == 0 || err->error == -EEXIST)
+                    return 0;
+                if (ignore_enoent && (err->error == -ENOENT || err->error == -EINVAL))
+                    return 0;
                 LOGE("%s: kernel rejected: %s (errno=%d)",
                      what, strerror(-err->error), -err->error);
-                return err->error;                  /* already negative */
+                return err->error;
             }
 
-            /* Anything else with matching seq is unexpected for NEW* req. */
             LOGE("%s: unexpected nlmsg_type=%u", what, h->nlmsg_type);
             return -EPROTO;
         }
-        /* No matching seq in this datagram — loop and read more. */
     }
     LOGE("%s: exceeded %d unmatched netlink replies", what, RTNL_MAX_RECV_TRIES);
     return -EPROTO;
@@ -291,37 +385,26 @@ static int rtnl_send_ack(int fd, struct nlmsghdr *n, const char *what)
 
 /* ── Build & send: RTM_NEWQDISC clsact ───────────────────────────────── */
 
-/*
- * Install the clsact qdisc on `ifindex`. Idempotent: EEXIST is success.
- * clsact replaces the legacy "ingress" qdisc from Linux 4.5 onwards and
- * exposes both ingress and egress filter hooks via the TC_H_MIN_INGRESS /
- * TC_H_MIN_EGRESS minor slots.
- */
 static int install_clsact(int fd, int ifindex, const char *iface)
 {
-    struct {
-        struct nlmsghdr n;
-        struct tcmsg    t;
-        char            buf[RTNL_REQ_BUF_SIZE];
-    } req;
+    union nl_tc_req req;
     memset(&req, 0, sizeof(req));
 
-    req.n.nlmsg_len   = NLMSG_LENGTH(sizeof(struct tcmsg));
-    req.n.nlmsg_type  = RTM_NEWQDISC;
-    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK;
+    req.m.n.nlmsg_len   = NLMSG_LENGTH(sizeof(struct tcmsg));
+    req.m.n.nlmsg_type  = RTM_NEWQDISC;
+    req.m.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK;
 
-    req.t.tcm_family  = AF_UNSPEC;
-    req.t.tcm_ifindex = ifindex;
-    req.t.tcm_parent  = TC_H_CLSACT;                   /* 0xFFFFFFF1 */
-    req.t.tcm_handle  = HNC_TC_H_CLSACT_HANDLE;        /* 0xFFFF0000 */
+    req.m.t.tcm_family  = AF_UNSPEC;
+    req.m.t.tcm_ifindex = ifindex;
+    req.m.t.tcm_parent  = HNC_TC_H_CLSACT_PARENT;
+    req.m.t.tcm_handle  = HNC_TC_H_CLSACT_HANDLE;
 
-    if (addattr_l(&req.n, sizeof(req), TCA_KIND,
-                  "clsact", sizeof("clsact")) < 0) {
+    if (req_addattr_l(&req, TCA_KIND, "clsact", sizeof("clsact")) < 0) {
         LOGE("clsact: addattr_l(TCA_KIND): %s", strerror(errno));
         return -errno;
     }
 
-    int rc = rtnl_send_ack(fd, &req.n, "clsact qdisc add");
+    int rc = rtnl_send_ack(fd, &req.m.n, "clsact qdisc add", 0);
     if (rc == 0)
         LOGI("clsact qdisc OK on %s (ifindex=%d)", iface, ifindex);
     return rc;
@@ -329,129 +412,249 @@ static int install_clsact(int fd, int ifindex, const char *iface)
 
 /* ── Build & send: RTM_NEWTFILTER matchall + mirred ──────────────────── */
 
-/*
- * Append a single "mirred egress redirect dev <ifb>" action into the current
- * TCA_MATCHALL_ACT -> act[N] nested attribute. Caller is responsible for the
- * enclosing nest_end() calls.
- */
-static int append_mirred_action(struct nlmsghdr *n, size_t maxlen,
-                                int ifb_ifindex)
+static int append_mirred_action(union nl_tc_req *req, int ifb_ifindex)
 {
     struct tc_mirred mirred;
     memset(&mirred, 0, sizeof(mirred));
-    /*
-     * tc_gen embedded fields (index=0 capab=0 refcnt=0 bindcnt=0) left zero.
-     * .action = TC_ACT_STOLEN tells the ingress path this skb is now owned
-     * by the mirred action and must not be freed by the caller.
-     */
     mirred.action  = TC_ACT_STOLEN;
-    mirred.eaction = TCA_EGRESS_REDIR;   /* redirect (not mirror)  */
-    mirred.ifindex = ifb_ifindex;
+    mirred.eaction = TCA_EGRESS_REDIR;
+    mirred.ifindex = (uint32_t)ifb_ifindex;
 
-    if (addattr_l(n, maxlen, TCA_ACT_KIND,
-                  "mirred", sizeof("mirred")) < 0)
+    if (req_addattr_l(req, TCA_ACT_KIND, "mirred", sizeof("mirred")) < 0)
         return -errno;
 
-    /*
-     * iproute2 emits TCA_ACT_OPTIONS with NLA_F_NESTED set (type | 0x8000).
-     * All the OTHER nests (TCA_OPTIONS, TCA_MATCHALL_ACT, action-index)
-     * are emitted with the plain type — we match that convention exactly
-     * so our bytes are identical to `tc` on the wire.
-     */
-    struct rtattr *act_opts =
-        addattr_nest(n, maxlen, TCA_ACT_OPTIONS | NLA_F_NESTED);
+    size_t act_opts = req_nest_begin(req, TCA_ACT_OPTIONS | NLA_F_NESTED);
     if (!act_opts) return -errno;
 
-    if (addattr_l(n, maxlen, TCA_MIRRED_PARMS,
-                  &mirred, sizeof(mirred)) < 0)
+    if (req_addattr_l(req, TCA_MIRRED_PARMS, &mirred, sizeof(mirred)) < 0)
         return -errno;
 
-    addattr_nest_end(n, act_opts);
+    req_nest_end(req, act_opts);
     return 0;
 }
 
-/*
- * Install a matchall classifier on the ingress slot of `iface_ifindex` with
- * a single mirred-egress-redirect action pointing at `ifb_ifindex`.
- *
- * Equivalent shell:
- *     tc filter add dev <iface> ingress prio <prio> protocol all matchall \
- *         action mirred egress redirect dev <ifb_iface>
- *
- * Idempotent: EEXIST on the same (parent, prio) is treated as success.
- */
 static int install_matchall_filter(int fd,
                                    int iface_ifindex, int ifb_ifindex,
                                    int prio,
                                    const char *iface, const char *ifb_iface)
 {
-    struct {
-        struct nlmsghdr n;
-        struct tcmsg    t;
-        char            buf[RTNL_REQ_BUF_SIZE];
-    } req;
+    union nl_tc_req req;
     memset(&req, 0, sizeof(req));
 
-    req.n.nlmsg_len   = NLMSG_LENGTH(sizeof(struct tcmsg));
-    req.n.nlmsg_type  = RTM_NEWTFILTER;
-    req.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_EXCL | NLM_F_ACK;
+    req.m.n.nlmsg_len   = NLMSG_LENGTH(sizeof(struct tcmsg));
+    req.m.n.nlmsg_type  = RTM_NEWTFILTER;
+    req.m.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE | NLM_F_ACK;
 
-    req.t.tcm_family  = AF_UNSPEC;
-    req.t.tcm_ifindex = iface_ifindex;
-    req.t.tcm_parent  = HNC_TC_H_INGRESS_PARENT;        /* 0xFFFFFFF2 */
-    req.t.tcm_handle  = 0;                              /* let kernel pick */
+    req.m.t.tcm_family  = AF_UNSPEC;
+    req.m.t.tcm_ifindex = iface_ifindex;
+    req.m.t.tcm_parent  = HNC_TC_H_INGRESS_PARENT;
+    req.m.t.tcm_handle  = 1U;
+    req.m.t.tcm_info    = TC_H_MAKE((uint32_t)prio << 16, htons(ETH_P_ALL));
 
-    /*
-     * tcm_info layout (u32, host byte order container):
-     *   bits 31..16  prio   — plain integer major id
-     *   bits 15.. 0  proto  — **stored in network byte order**
-     *
-     * In net/sched/cls_api.c the kernel does
-     *     protocol = TC_H_MIN(t->tcm_info)
-     * then compares against htons(ETH_P_ALL), so htons() here is mandatory.
-     */
-    req.t.tcm_info = TC_H_MAKE((uint32_t)prio << 16, htons(ETH_P_ALL));
-
-    if (addattr_l(&req.n, sizeof(req), TCA_KIND,
-                  "matchall", sizeof("matchall")) < 0) {
+    if (req_addattr_l(&req, TCA_KIND, "matchall", sizeof("matchall")) < 0) {
         LOGE("matchall: addattr_l(TCA_KIND): %s", strerror(errno));
         return -errno;
     }
 
-    /*
-     * Nested attribute tree:
-     *   TCA_OPTIONS
-     *     TCA_MATCHALL_ACT              (= the action list)
-     *       [rta_type = 1]              (= action index 1; single action)
-     *         TCA_ACT_KIND = "mirred"
-     *         TCA_ACT_OPTIONS
-     *           TCA_MIRRED_PARMS = struct tc_mirred
-     */
-    struct rtattr *options = addattr_nest(&req.n, sizeof(req), TCA_OPTIONS);
-    if (!options) { LOGE("matchall: nest TCA_OPTIONS"); return -errno; }
+    size_t options = req_nest_begin(&req, TCA_OPTIONS);
+    size_t ma_act  = req_nest_begin(&req, TCA_MATCHALL_ACT);
+    size_t act_1   = req_nest_begin(&req, 1);
+    if (!options || !ma_act || !act_1)
+        return -EMSGSIZE;
 
-    struct rtattr *ma_act = addattr_nest(&req.n, sizeof(req), TCA_MATCHALL_ACT);
-    if (!ma_act)  { LOGE("matchall: nest TCA_MATCHALL_ACT"); return -errno; }
-
-    /* Action index 1 — the rtattr type *is* the index. */
-    struct rtattr *act_1 = addattr_nest(&req.n, sizeof(req), 1);
-    if (!act_1)   { LOGE("matchall: nest act[1]"); return -errno; }
-
-    int rc = append_mirred_action(&req.n, sizeof(req), ifb_ifindex);
+    int rc = append_mirred_action(&req, ifb_ifindex);
     if (rc < 0) {
         LOGE("matchall: append_mirred_action: %s", strerror(-rc));
         return rc;
     }
 
-    addattr_nest_end(&req.n, act_1);
-    addattr_nest_end(&req.n, ma_act);
-    addattr_nest_end(&req.n, options);
+    req_nest_end(&req, act_1);
+    req_nest_end(&req, ma_act);
+    req_nest_end(&req, options);
 
-    rc = rtnl_send_ack(fd, &req.n, "matchall+mirred filter add");
+    rc = rtnl_send_ack(fd, &req.m.n, "matchall+mirred filter replace", 0);
     if (rc == 0)
         LOGI("matchall prio %d → %s (ifindex=%d) installed on %s",
              prio, ifb_iface, ifb_ifindex, iface);
     return rc;
+}
+
+/* ── Build & send: GRO-safe Dual-Stack `police` action ───────────────── */
+
+static int append_police_action(union nl_tc_req *req, uint64_t rate_bytes_per_sec)
+{
+    uint64_t burst_bytes = rate_bytes_per_sec / 8ULL;
+    if (burst_bytes < HNC_POLICE_MIN_BURST)
+        burst_bytes = HNC_POLICE_MIN_BURST;
+
+    const uint8_t cell_log = 8;
+    uint32_t rtab[256];
+    for (int i = 0; i < 256; i++) {
+        uint64_t sz = (uint64_t)(i + 1) << cell_log;
+        rtab[i] = calc_psched_ticks(rate_bytes_per_sec, sz);
+    }
+
+    struct tc_police pol;
+    memset(&pol, 0, sizeof(pol));
+    pol.action        = TC_POLICE_SHOT;
+    pol.mtu           = HNC_POLICE_MTU;
+    pol.burst         = calc_psched_ticks(rate_bytes_per_sec, burst_bytes);
+    pol.rate.cell_log = cell_log;
+    pol.rate.mpu      = 0;
+    pol.rate.overhead = 0;
+    pol.rate.cell_align = -1;
+    pol.rate.rate     = (rate_bytes_per_sec >= 0xffffffffULL)
+                            ? 0xffffffffU
+                            : (uint32_t)rate_bytes_per_sec;
+
+    if (req_addattr_l(req, TCA_ACT_KIND, "police", sizeof("police")) < 0)
+        return -errno;
+
+    size_t act_opts = req_nest_begin(req, TCA_ACT_OPTIONS | NLA_F_NESTED);
+    if (!act_opts)
+        return -EMSGSIZE;
+
+    if (req_addattr_l(req, TCA_POLICE_TBF, &pol, sizeof(pol)) < 0)
+        return -errno;
+    if (req_addattr_l(req, TCA_POLICE_RATE, rtab, sizeof(rtab)) < 0)
+        return -errno;
+    if (rate_bytes_per_sec >= 0xffffffffULL) {
+        if (req_addattr_l(req, TCA_POLICE_RATE64,
+                          &rate_bytes_per_sec, sizeof(rate_bytes_per_sec)) < 0)
+            return -errno;
+    }
+
+    req_nest_end(req, act_opts);
+    return 0;
+}
+
+static int install_police_one_proto(int fd, int ifindex, int prio,
+                                    uint16_t eth_proto, uint64_t rate_Bps,
+                                    const char *src_ip, const char *iface)
+{
+    union nl_tc_req req;
+    memset(&req, 0, sizeof(req));
+
+    req.m.n.nlmsg_len   = NLMSG_LENGTH(sizeof(struct tcmsg));
+    req.m.n.nlmsg_type  = RTM_NEWTFILTER;
+    req.m.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_CREATE | NLM_F_REPLACE | NLM_F_ACK;
+
+    req.m.t.tcm_family  = AF_UNSPEC;
+    req.m.t.tcm_ifindex = ifindex;
+    req.m.t.tcm_parent  = HNC_TC_H_INGRESS_PARENT;
+    req.m.t.tcm_info    = TC_H_MAKE((uint32_t)prio << 16, htons(eth_proto));
+
+    if (src_ip != NULL && src_ip[0] != '\0') {
+        struct {
+            struct tc_u32_sel sel;
+            struct tc_u32_key keys[4];
+        } u32_pack;
+        memset(&u32_pack, 0, sizeof(u32_pack));
+        u32_pack.sel.flags = TC_U32_TERMINAL;
+
+        if (eth_proto == ETH_P_IP) {
+            struct in_addr v4;
+            if (inet_pton(AF_INET, src_ip, &v4) != 1) {
+                LOGE("invalid IPv4 src_ip '%s'", src_ip);
+                return -EINVAL;
+            }
+            u32_pack.sel.nkeys   = 1;
+            u32_pack.keys[0].val = v4.s_addr;
+            u32_pack.keys[0].mask = 0xffffffffU;
+            u32_pack.keys[0].off = 12;
+        } else if (eth_proto == ETH_P_IPV6) {
+            struct in6_addr v6;
+            if (inet_pton(AF_INET6, src_ip, &v6) != 1) {
+                LOGE("invalid IPv6 src_ip '%s'", src_ip);
+                return -EINVAL;
+            }
+            u32_pack.sel.nkeys = 4;
+            for (int k = 0; k < 4; k++) {
+                memcpy(&u32_pack.keys[k].val, &v6.s6_addr[k * 4], 4);
+                u32_pack.keys[k].mask = 0xffffffffU;
+                u32_pack.keys[k].off  = 8 + k * 4;
+            }
+        } else {
+            LOGE("src_ip matching requires protocol ip or ipv6");
+            return -EINVAL;
+        }
+
+        req.m.t.tcm_handle = 0;
+        if (req_addattr_l(&req, TCA_KIND, "u32", sizeof("u32")) < 0)
+            return -errno;
+
+        size_t opt_nest = req_nest_begin(&req, TCA_OPTIONS);
+        if (!opt_nest)
+            return -EMSGSIZE;
+
+        size_t sel_bytes = sizeof(struct tc_u32_sel) +
+                           (size_t)u32_pack.sel.nkeys * sizeof(struct tc_u32_key);
+        if (req_addattr_l(&req, TCA_U32_SEL, &u32_pack, sel_bytes) < 0)
+            return -errno;
+
+        size_t u32_act = req_nest_begin(&req, TCA_U32_ACT);
+        size_t act_1   = req_nest_begin(&req, 1);
+        if (!u32_act || !act_1)
+            return -EMSGSIZE;
+
+        int rc = append_police_action(&req, rate_Bps);
+        if (rc < 0)
+            return rc;
+
+        req_nest_end(&req, act_1);
+        req_nest_end(&req, u32_act);
+        req_nest_end(&req, opt_nest);
+    } else {
+        req.m.t.tcm_handle = 1U;
+        if (req_addattr_l(&req, TCA_KIND, "matchall", sizeof("matchall")) < 0)
+            return -errno;
+
+        size_t options = req_nest_begin(&req, TCA_OPTIONS);
+        size_t ma_act  = req_nest_begin(&req, TCA_MATCHALL_ACT);
+        size_t act_1   = req_nest_begin(&req, 1);
+        if (!options || !ma_act || !act_1)
+            return -EMSGSIZE;
+
+        int rc = append_police_action(&req, rate_Bps);
+        if (rc < 0)
+            return rc;
+
+        req_nest_end(&req, act_1);
+        req_nest_end(&req, ma_act);
+        req_nest_end(&req, options);
+    }
+
+    uint64_t eff_burst = rate_Bps / 8ULL;
+    if (eff_burst < HNC_POLICE_MIN_BURST)
+        eff_burst = HNC_POLICE_MIN_BURST;
+
+    int rc = rtnl_send_ack(fd, &req.m.n, "ingress police filter replace", 0);
+    if (rc == 0) {
+        LOGI("police prio %d proto=0x%04x rate=%lluB/s burst=%lluB mtu=%u installed on %s",
+             prio, (unsigned)eth_proto,
+             (unsigned long long)rate_Bps,
+             (unsigned long long)eff_burst,
+             HNC_POLICE_MTU, iface);
+    }
+    return rc;
+}
+
+static int delete_ingress_filter_prio(int fd, int ifindex, int prio, uint16_t eth_proto)
+{
+    union nl_tc_req req;
+    memset(&req, 0, sizeof(req));
+
+    req.m.n.nlmsg_len   = NLMSG_LENGTH(sizeof(struct tcmsg));
+    req.m.n.nlmsg_type  = RTM_DELTFILTER;
+    req.m.n.nlmsg_flags = NLM_F_REQUEST | NLM_F_ACK;
+
+    req.m.t.tcm_family  = AF_UNSPEC;
+    req.m.t.tcm_ifindex = ifindex;
+    req.m.t.tcm_parent  = HNC_TC_H_INGRESS_PARENT;
+    req.m.t.tcm_handle  = 0;
+    req.m.t.tcm_info    = TC_H_MAKE((uint32_t)prio << 16, htons(eth_proto));
+
+    return rtnl_send_ack(fd, &req.m.n, "ingress filter delete", 1);
 }
 
 /* ── CLI entry point ─────────────────────────────────────────────────── */
@@ -459,48 +662,202 @@ static int install_matchall_filter(int fd,
 static void usage(const char *argv0)
 {
     fprintf(stderr,
-        "Usage: %s <iface> <ifb_iface> [prio]\n"
+        "Usage:\n"
+        "  %s <iface> <ifb_iface> [prio]\n"
+        "  %s police <iface> <rate> [prio] [all|ip|ipv6|dual] [src_ip]\n"
+        "  %s police-del <iface> <prio> [all|ip|ipv6|dual]\n"
+        "  %s del <iface> [prio]\n"
         "\n"
-        "Installs on <iface>:\n"
+        "Mirred mode (default prio = %d, yielding prio 1 to clsact BPF):\n"
         "  tc qdisc  add dev <iface> clsact\n"
-        "  tc filter add dev <iface> ingress prio <prio> protocol all matchall \\\n"
+        "  tc filter replace dev <iface> ingress prio <prio> protocol all matchall \\\n"
         "      action mirred egress redirect dev <ifb_iface>\n"
         "\n"
-        "Arguments:\n"
-        "  iface       upstream iface (e.g. wlan2) — must exist\n"
-        "  ifb_iface   IFB redirect target (e.g. ifb0) — must exist & UP\n"
-        "  prio        filter priority, 1..65535 (default 1)\n"
+        "Police mode (GRO-safe burst = max(rate_Bps/8, 65536), mtu = 65535, dual-stack):\n"
+        "  Installs clsact ingress police filter(s) for ETH_P_ALL or ETH_P_IP + ETH_P_IPV6.\n"
         "\n"
         "Return codes:\n"
         "  0  OK (or EEXIST, idempotent)\n"
         "  1  iface not found\n"
         "  2  ifb_iface not found\n"
-        "  3  netlink error (kernel rejection / I/O failure)\n"
+        "  3  netlink error\n"
         "  4  usage / invalid argument\n",
-        argv0);
+        argv0, argv0, argv0, argv0, HNC_DEFAULT_MIRRED_PRIO);
 }
 
-int main(int argc, char **argv)
+static int cmd_police(int argc, char **argv)
 {
-    if (argc < 3 || argc > 4) {
+    if (argc < 4 || argc > 7) {
         usage(argv[0]);
         return RC_USAGE;
     }
 
-    const char *iface     = argv[1];
-    const char *ifb_iface = argv[2];
+    const char *iface   = argv[2];
+    const char *ratestr = argv[3];
+    uint64_t rate_Bps = 0;
+    if (parse_rate_bytes_per_sec(ratestr, &rate_Bps) < 0) {
+        LOGE("invalid rate '%s'", ratestr);
+        return RC_USAGE;
+    }
 
-    int prio = 1;
-    if (argc == 4) {
-        char *endp = NULL;
-        errno = 0;
-        long v = strtol(argv[3], &endp, 10);
-        if (errno != 0 || endp == argv[3] || *endp != '\0'
-            || v < 1 || v > 65535) {
+    int prio = HNC_DEFAULT_POLICE_PRIO;
+    if (argc >= 5 && parse_prio_arg(argv[4], &prio) < 0) {
+        LOGE("prio '%s' out of range (1..65535)", argv[4]);
+        return RC_USAGE;
+    }
+
+    const char *proto_mode = (argc >= 6) ? argv[5] : "all";
+    const char *src_ip     = (argc >= 7) ? argv[6] : NULL;
+
+    if (src_ip && src_ip[0] != '\0' &&
+        (strcmp(proto_mode, "all") == 0 || strcmp(proto_mode, "auto") == 0)) {
+        proto_mode = strchr(src_ip, ':') ? "ipv6" : "ip";
+    }
+
+    unsigned iface_idx = if_nametoindex(iface);
+    if (iface_idx == 0) {
+        LOGE("iface '%s' not found: %s", iface, strerror(errno));
+        return RC_IFACE_NOT_FOUND;
+    }
+
+    int fd = rtnl_open();
+    if (fd < 0)
+        return RC_NETLINK_ERROR;
+
+    int rc = install_clsact(fd, (int)iface_idx, iface);
+    if (rc < 0) {
+        close(fd);
+        return RC_NETLINK_ERROR;
+    }
+
+    if (strcmp(proto_mode, "all") == 0) {
+        rc = install_police_one_proto(fd, (int)iface_idx, prio, ETH_P_ALL, rate_Bps, NULL, iface);
+    } else if (strcmp(proto_mode, "ip") == 0 || strcmp(proto_mode, "ipv4") == 0) {
+        rc = install_police_one_proto(fd, (int)iface_idx, prio, ETH_P_IP, rate_Bps, src_ip, iface);
+    } else if (strcmp(proto_mode, "ipv6") == 0 || strcmp(proto_mode, "ip6") == 0) {
+        rc = install_police_one_proto(fd, (int)iface_idx, prio, ETH_P_IPV6, rate_Bps, src_ip, iface);
+    } else if (strcmp(proto_mode, "dual") == 0) {
+        if (src_ip && src_ip[0] != '\0') {
+            close(fd);
+            LOGE("'dual' protocol mode cannot combine with a single-family src_ip");
+            return RC_USAGE;
+        }
+        rc = install_police_one_proto(fd, (int)iface_idx, prio, ETH_P_IP, rate_Bps, NULL, iface);
+        if (rc == 0) {
+            int prio6 = (prio < 65535) ? (prio + 1) : prio;
+            rc = install_police_one_proto(fd, (int)iface_idx, prio6, ETH_P_IPV6, rate_Bps, NULL, iface);
+        }
+    } else {
+        close(fd);
+        LOGE("unknown protocol mode '%s' (expected all|ip|ipv6|dual)", proto_mode);
+        return RC_USAGE;
+    }
+
+    close(fd);
+    if (rc == -EINVAL)
+        return RC_USAGE;
+    return (rc < 0) ? RC_NETLINK_ERROR : RC_OK;
+}
+
+static int cmd_police_del(int argc, char **argv)
+{
+    if (argc < 4 || argc > 5) {
+        usage(argv[0]);
+        return RC_USAGE;
+    }
+    const char *iface = argv[2];
+    int prio = 0;
+    if (parse_prio_arg(argv[3], &prio) < 0) {
+        LOGE("prio '%s' out of range (1..65535)", argv[3]);
+        return RC_USAGE;
+    }
+    const char *proto_mode = (argc >= 5) ? argv[4] : "all";
+
+    unsigned iface_idx = if_nametoindex(iface);
+    if (iface_idx == 0)
+        return RC_OK;
+
+    int fd = rtnl_open();
+    if (fd < 0)
+        return RC_NETLINK_ERROR;
+
+    int rc = 0;
+    if (strcmp(proto_mode, "all") == 0) {
+        rc = delete_ingress_filter_prio(fd, (int)iface_idx, prio, ETH_P_ALL);
+    } else if (strcmp(proto_mode, "ip") == 0 || strcmp(proto_mode, "ipv4") == 0) {
+        rc = delete_ingress_filter_prio(fd, (int)iface_idx, prio, ETH_P_IP);
+    } else if (strcmp(proto_mode, "ipv6") == 0 || strcmp(proto_mode, "ip6") == 0) {
+        rc = delete_ingress_filter_prio(fd, (int)iface_idx, prio, ETH_P_IPV6);
+    } else if (strcmp(proto_mode, "dual") == 0) {
+        rc = delete_ingress_filter_prio(fd, (int)iface_idx, prio, ETH_P_IP);
+        int prio6 = (prio < 65535) ? (prio + 1) : prio;
+        int rc6 = delete_ingress_filter_prio(fd, (int)iface_idx, prio6, ETH_P_IPV6);
+        if (rc == 0) rc = rc6;
+    } else {
+        close(fd);
+        LOGE("unknown protocol mode '%s'", proto_mode);
+        return RC_USAGE;
+    }
+
+    close(fd);
+    return (rc < 0) ? RC_NETLINK_ERROR : RC_OK;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc < 3) {
+        usage(argv[0]);
+        return RC_USAGE;
+    }
+
+    if (strcmp(argv[1], "police") == 0)
+        return cmd_police(argc, argv);
+
+    if (strcmp(argv[1], "police-del") == 0)
+        return cmd_police_del(argc, argv);
+
+    if (strcmp(argv[1], "del") == 0) {
+        if (argc > 4) {
+            usage(argv[0]);
+            return RC_USAGE;
+        }
+        int dprio = HNC_DEFAULT_MIRRED_PRIO;
+        if (argc == 4 && parse_prio_arg(argv[3], &dprio) < 0) {
             LOGE("prio '%s' out of range (1..65535)", argv[3]);
             return RC_USAGE;
         }
-        prio = (int)v;
+        unsigned idx = if_nametoindex(argv[2]);
+        if (idx == 0)
+            return RC_OK;
+        int fd = rtnl_open();
+        if (fd < 0)
+            return RC_NETLINK_ERROR;
+        int rc = delete_ingress_filter_prio(fd, (int)idx, dprio, ETH_P_ALL);
+        close(fd);
+        return (rc < 0) ? RC_NETLINK_ERROR : RC_OK;
+    }
+
+    int arg_off = 1;
+    if (strcmp(argv[1], "add") == 0 || strcmp(argv[1], "replace") == 0 ||
+        strcmp(argv[1], "redirect") == 0) {
+        arg_off = 2;
+    }
+
+    int rem_args = argc - arg_off;
+    if (rem_args < 2 || rem_args > 3) {
+        usage(argv[0]);
+        return RC_USAGE;
+    }
+
+    const char *iface     = argv[arg_off];
+    const char *ifb_iface = argv[arg_off + 1];
+    int prio = HNC_DEFAULT_MIRRED_PRIO;
+
+    if (rem_args == 3) {
+        if (parse_prio_arg(argv[arg_off + 2], &prio) < 0) {
+            LOGE("prio '%s' out of range (1..65535)", argv[arg_off + 2]);
+            return RC_USAGE;
+        }
     }
 
     unsigned iface_idx = if_nametoindex(iface);
@@ -519,14 +876,12 @@ int main(int argc, char **argv)
     if (fd < 0)
         return RC_NETLINK_ERROR;
 
-    /* 1. clsact qdisc (idempotent, EEXIST is fine) */
     int rc = install_clsact(fd, (int)iface_idx, iface);
     if (rc < 0) {
         close(fd);
         return RC_NETLINK_ERROR;
     }
 
-    /* 2. matchall ingress filter + mirred egress redirect action */
     rc = install_matchall_filter(fd,
                                  (int)iface_idx, (int)ifb_idx,
                                  prio, iface, ifb_iface);

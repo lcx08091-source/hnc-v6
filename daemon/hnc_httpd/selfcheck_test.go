@@ -1009,3 +1009,68 @@ func TestSelfcheckMtkHwnatStateReuse(t *testing.T) {
 	mustContain(t, "hwnat", it.Value, "已由 HNC 关闭")
 	mustContain(t, "hwnat", it.Detail, "hook_toggle=0")
 }
+
+func TestSelfcheckOrthogonalMarkV540(t *testing.T) {
+	// 1. 验证新式 v5.40.0 正交高位编码 (mid=1 -> 0x00810000/0x00ff0000, mid=59 -> 0x00bb0000/0x00ff0000)
+	// 以及叠加 app_qos/app_limits 高位后的复合标记均可无损还原为 class 1:100 与 1:59
+	neigh := scParseNeighV6(
+		"2409:8900::101 lladdr aa:bb:cc:dd:ee:01 REACHABLE\n" +
+			"2409:8900::159 lladdr aa:bb:cc:dd:ee:59 REACHABLE\n",
+	)
+	m4 := scParseMarkRules(
+		"-A HNC_MARK -m mac --mac-source aa:bb:cc:dd:ee:01 -j MARK --set-xmark 0x00810000/0x00ff0000\n" +
+			"-A HNC_MARK -m mac --mac-source aa:bb:cc:dd:ee:59 -j MARK --set-xmark 0x00bb0000/0x00ff0000\n",
+	)
+	m6 := scParseMarkRules(
+		"-A HNC_MARK -m mac --mac-source aa:bb:cc:dd:ee:01 -j MARK --set-xmark 0x00810000/0x00ff0000\n" +
+			"-A HNC_MARK -m mac --mac-source aa:bb:cc:dd:ee:59 -j MARK --set-xmark 0x06bb0000/0x00ff0000\n",
+	)
+	eg := []scV6Filter{
+		{Addr: "2409:8900::101", Dir: "dst", FlowID: "1:100", Pref: "201"},
+		{Addr: "2409:8900::159", Dir: "dst", FlowID: "1:59", Pref: "259"},
+	}
+	in := []scV6Filter{
+		{Addr: "2409:8900::101", Dir: "src", FlowID: "1:100", Pref: "201"},
+		{Addr: "2409:8900::159", Dir: "src", FlowID: "1:59", Pref: "259"},
+	}
+	ifb := map[string]bool{"1:100": true, "1:59": true}
+
+	devs := scIPv6Coverage(neigh, m4, m6, eg, in, ifb, 0x00800000)
+	if len(devs) != 2 {
+		t.Fatalf("expected 2 v6 devices, got %d: %+v", len(devs), devs)
+	}
+	if !devs[0].Limited || devs[0].Class != "1:100" || len(devs[0].DownMiss) != 0 || len(devs[0].UpMiss) != 0 {
+		t.Fatalf("mid=1 orthogonal mark coverage failed: %+v", devs[0])
+	}
+	if !devs[1].Limited || devs[1].Class != "1:59" || len(devs[1].DownMiss) != 0 || len(devs[1].UpMiss) != 0 {
+		t.Fatalf("mid=59 orthogonal mark coverage failed: %+v", devs[1])
+	}
+
+	// 2. 验证默认自检不附带 proc_goroutineleak, 开启 run/diag_goroutineleak.enabled 后附带该项
+	f := fixtureColorOSQualcomm("/data/local/hnc")
+	rDefault := runSelfcheck(f.scEnv(), scOptions{})
+	for _, sec := range rDefault.Sections {
+		if sec.ID == "process" {
+			for _, it := range sec.Items {
+				if it.ID == "proc_goroutineleak" {
+					t.Fatal("proc_goroutineleak must not appear when diag_goroutineleak.enabled is absent")
+				}
+			}
+		}
+	}
+	f.files[f.h("run", "diag_goroutineleak.enabled")] = "1\n"
+	rDiag := runSelfcheck(f.scEnv(), scOptions{})
+	foundGL := false
+	for _, sec := range rDiag.Sections {
+		if sec.ID == "process" {
+			for _, it := range sec.Items {
+				if it.ID == "proc_goroutineleak" {
+					foundGL = true
+				}
+			}
+		}
+	}
+	if !foundGL {
+		t.Fatal("expected proc_goroutineleak item when run/diag_goroutineleak.enabled exists")
+	}
+}

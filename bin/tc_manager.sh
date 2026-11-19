@@ -28,6 +28,16 @@
 #   set_limit <iface> <mark_id> <down_mbps> <up_mbps> [ip]
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
+    . "$HNC_DIR/bin/hnc_constants.sh"
+elif [ -f "${0%/*}/hnc_constants.sh" ]; then
+    . "${0%/*}/hnc_constants.sh"
+fi
+DEV_MARK_MASK="${HNC_MARK_MASK:-0x00ff0000}"
+command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
+    hnc_dev_mark_hex() { printf '0x%08x
+' $(( 0x00800000 | ($1 << 16) )); }
+}
 RULES_FILE=$HNC_DIR/data/rules.json
 # rc3.1.30 Bug B 修复 · restore 时用 devices.json 的实时 IP, rules.json 只作 fallback
 # devices.json 由 hotspotd C daemon 实时维护 (netlink RTGRP_NEIGH),
@@ -231,7 +241,7 @@ leaf_has_active_netem() {
 
 sqm_leaf_replace() {
     local dev=$1 class_id=$2 leaf_handle=$3 kind=${4:-}
-    app_qos_owns_class "$dev" "$class_id" && return 0  # v5.30 T4: 叶子在子 class 上
+    subclasses_own_class "$dev" "$class_id" && return 0  # v5.40: 子类持有叶子
     [ -n "$kind" ] || kind=$(sqm_preferred_leaf)
     case "$kind" in
         fq_codel)
@@ -249,7 +259,7 @@ sqm_leaf_replace() {
 
 netem_leaf_replace_zero() {
     local dev=$1 class_id=$2 leaf_handle=$3
-    app_qos_owns_class "$dev" "$class_id" && return 0  # v5.30 T4: 叶子在子 class 上
+    subclasses_own_class "$dev" "$class_id" && return 0  # v5.40: 子类持有叶子
     # rc18: generous limit (assume high rate) so the unlimited default class is
     # never the bottleneck; per-device classes get this re-tuned to their actual
     # rate by tune_leaf_netem_limit right after set_rate_only.
@@ -305,7 +315,7 @@ lowlat_chain_default() {
 lowlat_leaf_set() {
     local dev=$1 parent=$2 handle=$3 chain=${4:-} op=${5:-replace} k
     LOWLAT_APPLIED=""
-    app_qos_owns_class "$dev" "${parent#1:}" && return 0  # v5.30 T4: 叶子在子 class 上
+    subclasses_own_class "$dev" "${parent#1:}" && return 0  # v5.40: 子类持有叶子
     [ -n "$chain" ] || chain=$(lowlat_chain)
     for k in $chain; do
         case "$k" in
@@ -563,9 +573,19 @@ _mark_for_class_id() {
 # (默认 = 没有设备开)时只做一次文件判断, 不发任何 tc 命令 —— 关闭时命令序列
 # 与 v5.29 逐条一致(test/unit/test_v530_app_qos.sh 对照 golden)。
 APP_QOS_STATE="$HNC_DIR/run/app_qos.state"
+APP_LIMITS_DEVS="$HNC_DIR/run/app_limits.devs"
 app_qos_owns_class() {
     [ -f "$APP_QOS_STATE" ] || return 1
     grep -qx "$1 $2" "$APP_QOS_STATE" 2>/dev/null
+}
+app_limits_owns_class() {
+    [ -f "$APP_LIMITS_DEVS" ] || return 1
+    grep -qx "$1 $2" "$APP_LIMITS_DEVS" 2>/dev/null
+}
+subclasses_own_class() {
+    app_qos_owns_class "$1" "$2" && return 0
+    app_limits_owns_class "$1" "$2" && return 0
+    return 1
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -654,23 +674,24 @@ tc_leaf_ensure() {
 # fw mark filter（备用，prio=1）
 tc_filter_fw_set() {
     local dev=$1 mark=$2 flowid=$3
+    local handle_spec="${mark}/${DEV_MARK_MASK}"
     if [ -z "$HNC_TEST_MODE" ]; then
-        tc filter del dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
-        tc filter del dev "$dev" parent 1: protocol ip pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
-        tc filter del dev "$dev" parent 1: protocol ipv6 pref 3 handle "$mark" fw 2>/dev/null || true
-        if tc filter add dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$mark" fw flowid "$flowid" 2>/dev/null; then
+        tc filter del dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$handle_spec" fw 2>/dev/null || true
+        tc filter del dev "$dev" parent 1: protocol ip pref "$FILTER_PRIO_FW" handle "$handle_spec" fw 2>/dev/null || true
+        tc filter del dev "$dev" parent 1: protocol ipv6 pref 3 handle "$handle_spec" fw 2>/dev/null || true
+        if tc filter add dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$handle_spec" fw flowid "$flowid" 2>/dev/null; then
             return 0
         fi
-        tc filter add dev "$dev" parent 1: protocol ip pref "$FILTER_PRIO_FW" handle "$mark" fw flowid "$flowid" 2>/dev/null || return 1
-        tc filter add dev "$dev" parent 1: protocol ipv6 pref 3 handle "$mark" fw flowid "$flowid" 2>/dev/null || true
+        tc filter add dev "$dev" parent 1: protocol ip pref "$FILTER_PRIO_FW" handle "$handle_spec" fw flowid "$flowid" 2>/dev/null || return 1
+        tc filter add dev "$dev" parent 1: protocol ipv6 pref 3 handle "$handle_spec" fw flowid "$flowid" 2>/dev/null || true
         return 0
     fi
-    tc filter del dev "$dev" parent 1: pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
-    if tc filter add dev "$dev" parent 1: pref "$FILTER_PRIO_FW" handle "$mark" fw \
+    tc filter del dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$handle_spec" fw 2>/dev/null || true
+    if tc filter add dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$handle_spec" fw \
         flowid "$flowid" 2>/dev/null; then
         return 0
     fi
-    log_error "fw filter add failed on $dev mark=$mark flowid=$flowid"
+    log_error "fw filter add failed on $dev mark=$handle_spec flowid=$flowid"
     return 1
 }
 
@@ -761,7 +782,7 @@ ensure_device_class() {
     local dev=$1 class_id=$2 ip=$3
     # v5.12: fwmark / u32 优先级按 mark_id 算(class 号可能被 _class_id_for_mark 挪过)
     local _mid; _mid=$(_mark_for_class_id "$class_id")
-    local mark; mark=$(printf "0x%x" $((0x800000 + _mid)))
+    local mark; mark=$(hnc_dev_mark_hex "$_mid")
     local prio=$((FILTER_PRIO_BASE + _mid))
     local leaf_handle direction
     if [ "$dev" = "$IFB_IFACE" ]; then
@@ -844,8 +865,8 @@ ensure_device_class() {
     # Existing active netem must be preserved; real delay/jitter/loss still wins over SQM.
     # v5.30 T4: 应用感知 QoS 开着的设备, 叶子在 3 个子 class 上(apply_app_qos.sh), 这里不动。
     local leaf_kind; leaf_kind=$(sqm_preferred_leaf)
-    if app_qos_owns_class "$dev" "$class_id"; then
-        log "  Leaf of 1:$class_id managed by app QoS (3 tier classes), skip"
+    if subclasses_own_class "$dev" "$class_id"; then
+        log "  Leaf of 1:$class_id managed by child classes (app_qos/app_limits), skip"
     elif leaf_has_active_netem "$dev" "$class_id"; then
         : # keep real netem as-is; set_netem_only owns delay parameters.
     elif [ "$leaf_kind" != "off" ]; then
@@ -937,8 +958,8 @@ class_args_for() {
 # 参数：dev class_id delay_ms jitter_ms loss
 set_netem_only() {
     local dev=$1 class_id=$2 delay_ms=${3:-0} jitter_ms=${4:-0} loss=${5:-0}
-    if app_qos_owns_class "$dev" "$class_id"; then
-        log "  netem on 1:$class_id skipped: leaf managed by app QoS (turn app QoS off to use delay)"
+    if subclasses_own_class "$dev" "$class_id"; then
+        log "  netem on 1:$class_id skipped: leaf managed by child classes (app_qos/app_limits)"
         return 0
     fi
     local leaf_handle
@@ -998,7 +1019,7 @@ set_netem_only() {
 # their own queue management.
 tune_leaf_netem_limit() {
     local dev=$1 class_id=$2 mbps=$3
-    app_qos_owns_class "$dev" "$class_id" && return 0  # v5.30 T4
+    subclasses_own_class "$dev" "$class_id" && return 0  # v5.40
     leaf_has_netem "$dev" "$class_id" || return 0
     leaf_has_active_netem "$dev" "$class_id" && return 0
     local leaf_handle
@@ -1021,34 +1042,82 @@ ensure_ingress_qdisc() {
     tc qdisc show dev "$iface" 2>/dev/null | grep -qE 'qdisc (ingress|clsact) ffff:'
 }
 # v5.38.0: 双栈化无 IFB 机型的 ingress police 上行限速 (补齐 IPv6 邻居全局单播源地址过滤, 彻底堵住 GKI 6.1/6.6 无 IFB 时 IPv6 上行 100% 逃逸漏洞)
+# 计算 police 突发桶字节数: burst = max(rate_bytes_per_sec / 8, 65536), 确保 >= 64KB 容纳 GRO/TSO 超大帧!
+police_burst_bytes() {
+    awk -v r="$1" 'BEGIN {
+        n = r + 0; u = r; sub(/^[0-9.]+/, "", u); u = tolower(u)
+        if (u ~ /^g/) bps = n * 1000000000.0
+        else if (u ~ /^m/) bps = n * 1000000.0
+        else if (u ~ /^k/) bps = n * 1000.0
+        else bps = n * 1.0
+        bytes_per_sec = bps / 8.0
+        win = int(bytes_per_sec / 8.0 + 0.5)
+        if (win < 65536) win = 65536
+        print win "b"
+    }'
+}
+
 set_uplink_police() {
-    local iface=$1 class_id=$2 ip=$3 rate=$4 burst=$5
-    [ -n "$ip" ] || return 1
+    local iface=$1 class_id=$2 ip=$3 rate=$4
+    [ -n "$rate" ] || return 1
+    local _mid; _mid=$(_mark_for_class_id "$class_id")
+    local _dmark; _dmark=$(hnc_dev_mark_hex "$_mid") || return 1
+    local pburst; pburst=$(police_burst_bytes "$rate")
     local prio=$((INGRESS_POLICE_PRIO_BASE + class_id))
     local prio6=$((INGRESS_POLICE_PRIO_BASE + 5000 + class_id))
-    tc filter del dev "$iface" parent ffff: protocol ip prio "$prio" 2>/dev/null || true
-    [ -z "${HNC_TEST_MODE:-}" ] && { tc filter del dev "$iface" parent ffff: protocol ipv6 prio "$prio6" 2>/dev/null || true; }
-    tc filter add dev "$iface" parent ffff: protocol ip prio "$prio" u32 \
-        match ip src "$ip/32" police rate "$rate" burst "$burst" drop 2>/dev/null || return 1
-    if [ -z "${HNC_TEST_MODE:-}" ] && command -v ip >/dev/null 2>&1; then
-        local _mac _v6
-        _mac=$(ip -4 neigh show dev "$iface" to "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="lladdr"){print tolower($(i+1)); exit}}')
-        if [ -n "$_mac" ]; then
-            for _v6 in $(ip -6 neigh show dev "$iface" 2>/dev/null | awk -v m="$_mac" 'tolower($0) ~ ("lladdr " m) && $1 !~ /^fe80:/ {print $1}'); do
-                tc filter add dev "$iface" parent ffff: protocol ipv6 prio "$prio6" u32 \
-                    match ip6 src "${_v6}/128" police rate "$rate" burst "$burst" drop 2>/dev/null || true
-            done
-        fi
+    local prio_fw4=$((INGRESS_POLICE_PRIO_BASE + 6000 + class_id))
+    local prio_fw6=$((INGRESS_POLICE_PRIO_BASE + 7000 + class_id))
+
+    clear_uplink_police "$iface" "$class_id"
+
+    local _any_ok=0
+    if [ -n "$ip" ]; then
+        tc filter add dev "$iface" parent ffff: protocol ip prio "$prio" u32             match ip src "$ip/32" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1
     fi
-    return 0
+
+    # 解析该客户端 MAC 并为所有全局单播 IPv6 邻居挂载 u32 ip6 src police
+    local _mac="" _v6
+    if [ -n "$ip" ] && [ -f "$DEVICES_FILE" ]; then
+        _mac=$(tr -d '\r\n' < "$DEVICES_FILE" 2>/dev/null | awk -v t="$ip" '
+            {
+                s = $0
+                while (match(s, /"[0-9a-fA-F:]{17}"[[:space:]]*:[[:space:]]*\{[^{}]*\}/)) {
+                    blk = substr(s, RSTART, RLENGTH)
+                    if (index(blk, "\"" t "\"") > 0) {
+                        m = substr(blk, 2, 17)
+                        print tolower(m); exit
+                    }
+                    s = substr(s, RSTART + RLENGTH)
+                }
+            }')
+    fi
+    if [ -z "$_mac" ] && [ -n "$ip" ] && command -v ip >/dev/null 2>&1; then
+        _mac=$(ip -4 neigh show dev "$iface" to "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="lladdr"){print tolower($(i+1)); exit}}')
+    fi
+    if [ -n "$_mac" ] && command -v ip >/dev/null 2>&1; then
+        for _v6 in $(ip -6 neigh show dev "$iface" 2>/dev/null | awk -v m="$_mac" 'tolower($0) ~ ("lladdr " m) && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $NF != "FAILED" && $NF != "INCOMPLETE" {print $1}'); do
+            tc filter add dev "$iface" parent ffff: protocol ipv6 prio "$prio6" u32                 match ip6 src "${_v6}/128" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
+        done
+    fi
+
+    # 双栈正交 fw 掩码兜底 (配合 pref 1 clsact L2 MAC 打标器覆盖临时 IPv6 轮换!)
+    tc filter add dev "$iface" parent ffff: protocol ip prio "$prio_fw4"         handle "${_dmark}/${DEV_MARK_MASK}" fw police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
+    tc filter add dev "$iface" parent ffff: protocol ipv6 prio "$prio_fw6"         handle "${_dmark}/${DEV_MARK_MASK}" fw police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
+
+    [ "$_any_ok" = 1 ]
 }
+
 clear_uplink_police() {
     local iface=$1 class_id=$2
     local prio=$((INGRESS_POLICE_PRIO_BASE + class_id))
     local prio6=$((INGRESS_POLICE_PRIO_BASE + 5000 + class_id))
+    local prio_fw4=$((INGRESS_POLICE_PRIO_BASE + 6000 + class_id))
+    local prio_fw6=$((INGRESS_POLICE_PRIO_BASE + 7000 + class_id))
     tc filter del dev "$iface" parent ffff: protocol ip prio "$prio" 2>/dev/null || true
     if [ -z "${HNC_TEST_MODE:-}" ]; then
         tc filter del dev "$iface" parent ffff: protocol ipv6 prio "$prio6" 2>/dev/null || true
+        tc filter del dev "$iface" parent ffff: protocol ip prio "$prio_fw4" 2>/dev/null || true
+        tc filter del dev "$iface" parent ffff: protocol ipv6 prio "$prio_fw6" 2>/dev/null || true
     fi
 }
 
@@ -1358,38 +1427,38 @@ install_ingress_mirred_once() {
             || log_error "install_ingress_mirred: cannot add clsact/ingress qdisc on $iface"
     fi
 
-    # 幂等: 先删可能残留的 pref 1
-    tc filter del dev "$iface" ingress pref 1 2>/dev/null || true
+    # v5.40.0 T2 第 4 项: 将 ifb0 mirred 统一挂载于 prio 2 (pref 2), 把 prio 1 永久留给 hnc_clsact.o!
+    tc filter del dev "$iface" ingress pref 2 2>/dev/null || true
 
-    # 主路径: ingress 简写 + matchall (Ling 真机手动验证过能用)
+    # 主路径: ingress 简写 + prio 2 matchall
     local _out
-    _out=$(tc filter add dev "$iface" ingress prio 1 protocol all matchall \
+    _out=$(tc filter add dev "$iface" ingress prio 2 protocol all matchall \
            action mirred egress redirect dev "$IFB_IFACE" 2>&1)
     if [ -z "$_out" ]; then
-        log "install_ingress_mirred: $iface ingress pref 1 matchall → $IFB_IFACE OK"
+        log "install_ingress_mirred: $iface ingress pref 2 matchall → $IFB_IFACE OK"
         return 0
     fi
 
     log_error "install_ingress_mirred: matchall failed: $_out, trying u32 fallback"
 
-    # Fallback 1: ingress 简写 + u32 (旧内核)
-    _out=$(tc filter add dev "$iface" ingress protocol ip prio 1 u32 \
+    # Fallback 1: ingress 简写 + prio 2/3 u32 (旧内核)
+    _out=$(tc filter add dev "$iface" ingress protocol ip prio 2 u32 \
            match u32 0 0 action mirred egress redirect dev "$IFB_IFACE" 2>&1)
     if [ -z "$_out" ]; then
-        log "install_ingress_mirred: $iface ingress pref 1 u32 (v4 only) → $IFB_IFACE OK"
-        tc filter add dev "$iface" ingress protocol ipv6 prio 2 u32 \
+        log "install_ingress_mirred: $iface ingress pref 2 u32 (v4+v6) → $IFB_IFACE OK"
+        tc filter add dev "$iface" ingress protocol ipv6 prio 3 u32 \
             match u32 0 0 action mirred egress redirect dev "$IFB_IFACE" 2>/dev/null || true
         return 0
     fi
 
     log_error "install_ingress_mirred: u32 also failed: $_out, trying parent ffff: fallback"
 
-    # Fallback 2: 老式 parent ffff: (非 clsact 内核)
-    tc filter del dev "$iface" parent ffff: pref 1 2>/dev/null || true
-    _out=$(tc filter add dev "$iface" parent ffff: prio 1 protocol all matchall \
+    # Fallback 2: 老式 parent ffff: prio 2 (非 clsact 内核)
+    tc filter del dev "$iface" parent ffff: pref 2 2>/dev/null || true
+    _out=$(tc filter add dev "$iface" parent ffff: prio 2 protocol all matchall \
            action mirred egress redirect dev "$IFB_IFACE" 2>&1)
     if [ -z "$_out" ]; then
-        log "install_ingress_mirred: $iface parent ffff: pref 1 matchall → $IFB_IFACE OK"
+        log "install_ingress_mirred: $iface parent ffff: pref 2 matchall → $IFB_IFACE OK"
         return 0
     fi
 
@@ -1432,7 +1501,7 @@ install_ingress_mirred_via_netlink() {
 
     # 调直通工具, 输出拼到我们自己日志
     local _out
-    _out=$("$netlink_bin" "$iface" "$IFB_IFACE" 1 2>&1)
+    _out=$("$netlink_bin" "$iface" "$IFB_IFACE" 2 2>&1)
     local rc=$?
     if [ $rc -eq 0 ]; then
         log "install_ingress_mirred: via netlink OK (${_out})"
@@ -1768,6 +1837,7 @@ init_tc() {
     else
         log_uplink_unsupported_once "init_tc"
     fi
+    _hnc_install_clsact_bpf "$iface"
 
     # 以下 class / ingress qdisc / ifb 等代码只在 root htb OK 时执行
     # rc36 (TC-1): root htb 彻底失败时返回 1(此前静默 return 0 误导调用方)。ingress
@@ -1876,15 +1946,35 @@ ensure_ingress_mirred_v1() {
     # set_limit(up>0)/ensure_ingress 都判"缺失"去 del pref 1 再重装:上行在重装
     # 窗口内不经 ifb0 整形;netlink 工具不可用时还会每次再起一个 45s 的异步重试
     # worker。改为与 watchdog ensure_tc_uplink_healthy 相同的宽松匹配。
-    if tc filter show dev "$iface" ingress 2>/dev/null | grep -qiE "mirred.*redirect.*$IFB_IFACE"; then
-        return 0
-    fi
-    if tc filter show dev "$iface" parent ffff: 2>/dev/null | grep -qiE "mirred.*redirect.*$IFB_IFACE"; then
+    local _ing_dump
+    _ing_dump=$(tc filter show dev "$iface" ingress 2>/dev/null)
+    [ -z "$_ing_dump" ] && _ing_dump=$(tc filter show dev "$iface" parent ffff: 2>/dev/null)
+    if printf '%s
+' "$_ing_dump" | grep -qiE "mirred.*redirect.*$IFB_IFACE"; then
+        # 若旧版 mirred 仍占在 pref 1 且当前存在 clsact 产物, 平滑迁至 pref 2 释放 pref 1 并安装 clsact!
+        if printf '%s
+' "$_ing_dump" | awk -v ifb="$IFB_IFACE" '
+            BEGIN { cur=0; hit=0; ifb_lc=tolower(ifb) }
+            {
+                ln=tolower($0)
+                for (i=1; i<NF; i++) if (($i=="pref" || $i=="prio") && $(i+1) ~ /^[0-9]+$/) cur=$(i+1)+0
+                if (ln ~ ("mirred.*redirect.*" ifb_lc) && cur == 1) { hit=1; exit 0 }
+            }
+            END { exit(hit ? 0 : 1) }
+        ' && [ -f "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact.o" ] && [ -x "${HNC_DIR:-/data/local/hnc}/bin/hnc_clsact_ctl" ]; then
+            log "ensure_ingress_mirred_v1: migrating legacy pref 1 mirred to pref 2 on $iface for clsact"
+            tc filter del dev "$iface" ingress pref 1 2>/dev/null || tc filter del dev "$iface" parent ffff: pref 1 2>/dev/null || true
+            install_ingress_mirred "$iface"
+            _hnc_install_clsact_bpf "$iface"
+            return 0
+        fi
         return 0
     fi
     log "ensure_ingress_mirred_v1: mirred missing on $iface, reinstalling via unified path"
     install_ingress_mirred "$iface"
-    return $?
+    local _mrc=$?
+    _hnc_install_clsact_bpf "$iface"
+    return $_mrc
 }
 
 set_limit() {
@@ -2145,25 +2235,60 @@ remove_device() {
     local iface=$1 mark_id=$2
     _validate_mark_id "$mark_id" || return 1
     local class_id; class_id=$(_class_id_for_mark "$mark_id")  # v5.12: mid=1 → 1:100
-    local mark; mark=$(printf "0x%x" $((0x800000 + mark_id)))
-    # v5.12: u32 优先级按 mark_id 算(与 ensure_device_class 一致)。
-    # 同时去掉旧的 `prio+1` 删除:u32 filter 只用 100+mark_id 这一个优先级,prio+1
-    # 恰好是 mark_id+1 那台设备的 u32 dst(热点口)/src(ifb0)filter —— 清 A 的
-    # 限速会顺手删掉 B 的 IP 分类器;B 的上行在 ifb0 上 mark 恒为 0(mirred 早于
-    # iptables),fw 兜底匹配不到,直接掉进默认类不限速。mark_id=99 时 prio 200
-    # 还会误删应用级限速的 fw filter。
+    local mark; mark=$(hnc_dev_mark_hex "$mark_id")
+    local handle_spec="${mark}/${DEV_MARK_MASK}"
     local prio=$((FILTER_PRIO_BASE + mark_id))
-    # v5.30 T4: 有应用感知 QoS 子 class 时先拆掉(HTB 不许删还有子 class 的 class)
+
+    # 1) 若挂载了 app_qos 或 app_limits 子类, 必须先清空 parent 1:$class_id 的过滤器和所有子类(1:a0XX, 1:9XXX, 1:9eXX)!
+    local _had_aq=0
     if app_qos_owns_class "$iface" "$class_id"; then
-        sh "$HNC_DIR/bin/apply_app_qos.sh" teardown "$iface" "$mark_id" >/dev/null 2>&1 || true
+        _had_aq=1
+        HNC_SKIP_ENSURE_CLASS=1 sh "$HNC_DIR/bin/apply_app_qos.sh" teardown "$iface" "$mark_id" >/dev/null 2>&1 || true
     fi
+    if app_limits_owns_class "$iface" "$class_id"; then
+        tc filter del dev "$iface" parent "1:$class_id" 2>/dev/null || true
+        if [ -f "$HNC_DIR/run/app_limits.tree" ]; then
+            awk -v d="$iface" -v p="1:$class_id" '($1=="APP" || $1=="DEF") && $2==d && $3==p {print $4}' "$HNC_DIR/run/app_limits.tree" 2>/dev/null |                 while read -r _sc; do
+                    [ -n "$_sc" ] && tc class del dev "$iface" classid "$_sc" 2>/dev/null || true
+                done
+            awk -v d="$iface" -v p="1:$class_id" -v c="$class_id" '
+                $1=="DEV" && $2==d && $3==c { next }
+                ($1=="APP" || $1=="DEF") && $2==d && $3==p { next }
+                { print }
+            ' "$HNC_DIR/run/app_limits.tree" > "$HNC_DIR/run/app_limits.tree.tmp" 2>/dev/null                 && mv -f "$HNC_DIR/run/app_limits.tree.tmp" "$HNC_DIR/run/app_limits.tree" 2>/dev/null || true
+        fi
+        tc class show dev "$iface" 2>/dev/null | awk -v p="1:$class_id" '
+            $1=="class" && $2=="htb" {
+                for(i=4;i<=NF;i++) if($i=="parent" && $(i+1)==p) print $3
+            }' | while read -r _sc; do
+                [ -n "$_sc" ] && tc class del dev "$iface" classid "$_sc" 2>/dev/null || true
+            done
+        tc class del dev "$iface" classid "1:$(printf '%x' $((0x9e00 + mark_id)))" 2>/dev/null || true
+        grep -vx "$iface $class_id" "$APP_LIMITS_DEVS" > "$APP_LIMITS_DEVS.tmp" 2>/dev/null || : > "$APP_LIMITS_DEVS.tmp"
+        if [ -s "$APP_LIMITS_DEVS.tmp" ]; then
+            mv -f "$APP_LIMITS_DEVS.tmp" "$APP_LIMITS_DEVS"
+        else
+            rm -f "$APP_LIMITS_DEVS.tmp" "$APP_LIMITS_DEVS" 2>/dev/null
+        fi
+    fi
+
     for dev in "$iface" "$IFB_IFACE"; do
-        tc filter del dev "$dev" parent 1: prio "$prio"         2>/dev/null || true
-        tc filter del dev "$dev" parent 1: pref "$FILTER_PRIO_FW" handle "$mark" fw 2>/dev/null || true
+        tc filter del dev "$dev" parent 1: prio "$prio" 2>/dev/null || true
+        tc filter del dev "$dev" parent 1: protocol all pref "$FILTER_PRIO_FW" handle "$handle_spec" fw 2>/dev/null || true
+        if [ -z "$HNC_TEST_MODE" ]; then
+            tc filter del dev "$dev" parent 1: protocol ip pref "$FILTER_PRIO_FW" handle "$handle_spec" fw 2>/dev/null || true
+            tc filter del dev "$dev" parent 1: protocol ipv6 pref 3 handle "$handle_spec" fw 2>/dev/null || true
+        fi
+        if [ "$dev" = "$iface" ] && { [ -z "$HNC_TEST_MODE" ] || [ "$_had_aq" = "1" ]; }; then
+            tc filter del dev "$dev" parent 1: protocol all pref 50 handle "$handle_spec" fw 2>/dev/null || true
+            tc filter del dev "$dev" parent 1: protocol ip pref 50 handle "$handle_spec" fw 2>/dev/null || true
+            tc filter del dev "$dev" parent 1: protocol ipv6 pref 50 handle "$handle_spec" fw 2>/dev/null || true
+            tc filter del dev "$dev" parent 1: protocol ipv6 pref 51 handle "$handle_spec" fw 2>/dev/null || true
+        fi
         tc qdisc del dev "$dev" parent "1:$class_id" 2>/dev/null || true
         tc class del dev "$dev" classid "1:$class_id" 2>/dev/null || true
     done
-    clear_uplink_police "$iface" "$class_id"  # rc18: drop the ingress police fallback filter too
+    clear_uplink_police "$iface" "$class_id"
     log "Removed TC rules: mark_id=$mark_id"
 }
 
@@ -2524,13 +2649,22 @@ cleanup_tc() {
     fi
     if [ -n "$iface" ]; then
         # 绝不删整个 clsact qdisc(GKI AOSP tether offload BPF 程序挂载于其上), 仅摘除 HNC 自装的 pref 1 与 police 301..400!
+        tc filter del dev "$iface" ingress pref 2 2>/dev/null || true
+        tc filter del dev "$iface" parent ffff: pref 2 2>/dev/null || true
         tc filter del dev "$iface" ingress pref 1 2>/dev/null || true
         tc filter del dev "$iface" parent ffff: pref 1 2>/dev/null || true
-        _pp=301
-        while [ "$_pp" -le 400 ]; do
-            tc filter del dev "$iface" parent ffff: prio "$_pp" protocol all 2>/dev/null || true
-            tc filter del dev "$iface" parent ffff: prio "$_pp" protocol ip 2>/dev/null || true
-            tc filter del dev "$iface" parent ffff: prio "$_pp" protocol ipv6 2>/dev/null || true
+        _pp=1
+        while [ "$_pp" -le 100 ]; do
+            _p4=$((300 + _pp))
+            _p6=$((5300 + _pp))
+            _pfw4=$((6300 + _pp))
+            _pfw6=$((7300 + _pp))
+            tc filter del dev "$iface" parent ffff: prio "$_p4" protocol all 2>/dev/null || true
+            tc filter del dev "$iface" parent ffff: prio "$_p4" protocol ip 2>/dev/null || true
+            tc filter del dev "$iface" parent ffff: prio "$_p4" protocol ipv6 2>/dev/null || true
+            tc filter del dev "$iface" parent ffff: prio "$_p6" protocol ipv6 2>/dev/null || true
+            tc filter del dev "$iface" parent ffff: prio "$_pfw4" protocol ip 2>/dev/null || true
+            tc filter del dev "$iface" parent ffff: prio "$_pfw6" protocol ipv6 2>/dev/null || true
             _pp=$((_pp + 1))
         done
         tc qdisc show dev "$iface" 2>/dev/null | grep -q "qdisc ingress ffff:" && tc qdisc del dev "$iface" ingress 2>/dev/null || true
@@ -2557,11 +2691,15 @@ TC_ACTION_LOCK="$HNC_DIR/run/tc_action.lock"
 TC_ACTION_STALE_SEC=25
 TC_ACTION_LEASE_MAX_SEC=90
 
+_TC_LOCK_REENTRANT=0
 tc_action_lock() {
     if [ -n "${HNC_TC_LOCK_HELD:-}" ] && [ -d "$TC_ACTION_LOCK" ]; then
         local _cur_pid
         _cur_pid=$(awk '{print $1}' "$TC_ACTION_LOCK/owner" 2>/dev/null)
-        [ "$_cur_pid" = "$HNC_TC_LOCK_HELD" ] && return 0
+        if [ "$_cur_pid" = "$HNC_TC_LOCK_HELD" ]; then
+            _TC_LOCK_REENTRANT=1
+            return 0
+        fi
     fi
     mkdir -p "$HNC_DIR/run" 2>/dev/null || true
     # v5.9.1: 清理 mv 抢占后可能残留的 stale 坟场目录(mv 与 rm 之间被
@@ -2609,6 +2747,7 @@ tc_action_lock() {
     rm -rf "$_stale_grave" 2>/dev/null || true
     if mkdir "$TC_ACTION_LOCK" 2>/dev/null; then
         echo "$$ $1 $now" > "$TC_ACTION_LOCK/owner" 2>/dev/null || true
+        export HNC_TC_LOCK_HELD="$$"
         return 0
     fi
     log "tc_action_lock: busy owner=${owner} requester=$1"
@@ -2640,6 +2779,10 @@ tc_action_lock_renew() {
 # rc 刻意保持 0: dispatcher 各分支依赖 unlock 不干扰 exit $rc 传播。
 tc_action_unlock() {
     local owner owner_pid
+    if [ "${_TC_LOCK_REENTRANT:-0}" = "1" ]; then
+        _TC_LOCK_REENTRANT=0
+        return 0
+    fi
     [ -d "$TC_ACTION_LOCK" ] || return 0
     owner=$(cat "$TC_ACTION_LOCK/owner" 2>/dev/null)
     owner_pid=$(echo "$owner" | awk '{print $1}')
@@ -2648,6 +2791,7 @@ tc_action_unlock() {
         return 0
     fi
     rm -rf "$TC_ACTION_LOCK" 2>/dev/null || true
+    unset HNC_TC_LOCK_HELD
     return 0
 }
 
@@ -2771,10 +2915,22 @@ case "$1" in
         tc_action_unlock
         exit $rc ;;
     ensure_class)
-        # v5.30 T4: 应用感知 QoS 要挂在设备 class 下; 没有限速 / 延迟规则的设备没有
-        # class → 只在下行网卡上建(已存在则原样保留 rate / ceil)。$2=iface $3=mark_id $4=ip
-        tc_action_lock ensure_class || exit 12
+        # v5.30 T4 / v5.40 W4: 应用感知 QoS / 单应用限速挂在设备 class 下及拆树后补回 fq_codel 叶子;
+        # 瞬时锁竞争带 12 次 × 250ms 退避重试, 杜绝直接 exit 12 导致设备类退回 pfifo!
+        _ec_try=0
+        until tc_action_lock ensure_class; do
+            _ec_try=$((_ec_try + 1))
+            [ "$_ec_try" -ge 12 ] && exit 12
+            usleep 250000 2>/dev/null || sleep 0.25 2>/dev/null || sleep 1
+        done
         _validate_mark_id "$3" && ensure_device_class "$2" "$(_class_id_for_mark "$3")" "$4"
+        rc=$?
+        tc_action_unlock
+        exit $rc ;;
+    set_uplink_police)
+        # $2=iface $3=mark_id $4=ip $5=rate
+        tc_action_lock set_uplink_police || exit 12
+        _validate_mark_id "$3" && set_uplink_police "$2" "$(_class_id_for_mark "$3")" "$4" "$5"
         rc=$?
         tc_action_unlock
         exit $rc ;;

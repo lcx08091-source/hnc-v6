@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # build.sh — Cross-compile hnc_tc_ingress for Android via NDK.
 #
-# Requires Android NDK r25 or later (tested with r27c).
+# Requires Android NDK r25 or later (tested with r30 LTS).
 #
 # Usage:
-#   export ANDROID_NDK=/path/to/android-ndk-r27c   # or $ANDROID_NDK_HOME / $ANDROID_NDK_ROOT
+#   export ANDROID_NDK=/path/to/android-ndk-r30   # or $ANDROID_NDK_HOME / $ANDROID_NDK_ROOT
 #   bash build.sh [arch]
 #
 #     arch = arm64 (default) | arm | x86_64 | host
@@ -13,7 +13,7 @@
 #   out/<arch>/hnc_tc_ingress
 #
 # Env overrides:
-#   HNC_NDK_API   Android API level (default 21)
+#   HNC_NDK_API   Android API level (default 28)
 #   CC            override compiler (mainly for the 'host' path)
 #
 # SPDX-License-Identifier: GPL-2.0
@@ -23,7 +23,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ARCH="${1:-arm64}"
-API="${HNC_NDK_API:-24}"
+API="${HNC_NDK_API:-28}"
 OUTDIR="out/${ARCH}"
 SRC="hnc_tc_ingress.c"
 BIN="hnc_tc_ingress"
@@ -35,7 +35,7 @@ if [ "$ARCH" = "host" ]; then
     # box (error-path behaviour, valgrind, strace comparison against tc).
     # The REAL target is arm64.
     CC="${CC:-gcc}"
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
     LDFLAGS="-pie"
     echo "[build] Host build with $CC"
     echo "[build] $CC $CFLAGS -o $OUTDIR/$BIN $SRC $LDFLAGS"
@@ -79,12 +79,10 @@ if [ ! -x "$CC" ]; then
 fi
 
 # -fPIE + -pie: required for Android 5+ (non-PIE binaries refuse to load).
-# -static-libgcc: avoid libgcc.so dependency; keeps single binary portable
-#   across NDK versions.
 # We intentionally do NOT use -static (full static linking) because bionic
 # libc is not designed to be linked statically on Android; dynamic linkage
 # against /system/lib64/libc.so is the blessed path.
-CFLAGS="-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE -DANDROID -static-libgcc -fPIE"
+CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
 LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 echo "[build] NDK:        $ANDROID_NDK"

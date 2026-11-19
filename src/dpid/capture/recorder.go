@@ -67,12 +67,12 @@ type Recorder struct {
 }
 
 type recSession struct {
+	bytes    atomic.Int64
 	path     string
 	f        *os.File
 	queue    chan recItem
 	done     chan struct{} // 关 = 停止
 	finished chan struct{} // writeLoop 收尾(落盘 + 搬运)完成后关
-	bytes    atomic.Int64
 }
 
 type recItem struct {

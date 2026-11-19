@@ -56,6 +56,14 @@ out=$(grun apply | tail -n1)
 [ ! -s "$HNC_TEST_DIR/ipc.log" ] && [ "$(gstatus fallback_active)" = false ] && [ "$(gstatus mode)" = auto ] \
   && [ "$(gstatus offload_state)" = IDLE ] && echo "$out" | grep -q '"last_check":[1-9]' && test_pass || test_fail "out=$out ipc=$(cat "$HNC_TEST_DIR/ipc.log")"
 
+test_start "offload guard: auto + CAPABLE + active policy → T+0 immediate slow-path suppression"
+gseed
+echo CAPABLE > "$HNC_TEST_DIR/check_state"
+grun apply >/dev/null
+[ "$(gstatus fallback_active)" = true ] && [ "$(gstatus slowpath)" = ok ] \
+  && [ "$(grep -c OFFLOAD_DISABLE_GLOBAL "$HNC_TEST_DIR/ipc.log")" = 1 ] \
+  && test_pass || test_fail "T+0 preempt failed: $(cat "$HNC_TEST_DIR/run/offload_guard.json")"
+
 test_start "offload guard: auto + ACTIVE → force slow path, re-asserted while suppressed"
 gseed
 echo ACTIVE > "$HNC_TEST_DIR/check_state"
@@ -115,19 +123,24 @@ grun apply >/dev/null
 [ "$rc" = 0 ] && [ "$sp" = unavailable ] && [ ! -s "$HNC_TEST_DIR/ipc.log" ] && [ "$(gstatus fallback_active)" = false ] \
   && test_pass || test_fail "rc=$rc sp=$sp"
 
-test_start "offload guard: clsact_wanted gate (mode + pref1 mirred)"
+test_start "offload guard: clsact_wanted gate (pref 2 mirred decoupled OK, legacy pref 1 mirred skipped)"
 gseed '{"clsact_bpf_mode":"on"}'
 : > "$HNC_TEST_DIR/bin/hnc_clsact.o"
-printf '#!/bin/sh\necho "{\\"ok\\":false,\\"bpf_filter\\":false}"\n' > "$HNC_TEST_DIR/bin/hnc_clsact_ctl"; chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
-grun clsact_wanted wlan2; w_on=$?
+printf '#!/bin/sh
+echo "{\"ok\":false,\"bpf_filter\":false}"
+' > "$HNC_TEST_DIR/bin/hnc_clsact_ctl"; chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
+echo "filter protocol all pref 2 matchall chain 0 action order 1: mirred (Egress Redirect to device ifb0) stolen" > "$HNC_TEST_DIR/tc_show"
+grun clsact_wanted wlan2; w_pref2=$?
 echo "filter protocol all pref 1 matchall chain 0 action order 1: mirred (Egress Redirect to device ifb0) stolen" > "$HNC_TEST_DIR/tc_show"
 grun clsact_wanted wlan2; w_mirred=$?
 rm -f "$HNC_TEST_DIR/tc_show"
-printf '{"clsact_bpf_mode":"auto"}\n' > "$HNC_TEST_DIR/data/rules.json"
+printf '{"clsact_bpf_mode":"auto"}
+' > "$HNC_TEST_DIR/data/rules.json"
 grun clsact_wanted wlan2; w_auto=$?
-printf '{"clsact_bpf_mode":"off"}\n' > "$HNC_TEST_DIR/data/rules.json"
+printf '{"clsact_bpf_mode":"off"}
+' > "$HNC_TEST_DIR/data/rules.json"
 grun clsact_wanted wlan2; w_off=$?
-[ "$w_on" = 0 ] && [ "$w_mirred" = 1 ] && [ "$w_auto" = 1 ] && [ "$w_off" = 1 ] && test_pass || test_fail "on=$w_on mirred=$w_mirred auto=$w_auto off=$w_off"
+[ "$w_pref2" = 0 ] && [ "$w_mirred" = 1 ] && [ "$w_auto" = 1 ] && [ "$w_off" = 1 ] && test_pass || test_fail "pref2=$w_pref2 mirred=$w_mirred auto=$w_auto off=$w_off"
 
 test_start "offload guard: on + pref1 held by mirred → clsact skipped, uninstall never called"
 gseed '{"clsact_bpf_mode":"on"}'

@@ -4,7 +4,7 @@
 
 V6="$HNC_REPO_ROOT/bin/v6_sync.sh"
 MAC5="aa:bb:cc:dd:ee:05"
-IPT_MARKED5="MARK       all  --  0.0.0.0/0            0.0.0.0/0            MAC $MAC5 MARK set 0x800005"
+IPT_MARKED5="MARK       all  --  0.0.0.0/0            0.0.0.0/0            MAC $MAC5 MARK xset 0x00850000/0x00ff0000"
 HDR5="#hnc_v6 iface=wlan2 mark=5 ing=0"
 
 # neigh_lines <addr>... → 模拟 `ip -6 neigh` 输出(外加 device_detect 需要的 inet 行)
@@ -183,3 +183,21 @@ assert_exit_zero "$rc" "stale 锁不应阻塞" && \
     assert_mock_called "match ip6 dst 2408:1::5/128" "应正常同步" && \
     assert_eq "no" "$([ -d "$HNC_TEST_DIR/run/v6_sync.lock" ] && echo yes || echo no)" "锁目录应被释放" && test_pass
 mock_teardown
+
+test_start "v6_sync compat: 同时支持 -S HNC_MARK 正交格式与旧 0x800005 格式平滑解析"
+mock_setup
+seed
+mock_set_stdout ip "$(neigh_lines 2408:1::5)"
+mock_set_stdout tc ""
+mock_set_stdout iptables "-A HNC_MARK -m mac --mac-source $MAC5 -m mark --mark 0x0/0x00ff0000 -j MARK --set-xmark 0x00850000/0x00ff0000"
+HNC_V6_NOW=1000 v6 sync_one "$MAC5"
+assert_mock_called "prio 205 u32 match ip6 dst 2408:1::5/128 flowid 1:5" "-S 0x00850000 解析为 mid=5" || { mock_teardown; true; }
+
+if [ -n "$MOCK_BIN_DIR" ]; then
+    : > "$MOCK_LOG"
+    rm -rf "$HNC_TEST_DIR/run/v6/$MAC5"
+    mock_set_stdout iptables "MARK       all  --  0.0.0.0/0            0.0.0.0/0            MAC $MAC5 MARK set 0x800005"
+    HNC_V6_NOW=1000 v6 sync_one "$MAC5"
+    assert_mock_called "prio 205 u32 match ip6 dst 2408:1::5/128 flowid 1:5" "旧 0x800005 兼容解析为 mid=5" && test_pass
+    mock_teardown
+fi
