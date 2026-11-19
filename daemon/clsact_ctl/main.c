@@ -354,6 +354,15 @@ static int range_valid(uint64_t off, uint64_t len, size_t total)
     return off <= total && len <= total - (size_t)off;
 }
 
+static void elf_free(struct elf_ctx *c)
+{
+    if (!c)
+        return;
+    free(c->sh);
+    free(c->data);
+    memset(c, 0, sizeof(*c));
+}
+
 static int elf_load(struct elf_ctx *c, const char *path)
 {
     memset(c, 0, sizeof(*c));
@@ -396,31 +405,33 @@ static int elf_load(struct elf_ctx *c, const char *path)
         c->data = NULL;
         return -1;
     }
+    uint64_t sh_bytes = (uint64_t)c->eh->e_shnum * sizeof(Elf64_Shdr);
     if (c->eh->e_shoff == 0 || c->eh->e_shnum == 0 ||
         c->eh->e_shentsize != sizeof(Elf64_Shdr) ||
         c->eh->e_shstrndx >= c->eh->e_shnum ||
-        (c->eh->e_shoff % 8) != 0 ||
-        !range_valid(c->eh->e_shoff,
-                     (uint64_t)c->eh->e_shnum * sizeof(Elf64_Shdr), c->size)) {
+        !range_valid(c->eh->e_shoff, sh_bytes, c->size)) {
         LOGE("bad section table");
-        free(c->data);
-        c->data = NULL;
+        elf_free(c);
         return -1;
     }
-    c->sh = (Elf64_Shdr *)(c->data + c->eh->e_shoff);
+    /* llvm-strip -g 剥离 DWARF 后可能重排 e_shoff 至 4 字节边界; 独立对齐拷贝避免误拒与 32 位 ARM SIGBUS */
+    c->sh = malloc((size_t)sh_bytes);
+    if (!c->sh) {
+        elf_free(c);
+        return -1;
+    }
+    memcpy(c->sh, c->data + c->eh->e_shoff, (size_t)sh_bytes);
     Elf64_Shdr *shstr_sh = &c->sh[c->eh->e_shstrndx];
     if (shstr_sh->sh_size == 0 ||
         !range_valid(shstr_sh->sh_offset, shstr_sh->sh_size, c->size)) {
-        free(c->data);
-        c->data = NULL;
+        elf_free(c);
         return -1;
     }
     c->shstr    = (const char *)(c->data + shstr_sh->sh_offset);
     c->shstr_sz = (size_t)shstr_sh->sh_size;
     if (c->shstr[c->shstr_sz - 1] != '\0') {
         LOGE("unterminated shstrtab");
-        free(c->data);
-        c->data = NULL;
+        elf_free(c);
         return -1;
     }
     for (int i = 0; i < c->eh->e_shnum; i++) {
@@ -428,8 +439,7 @@ static int elf_load(struct elf_ctx *c, const char *path)
         if (c->sh[i].sh_name >= c->shstr_sz ||
             (sh_type_needs_data(c->sh[i].sh_type) && !range_valid(so, ss, c->size))) {
             LOGE("section %d out of bounds", i);
-            free(c->data);
-            c->data = NULL;
+            elf_free(c);
             return -1;
         }
     }
@@ -449,7 +459,7 @@ static int sec_index(struct elf_ctx *c, const char *name)
 }
 
 static int get_sym_strtab(struct elf_ctx *c, int symi,
-                          const Elf64_Sym **out_syms, size_t *out_nsym,
+                          const uint8_t **out_sym_base, size_t *out_nsym,
                           const char **out_str, size_t *out_strsz)
 {
     if (symi < 0 || symi >= c->eh->e_shnum)
@@ -463,10 +473,10 @@ static int get_sym_strtab(struct elf_ctx *c, int symi,
     const char *str = (const char *)(c->data + strsh->sh_offset);
     if (str[strsh->sh_size - 1] != '\0')
         return -1;
-    *out_syms  = (const Elf64_Sym *)(c->data + symsh->sh_offset);
-    *out_nsym  = (size_t)(symsh->sh_size / sizeof(Elf64_Sym));
-    *out_str   = str;
-    *out_strsz = (size_t)strsh->sh_size;
+    *out_sym_base = c->data + symsh->sh_offset;
+    *out_nsym     = (size_t)(symsh->sh_size / sizeof(Elf64_Sym));
+    *out_str      = str;
+    *out_strsz    = (size_t)strsh->sh_size;
     return 0;
 }
 
@@ -482,17 +492,17 @@ static int create_named_map(struct elf_ctx *c, const char *want_sym,
     for (int i = 0; i < c->eh->e_shnum; i++)
         if (c->sh[i].sh_type == SHT_SYMTAB) { symi = i; break; }
 
-    const Elf64_Sym *syms = NULL;
+    const uint8_t *sym_base = NULL;
     const char *str = NULL;
     size_t nsym = 0, strsz = 0;
-    if (get_sym_strtab(c, symi, &syms, &nsym, &str, &strsz) < 0) {
+    if (get_sym_strtab(c, symi, &sym_base, &nsym, &str, &strsz) < 0) {
         LOGE("invalid symtab/strtab");
         return -1;
     }
 
     for (size_t k = 0; k < nsym; k++) {
         Elf64_Sym sym;
-        memcpy(&sym, &syms[k], sizeof(sym));
+        memcpy(&sym, sym_base + k * sizeof(Elf64_Sym), sizeof(sym));
         if (sym.st_shndx != (uint16_t)mi || sym.st_name == 0 || sym.st_name >= strsz)
             continue;
         const char *name = str + sym.st_name;
@@ -550,10 +560,10 @@ static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
     for (int i = 0; i < c->eh->e_shnum; i++) {
         if (c->sh[i].sh_type != SHT_REL || c->sh[i].sh_info != (uint32_t)pi)
             continue;
-        const Elf64_Sym *syms = NULL;
+        const uint8_t *sym_base = NULL;
         const char *str = NULL;
         size_t nsym = 0, strsz = 0;
-        if (get_sym_strtab(c, (int)c->sh[i].sh_link, &syms, &nsym, &str, &strsz) < 0) {
+        if (get_sym_strtab(c, (int)c->sh[i].sh_link, &sym_base, &nsym, &str, &strsz) < 0) {
             LOGE("bad reloc symtab for %s", sec_name);
             free(insns);
             return -1;
@@ -574,7 +584,7 @@ static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
                 return -1;
             }
             Elf64_Sym sym;
-            memcpy(&sym, &syms[sym_idx], sizeof(sym));
+            memcpy(&sym, sym_base + (size_t)sym_idx * sizeof(Elf64_Sym), sizeof(sym));
             if (sym.st_name >= strsz) {
                 free(insns);
                 return -1;
@@ -751,10 +761,10 @@ static int cmd_install(const char *iface, const char *obj)
         return RC_BPF;
 
     int raw_ip_fd = create_named_map(&c, "ip_mark_map", 4, 4, 0);
-    if (raw_ip_fd < 0) { free(c.data); return RC_BPF; }
+    if (raw_ip_fd < 0) { elf_free(&c); return RC_BPF; }
     int ip_existed = 0;
     int ip_map_fd = get_or_pin_map(raw_ip_fd, MAP_PIN, &ip_existed);
-    if (ip_map_fd < 0) { free(c.data); return RC_BPF; }
+    if (ip_map_fd < 0) { elf_free(&c); return RC_BPF; }
 
     int raw_mac_fd = create_named_map(&c, "mac_mark_map", sizeof(struct mac_key), 4, 1);
     int mac_existed = 0;
@@ -763,7 +773,7 @@ static int cmd_install(const char *iface, const char *obj)
         /* Map symbol existed in ELF but BPF_MAP_CREATE failed */
         if (!ip_existed) unlink(MAP_PIN);
         close(ip_map_fd);
-        free(c.data);
+        elf_free(&c);
         return RC_BPF;
     }
     if (raw_mac_fd >= 0) {
@@ -771,14 +781,14 @@ static int cmd_install(const char *iface, const char *obj)
         if (mac_map_fd < 0) {
             if (!ip_existed) unlink(MAP_PIN);
             close(ip_map_fd);
-            free(c.data);
+            elf_free(&c);
             return RC_BPF;
         }
     }
 
     int prog_in = load_prog_sec(&c, "tc", ip_map_fd, mac_map_fd, 0);
     int prog_eg = (mac_map_fd >= 0) ? load_prog_sec(&c, "tc_egress", ip_map_fd, mac_map_fd, 1) : -1;
-    free(c.data);
+    elf_free(&c);
 
     if (prog_in < 0) {
         if (prog_eg >= 0) close(prog_eg);

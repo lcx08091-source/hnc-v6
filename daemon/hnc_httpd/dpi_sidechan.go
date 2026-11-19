@@ -246,10 +246,8 @@ func evalLANSelfConsistency(hncDir string, now time.Time) *dpiLANSelfConsistency
 		if h == "" || strings.Contains(h, "cloudflare-ech") {
 			return true
 		}
-		for sfx := range shared {
-			if h == sfx || strings.HasSuffix(h, "."+sfx) {
-				return true
-			}
+		if shared != nil && shared.Match(h) {
+			return true
 		}
 		return false
 	}

@@ -255,10 +255,6 @@ func parseBoolStr(s string) (bool, bool) {
 	}
 }
 
-func round2(v float64) float64 {
-	return math.Round(v*100) / 100
-}
-
 func (c *autorateCtl) ApplyConfig(next autorateConfig, hotspotIface string) actionResp {
 	next = normalizeAutorateConfig(next)
 	if next.Enabled {
@@ -434,10 +430,13 @@ func probeReflectorRTT(upstreamIface string, reflectors []string, cursor *int) (
 					if upstreamIface == "" {
 						return nil
 					}
-					_ = c.Control(func(fd uintptr) {
-						_ = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, upstreamIface)
-					})
-					return nil
+					var bindErr error
+					if err := c.Control(func(fd uintptr) {
+						bindErr = syscall.SetsockoptString(int(fd), syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE, upstreamIface)
+					}); err != nil {
+						return err
+					}
+					return bindErr
 				},
 			}
 			ctx, cancel := context.WithTimeout(context.Background(), 900*time.Millisecond)
@@ -660,22 +659,40 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	nextDown = math.Max(cfg.DownMinMbps, math.Min(effDownMax, nextDown))
 	nextUp = math.Max(cfg.UpMinMbps, math.Min(effUpMax, nextUp))
 
-	needTune := ctl.appliedIface != hotspotIface ||
-		math.Abs(nextDown-ctl.appliedDown) >= math.Max(0.5, ctl.appliedDown*autorateTuneDeadband) ||
-		math.Abs(nextUp-ctl.appliedUp) >= math.Max(0.3, ctl.appliedUp*autorateTuneDeadband)
+	ctl.mu.Lock()
+	prevIface := ctl.appliedIface
+	prevDown := ctl.appliedDown
+	prevUp := ctl.appliedUp
+	stillEnabled := ctl.cfg.Enabled
+	ctl.mu.Unlock()
+	if !stillEnabled {
+		return
+	}
 
+	needTune := prevIface != hotspotIface ||
+		math.Abs(nextDown-prevDown) >= math.Max(0.5, prevDown*autorateTuneDeadband) ||
+		math.Abs(nextUp-prevUp) >= math.Max(0.3, prevUp*autorateTuneDeadband)
+
+	tunedOK := false
 	if needTune {
 		rc, out := runBin(s.hncDir, "tc_manager.sh", "global_shaper_tune", hotspotIface, mbpsToTcRate(nextDown), mbpsToTcRate(nextUp))
 		if rc == 0 {
-			ctl.appliedIface = hotspotIface
-			ctl.appliedDown = nextDown
-			ctl.appliedUp = nextUp
+			tunedOK = true
 		} else {
 			log.Printf("autorate: global_shaper_tune failed on %s: %s", hotspotIface, strings.TrimSpace(out))
 		}
 	}
 
 	ctl.mu.Lock()
+	if !ctl.cfg.Enabled {
+		ctl.mu.Unlock()
+		return
+	}
+	if tunedOK {
+		ctl.appliedIface = hotspotIface
+		ctl.appliedDown = nextDown
+		ctl.appliedUp = nextUp
+	}
 	ctl.st.State = newState
 	ctl.st.SleepReason = ""
 	ctl.st.HotspotIface = hotspotIface

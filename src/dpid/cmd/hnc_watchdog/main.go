@@ -944,8 +944,8 @@ func appLimitApplyLoop() {
 	dirtyTk := time.NewTicker(3 * time.Second)
 	defer tk.Stop()
 	defer dirtyTk.Stop()
+	appApplyOnce(script)
 	for {
-		appApplyOnce(script)
 		select {
 		case <-stopCh:
 			return
@@ -954,7 +954,9 @@ func appLimitApplyLoop() {
 			if _, err := os.Stat(dirty); err != nil {
 				continue
 			}
+			_ = os.Remove(dirty)
 		}
+		appApplyOnce(script)
 	}
 }
 
@@ -979,24 +981,6 @@ func appApplyOnce(script string) {
 // appQosStateFn 读状态机(测试注入, 不读真实 run/hnc_state)。
 var appQosStateFn = readState
 
-// pollDirty returns a channel that fires once the dirty marker appears.
-// We use polling rather than inotify because Android's filesystem layer
-// is inconsistent across vendor kernels for inotify on /data.
-func pollDirty(path string) <-chan struct{} {
-	out := make(chan struct{}, 1)
-	go func() {
-		// v5.25: 1 秒 → 3 秒一查(30 秒窗口内唤醒 30 次 → 10 次); 界面改限速后最多慢 2 秒生效。
-		for i := 0; i < 10; i++ {
-			time.Sleep(3 * time.Second)
-			if _, err := os.Stat(path); err == nil {
-				out <- struct{}{}
-				return
-			}
-		}
-		// Timed out without marker; channel closes silently. Tick path wins.
-	}()
-	return out
-}
 
 // alertScanLoop runs alert.Run() on a 5-minute cadence. It logs new alerts
 // to the watchdog log so operators have a single timeline to read.

@@ -1,11 +1,11 @@
-// inotify_watch.go — HNC v5.37.0: Linux inotify 零轮询唤醒器 (替代 80ms os.Stat 空转轮询)
+// inotify_watch.go — HNC v5.38.0: Linux inotify 零轮询唤醒器 (无 unsafe 对齐风险 / 32 位 ARM 安全)
 package main
 
 import (
 	"context"
+	"encoding/binary"
 	"os"
 	"syscall"
-	"unsafe"
 )
 
 func startRunDirInotify(ctx context.Context, runDir string, notifyCh chan<- string) bool {
@@ -20,10 +20,15 @@ func startRunDirInotify(ctx context.Context, runDir string, notifyCh chan<- stri
 	}
 	f := os.NewFile(uintptr(fd), "dpid-run-inotify")
 	go func() {
+		done := make(chan struct{})
+		defer close(done)
 		defer f.Close()
 		go func() {
-			<-ctx.Done()
-			_ = f.Close()
+			select {
+			case <-ctx.Done():
+				_ = f.Close()
+			case <-done:
+			}
 		}()
 		var buf [4096]byte
 		for {
@@ -33,8 +38,14 @@ func startRunDirInotify(ctx context.Context, runDir string, notifyCh chan<- stri
 			}
 			off := 0
 			for off+syscall.SizeofInotifyEvent <= n {
-				ev := (*syscall.InotifyEvent)(unsafe.Pointer(&buf[off]))
-				raw := buf[off+syscall.SizeofInotifyEvent : off+syscall.SizeofInotifyEvent+int(ev.Len)]
+				// struct inotify_event: wd(int32,0..4), mask(uint32,4..8), cookie(uint32,8..12), len(uint32,12..16)
+				evLen := binary.LittleEndian.Uint32(buf[off+12 : off+16])
+				hdrEnd := off + syscall.SizeofInotifyEvent
+				if evLen > uint32(n-hdrEnd) {
+					break
+				}
+				endOff := hdrEnd + int(evLen)
+				raw := buf[hdrEnd:endOff]
 				end := 0
 				for end < len(raw) && raw[end] != 0 {
 					end++
@@ -47,7 +58,7 @@ func startRunDirInotify(ctx context.Context, runDir string, notifyCh chan<- stri
 					default:
 					}
 				}
-				off += syscall.SizeofInotifyEvent + int(ev.Len)
+				off = endOff
 			}
 		}
 	}()

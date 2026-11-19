@@ -392,7 +392,7 @@ func (s *server) DistillPersonalNow(now time.Time, opt DistillOptions) (DistillR
 	rep.SamplesScanned = len(allSamples)
 
 	// 4. 构建 pkg → (appID, appName, category) 解析器(兼容未录入 pkg_app_map 的单应用自研域名自动推断)
-	pkgResolver, unmapped := buildPkgAppResolver(allSamples, pmap, rnames, hiddenRules, cat, conduitPkgs, opt.AllowUnmappedPkg)
+	pkgResolver, unmapped := buildPkgAppResolver(allSamples, pmap, rnames, hiddenRules, conduitPkgs, cat, opt.AllowUnmappedPkg)
 	rep.UnmappedPkgs = unmapped
 
 	// 5. 聚合全窗口 (JA4, ALPN, Port, QTP) 多源证据

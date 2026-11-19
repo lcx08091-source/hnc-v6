@@ -337,7 +337,8 @@ func appUsageAcctStep(prev *map[string][2]uint64, init *bool, entries []ctEntry,
 			delete(*prev, ev.Key)
 		}
 		isV6 := strings.Contains(ev.Dst, ":")
-		out = append(out, appUsageDelta{Src: ev.Src, Dst: ev.Dst, Up: du, Dn: dd, Key: ev.Key, Proto: ev.Proto, Dport: ev.Dport, IsIPv6: isV6, Closing: true})
+		evProto, evDport := ctKeyProtoDport(ev.Key)
+		out = append(out, appUsageDelta{Src: ev.Src, Dst: ev.Dst, Up: du, Dn: dd, Key: ev.Key, Proto: evProto, Dport: evDport, IsIPv6: isV6, Closing: true})
 	}
 	for i := range entries {
 		e := &entries[i]
@@ -582,3 +583,21 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		"precise": sn.acct && ctEventsPrecise(),
 	})
 }
+
+func ctKeyProtoDport(k string) (string, int) {
+	parts := strings.Split(k, "|")
+	if len(parts) == 5 {
+		dport := 0
+		for i := 0; i < len(parts[4]); i++ {
+			c := parts[4][i]
+			if c < '0' || c > '9' {
+				dport = 0
+				break
+			}
+			dport = dport*10 + int(c-'0')
+		}
+		return parts[0], dport
+	}
+	return "", 0
+}
+

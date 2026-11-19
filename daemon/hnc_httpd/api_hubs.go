@@ -93,7 +93,11 @@ func (s *server) apiDPICockpit(w http.ResponseWriter, r *http.Request) {
 	}
 	dpiRaw, _ := s.jsonCache.read(filepath.Join(s.hncDir, "run", "dpi_state.json"))
 	studio := captureGETHandlerJSON(s.apiSelfStudio, "/api/self/studio")
-	eval := captureGETHandlerJSON(s.apiDPIEval, "/api/dpi_eval?days="+strconv.Itoa(days))
+	evalDays := days
+	if evalDays == 3 {
+		evalDays = 7
+	}
+	eval := captureGETHandlerJSON(s.apiDPIEval, "/api/dpi_eval?days="+strconv.Itoa(evalDays))
 	hist := captureGETHandlerJSON(s.apiDPIHistory, "/api/dpi_history?days="+strconv.Itoa(days))
 	protoCnt := loadPrototypeStore(s.hncDir).AppCount()
 	var sig interface{}

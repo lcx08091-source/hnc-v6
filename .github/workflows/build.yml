@@ -58,6 +58,12 @@ jobs:
           go-version: '1.25'
           cache-dependency-path: daemon/hnc_httpd/go.sum
 
+      - name: Setup Java 17 (for javac -source 8 -bootclasspath)
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
       # Android SDK (build-tools d8 + a platform android.jar) for compiling
       # the app-label dex helper (tools/applabel). Used only at build time;
       # only the resulting bin/hnc_applabel.dex ships in the module.
@@ -163,8 +169,8 @@ jobs:
       # 唯一 Go 质量关卡是 preflight 的二进制 strings 检查)。host GOOS 跑。
       - name: Go vet + test (hnc_httpd + dpid)
         run: |
-          cd daemon/hnc_httpd && go vet ./... && go test ./...
-          cd ../../src/dpid && go vet ./... && go test ./...
+          (cd daemon/hnc_httpd && go vet ./... && go test ./...)
+          (cd src/dpid && go vet ./... && go test ./...)
 
       # v5.22: 32 位类型检查(armeabi-v7a)。用 GOOS=linux 而非 android:
       # android/arm 不支持内部链接, 无 NDK 时 vet 会报 "requires external (cgo)
@@ -176,8 +182,8 @@ jobs:
           GOARCH: arm
           GOARM: '7'
         run: |
-          cd daemon/hnc_httpd && go vet ./...
-          cd ../../src/dpid && go vet ./...
+          (cd daemon/hnc_httpd && go vet ./...)
+          (cd src/dpid && go vet ./...)
 
       - name: Frontend JS, Shell, Host C & Python unit tests
         run: |
@@ -364,7 +370,7 @@ jobs:
            done)
           (cd src/launcher && bash build.sh install arm)
           (cd daemon/tc_netlink && bash build.sh arm)
-          (cd daemon/clsact_ctl && bash build.sh arm)
+          (cd daemon/clsact_ctl && HNC_SKIP_BPF_BUILD=1 bash build.sh arm)
           (cd daemon/hotspotd && bash build.sh arm)
 
           # 与 arm64 一一对应: 缺一个 armv7 包就会混进 arm64 二进制
@@ -576,7 +582,7 @@ jobs:
           PY
           # sha256 对【zip 本身】计算 —— 消费脚本校验的是下载的 zip
           sha256sum dpi-rules.zip > dpi-rules.zip.sha256
-          echo "DPI_RULES_VERSION=$VER" >> $GITHUB_ENV
+          echo "DPI_RULES_VERSION=rules-${{ steps.version.outputs.version }}" >> $GITHUB_ENV
 
       # v5.22: 成品 zip 严格校验(按包 ABI 校验每个原生二进制的 ELF 架构,
       # 防止混架构; 同时覆盖必需文件 / 版本内嵌 / customize.sh)。

@@ -41,7 +41,7 @@ func exportCompiledFPForDPID(hncDir string, now time.Time) error {
 			continue
 		}
 		v := e.verdict(nowUnix)
-		if !v.Usable || v.AppID == "" {
+		if !v.Usable || v.Top == "" {
 			continue
 		}
 		parts := strings.Split(key, "|")
@@ -53,13 +53,17 @@ func exportCompiledFPForDPID(hncDir string, now time.Time) error {
 		if len(parts) >= 4 {
 			qtp = parts[3]
 		}
+		appName := v.TopName
+		if appName == "" {
+			appName = v.Top
+		}
 		rule := compiledFPRuleOut{
-			AppID:    v.AppID,
-			AppName:  v.AppName,
-			Category: v.Category,
+			AppID:    v.Top,
+			AppName:  appName,
+			Category: v.TopCat,
 			JA4:      ja4,
 			ALPN:     alpn,
-			Conf:     v.Ratio,
+			Conf:     v.Conf,
 		}
 		if qtp != "" {
 			exactFP[ja4+"|"+alpn+"|"+qtp] = rule
@@ -70,7 +74,7 @@ func exportCompiledFPForDPID(hncDir string, now time.Time) error {
 	// 2. 合并导入规则包中的高纯度指纹
 	for key, imp := range fpSt.importedLocked() {
 		parts := strings.Split(key, "|")
-		if len(parts) < 2 || parts[0] == "" || imp.App == "" {
+		if len(parts) < 2 || parts[0] == "" || imp.AppID == "" {
 			continue
 		}
 		ja4, alpn := parts[0], parts[1]
@@ -82,10 +86,14 @@ func exportCompiledFPForDPID(hncDir string, now time.Time) error {
 		if qtp != "" {
 			k = k + "|" + qtp
 		}
+		appName := imp.App
+		if appName == "" {
+			appName = imp.AppID
+		}
 		if _, exists := exactFP[k]; !exists {
 			exactFP[k] = compiledFPRuleOut{
-				AppID:    imp.App,
-				AppName:  imp.Name,
+				AppID:    imp.AppID,
+				AppName:  appName,
 				Category: imp.Category,
 				JA4:      ja4,
 				ALPN:     alpn,
@@ -98,12 +106,16 @@ func exportCompiledFPForDPID(hncDir string, now time.Time) error {
 	// 3. 最高优先级覆盖用户手工指定的 JA4 纠正规则
 	rp := rpCollect(hncDir, now)
 	for _, ur := range rp.userJA4 {
-		if ur.JA4 == "" || ur.App == "" {
+		if ur.JA4 == "" || ur.AppID == "" {
 			continue
 		}
+		appName := ur.App
+		if appName == "" {
+			appName = ur.AppID
+		}
 		exactFP[ur.JA4] = compiledFPRuleOut{
-			AppID:    ur.App,
-			AppName:  ur.Name,
+			AppID:    ur.AppID,
+			AppName:  appName,
 			Category: ur.Category,
 			JA4:      ur.JA4,
 			Conf:     1.0,

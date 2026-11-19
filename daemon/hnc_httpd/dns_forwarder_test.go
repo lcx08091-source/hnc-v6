@@ -14,11 +14,12 @@ import (
 // 截断 → TCP 重取、EDNS 透传、封锁应答、限速、上游故障。
 
 type fakeUpstream struct {
+	// udpN/tcpN 置顶保证 32 位 ARM 下 8 字节对齐
+	udpN     int64
+	tcpN     int64
 	addr     string
 	udp      *net.UDPConn
 	tcp      net.Listener
-	udpN     int64
-	tcpN     int64
 	mu       sync.Mutex
 	sawOPT   bool
 	sawDO    bool

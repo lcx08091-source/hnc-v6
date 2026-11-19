@@ -1,11 +1,3 @@
-## v5.38.0 (2026-11-18)
-
-- **「应用」与「分析」前后端高内聚重构**：将「本机真值常驻自训工作台」迁入「分析 → DPI 与自训」，并将分散在 3 个页面的新发现应用、飞轮候选、未识别域名纠错与规则包合并为「应用 → 应用规则中心」，配套新增 `/api/apps_overview`、`/api/rules_hub`、`/api/dpi_cockpit` 聚合接口。
-- **双 SIM 套餐卡片内一键直改与智能对账升级**：在「本月流量」每张 SIM 卡行内提供套餐容量、计费日与掌厅校准锚点一键直编；在 `auto` 模式下检测到高通 IPA / 联发科 MDDP 硬件加速漏计或半途安装时自动采用系统 `NetworkStatsService` 权威值。
-- **热点本机 5G / Wi-Fi 信号实时感知 (`signal_monitor.go`)**：零唤醒读取 `dumpsys telephony.registry` (`5G SA/NSA RSRP/SINR`) 与 `cmd wifi status`，联动 `5G Autorate` 弱信号动态预收口与跨制式切换 `BaseRTT` 重锚定，并在顶栏实时展示信号胶囊与四象限卡顿诊断。
-- **零样本 / 极少样本新一代不解密 DPI**：新增去瞬态扩展 `TLSFP` + `QUICGeom` 几何特征、8 跳 DNS CNAME 专属 CDN 回溯、120ms 门控时间因果突发传播引擎 (`CausalBurstEngine`) 以及 `K>=1` 少样本 IDF-Jaccard + SPLT 原型匹配器 (`PrototypeStore`)。
-- **交互与数据面体验根治**：实现液态玻璃底栏按压膨胀放大折射滑块；根治展开设备卡片自动乱滑并将 9 块面板减负为 3-Tab 抽屉；移除陌生随机 MAC 默认限速/默认隔离护栏；全套统一为 `24×24` `1.85px` 双层光学纯矢量 SVG；补齐无 IFB 机型 IPv6 上行 `police` 限速与限速即刻 `v6_sync`。
-
 # HNC 更新日志
 
 > 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) + [Semantic Versioning 2.0.0](https://semver.org/lang/zh-CN/).
@@ -19,6 +11,23 @@
 > - **Deprecated** — 即将移除的功能(下个大版本会删)
 > - **Removed** — 本版本删除的功能
 > - **Internals** — 内部架构、可观测性、文档,不直接面向用户
+
+---
+
+## [5.38.0] - 2026-11-18
+
+- **「应用」与「分析」前后端高内聚重构**：将「本机真值常驻自训工作台」迁入「分析 → DPI 与自训」，并将分散在 3 个页面的新发现应用、飞轮候选、未识别域名纠错与规则包合并为「应用 → 应用规则中心」，配套新增 `/api/apps_overview`、`/api/rules_hub`、`/api/dpi_cockpit` 聚合接口。
+- **双 SIM 套餐卡片内一键直改与智能对账升级**：在「本月流量」每张 SIM 卡行内提供套餐容量、计费日与掌厅校准锚点一键直编；在 `auto` 模式下检测到高通 IPA / 联发科 MDDP 硬件加速漏计或半途安装时自动采用系统 `NetworkStatsService` 权威值。
+- **热点本机 5G / Wi-Fi 信号实时感知 (`signal_monitor.go`)**：零唤醒读取 `dumpsys telephony.registry` (`5G SA/NSA RSRP/SINR`) 与 `cmd wifi status`，联动 `5G Autorate` 弱信号动态预收口与跨制式切换 `BaseRTT` 重锚定，并在顶栏实时展示信号胶囊与四象限卡顿诊断。
+- **零样本 / 极少样本新一代不解密 DPI**：新增去瞬态扩展 `TLSFP` + `QUICGeom` 几何特征、8 跳 DNS CNAME 专属 CDN 回溯、120ms 门控时间因果突发传播引擎 (`CausalBurstEngine`) 以及 `K>=1` 少样本 IDF-Jaccard + SPLT 原型匹配器 (`PrototypeStore`)。
+- **交互与数据面体验根治**：实现液态玻璃底栏按压膨胀放大折射滑块；根治展开设备卡片自动乱滑并将 9 块面板减负为 3-Tab 抽屉；移除陌生随机 MAC 默认限速/默认隔离护栏；全套统一为 `24×24` `1.85px` 双层光学纯矢量 SVG；补齐无 IFB 机型 IPv6 上行 `police` 限速与限速即刻 `v6_sync`。
+
+---
+
+## [5.37.0] - 2026-11-18
+
+- **架构性能与自适应控制面大升级**：引入 `5G Autorate` 零主动探测缓冲膨胀抑制引擎（被动读取 `conntrack` TCP RTT + `tc_manager.sh global_shaper_tune` 无丢包热调速），将双栈 `apply_app_limits.sh` 升级为 `iptables-restore --noflush` 原子批处理，并将 `dpid` 80ms 轮询升级为 Linux `inotify` 零轮询唤醒。
+- **ECH / 纯 IPv6 加密流量蒸馏与识别闭环**：新增 `fp_distill_splt.go` 自适应个人指纹蒸馏与 `dpi_fp_compiled.json` 编译指纹热加载，打通 ECH 遮蔽场景下的应用识别与归因。
 
 ---
 
@@ -2161,7 +2170,7 @@ Ling 设备实测确认 (Realme RMX5010, Android 16, SukiSU kernel 6.6.102):
 
 ---
 
-## [v5.7.0] — 计划中 (开发中)
+## [5.7.0] — 计划中 (开发中)
 
 **主题:从"极客仪表盘"到"普通人能用的工具"。**
 
@@ -2185,7 +2194,7 @@ v5.7 是 HNC 历史上第一次产品定位升级 —— 不再只是给极客�
 
 ---
 
-## [v5.6.0] — 2026-05-22 (本日发布)
+## [5.6.0] — 2026-05-22 (本日发布)
 
 **主题:看见自己设备的网络流量。**
 
@@ -2241,7 +2250,7 @@ rc4 后实测显示:**整个 self-capture 子系统全栈工作**(rmnet/tun 抓 
 
 ---
 
-## [v5.5.0] — 2026-05-21
+## [5.5.0] — 2026-05-21
 
 **主题:watchdog 真正成为 supervisor。**
 

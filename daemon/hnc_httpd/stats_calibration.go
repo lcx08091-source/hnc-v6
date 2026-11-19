@@ -1024,9 +1024,10 @@ func puCalAttach(hncDir string, cfg puConfig, cycleStart, now time.Time, resp ma
 			}
 			row["netstats_cycle_used"] = c.Total
 			hncUsed, _ := row["cycle_used"].(uint64)
-			// v5.38.0: auto 模式下若检测到 IPA/MDDP 硬件加速漏计(OffloadKind=="hw")或装机未满整周期(!WindowFull 且系统统计显著更多),
-			// 自动无感切换本卡周期用量为系统 NetworkStats 权威值(无需手动切 prefer)!
-			autoPromote := mode == "auto" && (r.OffloadKind == "hw" || (!r.WindowFull && c.Total > hncUsed+(64<<20)))
+			// v5.38.0: auto 模式下若实时双快照窗口确认 IPA/MDDP 硬件加速漏计(OffloadKind=="hw" && OffloadGapSource=="live_window")
+			// 或装机未满整周期(!WindowFull 且系统统计显著更多), 自动无感切换本卡周期用量为系统 NetworkStats 权威值(无需手动切 prefer)!
+			// 注意: 仅凭单次 cycle_window 历史差值在整周期覆盖(WindowFull)时不自动抢切, 保持与 TestCalibratorCheckAndAttach 契约严格一致。
+			autoPromote := mode == "auto" && ((r.OffloadKind == "hw" && r.OffloadGapSource == "live_window") || (!r.WindowFull && c.Total > hncUsed+(64<<20)))
 			if mode != "prefer" && !autoPromote {
 				continue
 			}

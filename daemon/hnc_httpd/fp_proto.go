@@ -209,8 +209,15 @@ func (s *PrototypeStore) Match(queryTokens []string, rawSPLT [protoSPLTDim]int16
 		}
 		jacc := float32(numSum / (denSum + 1e-7))
 
+		var pHasSPLT bool
+		for i := 0; i < protoSPLTDim; i++ {
+			if p.SPLTCentroid[i] != 0 {
+				pHasSPLT = true
+				break
+			}
+		}
 		var score float32
-		if qHasSPLT {
+		if qHasSPLT && pHasSPLT {
 			var dot float32
 			for i := 0; i < protoSPLTDim; i++ {
 				dot += qVec[i] * p.SPLTCentroid[i]

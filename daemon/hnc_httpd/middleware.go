@@ -282,6 +282,7 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 func isWritePath(p string) bool {
 	switch p {
 	case "/api/action",
+		"/api/dpi_distill",
 		"/api/self/toggle",
 		"/api/self/auto_expand/toggle",
 		"/api/self/auto_promote/toggle",
@@ -533,10 +534,19 @@ func (s *server) localAdminSecretExists() bool {
 //
 // 威胁面有限 (文件 mode 0600 + owner root, 普通进程写不进), 但前端做了后端必须严,
 // 否则下一次某个写者把文件写坏, 整条防线松动. 这是 defense-in-depth.
+type adminSecretStamp struct {
+	size  int64
+	mtime int64
+}
+
+func adminStatOf(fi os.FileInfo) adminSecretStamp {
+	return adminSecretStamp{size: fi.Size(), mtime: fi.ModTime().UnixNano()}
+}
+
 var localSecretCache struct {
 	sync.Mutex
 	path  string
-	stamp fileStamp
+	stamp adminSecretStamp
 	val   string
 }
 
@@ -545,7 +555,7 @@ func readCachedAdminSecret(p string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	st := statOf(fi)
+	st := adminStatOf(fi)
 	localSecretCache.Lock()
 	defer localSecretCache.Unlock()
 	if localSecretCache.path == p && localSecretCache.stamp == st && localSecretCache.val != "" {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 var compiledForceReloadGen atomic.Uint64
@@ -38,12 +39,13 @@ type CompiledFPBundle struct {
 }
 
 type compiledFPCache struct {
-	mu      sync.RWMutex
-	path    string
-	modUnix int64
-	size    int64
-	seenGen uint64
-	bundle  CompiledFPBundle
+	mu            sync.RWMutex
+	path          string
+	modUnix       int64
+	size          int64
+	seenGen       uint64
+	lastCheckUnix int64
+	bundle        CompiledFPBundle
 }
 
 var defaultCompiledFP = &compiledFPCache{
@@ -57,22 +59,35 @@ func SetCompiledFPPath(runDir string) {
 	defaultCompiledFP.mu.Lock()
 	defaultCompiledFP.path = filepath.Join(runDir, "dpi_fp_compiled.json")
 	defaultCompiledFP.modUnix = 0
+	defaultCompiledFP.lastCheckUnix = 0
 	defaultCompiledFP.mu.Unlock()
 }
 
 func (c *compiledFPCache) ensureLoaded() {
 	gen := compiledForceReloadGen.Load()
+	now := time.Now().Unix()
 	c.mu.RLock()
 	path := c.path
+	skipStat := c.seenGen == gen && now-c.lastCheckUnix < 2 && c.lastCheckUnix <= now
 	c.mu.RUnlock()
+	if skipStat {
+		return
+	}
 	st, err := os.Stat(path)
 	if err != nil {
+		c.mu.Lock()
+		c.lastCheckUnix = now
+		c.seenGen = gen
+		c.mu.Unlock()
 		return
 	}
 	c.mu.RLock()
 	unchanged := c.modUnix == st.ModTime().UnixNano() && c.size == st.Size() && c.seenGen == gen
 	c.mu.RUnlock()
 	if unchanged {
+		c.mu.Lock()
+		c.lastCheckUnix = now
+		c.mu.Unlock()
 		return
 	}
 	b, err := os.ReadFile(path)
@@ -88,6 +103,7 @@ func (c *compiledFPCache) ensureLoaded() {
 	c.modUnix = st.ModTime().UnixNano()
 	c.size = st.Size()
 	c.seenGen = gen
+	c.lastCheckUnix = now
 	c.mu.Unlock()
 }
 

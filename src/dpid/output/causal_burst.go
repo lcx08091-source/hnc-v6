@@ -73,7 +73,7 @@ func ipToCausalPrefix(ipStr string) netip.Prefix {
 
 // RecordAnchor 在客户端命中非底层 SDK/非隧道的真实应用规则时登记时间因果锚点
 func (e *CausalBurstEngine) RecordAnchor(clientKey string, tsMs int64, rule l3Rule, remoteIPStr, tlsfp, qtp string) {
-	if e == nil || clientKey == "" || rule.ID == "" || strings.HasPrefix(rule.ID, "_") || rule.Tier == tierHidden {
+	if e == nil || clientKey == "" || rule.ID == "" || strings.HasPrefix(rule.ID, "_") || AppTier(rule.Category) == TierHidden {
 		return
 	}
 	pfx := ipToCausalPrefix(remoteIPStr)
@@ -81,6 +81,12 @@ func (e *CausalBurstEngine) RecordAnchor(clientKey string, tsMs int64, rule l3Ru
 	defer e.mu.Unlock()
 	st := e.clients[clientKey]
 	if st == nil {
+		if len(e.clients) >= 512 {
+			for k := range e.clients {
+				delete(e.clients, k)
+				break
+			}
+		}
 		st = &clientCausalRing{bound: make(map[string]causalBoundFlow, 16)}
 		e.clients[clientKey] = st
 	}

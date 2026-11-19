@@ -287,6 +287,7 @@ func wellKnownSvc(proto string, port int) string {
 type ipName struct {
 	Name string
 	Src  string
+	Ts   int64
 	// v5.14: dpid 按规则库给域名归的类(DNS 关联: 看不到 SNI 的 QUIC 也能算给应用)
 	App, AppName, Category string
 }
@@ -304,7 +305,11 @@ func (s *server) loadIPNames() map[string]ipName {
 						if src == "" {
 							src = "dns"
 						}
-						out[ip] = ipName{Name: name, Src: src, App: asString(m["app"]),
+						ts, _ := toInt64(m["ts"])
+						if ts == 0 {
+							ts, _ = toInt64(m["exp"])
+						}
+						out[ip] = ipName{Name: name, Src: src, Ts: ts, App: asString(m["app"]),
 							AppName: asString(m["app_name"]), Category: asString(m["category"])}
 					}
 				}

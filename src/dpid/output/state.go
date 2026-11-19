@@ -649,14 +649,6 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 		bumpName(c.Hostnames, host, now, maxNamesPerClient)
 		bumpName(w.globalDNS, host, now, maxGlobalNames)
 		r, ok := w.bumpLabelLocked(c, host, now, 0)
-		if (!ok || IsECHOuterHost(host)) && ja4 != "" {
-			if cr, cok := MatchCompiledEncrypted(ja4, "", "", "", net.ParseIP(remoteIP), "", 0); cok {
-				r = l3Rule{ID: cr.AppID, Name: cr.AppName, Category: cr.Category, Priority: PrioritySpecific, Verified: true}
-				ok = true
-				bumpLabelWithBytes(c.Apps, r.ID, r.Name, r.Category, "fp:"+ja4, now, 0, true, "", false)
-				bumpLabelWithBytes(w.globalApps, r.ID, r.Name, r.Category, "fp:"+ja4, now, 0, true, "", false)
-			}
-		}
 		if !ok {
 			w.bumpUnknownLocked(c, host, now)
 		}
@@ -707,12 +699,30 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 	w.encdns.observeTLS(host, remoteIP, c.ClientMAC, now) // v5.21: DoH 疑似
 	c.LastSeen = now
 	touchIP(c.RemoteIPs, remoteIP, now, maxIPsPerClient)
-	if host != "" {
-		c.LastSNI = host
-		bumpName(c.SNI, host, now, maxNamesPerClient)
-		bumpName(w.globalSNI, host, now, maxGlobalNames)
-		r, ok := w.bumpLabelLocked(c, host, now, 0)
-		if !ok {
+	if host != "" || ja4 != "" {
+		var r l3Rule
+		var ok bool
+		if host != "" {
+			c.LastSNI = host
+			bumpName(c.SNI, host, now, maxNamesPerClient)
+			bumpName(w.globalSNI, host, now, maxGlobalNames)
+			r, ok = w.bumpLabelLocked(c, host, now, 0)
+		}
+		if (!ok || IsECHOuterHost(host)) && ja4 != "" {
+			if cr, cok := MatchCompiledEncrypted(ja4, "", "", "", net.ParseIP(remoteIP), "", 0); cok {
+				r = l3Rule{ID: cr.AppID, Name: cr.AppName, Category: cr.Category, Priority: PrioritySpecific, Verified: true}
+				ok = true
+				evid := "fp:" + ja4
+				bumpLabelWithBytes(c.Apps, r.ID, r.Name, r.Category, evid, now, 0, true, "", false)
+				bumpLabelWithBytes(w.globalApps, r.ID, r.Name, r.Category, evid, now, 0, true, "", false)
+				if r.Category != "" {
+					catName := categoryLabel(r.Category)
+					bumpLabelWithBytes(c.Categories, r.Category, catName, "", evid, now, 0, true, "", false)
+					bumpLabelWithBytes(w.globalCategories, r.Category, catName, "", evid, now, 0, true, "", false)
+				}
+			}
+		}
+		if !ok && host != "" && !IsECHOuterHost(host) {
 			w.bumpUnknownLocked(c, host, now)
 		}
 		discRule, discKnown = r, ok
@@ -726,16 +736,18 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 			}
 			w.causal.RecordAnchor(ck, ts.UnixMilli(), r, remoteIP, ja4, "")
 		}
-		if remoteIP != "" && w.IPAppMap != nil {
-			if ok && r.ID != "" {
-				w.IPAppMap.Record(remoteIP, r.ID, r.Name, r.Category, now, "tls")
-				// v5.9.7: 证据账本(TLS 源, log-odds=2.0)
-				if w.evidence != nil && c.ClientMAC != "" {
-					w.evidence.Add(c.ClientMAC, r.ID, EvidenceEntry{
-						Ts: ts, Source: SrcTLS, RuleID: r.ID,
-						ParentEventID: host, Detail: host,
-					})
+		if remoteIP != "" && w.IPAppMap != nil && ok && r.ID != "" {
+			w.IPAppMap.Record(remoteIP, r.ID, r.Name, r.Category, now, "tls")
+			// v5.9.7: 证据账本(TLS 源, log-odds=2.0)
+			if w.evidence != nil && c.ClientMAC != "" {
+				evDetail := host
+				if evDetail == "" {
+					evDetail = "fp:" + ja4
 				}
+				w.evidence.Add(c.ClientMAC, r.ID, EvidenceEntry{
+					Ts: ts, Source: SrcTLS, RuleID: r.ID,
+					ParentEventID: evDetail, Detail: evDetail,
+				})
 			}
 		}
 	}

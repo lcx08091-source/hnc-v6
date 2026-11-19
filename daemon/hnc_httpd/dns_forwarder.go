@@ -87,6 +87,12 @@ type dnsFwdStats struct {
 }
 
 type dnsForwarder struct {
+	// st 必须位于结构体偏移 0 处: 32 位 armeabi-v7a (GOARCH=arm) 下 sync/atomic 64 位操作要求 8 字节对齐。
+	st struct {
+		queries, cached, blocked, errors, limited, dropped int64
+		upstream, upErrs, upTCP, servfail                  int64
+	}
+
 	upstream  atomic.Value // string "ip:port"
 	blockMode atomic.Value // string
 	timeout   time.Duration
@@ -109,11 +115,6 @@ type dnsForwarder struct {
 	sem      chan struct{}
 	tcpSem   chan struct{}
 	tcpConns map[net.Conn]bool
-
-	st struct {
-		queries, cached, blocked, errors, limited, dropped int64
-		upstream, upErrs, upTCP, servfail                  int64
-	}
 	latMu  sync.Mutex
 	lat    [dnsLatRing]float64
 	latN   int

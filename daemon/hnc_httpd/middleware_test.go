@@ -15,6 +15,7 @@ func TestIsSensitiveReadPath(t *testing.T) {
 		"/api/dpi_history", "/api/app_limits",
 		// v6 review 补登: self 归因 / 导出内容 / SLA / SSE 事件流
 		"/api/whoami", "/api/json_health", "/api/self/studio",
+		"/api/autorate", "/api/signal", "/api/apps_overview", "/api/rules_hub", "/api/dpi_cockpit",
 		"/api/phone_usage", "/api/stats_health", "/api/connections", "/api/discover",
 		"/api/self", "/api/self/ifaces", "/api/self/attrib",
 		"/api/sla", "/api/events", "/api/exports",

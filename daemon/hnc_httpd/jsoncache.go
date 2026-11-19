@@ -36,6 +36,17 @@ func newJSONFileCache() *jsonFileCache {
 
 // read 返回 path 解析后的 JSON, mtime+size 未变时直接命中缓存。
 func (c *jsonFileCache) read(path string) (interface{}, error) {
+	if c == nil {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		var v interface{}
+		if err := json.Unmarshal(data, &v); err != nil {
+			return nil, err
+		}
+		return v, nil
+	}
 	st, err := os.Stat(path)
 	if err != nil {
 		return nil, err

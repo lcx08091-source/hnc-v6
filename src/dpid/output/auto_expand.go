@@ -273,54 +273,54 @@ func (a *SelfAttribAggregator) RunAutoExpander(ctx context.Context, runDir strin
 			return
 		case <-a.expandKick:
 		case <-tk.C:
-			// Drain once; feed BOTH the brand-new-apex candidate accumulator
-			// (always, for shadow calibration) and the same-apex expander below.
-			pending := a.drainUnmatchedSNIs()
+		}
+		// Drain once; feed BOTH the brand-new-apex candidate accumulator
+		// (always, for shadow calibration) and the same-apex expander below.
+		pending := a.drainUnmatchedSNIs()
 
-			a.processCandidates(pending, acc, promoted, runDir, time.Now().Unix())
+		a.processCandidates(pending, acc, promoted, runDir, time.Now().Unix())
 
-			// Same-apex auto-expand: gated by auto_expand.enabled.
-			if _, err := os.Stat(flagPath); err != nil {
+		// Same-apex auto-expand: gated by auto_expand.enabled.
+		if _, err := os.Stat(flagPath); err != nil {
+			continue
+		}
+		if len(pending) == 0 {
+			continue
+		}
+
+		added := 0
+		st.mu.Lock()
+		rules := loadL3Rules().rules
+		blocklist, err := loadBlocklist()
+		if err != nil {
+			log.Printf("auto-expand: blocklist load failed: %v (treating as empty)", err)
+			// fallthrough — continue with empty blocklist
+		}
+		now := time.Now().Unix()
+		for sni, uidSet := range pending {
+			if _, already := st.confirmed[sni]; already {
 				continue
 			}
-			if len(pending) == 0 {
-				continue
+			if rule, uid, hits, ok := evaluateCandidate(sni, uidSet, rules, blocklist, a); ok {
+				expanded := buildExpandedRule(sni, rule, uid, hits, a.PkgForUID(uid), now)
+				st.confirmed[sni] = expanded
+				added++
+				log.Printf("auto-expand: confirmed %s under rule %s (uid=%d hits=%d apex=%s)",
+					sni, rule.ID, uid, hits, expanded.Apex)
 			}
+		}
+		needWrite := added > 0
+		st.mu.Unlock()
 
-			added := 0
-			st.mu.Lock()
-			rules := loadL3Rules().rules
-			blocklist, err := loadBlocklist()
-			if err != nil {
-				log.Printf("auto-expand: blocklist load failed: %v (treating as empty)", err)
-				// fallthrough — continue with empty blocklist
-			}
-			now := time.Now().Unix()
-			for sni, uidSet := range pending {
-				if _, already := st.confirmed[sni]; already {
-					continue
-				}
-				if rule, uid, hits, ok := evaluateCandidate(sni, uidSet, rules, blocklist, a); ok {
-					expanded := buildExpandedRule(sni, rule, uid, hits, a.PkgForUID(uid), now)
-					st.confirmed[sni] = expanded
-					added++
-					log.Printf("auto-expand: confirmed %s under rule %s (uid=%d hits=%d apex=%s)",
-						sni, rule.ID, uid, hits, expanded.Apex)
-				}
-			}
-			needWrite := added > 0
-			st.mu.Unlock()
-
-			if needWrite {
-				if err := writeExpansions(st); err != nil {
-					log.Printf("auto-expand: write failed: %v", err)
-				} else {
-					a.SetAutoExpandedCount(len(st.confirmed))
-					log.Printf("auto-expand: wrote %s (+%d new, %d total)", autoExpandOutFile, added, len(st.confirmed))
-					st.lastWrittenAt = now
-					// Bust the rule cache so next classifyHost sees new rules.
-					invalidateRuleCache()
-				}
+		if needWrite {
+			if err := writeExpansions(st); err != nil {
+				log.Printf("auto-expand: write failed: %v", err)
+			} else {
+				a.SetAutoExpandedCount(len(st.confirmed))
+				log.Printf("auto-expand: wrote %s (+%d new, %d total)", autoExpandOutFile, added, len(st.confirmed))
+				st.lastWrittenAt = now
+				// Bust the rule cache so next classifyHost sees new rules.
+				invalidateRuleCache()
 			}
 		}
 	}
