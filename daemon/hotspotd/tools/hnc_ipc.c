@@ -36,6 +36,10 @@
 #include <unistd.h>
 #include <errno.h>
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
+#include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 

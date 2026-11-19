@@ -49,9 +49,7 @@
 #define PATH_MAX 4096
 #endif
 
-#ifndef BPF_OBJ_GET_INFO_BY_FD
-#define BPF_OBJ_GET_INFO_BY_FD 15
-#endif
+#define HNC_BPF_OBJ_GET_INFO_BY_FD 15
 
 /* ══════════════════════════════════════════════════════════
  * bpf() syscall wrapper (static hnc_bpf_* 命名杜绝与 libbpf.a 符号冲突)
@@ -138,7 +136,7 @@ static int hnc_bpf_obj_get_info_by_fd(int fd, struct bpf_map_info *info, uint32_
     attr.info.bpf_fd   = (uint32_t)fd;
     attr.info.info_len = *info_len;
     attr.info.info     = hnc_ptr_to_u64(info);
-    int rc = (int)hnc_sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr));
+    int rc = (int)hnc_sys_bpf(HNC_BPF_OBJ_GET_INFO_BY_FD, &attr, sizeof(attr));
     *info_len = attr.info.info_len;
     return rc;
 }

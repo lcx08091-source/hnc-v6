@@ -40,6 +40,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -69,9 +70,7 @@
 #define HNC_POLICE_MIN_BURST      65536ULL
 #define HNC_POLICE_MTU            65535U
 
-#ifndef TCA_POLICE_RATE64
-#define TCA_POLICE_RATE64         8
-#endif
+#define HNC_TCA_POLICE_RATE64     8
 
 #define RTNL_REQ_BUF_SIZE         4096    /* accommodates 256-entry rtab + u32/matchall */
 #define RTNL_RECV_BUF_SIZE        8192    /* ACK / NLMSG_ERROR recv buffer              */
@@ -87,10 +86,10 @@
 
 /* ── Logging ─────────────────────────────────────────────────────────── */
 
-#define LOGE(fmt, ...) \
-    fprintf(stderr, "hnc_tc_ingress: " fmt "\n", ##__VA_ARGS__)
-#define LOGI(fmt, ...) \
-    fprintf(stderr, "hnc_tc_ingress: " fmt "\n", ##__VA_ARGS__)
+#define LOGE(...) \
+    do { fprintf(stderr, "hnc_tc_ingress: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
+#define LOGI(...) \
+    do { fprintf(stderr, "hnc_tc_ingress: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
 
 /* ── Union-backed rtnetlink request buffer (C11 provenance clean) ────── */
 
@@ -519,7 +518,7 @@ static int append_police_action(union nl_tc_req *req, uint64_t rate_bytes_per_se
     if (req_addattr_l(req, TCA_POLICE_RATE, rtab, sizeof(rtab)) < 0)
         return -errno;
     if (rate_bytes_per_sec >= 0xffffffffULL) {
-        if (req_addattr_l(req, TCA_POLICE_RATE64,
+        if (req_addattr_l(req, HNC_TCA_POLICE_RATE64,
                           &rate_bytes_per_sec, sizeof(rate_bytes_per_sec)) < 0)
             return -errno;
     }
@@ -545,12 +544,15 @@ static int install_police_one_proto(int fd, int ifindex, int prio,
     req.m.t.tcm_info    = TC_H_MAKE((uint32_t)prio << 16, htons(eth_proto));
 
     if (src_ip != NULL && src_ip[0] != '\0') {
-        struct {
-            struct tc_u32_sel sel;
-            struct tc_u32_key keys[4];
-        } u32_pack;
-        memset(&u32_pack, 0, sizeof(u32_pack));
-        u32_pack.sel.flags = TC_U32_TERMINAL;
+        /* ISO C11 clean buffer: struct tc_u32_sel ends with flexible array keys[],
+         * so never embed it inside another struct (-Wgnu-variable-sized-type-not-at-end). */
+        unsigned char u32_buf[sizeof(struct tc_u32_sel) + 4U * sizeof(struct tc_u32_key)]
+            __attribute__((aligned(8)));
+        memset(u32_buf, 0, sizeof(u32_buf));
+        struct tc_u32_sel *sel = (struct tc_u32_sel *)u32_buf;
+        struct tc_u32_key *keys =
+            (struct tc_u32_key *)(u32_buf + sizeof(struct tc_u32_sel));
+        sel->flags = TC_U32_TERMINAL;
 
         if (eth_proto == ETH_P_IP) {
             struct in_addr v4;
@@ -558,21 +560,21 @@ static int install_police_one_proto(int fd, int ifindex, int prio,
                 LOGE("invalid IPv4 src_ip '%s'", src_ip);
                 return -EINVAL;
             }
-            u32_pack.sel.nkeys   = 1;
-            u32_pack.keys[0].val = v4.s_addr;
-            u32_pack.keys[0].mask = 0xffffffffU;
-            u32_pack.keys[0].off = 12;
+            sel->nkeys   = 1;
+            keys[0].val  = v4.s_addr;
+            keys[0].mask = 0xffffffffU;
+            keys[0].off  = 12;
         } else if (eth_proto == ETH_P_IPV6) {
             struct in6_addr v6;
             if (inet_pton(AF_INET6, src_ip, &v6) != 1) {
                 LOGE("invalid IPv6 src_ip '%s'", src_ip);
                 return -EINVAL;
             }
-            u32_pack.sel.nkeys = 4;
+            sel->nkeys = 4;
             for (int k = 0; k < 4; k++) {
-                memcpy(&u32_pack.keys[k].val, &v6.s6_addr[k * 4], 4);
-                u32_pack.keys[k].mask = 0xffffffffU;
-                u32_pack.keys[k].off  = 8 + k * 4;
+                memcpy(&keys[k].val, &v6.s6_addr[k * 4], 4);
+                keys[k].mask = 0xffffffffU;
+                keys[k].off  = 8 + k * 4;
             }
         } else {
             LOGE("src_ip matching requires protocol ip or ipv6");
@@ -588,8 +590,8 @@ static int install_police_one_proto(int fd, int ifindex, int prio,
             return -EMSGSIZE;
 
         size_t sel_bytes = sizeof(struct tc_u32_sel) +
-                           (size_t)u32_pack.sel.nkeys * sizeof(struct tc_u32_key);
-        if (req_addattr_l(&req, TCA_U32_SEL, &u32_pack, sel_bytes) < 0)
+                           (size_t)sel->nkeys * sizeof(struct tc_u32_key);
+        if (req_addattr_l(&req, TCA_U32_SEL, u32_buf, sel_bytes) < 0)
             return -errno;
 
         size_t u32_act = req_nest_begin(&req, TCA_U32_ACT);

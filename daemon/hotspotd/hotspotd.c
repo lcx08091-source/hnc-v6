@@ -109,8 +109,16 @@ static void nl_process(int fd) {
         }
         if (n == 0) return;
 
-        struct nlmsghdr *nlh = (struct nlmsghdr *)buf;
-        for (; NLMSG_OK(nlh, (unsigned)n); nlh = NLMSG_NEXT(nlh, n)) {
+        size_t rem = (size_t)n;
+        for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
+            struct nlmsghdr *nlh = (struct nlmsghdr *)(buf + off);
+            if (nlh->nlmsg_len < sizeof(struct nlmsghdr) || (size_t)nlh->nlmsg_len > rem)
+                break;
+            size_t step = NLMSG_ALIGN(nlh->nlmsg_len);
+            if (step > rem)
+                step = rem;
+            off += step;
+            rem -= step;
             if (nlh->nlmsg_type == RTM_NEWLINK || nlh->nlmsg_type == RTM_DELLINK) {
                 hnc_scheduler_request_refresh();
             }

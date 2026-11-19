@@ -13,7 +13,7 @@
   'use strict';
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = META.version || 'v5.40.2', VCODE = String(META.versionCode || '5400200');
+  var VER = META.version || 'v5.40.3', VCODE = String(META.versionCode || '5400300');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 

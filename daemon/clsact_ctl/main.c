@@ -77,9 +77,7 @@
 #define TCA_BPF_FLAG_ACT_DIRECT 1
 #endif
 
-#ifndef BPF_OBJ_GET_INFO_BY_FD
-#define BPF_OBJ_GET_INFO_BY_FD 15
-#endif
+#define HNC_BPF_OBJ_GET_INFO_BY_FD 15
 
 #define R_BPF_64_64       1
 #define BPF_PSEUDO_MAP_FD 1
@@ -92,8 +90,8 @@
 #define RC_USAGE     4
 #define RC_MAP       5
 
-#define LOGE(fmt, ...) fprintf(stderr, "clsact_ctl: " fmt "\n", ##__VA_ARGS__)
-#define LOGI(fmt, ...) fprintf(stderr, "clsact_ctl: " fmt "\n", ##__VA_ARGS__)
+#define LOGE(...) do { fprintf(stderr, "clsact_ctl: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
+#define LOGI(...) do { fprintf(stderr, "clsact_ctl: "); fprintf(stderr, __VA_ARGS__); fprintf(stderr, "\n"); } while (0)
 
 struct mac_key {
     uint8_t  mac[6];
@@ -487,7 +485,7 @@ static int get_sym_strtab(struct elf_ctx *c, int symi,
     if (symi < 0 || symi >= c->eh->e_shnum)
         return -1;
     Elf64_Shdr *symsh = &c->sh[symi];
-    if (symsh->sh_type != SHT_SYMTAB || symsh->sh_link >= c->eh->e_shnum)
+    if (symsh->sh_type != SHT_SYMTAB || symsh->sh_link >= (uint32_t)c->eh->e_shnum)
         return -1;
     Elf64_Shdr *strsh = &c->sh[symsh->sh_link];
     if (strsh->sh_type != SHT_STRTAB || strsh->sh_size == 0)
@@ -672,7 +670,7 @@ static int bpf_map_get_info_by_fd(int fd, struct bpf_map_info *info)
     a.attr.info.bpf_fd   = (uint32_t)fd;
     a.attr.info.info_len = (uint32_t)sizeof(*info);
     a.attr.info.info     = (uint64_t)(uintptr_t)info;
-    return sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &a);
+    return sys_bpf(HNC_BPF_OBJ_GET_INFO_BY_FD, &a);
 }
 
 static int get_or_pin_map(int new_fd, const char *pin_path,

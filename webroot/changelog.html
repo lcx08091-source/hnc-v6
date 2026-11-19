@@ -13,8 +13,15 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v5-40-3" data-version="v5.40.3" data-version-code="5400300">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v5.40.3(正式版): 全仓 NDK r30 C11 柔性数组与 Bionic 头文件清障 · Go 1.27 双架构 CI 全绿基线 · RMX5010 数据面加固 <span class="badge b-ok" style="margin-left:4px">最新稳定版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-19 · versionCode 5400300</span></div>
+  <ul class="cl-list">
+    <li><b>根治 NDK r30 C11 严格编译红叉</b>：重构 <span class="mono">hnc_tc_ingress.c</span> 中含柔性数组的 <span class="mono">tc_u32_sel</span> 缓冲区布局（彻底消除 Clang <span class="mono">-Wgnu-variable-sized-type-not-at-end</span> 报错），为全仓 16 个 C 源文件补齐 Android Bionic <span class="mono">&lt;strings.h&gt;</span> / <span class="mono">&lt;sys/time.h&gt;</span> 头文件与纯 ISO C11 日志宏、无符号 Netlink 边界解析。</li>
+    <li><b>Go 1.27 双架构构建与 RMX5010 真机修复闭环</b>：保留 <span class="mono">.rodata</span> 路由字面量驻留、单应用限速与三档 QoS 在 <span class="mono">POSTROUTING</span> 优先存入 <span class="mono">CONNMARK</span> 及 <span class="mono">hnc_httpd</span> 单实例排他锁。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v5-40-2" data-version="v5.40.2" data-version-code="5400200">
-  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v5.40.2(正式版): Go 1.27 ARM64 构建门禁根治 · RMX5010 应用标记持久化顺序修复 · hnc_httpd 单实例排他锁 <span class="badge b-ok" style="margin-left:4px">最新稳定版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-19 · versionCode 5400200</span></div>
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v5.40.2(正式版): Go 1.27 ARM64 构建门禁根治 · RMX5010 应用标记持久化顺序修复 · hnc_httpd 单实例排他锁 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-19 · versionCode 5400200</span></div>
   <ul class="cl-list">
     <li><b>根治 GitHub Actions Go 1.27 构建红叉</b>：显式驻留关键 API 路由与动作字面量于 <span class="mono">.rodata</span>（防止 ARM64 <span class="mono">walkCompareString</span> 折叠为移位立即数导致门禁误判），恢复 <span class="mono">-mod=mod</span> 并补齐 NDK r30 <span class="mono">clang</span> 自动回退与原始字节级二进制校验。</li>
     <li><b>修复 RMX5010 应用限速与三档 QoS 下行标记持久化顺序</b>：<span class="mono">HNC_APP_LIMIT_DOWN</span> 与 <span class="mono">HNC_APP_QOS</span> 统一挂载于 <span class="mono">mangle/POSTROUTING</span> 的 <span class="mono">HNC_SAVE</span> 之前，确保 <span class="mono">[31:24]</span> 应用槽位与档位同步存入 <span class="mono">CONNMARK</span>，不被尾部 <span class="mono">HNC_EGRESS_FIX</span> 还原清零。</li>

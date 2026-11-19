@@ -1,7 +1,7 @@
 id=hotspot_net_ctl
 name=Hotspot Network Control (HNC)
-version=v5.40.2
-versionCode=5400200
+version=v5.40.3
+versionCode=5400300
 author=HNC Team
-description=Android 热点网关控制中心 v5.40.2 · GitHub Actions Go 1.27 全绿构建修复 · RMX5010 真机数据面与单实例锁加固
+description=Android 热点网关控制中心 v5.40.3 · 全量 Go 1.27 + NDK r30 C11/eBPF 双架构 CI 门禁清零 · RMX5010 真机数据面加固
 updateJson=https://raw.githubusercontent.com/lcx08091-source/hnc-v6/main/update.json

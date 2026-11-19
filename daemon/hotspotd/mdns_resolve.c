@@ -29,9 +29,13 @@
  *     -o mdns_resolve mdns_resolve.c
  */
 
+#ifndef _GNU_SOURCE
+#define _GNU_SOURCE
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <stdint.h>
 #include <unistd.h>
 #include <errno.h>

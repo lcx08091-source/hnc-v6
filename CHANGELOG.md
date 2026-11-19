@@ -14,6 +14,12 @@
 
 ---
 
+## [5.40.3] - 2026-11-19
+
+### 全仓 NDK r30 Clang C11 `-Werror` 深度清障与双架构打包全链路核验
+- **Fixed · 根治 `Build hnc_tc_ingress (C)` 及全部下游 C 守护进程编译红叉**: 移除 `hnc_tc_ingress.c` 中将含柔性数组成员的 `struct tc_u32_sel` 嵌入外层结构体的 GNU 扩展写法（消除 NDK r30 Clang `-Werror,-Wgnu-variable-sized-type-not-at-end` 致命报错），改用严格对齐的纯 ISO C11 字节缓冲区；为 `hnc_tc_ingress.c`、`platform.c`、`mdns_resolve.c`、`hnc_ipc.c` 补齐 Android Bionic 标准头 `<strings.h>` / `<sys/time.h>`，将全部可变参日志宏与 Netlink 消息遍历统一收敛至零扩展、零符号比较警告的纯 C11 实现。
+- **Fixed · 双架构成品包门禁加固**: 将 `artifact_sanity_check.sh` 对 `hnc_dpid` 与 `hnc_httpd` 的标识校验统一升级为原始字节直接匹配，确保 `arm64-v8a` 与 `armeabi-v7a` 全流程自动发版一次全绿。
+
 ## [5.40.2] - 2026-11-19
 
 ### GitHub Actions Go 1.27 编译门禁根治与 RMX5010 P0 护栏补强

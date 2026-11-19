@@ -1,6 +1,6 @@
 {
-  "version": "v5.40.2",
-  "versionCode": 5400200,
-  "zipUrl": "https://github.com/lcx08091-source/hnc-v6/releases/download/v5.40.2/HNC-v5_40_2-arm64.zip",
+  "version": "v5.40.3",
+  "versionCode": 5400300,
+  "zipUrl": "https://github.com/lcx08091-source/hnc-v6/releases/download/v5.40.3/HNC-v5_40_3-arm64.zip",
   "changelog": "https://raw.githubusercontent.com/lcx08091-source/hnc-v6/main/CHANGELOG.md"
 }

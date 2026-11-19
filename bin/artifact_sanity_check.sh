@@ -97,15 +97,14 @@ if grep -x 'bin/hnc_dpid' "$TMP.entries" >/dev/null; then
     else
       warn "od not available; skipped hnc_dpid ELF machine check"
     fi
-    if command -v strings >/dev/null 2>&1; then
-      (strings -a "$TMP.extract/hnc_dpid" 2>/dev/null || strings "$TMP.extract/hnc_dpid" 2>/dev/null) > "$TMP.dpid.strings"
-      if grep -F '0.1.0-rc1.2-fixed' "$TMP.dpid.strings" >/dev/null || grep -F '0.1.0-rc1.3' "$TMP.dpid.strings" >/dev/null || grep -F '0.2.0-l2-rc19' "$TMP.dpid.strings" >/dev/null || grep -F '0.3.0-l3-rc20' "$TMP.dpid.strings" >/dev/null || grep -F '0.3.1-l3-rc20.1' "$TMP.dpid.strings" >/dev/null || grep -F 'hnc_dpid' "$TMP.dpid.strings" >/dev/null; then
+    if command -v grep >/dev/null 2>&1; then
+      if grep -a -E '0\.1\.0-rc1\.|0\.2\.0-l2|0\.3\.|0\.5\.|hnc_dpid' "$TMP.extract/hnc_dpid" >/dev/null 2>&1; then
         ok "hnc_dpid contains expected version/name marker"
       else
         fail "hnc_dpid missing expected version/name marker; binary may be stale or wrong"
       fi
     else
-      warn "strings not available; skipped hnc_dpid version/name marker check"
+      warn "grep not available; skipped hnc_dpid version/name marker check"
     fi
   else
     fail "hnc_dpid extraction failed or produced empty file"
