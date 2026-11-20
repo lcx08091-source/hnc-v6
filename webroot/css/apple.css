@@ -190,6 +190,7 @@
   color: var(--dpv-text);
 }
 
+.dpv-inline-wrap,
 .dpv-sheet-body,
 .dpv-selfcheck-bar {
   --dpv-surface: var(--card-2, rgba(255, 255, 255, 0.92));
@@ -848,10 +849,13 @@
  * HNC v6.0.0 · Vector — Apple / Frosted 与 Cyber 机能主题专属适配样式
  * ========================================================================== */
 [data-style="apple"] .v6-kpi,
+[data-style="apple"] .lgd-summary-line,
 [data-style="apple"] .lgd-ctrl-bar,
 [data-style="apple"] .lgd-item,
 [data-style="apple"] .v6-flow-item,
-[data-style="apple"] .v6-tuple-row {
+[data-style="apple"] .v6-calm-empty,
+[data-style="apple"] .v6-tuple-row,
+[data-style="apple"] .v6-bento:not(.on) {
   border: 0;
   background: var(--ap-inset, var(--input));
 }
@@ -864,39 +868,55 @@
   bottom: 0;
   width: min(760px, 100%);
   border: 0;
-  border-radius: 18px 18px 0 0;
+  border-radius: 22px 22px 0 0;
   padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 18px);
 }
 
-/* 赛博机能主题 (data-style="cyber") 锐利折角、战术网格与等宽字体对齐 */
+/* 赛博机能主题 (data-style="cyber") 锐利折角与高对比度战术边框 */
 [data-style="cyber"] .v6-card,
+[data-style="cyber"] .v6-hero-card,
 [data-style="cyber"] .lgd-panel,
-[data-style="cyber"] .v6-top-strip,
 [data-style="cyber"] .v6-dev-banner {
   border-radius: var(--r-lg, 8px);
 }
 [data-style="cyber"] .v6-kpi,
 [data-style="cyber"] .v6-num-box,
 [data-style="cyber"] .v6-flow-item,
-[data-style="cyber"] .v6-dev-pill,
+[data-style="cyber"] .v6-calm-empty,
+[data-style="cyber"] .v6-bento:not(.on),
+[data-style="cyber"] .v6-subtabs,
+[data-style="cyber"] .v6-dev-pill:not(.on):not(.is-auto),
+[data-style="cyber"] .lgd-summary-line,
 [data-style="cyber"] .lgd-ctrl-bar,
 [data-style="cyber"] .lgd-item,
-[data-style="cyber"] .lgd-tchip,
-[data-style="cyber"] .lgd-act-btn,
-[data-style="cyber"] .v6-mini-btn,
+[data-style="cyber"] .lgd-tchip:not(.on),
+[data-style="cyber"] .lgd-act-btn:not(.dan):not(.warn):not(.ok),
+[data-style="cyber"] .v6-mini-btn:not(.pri):not(.dan):not(.warn):not(.ok),
 [data-style="cyber"] .v6-tuple-row,
 [data-style="cyber"] .v6-scalpel-entry {
-  border-radius: 5px;
+  border-radius: 6px;
   background: var(--cy-sub, var(--input));
   border: 1px solid var(--stroke);
 }
-[data-style="cyber"] .v6-orb {
+[data-style="cyber"] .v6-bento.on,
+[data-style="cyber"] .v6-dev-pill.on,
+[data-style="cyber"] .v6-subtab,
+[data-style="cyber"] .lgd-tchip,
+[data-style="cyber"] .lgd-act-btn,
+[data-style="cyber"] .v6-mini-btn {
   border-radius: 6px;
-  background: var(--cy-sub, var(--input));
-  border: 1px solid var(--stroke-2);
+}
+[data-style="cyber"] .v6-subtab.on {
+  background: var(--cy-accent-2, rgba(56,189,248,.18));
+  color: var(--cy-accent, #38bdf8);
+  border: 1px solid var(--cy-accent, #38bdf8);
+}
+[data-style="cyber"] .v6-orb,
+[data-style="cyber"] .v6-bento-ic {
+  border-radius: 6px;
 }
 [data-style="cyber"] .v6-card-t,
-[data-style="cyber"] .v6-top-title b,
+[data-style="cyber"] .v6-hero-headline b,
 [data-style="cyber"] .lgd-act-btn,
 [data-style="cyber"] .v6-mini-btn {
   font-family: var(--mono);
@@ -910,7 +930,7 @@
 }
 [data-style="cyber"] .lgd-tchip.on {
   background: var(--cy-accent-2, var(--blue));
+  color: #fff;
   border-color: var(--cy-accent, var(--blue));
   box-shadow: 0 0 10px -2px var(--cy-glow, transparent);
 }
-

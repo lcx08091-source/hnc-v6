@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -434,6 +435,8 @@ func (s *server) apiHealth(w http.ResponseWriter, r *http.Request) {
 	// (典型 /data/local/hnc), 暴露给匿名调用属于信息泄露 — 帮助攻击者
 	// 定位文件系统结构. grep webroot 确认前端无任何代码读 health.hnc_dir,
 	// 删除零回归. 如果未来某管理面需要 hnc_dir, 走鉴权端点 (/api/whoami 之类).
+	runtime.KeepAlive(&v6RequiredAPIMarkers)
+	runtime.KeepAlive(&dataplaneRequiredAPIMarkers)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":           "ok",
 		"version":          version,

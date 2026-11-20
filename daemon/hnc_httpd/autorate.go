@@ -593,8 +593,8 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	prevRAT := ctl.lastSignalRAT
 	ctl.mu.RUnlock()
 
-	// v5.38.0: 5G SA/NSA <-> 4G LTE 制式切换瞬间立即重锚定 BaseRTT, 防止将 4G 天然空口高时延误判为队列膨胀!
-	if sig.Available && sig.RAT != "" && prevRAT != "" && sig.RAT != prevRAT {
+	// v6.0.0: 仅在跨代际制式切换 (5G <-> 4G LTE <-> Wi-Fi) 瞬间重锚定 BaseRTT, 避免 5G SA/NSA/5G-A 载波聚合跳变误清空基线!
+	if sig.Available && sig.RAT != "" && prevRAT != "" && ratGeneration(sig.RAT) != ratGeneration(prevRAT) {
 		baseRTT = 0
 		ctl.fastRTT = 0
 	}
@@ -743,4 +743,18 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	}
 	ctl.st.UpdatedAt = now.Unix()
 	ctl.mu.Unlock()
+}
+
+func ratGeneration(rat string) string {
+	u := strings.ToUpper(strings.TrimSpace(rat))
+	switch {
+	case strings.HasPrefix(u, "5G"):
+		return "5G"
+	case strings.HasPrefix(u, "4G") || strings.Contains(u, "LTE"):
+		return "4G"
+	case strings.Contains(u, "WI-FI") || strings.Contains(u, "WIFI"):
+		return "WIFI"
+	default:
+		return u
+	}
 }

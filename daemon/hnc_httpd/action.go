@@ -92,12 +92,9 @@ func readHotspotIfaceMAC(hncDir string) string {
 	if !strings.HasPrefix(state, "ACTIVE:") {
 		return ""
 	}
-	iface := strings.TrimPrefix(state, "ACTIVE:")
-	// iface 必须是 [a-z0-9] 的简单格式,防 ../../path/传入
-	for _, c := range iface {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-			return ""
-		}
+	iface := strings.TrimSpace(strings.TrimPrefix(state, "ACTIVE:"))
+	if !isValidHotspotIfaceName(iface) {
+		return ""
 	}
 	macBytes, err := os.ReadFile("/sys/class/net/" + iface + "/address")
 	if err != nil {
@@ -545,9 +542,18 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 
 // ── action 实现 ───────────────────────────────────────────────
 
-// readUplinkCapability returns (supported, known). Unknown keeps legacy best-effort behavior.
+// readUplinkCapability returns (supported, known).
+// v6.0 兼容性加固: GKI 6.1/6.6 内核普遍裁剪 CONFIG_IFB 导致 uplink_supported=false,
+// 但只要 capability_probe 探出 uplink_police_supported=true, 即可走双栈 ingress police 限速!
 func readUplinkCapability(hncDir string) (bool, bool) {
-	return readCapabilityBool(hncDir, "uplink_supported")
+	sup, known := readCapabilityBool(hncDir, "uplink_supported")
+	if known && sup {
+		return true, true
+	}
+	if polSup, polKnown := readCapabilityBool(hncDir, "uplink_police_supported"); polKnown && polSup {
+		return true, true
+	}
+	return sup, known
 }
 
 func numberStringPositive(s string) bool {
@@ -959,14 +965,18 @@ func readHotspotIfaceName(hncDir string) string {
 		return ""
 	}
 	iface := strings.TrimSpace(strings.TrimPrefix(state, "ACTIVE:"))
-	// Validate iface to prevent injection (与 Go 侧 ifaceNameRE 同族, 此处只
-	// 允许小写字母数字, 分叉原版语义)
-	for _, c := range iface {
-		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
-			return ""
-		}
+	if !isValidHotspotIfaceName(iface) {
+		return ""
 	}
 	return iface
+}
+
+// isValidHotspotIfaceName 统一校验热点接口名(兼容 ap_br_wlan2 / ap_br_ap0 / bt-pan / rndis0 / usb0 等合法内核接口, 同时拦截路径穿越)。
+func isValidHotspotIfaceName(iface string) bool {
+	if iface == "" || strings.Contains(iface, "..") {
+		return false
+	}
+	return ifaceNameRE.MatchString(iface)
 }
 
 // clsactCheckResult is the JSON response for clsact_check action.

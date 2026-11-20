@@ -18,7 +18,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -640,7 +639,7 @@ func EnsureLANFastlaneOnIface(ifindex int, lanSubnets []string) error {
 	if err != nil {
 		return err
 	}
-	defer syscall.Close(fd)
+	defer closeRTNetlinkSocket(fd)
 
 	msgs, err := BuildLANFastlaneNetlinkBatch(ifindex, lanSubnets, readPschedTickInUsec())
 	if err != nil {

@@ -157,7 +157,7 @@ function statsBody() {
     '<div class="sec"><span>按应用 <small id="st-apps-t">' + RANGE_T[S.statsRange] + ' · 真实流量</small></span></div><div class="glass" style="padding:12px 14px" id="st-apps"><div class="note">加载中…</div></div>' +
     '<div class="glass' + (S.open.detail ? ' open' : '') + '" id="detail"><button class="card-h" data-act="fold" data-key="detail"><span class="tx"><div class="t">流量明细</div><div class="s">只列有流量的时段 · 点开查看</div></span>' + ico('chev', 'chev') + '</button>' +
       '<div class="fold"><div><div class="fold-in tbl" id="tbl"></div></div></div></div>' +
-    '<div class="sec"><span>热点设备本月排行 <small>计费周期口径</small></span></div>' +
+    '<div class="sec"><span>热点设备本月排行 <small>计费周期口径</small></span><span class="r rk-legend"><i class="rk-dot on"></i>在线 <i class="rk-dot off"></i>离线</span></div>' +
     '<div class="glass" style="padding:12px 14px" id="pu-dev-rank">' + hsMonthRankHtml() + '</div>';
 }
 var RANGE_DAYS = { today: 1, week: 7, month: 30 };
@@ -246,7 +246,7 @@ function barTip(col) {
 }
 
 /* ═════════════════════ 分析页 · DPI ═════════════════════ */
-var MODE_T = { af_packet: 'AF_PACKET 抓包', conntrack: 'conntrack 旁路', waiting: '等待热点', rebinding: '重新绑定中', unavailable: '不可用', blind: '盲区（无法抓包）' };
+var MODE_T = { ok: 'AF_PACKET 旁路抓包', af_packet: 'AF_PACKET 旁路抓包', conntrack: 'conntrack 连接表旁路', waiting: '等待热点拉起', rebinding: '重新绑定网卡中', unavailable: '抓包不可用', blind: '盲区（硬件旁路或受限）' };
 function loadDpi(full) {
   var ps = [api.get('/api/dpi_state', null, { timeout: 9000 }).then(function (r) {
     S.dpi = r; S.dpiErr = '';
@@ -273,27 +273,40 @@ function loadDpiHist(days, force) {
 function loadProcHealth() {
   return api.get('/api/proc_health', null, { timeout: 9000 }).then(function (r) { S.proc = r; S.procHealthOk = true; }).catch(function () { S.proc = null; S.procHealthOk = false; });
 }
+var HIST_COLORS_CYBER = ['#38BDF8', '#F59E0B', '#34D399', '#A78BFA', '#FB7185', '#2DD4BF', '#60A5FA', '#FBBF24'];
+function activeHistColors() {
+  return (S && S.style === 'cyber') ? HIST_COLORS_CYBER : HIST_COLORS;
+}
 function hsMonthRankHtml() {
   var um = S.usage && S.usage.devices;
   if (!um) return '<div class="note">加载设备月度用量中…</div>';
-  var list = Object.keys(um).map(function (mac) {
+  var all = Object.keys(um).map(function (mac) {
     var u = um[mac] || {}, d = devBy(mac);
-    return { mac: mac, name: d ? d.name : mac, v: num(u.rx) + num(u.tx), rx: num(u.rx), tx: num(u.tx) };
-  }).filter(function (x) { return x.v > 0; }).sort(function (a, b) { return b.v - a.v; }).slice(0, 8);
+    return { mac: mac, name: d ? d.name : mac, online: !!(d && d.online), v: num(u.rx) + num(u.tx), rx: num(u.rx), tx: num(u.tx) };
+  }).filter(function (x) { return x.v > 0; }).sort(function (a, b) { return b.v - a.v; });
+  var list = all.slice(0, 8);
   if (!list.length) return '<div class="note">本计费周期暂无热点设备流量记录</div>';
-  var mx = list[0].v || 1, tot = sum(list, function (x) { return x.v; }) || 1;
+  var mx = list[0].v || 1, tot = sum(all, function (x) { return x.v; }) || 1, pal = activeHistColors();
   return list.map(function (x, i) {
-    return '<div class="hbar"><span class="n">' + esc(x.name) + '</span><span><i class="b" style="display:block;width:' + Math.max(2, x.v / mx * 100).toFixed(1) + '%;background:' + HIST_COLORS[i % 8] + '"></i></span><span class="v">' + bytes(x.v) + ' · ' + Math.round(x.v / tot * 100) + '%</span></div>';
+    var rk = (i < 9 ? '0' : '') + (i + 1);
+    return '<button type="button" class="hbar hbar-btn press' + (x.online ? '' : ' is-offline') + '" data-jump-mac="' + esc(x.mac) + '" title="' + (x.online ? '当前在线 · 点击定位到该设备' : '当前离线 · 点击定位到历史记录') + '">' +
+      '<span class="n"><em class="rk-idx">' + rk + '</em><i class="rk-dot ' + (x.online ? 'on' : 'off') + '" aria-hidden="true"></i><span class="rk-nm">' + esc(x.name) + '</span></span>' +
+      '<span><i class="b" style="display:block;width:' + Math.max(2, x.v / mx * 100).toFixed(1) + '%;background:' + pal[i % 8] + '"></i></span>' +
+      '<span class="v">' + bytes(x.v) + ' · ' + Math.round(x.v / tot * 100) + '%</span>' +
+    '</button>';
   }).join('');
 }
 
 function dpiBody() {
   return '<div id="dpi-hero"></div>' +
     '<div id="dpi-studio-slot" style="margin-top:12px">' + (typeof selfStudioCardHtml === 'function' ? selfStudioCardHtml() : '') + '</div>' +
-    '<div class="glass" style="margin-top:12px;padding:12px 14px;display:flex;align-items:center;justify-content:space-between;gap:10px">' +
-      '<span style="font-size:12.5px;color:var(--text-2)">新发现应用确认、候选域名晋级与规则库编辑已统一收口至<b>「应用 → 应用规则中心」</b></span>' +
-      '<button type="button" class="btn sec press" data-act="go-rules-hub" style="white-space:nowrap">前往规则中心 ›</button>' +
-    '</div>' +
+    '<button type="button" class="glass rules-hub-callout press" data-act="go-rules-hub">' +
+      '<span class="rhc-main">' +
+        '<span class="rhc-t">应用规则中心</span>' +
+        '<span class="rhc-s">新发现应用确认、候选域名晋级与规则库编辑已统一收口至此</span>' +
+      '</span>' +
+      '<span class="rhc-cta">前往管理 ›</span>' +
+    '</button>' +
     '<div class="cols" style="margin-top:12px"><div>' +
       '<div class="sec"><span>热点按应用流量历史</span>' + seg('hist', [[1, '今日'], [3, '3 天'], [7, '7 天']], S.dpiDays, 'small') + '</div><div class="glass" style="padding:12px 14px" id="dpi-hist"></div>' +
       '<div class="sec"><span>活跃客户端画像</span>' + seg('dflt', [['all', '全部'], ['active', '活跃'], ['high', '高置信']], S.dpiFilter, 'small') + '</div><div class="glass" id="dpi-clients"></div>' +
@@ -302,7 +315,7 @@ function dpiBody() {
       '<div class="sec"><span>识别准确率自评与引擎健康</span><button class="linkish" data-act="dpi-refresh">刷新</button></div>' +
       (typeof evalFold === 'function' ? '<div class="glass rows" style="margin-bottom:12px">' + evalFold() + '</div>' : '') +
       '<div class="glass rows" id="dpi-status"></div>' +
-      '<div class="sec"><span>内核抓包与分流探测</span></div><div class="glass rows" id="dpi-probe"></div>' +
+      '<div class="sec"><span>五层抓包与流量感知矩阵</span><small>只读零改包</small></div><div class="glass rows" id="dpi-probe"></div>' +
       '<div class="sec"><span>未识别去向流量监测</span></div><div class="glass" id="dpi-unk2"></div>' +
       '<div class="sec"><span>诊断样本导出</span></div>' + (typeof exportDiagBoxHtml === 'function' ? exportDiagBoxHtml() : '') +
     '</div></div>';
@@ -319,8 +332,9 @@ function paintDpi() {
   var r = S.dpi, st = r && r.available && r.state, s = (st && st.stats) || {};
   var health = st ? (st.health || 'ok') : 'down', ok = st && !/stall|crash|down|error/i.test(health) && st.mode !== 'unavailable';
   var badge = !r ? ['加载中', 'b-gray'] : !st ? ['不可用', 'b-red'] : ok ? ['运行中', 'b-ok'] : [health, 'b-warn'];
-  hero.innerHTML = '<div class="glass dpihero"><div class="top"><div><div class="l">识别模式</div><div class="mode">' + esc(st ? (MODE_T[st.mode] || st.mode || '—') : (S.dpiErr || (r && r.error) || 'dpid 未运行')) + '</div></div>' +
-    '<span class="badge ' + badge[1] + '" style="font-size:12px;padding:5px 10px">' + (badge[1] === 'b-ok' ? '<span class="breathe"></span>&nbsp;' : '') + esc(badge[0]) + '</span></div>' +
+  hero.innerHTML = '<div class="glass dpihero">' +
+    '<div class="dpihero-eyebrow"><span class="l">主力识别通道 · 五层被动感知</span><span class="badge ' + badge[1] + ' dpihero-badge">' + (badge[1] === 'b-ok' ? '<span class="breathe"></span>&nbsp;' : '') + esc(badge[0]) + '</span></div>' +
+    '<div class="top"><div class="dpihero-mode-wrap"><div class="mode">' + esc(st ? (MODE_T[st.mode] || st.mode || '—') : (S.dpiErr || (r && r.error) || 'dpid 未运行')) + '</div></div><div id="dpi-ring-slot" class="dpi-ring-slot"></div></div>' +
     (st ? '<div class="note" style="margin-top:6px">' + esc(st.interface || '—') + ' · 运行 ' + hms(st.uptime_s) + (st.stall_seconds ? ' · 停滞 ' + st.stall_seconds + ' 秒' : '') + (st.blind_reason ? ' · ' + esc(st.blind_reason) : '') + ' · 客户端 ' + num(st.client_count) + '</div>' : '') +
     '<div class="grid">' + [['packets', '已抓包', 'var(--blue)'], ['dns_events', 'DNS 事件', 'var(--cyan)'], ['tls_events', 'TLS 事件', 'var(--purple)'], ['kernel_drops', '内核丢包', 'var(--red)']].map(function (x) {
       return '<div><div class="n num">' + fmtN(s[x[0]]) + '</div><div class="l">' + x[1] + '</div>' + sparkSvg(S.dpiSpark[x[0]], x[2]) + '</div>'; }).join('') + '</div>' +
@@ -338,16 +352,17 @@ function paintDpi() {
     stRow('健康度', esc(health), ok ? 'ok' : 'warn') + stRow('规则库', esc(st.l3_rule_version || '—') + (st.dfp_enabled ? ' · DFP' : ''), '') +
     stRow('识别覆盖', ur && ur.total_bytes ? Math.round((1 - num(ur.ratio)) * 100) + '%' : '—', '', ur && ur.total_bytes ? '已识别 ' + bytes(ur.identified_bytes) + ' / ' + bytes(ur.total_bytes) : '按字节') +
     stRow('去重域名', num(st.unique_sni) + ' SNI · ' + num(st.unique_hostnames) + ' 主机名 · ' + num(st.unique_ja4) + ' 种指纹', '') +
-    (st.evidence_summary && st.evidence_summary.total ? stRow('证据账本', num(st.evidence_summary.total) + ' 条', '', Object.keys(st.evidence_summary.by_source || {}).map(function (k) { return k + ' ' + st.evidence_summary.by_source[k]; }).join(' · ')) : '') +
+    (st.evidence_summary && st.evidence_summary.total ? stRow('识别依据统计', num(st.evidence_summary.total) + ' 条', '', Object.keys(st.evidence_summary.by_source || {}).map(function (k) { var zh = { sni: 'TLS域名', dns: 'DNS解析', cname: 'CNAME链', quic: 'QUIC握手', ja4: '协议指纹', fp: '学习指纹', burst: '并发关联', proto: '流量形态', ip: '已知IP' }[k] || k; return zh + ' ' + st.evidence_summary.by_source[k]; }).join(' · ')) : '') +
     stRow('重新绑定', num(st.rebind_count) + ' 次', '', '<button class="linkish" data-act="dpi-rebind">立即重新绑定</button>') +
     (p ? stRow('进程健康', esc(p.status || '—'), /ok|healthy/i.test(p.status) ? 'ok' : 'warn', p.counts ? 'dpid ' + num(p.counts.hnc_dpid) + ' · httpd ' + num(p.counts.hnc_httpd) + ' · hotspotd ' + num(p.counts.hotspotd) + ' · watchdog ' + num(p.counts.watchdog_main) + ' · launcher ' + num(p.counts.dpid_guard_main) : esc(p.detail || '')) : '');
-  // 探测
-  var pr = S.probe;
-  $('#dpi-probe').innerHTML = !pr ? stRow('探针', '暂无数据', '') :
-    stRow('AF_PACKET', pr.af_packet_available ? '可用' : '不可用 · ' + esc(pr.af_packet_error || '受限'), pr.af_packet_available ? 'ok' : 'bad') +
-    stRow('热点接口', esc(pr.ap_iface || '—'), '', pr.ap_iface_source ? '来源 ' + esc(pr.ap_iface_source) : '') +
-    stRow('Conntrack', pr.conntrack_readable ? '可读' : '不可读', pr.conntrack_readable ? 'ok' : 'warn', esc(pr.conntrack_path || '')) +
-    stRow('BPF Tether Offload', pr.offload_hint ? '可能接管' : '未接管', pr.offload_hint ? 'warn' : 'ok', esc(pr.offload_evidence || ''));
+  // 五层抓包与流量感知矩阵探测
+  var pr = S.probe, selfOn = S.selfCfg ? S.selfCfg.enabled !== false : true;
+  $('#dpi-probe').innerHTML = (!pr ? '' :
+    stRow('L1 · AF_PACKET + cBPF 旁路抓头', pr.af_packet_available ? '就绪 · 零改包' : '受限 · 自动降级', pr.af_packet_available ? 'ok' : 'warn', '只抓 DNS / TLS / QUIC 握手包头（384B），不解密正文 · 接口 ' + esc(pr.ap_iface || (st && st.interface) || 'wlan2')) +
+    stRow('L2 · nf_conntrack 内核连接对账', pr.conntrack_readable ? '可读 · 全字节' : '不可读', pr.conntrack_readable ? 'ok' : 'warn', '即使 AF_PACKET 受限仍可按连接表统计真实上下行字节 · ' + esc(pr.conntrack_path || '/proc/net/nf_conntrack')) +
+    stRow('L3 · eBPF clsact 二层直通观测', pr.offload_hint ? '硬件分流活跃' : '慢路径清晰', pr.offload_hint ? 'warn' : 'ok', esc(pr.offload_evidence || 'L2 MAC 精确记账与防逃逸打标协同'))) +
+    stRow('L4 · /proc/net UID 本机真值对齐', selfOn ? '亮屏常驻' : '已手动关闭', selfOn ? 'ok' : '', '本机双网卡 Socket inode → Android 应用 UID 零误差蒸馏至热点') +
+    stRow('L5 · 被动终端栈与密文几何画像', st && st.dfp_enabled !== false ? '已启用' : '基础模式', 'ok', 'DHCP Option 55/60 + mDNS + JA4 + 8 包 SPLT 序列应对 ECH/无域名流');
   paintDpiHist(); paintClients(); paintUnknown(); paintUnkTraffic(); paintIdent(); paintDiscEntry();
 }
 /* 未识别流量(按字节) —— 连接表里没被规则库认出来的域名 / IP */

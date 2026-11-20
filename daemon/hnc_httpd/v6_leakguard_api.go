@@ -179,17 +179,19 @@ type LeakEvent struct {
 	LeakLabel  string `json:"leak_label,omitempty"`
 	RawValue   string `json:"raw_value"`
 	RawSnippet string `json:"raw_snippet"`
+	HitCount   int64  `json:"hit_count,omitempty"`
 	IsBlocked  bool   `json:"is_blocked"`
 }
 
 type leakGuardCtrlFile struct {
-	Capacity       int   `json:"capacity"`
-	CooldownSec    int   `json:"cooldown_sec"`
-	NotifyEnabled  bool  `json:"notify_enabled"`
-	LockscreenMask bool  `json:"lockscreen_mask"`
-	ClearSeq       int64 `json:"clear_seq"`
-	ClearedAt      int64 `json:"cleared_at"`
-	UpdatedAt      int64 `json:"updated_at"`
+	Capacity       int             `json:"capacity"`
+	CooldownSec    int             `json:"cooldown_sec"`
+	NotifyEnabled  bool            `json:"notify_enabled"`
+	LockscreenMask bool            `json:"lockscreen_mask"`
+	ClearSeq       int64           `json:"clear_seq"`
+	ClearedAt      int64           `json:"cleared_at"`
+	BlockedTargets map[string]bool `json:"blocked_targets,omitempty"`
+	UpdatedAt      int64           `json:"updated_at"`
 }
 
 type leakGuardPersistFile struct {
@@ -210,6 +212,7 @@ type leakGuardEngine struct {
 	mu             sync.Mutex
 	cfg            LeakGuardConfig
 	clearedAt      int64
+	maxSeenTs      int64
 	events         []LeakEvent // 按时间升序存储, 容量受 cfg.Capacity 约束
 	seenIDs        map[string]int64
 	cooldownLedger map[string]int64
@@ -220,8 +223,8 @@ type leakGuardEngine struct {
 }
 
 func defaultLeakNotifyExec(ctx context.Context, bin string, args ...string) error {
-	// 安全铁律: 纯参数切片直调目标二进制, 绝不拼接命令行字符串
-	cmd := exec.CommandContext(ctx, bin, args...)
+	// 安全铁律: 纯参数切片直调目标二进制 + hardenCmd 2s WaitDelay 防管道悬挂
+	cmd := hardenCmd(exec.CommandContext(ctx, bin, args...))
 	return cmd.Run()
 }
 
@@ -303,6 +306,7 @@ func (e *leakGuardEngine) saveStateLocked() error {
 		LockscreenMask: e.cfg.LockscreenMask,
 		ClearSeq:       e.clearSeq.Load(),
 		ClearedAt:      e.clearedAt,
+		BlockedTargets: e.blockedTargets,
 		UpdatedAt:      now,
 	}
 	cb, err := json.MarshalIndent(ctrl, "", "  ")
@@ -502,6 +506,7 @@ func parseFlexibleLeakEvent(m map[string]any) (LeakEvent, bool) {
 		LeakLabel:  str("leak_label", "label"),
 		RawValue:   str("raw_value", "value", "secret"),
 		RawSnippet: str("raw_snippet", "snippet", "payload"),
+		HitCount:   i64("hit_count", "hits"),
 	}
 	if b, ok := m["is_blocked"].(bool); ok {
 		ev.IsBlocked = b
@@ -726,6 +731,9 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 		if clearedAt > 0 && ev.Ts < clearedAt {
 			continue
 		}
+		if ev.Ts > e.maxSeenTs {
+			e.maxSeenTs = ev.Ts
+		}
 		if ev.MAC == "" && ev.SrcIP != "" {
 			if m := macByIP[ev.SrcIP]; m != "" {
 				ev.MAC = m
@@ -747,13 +755,27 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 		if ev.LeakLabel == "" {
 			ev.LeakLabel = leakTypeDisplayName(ev.LeakType)
 		}
+		if ev.HitCount <= 0 {
+			ev.HitCount = 1
+		}
 		ev.ID = computeLeakEventID(ev)
 		if _, dup := e.seenIDs[ev.ID]; dup {
+			for idx := len(e.events) - 1; idx >= 0; idx-- {
+				if e.events[idx].ID == ev.ID {
+					if ev.HitCount > e.events[idx].HitCount {
+						delta := ev.HitCount - e.events[idx].HitCount
+						e.events[idx].HitCount = ev.HitCount
+						e.events[idx].Ts = ev.Ts
+						e.totalHits.Add(delta)
+					}
+					break
+				}
+			}
 			continue
 		}
 		e.seenIDs[ev.ID] = ev.Ts
 		e.events = append(e.events, ev)
-		e.totalHits.Add(1)
+		e.totalHits.Add(ev.HitCount)
 		added = append(added, ev)
 
 		devKey := ev.MAC
@@ -773,7 +795,11 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 		drop := len(e.events) - cfg.Capacity
 		e.events = append([]LeakEvent(nil), e.events[drop:]...)
 	}
-	if len(e.seenIDs) > cfg.Capacity*4 {
+	seenLimit := cfg.Capacity * 4
+	if seenLimit < 2048 {
+		seenLimit = 2048
+	}
+	if len(e.seenIDs) > seenLimit {
 		keep := make(map[string]int64, len(e.events))
 		for _, it := range e.events {
 			keep[it.ID] = it.Ts
@@ -1034,18 +1060,22 @@ func (s *server) apiLeakGuardClear(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().Unix()
 
 	eng.mu.Lock()
+	clrTs := now
+	if eng.maxSeenTs >= clrTs {
+		clrTs = eng.maxSeenTs + 1
+	}
 	eng.events = nil
 	eng.seenIDs = make(map[string]int64)
 	eng.cooldownLedger = make(map[string]int64)
-	eng.clearedAt = now
+	eng.clearedAt = clrTs
+	eng.maxSeenTs = clrTs
 	seq := eng.clearSeq.Add(1)
 	eng.totalHits.Store(0)
-	err := eng.saveStateLocked()
-	eng.mu.Unlock()
-
 	if s.hncDir != "" {
 		_ = discoverWriteAtomic(eng.dpidEventsPath(), []byte("{\"events\":[]}\n"))
 	}
+	err := eng.saveStateLocked()
+	eng.mu.Unlock()
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write ctrl failed", "detail": err.Error()})
 		return

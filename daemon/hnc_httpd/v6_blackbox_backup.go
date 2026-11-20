@@ -503,6 +503,11 @@ var (
 		"dpi_user_rules.json",
 		"phone_usage_config.json",
 		"dpi_experiment.json",
+		"leakguard_config.json",
+		"device_ident_override.json",
+		"startup_fp.json",
+		"fp_prototypes.json",
+		"dpi_self_config.json",
 	}
 	v6DynamicConfigNameRE = regexp.MustCompile(`^v6_[a-z0-9_.-]{1,48}\.json$`)
 )

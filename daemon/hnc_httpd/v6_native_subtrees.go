@@ -23,7 +23,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -701,15 +700,21 @@ func (s *server) PlanAppLimitSlotAssignments(midByMAC map[string]int) []V6AppLim
 
 // buildGetNeighIPv6DumpMsg 构造 RTM_GETNEIGH (AF_INET6, NLM_F_REQUEST|NLM_F_DUMP) 报文:
 // nlmsghdr(16B) + struct ndmsg(12B)。
+const (
+	rtnlNewNeigh uint16 = 28 // RTM_NEWNEIGH
+	rtnlGetNeigh uint16 = 30 // RTM_GETNEIGH
+	rtnlAfInet6  uint8  = 10 // AF_INET6
+)
+
 func buildGetNeighIPv6DumpMsg(seq uint32) []byte {
 	const ndmsgLen = 12
 	total := rtnlMsgHdrLen + ndmsgLen
 	buf := make([]byte, total)
 	binary.LittleEndian.PutUint32(buf[0:4], uint32(total))
-	binary.LittleEndian.PutUint16(buf[4:6], uint16(syscall.RTM_GETNEIGH))
+	binary.LittleEndian.PutUint16(buf[4:6], rtnlGetNeigh)
 	binary.LittleEndian.PutUint16(buf[6:8], uint16(rtnlFRequest|rtnlFDump))
 	binary.LittleEndian.PutUint32(buf[8:12], seq)
-	buf[16] = uint8(syscall.AF_INET6) // ndm_family = AF_INET6
+	buf[16] = rtnlAfInet6 // ndm_family = AF_INET6
 	return buf
 }
 
@@ -773,49 +778,7 @@ func parseIPv6NeighDumpMsgs(b []byte, allowedIfindexes map[int]bool) (map[string
 
 // DumpNativeIPv6Neighbors 通过原生 AF_NETLINK RTM_GETNEIGH 读取指定下游接口上的活跃全局 IPv6 邻居映射。
 func DumpNativeIPv6Neighbors(allowedIfindexes map[int]bool) (map[string][]net.IP, error) {
-	fd, err := openRTNetlinkSocket()
-	if err != nil {
-		return nil, err
-	}
-	defer syscall.Close(fd)
-
-	seq := rtnlNextSeq()
-	req := buildGetNeighIPv6DumpMsg(seq)
-	if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		return nil, fmt.Errorf("rtnl neigh dump send: %w", err)
-	}
-
-	merged := make(map[string][]net.IP)
-	seen := make(map[string]bool)
-	buf := make([]byte, 65536)
-	for {
-		n, _, err := syscall.Recvfrom(fd, buf, 0)
-		if errors.Is(err, syscall.EINTR) {
-			continue
-		}
-		if err != nil {
-			return nil, fmt.Errorf("rtnl neigh dump recv: %w", err)
-		}
-		if n <= 0 {
-			return nil, errors.New("rtnl neigh dump: empty recv")
-		}
-		chunkMap, done, pErr := parseIPv6NeighDumpMsgs(buf[:n], allowedIfindexes)
-		if pErr != nil {
-			return nil, pErr
-		}
-		for mac, ips := range chunkMap {
-			for _, ip := range ips {
-				k := mac + "|" + ip.String()
-				if !seen[k] && len(merged[mac]) < v6IPv6MaxAddrs {
-					seen[k] = true
-					merged[mac] = append(merged[mac], ip)
-				}
-			}
-		}
-		if done {
-			return merged, nil
-		}
-	}
+	return dumpNativeIPv6NeighborsOS(allowedIfindexes)
 }
 
 // NativeSyncIPv6FiltersV6 在所有并管下游接口与上行 ifb0 上原生同步受控设备的 128-bit IPv6 u32 过滤器。
@@ -839,7 +802,7 @@ func NativeSyncIPv6FiltersV6(downIfindexes []int, ifbIfindex int, midByMAC map[s
 	if err != nil {
 		return 0, err
 	}
-	defer syscall.Close(fd)
+	defer closeRTNetlinkSocket(fd)
 
 	totalSynced := 0
 	for mac, mid := range midByMAC {
@@ -1034,7 +997,7 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 		if sErr != nil {
 			rep.Warnings = append(rep.Warnings, sErr.Error())
 		} else {
-			defer syscall.Close(fd)
+			defer closeRTNetlinkSocket(fd)
 			tick := readPschedTickInUsec()
 
 			for _, ds := range devSpecs {

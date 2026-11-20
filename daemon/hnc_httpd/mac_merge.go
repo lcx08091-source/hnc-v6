@@ -532,21 +532,52 @@ func scoreMacPair(np, op *macProfile) (score int, reasons []string, ok bool) {
 		add(-20, "设备类型不同")
 	}
 	// TLS 指纹集合
+	ja4Overlap := 0.0
 	if len(np.JA4) >= 2 && len(op.JA4) >= 2 {
 		j, _ := jaccard(np.JA4, op.JA4)
+		ja4Overlap = j
 		if pts := int(math.Round(20 * j)); pts >= 3 {
 			add(pts, fmt.Sprintf("TLS 指纹(JA4)重合 %d%%", int(math.Round(j*100))))
 		}
 	}
-	// 常用应用集合
-	if len(np.Apps) >= 3 && len(op.Apps) >= 3 {
+	// 常用应用集合 + 小众专属应用 DNA 命中(区分国民泛应用与个人专属栈)
+	appOverlap := 0.0
+	var rareCommon []string
+	if len(np.Apps) >= 2 && len(op.Apps) >= 2 {
 		j, common := jaccard(np.Apps, op.Apps)
-		if pts := int(math.Round(20 * j)); pts >= 3 {
-			if len(common) > 4 {
-				common = common[:4]
+		appOverlap = j
+		for _, a := range common {
+			if !isUbiquitousMergeApp(a) {
+				rareCommon = append(rareCommon, a)
 			}
-			add(pts, fmt.Sprintf("常用应用重合 %d%%(%s)", int(math.Round(j*100)), strings.Join(common, "、")))
 		}
+		if len(np.Apps) >= 3 && len(op.Apps) >= 3 {
+			if pts := int(math.Round(20 * j)); pts >= 3 {
+				show := common
+				if len(show) > 4 {
+					show = show[:4]
+				}
+				add(pts, fmt.Sprintf("常用应用重合 %d%%(%s)", int(math.Round(j*100)), strings.Join(show, "、")))
+			}
+		}
+		// 非对称包含度 + 小众专属应用命中: 刚重连的新 MAC 只跑了 2~4 个应用, 但全部落在旧画像且含小众专属应用
+		contain := float64(len(common)) / float64(len(np.Apps))
+		if len(rareCommon) > 0 && contain >= 0.75 {
+			showR := rareCommon
+			if len(showR) > 3 {
+				showR = showR[:3]
+			}
+			add(8, "专属非常见应用特征吻合("+strings.Join(showR, "、")+")")
+		}
+	}
+	// v6.0 匿名轮换 MAC 多维栈共振补偿 (针对 iOS 18+ Rotating MAC / Android 15+ / RFC 7844 隐藏 DHCP 主机名):
+	// 当设备主动隐藏主机名时, 旧版缺少 35 分主机名项导致上限被卡在 ~60 分;
+	// 若无任何品牌/型号/系统冲突, 且 DHCP Option 55 协议栈 + JA4 指纹簇 + 应用画像 + 终端家族四维同时正交吻合, 予以 +16 共振补偿!
+	hasHardConflict := diff(np.Brand, op.Brand) || diff(np.Model, op.Model) || diff(np.OS, op.OS) || diff(np.Type, op.Type) || diff(np.DHCPFP, op.DHCPFP)
+	noHostname := strings.TrimSpace(np.DHCPName) == "" && strings.TrimSpace(np.MDNSName) == ""
+	famAligned := eq(np.Brand, op.Brand) || eq(np.Model, op.Model) || eq(np.OS, op.OS) || eq(np.VendorClass, op.VendorClass)
+	if !hasHardConflict && noHostname && eq(np.DHCPFP, op.DHCPFP) && famAligned && ja4Overlap >= 0.50 && (appOverlap >= 0.50 || len(rareCommon) >= 1) {
+		add(16, "匿名轮换 MAC 多维协议栈共振(DHCP 栈+TLS 指纹+应用画像一致)")
 	}
 	if ident < macMergeIdentMin {
 		return 0, nil, false
@@ -611,7 +642,30 @@ func macMergeCandidates(f *macMergeFile, newMAC string, aliases map[string]strin
 	if len(out) > macMergeTopN {
 		out = out[:macMergeTopN]
 	}
+	// 同品牌家庭多设备防误并守卫: 若第 1 候选与第 2 候选分差 < 12 分, 强制压回人工确认区间 (<85) 并标注原因
+	if len(out) >= 2 && out[0].Score-out[1].Score < 12 {
+		if out[0].Score >= 83 {
+			out[0].Score = 82
+		}
+		out[0].Reasons = append(out[0].Reasons, "存在特征相近的同品牌离线设备，建议人工确认")
+	}
 	return out
+}
+
+var ubiquitousMergeApps = map[string]struct{}{
+	"weixin": {}, "wechat": {}, "qq": {}, "douyin": {}, "bilibili": {},
+	"alipay": {}, "taobao": {}, "tmall": {}, "jd": {}, "pinduoduo": {},
+	"meituan": {}, "xiaohongshu": {}, "weibo": {}, "zhihu": {}, "kuaishou": {},
+	"baidu": {}, "amap": {}, "apple": {}, "icloud": {}, "xiaomi": {}, "huawei": {},
+}
+
+func isUbiquitousMergeApp(appID string) bool {
+	k := strings.ToLower(strings.TrimSpace(appID))
+	if k == "" || strings.HasPrefix(k, "_") {
+		return true
+	}
+	_, ok := ubiquitousMergeApps[k]
+	return ok
 }
 
 // ─── 后台循环 ──────────────────────────────────────────────────────────

@@ -66,12 +66,14 @@ var builtinSystemUpdateSuffixes = []string{
 }
 
 var builtinUpdateRuleIDs = map[string]bool{
-	"windows_update_v6":      true,
-	"apple_system_update_v6": true,
-	"steam_bulk_update_v6":   true,
-	"console_rom_ota_v6":     true,
-	"microsoft_update":       true,
-	"apple_update":           true,
+	"windows_update_v6":          true,
+	"apple_system_update_v6":     true,
+	"steam_bulk_update_v6":       true,
+	"console_rom_ota_v6":         true,
+	"playstation_xbox_update_v6": true,
+	"android_rom_ota_v6":         true,
+	"microsoft_update":           true,
+	"apple_update":               true,
 }
 
 // UpdateLeashConfig 配置结构（直接数字型 grace_mb 与 leash_kbps）。

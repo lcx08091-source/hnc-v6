@@ -286,7 +286,12 @@ func isWritePath(p string) bool {
 		"/api/self/toggle",
 		"/api/self/auto_expand/toggle",
 		"/api/self/auto_promote/toggle",
-		"/api/export":
+		"/api/export",
+		"/api/leakguard/clear",
+		"/api/leakguard/config",
+		"/api/leakguard/block-domain",
+		"/api/v6/scalpel/cut",
+		"/api/restore":
 		return true
 	}
 	return false
@@ -418,7 +423,20 @@ func isSensitiveReadPath(p string) bool {
 		"/api/encdns",
 		"/api/dns",
 		"/api/dns/log",
-		"/api/exports":
+		"/api/exports",
+		"/api/vector_sync",
+		"/api/v6/diag_dump",
+		"/api/leakguard/events",
+		"/api/leakguard/stream",
+		"/api/v6/express",
+		"/api/v6/update_leash",
+		"/api/v6/scalpel/flows",
+		"/api/thermo",
+		"/api/v6/thermo",
+		"/api/v6/blackbox",
+		"/api/v6/multi_iface",
+		"/api/v6/native_subtrees",
+		"/api/backup":
 		return true
 	}
 	// 导出文件按名子路径: /api/exports/<name>.zip

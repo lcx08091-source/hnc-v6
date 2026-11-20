@@ -1,5 +1,3 @@
-//go:build linux || android
-
 // v6_flow_scalpel.go — HNC v6.0.0 · Vector (T4 模块 4):
 // FlowScalpel 五元组实时透视 + 免断网单流秒斩手术刀。
 //
@@ -32,7 +30,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 )
 
@@ -230,44 +227,16 @@ func parseNetlinkAck(resp []byte) error {
 			return errors.New("truncated NLMSG_ERROR")
 		}
 		errnoNeg := int32(binary.LittleEndian.Uint32(resp[16:20]))
-		if errnoNeg == 0 {
-			return nil // NLMSG_ERROR code=0 代表 ACK 成功
-		}
-		errno := syscall.Errno(-errnoNeg)
-		if errors.Is(errno, syscall.ENOENT) {
+		if errnoNeg == 0 || -errnoNeg == 2 { // 0 = ACK, ENOENT(2) = 连接已自然销毁
 			return nil
 		}
-		return errno
+		return fmt.Errorf("ctnetlink delete errno %d", -errnoNeg)
 	}
 	return nil
 }
 
 func (e *flowScalpelEngine) defaultDeleteConntrackNetlink(tuple ScalpelTuple, seq uint32) error {
-	msg, err := buildConntrackDeleteNetlinkMsg(tuple, seq)
-	if err != nil {
-		return err
-	}
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, nlNetfilter)
-	if err != nil {
-		return err
-	}
-	defer syscall.Close(fd)
-
-	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		return err
-	}
-	tv := syscall.Timeval{Sec: 1}
-	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
-
-	if err := syscall.Sendto(fd, msg, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		return err
-	}
-	buf := make([]byte, 4096)
-	n, _, err := syscall.Recvfrom(fd, buf, 0)
-	if err != nil {
-		return err
-	}
-	return parseNetlinkAck(buf[:n])
+	return sendConntrackDeleteNetlink(tuple, seq)
 }
 
 // ── Step 2: 双栈 iptables-restore / ip6tables-restore -w 2 --noflush 构造与提交 ──
@@ -319,14 +288,14 @@ func resolveScalpelBin(name string) string {
 	return ""
 }
 
-func (e *flowScalpelEngine) ensureForwardJumpLocked(isIPv6 bool) {
+func (e *flowScalpelEngine) ensureForwardJump(isIPv6 bool) {
 	if e.srv == nil || !useNativeDataplane(e.srv.hncDir) {
 		return
 	}
-	if !isIPv6 && e.hookEnsuredV4 {
-		return
-	}
-	if isIPv6 && e.hookEnsuredV6 {
+	e.mu.Lock()
+	already := (!isIPv6 && e.hookEnsuredV4) || (isIPv6 && e.hookEnsuredV6)
+	e.mu.Unlock()
+	if already {
 		return
 	}
 	iptName := "iptables"
@@ -339,15 +308,17 @@ func (e *flowScalpelEngine) ensureForwardJumpLocked(isIPv6 bool) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	_ = exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-N", scalpelChainName).Run()
-	if exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-C", "FORWARD", "-j", scalpelChainName).Run() != nil {
-		_ = exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-j", scalpelChainName).Run()
+	_ = hardenCmd(exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-N", scalpelChainName)).Run()
+	if hardenCmd(exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-C", "FORWARD", "-j", scalpelChainName)).Run() != nil {
+		_ = hardenCmd(exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-j", scalpelChainName)).Run()
 	}
+	e.mu.Lock()
 	if isIPv6 {
 		e.hookEnsuredV6 = true
 	} else {
 		e.hookEnsuredV4 = true
 	}
+	e.mu.Unlock()
 }
 
 func (e *flowScalpelEngine) defaultPipeRestore(family int, payload string) error {
@@ -365,7 +336,7 @@ func (e *flowScalpelEngine) defaultPipeRestore(family int, payload string) error
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), scalpelRestoreTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, binPath, "-w", "2", "--noflush")
+	cmd := hardenCmd(exec.CommandContext(ctx, binPath, "-w", "2", "--noflush"))
 	cmd.Stdin = strings.NewReader(payload)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -442,12 +413,12 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 		e.rules = append(e.rules, r15m)
 	}
 
-	e.ensureForwardJumpLocked(isV6)
 	payload := buildScalpelRestorePayload(isV6, e.rules)
 	runner := e.iptRunner
 	activeCnt := len(e.rules)
 	e.mu.Unlock()
 
+	e.ensureForwardJump(isV6)
 	var iptErr error
 	if runner != nil {
 		iptErr = runner(family, payload)

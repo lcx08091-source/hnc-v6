@@ -60,7 +60,7 @@ detect_paths() {
 # 输出可写开关(不带前缀)
 detect_knobs() {
     local p
-    for p in /sys/kernel/debug/hnat/hook_toggle /proc/hnat/hook_toggle; do
+    for p in /sys/kernel/debug/hnat/hook_toggle /proc/hnat/hook_toggle /sys/kernel/mddp/enable /proc/mddp/enable; do
         [ -w "$R$p" ] && echo "$p"
     done
     for p in "$R"/sys/module/*hnat*/parameters/hook_toggle "$R"/sys/module/*hnat*/parameters/hnat_enable \

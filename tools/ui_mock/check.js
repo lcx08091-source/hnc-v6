@@ -160,6 +160,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await shot('signal-sheet'); await checkText('signal-sheet'); await closeSheet();
       }
 
+      // ── 智能护航 (v6.0.0 网速护航 + 隐私安检 + 连接排障) ──
+      await tab('vector');
+      await settle(900);
+      await scrollShots('vector-escort', 4);
+      if (await page.locator('[data-v6-subtab="privacy"]').count()) {
+        await click('[data-v6-subtab="privacy"]', 500);
+        await scrollShots('vector-privacy', 4);
+      }
+      if (await page.locator('[data-v6-act="lgd-toggle-btn"]').count()) {
+        await click('[data-v6-act="lgd-toggle-btn"]', 500);
+        await shot('vector-leakguard-forensic'); await checkText('vector-leakguard-forensic');
+      }
+      if (await page.locator('[data-v6-subtab="troubleshoot"]').count()) {
+        await click('[data-v6-subtab="troubleshoot"]', 500);
+        await scrollShots('vector-troubleshoot', 3);
+      }
+      if (await page.locator('#p-vector [data-v6-act="open-scalpel"]').count()) {
+        await click('#p-vector [data-v6-act="open-scalpel"]', 900);
+        await shot('vector-scalpel-drawer'); await checkText('vector-scalpel-drawer');
+        await click('[data-v6-act="scalpel-close"]', 400);
+      }
+
       // ── 应用 (活跃应用 + 应用规则中心) ──
       await tab('apps');
       await scrollShots('apps-active', 3);

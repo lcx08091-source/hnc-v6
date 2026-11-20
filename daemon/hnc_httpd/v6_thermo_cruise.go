@@ -439,7 +439,7 @@ func (e *thermoCruiseEngine) summary() map[string]any {
 	e.mu.Unlock()
 	return map[string]any{
 		"enabled":           cfg.Enabled,
-		"effective_stage":   e.effectiveStage.Load(),
+		"effective_stage":   int(e.effectiveStage.Load()),
 		"raw_thermal_stage": rawStage,
 		"temp_c":            rd.TempC,
 		"capacity_pct":      rd.CapacityPct,

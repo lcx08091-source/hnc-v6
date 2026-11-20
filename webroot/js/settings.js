@@ -298,7 +298,7 @@ function renderSettings(anim1) {
   var gsOn = c.global_shaper_enabled === true, hsAuto = c.hotspot_autostart === true, lv = S.live || {};
   var groups = [];
   var scR = scRep(), scW = scR ? (num((scR.summary || {}).fail) ? 'fail' : num((scR.summary || {}).warn) ? 'warn' : 'ok') : '';
-  groups.push(['诊断', sBtn([scW === 'fail' ? 'red' : scW === 'warn' ? 'orange' : 'green', 'check'], '自检报告', SC.running ? '正在自检…' : scR ? scAgo(scR.generated_at) + '生成 · ' + scSumTxt(scR.summary) : '一键检查限速能力、防火墙、热点、IPv6、时间等，约 20 秒', 'sc-open', scR ? '查看' : '一键自检') + dpvDiagRowHtml() + sFold('logs', ['gray', 'doc'], '运行日志', 'service · hotspotd · dpid · iptables/tc 等',
+  groups.push(['诊断', sBtn([scW === 'fail' ? 'red' : scW === 'warn' ? 'orange' : 'green', 'check'], '自检报告', SC.running ? '正在自检…' : scR ? scAgo(scR.generated_at) + '生成 · ' + scSumTxt(scR.summary) : '一键检查限速能力、防火墙、热点、IPv6、时间等，约 20 秒', 'sc-open', scR ? '查看' : '一键自检') + sFold('logs', ['gray', 'doc'], '运行日志', 'service · hotspotd · dpid · iptables/tc 等',
     '<div style="display:flex;gap:8px"><select class="selbox" id="log-file" style="flex:1">' + LOG_FILES.map(function (f) { return '<option' + (f === S.logFile ? ' selected' : '') + '>' + f + '</option>'; }).join('') + '</select><button class="btn sec press" data-act="log-refresh">' + ico('refresh') + '刷新</button><button class="btn sec press" data-act="log-copy">' + ico('copy') + '</button></div>' +
     '<div class="logv" id="logv"><div class="t">展开后自动加载</div></div>')]);
   groups.push(['热点', sFold('hs', ['blue', 'wifi'], '开机自动开热点', '开机后自动开 WiFi 热点；ColorOS 可能不放行命令行开热点',
@@ -338,7 +338,7 @@ function renderSettings(anim1) {
   var fx = c.flywheel_exclude_user || [];
   groups.push(['飞轮排除名单', sFold('fw', ['cyan', 'shield'], '不参与规则学习的应用', 'VPN / 代理会代理别的应用流量，排除后不污染规则 · ' + fx.length + ' 个',
     '<div class="chips">' + (fx.length ? fx.map(function (p) { return '<span class="chip">' + esc(p) + '<button class="linkish danger" data-fw-del="' + esc(p) + '" aria-label="移除">×</button></span>'; }).join('') : '<span class="note">还没有手动排除的应用（内置名单已包含常见 VPN / 代理）</span>') + '</div>' +
-    '<div style="display:flex;gap:8px">' + inp('fw-pkg', '', '', 'maxlength="128" placeholder="包名，如 com.github.metacubex.clash.meta" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="fw-add">添加</button></div><div class="note">约 5 分钟内生效；也可以在应用页的应用详情里一键排除。</div>')]);
+    '<div style="display:flex;gap:8px">' + inp('fw-pkg', '', '', 'data-fw-inp="1" maxlength="128" placeholder="包名，如 com.github.metacubex.clash.meta" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="fw-add">添加</button></div><div class="note">约 5 分钟内生效；也可以在应用页的应用详情里一键排除。</div>')]);
   var m = S.metrics || {}, age = S.lastOk ? Math.round((Date.now() - S.lastOk) / 1000) : null;
   groups.push(['刷新与功耗', sFold('rmode', ['green', 'refresh'], '设备页刷新模式', '实时更跟手；省电会降低前台轮询频率', seg('rmode', [['realtime', '实时'], ['balanced', '均衡'], ['powersave', '省电']], S.refreshMode), val({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode])) +
     sItem(['gray', 'info'], '数据新鲜度', '/api/live 最近一次成功返回', val(age == null ? '—' : age <= 2 ? '刚刚' : age + ' 秒前', age != null && age <= 8 ? 'ok' : 'warn'), ' id="fresh-row"') +
@@ -389,19 +389,26 @@ function renderSettings(anim1) {
   groups.push(['硬件加速兜底', sItem(['orange', 'rocket'], '防止系统热点加速绕过限速', '自动：检测到加速正在转发流量时，才让它退回常规路径，保证限速 / 封锁 / 统计都生效', '') +
     '<div class="row" style="padding-top:0">' + seg('guard-mode', [['auto', '自动'], ['on', '始终'], ['off', '关闭']], gm, 'small') + '</div>' +
     '<div class="row">' + gi(og && og.fallback_active ? 'green' : 'gray', 'layers') + '<span class="tx"><div class="t">当前状态</div><div class="s" id="guard-s">' + esc(ogS) + (og && og.detail && gm !== 'off' ? '<br>' + esc(og.detail) : '') + (og && og.last_check ? ' · ' + ago(og.last_check) + '检测' : '') + '</div></span></div>' +
-    (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? ['clsact', 'bpf_filter', 'map', 'watchdog'].map(function (k) { return k + (cs[k] ? ':正常' : ':异常'); }).join(' · ') : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
-  S.open.look = true; groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', ({ cyber: '赛博机能', liquid: '液态玻璃' }[S.style] || '极简默认') + ' · 浅色 / 深色 / 跟随系统 · 界面动画',
-    '<div class="note" style="margin-bottom:-2px">界面风格</div><div class="style-pick">' + [
-      ['default', '极简默认', 'linear-gradient(145deg,#EEF2F8,#F8FAFC)', 'linear-gradient(90deg,#2563EB,#4F46E5)', '#FFFFFF;box-shadow:0 1px 3px rgba(15,23,42,.08)'],
-      ['cyber', '赛博机能', 'radial-gradient(80% 80% at 85% 15%,rgba(94,164,220,.26),transparent),linear-gradient(145deg,#0B1017,#141E2B)', 'linear-gradient(90deg,#4A88C2,#6BAED6)', 'rgba(19,28,40,.92);border:1px solid rgba(126,163,198,.34)'],
-      ['liquid', '液态玻璃', 'radial-gradient(60% 60% at 15% 10%,rgba(80,150,255,.38),transparent),radial-gradient(60% 60% at 90% 90%,rgba(244,114,182,.32),transparent),#EAF2FD', 'linear-gradient(180deg,#2B93FF,#0A74F5)', 'rgba(255,255,255,.65);box-shadow:inset 0 1px 0 #fff,0 2px 6px rgba(30,45,90,.12)']
+    (gm === 'on' ? '<div class="row">' + gi('gray', 'flask') + '<span class="tx"><div class="t">clsact 打标（附带）</div><div class="s" id="clsact-s">' + (cs ? [['clsact', '队列挂点'], ['bpf_filter', '分流程序'], ['map', '状态表'], ['watchdog', '守护巡检']].map(function (it) { return it[1] + (cs[it[0]] ? ':正常' : ':异常'); }).join(' · ') : '点「检查」查看') + '</div></span><button class="linkish" data-act="clsact-check">检查</button>' + (cs && !(cs.clsact && cs.bpf_filter && cs.map && cs.watchdog) ? '<button class="linkish danger" data-act="clsact-repair">修复</button>' : '') + '</div>' : '')]);
+  if (S.open.look === undefined) S.open.look = true;
+  var curStyleKey = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : (S.style === 'cyber' ? 'cyber' : 'default');
+  var curStyleName = { liquid: '液态玻璃 · 光学折射', frosted: '经典毛玻璃', cyber: '赛博机甲', default: '极简精密' }[curStyleKey] || '液态玻璃';
+  groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', curStyleName + ' · 浅色 / 深色 / 跟随系统 · 120fps 动态引擎',
+    '<div class="note" style="margin-bottom:2px">四大独立视觉架构（点按即时切换，均支持浅色 / 纯正 OLED 暗夜双态）</div>' +
+    '<div class="style-pick style-pick-4">' + [
+      ['liquid', '液态折射', '光学棱镜边缘 · 水滴透镜', 'pv-liquid'],
+      ['frosted', '经典毛玻璃', '均匀柔雾缎面 · 零色散', 'pv-frosted'],
+      ['default', '极简精密', '微米级实心边框 · 零模糊', 'pv-default'],
+      ['cyber', '赛博机甲', '切角装甲遥测 · 等宽数显', 'pv-cyber']
     ].map(function (t) {
-      return '<button class="press' + (S.style === t[0] ? ' on' : '') + '" data-style-pick="' + t[0] + '"><span class="pv" style="background:' + t[2] + '"><i style="width:46%;background:' + t[3] + '"></i><i style="background:' + t[4] + '"></i><i style="width:80%;background:' + t[4] + '"></i></span>' + t[1] + '</button>'; }).join('') + '</div>' +
+      return '<button type="button" class="style-card press' + (curStyleKey === t[0] ? ' on' : '') + '" data-style-pick="' + t[0] + '">' +
+        '<span class="pv ' + t[3] + '"><span class="pv-top"><i class="pv-pill"></i><i class="pv-dot"></i></span><span class="pv-body"><i class="pv-bar"></i><i class="pv-sub"></i></span></span>' +
+        '<span class="style-meta"><b>' + t[1] + '</b><small>' + t[2] + '</small></span>' +
+      '</button>';
+    }).join('') + '</div>' +
     // v5.30 玻璃浓度(只在液态玻璃风格下显示, liquid.css .lg-only): 往右更不透明, 文字更清楚; 拖动时整页实时预览
     '<div class="lg-only">' +
-    '<div class="note" style="margin-bottom:-2px">光学质感模式（支持自定义壁纸实时切换）</div>' +
-    seg('glass-mode', [['liquid', '液态玻璃 · 光学折射'], ['frosted', '经典毛玻璃 · 均匀柔雾']], S.glassMode || 'liquid', 'small') +
-    '<div class="note" style="margin:6px 0 -2px">玻璃浓度 · <span id="glass-tint-v">' + glassTintLabel(S.glassTint) + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
+    '<div class="note" style="margin:2px 0 -2px">玻璃透光度微调 · <span id="glass-tint-v">' + glassTintLabel(S.glassTint) + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
     '<div class="gx-row"><span>清透</span><input type="range" class="gx-range" id="glass-tint" min="0" max="100" step="1" value="' + S.glassTint + '" aria-label="玻璃浓度"><span>着色</span></div></div>' +
     '<div class="note" style="margin-bottom:-2px">颜色</div><div class="theme-pick">' + [['auto', '跟随系统', 'linear-gradient(135deg,#F5F5F7 50%,#1c1c1e 50%)'], ['light', '浅色', '#F5F5F7'], ['dark', '深色', '#1c1c1e']].map(function (t) {
       return '<button class="press' + (S.theme === t[0] ? ' on' : '') + '" data-theme-pick="' + t[0] + '"><span class="sw" style="background:' + t[2] + '"></span>' + t[1] + '</button>'; }).join('') + '</div>' +
@@ -435,15 +442,21 @@ function renderSettings(anim1) {
       '<span class="badge ' + (remOn ? 'b-ok' : 'b-gray') + '">' + (remOn ? '已开启' : '已关闭') + '</span>',
       gMap['远程访问'] || ''),
     scard('scard-look', ['purple', 'palette'], '外观、主题与动效',
-      ({ cyber: '赛博机能', liquid: '液态玻璃' }[S.style] || '极简默认') + ' · ' + ({ auto: '跟随系统', light: '浅色', dark: '深色' }[S.theme] || '浅色') + ' · 自定义壁纸与玻璃折射',
-      '<span class="badge b-acc">' + ({ cyber: '赛博机能', liquid: '液态玻璃' }[S.style] || '极简默认') + '</span>',
+      curStyleName + ' · ' + ({ auto: '跟随系统', light: '浅色', dark: '深色' }[S.theme] || '浅色') + ' · 自定义壁纸与视觉引擎',
+      '<span class="badge b-acc">' + curStyleName.split(' · ')[0] + '</span>',
       gMap['外观'] || ''),
     scard('scard-alert', ['orange', 'bolt'], '告警与配额提醒',
       '新设备接入提醒 · 月度流量配额 · 异常流量检测',
       '<span class="badge ' + (ac.enabled !== false ? 'b-ok' : 'b-gray') + '">' + (ac.enabled !== false ? '已开启' : '已关闭') + '</span>',
       gMap['告警'] || '')
   ];
+  var v6LgHits = num(window.V6 && V6.lg && V6.lg.total_hits);
+  var v6TempS = (window.V6 && V6.thermo && V6.thermo.temp_c > 0) ? (V6.thermo.temp_c.toFixed(1) + '°C') : '正常';
   var advCards = [
+    scard('scard-v6', ['blue', 'vector'], '智能护航与配置备份',
+      '游戏通话优先 · 后台更新限速 · 温控保护（' + esc(v6TempS) + '）· 隐私安检（' + v6LgHits + ' 条）',
+      '<span class="badge b-acc">v6.0.0</span>',
+      typeof v6SettingsBodyHtml === 'function' ? v6SettingsBodyHtml() : ''),
     scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
       'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
       '<span class="badge b-pur">DPI 识别</span>',
@@ -461,7 +474,26 @@ function renderSettings(anim1) {
       mmCnt ? '<span class="badge b-warn">' + mmCnt + ' 条建议</span>' : '<span class="badge b-gray">正常</span>',
       (gMap['设备'] || '') + (gMap['飞轮排除名单'] || ''))
   ];
+  var dpvNorm = typeof dpvNormalize === 'function' ? dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled) : null;
+  var dpvHasErr = !!(dpvNorm && dpvNorm.sampled_ok && dpvNorm.summary && dpvNorm.summary.bypass_or_missing_count > 0);
+  if (dpvHasErr && S.open['scard-dpv'] === undefined) S.open['scard-dpv'] = true;
+  var dpvSubTxt = !dpvNorm || !dpvNorm.sampled_ok
+    ? '检验给设备设的限速是否真正管用，有无被手机系统加速绕过'
+    : dpvHasErr
+      ? ('发现 ' + dpvInt(dpvNorm.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
+      : ('已设限速 ' + dpvInt(dpvNorm.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dpvNorm.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
+  var dpvBadgeHtml = !dpvNorm || !dpvNorm.sampled_ok
+    ? '<span class="badge b-gray" id="dpv-scard-badge">点开检验</span>'
+    : dpvHasErr
+      ? '<span class="badge b-warn" id="dpv-scard-badge">待修复</span>'
+      : (dpvNorm.summary.hitting_count > 0
+          ? '<span class="badge b-ok" id="dpv-scard-badge">真实生效</span>'
+          : '<span class="badge b-acc" id="dpv-scard-badge">待命就绪</span>');
   var diagCards = [
+    scard('scard-dpv', [dpvHasErr ? 'orange' : 'green', 'shield'], '限速真实生效检验',
+      esc(dpvSubTxt),
+      dpvBadgeHtml,
+      dpvRenderSettingsSlotHtml()),
     scard('scard-diag', [scW === 'fail' ? 'red' : scW === 'warn' ? 'orange' : 'green', 'check'], '自检报告与运行日志',
       (scR ? '自检 ' + scSumTxt(scR.summary) : '一键兼容性自检') + ' · 14 类系统与守护日志',
       scR ? '<span class="badge ' + (scW === 'fail' ? 'b-red' : scW === 'warn' ? 'b-warn' : 'b-ok') + '">' + esc(scSumTxt(scR.summary)) + '</span>' : '<span class="badge b-gray">可自检</span>',
@@ -476,20 +508,19 @@ function renderSettings(anim1) {
       (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
     scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
       '调试模拟设备 · 后端版本 ' + esc(l.backend_version || '—') + ' · 完整更新日志',
-      '<span class="badge b-gray">' + esc(l.backend_version || 'v5.40.0') + '</span>',
+      '<span class="badge b-gray">' + esc(l.backend_version || 'v6.0.0') + '</span>',
       (gMap['模拟环境（调试）'] || '') + (gMap['关于'] || ''))
   ];
   var cols = function (list) { if (!wide()) return '<div class="scard-stack">' + list.join('') + '</div>'; var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
   var lvSec = function (id, title, sub, cards) {
     var hide = S.setLv !== 'all' && S.setLv !== id ? ' hidden' : '';
-    var dpvSlot = id === 'diag' ? dpvRenderSettingsSlotHtml() : (id === 'adv' && typeof v6SettingsSlotHtml === 'function' ? v6SettingsSlotHtml() : '');
     return '<div class="set-lv-sec" data-lv-sec="' + id + '"' + hide + '>' +
       '<div class="sec set-lv-hd"><span>' + title + ' <small>' + sub + '</small></span><span class="r">' + cards.length + ' 项</span></div>' +
-      dpvSlot + cols(cards) + '</div>';
+      cols(cards) + '</div>';
   };
-  var anyOpen = ['scard-hs','scard-rem','scard-look','scard-alert','scard-dpi','scard-qos','scard-guard','scard-devm','scard-diag','scard-stat','scard-maint','scard-about'].some(function (k) { return S.open[k]; });
+  var anyOpen = ['scard-hs','scard-rem','scard-look','scard-alert','scard-v6','scard-dpi','scard-qos','scard-guard','scard-devm','scard-dpv','scard-diag','scard-stat','scard-maint','scard-about'].some(function (k) { return S.open[k]; });
   var h = '<div class="wrap">' +
-    '<div class="set-top-bar">' + seg('set-lv', [['all', '全部 (12)'], ['basic', '常用 (4)'], ['adv', '进阶 (4)'], ['diag', '诊断 (4)']], S.setLv) +
+    '<div class="set-top-bar">' + seg('set-lv', [['all', '全部 (' + (basicCards.length + advCards.length + diagCards.length) + ')'], ['basic', '常用 (' + basicCards.length + ')'], ['adv', '进阶 (' + advCards.length + ')'], ['diag', '诊断 (' + diagCards.length + ')']], S.setLv) +
     '<div class="set-top-meta"><span class="note">按级别分类折叠 · 点卡片展开对应设置</span><button class="linkish" data-act="set-fold-toggle">' + (anyOpen ? '全部收起' : '展开常用') + '</button></div></div>' +
     lvSec('basic', '一、基础常用', '热点 · 远程 · 外观 · 告警', basicCards) +
     lvSec('adv', '二、进阶与识别', 'DPI 识别 · 带宽队列 · 加速兜底 · 设备合并', advCards) +
@@ -1612,14 +1643,14 @@ function dpvNormalize(raw, leakOn) {
     : ((typeof S === 'object' && S && S.hotspot && typeof S.hotspot.active === 'boolean') ? S.hotspot.active : true);
 
   var defaultHeadline = !hsActive
-    ? '热点当前未开启，开启热点后可实时核验内核 HTB 限速队列命中计数'
+    ? '当前未开启热点，开启热点后即可检验设备限速是否真实生效'
     : bypassMissingCount > 0
-      ? '注意：' + bypassMissingCount + ' 台受控设备存在队列缺失或疑似快径旁路，建议点击「一键重下发修复」'
+      ? '发现 ' + bypassMissingCount + ' 台设备的限速可能被手机硬件加速绕过，请点击下方「一键修复限速」'
       : hittingCount > 0
-        ? '内核限速真实生效：' + hittingCount + '/' + ctrlTotal + ' 台受控设备已命中 HTB 队列（其余 ' + idleCount + ' 台空闲就绪）'
+        ? '限速已真实生效：' + hittingCount + '/' + ctrlTotal + ' 台限速设备的上网流量正经过限速通道（其余 ' + idleCount + ' 台当前无流量待命）'
         : ctrlTotal > 0
-          ? '全部 ' + ctrlTotal + ' 台受控设备内核队列与正交掩码链路已就绪，等待客户端产生流量'
-          : '热点运行中，当前未配置受控限速、应用 QoS 或黑名单设备';
+          ? '全部 ' + ctrlTotal + ' 台设备的限速通道已准备就绪，设备开始上网下载后即可看到生效计数'
+          : '热点运行正常，目前还没有给任何设备单独设置限速或封锁';
 
   var ipEntries = typeof bpf.ip_mark_entries !== 'undefined'
     ? dpvNum(bpf.ip_mark_entries, 0)
@@ -1779,105 +1810,48 @@ function dpvRenderCardHtml(data, isBusy) {
   var markLayout = d.mark_layout;
   var low16Protected = Boolean(d.netd_low16_protected);
 
-  var overallBadgeCls = !sampled
-    ? 'dpv-pill-muted'
-    : sum.overall_status === 'fail'
-      ? 'dpv-pill-danger'
-      : sum.overall_status === 'warn'
-        ? 'dpv-pill-warn'
-        : (sum.overall_status === 'ok' && sum.hitting_count > 0)
-          ? 'dpv-pill-ok'
-          : 'dpv-pill-info';
-  var overallBadgeText = !sampled
-    ? '待采样核验'
-    : sum.overall_status === 'fail'
-      ? '疑似快径旁路'
-      : sum.overall_status === 'warn'
-        ? '队列缺失待修复'
-        : sum.hitting_count > 0
-          ? '队列真实命中'
-          : (d.hotspot_active ? '链路就绪待流量' : '热点未开启');
-
   var offloadHealthy = sampled && (off.tether_offload_disabled || off.slowpath_active) &&
     off.hwnat !== 'detected_no_knob' && off.hwnat !== 'failed';
   var hwnatLabel = !sampled
-    ? '硬件快径状态待采样'
+    ? '系统加速接管状态：待检验'
     : (off.hwnat === 'none' || off.hwnat === 'disabled' || off.hwnat === 'suppressed'
-        ? 'T+0 硬件快径已压制'
-        : 'HWNAT: ' + off.hwnat);
+        ? '系统硬件加速已受控（不绕过限速）'
+        : '硬件加速状态：' + off.hwnat);
 
   var fwmarkBadgeCls = !sampled ? '' : (low16Protected ? 'dpv-chip-ok' : 'dpv-chip-warn');
   var fwmarkBadgeText = !sampled
-    ? '正交掩码契约（0xffff0000 · 待核验）'
+    ? '系统网络标记隔离（待检验）'
     : (low16Protected
-        ? 'netd 低 16 位正交保护（' + dpvEsc(d.fwmark_mask) + '）'
-        : '低 16 位 netd 掩码冲突 (' + dpvEsc(markLayout) + ')');
+        ? '与系统路由互不冲突 (' + dpvEsc(d.fwmark_mask) + ')'
+        : '存在标记冲突 (' + dpvEsc(markLayout) + ')');
 
   var hasAnomaly = sampled && sum.bypass_or_missing_count > 0;
   var repairBtnCls = hasAnomaly ? 'dpv-btn dpv-btn-warn press' : 'dpv-btn dpv-btn-secondary press';
-  var runLabel = isBusy && !DPV_STATE.resyncing ? '正在采样内核计数器…' : '立即核验队列命中';
-  var repairLabel = isBusy && DPV_STATE.resyncing ? '正在重下发修复…' : '一键重下发修复';
+  var runLabel = isBusy && !DPV_STATE.resyncing ? '正在检验限速通道…' : '立即重新检验';
+  var repairLabel = isBusy && DPV_STATE.resyncing ? '正在修复限速规则…' : '一键修复限速';
 
   return (
-    '<section class="dpv-card glass" id="dpv-settings-card" aria-label="数据面真机命中核验">' +
-    '  <div class="dpv-card-head">' +
-    '    <div class="dpv-title-wrap">' +
-    '      <span class="dpv-icon-box">' + DPV_ICONS.dataplane + '</span>' +
-    '      <div>' +
-    '        <div class="dpv-title-row">' +
-    '          <h3 class="dpv-card-title">数据面真机命中核验（v5.40）</h3>' +
-    '          <span class="dpv-pill ' + overallBadgeCls + '">' + dpvEsc(overallBadgeText) + '</span>' +
-    '        </div>' +
-    '        <p class="dpv-card-sub">接口 ' + dpvEsc(d.iface || '—') + ' · 采样时间：' + dpvEsc(d.checked_at_str) + ' · 原生原子下发 &lt;80ms</p>' +
-    '      </div>' +
-    '    </div>' +
-    '  </div>' +
-    '  <div class="dpv-tag-strip">' +
-    '    <span class="dpv-chip ' + (sampled ? 'dpv-chip-primary' : '') + '">' + dpvEsc(d.engine_label) + '</span>' +
-    '    <span class="dpv-chip ' + fwmarkBadgeCls + '">' +
-    DPV_ICONS.fwmark +
-    '<span>' + fwmarkBadgeText + '</span>' +
-    '    </span>' +
-    '    <span class="dpv-chip ' + (!sampled ? '' : (offloadHealthy ? 'dpv-chip-ok' : 'dpv-chip-warn')) + '">' +
-    dpvEsc(hwnatLabel) +
-    '    </span>' +
-    '  </div>' +
-    '  <div class="dpv-bpf-grid" role="list" aria-label="BPF Map 就绪状态">' +
-    '    <div class="dpv-bpf-item" role="listitem">' +
-    '      <span class="dpv-bpf-name">BPF mac_mark / clsact</span>' +
-    '      <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.clsact_attached ? 'is-ok' : 'is-warn')) + '">' +
-    (!sampled ? '待采样核验' : (bpf.clsact_attached ? '已挂载 · ' + dpvInt(bpf.mac_mark_entries) + ' 项' : '待挂载')) +
-    '      </span>' +
-    '    </div>' +
-    '    <div class="dpv-bpf-item" role="listitem">' +
-    '      <span class="dpv-bpf-name">BPF ip_mark / ifb0 prio2</span>' +
-    '      <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.ifb_redirect_prio2 ? 'is-ok' : 'is-warn')) + '">' +
-    (!sampled ? '待采样核验' : (bpf.ifb_redirect_prio2 ? 'prio2 就绪 · ' + dpvInt(bpf.ip_mark_entries) + ' 项' : dpvInt(bpf.ip_mark_entries) + ' 项 · 待重定向')) +
-    '      </span>' +
-    '    </div>' +
-    '    <div class="dpv-bpf-item" role="listitem">' +
-    '      <span class="dpv-bpf-name">tether_limit_map</span>' +
-    '      <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.tether_limit_zeroed ? 'is-ok' : 'is-warn')) + '">' +
-    (!sampled ? '待采样核验' : (bpf.tether_limit_zeroed ? 'T+0 已置 0 · 防旁路' : '未置 0 · 存在旁路风险')) +
-    '      </span>' +
-    '    </div>' +
+    '<div class="dpv-inline-wrap" id="dpv-settings-card" aria-label="限速真实生效检验">' +
+    '  <div class="dpv-plain-intro">' +
+    '    部分手机开启自带热点硬件加速后，网页里显示的限速可能会被系统底层直接绕过（俗称“假限速”）。这里通过核对每台限速设备的真实过包流量，帮您确认限速 100% 生效。' +
+    (sampled ? ' <span class="note">（热点接口 ' + dpvEsc(d.iface || 'wlan2') + ' · 检验时间 ' + dpvEsc(d.checked_at_str) + '）</span>' : '') +
     '  </div>' +
     '  <div class="dpv-kpi-grid">' +
     '    <div class="dpv-kpi-cell">' +
     '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.controlled_devices) : '—') + '</span>' +
-    '      <span class="dpv-kpi-label">受控设备</span>' +
+    '      <span class="dpv-kpi-label">已设限速设备</span>' +
     '    </div>' +
     '    <div class="dpv-kpi-cell ' + (sampled ? 'is-hit' : '') + '">' +
     '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.hitting_count) : '—') + '</span>' +
-    '      <span class="dpv-kpi-label">队列真实命中</span>' +
+    '      <span class="dpv-kpi-label">正在生效</span>' +
     '    </div>' +
     '    <div class="dpv-kpi-cell ' + (sampled ? 'is-idle' : '') + '">' +
     '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.idle_count) : '—') + '</span>' +
-    '      <span class="dpv-kpi-label">空闲就绪</span>' +
+    '      <span class="dpv-kpi-label">空闲待命</span>' +
     '    </div>' +
     '    <div class="dpv-kpi-cell ' + (hasAnomaly ? 'is-alert' : '') + '">' +
     '      <span class="dpv-kpi-num">' + (sampled ? dpvInt(sum.bypass_or_missing_count) : '—') + '</span>' +
-    '      <span class="dpv-kpi-label">旁路/缺失告警</span>' +
+    '      <span class="dpv-kpi-label">绕过/失效异常</span>' +
     '    </div>' +
     '  </div>' +
     '  <p class="dpv-verdict-line">' + dpvEsc(sum.headline) + '</p>' +
@@ -1892,10 +1866,40 @@ function dpvRenderCardHtml(data, isBusy) {
     '    </button>' +
     '    <button type="button" class="dpv-btn dpv-btn-secondary press" data-dpv-act="sheet">' +
     DPV_ICONS.counters +
-    '<span>查看逐设备计数器</span>' +
+    '<span>查看每台设备详情</span>' +
     '    </button>' +
     '  </div>' +
-    '</section>'
+    '  <details class="v6-adv-fold dpv-tech-fold">' +
+    '    <summary><span>底层内核队列与硬件加速技术指标</span><span class="v6-adv-r"><span>开发者详情</span></span></summary>' +
+    '    <div class="v6-adv-body">' +
+    '      <div class="dpv-tag-strip">' +
+    '        <span class="dpv-chip ' + (sampled ? 'dpv-chip-primary' : '') + '">' + dpvEsc(d.engine_label) + '</span>' +
+    '        <span class="dpv-chip ' + fwmarkBadgeCls + '">' + DPV_ICONS.fwmark + '<span>' + fwmarkBadgeText + '</span></span>' +
+    '        <span class="dpv-chip ' + (!sampled ? '' : (offloadHealthy ? 'dpv-chip-ok' : 'dpv-chip-warn')) + '">' + dpvEsc(hwnatLabel) + '</span>' +
+    '      </div>' +
+    '      <div class="dpv-bpf-grid" role="list" aria-label="底层模块状态">' +
+    '        <div class="dpv-bpf-item" role="listitem">' +
+    '          <span class="dpv-bpf-name">下行标记挂点 (clsact)</span>' +
+    '          <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.clsact_attached ? 'is-ok' : 'is-warn')) + '">' +
+    (!sampled ? '待采样' : (bpf.clsact_attached ? '正常 · ' + dpvInt(bpf.mac_mark_entries) + ' 项' : '待挂载')) +
+    '          </span>' +
+    '        </div>' +
+    '        <div class="dpv-bpf-item" role="listitem">' +
+    '          <span class="dpv-bpf-name">上行重定向队列 (ifb0)</span>' +
+    '          <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.ifb_redirect_prio2 ? 'is-ok' : 'is-warn')) + '">' +
+    (!sampled ? '待采样' : (bpf.ifb_redirect_prio2 ? '就绪 · ' + dpvInt(bpf.ip_mark_entries) + ' 项' : dpvInt(bpf.ip_mark_entries) + ' 项')) +
+    '          </span>' +
+    '        </div>' +
+    '        <div class="dpv-bpf-item" role="listitem">' +
+    '          <span class="dpv-bpf-name">防加速绕过开关 (tether_limit)</span>' +
+    '          <span class="dpv-bpf-val ' + (!sampled ? 'is-muted' : (bpf.tether_limit_zeroed ? 'is-ok' : 'is-warn')) + '">' +
+    (!sampled ? '待采样' : (bpf.tether_limit_zeroed ? '已压制防绕过' : '存在绕过风险')) +
+    '          </span>' +
+    '        </div>' +
+    '      </div>' +
+    '    </div>' +
+    '  </details>' +
+    '</div>'
   );
 }
 
@@ -2134,7 +2138,28 @@ function dpvRefreshRenderedViews() {
   if (typeof document === 'undefined') return;
   var mountEl = document.getElementById('dpv-settings-mount') || document.querySelector('[data-dpv-mount]');
   if (mountEl) {
+    var openTech = !!mountEl.querySelector('.dpv-tech-fold[open]');
     mountEl.innerHTML = dpvRenderCardHtml(DPV_STATE.lastData, DPV_STATE.loading);
+    if (openTech) {
+      var tf = mountEl.querySelector('.dpv-tech-fold');
+      if (tf) tf.open = true;
+    }
+    var scardEl = document.querySelector('.scard[data-foldkey="scard-dpv"]');
+    if (scardEl && DPV_STATE.lastData && DPV_STATE.lastData.sampled_ok) {
+      var dn = dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled);
+      var subEl = scardEl.querySelector('.scard-h small');
+      var bdgEl = document.getElementById('dpv-scard-badge');
+      var hasErr2 = dn.summary.bypass_or_missing_count > 0;
+      if (subEl) {
+        subEl.textContent = hasErr2
+          ? ('发现 ' + dpvInt(dn.summary.bypass_or_missing_count) + ' 台设备限速可能被绕过 · 点开一键修复')
+          : ('已设限速 ' + dpvInt(dn.summary.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(dn.summary.hitting_count) + ' 台 · 未被硬件加速绕过');
+      }
+      if (bdgEl) {
+        bdgEl.className = 'badge ' + (hasErr2 ? 'b-warn' : (dn.summary.hitting_count > 0 ? 'b-ok' : 'b-acc'));
+        bdgEl.textContent = hasErr2 ? '待修复' : (dn.summary.hitting_count > 0 ? '真实生效' : '待命就绪');
+      }
+    }
   }
   var sheetRoot = document.getElementById('dpv-sheet-root');
   if (sheetRoot && sheetRoot.parentNode) {

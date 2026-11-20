@@ -131,6 +131,14 @@ function stagger(root, max) {
 }
 function tween(el, to, dec) {
   if (!el) return;
+  if (typeof performance !== 'undefined' && S && performance.now() < (S.scrollBusyUntil || 0)) {
+    cancelAnimationFrame(el._tw);
+    el._v = to;
+    var fastTxt = to.toFixed(dec);
+    if (el.textContent !== fastTxt) el.textContent = fastTxt;
+    return;
+  }
+  if (!el) return;
   if (el._twRaf) { cancelAnimationFrame(el._twRaf); el._twRaf = 0; }
   var numOn = typeof fxOn !== 'function' || fxOn('num');
   var tp = themePhys();
@@ -427,14 +435,25 @@ function currentGlassAttr() {
   if (S.style === 'liquid') return S.glassMode === 'frosted' ? 'frosted' : 'liquid';
   return '';
 }
+function resolveEffectiveTheme(mode) {
+  if (mode === 'light' || mode === 'dark') return mode;
+  var sysDark = false;
+  try { sysDark = typeof matchMedia === 'function' && matchMedia('(prefers-color-scheme: dark)').matches; } catch (_) {}
+  return sysDark ? 'dark' : 'light';
+}
 function applyTheme() {
   var r = document.documentElement, ga = currentGlassAttr();
-  if (S.theme === 'light' || S.theme === 'dark') r.setAttribute('data-theme', S.theme); else r.removeAttribute('data-theme');
+  var tMode = (S.theme === 'light' || S.theme === 'dark') ? S.theme : 'auto';
+  r.setAttribute('data-theme', resolveEffectiveTheme(tMode));
+  r.setAttribute('data-theme-mode', tMode);
   if (S.style === 'liquid') r.setAttribute('data-style', 'apple');
   else if (S.style === 'cyber') r.setAttribute('data-style', 'cyber');
   else r.removeAttribute('data-style');
   if (ga) r.setAttribute('data-glass', ga); else r.removeAttribute('data-glass');
+  var hdr0 = typeof document.querySelector === 'function' ? document.querySelector('.header') : null;
+  if (hdr0) hdr0._navKey = '';
   if (typeof liquidGlass === 'function') liquidGlass();
+  if (typeof refreshHyaliteTargets === 'function' && lgOn) refreshHyaliteTargets();
   applyGlassTint();
   r.classList.toggle('calm', !S.motion);
   applyMotion();
@@ -465,11 +484,12 @@ var LG_OPTS = {
   sheet: { bevel: 26, thickness: 42, slope: .9, shape: 'squircle', blur: 16, dispersion: 1.4, shade: .24, rim: 1.6, edge: 1, light: -30, sat: 1.1, settle: 160 },
   toast: { bevel: 16, thickness: 22, shape: 'squircle', blur: 10, dispersion: 1.2, shade: .24, rim: 1.5, edge: 1, light: -30 }
 };
+/* 自定义壁纸 120fps 快速真折射配置：保留底栏 Snell 边缘折射与菲涅尔高光，关闭昂贵的 RGB 三通道分离色散与额外平滑通道(滤镜节点从 34 降至 11) */
 var LG_OPTS_WP = {
-  tabbar: { bevel: 14, thickness: 22, slope: .86, shape: 'squircle', blur: 3.2, dispersion: .26, shade: .08, rim: .04, edgeW: 0, edge: 0, light: -38, sat: 1.14, materialize: 0, settle: 120 },
-  hbtn: { bevel: 12, thickness: 16, slope: .86, shape: 'squircle', blur: 2.0, dispersion: .22, shade: .08, rim: .04, edgeW: 0, edge: 0, light: -38, sat: 1.10, materialize: 0 },
-  sheet: { bevel: 20, thickness: 28, slope: .88, shape: 'squircle', blur: 18, dispersion: .24, shade: .08, rim: .05, edgeW: 0, edge: 0, light: -38, sat: 1.12, settle: 150 },
-  toast: { bevel: 14, thickness: 18, slope: .88, shape: 'squircle', blur: 12, dispersion: .20, shade: .08, rim: .04, edgeW: 0, edge: 0, light: -38 }
+  tabbar: { bevel: 15, thickness: 24, slope: .92, shape: 'squircle', blur: 2.4, dispersion: 0, smooth: 0, shade: .12, rim: .85, edgeW: 1, edge: .55, light: -38, sat: 1, materialize: 0, settle: 90 },
+  hbtn: { bevel: 12, thickness: 16, slope: .86, shape: 'squircle', blur: 1.8, dispersion: 0, smooth: 0, shade: .08, rim: .45, edgeW: 0, edge: 0, light: -38, sat: 1, materialize: 0 },
+  sheet: { bevel: 20, thickness: 28, slope: .88, shape: 'squircle', blur: 16, dispersion: 0, smooth: 0, shade: .08, rim: .55, edgeW: 0, edge: 0, light: -38, sat: 1, settle: 120 },
+  toast: { bevel: 14, thickness: 18, slope: .88, shape: 'squircle', blur: 10, dispersion: 0, smooth: 0, shade: .08, rim: .45, edgeW: 0, edge: 0, light: -38, sat: 1 }
 };
 var lgOn = false;
 function hasWpActive() {
@@ -477,24 +497,45 @@ function hasWpActive() {
   return r.getAttribute('data-has-wp') === '1' || r.getAttribute('data-has-wallpaper') === '1' || r.classList.contains('has-wallpaper');
 }
 function lgOptsFor(kind, g, instant) {
-  var wp = hasWpActive(), o = Object.assign({}, LG_OPTS[kind] || {}, wp ? (LG_OPTS_WP[kind] || {}) : {});
+  var wp = hasWpActive(), dk = false;
+  try { dk = document.documentElement.getAttribute('data-theme') === 'dark'; } catch (_) {}
+  var o = Object.assign({}, LG_OPTS[kind] || {}, wp ? (LG_OPTS_WP[kind] || {}) : {});
   var gv = g || (typeof glassTintVars === 'function' ? glassTintVars(S.glassTint) : { up: 0, dn: 0 });
   if (kind === 'tabbar') {
-    o.blur = +((wp ? 3.8 : 2.4) + (gv.up || 0) * 5.2 - (gv.dn || 0) * 1.4).toFixed(2);
-    o.sat = +((wp ? 1.12 : 1.04) + (gv.dn || 0) * .10).toFixed(2);
+    o.blur = +((wp ? 2.6 : 2.4) + (gv.up || 0) * 4.2 - (gv.dn || 0) * 1.1).toFixed(2);
+    o.sat = 1; // Offload saturation boost to native CSS backdrop-filter GPU pass (saves 10 SVG primitives/frame)
+  } else {
+    o.sat = 1;
+  }
+  if (dk) {
+    o.rim = +((o.rim || 1) * 0.36).toFixed(2);
+    o.edge = +((o.edge || 0.7) * 0.24).toFixed(2);
+    o.shade = +((o.shade || 0.16) * 0.65).toFixed(2);
+    o.theme = 'dark';
+  } else {
+    o.theme = 'light';
   }
   if (instant) o.materialize = 0;
   return o;
 }
-function lgTargets() { return [['tabbar', $('#tabbar')], ['hbtn', $('#bell')], ['hbtn', $('#theme-btn')]]; }
+/* 120fps TBDR 优化: SVG ReferenceFilter 仅挂载在底栏 #tabbar (1 个实例, 10 个原语); 3 个 37px 顶栏圆钮改走硬件 Mipmap 棱镜快径, 省去 3 路全分辨率回读 */
+function lgTargets() {
+  var tb = typeof $ === 'function' ? $('#tabbar') : null;
+  return tb ? [['tabbar', tb]] : [];
+}
 function rebindHyaliteTargets(g, forceRefresh) {
   if (!window.Hyalite || !lgOn) return;
+  var wp = hasWpActive();
   var ln = typeof $ === 'function' ? $('#lens') : null;
   if (ln) try { Hyalite.detach(ln); } catch (_) {}
   lgTargets().forEach(function (t) {
     var kind = t[0], el = t[1]; if (!el) return;
-    var o = lgOptsFor(kind, g, true), sig = JSON.stringify(o);
     try {
+      if (wp && kind === 'hbtn') {
+        if (el.__lgSig) { Hyalite.detach(el); el.__lgSig = ''; }
+        return;
+      }
+      var o = lgOptsFor(kind, g, true), sig = JSON.stringify(o);
       if (el.__lgSig !== sig) {
         Hyalite.detach(el);
         Hyalite.attach(el, o);
@@ -514,36 +555,55 @@ function liquidGlass() {
   if (ln) try { Hyalite.detach(ln); } catch (_) {}
   if (want === lgOn) { if (lgOn) rebindHyaliteTargets(null, false); return; }
   lgOn = want;
+  var wpNow = hasWpActive();
   lgTargets().forEach(function (t) {
     var kind = t[0], el = t[1]; if (!el) return;
     try {
-      if (want) { var o = lgOptsFor(kind, null, false); Hyalite.attach(el, o); el.__lgSig = JSON.stringify(lgOptsFor(kind, null, true)); }
-      else { Hyalite.detach(el); el.__lgSig = ''; }
+      if (want && !(wpNow && kind === 'hbtn')) {
+        var o = lgOptsFor(kind, null, false);
+        Hyalite.attach(el, o);
+        el.__lgSig = JSON.stringify(lgOptsFor(kind, null, true));
+      } else {
+        Hyalite.detach(el);
+        el.__lgSig = '';
+      }
     } catch (_) {}
   });
 }
 /* 大标题滚动插值 —— --lt 大标题淡出缩小, --st 顶栏小标题浮现, --hp 顶栏毛玻璃出现 (严守 v530_frontend.js nav_solid 单测契约) */
-var NAV_T = { devices: '设备', apps: '应用', stats: '分析', settings: '设置' }, navRaf = 0;
+var NAV_T = { devices: '设备', apps: '应用', vector: '智能护航', stats: '分析', settings: '设置' }, navRaf = 0;
 function navSync() {
   var hdr = document.querySelector('.header'), ht = document.getElementById('htitle'); if (!hdr || !ht) return;
-  ht.textContent = NAV_T[S.page] || '';
-  var pg = document.getElementById('p-' + S.page), y = pg ? pg.scrollTop : 0, on = apple() && fxOn('title');
-  document.documentElement.classList.toggle('fx-notitle', apple() && !fxOn('title'));
+  var curTitle = NAV_T[S.page] || '';
+  if (ht.textContent !== curTitle) ht.textContent = curTitle;
+  var pg = document.getElementById('p-' + S.page), y = pg ? pg.scrollTop : 0, isAp = apple(), tOn = fxOn('title'), on = isAp && tOn;
+  document.documentElement.classList.toggle('fx-notitle', isAp && !tOn);
   var lt = on ? clamp(y / 44, 0, 1) : 1, st = on ? clamp((y - 28) / 14, 0, 1) : 1, hp = on ? clamp((y - 4) / 26, 0, 1) : 1;
-  if (pg) pg.style.setProperty('--lt', lt.toFixed(3));
-  hdr.style.setProperty('--st', st.toFixed(3)); hdr.style.setProperty('--hp', hp.toFixed(3));
-  // --hs 液态玻璃顶栏动态折射增强(iOS 27): 随滚动深度连续增强底部折射亮线、漫射阴影与磨砂浓度
   var hs = clamp((y - (on ? 56 : 8)) / 20, 0, 1), sp = clamp(y / 72, 0, 1);
-  hdr.style.setProperty('--hs', hs.toFixed(3));
-  hdr.style.setProperty('--scroll-p', sp.toFixed(3));
+  var ltS = lt.toFixed(3), stS = st.toFixed(3), hpS = hp.toFixed(3), hsS = hs.toFixed(3), spS = sp.toFixed(3);
+  var nk = (S.page || '') + '|' + (on ? 1 : 0) + '|' + ltS + '|' + stS + '|' + hpS + '|' + hsS + '|' + spS;
+  if (hdr._navKey === nk && (!pg || pg._ltVal === ltS)) return;
+  hdr._navKey = nk;
+  if (pg && pg._ltVal !== ltS) { pg._ltVal = ltS; pg.style.setProperty('--lt', ltS); }
+  hdr.style.setProperty('--st', stS); hdr.style.setProperty('--hp', hpS);
+  hdr.style.setProperty('--hs', hsS);
+  hdr.style.setProperty('--scroll-p', spS);
   hdr.classList.toggle('hs-on', hs > 0);
 }
+var _scrollIdleT = 0;
 document.addEventListener('scroll', function (e) {
-  if (!apple() || !e.target.classList || !e.target.classList.contains('page') || !e.target.classList.contains('on')) return;
-  if (!navRaf) navRaf = requestAnimationFrame(function () { navRaf = 0; navSync(); });
-}, true);
+  var t = e.target;
+  if (t && t.classList && t.classList.contains('page') && t.classList.contains('on')) {
+    if (typeof performance !== 'undefined') S.scrollBusyUntil = performance.now() + 170;
+    var r = document.documentElement;
+    if (!r.classList.contains('is-scrolling')) r.classList.add('is-scrolling');
+    clearTimeout(_scrollIdleT);
+    _scrollIdleT = setTimeout(function () { r.classList.remove('is-scrolling'); }, 140);
+    if (apple() && !navRaf) navRaf = requestAnimationFrame(function () { navRaf = 0; navSync(); });
+  }
+}, { capture: true, passive: true });
 
-Object.assign(LG_OPTS.tabbar, { bevel: 17, thickness: 33, slope: 1.04, shape: 'squircle', blur: 2.4, dispersion: .65, shade: .19, rim: 1.35, edgeW: 1.2, edge: .7, light: -38, sat: 1.03, materialize: 380 });
+Object.assign(LG_OPTS.tabbar, { bevel: 17, thickness: 32, slope: 1.04, shape: 'squircle', blur: 2.4, dispersion: .58, shade: .18, rim: 1.25, edgeW: 1.15, edge: .65, light: -38, sat: 1, materialize: 260 });
 Object.assign(LG_OPTS.hbtn, { bevel: 15, thickness: 24, slope: 1.02, shape: 'squircle', blur: 1.2, dispersion: .55, shade: .16, rim: 1.4, edge: .65, light: -38 });
 Object.assign(LG_OPTS.sheet, { bevel: 23, thickness: 38, slope: .92, blur: 20, dispersion: .5, shade: .13, rim: 1.2, edge: .65, light: -38, sat: 1.05 });
 Object.assign(LG_OPTS.toast, { bevel: 15, thickness: 24, blur: 12, dispersion: .4, shade: .14, rim: 1.2, edge: .6, light: -38 });

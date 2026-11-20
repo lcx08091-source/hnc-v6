@@ -33,8 +33,21 @@ var genericMultiTenantCDNs = map[string]struct{}{
 	"smtcdns.net":         {},
 	"cdntip.com":          {},
 	"baishan-cloud.net":   {},
+	"bsclink.cn":          {},
 	"myhuaweicloud.com":   {},
 	"hwcdn.net":           {},
+	"cdnhwc1.com":         {},
+	"cdnhwc2.com":         {},
+	"cdnhwc3.com":         {},
+	"kunlungr.com":        {},
+	"kunlunar.com":        {},
+	"kunluncan.com":       {},
+	"eo-edge.com":         {},
+	"eo-dnse2.com":        {},
+	"tcdnvod.com":         {},
+	"ovscdns.com":         {},
+	"bdydns.com":          {},
+	"volcgslb.com":        {},
 }
 
 func isGenericMultiTenantCDN(host string) bool {

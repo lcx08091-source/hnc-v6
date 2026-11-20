@@ -89,7 +89,11 @@ function selfStudioCardHtml() {
     '<div class="studio-head">' +
       '<span class="studio-orb">' + studioSvg('prism') + '</span>' +
       '<div class="studio-title-wrap">' +
-        '<div class="studio-title-row"><b>本机真值常驻自训工作台</b>' + badge + '</div>' +
+        '<div class="studio-title-top">' +
+          '<b>本机真值常驻自训工作台</b>' +
+          '<button type="button" class="studio-guide-pill press" data-act="studio-recipe">' + (S.studioRecipeOpen ? '收起原理' : '引擎原理') + '</button>' +
+        '</div>' +
+        '<div class="studio-badge-line">' + badge + '</div>' +
         '<div class="studio-sub">亮屏无感采训 + 熄屏自动蒸馏 · K≥1 少样本 IDF-Jaccard/SPLT 原型与 TLSFP 稳定栈引擎</div>' +
       '</div>' +
     '</div>' +
@@ -103,10 +107,9 @@ function selfStudioCardHtml() {
       '<div class="studio-m"><span class="l">双路真值网卡</span><b class="mono" style="font-size:12.5px">' + esc(ifTxt) + '</b><small>inotify 零轮询唤醒</small></div>' +
     '</div>' +
     (st.last_distill && st.last_distill.ts ? '<div class="note" style="margin-top:4px">最近蒸馏：' + esc(ago(st.last_distill.ts)) + ' · 扫描 ' + num(st.last_distill.samples_read) + ' 条样本 · 专属指纹 ' + num(st.last_distill.exclusive_fps) + ' 个 · 少样本原型 ' + num(st.last_distill.prototype_apps, protoApps) + ' 个</div>' : '') +
-    '<div class="studio-actions">' +
+    '<div class="studio-actions studio-actions-2col">' +
       '<button type="button" class="btn pri press" data-act="studio-distill">立即蒸馏并同步热点</button>' +
       '<button type="button" class="btn sec press" data-act="studio-export">导出规则包</button>' +
-      '<button type="button" class="linkish studio-guide-btn" data-act="studio-recipe">' + (S.studioRecipeOpen ? '收起引擎说明' : '零/少样本引擎说明') + '</button>' +
     '</div>' +
     recipe +
     '<div style="border-top:1px solid var(--divider);margin-top:8px;padding-top:8px;display:grid;gap:6px">' +
@@ -122,8 +125,17 @@ function rulesPendingCount() {
   return discN + candN;
 }
 
+function appsPendingSig() {
+  var cnt = rulesPendingCount();
+  if (cnt <= 0) return '';
+  var g0 = S.disc && Array.isArray(S.disc.groups) && S.disc.groups[0] ? (S.disc.groups[0].key || S.disc.groups[0].suffix || '') : '';
+  return cnt + ':' + g0;
+}
 function paintAppsDot() {
-  var on = rulesPendingCount() > 0;
+  var sig = appsPendingSig();
+  if (S.page === 'apps' && S.appsSub === 'rules' && sig) LS.set('hnc6.apps_seen_sig', sig);
+  var seen = LS.get('hnc6.apps_seen_sig', '');
+  var on = !!sig && sig !== seen;
   $$('.tab[data-tab="apps"] .dot').forEach(function (d) { d.hidden = !on; });
 }
 
@@ -155,6 +167,7 @@ function renderApps(anim1) {
   var p = $('#p-apps'); if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h; placeSegs(p);
   if (anim1) stagger($('.wrap', p));
   if (S.appsSub === 'rules') {
+    paintAppsDot();
     if (typeof paintUnknown === 'function') paintUnknown();
     if (S.open.fpl && typeof loadFP === 'function') loadFP();
     if (S.open.rpack && typeof loadRulepack === 'function') loadRulepack();
@@ -191,6 +204,15 @@ function selfConnSheet() {
   }).catch(function (e) { var el = $('#sc-body'); if (el) el.innerHTML = '<div class="note err">' + esc(errText(e)) + '</div>'; });
 }
 
+function appMatchQuery(text) {
+  var q = String(S.appQ || '').trim().toLowerCase();
+  if (!q) return true;
+  return String(text || '').toLowerCase().indexOf(q) >= 0;
+}
+function appsSearchBarHtml(ph) {
+  return '<label class="glass search app-search-bar" style="margin:8px 0 10px">' + ico('search') +
+    '<input id="app-q" type="search" placeholder="' + esc(ph || '搜索活跃应用名称 · 包名 · UID') + '" value="' + esc(S.appQ || '') + '" autocomplete="off"></label>';
+}
 function appsSub() {
   var self = S.self;
   // ── 子页 1: 活跃应用 (热点客户端今日应用排行 + 本机运行应用归因 + 代理排除) ──
@@ -201,7 +223,11 @@ function appsSub() {
         '<div class="glass" style="padding:12px 14px">' + appUsageBars(au, 6) + '</div>'
       : '';
 
-    var rows = appRows();
+    var allRows = appRows();
+    var rows = allRows.filter(function (r) {
+      var a = r.a || {};
+      return appMatchQuery((a.name || '') + ' ' + (a.pkg || '') + ' ' + (a.uid || ''));
+    });
     var usr = rows.filter(function (r) { return !r.a.is_system; }), sys = rows.filter(function (r) { return r.a.is_system; });
     var mx = Math.max.apply(null, rows.map(function (r) { return r.bytes; }).concat([1]));
     var fx = (S.cfg && S.cfg.flywheel_exclude_user) || [];
@@ -216,10 +242,10 @@ function appsSub() {
     var exclHtml = '<div class="glass' + (S.open.fwexcl ? ' open' : '') + '" data-foldkey="fwexcl"><button class="card-h" data-act="fold" data-key="fwexcl">' + gi('cyan', 'shield') + '<span class="tx"><div class="t">VPN / 代理导管排除名单</div><div class="s">不参与自动规则与原型学习的包名 · 已自定义 ' + fx.length + ' 个</div></span>' + ico('chev', 'chev') + '</button>' +
       '<div class="fold"><div><div class="fold-in set-body">' +
         '<div class="chips">' + (fx.length ? fx.map(function (p) { return '<span class="chip">' + esc(p) + '<button class="linkish danger" data-fw-del="' + esc(p) + '" aria-label="移除">×</button></span>'; }).join('') : '<span class="note">内置已自动排除 Clash / Sing-box / V2Ray / WireGuard 等 30 款常见代理工具</span>') + '</div>' +
-        '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="fw-pkg" maxlength="128" placeholder="输入代理包名，如 com.github.metacubex.clash.meta" style="font-family:var(--mono)"></span><button class="btn pri press" data-act="fw-add">添加</button></div>' +
+        '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="fw-pkg-apps" data-fw-inp="1" maxlength="128" placeholder="输入代理包名，如 com.github.metacubex.clash.meta" style="font-family:var(--mono)"></span><button class="btn pri press" data-act="fw-add">添加</button></div>' +
       '</div></div></div></div>';
 
-    return ifaceChips() + hsHtml + hostHtml + exclHtml;
+    return ifaceChips() + appsSearchBarHtml('搜索活跃应用名称 · 包名 · UID') + hsHtml + hostHtml + exclHtml;
   }
 
   // ── 子页 2: 应用规则中心 (合并原散落在 3 处的新发现应用 + 本机独占候选 + 未识别域名补库 + 人工纠正 + 规则包/JSON 库) ──

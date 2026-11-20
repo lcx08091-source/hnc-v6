@@ -88,6 +88,44 @@ func TestScoreMacPair(t *testing.T) {
 	}
 }
 
+func TestScoreMacPairAnonymousRotatingResonance(t *testing.T) {
+	base := int64(1_790_500_000)
+	oldIPhone := &macProfile{
+		FirstSeen: base - 86400*5, LastSeen: base - 120,
+		DHCPName: "", DHCPFP: "1,121,3,6,15,108,114,119,252",
+		Type: "phone", Brand: "Apple", Model: "iPhone", OS: "iOS",
+		JA4:  []string{"t13d2014h2_a09f3c656075_14788d8d241b", "q13d0312h3_55b375c5d22e_08f83d9b1e90"},
+		Apps: []string{"weixin", "bilibili", "genshin", "tailscale"},
+	}
+	reconnected := &macProfile{
+		FirstSeen: base, LastSeen: base + 30,
+		DHCPName: "", DHCPFP: oldIPhone.DHCPFP,
+		Type: "phone", Brand: "Apple", Model: "iPhone", OS: "iOS",
+		JA4:  oldIPhone.JA4,
+		Apps: []string{"weixin", "genshin", "tailscale"},
+	}
+	sc, why, ok := scoreMacPair(reconnected, oldIPhone)
+	if !ok || sc < 85 {
+		t.Fatalf("anonymous iOS rotating MAC reconnect should reach >=85 via multimodal resonance, got ok=%v score=%d reasons=%v", ok, sc, why)
+	}
+
+	// 同家庭出现两台几乎一模一样的离线 iPhone 时, Top-2 分差保护应将首选压回 <85 提示人工确认
+	twinIPhone := *oldIPhone
+	twinIPhone.LastSeen = base - 240
+	f := &macMergeFile{
+		Profiles: map[string]*macProfile{
+			"da:a1:19:00:00:99": reconnected,
+			"da:a1:19:00:00:01": oldIPhone,
+			"da:a1:19:00:00:02": &twinIPhone,
+		},
+		Dismissed: map[string]int64{},
+	}
+	cands := macMergeCandidates(f, "da:a1:19:00:00:99", nil, base+30)
+	if len(cands) < 2 || cands[0].Score >= 85 {
+		t.Fatalf("expected twin-device ambiguity guard to cap score <85, got %+v", cands)
+	}
+}
+
 // ─── 夹具 ──────────────────────────────────────────────────────────────
 
 const (

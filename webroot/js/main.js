@@ -46,7 +46,7 @@ function go(name) {
 }
 
 /* ═════════════════════ 底栏: 微信 / iOS 26 液态玻璃滑动膨胀放大折射引擎 + 根治卡片展开乱滑 ═════════════════════ */
-var TABS = [['devices', '设备', 'dev'], ['apps', '应用', 'apps'], ['vector', '矢量', 'vector'], ['stats', '分析', 'stats'], ['settings', '设置', 'gear']];
+var TABS = [['devices', '设备', 'dev'], ['apps', '应用', 'apps'], ['vector', '护航', 'vector'], ['stats', '分析', 'stats'], ['settings', '设置', 'gear']];
 try { document.documentElement.style.setProperty('--tab-n', String(TABS.length)); } catch (_) {}
 function buildTabItems(filled) {
   return TABS.map(function (t) {
@@ -71,12 +71,18 @@ function pulseCyberLens() {
   L.lockT = setTimeout(function () { lens.classList.remove('cy-lens-lock'); }, 150);
 }
 function tabGeom() {
-  var br = bar.getBoundingClientRect(), tr = tabsEl.getBoundingClientRect();
-  var padL = tr.width > 0 ? Math.max(0, tr.left - br.left) : 6;
-  var totalW = tr.width > 0 ? tr.width : Math.max(160, bar.clientWidth - 12);
+  /* 使用不受入场 navPop scale(.9) 缩放污染的布局盒尺寸，彻底根治第 5 个 Tab「设置」被透镜裁半边问题 */
+  var padL = tabsEl.offsetWidth > 0 ? Math.max(0, tabsEl.offsetLeft) : 5;
+  var totalW = tabsEl.offsetWidth > 0 ? tabsEl.offsetWidth : Math.max(160, bar.clientWidth - padL * 2);
   var w = totalW / TABS.length;
   var minX = padL, maxX = padL + (TABS.length - 1) * w;
   return { padL: padL, w: w, totalW: totalW, minX: minX, maxX: maxX };
+}
+function hitTabIdx(clientX, g) {
+  g = g || tabGeom();
+  var tr = tabsEl.getBoundingClientRect();
+  var slotScreenW = tr.width > 0 ? (tr.width / TABS.length) : g.w;
+  return clamp(Math.floor((clientX - tr.left) / slotScreenW), 0, TABS.length - 1);
 }
 function slotW() { return tabGeom().w; }
 function layoutLens() {
@@ -145,12 +151,12 @@ function stepLens(t) {
 }
 function kick() { if (!motionOn()) { L.x = L.tx; L.s = L.ts; L.v = L.sv = 0; paintLens(); return; } if (!L.raf) { L.last = 0; L.raf = requestAnimationFrame(stepLens); } }
 function idxAtX(x, g) { g = g || tabGeom(); return clamp(Math.round((x - g.padL) / g.w), 0, TABS.length - 1); }
-function localLensX(e, g) { g = g || tabGeom(); var r = bar.getBoundingClientRect(); return e.clientX - r.left - g.w / 2; }
+function localLensX(e, g) { g = g || tabGeom(); var r = bar.getBoundingClientRect(); var sx = bar.offsetWidth > 0 ? (r.width / bar.offsetWidth) : 1; return (e.clientX - r.left) / (sx || 1) - (bar.clientLeft || 0) - g.w / 2; }
 bar.addEventListener('pointerdown', function (e) {
   if (e.button != null && e.button !== 0) return;
   e.preventDefault();
   try { bar.setPointerCapture(e.pointerId); } catch (_) {}
-  var g = tabGeom(), x = localLensX(e, g), hit = clamp(Math.floor((e.clientX - tabsEl.getBoundingClientRect().left) / g.w), 0, TABS.length - 1);
+  var g = tabGeom(), x = localLensX(e, g), hit = hitTabIdx(e.clientX, g);
   L.down = true; L.drag = false; L.hitIdx = hit; L.moved = 0; L.fx0 = L.fx = x; L.ft = performance.now(); L.fv = 0;
   L.gx = Math.abs(x - L.x) < g.w * .55 ? L.x - x : 0;
   bar.classList.add('pressing');
@@ -189,7 +195,7 @@ function releaseLens(e) {
   var g = tabGeom(), i;
   if (!wasDrag || L.moved < 6) {
     i = e && e.clientX != null && e.type !== 'pointercancel'
-      ? clamp(Math.floor((e.clientX - tabsEl.getBoundingClientRect().left) / g.w), 0, TABS.length - 1)
+      ? hitTabIdx(e.clientX, g)
       : L.hitIdx;
   } else {
     var fv = performance.now() - L.ft < 120 ? L.fv : 0, af = Math.abs(fv);
@@ -212,6 +218,7 @@ function syncTab(name, instant) {
 if (typeof ResizeObserver === 'function') {
   try { new ResizeObserver(function () { layoutLens(); if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets(); }).observe(bar); } catch (_) {}
 }
+bar.addEventListener('animationend', function (e) { if (e.target === bar) { layoutLens(); if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets(); } });
 /* v5.38.0 根治乱滑: 展开设备卡(.dev)绝不因卡片总高超出底栏而强制大幅滚走页面，仅当卡片标题头本身被底栏遮挡时微调 */
 function ensureAboveTabbar(el) {
   if (!el || !bar) return;
@@ -235,60 +242,169 @@ function ensureAboveTabbar(el) {
   }, waitMs);
 }
 
-/* ═══ 顶栏热点手机本机 5G / Wi-Fi 信号实时胶囊与四象限诊断弹层 ═══ */
+/* ═══ 顶栏热点手机本机 5G-A / 全频段运营商实时胶囊与四维体感诊断弹层 ═══ */
+function sigShortCarrier(sig) {
+  if (!sig) return '';
+  if (sig.carrier_short) return sig.carrier_short;
+  var c = String(sig.carrier || '');
+  if (/广电|BROADNET|CBN/i.test(c)) return '广电';
+  if (/移动|MOBILE|CMCC/i.test(c)) return '移动';
+  if (/联通|UNICOM|CUCC/i.test(c)) return '联通';
+  if (/电信|TELECOM|CTCC|CHN-CT/i.test(c)) return '电信';
+  return c.length <= 4 ? c : '';
+}
+function sigFallbackTrait(band, combo, bw, isWifi) {
+  if (isWifi) return band === '6GHz' ? '6GHz 超宽信道 · 干扰极少网速快' : (band === '5GHz' ? '5GHz 高速频段 · 信道干净网速快，隔墙衰减略明显' : '2.4GHz 穿墙频段 · 覆盖远，易受同频干扰');
+  var b = String(combo || band || '');
+  var bwTxt = bw > 0 ? ('（' + bw + 'MHz）') : '';
+  if (/n41.*n28|n28.*n41/.test(b)) return '5G-A 黄金高低频双载波聚合 ' + b + bwTxt + ' · 兼顾 2.6GHz 百兆极速与 700MHz 强穿墙稳连接';
+  if (/n78\+n78/.test(b)) return '5G-A 3.5GHz 双百兆载波聚合 ' + b + bwTxt + ' · 电联旗舰满血高速通道';
+  if (/n28|B28|B5|B8|n5|n8/.test(b)) return '700–900MHz 黄金低频穿墙频段' + bwTxt + ' · 室内深处与电梯信号稳，单载波峰值适中';
+  if (/n41/.test(b)) return '2.6GHz 移动/广电主力高速频段' + bwTxt + ' · 兼顾百兆大带宽吞吐与城区室内覆盖';
+  if (/n78|n77/.test(b)) return '3.5GHz 电信/联通主力高速频段' + bwTxt + ' · 容量大网速极快，隔两堵墙略有衰减';
+  if (/n79/.test(b)) return '4.9GHz 高频超大容量频段' + bwTxt + ' · 商圈场馆高速专道，穿墙能力偏弱';
+  if (/n1|B1|n3|B3/.test(b)) return '1.8–2.1GHz 中频均衡频段' + bwTxt + ' · 覆盖距离与上下行均衡稳定';
+  return b ? ('当前工作频段 ' + b + bwTxt) : '';
+}
 function paintSignalPill() {
   var btn = $('#sig-pill'); if (!btn) return;
   var sig = S.signal;
   if (!sig || !sig.available) { btn.hidden = true; return; }
   btn.hidden = false;
   var q = sig.quality || 'good';
+  var isWifi = sig.mode === 'wifi_sta';
   btn.className = 'sig-pill press q-' + q;
-  var dbm = sig.mode === 'wifi_sta' ? sig.wifi_rssi_dbm : sig.rsrp_dbm;
-  var ratTxt = sig.rat || (sig.mode === 'wifi_sta' ? 'Wi-Fi' : '5G');
-  btn.innerHTML = cellSvg(sig.bars, sig.mode) + '<span>' + esc(ratTxt) + (dbm ? ' ' + dbm + '<span class="sig-unit">dBm</span>' : '') + '</span>';
+  var dbm = isWifi ? sig.wifi_rssi_dbm : sig.rsrp_dbm;
+  var dRat = sig.display_rat || (sig.is_5ga ? '5G-A' : (sig.rat || (isWifi ? 'Wi-Fi' : '5G')));
+  var cShort = isWifi ? '' : sigShortCarrier(sig);
+  var bandShort = sig.band ? (' · ' + sig.band) : '';
+  var labelMain = (cShort ? cShort + ' ' : '') + dRat + bandShort;
+  btn.innerHTML = cellSvg(sig.bars, sig.mode) + '<span>' + esc(labelMain) + (dbm ? '<span class="sig-unit"> ' + dbm + 'dBm</span>' : '') + '</span>';
 }
-function signalSheet() {
+function signalSheetHtml() {
   var sig = S.signal || {};
   var ar = S.autorate || (S.cfg && S.cfg.autorate) || {};
   var isWifi = sig.mode === 'wifi_sta';
   var dbm = isWifi ? sig.wifi_rssi_dbm : sig.rsrp_dbm;
+  var sinr = num(sig.sinr_db, 0), rsrq = num(sig.rsrq_db, 0);
   var rtt = num(ar.rtt_ms), dRtt = num(ar.delta_rtt_ms);
-  var quadTitle = '空口通畅 · 射频健康', quadDesc = '当前上游空口信号充足且队列时延平稳，热点客户端可跑满物理带宽。', quadCls = 'b-ok';
+  var dRat = sig.display_rat || (sig.is_5ga ? '5G-A' : (sig.rat || (isWifi ? 'Wi-Fi 中继' : '5G')));
+  var combo = sig.band_combo || sig.band || '';
+  var totBw = num(sig.total_bw_mhz, num(sig.bandwidth_mhz, 0));
+  var caCnt = num(sig.ca_count, combo.indexOf('+') > 0 ? combo.split('+').length : (combo ? 1 : 0));
+
+  var rsrpLbl = sig.rsrp_label || (dbm >= -85 ? '极强' : dbm >= -95 ? '良好' : dbm >= -105 ? '一般' : dbm >= -115 ? '偏弱' : '极弱');
+  var sinrLbl = sig.sinr_label || (isWifi ? 'Wi-Fi 信道' : (sinr >= 20 ? '极纯净' : sinr >= 13 ? '纯净' : sinr >= 3 ? '轻度干扰' : '干扰明显'));
+  var rsrqLbl = sig.rsrq_label || (isWifi ? '自动协商' : (!rsrq ? '负载正常' : (rsrq >= -10 ? '基站空闲' : rsrq >= -14 ? '负载正常' : rsrq >= -17 ? '晚高峰偏忙' : '基站拥塞')));
+  var spPct = num(sig.speed_potential_pct, Math.round(num(sig.rf_ceiling_factor, 1) * 100));
+  var spTxt = sig.speed_potential_text || (spPct >= 95 ? '可跑满套餐峰值' : ('约发挥 ' + spPct + '% 潜力'));
+
+  var rsrpTone = dbm >= -95 ? 'is-ok' : (dbm >= -108 ? '' : 'is-bad');
+  var sinrTone = isWifi || sinr >= 10 ? 'is-ok' : (sinr >= 0 ? 'is-warn' : 'is-bad');
+  var rsrqTone = isWifi || !rsrq || rsrq >= -14 ? 'is-ok' : (rsrq >= -17 ? 'is-warn' : 'is-bad');
+  var spTone = spPct >= 90 ? 'is-ok' : (spPct >= 75 ? 'is-warn' : 'is-bad');
+
+  var quadTitle = '手机信号通畅 · 可跑满物理网速';
+  var quadDesc = sig.diagnosis_cn || '当前手机基站信号纯净、排队延迟平稳，连热点的设备可顺畅跑满高速带宽。';
+  var quadCls = 'b-ok';
   if (sig.quality === 'weak' || sig.quality === 'critical') {
-    quadTitle = '象限 II · 热点手机自身基站弱信号边缘';
-    quadDesc = '手机当前 RSRP/SINR 处于弱场边缘（α_rf = ' + trim0(num(sig.rf_ceiling_factor, 1).toFixed(2)) + '），建议将手机移至窗边，并开启 5G Autorate 自动压低突发上限防断流。';
+    quadTitle = '手机当前位置基站信号偏弱';
+    quadDesc = '手机接收信号较弱（网速发挥约 ' + spPct + '%），建议将热点手机移至靠近窗户或开阔位置，并开启「5G 自适应总带宽」防止打游戏断流。';
     quadCls = 'b-red';
-  } else if (dRtt > 25) {
-    quadTitle = '象限 III · 信号满格但基站空口晚高峰拥塞';
-    quadDesc = '手机射频信号良好，但上游排队增量时延 +' + Math.round(dRtt) + 'ms，属于运营商基站调度拥塞；5G Autorate 已自动介入退避稳帧。';
+  } else if (dRtt > 25 || (!isWifi && rsrq && rsrq <= -17)) {
+    quadTitle = '信号格数充足，但当前基站上网人数较多';
+    quadDesc = dRtt > 25
+      ? ('手机信号良好，但基站排队延迟升高 +' + Math.round(dRtt) + ' ms，属于晚高峰基站繁忙；HNC 智能带宽正在自动介入稳住延迟。')
+      : '手机信号强度充足，但基站信道负载偏忙（RSRQ ' + rsrq + ' dB），高峰期下载速度可能略有波动。';
     quadCls = 'b-warn';
   }
-  var h = '<h3>热点手机实时信号与网络诊断</h3>' +
-    '<div class="sub">零 Modem 唤醒读取 <span class="mono">dumpsys telephony.registry</span> · 联动 5G Autorate</div>' +
-    '<div class="dbox" style="margin-bottom:10px">' +
-      '<div class="row2"><span class="k">当前承载制式</span><span class="v"><span class="badge ' + quadCls + '">' + esc(sig.rat || '未知') + ' · ' + esc(sig.quality_cn || '') + '</span></span></div>' +
-      (sig.carrier ? '<div class="row2"><span class="k">上网卡与出口</span><span class="v">' + esc('卡' + (sig.slot || 1) + ' · ' + sig.carrier) + (sig.upstream_iface ? ' (<span class="mono">' + esc(sig.upstream_iface) + '</span>)' : '') + '</span></div>' : '') +
-      '<div class="row2"><span class="k">' + (isWifi ? 'Wi-Fi RSSI 信号强度' : '5G/LTE RSRP 接收功率') + '</span><span class="v mono">' + (dbm ? dbm + ' dBm' : '—') + (sig.band ? ' · 频段 ' + esc(sig.band) : '') + (sig.bandwidth_mhz ? ' (' + sig.bandwidth_mhz + 'MHz)' : '') + '</span></div>' +
-      (!isWifi && sig.sinr_db != null ? '<div class="row2"><span class="k">SINR 信噪比 / RSRQ</span><span class="v mono">' + sig.sinr_db + ' dB / ' + (sig.rsrq_db || '—') + ' dB</span></div>' : '') +
-      (isWifi && sig.wifi_link_mbps ? '<div class="row2"><span class="k">Wi-Fi 协商速率</span><span class="v mono">' + sig.wifi_link_mbps + ' Mbps</span></div>' : '') +
-      '<div class="row2"><span class="k">Autorate 射频天花板系数 α_rf</span><span class="v mono">' + Math.round(num(sig.rf_ceiling_factor, 1) * 100) + '%</span></div>' +
-      (rtt > 0 ? '<div class="row2"><span class="k">上游实测 RTT / 排队膨胀</span><span class="v mono">' + rtt.toFixed(1) + ' ms (Δ ' + dRtt.toFixed(1) + ' ms)</span></div>' : '') +
+
+  var carrierTitle = isWifi
+    ? ('Wi-Fi 中继上网' + (sig.upstream_iface ? ' (' + sig.upstream_iface + ')' : ''))
+    : ('卡' + (sig.slot || 1) + ' · ' + (sig.carrier || '移动网络'));
+  var bandLine = combo
+    ? ('频段 ' + combo + (totBw > 0 ? (' · ' + (caCnt >= 2 ? '聚合总带宽 ' : '带宽 ') + totBw + 'MHz') : '') + (caCnt >= 2 ? (' (' + caCnt + 'CC)') : ''))
+    : (sig.upstream_iface ? ('出口接口 ' + sig.upstream_iface) : '等待基带上报频段');
+  var traitTxt = sig.band_trait || sigFallbackTrait(sig.band, combo, totBw, isWifi);
+
+  return '<h3>热点手机实时信号与频段诊断</h3>' +
+    '<div class="sub">实时读取手机基带状态（零额外唤醒耗电） · 支持 5G-A 多载波与全频段识别</div>' +
+    '<div class="sig-hero-bar">' +
+      '<div class="sig-hero-l">' +
+        '<div class="sig-hero-carrier">' +
+          '<span>' + esc(carrierTitle) + '</span>' +
+          (sig.is_5ga || dRat === '5G-A' ? '<span class="sig-5ga-tag">5G-A</span>' : '<span class="badge b-acc">' + esc(dRat) + '</span>') +
+          (sig.sharing_mode ? '<span class="badge b-pur">' + esc(sig.sharing_mode) + '</span>' : '') +
+        '</div>' +
+        '<div class="sig-hero-band">' + esc(bandLine) + '</div>' +
+      '</div>' +
+      '<span class="badge ' + quadCls + '" style="font-size:12px;padding:5px 10px">' + esc(sig.quality_cn || '良好') + '</span>' +
     '</div>' +
-    '<div class="dsec">四象限瓶颈智能归因</div>' +
-    '<div class="dbox"><div style="font-weight:700;margin-bottom:4px">' + quadTitle + '</div><div class="note">' + quadDesc + '</div></div>' +
+    '<div class="sig-4d-grid">' +
+      '<div class="sig-4d-cell ' + rsrpTone + '"><span class="sig-4d-k">信号强度</span><div class="sig-4d-v"><span>' + esc(rsrpLbl) + '</span><small>' + (dbm ? dbm + ' dBm' : '—') + '</small></div></div>' +
+      '<div class="sig-4d-cell ' + sinrTone + '"><span class="sig-4d-k">' + (isWifi ? '连接速率' : '信号纯净度') + '</span><div class="sig-4d-v"><span>' + esc(isWifi && sig.wifi_link_mbps ? (sig.wifi_link_mbps + ' Mbps') : sinrLbl) + '</span>' + (!isWifi && sig.sinr_db != null ? '<small>SINR ' + sinr + ' dB</small>' : '') + '</div></div>' +
+      '<div class="sig-4d-cell ' + rsrqTone + '"><span class="sig-4d-k">' + (isWifi ? '工作频段' : '基站空闲度') + '</span><div class="sig-4d-v"><span>' + esc(isWifi ? (sig.band || '5GHz') : rsrqLbl) + '</span>' + (!isWifi && rsrq ? '<small>RSRQ ' + rsrq + ' dB</small>' : '') + '</div></div>' +
+      '<div class="sig-4d-cell ' + spTone + '"><span class="sig-4d-k">网速发挥度</span><div class="sig-4d-v"><span>' + spPct + '%</span><small>' + esc(spTxt) + '</small></div></div>' +
+    '</div>' +
+    (traitTxt ? '<div class="sig-band-box"><b>当前频段解读：</b>' + esc(traitTxt) + '</div>' : '') +
+    '<div class="dbox" style="margin-bottom:10px"><div style="font-weight:750;margin-bottom:3px">' + esc(quadTitle) + '</div><div class="note" style="margin:0">' + esc(quadDesc) + '</div></div>' +
+    '<details class="v6-adv-fold" id="sig-tech-fold">' +
+      '<summary><span>底层射频工程参数（RSRP / 频点 / 接口）</span><span class="v6-adv-r"><span>展开详情</span></span></summary>' +
+      '<div class="v6-adv-body">' +
+        '<div class="dbox">' +
+          '<div class="row2"><span class="k">协议制式 / 出口网卡</span><span class="v mono">' + esc((sig.rat || '—') + (sig.is_5ga ? ' (NR_ADVANCED)' : '') + (sig.upstream_iface ? ' · ' + sig.upstream_iface : '')) + '</span></div>' +
+          (sig.mcc_mnc ? '<div class="row2"><span class="k">运营商 PLMN 编码</span><span class="v mono">' + esc(sig.mcc_mnc) + '</span></div>' : '') +
+          (sig.arfcn ? '<div class="row2"><span class="k">下行频点号 (ARFCN)</span><span class="v mono">' + sig.arfcn + (sig.freq_mhz ? ' (~' + sig.freq_mhz + ' MHz)' : '') + '</span></div>' : '') +
+          (!isWifi && sig.lte_rsrp_dbm ? '<div class="row2"><span class="k">4G 锚点信号 (NSA)</span><span class="v mono">' + sig.lte_rsrp_dbm + ' dBm</span></div>' : '') +
+          '<div class="row2"><span class="k">Autorate 射频上限系数</span><span class="v mono">' + Math.round(num(sig.rf_ceiling_factor, 1) * 100) + '%</span></div>' +
+          (rtt > 0 ? '<div class="row2"><span class="k">实测基站延迟 / 排队增量</span><span class="v mono">' + rtt.toFixed(1) + ' ms (Δ ' + dRtt.toFixed(1) + ' ms)</span></div>' : '') +
+        '</div>' +
+      '</div>' +
+    '</details>' +
     '<div class="btns" style="margin-top:12px"><button class="btn sec press" id="sig-refresh-btn">立即刷新信号</button><button class="btn pri press" data-close>完成</button></div>';
-  sheet(h);
+}
+function bindSignalSheetBtn() {
   var rb = $('#sig-refresh-btn');
   if (rb) rb.onclick = function () {
-    busyWhile(rb, api.get('/api/signal', { refresh: 1 }).then(function (r) { S.signal = r; paintSignalPill(); signalSheet(); toast('实时信号已刷新'); }));
+    var foldEl = $('#sig-tech-fold');
+    var wasOpen = !!(foldEl && foldEl.open);
+    busyWhile(rb, api.get('/api/signal', { refresh: 1 }).then(function (r) {
+      S.signal = r;
+      paintSignalPill();
+      var sb = $('#sheet-body');
+      if (sb && $('#sheet') && $('#sheet').classList.contains('show')) {
+        sb.innerHTML = signalSheetHtml();
+        var nf = $('#sig-tech-fold');
+        if (nf && wasOpen) nf.open = true;
+        bindSignalSheetBtn();
+      }
+      toast('实时信号与频段已刷新');
+    }));
   };
+}
+function signalSheet() {
+  sheet(signalSheetHtml());
+  bindSignalSheetBtn();
 }
 
 /* ═════════════════════ 主题(圆形扩散 / 战术瞬切) ═════════════════════ */
 function setStyle(v, x, y) {
-  S.style = v === 'cyber' || v === 'liquid' ? v : 'default'; LS.set('hnc6.style', S.style);
+  if (v === 'frosted') {
+    S.style = 'liquid';
+    S.glassMode = 'frosted';
+    LS.set('hnc6.glass_mode', 'frosted');
+  } else if (v === 'liquid') {
+    S.style = 'liquid';
+    S.glassMode = 'liquid';
+    LS.set('hnc6.glass_mode', 'liquid');
+  } else {
+    S.style = v === 'cyber' ? 'cyber' : 'default';
+  }
+  LS.set('hnc6.style', S.style);
+  var activeKey = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : S.style;
   revealApply(function () { applyTheme(); if (typeof navSync === 'function') navSync(); }, x, y);
-  $$('[data-style-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-style-pick') === S.style); });
+  $$('[data-style-pick]').forEach(function (b) { b.classList.toggle('on', b.getAttribute('data-style-pick') === activeKey); });
+  if (S.page === 'settings' && typeof renderSettings === 'function') setTimeout(function () { renderSettings(false); }, 70);
   setTimeout(function () { placeSegs(); layoutLens(); syncTab(S.page, true); }, 60);
 }
 function setTheme(t, x, y) {
@@ -309,10 +425,10 @@ function revealApply(fn, x, y) {
     setTimeout(function () { try { vt.skipTransition(); } catch (_) {} }, 1000);
   } else fn();
 }
-function isDark() { var a = document.documentElement.getAttribute('data-theme'); return a === 'dark' || (!a && matchMedia('(prefers-color-scheme: dark)').matches); }
+function isDark() { var a = document.documentElement.getAttribute('data-theme'); return a === 'dark' || (a !== 'light' && matchMedia('(prefers-color-scheme: dark)').matches); }
 $('#theme-btn').addEventListener('click', function (e) { setTheme(isDark() ? 'light' : 'dark', e.clientX, e.clientY); });
 $('#bell').addEventListener('click', openAlerts);
-var v6NavBtnEl = $('#v6-nav-btn'); if (v6NavBtnEl) v6NavBtnEl.addEventListener('click', function () { if (S.page !== 'vector') go('vector'); else if (typeof v6ScrollToLeakGuard === 'function') v6ScrollToLeakGuard(); });
+var v6NavBtnEl = $('#v6-nav-btn'); if (v6NavBtnEl) v6NavBtnEl.addEventListener('click', function () { if (typeof closeSheet === 'function' && $('#sheet') && $('#sheet').classList.contains('show')) closeSheet(0); if (typeof closeScalpelDrawer === 'function') closeScalpelDrawer(); if (typeof v6FocusPrivacyPanel === 'function') v6FocusPrivacyPanel(); else if (S.page !== 'vector') go('vector'); });
 var sigPillEl = $('#sig-pill'); if (sigPillEl) sigPillEl.addEventListener('click', signalSheet);
 
 /* ═════════════════════ 事件委托 ═════════════════════ */
@@ -472,6 +588,7 @@ document.addEventListener('click', function (e) {
       a.textContent = !hasOpen ? '全部收起' : '展开常用';
       break;
     case 'fold': var key = a.getAttribute('data-key'), selKey = (window.CSS && CSS.escape) ? CSS.escape(key) : String(key || '').replace(/["\\]/g, '\\$&'), fw = a.closest('[data-foldkey="' + selKey + '"]') || document.getElementById(key); var opened = foldToggle(fw, key);
+      if (opened && key === 'scard-dpv' && typeof dpvLoadSilent === 'function' && (!DPV_STATE.lastData || !DPV_STATE.lastData.sampled_ok)) dpvLoadSilent();
       if (opened && (key === 'logs' || key === 'scard-diag') && S.open.logs) loadLog();
       if (opened && (key === 'tokens' || key === 'scard-rem') && S.open.tokens) loadTokens();
       if (opened && key === 'dnst') loadDNS(); if (opened && key === 'fpl') loadFP(); if (opened && key === 'pwr') loadPower(false);
@@ -519,7 +636,7 @@ document.addEventListener('click', function (e) {
     case 'applim-save': case 'applim-clear':
       var row2 = a.closest('[data-app]'), app = row2.getAttribute('data-app'), lim = act === 'applim-clear' ? 0 : mbsToMbps($('input', row2).value);
       // 应用限速表先刷新再重绘卡片: 此前卡片先按旧表画一遍, 再按新表画一遍(两次整卡重绘, 保存的值闪回旧值)
-      devAct(d.mac, function () { return (lim > 0 ? api.action('app_limit_set', { mac: d.mac, app_id: app, down_mbps: trim0(lim.toFixed(3)) }) : api.action('app_limit_clear', { mac: d.mac, app_id: app })).then(function (r) { return loadAppLimits().then(function () { return r; }); }); }, lim > 0 ? '已限速 ' + app : app + ' 不再限速', a);
+      devAct(d.mac, function () { return (lim > 0 ? api.action('app_limit_set', { mac: d.mac, app_id: app, down_mbps: trim0(lim.toFixed(3)) }) : api.action('app_limit_clear', { mac: d.mac, app_id: app })).then(function (r) { return loadAppLimits().then(function () { return r; }); }); }, (function(){ var catItem = (typeof APP_CATALOG !== 'undefined' && APP_CATALOG && APP_CATALOG[app]); var nm = (catItem && catItem.name) || app; return lim > 0 ? '已限速 ' + nm : nm + ' 不再限速'; })(), a);
       break;
     case 'refresh': busyWhile(a, api.action('refresh', {}, { timeout: 15000, maxTime: 13 }).catch(function () {})).then(function () { return globalRefresh('已刷新 · ' + S.devices.filter(function (x) { return x.online; }).length + ' 台在线'); }); break;
     case 'clear-all': confirmSheet('清空所有规则', '移除全部限速、延迟、黑名单（设备列表保留）', '清空').then(function (ok) { if (ok) api.action('cleanup_rules', {}, { timeout: 30000, maxTime: 28 }).then(function () { return globalRefresh('已清空所有规则'); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
@@ -612,7 +729,7 @@ document.addEventListener('click', function (e) {
     case 'ttl-save':
       var td = Math.round(num($('#ttl-days').value, -1)); if (td < 0 || td > 3650) { toast('请填 0~3650 天', 'err'); break; }
       busyWhile(a, api.action('stale_ttl_set', { days: String(td) })).then(function () { toast(td ? '离线 ' + td + ' 天后自动清理规则' : '已关闭离线规则自动清理'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'fw-add': var pkg = $('#fw-pkg').value.trim(); if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(pkg)) { toast('包名格式不对', 'err'); break; }
+    case 'fw-add': var fwScope = a.closest('.set-body, .fold-in, .rows') || document, fwEl = $('input[data-fw-inp], #fw-pkg', fwScope), pkg = (fwEl ? fwEl.value : '').trim(); if (!/^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+$/.test(pkg)) { toast('包名格式不对', 'err'); break; }
       busyWhile(a, api.action('flywheel_exclude_set', { op: 'add', pkg: pkg })).then(function () { toast('已排除 ' + pkg + ' · 约 5 分钟内生效'); return loadConfig(); }).then(function () { renderSettings(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'webacc-save': (function () {
       var mode = S.webaccMode || ((S.cfg.webui_access || {}).mode) || 'all', mi = $('#webacc-macs');
@@ -811,8 +928,13 @@ function pollOnce() {
       if (S.page !== 'apps' || document.querySelector('#p-apps :focus')) return;
       var sc = $('#p-stats .studio-card') || $('#p-apps .studio-card');
       if (sc && typeof selfStudioCardHtml === 'function') { sc = morphOuter(sc, selfStudioCardHtml()); placeSegs(sc); }
-      if (!document.querySelector('#p-apps .row-wrap.open')) {
-        var b = $('#apps-sub'); if (b && S.appsSub !== 'export' && S.appsSub !== 'set') { b.innerHTML = appsSub(); placeSegs(b); }
+      if (!document.querySelector('#p-apps .row-wrap.open') && !document.querySelector('#p-apps #rules.open')) {
+        var b = $('#apps-sub');
+        if (b && S.appsSub !== 'export' && S.appsSub !== 'set') {
+          b.innerHTML = appsSub();
+          placeSegs(b);
+          if (S.appsSub === 'rules' && typeof paintUnknown === 'function') paintUnknown();
+        }
       }
     });
     schedulePoll();
@@ -1021,30 +1143,40 @@ function showRollbackBanner(rb) {
     spotCtx = null;
   }
 
+  var _spotHoldT = 0, _spotDownX = 0, _spotDownY = 0;
+  function cancelPendingSpot() { if (_spotHoldT) { clearTimeout(_spotHoldT); _spotHoldT = 0; } }
   document.addEventListener('pointerdown', function (e) {
+    cancelPendingSpot();
     var mode = typeof motionTheme === 'function' ? motionTheme() : 'default';
     if ((mode === 'liquid' || mode === 'cyber') && motionOn() && !(typeof lowFx === 'function' && lowFx())) {
-      var g = e.target.closest && e.target.closest('.glass:not(.seg):not(.search)');
+      var g = e.target.closest && e.target.closest('.glass:not(.seg):not(.search):not(#tabbar):not(.hbtn)');
       if (g && !g.closest('#sheet')) {
         clearSpotCtx();
-        var gr = g.getBoundingClientRect();
-        if (mode === 'liquid') {
-          var canTilt = fxOn('press') && !g.classList.contains('open') && gr.height < 260 && !e.target.closest('input,textarea,select,.toggle,.seg,[data-lcc-track]');
-          g.classList.add('is-spotting');
-          if (canTilt) g.classList.add('is-tilting');
-          spotCtx = { el: g, rect: gr, pid: e.pointerId, cx: e.clientX, cy: e.clientY, x0: e.clientX, y0: e.clientY, tilt: canTilt, raf: 0 };
-          writeSpotFrame();
-        } else {
-          var px = clamp((e.clientX - gr.left) / Math.max(1, gr.width) * 100, 0, 100).toFixed(1) + '%';
-          var py = clamp((e.clientY - gr.top) / Math.max(1, gr.height) * 100, 0, 100).toFixed(1) + '%';
-          g.style.setProperty('--spot-x', px);
-          g.style.setProperty('--spot-y', py);
-          g.classList.remove('cy-card-ping');
-          void g.offsetWidth;
-          g.classList.add('cy-card-ping');
-          clearTimeout(g._cyPingT);
-          g._cyPingT = setTimeout(function () { g.classList.remove('cy-card-ping'); }, 170);
-        }
+        _spotDownX = e.clientX; _spotDownY = e.clientY;
+        var armFn = function () {
+          _spotHoldT = 0;
+          var gr = g.getBoundingClientRect();
+          if (mode === 'liquid') {
+            var wpOn = typeof hasWpActive === 'function' && hasWpActive();
+            var canTilt = !wpOn && fxOn('press') && !g.classList.contains('open') && gr.height < 240 && !e.target.closest('input,textarea,select,.toggle,.seg,[data-lcc-track]');
+            g.classList.add('is-spotting');
+            if (canTilt) g.classList.add('is-tilting');
+            spotCtx = { el: g, rect: gr, pid: e.pointerId, cx: e.clientX, cy: e.clientY, x0: e.clientX, y0: e.clientY, tilt: canTilt, raf: 0 };
+            writeSpotFrame();
+          } else {
+            var px = clamp((e.clientX - gr.left) / Math.max(1, gr.width) * 100, 0, 100).toFixed(1) + '%';
+            var py = clamp((e.clientY - gr.top) / Math.max(1, gr.height) * 100, 0, 100).toFixed(1) + '%';
+            g.style.setProperty('--spot-x', px);
+            g.style.setProperty('--spot-y', py);
+            g.classList.remove('cy-card-ping');
+            void g.offsetWidth;
+            g.classList.add('cy-card-ping');
+            clearTimeout(g._cyPingT);
+            g._cyPingT = setTimeout(function () { g.classList.remove('cy-card-ping'); }, 170);
+          }
+        };
+        if (e.pointerType === 'mouse' || mode === 'cyber') armFn();
+        else _spotHoldT = setTimeout(armFn, 85);
       }
     }
     // 2. Liquid Capsule Slider drag start
@@ -1061,6 +1193,9 @@ function showRollbackBanner(rb) {
   }, { passive: true });
 
   document.addEventListener('pointermove', function (e) {
+    if (_spotHoldT && (Math.abs(e.clientX - _spotDownX) > 5 || Math.abs(e.clientY - _spotDownY) > 5)) {
+      cancelPendingSpot();
+    }
     if (spotCtx && e.pointerId === spotCtx.pid) {
       spotCtx.cx = e.clientX;
       spotCtx.cy = e.clientY;
@@ -1074,6 +1209,7 @@ function showRollbackBanner(rb) {
   }, { passive: true });
 
   function endLccDrag() {
+    cancelPendingSpot();
     clearSpotCtx();
     if (!lccDrag) return;
     lccDrag.cap.classList.remove('dragging');
@@ -1082,7 +1218,7 @@ function showRollbackBanner(rb) {
   }
   document.addEventListener('pointerup', endLccDrag);
   document.addEventListener('pointercancel', endLccDrag);
-  document.addEventListener('scroll', clearSpotCtx, true);
+  document.addEventListener('scroll', function () { cancelPendingSpot(); clearSpotCtx(); }, { capture: true, passive: true });
 
   // Sync manual input typing back to liquid capsule bars
   document.addEventListener('input', function (e) {
@@ -1095,6 +1231,21 @@ function showRollbackBanner(rb) {
 
   // Wire preset pills & Control Center 3-tile Bento toggles
   document.addEventListener('click', function (e) {
+    var jMac = e.target.closest && e.target.closest('[data-jump-mac]');
+    if (jMac) {
+      var targetMac = jMac.getAttribute('data-jump-mac');
+      if (targetMac) {
+        S.filter = 'all'; S.q = ''; S.quickPill = 'all';
+        S.open[targetMac] = true; S.sel = targetMac;
+        go('devices');
+        renderDevices(false);
+        setTimeout(function () {
+          var cardEl = document.querySelector('.dev[data-dev="' + targetMac + '"]');
+          if (cardEl) cardEl.scrollIntoView({ behavior: motionOn() ? 'smooth' : 'auto', block: 'center' });
+        }, 120);
+      }
+      return;
+    }
     var pre = e.target.closest && e.target.closest('[data-lcc-preset]');
     if (pre) {
       var box = pre.closest('[data-dev]') || pre.closest('[data-side]');
@@ -1102,8 +1253,17 @@ function showRollbackBanner(rb) {
       var v = parseFloat(pre.getAttribute('data-lcc-preset')) || 0;
       var dnInp = box.querySelector('[data-f="down"]');
       var upInp = box.querySelector('[data-f="up"]');
-      if (dnInp && !dnInp.disabled) { dnInp.value = v > 0 ? String(v) : ''; syncLccFromInput(box, 'down'); }
-      if (upInp && !upInp.disabled) { upInp.value = v > 0 ? String(Math.max(0.2, +(v * 0.5).toFixed(1))) : ''; syncLccFromInput(box, 'up'); }
+      if (dnInp && !dnInp.disabled) {
+        dnInp.value = v > 0 ? String(v) : '';
+        dnInp.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      if (upInp && !upInp.disabled) {
+        upInp.value = v > 0 ? String(Math.max(0.2, +(v * 0.5).toFixed(1))) : '';
+        upInp.dispatchEvent(new Event('input', { bubbles: true }));
+      }
+      box.querySelectorAll('[data-lcc-preset]').forEach(function (b) { b.classList.toggle('on', b === pre); });
+      var apBtn = box.querySelector('[data-act="apply-limit"]');
+      if (apBtn) apBtn.textContent = v > 0 ? ('应用限速 (' + v + ' MB/s)') : '应用（恢复不限速）';
       if (typeof haptic === 'function') haptic(8);
       return;
     }
@@ -1112,21 +1272,27 @@ function showRollbackBanner(rb) {
       var box2 = cc.closest('[data-dev]') || cc.closest('[data-side]');
       var mac2 = box2 && (box2.getAttribute('data-dev') || box2.getAttribute('data-side'));
       if (mac2 && S.busy[mac2]) { toast('这台设备还有操作在进行'); return; }
+      var dTarget = mac2 ? devBy(mac2) : null;
+      if (!dTarget) return;
       var kind = cc.getAttribute('data-cc-tog');
-      var realTog = box2 && box2.querySelector('.toggle[data-act="' + kind + '"]');
-      if (realTog && !realTog.disabled) {
-        realTog.click();
-        var isNowOn = realTog.getAttribute('aria-checked') === 'true';
-        cc.classList.toggle('on', isNowOn);
-        if (kind === 'sqm') cc.classList.toggle('sqm-on', isNowOn);
-        else if (kind === 'appqos') cc.classList.toggle('qos-on', isNowOn);
-        else if (kind === 'wl') cc.classList.toggle('wl-on', isNowOn);
+      var nextOn = !cc.classList.contains('on');
+      cc.classList.toggle('on', nextOn);
+      if (kind === 'sqm') {
+        cc.classList.toggle('sqm-on', nextOn);
+        devAct(dTarget.mac, function () { return api.action('rule_sqm', { mac: dTarget.mac, enabled: String(nextOn) }); }, nextOn ? '已开启低延迟优先' : '已关闭低延迟优先', cc);
+      } else if (kind === 'appqos') {
+        cc.classList.toggle('qos-on', nextOn);
+        devAct(dTarget.mac, function () { return api.action('app_qos_set', { mac: dTarget.mac, enabled: String(nextOn) }); }, nextOn ? '已开启应用级分流（约 3 秒内生效）' : '已关闭应用级分流', cc);
+      } else if (kind === 'wl') {
+        cc.classList.toggle('wl-on', nextOn);
+        devAct(dTarget.mac, function () { return api.action('device_whitelist_set', { mac: dTarget.mac, enabled: String(nextOn) }); }, nextOn ? dTarget.name + ' 已加入白名单' : dTarget.name + ' 已移出白名单', cc);
       }
+      return;
     }
   });
  function tabState(){host.querySelectorAll('[data-tab]').forEach(function(el){var name=el.getAttribute('data-tab'),on=name===S.page;el.setAttribute('role','tab');el.setAttribute('aria-label',NAV_T[name]);el.setAttribute('aria-selected',String(on));el.setAttribute('aria-controls','p-'+name);el.tabIndex=on?0:-1;});}
  var originalSync=syncTab;syncTab=function(name,instant){originalSync(name,instant);tabState();};tabState();
- host.addEventListener('keydown',function(e){var el=e.target.closest('[data-tab]');if(!el)return;var n=ORDER.indexOf(el.getAttribute('data-tab'));if(e.key==='ArrowRight')n=(n+1)%4;else if(e.key==='ArrowLeft')n=(n+3)%4;else if(e.key==='Home')n=0;else if(e.key==='End')n=3;else if(e.key!=='Enter'&&e.key!==' ')return;e.preventDefault();go(ORDER[n]);host.querySelector('[data-tab="'+ORDER[n]+'"]').focus();});
+ host.addEventListener('keydown',function(e){var el=e.target.closest('[data-tab]');if(!el)return;var n=ORDER.indexOf(el.getAttribute('data-tab'));var len=ORDER.length;if(e.key==='ArrowRight')n=(n+1)%len;else if(e.key==='ArrowLeft')n=(n+len-1)%len;else if(e.key==='Home')n=0;else if(e.key==='End')n=len-1;else if(e.key!=='Enter'&&e.key!==' ')return;e.preventDefault();go(ORDER[n]);host.querySelector('[data-tab="'+ORDER[n]+'"]').focus();});
 })();
 
 /* === v5.33.1 Enhancement Layer 2: Dual RX/TX Bezier Sparkline, Filter Pills & Live Settings Search === */
@@ -1249,7 +1415,7 @@ function showRollbackBanner(rb) {
     var html = _origDevCard(d);
     if (d.online) {
       var loadPct = Math.min(100, Math.max(6, Math.round((num(d.rx) + num(d.tx)) / (3.2 * 1048576) * 100)));
-      html = html.replace('</span></button>', '<span class="dev-load-bar"><i style="width:' + loadPct + '%"></i></span></span></button>');
+      html = html.replace('<span class="dev-r">', '<span class="dev-r"><span class="dev-load-bar"><i style="width:' + loadPct + '%"></i></span>');
     }
     return html;
   };
@@ -1322,7 +1488,7 @@ function showRollbackBanner(rb) {
   if (typeof _origAppsSub === 'function') {
     window.appsSub = function() {
       var html = _origAppsSub();
-      if (S.appsSub === 'my') {
+      if (S.appsSub === 'active') {
         var rows = appRows().filter(function(r){ return !r.a.is_system && r.bytes > 0; }).slice(0, 6);
         var tot = rows.reduce(function(s, r){ return s + r.bytes; }, 0);
         if (tot > 0) {
@@ -1346,19 +1512,22 @@ function showRollbackBanner(rb) {
   if (typeof _origPaintDpi === 'function') {
     window.paintDpi = function() {
       _origPaintDpi();
+      var slot = $('#dpi-ring-slot');
       var top = $('#dpi-hero .dpihero .top');
       var st = S.dpi && S.dpi.available && S.dpi.state;
       var ur = st && st.unidentified_ratio;
-      if (top && ur && ur.total_bytes && !$('#dpi-cov-ring')) {
-        var cov = clamp(1 - num(ur.ratio), 0, 1), r = 19, c = 2 * Math.PI * r;
-        var ringHtml = '<div class="dpi-ring-wrap" id="dpi-cov-ring">' +
-          '<svg class="dpi-ring-svg" viewBox="0 0 46 46">' +
-            '<circle cx="23" cy="23" r="' + r + '" fill="none" stroke="var(--input)" stroke-width="4.5"/>' +
-            '<circle cx="23" cy="23" r="' + r + '" fill="none" stroke="var(--green)" stroke-width="4.5" stroke-dasharray="' + c.toFixed(1) + '" stroke-dashoffset="' + ((1 - cov) * c).toFixed(1) + '" stroke-linecap="round"/>' +
+      if ((slot || top) && ur && ur.total_bytes && !$('#dpi-cov-ring')) {
+        var cov = clamp(1 - num(ur.ratio), 0, 1), r = 18, c = 2 * Math.PI * r;
+        var strokeCol = cov < 0.5 ? 'var(--orange)' : 'var(--green)';
+        var ringHtml = '<div class="dpi-ring-wrap" id="dpi-cov-ring" data-animated="1">' +
+          '<svg class="dpi-ring-svg" viewBox="0 0 44 44">' +
+            '<circle cx="22" cy="22" r="' + r + '" fill="none" stroke="var(--stroke-2)" stroke-width="4.2"/>' +
+            '<circle cx="22" cy="22" r="' + r + '" fill="none" stroke="' + strokeCol + '" stroke-width="4.2" stroke-dasharray="' + c.toFixed(1) + '" stroke-dashoffset="' + ((1 - cov) * c).toFixed(1) + '" stroke-linecap="round"/>' +
           '</svg>' +
-          '<div style="text-align:right"><div class="num" style="font-size:17px;font-weight:800">' + Math.round(cov * 100) + '%</div><div class="note">识别覆盖率</div></div>' +
+          '<div class="dpi-ring-txt"><div class="num dpi-ring-pct">' + Math.round(cov * 100) + '%</div><div class="dpi-ring-lbl">识别覆盖率</div></div>' +
         '</div>';
-        top.lastElementChild.insertAdjacentHTML('beforebegin', ringHtml);
+        if (slot) slot.innerHTML = ringHtml;
+        else top.lastElementChild.insertAdjacentHTML('beforebegin', ringHtml);
       }
     };
   }
@@ -1369,9 +1538,13 @@ function showRollbackBanner(rb) {
     $$('#p-settings .scard').forEach(function(card) {
       var match = !q || card.textContent.toLowerCase().indexOf(q) >= 0;
       card.hidden = !match;
+      var fk = card.getAttribute('data-foldkey');
       if (q && match) {
         card.classList.add('open');
         placeSegs(card);
+      } else if (!q && fk) {
+        card.classList.toggle('open', !!S.open[fk]);
+        if (S.open[fk]) placeSegs(card);
       }
     });
     $$('#p-settings [data-lv-sec]').forEach(function(sec) {
@@ -1379,6 +1552,19 @@ function showRollbackBanner(rb) {
       else sec.hidden = (S.setLv !== 'all' && sec.getAttribute('data-lv-sec') !== S.setLv);
     });
   }
+  document.addEventListener('input', function(e) {
+    if (e.target && e.target.id === 'app-q') {
+      S.appQ = e.target.value;
+      var pos = e.target.selectionStart;
+      var sub = $('#apps-sub');
+      if (sub && S.appsSub !== 'rules' && S.appsSub !== 'export' && S.appsSub !== 'set') {
+        sub.innerHTML = appsSub();
+        placeSegs(sub);
+        var ni = $('#app-q');
+        if (ni) { ni.focus(); try { ni.setSelectionRange(pos, pos); } catch (_) {} }
+      }
+    }
+  });
 
   var _origRenderSettings = window.renderSettings;
   if (typeof _origRenderSettings === 'function') {
@@ -1563,8 +1749,20 @@ function showRollbackBanner(rb) {
     im.src = rawSrc;
   }
 
+  /* 120fps 壁纸引擎（CSP 严格兼容 img-src 'self' data:）：将大图直接挂载于独立合成层 .wp-img 而非 :root 继承变量，且拖动滑块零重算图片与 SVG 滤镜 */
+  var _wpAppliedUri = '', _wpToneKey = '', _wpWasActive = null;
+  function syncWpNumericVars() {
+    var r = document.documentElement;
+    var blurPx = clamp(num(S.wpBlur, 0), 0, 24);
+    var dimRatio = (clamp(num(S.wpDim, 12), 0, 75) / 100).toFixed(2);
+    r.style.setProperty('--wp-blur', blurPx + 'px');
+    r.style.setProperty('--wp-dim', dimRatio);
+    if (blurPx > 0) r.setAttribute('data-wp-blurred', '1');
+    else r.removeAttribute('data-wp-blurred');
+  }
   window.applyWallpaper = function() {
     var r = document.documentElement;
+    var wpImg = document.querySelector('#hnc-wallpaper .wp-img');
     var uri = '', rawSrc = '';
     if (S.wpId === 'custom' && S.wpCustom) {
       rawSrc = S.wpCustom;
@@ -1573,26 +1771,43 @@ function showRollbackBanner(rb) {
       uri = WP_PRESETS[S.wpId].uri;
       rawSrc = WP_PRESETS[S.wpId].rawSrc || '';
     }
-    if (uri) {
+    var activeNow = !!uri;
+    if (activeNow) {
       r.setAttribute('data-has-wp', '1');
       r.setAttribute('data-has-wallpaper', '1');
       r.classList.add('has-wallpaper');
       r.setAttribute('data-wp-text', S.wpTextMode === 'capsule' ? 'capsule' : 'adaptive');
-      r.style.setProperty('--wp-image', uri);
-      r.style.setProperty('--wp-blur', clamp(num(S.wpBlur, 0), 0, 24) + 'px');
-      r.style.setProperty('--wp-dim', (clamp(num(S.wpDim, 12), 0, 75) / 100).toFixed(2));
-      detectWallpaperTone(rawSrc);
+      r.style.removeProperty('--wp-image');
+      if (wpImg && _wpAppliedUri !== uri) {
+        _wpAppliedUri = uri;
+        wpImg.style.backgroundImage = uri;
+      }
+      syncWpNumericVars();
+      var toneKey = S.wpId + '|' + (rawSrc ? rawSrc.length + ':' + rawSrc.slice(0, 48) : '');
+      if (_wpToneKey !== toneKey) {
+        _wpToneKey = toneKey;
+        detectWallpaperTone(rawSrc);
+      }
     } else {
       r.removeAttribute('data-has-wp');
       r.removeAttribute('data-has-wallpaper');
+      r.removeAttribute('data-wp-blurred');
       r.classList.remove('has-wallpaper');
       r.removeAttribute('data-wp-text');
       r.removeAttribute('data-wp-tone');
       r.removeAttribute('data-wp-top');
       r.removeAttribute('data-wp-bot');
       r.style.removeProperty('--wp-image');
+      if (wpImg && _wpAppliedUri !== '') {
+        _wpAppliedUri = '';
+        wpImg.style.backgroundImage = 'none';
+      }
+      _wpToneKey = '';
     }
-    if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets();
+    if (_wpWasActive !== activeNow) {
+      _wpWasActive = activeNow;
+      if (typeof refreshHyaliteTargets === 'function') refreshHyaliteTargets();
+    }
   };
 
   window.wpSettingsHtml = function() {
@@ -1661,16 +1876,18 @@ function showRollbackBanner(rb) {
     }
     if (t.id === 'wp-blur') {
       S.wpBlur = clamp(num(t.value, 0), 0, 24);
-      LS.set('hnc6.wp_blur', String(S.wpBlur));
       var bv = $('#wp-blur-v'); if (bv) bv.textContent = Math.round(S.wpBlur) + ' px';
-      applyWallpaper();
+      syncWpNumericVars();
+      clearTimeout(t._wpSaveT);
+      t._wpSaveT = setTimeout(function () { LS.set('hnc6.wp_blur', String(S.wpBlur)); }, 120);
       return;
     }
     if (t.id === 'wp-dim') {
       S.wpDim = clamp(num(t.value, 22), 0, 75);
-      LS.set('hnc6.wp_dim', String(S.wpDim));
       var dv = $('#wp-dim-v'); if (dv) dv.textContent = Math.round(S.wpDim) + '%';
-      applyWallpaper();
+      syncWpNumericVars();
+      clearTimeout(t._wpSaveT);
+      t._wpSaveT = setTimeout(function () { LS.set('hnc6.wp_dim', String(S.wpDim)); }, 120);
       return;
     }
   });
@@ -1679,32 +1896,53 @@ function showRollbackBanner(rb) {
     var t = e.target;
     if (!t || t.id !== 'wp-file' || !t.files || !t.files[0]) return;
     var file = t.files[0];
-    var reader = new FileReader();
-    reader.onload = function(ev) {
-      var img = new Image();
-      img.onload = function() {
-        var maxSide = 1600, w = img.width || 800, h = img.height || 600;
+    var finishDecode = function(img, cleanupUrl) {
+      try {
+        var maxSide = 1280, w = img.naturalWidth || img.width || 800, h = img.naturalHeight || img.height || 600;
         if (w > maxSide || h > maxSide) {
           var scale = maxSide / Math.max(w, h);
-          w = Math.round(w * scale);
-          h = Math.round(h * scale);
+          w = Math.max(1, Math.round(w * scale));
+          h = Math.max(1, Math.round(h * scale));
         }
         var cv = document.createElement('canvas');
         cv.width = w; cv.height = h;
-        var ctx = cv.getContext('2d');
+        var ctx = cv.getContext('2d', { alpha: false });
         ctx.drawImage(img, 0, 0, w, h);
-        var dataUrl = cv.toDataURL('image/jpeg', 0.84);
+        var dataUrl = '';
+        try { dataUrl = cv.toDataURL('image/webp', 0.80); } catch (_) {}
+        if (!dataUrl || dataUrl.indexOf('data:image/webp') !== 0) {
+          dataUrl = cv.toDataURL('image/jpeg', 0.82);
+        }
         S.wpCustom = dataUrl;
         S.wpId = 'custom';
+        _wpToneKey = '';
         try { LS.set('hnc6.wp_custom', dataUrl); LS.set('hnc6.wp_id', 'custom'); } catch (_) {}
         applyWallpaper();
         syncWpUi();
-        toast('已应用自定义本地壁纸');
-      };
-      img.onerror = function() { toast('图片格式无法解析', 'err'); };
-      img.src = ev.target.result;
+        toast('已应用自定义本地壁纸（已开启 120fps 显存优化）');
+      } finally {
+        if (cleanupUrl) try { URL.revokeObjectURL(cleanupUrl); } catch (_) {}
+      }
     };
-    reader.readAsDataURL(file);
+    if (typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function') {
+      var tmpObjUrl = URL.createObjectURL(file);
+      var imgFast = new Image();
+      imgFast.onload = function() { finishDecode(imgFast, tmpObjUrl); };
+      imgFast.onerror = function() {
+        try { URL.revokeObjectURL(tmpObjUrl); } catch (_) {}
+        toast('图片格式无法解析', 'err');
+      };
+      imgFast.src = tmpObjUrl;
+    } else {
+      var reader = new FileReader();
+      reader.onload = function(ev) {
+        var img = new Image();
+        img.onload = function() { finishDecode(img, ''); };
+        img.onerror = function() { toast('图片格式无法解析', 'err'); };
+        img.src = ev.target.result;
+      };
+      reader.readAsDataURL(file);
+    }
     t.value = '';
   });
 

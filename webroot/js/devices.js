@@ -323,14 +323,15 @@ function devBody(d) {
   if (d.online) {
     h += '<div class="conn-strip"><span data-conn-mini>' + connMiniHtml(d.mac) + '</span>' +
       '<span style="display:inline-flex;align-items:center;gap:8px;flex-shrink:0">' +
-        '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>五元组手术刀</span></button>' +
+        '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>清理连接</span></button>' +
         '<button type="button" class="linkish" data-act="conns">全部连接</button>' +
       '</span></div>';
   } else {
-    h += '<div class="conn-strip"><span>五元组流透视 · 秒斩死流或冻结 15 分钟</span>' +
-      '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>五元组手术刀</span></button></div>';
+    h += '<div class="conn-strip"><span>查看连接明细或单独断开异常连接</span>' +
+      '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>清理连接</span></button></div>';
   }
 
+  if (typeof v6DeviceEscortStripHtml === 'function') h += v6DeviceEscortStripHtml(d);
   h += seg('dev-tab', [['limit', '限速分流'], ['quota', '应用配额'], ['conn', '连接画像']], curTab, 'small');
 
   // ── Pane 1: 限速分流 (默认首屏仅保留带宽限速 + 按需折叠弱网延迟，清爽一屏见底) ──
@@ -354,6 +355,13 @@ function devBody(d) {
             '<button type="button" class="bw-clr" data-bw-clr="up" aria-label="清空上行"' + (upStr ? '' : ' hidden') + '>×</button>' +
             '<span class="u">MB/s</span></span>' +
         '</label>' +
+      '</div>' +
+      '<div class="bw-presets" aria-label="快捷限速档位">' +
+        '<span class="bw-pre-lbl">快捷填入：</span>' +
+        [['0', '不限速'], ['1', '1 MB/s'], ['2', '2 MB/s'], ['5', '5 MB/s'], ['10', '10 MB/s']].map(function (p) {
+          var isCur = (p[0] === '0' && !dnVal) || (dnVal > 0 && Math.abs(dnVal - parseFloat(p[0])) < 0.05);
+          return '<button type="button" class="bw-pre-pill press' + (isCur ? ' on' : '') + '" data-lcc-preset="' + p[0] + '"' + dis + '>' + p[1] + '</button>';
+        }).join('') +
       '</div>' +
       (upOk() && offloadRisk() ? '<div class="note warn">检测到系统 offload（' + esc(S.offload.detail) + '），应用限速时将自动通知 hotspotd 切慢路径</div>' : '') +
       '<div class="btns"><button class="btn sec press" data-act="clear-limit"' + busy + '>清除</button><button class="btn pri press" data-act="apply-limit"' + busy + dis + '>应用限速</button></div>' +
@@ -534,7 +542,7 @@ var connT = null;
 function connSheet(d) {
   S.connView = S.connView || 'all';
   sheet('<h3>实时连接 · ' + esc(d.name) + '</h3><div class="sub mono">' + (d.sim ? '<span class="badge b-sim" style="font-family:var(--font)">模拟</span> ' : '') + esc(d.ip || '') + ' · ' + d.mac + '</div>' +
-    '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0 6px;flex-wrap:wrap">' + seg('connv', [['all', '全部'], ['active', '活跃'], ['group', '按应用']], S.connView, 'small') + '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>五元组手术台</span></button></div>' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0 6px;flex-wrap:wrap">' + seg('connv', [['all', '全部'], ['active', '活跃'], ['group', '按应用']], S.connView, 'small') + '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>清理异常连接</span></button></div>' +
     '<div id="cn-body"><div class="note">加载中…</div></div><div class="note" style="margin-top:8px">数据来自内核连接表（conntrack），域名来自 DPI 抓到的 DNS / TLS，每 2 秒刷新</div>' +
     '<button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true, kind: 'conns', onClose: function () { clearInterval(connT); connT = null; S.connMac = null; } });
   S.connMac = d.mac;
@@ -739,7 +747,7 @@ function renderDevices(anim1) {
     '<div class="toolbar"><button class="chip press' + (S.batch ? ' on' : '') + '" data-act="batch">' + ico('box') + '批量</button><button class="chip press" data-act="tpl">' + ico('star') + '模板</button></div>' +
     (S.batch ? '<div class="glass batchbar swap"><div class="top"><span>已选 <b class="num" id="picked-n">' + Object.keys(S.picked).length + '</b> 台</span><button class="hint-a" data-act="b-all">全选</button><button class="hint-a" data-act="b-none">清空</button><button class="hint-a" data-act="batch">退出</button></div>' +
       '<div class="btns"><button class="btn sec press" data-act="b-tpl">应用模板</button><button class="btn sec press" data-act="b-clear">清除限速</button><button class="btn sec press" data-act="b-cdelay">清除延迟</button><button class="btn dan press" data-act="b-block">加黑</button><button class="btn ok press" data-act="b-unblock">解黑</button></div></div>' : '') +
-    '<div class="sec"><span>设备列表</span><span class="r"><span id="list-on">' + on + '</span> 在线 · 共 ' + S.devices.length + '</span></div>' +
+    '<div class="sec"><span>设备列表</span><span class="r"><span id="list-on">' + on + '</span> 在线 · ' + (visibleDevs().length < S.devices.length ? ('当前显示 ' + visibleDevs().length + ' / 共 ' + S.devices.length) : ('共 ' + S.devices.length)) + '</span></div>' +
     '<div class="dev-list' + (S.batch ? ' batch' : '') + '" id="dev-list">' + devListHtml() + '</div></div>' +
     (wide() ? '<div class="dev-side" id="dev-side">' + devSide() + '</div>' : '') + '</div>';
   var p = $('#p-devices');
@@ -799,7 +807,7 @@ function rollNum(el, str, unit) {
 }
 function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge ? d.merge.old_mac + '/' + d.merge.score : '', d.vpn ? d.vpn.level : '', d.rmac ? 1 : 0, d.mergedInto, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.appQos ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError, d.sim ? 1 : 0,
   d.eff ? [d.eff.reason, d.eff.blocked ? 1 : 0, d.eff.down_mbps, d.eff.up_mbps, d.eff.apply_error || ''].join(',') : '', d.quota ? [d.quota.state, d.quota.applied ? 1 : 0, d.quota.daily_gb, d.quota.monthly_gb, d.quota.action].join(',') : '',
-  d.sched ? d.sched.windows.length + ',' + d.sched.active_window_index : '', d.atl.map(function (x) { return x.app_id + (x.exhausted ? '!' : '') + x.minutes; }).join(','), d.cblocks.map(function (x) { return x.category; }).join(',')].join(':'); }).join('|'); }
+  d.sched ? d.sched.windows.length + ',' + d.sched.active_window_index : '', d.atl.map(function (x) { return x.app_id + (x.exhausted ? '!' : '') + x.minutes; }).join(','), d.cblocks.map(function (x) { return x.category; }).join(','), typeof v6DeviceShapeSig === 'function' ? v6DeviceShapeSig(d) : ''].join(':'); }).join('|'); }
 function refreshCard(mac) {
   var d = devBy(mac); if (!d) return;
   var el = document.querySelector('.dev[data-dev="' + mac + '"]');

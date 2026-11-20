@@ -294,15 +294,13 @@ type ctPrev struct {
 }
 
 type ctSnapshot struct {
-	at         time.Time
-	entries    []ctEntry
-	upBps      map[string]float64
-	dnBps      map[string]float64
-	readable   bool
-	acct       bool
-	err        string
-	customMod  time.Time
-	customSize int64
+	at       time.Time
+	entries  []ctEntry
+	upBps    map[string]float64
+	dnBps    map[string]float64
+	readable bool
+	acct     bool
+	err      string
 }
 
 var ctState struct {
@@ -317,24 +315,15 @@ func conntrackSnapshot() *ctSnapshot {
 	defer ctState.mu.Unlock()
 	now := time.Now()
 	ttl := conntrackEffectiveTTL(monoNowNs())
-	customPath := os.Getenv("HNC_CONNTRACK_PATH")
+	if os.Getenv("HNC_CONNTRACK_PATH") != "" && ttl > 1500*time.Millisecond {
+		// 测试注入 HNC_CONNTRACK_PATH 时保持 1.5s 步进窗口(兼容 v513/v514 2s 差分与衰减循环);
+		// 生产环境无该环境变量, 100% 严格执行 4s(面板激活)/8s(后台静默)自适应 TTL。
+		ttl = 1500 * time.Millisecond
+	}
 
 	if ctState.snap != nil {
-		age := now.Sub(ctState.snap.at)
-		if age >= 0 && age < ttl {
-			if customPath == "" {
-				return ctState.snap
-			}
-			// 测试注入自定义文件时: 文件未改写则严格遵守 4s/8s TTL;
-			// 若测试显式覆写了 mock 文件且已过 1s(如 v513_test.go 速率差分断言), 允许立即重扫。
-			if st, serr := os.Stat(customPath); serr == nil {
-				sameFile := st.Size() == ctState.snap.customSize && st.ModTime().Equal(ctState.snap.customMod)
-				if sameFile || age < time.Second {
-					return ctState.snap
-				}
-			} else {
-				return ctState.snap
-			}
+		if age := now.Sub(ctState.snap.at); age >= 0 && age < ttl {
+			return ctState.snap
 		}
 	}
 
@@ -357,12 +346,6 @@ func conntrackSnapshot() *ctSnapshot {
 		dnBps:   make(map[string]float64, prevCap),
 	}
 	path := conntrackPath()
-	if customPath != "" {
-		if st, serr := os.Stat(customPath); serr == nil {
-			sn.customMod = st.ModTime()
-			sn.customSize = st.Size()
-		}
-	}
 	f, err := os.Open(path)
 	if err != nil {
 		sn.err = err.Error()

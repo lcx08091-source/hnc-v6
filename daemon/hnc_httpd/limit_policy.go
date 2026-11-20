@@ -70,8 +70,30 @@ type quotaAsyncNotif struct {
 	body  string
 }
 
-// quotaNotifyExecFn 系统通知执行钩子(默认走带进程组隔离与 3s 硬超时的 cmd notification; 单测可替换)。
-var quotaNotifyExecFn = defaultQuotaNotifyExec
+// quotaNotifyExecFn 系统通知执行钩子(默认走带进程组隔离与 3s 硬超时的 cmd notification; 单测可安全替换)。
+var (
+	quotaNotifyMu     sync.RWMutex
+	quotaNotifyExecFn = defaultQuotaNotifyExec
+)
+
+func getQuotaNotifyExecFn() func(context.Context, string, string) error {
+	quotaNotifyMu.RLock()
+	fn := quotaNotifyExecFn
+	quotaNotifyMu.RUnlock()
+	return fn
+}
+
+func setQuotaNotifyExecFn(fn func(context.Context, string, string) error) func() {
+	quotaNotifyMu.Lock()
+	old := quotaNotifyExecFn
+	quotaNotifyExecFn = fn
+	quotaNotifyMu.Unlock()
+	return func() {
+		quotaNotifyMu.Lock()
+		quotaNotifyExecFn = old
+		quotaNotifyMu.Unlock()
+	}
+}
 
 func defaultQuotaNotifyExec(ctx context.Context, title, body string) error {
 	const cmdBin = "/system/bin/cmd"
@@ -92,12 +114,16 @@ func defaultQuotaNotifyExec(ctx context.Context, title, body string) error {
 }
 
 func dispatchQuotaNotificationsAsync(items []quotaAsyncNotif) {
+	fn := getQuotaNotifyExecFn()
+	if fn == nil {
+		return
+	}
 	for _, it := range items {
 		item := it
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), quotaNotifyTimeout)
 			defer cancel()
-			if err := quotaNotifyExecFn(ctx, item.title, item.body); err != nil {
+			if err := fn(ctx, item.title, item.body); err != nil {
 				log.Printf("limitctl: async quota notification error/timeout: %v", err)
 			}
 		}()

@@ -655,19 +655,32 @@ func (st *fpStore) attribute(key string, apps map[string]ipApp, names map[string
 	if a, ok := dpiUserMatchIP(dst, dport, now); ok {
 		return flowAttr{App: a, Src: "user", Conf: 1}, true
 	}
-	if a, s, ok := appForIPSrc(dst, apps, names); ok {
-		fa := flowAttr{App: a, Src: s}
-		if s == "user" {
+	ipFallback, ipSrc, hasIPMatch := appForIPSrc(dst, apps, names)
+	if hasIPMatch && (ipSrc == "user" || ipSrc == "domain") {
+		fa := flowAttr{App: ipFallback, Src: ipSrc}
+		if ipSrc == "user" {
 			fa.Conf = 1
 		}
 		return fa, true
 	}
 	if isPrivateIP(dst) {
+		if hasIPMatch {
+			return flowAttr{App: ipFallback, Src: ipSrc}, true
+		}
 		return flowAttr{}, false
 	}
+	// v6.0 共享 CDN 防串台: 当 appForIPSrc 仅命中全局 ip_app_map (ipSrc=="ip") 时,
+	// 先查当前连接的精确五元组 TLS/QUIC 学习绑定, 防止多租户阿里云/腾讯云边缘节点跨设备串台!
 	st.mu.Lock()
-	defer st.mu.Unlock()
-	return st.fpAttrLocked(key, proto, src, dst, dport, names, now.Unix())
+	fa, fpOK := st.fpAttrLocked(key, proto, src, dst, dport, names, now.Unix())
+	st.mu.Unlock()
+	if fpOK {
+		return fa, true
+	}
+	if hasIPMatch {
+		return flowAttr{App: ipFallback, Src: ipSrc, JA4: fa.JA4}, true
+	}
+	return fa, false
 }
 
 func (st *fpStore) fpAttrLocked(key, proto, src, dst string, dport int, names map[string]ipName, now int64) (flowAttr, bool) {

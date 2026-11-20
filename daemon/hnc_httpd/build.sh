@@ -109,7 +109,12 @@ else
         /api/dpi_probe \
         dpi_rebind \
         /api/dataplane_verify \
-        dataplane_verify_run
+        dataplane_verify_run \
+        /api/vector_sync \
+        /api/leakguard/events \
+        /api/v6/express \
+        /api/v6/blackbox \
+        /api/backup
     do
         if ! grep -a -F "$sym" "$OUT_BIN" >/dev/null 2>&1; then
             echo "ERROR: rebuilt hnc_httpd missing required DPI API route/action string: $sym" >&2

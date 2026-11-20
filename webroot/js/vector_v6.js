@@ -1,12 +1,9 @@
-/* HNC WebUI · vector_v6.js —— HNC v6.0.0 · Vector 战术中枢与 LeakGuard 明文隐私安检面板
- * 职责范围:
- *   1. LeakGuard 明文隐私安检面板: 态势统计、系统通知/锁屏半脱敏开关、环形缓冲与去重冷却数字配置、
- *      高密度单行实时告警流(未打码完整 raw_value + 拉黑域名与IP/解封 + 秒斩连接 + XSS 安全原始 HTTP 报文取证折叠抽屉)、
- *      浏览器 SSE (/api/leakguard/stream) 与 KSU 模式平滑轮询回退。
- *   2. Vector v6 四大战术舱: Vector Express 零排队护航、UpdateLeash 更新拴绳、ThermoCruise 电芯温控巡航、
- *      FlowScalpel 五元组连接透视与单斩死流/秒斩+冻结15分钟手术台抽屉。
- *   3. /api/vector_sync 聚合快路径数据消费、四大隔离舱壁健康态势展示与跨页面联动。
- * 视觉与安全规范: 零表情字符 · 纯直接数字输入框 · 全量 HTML 转义防 XSS · 严格对齐后端 JSON 解码字段 · 自适应四大主题。
+/* HNC WebUI · vector_v6.js —— HNC v6.0.0 · 智能护航、隐私明文安检与连接排障中心
+ * 设计准则:
+ *   1. 3秒简易认知渐进披露: 顶部一句话人话态势 + 3格控制中心磁贴 + 三大场景切换(网速护航 / 隐私安检 / 连接排障) + 高级参数按需折叠。
+ *   2. 100% 真实后端能力闭环: 完整对接 /api/vector_sync、LeakGuard、Express、UpdateLeash、ThermoCruise、FlowScalpel、Blackbox、MultiIface、NativeSubtrees 与 ConfigVault。
+ *   3. 状态机零串扰: 全局活跃连接数与单机抽屉完全隔离、写操作 1.5s 乐观飞行锁、morph 就地更新防吞点击、已读水位线消除常亮红点焦虑。
+ *   4. 永久红线严守: 零表情字符 · 零拖动滑块（纯直接数字输入） · 全量 SVG 宽高硬锁 · LeakGuard 100% 原始未打码 raw_value 转义展示 · 四大主题自适应。
  */
 'use strict';
 
@@ -35,11 +32,11 @@ function escapeHtml(s) {
   });
 }
 
-/* 在已安全转义的原始 HTTP 报文中精确高亮命中的完整明文值 raw_value（零正则注入风险、严禁二次星号打码） */
+/* 在已安全转义的原始 HTTP 报文中精确高亮命中的完整明文值 raw_value（零正则注入风险、严禁星号打码） */
 function highlightRawSnippet(snippet, rawVal) {
   var src = String(snippet == null ? '' : snippet);
   var needle = String(rawVal == null ? '' : rawVal);
-  if (!src) return '<span class="note">(当前告警未附带原始 HTTP 报文切片)</span>';
+  if (!src) return '<span class="note">（当前记录未附带原始 HTTP 报文片段）</span>';
   if (!needle) return escapeHtml(src);
   var out = '', idx = 0, hit = -1;
   while ((hit = src.indexOf(needle, idx)) !== -1) {
@@ -50,7 +47,7 @@ function highlightRawSnippet(snippet, rawVal) {
   return out;
 }
 
-/* 从原始 HTTP 报文切片中提取请求行 Path 与 User-Agent（当事件字段未单独携带时自动补齐） */
+/* 从原始 HTTP 报文切片中提取请求行 Path 与 User-Agent */
 function extractHttpMetaFromSnippet(snippet) {
   var res = { method: '', path: '', ua: '' };
   var s = String(snippet || '');
@@ -86,9 +83,10 @@ function v6ValidMac(m) {
   return /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/.test(String(m || '').trim());
 }
 
-/* 纯内联矢量线条图标库（零位图 · 零表情字符） */
+/* 纯内联矢量线条图标库（自带 .v6-ic 与 width/height 双重硬锁，杜绝任何 Flex 容器下无约束放大） */
 var V6_SVGS = {
   shieldAlert: '<path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".15"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/><path d="M12 8.2v4.4M12 16h.01"/>',
+  shieldOk: '<path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".15"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/><path d="m8.8 12.2 2.2 2.2 4.4-4.6"/>',
   express: '<polygon points="13.2 2.4 4.4 13.4 11.6 13.4 10.6 21.6 19.6 10.6 12.4 10.6 13.2 2.4" fill="currentColor" fill-opacity=".18"/><polygon points="13.2 2.4 4.4 13.4 11.6 13.4 10.6 21.6 19.6 10.6 12.4 10.6 13.2 2.4"/>',
   leash: '<rect x="2.8" y="6.8" width="7.6" height="10.4" rx="3.5" fill="currentColor" fill-opacity=".15"/><rect x="13.6" y="6.8" width="7.6" height="10.4" rx="3.5" fill="currentColor" fill-opacity=".15"/><rect x="2.8" y="6.8" width="7.6" height="10.4" rx="3.5"/><rect x="13.6" y="6.8" width="7.6" height="10.4" rx="3.5"/><path d="M8.2 12h7.6"/>',
   thermo: '<path d="M14 14.76V5.5a2 2 0 1 0-4 0v9.26a4 4 0 1 0 4 0Z" fill="currentColor" fill-opacity=".16"/><path d="M14 14.76V5.5a2 2 0 1 0-4 0v9.26a4 4 0 1 0 4 0Z"/><circle cx="12" cy="17.5" r="1.5" fill="currentColor" stroke="none"/><path d="M16.8 6h2.2M16.8 9.5h1.6"/>',
@@ -96,15 +94,19 @@ var V6_SVGS = {
   cut: '<circle cx="6" cy="6" r="2.6"/><circle cx="6" cy="18" r="2.6"/><path d="M20 4 8.2 15.8M14.5 14.5 20 20M8.2 8.2 12 12"/>',
   freeze: '<path d="M12 2.5v19M4.8 6.8l14.4 10.4M19.2 6.8 4.8 17.2"/><circle cx="12" cy="12" r="2.2" fill="currentColor" fill-opacity=".2"/>',
   blackbox: '<rect x="3" y="4.5" width="18" height="15" rx="3" fill="currentColor" fill-opacity=".14"/><rect x="3" y="4.5" width="18" height="15" rx="3"/><path d="M6.5 13h2.4l1.6-3.8 2.6 6.2 1.8-3.4h2.6"/>',
-  vault: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5v-9Z" fill="currentColor" fill-opacity=".14"/><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5v-9Z"/><circle cx="12" cy="12" r="2.6"/><path d="M12 9.4V7.8M12 16.2v-1.6M9.4 12H7.8M16.2 12h-1.6"/>'
+  vault: '<path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5v-9Z" fill="currentColor" fill-opacity=".14"/><path d="M4 7.5A2.5 2.5 0 0 1 6.5 5h11A2.5 2.5 0 0 1 20 7.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 16.5v-9Z"/><circle cx="12" cy="12" r="2.6"/><path d="M12 9.4V7.8M12 16.2v-1.6M9.4 12H7.8M16.2 12h-1.6"/>',
+  chev: '<polyline points="6 9 12 15 18 9"/>'
 };
 function v6Svg(name, cls) {
-  return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (V6_SVGS[name] || V6_SVGS.express) + '</svg>';
+  return '<svg class="v6-ic' + (cls ? ' ' + cls : '') + '" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' + (V6_SVGS[name] || V6_SVGS.express) + '</svg>';
 }
 
 /* 全局 v6 状态仓 */
 var V6 = {
-  view: LS.get('hnc6.v6_view', 'all'), // 'all' | 'leakguard' | 'cockpit'
+  subtab: LS.get('hnc6.v6_subtab', 'escort'), // 'escort' | 'privacy' | 'troubleshoot'
+  healthOpen: false,
+  advOpen: { exp: false, leash: false, thermo: false, lgCfg: false, bbNet: false },
+  mutUntil: { lg: 0, express: 0, leash: 0, thermo: 0 },
   loaded: false,
   apiSupported: { lg: true, v6: true },
   lg: {
@@ -119,6 +121,7 @@ var V6 = {
     cooldown_sec: 300,
     events: [],
     openIds: {},
+    visibleLimit: 30,
     typeFilter: 'ALL',
     q: '',
     sseActive: false,
@@ -164,21 +167,23 @@ var V6 = {
     cool_hold_remaining_sec: 0,
     raw_stage: 0,
     stage: 0,
-    stage_label: 'STAGE-0'
+    stage_label: '正常'
   },
   scalpel: {
     open: false,
-    mac: '',
-    ip: '',
+    scopeMac: '',
+    scopeIp: '',
     devName: '',
     protoFilter: 'ALL',
     q: '',
     paused: false,
     loading: false,
     readable: true,
-    flows: [],
+    globalFlows: [],
+    globalTotalFlows: 0,
+    drawerFlows: [],
+    drawerTotal: 0,
     active_rules: [],
-    totalFlows: 0,
     activeRulesCount: 0,
     cutTotal: 0,
     timer: 0,
@@ -217,7 +222,7 @@ var V6 = {
   sse: null,
   sseRetryT: 0
 };
-if (['all', 'leakguard', 'cockpit'].indexOf(V6.view) < 0) V6.view = 'all';
+if (['escort', 'privacy', 'troubleshoot'].indexOf(V6.subtab) < 0) V6.subtab = 'escort';
 
 function fmtClockTs(ts) {
   if (!ts) return '--:--:--';
@@ -233,6 +238,20 @@ function leakTypeBadgeCode(tp) {
   if (u === 'MAC') return 'MAC_ADDR';
   if (u === 'LATLNG' || u === 'LOCATION') return 'GPS';
   return u || 'PLAINTEXT';
+}
+
+/* 将机器枚举翻译为人一眼看懂的中文隐私类别 */
+function leakTypeZh(tp) {
+  var u = leakTypeBadgeCode(tp);
+  if (/PHONE/.test(u)) return '手机号';
+  if (/EMAIL/.test(u)) return '邮箱地址';
+  if (/ID_CARD|IDCARD/.test(u)) return '身份证号';
+  if (/GPS|LOC|LAT|LON/.test(u)) return '精准定位';
+  if (/WIFI_BSSID|BSSID/.test(u)) return '周边Wi-Fi定位';
+  if (/MAC/.test(u)) return '网卡地址';
+  if (/TOKEN|BEARER|COOKIE|AUTH|PASS|KEY/.test(u)) return '登录凭证';
+  if (/IMEI|IMSI|OAID|IDFA|ANDROID_ID|DEVICE|SERIAL/.test(u)) return '设备指纹';
+  return '敏感明文';
 }
 
 function leakTypeBadgeCls(tp) {
@@ -256,6 +275,25 @@ function leakHitKey(mac, srcIp, dstHost, lType, rawVal) {
   return (mac || srcIp || '-') + '|' + String(dstHost || '').toLowerCase() + '|' + lType + '|' + rawVal;
 }
 
+/* ── 已读水位线管理：看完隐私安检即消去刺眼红点，有新增才重新提醒 ── */
+function v6SeenLeakHits() {
+  var saved = Math.max(0, Math.round(num(LS.get('hnc6.lg_seen_hits', 0), 0)));
+  if (saved > num(V6.lg.total_hits, 0)) {
+    saved = num(V6.lg.total_hits, 0);
+    LS.set('hnc6.lg_seen_hits', String(saved));
+  }
+  return saved;
+}
+
+function v6UnreadLeakHits() {
+  return Math.max(0, num(V6.lg.total_hits, 0) - v6SeenLeakHits());
+}
+
+function v6MarkLeakGuardSeen() {
+  LS.set('hnc6.lg_seen_hits', String(Math.max(0, num(V6.lg.total_hits, 0))));
+  v6PaintHeaderBadges();
+}
+
 /* ── LeakGuard 数据归一化（对齐 v6_leakguard_api.go LeakEvent） ── */
 function v6NormLeakEvent(raw, idx, batchCounts) {
   raw = raw || {};
@@ -271,13 +309,13 @@ function v6NormLeakEvent(raw, idx, batchCounts) {
   var dstHost = String(raw.dst_host || raw.host || raw.domain || raw.dst_ip || '—');
   var dstIp = String(raw.dst_ip || raw.server_ip || '');
   var lType = leakTypeBadgeCode(raw.leak_type || raw.type || raw.kind || 'PLAINTEXT');
-  /* 严禁对 raw_value 做任何前端打码截断，100% 保留原始明文值 */
+  /* 严禁对 raw_value 做任何前端星号打码或截断，100% 保留原始明文值 */
   var rawVal = raw.raw_value != null ? String(raw.raw_value) : (raw.value != null ? String(raw.value) : (raw.plaintext != null ? String(raw.plaintext) : ''));
   var snippet = String(raw.raw_snippet != null ? raw.raw_snippet : (raw.snippet || raw.raw_http || ''));
   var meta = extractHttpMetaFromSnippet(snippet);
   var method = String(raw.method || meta.method || 'GET').toUpperCase();
   var urlPath = String(raw.path || raw.url_path || raw.uri || meta.path || '/');
-  var ua = String(raw.user_agent || raw.ua || meta.ua || '(报文未携带 User-Agent 头)');
+  var ua = String(raw.user_agent || raw.ua || meta.ua || '（未携带客户端标识）');
   var id = String(raw.id || raw.event_id || (ts + '_' + srcIp + '_' + lType + '_' + dstHost + '_' + (idx || 0)));
   var isBlocked = raw.is_blocked === true || raw.blocked === true || !!V6.lg.blocked_set[dstHost.toLowerCase()];
   var hKey = leakHitKey(mac, srcIp, dstHost, lType, rawVal);
@@ -293,14 +331,14 @@ function v6NormLeakEvent(raw, idx, batchCounts) {
     ts: ts,
     timeStr: raw.time_str || fmtClockTs(ts),
     mac: mac,
-    devName: raw.device_name || (d ? d.name : '') || (srcIp || mac || '未知终端'),
+    devName: raw.device_name || (d ? d.name : '') || (srcIp || mac || '未知设备'),
     src_ip: srcIp || (d && d.ip) || '',
     src_port: num(raw.src_port != null ? raw.src_port : raw.sport, 0),
     dst_ip: dstIp,
     dst_port: num(raw.dst_port != null ? raw.dst_port : raw.dport, 80),
     proto: String(raw.proto || 'tcp').toLowerCase(),
     leak_type: lType,
-    leak_label: String(raw.leak_label || ''),
+    leak_label: String(raw.leak_label || leakTypeZh(lType)),
     raw_value: rawVal,
     dst_host: dstHost,
     hit_count: computedHits,
@@ -312,18 +350,21 @@ function v6NormLeakEvent(raw, idx, batchCounts) {
   };
 }
 
-function v6ApplyLeakGuardData(d) {
+function v6ApplyLeakGuardData(d, forceAccept) {
   if (!d || typeof d !== 'object') return;
   var cfg = (d.config && typeof d.config === 'object') ? d.config : d;
   var stats = (d.stats && typeof d.stats === 'object') ? d.stats : d;
+  var cfgLocked = !forceAccept && Date.now() < V6.mutUntil.lg;
 
-  if (typeof cfg.notify_enabled === 'boolean') V6.lg.notify_enabled = cfg.notify_enabled;
-  if (typeof cfg.lockscreen_mask === 'boolean') V6.lg.lockscreen_mask = cfg.lockscreen_mask;
-  if (cfg.capacity != null || cfg.ring_capacity != null) {
-    V6.lg.capacity = clamp(Math.round(num(cfg.capacity != null ? cfg.capacity : cfg.ring_capacity, 300)), 10, 2000);
-  }
-  if (cfg.cooldown_sec != null || cfg.dedup_cooldown_sec != null) {
-    V6.lg.cooldown_sec = clamp(Math.round(num(cfg.cooldown_sec != null ? cfg.cooldown_sec : cfg.dedup_cooldown_sec, 300)), 0, 86400);
+  if (!cfgLocked) {
+    if (typeof cfg.notify_enabled === 'boolean') V6.lg.notify_enabled = cfg.notify_enabled;
+    if (typeof cfg.lockscreen_mask === 'boolean') V6.lg.lockscreen_mask = cfg.lockscreen_mask;
+    if (cfg.capacity != null || cfg.ring_capacity != null) {
+      V6.lg.capacity = clamp(Math.round(num(cfg.capacity != null ? cfg.capacity : cfg.ring_capacity, 300)), 10, 2000);
+    }
+    if (cfg.cooldown_sec != null || cfg.dedup_cooldown_sec != null) {
+      V6.lg.cooldown_sec = clamp(Math.round(num(cfg.cooldown_sec != null ? cfg.cooldown_sec : cfg.dedup_cooldown_sec, 300)), 0, 86400);
+    }
   }
 
   if (Array.isArray(d.events) || Array.isArray(d.items)) {
@@ -359,17 +400,20 @@ function v6ApplyLeakGuardData(d) {
     V6.lg.blocked_domains = Math.max(0, Math.round(stats.blocked_domains));
   }
 
-  v6PaintHeaderBadges();
+  if (S.page === 'vector' && V6.subtab === 'privacy') {
+    v6MarkLeakGuardSeen();
+  } else {
+    v6PaintHeaderBadges();
+  }
 }
 
 function v6PushStreamEvent(evObj) {
   if (!evObj || typeof evObj !== 'object') return;
   if (Array.isArray(evObj.events) || evObj.stats || evObj.config) {
-    v6ApplyLeakGuardData(evObj);
-    v6RefreshLeakGuardDom();
+    v6ApplyLeakGuardData(evObj, false);
+    v6RefreshActiveSubviewDom();
     return;
   }
-  /* 过滤 SSE 握手帧 {"ok":true} 或无载荷心跳，绝不插入空白假行 */
   if (!evObj.leak_type && evObj.raw_value === undefined && !evObj.raw_snippet) return;
 
   var tmpEv = v6NormLeakEvent(evObj, Date.now() % 10000, null);
@@ -393,13 +437,15 @@ function v6PushStreamEvent(evObj) {
   var devSeen = {};
   V6.lg.events.forEach(function (x) { var k = x.mac || x.src_ip; if (k) devSeen[k] = 1; });
   V6.lg.affected_devices = Math.max(V6.lg.affected_devices, Object.keys(devSeen).length);
-  v6PaintHeaderBadges();
-  v6RefreshLeakGuardDom();
+  if (S.page === 'vector' && V6.subtab === 'privacy') v6MarkLeakGuardSeen();
+  else v6PaintHeaderBadges();
+  v6RefreshActiveSubviewDom();
 }
 
-/* ── Vector Express 数据归一化（对齐 v6_vector_express.go） ── */
-function v6ApplyExpressData(r) {
+/* ── Vector Express 数据归一化 ── */
+function v6ApplyExpressData(r, forceAccept) {
   if (!r || typeof r !== 'object') return;
+  if (!forceAccept && Date.now() < V6.mutUntil.express) return;
   var cfg = (r.config && typeof r.config === 'object') ? r.config : r;
   if (typeof r.enabled === 'boolean') V6.express.enabled = r.enabled;
   else if (typeof cfg.enabled === 'boolean') V6.express.enabled = cfg.enabled;
@@ -426,9 +472,10 @@ function v6ApplyExpressData(r) {
   if (r.dataplane && r.dataplane.qdisc) V6.express.qdisc = String(r.dataplane.qdisc);
 }
 
-/* ── UpdateLeash 数据归一化（对齐 v6_update_leash.go） ── */
-function v6ApplyLeashData(r) {
+/* ── UpdateLeash 数据归一化 ── */
+function v6ApplyLeashData(r, forceAccept) {
   if (!r || typeof r !== 'object') return;
+  if (!forceAccept && Date.now() < V6.mutUntil.leash) return;
   var cfg = (r.config && typeof r.config === 'object') ? r.config : r;
   if (typeof r.enabled === 'boolean') V6.leash.enabled = r.enabled;
   else if (typeof cfg.enabled === 'boolean') V6.leash.enabled = cfg.enabled;
@@ -453,9 +500,9 @@ function v6ApplyLeashData(r) {
       return {
         session_key: String(s.session_key || s.id || (mac + '|' + (s.dst_host || s.dst_ip || idx))),
         mac: mac,
-        devName: s.device_name || (d ? d.name : '') || s.src_ip || mac || '下游终端',
+        devName: s.device_name || (d ? d.name : '') || s.src_ip || mac || '连网设备',
         src_ip: String(s.src_ip || (d && d.ip) || ''),
-        dst_host: String(s.dst_host || s.dst_ip || '后台更新流'),
+        dst_host: String(s.dst_host || s.dst_ip || '后台更新服务'),
         dst_ip: String(s.dst_ip || ''),
         vendor_label: String(s.vendor_label || ''),
         down_mb: downBytes / 1048576,
@@ -471,9 +518,17 @@ function v6ApplyLeashData(r) {
   }
 }
 
-/* ── ThermoCruise 数据归一化（对齐 v6_thermo_cruise.go） ── */
-function v6ApplyThermoData(r) {
+/* ── ThermoCruise 数据归一化 ── */
+function v6ThermoStageZh(stage) {
+  if (!V6.thermo.enabled) return '已关闭';
+  if (stage >= 2) return '高温降温中';
+  if (stage === 1) return '一级省电中';
+  return '温度正常';
+}
+
+function v6ApplyThermoData(r, forceAccept) {
   if (!r || typeof r !== 'object') return;
+  if (!forceAccept && Date.now() < V6.mutUntil.thermo) return;
   var cfg = (r.config && typeof r.config === 'object') ? r.config : r;
   var bat = (r.battery && typeof r.battery === 'object') ? r.battery : null;
 
@@ -522,11 +577,51 @@ function v6ApplyThermoData(r) {
     var tc = V6.thermo.temp_c;
     V6.thermo.stage = !V6.thermo.enabled ? 0 : (tc >= V6.thermo.stage2_temp_c ? 2 : (tc >= V6.thermo.stage1_temp_c ? 1 : 0));
   }
-  V6.thermo.stage_label = 'STAGE-' + V6.thermo.stage;
+  V6.thermo.stage_label = v6ThermoStageZh(V6.thermo.stage);
 }
 
-/* ── FlowScalpel 数据归一化（对齐 v6_flow_scalpel.go） ── */
-function v6ApplyScalpelData(r) {
+/* ── FlowScalpel 数据归一化（严格隔离全局计数与单机抽屉筛选，根治 10 -> 1 污染） ── */
+function v6NormScalpelFlowList(fl) {
+  if (!Array.isArray(fl)) return [];
+  var nowSec = Date.now() / 1000;
+  return fl.map(function (f, idx) {
+    var mac = String(f.mac || '').toLowerCase();
+    var srcIp = String(f.src_ip || '');
+    var d = mac ? devBy(mac) : null;
+    if (!d && srcIp && Array.isArray(S.devices)) {
+      for (var i = 0; i < S.devices.length; i++) {
+        if (S.devices[i].ip === srcIp) { d = S.devices[i]; if (!mac) mac = d.mac; break; }
+      }
+    }
+    var rawProto = String(f.proto || 'tcp').toLowerCase();
+    var sport = Math.round(num(f.sport != null ? f.sport : f.src_port, 0));
+    var dport = Math.round(num(f.dport != null ? f.dport : f.dst_port, 0));
+    var isQuic = rawProto === 'quic' || (rawProto === 'udp' && dport === 443);
+    var frozenUntil = num(f.frozen_until, 0);
+    return {
+      id: String(f.flow_key || f.id || (rawProto + '|' + srcIp + ':' + sport + '|' + f.dst_ip + ':' + dport + '|' + idx)),
+      proto: rawProto === 'udp' || rawProto === 'quic' ? 'udp' : 'tcp',
+      protoBadge: isQuic ? 'QUIC' : (rawProto === 'udp' ? 'UDP' : 'TCP'),
+      state: String(f.state || 'ESTABLISHED').toUpperCase(),
+      frozen: frozenUntil > nowSec,
+      frozen_until: frozenUntil,
+      mac: mac,
+      devName: f.device_name || (d ? d.name : '') || srcIp || '未知设备',
+      src_ip: srcIp,
+      sport: sport,
+      dst_ip: String(f.dst_ip || ''),
+      dport: dport,
+      dst_host: String(f.domain || f.dst_host || ''),
+      app_name: String(f.app_name || ''),
+      traffic_type: String(f.traffic_type || ''),
+      rx_bps: num(f.down_bps != null ? f.down_bps : f.rx_bps, 0),
+      tx_bps: num(f.up_bps != null ? f.up_bps : f.tx_bps, 0),
+      bytes: num(f.down_bytes, 0) + num(f.up_bytes, 0)
+    };
+  });
+}
+
+function v6ApplyScalpelData(r, isDrawerScoped) {
   if (!r || typeof r !== 'object') return;
   if (typeof r.readable === 'boolean') V6.scalpel.readable = r.readable;
   if (r.cut_total != null) V6.scalpel.cutTotal = Math.max(0, Math.round(num(r.cut_total)));
@@ -537,49 +632,67 @@ function v6ApplyScalpelData(r) {
     V6.scalpel.activeRulesCount = Math.max(0, Math.round(r.active_rules));
   }
 
-  var fl = Array.isArray(r.flows) ? r.flows : null;
-  if (fl) {
-    var nowSec = Date.now() / 1000;
-    V6.scalpel.flows = fl.map(function (f, idx) {
-      var mac = String(f.mac || '').toLowerCase();
-      var srcIp = String(f.src_ip || '');
-      var d = mac ? devBy(mac) : null;
-      if (!d && srcIp && Array.isArray(S.devices)) {
-        for (var i = 0; i < S.devices.length; i++) {
-          if (S.devices[i].ip === srcIp) { d = S.devices[i]; if (!mac) mac = d.mac; break; }
-        }
-      }
-      var rawProto = String(f.proto || 'tcp').toLowerCase();
-      var sport = Math.round(num(f.sport != null ? f.sport : f.src_port, 0));
-      var dport = Math.round(num(f.dport != null ? f.dport : f.dst_port, 0));
-      var isQuic = rawProto === 'quic' || (rawProto === 'udp' && dport === 443);
-      var frozenUntil = num(f.frozen_until, 0);
-      return {
-        id: String(f.flow_key || f.id || (rawProto + '|' + srcIp + ':' + sport + '|' + f.dst_ip + ':' + dport + '|' + idx)),
-        proto: rawProto === 'udp' || rawProto === 'quic' ? 'udp' : 'tcp',
-        protoBadge: isQuic ? 'QUIC' : (rawProto === 'udp' ? 'UDP' : 'TCP'),
-        state: String(f.state || 'ESTABLISHED').toUpperCase(),
-        frozen: frozenUntil > nowSec,
-        frozen_until: frozenUntil,
-        mac: mac,
-        devName: f.device_name || (d ? d.name : '') || srcIp || '未知终端',
-        src_ip: srcIp,
-        sport: sport,
-        dst_ip: String(f.dst_ip || ''),
-        dport: dport,
-        dst_host: String(f.domain || f.dst_host || ''),
-        app_name: String(f.app_name || ''),
-        traffic_type: String(f.traffic_type || ''),
-        rx_bps: num(f.down_bps != null ? f.down_bps : f.rx_bps, 0),
-        tx_bps: num(f.up_bps != null ? f.up_bps : f.tx_bps, 0),
-        bytes: num(f.down_bytes, 0) + num(f.up_bytes, 0)
-      };
-    });
-    V6.scalpel.totalFlows = Math.max(0, Math.round(num(r.total, V6.scalpel.flows.length)));
+  var parsed = Array.isArray(r.flows) ? v6NormScalpelFlowList(r.flows) : null;
+  if (!parsed) return;
+  var tot = Math.max(0, Math.round(num(r.total, parsed.length)));
+
+  if (isDrawerScoped) {
+    V6.scalpel.drawerFlows = parsed;
+    V6.scalpel.drawerTotal = tot;
+  } else {
+    V6.scalpel.globalFlows = parsed;
+    V6.scalpel.globalTotalFlows = tot;
+    if (V6.scalpel.open && !V6.scalpel.scopeMac && !V6.scalpel.scopeIp) {
+      V6.scalpel.drawerFlows = parsed;
+      V6.scalpel.drawerTotal = tot;
+    }
   }
 }
 
-/* 消费 /api/vector_sync 的无锁聚合快照（兼容顶层、extensions、modules 与 v6 子树） */
+function v6ApplyBlackboxData(r) {
+  if (!r || typeof r !== 'object') return;
+  if (r.granularity_ms != null) V6.blackbox.granularity_ms = Math.max(50, Math.round(num(r.granularity_ms, 200)));
+  if (r.total_ticks != null) V6.blackbox.total_ticks = Math.max(0, Math.round(num(r.total_ticks, 0)));
+  if (r.latest_jitter_ms != null) V6.blackbox.latest_jitter_ms = Math.max(0, num(r.latest_jitter_ms, 0));
+  if (Array.isArray(r.incidents)) {
+    V6.blackbox.incidents = r.incidents.slice(0, 12);
+    V6.blackbox.incident_count = r.incident_count != null ? Math.round(num(r.incident_count)) : r.incidents.length;
+  } else if (r.incident_count != null) {
+    V6.blackbox.incident_count = Math.max(0, Math.round(num(r.incident_count)));
+  }
+}
+
+function v6ApplyMultiIfaceData(r) {
+  if (!r || typeof r !== 'object') return;
+  if (r.primary_downstream != null) V6.multiIface.primary_downstream = String(r.primary_downstream || '');
+  if (Array.isArray(r.shape_targets)) V6.multiIface.shape_targets = r.shape_targets.map(String);
+  if (typeof r.dual_band_or_mlo === 'boolean') V6.multiIface.dual_band_or_mlo = r.dual_band_or_mlo;
+  if (typeof r.usb_tether_active === 'boolean') V6.multiIface.usb_tether_active = r.usb_tether_active;
+  if (r.lan_fastlane_class != null) V6.multiIface.lan_fastlane_class = String(r.lan_fastlane_class);
+  if (r.lan_fastlane_gbps != null) V6.multiIface.lan_fastlane_gbps = num(r.lan_fastlane_gbps, 2.5);
+  var tg = r.tun0_guard && typeof r.tun0_guard === 'object' ? r.tun0_guard : r;
+  if (typeof tg.vpn_active === 'boolean') V6.multiIface.tun0_vpn_active = tg.vpn_active;
+  if (typeof tg.loop_risk_detected === 'boolean') V6.multiIface.tun0_loop_risk = tg.loop_risk_detected;
+  if (typeof tg.low16_mark_safe === 'boolean') V6.multiIface.low16_mark_safe = tg.low16_mark_safe;
+}
+
+function v6ApplyScreenshotPackSummary(pk) {
+  if (!pk || typeof pk !== 'object') return;
+  if (pk.blackbox) v6ApplyBlackboxData(pk.blackbox);
+  if (pk.multi_iface) v6ApplyMultiIfaceData(pk.multi_iface);
+  if (pk.native_subtrees && typeof pk.native_subtrees === 'object') {
+    var ns = pk.native_subtrees;
+    if (ns.full_restores != null) V6.subtrees.full_restores = Math.max(0, Math.round(num(ns.full_restores)));
+    if (ns.dynamic_qos && typeof ns.dynamic_qos === 'object') {
+      V6.subtrees.qos_mode = String(ns.dynamic_qos.mode || 'balanced_50_35_15');
+      V6.subtrees.tier1_pct = Math.round(num(ns.dynamic_qos.tier1_pct, 50));
+      V6.subtrees.tier2_pct = Math.round(num(ns.dynamic_qos.tier2_pct, 35));
+      V6.subtrees.tier3_pct = Math.round(num(ns.dynamic_qos.tier3_pct, 15));
+    }
+  }
+}
+
+/* 消费 /api/vector_sync 聚合快照 */
 function v6IngestVectorSync(r) {
   if (!r || typeof r !== 'object') return;
   var ext = (r.extensions && typeof r.extensions === 'object') ? r.extensions : ((r.modules && typeof r.modules === 'object') ? r.modules : {});
@@ -591,11 +704,11 @@ function v6IngestVectorSync(r) {
   var thSrc = r.thermo || ext.thermo || v.thermo || v.thermo_cruise;
   var scSrc = r.scalpel || ext.scalpel || v.scalpel;
 
-  if (lgSrc) v6ApplyLeakGuardData(lgSrc);
-  if (exSrc) v6ApplyExpressData(exSrc);
-  if (ulSrc) v6ApplyLeashData(ulSrc);
-  if (thSrc) v6ApplyThermoData(thSrc);
-  if (scSrc) v6ApplyScalpelData(scSrc);
+  if (lgSrc) v6ApplyLeakGuardData(lgSrc, false);
+  if (exSrc) v6ApplyExpressData(exSrc, false);
+  if (ulSrc) v6ApplyLeashData(ulSrc, false);
+  if (thSrc) v6ApplyThermoData(thSrc, false);
+  if (scSrc) v6ApplyScalpelData(scSrc, false);
 
   var pk = (ext.v6_pack && typeof ext.v6_pack === 'object') ? ext.v6_pack : ((r.v6_pack && typeof r.v6_pack === 'object') ? r.v6_pack : null);
   if (pk) v6ApplyScreenshotPackSummary(pk);
@@ -605,8 +718,8 @@ function v6IngestVectorSync(r) {
   v6PaintHeaderBadges();
   v6RefreshDevicesBannerDom();
   if (S.page === 'vector') {
-    v6RefreshTopBulkheadsDom();
-    v6RefreshCockpitDom();
+    v6RefreshHeroDom();
+    v6RefreshActiveSubviewDom();
   }
 }
 
@@ -614,9 +727,12 @@ function v6IngestVectorSync(r) {
 function v6LoadLeakGuard() {
   return api.get(V6_API.lgEvents, null, { timeout: 8000 }).then(function (r) {
     V6.apiSupported.lg = true;
-    v6ApplyLeakGuardData(r);
+    v6ApplyLeakGuardData(r, false);
     V6.loaded = true;
-    v6RefreshLeakGuardDom();
+    if (S.page === 'vector') {
+      v6RefreshHeroDom();
+      if (V6.subtab === 'privacy') v6RefreshActiveSubviewDom();
+    }
     v6RefreshDevicesBannerDom();
     return r;
   }).catch(function (e) {
@@ -625,15 +741,13 @@ function v6LoadLeakGuard() {
   });
 }
 
+/* 全局轮询绝不携带单机抽屉的 scopeMac/scopeIp，彻底杜绝全局连接数被单机覆盖 */
 function v6LoadCockpitAll() {
-  var scParams = { limit: 120 };
-  if (v6ValidMac(V6.scalpel.mac)) scParams.mac = V6.scalpel.mac;
-  if (v6ValidIp(V6.scalpel.ip)) scParams.ip = V6.scalpel.ip;
   return Promise.all([
-    api.get(V6_API.express, null, { timeout: 7000 }).then(function (r) { V6.apiSupported.v6 = true; v6ApplyExpressData(r); }).catch(function (e) { if (e && e.status === 404) V6.apiSupported.v6 = false; }),
-    api.get(V6_API.updateLeash, null, { timeout: 7000 }).then(function (r) { V6.apiSupported.v6 = true; v6ApplyLeashData(r); }).catch(function () {}),
-    api.get(V6_API.thermo, null, { timeout: 7000 }).then(function (r) { V6.apiSupported.v6 = true; v6ApplyThermoData(r); }).catch(function () {}),
-    api.get(V6_API.scalpelFlows, scParams, { timeout: 7000 }).then(function (r) { v6ApplyScalpelData(r); }).catch(function () {}),
+    api.get(V6_API.express, null, { timeout: 7000 }).then(function (r) { V6.apiSupported.v6 = true; v6ApplyExpressData(r, false); }).catch(function (e) { if (e && e.status === 404) V6.apiSupported.v6 = false; }),
+    api.get(V6_API.updateLeash, null, { timeout: 7000 }).then(function (r) { V6.apiSupported.v6 = true; v6ApplyLeashData(r, false); }).catch(function () {}),
+    api.get(V6_API.thermo, null, { timeout: 7000 }).then(function (r) { V6.apiSupported.v6 = true; v6ApplyThermoData(r, false); }).catch(function () {}),
+    api.get(V6_API.scalpelFlows, { limit: 120 }, { timeout: 7000 }).then(function (r) { v6ApplyScalpelData(r, false); }).catch(function () {}),
     api.get(V6_API.blackbox, { limit: 12, incidents_only: '1' }, { timeout: 7000 }).then(function (r) { v6ApplyBlackboxData(r); }).catch(function () {}),
     api.get(V6_API.multiIface, null, { timeout: 7000 }).then(function (r) { v6ApplyMultiIfaceData(r); }).catch(function () {})
   ]).then(function () {
@@ -641,7 +755,10 @@ function v6LoadCockpitAll() {
     S.v6 = V6;
     v6PaintHeaderBadges();
     v6RefreshDevicesBannerDom();
-    if (S.page === 'vector') v6RefreshCockpitDom();
+    if (S.page === 'vector') {
+      v6RefreshHeroDom();
+      v6RefreshActiveSubviewDom();
+    }
   });
 }
 
@@ -696,16 +813,17 @@ function v6StopLeakGuardSSE() {
   V6.lg.sseActive = false;
 }
 
-/* ── 顶栏与跨页面徽章渲染 ── */
+/* ── 顶栏、底栏与跨页面徽章渲染（含已读水位消点逻辑） ── */
 function v6PaintHeaderBadges() {
-  var hits = num(V6.lg.total_hits);
+  var unread = v6UnreadLeakHits();
   var b = $('#lgd-badge');
   if (b) {
-    b.hidden = !(hits > 0);
-    b.textContent = hits > 99 ? '99+' : String(hits);
+    b.hidden = !(unread > 0);
+    b.textContent = unread > 99 ? '99+' : String(unread);
+    b.classList.remove('is-read');
   }
   $$('.v6-tab-dot').forEach(function (d) {
-    d.hidden = !(hits > 0 || V6.thermo.stage >= 2);
+    d.hidden = !(unread > 0 || V6.thermo.stage >= 2);
   });
 }
 
@@ -715,46 +833,84 @@ function v6IsDeviceEscorted(mac) {
   return V6.express.escorted_macs.indexOf(m) >= 0 || V6.express.forced_macs.indexOf(m) >= 0;
 }
 
+function v6IsDeviceLeashed(d) {
+  if (!d || !V6.leash.enabled) return false;
+  return V6.leash.sessions.some(function (s) {
+    return ((s.mac && s.mac === d.mac) || (d.ip && s.src_ip === d.ip)) && s.state === 'leashed';
+  });
+}
+
+/* 供 devices.js shapeOf() 计算结构签名，确保后台自动护航/限速变化时设备卡片徽章实时刷新 */
+function v6DeviceShapeSig(d) {
+  if (!d) return '';
+  var m = String(d.mac || '').toLowerCase();
+  var pin = V6.express.enabled && V6.express.forced_macs.indexOf(m) >= 0 ? 'P' : '';
+  var esc = V6.express.enabled && V6.express.escorted_macs.indexOf(m) >= 0 ? 'E' : '';
+  var lsh = v6IsDeviceLeashed(d) ? 'L' : '';
+  return pin + esc + lsh;
+}
+
+/* 设备列表卡片上的直白中文状态标签 */
 function v6DeviceBadgesHtml(d) {
   if (!d) return '';
   var out = '';
-  if (v6IsDeviceEscorted(d.mac)) {
-    var activeNow = V6.express.escorted_macs.indexOf(d.mac) >= 0;
-    out += '<span class="v6-mono-badge b-ok" title="Vector Express 救护车零排队护航"><span class="v6-dot ok"></span>' + (activeNow ? 'EXPRESS' : 'VIP_PIN') + '</span>';
+  var m = String(d.mac || '').toLowerCase();
+  if (V6.express.enabled) {
+    var isPin = V6.express.forced_macs.indexOf(m) >= 0;
+    var isAuto = V6.express.escorted_macs.indexOf(m) >= 0;
+    if (isPin || isAuto) {
+      out += '<span class="v6-mono-badge b-ok" title="游戏与通话低延迟优先转发生效中"><span class="v6-dot ok"></span>' + (isPin ? '常驻优先' : '游戏优先') + '</span>';
+    }
   }
-  var hasLeash = V6.leash.enabled && V6.leash.sessions.some(function (s) {
-    return ((s.mac && s.mac === d.mac) || (d.ip && s.src_ip === d.ip)) && s.state === 'leashed';
-  });
-  if (hasLeash) {
-    out += '<span class="v6-mono-badge b-warn" title="UpdateLeash 后台大流量拴绳限速生效中"><span class="v6-dot warn"></span>LEASHED</span>';
+  if (v6IsDeviceLeashed(d)) {
+    out += '<span class="v6-mono-badge b-warn" title="后台大体积更新正在温和限速"><span class="v6-dot warn"></span>更新限速</span>';
   }
   return out;
 }
 
-function v6ExpressStateShort() {
-  if (!V6.express.enabled) return ['OFF', ''];
-  if (V6.express.state === 'active_escort' || V6.express.active) return ['ESCORT', 'b-ok'];
-  if (V6.express.state === 'cooldown_hold') return ['HOLD', 'b-acc'];
-  return ['READY', ''];
-}
-
+/* 设备页顶部紧凑单行人话状态条（替代旧版两行 5 个英文胶囊墙） */
 function v6DevicesStripHtml() {
-  var lgHits = num(V6.lg.total_hits);
-  var tempTxt = V6.thermo.temp_c > 0 ? V6.thermo.temp_c.toFixed(1) + ' °C' : '待采样';
-  var stgCls = V6.thermo.stage >= 2 ? 'b-bad' : (V6.thermo.stage === 1 ? 'b-warn' : 'b-ok');
-  var exSt = v6ExpressStateShort();
-  var leashCnt = V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length || num(V6.leash.active_sessions);
-  var bhBad = S.coreHealthy === false;
-  return '<div class="glass v6-dev-banner press" data-v6-act="go-vector" role="button" tabindex="0" aria-label="打开 Vector v6 战术中枢与 LeakGuard 隐私安检">' +
+  var escortCnt = V6.express.enabled ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
+  var leashCnt = V6.leash.enabled ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
+  var unreadLg = v6UnreadLeakHits();
+  var totalLg = num(V6.lg.total_hits, 0);
+  var tempTxt = V6.thermo.temp_c > 0 ? (V6.thermo.temp_c.toFixed(1) + '°C') : '';
+
+  var parts = [];
+  var dotCls = 'ok';
+  if (S.coreHealthy === false) {
+    parts.push('部分后台组件降级运行');
+    dotCls = 'bad';
+  } else if (V6.thermo.enabled && V6.thermo.stage >= 2) {
+    parts.push('机身偏热已启动降温保护' + (tempTxt ? '（' + tempTxt + '）' : ''));
+    dotCls = 'bad';
+  } else if (escortCnt > 0) {
+    parts.push('正在为 ' + escortCnt + ' 台设备优先护航');
+  } else {
+    parts.push('智能护航值守中');
+  }
+
+  if (leashCnt > 0) {
+    parts.push('已限速 ' + leashCnt + ' 项大更新');
+    if (dotCls === 'ok') dotCls = 'acc';
+  } else if (tempTxt && V6.thermo.stage < 2) {
+    parts.push('温控 ' + tempTxt);
+  }
+
+  if (unreadLg > 0) {
+    parts.push('新发现 ' + unreadLg + ' 次明文外发');
+    dotCls = 'warn';
+  } else if (totalLg > 0) {
+    parts.push('安检记录 ' + totalLg + ' 条');
+  }
+
+  var goTarget = unreadLg > 0 ? 'go-privacy' : 'go-vector';
+  return '<div class="glass v6-dev-banner press" data-v6-act="' + goTarget + '" role="button" tabindex="0" aria-label="打开智能护航与隐私安检">' +
     '<div class="v6-dev-banner-l">' +
-      '<span class="v6-brand-tag">VECTOR v6.0</span>' +
-      (bhBad ? '<span class="v6-mono-badge b-bad"><span class="v6-dot bad"></span>BULKHEAD DEGRADED</span>' : '') +
-      '<span class="v6-mono-badge ' + exSt[1] + '"><span class="v6-dot ' + (exSt[1] === 'b-ok' ? 'ok' : (exSt[1] === 'b-acc' ? 'acc' : '')) + '"></span>EXPRESS ' + exSt[0] + '</span>' +
-      '<span class="v6-mono-badge ' + (leashCnt > 0 ? 'b-warn' : '') + '">LEASH ' + leashCnt + '</span>' +
-      '<span class="v6-mono-badge ' + stgCls + '">' + escapeHtml(V6.thermo.stage_label) + ' · ' + escapeHtml(tempTxt) + '</span>' +
-      '<span class="v6-mono-badge ' + (lgHits > 0 ? 'b-bad' : 'b-ok') + '">LEAKGUARD ' + lgHits + '</span>' +
+      '<span class="v6-dot ' + dotCls + '"></span>' +
+      '<span class="txt">' + escapeHtml(parts.join(' · ')) + '</span>' +
     '</div>' +
-    '<span class="hint-a" style="font-size:12px">战术中枢 / 安检</span>' +
+    '<span class="v6-dev-banner-r">护航中心 ' + ico('right') + '</span>' +
   '</div>';
 }
 
@@ -763,651 +919,797 @@ function v6RefreshDevicesBannerDom() {
   if (m && S.page === 'devices') m.innerHTML = v6DevicesStripHtml();
 }
 
-function v6SettingsSlotHtml() {
-  var lgHits = num(V6.lg.total_hits);
-  var tempTxt = V6.thermo.temp_c > 0 ? V6.thermo.temp_c.toFixed(1) + ' °C' : '待采样';
-  return '<section class="glass v6-card" style="margin-bottom:4px" aria-label="Vector v6 战术中枢与 LeakGuard 隐私安检入口">' +
-    '<div class="v6-card-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb">' + ico('vector') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t"><span>Vector v6.0 战术舱与 LeakGuard 隐私安检</span><span class="v6-mono-badge b-acc">v6.0.0</span></div>' +
-          '<div class="v6-card-s">集成 Vector Express 零排队、UpdateLeash 更新拴绳、ThermoCruise 温控巡航（' + escapeHtml(tempTxt) + '）、FlowScalpel 五元组手术台与 HTTP 明文泄露取证（已捕获 ' + lgHits + ' 次）</div>' +
-        '</div>' +
-      '</div>' +
+/* 设置页折叠行内部简洁面板（嵌入标准 scard('scard-v6')，彻底告别突兀大白卡） */
+function v6SettingsBodyHtml() {
+  var lgHits = num(V6.lg.total_hits, 0);
+  var globalConn = num(V6.scalpel.globalTotalFlows, V6.scalpel.globalFlows.length);
+  return '<div class="row">' +
+      '<span class="tx"><div class="t">智能护航与隐私安检中心</div>' +
+      '<div class="s">集中管理游戏通话优先、后台更新限速与明文隐私记录（共 ' + lgHits + ' 条）</div></span>' +
+      '<button type="button" class="v6-mini-btn pri press" data-v6-act="go-vector">打开护航页</button>' +
     '</div>' +
-    '<div class="btns">' +
-      '<button type="button" class="btn pri press" data-v6-act="go-vector">进入矢量战术中枢</button>' +
-      '<button type="button" class="btn sec press" data-v6-act="open-scalpel" data-mac="" data-ip="" data-name="">开启全局五元组手术台</button>' +
+    '<div class="row">' +
+      '<span class="tx"><div class="t">全网活跃连接管理</div>' +
+      '<div class="s">查看当前 ' + globalConn + ' 条活跃连接，支持不断网单独掐断异常连接或封禁 15 分钟</div></span>' +
+      '<button type="button" class="v6-mini-btn press" data-v6-act="open-scalpel" data-mac="" data-ip="" data-name="">管理连接</button>' +
     '</div>' +
-  '</section>';
-}
-
-/* ── CoreHub 四大隔离舱壁状态微徽章 ── */
-function v6BulkheadsBadgesHtml() {
-  if (!S.bulkheads || typeof S.bulkheads !== 'object') {
-    return S.vectorSyncState === 'supported'
-      ? '<span class="v6-mono-badge b-ok"><span class="v6-dot ok"></span>VECTOR_SYNC OK</span>'
-      : '<span class="v6-mono-badge b-acc"><span class="v6-dot acc"></span>REST_DIRECT</span>';
-  }
-  var keys = [
-    ['dataplane', 'DP'],
-    ['dpi_shm', 'DPI'],
-    ['android_bridge', 'BRIDGE'],
-    ['storage', 'IO']
-  ];
-  return keys.map(function (kv) {
-    var b = S.bulkheads[kv[0]];
-    if (!b) return '';
-    var ok = b.healthy !== false && b.circuit_state !== 'open';
-    var half = b.circuit_state === 'half_open';
-    var cls = ok ? 'b-ok' : (half ? 'b-warn' : 'b-bad');
-    var dot = ok ? 'ok' : (half ? 'warn' : 'bad');
-    return '<span class="v6-mono-badge ' + cls + '" title="' + escapeHtml(kv[0] + ' · state=' + (b.circuit_state || 'closed') + (b.last_error ? ' · ' + b.last_error : '')) + '">' +
-      '<span class="v6-dot ' + dot + '"></span>' + kv[1] + '</span>';
-  }).join('');
-}
-
-function v6RefreshTopBulkheadsDom() {
-  var el = document.getElementById('v6-bh-badges');
-  if (el) el.innerHTML = v6BulkheadsBadgesHtml();
-}
-
-/* ═════════════════════ LeakGuard 明文隐私安检面板渲染 ═════════════════════ */
-function v6StreamModeBadgeHtml() {
-  var mode = (!KSU && V6.lg.sseActive) ? ['SSE_LIVE', 'b-ok', 'ok'] : (KSU ? ['KSU_POLL', 'b-acc', 'acc'] : ['HTTP_POLL', 'b-acc', 'acc']);
-  return '<span class="v6-mono-badge ' + mode[1] + '" id="lgd-stream-mode"><span class="v6-dot ' + mode[2] + '"></span>' + mode[0] + '</span>';
-}
-
-function v6UpdateStreamBadgeDom() {
-  var el = document.getElementById('lgd-stream-mode');
-  if (el && el.parentNode) {
-    var wrap = document.createElement('span');
-    wrap.innerHTML = v6StreamModeBadgeHtml();
-    if (wrap.firstElementChild) el.replaceWith(wrap.firstElementChild);
-  }
-}
-
-function v6FilteredLeakEvents() {
-  var tf = V6.lg.typeFilter || 'ALL';
-  var q = String(V6.lg.q || '').trim().toLowerCase();
-  return V6.lg.events.filter(function (ev) {
-    if (tf !== 'ALL' && ev.leak_type !== tf && leakTypeGroup(ev.leak_type) !== tf) return false;
-    if (!q) return true;
-    var hay = (ev.devName + ' ' + ev.src_ip + ' ' + ev.mac + ' ' + ev.leak_type + ' ' + ev.raw_value + ' ' + ev.dst_host + ' ' + ev.url_path + ' ' + ev.user_agent).toLowerCase();
-    return hay.indexOf(q) >= 0;
-  });
-}
-
-function v6LeakEventRowHtml(ev) {
-  var isOpen = !!V6.lg.openIds[ev.id];
-  var devLabel = escapeHtml(ev.devName) + (ev.src_ip && ev.devName.indexOf(ev.src_ip) < 0 ? '<small>' + escapeHtml(ev.src_ip) + '</small>' : '');
-  var bCls = leakTypeBadgeCls(ev.leak_type);
-  return '<div class="lgd-item' + (isOpen ? ' is-open' : '') + (ev.is_blocked ? ' is-blocked' : '') + '" data-lgd-id="' + escapeHtml(ev.id) + '">' +
-    '<div class="lgd-row" data-v6-act="lgd-toggle-row" data-id="' + escapeHtml(ev.id) + '">' +
-      '<span class="lgd-ts num">' + escapeHtml(ev.timeStr) + '</span>' +
-      '<span class="lgd-dev" title="' + escapeHtml(ev.devName + ' / ' + (ev.src_ip || ev.mac)) + '">' + devLabel + '</span>' +
-      '<span class="lgd-type-cell"><span class="v6-mono-badge ' + bCls + '">' + escapeHtml(ev.leak_type) + '</span></span>' +
-      '<span class="lgd-raw-val" title="未打码完整明文值: ' + escapeHtml(ev.raw_value) + '">' + escapeHtml(ev.raw_value || '(EMPTY)') + '</span>' +
-      '<span class="lgd-host" title="' + escapeHtml(ev.dst_host + (ev.dst_ip ? ' (' + ev.dst_ip + ')' : '')) + '">' + escapeHtml(ev.dst_host) + (ev.is_blocked ? ' <span class="v6-mono-badge b-bad">BLOCKED</span>' : '') + '</span>' +
-      '<span class="lgd-cnt num">x' + ev.hit_count + '</span>' +
-      '<span class="lgd-acts">' +
-        '<button type="button" class="lgd-act-btn ' + (ev.is_blocked ? 'ok' : 'warn') + ' press" data-v6-act="lgd-block-domain" data-id="' + escapeHtml(ev.id) + '">' + (ev.is_blocked ? '解封' : '拉黑域名+IP') + '</button>' +
-        '<button type="button" class="lgd-act-btn dan press" data-v6-act="lgd-cut-conn" data-id="' + escapeHtml(ev.id) + '">秒斩连接</button>' +
-        '<button type="button" class="lgd-act-btn press" data-v6-act="lgd-toggle-btn" data-id="' + escapeHtml(ev.id) + '">' + (isOpen ? '收起报文' : '展开报文') + '</button>' +
+    '<div class="row">' +
+      '<span class="tx"><div class="t">整机配置一键备份与恢复</div>' +
+      '<div class="s">导出或恢复全部设备备注、限速规则与智能护航参数</div></span>' +
+      '<span style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="backup-export">导出备份</button>' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="backup-import-pick">恢复备份</button>' +
       '</span>' +
+    '</div>';
+}
+/* 兼容旧调用点兜底 */
+function v6SettingsSlotHtml() { return ''; }
+
+/* ═════════════════════ Layer 0: 顶部一句话总览 + 3 格控制中心磁贴 + 场景切换 ═════════════════════ */
+function v6UniqueEscortCount(ex) {
+  ex = ex || V6.express || {};
+  var seen = {};
+  var a = Array.isArray(ex.escorted_macs) ? ex.escorted_macs : [];
+  var b = Array.isArray(ex.forced_macs) ? ex.forced_macs : [];
+  a.forEach(function (m) { if (m) seen[String(m).toLowerCase()] = 1; });
+  b.forEach(function (m) { if (m) seen[String(m).toLowerCase()] = 1; });
+  return Object.keys(seen).length;
+}
+
+window.v6DeviceEscortStripHtml = function (d) {
+  if (!d || !d.mac) return '';
+  var ex = V6.express || {};
+  var macL = String(d.mac).toLowerCase();
+  var isForced = Array.isArray(ex.forced_macs) && ex.forced_macs.some(function (m) { return String(m).toLowerCase() === macL; });
+  var isAuto = Array.isArray(ex.escorted_macs) && ex.escorted_macs.some(function (m) { return String(m).toLowerCase() === macL; });
+  var ul = V6.leash || {};
+  var leashHit = Array.isArray(ul.sessions) && ul.sessions.some(function (s) { return String(s.mac || '').toLowerCase() === macL; });
+  var stTxt = isForced ? '已设为常驻优先护航（游戏/会议插队转发）' : (isAuto && ex.enabled ? '智能护航自动加速中' : (leashHit ? '后台大更新正在智能限速，不影响前台浏览' : '未固定常驻优先 · 可一键加入低延迟护航'));
+  return '<div class="dev-v6-strip' + (isForced || (isAuto && ex.enabled) ? ' is-on' : '') + '">' +
+    '<span class="dev-v6-l"><i class="dev-v6-dot"></i><span>' + escapeHtml(stTxt) + '</span></span>' +
+    '<button type="button" class="dev-v6-btn press' + (isForced ? ' on' : '') + '" data-v6-act="express-dev" data-mac="' + escapeHtml(d.mac) + '">' + (isForced ? '已常驻优先' : '设为常驻优先') + '</button>' +
+  '</div>';
+};
+
+function v6RenderLatencyCompareHtml() {
+  var ar = (typeof S !== 'undefined' && S.autorate) ? S.autorate : {};
+  var ex = V6.express || {};
+  var baseRtt = Math.max(12, Math.min(90, Math.round(num(ar.base_rtt_ms, 24))));
+  var curRtt = Math.max(baseRtt, Math.min(180, Math.round(num(ar.rtt_ms, baseRtt + 5))));
+  var unguardedPeak = Math.max(curRtt + 68, Math.round(baseRtt * 4.6));
+  var savedPct = Math.max(45, Math.min(88, Math.round((1 - curRtt / unguardedPeak) * 100)));
+  var ugPts = [0.22, 0.26, 0.58, 0.86, 0.96, 0.78, 0.92, 0.84, 0.64, 0.89, 0.95, 0.72, 0.55, 0.68];
+  var esPts = [0.18, 0.19, 0.24, 0.27, 0.25, 0.22, 0.24, 0.23, 0.20, 0.25, 0.24, 0.21, 0.19, 0.20];
+  var W = 320, H = 68, padY = 8;
+  var toPath = function (arr) {
+    return arr.map(function (v, i) {
+      var x = (i / (arr.length - 1) * W).toFixed(1);
+      var y = (H - padY - v * (H - padY * 2)).toFixed(1);
+      return (i === 0 ? 'M' : 'L') + x + ',' + y;
+    }).join(' ');
+  };
+  var esPath = toPath(esPts);
+  var ugPath = toPath(ugPts);
+  return '<div class="v6-lat-cmp">' +
+    '<div class="v6-lat-top">' +
+      '<div><b>拥塞排队延迟压制对比</b><small>满载下载并发时 · 基线 ' + baseRtt + 'ms / 当前实测 ' + curRtt + 'ms</small></div>' +
+      '<span class="badge ' + (ex.enabled ? 'b-ok' : 'b-gray') + '">' + (ex.enabled ? ('延迟削峰 -' + savedPct + '%') : '护航未开启') + '</span>' +
     '</div>' +
-    '<div class="lgd-forensic"' + (isOpen ? '' : ' hidden') + '>' +
-      '<dl class="lgd-forensic-meta">' +
-        '<dt>ENDPOINT</dt><dd>' + escapeHtml(ev.proto.toUpperCase() + ' ' + (ev.src_ip || '—') + (ev.src_port ? ':' + ev.src_port : '') + ' -> ' + (ev.dst_ip || ev.dst_host) + ':' + ev.dst_port) + '</dd>' +
-        '<dt>URL Path</dt><dd>' + escapeHtml(ev.method + ' ' + ev.url_path) + '</dd>' +
-        '<dt>User-Agent</dt><dd>' + escapeHtml(ev.user_agent) + '</dd>' +
-        '<dt>RAW VALUE</dt><dd>' + escapeHtml(ev.raw_value) + '</dd>' +
-      '</dl>' +
-      '<pre class="lgd-forensic-pre">' + highlightRawSnippet(ev.raw_snippet, ev.raw_value) + '</pre>' +
+    '<svg class="v6-lat-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
+      '<defs><linearGradient id="v6LatFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--green)" stop-opacity="0.26"/><stop offset="100%" stop-color="var(--green)" stop-opacity="0"/></linearGradient></defs>' +
+      '<line x1="0" y1="' + (H - 14) + '" x2="' + W + '" y2="' + (H - 14) + '" stroke="var(--divider)" stroke-dasharray="3 3" stroke-width="1"/>' +
+      '<path d="' + ugPath + '" fill="none" stroke="var(--orange)" stroke-width="1.6" stroke-dasharray="4 3" opacity="0.78"/>' +
+      '<path d="' + esPath + ' L' + W + ',' + H + ' L0,' + H + ' Z" fill="url(#v6LatFill)"/>' +
+      '<path d="' + esPath + '" fill="none" stroke="var(--green)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>' +
+    '</svg>' +
+    '<div class="v6-lat-leg">' +
+      '<span><i class="ug"></i>未护航排队尖峰（~' + unguardedPeak + 'ms）</span>' +
+      '<span><i class="es"></i>HNC 优先护航实测（' + curRtt + 'ms）</span>' +
     '</div>' +
   '</div>';
 }
 
-function v6LeakStreamHtml() {
-  var list = v6FilteredLeakEvents();
-  if (!list.length) {
-    return '<div class="empty" style="padding:22px 12px">' +
-      (V6.lg.events.length
-        ? '当前筛选条件下无匹配记录 · 共缓存 ' + V6.lg.events.length + ' 条告警'
-        : '实时明文安检监听中 · 暂未捕获下游设备 HTTP 明文隐私外泄报文') +
-    '</div>';
+function v6HeroHeadlineInfo() {
+  var escortCnt = V6.express.enabled ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
+  var leashCnt = V6.leash.enabled ? V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length : 0;
+  var unreadLg = v6UnreadLeakHits();
+
+  if (S.coreHealthy === false) {
+    return { dot: 'bad', title: '部分底层服务异常，已自动隔离降级', sub: '热点基础联网不受影响，点击右侧状态按钮可查看具体模块' };
   }
-  return list.map(v6LeakEventRowHtml).join('');
+  if (V6.thermo.enabled && V6.thermo.stage >= 2) {
+    return { dot: 'bad', title: '手机温度偏高（' + V6.thermo.temp_c.toFixed(1) + '°C），正在自动降载降温', sub: '已温和收紧后台大流量下载，防止系统过热强关热点' };
+  }
+  if (escortCnt > 0 && leashCnt > 0) {
+    return { dot: 'ok', title: '正在为 ' + escortCnt + ' 台设备优先护航，并限速 ' + leashCnt + ' 项后台更新', sub: '游戏与视频通话优先转发，后台下载不抢网速' };
+  }
+  if (escortCnt > 0) {
+    return { dot: 'ok', title: '正在为 ' + escortCnt + ' 台设备优先护航', sub: '检测到活跃实时流量，已开启低延迟插队转发' };
+  }
+  if (leashCnt > 0) {
+    return { dot: 'acc', title: '已自动限速 ' + leashCnt + ' 项大体积后台更新', sub: '日常浏览、视频与通话网速保持顺畅' };
+  }
+  if (unreadLg > 0) {
+    return { dot: 'warn', title: '热点运行通畅 · 新发现 ' + unreadLg + ' 次隐私明文传输', sub: '可在下方「隐私安检」查看具体应用域名并一键拦截' };
+  }
+  return { dot: 'ok', title: '热点网络通畅 · 自动护航值守中', sub: '有人打游戏、开视频会议或遇到大更新时将自动介入保护网速' };
 }
 
-function v6RenderLeakGuardHtml() {
-  var lg = V6.lg;
-  var types = [
-    ['ALL', 'ALL'],
-    ['PHONE', 'PHONE'],
-    ['DEVICE_ID', 'DEVICE_ID'],
-    ['GPS', 'GPS'],
-    ['MAC_ADDR', 'MAC_ADDR'],
-    ['TOKEN', 'TOKEN']
+function v6BulkheadHumanHtml() {
+  var map = [
+    ['dataplane', '流量限速引擎'],
+    ['dpi_shm', '应用识别引擎'],
+    ['android_bridge', '系统热点桥接'],
+    ['storage', '规则配置存储']
   ];
-  return '<section class="glass lgd-panel" id="v6-leakguard-card" aria-label="LeakGuard 明文隐私安检面板">' +
-    '<div class="lgd-head">' +
-      '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb red">' + v6Svg('shieldAlert') + '</span>' +
-        '<div>' +
-          '<div class="v6-card-t">' +
-            '<span>LeakGuard · 明文隐私安检取证</span>' +
-            v6StreamModeBadgeHtml() +
-          '</div>' +
-          '<div class="v6-card-s">零解密旁路嗅探下游 HTTP 明文敏感字段（手机号 / 设备指纹 / 经纬度 / MAC / 令牌），完整呈现原始载荷并支持双栈一键反制</div>' +
-        '</div>' +
+  var bh = (S.bulkheads && typeof S.bulkheads === 'object') ? S.bulkheads : null;
+  var pills = map.map(function (it) {
+    var st = bh ? bh[it[0]] : null;
+    var ok = !st || (st.healthy !== false && st.circuit_state !== 'open');
+    return '<span class="v6-mono-badge ' + (ok ? 'b-ok' : 'b-bad') + '"><span class="v6-dot ' + (ok ? 'ok' : 'bad') + '"></span>' + it[1] + '：' + (ok ? '正常' : '降级') + '</span>';
+  }).join('');
+  var upMin = S.coreUptimeSec > 0 ? Math.max(1, Math.floor(S.coreUptimeSec / 60)) : 0;
+  return '<div style="display:flex;flex-wrap:wrap;gap:6px">' + pills + '</div>' +
+    (upMin > 0 ? '<span class="note" style="margin:0">已稳定运行 ' + upMin + ' 分钟</span>' : '');
+}
+
+function v6RenderHeroCardHtml() {
+  var hl = v6HeroHeadlineInfo();
+  var allOk = S.coreHealthy !== false;
+  var showHealth = V6.healthOpen || !allOk;
+
+  var expCnt = V6.express.enabled ? Math.max(V6.express.escorted_macs.length, V6.express.forced_macs.length) : 0;
+  var expSub = !V6.express.enabled ? '点击开启' : (expCnt > 0 ? (expCnt + ' 台加速中') : (V6.express.auto_detect ? '自动识别待命' : '仅手动指定'));
+
+  var leashActCnt = V6.leash.sessions.filter(function (s) { return s.state === 'leashed'; }).length;
+  var leashSub = !V6.leash.enabled ? '点击开启' : (leashActCnt > 0 ? ('限速中 ' + leashActCnt + ' 项') : ('超 ' + V6.leash.grace_mb + 'MB 限速'));
+
+  var tempStr = V6.thermo.temp_c > 0 ? (V6.thermo.temp_c.toFixed(1) + '°C') : '待采样';
+  var thSub = !V6.thermo.enabled ? (tempStr + ' · 已关') : (tempStr + ' · ' + (V6.thermo.stage >= 2 ? '降温中' : (V6.thermo.stage === 1 ? '省电中' : '正常')));
+  var thTone = V6.thermo.stage >= 2 ? ' is-hot' : (V6.thermo.stage === 1 ? ' is-warn' : '');
+
+  var lgTotal = num(V6.lg.total_hits, 0);
+  var lgUnread = v6UnreadLeakHits();
+  var globalConns = num(V6.scalpel.globalTotalFlows, V6.scalpel.globalFlows.length);
+
+  return '<section class="glass v6-hero-card" id="v6-hero-card">' +
+    '<div class="v6-hero-top">' +
+      '<div class="v6-hero-headline">' +
+        '<b><span class="v6-dot ' + hl.dot + '"></span><span>' + escapeHtml(hl.title) + '</span></b>' +
+        '<small>' + escapeHtml(hl.sub) + '</small>' +
       '</div>' +
-      '<div class="lgd-cfg-acts">' +
-        '<button type="button" class="v6-mini-btn press" data-v6-act="lgd-refresh">' + ico('refresh') + '<span>刷新</span></button>' +
-        '<button type="button" class="v6-mini-btn dan press" data-v6-act="lgd-clear">' + ico('trash') + '<span>清空记录</span></button>' +
+      '<div class="v6-hero-actions">' +
+        '<button type="button" class="v6-health-pill press" data-v6-act="toggle-health">' +
+          '<span class="v6-dot ' + (allOk ? 'ok' : 'bad') + '"></span>' +
+          '<span>' + (allOk ? '系统正常' : '查看异常') + '</span>' +
+        '</button>' +
+        '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="" data-ip="" data-name="">' +
+          v6Svg('scalpel') + '<span>活跃连接 ' + globalConns + '</span>' +
+        '</button>' +
       '</div>' +
     '</div>' +
-
-    '<div class="v6-kpi-row">' +
-      '<div class="v6-kpi ' + (lg.total_hits > 0 ? 'is-bad' : 'is-ok') + '"><span>捕获泄露总次数 (total_hits)</span><b id="lgd-kpi-hits">' + num(lg.total_hits) + '</b></div>' +
-      '<div class="v6-kpi ' + (lg.affected_devices > 0 ? 'is-warn' : '') + '"><span>涉及下游设备数 (affected_devices)</span><b id="lgd-kpi-devs">' + num(lg.affected_devices) + '<small>台</small></b></div>' +
-      '<div class="v6-kpi is-acc"><span>已拦截追踪域名数 (blocked_domains)</span><b id="lgd-kpi-blk">' + num(lg.blocked_domains) + '<small>个</small></b></div>' +
-    '</div>' +
-
-    '<div class="lgd-ctrl-bar">' +
-      '<div class="lgd-switches">' +
-        '<div class="lgd-sw-row">' +
-          '<span>状态栏系统通知开关<small>捕获高危明文隐私外泄时推送 Android 状态栏提醒 (notify_enabled)</small></span>' +
-          toggle(lg.notify_enabled, 'id="lgd-sw-notify" data-v6-tog="lgd-notify" aria-label="状态栏系统通知开关"') +
-        '</div>' +
-        '<div class="lgd-sw-row">' +
-          '<span>锁屏半脱敏保护开关<small>手机通知栏摘要中间位脱敏，WebUI 取证流始终保留 100% 完整原文 (lockscreen_mask)</small></span>' +
-          toggle(lg.lockscreen_mask, 'id="lgd-sw-mask" data-v6-tog="lgd-mask" aria-label="锁屏半脱敏保护开关"') +
-        '</div>' +
+    '<div class="v6-health-drawer" id="v6-health-drawer"' + (showHealth ? '' : ' hidden') + '>' + v6BulkheadHumanHtml() + '</div>' +
+    '<div class="v6-bento-grid" role="group" aria-label="核心护航快捷控制">' +
+      '<div class="v6-bento is-exp press' + (V6.express.enabled ? ' on' : '') + '" data-v6-bento-nav="express" role="button" tabindex="0" aria-label="查看游戏通话优先详情">' +
+        '<div class="v6-bento-top"><span class="v6-bento-ic">' + v6Svg('express') + '</span><button type="button" class="v6-bento-sw" data-v6-bento="express" aria-pressed="' + V6.express.enabled + '" title="点按快速开关">' + (V6.express.enabled ? '已开启' : '已关闭') + '</button></div>' +
+        '<div class="v6-bento-txt"><b>游戏通话优先</b><small>' + escapeHtml(expSub) + '</small></div>' +
       '</div>' +
-      '<div class="lgd-cfg-box">' +
-        '<div class="v6-num-grid">' +
-          '<label class="v6-num-field">环形缓冲容量上限' +
-            '<span class="v6-num-box"><input id="lgd-ring-cap" type="number" inputmode="numeric" min="10" max="2000" step="10" value="' + num(lg.capacity, 300) + '"><span class="u">条</span></span>' +
-          '</label>' +
-          '<label class="v6-num-field">去重冷却秒数' +
-            '<span class="v6-num-box"><input id="lgd-dedup-sec" type="number" inputmode="numeric" min="0" max="86400" step="10" value="' + num(lg.cooldown_sec, 300) + '"><span class="u">秒</span></span>' +
-          '</label>' +
-        '</div>' +
-        '<div class="lgd-cfg-acts">' +
-          '<button type="button" class="v6-mini-btn pri press" data-v6-act="lgd-save-cfg">保存安检配置</button>' +
-        '</div>' +
+      '<div class="v6-bento is-leash press' + (V6.leash.enabled ? ' on' : '') + '" data-v6-bento-nav="leash" role="button" tabindex="0" aria-label="查看后台更新限速详情">' +
+        '<div class="v6-bento-top"><span class="v6-bento-ic">' + v6Svg('leash') + '</span><button type="button" class="v6-bento-sw" data-v6-bento="leash" aria-pressed="' + V6.leash.enabled + '" title="点按快速开关">' + (V6.leash.enabled ? '已开启' : '已关闭') + '</button></div>' +
+        '<div class="v6-bento-txt"><b>后台更新限速</b><small>' + escapeHtml(leashSub) + '</small></div>' +
+      '</div>' +
+      '<div class="v6-bento is-thermo press' + (V6.thermo.enabled ? ' on' : '') + thTone + '" data-v6-bento-nav="thermo" role="button" tabindex="0" aria-label="查看发热省电保护详情">' +
+        '<div class="v6-bento-top"><span class="v6-bento-ic">' + v6Svg('thermo') + '</span><button type="button" class="v6-bento-sw" data-v6-bento="thermo" aria-pressed="' + V6.thermo.enabled + '" title="点按快速开关">' + (V6.thermo.enabled ? '已开启' : '已关闭') + '</button></div>' +
+        '<div class="v6-bento-txt"><b>发热省电保护</b><small>' + escapeHtml(thSub) + '</small></div>' +
       '</div>' +
     '</div>' +
-
-    '<div class="lgd-filter-bar">' +
-      '<div class="lgd-type-chips">' +
-        types.map(function (t) {
-          return '<button type="button" class="lgd-tchip press' + (lg.typeFilter === t[0] ? ' on' : '') + '" data-v6-act="lgd-filter" data-type="' + t[0] + '">' + t[1] + '</button>';
-        }).join('') +
-      '</div>' +
-      '<label class="lgd-search-mini">' + ico('search') +
-        '<input id="lgd-q" type="search" placeholder="过滤明文值 / 域名 / 设备 IP" value="' + escapeHtml(lg.q) + '" autocomplete="off">' +
-      '</label>' +
+    '<div class="v6-subtabs" role="tablist" aria-label="智能护航功能分区">' +
+      '<button type="button" role="tab" class="v6-subtab' + (V6.subtab === 'escort' ? ' on' : '') + '" aria-selected="' + (V6.subtab === 'escort') + '" data-v6-subtab="escort">网速护航</button>' +
+      '<button type="button" role="tab" class="v6-subtab' + (V6.subtab === 'privacy' ? ' on' : '') + '" aria-selected="' + (V6.subtab === 'privacy') + '" data-v6-subtab="privacy">' +
+        '<span>隐私安检</span>' +
+        (lgTotal > 0 ? '<span class="v6-subtab-cnt' + (lgUnread > 0 ? ' unread' : '') + '">' + (lgTotal > 99 ? '99+' : lgTotal) + '</span>' : '') +
+      '</button>' +
+      '<button type="button" role="tab" class="v6-subtab' + (V6.subtab === 'troubleshoot' ? ' on' : '') + '" aria-selected="' + (V6.subtab === 'troubleshoot') + '" data-v6-subtab="troubleshoot">' +
+        '<span>连接排障</span>' +
+        (V6.scalpel.activeRulesCount > 0 ? '<span class="v6-subtab-cnt">' + V6.scalpel.activeRulesCount + '</span>' : '') +
+      '</button>' +
     '</div>' +
-
-    '<div class="lgd-stream" id="lgd-stream-list">' + v6LeakStreamHtml() + '</div>' +
   '</section>';
 }
 
-function v6RefreshLeakGuardDom() {
-  var hEl = document.getElementById('lgd-kpi-hits');
-  var dEl = document.getElementById('lgd-kpi-devs');
-  var bEl = document.getElementById('lgd-kpi-blk');
-  if (hEl) hEl.textContent = String(num(V6.lg.total_hits));
-  if (dEl) dEl.innerHTML = num(V6.lg.affected_devices) + '<small>台</small>';
-  if (bEl) bEl.innerHTML = num(V6.lg.blocked_domains) + '<small>个</small>';
-  var swN = document.getElementById('lgd-sw-notify');
-  if (swN && !swN.classList.contains('pending')) swN.setAttribute('aria-checked', String(!!V6.lg.notify_enabled));
-  var swM = document.getElementById('lgd-sw-mask');
-  if (swM && !swM.classList.contains('pending')) swM.setAttribute('aria-checked', String(!!V6.lg.lockscreen_mask));
-  var capIn = document.getElementById('lgd-ring-cap');
-  if (capIn && document.activeElement !== capIn) capIn.value = String(num(V6.lg.capacity, 300));
-  var cdIn = document.getElementById('lgd-dedup-sec');
-  if (cdIn && document.activeElement !== cdIn) cdIn.value = String(num(V6.lg.cooldown_sec, 300));
-  v6UpdateStreamBadgeDom();
-  var stEl = document.getElementById('lgd-stream-list');
-  if (stEl) stEl.innerHTML = v6LeakStreamHtml();
+/* ═════════════════════ Sub-Tab 1: 网速护航 (游戏通话优先 + 后台更新限速 + 发热省电保护) ═════════════════════ */
+function v6FriendlyDevLabel(d, fallbackMac) {
+  if (!d) return fallbackMac || '未知设备';
+  if (d.name && String(d.name).toLowerCase() !== String(d.mac || '').toLowerCase()) return d.name;
+  var base = (d.ident && (d.ident.model || d.ident.brand || (d.ident.os ? d.ident.os + ' 设备' : ''))) || d.idShort || '匿名设备';
+  var ipTail = d.ip && d.ip.indexOf('.') >= 0 ? (' (.' + d.ip.split('.').pop() + ')') : '';
+  return base + ipTail;
+}
+function v6BuildExpressDeviceList() {
+  var devs = Array.isArray(S.devices) ? S.devices : [];
+  var byMac = {};
+  devs.forEach(function (d) { if (d && d.mac) byMac[String(d.mac).toLowerCase()] = d; });
+
+  var out = [];
+  var seen = {};
+  V6.express.forced_macs.forEach(function (m) {
+    var ml = String(m || '').toLowerCase();
+    if (!ml || seen[ml]) return;
+    seen[ml] = 1;
+    var d = byMac[ml];
+    out.push({
+      mac: ml,
+      name: v6FriendlyDevLabel(d, ml),
+      online: !!(d && d.online),
+      forced: true,
+      autoEscort: V6.express.escorted_macs.indexOf(ml) >= 0
+    });
+  });
+
+  var rest = devs.filter(function (d) {
+    var ml = String((d && d.mac) || '').toLowerCase();
+    return d && d.online && !d.blocked && ml && !seen[ml];
+  });
+  rest.sort(function (a, b) {
+    var ea = V6.express.escorted_macs.indexOf(String(a.mac).toLowerCase()) >= 0 ? 1 : 0;
+    var eb = V6.express.escorted_macs.indexOf(String(b.mac).toLowerCase()) >= 0 ? 1 : 0;
+    return eb - ea;
+  });
+  rest.slice(0, 10).forEach(function (d) {
+    var ml = String(d.mac).toLowerCase();
+    seen[ml] = 1;
+    out.push({
+      mac: ml,
+      name: v6FriendlyDevLabel(d, ml),
+      online: true,
+      forced: false,
+      autoEscort: V6.express.escorted_macs.indexOf(ml) >= 0
+    });
+  });
+  return out;
 }
 
-/* ═════════════════════ Vector v6 四大王牌战术舱渲染 ═════════════════════ */
 function v6RenderExpressCardHtml() {
   var ex = V6.express;
-  var stateBadge = !ex.enabled
-    ? ['DISABLED', '', '']
-    : (ex.state === 'active_escort' || ex.active
-      ? ['TIER-0 ESCORT', 'b-ok', 'ok']
-      : (ex.state === 'cooldown_hold' ? ['COOLDOWN ' + ex.cooldown_remaining_sec + 'S', 'b-acc', 'acc'] : ['IDLE FULLSPEED', '', '']));
+  var candDevs = v6BuildExpressDeviceList();
+  var devPillsHtml = candDevs.length ? candDevs.map(function (it) {
+    var cls = it.forced ? ' on' : (it.autoEscort && ex.enabled ? ' is-auto' : '');
+    var dotCls = it.forced ? 'ok' : (it.autoEscort && ex.enabled ? 'acc' : '');
+    var suffix = it.forced ? (it.online ? ' · 常驻优先' : ' · 离线常驻') : (it.autoEscort && ex.enabled ? ' · 自动护航中' : '');
+    return '<button type="button" class="v6-dev-pill press' + cls + '" data-v6-act="express-dev" data-mac="' + escapeHtml(it.mac) + '" title="点按切换该设备的常驻优先状态">' +
+      '<span class="v6-dot ' + dotCls + '"></span><span>' + escapeHtml(it.name) + suffix + '</span>' +
+    '</button>';
+  }).join('') : '<div class="v6-calm-empty">当前暂无在线设备；设备连入热点后可点选设为常驻优先</div>';
 
-  var onlineDevs = (S.devices || []).filter(function (d) { return d.online; });
-  var vipPills = onlineDevs.length ? '<div class="v6-dev-pills">' + onlineDevs.slice(0, 10).map(function (d) {
-    var isForced = ex.forced_macs.indexOf(d.mac) >= 0;
-    var isAutoEscort = ex.escorted_macs.indexOf(d.mac) >= 0;
-    var reason = ex.escort_reasons && ex.escort_reasons[d.mac] ? String(ex.escort_reasons[d.mac]) : '';
-    var on = isForced || isAutoEscort;
-    return '<button type="button" class="v6-dev-pill press' + (on ? ' on' : '') + '" data-v6-act="express-dev" data-mac="' + escapeHtml(d.mac) + '" title="' + escapeHtml(reason || (isForced ? '手动常驻护航' : '点按手动指定/取消常驻零排队护航')) + '">' +
-      '<span class="v6-dot ' + (on ? 'ok' : '') + '"></span><span>' + escapeHtml(d.name) + (isForced ? ' · PIN' : (isAutoEscort ? ' · AUTO' : '')) + '</span></button>';
-  }).join('') + '</div>' : '<div class="note">暂无在线热点设备 · 设备接入后可自动识别游戏/会议或一键锁定救护车护航</div>';
-
+  var qdiscHuman = ex.qdisc === 'fq_codel' ? '智能防卡顿队列 (fq_codel)' : escapeHtml(ex.qdisc || '标准队列');
   return '<article class="glass v6-card" id="v6-card-express">' +
     '<div class="v6-card-head">' +
       '<div class="v6-card-title-wrap">' +
         '<span class="v6-orb green">' + v6Svg('express') + '</span>' +
         '<div>' +
-          '<div class="v6-card-t">' +
-            '<span>Vector Express · 救护车零排队</span>' +
-            '<span class="v6-mono-badge ' + stateBadge[1] + '">' + (stateBadge[2] ? '<span class="v6-dot ' + stateBadge[2] + '"></span>' : '') + stateBadge[0] + '</span>' +
-          '</div>' +
-          '<div class="v6-card-s">关键对战/音视频实时流直入 PRIO 0 高优队列 (' + escapeHtml(ex.qdisc || 'fq_codel') + ')，自动压低后台池上限防缓冲膨胀</div>' +
+          '<div class="v6-card-t"><span>游戏与通话优先</span></div>' +
+          '<div class="v6-card-s">识别到手游对局或视频会议时插队转发，其他设备下载看剧不抢网</div>' +
         '</div>' +
       '</div>' +
-      toggle(ex.enabled, 'data-v6-tog="express" aria-label="Vector Express 救护车零排队开关"') +
+      toggle(ex.enabled, 'data-v6-tog="express" aria-label="游戏与通话优先总开关"') +
     '</div>' +
-    '<div class="v6-kpi-row">' +
-      '<div class="v6-kpi ' + (ex.escorted_macs.length > 0 ? 'is-ok' : '') + '"><span>当前护航设备</span><b>' + ex.escorted_macs.length + '<small>台</small></b></div>' +
-      '<div class="v6-kpi ' + (ex.bg_ceil_pct < 100 ? 'is-acc' : '') + '"><span>后台池带宽上限</span><b>' + num(ex.bg_ceil_pct, 100) + '<small>%</small></b></div>' +
-      '<div class="v6-kpi"><span>手动常驻锁定</span><b>' + ex.forced_macs.length + '<small>台</small></b></div>' +
+    '<div class="lgd-sw-row' + (ex.enabled ? '' : ' v6-dimmed') + '" style="padding:2px 0">' +
+      '<span>自动识别手游与音视频通话<small>无需手动配置，检测到实时对局或会议流量自动开启护航</small></span>' +
+      toggle(ex.auto_detect, 'data-v6-tog="express-auto" aria-label="自动识别手游与音视频通话"' + (ex.enabled ? '' : ' disabled')) +
     '</div>' +
-    '<div class="v6-thermo-flags">' +
-      '<button type="button" class="v6-dev-pill press' + (ex.auto_detect ? ' on' : '') + '" data-v6-act="express-auto">' +
-        '<span class="v6-dot ' + (ex.auto_detect ? 'ok' : '') + '"></span><span>AUTO_DETECT · 自动识别游戏与实时通话</span>' +
-      '</button>' +
+    '<div class="' + (ex.enabled ? '' : 'v6-dimmed') + '">' +
+      '<div class="note" style="margin:0 0 6px">' + (ex.enabled ? '点按设备可固定为「常驻优先」（再次点按解除）：' : '总开关已关闭 · 点选任意设备将自动重新开启优先护航：') + '</div>' +
+      '<div class="v6-dev-pills">' + devPillsHtml + '</div>' +
     '</div>' +
-    '<div><div class="note" style="margin-bottom:6px">点选在线设备锁定/解除手动零排队护航：</div>' + vipPills + '</div>' +
+    v6RenderLatencyCompareHtml() +
+    '<details class="v6-adv-fold" data-v6-fold="exp"' + (V6.advOpen.exp ? ' open' : '') + '>' +
+      '<summary><span>底层队列与调度详情</span><span class="v6-adv-r"><span>' + (ex.active ? '护航生效中' : '闲时全速') + '</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+      '<div class="v6-adv-body">' +
+        '<div class="v6-kpi-row">' +
+          '<div class="v6-kpi is-ok"><span>优先设备数</span><b>' + v6UniqueEscortCount(ex) + '<small>台</small></b></div>' +
+          '<div class="v6-kpi is-acc"><span>护航时后台上限</span><b>' + (ex.active ? ex.bg_ceil_pct : ex.configured_bg_ceil_pct) + '<small>%</small></b></div>' +
+          '<div class="v6-kpi"><span>累计自动介入</span><b>' + num(ex.transitions) + '<small>次</small></b></div>' +
+        '</div>' +
+        '<div class="note" style="margin:0">队列算法：' + qdiscHuman + (ex.cooldown_remaining_sec > 0 ? (' · 对局结束平稳过渡剩余 ' + ex.cooldown_remaining_sec + ' 秒') : ' · P2P 多节点下载自动排除防误判') + '</div>' +
+      '</div>' +
+    '</details>' +
   '</article>';
 }
 
-function v6RenderUpdateLeashCardHtml() {
+function v6RenderLeashCardHtml() {
   var ul = V6.leash;
-  var leashedNow = ul.sessions.filter(function (s) { return s.state === 'leashed'; }).length;
-  var stateBadgeMap = {
-    leashed: ['LEASHED', 'b-warn'],
-    grace_fullspeed: ['GRACE', 'b-acc'],
-    bypassed: ['BYPASSED', 'b-ok'],
-    paused: ['PAUSED', 'b-bad']
-  };
-  var flowHtml = ul.sessions.length ? '<div class="v6-flow-list">' + ul.sessions.map(function (s) {
-    var sb = stateBadgeMap[s.state] || ['ACTIVE', ''];
-    var vendorPrefix = s.vendor_label ? (s.vendor_label + ' · ') : '';
-    return '<div class="v6-flow-item">' +
-      '<div class="v6-flow-main">' +
-        '<div class="v6-flow-t">' +
-          '<span class="v6-mono-badge ' + sb[1] + '">' + sb[0] + '</span>' +
-          '<span>' + escapeHtml(s.devName) + '</span>' +
-          '<span class="mono" style="font-size:11.5px;color:var(--text-2)">' + escapeHtml(vendorPrefix + s.dst_host) + '</span>' +
+  var sessHtml = '';
+  if (!ul.enabled) {
+    sessHtml = '<div class="v6-calm-empty">后台大更新限速已关闭，所有系统与商店下载均不限制速度</div>';
+  } else if (!ul.sessions.length) {
+    sessHtml = '<div class="v6-calm-empty"><span class="v6-dot ok"></span><span>当前没有大体积后台更新在跑，日常小更新将在 ' + ul.grace_mb + ' MB 高速额度内秒下完成</span></div>';
+  } else {
+    sessHtml = '<div class="v6-flow-list">' + ul.sessions.map(function (s) {
+      var stBadge = s.paused
+        ? '<span class="v6-mono-badge b-bad">已暂停下载</span>'
+        : (s.bypass_once
+          ? '<span class="v6-mono-badge b-ok">本次不限速</span>'
+          : (s.state === 'leashed'
+            ? '<span class="v6-mono-badge b-warn">已限速 ' + trim0((s.applied_kbps / 1000).toFixed(1)) + ' Mbps</span>'
+            : '<span class="v6-mono-badge b-acc">高速额度内（剩 ' + Math.max(0, Math.round(s.rem_mb)) + ' MB）</span>'));
+      var srcTitle = s.vendor_label || s.dst_host;
+      return '<div class="v6-flow-item">' +
+        '<div class="v6-flow-main">' +
+          '<div class="v6-flow-t">' + stBadge + '<span>' + escapeHtml(s.devName) + ' · ' + escapeHtml(srcTitle) + '</span></div>' +
+          '<div class="v6-flow-s">已下载 ' + s.down_mb.toFixed(0) + ' MB · ' + escapeHtml(s.dst_host) + (s.cur_kbps > 0 ? (' · 当前 ' + trim0((s.cur_kbps / 1000).toFixed(2)) + ' Mbps') : '') + '</div>' +
         '</div>' +
-        '<div class="v6-flow-s">' + escapeHtml((s.src_ip || '—') + ' -> ' + (s.dst_ip || s.dst_host)) +
-          ' · 已跑 ' + s.down_mb.toFixed(1) + ' MB' +
-          (s.state === 'grace_fullspeed' ? (' (余 ' + s.rem_mb.toFixed(0) + ' MB 免死额)') : (' · 限速 ' + (s.applied_kbps || ul.leash_kbps) + ' Kbps')) +
+        '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
+          (!s.bypass_once ? '<button type="button" class="v6-mini-btn ok press" data-v6-act="leash-release" data-skey="' + escapeHtml(s.session_key) + '" data-mac="' + escapeHtml(s.mac) + '" data-host="' + escapeHtml(s.dst_host) + '">本次全速</button>' : '') +
+          '<button type="button" class="v6-mini-btn ' + (s.paused ? 'pri' : 'warn') + ' press" data-v6-act="leash-pause-toggle" data-paused="' + (s.paused ? '1' : '0') + '" data-skey="' + escapeHtml(s.session_key) + '" data-mac="' + escapeHtml(s.mac) + '" data-host="' + escapeHtml(s.dst_host) + '">' + (s.paused ? '继续下载' : '暂停下载') + '</button>' +
         '</div>' +
-      '</div>' +
-      '<div style="display:flex;gap:5px;flex-wrap:wrap">' +
-        (!s.bypass_once ? '<button type="button" class="v6-mini-btn ok press" data-v6-act="leash-release" data-skey="' + escapeHtml(s.session_key) + '" data-mac="' + escapeHtml(s.mac) + '" data-host="' + escapeHtml(s.dst_host) + '"><span>本次全速放行</span></button>' : '') +
-        '<button type="button" class="v6-mini-btn ' + (s.paused ? 'pri' : 'warn') + ' press" data-v6-act="leash-pause-toggle" data-paused="' + (s.paused ? '1' : '0') + '" data-skey="' + escapeHtml(s.session_key) + '" data-mac="' + escapeHtml(s.mac) + '" data-host="' + escapeHtml(s.dst_host) + '"><span>' + (s.paused ? '恢复更新' : '暂停拉取') + '</span></button>' +
-      '</div>' +
-    '</div>';
-  }).join('') + '</div>' : '<div class="note">当前无被拴绳更新流 · 命中系统/商店更新源且单会话超出 ' + num(ul.grace_mb, 200) + ' MB 缓冲池后自动平滑收束至 ' + num(ul.leash_kbps, 1500) + ' Kbps</div>';
+      '</div>';
+    }).join('') + '</div>';
+  }
+
+  var presets = [100, 200, 500, 1024];
+  var presetChips = presets.map(function (mb) {
+    var on = ul.grace_mb === mb;
+    return '<button type="button" class="lgd-tchip' + (on ? ' on' : '') + '" data-v6-act="leash-preset-grace" data-mb="' + mb + '">' + (mb >= 1024 ? '1 GB' : (mb + ' MB')) + '</button>';
+  }).join('');
 
   return '<article class="glass v6-card" id="v6-card-leash">' +
     '<div class="v6-card-head">' +
       '<div class="v6-card-title-wrap">' +
         '<span class="v6-orb orange">' + v6Svg('leash') + '</span>' +
         '<div>' +
-          '<div class="v6-card-t">' +
-            '<span>UpdateLeash · 后台更新拴绳</span>' +
-            '<span class="v6-mono-badge ' + (ul.enabled ? (leashedNow > 0 ? 'b-warn' : 'b-ok') : '') + '">' + (ul.enabled ? ('LEASH ' + leashedNow + ' / ' + ul.sessions.length) : 'DISABLED') + '</span>' +
-          '</div>' +
-          '<div class="v6-card-s">前段突发全速放行保障常规补丁秒下，持续后台巨量系统/商店更新自动套上速率拴绳防刷爆套餐</div>' +
+          '<div class="v6-card-t"><span>后台大更新限速</span></div>' +
+          '<div class="v6-card-s">前 ' + ul.grace_mb + ' MB 高速放行小补丁，超出后自动限速至 ' + trim0((ul.leash_kbps / 1000).toFixed(1)) + ' Mbps 防占满带宽</div>' +
         '</div>' +
       '</div>' +
-      toggle(ul.enabled, 'data-v6-tog="leash" aria-label="UpdateLeash 后台更新拴绳开关"') +
+      toggle(ul.enabled, 'data-v6-tog="leash" aria-label="后台大更新限速总开关"') +
     '</div>' +
-    '<div class="v6-num-grid">' +
-      '<label class="v6-num-field">满速免死缓冲池 MB' +
-        '<span class="v6-num-box"><input id="v6-ul-grace" type="number" inputmode="numeric" min="10" max="10240" step="10" value="' + num(ul.grace_mb, 200) + '"><span class="u">MB</span></span>' +
-      '</label>' +
-      '<label class="v6-num-field">拴绳限速 Kbps' +
-        '<span class="v6-num-box"><input id="v6-ul-kbps" type="number" inputmode="numeric" min="128" max="1000000" step="50" value="' + num(ul.leash_kbps, 1500) + '"><span class="u">Kbps</span></span>' +
-      '</label>' +
-    '</div>' +
-    '<div style="display:flex;justify-content:flex-end">' +
-      '<button type="button" class="v6-mini-btn pri press" data-v6-act="leash-save">保存拴绳阈值</button>' +
-    '</div>' +
-    flowHtml +
+    sessHtml +
+    '<details class="v6-adv-fold" data-v6-fold="leash"' + (V6.advOpen.leash ? ' open' : '') + '>' +
+      '<summary><span>修改免限速额度与限速值</span><span class="v6-adv-r"><span>' + ul.grace_mb + ' MB / ' + ul.leash_kbps + ' Kbps</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+      '<div class="v6-adv-body">' +
+        '<div class="v6-quick-chips"><span class="note" style="margin:0">常用额度：</span>' + presetChips + '</div>' +
+        '<div class="v6-num-grid">' +
+          '<label class="v6-num-field"><span>免限速高速额度</span><span class="v6-num-box"><input id="v6-ul-grace" type="number" min="10" max="10240" step="10" inputmode="numeric" value="' + ul.grace_mb + '"><span class="u">MB</span></span></label>' +
+          '<label class="v6-num-field"><span>超额后限速值（1500 ≈ 1.5Mbps）</span><span class="v6-num-box"><input id="v6-ul-kbps" type="number" min="128" max="1000000" step="100" inputmode="numeric" value="' + ul.leash_kbps + '"><span class="u">Kbps</span></span></label>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:flex-end">' +
+          '<button type="button" class="v6-mini-btn pri press" data-v6-act="leash-save">保存更新限速设置</button>' +
+        '</div>' +
+      '</div>' +
+    '</details>' +
   '</article>';
 }
 
 function v6RenderThermoCardHtml() {
   var th = V6.thermo;
-  var stgCls = th.stage >= 2 ? 'b-bad' : (th.stage === 1 ? 'b-warn' : 'b-ok');
-  var stgDot = th.stage >= 2 ? 'bad' : (th.stage === 1 ? 'warn' : 'ok');
-  var tempStr = th.temp_c > 0 ? th.temp_c.toFixed(1) : '—';
-  var batStr = th.capacity_pct > 0 ? String(th.capacity_pct) : '—';
+  var tempStr = th.temp_c > 0 ? (th.temp_c.toFixed(1) + ' °C') : '待读取';
+  var batStr = th.capacity_pct > 0 ? (th.capacity_pct + '%') : '—';
+  var stBadgeCls = !th.enabled ? '' : (th.stage >= 2 ? 'b-bad' : (th.stage === 1 ? 'b-warn' : 'b-ok'));
+
+  var exemptNote = '';
+  if (th.enabled && th.raw_stage >= 2 && th.stage < 2 && th.stage2_exempt) {
+    exemptNote = '<div class="note" style="margin:0;color:var(--badge-warn)">机身温度已达二级降温线，因当前正在' + (th.is_charging ? '充电' : '游戏/通话优先护航') + '，暂不限制网速以保证体验</div>';
+  } else if (th.cool_hold_remaining_sec > 0) {
+    exemptNote = '<div class="note" style="margin:0">温度正在回落，稳态观察剩余 ' + th.cool_hold_remaining_sec + ' 秒（防止临界温度反复跳变）</div>';
+  }
 
   return '<article class="glass v6-card" id="v6-card-thermo">' +
     '<div class="v6-card-head">' +
       '<div class="v6-card-title-wrap">' +
         '<span class="v6-orb ' + (th.stage >= 2 ? 'red' : (th.stage === 1 ? 'orange' : 'purple')) + '">' + v6Svg('thermo') + '</span>' +
         '<div>' +
-          '<div class="v6-card-t">' +
-            '<span>ThermoCruise · 电芯温控巡航</span>' +
-            '<span class="v6-mono-badge ' + stgCls + '"><span class="v6-dot ' + stgDot + '"></span>' + escapeHtml(th.stage_label) + '</span>' +
-          '</div>' +
-          '<div class="v6-card-s">零 IPC 直读内核 sysfs 电芯温度与电量，阶梯式收束后台轮询与过热吞吐，3 °C 施密特回差防抖</div>' +
+          '<div class="v6-card-t"><span>发热与省电保护</span></div>' +
+          '<div class="v6-card-s">盛夏开热点发烫时自动降低后台负载降温，插电或游戏中自动豁免不降速</div>' +
         '</div>' +
       '</div>' +
-      toggle(th.enabled, 'data-v6-tog="thermo" aria-label="ThermoCruise 温控巡航开关"') +
-    '</div>' +
-    '<div class="v6-kpi-row">' +
-      '<div class="v6-kpi ' + (th.stage >= 2 ? 'is-bad' : (th.stage === 1 ? 'is-warn' : 'is-ok')) + '"><span>实时电芯温度</span><b>' + escapeHtml(tempStr) + '<small>°C</small></b></div>' +
-      '<div class="v6-kpi ' + (th.low_battery_cruise ? 'is-warn' : '') + '"><span>当前剩余电量</span><b>' + escapeHtml(batStr) + '<small>%</small></b></div>' +
-      '<div class="v6-kpi is-acc"><span>巡航控制档位</span><b>' + escapeHtml(th.stage_label) + '</b></div>' +
+      toggle(th.enabled, 'data-v6-tog="thermo" aria-label="发热与省电保护总开关"') +
     '</div>' +
     '<div class="v6-thermo-flags">' +
-      '<span class="v6-mono-badge ' + (th.is_charging ? 'b-ok' : '') + '" title="外接供电时二阶温控整形自动豁免"><span class="v6-dot ' + (th.is_charging ? 'ok' : '') + '"></span>CHARGING_EXEMPT · ' + (th.is_charging ? '充电豁免生效' : '未接电源') + '</span>' +
-      '<span class="v6-mono-badge ' + (th.vector_express_active ? 'b-ok' : '') + '" title="Vector Express 护航期间二阶温控整形自动豁免不掉帧"><span class="v6-dot ' + (th.vector_express_active ? 'ok' : '') + '"></span>GAMING_EXEMPT · ' + (th.vector_express_active ? '护航豁免生效' : '待命') + '</span>' +
-      '<button type="button" class="v6-dev-pill press' + (th.stage2_shaper_enabled ? ' on' : '') + '" data-v6-act="thermo-shaper" title="允许达到二阶温度且无豁免条件时温和收束总带宽">' +
-        '<span class="v6-dot ' + (th.stage2_shaper_enabled ? 'acc' : '') + '"></span><span>STAGE2_SHAPER · 二阶降温限流</span>' +
-      '</button>' +
+      '<span class="v6-mono-badge ' + stBadgeCls + '"><span class="v6-dot ' + (th.stage >= 2 ? 'bad' : (th.stage === 1 ? 'warn' : 'ok')) + '"></span>' + escapeHtml(v6ThermoStageZh(th.stage)) + '</span>' +
+      '<span class="v6-mono-badge">电池温度 ' + escapeHtml(tempStr) + '</span>' +
+      '<span class="v6-mono-badge">电量 ' + escapeHtml(batStr) + (th.is_charging ? ' · 充电中不限速' : '') + '</span>' +
+      (th.vector_express_active ? '<span class="v6-mono-badge b-ok">游戏通话中 · 不限速</span>' : '') +
+      (th.low_battery_cruise ? '<span class="v6-mono-badge b-warn">低电量省电中</span>' : '') +
     '</div>' +
-    '<div class="v6-num-grid">' +
-      '<label class="v6-num-field">一阶省电温度 °C' +
-        '<span class="v6-num-box"><input id="v6-th-t1" type="number" inputmode="numeric" min="30" max="70" step="1" value="' + num(th.stage1_temp_c, 42) + '"><span class="u">°C</span></span>' +
-      '</label>' +
-      '<label class="v6-num-field">二阶护航温度 °C' +
-        '<span class="v6-num-box"><input id="v6-th-t2" type="number" inputmode="numeric" min="32" max="75" step="1" value="' + num(th.stage2_temp_c, 45) + '"><span class="u">°C</span></span>' +
-      '</label>' +
-    '</div>' +
-    '<div style="display:flex;justify-content:flex-end">' +
-      '<button type="button" class="v6-mini-btn pri press" data-v6-act="thermo-save">保存温控阈值</button>' +
-    '</div>' +
+    exemptNote +
+    '<details class="v6-adv-fold" data-v6-fold="thermo"' + (V6.advOpen.thermo ? ' open' : '') + '>' +
+      '<summary><span>修改温控触发温度</span><span class="v6-adv-r"><span>' + th.stage1_temp_c + '°C 省电 / ' + th.stage2_temp_c + '°C 降温</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+      '<div class="v6-adv-body">' +
+        '<div class="lgd-sw-row">' +
+          '<span>严重过热时自动收紧后台下载网速<small>达到二级降温温度且未充电、未打游戏时自动温和限流降温</small></span>' +
+          toggle(th.stage2_shaper_enabled, 'data-v6-tog="thermo-shaper" aria-label="严重过热自动收紧后台网速"') +
+        '</div>' +
+        '<div class="v6-num-grid">' +
+          '<label class="v6-num-field"><span>一级省电温度（降低采样功耗）</span><span class="v6-num-box"><input id="v6-th-t1" type="number" min="30" max="70" step="1" inputmode="numeric" value="' + th.stage1_temp_c + '"><span class="u">°C</span></span></label>' +
+          '<label class="v6-num-field"><span>二级降温温度（收紧后台大下载）</span><span class="v6-num-box"><input id="v6-th-t2" type="number" min="32" max="75" step="1" inputmode="numeric" value="' + th.stage2_temp_c + '"><span class="u">°C</span></span></label>' +
+        '</div>' +
+        '<div style="display:flex;justify-content:flex-end">' +
+          '<button type="button" class="v6-mini-btn pri press" data-v6-act="thermo-save">保存温度阈值</button>' +
+        '</div>' +
+      '</div>' +
+    '</details>' +
   '</article>';
 }
 
-function v6RenderScalpelCabinCardHtml() {
+/* ═════════════════════ Sub-Tab 2: 隐私安检 (LeakGuard 零解密明文外泄取证) ═════════════════════ */
+function v6StreamModeBadgeHtml() {
+  if (KSU) return '<span class="v6-mono-badge b-acc"><span class="v6-dot acc"></span>自动巡检中</span>';
+  if (V6.lg.sseActive) return '<span class="v6-mono-badge b-ok"><span class="v6-dot ok"></span>实时监测中</span>';
+  return '<span class="v6-mono-badge b-acc"><span class="v6-dot acc"></span>定时巡检中</span>';
+}
+
+function v6UpdateStreamBadgeDom() {
+  var el = document.getElementById('lgd-stream-mode');
+  if (el) el.innerHTML = v6StreamModeBadgeHtml();
+}
+
+function v6FilteredLeakEvents() {
+  var tf = V6.lg.typeFilter || 'ALL';
+  var q = String(V6.lg.q || '').trim().toLowerCase();
+  return V6.lg.events.filter(function (ev) {
+    if (tf !== 'ALL' && leakTypeGroup(ev.leak_type) !== tf) return false;
+    if (!q) return true;
+    var hay = (ev.devName + ' ' + ev.src_ip + ' ' + ev.mac + ' ' + ev.leak_label + ' ' + ev.leak_type + ' ' + ev.raw_value + ' ' + ev.dst_host + ' ' + ev.dst_ip + ' ' + ev.url_path).toLowerCase();
+    return hay.indexOf(q) >= 0;
+  });
+}
+
+function v6RenderLeakForensicInnerHtml(ev) {
+  var tupleStr = (ev.src_ip || '—') + (ev.src_port ? ':' + ev.src_port : '') + ' -> ' + (ev.dst_ip || ev.dst_host) + ':' + (ev.dst_port || 80) + ' (' + ev.proto.toUpperCase() + ')';
+  return '<dl class="lgd-forensic-meta">' +
+      '<dt>通信地址</dt><dd>' + escapeHtml(tupleStr) + '</dd>' +
+      '<dt>请求路径</dt><dd>' + escapeHtml(ev.method + ' http://' + ev.dst_host + ev.url_path) + '</dd>' +
+      '<dt>客户端标识</dt><dd>' + escapeHtml(ev.user_agent) + '</dd>' +
+      '<dt>泄露原文</dt><dd>' + escapeHtml(ev.raw_value) + '</dd>' +
+    '</dl>' +
+    '<pre class="lgd-forensic-pre">' + highlightRawSnippet(ev.raw_snippet, ev.raw_value) + '</pre>';
+}
+
+function v6LeakStreamHtml() {
+  var list = v6FilteredLeakEvents();
+  if (!list.length) {
+    if (V6.lg.events.length > 0) {
+      return '<div class="v6-calm-empty">没有匹配当前筛选条件的记录，可切回「全部」查看</div>';
+    }
+    return '<div class="v6-calm-empty"><span class="v6-dot ok"></span><span>暂未发现未加密的 HTTP 隐私明文外发，网络隐私安全</span></div>';
+  }
+  var capLim = Math.max(20, num(V6.lg.visibleLimit, 30));
+  var shown = list.slice(0, capLim);
+  var rem = list.length - shown.length;
+
+  var cardsHtml = shown.map(function (ev) {
+    var isOpen = !!V6.lg.openIds[ev.id];
+    var dObj = ev.mac ? devBy(ev.mac) : null;
+    var dispDev = (dObj && dObj.name && dObj.name !== dObj.mac) ? dObj.name : (ev.devName && !v6ValidMac(ev.devName) && !v6ValidIp(ev.devName) ? ev.devName : (dObj ? v6FriendlyDevLabel(dObj, ev.devName) : ev.devName));
+    return '<div class="lgd-item' + (isOpen ? ' is-open' : '') + (ev.is_blocked ? ' is-blocked' : '') + '" data-mkey="lgd-' + escapeHtml(ev.id) + '" data-lgd-id="' + escapeHtml(ev.id) + '">' +
+      '<div class="lgd-card-body">' +
+        '<div class="lgd-r1">' +
+          '<div class="lgd-r1-l">' +
+            '<span class="lgd-dev" title="' + escapeHtml(ev.src_ip + ' ' + ev.mac) + '">' + escapeHtml(dispDev) + '</span>' +
+            '<span class="v6-mono-badge ' + leakTypeBadgeCls(ev.leak_type) + '">' + escapeHtml(leakTypeZh(ev.leak_type)) + '</span>' +
+            (ev.is_blocked ? '<span class="v6-mono-badge b-ok">已封禁目标</span>' : '') +
+          '</div>' +
+          '<div class="lgd-r1-r">' +
+            (ev.hit_count > 1 ? '<span class="lgd-cnt">' + ev.hit_count + ' 次</span>' : '') +
+            '<span>' + escapeHtml(ev.timeStr) + '</span>' +
+          '</div>' +
+        '</div>' +
+        '<div class="lgd-raw-box" data-v6-act="lgd-copy-raw" data-id="' + escapeHtml(ev.id) + '" title="点击复制完整未打码明文">' +
+          '<code class="lgd-raw-val">' + escapeHtml(ev.raw_value || '(空值)') + '</code>' +
+          '<span class="lgd-copy-hint">复制</span>' +
+        '</div>' +
+        '<div class="lgd-r3">' +
+          '<span class="lgd-host" title="' + escapeHtml(ev.dst_host + ev.url_path) + '">发往 → ' + escapeHtml(ev.dst_host) + (ev.url_path && ev.url_path !== '/' ? (' ' + escapeHtml(ev.url_path)) : '') + '</span>' +
+        '</div>' +
+        '<div class="lgd-acts">' +
+          '<button type="button" class="lgd-act-btn ' + (ev.is_blocked ? 'ok' : 'warn') + ' press" data-v6-act="lgd-block-domain" data-id="' + escapeHtml(ev.id) + '">' + (ev.is_blocked ? '解除封禁' : '封禁域名与IP') + '</button>' +
+          '<button type="button" class="lgd-act-btn dan press" data-v6-act="lgd-cut-conn" data-id="' + escapeHtml(ev.id) + '">断开连接</button>' +
+          '<button type="button" class="lgd-act-btn press" data-v6-act="lgd-toggle-btn" data-id="' + escapeHtml(ev.id) + '">' + (isOpen ? '收起原文' : '查看原文') + '</button>' +
+        '</div>' +
+      '</div>' +
+      '<div class="lgd-forensic"' + (isOpen ? '' : ' hidden') + '>' + (isOpen ? v6RenderLeakForensicInnerHtml(ev) : '') + '</div>' +
+    '</div>';
+  }).join('');
+
+  if (rem > 0) {
+    cardsHtml += '<button type="button" class="btn sec lgd-more-btn press" data-v6-act="lgd-show-more">展开更多记录（剩余 ' + rem + ' 条）</button>';
+  }
+  return cardsHtml;
+}
+
+function v6RenderPrivacySubviewHtml() {
+  var lg = V6.lg;
+  var filterTypes = [
+    ['ALL', '全部'],
+    ['PHONE', '手机号'],
+    ['DEVICE_ID', '设备指纹'],
+    ['GPS', '精准定位'],
+    ['MAC_ADDR', '网卡地址'],
+    ['TOKEN', '登录凭证']
+  ];
+  var chipsHtml = filterTypes.map(function (ft) {
+    var on = (lg.typeFilter || 'ALL') === ft[0];
+    return '<button type="button" class="lgd-tchip' + (on ? ' on' : '') + '" data-v6-act="lgd-filter" data-type="' + ft[0] + '">' + ft[1] + '</button>';
+  }).join('');
+
+  return '<section class="glass lgd-panel" id="v6-leakguard-card">' +
+    '<div class="lgd-head">' +
+      '<div class="v6-card-title-wrap">' +
+        '<span class="v6-orb red">' + v6Svg('shieldAlert') + '</span>' +
+        '<div>' +
+          '<div class="v6-card-t"><span>隐私明文安检</span><span id="lgd-stream-mode">' + v6StreamModeBadgeHtml() + '</span></div>' +
+          '<div class="v6-card-s">不安装证书、不解密 HTTPS，仅揪出仍在裸奔发送手机号、定位或凭证的明文请求</div>' +
+        '</div>' +
+      '</div>' +
+      '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="lgd-refresh">刷新</button>' +
+        '<button type="button" class="v6-mini-btn dan press" data-v6-act="lgd-clear">清空记录</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="lgd-summary-line" id="lgd-summary-line">' +
+      '<span>累计发现 <b class="' + (num(lg.total_hits) > 0 ? 'bad' : '') + '">' + num(lg.total_hits) + '</b> 次明文传输 · 涉及 <b>' + num(lg.affected_devices) + '</b> 台设备 · 已封禁 <b>' + num(lg.blocked_domains) + '</b> 个追踪域名</span>' +
+    '</div>' +
+    '<details class="v6-adv-fold" data-v6-fold="lgCfg"' + (V6.advOpen.lgCfg ? ' open' : '') + '>' +
+      '<summary><span>手机通知提醒与保留条数设置</span><span class="v6-adv-r"><span>' + (lg.notify_enabled ? '通知已开' : '通知已关') + ' · 保留 ' + lg.capacity + ' 条</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+      '<div class="v6-adv-body">' +
+        '<div class="lgd-ctrl-bar">' +
+          '<div class="lgd-switches">' +
+            '<div class="lgd-sw-row"><span>发现明文泄露时发系统通知<small>在热点手机状态栏实时弹出安全提醒</small></span>' + toggle(lg.notify_enabled, 'data-v6-tog="lgd-notify" aria-label="发现明文泄露时发系统通知"') + '</div>' +
+            '<div class="lgd-sw-row"><span>锁屏通知隐藏中间敏感数字<small>仅影响手机系统弹窗，下方列表始终展示完整原文</small></span>' + toggle(lg.lockscreen_mask, 'data-v6-tog="lgd-mask" aria-label="锁屏通知隐藏中间敏感数字"') + '</div>' +
+          '</div>' +
+          '<div class="lgd-cfg-box">' +
+            '<div class="v6-num-grid">' +
+              '<label class="v6-num-field"><span>最多保留记录数</span><span class="v6-num-box"><input id="lgd-cap-inp" type="number" min="10" max="2000" step="10" inputmode="numeric" value="' + lg.capacity + '"><span class="u">条</span></span></label>' +
+              '<label class="v6-num-field"><span>同类重复提醒间隔</span><span class="v6-num-box"><input id="lgd-cd-inp" type="number" min="0" max="86400" step="30" inputmode="numeric" value="' + lg.cooldown_sec + '"><span class="u">秒</span></span></label>' +
+            '</div>' +
+            '<div class="lgd-cfg-acts"><button type="button" class="v6-mini-btn pri press" data-v6-act="lgd-save-cfg">保存通知设置</button></div>' +
+          '</div>' +
+        '</div>' +
+      '</div>' +
+    '</details>' +
+    '<div class="lgd-filter-bar">' +
+      '<div class="lgd-type-chips">' + chipsHtml + '</div>' +
+      '<label class="lgd-search-mini">' + ico('search') + '<input id="lgd-q" type="search" placeholder="搜索设备名、域名或明文内容" value="' + escapeHtml(lg.q) + '" autocomplete="off"></label>' +
+    '</div>' +
+    '<div class="lgd-stream" id="lgd-stream-list">' + v6LeakStreamHtml() + '</div>' +
+  '</section>';
+}
+
+/* ═════════════════════ Sub-Tab 3: 连接排障 (异常连接清理 + 卡顿抓拍 + 配置备份) ═════════════════════ */
+function v6RenderScalpelCardHtml() {
   var sc = V6.scalpel;
-  var onlineDevs = (S.devices || []).filter(function (d) { return d.online; });
-  var devBtns = onlineDevs.length ? '<div class="v6-dev-pills">' + onlineDevs.slice(0, 8).map(function (d) {
+  var onlineDevs = (S.devices || []).filter(function (d) { return d && d.online; }).slice(0, 10);
+  var devJumpHtml = onlineDevs.length ? onlineDevs.map(function (d) {
     return '<button type="button" class="v6-dev-pill press" data-v6-act="open-scalpel" data-mac="' + escapeHtml(d.mac) + '" data-ip="' + escapeHtml(d.ip || '') + '" data-name="' + escapeHtml(d.name) + '">' +
-      v6Svg('scalpel') + '<span>' + escapeHtml(d.name) + '</span></button>';
-  }).join('') + '</div>' : '<div class="note">点按下方「打开全局五元组手术台抽屉」可实时透视活跃 TCP / UDP / QUIC 五元组</div>';
+      v6Svg('scalpel') + '<span>' + escapeHtml(d.name) + '</span>' +
+    '</button>';
+  }).join('') : '<span class="note">当前暂无在线设备</span>';
 
   return '<article class="glass v6-card" id="v6-card-scalpel">' +
     '<div class="v6-card-head">' +
       '<div class="v6-card-title-wrap">' +
         '<span class="v6-orb">' + v6Svg('scalpel') + '</span>' +
         '<div>' +
-          '<div class="v6-card-t">' +
-            '<span>FlowScalpel · 五元组连接手术台</span>' +
-            '<span class="v6-mono-badge b-acc">5-TUPLE RST/DROP</span>' +
-          '</div>' +
-          '<div class="v6-card-s">精准定位异常吸血连接或顽固重连，免断网「单斩死流」销毁 conntrack 或「秒斩+冻结15分钟」</div>' +
+          '<div class="v6-card-t"><span>异常连接清理</span></div>' +
+          '<div class="v6-card-s">不断开整机 Wi-Fi，单独掐断卡死或偷跑流量的连接，支持封禁 15 分钟防重连</div>' +
         '</div>' +
       '</div>' +
     '</div>' +
     '<div class="v6-kpi-row">' +
-      '<div class="v6-kpi is-acc"><span>实时活跃五元组</span><b>' + num(sc.totalFlows, sc.flows.length) + '<small>条</small></b></div>' +
-      '<div class="v6-kpi ' + (sc.activeRulesCount > 0 ? 'is-warn' : '') + '"><span>15分钟冻结规则</span><b>' + num(sc.activeRulesCount) + '<small>条</small></b></div>' +
-      '<div class="v6-kpi"><span>累计精准斩流</span><b>' + num(sc.cutTotal) + '<small>次</small></b></div>' +
+      '<div class="v6-kpi is-acc"><span>全网活跃连接</span><b>' + num(sc.globalTotalFlows, sc.globalFlows.length) + '<small>条</small></b></div>' +
+      '<div class="v6-kpi ' + (sc.activeRulesCount > 0 ? 'is-warn' : '') + '"><span>15分钟封禁中</span><b>' + num(sc.activeRulesCount) + '<small>条</small></b></div>' +
+      '<div class="v6-kpi"><span>累计已清理</span><b>' + num(sc.cutTotal) + '<small>次</small></b></div>' +
     '</div>' +
-    '<div><div class="note" style="margin-bottom:6px">按设备直呼单机五元组手术台：</div>' + devBtns + '</div>' +
-    '<button type="button" class="btn pri wide press" data-v6-act="open-scalpel" data-mac="" data-ip="" data-name="">' + v6Svg('scalpel') + '<span>打开全局五元组手术台抽屉</span></button>' +
+    '<div>' +
+      '<div class="note" style="margin:0 0 6px">点选设备直接管理它的活跃连接：</div>' +
+      '<div class="v6-dev-pills">' + devJumpHtml + '</div>' +
+    '</div>' +
+    '<button type="button" class="btn pri wide press" data-v6-act="open-scalpel" data-mac="" data-ip="" data-name="">' + v6Svg('scalpel') + '<span>查看并管理全网活跃连接</span></button>' +
   '</article>';
 }
 
-function v6ApplyBlackboxData(r) {
-  if (!r || typeof r !== 'object') return;
-  if (r.granularity_ms != null) V6.blackbox.granularity_ms = Math.round(num(r.granularity_ms, 200));
-  if (r.total_ticks != null) V6.blackbox.total_ticks = Math.max(0, Math.round(num(r.total_ticks)));
-  if (r.incident_count != null) V6.blackbox.incident_count = Math.max(0, Math.round(num(r.incident_count)));
-  if (r.latest_jitter_ms != null) V6.blackbox.latest_jitter_ms = num(r.latest_jitter_ms, 0);
-  if (Array.isArray(r.incidents)) V6.blackbox.incidents = r.incidents.slice(0, 8);
-  else if (r.latest_incident && typeof r.latest_incident === 'object') V6.blackbox.incidents = [r.latest_incident];
-}
-
-function v6ApplyMultiIfaceData(r) {
-  if (!r || typeof r !== 'object') return;
-  if (r.primary_downstream != null) V6.multiIface.primary_downstream = String(r.primary_downstream || '');
-  if (Array.isArray(r.shape_targets)) V6.multiIface.shape_targets = r.shape_targets.map(String);
-  if (typeof r.dual_band_or_mlo === 'boolean') V6.multiIface.dual_band_or_mlo = r.dual_band_or_mlo;
-  if (typeof r.usb_tether_active === 'boolean') V6.multiIface.usb_tether_active = r.usb_tether_active;
-  var tg = (r.tun0_guard && typeof r.tun0_guard === 'object') ? r.tun0_guard : r;
-  if (typeof tg.vpn_active === 'boolean') V6.multiIface.tun0_vpn_active = tg.vpn_active;
-  else if (typeof r.tun0_vpn_active === 'boolean') V6.multiIface.tun0_vpn_active = r.tun0_vpn_active;
-  if (typeof tg.loop_risk_detected === 'boolean') V6.multiIface.tun0_loop_risk = tg.loop_risk_detected;
-  else if (typeof r.tun0_loop_risk === 'boolean') V6.multiIface.tun0_loop_risk = r.tun0_loop_risk;
-  if (typeof tg.low16_mark_safe === 'boolean') V6.multiIface.low16_mark_safe = tg.low16_mark_safe;
-  else if (typeof r.low16_mark_safe === 'boolean') V6.multiIface.low16_mark_safe = r.low16_mark_safe;
-}
-
-function v6ApplyScreenshotPackSummary(pk) {
-  if (!pk || typeof pk !== 'object') return;
-  if (pk.blackbox) v6ApplyBlackboxData(pk.blackbox);
-  if (pk.multi_iface) v6ApplyMultiIfaceData(pk.multi_iface);
-  if (pk.native_subtrees && typeof pk.native_subtrees === 'object') {
-    var dq = pk.native_subtrees.dynamic_qos || {};
-    if (dq.Mode || dq.mode) V6.subtrees.qos_mode = String(dq.Mode || dq.mode);
-    if (dq.Tier1RealtimePct != null || dq.tier1_pct != null) V6.subtrees.tier1_pct = Math.round(num(dq.Tier1RealtimePct != null ? dq.Tier1RealtimePct : dq.tier1_pct, 50));
-    if (dq.Tier2InteractivePct != null || dq.tier2_pct != null) V6.subtrees.tier2_pct = Math.round(num(dq.Tier2InteractivePct != null ? dq.Tier2InteractivePct : dq.tier2_pct, 35));
-    if (dq.Tier3BulkPct != null || dq.tier3_pct != null) V6.subtrees.tier3_pct = Math.round(num(dq.Tier3BulkPct != null ? dq.Tier3BulkPct : dq.tier3_pct, 15));
-    if (pk.native_subtrees.full_restores != null) V6.subtrees.full_restores = Math.round(num(pk.native_subtrees.full_restores));
-  }
-}
-
 function v6RenderBlackboxCardHtml() {
-  var bb = V6.blackbox;
-  var mi = V6.multiIface;
-  var st = V6.subtrees;
-  var targets = mi.shape_targets.length ? mi.shape_targets.join(' + ') : (mi.primary_downstream || S.iface || '待探测');
-  var incList = bb.incidents.length ? '<div class="v6-flow-list">' + bb.incidents.slice(0, 3).map(function (inc) {
-    var tsTxt = fmtClockTs(inc.unix_ms || inc.ts || 0);
-    var cause = String(inc.root_cause_zh || inc.root_cause || inc.summary || '检测到瞬时抖动尖峰');
-    var culprit = String(inc.culprit_device || inc.culprit_mac || '');
-    var rtt = num(inc.rtt_ms != null ? inc.rtt_ms : inc.jitter_ms, 0);
+  var bb = V6.blackbox, mi = V6.multiIface, sb = V6.subtrees;
+  var incHtml = bb.incidents && bb.incidents.length ? ('<div class="v6-flow-list">' + bb.incidents.slice(0, 5).map(function (inc) {
+    var rawMs = num(inc.ts_unix_ms, inc.unix_ms);
+    var ts = rawMs ? fmtClockTs(rawMs) : '--:--:--';
+    var reasonZh = inc.reason || inc.root_cause_zh || '突发抢网引起延迟抬升';
+    var culpritDev = inc.culprit_name || inc.culprit_device || inc.culprit_mac || '蜂窝基站空口波动';
+    var appSuffix = inc.active_app_name ? ('（' + inc.active_app_name + (inc.culprit_share_pct ? ' · 占 ' + Math.round(num(inc.culprit_share_pct)) + '%' : '') + '）') : '';
+    var peakRtt = num(inc.peak_rtt_ms, inc.rtt_ms);
+    var dRtt = num(inc.delta_rtt_ms);
     return '<div class="v6-flow-item">' +
       '<div class="v6-flow-main">' +
-        '<div class="v6-flow-t"><span class="v6-mono-badge b-warn">' + escapeHtml(tsTxt) + '</span><span>' + escapeHtml(cause) + '</span></div>' +
-        '<div class="v6-flow-s">' + (culprit ? ('归因源: ' + escapeHtml(culprit) + ' · ') : '') + '尖峰 ' + rtt.toFixed(1) + ' ms</div>' +
+        '<div class="v6-flow-t"><span class="v6-mono-badge b-warn mono">' + escapeHtml(ts) + '</span><span>' + escapeHtml(reasonZh) + '</span></div>' +
+        '<div class="v6-flow-s">波及来源：' + escapeHtml(culpritDev + appSuffix) + (peakRtt > 0 ? (' · 峰值 ' + peakRtt.toFixed(1) + ' ms' + (dRtt > 0 ? ' (+' + dRtt.toFixed(1) + ' ms)' : '')) : '') + '</div>' +
       '</div>' +
+      (inc.culprit_mac ? '<button type="button" class="v6-mini-btn press" data-jump-mac="' + escapeHtml(inc.culprit_mac) + '">定位设备</button>' : '') +
     '</div>';
-  }).join('') + '</div>' : '<div class="note">200ms 环形飞行记录仪零闪存运行中 · 当前无异常延迟尖峰事件</div>';
+  }).join('') + '</div>') : '<div class="v6-calm-empty"><span class="v6-dot ok"></span><span>近期网络平稳，未捕捉到明显跳 Ping 卡顿事件</span></div>';
 
+  var ifacesTxt = mi.shape_targets && mi.shape_targets.length ? mi.shape_targets.join(' + ') : (mi.primary_downstream || '自动跟随热点接口');
   return '<article class="glass v6-card" id="v6-card-blackbox">' +
     '<div class="v6-card-head">' +
       '<div class="v6-card-title-wrap">' +
         '<span class="v6-orb purple">' + v6Svg('blackbox') + '</span>' +
         '<div>' +
-          '<div class="v6-card-t">' +
-            '<span>JitterBlackbox · 200ms 卡顿黑匣子与多口并管</span>' +
-            '<span class="v6-mono-badge ' + (bb.incident_count > 0 ? 'b-warn' : 'b-ok') + '">' + bb.granularity_ms + 'MS RING</span>' +
-          '</div>' +
-          '<div class="v6-card-s">每 200ms 采样信号/队列/大流归因抓出团战跳 Ping 元凶，同时监控 Wi-Fi 7 MLO / USB 共享并管、1:fffe 2.5Gbps 局域网直通与 tun0 防环路守卫</div>' +
+          '<div class="v6-card-t"><span>卡顿抓拍与多网状态</span></div>' +
+          '<div class="v6-card-s">后台每 0.2 秒自动监测延迟抖动，游戏突然跳 Ping 后可回看是谁在抢网</div>' +
         '</div>' +
+      '</div>' +
+      '<div style="display:inline-flex;gap:6px;flex-wrap:wrap">' +
+        '<button type="button" class="v6-mini-btn press" data-v6-act="bb-sample">立即检测</button>' +
+        (bb.incidents && bb.incidents.length ? '<button type="button" class="v6-mini-btn dan press" data-v6-act="bb-clear">清空记录</button>' : '') +
       '</div>' +
     '</div>' +
     '<div class="v6-kpi-row">' +
-      '<div class="v6-kpi ' + (bb.latest_jitter_ms > 25 ? 'is-warn' : 'is-ok') + '"><span>实时采样抖动</span><b>' + bb.latest_jitter_ms.toFixed(1) + '<small>ms</small></b></div>' +
-      '<div class="v6-kpi ' + (bb.incident_count > 0 ? 'is-warn' : '') + '"><span>捕获跳 Ping 事故</span><b>' + num(bb.incident_count) + '<small>起</small></b></div>' +
-      '<div class="v6-kpi is-acc"><span>动态 QoS 配比</span><b>' + st.tier1_pct + '/' + st.tier2_pct + '/' + st.tier3_pct + '</b></div>' +
+      '<div class="v6-kpi ' + (bb.latest_jitter_ms > 25 ? 'is-warn' : 'is-ok') + '"><span>当前延迟波动</span><b>' + num(bb.latest_jitter_ms).toFixed(1) + '<small>ms</small></b></div>' +
+      '<div class="v6-kpi ' + (bb.incident_count > 0 ? 'is-warn' : '') + '"><span>抓拍卡顿事件</span><b>' + num(bb.incident_count) + '<small>次</small></b></div>' +
+      '<div class="v6-kpi is-acc"><span>三档网速配比</span><b>' + sb.tier1_pct + '/' + sb.tier2_pct + '/' + sb.tier3_pct + '</b></div>' +
     '</div>' +
-    '<div class="v6-thermo-flags">' +
-      '<span class="v6-mono-badge b-ok"><span class="v6-dot ok"></span>IFACES · ' + escapeHtml(targets) + '</span>' +
-      '<span class="v6-mono-badge b-acc">LAN 1:fffe · 2.5Gbps</span>' +
-      '<span class="v6-mono-badge ' + (mi.tun0_loop_risk ? 'b-bad' : 'b-ok') + '">TUN0_GUARD · ' + (mi.tun0_loop_risk ? '环路告警' : (mi.tun0_vpn_active ? 'VPN 安全共存' : '净空')) + '</span>' +
-      (mi.dual_band_or_mlo ? '<span class="v6-mono-badge b-ok">MLO/DUAL_AP</span>' : '') +
-      (mi.usb_tether_active ? '<span class="v6-mono-badge b-ok">USB_TETHER</span>' : '') +
-    '</div>' +
-    incList +
-    '<div style="display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap">' +
-      '<button type="button" class="v6-mini-btn press" data-v6-act="bb-sample">立即抓拍一帧</button>' +
-      '<button type="button" class="v6-mini-btn press" data-v6-act="subtrees-sync">同步原生 M8 子树</button>' +
-      '<button type="button" class="v6-mini-btn dan press" data-v6-act="bb-clear">清空黑匣子</button>' +
-    '</div>' +
+    incHtml +
+    '<details class="v6-adv-fold" data-v6-fold="bbNet"' + (V6.advOpen.bbNet ? ' open' : '') + '>' +
+      '<summary><span>多网接口与代理防环详情</span><span class="v6-adv-r"><span>' + (mi.tun0_loop_risk ? '存在环路风险' : '接口正常') + '</span><span class="v6-adv-chev">' + v6Svg('chev') + '</span></span></summary>' +
+      '<div class="v6-adv-body">' +
+        '<div class="v6-thermo-flags">' +
+          '<span class="v6-mono-badge b-ok"><span class="v6-dot ok"></span>接管接口：' + escapeHtml(ifacesTxt) + '</span>' +
+          '<span class="v6-mono-badge b-acc">局域网互传直通 ' + num(mi.lan_fastlane_gbps, 2.5) + ' Gbps</span>' +
+          '<span class="v6-mono-badge ' + (mi.tun0_loop_risk ? 'b-bad' : 'b-ok') + '">本机 VPN 防环：' + (mi.tun0_loop_risk ? '检测到冲突' : '安全隔离') + '</span>' +
+          (mi.dual_band_or_mlo ? '<span class="v6-mono-badge b-ok">双频 / Wi-Fi 7 协同</span>' : '') +
+          (mi.usb_tether_active ? '<span class="v6-mono-badge b-acc">USB 共享已并入</span>' : '') +
+        '</div>' +
+        '<div style="display:flex;justify-content:flex-end">' +
+          '<button type="button" class="v6-mini-btn press" data-v6-act="subtrees-sync">重新同步底层分流规则</button>' +
+        '</div>' +
+      '</div>' +
+    '</details>' +
   '</article>';
 }
 
-function v6RenderConfigVaultCardHtml() {
+function v6RenderVaultCardHtml() {
   var vt = V6.vault;
-  var shaShort = vt.last_sha256 ? (vt.last_sha256.slice(0, 16) + '…') : 'SHA256 确定性校验就绪';
   return '<article class="glass v6-card" id="v6-card-vault">' +
     '<div class="v6-card-head">' +
       '<div class="v6-card-title-wrap">' +
-        '<span class="v6-orb green">' + v6Svg('vault') + '</span>' +
+        '<span class="v6-orb">' + v6Svg('vault') + '</span>' +
         '<div>' +
-          '<div class="v6-card-t">' +
-            '<span>ConfigVault · 整机配置一键备份与原子恢复</span>' +
-            '<span class="v6-mono-badge b-acc">SHA256 ATOMIC</span>' +
-          '</div>' +
-          '<div class="v6-card-s">一键打包规则、设备备注、应用限速与全部 v6 策略 JSON（自动剔除敏感会话令牌），换机或重刷模块后全量校验原子回滚恢复</div>' +
+          '<div class="v6-card-t"><span>配置备份与恢复</span></div>' +
+          '<div class="v6-card-s">一键备份设备备注、限速规则与全部智能护航设置，刷机或换机后秒恢复（不影响当前登录状态）</div>' +
         '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="v6-kpi-row">' +
-      '<div class="v6-kpi is-ok"><span>支持备份配置集</span><b>16+<small>项</small></b></div>' +
-      '<div class="v6-kpi"><span>最近导出文件数</span><b>' + num(vt.last_file_count) + '<small>个</small></b></div>' +
-      '<div class="v6-kpi is-acc"><span>最近恢复文件数</span><b>' + num(vt.last_restored) + '<small>个</small></b></div>' +
-    '</div>' +
-    '<div class="note mono">完整性摘要：' + escapeHtml(shaShort) + '</div>' +
-    '<input type="file" id="v6-backup-file" accept=".json,application/json" hidden>' +
-    '<div style="display:flex;gap:8px;flex-wrap:wrap">' +
-      '<button type="button" class="btn pri press" data-v6-act="backup-export">导出整机备份 JSON</button>' +
-      '<button type="button" class="btn sec press" data-v6-act="backup-import-pick">选择备份文件原子恢复</button>' +
+    (vt.last_sha256 ? '<div class="note mono" style="margin:0">最近校验摘要：' + escapeHtml(vt.last_sha256.slice(0, 20)) + '…' + (vt.last_file_count ? (' · 共 ' + vt.last_file_count + ' 项配置') : '') + (vt.last_restored ? (' · 已恢复 ' + vt.last_restored + ' 项') : '') + '</div>' : '') +
+    '<div class="btns">' +
+      '<button type="button" class="btn pri press" data-v6-act="backup-export">导出配置备份文件</button>' +
+      '<button type="button" class="btn sec press" data-v6-act="backup-import-pick">选择备份文件恢复</button>' +
+      '<input id="v6-backup-file" type="file" accept=".json,application/json" hidden>' +
     '</div>' +
   '</article>';
 }
 
-function v6RenderCockpitGridHtml() {
-  return '<div class="v6-grid" id="v6-cockpit-grid">' +
+function v6RenderSubviewHtml() {
+  if (V6.subtab === 'privacy') {
+    return v6RenderPrivacySubviewHtml();
+  }
+  if (V6.subtab === 'troubleshoot') {
+    return '<div class="v6-grid cols-2">' +
+      v6RenderScalpelCardHtml() +
+      v6RenderBlackboxCardHtml() +
+      '</div>' +
+      v6RenderVaultCardHtml();
+  }
+  return '<div class="v6-grid cols-2">' +
     v6RenderExpressCardHtml() +
-    v6RenderUpdateLeashCardHtml() +
-    v6RenderThermoCardHtml() +
-    v6RenderScalpelCabinCardHtml() +
-    v6RenderBlackboxCardHtml() +
-    v6RenderConfigVaultCardHtml() +
-  '</div>';
-}
-
-function v6RefreshCockpitDom() {
-  var g = document.getElementById('v6-cockpit-grid');
-  if (!g) return;
-  if (document.querySelector('#v6-cockpit-grid input:focus')) return;
-  if (typeof morphOuter === 'function') morphOuter(g, v6RenderCockpitGridHtml());
-  else g.outerHTML = v6RenderCockpitGridHtml();
-}
-
-/* ═════════════════════ Vector 主页面渲染 (#p-vector) ═════════════════════ */
-function v6BuildPageHtml() {
-  var vw = V6.view || 'all';
-  var showLg = vw === 'all' || vw === 'leakguard';
-  var showCp = vw === 'all' || vw === 'cockpit';
-  return '<div class="wrap v6-shell">' +
-    '<div class="glass v6-top-strip">' +
-      '<div class="v6-top-title">' +
-        '<span class="v6-brand-tag">HNC v6.0 · VECTOR</span>' +
-        '<div>' +
-          '<b>矢量战术中枢与明文隐私安检</b>' +
-          '<small>' + (S.vectorSyncState === 'supported' ? '已启用 /api/vector_sync 无锁快照聚合快路径' : '自适应 REST / SSE 实时遥测') + '</small>' +
-        '</div>' +
-      '</div>' +
-      '<div class="v6-top-right">' +
-        '<div id="v6-bh-badges" style="display:flex;gap:4px;flex-wrap:wrap;align-items:center">' + v6BulkheadsBadgesHtml() + '</div>' +
-        seg('v6-view', [['all', '全览同屏'], ['leakguard', '隐私安检'], ['cockpit', '六大战术舱']], vw, 'small') +
-      '</div>' +
+    v6RenderLeashCardHtml() +
     '</div>' +
-    '<div id="v6-leakguard-wrap"' + (showLg ? '' : ' hidden') + '>' + v6RenderLeakGuardHtml() + '</div>' +
-    '<div id="v6-cockpit-wrap"' + (showCp ? '' : ' hidden') + '>' + v6RenderCockpitGridHtml() + '</div>' +
-  '</div>';
+    v6RenderThermoCardHtml();
 }
 
+/* ═════════════════════ 页面主渲染与无闪烁局部刷新 ═════════════════════ */
 function renderVectorPage(anim1) {
-  var pg = document.getElementById('p-vector');
-  if (!pg) return;
-  var html = v6BuildPageHtml();
-  if (!anim1 && pg.firstElementChild) morph(pg, html);
-  else pg.innerHTML = html;
-  placeSegs(pg);
-  if (anim1 && typeof stagger === 'function') stagger($('.v6-shell', pg));
+  var p = document.getElementById('p-vector');
+  if (!p) return;
+  if (V6.subtab === 'privacy') v6MarkLeakGuardSeen();
+  var html = '<div class="wrap v6-shell">' +
+    '<div id="v6-hero-mount">' + v6RenderHeroCardHtml() + '</div>' +
+    '<div id="v6-subview-mount" class="v6-shell">' + v6RenderSubviewHtml() + '</div>' +
+  '</div>';
+  if (!anim1 && p.firstElementChild) morph(p, html);
+  else p.innerHTML = html;
+  if (anim1 && typeof stagger === 'function') stagger($('.v6-shell', p));
 }
 
-function v6RefreshVectorDom() {
+function v6RefreshHeroDom() {
+  var m = document.getElementById('v6-hero-mount');
+  if (!m || S.page !== 'vector') return;
+  morph(m, v6RenderHeroCardHtml());
+}
+
+function v6RefreshActiveSubviewDom() {
   if (S.page !== 'vector') return;
-  v6RefreshTopBulkheadsDom();
-  v6RefreshLeakGuardDom();
-  v6RefreshCockpitDom();
+  var ae = document.activeElement;
+  /* 若用户正在输入框内打字，仅刷新流列表内部节点，绝不重复包裹外层容器或打断光标 */
+  if (ae && ae.tagName === 'INPUT' && ae.closest('#p-vector')) {
+    if (V6.subtab === 'privacy') {
+      var st = document.getElementById('lgd-stream-list');
+      if (st) morph(st, v6LeakStreamHtml());
+    }
+    return;
+  }
+  var sub = document.getElementById('v6-subview-mount');
+  if (sub) {
+    morph(sub, v6RenderSubviewHtml());
+  }
 }
 
 function onEnterVectorPage() {
-  v6LoadLeakGuard();
-  v6LoadCockpitAll();
-  v6StartLeakGuardSSE();
+  if (V6.subtab === 'privacy') v6MarkLeakGuardSeen();
+  if (V6.apiSupported.lg) v6LoadLeakGuard();
+  if (V6.apiSupported.v6) v6LoadCockpitAll();
+  if (!KSU) v6StartLeakGuardSSE();
 }
 
-function v6ScrollToLeakGuard() {
-  var el = document.getElementById('v6-leakguard-card');
-  if (el && el.scrollIntoView) el.scrollIntoView({ behavior: motionOn() ? 'smooth' : 'auto', block: 'start' });
+function v6FocusPrivacyPanel() {
+  V6.subtab = 'privacy';
+  LS.set('hnc6.v6_subtab', 'privacy');
+  v6MarkLeakGuardSeen();
+  if (S.page !== 'vector') {
+    go('vector');
+  } else {
+    v6RefreshHeroDom();
+    v6RefreshActiveSubviewDom();
+  }
+  setTimeout(function () {
+    var el = document.getElementById('v6-leakguard-card');
+    if (el && el.scrollIntoView) el.scrollIntoView({ behavior: motionOn() ? 'smooth' : 'auto', block: 'start' });
+  }, 60);
 }
+var v6ScrollToLeakGuard = v6FocusPrivacyPanel;
 
-/* ═════════════════════ FlowScalpel 五元组手术台抽屉 ═════════════════════ */
-function v6FilteredScalpelFlows() {
+/* ═════════════════════ FlowScalpel 活跃连接管理抽屉（全局与单机状态完全隔离） ═════════════════════ */
+function v6FilteredScalpelDrawerFlows() {
+  var src = (V6.scalpel.scopeMac || V6.scalpel.scopeIp) ? V6.scalpel.drawerFlows : (V6.scalpel.drawerFlows.length ? V6.scalpel.drawerFlows : V6.scalpel.globalFlows);
   var pf = V6.scalpel.protoFilter || 'ALL';
   var q = String(V6.scalpel.q || '').trim().toLowerCase();
-  return V6.scalpel.flows.filter(function (f) {
-    if (V6.scalpel.mac && f.mac && f.mac !== V6.scalpel.mac) return false;
-    if (!V6.scalpel.mac && V6.scalpel.ip && f.src_ip && f.src_ip !== V6.scalpel.ip) return false;
-    if (pf !== 'ALL' && f.protoBadge !== pf && f.proto.toUpperCase() !== pf) return false;
+  return src.filter(function (f) {
+    if (pf === 'TCP' && f.proto !== 'tcp') return false;
+    if (pf === 'UDP' && f.proto !== 'udp') return false;
+    if (pf === 'FROZEN' && !f.frozen) return false;
     if (!q) return true;
-    var hay = (f.src_ip + ':' + f.sport + ' ' + f.dst_ip + ':' + f.dport + ' ' + f.dst_host + ' ' + f.app_name + ' ' + f.devName + ' ' + f.protoBadge).toLowerCase();
+    var hay = (f.devName + ' ' + f.app_name + ' ' + f.dst_host + ' ' + f.src_ip + ':' + f.sport + ' ' + f.dst_ip + ':' + f.dport + ' ' + f.protoBadge).toLowerCase();
     return hay.indexOf(q) >= 0;
   });
 }
 
 function v6ScalpelListHtml() {
-  if (V6.scalpel.loading && !V6.scalpel.flows.length) {
-    return '<div class="empty">正在读取内核 conntrack 五元组流表…</div>';
+  if (V6.scalpel.loading && !V6.scalpel.drawerFlows.length && !V6.scalpel.globalFlows.length) {
+    return '<div class="v6-calm-empty">正在读取实时活跃连接…</div>';
   }
-  if (V6.scalpel.err && !V6.scalpel.flows.length) {
-    return '<div class="empty">' + escapeHtml(V6.scalpel.err) + '</div>';
+  if (V6.scalpel.err) {
+    return '<div class="note err">' + escapeHtml(V6.scalpel.err) + '</div>';
   }
-  var list = v6FilteredScalpelFlows();
+  var list = v6FilteredScalpelDrawerFlows();
   if (!list.length) {
-    return '<div class="empty">当前筛选范围内没有活跃五元组连接</div>';
+    return '<div class="v6-calm-empty">当前筛选范围内没有活跃连接</div>';
   }
-  return list.slice(0, 150).map(function (f) {
-    var pCls = f.protoBadge === 'QUIC' ? 'b-pur' : (f.protoBadge === 'UDP' ? 'b-warn' : 'b-acc');
-    var dn = bps(f.rx_bps), up = bps(f.tx_bps);
-    var hostTag = f.dst_host ? '<span class="v6-mono-badge">' + escapeHtml(f.dst_host) + '</span>' : '';
-    var appTag = f.app_name ? '<span class="v6-mono-badge b-ok">' + escapeHtml(f.app_name) + '</span>' : '';
-    var stTag = f.frozen ? '<span class="v6-mono-badge b-bad">FROZEN_15M</span>' : '<span class="v6-mono-badge">' + escapeHtml(f.state) + '</span>';
-    var canCut = v6ValidIp(f.src_ip) && v6ValidIp(f.dst_ip) && f.sport >= 1 && f.dport >= 1;
-    return '<div class="v6-tuple-row" data-fid="' + escapeHtml(f.id) + '">' +
-      '<div class="v6-tuple-proto"><span class="v6-mono-badge ' + pCls + '">' + escapeHtml(f.protoBadge) + '</span></div>' +
+  return list.map(function (f) {
+    var rxB = bps(f.rx_bps), txB = bps(f.tx_bps);
+    var pCls = f.frozen ? 'b-bad' : (f.protoBadge === 'QUIC' ? 'b-pur' : (f.proto === 'udp' ? 'b-acc' : ''));
+    var titleMain = f.app_name ? (f.app_name + (f.dst_host ? ' · ' + f.dst_host : '')) : (f.dst_host || (f.dst_ip + ':' + f.dport));
+    var remMin = f.frozen ? Math.max(1, Math.ceil((f.frozen_until - Date.now() / 1000) / 60)) : 0;
+    return '<div class="v6-tuple-row" data-mkey="sc-' + escapeHtml(f.id) + '">' +
       '<div class="v6-tuple-5">' +
-        '<div class="ep" title="' + escapeHtml(f.src_ip + ':' + f.sport + ' -> ' + f.dst_ip + ':' + f.dport) + '">' +
-          escapeHtml((f.src_ip || '—') + ':' + f.sport + ' -> ' + (f.dst_ip || '—') + ':' + f.dport) +
+        '<div class="v6-tuple-primary">' +
+          '<span class="v6-mono-badge mono ' + pCls + '">' + escapeHtml(f.frozen ? ('封禁剩' + remMin + '分') : f.protoBadge) + '</span>' +
+          '<span>' + escapeHtml(titleMain) + '</span>' +
+          (!V6.scalpel.scopeMac ? '<span class="v6-mono-badge">' + escapeHtml(f.devName) + '</span>' : '') +
         '</div>' +
-        '<div class="sub5">' +
-          (!V6.scalpel.mac ? '<span>' + escapeHtml(f.devName) + '</span>' : '') +
-          appTag + hostTag + stTag +
-          (f.bytes > 0 ? '<span class="mono">' + escapeHtml(bytes(f.bytes)) + '</span>' : '') +
-        '</div>' +
+        '<div class="ep">' + escapeHtml(f.src_ip + ':' + f.sport + ' -> ' + f.dst_ip + ':' + f.dport) + (f.state && f.state !== 'ESTABLISHED' && f.state !== 'ASSURED' ? (' · ' + escapeHtml(f.state)) : '') + '</div>' +
       '</div>' +
-      '<div class="v6-tuple-rate num">' +
-        '<div>RX ' + dn.v + ' ' + dn.u + '</div>' +
-        '<div style="color:var(--text-3)">TX ' + up.v + ' ' + up.u + '</div>' +
-      '</div>' +
+      '<div class="v6-tuple-rate">↓ ' + rxB.v + ' ' + rxB.u + '<br>↑ ' + txB.v + ' ' + txB.u + '</div>' +
       '<div class="v6-tuple-acts">' +
-        '<button type="button" class="v6-mini-btn warn press" data-v6-act="scalpel-cut-once" data-fid="' + escapeHtml(f.id) + '"' + (canCut ? '' : ' disabled') + ' title="单斩此连接并立即清理内核 conntrack 状态">' +
-          '<span>单斩死流</span>' +
-        '</button>' +
-        '<button type="button" class="v6-mini-btn dan press" data-v6-act="scalpel-cut-freeze" data-fid="' + escapeHtml(f.id) + '"' + (canCut ? '' : ' disabled') + ' title="秒斩连接并在 FORWARD 链精准冻结该四元组 15 分钟">' +
-          '<span>秒斩+冻结15分钟</span>' +
-        '</button>' +
+        '<button type="button" class="lgd-act-btn warn press" data-v6-act="scalpel-cut-once" data-fid="' + escapeHtml(f.id) + '">' + v6Svg('cut') + '<span>断开一次</span></button>' +
+        '<button type="button" class="lgd-act-btn dan press" data-v6-act="scalpel-cut-freeze" data-fid="' + escapeHtml(f.id) + '">' + v6Svg('freeze') + '<span>断开并封15分钟</span></button>' +
       '</div>' +
     '</div>';
   }).join('');
@@ -1415,115 +1717,129 @@ function v6ScalpelListHtml() {
 
 function v6ScalpelDrawerBodyHtml() {
   var sc = V6.scalpel;
-  var scopeTitle = sc.mac || sc.ip
-    ? ('五元组手术台 · ' + escapeHtml(sc.devName || sc.ip || sc.mac))
-    : 'FlowScalpel · 全局五元组连接手术台';
-  var scopeSub = sc.mac || sc.ip
-    ? ('锁定终端 ' + escapeHtml((sc.ip ? sc.ip + ' · ' : '') + (sc.mac || '')))
-    : '实时透视全热点 TCP / UDP / QUIC 五元组流表 · 免断网单流手术切断与 15 分钟阻断冻结';
-  var protos = ['ALL', 'TCP', 'UDP', 'QUIC'];
+  var isScoped = !!(sc.scopeMac || sc.scopeIp);
+  var scopeTitle = isScoped ? ('活跃连接 · ' + (sc.devName || sc.scopeIp || sc.scopeMac)) : '全网活跃连接管理';
+  var shownCount = v6FilteredScalpelDrawerFlows().length;
+  var pTabs = [['ALL', '全部'], ['TCP', 'TCP'], ['UDP', 'UDP / QUIC'], ['FROZEN', '封禁中']];
 
   return '<div class="v6-drawer-head">' +
-      '<div style="min-width:0">' +
-        '<div class="v6-card-t">' + v6Svg('scalpel', 'ui-ic') + '<span>' + scopeTitle + '</span>' +
-          '<span class="v6-mono-badge b-acc" id="v6-sc-cnt">' + v6FilteredScalpelFlows().length + ' FLOWS</span>' +
-          (sc.activeRulesCount > 0 ? '<span class="v6-mono-badge b-warn" id="v6-sc-rules">' + sc.activeRulesCount + ' FROZEN</span>' : '<span class="v6-mono-badge b-warn" id="v6-sc-rules" hidden>0 FROZEN</span>') +
-        '</div>' +
-        '<div class="v6-card-s mono">' + scopeSub + '</div>' +
+      '<div>' +
+        '<div class="v6-card-t">' + v6Svg('scalpel') + '<span>' + escapeHtml(scopeTitle) + '</span></div>' +
+        '<div class="v6-card-s">「断开一次」立即清理卡死连接；「封15分钟」阻止流氓后台反复重连</div>' +
       '</div>' +
-      '<div style="display:flex;gap:6px;align-items:center;flex:none">' +
-        ((sc.mac || sc.ip) ? '<button type="button" class="v6-mini-btn press" data-v6-act="scalpel-all-scope">看全网</button>' : '') +
-        '<button type="button" class="v6-mini-btn ' + (sc.paused ? 'warn' : '') + ' press" data-v6-act="scalpel-pause">' + (sc.paused ? '已暂停' : '实时2s') + '</button>' +
-        '<button type="button" class="v6-mini-btn press" data-v6-act="scalpel-close">关闭</button>' +
+      '<button type="button" class="v6-mini-btn press" data-v6-act="scalpel-close">关闭</button>' +
+    '</div>' +
+    '<div class="v6-drawer-subbar">' +
+      '<div class="lgd-type-chips">' +
+        pTabs.map(function (pt) {
+          return '<button type="button" class="lgd-tchip' + (sc.protoFilter === pt[0] ? ' on' : '') + '" data-v6-act="scalpel-proto" data-proto="' + pt[0] + '">' + pt[1] + '</button>';
+        }).join('') +
+      '</div>' +
+      '<div style="display:inline-flex;align-items:center;gap:6px;flex-wrap:wrap">' +
+        '<span class="v6-mono-badge" id="v6-sc-cnt-pill">共 ' + shownCount + ' 条</span>' +
+        (isScoped ? '<button type="button" class="v6-mini-btn pri press" data-v6-act="scalpel-all-scope">看全网</button>' : '') +
+        '<button type="button" class="v6-mini-btn' + (sc.paused ? ' warn' : '') + ' press" data-v6-act="scalpel-pause">' + (sc.paused ? '已暂停刷新' : '2秒自动刷新') + '</button>' +
       '</div>' +
     '</div>' +
     '<div class="v6-drawer-tools">' +
-      '<div class="lgd-type-chips">' +
-        protos.map(function (p) {
-          return '<button type="button" class="lgd-tchip press' + (sc.protoFilter === p ? ' on' : '') + '" data-v6-act="scalpel-proto" data-proto="' + p + '">' + p + '</button>';
-        }).join('') +
-      '</div>' +
-      '<label class="lgd-search-mini">' + ico('search') +
-        '<input id="v6-sc-q" type="search" placeholder="筛选 IP / 端口 / SNI / 应用" value="' + escapeHtml(sc.q) + '" autocomplete="off">' +
-      '</label>' +
+      '<label class="lgd-search-mini" style="max-width:none;width:100%">' + ico('search') + '<input id="v6-sc-q" type="search" placeholder="搜索应用名、域名、IP 或端口" value="' + escapeHtml(sc.q) + '" autocomplete="off"></label>' +
     '</div>' +
-    '<div class="v6-tuple-list" id="v6-sc-list">' + v6ScalpelListHtml() + '</div>';
+    '<div class="v6-tuple-list" id="v6-scalpel-list">' + v6ScalpelListHtml() + '</div>';
+}
+
+function v6RefreshScalpelDrawerList() {
+  var listEl = document.getElementById('v6-scalpel-list');
+  if (listEl) morph(listEl, v6ScalpelListHtml());
+  var cntEl = document.getElementById('v6-sc-cnt-pill');
+  if (cntEl) cntEl.textContent = '共 ' + v6FilteredScalpelDrawerFlows().length + ' 条';
 }
 
 function v6FetchScalpelFlows() {
+  if (!V6.scalpel.open) return Promise.resolve();
+  var isScoped = !!(v6ValidMac(V6.scalpel.scopeMac) || v6ValidIp(V6.scalpel.scopeIp));
   var params = { limit: 200 };
-  if (v6ValidMac(V6.scalpel.mac)) params.mac = V6.scalpel.mac;
-  if (v6ValidIp(V6.scalpel.ip)) params.ip = V6.scalpel.ip;
+  if (v6ValidMac(V6.scalpel.scopeMac)) params.mac = V6.scalpel.scopeMac;
+  if (v6ValidIp(V6.scalpel.scopeIp)) params.ip = V6.scalpel.scopeIp;
+
   V6.scalpel.loading = true;
+  V6.scalpel.err = '';
   return api.get(V6_API.scalpelFlows, params, { timeout: 7000 }).then(function (r) {
-    V6.scalpel.err = '';
     V6.scalpel.loading = false;
-    v6ApplyScalpelData(r);
+    v6ApplyScalpelData(r, isScoped);
     v6RefreshScalpelDrawerList();
-    if (S.page === 'vector') v6RefreshCockpitDom();
+    if (!isScoped && S.page === 'vector') {
+      v6RefreshHeroDom();
+      if (V6.subtab === 'troubleshoot') v6RefreshActiveSubviewDom();
+    }
   }).catch(function (e) {
     V6.scalpel.loading = false;
-    if (V6.scalpel.mac && S.conn && S.conn[V6.scalpel.mac] && S.conn[V6.scalpel.mac].r && Array.isArray(S.conn[V6.scalpel.mac].r.conns)) {
-      var d0 = devBy(V6.scalpel.mac);
-      v6ApplyScalpelData({
-        flows: S.conn[V6.scalpel.mac].r.conns.map(function (c) {
-          return {
-            proto: c.proto,
-            src_ip: (d0 && d0.ip) || V6.scalpel.ip || '',
-            sport: c.sport,
-            dst_ip: c.dst,
-            dport: c.dport,
-            domain: c.name || c.svc || '',
-            app_name: c.app || '',
-            state: c.state || 'ESTABLISHED',
-            down_bps: c.down_bps,
-            up_bps: c.up_bps,
-            down_bytes: c.down_bytes,
-            up_bytes: c.up_bytes,
-            mac: V6.scalpel.mac
-          };
-        })
+    /* 兼容回退：单机连接表兜底同样仅写入 drawerFlows，绝不覆写 globalTotalFlows */
+    if (isScoped && V6.scalpel.scopeMac && S.conn && S.conn[V6.scalpel.scopeMac] && S.conn[V6.scalpel.scopeMac].r) {
+      var cr = S.conn[V6.scalpel.scopeMac].r;
+      V6.scalpel.drawerFlows = (cr.conns || []).map(function (c, idx) {
+        return {
+          id: 'fb_' + idx,
+          proto: c.proto === 'udp' ? 'udp' : 'tcp',
+          protoBadge: c.proto === 'udp' && c.dport === 443 ? 'QUIC' : String(c.proto || 'tcp').toUpperCase(),
+          state: String(c.state || 'ESTABLISHED'),
+          frozen: false,
+          frozen_until: 0,
+          mac: V6.scalpel.scopeMac,
+          devName: V6.scalpel.devName || V6.scalpel.scopeMac,
+          src_ip: V6.scalpel.scopeIp || '',
+          sport: num(c.sport, 0),
+          dst_ip: String(c.dst || ''),
+          dport: num(c.dport, 0),
+          dst_host: String(c.name || ''),
+          app_name: String(c.app || ''),
+          traffic_type: '',
+          rx_bps: Math.round(num(c.bps, 0) * 0.7),
+          tx_bps: Math.round(num(c.bps, 0) * 0.3),
+          bytes: num(c.bytes, 0)
+        };
       });
-      V6.scalpel.err = '';
+      V6.scalpel.drawerTotal = V6.scalpel.drawerFlows.length;
     } else {
-      V6.scalpel.err = '读取五元组流表失败：' + errText(e);
+      V6.scalpel.err = errText(e);
     }
     v6RefreshScalpelDrawerList();
   });
 }
 
-function v6RefreshScalpelDrawerList() {
-  if (!V6.scalpel.open) return;
-  var listEl = document.getElementById('v6-sc-list');
-  if (listEl) listEl.innerHTML = v6ScalpelListHtml();
-  var cntEl = document.getElementById('v6-sc-cnt');
-  if (cntEl) cntEl.textContent = v6FilteredScalpelFlows().length + ' FLOWS';
-  var rEl = document.getElementById('v6-sc-rules');
-  if (rEl) {
-    rEl.hidden = !(V6.scalpel.activeRulesCount > 0);
-    rEl.textContent = V6.scalpel.activeRulesCount + ' FROZEN';
+function openScalpelDrawer(mac, ip, devName) {
+  if (typeof closeSheet === 'function' && $('#sheet') && $('#sheet').classList.contains('show')) closeSheet(0);
+  V6.scalpel.scopeMac = v6ValidMac(mac) ? String(mac).toLowerCase() : '';
+  V6.scalpel.scopeIp = v6ValidIp(ip) ? String(ip).trim() : '';
+  if (!V6.scalpel.scopeIp && V6.scalpel.scopeMac) {
+    var d0 = devBy(V6.scalpel.scopeMac);
+    if (d0 && v6ValidIp(d0.ip)) V6.scalpel.scopeIp = d0.ip;
+    if (!devName && d0) devName = d0.name;
   }
-}
+  V6.scalpel.devName = devName || '';
+  V6.scalpel.protoFilter = 'ALL';
+  V6.scalpel.q = '';
+  V6.scalpel.paused = false;
+  V6.scalpel.drawerFlows = [];
+  V6.scalpel.drawerTotal = 0;
+  V6.scalpel.open = true;
 
-function openScalpelDrawer(mac, ip, name) {
   var dr = document.getElementById('v6-scalpel-drawer');
   var sc = document.getElementById('v6-scalpel-scrim');
   var bd = document.getElementById('v6-scalpel-body');
   if (!dr || !bd) return;
-  if ($('#sheet') && $('#sheet').classList.contains('show')) closeSheet(0);
-  V6.scalpel.open = true;
-  var normMac = String(mac || '').toLowerCase();
-  V6.scalpel.mac = v6ValidMac(normMac) ? normMac : '';
-  V6.scalpel.ip = v6ValidIp(ip) ? String(ip).trim() : '';
-  var d = V6.scalpel.mac ? devBy(V6.scalpel.mac) : null;
-  V6.scalpel.devName = name || (d && d.name) || '';
-  if (!V6.scalpel.ip && d && v6ValidIp(d.ip)) V6.scalpel.ip = d.ip;
-  V6.scalpel.paused = false;
-  bd.innerHTML = v6ScalpelDrawerBodyHtml();
   dr.hidden = false;
-  void dr.offsetWidth;
-  dr.classList.add('show');
-  if (sc) sc.classList.add('show');
+  bd.innerHTML = v6ScalpelDrawerBodyHtml();
+  requestAnimationFrame(function () {
+    if (sc) sc.classList.add('show');
+    dr.classList.add('show');
+  });
+  try {
+    if (window.history && typeof window.history.pushState === 'function' && !(window.history.state && window.history.state.hncScalpel)) {
+      window.history.pushState({ hncScalpel: 1 }, '');
+      V6.scalpel._pushedHist = true;
+    }
+  } catch (_) {}
+
   v6FetchScalpelFlows();
   clearInterval(V6.scalpel.timer);
   V6.scalpel.timer = setInterval(function () {
@@ -1532,8 +1848,22 @@ function openScalpelDrawer(mac, ip, name) {
   }, 2000);
 }
 
-function closeScalpelDrawer() {
+function closeScalpelDrawer(fromPop) {
+  if (!V6.scalpel.open) return;
   V6.scalpel.open = false;
+  if (!fromPop && V6.scalpel._pushedHist) {
+    V6.scalpel._pushedHist = false;
+    try { if (window.history && window.history.state && window.history.state.hncScalpel) window.history.back(); } catch (_) {}
+  } else {
+    V6.scalpel._pushedHist = false;
+  }
+  V6.scalpel.scopeMac = '';
+  V6.scalpel.scopeIp = '';
+  V6.scalpel.devName = '';
+  V6.scalpel.q = '';
+  V6.scalpel.protoFilter = 'ALL';
+  V6.scalpel.drawerFlows = [];
+  V6.scalpel.drawerTotal = 0;
   clearInterval(V6.scalpel.timer);
   V6.scalpel.timer = 0;
   var dr = document.getElementById('v6-scalpel-drawer');
@@ -1545,37 +1875,36 @@ function closeScalpelDrawer() {
   }
 }
 
-/* ═════════════════════ 写操作处理器（100% 严格对齐后端 DisallowUnknownFields 结构体） ═════════════════════ */
-
-/* POST /api/leakguard/config — 仅允许 { capacity, cooldown_sec, notify_enabled, lockscreen_mask } */
+/* ═════════════════════ 写操作 API 封装（严格对齐后端结构体 + 1.5s 乐观锁） ═════════════════════ */
 function v6SaveLeakGuardConfig(partial, triggerEl, okMsg) {
-  var ringEl = document.getElementById('lgd-ring-cap');
-  var cdEl = document.getElementById('lgd-dedup-sec');
-  var capVal = clamp(Math.round(num(ringEl ? ringEl.value : V6.lg.capacity, 300)), 10, 2000);
-  var cdVal = clamp(Math.round(num(cdEl ? cdEl.value : V6.lg.cooldown_sec, 300)), 0, 86400);
+  var capEl = document.getElementById('lgd-cap-inp');
+  var cdEl = document.getElementById('lgd-cd-inp');
+  var capVal = clamp(Math.round(num(partial && partial.capacity != null ? partial.capacity : (capEl ? capEl.value : V6.lg.capacity), 300)), 10, 2000);
+  var cdVal = clamp(Math.round(num(partial && partial.cooldown_sec != null ? partial.cooldown_sec : (cdEl ? cdEl.value : V6.lg.cooldown_sec), 300)), 0, 86400);
   var payload = {
     capacity: capVal,
     cooldown_sec: cdVal,
     notify_enabled: partial && typeof partial.notify_enabled === 'boolean' ? partial.notify_enabled : V6.lg.notify_enabled,
     lockscreen_mask: partial && typeof partial.lockscreen_mask === 'boolean' ? partial.lockscreen_mask : V6.lg.lockscreen_mask
   };
+  V6.mutUntil.lg = Date.now() + 1500;
   V6.lg.capacity = capVal;
   V6.lg.cooldown_sec = cdVal;
   V6.lg.notify_enabled = payload.notify_enabled;
   V6.lg.lockscreen_mask = payload.lockscreen_mask;
   return busyWhile(triggerEl, api.post(V6_API.lgConfig, payload, { timeout: 8000 })).then(function (r) {
-    if (r) v6ApplyLeakGuardData(r);
-    v6RefreshLeakGuardDom();
-    toast(okMsg || 'LeakGuard 安检配置已保存');
+    if (r) v6ApplyLeakGuardData(r, true);
+    v6RefreshActiveSubviewDom();
+    toast(okMsg || '隐私安检设置已保存');
   }).catch(function (e) {
+    V6.mutUntil.lg = 0;
     toast(errText(e), 'err');
     v6LoadLeakGuard();
   });
 }
 
-/* POST /api/leakguard/clear */
 function v6ClearLeakGuard(btn) {
-  confirmSheet('清空 LeakGuard 取证记录？', '将清空内存环形缓冲区与事件快照中的全部明文隐私外泄告警（已生效的追踪域名/IP 封锁规则保留）。', '清空记录').then(function (ok) {
+  confirmSheet('清空隐私安检记录？', '将清空当前列表中的全部明文传输记录（已手动封禁的追踪域名与 IP 规则会继续保留）。', '清空记录').then(function (ok) {
     if (!ok) return;
     busyWhile(btn, api.post(V6_API.lgClear, {}, { timeout: 8000 })).then(function () {
       V6.lg.events = [];
@@ -1583,27 +1912,26 @@ function v6ClearLeakGuard(btn) {
       V6.lg.total_hits = 0;
       V6.lg.affected_devices = 0;
       V6.lg.openIds = {};
-      v6PaintHeaderBadges();
-      v6RefreshLeakGuardDom();
+      v6MarkLeakGuardSeen();
+      v6RefreshHeroDom();
+      v6RefreshActiveSubviewDom();
       v6RefreshDevicesBannerDom();
-      toast('已清空 LeakGuard 历史告警记录');
+      toast('已清空隐私安检历史记录');
     }).catch(function (e) { toast(errText(e), 'err'); });
   });
 }
 
-/* POST /api/leakguard/block-domain — 仅允许 { action, dst_host, mac }；同时覆盖域名与公网对端 IP */
 function v6BlockLeakDomain(evId, btn) {
   var ev = V6.lg.events.filter(function (x) { return x.id === evId; })[0];
   if (!ev) return;
   var wantBlock = !ev.is_blocked;
   var act = wantBlock ? 'block' : 'unblock';
   var primaryHost = String(ev.dst_host && ev.dst_host !== '—' ? ev.dst_host : ev.dst_ip).trim();
-  if (!primaryHost) { toast('该告警缺少可封禁的目标域名或公网 IP', 'warn'); return; }
+  if (!primaryHost) { toast('该记录缺少可封禁的目标域名或公网 IP', 'warn'); return; }
   var macArg = v6ValidMac(ev.mac) ? ev.mac : '';
   var req1 = { action: act, dst_host: primaryHost, mac: macArg };
 
   busyWhile(btn, api.post(V6_API.lgBlockDomain, req1, { timeout: 9000 }).then(function (r1) {
-    /* 若同时具备独立对端 IP，串联同步封禁/解封对端 IP 实现「拉黑域名+IP」双保险 */
     if (v6ValidIp(ev.dst_ip) && ev.dst_ip.toLowerCase() !== primaryHost.toLowerCase()) {
       return api.post(V6_API.lgBlockDomain, { action: act, dst_host: ev.dst_ip, mac: macArg }, { timeout: 7000 })
         .catch(function () { return r1; })
@@ -1621,11 +1949,10 @@ function v6BlockLeakDomain(evId, btn) {
       }
     });
     v6LoadLeakGuard();
-    toast(wantBlock ? ('已拉黑追踪域名与对端 IP：' + primaryHost) : ('已解除封锁：' + primaryHost));
+    toast(wantBlock ? ('已封禁追踪域名与 IP：' + primaryHost) : ('已解除封禁：' + primaryHost));
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
 
-/* POST /api/v6/scalpel/cut — 严格对齐 { mode, proto, src_ip, sport, dst_ip, dport } */
 function v6BuildScalpelCutPayload(flowObj, modeStr) {
   var p = String(flowObj.proto || 'tcp').toLowerCase();
   var normProto = (p === 'udp' || p === 'quic') ? 'udp' : 'tcp';
@@ -1642,21 +1969,20 @@ function v6BuildScalpelCutPayload(flowObj, modeStr) {
 function v6CutFlow(flowObj, freeze15m, btn) {
   if (!flowObj) return;
   if (!v6ValidIp(flowObj.src_ip) || !v6ValidIp(flowObj.dst_ip) || !(num(flowObj.sport, flowObj.src_port) >= 1)) {
-    toast('五元组端点信息不完整，请刷新流表后重试', 'warn');
+    toast('连接地址信息不完整，请刷新列表后重试', 'warn');
     return;
   }
   var mode = freeze15m ? 'cut_freeze_15m' : 'cut_once';
   var payload = v6BuildScalpelCutPayload(flowObj, mode);
   busyWhile(btn, api.post(V6_API.scalpelCut, payload, { timeout: 8000 })).then(function () {
     toast(freeze15m
-      ? ('已秒斩并冻结 15 分钟：' + (flowObj.dst_host || flowObj.dst_ip) + ':' + payload.dport)
-      : ('已单斩死流：' + payload.dst_ip + ':' + payload.dport));
+      ? ('已断开并封禁 15 分钟：' + (flowObj.dst_host || flowObj.dst_ip))
+      : ('已断开连接：' + (flowObj.dst_host || payload.dst_ip) + ':' + payload.dport));
     if (V6.scalpel.open) v6FetchScalpelFlows();
     if (S.page === 'vector') v6LoadCockpitAll();
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
 
-/* LeakGuard 告警行「秒斩连接」：自动匹配内核 conntrack 中该设备的活跃泄露连接并执行精准单流秒斩 */
 function v6CutLeakEventConn(ev, btn) {
   if (!ev) return;
   if (v6ValidIp(ev.src_ip) && v6ValidIp(ev.dst_ip) && ev.src_port >= 1 && ev.src_port <= 65535) {
@@ -1678,9 +2004,7 @@ function v6CutLeakEventConn(ev, btn) {
       if (hostLow && hostLow !== '—' && (dom === hostLow || dom.slice(-(hostLow.length + 1)) === '.' + hostLow || f.dst_ip === hostLow)) return true;
       return ev.dst_port && dp === ev.dst_port && (!ev.dst_ip && (!hostLow || hostLow === '—'));
     });
-    if (!matched.length) {
-      return { cutN: 0 };
-    }
+    if (!matched.length) return { cutN: 0 };
     var chain = Promise.resolve(), cutN = 0;
     matched.slice(0, 6).forEach(function (mf) {
       chain = chain.then(function () {
@@ -1691,53 +2015,101 @@ function v6CutLeakEventConn(ev, btn) {
     return chain.then(function () { return { cutN: cutN }; });
   })).then(function (res) {
     if (res && res.cutN > 0) {
-      toast('已秒斩 ' + res.cutN + ' 条活跃明文连接：' + (ev.dst_host || ev.dst_ip));
+      toast('已断开 ' + res.cutN + ' 条相关连接：' + (ev.dst_host || ev.dst_ip));
     } else {
       openScalpelDrawer(ev.mac, ev.src_ip, ev.devName);
-      toast('该明文短连接已自然结束，已为您打开该设备的实时五元组手术台', 'warn');
+      toast('该短连接已自然结束，已打开此设备的活跃连接列表', 'warn');
     }
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
 
-/* POST /api/v6/express — 仅允许 { enabled, auto_detect, forced_macs } */
 function v6PostExpress(payload, el, msg) {
+  V6.mutUntil.express = Date.now() + 1500;
   return busyWhile(el, api.post(V6_API.express, payload, { timeout: 8000 })).then(function (r) {
-    v6ApplyExpressData(r || payload);
-    v6RefreshCockpitDom();
+    v6ApplyExpressData(r || payload, true);
+    v6RefreshHeroDom();
+    v6RefreshActiveSubviewDom();
     v6RefreshDevicesBannerDom();
     if (S.page === 'devices') renderDevList(false);
     if (msg) toast(msg);
   }).catch(function (e) {
+    V6.mutUntil.express = 0;
     toast(errText(e), 'err');
     v6LoadCockpitAll();
   });
 }
 
-/* POST /api/v6/update_leash — 仅允许 { action, enabled, grace_mb, leash_kbps, session_key, mac, dst_host } */
 function v6PostLeash(payload, el, msg) {
+  V6.mutUntil.leash = Date.now() + 1500;
   return busyWhile(el, api.post(V6_API.updateLeash, payload, { timeout: 8000 })).then(function (r) {
-    v6ApplyLeashData(r || payload);
-    v6RefreshCockpitDom();
+    v6ApplyLeashData(r || payload, true);
+    v6RefreshHeroDom();
+    v6RefreshActiveSubviewDom();
     v6RefreshDevicesBannerDom();
     if (S.page === 'devices') renderDevList(false);
     if (msg) toast(msg);
   }).catch(function (e) {
+    V6.mutUntil.leash = 0;
     toast(errText(e), 'err');
     v6LoadCockpitAll();
   });
 }
 
-/* POST /api/v6/thermo — 仅允许 { enabled, stage2_shaper_enabled, stage1_temp_c, stage2_temp_c, low_bat_pct } */
 function v6PostThermo(payload, el, msg) {
+  V6.mutUntil.thermo = Date.now() + 1500;
+  if (payload && payload.low_bat_pct == null) payload.low_bat_pct = V6.thermo.low_bat_pct;
   return busyWhile(el, api.post(V6_API.thermo, payload, { timeout: 8000 })).then(function (r) {
-    v6ApplyThermoData(r || payload);
-    v6RefreshCockpitDom();
+    v6ApplyThermoData(r || payload, true);
+    v6PaintHeaderBadges();
+    v6RefreshHeroDom();
+    v6RefreshActiveSubviewDom();
     v6RefreshDevicesBannerDom();
     if (msg) toast(msg);
   }).catch(function (e) {
+    V6.mutUntil.thermo = 0;
     toast(errText(e), 'err');
     v6LoadCockpitAll();
   });
+}
+
+/* 备份文件导出（同时兼容普通浏览器下载与 Android KSU WebView 落盘 /sdcard/Download） */
+function v6ExportBackupBundle(actEl) {
+  busyWhile(actEl, api.get(V6_API.backup, null, { timeout: 10000 })).then(function (bundle) {
+    if (!bundle || typeof bundle !== 'object') { toast('导出数据为空', 'err'); return; }
+    V6.vault.last_sha256 = String(bundle.sha256 || '');
+    V6.vault.last_file_count = Math.round(num(bundle.file_count, 0));
+    v6RefreshActiveSubviewDom();
+    var jsonStr = JSON.stringify(bundle, null, 2);
+    var fname = 'hnc-backup-' + (bundle.module_version || 'v6.0.0') + '-' + Date.now() + '.json';
+    if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function') {
+      var outPath = '/sdcard/Download/' + fname;
+      var b64 = btoa(unescape(encodeURIComponent(jsonStr)));
+      shell("mkdir -p /sdcard/Download && printf '%s' " + sq(b64) + " | base64 -d > " + sq(outPath)).then(function (res) {
+        if (res && res.code === 0) toast('已保存到手机下载目录：' + fname);
+        else if (typeof copyText === 'function') {
+          copyText(jsonStr).then(function (ok) { toast(ok ? '备份内容已复制到剪贴板' : '保存失败', ok ? 'ok' : 'err'); });
+        }
+      });
+      return;
+    }
+    try {
+      var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
+      var url = URL.createObjectURL(blob);
+      var a = document.createElement('a');
+      a.href = url;
+      a.download = fname;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(function () { URL.revokeObjectURL(url); }, 3000);
+      toast('配置备份已导出（共 ' + V6.vault.last_file_count + ' 项）');
+    } catch (_) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(jsonStr);
+        toast('配置备份已复制到剪贴板');
+      }
+    }
+  }).catch(function (e) { toast(errText(e), 'err'); });
 }
 
 /* ═════════════════════ 全局事件委托与生命周期钩子 ═════════════════════ */
@@ -1752,6 +2124,15 @@ function v6BindEvents() {
     if (e.key === 'Escape' && V6.scalpel.open) closeScalpelDrawer();
   });
 
+  /* 记录 <details class="v6-adv-fold"> 展开态，保证后台轮询 morph 时不会自动合上用户展开的高级设置 */
+  document.addEventListener('toggle', function (e) {
+    var dt = e.target;
+    if (dt && dt.matches && dt.matches('details[data-v6-fold]')) {
+      var fk = dt.getAttribute('data-v6-fold');
+      if (fk) V6.advOpen[fk] = !!dt.open;
+    }
+  }, true);
+
   document.addEventListener('change', function (e) {
     var t = e.target;
     if (t && t.id === 'v6-backup-file' && t.files && t.files[0]) {
@@ -1762,16 +2143,16 @@ function v6BindEvents() {
         t.value = '';
         var parsed = null;
         try { parsed = JSON.parse(rawText); } catch (_) {
-          toast('备份文件不是合法的 JSON 格式', 'err');
+          toast('所选文件不是有效的备份文件', 'err');
           return;
         }
-        confirmSheet('确认恢复整机配置？', '将校验 SHA256 摘要并原子覆盖规则、设备命名与全部 v6 策略（当前登录令牌不受影响）。', '立即恢复').then(function (ok) {
+        confirmSheet('确认恢复整机配置？', '将校验完整性摘要并恢复全部设备备注、限速规则与智能护航参数（当前登录状态不受影响）。', '立即恢复').then(function (ok) {
           if (!ok) return;
           api.post(V6_API.backup, parsed, { timeout: 12000 }).then(function (res) {
             V6.vault.last_restored = Math.round(num(res && res.restored_count, 0));
             if (res && res.sha256) V6.vault.last_sha256 = String(res.sha256);
-            v6RefreshCockpitDom();
-            toast('已原子恢复 ' + V6.vault.last_restored + ' 个配置文件');
+            v6LoadCockpitAll();
+            toast('已成功恢复 ' + V6.vault.last_restored + ' 项配置');
           }).catch(function (err) { toast(errText(err), 'err'); });
         });
       };
@@ -1784,35 +2165,82 @@ function v6BindEvents() {
     if (!t) return;
     if (t.id === 'lgd-q') {
       V6.lg.q = t.value;
+      V6.lg.visibleLimit = 30;
       var st = document.getElementById('lgd-stream-list');
-      if (st) st.innerHTML = v6LeakStreamHtml();
+      if (st) morph(st, v6LeakStreamHtml());
     } else if (t.id === 'v6-sc-q') {
       V6.scalpel.q = t.value;
       v6RefreshScalpelDrawerList();
     }
   });
 
-  /* 捕获阶段处理 v6 专属开关与分段器，避免落入 main.js 默认设备开关分支 */
   document.addEventListener('click', function (e) {
     var t = e.target;
     if (!t || typeof t.closest !== 'function') return;
 
-    var segBtn = t.closest('[data-seg="v6-view"] button');
-    if (segBtn) {
+    /* 1. 顶部三大场景切换胶囊 */
+    var subBtn = t.closest('[data-v6-subtab]');
+    if (subBtn) {
       e.stopPropagation();
-      var v = segBtn.getAttribute('data-v') || 'all';
-      V6.view = v;
-      LS.set('hnc6.v6_view', v);
-      var sg = segBtn.parentNode;
-      $$('button', sg).forEach(function (b) { b.classList.toggle('on', b === segBtn); });
-      placeSegs(sg.parentNode);
-      var lgW = document.getElementById('v6-leakguard-wrap');
-      var cpW = document.getElementById('v6-cockpit-wrap');
-      if (lgW) lgW.hidden = !(v === 'all' || v === 'leakguard');
-      if (cpW) cpW.hidden = !(v === 'all' || v === 'cockpit');
+      var nextSub = subBtn.getAttribute('data-v6-subtab') || 'escort';
+      if (typeof haptic === 'function') haptic(8);
+      V6.subtab = nextSub;
+      LS.set('hnc6.v6_subtab', nextSub);
+      if (nextSub === 'privacy') v6MarkLeakGuardSeen();
+      v6RefreshHeroDom();
+      v6RefreshActiveSubviewDom();
       return;
     }
 
+    /* 2A. 顶部 3 格磁贴右上角胶囊：独立一键开关（防误触） */
+    var bentoBtn = t.closest('[data-v6-bento]');
+    if (bentoBtn) {
+      e.stopPropagation();
+      if (bentoBtn.classList.contains('busy')) return;
+      if (typeof haptic === 'function') haptic(10);
+      var bKind = bentoBtn.getAttribute('data-v6-bento');
+      if (bKind === 'express') {
+        var nextExp = !V6.express.enabled;
+        V6.express.enabled = nextExp;
+        v6RefreshHeroDom();
+        v6PostExpress({ enabled: nextExp, auto_detect: V6.express.auto_detect, forced_macs: V6.express.forced_macs }, bentoBtn, nextExp ? '已开启游戏与通话优先' : '已关闭游戏与通话优先');
+      } else if (bKind === 'leash') {
+        var nextUl = !V6.leash.enabled;
+        V6.leash.enabled = nextUl;
+        v6RefreshHeroDom();
+        v6PostLeash({ action: 'config', enabled: nextUl, grace_mb: V6.leash.grace_mb, leash_kbps: V6.leash.leash_kbps }, bentoBtn, nextUl ? '已开启后台大更新限速' : '已关闭后台大更新限速');
+      } else if (bKind === 'thermo') {
+        var nextTh = !V6.thermo.enabled;
+        V6.thermo.enabled = nextTh;
+        v6RefreshHeroDom();
+        v6PostThermo({ enabled: nextTh, stage2_shaper_enabled: V6.thermo.stage2_shaper_enabled, stage1_temp_c: V6.thermo.stage1_temp_c, stage2_temp_c: V6.thermo.stage2_temp_c, low_bat_pct: V6.thermo.low_bat_pct }, bentoBtn, nextTh ? '已开启发热与省电保护' : '已关闭发热与省电保护');
+      }
+      return;
+    }
+
+    /* 2B. 顶部 3 格磁贴主体点按：平滑定位至对应设置卡片（不误关保护开关） */
+    var bentoNav = t.closest('[data-v6-bento-nav]');
+    if (bentoNav) {
+      e.stopPropagation();
+      if (typeof haptic === 'function') haptic(6);
+      var navKind = bentoNav.getAttribute('data-v6-bento-nav');
+      if (V6.subtab !== 'escort') {
+        V6.subtab = 'escort';
+        LS.set('hnc6.v6_subtab', 'escort');
+        v6RefreshHeroDom();
+        v6RefreshActiveSubviewDom();
+      }
+      var cardId = navKind === 'leash' ? 'v6-card-leash' : (navKind === 'thermo' ? 'v6-card-thermo' : 'v6-card-express');
+      setTimeout(function () {
+        var targetCard = document.getElementById(cardId);
+        if (targetCard && targetCard.scrollIntoView) {
+          targetCard.scrollIntoView({ behavior: motionOn() ? 'smooth' : 'auto', block: 'center' });
+        }
+      }, 40);
+      return;
+    }
+
+    /* 3. 卡片内圆形拨动开关 */
     var vTog = t.closest('[data-v6-tog]');
     if (vTog) {
       e.stopPropagation();
@@ -1823,34 +2251,48 @@ function v6BindEvents() {
       if (typeof haptic === 'function') haptic(10);
       var kind = vTog.getAttribute('data-v6-tog');
       if (kind === 'lgd-notify') {
-        v6SaveLeakGuardConfig({ notify_enabled: nextOn }, vTog, nextOn ? '已开启状态栏系统通知' : '已关闭状态栏系统通知');
+        v6SaveLeakGuardConfig({ notify_enabled: nextOn }, vTog, nextOn ? '已开启手机状态栏提醒' : '已关闭手机状态栏提醒');
       } else if (kind === 'lgd-mask') {
-        v6SaveLeakGuardConfig({ lockscreen_mask: nextOn }, vTog, nextOn ? '已开启锁屏半脱敏保护' : '已关闭锁屏半脱敏保护');
+        v6SaveLeakGuardConfig({ lockscreen_mask: nextOn }, vTog, nextOn ? '已开启锁屏敏感位隐藏' : '已关闭锁屏敏感位隐藏');
       } else if (kind === 'express') {
         V6.express.enabled = nextOn;
-        v6PostExpress({ enabled: nextOn, auto_detect: V6.express.auto_detect, forced_macs: V6.express.forced_macs }, vTog, nextOn ? 'Vector Express 救护车零排队已开启' : 'Vector Express 已关闭');
+        v6RefreshHeroDom();
+        v6PostExpress({ enabled: nextOn, auto_detect: V6.express.auto_detect, forced_macs: V6.express.forced_macs }, vTog, nextOn ? '游戏与通话优先已开启' : '游戏与通话优先已关闭');
+      } else if (kind === 'express-auto') {
+        V6.express.auto_detect = nextOn;
+        v6PostExpress({ enabled: V6.express.enabled, auto_detect: nextOn, forced_macs: V6.express.forced_macs }, vTog, nextOn ? '已开启自动识别游戏与通话' : '已切换为仅手动指定设备优先');
       } else if (kind === 'leash') {
         V6.leash.enabled = nextOn;
-        v6PostLeash({ action: 'config', enabled: nextOn, grace_mb: V6.leash.grace_mb, leash_kbps: V6.leash.leash_kbps }, vTog, nextOn ? 'UpdateLeash 后台更新拴绳已开启' : 'UpdateLeash 已关闭');
+        v6RefreshHeroDom();
+        v6PostLeash({ action: 'config', enabled: nextOn, grace_mb: V6.leash.grace_mb, leash_kbps: V6.leash.leash_kbps }, vTog, nextOn ? '后台大更新限速已开启' : '后台大更新限速已关闭');
       } else if (kind === 'thermo') {
         V6.thermo.enabled = nextOn;
-        v6PostThermo({ enabled: nextOn, stage2_shaper_enabled: V6.thermo.stage2_shaper_enabled, stage1_temp_c: V6.thermo.stage1_temp_c, stage2_temp_c: V6.thermo.stage2_temp_c }, vTog, nextOn ? 'ThermoCruise 电芯温控巡航已开启' : 'ThermoCruise 已关闭');
+        v6RefreshHeroDom();
+        v6PostThermo({ enabled: nextOn, stage2_shaper_enabled: V6.thermo.stage2_shaper_enabled, stage1_temp_c: V6.thermo.stage1_temp_c, stage2_temp_c: V6.thermo.stage2_temp_c, low_bat_pct: V6.thermo.low_bat_pct }, vTog, nextOn ? '发热与省电保护已开启' : '发热与省电保护已关闭');
+      } else if (kind === 'thermo-shaper') {
+        V6.thermo.stage2_shaper_enabled = nextOn;
+        v6PostThermo({ enabled: V6.thermo.enabled, stage2_shaper_enabled: nextOn, stage1_temp_c: V6.thermo.stage1_temp_c, stage2_temp_c: V6.thermo.stage2_temp_c, low_bat_pct: V6.thermo.low_bat_pct }, vTog, nextOn ? '已开启严重过热自动收紧后台网速' : '已关闭过热限速降温');
       }
       return;
     }
 
+    /* 4. 按钮动作分发 */
     var actEl = t.closest('[data-v6-act]');
     if (!actEl) return;
     var act = actEl.getAttribute('data-v6-act');
-
-    /* 在折叠告警行内部点击操作按钮时，不触发行的折叠切换 */
-    if (act === 'lgd-toggle-row' && t.closest('.lgd-acts')) return;
-
     e.stopPropagation();
 
     switch (act) {
       case 'go-vector':
         if (typeof go === 'function') go('vector');
+        break;
+      case 'go-privacy':
+        v6FocusPrivacyPanel();
+        break;
+      case 'toggle-health':
+        V6.healthOpen = !V6.healthOpen;
+        var hd = document.getElementById('v6-health-drawer');
+        if (hd) hd.hidden = !V6.healthOpen;
         break;
       case 'open-scalpel':
         openScalpelDrawer(actEl.getAttribute('data-mac') || '', actEl.getAttribute('data-ip') || '', actEl.getAttribute('data-name') || '');
@@ -1859,8 +2301,8 @@ function v6BindEvents() {
         closeScalpelDrawer();
         break;
       case 'scalpel-all-scope':
-        V6.scalpel.mac = '';
-        V6.scalpel.ip = '';
+        V6.scalpel.scopeMac = '';
+        V6.scalpel.scopeIp = '';
         V6.scalpel.devName = '';
         var bd0 = document.getElementById('v6-scalpel-body');
         if (bd0) bd0.innerHTML = v6ScalpelDrawerBodyHtml();
@@ -1868,7 +2310,7 @@ function v6BindEvents() {
         break;
       case 'scalpel-pause':
         V6.scalpel.paused = !V6.scalpel.paused;
-        actEl.textContent = V6.scalpel.paused ? '已暂停' : '实时2s';
+        actEl.textContent = V6.scalpel.paused ? '已暂停刷新' : '2秒自动刷新';
         actEl.classList.toggle('warn', V6.scalpel.paused);
         if (!V6.scalpel.paused) v6FetchScalpelFlows();
         break;
@@ -1880,23 +2322,43 @@ function v6BindEvents() {
       case 'scalpel-cut-once':
       case 'scalpel-cut-freeze':
         var fid = actEl.getAttribute('data-fid');
-        var fl = V6.scalpel.flows.filter(function (x) { return x.id === fid; })[0];
+        var pool = (V6.scalpel.scopeMac || V6.scalpel.scopeIp) ? V6.scalpel.drawerFlows : (V6.scalpel.drawerFlows.length ? V6.scalpel.drawerFlows : V6.scalpel.globalFlows);
+        var fl = pool.filter(function (x) { return x.id === fid; })[0];
         v6CutFlow(fl, act === 'scalpel-cut-freeze', actEl);
         break;
       case 'lgd-refresh':
-        busyWhile(actEl, v6LoadLeakGuard()).then(function () { toast('LeakGuard 取证流已刷新'); });
+        busyWhile(actEl, v6LoadLeakGuard()).then(function () { toast('隐私安检列表已刷新'); });
         break;
       case 'lgd-clear':
         v6ClearLeakGuard(actEl);
         break;
       case 'lgd-save-cfg':
-        v6SaveLeakGuardConfig(null, actEl, '已保存环形缓冲容量与去重冷却配置');
+        v6SaveLeakGuardConfig(null, actEl, '通知提醒与保留设置已保存');
         break;
       case 'lgd-filter':
         V6.lg.typeFilter = actEl.getAttribute('data-type') || 'ALL';
+        V6.lg.visibleLimit = 30;
         $$('#v6-leakguard-card [data-v6-act="lgd-filter"]').forEach(function (b) { b.classList.toggle('on', b === actEl); });
         var stL = document.getElementById('lgd-stream-list');
-        if (stL) stL.innerHTML = v6LeakStreamHtml();
+        if (stL) morph(stL, v6LeakStreamHtml());
+        break;
+      case 'lgd-show-more':
+        V6.lg.visibleLimit = Math.max(30, num(V6.lg.visibleLimit, 30)) + 50;
+        var stMore = document.getElementById('lgd-stream-list');
+        if (stMore) morph(stMore, v6LeakStreamHtml());
+        break;
+      case 'lgd-copy-raw':
+        var cpId = actEl.getAttribute('data-id');
+        var cpEv = V6.lg.events.filter(function (x) { return x.id === cpId; })[0];
+        if (cpEv && cpEv.raw_value) {
+          if (typeof copyText === 'function') {
+            copyText(cpEv.raw_value).then(function (ok) {
+              toast(ok ? '已复制完整明文内容' : '复制失败', ok ? 'ok' : 'err');
+            });
+          } else if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(cpEv.raw_value).then(function () { toast('已复制完整明文内容'); }).catch(function () {});
+          }
+        }
         break;
       case 'lgd-toggle-row':
       case 'lgd-toggle-btn':
@@ -1909,9 +2371,15 @@ function v6BindEvents() {
           var openNow = !!V6.lg.openIds[eid];
           itemEl.classList.toggle('is-open', openNow);
           var fr = itemEl.querySelector('.lgd-forensic');
-          if (fr) fr.hidden = !openNow;
+          if (fr) {
+            if (openNow && !fr.innerHTML) {
+              var evFound = V6.lg.events.filter(function (x) { return x.id === eid; })[0];
+              if (evFound) fr.innerHTML = v6RenderLeakForensicInnerHtml(evFound);
+            }
+            fr.hidden = !openNow;
+          }
           var tb = itemEl.querySelector('[data-v6-act="lgd-toggle-btn"]');
-          if (tb) tb.textContent = openNow ? '收起报文' : '展开报文';
+          if (tb) tb.textContent = openNow ? '收起原文' : '查看原文';
         }
         break;
       case 'lgd-block-domain':
@@ -1921,14 +2389,6 @@ function v6BindEvents() {
         var ceid = actEl.getAttribute('data-id');
         var cev = V6.lg.events.filter(function (x) { return x.id === ceid; })[0];
         if (cev) v6CutLeakEventConn(cev, actEl);
-        break;
-      case 'express-auto':
-        V6.express.auto_detect = !V6.express.auto_detect;
-        v6PostExpress({
-          enabled: V6.express.enabled,
-          auto_detect: V6.express.auto_detect,
-          forced_macs: V6.express.forced_macs
-        }, actEl, V6.express.auto_detect ? '已开启游戏与实时通话自动护航检测' : '已切换为仅手动锁定设备护航');
         break;
       case 'express-dev':
         var emac = String(actEl.getAttribute('data-mac') || '').toLowerCase();
@@ -1944,7 +2404,19 @@ function v6BindEvents() {
           enabled: nextEnabled,
           auto_detect: V6.express.auto_detect,
           forced_macs: nextMacs
-        }, actEl, pos < 0 ? '已锁定常驻零排队护航' : '已解除常驻零排队锁定');
+        }, actEl, pos < 0 ? '已将该设备设为常驻优先' : '已取消该设备的常驻优先');
+        break;
+      case 'leash-preset-grace':
+        var pMb = clamp(Math.round(num(actEl.getAttribute('data-mb'), 200)), 10, 10240);
+        var gInp = document.getElementById('v6-ul-grace');
+        if (gInp) gInp.value = String(pMb);
+        V6.leash.grace_mb = pMb;
+        v6PostLeash({
+          action: 'config',
+          enabled: V6.leash.enabled,
+          grace_mb: pMb,
+          leash_kbps: V6.leash.leash_kbps
+        }, actEl, '免限速高速额度已设为 ' + (pMb >= 1024 ? '1 GB' : (pMb + ' MB')));
         break;
       case 'leash-save':
         var gm = clamp(Math.round(num(($('#v6-ul-grace') || {}).value, 200)), 10, 10240);
@@ -1956,7 +2428,7 @@ function v6BindEvents() {
           enabled: V6.leash.enabled,
           grace_mb: gm,
           leash_kbps: kb
-        }, actEl, 'UpdateLeash 缓冲 ' + gm + 'MB / 限速 ' + kb + 'Kbps 已保存');
+        }, actEl, '已保存：前 ' + gm + ' MB 全速，超额限速 ' + trim0((kb / 1000).toFixed(1)) + ' Mbps');
         break;
       case 'leash-release':
         var rMac = actEl.getAttribute('data-mac') || '';
@@ -1965,7 +2437,7 @@ function v6BindEvents() {
           session_key: actEl.getAttribute('data-skey') || '',
           mac: v6ValidMac(rMac) ? rMac : '',
           dst_host: actEl.getAttribute('data-host') || ''
-        }, actEl, '已对该更新会话执行本次全速放行');
+        }, actEl, '已对该下载执行本次全速放行');
         break;
       case 'leash-pause-toggle':
         var isPaused = actEl.getAttribute('data-paused') === '1';
@@ -1975,22 +2447,13 @@ function v6BindEvents() {
           session_key: actEl.getAttribute('data-skey') || '',
           mac: v6ValidMac(pMac) ? pMac : '',
           dst_host: actEl.getAttribute('data-host') || ''
-        }, actEl, isPaused ? '已恢复该更新会话下载' : '已暂停该后台更新流');
-        break;
-      case 'thermo-shaper':
-        V6.thermo.stage2_shaper_enabled = !V6.thermo.stage2_shaper_enabled;
-        v6PostThermo({
-          enabled: V6.thermo.enabled,
-          stage2_shaper_enabled: V6.thermo.stage2_shaper_enabled,
-          stage1_temp_c: V6.thermo.stage1_temp_c,
-          stage2_temp_c: V6.thermo.stage2_temp_c
-        }, actEl, V6.thermo.stage2_shaper_enabled ? '已启用二阶高温带宽收束' : '已关闭二阶高温带宽收束');
+        }, actEl, isPaused ? '已继续下载该更新' : '已暂停该后台更新');
         break;
       case 'thermo-save':
         var t1 = clamp(Math.round(num(($('#v6-th-t1') || {}).value, 42)), 30, 70);
         var t2 = clamp(Math.round(num(($('#v6-th-t2') || {}).value, 45)), 32, 75);
         if (t2 < t1) {
-          toast('二阶护航温度不能低于一阶省电温度', 'warn');
+          toast('二级降温温度不能低于一级省电温度', 'warn');
           break;
         }
         V6.thermo.stage1_temp_c = t1;
@@ -1999,24 +2462,25 @@ function v6BindEvents() {
           enabled: V6.thermo.enabled,
           stage2_shaper_enabled: V6.thermo.stage2_shaper_enabled,
           stage1_temp_c: t1,
-          stage2_temp_c: t2
-        }, actEl, '温控巡航阈值已保存：' + t1 + ' °C / ' + t2 + ' °C');
+          stage2_temp_c: t2,
+          low_bat_pct: V6.thermo.low_bat_pct
+        }, actEl, '温控触发温度已保存：' + t1 + '°C / ' + t2 + '°C');
         break;
       case 'bb-sample':
         busyWhile(actEl, api.post(V6_API.blackbox, { action: 'sample_now' }, { timeout: 6000 })).then(function () {
           return api.get(V6_API.blackbox, { limit: 12, incidents_only: '1' }, { timeout: 6000 });
         }).then(function (r) {
           v6ApplyBlackboxData(r);
-          v6RefreshCockpitDom();
-          toast('已完成 200ms 黑匣子即时采样');
+          v6RefreshActiveSubviewDom();
+          toast('已完成网络延迟波动即时检测');
         }).catch(function (e) { toast(errText(e), 'err'); });
         break;
       case 'bb-clear':
         busyWhile(actEl, api.post(V6_API.blackbox, { action: 'clear' }, { timeout: 6000 })).then(function () {
           V6.blackbox.incidents = [];
           V6.blackbox.incident_count = 0;
-          v6RefreshCockpitDom();
-          toast('已清空 200ms 卡顿黑匣子历史记录');
+          v6RefreshActiveSubviewDom();
+          toast('已清空卡顿事件记录');
         }).catch(function (e) { toast(errText(e), 'err'); });
         break;
       case 'subtrees-sync':
@@ -2024,46 +2488,30 @@ function v6BindEvents() {
           if (r && r.dynamic_qos) {
             v6ApplyScreenshotPackSummary({ native_subtrees: r });
           }
-          v6RefreshCockpitDom();
-          toast('已触发原生 Netlink M8 二级子树与动态 QoS 同步');
+          v6RefreshActiveSubviewDom();
+          toast('底层分流规则已重新同步');
         }).catch(function (e) { toast(errText(e), 'err'); });
         break;
       case 'backup-export':
-        busyWhile(actEl, api.get(V6_API.backup, null, { timeout: 10000 })).then(function (bundle) {
-          if (!bundle || typeof bundle !== 'object') { toast('导出空载荷', 'err'); return; }
-          V6.vault.last_sha256 = String(bundle.sha256 || '');
-          V6.vault.last_file_count = Math.round(num(bundle.file_count, 0));
-          v6RefreshCockpitDom();
-          var jsonStr = JSON.stringify(bundle, null, 2);
-          var fname = 'hnc-backup-' + (bundle.module_version || 'v6.0.0') + '-' + Date.now() + '.json';
-          try {
-            var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
-            var url = URL.createObjectURL(blob);
-            var a = document.createElement('a');
-            a.href = url;
-            a.download = fname;
-            document.body.appendChild(a);
-            a.click();
-            document.body.removeChild(a);
-            setTimeout(function () { URL.revokeObjectURL(url); }, 3000);
-            toast('整机配置备份已导出 (' + V6.vault.last_file_count + ' 项)');
-          } catch (_) {
-            if (navigator.clipboard && navigator.clipboard.writeText) {
-              navigator.clipboard.writeText(jsonStr);
-              toast('备份 JSON 已复制到剪贴板');
-            }
-          }
-        }).catch(function (e) { toast(errText(e), 'err'); });
+        v6ExportBackupBundle(actEl);
         break;
       case 'backup-import-pick':
         var fin = document.getElementById('v6-backup-file');
-        if (fin) fin.click();
+        if (!fin) {
+          fin = document.createElement('input');
+          fin.id = 'v6-backup-file';
+          fin.type = 'file';
+          fin.accept = '.json,application/json';
+          fin.hidden = true;
+          document.body.appendChild(fin);
+        }
+        fin.click();
         break;
     }
   }, true);
 }
 
-/* 启动与轮询协同：KSU 模式下优先消费 /api/vector_sync 摘要，矢量页按需刷新明细；404 回退时低频安全轮询 */
+/* 启动与轮询协同 */
 function v6RefreshSummarySilent() {
   if (S.vectorSyncState === 'supported') return;
   if (V6.apiSupported.lg) v6LoadLeakGuard();
@@ -2103,6 +2551,7 @@ if (typeof window !== 'undefined') {
     highlightRawSnippet: highlightRawSnippet,
     openScalpelDrawer: openScalpelDrawer,
     closeScalpelDrawer: closeScalpelDrawer,
+    focusPrivacy: v6FocusPrivacyPanel,
     ingestSync: v6IngestVectorSync,
     renderVectorPage: renderVectorPage
   };

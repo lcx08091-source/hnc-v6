@@ -348,8 +348,11 @@ func TestLimitPolicyNotificationOutsideActionLock(t *testing.T) {
 	c.apply = func(mac string, from, to limitRule) error { return nil }
 
 	notifyEntered := make(chan struct{}, 1)
-	oldExec := quotaNotifyExecFn
-	quotaNotifyExecFn = func(ctx context.Context, title, body string) error {
+	releaseNotify := make(chan struct{})
+	var notifyWG sync.WaitGroup
+	notifyWG.Add(1)
+	restoreExec := setQuotaNotifyExecFn(func(ctx context.Context, title, body string) error {
+		defer notifyWG.Done()
 		// 通知触发时如果 actionMu 仍被 tick 持有, 这里 TryLock 会失败(证明死锁风险)!
 		if !actionMu.TryLock() {
 			t.Errorf("CRITICAL: actionMu is STILL HELD while quota notification executes!")
@@ -360,10 +363,18 @@ func TestLimitPolicyNotificationOutsideActionLock(t *testing.T) {
 		case notifyEntered <- struct{}{}:
 		default:
 		}
-		<-ctx.Done()
-		return ctx.Err()
-	}
-	t.Cleanup(func() { quotaNotifyExecFn = oldExec })
+		select {
+		case <-releaseNotify:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	})
+	t.Cleanup(func() {
+		close(releaseNotify)
+		notifyWG.Wait()
+		restoreExec()
+	})
 
 	mac := "aa:bb:cc:dd:ee:99"
 	_ = c.actionQuotaSet(map[string]string{"mac": mac, "daily_gb": "1", "action": "throttle"})
@@ -395,6 +406,8 @@ func TestLimitPolicyNotificationOutsideActionLock(t *testing.T) {
 }
 
 func TestConntrackAdaptiveTTL4sAnd8s(t *testing.T) {
+	oldTouch := ctPanelTouchMonoNs.Load()
+	t.Cleanup(func() { ctPanelTouchMonoNs.Store(oldTouch) })
 	nowMono := int64(100 * time.Second)
 	ctPanelTouchMonoNs.Store(0)
 	if got := conntrackEffectiveTTL(nowMono); got != 8*time.Second {

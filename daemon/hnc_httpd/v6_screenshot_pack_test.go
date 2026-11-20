@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 )
@@ -215,8 +214,8 @@ func TestV6NativeSubtreesNetlinkAndDynamicQoS(t *testing.T) {
 	ndTotal := rtnlMsgHdrLen + 12 + len(neighPayload)
 	ndMsg := make([]byte, ndTotal)
 	binary.LittleEndian.PutUint32(ndMsg[0:4], uint32(ndTotal))
-	binary.LittleEndian.PutUint16(ndMsg[4:6], uint16(syscall.RTM_NEWNEIGH))
-	ndMsg[16] = uint8(syscall.AF_INET6)
+	binary.LittleEndian.PutUint16(ndMsg[4:6], rtnlNewNeigh)
+	ndMsg[16] = rtnlAfInet6
 	binary.LittleEndian.PutUint32(ndMsg[20:24], 9)
 	binary.LittleEndian.PutUint16(ndMsg[24:26], nudReachable)
 	copy(ndMsg[28:], neighPayload)

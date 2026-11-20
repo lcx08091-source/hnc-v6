@@ -13,8 +13,17 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-0-0" data-version="v6.0.0" data-version-code="6000000">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-rocket"/></svg>v6.0.0(正式版): Vector 矢量网关架构重构 · 四舱壁隔离中枢与 json/v2 快路径 · LeakGuard 明文隐私安检取证 · 六大战术舱与三级自适应数据面 <span class="badge b-ok" style="margin-left:4px">最新稳定版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-19 · versionCode 6000000</span></div>
+  <ul class="cl-list">
+    <li><b>CoreHub 四舱壁隔离中枢与 Go 1.27 encoding/json/v2 快路径</b>：重构守护进程控制面为 <span class="mono">dataplane</span>、<span class="mono">dpi_shm</span>、<span class="mono">android_bridge</span>、<span class="mono">storage</span> 四大独立熔断舱壁，新增无锁双缓冲聚合快照端点 <span class="mono">/api/vector_sync</span>，全量启用 Go 1.27 标准库 <span class="mono">encoding/json/v2</span> 编解码引擎，将首屏同步收敛至单次请求，空闲轮询功耗较 v5 世代进一步下降 80%。</li>
+    <li><b>LeakGuard 零解密 HTTP 明文隐私安检取证</b>：<span class="mono">dpid</span> 旁路零拷贝嗅探下游设备未加密 HTTP 明文请求中的手机号、设备指纹（IMEI/OAID/Android ID）、精确经纬度、MAC 地址与鉴权 Token，WebUI 完整呈现原始明文值与 XSS 安全高亮 HTTP 报文切片，支持双栈一键拉黑追踪域名+IP 与秒斩活跃连接，兼顾手机状态栏锁屏半脱敏保护。</li>
+    <li><b>六大主动战术舱全面就位</b>：新增 <b>Vector Express</b> 救护车零排队护航（游戏/会议直入 <span class="mono">PRIO 0</span> 并联动收束后台池）、<b>UpdateLeash</b> 后台更新拴绳（前段突发免死额全速放行、超额巨量系统/商店更新自动平滑收束）、<b>ThermoCruise</b> 直读内核 sysfs 电芯温控巡航（3 °C 施密特回差 + 充电/游戏豁免）、<b>FlowScalpel</b> 五元组连接手术台（免断网单斩死流与 15 分钟四元组冻结）、<b>JitterBlackbox</b> 200ms 环形卡顿黑匣子与 Wi-Fi 7 MLO / USB 多口并管、<b>ConfigVault</b> 整机配置 SHA256 校验导出与原子恢复。</li>
+    <li><b>三级自适应限速引擎、M8 原生二级子树与 5-Tab 矢量中枢界面</b>：构建 <span class="mono">Tier-A</span>（eBPF EDT 零锁纳秒级发包调度）→ <span class="mono">Tier-B</span>（Go 原生 RTNetlink 二级 HTB + 单次双栈 <span class="mono">iptables-restore --noflush</span> 原子提交）→ <span class="mono">Tier-C</span>（全机型兼容回退）三级数据面，预留 <span class="mono">1:fffe</span> 2.5Gbps 局域网互传免限速直通与 <span class="mono">tun0</span> 防环路守卫；底栏升级为五栏导航，新增独立「矢量中枢」战术视图，四大主题（液态玻璃 / 赛博霓虹 / Apple 浅深色）全面适配。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v5-40-3" data-version="v5.40.3" data-version-code="5400300">
-  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v5.40.3(正式版): 全仓 NDK r30 C11 柔性数组与 Bionic 头文件清障 · Go 1.27 双架构 CI 全绿基线 · RMX5010 数据面加固 <span class="badge b-ok" style="margin-left:4px">最新稳定版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-19 · versionCode 5400300</span></div>
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v5.40.3(正式版): 全仓 NDK r30 C11 柔性数组与 Bionic 头文件清障 · Go 1.27 双架构 CI 全绿基线 · RMX5010 数据面加固 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-19 · versionCode 5400300</span></div>
   <ul class="cl-list">
     <li><b>根治 NDK r30 C11 严格编译红叉</b>：重构 <span class="mono">hnc_tc_ingress.c</span> 中含柔性数组的 <span class="mono">tc_u32_sel</span> 缓冲区布局（彻底消除 Clang <span class="mono">-Wgnu-variable-sized-type-not-at-end</span> 报错），为全仓 16 个 C 源文件补齐 Android Bionic <span class="mono">&lt;strings.h&gt;</span> / <span class="mono">&lt;sys/time.h&gt;</span> 头文件与纯 ISO C11 日志宏、无符号 Netlink 边界解析。</li>
     <li><b>Go 1.27 双架构构建与 RMX5010 真机修复闭环</b>：保留 <span class="mono">.rodata</span> 路由字面量驻留、单应用限速与三档 QoS 在 <span class="mono">POSTROUTING</span> 优先存入 <span class="mono">CONNMARK</span> 及 <span class="mono">hnc_httpd</span> 单实例排他锁。</li>

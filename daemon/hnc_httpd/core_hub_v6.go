@@ -850,6 +850,9 @@ func (h *CoreHub) Close() {
 	h.DpiShmBulkhead.Close()
 	h.AndroidBridgeBulkhead.Close()
 	h.StorageBulkhead.Close()
+	if h.srv != nil {
+		serverHubMap.Delete(h.srv)
+	}
 }
 
 // Snapshot 无锁 RCU 原子读取当前全栈态势快照(单条指针加载指令, < 50ns, 0 互斥锁, 0 分配)。

@@ -464,7 +464,7 @@
        behind the glass). The ring mask needs no extra channel — the centre has zero displacement,
        so |R − ½| + |G − ½| *is* the ring. */
     let base = 'shaded';
-    if (o.sat !== 1) {
+    if (Math.abs((o.sat || 1) - 1) > 0.08) {
       for (const [ch, row] of [['R', '1 0 0 0 0'], ['G', '0 1 0 0 0']]) {
         f.appendChild(prim('feColorMatrix', { in: 'map', type: 'matrix',
           values: `0 0 0 0 1  0 0 0 0 1  0 0 0 0 1  ${row}`, result: 'rg' + ch }));   // RGB ← white, A ← that channel
@@ -501,14 +501,17 @@
      on the element itself, so they stay crisp and follow border-radius for free — and they show up
      in Safari and Firefox too, which get no refraction at all. */
   function edgeShadow(o) {
-    const a = o.edge;
+    let a = o.edge;
     if (a <= 0) return 'none';
+    let isDark = false;
+    try { isDark = document.documentElement.getAttribute('data-theme') === 'dark'; } catch (_) {}
+    if (isDark) a *= 0.18; // OLED Dark Mode: whisper-subtle crystal hairline instead of chalky white ring
     const rad = o.light * Math.PI / 180, dx = Math.sin(rad).toFixed(2), dy = (-Math.cos(rad)).toFixed(2);
     return [
-      `inset 0 0 0 .5px rgba(255,255,255,${(0.72 * a).toFixed(3)})`,                  // the line itself
-      `inset ${dx}px ${dy}px 0 .5px rgba(255,255,255,${(0.55 * a).toFixed(3)})`,      // brighter into the light
-      `inset 0 0 0 1.5px rgba(0,0,0,${(0.16 * a).toFixed(3)})`,                       // the hairline of dark under it
-      `inset 0 0 6px 2px rgba(255,255,255,${(0.07 * a).toFixed(3)})`,                 // one faint band further in
+      `inset 0 0 0 .5px rgba(255,255,255,${(0.72 * a).toFixed(3)})`,
+      `inset ${dx}px ${dy}px 0 .5px rgba(255,255,255,${(0.55 * a).toFixed(3)})`,
+      `inset 0 0 0 1.5px rgba(0,0,0,${(isDark ? 0.42 : 0.16 * a).toFixed(3)})`,
+      `inset 0 0 6px 2px rgba(255,255,255,${(0.06 * a).toFixed(3)})`,
     ].join(',');
   }
 

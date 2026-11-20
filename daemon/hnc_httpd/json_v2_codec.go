@@ -102,16 +102,35 @@ func releaseJSONv2Encoder(pw *pooledJSONv2Encoder) {
 	jsonV2EncoderPool.Put(pw)
 }
 
+var (
+	jsonV2CompactOpts = jsonv2.JoinOptions(
+		jsonv2.DefaultOptionsV2(),
+		jsontext.AllowInvalidUTF8(true),
+		jsontext.AllowDuplicateNames(true),
+	)
+	jsonV2MultilineOpts = jsonv2.JoinOptions(
+		jsonv2.DefaultOptionsV2(),
+		jsontext.AllowInvalidUTF8(true),
+		jsontext.AllowDuplicateNames(true),
+		jsonv2.Deterministic(true),
+		jsontext.WithIndent("  "),
+	)
+	jsonV2DecodeOpts = jsonv2.JoinOptions(
+		jsonv2.DefaultOptionsV2(),
+		jsontext.AllowInvalidUTF8(true),
+		jsontext.AllowDuplicateNames(true),
+		jsonv2.MatchCaseInsensitiveNames(true),
+	)
+)
+
 // encodeToPooledBuffer 使用 Go 1.27 json/v2 + jsontext 序列化到复用缓冲区;
 // 若传入包含未指定格式的 time.Duration 等遗留 v1 类型, 自动回退至 v1 编码保证 100% 兼容。
 func encodeToPooledBuffer(v any, multiline bool) (*pooledJSONv2Encoder, error) {
 	globalJSONv2Metrics.encodeCalls.Add(1)
 	pw := acquireJSONv2Encoder(multiline)
-	var opts jsonv2.Options
+	opts := jsonV2CompactOpts
 	if multiline {
-		opts = jsonv2.JoinOptions(jsonv2.DefaultOptionsV2(), jsonv2.Deterministic(true))
-	} else {
-		opts = jsonv2.DefaultOptionsV2()
+		opts = jsonV2MultilineOpts
 	}
 	if err := jsonv2.MarshalEncode(pw.enc, v, opts); err != nil {
 		globalJSONv2Metrics.encodeFallback.Add(1)
@@ -166,12 +185,7 @@ func UnmarshalJSONv2(data []byte, out any) error {
 		dec.Reset(bytes.NewReader(nil))
 		jsonV2DecoderPool.Put(dec)
 	}()
-	return jsonv2.UnmarshalDecode(
-		dec,
-		out,
-		jsonv2.DefaultOptionsV2(),
-		jsonv2.MatchCaseInsensitiveNames(true),
-	)
+	return jsonv2.UnmarshalDecode(dec, out, jsonV2DecodeOpts)
 }
 
 // WriteJSONv2 使用 Go 1.27 encoding/json/v2 + sync.Pool 缓冲池向 http.ResponseWriter 输出 JSON。

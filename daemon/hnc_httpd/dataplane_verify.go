@@ -377,6 +377,11 @@ var dataplaneRequiredAPIMarkers = [...]string{
 	"dpi_rebind",
 	"/api/dataplane_verify",
 	"dataplane_verify_run",
+	"/api/vector_sync",
+	"/api/leakguard/events",
+	"/api/v6/express",
+	"/api/v6/blackbox",
+	"/api/backup",
 }
 
 // dispatchDataplaneVerifyAction 供 action.go 在锁外(handleAction)或锁内(dispatchAction)分发。

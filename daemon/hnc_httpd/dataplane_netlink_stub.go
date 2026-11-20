@@ -21,7 +21,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
+	"time"
 )
 
 const (
@@ -169,7 +171,7 @@ func useNativeDataplane(hncDir string) bool {
 	if b, err := os.ReadFile(constPath); err == nil && bytes.Contains(b, []byte("run/exec.log")) {
 		return false
 	}
-	return false
+	return true
 }
 
 func pschedTickInUsecFromContent(content string) float64 {
@@ -1132,8 +1134,63 @@ var (
 	nativeIptCmdRunner = func(_ string, _ ...string) (string, error) { return "", errNetlinkUnsupportedOS }
 )
 
-func acquireNativeDataplaneLock(_, _ string) (func(), error) {
-	return func() {}, nil
+var nativeDPLockMu sync.Mutex
+
+func acquireNativeDataplaneLock(hncDir, op string) (func(), error) {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		return func() {}, nil
+	}
+	if strings.TrimSpace(op) == "" {
+		op = "native_dp"
+	}
+	nativeDPLockMu.Lock()
+	runDir := filepath.Join(hncDir, "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		nativeDPLockMu.Unlock()
+		return nil, err
+	}
+	gateDir := filepath.Join(runDir, "lock", "gate")
+	tcLockDir := filepath.Join(runDir, "tc_action.lock")
+	selfPID := os.Getpid()
+	selfPIDStr := strconv.Itoa(selfPID)
+	for round := 0; round < 120; round++ {
+		if _, gErr := os.Stat(gateDir); gErr == nil {
+			time.Sleep(25 * time.Millisecond)
+			continue
+		}
+		if err := os.Mkdir(tcLockDir, 0o755); err == nil {
+			ownerLine := fmt.Sprintf("%d %s %d\n", selfPID, op, time.Now().Unix())
+			_ = os.WriteFile(filepath.Join(tcLockDir, "owner"), []byte(ownerLine), 0o644)
+			if _, gErr := os.Stat(gateDir); gErr == nil {
+				_ = os.RemoveAll(tcLockDir)
+				time.Sleep(25 * time.Millisecond)
+				continue
+			}
+			var once sync.Once
+			release := func() {
+				once.Do(func() {
+					if b, rErr := os.ReadFile(filepath.Join(tcLockDir, "owner")); rErr == nil {
+						fs := strings.Fields(string(b))
+						if len(fs) == 0 || fs[0] == selfPIDStr {
+							_ = os.RemoveAll(tcLockDir)
+						}
+					} else {
+						_ = os.RemoveAll(tcLockDir)
+					}
+					nativeDPLockMu.Unlock()
+				})
+			}
+			return release, nil
+		}
+		if st, sErr := os.Stat(tcLockDir); sErr == nil && time.Since(st.ModTime()) >= 25*time.Second {
+			_ = os.RemoveAll(tcLockDir)
+			continue
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	nativeDPLockMu.Unlock()
+	return nil, errors.New("native dataplane: lock busy timeout")
 }
 
 func ensureNativeIPv4StatsRule(iptBin, ip string) {
@@ -1474,4 +1531,15 @@ func nlApplyBatchWithFWFallbackOnSocket(_ int, _ [][]byte) (int, error) {
 
 func nlProbeKernelCapabilities(_ int) (bool, bool, bool) {
 	return false, false, false
+}
+
+
+func closeRTNetlinkSocket(_ int) {}
+
+func sendConntrackDeleteNetlink(_ ScalpelTuple, _ uint32) error {
+	return errNetlinkUnsupportedOS
+}
+
+func dumpNativeIPv6NeighborsOS(_ map[int]bool) (map[string][]net.IP, error) {
+	return nil, errNetlinkUnsupportedOS
 }

@@ -285,7 +285,7 @@ func sealQUICInitial(t testing.TB, p *quicVersionParams, dcid, scid, token []byt
 
 func unprotectedHeaderForTest(t testing.TB, pkt []byte, h *quicLongHeader, k *quicKeys) []byte {
 	var mask [16]byte
-	k.hp.Encrypt(mask[:], pkt[h.pnOffset+4:pnOffset+20])
+	k.hp.Encrypt(mask[:], pkt[h.pnOffset+4:h.pnOffset+20])
 	out := append([]byte(nil), pkt[:h.pnOffset+4]...)
 	out[0] ^= mask[0] & 0x0f
 	pnLen := int(out[0]&3) + 1

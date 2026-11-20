@@ -311,3 +311,49 @@ function alertAction(kind, id, mac) {
     return blockDevice(d).then(function (ok) { if (ok) return Promise.all([seen(), known()]).then(loadAlerts); });
   }
 }
+
+/* v6 连接抽屉跟手下拉关闭与 Android 侧滑返回拦截 */
+(function () {
+  var dr = document.getElementById('v6-scalpel-drawer'), sc = document.getElementById('v6-scalpel-scrim'), ds = null;
+  if (dr) {
+    dr.addEventListener('pointerdown', function (e) {
+      if (e.button != null && e.button !== 0) return;
+      if (!dr.classList.contains('show')) return;
+      if (e.target.closest('input, select, textarea, button, a')) return;
+      var listEl = dr.querySelector('.v6-tuple-list');
+      var onGrab = !!e.target.closest('.grab, .v6-drawer-head');
+      if (!onGrab && listEl && listEl.scrollTop > 2) return;
+      ds = { id: e.pointerId, y0: e.clientY, dy: 0, drag: false };
+    });
+    dr.addEventListener('pointermove', function (e) {
+      if (!ds || e.pointerId !== ds.id) return;
+      var dy = e.clientY - ds.y0;
+      if (!ds.drag) {
+        if (dy < 8) return;
+        ds.drag = true;
+        dr.style.transition = 'none';
+        if (sc) sc.style.transition = 'none';
+      }
+      ds.dy = Math.max(0, dy);
+      dr.style.transform = 'translate3d(-50%,' + ds.dy.toFixed(1) + 'px,0)';
+      if (sc) sc.style.opacity = String(Math.max(0.15, 1 - ds.dy / 320));
+    });
+    var endDrag = function (e) {
+      if (!ds || (e && e.pointerId != null && e.pointerId !== ds.id)) return;
+      var wasDrag = ds.drag, dy = ds.dy;
+      ds = null;
+      if (!wasDrag) return;
+      dr.style.transition = '';
+      dr.style.transform = '';
+      if (sc) { sc.style.transition = ''; sc.style.opacity = ''; }
+      if (dy > 68 && typeof closeScalpelDrawer === 'function') closeScalpelDrawer();
+    };
+    dr.addEventListener('pointerup', endDrag);
+    dr.addEventListener('pointercancel', endDrag);
+  }
+  window.addEventListener('popstate', function () {
+    var shEl = document.getElementById('sheet');
+    if (shEl && shEl.classList.contains('show')) { closeSheet(0); return; }
+    if (dr && dr.classList.contains('show') && typeof closeScalpelDrawer === 'function') closeScalpelDrawer(true);
+  });
+})();

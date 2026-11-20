@@ -77,7 +77,7 @@ has_active_policy() {
 hotspot_iface() {
     local s=""
     s=$(sed -n 's/^ACTIVE://p' "$RUN/hnc_state" 2>/dev/null | head -n1 | tr -d ' \r\n')
-    case "$s" in *[!a-zA-Z0-9_.-]*) s="" ;; esac
+    case "$s" in *[!a-zA-Z0-9_.:-]*) s="" ;; esac
     if [ -n "$s" ] && [ -e "$SYS_NET/$s" ]; then
         echo "$s"
         return 0
@@ -161,8 +161,18 @@ tether_hal_restore() {
     return 0
 }
 
+vendor_fastpath_probe() {
+    local fp
+    for fp in /sys/sfe_ipv4/debug_dev /sys/module/shortcut_fe/parameters /sys/module/fast_classifier /sys/devices/platform/dit /sys/module/dit; do
+        if [ -e "$fp" ]; then
+            log "detected vendor fastpath node: $fp"
+        fi
+    done
+}
+
 slowpath_disable() {
     tether_hal_suppress
+    vendor_fastpath_probe
     [ -x "$IPC" ] || { echo unavailable; return; }
     local out rc
     out=$("$IPC" OFFLOAD_DISABLE_GLOBAL 2>/dev/null); rc=$?

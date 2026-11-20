@@ -280,6 +280,9 @@ func TestV6LeakGuardFullLifecycleAndInjectionGuard(t *testing.T) {
 		t.Fatalf("SSE missing frames: gotHeartbeat=%v gotLeakEvent=%v", gotHeartbeat, gotLeakEvent)
 	}
 
+	sseCancel()
+	_ = sseResp.Body.Close()
+
 	// 测试 POST /api/leakguard/clear
 	clrRec := doV6JSONReq(t, mux, http.MethodPost, "/api/leakguard/clear", `{}`)
 	if clrRec.Code != http.StatusOK {

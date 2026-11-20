@@ -64,7 +64,13 @@ log "manual rebind requested iface=$IFACE"
 write_state "$IFACE" "manual DPI rebind requested; restarting capture on $IFACE"
 
 echo "$IFACE" > "$RUN/hotspot_iface" 2>/dev/null || true
-printf '{"iface":"%s","log_level":"info"}\n' "$IFACE" > "$CONFIG" 2>/dev/null || true
+if [ -s "$CONFIG" ] && grep -q '"iface"[[:space:]]*:' "$CONFIG" 2>/dev/null; then
+    sed 's/"iface"[[:space:]]*:[[:space:]]*"[^"]*"/"iface":"'"$IFACE"'"/' "$CONFIG" > "$CONFIG.tmp.$$" 2>/dev/null \
+        && mv -f "$CONFIG.tmp.$$" "$CONFIG" 2>/dev/null \
+        || printf '{"iface":"%s","log_level":"info"}\n' "$IFACE" > "$CONFIG" 2>/dev/null || true
+else
+    printf '{"iface":"%s","log_level":"info"}\n' "$IFACE" > "$CONFIG" 2>/dev/null || true
+fi
 chmod 644 "$CONFIG" 2>/dev/null || true
 
 # rc11: the authoritative launcher is the C launcher (hnc_launcher), kept alive

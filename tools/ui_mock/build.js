@@ -75,8 +75,8 @@ html = html.replace(/<script\s+src="([^"]+)"\s*><\/script>/g, (m, src) => {
     try {
       cl = read(path.join(WEB, 'changelog.html'));
       if (cl.length > 36000) {
-        var secs = cl.split('<div class="cl-section">');
-        cl = secs.slice(0, 13).join('<div class="cl-section">') +
+        var secs = cl.split(/(?=<div class="cl-section\b)/);
+        cl = secs.slice(0, 13).join('') +
           '<div class="note" style="text-align:center;padding:12px 0">单文件交互预览仅内嵌近期 12 个版本记录 · 完整历史记录见模块包 webroot/changelog.html</div>';
       }
     } catch (_) {}

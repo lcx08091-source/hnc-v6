@@ -1,4 +1,4 @@
-// signal_monitor.go — HNC v6.0.0 · Vector: 热点手机自身 5G SA/NSA · 4G LTE · Wi-Fi STA 异步零阻塞信号质量感知
+// signal_monitor.go — HNC v6.0.0 · Vector: 热点手机自身 5G-A / 5G SA/NSA · 4G LTE · Wi-Fi STA 异步零阻塞全频段信号感知
 //
 // 技术原理:
 //   1. 彻底消灭 HTTP 请求线程同步跑 dumpsys:
@@ -8,7 +8,11 @@
 //   2. 自适应刷新节拍省掉 70% system_server Binder 唤醒:
 //      - 活跃态刷新周期从 3s 调优至 8s, 空闲态(熄屏无面板/无在线设备/热点关闭)放宽至 45s;
 //      - 外部命令统一启用进程组隔离(Setpgid + 超时向 -pgid 发 SIGKILL), 杜绝僵尸进程堆积;
-//   3. 攻克 AOSP 12–16 五大解析陷阱与 5G Autorate 联动(完整保留既有字段语义)。
+//   3. AOSP 12–16 / ColorOS 16 全频段 5G-A 精准解析与 5G Autorate 联动:
+//      - 扩大 Scanner 缓冲至 512KB、头部扫描上限放宽至 2500 行(遇 "local logs:" 立即截断, 零 Modem 唤醒);
+//      - 精准识别 NR_ADVANCED (5G-A) 图标态与 PrimaryServing + SecondaryServing 多载波聚合 (2CC/3CC) 组合及总带宽;
+//      - 当高通/联发科基带隐藏 mBand=0 时, 自动通过 mDownlinkChannelNumber / mNrArfcn / mEarfcn 查 3GPP 频段表反推;
+//      - 完整保留既有 JSON 字段语义(RAT 保持 "5G SA"/"5G NSA"/"4G LTE" 零破坏既有单测, 新增 DisplayRAT="5G-A" 等增强字段)。
 package main
 
 import (
@@ -35,28 +39,44 @@ const (
 )
 
 type hostSignalStatus struct {
-	Available       bool    `json:"available"`
-	Mode            string  `json:"mode"`             // "cellular" | "wifi_sta" | "unknown"
-	RAT             string  `json:"rat"`              // "5G SA" | "5G NSA" | "4G LTE" | "Wi-Fi" | "Unknown"
-	Slot            int     `json:"slot,omitempty"`   // 1 | 2
-	SubID           int     `json:"sub_id,omitempty"` // active data subId
-	Carrier         string  `json:"carrier,omitempty"`
-	UpstreamIface   string  `json:"upstream_iface,omitempty"`
-	Band            string  `json:"band,omitempty"` // e.g. "n78", "n41", "B3", "5GHz"
-	BandwidthMHz    int     `json:"bandwidth_mhz,omitempty"`
-	RSRPdBm         int     `json:"rsrp_dbm,omitempty"` // NR ssRsrp or LTE rsrp (-140..-44)
-	RSRQdB          int     `json:"rsrq_db,omitempty"`  // NR ssRsrq or LTE rsrq (-20..-3)
-	SINRdB          int     `json:"sinr_db,omitempty"`  // NR ssSinr or LTE rssnr (-20..40)
-	LTERSRPdBm      int     `json:"lte_rsrp_dbm,omitempty"`
-	WifiRSSIdBm     int     `json:"wifi_rssi_dbm,omitempty"`
-	WifiLinkMbps    int     `json:"wifi_link_mbps,omitempty"`
-	Bars            int     `json:"bars"`              // 0..4
-	Quality         string  `json:"quality"`           // "excellent" | "good" | "fair" | "weak" | "critical" | "unknown"
-	QualityCN       string  `json:"quality_cn"`        // 中文健康标签
-	RFCeilingFactor float64 `json:"rf_ceiling_factor"` // α_rf in [0.35, 1.0] for Autorate
-	Diagnosis       string  `json:"diagnosis"`         // "ok" | "rf_weak" | "congestion" | "lan_bottleneck" | "idle"
-	DiagnosisCN     string  `json:"diagnosis_cn"`
-	UpdatedAt       int64   `json:"updated_at"`
+	Available          bool    `json:"available"`
+	Mode               string  `json:"mode"`                         // "cellular" | "wifi_sta" | "unknown"
+	RAT                string  `json:"rat"`                          // 兼容契约: "5G SA" | "5G NSA" | "4G LTE" | "Wi-Fi 中继" | "Unknown"
+	DisplayRAT         string  `json:"display_rat,omitempty"`        // 界面展示制式: "5G-A" | "5G SA" | "5G NSA" | "4G+" | "4G LTE" | "Wi-Fi 中继"
+	Is5GA              bool    `json:"is_5ga,omitempty"`             // 是否处于 5G-A (NR_ADVANCED / 多载波聚合 / >=140MHz)
+	Slot               int     `json:"slot,omitempty"`               // 1 | 2
+	SubID              int     `json:"sub_id,omitempty"`             // active data subId
+	Carrier            string  `json:"carrier,omitempty"`            // 归一化运营商全称 (如 "中国移动", "中国广电")
+	CarrierShort       string  `json:"carrier_short,omitempty"`      // 顶栏紧凑短名 (如 "移动", "广电", "电信", "联通")
+	MCCMNC             string  `json:"mcc_mnc,omitempty"`            // 5~6 位 PLMN (如 "46000", "46015")
+	SharingMode        string  `json:"sharing_mode,omitempty"`       // 共建共享提示 (如 "700MHz 移广共建共享", "3.5GHz 电联共建共享")
+	UpstreamIface      string  `json:"upstream_iface,omitempty"`     // 如 "rmnet_data2", "ccmni0"
+	Band               string  `json:"band,omitempty"`               // 主载波频段: 如 "n41", "n78", "n28", "B3", "5GHz"
+	BandwidthMHz       int     `json:"bandwidth_mhz,omitempty"`      // 主载波带宽 (MHz)
+	BandCombo          string  `json:"band_combo,omitempty"`         // 多载波组合: 如 "n41+n28", "n78+n78"
+	TotalBWMHz         int     `json:"total_bw_mhz,omitempty"`       // 多载波聚合总带宽 (MHz), 如 130, 200
+	CACount            int     `json:"ca_count,omitempty"`           // 活跃聚合载波数 (1..4)
+	ARFCN              int     `json:"arfcn,omitempty"`              // 主载波 NR-ARFCN / EARFCN 频点号
+	FreqMHz            int     `json:"freq_mhz,omitempty"`           // 主频段近似中心频率 (MHz), 如 2600, 700, 3500
+	BandTrait          string  `json:"band_trait,omitempty"`         // 频段物理特性人话解读
+	RSRPdBm            int     `json:"rsrp_dbm,omitempty"`           // NR ssRsrp or LTE rsrp (-140..-44)
+	RSRQdB             int     `json:"rsrq_db,omitempty"`            // NR ssRsrq or LTE rsrq (-20..-3)
+	SINRdB             int     `json:"sinr_db,omitempty"`            // NR ssSinr or LTE rssnr (-20..40)
+	LTERSRPdBm         int     `json:"lte_rsrp_dbm,omitempty"`       // NSA 场景下的 LTE 锚点 RSRP
+	WifiRSSIdBm        int     `json:"wifi_rssi_dbm,omitempty"`      // Wi-Fi STA RSSI
+	WifiLinkMbps       int     `json:"wifi_link_mbps,omitempty"`     // Wi-Fi STA 协商速率
+	RSRPLabel          string  `json:"rsrp_label,omitempty"`         // 信号强度人话评级 ("极强"/"良好"/"一般"/"偏弱"/"极弱")
+	SINRLabel          string  `json:"sinr_label,omitempty"`         // 信号纯净度人话评级 ("极纯净"/"纯净"/"轻度干扰"/"嘈杂易跳Ping")
+	RSRQLabel          string  `json:"rsrq_label,omitempty"`         // 基站空闲度人话评级 ("基站空闲"/"负载正常"/"晚高峰偏忙"/"基站拥塞")
+	SpeedPotentialPct  int     `json:"speed_potential_pct,omitempty"` // 网速潜力百分比 (35..100)
+	SpeedPotentialText string  `json:"speed_potential_text,omitempty"`
+	Bars               int     `json:"bars"`              // 0..4
+	Quality            string  `json:"quality"`           // "excellent" | "good" | "fair" | "weak" | "critical" | "unknown"
+	QualityCN          string  `json:"quality_cn"`        // 中文健康标签
+	RFCeilingFactor    float64 `json:"rf_ceiling_factor"` // α_rf in [0.35, 1.0] for Autorate
+	Diagnosis          string  `json:"diagnosis"`         // "ok" | "rf_weak" | "congestion" | "lan_bottleneck" | "idle"
+	DiagnosisCN        string  `json:"diagnosis_cn"`
+	UpdatedAt          int64   `json:"updated_at"`
 }
 
 // signalMonitor 零阻塞异步信号监测器。
@@ -270,27 +290,45 @@ func (m *signalMonitor) sampleHostSignal(s *server) hostSignalStatus {
 	return st
 }
 
+// simSignalSnapshot 提供符合真实国内运营商频谱分配的 5G-A 双载波模拟快照(中国移动 n41 100MHz + n28 30MHz = 130MHz)。
 func simSignalSnapshot(s *server) hostSignalStatus {
+	rsrpLbl, sinrLbl, rsrqLbl, spPct, spTxt := build4DSignalLabels(-84, 21, -8, true, 1.0, false, 0)
 	st := hostSignalStatus{
-		Available:       true,
-		Mode:            "cellular",
-		RAT:             "5G SA",
-		Slot:            1,
-		SubID:           1,
-		Carrier:         "中国移动",
-		UpstreamIface:   "rmnet_data2",
-		Band:            "n78",
-		BandwidthMHz:    100,
-		RSRPdBm:         -88,
-		RSRQdB:          -9,
-		SINRdB:          19,
-		Bars:            4,
-		Quality:         "excellent",
-		QualityCN:       "5G 极佳",
-		RFCeilingFactor: 1.0,
-		Diagnosis:       "ok",
-		DiagnosisCN:     "上游 5G n78 满格低延迟，空口无拥塞",
-		UpdatedAt:       time.Now().Unix(),
+		Available:          true,
+		Mode:               "cellular",
+		RAT:                "5G SA",
+		DisplayRAT:         "5G-A",
+		Is5GA:              true,
+		Slot:               1,
+		SubID:              1,
+		Carrier:            "中国移动",
+		CarrierShort:       "移动",
+		MCCMNC:             "46000",
+		SharingMode:        "2.6GHz+700MHz 移广双载波共享",
+		UpstreamIface:      "rmnet_data2",
+		Band:               "n41",
+		BandwidthMHz:       100,
+		BandCombo:          "n41+n28",
+		TotalBWMHz:         130,
+		CACount:            2,
+		ARFCN:              504990,
+		FreqMHz:            2600,
+		BandTrait:          describeBandTrait("n41", "n41+n28", 130, 2, false),
+		RSRPdBm:            -84,
+		RSRQdB:             -8,
+		SINRdB:             21,
+		RSRPLabel:          rsrpLbl,
+		SINRLabel:          sinrLbl,
+		RSRQLabel:          rsrqLbl,
+		SpeedPotentialPct:  spPct,
+		SpeedPotentialText: spTxt,
+		Bars:               4,
+		Quality:            "excellent",
+		QualityCN:          "5G-A 极佳",
+		RFCeilingFactor:    1.0,
+		Diagnosis:          "ok",
+		DiagnosisCN:        "上游 5G-A 双载波 (n41+n28 · 130MHz) 满格低延迟，空口无拥塞",
+		UpdatedAt:          time.Now().Unix(),
 	}
 	enrichSignalDiagnosis(&st, s)
 	return st
@@ -305,23 +343,30 @@ func enrichSignalDiagnosis(st *hostSignalStatus, s *server) {
 		return
 	}
 	weakRF := st.Quality == "weak" || st.Quality == "critical"
+	cellBusy := st.Mode == "cellular" && validRSRQ(st.RSRQdB) && st.RSRQdB <= -17
 	bloated := ar.Enabled && ar.DeltaRTTMs > math.Max(20, ar.RTTDeltaMs)
 	switch {
 	case weakRF && bloated:
 		st.Diagnosis = "rf_weak"
-		st.DiagnosisCN = "热点机处于弱信号边缘区且空口排队膨胀，Autorate 已联动预压顶稳帧"
+		st.DiagnosisCN = "热点机处于弱信号边缘区且空口排队膨胀，智能带宽已联动收紧上限稳住延迟"
 	case weakRF:
 		st.Diagnosis = "rf_weak"
-		st.DiagnosisCN = "热点机当前信号偏弱（建议移至窗边），已启用弱网防抖保护上限"
-	case bloated:
+		st.DiagnosisCN = "热点机当前基站信号偏弱（建议移至窗边），已启用弱网防断流保护"
+	case bloated || cellBusy:
 		st.Diagnosis = "congestion"
-		st.DiagnosisCN = "热点机信号良好但基站空口繁忙（ΔRTT 升高），Autorate 正在退避消肿"
+		if bloated {
+			st.DiagnosisCN = "手机信号强度充足，但基站当前上网人数多（排队延迟升高），智能带宽正在自动稳帧"
+		} else {
+			st.DiagnosisCN = "手机信号格数充足，但当前基站信道负载偏忙，高峰期网速可能略有波动"
+		}
 	default:
 		st.Diagnosis = "ok"
 		if st.Mode == "wifi_sta" {
 			st.DiagnosisCN = "上游 Wi-Fi 中继链路通畅"
+		} else if st.Is5GA && st.BandCombo != "" {
+			st.DiagnosisCN = "5G-A 多载波通道（" + st.BandCombo + "）信号纯净、基站空闲，热点可跑满高速带宽"
 		} else {
-			st.DiagnosisCN = "上游蜂窝射频与排队延迟均健康"
+			st.DiagnosisCN = "手机基站信号纯净、空口延迟平稳，热点可顺畅跑满物理网速"
 		}
 	}
 }
@@ -370,11 +415,13 @@ func dumpTelephonyRegistryHeadCtx(parentCtx context.Context, timeout time.Durati
 	}
 	var sb strings.Builder
 	sc := bufio.NewScanner(stdout)
+	// ColorOS 16 / HyperOS 2 / OneUI 7 单行 mServiceState 常超 64KB, 扩容至 512KB 防止 ErrTooLong 中断读取!
+	sc.Buffer(make([]byte, 64*1024), 512*1024)
 	lines := 0
 	truncated := false
 	for sc.Scan() {
 		line := sc.Text()
-		if strings.HasPrefix(strings.TrimSpace(line), "local logs:") || lines >= 650 {
+		if strings.HasPrefix(strings.TrimSpace(line), "local logs:") || lines >= 2500 {
 			truncated = true
 			cancel()
 			break
@@ -397,47 +444,88 @@ func runFastSystemCmd(timeout time.Duration, name string, args ...string) (strin
 }
 
 var (
-	rePhoneBlock   = regexp.MustCompile(`^\s*Phone Id=(\d+)`)
-	reActiveSub    = regexp.MustCompile(`mActiveDataSubId=(-?\d+)`)
-	reSubIDField   = regexp.MustCompile(`\bmSubId=(\d+)`)
-	reNrSignal     = regexp.MustCompile(`CellSignalStrengthNr:\{[^}]*?ssRsrp\s*=\s*(-?\d+)[^}]*?ssRsrq\s*=\s*(-?\d+)[^}]*?ssSinr\s*=\s*(-?\d+)`)
-	reLteSignal    = regexp.MustCompile(`CellSignalStrengthLte:\s*rssi=(-?\d+)\s+rsrp=(-?\d+)\s+rsrq=(-?\d+)\s+rssnr=(-?\d+)`)
-	reAccessTech   = regexp.MustCompile(`accessNetworkTechnology=([A-Za-z0-9_ -]+)`)
-	reEndcAvail    = regexp.MustCompile(`isEnDcAvailable\s*=\s*true`)
-	reDispOverride = regexp.MustCompile(`override(?:Network)?=(NR_NSA|NR_ADVANCED|NR_MMWAVE|LTE_CA)`)
-	reOperatorLong = regexp.MustCompile(`mOperatorAlphaLong=([^,\n}]+)`)
-	reOperatorShrt = regexp.MustCompile(`mOperatorAlphaShort=([^,\n}]+)`)
-	reDataIface    = regexp.MustCompile(`InterfaceName:\s*([A-Za-z0-9_.-]+)`)
-	rePhysChan     = regexp.MustCompile(`mConnectionStatus=PrimaryServing[^}]*?mNetworkType=(NR|LTE)[^}]*?mBand=(\d+)`)
-	rePhysBW       = regexp.MustCompile(`mCellBandwidthDownlinkKhz=(\d+)`)
-	reWifiRSSI     = regexp.MustCompile(`RSSI:\s*(-?\d+)`)
-	reWifiSpeed    = regexp.MustCompile(`Tx Link speed:\s*(\d+)Mbps`)
-	reWifiFreq     = regexp.MustCompile(`Frequency:\s*(\d+)MHz`)
+	rePhoneBlock     = regexp.MustCompile(`^\s*Phone Id\s*=\s*(\d+)`)
+	reActiveSub      = regexp.MustCompile(`mActiveDataSubId\s*=\s*(-?\d+)`)
+	reSubIDField     = regexp.MustCompile(`\bmSubId\s*=\s*(\d+)`)
+	reNrSignal       = regexp.MustCompile(`CellSignalStrengthNr:\s*\{[^}]*?ssRsrp\s*=\s*(-?\d+)[^}]*?ssRsrq\s*=\s*(-?\d+)[^}]*?ssSinr\s*=\s*(-?\d+)`)
+	reLteSignal      = regexp.MustCompile(`CellSignalStrengthLte:[^,}\n]*?\brssi\s*=\s*(-?\d+)\s+rsrp\s*=\s*(-?\d+)\s+rsrq\s*=\s*(-?\d+)\s+rssnr\s*=\s*(-?\d+)`)
+	reAccessTech     = regexp.MustCompile(`accessNetworkTechnology\s*=\s*([A-Za-z0-9_ -]+)`)
+	reEndcAvail      = regexp.MustCompile(`isEnDcAvailable\s*=\s*true`)
+	reNrConnected    = regexp.MustCompile(`nrState\s*=\s*CONNECTED`)
+	reDispOverride   = regexp.MustCompile(`override(?:Network|NetworkType)?\s*=\s*(NR_NSA|NR_ADVANCED|NR_MMWAVE|LTE_CA|LTE_ADVANCED_PRO)`)
+	reOperatorLong   = regexp.MustCompile(`mOperatorAlphaLong\s*=\s*([^,\n}]+)`)
+	reOperatorShrt   = regexp.MustCompile(`mOperatorAlphaShort\s*=\s*([^,\n}]+)`)
+	reOperatorNum    = regexp.MustCompile(`mOperatorNumeric\s*=\s*(\d{5,6})`)
+	reMccMncPair     = regexp.MustCompile(`mMcc\s*=\s*(\d{3})\s*,?\s*mMnc\s*=\s*(\d{2,3})`)
+	reDataIface      = regexp.MustCompile(`InterfaceName:\s*([A-Za-z0-9_.-]+)`)
+	rePhysChanEntry  = regexp.MustCompile(`\{[^{}]*mConnectionStatus\s*=\s*(PrimaryServing|SecondaryServing|1|2)[^{}]*\}`)
+	reChanConnStatus = regexp.MustCompile(`mConnectionStatus\s*=\s*(PrimaryServing|SecondaryServing|1|2)`)
+	reChanNetType    = regexp.MustCompile(`mNetworkType\s*=\s*(NR|LTE|13|20)`)
+	reChanBand       = regexp.MustCompile(`mBand\s*=\s*(\d+)`)
+	reChanDLKhz      = regexp.MustCompile(`mCellBandwidthDownlinkKhz\s*=\s*(\d+)`)
+	reChanDLArfcn    = regexp.MustCompile(`(?:mDownlinkChannelNumber|mChannelNumber)\s*=\s*(\d+)`)
+	reCellIdNr       = regexp.MustCompile(`CellIdentityNr:\s*\{[^}]*\}`)
+	reCellIdLte      = regexp.MustCompile(`CellIdentityLte:\s*\{[^}]*\}`)
+	reNrArfcnField   = regexp.MustCompile(`mNrArfcn\s*=\s*(\d+)`)
+	reEarfcnField    = regexp.MustCompile(`mEarfcn\s*=\s*(\d+)`)
+	reBandsArray     = regexp.MustCompile(`mBands\s*=\s*\[([0-9,\s]+)\]`)
+	reLteBwField     = regexp.MustCompile(`mBandwidth\s*=\s*(\d+)`)
+	reWifiRSSI       = regexp.MustCompile(`RSSI:\s*(-?\d+)`)
+	reWifiSpeed      = regexp.MustCompile(`Tx Link speed:\s*(\d+)Mbps`)
+	reWifiFreq       = regexp.MustCompile(`Frequency:\s*(\d+)MHz`)
 )
 
+type parsedServingCarrier struct {
+	IsPrimary bool
+	IsNR      bool
+	Band      string
+	BWMHz     int
+	ARFCN     int
+}
+
 type parsedPhoneSlot struct {
-	PhoneID     int
-	SubID       int
-	Carrier     string
-	Ifaces      map[string]bool
-	HasNRValid  bool
-	NRRsrp      int
-	NRRsrq      int
-	NRSinr      int
-	HasLTEValid bool
-	LTERsrp     int
-	LTERsrq     int
-	LTESinr     int
-	IsSA        bool
-	IsNSA       bool
-	IsLTE       bool
-	Band        string
-	BWMHz       int
+	PhoneID          int
+	SubID            int
+	AlphaLong        string
+	AlphaShort       string
+	MCCMNC           string
+	Ifaces           map[string]bool
+	HasNRValid       bool
+	NRRsrp           int
+	NRRsrq           int
+	NRSinr           int
+	HasNRRsrq        bool
+	HasLTEValid      bool
+	LTERsrp          int
+	LTERsrq          int
+	LTESinr          int
+	HasLTERsrq       bool
+	IsSA             bool
+	IsNSA            bool
+	IsLTE            bool
+	Is5GA            bool
+	IsLTECA          bool
+	Carriers         []parsedServingCarrier
+	FallbackNRBand   string
+	FallbackNRArfcn  int
+	FallbackLTEBand  string
+	FallbackLTEArfcn int
+	FallbackLTEBWMHz int
 }
 
 func validRSRP(v int) bool { return v != sigUnavailable && v >= -145 && v <= -40 }
 func validRSRQ(v int) bool { return v != sigUnavailable && v >= -30 && v <= 0 }
 func validSINR(v int) bool { return v != sigUnavailable && v >= -25 && v <= 50 }
+
+func parseBandsBracket(s string, prefix string) string {
+	for _, part := range strings.Split(s, ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(part))
+		if err == nil && n > 0 && n < 1000 {
+			return prefix + strconv.Itoa(n)
+		}
+	}
+	return ""
+}
 
 func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignalStatus {
 	activeSubID := -1
@@ -463,16 +551,22 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		if m := reSubIDField.FindStringSubmatch(line); m != nil && cur.SubID == 0 {
 			cur.SubID, _ = strconv.Atoi(m[1])
 		}
-		if m := reOperatorShrt.FindStringSubmatch(line); m != nil && cur.Carrier == "" {
-			v := strings.TrimSpace(m[1])
-			if v != "" && v != "null" {
-				cur.Carrier = v
+		if m := reOperatorLong.FindStringSubmatch(line); m != nil && cur.AlphaLong == "" {
+			if v := cleanOperatorToken(m[1]); v != "" {
+				cur.AlphaLong = v
 			}
 		}
-		if m := reOperatorLong.FindStringSubmatch(line); m != nil && cur.Carrier == "" {
-			v := strings.TrimSpace(m[1])
-			if v != "" && v != "null" {
-				cur.Carrier = v
+		if m := reOperatorShrt.FindStringSubmatch(line); m != nil && cur.AlphaShort == "" {
+			if v := cleanOperatorToken(m[1]); v != "" {
+				cur.AlphaShort = v
+			}
+		}
+		if m := reOperatorNum.FindStringSubmatch(line); m != nil && cur.MCCMNC == "" {
+			cur.MCCMNC = m[1]
+		}
+		if cur.MCCMNC == "" {
+			if m := reMccMncPair.FindStringSubmatch(line); m != nil {
+				cur.MCCMNC = m[1] + m[2]
 			}
 		}
 		for _, im := range reDataIface.FindAllStringSubmatch(line, -1) {
@@ -489,6 +583,7 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 				cur.NRRsrp = rsrp
 				if validRSRQ(rsrq) {
 					cur.NRRsrq = rsrq
+					cur.HasNRRsrq = true
 				}
 				if validSINR(sinr) {
 					cur.NRSinr = sinr
@@ -504,6 +599,7 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 				cur.LTERsrp = rsrp
 				if validRSRQ(rsrq) {
 					cur.LTERsrq = rsrq
+					cur.HasLTERsrq = true
 				}
 				if validSINR(sinr) {
 					cur.LTESinr = sinr
@@ -513,34 +609,123 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		for _, am := range reAccessTech.FindAllStringSubmatch(line, -1) {
 			tech := strings.ToUpper(strings.TrimSpace(am[1]))
 			switch {
-			case tech == "NR":
+			case tech == "NR" || tech == "NR_SA":
 				cur.IsSA = true
 			case strings.Contains(tech, "LTE"):
 				cur.IsLTE = true
+				if strings.Contains(tech, "CA") {
+					cur.IsLTECA = true
+				}
 			}
 		}
-		if reEndcAvail.MatchString(line) {
+		if reEndcAvail.MatchString(line) || reNrConnected.MatchString(line) {
 			cur.IsNSA = true
 		}
-		if m := reDispOverride.FindStringSubmatch(line); m != nil {
-			if strings.HasPrefix(m[1], "NR_") {
+		for _, dm := range reDispOverride.FindAllStringSubmatch(line, -1) {
+			switch dm[1] {
+			case "NR_NSA":
 				cur.IsNSA = true
+			case "NR_ADVANCED", "NR_MMWAVE":
+				// 严禁把 SA 下的 NR_ADVANCED (5G-A) 误标为 NSA!
+				cur.Is5GA = true
+			case "LTE_CA", "LTE_ADVANCED_PRO":
+				cur.IsLTECA = true
 			}
 		}
-		if m := rePhysChan.FindStringSubmatch(line); m != nil {
-			bNum, _ := strconv.Atoi(m[2])
-			if bNum > 0 {
-				if m[1] == "NR" {
-					cur.Band = "n" + strconv.Itoa(bNum)
-				} else if cur.Band == "" {
-					cur.Band = "B" + strconv.Itoa(bNum)
+
+		// 提取 CellIdentityNr / CellIdentityLte 兜底频段与频点 (防止部分 ROM 清空 PhysicalChannelConfig)
+		for _, nrBlk := range reCellIdNr.FindAllString(line, -1) {
+			if am := reNrArfcnField.FindStringSubmatch(nrBlk); am != nil {
+				if arfcn, err := strconv.Atoi(am[1]); err == nil && arfcn > 0 && arfcn != sigUnavailable {
+					cur.FallbackNRArfcn = arfcn
+					if b, _ := nrBandFromARFCN(arfcn, cur.MCCMNC); b != "" && cur.FallbackNRBand == "" {
+						cur.FallbackNRBand = b
+					}
 				}
 			}
-			if bm := rePhysBW.FindStringSubmatch(line); bm != nil {
-				khz, _ := strconv.Atoi(bm[1])
-				if khz >= 1000 && khz/1000 > cur.BWMHz {
-					cur.BWMHz = khz / 1000
+			if bm := reBandsArray.FindStringSubmatch(nrBlk); bm != nil && cur.FallbackNRBand == "" {
+				cur.FallbackNRBand = parseBandsBracket(bm[1], "n")
+			}
+		}
+		for _, lteBlk := range reCellIdLte.FindAllString(line, -1) {
+			if am := reEarfcnField.FindStringSubmatch(lteBlk); am != nil {
+				if earfcn, err := strconv.Atoi(am[1]); err == nil && earfcn >= 0 && earfcn != sigUnavailable {
+					cur.FallbackLTEArfcn = earfcn
+					if b, _ := lteBandFromEARFCN(earfcn); b != "" && cur.FallbackLTEBand == "" {
+						cur.FallbackLTEBand = b
+					}
 				}
+			}
+			if bm := reBandsArray.FindStringSubmatch(lteBlk); bm != nil && cur.FallbackLTEBand == "" {
+				cur.FallbackLTEBand = parseBandsBracket(bm[1], "B")
+			}
+			if bwm := reLteBwField.FindStringSubmatch(lteBlk); bwm != nil && cur.FallbackLTEBWMHz == 0 {
+				if khz, err := strconv.Atoi(bwm[1]); err == nil && khz >= 1000 && khz <= 100000 {
+					cur.FallbackLTEBWMHz = khz / 1000
+				}
+			}
+		}
+
+		// 提取 PhysicalChannelConfigList 中全部主/辅载波 (PrimaryServing + SecondaryServing), 支持 5G-A 2CC/3CC 聚合计算
+		if strings.Contains(line, "mConnectionStatus") {
+			entries := rePhysChanEntry.FindAllString(line, -1)
+			if len(entries) == 0 {
+				entries = []string{line}
+			}
+			// 仅采信最新一行非空的 PhysicalChannelConfigList 快照, 避免历史同槽行重复累加
+			var lineCarriers []parsedServingCarrier
+			for _, ent := range entries {
+				sm := reChanConnStatus.FindStringSubmatch(ent)
+				if sm == nil {
+					continue
+				}
+				isPri := sm[1] == "PrimaryServing" || sm[1] == "1"
+				isNR := false
+				if nm := reChanNetType.FindStringSubmatch(ent); nm != nil {
+					isNR = nm[1] == "NR" || nm[1] == "20"
+				} else if cur.HasNRValid && !cur.IsLTE {
+					isNR = true
+				}
+				var arfcn, bwMHz int
+				if cm := reChanDLArfcn.FindStringSubmatch(ent); cm != nil {
+					if v, err := strconv.Atoi(cm[1]); err == nil && v > 0 && v != sigUnavailable {
+						arfcn = v
+					}
+				}
+				if bm := reChanDLKhz.FindStringSubmatch(ent); bm != nil {
+					if khz, err := strconv.Atoi(bm[1]); err == nil && khz >= 1000 && khz <= 400000 {
+						bwMHz = khz / 1000
+					}
+				}
+				bandStr := ""
+				if mdm := reChanBand.FindStringSubmatch(ent); mdm != nil {
+					if bNum, err := strconv.Atoi(mdm[1]); err == nil && bNum > 0 && bNum < 1000 {
+						if isNR {
+							bandStr = "n" + strconv.Itoa(bNum)
+						} else {
+							bandStr = "B" + strconv.Itoa(bNum)
+						}
+					}
+				}
+				if bandStr == "" && arfcn > 0 {
+					if isNR {
+						bandStr, _ = nrBandFromARFCN(arfcn, cur.MCCMNC)
+					} else {
+						bandStr, _ = lteBandFromEARFCN(arfcn)
+					}
+				}
+				if bandStr != "" || bwMHz > 0 || arfcn > 0 {
+					lineCarriers = append(lineCarriers, parsedServingCarrier{
+						IsPrimary: isPri,
+						IsNR:      isNR,
+						Band:      bandStr,
+						BWMHz:     bwMHz,
+						ARFCN:     arfcn,
+					})
+				}
+			}
+			if len(lineCarriers) > 0 {
+				cur.Carriers = lineCarriers
 			}
 		}
 	}
@@ -581,50 +766,185 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		}
 	}
 
+	// 汇总主载波与多载波聚合信息
+	var priBand string
+	var priBW, priArfcn, totalBW, nrCount, activeCount int
+	var comboParts []string
+	wantNR := chosen.HasNRValid
+
+	for _, c := range chosen.Carriers {
+		if wantNR && !c.IsNR && !chosen.IsNSA {
+			continue
+		}
+		activeCount++
+		if c.IsNR {
+			nrCount++
+		}
+		if c.BWMHz > 0 {
+			totalBW += c.BWMHz
+		}
+		if c.Band != "" {
+			comboParts = append(comboParts, c.Band)
+		}
+		if c.IsPrimary && priBand == "" {
+			priBand = c.Band
+			priBW = c.BWMHz
+			priArfcn = c.ARFCN
+		} else if priBand == "" && (!wantNR || c.IsNR) {
+			priBand = c.Band
+			priBW = c.BWMHz
+			priArfcn = c.ARFCN
+		}
+	}
+
+	// 若 PhysicalChannelConfigList 未给出频段, 启用 CellIdentity NR-ARFCN / EARFCN 兜底反推
+	if wantNR {
+		if priBand == "" {
+			priBand = chosen.FallbackNRBand
+		}
+		if priArfcn == 0 {
+			priArfcn = chosen.FallbackNRArfcn
+		}
+		if priBand == "" && priArfcn > 0 {
+			priBand, _ = nrBandFromARFCN(priArfcn, chosen.MCCMNC)
+		}
+	} else {
+		if priBand == "" {
+			priBand = chosen.FallbackLTEBand
+		}
+		if priArfcn == 0 {
+			priArfcn = chosen.FallbackLTEArfcn
+		}
+		if priBW == 0 {
+			priBW = chosen.FallbackLTEBWMHz
+		}
+		if priBand == "" && priArfcn > 0 {
+			priBand, _ = lteBandFromEARFCN(priArfcn)
+		}
+	}
+	if totalBW == 0 && priBW > 0 {
+		totalBW = priBW
+	}
+	if activeCount == 0 && priBand != "" {
+		activeCount = 1
+	}
+	bandCombo := strings.Join(comboParts, "+")
+	if bandCombo == "" && priBand != "" {
+		bandCombo = priBand
+	}
+
+	is5GA := false
+	if wantNR && (chosen.Is5GA || nrCount >= 2 || totalBW >= 140) {
+		is5GA = true
+	}
+
+	carrierFull, carrierShort, sharingMode := normalizeCarrierAndMOCN(
+		chosen.AlphaLong, chosen.AlphaShort, chosen.MCCMNC, priBand, bandCombo,
+	)
+
+	freqMHz := lookupBandFreqMHz(priBand)
+	if freqMHz == 0 && priArfcn > 0 {
+		if wantNR {
+			_, freqMHz = nrBandFromARFCN(priArfcn, chosen.MCCMNC)
+		} else {
+			_, freqMHz = lteBandFromEARFCN(priArfcn)
+		}
+	}
+
 	out := hostSignalStatus{
 		Available:     true,
 		Mode:          "cellular",
+		Is5GA:         is5GA,
 		Slot:          chosen.PhoneID + 1,
 		SubID:         chosen.SubID,
-		Carrier:       chosen.Carrier,
+		Carrier:       carrierFull,
+		CarrierShort:  carrierShort,
+		MCCMNC:        chosen.MCCMNC,
+		SharingMode:   sharingMode,
 		UpstreamIface: wantIface,
-		Band:          chosen.Band,
-		BandwidthMHz:  chosen.BWMHz,
+		Band:          priBand,
+		BandwidthMHz:  priBW,
+		BandCombo:     bandCombo,
+		TotalBWMHz:    totalBW,
+		CACount:       activeCount,
+		ARFCN:         priArfcn,
+		FreqMHz:       freqMHz,
+		BandTrait:     describeBandTrait(priBand, bandCombo, totalBW, activeCount, false),
 		UpdatedAt:     nowUnix,
 	}
 
 	// 强制优先采信有效 NR 载波指标 (规避 mLteAsPrimaryInNrNsa=true 导致的 LTE 锚点假满格)
+	hasValidRSRQ := false
 	if chosen.HasNRValid {
 		out.RSRPdBm = chosen.NRRsrp
 		out.RSRQdB = chosen.NRRsrq
 		out.SINRdB = chosen.NRSinr
+		hasValidRSRQ = chosen.HasNRRsrq
 		if chosen.HasLTEValid {
 			out.LTERSRPdBm = chosen.LTERsrp
 		}
-		if chosen.IsSA {
+		// 若明确为 SA 且未启用 EN-DC 锚点, RAT 记为 "5G SA", 否则记为 "5G NSA" (100% 保持既有单测兼容);
+		// 5G-A 图标展示统一走 DisplayRAT = "5G-A"。
+		if chosen.IsSA && !chosen.IsNSA {
+			out.RAT = "5G SA"
+		} else if chosen.IsSA && !chosen.HasLTEValid {
 			out.RAT = "5G SA"
 		} else {
 			out.RAT = "5G NSA"
+		}
+		if is5GA {
+			out.DisplayRAT = "5G-A"
+		} else {
+			out.DisplayRAT = out.RAT
 		}
 	} else {
 		out.RSRPdBm = chosen.LTERsrp
 		out.RSRQdB = chosen.LTERsrq
 		out.SINRdB = chosen.LTESinr
+		hasValidRSRQ = chosen.HasLTERsrq
 		out.RAT = "4G LTE"
+		if chosen.IsLTECA || activeCount >= 2 {
+			out.DisplayRAT = "4G+"
+		} else {
+			out.DisplayRAT = "4G LTE"
+		}
 	}
 
-	out.Bars, out.Quality, out.QualityCN, out.RFCeilingFactor = scoreCellularSignal(out.RSRPdBm, out.SINRdB, strings.HasPrefix(out.RAT, "5G"))
+	out.Bars, out.Quality, out.QualityCN, out.RFCeilingFactor = scoreCellularSignal4D(
+		out.RSRPdBm, out.SINRdB, out.RSRQdB, hasValidRSRQ, strings.HasPrefix(out.RAT, "5G"), is5GA,
+	)
+	out.RSRPLabel, out.SINRLabel, out.RSRQLabel, out.SpeedPotentialPct, out.SpeedPotentialText = build4DSignalLabels(
+		out.RSRPdBm, out.SINRdB, out.RSRQdB, hasValidRSRQ, out.RFCeilingFactor, false, 0,
+	)
 	out.Diagnosis = "ok"
 	out.DiagnosisCN = "蜂窝射频状态已同步"
 	return out
 }
 
 func scoreCellularSignal(rsrp, sinr int, is5G bool) (bars int, quality, qualityCN string, alpha float64) {
+	return scoreCellularSignal4D(rsrp, sinr, -9, false, is5G, false)
+}
+
+func scoreCellularSignal4D(rsrp, sinr, rsrq int, hasRSRQ, is5G, is5GA bool) (bars int, quality, qualityCN string, alpha float64) {
+	prefix := "4G"
+	if is5GA {
+		prefix = "5G-A"
+	} else if is5G {
+		prefix = "5G"
+	}
+	severeLoad := hasRSRQ && rsrq <= -17
+
 	switch {
 	case rsrp >= -88 && sinr >= 13:
-		return 4, "excellent", map[bool]string{true: "5G 极佳", false: "4G 极佳"}[is5G], 1.0
+		if severeLoad {
+			return 3, "good", prefix + " 良好（基站繁忙）", 0.90
+		}
+		return 4, "excellent", prefix + " 极佳", 1.0
 	case rsrp >= -98 && sinr >= 6:
-		return 3, "good", map[bool]string{true: "5G 良好", false: "4G 良好"}[is5G], 0.95
+		if severeLoad {
+			return 2, "fair", "信号尚可（基站拥塞）", 0.78
+		}
+		return 3, "good", prefix + " 良好", 0.95
 	case rsrp >= -108 && sinr >= 0:
 		return 2, "fair", "信号一般", 0.80
 	case rsrp >= -116:
@@ -671,21 +991,31 @@ func parseWifiStatusOutput(raw, upIf string, nowUnix int64) hostSignalStatus {
 	default:
 		bars, q, qCN, alpha = 0, "critical", "Wi-Fi 极弱", 0.35
 	}
+	rsrpLbl, sinrLbl, rsrqLbl, spPct, spTxt := build4DSignalLabels(0, 0, 0, false, alpha, true, rssi)
 	return hostSignalStatus{
-		Available:       true,
-		Mode:            "wifi_sta",
-		RAT:             "Wi-Fi 中继",
-		UpstreamIface:   upIf,
-		Band:            band,
-		WifiRSSIdBm:     rssi,
-		WifiLinkMbps:    linkMbps,
-		Bars:            bars,
-		Quality:         q,
-		QualityCN:       qCN,
-		RFCeilingFactor: alpha,
-		Diagnosis:       "ok",
-		DiagnosisCN:     "上游 Wi-Fi 中继状态已同步",
-		UpdatedAt:       nowUnix,
+		Available:          true,
+		Mode:               "wifi_sta",
+		RAT:                "Wi-Fi 中继",
+		DisplayRAT:         "Wi-Fi 中继",
+		UpstreamIface:      upIf,
+		Band:               band,
+		BandCombo:          band,
+		FreqMHz:            freq,
+		BandTrait:          describeBandTrait(band, band, 0, 1, true),
+		WifiRSSIdBm:        rssi,
+		WifiLinkMbps:       linkMbps,
+		RSRPLabel:          rsrpLbl,
+		SINRLabel:          sinrLbl,
+		RSRQLabel:          rsrqLbl,
+		SpeedPotentialPct:  spPct,
+		SpeedPotentialText: spTxt,
+		Bars:               bars,
+		Quality:            q,
+		QualityCN:          qCN,
+		RFCeilingFactor:    alpha,
+		Diagnosis:          "ok",
+		DiagnosisCN:        "上游 Wi-Fi 中继状态已同步",
+		UpdatedAt:          nowUnix,
 	}
 }
 

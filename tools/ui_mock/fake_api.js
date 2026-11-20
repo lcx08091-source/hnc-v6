@@ -13,7 +13,7 @@
   'use strict';
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = META.version || 'v5.40.3', VCODE = String(META.versionCode || '5400300');
+  var VER = META.version || 'v6.0.0', VCODE = String(META.versionCode || '6000000');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 
@@ -290,7 +290,7 @@
   ];
   var APP_LIMIT_SHARED = false;
   var ENC = { policy: 'dot', devices: {} };
-  var MOCK_SIGNAL = { available: true, mode: 'cellular', rat: '5G SA', slot: 1, sub_id: 1, carrier: '中国移动', upstream_iface: 'rmnet_data2', band: 'n78', bandwidth_mhz: 100, rsrp_dbm: -86, rsrq_db: -9, sinr_db: 18, bars: 4, quality: 'excellent', quality_cn: '5G 极佳', rf_ceiling_factor: 1.0, diagnosis: 'ok', diagnosis_cn: '蜂窝射频状态极佳', updated_at: T };
+  var MOCK_SIGNAL = { available: true, mode: 'cellular', rat: '5G SA', display_rat: '5G-A', is_5ga: true, slot: 1, sub_id: 1, carrier: '中国移动', carrier_short: '移动', mcc_mnc: '46000', sharing_mode: '2.6GHz+700MHz 移广双载波共享', upstream_iface: 'rmnet_data2', band: 'n41', bandwidth_mhz: 100, band_combo: 'n41+n28', total_bw_mhz: 130, ca_count: 2, arfcn: 504990, freq_mhz: 2600, band_trait: '5G-A 高低频黄金双载波聚合 n41+n28（总带宽 130MHz） · 兼顾 2.6GHz 极速大带宽与 700MHz 强穿墙稳上行', rsrp_dbm: -84, rsrq_db: -8, sinr_db: 21, rsrp_label: '极强', sinr_label: '极纯净', rsrq_label: '基站空闲', speed_potential_pct: 100, speed_potential_text: '可跑满套餐峰值', bars: 4, quality: 'excellent', quality_cn: '5G-A 极佳', rf_ceiling_factor: 1.0, diagnosis: 'ok', diagnosis_cn: '5G-A 多载波通道（n41+n28）信号纯净、基站空闲，热点可跑满高速带宽', updated_at: T };
   var PU_CFG = { billing_day: 1, warn_percent: 80, plan_sim1_gb: 100, plan_sim2_gb: 0, anchor_sim1_gb: 0, anchor_sim2_gb: 0, use_netstats: 'auto' };
   var SELF_ON = { toggle: true, auto_expand: true, auto_promote: false };
   var DNS = { enabled: false, block_mode: 'nxdomain', log_queries: false };
@@ -1102,7 +1102,7 @@
     bl_add: function (p) { var d = needDev(p.mac); d.status = 'blocked'; return 'blacklisted'; },
     bl_del: function (p) { var d = needDev(p.mac); d.status = 'allowed'; return 'removed from blacklist'; },
     refresh: function () { return 'scan ok · ' + DEVS.filter(function (d) { return d.online; }).length + ' online'; },
-    cleanup_rules: function () { DEVS.forEach(function (d) { d.down_mbps = d.up_mbps = d.delay_ms = d.jitter_ms = d.loss_pct = 0; d.limit_enabled = false; d.status = 'allowed'; }); return ''; },
+    cleanup_rules: function () { DEVS.forEach(function (d) { d.down_mbps = d.up_mbps = d.delay_ms = d.jitter_ms = d.loss_pct = 0; d.limit_enabled = false; d.status = 'allowed'; d.blocks = []; }); if (typeof V6_LG_STATE === 'object') V6_LG_STATE.blocked_set = {}; if (typeof V6_EXP_STATE === 'object') V6_EXP_STATE.forced_macs = []; if (typeof V6_SC_STATE === 'object') V6_SC_STATE.frozen_rules = []; return ''; },
     cleanup_offline_devices: function (p) {
       var inc = bool(p.include_rules), rm = 0, kept = 0;
       DEVS = DEVS.filter(function (d) {
@@ -1350,6 +1350,610 @@
     '/api/rollback_ack': function () { return { ok: true }; }
   };
 
+
+  /* ═════════════ HNC v6.0.0 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
+  var V6_LG_STATE = {
+    notify_enabled: true,
+    lockscreen_mask: true,
+    capacity: 300,
+    cooldown_sec: 300,
+    blocked_set: { 'adtrack-legacy.example.cn': 1 },
+    events: [
+      {
+        id: 'lg_v6_01',
+        ts: T - 18,
+        mac: '0a:7f:3c:41:9e:21',
+        device_name: '小米 14',
+        src_ip: '192.168.43.23',
+        src_port: 51428,
+        dst_ip: '114.118.24.66',
+        dst_port: 80,
+        proto: 'tcp',
+        leak_type: 'PHONE',
+        raw_value: '13800138000',
+        dst_host: 'sdk-report.example-ad.cn',
+        hit_count: 3,
+        method: 'POST',
+        path: '/v2/collect?mobile=13800138000&channel=mi',
+        user_agent: 'Dalvik/2.1.0 (Linux; U; Android 15; Xiaomi 14)',
+        is_blocked: false,
+        raw_snippet: 'POST /v2/collect?mobile=13800138000&channel=mi HTTP/1.1\r\nHost: sdk-report.example-ad.cn\r\nUser-Agent: Dalvik/2.1.0 (Linux; U; Android 15; Xiaomi 14)\r\nContent-Type: application/x-www-form-urlencoded\r\n\r\nuid=demo_9021&phone=13800138000&net=wifi'
+      },
+      {
+        id: 'lg_v6_02',
+        ts: T - 47,
+        mac: '3a:91:d4:6b:02:5f',
+        device_name: 'MacBook Pro',
+        src_ip: '192.168.43.31',
+        src_port: 58310,
+        dst_ip: '120.55.89.14',
+        dst_port: 80,
+        proto: 'tcp',
+        leak_type: 'TOKEN',
+        raw_value: 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.demo_v6_token',
+        dst_host: 'legacy-api.devtool-sync.net',
+        hit_count: 1,
+        method: 'GET',
+        path: '/v1/workspace/ping',
+        user_agent: 'curl/8.7.1',
+        is_blocked: false,
+        raw_snippet: 'GET /v1/workspace/ping HTTP/1.1\r\nHost: legacy-api.devtool-sync.net\r\nUser-Agent: curl/8.7.1\r\nAuthorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.demo_v6_token\r\nAccept: */*'
+      },
+      {
+        id: 'lg_v6_03',
+        ts: T - 112,
+        mac: 'd2:6e:4a:8c:15:f3',
+        device_name: '192.168.43.96',
+        src_ip: '192.168.43.96',
+        src_port: 44912,
+        dst_ip: '180.97.33.108',
+        dst_port: 80,
+        proto: 'tcp',
+        leak_type: 'GPS',
+        raw_value: '31.230416,121.473701',
+        dst_host: 'weather-loc.iot-probe.cn',
+        hit_count: 2,
+        method: 'GET',
+        path: '/loc/check?latlng=31.230416,121.473701&coord=gcj02',
+        user_agent: 'okhttp/4.12.0',
+        is_blocked: false,
+        raw_snippet: 'GET /loc/check?latlng=31.230416,121.473701&coord=gcj02 HTTP/1.1\r\nHost: weather-loc.iot-probe.cn\r\nUser-Agent: okhttp/4.12.0\r\nConnection: keep-alive'
+      },
+      {
+        id: 'lg_v6_04',
+        ts: T - 265,
+        mac: '6a:0e:55:b1:9c:42',
+        device_name: '客厅电视',
+        src_ip: '192.168.43.67',
+        src_port: 39820,
+        dst_ip: '106.11.43.88',
+        dst_port: 80,
+        proto: 'tcp',
+        leak_type: 'DEVICE_ID',
+        raw_value: 'oaid_8f4e2c19a0b741d39e5c0012a87b6d01',
+        dst_host: 'adtrack-legacy.example.cn',
+        hit_count: 6,
+        method: 'GET',
+        path: '/splash/impression?oaid=oaid_8f4e2c19a0b741d39e5c0012a87b6d01&res=3840x2160',
+        user_agent: 'AndroidTV-AdSDK/3.4.2',
+        is_blocked: true,
+        raw_snippet: 'GET /splash/impression?oaid=oaid_8f4e2c19a0b741d39e5c0012a87b6d01&res=3840x2160 HTTP/1.1\r\nHost: adtrack-legacy.example.cn\r\nUser-Agent: AndroidTV-AdSDK/3.4.2'
+      },
+      {
+        id: 'lg_v6_05',
+        ts: T - 490,
+        mac: '7e:c4:19:20:5a:8b',
+        device_name: '小爱音箱',
+        src_ip: '192.168.43.71',
+        src_port: 47204,
+        dst_ip: '42.62.94.19',
+        dst_port: 80,
+        proto: 'tcp',
+        leak_type: 'MAC_ADDR',
+        raw_value: '7e:c4:19:20:5a:8b',
+        dst_host: 'ota-ping.smartspeaker-demo.cn',
+        hit_count: 1,
+        method: 'POST',
+        path: '/device/heartbeat',
+        user_agent: 'SmartSpeaker-HTTP/1.8',
+        is_blocked: false,
+        raw_snippet: 'POST /device/heartbeat HTTP/1.1\r\nHost: ota-ping.smartspeaker-demo.cn\r\nUser-Agent: SmartSpeaker-HTTP/1.8\r\nContent-Type: application/json\r\n\r\n{"mac":"7e:c4:19:20:5a:8b","fw":"2.14.8"}'
+      }
+    ]
+  };
+
+  function v6LeakGuardPayload() {
+    var totalHits = 0, devMap = {};
+    V6_LG_STATE.events.forEach(function (ev) {
+      totalHits += (ev.hit_count || 1);
+      if (ev.mac || ev.src_ip) devMap[ev.mac || ev.src_ip] = 1;
+      ev.is_blocked = !!V6_LG_STATE.blocked_set[String(ev.dst_host || '').toLowerCase()] || !!V6_LG_STATE.blocked_set[String(ev.dst_ip || '').toLowerCase()];
+    });
+    var blkCnt = Object.keys(V6_LG_STATE.blocked_set).filter(function (k) { return !/^\d+\.\d+\.\d+\.\d+$/.test(k); }).length;
+    return {
+      ok: true,
+      config: {
+        notify_enabled: V6_LG_STATE.notify_enabled,
+        lockscreen_mask: V6_LG_STATE.lockscreen_mask,
+        capacity: V6_LG_STATE.capacity,
+        cooldown_sec: V6_LG_STATE.cooldown_sec
+      },
+      stats: {
+        total_hits: totalHits,
+        affected_devices: Object.keys(devMap).length,
+        blocked_domains: blkCnt
+      },
+      events: V6_LG_STATE.events
+    };
+  }
+
+  var V6_EXP_STATE = {
+    enabled: true,
+    auto_detect: true,
+    forced_macs: ['0a:7f:3c:41:9e:21'],
+    configured_bg_ceil_pct: 85,
+    transitions: 4,
+    qdisc: 'fq_codel'
+  };
+
+  function v6ExpressPayload() {
+    var escorted = [];
+    var reasons = {};
+    if (V6_EXP_STATE.enabled) {
+      V6_EXP_STATE.forced_macs.forEach(function (m) {
+        if (escorted.indexOf(m) < 0) escorted.push(m);
+        reasons[m] = '手动常驻锁定零排队护航 (PRIO 0)';
+      });
+      if (V6_EXP_STATE.auto_detect) {
+        var dGame = dev('0a:7f:3c:41:9e:21');
+        if (dGame && dGame.online) {
+          if (escorted.indexOf(dGame.mac) < 0) escorted.push(dGame.mac);
+          reasons[dGame.mac] = '王者荣耀 UDP 高频对战微突发 + 常驻锁定';
+        }
+        var dCall = dev('3a:91:d4:6b:02:5f');
+        if (dCall && dCall.online) {
+          if (escorted.indexOf(dCall.mac) < 0) escorted.push(dCall.mac);
+          reasons[dCall.mac] = '腾讯会议 WebRTC EF(46) 实时双向音视频流';
+        }
+      }
+    }
+    var active = V6_EXP_STATE.enabled && escorted.length > 0;
+    return {
+      ok: true,
+      enabled: V6_EXP_STATE.enabled,
+      auto_detect: V6_EXP_STATE.auto_detect,
+      state: !V6_EXP_STATE.enabled ? 'disabled' : (active ? 'active_escort' : 'idle_fullspeed'),
+      active: active,
+      forced_macs: V6_EXP_STATE.forced_macs.slice(),
+      escorted_macs: escorted,
+      escort_reasons: reasons,
+      bg_ceil_pct: active ? V6_EXP_STATE.configured_bg_ceil_pct : 100,
+      configured_bg_ceil_pct: V6_EXP_STATE.configured_bg_ceil_pct,
+      cooldown_remaining_sec: 0,
+      transitions: V6_EXP_STATE.transitions,
+      dataplane: { qdisc: V6_EXP_STATE.qdisc, tier: 'tier_b_native_htb' }
+    };
+  }
+
+  var V6_UL_STATE = {
+    enabled: true,
+    grace_mb: 200,
+    leash_kbps: 1500,
+    leashed_count: 3,
+    sessions: [
+      {
+        session_key: '5e:20:b7:3a:c4:18|atum.hac.lp1.d4c.nintendo.net',
+        mac: '5e:20:b7:3a:c4:18',
+        device_name: '任天堂 Switch',
+        src_ip: '192.168.43.52',
+        dst_host: 'atum.hac.lp1.d4c.nintendo.net',
+        dst_ip: '104.111.42.88',
+        vendor_label: 'Nintendo eShop',
+        down_bytes: Math.round(648.4 * MB),
+        grace_remaining_bytes: 0,
+        down_bps: 184000,
+        applied_kbps: 1500,
+        state: 'leashed',
+        bypass_once: false,
+        paused: false
+      },
+      {
+        session_key: 'a6:5b:0f:93:7e:24|tlu.dl.delivery.mp.microsoft.com',
+        mac: 'a6:5b:0f:93:7e:24',
+        device_name: 'ThinkPad',
+        src_ip: '192.168.43.84',
+        dst_host: 'tlu.dl.delivery.mp.microsoft.com',
+        dst_ip: '13.107.4.52',
+        vendor_label: 'Windows Update',
+        down_bytes: Math.round(126.2 * MB),
+        grace_remaining_bytes: Math.round(73.8 * MB),
+        down_bps: 1420000,
+        applied_kbps: 0,
+        state: 'grace_fullspeed',
+        bypass_once: false,
+        paused: false
+      }
+    ]
+  };
+
+  function v6LeashPayload() {
+    var graceBytes = V6_UL_STATE.grace_mb * MB;
+    var computed = V6_UL_STATE.sessions.map(function (s) {
+      var copy = clone(s);
+      copy.grace_remaining_bytes = Math.max(0, graceBytes - copy.down_bytes);
+      if (copy.paused) {
+        copy.state = 'paused';
+        copy.applied_kbps = 0;
+      } else if (!V6_UL_STATE.enabled || copy.bypass_once) {
+        copy.state = copy.bypass_once ? 'bypassed' : 'grace_fullspeed';
+        copy.applied_kbps = 0;
+      } else if (copy.down_bytes >= graceBytes) {
+        copy.state = 'leashed';
+        copy.applied_kbps = V6_UL_STATE.leash_kbps;
+      } else {
+        copy.state = 'grace_fullspeed';
+        copy.applied_kbps = 0;
+      }
+      return copy;
+    });
+    var lCnt = computed.filter(function (s) { return s.state === 'leashed'; }).length;
+    return {
+      ok: true,
+      enabled: V6_UL_STATE.enabled,
+      grace_mb: V6_UL_STATE.grace_mb,
+      leash_kbps: V6_UL_STATE.leash_kbps,
+      leashed_count: lCnt,
+      active_sessions: computed.length,
+      sessions: computed
+    };
+  }
+
+  var V6_TH_STATE = {
+    enabled: true,
+    stage2_shaper_enabled: true,
+    stage1_temp_c: 42,
+    stage2_temp_c: 45,
+    low_bat_pct: 20,
+    temp_c: 39.6,
+    capacity_pct: 78,
+    is_charging: false,
+    bat_status: 'Discharging'
+  };
+
+  function v6ThermoPayload() {
+    var exActive = v6ExpressPayload().active;
+    var tc = round((V6_TH_STATE.temp_c + Math.sin(Date.now() / 45000) * 0.3) * 10) / 10;
+    var rawStg = tc >= V6_TH_STATE.stage2_temp_c ? 2 : (tc >= V6_TH_STATE.stage1_temp_c ? 1 : 0);
+    var exempt = V6_TH_STATE.is_charging || exActive;
+    var effStg = !V6_TH_STATE.enabled ? 0 : (rawStg === 2 && exempt ? 1 : rawStg);
+    return {
+      ok: true,
+      enabled: V6_TH_STATE.enabled,
+      stage2_shaper_enabled: V6_TH_STATE.stage2_shaper_enabled,
+      stage1_temp_c: V6_TH_STATE.stage1_temp_c,
+      stage2_temp_c: V6_TH_STATE.stage2_temp_c,
+      low_bat_pct: V6_TH_STATE.low_bat_pct,
+      battery: {
+        available: true,
+        temp_c: tc,
+        capacity_pct: V6_TH_STATE.capacity_pct,
+        status: V6_TH_STATE.bat_status,
+        is_charging: V6_TH_STATE.is_charging
+      },
+      vector_express_active: exActive,
+      stage2_exempt: exempt,
+      exempt_reason: V6_TH_STATE.is_charging ? 'charging_exempt' : (exActive ? 'gaming_escort_exempt' : ''),
+      low_battery_cruise: V6_TH_STATE.capacity_pct <= V6_TH_STATE.low_bat_pct,
+      cool_hold_remaining_sec: 0,
+      raw_thermal_stage: rawStg,
+      effective_stage: effStg
+    };
+  }
+
+  var V6_SC_STATE = {
+    cut_total: 4,
+    killed_keys: {},
+    frozen_rules: [
+      { key: 'tcp|192.168.43.67|106.11.43.88|80', proto: 'tcp', src_ip: '192.168.43.67', dst_ip: '106.11.43.88', dport: 80, expires_at: T + 780 }
+    ]
+  };
+
+  function v6BuildScalpelFlows(filterMac, filterIp) {
+    stepRates();
+    var nowSec = now();
+    V6_SC_STATE.frozen_rules = V6_SC_STATE.frozen_rules.filter(function (r) { return r.expires_at > nowSec; });
+    var frozenMap = {};
+    V6_SC_STATE.frozen_rules.forEach(function (r) {
+      frozenMap[r.proto + '|' + r.src_ip + '|' + r.dst_ip + '|' + r.dport] = r.expires_at;
+    });
+
+    var seedFlows = [
+      { flow_key: 'sc_01', mac: '0a:7f:3c:41:9e:21', device_name: '小米 14', proto: 'udp', src_ip: '192.168.43.23', sport: 55120, dst_ip: '183.3.226.35', dport: 10012, domain: 'pvp.qq.com', app_name: '王者荣耀', state: 'ASSURED', down_bps: 148000, up_bps: 72000, down_bytes: 18 * MB, up_bytes: 7 * MB },
+      { flow_key: 'sc_02', mac: '0a:7f:3c:41:9e:21', device_name: '小米 14', proto: 'tcp', src_ip: '192.168.43.23', sport: 51428, dst_ip: '114.118.24.66', dport: 80, domain: 'sdk-report.example-ad.cn', app_name: '广告遥测 SDK', state: 'ESTABLISHED', down_bps: 4200, up_bps: 1800, down_bytes: 64 * KB, up_bytes: 28 * KB },
+      { flow_key: 'sc_03', mac: '3a:91:d4:6b:02:5f', device_name: 'MacBook Pro', proto: 'udp', src_ip: '192.168.43.31', sport: 60412, dst_ip: '119.147.82.44', dport: 3480, domain: 'avc.meeting.qq.com', app_name: '腾讯会议', state: 'ASSURED', down_bps: 680000, up_bps: 520000, down_bytes: 192 * MB, up_bytes: 148 * MB },
+      { flow_key: 'sc_04', mac: '3a:91:d4:6b:02:5f', device_name: 'MacBook Pro', proto: 'tcp', src_ip: '192.168.43.31', sport: 58310, dst_ip: '120.55.89.14', dport: 80, domain: 'legacy-api.devtool-sync.net', app_name: '命令行工具', state: 'ESTABLISHED', down_bps: 2400, up_bps: 1200, down_bytes: 42 * KB, up_bytes: 19 * KB },
+      { flow_key: 'sc_05', mac: '1e:52:a8:0c:77:3d', device_name: 'iPad Air', proto: 'quic', src_ip: '192.168.43.45', sport: 52890, dst_ip: '111.225.148.29', dport: 443, domain: 'v26-dy.douyinvod.com', app_name: '抖音', state: 'ASSURED', down_bps: 1940000, up_bps: 68000, down_bytes: 412 * MB, up_bytes: 14 * MB },
+      { flow_key: 'sc_06', mac: '5e:20:b7:3a:c4:18', device_name: '任天堂 Switch', proto: 'tcp', src_ip: '192.168.43.52', sport: 49218, dst_ip: '104.111.42.88', dport: 443, domain: 'atum.hac.lp1.d4c.nintendo.net', app_name: '任天堂 eShop', state: 'ESTABLISHED', down_bps: 185000, up_bps: 9200, down_bytes: 648 * MB, up_bytes: 9 * MB },
+      { flow_key: 'sc_07', mac: '6a:0e:55:b1:9c:42', device_name: '客厅电视', proto: 'quic', src_ip: '192.168.43.67', sport: 43106, dst_ip: '36.110.188.72', dport: 443, domain: 'data.video.iqiyi.com', app_name: '爱奇艺', state: 'ASSURED', down_bps: 2310000, up_bps: 42000, down_bytes: 1120 * MB, up_bytes: 21 * MB },
+      { flow_key: 'sc_08', mac: '6a:0e:55:b1:9c:42', device_name: '客厅电视', proto: 'tcp', src_ip: '192.168.43.67', sport: 39820, dst_ip: '106.11.43.88', dport: 80, domain: 'adtrack-legacy.example.cn', app_name: '电视开屏 SDK', state: 'TIME_WAIT', down_bps: 0, up_bps: 0, down_bytes: 128 * KB, up_bytes: 24 * KB },
+      { flow_key: 'sc_09', mac: 'a6:5b:0f:93:7e:24', device_name: 'ThinkPad', proto: 'udp', src_ip: '192.168.43.84', sport: 51820, dst_ip: '203.0.113.18', dport: 51820, domain: 'wg-gateway.corp-demo.net', app_name: 'VPN/代理隧道', state: 'ASSURED', down_bps: 540000, up_bps: 145000, down_bytes: 186 * MB, up_bytes: 52 * MB },
+      { flow_key: 'sc_10', mac: 'd2:6e:4a:8c:15:f3', device_name: '192.168.43.96', proto: 'tcp', src_ip: '192.168.43.96', sport: 44912, dst_ip: '180.97.33.108', dport: 80, domain: 'weather-loc.iot-probe.cn', app_name: '天气定位组件', state: 'ESTABLISHED', down_bps: 1600, up_bps: 800, down_bytes: 18 * KB, up_bytes: 9 * KB }
+    ];
+
+    var fMac = String(filterMac || '').toLowerCase();
+    var fIp = String(filterIp || '').trim();
+    var out = [];
+    seedFlows.forEach(function (f) {
+      var pNorm = (f.proto === 'udp' || f.proto === 'quic') ? 'udp' : 'tcp';
+      var k5 = pNorm + '|' + f.src_ip + ':' + f.sport + '|' + f.dst_ip + ':' + f.dport;
+      if (V6_SC_STATE.killed_keys[k5]) return;
+      if (f.domain && V6_LG_STATE.blocked_set[String(f.domain).toLowerCase()]) return;
+      if (fMac && f.mac !== fMac) return;
+      if (fIp && f.src_ip !== fIp) return;
+      var k4 = pNorm + '|' + f.src_ip + '|' + f.dst_ip + '|' + f.dport;
+      var copy = clone(f);
+      if (frozenMap[k4]) {
+        copy.frozen_until = frozenMap[k4];
+        copy.down_bps = 0;
+        copy.up_bps = 0;
+        copy.state = 'FROZEN';
+      } else {
+        copy.down_bps = round(copy.down_bps * rnd(0.86, 1.16));
+        copy.up_bps = round(copy.up_bps * rnd(0.86, 1.16));
+      }
+      out.push(copy);
+    });
+    return out;
+  }
+
+  function v6ScalpelPayload(q) {
+    var flows = v6BuildScalpelFlows(q && q.mac, q && q.ip);
+    return {
+      ok: true,
+      readable: true,
+      total: flows.length,
+      cut_total: V6_SC_STATE.cut_total,
+      active_rules: V6_SC_STATE.frozen_rules,
+      flows: flows
+    };
+  }
+
+  var V6_BB_STATE = {
+    granularity_ms: 200,
+    total_ticks: 18420,
+    latest_jitter_ms: 4.8,
+    incidents: [
+      {
+        unix_ms: (T - 340) * 1000,
+        rtt_ms: 46.2,
+        jitter_ms: 28.4,
+        culprit_device: '任天堂 Switch (192.168.43.52)',
+        root_cause_zh: 'eShop 突发多线程并发拉取触发上行队列瞬时水位抬升，已由 UpdateLeash 压制收敛'
+      },
+      {
+        unix_ms: (T - 1920) * 1000,
+        rtt_ms: 39.5,
+        jitter_ms: 21.0,
+        culprit_device: '5G NR 空口切站 (rmnet_data2)',
+        root_cause_zh: '上游基站 PCI 切换引起 180ms 短暂重传，5G Autorate 已平滑重锚定'
+      }
+    ]
+  };
+
+  function v6BlackboxPayload() {
+    V6_BB_STATE.total_ticks += 3;
+    V6_BB_STATE.latest_jitter_ms = round((4.2 + Math.abs(Math.sin(Date.now() / 9000)) * 3.6) * 10) / 10;
+    return {
+      ok: true,
+      granularity_ms: V6_BB_STATE.granularity_ms,
+      total_ticks: V6_BB_STATE.total_ticks,
+      incident_count: V6_BB_STATE.incidents.length,
+      latest_jitter_ms: V6_BB_STATE.latest_jitter_ms,
+      incidents: V6_BB_STATE.incidents
+    };
+  }
+
+  function v6MultiIfacePayload() {
+    return {
+      ok: true,
+      primary_downstream: IFACE,
+      shape_targets: [IFACE, 'ap_br_wlan2'],
+      dual_band_or_mlo: true,
+      usb_tether_active: false,
+      lan_fastlane_class: '1:fffe',
+      lan_fastlane_gbps: 2.5,
+      tun0_guard: {
+        vpn_active: false,
+        loop_risk_detected: false,
+        low16_mark_safe: true
+      }
+    };
+  }
+
+  var V6_SUBTREES_RESTORES = 2;
+  function v6SubtreesPayload() {
+    var exOn = v6ExpressPayload().active;
+    return {
+      ok: true,
+      full_restores: V6_SUBTREES_RESTORES,
+      dynamic_qos: exOn
+        ? { mode: 'gaming_60_30_10', tier1_pct: 60, tier2_pct: 30, tier3_pct: 10 }
+        : { mode: 'balanced_50_35_15', tier1_pct: 50, tier2_pct: 35, tier3_pct: 15 }
+    };
+  }
+
+  var V6_VAULT_SHA = '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08';
+
+  GET['/api/vector_sync'] = function () {
+    var lv = GET['/api/live']({});
+    var dv = GET['/api/devices']();
+    return {
+      ok: true,
+      version: VER,
+      backend_version: VER,
+      healthy: true,
+      core_uptime_sec: 14820 + Math.floor((Date.now() - PAGE_T0) / 1000),
+      bulkheads: {
+        dataplane: { healthy: true, circuit_state: 'closed', fail_count: 0 },
+        dpi_shm: { healthy: true, circuit_state: 'closed', fail_count: 0 },
+        android_bridge: { healthy: true, circuit_state: 'closed', fail_count: 0 },
+        storage: { healthy: true, circuit_state: 'closed', fail_count: 0 }
+      },
+      health: GET['/api/health'](),
+      live: lv,
+      devices: dv.devices,
+      devices_sig: dv.devices_sig || '',
+      config: GET['/api/config'](),
+      capabilities: GET['/api/capabilities'](),
+      alerts: GET['/api/alerts'](),
+      offload_status: GET['/api/offload_status'](),
+      app_limits: GET['/api/app_limits'](),
+      templates: GET['/api/templates'](),
+      leakguard: v6LeakGuardPayload(),
+      express: v6ExpressPayload(),
+      update_leash: v6LeashPayload(),
+      thermo: v6ThermoPayload(),
+      scalpel: v6ScalpelPayload({}),
+      v6_pack: {
+        blackbox: v6BlackboxPayload(),
+        multi_iface: v6MultiIfacePayload(),
+        native_subtrees: v6SubtreesPayload()
+      }
+    };
+  };
+  GET['/api/leakguard/events'] = function () { return v6LeakGuardPayload(); };
+  GET['/api/v6/express'] = function () { return v6ExpressPayload(); };
+  GET['/api/v6/update_leash'] = function () { return v6LeashPayload(); };
+  GET['/api/v6/thermo'] = function () { return v6ThermoPayload(); };
+  GET['/api/v6/scalpel/flows'] = function (q) { return v6ScalpelPayload(q || {}); };
+  GET['/api/v6/blackbox'] = function () { return v6BlackboxPayload(); };
+  GET['/api/v6/multi_iface'] = function () { return v6MultiIfacePayload(); };
+  GET['/api/v6/native_subtrees'] = function () { return v6SubtreesPayload(); };
+  GET['/api/v6/diag_dump'] = function () {
+    return {
+      ok: true,
+      version: VER,
+      generated_at: now(),
+      bulkheads: GET['/api/vector_sync']().bulkheads,
+      dataplane_tier: 'tier_b_native_htb',
+      json_engine: 'go1.27_encoding_json_v2'
+    };
+  };
+  GET['/api/backup'] = function () {
+    return {
+      schema: 'hnc.config.vault.v6',
+      module_version: VER,
+      exported_at: now(),
+      file_count: 16,
+      sha256: V6_VAULT_SHA,
+      files: {
+        'rules.json': rulesJson(),
+        'vector_express.json': { enabled: V6_EXP_STATE.enabled, auto_detect: V6_EXP_STATE.auto_detect, forced_macs: V6_EXP_STATE.forced_macs },
+        'update_leash.json': { enabled: V6_UL_STATE.enabled, grace_mb: V6_UL_STATE.grace_mb, leash_kbps: V6_UL_STATE.leash_kbps },
+        'thermo_cruise.json': { enabled: V6_TH_STATE.enabled, stage1_temp_c: V6_TH_STATE.stage1_temp_c, stage2_temp_c: V6_TH_STATE.stage2_temp_c }
+      }
+    };
+  };
+
+  POST['/api/leakguard/config'] = function (b) {
+    if (b && typeof b.notify_enabled === 'boolean') V6_LG_STATE.notify_enabled = b.notify_enabled;
+    if (b && typeof b.lockscreen_mask === 'boolean') V6_LG_STATE.lockscreen_mask = b.lockscreen_mask;
+    if (b && b.capacity != null) V6_LG_STATE.capacity = lim(round(+b.capacity || 300), 10, 2000);
+    if (b && b.cooldown_sec != null) V6_LG_STATE.cooldown_sec = lim(round(+b.cooldown_sec || 300), 0, 86400);
+    return v6LeakGuardPayload();
+  };
+  POST['/api/leakguard/clear'] = function () {
+    V6_LG_STATE.events = [];
+    return v6LeakGuardPayload();
+  };
+  POST['/api/leakguard/block-domain'] = function (b) {
+    var host = String((b && b.dst_host) || '').trim().toLowerCase();
+    if (!host) throw err('missing dst_host', 400);
+    var unb = !!(b && b.action === 'unblock');
+    if (unb) delete V6_LG_STATE.blocked_set[host];
+    else V6_LG_STATE.blocked_set[host] = 1;
+    var targetMac = String((b && b.mac) || '').toLowerCase();
+    DEVS.forEach(function (d) {
+      if (targetMac && d.mac !== targetMac) return;
+      d.blocks = (d.blocks || []).filter(function (x) { return String(x.value || '').toLowerCase() !== host; });
+      if (!unb) {
+        d.blocks.push({ kind: /^\d+\.\d+\.\d+\.\d+$/.test(host) ? 'ip' : 'domain', value: host, label: '隐私安检拦截', source: 'manual' });
+      }
+    });
+    return v6LeakGuardPayload();
+  };
+  POST['/api/v6/express'] = function (b) {
+    if (b && typeof b.enabled === 'boolean') V6_EXP_STATE.enabled = b.enabled;
+    if (b && typeof b.auto_detect === 'boolean') V6_EXP_STATE.auto_detect = b.auto_detect;
+    if (b && Array.isArray(b.forced_macs)) {
+      V6_EXP_STATE.forced_macs = b.forced_macs.map(function (m) { return String(m || '').toLowerCase(); }).filter(Boolean);
+    }
+    V6_EXP_STATE.transitions += 1;
+    return v6ExpressPayload();
+  };
+  POST['/api/v6/update_leash'] = function (b) {
+    var act = (b && b.action) || 'config';
+    if (act === 'config') {
+      if (b && typeof b.enabled === 'boolean') V6_UL_STATE.enabled = b.enabled;
+      if (b && b.grace_mb != null) V6_UL_STATE.grace_mb = lim(round(+b.grace_mb || 200), 10, 10240);
+      if (b && b.leash_kbps != null) V6_UL_STATE.leash_kbps = lim(round(+b.leash_kbps || 1500), 128, 1000000);
+    } else {
+      var sk = String((b && b.session_key) || '');
+      V6_UL_STATE.sessions.forEach(function (s) {
+        if (s.session_key === sk || (b.mac && s.mac === String(b.mac).toLowerCase() && (!b.dst_host || s.dst_host === b.dst_host))) {
+          if (act === 'bypass_once') { s.bypass_once = true; s.paused = false; s.state = 'bypassed'; s.applied_kbps = 0; }
+          else if (act === 'pause_update') { s.paused = true; s.state = 'paused'; s.down_bps = 0; }
+          else if (act === 'resume_update') { s.paused = false; s.state = s.bypass_once ? 'bypassed' : 'leashed'; s.down_bps = 184000; }
+        }
+      });
+    }
+    return v6LeashPayload();
+  };
+  POST['/api/v6/thermo'] = function (b) {
+    if (b && typeof b.enabled === 'boolean') V6_TH_STATE.enabled = b.enabled;
+    if (b && typeof b.stage2_shaper_enabled === 'boolean') V6_TH_STATE.stage2_shaper_enabled = b.stage2_shaper_enabled;
+    if (b && b.stage1_temp_c != null) V6_TH_STATE.stage1_temp_c = lim(+b.stage1_temp_c || 42, 30, 70);
+    if (b && b.stage2_temp_c != null) V6_TH_STATE.stage2_temp_c = lim(+b.stage2_temp_c || 45, 32, 75);
+    if (b && b.low_bat_pct != null) V6_TH_STATE.low_bat_pct = lim(round(+b.low_bat_pct || 20), 1, 80);
+    return v6ThermoPayload();
+  };
+  POST['/api/v6/scalpel/cut'] = function (b) {
+    var pNorm = (b && (b.proto === 'udp' || b.proto === 'quic')) ? 'udp' : 'tcp';
+    var sip = String((b && b.src_ip) || '').trim();
+    var dip = String((b && b.dst_ip) || '').trim();
+    var sp = round(+(b && b.sport) || 0);
+    var dp = round(+(b && b.dport) || 0);
+    if (!sip || !dip || dp <= 0) throw err('invalid 5-tuple', 400);
+    V6_SC_STATE.cut_total += 1;
+    if (b && b.mode === 'cut_freeze_15m') {
+      var k4 = pNorm + '|' + sip + '|' + dip + '|' + dp;
+      V6_SC_STATE.frozen_rules = V6_SC_STATE.frozen_rules.filter(function (r) { return r.key !== k4; });
+      V6_SC_STATE.frozen_rules.push({ key: k4, proto: pNorm, src_ip: sip, dst_ip: dip, dport: dp, expires_at: now() + 900 });
+    } else if (sp > 0) {
+      V6_SC_STATE.killed_keys[pNorm + '|' + sip + ':' + sp + '|' + dip + ':' + dp] = 1;
+    }
+    return { ok: true, mode: (b && b.mode) || 'cut_once', cut_total: V6_SC_STATE.cut_total, active_rules: V6_SC_STATE.frozen_rules.length };
+  };
+  POST['/api/v6/blackbox'] = function (b) {
+    var act = (b && b.action) || 'sample_now';
+    if (act === 'clear') {
+      V6_BB_STATE.incidents = [];
+    } else {
+      V6_BB_STATE.total_ticks += 1;
+      V6_BB_STATE.latest_jitter_ms = round(rnd(3.4, 7.8) * 10) / 10;
+    }
+    return v6BlackboxPayload();
+  };
+  POST['/api/v6/native_subtrees'] = function () {
+    V6_SUBTREES_RESTORES += 1;
+    return v6SubtreesPayload();
+  };
+  POST['/api/backup'] = function (b) {
+    var cnt = (b && b.files && typeof b.files === 'object') ? Object.keys(b.files).length : (round(+(b && b.file_count) || 16));
+    return { ok: true, restored_count: Math.max(1, cnt), sha256: (b && b.sha256) || V6_VAULT_SHA };
+  };
+  POST['/api/restore'] = POST['/api/backup'];
+
   /* ═════════════ 预置曲线历史 ═════════════
    * 顶部「近 60 秒下行」曲线和 DPI 计数小曲线都是前端按轮询结果一点点攒的, 刚打开时是一条直线;
    * 这里先按同样的随机游走补上前 29 个点(S 是 core.js 的全局状态), 首屏就有起伏 */
@@ -1404,9 +2008,27 @@
 
   /* ═════════════ 拦下预览里用不了的东西 ═════════════ */
   // SSE: 不建连接(演示数据本来就在内存里, 轮询足够)
-  function FakeEventSource(url) { this.url = url; this.readyState = 0; this.onopen = this.onerror = this.onmessage = null; }
-  FakeEventSource.prototype.addEventListener = function () {};
-  FakeEventSource.prototype.removeEventListener = function () {};
+  function FakeEventSource(url) {
+    var self = this;
+    this.url = url;
+    this.readyState = 0;
+    this.onopen = this.onerror = this.onmessage = null;
+    this._ls = {};
+    setTimeout(function () {
+      if (self.readyState === 2) return;
+      self.readyState = 1;
+      if (typeof self.onopen === 'function') self.onopen({ type: 'open' });
+      (self._ls.ready || []).forEach(function (fn) { try { fn({ type: 'ready', data: '{"ok":true}' }); } catch (_) {} });
+    }, 35);
+  }
+  FakeEventSource.prototype.addEventListener = function (tp, fn) {
+    if (!this._ls[tp]) this._ls[tp] = [];
+    this._ls[tp].push(fn);
+  };
+  FakeEventSource.prototype.removeEventListener = function (tp, fn) {
+    if (!this._ls[tp]) return;
+    this._ls[tp] = this._ls[tp].filter(function (x) { return x !== fn; });
+  };
   FakeEventSource.prototype.close = function () { this.readyState = 2; };
   window.EventSource = FakeEventSource;
   // fetch: 只应答 changelog.html(内嵌副本), 其它一律不联网
@@ -1436,7 +2058,10 @@
   /* ═════════════ 「演示数据」标记 ═════════════ */
   var st = document.createElement('style');
   st.textContent = '#mode-pill.sample{display:inline-block!important;color:var(--orange,#FF9500);background:color-mix(in srgb,var(--orange,#FF9500) 14%,transparent);' +
-    'box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--orange,#FF9500) 35%,transparent);position:relative;z-index:1}';
+    'box-shadow:inset 0 0 0 1px color-mix(in srgb,var(--orange,#FF9500) 35%,transparent);position:relative;z-index:1;transition:opacity .15s ease}' +
+    '[data-style="apple"] .header #mode-pill.sample{opacity:calc(1 - var(--st,0))}' +
+    '.header.hs-on #mode-pill.sample{opacity:0!important;pointer-events:none!important}' +
+    '@media (max-width:600px){.header{padding-left:60px!important}}';
   (document.head || document.documentElement).appendChild(st);
   function demoPill() {
     var p = document.getElementById('mode-pill'); if (!p) return;

@@ -104,7 +104,7 @@ var I = {
   leash:'<rect x="3" y="6.5" width="7.5" height="11" rx="3.6" fill="currentColor" fill-opacity=".15"/><rect x="13.5" y="6.5" width="7.5" height="11" rx="3.6" fill="currentColor" fill-opacity=".15"/><rect x="3" y="6.5" width="7.5" height="11" rx="3.6"/><rect x="13.5" y="6.5" width="7.5" height="11" rx="3.6"/><path d="M8.2 12h7.6"/>',
   thermo:'<path d="M14 14.76V5.5a2 2 0 1 0-4 0v9.26a4 4 0 1 0 4 0Z" fill="currentColor" fill-opacity=".16"/><path d="M14 14.76V5.5a2 2 0 1 0-4 0v9.26a4 4 0 1 0 4 0Z"/><circle cx="12" cy="17.5" r="1.5" fill="currentColor" stroke="none"/><path d="M16.8 6h2.2M16.8 9.5h1.6"/>'
 };
-function ico(k, cls) { return '<svg class="' + (cls || '') + '" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">' + (I[k] || '') + '</svg>'; }
+function ico(k, cls) { return '<svg class="' + (cls || '') + '" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round">' + (I[k] || '') + '</svg>'; }
 
 /* 底栏双态光学图标：默认轮廓态 (out) vs 液态透镜内实心镂空态 (fill) */
 var HNC_TAB_SVGS = {
@@ -245,7 +245,7 @@ function mkey(n) {
   return k ? n.nodeName + ':' + k : '';
 }
 function morphAttrs(a, b) {
-  var i, at, frozen = a.classList.contains('pending') || !!(a.parentNode && a.parentNode.classList && a.parentNode.classList.contains('pending'));
+  var i, at, frozen = a.classList.contains('pending') || a.classList.contains('busy') || !!(a.parentNode && a.parentNode.classList && (a.parentNode.classList.contains('pending') || a.parentNode.classList.contains('busy')));
   for (i = a.attributes.length - 1; i >= 0; i--) {
     at = a.attributes[i].name;
     if (b.hasAttribute(at) || (at === 'style' && a.classList.contains('thumb'))) continue;

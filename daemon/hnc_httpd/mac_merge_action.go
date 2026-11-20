@@ -782,6 +782,40 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 		}})
 	}
 
+	// 7b) 加密 DNS 按设备豁免/覆盖策略 (data/encdns.json)
+	encCfg := loadEncdns(h)
+	if oldEncPol, hasOldEnc := encCfg.Devices[from]; hasOldEnc {
+		_, hasNewEnc := encCfg.Devices[to]
+		if !hasNewEnc || force {
+			var snapEnc fileSnap
+			steps = append(steps, mergeStep{name: "encdns", do: func() error {
+				encdnsMu.Lock()
+				defer encdnsMu.Unlock()
+				snapEnc = snapFile(encdnsPath(h))
+				c := loadEncdns(h)
+				if c.Devices == nil {
+					c.Devices = map[string]string{}
+				}
+				c.Devices[to] = oldEncPol
+				c.Ts = now.Unix()
+				b, _ := json.Marshal(c)
+				if err := discoverWriteAtomic(encdnsPath(h), b); err != nil {
+					return err
+				}
+				encdnsCountersInvalidate()
+				mig["encdns"] = true
+				return nil
+			}, undo: func() {
+				encdnsMu.Lock()
+				defer encdnsMu.Unlock()
+				if snapEnc.path != "" {
+					_ = snapEnc.restore()
+					encdnsCountersInvalidate()
+				}
+			}})
+		}
+	}
+
 	// 8) 别名表 = 提交点
 	{
 		var snap fileSnap
@@ -926,6 +960,22 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 			warn("conn_blocks sync: %v", err)
 		}
 		connBlockMu.Unlock()
+	}
+	if _, hadEnc := encCfg.Devices[from]; hadEnc {
+		encdnsMu.Lock()
+		c := loadEncdns(h)
+		if _, ok := c.Devices[from]; ok {
+			delete(c.Devices, from)
+			c.Ts = now.Unix()
+			b, _ := json.Marshal(c)
+			if err := discoverWriteAtomic(encdnsPath(h), b); err != nil {
+				warn("encdns: %v", err)
+			} else {
+				encdnsCountersInvalidate()
+				_, _ = runBin(h, "encdns_sync.sh")
+			}
+		}
+		encdnsMu.Unlock()
 	}
 	if c := s.limitCtl; c != nil {
 		c.mu.Lock()

@@ -4,7 +4,8 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="theme-color" content="#F5F5F7" media="(prefers-color-scheme: light)">
-<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#08090C" media="(prefers-color-scheme: dark)">
 <title>HNC · Hotspot Network Control</title>
 <!--
   HNC WebUI v6 (v5.11 起的新版界面)
@@ -487,7 +488,7 @@
     radial-gradient(90% 80% at 92% 100%,rgba(0,122,255,.12) 0%,transparent 62%),
     var(--card);
 }
-[data-glass="liquid"] .hero>div:not(.hero-div){
+[data-glass="liquid"] .hero>div:not(.hero-div):not(.hero-spark-hud){
   padding:11px 13px;
   border-radius:19px;
   background:rgba(255,255,255,.46);
@@ -557,7 +558,7 @@
     radial-gradient(42% 36% at 18% 82%,rgba(16,185,129,.20) 0%,transparent 72%),
     linear-gradient(145deg,#060b14 0%,#0b1526 52%,#081120 100%)!important;
 }
-:root[data-glass="liquid"][data-theme="dark"] .hero>div:not(.hero-div),
+:root[data-glass="liquid"][data-theme="dark"] .hero>div:not(.hero-div):not(.hero-spark-hud),
 :root[data-glass="liquid"][data-theme="dark"] .ctrl,
 :root[data-glass="liquid"][data-theme="dark"] .cc-tile,
 :root[data-glass="liquid"][data-theme="dark"] .scard-rows>.row,
@@ -646,9 +647,7 @@
 .hero-spark-hud .pills{display:inline-flex;gap:8px}
 
 /* 2. 搜索框下方一键快捷筛选胶囊条 (.quick-pills) */
-.quick-pills{
-  display:flex;gap:7px;overflow-x:auto;padding:2px 2px 4px;scrollbar-width:none;-ms-overflow-style:none;
-}
+.quick-pills { display: flex; gap: 7px; overflow-x: auto; margin: 0 -16px; padding: 2px 16px 4px; scroll-padding-inline: 16px; scrollbar-width: none; -ms-overflow-style: none; }
 .quick-pills::-webkit-scrollbar{display:none}
 .qpill{
   display:inline-flex;align-items:center;gap:5px;height:33px;padding:0 12px;border-radius:999px;
@@ -4192,15 +4191,1002 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
 .cc-bento-row .cc-txt b { font-size: 12px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
 .cc-bento-row .cc-txt small { font-size: 10.5px !important; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; display: block; }
 .conn-strip .linkish { font-size: 12px !important; font-weight: 600; white-space: nowrap; flex-shrink: 0; }
-@media (max-width: 440px) {
-  .sig-pill { height: 26px; padding: 0 7px; font-size: 10.5px; gap: 4px; }
-  .sig-pill .sig-unit { display: none; }
+@media (max-width: 560px) {
+  .header .sample { display: none; }
+}
+/* 滚动收起大标题时平滑淡出顶栏 #mode-pill，彻底杜绝任何屏宽下与居中小标题 #htitle 字叠字碰撞 */
+[data-style="apple"] .header #mode-pill {
+  opacity: calc(1 - var(--st, 0));
+  transition: opacity .15s ease;
+}
+.header.hs-on #mode-pill {
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+[data-style="apple"] .header .htitle {
+  max-width: calc(100% - 236px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+@media (min-width: 769px) {
+  .header .brand { flex: 0 0 auto; margin-right: auto; }
+}
+@media (max-width: 768px) {
+  .sig-pill { height: 27px; padding: 0 8px; font-size: 11px; gap: 4px; max-width: 142px; overflow: hidden; text-overflow: ellipsis; }
+  .sig-pill .sig-unit, .header .brand-sub { display: none !important; }
   [data-style="apple"] .header .brand { display: none !important; }
+  [data-style="apple"] .header #sig-pill { position: relative; z-index: 2; margin-right: auto; }
+  :root:not([data-style="apple"]) .header .brand { flex: 0 0 auto; margin-right: 6px; }
+  :root:not([data-style="apple"]) .header #sig-pill { margin-right: auto; }
+}
+@media (max-width: 480px) {
+  .sig-pill { height: 26px; padding: 0 7px; font-size: 10.5px; gap: 4px; max-width: 126px; }
+  .header { gap: 6px; padding-left: max(14px, env(safe-area-inset-left, 0px)); padding-right: max(12px, env(safe-area-inset-right, 0px)); }
+  [data-glass="liquid"] .hbtn, :root[data-glass="frosted"] .hbtn { width: 37px; height: 37px; margin-left: 2px; }
+}
+/* 修复默认极简浅色主题底栏选中项蓝底蓝字隐身 & 赛博主题字体色 */
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]):not([data-theme="dark"]) #tabbar:not(.drag) #lens-in .tab {
+  color: #FFFFFF !important;
+}
+:root[data-style="cyber"] #tabbar #lens-in .tab {
+  font-family: var(--mono);
+  color: var(--cy-accent, #38bdf8) !important;
+}
+#hnc-cy-scan { top: env(safe-area-inset-top, 0px); }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   PART 10 · HNC v6.0.0 Master Frontend Architecture (A2UI Surface Token System)
+   · 谷歌 A2UI 1.0 & Chrome Modern Web Guidance 语义表面令牌解耦（终结特异性混战）
+   · 纯正 iOS 26 / macOS Dark Mode 黑曜石四级空间明度体系（L0 #08090C → L1 #16181F → L2 → L3）
+   · Adreno TBDR 满帧 120fps 光学折射引擎 v2（零 SaveLayer 异或遮罩、零三明治回读、滚动硬件 Mipmap 快径）
+   · 经典毛玻璃（Satin Vibrancy）、极简精密（Linear/Vercel）、赛博机甲（Endfield HUD）全模式深度精雕
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* 10.0 全局语义表面令牌与未定义变量统一收口 */
+:root {
+  --accent: var(--blue);
+  --text: var(--text-1);
+  --t2: var(--text-3);
+  --border: var(--stroke);
 }
 
+/* 窄屏与宿主内嵌预览顶栏防拥挤排布：区分 3 列玻璃 Hero 与 5 列分割线 Hero */
+@media (max-width: 460px) {
+  .header #sig-pill:not([hidden]) + #mode-pill { display: none !important; }
+  [data-glass] .hero { grid-template-columns: minmax(0, 1.12fr) minmax(0, 1.12fr) minmax(74px, .82fr) !important; gap: 8px !important; }
+  :root:not([data-glass]) .hero { grid-template-columns: minmax(0, 1.12fr) 1px minmax(0, 1.12fr) 1px minmax(72px, .82fr) !important; }
+  [data-glass] .hero > div:not(.hero-div):not(.hero-spark-hud) { padding: 10px 10px !important; }
+  .hero .hero-v { font-size: 23px !important; }
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   10.1 120fps 光学折射合成管线 v2（Adreno 830 TBDR 零 SaveLayer 阻塞架构）
+   ─────────────────────────────────────────────────────────────────────────── */
+/* 1) 移除底部 body::after 双重离屏模糊与遮罩，改为纯 Alpha 渐隐衬底（消灭底部三明治回读） */
+body::after {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  -webkit-mask-image: none !important;
+  mask-image: none !important;
+  background: linear-gradient(to top, var(--bg) 0%, color-mix(in srgb, var(--bg) 56%, transparent) 52%, transparent 100%) !important;
+}
+/* 2) 顶栏模糊核恒定化：仅通过合成器线程改变 opacity: var(--hs, 0)，彻底杜绝动态模糊半径每帧重建 Shader */
+[data-glass="liquid"] .header::before,
+[data-glass="frosted"] .header::before {
+  opacity: calc(var(--hp, 0) * (1 - var(--hs, 0))) !important;
+  -webkit-backdrop-filter: blur(16px) saturate(185%) !important;
+  backdrop-filter: blur(16px) saturate(185%) !important;
+}
+[data-glass="liquid"] .header.hs-on::after,
+[data-glass="frosted"] .header.hs-on::after {
+  -webkit-backdrop-filter: blur(16px) saturate(185%) !important;
+  backdrop-filter: blur(16px) saturate(185%) !important;
+  opacity: var(--hs, 0) !important;
+  will-change: opacity;
+}
+/* 3) 顶栏 37px 圆钮走硬件 Mipmap + 非对称色散棱镜内阴影（省去 3 路全分辨率 SVG ReferenceFilter） */
+:root[data-glass="liquid"]:not([data-theme="dark"]):not([data-has-wp="1"]) .hbtn {
+  -webkit-backdrop-filter: blur(12px) saturate(195%) !important;
+  backdrop-filter: blur(12px) saturate(195%) !important;
+  box-shadow:
+    inset 1px 1px .6px rgba(255, 255, 255, .92),
+    inset -1px -1px .8px rgba(56, 189, 248, .28),
+    inset .8px -.8px .8px rgba(244, 114, 182, .18),
+    0 6px 16px -6px rgba(15, 30, 65, .16) !important;
+}
+/* 4) 底栏 #tabbar：静止与拖拽透镜时运行精简版 Snell 光学折射；页面高速滚屏期无缝切入硬件 Mipmap 快径稳跑 120fps */
+:root[data-glass="liquid"] #tabbar {
+  -webkit-backdrop-filter: var(--hyalite, blur(20px)) saturate(185%) !important;
+  backdrop-filter: var(--hyalite, blur(20px)) saturate(185%) !important;
+}
+:root.is-scrolling[data-glass="liquid"] #tabbar:not(.drag):not(.pressing) {
+  -webkit-backdrop-filter: blur(20px) saturate(185%) !important;
+  backdrop-filter: blur(20px) saturate(185%) !important;
+}
+/* 5) 滚动列表卡片：用 Skia 硬件 SDF 圆角非对称折光内阴影替代 mask-composite: exclude（消灭每帧 20+ 次 SaveLayer），并恢复 layout style 遏制 */
+:root[data-glass="liquid"] .dev:not(.open),
+:root[data-glass="liquid"] .scard:not(.open) {
+  contain: layout style !important;
+}
+:root[data-glass="liquid"] .dev.glass::before,
+:root[data-glass="liquid"] .scard.glass::before,
+:root[data-glass="liquid"] .filter.glass::before,
+:root[data-glass="liquid"] .gops.glass::before,
+:root[data-glass="liquid"] .search.glass::before,
+:root[data-glass="liquid"] .v6-card.glass::before,
+:root[data-glass="liquid"] .lgd-panel.glass::before,
+:root[data-glass="liquid"] .seg.glass::before,
+:root[data-glass="liquid"] .sheet .glass::before {
+  display: none !important;
+  content: none !important;
+}
+:root[data-glass="liquid"]:not([data-theme="dark"]):not([data-has-wp="1"]) .glass:not(#tabbar):not(.seg) {
+  isolation: auto;
+  -webkit-backdrop-filter: blur(16px) saturate(190%) !important;
+  backdrop-filter: blur(16px) saturate(190%) !important;
+  box-shadow:
+    inset 1.1px 1.1px .5px rgba(255, 255, 255, .92),
+    inset -1px -1px .7px rgba(56, 189, 248, .22),
+    0 0 0 .5px rgba(15, 28, 58, .06),
+    0 12px 30px -12px rgba(22, 40, 82, .14) !important;
+}
+/* 移除 --spot-x / --spot-y 的冗余 Houdini 过渡，呼吸灯全改合成器动画 */
+:root[data-glass="liquid"] .glass:not(.seg)::after {
+  transition: opacity .20s ease !important;
+}
+.breathe {
+  animation: hncDotPulse 2.4s ease-in-out infinite !important;
+  box-shadow: 0 0 7px currentColor !important;
+}
+@keyframes hncDotPulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: .52; transform: scale(.86); }
+}
+:root[data-glass="liquid"] .mesh {
+  contain: strict;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   10.2 纯正 OLED 黑曜石暗夜系统（L0 #08090C → L1 #16181F → L2 → L3，零海军蓝糊底、零粉笔白框）
+   ─────────────────────────────────────────────────────────────────────────── */
+:root[data-theme="dark"]:not([data-style="cyber"]) {
+  color-scheme: dark;
+  --bg: #08090C;
+  --ap-grouped: #08090C;
+  --card: rgba(22, 24, 30, calc(.84 + var(--gx-up, 0) * .10 - var(--gx-dn, 0) * .14));
+  --card-2: rgba(30, 33, 41, calc(.90 + var(--gx-up, 0) * .06 - var(--gx-dn, 0) * .12));
+  --card-solid: #16181F;
+  --lg-fill: rgba(24, 26, 33, calc(.78 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .14));
+  --lg-fill-2: rgba(30, 33, 42, calc(.88 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .12));
+  --lg-sub: rgba(255, 255, 255, calc(.055 + var(--gx-up, 0) * .03 - var(--gx-dn, 0) * .02));
+  --lg-sub-2: rgba(255, 255, 255, calc(.075 + var(--gx-up, 0) * .03 - var(--gx-dn, 0) * .02));
+  --lg-tile-on: rgba(255, 255, 255, calc(.12 + var(--gx-up, 0) * .04 - var(--gx-dn, 0) * .03));
+  --ap-inset: rgba(255, 255, 255, .055);
+  --input: rgba(255, 255, 255, .065);
+  --ap-fill-2: rgba(255, 255, 255, .12);
+  --ap-thumb: #464956;
+
+  --text-1: rgba(255, 255, 255, .96);
+  --text-2: rgba(235, 235, 245, .74);
+  --text-3: rgba(235, 235, 245, .50);
+  --text-4: rgba(235, 235, 245, .28);
+
+  --stroke: rgba(255, 255, 255, .08);
+  --stroke-2: rgba(255, 255, 255, .13);
+  --divider: rgba(255, 255, 255, .075);
+  --bevel-grad: linear-gradient(180deg, rgba(255, 255, 255, .10) 0%, rgba(255, 255, 255, .025) 35%, transparent 70%);
+  --lg-rim: inset 0 .5px 0 rgba(255, 255, 255, .095), 0 0 0 .5px rgba(255, 255, 255, .07);
+  --lg-rim-inner: inset 0 .5px 0 rgba(255, 255, 255, .07);
+  --lg-drop: 0 16px 38px -14px rgba(0, 0, 0, .72), 0 4px 12px -3px rgba(0, 0, 0, .48);
+  --lg-sheen: radial-gradient(90% 48% at var(--spot-x, 18%) var(--spot-y, 0%), rgba(255, 255, 255, .055) 0%, transparent 58%);
+  --scrim: rgba(0, 0, 0, .70);
+
+  --blue: #0A84FF;
+  --accent: #0A84FF;
+  --indigo: #5E5CE6;
+  --purple: #BF5AF2;
+  --green: #30D158;
+  --orange: #FF9F0A;
+  --red: #FF453A;
+  --cyan: #64D2FF;
+  --rx: #0A84FF;
+  --tx: #BF5AF2;
+
+  --badge-ok-bg: rgba(48, 209, 88, .15);   --badge-ok: #4AE072;
+  --badge-acc-bg: rgba(10, 132, 255, .16); --badge-acc: #5CB0FF;
+  --badge-warn-bg: rgba(255, 159, 10, .16);--badge-warn: #FFB340;
+  --badge-red-bg: rgba(255, 69, 58, .16);  --badge-red: #FF6961;
+  --badge-pur-bg: rgba(191, 90, 242, .16); --badge-pur: #DA8FFF;
+  --badge-gray-bg: rgba(142, 142, 147, .18);--badge-gray: #AEAEB2;
+}
+
+:root[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]) html,
+:root[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]) body {
+  background: #08090C !important;
+  color: var(--text-1);
+}
+/* 液态玻璃无壁纸暗夜：仅在顶部保留极克制的 5.5% 冷光折射源，绝不把画布染成深海军蓝 */
+:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .mesh {
+  position: fixed !important;
+  inset: 0 !important;
+  filter: none !important;
+  animation: none !important;
+  opacity: 1 !important;
+  background:
+    radial-gradient(50% 34% at 16% 5%, rgba(10, 132, 255, .07) 0%, transparent 72%),
+    radial-gradient(44% 30% at 86% 8%, rgba(191, 90, 242, .05) 0%, transparent 72%),
+    #08090C !important;
+}
+:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .mesh::before {
+  opacity: 0 !important;
+}
+
+/* 暗夜卡片与按钮微晶高光边缘（取代刺眼 .44~.96 死白线框） */
+:root[data-glass="liquid"][data-theme="dark"]:not([data-has-wp="1"]) .glass:not(#tabbar):not(.seg) {
+  isolation: auto;
+  -webkit-backdrop-filter: blur(16px) saturate(180%) !important;
+  backdrop-filter: blur(16px) saturate(180%) !important;
+  box-shadow:
+    inset .8px .8px .4px rgba(255, 255, 255, .11),
+    inset -.8px -.8px .5px rgba(10, 132, 255, .09),
+    0 0 0 .5px rgba(255, 255, 255, .065),
+    var(--lg-drop) !important;
+}
+:root[data-glass="liquid"][data-theme="dark"] .hero::before {
+  padding: .75px !important;
+  opacity: .75 !important;
+}
+:root[data-glass="liquid"][data-theme="dark"] .glass:not(.seg)::after {
+  --spot-a: .06;
+  background: radial-gradient(90% 50% at var(--spot-x, 18%) var(--spot-y, 0%), rgba(255, 255, 255, var(--spot-a, .06)) 0%, transparent 58%) !important;
+}
+:root[data-glass="liquid"][data-theme="dark"] .dev[data-tint="online"]  { --tint-rgb: 10, 132, 255; --tint-alpha: .16; }
+:root[data-glass="liquid"][data-theme="dark"] .dev[data-tint="active"]  { --tint-rgb: 48, 209, 88;  --tint-alpha: .20; }
+:root[data-glass="liquid"][data-theme="dark"] .dev[data-tint="shaped"]  { --tint-rgb: 255, 159, 10; --tint-alpha: .24; }
+:root[data-glass="liquid"][data-theme="dark"] .dev[data-tint="blocked"] { --tint-rgb: 255, 69, 58;  --tint-alpha: .28; }
+:root[data-glass="liquid"][data-theme="dark"] .dev[data-tint="online"],
+:root[data-glass="liquid"][data-theme="dark"] .dev[data-tint="active"],
+:root[data-glass="liquid"][data-theme="dark"] .dev[data-tint="shaped"],
+:root[data-glass="liquid"][data-theme="dark"] .dev[data-tint="blocked"] {
+  --bevel-grad: linear-gradient(180deg, rgba(var(--tint-rgb), calc(var(--tint-alpha) * .75)) 0%, transparent 65%);
+  box-shadow:
+    inset 0 .5px 0 rgba(255, 255, 255, .10),
+    inset 0 14px 26px -20px rgba(var(--tint-rgb), calc(var(--tint-alpha) * .45)),
+    0 0 0 .5px rgba(255, 255, 255, .07),
+    var(--lg-drop) !important;
+}
+:root[data-glass][data-theme="dark"] .sgrp.scard.open,
+:root[data-glass][data-theme="dark"] .dev.open {
+  background: var(--card-2) !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .12), 0 0 0 .5px rgba(255, 255, 255, .09), var(--lg-drop) !important;
+}
+:root[data-glass="liquid"][data-theme="dark"] .tabbar,
+:root[data-glass="liquid"][data-theme="dark"] .hbtn,
+:root[data-glass="liquid"][data-theme="dark"] .sheet,
+:root[data-glass="liquid"][data-theme="dark"] .toast {
+  background: rgba(24, 26, 33, .82) !important;
+  border: 0 !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .11), 0 0 0 .5px rgba(255, 255, 255, .075), var(--lg-drop) !important;
+}
+:root[data-glass="liquid"][data-theme="dark"] .hbtn {
+  -webkit-backdrop-filter: blur(12px) saturate(180%) !important;
+  backdrop-filter: blur(12px) saturate(180%) !important;
+}
+
+/* L2 卡片内嵌子容器微提亮（绝不倒挂变黑，且排除 .hero-spark-hud 防止多余套框） */
+:root[data-glass][data-theme="dark"] .hero {
+  background: radial-gradient(110% 80% at 12% 0%, rgba(10, 132, 255, .06) 0%, transparent 56%), var(--card) !important;
+}
+:root[data-glass][data-theme="dark"] .hero > div:not(.hero-div):not(.hero-spark-hud),
+:root[data-glass][data-theme="dark"] .ahero .stats > div:not(.hero-div),
+:root[data-glass][data-theme="dark"] .ctrl,
+:root[data-glass][data-theme="dark"] .cc-tile:not(.on),
+:root[data-glass][data-theme="dark"] .scard-rows > .row,
+:root[data-glass][data-theme="dark"] .scard-rows > .row-wrap,
+:root[data-glass][data-theme="dark"] .v6-kpi,
+:root[data-glass][data-theme="dark"] .v6-num-box,
+:root[data-glass][data-theme="dark"] .v6-flow-item,
+:root[data-glass][data-theme="dark"] .v6-calm-empty,
+:root[data-glass][data-theme="dark"] .v6-bento:not(.on),
+:root[data-glass][data-theme="dark"] .v6-dev-pill:not(.on):not(.is-auto),
+:root[data-glass][data-theme="dark"] .lgd-summary-line,
+:root[data-glass][data-theme="dark"] .lgd-ctrl-bar,
+:root[data-glass][data-theme="dark"] .lgd-item,
+:root[data-glass][data-theme="dark"] .lgd-tchip:not(.on),
+:root[data-glass][data-theme="dark"] .lgd-search-mini {
+  background: var(--lg-sub) !important;
+  border-color: rgba(255, 255, 255, .06) !important;
+  box-shadow: var(--lg-rim-inner) !important;
+}
+:root[data-glass][data-theme="dark"] .search,
+:root[data-glass][data-theme="dark"] .qpill:not(.on),
+:root[data-glass][data-theme="dark"] .chip:not(.on),
+:root[data-glass][data-theme="dark"] .dd-btn {
+  background: rgba(26, 28, 36, .88) !important;
+  color: var(--text-1) !important;
+  border: 0 !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .09), 0 0 0 .5px rgba(255, 255, 255, .07) !important;
+}
+:root[data-theme="dark"] .search:focus-within {
+  box-shadow: 0 0 0 1.5px var(--blue), 0 0 0 4px rgba(10, 132, 255, .20) !important;
+}
+
+/* 根治 .qpill.on（「全部 9」）被暗夜基础规则覆盖丢失高亮，补齐分段器、透镜与按钮语义色 */
+:root[data-theme="dark"]:not([data-style="cyber"]) .qpill.on,
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .qpill.on {
+  background: linear-gradient(180deg, #1F8FFF 0%, #0A84FF 100%) !important;
+  color: #FFFFFF !important;
+  border: 0 !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .32), 0 6px 16px -4px rgba(10, 132, 255, .48) !important;
+}
+:root[data-theme="dark"]:not([data-style="cyber"]) .qpill.on b,
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .qpill.on b {
+  background: rgba(255, 255, 255, .24) !important;
+  color: #FFFFFF !important;
+}
+:root[data-glass][data-theme="dark"] .btn.sec,
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) .btn.sec {
+  background: rgba(255, 255, 255, .075) !important;
+  color: var(--blue) !important;
+  border: 0 !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .08), 0 0 0 .5px rgba(255, 255, 255, .06) !important;
+}
+:root[data-glass][data-theme="dark"] .btn.dan {
+  background: var(--badge-red-bg) !important;
+  color: var(--badge-red) !important;
+  box-shadow: inset 0 0 0 .5px rgba(255, 69, 58, .28) !important;
+}
+:root[data-glass][data-theme="dark"] .btn.ok {
+  background: var(--badge-ok-bg) !important;
+  color: var(--badge-ok) !important;
+  box-shadow: inset 0 0 0 .5px rgba(48, 209, 88, .28) !important;
+}
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg,
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg.glass,
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg.small,
+:root[data-theme="dark"]:not([data-style="cyber"]) .v6-subtabs {
+  background: rgba(255, 255, 255, .065) !important;
+  border: 0 !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .42), 0 0 0 .5px rgba(255, 255, 255, .06) !important;
+}
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg .thumb,
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg.small .thumb,
+:root[data-theme="dark"]:not([data-style="cyber"]) .v6-subtab.on {
+  background: #3A3D4A !important;
+  color: #FFFFFF !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .18), 0 2px 8px rgba(0, 0, 0, .45) !important;
+}
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg button { color: var(--text-2) !important; }
+:root[data-theme="dark"]:not([data-style="cyber"]) .seg button.on { color: #FFFFFF !important; font-weight: 650 !important; }
+:root[data-glass="liquid"][data-theme="dark"] .toggle:not([aria-checked="true"]) {
+  background: rgba(255, 255, 255, .14) !important;
+  box-shadow: inset 0 1px 2px rgba(0, 0, 0, .42), 0 0 0 .5px rgba(255, 255, 255, .08) !important;
+}
+:root[data-glass="liquid"][data-theme="dark"] .toggle[aria-checked="true"] {
+  background: linear-gradient(180deg, #34DB61 0%, #30D158 100%) !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .28), 0 4px 12px -3px rgba(48, 209, 88, .40) !important;
+}
+:root[data-glass][data-theme="dark"] #tabbar #lens.lens {
+  background: rgba(255, 255, 255, .11) !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .16), 0 4px 14px -4px rgba(0, 0, 0, .55) !important;
+}
+:root[data-glass][data-theme="dark"] #tabbar #tabs .tab.on,
+:root[data-glass][data-theme="dark"] #tabbar #tabs .tab[aria-selected="true"],
+:root[data-glass][data-theme="dark"] #tabbar #lens-in .tab {
+  color: #0A84FF !important;
+  text-shadow: none !important;
+}
+:root[data-glass="liquid"][data-theme="dark"] #h-dn {
+  background: linear-gradient(180deg, #5CB0FF 0%, #0A84FF 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+:root[data-glass="liquid"][data-theme="dark"] #h-up {
+  background: linear-gradient(180deg, #DF9EFF 0%, #BF5AF2 100%);
+  -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+:root[data-theme="dark"] .banner .bi b { color: #08090C; }
+:root[data-theme="dark"] .dtag.ja4 { background: rgba(255, 159, 10, .16); color: #FFB340; }
+:root[data-theme="dark"] .dev-apps .tt, :root[data-theme="dark"] .fgline .tt { background: rgba(94, 92, 230, .20); color: #9D9BFF; }
+:root[data-theme="dark"] .dpv-btn-primary { background: #0A84FF; color: #FFFFFF; }
+:root[data-theme="dark"] .sig-pill:not(.q-weak):not(.q-critical) { border-color: rgba(255, 255, 255, .09); background: rgba(255, 255, 255, .06); }
+:root[data-theme="dark"] .gridl { border-top-color: rgba(255, 255, 255, .08); }
+:root[data-theme="dark"] .skel::after { background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .08), transparent); }
+:root[data-theme="dark"] .lgd-forensic-pre { background: #0D0F14 !important; border-color: rgba(255, 255, 255, .08) !important; color: #E2E8F0 !important; }
+
+/* ───────────────────────────────────────────────────────────────────────────
+   10.3 模式二深度精雕：经典毛玻璃 (data-glass="frosted" · 原生 Apple 均匀缎面毛玻璃)
+   区别于液态玻璃的斜切棱镜高光与炫彩流光底，采用纯净中性底 + 丝滑柔雾缎面层
+   ─────────────────────────────────────────────────────────────────────────── */
+:root[data-glass="frosted"]:not([data-has-wp="1"]) .mesh {
+  display: none !important;
+  animation: none !important;
+}
+:root[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]) {
+  --bg: #F2F3F7;
+  --ap-grouped: #F2F3F7;
+  --card: rgba(255, 255, 255, calc(.80 + var(--gx-up, 0) * .14 - var(--gx-dn, 0) * .18));
+  --card-2: rgba(255, 255, 255, calc(.90 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .14));
+  --stroke: rgba(15, 23, 42, .065);
+  --lg-rim: 0 0 0 .5px rgba(15, 23, 42, .065), inset 0 .5px 0 rgba(255, 255, 255, .85);
+  --lg-drop: 0 8px 24px -10px rgba(15, 23, 42, .08), 0 2px 6px -2px rgba(15, 23, 42, .04);
+}
+:root[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]) html,
+:root[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]) body {
+  background: #F2F3F7 !important;
+}
+:root[data-glass="frosted"][data-theme="dark"]:not([data-has-wp="1"]) {
+  --bg: #0A0B0E;
+  --ap-grouped: #0A0B0E;
+  --card: rgba(28, 30, 37, calc(.82 + var(--gx-up, 0) * .12 - var(--gx-dn, 0) * .16));
+  --card-2: rgba(36, 39, 48, calc(.88 + var(--gx-up, 0) * .08 - var(--gx-dn, 0) * .14));
+}
+:root[data-glass="frosted"] .glass::before,
+:root[data-glass="frosted"] .glass::after {
+  display: none !important;
+}
+:root[data-glass="frosted"] .glass:not(.seg) {
+  -webkit-backdrop-filter: blur(20px) saturate(180%) !important;
+  backdrop-filter: blur(20px) saturate(180%) !important;
+  box-shadow: var(--lg-rim), var(--lg-drop) !important;
+}
+:root[data-glass="frosted"]:not([data-theme="dark"]) .v6-bento.on,
+:root[data-glass="liquid"]:not([data-theme="dark"]) .v6-bento.on {
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .85), 0 8px 20px -8px rgba(0, 122, 255, .25) !important;
+}
+:root[data-glass][data-theme="dark"] .v6-bento.on {
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .18), 0 8px 22px -8px rgba(0, 0, 0, .55) !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   10.4 模式三深度精雕：极简精密 (:root:not([data-style]):not([data-glass]) · Linear / Vercel 美学)
+   零高斯模糊开销、微米级 1px 实心边框、Zinc 中性灰阶、等宽精密数显、120fps 瞬时反馈
+   ─────────────────────────────────────────────────────────────────────────── */
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) .mesh,
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) body::after {
+  display: none !important;
+  animation: none !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-theme="dark"]):not([data-has-wp="1"]) {
+  --bg: #F6F7F9;
+  --card: #FFFFFF;
+  --card-2: #FFFFFF;
+  --card-solid: #FFFFFF;
+  --input: #F1F3F7;
+  --text-1: #09090B;
+  --text-2: #3F3F46;
+  --text-3: #71717A;
+  --text-4: #A1A1AA;
+  --stroke: rgba(9, 9, 11, .085);
+  --stroke-2: rgba(9, 9, 11, .14);
+  --divider: rgba(9, 9, 11, .065);
+  --blue: #2563EB;
+  --accent: #2563EB;
+  --green: #16A34A;
+  --shadow: 0 1px 2px rgba(9, 9, 11, .04), 0 0 0 1px rgba(9, 9, 11, .075);
+}
+:root:not([data-style]):not([data-glass])[data-theme="dark"]:not([data-has-wp="1"]) {
+  --bg: #09090B;
+  --card: #111216;
+  --card-2: #17181E;
+  --card-solid: #111216;
+  --input: #1A1C23;
+  --text-1: #FAFAFA;
+  --text-2: #D4D4D8;
+  --text-3: #8E8E98;
+  --text-4: #52525B;
+  --stroke: rgba(255, 255, 255, .085);
+  --stroke-2: rgba(255, 255, 255, .14);
+  --divider: rgba(255, 255, 255, .07);
+  --blue: #3B82F6;
+  --accent: #3B82F6;
+  --green: #22C55E;
+  --shadow: 0 2px 8px rgba(0, 0, 0, .38), 0 0 0 1px rgba(255, 255, 255, .08);
+}
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) .glass {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background: var(--card) !important;
+  border: 1px solid var(--stroke) !important;
+  border-radius: 14px !important;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, .04) !important;
+}
+:root:not([data-style]):not([data-glass])[data-theme="dark"]:not([data-has-wp="1"]) .glass {
+  box-shadow: 0 4px 14px -4px rgba(0, 0, 0, .45) !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) .glass::before,
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) .glass::after {
+  display: none !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) .header {
+  background: color-mix(in srgb, var(--bg) 88%, transparent) !important;
+  -webkit-backdrop-filter: blur(12px) !important;
+  backdrop-filter: blur(12px) !important;
+  border-bottom: 1px solid var(--divider) !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) .seg {
+  background: var(--input) !important;
+  border: 1px solid var(--stroke) !important;
+  border-radius: 10px !important;
+  box-shadow: none !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-theme="dark"]):not([data-has-wp="1"]) .seg .thumb {
+  background: #FFFFFF !important;
+  border-radius: 8px !important;
+  box-shadow: 0 1px 3px rgba(9, 9, 11, .10), 0 0 0 .5px rgba(9, 9, 11, .06) !important;
+}
+:root:not([data-style]):not([data-glass])[data-theme="dark"]:not([data-has-wp="1"]) .seg .thumb {
+  background: #272A35 !important;
+  border-radius: 8px !important;
+  box-shadow: inset 0 .5px 0 rgba(255, 255, 255, .12), 0 1px 4px rgba(0, 0, 0, .45) !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar.tabbar {
+  background: color-mix(in srgb, var(--card-solid) 94%, transparent) !important;
+  -webkit-backdrop-filter: blur(14px) !important;
+  backdrop-filter: blur(14px) !important;
+  border: 1px solid var(--stroke-2) !important;
+  border-radius: 18px !important;
+  box-shadow: 0 12px 32px -8px rgba(0, 0, 0, .18) !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar #lens.lens {
+  background: var(--blue) !important;
+  border-radius: 13px !important;
+  box-shadow: 0 4px 12px -3px color-mix(in srgb, var(--blue) 48%, transparent) !important;
+}
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar:not(.drag) #lens-in .tab,
+:root:not([data-style]):not([data-glass]):not([data-has-wp="1"]) #tabbar:not(.drag) #tabs .tab.on {
+  color: #FFFFFF !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   10.5 模式四深度精雕：赛博机甲 ([data-style="cyber"] · 终末地 / Nothing 工业机能遥测台)
+   全站统一硬朗装甲切角、拉开上下行电光青/战术琥珀对比、补齐智能护航与设置全组件适配
+   ─────────────────────────────────────────────────────────────────────────── */
+:root[data-style="cyber"]:not([data-theme="dark"]) {
+  --bg: #E4EAF1;
+  --card: rgba(246, 249, 252, .94);
+  --card-2: #FFFFFF;
+  --card-solid: #F4F7FA;
+  --input: rgba(15, 23, 42, .06);
+  --text-1: #0B121E;
+  --text-2: #2D3B4E;
+  --text-3: #5B6B82;
+  --stroke: rgba(14, 116, 144, .22);
+  --stroke-2: rgba(14, 116, 144, .36);
+  --blue: #0284C7;
+  --accent: #0284C7;
+  --cy-accent: #0284C7;
+  --rx: #0284C7;
+  --tx: #D97706;
+}
+:root[data-style="cyber"][data-theme="dark"] {
+  --bg: #06090F;
+  --card: rgba(12, 18, 28, .92);
+  --card-2: rgba(17, 25, 38, .96);
+  --card-solid: #0C121C;
+  --input: rgba(56, 189, 248, .075);
+  --text-1: #F1F5F9;
+  --text-2: #CBD5E1;
+  --text-3: #7E92AA;
+  --stroke: rgba(56, 189, 248, .22);
+  --stroke-2: rgba(56, 189, 248, .38);
+  --blue: #38BDF8;
+  --accent: #38BDF8;
+  --cy-accent: #38BDF8;
+  --green: #34D399;
+  --orange: #F59E0B;
+  --red: #FB7185;
+  --rx: #38BDF8;
+  --tx: #F59E0B;
+}
+:root[data-style="cyber"] .v6-card,
+:root[data-style="cyber"] .lgd-panel,
+:root[data-style="cyber"] .sgrp.scard,
+:root[data-style="cyber"] .dpv-inline-wrap {
+  border-radius: 6px !important;
+}
+:root[data-style="cyber"] .v6-bento,
+:root[data-style="cyber"] .lgd-item,
+:root[data-style="cyber"] .v6-kpi,
+:root[data-style="cyber"] .v6-lat-cmp,
+:root[data-style="cyber"] .dpv-kpi-cell,
+:root[data-style="cyber"] .dpv-btn,
+:root[data-style="cyber"] .lgd-act-btn,
+:root[data-style="cyber"] .bw-card,
+:root[data-style="cyber"] .dev-v6-strip {
+  border-radius: 4px !important;
+}
+:root[data-style="cyber"] .v6-bento {
+  border: 1px solid var(--stroke) !important;
+  background: var(--input) !important;
+  position: relative;
+}
+:root[data-style="cyber"] .v6-bento.on {
+  border-color: var(--cy-accent, #38BDF8) !important;
+  background: color-mix(in srgb, var(--cy-accent, #38BDF8) 14%, var(--card-solid)) !important;
+  box-shadow: inset 3px 0 0 var(--cy-accent, #38BDF8), 0 6px 18px -8px rgba(56, 189, 248, .35) !important;
+}
+:root[data-style="cyber"] .v6-bento-txt b,
+:root[data-style="cyber"] .v6-kpi b,
+:root[data-style="cyber"] .dpv-kpi-num,
+:root[data-style="cyber"] .sig-pill {
+  font-family: var(--mono);
+}
+:root[data-style="cyber"] .sig-pill,
+:root[data-style="cyber"] .bw-pre-pill,
+:root[data-style="cyber"] .v6-dev-pill,
+:root[data-style="cyber"] .lgd-tchip {
+  border-radius: 4px !important;
+}
+:root[data-has-wp="1"][data-style="cyber"][data-theme="dark"] .glass {
+  background: rgba(10, 16, 26, .82) !important;
+  border-color: rgba(56, 189, 248, .28) !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   10.6 自定义壁纸 + 全模式 120fps 硬件合成保真（严守 CSP img-src 'self' data:）
+   ─────────────────────────────────────────────────────────────────────────── */
+:root[data-has-wp="1"] .mesh {
+  display: none !important;
+  animation: none !important;
+}
+:root:not([data-wp-blurred="1"]) #hnc-wallpaper .wp-img {
+  inset: 0 !important;
+  filter: none !important;
+  transform: translateZ(0) !important;
+  transition: none !important;
+}
+:root[data-wp-blurred="1"] #hnc-wallpaper .wp-img {
+  inset: -28px !important;
+  filter: blur(var(--wp-blur, 0px)) !important;
+  transform: scale(1.04) translateZ(0) !important;
+}
+:root[data-has-wp="1"][data-theme="dark"] #hnc-wallpaper .wp-scrim {
+  background: linear-gradient(180deg,
+    rgba(6, 7, 10, calc(.40 + var(--wp-dim, .18) * .54)) 0%,
+    rgba(6, 7, 10, calc(.32 + var(--wp-dim, .18) * .50)) 50%,
+    rgba(6, 7, 10, calc(.46 + var(--wp-dim, .18) * .56)) 100%) !important;
+}
+:root[data-has-wp="1"][data-theme="dark"]:not([data-style="cyber"]) {
+  --card: rgba(18, 20, 26, calc(.56 + var(--gx-up, 0) * .24 - var(--gx-dn, 0) * .16)) !important;
+  --card-2: rgba(24, 27, 35, calc(.66 + var(--gx-up, 0) * .20 - var(--gx-dn, 0) * .14)) !important;
+  --lg-fill: rgba(18, 20, 26, calc(.62 + var(--gx-up, 0) * .22 - var(--gx-dn, 0) * .14)) !important;
+  --lg-fill-2: rgba(24, 26, 34, calc(.78 + var(--gx-up, 0) * .16 - var(--gx-dn, 0) * .14)) !important;
+  --lg-sub: rgba(255, 255, 255, calc(.07 + var(--gx-up, 0) * .05 - var(--gx-dn, 0) * .03)) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"] .glass:not(#tabbar):not(.seg) {
+  -webkit-backdrop-filter: blur(12px) saturate(175%) !important;
+  backdrop-filter: blur(12px) saturate(175%) !important;
+}
+:root[data-has-wp="1"][data-glass="liquid"] .hbtn {
+  -webkit-backdrop-filter: blur(10px) saturate(175%) !important;
+  backdrop-filter: blur(10px) saturate(175%) !important;
+}
+:root[data-has-wp="1"] .qpill:not(.on),
+:root[data-has-wp="1"] .chip:not(.on),
+:root[data-has-wp="1"] .btn.sec,
+:root[data-has-wp="1"] .dd-btn,
+:root[data-has-wp="1"] .seg:not(.small) {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+}
+:root[data-has-wp="1"] .glass.is-tilting {
+  transform: none !important;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   10.7 HNC v6.0 全站按钮比例收敛、微晶克制高光与三处真机视口像素级精修
+   1) 收敛 [data-style="apple"]/.btn 50px/17px 巨型胶囊与 .55 塑料白反光 → 39px/13.5px/12px 哑光微晶棱边 (.24)
+   2) 热点设备本月排行：补齐离线空心灰圈占位 (.rk-dot.off)，01~08 设备名严丝合缝垂直对齐
+   3) DPI 顶部总览卡：眉栏状态解耦 + 识别模式/覆盖率圆环双列零断字防孤字换行
+   4) 自训工作台：引擎原理内收至右上胶囊，双操作钮对称网格，底部规则中心入口卡防底栏遮挡
+   ─────────────────────────────────────────────────────────────────────────── */
+.page,
+[data-style="apple"] .page,
+[data-glass="liquid"] .page,
+[data-glass="frosted"] .page {
+  padding-bottom: calc(env(safe-area-inset-bottom, 0px) + 128px) !important;
+}
+
+/* 1) 全站按钮尺寸层级与高光克制化（覆盖 apple.css 50px/17px 与 liquid.css 999px/.55 过曝） */
+.btn,
+[data-style="apple"] .btn,
+[data-glass="liquid"] .btn,
+[data-glass="frosted"] .btn {
+  height: 39px;
+  padding: 0 15px;
+  border-radius: 12px;
+  font-size: 13.5px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+[data-style="cyber"] .btn {
+  height: 38px;
+  padding: 0 14px;
+  border-radius: 5px !important;
+  font-size: 13px;
+  font-weight: 700;
+}
+/* 卡片内次级控制区、横幅、合并条与未知域名行采用更精悍的 33~36px 紧凑比例 */
+[data-style="apple"] .ctrl .btn,
+[data-glass] .ctrl .btn,
+[data-style="apple"] .v6-card .btns > .btn,
+[data-glass] .v6-card .btns > .btn {
+  height: 38px !important;
+  font-size: 13.5px !important;
+  padding: 0 14px !important;
+  border-radius: 11px;
+}
+.mrg .btns .btn,
+[data-style="apple"] .mrg .btns .btn,
+.batchbar .btn,
+[data-style="apple"] .batchbar .btn,
+#dpi-unknown .sni-row > .btn,
+.banner.thin .btn {
+  height: 33px !important;
+  font-size: 12.5px !important;
+  padding: 0 12px !important;
+  border-radius: 10px !important;
+}
+/* 修复 apple.css 将 .linkish 放大到 17px 导致行内操作文字喧宾夺主的问题 */
+[data-style="apple"] .linkish {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* 主按钮：克制哑光微晶棱边（将顶部镜面高光从 .55 压至 .24，外发光从 .65 压至 .30，彻底告别塑料糖豆感） */
+[data-glass="liquid"] .btn.pri,
+[data-glass="frosted"] .btn.pri,
+[data-style="apple"] .btn.pri {
+  background: linear-gradient(180deg, #1982FF 0%, #006CE6 100%) !important;
+  color: #FFFFFF !important;
+  border: 0 !important;
+  box-shadow:
+    inset 0 .75px 0 rgba(255, 255, 255, .24),
+    inset 0 -.75px 0 rgba(0, 28, 72, .18),
+    0 5px 14px -5px rgba(0, 110, 230, .30) !important;
+}
+:root[data-theme="dark"]:not([data-style="cyber"]) .btn.pri {
+  background: linear-gradient(180deg, #1F8BFF 0%, #0A76EC 100%) !important;
+  color: #FFFFFF !important;
+  border: 0 !important;
+  box-shadow:
+    inset 0 .6px 0 rgba(255, 255, 255, .22),
+    inset 0 -.6px 0 rgba(0, 18, 48, .32),
+    0 6px 16px -6px rgba(10, 132, 255, .36) !important;
+}
+
+/* 次要按钮：清透低饱和嵌入式微晶填充，不再鼓成死白厚胶囊 */
+[data-glass="liquid"]:not([data-theme="dark"]) .btn.sec,
+[data-glass="frosted"]:not([data-theme="dark"]) .btn.sec {
+  background: rgba(15, 23, 42, .055) !important;
+  color: var(--blue) !important;
+  border: 0 !important;
+  box-shadow:
+    inset 0 .75px 0 rgba(255, 255, 255, .72),
+    0 0 0 .5px rgba(15, 23, 42, .085) !important;
+}
+
+/* 2) 分析页「热点设备本月排行」：在线实心绿点 + 离线空心灰圈等宽槽位对齐 + 按应用横条防挤占 */
+.rk-legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11.5px !important;
+  color: var(--text-3);
+}
+.rk-idx {
+  display: inline-block;
+  width: 2.1ch;
+  font: 700 10.5px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  margin-right: 4px;
+  font-style: normal;
+  flex-shrink: 0;
+}
+.rk-dot {
+  display: inline-block;
+  width: 6.5px;
+  height: 6.5px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: middle;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+.rk-legend .rk-dot {
+  margin-right: 1px;
+  margin-left: 4px;
+}
+.rk-dot.on {
+  background: var(--green);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--green) 55%, transparent);
+}
+.rk-dot.off {
+  background: transparent;
+  border: 1.5px solid var(--text-4);
+  opacity: .82;
+}
+#pu-dev-rank .hbar-btn .n {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}
+#pu-dev-rank .hbar-btn .rk-nm {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+#pu-dev-rank .hbar-btn.is-offline .rk-nm {
+  color: var(--text-2);
+}
+#st-apps .hbar {
+  grid-template-columns: minmax(74px, 1.02fr) minmax(56px, 1.12fr) auto;
+  align-items: center;
+}
+
+/* 3) DPI 与自训顶部座舱：眉栏解耦 + 零孤字断行 */
+.dpihero-eyebrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 5px;
+}
+.dpihero-eyebrow .l {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-3);
+}
+.dpihero-badge {
+  font-size: 11.5px !important;
+  padding: 3.5px 9px !important;
+  border-radius: 999px !important;
+}
+.dpihero .top {
+  display: flex !important;
+  align-items: center !important;
+  justify-content: space-between !important;
+  gap: 10px !important;
+  flex-wrap: nowrap !important;
+}
+.dpihero-mode-wrap {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+.dpihero .mode {
+  font-size: clamp(17px, 4.6vw, 20px) !important;
+  font-weight: 800 !important;
+  letter-spacing: -0.02em;
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dpi-ring-slot {
+  flex: 0 0 auto;
+}
+.dpi-ring-wrap {
+  display: inline-flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+.dpi-ring-svg {
+  width: 42px !important;
+  height: 42px !important;
+  flex-shrink: 0;
+}
+.dpi-ring-txt {
+  text-align: right;
+  white-space: nowrap;
+}
+.dpi-ring-pct {
+  font-size: 16.5px;
+  font-weight: 800;
+  line-height: 1.15;
+  color: var(--text-1);
+}
+.dpi-ring-lbl {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-3);
+  white-space: nowrap;
+  margin-top: 1px;
+}
+
+/* 4) 本机真值常驻自训工作台：右上原理胶囊 + 对称双列主次操作钮 + 规则中心精致入口条 */
+.studio-title-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.studio-title-top b {
+  font-size: 15.5px;
+  font-weight: 750;
+  color: var(--text-1);
+  letter-spacing: -0.015em;
+}
+.studio-badge-line {
+  margin-top: 4px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.studio-guide-pill {
+  flex-shrink: 0;
+  height: 25px;
+  padding: 0 9px;
+  border-radius: 999px;
+  font-size: 11.5px;
+  font-weight: 650;
+  color: var(--blue);
+  background: var(--badge-acc-bg, rgba(0, 122, 255, .12));
+  border: 1px solid color-mix(in srgb, var(--blue) 22%, transparent);
+  white-space: nowrap;
+}
+.studio-actions.studio-actions-2col {
+  display: grid !important;
+  grid-template-columns: minmax(0, 1.22fr) minmax(0, 1fr) !important;
+  gap: 9px !important;
+  align-items: center !important;
+  margin-top: 8px !important;
+}
+.studio-actions.studio-actions-2col > .btn {
+  width: 100%;
+  margin: 0 !important;
+}
+.rules-hub-callout {
+  width: 100%;
+  margin-top: 12px;
+  padding: 12px 15px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+.rules-hub-callout .rhc-main {
+  min-width: 0;
+  flex: 1;
+  display: grid;
+  gap: 2px;
+}
+.rules-hub-callout .rhc-t {
+  font-size: 13.5px;
+  font-weight: 700;
+  color: var(--text-1);
+}
+.rules-hub-callout .rhc-s {
+  font-size: 12px;
+  color: var(--text-3);
+  line-height: 1.4;
+}
+.rules-hub-callout .rhc-cta {
+  flex-shrink: 0;
+  height: 30px;
+  padding: 0 11px;
+  border-radius: 9px;
+  display: inline-flex;
+  align-items: center;
+  font-size: 12px;
+  font-weight: 650;
+  color: var(--blue);
+  background: var(--badge-acc-bg, rgba(0, 122, 255, .12));
+  white-space: nowrap;
+}
+[data-style="cyber"] .rules-hub-callout .rhc-cta,
+[data-style="cyber"] .studio-guide-pill {
+  border-radius: 4px;
+}
 </style>
 <!-- 首帧前按本地偏好设好主题/风格/玻璃浓度, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme / applyGlassTint 一致, 之后由它接管) -->
-<script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'), gm = g('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid', wp = g('hnc6.wp_id'); if (t === 'light' || t === 'dark') r.setAttribute('data-theme', t); if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); } else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber'); if (wp && wp !== 'none' && (wp !== 'custom' || g('hnc6.wp_custom'))) { r.setAttribute('data-has-wp', '1'); r.setAttribute('data-has-wallpaper', '1'); r.classList.add('has-wallpaper'); r.setAttribute('data-wp-text', g('hnc6.wp_text_v2') === 'capsule' ? 'capsule' : 'adaptive'); var wts = (g('hnc6.wp_tones') || '').split(','); if (wp === 'prism') wts = ['light', 'light', 'light']; else if (wts.length !== 3) wts = ['dark', 'light', 'dark']; r.setAttribute('data-wp-top', wts[0]); r.setAttribute('data-wp-tone', wts[1]); r.setAttribute('data-wp-bot', wts[2]); } if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1' && g('hnc6.lowfx_manual') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>
+<script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'), gm = g('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid', wp = g('hnc6.wp_id'); var sysDk = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; var resT = (t === 'light' || t === 'dark') ? t : (sysDk ? 'dark' : 'light'); r.setAttribute('data-theme', resT); r.setAttribute('data-theme-mode', (t === 'light' || t === 'dark') ? t : 'auto'); if (parseFloat(g('hnc6.wp_blur')) > 0) r.setAttribute('data-wp-blurred', '1'); if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); } else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber'); if (wp && wp !== 'none' && (wp !== 'custom' || g('hnc6.wp_custom'))) { r.setAttribute('data-has-wp', '1'); r.setAttribute('data-has-wallpaper', '1'); r.classList.add('has-wallpaper'); r.setAttribute('data-wp-text', g('hnc6.wp_text_v2') === 'capsule' ? 'capsule' : 'adaptive'); var wts = (g('hnc6.wp_tones') || '').split(','); if (wp === 'prism') wts = ['light', 'light', 'light']; else if (wts.length !== 3) wts = ['dark', 'light', 'dark']; r.setAttribute('data-wp-top', wts[0]); r.setAttribute('data-wp-tone', wts[1]); r.setAttribute('data-wp-bot', wts[2]); } if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1' && g('hnc6.lowfx_manual') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>
 </head>
 <body>
 <div class="mesh" aria-hidden="true"></div><div id="hnc-wallpaper" aria-hidden="true"><div class="wp-img"></div><div class="wp-scrim"></div></div>
@@ -4210,7 +5196,7 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
   <div class="htitle" id="htitle" aria-hidden="true"></div>
   <button class="sig-pill press" id="sig-pill" type="button" hidden aria-label="热点本机实时信号"></button>
   <span class="sample" id="mode-pill" hidden></span>
-  <button class="hbtn press" id="v6-nav-btn" type="button" aria-label="矢量中枢与隐私安检" title="Vector v6 战术舱 · LeakGuard 隐私安检"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".15"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/><path d="M9 12.2 11.2 14.4 15.4 9.8"/></svg><span class="hbadge" id="lgd-badge" hidden>0</span></button>
+  <button class="hbtn press" id="v6-nav-btn" type="button" aria-label="智能护航与隐私安检" title="智能护航 · 隐私明文安检"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z" fill="currentColor" fill-opacity=".15"/><path d="M12 21.5s7.5-3.6 7.5-9.8V5.4L12 2.6 4.5 5.4v6.3c0 6.2 7.5 9.8 7.5 9.8Z"/><path d="M9 12.2 11.2 14.4 15.4 9.8"/></svg><span class="hbadge" id="lgd-badge" hidden>0</span></button>
   <button class="hbtn press" id="bell" aria-label="告警"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8.2a6 6 0 0 0-12 0c0 6.6-2.8 8.6-2.8 8.6h17.6S18 14.8 18 8.2Z" fill="currentColor" fill-opacity=".14"/><path d="M18 8.2a6 6 0 0 0-12 0c0 6.6-2.8 8.6-2.8 8.6h17.6S18 14.8 18 8.2Z"/><path d="M13.8 20.4a2.1 2.1 0 0 1-3.6 0"/></svg><span class="hbadge" id="bell-n" hidden>0</span></button>
   <button class="hbtn press" id="theme-btn" aria-label="切换主题"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.8"/><path d="M12 3.2a8.8 8.8 0 0 1 0 17.6Z" fill="currentColor" fill-opacity=".82" stroke="none"/></svg></button>
 </header>
@@ -4218,7 +5204,7 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
 <main class="pages" id="pages">
   <section class="page on" id="p-devices" data-page="devices" data-title="设备"></section>
   <section class="page" id="p-apps" data-page="apps" data-title="应用"></section>
-  <section class="page" id="p-vector" data-page="vector" data-title="矢量中枢"></section>
+  <section class="page" id="p-vector" data-page="vector" data-title="智能护航"></section>
   <section class="page" id="p-stats" data-page="stats" data-title="分析"></section>
   <section class="page" id="p-settings" data-page="settings" data-title="设置"></section>
 </main>
@@ -4231,7 +5217,7 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
 <div class="scrim" id="scrim"></div>
 <div class="sheet" id="sheet" role="dialog" aria-modal="true"><div class="grab"></div><div id="sheet-body"></div></div>
 <div class="v6-drawer-scrim" id="v6-scalpel-scrim"></div>
-<aside class="v6-drawer glass" id="v6-scalpel-drawer" role="dialog" aria-modal="true" aria-label="FlowScalpel 五元组手术台" hidden><div class="grab"></div><div id="v6-scalpel-body"></div></aside>
+<aside class="v6-drawer glass" id="v6-scalpel-drawer" role="dialog" aria-modal="true" aria-label="活跃连接管理与异常断流" hidden><div class="grab"></div><div id="v6-scalpel-body"></div></aside>
 <div class="toast" id="toast" role="status" aria-live="polite"><svg id="toast-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span id="toast-t"></span></div>
 
 <script src="hyalite.js"></script>
