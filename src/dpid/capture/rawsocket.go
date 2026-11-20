@@ -604,7 +604,7 @@ func (h *Handle) runEpollLoop(ctx context.Context, infiniteWait bool, onEvent fu
 			}
 			if err != nil {
 				switch err {
-				case syscall.EAGAIN, syscall.EWOULDBLOCK, syscall.EINTR:
+				case syscall.EAGAIN, syscall.EINTR:
 					batch = epollDrainBatchMax
 					continue
 				case syscall.EBADF:
