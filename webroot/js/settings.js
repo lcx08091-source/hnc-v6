@@ -455,7 +455,7 @@ function renderSettings(anim1) {
   var advCards = [
     scard('scard-v6', ['blue', 'vector'], '智能护航与配置备份',
       '游戏通话优先 · 后台更新限速 · 温控保护（' + esc(v6TempS) + '）· 隐私安检（' + v6LgHits + ' 条）',
-      '<span class="badge b-acc">v6.0.0</span>',
+      '<span class="badge b-acc">v6.0.1</span>',
       typeof v6SettingsBodyHtml === 'function' ? v6SettingsBodyHtml() : ''),
     scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
       'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
@@ -508,7 +508,7 @@ function renderSettings(anim1) {
       (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
     scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
       '调试模拟设备 · 后端版本 ' + esc(l.backend_version || '—') + ' · 完整更新日志',
-      '<span class="badge b-gray">' + esc(l.backend_version || 'v6.0.0') + '</span>',
+      '<span class="badge b-gray">' + esc(l.backend_version || 'v6.0.1') + '</span>',
       (gMap['模拟环境（调试）'] || '') + (gMap['关于'] || ''))
   ];
   var cols = function (list) { if (!wide()) return '<div class="scard-stack">' + list.join('') + '</div>'; var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };

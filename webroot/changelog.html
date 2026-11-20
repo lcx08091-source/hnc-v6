@@ -13,8 +13,16 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-0-1" data-version="v6.0.1" data-version-code="6000001">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-sparkles"/></svg>v6.0.1(正式版): 跨芯片全 ROM 限速兼容矩阵 · 匿名轮换 MAC 多维共振合并 · 5G-A 多载波感知与 120fps 微晶界面 <span class="badge b-ok" style="margin-left:4px">最新稳定版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-20 · versionCode 6000001</span></div>
+  <ul class="cl-list">
+    <li><b>跨芯片/跨 ROM 限速兜底矩阵</b>：打通 <span class="mono">ap_br_*</span> 桥接热点接口、GKI 6.1/6.6 无 <span class="mono">ifb</span> 内核双栈 <span class="mono">ingress police</span> 上行限速、五级低延迟叶子队列自适应降级（<span class="mono">fq_codel</span> → <span class="mono">fq</span> → <span class="mono">sfq</span> → 动态缩放 <span class="mono">pfifo</span>）及天玑 <span class="mono">MDDP</span> / 骁龙 <span class="mono">SFE</span> / 三星 <span class="mono">DIT</span> 硬件加速排障。</li>
+    <li><b>匿名轮换 MAC 多维共振识别与防误并守卫</b>：融合 DHCP Option 55 协议栈、JA4 指纹簇、小众专属应用画像与离线重连时间窗，内置同型号多设备分差守卫并补齐 <span class="mono">encdns.json</span> 策略迁移与整机备份纳入。</li>
+    <li><b>5G-A 射频感知与微晶光感界面打磨</b>：支持 <span class="mono">NR_ADVANCED</span> 5G-A 多载波聚合带宽、NR-ARFCN 反推频段、移动×广电共建共享识别；优化离线设备圆点对齐、抓包引擎标题自适应不折行与 39px 低眩光微晶按钮，修复流级指纹与静态规则库归因优先级单测。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v6-0-0" data-version="v6.0.0" data-version-code="6000000">
-  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-rocket"/></svg>v6.0.0(正式版): Vector 矢量网关架构重构 · 四舱壁隔离中枢与 json/v2 快路径 · LeakGuard 明文隐私安检取证 · 六大战术舱与三级自适应数据面 <span class="badge b-ok" style="margin-left:4px">最新稳定版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-19 · versionCode 6000000</span></div>
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-rocket"/></svg>v6.0.0(正式版): Vector 矢量网关架构重构 · 四舱壁隔离中枢与 json/v2 快路径 · LeakGuard 明文隐私安检取证 · 六大战术舱与三级自适应数据面 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-19 · versionCode 6000000</span></div>
   <ul class="cl-list">
     <li><b>CoreHub 四舱壁隔离中枢与 Go 1.27 encoding/json/v2 快路径</b>：重构守护进程控制面为 <span class="mono">dataplane</span>、<span class="mono">dpi_shm</span>、<span class="mono">android_bridge</span>、<span class="mono">storage</span> 四大独立熔断舱壁，新增无锁双缓冲聚合快照端点 <span class="mono">/api/vector_sync</span>，全量启用 Go 1.27 标准库 <span class="mono">encoding/json/v2</span> 编解码引擎，将首屏同步收敛至单次请求，空闲轮询功耗较 v5 世代进一步下降 80%。</li>
     <li><b>LeakGuard 零解密 HTTP 明文隐私安检取证</b>：<span class="mono">dpid</span> 旁路零拷贝嗅探下游设备未加密 HTTP 明文请求中的手机号、设备指纹（IMEI/OAID/Android ID）、精确经纬度、MAC 地址与鉴权 Token，WebUI 完整呈现原始明文值与 XSS 安全高亮 HTTP 报文切片，支持双栈一键拉黑追踪域名+IP 与秒斩活跃连接，兼顾手机状态栏锁屏半脱敏保护。</li>

@@ -14,6 +14,13 @@
 
 ---
 
+## [6.0.1] - 2026-11-20
+
+### 跨 ROM 限速全矩阵兼容、匿名轮换 MAC 多维共振合并与微晶光感 WebUI 升级
+- **Added · 跨芯片/跨 ROM 限速兼容兜底链 (`tc_manager.sh` + `hnc_offload_guard.sh` + `dataplane_netlink.go` + `iface_patterns.go`)**: 全链路支持 `ap_br_*` 桥接热点接口与 Wi-Fi 7 MLO 双频并发去重；新增 GKI 6.1/6.6 无 `ifb` 内核双栈 `ingress police` 每设备独立上行限速闭环、五级自适应低延迟叶子队列回退链（`fq_codel(5ms)` -> `fq_codel` -> `fq` -> `sfq` -> 按速率动态缩放 `pfifo(16..256)`），并覆盖联发科天玑 `MDDP`、高通 `SFE/ECM` 与三星 `DIT` 硬件转发旁路动态排障。
+- **Added · 匿名轮换 MAC 多维协议栈共振与零丢配置迁移 (`mac_merge.go` + `mac_merge_action.go`)**: 针对 iOS 18+ Rotating Wi-Fi Address 与 Android 15+ 隐藏 DHCP 主机名重连场景，融合 DHCP Option 55 指纹栈、JA4 集合、专属小众应用特征与重连时间窗补偿，内置同家庭双胞胎同型号防误并守卫（Top-2 分差 `<12` 自动压回人工确认）与 `encdns.json` 原子迁移。
+- **Changed · 5G-A 多载波射频感知与微晶光感四主题界面 (`signal_monitor.go` + `webroot/*`)**: 支持 `NR_ADVANCED` `5G-A` 标识、3GPP NR-ARFCN/EARFCN 反推频段与中国移动×广电共建共享识别；升级 Google A2UI 1.0 风格 120fps 纯黑 OLED/液态微晶双栖渲染、离线设备对齐占位点与克制微晶按钮视觉体系；修复 `fpStore.attribute` 规则库与指纹归因优先级回归断言。
+
 ## [6.0.0] - 2026-11-19
 
 ### HNC v6.0.0 · Vector 零开销架构重塑与五大王牌战术舱正式版

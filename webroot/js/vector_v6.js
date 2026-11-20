@@ -2080,7 +2080,7 @@ function v6ExportBackupBundle(actEl) {
     V6.vault.last_file_count = Math.round(num(bundle.file_count, 0));
     v6RefreshActiveSubviewDom();
     var jsonStr = JSON.stringify(bundle, null, 2);
-    var fname = 'hnc-backup-' + (bundle.module_version || 'v6.0.0') + '-' + Date.now() + '.json';
+    var fname = 'hnc-backup-' + (bundle.module_version || 'v6.0.1') + '-' + Date.now() + '.json';
     if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function') {
       var outPath = '/sdcard/Download/' + fname;
       var b64 = btoa(unescape(encodeURIComponent(jsonStr)));
