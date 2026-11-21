@@ -699,6 +699,55 @@ else
         cp -f "$MODDIR/data/auto_expand_blocklist.json" "$DPID_BLOCKLIST" 2>/dev/null
         chmod 644 "$DPID_BLOCKLIST" 2>/dev/null
         log "dpid: installed default auto_expand_blocklist.json to $DPID_BLOCKLIST"
+    elif [ -f "$DPID_BLOCKLIST" ] && [ -f "$MODDIR/data/auto_expand_blocklist.json" ]; then
+        _BLK_TMP="$DPID_BLOCKLIST.merge.$$"
+        if awk '
+            FNR == NR {
+                if (match($0, /"[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+"/)) {
+                    d = substr($0, RSTART + 1, RLENGTH - 2)
+                    if (d !~ / /) seen[tolower(d)] = 1
+                }
+                lines[++n] = $0
+                next
+            }
+            {
+                if (match($0, /"[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+"/)) {
+                    d = substr($0, RSTART + 1, RLENGTH - 2)
+                    dl = tolower(d)
+                    if (d !~ / / && !(dl in seen)) {
+                        seen[dl] = 1
+                        add[++m] = dl
+                    }
+                }
+            }
+            END {
+                if (m == 0) exit 2
+                ins = 0
+                for (i = n; i >= 1; i--) {
+                    if (lines[i] ~ /\]/) { ins = i; break }
+                }
+                if (ins == 0) exit 1
+                prev = ins - 1
+                while (prev >= 1 && lines[prev] ~ /^[[:space:]]*$/) prev--
+                if (prev >= 1 && lines[prev] !~ /\[[[:space:]]*$/ && lines[prev] !~ /,[[:space:]]*$/) {
+                    sub(/[[:space:]]*$/, ",", lines[prev])
+                }
+                for (i = 1; i <= n; i++) {
+                    if (i == ins) {
+                        for (j = 1; j <= m; j++) {
+                            sep = (j < m) ? "," : ""
+                            print "    \"" add[j] "\"" sep
+                        }
+                    }
+                    print lines[i]
+                }
+            }
+        ' "$DPID_BLOCKLIST" "$MODDIR/data/auto_expand_blocklist.json" > "$_BLK_TMP" 2>/dev/null && [ -s "$_BLK_TMP" ]; then
+            chmod 644 "$_BLK_TMP" 2>/dev/null || true
+            mv -f "$_BLK_TMP" "$DPID_BLOCKLIST" 2>/dev/null && log "dpid: merged newly shipped shared-infra apexes into $DPID_BLOCKLIST"
+        else
+            rm -f "$_BLK_TMP" 2>/dev/null || true
+        fi
     fi
 
     DPID_ENTITY="$HNC_DIR/etc/entity_db.json"

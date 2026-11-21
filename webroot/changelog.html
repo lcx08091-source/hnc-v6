@@ -13,6 +13,14 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-1-0-alpha-1" data-version="v6.1.0-alpha.1" data-version-code="6009101">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-wrench"/></svg>v6.1.0-alpha.1(净屋换牌内测版): 全仓错位版本号清零 · 预发布防误推与黄金快照回滚护栏 · DPI 规则零冲突归并 · 后台熄屏零唤醒优化 <span class="badge b-warn" style="margin-left:4px">Alpha 内测版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-21 · versionCode 6009101</span></div>
+  <ul class="cl-list">
+    <li><b>全仓历史错位版本号一次性归零</b>：统一收口 <span class="mono">json-health.html</span>（支持本机 KSU 直读版本）、设置页离线兜底卡、备份文件名、<span class="mono">dpi_rebind</span>、<span class="mono">ahnc_migration</span> 及核心维护脚本横幅至运行态模块版本，补回说明文档自动版本注入占位符并以正式 <span class="mono">GPL-3.0 / eBPF GPLv2+v3</span> 许可证替换历史草稿文件。</li>
+    <li><b>预发布三道安全护栏就位</b>：启用 <span class="mono">6009101~6009399</span> 测试号段走廊保住正式版 <span class="mono">6010000</span> 整万升级路径；测试期锁定 <span class="mono">update.json</span> 不打扰稳定版用户；连刷测试包或回滚重刷时自动锁住 <span class="mono">v6.0.1</span> 黄金 <span class="mono">.prev</span> 回滚底包并采用原子目录切换恢复。</li>
+    <li><b>DPI 规则零逃逸去重与后台零唤醒</b>：消除 35 个规则分包中的 37 处重复域名并挂靠 Steam / 抖音父规则防单应用限速逃逸，修复腾讯游戏前台心跳规则字段拼写与老用户升级屏蔽表合并；WebUI 切入后台或冷启动未就绪时彻底阻断周期定时器抢跑，并在设置页底部新增微晶构建防伪水印。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v6-0-1" data-version="v6.0.1" data-version-code="6000001">
   <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-sparkles"/></svg>v6.0.1(正式版): 跨芯片全 ROM 限速兼容矩阵 · 匿名轮换 MAC 多维共振合并 · 5G-A 多载波感知与 120fps 微晶界面 <span class="badge b-ok" style="margin-left:4px">最新稳定版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-20 · versionCode 6000001</span></div>
   <ul class="cl-list">

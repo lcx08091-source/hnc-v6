@@ -43,7 +43,8 @@
         "steamcontent.com",
         "lancache.steamcontent.com",
         "cache.steamcontent.com"
-      ]
+      ],
+      "_parent_rule_id": "steam"
     },
     {
       "id": "console_rom_ota_v6",

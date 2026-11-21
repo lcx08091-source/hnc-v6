@@ -12,7 +12,7 @@ TS="$(date +%s 2>/dev/null || echo 0)"
 
 json_escape() {
   # keep Android ash compatible; enough for short status strings/paths
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r/ /g; s/\n/ /g; s/\t/ /g'
+  printf '%s' "$1" | tr '\r\n\t' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g'
 }
 
 file_ok() {
@@ -129,9 +129,19 @@ fi
 # Refresh json_health files if doctor exists, but status is read-only.
 [ -x "$BIN/json_doctor.sh" ] && sh "$BIN/json_doctor.sh" status >/dev/null 2>&1
 
+BACKEND_VER=""
+BACKEND_VC=""
+for _mp in "$HNC/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
+  [ -f "$_mp" ] || continue
+  [ -n "$BACKEND_VER" ] || BACKEND_VER="$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')"
+  [ -n "$BACKEND_VC" ] || BACKEND_VC="$(sed -n '/^versionCode=/{s/^versionCode=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')"
+done
+
 cat <<JSON
 {
   "ok": true,
+  "backend_version": "$(json_escape "$BACKEND_VER")",
+  "backend_version_code": "$(json_escape "$BACKEND_VC")",
   "timestamp": $TS,
   "overall": "$(json_escape "$OVERALL")",
   "json_doctor_rc": "$DOC_RC",

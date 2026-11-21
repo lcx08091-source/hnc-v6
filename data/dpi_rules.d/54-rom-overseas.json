@@ -25,8 +25,6 @@
       "category": "system",
       "confidence": "high",
       "suffixes": [
-        "mesu.apple.com",
-        "swcdn.apple.com",
         "swdownload.apple.com",
         "appldnld.apple.com",
         "icloud-content.com",
@@ -43,7 +41,6 @@
         "live.com",
         "msftncsi.com",
         "msftconnecttest.com",
-        "windowsupdate.com",
         "msedge.net",
         "office.com",
         "office365.com",
@@ -61,7 +58,6 @@
         "download.windowsupdate.com",
         "update.microsoft.com",
         "delivery.mp.microsoft.com",
-        "dl.delivery.mp.microsoft.com",
         "settings-win.data.microsoft.com"
       ]
     },

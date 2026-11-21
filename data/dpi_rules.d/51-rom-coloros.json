@@ -46,7 +46,6 @@
       "suffixes": [
         "oppo.com",
         "oppomobile.com",
-        "coloros.com",
         "heytap.com",
         "oppopush.com"
       ]
@@ -57,7 +56,6 @@
       "category": "system",
       "confidence": "high",
       "suffixes": [
-        "heytapmobi.com",
         "heytapdl.com",
         "heytapdownload.com",
         "ocloud.heytap.com",

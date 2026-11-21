@@ -130,7 +130,7 @@ jobs:
           if [ -n "$INPUT_RELEASE_TAG" ]; then
             TAG="$INPUT_RELEASE_TAG"
             # a. 格式护栏(与 bin/version_consistency_check.sh / ci_preflight.sh 同一正则)
-            echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$' \
+            echo "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$' \
               || { echo "ERROR: release_tag '$TAG' 格式非法"; exit 1; }
             # b. 与 module.prop 一致(防 tag 与内容不符 —— v5.8.9-portal 事故的护栏)
             [ "$TAG" = "$MODULE_VERSION" ] \
@@ -149,7 +149,7 @@ jobs:
           elif [ "$GITHUB_EVENT_NAME" = "push" ] && [ "$GITHUB_REF" = "refs/heads/main" ]; then
             # v5.16.1: push main 自动发版 —— 以 module.prop 版本为 tag
             CAND="$MODULE_VERSION"
-            if ! echo "$CAND" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then
+            if ! echo "$CAND" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then
               echo "module.prop version '$CAND' 格式不合发版规则, 只构建不发版"
             elif git ls-remote --exit-code origin "refs/tags/$CAND" >/dev/null 2>&1; then
               echo "tag $CAND 已存在(版本号没升), 只构建不发版"
@@ -533,6 +533,7 @@ jobs:
             -x "EVOLUTION.md" \
             -x "COMPATIBILITY.md" \
             -x "INSTRUCTIONS.md" \
+            -x "*.TODO"
             -x "CLAUDE.md"
           
           echo "OUT_ZIP=$OUT" >> $GITHUB_ENV
@@ -680,6 +681,8 @@ jobs:
           name: HNC ${{ steps.reltag.outputs.tag }}
           body_path: release_notes.md
           tag_name: ${{ steps.reltag.outputs.tag }}
+          prerelease: ${{ contains(steps.reltag.outputs.tag, '-alpha') || contains(steps.reltag.outputs.tag, '-beta') || contains(steps.reltag.outputs.tag, '-rc') }}
+          make_latest: ${{ (contains(steps.reltag.outputs.tag, '-alpha') || contains(steps.reltag.outputs.tag, '-beta') || contains(steps.reltag.outputs.tag, '-rc')) && 'false' || 'true' }}
           target_commitish: ${{ github.sha }}
           files: |
             ${{ env.OUT_ZIP }}
@@ -690,4 +693,3 @@ jobs:
             dpi-rules.zip.sha256
             ${{ env.TOOLS_ZIP }}
             ${{ env.TOOLS_SHA }}
-          prerelease: ${{ contains(steps.reltag.outputs.tag, 'alpha') || contains(steps.reltag.outputs.tag, 'beta') || contains(steps.reltag.outputs.tag, 'rc') }}

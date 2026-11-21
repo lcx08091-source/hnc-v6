@@ -62,11 +62,9 @@
       "category": "ai",
       "confidence": "high",
       "suffixes": [
-        "chatgpt.com",
-        "oaistatic.com",
-        "oaiusercontent.com",
         "openaiapi-site.azureedge.net"
-      ]
+      ],
+      "_parent_rule_id": "openai"
     }
   ]
 }

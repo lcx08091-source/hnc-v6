@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# dpi_rebind.sh — HNC v5.3.0-rc17
+# dpi_rebind.sh — HNC v6.1+ manual DPI capture rebind helper
 # Manual DPI rebind helper.  Safe for WebUI button use: restart the dpid child,
 # refresh dpi_config.json with the current hotspot iface; the C launcher (or, in
 # direct mode, this script / the Go watchdog) brings dpid back up.
@@ -36,9 +36,18 @@ write_state(){
     iface=$(json_escape "$1")
     reason=$(json_escape "$2")
     now=$(date +%s 2>/dev/null || echo 0)
+    _self_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+    _mver=""
+    for _mp in "${_self_root:+$_self_root/module.prop}" "$HNC/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
+        [ -n "$_mp" ] && [ -f "$_mp" ] || continue
+        _mver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d '\000-\037\177 "')
+        [ -n "$_mver" ] && break
+    done
+    _mver=${_mver#v}
+    _mver=$(json_escape "${_mver:-unknown}")
     # v5.12: 临时名带 pid, 不与 dpid / supervisor 的同名 .tmp 互踩
     cat > "$RUN/dpi_state.json.tmp.$$" <<EOF_STATE
-{"schema_version":1,"timestamp":$now,"version":"0.1.0-rc1.2-fixed+rc17-manual","mode":"blind","interface":"$iface","uptime_s":0,"blind_reason":"$reason","stats":{"packets":0,"dns_events":0,"tls_events":0,"kernel_drops":0,"ignored_packets":0,"parse_errors":0}}
+{"schema_version":1,"timestamp":$now,"version":"0.5.4-rc30.12.5-rebind+${_mver}","mode":"blind","interface":"$iface","uptime_s":0,"blind_reason":"$reason","stats":{"packets":0,"dns_events":0,"tls_events":0,"kernel_drops":0,"ignored_packets":0,"parse_errors":0}}
 EOF_STATE
     mv -f "$RUN/dpi_state.json.tmp.$$" "$RUN/dpi_state.json" 2>/dev/null || true
 }

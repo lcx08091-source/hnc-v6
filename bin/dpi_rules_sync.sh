@@ -40,6 +40,11 @@ if [ ! -d "$MOD" ]; then
     log "skip: module rules dir missing: $MOD"
     exit 0
 fi
+_MOD_ROOT=$(dirname "$MOD")
+if [ -f "$_MOD_ROOT/update" ] && [ "$_MOD_ROOT" = "/data/adb/modules/hotspot_net_ctl" ]; then
+    log "skip: module update staged pending reboot ($_MOD_ROOT/update present)"
+    exit 0
+fi
 
 ETC=$(dirname "$RT")
 VER_FILE="$ETC/.rules_sync_module_version"
@@ -64,8 +69,8 @@ for d in "$ETC"/.dpi_rules_sync.new.*; do
 done
 
 # ── 模块版本: 决定 97 是否保留 ───────────────────────────────────────
-MODVER=$(sed -n 's/^versionCode=\([0-9A-Za-z._-]*\).*/\1/p' "$PROP" 2>/dev/null | head -1)
-OLDVER=$(head -1 "$VER_FILE" 2>/dev/null | tr -d ' \r\n')
+MODVER=$(sed -n '/^versionCode=/{s/^versionCode=//p;q;}' "$PROP" 2>/dev/null | tr -d ' \t\r\n')
+OLDVER=$(sed -n '1p' "$VER_FILE" 2>/dev/null | tr -d ' \t\r\n')
 KEEP97=0
 if [ -n "$MODVER" ] && [ "$MODVER" = "$OLDVER" ]; then
     KEEP97=1

@@ -416,7 +416,11 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  groups.push(['关于', sItem(['blue', 'info'], '版本', 'HNC 后端 · versionCode ' + esc(l.backend_version_code || '—'), val(esc(l.backend_version || '—'))) +
+  var HNC_UI_VER = 'v6.1.0-alpha.1', HNC_UI_VC = '6009101', HNC_UI_DATE = '2026-11-21';
+  var bVer = String(l.backend_version || HNC_UI_VER);
+  var bVc = String(l.backend_version_code || HNC_UI_VC);
+  var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
+  groups.push(['关于', sItem(['blue', 'info'], '版本', 'HNC 后端 · ' + bChan + ' · versionCode ' + esc(bVc), val(esc(bVer))) +
     sBtn(['green', 'doc'], '更新日志', '查看完整变更记录', 'changelog', '查看') +
     (KSU || (S.whoami && S.whoami.authenticated === false) ? '' : '<button class="row" data-act="logout">' + gi('red', 'lock') + '<span class="tx"><div class="t">退出登录' + (wLabel ? '（' + esc(wLabel) + '）' : '') + '</div><div class="s">清除这台设备的远程访问凭据</div></span><span class="hint-a danger">退出</span></button>')]);
   // 按级别分类 + 全部收拢为可折叠卡片(默认仅展开「热点」或全折叠，一屏清爽浏览)
@@ -455,7 +459,7 @@ function renderSettings(anim1) {
   var advCards = [
     scard('scard-v6', ['blue', 'vector'], '智能护航与配置备份',
       '游戏通话优先 · 后台更新限速 · 温控保护（' + esc(v6TempS) + '）· 隐私安检（' + v6LgHits + ' 条）',
-      '<span class="badge b-acc">v6.0.1</span>',
+      (function(){ var _rv = String(l.backend_version || 'v6.1.0-alpha.1'); var _short = _rv.replace(/^(v\d+\.\d+)\.\d+-(alpha|beta|rc)\.?(\d+).*$/i, function(_, m, c, n){ return m + ' ' + c.charAt(0).toUpperCase() + n; }); return '<span class="badge b-acc" title="' + esc(_rv) + '">' + esc(_short) + '</span>'; })(),
       typeof v6SettingsBodyHtml === 'function' ? v6SettingsBodyHtml() : ''),
     scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
       'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
@@ -508,7 +512,7 @@ function renderSettings(anim1) {
       (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
     scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
       '调试模拟设备 · 后端版本 ' + esc(l.backend_version || '—') + ' · 完整更新日志',
-      '<span class="badge b-gray">' + esc(l.backend_version || 'v6.0.1') + '</span>',
+      '<span class="badge b-gray">' + esc(bVer) + '</span>',
       (gMap['模拟环境（调试）'] || '') + (gMap['关于'] || ''))
   ];
   var cols = function (list) { if (!wide()) return '<div class="scard-stack">' + list.join('') + '</div>'; var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
@@ -525,7 +529,7 @@ function renderSettings(anim1) {
     lvSec('basic', '一、基础常用', '热点 · 远程 · 外观 · 告警', basicCards) +
     lvSec('adv', '二、进阶与识别', 'DPI 识别 · 带宽队列 · 加速兜底 · 设备合并', advCards) +
     lvSec('diag', '三、诊断与系统', '自检日志 · 运行健康 · 维护备份 · 模拟与关于', diagCards) +
-    '<div class="foot">HNC · Hotspot Network Control' + (l.backend_version ? ' · ' + esc(l.backend_version) : '') + '</div></div>';
+    '<div class="foot hnc-build-wm" id="hnc-build-wm">' + (/-alpha/i.test(bVer) ? '<span class="wm-chan">[ALPHA]</span>' : /-beta/i.test(bVer) ? '<span class="wm-chan">[BETA]</span>' : /-rc/i.test(bVer) ? '<span class="wm-chan">[RC]</span>' : '') + '<span>HNC · ' + esc(bVer) + ' · VC ' + esc(bVc) + ' · Build ' + HNC_UI_DATE + '</span></div></div>';
   var p = $('#p-settings');
   if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h;
   placeSegs(p);
@@ -1171,8 +1175,9 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
+    var fbVer = m.version || (S.live && S.live.backend_version) || 'v6.1.0-alpha.1';
     var fallback = '<div class="cl-section" id="cl-history">' +
-      '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(m.version || 'v5.40.0') + ' · Go 1.27 原生 RTNetlink · 数据面正交限速核验正式版</div>' +
+      '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
         '<li><b>按需远程加载</b>：已移除主文件内嵌的 378 KB 历史更新日志，改为由服务端按需注入 <code>changelog.html</code>，单文件体积直降 35%+。</li>' +
         '<li><b>iOS 27 光学液态玻璃</b>：新增状态驱动边缘导光、晶莹水滴开关拇指、分段滑块水银拉伸形变、顶栏滚动动态折射与深色黑曜石菲涅尔反射。</li>' +

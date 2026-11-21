@@ -59,6 +59,10 @@ chmod 755 "$HNC_DIR/bin" "$HNC_DIR/webroot" "$HNC_DIR/daemon" "$HNC_DIR/daemon/h
 fix_perms   # 先修模块目录, cp 出来的权限就对
 cp -rf "$MODDIR/bin/"* "$HNC_DIR/bin/" 2>/dev/null || true
 cp -rf "$MODDIR/webroot/"* "$HNC_DIR/webroot/" 2>/dev/null || true
+if [ -f "$MODDIR/module.prop" ]; then
+    cp -f "$MODDIR/module.prop" "$HNC_DIR/module.prop" 2>/dev/null || true
+    chmod 644 "$HNC_DIR/module.prop" 2>/dev/null || true
+fi
 
 H_MOD="$MODDIR/daemon/hnc_httpd/hnc_httpd"
 H_RUN="$HNC_DIR/daemon/hnc_httpd/hnc_httpd"

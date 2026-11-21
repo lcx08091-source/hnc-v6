@@ -64,8 +64,7 @@
       "suffixes": [
         "music.163.com",
         "music.126.net",
-        "y.163.com",
-        "126.net"
+        "y.163.com"
       ],
       "ground_truth_2026_05_18": {
         "source": "external_ai_pcap_analysis",

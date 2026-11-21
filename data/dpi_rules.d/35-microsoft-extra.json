@@ -10,8 +10,7 @@
       "confidence": "high",
       "suffixes": [
         "microsoftonline.com",
-        "skype.com",
-        "live.com"
+        "skype.com"
       ],
       "ground_truth": {
         "verified": true,

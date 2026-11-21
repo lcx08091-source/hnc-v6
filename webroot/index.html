@@ -5184,6 +5184,44 @@ body::after {
 [data-style="cyber"] .studio-guide-pill {
   border-radius: 4px;
 }
+
+/* v6.1.0-alpha.1 设置页底部微晶构建水印条（零眩光 · 高对比双色 · 等宽对齐 · 无 Emoji） */
+.foot.hnc-build-wm {
+  margin: 16px auto 4px;
+  padding: 6px 13px;
+  width: fit-content;
+  max-width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  flex-wrap: wrap;
+  border-radius: 999px;
+  font: 600 11px/1.4 var(--mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--text-3);
+  background: var(--lg-sub, rgba(148, 163, 184, .08));
+  letter-spacing: .01em;
+  user-select: text;
+}
+.foot.hnc-build-wm .wm-chan {
+  padding: 1px 6px;
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 750;
+  color: #92400e;
+  background: rgba(245, 158, 11, .16);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .foot.hnc-build-wm .wm-chan {
+    color: #fbbf24;
+    background: rgba(251, 191, 36, .16);
+  }
+}
+:root[data-theme="dark"] .foot.hnc-build-wm .wm-chan {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, .16);
+}
 </style>
 <!-- 首帧前按本地偏好设好主题/风格/玻璃浓度, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme / applyGlassTint 一致, 之后由它接管) -->
 <script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'), gm = g('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid', wp = g('hnc6.wp_id'); var sysDk = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; var resT = (t === 'light' || t === 'dark') ? t : (sysDk ? 'dark' : 'light'); r.setAttribute('data-theme', resT); r.setAttribute('data-theme-mode', (t === 'light' || t === 'dark') ? t : 'auto'); if (parseFloat(g('hnc6.wp_blur')) > 0) r.setAttribute('data-wp-blurred', '1'); if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); } else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber'); if (wp && wp !== 'none' && (wp !== 'custom' || g('hnc6.wp_custom'))) { r.setAttribute('data-has-wp', '1'); r.setAttribute('data-has-wallpaper', '1'); r.classList.add('has-wallpaper'); r.setAttribute('data-wp-text', g('hnc6.wp_text_v2') === 'capsule' ? 'capsule' : 'adaptive'); var wts = (g('hnc6.wp_tones') || '').split(','); if (wp === 'prism') wts = ['light', 'light', 'light']; else if (wts.length !== 3) wts = ['dark', 'light', 'dark']; r.setAttribute('data-wp-top', wts[0]); r.setAttribute('data-wp-tone', wts[1]); r.setAttribute('data-wp-bot', wts[2]); } if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1' && g('hnc6.lowfx_manual') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>

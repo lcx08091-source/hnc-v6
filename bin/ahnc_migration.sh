@@ -47,7 +47,9 @@ if [ ! -d "$AHNC_DIR" ]; then
     exit 0
 fi
 
-log "starting AHNC → HNC v5.5.0 migration"
+_AHNC_MVER=$(sed -n '/^version=/{s/^version=//p;q;}' "$HNC_DIR/module.prop" 2>/dev/null | tr -d ' \t\r\n"')
+[ -n "$_AHNC_MVER" ] || _AHNC_MVER=$(sed -n '/^version=/{s/^version=//p;q;}' /data/adb/modules/hotspot_net_ctl/module.prop 2>/dev/null | tr -d ' \t\r\n"')
+log "starting AHNC -> HNC ${_AHNC_MVER:-v6.1} migration"
 mkdir -p "$HNC_RUN"
 
 # ─── Migrate self-conns.YYYYMMDD.jsonl → self_attrib.YYYYMMDD.jsonl ───
@@ -82,7 +84,7 @@ done
     echo "ahnc_dir=$AHNC_DIR"
     echo "files_migrated=$migrated_count"
     echo "ts=$(date +%s)"
-    echo "hnc_version=v5.5.0"
+    echo "hnc_version=${_AHNC_MVER:-v6.1}"
     echo ""
     echo "# AHNC migration complete. Safe-to-remove items:"
     echo "#   - The AHNC KSU module: $AHNC_KSU_MODULE"

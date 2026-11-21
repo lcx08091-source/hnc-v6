@@ -26,7 +26,6 @@
       "category": "system",
       "confidence": "medium",
       "suffixes": [
-        "allawntech.com",
         "allawnos.com"
       ],
       "ground_truth": {

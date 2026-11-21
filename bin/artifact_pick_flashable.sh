@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# HNC v5.3.0-rc5 · pick/extract the real flashable module ZIP from a GitHub Actions artifact.
+# HNC flashable module ZIP extractor & verifier (v6.1+).
 # Safe: only reads/extracts ZIP files and optionally runs artifact_sanity_check.sh.
 
 set +e
@@ -40,7 +40,8 @@ unzip -l "$SRC" > "$LIST" 2>/dev/null || { fail "cannot list zip: $SRC"; say "su
 ENTRIES="$OUTDIR/.artifact_entries.$$"
 awk 'NR>3 && $0 !~ /---------/ {print $4}' "$LIST" | sed '/^$/d' > "$ENTRIES"
 
-say "HNC flashable artifact picker v5.3.0-rc5"
+_APF_VER=$(awk -F= '$1=="version"{print $2; exit}' "$SCRIPT_DIR/../module.prop" 2>/dev/null | tr -d '\r')
+say "HNC flashable artifact picker ${_APF_VER:-v6.1}"
 say "source=$SRC"
 say "outdir=$OUTDIR"
 

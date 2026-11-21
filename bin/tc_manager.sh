@@ -3011,7 +3011,14 @@ case "$1" in
     *)
         echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_sqm|global_shaper|set_all|remove|restore|ensure_ingress|ensure_class|status|snapshot|cleanup}"
         echo ""
-        echo "v5.1.0-rc1-hotfix17.7: TC writer serialization + state snapshot"
+        _tcm_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+        _tcm_ver=""
+        for _tcm_p in "${_tcm_root:+$_tcm_root/module.prop}" "/data/local/hnc/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
+            [ -n "$_tcm_p" ] && [ -f "$_tcm_p" ] || continue
+            _tcm_ver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_tcm_p" 2>/dev/null | tr -d ' \t\r\n"')
+            [ -n "$_tcm_ver" ] && break
+        done
+        echo "HNC ${_tcm_ver:-v6.1}: Orthogonal skb->mark [31:16] HTB/AQM + dual-stack ingress police + serialized snapshot"
         echo ""
         echo "验证限速命令："
         echo "  tc qdisc show dev \$IFACE"

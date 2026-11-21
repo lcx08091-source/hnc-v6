@@ -940,17 +940,31 @@ function pollOnce() {
     schedulePoll();
   });
 }
-setInterval(function () { if (S.page === 'devices') paintFresh(); }, 1000);
-var slowT = [];
+var freshT = 0, slowT = [];
+function startFreshTick() {
+  clearInterval(freshT); freshT = 0;
+  if (S.booted && !document.hidden) freshT = setInterval(function () { if (!document.hidden && S.page === 'devices') paintFresh(); }, 1000);
+}
+function stopSlowPolls() {
+  clearInterval(freshT); freshT = 0;
+  slowT.forEach(clearInterval); slowT = [];
+}
 function startSlowPolls() {
-  slowT.forEach(clearInterval);
+  stopSlowPolls();
+  if (!S.booted || document.hidden) return;
+  startFreshTick();
   slowT = [setInterval(function () { if (!document.hidden) loadAlerts(); }, 60000),
     setInterval(function () { if (!document.hidden) loadOffload(); }, 60000),
     setInterval(function () { if (!document.hidden && S.page !== 'apps' && S.page !== 'stats') api.getSafe('/api/dpi_state', null, null).then(function (r) { if (r && r.available && r.state) { S.self = r.state.self || null; paintAppsDot(); } }); }, 25000),
     setInterval(function () { if (!document.hidden && S.page === 'devices') { loadOnlineHours(); loadUsage(); } }, 600000),
     setInterval(function () { if (!document.hidden && S.page === 'stats' && S.aseg === 'stats') { refreshStats(); refreshPU(true); } }, 300000)];
 }
-document.addEventListener('visibilitychange', function () { if (typeof v6OnVisibility === 'function') v6OnVisibility(document.hidden); if (document.hidden) { clearTimeout(pollT); stopSSE(); } else { burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); } });
+document.addEventListener('visibilitychange', function () {
+  if (typeof v6OnVisibility === 'function') v6OnVisibility(document.hidden);
+  if (document.hidden) { clearTimeout(pollT); stopSSE(); stopSlowPolls(); }
+  else if (S.booted) { startSlowPolls(); burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); }
+  else if (!booting) { boot(true); }
+});
 
 /* ═════════════════════ 启动 ═════════════════════
  * 旧版 bug: health 失败后重试成功只恢复了设备轮询, 配置/能力/告警/offload 全停在默认值。
