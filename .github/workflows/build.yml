@@ -533,7 +533,7 @@ jobs:
             -x "EVOLUTION.md" \
             -x "COMPATIBILITY.md" \
             -x "INSTRUCTIONS.md" \
-            -x "*.TODO"
+            -x "*.TODO" \
             -x "CLAUDE.md"
           
           echo "OUT_ZIP=$OUT" >> $GITHUB_ENV
