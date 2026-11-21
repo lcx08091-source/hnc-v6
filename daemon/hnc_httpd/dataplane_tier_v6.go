@@ -763,6 +763,8 @@ func tuneGlobalShaperOnActor(actor *DataplaneActor, hncDir string, downKbps, upK
 				return nil
 			}
 			a.nlFallbacks.Add(1)
+			delete(a.reconcileMap, "express:"+hncDir+":"+iface)
+			delete(a.reconcileMap, "leash:"+hncDir+":"+iface)
 		}
 
 		// Tier 3 内存原子批处理兜底 (单次 `tc -force -batch -` 管道, <= 1 次子进程)

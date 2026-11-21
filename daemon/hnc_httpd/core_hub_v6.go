@@ -1255,7 +1255,7 @@ func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, 
 			}, false, statErr
 		}
 
-		if h.shmReader != nil && (h.shmRunDir != runDir || h.shmInfo == nil || !os.SameFile(h.shmInfo, curInfo)) {
+		if h.shmReader != nil && (h.shmRunDir != runDir || h.shmInfo == nil || !os.SameFile(h.shmInfo, curInfo) || curInfo.Size() < shm.FileSize) {
 			h.closeShmReaderLocked()
 		}
 

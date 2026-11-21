@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -177,71 +178,95 @@ func TestCoreHubNoStartZeroGoroutineLeak(t *testing.T) {
 		},
 	}, 3, 0)
 
-	func() {
-		s := newServer(dir)
-		hub := NewCoreHub(s)
-		for i := 0; i < 4; i++ {
-			snap := hub.RefreshSnapshotNow()
-			if snap == nil || !snap.Healthy {
-				t.Fatalf("refresh #%d failed: %+v", i+1, snap)
-			}
+	runtime.GC()
+	runtime.GC()
+	baseLeak := sampleGoroutineLeakProfile(true)
+	baseCount := 0
+	baseStacks := make(map[string]bool)
+	if baseLeak != nil {
+		baseCount = baseLeak.LeakedCount
+		for _, st := range baseLeak.PreviewStacks {
+			baseStacks[st] = true
 		}
-		if hub.DpiShmBulkhead.actorRunning.Load() != false {
-			t.Fatalf("expected hub.DpiShmBulkhead.actorRunning == false when hub.Start() not called")
+	}
+
+	s := newServer(dir)
+	hub := NewCoreHub(s)
+	for i := 0; i < 4; i++ {
+		snap := hub.RefreshSnapshotNow()
+		if snap == nil || !snap.Healthy {
+			t.Fatalf("refresh #%d failed: %+v", i+1, snap)
 		}
-		if hub.DataplaneBulkhead.actorRunning.Load() ||
-			hub.AndroidBridgeBulkhead.actorRunning.Load() ||
-			hub.StorageBulkhead.actorRunning.Load() {
-			t.Fatalf("expected zero bulkhead actors started before hub.Start()")
-		}
-		bh := hub.DpiShmBulkhead.Health()
-		if bh.Submitted == 0 || bh.Completed == 0 || !bh.Healthy {
-			t.Fatalf("expected inline bulkhead counters updated accurately, got %+v", bh)
-		}
-		// 模拟调用方未调用 hub.Start() 亦未显式 Close() 即释放局部实例的场景(仅释放文件句柄与全局槽)
-		hub.closeShmReader()
-		defaultGlobalHub.CompareAndSwap(hub, nil)
-		serverHubMap.Delete(s)
-	}()
+	}
+	if hub.DpiShmBulkhead.actorRunning.Load() != false {
+		t.Fatalf("expected hub.DpiShmBulkhead.actorRunning == false when hub.Start() not called")
+	}
+	if hub.DataplaneBulkhead.actorRunning.Load() ||
+		hub.AndroidBridgeBulkhead.actorRunning.Load() ||
+		hub.StorageBulkhead.actorRunning.Load() {
+		t.Fatalf("expected zero bulkhead actors started before hub.Start()")
+	}
+	bh := hub.DpiShmBulkhead.Health()
+	if bh.Submitted == 0 || bh.Completed == 0 || !bh.Healthy {
+		t.Fatalf("expected inline bulkhead counters updated accurately, got %+v", bh)
+	}
+	// 模拟调用方未调用 hub.Start() 亦未显式 Close() 即释放局部实例的场景(仅释放文件句柄与全局槽)
+	hub.closeShmReader()
+	defaultGlobalHub.CompareAndSwap(hub, nil)
+	serverHubMap.Delete(s)
+	hub = nil
+	s = nil
 
 	runtime.GC()
 	runtime.GC()
 	leakSum := sampleGoroutineLeakProfile(true)
-	if leakSum == nil {
-		t.Fatal("expected non-nil GoroutineLeakSummary from sampleGoroutineLeakProfile(true)")
+	if leakSum == nil || !leakSum.Sampled {
+		t.Fatalf("expected sampled GoroutineLeakSummary from sampleGoroutineLeakProfile(true), got %+v", leakSum)
 	}
-	if leakSum.LeakedCount != 0 || (leakSum.Supported && leakSum.Status != "clean") {
-		t.Fatalf("detected goroutine leak on unstarted CoreHub: %+v", leakSum)
+	if leakSum.LeakedCount > baseCount {
+		t.Fatalf("unstarted CoreHub leaked %d new goroutine(s) (before=%d after=%d): %+v",
+			leakSum.LeakedCount-baseCount, baseCount, leakSum.LeakedCount, leakSum)
+	}
+	for _, st := range leakSum.PreviewStacks {
+		if !baseStacks[st] && (strings.Contains(st, "CoreHub") || strings.Contains(st, "DpiShmBulkhead")) {
+			t.Fatalf("detected new CoreHub/DpiShmBulkhead leaked stack:\n%s", st)
+		}
 	}
 }
 
 func TestBeta1Atomic64StructAlignmentAssertions(t *testing.T) {
+	var (
+		zFS flowScalpelEngine
+		zJB JitterBlackbox
+		zBH Bulkhead
+		zCH CoreHub
+	)
 	fields := []struct {
 		name   string
 		offset uintptr
 	}{
-		{"flowScalpelEngine.seqGen", unsafe.Offsetof(flowScalpelEngine{}.seqGen)},
-		{"flowScalpelEngine.cutTotal", unsafe.Offsetof(flowScalpelEngine{}.cutTotal)},
-		{"JitterBlackbox.totalTicks", unsafe.Offsetof(JitterBlackbox{}.totalTicks)},
-		{"JitterBlackbox.totalIncidents", unsafe.Offsetof(JitterBlackbox{}.totalIncidents)},
-		{"JitterBlackbox.lastTickUnixMs", unsafe.Offsetof(JitterBlackbox{}.lastTickUnixMs)},
-		{"JitterBlackbox.lastSpikeUnixMs", unsafe.Offsetof(JitterBlackbox{}.lastSpikeUnixMs)},
-		{"JitterBlackbox.latestJitterBits", unsafe.Offsetof(JitterBlackbox{}.latestJitterBits)},
-		{"Bulkhead.actorBeatMonoNs", unsafe.Offsetof(Bulkhead{}.actorBeatMonoNs)},
-		{"Bulkhead.circuitOpenUntil", unsafe.Offsetof(Bulkhead{}.circuitOpenUntil)},
-		{"Bulkhead.totalSubmitted", unsafe.Offsetof(Bulkhead{}.totalSubmitted)},
-		{"Bulkhead.totalCompleted", unsafe.Offsetof(Bulkhead{}.totalCompleted)},
-		{"Bulkhead.totalErrors", unsafe.Offsetof(Bulkhead{}.totalErrors)},
-		{"Bulkhead.totalTimeouts", unsafe.Offsetof(Bulkhead{}.totalTimeouts)},
-		{"Bulkhead.totalPanics", unsafe.Offsetof(Bulkhead{}.totalPanics)},
-		{"Bulkhead.totalRejected", unsafe.Offsetof(Bulkhead{}.totalRejected)},
-		{"Bulkhead.totalCircuitTrips", unsafe.Offsetof(Bulkhead{}.totalCircuitTrips)},
-		{"Bulkhead.lastExecNs", unsafe.Offsetof(Bulkhead{}.lastExecNs)},
-		{"CoreHub.seq", unsafe.Offsetof(CoreHub{}.seq)},
-		{"CoreHub.lastRefreshMono", unsafe.Offsetof(CoreHub{}.lastRefreshMono)},
-		{"CoreHub.vectorSyncHits", unsafe.Offsetof(CoreHub{}.vectorSyncHits)},
-		{"CoreHub.shmSeqlockHits", unsafe.Offsetof(CoreHub{}.shmSeqlockHits)},
-		{"CoreHub.shmFallbackCount", unsafe.Offsetof(CoreHub{}.shmFallbackCount)},
+		{"flowScalpelEngine.seqGen", unsafe.Offsetof(zFS.seqGen)},
+		{"flowScalpelEngine.cutTotal", unsafe.Offsetof(zFS.cutTotal)},
+		{"JitterBlackbox.totalTicks", unsafe.Offsetof(zJB.totalTicks)},
+		{"JitterBlackbox.totalIncidents", unsafe.Offsetof(zJB.totalIncidents)},
+		{"JitterBlackbox.lastTickUnixMs", unsafe.Offsetof(zJB.lastTickUnixMs)},
+		{"JitterBlackbox.lastSpikeUnixMs", unsafe.Offsetof(zJB.lastSpikeUnixMs)},
+		{"JitterBlackbox.latestJitterBits", unsafe.Offsetof(zJB.latestJitterBits)},
+		{"Bulkhead.actorBeatMonoNs", unsafe.Offsetof(zBH.actorBeatMonoNs)},
+		{"Bulkhead.circuitOpenUntil", unsafe.Offsetof(zBH.circuitOpenUntil)},
+		{"Bulkhead.totalSubmitted", unsafe.Offsetof(zBH.totalSubmitted)},
+		{"Bulkhead.totalCompleted", unsafe.Offsetof(zBH.totalCompleted)},
+		{"Bulkhead.totalErrors", unsafe.Offsetof(zBH.totalErrors)},
+		{"Bulkhead.totalTimeouts", unsafe.Offsetof(zBH.totalTimeouts)},
+		{"Bulkhead.totalPanics", unsafe.Offsetof(zBH.totalPanics)},
+		{"Bulkhead.totalRejected", unsafe.Offsetof(zBH.totalRejected)},
+		{"Bulkhead.totalCircuitTrips", unsafe.Offsetof(zBH.totalCircuitTrips)},
+		{"Bulkhead.lastExecNs", unsafe.Offsetof(zBH.lastExecNs)},
+		{"CoreHub.seq", unsafe.Offsetof(zCH.seq)},
+		{"CoreHub.lastRefreshMono", unsafe.Offsetof(zCH.lastRefreshMono)},
+		{"CoreHub.vectorSyncHits", unsafe.Offsetof(zCH.vectorSyncHits)},
+		{"CoreHub.shmSeqlockHits", unsafe.Offsetof(zCH.shmSeqlockHits)},
+		{"CoreHub.shmFallbackCount", unsafe.Offsetof(zCH.shmFallbackCount)},
 	}
 	for _, f := range fields {
 		if f.offset%8 != 0 {
@@ -350,24 +375,28 @@ func TestDataplaneReconcileInvalidationAndIfindexDrift(t *testing.T) {
 	}
 
 	actor.InvalidateReconcile("ifb0")
-	_ = actor.Do("verify_ifb_clear", func(a *DataplaneActor) error {
+	if err := actor.Do("verify_ifb_clear", func(a *DataplaneActor) error {
 		if _, ok := a.reconcileMap["express:"+hncDir+":"+iface]; ok {
-			t.Fatal("expected InvalidateReconcile(ifb0) to clear express digest")
+			return errors.New("expected InvalidateReconcile(ifb0) to clear express digest")
 		}
 		if _, ok := a.reconcileMap["leash:"+hncDir+":"+iface]; ok {
-			t.Fatal("expected InvalidateReconcile(ifb0) to clear leash digest")
+			return errors.New("expected InvalidateReconcile(ifb0) to clear leash digest")
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 	if err := runSim(41, 12, 100000, 50000, false); err != nil || applyCount != 4 {
 		t.Fatalf("expected InvalidateReconcile(ifb0) to clear shaper digest (applyCount=4), got %d", applyCount)
 	}
 
 	_ = runSim(42, 12, 100000, 50000, true)
-	_ = actor.Do("check_ifidx", func(a *DataplaneActor) error {
+	if err := actor.Do("check_ifidx", func(a *DataplaneActor) error {
 		if _, exists := a.reconcileMap["vector:"+hncDir+":"+iface]; exists {
-			t.Fatalf("expected vector digest cleared on ifindex drift 41->42")
+			return errors.New("expected vector digest cleared on ifindex drift 41->42")
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 }

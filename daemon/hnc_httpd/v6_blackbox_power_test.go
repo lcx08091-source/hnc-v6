@@ -23,24 +23,31 @@ func waitBlackboxCond(t *testing.T, timeout time.Duration, desc string, cond fun
 }
 
 func TestAtomic64StructHeadAlignmentGuard(t *testing.T) {
+	var (
+		zSrv server
+		zCH  CoreHub
+		zDP  DataplaneActor
+		zFS  flowScalpelEngine
+		zJB  JitterBlackbox
+	)
 	offsets := []struct {
 		name   string
 		offset uintptr
 	}{
-		{"server.blackboxCaptureUntilUnix", unsafe.Offsetof(server{}.blackboxCaptureUntilUnix)},
-		{"server.blackboxLastActiveMs", unsafe.Offsetof(server{}.blackboxLastActiveMs)},
-		{"server.blackboxShortCircuits", unsafe.Offsetof(server{}.blackboxShortCircuits)},
-		{"server.blackboxRecordedTicks", unsafe.Offsetof(server{}.blackboxRecordedTicks)},
-		{"CoreHub.shmSeqlockHits", unsafe.Offsetof(CoreHub{}.shmSeqlockHits)},
-		{"CoreHub.shmFallbackCount", unsafe.Offsetof(CoreHub{}.shmFallbackCount)},
-		{"DataplaneActor.reconcileInvalidations", unsafe.Offsetof(DataplaneActor{}.reconcileInvalidations)},
-		{"flowScalpelEngine.seqGen", unsafe.Offsetof(flowScalpelEngine{}.seqGen)},
-		{"flowScalpelEngine.cutTotal", unsafe.Offsetof(flowScalpelEngine{}.cutTotal)},
-		{"JitterBlackbox.totalTicks", unsafe.Offsetof(JitterBlackbox{}.totalTicks)},
-		{"JitterBlackbox.totalIncidents", unsafe.Offsetof(JitterBlackbox{}.totalIncidents)},
-		{"JitterBlackbox.lastTickUnixMs", unsafe.Offsetof(JitterBlackbox{}.lastTickUnixMs)},
-		{"JitterBlackbox.lastSpikeUnixMs", unsafe.Offsetof(JitterBlackbox{}.lastSpikeUnixMs)},
-		{"JitterBlackbox.latestJitterBits", unsafe.Offsetof(JitterBlackbox{}.latestJitterBits)},
+		{"server.blackboxCaptureUntilUnix", unsafe.Offsetof(zSrv.blackboxCaptureUntilUnix)},
+		{"server.blackboxLastActiveMs", unsafe.Offsetof(zSrv.blackboxLastActiveMs)},
+		{"server.blackboxShortCircuits", unsafe.Offsetof(zSrv.blackboxShortCircuits)},
+		{"server.blackboxRecordedTicks", unsafe.Offsetof(zSrv.blackboxRecordedTicks)},
+		{"CoreHub.shmSeqlockHits", unsafe.Offsetof(zCH.shmSeqlockHits)},
+		{"CoreHub.shmFallbackCount", unsafe.Offsetof(zCH.shmFallbackCount)},
+		{"DataplaneActor.reconcileInvalidations", unsafe.Offsetof(zDP.reconcileInvalidations)},
+		{"flowScalpelEngine.seqGen", unsafe.Offsetof(zFS.seqGen)},
+		{"flowScalpelEngine.cutTotal", unsafe.Offsetof(zFS.cutTotal)},
+		{"JitterBlackbox.totalTicks", unsafe.Offsetof(zJB.totalTicks)},
+		{"JitterBlackbox.totalIncidents", unsafe.Offsetof(zJB.totalIncidents)},
+		{"JitterBlackbox.lastTickUnixMs", unsafe.Offsetof(zJB.lastTickUnixMs)},
+		{"JitterBlackbox.lastSpikeUnixMs", unsafe.Offsetof(zJB.lastSpikeUnixMs)},
+		{"JitterBlackbox.latestJitterBits", unsafe.Offsetof(zJB.latestJitterBits)},
 	}
 	for _, item := range offsets {
 		if item.offset%8 != 0 {
