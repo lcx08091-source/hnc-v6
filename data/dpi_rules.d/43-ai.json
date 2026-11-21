@@ -63,8 +63,7 @@
       "confidence": "high",
       "suffixes": [
         "openaiapi-site.azureedge.net"
-      ],
-      "_parent_rule_id": "openai"
+      ]
     }
   ]
 }

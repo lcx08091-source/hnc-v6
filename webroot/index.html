@@ -5185,7 +5185,7 @@ body::after {
   border-radius: 4px;
 }
 
-/* v6.1.0-alpha.1 设置页底部微晶构建水印条（零眩光 · 高对比双色 · 等宽对齐 · 无 Emoji） */
+/* v6.1.0-alpha.1 设置页底部微晶构建水印条（零眩光 · 等宽对齐 · 无 Emoji） */
 .foot.hnc-build-wm {
   margin: 16px auto 4px;
   padding: 6px 13px;
@@ -5209,18 +5209,8 @@ body::after {
   border-radius: 999px;
   font-size: 10px;
   font-weight: 750;
-  color: #92400e;
-  background: rgba(245, 158, 11, .16);
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) .foot.hnc-build-wm .wm-chan {
-    color: #fbbf24;
-    background: rgba(251, 191, 36, .16);
-  }
-}
-:root[data-theme="dark"] .foot.hnc-build-wm .wm-chan {
-  color: #fbbf24;
-  background: rgba(251, 191, 36, .16);
+  color: var(--badge-warn, #d97706);
+  background: var(--badge-warn-bg, rgba(245, 158, 11, .14));
 }
 </style>
 <!-- 首帧前按本地偏好设好主题/风格/玻璃浓度, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme / applyGlassTint 一致, 之后由它接管) -->

@@ -16,12 +16,10 @@
 
 ## [6.1.0-alpha.1] - 2026-11-21
 
-> **通道说明（内测通道 · 稳定版当前为 `v6.0.1`）**：本版本仅面向手动刷入验证全屋大扫除基线，自动更新广播文件（`update.json`）保持冻结在 `v6.0.1`，待 `v6.1.0` 正式封版后统一推送。
-
 ### v6.1.0 全量收尾工程第一阶段 · 净屋换牌与发布护栏加固版
-- **Added · 语义化预发布通道门禁与零依赖发版护栏 (`bin/version_consistency_check.sh` + `bin/ci_preflight.sh` + `.github/workflows/build.yml`)**: 升级版本门禁与发版标签正则支持 `-alpha.N` / `-beta.N` / `-rc.N` 标准预发布后缀，锁定 `6009101~6009399` 前置 `versionCode` 走廊确保未来 `v6.1.0` 正式版平稳落位 `6010000` 零倒挂；新增预发布期 `update.json` 冻结强校验、`module.prop` BOM/CRLF 字节级检查与根目录 `*.TODO` 拦截，杜绝测试包误标 GitHub `Latest` 或误推给稳定版用户。
-- **Added · 预发布连刷与回滚重刷 `.prev` 黄金快照保护及构建防伪水印 (`bin/hnc_rollback.sh` + `bin/hnc_runtime_sync.sh` + `webroot/*`)**: 重构 `rb_norm_vc` 十进制归一化（消除 POSIX 八进制算术陷阱与 6 位历史码误判），在 `alpha/beta/rc` 连续迭代及回滚后再刷修复包时全程锁住已验证正式版 `.prev` 镜像，回滚恢复升级为目录原子替换并同步备份 `module.prop`；设置页底部新增微晶 `[ALPHA]` 版本号 + `versionCode` + 构建日期防伪水印。
-- **Fixed · 全仓错位版本号清零、DPI 零逃逸去重与 KSU/熄屏体验优化 (`webroot/*` + `bin/*` + `data/dpi_rules.d/*` + `./service.sh` + `README.md` + `LICENSE`)**: 打通 `bin/json_health_panel.sh` 与 `window.ksu.moduleInfo()` 让本机 KSU WebView 下的 `json-health.html` 实时显示真实版本；清理 `data/dpi_rules.d/` 跨包 37 处重复域名并通过 `_parent_rule_id` 挂靠保住 Steam 单应用限速/游戏封锁与抖音内横屏视频/直播归因，修复 `tencent_game_foreground_heartbeat` 单数 `suffix` 拼写缺陷与老用户升级 `auto_expand_blocklist.json` 幂等合并；修复 `main.js` 冷启动 `visibilitychange` 竞态与熄屏后台定时器唤醒；补齐 `GPL-3.0-only` 及内核 eBPF `GPL-2.0-only OR GPL-3.0-only` 正式许可证。
+- **Added · 语义化预发布通道门禁与防误推护栏 (`bin/version_consistency_check.sh` + `bin/ci_preflight.sh` + `bin/release_channel_sync.sh`)**: 升级双门禁版本正则支持 `-alpha.N` / `-beta.N` / `-rc.N` 标准预发布后缀，启用 `6009101~6009399` 前置 `versionCode` 走廊确保未来 `v6.1.0` 正式版平稳落位 `6010000` 零倒挂；新增预发布期 `update.json` 冻结强校验与 `*.TODO` 残余拦截，杜绝测试包通过管理器自动更新通道误推给 `v6.0.1` 稳定版用户。
+- **Added · 预发布连刷 `.prev` 黄金快照保护与设置页构建防伪水印 (`bin/hnc_rollback.sh` + `webroot/*`)**: 加固 `rb_snapshot` 状态机，在 `alpha/beta/rc` 连续迭代刷机时自动锁住升级前已验证的稳定版 `.prev` 回滚镜像不被中间测试包冲掉；设置页底部新增微晶 `[ALPHA]` 版本号 + `versionCode` + 构建日期防伪水印。
+- **Fixed · 全仓 10 类历史错位版本号清零、37 处 DPI 规则去重与熄屏零唤醒优化 (`webroot/*` + `bin/*` + `data/dpi_rules.d/*` + `README.md` + `LICENSE`)**: 动态化 `json-health.html`（原硬编码 `v5.36`）、离线日志兜底卡（原 `v5.40.0`）、备份文件名、`dpi_rebind.sh`（原 `0.1.0-rc1.2`）及五大脚本横幅；清理 `data/dpi_rules.d/` 跨包 37 处重复域名并同步多租户公共云清单；修复 `main.js` 页面隐藏期间 `paintFresh` 与慢轮询定时器残留唤醒；补回 `README.md` `{{VERSION}}` 自动注入占位符并以正式 `GPL-3.0 LICENSE` 替换 `LICENSE.TODO`。
 
 ## [6.0.1] - 2026-11-20
 

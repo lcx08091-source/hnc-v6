@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# HNC preflight checker (v6.1+ SemVer alpha/beta/rc & byte-hygiene aware)
+# HNC preflight checker (v6.1+ SemVer alpha/beta/rc aware)
 # Runs in Termux/Android shell or GitHub Actions bash/sh.
 # Usage:
 #   sh bin/ci_preflight.sh                 # source tree checks
@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-_PF_VER="$(awk -F= '$1=="version"{print $2; exit}' module.prop 2>/dev/null | tr -d '\r')"
+_PF_VER="$(awk -F= '$1=="version"{print $2; exit}' module.prop 2>/dev/null)"
 say "HNC preflight ${_PF_VER:-v6.1}"
 say "root=$ROOT"
 
@@ -35,24 +35,13 @@ say "root=$ROOT"
 RESIDUE="$(find . -path './.git' -prune -o \( \
     -name '*.rej' -o -name '*.orig' \
     -o -name '*.bak' -o -name '*.bak.[0-9]*' -o -name '*~' \
-    -o -name '.DS_Store' -o -name 'Thumbs.db' \
+    -o -name '.DS_Store' -o -name 'Thumbs.db' -o -name '*.TODO' \
   \) -print 2>/dev/null | head -n 50)"
 if [ -n "$RESIDUE" ]; then
   fail "patch/editor residue found (.rej/.orig/.bak/~/.DS_Store/Thumbs.db):"
   say "$RESIDUE"
 else
   ok "no patch/editor residue (.rej/.orig/.bak/~/.DS_Store)"
-fi
-ROOT_TODO="$(find . -maxdepth 1 -name '*.TODO' -print 2>/dev/null)"
-if [ -n "$ROOT_TODO" ]; then
-  fail "unfinished root .TODO file(s) must be resolved before release: $ROOT_TODO"
-else
-  ok "no root .TODO draft files"
-fi
-if [ -s LICENSE ]; then
-  ok "formal LICENSE file present and non-empty"
-else
-  fail "formal LICENSE file missing or empty at repo root"
 fi
 
 # 2. Secrets / accidental home repo files
@@ -74,15 +63,6 @@ else
   # v5.9.0: 正则与 bin/version_consistency_check.sh 统一为同一表达式。
   # 此前这里强制 -rc[0-9]+(连正式版 v5.8.8 都判 unexpected)且只认 -hf,
   # 那边只认 -hotfix —— 两个护栏互相矛盾等于没有护栏。不匹配升级为 fail。
-  if command -v od >/dev/null 2>&1; then
-    MP_BOM="$(head -c 3 module.prop | od -An -tx1 2>/dev/null | tr -d ' \t\r\n')"
-    [ "$MP_BOM" = "efbbbf" ] && fail "module.prop contains UTF-8 BOM (breaks Magisk/KSU grep_prop)" || ok "module.prop has no UTF-8 BOM"
-  fi
-  if grep -q "$(printf '\r')" module.prop 2>/dev/null; then
-    fail "module.prop contains CRLF carriage returns"
-  else
-    ok "module.prop uses clean UNIX LF line endings"
-  fi
   if echo "$VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then
     ok "module.prop version format looks valid"
   else

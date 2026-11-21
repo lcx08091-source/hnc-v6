@@ -1171,13 +1171,8 @@ case "$1" in
         echo "           whitelist_add|whitelist_remove|whitelist_on|whitelist_off|"
         echo "           stats|ensure_stats|stats_all|reset_counters|cleanup}"
         echo ""
-        _ipt_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
-        _ipt_ver=""
-        for _ipt_p in "${_ipt_root:+$_ipt_root/module.prop}" "/data/local/hnc/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
-            [ -n "$_ipt_p" ] && [ -f "$_ipt_p" ] || continue
-            _ipt_ver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_ipt_p" 2>/dev/null | tr -d ' \t\r\n"')
-            [ -n "$_ipt_p" ] && [ -n "$_ipt_ver" ] && break
-        done
+        _ipt_ver=$(sed -n 's/^version=//p' /data/adb/modules/hotspot_net_ctl/module.prop 2>/dev/null | head -1)
+        [ -n "$_ipt_ver" ] || _ipt_ver=$(sed -n 's/^version=//p' "$(dirname "$0")/../module.prop" 2>/dev/null | head -1)
         echo "HNC ${_ipt_ver:-v6.1} 双栈支持（IPv4 + IPv6 · 保护低 16 位 netd 路由 netId）"
         echo "支持 ensure_stats / ensure_stats_online / stats_all 按设备流量统计与 gate/mac 原子锁"
         echo "运行时检测：IPV6_OK=$IPV6_OK"

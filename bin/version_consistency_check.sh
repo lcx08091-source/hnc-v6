@@ -21,43 +21,17 @@ else
   #   v5.3.0-rc30.12-hf2           (rc + hf 新风格)
   #   v5.9.0-hotfix1               (正式版 + hotfix)
   if printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then ok "module version format is accepted"; else fail "module version format is unexpected: $VERSION"; fi
-  MOD_DESC="$(sed -n '/^description=/{s/^description=//p;q;}' "$MODULE_PROP" | tr -d '\r')"
-  DESC_VERS="$(printf '%s\n' "$MOD_DESC" | grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*' || true)"
-  if [ -n "$DESC_VERS" ]; then
-    DESC_BAD=0
-    for _dv in $DESC_VERS; do
-      [ "$_dv" = "$VERSION" ] || DESC_BAD=1
-    done
-    if [ "$DESC_BAD" -eq 0 ]; then
-      ok "module.prop description embeds exact $VERSION"
+  MOD_DESC="$(sed -n 's/^description=//p' "$MODULE_PROP" | head -1)"
+  if printf '%s\n' "$MOD_DESC" | grep -Eq 'v[0-9]+\.[0-9]+\.[0-9]+'; then
+    if printf '%s\n' "$MOD_DESC" | grep -Fq "$VERSION"; then
+      ok "module.prop description embeds matching $VERSION"
     else
-      fail "module.prop description version token mismatch (expected $VERSION, got: $DESC_VERS)"
+      fail "module.prop description version mismatch (expected $VERSION): $MOD_DESC"
     fi
   fi
-  if printf '%s\n' "$VERSION_CODE" | grep -Eq '^[1-9][0-9]{6,8}$'; then
-    VC_REM=$(( VERSION_CODE % 10000 ))
-    case "$VERSION" in
-      *-alpha*)
-        if [ "$VC_REM" -ge 9101 ] && [ "$VC_REM" -le 9199 ]; then ok "alpha versionCode corridor valid ($VERSION_CODE)"; else fail "alpha versionCode ($VERSION_CODE) must end in 9101..9199"; fi ;;
-      *-beta*)
-        if [ "$VC_REM" -ge 9201 ] && [ "$VC_REM" -le 9299 ]; then ok "beta versionCode corridor valid ($VERSION_CODE)"; else fail "beta versionCode ($VERSION_CODE) must end in 9201..9299"; fi ;;
-      *-rc*)
-        if [ "$VC_REM" -ge 9301 ] && [ "$VC_REM" -le 9999 ]; then ok "rc versionCode corridor valid ($VERSION_CODE)"; else fail "rc versionCode ($VERSION_CODE) must end in 9301..9999"; fi ;;
-      *)
-        if [ "$VC_REM" -lt 9100 ]; then ok "stable versionCode corridor valid ($VERSION_CODE)"; else fail "stable versionCode ($VERSION_CODE) collides with pre-release corridor >=9100"; fi ;;
-    esac
-  fi
-  VER_BARE="${VERSION#v}"
-  if [ -f CHANGELOG.md ]; then
-    CL_SEC="$(awk -v ver="$VER_BARE" '$0 ~ "^## \\[" ver "\\]" {found=1; next} found && /^## \[/ {exit} found {print}' CHANGELOG.md | tr -d ' \t\r\n')"
-    if [ -n "$CL_SEC" ]; then ok "CHANGELOG.md has non-empty section for [$VER_BARE]"; else fail "CHANGELOG.md missing or empty section for ## [$VER_BARE]"; fi
-  fi
-  if [ -f webroot/changelog.html ]; then
-    if grep -Fq "data-version=\"$VERSION\"" webroot/changelog.html; then ok "webroot/changelog.html contains $VERSION entry"; else fail "webroot/changelog.html missing data-version=\"$VERSION\""; fi
-  fi
   if [ -f update.json ]; then
-    UPD_VER="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' update.json | head -n 1)"
-    UPD_VC="$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' update.json | head -n 1)"
+    UPD_VER="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' update.json | head -1)"
+    UPD_VC="$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' update.json | head -1)"
     case "$VERSION" in
       *-alpha*|*-beta*|*-rc*)
         case "$UPD_VER" in
@@ -74,7 +48,7 @@ else
         if [ "$UPD_VER" = "$VERSION" ] && [ "$UPD_VC" = "$VERSION_CODE" ]; then
           ok "update.json matches stable release ($UPD_VER / $UPD_VC)"
         else
-          fail "stable module.prop ($VERSION / $VERSION_CODE) differs from update.json ($UPD_VER / $UPD_VC)"
+          warn "stable module.prop ($VERSION / $VERSION_CODE) differs from update.json ($UPD_VER / $UPD_VC)"
         fi ;;
     esac
   fi

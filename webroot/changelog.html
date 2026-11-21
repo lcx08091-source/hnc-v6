@@ -14,11 +14,11 @@
   </defs>
 </svg>
 <div class="cl-section" id="release-v6-1-0-alpha-1" data-version="v6.1.0-alpha.1" data-version-code="6009101">
-  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-wrench"/></svg>v6.1.0-alpha.1(净屋换牌内测版): 全仓错位版本号清零 · 预发布防误推与黄金快照回滚护栏 · DPI 规则零冲突归并 · 后台熄屏零唤醒优化 <span class="badge b-warn" style="margin-left:4px">Alpha 内测版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-21 · versionCode 6009101</span></div>
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-wrench"/></svg>v6.1.0-alpha.1(净屋换牌内测版): 全仓错位版本号清零 · 预发布防误推与黄金快照回滚护栏 · 37 处 DPI 规则去重 · 后台熄屏零唤醒优化 <span class="badge b-warn" style="margin-left:4px">Alpha 内测版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-21 · versionCode 6009101</span></div>
   <ul class="cl-list">
-    <li><b>全仓历史错位版本号一次性归零</b>：统一收口 <span class="mono">json-health.html</span>（支持本机 KSU 直读版本）、设置页离线兜底卡、备份文件名、<span class="mono">dpi_rebind</span>、<span class="mono">ahnc_migration</span> 及核心维护脚本横幅至运行态模块版本，补回说明文档自动版本注入占位符并以正式 <span class="mono">GPL-3.0 / eBPF GPLv2+v3</span> 许可证替换历史草稿文件。</li>
-    <li><b>预发布三道安全护栏就位</b>：启用 <span class="mono">6009101~6009399</span> 测试号段走廊保住正式版 <span class="mono">6010000</span> 整万升级路径；测试期锁定 <span class="mono">update.json</span> 不打扰稳定版用户；连刷测试包或回滚重刷时自动锁住 <span class="mono">v6.0.1</span> 黄金 <span class="mono">.prev</span> 回滚底包并采用原子目录切换恢复。</li>
-    <li><b>DPI 规则零逃逸去重与后台零唤醒</b>：消除 35 个规则分包中的 37 处重复域名并挂靠 Steam / 抖音父规则防单应用限速逃逸，修复腾讯游戏前台心跳规则字段拼写与老用户升级屏蔽表合并；WebUI 切入后台或冷启动未就绪时彻底阻断周期定时器抢跑，并在设置页底部新增微晶构建防伪水印。</li>
+    <li><b>全仓历史错位版本号一次性归零</b>：统一收口 <span class="mono">json-health.html</span>、设置页离线兜底卡、备份文件名、<span class="mono">dpi_rebind</span> 及五大核心维护脚本横幅至实时模块版本，补回说明文档自动版本注入占位符并以正式 <span class="mono">GPL-3.0 LICENSE</span> 替换历史草稿文件。</li>
+    <li><b>预发布三道安全护栏就位</b>：启用 <span class="mono">6009101~6009399</span> 测试号段走廊保住正式版 <span class="mono">6010000</span> 整万升级路径；测试期锁定 <span class="mono">update.json</span> 不打扰稳定版用户；连刷测试包自动保留 <span class="mono">v6.0.1</span> 黄金 <span class="mono">.prev</span> 回滚底包。</li>
+    <li><b>DPI 规则库零冲突去重与后台零唤醒</b>：精准消除 35 个规则分包中的 37 处重复域名并对齐多租户公共云清单；WebUI 切入后台或锁屏时彻底销毁全部周期定时器，并在设置页底部新增微晶构建防伪水印。</li>
   </ul>
 </div>
 <div class="cl-section" id="release-v6-0-1" data-version="v6.0.1" data-version-code="6000001">

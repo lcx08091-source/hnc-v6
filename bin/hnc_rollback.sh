@@ -26,39 +26,16 @@
 HNC_RB_LOG="${HNC_RB_LOG:-/dev/null}"
 rb_log() { echo "$(date '+%Y-%m-%d %H:%M:%S') [rollback] $*" >> "$HNC_RB_LOG" 2>/dev/null || true; }
 
-rb_mod_vc() { sed -n '/^versionCode=/{s/^versionCode=//p;q;}' "$1/module.prop" 2>/dev/null | tr -d ' \t\r\n'; }
+rb_mod_vc() { sed -n 's/^versionCode=//p' "$1/module.prop" 2>/dev/null | head -n1 | tr -d ' \r'; }
 
-# v6.1.0-alpha.1: 纯 POSIX 十进制归一化(剥离前导零 + <=9 位上限, 根除 dash/ash 八进制崩溃与 mksh 32 位溢出)
-rb_norm_vc() {
-    case "$1" in ''|*[!0-9]*) return 1 ;; esac
-    _rb_vc=$1
-    while [ "${_rb_vc#0}" != "$_rb_vc" ]; do
-        _rb_vc=${_rb_vc#0}
-    done
-    [ -n "$_rb_vc" ] || _rb_vc=0
-    [ "${#_rb_vc}" -le 9 ] || return 1
-    return 0
-}
-
-# 判定是否为 v6+ 预发布走廊 versionCode (6009101..6009999; >=6000000 下界防 6 位历史码误判)
+# v6.1.0-alpha.1: 预发布走廊判定(XXYY9100..XXYY9999 为 alpha/beta/rc 测试通道;
+# 正式版尾号为 0000..0999)。测试版连刷(alpha.1 -> alpha.2 -> beta.1)时若 .prev
+# 里已存有经过验证的正式版黄金快照, 严禁拿半成品测试版覆盖掉 .prev。
 rb_is_prerelease_vc() {
-    rb_norm_vc "$1" || return 1
-    [ "$_rb_vc" -ge 6000000 ] || return 1
-    _rb_rem=$(( _rb_vc % 10000 ))
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    _rb_rem=$(( $1 % 10000 ))
     [ "$_rb_rem" -ge 9100 ] && return 0
     return 1
-}
-
-# 正向判定是否为合法正式版 versionCode (绝不用 ! rb_is_prerelease_vc 防止脏字符串取反为真)
-rb_is_stable_vc() {
-    rb_norm_vc "$1" || return 1
-    [ "$_rb_vc" -gt 0 ] || return 1
-    if [ "$_rb_vc" -ge 6000000 ]; then
-        _rb_rem=$(( _rb_vc % 10000 ))
-        [ "$_rb_rem" -lt 9100 ] && return 0
-        return 1
-    fi
-    return 0
 }
 
 rb_data() { echo "$1/data"; }
@@ -88,30 +65,14 @@ rb_snapshot() {
         : # 同版本重启 / 首次安装: 不做快照, 也没有观察期
     else
         _prev="$_hnc/.prev"; _tmp="$_hnc/.prev.tmp"; _bak="$_hnc/.prev.old"
-        mkdir -p "$_d" 2>/dev/null || true
-        if [ ! -d "$_prev/bin" ] && [ -d "$_bak/bin" ] && [ -f "$_bak/version" ]; then
-            rm -rf "$_prev" 2>/dev/null || true
-            mv -f "$_bak" "$_prev" 2>/dev/null || true
-        fi
-        rm -rf "$_tmp" 2>/dev/null || true
-        _prev_ver=$(tr -d ' \t\r\n' < "$_prev/version" 2>/dev/null || true)
-        rb_norm_vc "$_old" && _old_norm=$_rb_vc || _old_norm=""
-        rb_norm_vc "$_new" && _new_norm=$_rb_vc || _new_norm=""
-        rb_norm_vc "$_prev_ver" && _prev_norm=$_rb_vc || _prev_norm=""
-        if [ -d "$_prev/bin" ] && [ -n "$(ls -A "$_prev/bin" 2>/dev/null)" ] \
-           && rb_is_stable_vc "$_prev_ver" \
-           && { rb_is_prerelease_vc "$_old" || { [ -n "$_prev_norm" ] && [ "$_old_norm" = "$_prev_norm" ]; }; }; then
-            rb_log "snapshot: preserve golden stable .prev (vc=$_prev_norm) across v$_old -> v$_new"
-            rm -f "$_d/rollback.pinned" 2>/dev/null || true
+        _prev_ver=$(cat "$_prev/version" 2>/dev/null | tr -d ' \r\n')
+        if [ -d "$_prev/bin" ] && [ -n "$_prev_ver" ] && ! rb_is_prerelease_vc "$_prev_ver" && rb_is_prerelease_vc "$_old"; then
+            rb_log "snapshot: preserve stable golden .prev (v$_prev_ver) across pre-release hop v$_old -> v$_new"
+            date +%s > "$_d/rollback.observing" 2>/dev/null || true
             echo 0 > "$_d/rollback.failstreak" 2>/dev/null || true
             echo 0 > "$_d/rollback.restarts" 2>/dev/null || true
             : > "$_d/rollback.lastpid_httpd" 2>/dev/null || true
             : > "$_d/rollback.lastpid_watchdog" 2>/dev/null || true
-            if [ "$_new_norm" != "$_prev_norm" ]; then
-                date +%s > "$_d/rollback.observing" 2>/dev/null || true
-            else
-                rm -f "$_d/rollback.observing" 2>/dev/null || true
-            fi
         else
             # 升级: 打包旧运行目录到 .prev(整体换, 失败不影响开机)
             rm -rf "$_tmp" "$_bak" 2>/dev/null || true
@@ -119,7 +80,6 @@ rb_snapshot() {
                && cp -a "$_hnc/bin/." "$_tmp/bin/" 2>/dev/null \
                && cp -a "$_hnc/daemon/." "$_tmp/daemon/" 2>/dev/null \
                && cp -a "$_hnc/webroot/." "$_tmp/webroot/" 2>/dev/null; then
-                [ -f "$_hnc/module.prop" ] && cp -af "$_hnc/module.prop" "$_tmp/module.prop" 2>/dev/null || true
                 echo "$_old" > "$_tmp/version" 2>/dev/null || true
                 [ -d "$_prev" ] && mv -f "$_prev" "$_bak" 2>/dev/null || true
                 if mv -f "$_tmp" "$_prev" 2>/dev/null; then
@@ -129,7 +89,6 @@ rb_snapshot() {
                     [ -d "$_bak" ] && mv -f "$_bak" "$_prev" 2>/dev/null || true
                     rb_log "snapshot WARN: swap failed, keep old .prev"
                 fi
-                rm -f "$_d/rollback.pinned" 2>/dev/null || true
                 # 观察期标记(10 分钟, 哨兵按 30 秒一轮调 observe)
                 date +%s > "$_d/rollback.observing" 2>/dev/null || true
                 echo 0 > "$_d/rollback.failstreak" 2>/dev/null || true
@@ -249,22 +208,9 @@ rb_do_rollback() {
     fi
 
     if [ -d "$_prev/bin" ]; then
-        for _sub in bin daemon webroot; do
-            [ -d "$_prev/$_sub" ] || continue
-            rm -rf "$_hnc/${_sub}.rb" "$_hnc/${_sub}.bad" 2>/dev/null || true
-            if cp -a "$_prev/$_sub" "$_hnc/${_sub}.rb" 2>/dev/null; then
-                [ -d "$_hnc/$_sub" ] && mv -f "$_hnc/$_sub" "$_hnc/${_sub}.bad" 2>/dev/null || true
-                if mv -f "$_hnc/${_sub}.rb" "$_hnc/$_sub" 2>/dev/null; then
-                    rm -rf "$_hnc/${_sub}.bad" 2>/dev/null || true
-                else
-                    [ -d "$_hnc/${_sub}.bad" ] && mv -f "$_hnc/${_sub}.bad" "$_hnc/$_sub" 2>/dev/null || true
-                    cp -a "$_prev/$_sub/." "$_hnc/$_sub/" 2>/dev/null || true
-                fi
-            else
-                cp -a "$_prev/$_sub/." "$_hnc/$_sub/" 2>/dev/null || true
-            fi
-        done
-        [ -f "$_prev/module.prop" ] && cp -af "$_prev/module.prop" "$_hnc/module.prop" 2>/dev/null || true
+        cp -a "$_prev/bin/." "$_hnc/bin/" 2>/dev/null || true
+        cp -a "$_prev/daemon/." "$_hnc/daemon/" 2>/dev/null || true
+        cp -a "$_prev/webroot/." "$_hnc/webroot/" 2>/dev/null || true
         chmod 755 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         chcon u:object_r:system_file:s0 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         # 拷来拷去 SELinux 上下文会变成 system_data_file, ColorOS 上 Go 进程

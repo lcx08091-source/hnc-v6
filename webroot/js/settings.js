@@ -416,11 +416,9 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-alpha.1', HNC_UI_VC = '6009101', HNC_UI_DATE = '2026-11-21';
-  var bVer = String(l.backend_version || HNC_UI_VER);
-  var bVc = String(l.backend_version_code || HNC_UI_VC);
+  var bVer = String(l.backend_version || '');
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
-  groups.push(['关于', sItem(['blue', 'info'], '版本', 'HNC 后端 · ' + bChan + ' · versionCode ' + esc(bVc), val(esc(bVer))) +
+  groups.push(['关于', sItem(['blue', 'info'], '版本', 'HNC 后端 · ' + bChan + ' · versionCode ' + esc(l.backend_version_code || '—'), val(esc(bVer || '—'))) +
     sBtn(['green', 'doc'], '更新日志', '查看完整变更记录', 'changelog', '查看') +
     (KSU || (S.whoami && S.whoami.authenticated === false) ? '' : '<button class="row" data-act="logout">' + gi('red', 'lock') + '<span class="tx"><div class="t">退出登录' + (wLabel ? '（' + esc(wLabel) + '）' : '') + '</div><div class="s">清除这台设备的远程访问凭据</div></span><span class="hint-a danger">退出</span></button>')]);
   // 按级别分类 + 全部收拢为可折叠卡片(默认仅展开「热点」或全折叠，一屏清爽浏览)
@@ -459,7 +457,7 @@ function renderSettings(anim1) {
   var advCards = [
     scard('scard-v6', ['blue', 'vector'], '智能护航与配置备份',
       '游戏通话优先 · 后台更新限速 · 温控保护（' + esc(v6TempS) + '）· 隐私安检（' + v6LgHits + ' 条）',
-      (function(){ var _rv = String(l.backend_version || 'v6.1.0-alpha.1'); var _short = _rv.replace(/^(v\d+\.\d+)\.\d+-(alpha|beta|rc)\.?(\d+).*$/i, function(_, m, c, n){ return m + ' ' + c.charAt(0).toUpperCase() + n; }); return '<span class="badge b-acc" title="' + esc(_rv) + '">' + esc(_short) + '</span>'; })(),
+      '<span class="badge b-acc">' + esc(l.backend_version || 'Vector v6') + '</span>',
       typeof v6SettingsBodyHtml === 'function' ? v6SettingsBodyHtml() : ''),
     scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
       'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
@@ -512,7 +510,7 @@ function renderSettings(anim1) {
       (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
     scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
       '调试模拟设备 · 后端版本 ' + esc(l.backend_version || '—') + ' · 完整更新日志',
-      '<span class="badge b-gray">' + esc(bVer) + '</span>',
+      '<span class="badge b-gray">' + esc(l.backend_version || '—') + '</span>',
       (gMap['模拟环境（调试）'] || '') + (gMap['关于'] || ''))
   ];
   var cols = function (list) { if (!wide()) return '<div class="scard-stack">' + list.join('') + '</div>'; var hf = Math.ceil(list.length / 2); return '<div class="cols"><div>' + list.slice(0, hf).join('') + '</div><div>' + list.slice(hf).join('') + '</div></div>'; };
@@ -529,7 +527,7 @@ function renderSettings(anim1) {
     lvSec('basic', '一、基础常用', '热点 · 远程 · 外观 · 告警', basicCards) +
     lvSec('adv', '二、进阶与识别', 'DPI 识别 · 带宽队列 · 加速兜底 · 设备合并', advCards) +
     lvSec('diag', '三、诊断与系统', '自检日志 · 运行健康 · 维护备份 · 模拟与关于', diagCards) +
-    '<div class="foot hnc-build-wm" id="hnc-build-wm">' + (/-alpha/i.test(bVer) ? '<span class="wm-chan">[ALPHA]</span>' : /-beta/i.test(bVer) ? '<span class="wm-chan">[BETA]</span>' : /-rc/i.test(bVer) ? '<span class="wm-chan">[RC]</span>' : '') + '<span>HNC · ' + esc(bVer) + ' · VC ' + esc(bVc) + ' · Build ' + HNC_UI_DATE + '</span></div></div>';
+    '<div class="foot hnc-build-wm" id="hnc-build-wm">' + (/-alpha/i.test(bVer) ? '<span class="wm-chan">[ALPHA]</span>' : /-beta/i.test(bVer) ? '<span class="wm-chan">[BETA]</span>' : /-rc/i.test(bVer) ? '<span class="wm-chan">[RC]</span>' : '') + '<span>HNC · ' + esc(bVer || 'v6.1.0-alpha.1') + (l.backend_version_code ? ' · VC ' + esc(l.backend_version_code) : '') + ' · Build 2026-11-21</span></div></div>';
   var p = $('#p-settings');
   if (!anim1 && p.firstElementChild) morph(p, h); else p.innerHTML = h;
   placeSegs(p);
