@@ -82,6 +82,13 @@ type flowScalpelEngine struct {
 	seqGen   atomic.Uint64
 	cutTotal atomic.Uint64
 
+	tickerActive  atomic.Bool
+	wakeOnce      sync.Once
+	wakeCh        chan struct{}
+	sweepInterval time.Duration
+	ruleCountHook func() int
+	sweepHook     func(time.Time)
+
 	srv           *server
 	mu            sync.Mutex
 	rules         []ScalpelActiveRule
@@ -95,6 +102,7 @@ type flowScalpelEngine struct {
 
 func newFlowScalpelEngine(s *server) *flowScalpelEngine {
 	eng := &flowScalpelEngine{
+		wakeCh:        make(chan struct{}, 1),
 		srv:           s,
 		resetDuration: scalpelResetTTL,
 		freezeDur:     scalpelFreezeTTL,
@@ -417,6 +425,7 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 	runner := e.iptRunner
 	activeCnt := len(e.rules)
 	e.mu.Unlock()
+	e.notifyRuleAdded()
 
 	e.ensureForwardJump(isV6)
 	var iptErr error
@@ -503,15 +512,108 @@ func (e *flowScalpelEngine) summary() map[string]any {
 	}
 }
 
+const v6FlowScalpelSweepInterval = 5 * time.Second
+
+func (e *flowScalpelEngine) ensureWakeCh() chan struct{} {
+	if e == nil {
+		return nil
+	}
+	e.wakeOnce.Do(func() {
+		if e.wakeCh == nil {
+			e.wakeCh = make(chan struct{}, 1)
+		}
+	})
+	return e.wakeCh
+}
+
+func (e *flowScalpelEngine) notifyRuleAdded() {
+	ch := e.ensureWakeCh()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func (e *flowScalpelEngine) IsTickerActive() bool {
+	if e == nil {
+		return false
+	}
+	return e.tickerActive.Load()
+}
+
+func (e *flowScalpelEngine) ActiveRuleCount() int {
+	if e == nil {
+		return 0
+	}
+	if e.ruleCountHook != nil {
+		return e.ruleCountHook()
+	}
+	e.mu.Lock()
+	n := len(e.rules)
+	e.mu.Unlock()
+	return n
+}
+
+func (e *flowScalpelEngine) effectiveSweepInterval() time.Duration {
+	if e != nil && e.sweepInterval > 0 {
+		return e.sweepInterval
+	}
+	return v6FlowScalpelSweepInterval
+}
+
+func (e *flowScalpelEngine) sweepOnce(now time.Time) {
+	if e == nil {
+		return
+	}
+	if e.sweepHook != nil {
+		e.sweepHook(now)
+		return
+	}
+	e.SweepExpired(now)
+}
+
 func (e *flowScalpelEngine) runLoop(stop <-chan struct{}) {
-	tk := time.NewTicker(5 * time.Second)
-	defer tk.Stop()
+	if e == nil {
+		<-stop
+		return
+	}
+	wakeCh := e.ensureWakeCh()
+	var (
+		tk   *time.Ticker
+		tkCh <-chan time.Time
+	)
+	stopTicker := func() {
+		if tk != nil {
+			tk.Stop()
+			tk = nil
+			tkCh = nil
+		}
+		e.tickerActive.Store(false)
+	}
+	ensureTicker := func() {
+		if tk == nil {
+			tk = time.NewTicker(e.effectiveSweepInterval())
+			tkCh = tk.C
+		}
+		e.tickerActive.Store(true)
+	}
+	defer stopTicker()
+
 	for {
+		if e.ActiveRuleCount() > 0 {
+			ensureTicker()
+		} else {
+			stopTicker()
+		}
 		select {
 		case <-stop:
 			return
-		case now := <-tk.C:
-			e.SweepExpired(now)
+		case <-wakeCh:
+		case now := <-tkCh:
+			e.sweepOnce(now)
 		}
 	}
 }

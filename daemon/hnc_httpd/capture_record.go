@@ -21,6 +21,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strconv"
+	"strings"
 )
 
 // scCaptureRecordItem 状态文件的内存形态(缺字段 = 没在录)。
@@ -38,6 +39,9 @@ func captureRecordStatus(hncDir string) map[string]interface{} {
 
 // actionCaptureRecord POST /api/action capture_record {minutes}。
 func actionCaptureRecord(s *server, p map[string]string) actionResp {
+	if s == nil || strings.TrimSpace(s.hncDir) == "" {
+		return actionResp{OK: false, Error: "server uninitialized", Detail: "missing hncDir"}
+	}
 	minutes := 10
 	if v, ok := p["minutes"]; ok && v != "" {
 		n, err := strconv.Atoi(v)
@@ -50,6 +54,7 @@ func actionCaptureRecord(s *server, p map[string]string) actionResp {
 	if err := os.WriteFile(req, []byte(fmt.Sprintf("%d\n", minutes)), 0o644); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
+	s.markBlackboxCaptureMinutes(minutes)
 	st := captureRecordStatus(s.hncDir)
 	if st == nil {
 		st = map[string]interface{}{"requested": true, "minutes": minutes}
@@ -63,6 +68,10 @@ func actionCaptureRecord(s *server, p map[string]string) actionResp {
 
 // actionCaptureRecordStop POST /api/action capture_record_stop。
 func actionCaptureRecordStop(s *server) actionResp {
+	if s == nil || strings.TrimSpace(s.hncDir) == "" {
+		return actionResp{OK: false, Error: "server uninitialized", Detail: "missing hncDir"}
+	}
+	s.clearBlackboxCapture()
 	// 请求还没被 dpid 取走 → 直接撤回请求; 否则写 stop(dpid 空闲时会清掉
 	// 没人认领的 stop, 免得它把下一次录制直接取消)
 	req := filepath.Join(s.hncDir, "run", "capture_record.request")

@@ -355,86 +355,429 @@ func (jb *JitterBlackbox) Snapshot(limit int, incidentsOnly bool) (frames []Blac
 	return frames, incidents
 }
 
+const (
+	v6BlackboxActiveHoldDur = 10 * time.Second
+	v6BlackboxPatrolDur     = 5 * time.Second
+)
+
+type blackboxLoopMode int32
+
+const (
+	blackboxModeSleeping blackboxLoopMode = 0 // G0_AP_OFF / G1_NO_CLIENTS: 停表零唤醒
+	blackboxModePatrol   blackboxLoopMode = 1 // G2_IDLE_PATROL: 5s 低速巡检
+	blackboxModeActive   blackboxLoopMode = 2 // G3_ACTIVE_FLIGHT: 200ms 飞行记录采样
+)
+
+type blackboxAutorateReading struct {
+	RTTMs       float64
+	BaseRTTMs   float64
+	CapacityBps int64
+}
+
+func (s *server) ensureBlackboxWakeCh() chan struct{} {
+	if s == nil {
+		return nil
+	}
+	s.blackboxWakeOnce.Do(func() {
+		if s.blackboxWakeCh == nil {
+			s.blackboxWakeCh = make(chan struct{}, 1)
+		}
+	})
+	return s.blackboxWakeCh
+}
+
+func (s *server) wakeBlackboxLoop() {
+	ch := s.ensureBlackboxWakeCh()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+func (s *server) BlackboxLoopMode() blackboxLoopMode {
+	if s == nil {
+		return blackboxModeSleeping
+	}
+	return blackboxLoopMode(s.blackboxLoopMode.Load())
+}
+
+func (s *server) effectiveBlackboxActiveDur() time.Duration {
+	if s != nil && s.blackboxActiveDur > 0 {
+		return s.blackboxActiveDur
+	}
+	return v6BlackboxIntervalMs * time.Millisecond
+}
+
+func (s *server) effectiveBlackboxPatrolDur() time.Duration {
+	if s != nil && s.blackboxPatrolDur > 0 {
+		return s.blackboxPatrolDur
+	}
+	return v6BlackboxPatrolDur
+}
+
+func (s *server) effectiveBlackboxHoldDur() time.Duration {
+	if s != nil && s.blackboxHoldDur > 0 {
+		return s.blackboxHoldDur
+	}
+	return v6BlackboxActiveHoldDur
+}
+
+func (s *server) markBlackboxActive(now time.Time) {
+	if s == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	s.blackboxLastActiveMs.Store(now.UnixMilli())
+}
+
+func (s *server) hasRecentBlackboxActivity(now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	last := s.blackboxLastActiveMs.Load()
+	if last <= 0 {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	holdMs := s.effectiveBlackboxHoldDur().Milliseconds()
+	if holdMs <= 0 {
+		holdMs = 1
+	}
+	delta := now.UnixMilli() - last
+	if delta < -holdMs {
+		s.blackboxLastActiveMs.CompareAndSwap(last, 0)
+		return false
+	}
+	return delta < holdMs
+}
+
+func (s *server) setBlackboxCaptureUntil(untilUnix int64) {
+	if s == nil {
+		return
+	}
+	if untilUnix <= 0 {
+		s.blackboxCaptureUntilUnix.Store(0)
+	} else {
+		s.blackboxCaptureUntilUnix.Store(untilUnix)
+	}
+	s.wakeBlackboxLoop()
+}
+
+func (s *server) markBlackboxCaptureMinutes(minutes int) {
+	if s == nil {
+		return
+	}
+	if minutes <= 0 {
+		minutes = 1
+	}
+	until := time.Now().Add(time.Duration(minutes) * time.Minute).Unix()
+	s.setBlackboxCaptureUntil(until)
+}
+
+func (s *server) clearBlackboxCapture() {
+	if s == nil {
+		return
+	}
+	s.blackboxCaptureUntilUnix.Store(0)
+	if s.BlackboxLoopMode() == blackboxModeActive {
+		s.wakeBlackboxLoop()
+	}
+}
+
+func (s *server) isBlackboxCaptureActive(now time.Time) bool {
+	if s == nil {
+		return false
+	}
+	until := s.blackboxCaptureUntilUnix.Load()
+	if until <= 0 {
+		return false
+	}
+	if now.IsZero() {
+		now = time.Now()
+	}
+	if now.Unix() >= until {
+		s.blackboxCaptureUntilUnix.CompareAndSwap(until, 0)
+		return false
+	}
+	return true
+}
+
+func (s *server) notifyBlackboxTraffic() {
+	if s == nil {
+		return
+	}
+	s.markBlackboxActive(time.Now())
+	if s.BlackboxLoopMode() != blackboxModeActive {
+		s.wakeBlackboxLoop()
+	}
+}
+
+func (s *server) notifyBlackboxIfActiveRates() {
+	if s == nil {
+		return
+	}
+	hasTraffic := false
+	s.rateMu.Lock()
+	for _, v := range s.rates {
+		if v.rxBps > 0 || v.txBps > 0 {
+			hasTraffic = true
+			break
+		}
+	}
+	s.rateMu.Unlock()
+	if hasTraffic {
+		s.notifyBlackboxTraffic()
+	}
+}
+
+func (s *server) currentBlackboxActivity() (<-chan struct{}, Activity) {
+	if s != nil && s.blackboxActivityHook != nil {
+		return s.blackboxActivityHook()
+	}
+	ch := activityChanged()
+	act := activityNow()
+	return ch, act
+}
+
+func (s *server) readBlackboxAutorate() (blackboxAutorateReading, bool) {
+	if s == nil {
+		return blackboxAutorateReading{}, false
+	}
+	if s.blackboxAutorateHook != nil {
+		return s.blackboxAutorateHook()
+	}
+	if s.autorate == nil {
+		return blackboxAutorateReading{}, false
+	}
+	ar := s.autorate.Snapshot()
+	var out blackboxAutorateReading
+	out.RTTMs = ar.RTTMs
+	out.BaseRTTMs = ar.BaseRTTMs
+	if ar.CurDownMbps > 0 {
+		out.CapacityBps = int64((ar.CurDownMbps * 1_000_000.0) / 8.0)
+	}
+	return out, true
+}
+
 // SampleBlackboxOnce 从 server 的内存速率表、DPI 活跃应用缓存与 Autorate 实时指标采集一帧写入黑匣子。
+// v6.1.0-beta.1: 零流量且无 RTT 突刺时提前短路(即使处于抓包录制窗口也不写空帧冲刷 300 帧卡顿现场),
+// 空载突刺路径零 jsonCache Stat、零 ratesCopy 堆分配。
 func (s *server) SampleBlackboxOnce(now time.Time) (BlackboxFrame, *BlackboxIncident) {
+	return s.sampleBlackbox(now, false)
+}
+
+func (s *server) sampleBlackbox(now time.Time, force bool) (BlackboxFrame, *BlackboxIncident) {
 	var in BlackboxTickInput
 	in.Now = now
 	if s == nil {
 		return globalJitterBlackbox.RecordSample(in)
 	}
 
-	if s.autorate != nil {
-		ar := s.autorate.Snapshot()
+	checkNow := now
+	if checkNow.IsZero() {
+		checkNow = time.Now()
+	}
+
+	hasSpike := false
+	if ar, ok := s.readBlackboxAutorate(); ok {
 		in.RTTMs = ar.RTTMs
 		in.BaseRTTMs = ar.BaseRTTMs
-		if ar.CurDownMbps > 0 {
-			in.CapacityBps = int64((ar.CurDownMbps * 1_000_000.0) / 8.0)
+		in.CapacityBps = ar.CapacityBps
+		if in.RTTMs > 0 && in.BaseRTTMs > 0 && (in.RTTMs-in.BaseRTTMs) >= v6BlackboxSpikeDeltaRTTMs {
+			hasSpike = true
 		}
 	}
 
-	// 读取设备备注与 IP 快照 (命中 mtime+size jsonCache 时零磁盘 I/O!)
-	namesMap := map[string]any{}
-	if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "data", "device_names.json")); err == nil {
-		if m, ok := raw.(map[string]any); ok {
-			namesMap = m
-		}
-	}
-	devsMap := map[string]any{}
-	if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "data", "devices.json")); err == nil {
-		if m, ok := raw.(map[string]any); ok {
-			devsMap = m
-		}
-	}
-	appsByMAC := s.dpiAppsByMAC()
-
+	var (
+		ratesCopy  map[string]rateOut
+		hasTraffic bool
+	)
 	s.rateMu.Lock()
-	ratesCopy := make(map[string]rateOut, len(s.rates))
-	for k, v := range s.rates {
-		ratesCopy[k] = v
+	for _, v := range s.rates {
+		if v.rxBps > 0 || v.txBps > 0 {
+			hasTraffic = true
+			break
+		}
+	}
+	if hasTraffic {
+		ratesCopy = make(map[string]rateOut, len(s.rates))
+		for k, v := range s.rates {
+			ratesCopy[k] = v
+		}
 	}
 	s.rateMu.Unlock()
 
-	samples := make([]BlackboxDeviceSample, 0, len(ratesCopy))
-	for mac, ro := range ratesCopy {
-		if ro.rxBps <= 0 && ro.txBps <= 0 {
-			continue
-		}
-		var ipStr, devName, appID, appName string
-		if dm, ok := devsMap[mac].(map[string]any); ok {
-			ipStr = asString(dm["ip"])
-			devName = asString(dm["hostname"])
-		}
-		if custom := strings.TrimSpace(asString(namesMap[mac])); custom != "" {
-			devName = custom
-		}
-		if topApps := appsByMAC[mac]; len(topApps) > 0 {
-			appID = asString(topApps[0]["id"])
-			appName = asString(topApps[0]["name"])
-		}
-		samples = append(samples, BlackboxDeviceSample{
-			MAC:           mac,
-			IP:            ipStr,
-			Name:          devName,
-			RxBps:         ro.rxBps,
-			TxBps:         ro.txBps,
-			ActiveAppID:   appID,
-			ActiveAppName: appName,
-		})
+	if !force && !hasTraffic && !hasSpike {
+		s.blackboxShortCircuits.Add(1)
+		return BlackboxFrame{}, nil
 	}
-	in.Devices = samples
+
+	if hasTraffic || hasSpike {
+		s.markBlackboxActive(checkNow)
+	}
+	s.blackboxRecordedTicks.Add(1)
+
+	if s.blackboxSampleOverride != nil {
+		return s.blackboxSampleOverride(in, ratesCopy)
+	}
+
+	if hasTraffic {
+		namesMap := map[string]any{}
+		if s.jsonCache != nil {
+			if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "data", "device_names.json")); err == nil {
+				if m, ok := raw.(map[string]any); ok {
+					namesMap = m
+				}
+			}
+		}
+		devsMap := map[string]any{}
+		if s.jsonCache != nil {
+			if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "data", "devices.json")); err == nil {
+				if m, ok := raw.(map[string]any); ok {
+					devsMap = m
+				}
+			}
+		}
+		appsByMAC := s.dpiAppsByMAC()
+
+		samples := make([]BlackboxDeviceSample, 0, len(ratesCopy))
+		for mac, ro := range ratesCopy {
+			if ro.rxBps <= 0 && ro.txBps <= 0 {
+				continue
+			}
+			var ipStr, devName, appID, appName string
+			if dm, ok := devsMap[mac].(map[string]any); ok {
+				ipStr = asString(dm["ip"])
+				devName = asString(dm["hostname"])
+			}
+			if custom := strings.TrimSpace(asString(namesMap[mac])); custom != "" {
+				devName = custom
+			}
+			if topApps := appsByMAC[mac]; len(topApps) > 0 {
+				appID = asString(topApps[0]["id"])
+				appName = asString(topApps[0]["name"])
+			}
+			samples = append(samples, BlackboxDeviceSample{
+				MAC:           mac,
+				IP:            ipStr,
+				Name:          devName,
+				RxBps:         ro.rxBps,
+				TxBps:         ro.txBps,
+				ActiveAppID:   appID,
+				ActiveAppName: appName,
+			})
+		}
+		in.Devices = samples
+	}
 	return globalJitterBlackbox.RecordSample(in)
 }
 
-// StartBlackboxFlightLoop 启动 200ms 纯内存飞行记录仪协程(随 stop 通道优雅退出, 零 goroutine 泄漏)。
+// StartBlackboxFlightLoop 启动事件驱动四档休眠飞行记录仪协程:
+//   - G0_AP_OFF / G1_NO_CLIENTS: 彻底释放 Ticker, 0 次/小时唤醒;
+//   - G2_IDLE_PATROL: 热点有设备但无活跃转发流量满 10s, 降频至 5s 巡检;
+//   - G3_ACTIVE_FLIGHT: 检出转发流量或抓包开启时恢复 200ms 采样。
 func (s *server) StartBlackboxFlightLoop(stop <-chan struct{}) {
-	ticker := time.NewTicker(v6BlackboxIntervalMs * time.Millisecond)
-	defer ticker.Stop()
+	if s == nil {
+		<-stop
+		return
+	}
+	wakeCh := s.ensureBlackboxWakeCh()
+
+	var (
+		ticker    *time.Ticker
+		tickerCh  <-chan time.Time
+		curPeriod time.Duration
+	)
+	stopTicker := func() {
+		if ticker != nil {
+			ticker.Stop()
+			ticker = nil
+			tickerCh = nil
+			curPeriod = 0
+		}
+	}
+	setPeriod := func(d time.Duration, mode blackboxLoopMode) {
+		s.blackboxLoopMode.Store(int32(mode))
+		if d <= 0 {
+			stopTicker()
+			return
+		}
+		if ticker != nil && curPeriod == d {
+			return
+		}
+		if ticker == nil {
+			ticker = time.NewTicker(d)
+			tickerCh = ticker.C
+		} else {
+			select {
+			case <-ticker.C:
+			default:
+			}
+			ticker.Reset(d)
+		}
+		curPeriod = d
+	}
+	defer func() {
+		stopTicker()
+		s.blackboxLoopMode.Store(int32(blackboxModeSleeping))
+	}()
+
 	for {
+		actCh, act := s.currentBlackboxActivity()
+		now := time.Now()
+		capturing := s.isBlackboxCaptureActive(now)
+
+		var (
+			target time.Duration
+			mode   blackboxLoopMode
+		)
+		switch {
+		case capturing:
+			target = s.effectiveBlackboxActiveDur()
+			mode = blackboxModeActive
+		case act.Known && (!act.HotspotActive || act.ClientsOnline <= 0):
+			target = 0
+			mode = blackboxModeSleeping
+		case s.hasRecentBlackboxActivity(now):
+			target = s.effectiveBlackboxActiveDur()
+			mode = blackboxModeActive
+		default:
+			target = s.effectiveBlackboxPatrolDur()
+			mode = blackboxModePatrol
+		}
+
+		if mode == blackboxModePatrol && s.hasRecentBlackboxActivity(time.Now()) {
+			target = s.effectiveBlackboxActiveDur()
+			mode = blackboxModeActive
+		}
+		prevMode := s.BlackboxLoopMode()
+		setPeriod(target, mode)
+		if prevMode == blackboxModeActive && mode == blackboxModePatrol && s.hasRecentBlackboxActivity(time.Now()) {
+			s.wakeBlackboxLoop()
+		}
+
 		select {
 		case <-stop:
 			return
-		case now := <-ticker.C:
-			s.SampleBlackboxOnce(now)
+		case <-actCh:
+		case <-wakeCh:
+			if prevMode != blackboxModeActive {
+				wakeNow := time.Now()
+				_, wakeAct := s.currentBlackboxActivity()
+				activeReady := !(wakeAct.Known && (!wakeAct.HotspotActive || wakeAct.ClientsOnline <= 0)) && s.hasRecentBlackboxActivity(wakeNow)
+				if activeReady || s.isBlackboxCaptureActive(wakeNow) {
+					s.sampleBlackbox(wakeNow, false)
+				}
+			}
+		case tickNow := <-tickerCh:
+			s.sampleBlackbox(tickNow, false)
 		}
 	}
 }
@@ -476,7 +819,7 @@ func (s *server) apiV6BlackboxPost(w http.ResponseWriter, r *http.Request) {
 		globalJitterBlackbox.Clear()
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "detail": "blackbox cleared"})
 	case "sample_now", "trigger_snapshot":
-		fr, inc := s.SampleBlackboxOnce(time.Now())
+		fr, inc := s.sampleBlackbox(time.Now(), true)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "frame": fr, "incident": inc})
 	default:
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "unknown action"})
@@ -877,6 +1220,7 @@ func (s *server) apiBackupPost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
 		return
 	}
+	InvalidateDataplaneReconcileNative(s.hncDir, "")
 
 	// 若运行在真实原生数据面环境, 顺带触发一次原生全量恢复使新配置即时下发内核
 	var dpRestored bool

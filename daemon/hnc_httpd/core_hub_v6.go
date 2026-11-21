@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -29,6 +30,8 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"hnc.io/dpid/shm"
 )
 
 const (
@@ -238,11 +241,12 @@ type Bulkhead struct {
 	circuitOpenUntil  atomic.Int64  // offset 8: 熔断器退避截止单调时钟(ns), 0 = closed
 	totalSubmitted    atomic.Uint64 // offset 16
 	totalCompleted    atomic.Uint64 // offset 24
-	totalTimeouts     atomic.Uint64 // offset 32
-	totalPanics       atomic.Uint64 // offset 40
-	totalRejected     atomic.Uint64 // offset 48
-	totalCircuitTrips atomic.Uint64 // offset 56
-	lastExecNs        atomic.Int64  // offset 64
+	totalErrors       atomic.Uint64 // offset 32
+	totalTimeouts     atomic.Uint64 // offset 40
+	totalPanics       atomic.Uint64 // offset 48
+	totalRejected     atomic.Uint64 // offset 56
+	totalCircuitTrips atomic.Uint64 // offset 64
+	lastExecNs        atomic.Int64  // offset 72
 
 	consecTimeouts atomic.Int32
 	halfOpenProbe  atomic.Bool
@@ -474,6 +478,51 @@ func (b *Bulkhead) Execute(parentCtx context.Context, timeout time.Duration, fn 
 	}
 }
 
+// ExecuteInline 在调用方栈内同步执行短时任务, 不调用 StartActor() 亦不派生短命子协程:
+// 完整保留半开熔断准入与 recover() 隔离罩, 直接原子刷新心跳槽与成功/错误指标。
+func (b *Bulkhead) ExecuteInline(fn func() error) (err error) {
+	if b == nil || fn == nil {
+		return nil
+	}
+	startMono := monoNowNs()
+	if _, allowErr := b.allowSubmission(startMono); allowErr != nil {
+		return allowErr
+	}
+	b.actorBeatMonoNs.Store(startMono)
+	b.totalSubmitted.Add(1)
+
+	defer func() {
+		if p := recover(); p != nil {
+			endMono := monoNowNs()
+			b.actorBeatMonoNs.Store(endMono)
+			b.lastExecNs.Store(endMono - startMono)
+			b.totalPanics.Add(1)
+			b.totalErrors.Add(1)
+			b.halfOpenProbe.Store(false)
+			msg := fmt.Sprintf("panic recovered in bulkhead %s: %v", b.name, p)
+			b.setLastErr(msg)
+			log.Printf("core_hub: %s", msg)
+			err = fmt.Errorf("%w: %v", ErrBulkheadPanic, p)
+		}
+	}()
+
+	err = fn()
+	endMono := monoNowNs()
+	b.actorBeatMonoNs.Store(endMono)
+	b.lastExecNs.Store(endMono - startMono)
+	b.consecTimeouts.Store(0)
+	if b.circuitOpenUntil.Load() != 0 {
+		b.circuitOpenUntil.Store(0)
+	}
+	b.halfOpenProbe.Store(false)
+	b.totalCompleted.Add(1)
+	if err != nil {
+		b.totalErrors.Add(1)
+		b.setLastErr(err.Error())
+	}
+	return err
+}
+
 func (b *Bulkhead) actorLoop() {
 	tk := time.NewTicker(bulkheadHeartbeatInterval)
 	defer tk.Stop()
@@ -526,6 +575,7 @@ func (b *Bulkhead) executeTaskIsolated(task bulkheadTask) error {
 		defer func() {
 			if p := recover(); p != nil {
 				b.totalPanics.Add(1)
+				b.totalErrors.Add(1)
 				msg := fmt.Sprintf("panic recovered in bulkhead %s: %v", b.name, p)
 				b.setLastErr(msg)
 				log.Printf("core_hub: %s", msg)
@@ -558,6 +608,7 @@ func (b *Bulkhead) executeTaskIsolated(task bulkheadTask) error {
 		b.halfOpenProbe.Store(false)
 		b.totalCompleted.Add(1)
 		if out.err != nil {
+			b.totalErrors.Add(1)
 			b.setLastErr(out.err.Error())
 		}
 		return out.err
@@ -708,9 +759,11 @@ type WorldSnapshot struct {
 // CoreHub 四舱壁防连坐核心中枢。
 // 铁律: 所有 64 位原子字段严格置于结构体开头(offset 0, 8, 16), 通过 32 位 ARMv7 go vet。
 type CoreHub struct {
-	seq             atomic.Uint64 // offset 0
-	lastRefreshMono atomic.Int64  // offset 8
-	vectorSyncHits  atomic.Uint64 // offset 16
+	seq              atomic.Uint64 // offset 0
+	lastRefreshMono  atomic.Int64  // offset 8
+	vectorSyncHits   atomic.Uint64 // offset 16
+	shmSeqlockHits   atomic.Uint64 // offset 24
+	shmFallbackCount atomic.Uint64 // offset 32
 
 	world       atomic.Pointer[WorldSnapshot]
 	loopActive  atomic.Bool
@@ -725,6 +778,13 @@ type CoreHub struct {
 	srv      *server
 	stopCh   chan struct{}
 	stopOnce sync.Once
+
+	shmMu           sync.Mutex
+	shmReader       *shm.Reader
+	shmInfo         os.FileInfo
+	shmRunDir       string
+	shmLastStatMono int64
+	shmSnapBuf      shm.Snapshot
 }
 
 var (
@@ -850,6 +910,8 @@ func (h *CoreHub) Close() {
 	h.DpiShmBulkhead.Close()
 	h.AndroidBridgeBulkhead.Close()
 	h.StorageBulkhead.Close()
+	h.closeShmReader()
+	defaultGlobalHub.CompareAndSwap(h, nil)
 	if h.srv != nil {
 		serverHubMap.Delete(h.srv)
 	}
@@ -900,6 +962,9 @@ func (h *CoreHub) RefreshSnapshotNow() *WorldSnapshot {
 	nowMono := monoNowNs()
 	seq := h.seq.Add(1)
 
+	// v6.1.0-beta.1: 通过 DpiShmBulkhead 无锁读取 16KB shm_vector.bin(异常/缺席自动无损回退 jsonCache)
+	shmRes := h.pollDpiShmVector(now)
+
 	bhMap := map[string]BulkheadHealth{
 		"dataplane":      h.DataplaneBulkhead.Health(),
 		"dpi_shm":        h.DpiShmBulkhead.Health(),
@@ -914,8 +979,12 @@ func (h *CoreHub) RefreshSnapshotNow() *WorldSnapshot {
 		}
 	}
 
-	live := buildVectorLiveSummary(h.srv, now)
+	live := buildVectorLiveSummaryInternal(h.srv, now, shmRes, h.loopActive.Load())
 	exts := collectVectorSyncProviders(h.srv)
+	if exts == nil {
+		exts = make(map[string]any, 2)
+	}
+	exts["dpi_shm_vector"] = shmRes.toExtensionMap()
 
 	snap := &WorldSnapshot{
 		OK:              true,
@@ -940,7 +1009,437 @@ func (h *CoreHub) RefreshSnapshotNow() *WorldSnapshot {
 	return snap
 }
 
+const (
+	dpiShmMaxStaleAge         = 15 * time.Second
+	dpiShmMaxFutureSkew       = 5 * time.Second
+	dpiShmTaskTimeout         = 250 * time.Millisecond
+	dpiShmFastStatRefreshIntv = 5 * time.Second
+	dpiShmFakeClockTolerance  = 2 * time.Second
+)
+
+type dpiShmDeviceLive struct {
+	MAC         string `json:"mac"`
+	IPv4        string `json:"ipv4,omitempty"`
+	IPv6        string `json:"ipv6,omitempty"`
+	RxBytes     uint64 `json:"rx_bytes"`
+	TxBytes     uint64 `json:"tx_bytes"`
+	ActiveFlows uint32 `json:"active_flows"`
+	Flags       uint32 `json:"flags"`
+}
+
+type dpiShmReadResult struct {
+	Valid          bool
+	Attached       bool
+	Mmapped        bool
+	Stale          bool
+	Seq            uint64
+	UpdatedMonoNs  int64
+	UpdatedUnixNs  int64
+	AgeMs          int64
+	DeviceCount    uint32
+	ActiveFlows    uint32
+	TotalLeaks     uint64
+	HeaderFlags    uint32
+	Source         string
+	FallbackReason string
+	ByMAC          map[string]dpiShmDeviceLive
+}
+
+func (r dpiShmReadResult) toExtensionMap() map[string]any {
+	src := r.Source
+	if src == "" {
+		src = "json_fallback"
+	}
+	out := map[string]any{
+		"attached":        r.Attached,
+		"mmapped":         r.Mmapped,
+		"seq":             r.Seq,
+		"device_count":    r.DeviceCount,
+		"active_flows":    r.ActiveFlows,
+		"total_leaks":     r.TotalLeaks,
+		"flags":           r.HeaderFlags,
+		"updated_unix_ns": r.UpdatedUnixNs,
+		"age_ms":          r.AgeMs,
+		"stale":           r.Stale,
+		"source":          src,
+	}
+	if r.FallbackReason != "" {
+		out["fallback_reason"] = r.FallbackReason
+	}
+	if r.Valid && len(r.ByMAC) > 0 {
+		devs := make([]dpiShmDeviceLive, 0, len(r.ByMAC))
+		for _, d := range r.ByMAC {
+			devs = append(devs, d)
+		}
+		sort.Slice(devs, func(i, j int) bool {
+			if devs[i].ActiveFlows != devs[j].ActiveFlows {
+				return devs[i].ActiveFlows > devs[j].ActiveFlows
+			}
+			return devs[i].MAC < devs[j].MAC
+		})
+		out["devices"] = devs
+	}
+	return out
+}
+
+func (h *CoreHub) closeShmReader() {
+	if h.shmMu.TryLock() {
+		h.closeShmReaderLocked()
+		h.shmMu.Unlock()
+	}
+}
+
+func (h *CoreHub) closeShmReaderLocked() {
+	if h.shmReader != nil {
+		_ = h.shmReader.Close()
+		h.shmReader = nil
+	}
+	h.shmInfo = nil
+	h.shmRunDir = ""
+	h.shmLastStatMono = 0
+}
+
+func normalizeShmMAC(raw string) string {
+	m := strings.ToLower(strings.TrimSpace(raw))
+	if m == "" || m == "00:00:00:00:00:00" || m == "ff:ff:ff:ff:ff:ff" {
+		return ""
+	}
+	return m
+}
+
+func cleanShmIP(raw string) string {
+	ip := strings.TrimSpace(raw)
+	if ip == "" || ip == "0.0.0.0" || ip == "::" || ip == "<nil>" {
+		return ""
+	}
+	return ip
+}
+
+func (h *CoreHub) pollDpiShmVector(now time.Time) dpiShmReadResult {
+	fallback := dpiShmReadResult{
+		Source:         "json_fallback",
+		FallbackReason: "unconfigured",
+	}
+	if h == nil || h.closed.Load() || h.srv == nil || h.srv.hncDir == "" {
+		if h != nil {
+			h.shmFallbackCount.Add(1)
+		}
+		return fallback
+	}
+	if h.DpiShmBulkhead == nil {
+		h.shmFallbackCount.Add(1)
+		fallback.FallbackReason = "bulkhead_absent"
+		return fallback
+	}
+
+	runDir := filepath.Join(h.srv.hncDir, "run")
+	shmPath := shm.FilePath(runDir)
+
+	var (
+		out   dpiShmReadResult
+		bhErr error
+	)
+	if !h.loopActive.Load() {
+		// 未调用 Start() 的构造期或单测路径: 绝不调用 Execute (避免隐式 StartActor 驻留常驻协程触发 goroutineleak)
+		bhErr = h.DpiShmBulkhead.ExecuteInline(func() error {
+			var err error
+			out, _, err = h.readAndDecodeShmLocked(runDir, shmPath, now, false)
+			return err
+		})
+	} else {
+		nowMono := monoNowNs()
+		canFastMmap := false
+		if h.shmMu.TryLock() {
+			if h.shmReader != nil && h.shmReader.IsMmapped() && h.shmRunDir == runDir &&
+				h.shmLastStatMono > 0 && nowMono >= h.shmLastStatMono &&
+				(nowMono-h.shmLastStatMono) < int64(dpiShmFastStatRefreshIntv) {
+				canFastMmap = true
+			}
+			h.shmMu.Unlock()
+		}
+
+		needSlowPath := !canFastMmap
+		if canFastMmap {
+			var retrySlow bool
+			bhErr = h.DpiShmBulkhead.ExecuteInline(func() error {
+				var err error
+				out, retrySlow, err = h.readAndDecodeShmLocked(runDir, shmPath, now, true)
+				return err
+			})
+			if bhErr == nil && retrySlow {
+				needSlowPath = true
+			}
+		}
+		if needSlowPath {
+			resCh := make(chan dpiShmReadResult, 1)
+			bhErr = h.DpiShmBulkhead.Execute(context.Background(), dpiShmTaskTimeout, func(_ context.Context) error {
+				res, _, err := h.readAndDecodeShmLocked(runDir, shmPath, now, false)
+				resCh <- res
+				return err
+			})
+			if bhErr == nil {
+				out = <-resCh
+			} else {
+				select {
+				case prev := <-resCh:
+					out = prev
+				default:
+					out = dpiShmReadResult{
+						Source:         "json_fallback",
+						FallbackReason: "bulkhead_error",
+					}
+				}
+			}
+		}
+	}
+
+	if bhErr != nil {
+		h.shmFallbackCount.Add(1)
+		if out.Source == "" {
+			out.Source = "json_fallback"
+		}
+		if out.FallbackReason == "" {
+			out.FallbackReason = "bulkhead_error"
+		}
+		out.Valid = false
+		return out
+	}
+
+	if out.Valid {
+		h.shmSeqlockHits.Add(1)
+	} else {
+		h.shmFallbackCount.Add(1)
+	}
+	return out
+}
+
+func (h *CoreHub) readAndDecodeShmLocked(runDir, shmPath string, now time.Time, skipStat bool) (dpiShmReadResult, bool, error) {
+	if skipStat {
+		if !h.shmMu.TryLock() {
+			return dpiShmReadResult{}, true, nil
+		}
+	} else {
+		h.shmMu.Lock()
+	}
+	defer func() {
+		if h.closed.Load() {
+			h.closeShmReaderLocked()
+		}
+		h.shmMu.Unlock()
+		if h.closed.Load() && h.shmMu.TryLock() {
+			h.closeShmReaderLocked()
+			h.shmMu.Unlock()
+		}
+	}()
+	if h.closed.Load() {
+		h.closeShmReaderLocked()
+		return dpiShmReadResult{
+			Source:         "json_fallback",
+			FallbackReason: "closed",
+		}, false, ErrBulkheadClosed
+	}
+
+	if !skipStat {
+		curInfo, statErr := os.Stat(shmPath)
+		if statErr != nil {
+			h.closeShmReaderLocked()
+			if errors.Is(statErr, os.ErrNotExist) {
+				return dpiShmReadResult{
+					Source:         "json_fallback",
+					FallbackReason: "standby_absent",
+				}, false, nil
+			}
+			return dpiShmReadResult{
+				Source:         "json_fallback",
+				FallbackReason: "stat_error",
+			}, false, statErr
+		}
+
+		if h.shmReader != nil && (h.shmRunDir != runDir || h.shmInfo == nil || !os.SameFile(h.shmInfo, curInfo)) {
+			h.closeShmReaderLocked()
+		}
+
+		if h.shmReader == nil {
+			r, openErr := shm.OpenReader(runDir)
+			if openErr != nil {
+				if errors.Is(openErr, os.ErrNotExist) || errors.Is(openErr, shm.ErrUninitialized) {
+					return dpiShmReadResult{
+						Source:         "json_fallback",
+						FallbackReason: "standby_uninitialized",
+					}, false, nil
+				}
+				return dpiShmReadResult{
+					Source:         "json_fallback",
+					FallbackReason: "open_corrupt",
+				}, false, openErr
+			}
+			if freshInfo, fErr := os.Stat(shmPath); fErr == nil {
+				curInfo = freshInfo
+			}
+			h.shmReader = r
+			h.shmInfo = curInfo
+			h.shmRunDir = runDir
+		}
+		h.shmLastStatMono = monoNowNs()
+	} else if h.shmReader == nil {
+		return dpiShmReadResult{}, true, nil
+	}
+
+	attached := true
+	mmapped := h.shmReader.IsMmapped()
+	readErr := h.shmReader.ReadInto(&h.shmSnapBuf)
+	if readErr != nil {
+		if skipStat {
+			h.shmLastStatMono = 0
+			return dpiShmReadResult{}, true, nil
+		}
+		switch {
+		case errors.Is(readErr, shm.ErrUninitialized):
+			return dpiShmReadResult{
+				Attached:       attached,
+				Mmapped:        mmapped,
+				Source:         "json_fallback",
+				FallbackReason: "uninitialized",
+			}, false, nil
+		case errors.Is(readErr, shm.ErrClosed):
+			h.closeShmReaderLocked()
+			return dpiShmReadResult{
+				Source:         "json_fallback",
+				FallbackReason: "reader_closed",
+			}, false, nil
+		default:
+			h.closeShmReaderLocked()
+			return dpiShmReadResult{
+				Source:         "json_fallback",
+				FallbackReason: "read_corrupt",
+			}, false, readErr
+		}
+	}
+
+	hdr := h.shmSnapBuf.Header
+	if hdr.Seq == 0 || (hdr.UpdatedMonoNs <= 0 && hdr.UpdatedUnixNs <= 0) {
+		return dpiShmReadResult{
+			Attached:       attached,
+			Mmapped:        mmapped,
+			Seq:            hdr.Seq,
+			UpdatedMonoNs:  hdr.UpdatedMonoNs,
+			UpdatedUnixNs:  hdr.UpdatedUnixNs,
+			DeviceCount:    hdr.DeviceCount,
+			ActiveFlows:    hdr.ActiveFlows,
+			TotalLeaks:     hdr.TotalLeaks,
+			HeaderFlags:    hdr.Flags,
+			Source:         "json_fallback",
+			FallbackReason: "uninitialized",
+		}, false, nil
+	}
+
+	wallNow := time.Now()
+	checkNow := now
+	if checkNow.IsZero() {
+		checkNow = wallNow
+	}
+	wallSkew := checkNow.Sub(wallNow)
+	if wallSkew < 0 {
+		wallSkew = -wallSkew
+	}
+	var age time.Duration
+	if hdr.UpdatedMonoNs > 0 && wallSkew <= dpiShmFakeClockTolerance {
+		age = time.Duration(shm.MonotonicNs() - hdr.UpdatedMonoNs)
+	} else {
+		if hdr.UpdatedUnixNs <= 0 {
+			return dpiShmReadResult{
+				Attached:       attached,
+				Mmapped:        mmapped,
+				Seq:            hdr.Seq,
+				UpdatedMonoNs:  hdr.UpdatedMonoNs,
+				UpdatedUnixNs:  hdr.UpdatedUnixNs,
+				DeviceCount:    hdr.DeviceCount,
+				ActiveFlows:    hdr.ActiveFlows,
+				TotalLeaks:     hdr.TotalLeaks,
+				HeaderFlags:    hdr.Flags,
+				Source:         "json_fallback",
+				FallbackReason: "uninitialized",
+			}, false, nil
+		}
+		age = checkNow.Sub(time.Unix(0, hdr.UpdatedUnixNs))
+	}
+	ageMs := age.Milliseconds()
+	if ageMs < 0 {
+		ageMs = 0
+	}
+	if age > dpiShmMaxStaleAge || age < -dpiShmMaxFutureSkew {
+		if skipStat {
+			h.shmLastStatMono = 0
+			return dpiShmReadResult{}, true, nil
+		}
+		return dpiShmReadResult{
+			Attached:       attached,
+			Mmapped:        mmapped,
+			Stale:          true,
+			Seq:            hdr.Seq,
+			UpdatedMonoNs:  hdr.UpdatedMonoNs,
+			UpdatedUnixNs:  hdr.UpdatedUnixNs,
+			AgeMs:          ageMs,
+			DeviceCount:    hdr.DeviceCount,
+			ActiveFlows:    hdr.ActiveFlows,
+			TotalLeaks:     hdr.TotalLeaks,
+			HeaderFlags:    hdr.Flags,
+			Source:         "json_fallback",
+			FallbackReason: "stale_snapshot",
+		}, false, nil
+	}
+
+	limit := int(hdr.DeviceCount)
+	if limit > len(h.shmSnapBuf.Devices) {
+		limit = len(h.shmSnapBuf.Devices)
+	}
+	var byMAC map[string]dpiShmDeviceLive
+	if limit > 0 {
+		byMAC = make(map[string]dpiShmDeviceLive, limit)
+		for i := 0; i < limit; i++ {
+			slot := &h.shmSnapBuf.Devices[i]
+			mac := normalizeShmMAC(slot.MACString())
+			if mac == "" {
+				continue
+			}
+			byMAC[mac] = dpiShmDeviceLive{
+				MAC:         mac,
+				IPv4:        cleanShmIP(slot.IPv4String()),
+				IPv6:        cleanShmIP(slot.IPv6String()),
+				RxBytes:     slot.RxBytes,
+				TxBytes:     slot.TxBytes,
+				ActiveFlows: slot.ActiveFlows,
+				Flags:       slot.Flags,
+			}
+		}
+	}
+
+	return dpiShmReadResult{
+		Valid:         true,
+		Attached:      attached,
+		Mmapped:       mmapped,
+		Seq:           hdr.Seq,
+		UpdatedMonoNs: hdr.UpdatedMonoNs,
+		UpdatedUnixNs: hdr.UpdatedUnixNs,
+		AgeMs:         ageMs,
+		DeviceCount:   hdr.DeviceCount,
+		ActiveFlows:   hdr.ActiveFlows,
+		TotalLeaks:    hdr.TotalLeaks,
+		HeaderFlags:   hdr.Flags,
+		Source:        "shm_seqlock",
+		ByMAC:         byMAC,
+	}, false, nil
+}
+
 func buildVectorLiveSummary(s *server, now time.Time) VectorLiveSummary {
+	return buildVectorLiveSummaryInternal(s, now, dpiShmReadResult{}, false)
+}
+
+func buildVectorLiveSummaryWithShm(s *server, now time.Time, shmRes dpiShmReadResult) VectorLiveSummary {
+	return buildVectorLiveSummaryInternal(s, now, shmRes, false)
+}
+
+func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadResult, allowAsyncSignal bool) VectorLiveSummary {
 	act := activityNow()
 	sum := VectorLiveSummary{
 		ActivityLevel: act.Level,
@@ -967,6 +1466,52 @@ func buildVectorLiveSummary(s *server, now time.Time) VectorLiveSummary {
 		if raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "data", "devices.json")); err == nil {
 			devMap, _ = raw.(map[string]any)
 		}
+	}
+	if shmRes.Valid && len(shmRes.ByMAC) > 0 {
+		copied := make(map[string]any, len(devMap)+len(shmRes.ByMAC))
+		for k, v := range devMap {
+			if inner, ok := v.(map[string]any); ok {
+				cp := make(map[string]any, len(inner)+2)
+				for ik, iv := range inner {
+					cp[ik] = iv
+				}
+				copied[k] = cp
+			} else {
+				copied[k] = v
+			}
+		}
+		nowSecF := float64(now.Unix())
+		for mac, obs := range shmRes.ByMAC {
+			bestIP := obs.IPv4
+			if bestIP == "" {
+				bestIP = obs.IPv6
+			}
+			matchedKey := ""
+			for k := range copied {
+				if strings.EqualFold(strings.TrimSpace(k), mac) {
+					matchedKey = k
+					break
+				}
+			}
+			liveSlot := (obs.Flags&shm.FlagOnline) != 0 || obs.ActiveFlows > 0
+			if matchedKey != "" {
+				if dm, ok := copied[matchedKey].(map[string]any); ok {
+					if asString(dm["ip"]) == "" && bestIP != "" {
+						dm["ip"] = bestIP
+					}
+					if liveSlot {
+						dm["last_seen"] = nowSecF
+					}
+				}
+			} else if liveSlot {
+				copied[mac] = map[string]any{
+					"mac":       mac,
+					"ip":        bestIP,
+					"last_seen": nowSecF,
+				}
+			}
+		}
+		devMap = copied
 	}
 	var ruleDevs map[string]any
 	var blSet map[string]bool
@@ -1055,8 +1600,17 @@ func buildVectorLiveSummary(s *server, now time.Time) VectorLiveSummary {
 		sum.IfaceMethod = det.Method
 	}
 	if s.signalCtl != nil {
-		sig := s.signalCtl.Get(s)
-		sum.Signal = sig
+		if allowAsyncSignal {
+			sum.Signal = s.signalCtl.Get(s)
+		} else if simLive {
+			sum.Signal = simSignalSnapshot(s)
+		} else {
+			s.signalCtl.mu.RLock()
+			sig := s.signalCtl.last
+			s.signalCtl.mu.RUnlock()
+			enrichSignalDiagnosis(&sig, s)
+			sum.Signal = sig
+		}
 	}
 	if s.autorate != nil {
 		ar := s.autorate.Snapshot()

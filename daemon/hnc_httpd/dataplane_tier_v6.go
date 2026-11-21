@@ -106,10 +106,11 @@ type DataplaneActor struct {
 	nlOpsTotal      atomic.Uint64
 	nlFallbacks     atomic.Uint64
 	tier3Batches    atomic.Uint64
-	dedupHits       atomic.Uint64
-	lastApplyUsec   atomic.Int64
-	lastUpdatedUnix atomic.Int64
-	closedFlag      atomic.Int64
+	dedupHits              atomic.Uint64
+	reconcileInvalidations atomic.Uint64
+	lastApplyUsec          atomic.Int64
+	lastUpdatedUnix        atomic.Int64
+	closedFlag             atomic.Int64
 
 	statusSnap atomic.Value // 存放不可变 DataplaneTierStatus 值副本
 	reqCh      chan dataplaneActorJob
@@ -122,6 +123,7 @@ type DataplaneActor struct {
 	nlFD         int
 	probeState   dataplaneProbeSnapshot
 	reconcileMap map[string]string
+	ifindexMap   map[string]int
 	shaperSpec   v6ShaperDesiredState
 	expressSpec  v6ExpressDesiredState
 	leashSpec    v6LeashDesiredState
@@ -190,6 +192,7 @@ func NewDataplaneActor() *DataplaneActor {
 		doneCh:       make(chan struct{}),
 		nlFD:         -1,
 		reconcileMap: make(map[string]string, 16),
+		ifindexMap:   make(map[string]int, 4),
 		probeState: dataplaneProbeSnapshot{
 			tier: DataplaneTierNativeNetlink,
 		},
@@ -310,6 +313,146 @@ func (a *DataplaneActor) resetSocket(h dpTierHooks) {
 		h.closeSocket(a.nlFD)
 		a.nlFD = -1
 	}
+	a.invalidateAllReconcileLocked()
+}
+
+func (a *DataplaneActor) invalidateAllReconcileLocked() int {
+	if a == nil || len(a.reconcileMap) == 0 {
+		return 0
+	}
+	n := len(a.reconcileMap)
+	clear(a.reconcileMap)
+	a.reconcileInvalidations.Add(uint64(n))
+	return n
+}
+
+func reconcileKeyMatches(key, hncDir, iface string) bool {
+	hncDir = strings.TrimSpace(hncDir)
+	iface = strings.TrimSpace(iface)
+	if iface == "*" {
+		iface = ""
+	}
+	if hncDir == "" && iface == "" {
+		return true
+	}
+	domain, rest, ok := strings.Cut(key, ":")
+	if !ok || domain == "" {
+		return false
+	}
+	keyDir := rest
+	keyIface := ""
+	if d, tail, hasSep := strings.Cut(rest, ":"); hasSep {
+		for {
+			nextD, nextTail, more := strings.Cut(tail, ":")
+			if !more {
+				break
+			}
+			d += ":" + nextD
+			tail = nextTail
+		}
+		if !strings.ContainsAny(tail, `/\`) {
+			keyDir = d
+			keyIface = tail
+		}
+	}
+	if hncDir != "" && keyDir != hncDir {
+		return false
+	}
+	if iface == "" {
+		return true
+	}
+	if keyIface == "" || keyIface == iface {
+		return true
+	}
+	if strings.HasPrefix(iface, "ifb") && (domain == "shaper" || domain == "express" || domain == "leash") {
+		return true
+	}
+	return false
+}
+
+func (a *DataplaneActor) invalidateReconcileLocked(hncDir, iface string) int {
+	if a == nil {
+		return 0
+	}
+	iface = strings.TrimSpace(iface)
+	if hncDir == "" && (iface == "" || iface == "*") {
+		if a.ifindexMap != nil {
+			clear(a.ifindexMap)
+		}
+		return a.invalidateAllReconcileLocked()
+	}
+	if a.ifindexMap != nil {
+		if iface == "" || iface == "*" {
+			clear(a.ifindexMap)
+		} else {
+			delete(a.ifindexMap, iface)
+		}
+	}
+	removed := 0
+	for k := range a.reconcileMap {
+		if reconcileKeyMatches(k, hncDir, iface) {
+			delete(a.reconcileMap, k)
+			removed++
+		}
+	}
+	if removed > 0 {
+		a.reconcileInvalidations.Add(uint64(removed))
+	}
+	return removed
+}
+
+func (a *DataplaneActor) trackIfindexLocked(hncDir, iface string, ifindex int) bool {
+	if a == nil {
+		return false
+	}
+	iface = strings.TrimSpace(iface)
+	if iface == "" {
+		return false
+	}
+	if a.ifindexMap == nil {
+		a.ifindexMap = make(map[string]int, 4)
+	}
+	prev, existed := a.ifindexMap[iface]
+	if ifindex <= 0 {
+		if existed {
+			delete(a.ifindexMap, iface)
+			a.invalidateReconcileLocked(hncDir, iface)
+			return true
+		}
+		return false
+	}
+	a.ifindexMap[iface] = ifindex
+	if existed && prev != ifindex {
+		a.invalidateReconcileLocked(hncDir, iface)
+		a.ifindexMap[iface] = ifindex
+		return true
+	}
+	return false
+}
+
+// InvalidateReconcile 清空指定接口(传 "" 或 "*" 清空全部)的内存期望摘要缓存。
+func (a *DataplaneActor) InvalidateReconcile(iface string) {
+	if a == nil {
+		return
+	}
+	_ = a.Do("invalidate_reconcile", func(act *DataplaneActor) error {
+		act.invalidateReconcileLocked("", iface)
+		act.publishSnapshotLocked()
+		return nil
+	})
+}
+
+// InvalidateDataplaneReconcileNative 供规则核对或热点重初始化时清空全局 DataplaneActor 去重缓存。
+func InvalidateDataplaneReconcileNative(hncDir, iface string) {
+	actor := DefaultDataplaneActor()
+	if actor == nil {
+		return
+	}
+	_ = actor.Do("invalidate_reconcile", func(a *DataplaneActor) error {
+		a.invalidateReconcileLocked(hncDir, iface)
+		a.publishSnapshotLocked()
+		return nil
+	})
 }
 
 // runWithPersistentSocket 在常驻 AF_NETLINK 长连接上执行 fn, 遇底层连接陈旧错误时自动重连重试一次。
@@ -579,6 +722,11 @@ func tuneGlobalShaperOnActor(actor *DataplaneActor, hncDir string, downKbps, upK
 	upBps := kbpsToBytesPerSec(upKbps)
 
 	return actor.Do("tune_global_shaper", func(a *DataplaneActor) error {
+		if a.reconcileMap == nil {
+			a.reconcileMap = make(map[string]string, 16)
+		}
+		a.trackIfindexLocked(hncDir, iface, downIdx)
+		a.trackIfindexLocked(hncDir, "ifb0", ifbIdx)
 		digestKey := "shaper:" + hncDir + ":" + iface
 		digestVal := fmt.Sprintf("%d:%d:%d:%d", downIdx, ifbIdx, downKbps, upKbps)
 		if prev, ok := a.reconcileMap[digestKey]; ok && prev == digestVal {
@@ -674,6 +822,11 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 	}
 
 	return actor.Do("vector_express", func(a *DataplaneActor) error {
+		if a.reconcileMap == nil {
+			a.reconcileMap = make(map[string]string, 16)
+		}
+		a.trackIfindexLocked(hncDir, iface, downIdx)
+		a.trackIfindexLocked(hncDir, "ifb0", ifbIdx)
 		digestKey := "express:" + hncDir + ":" + iface
 		digestVal := fmt.Sprintf("%d:%d:%t:0x%08x:%d", downIdx, ifbIdx, enable, gameMark&gameMask, bgCeilKbps)
 		if prev, ok := a.reconcileMap[digestKey]; ok && prev == digestVal {
@@ -796,6 +949,11 @@ func applyUpdateLeashOnActor(actor *DataplaneActor, hncDir string, leashMark uin
 	}
 
 	return actor.Do("update_leash", func(a *DataplaneActor) error {
+		if a.reconcileMap == nil {
+			a.reconcileMap = make(map[string]string, 16)
+		}
+		a.trackIfindexLocked(hncDir, iface, downIdx)
+		a.trackIfindexLocked(hncDir, "ifb0", ifbIdx)
 		digestKey := "leash:" + hncDir + ":" + iface
 		digestVal := fmt.Sprintf("%d:%d:%t:0x%08x:%d", downIdx, ifbIdx, enable, leashMark&leashMask, rateKbps)
 		if prev, ok := a.reconcileMap[digestKey]; ok && prev == digestVal {

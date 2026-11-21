@@ -17,16 +17,36 @@ import (
 	"hnc.io/dpid/neigh"
 )
 
-// withTempM4Writer 预算类测试用: 全局 m4Writer 换成新的(测试结束停掉并恢复),
-// 路径进临时目录 —— 不碰真实 /data/local/hnc。
+// newStubM4Runner 构造全内存隔离的轻量 M4 写者桩: 不开真实内核 Netlink 套接字、
+// 不扫宿主网卡、不执行真实 sh bin/iptables_manager.sh 或 mdns_resolve。
+func newStubM4Runner(iface string) *m4GoRunner {
+	r := newM4GoRunner(iface)
+	r.subscribeFn = func() (m4NeighSource, error) {
+		return &fakeNeighSource{ch: make(chan []neigh.Entry), stop: make(chan struct{})}, nil
+	}
+	r.dumpIfFn = func(int) ([]neigh.Entry, error) { return nil, nil }
+	r.ifIndexFn = func(string) (int, error) { return 0, os.ErrNotExist }
+	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
+	r.blacklistFn = func() map[string]bool { return nil }
+	r.hooks.Fast = func(mac string) (string, string) { return macFallback(mac), "mac" }
+	r.hooks.Full = func(mac, ip string) (string, string) { return macFallback(mac), "mac" }
+	r.applyHooks()
+	return r
+}
+
+// withTempM4Writer 预算与主循环类测试用: 全局 m4Writer 与 newM4RunnerFn 换成隔离桩(测试结束停掉并恢复),
+// 路径进临时目录 —— 不碰真实 /data/local/hnc、不开真实 Netlink 套接字、不跑真实外部脚本。
 func withTempM4Writer(t *testing.T) {
 	t.Helper()
 	m4TestEnv(t)
-	old := m4Writer
+	oldWriter := m4Writer
+	oldNewRunner := newM4RunnerFn
 	m4Writer = &m4WriterMgr{}
+	newM4RunnerFn = newStubM4Runner
 	t.Cleanup(func() {
 		m4Writer.hotspotDown()
-		m4Writer = old
+		m4Writer = oldWriter
+		newM4RunnerFn = oldNewRunner
 	})
 }
 
@@ -86,7 +106,7 @@ func TestRunnerInitialFullSync(t *testing.T) {
 	m4TestEnv(t)
 	r, _ := startTestRunner(t,
 		func() []neigh.Entry {
-			return []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: 0x04}}
+			return []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: neigh.NUDStale}}
 		},
 		func() (int, error) { return 7, nil },
 		func(mac, ip string) (string, string) { return macFallback(mac), "mac" })
@@ -104,7 +124,7 @@ func TestResolvedNameIsWritten(t *testing.T) {
 		func() (int, error) { return 7, nil },
 		func(mac, ip string) (string, string) { return "Redmi-TV", "dhcp" })
 	defer stopRunner(t, r)
-	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: 0x02}}
+	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: neigh.NUDReachable}}
 	if got, ok := waitDevices(t, 4*time.Second, func(s string) bool { return strings.Contains(s, `"hostname":"Redmi-TV","hostname_src":"dhcp"`) }); !ok {
 		t.Fatalf("4 秒内解析出的名字应写进 devices.json, 得 %q", got)
 	}
@@ -125,7 +145,7 @@ func TestStopWaitsForInflightResolve(t *testing.T) {
 			finished.Store(true)
 			return "pixel", "dhcp"
 		})
-	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: 0x02}}
+	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: neigh.NUDReachable}}
 	select {
 	case <-started:
 	case <-time.After(4 * time.Second):
@@ -165,13 +185,13 @@ func TestRunnerIgnoresEventsUntilIfindexKnown(t *testing.T) {
 		func(mac, ip string) (string, string) { return macFallback(mac), "mac" })
 	defer stopRunner(t, r)
 	// 上游 wlan0(ifindex 3)上的路由器
-	src.ch <- []neigh.Entry{{IfIndex: 3, IP: net.ParseIP("192.168.1.1"), MAC: "02:00:00:00:01:01", State: 0x02}}
+	src.ch <- []neigh.Entry{{IfIndex: 3, IP: net.ParseIP("192.168.1.1"), MAC: "02:00:00:00:01:01", State: neigh.NUDReachable}}
 	time.Sleep(600 * time.Millisecond) // 让写者有机会(错误地)写出
 	if b, err := os.ReadFile(m4DevicesJSON); err == nil && strings.Contains(string(b), "02:00:00:00:01:01") {
 		t.Fatalf("网卡还没认出来时收了上游邻居: %s", b)
 	}
 	known.Store(true)
-	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: 0x02}}
+	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: neigh.NUDReachable}}
 	got, ok := waitDevices(t, 3*time.Second, func(s string) bool { return strings.Contains(s, "02:5a:00:00:00:01") })
 	if !ok || strings.Contains(got, "02:00:00:00:01:01") {
 		t.Fatalf("认出网卡后只收热点网卡的设备, 得 %q", got)

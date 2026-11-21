@@ -3078,12 +3078,13 @@ func nlEnsureHTBRootOnSocket(fd int, ifindex int, defaultMinor uint16, rootRateB
 	}
 	tickInUsec := readPschedTickInUsec()
 	burst := hncBurstBytesForRate(rootRateBps, false)
+	quantum := hncQuantumForRate(rootRateBps)
 	seqRoot := rtnlNextSeq()
-	if err := rtnlSendAndWaitAck(fd, buildHTBClassUpsertMsg(seqRoot, ifindex, rtnlHtbRootMaj, rtnlHtbRootCls, rootRateBps, rootRateBps, burst, burst, DefaultHTBRootQuantumB, 0, tickInUsec), seqRoot); err != nil {
+	if err := rtnlSendAndWaitAck(fd, buildHTBClassUpsertMsg(seqRoot, ifindex, rtnlHtbRootMaj, rtnlHtbRootCls, rootRateBps, rootRateBps, burst, burst, quantum, 0, tickInUsec), seqRoot); err != nil {
 		return err
 	}
 	seqDef := rtnlNextSeq()
-	if err := rtnlSendAndWaitAck(fd, buildHTBClassUpsertMsg(seqDef, ifindex, rtnlHtbRootCls, defClassHandle, rootRateBps, rootRateBps, burst, burst, DefaultHTBRootQuantumB, 7, tickInUsec), seqDef); err != nil {
+	if err := rtnlSendAndWaitAck(fd, buildHTBClassUpsertMsg(seqDef, ifindex, rtnlHtbRootCls, defClassHandle, rootRateBps, rootRateBps, burst, burst, quantum, 7, tickInUsec), seqDef); err != nil {
 		return err
 	}
 	if !hasDefLeaf {
@@ -3093,7 +3094,13 @@ func nlEnsureHTBRootOnSocket(fd int, ifindex int, defaultMinor uint16, rootRateB
 	return nil
 }
 
+var (
+	nlShaperSendAndWaitAckFn = rtnlSendAndWaitAck
+	nlShaperEnsureHTBRootFn  = nlEnsureHTBRootOnSocket
+)
+
 // nlTuneGlobalShaperOnSocket 在长连接 fd 上直接通过 RTM_NEWTCLASS 热更新根类 1:1 带宽 (< 0.2ms, 零 dump)。
+// v6.1.0-beta.1: 上行 ifb0 与下行对称检查 Netlink ACK 回执, 报错时自动补建根树一次, 仍失败则累加 nlErrors 并透传错误。
 func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfindex int, upBps uint64) (int, error) {
 	tick := readPschedTickInUsec()
 	sent := 0
@@ -3101,11 +3108,10 @@ func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfin
 		burst := hncBurstBytesForRate(downBps, false)
 		seq := rtnlNextSeq()
 		msg := buildHTBClassUpsertMsg(seq, downIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, downBps, downBps, burst, burst, hncQuantumForRate(downBps), 0, tick)
-		if err := rtnlSendAndWaitAck(fd, msg, seq); err != nil {
-			// 若根 HTB 尚未建树, 自动在同一连接补齐根树后再重试一次
-			if eErr := nlEnsureHTBRootOnSocket(fd, downIfindex, rtnlDefMinor, downBps); eErr != nil {
+		if err := nlShaperSendAndWaitAckFn(fd, msg, seq); err != nil {
+			if eErr := nlShaperEnsureHTBRootFn(fd, downIfindex, rtnlDefMinor, downBps); eErr != nil {
 				dpStats.nlErrors.Add(1)
-				return sent, err
+				return sent, fmt.Errorf("tune global shaper 1:1 failed (%w); ensure root failed: %v", err, eErr)
 			}
 		}
 		sent++
@@ -3114,9 +3120,13 @@ func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfin
 		burst := hncBurstBytesForRate(upBps, false)
 		seq := rtnlNextSeq()
 		msg := buildHTBClassUpsertMsg(seq, ifbIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, upBps, upBps, burst, burst, hncQuantumForRate(upBps), 0, tick)
-		if err := rtnlSendAndWaitAck(fd, msg, seq); err == nil {
-			sent++
+		if err := nlShaperSendAndWaitAckFn(fd, msg, seq); err != nil {
+			if eErr := nlShaperEnsureHTBRootFn(fd, ifbIfindex, rtnlDefMinor, upBps); eErr != nil {
+				dpStats.nlErrors.Add(1)
+				return sent, fmt.Errorf("tune global shaper 1:1 failed (%w); ensure root failed: %v", err, eErr)
+			}
 		}
+		sent++
 	}
 	return sent, nil
 }

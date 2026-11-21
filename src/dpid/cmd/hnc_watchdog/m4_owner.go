@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -60,6 +61,9 @@ var (
 	m4CachePath     = dataDir + "/hostname_cache.json"
 	m4OverridesPath = dataDir + "/oui_overrides.json"
 	m4MDNSBin       = binDir + "/mdns_resolve"
+
+	m4ReconnectBaseBackoff = time.Second
+	m4ReconnectMaxBackoff  = 30 * time.Second
 )
 
 // 看门狗动作 / 自检可见(actionstats 带出)。
@@ -83,7 +87,10 @@ type m4WriterMgr struct {
 	runner *m4GoRunner
 }
 
-var m4Writer = &m4WriterMgr{}
+var (
+	m4Writer      = &m4WriterMgr{}
+	newM4RunnerFn = newM4GoRunner
+)
 
 // tick 主循环每轮调用(热点 ACTIVE 时 iface 非空): 起 / 换网卡重起 / 停写者。
 func (m *m4WriterMgr) tick(iface string, now time.Time) {
@@ -96,7 +103,7 @@ func (m *m4WriterMgr) tick(iface string, now time.Time) {
 	m.ensureGoRunnerLocked(iface)
 }
 
-// hotspotDown 热点没开(主循环探测失败 / PENDING)时调: 停写者。
+// hotspotDown 热点没开(主循环探测失败 / PENDING / 退出)时调: 停写者。
 func (m *m4WriterMgr) hotspotDown() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -215,7 +222,7 @@ func (m *m4WriterMgr) ensureGoRunnerLocked(iface string) {
 		return
 	}
 	m.stopGoRunnerLocked("网卡变了")
-	r := newM4GoRunner(iface)
+	r := newM4RunnerFn(iface)
 	m.runner = r
 	r.start()
 }
@@ -236,25 +243,155 @@ func (r *m4GoRunner) run() {
 	defer close(r.doneCh)
 	monoMs := func() int64 { return time.Now().UnixNano() / int64(time.Millisecond) }
 	events := make(chan []neigh.Entry, 64)
-	src, err := r.subscribeFn()
+	resyncCh := make(chan struct{}, 1)
+	var (
+		subMu      sync.Mutex
+		stopping   bool
+		closeSub   func()
+		readWG     sync.WaitGroup
+		needResync bool
+	)
+	bindSub := func(src m4NeighSource) (func(), bool) {
+		once := sync.OnceFunc(func() { _ = src.Close() })
+		subMu.Lock()
+		if stopping {
+			subMu.Unlock()
+			once()
+			return once, false
+		}
+		closeSub = once
+		subMu.Unlock()
+		return once, true
+	}
+	stopSub := func() {
+		subMu.Lock()
+		stopping = true
+		fn := closeSub
+		closeSub = nil
+		subMu.Unlock()
+		if fn != nil {
+			fn()
+		}
+	}
+	isStopping := func() bool {
+		subMu.Lock()
+		s := stopping
+		subMu.Unlock()
+		return s
+	}
+	triggerResync := func() {
+		select {
+		case resyncCh <- struct{}{}:
+		default:
+		}
+	}
+
+	initSrc, err := r.subscribeFn()
 	if err != nil {
-		logf("m4_owner: 订阅邻居表失败: %v(只靠 30s 全量兜底)", err)
-	} else {
-		go func() {
-			defer src.Close()
-			for {
-				es, err := src.Read()
-				if err != nil {
+		logf("m4_owner: 初始订阅邻居表失败: %v(转入后台指数退避重连 + 30s 全量兜底)", err)
+	}
+	readWG.Add(1)
+	go func(src m4NeighSource) {
+		defer readWG.Done()
+		var closeCurr func()
+		if src != nil {
+			var ok bool
+			closeCurr, ok = bindSub(src)
+			if !ok {
+				return
+			}
+		}
+		defer func() {
+			if closeCurr != nil {
+				closeCurr()
+			}
+			subMu.Lock()
+			closeSub = nil
+			subMu.Unlock()
+		}()
+
+		backoff := m4ReconnectBaseBackoff
+		var lastEnobufsLog time.Time
+		for {
+			select {
+			case <-r.stopCh:
+				return
+			default:
+			}
+			if isStopping() {
+				return
+			}
+			if src == nil {
+				wait := backoff
+				if backoff < m4ReconnectMaxBackoff {
+					backoff *= 2
+					if backoff > m4ReconnectMaxBackoff {
+						backoff = m4ReconnectMaxBackoff
+					}
+				}
+				tmr := time.NewTimer(wait)
+				select {
+				case <-tmr.C:
+				case <-r.stopCh:
+					tmr.Stop()
 					return
 				}
+				if isStopping() {
+					return
+				}
+				next, sErr := r.subscribeFn()
+				if sErr != nil {
+					logf("m4_owner: 重连邻居表订阅失败(wait=%v): %v", wait, sErr)
+					continue
+				}
+				var ok bool
+				closeCurr, ok = bindSub(next)
+				if !ok {
+					return
+				}
+				src = next
+				backoff = m4ReconnectBaseBackoff
+				logf("m4_owner: 邻居表订阅已恢复, 触发全量重同步")
+				triggerResync()
+			}
+
+			es, rErr := src.Read()
+			if rErr != nil {
 				select {
-				case events <- es:
 				case <-r.stopCh:
 					return
+				default:
 				}
+				if isStopping() {
+					return
+				}
+				if errors.Is(rErr, syscall.ENOBUFS) {
+					if now := time.Now(); now.Sub(lastEnobufsLog) >= 5*time.Second {
+						lastEnobufsLog = now
+						logf("m4_owner: 邻居订阅缓冲区溢出(ENOBUFS), 原位触发 1Hz 全量重同步")
+					}
+					triggerResync()
+					continue
+				}
+				logf("m4_owner: 邻居订阅读取异常: %v(关闭旧连接并退避重连)", rErr)
+				closeCurr()
+				subMu.Lock()
+				closeSub = nil
+				subMu.Unlock()
+				src, closeCurr = nil, nil
+				continue
 			}
-		}()
-	}
+			backoff = m4ReconnectBaseBackoff
+			if len(es) == 0 {
+				continue
+			}
+			select {
+			case events <- es:
+			case <-r.stopCh:
+				return
+			}
+		}
+	}(initSrc)
 
 	var (
 		dirty        bool
@@ -285,7 +422,7 @@ func (r *m4GoRunner) run() {
 		inFlightMu.Lock()
 		n := len(inFlight)
 		inFlightMu.Unlock()
-		want := m4NextTickMS(dirty, r.table.HasPending(), n > 0)
+		want := m4NextTickMS(dirty || needResync, r.table.HasPending(), n > 0)
 		if want == period || (onlyFaster && want > period) {
 			return
 		}
@@ -310,6 +447,8 @@ func (r *m4GoRunner) run() {
 		ticked := false
 		select {
 		case <-r.stopCh:
+			stopSub()
+			readWG.Wait()
 			resolveWG.Wait()
 			select {
 			case <-resolved:
@@ -320,6 +459,8 @@ func (r *m4GoRunner) run() {
 				lastWritten = r.writeOut(lastWritten, &lastStatsAt, &lastStatsMap, true)
 			}
 			return
+		case <-resyncCh:
+			needResync = true
 		case <-resolved:
 			markDirty()
 		case es := <-events:
@@ -342,19 +483,24 @@ func (r *m4GoRunner) run() {
 			r.tickN.Add(1)
 			now := time.Now()
 			if nonce, due := refreshDue(); due {
-				if es, err := r.dumpIfFn(r.ifIdx); err == nil {
+				if r.ifIdx == 0 {
+					r.refreshIface()
+				}
+				if es, err := r.dumpIfFn(r.ifIdx); err == nil && r.ifIdx != 0 {
 					r.table.FullSync(es, now)
 				}
 				r.table.EvictOffline(now)
 				lastWritten = r.writeOut(lastWritten, &lastStatsAt, &lastStatsMap, true)
 				dirty = false
 				firstDirtyMs = 0
+				needResync = false
 				lastSync = now
 				if err := writeAtomic(m4RefreshAckFile, []byte(nonce+"\n")); err != nil {
 					logf("m4_owner: 写刷新回执失败: %v", err)
 				}
 			}
-			if now.Sub(lastSync) >= m4FullSyncEvery {
+			if now.Sub(lastSync) >= m4FullSyncEvery || (needResync && now.Sub(lastSync) >= time.Second) {
+				needResync = false
 				lastSync = now
 				r.refreshIface()
 				if es, err := r.dumpIfFn(r.ifIdx); err == nil && r.ifIdx != 0 {

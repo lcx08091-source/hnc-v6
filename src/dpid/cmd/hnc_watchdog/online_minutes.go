@@ -11,7 +11,7 @@
 //     Doze 把主循环拉长到 3 分钟一轮时不会少记; 跨零点的间隔按零点拆到两天。
 //   - 每 onlineFlushEvery(~55 分钟)或跨日时落盘, 一台设备一行
 //     {"t","day","mac","m":<分钟>} —— 文件增长与旧版同量级。
-//   - 看门狗收到 SIGTERM 正常退出时(main → onExit)把未落盘的分钟写掉。
+//   - 看门狗收到 SIGTERM 正常退出时(main → onExit)停 M4 写者并把未落盘的分钟写掉。
 //
 // 读侧(httpd onlineMinutesByMAC): 有 m 按 m 算, 旧行没有 m 按 60 算。
 package main
@@ -193,7 +193,8 @@ func (a *onlineAccum) flush(now time.Time) {
 	a.pending = map[onlineKey]int{}
 }
 
-// onExit 看门狗正常退出(SIGTERM → mainLoop 返回)时调用: 未落盘的分钟写掉。
+// onExit 看门狗正常退出(SIGTERM → mainLoop 返回)时调用: 优雅回收 M4 订阅协程并把未落盘的分钟写掉。
 func onExit() {
+	m4Writer.hotspotDown()
 	onlineAcc.flush(nowFn())
 }

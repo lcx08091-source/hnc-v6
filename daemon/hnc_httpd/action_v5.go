@@ -534,6 +534,7 @@ func actionRefresh(hncDir string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "scan failed", Detail: out}
 	}
+	observeRefreshAckForNeighFallback(hncDir)
 	return actionResp{OK: true, Detail: strings.TrimSpace(out)}
 }
 
@@ -568,6 +569,7 @@ func actionCleanupRules(hncDir string) actionResp {
 	if rc != 0 {
 		return actionResp{OK: false, Error: "cleanup failed", Detail: out}
 	}
+	InvalidateDataplaneReconcileNative(hncDir, "")
 	return actionResp{OK: true}
 }
 
@@ -600,6 +602,7 @@ func actionCleanupAll(hncDir string) actionResp {
 	if err := runBinDetached(hncDir, "cleanup.sh", "safe_release"); err != nil {
 		return actionResp{OK: false, Error: "spawn failed", Detail: err.Error()}
 	}
+	InvalidateDataplaneReconcileNative(hncDir, "")
 	return actionResp{OK: true, Detail: "safe release scheduled · service will be restarted automatically"}
 }
 

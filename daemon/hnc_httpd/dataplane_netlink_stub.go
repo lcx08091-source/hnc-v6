@@ -1521,8 +1521,43 @@ func deviceHasDelayOwner(dm map[string]interface{}) bool {
 	return false
 }
 
-func nlTuneGlobalShaperOnSocket(_ int, _ int, _ uint64, _ int, _ uint64) (int, error) {
-	return 0, errNetlinkUnsupportedOS
+func nlEnsureHTBRootOnSocket(_ int, _ int, _ uint16, _ uint64) error {
+	return errNetlinkUnsupportedOS
+}
+
+var (
+	nlShaperSendAndWaitAckFn = rtnlSendAndWaitAck
+	nlShaperEnsureHTBRootFn  = nlEnsureHTBRootOnSocket
+)
+
+func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfindex int, upBps uint64) (int, error) {
+	tick := readPschedTickInUsec()
+	sent := 0
+	if downIfindex > 0 && downBps > 0 {
+		burst := hncBurstBytesForRate(downBps, false)
+		seq := rtnlNextSeq()
+		msg := buildHTBClassUpsertMsg(seq, downIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, downBps, downBps, burst, burst, hncQuantumForRate(downBps), 0, tick)
+		if err := nlShaperSendAndWaitAckFn(fd, msg, seq); err != nil {
+			if eErr := nlShaperEnsureHTBRootFn(fd, downIfindex, rtnlDefMinor, downBps); eErr != nil {
+				dpStats.nlErrors.Add(1)
+				return sent, fmt.Errorf("tune global shaper 1:1 failed (%w); ensure root failed: %v", err, eErr)
+			}
+		}
+		sent++
+	}
+	if ifbIfindex > 0 && upBps > 0 {
+		burst := hncBurstBytesForRate(upBps, false)
+		seq := rtnlNextSeq()
+		msg := buildHTBClassUpsertMsg(seq, ifbIfindex, rtnlHtbRootMaj, rtnlHtbRootCls, upBps, upBps, burst, burst, hncQuantumForRate(upBps), 0, tick)
+		if err := nlShaperSendAndWaitAckFn(fd, msg, seq); err != nil {
+			if eErr := nlShaperEnsureHTBRootFn(fd, ifbIfindex, rtnlDefMinor, upBps); eErr != nil {
+				dpStats.nlErrors.Add(1)
+				return sent, fmt.Errorf("tune global shaper 1:1 failed (%w); ensure root failed: %v", err, eErr)
+			}
+		}
+		sent++
+	}
+	return sent, nil
 }
 
 func nlApplyBatchWithFWFallbackOnSocket(_ int, _ [][]byte) (int, error) {

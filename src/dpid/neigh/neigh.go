@@ -19,6 +19,8 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -246,32 +248,99 @@ func DumpIf(ifindex int) ([]Entry, error) {
 	return KeepIfIndex(es, ifindex), nil
 }
 
+const (
+	subRcvBufBytes = 512 << 10 // 512 KiB 接收缓冲, 降低突发 ARP/NDP 广播溢出概率
+	subReadBufSize = 1 << 16   // 64 KiB 复用接收缓冲, 空闲零超时轮询、零堆内存分配
+)
+
 // Sub 邻居表事件订阅(RTNLGRP_NEIGH)。
-type Sub struct{ fd int }
+// 经 os.NewFile + SyscallConn 托管给 Go runtime netpoll(internal/poll.fdMutex 引用计数锁):
+// 空闲期 0 次超时唤醒, Close 微秒级唤醒阻塞中的 Read, 100% 消除整数 FD 复用竞态。
+// Read 由单协程顺序调用, Close 支持并发幂等调用; 结构体无 64 位原子字段, 32 位 ARM 安全。
+type Sub struct {
+	file   *os.File
+	raw    syscall.RawConn
+	closed atomic.Bool
+	buf    []byte
+}
 
 // Subscribe 订阅邻居表增删改事件。用完 Close。
 func Subscribe() (*Sub, error) {
-	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, syscall.NETLINK_ROUTE)
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC|syscall.SOCK_NONBLOCK, syscall.NETLINK_ROUTE)
 	if err != nil {
 		return nil, fmt.Errorf("neigh: socket: %w", err)
 	}
+	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, subRcvBufBytes)
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK, Groups: rtmgrpNeigh}); err != nil {
-		syscall.Close(fd)
+		_ = syscall.Close(fd)
 		return nil, fmt.Errorf("neigh: bind groups: %w", err)
 	}
-	return &Sub{fd: fd}, nil
+	f := os.NewFile(uintptr(fd), "neigh-netlink")
+	if f == nil {
+		_ = syscall.Close(fd)
+		return nil, errors.New("neigh: os.NewFile returned nil")
+	}
+	_ = f.SetReadDeadline(time.Time{})
+	raw, err := f.SyscallConn()
+	if err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("neigh: syscallconn: %w", err)
+	}
+	return &Sub{
+		file: f,
+		raw:  raw,
+		buf:  make([]byte, subReadBufSize),
+	}, nil
 }
 
-// Read 阻塞读一批事件(RTM_DELNEIGH 的 Deleted=true)。
+// Read 读一批事件(RTM_DELNEIGH 的 Deleted=true)。
+// 经 netpoll 挂起等待可读事件; 信号中断(EINTR)返回 nil, nil; 已关闭或 EBADF 返回 os.ErrClosed;
+// 内核接收缓冲溢出(ENOBUFS)原样包装返回供上层 errors.Is 识别。
 func (s *Sub) Read() ([]Entry, error) {
-	buf := make([]byte, 1<<16)
-	n, _, err := syscall.Recvfrom(s.fd, buf, 0)
-	if err != nil {
-		return nil, fmt.Errorf("neigh: recv: %w", err)
+	if s == nil || s.raw == nil || s.closed.Load() || len(s.buf) == 0 {
+		return nil, os.ErrClosed
 	}
-	es, _, err := ParseMsgs(buf[:n])
+	var (
+		n       int
+		recvErr error
+	)
+	rerr := s.raw.Read(func(fd uintptr) bool {
+		n, _, recvErr = syscall.Recvfrom(int(fd), s.buf, 0)
+		if errors.Is(recvErr, syscall.EAGAIN) || errors.Is(recvErr, syscall.EWOULDBLOCK) {
+			recvErr = nil
+			return false
+		}
+		if errors.Is(recvErr, syscall.EINTR) {
+			recvErr = nil
+			n = 0
+			return true
+		}
+		return true
+	})
+	if rerr != nil || s.closed.Load() || errors.Is(recvErr, syscall.EBADF) {
+		return nil, os.ErrClosed
+	}
+	if recvErr != nil {
+		return nil, fmt.Errorf("neigh: recv: %w", recvErr)
+	}
+	if n <= 0 {
+		return nil, nil
+	}
+	es, _, err := ParseMsgs(s.buf[:n])
 	return es, err
 }
 
-// Close 关闭订阅。
-func (s *Sub) Close() error { return syscall.Close(s.fd) }
+// Close 幂等关闭订阅, 由 os.File 内部 fdMutex 序列化底层关闭并微秒级唤醒阻塞中的 Read。
+func (s *Sub) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closed.Store(true)
+	if s.file == nil {
+		return nil
+	}
+	if err := s.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		return err
+	}
+	return nil
+}

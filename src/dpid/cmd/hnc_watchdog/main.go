@@ -790,6 +790,7 @@ func handlePending(_ *restoreThrottle) time.Duration {
 		return intervalProbe
 	}
 	writeStateFn(wdState{kind: stateActive, iface: iface})
+	m4Writer.tick(iface, nowFn())
 	return intervalNormal
 }
 
@@ -810,6 +811,7 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		res := runActionFn("migrate", activeIface, newIface, newIP)
 		if res.exitCode == 0 {
 			writeStateFn(wdState{kind: stateActive, iface: newIface})
+			m4Writer.tick(newIface, nowFn())
 		} else {
 			logf("migrate rc=%d", res.exitCode)
 		}

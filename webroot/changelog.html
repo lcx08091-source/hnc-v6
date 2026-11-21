@@ -13,12 +13,20 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
-<div class="cl-section" id="release-v6-1-0-alpha-1" data-version="v6.1.0-alpha.1" data-version-code="6009101">
-  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-wrench"/></svg>v6.1.0-alpha.1(净屋换牌内测版): 全仓错位版本号清零 · 预发布防误推与黄金快照回滚护栏 · 37 处 DPI 规则去重 · 后台熄屏零唤醒优化 <span class="badge b-warn" style="margin-left:4px">Alpha 内测版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-21 · versionCode 6009101</span></div>
+<div class="cl-section" id="release-v6-1-0-beta-1" data-version="v6.1.0-beta.1" data-version-code="6009201">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-dataplane"/></svg>v6.1.0-beta.1(公测版): 设备发现断线自愈与首屏秒出 · 待机零唤醒省电与黑匣子现场保护 · 16KB 共享内存读端接通 · 上行队列对账闭环 <span class="badge b-acc" style="margin-left:4px">Beta 公测版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-21 · versionCode 6009201</span></div>
   <ul class="cl-list">
-    <li><b>全仓历史错位版本号一次性归零</b>：统一收口 <span class="mono">json-health.html</span>、设置页离线兜底卡、备份文件名、<span class="mono">dpi_rebind</span> 及五大核心维护脚本横幅至实时模块版本，补回说明文档自动版本注入占位符并以正式 <span class="mono">GPL-3.0 LICENSE</span> 替换历史草稿文件。</li>
-    <li><b>预发布三道安全护栏就位</b>：启用 <span class="mono">6009101~6009399</span> 测试号段走廊保住正式版 <span class="mono">6010000</span> 整万升级路径；测试期锁定 <span class="mono">update.json</span> 不打扰稳定版用户；连刷测试包自动保留 <span class="mono">v6.0.1</span> 黄金 <span class="mono">.prev</span> 回滚底包。</li>
-    <li><b>DPI 规则库零冲突去重与后台零唤醒</b>：精准消除 35 个规则分包中的 37 处重复域名并对齐多租户公共云清单；WebUI 切入后台或锁屏时彻底销毁全部周期定时器，并在设置页底部新增微晶构建防伪水印。</li>
+    <li><b>设备发现韧性自愈与首屏零盲区</b>：为邻居表订阅配置 <span class="mono">500ms</span> 读取超时与原子单次关闭，根治关热点或切网卡时的后台通道滞留；遇到内核通知缓冲溢出原位触发 <span class="mono">1 Hz</span> 全量重同步，断线后自动退避重连，并在开热点初始化与切网卡成功当轮立即启动发现器；同步在 <span class="mono">hnc_httpd</span> 补充纯内存只读邻居应急合并（严守 <span class="mono">v5.33</span> 单一写盘铁律）。</li>
+    <li><b>后台零唤醒省电与 60s 卡顿黑匣子保真</b>：热点未开启或零在线设备时彻底释放 <span class="mono">200ms</span> 黑匣子定时器与空规则手术台定时器实现零后台唤醒；无活跃流量且无延迟突增时跳过文件状态检查与空白帧写入，防止断流 60 秒后冲刷真实卡顿记录。</li>
+    <li><b>16KB 共享内存读端正式接通与上行队列自愈</b>：<span class="mono">DpiShmBulkhead</span> 正式启用 <span class="mono">shm_vector.bin</span> 双槽位无锁序列锁读取（未就绪或超期自动无感回退 JSON 缓存）；补齐上行 <span class="mono">ifb0</span> 根队列报错补建自愈及 <span class="mono">reconcileMap</span> 网卡变更自动清空对账机制。</li>
+  </ul>
+</div>
+<div class="cl-section" id="release-v6-1-0-alpha-1" data-version="v6.1.0-alpha.1" data-version-code="6009101">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-wrench"/></svg>v6.1.0-alpha.1(净屋换牌内测版): 全仓错位版本号清零 · 预发布防误推与黄金快照回滚护栏 · DPI 规则零冲突归并 · 后台熄屏零唤醒优化 <span class="badge b-warn" style="margin-left:4px">Alpha 内测版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-21 · versionCode 6009101</span></div>
+  <ul class="cl-list">
+    <li><b>全仓历史错位版本号一次性归零</b>：统一收口 <span class="mono">json-health.html</span>（支持本机 KSU 直读版本）、设置页离线兜底卡、备份文件名、<span class="mono">dpi_rebind</span>、<span class="mono">ahnc_migration</span> 及核心维护脚本横幅至运行态模块版本，补回说明文档自动版本注入占位符并以正式 <span class="mono">GPL-3.0 / eBPF GPLv2+v3</span> 许可证替换历史草稿文件。</li>
+    <li><b>预发布三道安全护栏就位</b>：启用 <span class="mono">6009101~6009399</span> 测试号段走廊保住正式版 <span class="mono">6010000</span> 整万升级路径；测试期锁定 <span class="mono">update.json</span> 不打扰稳定版用户；连刷测试包或回滚重刷时自动锁住 <span class="mono">v6.0.1</span> 黄金 <span class="mono">.prev</span> 回滚底包并采用原子目录切换恢复。</li>
+    <li><b>DPI 规则零逃逸去重与后台零唤醒</b>：消除 35 个规则分包中的 37 处重复域名并挂靠 Steam / 抖音父规则防单应用限速逃逸，修复腾讯游戏前台心跳规则字段拼写与老用户升级屏蔽表合并；WebUI 切入后台或冷启动未就绪时彻底阻断周期定时器抢跑，并在设置页底部新增微晶构建防伪水印。</li>
   </ul>
 </div>
 <div class="cl-section" id="release-v6-0-1" data-version="v6.0.1" data-version-code="6000001">

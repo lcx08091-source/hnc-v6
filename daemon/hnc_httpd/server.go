@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -32,6 +33,22 @@ type rateOut struct {
 }
 
 type server struct {
+	// 64 位原子字段严格置于结构体起始偏移 0 处, 确保 32 位 GOARCH=arm 8 字节对齐安全
+	blackboxCaptureUntilUnix atomic.Int64
+	blackboxLastActiveMs     atomic.Int64
+	blackboxShortCircuits    atomic.Int64
+	blackboxRecordedTicks    atomic.Int64
+	blackboxLoopMode         atomic.Int32
+
+	blackboxWakeOnce       sync.Once
+	blackboxWakeCh         chan struct{}
+	blackboxActivityHook   func() (<-chan struct{}, Activity)
+	blackboxAutorateHook   func() (blackboxAutorateReading, bool)
+	blackboxSampleOverride func(in BlackboxTickInput, ratesCopy map[string]rateOut) (BlackboxFrame, *BlackboxIncident)
+	blackboxActiveDur      time.Duration
+	blackboxPatrolDur      time.Duration
+	blackboxHoldDur        time.Duration
+
 	hncDir       string
 	remote       *remoteListener // 远程端口(remote_listener.go); -bind none 时为 nil
 	tokens       *TokensStore
@@ -80,8 +97,9 @@ func newServer(hncDir string) *server {
 		limiter:      NewRateLimiter(),
 		writeCounter: NewWriteCounter(),
 		jsonCache:    newJSONFileCache(),
-		lastSamples:  make(map[string]rateSample),
-		rates:        make(map[string]rateOut),
+		blackboxWakeCh: make(chan struct{}, 1),
+		lastSamples:    make(map[string]rateSample),
+		rates:          make(map[string]rateOut),
 	}
 	s.limitCtl = newLimitCtl(hncDir, &s.actionMu)
 	s.autorate = newAutorateCtl(hncDir)
@@ -530,6 +548,10 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 	}
 	s.rateMu.Unlock()
 
+	// v6.1.0-beta.1: 看门狗刷新回执超时(15s 窗口)或 ACTIVE 态下 devices.json 缺失/超 45s 陈旧时,
+	// 克隆局部 map 并以 2s 冷却只读合并内核邻居表(零子进程、零写盘、零 jsonCache 污染)。
+	devicesMap = s.mergeReadonlyNeighFallback(devicesPath, devicesMap, int64(nowSec))
+
 	// 合并
 	out := make([]map[string]interface{}, 0, len(devicesMap))
 	seen := make(map[string]bool, len(devicesMap))
@@ -764,6 +786,7 @@ func (s *server) RateLoop(stop <-chan struct{}) {
 	// 打开界面时活动状态立即翻转, powerWait 马上醒来恢复 2s。
 	for last := time.Now(); ; last = time.Now() {
 		s.sampleRatesOnce()
+		s.notifyBlackboxIfActiveRates()
 		if !powerWait(stop, "rate", last, nil) {
 			return
 		}

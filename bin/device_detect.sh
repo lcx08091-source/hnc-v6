@@ -16,6 +16,7 @@
 #   iface   热点网卡名(bin/hnc_iface.sh, 带 5 分钟缓存)
 #   status  hotspotd STATUS
 #   count   devices.json 里的设备数
+#   live    纯只读内核邻居表应急排障视图(ip -4 neigh show, 绝不写 data/devices.json)
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
 DEVICES_FILE=$HNC_DIR/data/devices.json
@@ -218,8 +219,41 @@ case "${1:-scan}" in
         # v5.32 T1: 数 devices.json 里的设备数(单行 JSON 按出现次数, 不按行)
         echo "$(count_devices_from_json "$DEVICES_FILE")"
         ;;
+    live)
+        # v6.1.0-beta.1: 纯只读内核邻居表应急排障视图(绝不写 data/devices.json)
+        _ro_if=$(printf '%s' "${2:-}" | tr -d '\r[:space:]')
+        if [ $# -ge 2 ] && [ -n "${2:-}" ]; then
+            case "$_ro_if" in
+                ""|-*|*[!A-Za-z0-9_.-]*)
+                    echo "ERROR: invalid interface name" >&2
+                    exit 1
+                    ;;
+            esac
+        fi
+        if [ -z "$_ro_if" ] && [ -f "$HNC_DIR/run/hnc_state" ]; then
+            _st_line=$(head -n 1 "$HNC_DIR/run/hnc_state" 2>/dev/null | tr -d '\r')
+            case "$_st_line" in
+                ACTIVE:*)
+                    _ro_if=$(printf '%s' "${_st_line#ACTIVE:}" | awk '{print $1}' | cut -d: -f1 | tr -d '\r[:space:]')
+                    case "$_ro_if" in -*|*[!A-Za-z0-9_.-]*) _ro_if="" ;; esac
+                    ;;
+            esac
+        fi
+        if [ -z "$_ro_if" ]; then
+            _ro_if=$(get_hotspot_iface 2>/dev/null | head -n 1 | tr -d '\r[:space:]' || true)
+            case "$_ro_if" in -*|*[!A-Za-z0-9_.-]*) _ro_if="" ;; esac
+        fi
+        if [ -z "$_ro_if" ]; then
+            echo "# readonly_neigh iface=none (hotspot inactive; data/devices.json untouched)"
+            exit 0
+        fi
+        echo "# readonly_neigh iface=$_ro_if (data/devices.json untouched)"
+        if command -v ip >/dev/null 2>&1; then
+            ip -4 neigh show dev "$_ro_if" 2>/dev/null | grep -E 'REACHABLE|STALE|DELAY|PROBE' || true
+        fi
+        ;;
     *)
-        echo "Usage: $0 [scan|daemon|list|iface|status|count]"
+        echo "Usage: $0 [scan|daemon|list|iface|status|count|live]"
         exit 1
         ;;
 esac

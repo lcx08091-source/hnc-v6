@@ -273,6 +273,7 @@ func (c *autorateCtl) ApplyConfig(next autorateConfig, hotspotIface string) acti
 				return actionResp{OK: false, Error: "shaper apply failed", Detail: strings.TrimSpace(out)}
 			}
 		}
+		InvalidateDataplaneReconcileNative(c.hncDir, "")
 		_, _ = runBin(c.hncDir, "json_set.sh", "top", "global_shaper_down", downStr)
 		_, _ = runBin(c.hncDir, "json_set.sh", "top", "global_shaper_up", upStr)
 		_, _ = runBin(c.hncDir, "json_set.sh", "top", "global_shaper_enabled", "true")
@@ -280,6 +281,7 @@ func (c *autorateCtl) ApplyConfig(next autorateConfig, hotspotIface string) acti
 		if hotspotIface != "" {
 			_, _ = runBin(c.hncDir, "tc_manager.sh", "global_shaper", hotspotIface, "off", "0", "0")
 		}
+		InvalidateDataplaneReconcileNative(c.hncDir, "")
 		_, _ = runBin(c.hncDir, "json_set.sh", "top", "global_shaper_enabled", "false")
 	}
 
@@ -497,7 +499,14 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 			if !act.HotspotActive {
 				reason = "hotspot_off"
 			}
+			invalidateDP := false
 			ctl.mu.Lock()
+			if reason == "hotspot_off" && (ctl.st.SleepReason != "hotspot_off" || ctl.appliedIface != "") {
+				ctl.appliedIface = ""
+				ctl.appliedDown = 0
+				ctl.appliedUp = 0
+				invalidateDP = true
+			}
 			ctl.st.State = "sleeping"
 			ctl.st.SleepReason = reason
 			ctl.st.LoadDown = 0
@@ -506,6 +515,13 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 			ctl.st.ActualUpMbps = 0
 			ctl.prevSampleAt = time.Time{}
 			ctl.mu.Unlock()
+			if invalidateDP {
+				hncDir := ctl.hncDir
+				if hncDir == "" {
+					hncDir = s.hncDir
+				}
+				InvalidateDataplaneReconcileNative(hncDir, "")
+			}
 
 			actCh := activityChanged()
 			select {

@@ -395,6 +395,7 @@ func dispatchDataplaneVerifyAction(s *server, action string, p map[string]string
 		if ifc := readHotspotIfaceName(s.hncDir); ifc != "" {
 			_, _ = runBin(s.hncDir, "hnc_offload_guard.sh", "apply")
 			_, _ = runBin(s.hncDir, "tc_manager.sh", "sync_all", ifc)
+			InvalidateDataplaneReconcileNative(s.hncDir, "")
 		}
 	}
 	wantLeak := dpParamTruthy(p["check_goroutineleak"]) || dpParamTruthy(p["goroutineleak"])

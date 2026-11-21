@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,13 +19,13 @@ import (
 
 // m4TestEnv 重定向所有路径到临时目录(测试结束全部恢复)。
 // v5.31 审查修复: 原来只恢复 m4OwnerFile, 其余变量留在已删的临时目录; 名字解析的
-// 路径(device_names / hostname_cache / oui_overrides / mdns_resolve)和 Go 写日志
-// 没重定向 —— 测试会读写真实的 /data/local/hnc。
+// 路径(device_names / hostname_cache / oui_overrides / mdns_resolve)、bin/iptables_manager.sh
+// 和 Go 写日志一并重定向 —— 测试绝不读写真实的 /data/local/hnc。
 func m4TestEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
 	ptrs := []*string{&m4DevicesJSON, &m4DevicesTmpGo, &m4RefreshFile, &m4RefreshAckFile, &m4GoWriteLog,
-		&m4NamesPath, &m4CachePath, &m4OverridesPath, &m4MDNSBin, &rulesJSONPath}
+		&m4NamesPath, &m4CachePath, &m4OverridesPath, &m4MDNSBin, &rulesJSONPath, &iptablesMgrPath}
 	old := make([]string, len(ptrs))
 	for i, p := range ptrs {
 		old[i] = *p
@@ -44,6 +45,7 @@ func m4TestEnv(t *testing.T) string {
 	m4OverridesPath = filepath.Join(dir, "oui_overrides.json")
 	m4MDNSBin = filepath.Join(dir, "no_mdns_resolve")
 	rulesJSONPath = filepath.Join(dir, "rules.json")
+	iptablesMgrPath = filepath.Join(dir, "bin", "no_iptables_manager.sh")
 	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
 	return dir
 }
@@ -76,6 +78,9 @@ func TestM4ShouldWrite(t *testing.T) {
 // 热点没了就停。
 func TestWriterTick(t *testing.T) {
 	m4TestEnv(t)
+	oldNew := newM4RunnerFn
+	newM4RunnerFn = newStubM4Runner
+	t.Cleanup(func() { newM4RunnerFn = oldNew })
 	m := &m4WriterMgr{}
 	m.tick("lo", time.Now())
 	if m.runner == nil {
@@ -111,7 +116,7 @@ func TestRunnerWriteOut(t *testing.T) {
 	r.table.Fast = func(mac string) (string, string) { return "tv", "manual" }
 
 	// 直接构造事件走 Apply
-	if !r.table.Apply(neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: 0x02}, time.Now()) {
+	if !r.table.Apply(neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: neigh.NUDReachable}, time.Now()) {
 		t.Fatal("事件应生效")
 	}
 	statsAt := time.Time{}
@@ -161,7 +166,7 @@ func TestRunnerLifecycle(t *testing.T) {
 		}
 	}()
 	// 送一条事件, 轮询等 devices.json 出现(带超时, 不裸 sleep)
-	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.109"), MAC: "02:5a:00:00:00:09", State: 0x02}}
+	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.109"), MAC: "02:5a:00:00:00:09", State: neigh.NUDReachable}}
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		if b, err := os.ReadFile(m4DevicesJSON); err == nil {
@@ -179,7 +184,7 @@ func TestRunnerLifecycle(t *testing.T) {
 
 // TestRefreshTriggersFullSync v5.31 T4 / v5.33: 「立刻扫一次」—— 往 run/devices.refresh
 // 写 nonce 后, 写者应在 1 秒内全量扫、写 devices.json, 然后把同一个 nonce 写进
-// run/devices.refresh.ack(device_detect.sh scan 等的就是它; 回执出现时 devices.json
+// run/devices.refresh.ack(bin/device_detect.sh scan 等的就是它; 回执出现时 devices.json
 // 必须已经是这次扫描的结果)。「改动前会失败」: v5.32 没有回执文件。
 func TestRefreshTriggersFullSync(t *testing.T) {
 	dir := m4TestEnv(t)
@@ -199,7 +204,7 @@ func TestRefreshTriggersFullSync(t *testing.T) {
 			return nil, nil
 		}
 		return []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.109"),
-			MAC: "02:5a:00:00:00:09", State: 0x02}}, nil
+			MAC: "02:5a:00:00:00:09", State: neigh.NUDReachable}}, nil
 	}
 	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
 	r.blacklistFn = func() map[string]bool { return nil }
@@ -262,10 +267,11 @@ func TestReadNonce(t *testing.T) {
 	}
 }
 
-// fakeNeighSource 假订阅源: Read 从 channel 取一批事件。
+// fakeNeighSource 假订阅源: Read 从 channel 取一批事件, Close 幂等关闭。
 type fakeNeighSource struct {
 	ch   chan []neigh.Entry
 	stop chan struct{}
+	once sync.Once
 }
 
 func (f *fakeNeighSource) Read() ([]neigh.Entry, error) {
@@ -277,7 +283,10 @@ func (f *fakeNeighSource) Read() ([]neigh.Entry, error) {
 	}
 }
 
-func (f *fakeNeighSource) Close() error { close(f.stop); return nil }
+func (f *fakeNeighSource) Close() error {
+	f.once.Do(func() { close(f.stop) })
+	return nil
+}
 
 // TestM4NextTickMS v5.32 T4: 主循环下一拍间隔 —— 有事(dirty / 待解析名字 /
 // 在途解析)200ms, 全空闲 m4IdleTickMS(500ms)。改动前固定 200ms(m4WriteHardRateMS)。
@@ -384,10 +393,10 @@ func m4WaitCount(c *atomic.Int32, base int32, limit time.Duration) (time.Duratio
 }
 
 // TestRefreshLatencyWhenIdle v5.32 审查修复: 空闲降频后 REFRESH 仍要在 1 秒内反映到
-// devices.json(device_detect.sh do_scan_via_daemon: SIGUSR1 后 sleep 1 比 mtime,
+// devices.json(bin/device_detect.sh do_scan_via_daemon: SIGUSR1 后 sleep 1 比 mtime,
 // 没变就当 hotspotd 卡死、退回 shell 扫描)。最坏情况是 touch 刚好落在一拍之后 ——
 // 这里等到一拍刚过再 touch, 量到全量扫的用时。GLM 版空闲拍 1 秒, 这一步要 ~1 秒,
-// 加上 hotspotd 转发和写盘就超出 device_detect.sh 的 1 秒窗口。
+// 加上 hotspotd 转发和写盘就超出 bin/device_detect.sh 的 1 秒窗口。
 func TestRefreshLatencyWhenIdle(t *testing.T) {
 	r, _, dumped := m4IdleRunner(t)
 	r.start()
@@ -415,7 +424,7 @@ func TestRefreshLatencyWhenIdle(t *testing.T) {
 	}
 	// 空闲拍 + 调度余量, 必须给 hotspotd 转发 / 写盘 / sleep 1 的抖动留出空间
 	if took > 800*time.Millisecond {
-		t.Fatalf("空闲时 REFRESH 用了 %v 才全量扫(上限 800ms; device_detect.sh 只等 1 秒)", took)
+		t.Fatalf("空闲时 REFRESH 用了 %v 才全量扫(上限 800ms; bin/device_detect.sh 只等 1 秒)", took)
 	}
 	t.Logf("空闲时 REFRESH → 全量扫 %v", took)
 }
@@ -443,7 +452,7 @@ func TestRunnerEventStormDoesNotStarveTick(t *testing.T) {
 			}
 			ip := net.IPv4(192, 168, 43, byte(100+i%2))
 			select {
-			case src.ch <- []neigh.Entry{{IfIndex: 7, IP: ip, MAC: "02:5a:00:00:00:01", State: 0x02}}:
+			case src.ch <- []neigh.Entry{{IfIndex: 7, IP: ip, MAC: "02:5a:00:00:00:01", State: neigh.NUDReachable}}:
 			case <-stopFeed:
 				return
 			}
