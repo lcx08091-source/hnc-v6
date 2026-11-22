@@ -40,7 +40,7 @@ unzip -l "$SRC" > "$LIST" 2>/dev/null || { fail "cannot list zip: $SRC"; say "su
 ENTRIES="$OUTDIR/.artifact_entries.$$"
 awk 'NR>3 && $0 !~ /---------/ {print $4}' "$LIST" | sed '/^$/d' > "$ENTRIES"
 
-_APF_VER=$(awk -F= '$1=="version"{print $2; exit}' "$SCRIPT_DIR/../module.prop" 2>/dev/null)
+_APF_VER=$(awk -F= '$1=="version"{print $2; exit}' "$SCRIPT_DIR/../module.prop" 2>/dev/null | tr -d '\r')
 say "HNC flashable artifact picker ${_APF_VER:-v6.1}"
 say "source=$SRC"
 say "outdir=$OUTDIR"
@@ -51,9 +51,39 @@ if grep -x 'module.prop' "$ENTRIES" >/dev/null 2>&1; then
 else
     NESTED=$(grep -E '\.zip$' "$ENTRIES" | sed '/^$/d')
     NESTED_COUNT=$(printf '%s\n' "$NESTED" | sed '/^$/d' | wc -l | tr -d ' ')
+    INNER=""
     if [ "$NESTED_COUNT" = "1" ]; then
-        INNER=$(printf '%s\n' "$NESTED" | head -1)
-        warn "source looks like an Actions outer wrapper; extracting inner ZIP: $INNER"
+        INNER=$(printf '%s\n' "$NESTED" | head -n 1)
+    elif [ "$NESTED_COUNT" -gt 1 ] 2>/dev/null; then
+        # GitHub Actions outer artifact bundles HNC-*.zip alongside dpi-rules.zip.
+        # Prefer a unique HNC-*.zip entry; otherwise inspect nested zips for a unique root module.prop.
+        HNC_CANDS=$(printf '%s\n' "$NESTED" | grep -E '(^|/)HNC-[^/]*\.zip$' | sed '/^$/d')
+        HNC_COUNT=$(printf '%s\n' "$HNC_CANDS" | sed '/^$/d' | wc -l | tr -d ' ')
+        if [ "$HNC_COUNT" = "1" ]; then
+            INNER=$(printf '%s\n' "$HNC_CANDS" | head -n 1)
+        else
+            PROBE_TMP="$OUTDIR/.probe_inner.$$.zip"
+            MOD_CANDS=""
+            MOD_COUNT=0
+            while IFS= read -r _cand; do
+                [ -n "$_cand" ] || continue
+                if unzip -p "$SRC" "$_cand" > "$PROBE_TMP" 2>/dev/null && [ -s "$PROBE_TMP" ]; then
+                    if unzip -l "$PROBE_TMP" 2>/dev/null | awk 'NR>3 && $0 !~ /---------/ {print $4}' | grep -x 'module.prop' >/dev/null 2>&1; then
+                        MOD_CANDS="$_cand"
+                        MOD_COUNT=$((MOD_COUNT + 1))
+                    fi
+                fi
+            done <<EOF_NESTED
+$NESTED
+EOF_NESTED
+            rm -f "$PROBE_TMP" 2>/dev/null || true
+            if [ "$MOD_COUNT" = "1" ]; then
+                INNER="$MOD_CANDS"
+            fi
+        fi
+    fi
+    if [ -n "$INNER" ]; then
+        warn "source looks like an Actions outer wrapper (nested_zips=$NESTED_COUNT); extracting inner ZIP: $INNER"
         unzip -p "$SRC" "$INNER" > "$OUTDIR/$(basename "$INNER")" 2>/dev/null
         FLASHABLE="$OUTDIR/$(basename "$INNER")"
         [ -s "$FLASHABLE" ] && ok "inner flashable ZIP extracted: $FLASHABLE" || fail "failed to extract inner ZIP: $INNER"

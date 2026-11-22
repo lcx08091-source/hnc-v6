@@ -30,6 +30,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"runtime"
 	"syscall"
 	"unsafe"
 )
@@ -185,16 +186,11 @@ type bpfAttrObjGet struct {
 	FileFlags uint32
 }
 
-// bpfPathBuf v5.12: 包级变量强制堆分配(理由同 EBPFSampler.key), 仅启动时
-// 单 goroutine 使用一次。
-var bpfPathPtr *byte
-
 func bpfObjGetCall(path string) (int, error) {
 	cptr, err := syscall.BytePtrFromString(path)
 	if err != nil {
 		return -1, err
 	}
-	bpfPathPtr = cptr
 	attr := bpfAttrObjGet{
 		Pathname: uint64(uintptr(unsafe.Pointer(cptr))),
 	}
@@ -211,6 +207,8 @@ func bpfObjGetCall(path string) (int, error) {
 		uintptr(unsafe.Pointer(&pad)),
 		unsafe.Sizeof(attr),
 	)
+	runtime.KeepAlive(cptr)
+	runtime.KeepAlive(&pad)
 	if errno != 0 {
 		return -1, errno
 	}
@@ -244,6 +242,9 @@ func bpfMapLookupElemCall(mapFD int, key, value unsafe.Pointer) error {
 		uintptr(unsafe.Pointer(&pad)),
 		unsafe.Sizeof(attr),
 	)
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(value)
+	runtime.KeepAlive(&pad)
 	if errno != 0 {
 		return errno
 	}
@@ -271,6 +272,9 @@ func bpfMapGetNextKeyCall(mapFD int, key, nextKey unsafe.Pointer) error {
 		uintptr(unsafe.Pointer(&pad)),
 		unsafe.Sizeof(attr),
 	)
+	runtime.KeepAlive(key)
+	runtime.KeepAlive(nextKey)
+	runtime.KeepAlive(&pad)
 	if errno != 0 {
 		return errno
 	}

@@ -454,8 +454,8 @@ func scoreMacPair(np, op *macProfile) (score int, reasons []string, ok bool) {
 	if np == nil || op == nil {
 		return 0, nil, false
 	}
-	// 同时在线过 → 不可能是同一台设备换了 MAC
-	if np.FirstSeen > 0 && op.LastSeen > np.FirstSeen+macMergeOverlapSlop {
+	// 同时在线过(旧 MAC 在新 MAC 首次出现之后仍活跃, 即 gap < 0) → 不可能是同一台设备换了 MAC, 直接排除
+	if np.FirstSeen > 0 && op.LastSeen > np.FirstSeen {
 		return 0, nil, false
 	}
 	ident := 0 // 正向身份分(不含时间)
@@ -541,60 +541,70 @@ func scoreMacPair(np, op *macProfile) (score int, reasons []string, ok bool) {
 		}
 	}
 	// 常用应用集合 + 小众专属应用 DNA 命中(区分国民泛应用与个人专属栈)
-	appOverlap := 0.0
+	// Jaccard 与共振加分剔除 ubiquitousMergeApps, 防同品牌陌生设备仅凭国民泛应用误合并;
+	// 仅当双方都无任何非泛用应用且应用数 >= 3 时给予低权重参考分(封顶 6 分, 且绝不触发共振)。
+	rareAppOverlap := 0.0
 	var rareCommon []string
 	if len(np.Apps) >= 2 && len(op.Apps) >= 2 {
-		j, common := jaccard(np.Apps, op.Apps)
-		appOverlap = j
-		for _, a := range common {
-			if !isUbiquitousMergeApp(a) {
-				rareCommon = append(rareCommon, a)
+		rareNP := filterNonUbiquitousApps(np.Apps)
+		rareOP := filterNonUbiquitousApps(op.Apps)
+		if len(rareNP) > 0 && len(rareOP) > 0 {
+			rj, rc := jaccard(rareNP, rareOP)
+			rareAppOverlap = rj
+			rareCommon = rc
+			if len(rareNP) >= 2 && len(rareOP) >= 2 {
+				if pts := int(math.Round(20 * rj)); pts >= 3 {
+					show := rareCommon
+					if len(show) > 4 {
+						show = show[:4]
+					}
+					add(pts, fmt.Sprintf("常用应用重合 %d%%(%s)", int(math.Round(rj*100)), strings.Join(show, "、")))
+				}
 			}
-		}
-		if len(np.Apps) >= 3 && len(op.Apps) >= 3 {
-			if pts := int(math.Round(20 * j)); pts >= 3 {
+			// 非对称包含度 + 小众专属应用命中: 刚重连的新 MAC 只跑了少量专属应用, 且大部分落在旧画像
+			contain := float64(len(rareCommon)) / float64(len(rareNP))
+			if len(rareCommon) > 0 && contain >= 0.75 {
+				showR := rareCommon
+				if len(showR) > 3 {
+					showR = showR[:3]
+				}
+				add(8, "专属非常见应用特征吻合("+strings.Join(showR, "、")+")")
+			}
+		} else if len(rareNP) == 0 && len(rareOP) == 0 && len(np.Apps) >= 3 && len(op.Apps) >= 3 {
+			j, common := jaccard(np.Apps, op.Apps)
+			if pts := int(math.Round(6 * j)); pts >= 3 {
 				show := common
 				if len(show) > 4 {
 					show = show[:4]
 				}
-				add(pts, fmt.Sprintf("常用应用重合 %d%%(%s)", int(math.Round(j*100)), strings.Join(show, "、")))
+				add(pts, fmt.Sprintf("常用应用重合 %d%%(通用应用参考:%s)", int(math.Round(j*100)), strings.Join(show, "、")))
 			}
-		}
-		// 非对称包含度 + 小众专属应用命中: 刚重连的新 MAC 只跑了 2~4 个应用, 但全部落在旧画像且含小众专属应用
-		contain := float64(len(common)) / float64(len(np.Apps))
-		if len(rareCommon) > 0 && contain >= 0.75 {
-			showR := rareCommon
-			if len(showR) > 3 {
-				showR = showR[:3]
-			}
-			add(8, "专属非常见应用特征吻合("+strings.Join(showR, "、")+")")
 		}
 	}
 	// v6.0 匿名轮换 MAC 多维栈共振补偿 (针对 iOS 18+ Rotating MAC / Android 15+ / RFC 7844 隐藏 DHCP 主机名):
 	// 当设备主动隐藏主机名时, 旧版缺少 35 分主机名项导致上限被卡在 ~60 分;
-	// 若无任何品牌/型号/系统冲突, 且 DHCP Option 55 协议栈 + JA4 指纹簇 + 应用画像 + 终端家族四维同时正交吻合, 予以 +16 共振补偿!
+	// 若无任何品牌/型号/系统冲突, 且 DHCP Option 55 协议栈 + JA4 指纹簇 + 非泛用专属应用画像 + 终端家族四维同时正交吻合, 予以 +16 共振补偿!
 	hasHardConflict := diff(np.Brand, op.Brand) || diff(np.Model, op.Model) || diff(np.OS, op.OS) || diff(np.Type, op.Type) || diff(np.DHCPFP, op.DHCPFP)
 	noHostname := strings.TrimSpace(np.DHCPName) == "" && strings.TrimSpace(np.MDNSName) == ""
 	famAligned := eq(np.Brand, op.Brand) || eq(np.Model, op.Model) || eq(np.OS, op.OS) || eq(np.VendorClass, op.VendorClass)
-	if !hasHardConflict && noHostname && eq(np.DHCPFP, op.DHCPFP) && famAligned && ja4Overlap >= 0.50 && (appOverlap >= 0.50 || len(rareCommon) >= 1) {
+	if !hasHardConflict && noHostname && eq(np.DHCPFP, op.DHCPFP) && famAligned && ja4Overlap >= 0.50 && (rareAppOverlap >= 0.50 || len(rareCommon) >= 1) {
 		add(16, "匿名轮换 MAC 多维协议栈共振(DHCP 栈+TLS 指纹+应用画像一致)")
 	}
 	if ident < macMergeIdentMin {
 		return 0, nil, false
 	}
-	// 时间接近: 旧 MAC 最后出现 → 新 MAC 首次出现
+	// 时间接近: 旧 MAC 最后出现 → 新 MAC 首次出现 (gap < 0 已在上方排除, 不给时间加分)
 	if np.FirstSeen > 0 && op.LastSeen > 0 {
 		gap := np.FirstSeen - op.LastSeen
-		if gap < 0 {
-			gap = 0
-		}
-		switch {
-		case gap <= 600:
-			add(15, "旧 MAC 离线 "+humanGap(gap)+"后新 MAC 出现")
-		case gap <= 3600:
-			add(10, "旧 MAC 离线 "+humanGap(gap)+"后新 MAC 出现")
-		case gap <= 86400:
-			add(5, "旧 MAC 离线 "+humanGap(gap)+"后新 MAC 出现")
+		if gap >= 0 {
+			switch {
+			case gap <= 600:
+				add(15, "旧 MAC 离线 "+humanGap(gap)+"后新 MAC 出现")
+			case gap <= 3600:
+				add(10, "旧 MAC 离线 "+humanGap(gap)+"后新 MAC 出现")
+			case gap <= 86400:
+				add(5, "旧 MAC 离线 "+humanGap(gap)+"后新 MAC 出现")
+			}
 		}
 	}
 	if score > 100 {
@@ -666,6 +676,19 @@ func isUbiquitousMergeApp(appID string) bool {
 	}
 	_, ok := ubiquitousMergeApps[k]
 	return ok
+}
+
+func filterNonUbiquitousApps(apps []string) []string {
+	if len(apps) == 0 {
+		return nil
+	}
+	var out []string
+	for _, a := range apps {
+		if !isUbiquitousMergeApp(a) {
+			out = append(out, a)
+		}
+	}
+	return out
 }
 
 // ─── 后台循环 ──────────────────────────────────────────────────────────

@@ -611,14 +611,16 @@ static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
             memcpy(&rel, rel_base + k * sizeof(Elf64_Rel), sizeof(rel));
             uint32_t sym_idx = (uint32_t)ELF64_R_SYM(rel.r_info);
             uint32_t typ     = (uint32_t)ELF64_R_TYPE(rel.r_info);
-            size_t insn_idx  = (size_t)(rel.r_offset / 8);
-            if (typ != R_BPF_64_64 || (rel.r_offset % 8) != 0 ||
-                insn_idx + 1 >= ninsn || sym_idx >= nsym) {
+            if (typ != R_BPF_64_64 || (rel.r_offset % 8ULL) != 0ULL ||
+                rel.r_offset >= (uint64_t)insnsz ||
+                ((uint64_t)insnsz - rel.r_offset) < 16ULL ||
+                sym_idx >= nsym) {
                 LOGE("unsupported or out-of-bounds relocation (type=%u sym=%u) in %s",
                      typ, sym_idx, sec_name);
                 free(insns);
                 return -1;
             }
+            size_t insn_idx = (size_t)(rel.r_offset / 8ULL);
             Elf64_Sym sym;
             memcpy(&sym, sym_base + (size_t)sym_idx * sizeof(Elf64_Sym), sizeof(sym));
             if (sym.st_name >= strsz) {
@@ -646,27 +648,48 @@ static int load_prog_sec(struct elf_ctx *c, const char *sec_name,
         }
     }
 
-    char *logbuf = calloc(1, 1U << 16);
+    /* Two-phase BPF_PROG_LOAD: load silently first (log_level=0) so Linux 6.1 GKI
+     * does not fail valid programs with -ENOSPC when verbose verifier logs exceed 64KB. */
     union bpf_attr_pad a;
     memset(&a, 0, sizeof(a));
     a.attr.prog_type = BPF_PROG_TYPE_SCHED_CLS;
     a.attr.insns     = (uint64_t)(uintptr_t)insns;
     a.attr.insn_cnt  = (uint32_t)ninsn;
     a.attr.license   = (uint64_t)(uintptr_t)"GPL";
-    if (logbuf) {
-        a.attr.log_buf   = (uint64_t)(uintptr_t)logbuf;
-        a.attr.log_size  = 1U << 16;
-        a.attr.log_level = 1;
-    }
+    a.attr.log_level = 0;
+    a.attr.log_buf   = 0;
+    a.attr.log_size  = 0;
+
     int fd = sys_bpf(BPF_PROG_LOAD, &a);
-    free(insns);
     if (fd < 0) {
-        LOGE("BPF_PROG_LOAD(%s): %s", sec_name, strerror(errno));
+        int load_errno = errno;
+        const size_t log_cap = 512U * 1024U;
+        char *logbuf = calloc(1, log_cap);
+        if (logbuf) {
+            memset(&a, 0, sizeof(a));
+            a.attr.prog_type = BPF_PROG_TYPE_SCHED_CLS;
+            a.attr.insns     = (uint64_t)(uintptr_t)insns;
+            a.attr.insn_cnt  = (uint32_t)ninsn;
+            a.attr.license   = (uint64_t)(uintptr_t)"GPL";
+            a.attr.log_buf   = (uint64_t)(uintptr_t)logbuf;
+            a.attr.log_size  = (uint32_t)log_cap;
+            a.attr.log_level = 1;
+            int retry_fd = sys_bpf(BPF_PROG_LOAD, &a);
+            if (retry_fd >= 0) {
+                free(logbuf);
+                free(insns);
+                return retry_fd;
+            }
+            logbuf[log_cap - 1] = '\0';
+        }
+        LOGE("BPF_PROG_LOAD(%s): %s", sec_name, strerror(load_errno));
         if (logbuf && logbuf[0])
             fprintf(stderr, "--- verifier log (%s) ---\n%s--------------------\n",
                     sec_name, logbuf);
+        free(logbuf);
+        errno = load_errno;
     }
-    free(logbuf);
+    free(insns);
     return fd;
 }
 

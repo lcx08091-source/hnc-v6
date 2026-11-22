@@ -50,6 +50,8 @@ func actionCaptureRecord(s *server, p map[string]string) actionResp {
 		}
 		minutes = n
 	}
+	stop := filepath.Join(s.hncDir, "run", "capture_record.stop")
+	_ = os.Remove(stop)
 	req := filepath.Join(s.hncDir, "run", "capture_record.request")
 	if err := os.WriteFile(req, []byte(fmt.Sprintf("%d\n", minutes)), 0o644); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}

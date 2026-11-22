@@ -90,6 +90,7 @@ type flowScalpelEngine struct {
 	sweepHook     func(time.Time)
 
 	srv           *server
+	applyMu       sync.Mutex
 	mu            sync.Mutex
 	rules         []ScalpelActiveRule
 	hookEnsuredV4 bool
@@ -381,57 +382,85 @@ func (e *flowScalpelEngine) Cut(now time.Time, tuple ScalpelTuple, mode string) 
 		family = scalpelAfInet6
 	}
 
-	e.mu.Lock()
-	e.pruneExpiredLocked(now)
-	resetDur := e.resetDuration
-	if resetDur <= 0 {
-		resetDur = scalpelResetTTL
-	}
-	freezeDur := e.freezeDur
-	if freezeDur <= 0 {
-		freezeDur = scalpelFreezeTTL
-	}
-
-	expReset := now.Add(resetDur)
-	r5s := ScalpelActiveRule{
-		ID:          fmt.Sprintf("sc_%d_rst", seq),
-		Mode:        "reset_5s",
-		IsIPv6:      isV6,
-		Tuple:       norm,
-		MatchSport:  true,
-		CreatedAt:   now.Unix(),
-		ExpiresAt:   expReset,
-		ExpiresUnix: expReset.Unix(),
-	}
-	e.rules = append(e.rules, r5s)
-
+	var resetDur time.Duration
 	var expFreeze time.Time
-	if mode == scalpelModeFreeze15m {
-		expFreeze = now.Add(freezeDur)
-		r15m := ScalpelActiveRule{
-			ID:          fmt.Sprintf("sc_%d_frz", seq),
-			Mode:        "freeze_15m",
+	var activeCnt int
+	var iptErr error
+	func() {
+		e.applyMu.Lock()
+		defer e.applyMu.Unlock()
+		e.mu.Lock()
+		ch4, ch6 := e.pruneExpiredLocked(now)
+		resetDur = e.resetDuration
+		if resetDur <= 0 {
+			resetDur = scalpelResetTTL
+		}
+		freezeDur := e.freezeDur
+		if freezeDur <= 0 {
+			freezeDur = scalpelFreezeTTL
+		}
+
+		expReset := now.Add(resetDur)
+		r5s := ScalpelActiveRule{
+			ID:          fmt.Sprintf("sc_%d_rst", seq),
+			Mode:        "reset_5s",
 			IsIPv6:      isV6,
 			Tuple:       norm,
-			MatchSport:  false,
+			MatchSport:  true,
 			CreatedAt:   now.Unix(),
-			ExpiresAt:   expFreeze,
-			ExpiresUnix: expFreeze.Unix(),
+			ExpiresAt:   expReset,
+			ExpiresUnix: expReset.Unix(),
 		}
-		e.rules = append(e.rules, r15m)
-	}
+		e.rules = append(e.rules, r5s)
 
-	payload := buildScalpelRestorePayload(isV6, e.rules)
-	runner := e.iptRunner
-	activeCnt := len(e.rules)
-	e.mu.Unlock()
-	e.notifyRuleAdded()
+		if mode == scalpelModeFreeze15m {
+			expFreeze = now.Add(freezeDur)
+			r15m := ScalpelActiveRule{
+				ID:          fmt.Sprintf("sc_%d_frz", seq),
+				Mode:        "freeze_15m",
+				IsIPv6:      isV6,
+				Tuple:       norm,
+				MatchSport:  false,
+				CreatedAt:   now.Unix(),
+				ExpiresAt:   expFreeze,
+				ExpiresUnix: expFreeze.Unix(),
+			}
+			e.rules = append(e.rules, r15m)
+		}
 
-	e.ensureForwardJump(isV6)
-	var iptErr error
-	if runner != nil {
-		iptErr = runner(family, payload)
-	}
+		if isV6 {
+			ch6 = true
+		} else {
+			ch4 = true
+		}
+		var p4, p6 string
+		if ch4 {
+			p4 = buildScalpelRestorePayload(false, e.rules)
+		}
+		if ch6 {
+			p6 = buildScalpelRestorePayload(true, e.rules)
+		}
+		runner := e.iptRunner
+		activeCnt = len(e.rules)
+		e.mu.Unlock()
+		e.notifyRuleAdded()
+
+		e.ensureForwardJump(isV6)
+		if runner != nil {
+			if isV6 {
+				iptErr = runner(scalpelAfInet6, p6)
+				if ch4 {
+					_ = runner(scalpelAfInet, p4)
+				}
+			} else {
+				iptErr = runner(scalpelAfInet, p4)
+				if ch6 {
+					_ = runner(scalpelAfInet6, p6)
+				}
+			}
+		}
+	}()
+	_ = family
 	e.cutTotal.Add(1)
 
 	time.AfterFunc(resetDur+50*time.Millisecond, func() {
@@ -479,6 +508,9 @@ func (e *flowScalpelEngine) pruneExpiredLocked(now time.Time) (changedV4, change
 
 // SweepExpired 清理已到期的 5s/15m 规则并同步刷新对应协议栈的 HNC_SCALPEL 子链。
 func (e *flowScalpelEngine) SweepExpired(now time.Time) {
+	e.applyMu.Lock()
+	defer e.applyMu.Unlock()
+
 	e.mu.Lock()
 	ch4, ch6 := e.pruneExpiredLocked(now)
 	var p4, p6 string
@@ -502,9 +534,14 @@ func (e *flowScalpelEngine) SweepExpired(now time.Time) {
 }
 
 func (e *flowScalpelEngine) summary() map[string]any {
+	now := time.Now()
 	e.mu.Lock()
-	e.pruneExpiredLocked(time.Now())
-	cnt := len(e.rules)
+	cnt := 0
+	for _, r := range e.rules {
+		if now.Before(r.ExpiresAt) {
+			cnt++
+		}
+	}
 	e.mu.Unlock()
 	return map[string]any{
 		"active_rules": cnt,
@@ -659,8 +696,12 @@ func (s *server) apiScalpelFlows(w http.ResponseWriter, r *http.Request) {
 
 	eng := s.v6State().scalpel
 	eng.mu.Lock()
-	eng.pruneExpiredLocked(now)
-	activeRules := append([]ScalpelActiveRule(nil), eng.rules...)
+	activeRules := make([]ScalpelActiveRule, 0, len(eng.rules))
+	for _, r := range eng.rules {
+		if now.Before(r.ExpiresAt) {
+			activeRules = append(activeRules, r)
+		}
+	}
 	eng.mu.Unlock()
 
 	frozenEndpoint := func(src, dst string, dport int, proto string) int64 {

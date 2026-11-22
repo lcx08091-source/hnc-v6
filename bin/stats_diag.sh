@@ -47,13 +47,13 @@ stats_jsonl_summary() {
   out="$(awk -v kind="$kind" -v now="$now" '
   function mac_seen(m) { if (m != "" && !(m in macs)) { macs[m]=1; uniq++ } }
   function get_num(line, key,    r,s) {
-    r="\\\"" key "\\\"[[:space:]]*:[[:space:]]*[0-9]+"
+    r="\"" key "\"[[:space:]]*:[[:space:]]*[0-9]+"
     if (match(line, r)) { s=substr(line,RSTART,RLENGTH); sub(/.*:[[:space:]]*/,"",s); return s+0 }
     return -1
   }
   function get_str(line, key,    r,s) {
-    r="\\\"" key "\\\"[[:space:]]*:[[:space:]]*\\\"[^\\\"]*\\\""
-    if (match(line, r)) { s=substr(line,RSTART,RLENGTH); sub(/.*:[[:space:]]*\\\"/,"",s); sub(/\\\"$/,"",s); return s }
+    r="\"" key "\"[[:space:]]*:[[:space:]]*\"[^\"]*\""
+    if (match(line, r)) { s=substr(line,RSTART,RLENGTH); sub(/.*:[[:space:]]*"/,"",s); sub(/"$/,"",s); return s }
     return ""
   }
   {

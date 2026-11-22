@@ -29,6 +29,12 @@ on:
         type: string
         default: ''
 
+# Serialize push(main/tag) and manual release workflows to prevent dual-stream races overwriting Releases;
+# PR runs stay isolated per ref and cancel superseded commits.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.ref || 'release-serial' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -138,9 +144,14 @@ jobs:
             # c. 只允许在 main 上发版
             [ "$GITHUB_REF" = "refs/heads/main" ] \
               || { echo "ERROR: 发版只能在 main 上运行 (当前 $GITHUB_REF)"; exit 1; }
-            # d. tag 不得已存在
-            if git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            # d. tag 不得已存在(显式区分 rc=0 存在 / rc=2 不存在 / 其他为网络或鉴权故障)
+            LS_RC=0
+            git ls-remote --exit-code origin "refs/tags/$TAG" >/dev/null 2>&1 || LS_RC=$?
+            if [ "$LS_RC" -eq 0 ]; then
               echo "ERROR: tag $TAG 已存在于 origin"; exit 1
+            elif [ "$LS_RC" -ne 2 ]; then
+              echo "ERROR: git ls-remote 查询 origin tag $TAG 失败 (rc=$LS_RC，疑似网络或鉴权故障)" >&2
+              exit 1
             fi
             echo "Release mode: will create tag+release $TAG at $GITHUB_SHA"
           elif printf '%s' "$GITHUB_REF" | grep -q '^refs/tags/v'; then
@@ -151,11 +162,18 @@ jobs:
             CAND="$MODULE_VERSION"
             if ! echo "$CAND" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then
               echo "module.prop version '$CAND' 格式不合发版规则, 只构建不发版"
-            elif git ls-remote --exit-code origin "refs/tags/$CAND" >/dev/null 2>&1; then
-              echo "tag $CAND 已存在(版本号没升), 只构建不发版"
             else
-              TAG="$CAND"
-              echo "Auto-release mode: push main, will create tag+release $TAG at $GITHUB_SHA"
+              LS_RC=0
+              git ls-remote --exit-code origin "refs/tags/$CAND" >/dev/null 2>&1 || LS_RC=$?
+              if [ "$LS_RC" -eq 0 ]; then
+                echo "tag $CAND 已存在(版本号没升), 只构建不发版"
+              elif [ "$LS_RC" -eq 2 ]; then
+                TAG="$CAND"
+                echo "Auto-release mode: push main, will create tag+release $TAG at $GITHUB_SHA"
+              else
+                echo "ERROR: git ls-remote 查询 origin tag $CAND 失败 (rc=$LS_RC，疑似网络或鉴权故障)" >&2
+                exit 1
+              fi
             fi
           else
             echo "No release for this run (build only)"
@@ -519,6 +537,12 @@ jobs:
             -x "daemon/**/*.go" \
             -x "daemon/**/*.c" \
             -x "daemon/**/*.h" \
+            -x "daemon/hnc_httpd/testdata*" \
+            -x "daemon/hnc_httpd/go.mod" \
+            -x "daemon/hnc_httpd/go.sum" \
+            -x "daemon/hotspotd*" \
+            -x "daemon/clsact_ctl*" \
+            -x "daemon/tc_netlink*" \
             -x "tools/*" -x "tools" \
             -x "daemon/**/web/*" \
             -x "daemon/**/build.sh" \

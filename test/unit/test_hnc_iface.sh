@@ -12,8 +12,9 @@ fx_init() {
     echo '{"version":1,"devices":{}}' > "$HNC_TEST_DIR/data/rules.json"
     printf 'IP address       HW type     Flags       HW address            Mask     Device\n' > "$FX/arp"
     : > "$FX/ip_addr"; : > "$FX/ip_route"; : > "$FX/route_get"; : > "$FX/calls"
-    cat > "$FX/mock/dumpsys" <<'M'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'M'
 echo "dumpsys $*" >> "$FX/calls"
 case "$1" in
     tethering) cat "$FX/dumpsys_tethering" 2>/dev/null ;;
@@ -22,8 +23,10 @@ case "$1" in
 esac
 exit 0
 M
-    cat > "$FX/mock/ip" <<'M'
-#!/bin/sh
+    } > "$FX/mock/dumpsys"
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'M'
 echo "ip $*" >> "$FX/calls"
 case "$*" in
     "-4 -o addr show") cat "$FX/ip_addr" ;;
@@ -32,12 +35,15 @@ case "$*" in
 esac
 exit 0
 M
-    cat > "$FX/mock/iptables" <<'M'
-#!/bin/sh
+    } > "$FX/mock/ip"
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'M'
 echo "iptables $*" >> "$FX/calls"
 cat "$FX/tetherctrl" 2>/dev/null
 exit 0
 M
+    } > "$FX/mock/iptables"
     chmod +x "$FX/mock/"*
     export FX
 }
@@ -59,7 +65,7 @@ irun() {
     HNC_DIR="$HNC_TEST_DIR" HNC_SKIP_PATH_HARDENING=1 HNC_SYS_NET="$FX/sys" HNC_PROC_NET_ARP="$FX/arp" \
     PATH="$FX/mock:$PATH" sh "$IFSCRIPT" "$@" 2>/dev/null
 }
-jf() { sed -n "s/.*\"$1\":\\(\"[^\"]*\"\\|\\[[^]]*\\]\\|[a-z0-9]*\\).*/\\1/p" "$HNC_TEST_DIR/run/iface_detect.json" 2>/dev/null | head -n1; }
+jf() { sed -En "s/.*\"$1\":(\"[^\"]*\"|\\[[^]]*\\]|[a-z0-9]*).*/\\1/p" "$HNC_TEST_DIR/run/iface_detect.json" 2>/dev/null | head -n1; }
 
 # ─── ColorOS 16(RMX5010): wlan2 热点 + wlan0 STA + rmnet_data2 上游 ───────────
 test_start "hnc_iface: ColorOS wlan2 via dumpsys tethering, upstream rmnet_data2=cell"

@@ -25,6 +25,7 @@ HTTPD_PID=$(head -n 1 "$RUN/httpd.pid" 2>/dev/null | tr -dc '0-9')
 if [ -z "$HTTPD_PID" ] || ! kill -0 "$HTTPD_PID" 2>/dev/null; then
     echo "- HNC: WebUI 守护进程未就绪，正在后台唤醒服务..."
     if [ -f "$MODDIR/service.sh" ]; then
+        mkdir -p "$HNC_DIR/logs" 2>/dev/null
         nohup sh "$MODDIR/service.sh" </dev/null >>"$HNC_DIR/logs/service.log" 2>&1 &
         sleep 2
     fi

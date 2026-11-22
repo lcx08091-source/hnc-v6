@@ -393,18 +393,34 @@ func buildExpandedRule(sni string, parent l3Rule, uid int, hits int, pkg string,
 	if subdomain == "" {
 		subdomain = sni
 	}
-	// Sanitize subdomain into a rule-id-safe suffix.
-	idSuffix := strings.ReplaceAll(subdomain, ".", "_")
+	// Sanitize subdomain into a rule-id-safe suffix and dynamically trim so total ID <= 64
+	// (matching normalizeRuleID limit).
+	idSuffix := strings.ReplaceAll(strings.ToLower(subdomain), ".", "_")
 	idSuffix = strings.ReplaceAll(idSuffix, "-", "_")
-	if len(idSuffix) > 40 {
-		idSuffix = idSuffix[:40]
+	const (
+		maxRuleIDLen = 64
+		autoExpSep   = "_autoexp_"
+	)
+	maxSuffix := maxRuleIDLen - len(parent.ID) - len(autoExpSep)
+	if maxSuffix > 40 {
+		maxSuffix = 40
+	}
+	if maxSuffix < 0 {
+		maxSuffix = 0
+	}
+	if len(idSuffix) > maxSuffix {
+		idSuffix = idSuffix[:maxSuffix]
+	}
+	ruleID := parent.ID + autoExpSep + idSuffix
+	if len(ruleID) > maxRuleIDLen {
+		ruleID = ruleID[:maxRuleIDLen]
 	}
 	displayName := parent.Name
 	if displayName == "" {
 		displayName = parent.ID
 	}
 	return autoExpandedRule{
-		ID:         parent.ID + "_autoexp_" + idSuffix,
+		ID:         ruleID,
 		Name:       displayName + " (自动扩展: " + subdomain + ")",
 		App:        displayName + " (自动扩展: " + subdomain + ")",
 		Category:   parent.Category,

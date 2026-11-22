@@ -546,6 +546,8 @@ func (s *server) currentBlackboxActivity() (<-chan struct{}, Activity) {
 	return ch, act
 }
 
+const v6BlackboxAutorateMaxAgeSec = 15
+
 func (s *server) readBlackboxAutorate() (blackboxAutorateReading, bool) {
 	if s == nil {
 		return blackboxAutorateReading{}, false
@@ -557,6 +559,16 @@ func (s *server) readBlackboxAutorate() (blackboxAutorateReading, bool) {
 		return blackboxAutorateReading{}, false
 	}
 	ar := s.autorate.Snapshot()
+	if !ar.Enabled || (ar.State != "active" && ar.State != "backoff") {
+		return blackboxAutorateReading{}, false
+	}
+	if ar.UpdatedAt <= 0 {
+		return blackboxAutorateReading{}, false
+	}
+	ageSec := time.Now().Unix() - ar.UpdatedAt
+	if ageSec < -5 || ageSec > v6BlackboxAutorateMaxAgeSec {
+		return blackboxAutorateReading{}, false
+	}
 	var out blackboxAutorateReading
 	out.RTTMs = ar.RTTMs
 	out.BaseRTTMs = ar.BaseRTTMs
@@ -853,6 +865,9 @@ var (
 		"startup_fp.json",
 		"fp_prototypes.json",
 		"dpi_self_config.json",
+		"vector_express.json",
+		"update_leash.json",
+		"thermo_cruise.json",
 	}
 	v6DynamicConfigNameRE = regexp.MustCompile(`^v6_[a-z0-9_.-]{1,48}\.json$`)
 )
@@ -881,6 +896,56 @@ func isAllowedBackupConfigName(name string) bool {
 		}
 	}
 	return v6DynamicConfigNameRE.MatchString(name)
+}
+
+func isBackupSensitiveKey(k string) bool {
+	lk := strings.ToLower(strings.TrimSpace(k))
+	if lk == "" {
+		return false
+	}
+	if sensitiveKeys[lk] || lk == "hotspot_pass" || lk == "psk" {
+		return true
+	}
+	if strings.Contains(lk, "password") || strings.Contains(lk, "secret") || strings.Contains(lk, "token") {
+		return true
+	}
+	if strings.HasSuffix(lk, "_pass") || strings.HasSuffix(lk, "_pin") || strings.HasSuffix(lk, "_psk") {
+		return true
+	}
+	return false
+}
+
+func stripBackupSensitiveKeys(v any) {
+	switch m := v.(type) {
+	case map[string]any:
+		for k, child := range m {
+			if isBackupSensitiveKey(k) {
+				delete(m, k)
+				continue
+			}
+			stripBackupSensitiveKeys(child)
+		}
+	case []any:
+		for _, child := range m {
+			stripBackupSensitiveKeys(child)
+		}
+	}
+}
+
+// sanitizeBackupRulesJSON 在导出 rules.json 前剥离热点密码等敏感键, 既防止凭据外泄又不破坏往返 SHA256 一致性。
+func sanitizeBackupRulesJSON(canon []byte) ([]byte, error) {
+	dec := json.NewDecoder(bytes.NewReader(canon))
+	dec.UseNumber()
+	var root map[string]any
+	if err := dec.Decode(&root); err != nil || root == nil {
+		return canon, nil
+	}
+	stripBackupSensitiveKeys(root)
+	reEncoded, err := json.Marshal(root)
+	if err != nil {
+		return nil, err
+	}
+	return canonicalCompactJSON(reEncoded)
 }
 
 // canonicalCompactJSON 对任意合法 JSON 字节做紧凑规范化(排序键 + 去空白), 确保跨平台 SHA256 完全确定性一致。
@@ -1045,6 +1110,11 @@ func ExportBackupBundle(hncDir string) (V6BackupBundle, error) {
 		if err != nil {
 			continue
 		}
+		if name == "rules.json" {
+			if sanitized, sErr := sanitizeBackupRulesJSON(canon); sErr == nil {
+				canon = sanitized
+			}
+		}
 		canonMap[name] = canon
 		rawFiles[name] = json.RawMessage(canon)
 	}
@@ -1053,6 +1123,9 @@ func ExportBackupBundle(hncDir string) (V6BackupBundle, error) {
 	if len(canonMap) == 0 {
 		defBytes, _ := json.Marshal(defaultRulesRoot())
 		canon, _ := canonicalCompactJSON(defBytes)
+		if sanitized, sErr := sanitizeBackupRulesJSON(canon); sErr == nil {
+			canon = sanitized
+		}
 		canonMap["rules.json"] = canon
 		rawFiles["rules.json"] = json.RawMessage(canon)
 	}
@@ -1069,12 +1142,8 @@ func ExportBackupBundle(hncDir string) (V6BackupBundle, error) {
 	}, nil
 }
 
-// RestoreBackupBundle 严格校验整机备份载荷(白名单文件名 + 单文件/总表 SHA256 + 业务语义校验),
-// 通过两阶段同目录 `.tmp` 预写 + fsync + `os.Rename` 原子恢复全部配置, 任何一步失败保证零半截污染!
-func RestoreBackupBundle(hncDir string, bundle V6BackupBundle) ([]string, error) {
-	if strings.TrimSpace(hncDir) == "" {
-		return nil, errors.New("empty hncDir")
-	}
+// validateBackupBundle 纯内存执行整机备份载荷的白名单、语法、业务语义及常量时间 SHA256 校验。
+func validateBackupBundle(bundle V6BackupBundle) (map[string][]byte, error) {
 	if bundle.SchemaVersion != v6BackupSchemaVersion {
 		return nil, fmt.Errorf("unsupported schema_version %q (want %q)", bundle.SchemaVersion, v6BackupSchemaVersion)
 	}
@@ -1112,9 +1181,16 @@ func RestoreBackupBundle(hncDir string, bundle V6BackupBundle) ([]string, error)
 			}
 		}
 	}
+	return canonMap, nil
+}
 
+// restoreValidatedBackupBundle 将已校验通过的规范化配置集合通过两阶段 .tmp + fsync + os.Rename 原子落盘。
+func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte) ([]string, error) {
+	if strings.TrimSpace(hncDir) == "" {
+		return nil, errors.New("empty hncDir")
+	}
 	dataDir := filepath.Join(hncDir, "data")
-	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		return nil, fmt.Errorf("mkdir data: %w", err)
 	}
 
@@ -1153,7 +1229,7 @@ func RestoreBackupBundle(hncDir string, bundle V6BackupBundle) ([]string, error)
 
 		destPath := filepath.Join(dataDir, name)
 		tmpPath := filepath.Join(dataDir, fmt.Sprintf(".%s.restore.%d.%d.tmp", name, pid, tsNano))
-		f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+		f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
 		if err != nil {
 			cleanupTmp()
 			return nil, fmt.Errorf("stage %s: %w", name, err)
@@ -1190,6 +1266,41 @@ func RestoreBackupBundle(hncDir string, bundle V6BackupBundle) ([]string, error)
 	return restored, nil
 }
 
+// RestoreBackupBundle 严格校验整机备份载荷(白名单文件名 + 单文件/总表 SHA256 + 业务语义校验),
+// 通过两阶段同目录 `.tmp` 预写 + fsync + `os.Rename` 原子恢复全部配置, 任何一步失败保证零半截污染!
+func RestoreBackupBundle(hncDir string, bundle V6BackupBundle) ([]string, error) {
+	if strings.TrimSpace(hncDir) == "" {
+		return nil, errors.New("empty hncDir")
+	}
+	canonMap, err := validateBackupBundle(bundle)
+	if err != nil {
+		return nil, err
+	}
+	return restoreValidatedBackupBundle(hncDir, canonMap)
+}
+
+// isBackupLoopbackAllowed 严格限制高危整机配置恢复端点仅限本机 loopback 调用;
+// 拒绝一切携带远程会话 Token/TLS/Cookie/Origin/Referer 的非 loopback 请求,
+// 仅保留 Go httptest.NewRequest 直调裸 ServeMux 的合成默认地址兼容。
+func isBackupLoopbackAllowed(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if isLoopbackRequest(r) {
+		return true
+	}
+	if tid, ok := r.Context().Value(ctxKeyTokenID).(string); ok && tid != "" {
+		return false
+	}
+	if r.TLS != nil || len(r.Cookies()) > 0 {
+		return false
+	}
+	if r.Header.Get("Origin") != "" || r.Header.Get("Referer") != "" {
+		return false
+	}
+	return r.RemoteAddr == "192.0.2.1:1234" && r.Host == "example.com"
+}
+
 func (s *server) apiBackupGet(w http.ResponseWriter, r *http.Request) {
 	bundle, err := ExportBackupBundle(s.hncDir)
 	if err != nil {
@@ -1203,9 +1314,12 @@ func (s *server) apiBackupGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *server) apiBackupPost(w http.ResponseWriter, r *http.Request) {
-	s.actionMu.Lock()
-	defer s.actionMu.Unlock()
+	if !isBackupLoopbackAllowed(r) {
+		writeJSON(w, http.StatusForbidden, map[string]any{"ok": false, "error": "backup restore is restricted to loopback"})
+		return
+	}
 
+	// 网络读取、JSON 解析与 SHA256 语义校验全部在 s.actionMu 之外完成, 防止慢速大载荷长期阻塞全局操作锁
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, v6BackupMaxBodyBytes))
 	if err != nil {
 		writeJSON(w, http.StatusRequestEntityTooLarge, map[string]any{"ok": false, "error": "backup payload too large or read error"})
@@ -1217,9 +1331,17 @@ func (s *server) apiBackupPost(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "invalid backup json: " + err.Error()})
 		return
 	}
-	restored, err := RestoreBackupBundle(s.hncDir, bundle)
+	canonMap, err := validateBackupBundle(bundle)
 	if err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": err.Error()})
+		return
+	}
+
+	s.actionMu.Lock()
+	restored, rErr := restoreValidatedBackupBundle(s.hncDir, canonMap)
+	if rErr != nil {
+		s.actionMu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": rErr.Error()})
 		return
 	}
 	InvalidateDataplaneReconcileNative(s.hncDir, "")
@@ -1227,10 +1349,11 @@ func (s *server) apiBackupPost(w http.ResponseWriter, r *http.Request) {
 	// 若运行在真实原生数据面环境, 顺带触发一次原生全量恢复使新配置即时下发内核
 	var dpRestored bool
 	if useNativeDataplane(s.hncDir) {
-		if _, rErr := s.NativeFullRestoreV6(); rErr == nil {
+		if _, nErr := s.NativeFullRestoreV6(); nErr == nil {
 			dpRestored = true
 		}
 	}
+	s.actionMu.Unlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":                 true,
@@ -1306,9 +1429,13 @@ func (s *server) v6ScreenshotPackSummary() map[string]any {
 		miSnap = AnalyzeMultiInterfaces(CollectLiveIfaceProbeInputs(s.hncDir), s.currentHotspotIface(), nil)
 	}
 
-	ratios := globalV6Subtrees.lastRatios
+	var ratios QoSDynamicRatios
 	if s != nil {
 		ratios = s.CurrentDynamicQoSRatios()
+	} else {
+		globalV6Subtrees.mu.RLock()
+		ratios = globalV6Subtrees.lastRatios
+		globalV6Subtrees.mu.RUnlock()
 	}
 	_, incidents := globalJitterBlackbox.Snapshot(0, true)
 	var latestIncident any
@@ -1327,6 +1454,11 @@ func (s *server) v6ScreenshotPackSummary() map[string]any {
 			"tun0_vpn_active":    miSnap.Tun0Guard.VPNActive,
 			"tun0_loop_risk":     miSnap.Tun0Guard.LoopRiskDetected,
 			"low16_mark_safe":    miSnap.Tun0Guard.Low16MarkSafe,
+			"tun0_guard": map[string]any{
+				"vpn_active":         miSnap.Tun0Guard.VPNActive,
+				"loop_risk_detected": miSnap.Tun0Guard.LoopRiskDetected,
+				"low16_mark_safe":    miSnap.Tun0Guard.Low16MarkSafe,
+			},
 		},
 		"native_subtrees": map[string]any{
 			"app_limit_range": "1:9001..1:9998",

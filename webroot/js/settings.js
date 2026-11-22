@@ -226,9 +226,10 @@ function simAfter(msg) { return function () { if (msg) toast(msg); return Promis
 function sItem(ic, t, s, right, attrs) { return '<div class="row"' + (attrs || '') + '>' + gi(ic[0], ic[1]) + '<span class="tx"><div class="t">' + t + '</div>' + (s ? '<div class="s">' + s + '</div>' : '') + '</span>' + (right || '') + '</div>'; }
 function sBtn(ic, t, s, act, hint, cls) { return '<button class="row" data-act="' + act + '">' + gi(ic[0], ic[1]) + '<span class="tx"><div class="t">' + t + '</div>' + (s ? '<div class="s">' + s + '</div>' : '') + '</span>' + (hint ? '<span class="hint-a ' + (cls || '') + '">' + hint + '</span>' : ico('right', 'chev')) + '</button>'; }
 function sFold(key, ic, t, s, body, ctrl) {
-  return '<div class="row-wrap' + (S.open[key] ? ' open' : '') + '" data-foldkey="' + key + '"><div class="row-h" style="padding:12px 14px"><button data-act="fold" data-key="' + key + '" style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left">' + gi(ic[0], ic[1]) +
+  var ek = esc(key);
+  return '<div class="row-wrap' + (S.open[key] ? ' open' : '') + '" data-foldkey="' + ek + '"><div class="row-h" style="padding:12px 14px"><button data-act="fold" data-key="' + ek + '" style="display:flex;align-items:center;gap:12px;flex:1;min-width:0;text-align:left">' + gi(ic[0], ic[1]) +
     '<span class="tx"><div class="t">' + t + '</div>' + (s ? '<div class="s">' + s + '</div>' : '') + '</span></button>' + (ctrl || '') +
-    '<button data-act="fold" data-key="' + key + '" aria-label="展开" style="padding:6px">' + ico('chev', 'chev') + '</button></div><div class="fold"><div><div class="fold-in set-body">' + body + '</div></div></div></div>';
+    '<button data-act="fold" data-key="' + ek + '" aria-label="展开" style="padding:6px">' + ico('chev', 'chev') + '</button></div><div class="fold"><div><div class="fold-in set-body">' + body + '</div></div></div></div>';
 }
 function val(v, cls) { return '<span class="v ' + (cls || '') + '">' + v + '</span>'; }
 function inp(id, v, u, attrs) { return '<span class="box"><input id="' + id + '" value="' + esc(v == null ? '' : v) + '" ' + (attrs || 'type="number" min="0"') + '>' + (u ? '<span class="u">' + u + '</span>' : '') + '</span>'; }
@@ -315,7 +316,7 @@ function renderSettings(anim1) {
       '<button class="btn pri press" data-act="sched-save">保存</button>') +
     sItem(['blue', 'wifi'], '热点接口', '当前热点使用的接口（实时）' + (lv.iface_method ? ' · 识别方式：' + esc(IFM_T[lv.iface_method] || lv.iface_method) : ''), val(esc(S.hotspot.iface || '—') + (S.hotspot.active === false ? ' · 未开启' : ''))) + tetherNote(lv) +
     sFold('iface', ['cyan', 'wifi'], '热点接口偏好', '默认自动识别；ColorOS 常见 wlan2', '<div style="display:flex;gap:8px">' + inp('iface-pref', c.hotspot_iface || 'auto', '', 'maxlength="15" placeholder="auto" style="font-family:var(--mono)"') + '<button class="btn pri press" data-act="iface-save">保存</button></div><div class="note">填 auto 让 HNC 自动识别；手动填接口名（如 wlan2 / ap0）用于识别不准的机型。</div>', val(esc(c.hotspot_iface || 'auto'))) +
-    sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val((OFFLOAD_T[S.offload.detail] || S.offload.detail || '—') + (S.offload.guard && S.offload.guard.fallback_active ? ' · 已兜底' : ''), S.offload.detail === 'ACTIVE' && !(S.offload.guard && S.offload.guard.fallback_active) ? 'warn' : 'ok')) +
+    sItem(['orange', 'rocket'], '硬件 offload', 'BPF tether 是否绕过 tc 限速', val(esc(OFFLOAD_T[S.offload.detail] || S.offload.detail || '—') + (S.offload.guard && S.offload.guard.fallback_active ? ' · 已兜底' : ''), S.offload.detail === 'ACTIVE' && !(S.offload.guard && S.offload.guard.fallback_active) ? 'warn' : 'ok')) +
     sItem(['red', 'shield'], '网站封锁 · DNS 层', '封锁网站时顺带拦掉该设备对这个域名的 DNS 查询，第一次连接就拦住', val({ available: '可用', unavailable: '内核不支持（只按 IP 拦）', unknown: '首次封锁时检测' }[c.conn_block_dns_layer] || '—', c.conn_block_dns_layer === 'unavailable' ? 'warn' : 'ok'))]);
   groups.push(['设备', rmacPolicyHtml(c) + mergeSettingsHtml()]);   // 随机 MAC 无感继承 + 防绕过护栏 + 合并建议
   // 告警总开关 + 新设备接入提醒(后端早就有, 旧新界面都没做设置)
@@ -349,7 +350,7 @@ function renderSettings(anim1) {
   groups.push(['远程访问', (KSU ? sItem(['blue', 'globe'], '启用远程访问服务', '开启后 :8443 监听，热点内其他设备可用浏览器访问（约 1 分钟生效）', toggle(remOn, 'data-set="remote" aria-label="远程访问服务"')) : sItem(['blue', 'globe'], '远程访问服务', '你正在通过远程访问使用 HNC；开关只能在本机 WebUI 里改', val('已开启', 'ok'))) +
     (remOn || !KSU ? '<div class="row">' + gi('gray', 'link') + '<span class="tx"><div class="t">访问地址</div><div class="s mono">' + esc(rUrl || '无法获取本机 IP · 请确认热点已开启') + '</div></span>' + (rUrl ? '<button class="linkish" data-act="url-copy">复制</button><button class="linkish" data-act="url-share">分享</button>' : '') + '</div>' : '') +
     (KSU ? sItem(['purple', 'lock'], '远程 PIN 配对鉴权', '安全基线常驻保护 · 局域网浏览器首次访问必须验证 6 位配对码', val('强制开启', 'ok')) : '') +
-    sBtn(['orange', 'star'], '生成配对码', '远端新设备首次连接用 · 120 秒有效', 'pair-new', '生成') +
+    (KSU ? sBtn(['orange', 'star'], '生成配对码', '远端新设备首次连接用 · 120 秒有效', 'pair-new', '生成') : '') +
     (c.webui_access ? sFold('webacc', ['red', 'shield'], 'WebUI 访问控制', { all: '热点内所有设备都能打开登录页', allowlist: '只有名单里的设备能连接', local_only: '只有本机能打开' }[c.webui_access.mode || 'all'] || '',
       seg('webacc-mode', [['all', '全部'], ['allowlist', '白名单'], ['local_only', '仅本机']], S.webaccMode || c.webui_access.mode || 'all', 'small') +
       '<label class="field" style="margin-top:10px">白名单（MAC 或 IP，逗号分隔，最多 32 个）' + inp('webacc-macs', (c.webui_access.macs || []).join(', '), '', 'placeholder="aa:bb:cc:dd:ee:ff, 192.168.43.25"') + '</label>' +
@@ -416,7 +417,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-beta.1', HNC_UI_VC = '6009201', HNC_UI_DATE = '2026-11-21';
+  var HNC_UI_VER = 'v6.1.0-beta.2', HNC_UI_VC = '6009202', HNC_UI_DATE = '2026-11-22';
   var bVer = String(l.backend_version || HNC_UI_VER);
   var bVc = String(l.backend_version_code || HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -459,7 +460,7 @@ function renderSettings(anim1) {
   var advCards = [
     scard('scard-v6', ['blue', 'vector'], '智能护航与配置备份',
       '游戏通话优先 · 后台更新限速 · 温控保护（' + esc(v6TempS) + '）· 隐私安检（' + v6LgHits + ' 条）',
-      (function(){ var _rv = String(l.backend_version || 'v6.1.0-beta.1'); var _short = _rv.replace(/^(v\d+\.\d+)\.\d+-(alpha|beta|rc)\.?(\d+).*$/i, function(_, m, c, n){ return m + ' ' + c.charAt(0).toUpperCase() + n; }); return '<span class="badge b-acc" title="' + esc(_rv) + '">' + esc(_short) + '</span>'; })(),
+      (function(){ var _rv = String(l.backend_version || 'v6.1.0-beta.2'); var _short = _rv.replace(/^(v\d+\.\d+)\.\d+-(alpha|beta|rc)\.?(\d+).*$/i, function(_, m, c, n){ return m + ' ' + c.charAt(0).toUpperCase() + n; }); return '<span class="badge b-acc" title="' + esc(_rv) + '">' + esc(_short) + '</span>'; })(),
       typeof v6SettingsBodyHtml === 'function' ? v6SettingsBodyHtml() : ''),
     scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
       'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
@@ -1175,13 +1176,13 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = m.version || (S.live && S.live.backend_version) || 'v6.1.0-beta.1';
+    var fbVer = m.version || (S.live && S.live.backend_version) || 'v6.1.0-beta.2';
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
         '<li><b>按需远程加载</b>：已移除主文件内嵌的 378 KB 历史更新日志，改为由服务端按需注入 <code>changelog.html</code>，单文件体积直降 35%+。</li>' +
         '<li><b>iOS 27 光学液态玻璃</b>：新增状态驱动边缘导光、晶莹水滴开关拇指、分段滑块水银拉伸形变、顶栏滚动动态折射与深色黑曜石菲涅尔反射。</li>' +
-        '<li><b>设置页四级卡片折叠</b>：支持「全部 / 常用 / 进阶 / 诊断」四级筛选与 12 张独立液态卡片折叠。</li>' +
+        '<li><b>设置页四级卡片折叠</b>：支持「全部 / 常用 / 进阶 / 诊断」四级筛选与 14 张独立液态卡片折叠。</li>' +
       '</ul></div>';
     if (location.protocol === 'file:' || window.__HNC_MOCK_META) { resolve(fallback); return; }
     try {
@@ -1200,7 +1201,16 @@ function showChangelog() {
     clCache = txt;
     var doc = new DOMParser().parseFromString(txt, 'text/html');
     $$('script,iframe,object,embed,form,link,meta,style', doc).forEach(function (n) { n.remove(); });
-    $$('*', doc.body).forEach(function (n) { Array.prototype.slice.call(n.attributes).forEach(function (a) { if (/^on/i.test(a.name) || (a.name === 'href' && /^\s*javascript:/i.test(a.value))) n.removeAttribute(a.name); }); });
+    $$('*', doc.body).forEach(function (n) {
+      Array.prototype.slice.call(n.attributes).forEach(function (a) {
+        var an = a.name.toLowerCase();
+        if (/^on/.test(an)) { n.removeAttribute(a.name); return; }
+        if (an === 'href' || an === 'xlink:href' || an === 'src' || an === 'action' || an === 'formaction') {
+          var av = String(a.value || '').replace(/[\u0000-\u0020]+/g, '');
+          if (/^(javascript|vbscript|data):/i.test(av)) n.removeAttribute(a.name);
+        }
+      });
+    });
     var b = $('#cl-body'); if (b) b.innerHTML = doc.body.innerHTML;
   }).catch(function (e) { var b = $('#cl-body'); if (b) b.innerHTML = '<div class="note err">读取 changelog.html 失败：' + esc(errText(e)) + '</div>'; });
 }

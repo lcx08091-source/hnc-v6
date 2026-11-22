@@ -937,20 +937,36 @@ func (w *Writer) enforceGlobalFlowLimitLocked(now int64) {
 		count int
 	}
 	counts := make([]clientFlowCount, 0, len(w.clients))
+	actualTotal := 0
 	for key, c := range w.clients {
 		if c.Flows != nil && len(c.Flows.flows) > 0 {
-			counts = append(counts, clientFlowCount{key, len(c.Flows.flows)})
+			n := len(c.Flows.flows)
+			actualTotal += n
+			counts = append(counts, clientFlowCount{key, n})
 		}
 	}
+	w.totalActiveFlows = actualTotal
+	if w.totalActiveFlows <= maxGlobalFlows || len(counts) == 0 {
+		return
+	}
 	sort.Slice(counts, func(i, j int) bool { return counts[i].count > counts[j].count })
-	// 从流最多的 client 开始压回 per-client 上限, 直到总量回限内。
+	// 按 excess 与每户公平配额计算目标预算, 从流最多的 client 开始压低直到总量回限内。
+	fairCap := maxGlobalFlows / len(counts)
 	for _, cfc := range counts {
 		if w.totalActiveFlows <= maxGlobalFlows {
 			break
 		}
 		if c, ok := w.clients[cfc.key]; ok && c.Flows != nil {
 			before := len(c.Flows.flows)
-			c.Flows.globalEvict(now, maxFlowsPerClient)
+			excess := w.totalActiveFlows - maxGlobalFlows
+			budget := before - excess
+			if budget < fairCap {
+				budget = fairCap
+			}
+			if budget < 0 {
+				budget = 0
+			}
+			c.Flows.globalEvict(now, budget)
 			w.totalActiveFlows -= before - len(c.Flows.flows)
 		}
 	}

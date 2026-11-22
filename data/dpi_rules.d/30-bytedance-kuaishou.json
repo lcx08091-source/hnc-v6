@@ -13,8 +13,7 @@
         "pglstatp.snssdk.com",
         "is.snssdk.com",
         "log.snssdk.com",
-        "log.zijieapi.com",
-        "api-access.pangolin-sdk-toutiao-b.com"
+        "log.zijieapi.com"
       ]
     },
     {
@@ -179,7 +178,8 @@
       "suffixes": [
         "ixigua.com"
       ],
-      "note": "ixigua.com 在字节系内部作为直播 CDN 共享给抖音/抖音极速版等。判定规则: 若同时大量抖音流量 → 属于抖音直播 CDN; 若抖音流量低 → 才可能是真的西瓜视频 App"
+      "note": "ixigua.com 在字节系内部作为直播 CDN 共享给抖音/抖音极速版等。判定规则: 若同时大量抖音流量 → 属于抖音直播 CDN; 若抖音流量低 → 才可能是真的西瓜视频 App",
+      "_parent_rule_id": "douyin"
     },
     {
       "id": "kuaishou",
@@ -302,7 +302,8 @@
       "suffixes": [
         "ixiguavideo.com",
         "ixiguapic.com"
-      ]
+      ],
+      "_parent_rule_id": "douyin"
     }
   ]
 }

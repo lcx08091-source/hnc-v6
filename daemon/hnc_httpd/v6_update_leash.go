@@ -136,14 +136,16 @@ type updateLeashEngine struct {
 	leashedCount atomic.Int64
 	totalSavedB  atomic.Uint64
 
-	srv         *server
-	mu          sync.Mutex
-	cfg         UpdateLeashConfig
-	sessions    map[string]*UpdateLeashSession // key = mac + "|" + targetHostOrIP
-	bypassedSet map[string]bool
-	pausedSet   map[string]bool
-	suffixCache []string
-	applyHook   func(active []UpdateLeashSession)
+	srv               *server
+	mu                sync.Mutex
+	cfg               UpdateLeashConfig
+	sessions          map[string]*UpdateLeashSession // key = mac + "|" + targetHostOrIP
+	bypassedSet       map[string]bool
+	pausedSet         map[string]bool
+	suffixCache       []string
+	applyHook         func(active []UpdateLeashSession)
+	lastPersistedKey  string
+	hasPersistedState bool
 }
 
 func newUpdateLeashEngine(s *server) *updateLeashEngine {
@@ -500,12 +502,59 @@ func (e *updateLeashEngine) persistActiveLeash(leashed []UpdateLeashSession) {
 	if e.srv == nil || e.srv.hncDir == "" {
 		return
 	}
+	sorted := make([]UpdateLeashSession, len(leashed))
+	copy(sorted, leashed)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i].SessionKey < sorted[j].SessionKey
+	})
+	type leashDigestItem struct {
+		SessionKey  string `json:"k"`
+		MAC         string `json:"m"`
+		SrcIP       string `json:"s"`
+		DstHost     string `json:"h"`
+		DstIP       string `json:"d"`
+		AppliedKbps int    `json:"r"`
+		State       string `json:"st"`
+		BypassOnce  bool   `json:"b"`
+		Paused      bool   `json:"p"`
+	}
+	digestList := make([]leashDigestItem, 0, len(sorted))
+	for _, it := range sorted {
+		digestList = append(digestList, leashDigestItem{
+			SessionKey:  it.SessionKey,
+			MAC:         it.MAC,
+			SrcIP:       it.SrcIP,
+			DstHost:     it.DstHost,
+			DstIP:       it.DstIP,
+			AppliedKbps: it.AppliedKbps,
+			State:       it.State,
+			BypassOnce:  it.BypassOnce,
+			Paused:      it.Paused,
+		})
+	}
+	digestBytes, err := json.Marshal(digestList)
+	if err != nil {
+		return
+	}
+	digestKey := string(digestBytes)
+	e.mu.Lock()
+	if e.hasPersistedState && e.lastPersistedKey == digestKey {
+		e.mu.Unlock()
+		return
+	}
+	e.mu.Unlock()
+
 	payload := map[string]any{
 		"updated_at": time.Now().Unix(),
-		"leashed":    leashed,
+		"leashed":    sorted,
 	}
 	if b, err := json.MarshalIndent(payload, "", "  "); err == nil {
-		_ = discoverWriteAtomic(e.activeRunPath(), b)
+		if discoverWriteAtomic(e.activeRunPath(), b) == nil {
+			e.mu.Lock()
+			e.lastPersistedKey = digestKey
+			e.hasPersistedState = true
+			e.mu.Unlock()
+		}
 	}
 }
 

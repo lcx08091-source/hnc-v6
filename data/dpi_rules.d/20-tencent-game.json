@@ -202,7 +202,6 @@
       "app": "腾讯游戏前台心跳 (behavior marker)",
       "category": "behavior-marker",
       "confidence": "very_high",
-      "suffix": "mdt.qq.com",
       "behavioral_rules": {
         "domains_to_track": [
           "game.eve.mdt.qq.com"
@@ -221,7 +220,10 @@
           "K80 火影后台保活: 20 queries / 5min = 4/min (背景节奏)",
           "RMX5010 PUBG 前台: 26+ queries / 5min ~= 5+/min (但屏幕亮+操作)"
         ]
-      }
+      },
+      "suffixes": [
+        "mdt.qq.com"
+      ]
     },
     {
       "id": "tencent_game_geo_template",

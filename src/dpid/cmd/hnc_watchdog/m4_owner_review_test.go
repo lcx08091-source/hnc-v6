@@ -3,6 +3,8 @@
 package main
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -14,6 +16,9 @@ import (
 	"testing"
 	"time"
 
+	"hnc.io/dpid/activity"
+	"hnc.io/dpid/devname"
+	"hnc.io/dpid/devscan"
 	"hnc.io/dpid/neigh"
 )
 
@@ -198,11 +203,19 @@ func TestRunnerIgnoresEventsUntilIfindexKnown(t *testing.T) {
 	}
 }
 
-// 审查修复 8(接线): 主循环探测到热点没开 → 停 Go 写者(原来写者照样每 200ms 醒一次)。
+// 审查修复 8(接线): 主循环探测到热点没开 → 停 Go 写者、写回 PENDING 并落盘在线时长。
 func TestHotspotDownStopsRunner(t *testing.T) {
 	clk := &fakeClock{now: time.Date(2026, 10, 10, 12, 0, 0, 0, time.Local)}
 	rec := newActionRec()
 	withFakeEnv(t, clk, rec)
+	var saved wdState
+	savedCalled := false
+	oldWrite := writeStateFn
+	writeStateFn = func(s wdState) {
+		saved = s
+		savedCalled = true
+	}
+	t.Cleanup(func() { writeStateFn = oldWrite })
 	rec.probeRC, rec.probeOut = 1, "" // 热点关了
 	fr := fakeRunner("wlan0")
 	m4Writer.runner = fr
@@ -215,6 +228,9 @@ func TestHotspotDownStopsRunner(t *testing.T) {
 	}
 	if m4Writer.runner != nil {
 		t.Fatal("停了以后 runner 应为 nil")
+	}
+	if !savedCalled || saved.kind != statePending {
+		t.Fatalf("热点关闭后应写回 PENDING 状态, got called=%v state=%+v", savedCalled, saved)
 	}
 }
 
@@ -250,7 +266,22 @@ func TestFindLiveByNameSkipsZombie(t *testing.T) {
 	dir := t.TempDir()
 	name := "hnczombie" + strconv.Itoa(os.Getpid()%1000)
 	bin := filepath.Join(dir, name)
-	if err := os.Symlink("/bin/true", bin); err != nil {
+	truePath := ""
+	for _, cand := range []string{"/system/bin/true", "/bin/true", "/usr/bin/true"} {
+		if _, err := os.Stat(cand); err == nil {
+			truePath = cand
+			break
+		}
+	}
+	if truePath == "" {
+		if p, err := exec.LookPath("true"); err == nil && p != "" {
+			truePath = p
+		}
+	}
+	if truePath == "" {
+		t.Skip("找不到 true 可执行文件")
+	}
+	if err := os.Symlink(truePath, bin); err != nil {
 		t.Skipf("建不了符号链接: %v", err)
 	}
 	cmd := exec.Command(bin)
@@ -272,5 +303,426 @@ func TestFindLiveByNameSkipsZombie(t *testing.T) {
 	}
 	if got := findLiveByName(name); got == pid {
 		t.Fatalf("按名字找到了僵尸进程 %d", pid)
+	}
+}
+
+func TestDevnameResolveContextSkipsExternalOnCancel(t *testing.T) {
+	dir := t.TempDir()
+	var called atomic.Int32
+	r := &devname.Resolver{
+		NamesPath:     filepath.Join(dir, "device_names.json"),
+		CachePath:     filepath.Join(dir, "hostname_cache.json"),
+		OverridesPath: filepath.Join(dir, "oui_overrides.json"),
+		RunDumpsys: func() ([]byte, error) {
+			called.Add(1)
+			return []byte("02:5a:00:00:00:01 hostname: dhcp-dev\n"), nil
+		},
+		RunMDNS: func(string) ([]byte, error) {
+			called.Add(1)
+			return []byte("mdns-dev\n"), nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	hn, src := r.ResolveContext(ctx, "02:5a:00:00:00:01", "192.168.43.10")
+	if called.Load() != 0 {
+		t.Fatalf("已取消的 ctx 不应触发外部解析, called=%d", called.Load())
+	}
+	if hn != "00000001" || src != "mac" {
+		t.Fatalf("期望兜底 MAC, 得 %q %q", hn, src)
+	}
+}
+
+func TestM4InitialEmptyFullSyncClearsZombieDevicesJSON(t *testing.T) {
+	m4TestEnv(t)
+	zombie := `{"02:de:ad:be:ef:01":{"ip":"192.168.43.99","mac":"02:de:ad:be:ef:01","hostname":"old-zombie","hostname_src":"dhcp","iface":"wlan2","rx_bytes":0,"tx_bytes":0,"status":"allowed","last_seen":1700000000}}`
+	if err := os.WriteFile(m4DevicesJSON, []byte(zombie), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := startTestRunner(t,
+		func() []neigh.Entry { return nil },
+		func() (int, error) { return 7, nil },
+		func(mac, ip string) (string, string) { return macFallback(mac), "mac" })
+	defer stopRunner(t, r)
+	if got, ok := waitDevices(t, 2*time.Second, func(s string) bool { return strings.TrimSpace(s) == "{}" }); !ok {
+		t.Fatalf("首轮 0 客户端全量扫应覆写 {} 清掉旧僵尸, 得 %q", got)
+	}
+}
+
+func TestM4StartupUnackedRefreshNotSwallowed(t *testing.T) {
+	m4TestEnv(t)
+	// 启动写者前先写入未回执的首屏刷新请求
+	if err := os.WriteFile(m4RefreshFile, []byte("boot-scan-1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r, _ := startTestRunner(t,
+		func() []neigh.Entry {
+			return []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.22"), MAC: "02:5a:00:00:00:22", State: neigh.NUDReachable}}
+		},
+		func() (int, error) { return 7, nil },
+		func(mac, ip string) (string, string) { return "boot-dev", "manual" })
+	defer stopRunner(t, r)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if b, err := os.ReadFile(m4RefreshAckFile); err == nil && strings.TrimSpace(string(b)) == "boot-scan-1" {
+			return
+		}
+		if time.Now().After(deadline) {
+			b, _ := os.ReadFile(m4RefreshAckFile)
+			t.Fatalf("启动前写入的未回执刷新请求被吞掉, ack=%q", b)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestM4RefreshUnconditionallyRefreshesIfaceAndGatesAck(t *testing.T) {
+	m4TestEnv(t)
+	var curIfIdx atomic.Int32
+	curIfIdx.Store(7)
+	var failDump atomic.Bool
+	failDump.Store(false)
+
+	r := newM4GoRunner("wlan2")
+	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
+	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
+	r.ifIndexFn = func(string) (int, error) { return int(curIfIdx.Load()), nil }
+	r.dumpIfFn = func(idx int) ([]neigh.Entry, error) {
+		if failDump.Load() {
+			return nil, errors.New("simulated dump error")
+		}
+		if idx == 12 {
+			return []neigh.Entry{{IfIndex: 12, IP: net.ParseIP("192.168.43.12"), MAC: "02:5a:00:00:00:12", State: neigh.NUDReachable}}, nil
+		}
+		return nil, nil
+	}
+	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
+	r.blacklistFn = func() map[string]bool { return nil }
+	r.hooks.Fast = func(mac string) (string, string) { return "rebuilt-dev", "manual" }
+	r.hooks.Full = func(mac, ip string) (string, string) { return "rebuilt-dev", "manual" }
+	r.applyHooks()
+	r.start()
+	defer stopRunner(t, r)
+
+	if _, ok := waitDevices(t, 2*time.Second, func(s string) bool { return strings.TrimSpace(s) == "{}" }); !ok {
+		t.Fatal("首轮应落盘 {}")
+	}
+
+	// 1. dump 失败时不得写 ack
+	failDump.Store(true)
+	if err := os.WriteFile(m4RefreshFile, []byte("fail-nonce\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(450 * time.Millisecond)
+	if b, err := os.ReadFile(m4RefreshAckFile); err == nil && strings.TrimSpace(string(b)) == "fail-nonce" {
+		t.Fatalf("dump 失败时不应写回执: %q", b)
+	}
+
+	// 2. 同名网卡重建(ifindex 7 -> 12, 非 0!)后恢复 dump: refreshDue 应无条件刷 refreshIface 并回执
+	curIfIdx.Store(12)
+	failDump.Store(false)
+	if err := os.WriteFile(m4RefreshFile, []byte("rebuild-nonce\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if b, err := os.ReadFile(m4RefreshAckFile); err == nil && strings.TrimSpace(string(b)) == "rebuild-nonce" {
+			devBytes, _ := os.ReadFile(m4DevicesJSON)
+			if !strings.Contains(string(devBytes), "02:5a:00:00:00:12") {
+				t.Fatalf("同名重建 ifindex=12 设备未写入: %s", devBytes)
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			b, _ := os.ReadFile(m4RefreshAckFile)
+			t.Fatalf("未收到 rebuild-nonce 回执, ack=%q", b)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func TestM4StopTimeoutCapAllowsOnExitFlush(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 11, 21, 14, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	withFakeEnv(t, clk, rec)
+
+	oldWait := m4StopWaitMax
+	m4StopWaitMax = 150 * time.Millisecond
+	t.Cleanup(func() { m4StopWaitMax = oldWait })
+
+	// 构造一个 doneCh 永不关闭的卡死写者
+	stuck := &m4GoRunner{iface: "wlan2", stopCh: make(chan struct{}), doneCh: make(chan struct{})}
+	m4Writer.mu.Lock()
+	m4Writer.runner = stuck
+	m4Writer.mu.Unlock()
+
+	setDevices(t, onlineAcc, clk.now, macA)
+	onlineAcc.sample(clk.now)
+
+	t0 := time.Now()
+	onExit()
+	if elapsed := time.Since(t0); elapsed > 1500*time.Millisecond {
+		t.Fatalf("onExit 超时兜底未生效, 耗时 %v", elapsed)
+	}
+	lines := readLines(t, onlineAcc.file)
+	if len(lines) != 1 || !strings.Contains(lines[0], macA) {
+		t.Fatalf("停机兜底后应执行 onlineAcc.flush(), 得 %v", lines)
+	}
+}
+
+func TestM4StopSkipsBlockingStatsAll(t *testing.T) {
+	m4TestEnv(t)
+	var statsCalls atomic.Int32
+	r := newM4GoRunner("wlan2")
+	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 8), stop: make(chan struct{})}
+	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
+	r.dumpIfFn = func(int) ([]neigh.Entry, error) { return nil, nil }
+	r.ifIndexFn = func(string) (int, error) { return 7, nil }
+	r.statsCmdFn = func() (map[string][2]int64, error) {
+		statsCalls.Add(1)
+		return map[string][2]int64{}, nil
+	}
+	r.blacklistFn = func() map[string]bool { return nil }
+	r.hooks.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.hooks.Full = func(mac, ip string) (string, string) { return "tv", "manual" }
+	r.applyHooks()
+	r.start()
+
+	if _, ok := waitDevices(t, 2*time.Second, func(s string) bool { return strings.TrimSpace(s) == "{}" }); !ok {
+		t.Fatal("首轮应落盘")
+	}
+	beforeStop := statsCalls.Load()
+	// 注入脏事件后立即停机: 停机 writeOut(force=false) 且 stopping=true 不得再次调用 statsCmdFn
+	src.ch <- []neigh.Entry{{IfIndex: 7, IP: net.ParseIP("192.168.43.88"), MAC: "02:5a:00:00:00:88", State: neigh.NUDReachable}}
+	time.Sleep(30 * time.Millisecond)
+	stopRunner(t, r)
+	if after := statsCalls.Load(); after != beforeStop {
+		t.Fatalf("停机落盘不应再调 statsCmdFn: before=%d after=%d", beforeStop, after)
+	}
+}
+
+func TestIsDozeZeroForkBatteryAndQuiet(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 11, 21, 15, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	withFakeEnv(t, clk, rec)
+
+	capFile := filepath.Join(t.TempDir(), "capacity")
+	oldCapFn := batteryCapPathFn
+	batteryCapPathFn = func() string { return capFile }
+	t.Cleanup(func() {
+		batteryCapPathFn = oldCapFn
+		dozeCacheMu.Lock()
+		dozeCheckTS = time.Time{}
+		dozeCached = false
+		dozeCacheMu.Unlock()
+	})
+	resetDozeCache := func() {
+		dozeCacheMu.Lock()
+		dozeCheckTS = time.Time{}
+		dozeCached = false
+		dozeCacheMu.Unlock()
+	}
+
+	// 1. 熄屏静默(Quiet=true) -> 直接 true, 0 fork
+	actSnapshotFn = func() activity.Snapshot {
+		return activity.Snapshot{OK: true, Level: activity.LevelBackground, Quiet: true}
+	}
+	if !isDoze() {
+		t.Fatal("activity Quiet=true 时 isDoze 应返回 true")
+	}
+
+	// 2. 亮屏且电量 80% -> false
+	actSnapshotFn = func() activity.Snapshot {
+		return activity.Snapshot{OK: true, Level: activity.LevelActive, Quiet: false}
+	}
+	_ = os.WriteFile(capFile, []byte("80\n"), 0o644)
+	resetDozeCache()
+	if isDoze() {
+		t.Fatal("亮屏且电量 80% 时不应为 Doze")
+	}
+
+	// 3. 电量 4% (<5%) -> true(保留低电降频)
+	_ = os.WriteFile(capFile, []byte("4\n"), 0o644)
+	clk.now = clk.now.Add(31 * time.Second)
+	if !isDoze() {
+		t.Fatal("电量 <5% 时应触发低电降频")
+	}
+
+	if rec.counts["is_doze"] != 0 {
+		t.Fatalf("isDoze 必须纯 Go 0-fork, 但调用了 %d 次 runAction(is_doze)", rec.counts["is_doze"])
+	}
+}
+
+func TestHandleActiveMigrateFailureStopsM4Writer(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 11, 21, 16, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	rec.probeOut = "ap0 192.168.43.1\n"
+	rec.rc["migrate"] = 1
+	withFakeEnv(t, clk, rec)
+
+	fr := fakeRunner("wlan2")
+	m4Writer.mu.Lock()
+	m4Writer.runner = fr
+	m4Writer.mu.Unlock()
+
+	handleActive("wlan2", &restoreThrottle{}, &activeAux{})
+	select {
+	case <-fr.doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("migrate 失败后应停掉旧网卡上的 m4Writer")
+	}
+	if m4Writer.runner != nil {
+		t.Fatal("migrate 失败后 runner 应置空")
+	}
+}
+
+func TestOnlineMinutesRollbackFlushFailAndHotspotDown(t *testing.T) {
+	a := withTempOnlineAcc(t)
+	t0 := time.Date(2026, 11, 21, 10, 0, 0, 0, cst)
+	setDevices(t, a, t0, macA)
+	a.sample(t0) // 首次记 5 分钟
+	if got := a.pending[onlineKey{"20261121", macA}]; got != 5 {
+		t.Fatalf("首次采样应为 5 分钟, 得 %d", got)
+	}
+
+	// 时钟回拨 3 分钟: 重置 a.last, 绝不白送 5 分钟
+	tBack := t0.Add(-3 * time.Minute)
+	setDevices(t, a, tBack, macA)
+	a.sample(tBack)
+	if got := a.pending[onlineKey{"20261121", macA}]; got != 5 {
+		t.Fatalf("时钟回拨不应白送分钟, 得 %d", got)
+	}
+	if !a.last.Equal(tBack) {
+		t.Fatalf("时钟回拨应重置 a.last=%v, 得 %v", tBack, a.last)
+	}
+
+	// 写入失败不得推进 a.flushed
+	badFile := filepath.Join(t.TempDir(), "missing-dir", "online_hours.jsonl")
+	goodFile := a.file
+	a.file = badFile
+	prevFlushed := a.flushed
+	a.flush(t0.Add(time.Hour))
+	if !a.flushed.Equal(prevFlushed) {
+		t.Fatalf("写失败不应推进 a.flushed: prev=%v cur=%v", prevFlushed, a.flushed)
+	}
+
+	// 恢复文件路径后调 hotspotDown: 落盘并清空 a.last
+	a.file = goodFile
+	a.hotspotDown(t0.Add(time.Hour))
+	if !a.last.IsZero() {
+		t.Fatalf("hotspotDown 后应重置 a.last, 得 %v", a.last)
+	}
+	if len(a.pending) != 0 {
+		t.Fatalf("hotspotDown 落盘后应清空 pending: %v", a.pending)
+	}
+	if lines := readLines(t, goodFile); len(lines) != 1 {
+		t.Fatalf("hotspotDown 应落盘 1 行, 得 %v", lines)
+	}
+}
+
+func TestAppLimitHasWorkAndNextWait(t *testing.T) {
+	dataTmp, runTmp := t.TempDir(), t.TempDir()
+	if appLimitHasWork(dataTmp, runTmp) {
+		t.Fatal("空目录不应判定 hasWork")
+	}
+	if got := appLimitNextWait(true, false, false, 0); got != appLimitIdlePoll {
+		t.Fatalf("热点空闲应放宽至 %v, 得 %v", appLimitIdlePoll, got)
+	}
+	if got := appLimitNextWait(false, false, true, 0); got != appLimitEmptyQuietPoll {
+		t.Fatalf("空配置且静默应放宽至 %v, 得 %v", appLimitEmptyQuietPoll, got)
+	}
+	if got := appLimitNextWait(false, false, false, 0); got != appLimitDirtyPollFast {
+		t.Fatalf("空配置且亮屏应 3s stat, 得 %v", got)
+	}
+	if err := os.WriteFile(filepath.Join(dataTmp, "app_limits.flat"), []byte("aa:bb:cc:dd:ee:01 game 1000\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if !appLimitHasWork(dataTmp, runTmp) {
+		t.Fatal("app_limits.flat 非空应判定 hasWork")
+	}
+	if got := appLimitNextWait(false, true, true, 0); got != appLimitApplyEvery {
+		t.Fatalf("有配置且静默应 30s 周期, 得 %v", got)
+	}
+}
+
+func TestSleepOrWakeDebounceShortensInsteadOfDropping(t *testing.T) {
+	oldLast := lastEventRound
+	t.Cleanup(func() { lastEventRound = oldLast })
+	// 清空可能残留的 linkWake
+	select {
+	case <-linkWake:
+	default:
+	}
+	// 距离上次事件 4.85s (还在 5s 防抖期内, 剩余 150ms)
+	lastEventRound = time.Now().Add(-eventMinGap + 150*time.Millisecond)
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		wakeMain()
+	}()
+	t0 := time.Now()
+	ok, woken := sleepOrWake(30 * time.Second)
+	took := time.Since(t0)
+	if !ok || !woken {
+		t.Fatalf("防抖期内事件应被延后交付而非丢弃: ok=%v woken=%v", ok, woken)
+	}
+	if took > 4*time.Second {
+		t.Fatalf("应缩短 30s 睡眠至防抖期满+settle, 实测耗时 %v", took)
+	}
+}
+
+func TestNativeExecCommandTimeoutKillsPgrp(t *testing.T) {
+	oldTimeout := nativeExecTimeout
+	nativeExecTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { nativeExecTimeout = oldTimeout })
+
+	t0 := time.Now()
+	_, rc, err := execCommandFn(shellPath(), "-c", "sleep 10")
+	took := time.Since(t0)
+	if rc != -1 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("超时应返回 rc=-1 + DeadlineExceeded, 得 rc=%d err=%v", rc, err)
+	}
+	if took > 3*time.Second {
+		t.Fatalf("超时回收过慢: %v", took)
+	}
+}
+
+func TestDevscanReResolveCooldownAndNoDowngrade(t *testing.T) {
+	tb := devscan.NewTable("wlan2", 7)
+	tb.Fast = func(mac string) (string, string) { return macFallback(mac), "mac" }
+	t0 := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	mac := "02:5a:00:00:00:55"
+	e := neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.55"), MAC: mac, State: neigh.NUDReachable}
+
+	// 1. 首次上线 -> pending -> 解析结果为 mac 兜底
+	tb.Apply(e, t0)
+	if !tb.ApplyResolution(mac, "00000055", "mac", t0.Add(2*time.Second)) {
+		t.Fatal("首次回填 mac 应成功")
+	}
+	// 5 秒内再收 ARP 事件: 不得因 HostnameSrc=="mac" 绕过 60s 冷却
+	tb.Apply(e, t0.Add(5*time.Second))
+	if tb.HasPending() {
+		t.Fatal("mac 兜底在 60s 冷却期内不应重新触发 pending")
+	}
+
+	// 2. 升级为有效主机名 dhcp 后, 满 60s 收到 ARP 事件不得降级为 pending / MAC 兜底
+	if !tb.ApplyResolution(mac, "LivingRoom-TV", "dhcp", t0.Add(10*time.Second)) {
+		t.Fatal("升级为 dhcp 主机名应成功")
+	}
+	tb.Apply(e, t0.Add(80*time.Second))
+	var got map[string]devscan.Device
+	if err := json.Unmarshal(tb.RenderJSON(nil, nil), &got); err != nil {
+		t.Fatal(err)
+	}
+	if d := got[mac]; d.Hostname != "LivingRoom-TV" || d.HostnameSrc != "dhcp" {
+		t.Fatalf("满 60s 重扫不得降级已有有效主机名, 得 %+v", d)
+	}
+	// 即使外部回填低优先级 mac 兜底也不得覆盖已有有效主机名
+	if tb.ApplyResolution(mac, "00000055", "mac", t0.Add(85*time.Second)) {
+		t.Fatal("ApplyResolution 不得用低优先级 mac 降级已有有效主机名")
+	}
+	if err := json.Unmarshal(tb.RenderJSON(nil, nil), &got); err != nil {
+		t.Fatal(err)
+	}
+	if d := got[mac]; d.Hostname != "LivingRoom-TV" || d.HostnameSrc != "dhcp" {
+		t.Fatalf("有效主机名被降级: %+v", d)
 	}
 }

@@ -132,7 +132,7 @@ function stagger(root, max) {
 function tween(el, to, dec) {
   if (!el) return;
   if (typeof performance !== 'undefined' && S && performance.now() < (S.scrollBusyUntil || 0)) {
-    cancelAnimationFrame(el._tw);
+    if (el._twRaf) { cancelAnimationFrame(el._twRaf); el._twRaf = 0; }
     el._v = to;
     var fastTxt = to.toFixed(dec);
     if (el.textContent !== fastTxt) el.textContent = fastTxt;

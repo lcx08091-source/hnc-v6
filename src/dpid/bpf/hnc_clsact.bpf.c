@@ -69,6 +69,16 @@ struct bpf_map_def SEC("maps") dev_stats_map = {
     .max_entries = HNC_DEV_SLOTS_MAX,
 };
 
+static __always_inline const __u8 *skb_data_ptr(const struct __sk_buff *skb)
+{
+    return (const __u8 *)(long)(*(const volatile __u32 *)&skb->data);
+}
+
+static __always_inline const __u8 *skb_data_end_ptr(const struct __sk_buff *skb)
+{
+    return (const __u8 *)(long)(*(const volatile __u32 *)&skb->data_end);
+}
+
 static __always_inline void copy_mac_key(struct mac_key *key, const __u8 *addr)
 {
     /* Ethernet dst/src offsets (0 and 6) are always 2-byte aligned regardless
@@ -171,8 +181,8 @@ static __always_inline void promote_uplink_realtime_pkt(struct __sk_buff *skb,
         return;
 
     __u32 base_off = l3_off & 0x3eU;
-    const __u8 *data = (const __u8 *)(long)skb->data;
-    const __u8 *data_end = (const __u8 *)(long)skb->data_end;
+    const __u8 *data = skb_data_ptr(skb);
+    const __u8 *data_end = skb_data_end_ptr(skb);
 
     if (h_proto == bpf_htons(ETH_P_IP)) {
         const __u8 *nh = data + base_off;
@@ -180,8 +190,8 @@ static __always_inline void promote_uplink_realtime_pkt(struct __sk_buff *skb,
             __u32 need = (base_off + 20U) & 0x7fU;
             if (pkt_len < need || bpf_skb_pull_data(skb, need) < 0)
                 return;
-            data = (const __u8 *)(long)skb->data;
-            data_end = (const __u8 *)(long)skb->data_end;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
             nh = data + base_off;
             if (nh + 20 > data_end)
                 return;
@@ -218,8 +228,8 @@ static __always_inline void promote_uplink_realtime_pkt(struct __sk_buff *skb,
             __u32 need_u = (udp_off + 8U) & 0xffU;
             if (pkt_len < need_u || bpf_skb_pull_data(skb, need_u) < 0)
                 return;
-            data = (const __u8 *)(long)skb->data;
-            data_end = (const __u8 *)(long)skb->data_end;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
             uh = data + udp_off;
             if (uh + 8 > data_end)
                 return;
@@ -244,8 +254,8 @@ static __always_inline void promote_uplink_realtime_pkt(struct __sk_buff *skb,
             __u32 need6 = (base_off + 40U) & 0x7fU;
             if (pkt_len < need6 || bpf_skb_pull_data(skb, need6) < 0)
                 return;
-            data = (const __u8 *)(long)skb->data;
-            data_end = (const __u8 *)(long)skb->data_end;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
             v6h = data + base_off;
             if (v6h + 40 > data_end)
                 return;
@@ -274,8 +284,8 @@ static __always_inline void promote_uplink_realtime_pkt(struct __sk_buff *skb,
             __u32 need_u6 = (udp6_off + 8U) & 0xffU;
             if (pkt_len < need_u6 || bpf_skb_pull_data(skb, need_u6) < 0)
                 return;
-            data = (const __u8 *)(long)skb->data;
-            data_end = (const __u8 *)(long)skb->data_end;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
             uh6 = data + udp6_off;
             if (uh6 + 8 > data_end)
                 return;
@@ -317,16 +327,16 @@ static __always_inline int apply_dev_mark_and_stats(struct __sk_buff *skb,
 static __always_inline int is_ipv6_ndp_ctrl(struct __sk_buff *skb, __u32 l3_off)
 {
     __u32 base_off = l3_off & 0x3eU;
-    const __u8 *data = (const __u8 *)(long)skb->data;
-    const __u8 *data_end = (const __u8 *)(long)skb->data_end;
+    const __u8 *data = skb_data_ptr(skb);
+    const __u8 *data_end = skb_data_end_ptr(skb);
     const __u8 *v6h = data + base_off;
 
     if (v6h + 40 > data_end) {
         __u32 pull_v6 = (base_off + 40U) & 0x7fU;
         if (skb->len < pull_v6 || bpf_skb_pull_data(skb, pull_v6) < 0)
             return 0;
-        data = (const __u8 *)(long)skb->data;
-        data_end = (const __u8 *)(long)skb->data_end;
+        data = skb_data_ptr(skb);
+        data_end = skb_data_end_ptr(skb);
         v6h = data + base_off;
         if (v6h + 40 > data_end)
             return 0;
@@ -362,8 +372,8 @@ static __always_inline int is_ipv6_ndp_ctrl(struct __sk_buff *skb, __u32 l3_off)
             __u32 need = safe_off + 8U;
             if (skb->len < need || bpf_skb_pull_data(skb, need) < 0)
                 return 0;
-            data = (const __u8 *)(long)skb->data;
-            data_end = (const __u8 *)(long)skb->data_end;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
             ext = data + safe_off;
             if (ext + 8 > data_end)
                 return 0;
@@ -397,8 +407,8 @@ static __always_inline int is_ipv6_ndp_ctrl(struct __sk_buff *skb, __u32 l3_off)
         __u32 need = icmp_off + 2U;
         if (skb->len < need || bpf_skb_pull_data(skb, need) < 0)
             return 0;
-        data = (const __u8 *)(long)skb->data;
-        data_end = (const __u8 *)(long)skb->data_end;
+        data = skb_data_ptr(skb);
+        data_end = skb_data_end_ptr(skb);
         icmp6 = data + icmp_off;
         if (icmp6 + 2 > data_end)
             return 0;
@@ -424,13 +434,13 @@ static __always_inline int parse_l2_hdr(struct __sk_buff *skb, int use_src_mac,
         proto != bpf_htons(ETH_P_8021AD))
         return -1;
 
-    const __u8 *data = (const __u8 *)(long)skb->data;
-    const __u8 *data_end = (const __u8 *)(long)skb->data_end;
+    const __u8 *data = skb_data_ptr(skb);
+    const __u8 *data_end = skb_data_end_ptr(skb);
     if (data + 14 > data_end) {
         if (skb->len < 14 || bpf_skb_pull_data(skb, 14) < 0)
             return -1;
-        data = (const __u8 *)(long)skb->data;
-        data_end = (const __u8 *)(long)skb->data_end;
+        data = skb_data_ptr(skb);
+        data_end = skb_data_end_ptr(skb);
         if (data + 14 > data_end)
             return -1;
     }
@@ -444,8 +454,8 @@ static __always_inline int parse_l2_hdr(struct __sk_buff *skb, int use_src_mac,
         if (data + 18 > data_end) {
             if (skb->len < 18 || bpf_skb_pull_data(skb, 18) < 0)
                 return -1;
-            data = (const __u8 *)(long)skb->data;
-            data_end = (const __u8 *)(long)skb->data_end;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
             if (data + 18 > data_end)
                 return -1;
         }
@@ -456,8 +466,8 @@ static __always_inline int parse_l2_hdr(struct __sk_buff *skb, int use_src_mac,
             if (data + 22 > data_end) {
                 if (skb->len < 22 || bpf_skb_pull_data(skb, 22) < 0)
                     return -1;
-                data = (const __u8 *)(long)skb->data;
-                data_end = (const __u8 *)(long)skb->data_end;
+                data = skb_data_ptr(skb);
+                data_end = skb_data_end_ptr(skb);
                 if (data + 22 > data_end)
                     return -1;
             }
@@ -493,16 +503,16 @@ int hnc_clsact_ingress(struct __sk_buff *skb)
 
     if (h_proto == bpf_htons(ETH_P_IP)) {
         __u32 ip_off = l3_off & 0x3eU;
-        const __u8 *data = (const __u8 *)(long)skb->data;
-        const __u8 *data_end = (const __u8 *)(long)skb->data_end;
+        const __u8 *data = skb_data_ptr(skb);
+        const __u8 *data_end = skb_data_end_ptr(skb);
         const __u8 *nh = data + ip_off;
 
         if (nh + 20 > data_end) {
             __u32 need = ip_off + 20U;
             if (skb->len < need || bpf_skb_pull_data(skb, need) < 0)
                 return TC_ACT_UNSPEC;
-            data = (const __u8 *)(long)skb->data;
-            data_end = (const __u8 *)(long)skb->data_end;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
             nh = data + ip_off;
             if (nh + 20 > data_end)
                 return TC_ACT_UNSPEC;

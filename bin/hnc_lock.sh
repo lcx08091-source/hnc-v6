@@ -173,6 +173,9 @@ mac_lock() {
     while [ $i -lt $_LOCK_TIMEOUT_ROUNDS ]; do
         # 1. 门禁检查: gate 被占 → 等(v5.9.0: 上游调用链自己持 gate 则豁免)
         if [ -d "$GATE_LOCK" ] && ! _gate_held_by_caller; then
+            if [ "$i" -ge 20 ] && [ $(( (i - 20) % 10 )) -eq 0 ]; then
+                _try_reclaim_stale "$GATE_LOCK"
+            fi
             _short_sleep
             i=$((i+1))
             continue

@@ -618,17 +618,19 @@ func calLiveWindow(snaps []calSnap, cur calSnap, uid *nsDump) *calOffloadWin {
 		}
 	}
 	var fwd uint64
-	fwdOK := false
-	if base.FwdV4OK && cur.FwdV4OK && cur.FwdV4 >= base.FwdV4 {
+	v4Valid := base.FwdV4OK && cur.FwdV4OK && cur.FwdV4 >= base.FwdV4
+	v6Valid := base.FwdV6OK && cur.FwdV6OK && cur.FwdV6 >= base.FwdV6
+	v4RolledBack := base.FwdV4OK && cur.FwdV4OK && cur.FwdV4 < base.FwdV4
+	v6RolledBack := base.FwdV6OK && cur.FwdV6OK && cur.FwdV6 < base.FwdV6
+	if v4Valid {
 		w.FwdV4Bytes = u64p(cur.FwdV4 - base.FwdV4)
 		fwd += cur.FwdV4 - base.FwdV4
-		fwdOK = true
 	}
-	if base.FwdV6OK && cur.FwdV6OK && cur.FwdV6 >= base.FwdV6 {
+	if v6Valid {
 		w.FwdV6Bytes = u64p(cur.FwdV6 - base.FwdV6)
 		fwd += cur.FwdV6 - base.FwdV6
-		fwdOK = true
 	}
+	fwdOK := (v4Valid || v6Valid) && !v4RolledBack && !v6RolledBack
 	if fwdOK && enough {
 		w.FwdGapPct = calPct(nt-float64(fwd), nt)
 	}
@@ -883,6 +885,23 @@ func (c *calibrator) check(now time.Time, pu *puEngine) {
 	}
 	cfg := puLoadConfig(c.hncDir)
 	mode := cfg.netstatsMode()
+	cycleStart := puCycleStart(now, cfg.BillingDay)
+	if mode == "off" {
+		res := calResult{
+			Source:            "netstats",
+			Status:            "unavailable",
+			Reason:            "disabled",
+			CheckedAt:         now.Unix(),
+			CycleStart:        cycleStart.Unix(),
+			NetstatsCellBySim: []calCellSim{},
+			UseNetstats:       mode,
+		}
+		c.mu.Lock()
+		c.last = &res
+		c.mu.Unlock()
+		return
+	}
+
 	snap := c.takeSnap(now)
 	c.mu.Lock()
 	prevSnaps := append([]calSnap(nil), c.snaps...)
@@ -890,38 +909,31 @@ func (c *calibrator) check(now time.Time, pu *puEngine) {
 	c.cur = snap
 	c.mu.Unlock()
 
-	cycleStart := puCycleStart(now, cfg.BillingDay)
-	var res calResult
-	if mode == "off" {
-		res = calResult{Source: "netstats", Status: "unavailable", Reason: "disabled",
-			CheckedAt: now.Unix(), CycleStart: cycleStart.Unix(), NetstatsCellBySim: []calCellSim{}}
-	} else {
-		in := calInput{Now: now, CycleStart: cycleStart}
-		_, _ = c.env.run(calCmdTimeout, "dumpsys", "netstats", "--poll")
-		if out, err := c.env.run(calCmdTimeout, "dumpsys", "netstats", "--full"); err == nil || out != "" {
-			in.Xt, _ = parseNetstatsDump(strings.NewReader(out), func(sec string, uid int) bool {
-				return (sec == "xt" || sec == "dev") && uid == nsUIDAll
-			})
-		}
-		if out, err := c.env.run(calCmdTimeout, "dumpsys", "netstats", "--uid"); err == nil || out != "" {
-			in.Uid, _ = parseNetstatsDump(strings.NewReader(out), func(sec string, uid int) bool {
-				return sec == "uid" && uid == nsUIDTethering
-			})
-		}
-		if out, err := c.env.run(10*time.Second, "content", "query", "--uri", "content://telephony/siminfo"); err == nil {
-			in.Subs = calParseSiminfo(out)
-		}
-		if c.env.bootTime != nil {
-			in.BootTime = c.env.bootTime()
-		}
-		if pu != nil {
-			in.Days = pu.days(cycleStart, now)
-		}
-		in.Earliest = calEarliestDay(c.hncDir)
-		res = calCompute(in)
-		if res.NetstatsOK {
-			calMergeOffload(&res, calLiveWindow(prevSnaps, snap, in.Uid))
-		}
+	in := calInput{Now: now, CycleStart: cycleStart}
+	_, _ = c.env.run(calCmdTimeout, "dumpsys", "netstats", "--poll")
+	if out, err := c.env.run(calCmdTimeout, "dumpsys", "netstats", "--full"); err == nil || out != "" {
+		in.Xt, _ = parseNetstatsDump(strings.NewReader(out), func(sec string, uid int) bool {
+			return (sec == "xt" || sec == "dev") && uid == nsUIDAll
+		})
+	}
+	if out, err := c.env.run(calCmdTimeout, "dumpsys", "netstats", "--uid"); err == nil || out != "" {
+		in.Uid, _ = parseNetstatsDump(strings.NewReader(out), func(sec string, uid int) bool {
+			return sec == "uid" && uid == nsUIDTethering
+		})
+	}
+	if out, err := c.env.run(10*time.Second, "content", "query", "--uri", "content://telephony/siminfo"); err == nil {
+		in.Subs = calParseSiminfo(out)
+	}
+	if c.env.bootTime != nil {
+		in.BootTime = c.env.bootTime()
+	}
+	if pu != nil {
+		in.Days = pu.days(cycleStart, now)
+	}
+	in.Earliest = calEarliestDay(c.hncDir)
+	res := calCompute(in)
+	if res.NetstatsOK {
+		calMergeOffload(&res, calLiveWindow(prevSnaps, snap, in.Uid))
 	}
 	res.UseNetstats = mode
 	c.mu.Lock()

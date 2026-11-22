@@ -91,7 +91,7 @@ static void hlog(const char *fmt, ...) {
    Netlink：只订阅链路事件(offload 重探主上游)
 ══════════════════════════════════════════════════════════ */
 static void nl_process(int fd) {
-    char buf[8192];
+    char buf[8192] __attribute__((aligned(NLMSG_ALIGNTO)));
     /* 一次 wakeup 抽干到 EAGAIN(rc3.1.33 #4)。事件风暴会被调度器 worker 合并
      * 成一次重探, 这里每条链路事件都请求一次也没关系(只置 flag + cond_signal)。 */
     for (;;) {
@@ -205,12 +205,14 @@ static void handle_client(int cfd) {
     setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv_rd, sizeof(tv_rd));
     setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv_wr, sizeof(tv_wr));
 
-    struct ucred cred;
-    socklen_t clen = sizeof(cred);
-    if (getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) == 0 &&
-        cred.uid != geteuid() && geteuid() == 0) {
-        close(cfd);
-        return;
+    if (geteuid() == 0) {
+        struct ucred cred;
+        socklen_t clen = (socklen_t)sizeof(cred);
+        if (getsockopt(cfd, SOL_SOCKET, SO_PEERCRED, &cred, &clen) != 0 ||
+            clen != (socklen_t)sizeof(cred) || cred.uid != 0) {
+            close(cfd);
+            return;
+        }
     }
     char req[64] = {0};
     ssize_t n;

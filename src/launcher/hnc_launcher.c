@@ -323,6 +323,21 @@ static int install_signal_handlers(void)
 
 /* ─── DPID 子进程 ─────────────────────────────────────────────────── */
 
+static int dup2_nocloexec(int fd, int target)
+{
+	if (fd == target) {
+		int fl = fcntl(target, F_GETFD);
+		if (fl < 0)
+			return -1;
+		if (fl & FD_CLOEXEC) {
+			if (fcntl(target, F_SETFD, fl & ~FD_CLOEXEC) < 0)
+				return -1;
+		}
+		return target;
+	}
+	return dup2(fd, target);
+}
+
 /*
  * 启动 dpid. 返回 pid (子进程), 失败返回 -1.
  * 标准输出和标准错误重定向到 dpid.log.
@@ -353,16 +368,16 @@ static pid_t spawn_dpid(void)
 
 		int null_fd = open("/dev/null", O_RDONLY | O_CLOEXEC);
 		if (null_fd >= 0) {
-			dup2(null_fd, STDIN_FILENO);
-			if (null_fd > STDERR_FILENO)
+			(void)dup2_nocloexec(null_fd, STDIN_FILENO);
+			if (null_fd != STDIN_FILENO)
 				close(null_fd);
 		}
 
 		int fd = open(LOG_DPID, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
 		if (fd >= 0) {
-			dup2(fd, STDOUT_FILENO);
-			dup2(fd, STDERR_FILENO);
-			if (fd > STDERR_FILENO)
+			(void)dup2_nocloexec(fd, STDOUT_FILENO);
+			(void)dup2_nocloexec(fd, STDERR_FILENO);
+			if (fd != STDOUT_FILENO && fd != STDERR_FILENO)
 				close(fd);
 		}
 
@@ -400,6 +415,8 @@ static int wait_dpid(pid_t pid, int *out_rc, int *out_signum)
 	*out_signum = 0;
 
 	for (;;) {
+		if (g_shutdown)
+			return -1;
 		r = waitpid(pid, &status, 0);
 		if (r < 0) {
 			if (errno == EINTR) {
@@ -480,14 +497,14 @@ static int run_supervise_loop(void)
 			continue;
 		}
 
-		/* v5.12: 信号竞态修复。SIGTERM 若落在 fork() 与 spawn_dpid 里
+		/* v5.12+: 信号竞态修复。SIGTERM 若落在 fork() 与 spawn_dpid 里
 		 * g_child_pid = pid 赋值之间, on_term_signal 看到 g_child_pid==0 不会
-		 * 转发 SIGTERM; 随后 wait_dpid 的 waitpid 因信号已处理完而不会 EINTR,
-		 * 一直阻塞到 dpid 自己退出 —— launcher 无法停止、dpid 继续运行。
-		 * 赋值之后再检查一次 g_shutdown 补发即可闭合窗口(之后到达的信号由
-		 * handler 直接转发)。 */
-		if (g_shutdown)
+		 * 转发 SIGTERM; 若继续进阻塞 wait_dpid(), dpid 卡住将永久挂死。
+		 * 直接补发 SIGTERM 并 break 进入下方 10s WNOHANG + SIGKILL 有界清理路径。 */
+		if (g_shutdown) {
 			kill(pid, SIGTERM);
+			break;
+		}
 
 		/* 等子进程退出 */
 		abnormal = wait_dpid(pid, &rc, &signum);

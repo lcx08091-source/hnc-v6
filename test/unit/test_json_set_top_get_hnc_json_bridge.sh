@@ -5,7 +5,7 @@
 
 set -eu
 
-ROOT="${HNC_TEST_ROOT:-/tmp/hnc-json-set-top-get-bridge-$$}"
+ROOT="${HNC_TEST_ROOT:-${TMPDIR:-/tmp}/hnc-json-set-top-get-bridge-$$}"
 mkdir -p "$ROOT/bin" "$ROOT/data" "$ROOT/run"
 
 if [ -x "./bin/json_set.sh" ]; then

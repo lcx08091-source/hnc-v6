@@ -87,6 +87,8 @@ func (o realMergeOps) rule(action string, p map[string]string) actionResp {
 		r = actionDeviceSQMSet(h, p)
 	case "device_whitelist_set":
 		r = actionDeviceWhitelistSet(h, p)
+	case "app_qos_set":
+		r = actionAppQosSet(h, p)
 	case "rules_device_remove":
 		rc, out := runBin(h, "json_set.sh", "device_remove", p["mac"])
 		r = actionResp{OK: rc == 0, Detail: strings.TrimSpace(out)}

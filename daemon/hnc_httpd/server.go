@@ -23,7 +23,7 @@ import (
 type rateSample struct {
 	rxBytes int64
 	txBytes int64
-	ts      int64 // unix seconds, 上次字节有变化的时刻
+	ts      time.Time // 单调时钟, 上次字节有变化的时刻(防 NTP 回拨冻速率)
 }
 
 // rateOut — RateLoop 发布给读端的当前速率 (bytes/sec).
@@ -128,7 +128,7 @@ func (s *server) handler() http.Handler {
 
 	// 只读 API(被 authMiddleware 保护,2.b 默认 remote_auth_required=false 放行)
 	mux.HandleFunc("/api/health", s.apiHealth)
-	mux.HandleFunc("/api/rollback_ack", s.apiRollbackAck) // v5.29 T3: 横幅「知道了」
+	mux.HandleFunc("/api/rollback_ack", s.requireMutation(s.apiRollbackAck)) // v5.29 T3: 横幅「知道了」
 	// v5.9.92: 鉴权身份查询 —— apiHealth 的 rc30.12.30 注释自己给的方案
 	// ("如果未来想恢复 session label, 走独立 /api/whoami 端点 (鉴权)")。
 	// 远程 SPA 的登出按钮因 session_label 删除而恒隐藏, doLogout 白写。
@@ -797,7 +797,7 @@ func (s *server) RateLoop(stop <-chan struct{}) {
 // 基线 (lastSamples[mac]) 只在字节变化时前移, ts 记录上次变化时刻 → dt 反映真实
 // 流量间隔而非采样间隔, 既不被 hotspotd 5s 刷新拖成 0, 又能在真空闲时衰减归零.
 func (s *server) sampleRatesOnce() {
-	raw, err := readJSON(filepath.Join(s.hncDir, "data", "devices.json"))
+	raw, err := s.jsonCache.read(filepath.Join(s.hncDir, "data", "devices.json"))
 	if err != nil {
 		return // devices.json 暂缺/半写: 跳过这轮, 保留上次 rates
 	}
@@ -805,7 +805,7 @@ func (s *server) sampleRatesOnce() {
 	if devicesMap == nil {
 		return
 	}
-	now := time.Now().Unix()
+	now := time.Now()
 
 	s.rateMu.Lock()
 	defer s.rateMu.Unlock()
@@ -830,20 +830,21 @@ func (s *server) sampleRatesOnce() {
 		if rxB == prev.rxBytes && txB == prev.txBytes {
 			// 字节没动 (常遇到 hotspotd 还没刷): 基线不前移; 速率沿用上次, 超空闲阈值才归零
 			keep := s.rates[macKey]
-			if now-prev.ts >= rateIdleZeroSec {
+			if now.Sub(prev.ts) >= rateIdleZeroSec*time.Second {
 				keep = rateOut{}
 			}
 			newPrev[macKey] = prev
 			newRates[macKey] = keep
 			continue
 		}
-		// 字节变了: 用距"上次变化时刻"的 dt 算速率
-		dt := now - prev.ts
-		if dt < 1 {
-			dt = 1
-		}
+		// 字节变了: 用单调时钟距"上次变化时刻"的 dt 算速率(防 NTP 回拨冻速率)
+		elapsed := now.Sub(prev.ts)
 		var rxBps, txBps int64
-		if dt <= 120 {
+		if elapsed >= 0 && elapsed <= 120*time.Second {
+			dtSec := elapsed.Seconds()
+			if dtSec < 1 {
+				dtSec = 1
+			}
 			drx := rxB - prev.rxBytes
 			dtx := txB - prev.txBytes
 			if drx < 0 { // 计数器复位 (full_restore -F HNC_STATS)
@@ -852,10 +853,10 @@ func (s *server) sampleRatesOnce() {
 			if dtx < 0 {
 				dtx = 0
 			}
-			rxBps = drx / dt
-			txBps = dtx / dt
+			rxBps = int64(float64(drx) / dtSec)
+			txBps = int64(float64(dtx) / dtSec)
 		}
-		// dt>120: 长间隔(stats 中断/复位), 当基线重置, 这轮速率 0
+		// elapsed>120s 或异常负间隔: 当基线重置, 这轮速率 0
 		newPrev[macKey] = rateSample{rxBytes: rxB, txBytes: txB, ts: now}
 		newRates[macKey] = rateOut{rxBps: rxBps, txBps: txBps}
 	}
@@ -1203,12 +1204,17 @@ func aggregate(rangeParam string, raw, daily []map[string]interface{}) []Bucket 
 	case "month":
 		dates = lastNDates(now, 30)
 	case "all":
-		// 从最早 daily 日期到今天,最多 90 天
+		// 从最早 daily 日期到今天,最多 90 天; 先将 earliest 钳制在 today - 89 天,
+		// 防止未校时(如 1970-01-01)或异常日期让 datesFromTo 构造超大跨度切片。
+		minDate := todayStart.AddDate(0, 0, -89).Format("2006-01-02")
 		earliest := todayStr
 		for _, d := range daily {
 			if ds, _ := d["date"].(string); ds != "" && ds < earliest {
 				earliest = ds
 			}
+		}
+		if earliest < minDate {
+			earliest = minDate
 		}
 		dates = datesFromTo(earliest, todayStr)
 		if len(dates) > 90 {

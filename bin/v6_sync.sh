@@ -201,10 +201,22 @@ get_v6_addrs() {
 #      不 flush(避免重建空窗)
 #   4. 其余(有地址过期 / 头行变化 / filter 丢失)→ flush 该设备 prio 段后按期望集重建
 # ═══════════════════════════════════════════════════════════════
+_v6_valid_mac() {
+    case "$1" in
+        [0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F]:[0-9a-fA-F][0-9a-fA-F])
+            return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 sync_one() {
     local mac=$1
     local iface=${2:-$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null)}
     [ -z "$mac" ] && { log "WARN: sync_one called with empty mac"; return 1; }
+    if ! _v6_valid_mac "$mac"; then
+        log "WARN: sync_one: invalid mac '$mac'"
+        return 1
+    fi
     [ -z "$iface" ] && { log "WARN: sync_one no iface"; return 1; }
     mac=$(printf '%s' "$mac" | tr 'A-F' 'a-f')
 
@@ -403,6 +415,11 @@ clear_one() {
     local mac=$1
     local iface=${2:-$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null)}
     [ -z "$mac" ] && return 1
+    if ! _v6_valid_mac "$mac"; then
+        log "WARN: clear_one: invalid mac '$mac'"
+        return 1
+    fi
+    mac=$(printf '%s' "$mac" | tr 'A-F' 'a-f')
 
     local snap="$SNAP_DIR/$mac"
 

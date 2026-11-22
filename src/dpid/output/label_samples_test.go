@@ -173,16 +173,16 @@ func TestLabelSamplesExpireSweep(t *testing.T) {
 		}
 		return p
 	}
-	old := mk(labelSamplesPrefix + "20260920" + labelSamplesJSONLEXT)
-	oldCap := mk(labelSamplesPrefix + "20260920" + labelSamplesCapEXT)
-	keep := mk(labelSamplesPrefix + "20260929" + labelSamplesJSONLEXT)
-	keepCap := mk(labelSamplesPrefix + "20260929" + labelSamplesCapEXT)
+	old := mk(labelSamplesPrefix + "20260930" + labelSamplesJSONLEXT)
+	oldCap := mk(labelSamplesPrefix + "20260930" + labelSamplesCapEXT)
+	keep := mk(labelSamplesPrefix + "20261002" + labelSamplesJSONLEXT)
+	keepCap := mk(labelSamplesPrefix + "20261002" + labelSamplesCapEXT)
 	today := mk(labelSamplesPrefix + "20261003" + labelSamplesJSONLEXT)
 	junk := mk("dpi_state.json")                                        // 别人的文件, 绝不能碰
 	nearmiss := mk("label_samples.tmp.1")                               // 前缀同名但非样本文件
-	weird := mk(labelSamplesPrefix + "20260926" + labelSamplesJSONLEXT) // 恰好等于 cutoff → 保留
+	weird := mk(labelSamplesPrefix + "20261001" + labelSamplesJSONLEXT) // 恰好等于 cutoff → 保留
 
-	w.sweepExpired(lsvDay2) // cutoff = 2026-09-26
+	w.sweepExpired(lsvDay2) // cutoff = 2026-10-01 (保留 2 天)
 
 	for _, p := range []string{old, oldCap} {
 		if _, err := os.Stat(p); !os.IsNotExist(err) {

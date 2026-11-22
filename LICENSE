@@ -1,6 +1,15 @@
 Hotspot Network Control (HNC)
 Copyright (C) 2024-2026 Ling (lcx08091-source) and HNC Contributors
-SPDX-License-Identifier: GPL-3.0-only
+
+Component Licensing Summary:
+- User-space daemons, CLI utilities, shell scripts, and WebUI assets:
+  SPDX-License-Identifier: GPL-3.0-only
+- Linux kernel eBPF programs (src/bpf/hnc_clsact.bpf.c / bin/hnc_clsact.o):
+  SPDX-License-Identifier: GPL-2.0-only OR GPL-3.0-only
+  (Dual-licensed to satisfy Linux kernel BPF verifier GPLv2 compatibility;
+   full GPL-2.0 text is provided in LICENSES/GPL-2.0-only.txt.)
+- Bundled third-party domain lists and libraries retain their respective
+  permissive licenses (MIT) as documented in THIRD_PARTY_NOTICES.md.
 
                     GNU GENERAL PUBLIC LICENSE
                        Version 3, 29 June 2007

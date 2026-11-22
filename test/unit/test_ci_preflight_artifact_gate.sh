@@ -9,6 +9,10 @@
 # 不再手抄一份(此前手抄清单落后于 gate —— 缺 clsact 产物等, 测试恒 FAIL)。
 _REQ_FILES=$(sed -n 's/^for req in \(.*\); do$/\1/p' "$HNC_REPO_ROOT/bin/artifact_sanity_check.sh" | head -1)
 [ -n "$_REQ_FILES" ] || _REQ_FILES="webroot/index.html"
+case " $_REQ_FILES " in
+    *" LICENSE "*) ;;
+    *) _REQ_FILES="$_REQ_FILES LICENSE" ;;
+esac
 
 make_repo_fixture() {
     root="$1"

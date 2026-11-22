@@ -10,8 +10,19 @@ cat > "$TMP/hnc/data/rules.json" <<'JSON'
 {"version":1,"whitelist_mode":false,"devices":{"aa:bb:cc:dd:ee:ff":{"mark_id":32,"note":"hello, brace } comma, quote \" 中文","limit_enabled":true,"down_mbps":0.75}},"blacklist":[]}
 JSON
 
+_SH="${HNC_TEST_SH:-}"
+if [ -z "$_SH" ]; then
+  if [ -n "${PREFIX:-}" ] && [ -x "$PREFIX/bin/sh" ]; then
+    _SH="$PREFIX/bin/sh"
+  elif [ -x /system/bin/sh ]; then
+    _SH="/system/bin/sh"
+  else
+    _SH="/bin/sh"
+  fi
+fi
+
 cat > "$TMP/bin/hnc_json_exec" <<EOF2
-#!/usr/bin/env sh
+#!$_SH
 exec sh "$ROOT/bin/hnc_json" "\$@"
 EOF2
 chmod 755 "$TMP/bin/hnc_json_exec"

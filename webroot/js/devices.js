@@ -29,8 +29,7 @@ function badges(d) {
   b += policyBadges(d);
   if (d.applyError) b += '<span class="badge b-red" title="' + esc(d.applyError) + '">应用出错</span>';
   if (d.vpn) b += vpnBadge(d.vpn);
-  if (d.rmacGuarded) b += '<span class="badge b-warn" title="新接入未知随机 MAC，已自动套用默认管控护栏">随机MAC护栏</span>';
-  else if (d.autoInhFrom) b += '<span class="badge b-ok" title="更换随机 MAC 后已自动无感继承 ' + esc(d.autoInhName || d.autoInhFrom) + ' 的名称与规则（置信度 ' + (d.autoInhScore || 90) + '）">无感继承</span>';
+  if (d.autoInhFrom) b += '<span class="badge b-ok" title="更换随机 MAC 后已自动无感继承 ' + esc(d.autoInhName || d.autoInhFrom) + ' 的名称与规则（置信度 ' + (d.autoInhScore || 90) + '）">无感继承</span>';
   else if (d.rmac) b += '<span class="badge b-gray" title="Android/iOS 隐私 Wi-Fi 的随机 MAC；高置信度换地址时自动继承规则">随机 MAC</span>';
   if (d.mergedInto) b += '<span class="badge b-gray" title="这个旧 MAC 已合并到 ' + esc(d.mergedInto) + '">已合并</span>';
   if (typeof v6DeviceBadgesHtml === 'function') b += v6DeviceBadgesHtml(d);
@@ -536,18 +535,40 @@ function connMiniHtml(mac) {
   var d0 = devBy(mac), cs = d0 ? catShare(d0) : '';
   return '<div class="cn-sum"><span>共 <b>' + num(r.total) + '</b> 条</span><span>↓↑ <b>' + bpsTxt(r.bps) + '</b></span>' + (r.groups && r.groups[0] ? '<span>最多 <b>' + esc(r.groups[0].label) + '</b></span>' : '') + '</div>' + (cs ? '<div class="note" style="margin:-4px 0 6px">' + esc(cs) + '</div>' : '') + connNotes(r) + list.slice(0, 4).map(connRow).join('');
 }
-function paintConnMini(mac) { $$('[data-dev="' + mac + '"] [data-conn-mini], [data-side="' + mac + '"] [data-conn-mini]').forEach(function (el) { el.innerHTML = connMiniHtml(mac); }); }
+function cssEscMac(m) {
+  var s = String(m == null ? '' : m);
+  return (window.CSS && typeof CSS.escape === 'function') ? CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
+}
+function paintConnMini(mac) {
+  var sel = cssEscMac(mac);
+  $$('[data-dev="' + sel + '"] [data-conn-mini], [data-side="' + sel + '"] [data-conn-mini]').forEach(function (el) { el.innerHTML = connMiniHtml(mac); });
+}
 function refreshConnMini(mac) { return loadConns(mac).then(function () { paintConnMini(mac); }); }
-var connT = null;
+var connT = null, connVisFn = null;
+function stopConnTimer() {
+  if (connT) { clearInterval(connT); connT = null; }
+}
 function connSheet(d) {
   S.connView = S.connView || 'all';
-  sheet('<h3>实时连接 · ' + esc(d.name) + '</h3><div class="sub mono">' + (d.sim ? '<span class="badge b-sim" style="font-family:var(--font)">模拟</span> ' : '') + esc(d.ip || '') + ' · ' + d.mac + '</div>' +
+  if (connVisFn) { document.removeEventListener('visibilitychange', connVisFn); connVisFn = null; }
+  stopConnTimer();
+  sheet('<h3>实时连接 · ' + esc(d.name) + '</h3><div class="sub mono">' + (d.sim ? '<span class="badge b-sim" style="font-family:var(--font)">模拟</span> ' : '') + esc(d.ip || '') + ' · ' + esc(d.mac) + '</div>' +
     '<div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin:10px 0 6px;flex-wrap:wrap">' + seg('connv', [['all', '全部'], ['active', '活跃'], ['group', '按应用']], S.connView, 'small') + '<button type="button" class="v6-scalpel-entry press" data-v6-act="open-scalpel" data-mac="' + esc(d.mac) + '" data-ip="' + esc(d.ip || '') + '" data-name="' + esc(d.name) + '">' + ico('scalpel') + '<span>清理异常连接</span></button></div>' +
     '<div id="cn-body"><div class="note">加载中…</div></div><div class="note" style="margin-top:8px">数据来自内核连接表（conntrack），域名来自 DPI 抓到的 DNS / TLS，每 2 秒刷新</div>' +
-    '<button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true, kind: 'conns', onClose: function () { clearInterval(connT); connT = null; S.connMac = null; } });
+    '<button class="btn sec wide press" data-close style="margin-top:12px">关闭</button>', { tall: true, kind: 'conns', onClose: function () { stopConnTimer(); if (connVisFn) { document.removeEventListener('visibilitychange', connVisFn); connVisFn = null; } S.connMac = null; } });
   S.connMac = d.mac;
   var tick = function () { if (document.hidden || S.connMac !== d.mac) return; loadConns(d.mac).then(function () { paintConnSheet(); paintConnMini(d.mac); }); };
-  clearInterval(connT); connT = setInterval(tick, 2000); tick();
+  var startConnTimer = function () {
+    stopConnTimer();
+    if (document.hidden || S.connMac !== d.mac) return;
+    connT = setInterval(tick, 2000);
+  };
+  connVisFn = function () {
+    if (document.hidden) { stopConnTimer(); }
+    else if (S.connMac === d.mac) { tick(); startConnTimer(); }
+  };
+  document.addEventListener('visibilitychange', connVisFn);
+  if (!document.hidden) { startConnTimer(); tick(); }
 }
 function paintConnSheet() {
   var el = $('#cn-body'); if (!el || !S.connMac) return;
@@ -593,23 +614,17 @@ function appLimNote(x) {
   if (!l) return '<div class="note warn appq-n">这个应用的地址都与其他应用共用，限速暂未生效' + (sk ? '（跳过 ' + sk + ' 个共享 CDN 地址）' : '') + '</div>';
   return '<div class="note appq-n">已限速 ' + l + ' 个地址' + (sk ? ' · 跳过 ' + sk + ' 个共享 CDN 地址' : '') + (S.appLimitShared ? ' · 含共享地址' : '') + '</div>';
 }
-function rmacGuardBannerHtml(d) {
-  if (!d || !d.rmacGuarded) return '';
-  var mTxt = d.rmacGuardMode === 'quarantine' ? '默认隔离断网' : '默认安全限速';
-  return '<div class="mrg rmac-guard-bar"><div class="mrg-t">' + ico('shield') +
-    '<span>新接入未知随机 MAC · 已自动套用<b>' + mTxt + '</b>护栏<span class="note" style="display:block;font-weight:500">防止手机频繁换随机 MAC 绕过限速或封锁；确认是自家设备可一键放行</span></span></div>' +
-    '<div class="btns"><button class="btn pri press" data-act="rmac-trust">信任此设备并解除护栏</button></div></div>';
-}
 function devCard(d) {
   var r = bps(d.rx), t = bps(d.tx), open = !wide() && S.open[d.mac], closing = !open && !wide() && S.closingAt && Date.now() - (S.closingAt[d.mac] || 0) < 800;
   var meta = d.online ? (d.ip || '—') : d.blocked ? '已阻止联网' : '最后出现 ' + ago(d.lastSeen);
   var tintState = d.blocked ? 'blocked' : d.online ? ((num(d.down) > 0 || num(d.up) > 0 || num(d.delay) > 0) ? 'shaped' : (num(d.rx) + num(d.tx) > 524288 ? 'active' : 'online')) : 'offline';
-  return '<article class="glass dev' + (open ? ' open' : '') + (wide() && S.sel === d.mac ? ' sel' : '') + (S.picked[d.mac] ? ' picked' : '') + '" data-dev="' + d.mac + '" data-tint="' + tintState + '">' +
+  var macEsc = esc(d.mac), macId = esc(String(d.mac || '').replace(/:/g, ''));
+  return '<article class="glass dev' + (open ? ' open' : '') + (wide() && S.sel === d.mac ? ' sel' : '') + (S.picked[d.mac] ? ' picked' : '') + '" data-dev="' + macEsc + '" data-tint="' + tintState + '">' +
     '<button class="dev-h" data-act="toggle-dev" aria-expanded="' + !!open + '"><span class="check">' + ico('check') + '</span>' +
       '<span class="av">' + d.icon + '<span class="dot ' + (d.blocked ? 'blocked' : d.online ? 'online' : 'offline') + '"></span></span>' +
       '<span class="dev-info"><span class="dev-name"><span class="nm">' + esc(d.name) + '</span>' + badges(d) + '</span>' +
-        '<span class="dev-meta mono" style="display:block">' + esc(d.ip || '—') + ' · ' + d.mac + '</span>' +
-        '<span class="dev-meta" style="display:block">' + esc(d.online ? (d.idShort || d.vendor || '在线') : (d.idShort ? d.idShort + ' · ' : '') + meta) + '<span id="ct-' + d.mac.replace(/:/g, '') + '">' + connCountText(d) + '</span><span id="oh-' + d.mac.replace(/:/g, '') + '"></span><span id="mu-' + d.mac.replace(/:/g, '') + '"></span></span>' +
+        '<span class="dev-meta mono" style="display:block">' + esc(d.ip || '—') + ' · ' + macEsc + '</span>' +
+        '<span class="dev-meta" style="display:block">' + esc(d.online ? (d.idShort || d.vendor || '在线') : (d.idShort ? d.idShort + ' · ' : '') + meta) + '<span id="ct-' + macId + '">' + connCountText(d) + '</span><span id="oh-' + macId + '"></span><span id="mu-' + macId + '"></span></span>' +
         '<span class="dev-apps" data-apps' + (appsLine(d) ? '' : ' hidden') + '>' + appsLine(d) + '</span>' +
       '</span>' +
       (d.online ? '<span class="dev-rate num"><span class="d">↓ <b data-rx>' + r.v + '</b> ' + r.u + '</span><span class="u">↑ <b data-tx>' + t.v + '</b> ' + t.u + '</span>' + ico(wide() ? 'right' : 'chev', 'chev') + '</span>'
@@ -656,7 +671,8 @@ function appsLine(d) {
 function devSide() {
   var d = devBy(S.sel);
   if (!d) return '<div class="glass empty">点左侧的设备查看和调整规则</div>';
-  return '<div class="glass swap" data-side="' + d.mac + '"><div class="side-head"><span class="av">' + d.icon + '<span class="dot ' + (d.blocked ? 'blocked' : d.online ? 'online' : 'offline') + '"></span></span><div style="min-width:0"><div class="t">' + esc(d.name) + '</div><div class="s mono">' + esc(d.ip || '—') + ' · ' + d.mac + '</div></div></div>' +
+  var macEsc = esc(d.mac);
+  return '<div class="glass swap" data-side="' + macEsc + '"><div class="side-head"><span class="av">' + d.icon + '<span class="dot ' + (d.blocked ? 'blocked' : d.online ? 'online' : 'offline') + '"></span></span><div style="min-width:0"><div class="t">' + esc(d.name) + '</div><div class="s mono">' + esc(d.ip || '—') + ' · ' + macEsc + '</div></div></div>' +
     '<div style="padding:10px 14px 12px" class="dev-name">' + (badges(d) || '<span class="badge b-ok">无规则</span>') + '</div>' + mergeRowHtml(d) + devBody(d) + '</div>';
 }
 /* 列表顺序冻结: 有卡片展开着 / 刚在列表里点过 / 刚做完操作的几秒内, 已在屏幕上的卡片保持原来的先后,
@@ -723,7 +739,7 @@ function renderOffloadBanner() {
 }
 function renderDevices(anim1) {
   var l = S.live || {}, on = S.devices.filter(function (d) { return d.online; }).length;
-  var fl = FILTERS.filter(function (f) { return f[0] === S.filter; })[0];
+  var fl = FILTERS.filter(function (f) { return f[0] === S.filter; })[0] || FILTERS[0];
   var h = '<div class="wrap' + (wide() ? ' dev-split' : '') + '"><div class="wrap" style="margin:0;max-width:none">' + bridgeBanner() + '<div id="sim-bn" style="display:contents">' + simBannerHtml() + '</div>' +
     '<div class="banner warn" id="offload-banner" hidden><span class="bi"><b>!</b></span><div style="min-width:0"><div class="bt">检测到硬件 offload 正在转发流量</div><div class="bm">系统的 BPF tether offload 可能绕过 tc，导致限速偏松。若限速失灵，可在系统设置里关闭热点硬件加速，或重开一次热点。</div></div><button class="bx" data-act="offload-dismiss" aria-label="忽略">×</button></div>' +
     '<div class="glass hero"><div><div class="hero-l">下行</div><div class="hero-v num"><span id="h-dn">0.00</span><span class="u">MB/s</span></div></div><div class="hero-div"></div>' +
@@ -793,7 +809,7 @@ function drawSpark() {
 /* 轮询里的就地刷新: 只改速率数字, 不重建卡片(展开中的卡片与正在输入的框不受影响) */
 function patchRates() {
   S.devices.forEach(function (d) {
-    var c = document.querySelector('.dev[data-dev="' + d.mac + '"]'); if (!c) return;
+    var c = document.querySelector('.dev[data-dev="' + cssEscMac(d.mac) + '"]'); if (!c) return;
     var rx = $('[data-rx]', c), tx = $('[data-tx]', c);
     if (rx) { var a = bps(d.rx), b = bps(d.tx); rollNum(rx, a.v, a.u); rollNum(tx, b.v, b.u); rx.parentNode.lastChild.textContent = ' ' + a.u; tx.parentNode.lastChild.textContent = ' ' + b.u; }
     var al = $('[data-apps]', c); if (al) { var h = appsLine(d); if (al._h !== h) { al._h = h; al.innerHTML = h; al.hidden = !h; } }
@@ -810,7 +826,7 @@ function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge 
   d.sched ? d.sched.windows.length + ',' + d.sched.active_window_index : '', d.atl.map(function (x) { return x.app_id + (x.exhausted ? '!' : '') + x.minutes; }).join(','), d.cblocks.map(function (x) { return x.category; }).join(','), typeof v6DeviceShapeSig === 'function' ? v6DeviceShapeSig(d) : ''].join(':'); }).join('|'); }
 function refreshCard(mac) {
   var d = devBy(mac); if (!d) return;
-  var el = document.querySelector('.dev[data-dev="' + mac + '"]');
+  var el = document.querySelector('.dev[data-dev="' + cssEscMac(mac) + '"]');
   if (el) { el = morphOuter(el, devCard(d)); placeSegs(el); paintOnlineHours(); }
   if (wide() && S.sel === mac) { var sd = $('#dev-side'); if (sd) { morph(sd, devSide()); placeSegs(sd); } }
 }
@@ -818,8 +834,9 @@ function refreshCard(mac) {
 /* ═════════════════════ 设备操作 ═════════════════════ */
 function setBusy(mac, on) {
   if (on) S.busy[mac] = 1; else delete S.busy[mac];
-  $$('[data-dev="' + mac + '"] .btn, [data-side="' + mac + '"] .btn').forEach(function (b) { if (b.dataset.act && b.dataset.act !== 'copy-mac' && b.dataset.act !== 'rename') b.disabled = !!on; });
-  $$('.dev[data-dev="' + mac + '"], [data-side="' + mac + '"]').forEach(function (c) { if (on) c.setAttribute('aria-busy', 'true'); else c.removeAttribute('aria-busy'); });
+  var sel = cssEscMac(mac);
+  $$('[data-dev="' + sel + '"] .btn, [data-side="' + sel + '"] .btn').forEach(function (b) { if (b.dataset.act && b.dataset.act !== 'copy-mac' && b.dataset.act !== 'rename') b.disabled = !!on; });
+  $$('.dev[data-dev="' + sel + '"], [data-side="' + sel + '"]').forEach(function (c) { if (on) c.setAttribute('aria-busy', 'true'); else c.removeAttribute('aria-busy'); });
 }
 /* 请求进行中的视觉状态: 按钮 → .busy(禁用 + 稍后出转圈, 防重复提交); 开关 / 分段 → .pending(保持乐观状态, 不被后台刷新改回) */
 function pend(el, on) {
@@ -1022,12 +1039,28 @@ function setQos(kind, v, el) {
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
 function setWhitelistMode(on, el) {
-  busyWhile(el, api.action('whitelist_set', { enabled: on ? 'true' : 'false' })).then(function (r) {
-    S.cfg.whitelist_mode = on;
-    var cnt = S.devices.filter(function (d) { return d.wl; }).length;
-    toast(on ? '白名单模式已开启 · 放行 ' + cnt + ' 台' : '白名单模式已关闭', on && !cnt ? 'warn' : 'ok');
-    if (on && !cnt) setTimeout(function () { toast('提醒：还没有设备在白名单里，热点内设备都将无法上网', 'warn'); }, 2300);
-  }).catch(function (e) { if (el) el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); });
+  var commit = function () {
+    if (el) el.setAttribute('aria-checked', String(on));
+    busyWhile(el, api.action('whitelist_set', { enabled: on ? 'true' : 'false' })).then(function () {
+      S.cfg.whitelist_mode = on;
+      var cnt = S.devices.filter(function (d) { return d.wl; }).length;
+      toast(on ? '白名单模式已开启 · 放行 ' + cnt + ' 台' : '白名单模式已关闭', 'ok');
+    }).catch(function (e) { if (el) el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); });
+  };
+  if (!on) { commit(); return; }
+  var wlCnt = S.devices.filter(function (d) { return d.wl; }).length;
+  if (el) el.setAttribute('aria-checked', 'false');
+  if (wlCnt <= 0) {
+    toast('请先将至少 1 台设备加入白名单', 'warn');
+    return;
+  }
+  confirmSheet('开启白名单模式？', '当前白名单共 ' + wlCnt + ' 台设备。开启后，未在白名单的设备将立即断网，确定要开启吗？', '确认开启').then(function (ok) {
+    if (!ok) {
+      if (el) el.setAttribute('aria-checked', 'false');
+      return;
+    }
+    commit();
+  });
 }
 
 

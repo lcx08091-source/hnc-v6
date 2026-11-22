@@ -102,10 +102,15 @@ type Handle struct {
 	wakeW        int
 	epollReady   bool
 	openedNative bool
+	rcvBuf       int
+	closed       bool
 }
 
 // initEpollStateLocked 为 Handle 初始化 epfd 与非阻塞唤醒管道(调用方需持锁或在发布前调用)。
 func (h *Handle) initEpollStateLocked() bool {
+	if h.closed {
+		return false
+	}
 	if h.epollReady {
 		return h.epfd >= 0
 	}
@@ -137,14 +142,24 @@ func (h *Handle) initEpollStateLocked() bool {
 	h.wakeW = pipeFDs[1]
 	h.epollReady = true
 	if h.fd >= 0 {
-		h.syncEpollFDLocked(h.fd)
+		if err := h.syncEpollFDLocked(h.fd); err != nil {
+			_ = syscall.Close(pipeFDs[0])
+			_ = syscall.Close(pipeFDs[1])
+			_ = syscall.Close(epfd)
+			h.epfd, h.epollRegFD, h.wakeR, h.wakeW = -1, -1, -1, -1
+			h.epollReady = false
+			return false
+		}
 	}
 	return true
 }
 
-func (h *Handle) syncEpollFDLocked(fd int) {
-	if !h.epollReady || h.epfd < 0 || fd < 0 || h.epollRegFD == fd {
-		return
+func (h *Handle) syncEpollFDLocked(fd int) error {
+	if !h.epollReady || h.epfd < 0 || fd < 0 {
+		return syscall.EBADF
+	}
+	if h.epollRegFD == fd {
+		return nil
 	}
 	if h.epollRegFD >= 0 {
 		_ = syscall.EpollCtl(h.epfd, syscall.EPOLL_CTL_DEL, h.epollRegFD, nil)
@@ -154,9 +169,11 @@ func (h *Handle) syncEpollFDLocked(fd int) {
 		Events: syscall.EPOLLIN | syscall.EPOLLERR | syscall.EPOLLHUP,
 		Fd:     int32(fd),
 	}
-	if err := syscall.EpollCtl(h.epfd, syscall.EPOLL_CTL_ADD, fd, &ev); err == nil {
-		h.epollRegFD = fd
+	if err := syscall.EpollCtl(h.epfd, syscall.EPOLL_CTL_ADD, fd, &ev); err != nil {
+		return err
 	}
+	h.epollRegFD = fd
+	return nil
 }
 
 func (h *Handle) pokeWakeLocked() {
@@ -256,6 +273,7 @@ func Open(opts Options) (*Handle, error) {
 		wakeR:        -1,
 		wakeW:        -1,
 		openedNative: true,
+		rcvBuf:       opts.RcvBufBytes,
 	}
 	if !h.initEpollStateLocked() {
 		// 极端裁剪环境若不支持 epoll, 回退阻塞超时模式确保抓包可用。
@@ -302,6 +320,15 @@ func (h *Handle) CurrentIfindex() int {
 // a new raw socket, attaches the appropriate BPF filter, atomically swaps the
 // fd, and immediately wakes EpollWait via wakeW so Run returns ErrRebound in 0ms.
 func (h *Handle) Rebind(newIface string) error {
+	h.mu.Lock()
+	if h.closed {
+		h.mu.Unlock()
+		return fmt.Errorf("rebind on closed handle")
+	}
+	snap := h.snap
+	rcvBuf := h.rcvBuf
+	h.mu.Unlock()
+
 	ifc, err := net.InterfaceByName(newIface)
 	if err != nil {
 		return fmt.Errorf("rebind lookup %s: %w", newIface, err)
@@ -314,12 +341,16 @@ func (h *Handle) Rebind(newIface string) error {
 		return fmt.Errorf("rebind socket: %w", err)
 	}
 
+	if rcvBuf > 0 {
+		_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, rcvBuf)
+	}
+
 	var raw []syscall.SockFilter
 	switch lt {
 	case arphrdRawIP, arphrdNone:
-		raw, err = BuildFilterRawIP(uint32(h.snap))
+		raw, err = BuildFilterRawIP(uint32(snap))
 	default:
-		raw, err = BuildFilter(uint32(h.snap))
+		raw, err = BuildFilter(uint32(snap))
 	}
 	if err != nil {
 		_ = syscall.Close(fd)
@@ -337,10 +368,10 @@ func (h *Handle) Rebind(newIface string) error {
 	}
 
 	h.mu.Lock()
-	if !h.epollReady || h.epfd < 0 {
-		_ = syscall.SetNonblock(fd, false)
-		tv := syscall.Timeval{Sec: 0, Usec: 500_000}
-		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+	if h.closed {
+		h.mu.Unlock()
+		_ = syscall.Close(fd)
+		return fmt.Errorf("rebind on closed handle")
 	}
 	oldFD := h.fd
 	h.fd = fd
@@ -351,7 +382,11 @@ func (h *Handle) Rebind(newIface string) error {
 	if oldFD >= 0 {
 		h.retired = append(h.retired, oldFD)
 	}
-	h.syncEpollFDLocked(fd)
+	if !h.epollReady || h.epfd < 0 || h.syncEpollFDLocked(fd) != nil {
+		_ = syscall.SetNonblock(fd, false)
+		tv := syscall.Timeval{Sec: 0, Usec: 500_000}
+		_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+	}
 	h.pokeWakeLocked()
 	h.mu.Unlock()
 
@@ -362,6 +397,10 @@ func (h *Handle) Rebind(newIface string) error {
 func (h *Handle) Close() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closed {
+		return
+	}
+	h.closed = true
 	h.pokeWakeLocked()
 	if h.fd >= 0 {
 		_ = syscall.Close(h.fd)
@@ -520,6 +559,19 @@ func (h *Handle) Run(ctx context.Context, onEvent func(Event)) error {
 	return h.runRecvfromFallback(ctx, onEvent)
 }
 
+func (h *Handle) checkSocketError(fd int) (err error, retry bool) {
+	soErr, gerr := syscall.GetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_ERROR)
+	if gerr == nil && soErr != 0 {
+		e := syscall.Errno(soErr)
+		if e == syscall.ENOBUFS {
+			h.stats.drops.Add(1)
+			return nil, true
+		}
+		return fmt.Errorf("socket error: %w", e), false
+	}
+	return fmt.Errorf("socket hangup: %w", syscall.ENETDOWN), false
+}
+
 func (h *Handle) runEpollLoop(ctx context.Context, infiniteWait bool, onEvent func(Event)) error {
 	var events [4]syscall.EpollEvent
 	waitMs := -1
@@ -535,23 +587,35 @@ func (h *Handle) runEpollLoop(ctx context.Context, infiniteWait bool, onEvent fu
 		}
 
 		h.mu.Lock()
+		if h.rebound {
+			h.mu.Unlock()
+			return ErrRebound
+		}
+		if h.closed || h.fd < 0 {
+			h.mu.Unlock()
+			return nil
+		}
 		fd := h.fd
 		epfd := h.epfd
 		wakeR := h.wakeR
 		linkType := h.linkType
-		if fd >= 0 && epfd >= 0 {
-			h.syncEpollFDLocked(fd)
+		var syncErr error
+		if epfd >= 0 {
+			syncErr = h.syncEpollFDLocked(fd)
+		}
+		if epfd < 0 || syncErr != nil {
+			_ = syscall.SetNonblock(fd, false)
+			tv := syscall.Timeval{Sec: 0, Usec: 500_000}
+			_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+			h.mu.Unlock()
+			return h.runRecvfromFallback(ctx, onEvent)
 		}
 		h.mu.Unlock()
 
-		if fd < 0 || epfd < 0 {
-			return nil
-		}
-
 		nev, werr := syscall.EpollWait(epfd, events[:], waitMs)
 		h.mu.Lock()
-		swapped := h.fd != fd && h.rebound
-		closedNow := h.fd < 0
+		swapped := h.rebound
+		closedNow := h.closed || h.fd < 0
 		h.mu.Unlock()
 		if swapped {
 			return ErrRebound
@@ -579,31 +643,48 @@ func (h *Handle) runEpollLoop(ctx context.Context, infiniteWait bool, onEvent fu
 		}
 
 		pktReady := false
+		pktErr := false
 		for i := 0; i < nev; i++ {
 			evFD := int(events[i].Fd)
 			if evFD == wakeR {
 				drainWakeFD(wakeR)
 			} else if evFD == fd {
-				pktReady = true
+				if events[i].Events&(syscall.EPOLLERR|syscall.EPOLLHUP) != 0 {
+					pktErr = true
+				}
+				if events[i].Events&syscall.EPOLLIN != 0 {
+					pktReady = true
+				}
 			}
+		}
+		if pktErr && !pktReady {
+			err, retry := h.checkSocketError(fd)
+			if retry {
+				continue
+			}
+			return err
 		}
 		if !pktReady {
 			continue
 		}
 
+		received := 0
 		for batch := 0; batch < epollDrainBatchMax; batch++ {
 			if ctx.Err() != nil {
 				return nil
 			}
 			n, _, err := syscall.Recvfrom(fd, h.buf, syscall.MSG_DONTWAIT)
 			h.mu.Lock()
-			swappedNow := h.fd != fd && h.rebound
+			swappedNow := h.rebound
 			h.mu.Unlock()
 			if swappedNow {
 				return ErrRebound
 			}
 			if err != nil {
 				switch err {
+				case syscall.ENOBUFS:
+					h.stats.drops.Add(1)
+					continue
 				case syscall.EAGAIN, syscall.EINTR:
 					batch = epollDrainBatchMax
 					continue
@@ -622,7 +703,14 @@ func (h *Handle) runEpollLoop(ctx context.Context, infiniteWait bool, onEvent fu
 			if n <= 0 {
 				break
 			}
+			received++
 			h.dispatchCapturedPacket(n, linkType, onEvent)
+		}
+		if pktErr && received == 0 {
+			err, retry := h.checkSocketError(fd)
+			if !retry {
+				return err
+			}
 		}
 	}
 }
@@ -634,22 +722,30 @@ func (h *Handle) runRecvfromFallback(ctx context.Context, onEvent func(Event)) e
 		}
 
 		h.mu.Lock()
+		if h.rebound {
+			h.mu.Unlock()
+			return ErrRebound
+		}
+		if h.closed || h.fd < 0 {
+			h.mu.Unlock()
+			return nil
+		}
 		fd := h.fd
 		linkType := h.linkType
 		h.mu.Unlock()
-		if fd < 0 {
-			return nil
-		}
 
 		n, _, err := syscall.Recvfrom(fd, h.buf, 0)
 		h.mu.Lock()
-		swapped := h.fd != fd && h.rebound
+		swapped := h.rebound
 		h.mu.Unlock()
 		if swapped {
 			return ErrRebound
 		}
 		if err != nil {
 			switch err {
+			case syscall.ENOBUFS:
+				h.stats.drops.Add(1)
+				continue
 			case syscall.EAGAIN, syscall.EINTR:
 				continue
 			case syscall.EBADF:

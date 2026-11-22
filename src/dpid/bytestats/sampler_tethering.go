@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"unsafe"
@@ -221,12 +222,12 @@ type bpfMapInfo struct {
 
 // bpfObjGetInfoCall wraps BPF_OBJ_GET_INFO_BY_FD (cmd 15).
 func bpfObjGetInfoCall(fd int) (*bpfMapInfo, error) {
-	info := bpfMapInfo{}
+	info := new(bpfMapInfo)
 	attrBuf := struct {
 		BPFFD   uint32
 		InfoLen uint32
 		InfoPtr uint64
-	}{BPFFD: uint32(fd), InfoLen: uint32(unsafe.Sizeof(info)), InfoPtr: uint64(uintptr(unsafe.Pointer(&info)))}
+	}{BPFFD: uint32(fd), InfoLen: uint32(unsafe.Sizeof(*info)), InfoPtr: uint64(uintptr(unsafe.Pointer(info)))}
 	var pad [128]byte
 	binary.NativeEndian.PutUint32(pad[0:4], attrBuf.BPFFD)
 	binary.NativeEndian.PutUint32(pad[4:8], attrBuf.InfoLen)
@@ -238,8 +239,10 @@ func bpfObjGetInfoCall(fd int) (*bpfMapInfo, error) {
 		uintptr(unsafe.Pointer(&pad)),
 		unsafe.Sizeof(attrBuf),
 	)
+	runtime.KeepAlive(info)
+	runtime.KeepAlive(&pad)
 	if errno != 0 {
 		return nil, errno
 	}
-	return &info, nil
+	return info, nil
 }

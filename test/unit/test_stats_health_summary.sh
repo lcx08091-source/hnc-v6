@@ -8,11 +8,22 @@ mkdir -p "$ROOT/bin" "$ROOT/run" "$ROOT/data"
 cp "$(dirname "${HNC_TEST_FILE:-${BASH_SOURCE:-$0}}")/../../bin/stats_health_summary.sh" "$ROOT/bin/stats_health_summary.sh"
 chmod 755 "$ROOT/bin/stats_health_summary.sh"
 
+_SH="${HNC_TEST_SH:-}"
+if [ -z "$_SH" ]; then
+  if [ -n "${PREFIX:-}" ] && [ -x "$PREFIX/bin/sh" ]; then
+    _SH="$PREFIX/bin/sh"
+  elif [ -x /system/bin/sh ]; then
+    _SH="/system/bin/sh"
+  else
+    _SH="/bin/sh"
+  fi
+fi
+
 mkhelper() {
   name="$1"
   status="$2"
   cat > "$ROOT/bin/$name" <<EOF2
-#!/usr/bin/env sh
+#!$_SH
 echo '{"ok":true,"status":"$status"}'
 EOF2
   chmod 755 "$ROOT/bin/$name"
@@ -30,7 +41,7 @@ done
 HNC="$ROOT" HNC_TEST_MODE=1 sh "$ROOT/bin/stats_health_summary.sh" json > "$ROOT/out.warn.json"
 grep -q '"status":"warn"' "$ROOT/out.warn.json"
 grep -q '"stats_retention":"warn"' "$ROOT/out.warn.json"
-if grep -q 'shadow\|v52\|compare\|migration' "$ROOT/out.warn.json"; then exit 1; fi
+if grep -qE 'shadow|v52|compare|migration' "$ROOT/out.warn.json"; then exit 1; fi
 if grep -q '"status":""' "$ROOT/out.warn.json"; then exit 1; fi
 if grep -q '"recommendation":""' "$ROOT/out.warn.json"; then exit 1; fi
 [ -f "$ROOT/run/stats_health_summary.json" ]
@@ -38,10 +49,12 @@ if grep -q '"recommendation":""' "$ROOT/out.warn.json"; then exit 1; fi
 
 mkhelper stats_retention_diag.sh ok
 # stats_diag.sh 的真实输出没有 status 字段, 只有 "ok":true → 视为 ok
-cat > "$ROOT/bin/stats_diag.sh" <<'EOF2'
-#!/usr/bin/env sh
+{
+  printf '#!%s\n' "$_SH"
+  cat <<'EOF2'
 echo '{"ok":true,"timestamp":1}'
 EOF2
+} > "$ROOT/bin/stats_diag.sh"
 chmod 755 "$ROOT/bin/stats_diag.sh"
 HNC="$ROOT" HNC_TEST_MODE=1 sh "$ROOT/bin/stats_health_summary.sh" json > "$ROOT/out.ok.json"
 grep -q '"status":"ok"' "$ROOT/out.ok.json"

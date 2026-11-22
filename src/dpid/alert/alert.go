@@ -89,7 +89,7 @@ type UnknownDevice struct {
 	QuietHourEnd   int `json:"quiet_hour_end"`
 	// Per-MAC re-alert cooldown. Default 30 min — if user dismissed an
 	// unknown device once but didn't mark it known, don't spam again.
-	MinIntervalSec int `json:"min_interval_sec"`
+	MinIntervalSec int64 `json:"min_interval_sec"`
 }
 
 type AnomalyCfg struct {
@@ -262,14 +262,68 @@ func readDevicesJSON(path string) map[string]hotspotDev {
 
 // ──────────── alert log writer ────────────
 
+const (
+	alertsMaxFileBytes = 2 << 20 // 2 MiB 上限, 防写爆 32M tmpfs
+	alertsKeepBytes    = 1 << 20 // 滚动截断时保留最新 1 MiB 完整 JSONL 行
+)
+
+func truncateAlertsLocked(f *os.File, newLineLen int64) {
+	st, err := f.Stat()
+	if err != nil || st.Size()+newLineLen <= alertsMaxFileBytes {
+		return
+	}
+	keep := int64(alertsKeepBytes)
+	if maxKeep := int64(alertsMaxFileBytes) - newLineLen; keep > maxKeep {
+		keep = maxKeep
+	}
+	if keep <= 0 {
+		_ = f.Truncate(0)
+		_, _ = f.Seek(0, 0)
+		return
+	}
+	if keep > st.Size() {
+		keep = st.Size()
+	}
+	offset := st.Size() - keep
+	buf := make([]byte, keep)
+	n, rerr := f.ReadAt(buf, offset)
+	if rerr != nil && n == 0 {
+		_ = f.Truncate(0)
+		_, _ = f.Seek(0, 0)
+		return
+	}
+	buf = buf[:n]
+	if offset > 0 {
+		nl := -1
+		for i, c := range buf {
+			if c == '\n' {
+				nl = i
+				break
+			}
+		}
+		if nl >= 0 && nl+1 < len(buf) {
+			buf = buf[nl+1:]
+		} else {
+			buf = nil
+		}
+	}
+	if err := f.Truncate(0); err != nil {
+		return
+	}
+	_, _ = f.Seek(0, 0)
+	if len(buf) > 0 {
+		_, _ = f.Write(buf)
+	}
+}
+
 // Append v5.26 T7: 往 run/alerts.jsonl 追加一条告警的唯一权威实现。
 // httpd 与看门狗两个进程会同时追加同一文件, O_APPEND 只保证不覆盖、
-// 不保证整行原子 —— flock(LOCK_EX) 后一次 Write 写完整行再解锁。
+// 不保证整行原子 —— flock(LOCK_EX) 后先校验 2MB 上限滚动截断, 再一次 Write 写完整行。
 func Append(path string, a Alert) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_RDWR, 0o644)
 	if err != nil {
 		return err
 	}
@@ -278,13 +332,16 @@ func Append(path string, a Alert) error {
 	if err != nil {
 		return err
 	}
+	line := append(b, '\n')
 	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
 		// flock 不可用(如某些 FUSE)时退化为直接写, 与旧行为一致。
-		_, werr := f.Write(append(b, '\n'))
+		truncateAlertsLocked(f, int64(len(line)))
+		_, werr := f.Write(line)
 		return werr
 	}
 	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	_, err = f.Write(append(b, '\n'))
+	truncateAlertsLocked(f, int64(len(line)))
+	_, err = f.Write(line)
 	return err
 }
 

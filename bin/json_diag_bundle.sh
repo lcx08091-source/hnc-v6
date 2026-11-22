@@ -108,14 +108,30 @@ for f in "$RUN"/tc_state.*.txt "$RUN"/capabilities*.json "$RUN"/capabilities*.lo
   [ -e "$f" ] && copy_if_exists "$f" "$OUT/run/$(basename "$f")"
 done
 
+copy_redacted_json() {
+  src="$1"; dst="$2"
+  [ -f "$src" ] || return 0
+  mkdir -p "$(dirname "$dst")" 2>/dev/null
+  sed -E 's/("(password|pass|secret|token|pin|psk|hotspot_pass)"[[:space:]]*:[[:space:]]*)"([^"\\]|\\.)*"/\1"<redacted>"/g' \
+    "$src" > "$dst" 2>/dev/null
+}
+
 # Backup inventory and small latest backup samples for recovery debugging.
 BACKUP_DIR="$DATA/.json_backups"
 if [ -d "$BACKUP_DIR" ]; then
   ls -la "$BACKUP_DIR" > "$OUT/json_backups.list.txt" 2>&1
-  # Copy only newest backups, capped, so the debug bundle does not become huge.
+  # Copy only newest non-credential backups, redacted and capped, so secrets never leak to /sdcard/Download.
   mkdir -p "$OUT/json_backups_latest" 2>/dev/null
-  ls -t "$BACKUP_DIR" 2>/dev/null | head -n 20 | while read -r bf; do
-    [ -n "$bf" ] && copy_if_exists "$BACKUP_DIR/$bf" "$OUT/json_backups_latest/$bf"
+  _bc=0
+  ls -t "$BACKUP_DIR" 2>/dev/null | while IFS= read -r bf; do
+    [ -n "$bf" ] || continue
+    case "$bf" in
+      remote_tokens.json*|tokens.json*) continue ;;
+    esac
+    [ -f "$BACKUP_DIR/$bf" ] || continue
+    copy_redacted_json "$BACKUP_DIR/$bf" "$OUT/json_backups_latest/$bf"
+    _bc=$(( _bc + 1 ))
+    [ "$_bc" -ge 20 ] && break
   done
 else
   echo "no backup dir: $BACKUP_DIR" > "$OUT/json_backups.list.txt"
@@ -124,11 +140,10 @@ fi
 # Copy live JSON files for parse debugging. These may contain local IP/MAC/device names;
 # HNC debug bundles already include operational metadata, so keep this explicit.
 mkdir -p "$OUT/live_json" 2>/dev/null
-# SEC: 脱敏 rules.json 中的热点密码, 且绝不明文导出 remote_tokens.json 凭据到 /sdcard/Download
+# SEC: 脱敏 rules.json 中的热点密码(含转义引号), 且绝不明文导出 remote_tokens.json 凭据到 /sdcard/Download
 for f in rules.json device_names.json templates.json devices.json; do
   if [ -f "$DATA/$f" ]; then
-    sed -E 's/("(password|pass|secret|token|pin|psk|hotspot_pass)"[[:space:]]*:[[:space:]]*)"[^"]*"/\1"<redacted>"/g' \
-      "$DATA/$f" > "$OUT/live_json/$f" 2>/dev/null
+    copy_redacted_json "$DATA/$f" "$OUT/live_json/$f"
   fi
 done
 

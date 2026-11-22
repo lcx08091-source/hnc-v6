@@ -20,6 +20,7 @@
 # 测试钩子: HNC_SCHED_NOW=HH:MM 覆盖当前时间; HNC_SCHED_CHARGING=1|0 覆盖充电状态;
 #           HNC_POWER_SUPPLY_DIR 覆盖 /sys/class/power_supply。
 
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
 RULES="$HNC_DIR/data/rules.json"
 RUN="$HNC_DIR/run"
@@ -52,7 +53,8 @@ to_min() {
         *) return 1 ;;
     esac
     _h=${1%%:*}; _m=${1##*:}
-    echo $(( ${_h#0} * 60 + ${_m#0} ))
+    _h=${_h#0}; _h=${_h:-0}; _m=${_m#0}; _m=${_m:-0}
+    echo $(( _h * 60 + _m ))
 }
 
 in_window=1

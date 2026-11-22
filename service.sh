@@ -9,7 +9,7 @@
 # v5.20: 末尾追加 /data/local/hnc/bin —— /system/bin 运行期被卸时, 本进程及其全部
 # 子进程(offload_guard / hotspotd 拉起的脚本等)的裸 applet 能落到 /data 副本上
 # (见下方 provision_fallback_tools)。放在最后, 平时仍优先用系统命令。
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
 
 # v5.9.3 BUG-009:service.sh 也会被 magiskd 直接拉起(umask=0),而且 WebUI 的
 # "重启后端"是直接 fork service.sh、根本不经过 post-fs-data.sh,所以这里必须
@@ -64,6 +64,7 @@ rm -f "$RUN/uplink_unsupported" "$RUN/uplink_fail_count" "$RUN/uplink_unsupporte
 # 趁机复制。全程 best-effort,绝不让 service 失败。
 provision_fallback_tools() {
     bbdir="$HNC_DIR/bin"
+    mkdir -p "$bbdir" 2>/dev/null || true
     mc=""
     _bbl="/data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/busybox /system/xbin/busybox /system/bin/busybox"
     for _cl in "$MODDIR/bin/hnc_compat.sh" "$HNC_DIR/bin/hnc_compat.sh"; do
@@ -77,10 +78,11 @@ provision_fallback_tools() {
     done
     if [ -n "$mc" ] && cp -f "$mc" "$bbdir/.hnc_mc" 2>/dev/null; then
         chmod 755 "$bbdir/.hnc_mc" 2>/dev/null
+        chcon u:object_r:system_file:s0 "$bbdir/.hnc_mc" 2>/dev/null || true
         _al=" $("$bbdir/.hnc_mc" --list 2>/dev/null | tr '\n' ' ') "
         [ "$_al" = "  " ] && _al=" $("$bbdir/.hnc_mc" 2>/dev/null | tr '\n' ' ') "
         _core="sleep head tail cat printf date grep sed cut tr wc"
-        _extra="awk rm mkdir mv touch dirname basename stat readlink sort uniq find ln chmod chown id seq pidof ps xargs"
+        _extra="awk rm mkdir mv touch dirname basename stat readlink sort uniq find ln chmod chown id seq pidof ps xargs nohup cp cmp ls rmdir pkill usleep od timeout"
         for ap in $_core $_extra; do
             if [ "$_al" != "  " ]; then
                 case "$_al" in *" $ap "*) ln -sf .hnc_mc "$bbdir/$ap" 2>/dev/null ;; esac
@@ -97,6 +99,7 @@ provision_fallback_tools() {
     elif [ -e /system/bin/sh ] && cp -fL /system/bin/sh "$bbdir/sh" 2>/dev/null; then
         chmod 755 "$bbdir/sh" 2>/dev/null
     fi
+    [ -e "$bbdir/sh" ] && chcon u:object_r:system_file:s0 "$bbdir/sh" 2>/dev/null || true
 }
 provision_fallback_tools 2>/dev/null || true
 
@@ -137,11 +140,28 @@ process_by_name_alive() {
 }
 
 list_watchdog_pids() {
+    local _proot="${HNC_PROC_ROOT:-/proc}" _wp _d _p _cand
     (
-        pidof hnc_watchdog 2>/dev/null | tr ' ' '\n'
-        ps -ef 2>/dev/null | awk '
-            $0 !~ /awk/ && $0 !~ /grep/ && $0 ~ /(^|[ /])(hnc_watchdog|watchdog\.sh)([[:space:]]|$)/ { print $2 }
-        '
+        if command -v pidfile_live_pid >/dev/null 2>&1; then
+            _wp=$(pidfile_live_pid "$RUN/watchdog.pid" hnc_watchdog 2>/dev/null)
+            [ -n "$_wp" ] && echo "$_wp"
+        fi
+        if [ "$_proot" = "/proc" ] && command -v pid_matches >/dev/null 2>&1; then
+            for _d in "$_proot"/[0-9]*; do
+                [ -r "$_d/cmdline" ] || continue
+                _p=${_d##*/}
+                pid_matches "$_p" hnc_watchdog && echo "$_p"
+            done
+        fi
+        for _cand in $(pidof hnc_watchdog 2>/dev/null) \
+                     $(ps -ef 2>/dev/null | awk '$0 !~ /awk/ && $0 !~ /grep/ && $0 ~ /(^|[ /])hnc_watchdog([[:space:]]|$)/ { print $2 }'); do
+            case "$_cand" in ''|*[!0-9]*) continue ;; esac
+            if [ -r "$_proot/$_cand/cmdline" ] && command -v pid_matches >/dev/null 2>&1; then
+                pid_matches "$_cand" hnc_watchdog && echo "$_cand"
+            else
+                echo "$_cand"
+            fi
+        done
     ) | awk 'NF && !seen[$1]++ { print $1 }'
 }
 
@@ -169,7 +189,7 @@ prune_duplicate_watchdogs() {
     [ -z "$count" ] && count=0
     [ "$count" -le 1 ] && return 0
 
-    keep=$(cat "$RUN/watchdog.pid" 2>/dev/null)
+    keep=$(cat "$RUN/watchdog.pid" 2>/dev/null | tr -d ' \r\n')
     case " $pids " in
         *" $keep "*) ;;
         *) keep="" ;;
@@ -808,6 +828,7 @@ fi
 # ─── rc30.12.16: 进程哨兵循环 ──────────────────────────────────
 (
     sleep 15
+    [ -f "$HNC_DIR/bin/hnc_activity.sh" ] && . "$HNC_DIR/bin/hnc_activity.sh"
     log "sentinel: starting (launcher_choice=$LAUNCHER_CHOICE, dpid_launcher=$DPID_LAUNCHER, scope=watchdog(+rollback); dpid->launcher+go-watchdog)"
 
     while true; do
@@ -820,11 +841,17 @@ fi
             sleep 2
         fi
 
+        _sent_sleep=30
         if [ -f "$HNC_DIR/data/rollback.observing" ] && [ -f "$HNC_DIR/bin/hnc_rollback.sh" ]; then
             HNC_RB_LOG="$HNC_DIR/logs/rollback.log" sh "$HNC_DIR/bin/hnc_rollback.sh" observe "$HNC_DIR"
+        elif command -v hnc_act_load >/dev/null 2>&1; then
+            _sent_now=$(date +%s 2>/dev/null || echo 0)
+            if hnc_act_load "$_sent_now" && [ "$ACT_OK" = "1" ] && [ "$ACT_LEVEL" = "hotspot_off" ]; then
+                _sent_sleep=120
+            fi
         fi
 
-        sleep 30
+        sleep "$_sent_sleep"
     done
 ) >> "$HNC_DIR/logs/sentinel.log" 2>&1 &
 echo $! > "$RUN/sentinel.pid" 2>/dev/null || true

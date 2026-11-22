@@ -22,16 +22,20 @@ SENT_MOCK="$SENT_TD/mockbin"
 mkdir -p "$SENT_PROC" "$SENT_RUN" "$SENT_MOCK"
 
 # ── mock ps / pidof: ps 只给短名字(内容可配), pidof 一律找不到 ──
-cat > "$SENT_MOCK/ps" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 [ -n "$SENT_PS_OUT" ] && printf '%s\n' "$SENT_PS_OUT"
 exit 0
 EOF
-cat > "$SENT_MOCK/pidof" <<'EOF'
-#!/bin/sh
+} > "$SENT_MOCK/ps"
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 # 模拟 toybox pidof 认不出 Go 二进制的场景
 exit 1
 EOF
+} > "$SENT_MOCK/pidof"
 chmod +x "$SENT_MOCK/ps" "$SENT_MOCK/pidof"
 SENT_OLD_PATH="$PATH"
 export PATH="$SENT_MOCK:$PATH"

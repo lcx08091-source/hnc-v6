@@ -2,6 +2,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,11 +78,65 @@ func TestScRollbackItemStates(t *testing.T) {
 
 func TestVcName(t *testing.T) {
 	for in, want := range map[string]string{
-		"5290001": "5.29.0-rc1", "5180000": "5.18.0", "5271002": "5.27.1-rc2",
-		"unknown": "unknown", "": "", "52900x1": "52900x1",
+		"5290001": "5.29.0-rc1",
+		"5180000": "5.18.0",
+		"5271002": "5.27.1-rc2",
+		"6000000": "6.0.0",
+		"6000001": "6.0.1",
+		"6009101": "6.1.0-alpha.1",
+		"6009201": "6.1.0-beta.1",
+		"6009301": "6.1.0-rc.1",
+		"6010000": "6.1.0",
+		"6010002": "6.1.2",
+		"6019203": "6.2.0-beta.3",
+		"6009100": "6009100",
+		"unknown": "unknown",
+		"":        "",
+		"52900x1": "52900x1",
+		"-600001": "-600001",
 	} {
 		if got := vcName(in); got != want {
 			t.Errorf("vcName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestRollbackAckRequiresMutation(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dir, "data"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s := newServer(dir)
+	h := s.requireMutation(s.apiRollbackAck)
+
+	// 缺少 Content-Type → 415
+	req := httptest.NewRequest(http.MethodPost, "/api/rollback_ack", strings.NewReader("{}"))
+	req.Header.Set("X-HNC-CSRF", "1")
+	rec := httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("missing content-type status=%d, want 415", rec.Code)
+	}
+
+	// 缺少 CSRF header → 400
+	req = httptest.NewRequest(http.MethodPost, "/api/rollback_ack", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	rec = httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("missing csrf status=%d, want 400", rec.Code)
+	}
+
+	// 合法 JSON + CSRF → 200 并写 rollback.ack
+	req = httptest.NewRequest(http.MethodPost, "/api/rollback_ack", strings.NewReader("{}"))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-HNC-CSRF", "1")
+	rec = httptest.NewRecorder()
+	h(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("valid ack status=%d body=%s, want 200", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "data", "rollback.ack")); err != nil {
+		t.Fatalf("rollback.ack not written: %v", err)
 	}
 }

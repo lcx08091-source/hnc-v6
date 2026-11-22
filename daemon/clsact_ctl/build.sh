@@ -40,7 +40,7 @@ if [ "${HNC_SKIP_BPF_BUILD:-0}" != "1" ]; then
             exit 1
         fi
     else
-        "$BPFCC" -O2 -g -target bpfel -Wall -Wextra -Werror -D__TARGET_ARCH_arm64 \
+        "$BPFCC" -O2 -g -target bpfel -mcpu=v2 -Wall -Wextra -Werror -D__TARGET_ARCH_arm64 \
             -c "$BPF_SRC" -o "$BINDIR/hnc_clsact.o"
         if [ -f "$BINDIR/hnc_clsact.o" ]; then
             llvm-strip -g "$BINDIR/hnc_clsact.o" 2>/dev/null \

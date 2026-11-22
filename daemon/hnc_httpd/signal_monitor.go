@@ -116,6 +116,14 @@ func newSignalMonitor(hncDir string) *signalMonitor {
 	return m
 }
 
+func (m *signalMonitor) shouldSuppressBackgroundRefresh() bool {
+	act := activityNow()
+	if !act.Known || act.WebUIActive {
+		return false
+	}
+	return act.Level == lvlHotspotOff || act.Level == lvlNoClients
+}
+
 // currentTTL 按系统活跃档位动态返回缓存有效期: 活跃态 8s, 空闲/熄屏态 45s。
 func (m *signalMonitor) currentTTL() time.Duration {
 	act := activityNow()
@@ -156,7 +164,7 @@ func (m *signalMonitor) Get(s *server) hostSignalStatus {
 	if s != nil {
 		enrichSignalDiagnosis(&cp, s)
 	}
-	if stale {
+	if stale && !m.shouldSuppressBackgroundRefresh() {
 		m.TriggerRefresh(s, false)
 	}
 	return cp
@@ -172,6 +180,9 @@ func (m *signalMonitor) TriggerRefresh(s *server, force bool) {
 	if m == nil || m.closed.Load() {
 		return
 	}
+	if !force && m.shouldSuppressBackgroundRefresh() {
+		return
+	}
 	if force {
 		m.forceNext.Store(true)
 	}
@@ -183,6 +194,9 @@ func (m *signalMonitor) TriggerRefresh(s *server, force bool) {
 		defer m.inFlight.Store(false)
 		forced := m.forceNext.Swap(false)
 		if !forced {
+			if m.shouldSuppressBackgroundRefresh() {
+				return
+			}
 			ttl := m.currentTTL()
 			m.mu.RLock()
 			fresh := !m.lastAt.IsZero() && time.Since(m.lastAt) < ttl
@@ -423,15 +437,16 @@ func dumpTelephonyRegistryHeadCtx(parentCtx context.Context, timeout time.Durati
 		line := sc.Text()
 		if strings.HasPrefix(strings.TrimSpace(line), "local logs:") || lines >= 2500 {
 			truncated = true
-			cancel()
 			break
 		}
 		sb.WriteString(line)
 		sb.WriteByte('\n')
 		lines++
 	}
+	timedOut := ctx.Err() == context.DeadlineExceeded
+	cancel()
 	waitErr := cmd.Wait()
-	if !truncated && ctx.Err() == context.DeadlineExceeded {
+	if !truncated && timedOut {
 		return sb.String(), context.DeadlineExceeded
 	}
 	_ = waitErr

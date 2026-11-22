@@ -16,6 +16,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -110,7 +111,7 @@ func actionAlertConfigSet(hncDir string, p map[string]string) actionResp {
 		}
 	case "monthly_quota":
 		limitGB, err := strconv.ParseFloat(strings.TrimSpace(p["limit_gb"]), 64)
-		if err != nil || limitGB <= 0 || limitGB > 10240 {
+		if err != nil || math.IsNaN(limitGB) || math.IsInf(limitGB, 0) || limitGB <= 0 || limitGB > 10240 {
 			return actionResp{OK: false, Error: "bad params", Detail: "limit_gb must be 0.01..10240"}
 		}
 		warnPct := intFromParams(p, "warn_pct", 80)
@@ -125,7 +126,7 @@ func actionAlertConfigSet(hncDir string, p map[string]string) actionResp {
 		m["monthly_quota"] = sec
 	case "anomaly_traffic":
 		ratio, err := strconv.ParseFloat(strings.TrimSpace(p["ratio"]), 64)
-		if err != nil || ratio <= 0 || ratio > 1000 {
+		if err != nil || math.IsNaN(ratio) || math.IsInf(ratio, 0) || ratio <= 0 || ratio > 1000 {
 			return actionResp{OK: false, Error: "bad params", Detail: "ratio must be 0..1000"}
 		}
 		minMB := int64FromParams(p, "min_mb", 50)

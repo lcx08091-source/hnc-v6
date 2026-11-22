@@ -46,11 +46,27 @@ var (
 	netInterfaceByNameFn = net.InterfaceByName
 	// netInterfacesFn 列全部网卡(默认 net.Interfaces)。
 	netInterfacesFn = net.Interfaces
-	// execCommandFn 直接执行外部命令(不经 sh; iptables / tc 文本探测用)。
+	// execCommandFn 直接执行外部命令(不经 sh; iptables / tc 文本探测用),
+	// 强制 10s 超时 + 独立进程组 SIGKILL + WaitDelay, 防锁阻塞挂死主循环。
 	execCommandFn = func(name string, args ...string) (string, int, error) {
-		b, err := exec.Command(name, args...).CombinedOutput()
+		ctx, cancel := context.WithTimeout(context.Background(), nativeExecTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil && cmd.Process.Pid > 0 {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				return cmd.Process.Kill()
+			}
+			return nil
+		}
+		cmd.WaitDelay = time.Second
+		b, err := cmd.CombinedOutput()
 		rc := 0
-		if ee, ok := err.(*exec.ExitError); ok {
+		if ctx.Err() == context.DeadlineExceeded {
+			rc = -1
+			err = ctx.Err()
+		} else if ee, ok := err.(*exec.ExitError); ok {
 			rc = ee.ExitCode()
 		} else if err != nil {
 			rc = -1
@@ -74,6 +90,9 @@ var (
 	checkHealthFn  = checkHealth
 )
 
+// nativeExecTimeout execCommandFn 的单次外部命令超时(iptables / tc 探测)。
+var nativeExecTimeout = 10 * time.Second
+
 // ifaceDetectTimeout hnc_iface.sh get 的超时(它会跑 dumpsys / iptables 探测)。
 const ifaceDetectTimeout = 15 * time.Second
 
@@ -88,14 +107,18 @@ func runIfaceDetect() {
 	cmd.Stdout, cmd.Stderr = nil, nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
-		if cmd.Process != nil {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
 			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
 		}
 		return nil
 	}
+	cmd.WaitDelay = time.Second
 	err := cmd.Run()
 	rc := 0
-	if ee, ok := err.(*exec.ExitError); ok {
+	if ctx.Err() == context.DeadlineExceeded {
+		rc, err = -1, ctx.Err()
+	} else if ee, ok := err.(*exec.ExitError); ok {
 		rc, err = ee.ExitCode(), nil
 	} else if err != nil {
 		rc = -1

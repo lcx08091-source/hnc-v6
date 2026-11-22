@@ -30,17 +30,31 @@ TEST_FAILED_NAMES=""
 CURRENT_TEST=""
 
 # ─── 隔离的 HNC_DIR(每个测试 process 独立)─────────
-# Android 没有 /tmp,用 /data/local/tmp(Android 的标准临时目录)
-# Linux 沙箱用 /tmp,自动选择
-if [ -n "${TMPDIR:-}" ] && [ -d "$TMPDIR" ]; then
-    HNC_TEST_DIR="$TMPDIR/hnc_test_$$"
-elif [ -d /data/local/tmp ]; then
-    HNC_TEST_DIR="/data/local/tmp/hnc_test_$$"
-elif [ -d /tmp ]; then
-    HNC_TEST_DIR="/tmp/hnc_test_$$"
-else
-    HNC_TEST_DIR="$HOME/.hnc_test_$$"
+# 依次探测可写临时目录: Android 非 root 沙箱 /data/local/tmp 存在但不可写, 需校验 -w
+_hnc_test_base=""
+for _d in "${TMPDIR:-}" /data/local/tmp /tmp "${HOME:-}"; do
+    if [ -n "$_d" ] && [ -d "$_d" ] && [ -w "$_d" ]; then
+        _hnc_test_base="$_d"
+        break
+    fi
+done
+[ -n "$_hnc_test_base" ] || _hnc_test_base="."
+HNC_TEST_DIR="$_hnc_test_base/hnc_test_$$"
+unset _hnc_test_base _d
+
+# ─── 可执行 mock shebang 解释器 ──────────────────────
+# Android 非 root 沙箱执行 #!/bin/sh 会触发 SELinux Permission denied;
+# 优先 $PREFIX/bin/sh, 其次 /system/bin/sh, 其次 /bin/sh(Linux CI)。
+if [ -z "${HNC_TEST_SH:-}" ] || [ ! -x "$HNC_TEST_SH" ]; then
+    if [ -n "${PREFIX:-}" ] && [ -x "$PREFIX/bin/sh" ]; then
+        HNC_TEST_SH="$PREFIX/bin/sh"
+    elif [ -x /system/bin/sh ]; then
+        HNC_TEST_SH="/system/bin/sh"
+    else
+        HNC_TEST_SH="/bin/sh"
+    fi
 fi
+export HNC_TEST_SH
 
 setup_test_env() {
     rm -rf "$HNC_TEST_DIR"
@@ -218,6 +232,10 @@ assert_exit_nonzero() {
 MOCK_LOG=""
 MOCK_BIN_DIR=""
 MOCK_OLD_PATH=""
+MOCK_OLD_TC_BIN=""
+MOCK_OLD_TC_BIN_SET=0
+MOCK_OLD_IP_BIN=""
+MOCK_OLD_IP_BIN_SET=0
 
 mock_setup() {
     MOCK_LOG="$HNC_TEST_DIR/mock.log"
@@ -232,7 +250,7 @@ mock_setup() {
     # 创建 mock binary,通过环境变量读 stdout/exit code
     for cmd in iptables ip6tables tc ip; do
         cat > "$MOCK_BIN_DIR/$cmd" <<MOCK_EOF
-#!/bin/sh
+#!${HNC_TEST_SH}
 # 自动生成的 mock binary
 echo "${cmd}|\$*" >> "\$MOCK_LOG"
 # 从环境变量读 stdout(如果设了)
@@ -251,6 +269,22 @@ MOCK_EOF
     # 真机上 /system/bin/iptables 优先级高于 mock,导致 mock 拦不到任何调用
     MOCK_OLD_PATH="$PATH"
     export PATH="$MOCK_BIN_DIR:$PATH"
+    if [ "${TC_BIN+1}" = "1" ]; then
+        MOCK_OLD_TC_BIN="$TC_BIN"
+        MOCK_OLD_TC_BIN_SET=1
+    else
+        MOCK_OLD_TC_BIN=""
+        MOCK_OLD_TC_BIN_SET=0
+    fi
+    if [ "${IP_BIN+1}" = "1" ]; then
+        MOCK_OLD_IP_BIN="$IP_BIN"
+        MOCK_OLD_IP_BIN_SET=1
+    else
+        MOCK_OLD_IP_BIN=""
+        MOCK_OLD_IP_BIN_SET=0
+    fi
+    export TC_BIN="$MOCK_BIN_DIR/tc"
+    export IP_BIN="$MOCK_BIN_DIR/ip"
     export MOCK_LOG
     export HNC_SKIP_PATH_HARDENING=1
     # rc3.1.32: 新的 init_tc 重试逻辑在 mock 下误判 (mock 往 stdout 吐调用记录,
@@ -262,6 +296,20 @@ MOCK_EOF
 mock_teardown() {
     [ -n "$MOCK_OLD_PATH" ] && export PATH="$MOCK_OLD_PATH"
     MOCK_OLD_PATH=""
+    if [ "$MOCK_OLD_TC_BIN_SET" = "1" ]; then
+        export TC_BIN="$MOCK_OLD_TC_BIN"
+    else
+        unset TC_BIN
+    fi
+    if [ "$MOCK_OLD_IP_BIN_SET" = "1" ]; then
+        export IP_BIN="$MOCK_OLD_IP_BIN"
+    else
+        unset IP_BIN
+    fi
+    MOCK_OLD_TC_BIN=""
+    MOCK_OLD_TC_BIN_SET=0
+    MOCK_OLD_IP_BIN=""
+    MOCK_OLD_IP_BIN_SET=0
     unset HNC_SKIP_PATH_HARDENING
     unset MOCK_LOG HNC_TEST_MODE
     unset MOCK_STDOUT_iptables MOCK_STDOUT_ip6tables MOCK_STDOUT_tc MOCK_STDOUT_ip

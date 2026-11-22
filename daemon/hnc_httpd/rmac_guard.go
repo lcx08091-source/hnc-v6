@@ -41,7 +41,10 @@ type rmacStateFile struct {
 	Guarded       map[string]rmacGuardEntry     `json:"guarded,omitempty"` // 仅用于 v5.37 旧版残留自动清理
 }
 
-var rmacMu sync.Mutex
+var (
+	rmacMu        sync.Mutex
+	rmacFlushedLS = map[string]map[string]int64{} // hncDir -> (offline random mac -> flushed last_seen 水位)
+)
 
 func defaultRMACPolicy() rmacPolicy {
 	return rmacPolicy{
@@ -173,7 +176,11 @@ func (s *server) rmacReconcile(now time.Time) {
 		macMergeMu.Lock()
 		mf := loadMacMergeFile(s.hncDir)
 		macMergeMu.Unlock()
-		aliases := loadMACAliases(s.hncDir)
+		cachedAliases := loadMACAliases(s.hncDir)
+		aliases := make(map[string]string, len(cachedAliases))
+		for k, v := range cachedAliases {
+			aliases[k] = v
+		}
 		names, _ := loadDeviceNames(filepath.Join(s.hncDir, deviceNamesRelPath))
 
 		for newMAC, cands := range mf.Suggestions {
@@ -198,6 +205,7 @@ func (s *server) rmacReconcile(now time.Time) {
 			_, err := s.deviceMerge(best.OldMAC, newMAC, true, now)
 			s.actionMu.Unlock()
 			if err == nil {
+				aliases[best.OldMAC] = newMAC
 				rmacMu.Lock()
 				st := loadRMACState(s.hncDir)
 				st.AutoInherited[newMAC] = rmacAutoInheritRec{
@@ -224,21 +232,41 @@ func (s *server) rmacReconcile(now time.Time) {
 	}
 
 	// 2. 离线短命无规则随机 MAC 邻居清理(仅清理无手工命名、无持久化限速/黑名单的过期 STALE/FAILED 邻居)
+	// 对同一批已 flush 的离线随机 MAC 按 last_seen 记录水位, 防止 devices.json 保留旧条目时每轮无限 fork ip neigh flush。
 	gcSec := int64(pol.EphemeralGCMinutes) * 60
-	staleFlush := false
+	toFlush := map[string]int64{}
+	rmacMu.Lock()
+	flushed := rmacFlushedLS[s.hncDir]
+	if flushed != nil {
+		for mac := range flushed {
+			if _, exists := lastSeenMap[mac]; !exists || onlineIP[mac] != "" {
+				delete(flushed, mac)
+			}
+		}
+	}
 	for mac, ls := range lastSeenMap {
 		if onlineIP[mac] != "" || !isRandomizedMAC(mac) || isSimMACPrefix(mac) {
 			continue
 		}
 		if ls > 0 && nowU-ls >= gcSec {
-			staleFlush = true
-			break
+			if flushed == nil || flushed[mac] != ls {
+				toFlush[mac] = ls
+			}
 		}
 	}
-	if staleFlush {
+	rmacMu.Unlock()
+	if len(toFlush) > 0 {
 		if ap := s.currentHotspotIface(); ap != "" {
 			_, _ = calRunCmd(3*time.Second, "ip", "neigh", "flush", "dev", ap, "nud", "stale")
 			_, _ = calRunCmd(3*time.Second, "ip", "neigh", "flush", "dev", ap, "nud", "failed")
+			rmacMu.Lock()
+			if rmacFlushedLS[s.hncDir] == nil {
+				rmacFlushedLS[s.hncDir] = map[string]int64{}
+			}
+			for mac, ls := range toFlush {
+				rmacFlushedLS[s.hncDir][mac] = ls
+			}
+			rmacMu.Unlock()
 		}
 	}
 }

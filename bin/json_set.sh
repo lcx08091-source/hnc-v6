@@ -149,7 +149,7 @@ bl_del)
 
 # 清空所有规则。v5.11 起写前备份 + 原子替换(误点「清空」后 json_doctor 可恢复)。
 reset)
-    printf '%s\n' '{"version":1,"whitelist_mode":false,"devices":{},"blacklist":[],"whitelist":[]}' \
+    printf '%s\n' '{"version":1,"whitelist_mode":false,"auth_required":true,"devices":{},"blacklist":[],"whitelist":[]}' \
         | hj replace "$RULES"
     ;;
 

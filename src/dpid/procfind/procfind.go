@@ -50,20 +50,27 @@ type Row struct {
 	Child     uint64 // cutime+cstime (ticks)
 	Start     uint64 // starttime (ticks)
 	Cmdline   string // argv 以空格连接(NUL→空格)
+	State     byte   // /proc/<pid>/stat 进程状态字符 ('S','R','Z','X'...)
+	Comm      string // /proc/<pid>/stat 括号内的进程短名
 }
 
-// StatFields /proc/<pid>/stat → ppid, utime+stime, cutime+cstime, starttime。
-// comm 可含空格/括号, 从最后一个 ')' 后切。
-func StatFields(s string) (ppid int, own, child, start uint64, ok bool) {
-	i := strings.LastIndexByte(s, ')')
-	if i < 0 {
+func isDeadState(state byte) bool {
+	return state == 'Z' || state == 'X' || state == 'x'
+}
+
+func parseStat(s string) (comm string, state byte, ppid int, own, child, start uint64, ok bool) {
+	l := strings.IndexByte(s, '(')
+	r := strings.LastIndexByte(s, ')')
+	if l < 0 || r <= l {
 		return
 	}
-	f := strings.Fields(s[i+1:])
+	comm = s[l+1 : r]
+	f := strings.Fields(s[r+1:])
 	// f[0]=state(3) f[1]=ppid(4) f[11]=utime(14) f[12]=stime(15) f[13]=cutime(16) f[14]=cstime(17) f[19]=starttime(22)
-	if len(f) < 20 {
+	if len(f) < 20 || len(f[0]) == 0 {
 		return
 	}
+	state = f[0][0]
 	p, e0 := strconv.Atoi(f[1])
 	u, e1 := strconv.ParseUint(f[11], 10, 64)
 	st, e2 := strconv.ParseUint(f[12], 10, 64)
@@ -79,7 +86,14 @@ func StatFields(s string) (ppid int, own, child, start uint64, ok bool) {
 	if cs < 0 {
 		cs = 0
 	}
-	return p, u + st, uint64(cu) + uint64(cs), sv, true
+	return comm, state, p, u + st, uint64(cu) + uint64(cs), sv, true
+}
+
+// StatFields /proc/<pid>/stat → ppid, utime+stime, cutime+cstime, starttime。
+// comm 可含空格/括号, 从最后一个 ')' 后切。
+func StatFields(s string) (ppid int, own, child, start uint64, ok bool) {
+	_, _, ppid, own, child, start, ok = parseStat(s)
+	return
 }
 
 // Cmdline 读单个进程的 cmdline(NUL→空格, 首尾去空白), 失败返回空串。
@@ -91,7 +105,7 @@ func (fs FS) Cmdline(pid int) string {
 	return strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " "))
 }
 
-// Table 一次扫描 /proc: pid → Row(不含 cmdline, 需要时用 Cmdline 单读)。
+// Table 一次扫描 /proc: pid → Row(不含 cmdline, 需要时用 Cmdline 单读; 自动过滤 Z/X 僵尸进程)。
 func (fs FS) Table() map[int]Row {
 	out := map[int]Row{}
 	if fs.ReadDir == nil {
@@ -110,8 +124,11 @@ func (fs FS) Table() map[int]Row {
 		if err != nil {
 			continue
 		}
-		if pp, own, ch, st, ok := StatFields(string(b)); ok {
-			out[pid] = Row{PID: pid, PPID: pp, Own: own, Child: ch, Start: st}
+		if comm, state, pp, own, ch, st, ok := parseStat(string(b)); ok {
+			if isDeadState(state) {
+				continue
+			}
+			out[pid] = Row{PID: pid, PPID: pp, Own: own, Child: ch, Start: st, State: state, Comm: comm}
 		}
 	}
 	return out
@@ -121,12 +138,12 @@ func (fs FS) Table() map[int]Row {
 type Def struct {
 	Self     bool     // 是自己(httpd) → 直接返回 SelfPID
 	PIDFiles []string // 相对 <hncDir>/run/ 的 pid 文件, 按序尝试
-	Key      string   // pidfile 校验: cmdline 必含(空 cmdline 放行)
+	Key      string   // pidfile 校验: cmdline 必含(cmdline 为空时回退校验 stat comm)
 	ScanKey  string   // pidfile 全失效时扫 /proc: cmdline 必含(空则不扫)
 }
 
-// FindPID 统一查找: Self → pidfile(存活 + cmdline 含 Key 或为空)
-// → ScanKey 扫描(升序, cmdline 含 ScanKey, 跳过自己)。找不到返回 0。
+// FindPID 统一查找: Self → pidfile(存活非僵尸 + cmdline 或 stat comm 含 Key)
+// → ScanKey 扫描(升序, cmdline 含 ScanKey, 跳过自己与僵尸进程)。找不到返回 0。
 // tab 可为 nil: pidfile 存活改读 /proc/<pid>/stat 判断, 只有走到扫描时才现建进程表
 // (selfcheck 这种只查几个进程的调用方, 多数情况下不必扫全部 /proc)。
 func (fs FS) FindPID(d Def, hncDir string, tab map[int]Row) int {
@@ -142,14 +159,50 @@ func (fs FS) FindPID(d Def, hncDir string, tab map[int]Row) int {
 		if err != nil || pid <= 0 {
 			continue
 		}
+		var comm string
 		if tab != nil {
-			if _, ok := tab[pid]; !ok {
+			row, ok := tab[pid]
+			if !ok || isDeadState(row.State) {
 				continue
 			}
-		} else if _, err := fs.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); err != nil {
+			comm = row.Comm
+			if comm == "" && row.State == 0 {
+				if sb, serr := fs.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat"); serr == nil {
+					if c, st, _, _, _, _, sok := parseStat(string(sb)); sok {
+						if isDeadState(st) {
+							continue
+						}
+						comm = c
+					}
+				}
+			}
+		} else {
+			sb, serr := fs.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+			if serr != nil {
+				continue
+			}
+			c, st, _, _, _, _, sok := parseStat(string(sb))
+			if !sok || isDeadState(st) {
+				continue
+			}
+			comm = c
+		}
+		if d.Key == "" {
+			return pid
+		}
+		cl := fs.Cmdline(pid)
+		if cl != "" {
+			if strings.Contains(cl, d.Key) {
+				return pid
+			}
 			continue
 		}
-		if cl := fs.Cmdline(pid); cl == "" || strings.Contains(cl, d.Key) {
+		// cmdline 为空时严禁无条件放行, 仅当 stat comm 匹配 Key 时回退放行。
+		key := d.Key
+		if len(key) > 15 {
+			key = key[:15]
+		}
+		if comm != "" && strings.Contains(comm, key) {
 			return pid
 		}
 	}
@@ -165,7 +218,7 @@ func (fs FS) FindPID(d Def, hncDir string, tab map[int]Row) int {
 	}
 	sort.Ints(pids)
 	for _, pid := range pids {
-		if pid == fs.SelfPID {
+		if pid == fs.SelfPID || isDeadState(tab[pid].State) {
 			continue
 		}
 		if strings.Contains(fs.Cmdline(pid), d.ScanKey) {

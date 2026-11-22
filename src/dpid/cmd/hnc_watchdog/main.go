@@ -20,7 +20,9 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -36,6 +38,7 @@ import (
 	"syscall"
 	"time"
 
+	"hnc.io/dpid/activity"
 	"hnc.io/dpid/alert"
 	"hnc.io/dpid/tzlocal"
 )
@@ -341,7 +344,9 @@ func runAction(name string, args ...string) actionResult {
 	}
 	cmd.WaitDelay = 2 * time.Second
 
+	touchMainLoopStep()
 	out, err := cmd.Output()
+	touchMainLoopStep()
 	rc := 0
 	if err != nil {
 		var ee *exec.ExitError
@@ -632,24 +637,55 @@ func findLiveByName(name string) int {
 
 // ─── doze detection ─────────────────────────────────────────────────────
 
-var (
-	dozeCacheMu sync.Mutex
-	dozeCached  bool
-	dozeCheckTS time.Time
+const (
+	dozeBatteryCapPath = "/sys/class/power_supply/battery/capacity"
+	dozeLowBatteryPct  = 5
 )
 
+var (
+	dozeCacheMu      sync.Mutex
+	dozeCached       bool
+	dozeCheckTS      time.Time
+	batteryCapPathFn = func() string { return dozeBatteryCapPath }
+)
+
+// readBatteryCapacity 纯 Go 0-fork 读 /sys/class/power_supply/battery/capacity。
+// 读不到或非合法 0..100 数值返回 (-1, false)。
+func readBatteryCapacity() (int, bool) {
+	b, err := os.ReadFile(batteryCapPathFn())
+	if err != nil {
+		return -1, false
+	}
+	v, err := strconv.Atoi(strings.TrimSpace(string(b)))
+	if err != nil || v < 0 || v > 100 {
+		return -1, false
+	}
+	return v, true
+}
+
+// isDoze 纯 Go 0-fork 低功耗判定:
+//   - 不再 fork `./bin/watchdog.sh action is_doze` 唤醒 system_server;
+//   - 复用 run/activity.json 的熄屏静默态 (s.OK && s.Quiet → 直接降频);
+//   - 保留电量 <5% 低电降频 (读 /sys/class/power_supply/battery/capacity, 30s 缓存)。
 func isDoze() bool {
-	if screenAwake() {
-		return false
+	s := actSnapshotFn()
+	if s.OK && s.Quiet {
+		return true
 	}
 	dozeCacheMu.Lock()
 	defer dozeCacheMu.Unlock()
-	if !dozeCheckTS.IsZero() && time.Since(dozeCheckTS) < 30*time.Second {
-		return dozeCached
+	now := nowFn()
+	if !dozeCheckTS.IsZero() {
+		if el := now.Sub(dozeCheckTS); el >= 0 && el < 30*time.Second {
+			return dozeCached
+		}
 	}
-	res := runAction("is_doze")
-	dozeCached = res.exitCode == 0
-	dozeCheckTS = time.Now()
+	lowBat := false
+	if capPct, ok := readBatteryCapacity(); ok && capPct < dozeLowBatteryPct {
+		lowBat = true
+	}
+	dozeCached = lowBat
+	dozeCheckTS = now
 	return dozeCached
 }
 
@@ -773,7 +809,9 @@ func mainLoop() {
 
 func handlePending(_ *restoreThrottle) time.Duration {
 	m4Writer.hotspotDown()
+	touchMainLoopStep()
 	res := probeHotspotFn()
+	touchMainLoopStep()
 	if res.exitCode != 0 || res.stdout == "" {
 		return intervalProbe
 	}
@@ -785,20 +823,27 @@ func handlePending(_ *restoreThrottle) time.Duration {
 	iface, ip := parts[0], parts[1]
 	logf("STATE PENDING -> ACTIVE:%s (ip=%s); running full_init", iface, ip)
 	res = runActionFn("full_init", iface, ip)
+	touchMainLoopStep()
 	if res.exitCode != 0 {
 		logf("full_init returned rc=%d; staying PENDING", res.exitCode)
 		return intervalProbe
 	}
 	writeStateFn(wdState{kind: stateActive, iface: iface})
 	m4Writer.tick(iface, nowFn())
+	wakeAppLimitLoop()
 	return intervalNormal
 }
 
 func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux) time.Duration {
+	touchMainLoopStep()
 	probe := probeHotspotFn()
+	touchMainLoopStep()
 	if probe.exitCode != 0 || probe.stdout == "" {
+		logf("STATE ACTIVE:%s -> PENDING (hotspot closed)", activeIface)
 		m4Writer.hotspotDown()
-		return intervalNormal
+		onlineAcc.hotspotDown(nowFn())
+		writeStateFn(wdState{kind: statePending})
+		return intervalProbe
 	}
 	parts := strings.Fields(probe.stdout)
 	if len(parts) < 2 {
@@ -809,11 +854,14 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	if newIface != activeIface {
 		logf("iface changed %s -> %s; migrating", activeIface, newIface)
 		res := runActionFn("migrate", activeIface, newIface, newIP)
+		touchMainLoopStep()
 		if res.exitCode == 0 {
 			writeStateFn(wdState{kind: stateActive, iface: newIface})
 			m4Writer.tick(newIface, nowFn())
+			wakeAppLimitLoop()
 		} else {
-			logf("migrate rc=%d", res.exitCode)
+			logf("migrate rc=%d; stopping stale m4 writer", res.exitCode)
+			m4Writer.hotspotDown()
 		}
 		return intervalNormal
 	}
@@ -823,10 +871,12 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	m4Writer.tick(newIface, now)
 	if aux.cap.due(newIface, now) {
 		_ = runActionFn("capability_probe", newIface)
+		touchMainLoopStep()
 		aux.cap.mark(newIface, now)
 	}
 
 	healthRC := checkHealthFn(newIface)
+	touchMainLoopStep()
 	switch healthRC {
 	case 0:
 		recovering := aux.recoveryRounds > 0
@@ -836,16 +886,20 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		now := nowFn()
 		if now.Sub(aux.lastV6Sync) >= 60*time.Second {
 			runV6SyncFn()
+			touchMainLoopStep()
 			aux.lastV6Sync = now
 		}
 		if statsSampleDue(aux.lastStatsSample, now) {
 			runStatsSampleFn()
+			touchMainLoopStep()
 			aux.lastStatsSample = now
 		}
 		if recovering || now.Sub(aux.lastUplink) >= tcUplinkEvery {
 			if ok, unknown := nativeUplinkOK(newIface); !ok || unknown {
+				touchMainLoopStep()
 				_ = runActionFn("tc_uplink_healthy")
 			}
+			touchMainLoopStep()
 			aux.lastUplink = now
 		}
 		return intervalNormal
@@ -860,6 +914,7 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		res := runActionFn("full_restore",
 			fmt.Sprintf("health_fail (total=%d, window=%d/%d)",
 				throttle.totalRestores, throttle.windowCount, restoreWindowMax))
+		touchMainLoopStep()
 		if res.exitCode != 0 {
 			logf("full_restore rc=%d", res.exitCode)
 		}
@@ -952,29 +1007,126 @@ func main() {
 	logf("hnc_watchdog exiting normally")
 }
 
+const (
+	appLimitApplyEvery     = 30 * time.Second
+	appLimitDirtyPollFast  = 3 * time.Second
+	appLimitEmptyQuietPoll = 60 * time.Second
+	appLimitIdlePoll       = 120 * time.Second
+)
+
+var appLimitWakeCh = make(chan struct{}, 1)
+
+func wakeAppLimitLoop() {
+	select {
+	case appLimitWakeCh <- struct{}{}:
+	default:
+	}
+}
+
+// appLimitHasWork 判断当前是否存在单应用限速/应用感知 QoS 的有效配置或待清理残留状态。
+// 全空时周期轮询无需每 30 秒 fork 千行 shell 脚本, 仅在检测到 dirty 标记或配置非空时下发。
+func appLimitHasWork(dataPath, runPath string) bool {
+	if fi, err := os.Stat(filepath.Join(dataPath, "app_limits.flat")); err == nil && fi.Size() > 0 {
+		return true
+	}
+	for _, name := range []string{
+		"app_limits.devs",
+		"app_limits.tree",
+		"app_limits.applied.sig",
+		"app_limits.full_state.sig",
+		"app_limits_inactive.marker",
+		"app_qos.state",
+	} {
+		if _, err := os.Stat(filepath.Join(runPath, name)); err == nil {
+			return true
+		}
+	}
+	b, err := os.ReadFile(filepath.Join(dataPath, "rules.json"))
+	if err == nil && len(b) < 8<<20 && bytes.Contains(b, []byte(`"app_qos"`)) {
+		var r struct {
+			Devices map[string]map[string]interface{} `json:"devices"`
+		}
+		if json.Unmarshal(b, &r) == nil {
+			for _, d := range r.Devices {
+				if boolish(d["app_qos"]) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// appLimitNextWait 计算 appLimitApplyLoop 下一轮等待时长:
+//   - 热点未开: 放宽至 120s(热点开启时由 appLimitWakeCh 即时唤醒);
+//   - 空配置且熄屏/无客户端: 放宽至 60s(0 fork);
+//   - 空配置且亮屏/有界面: 3s 轻量 stat 检查 app_limit.dirty(0 fork);
+//   - 有配置: 亮屏 3s 响应 dirty / 30s 周期下发, 熄屏/无客户端 30s 周期下发。
+func appLimitNextWait(idle, hasWork, quietOrNoClients bool, sinceLastApply time.Duration) time.Duration {
+	if idle {
+		return appLimitIdlePoll
+	}
+	if !hasWork {
+		if quietOrNoClients {
+			return appLimitEmptyQuietPoll
+		}
+		return appLimitDirtyPollFast
+	}
+	rem := appLimitApplyEvery - sinceLastApply
+	if rem < appLimitDirtyPollFast {
+		rem = appLimitDirtyPollFast
+	}
+	if quietOrNoClients {
+		return rem
+	}
+	if appLimitDirtyPollFast < rem {
+		return appLimitDirtyPollFast
+	}
+	return rem
+}
+
 func appLimitApplyLoop() {
 	script := binDir + "/apply_app_limits.sh"
 	dirty := runDir + "/app_limit.dirty"
 	if !sleepUntil(45 * time.Second) {
 		return
 	}
-	tk := time.NewTicker(30 * time.Second)
-	dirtyTk := time.NewTicker(3 * time.Second)
-	defer tk.Stop()
-	defer dirtyTk.Stop()
-	appApplyOnce(script)
+	var lastApply time.Time
 	for {
+		idle := hotspotIdleFn()
+		hasWork := false
+		if !idle {
+			hasDirty := false
+			if _, err := os.Stat(dirty); err == nil {
+				hasDirty = true
+				_ = os.Remove(dirty)
+			}
+			hasWork = appLimitHasWork(dataDir, runDir)
+			now := nowFn()
+			if hasDirty || (hasWork && (lastApply.IsZero() || now.Sub(lastApply) >= appLimitApplyEvery || now.Sub(lastApply) < 0)) {
+				appApplyOnce(script)
+				lastApply = nowFn()
+				hasWork = appLimitHasWork(dataDir, runDir)
+			}
+		}
+		s := actSnapshotFn()
+		quietOrNoClients := s.OK && (s.Quiet || s.Level == activity.LevelNoClients)
+		sinceLast := time.Duration(0)
+		if !lastApply.IsZero() {
+			if d := nowFn().Sub(lastApply); d > 0 {
+				sinceLast = d
+			}
+		}
+		wait := appLimitNextWait(idle, hasWork, quietOrNoClients, sinceLast)
+		tmr := time.NewTimer(wait)
 		select {
 		case <-stopCh:
+			tmr.Stop()
 			return
-		case <-tk.C:
-		case <-dirtyTk.C:
-			if _, err := os.Stat(dirty); err != nil {
-				continue
-			}
-			_ = os.Remove(dirty)
+		case <-appLimitWakeCh:
+			tmr.Stop()
+		case <-tmr.C:
 		}
-		appApplyOnce(script)
 	}
 }
 

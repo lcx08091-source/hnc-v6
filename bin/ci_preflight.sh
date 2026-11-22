@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# HNC preflight checker (v6.1+ SemVer alpha/beta/rc aware)
+# HNC preflight checker (v6.1+ SemVer alpha/beta/rc & byte-hygiene aware)
 # Runs in Termux/Android shell or GitHub Actions bash/sh.
 # Usage:
 #   sh bin/ci_preflight.sh                 # source tree checks
@@ -24,7 +24,7 @@ while [ $# -gt 0 ]; do
   shift
 done
 
-_PF_VER="$(awk -F= '$1=="version"{print $2; exit}' module.prop 2>/dev/null)"
+_PF_VER="$(awk -F= '$1=="version"{print $2; exit}' module.prop 2>/dev/null | tr -d '\r')"
 say "HNC preflight ${_PF_VER:-v6.1}"
 say "root=$ROOT"
 
@@ -35,13 +35,24 @@ say "root=$ROOT"
 RESIDUE="$(find . -path './.git' -prune -o \( \
     -name '*.rej' -o -name '*.orig' \
     -o -name '*.bak' -o -name '*.bak.[0-9]*' -o -name '*~' \
-    -o -name '.DS_Store' -o -name 'Thumbs.db' -o -name '*.TODO' \
+    -o -name '*.TODO' -o -name '.DS_Store' -o -name 'Thumbs.db' \
   \) -print 2>/dev/null | head -n 50)"
 if [ -n "$RESIDUE" ]; then
-  fail "patch/editor residue found (.rej/.orig/.bak/~/.DS_Store/Thumbs.db):"
+  fail "patch/editor residue found (.rej/.orig/.bak/~/.TODO/.DS_Store/Thumbs.db):"
   say "$RESIDUE"
 else
-  ok "no patch/editor residue (.rej/.orig/.bak/~/.DS_Store)"
+  ok "no patch/editor residue (.rej/.orig/.bak/~/.TODO/.DS_Store)"
+fi
+ROOT_TODO="$(find . -maxdepth 1 -name '*.TODO' -print 2>/dev/null)"
+if [ -n "$ROOT_TODO" ]; then
+  fail "unfinished root .TODO file(s) must be resolved before release: $ROOT_TODO"
+else
+  ok "no root .TODO draft files"
+fi
+if [ -s LICENSE ]; then
+  ok "formal LICENSE file present and non-empty"
+else
+  fail "formal LICENSE file missing or empty at repo root"
 fi
 
 # 2. Secrets / accidental home repo files
@@ -63,6 +74,15 @@ else
   # v5.9.0: 正则与 bin/version_consistency_check.sh 统一为同一表达式。
   # 此前这里强制 -rc[0-9]+(连正式版 v5.8.8 都判 unexpected)且只认 -hf,
   # 那边只认 -hotfix —— 两个护栏互相矛盾等于没有护栏。不匹配升级为 fail。
+  if command -v od >/dev/null 2>&1; then
+    MP_BOM="$(head -c 3 module.prop | od -An -tx1 2>/dev/null | tr -d ' \t\r\n')"
+    [ "$MP_BOM" = "efbbbf" ] && fail "module.prop contains UTF-8 BOM (breaks Magisk/KSU grep_prop)" || ok "module.prop has no UTF-8 BOM"
+  fi
+  if grep -q "$(printf '\r')" module.prop 2>/dev/null; then
+    fail "module.prop contains CRLF carriage returns"
+  else
+    ok "module.prop uses clean UNIX LF line endings"
+  fi
   if echo "$VER" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then
     ok "module.prop version format looks valid"
   else
@@ -157,7 +177,7 @@ fi
 # 源码与打包路径均已移除, 无需再查 ELF 架构。
 
 # 7. Version drift warning: detect very old hotfix strings in live web/go files.
-OLD_HITS="$(grep -R "hotfix4\|hotfix10\|hotfix16\.7\|hotfix17\.3" -n webroot daemon/hnc_httpd 2>/dev/null | head -n 30)"
+OLD_HITS="$(grep -RnE 'hotfix4|hotfix10|hotfix16\.7|hotfix17\.3' webroot daemon/hnc_httpd 2>/dev/null | head -n 30)"
 if [ -n "$OLD_HITS" ]; then
   warn "old hotfix strings found; verify they are changelog-only, not runtime version:"
   say "$OLD_HITS"
@@ -328,18 +348,24 @@ fi
 # 10. v5.28 A4: pitfall lint(老坑规则: 时区 / toybox grep / ps 判活 / 告警
 # 写入 / json_escape Tab)。存量白名单见 bin/pitfall_lint.allow, 只拦新增。
 if [ -f "bin/pitfall_lint.sh" ]; then
-    sh bin/pitfall_lint.sh "$ROOT" > "$ROOT/.pitfall_lint.$$" 2>&1
+    _pl_tmpbase="${TMPDIR:-/tmp}"
+    [ -d "$_pl_tmpbase" ] && [ -w "$_pl_tmpbase" ] || _pl_tmpbase="/data/local/tmp"
+    [ -d "$_pl_tmpbase" ] && [ -w "$_pl_tmpbase" ] || _pl_tmpbase="$ROOT"
+    _pl_out="$_pl_tmpbase/.pitfall_lint.$$"
+    trap 'rm -f "$_pl_out" 2>/dev/null' INT TERM
+    sh bin/pitfall_lint.sh "$ROOT" > "$_pl_out" 2>&1
     _pl_rc=$?
     if [ "$_pl_rc" -eq 0 ]; then
         ok "pitfall lint: 0 新增违规"
     elif [ "$_pl_rc" -eq 1 ]; then
         fail "pitfall lint 发现新增违规(规则见 bin/pitfall_lint.sh 文件头):"
-        sed 's/^/        /' "$ROOT/.pitfall_lint.$$"
+        sed 's/^/        /' "$_pl_out"
     else
         # rc=2: 环境 / 用法错误(例如 artifact 测试搭的精简仓库没有 service.sh), 不是违规
-        warn "pitfall lint 无法运行(rc=$_pl_rc): $(head -n 1 "$ROOT/.pitfall_lint.$$" 2>/dev/null)"
+        warn "pitfall lint 无法运行(rc=$_pl_rc): $(head -n 1 "$_pl_out" 2>/dev/null)"
     fi
-    rm -f "$ROOT/.pitfall_lint.$$"
+    rm -f "$_pl_out" 2>/dev/null || true
+    trap - INT TERM
 else
     warn "bin/pitfall_lint.sh 不存在, 跳过 pitfall lint"
 fi

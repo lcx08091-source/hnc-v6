@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
 # v3.5.0 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 # hotspot_autostart.sh — 开机自动启动 WiFi 热点
 # 用法: start [ssid] [pass] | stop | status
 #
@@ -18,7 +18,7 @@ HNC_DIR=${HNC_DIR:-/data/local/hnc}
 RULES=$HNC_DIR/data/rules.json
 LOG=$HNC_DIR/logs/hotspot.log
 
-log() { echo "[$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')] [HOTSPOT] $1" >> $LOG; }
+log() { echo "[$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S')] [HOTSPOT] $1" >> "$LOG"; }
 
 # ─── 从 rules.json 读取用户级字段 ─────────────────────────────
 # 字符串字段（带引号的 JSON 字符串）
@@ -59,7 +59,7 @@ get_rule_str() {
 }
 # 数值字段
 get_rule_num() {
-    grep -o "\"$1\"[[:space:]]*:[[:space:]]*-\?[0-9][0-9.]*" "$RULES" 2>/dev/null \
+    grep -oE "\"$1\"[[:space:]]*:[[:space:]]*-?[0-9][0-9.]*" "$RULES" 2>/dev/null \
         | head -1 | sed 's/.*:[[:space:]]*//'
 }
 # 布尔字段
@@ -121,7 +121,11 @@ setup_nat() {
     { echo 1 > /proc/sys/net/ipv4/ip_forward; } 2>/dev/null || sysctl -w net.ipv4.ip_forward=1 2>/dev/null || true
     iptables -w 2 -t nat -C POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || iptables -w 2 -t nat -A POSTROUTING -o "$up" -j MASQUERADE 2>/dev/null || true
     iptables -w 2 -C FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || iptables -w 2 -A FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || true
-    iptables -w 2 -C FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || iptables -w 2 -A FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    if ! iptables -w 2 -C FORWARD -i "$up" -o "$ap" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+       && ! iptables -w 2 -C FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null; then
+        iptables -w 2 -A FORWARD -i "$up" -o "$ap" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null \
+            || iptables -w 2 -A FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+    fi
     log "NAT: done (ap=$ap up=$up)"
 }
 teardown_nat() {
@@ -130,6 +134,7 @@ teardown_nat() {
     ap=$(detect_ap_iface "$up")
     if [ -n "$ap" ] && [ -n "$up" ]; then
         iptables -w 2 -D FORWARD -i "$ap" -o "$up" -j ACCEPT 2>/dev/null || true
+        iptables -w 2 -D FORWARD -i "$up" -o "$ap" -m conntrack --ctstate RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
         iptables -w 2 -D FORWARD -i "$up" -o "$ap" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
     fi
     log "NAT: torn down"
@@ -168,11 +173,15 @@ start|start-now)
 
     # ── 1. 注入 SELinux 策略 ────────────────────────────────
     log "Injecting SELinux policies..."
-    KSU_BIN="/data/adb/ksu/bin/ksud"
+    KSU_BIN=""
+    for _kb in /data/adb/ksud /data/adb/ksu/bin/ksud; do
+        [ -x "$_kb" ] && { KSU_BIN="$_kb"; break; }
+    done
+    unset _kb
     MAGISK_POLICY=$(command -v magiskpolicy 2>/dev/null)
 
     inject_rule() {
-        [ -x "$KSU_BIN" ]   && "$KSU_BIN" sepolicy patch "$1" 2>/dev/null && return 0
+        [ -n "$KSU_BIN" ] && [ -x "$KSU_BIN" ] && "$KSU_BIN" sepolicy patch "$1" 2>/dev/null && return 0
         [ -n "$MAGISK_POLICY" ] && "$MAGISK_POLICY" --live "$1" 2>/dev/null && return 0
         return 1
     }
@@ -211,7 +220,9 @@ start|start-now)
     [ -z "$AP_SSID" ] && AP_SSID="$(get_setting wifi_ap_ssid)"
     [ -z "$AP_PASS" ] && AP_PASS="$(get_setting wifi_ap_password)"
     [ -z "$AP_SSID" ] && AP_SSID="MyHotspot"
-    [ -z "$AP_PASS" ] && AP_PASS="12345678"
+    if [ -z "$AP_PASS" ]; then
+        log "WARN: hotspot_pass is empty (neither rules.json nor system settings set); refusing hardcoded weak password or open downgrade for start-softap"
+    fi
     log "SSID=$AP_SSID"
 
     # ── 4. 启动热点（先探测再按可用方法链尝试）────────────────
@@ -226,9 +237,22 @@ start|start-now)
         HNC_COMPAT_LIB=1 . "$HNC_DIR/bin/hnc_compat.sh"
         hnc_softap_probe
         CHAIN="$HNC_SOFTAP_CHAIN"
+        # SEC: 配置了非空密码时绝不降级到 open; 未配置密码时跳过 start-softap(只允许系统原生热点方法)
+        if [ -n "$AP_PASS" ]; then
+            _filtered_secs=""
+            for _s in $HNC_SOFTAP_SECS; do
+                [ "$_s" = "open" ] && continue
+                _filtered_secs="$_filtered_secs $_s"
+            done
+            HNC_SOFTAP_SECS="${_filtered_secs# }"
+            unset _filtered_secs _s
+        fi
         log "softap probe: chain=[$CHAIN] sec=[$HNC_SOFTAP_SECS] lohs=$_HC_P_LOHS sdk=$(getprop ro.build.version.sdk 2>/dev/null)"
         [ -n "$CHAIN" ] || log "softap probe: 本机没有任何可用的命令行开热点方法(Android 10 及以下无 start-softap), 请从系统设置开热点"
         for M in $CHAIN; do
+            case "$M" in
+                softap*) [ -n "$AP_PASS" ] || { log "skip $M: hotspot_pass not configured"; continue; } ;;
+            esac
             RESULT=$(hnc_softap_try "$M" "$AP_SSID" "$AP_PASS")
             if [ $? -eq 0 ]; then
                 STARTED=1; USED="$M"
@@ -239,7 +263,7 @@ start|start-now)
             log "method $M failed: $(printf '%s' "$RESULT" | tr '\n' ' ' | cut -c1-160)"
         done
         # WifiService 刚就绪首次可能失败: 等 5s 对第一种 softap 方法再试一次
-        if [ "$STARTED" = "0" ]; then
+        if [ "$STARTED" = "0" ] && [ -n "$AP_PASS" ]; then
             case " $CHAIN " in
                 *" softap_band "*|*" softap "*)
                     sleep 5
@@ -255,16 +279,18 @@ start|start-now)
             hnc_softap_record "${USED:-${CHAIN%% *}}" 0 "$RESULT"
         fi
     else
-        # 旧固定顺序(hnc_compat.sh 缺失时)
-        for SEC in wpa2 wpa3 wpa3_transition open; do
-            RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" -b any 2>&1)
-            echo "$RESULT" | grep -qiE "started|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC -b any)"; break; }
-        done
-        if [ "$STARTED" = "0" ]; then
-            for SEC in wpa2 wpa3 open; do
-                RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" 2>&1)
-                echo "$RESULT" | grep -qiE "started|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC no-b)"; break; }
+        # 旧固定顺序(hnc_compat.sh 缺失时): 非空密码绝不降级到 open, 无密码拒绝 start-softap
+        if [ -n "$AP_PASS" ]; then
+            for SEC in wpa2 wpa3 wpa3_transition; do
+                RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" -b any 2>&1)
+                echo "$RESULT" | grep -qiE "started|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC -b any)"; break; }
             done
+            if [ "$STARTED" = "0" ]; then
+                for SEC in wpa2 wpa3; do
+                    RESULT=$(cmd wifi start-softap "$AP_SSID" "$SEC" "$AP_PASS" 2>&1)
+                    echo "$RESULT" | grep -qiE "started|success" && { STARTED=1; START_METHOD=softap_local; log "started via start-softap (sec=$SEC no-b)"; break; }
+                done
+            fi
         fi
         if [ "$STARTED" = "0" ]; then
             cmd tethering tether wifi 2>/dev/null && { STARTED=1; START_METHOD=system; log "started via cmd tethering (system NAT)"; }

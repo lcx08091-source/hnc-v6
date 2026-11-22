@@ -63,6 +63,25 @@ if command -v node >/dev/null 2>&1; then
     case "$a" in *.js) node --check "$ROOT/webroot/$a" 2>/dev/null || perr="$perr $a" ;; esac
   done
   [ -z "$perr" ] && ok "webroot/js/*.js parse" || bad "JS syntax error:$perr"
+  JH_HTML="$ROOT/webroot/json-health.html"
+  if [ -f "$JH_HTML" ]; then
+    TMP_JH="${TMPDIR:-/tmp}/hnc_v6_json_health.$$.js"
+    node -e "
+      const s=require('fs').readFileSync(process.argv[1],'utf8');
+      const m=[...s.matchAll(/<script(?:\s[^>]*)?>([\s\S]*?)<\/script>/gi)].filter(x=>!/\bsrc\s*=/i.test(x[0]));
+      if (!m.length) process.exit(2);
+      require('fs').writeFileSync(process.argv[2], m.map(x=>x[1]).join('\n;\n'));
+    " "$JH_HTML" "$TMP_JH"
+    _jh_rc=$?
+    if [ "$_jh_rc" -eq 0 ] && node --check "$TMP_JH" 2>/dev/null; then
+      ok "json-health.html inline JS parses"
+    else
+      bad "json-health.html inline JS syntax error"
+    fi
+    rm -f "$TMP_JH"
+  else
+    bad "webroot/json-health.html missing"
+  fi
 else
   echo "[SKIP] node not found"
 fi

@@ -925,9 +925,9 @@ Current packaged build: `{{VERSION}}` (`{{DATE}}`) · Latest releases: [GitHub R
 
 License
 
-HNC is distributed under the **GNU General Public License v3.0 (GPL-3.0-only)**.
+HNC user-space components are distributed under the **GNU General Public License v3.0 (`GPL-3.0-only`)**, while Linux kernel eBPF programs (`hnc_clsact.bpf.c` / `bin/hnc_clsact.o`) are dual-licensed under **`GPL-2.0-only OR GPL-3.0-only`** for Linux kernel BPF verifier compatibility.
 
-See `LICENSE` and `THIRD_PARTY_NOTICES.md` in the repository root for full terms and third-party attributions.
+See `LICENSE`, `LICENSES/GPL-2.0-only.txt`, and `THIRD_PARTY_NOTICES.md` in the repository root for full terms and third-party attributions.
 
 
 ---
@@ -1486,7 +1486,7 @@ http://127.0.0.1:8444/
 - 手动回退：刷回上一个版本的 ZIP。(自动回滚用的是升级时存在 `/data/local/hnc/.prev` 的上一版快照, 不用手动去动它。)
 - 预发布测试黄金快照保护：在 `-alpha` / `-beta` / `-rc` 测试版之间连续刷机时，系统会自动锁住升级前已验证的正式版 `/data/local/hnc/.prev` 快照不被覆盖，确保触发自动回滚时始终退回稳妥的正式版本。
 - v6 统一守护与四舱壁架构：设备发现、`dpid` 进程守护、内核能力探测与硬件加速旁路压制均由统一的 Go 看门狗与 `hnc_httpd` 四舱壁中枢协同接管；配置文件统一经 `bin/hnc_json` 原子写入，DPI 规则统一由 `data/dpi_rules.d/` 加载。
-- 排障与回退建议：若在特定 ROM 上遇到兼容异常，请先在 WebUI「设置 -> 诊断」导出诊断包（或执行下方 `diag.sh`），再覆盖刷回上一个稳定版 ZIP。
+- 排障与回退建议：若在特定 ROM 上遇到兼容异常，请先在 WebUI「设置 -> 诊断」导出诊断包（或执行 `su -c 'sh /data/local/hnc/bin/diag.sh'`），再覆盖刷回上一个稳定版 ZIP。
 - 远程访问：8443 端口由 hnc_httpd 按设置里的「远程访问」开关自己开 / 关(几秒内生效),httpd 重启后照样保持。
 
 
@@ -1910,9 +1910,9 @@ WebUI
 
 License
 
-本项目采用 **GNU General Public License v3.0 (GPL-3.0-only)** 开源许可证发布。
+本项目用户态组件采用 **GNU General Public License v3.0 (`GPL-3.0-only`)** 开源许可证发布；内核态 eBPF 程序（`hnc_clsact.bpf.c` / `bin/hnc_clsact.o`）采用 **`GPL-2.0-only OR GPL-3.0-only`** 双许可兼容内核校验器要求。
 
-完整授权条款与第三方组件声明请查阅仓库根目录下的 `LICENSE` 与 `THIRD_PARTY_NOTICES.md`。
+完整授权条款与第三方组件声明请查阅仓库根目录下的 `LICENSE`、`LICENSES/GPL-2.0-only.txt` 与 `THIRD_PARTY_NOTICES.md`。
 
 
 ---

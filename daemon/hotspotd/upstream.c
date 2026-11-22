@@ -295,6 +295,33 @@ int upstream_detect_via_bpf(int *ifindex_out,
     unsigned char key[128];
     unsigned char next_key[128];
     unsigned char value[128];
+
+    /* 校验 map schema: 防止 ROM 扩大 struct 或使用 PERCPU map 写爆栈缓冲 */
+    struct bpf_map_info minfo;
+    memset(&minfo, 0, sizeof(minfo));
+    union bpf_attr iattr;
+    memset(&iattr, 0, sizeof(iattr));
+    iattr.info.bpf_fd   = (uint32_t)fd;
+    iattr.info.info_len = (uint32_t)sizeof(minfo);
+    iattr.info.info     = (uint64_t)(uintptr_t)&minfo;
+    if (_sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &iattr, sizeof(iattr)) < 0) {
+        fprintf(stderr, "[upstream] Tier3: get_info failed: %s\n", strerror(errno));
+        close((int)fd);
+        return -1;
+    }
+    if (minfo.key_size == 0 || minfo.key_size > sizeof(key) ||
+        minfo.value_size < sizeof(uint32_t) || minfo.value_size > sizeof(value) ||
+        minfo.type == (uint32_t)BPF_MAP_TYPE_PERCPU_HASH ||
+        minfo.type == (uint32_t)BPF_MAP_TYPE_PERCPU_ARRAY ||
+        minfo.type == (uint32_t)BPF_MAP_TYPE_LRU_PERCPU_HASH ||
+        minfo.type == 21U /* BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE */) {
+        fprintf(stderr,
+                "[upstream] Tier3: incompatible map schema (type=%u key=%u val=%u)\n",
+                minfo.type, minfo.key_size, minfo.value_size);
+        close((int)fd);
+        return -1;
+    }
+
     memset(key, 0, sizeof(key));
     memset(next_key, 0, sizeof(next_key));
     memset(value, 0, sizeof(value));
@@ -419,6 +446,7 @@ int upstream_detect_via_limit_map(int *ifindex_out,
 
     uint32_t prev_key = 0;
     uint32_t next_key = 0;
+    uint32_t zero = 0;
     int first = 1;
 
     while (count < 16) {
@@ -428,7 +456,6 @@ int upstream_detect_via_limit_map(int *ifindex_out,
         nattr.next_key = (uint64_t)(uintptr_t)&next_key;
         if (first) {
             /* 首次用全零 key (不是 NULL), 兼容新老 kernel 语义 */
-            uint32_t zero = 0;
             nattr.key = (uint64_t)(uintptr_t)&zero;
         } else {
             nattr.key = (uint64_t)(uintptr_t)&prev_key;

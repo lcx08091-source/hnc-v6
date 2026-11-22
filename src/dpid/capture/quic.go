@@ -1001,17 +1001,18 @@ func parseGQUICMessage(b []byte) (map[string][]byte, bool) {
 		return nil, false
 	}
 	out := make(map[string][]byte, 2)
-	prev := 0
+	prev := uint64(0)
+	maxValLen := uint64(len(b) - vals)
 	for i := 0; i < num; i++ {
 		ent := b[tbl+i*8 : tbl+i*8+8]
-		end := int(binary.LittleEndian.Uint32(ent[4:8]))
-		if end < prev || vals+end > len(b) {
+		end := uint64(binary.LittleEndian.Uint32(ent[4:8]))
+		if end < prev || end > maxValLen {
 			// 值区被截断(超出本包)时, 只要已拿到 SNI 就够用。
 			break
 		}
 		tag := string(ent[:4])
 		if tag == "SNI\x00" || tag == "UAID" {
-			out[tag] = b[vals+prev : vals+end]
+			out[tag] = b[vals+int(prev) : vals+int(end)]
 		}
 		prev = end
 	}

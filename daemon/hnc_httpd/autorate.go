@@ -110,20 +110,24 @@ func defaultAutorateConfig() autorateConfig {
 	}
 }
 
+func invalidFiniteFloat(v float64) bool {
+	return math.IsNaN(v) || math.IsInf(v, 0)
+}
+
 func normalizeAutorateConfig(c autorateConfig) autorateConfig {
-	if c.DownMinMbps < 1 {
+	if invalidFiniteFloat(c.DownMinMbps) || c.DownMinMbps < 1 || c.DownMinMbps > 10000 {
 		c.DownMinMbps = autorateDefaultDownMinMbps
 	}
-	if c.DownMaxMbps < c.DownMinMbps {
+	if invalidFiniteFloat(c.DownMaxMbps) || c.DownMaxMbps < c.DownMinMbps || c.DownMaxMbps > 10000 {
 		c.DownMaxMbps = math.Max(c.DownMinMbps*2, autorateDefaultDownMaxMbps)
 	}
-	if c.UpMinMbps < 1 {
+	if invalidFiniteFloat(c.UpMinMbps) || c.UpMinMbps < 1 || c.UpMinMbps > 10000 {
 		c.UpMinMbps = autorateDefaultUpMinMbps
 	}
-	if c.UpMaxMbps < c.UpMinMbps {
+	if invalidFiniteFloat(c.UpMaxMbps) || c.UpMaxMbps < c.UpMinMbps || c.UpMaxMbps > 10000 {
 		c.UpMaxMbps = math.Max(c.UpMinMbps*2, autorateDefaultUpMaxMbps)
 	}
-	if c.RTTDeltaMs < 5 || c.RTTDeltaMs > 250 {
+	if invalidFiniteFloat(c.RTTDeltaMs) || c.RTTDeltaMs < 5 || c.RTTDeltaMs > 250 {
 		c.RTTDeltaMs = autorateDefaultDeltaMS
 	}
 	if len(c.Reflectors) == 0 {
@@ -223,6 +227,8 @@ func (c *autorateCtl) DisableFromStaticShaper() {
 	c.syncStatusConfigLocked(c.cfg)
 	c.st.State = "disabled"
 	c.st.SleepReason = ""
+	c.st.RTTMs = 0
+	c.st.DeltaRTTMs = 0
 	c.st.UpdatedAt = time.Now().Unix()
 	cfgCopy := c.cfg
 	c.mu.Unlock()
@@ -303,6 +309,8 @@ func (c *autorateCtl) ApplyConfig(next autorateConfig, hotspotIface string) acti
 		c.st.State = "disabled"
 		c.st.SleepReason = ""
 	}
+	c.st.RTTMs = 0
+	c.st.DeltaRTTMs = 0
 	c.st.UpdatedAt = time.Now().Unix()
 	c.mu.Unlock()
 	c.Poke()
@@ -336,13 +344,20 @@ func actionAutorateSet(s *server, p map[string]string) actionResp {
 		cur.Enabled = en
 	}
 
+	badFloatKey := ""
 	parseF := func(key string) (float64, bool) {
 		v := strings.TrimSpace(p[key])
 		if v == "" {
 			return 0, false
 		}
 		f, err := strconv.ParseFloat(v, 64)
-		if err != nil || f <= 0 || f > 10000 {
+		if err == nil && invalidFiniteFloat(f) {
+			if badFloatKey == "" {
+				badFloatKey = key
+			}
+			return 0, false
+		}
+		if err != nil || invalidFiniteFloat(f) || f <= 0 || f > 10000 {
 			return 0, false
 		}
 		return f, true
@@ -374,6 +389,9 @@ func actionAutorateSet(s *server, p map[string]string) actionResp {
 		cur.RTTDeltaMs = f
 	} else if f, ok := parseF("max_delta_rtt_ms"); ok {
 		cur.RTTDeltaMs = f
+	}
+	if badFloatKey != "" {
+		return actionResp{OK: false, Error: "bad params", Detail: badFloatKey + " must be a finite number"}
 	}
 	if cur.DownMinMbps > cur.DownMaxMbps || cur.UpMinMbps > cur.UpMaxMbps {
 		return actionResp{OK: false, Error: "bad params", Detail: "min bandwidth cannot exceed max bandwidth"}
@@ -482,6 +500,8 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 			ctl.mu.Lock()
 			ctl.st.State = "disabled"
 			ctl.st.SleepReason = "autorate_disabled"
+			ctl.st.RTTMs = 0
+			ctl.st.DeltaRTTMs = 0
 			ctl.prevSampleAt = time.Time{}
 			ctl.mu.Unlock()
 			select {
@@ -492,6 +512,7 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 			}
 		}
 
+		actCh := activityChanged()
 		act := activityNow()
 		simOn := s.simActive()
 		if !simOn && (!act.HotspotActive || act.ClientsOnline <= 0) {
@@ -513,6 +534,8 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 			ctl.st.LoadUp = 0
 			ctl.st.ActualDownMbps = 0
 			ctl.st.ActualUpMbps = 0
+			ctl.st.RTTMs = 0
+			ctl.st.DeltaRTTMs = 0
 			ctl.prevSampleAt = time.Time{}
 			ctl.mu.Unlock()
 			if invalidateDP {
@@ -523,7 +546,6 @@ func (s *server) AutorateLoop(stopCh <-chan struct{}) {
 				InvalidateDataplaneReconcileNative(hncDir, "")
 			}
 
-			actCh := activityChanged()
 			select {
 			case <-stopCh:
 				return
@@ -675,12 +697,12 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	nextDown = math.Max(cfg.DownMinMbps, math.Min(effDownMax, nextDown))
 	nextUp = math.Max(cfg.UpMinMbps, math.Min(effUpMax, nextUp))
 
-	ctl.mu.Lock()
+	ctl.mu.RLock()
 	prevIface := ctl.appliedIface
 	prevDown := ctl.appliedDown
 	prevUp := ctl.appliedUp
 	stillEnabled := ctl.cfg.Enabled
-	ctl.mu.Unlock()
+	ctl.mu.RUnlock()
 	if !stillEnabled {
 		return
 	}
@@ -691,42 +713,67 @@ func (s *server) autorateStep(cfg autorateConfig) {
 
 	tunedOK := false
 	if needTune {
-		hncDir := ctl.hncDir
-		if hncDir == "" {
-			hncDir = s.hncDir
+		// 严格遵守全局锁序 s.actionMu -> ctl.mu, 防止与用户关闭/静态调速并发竞争
+		s.actionMu.Lock()
+		ctl.mu.RLock()
+		stillEnabled = ctl.cfg.Enabled
+		prevIface = ctl.appliedIface
+		prevDown = ctl.appliedDown
+		prevUp = ctl.appliedUp
+		ctl.mu.RUnlock()
+		if !stillEnabled {
+			s.actionMu.Unlock()
+			return
 		}
-		downKbps := int(math.Round(nextDown * 1000))
-		upKbps := int(math.Round(nextUp * 1000))
-		if downKbps < minRateKbit {
-			downKbps = minRateKbit
-		}
-		if upKbps < minRateKbit {
-			upKbps = minRateKbit
-		}
-		if useNativeDataplane(hncDir) {
-			if err := TuneGlobalShaperNative(hncDir, downKbps, upKbps); err == nil {
-				tunedOK = true
+		needTune = prevIface != hotspotIface ||
+			math.Abs(nextDown-prevDown) >= math.Max(0.5, prevDown*autorateTuneDeadband) ||
+			math.Abs(nextUp-prevUp) >= math.Max(0.3, prevUp*autorateTuneDeadband)
+		if needTune {
+			hncDir := ctl.hncDir
+			if hncDir == "" {
+				hncDir = s.hncDir
+			}
+			downKbps := int(math.Round(nextDown * 1000))
+			upKbps := int(math.Round(nextUp * 1000))
+			if downKbps < minRateKbit {
+				downKbps = minRateKbit
+			}
+			if upKbps < minRateKbit {
+				upKbps = minRateKbit
+			}
+			if useNativeDataplane(hncDir) {
+				if err := TuneGlobalShaperNative(hncDir, downKbps, upKbps); err == nil {
+					tunedOK = true
+				}
+			}
+			if !tunedOK {
+				rc, out := runBin(s.hncDir, "tc_manager.sh", "global_shaper_tune", hotspotIface, mbpsToTcRate(nextDown), mbpsToTcRate(nextUp))
+				if rc == 0 {
+					tunedOK = true
+				} else {
+					log.Printf("autorate: global_shaper_tune failed on %s: %s", hotspotIface, strings.TrimSpace(out))
+				}
 			}
 		}
-		if !tunedOK {
-			rc, out := runBin(s.hncDir, "tc_manager.sh", "global_shaper_tune", hotspotIface, mbpsToTcRate(nextDown), mbpsToTcRate(nextUp))
-			if rc == 0 {
-				tunedOK = true
-			} else {
-				log.Printf("autorate: global_shaper_tune failed on %s: %s", hotspotIface, strings.TrimSpace(out))
-			}
+		ctl.mu.Lock()
+		if !ctl.cfg.Enabled {
+			ctl.mu.Unlock()
+			s.actionMu.Unlock()
+			return
 		}
+		if tunedOK {
+			ctl.appliedIface = hotspotIface
+			ctl.appliedDown = nextDown
+			ctl.appliedUp = nextUp
+		}
+		ctl.mu.Unlock()
+		s.actionMu.Unlock()
 	}
 
 	ctl.mu.Lock()
 	if !ctl.cfg.Enabled {
 		ctl.mu.Unlock()
 		return
-	}
-	if tunedOK {
-		ctl.appliedIface = hotspotIface
-		ctl.appliedDown = nextDown
-		ctl.appliedUp = nextUp
 	}
 	ctl.st.State = newState
 	ctl.st.SleepReason = ""
@@ -742,6 +789,9 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	if sampleRTT > 0 {
 		ctl.st.RTTMs = round2(sampleRTT)
 		ctl.st.DeltaRTTMs = round2(deltaRTT)
+	} else if newState == "idle_traffic" {
+		ctl.st.RTTMs = 0
+		ctl.st.DeltaRTTMs = 0
 	}
 	ctl.st.ScaleEventsUp += scaleUpInc
 	ctl.st.ScaleEventsDn += scaleDnInc

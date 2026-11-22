@@ -2,7 +2,7 @@
 
 # v3.5.0 alpha-0: PATH 健壮性,见 service.sh
 # rc13: 追加 /data/local/hnc/bin —— /system/bin 被卸时裸命令 fallthrough 到 /data 预置副本。
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 # iptables_manager.sh — v3.4.1  双栈（IPv4 + IPv6）+ 安全 MARK 命名空间
 #
 # 【v3.4.1 关键修复】
@@ -188,7 +188,8 @@ init_chains() {
 
     # ── v5.40.1 HNC_PREROUTE_GUARD (mangle/PREROUTING): 策略路由护栏 ──
     # RMX5010 / ColorOS 16 真机实证: ip rule 10000(0xc0000/0xd0000) 与 18000-20000(0x0/0x10000)
-    # 检查 [19:16] 位。clsact 入向打标报文已完成 ifb0 上行整形, 进入路由前先清零 [19:16],
+    # 检查 [19:16] 位。clsact 入向打标报文已完成 ifb0 上行整形, 进入路由前清零完整 [23:16]
+    # 设备位域 (${DEV_MARK_MASK}=0x00ff0000, 绝不触碰低 16 位 netd 0x0000ffff),
     # 路由完成后在 mangle/FORWARD 由 HNC_RESTORE + HNC_MARK 恢复完整正交设备标。
     if $IPT -t mangle -S PREROUTING 2>/dev/null | grep -q 'HNC_RESTORE'; then
         ipt_dual_del_all -t mangle -D PREROUTING -j HNC_RESTORE
@@ -196,7 +197,7 @@ init_chains() {
     _ensure_chain mangle HNC_PREROUTE_GUARD
     ipt_dual -t mangle -A HNC_PREROUTE_GUARD \
         -m mark --mark 0x00800000/0x00800000 \
-        -j MARK --set-xmark 0x0/0x000f0000
+        -j MARK --set-xmark "0x0/${DEV_MARK_MASK}"
     _ensure_link mangle PREROUTING HNC_PREROUTE_GUARD 1
 
     # ── HNC_RESTORE (mangle/FORWARD pos 1): CONNMARK → MARK ───
@@ -490,16 +491,25 @@ whitelist_mode_off() {
 
 whitelist_add() {
     local ip=$1 mac=$2
-    ipt_dual_q -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j ACCEPT
-    ipt_dual    -t filter -I HNC_WHITELIST 1 -m mac --mac-source "$mac" -j ACCEPT
-    [ -n "$ip" ] && $IPT -t filter -I HNC_WHITELIST 1 -s "$ip" -j ACCEPT
+    ipt_dual_del_all -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j RETURN
+    ipt_dual_del_all -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j ACCEPT
+    ipt_dual -t filter -I HNC_WHITELIST 1 -m mac --mac-source "$mac" -j RETURN
+    if [ -n "$ip" ]; then
+        ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -j RETURN
+        ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -j ACCEPT
+        $IPT -t filter -I HNC_WHITELIST 1 -s "$ip" -j RETURN
+    fi
     log "Whitelist add: $ip ($mac)"
 }
 
 whitelist_remove() {
     local ip=$1 mac=$2
-    ipt_dual_q -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j ACCEPT
-    [ -n "$ip" ] && $IPT -t filter -D HNC_WHITELIST -s "$ip" -j ACCEPT 2>/dev/null
+    ipt_dual_del_all -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j RETURN
+    ipt_dual_del_all -t filter -D HNC_WHITELIST -m mac --mac-source "$mac" -j ACCEPT
+    if [ -n "$ip" ]; then
+        ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -j RETURN
+        ipt_del_all "$IPT" -t filter -D HNC_WHITELIST -s "$ip" -j ACCEPT
+    fi
     log "Whitelist remove: $ip ($mac)"
     return 0  # Patch 4.b: 幂等清理强制返 0,见 unmark_device
 }
@@ -1171,8 +1181,13 @@ case "$1" in
         echo "           whitelist_add|whitelist_remove|whitelist_on|whitelist_off|"
         echo "           stats|ensure_stats|stats_all|reset_counters|cleanup}"
         echo ""
-        _ipt_ver=$(sed -n 's/^version=//p' /data/adb/modules/hotspot_net_ctl/module.prop 2>/dev/null | head -1)
-        [ -n "$_ipt_ver" ] || _ipt_ver=$(sed -n 's/^version=//p' "$(dirname "$0")/../module.prop" 2>/dev/null | head -1)
+        _ipt_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+        _ipt_ver=""
+        for _ipt_p in "${_ipt_root:+$_ipt_root/module.prop}" "/data/local/hnc/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
+            [ -n "$_ipt_p" ] && [ -f "$_ipt_p" ] || continue
+            _ipt_ver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_ipt_p" 2>/dev/null | tr -d ' \t\r\n"')
+            [ -n "$_ipt_p" ] && [ -n "$_ipt_ver" ] && break
+        done
         echo "HNC ${_ipt_ver:-v6.1} 双栈支持（IPv4 + IPv6 · 保护低 16 位 netd 路由 netId）"
         echo "支持 ensure_stats / ensure_stats_online / stats_all 按设备流量统计与 gate/mac 原子锁"
         echo "运行时检测：IPV6_OK=$IPV6_OK"

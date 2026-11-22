@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
 # v3.5.0 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 # tc_manager.sh — v3.2.0  Android 16 / KSU 强化版
 #
 # 核心修复（解释"限速时好时坏"根因）：
@@ -1041,6 +1041,14 @@ ensure_ingress_qdisc() {
     # clsact and ingress are mutually exclusive; if one already exists reuse it
     tc qdisc show dev "$iface" 2>/dev/null | grep -qE 'qdisc (ingress|clsact) ffff:'
 }
+_ingress_filter_parent() {
+    local iface=$1
+    if tc qdisc show dev "$iface" 2>/dev/null | grep -q 'qdisc clsact ffff:'; then
+        echo "ingress"
+    else
+        echo "parent ffff:"
+    fi
+}
 # v5.38.0: 双栈化无 IFB 机型的 ingress police 上行限速 (补齐 IPv6 邻居全局单播源地址过滤, 彻底堵住 GKI 6.1/6.6 无 IFB 时 IPv6 上行 100% 逃逸漏洞)
 # 计算 police 突发桶字节数: burst = max(rate_bytes_per_sec / 8, 65536), 确保 >= 64KB 容纳 GRO/TSO 超大帧!
 police_burst_bytes() {
@@ -1063,16 +1071,18 @@ set_uplink_police() {
     local _mid; _mid=$(_mark_for_class_id "$class_id")
     local _dmark; _dmark=$(hnc_dev_mark_hex "$_mid") || return 1
     local pburst; pburst=$(police_burst_bytes "$rate")
+    local _ing_parent; _ing_parent=$(_ingress_filter_parent "$iface")
     local prio=$((INGRESS_POLICE_PRIO_BASE + class_id))
     local prio6=$((INGRESS_POLICE_PRIO_BASE + 5000 + class_id))
     local prio_fw4=$((INGRESS_POLICE_PRIO_BASE + 6000 + class_id))
     local prio_fw6=$((INGRESS_POLICE_PRIO_BASE + 7000 + class_id))
 
-    clear_uplink_police "$iface" "$class_id"
+    clear_uplink_police "$iface" "$class_id" "$_ing_parent"
 
     local _any_ok=0
     if [ -n "$ip" ]; then
-        tc filter add dev "$iface" parent ffff: protocol ip prio "$prio" u32             match ip src "$ip/32" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1
+        # shellcheck disable=SC2086
+        tc filter add dev "$iface" $_ing_parent protocol ip prio "$prio" u32             match ip src "$ip/32" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1
     fi
 
     # 解析该客户端 MAC 并为所有全局单播 IPv6 邻居挂载 u32 ip6 src police
@@ -1096,28 +1106,42 @@ set_uplink_police() {
     fi
     if [ -n "$_mac" ] && command -v ip >/dev/null 2>&1; then
         for _v6 in $(ip -6 neigh show dev "$iface" 2>/dev/null | awk -v m="$_mac" 'tolower($0) ~ ("lladdr " m) && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $NF != "FAILED" && $NF != "INCOMPLETE" {print $1}'); do
-            tc filter add dev "$iface" parent ffff: protocol ipv6 prio "$prio6" u32                 match ip6 src "${_v6}/128" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
+            # shellcheck disable=SC2086
+            tc filter add dev "$iface" $_ing_parent protocol ipv6 prio "$prio6" u32                 match ip6 src "${_v6}/128" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
         done
     fi
 
     # 双栈正交 fw 掩码兜底 (配合 pref 1 clsact L2 MAC 打标器覆盖临时 IPv6 轮换!)
-    tc filter add dev "$iface" parent ffff: protocol ip prio "$prio_fw4"         handle "${_dmark}/${DEV_MARK_MASK}" fw police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
-    tc filter add dev "$iface" parent ffff: protocol ipv6 prio "$prio_fw6"         handle "${_dmark}/${DEV_MARK_MASK}" fw police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
+    # shellcheck disable=SC2086
+    tc filter add dev "$iface" $_ing_parent protocol ip prio "$prio_fw4"         handle "${_dmark}/${DEV_MARK_MASK}" fw police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
+    # shellcheck disable=SC2086
+    tc filter add dev "$iface" $_ing_parent protocol ipv6 prio "$prio_fw6"         handle "${_dmark}/${DEV_MARK_MASK}" fw police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
 
     [ "$_any_ok" = 1 ]
 }
 
 clear_uplink_police() {
-    local iface=$1 class_id=$2
+    local iface=$1 class_id=$2 _ing_parent=${3:-}
+    if [ -z "$_ing_parent" ]; then
+        if [ -z "${HNC_TEST_MODE:-}" ]; then
+            _ing_parent=$(_ingress_filter_parent "$iface")
+        else
+            _ing_parent="parent ffff:"
+        fi
+    fi
     local prio=$((INGRESS_POLICE_PRIO_BASE + class_id))
     local prio6=$((INGRESS_POLICE_PRIO_BASE + 5000 + class_id))
     local prio_fw4=$((INGRESS_POLICE_PRIO_BASE + 6000 + class_id))
     local prio_fw6=$((INGRESS_POLICE_PRIO_BASE + 7000 + class_id))
-    tc filter del dev "$iface" parent ffff: protocol ip prio "$prio" 2>/dev/null || true
+    # shellcheck disable=SC2086
+    tc filter del dev "$iface" $_ing_parent protocol ip prio "$prio" 2>/dev/null || true
     if [ -z "${HNC_TEST_MODE:-}" ]; then
-        tc filter del dev "$iface" parent ffff: protocol ipv6 prio "$prio6" 2>/dev/null || true
-        tc filter del dev "$iface" parent ffff: protocol ip prio "$prio_fw4" 2>/dev/null || true
-        tc filter del dev "$iface" parent ffff: protocol ipv6 prio "$prio_fw6" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        tc filter del dev "$iface" $_ing_parent protocol ipv6 prio "$prio6" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        tc filter del dev "$iface" $_ing_parent protocol ip prio "$prio_fw4" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        tc filter del dev "$iface" $_ing_parent protocol ipv6 prio "$prio_fw6" 2>/dev/null || true
     fi
 }
 
@@ -1460,6 +1484,9 @@ install_ingress_mirred_once() {
 
     # v5.40.0 T2 第 4 项: 将 ifb0 mirred 统一挂载于 prio 2 (pref 2), 把 prio 1 永久留给 hnc_clsact.o!
     tc filter del dev "$iface" ingress pref 2 2>/dev/null || true
+    if [ -z "${HNC_TEST_MODE:-}" ]; then
+        tc filter del dev "$iface" ingress pref 3 2>/dev/null || true
+    fi
 
     # 主路径: ingress 简写 + prio 2 matchall
     local _out
@@ -1486,6 +1513,9 @@ install_ingress_mirred_once() {
 
     # Fallback 2: 老式 parent ffff: prio 2 (非 clsact 内核)
     tc filter del dev "$iface" parent ffff: pref 2 2>/dev/null || true
+    if [ -z "${HNC_TEST_MODE:-}" ]; then
+        tc filter del dev "$iface" parent ffff: pref 3 2>/dev/null || true
+    fi
     _out=$(tc filter add dev "$iface" parent ffff: prio 2 protocol all matchall \
            action mirred egress redirect dev "$IFB_IFACE" 2>&1)
     if [ -z "$_out" ]; then
@@ -1590,6 +1620,7 @@ install_ingress_mirred() {
         return 0
     fi
 
+    [ -n "$HNC_TEST_MODE" ] && return 0
     log "install_ingress_mirred: initial shell attempt failed, spawning async worker (ColorOS race window)"
 
     # 后台 worker: 最多等 45s, 每 3s 重试一次
@@ -2159,14 +2190,27 @@ set_limit() {
 set_delay() {
     local iface=$1 mark_id=$2 delay_ms=${3:-0} jitter_ms=${4:-0} loss=${5:-0} ip=${6:-}
     _validate_mark_id "$mark_id" || return 1
+    local _nv
+    for _nv in "$delay_ms" "$jitter_ms" "$loss"; do
+        if ! printf '%s' "$_nv" | grep -Eq '^[0-9]+(\.[0-9]+)?$'; then
+            log_error "set_delay: invalid numeric param '$_nv' (delay=$delay_ms jitter=$jitter_ms loss=$loss)"
+            return 1
+        fi
+    done
     local class_id; class_id=$(_class_id_for_mark "$mark_id")  # v5.12: mid=1 → 1:100
 
     # v3.8.5: 把 RTT delay 除以 2 分给两个方向
-    # egress 向上取整,ingress 向下取整(奇数精度保留)
-    local delay_eg delay_ig
+    # egress 向上取整,ingress 向下取整(奇数精度保留; 用 awk 避免 mksh 浮点算术崩溃与算术注入)
+    local delay_eg delay_ig _half
     if gt0 "$delay_ms"; then
-        delay_eg=$(( (delay_ms + 1) / 2 ))
-        delay_ig=$(( delay_ms / 2 ))
+        _half=$(awk -v d="$delay_ms" 'BEGIN {
+            half = (d + 0) / 2.0
+            ig = int(half)
+            eg = (half > ig) ? ig + 1 : ig
+            print eg, ig
+        }')
+        delay_eg=${_half% *}
+        delay_ig=${_half#* }
     else
         delay_eg=0
         delay_ig=0
@@ -2336,21 +2380,42 @@ remove_device() {
 get_current_ip() {
     local mac=$1
     [ -f "$DEVICES_FILE" ] || { echo ""; return; }
-    awk -v m="$mac" '
+    tr -d '\r\n' < "$DEVICES_FILE" 2>/dev/null | awk -v m="$mac" '
     {
-        idx = index($0, "\"" m "\"")
-        if (idx > 0) {
-            tail = substr($0, idx)
-            if (match(tail, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
-                seg = substr(tail, RSTART, RLENGTH)
-                if (match(seg, /[0-9.]+/)) {
-                    print substr(seg, RSTART, RLENGTH)
-                    exit
+        s = tolower($0)
+        needle = "\"" tolower(m) "\""
+        pos = 1
+        while ((off = index(substr(s, pos), needle)) > 0) {
+            idx = pos + off - 1
+            tail = substr(s, idx + length(needle))
+            if (match(tail, /^[[:space:]]*:[[:space:]]*\{/)) {
+                rest = substr(tail, RSTART + RLENGTH)
+                depth = 1; ins = 0; endpos = 0; n = length(rest)
+                for (i = 1; i <= n && depth > 0; i++) {
+                    c = substr(rest, i, 1)
+                    if (ins) {
+                        if (c == "\\") { i++; continue }
+                        if (c == "\"") ins = 0
+                    } else {
+                        if (c == "\"") ins = 1
+                        else if (c == "{") depth++
+                        else if (c == "}") { depth--; if (depth == 0) { endpos = i - 1; break } }
+                    }
                 }
+                blk = (endpos > 0) ? substr(rest, 1, endpos) : ""
+                if (match(blk, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
+                    seg = substr(blk, RSTART, RLENGTH)
+                    if (match(seg, /[0-9.]+/)) {
+                        print substr(seg, RSTART, RLENGTH)
+                        exit
+                    }
+                }
+                exit
             }
+            pos = idx + length(needle)
         }
     }
-    ' "$DEVICES_FILE"
+    '
 }
 
 
@@ -2690,23 +2755,32 @@ cleanup_tc() {
         log "cleanup_tc: preserving root qdisc on $iface (not owned by HNC)"
     fi
     if [ -n "$iface" ]; then
-        # 绝不删整个 clsact qdisc(GKI AOSP tether offload BPF 程序挂载于其上), 仅摘除 HNC 自装的 pref 1 与 police 301..400!
+        # 绝不删整个 clsact qdisc(GKI AOSP tether offload BPF 程序挂载于其上), 仅摘除 HNC 自装的 pref 1/2/3 与 police 301..7400!
+        tc filter del dev "$iface" ingress pref 3 2>/dev/null || true
+        tc filter del dev "$iface" parent ffff: pref 3 2>/dev/null || true
         tc filter del dev "$iface" ingress pref 2 2>/dev/null || true
         tc filter del dev "$iface" parent ffff: pref 2 2>/dev/null || true
         tc filter del dev "$iface" ingress pref 1 2>/dev/null || true
         tc filter del dev "$iface" parent ffff: pref 1 2>/dev/null || true
+        local _ing_parent; _ing_parent=$(_ingress_filter_parent "$iface")
         _pp=1
         while [ "$_pp" -le 100 ]; do
             _p4=$((300 + _pp))
             _p6=$((5300 + _pp))
             _pfw4=$((6300 + _pp))
             _pfw6=$((7300 + _pp))
-            tc filter del dev "$iface" parent ffff: prio "$_p4" protocol all 2>/dev/null || true
-            tc filter del dev "$iface" parent ffff: prio "$_p4" protocol ip 2>/dev/null || true
-            tc filter del dev "$iface" parent ffff: prio "$_p4" protocol ipv6 2>/dev/null || true
-            tc filter del dev "$iface" parent ffff: prio "$_p6" protocol ipv6 2>/dev/null || true
-            tc filter del dev "$iface" parent ffff: prio "$_pfw4" protocol ip 2>/dev/null || true
-            tc filter del dev "$iface" parent ffff: prio "$_pfw6" protocol ipv6 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_p4" protocol all 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_p4" protocol ip 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_p4" protocol ipv6 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_p6" protocol ipv6 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_pfw4" protocol ip 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_pfw6" protocol ipv6 2>/dev/null || true
             _pp=$((_pp + 1))
         done
         tc qdisc show dev "$iface" 2>/dev/null | grep -q "qdisc ingress ffff:" && tc qdisc del dev "$iface" ingress 2>/dev/null || true
@@ -3011,8 +3085,13 @@ case "$1" in
     *)
         echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_sqm|global_shaper|set_all|remove|restore|ensure_ingress|ensure_class|status|snapshot|cleanup}"
         echo ""
-        _tcm_ver=$(sed -n 's/^version=//p' /data/adb/modules/hotspot_net_ctl/module.prop 2>/dev/null | head -1)
-        [ -n "$_tcm_ver" ] || _tcm_ver=$(sed -n 's/^version=//p' "$(dirname "$0")/../module.prop" 2>/dev/null | head -1)
+        _tcm_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+        _tcm_ver=""
+        for _tcm_p in "${_tcm_root:+$_tcm_root/module.prop}" "/data/local/hnc/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
+            [ -n "$_tcm_p" ] && [ -f "$_tcm_p" ] || continue
+            _tcm_ver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_tcm_p" 2>/dev/null | tr -d ' \t\r\n"')
+            [ -n "$_tcm_ver" ] && break
+        done
         echo "HNC ${_tcm_ver:-v6.1}: Orthogonal skb->mark [31:16] HTB/AQM + dual-stack ingress police + serialized snapshot"
         echo ""
         echo "验证限速命令："

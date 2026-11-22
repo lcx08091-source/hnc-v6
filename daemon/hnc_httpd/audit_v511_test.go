@@ -67,6 +67,22 @@ func TestHardenCmdDoesNotHangOnGrandchild(t *testing.T) {
 	}
 }
 
+// testShellBin 动态探测可执行脚本 shebang 解释器, 兼容 Android 非 root 沙箱(/system/bin/sh)与 Linux CI(/bin/sh)。
+func testShellBin() string {
+	for _, p := range []string{"/system/bin/sh", "/bin/sh"} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return p
+		}
+	}
+	if p := os.Getenv("PREFIX"); p != "" {
+		cand := filepath.Join(p, "bin", "sh")
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() && st.Mode()&0o111 != 0 {
+			return cand
+		}
+	}
+	return "/bin/sh"
+}
+
 // A2(集成): runExe 超时必须返回 124 + "timeout after 5s", 且不被孙进程拖住。
 func TestRunExeTimeoutWithGrandchild(t *testing.T) {
 	if testing.Short() {
@@ -76,7 +92,7 @@ func TestRunExeTimeoutWithGrandchild(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	script := "#!/bin/sh\nsleep 30\necho never\n"
+	script := "#!" + testShellBin() + "\nsleep 30\necho never\n"
 	if err := os.WriteFile(filepath.Join(dir, "bin", "hang"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}

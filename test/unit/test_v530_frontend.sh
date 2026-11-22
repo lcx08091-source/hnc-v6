@@ -5,7 +5,7 @@
 
 _v530_node=$(command -v node 2>/dev/null)
 if [ -z "$_v530_node" ]; then
-    for _c in /opt/node*/bin/node /usr/local/bin/node; do
+    for _c in ${PREFIX:+"$PREFIX/bin/node"} /opt/node*/bin/node /usr/local/bin/node; do
         [ -x "$_c" ] && { _v530_node="$_c"; break; }
     done
 fi

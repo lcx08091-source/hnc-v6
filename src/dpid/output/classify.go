@@ -84,7 +84,7 @@ func buildHostIndex(rules []l3Rule, seq uint64) *hostIndex {
 			if !ok {
 				slot = [2]int32{-1, -1}
 			}
-			if slot[pri] < 0 { // 先到先得
+			if slot[pri] < 0 || (r.userCustom && !rules[slot[pri]].userCustom) { // 普通规则先到先得; 99-user-custom 优先覆盖非自定义规则
 				slot[pri] = int32(i)
 			}
 			idx.bySuffix[suf] = slot

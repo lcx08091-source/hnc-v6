@@ -75,8 +75,9 @@ type Device struct {
 // device Device 加上不进 JSON 的记账字段。
 type device struct {
 	Device
-	lastResolve  int64 // 上次发起解析(unix 秒)
-	pendingSince int64 // 进入 pending 的时刻(unix 秒; >= PendingBreathingRoom 才派发)
+	lastResolve    int64 // 上次发起解析(unix 秒)
+	pendingSince   int64 // 进入 pending 的时刻(unix 秒; >= PendingBreathingRoom 才派发)
+	reResolveForce bool  // 手动名被删除后允许用新解析结果替换
 }
 
 // cand 一个 (MAC, IP) 表项的候选状态(换 IP 期间旧表项还在)。
@@ -294,6 +295,28 @@ func (t *Table) candidateSeenTimeLocked(mac, ip string, e neigh.Entry, now time.
 	return prev.lastEvent
 }
 
+// hostnameSrcRank 主机名来源优先级(数值越高越可信), 用于重解析防降级。
+func hostnameSrcRank(src string) int {
+	switch {
+	case src == "manual":
+		return 5
+	case src == "dhcp", src == "mdns":
+		return 4
+	case strings.HasPrefix(src, "cache-"):
+		return 3
+	case src == "oui":
+		return 2
+	case src == "mac":
+		return 1
+	default: // "", "pending"
+		return 0
+	}
+}
+
+func (d *device) isPending() bool {
+	return d.HostnameSrc == "pending" || d.pendingSince > 0
+}
+
 func (t *Table) applyOnlineLocked(mac, ip string, state uint16, now, seen time.Time) bool {
 	nowUnix := now.Unix()
 	cs := t.cands[mac]
@@ -320,17 +343,39 @@ func (t *Table) applyOnlineLocked(mac, ip string, state uint16, now, seen time.T
 		d.Hostname, d.HostnameSrc = hn, src
 		d.lastResolve = nowUnix
 		t.devs[mac] = d
-	} else if d.HostnameSrc == "mac" || now.Sub(time.Unix(d.lastResolve, 0)) >= ReResolveWindow {
-		// 对齐 C: dhcp_only 先把名字降回 manual/mac, 命中更好来源时异步升级。
+	} else if now.Sub(time.Unix(d.lastResolve, 0)) >= ReResolveWindow {
+		// 严格遵守 60s ReResolveWindow 冷却(移除 d.HostnameSrc == "mac" 短路);
+		// 已有有效主机名时不降级为 MAC 兜底/pending。
 		hn, src := "00000000", "mac"
 		if t.Fast != nil {
 			hn, src = t.Fast(mac)
 		}
-		if src == "mac" {
-			src = "pending"
-			d.pendingSince = nowUnix
+		if src != "mac" {
+			d.Hostname, d.HostnameSrc = hn, src
+			d.pendingSince = 0
+			d.reResolveForce = false
+		} else if d.HostnameSrc == "" || d.HostnameSrc == "pending" {
+			d.Hostname, d.HostnameSrc = hn, "pending"
+			if d.pendingSince == 0 {
+				d.pendingSince = nowUnix
+			}
+		} else if d.HostnameSrc == "mac" {
+			// 尚无有效主机名: 保留展示名并按冷却排队异步重解析
+			if d.pendingSince == 0 {
+				d.pendingSince = nowUnix
+			}
+		} else if d.HostnameSrc == "manual" {
+			// 用户已删除手动名: 保留当前展示名不闪烁 MAC, 异步重解析后允许替换
+			d.reResolveForce = true
+			if d.pendingSince == 0 {
+				d.pendingSince = nowUnix
+			}
+		} else if hostnameSrcRank(d.HostnameSrc) < 4 {
+			// oui / cache-* 尝试后台升级为实时 dhcp/mdns, 保留已有有效主机名不降级
+			if d.pendingSince == 0 {
+				d.pendingSince = nowUnix
+			}
 		}
-		d.Hostname, d.HostnameSrc = hn, src
 		d.lastResolve = nowUnix
 	}
 	if best := pickIP(cs); best != "" {
@@ -417,7 +462,7 @@ func (t *Table) PendingDue(now time.Time) (string, string, bool) {
 	mac, ip := "", ""
 	var oldest int64 = -1
 	for m, d := range t.devs {
-		if d.HostnameSrc != "pending" {
+		if !d.isPending() {
 			continue
 		}
 		if now.Sub(time.Unix(d.pendingSince, 0)) < PendingBreathingRoom {
@@ -436,7 +481,7 @@ func (t *Table) HasPending() bool {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	for _, d := range t.devs {
-		if d.HostnameSrc == "pending" {
+		if d.isPending() {
 			return true
 		}
 	}
@@ -453,9 +498,15 @@ func (t *Table) ApplyResolution(mac, hostname, src string, now time.Time) bool {
 	if d == nil || hostname == "" || src == "" {
 		return false // 设备已走 / 结果为空: 丢弃
 	}
-	d.Hostname, d.HostnameSrc = hostname, src
+	d.pendingSince = 0
 	d.lastResolve = now.Unix()
-	return true
+	if !d.reResolveForce && hostnameSrcRank(d.HostnameSrc) >= 2 && hostnameSrcRank(src) < hostnameSrcRank(d.HostnameSrc) {
+		return false // 重解析不降级已有有效主机名
+	}
+	d.reResolveForce = false
+	changed := d.Hostname != hostname || d.HostnameSrc != src
+	d.Hostname, d.HostnameSrc = hostname, src
+	return changed
 }
 
 // RenderJSON 渲染 devices.json 内容(只含在线设备; 字段与 hotspotd.c write_json

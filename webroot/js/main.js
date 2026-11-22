@@ -625,16 +625,18 @@ document.addEventListener('click', function (e) {
     case 'fx-demo': fxDemo(a.getAttribute('data-demo')); break;
     case 'fx-perf': setLowFx(!PERF.low, false); PERF.strikes = 0; fxRefresh(); toast(PERF.low ? '已切到简化动画' : '已恢复完整动画'); break;
     case 'self-conns': selfConnSheet(); break;
-    case 'apply-limit': var lv = [readNum(box, 'down'), readNum(box, 'up')]; devAct(d.mac, function () { return doLimit(d, mbsToMbps(lv[0]), mbsToMbps(lv[1])); }, lv[0] || lv[1] ? '已应用限速到 ' + d.name : '已清除 ' + d.name + ' 的限速', a); break;
-    case 'clear-limit': devAct(d.mac, function () { return api.action('rule_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的限速', a); break;
-    case 'apply-delay': var dv = [readNum(box, 'delay'), readNum(box, 'jitter'), readNum(box, 'loss')]; devAct(d.mac, function () { return doDelay(d, dv[0], dv[1], dv[2]); }, dv[0] || dv[1] || dv[2] ? '已对 ' + d.name + ' 注入延迟' : '已清除延迟', a); break;
-    case 'clear-delay': devAct(d.mac, function () { return api.action('delay_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的延迟', a); break;
-    case 'unblock': devAct(d.mac, function () { return api.action('bl_del', { mac: d.mac }); }, d.name + ' 已解除封锁', a); break;
-    case 'rename': renameSheet(d.mac, d.manual || d.name !== d.mac ? d.name : ''); break;
-    case 'copy-mac': copyText(d.mac).then(function (ok) { toast(ok ? '已复制 ' + d.mac : '复制失败', ok ? 'ok' : 'err'); }); break;
-    case 'trend': busyWhile(a, loadTrend(d, box)); break;
+    case 'apply-limit': if (!d || !box) break; var lv = [readNum(box, 'down'), readNum(box, 'up')]; devAct(d.mac, function () { return doLimit(d, mbsToMbps(lv[0]), mbsToMbps(lv[1])); }, lv[0] || lv[1] ? '已应用限速到 ' + d.name : '已清除 ' + d.name + ' 的限速', a); break;
+    case 'clear-limit': if (!d || !box) break; devAct(d.mac, function () { return api.action('rule_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的限速', a); break;
+    case 'apply-delay': if (!d || !box) break; var dv = [readNum(box, 'delay'), readNum(box, 'jitter'), readNum(box, 'loss')]; devAct(d.mac, function () { return doDelay(d, dv[0], dv[1], dv[2]); }, dv[0] || dv[1] || dv[2] ? '已对 ' + d.name + ' 注入延迟' : '已清除延迟', a); break;
+    case 'clear-delay': if (!d || !box) break; devAct(d.mac, function () { return api.action('delay_clear', { mac: d.mac }); }, '已清除 ' + d.name + ' 的延迟', a); break;
+    case 'unblock': if (!d || !box) break; devAct(d.mac, function () { return api.action('bl_del', { mac: d.mac }); }, d.name + ' 已解除封锁', a); break;
+    case 'rename': if (!d || !box) break; renameSheet(d.mac, d.manual || d.name !== d.mac ? d.name : ''); break;
+    case 'copy-mac': if (!d || !box) break; copyText(d.mac).then(function (ok) { toast(ok ? '已复制 ' + d.mac : '复制失败', ok ? 'ok' : 'err'); }); break;
+    case 'trend': if (!d || !box) break; busyWhile(a, loadTrend(d, box)); break;
     case 'applim-save': case 'applim-clear':
-      var row2 = a.closest('[data-app]'), app = row2.getAttribute('data-app'), lim = act === 'applim-clear' ? 0 : mbsToMbps($('input', row2).value);
+      if (!d || !box) break;
+      var row2 = a.closest('[data-app]'); if (!row2) break;
+      var app = row2.getAttribute('data-app'), lim = act === 'applim-clear' ? 0 : mbsToMbps($('input', row2).value);
       // 应用限速表先刷新再重绘卡片: 此前卡片先按旧表画一遍, 再按新表画一遍(两次整卡重绘, 保存的值闪回旧值)
       devAct(d.mac, function () { return (lim > 0 ? api.action('app_limit_set', { mac: d.mac, app_id: app, down_mbps: trim0(lim.toFixed(3)) }) : api.action('app_limit_clear', { mac: d.mac, app_id: app })).then(function (r) { return loadAppLimits().then(function () { return r; }); }); }, (function(){ var catItem = (typeof APP_CATALOG !== 'undefined' && APP_CATALOG && APP_CATALOG[app]); var nm = (catItem && catItem.name) || app; return lim > 0 ? '已限速 ' + nm : nm + ' 不再限速'; })(), a);
       break;
@@ -650,13 +652,14 @@ document.addEventListener('click', function (e) {
       var tg = S.batch ? selectedDevs() : wide() && S.sel ? [devBy(S.sel)].filter(Boolean) : S.devices.filter(function (x) { return S.open[x.mac]; });
       tplSheet(tg, true); break;
     case 'quota-save':
+      if (!d || !box) break;
       var qd = readNum(box, 'q-daily'), qm = readNum(box, 'q-month'), qt = mbsToMbps(readNum(box, 'q-thr')), qab = $('[data-seg="q-act"] button.on', box), qa = qab ? qab.getAttribute('data-v') : 'throttle';
       if (!(qd > 0) && !(qm > 0)) { toast('每日或每月至少填一个上限', 'warn'); break; }
       if (qd < 0 || qm < 0) { toast('上限不能是负数', 'err'); break; }
       devAct(d.mac, function () { var qp = { mac: d.mac, daily_gb: trim0(qd.toFixed(3)), monthly_gb: trim0(qm.toFixed(3)), action: qa }; if (qt > 0) qp.throttle_mbps = trim0(qt.toFixed(3)); return api.action('quota_set', qp); }, '已保存 ' + d.name + ' 的流量配额', a); break;
-    case 'quota-clear': devAct(d.mac, function () { return api.action('quota_clear', { mac: d.mac }); }, '已删除流量配额', a); break;
-    case 'sched-edit': schedSheet(d); break;
-    case 'sched-clear': confirmSheet('清除分时段？', '删除 ' + esc(d.name) + ' 的全部时段，恢复手动限速。', '清除').then(function (ok) { if (ok) devAct(d.mac, function () { return api.action('schedule_clear', { mac: d.mac }); }, '已清除分时段'); }); break;
+    case 'quota-clear': if (!d || !box) break; devAct(d.mac, function () { return api.action('quota_clear', { mac: d.mac }); }, '已删除流量配额', a); break;
+    case 'sched-edit': if (!d || !box) break; schedSheet(d); break;
+    case 'sched-clear': if (!d || !box) break; confirmSheet('清除分时段？', '删除 ' + esc(d.name) + ' 的全部时段，恢复手动限速。', '清除').then(function (ok) { if (ok) devAct(d.mac, function () { return api.action('schedule_clear', { mac: d.mac }); }, '已清除分时段'); }); break;
     case 'pu-save': puSave(); break;
     case 'sim-off': simSet(false).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'sim-add': simAddSheet(); break;
@@ -861,17 +864,31 @@ document.addEventListener('scroll', function () { if (holdP) holdCancel(); }, tr
  * 间隔与旧版一致: 有在线设备 1s / 空闲 1.5~5s / 热点关 3~15s; 设备签名变化后 5 秒内 250ms 快轮询。 */
 var pollT = 0, pollBusy = false, burstUntil = 0, tickN = 0;
 /* 远程浏览器用 /api/events 实时推送(设备接入/离开/规则变化), 空闲时轮询放缓到 15~30 秒 */
-var es = null;
+var es = null, esRetryT = 0, esBackoff = 3000;
 function startSSE() {
   if (KSU || typeof EventSource === 'undefined' || es || document.hidden) return;
+  clearTimeout(esRetryT); esRetryT = 0;
   try {
-    es = new EventSource('/api/events');
-    es.onopen = function () { S.sse = true; };
-    es.addEventListener('changed', function () { burstUntil = Date.now() + 3000; schedulePoll(0); });
-    es.onerror = function () { S.sse = false; };   // 浏览器会自动重连
+    var curEs = new EventSource('/api/events');
+    es = curEs;
+    curEs.onopen = function () { S.sse = true; esBackoff = 3000; };
+    curEs.addEventListener('changed', function () { burstUntil = Date.now() + 3000; schedulePoll(0); });
+    curEs.onerror = function () {
+      S.sse = false;
+      try { curEs.close(); } catch (_) {}
+      if (es === curEs) es = null;
+      if (document.hidden || KSU) return;
+      clearTimeout(esRetryT);
+      var wait = esBackoff;
+      esBackoff = Math.min(60000, esBackoff * 2);
+      esRetryT = setTimeout(function () { esRetryT = 0; startSSE(); }, wait);
+    };
   } catch (_) { es = null; }
 }
-function stopSSE() { if (es) { try { es.close(); } catch (_) {} es = null; S.sse = false; } }
+function stopSSE() {
+  clearTimeout(esRetryT); esRetryT = 0; esBackoff = 3000;
+  if (es) { try { es.close(); } catch (_) {} es = null; S.sse = false; }
+}
 function pollDelay() {
   if (Date.now() < burstUntil) return 250;
   var l = S.live || {}, m = S.refreshMode, on = num(l.online);
@@ -943,7 +960,7 @@ function pollOnce() {
 var freshT = 0, slowT = [];
 function startFreshTick() {
   clearInterval(freshT); freshT = 0;
-  if (!document.hidden) freshT = setInterval(function () { if (!document.hidden && S.page === 'devices') paintFresh(); }, 1000);
+  if (S.booted && !document.hidden) freshT = setInterval(function () { if (!document.hidden && S.page === 'devices') paintFresh(); }, 1000);
 }
 function stopSlowPolls() {
   clearInterval(freshT); freshT = 0;
@@ -951,7 +968,7 @@ function stopSlowPolls() {
 }
 function startSlowPolls() {
   stopSlowPolls();
-  if (document.hidden) return;
+  if (!S.booted || document.hidden) return;
   startFreshTick();
   slowT = [setInterval(function () { if (!document.hidden) loadAlerts(); }, 60000),
     setInterval(function () { if (!document.hidden) loadOffload(); }, 60000),
@@ -959,8 +976,12 @@ function startSlowPolls() {
     setInterval(function () { if (!document.hidden && S.page === 'devices') { loadOnlineHours(); loadUsage(); } }, 600000),
     setInterval(function () { if (!document.hidden && S.page === 'stats' && S.aseg === 'stats') { refreshStats(); refreshPU(true); } }, 300000)];
 }
-startFreshTick();
-document.addEventListener('visibilitychange', function () { if (typeof v6OnVisibility === 'function') v6OnVisibility(document.hidden); if (document.hidden) { clearTimeout(pollT); stopSSE(); stopSlowPolls(); } else { startSlowPolls(); burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); } });
+document.addEventListener('visibilitychange', function () {
+  if (typeof v6OnVisibility === 'function') v6OnVisibility(document.hidden);
+  if (document.hidden) { clearTimeout(pollT); stopSSE(); stopSlowPolls(); }
+  else if (S.booted) { startSlowPolls(); burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); }
+  else if (!booting) { boot(true); }
+});
 
 /* ═════════════════════ 启动 ═════════════════════
  * 旧版 bug: health 失败后重试成功只恢复了设备轮询, 配置/能力/告警/offload 全停在默认值。
@@ -1243,14 +1264,15 @@ function showRollbackBanner(rb) {
   document.addEventListener('click', function (e) {
     var jMac = e.target.closest && e.target.closest('[data-jump-mac]');
     if (jMac) {
-      var targetMac = jMac.getAttribute('data-jump-mac');
+      var targetMac = String(jMac.getAttribute('data-jump-mac') || '').trim().toLowerCase();
       if (targetMac) {
-        S.filter = 'all'; S.q = ''; S.quickPill = 'all';
+        S.filter = 'all'; S.q = ''; S.qpill = 'all';
         S.open[targetMac] = true; S.sel = targetMac;
         go('devices');
         renderDevices(false);
         setTimeout(function () {
-          var cardEl = document.querySelector('.dev[data-dev="' + targetMac + '"]');
+          var selMac = (window.CSS && typeof CSS.escape === 'function') ? CSS.escape(targetMac) : targetMac.replace(/["\\]/g, '\\$&');
+          var cardEl = document.querySelector('.dev[data-dev="' + selMac + '"]');
           if (cardEl) cardEl.scrollIntoView({ behavior: motionOn() ? 'smooth' : 'auto', block: 'center' });
         }, 120);
       }
@@ -1417,59 +1439,6 @@ function showRollbackBanner(rb) {
     } else {
       bar.innerHTML = html;
     }
-  }
-
-  /* ── 3. 增强设备卡片：在线带宽负载条 + 4磁贴控制中心 + 液态阀门松手即生效 ── */
-  var _origDevCard = window.devCard;
-  window.devCard = function(d) {
-    var html = _origDevCard(d);
-    if (d.online) {
-      var loadPct = Math.min(100, Math.max(6, Math.round((num(d.rx) + num(d.tx)) / (3.2 * 1048576) * 100)));
-      html = html.replace('<span class="dev-r">', '<span class="dev-r"><span class="dev-load-bar"><i style="width:' + loadPct + '%"></i></span>');
-    }
-    return html;
-  };
-
-  var _origPatchRates = window.patchRates;
-  if (typeof _origPatchRates === 'function') {
-    window.patchRates = function() {
-      _origPatchRates();
-      S.devices.forEach(function(d) {
-        if (!d.online) return;
-        var bar = document.querySelector('.dev[data-dev="' + d.mac + '"] .dev-load-bar > i');
-        if (bar) {
-          var loadPct = Math.min(100, Math.max(6, Math.round((num(d.rx) + num(d.tx)) / (3.2 * 1048576) * 100)));
-          bar.style.width = loadPct + '%';
-        }
-      });
-    };
-  }
-
-  var _origDevBody = window.devBody;
-  window.devBody = function(d) {
-    var html = _origDevBody(d);
-    // 将 3 格控制中心升级为 4 格（新增第 4 格：实时连接流直达磁贴）
-    var nConn = d.online && S.connCounts && S.connCounts[d.mac] && S.connCounts[d.mac].n;
-    var connCount = nConn ? (nConn + ' 条') : (d.online ? '实时' : '离线');
-    var tile4 = '<button type="button" class="cc-tile conn-tile press' + (d.online ? ' on conn-on' : '') + '" data-act="conns"' + (d.online ? '' : ' disabled') + '>' +
-                  '<span class="cc-orb">' + bentoSvg('conns') + '</span>' +
-                  '<span class="cc-txt"><b>实时连接流</b><small><span data-cc-conn="' + esc(d.mac) + '">' + connCount + '</span> · 点按嗅探</small></span>' +
-                '</button>';
-    html = html.replace('<div class="cc-bento-row">', '<div class="cc-bento-row bento-4">')
-               .replace('</button></div><div class="ctrl lcc-ctrl', '</button>' + tile4 + '</div><div class="ctrl lcc-ctrl');
-    return html;
-  };
-
-  var _origPaintConnCounts = window.paintConnCounts;
-  if (typeof _origPaintConnCounts === 'function') {
-    window.paintConnCounts = function() {
-      _origPaintConnCounts();
-      S.devices.forEach(function(d) {
-        var nConn = d.online && S.connCounts && S.connCounts[d.mac] && S.connCounts[d.mac].n;
-        if (!nConn) return;
-        $$('[data-cc-conn="' + d.mac + '"]').forEach(function(el) { el.textContent = nConn + ' 条'; });
-      });
-    };
   }
 
   var _origRenderDevices = window.renderDevices;
@@ -1686,19 +1655,30 @@ function showRollbackBanner(rb) {
     prism:  { tone: 'light', top: 'light', bot: 'light' }
   };
 
+  function escCssUrl(u) {
+    return String(u == null ? '' : u).replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/[\r\n]/g, '');
+  }
+  function isBlockedWpUri(u) {
+    return /^\s*data:image\/svg\+xml/i.test(String(u == null ? '' : u));
+  }
+
   if (typeof window !== 'undefined' && Array.isArray(window.__HNC_USER_WALLPAPERS)) {
     window.__HNC_USER_WALLPAPERS.forEach(function (uw) {
       if (!uw || !uw.id || !uw.src) return;
-      WP_PRESETS[uw.id] = {
-        label: uw.label || uw.id,
-        thumb: 'url("' + uw.src + '") center/cover no-repeat',
-        uri: 'url("' + uw.src + '")',
-        rawSrc: uw.src
+      var idStr = String(uw.id);
+      var srcStr = String(uw.src).trim();
+      if (!srcStr || isBlockedWpUri(srcStr)) return;
+      var safeCssUrl = escCssUrl(srcStr);
+      WP_PRESETS[idStr] = {
+        label: String(uw.label || idStr),
+        thumb: 'url("' + safeCssUrl + '") center/cover no-repeat',
+        uri: 'url("' + safeCssUrl + '")',
+        rawSrc: srcStr
       };
-      if (uw.tones) PRESET_TONES[uw.id] = uw.tones;
+      if (uw.tones) PRESET_TONES[idStr] = uw.tones;
     });
-    if (!LS.get('hnc6.wp_init_v537', '') && window.__HNC_USER_WALLPAPERS[0]) {
-      S.wpId = window.__HNC_USER_WALLPAPERS[0].id;
+    if (!LS.get('hnc6.wp_init_v537', '') && window.__HNC_USER_WALLPAPERS[0] && WP_PRESETS[String(window.__HNC_USER_WALLPAPERS[0].id)]) {
+      S.wpId = String(window.__HNC_USER_WALLPAPERS[0].id);
       S.wpDim = 10;
       LS.set('hnc6.wp_id', S.wpId);
       LS.set('hnc6.wp_dim', '10');
@@ -1774,9 +1754,9 @@ function showRollbackBanner(rb) {
     var r = document.documentElement;
     var wpImg = document.querySelector('#hnc-wallpaper .wp-img');
     var uri = '', rawSrc = '';
-    if (S.wpId === 'custom' && S.wpCustom) {
+    if (S.wpId === 'custom' && S.wpCustom && !isBlockedWpUri(S.wpCustom)) {
       rawSrc = S.wpCustom;
-      uri = 'url("' + S.wpCustom.replace(/"/g, '\"') + '")';
+      uri = 'url("' + escCssUrl(S.wpCustom) + '")';
     } else if (WP_PRESETS[S.wpId] && WP_PRESETS[S.wpId].uri) {
       uri = WP_PRESETS[S.wpId].uri;
       rawSrc = WP_PRESETS[S.wpId].rawSrc || '';
@@ -1824,9 +1804,9 @@ function showRollbackBanner(rb) {
     var hasWp = (S.wpId === 'custom' && !!S.wpCustom) || (S.wpId !== 'none' && !!WP_PRESETS[S.wpId]);
     var preBtns = Object.keys(WP_PRESETS).map(function(k) {
       var p = WP_PRESETS[k];
-      return '<button type="button" class="wp-pre press' + (S.wpId === k ? ' on' : '') + '" data-wp-pick="' + k + '">' +
-        '<span class="wp-sw" style="background:' + p.thumb + '"></span>' +
-        '<span>' + p.label + '</span></button>';
+      return '<button type="button" class="wp-pre press' + (S.wpId === k ? ' on' : '') + '" data-wp-pick="' + esc(k) + '">' +
+        '<span class="wp-sw" style="background:' + esc(p.thumb) + '"></span>' +
+        '<span>' + esc(p.label) + '</span></button>';
     }).join('');
     var customBadge = S.wpId === 'custom' && S.wpCustom ? ' · 已启用自定义图' : '';
     return '<div class="wp-panel" id="wp-panel">' +
@@ -1906,6 +1886,11 @@ function showRollbackBanner(rb) {
     var t = e.target;
     if (!t || t.id !== 'wp-file' || !t.files || !t.files[0]) return;
     var file = t.files[0];
+    if (/svg/i.test(file.type || '') || /\.svg$/i.test(file.name || '')) {
+      toast('不支持 SVG 格式图片作为壁纸', 'warn');
+      t.value = '';
+      return;
+    }
     var finishDecode = function(img, cleanupUrl) {
       try {
         var maxSide = 1280, w = img.naturalWidth || img.width || 800, h = img.naturalHeight || img.height || 600;
@@ -2071,6 +2056,7 @@ function showRollbackBanner(rb) {
     var wpPick = e.target.closest && e.target.closest('[data-wp-pick]');
     if (wpPick) {
       var wid = wpPick.getAttribute('data-wp-pick');
+      if (!wid || !WP_PRESETS[wid]) return;
       S.wpId = wid;
       LS.set('hnc6.wp_id', wid);
       applyWallpaper();
@@ -2096,8 +2082,8 @@ function showRollbackBanner(rb) {
         toast('已清除壁纸链接');
         return;
       }
-      if (!/^(https:\/\/|data:image\/)/i.test(urlVal)) {
-        toast('请输入以 https:// 开头的图片直链', 'warn');
+      if (!/^(https:\/\/|data:image\/)/i.test(urlVal) || isBlockedWpUri(urlVal)) {
+        toast('请输入以 https:// 开头的位图图片直链（不支持 SVG）', 'warn');
         return;
       }
       S.wpCustom = urlVal;

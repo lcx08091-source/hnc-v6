@@ -16,8 +16,9 @@ qc_mock_setup() {
     QCM="$HNC_TEST_DIR/qcmock"
     mkdir -p "$QCM/state" "$QCM/mods"
     : > "$QCM/calls.log"
-    cat > "$QCM/tc" <<'EOF'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 echo "tc|$*" >> "$QCM_DIR/calls.log"
 case "$*" in
     *"qdisc replace dev "*" root "*|*"qdisc add dev "*" root "*)
@@ -31,27 +32,34 @@ case "$*" in
 esac
 exit 0
 EOF
-    cat > "$QCM/ip" <<'EOF'
-#!/bin/sh
+    } > "$QCM/tc"
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 echo "ip|$*" >> "$QCM_DIR/calls.log"
 exit 0
 EOF
-    cat > "$QCM/modprobe" <<'EOF'
-#!/bin/sh
+    } > "$QCM/ip"
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 echo "modprobe|$*" >> "$QCM_DIR/calls.log"
 for a in "$@"; do m=$a; done
 case " $MOCK_QC_MODPROBE_OK " in *" $m "*) : > "$QCM_DIR/state/$m"; exit 0 ;; esac
 echo "modprobe: FATAL: Module $m not found" >&2
 exit 1
 EOF
-    cat > "$QCM/insmod" <<'EOF'
-#!/bin/sh
+    } > "$QCM/modprobe"
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 echo "insmod|$*" >> "$QCM_DIR/calls.log"
 m=$(basename "$1" .ko)
 case " $MOCK_QC_INSMOD_OK " in *" $m "*) : > "$QCM_DIR/state/$m"; exit 0 ;; esac
 echo "insmod: failed to load $1: Operation not permitted" >&2
 exit 1
 EOF
+    } > "$QCM/insmod"
     chmod +x "$QCM/tc" "$QCM/ip" "$QCM/modprobe" "$QCM/insmod"
     : > "$QCM/proc_modules"
     export QCM_DIR="$QCM"
@@ -285,13 +293,15 @@ mock_teardown
 
 test_start "set_limit: tc 拒绝 quantum 时退回旧参数(不带 quantum)"
 mock_setup
-cat > "$MOCK_BIN_DIR/tc" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "tc|$*" >> "$MOCK_LOG"
 case "$*" in *" quantum "*" 60000"*|*"quantum 60000"*) exit 1 ;; esac
 [ -n "$MOCK_STDOUT_tc" ] && printf '%s\n' "$MOCK_STDOUT_tc"
 exit 0
 EOF
+} > "$MOCK_BIN_DIR/tc"
 chmod +x "$MOCK_BIN_DIR/tc"
 mock_set_stdout tc "$TC_TREE"
 tcm set_limit wlan2 5 300 0 192.168.43.5 >/dev/null 2>&1; rc=$?

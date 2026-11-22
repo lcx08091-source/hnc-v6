@@ -907,7 +907,7 @@
   border-radius: 6px;
 }
 [data-style="cyber"] .v6-subtab.on {
-  background: var(--cy-accent-2, rgba(56,189,248,.18));
+  background: color-mix(in srgb, var(--cy-accent, #38bdf8) 16%, transparent);
   color: var(--cy-accent, #38bdf8);
   border: 1px solid var(--cy-accent, #38bdf8);
 }

@@ -3,7 +3,7 @@
 # 旧的 30 秒节流等于每分钟跑一次完整能力探测(真机热点空转 watchdog ≈ 530 CPU 秒/小时)。
 
 cap_stub() {
-    printf '#!/bin/sh\necho x >> "%s/run/cap_calls"\n' "$HNC_TEST_DIR" > "$HNC_TEST_DIR/bin/capability_probe.sh"
+    printf '#!%s\necho x >> "%s/run/cap_calls"\n' "${HNC_TEST_SH:-/system/bin/sh}" "$HNC_TEST_DIR" > "$HNC_TEST_DIR/bin/capability_probe.sh"
     chmod +x "$HNC_TEST_DIR/bin/capability_probe.sh"
     rm -f "$HNC_TEST_DIR/run/cap_calls" "$HNC_TEST_DIR/run/capability_probe_last"
 }

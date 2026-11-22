@@ -224,16 +224,17 @@ function appsSub() {
       : '';
 
     var allRows = appRows();
+    var qStr = String(S.appQ || '').trim();
     var rows = allRows.filter(function (r) {
       var a = r.a || {};
-      return appMatchQuery((a.name || '') + ' ' + (a.pkg || '') + ' ' + (a.uid || ''));
+      return appMatchQuery((r.name + ' ' + (a.pkg || '') + ' ' + r.uid).toLowerCase());
     });
     var usr = rows.filter(function (r) { return !r.a.is_system; }), sys = rows.filter(function (r) { return r.a.is_system; });
     var mx = Math.max.apply(null, rows.map(function (r) { return r.bytes; }).concat([1]));
     var fx = (S.cfg && S.cfg.flywheel_exclude_user) || [];
 
     var hostHtml = !rows.length
-      ? '<div class="glass empty">' + (!self ? 'dpid 暂未上报本机数据' : !self.enabled ? '本机采样休眠中 · 亮屏后自动恢复，或前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 切换' : '采样器刚就绪 · 等待首批连接…') + '</div>'
+      ? '<div class="glass empty">' + (qStr && allRows.length ? '未找到匹配「' + esc(qStr) + '」的本机应用' : !self ? 'dpid 暂未上报本机数据' : !self.enabled ? '本机采样休眠中 · 亮屏后自动恢复，或前往 <button class="linkish" data-act="go-dpi-studio">DPI 与自训</button> 切换' : '采样器刚就绪 · 等待首批连接…') + '</div>'
       : '<div class="sec"><span>热点手机本机应用 <small>UID 级真实套接字归因 · 点开可排除代理</small></span><button class="linkish" data-act="self-conns">此刻连接明细</button></div>' +
         '<div class="glass rows">' + usr.slice(0, 50).map(function (r) { return appRow(r, mx); }).join('') + '</div>' +
         (sys.length ? '<div class="glass' + (S.open.sysapps ? ' open' : '') + '" data-foldkey="sysapps"><button class="card-h" data-act="fold" data-key="sysapps">' + gi('gray', 'cpu') + '<span class="tx"><div class="t">本机系统与组件应用</div><div class="s">' + sys.length + ' 个 · 默认收起不污染规则库</div></span>' + ico('chev', 'chev') + '</button>' +
@@ -255,7 +256,7 @@ function appsSub() {
     if (!list.length) return '';
     return '<div class="dsec" style="margin:8px 2px 4px">' + title + ' · ' + list.length + '</div><div class="glass sni">' + list.map(function (c) {
       var inf = typeof classifyInfraHost === 'function' ? classifyInfraHost(c.apex) : null;
-      return '<div class="sni-row" data-apex="' + esc(c.apex) + '"><span class="dw"><span class="d" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="mono">' + esc(c.apex) + '</span>' + (inf ? infraBadgeHtml(inf) : '') + '</span><span class="c">' + esc(c.app || (c.uid ? 'uid ' + c.uid : '未知应用')) + ' · 命中 ' + num(c.hits) + ' 次 · ' + num(c.windows) + ' 窗口 · 置信' + ({ high: '高', med: '中', low: '低', shared: '共享' }[c.tier] || c.tier) + '</span></span>' + acts(c) + '</div>';
+      return '<div class="sni-row" data-apex="' + esc(c.apex) + '"><span class="dw"><span class="d" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap"><span class="mono">' + esc(c.apex) + '</span>' + (inf ? infraBadgeHtml(inf) : '') + '</span><span class="c">' + esc(c.app || (c.uid ? 'uid ' + c.uid : '未知应用')) + ' · 命中 ' + num(c.hits) + ' 次 · ' + num(c.windows) + ' 窗口 · 置信' + ({ high: '高', med: '中', low: '低', shared: '共享' }[c.tier] || esc(c.tier)) + '</span></span>' + acts(c) + '</div>';
     }).join('') + '</div>';
   };
 

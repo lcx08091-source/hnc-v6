@@ -438,3 +438,124 @@ func BenchmarkWorldSnapshotLoad(b *testing.B) {
 		}
 	}
 }
+
+func TestBulkheadIdleHealthAndCanceledTaskCircuitGuard(t *testing.T) {
+	var fakeMono atomic.Int64
+	fakeMono.Store(int64(10 * time.Second))
+	oldMono := monoNowFn
+	monoNowFn = fakeMono.Load
+	t.Cleanup(func() { monoNowFn = oldMono })
+
+	bh := NewBulkhead(BulkheadConfig{
+		Name:             "idle_and_cancel_test",
+		QueueSize:        4,
+		DefaultTimeout:   40 * time.Millisecond,
+		TripThreshold:    2,
+		CooldownDuration: 30 * time.Second,
+		MaxStaleAge:      10 * time.Second,
+	})
+	t.Cleanup(bh.Close)
+
+	// 1. 启动 Actor 执行一次正常任务后, 单调时钟推进 1 小时(模拟整夜零唤醒休眠): 必须保持 Healthy=true 且 BeatAgeMs=0
+	if err := bh.Execute(context.Background(), 200*time.Millisecond, func(ctx context.Context) error {
+		return nil
+	}); err != nil {
+		t.Fatalf("initial execute failed: %v", err)
+	}
+	fakeMono.Add(int64(time.Hour))
+	h := bh.Health()
+	if !h.Healthy || h.BeatAgeMs != 0 || bh.BeatAge() != 0 {
+		t.Fatalf("idle bulkhead must remain healthy with 0 beat age after long sleep, got health=%+v beatAge=%v", h, bh.BeatAge())
+	}
+
+	// 2. 队头慢任务阻塞超过 350ms, 让排队中的 task2 触发 Execute.waitTimer (20ms+250ms=270ms) 超时并标记 canceled;
+	//    随后队头 task1 亦超时触发熔断(2/2), actorLoop 取出已取消的 task2 时必须直接跳过, 绝不执行也不重置熔断器!
+	block1 := make(chan struct{})
+	defer close(block1)
+	started1 := make(chan struct{})
+	done1 := make(chan error, 1)
+	go func() {
+		done1 <- bh.Execute(context.Background(), 400*time.Millisecond, func(ctx context.Context) error {
+			close(started1)
+			<-block1
+			return nil
+		})
+	}()
+	<-started1
+
+	lateDone := make(chan struct{})
+	err2 := bh.Execute(context.Background(), 20*time.Millisecond, func(ctx context.Context) error {
+		close(lateDone)
+		return nil
+	})
+	if !errors.Is(err2, ErrBulkheadTimeout) {
+		t.Fatalf("queued task should hit Execute waitTimer timeout, got %v", err2)
+	}
+	if err1 := <-done1; !errors.Is(err1, ErrBulkheadTimeout) {
+		t.Fatalf("head-of-line task should hit timeout, got %v", err1)
+	}
+	// 等待 actorLoop 消费并跳过已取消的 task2
+	time.Sleep(50 * time.Millisecond)
+	select {
+	case <-lateDone:
+		t.Fatal("canceled queued task should have been skipped by actorLoop")
+	default:
+	}
+	if ct := bh.consecTimeouts.Load(); ct < 2 || bh.CircuitState() != "open" {
+		t.Fatalf("canceled queued task must not reset consecTimeouts or close circuit: consec=%d state=%q", ct, bh.CircuitState())
+	}
+}
+
+func TestCoreHubActivityPauseResumeAndCompareAndDelete(t *testing.T) {
+	oldAct := actState.cur.Load()
+	t.Cleanup(func() {
+		if oldAct != nil {
+			activityPublish(*oldAct)
+		} else {
+			actState.cur.Store(nil)
+		}
+	})
+
+	s, _ := setupTestV6Server(t)
+	activityPublish(Activity{
+		Known:         true,
+		HotspotActive: false,
+		WebUIActive:   false,
+	})
+	hub := s.CoreHub()
+	stopCh := make(chan struct{})
+	t.Cleanup(func() { close(stopCh) })
+	hub.Start(stopCh)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && !hub.paused.Load() {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !hub.paused.Load() {
+		t.Fatal("expected CoreHub to enter paused mode when hotspot_off and WebUI inactive")
+	}
+	seqBefore := hub.Snapshot().Seq
+
+	// 唤醒为热点活跃 + WebUI 在线 -> 立即退出暂停并刷新快照
+	activityPublish(Activity{
+		Known:         true,
+		HotspotActive: true,
+		ClientsOnline: 1,
+		WebUIActive:   true,
+	})
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && (hub.paused.Load() || hub.Snapshot().Seq <= seqBefore) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if hub.paused.Load() || hub.Snapshot().Seq <= seqBefore {
+		t.Fatalf("expected CoreHub to resume and refresh snapshot: paused=%v seqBefore=%d seqNow=%d",
+			hub.paused.Load(), seqBefore, hub.Snapshot().Seq)
+	}
+
+	// 验证并发竞态败者 Close() 不会误删 serverHubMap 中胜出的 hub
+	loser := NewCoreHub(s)
+	loser.Close()
+	if got := s.CoreHub(); got != hub {
+		t.Fatalf("loser CoreHub.Close() evicted active hub from serverHubMap")
+	}
+}

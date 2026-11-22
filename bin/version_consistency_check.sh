@@ -21,34 +21,103 @@ else
   #   v5.3.0-rc30.12-hf2           (rc + hf 新风格)
   #   v5.9.0-hotfix1               (正式版 + hotfix)
   if printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then ok "module version format is accepted"; else fail "module version format is unexpected: $VERSION"; fi
-  MOD_DESC="$(sed -n 's/^description=//p' "$MODULE_PROP" | head -1)"
-  if printf '%s\n' "$MOD_DESC" | grep -Eq 'v[0-9]+\.[0-9]+\.[0-9]+'; then
-    if printf '%s\n' "$MOD_DESC" | grep -Fq "$VERSION"; then
-      ok "module.prop description embeds matching $VERSION"
+  MOD_DESC="$(sed -n '/^description=/{s/^description=//p;q;}' "$MODULE_PROP" | tr -d '\r')"
+  DESC_VERS="$(printf '%s\n' "$MOD_DESC" | grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*' || true)"
+  if [ -n "$DESC_VERS" ]; then
+    DESC_BAD=0
+    for _dv in $DESC_VERS; do
+      [ "$_dv" = "$VERSION" ] || DESC_BAD=1
+    done
+    if [ "$DESC_BAD" -eq 0 ]; then
+      ok "module.prop description embeds exact $VERSION"
     else
-      fail "module.prop description version mismatch (expected $VERSION): $MOD_DESC"
+      fail "module.prop description version token mismatch (expected $VERSION, got: $DESC_VERS)"
     fi
   fi
-  if [ -f update.json ]; then
-    UPD_VER="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' update.json | head -1)"
-    UPD_VC="$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' update.json | head -1)"
+  if printf '%s\n' "$VERSION_CODE" | grep -Eq '^[1-9][0-9]{6,8}$'; then
+    VC_REM=$(( VERSION_CODE % 10000 ))
+    case "$VERSION" in
+      *-alpha*)
+        if [ "$VC_REM" -ge 9101 ] && [ "$VC_REM" -le 9199 ]; then ok "alpha versionCode corridor valid ($VERSION_CODE)"; else fail "alpha versionCode ($VERSION_CODE) must end in 9101..9199"; fi ;;
+      *-beta*)
+        if [ "$VC_REM" -ge 9201 ] && [ "$VC_REM" -le 9299 ]; then ok "beta versionCode corridor valid ($VERSION_CODE)"; else fail "beta versionCode ($VERSION_CODE) must end in 9201..9299"; fi ;;
+      *-rc*)
+        if [ "$VC_REM" -ge 9301 ] && [ "$VC_REM" -le 9999 ]; then ok "rc versionCode corridor valid ($VERSION_CODE)"; else fail "rc versionCode ($VERSION_CODE) must end in 9301..9999"; fi ;;
+      *)
+        if [ "$VC_REM" -lt 9100 ]; then ok "stable versionCode corridor valid ($VERSION_CODE)"; else fail "stable versionCode ($VERSION_CODE) collides with pre-release corridor >=9100"; fi ;;
+    esac
+  fi
+  VER_BARE="${VERSION#v}"
+  if [ -f CHANGELOG.md ]; then
+    CL_SEC="$(awk -v ver="$VER_BARE" 'index($0, "## [" ver "]") == 1 {found=1; next} found && /^## \[/ {exit} found {print}' CHANGELOG.md | tr -d ' \t\r\n')"
+    if [ -n "$CL_SEC" ]; then ok "CHANGELOG.md has non-empty section for [$VER_BARE]"; else fail "CHANGELOG.md missing or empty section for ## [$VER_BARE]"; fi
+  fi
+  if [ -f webroot/changelog.html ]; then
+    if grep -Fq "data-version=\"$VERSION\"" webroot/changelog.html; then ok "webroot/changelog.html contains $VERSION entry"; else fail "webroot/changelog.html missing data-version=\"$VERSION\""; fi
+  fi
+  if [ ! -f update.json ]; then
+    fail "update.json not found"
+  else
+    UPD_VER="$(sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' update.json | head -n 1 | tr -d '\r')"
+    UPD_VC="$(sed -n 's/.*"versionCode"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' update.json | head -n 1 | tr -d '\r')"
+    UPD_ZIP="$(sed -n 's/.*"zipUrl"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' update.json | head -n 1 | tr -d '\r')"
+    UPD_CL="$(sed -n 's/.*"changelog"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' update.json | head -n 1 | tr -d '\r')"
     case "$VERSION" in
       *-alpha*|*-beta*|*-rc*)
-        case "$UPD_VER" in
-          *-alpha*|*-beta*|*-rc*)
-            fail "update.json points to pre-release $UPD_VER; keep update.json frozen on latest stable during alpha/beta/rc" ;;
-          *)
-            if [ -n "$UPD_VC" ] && [ -n "$VERSION_CODE" ] && [ "$UPD_VC" -lt "$VERSION_CODE" ] 2>/dev/null; then
-              ok "pre-release OTA guard: update.json stays pinned on stable ($UPD_VER / $UPD_VC < $VERSION_CODE)"
-            else
-              fail "update.json versionCode ($UPD_VC) must stay below pre-release ($VERSION_CODE)"
-            fi ;;
-        esac ;;
-      *)
-        if [ "$UPD_VER" = "$VERSION" ] && [ "$UPD_VC" = "$VERSION_CODE" ]; then
-          ok "update.json matches stable release ($UPD_VER / $UPD_VC)"
+        UPD_BAD=0
+        if [ -z "$UPD_VER" ]; then
+          fail "update.json version is empty during pre-release"
+          UPD_BAD=1
         else
-          warn "stable module.prop ($VERSION / $VERSION_CODE) differs from update.json ($UPD_VER / $UPD_VC)"
+          case "$UPD_VER" in
+            *-alpha*|*-beta*|*-rc*)
+              fail "update.json points to pre-release $UPD_VER; keep update.json frozen on latest stable during alpha/beta/rc"
+              UPD_BAD=1 ;;
+          esac
+        fi
+        case "$UPD_ZIP" in
+          *-alpha*|*-beta*|*-rc*)
+            fail "update.json zipUrl points to pre-release artifact: $UPD_ZIP"
+            UPD_BAD=1 ;;
+        esac
+        case "$UPD_CL" in
+          *-alpha*|*-beta*|*-rc*)
+            fail "update.json changelog points to pre-release ref: $UPD_CL"
+            UPD_BAD=1 ;;
+        esac
+        if [ -z "$UPD_VC" ] || ! printf '%s\n' "$UPD_VC" | grep -Eq '^[1-9][0-9]*$'; then
+          fail "update.json versionCode is missing or non-numeric: '$UPD_VC'"
+          UPD_BAD=1
+        else
+          UPD_VC_REM=$(( UPD_VC % 10000 ))
+          if [ "$UPD_VC_REM" -ge 9100 ]; then
+            fail "update.json versionCode ($UPD_VC) collides with pre-release corridor (% 10000 = $UPD_VC_REM >= 9100)"
+            UPD_BAD=1
+          fi
+          if [ -z "$VERSION_CODE" ] || ! [ "$UPD_VC" -lt "$VERSION_CODE" ] 2>/dev/null; then
+            fail "update.json versionCode ($UPD_VC) must stay below pre-release ($VERSION_CODE)"
+            UPD_BAD=1
+          fi
+        fi
+        if [ "$UPD_BAD" -eq 0 ]; then
+          ok "pre-release OTA guard: update.json stays pinned on stable ($UPD_VER / $UPD_VC < $VERSION_CODE)"
+        fi ;;
+      *)
+        UPD_BAD=0
+        case "$UPD_ZIP" in
+          *-alpha*|*-beta*|*-rc*)
+            fail "update.json zipUrl points to pre-release artifact on stable release: $UPD_ZIP"
+            UPD_BAD=1 ;;
+        esac
+        case "$UPD_CL" in
+          *-alpha*|*-beta*|*-rc*)
+            fail "update.json changelog points to pre-release ref on stable release: $UPD_CL"
+            UPD_BAD=1 ;;
+        esac
+        if [ -n "$UPD_VER" ] && [ "$UPD_VER" = "$VERSION" ] && [ "$UPD_VC" = "$VERSION_CODE" ]; then
+          [ "$UPD_BAD" -eq 0 ] && ok "update.json matches stable release ($UPD_VER / $UPD_VC)"
+        else
+          fail "stable module.prop ($VERSION / $VERSION_CODE) differs from update.json ($UPD_VER / $UPD_VC)"
         fi ;;
     esac
   fi

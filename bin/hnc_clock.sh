@@ -22,6 +22,7 @@
 # 测试注入: HNC_CLOCK_NOW(墙钟秒)、HNC_CLOCK_UPTIME(单调秒)
 
 HNC_CLOCK_MIN_TS=1735689600   # 2025-01-01T00:00:00Z
+HNC_CLOCK_MAX_TS=2145916800   # 2038-01-01T00:00:00Z (上界防未来跳变毒化 clock_hwm)
 HNC_CLOCK_TOLERANCE=600       # 允许落后高水位的秒数(小幅 NTP 回拨)
 HNC_CLOCK_JUMP=600            # 跳变阈值
 HNC_CLOCK_PERSIST_EVERY=300   # 高水位落盘节流
@@ -51,7 +52,14 @@ hnc_clock_hwm() {
 hnc_clock_sane() {
     local now=${1:-$(hnc_clock_now)} hwm
     case "$now" in ''|*[!0-9]*) return 1 ;; esac
+    # 10 位十进制范围预检防 32 位 shell 整数溢出, 再精确核对 [MIN_TS, MAX_TS]
+    [ "${#now}" -eq 10 ] || return 1
+    case "$now" in
+        1[7-9]*|20*|21[0-3]*|214[0-5]*) ;;
+        *) return 1 ;;
+    esac
     [ "$now" -ge "$HNC_CLOCK_MIN_TS" ] || return 1
+    [ "$now" -le "$HNC_CLOCK_MAX_TS" ] || return 1
     hwm=$(hnc_clock_hwm)
     if [ "$hwm" -gt 0 ] && [ "$now" -lt $((hwm - HNC_CLOCK_TOLERANCE)) ]; then
         return 1
@@ -61,6 +69,13 @@ hnc_clock_sane() {
 
 hnc_clock_note() {
     local now=${1:-$(hnc_clock_now)} hwm f tmp
+    case "$now" in ''|*[!0-9]*) return 1 ;; esac
+    [ "${#now}" -eq 10 ] || return 1
+    case "$now" in
+        1[7-9]*|20*|21[0-3]*|214[0-5]*) ;;
+        *) return 1 ;;
+    esac
+    [ "$now" -le "$HNC_CLOCK_MAX_TS" ] || return 1
     hnc_clock_sane "$now" || return 1
     hwm=$(hnc_clock_hwm)
     [ "$now" -ge $((hwm + HNC_CLOCK_PERSIST_EVERY)) ] || return 0

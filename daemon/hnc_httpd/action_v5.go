@@ -153,7 +153,7 @@ func actionDelaySet(hncDir string, p map[string]string) actionResp {
 	if useNativeDataplane(hncDir) {
 		existMid, _ := rulesStore.GetDeviceField(hncDir, mac, "mark_id")
 		existMid = strings.TrimSpace(existMid)
-		if existMid != "" && existMid != "0" && intRE.MatchString(existMid) {
+		if _, ok := atoiClamp(existMid, 1, 99); ok {
 			mid = existMid
 		} else {
 			allocN, aErr := rulesStore.AllocMarkID(hncDir, mac)
@@ -170,17 +170,20 @@ func actionDelaySet(hncDir string, p map[string]string) actionResp {
 	} else {
 		rcM, outM := runBin(hncDir, "json_set.sh", "device_get", mac, "mark_id")
 		mid = strings.TrimSpace(outM)
-		if rcM != 0 || mid == "" {
+		if rcM != 0 || mid == "" || mid == "0" {
 			rc0, out0 := runBin(hncDir, "apply_device_rule.sh", "alloc_mid", mac)
 			if rc0 != 0 {
 				return actionResp{OK: false, Error: "mid assign failed", Detail: out0}
 			}
 			mid = strings.TrimSpace(out0)
 			newMid = true
-			if !intRE.MatchString(mid) {
+			if _, ok := atoiClamp(mid, 1, 99); !ok {
 				return actionResp{OK: false, Error: "mid assign failed",
-					Detail: "alloc_mid returned non-integer mid: " + mid}
+					Detail: "alloc_mid returned invalid mid (must be 1..99): " + mid}
 			}
+		} else if _, ok := atoiClamp(mid, 1, 99); !ok {
+			return actionResp{OK: false, Error: "mid invalid",
+				Detail: "device_get returned invalid mid (must be 1..99): " + mid}
 		}
 	}
 
@@ -259,15 +262,15 @@ func actionDelayClear(hncDir string, p map[string]string) actionResp {
 		}
 		mid = strings.TrimSpace(outM)
 	}
-	if mid == "" {
+	if mid == "" || mid == "0" {
 		return actionResp{OK: true, Detail: "already cleared (no mid)"}
 	}
 	// rc3.1.33 修 #2: 同 delay_set, 防垃圾 mid 传给 tc
-	if !intRE.MatchString(mid) {
+	midInt, ok := atoiClamp(mid, 1, 99)
+	if !ok {
 		return actionResp{OK: false, Error: "mid invalid",
-			Detail: "device_get returned non-integer mid: " + mid}
+			Detail: "device_get returned invalid mid (must be 1..99): " + mid}
 	}
-	midInt, _ := strconv.Atoi(mid)
 	hasLimit := deviceHasPositiveLimit(hncDir, mac)
 	hasSecondary := deviceHasNonDelaySecondaryOwner(hncDir, iface, mac, midInt)
 	ip := lookupCurrentDeviceIP(hncDir, mac)

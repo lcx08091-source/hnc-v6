@@ -170,3 +170,31 @@ assert_file_exists "$HNC_TEST_DIR/run/portal_sessions.json" \
     "portal 已安装时守卫必须拦住这条 rm" && \
     test_pass
 mock_teardown
+
+# ═══ POSIX sed 兼容性: 大写 MAC 正确匹配 IPv4 ═══════════════════════
+
+test_start "POSIX sed: uppercase MAC in devices.json/app_limits.flat matches IPv4"
+mock_setup
+seed_app_env
+# 强制标准 POSIX sed(真机 Toybox /system/bin/sed 或 GNU sed --posix), 防止 GNU \L 扩展掩盖不兼容
+_real_sed=$(command -v sed 2>/dev/null || echo sed)
+if [ -x /system/bin/sed ]; then
+    printf '#!%s\nexec /system/bin/sed "$@"\n' "${HNC_TEST_SH:-/system/bin/sh}" > "$MOCK_BIN_DIR/sed"
+    chmod +x "$MOCK_BIN_DIR/sed"
+elif "$_real_sed" --posix -n 'p' </dev/null >/dev/null 2>&1; then
+    printf '#!%s\nexec "%s" --posix "$@"\n' "${HNC_TEST_SH:-/bin/sh}" "$_real_sed" > "$MOCK_BIN_DIR/sed"
+    chmod +x "$MOCK_BIN_DIR/sed"
+fi
+printf '%s\n' "AA:BB:CC:DD:EE:01 douyin 5" > "$HNC_TEST_DIR/data/app_limits.flat"
+printf '%s' '{"AA:BB:CC:DD:EE:01":{"ip":"192.168.43.50","name":"phone"}}' \
+    > "$HNC_TEST_DIR/data/devices.json"
+printf '%s\n' "1.2.3.4 douyin" > "$HNC_TEST_DIR/run/ip_app_map.flat"
+run_aal
+assert_mock_called "192.168.43.50 -g HNC_AL_C1" \
+    "标准 POSIX sed 下大写 MAC 必须匹配到 IPv4 192.168.43.50" && \
+    assert_mock_called "HNC_AL_C1 -s 1.2.3.4 -j MARK --set-xmark 0x04000000/0xfc000000" \
+        "大写 MAC 对应应用限速打标规则应正常下发" && \
+    assert_not_contains "$(app_log)" "client not online" \
+        "大写 MAC 不应因非 POSIX sed 转义被误判为离线" && \
+    test_pass
+mock_teardown

@@ -87,10 +87,10 @@ type dnsFwdStats struct {
 }
 
 type dnsForwarder struct {
-	// st 必须位于结构体偏移 0 处: 32 位 armeabi-v7a (GOARCH=arm) 下 sync/atomic 64 位操作要求 8 字节对齐。
+	// st 必须位于结构体偏移 0 处: 32 位 armeabi-v7a (GOARCH=arm) 下 64 位原子字段保证 8 字节对齐。
 	st struct {
-		queries, cached, blocked, errors, limited, dropped int64
-		upstream, upErrs, upTCP, servfail                  int64
+		queries, cached, blocked, errors, limited, dropped atomic.Int64
+		upstream, upErrs, upTCP, servfail                  atomic.Int64
 	}
 
 	upstream  atomic.Value // string "ip:port"
@@ -251,13 +251,13 @@ func (f *dnsForwarder) serveUDP(c *net.UDPConn) {
 			return
 		}
 		if n < 12 {
-			atomic.AddInt64(&f.st.dropped, 1)
+			f.st.dropped.Add(1)
 			continue
 		}
 		select {
 		case f.sem <- struct{}{}:
 		default:
-			atomic.AddInt64(&f.st.dropped, 1)
+			f.st.dropped.Add(1)
 			continue
 		}
 		msg := append([]byte(nil), buf[:n]...)
@@ -284,7 +284,7 @@ func (f *dnsForwarder) serveTCP(ln net.Listener) {
 		select {
 		case f.tcpSem <- struct{}{}:
 		default:
-			atomic.AddInt64(&f.st.dropped, 1)
+			f.st.dropped.Add(1)
 			conn.Close()
 			continue
 		}
@@ -361,7 +361,7 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 	t0 := time.Now()
 	q, err := dnsParseQuery(query)
 	if err != nil || q.Flags&dnsFlagQR != 0 {
-		atomic.AddInt64(&f.st.dropped, 1)
+		f.st.dropped.Add(1)
 		return nil
 	}
 	internal := f.isLocal(src)
@@ -391,9 +391,9 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 		return resp
 	}
 	if !internal {
-		atomic.AddInt64(&f.st.queries, 1)
+		f.st.queries.Add(1)
 		if !f.limiter.allow(ipStr, t0) {
-			atomic.AddInt64(&f.st.limited, 1)
+			f.st.limited.Add(1)
 			resp := dnsRcodeReply(query, q, dnsRcodeRefused)
 			logIt(resp, dnsLogEntry{Limited: true})
 			return resp
@@ -402,7 +402,7 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 			mac = f.macOf(src)
 		}
 		if f.blocked != nil && q.QName != "" && f.blocked(mac, q.QName) {
-			atomic.AddInt64(&f.st.blocked, 1)
+			f.st.blocked.Add(1)
 			mode, _ := f.blockMode.Load().(string)
 			resp := dnsBlockReply(query, q, mode)
 			logIt(resp, dnsLogEntry{Blocked: true})
@@ -416,7 +416,7 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 		key = dnsCacheKey(q)
 		if resp, info := f.cache.get(key, query, q, t0); resp != nil {
 			if !internal {
-				atomic.AddInt64(&f.st.cached, 1)
+				f.st.cached.Add(1)
 			}
 			logIt(resp, dnsLogEntry{Cached: true, Answers: dnsLogAnswers(info)})
 			return finish(resp)
@@ -424,21 +424,21 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 	}
 	resp, err := f.exchange(query, q, proto)
 	if err != nil {
-		atomic.AddInt64(&f.st.errors, 1)
+		f.st.errors.Add(1)
 		out := dnsRcodeReply(query, q, dnsRcodeServFail)
 		logIt(out, dnsLogEntry{})
 		return finish(out)
 	}
 	m, perr := dnsParseResponse(resp)
 	if perr != nil || !dnsSameQuestion(q, m) {
-		atomic.AddInt64(&f.st.errors, 1)
-		atomic.AddInt64(&f.st.upErrs, 1)
+		f.st.errors.Add(1)
+		f.st.upErrs.Add(1)
 		out := dnsRcodeReply(query, q, dnsRcodeServFail)
 		logIt(out, dnsLogEntry{})
 		return finish(out)
 	}
 	if m.Rcode == dnsRcodeServFail {
-		atomic.AddInt64(&f.st.servfail, 1)
+		f.st.servfail.Add(1)
 	}
 	if cacheable && m.Flags&dnsFlagTC == 0 {
 		f.cache.put(key, resp, m, t0)
@@ -471,24 +471,24 @@ func dnsLogAnswers(m dnsMsgInfo) []string {
 func (f *dnsForwarder) exchange(query []byte, q dnsQuery, proto string) ([]byte, error) {
 	up := f.Upstream()
 	if up == "" {
-		atomic.AddInt64(&f.st.upErrs, 1)
+		f.st.upErrs.Add(1)
 		return nil, errors.New("no upstream")
 	}
-	atomic.AddInt64(&f.st.upstream, 1)
+	f.st.upstream.Add(1)
 	if proto == "tcp" {
 		resp, err := dnsExchangeTCP(up, query, f.timeout)
 		if err != nil {
-			atomic.AddInt64(&f.st.upErrs, 1)
+			f.st.upErrs.Add(1)
 		}
 		return resp, err
 	}
 	resp, err := dnsExchangeUDP(up, query, q, f.timeout)
 	if err != nil {
-		atomic.AddInt64(&f.st.upErrs, 1)
+		f.st.upErrs.Add(1)
 		return nil, err
 	}
 	if len(resp) >= 4 && binary.BigEndian.Uint16(resp[2:4])&dnsFlagTC != 0 {
-		atomic.AddInt64(&f.st.upTCP, 1)
+		f.st.upTCP.Add(1)
 		if full, terr := dnsExchangeTCP(up, query, f.timeout); terr == nil {
 			return full, nil
 		}
@@ -573,11 +573,11 @@ func (f *dnsForwarder) Percentiles() (p50, p95 float64) {
 
 func (f *dnsForwarder) Stats() dnsFwdStats {
 	return dnsFwdStats{
-		Queries: atomic.LoadInt64(&f.st.queries), Cached: atomic.LoadInt64(&f.st.cached),
-		Blocked: atomic.LoadInt64(&f.st.blocked), Errors: atomic.LoadInt64(&f.st.errors),
-		RateLimited: atomic.LoadInt64(&f.st.limited), Dropped: atomic.LoadInt64(&f.st.dropped),
-		Upstream: atomic.LoadInt64(&f.st.upstream), UpstreamErrs: atomic.LoadInt64(&f.st.upErrs),
-		UpstreamTCP: atomic.LoadInt64(&f.st.upTCP), ServFail: atomic.LoadInt64(&f.st.servfail),
+		Queries: f.st.queries.Load(), Cached: f.st.cached.Load(),
+		Blocked: f.st.blocked.Load(), Errors: f.st.errors.Load(),
+		RateLimited: f.st.limited.Load(), Dropped: f.st.dropped.Load(),
+		Upstream: f.st.upstream.Load(), UpstreamErrs: f.st.upErrs.Load(),
+		UpstreamTCP: f.st.upTCP.Load(), ServFail: f.st.servfail.Load(),
 	}
 }
 

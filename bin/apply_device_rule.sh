@@ -17,7 +17,7 @@
 #   - IP 从 devices.json 现读 (不信任 caller 传入)
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
-    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
 RULES="$HNC_DIR/data/rules.json"
@@ -69,27 +69,46 @@ now_ts() {
 get_ip() {
     local mac=$1
     [ -f "$DEVICES" ] || { echo ""; return; }
-    # 简单 grep + sed: 找 "<mac>": { ... "ip": "x.x.x.x" ... }
-    # devices.json 是单行 JSON, 找 mac 后 60 字符内的 "ip":"..."
     local _ip
-    _ip=$(awk -v m="$mac" '
+    _ip=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null | awk -v m="$mac" '
     BEGIN { found=0 }
     {
-        idx = index($0, "\"" m "\"")
-        if (idx > 0) {
-            tail = substr($0, idx)
-            if (match(tail, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
-                seg = substr(tail, RSTART, RLENGTH)
-                if (match(seg, /[0-9.]+/)) {
-                    print substr(seg, RSTART, RLENGTH)
-                    found=1
-                    exit
+        s = tolower($0)
+        needle = "\"" tolower(m) "\""
+        pos = 1
+        while ((off = index(substr(s, pos), needle)) > 0) {
+            idx = pos + off - 1
+            tail = substr(s, idx + length(needle))
+            if (match(tail, /^[[:space:]]*:[[:space:]]*\{/)) {
+                rest = substr(tail, RSTART + RLENGTH)
+                depth = 1; ins = 0; endpos = 0; n = length(rest)
+                for (i = 1; i <= n && depth > 0; i++) {
+                    c = substr(rest, i, 1)
+                    if (ins) {
+                        if (c == "\\") { i++; continue }
+                        if (c == "\"") ins = 0
+                    } else {
+                        if (c == "\"") ins = 1
+                        else if (c == "{") depth++
+                        else if (c == "}") { depth--; if (depth == 0) { endpos = i - 1; break } }
+                    }
                 }
+                blk = (endpos > 0) ? substr(rest, 1, endpos) : ""
+                if (match(blk, /"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"/)) {
+                    seg = substr(blk, RSTART, RLENGTH)
+                    if (match(seg, /[0-9.]+/)) {
+                        print substr(seg, RSTART, RLENGTH)
+                        found = 1
+                        exit
+                    }
+                }
+                exit
             }
+            pos = idx + length(needle)
         }
     }
     END { if (!found) print "" }
-    ' "$DEVICES")
+    ')
     # v5.8.8 (audit): 只回合法 IPv4,挡掉 1.2.3.4.5 这类畸形(awk 已限 [0-9.]、不可注入,
     # 这里再保证四段合法八位组),否则返回空,调用方按"无 IP"处理。
     if valid_ipv4 "$_ip"; then printf '%s\n' "$_ip"; else echo ""; fi
@@ -202,34 +221,32 @@ js_set_dev() {
 
 js_set_dev_flush() {
     [ -z "$JSET_BUF" ] && return 0
-    local args=""
     local SEP_REC="$(printf '\036')"
     local SEP_KV="$(printf '\037')"
-    local rec k v
+    local rec k v keys_csv=""
     local _buf="$JSET_BUF"
     JSET_BUF=""
+    set --
     while [ -n "$_buf" ]; do
         rec="${_buf%%${SEP_REC}*}"
         _buf="${_buf#*${SEP_REC}}"
         [ -z "$rec" ] && continue
         k="${rec%%${SEP_KV}*}"
         v="${rec#*${SEP_KV}}"
-        args="$args $k $v"
+        set -- "$@" "$k" "$v"
+        if [ -z "$keys_csv" ]; then keys_csv="$k"
+        else keys_csv="$keys_csv,$k"
+        fi
     done
+    [ $# -eq 0 ] && return 0
     local out rc
-    # shellcheck disable=SC2086
-    out=$(sh "$BATCH_HELPER" device "$MAC" $args 2>&1)
+    out=$(sh "$BATCH_HELPER" device "$MAC" "$@" 2>&1)
     rc=$?
     if [ $rc -ne 0 ]; then
-        log "WARN: js_set_dev_flush failed rc=$rc args=$args out=$out"
-        local kk
-        set -- $args
-        while [ $# -ge 2 ]; do
-            kk=$1; shift 2
-            if [ -z "$JSON_FAILED" ]; then JSON_FAILED="$kk"
-            else JSON_FAILED="$JSON_FAILED,$kk"
-            fi
-        done
+        log "WARN: js_set_dev_flush failed rc=$rc keys=$keys_csv out=$out"
+        if [ -z "$JSON_FAILED" ]; then JSON_FAILED="$keys_csv"
+        else JSON_FAILED="$JSON_FAILED,$keys_csv"
+        fi
         return 1
     fi
     return 0
@@ -245,6 +262,9 @@ valid_mac() {
 }
 valid_ipv4() {
     printf '%s' "$1" | grep -Eq '^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])$'
+}
+valid_nonneg_num() {
+    printf '%s' "$1" | grep -Eq '^[0-9]+(\.[0-9]+)?$'
 }
 
 # ── main ─────────────────────────────────────────────────────────
@@ -263,6 +283,9 @@ case "$CMD" in
         UP_MBPS=$2
         [ -z "$DN_MBPS" ] && DN_MBPS=0
         [ -z "$UP_MBPS" ] && UP_MBPS=0
+        if ! valid_nonneg_num "$DN_MBPS" || ! valid_nonneg_num "$UP_MBPS"; then
+            emit_err "invalid rate: down='$DN_MBPS' up='$UP_MBPS' (expected non-negative number)"
+        fi
         IP=$(get_ip "$MAC")
         if [ -z "$IP" ]; then
             emit_err "device not found in devices.json (mac=$MAC, 设备可能离线或还没被探到)"

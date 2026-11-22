@@ -51,11 +51,22 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	h.Set("X-Accel-Buffering", "no") // 防中间代理缓冲
 	w.WriteHeader(http.StatusOK)
 
+	ctx := r.Context()
+	if ctx.Err() != nil {
+		return
+	}
+
 	write := func(payload string) bool {
-		if _, err := io.WriteString(w, payload); err != nil {
+		if ctx.Err() != nil {
 			return false
 		}
-		return rc.Flush() == nil
+		_ = rc.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		_, err := io.WriteString(w, payload)
+		if err == nil {
+			err = rc.Flush()
+		}
+		_ = rc.SetWriteDeadline(time.Time{})
+		return err == nil
 	}
 	// 连上立即发一次,让 SPA 马上拉一遍最新状态。
 	if !write("event: changed\ndata: {\"reason\":\"connect\"}\n\n") {
@@ -74,7 +85,6 @@ func (s *server) apiEvents(w http.ResponseWriter, r *http.Request) {
 	defer poll.Stop()
 	hb := time.NewTicker(20 * time.Second)
 	defer hb.Stop()
-	ctx := r.Context()
 	simTick := 0
 	for {
 		select {

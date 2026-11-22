@@ -15,7 +15,7 @@
 #   5. 五锁统一协议: 修改内核 tc 队列树期间协调获取 run/tc_action.lock (支持 HNC_TC_LOCK_HELD 父子重入与超时防死锁)。
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
-    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
 RUN="$HNC_DIR/run"
@@ -44,7 +44,12 @@ command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
     hnc_dev_mark_hex() { printf '0x%08x\n' $(( 0x00800000 | ($1 << 16) )); }
 }
 command -v hnc_applim_mark_hex >/dev/null 2>&1 || {
-    hnc_applim_mark_hex() { printf '0x%08x\n' $(( ($1 & 63) << 26 )); }
+    hnc_applim_mark_hex() {
+        local _slot="${1:-0}"
+        case "$_slot" in ''|*[!0-9]*) return 1 ;; esac
+        [ "$_slot" -ge 1 ] && [ "$_slot" -le 63 ] || return 1
+        printf '0x%02x000000\n' $(( (_slot & 63) << 2 ))
+    }
 }
 
 DEV_MASK="${HNC_MARK_MASK:-0x00ff0000}"
@@ -58,7 +63,9 @@ CHAIN_DOWN=HNC_APP_LIMIT_DOWN
 CHAIN_QUIC=HNC_QUIC_APPLIM
 LEGACY_CHAIN=HNC_APP_LIMIT
 INNER_PRIO_APP=1
+INNER_PRIO_APP_V6=3
 INNER_PRIO_DEF=9
+INNER_PRIO_DEF_V6=10
 
 mkdir -p "$HNC_DIR/logs" "$RUN" 2>/dev/null
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
@@ -238,6 +245,23 @@ if ! al_lock; then
     exit 0
 fi
 
+_al_cleanup() {
+    al_tc_unlock
+    rm -f ${IPNAME_APP_FLAT:+"$IPNAME_APP_FLAT"} \
+          ${IPSTATS_FLAT:+"$IPSTATS_FLAT.tmp"} \
+          ${DEV_META_MAP:+"$DEV_META_MAP"} \
+          ${V4_HDR:+"$V4_HDR"} ${V4_RULES:+"$V4_RULES"} ${V4_BATCH:+"$V4_BATCH"} \
+          ${V6_HDR:+"$V6_HDR"} ${V6_RULES:+"$V6_RULES"} ${V6_BATCH:+"$V6_BATCH"} \
+          ${QUIC_V4_RULES:+"$QUIC_V4_RULES"} ${QUIC_V6_RULES:+"$QUIC_V6_RULES"} \
+          ${QUIC_V4_BATCH:+"$QUIC_V4_BATCH"} ${QUIC_V6_BATCH:+"$QUIC_V6_BATCH"} \
+          ${TREE_TMP:+"$TREE_TMP"} ${DEVS_TMP:+"$DEVS_TMP"} \
+          ${DIRTY:+"${DIRTY}.processing"} 2>/dev/null
+    al_unlock
+}
+trap '_al_cleanup' EXIT
+trap '_al_cleanup; trap - EXIT; exit 143' TERM
+trap '_al_cleanup; trap - EXIT; exit 130' INT
+
 HAD_DIRTY=0
 if [ -f "$DIRTY" ]; then
     mv -f "$DIRTY" "${DIRTY}.processing" 2>/dev/null && HAD_DIRTY=1
@@ -277,6 +301,18 @@ V6_NEIGH_SORTED=$(printf '%s\n' "$V6_NEIGH_RAW" | awk '
         for (i = 2; i < NF; i++) if ($i == "lladdr") print tolower($1), tolower($(i+1))
     }' | sort)
 
+_al_hash_stream() {
+    if command -v cksum >/dev/null 2>&1; then
+        cksum | awk 'NF>=2 && $1!="" {print $1 "-" $2}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk 'NF>=1 && $1!="" {print $1}'
+    elif command -v md5sum >/dev/null 2>&1; then
+        md5sum | awk 'NF>=1 && $1!="" {print $1}'
+    else
+        wc -c | awk 'NF>=1 && $1~/^[0-9]+$/ {print "wc-" $1}'
+    fi
+}
+
 compute_full_sig() {
     {
         printf 'iface=%s|v6=%s\n' "$IFACE" "$IPV6_OK"
@@ -286,7 +322,7 @@ compute_full_sig() {
         cat "$RULES" 2>/dev/null
         cat "$AQ_STATE_FILE" 2>/dev/null
         printf '%s\n' "$V6_NEIGH_SORTED"
-    } | cksum | awk '{print $1 "-" $2}'
+    } | _al_hash_stream
 }
 
 app_classes_alive() {
@@ -305,7 +341,7 @@ app_classes_alive() {
 if [ "$HAD_DIRTY" = 0 ] && [ -s "$LIMITS_FLAT" ] && [ -s "$IP_APP_FLAT" ] && [ -f "$FULL_SIG_FILE" ]; then
     CUR_FULL_SIG=$(compute_full_sig)
     OLD_FULL_SIG=$(cat "$FULL_SIG_FILE" 2>/dev/null)
-    if [ "$CUR_FULL_SIG" = "$OLD_FULL_SIG" ] \
+    if [ -n "$CUR_FULL_SIG" ] && [ "$CUR_FULL_SIG" = "$OLD_FULL_SIG" ] \
        && $IPT -t mangle -C FORWARD -j "$CHAIN_UP" 2>/dev/null \
        && $IPT -t mangle -C POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null \
        && $IPT -t filter -C FORWARD -j "$CHAIN_QUIC" 2>/dev/null \
@@ -553,13 +589,15 @@ reset_tc_app_limits() {
         done
     done
 
-    # 先按 AL_TREE_FILE 拆除各父设备 1:<cid> 下的 prio 1 (以及无 app_qos 时的 prio 9) 过滤器和子类
+    # 先按 AL_TREE_FILE 拆除各父设备 1:<cid> 下的 prio 1/3 (以及无 app_qos 时的 prio 9/10) 过滤器和子类
     if [ -f "$AL_TREE_FILE" ]; then
         awk '$1=="DEV"{print $2, $3}' "$AL_TREE_FILE" 2>/dev/null | while read -r d_if d_cid; do
             [ -n "$d_if" ] && [ -n "$d_cid" ] || continue
             tc filter del dev "$d_if" parent "1:$d_cid" prio "$INNER_PRIO_APP" 2>/dev/null || true
+            tc filter del dev "$d_if" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_APP_V6" 2>/dev/null || true
             if ! has_app_qos_on_dev "$d_if" "$d_cid"; then
                 tc filter del dev "$d_if" parent "1:$d_cid" prio "$INNER_PRIO_DEF" 2>/dev/null || true
+                tc filter del dev "$d_if" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_DEF_V6" 2>/dev/null || true
             fi
         done
         awk '$1=="APP" || $1=="DEF"{print $2, $4}' "$AL_TREE_FILE" 2>/dev/null | while read -r d_if sub_cid; do
@@ -584,8 +622,10 @@ reset_tc_app_limits() {
             if [ -n "$par" ] && [ "$par" != "1:1" ] && [ "$par" != "root" ]; then
                 _pcid=${par#1:}
                 tc filter del dev "$IFACE" parent "$par" prio "$INNER_PRIO_APP" 2>/dev/null || true
+                tc filter del dev "$IFACE" parent "$par" protocol ipv6 prio "$INNER_PRIO_APP_V6" 2>/dev/null || true
                 if ! has_app_qos_on_dev "$IFACE" "$_pcid"; then
                     tc filter del dev "$IFACE" parent "$par" prio "$INNER_PRIO_DEF" 2>/dev/null || true
+                    tc filter del dev "$IFACE" parent "$par" protocol ipv6 prio "$INNER_PRIO_DEF_V6" 2>/dev/null || true
                 fi
                 _pmid=""
                 if [ "$_pcid" = "100" ]; then
@@ -670,11 +710,11 @@ if [ -z "$HNC_TEST_MODE" ] && ! tc qdisc show dev "$IFACE" 2>/dev/null | grep -q
     [ -x "$TCM" ] && HNC_SKIP_TC_SNAPSHOT=1 sh "$TCM" init "$IFACE" >/dev/null 2>&1 || true
 fi
 
-DEV_MAC_IP_MAP=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null | grep -oE '"[0-9A-Fa-f:]{17}"[[:space:]]*:[[:space:]]*\{[^}]*\}' | \
-    sed -n 's/^"\([0-9A-Fa-f:]*\)".*"ip"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\L\1 \2/p' 2>/dev/null)
-if [ -z "$DEV_MAC_IP_MAP" ] && [ -f "$DEVICES" ]; then
-    DEV_MAC_IP_MAP=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null | tr 'A-Z' 'a-z' | grep -oE '"[0-9a-f:]{17}"[[:space:]]*:[[:space:]]*\{[^}]*\}' | \
-        sed -n 's/^"\([0-9a-f:]*\)".*"ip"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1 \2/p')
+DEV_MAC_IP_MAP=""
+if [ -f "$DEVICES" ]; then
+    DEV_MAC_IP_MAP=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null | tr 'A-Z' 'a-z' \
+        | grep -oE '"[0-9a-f:]{17}"[[:space:]]*:[[:space:]]*\{[^}]*\}' \
+        | sed -n 's/^"\([0-9a-f:]*\)".*"ip"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1 \2/p')
 fi
 
 resolve_mac_ip() {
@@ -754,7 +794,6 @@ tr -d '\n' < "$RULES" 2>/dev/null | \
 : > "$V6_HDR"; : > "$V6_RULES"
 : > "$QUIC_V4_RULES"; : > "$QUIC_V6_RULES"
 : > "$TREE_TMP"; : > "$DEVS_TMP"
-trap 'al_tc_unlock; rm -f "$IPNAME_APP_FLAT" "$IPSTATS_FLAT.tmp" "$DEV_META_MAP" "$V4_HDR" "$V4_RULES" "$V4_BATCH" "$V6_HDR" "$V6_RULES" "$V6_BATCH" "$QUIC_V4_RULES" "$QUIC_V6_RULES" "$QUIC_V4_BATCH" "$QUIC_V6_BATCH" "$TREE_TMP" "$DEVS_TMP" "${DIRTY}.processing" 2>/dev/null; al_unlock' EXIT INT TERM
 
 split_app_ips() {
     awk -v want="$1" -v inc="$INCLUDE_SHARED" '
@@ -875,6 +914,7 @@ $mid"
         tc qdisc del dev "$IFACE" parent "1:$dev_cid" 2>/dev/null || true
     fi
     tc filter del dev "$IFACE" parent "1:$dev_cid" prio "$INNER_PRIO_APP" 2>/dev/null || true
+    tc filter del dev "$IFACE" parent "1:$dev_cid" protocol ipv6 prio "$INNER_PRIO_APP_V6" 2>/dev/null || true
 
     init_batch_top
     local cslot=$next_client_idx
@@ -928,7 +968,7 @@ add_inner_app_fw() {
     tc filter add dev "$IFACE" parent "1:$dev_cid" protocol ip prio "$INNER_PRIO_APP" \
         handle "${app_mark}/${APPLIM_MASK}" fw flowid "$app_cls" 2>/dev/null || return 1
     if [ "$IPV6_OK" = 1 ]; then
-        tc filter add dev "$IFACE" parent "1:$dev_cid" protocol ipv6 prio "$INNER_PRIO_APP" \
+        tc filter add dev "$IFACE" parent "1:$dev_cid" protocol ipv6 prio "$INNER_PRIO_APP_V6" \
             handle "${app_mark}/${APPLIM_MASK}" fw flowid "$app_cls" 2>/dev/null || return 1
     fi
     return 0
@@ -939,6 +979,7 @@ rollback_app_tc() {
     tc filter del dev "$IFACE" parent "1:$dev_cid" protocol all prio "$INNER_PRIO_APP" handle "${app_mark}/${APPLIM_MASK}" fw 2>/dev/null || true
     tc filter del dev "$IFACE" parent "1:$dev_cid" protocol ip prio "$INNER_PRIO_APP" handle "${app_mark}/${APPLIM_MASK}" fw 2>/dev/null || true
     tc filter del dev "$IFACE" parent "1:$dev_cid" protocol ipv6 prio "$INNER_PRIO_APP" handle "${app_mark}/${APPLIM_MASK}" fw 2>/dev/null || true
+    tc filter del dev "$IFACE" parent "1:$dev_cid" protocol ipv6 prio "$INNER_PRIO_APP_V6" handle "${app_mark}/${APPLIM_MASK}" fw 2>/dev/null || true
     tc class del dev "$IFACE" classid "$app_cls" 2>/dev/null || true
 }
 
@@ -1097,9 +1138,10 @@ if [ "$applied" -gt 0 ] && [ -s "$DEV_META_MAP" ]; then
         tc qdisc replace dev "$IFACE" parent "1:$def_hex" handle "${def_hex}:" fq_codel 2>/dev/null \
             || tc qdisc replace dev "$IFACE" parent "1:$def_hex" handle "${def_hex}:" pfifo 2>/dev/null || true
         tc filter del dev "$IFACE" parent "1:$d_cid" prio "$INNER_PRIO_DEF" 2>/dev/null || true
+        tc filter del dev "$IFACE" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_DEF_V6" 2>/dev/null || true
         if ! tc filter add dev "$IFACE" parent "1:$d_cid" protocol all prio "$INNER_PRIO_DEF" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null; then
             tc filter add dev "$IFACE" parent "1:$d_cid" protocol ip prio "$INNER_PRIO_DEF" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
-            [ "$IPV6_OK" = 1 ] && tc filter add dev "$IFACE" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_DEF" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
+            [ "$IPV6_OK" = 1 ] && tc filter add dev "$IFACE" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_DEF_V6" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
         fi
         echo "DEF $IFACE 1:$d_cid 1:$def_hex" >> "$TREE_TMP"
     done < "$DEV_META_MAP"
@@ -1177,7 +1219,12 @@ else
 fi
 
 if [ "$had_err" = 0 ]; then
-    compute_full_sig > "$FULL_SIG_FILE" 2>/dev/null
+    _new_full_sig=$(compute_full_sig)
+    if [ -n "$_new_full_sig" ]; then
+        printf '%s\n' "$_new_full_sig" > "$FULL_SIG_FILE" 2>/dev/null
+    else
+        rm -f "$FULL_SIG_FILE" 2>/dev/null
+    fi
 else
     rm -f "$FULL_SIG_FILE" 2>/dev/null
 fi

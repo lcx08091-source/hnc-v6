@@ -61,6 +61,10 @@ if [ -z "$TARGET_DATE" ]; then
     log "ERROR: cannot compute yesterday date (no date -d, no awk strftime)"
     exit 1
 fi
+if ! printf '%s' "$TARGET_DATE" | grep -Eq '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'; then
+    log "ERROR: invalid TARGET_DATE '$TARGET_DATE' (expected YYYY-MM-DD)"
+    exit 1
+fi
 
 # v4.0 Patch 1.6: raw 缺失时只跳过 stats 聚合,logs 备份仍要跑
 # (装机前几天没 raw,但 logs 照样每日备份)
@@ -203,13 +207,23 @@ log "aggregated $agg_count device-days for $TARGET_DATE"
 # ═══════════════════════════════════════════════════════════════
 if [ -s "$AGG_TMP" ]; then
     if [ -f "$DAILY_FILE" ]; then
-        # 过滤掉已有的 target_date 记录,再追加新的
+        # 过滤掉已有的 target_date 记录,再追加新的(rc=0 有保留行, rc=1 全过滤; rc>=2 为异常, 绝不覆盖)
         FILTER_TMP="${DAILY_FILE}.filter.$$"
-        grep -v "\"date\":\"$TARGET_DATE\"" "$DAILY_FILE" > "$FILTER_TMP" 2>/dev/null || : > "$FILTER_TMP"
-        cat "$AGG_TMP" >> "$FILTER_TMP"
-        mv "$FILTER_TMP" "$DAILY_FILE"
+        grep -Fv "\"date\":\"$TARGET_DATE\"" "$DAILY_FILE" > "$FILTER_TMP" 2>/dev/null
+        _grc=$?
+        if [ "$_grc" -le 1 ] && cat "$AGG_TMP" >> "$FILTER_TMP" 2>/dev/null; then
+            mv -f "$FILTER_TMP" "$DAILY_FILE"
+        else
+            log "ERROR: failed to update $DAILY_FILE (grep_rc=$_grc), keeping existing file"
+            rm -f "$FILTER_TMP" 2>/dev/null || true
+        fi
     else
-        cp "$AGG_TMP" "$DAILY_FILE"
+        FILTER_TMP="${DAILY_FILE}.new.$$"
+        if cp "$AGG_TMP" "$FILTER_TMP" 2>/dev/null; then
+            mv -f "$FILTER_TMP" "$DAILY_FILE"
+        else
+            rm -f "$FILTER_TMP" 2>/dev/null || true
+        fi
     fi
 fi
 rm -f "$AGG_TMP" "$MAC_NAMES_TMP"

@@ -352,7 +352,7 @@ function paintDpi() {
     stRow('健康度', esc(health), ok ? 'ok' : 'warn') + stRow('规则库', esc(st.l3_rule_version || '—') + (st.dfp_enabled ? ' · DFP' : ''), '') +
     stRow('识别覆盖', ur && ur.total_bytes ? Math.round((1 - num(ur.ratio)) * 100) + '%' : '—', '', ur && ur.total_bytes ? '已识别 ' + bytes(ur.identified_bytes) + ' / ' + bytes(ur.total_bytes) : '按字节') +
     stRow('去重域名', num(st.unique_sni) + ' SNI · ' + num(st.unique_hostnames) + ' 主机名 · ' + num(st.unique_ja4) + ' 种指纹', '') +
-    (st.evidence_summary && st.evidence_summary.total ? stRow('识别依据统计', num(st.evidence_summary.total) + ' 条', '', Object.keys(st.evidence_summary.by_source || {}).map(function (k) { var zh = { sni: 'TLS域名', dns: 'DNS解析', cname: 'CNAME链', quic: 'QUIC握手', ja4: '协议指纹', fp: '学习指纹', burst: '并发关联', proto: '流量形态', ip: '已知IP' }[k] || k; return zh + ' ' + st.evidence_summary.by_source[k]; }).join(' · ')) : '') +
+    (st.evidence_summary && st.evidence_summary.total ? stRow('识别依据统计', num(st.evidence_summary.total) + ' 条', '', Object.keys(st.evidence_summary.by_source || {}).map(function (k) { var zh = { sni: 'TLS域名', dns: 'DNS解析', cname: 'CNAME链', quic: 'QUIC握手', ja4: '协议指纹', fp: '学习指纹', burst: '并发关联', proto: '流量形态', ip: '已知IP' }[k] || k; return esc(zh) + ' ' + esc(st.evidence_summary.by_source[k]); }).join(' · ')) : '') +
     stRow('重新绑定', num(st.rebind_count) + ' 次', '', '<button class="linkish" data-act="dpi-rebind">立即重新绑定</button>') +
     (p ? stRow('进程健康', esc(p.status || '—'), /ok|healthy/i.test(p.status) ? 'ok' : 'warn', p.counts ? 'dpid ' + num(p.counts.hnc_dpid) + ' · httpd ' + num(p.counts.hnc_httpd) + ' · hotspotd ' + num(p.counts.hotspotd) + ' · watchdog ' + num(p.counts.watchdog_main) + ' · launcher ' + num(p.counts.dpid_guard_main) : esc(p.detail || '')) : '');
   // 五层抓包与流量感知矩阵探测
@@ -555,7 +555,7 @@ function discDetailHtml(g) {
   h += '<div style="text-align:center;margin-bottom:6px"><div style="font-size:19px;font-weight:800">' + esc(sg.name || gs.name || g.id) + '</div><div class="tags" style="display:flex;gap:4px;justify-content:center;flex-wrap:wrap;margin-top:6px">' + discTags(g) + '</div></div>';
   // v5.28 B2: 综合建议(每个来源一条人话依据; 分歧时提醒人工确认)
   if (sg.sources && sg.sources.length) {
-    h += '<div class="dsec">综合建议 · ' + (GCONF[sg.conf] || '建议') + '</div><div class="dbox">' + sg.sources.map(function (x) { return kv(SGSRC[x.src] || x.src, esc(x.name) + (x.basis ? '<div class="note" style="font-weight:500">' + esc(x.basis) + '</div>' : '')); }).join('') + (sg.conflict ? '<div class="note warn">两个来源给出的名字不一样，已取更可信的那个，请人工确认</div>' : '') + '</div>';
+    h += '<div class="dsec">综合建议 · ' + esc(GCONF[sg.conf] || '建议') + '</div><div class="dbox">' + sg.sources.map(function (x) { return kv(esc(SGSRC[x.src] || x.src), esc(x.name) + (x.basis ? '<div class="note" style="font-weight:500">' + esc(x.basis) + '</div>' : '')); }).join('') + (sg.conflict ? '<div class="note warn">两个来源给出的名字不一样，已取更可信的那个，请人工确认</div>' : '') + '</div>';
   }
   h += '<div class="dsec">判断依据</div>';
   // 本机安装包

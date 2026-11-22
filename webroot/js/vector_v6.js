@@ -664,16 +664,20 @@ function v6ApplyBlackboxData(r) {
 
 function v6ApplyMultiIfaceData(r) {
   if (!r || typeof r !== 'object') return;
-  if (r.primary_downstream != null) V6.multiIface.primary_downstream = String(r.primary_downstream || '');
-  if (Array.isArray(r.shape_targets)) V6.multiIface.shape_targets = r.shape_targets.map(String);
-  if (typeof r.dual_band_or_mlo === 'boolean') V6.multiIface.dual_band_or_mlo = r.dual_band_or_mlo;
-  if (typeof r.usb_tether_active === 'boolean') V6.multiIface.usb_tether_active = r.usb_tether_active;
-  if (r.lan_fastlane_class != null) V6.multiIface.lan_fastlane_class = String(r.lan_fastlane_class);
-  if (r.lan_fastlane_gbps != null) V6.multiIface.lan_fastlane_gbps = num(r.lan_fastlane_gbps, 2.5);
-  var tg = r.tun0_guard && typeof r.tun0_guard === 'object' ? r.tun0_guard : r;
-  if (typeof tg.vpn_active === 'boolean') V6.multiIface.tun0_vpn_active = tg.vpn_active;
-  if (typeof tg.loop_risk_detected === 'boolean') V6.multiIface.tun0_loop_risk = tg.loop_risk_detected;
-  if (typeof tg.low16_mark_safe === 'boolean') V6.multiIface.low16_mark_safe = tg.low16_mark_safe;
+  var src = (r.snapshot && typeof r.snapshot === 'object') ? r.snapshot : r;
+  if (src.primary_downstream != null) V6.multiIface.primary_downstream = String(src.primary_downstream || '');
+  if (Array.isArray(src.shape_targets)) V6.multiIface.shape_targets = src.shape_targets.map(String);
+  if (typeof src.dual_band_or_mlo === 'boolean') V6.multiIface.dual_band_or_mlo = src.dual_band_or_mlo;
+  if (typeof src.usb_tether_active === 'boolean') V6.multiIface.usb_tether_active = src.usb_tether_active;
+  if (src.lan_fastlane_class != null) V6.multiIface.lan_fastlane_class = String(src.lan_fastlane_class);
+  if (src.lan_fastlane_gbps != null) V6.multiIface.lan_fastlane_gbps = num(src.lan_fastlane_gbps, 2.5);
+  var tg = (src.tun0_guard && typeof src.tun0_guard === 'object') ? src.tun0_guard : ((r.tun0_guard && typeof r.tun0_guard === 'object') ? r.tun0_guard : src);
+  var vpnActive = typeof tg.vpn_active === 'boolean' ? tg.vpn_active : (typeof src.tun0_vpn_active === 'boolean' ? src.tun0_vpn_active : (typeof r.tun0_vpn_active === 'boolean' ? r.tun0_vpn_active : null));
+  if (vpnActive !== null) V6.multiIface.tun0_vpn_active = vpnActive;
+  var loopRisk = typeof tg.loop_risk_detected === 'boolean' ? tg.loop_risk_detected : (typeof src.tun0_loop_risk === 'boolean' ? src.tun0_loop_risk : (typeof r.tun0_loop_risk === 'boolean' ? r.tun0_loop_risk : null));
+  if (loopRisk !== null) V6.multiIface.tun0_loop_risk = loopRisk;
+  var low16Safe = typeof tg.low16_mark_safe === 'boolean' ? tg.low16_mark_safe : (typeof src.low16_mark_safe === 'boolean' ? src.low16_mark_safe : null);
+  if (low16Safe !== null) V6.multiIface.low16_mark_safe = low16Safe;
 }
 
 function v6ApplyScreenshotPackSummary(pk) {
@@ -806,11 +810,13 @@ function v6StartLeakGuardSSE() {
 
 function v6StopLeakGuardSSE() {
   clearTimeout(V6.sseRetryT);
+  V6.sseRetryT = 0;
   if (V6.sse) {
     try { V6.sse.close(); } catch (_) {}
     V6.sse = null;
   }
   V6.lg.sseActive = false;
+  V6.lg.sseFailed = false;
 }
 
 /* ── 顶栏、底栏与跨页面徽章渲染（含已读水位消点逻辑） ── */
@@ -974,39 +980,29 @@ window.v6DeviceEscortStripHtml = function (d) {
 function v6RenderLatencyCompareHtml() {
   var ar = (typeof S !== 'undefined' && S.autorate) ? S.autorate : {};
   var ex = V6.express || {};
-  var baseRtt = Math.max(12, Math.min(90, Math.round(num(ar.base_rtt_ms, 24))));
-  var curRtt = Math.max(baseRtt, Math.min(180, Math.round(num(ar.rtt_ms, baseRtt + 5))));
-  var unguardedPeak = Math.max(curRtt + 68, Math.round(baseRtt * 4.6));
-  var savedPct = Math.max(45, Math.min(88, Math.round((1 - curRtt / unguardedPeak) * 100)));
-  var ugPts = [0.22, 0.26, 0.58, 0.86, 0.96, 0.78, 0.92, 0.84, 0.64, 0.89, 0.95, 0.72, 0.55, 0.68];
-  var esPts = [0.18, 0.19, 0.24, 0.27, 0.25, 0.22, 0.24, 0.23, 0.20, 0.25, 0.24, 0.21, 0.19, 0.20];
-  var W = 320, H = 68, padY = 8;
-  var toPath = function (arr) {
-    return arr.map(function (v, i) {
-      var x = (i / (arr.length - 1) * W).toFixed(1);
-      var y = (H - padY - v * (H - padY * 2)).toFixed(1);
-      return (i === 0 ? 'M' : 'L') + x + ',' + y;
-    }).join(' ');
-  };
-  var esPath = toPath(esPts);
-  var ugPath = toPath(ugPts);
-  return '<div class="v6-lat-cmp">' +
-    '<div class="v6-lat-top">' +
-      '<div><b>拥塞排队延迟压制对比</b><small>满载下载并发时 · 基线 ' + baseRtt + 'ms / 当前实测 ' + curRtt + 'ms</small></div>' +
-      '<span class="badge ' + (ex.enabled ? 'b-ok' : 'b-gray') + '">' + (ex.enabled ? ('延迟削峰 -' + savedPct + '%') : '护航未开启') + '</span>' +
-    '</div>' +
-    '<svg class="v6-lat-svg" viewBox="0 0 ' + W + ' ' + H + '" preserveAspectRatio="none" aria-hidden="true">' +
-      '<defs><linearGradient id="v6LatFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="var(--green)" stop-opacity="0.26"/><stop offset="100%" stop-color="var(--green)" stop-opacity="0"/></linearGradient></defs>' +
-      '<line x1="0" y1="' + (H - 14) + '" x2="' + W + '" y2="' + (H - 14) + '" stroke="var(--divider)" stroke-dasharray="3 3" stroke-width="1"/>' +
-      '<path d="' + ugPath + '" fill="none" stroke="var(--orange)" stroke-width="1.6" stroke-dasharray="4 3" opacity="0.78"/>' +
-      '<path d="' + esPath + ' L' + W + ',' + H + ' L0,' + H + ' Z" fill="url(#v6LatFill)"/>' +
-      '<path d="' + esPath + '" fill="none" stroke="var(--green)" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>' +
-    '</svg>' +
-    '<div class="v6-lat-leg">' +
-      '<span><i class="ug"></i>未护航排队尖峰（~' + unguardedPeak + 'ms）</span>' +
-      '<span><i class="es"></i>HNC 优先护航实测（' + curRtt + 'ms）</span>' +
-    '</div>' +
-  '</div>';
+  var bb = V6.blackbox || {};
+  var baseRtt = num(ar.base_rtt_ms, 0);
+  var curRtt = num(ar.rtt_ms, 0);
+  var hasRealRtt = baseRtt > 0 && curRtt > 0;
+  var jitterMs = num(bb.latest_jitter_ms, 0);
+  var incCnt = Math.round(num(bb.incident_count, 0));
+
+  if (!hasRealRtt && !(jitterMs > 0) && !(incCnt > 0)) {
+    return '<div class="v6-calm-empty"><span class="v6-dot ' + (ex.enabled ? 'ok' : 'idle') + '"></span><span>当前网络通畅，暂无拥塞波动' + (ex.enabled ? '（优先护航持续待命中）' : '（开启优先护航后将在检测到拥塞时自动插队保护）') + '</span></div>';
+  }
+  if (hasRealRtt) {
+    var delta = Math.max(0, Math.round(curRtt - baseRtt));
+    var congested = delta >= 25;
+    var badgeCls = congested ? 'b-warn' : 'b-ok';
+    var badgeTxt = congested ? ('排队增量 +' + delta + 'ms') : (ex.enabled ? '延迟平稳' : '当前平稳');
+    return '<div class="v6-lat-cmp">' +
+      '<div class="v6-lat-top">' +
+        '<div><b>实时延迟与拥塞观测</b><small>实测基线 ' + Math.round(baseRtt) + 'ms · 当前 ' + Math.round(curRtt) + 'ms' + (jitterMs > 0 ? (' · 抖动 ' + jitterMs.toFixed(1) + 'ms') : '') + '</small></div>' +
+        '<span class="badge ' + badgeCls + '">' + badgeTxt + '</span>' +
+      '</div>' +
+    '</div>';
+  }
+  return '<div class="v6-calm-empty"><span class="v6-dot ' + (incCnt > 0 ? 'warn' : 'ok') + '"></span><span>' + (incCnt > 0 ? ('黑匣子已记录 ' + incCnt + ' 次近期延迟波动' + (jitterMs > 0 ? (' · 最新抖动 ' + jitterMs.toFixed(1) + 'ms') : '')) : ('最新采样抖动 ' + jitterMs.toFixed(1) + 'ms · 当前网络整体平稳')) + '</span></div>';
 }
 
 function v6HeroHeadlineInfo() {
@@ -1841,7 +1837,19 @@ function openScalpelDrawer(mac, ip, devName) {
   } catch (_) {}
 
   v6FetchScalpelFlows();
-  clearInterval(V6.scalpel.timer);
+  v6StartScalpelTimer();
+}
+
+function v6StopScalpelTimer() {
+  if (V6.scalpel.timer) {
+    clearInterval(V6.scalpel.timer);
+    V6.scalpel.timer = 0;
+  }
+}
+
+function v6StartScalpelTimer() {
+  v6StopScalpelTimer();
+  if (!V6.scalpel.open || document.hidden) return;
   V6.scalpel.timer = setInterval(function () {
     if (!V6.scalpel.open || V6.scalpel.paused || document.hidden) return;
     v6FetchScalpelFlows();
@@ -2074,7 +2082,7 @@ function v6PostThermo(payload, el, msg) {
 
 /* 备份文件导出（同时兼容普通浏览器下载与 Android KSU WebView 落盘 /sdcard/Download） */
 function v6ExportBackupBundle(actEl) {
-  busyWhile(actEl, api.get(V6_API.backup, null, { timeout: 10000 })).then(function (bundle) {
+  busyWhile(actEl, api.get(V6_API.backup, null, { timeout: 10000 }).then(function (bundle) {
     if (!bundle || typeof bundle !== 'object') { toast('导出数据为空', 'err'); return; }
     V6.vault.last_sha256 = String(bundle.sha256 || '');
     V6.vault.last_file_count = Math.round(num(bundle.file_count, 0));
@@ -2084,13 +2092,14 @@ function v6ExportBackupBundle(actEl) {
     if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function') {
       var outPath = '/sdcard/Download/' + fname;
       var b64 = btoa(unescape(encodeURIComponent(jsonStr)));
-      shell("mkdir -p /sdcard/Download && printf '%s' " + sq(b64) + " | base64 -d > " + sq(outPath)).then(function (res) {
-        if (res && res.code === 0) toast('已保存到手机下载目录：' + fname);
-        else if (typeof copyText === 'function') {
-          copyText(jsonStr).then(function (ok) { toast(ok ? '备份内容已复制到剪贴板' : '保存失败', ok ? 'ok' : 'err'); });
+      return shell("mkdir -p /sdcard/Download && printf '%s' " + sq(b64) + " | base64 -d > " + sq(outPath)).then(function () {
+        toast('已保存到手机下载目录：' + fname);
+      }).catch(function () {
+        if (typeof copyText === 'function') {
+          return copyText(jsonStr).then(function (ok) { toast(ok ? '写入下载目录失败，已复制备份内容到剪贴板' : '保存失败', ok ? 'warn' : 'err'); });
         }
+        toast('保存失败', 'err');
       });
-      return;
     }
     try {
       var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
@@ -2109,7 +2118,7 @@ function v6ExportBackupBundle(actEl) {
         toast('配置备份已复制到剪贴板');
       }
     }
-  }).catch(function (e) { toast(errText(e), 'err'); });
+  })).catch(function (e) { toast(errText(e), 'err'); });
 }
 
 /* ═════════════════════ 全局事件委托与生命周期钩子 ═════════════════════ */
@@ -2118,10 +2127,10 @@ function v6BindEvents() {
   document.__v6Bound = true;
 
   var scScrim = document.getElementById('v6-scalpel-scrim');
-  if (scScrim) scScrim.addEventListener('click', closeScalpelDrawer);
+  if (scScrim) scScrim.addEventListener('click', function () { closeScalpelDrawer(false); });
 
   document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && V6.scalpel.open) closeScalpelDrawer();
+    if (e.key === 'Escape' && V6.scalpel.open) closeScalpelDrawer(false);
   });
 
   /* 记录 <details class="v6-adv-fold"> 展开态，保证后台轮询 morph 时不会自动合上用户展开的高级设置 */
@@ -2485,7 +2494,12 @@ function v6BindEvents() {
         break;
       case 'subtrees-sync':
         busyWhile(actEl, api.post(V6_API.nativeSubtrees, { action: 'full_restore' }, { timeout: 8000 })).then(function (r) {
-          if (r && r.dynamic_qos) {
+          var dqos = r && (r.dynamic_qos || (r.report && r.report.qos_ratios));
+          if (dqos && typeof dqos === 'object') {
+            var nsObj = Object.assign({}, r, { dynamic_qos: dqos });
+            if (nsObj.full_restores == null && r.report && r.report.full_restores != null) nsObj.full_restores = r.report.full_restores;
+            v6ApplyScreenshotPackSummary({ native_subtrees: nsObj });
+          } else if (r && r.full_restores != null) {
             v6ApplyScreenshotPackSummary({ native_subtrees: r });
           }
           v6RefreshActiveSubviewDom();
@@ -2537,9 +2551,14 @@ function v6OnPollTick(tickN) {
 function v6OnVisibility(hidden) {
   if (hidden) {
     v6StopLeakGuardSSE();
+    v6StopScalpelTimer();
   } else {
     if (!KSU && V6.apiSupported.lg) v6StartLeakGuardSSE();
     if (S.page === 'vector') { v6LoadLeakGuard(); v6LoadCockpitAll(); }
+    if (V6.scalpel.open) {
+      if (!V6.scalpel.paused) v6FetchScalpelFlows();
+      v6StartScalpelTimer();
+    }
   }
 }
 

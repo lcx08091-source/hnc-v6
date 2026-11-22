@@ -19,9 +19,10 @@
 /* v5.9.0: hnc_run_cmd_timeout 依赖 */
 #include <errno.h>
 #include <fcntl.h>
+#include <limits.h>
+#include <poll.h>
 #include <signal.h>
 #include <unistd.h>
-#include <sys/select.h>
 #include <sys/time.h>
 #include <sys/wait.h>
 
@@ -102,6 +103,18 @@ static int64_t hnc_mono_us(void) {
     return (int64_t)tv.tv_sec * 1000000LL + (int64_t)tv.tv_usec;
 }
 
+static int hnc_dup2_nocloexec(int fd, int target) {
+    if (fd == target) {
+        int fl = fcntl(target, F_GETFD);
+        if (fl < 0) return -1;
+        if (fl & FD_CLOEXEC) {
+            if (fcntl(target, F_SETFD, fl & ~FD_CLOEXEC) < 0) return -1;
+        }
+        return target;
+    }
+    return dup2(fd, target);
+}
+
 int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_ms) {
     if (argv == NULL || argv[0] == NULL || buf == NULL || cap < 2 || timeout_ms <= 0)
         return -1;
@@ -127,19 +140,19 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
         sigaction(SIGPIPE, &sa_dfl, NULL);
 
         close(pipefd[0]);
-        if (dup2(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
+        if (hnc_dup2_nocloexec(pipefd[1], STDOUT_FILENO) < 0) _exit(127);
         if (pipefd[1] != STDOUT_FILENO)
             close(pipefd[1]);
 
         int devnull_in = open("/dev/null", O_RDONLY | O_CLOEXEC);
         if (devnull_in >= 0) {
-            dup2(devnull_in, STDIN_FILENO);
-            if (devnull_in > STDERR_FILENO) close(devnull_in);
+            (void)hnc_dup2_nocloexec(devnull_in, STDIN_FILENO);
+            if (devnull_in != STDIN_FILENO) close(devnull_in);
         }
         int devnull_err = open("/dev/null", O_WRONLY | O_CLOEXEC);
         if (devnull_err >= 0) {
-            dup2(devnull_err, STDERR_FILENO);
-            if (devnull_err > STDERR_FILENO) close(devnull_err);
+            (void)hnc_dup2_nocloexec(devnull_err, STDERR_FILENO);
+            if (devnull_err != STDERR_FILENO) close(devnull_err);
         }
         execvp(argv[0], argv);
         _exit(127);
@@ -163,14 +176,16 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
             break;
         }
 
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(pipefd[0], &rfds);
-        struct timeval tv = {
-            .tv_sec  = (time_t)(remain_us / 1000000LL),
-            .tv_usec = (suseconds_t)(remain_us % 1000000LL),
+        int64_t remain_ms = (remain_us + 999LL) / 1000LL;
+        if (remain_ms < 1) remain_ms = 1;
+        if (remain_ms > INT_MAX) remain_ms = INT_MAX;
+
+        struct pollfd pfd = {
+            .fd      = pipefd[0],
+            .events  = POLLIN,
+            .revents = 0,
         };
-        int ret = select(pipefd[0] + 1, &rfds, NULL, NULL, &tv);
+        int ret = poll(&pfd, 1, (int)remain_ms);
         if (ret < 0) {
             if (errno == EINTR) continue;
             break;
@@ -178,6 +193,9 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
         if (ret == 0) {
             kill(pid, SIGKILL);
             killed = 1;
+            break;
+        }
+        if (pfd.revents & POLLNVAL) {
             break;
         }
 

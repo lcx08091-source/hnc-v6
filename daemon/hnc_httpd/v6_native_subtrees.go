@@ -1108,12 +1108,14 @@ func (s *server) apiV6NativeSubtreesPost(w http.ResponseWriter, r *http.Request)
 	}
 	switch strings.TrimSpace(req.Action) {
 	case "full_restore", "":
+		s.actionMu.Lock()
 		rep, err := s.NativeFullRestoreV6()
+		s.actionMu.Unlock()
 		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error(), "report": rep})
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": err.Error(), "report": rep, "dynamic_qos": rep.QoSRatios})
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "report": rep})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "report": rep, "dynamic_qos": rep.QoSRatios})
 	case "tune_qos":
 		ratios, changed := globalV6Subtrees.SmoothStepDynamicQoS(req.JitterMs, req.DeltaRTTMs)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "changed": changed, "qos_ratios": ratios})

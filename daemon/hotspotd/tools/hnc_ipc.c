@@ -121,18 +121,27 @@ int main(int argc, char **argv)
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
     /* connect — validate env override to prevent attacker-controlled socket paths */
+    struct sockaddr_un sa;
+    memset(&sa, 0, sizeof(sa));
+    sa.sun_family = AF_UNIX;
+
     const char *sock_path = getenv("HNC_SOCK");
-    if (sock_path && *sock_path && strncmp(sock_path, "/data/", 6) == 0) {
-        /* env override accepted: must be under /data/ */
+    if (sock_path && *sock_path &&
+        strncmp(sock_path, "/data/", 6) == 0 &&
+        strstr(sock_path, "..") == NULL &&
+        strlen(sock_path) < sizeof(sa.sun_path)) {
+        /* env override accepted: must be under /data/, no "..", fits in sun_path */
     } else {
         sock_path = DEFAULT_SOCK_PATH;
     }
 
-    struct sockaddr_un sa;
-    memset(&sa, 0, sizeof(sa));
-    sa.sun_family = AF_UNIX;
-    /* sun_path 标准 108 bytes, 防截断 */
-    strncpy(sa.sun_path, sock_path, sizeof(sa.sun_path) - 1);
+    /* sun_path 标准 108 bytes, snprintf 替代 strncpy 消除截断告警 */
+    int pn = snprintf(sa.sun_path, sizeof(sa.sun_path), "%s", sock_path);
+    if (pn < 0 || (size_t)pn >= sizeof(sa.sun_path)) {
+        fprintf(stderr, "hnc_ipc: socket path too long\n");
+        close(fd);
+        return 1;
+    }
 
     if (connect(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
         fprintf(stderr, "hnc_ipc: connect %s: %s\n", sock_path, strerror(errno));

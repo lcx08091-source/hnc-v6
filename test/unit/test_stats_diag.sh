@@ -2,7 +2,8 @@
 set -eu
 
 ROOT_DIR="$(cd "$(dirname "${HNC_TEST_FILE:-${BASH_SOURCE:-$0}}")/../.." && pwd)"
-TMP_BASE="$ROOT_DIR/.tmp/test_stats_diag.$$"
+TMP_BASE="${TMPDIR:-/tmp}/test_stats_diag.$$"
+trap 'rm -rf "$TMP_BASE"' EXIT INT TERM
 rm -rf "$TMP_BASE"
 mkdir -p "$TMP_BASE/data" "$TMP_BASE/run" "$TMP_BASE/logs"
 

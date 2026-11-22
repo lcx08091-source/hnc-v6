@@ -24,8 +24,8 @@ EOF_USAGE
 [ -f "$ZIP" ] || { fail "artifact not found: $ZIP"; say "summary: failures=$FAIL warnings=$WARN"; exit 1; }
 command -v unzip >/dev/null 2>&1 || { fail "unzip not found; cannot inspect artifact"; say "summary: failures=$FAIL warnings=$WARN"; exit 1; }
 
-_ASC_DIR=$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)
-_ASC_VER=$(awk -F= '$1=="version"{print $2; exit}' "$_ASC_DIR/module.prop" 2>/dev/null)
+_ASC_DIR=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+_ASC_VER=$(awk -F= '$1=="version"{print $2; exit}' "$_ASC_DIR/module.prop" 2>/dev/null | tr -d '\r')
 say "HNC artifact sanity check ${_ASC_VER:-v6.1}"
 say "artifact=$ZIP"
 unzip -t "$ZIP" >"$TMP.unzip_test" 2>&1
@@ -66,9 +66,9 @@ else
 fi
 [ "$NESTED_COUNT" -gt 0 ] && fail "artifact contains nested ZIP(s); use the inner module ZIP or fix packaging: $(printf '%s' "$NESTED_ZIPS" | tr '\n' ' ')" || ok "artifact has no nested ZIP"
 grep -E '\.rej$|\.orig$' "$TMP.entries" >/dev/null && fail "artifact contains .rej/.orig patch residue" || ok "artifact has no .rej/.orig residue"
-grep -E '\.TODO$' "$TMP.entries" >/dev/null && fail "artifact contains .TODO unfinished file" || ok "artifact has no .TODO unfinished file"
+grep -E '(^|/)[^/]+\.TODO$' "$TMP.entries" >/dev/null && fail "artifact contains .TODO unfinished file" || ok "artifact has no .TODO unfinished file"
 grep -E '(^|/)(\.ssh|id_rsa|id_ed25519|.*_ed25519|.*_rsa|.*\.pem)$' "$TMP.entries" >/dev/null && fail "artifact may contain private key/secret files" || ok "artifact has no obvious private key/secret files"
-for req in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/vector_v6.js webroot/js/main.js data/dpi_rules.d/96-system-updates-v6.json webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json data/ip_owner.bin data/pkg_app_map.json bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_runtime_sync.sh bin/hnc_proc.sh customize.sh bin/hnc_arch.sh; do
+for req in LICENSE webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/vector_v6.js webroot/js/main.js data/dpi_rules.d/96-system-updates-v6.json webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json data/ip_owner.bin data/pkg_app_map.json bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_runtime_sync.sh bin/hnc_proc.sh customize.sh bin/hnc_arch.sh; do
   grep -x "$req" "$TMP.entries" >/dev/null && ok "required file exists: $req" || fail "required file missing at ZIP root path: $req"
 done
 

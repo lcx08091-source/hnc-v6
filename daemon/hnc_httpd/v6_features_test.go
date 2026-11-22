@@ -549,13 +549,20 @@ func TestV6FlowScalpelNetlinkAndRestore(t *testing.T) {
 	}
 	mu.Unlock()
 
-	// 等待自动清理触发, 验证临时五元组规则已被干净摘除
-	time.Sleep(180 * time.Millisecond)
-	mu.Lock()
-	lastPayload := v4Payloads[len(v4Payloads)-1]
-	mu.Unlock()
-	if strings.Contains(lastPayload, "54321") {
-		t.Fatalf("5s temporary RST rule was NOT cleaned up after expiry: %s", lastPayload)
+	// 等待自动清理触发, 验证临时五元组规则已被干净摘除（条件轮询留足调度余量防 Flaky）
+	deadline := time.Now().Add(1500 * time.Millisecond)
+	var lastPayload string
+	for {
+		mu.Lock()
+		lastPayload = v4Payloads[len(v4Payloads)-1]
+		mu.Unlock()
+		if !strings.Contains(lastPayload, "54321") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("5s temporary RST rule was NOT cleaned up after expiry: %s", lastPayload)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 
 	// 验证 UDP 规则使用 icmp-port-unreachable 及 cut_freeze_15m 模式
@@ -716,5 +723,212 @@ func TestV6ThermoCruiseSchmittHysteresisAndExemptions(t *testing.T) {
 		if _, ok := sum[key]; !ok {
 			t.Fatalf("v6FeaturesSummary missing module %q: %+v", key, sum)
 		}
+	}
+}
+
+func TestV6BackupRedactionAndLoopbackGuard(t *testing.T) {
+	dir := t.TempDir()
+	dataDir := filepath.Join(dir, "data")
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.WriteFile(filepath.Join(dataDir, "rules.json"), []byte(`{
+		"version": 1,
+		"hotspot_ssid": "HNC_5G",
+		"hotspot_pass": "SuperSecretPass99",
+		"admin_token": "tok_secret_value",
+		"devices": {},
+		"blacklist": [],
+		"whitelist": []
+	}`), 0o600)
+	_ = os.WriteFile(filepath.Join(dataDir, "vector_express.json"), []byte(`{"enabled":true}`), 0o600)
+	_ = os.WriteFile(filepath.Join(dataDir, "update_leash.json"), []byte(`{"enabled":true}`), 0o600)
+	_ = os.WriteFile(filepath.Join(dataDir, "thermo_cruise.json"), []byte(`{"enabled":true}`), 0o600)
+
+	bundle, err := ExportBackupBundle(dir)
+	if err != nil {
+		t.Fatalf("ExportBackupBundle failed: %v", err)
+	}
+	for _, name := range []string{"rules.json", "vector_express.json", "update_leash.json", "thermo_cruise.json"} {
+		if _, ok := bundle.Files[name]; !ok {
+			t.Fatalf("expected %s in backup bundle, got keys=%v", name, bundle.FileSHA256)
+		}
+	}
+	rulesStr := string(bundle.Files["rules.json"])
+	if strings.Contains(rulesStr, "SuperSecretPass99") || strings.Contains(rulesStr, "hotspot_pass") ||
+		strings.Contains(rulesStr, "tok_secret_value") || strings.Contains(rulesStr, "admin_token") {
+		t.Fatalf("SECURITY: sensitive secrets leaked in exported rules.json: %s", rulesStr)
+	}
+	if !strings.Contains(rulesStr, `"hotspot_ssid":"HNC_5G"`) {
+		t.Fatalf("non-sensitive hotspot_ssid was unexpectedly stripped: %s", rulesStr)
+	}
+
+	// 验证远程请求 POST /api/backup 被 403 拒绝 (仅限 loopback)
+	dstDir := t.TempDir()
+	dstSrv := newServer(dstDir)
+	dstMux := http.NewServeMux()
+	dstSrv.registerV6ScreenshotPackRoutes(dstMux)
+	payload, _ := json.Marshal(bundle)
+
+	remoteReq := httptest.NewRequest(http.MethodPost, "/api/backup", strings.NewReader(string(payload)))
+	remoteReq.RemoteAddr = "192.168.43.88:54321"
+	remoteReq.Host = "192.168.43.1:8443"
+	remoteReq.Header.Set("Content-Type", "application/json")
+	remoteReq.Header.Set("X-HNC-CSRF", "1")
+	remoteReq = remoteReq.WithContext(context.WithValue(remoteReq.Context(), ctxKeyTokenID, "REMOTE_TOK_1"))
+	remoteRec := httptest.NewRecorder()
+	dstMux.ServeHTTP(remoteRec, remoteReq)
+	if remoteRec.Code != http.StatusForbidden {
+		t.Fatalf("remote POST /api/backup must return 403 Forbidden, got %d body=%s", remoteRec.Code, remoteRec.Body.String())
+	}
+
+	// 验证本机 loopback 请求成功恢复且落盘权限受限 (0600)
+	localReq := httptest.NewRequest(http.MethodPost, "/api/backup", strings.NewReader(string(payload)))
+	localReq.RemoteAddr = "127.0.0.1:45678"
+	localReq.Host = "127.0.0.1:8080"
+	localReq.Header.Set("Content-Type", "application/json")
+	localReq.Header.Set("X-HNC-CSRF", "1")
+	localRec := httptest.NewRecorder()
+	dstMux.ServeHTTP(localRec, localReq)
+	if localRec.Code != http.StatusOK {
+		t.Fatalf("loopback POST /api/backup failed: %d %s", localRec.Code, localRec.Body.String())
+	}
+	if st, err := os.Stat(filepath.Join(dstDir, "data", "rules.json")); err == nil {
+		if perm := st.Mode().Perm(); perm&0o077 != 0 {
+			t.Fatalf("restored rules.json permissions too wide: %o (want 0600)", perm)
+		}
+	}
+}
+
+func TestV6ThermoWinterTempAndFullExemption(t *testing.T) {
+	// 冬季低温 8.5°C: power_supply/battery/temp 原始值 "85" 必须按 0.1°C 解析为 8.5°C 而非 85°C
+	if got, ok := parseSysfsTempCelsius("/sys/class/power_supply/battery/temp", "85"); !ok || got != 8.5 {
+		t.Fatalf("battery winter temp raw=85 got %.2f (ok=%v), want 8.5", got, ok)
+	}
+	if got, ok := parseSysfsTempCelsius("/sys/class/thermal/thermal_zone0/temp", "45200"); !ok || got != 45.2 {
+		t.Fatalf("thermal_zone temp raw=45200 got %.2f (ok=%v), want 45.2", got, ok)
+	}
+
+	// 验证 status="Full" (满电插电) 判定为 plugged-in 并豁免二阶降速与低电量保护
+	s, _, dir := newV6TestMux(t)
+	th := s.v6State().thermo
+	psRoot := filepath.Join(dir, "sysfs_power_full")
+	_ = os.MkdirAll(filepath.Join(psRoot, "bms"), 0o755)
+	_ = os.MkdirAll(filepath.Join(psRoot, "battery"), 0o755)
+	_ = os.WriteFile(filepath.Join(psRoot, "bms", "type"), []byte("Battery\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(psRoot, "bms", "temp"), []byte("300\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(psRoot, "bms", "status"), []byte("Unknown\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(psRoot, "battery", "type"), []byte("Battery\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(psRoot, "battery", "temp"), []byte("462\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(psRoot, "battery", "capacity"), []byte("100\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(psRoot, "battery", "status"), []byte("Full\n"), 0o644)
+
+	th.mu.Lock()
+	th.sysfsRoot = psRoot
+	th.cachedBatDir = ""
+	th.mu.Unlock()
+
+	rd := th.ReadBatteryFromSysfs()
+	if !rd.Available || rd.SupplyNode != "battery" || rd.TempC != 46.2 || !rd.IsCharging {
+		t.Fatalf("expected battery node prioritized over bms with Full=>IsCharging=true, got %+v", rd)
+	}
+	ev := th.Evaluate(time.Unix(1800009000, 0), rd, false)
+	if ev["stage2_shaper_active"] != false || ev["stage2_exempt"] != true {
+		t.Fatalf("Full plugged-in status must exempt stage2 shaper: %+v", ev)
+	}
+}
+
+func TestV6DataplaneAndLimitRegressions(t *testing.T) {
+	// 1. tcFWLineRE 兼容真实 iproute2 格式与旧测试桩格式, 不误匹配 u32
+	realLine := "filter parent 1: protocol all pref 1 fw chain 0 handle 0x820000/0xff0000 classid 1:2"
+	if h, m, c := extractTCFWMatch(tcFWLineRE.FindStringSubmatch(realLine)); h != "0x820000" || m != "0xff0000" || c != "1:2" {
+		t.Fatalf("real tc filter show line failed to match: h=%q m=%q c=%q", h, m, c)
+	}
+	legacyLine := "filter parent 1: protocol all pref 1 handle 0x850000/0xff0000 fw classid 1:5"
+	if h, m, c := extractTCFWMatch(tcFWLineRE.FindStringSubmatch(legacyLine)); h != "0x850000" || m != "0xff0000" || c != "1:5" {
+		t.Fatalf("legacy tc filter line failed to match: h=%q m=%q c=%q", h, m, c)
+	}
+	if m := tcFWLineRE.FindStringSubmatch("filter parent 1: protocol ip pref 105 u32 fh 800::800 flowid 1:5"); len(m) != 0 {
+		t.Fatalf("u32 filter line must not match tcFWLineRE: %v", m)
+	}
+
+	// 2. readDeviceMarkSpec 低 16 位硬保护
+	badDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(badDir, "bin"), 0o755)
+	_ = os.WriteFile(filepath.Join(badDir, "bin", "hnc_constants.sh"),
+		[]byte("HNC_DEV_MARK_SHIFT=8\nHNC_DEV_MARK_MASK=0x0000ffff\nHNC_DEV_MARK_BASE=0x00000080\n"), 0o644)
+	val, mask := readDeviceMarkSpec(badDir, 5)
+	if (val&0x0000ffff) != 0 || (mask&0x0000ffff) != 0 || mask != DefaultDevMarkMask {
+		t.Fatalf("readDeviceMarkSpec failed low-16-bit guard: val=0x%x mask=0x%x", val, mask)
+	}
+
+	// 3. resolveOrthogonalFilterMask 绝不返回裸 markVal 且阻断低 16 位
+	if got := resolveOrthogonalFilterMask(0x01000000, 0); got != DefaultAppQoSMarkMask {
+		t.Fatalf("resolveOrthogonalFilterMask(0x01000000,0)=0x%x want 0x%x", got, DefaultAppQoSMarkMask)
+	}
+	if got := resolveOrthogonalFilterMask(0x01000001, 0x0000ffff); (got & 0x0000ffff) != 0 {
+		t.Fatalf("resolveOrthogonalFilterMask leaked low 16 bits: 0x%x", got)
+	}
+
+	// 4. defaultCheckSchFQSysReady 结构化解析 available[], 不误判 fq_codel
+	if _, err := os.Stat("/sys/module/sch_fq"); err != nil {
+		qDir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(qDir, "run"), 0o755)
+		_ = os.WriteFile(filepath.Join(qDir, "run", "qdisc_caps.json"),
+			[]byte(`{"schema":1,"available":["fq_codel","sfq"],"chosen":"fq_codel"}`), 0o644)
+		if defaultCheckSchFQSysReady(qDir) {
+			t.Fatal("defaultCheckSchFQSysReady must not match fq_codel as fq")
+		}
+		_ = os.WriteFile(filepath.Join(qDir, "run", "qdisc_caps.json"),
+			[]byte(`{"schema":1,"available":["fq_codel","fq"],"chosen":"fq_codel"}`), 0o644)
+		if !defaultCheckSchFQSysReady(qDir) {
+			t.Fatal("defaultCheckSchFQSysReady should match available=[\"fq\"]")
+		}
+	}
+
+	// 5. midFromHTBClassMinor 与 htbClassMinorForMid 1..99 完整往返一致
+	for mid := 1; mid <= 99; mid++ {
+		minor, err := htbClassMinorForMid(mid)
+		if err != nil {
+			t.Fatalf("htbClassMinorForMid(%d) err=%v", mid, err)
+		}
+		gotMid, ok := midFromHTBClassMinor(minor)
+		if !ok || gotMid != mid {
+			t.Fatalf("midFromHTBClassMinor(0x%x) = (%d,%v), want (%d,true)", minor, gotMid, ok, mid)
+		}
+	}
+
+	// 6. limitCtl 空闲无脏标记时不重复刷写 limit_ctl_state.json; 仅在 usageDirty 满 5m 时落盘
+	lDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(lDir, "data"), 0o755)
+	_ = os.MkdirAll(filepath.Join(lDir, "run"), 0o755)
+	var actionMu sync.Mutex
+	lc := newLimitCtl(lDir, &actionMu)
+	tBase := time.Unix(1800010000, 0)
+	lc.mu.Lock()
+	lc.saveStateLocked(tBase, true)
+	lc.mu.Unlock()
+	stateFile := lc.statePath()
+	oldTime := time.Unix(1700000000, 0)
+	if err := os.Chtimes(stateFile, oldTime, oldTime); err != nil {
+		t.Fatalf("chtimes %s failed: %v", stateFile, err)
+	}
+	lc.mu.Lock()
+	lc.saveStateLocked(tBase.Add(10*time.Minute), false)
+	lc.mu.Unlock()
+	st, err := os.Stat(stateFile)
+	if err != nil {
+		t.Fatalf("stat %s failed: %v", stateFile, err)
+	}
+	if !st.ModTime().Equal(oldTime) {
+		t.Fatalf("idle limitCtl unexpectedly rewrote %s: mtime=%v want=%v", stateFile, st.ModTime(), oldTime)
+	}
+	lc.mu.Lock()
+	lc.usageDirty = true
+	lc.saveStateLocked(tBase.Add(10*time.Minute), false)
+	lc.mu.Unlock()
+	st2, err := os.Stat(stateFile)
+	if err != nil || st2.ModTime().Equal(oldTime) {
+		t.Fatalf("usageDirty limitCtl should persist after 5m interval: err=%v mtime=%v", err, st2.ModTime())
 	}
 }

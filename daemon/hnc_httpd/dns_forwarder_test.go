@@ -15,8 +15,8 @@ import (
 
 type fakeUpstream struct {
 	// udpN/tcpN 置顶保证 32 位 ARM 下 8 字节对齐
-	udpN     int64
-	tcpN     int64
+	udpN     atomic.Int64
+	tcpN     atomic.Int64
 	addr     string
 	udp      *net.UDPConn
 	tcp      net.Listener
@@ -126,7 +126,7 @@ func startFakeUpstream(t *testing.T) *fakeUpstream {
 			if err != nil {
 				return
 			}
-			atomic.AddInt64(&u.udpN, 1)
+			u.udpN.Add(1)
 			resp := u.answer(append([]byte(nil), buf[:n]...), "udp")
 			if resp == nil {
 				continue
@@ -157,7 +157,7 @@ func startFakeUpstream(t *testing.T) *fakeUpstream {
 					if err != nil {
 						return
 					}
-					atomic.AddInt64(&u.tcpN, 1)
+					u.tcpN.Add(1)
 					if err := dnsWriteTCPMsg(c, u.answer(q, "tcp")); err != nil {
 						return
 					}
@@ -207,7 +207,7 @@ func TestDNSForwarderUDPForwardAndCache(t *testing.T) {
 	if m.ID != 0x2222 || len(m.Answers) != 1 {
 		t.Fatalf("cached answer: %+v", m)
 	}
-	if n := atomic.LoadInt64(&u.udpN); n != 1 {
+	if n := u.udpN.Load(); n != 1 {
 		t.Fatalf("upstream hits = %d, want 1 (second from cache)", n)
 	}
 	st := f.Stats()
@@ -296,7 +296,7 @@ func TestDNSForwarderNegativeCacheSOA(t *testing.T) {
 		t.Fatalf("nx: %+v", m)
 	}
 	f.handle(dnsBuildQuery(2, "nx.test", dnsTypeA, 0, false), dnsTestClient, "udp")
-	if atomic.LoadInt64(&u.udpN) != 1 {
+	if u.udpN.Load() != 1 {
 		t.Fatal("NXDOMAIN with SOA must be cached")
 	}
 }
@@ -310,16 +310,16 @@ func TestDNSForwarderTruncationTCPRetry(t *testing.T) {
 	if m.Flags&dnsFlagTC == 0 || len(resp) > 512 || m.ANCount != 0 {
 		t.Fatalf("client must get truncated reply: len=%d %+v", len(resp), m)
 	}
-	if atomic.LoadInt64(&u.tcpN) != 1 || f.Stats().UpstreamTCP != 1 {
-		t.Fatalf("upstream tcp retry missing: tcp=%d", u.tcpN)
+	if u.tcpN.Load() != 1 || f.Stats().UpstreamTCP != 1 {
+		t.Fatalf("upstream tcp retry missing: tcp=%d", u.tcpN.Load())
 	}
 	// 客户端改走 TCP: 缓存里的完整应答, 不再问上游
 	m = mustResp(t, f.handle(dnsBuildQuery(0x56, "big.test", dnsTypeA, 0, false), dnsTestClient, "tcp"))
 	if m.Flags&dnsFlagTC != 0 || len(m.Answers) != 40 || m.ID != 0x56 {
 		t.Fatalf("tcp full answer: %+v", m)
 	}
-	if atomic.LoadInt64(&u.tcpN) != 1 || atomic.LoadInt64(&u.udpN) != 1 {
-		t.Fatalf("tcp retry should come from cache: udp=%d tcp=%d", u.udpN, u.tcpN)
+	if u.tcpN.Load() != 1 || u.udpN.Load() != 1 {
+		t.Fatalf("tcp retry should come from cache: udp=%d tcp=%d", u.udpN.Load(), u.tcpN.Load())
 	}
 	// 客户端 EDNS 4096: 一次 UDP 就能装下(仍然先 TC → TCP 重取, 但不再截断)
 	f2 := newTestFwd(u)
@@ -348,8 +348,8 @@ func TestDNSForwarderEDNSPassthrough(t *testing.T) {
 	if m.Q.HasOPT {
 		t.Fatal("non-EDNS client must not get the cached EDNS reply")
 	}
-	if atomic.LoadInt64(&u.udpN) != 2 {
-		t.Fatalf("upstream hits %d, want 2", u.udpN)
+	if u.udpN.Load() != 2 {
+		t.Fatalf("upstream hits %d, want 2", u.udpN.Load())
 	}
 }
 
@@ -383,7 +383,7 @@ func TestDNSForwarderBlockModes(t *testing.T) {
 	if st := f.Stats(); st.Blocked != 4 || st.Upstream != 2 {
 		t.Fatalf("stats %+v", st)
 	}
-	if atomic.LoadInt64(&u.udpN) != 2 {
+	if u.udpN.Load() != 2 {
 		t.Fatal("blocked queries must not reach upstream")
 	}
 }

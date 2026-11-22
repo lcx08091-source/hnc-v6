@@ -109,7 +109,7 @@ t_cp_failure_keeps_files() {
     make_mod 5270002 00-core.json 11-new.json
     # root 下只读目录拦不住写, 改用 PATH 里放一个必失败的 cp 模拟
     mkdir -p "$HNC_TEST_DIR/failbin"
-    printf '#!/bin/sh\nexit 1\n' > "$HNC_TEST_DIR/failbin/cp"
+    printf '#!%s\nexit 1\n' "${HNC_TEST_SH:-/system/bin/sh}" > "$HNC_TEST_DIR/failbin/cp"
     chmod +x "$HNC_TEST_DIR/failbin/cp"
     PATH="$HNC_TEST_DIR/failbin:$PATH" run_sync
     rc=$?

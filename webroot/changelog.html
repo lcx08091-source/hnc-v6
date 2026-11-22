@@ -13,6 +13,14 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-1-0-beta-2" data-version="v6.1.0-beta.2" data-version-code="6009202">
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-shield"/></svg>v6.1.0-beta.2(公测版): 前端核心缺陷与交互防呆清零 · 战术延迟真值呈现 · 远程连接与断线退避加固 · 全界面红线合规收口 <span class="badge b-acc" style="margin-left:4px">Beta 公测版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-22 · versionCode 6009202</span></div>
+  <ul class="cl-list">
+    <li><b>页面脚本修复与视觉规范清零</b>：修复 <span class="mono">json-health.html</span> 内联脚本换行语法报错，统一主按钮与极简默认主题按钮至 <span class="mono">39px / 12px</span> 微晶规范；修复 <span class="mono">index.html</span> 三处无效根选择器、补齐 <span class="mono">--t3</span> 语义变量并提升赛博主题子标签对比度；彻底清除更新日志残留符号。</li>
+    <li><b>白名单防误断网与真实延迟状态展示</b>：开启白名单模式前弹出二次确认并明确提醒未在白名单的设备将立即断网，白名单为空时直接阻止开启；移除矢量中枢中硬编码的假延迟对比曲线，无拥塞波动时如实展示当前网络通畅状态；修复连接抽屉点遮罩吞返回键及拖拽滑出卡住问题。</li>
+    <li><b>实时通道省电退避与安全对齐</b>：远程 <span class="mono">/api/events</span> 事件流断线后改为 <span class="mono">3s~60s</span> 指数退避单定时器重连，页面切后台自动暂停实时连接刷新与连接手术台轮询；补齐 <span class="mono">/api/vector_sync</span> 版本码透传、多口状态解包、备份导出落盘反馈、按钮提交态保护与动态字段安全转义；公测期间 <span class="mono">update.json</span> 继续锁在稳定版 <span class="mono">v6.0.1</span>，不打扰稳定版用户。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v6-1-0-beta-1" data-version="v6.1.0-beta.1" data-version-code="6009201">
   <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-dataplane"/></svg>v6.1.0-beta.1(公测版): 设备发现断线自愈与首屏秒出 · 待机零唤醒省电与黑匣子现场保护 · 16KB 共享内存读端接通 · 上行队列对账闭环 <span class="badge b-acc" style="margin-left:4px">Beta 公测版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-21 · versionCode 6009201</span></div>
   <ul class="cl-list">
@@ -1222,7 +1230,7 @@
 
 <!-- v5.7.0-rc10 -->
 <div class="cl-section">
-  <div class="cl-title">⬇ v5.7.0-rc10: 修导出下载 + 应用解析更全 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-wrench"/></svg> v5.7.0-rc10: 修导出下载 + 应用解析更全 <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
   <ul class="cl-list">
     <li><b>修「下载 zip」点了没反应</b>: 打包本来是成功的,坏在下载——本机 WebUI 是 file://,原来的下载链接在这种环境下点了无效。现在本机会把 zip 拷到 <code>/sdcard/Download/</code> 并提示"已保存",到文件管理器的"下载"目录就能找到。远程网页版仍是直接下载。</li>
     <li><b>应用解析更准更全</b>: uid→应用 的解析改读系统权威表 <code>/data/system/packages.list</code>(root),比原来的 pm 命令更全更快,修好了一部分真实应用被显示成"未识别"的问题。(uid 0/系统服务/隔离进程本来就没有应用,仍显示未识别,属正常。)</li>
@@ -1284,7 +1292,7 @@
 
 <!-- v5.7.0-rc4 -->
 <div class="cl-section">
-  <div class="cl-title">🇨🇳 v5.7.0-rc4: 实体库扩到 166 条(国内 + OEM) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
+  <div class="cl-title"><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-layers"/></svg> v5.7.0-rc4: 实体库扩到 166 条(国内 + OEM) <span style="font-size:11px;color:var(--t2);font-weight:400">2026-05-24</span></div>
   <ul class="cl-list">
     <li><b>实体库 +45 条,重点补国内/OEM 共享域名</b>(西方公开库收得最差的部分):OPPO/HeyTap、华为(dbankcdn/hicloud);爱奇艺/优酷/网易/知乎/小红书/拼多多/美团/虎牙/斗鱼/酷狗/汽车之家/58/搜狐/新浪/字节 等 CDN;秒针/AdMaster/热云/穿山甲/Mintegral 等统计广告 SDK。</li>
     <li><b>作用</b>: 这些国内 CDN/SDK 域名现在第一次出现就被识别为"共享",不会误进候选待审、也不会被误归到某个 app。</li>
@@ -1953,7 +1961,7 @@
             <li><b> 更新日志合并</b>: 历史 <code>PATCH-NOTES-*</code> 已汇总进 <code>CHANGELOG.md</code> 与 WebUI 更新记录, release 包根目录不再堆很多单独说明文件。</li>
             <li><b><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-layers"/></svg> 根目录瘦身</b>: 可刷 ZIP 只保留运行必需文件、<code>README.md</code> 和 <code>CHANGELOG.md</code>, 手机文件管理器里更清爽。</li>
             <li><b> CI 同步</b>: GitHub Actions 打包规则同步排除历史 patch notes 和开发阶段文档, 避免后续版本再次变臃肿。</li>
-            <li><b>ℹ 说明</b>: 本轮不改限速/iptables/BPF 逻辑, 不需要重新编译二进制。</li>
+            <li><b>说明</b>: 本轮不改限速/iptables/BPF 逻辑, 不需要重新编译二进制。</li>
           </ul>
         </div>
       </div>
@@ -2143,7 +2151,7 @@
               4. 60 秒内本机 <code>iptables -t mangle -S HNC_MARK</code> 应见到该 MAC 限速规则<br>
               5. 点 " 加黑" → confirm → toast → 60 秒内 iptables DROP 规则生效<br>
               6. 对主人自己手机 MAC 点加黑 → 应 toast " 无法对该设备操作 cannot blacklist host mac"(3.a.1 防自锁)</li>
-            <li><b>⏭ 留给未来</b>:Patch 3.c(audit.log 展示 section)作为可选项,本机 WebUI 和远端 dashboard 都加"审计日志"卡片展示最近 50 条写操作。如果实际装机用下来需要看操作历史,再开 3.c。</li>
+            <li><b>留给未来</b>:Patch 3.c(audit.log 展示 section)作为可选项,本机 WebUI 和远端 dashboard 都加"审计日志"卡片展示最近 50 条写操作。如果实际装机用下来需要看操作历史,再开 3.c。</li>
           </ul>
         </div>
       </div>
@@ -2340,7 +2348,7 @@
             <li><b> 配对流程原子性</b>:主人本机 WebUI 生成 PIN 通过 kexec 写 <code>$RUN/pair_pending</code>(tmp+rename 原子),httpd 只读不写;成功配对后 httpd 写 <code>$RUN/pair_success.&lt;sid&gt;</code>(tmp+rename 原子)让本机感知;httpd 只有 2 个 pairing endpoint,生成 / 取消 / 查状态都由本机 WebUI 通过 kexec 操作文件,不经 HTTP。</li>
             <li><b><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-cpu"/></svg> 测试</b>:新 41 个 Go 单测全过(<code>ratelimit_test</code> 11 + <code>middleware_test</code> 14 + <code>pair_test</code> 16)。原 2.a.1 <code>auth_test</code> 14 用例不破。shell 回归 128/128 全过。arm64 binary 6.9 MB。</li>
             <li><b><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-layers"/></svg> 改动</b>:+3 个新 Go 文件(705 行)+ 3 个测试(760 行)+ pair.html(205 行);<code>server.go</code> 加字段 + 挂路由;<code>main.go</code> goroutine 启动 + 8080 保护;<code>embed.go</code> 加 pair.html;<code>module.prop</code> 升 v4.0.0-patch2.b / 40009。Patch 1.5 Defer Init 状态机完整保留。</li>
-            <li><b>⏭ 留给 2.c</b>:WebUI 本机"生成配对码"按钮 + 120s 倒计时 modal + "已授权设备"列表 + 撤销单个/全部 + remote_auth_required toggle。2.b 纯后端,本机 WebUI 还是老样子。</li>
+            <li><b>留给 2.c</b>:WebUI 本机"生成配对码"按钮 + 120s 倒计时 modal + "已授权设备"列表 + 撤销单个/全部 + remote_auth_required toggle。2.b 纯后端,本机 WebUI 还是老样子。</li>
             <li><b><svg class="cl-ic" viewBox="0 0 24 24"><use href="#cl-cpu"/></svg> 装机验证</b>:<br>
               • <code>head -4 module.prop</code> 应显示 v4.0.0-patch2.b<br>
               • <code>hnc_httpd -bind xxx</code> 启动 log 应显示 version v4.0.0-patch2.b<br>

@@ -20,29 +20,31 @@ import (
 const (
 	// MinUnix 2025-01-01T00:00:00Z —— 低于此视为开机未对时(1970/2000)。
 	MinUnix int64 = 1735689600
+	// MaxUnix 2038-01-01T00:00:00Z (2037-12-31 上界) —— 高于此视为未来跳变。
+	MaxUnix int64 = 2145916800
 	// BackTolerance 允许落后高水位的秒数(小幅 NTP 回拨)。
 	BackTolerance int64 = 600
 )
 
-// ReadHWM 读高水位文件(单行 unix 秒)。文件缺失/损坏/非法 → 0。
+// ReadHWM 读高水位文件(单行 unix 秒)。文件缺失/损坏/非法/超上界 → 0。
 func ReadHWM(path string) int64 {
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return 0
 	}
 	v, err := strconv.ParseInt(strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0]), 10, 64)
-	if err != nil || v <= 0 {
+	if err != nil || v <= 0 || v > MaxUnix {
 		return 0
 	}
 	return v
 }
 
-// Sane 纯函数: now ≥ MinUnix 且(hwm ≤ 0 或 now ≥ hwm − BackTolerance)。
+// Sane 纯函数: MinUnix ≤ now ≤ MaxUnix 且(无有效高水位 或 now ≥ hwm − BackTolerance)。
 func Sane(nowUnix, hwm int64) bool {
-	if nowUnix < MinUnix {
+	if nowUnix < MinUnix || nowUnix > MaxUnix {
 		return false
 	}
-	if hwm > 0 && nowUnix < hwm-BackTolerance {
+	if hwm > 0 && hwm <= MaxUnix && nowUnix < hwm-BackTolerance {
 		return false
 	}
 	return true

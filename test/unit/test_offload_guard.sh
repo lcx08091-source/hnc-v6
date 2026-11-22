@@ -13,8 +13,9 @@ gseed() {
     printf '%s\n' "$_rules" > "$HNC_TEST_DIR/data/rules.json"
     echo IDLE > "$HNC_TEST_DIR/check_state"
     : > "$HNC_TEST_DIR/ipc.log"
-    cat > "$HNC_TEST_DIR/bin/hnc_ipc" <<'STUB'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'STUB'
 echo "$*" >> "$HNC_DIR/ipc.log"
 case "$1" in
     OFFLOAD_DISABLE_GLOBAL|OFFLOAD_RESTORE_GLOBAL) echo "OK:OK" ;;
@@ -22,13 +23,16 @@ case "$1" in
 esac
 exit 0
 STUB
+    } > "$HNC_TEST_DIR/bin/hnc_ipc"
     chmod +x "$HNC_TEST_DIR/bin/hnc_ipc"
     # tc 桩: 默认看不到 mirred(pref 1 空闲)
-    cat > "$HNC_TEST_DIR/stub/tc" <<'STUB'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'STUB'
 [ -f "$HNC_DIR/tc_show" ] && cat "$HNC_DIR/tc_show"
 exit 0
 STUB
+    } > "$HNC_TEST_DIR/stub/tc"
     chmod +x "$HNC_TEST_DIR/stub/tc"
 }
 grun() {
@@ -126,9 +130,7 @@ grun apply >/dev/null
 test_start "offload guard: clsact_wanted gate (pref 2 mirred decoupled OK, legacy pref 1 mirred skipped)"
 gseed '{"clsact_bpf_mode":"on"}'
 : > "$HNC_TEST_DIR/bin/hnc_clsact.o"
-printf '#!/bin/sh
-echo "{\"ok\":false,\"bpf_filter\":false}"
-' > "$HNC_TEST_DIR/bin/hnc_clsact_ctl"; chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
+printf '#!%s\necho "{\\"ok\\":false,\\"bpf_filter\\":false}"\n' "${HNC_TEST_SH:-/system/bin/sh}" > "$HNC_TEST_DIR/bin/hnc_clsact_ctl"; chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
 echo "filter protocol all pref 2 matchall chain 0 action order 1: mirred (Egress Redirect to device ifb0) stolen" > "$HNC_TEST_DIR/tc_show"
 grun clsact_wanted wlan2; w_pref2=$?
 echo "filter protocol all pref 1 matchall chain 0 action order 1: mirred (Egress Redirect to device ifb0) stolen" > "$HNC_TEST_DIR/tc_show"
@@ -145,12 +147,12 @@ grun clsact_wanted wlan2; w_off=$?
 test_start "offload guard: on + pref1 held by mirred → clsact skipped, uninstall never called"
 gseed '{"clsact_bpf_mode":"on"}'
 : > "$HNC_TEST_DIR/bin/hnc_clsact.o"
-printf '#!/bin/sh\necho "$*" >> "$HNC_DIR/ctl.log"\necho "{\\"ok\\":false,\\"bpf_filter\\":false}"\n' > "$HNC_TEST_DIR/bin/hnc_clsact_ctl"; chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
+printf '#!%s\necho "$*" >> "$HNC_DIR/ctl.log"\necho "{\\"ok\\":false,\\"bpf_filter\\":false}"\n' "${HNC_TEST_SH:-/system/bin/sh}" > "$HNC_TEST_DIR/bin/hnc_clsact_ctl"; chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
 echo "mirred (Egress Redirect to device ifb0) stolen" > "$HNC_TEST_DIR/tc_show"
 grun apply >/dev/null
 printf '{"clsact_bpf_mode":"off"}\n' > "$HNC_TEST_DIR/data/rules.json"
 grun apply >/dev/null
-! grep -q "install\|uninstall" "$HNC_TEST_DIR/ctl.log" 2>/dev/null && grep -q 'skipped_pref1_mirred' "$HNC_TEST_DIR/logs/offload_guard.log" \
+! grep -qE "install|uninstall" "$HNC_TEST_DIR/ctl.log" 2>/dev/null && grep -q 'skipped_pref1_mirred' "$HNC_TEST_DIR/logs/offload_guard.log" \
   && test_pass || test_fail "ctl=$(cat "$HNC_TEST_DIR/ctl.log" 2>/dev/null)"
 
 # ── v5.33: 没有常驻循环(Go 看门狗调度); clsact 修复并进本脚本 ──
@@ -177,14 +179,16 @@ echo "$out" | grep -qE '^[0-9]+ (none|hotspot|clients)$' && [ -f "$HNC_TEST_DIR/
 # 假 hnc_clsact_ctl: check 的结果由 $HNC_DIR/ctl_check 决定, 记下每次调用
 mkctl() {
     : > "$HNC_TEST_DIR/bin/hnc_clsact.o"
-    cat > "$HNC_TEST_DIR/bin/hnc_clsact_ctl" <<'STUB'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'STUB'
 echo "$*" >> "$HNC_DIR/ctl.log"
 case "$1" in
     check) cat "$HNC_DIR/ctl_check" 2>/dev/null ;;
 esac
 exit 0
 STUB
+    } > "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
     chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
     : > "$HNC_TEST_DIR/ctl.log"
 }

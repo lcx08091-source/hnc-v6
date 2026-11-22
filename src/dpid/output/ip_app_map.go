@@ -124,10 +124,10 @@ const (
 
 // AppTier 按规则 category 给出分级。
 func AppTier(category string) int {
-	c := strings.ToLower(strings.TrimSpace(category))
+	c := strings.ReplaceAll(strings.ToLower(strings.TrimSpace(category)), "-", "_")
 	switch c {
-	case "ads", "ad-sdk", "infrastructure", "third_party_telemetry", "system_telemetry_baseline",
-		"cloud", "cdn", "behavior-marker", "meta-warning", "p2p-unknown", "third_party_financial",
+	case "ads", "ad_sdk", "infrastructure", "third_party_telemetry", "system_telemetry_baseline",
+		"cloud", "cdn", "behavior_marker", "meta_warning", "p2p_unknown", "third_party_financial",
 		"system_chipset":
 		return TierHidden
 	case "system":
@@ -136,7 +136,7 @@ func AppTier(category string) int {
 	if strings.HasPrefix(c, "sdk") {
 		return TierHidden
 	}
-	if strings.HasPrefix(c, "system-") || strings.HasPrefix(c, "system_") {
+	if strings.HasPrefix(c, "system_") {
 		return TierSystem
 	}
 	return TierApp

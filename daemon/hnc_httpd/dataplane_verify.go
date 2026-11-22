@@ -1751,9 +1751,19 @@ func extractTCPrio(line string) int {
 var (
 	iptXMarkRE  = regexp.MustCompile(`--set-x?mark\s+(0x[0-9a-fA-F]+|\d+)(?:/(0x[0-9a-fA-F]+|\d+))?`)
 	iptNFMaskRE = regexp.MustCompile(`--(?:nfmask|ctmask)\s+(0x[0-9a-fA-F]+|\d+)`)
-	tcFWLineRE  = regexp.MustCompile(`handle\s+(0x[0-9a-fA-F]+|\d+)(?:/(0x[0-9a-fA-F]+|\d+))?\s+fw\s+(?:classid|flowid)\s+(\d+:[0-9a-fA-F]+)`)
+	tcFWLineRE  = regexp.MustCompile(`(?:\bfw\b[^\n]*?\bhandle\s+(0x[0-9a-fA-F]+|\d+)(?:/(0x[0-9a-fA-F]+|\d+))?\s+(?:fw\s+)?(?:classid|flowid)\s+(\d+:[0-9a-fA-F]+)|\bhandle\s+(0x[0-9a-fA-F]+|\d+)(?:/(0x[0-9a-fA-F]+|\d+))?\s+fw\s+(?:classid|flowid)\s+(\d+:[0-9a-fA-F]+))`)
 	tcFlowIDRE  = regexp.MustCompile(`(?:classid|flowid)\s+(\d+:[0-9a-fA-F]+)`)
 )
+
+func extractTCFWMatch(m []string) (handleStr, maskStr, classID string) {
+	if len(m) >= 4 && m[1] != "" {
+		return m[1], m[2], m[3]
+	}
+	if len(m) >= 7 && m[4] != "" {
+		return m[4], m[5], m[6]
+	}
+	return "", "", ""
+}
 
 // checkNetdLow16Protection 校验 HNC 的 CONNMARK/MARK 规则是否严格限制在高 16 位 0xffff0000,
 // 确保未污染低 16 位 0x0000ffff (Android netd netId / VPN 路由标记)。
@@ -1801,12 +1811,16 @@ func checkNetdLow16Protection(iptMangleV4, iptMangleV6, tcEgressFilters string) 
 	}
 	// 同时检查 tc fw 过滤器 handle 掩码是否触碰低 16 位
 	for _, m := range tcFWLineRE.FindAllStringSubmatch(tcEgressFilters, -1) {
-		h64, err := strconv.ParseUint(m[1], 0, 32)
+		hStr, maskStr, _ := extractTCFWMatch(m)
+		if hStr == "" {
+			continue
+		}
+		h64, err := strconv.ParseUint(hStr, 0, 32)
 		if err == nil && (uint32(h64)&dpNetdLow16Mask32) != 0 {
 			return dpMarkLayoutLegacy, false
 		}
-		if len(m) >= 3 && m[2] != "" {
-			mask64, err2 := strconv.ParseUint(m[2], 0, 32)
+		if maskStr != "" {
+			mask64, err2 := strconv.ParseUint(maskStr, 0, 32)
 			if err2 == nil && (uint32(mask64)&dpNetdLow16Mask32) != 0 {
 				return dpMarkLayoutLegacy, false
 			}
@@ -1818,11 +1832,13 @@ func checkNetdLow16Protection(iptMangleV4, iptMangleV6, tcEgressFilters string) 
 func parseTCFWFilterHandles(tcOut string) map[string]uint32 {
 	out := make(map[string]uint32)
 	for _, m := range tcFWLineRE.FindAllStringSubmatch(tcOut, -1) {
-		if len(m) >= 4 {
-			h64, err := strconv.ParseUint(m[1], 0, 32)
-			if err == nil {
-				out[normalizeTCClassID(m[3])] = uint32(h64)
-			}
+		hStr, _, cid := extractTCFWMatch(m)
+		if hStr == "" || cid == "" {
+			continue
+		}
+		h64, err := strconv.ParseUint(hStr, 0, 32)
+		if err == nil {
+			out[normalizeTCClassID(cid)] = uint32(h64)
 		}
 	}
 	return out

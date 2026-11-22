@@ -64,6 +64,7 @@ var (
 
 	m4ReconnectBaseBackoff = time.Second
 	m4ReconnectMaxBackoff  = 30 * time.Second
+	m4StopWaitMax          = 2500 * time.Millisecond
 )
 
 // 看门狗动作 / 自检可见(actionstats 带出)。
@@ -122,11 +123,13 @@ type m4GoRunner struct {
 	// v5.32 T4: 主循环醒来次数(严格置于 offset 0 保 32 位 ARM 原子对齐)
 	tickN atomic.Int64
 
-	iface  string
-	ifIdx  int
-	stopCh chan struct{}
-	doneCh chan struct{}
-	table  *devscan.Table
+	iface      string
+	ifIdx      int
+	stopCh     chan struct{}
+	doneCh     chan struct{}
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	table      *devscan.Table
 
 	// v5.31 T2: devname 全链解析(手动 → DHCP → mDNS → 缓存 → 厂商 → MAC)。
 	resolver *devname.Resolver
@@ -154,10 +157,13 @@ func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
 
 // newM4GoRunner 生产构造: 真订阅 / 真 dump / 真命令。
 func newM4GoRunner(iface string) *m4GoRunner {
+	stopCtx, stopCancel := context.WithCancel(context.Background())
 	r := &m4GoRunner{
-		iface:  iface,
-		stopCh: make(chan struct{}),
-		doneCh: make(chan struct{}),
+		iface:      iface,
+		stopCh:     make(chan struct{}),
+		doneCh:     make(chan struct{}),
+		stopCtx:    stopCtx,
+		stopCancel: stopCancel,
 	}
 	r.subscribeFn = func() (m4NeighSource, error) { return neigh.Subscribe() }
 	r.dumpIfFn = neigh.DumpIf
@@ -195,7 +201,13 @@ func (r *m4GoRunner) applyHooks() {
 	}
 	if full == nil && r.resolver != nil {
 		res := r.resolver
-		full = res.Resolve
+		ctx := r.stopCtx
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		full = func(mac, ip string) (string, string) {
+			return res.ResolveContext(ctx, mac, ip)
+		}
 	}
 	if fast == nil {
 		fast = func(mac string) (string, string) { return macFallback(mac), "mac" }
@@ -219,7 +231,13 @@ func (r *m4GoRunner) start() {
 
 func (m *m4WriterMgr) ensureGoRunnerLocked(iface string) {
 	if m.runner != nil && m.runner.iface == iface {
-		return
+		select {
+		case <-m.runner.doneCh:
+			// 旧写者已退出, 置空重建以恢复首屏与持续刷新
+			m.runner = nil
+		default:
+			return
+		}
 	}
 	m.stopGoRunnerLocked("网卡变了")
 	r := newM4RunnerFn(iface)
@@ -231,9 +249,16 @@ func (m *m4WriterMgr) stopGoRunnerLocked(reason string) {
 	if m.runner == nil {
 		return
 	}
+	r := m.runner
 	logf("m4_owner: 停 Go 写者(%s)", reason)
-	close(m.runner.stopCh)
-	<-m.runner.doneCh // 等它当前这次写完
+	close(r.stopCh)
+	tmr := time.NewTimer(m4StopWaitMax)
+	defer tmr.Stop()
+	select {
+	case <-r.doneCh: // 等它当前这次写完
+	case <-tmr.C:
+		logf("m4_owner: 停 Go 写者等待超时(%v), 放行后续退出流程", m4StopWaitMax)
+	}
 	m.runner = nil
 }
 
@@ -241,6 +266,9 @@ func (m *m4WriterMgr) stopGoRunnerLocked(reason string) {
 // 1s pending 派发)。退出前把 dirty 的内容补写一次(对齐 C 关机行为)。
 func (r *m4GoRunner) run() {
 	defer close(r.doneCh)
+	if r.stopCancel != nil {
+		defer r.stopCancel()
+	}
 	bootAt := time.Now()
 	monoMs := func() int64 {
 		d := time.Since(bootAt).Milliseconds()
@@ -357,7 +385,6 @@ func (r *m4GoRunner) run() {
 					return
 				}
 				src = next
-				backoff = m4ReconnectBaseBackoff
 				logf("m4_owner: 邻居表订阅已恢复, 触发全量重同步")
 				triggerResync()
 			}
@@ -378,6 +405,13 @@ func (r *m4GoRunner) run() {
 						logf("m4_owner: 邻居订阅缓冲区溢出(ENOBUFS), 原位触发 1Hz 全量重同步")
 					}
 					triggerResync()
+					tmr := time.NewTimer(100 * time.Millisecond)
+					select {
+					case <-tmr.C:
+					case <-r.stopCh:
+						tmr.Stop()
+						return
+					}
 					continue
 				}
 				logf("m4_owner: 邻居订阅读取异常: %v(关闭旧连接并退避重连)", rErr)
@@ -401,19 +435,21 @@ func (r *m4GoRunner) run() {
 	}(initSrc)
 
 	var (
-		dirty        bool
-		firstDirtyMs int64 // 首次 dirty 的毫秒时刻(0 = 无)
-		lastEventMs  int64
-		lastWriteMs  int64
-		lastWritten  []byte
-		lastStatsAt  time.Time
-		lastStatsMap = map[string][2]int64{}
-		lastSync     time.Time
-		lastPending  time.Time
-		inFlightMu   sync.Mutex
-		inFlight     = map[string]bool{}
-		resolved     = make(chan struct{}, 1)
-		resolveWG    sync.WaitGroup
+		dirty           bool
+		firstDirtyMs    int64 // 首次 dirty 的毫秒时刻(0 = 无)
+		lastEventMs     int64
+		lastWriteMs     int64
+		lastWritten     []byte
+		lastStatsAt     time.Time
+		lastStatsMap    = map[string][2]int64{}
+		lastSync        time.Time
+		lastSyncAttempt time.Time
+		initialWritten  bool
+		lastPending     time.Time
+		inFlightMu      sync.Mutex
+		inFlight        = map[string]bool{}
+		resolved        = make(chan struct{}, 1)
+		resolveWG       sync.WaitGroup
 	)
 	markDirty := func() {
 		dirty = true
@@ -437,35 +473,51 @@ func (r *m4GoRunner) run() {
 		period = want
 	}
 	var (
-		lastRefreshNano  int64
-		lastRefreshNonce string
-		hasInitRefresh   bool
+		lastRefreshNano     int64
+		lastRefreshNonce    string
+		hasInitRefresh      bool
+		lastRefreshTryAt    time.Time
+		lastRefreshTryNano  int64
+		lastRefreshTryNonce string
 	)
 	if fi, err := os.Stat(m4RefreshFile); err == nil {
-		hasInitRefresh = true
-		lastRefreshNano = fi.ModTime().UnixNano()
-		lastRefreshNonce = readNonce(m4RefreshFile)
+		reqNonce := readNonce(m4RefreshFile)
+		ackNonce := readNonce(m4RefreshAckFile)
+		// 仅当该请求已被回执(或无 nonce 的旧 touch 残留)才记为已消费,
+		// 防止写者刚启动时吞掉 UI/scan 已写入的首屏刷新请求。
+		if reqNonce == "" || reqNonce == ackNonce {
+			hasInitRefresh = true
+			lastRefreshNano = fi.ModTime().UnixNano()
+			lastRefreshNonce = reqNonce
+		}
 	}
-	refreshDue := func() (nonce string, due bool) {
+	refreshDue := func(now time.Time) (nonce string, modNano int64, due bool) {
 		fi, err := os.Stat(m4RefreshFile)
 		if err != nil {
-			return "", false
+			return "", 0, false
 		}
-		modNano := fi.ModTime().UnixNano()
+		modNano = fi.ModTime().UnixNano()
 		curNonce := readNonce(m4RefreshFile)
 		if hasInitRefresh && modNano == lastRefreshNano && curNonce == lastRefreshNonce {
-			return "", false
+			return "", 0, false
 		}
-		hasInitRefresh = true
-		lastRefreshNano = modNano
-		lastRefreshNonce = curNonce
-		return curNonce, true
+		if modNano == lastRefreshTryNano && curNonce == lastRefreshTryNonce &&
+			!lastRefreshTryAt.IsZero() && now.Sub(lastRefreshTryAt) < time.Second {
+			return "", 0, false
+		}
+		lastRefreshTryAt = now
+		lastRefreshTryNano = modNano
+		lastRefreshTryNonce = curNonce
+		return curNonce, modNano, true
 	}
 
 	for {
 		ticked := false
 		select {
 		case <-r.stopCh:
+			if r.stopCancel != nil {
+				r.stopCancel()
+			}
 			stopSub()
 			readWG.Wait()
 			resolveWG.Wait()
@@ -475,7 +527,7 @@ func (r *m4GoRunner) run() {
 			default:
 			}
 			if dirty {
-				lastWritten = r.writeOut(lastWritten, &lastStatsAt, &lastStatsMap, true)
+				lastWritten, _ = r.writeOutErr(lastWritten, &lastStatsAt, &lastStatsMap, false)
 			}
 			return
 		case <-resyncCh:
@@ -501,30 +553,61 @@ func (r *m4GoRunner) run() {
 			ticked = true
 			r.tickN.Add(1)
 			now := time.Now()
-			if nonce, due := refreshDue(); due {
-				if r.ifIdx == 0 {
-					r.refreshIface()
+			if nonce, modNano, due := refreshDue(now); due {
+				r.refreshIface()
+				var (
+					es      []neigh.Entry
+					dumpErr error
+				)
+				if r.ifIdx != 0 {
+					es, dumpErr = r.dumpIfFn(r.ifIdx)
+					if dumpErr == nil {
+						r.table.FullSync(es, now)
+					}
+				} else {
+					dumpErr = errors.New("ifindex unavailable")
 				}
-				if es, err := r.dumpIfFn(r.ifIdx); err == nil && r.ifIdx != 0 {
-					r.table.FullSync(es, now)
-				}
-				r.table.EvictOffline(now)
-				lastWritten = r.writeOut(lastWritten, &lastStatsAt, &lastStatsMap, true)
-				dirty = false
-				firstDirtyMs = 0
-				needResync = false
-				lastSync = now
-				if err := writeAtomic(m4RefreshAckFile, []byte(nonce+"\n")); err != nil {
-					logf("m4_owner: 写刷新回执失败: %v", err)
+				if dumpErr == nil {
+					r.table.EvictOffline(now)
+					var writeErr error
+					lastWritten, writeErr = r.writeOutErr(lastWritten, &lastStatsAt, &lastStatsMap, true)
+					needResync = false
+					lastSync = now
+					lastSyncAttempt = now
+					if writeErr == nil {
+						dirty = false
+						firstDirtyMs = 0
+						lastWriteMs = monoMs()
+						initialWritten = true
+						hasInitRefresh = true
+						lastRefreshNano = modNano
+						lastRefreshNonce = nonce
+						if nonce != "" {
+							if err := writeAtomic(m4RefreshAckFile, []byte(nonce+"\n")); err != nil {
+								logf("m4_owner: 写刷新回执失败: %v", err)
+							}
+						}
+					}
 				}
 			}
-			if now.Sub(lastSync) >= m4FullSyncEvery || (needResync && now.Sub(lastSync) >= time.Second) {
-				needResync = false
-				lastSync = now
+			syncDue := false
+			if lastSync.IsZero() {
+				syncDue = lastSyncAttempt.IsZero() || now.Sub(lastSyncAttempt) >= time.Second
+			} else if now.Sub(lastSync) >= m4FullSyncEvery {
+				syncDue = now.Sub(lastSyncAttempt) >= time.Second
+			} else if needResync && now.Sub(lastSync) >= time.Second {
+				syncDue = now.Sub(lastSyncAttempt) >= time.Second
+			}
+			if syncDue {
+				lastSyncAttempt = now
 				r.refreshIface()
-				if es, err := r.dumpIfFn(r.ifIdx); err == nil && r.ifIdx != 0 {
-					if r.table.FullSync(es, now) {
-						markDirty()
+				if r.ifIdx != 0 {
+					if es, dumpErr := r.dumpIfFn(r.ifIdx); dumpErr == nil {
+						needResync = false
+						lastSync = now
+						if r.table.FullSync(es, now) || !initialWritten {
+							markDirty()
+						}
 					}
 				}
 				if r.table.EvictOffline(now) > 0 {
@@ -550,7 +633,15 @@ func (r *m4GoRunner) run() {
 						resolveWG.Add(1)
 						go func(mac, ip string) {
 							defer resolveWG.Done()
+							defer func() {
+								inFlightMu.Lock()
+								delete(inFlight, mac)
+								inFlightMu.Unlock()
+							}()
 							hn, src := r.table.Full(mac, ip)
+							if r.stopCtx != nil && r.stopCtx.Err() != nil && r.hooks.Full == nil {
+								return
+							}
 							if r.table.ApplyResolution(mac, hn, src, time.Now()) {
 								select {
 								case resolved <- struct{}{}:
@@ -562,19 +653,20 @@ func (r *m4GoRunner) run() {
 									logf("m4_owner: hostname_cache 落盘失败: %v", err)
 								}
 							}
-							inFlightMu.Lock()
-							delete(inFlight, mac)
-							inFlightMu.Unlock()
 						}(mac, ip)
 					}
 				}
 			}
 			if dirty {
 				if nowMs := monoMs(); m4ShouldWrite(firstDirtyMs, lastEventMs, lastWriteMs, nowMs) {
-					lastWritten = r.writeOut(lastWritten, &lastStatsAt, &lastStatsMap, false)
-					dirty = false
-					firstDirtyMs = 0
-					lastWriteMs = monoMs()
+					var writeErr error
+					lastWritten, writeErr = r.writeOutErr(lastWritten, &lastStatsAt, &lastStatsMap, false)
+					if writeErr == nil {
+						dirty = false
+						firstDirtyMs = 0
+						lastWriteMs = monoMs()
+						initialWritten = true
+					}
 				}
 			}
 		}
@@ -596,30 +688,36 @@ func (r *m4GoRunner) refreshIface() {
 }
 
 func (r *m4GoRunner) writeOut(lastWritten []byte, lastStatsAt *time.Time, lastStatsMap *map[string][2]int64, force bool) []byte {
+	b, _ := r.writeOutErr(lastWritten, lastStatsAt, lastStatsMap, force)
+	return b
+}
+
+func (r *m4GoRunner) writeOutErr(lastWritten []byte, lastStatsAt *time.Time, lastStatsMap *map[string][2]int64, force bool) ([]byte, error) {
 	now := time.Now()
-	if force || now.Sub(*lastStatsAt) >= m4StatsTTL {
+	stopping := r.stopCtx != nil && r.stopCtx.Err() != nil
+	if !stopping && (force || now.Sub(*lastStatsAt) >= m4StatsTTL) {
 		if s, err := r.statsCmdFn(); err == nil {
 			*lastStatsMap, *lastStatsAt = s, now
 		}
 	}
 	b := r.table.RenderJSON(*lastStatsMap, r.blacklistFn())
 	if !force && string(b) == string(lastWritten) {
-		return lastWritten
+		return lastWritten, nil
 	}
 	out, tmp := m4DevicesJSON, m4DevicesTmpGo
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		m4GoWriteFails.Add(1)
 		logf("m4_owner: 写 %s 失败: %v", tmp, err)
-		return lastWritten
+		return lastWritten, err
 	}
 	_ = appendLine(m4GoWriteLog, time.Now().Format("2006-01-02T15:04:05")+": "+out)
 	if err := os.Rename(tmp, out); err != nil {
 		m4GoWriteFails.Add(1)
 		logf("m4_owner: rename %s 失败: %v", out, err)
-		return lastWritten
+		return lastWritten, err
 	}
 	m4GoWrites.Add(1)
-	return b
+	return b, nil
 }
 
 // ─── 纯函数 / 小工具(单测直接测) ─────────────────────────────────

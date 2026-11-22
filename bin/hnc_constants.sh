@@ -46,7 +46,7 @@ hnc_applim_mark_hex() {
     if [ "$_slot" -lt 1 ] || [ "$_slot" -gt 63 ]; then
         return 1
     fi
-    printf '0x%08x\n' $(( (_slot & 63) << 26 ))
+    printf '0x%02x000000\n' $(( (_slot & 63) << 2 ))
 }
 
 # 从 iptables -L/-S 输出的 mark 令牌解析 mid (1..99), 同时兼容:

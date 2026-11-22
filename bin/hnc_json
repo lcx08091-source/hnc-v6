@@ -86,7 +86,7 @@ _acquire_lock_dir() {
       rm -rf "$_ld" 2>/dev/null || true
     fi
     [ "$i" -gt 50 ] && { echo "hnc_json: lock timeout: $_ld" >&2; return 1; }
-    sleep 0.1
+    usleep 100000 2>/dev/null || sleep 0.1 2>/dev/null || sleep 1
   done
   echo $$ > "$_ld/pid" 2>/dev/null || true
   date +%s > "$_ld/ts" 2>/dev/null || true

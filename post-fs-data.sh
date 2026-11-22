@@ -3,7 +3,7 @@
 # 此阶段主要做目录初始化和文件权限设置
 
 # v3.5.0 alpha-0:PATH 健壮性(见 service.sh 同段注释)
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 # v5.9.3 BUG-009:引导脚本继承 magiskd/KSU 的 umask=0,裸 `mkdir -p` 建出来的
 # 目录就是 0777、裸 `>` 建出来的文件就是 0666 —— 仓库里一处 chmod 777 都没有,

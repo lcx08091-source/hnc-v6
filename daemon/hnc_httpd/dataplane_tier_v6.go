@@ -319,7 +319,11 @@ func (a *DataplaneActor) resetSocket(h dpTierHooks) {
 }
 
 func (a *DataplaneActor) invalidateAllReconcileLocked() int {
-	if a == nil || len(a.reconcileMap) == 0 {
+	if a == nil {
+		return 0
+	}
+	a.shaperSpec = v6ShaperDesiredState{}
+	if len(a.reconcileMap) == 0 {
 		return 0
 	}
 	n := len(a.reconcileMap)
@@ -389,6 +393,9 @@ func (a *DataplaneActor) invalidateReconcileLocked(hncDir, iface string) int {
 		} else {
 			delete(a.ifindexMap, iface)
 		}
+	}
+	if iface == "" || iface == "*" || a.shaperSpec.iface == iface || strings.HasPrefix(iface, "ifb") {
+		a.shaperSpec = v6ShaperDesiredState{}
 	}
 	removed := 0
 	for k := range a.reconcileMap {
@@ -678,9 +685,26 @@ func defaultCheckSchFQSysReady(hncDir string) bool {
 	}
 	if hncDir != "" {
 		if b, err := os.ReadFile(filepath.Join(hncDir, "run", "qdisc_caps.json")); err == nil && len(b) > 0 {
-			s := strings.ToLower(string(b))
-			if strings.Contains(s, `"sch_fq":true`) || strings.Contains(s, `"sch_fq": true`) || strings.Contains(s, `"fq":true`) {
-				return true
+			var qc struct {
+				Available []string `json:"available"`
+				Chosen    string   `json:"chosen"`
+				SchFQ     bool     `json:"sch_fq"`
+				FQ        bool     `json:"fq"`
+			}
+			if json.Unmarshal(b, &qc) == nil {
+				if qc.SchFQ || qc.FQ {
+					return true
+				}
+				chosen := strings.ToLower(strings.TrimSpace(qc.Chosen))
+				if chosen == "fq" || chosen == "sch_fq" {
+					return true
+				}
+				for _, item := range qc.Available {
+					name := strings.ToLower(strings.TrimSpace(item))
+					if name == "fq" || name == "sch_fq" {
+						return true
+					}
+				}
 			}
 		}
 	}
@@ -1242,11 +1266,31 @@ func effectiveRootRateBps(configuredKbps int) uint64 {
 }
 
 func resolveOrthogonalFilterMask(markVal, preferredMask uint32) uint32 {
-	if preferredMask != 0 && (markVal&preferredMask) == markVal && (markVal&preferredMask) != 0 {
+	const low16Mask = uint32(0x0000ffff)
+	// 严禁任何过滤器掩码或标记值侵占低 16 位 (Android netd netId 保护区)
+	markVal &^= low16Mask
+	if preferredMask != 0 && (preferredMask&low16Mask) == 0 && (markVal&preferredMask) == markVal && (markVal&preferredMask) != 0 {
 		return preferredMask
 	}
 	if markVal != 0 {
-		return markVal
+		// 按正交位域反推完整掩码, 严禁直接返回 markVal (防止 0x01000000/0x01000000 误匹配超集 0x03000000)
+		var inferred uint32
+		if (markVal & DefaultDevMarkMask) != 0 {
+			inferred |= DefaultDevMarkMask
+		}
+		if (markVal & DefaultAppQoSMarkMask) != 0 {
+			inferred |= DefaultAppQoSMarkMask
+		}
+		if (markVal & DefaultAppLimitMarkMask) != 0 {
+			inferred |= DefaultAppLimitMarkMask
+		}
+		if inferred != 0 {
+			return inferred
+		}
+		return DefaultConnmarkMask
+	}
+	if preferredMask != 0 && (preferredMask&low16Mask) == 0 {
+		return preferredMask
 	}
 	return DefaultAppQoSMarkMask
 }

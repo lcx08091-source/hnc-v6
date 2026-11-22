@@ -58,6 +58,12 @@ rebind_dpi(){
 validate_rules() {
     f="$1"
     [ -s "$f" ] || return 1
+    _jg=""
+    for _c in "$HNC_DIR/bin/json_guard.sh" "$MODDIR/bin/json_guard.sh" "${0%/*}/json_guard.sh"; do
+        [ -f "$_c" ] && { _jg="$_c"; break; }
+    done
+    [ -n "$_jg" ] || return 1
+    sh "$_jg" "$f" >/dev/null 2>&1 || return 1
     grep -q '"rules"[[:space:]]*:' "$f" 2>/dev/null || return 1
     first=$(tr -d ' \t\r\n' < "$f" | cut -c1 2>/dev/null)
     [ "$first" = "{" ] || return 1
@@ -65,7 +71,8 @@ validate_rules() {
 }
 
 get_release_meta() {
-    RELEASE_JSON=$(curl -sL --connect-timeout 10 --max-time 30 \
+    case "$API_URL" in https://*) ;; *) fail "refusing non-HTTPS API URL" ;; esac
+    RELEASE_JSON=$(curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 \
         -H "Accept: application/vnd.github+json" "$API_URL" 2>/dev/null) \
         || fail "cannot reach $API_URL"
     [ -n "$RELEASE_JSON" ] || fail "empty release response"
@@ -98,33 +105,67 @@ case "$1" in
         exit 0
     fi
     [ -n "$DL_URL" ] || fail "release $REMOTE_VERSION has no dpi-rules.zip attachment"
+    case "$DL_URL" in https://*) ;; *) fail "refusing non-HTTPS download URL: $DL_URL" ;; esac
+    [ -n "$SHA_URL" ] || fail "release $REMOTE_VERSION has no dpi-rules.zip.sha256 attachment"
+    case "$SHA_URL" in https://*) ;; *) fail "refusing non-HTTPS sha256 URL: $SHA_URL" ;; esac
     log "install from $DL_URL (current=$CUR remote=$REMOTE_VERSION)"
 
     mkdir -p "$WORK" 2>/dev/null || fail "mkdir $WORK failed"
-    curl -sL --connect-timeout 10 --max-time 120 -o "$WORK/dpi-rules.zip" "$DL_URL" \
+    curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 120 \
+        -o "$WORK/dpi-rules.zip" "$DL_URL" \
         || fail "download zip failed"
     [ -s "$WORK/dpi-rules.zip" ] || fail "downloaded zip is empty"
 
-    if [ -n "$SHA_URL" ]; then
-        curl -sL --connect-timeout 10 --max-time 30 -o "$WORK/rules.sha256" "$SHA_URL" 2>/dev/null
-        if [ -s "$WORK/rules.sha256" ]; then
-            EXPECT=$(cut -d' ' -f1 "$WORK/rules.sha256" 2>/dev/null)
-            ACTUAL=$(sha256sum "$WORK/dpi-rules.zip" 2>/dev/null | cut -d' ' -f1)
-            [ -n "$ACTUAL" ] || ACTUAL=$(shasum -a 256 "$WORK/dpi-rules.zip" 2>/dev/null | cut -d' ' -f1)
-            if [ -n "$EXPECT" ] && [ "$ACTUAL" != "$EXPECT" ]; then
-                fail "sha256 mismatch: expected $EXPECT got $ACTUAL"
-            fi
-            log "sha256 ok: $ACTUAL"
-        fi
+    curl -fsSL --proto '=https' --proto-redir '=https' --connect-timeout 10 --max-time 30 \
+        -o "$WORK/rules.sha256" "$SHA_URL" 2>/dev/null \
+        || fail "download sha256 failed"
+    [ -s "$WORK/rules.sha256" ] || fail "downloaded sha256 is empty"
+    EXPECT=$(awk '{print tolower($1); exit}' "$WORK/rules.sha256" 2>/dev/null)
+    printf '%s' "$EXPECT" | grep -qE '^[0-9a-f]{64}$' || fail "invalid sha256 digest in manifest"
+    ACTUAL=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        ACTUAL=$(sha256sum "$WORK/dpi-rules.zip" 2>/dev/null | awk '{print tolower($1); exit}')
+    elif command -v shasum >/dev/null 2>&1; then
+        ACTUAL=$(shasum -a 256 "$WORK/dpi-rules.zip" 2>/dev/null | awk '{print tolower($1); exit}')
+    else
+        fail "sha256sum/shasum unavailable; refusing unverified package"
     fi
+    printf '%s' "$ACTUAL" | grep -qE '^[0-9a-f]{64}$' || fail "failed to compute package sha256"
+    [ "$ACTUAL" = "$EXPECT" ] || fail "sha256 mismatch: expected $EXPECT got $ACTUAL"
+    log "sha256 ok: $ACTUAL"
 
-    # 解包: zip 里应有 dpi_rules.json(全量规则集)。toybox 无 unzip 时的兜底
-    # 是 Python —— Android 无; 最终兜底: 让用户通过 WebUI 导入。检测可用工具。
+    # 解包前逐条检查 zip 路径(拒绝绝对路径与 ".." 防 Zip Slip); 校验仅提取普通文件
     if command -v unzip >/dev/null 2>&1; then
-        unzip -o -q "$WORK/dpi-rules.zip" -d "$WORK/x" 2>/dev/null || fail "unzip failed"
-        NEWFILE=$(find "$WORK/x" \( -name 'dpi_rules.json' -o -name '*.json' \) 2>/dev/null | head -n 1)
-        [ -n "$NEWFILE" ] && [ -s "$NEWFILE" ] || fail "zip has no rules json"
-        cp -f "$NEWFILE" "$WORK/rules.json" || fail "copy extracted rules failed"
+        _zip_list="$WORK/zip.list"
+        if ! unzip -Z1 "$WORK/dpi-rules.zip" > "$_zip_list" 2>/dev/null || [ ! -s "$_zip_list" ]; then
+            unzip -l "$WORK/dpi-rules.zip" 2>/dev/null \
+                | awk '/^-+/{s++; next} s==1 && NF>=4 { sub(/^[[:space:]]*[0-9]+[[:space:]]+[^[:space:]]+[[:space:]]+[^[:space:]]+[[:space:]]+/, ""); print }' \
+                > "$_zip_list" 2>/dev/null
+        fi
+        [ -s "$_zip_list" ] || fail "cannot inspect zip entries"
+        _target_entry=""
+        _fallback_entry=""
+        while IFS= read -r _ze; do
+            [ -n "$_ze" ] || continue
+            case "$_ze" in
+                /*|..|../*|*/..|*/../*|*\\*)
+                    fail "unsafe zip entry path rejected: $_ze"
+                    ;;
+                */)
+                    continue
+                    ;;
+                dpi_rules.json|*/dpi_rules.json)
+                    [ -z "$_target_entry" ] && _target_entry="$_ze"
+                    ;;
+                *.json)
+                    [ -z "$_fallback_entry" ] && _fallback_entry="$_ze"
+                    ;;
+            esac
+        done < "$_zip_list"
+        [ -z "$_target_entry" ] && _target_entry="$_fallback_entry"
+        [ -n "$_target_entry" ] || fail "zip has no rules json"
+        unzip -p "$WORK/dpi-rules.zip" "$_target_entry" > "$WORK/rules.json" 2>/dev/null || fail "unzip extract failed"
+        [ -s "$WORK/rules.json" ] || fail "extracted rules json is empty"
     else
         fail "unzip not available on this ROM; please import via WebUI instead"
     fi

@@ -75,16 +75,48 @@ func (s *server) rollbackStatus() *rollbackOut {
 	return out
 }
 
-// vcName versionCode(5MMPRRR: 主.次.补丁 + rc 序号, 000 = 正式版)转成
-// 版本名: 5290001 → "5.29.0-rc1", 5180000 → "5.18.0"。认不出的原样返回。
+// vcName versionCode 转成版本名(不带前导 v, 前端横幅与自检文案自行补 v):
+//   - v5.x 旧号段 (5MMPRRR): 5290001 → "5.29.0-rc1", 5180000 → "5.18.0"
+//   - v6.x 新号段 (MMMPPPP, major >= 6):
+//     正式版 (PPPP < 9100):  6000000 → "6.0.0", 6000001 → "6.0.1", 6010000 → "6.1.0"
+//     预发布走廊 (PPPP >= 9100, 对应下一 minor):
+//     9101..9199 → alpha.N (如 6009101 → "6.1.0-alpha.1")
+//     9201..9299 → beta.N  (如 6009201 → "6.1.0-beta.1")
+//     9301..9999 → rc.N    (如 6009301 → "6.1.0-rc.1")
+//
+// 认不出的原样返回。
 func vcName(code string) string {
 	if len(code) != 7 {
 		return code
 	}
-	if _, err := strconv.Atoi(code); err != nil {
-		return code
+	for i := 0; i < len(code); i++ {
+		if code[i] < '0' || code[i] > '9' {
+			return code
+		}
 	}
+	major := int(code[0] - '0')
 	minor, _ := strconv.Atoi(code[1:3])
+	if major >= 6 {
+		rem, _ := strconv.Atoi(code[3:7])
+		if rem < 9100 {
+			return fmt.Sprintf("%d.%d.%d", major, minor, rem)
+		}
+		nextMajor, nextMinor := major, minor+1
+		if nextMinor >= 100 {
+			nextMajor++
+			nextMinor = 0
+		}
+		switch {
+		case rem >= 9101 && rem <= 9199:
+			return fmt.Sprintf("%d.%d.0-alpha.%d", nextMajor, nextMinor, rem-9100)
+		case rem >= 9201 && rem <= 9299:
+			return fmt.Sprintf("%d.%d.0-beta.%d", nextMajor, nextMinor, rem-9200)
+		case rem >= 9301 && rem <= 9999:
+			return fmt.Sprintf("%d.%d.0-rc.%d", nextMajor, nextMinor, rem-9300)
+		default:
+			return code
+		}
+	}
 	rc, _ := strconv.Atoi(code[4:7])
 	name := fmt.Sprintf("%c.%d.%c", code[0], minor, code[3])
 	if rc > 0 {

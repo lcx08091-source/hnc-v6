@@ -249,7 +249,7 @@ function morphAttrs(a, b) {
   for (i = a.attributes.length - 1; i >= 0; i--) {
     at = a.attributes[i].name;
     if (b.hasAttribute(at) || (at === 'style' && a.classList.contains('thumb'))) continue;
-    if (frozen && (at === 'class' || at === 'aria-checked')) continue;
+    if (frozen && (at === 'class' || at === 'aria-checked' || at === 'disabled' || at === 'aria-busy')) continue;
     a.removeAttribute(at);
   }
   for (i = 0; i < b.attributes.length; i++) {
@@ -261,7 +261,7 @@ function morphAttrs(a, b) {
       a.setAttribute('class', at.value + (keep.length ? ' ' + keep.join(' ') : ''));
       continue;
     }
-    if (frozen && at.name === 'aria-checked') continue;
+    if (frozen && (at.name === 'aria-checked' || at.name === 'disabled' || at.name === 'aria-busy')) continue;
     if (at.name === 'style' && a.classList.contains('thumb')) continue;
     a.setAttribute(at.name, at.value);
     if (a.nodeName === 'INPUT' && at.name === 'value' && a !== document.activeElement) a.value = at.value;
@@ -624,7 +624,7 @@ function appQosOf(d) { return d.app_qos === true || d.app_qos === 'true'; }
 /* 设备显示名: 主机名 > name > 厂商 > MAC; 手动命名原样用, 其余跳过垃圾名 */
 function devName(d, mac) {
   var hn = d.hostname_src === 'manual' ? d.hostname : (isJunkName(d.hostname) ? '' : d.hostname);
-  return hn || (isJunkName(d.name) ? '' : d.name) || d.vendor || mac;
+  return String(hn || (isJunkName(d.name) ? '' : d.name) || d.vendor || mac || '');
 }
 function mapDevice(d) {
   var mac = String(d.mac || '').toLowerCase();
@@ -832,6 +832,8 @@ function applyVectorSyncPayload(r) {
   if (lvObj) {
     var verStr = (hObj && hObj.backend_version) || r.version || r.backend_version || '';
     if (verStr && !lvObj.backend_version) lvObj.backend_version = verStr;
+    var verCode = (hObj && (hObj.backend_version_code || hObj.version_code)) || r.version_code || r.backend_version_code || '';
+    if (verCode && !lvObj.backend_version_code) lvObj.backend_version_code = verCode;
     if (rawDevArr && !lvObj.devices_sig) {
       var vSig = computeVecDevSig(rawDevArr);
       if (S.vecDevSig && S.vecDevSig !== vSig) lvObj.devices_sig = 'vsync:' + vSig;

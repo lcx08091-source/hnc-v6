@@ -38,7 +38,8 @@ STATE="$HNC_DIR/run/webui_guard.state"
 LOG="$HNC_DIR/logs/service.log"
 CHAIN=HNC_WEBUI
 PORTS=${HNC_WEBUI_PORTS:-"8443 8080 8444"}
-CELL_IFACES="rmnet+ ccmni+ wwan+ seth_+ sipa_eth+"
+CELL_IFACES="rmnet+ ccmni+ wwan+ seth_+ sipa_eth+ v4-rmnet+ clat+"
+UPSTREAM_TUN_IFACES="tun+ wg+ ppp+ tailscale+"
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
 
@@ -128,6 +129,10 @@ build() {  # $1=iptables 命令  $2=4|6
     done
     case "$MODE" in
         all)
+            for _c in $UPSTREAM_TUN_IFACES; do
+                run $_T -A $CHAIN -i "$_c" -p tcp -j REJECT --reject-with tcp-reset \
+                    || run $_T -A $CHAIN -i "$_c" -j DROP
+            done
             run $_T -A $CHAIN -j RETURN || return 1
             ;;
         allowlist)

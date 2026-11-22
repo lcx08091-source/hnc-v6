@@ -214,13 +214,23 @@ func Dump(family int) ([]Entry, error) {
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return nil, fmt.Errorf("neigh: bind: %w", err)
 	}
-	if err := syscall.Sendto(fd, buildDumpReq(family, 0), 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		return nil, fmt.Errorf("neigh: send: %w", err)
+	for {
+		err := syscall.Sendto(fd, buildDumpReq(family, 0), 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK})
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("neigh: send: %w", err)
+		}
+		break
 	}
 	var out []Entry
 	buf := make([]byte, 1<<16)
 	for {
 		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("neigh: recv: %w", err)
 		}

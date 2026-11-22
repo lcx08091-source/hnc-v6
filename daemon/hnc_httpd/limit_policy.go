@@ -478,6 +478,7 @@ type limitCtl struct {
 	usageMonthAt time.Time  // v5.26 T4: /api/usage_month 最近一次被请求的时刻
 	guard        clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
 	dirty        bool
+	usageDirty   bool
 	savedAt      time.Time
 	logged       map[string]string
 
@@ -533,14 +534,14 @@ func (c *limitCtl) savePoliciesLocked() error {
 }
 
 func (c *limitCtl) saveStateLocked(now time.Time, force bool) {
-	if !force && !c.dirty && now.Sub(c.savedAt) < limitStatePersist {
+	if !force && !c.dirty && !(c.usageDirty && now.Sub(c.savedAt) >= limitStatePersist) {
 		return
 	}
 	if err := writeJSONAtomic(c.statePath(), c.st); err != nil {
 		log.Printf("limitctl: save state: %v", err)
 		return
 	}
-	c.dirty, c.savedAt = false, now
+	c.dirty, c.usageDirty, c.savedAt = false, false, now
 }
 
 // Poke 让控制器尽快跑一轮(非阻塞)。nil 安全。
@@ -824,11 +825,20 @@ func (c *limitCtl) tick(now time.Time) {
 			if limitSkipMAC(mac) || !o.hasCnt {
 				continue
 			}
-			c.devState(mac).Usage.add(o.rx, o.tx, dayKey, monKey) // 用量按 limitStatePersist 周期落盘
+			dsRec := c.devState(mac)
+			before := dsRec.Usage
+			dsRec.Usage.add(o.rx, o.tx, dayKey, monKey) // 用量按 limitStatePersist 周期落盘
+			if dsRec.Usage != before {
+				c.usageDirty = true
+			}
 		}
 	}
 	for _, s := range c.st.Devices {
+		before := s.Usage
 		s.Usage.rollover(dayKey, monKey)
+		if s.Usage != before {
+			c.usageDirty = true
+		}
 	}
 	// 2) 历史下限(DPI 增量文件), 15 分钟 / 周期切换时刷新
 	hk := dayKey + "|" + monKey

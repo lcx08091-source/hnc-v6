@@ -29,6 +29,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"hnc.io/dpid/hostname"
@@ -171,19 +172,30 @@ type cacheEntry struct {
 // Resolve 完整六级链(同 C resolve_hostname 的顺序与输出)。
 // ip 为空时跳过 mDNS(与 C 一致)。
 func (r *Resolver) Resolve(mac, ip string) (string, string) {
+	return r.ResolveContext(context.Background(), mac, ip)
+}
+
+// ResolveContext 带上下文取消的完整六级链; ctx 取消后立即中止在途外部子进程
+// (dumpsys / mdns_resolve), 不阻塞看门狗停机。
+func (r *Resolver) ResolveContext(ctx context.Context, mac, ip string) (string, string) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	mac = strings.ToLower(strings.TrimSpace(mac))
 	// 1. 手动名
 	if hn, ok := LookupManual(mac, r.NamesPath); ok {
 		return hn, "manual"
 	}
 	// 2. DHCP(被动数据, ~35ms; 超时 500ms)
-	if hn, ok := r.tryDHCP(mac); ok {
-		r.CacheUpdate(mac, hn, "dhcp")
-		return hn, "dhcp"
+	if ctx.Err() == nil {
+		if hn, ok := r.tryDHCP(ctx, mac); ok {
+			r.CacheUpdate(mac, hn, "dhcp")
+			return hn, "dhcp"
+		}
 	}
 	// 3. mDNS(只在有 IP 时; 二进制自带 -t 800)
-	if ip != "" {
-		if hn, ok := r.tryMDNS(ip); ok {
+	if ip != "" && ctx.Err() == nil {
+		if hn, ok := r.tryMDNS(ctx, ip); ok {
 			r.CacheUpdate(mac, hn, "mdns")
 			return hn, "mdns"
 		}
@@ -310,8 +322,8 @@ func appendRune(out []byte, r rune) []byte {
 // dumpsys network_stack 输出里, 同一行既有 MAC(大小写不敏感)又有
 // "hostname: ", 取提取值(到 \r / , / 行尾, 去尾部空白), 多条取最后一条
 // 非垃圾名。
-func (r *Resolver) tryDHCP(mac string) (string, bool) {
-	out := r.dhcpOut()
+func (r *Resolver) tryDHCP(ctx context.Context, mac string) (string, bool) {
+	out := r.dhcpOut(ctx)
 	if len(out) == 0 {
 		return "", false
 	}
@@ -341,14 +353,30 @@ func (r *Resolver) tryDHCP(mac string) (string, bool) {
 	return latest, true
 }
 
-func (r *Resolver) dhcpOut() []byte {
+func (r *Resolver) dhcpOut(ctx context.Context) []byte {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return nil
+	}
 	if r.RunDumpsys != nil {
 		b, _ := r.RunDumpsys()
 		return b
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), dumpsysTimeout)
+	subCtx, cancel := context.WithTimeout(ctx, dumpsysTimeout)
 	defer cancel()
-	b, err := exec.CommandContext(ctx, "dumpsys", "network_stack").Output()
+	cmd := exec.CommandContext(subCtx, "dumpsys", "network_stack")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = time.Second
+	b, err := cmd.Output()
 	if err != nil {
 		return nil
 	}
@@ -357,7 +385,13 @@ func (r *Resolver) dhcpOut() []byte {
 
 // tryMDNS 与 try_mdns_resolve 一致: exit 0 才信输出, 去尾部换行,
 // 垃圾名当作没解析到。
-func (r *Resolver) tryMDNS(ip string) (string, bool) {
+func (r *Resolver) tryMDNS(ctx context.Context, ip string) (string, bool) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Err() != nil {
+		return "", false
+	}
 	var (
 		out []byte
 		err error
@@ -374,9 +408,19 @@ func (r *Resolver) tryMDNS(ip string) (string, bool) {
 		if pip := net.ParseIP(ip); pip == nil || pip.To4() == nil { // 与 C 的 inet_pton 防御一致
 			return "", false
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), mdnsTimeout)
+		subCtx, cancel := context.WithTimeout(ctx, mdnsTimeout)
 		defer cancel()
-		out, err = exec.CommandContext(ctx, r.MDNSBin, "-t", "800", ip).Output()
+		cmd := exec.CommandContext(subCtx, r.MDNSBin, "-t", "800", ip)
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil && cmd.Process.Pid > 0 {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				return cmd.Process.Kill()
+			}
+			return nil
+		}
+		cmd.WaitDelay = time.Second
+		out, err = cmd.Output()
 		if err != nil {
 			return "", false
 		}

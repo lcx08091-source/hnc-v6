@@ -12,8 +12,8 @@
 #   1 = some failed
 #   2 = test framework error
 
-# 强制干净 PATH(防止 user app 干扰)
-export PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin
+# 强制干净 PATH(防止 user app 干扰; 保留 Android 沙箱 $PREFIX/bin 在 /system/bin 之前)
+export PATH="${PREFIX:+$PREFIX/bin:}/system/bin:/system/xbin:/vendor/bin:/usr/local/bin:/usr/bin:/bin"
 
 # 仓库根目录(test/ 的父目录)
 HNC_REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -67,12 +67,17 @@ for test_file in $TEST_FILES; do
     echo "── $rel_path ──"
     # 在 subshell 里跑,避免测试文件污染主 shell
     # 但 TEST_PASS / TEST_FAIL 等计数需要持久化 → 用临时文件传递
-    # v3.5.0 alpha-fix: Android /tmp 不存在,用 /data/local/tmp
-    if [ -d /data/local/tmp ]; then
-        counter_file="/data/local/tmp/hnc_test_counters_$$"
-    else
-        counter_file="/tmp/hnc_test_counters_$$"
-    fi
+    # 依次探测可写目录: Android 非 root 沙箱 /data/local/tmp 不可写, 需校验 -w
+    _counter_dir=""
+    for _d in "${TMPDIR:-}" /data/local/tmp /tmp "${HOME:-}"; do
+        if [ -n "$_d" ] && [ -d "$_d" ] && [ -w "$_d" ]; then
+            _counter_dir="$_d"
+            break
+        fi
+    done
+    [ -n "$_counter_dir" ] || _counter_dir="."
+    counter_file="$_counter_dir/hnc_test_counters_$$"
+    rm -f "$counter_file"
     (
         . "$HNC_REPO_ROOT/test/lib.sh"
         # rc30.12.14: 给测试一个可靠的当前测试文件路径.

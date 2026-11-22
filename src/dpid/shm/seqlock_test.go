@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -236,6 +237,7 @@ func TestSeqLockMax64DevicesCapAndConcurrentStress(t *testing.T) {
 				Flags:       FlagOnline,
 			}
 			_ = w.Write(MonotonicNs(), uint32(step%100), step, []DeviceSlot{d})
+			runtime.Gosched()
 		}
 	}()
 

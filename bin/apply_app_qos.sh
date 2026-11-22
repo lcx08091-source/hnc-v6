@@ -11,7 +11,7 @@
 #   - 五锁统一协议: 修改内核 tc 队列树期间协调获取 run/tc_action.lock (兼容 HNC_TC_LOCK_HELD 父子重入与超时防死锁)。
 
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
-    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
 RUN="$HNC_DIR/run"
@@ -42,7 +42,9 @@ APPLIM_MASK="${HNC_APPLIM_MASK:-0xfc000000}"
 ROOT_PREF=50
 ROOT_PREF_V6=51
 INNER_PREF_FW=2
+INNER_PREF_FW_V6=4
 INNER_PREF_ALL=9
+INNER_PREF_ALL_V6=10
 
 mkdir -p "$HNC_DIR/logs" "$RUN" 2>/dev/null
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null)] $*" >> "$LOG" 2>/dev/null; }
@@ -87,7 +89,7 @@ restore_applim_default_child() {
         || tc qdisc replace dev "$iface" parent "1:$def_hex" handle "${def_hex}:" pfifo 2>/dev/null || true
     if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null; then
         tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
-        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
     fi
 }
 
@@ -224,9 +226,11 @@ teardown_dev() {
     cid=$(class_for_mid "$mid")
     dm=$(dev_mark "$mid")
     if has_applim_on_dev "$iface" "$cid"; then
-        # 该设备仍有单应用限速 prio 1 活跃: 仅精确拆除 prio 2 与 prio 9, 绝不误伤 prio 1!
+        # 该设备仍有单应用限速 prio 1/3 活跃: 仅精确拆除 prio 2/4 与 prio 9/10, 绝不误伤 prio 1/3!
         tc filter del dev "$iface" parent "1:$cid" prio "$INNER_PREF_FW" 2>/dev/null || true
+        tc filter del dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW_V6" 2>/dev/null || true
         tc filter del dev "$iface" parent "1:$cid" prio "$INNER_PREF_ALL" 2>/dev/null || true
+        tc filter del dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" 2>/dev/null || true
     else
         tc filter del dev "$iface" parent "1:$cid" 2>/dev/null || true
     fi
@@ -310,7 +314,9 @@ build_dev() {
     # 若之前未挂子类, 先摘除 1:<cid> 上的直接叶子 qdisc; 若有 app_limits 1:9eXX 兜底子类, 将其替换为三档 1:a0XX
     if has_applim_on_dev "$iface" "$cid"; then
         tc filter del dev "$iface" parent "1:$cid" prio "$INNER_PREF_FW" 2>/dev/null || true
+        tc filter del dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW_V6" 2>/dev/null || true
         tc filter del dev "$iface" parent "1:$cid" prio "$INNER_PREF_ALL" 2>/dev/null || true
+        tc filter del dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" 2>/dev/null || true
         tc class del dev "$iface" classid "1:$def_hex" 2>/dev/null || true
     else
         tc qdisc del dev "$iface" parent "1:$cid" 2>/dev/null || true
@@ -330,15 +336,15 @@ build_dev() {
 
     if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null; then
         tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null || return 1
-        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null || true
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW_V6" handle "$TIER_RT/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 1)" 2>/dev/null || true
     fi
     if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_FW" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null; then
         tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_FW" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null || return 1
-        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null || true
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW_V6" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null || true
     fi
     if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null; then
         tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || return 1
-        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || true
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || true
     fi
 
     tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
@@ -471,16 +477,16 @@ ipt_build() {
     [ "$IPV6_OK" = 1 ] && v6_neigh=$(ip -6 neigh show dev "$IFACE" 2>/dev/null | awk '
         $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $NF != "FAILED" && $NF != "INCOMPLETE" {
             for (i = 2; i < NF; i++) if ($i == "lladdr") print tolower($(i+1)), tolower($1)
-        }')
+        }' | tr -d '\r' | tr '\n' ';')
 
     awk -v iface="$IFACE" -v cm="$CHAIN_MARK" -v ch="$CHAIN" -v ci="$CHAIN_IP" \
         -v dmask="$DEV_MASK" -v amask="$APPLIM_MASK" -v rt="$TIER_RT" -v bg="$TIER_BG" -v tmask="$TIER_MASK" \
         -v v4f="$v4_batch" -v v6f="$v6_batch" -v has6="$IPV6_OK" -v neigh="$v6_neigh" '
         BEGIN {
             if (has6 == 1 && neigh != "") {
-                nn = split(neigh, lines, "\n")
+                nn = split(neigh, arr, ";")
                 for (k = 1; k <= nn; k++) {
-                    if (split(lines[k], kv, " ") == 2 && mac6_cnt[kv[1]] < 8) {
+                    if (split(arr[k], kv, " ") == 2 && mac6_cnt[kv[1]] < 8) {
                         mac6_cnt[kv[1]]++
                         mac6[kv[1], mac6_cnt[kv[1]]] = kv[2]
                     }
@@ -566,10 +572,24 @@ ipt_build() {
     done
 }
 
+_aq_hash_stream() {
+    if command -v cksum >/dev/null 2>&1; then
+        cksum | awk 'NF>=2 && $1!="" {print $1 "-" $2}'
+    elif command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | awk 'NF>=1 && $1!="" {print $1}'
+    elif command -v md5sum >/dev/null 2>&1; then
+        md5sum | awk 'NF>=1 && $1!="" {print $1}'
+    else
+        wc -c | awk 'NF>=1 && $1~/^[0-9]+$/ {print "wc-" $1}'
+    fi
+}
+
 if [ "$1" = "teardown" ]; then
     [ -n "$2" ] && [ -n "$3" ] || exit 1
     aq_lock || exit 1
-    trap 'aq_tc_unlock; aq_unlock' EXIT INT TERM
+    trap 'aq_tc_unlock; aq_unlock' EXIT
+    trap 'aq_tc_unlock; aq_unlock; trap - EXIT; exit 143' TERM
+    trap 'aq_tc_unlock; aq_unlock; trap - EXIT; exit 130' INT
     aq_tc_lock || { log "WARN: tc_action.lock busy on teardown $2 $3"; exit 1; }
     teardown_dev "$2" "$3"
     cid=$(class_for_mid "$3")
@@ -602,17 +622,19 @@ if [ "${NDEV:-0}" -eq 0 ] && [ ! -f "$STATE" ]; then
 fi
 
 aq_lock || exit 0
-trap 'aq_tc_unlock; aq_unlock' EXIT INT TERM
+trap 'aq_tc_unlock; aq_unlock' EXIT
+trap 'aq_tc_unlock; aq_unlock; trap - EXIT; exit 143' TERM
+trap 'aq_tc_unlock; aq_unlock; trap - EXIT; exit 130' INT
 probe_ipv6
 
 MIDS=$(awk '$1 == "dev" { print $2 }' "$PLAN" 2>/dev/null | tr '\n' ' ')
-TCSIG=$(printf '%s|%s' "$IFACE" "$MIDS" | cksum | awk '{print $1 "-" $2}')
-NEWSIG=$(cksum < "$PLAN" 2>/dev/null | awk '{print $1 "-" $2}')
+TCSIG=$(printf '%s|%s' "$IFACE" "$MIDS" | _aq_hash_stream)
+NEWSIG=$(_aq_hash_stream < "$PLAN" 2>/dev/null)
 OLD_TCSIG=$(sed -n 1p "$SIG" 2>/dev/null)
 OLD_IPTSIG=$(sed -n 2p "$SIG" 2>/dev/null)
 TC_OK=0
 BUILD_ERR=0
-if [ "${NDEV:-0}" -gt 0 ] && [ -f "$STATE" ] && [ "$OLD_TCSIG" = "$TCSIG" ]; then
+if [ "${NDEV:-0}" -gt 0 ] && [ -f "$STATE" ] && [ -n "$TCSIG" ] && [ "$OLD_TCSIG" = "$TCSIG" ]; then
     # shellcheck disable=SC2086
     children_ok "$IFACE" $MIDS && TC_OK=1
 fi
@@ -667,13 +689,13 @@ if [ "$TC_OK" != 1 ]; then
 fi
 
 if [ -f "$STATE" ]; then
-    if [ "$OLD_IPTSIG" != "$NEWSIG" ] \
+    if [ -z "$NEWSIG" ] || [ "$OLD_IPTSIG" != "$NEWSIG" ] \
        || ! $IPT -t mangle -C FORWARD -j "$CHAIN_MARK" 2>/dev/null \
        || ! $IPT -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null \
        || { [ "$IPV6_OK" = 1 ] && { ! $IP6T -t mangle -C FORWARD -j "$CHAIN_MARK" 2>/dev/null || ! $IP6T -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null; }; }; then
         ipt_build
     fi
-    if [ "$BUILD_ERR" = 0 ]; then
+    if [ "$BUILD_ERR" = 0 ] && [ -n "$TCSIG" ] && [ -n "$NEWSIG" ]; then
         printf '%s\n%s\n' "$TCSIG" "$NEWSIG" > "$SIG"
     else
         rm -f "$SIG" 2>/dev/null

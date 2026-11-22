@@ -30,6 +30,7 @@ done
 unset _bf
 
 # 删除运行状态 (pid / lock / pair pending / bpf 状态)
+umount -l "$HNC/run" 2>/dev/null || true
 rm -rf "$HNC/run" 2>/dev/null
 
 # 不删 /data/local/hnc/ 本身 - 让用户手动删 (保留 logs 供排查)

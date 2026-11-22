@@ -51,10 +51,12 @@ gseed() {
     echo "ACTIVE:wlan2" > "$HNC_TEST_DIR/run/hnc_state"
     printf '%s\n' "${1:-{\"devices\":{}}}" > "$HNC_TEST_DIR/data/rules.json"
     echo IDLE > "$HNC_TEST_DIR/check_state"
-    cat > "$HNC_TEST_DIR/bin/hnc_ipc" <<'STUB'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'STUB'
 echo "OK:OK"
 STUB
+    } > "$HNC_TEST_DIR/bin/hnc_ipc"
     chmod +x "$HNC_TEST_DIR/bin/hnc_ipc"
 }
 grun() {

@@ -27,7 +27,7 @@ if [ ! -f "$MODULE_PROP" ]; then
     exit 1
 fi
 
-VERSION=$(grep '^version=' "$MODULE_PROP" | head -1 | sed 's/^version=//')
+VERSION=$(grep '^version=' "$MODULE_PROP" | head -n 1 | sed 's/^version=//' | tr -d '\r')
 DATE=$(date +%Y-%m-%d 2>/dev/null || echo "unknown-date")
 
 if [ -z "$VERSION" ]; then
@@ -57,7 +57,7 @@ for relpath in $DOC_FILES; do
 
     if [ "$CHECK_ONLY" = "1" ]; then
         # check 模式: 看占位符是否还在 (CI 中如果 inject 失败, --check 会报错)
-        if grep -q "{{VERSION}}\|{{DATE}}" "$f"; then
+        if grep -qE '\{\{(VERSION|DATE)\}\}' "$f"; then
             echo "[FAIL] $relpath still has unresolved placeholders ({{VERSION}} or {{DATE}})"
             FAIL=$((FAIL+1))
         else
@@ -68,7 +68,7 @@ for relpath in $DOC_FILES; do
 
     # inject 模式: 实际替换
     # 用 ~ 作为 sed 分隔符 (version 号里可能有 / 但不会有 ~)
-    if grep -q "{{VERSION}}\|{{DATE}}" "$f"; then
+    if grep -qE '\{\{(VERSION|DATE)\}\}' "$f"; then
         sed -i.bak \
             -e "s~{{VERSION}}~$VERSION~g" \
             -e "s~{{DATE}}~$DATE~g" \

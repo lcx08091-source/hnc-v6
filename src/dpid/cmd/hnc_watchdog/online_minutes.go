@@ -106,12 +106,20 @@ func creditSplit(now time.Time, credit time.Duration) map[string]int {
 
 // sample 到点(距上次 ≥ onlineSampleEvery)则采样一次; 顺带判断该不该落盘。
 func (a *onlineAccum) sample(now time.Time) {
-	since := now.Sub(a.last)
-	if !a.last.IsZero() && since >= 0 && since < onlineSampleEvery {
-		return
-	}
 	if !a.clockOK(now) {
 		return
+	}
+	var since time.Duration
+	if !a.last.IsZero() {
+		since = now.Sub(a.last)
+		if since < 0 {
+			// 时钟回拨: 重置采样基线不记账, 绝不白送 5 分钟。
+			a.last = now
+			return
+		}
+		if since < onlineSampleEvery {
+			return
+		}
 	}
 	credit := onlineSampleEvery
 	if !a.last.IsZero() && since > 0 {
@@ -157,10 +165,10 @@ func (a *onlineAccum) flushDue(now time.Time) bool {
 }
 
 // flush 把累加的分钟追加写进 online_hours.jsonl(一台设备一天一行), 清空累加器。
-// 写失败时保留累加器, 下次再试。
+// 写失败时保留累加器且不推进 a.flushed, 下次再试。
 func (a *onlineAccum) flush(now time.Time) {
-	a.flushed = now
 	if len(a.pending) == 0 {
+		a.flushed = now
 		return
 	}
 	keys := make([]onlineKey, 0, len(a.pending))
@@ -168,6 +176,11 @@ func (a *onlineAccum) flush(now time.Time) {
 		if m > 0 {
 			keys = append(keys, k)
 		}
+	}
+	if len(keys) == 0 {
+		a.pending = map[onlineKey]int{}
+		a.flushed = now
+		return
 	}
 	sort.Slice(keys, func(i, j int) bool {
 		if keys[i].day != keys[j].day {
@@ -191,6 +204,14 @@ func (a *onlineAccum) flush(now time.Time) {
 		return
 	}
 	a.pending = map[onlineKey]int{}
+	a.flushed = now
+}
+
+// hotspotDown 热点关闭时调用: 先落盘已累计分钟, 再重置采样基线 a.last,
+// 避免热点重开后把关热点期间的空档计入在线时长。
+func (a *onlineAccum) hotspotDown(now time.Time) {
+	a.flush(now)
+	a.last = time.Time{}
 }
 
 // onExit 看门狗正常退出(SIGTERM → mainLoop 返回)时调用: 优雅回收 M4 订阅协程并把未落盘的分钟写掉。

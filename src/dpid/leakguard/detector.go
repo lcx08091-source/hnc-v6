@@ -5,6 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"io"
+	"log"
 	"math"
 	"os"
 	"path/filepath"
@@ -142,6 +143,11 @@ func (e *Engine) Start(ctx context.Context) {
 
 	go func() {
 		defer close(done)
+		defer func() {
+			if rec := recover(); rec != nil {
+				log.Printf("[leakguard] worker panic recovered: %v", rec)
+			}
+		}()
 		ctrlTk := time.NewTicker(time.Second)
 		defer ctrlTk.Stop()
 		dirty := false
@@ -151,7 +157,8 @@ func (e *Engine) Start(ctx context.Context) {
 				for {
 					select {
 					case job := <-e.pktCh:
-						if e.processJob(job) {
+						_, anyHit := e.processJob(job)
+						if anyHit {
 							dirty = true
 						}
 						jobPool.Put(job)
@@ -163,22 +170,28 @@ func (e *Engine) Start(ctx context.Context) {
 					}
 				}
 			case job := <-e.pktCh:
-				changed := e.processJob(job)
+				hasNew, hasAny := e.processJob(job)
 				jobPool.Put(job)
 				for i := 0; i < 32; i++ {
 					select {
 					case more := <-e.pktCh:
-						if e.processJob(more) {
-							changed = true
+						n, a := e.processJob(more)
+						if n {
+							hasNew = true
+						}
+						if a {
+							hasAny = true
 						}
 						jobPool.Put(more)
 					default:
 						i = 32
 					}
 				}
-				if changed {
+				if hasNew {
 					_ = e.FlushEvents()
 					dirty = false
+				} else if hasAny {
+					dirty = true
 				}
 			case <-ctrlTk.C:
 				if e.SyncControl() || dirty {
@@ -304,9 +317,14 @@ func (e *Engine) ProcessSync(in PacketInput) ([]LeakEvent, int) {
 	return recorded, newAlerts
 }
 
-func (e *Engine) processJob(job *packetJob) bool {
+func (e *Engine) processJob(job *packetJob) (newAlert bool, dirty bool) {
+	defer func() {
+		if rec := recover(); rec != nil {
+			log.Printf("[leakguard] job panic recovered: %v", rec)
+		}
+	}()
 	if !e.enabled.Load() {
-		return false
+		return false, false
 	}
 	e.scannedCount.Add(1)
 	if normMAC := normalizeValidMAC(job.clientMAC); normMAC != "" {
@@ -326,7 +344,7 @@ func (e *Engine) processJob(job *packetJob) bool {
 	}
 	candidates := e.ExtractLeaks(in)
 	if len(candidates) == 0 {
-		return false
+		return false, false
 	}
 	now := job.ts
 	if now.IsZero() {
@@ -337,13 +355,15 @@ func (e *Engine) processJob(job *packetJob) bool {
 		cand.IsBlocked = cand.Blocked
 		ev, isNew := e.ring.Record(cand, now)
 		e.totalLeaks.Add(1)
+		dirty = true
 		if isNew {
+			newAlert = true
 			if hook := e.onAlert.Load(); hook != nil && *hook != nil {
 				(*hook)(ev)
 			}
 		}
 	}
-	return true
+	return newAlert, dirty
 }
 
 // DroppedCount returns packets dropped due to backpressure on the 256-entry queue.
@@ -1330,6 +1350,9 @@ func buildReadableSnippet(src []byte, rawVal, fallbackNeedle string) string {
 		if end > len(src) {
 			end = len(src)
 		}
+		if start > end {
+			start = end
+		}
 		win = src[start:end]
 	} else {
 		limit := 2 * SnippetRadiusBytes
@@ -1341,16 +1364,42 @@ func buildReadableSnippet(src []byte, rawVal, fallbackNeedle string) string {
 	return sanitizeReadableBytes(win)
 }
 
+func asciiFoldByte(c byte) byte {
+	if c >= 'A' && c <= 'Z' {
+		return c + ('a' - 'A')
+	}
+	return c
+}
+
+// indexFoldASCII performs strict 1:1 byte-length-preserving ASCII case-insensitive search.
+// Never uses bytes.ToLower, which can expand invalid UTF-8 bytes to 3-byte U+FFFD and cause
+// out-of-bounds slice indices on the original raw packet buffer.
 func indexFoldASCII(haystack []byte, needle string) int {
-	if needle == "" || len(haystack) < len(needle) {
+	n := len(needle)
+	if n == 0 || len(haystack) < n {
 		return -1
 	}
 	if idx := bytes.Index(haystack, []byte(needle)); idx >= 0 {
 		return idx
 	}
-	lowH := bytes.ToLower(haystack)
-	lowN := strings.ToLower(needle)
-	return bytes.Index(lowH, []byte(lowN))
+	first := asciiFoldByte(needle[0])
+	limit := len(haystack) - n
+	for i := 0; i <= limit; i++ {
+		if asciiFoldByte(haystack[i]) != first {
+			continue
+		}
+		matched := true
+		for j := 1; j < n; j++ {
+			if asciiFoldByte(haystack[i+j]) != asciiFoldByte(needle[j]) {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return i
+		}
+	}
+	return -1
 }
 
 func sanitizeReadableBytes(b []byte) string {

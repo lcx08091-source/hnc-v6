@@ -228,7 +228,8 @@ caps_get() { grep -o "\"$1\":[a-z0-9]*" "$CAPS" 2>/dev/null | head -n1 | sed 's/
 caps_stale() {
     [ -n "$(caps_get string_layer)" ] || return 0
     _chk=$(caps_get checked); _up=$(cut -d. -f1 /proc/uptime 2>/dev/null); _now=$(date +%s 2>/dev/null)
-    case "$_chk$_up$_now" in *[!0-9]*|"") return 1 ;; esac
+    [ -n "$_chk" ] && [ -n "$_up" ] && [ -n "$_now" ] || return 1
+    case "$_chk$_up$_now" in *[!0-9]*) return 1 ;; esac
     [ "$_chk" -lt $((_now - _up)) ]
 }
 S4=0; S6=0

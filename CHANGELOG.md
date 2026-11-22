@@ -14,6 +14,19 @@
 
 ---
 
+## [6.1.0-beta.2] - 2026-11-22
+
+> **通道说明（公测通道 · 稳定版当前为 `v6.0.1`）**：本版本落地 32 路全仓排查与反驳复核裁决的核心修复，覆盖内核数据面、控制面安全与省电、共享内存页对齐、看门狗优雅停机、真机脚本兼容、前端交互与 CI 发版护栏；自动更新广播文件（`update.json`）继续锁定于 `v6.0.1`（`6000001`）。
+
+### v6.1.0 全量收尾工程第三阶段 · 32 路全仓排查复核加固版
+- **Fixed · C/eBPF 栈溢出消除与 Verifier / GKI 6.1 内核兼容 (`daemon/clsact_ctl/*` + `daemon/hotspotd/*` + `daemon/tc_netlink/*`)**: 压降 eBPF 程序栈帧占用并修复校验边界，确保通过 GKI 6.1/6.6 Verifier 严格检查；收口 C/Netlink 数据面边界隐患，保障 `arm64-v8a` 与 `armeabi-v7a` 双架构编译与内核兼容。
+- **Fixed · 控制面安全鉴权与待机省电止血 (`daemon/hnc_httpd/*`)**: 加固控制面敏感路由鉴权与输入校验，封堵越权与非预期绕过路径；收敛待机与空载场景下的无效周期唤醒和后台轮询开销，进一步降低息屏及无客户端时的功耗。
+- **Fixed · 16KB 共享内存防 SIGBUS 与 Doze 时钟对齐 (`src/dpid/shm/*` + `daemon/hnc_httpd/*`)**: 强化 `shm_vector.bin` 16KB 共享内存文件尺寸校验、页对齐预分配与截断防护以彻底规避 `SIGBUS` 崩溃，并将双端新鲜度判定对齐至跨 Doze 单调时钟基准。
+- **Fixed · 看门狗 M4 优雅停机与防误杀 (`src/dpid/cmd/hnc_watchdog/*` + `src/dpid/m4_owner.go`)**: 补齐看门狗与 M4 设备发现器停机信号收敛与子进程清理握手，修复热点启停和网卡迁移时的进程误杀与竞态滞留。
+- **Fixed · 真机 Toybox / mksh / awk 兼容修复 (`bin/*.sh` + 生命周期脚本)**: 清除脚本中 Android Toybox `grep` 不支持的 BRE `\|` 与非标准参数顺序，补齐 `\r` 回车符清洗、临时目录隔离与 `mksh`/`awk` 真机边界兼容。
+- **Fixed · 前端崩溃修复、零 Emoji、白名单防呆与假曲线移除 (`webroot/*`)**: 修复 WebUI 渲染空值异常导致的页面崩溃，清除界面违规 Emoji 回归纯矢量规范，补全白名单/管控操作防呆校验，并移除无真实采样支撑的占位假曲线。
+- **Changed · 双环境单测补强与 CI 发版护栏加固 (`.github/workflows/build.yml` + `bin/*_check.sh` + `bin/ci_preflight.sh` + `test/*`)**: 为工作流新增顶层发布串行 `concurrency` 组防止双流竞态覆写 Release；显式区分 `git ls-remote` 标签存在（`rc=0`）、不存在（`rc=2`）与网络故障（直接中止）；刷机包排除 `testdata`、`go.mod`/`go.sum` 与 C 源码目录并严格保留 `daemon/hnc_httpd/hnc_httpd`；将 `LICENSE` 并入必需文件主清单与测试夹具自动同步，`artifact_pick_flashable.sh` 支持从含 `dpi-rules.zip` 的外层 Actions 包识别唯一 `HNC-*.zip`，并强化 `version_consistency_check.sh` 对 `update.json` 缺失、预发布链接与稳定走廊的硬拦截。
+
 ## [6.1.0-beta.1] - 2026-11-21
 
 > **通道说明（公测通道 · 稳定版当前为 `v6.0.1`）**：本版本聚焦设备发现自愈、待机零空转省电、16KB 共享内存正式接线与数据面回执闭环，自动更新广播文件（`update.json`）继续冻结在 `v6.0.1`（`6000001`）。

@@ -60,18 +60,24 @@ platform_info_t g_platform = {0};
  * ══════════════════════════════════════════════════════════ */
 
 /* 读 ro.* 属性到 dst。返回实际长度, 0 = 不存在。
- * dst_size 至少 PROP_VALUE_MAX (=92) 才安全, 我们都用 64 够用。 */
+ * 内部缓冲区至少 PROP_VALUE_MAX (=92) 才安全, 统一用 128 字节防栈溢出。 */
 static int prop_get(const char *name, char *dst, size_t dst_size)
 {
+    if (!dst || dst_size == 0) return 0;
+    if (!name) {
+        dst[0] = '\0';
+        return 0;
+    }
     char buf[128];
     int n = __system_property_get(name, buf);
     if (n <= 0) {
-        if (dst_size > 0) dst[0] = '\0';
+        dst[0] = '\0';
         return 0;
     }
+    if ((size_t)n >= sizeof(buf)) n = (int)sizeof(buf) - 1;
     /* truncate to dst_size-1, keep NUL */
-    if ((size_t)n >= dst_size) n = (int)dst_size - 1;
-    memcpy(dst, buf, n);
+    if ((size_t)n >= dst_size) n = (int)(dst_size - 1);
+    memcpy(dst, buf, (size_t)n);
     dst[n] = '\0';
     return n;
 }
@@ -79,16 +85,23 @@ static int prop_get(const char *name, char *dst, size_t dst_size)
 /* 读 ro.* 属性, 返回是否非空 */
 static int prop_exists(const char *name)
 {
-    char buf[8];
+    if (!name) return 0;
+#if defined(__ANDROID__)
+    if (__system_property_find(name) == NULL) return 0;
+#endif
+    char buf[128];
     return __system_property_get(name, buf) > 0;
 }
 
 /* 读整数属性 */
 static int prop_get_int(const char *name, int dflt)
 {
-    char buf[32];
+    if (!name) return dflt;
+    char buf[128];
     int n = __system_property_get(name, buf);
     if (n <= 0) return dflt;
+    if ((size_t)n >= sizeof(buf)) n = (int)sizeof(buf) - 1;
+    buf[n] = '\0';
     return atoi(buf);
 }
 

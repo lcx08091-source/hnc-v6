@@ -36,7 +36,7 @@ const (
 
 	tcaKind = 1 // TCA_KIND
 
-	sizeofTcMsg = 20 // family(1)+pad(1)+ifindex(4)+handle(4)+parent(4)+info(4)
+	sizeofTcMsg = 20 // family(1)+pad1(1)+pad2(2)+ifindex(4)+handle(4)+parent(4)+info(4)
 )
 
 // TC_H_ROOT 根 parent 的值(qdisc "root")。
@@ -73,6 +73,7 @@ func QdiscList(ifindex int) ([]Qdisc, error) {
 	}
 	defer syscall.Close(fd)
 
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Sec: 3})
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return nil, fmt.Errorf("nlroute: bind: %w", err)
 	}
@@ -84,15 +85,25 @@ func QdiscList(ifindex int) ([]Qdisc, error) {
 	native.PutUint16(req[4:6], rtmGetQdisc)
 	native.PutUint16(req[6:8], nlmFRequest|nlmFDump)
 	native.PutUint32(req[8:12], 1) // seq
-	native.PutUint32(req[16:20], uint32(int32(ifindex)))
-	if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
-		return nil, fmt.Errorf("nlroute: send: %w", err)
+	native.PutUint32(req[nlMsgHdrLen+4:nlMsgHdrLen+8], uint32(int32(ifindex)))
+	for {
+		err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK})
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("nlroute: send: %w", err)
+		}
+		break
 	}
 
 	var out []Qdisc
 	buf := make([]byte, 1<<16)
 	for {
 		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		if errors.Is(err, syscall.EINTR) {
+			continue
+		}
 		if err != nil {
 			return nil, fmt.Errorf("nlroute: recv: %w", err)
 		}

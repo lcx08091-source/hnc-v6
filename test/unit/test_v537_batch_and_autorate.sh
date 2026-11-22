@@ -16,18 +16,22 @@ EOF
 
 test_start "v5.37: apply_app_limits uses single iptables-restore/ip6tables-restore --noflush batch"
 v537_make_env
-cat > "$MOCK_BIN_DIR/iptables-restore" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "iptables-restore|$*" >> "$MOCK_LOG"
 cat >> "$MOCK_LOG.v4batch"
 exit 0
 EOF
-cat > "$MOCK_BIN_DIR/ip6tables-restore" <<'EOF'
-#!/bin/sh
+} > "$MOCK_BIN_DIR/iptables-restore"
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "ip6tables-restore|$*" >> "$MOCK_LOG"
 cat >> "$MOCK_LOG.v6batch"
 exit 0
 EOF
+} > "$MOCK_BIN_DIR/ip6tables-restore"
 chmod +x "$MOCK_BIN_DIR/iptables-restore" "$MOCK_BIN_DIR/ip6tables-restore"
 echo "aa:bb:cc:dd:ee:01 bilibili 8" > "$HNC_DIR/data/app_limits.flat"
 cat > "$HNC_DIR/run/ip_app_map.flat" <<'EOF'
@@ -45,10 +49,12 @@ mock_teardown
 
 test_start "v5.37: apply_app_limits falls back cleanly when iptables-restore --noflush fails"
 v537_make_env
-cat > "$MOCK_BIN_DIR/iptables-restore" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 exit 1
 EOF
+} > "$MOCK_BIN_DIR/iptables-restore"
 chmod +x "$MOCK_BIN_DIR/iptables-restore"
 echo "aa:bb:cc:dd:ee:01 bilibili 5" > "$HNC_DIR/data/app_limits.flat"
 echo "198.51.100.7 bilibili" > "$HNC_DIR/run/ip_app_map.flat"
@@ -59,15 +65,18 @@ mock_teardown
 
 test_start "v5.37: apply_app_qos commits HNC_APP_QOS_IP via single --noflush batch"
 v537_make_env
-cat > "$MOCK_BIN_DIR/iptables-restore" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "iptables-restore|$*" >> "$MOCK_LOG"
 cat >> "$MOCK_LOG.qos_v4"
 exit 0
 EOF
+} > "$MOCK_BIN_DIR/iptables-restore"
 chmod +x "$MOCK_BIN_DIR/iptables-restore"
-cat > "$MOCK_BIN_DIR/tc" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "tc|$*" >> "$MOCK_LOG"
 case "$*" in
     "class show dev wlan2 classid 1:5"|"class show dev wlan2")
@@ -76,6 +85,7 @@ case "$*" in
 esac
 exit 0
 EOF
+} > "$MOCK_BIN_DIR/tc"
 chmod +x "$MOCK_BIN_DIR/tc"
 cat > "$HNC_DIR/run/app_qos.plan" <<'EOF'
 iface wlan2
@@ -91,8 +101,9 @@ mock_teardown
 
 test_start "v5.37: tc_manager global_shaper_tune hot-updates 1:1 ceil without resetting 1:9999 leaf"
 v537_make_env
-cat > "$MOCK_BIN_DIR/tc" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "tc|$*" >> "$MOCK_LOG"
 case "$*" in
     "qdisc show dev wlan2"|"qdisc show dev ifb0") echo "qdisc htb 1: root refcnt 2" ;;
@@ -100,6 +111,7 @@ case "$*" in
 esac
 exit 0
 EOF
+} > "$MOCK_BIN_DIR/tc"
 chmod +x "$MOCK_BIN_DIR/tc"
 sh "$HNC_DIR/bin/tc_manager.sh" global_shaper_tune wlan2 68mbit 18mbit
 assert_contains "$(cat "$MOCK_LOG")" "class change dev wlan2 parent 1: classid 1:1 htb rate 68mbit ceil 68mbit" "downlink hot-tuned" &&

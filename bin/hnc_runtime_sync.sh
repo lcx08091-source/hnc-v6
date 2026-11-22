@@ -43,6 +43,8 @@ fix_perms() {
         chmod 755 "$_dir"/*.sh 2>/dev/null
         for _b in $NATIVE_BINS; do fix_exec "$_dir/$_b"; done
     done
+    fix_exec "$HNC_DIR/bin/.hnc_mc"
+    fix_exec "$HNC_DIR/bin/sh"
     fix_exec "$MODDIR/daemon/hnc_httpd/hnc_httpd"
     fix_exec "$HNC_DIR/daemon/hnc_httpd/hnc_httpd"
 }
@@ -66,24 +68,43 @@ fi
 
 H_MOD="$MODDIR/daemon/hnc_httpd/hnc_httpd"
 H_RUN="$HNC_DIR/daemon/hnc_httpd/hnc_httpd"
+_need_httpd=0
 if [ ! -f "$H_MOD" ]; then
     echo "runtime sync WARN: module hnc_httpd missing at $H_MOD"
-elif ! cmp -s "$H_MOD" "$H_RUN" 2>/dev/null; then
-    # 旧 httpd 还在跑就先停(占着 8444, 新进程起不来)。只认 pidfile 里确是 hnc_httpd 的 pid,
-    # 再兜底 pidof(手动重启时 pidfile 可能已被删)。
-    _old=""
-    if [ -f "$RUN/httpd.pid" ]; then
-        _old=$(tr -d ' \r\n' < "$RUN/httpd.pid" 2>/dev/null)
-        case "$_old" in ''|*[!0-9]*) _old="" ;; esac
-        [ -n "$_old" ] && ! tr '\000' ' ' < "/proc/$_old/cmdline" 2>/dev/null | grep -q 'hnc_httpd' && _old=""
+elif [ ! -s "$H_RUN" ]; then
+    _need_httpd=1
+elif command -v cmp >/dev/null 2>&1; then
+    cmp -s "$H_MOD" "$H_RUN" 2>/dev/null || _need_httpd=1
+else
+    echo "runtime sync WARN: cmp unavailable, keeping existing $H_RUN"
+fi
+if [ "$_need_httpd" = "1" ]; then
+    _h_tmp="$H_RUN.new.$$"
+    if cp -f "$H_MOD" "$_h_tmp" 2>/dev/null && [ -s "$_h_tmp" ]; then
+        fix_exec "$_h_tmp"
+        # 旧 httpd 还在跑就先停(占着 8444, 新进程起不来)。只认 pidfile 里确是 hnc_httpd 的 pid,
+        # 再兜底 pidof(手动重启时 pidfile 可能已被删)。
+        _old=""
+        if [ -f "$RUN/httpd.pid" ]; then
+            _old=$(tr -d ' \r\n' < "$RUN/httpd.pid" 2>/dev/null)
+            case "$_old" in ''|*[!0-9]*) _old="" ;; esac
+            [ -n "$_old" ] && ! tr '\000' ' ' < "/proc/$_old/cmdline" 2>/dev/null | grep -q 'hnc_httpd' && _old=""
+        fi
+        for _p in $_old $(pidof hnc_httpd 2>/dev/null); do
+            kill -9 "$_p" 2>/dev/null && echo "runtime sync: stopped old hnc_httpd pid=$_p"
+        done
+        rm -f "$RUN/httpd.pid" 2>/dev/null
+        if mv -f "$_h_tmp" "$H_RUN" 2>/dev/null; then
+            fix_exec "$H_RUN"
+            echo "runtime sync: refreshed hnc_httpd binary from module"
+        else
+            rm -f "$_h_tmp" 2>/dev/null || true
+            echo "runtime sync WARN: failed to replace $H_RUN"
+        fi
+    else
+        rm -f "$_h_tmp" 2>/dev/null || true
+        echo "runtime sync WARN: failed to stage $H_MOD -> $_h_tmp, keeping existing hnc_httpd"
     fi
-    for _p in $_old $(pidof hnc_httpd 2>/dev/null); do
-        kill -9 "$_p" 2>/dev/null && echo "runtime sync: stopped old hnc_httpd pid=$_p"
-    done
-    rm -f "$RUN/httpd.pid" "$H_RUN" 2>/dev/null
-    cp -f "$H_MOD" "$H_RUN" 2>/dev/null || true
-    fix_exec "$H_RUN"
-    echo "runtime sync: refreshed hnc_httpd binary from module"
 fi
 fix_perms
 exit 0

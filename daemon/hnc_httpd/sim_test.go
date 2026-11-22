@@ -32,7 +32,7 @@ func simTestEnv(t *testing.T) (*server, string) {
 		"tc_manager.sh", "iptables_manager.sh", "connblock_sync.sh", "whitelist_sync.sh"} {
 		names[n] = true
 	}
-	script := "#!/bin/sh\necho \"$0 $*\" >> '" + marker + "'\necho 1\nexit 0\n"
+	script := "#!" + testShellBin() + "\necho \"$0 $*\" >> '" + marker + "'\necho 1\nexit 0\n"
 	for n := range names {
 		if err := os.WriteFile(filepath.Join(dir, "bin", n), []byte(script), 0o755); err != nil {
 			t.Fatal(err)

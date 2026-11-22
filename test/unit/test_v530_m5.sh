@@ -26,12 +26,13 @@ sed -n '/^# ─── rc30.12.16: 进程哨兵循环/,/^) >> "\$HNC_DIR\/logs\/s
 m5_select() {
     rm -f "$M5_TD/run/"* "$M5_TD/bin/"*
     : > "$M5_TD/run/wd_m5.disabled"
-    printf '#!/bin/sh\n' > "$M5_TD/bin/hnc_dpid_guard.sh"
-    printf '#!/bin/sh\n' > "$M5_TD/bin/hnc_dpid_supervisor"
-    printf '#!/bin/sh\nexit 0\n' > "$M5_TD/bin/fork_probe"
+    _m5_sh="${HNC_TEST_SH:-/system/bin/sh}"
+    printf '#!%s\n' "$_m5_sh" > "$M5_TD/bin/hnc_dpid_guard.sh"
+    printf '#!%s\n' "$_m5_sh" > "$M5_TD/bin/hnc_dpid_supervisor"
+    printf '#!%s\nexit 0\n' "$_m5_sh" > "$M5_TD/bin/fork_probe"
     case "$1" in
-        ok)    printf '#!/bin/sh\necho "hnc_launcher 1.0"\n' > "$M5_TD/bin/hnc_launcher" ;;
-        abort) printf '#!/bin/sh\necho "FATAL: TLS segment is underaligned"\nexit 134\n' > "$M5_TD/bin/hnc_launcher" ;;
+        ok)    printf '#!%s\necho "hnc_launcher 1.0"\n' "$_m5_sh" > "$M5_TD/bin/hnc_launcher" ;;
+        abort) printf '#!%s\necho "FATAL: TLS segment is underaligned"\nexit 134\n' "$_m5_sh" > "$M5_TD/bin/hnc_launcher" ;;
     esac
     chmod +x "$M5_TD/bin/"*
     (

@@ -30,6 +30,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -104,13 +105,21 @@ func certPut(hncDir, id string, c certInfo) {
 	_ = discoverWriteAtomic(certCachePath(hncDir), b)
 }
 
+var discoverWriteSeq atomic.Uint64
+
 func discoverWriteAtomic(path string, b []byte) error {
 	_ = os.MkdirAll(filepath.Dir(path), 0o755)
-	tmp := fmt.Sprintf("%s.tmp.%d", path, os.Getpid())
+	seq := discoverWriteSeq.Add(1)
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), seq)
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // probeCert 连 host:443 读证书。只读取、不信任(InsecureSkipVerify): 我们要的是

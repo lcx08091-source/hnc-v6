@@ -186,6 +186,18 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// rc30.12.33 (P0.2) + v6 安全加固: 先原子占用/扣减限流配额再读取 pair_pending,
+	// 防止无活动配对时零惩罚无限轮询探测配对窗口开启瞬间, 以及并发探针瞬间烧码。
+	consumed, consumedRetry, remaining := s.consumePinAttemptAudited(ip)
+	if !consumed {
+		w.Header().Set("Retry-After", int64ToStr(consumedRetry))
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = w.Write([]byte(`{"error":"too many pin attempts","locked_for_sec":` +
+			int64ToStr(consumedRetry) + `}`))
+		return
+	}
+
 	pending, err := readPairPending(s.hncDir)
 	if err != nil {
 		// 无活动配对 / 已过期 / 文件损坏
@@ -194,22 +206,7 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 		if strings.Contains(msg, "expired") {
 			status = http.StatusGone // 410 语义更准
 		}
-		// 不消费名额(没可错的目标 — 配对窗口本身的问题, 不是攻击)
-		writePairError(w, status, msg)
-		return
-	}
-
-	// rc30.12.33 (P0.2): 进入比对前原子占用名额. 并发 N 个错误请求时,
-	// 只有先到的 rlPinAttemptsMax 个能进入下面的 ConstantTimeCompare,
-	// 其他都在这里 429 返回. 旧版本 RegisterPinFail 在比对后才记账, 中
-	// 间存在 race window.
-	consumed, consumedRetry, remaining := s.consumePinAttemptAudited(ip)
-	if !consumed {
-		w.Header().Set("Retry-After", int64ToStr(consumedRetry))
-		w.Header().Set("Content-Type", "application/json; charset=utf-8")
-		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = w.Write([]byte(`{"error":"too many pin attempts","locked_for_sec":` +
-			int64ToStr(consumedRetry) + `}`))
+		writePairErrorWithRem(w, status, msg, remaining)
 		return
 	}
 

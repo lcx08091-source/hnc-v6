@@ -1023,7 +1023,7 @@
 :root:not([data-style]):not([data-glass="liquid"]) .up-cap.active .lcc-val{color:var(--tx)}
 :root:not([data-style]):not([data-glass="liquid"]) .lcc-pill{border-radius:9px;background:var(--def-pill-bg);border:1px solid var(--stroke);box-shadow:none;color:var(--text-2)}
 :root:not([data-style]):not([data-glass="liquid"]) .lcc-pill.on{background:var(--blue);border-color:var(--blue);color:#FFFFFF;box-shadow:none}
-:root:not([data-style]):not([data-glass="liquid"]) .btn{border-radius:11px;height:40px}
+:root:not([data-style]):not([data-glass="liquid"]) .btn{height:39px;border-radius:12px}
 :root:not([data-style]):not([data-glass="liquid"]) .btn.pri{background:var(--blue);box-shadow:0 4px 12px -4px color-mix(in srgb,var(--blue) 55%,transparent)}
 :root:not([data-style]):not([data-glass="liquid"]) .btn.sec{background:var(--card-solid);border:1px solid var(--stroke-2);color:var(--text-1)}
 :root:not([data-style]):not([data-glass="liquid"]) .chip{border-radius:10px;height:34px;background:var(--card-solid);border:1px solid var(--stroke);box-shadow:none}
@@ -1585,7 +1585,7 @@
 :root[data-has-wp="1"] #hnc-wallpaper{
   display:block;
 }
-:root[data-has-wp="1"] html,
+html[data-has-wp="1"],
 :root[data-has-wp="1"] body{
   background:transparent!important;
 }
@@ -4248,6 +4248,7 @@ html.has-wallpaper:not([data-style="cyber"]) .hbtn{
   --accent: var(--blue);
   --text: var(--text-1);
   --t2: var(--text-3);
+  --t3: var(--text-3);
   --border: var(--stroke);
 }
 
@@ -4401,7 +4402,7 @@ body::after {
   --badge-gray-bg: rgba(142, 142, 147, .18);--badge-gray: #AEAEB2;
 }
 
-:root[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]) html,
+html[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]),
 :root[data-theme="dark"]:not([data-style="cyber"]):not([data-has-wp="1"]) body {
   background: #08090C !important;
   color: var(--text-1);
@@ -4611,7 +4612,7 @@ body::after {
   --lg-rim: 0 0 0 .5px rgba(15, 23, 42, .065), inset 0 .5px 0 rgba(255, 255, 255, .85);
   --lg-drop: 0 8px 24px -10px rgba(15, 23, 42, .08), 0 2px 6px -2px rgba(15, 23, 42, .04);
 }
-:root[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]) html,
+html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
 :root[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]) body {
   background: #F2F3F7 !important;
 }
@@ -5185,7 +5186,7 @@ body::after {
   border-radius: 4px;
 }
 
-/* v6.1.0-alpha.1 设置页底部微晶构建水印条（零眩光 · 等宽对齐 · 无 Emoji） */
+/* v6.1.0-alpha.1 设置页底部微晶构建水印条（零眩光 · 高对比双色 · 等宽对齐 · 无 Emoji） */
 .foot.hnc-build-wm {
   margin: 16px auto 4px;
   padding: 6px 13px;
@@ -5209,8 +5210,18 @@ body::after {
   border-radius: 999px;
   font-size: 10px;
   font-weight: 750;
-  color: var(--badge-warn, #d97706);
-  background: var(--badge-warn-bg, rgba(245, 158, 11, .14));
+  color: #92400e;
+  background: rgba(245, 158, 11, .16);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .foot.hnc-build-wm .wm-chan {
+    color: #fbbf24;
+    background: rgba(251, 191, 36, .16);
+  }
+}
+:root[data-theme="dark"] .foot.hnc-build-wm .wm-chan {
+  color: #fbbf24;
+  background: rgba(251, 191, 36, .16);
 }
 </style>
 <!-- 首帧前按本地偏好设好主题/风格/玻璃浓度, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme / applyGlassTint 一致, 之后由它接管) -->

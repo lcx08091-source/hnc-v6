@@ -36,13 +36,18 @@ write_state(){
     iface=$(json_escape "$1")
     reason=$(json_escape "$2")
     now=$(date +%s 2>/dev/null || echo 0)
-    _mprop="/data/adb/modules/hotspot_net_ctl/module.prop"
-    [ -f "$_mprop" ] || _mprop="$(cd "$(dirname "$0")/.." 2>/dev/null && pwd)/module.prop"
-    _mver=$(sed -n 's/^version=//p' "$_mprop" 2>/dev/null | head -1 | tr -d ' \r\n')
-    _mver=$(json_escape "${_mver:-v6.1.0-alpha.1}")
+    _self_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+    _mver=""
+    for _mp in "${_self_root:+$_self_root/module.prop}" "$HNC_DIR/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
+        [ -n "$_mp" ] && [ -f "$_mp" ] || continue
+        _mver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d '\000-\037\177 "')
+        [ -n "$_mver" ] && break
+    done
+    _mver=${_mver#v}
+    _mver=$(json_escape "${_mver:-unknown}")
     # v5.12: 临时名带 pid, 不与 dpid / supervisor 的同名 .tmp 互踩
     cat > "$RUN/dpi_state.json.tmp.$$" <<EOF_STATE
-{"schema_version":1,"timestamp":$now,"version":"0.5.4-${_mver#v}+rebind","mode":"blind","interface":"$iface","uptime_s":0,"blind_reason":"$reason","stats":{"packets":0,"dns_events":0,"tls_events":0,"kernel_drops":0,"ignored_packets":0,"parse_errors":0}}
+{"schema_version":1,"timestamp":$now,"version":"0.5.4-rc30.12.5-rebind+${_mver}","mode":"blind","interface":"$iface","uptime_s":0,"blind_reason":"$reason","stats":{"packets":0,"dns_events":0,"tls_events":0,"kernel_drops":0,"ignored_packets":0,"parse_errors":0}}
 EOF_STATE
     mv -f "$RUN/dpi_state.json.tmp.$$" "$RUN/dpi_state.json" 2>/dev/null || true
 }
@@ -60,6 +65,11 @@ kill_pidfile(){
 IFACE=$(get_iface "$1")
 # Validate iface name (must match Go-side regex, 回移自 5.9.91 分叉线;
 # 与 hnc_httpd action.go 的 ifaceNameRE 保持同一字符集)
+case "$IFACE" in
+    -*|.*|*..*)
+        echo "invalid iface: $IFACE" >&2
+        exit 1 ;;
+esac
 if ! printf '%s' "$IFACE" | grep -qE '^[A-Za-z0-9_.:-]{1,32}$'; then
     echo "invalid iface: $IFACE" >&2
     exit 1

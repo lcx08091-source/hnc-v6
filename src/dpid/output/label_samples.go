@@ -49,8 +49,8 @@ const (
 	labelSamplesChanCap      = 1024               // 队列上限, 满了直接丢
 	labelSamplesDedupWindow  = 600 * time.Second  // 同一 (pkg,sni,ja4) 10 分钟内只记一次
 	labelSamplesDedupMax     = 50000              // 去重表上限, 超过整体清空(内存有界)
-	labelSamplesDailyCapByte = int64(20 << 20)    // 单日 20 MB
-	labelSamplesRetentionDay = 7                  // 保留 7 天
+	labelSamplesDailyCapByte = int64(2 << 20)     // 单日 2 MiB(保护 32M tmpfs)
+	labelSamplesRetentionDay = 2                  // 保留 2 天
 	labelSamplesMinUID       = 10000              // 低于此 UID 视为系统, 跳过
 	labelSamplesDateLayout   = "20060102"         // 本地日期(文件名用)
 	labelSamplesFileMode     = os.FileMode(0o640) // run/ 下私有, 不放全局可读

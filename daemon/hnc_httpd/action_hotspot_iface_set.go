@@ -16,6 +16,9 @@ func actionHotspotIfaceSet(hncDir string, p map[string]string) actionResp {
 		if len(iface) > 15 {
 			return actionResp{OK: false, Error: "bad params", Detail: "iface too long"}
 		}
+		if strings.HasPrefix(iface, "-") || strings.HasPrefix(iface, ".") || strings.Contains(iface, "..") {
+			return actionResp{OK: false, Error: "bad params", Detail: "invalid iface name"}
+		}
 		for _, c := range iface {
 			if !((c >= 'a' && c <= 'z') ||
 				(c >= 'A' && c <= 'Z') ||

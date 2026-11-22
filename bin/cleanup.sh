@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
 # v3.5.0 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 # cleanup.sh — HNC 资源完全释放
 # 在模块禁用/卸载/手动调用时执行，确保无残留进程和规则
 
@@ -137,9 +137,13 @@ _cand_ifaces="$IFACE"
 for _if_f in "$RUN/active_iface" "$RUN/hotspot_iface" "$RUN/iface.cache"; do
     [ -f "$_if_f" ] && _cand_ifaces="$_cand_ifaces $(head -n 1 "$_if_f" 2>/dev/null | tr -d '\r\n ')"
 done
-for _mk_f in "$RUN"/tc_root_owned_* "$RUN"/tc_mq_child_*; do
+for _mk_f in "$RUN"/tc_root_owned_*; do
     [ -e "$_mk_f" ] || continue
-    _cand_ifaces="$_cand_ifaces ${_mk_f##*tc_*_*_}"
+    _cand_ifaces="$_cand_ifaces ${_mk_f#"$RUN/tc_root_owned_"}"
+done
+for _mk_f in "$RUN"/tc_mq_child_*; do
+    [ -e "$_mk_f" ] || continue
+    _cand_ifaces="$_cand_ifaces ${_mk_f#"$RUN/tc_mq_child_"}"
 done
 [ -n "$IFACE" ] || IFACE=$(printf '%s\n' $_cand_ifaces wlan2 | awk 'NF{print; exit}')
 _seen_if=" "

@@ -49,11 +49,11 @@ validate_json() {
     f="$1"
     [ -f "$f" ] || return 2
     [ -s "$f" ] || return 3
-    if [ -x "$GUARD" ]; then
+    if [ -f "$GUARD" ]; then
         sh "$GUARD" "$f" >/dev/null 2>&1
         return $?
     fi
-    awk 'BEGIN{q=0;esc=0;b=0;s=0} {for(i=1;i<=length($0);i++){c=substr($0,i,1); if(q){ if(esc){esc=0;next} if(c=="\\"){esc=1;next} if(c=="\"")q=0; next } if(c=="\""){q=1;next} if(c=="{")b++; else if(c=="}")b--; else if(c=="[")s++; else if(c=="]")s--; if(b<0||s<0)exit 1 }} END{exit (q||esc||b||s)?1:0}' "$f" >/dev/null 2>&1
+    awk 'BEGIN{q=0;esc=0;b=0;s=0} {for(i=1;i<=length($0);i++){c=substr($0,i,1); if(q){ if(esc){esc=0;continue} if(c=="\\"){esc=1;continue} if(c=="\"")q=0; continue } if(c=="\""){q=1;continue} if(c=="{")b++; else if(c=="}")b--; else if(c=="[")s++; else if(c=="]")s--; if(b<0||s<0)exit 1 }} END{exit (q||esc||b||s)?1:0}' "$f" >/dev/null 2>&1
 }
 
 status_word() {

@@ -16,6 +16,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -990,14 +991,17 @@ func (s *server) apiLeakGuardStream(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	flushOut := func() error {
-		if err := rc.Flush(); err == nil {
+		err := rc.Flush()
+		if err == nil {
 			return nil
 		}
-		if canFlush {
-			flusher.Flush()
+		if errors.Is(err, http.ErrNotSupported) {
+			if canFlush {
+				flusher.Flush()
+			}
 			return nil
 		}
-		return nil
+		return err
 	}
 
 	writeFrame := func(frame string) bool {

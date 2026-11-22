@@ -738,6 +738,7 @@ func parseTCClassDumpMsgs(b []byte, wantIfIndex int) (map[string]HTBClassStat, e
 }
 
 func readDeviceMarkSpec(hncDir string, mid int) (uint32, uint32) {
+	const low16Mask = uint32(0x0000ffff)
 	mask := DefaultDevMarkMask
 	shift := uint(DefaultDevMarkShift)
 	base := DefaultDevMarkBase
@@ -752,25 +753,26 @@ func readDeviceMarkSpec(hncDir string, mid int) (uint32, uint32) {
 					k, v = strings.TrimSpace(k), strings.Trim(strings.TrimSpace(v), `"'`)
 					switch k {
 					case "HNC_DEV_MARK_MASK", "HNC_MARK_MASK":
-						if u, err := strconv.ParseUint(v, 0, 32); err == nil && u != 0 {
+						if u, err := strconv.ParseUint(v, 0, 32); err == nil && u != 0 && (uint32(u)&low16Mask) == 0 {
 							mask = uint32(u)
 						}
 					case "HNC_DEV_MARK_SHIFT", "HNC_MARK_SHIFT":
-						if u, err := strconv.ParseUint(v, 10, 8); err == nil && u < 32 {
+						if u, err := strconv.ParseUint(v, 10, 8); err == nil && u >= 16 && u < 32 {
 							shift = uint(u)
 						}
-					case "HNC_DEV_MARK_BASE":
-						if u, err := strconv.ParseUint(v, 0, 32); err == nil {
-							base = uint32(u)
-						}
-					case "HNC_MARK_BASE":
-						if u, err := strconv.ParseUint(v, 0, 32); err == nil && (uint32(u)&uint32(0x0000ffff)) == 0 {
+					case "HNC_DEV_MARK_BASE", "HNC_MARK_BASE":
+						if u, err := strconv.ParseUint(v, 0, 32); err == nil && (uint32(u)&low16Mask) == 0 {
 							base = uint32(u)
 						}
 					}
 				}
 			}
 		}
+	}
+	if shift < 16 || (mask&low16Mask) != 0 {
+		mask = DefaultDevMarkMask
+		shift = uint(DefaultDevMarkShift)
+		base = DefaultDevMarkBase
 	}
 	if mid < 1 || mid > 99 {
 		return 0, mask

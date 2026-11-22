@@ -13,21 +13,27 @@ cap_mock_setup() {
     CPM="$HNC_TEST_DIR/cpmock"
     mkdir -p "$CPM"
     # tc: 全部成功(find_bin 优先用 $HNC/bin/hnc_tc)
-    cat > "$HNC_TEST_DIR/bin/hnc_tc" <<'EOF'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 [ "$1" = "-V" ] && { echo "tc utility, iproute2-mock"; exit 0; }
 exit 0
 EOF
-    cat > "$CPM/ip" <<'EOF'
-#!/bin/sh
+    } > "$HNC_TEST_DIR/bin/hnc_tc"
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 exit 0
 EOF
+    } > "$CPM/ip"
     # dmesg: 由 MOCK_DMESG_FILE 提供内容
-    cat > "$CPM/dmesg" <<'EOF'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 cat "$MOCK_DMESG_FILE" 2>/dev/null
 exit 0
 EOF
+    } > "$CPM/dmesg"
     chmod +x "$HNC_TEST_DIR/bin/hnc_tc" "$CPM/ip" "$CPM/dmesg"
     : > "$CPM/dmesg.txt"
     export MOCK_DMESG_FILE="$CPM/dmesg.txt"
@@ -39,8 +45,9 @@ cap_run() {
 cap_json() { cat "$HNC_TEST_DIR/run/capabilities.json" 2>/dev/null; }
 # 假 qdisc_caps.sh: probe 时按 MOCK_QC_MODE 行为; 记录收到的 QDISC_CAPS_NO_LOAD
 cap_fake_qdisc() {
-    cat > "$HNC_TEST_DIR/bin/qdisc_caps.sh" <<'EOF'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 case "$1" in
     chosen) echo "" ; exit 0 ;;
 esac
@@ -52,6 +59,7 @@ case "$MOCK_QC_MODE" in
 esac
 exit 0
 EOF
+    } > "$HNC_TEST_DIR/bin/qdisc_caps.sh"
 }
 
 test_start "capability_probe: dmesg 无 AVC 匹配 → capabilities.json 仍是合法 JSON(旧版 0\\n0 损坏)"
@@ -73,11 +81,13 @@ unset MOCK_DMESG_FILE
 
 test_start "capability_probe: tc -V 带 TAB/控制字符 → 仍是合法 JSON"
 cap_mock_setup
-cat > "$HNC_TEST_DIR/bin/hnc_tc" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 [ "$1" = "-V" ] && { printf 'tc\tutility\001 "q" \\ x\n'; exit 0; }
 exit 0
 EOF
+} > "$HNC_TEST_DIR/bin/hnc_tc"
 chmod +x "$HNC_TEST_DIR/bin/hnc_tc"
 cap_run
 assert_json_valid "$HNC_TEST_DIR/run/capabilities.json" && test_pass

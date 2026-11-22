@@ -76,7 +76,8 @@ type l3Rule struct {
 	// parentID: v5.27 T1 「挂靠」—— 外部规则的 _parent_rule_id(规范化后)。
 	// 只在 compileExternalRules 内部用于把子规则并进父规则, 挂靠完成后
 	// 留在结果里的规则都是独立规则(父不存在 / 成环时保持原样)。
-	parentID string
+	parentID   string
+	userCustom bool // 来自 99-user-custom.json 等 99-* 用户自定义规则文件
 }
 
 // ipMatcher is a compiled CIDR + (proto, ports) tuple. Used for both IPv4
@@ -193,6 +194,7 @@ type externalRule struct {
 	// (_auto_expanded.json)、规则库扩充(<id>_v2fly)、导入的规则包(imp_*)
 	// 都用它把后缀并进已有应用, 而不是变成「名字相同、id 不同」的另一个应用。
 	ParentRuleID string `json:"_parent_rule_id"`
+	userCustom   bool
 }
 
 type externalMatcher struct {
@@ -383,6 +385,11 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 		if v := strings.TrimSpace(sub.RulesVersion); v != "" {
 			versionParts = append(versionParts, v)
 		}
+		if strings.HasPrefix(filepath.Base(f), "99-") {
+			for i := range sub.Rules {
+				sub.Rules[i].userCustom = true
+			}
+		}
 		allRules = append(allRules, sub.Rules...)
 		usableFiles++
 	}
@@ -400,10 +407,20 @@ func loadL3RulesFromDir() (loadedRules, bool) {
 		return loadedRules{}, false
 	}
 
+	compiledIDs := make(map[string]struct{}, len(compiled))
+	for _, r := range compiled {
+		compiledIDs[r.ID] = struct{}{}
+	}
 	merged := make([]l3Rule, 0, len(compiled)+len(builtinRules))
-	// External rules first so they win on equal-length suffix matches.
+	// External rules first so they win on equal-length suffix matches;
+	// skip builtin rules whose ID is already defined by external rules.
 	merged = append(merged, compiled...)
-	merged = append(merged, builtinRules...)
+	for _, br := range builtinRules {
+		if _, exists := compiledIDs[br.ID]; exists {
+			continue
+		}
+		merged = append(merged, br)
+	}
 
 	version := "external-d:" + strings.Join(versionParts, ",")
 	if len(versionParts) == 0 {
@@ -471,6 +488,7 @@ func compileExternalRules(in []externalRule) []l3Rule {
 			SubCategories: subs,
 			Verified:      verified,
 			parentID:      normalizeRuleID(r.ParentRuleID),
+			userCustom:    r.userCustom,
 		}
 		out = append(out, rule)
 		// v5.27: 原来在这里按「编译出的原始条数」截到 1024, 挂靠的子规则
@@ -502,9 +520,52 @@ func compileExternalRules(in []externalRule) []l3Rule {
 	// 后面的文件(99-user-custom 等)整条覆盖, 子规则要并进覆盖后的那条。
 	out = attachChildRules(out)
 	if len(out) > maxCompiledRules {
-		out = out[:maxCompiledRules]
+		out = capCompiledRules(out, maxCompiledRules)
 	}
 	return out
+}
+
+// capCompiledRules caps compiled rules at limit while always preserving
+// 99-user-custom.json rules ahead of lower-precedence entries.
+func capCompiledRules(out []l3Rule, limit int) []l3Rule {
+	if len(out) <= limit {
+		return out
+	}
+	customCount := 0
+	for i := range out {
+		if out[i].userCustom {
+			customCount++
+		}
+	}
+	if customCount == 0 {
+		return out[:limit]
+	}
+	if customCount >= limit {
+		kept := make([]l3Rule, 0, limit)
+		skip := customCount - limit
+		for _, r := range out {
+			if !r.userCustom {
+				continue
+			}
+			if skip > 0 {
+				skip--
+				continue
+			}
+			kept = append(kept, r)
+		}
+		return kept
+	}
+	rem := limit - customCount
+	kept := make([]l3Rule, 0, limit)
+	for _, r := range out {
+		if r.userCustom {
+			kept = append(kept, r)
+		} else if rem > 0 {
+			kept = append(kept, r)
+			rem--
+		}
+	}
+	return kept
 }
 
 const (

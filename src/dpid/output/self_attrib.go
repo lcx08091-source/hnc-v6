@@ -52,14 +52,12 @@ const (
 	SelfAttribInterval = 5 * time.Second
 
 	// SelfAttribRetainDays is how many daily self_attrib.YYYYMMDD.jsonl
-	// files are kept. v5.9.0: before this there was NO retention at all —
-	// with self-capture enabled the run/ dir grew by tens of MB per day,
-	// forever (trimOldFiles only covered the stats.* prefix).
-	SelfAttribRetainDays = 7
+	// files are kept. Tightened to 2 days so 32M tmpfs run/ cannot fill up.
+	SelfAttribRetainDays = 2
 
-	// SelfAttribMaxDailyBytes caps each daily JSONL file at 32MB (回移自
-	// 5.9.91 分叉, BUG-002: 现场曾膨胀到 1.8GB)。与连接集签名去重叠加做双保险。
-	SelfAttribMaxDailyBytes = 32 << 20 // 32MB per day cap
+	// SelfAttribMaxDailyBytes caps each daily JSONL file at 2 MiB
+	// to avoid exhausting the 32M tmpfs run/ partition.
+	SelfAttribMaxDailyBytes = 2 << 20 // 2 MiB per day cap
 
 	// SelfPkgCacheTTL is how often pm list packages -U is re-run.
 	SelfPkgCacheTTL = 5 * time.Minute

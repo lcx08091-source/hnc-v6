@@ -224,8 +224,9 @@ cat > "$HNC_TEST_DIR/data/rules.json" <<'EOF'
 {"clsact_bpf_mode":"on","devices":{"aa:bb:cc:dd:ee:05":{"ip":"192.168.43.55","mark_id":5,"limit_enabled":true}}}
 EOF
 : > "$HNC_TEST_DIR/bin/hnc_clsact.o"
-cat > "$HNC_TEST_DIR/bin/hnc_clsact_ctl" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "ctl|$*" >> "$MOCK_LOG"
 case "$1" in
     check) echo '{"ok":false,"bpf_filter":false,"map":true}' ;;
@@ -233,12 +234,14 @@ case "$1" in
 esac
 exit 0
 EOF
+} > "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
 chmod +x "$HNC_TEST_DIR/bin/hnc_clsact_ctl"
 
 # 状态感知 tc mock: 初始在 pref 1 占 mirred; 执行 filter del ... pref 1 后自动切到 pref 2, 且 filter add 输出空串表示成功
 echo "pref1" > "$HNC_TEST_DIR/tc_mirred_state"
-cat > "$MOCK_BIN_DIR/tc" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "tc|$*" >> "$MOCK_LOG"
 case "$*" in
     *"qdisc show"*)
@@ -261,6 +264,7 @@ case "$*" in
 esac
 exit 0
 EOF
+} > "$MOCK_BIN_DIR/tc"
 chmod +x "$MOCK_BIN_DIR/tc"
 mock_set_stdout ip "2408:8000::55 dev wlan2 lladdr aa:bb:cc:dd:ee:05 REACHABLE"
 
@@ -304,7 +308,7 @@ v540_seed_al
 # 模拟首次挂载: -C 返回 1 (尚未挂载), 其余命令返回 0
 for _b in iptables ip6tables; do
     cat > "$MOCK_BIN_DIR/$_b" <<EOF
-#!/bin/sh
+#!${HNC_TEST_SH:-/system/bin/sh}
 echo "${_b}|\$*" >> "\$MOCK_LOG"
 case "\$*" in
     *" -C "*) exit 1 ;;
@@ -333,13 +337,16 @@ echo "CAPABLE" > "$HNC_TEST_DIR/check_state"
 echo "aa:bb:cc:dd:ee:05 douyin 3" > "$HNC_TEST_DIR/data/app_limits.flat"
 echo '{"clsact_bpf_mode":"auto","devices":{}}' > "$HNC_TEST_DIR/data/rules.json"
 
-cat > "$HNC_TEST_DIR/bin/hnc_ipc" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "ipc|$*" >> "$MOCK_LOG"
 echo "OK:OK"
 EOF
-cat > "$MOCK_BIN_DIR/settings" <<'EOF'
-#!/bin/sh
+} > "$HNC_TEST_DIR/bin/hnc_ipc"
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "settings|$*" >> "$MOCK_LOG"
 case "$1 $2 $3" in
     "get global tether_offload_disabled") cat "$HNC_DIR/mock_setting_val" ;;
@@ -348,6 +355,7 @@ case "$1 $2 $3" in
 esac
 exit 0
 EOF
+} > "$MOCK_BIN_DIR/settings"
 chmod +x "$HNC_TEST_DIR/bin/hnc_ipc" "$MOCK_BIN_DIR/settings"
 
 run_og() {
@@ -394,8 +402,9 @@ v540_seed_al
 cat > "$HNC_TEST_DIR/data/rules.json" <<'EOF'
 {"version":1,"devices":{"aa:bb:cc:dd:ee:05":{"ip":"192.168.43.55","mark_id":5,"down_mbps":10,"limit_enabled":true}}}
 EOF
-cat > "$MOCK_BIN_DIR/tc" <<'EOF'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'EOF'
 echo "tc|$*" >> "$MOCK_LOG"
 case "$*" in
     *"filter add"*"parent 1: protocol all"*)
@@ -411,6 +420,7 @@ case "$*" in
 esac
 exit 0
 EOF
+} > "$MOCK_BIN_DIR/tc"
 chmod +x "$MOCK_BIN_DIR/tc"
 echo "aa:bb:cc:dd:ee:05 douyin 3" > "$HNC_TEST_DIR/data/app_limits.flat"
 echo "203.0.113.10 douyin" > "$HNC_TEST_DIR/run/ip_app_map.flat"
@@ -524,11 +534,11 @@ if [ -n "$MOCK_BIN_DIR" ]; then
 fi
 
 # ═══ 14. v5.40.1 RMX5010 真机护栏: HNC_PREROUTE_GUARD + FORWARD HNC_RESTORE + HNC_EGRESS_FIX ═══
-test_start "v5.40.1 RMX5010: HNC_RESTORE 移至 FORWARD 避开 ip rule, HNC_PREROUTE_GUARD 清 [19:16], HNC_EGRESS_FIX 防 bw_mangle 冲刷"
+test_start "v5.40.1 RMX5010: HNC_RESTORE 移至 FORWARD 避开 ip rule, HNC_PREROUTE_GUARD 清 [23:16], HNC_EGRESS_FIX 防 bw_mangle 冲刷"
 mock_setup
 for _b in iptables ip6tables; do
     cat > "$MOCK_BIN_DIR/$_b" <<EOF
-#!/bin/sh
+#!${HNC_TEST_SH:-/system/bin/sh}
 echo "${_b}|\$*" >> "\$MOCK_LOG"
 case "\$*" in
     *" -C "*) exit 1 ;;
@@ -538,7 +548,7 @@ EOF
     chmod +x "$MOCK_BIN_DIR/$_b"
 done
 HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/iptables_manager.sh" init >/dev/null 2>&1
-assert_mock_called "HNC_PREROUTE_GUARD -m mark --mark 0x00800000/0x00800000 -j MARK --set-xmark 0x0/0x000f0000" && \
+assert_mock_called "HNC_PREROUTE_GUARD -m mark --mark 0x00800000/0x00800000 -j MARK --set-xmark 0x0/0x00ff0000" && \
 assert_mock_called "mangle -I FORWARD 1 -j HNC_RESTORE" && \
 assert_mock_called "HNC_EGRESS_FIX ! -o rmnet+ -m connmark --mark 0x00800000/0x00800000 -j CONNMARK --restore-mark --nfmask 0xffff0000 --ctmask 0xffff0000" && \
 assert_mock_called "mangle -A POSTROUTING -j HNC_EGRESS_FIX" && \

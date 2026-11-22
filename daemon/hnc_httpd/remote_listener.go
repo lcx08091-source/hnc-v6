@@ -23,6 +23,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -48,11 +49,12 @@ type remoteListener struct {
 
 	kick chan struct{}
 
-	mu       sync.Mutex
-	https    *http.Server
-	redir    *http.Server
-	mainAddr string // 实际监听地址(测试用端口 0 时取真实端口)
-	gen      int    // 每次 start +1; Serve 意外退出时只清理同一代
+	mu         sync.Mutex
+	https      *http.Server
+	redir      *http.Server
+	baseCancel context.CancelFunc // 取消当前代所有请求的 BaseContext(SSE 等长连接立即退出)
+	mainAddr   string             // 实际监听地址(测试用端口 0 时取真实端口)
+	gen        int                // 每次 start +1; Serve 意外退出时只清理同一代
 
 	// rules.json 读取缓存(只在 Loop 的 goroutine 里用)
 	rulesMod  time.Time
@@ -154,12 +156,15 @@ func (rl *remoteListener) start() error {
 			return fmt.Errorf("cannot ensure cert: %w", err)
 		}
 	}
+	baseCtx, baseCancel := context.WithCancel(context.Background())
 	hs := &http.Server{
 		Handler:           rl.handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
+		BaseContext:       func(net.Listener) context.Context { return baseCtx },
+		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	var redir *http.Server
 	var redirLn net.Listener
@@ -174,6 +179,7 @@ func (rl *remoteListener) start() error {
 				ReadHeaderTimeout: 5 * time.Second,
 				ReadTimeout:       10 * time.Second,
 				WriteTimeout:      10 * time.Second,
+				BaseContext:       func(net.Listener) context.Context { return baseCtx },
 			}
 		}
 	}
@@ -181,7 +187,7 @@ func (rl *remoteListener) start() error {
 	rl.mu.Lock()
 	rl.gen++
 	gen := rl.gen
-	rl.https, rl.redir, rl.mainAddr = hs, redir, ln.Addr().String()
+	rl.https, rl.redir, rl.baseCancel, rl.mainAddr = hs, redir, baseCancel, ln.Addr().String()
 	rl.mu.Unlock()
 
 	if ip := net.ParseIP(rl.bind); ip != nil && ip.IsUnspecified() && !readAuthRequired(rl.hncDir) {
@@ -202,8 +208,12 @@ func (rl *remoteListener) start() error {
 			rl.mu.Lock()
 			if rl.gen == gen {
 				r := rl.redir
-				rl.https, rl.redir, rl.mainAddr = nil, nil, ""
+				cancelFn := rl.baseCancel
+				rl.https, rl.redir, rl.baseCancel, rl.mainAddr = nil, nil, nil, ""
 				rl.mu.Unlock()
+				if cancelFn != nil {
+					cancelFn()
+				}
 				if r != nil {
 					_ = r.Close()
 				}
@@ -222,21 +232,28 @@ func (rl *remoteListener) start() error {
 	return nil
 }
 
-// stop 关掉远程端口(进行中的请求最多等 5 秒)。
+// stop 关掉远程端口(先取消 BaseContext 断开 SSE 等长连接, 进行中的请求最多等 5 秒, 超时强制 Close)。
 func (rl *remoteListener) stop(why string) {
 	rl.mu.Lock()
-	hs, redir := rl.https, rl.redir
-	rl.https, rl.redir, rl.mainAddr = nil, nil, ""
+	hs, redir, baseCancel := rl.https, rl.redir, rl.baseCancel
+	rl.https, rl.redir, rl.baseCancel, rl.mainAddr = nil, nil, nil, ""
 	rl.gen++
 	rl.mu.Unlock()
+	if baseCancel != nil {
+		baseCancel()
+	}
 	if hs == nil {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_ = hs.Shutdown(ctx)
+	if err := hs.Shutdown(ctx); err != nil {
+		_ = hs.Close()
+	}
 	if redir != nil {
-		_ = redir.Shutdown(ctx)
+		if err := redir.Shutdown(ctx); err != nil {
+			_ = redir.Close()
+		}
 	}
 	log.Printf("remote listener: closed (%s)", why)
 }

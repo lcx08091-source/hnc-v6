@@ -127,9 +127,19 @@ else
 fi
 
 # ── [6/14] watchdog 进程 ────────────────────────────────
-WD_COUNT=$(pgrep -f "watchdog.sh" 2>/dev/null | wc -l)
-if [ "$WD_COUNT" -gt 0 ]; then
-    WD_PID=$(pgrep -f "watchdog.sh" 2>/dev/null | head -1)
+WD_PID=""
+if [ -f "$HNC/run/watchdog.pid" ]; then
+    _wp=$(tr -d ' \r\n' < "$HNC/run/watchdog.pid" 2>/dev/null)
+    case "$_wp" in ''|*[!0-9]*) _wp="" ;; esac
+    if [ -n "$_wp" ] && kill -0 "$_wp" 2>/dev/null \
+       && tr '\000' ' ' < "/proc/$_wp/cmdline" 2>/dev/null | grep -q 'hnc_watchdog'; then
+        WD_PID="$_wp"
+    fi
+    unset _wp
+fi
+[ -z "$WD_PID" ] && WD_PID=$(pidof hnc_watchdog 2>/dev/null | awk '{print $1}')
+[ -z "$WD_PID" ] && WD_PID=$(pgrep -f "watchdog.sh" 2>/dev/null | head -1)
+if [ -n "$WD_PID" ]; then
     ok "watchdog" "运行中 (pid=$WD_PID)"
 else
     warn "watchdog" "未运行(可能未启用自启)"
@@ -139,7 +149,10 @@ fi
 RULES_COUNT=0
 DEV_COUNT=0
 NAMES_COUNT=0
-[ -f "$HNC/data/rules.json" ] && RULES_COUNT=$(grep -c '"mark_id"' "$HNC/data/rules.json" 2>/dev/null || echo 0)
+if [ -f "$HNC/data/rules.json" ]; then
+    RULES_COUNT=$(grep -c '"mark_id"' "$HNC/data/rules.json" 2>/dev/null)
+    case "$RULES_COUNT" in ''|*[!0-9]*) RULES_COUNT=0 ;; esac
+fi
 [ -f "$HNC/data/devices.json" ] && DEV_COUNT=$(grep -oE '"[0-9a-f:]{17}"' "$HNC/data/devices.json" 2>/dev/null | wc -l)
 [ -f "$HNC/data/device_names.json" ] && NAMES_COUNT=$(grep -oE '"[0-9a-f:]{17}":' "$HNC/data/device_names.json" 2>/dev/null | wc -l)
 ok "数据文件" "rules=$RULES_COUNT 设备 / devices=$DEV_COUNT 在线 / names=$NAMES_COUNT 命名"

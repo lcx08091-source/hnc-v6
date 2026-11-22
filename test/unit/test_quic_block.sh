@@ -7,8 +7,9 @@ qseed() {
     mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs" "$HNC_TEST_DIR/stub"
     : > "$HNC_TEST_DIR/ipt.log"
     : > "$HNC_TEST_DIR/ip6t.log"
-    cat > "$HNC_TEST_DIR/stub/iptables" <<'EOF'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 echo "$*" >> "$HNC_DIR/ipt.log"
 case "$*" in *"-D FORWARD -j HNC_QUIC"*)
     n=$(grep -c -- '-D FORWARD -j HNC_QUIC' "$HNC_DIR/ipt.log")
@@ -16,8 +17,10 @@ case "$*" in *"-D FORWARD -j HNC_QUIC"*)
 esac
 exit 0
 EOF
-    cat > "$HNC_TEST_DIR/stub/ip6tables" <<'EOF'
-#!/bin/sh
+    } > "$HNC_TEST_DIR/stub/iptables"
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 echo "$*" >> "$HNC_DIR/ip6t.log"
 case "$*" in *"-D FORWARD -j HNC_QUIC"*)
     n=$(grep -c -- '-D FORWARD -j HNC_QUIC' "$HNC_DIR/ip6t.log")
@@ -25,6 +28,7 @@ case "$*" in *"-D FORWARD -j HNC_QUIC"*)
 esac
 exit 0
 EOF
+    } > "$HNC_TEST_DIR/stub/ip6tables"
     chmod +x "$HNC_TEST_DIR/stub/iptables" "$HNC_TEST_DIR/stub/ip6tables"
     [ -n "$1" ] && printf '%s\n' "$1" > "$HNC_TEST_DIR/data/rules.json"
     [ -n "$2" ] && printf '%s\n' "$2" > "$HNC_TEST_DIR/run/hnc_state"

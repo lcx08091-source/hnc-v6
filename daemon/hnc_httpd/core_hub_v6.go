@@ -35,11 +35,11 @@ import (
 )
 
 const (
-	worldSnapshotInterval     = 1500 * time.Millisecond
-	defaultAndroidCmdTimeout  = 2 * time.Second
-	bulkheadHeartbeatInterval = 500 * time.Millisecond
-	bulkheadHealthyMaxAge     = 10 * time.Second
-	maxDetachedRunaways       = 2
+	worldSnapshotInterval    = 1500 * time.Millisecond
+	worldSnapshotBgInterval  = 15 * time.Second
+	defaultAndroidCmdTimeout = 2 * time.Second
+	bulkheadHealthyMaxAge    = 10 * time.Second
+	maxDetachedRunaways      = 2
 )
 
 var (
@@ -228,10 +228,20 @@ type BulkheadConfig struct {
 }
 
 type bulkheadTask struct {
-	ctx     context.Context
-	timeout time.Duration
-	fn      func(ctx context.Context) error
-	doneCh  chan error // nil 表示 Fire-and-Forget 异步投递
+	ctx             context.Context
+	timeout         time.Duration
+	fn              func(ctx context.Context) error
+	doneCh          chan error // nil 表示 Fire-and-Forget 异步投递
+	isProbe         bool
+	canceled        atomic.Bool
+	probeReleased   atomic.Bool
+	timeoutRecorded atomic.Bool
+}
+
+func (t *bulkheadTask) releaseProbe(b *Bulkhead) {
+	if t != nil && t.isProbe && t.probeReleased.CompareAndSwap(false, true) {
+		b.halfOpenProbe.Store(false)
+	}
 }
 
 // Bulkhead 单个隔离舱壁。
@@ -247,14 +257,16 @@ type Bulkhead struct {
 	totalRejected     atomic.Uint64 // offset 56
 	totalCircuitTrips atomic.Uint64 // offset 64
 	lastExecNs        atomic.Int64  // offset 72
+	taskStartMonoNs   atomic.Int64  // offset 80: 当前在途任务起始单调时钟(ns), 0 = idle
 
 	consecTimeouts atomic.Int32
 	halfOpenProbe  atomic.Bool
 	actorRunning   atomic.Bool
+	inFlight       atomic.Bool
 	closed         atomic.Bool
 
 	name             string
-	queue            chan bulkheadTask
+	queue            chan *bulkheadTask
 	runawaySem       chan struct{}
 	stopCh           chan struct{}
 	actorOnce        sync.Once
@@ -286,7 +298,7 @@ func NewBulkhead(cfg BulkheadConfig) *Bulkhead {
 	}
 	b := &Bulkhead{
 		name:             cfg.Name,
-		queue:            make(chan bulkheadTask, cfg.QueueSize),
+		queue:            make(chan *bulkheadTask, cfg.QueueSize),
 		runawaySem:       make(chan struct{}, maxDetachedRunaways),
 		stopCh:           make(chan struct{}),
 		defaultTimeout:   cfg.DefaultTimeout,
@@ -317,12 +329,22 @@ func (b *Bulkhead) Beat() {
 	}
 }
 
-// BeatAge 返回距上次推进心跳的单调时钟时长。
+// BeatAge 返回当前在途任务或排队积压的单调时钟滞留时长; 空闲(无在途任务且队列为空)恒返回 0。
 func (b *Bulkhead) BeatAge() time.Duration {
 	if b == nil {
 		return 0
 	}
-	age := monoNowNs() - b.actorBeatMonoNs.Load()
+	if !b.inFlight.Load() && len(b.queue) == 0 {
+		return 0
+	}
+	nowMono := monoNowNs()
+	ref := b.actorBeatMonoNs.Load()
+	if b.inFlight.Load() {
+		if start := b.taskStartMonoNs.Load(); start > 0 {
+			ref = start
+		}
+	}
+	age := nowMono - ref
 	if age < 0 {
 		return 0
 	}
@@ -411,19 +433,22 @@ func (b *Bulkhead) TrySubmit(fn func(ctx context.Context) error) error {
 		return err
 	}
 	b.StartActor()
-	task := bulkheadTask{
+	task := &bulkheadTask{
 		ctx:     context.Background(),
 		timeout: b.defaultTimeout,
 		fn:      fn,
+		isProbe: isProbe,
+	}
+	// 空闲休眠后首次入队先刷新心跳锚点, 避免入队到 actorLoop 取出间的微秒窗口出现伪老化
+	if !b.inFlight.Load() && len(b.queue) == 0 {
+		b.actorBeatMonoNs.Store(monoNowNs())
 	}
 	select {
 	case b.queue <- task:
 		b.totalSubmitted.Add(1)
 		return nil
 	default:
-		if isProbe {
-			b.halfOpenProbe.Store(false)
-		}
+		task.releaseProbe(b)
 		b.totalRejected.Add(1)
 		return ErrBulkheadQueueFull
 	}
@@ -446,19 +471,21 @@ func (b *Bulkhead) Execute(parentCtx context.Context, timeout time.Duration, fn 
 	}
 	b.StartActor()
 	doneCh := make(chan error, 1)
-	task := bulkheadTask{
+	task := &bulkheadTask{
 		ctx:     parentCtx,
 		timeout: timeout,
 		fn:      fn,
 		doneCh:  doneCh,
+		isProbe: isProbe,
+	}
+	if !b.inFlight.Load() && len(b.queue) == 0 {
+		b.actorBeatMonoNs.Store(monoNowNs())
 	}
 	select {
 	case b.queue <- task:
 		b.totalSubmitted.Add(1)
 	default:
-		if isProbe {
-			b.halfOpenProbe.Store(false)
-		}
+		task.releaseProbe(b)
 		b.totalRejected.Add(1)
 		return ErrBulkheadQueueFull
 	}
@@ -469,11 +496,16 @@ func (b *Bulkhead) Execute(parentCtx context.Context, timeout time.Duration, fn 
 	case resErr := <-doneCh:
 		return resErr
 	case <-parentCtx.Done():
+		task.canceled.Store(true)
+		task.releaseProbe(b)
 		return parentCtx.Err()
 	case <-b.stopCh:
+		task.canceled.Store(true)
+		task.releaseProbe(b)
 		return ErrBulkheadClosed
 	case <-waitTimer.C:
-		b.recordTimeoutOrTrip()
+		task.canceled.Store(true)
+		b.recordTimeoutOrTrip(task)
 		return ErrBulkheadTimeout
 	}
 }
@@ -485,7 +517,8 @@ func (b *Bulkhead) ExecuteInline(fn func() error) (err error) {
 		return nil
 	}
 	startMono := monoNowNs()
-	if _, allowErr := b.allowSubmission(startMono); allowErr != nil {
+	isProbe, allowErr := b.allowSubmission(startMono)
+	if allowErr != nil {
 		return allowErr
 	}
 	b.actorBeatMonoNs.Store(startMono)
@@ -498,7 +531,9 @@ func (b *Bulkhead) ExecuteInline(fn func() error) (err error) {
 			b.lastExecNs.Store(endMono - startMono)
 			b.totalPanics.Add(1)
 			b.totalErrors.Add(1)
-			b.halfOpenProbe.Store(false)
+			if isProbe {
+				b.halfOpenProbe.Store(false)
+			}
 			msg := fmt.Sprintf("panic recovered in bulkhead %s: %v", b.name, p)
 			b.setLastErr(msg)
 			log.Printf("core_hub: %s", msg)
@@ -514,7 +549,9 @@ func (b *Bulkhead) ExecuteInline(fn func() error) (err error) {
 	if b.circuitOpenUntil.Load() != 0 {
 		b.circuitOpenUntil.Store(0)
 	}
-	b.halfOpenProbe.Store(false)
+	if isProbe {
+		b.halfOpenProbe.Store(false)
+	}
 	b.totalCompleted.Add(1)
 	if err != nil {
 		b.totalErrors.Add(1)
@@ -524,27 +561,43 @@ func (b *Bulkhead) ExecuteInline(fn func() error) (err error) {
 }
 
 func (b *Bulkhead) actorLoop() {
-	tk := time.NewTicker(bulkheadHeartbeatInterval)
-	defer tk.Stop()
 	b.Beat()
 	for {
 		select {
 		case <-b.stopCh:
 			return
-		case <-tk.C:
-			b.Beat()
 		case task := <-b.queue:
-			b.Beat()
+			if task == nil {
+				continue
+			}
+			if task.canceled.Load() {
+				task.releaseProbe(b)
+				b.Beat()
+				continue
+			}
+			nowMono := monoNowNs()
+			b.actorBeatMonoNs.Store(nowMono)
+			b.taskStartMonoNs.Store(nowMono)
+			b.inFlight.Store(true)
 			err := b.executeTaskIsolated(task)
 			b.Beat()
+			b.taskStartMonoNs.Store(0)
+			b.inFlight.Store(false)
 			if task.doneCh != nil {
-				task.doneCh <- err
+				select {
+				case task.doneCh <- err:
+				default:
+				}
 			}
 		}
 	}
 }
 
-func (b *Bulkhead) executeTaskIsolated(task bulkheadTask) error {
+func (b *Bulkhead) executeTaskIsolated(task *bulkheadTask) error {
+	if task.canceled.Load() {
+		task.releaseProbe(b)
+		return ErrBulkheadTimeout
+	}
 	startMono := monoNowNs()
 	timeout := task.timeout
 	if timeout <= 0 {
@@ -561,7 +614,11 @@ func (b *Bulkhead) executeTaskIsolated(task bulkheadTask) error {
 	select {
 	case b.runawaySem <- struct{}{}:
 	default:
-		b.recordTimeoutOrTrip()
+		if !task.canceled.Load() {
+			b.recordTimeoutOrTrip(task)
+		} else {
+			task.releaseProbe(b)
+		}
 		return ErrBulkheadTimeout
 	}
 
@@ -592,12 +649,17 @@ func (b *Bulkhead) executeTaskIsolated(task bulkheadTask) error {
 	select {
 	case out := <-resCh:
 		b.lastExecNs.Store(monoNowNs() - startMono)
+		// 若调用方已取消或因 waitTimer 超时离开, 滞后完成绝不污染熔断器与后续半开探测状态
+		if task.canceled.Load() {
+			task.releaseProbe(b)
+			return out.err
+		}
 		if out.panicked {
-			b.halfOpenProbe.Store(false)
+			task.releaseProbe(b)
 			return out.err
 		}
 		if errors.Is(out.err, context.DeadlineExceeded) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			b.recordTimeoutOrTrip()
+			b.recordTimeoutOrTrip(task)
 			return fmt.Errorf("%w: %v", ErrBulkheadTimeout, out.err)
 		}
 		// 正常返回(含普通业务错误): 重置连续超时计数并关闭半开熔断器。
@@ -605,7 +667,7 @@ func (b *Bulkhead) executeTaskIsolated(task bulkheadTask) error {
 		if b.circuitOpenUntil.Load() != 0 {
 			b.circuitOpenUntil.Store(0)
 		}
-		b.halfOpenProbe.Store(false)
+		task.releaseProbe(b)
 		b.totalCompleted.Add(1)
 		if out.err != nil {
 			b.totalErrors.Add(1)
@@ -615,19 +677,33 @@ func (b *Bulkhead) executeTaskIsolated(task bulkheadTask) error {
 
 	case <-ctx.Done():
 		b.lastExecNs.Store(monoNowNs() - startMono)
+		if task.canceled.Load() {
+			task.releaseProbe(b)
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return ErrBulkheadTimeout
+			}
+			return ctx.Err()
+		}
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			b.recordTimeoutOrTrip()
+			b.recordTimeoutOrTrip(task)
 			return ErrBulkheadTimeout
 		}
-		b.halfOpenProbe.Store(false)
+		task.releaseProbe(b)
 		return ctx.Err()
 	}
 }
 
-func (b *Bulkhead) recordTimeoutOrTrip() {
+func (b *Bulkhead) recordTimeoutOrTrip(task *bulkheadTask) {
+	if task != nil && !task.timeoutRecorded.CompareAndSwap(false, true) {
+		return
+	}
 	b.totalTimeouts.Add(1)
 	ct := b.consecTimeouts.Add(1)
-	b.halfOpenProbe.Store(false)
+	if task != nil {
+		task.releaseProbe(b)
+	} else {
+		b.halfOpenProbe.Store(false)
+	}
 	nowMono := monoNowNs()
 	if ct >= b.tripThreshold || b.circuitOpenUntil.Load() > 0 {
 		until := nowMono + int64(b.cooldownDuration)
@@ -667,13 +743,23 @@ func (b *Bulkhead) Health() BulkheadHealth {
 		return BulkheadHealth{Healthy: false, CircuitState: "closed"}
 	}
 	nowMono := monoNowNs()
-	// 尚未显式起常驻 Actor 协程时(如纯只读无任务空闲期), 心跳随观测刷新;
-	// 一旦 Actor 启动, 仅由 actorLoop 真实循环推进, 若循环卡死则 BeatAgeMs 自然老化告警!
+	qDepth := len(b.queue)
+	inFlight := b.inFlight.Load()
 	if !b.actorRunning.Load() && !b.closed.Load() {
 		b.actorBeatMonoNs.Store(nowMono)
 	}
 	beatMono := b.actorBeatMonoNs.Load()
-	ageNs := nowMono - beatMono
+	// 纯事件驱动健康判定: 空闲无在途任务且队列为空时不老化; 在途卡死按 taskStartMonoNs 计, 排队积压按 actorBeatMonoNs 计
+	var ageNs int64
+	if inFlight {
+		ref := b.taskStartMonoNs.Load()
+		if ref <= 0 {
+			ref = beatMono
+		}
+		ageNs = nowMono - ref
+	} else if qDepth > 0 {
+		ageNs = nowMono - beatMono
+	}
 	if ageNs < 0 {
 		ageNs = 0
 	}
@@ -689,7 +775,7 @@ func (b *Bulkhead) Health() BulkheadHealth {
 		CircuitState:      cState,
 		BeatAgeMs:         ageNs / int64(time.Millisecond),
 		BeatMonoNs:        beatMono,
-		QueueDepth:        len(b.queue),
+		QueueDepth:        qDepth,
 		QueueCap:          cap(b.queue),
 		ConsecTimeouts:    b.consecTimeouts.Load(),
 		CircuitCooldownMs: remCooldownMs,
@@ -767,6 +853,7 @@ type CoreHub struct {
 
 	world       atomic.Pointer[WorldSnapshot]
 	loopActive  atomic.Bool
+	paused      atomic.Bool
 	asyncFlight atomic.Bool
 	closed      atomic.Bool
 
@@ -856,7 +943,21 @@ func (s *server) CoreHub() *CoreHub {
 	return nh
 }
 
-// Start 启动四舱壁心跳循环与后台每 1.5s 推进一次的无锁快照刷新协程(幂等)。
+// coreHubRefreshInterval 根据全局活动档位计算 CoreHub 快照刷新间隔; 返回 0 表示彻底休眠(0 唤醒)。
+func coreHubRefreshInterval(act Activity) time.Duration {
+	if !act.Known || act.WebUIActive {
+		return worldSnapshotInterval
+	}
+	if !act.HotspotActive || act.Level == lvlHotspotOff || act.Level == lvlNoClients {
+		return 0
+	}
+	if act.Level == lvlBackground {
+		return worldSnapshotBgInterval
+	}
+	return worldSnapshotInterval
+}
+
+// Start 启动四舱壁事件驱动 Actor 与按活动档位自适应启停的无锁快照刷新协程(幂等)。
 func (h *CoreHub) Start(extStop <-chan struct{}) {
 	if h == nil || h.closed.Load() || !h.loopActive.CompareAndSwap(false, true) {
 		return
@@ -867,8 +968,41 @@ func (h *CoreHub) Start(extStop <-chan struct{}) {
 	h.StorageBulkhead.StartActor()
 
 	go func() {
-		tk := time.NewTicker(worldSnapshotInterval)
-		defer tk.Stop()
+		var tk *time.Ticker
+		var tickCh <-chan time.Time
+		var curInterval time.Duration
+		stopTicker := func() {
+			if tk != nil {
+				tk.Stop()
+				tk = nil
+				tickCh = nil
+			}
+			curInterval = 0
+		}
+		defer stopTicker()
+
+		syncSchedule := func(act Activity) bool {
+			want := coreHubRefreshInterval(act)
+			wasPaused := h.paused.Load()
+			if want <= 0 {
+				stopTicker()
+				h.paused.Store(true)
+				return false
+			}
+			h.paused.Store(false)
+			if want != curInterval {
+				stopTicker()
+				tk = time.NewTicker(want)
+				tickCh = tk.C
+				curInterval = want
+			}
+			return wasPaused || (want == worldSnapshotInterval && monoNowNs()-h.lastRefreshMono.Load() >= int64(worldSnapshotInterval))
+		}
+
+		// 先取变更通道再读快照, 杜绝切换边缘漏唤醒
+		actCh := activityChanged()
+		syncSchedule(activityNow())
+
 		for {
 			select {
 			case <-h.stopCh:
@@ -876,7 +1010,12 @@ func (h *CoreHub) Start(extStop <-chan struct{}) {
 			case <-extStop:
 				h.Close()
 				return
-			case <-tk.C:
+			case <-actCh:
+				actCh = activityChanged()
+				if syncSchedule(activityNow()) {
+					h.RefreshSnapshotNow()
+				}
+			case <-tickCh:
 				h.RefreshSnapshotNow()
 			}
 		}
@@ -913,8 +1052,9 @@ func (h *CoreHub) Close() {
 	h.closeShmReader()
 	defaultGlobalHub.CompareAndSwap(h, nil)
 	if h.srv != nil {
-		serverHubMap.Delete(h.srv)
-		v6Registry.Delete(h.srv)
+		if serverHubMap.CompareAndDelete(h.srv, h) {
+			v6Registry.Delete(h.srv)
+		}
 	}
 }
 
@@ -934,10 +1074,10 @@ func (h *CoreHub) VectorSyncHits() uint64 {
 	return h.vectorSyncHits.Load()
 }
 
-// triggerAsyncRefreshIfStale 当未显式开启常驻 Start 循环且快照超过 1.5s 时,
+// triggerAsyncRefreshIfStale 当未显式开启常驻 Start 循环(或循环处于省电暂停态)且快照超过 1.5s 时,
 // 触发单飞短命后台刷新(用完即退, 既不阻塞当前 HTTP 请求也不在单测里驻留永久协程)。
 func (h *CoreHub) triggerAsyncRefreshIfStale() {
-	if h == nil || h.loopActive.Load() || h.closed.Load() {
+	if h == nil || h.closed.Load() || (h.loopActive.Load() && !h.paused.Load()) {
 		return
 	}
 	age := monoNowNs() - h.lastRefreshMono.Load()
@@ -980,7 +1120,8 @@ func (h *CoreHub) RefreshSnapshotNow() *WorldSnapshot {
 		}
 	}
 
-	live := buildVectorLiveSummaryInternal(h.srv, now, shmRes, h.loopActive.Load())
+	allowAsyncSignal := h.loopActive.Load() && activityNow().WebUIActive
+	live := buildVectorLiveSummaryInternal(h.srv, now, shmRes, allowAsyncSignal)
 	exts := collectVectorSyncProviders(h.srv)
 	if exts == nil {
 		exts = make(map[string]any, 2)
@@ -1084,10 +1225,9 @@ func (r dpiShmReadResult) toExtensionMap() map[string]any {
 }
 
 func (h *CoreHub) closeShmReader() {
-	if h.shmMu.TryLock() {
-		h.closeShmReaderLocked()
-		h.shmMu.Unlock()
-	}
+	h.shmMu.Lock()
+	h.closeShmReaderLocked()
+	h.shmMu.Unlock()
 }
 
 func (h *CoreHub) closeShmReaderLocked() {

@@ -8,14 +8,17 @@ cx_init() {
     CX="$HNC_TEST_DIR/cx"
     rm -rf "$CX"; mkdir -p "$CX/adb" "$CX/appdata" "$CX/mock" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
     : > "$CX/props"; : > "$CX/calls"
-    cat > "$CX/mock/getprop" <<'M'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'M'
 sed -n "s/^$1=//p" "$CX/props" | head -n1
 M
+    } > "$CX/mock/getprop"
     # cmd 桩: `cmd wifi help` → $CX/wifi_help; `cmd -l` → $CX/cmd_l;
     # `cmd wifi start-softap ...` → 依 $CX/softap_ok_args 决定成功/失败
-    cat > "$CX/mock/cmd" <<'M'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'M'
 echo "cmd $*" >> "$CX/calls"
 case "$1 $2" in
     "wifi help"|"wifi -h") cat "$CX/wifi_help" 2>/dev/null ;;
@@ -28,8 +31,10 @@ case "$1 $2" in
 esac
 exit 0
 M
-    cat > "$CX/mock/svc" <<'M'
-#!/bin/sh
+    } > "$CX/mock/cmd"
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'M'
 echo "svc $*" >> "$CX/calls"
 case "$*" in
     wifi) cat "$CX/svc_help" 2>/dev/null || echo "Control the Wi-Fi manager
@@ -37,6 +42,7 @@ usage: svc wifi [enable|disable]" ;;
 esac
 exit 0
 M
+    } > "$CX/mock/svc"
     chmod +x "$CX/mock/"*
     export CX
 }
@@ -52,8 +58,8 @@ clib() {
       HNC_COMPAT_LIB=1 . "$CSCRIPT"
       eval "$1" ) 2>/dev/null
 }
-mkexe() { mkdir -p "$(dirname "$1")"; printf '#!/bin/sh\necho "%s"\n' "${2:-}" > "$1"; chmod +x "$1"; }
-jf() { sed -n "s/.*\"$2\":\\(\"[^\"]*\"\\|\\[[^]]*\\]\\|[a-z0-9]*\\).*/\\1/p" "$HNC_TEST_DIR/run/$1" 2>/dev/null | head -n1; }
+mkexe() { mkdir -p "$(dirname "$1")"; printf '#!%s\necho "%s"\n' "${HNC_TEST_SH:-/system/bin/sh}" "${2:-}" > "$1"; chmod +x "$1"; }
+jf() { sed -En "s/.*\"$2\":(\"[^\"]*\"|\\[[^]]*\\]|[a-z0-9]*).*/\\1/p" "$HNC_TEST_DIR/run/$1" 2>/dev/null | head -n1; }
 
 WIFI_HELP_A12='Wi-Fi (wifi) commands:
   start-softap <ssid> (open|wpa2|wpa3|wpa3_transition|owe|owe_transition) <passphrase> [-b 2|5|6|any|bridged|bridged_2_5|bridged_2_6|bridged_5_6] [-x] [-w 2|5|6] [-f <int> [<int>]]
@@ -129,13 +135,15 @@ assert_eq '"sukisu"' "$(jf root_env.json root)" && assert_eq '"high"' "$(jf root
 test_start "compat root: ksud --help lists kpm subcommand (at /data/adb/ksu/bin/ksud) → sukisu (medium)"
 cx_init
 mkdir -p "$CX/adb/ksu/bin"
-cat > "$CX/adb/ksu/bin/ksud" <<'M'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'M'
 case "$1" in
   -V) echo "KernelSU ksud 4.2.0-rc1 (uapi: 2)" ;;
   --help) printf 'Usage: ksud <COMMAND>\n\nCommands:\n  module   Manage KernelSU modules\n  kpm      KPM module manager\n  help     Print this message\n' ;;
 esac
 M
+} > "$CX/adb/ksu/bin/ksud"
 chmod +x "$CX/adb/ksu/bin/ksud"
 crun root >/dev/null
 assert_eq '"sukisu"' "$(jf root_env.json root)" && assert_eq '"medium"' "$(jf root_env.json root_confidence)" \
@@ -204,14 +212,18 @@ printf '%s\n' "$WIFI_HELP_A12" > "$CX/wifi_help"
 echo "wifi start-softap HNCAP wpa2 pass12345 -b any" > "$CX/softap_ok_args"
 mkdir -p "$HNC_TEST_DIR/data"
 echo '{"hotspot_ssid":"HNCAP","hotspot_pass":"pass12345"}' > "$HNC_TEST_DIR/data/rules.json"
-cat > "$CX/mock/ip" <<'M'
-#!/bin/sh
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'M'
 exit 0
 M
-cat > "$CX/mock/iptables" <<'M'
-#!/bin/sh
+} > "$CX/mock/ip"
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'M'
 exit 0
 M
+} > "$CX/mock/iptables"
 chmod +x "$CX/mock/ip" "$CX/mock/iptables"
 HNC_DIR="$HNC_TEST_DIR" HNC_SKIP_PATH_HARDENING=1 PATH="$CX/mock:$PATH" sh "$HNC_REPO_ROOT/bin/hotspot_autostart.sh" start-now >/dev/null 2>&1
 assert_eq '"softap_band"' "$(jf softap_method.json last_method)" && assert_eq true "$(jf softap_method.json last_ok)" \

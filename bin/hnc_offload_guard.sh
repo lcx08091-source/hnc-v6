@@ -10,7 +10,7 @@
 #   3. 严守硬件安全边界: 仅联动 bin/hnc_mtk_hwnat.sh, 零触碰高危 FOE 节点与厂商守护进程。
 #   4. prio 解耦识别: 仅当 mirred 仍霸占旧版 pref 1 时才跳过 clsact; prio 2 mirred 与 pref 1 clsact 完美共存!
 
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 HNC_DIR="${HNC_DIR:-/data/local/hnc}"
 RUN="$HNC_DIR/run"
@@ -69,7 +69,7 @@ has_active_policy() {
     [ -f "$RULES" ] || return 1
     local flat
     flat=$(tr -d '\r\n' < "$RULES" 2>/dev/null)
-    printf '%s' "$flat" | grep -qE '"(limit_enabled|app_qos|global_shaper_enabled|quic_block|isolation_enabled|whitelist_enabled)"[[:space:]]*:[[:space:]]*true' && return 0
+    printf '%s' "$flat" | grep -qE '"(limit_enabled|delay_enabled|sqm_enabled|app_qos|global_shaper_enabled|quic_block|client_isolation_enabled|whitelist_mode)"[[:space:]]*:[[:space:]]*true' && return 0
     printf '%s' "$flat" | grep -qE '"blacklist"[[:space:]]*:[[:space:]]*\[[^]]*"[0-9a-fA-F:]{17}"' && return 0
     return 1
 }
@@ -354,7 +354,7 @@ tick() {
         fb=1
         st_save "$fb" "$since" "$calm"
         cl=$(clsact_apply "$ifc")
-        if [ "$mode" = on ] || [ "$t0_preempt" = 1 ]; then
+        if [ "$mode" = on ] || [ "$t0_preempt" = 1 ] || { [ "$state" = ACTIVE ] && [ "$policy_on" = 1 ]; }; then
             HWNAT_ST=$(hwnat_disable)
         fi
         log "fallback ON (mode=$mode offload=$state t0=$t0_preempt iface=$ifc slowpath=$sp clsact=$cl)"
@@ -490,7 +490,9 @@ case "${1:-}" in
             echo "$INTERVAL none"
             exit 0
         fi
-        trap 'og_unlock' EXIT INT TERM
+        trap 'og_unlock' EXIT
+        trap 'og_unlock; trap - EXIT; exit 143' TERM
+        trap 'og_unlock; trap - EXIT; exit 130' INT
         tick
         guard_plan_sleep
         echo "$GUARD_PLAN_TOTAL ${GUARD_PLAN_WAKE:-none}"
@@ -501,13 +503,17 @@ case "${1:-}" in
             cat "$STATUS" 2>/dev/null
             exit 0
         fi
-        trap 'og_unlock' EXIT INT TERM
+        trap 'og_unlock' EXIT
+        trap 'og_unlock; trap - EXIT; exit 143' TERM
+        trap 'og_unlock; trap - EXIT; exit 130' INT
         tick
         cat "$STATUS" 2>/dev/null
         ;;
     restore)
         og_lock || true
-        trap 'og_unlock' EXIT INT TERM
+        trap 'og_unlock' EXIT
+        trap 'og_unlock; trap - EXIT; exit 143' TERM
+        trap 'og_unlock; trap - EXIT; exit 130' INT
         _rifc=$(hotspot_iface) || _rifc=$(head -n 1 "$RUN/iface.cache" 2>/dev/null | tr -d ' \r\n')
         do_restore "$_rifc"
         st_save 0 0 0
@@ -526,7 +532,9 @@ case "${1:-}" in
             echo busy
             exit 1
         fi
-        trap 'og_unlock' EXIT INT TERM
+        trap 'og_unlock' EXIT
+        trap 'og_unlock; trap - EXIT; exit 143' TERM
+        trap 'og_unlock; trap - EXIT; exit 130' INT
         clsact_repair "${2:-$(hotspot_iface)}"
         exit $?
         ;;

@@ -27,11 +27,11 @@ func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 	if !ok {
 		return actionResp{OK: false, Error: "bad params", Detail: "enabled must be true/false"}
 	}
-	if s.autorate != nil {
-		s.autorate.DisableFromStaticShaper()
-	}
 
 	if !enabled {
+		if s.autorate != nil {
+			s.autorate.DisableFromStaticShaper()
+		}
 		// 关:复位 1:1 ceil 回 DEFAULT_RATE,并落 flag。即便没热点接口也把 flag 清掉,
 		// 免得 restore_rules 下次又把它拉起来。
 		_, out := runBin(hncDir, "device_detect.sh", "iface")
@@ -77,6 +77,10 @@ func actionGlobalShaperSet(s *server, p map[string]string) actionResp {
 	iface := strings.TrimSpace(out)
 	if iface == "" {
 		return actionResp{OK: false, Error: "no hotspot iface", Detail: "热点未开启,无法应用全局整形"}
+	}
+
+	if s.autorate != nil {
+		s.autorate.DisableFromStaticShaper()
 	}
 
 	if rc2, out2 := runBin(hncDir, "tc_manager.sh", "global_shaper", iface, "on", rateDown, rateUp); rc2 != 0 {

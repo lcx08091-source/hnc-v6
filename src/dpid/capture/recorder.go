@@ -28,6 +28,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -140,6 +141,12 @@ func (r *Recorder) Status() map[string]interface{} {
 
 func (r *Recorder) statusFile() string { return filepath.Join(r.runDir, "capture_rec", "status.json") }
 func (r *Recorder) recDir() string     { return filepath.Join(r.runDir, "capture_rec") }
+func (r *Recorder) stagingDir() string {
+	if r.hncDir != "" {
+		return filepath.Join(r.hncDir, "exports", ".staging")
+	}
+	return r.recDir()
+}
 
 func (r *Recorder) pollLoop() {
 	for {
@@ -215,11 +222,12 @@ func (r *Recorder) start(minutes int) *recSession {
 	if r.sess.Load() != nil {
 		return nil
 	}
-	if err := os.MkdirAll(r.recDir(), 0o700); err != nil {
+	stageDir := r.stagingDir()
+	if err := os.MkdirAll(stageDir, 0o700); err != nil {
 		return nil
 	}
 	name := "rec-" + time.Now().Format("20060102-150405") + ".pcap"
-	path := filepath.Join(r.recDir(), name)
+	path := filepath.Join(stageDir, name)
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return nil
@@ -233,6 +241,10 @@ func (r *Recorder) start(minutes int) *recSession {
 	binary.LittleEndian.PutUint32(hdr[20:24], recLinkTypeRAW)
 	if _, err := f.Write(hdr[:]); err != nil {
 		f.Close()
+		_ = os.Remove(path)
+		if r.hncDir != "" {
+			_ = os.Remove(stageDir)
+		}
 		return nil
 	}
 	s := &recSession{path: path, f: f, queue: make(chan recItem, recQueueLen),
@@ -328,7 +340,7 @@ func (s *recSession) finish() {
 	}
 }
 
-// moveOut 录完把文件移到 exports/(失败留在 capture_rec/, 不算错误)。
+// moveOut 录完把文件原子移到 exports/；若跨文件系统(EXDEV)则回退拷贝+原子替换+删源。
 func (r *Recorder) moveOut(s *recSession) {
 	if s.path == "" {
 		return
@@ -337,7 +349,49 @@ func (r *Recorder) moveOut(s *recSession) {
 	if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
 		return
 	}
-	_ = os.Rename(s.path, dst)
+	if err := os.Rename(s.path, dst); err != nil {
+		if copyErr := copyFileAtomic(s.path, dst); copyErr != nil {
+			return
+		}
+		_ = os.Remove(s.path)
+	}
+	if r.hncDir != "" && filepath.Dir(s.path) == r.stagingDir() {
+		// 仅删除空 .staging 目录, 避免在 exports/ 下遗留子目录干扰枚举。
+		_ = os.Remove(r.stagingDir())
+	}
+}
+
+func copyFileAtomic(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	tmp := dst + ".tmp"
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		out.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := out.Sync(); err != nil {
+		out.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := out.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, dst); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func (r *Recorder) writeStatus() {

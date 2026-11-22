@@ -98,9 +98,19 @@ func startLinkWatch() {
 					return
 				default:
 				}
-				if err == syscall.EINTR || err == syscall.ENOBUFS {
-					// ENOBUFS: 事件积压溢出 —— 有变化但丢了细节, 照样唤醒一次。
+				if err == syscall.EINTR {
+					continue
+				}
+				if err == syscall.ENOBUFS {
+					// ENOBUFS: 事件积压溢出 —— 有变化但丢了细节, 唤醒一次并短退避防热循环。
 					wakeMain()
+					tmr := time.NewTimer(100 * time.Millisecond)
+					select {
+					case <-tmr.C:
+					case <-stopCh:
+						tmr.Stop()
+						return
+					}
 					continue
 				}
 				logf("link watch: recv: %v (stopped, fall back to polling)", err)
@@ -136,21 +146,50 @@ func netlinkHasLinkOrAddr(b []byte) bool {
 }
 
 // sleepOrWake 睡 d, 或被网卡事件提前叫醒。返回 (继续运行, 是否被事件叫醒)。
-// 事件叫醒时先等 eventSettle(热点口拿到地址), 且距上次事件触发至少 eventMinGap。
+// 事件叫醒时先等 eventSettle(热点口拿到地址), 且距上次事件触发至少 eventMinGap;
+// 若在 5s 防抖期内收到事件, 将剩余睡眠缩短至 eventMinGap - elapsed, 不丢事件。
 var lastEventRound time.Time
 
 func sleepOrWake(d time.Duration) (bool, bool) {
+	deadline := time.Now().Add(d)
 	t := time.NewTimer(d)
 	defer t.Stop()
+	deferredWake := false
 	for {
 		select {
 		case <-stopCh:
 			return false, false
 		case <-t.C:
+			if deferredWake {
+				if !sleepUntil(eventSettle) {
+					return false, false
+				}
+				// 合并 settle 期间又到的事件
+				select {
+				case <-linkWake:
+				default:
+				}
+				lastEventRound = time.Now()
+				return true, true
+			}
 			return true, false
 		case <-linkWake:
-			if time.Since(lastEventRound) < eventMinGap {
-				continue // 抖动: 继续等(仍受原定时器约束)
+			if !lastEventRound.IsZero() {
+				if elapsed := time.Since(lastEventRound); elapsed >= 0 && elapsed < eventMinGap {
+					rem := eventMinGap - elapsed
+					if target := time.Now().Add(rem); target.Before(deadline) {
+						if !t.Stop() {
+							select {
+							case <-t.C:
+							default:
+							}
+						}
+						t.Reset(rem)
+						deadline = target
+						deferredWake = true
+					}
+					continue // 防抖期内缩短等待至窗口期满, 不丢事件
+				}
 			}
 			if !sleepUntil(eventSettle) {
 				return false, false
@@ -293,7 +332,9 @@ func (h *hotspotScheduler) runIfDue(now time.Time) {
 	if _, err := os.Stat(script); err != nil {
 		return
 	}
+	touchMainLoopStep()
 	runScriptFn(script)
+	touchMainLoopStep()
 }
 
 // crossedBoundary 上次执行到现在之间是否跨过了某个时段边界。

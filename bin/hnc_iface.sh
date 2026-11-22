@@ -249,8 +249,25 @@ _hi_tether_upstream() {
 }
 
 _hi_tetherctrl_ifaces() {
-    iptables -t filter -L tetherctrl_FORWARD -n -v 2>/dev/null \
-        | awk '$3 == "ACCEPT" && $6 != "*" && $6 != "" && $0 !~ /RELATED|ESTABLISHED/ { print $6 }'
+    iptables -t filter -L tetherctrl_FORWARD -n -v 2>/dev/null | awk '
+        BEGIN { hdr_in = 0; v4re = "^!?[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+(/[0-9]+)?$" }
+        $1 == "pkts" && $2 == "bytes" && $3 == "target" {
+            for (i = 4; i <= NF; i++) if ($i == "in") { hdr_in = i; break }
+            next
+        }
+        $3 == "ACCEPT" && $0 !~ /RELATED|ESTABLISHED/ {
+            ifc = ""
+            if (NF >= 8 && $7 ~ v4re && $8 ~ v4re && $5 != "--") {
+                ifc = $5
+            } else if (NF >= 9 && $8 ~ v4re && $9 ~ v4re) {
+                ifc = $6
+            } else if (hdr_in > 0 && hdr_in <= NF) {
+                ifc = $hdr_in
+            } else {
+                ifc = $6
+            }
+            if (ifc != "" && ifc != "*" && ifc != "--") print ifc
+        }'
 }
 
 _hi_softap_iface() {
@@ -270,7 +287,7 @@ _hi_read_override() {
     v=$(printf '%s' "$v" | tr -d '[:space:]')
     case "$v" in \"*\") v=${v#\"}; v=${v%\"} ;; esac
     case "$v" in auto|null) v="" ;; esac
-    case "$v" in *[!A-Za-z0-9_.:-]*) v="" ;; esac
+    case "$v" in ''|-*|*..*|.|*[!A-Za-z0-9_.:-]*) v="" ;; esac
     echo "$v"
 }
 

@@ -81,6 +81,7 @@ type thermoCruiseEngine struct {
 	coolBelowStage1Since time.Time // 持续 <= stage1_temp_c - 3.0°C 的起始时刻
 	lastReading          ThermoBatteryReading
 	lastSnap             map[string]any
+	lastPersistedKey     string
 }
 
 func newThermoCruiseEngine(s *server) *thermoCruiseEngine {
@@ -147,7 +148,10 @@ func (e *thermoCruiseEngine) saveConfigLocked() error {
 
 // ── 零子进程 sysfs 电池温度/电量/充电态读取 (<50µs) ──────────────────────────
 
-func parseSysfsTempCelsius(raw string) (float64, bool) {
+// parseSysfsTempCelsius 按 sysfs 路径语义固定缩放温度:
+//   - thermal_zone*/temp: 恒按毫摄氏度 /1000.0;
+//   - power_supply/*/temp (默认电池节点): 恒按 0.1°C /10.0, 彻底避免冬季 8.5°C(85) 被误判为 85°C!
+func parseSysfsTempCelsius(path, raw string) (float64, bool) {
 	s := strings.TrimSpace(raw)
 	if s == "" {
 		return 0, false
@@ -156,17 +160,12 @@ func parseSysfsTempCelsius(raw string) (float64, bool) {
 	if err != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0, false
 	}
-	absV := math.Abs(v)
-	switch {
-	case absV >= 1000:
-		// 毫摄氏度 (如 thermal_zone 42500 -> 42.5°C)
-		return math.Round((v/1000.0)*10) / 10, true
-	case absV >= 100:
-		// Android power_supply 标准 0.1°C 单位 (如 425 -> 42.5°C, 390 -> 39.0°C)
-		return math.Round((v/10.0)*10) / 10, true
-	default:
-		return math.Round(v*10) / 10, true
+	slash := strings.ToLower(filepath.ToSlash(path))
+	scale := 10.0
+	if strings.Contains(slash, "thermal_zone") {
+		scale = 1000.0
 	}
+	return math.Round((v/scale)*10) / 10, true
 }
 
 func readSmallSysfsFile(path string) (string, bool) {
@@ -181,13 +180,24 @@ func discoverBatteryNodeDir(root string) string {
 	if root == "" {
 		return ""
 	}
-	// 优先检查常见命名快速命中, 再遍历全部 power_supply 子目录核验 type == Battery
+	// 优先探测标准聚合节点 <root>/battery (避免 OPLUS 等机型 bms 次级节点屏蔽真实充电状态)
+	primary := filepath.Join(root, "battery")
+	if _, hasTemp := readSmallSysfsFile(filepath.Join(primary, "temp")); hasTemp {
+		typ, hasType := readSmallSysfsFile(filepath.Join(primary, "type"))
+		if !hasType || strings.EqualFold(typ, "Battery") {
+			return primary
+		}
+	}
+	// 再遍历全部 power_supply 子目录核验 type == Battery
 	ents, err := os.ReadDir(root)
 	if err != nil {
 		return ""
 	}
 	var fallbackTempDir string
 	for _, ent := range ents {
+		if ent.Name() == "battery" {
+			continue
+		}
 		cand := filepath.Join(root, ent.Name())
 		typ, ok := readSmallSysfsFile(filepath.Join(cand, "type"))
 		if ok && strings.EqualFold(typ, "Battery") {
@@ -234,7 +244,8 @@ func (e *thermoCruiseEngine) ReadBatteryFromSysfs() ThermoBatteryReading {
 		return ThermoBatteryReading{Available: false, ReadLatency: time.Since(t0).Nanoseconds()}
 	}
 
-	tempStr, okTemp := readSmallSysfsFile(filepath.Join(batDir, "temp"))
+	tempPath := filepath.Join(batDir, "temp")
+	tempStr, okTemp := readSmallSysfsFile(tempPath)
 	if !okTemp {
 		// 节点变化时清缓存重探一次
 		batDir = discoverBatteryNodeDir(root)
@@ -244,9 +255,10 @@ func (e *thermoCruiseEngine) ReadBatteryFromSysfs() ThermoBatteryReading {
 		if batDir == "" {
 			return ThermoBatteryReading{Available: false, ReadLatency: time.Since(t0).Nanoseconds()}
 		}
-		tempStr, okTemp = readSmallSysfsFile(filepath.Join(batDir, "temp"))
+		tempPath = filepath.Join(batDir, "temp")
+		tempStr, okTemp = readSmallSysfsFile(tempPath)
 	}
-	tempC, validTemp := parseSysfsTempCelsius(tempStr)
+	tempC, validTemp := parseSysfsTempCelsius(tempPath, tempStr)
 	if !okTemp || !validTemp {
 		return ThermoBatteryReading{Available: false, SupplyNode: filepath.Base(batDir), ReadLatency: time.Since(t0).Nanoseconds()}
 	}
@@ -261,7 +273,7 @@ func (e *thermoCruiseEngine) ReadBatteryFromSysfs() ThermoBatteryReading {
 	if statusStr == "" {
 		statusStr = "Unknown"
 	}
-	charging := strings.EqualFold(statusStr, "Charging")
+	charging := strings.EqualFold(statusStr, "Charging") || strings.EqualFold(statusStr, "Full")
 
 	return ThermoBatteryReading{
 		Available:   true,
@@ -347,8 +359,9 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 		}
 	}
 
+	pluggedIn := rd.IsCharging || strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full")
 	lowBatActive := cfg.Enabled && rd.Available && rd.CapacityPct >= 0 &&
-		rd.CapacityPct <= cfg.LowBatPct && !rd.IsCharging
+		rd.CapacityPct <= cfg.LowBatPct && !pluggedIn
 
 	rawStage := e.rawThermalStage
 	effStage := 0
@@ -363,14 +376,14 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 			effStage = 1
 		}
 		if rawStage == 2 {
-			if rd.IsCharging {
+			if pluggedIn {
 				exemptReasons = append(exemptReasons, "charging")
 			}
 			if expressActive {
 				exemptReasons = append(exemptReasons, "vector_express")
 			}
 			if len(exemptReasons) > 0 {
-				// 快充或 Vector Express 游戏护航激活: 自动豁免二阶限速, 仅保留一阶内部轮询省电!
+				// 快充/满电插电或 Vector Express 游戏护航激活: 自动豁免二阶限速, 仅保留一阶内部轮询省电!
 				stage2Exempt = true
 				stage2ShaperActive = false
 				effStage = 1
@@ -397,6 +410,7 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 		}
 	}
 
+	exemptReasonStr := strings.Join(exemptReasons, "+")
 	snap := map[string]any{
 		"ok":                      true,
 		"enabled":                 cfg.Enabled,
@@ -412,7 +426,7 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 		"stage1_polling_relaxed":  stage1PollingRelax,
 		"stage2_shaper_active":    stage2ShaperActive,
 		"stage2_exempt":           stage2Exempt,
-		"exempt_reason":           strings.Join(exemptReasons, "+"),
+		"exempt_reason":           exemptReasonStr,
 		"low_battery_cruise":      lowBatActive,
 		"vector_express_active":   expressActive,
 		"cool_hold_remaining_sec": coolHoldRemSec,
@@ -421,11 +435,45 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 		"updated_at":              now.Unix(),
 	}
 	e.lastSnap = snap
+
+	// 状态脏检查(忽略 updated_at 与 read_latency_ns): 状态无实质变化时不重复刷盘 run/thermo_state.json
+	stateKey := ""
+	if db, err := json.Marshal(struct {
+		Cfg          ThermoCruiseConfig `json:"cfg"`
+		RawStage     int                `json:"raw"`
+		EffStage     int                `json:"eff"`
+		S1Relax      bool               `json:"s1"`
+		S2Active     bool               `json:"s2"`
+		S2Exempt     bool               `json:"ex"`
+		ExemptReason string             `json:"exr"`
+		LowBat       bool               `json:"lb"`
+		Express      bool               `json:"exp"`
+		CoolRem      int                `json:"cr"`
+		Avail        bool               `json:"av"`
+		Node         string             `json:"nd"`
+		TempC        float64            `json:"tc"`
+		CapPct       int                `json:"cp"`
+		Status       string             `json:"st"`
+		Plugged      bool               `json:"pl"`
+	}{
+		Cfg: cfg, RawStage: rawStage, EffStage: effStage, S1Relax: stage1PollingRelax,
+		S2Active: stage2ShaperActive, S2Exempt: stage2Exempt, ExemptReason: exemptReasonStr,
+		LowBat: lowBatActive, Express: expressActive, CoolRem: coolHoldRemSec,
+		Avail: rd.Available, Node: rd.SupplyNode, TempC: rd.TempC, CapPct: rd.CapacityPct,
+		Status: rd.Status, Plugged: pluggedIn,
+	}); err == nil {
+		stateKey = string(db)
+	}
+	needPersist := stateKey == "" || stateKey != e.lastPersistedKey
 	e.mu.Unlock()
 
-	if e.srv != nil && e.srv.hncDir != "" {
+	if needPersist && e.srv != nil && e.srv.hncDir != "" {
 		if b, err := json.MarshalIndent(snap, "", "  "); err == nil {
-			_ = discoverWriteAtomic(e.stateRunPath(), b)
+			if discoverWriteAtomic(e.stateRunPath(), b) == nil && stateKey != "" {
+				e.mu.Lock()
+				e.lastPersistedKey = stateKey
+				e.mu.Unlock()
+			}
 		}
 	}
 	return snap

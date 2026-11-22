@@ -271,6 +271,7 @@ func (s *TokensStore) Revoke(id string) bool {
 	if !t.Revoked {
 		t.Revoked = true
 		s.tokens[id] = t
+		s.dirty = true
 		if err := s.saveAtomicLocked(); err != nil {
 			fmt.Fprintf(os.Stderr, "tokens: revoke %s persisted in memory, save failed (SaveLoop retries): %v\n", id, err)
 		}
@@ -292,6 +293,7 @@ func (s *TokensStore) RevokeAll() int {
 		}
 	}
 	if n > 0 {
+		s.dirty = true
 		if err := s.saveAtomicLocked(); err != nil {
 			fmt.Fprintf(os.Stderr, "tokens: revoke_all (%d) persisted in memory, save failed (SaveLoop retries): %v\n", n, err)
 		}
@@ -371,6 +373,7 @@ func (s *TokensStore) Prune() (removed int, err error) {
 	if len(toDelete) == 0 {
 		return 0, nil
 	}
+	s.dirty = true
 	if err := s.saveAtomicLocked(); err != nil {
 		// 注意: 这里内存已删,磁盘写失败,下次 SaveLoop 会重试 flush,
 		// 最终一致。但日志应该记录。

@@ -50,9 +50,9 @@ var rateRE = regexp.MustCompile(`^[0-9]+(kbit|mbit)$`)
 // IP v4, 宽松一点(只校验基础格式)
 var ipv4RE = regexp.MustCompile(`^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$`)
 
-// 网卡名 (Linux iface 命名字符集, 限长 32)。v6 review: 从 actionDPIRebind
-// 的函数内 MustCompile 提升为包级, 与 macRE/rateRE 同处一地。
-var ifaceNameRE = regexp.MustCompile(`^[A-Za-z0-9_.:-]{1,32}$`)
+// 网卡名 (Linux iface 命名字符集, 拒绝前导 '-' / '.' 与任意 '..' 片段, 配合 isValidHotspotIfaceName 限长 32)。
+// v6 review: 从 actionDPIRebind 的函数内 MustCompile 提升为包级, 与 macRE/rateRE 同处一地。
+var ifaceNameRE = regexp.MustCompile(`^[A-Za-z0-9_](?:[A-Za-z0-9_:-]|\.[A-Za-z0-9_:-]){0,31}$`)
 
 // v4.0 Patch 3.a Gemini: 受保护的特殊 MAC
 // broadcast/null MAC 永远不能被 bl_add / rule_set
@@ -293,6 +293,8 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 			resp.Error == "protected mac",
 			isBadParamErr(resp.Error):
 			status = http.StatusBadRequest
+		case resp.Error == "forbidden":
+			status = http.StatusForbidden
 		case resp.Error == "conflict", // v5.21 device_merge: 目标已有不同设置, 需 force
 			resp.Error == "self_lockout": // v5.22 webui_access_set: 会把请求者自己锁在外面
 			status = http.StatusConflict
@@ -310,7 +312,7 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 	hncDir := s.hncDir
 	// rc2 修 G1: loopback-only guard 合并为单 switch (rc5.1.1 只合了注释没合代码)
 	switch action {
-	case "pair_revoke", "auth_required_set", "remote_enabled_set":
+	case "pair_new", "pair_revoke", "auth_required_set", "remote_enabled_set":
 		if !isLoopback {
 			return actionResp{OK: false, Error: "forbidden", Detail: "this action is loopback-only (use the on-device KSU WebUI)"}
 		}
@@ -778,12 +780,12 @@ func validateRate(r string) error {
 	if !rateRE.MatchString(r) {
 		return fmt.Errorf("format must be <n>kbit or <n>mbit")
 	}
-	// 提取数字部分算 kbit
-	var num int
+	// 提取数字部分算 kbit (统一用 int64 防止 32 位 ARM 上 int32 乘法回绕)
+	var num int64
 	var unit string
 	for i, c := range r {
 		if c < '0' || c > '9' {
-			n, err := strconv.Atoi(r[:i])
+			n, err := strconv.ParseInt(r[:i], 10, 64)
 			if err != nil {
 				return fmt.Errorf("bad number")
 			}
@@ -792,19 +794,21 @@ func validateRate(r string) error {
 			break
 		}
 	}
-	// v5.11: 乘法前先卡上界。num 来自 Atoi(最大 9.2e18), 直接 num*1000 会
-	// int64 溢出回绕, 可构造 "<19 位数>mbit" 使回绕值落在 [64, 10Gbit] 内骗过
-	// 下面的范围检查, 而 rateToMbpsStr 对 mbit 原样返回那串 19 位数字传给 shell。
+	// v5.11 + v6 加固: 乘法前先卡上界。num 来自 ParseInt(int64), 直接 num*1000
+	// 或 32 位 int 乘法都会溢出回绕, 必须按单位前置截断后再乘。
 	if num > maxRateKbit {
 		return fmt.Errorf("maximum rate is %dkbit (~10 Gbit)", maxRateKbit)
 	}
-	var kbit int
+	var kbit int64
 	switch unit {
 	case "kbit":
 		kbit = num
 	case "mbit":
 		// rc2 修 G4: 1000 不是 1024. tc k/m 后缀是十进制 (iproute2 约定),
-		//          且本文件 line 382 的 mbit→k 转换也是 *1000, 统一.
+		//          且本文件 mbit→k 转换也是 *1000, 统一.
+		if num > maxRateKbit/1000 {
+			return fmt.Errorf("maximum rate is %dkbit (~10 Gbit)", maxRateKbit)
+		}
 		kbit = num * 1000
 	default:
 		return fmt.Errorf("unit must be kbit or mbit")
@@ -939,7 +943,7 @@ func actionDPIRebind(hncDir string, p map[string]string) actionResp {
 	iface := strings.TrimSpace(p["iface"])
 	args := []string{}
 	if iface != "" {
-		if !ifaceNameRE.MatchString(iface) {
+		if !isValidHotspotIfaceName(iface) {
 			return actionResp{OK: false, Error: "bad params", Detail: "invalid iface"}
 		}
 		args = append(args, iface)
@@ -971,9 +975,9 @@ func readHotspotIfaceName(hncDir string) string {
 	return iface
 }
 
-// isValidHotspotIfaceName 统一校验热点接口名(兼容 ap_br_wlan2 / ap_br_ap0 / bt-pan / rndis0 / usb0 等合法内核接口, 同时拦截路径穿越)。
+// isValidHotspotIfaceName 统一校验热点接口名(兼容 ap_br_wlan2 / ap_br_ap0 / bt-pan / rndis0 / usb0 等合法内核接口, 同时拦截前导 '-' 选项注入与 '..' 路径穿越)。
 func isValidHotspotIfaceName(iface string) bool {
-	if iface == "" || strings.Contains(iface, "..") {
+	if iface == "" || len(iface) > 32 || strings.HasPrefix(iface, "-") || strings.HasPrefix(iface, ".") || strings.Contains(iface, "..") {
 		return false
 	}
 	return ifaceNameRE.MatchString(iface)
@@ -1002,7 +1006,7 @@ func actionClsactCheck(hncDir string) actionResp {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "check", iface)) // v5.11: WaitDelay
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
+	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin:/data/local/hnc/bin"}
 	out, _ := cmd.CombinedOutput()
 	s := string(out)
 	hasClsact := strings.Contains(s, `"qdisc":true`)
@@ -1109,7 +1113,7 @@ func runBinDetached(hncDir, script string, args ...string) error {
 	cmd.Env = []string{
 		"HNC_DIR=" + hncDir,
 		"HNC=" + hncDir, // rc3: json_set.sh 等脚本读 $HNC
-		"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin",
+		"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin:/data/local/hnc/bin",
 	}
 	// 重定向 stdout/stderr 到 cleanup.log · 脱离 httpd
 	// M-3 (回移自 5.9.91 分叉): 0600 防 world-readable 日志泄敏感审计信息

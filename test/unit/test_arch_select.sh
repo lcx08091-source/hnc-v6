@@ -48,14 +48,16 @@ mk_module() {
 # 假 getprop
 mk_getprop() {
     mkdir -p "$HNC_TEST_DIR/fakebin"
-    cat > "$HNC_TEST_DIR/fakebin/getprop" <<'EOF'
-#!/bin/sh
+    {
+        printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+        cat <<'EOF'
 case "$1" in
     ro.product.cpu.abi) printf '%s\n' "${FAKE_ABI:-}" ;;
     ro.product.cpu.abilist) printf '%s\n' "${FAKE_ABILIST:-}" ;;
     *) echo "" ;;
 esac
 EOF
+    } > "$HNC_TEST_DIR/fakebin/getprop"
     chmod 755 "$HNC_TEST_DIR/fakebin/getprop"
 }
 

@@ -137,10 +137,11 @@ type shSample struct {
 }
 
 type shState struct {
-	mu      sync.Mutex
-	at      time.Time
-	body    map[string]interface{}
-	samples []shSample // 最近 15 分钟
+	refreshMu sync.Mutex
+	mu        sync.Mutex
+	at        time.Time
+	body      map[string]interface{}
+	samples   []shSample // 最近 15 分钟
 }
 
 var shStates = struct {
@@ -240,10 +241,13 @@ func statsHealth(hncDir string, env shEnv, st *shState, now time.Time) map[strin
 	}
 	if env.ip6tForward != nil {
 		if out6, err := env.ip6tForward(); err == nil {
-			if _, _, j6, ok6 := calParseIptForward(out6); ok6 {
+			_, _, j6, ok6 := calParseIptForward(out6)
+			if !iptChecked {
+				iptChecked = true
+				iptJump = ok6
+				cur.Ipt, cur.IptOK = j6, ok6
+			} else if ok6 && iptJump {
 				cur.Ipt += j6
-				cur.IptOK = true
-				iptJump = true
 			}
 		}
 	}
@@ -268,13 +272,24 @@ func statsHealth(hncDir string, env shEnv, st *shState, now time.Time) map[strin
 			stalled = true
 		}
 	}
-	keep := st.samples[:0]
+	keep := make([]shSample, 0, len(st.samples)+1)
+	hasNewer := false
 	for _, x := range st.samples {
+		if x.T > cur.T {
+			if x.T-cur.T <= 15*60 {
+				hasNewer = true
+				keep = append(keep, x)
+			}
+			continue
+		}
 		if cur.T-x.T <= 15*60 && x.T < cur.T {
 			keep = append(keep, x)
 		}
 	}
-	st.samples = append(keep, cur)
+	if !hasNewer {
+		keep = append(keep, cur)
+	}
+	st.samples = keep
 	st.mu.Unlock()
 
 	var sampleAge interface{}
@@ -361,6 +376,16 @@ func (s *server) apiStatsHealth(w http.ResponseWriter, r *http.Request) {
 	now := time.Now()
 	st.mu.Lock()
 	body, at := st.body, st.at
+	st.mu.Unlock()
+	if body != nil && now.Sub(at) < shCacheTTL && !now.Before(at) {
+		writeJSON(w, http.StatusOK, body)
+		return
+	}
+	st.refreshMu.Lock()
+	defer st.refreshMu.Unlock()
+	now = time.Now()
+	st.mu.Lock()
+	body, at = st.body, st.at
 	st.mu.Unlock()
 	if body != nil && now.Sub(at) < shCacheTTL && !now.Before(at) {
 		writeJSON(w, http.StatusOK, body)
