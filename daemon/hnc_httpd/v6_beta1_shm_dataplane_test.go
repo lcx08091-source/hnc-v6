@@ -178,20 +178,35 @@ func TestCoreHubNoStartZeroGoroutineLeak(t *testing.T) {
 		},
 	}, 3, 0)
 
+	prevGlobal := defaultGlobalHub.Load()
+	t.Cleanup(func() {
+		defaultGlobalHub.Store(prevGlobal)
+	})
+
 	runtime.GC()
 	runtime.GC()
-	baseLeak := sampleGoroutineLeakProfile(true)
-	baseCount := 0
-	baseStacks := make(map[string]bool)
-	if baseLeak != nil {
-		baseCount = baseLeak.LeakedCount
-		for _, st := range baseLeak.PreviewStacks {
-			baseStacks[st] = true
-		}
+	rawBefore, _, _ := goroutineLeakDumpFn()
+	baseBodies := make(map[string]bool)
+	for _, body := range extractLeakedGoroutineBodies(rawBefore) {
+		baseBodies[body] = true
 	}
 
 	s := newServer(dir)
+	if s.signalCtl != nil {
+		s.signalCtl.sampleFn = func(*server) hostSignalStatus {
+			return hostSignalStatus{
+				Mode:            "nr_sa",
+				RAT:             "5G SA",
+				Quality:         "good",
+				QualityCN:       "良好",
+				RFCeilingFactor: 1.0,
+				Diagnosis:       "healthy",
+			}
+		}
+		_ = s.signalCtl.Refresh(s)
+	}
 	hub := NewCoreHub(s)
+	serverHubMap.Store(s, hub)
 	for i := 0; i < 4; i++ {
 		snap := hub.RefreshSnapshotNow()
 		if snap == nil || !snap.Healthy {
@@ -212,8 +227,9 @@ func TestCoreHubNoStartZeroGoroutineLeak(t *testing.T) {
 	}
 	// 模拟调用方未调用 hub.Start() 亦未显式 Close() 即释放局部实例的场景(仅释放文件句柄与全局槽)
 	hub.closeShmReader()
-	defaultGlobalHub.CompareAndSwap(hub, nil)
+	defaultGlobalHub.CompareAndSwap(hub, prevGlobal)
 	serverHubMap.Delete(s)
+	v6Registry.Delete(s)
 	hub = nil
 	s = nil
 
@@ -223,15 +239,49 @@ func TestCoreHubNoStartZeroGoroutineLeak(t *testing.T) {
 	if leakSum == nil || !leakSum.Sampled {
 		t.Fatalf("expected sampled GoroutineLeakSummary from sampleGoroutineLeakProfile(true), got %+v", leakSum)
 	}
-	if leakSum.LeakedCount > baseCount {
-		t.Fatalf("unstarted CoreHub leaked %d new goroutine(s) (before=%d after=%d): %+v",
-			leakSum.LeakedCount-baseCount, baseCount, leakSum.LeakedCount, leakSum)
+	rawAfter, supported, dumpErr := goroutineLeakDumpFn()
+	if supported && dumpErr != nil {
+		t.Fatalf("goroutineLeakDumpFn failed: %v", dumpErr)
 	}
-	for _, st := range leakSum.PreviewStacks {
-		if !baseStacks[st] && (strings.Contains(st, "CoreHub") || strings.Contains(st, "DpiShmBulkhead")) {
-			t.Fatalf("detected new CoreHub/DpiShmBulkhead leaked stack:\n%s", st)
+	for _, body := range extractLeakedGoroutineBodies(rawAfter) {
+		if !baseBodies[body] && (strings.Contains(body, "CoreHub") ||
+			strings.Contains(body, "Bulkhead") ||
+			strings.Contains(body, "pollDpiShmVector")) {
+			t.Fatalf("unstarted CoreHub leaked new goroutine:\n%s", body)
 		}
 	}
+}
+
+func extractLeakedGoroutineBodies(raw string) []string {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	var out []string
+	lines := strings.Split(strings.ReplaceAll(raw, "\r\n", "\n"), "\n")
+	var block []string
+	flush := func() {
+		if len(block) > 1 && isLeakedGoroutineHeader(block[0]) {
+			out = append(out, strings.Join(block[1:], "\n"))
+		}
+		block = block[:0]
+	}
+	for _, ln := range lines {
+		if strings.HasPrefix(ln, "goroutine ") && strings.HasSuffix(strings.TrimSpace(ln), ":") {
+			flush()
+			block = append(block, strings.TrimRight(ln, " \t"))
+			continue
+		}
+		if len(block) > 0 {
+			if strings.TrimSpace(ln) == "" {
+				flush()
+				continue
+			}
+			block = append(block, strings.TrimRight(ln, " \t"))
+		}
+	}
+	flush()
+	return out
 }
 
 func TestBeta1Atomic64StructAlignmentAssertions(t *testing.T) {

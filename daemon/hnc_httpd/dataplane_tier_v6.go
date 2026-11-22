@@ -149,8 +149,9 @@ var (
 	dpTierHooksMu sync.Mutex
 	activeDPHooks = defaultDPTierHooks()
 
-	defaultDPActorOnce sync.Once
-	defaultDPActor     *DataplaneActor
+	defaultDPActorOnce  sync.Once
+	defaultDPActor      *DataplaneActor
+	defaultDPActorReady atomic.Bool
 )
 
 func defaultDPTierHooks() dpTierHooks {
@@ -211,6 +212,7 @@ func NewDataplaneActor() *DataplaneActor {
 func DefaultDataplaneActor() *DataplaneActor {
 	defaultDPActorOnce.Do(func() {
 		defaultDPActor = NewDataplaneActor()
+		defaultDPActorReady.Store(true)
 	})
 	return defaultDPActor
 }
@@ -444,6 +446,9 @@ func (a *DataplaneActor) InvalidateReconcile(iface string) {
 
 // InvalidateDataplaneReconcileNative 供规则核对或热点重初始化时清空全局 DataplaneActor 去重缓存。
 func InvalidateDataplaneReconcileNative(hncDir, iface string) {
+	if !defaultDPActorReady.Load() && !useNativeDataplane(hncDir) {
+		return
+	}
 	actor := DefaultDataplaneActor()
 	if actor == nil {
 		return

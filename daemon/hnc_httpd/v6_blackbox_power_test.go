@@ -196,13 +196,15 @@ func TestBlackboxFlightLoopFourTierSleepAndWake(t *testing.T) {
 	}
 
 	var sampled atomic.Int64
+	var actReads atomic.Int32
 	srv := &server{
 		hncDir:            t.TempDir(),
 		rates:             map[string]rateOut{},
 		blackboxActiveDur: 15 * time.Millisecond,
-		blackboxPatrolDur: 320 * time.Millisecond,
-		blackboxHoldDur:   280 * time.Millisecond,
+		blackboxPatrolDur: 250 * time.Millisecond,
+		blackboxHoldDur:   800 * time.Millisecond,
 		blackboxActivityHook: func() (<-chan struct{}, Activity) {
+			actReads.Add(1)
 			actMu.Lock()
 			defer actMu.Unlock()
 			return actCh, curAct
@@ -228,8 +230,8 @@ func TestBlackboxFlightLoopFourTierSleepAndWake(t *testing.T) {
 		}
 	}()
 
-	waitBlackboxCond(t, time.Second, "enter G0_AP_OFF sleeping mode", func() bool {
-		return srv.BlackboxLoopMode() == blackboxModeSleeping
+	waitBlackboxCond(t, 2*time.Second, "enter G0_AP_OFF sleeping mode", func() bool {
+		return actReads.Load() >= 1 && srv.BlackboxLoopMode() == blackboxModeSleeping
 	})
 	// 空闲休眠态收到虚假唤醒信号不得误补采
 	srv.wakeBlackboxLoop()
@@ -238,14 +240,14 @@ func TestBlackboxFlightLoopFourTierSleepAndWake(t *testing.T) {
 		t.Fatalf("expected 0 samples in G0_AP_OFF, got %d", got)
 	}
 
+	readsBeforeG1 := actReads.Load()
 	updateAct(Activity{Known: true, HotspotActive: true, ClientsOnline: 0})
-	time.Sleep(35 * time.Millisecond)
-	if mode := srv.BlackboxLoopMode(); mode != blackboxModeSleeping {
-		t.Fatalf("expected G1_NO_CLIENTS to remain sleeping, got mode=%d", mode)
-	}
+	waitBlackboxCond(t, 2*time.Second, "process G1_NO_CLIENTS activity event", func() bool {
+		return actReads.Load() > readsBeforeG1 && srv.BlackboxLoopMode() == blackboxModeSleeping
+	})
 
 	updateAct(Activity{Known: true, HotspotActive: true, ClientsOnline: 2})
-	waitBlackboxCond(t, time.Second, "enter G2_IDLE_PATROL mode", func() bool {
+	waitBlackboxCond(t, 2*time.Second, "enter G2_IDLE_PATROL mode", func() bool {
 		return srv.BlackboxLoopMode() == blackboxModePatrol
 	})
 
@@ -254,7 +256,7 @@ func TestBlackboxFlightLoopFourTierSleepAndWake(t *testing.T) {
 	srv.rateMu.Unlock()
 	srv.notifyBlackboxIfActiveRates()
 
-	waitBlackboxCond(t, time.Second, "enter G3_ACTIVE_FLIGHT mode and record frames", func() bool {
+	waitBlackboxCond(t, 2*time.Second, "enter G3_ACTIVE_FLIGHT mode and record frames", func() bool {
 		return srv.BlackboxLoopMode() == blackboxModeActive && sampled.Load() >= 2
 	})
 
@@ -262,7 +264,7 @@ func TestBlackboxFlightLoopFourTierSleepAndWake(t *testing.T) {
 	srv.rates["aa:bb:cc:dd:ee:02"] = rateOut{rxBps: 0, txBps: 0}
 	srv.rateMu.Unlock()
 
-	waitBlackboxCond(t, 2*time.Second, "auto-downshift to G2_IDLE_PATROL", func() bool {
+	waitBlackboxCond(t, 3*time.Second, "auto-downshift to G2_IDLE_PATROL", func() bool {
 		return srv.BlackboxLoopMode() == blackboxModePatrol
 	})
 
@@ -281,11 +283,13 @@ func TestBlackboxFlightLoopFourTierSleepAndWake(t *testing.T) {
 
 func TestFlowScalpelZeroRuleSleepAndWakeResume(t *testing.T) {
 	var activeRules atomic.Int32
+	var ruleReads atomic.Int32
 	var sweeps atomic.Int64
 
 	eng := &flowScalpelEngine{
 		sweepInterval: 20 * time.Millisecond,
 		ruleCountHook: func() int {
+			ruleReads.Add(1)
 			return int(activeRules.Load())
 		},
 	}
@@ -317,8 +321,8 @@ func TestFlowScalpelZeroRuleSleepAndWakeResume(t *testing.T) {
 		}
 	}()
 
-	waitBlackboxCond(t, time.Second, "initial zero-rule ticker stopped", func() bool {
-		return !eng.IsTickerActive()
+	waitBlackboxCond(t, 2*time.Second, "initial zero-rule ticker stopped", func() bool {
+		return ruleReads.Load() >= 1 && !eng.IsTickerActive()
 	})
 	time.Sleep(50 * time.Millisecond)
 	if got := sweeps.Load(); got != 0 {

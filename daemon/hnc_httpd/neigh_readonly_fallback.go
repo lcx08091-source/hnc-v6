@@ -59,12 +59,21 @@ type neighBestCandidate struct {
 	seenSec       int64
 }
 
+func isHostWiredOrVirtualIface(ifaceName string) bool {
+	for _, pfx := range []string{"eth", "ens", "enp", "eno", "docker", "veth", "br-", "virbr"} {
+		if strings.HasPrefix(ifaceName, pfx) {
+			return true
+		}
+	}
+	return false
+}
+
 func defaultNeighIfaceReady(ifaceName string) bool {
 	ifaceName = strings.TrimSpace(ifaceName)
 	if ifaceName == "" || ifaceName == "lo" {
 		return false
 	}
-	if isCellIface(ifaceName) || isVPNIface(ifaceName) {
+	if isCellIface(ifaceName) || isVPNIface(ifaceName) || isHostWiredOrVirtualIface(ifaceName) {
 		return false
 	}
 	return ifaceIPv4(ifaceName) != ""

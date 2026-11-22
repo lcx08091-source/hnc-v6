@@ -195,6 +195,8 @@ func (a *onlineAccum) flush(now time.Time) {
 
 // onExit 看门狗正常退出(SIGTERM → mainLoop 返回)时调用: 优雅回收 M4 订阅协程并把未落盘的分钟写掉。
 func onExit() {
-	m4Writer.hotspotDown()
+	if m4Writer != nil {
+		m4Writer.hotspotDown()
+	}
 	onlineAcc.flush(nowFn())
 }

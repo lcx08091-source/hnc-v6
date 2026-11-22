@@ -704,12 +704,13 @@ func (s *server) StartBlackboxFlightLoop(stop <-chan struct{}) {
 		}
 	}
 	setPeriod := func(d time.Duration, mode blackboxLoopMode) {
-		s.blackboxLoopMode.Store(int32(mode))
 		if d <= 0 {
 			stopTicker()
+			s.blackboxLoopMode.Store(int32(mode))
 			return
 		}
 		if ticker != nil && curPeriod == d {
+			s.blackboxLoopMode.Store(int32(mode))
 			return
 		}
 		if ticker == nil {
@@ -723,6 +724,7 @@ func (s *server) StartBlackboxFlightLoop(stop <-chan struct{}) {
 			ticker.Reset(d)
 		}
 		curPeriod = d
+		s.blackboxLoopMode.Store(int32(mode))
 	}
 	defer func() {
 		stopTicker()
@@ -768,7 +770,7 @@ func (s *server) StartBlackboxFlightLoop(stop <-chan struct{}) {
 			return
 		case <-actCh:
 		case <-wakeCh:
-			if prevMode != blackboxModeActive {
+			if mode != blackboxModeActive {
 				wakeNow := time.Now()
 				_, wakeAct := s.currentBlackboxActivity()
 				activeReady := !(wakeAct.Known && (!wakeAct.HotspotActive || wakeAct.ClientsOnline <= 0)) && s.hasRecentBlackboxActivity(wakeNow)

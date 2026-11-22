@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -209,6 +210,7 @@ func Dump(family int) ([]Entry, error) {
 		return nil, fmt.Errorf("neigh: socket: %w", err)
 	}
 	defer syscall.Close(fd)
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &syscall.Timeval{Sec: 3})
 	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return nil, fmt.Errorf("neigh: bind: %w", err)
 	}
@@ -258,10 +260,12 @@ const (
 // 空闲期 0 次超时唤醒, Close 微秒级唤醒阻塞中的 Read, 100% 消除整数 FD 复用竞态。
 // Read 由单协程顺序调用, Close 支持并发幂等调用; 结构体无 64 位原子字段, 32 位 ARM 安全。
 type Sub struct {
-	file   *os.File
-	raw    syscall.RawConn
-	closed atomic.Bool
-	buf    []byte
+	file      *os.File
+	raw       syscall.RawConn
+	closed    atomic.Bool
+	closeOnce sync.Once
+	closeErr  error
+	buf       []byte
 }
 
 // Subscribe 订阅邻居表增删改事件。用完 Close。
@@ -280,7 +284,10 @@ func Subscribe() (*Sub, error) {
 		_ = syscall.Close(fd)
 		return nil, errors.New("neigh: os.NewFile returned nil")
 	}
-	_ = f.SetReadDeadline(time.Time{})
+	if err := f.SetReadDeadline(time.Time{}); err != nil {
+		_ = f.Close()
+		return nil, fmt.Errorf("neigh: netpoll: %w", err)
+	}
 	raw, err := f.SyscallConn()
 	if err != nil {
 		_ = f.Close()
@@ -317,8 +324,11 @@ func (s *Sub) Read() ([]Entry, error) {
 		}
 		return true
 	})
-	if rerr != nil || s.closed.Load() || errors.Is(recvErr, syscall.EBADF) {
+	if s.closed.Load() || errors.Is(rerr, os.ErrClosed) || errors.Is(rerr, net.ErrClosed) || errors.Is(recvErr, syscall.EBADF) {
 		return nil, os.ErrClosed
+	}
+	if rerr != nil {
+		return nil, fmt.Errorf("neigh: rawconn: %w", rerr)
 	}
 	if recvErr != nil {
 		return nil, fmt.Errorf("neigh: recv: %w", recvErr)
@@ -330,17 +340,18 @@ func (s *Sub) Read() ([]Entry, error) {
 	return es, err
 }
 
-// Close 幂等关闭订阅, 由 os.File 内部 fdMutex 序列化底层关闭并微秒级唤醒阻塞中的 Read。
+// Close 幂等关闭订阅, 由 sync.Once + os.File fdMutex 序列化底层关闭并微秒级唤醒阻塞中的 Read。
 func (s *Sub) Close() error {
 	if s == nil {
 		return nil
 	}
 	s.closed.Store(true)
-	if s.file == nil {
-		return nil
-	}
-	if err := s.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
-		return err
-	}
-	return nil
+	s.closeOnce.Do(func() {
+		if s.file != nil {
+			if err := s.file.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+				s.closeErr = err
+			}
+		}
+	})
+	return s.closeErr
 }

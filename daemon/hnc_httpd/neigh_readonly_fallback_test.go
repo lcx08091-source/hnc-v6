@@ -361,18 +361,31 @@ func TestNeighFallback_StaleConfirmedAgoAndRegPrune(t *testing.T) {
 		installNeighTestHooks(t, &curNow, &nowMtx, 9, func(ifindex int) ([]neigh.Entry, error) {
 			return nil, nil
 		})
+		neighFallbackRegMtx.Lock()
+		neighFallbackReg = make(map[string]*neighFallbackDirState)
+		neighFallbackRegMtx.Unlock()
+
 		base := t.TempDir()
-		for i := 0; i < 20; i++ {
+		for i := 0; i < neighFallbackRegPruneAt; i++ {
 			st := getNeighFallbackDirState(filepath.Join(base, "dir_"+strconv.Itoa(i)))
 			st.mtx.Lock()
 			st.armedUntil = curNow.Add(-1 * time.Second)
 			st.mtx.Unlock()
 		}
 		neighFallbackRegMtx.Lock()
+		beforePrune := len(neighFallbackReg)
+		neighFallbackRegMtx.Unlock()
+		if beforePrune != neighFallbackRegPruneAt {
+			t.Fatalf("expected %d entries before watermark prune, got %d", neighFallbackRegPruneAt, beforePrune)
+		}
+
+		// 第 17 个目录跨过 >= 16 水位线: 前 16 个过期目录全量回收, 仅剩刚注册的 active_dir
+		_ = getNeighFallbackDirState(filepath.Join(base, "active_dir"))
+		neighFallbackRegMtx.Lock()
 		n := len(neighFallbackReg)
 		neighFallbackRegMtx.Unlock()
-		if n > 2 {
-			t.Fatalf("neighFallbackReg did not prune expired dirs: len=%d", n)
+		if n != 1 {
+			t.Fatalf("neighFallbackReg did not prune expired dirs at watermark: len=%d, want 1", n)
 		}
 	})
 }

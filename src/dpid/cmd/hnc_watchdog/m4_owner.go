@@ -241,7 +241,14 @@ func (m *m4WriterMgr) stopGoRunnerLocked(reason string) {
 // 1s pending 派发)。退出前把 dirty 的内容补写一次(对齐 C 关机行为)。
 func (r *m4GoRunner) run() {
 	defer close(r.doneCh)
-	monoMs := func() int64 { return time.Now().UnixNano() / int64(time.Millisecond) }
+	bootAt := time.Now()
+	monoMs := func() int64 {
+		d := time.Since(bootAt).Milliseconds()
+		if d < 0 {
+			return 1
+		}
+		return 1 + d
+	}
 	events := make(chan []neigh.Entry, 64)
 	resyncCh := make(chan struct{}, 1)
 	var (
@@ -429,18 +436,30 @@ func (r *m4GoRunner) run() {
 		tick.Reset(want)
 		period = want
 	}
-	var lastRefreshM = monoMs()
+	var (
+		lastRefreshNano  int64
+		lastRefreshNonce string
+		hasInitRefresh   bool
+	)
+	if fi, err := os.Stat(m4RefreshFile); err == nil {
+		hasInitRefresh = true
+		lastRefreshNano = fi.ModTime().UnixNano()
+		lastRefreshNonce = readNonce(m4RefreshFile)
+	}
 	refreshDue := func() (nonce string, due bool) {
 		fi, err := os.Stat(m4RefreshFile)
 		if err != nil {
 			return "", false
 		}
-		m := fi.ModTime().UnixNano() / int64(time.Millisecond)
-		if m <= lastRefreshM {
+		modNano := fi.ModTime().UnixNano()
+		curNonce := readNonce(m4RefreshFile)
+		if hasInitRefresh && modNano == lastRefreshNano && curNonce == lastRefreshNonce {
 			return "", false
 		}
-		lastRefreshM = m
-		return readNonce(m4RefreshFile), true
+		hasInitRefresh = true
+		lastRefreshNano = modNano
+		lastRefreshNonce = curNonce
+		return curNonce, true
 	}
 
 	for {

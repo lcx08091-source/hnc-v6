@@ -914,6 +914,7 @@ func (h *CoreHub) Close() {
 	defaultGlobalHub.CompareAndSwap(h, nil)
 	if h.srv != nil {
 		serverHubMap.Delete(h.srv)
+		v6Registry.Delete(h.srv)
 	}
 }
 

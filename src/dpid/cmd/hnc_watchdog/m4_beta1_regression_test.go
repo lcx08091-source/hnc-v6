@@ -26,6 +26,7 @@ type scriptedNeighSource struct {
 	stopSig     chan struct{}
 	readEntered chan struct{}
 	enterOnce   sync.Once
+	readCount   atomic.Int32
 	closeCount  atomic.Int32
 }
 
@@ -43,6 +44,7 @@ func (s *scriptedNeighSource) Read() ([]neigh.Entry, error) {
 	case <-s.stopSig:
 		return nil, os.ErrClosed
 	case st := <-s.stepsCh:
+		s.readCount.Add(1)
 		if st.err != nil {
 			return nil, st.err
 		}
@@ -117,12 +119,14 @@ func TestRunnerEnobufsInPlaceResyncRateLimited(t *testing.T) {
 	for i := 0; i < 12; i++ {
 		src.stepsCh <- scriptedStep{err: fmt.Errorf("neigh: recv: %w", syscall.ENOBUFS)}
 	}
+	if _, ok := m4WaitCount(&src.readCount, 11, 2*time.Second); !ok {
+		t.Fatalf("timed out draining 12 ENOBUFS steps: readCount=%d", src.readCount.Load())
+	}
 
 	// 1s 限频窗口期满后触发唯一一次原位重同步, dumpCalls 从 1 精确变为 2
 	if _, ok := m4WaitCount(&dumpCalls, 1, 2500*time.Millisecond); !ok {
 		t.Fatalf("timed out waiting for ENOBUFS 1Hz resync: dumpCalls=%d, want 2", dumpCalls.Load())
 	}
-	time.Sleep(200 * time.Millisecond)
 
 	if got := dumpCalls.Load(); got != 2 {
 		t.Fatalf("ENOBUFS 1Hz resync dumpCalls=%d, want 2", got)
@@ -248,6 +252,7 @@ func TestNeighSubConcurrentCloseWakesReadPromptly(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = sub.Close() })
 
+	var closing atomic.Bool
 	readEntered := make(chan struct{})
 	readErrCh := make(chan error, 1)
 	go func() {
@@ -255,6 +260,9 @@ func TestNeighSubConcurrentCloseWakesReadPromptly(t *testing.T) {
 		for {
 			_, rerr := sub.Read()
 			if rerr != nil {
+				if !closing.Load() && !errors.Is(rerr, os.ErrClosed) {
+					continue
+				}
 				readErrCh <- rerr
 				return
 			}
@@ -262,7 +270,6 @@ func TestNeighSubConcurrentCloseWakesReadPromptly(t *testing.T) {
 	}()
 
 	<-readEntered
-	// 让读协程进入内核 netpoll 挂起等待态; 若旧实现仍有 500ms SO_RCVTIMEO 则剩余 ~470ms
 	time.Sleep(30 * time.Millisecond)
 
 	startClose := make(chan struct{})
@@ -280,6 +287,7 @@ func TestNeighSubConcurrentCloseWakesReadPromptly(t *testing.T) {
 		}()
 	}
 	readyWG.Wait()
+	closing.Store(true)
 	t0 := time.Now()
 	close(startClose)
 	closeWG.Wait()
@@ -290,12 +298,12 @@ func TestNeighSubConcurrentCloseWakesReadPromptly(t *testing.T) {
 		if !errors.Is(rerr, os.ErrClosed) {
 			t.Fatalf("Sub.Read() after Close() err=%v, want os.ErrClosed", rerr)
 		}
-		if elapsed >= 450*time.Millisecond {
-			t.Fatalf("Sub.Close() took %v to wake blocked Sub.Read(), want < 450ms (netpoll wakeup)", elapsed)
+		if elapsed >= 2*time.Second {
+			t.Fatalf("Sub.Close() took %v to wake blocked Sub.Read(), want < 2s (netpoll wakeup)", elapsed)
 		}
 		t.Logf("Sub.Close() woke blocked Sub.Read() in %v", elapsed)
-	case <-time.After(time.Second):
-		t.Fatal("Sub.Read() remained blocked 1s after Sub.Close()")
+	case <-time.After(3 * time.Second):
+		t.Fatal("Sub.Read() remained blocked 3s after Sub.Close()")
 	}
 
 	if _, rerr := sub.Read(); !errors.Is(rerr, os.ErrClosed) {

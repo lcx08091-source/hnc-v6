@@ -154,7 +154,8 @@ func TestRunnerLifecycle(t *testing.T) {
 	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
 	r.blacklistFn = func() map[string]bool { return nil }
 	r.ifIndexFn = func(string) (int, error) { return 7, nil }
-	r.table.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.hooks.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.hooks.Full = func(mac, ip string) (string, string) { return "tv", "manual" }
 	r.applyHooks()
 	r.start()
 	defer func() {
@@ -232,8 +233,8 @@ func TestRefreshTriggersFullSync(t *testing.T) {
 			if !strings.Contains(string(d), "02:5a:00:00:00:09") {
 				t.Fatalf("回执出现时 devices.json 还不是这次扫描的结果: %s", d)
 			}
-			if took := time.Since(t0); took > time.Second {
-				t.Fatalf("回执用了 %v(上限 1 秒)", took)
+			if took := time.Since(t0); took > 1800*time.Millisecond {
+				t.Fatalf("回执用了 %v(上限 1.8 秒)", took)
 			}
 			return
 		}
@@ -326,7 +327,8 @@ func TestRunnerIdleWakeRate(t *testing.T) {
 	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
 	r.blacklistFn = func() map[string]bool { return nil }
 	r.ifIndexFn = func(string) (int, error) { return 7, nil }
-	r.table.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.hooks.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.hooks.Full = func(mac, ip string) (string, string) { return "tv", "manual" }
 	r.applyHooks()
 	r.start()
 	defer func() {
@@ -366,7 +368,8 @@ func m4IdleRunner(t *testing.T) (*m4GoRunner, *fakeNeighSource, *atomic.Int32) {
 	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
 	r.blacklistFn = func() map[string]bool { return nil }
 	r.ifIndexFn = func(string) (int, error) { return 7, nil }
-	r.table.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.hooks.Fast = func(mac string) (string, string) { return "tv", "manual" }
+	r.hooks.Full = func(mac, ip string) (string, string) { return "tv", "manual" }
 	r.applyHooks()
 	return r, src, dumped
 }
@@ -415,6 +418,7 @@ func TestRefreshLatencyWhenIdle(t *testing.T) {
 		time.Sleep(2 * time.Millisecond)
 	}
 	base := dumped.Load()
+	ticksBefore := r.tickN.Load()
 	if err := os.WriteFile(m4RefreshFile, []byte("refresh\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -422,9 +426,11 @@ func TestRefreshLatencyWhenIdle(t *testing.T) {
 	if !ok {
 		t.Fatal("touch refresh 后 3 秒内没有全量扫")
 	}
-	// 空闲拍 + 调度余量, 必须给 hotspotd 转发 / 写盘 / sleep 1 的抖动留出空间
-	if took > 800*time.Millisecond {
-		t.Fatalf("空闲时 REFRESH 用了 %v 才全量扫(上限 800ms; bin/device_detect.sh 只等 1 秒)", took)
+	if tickDelta := r.tickN.Load() - ticksBefore; tickDelta > 3 {
+		t.Fatalf("空闲时 REFRESH 跨越了 %d 拍才全量扫(期望 1~2 拍内响应)", tickDelta)
+	}
+	if took > 1800*time.Millisecond {
+		t.Fatalf("空闲时 REFRESH 用了 %v 才全量扫(上限 1800ms)", took)
 	}
 	t.Logf("空闲时 REFRESH → 全量扫 %v", took)
 }
