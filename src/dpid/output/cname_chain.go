@@ -1,53 +1,54 @@
 // Package output - cname_chain.go: HNC v5.38.0 零样本 DNS CNAME 8 跳全链规则回溯器
 //
 // 解决痛点:
-//   国内 App 经常使用陌生边缘调度域名(如 svc-gw.cn / edge-dispatch-xx.com) CNAME 指向集团专属 CDN
-//   (如 *.dewucdn.com / *.byteimg.com / *.bilivideo.com), 最终尾跳再落到阿里云/网宿泛公共 CDN。
-//   旧 ipname.go 只存链末端 final CNAME, 一旦尾跳是泛公共 CDN(如 kunlunca.com)就会丢失中间专属跳证据!
-//   本模块在 DNS 应答解析阶段沿完整 8 跳链逐跳匹配规则库(自动豁免多租户公共基础设施后缀), 零样本 0ms 锁定真实应用。
+//
+//	国内 App 经常使用陌生边缘调度域名(如 svc-gw.cn / edge-dispatch-xx.com) CNAME 指向集团专属 CDN
+//	(如 *.dewucdn.com / *.byteimg.com / *.bilivideo.com), 最终尾跳再落到阿里云/网宿泛公共 CDN。
+//	旧 ipname.go 只存链末端 final CNAME, 一旦尾跳是泛公共 CDN(如 kunlunca.com)就会丢失中间专属跳证据!
+//	本模块在 DNS 应答解析阶段沿完整 8 跳链逐跳匹配规则库(自动豁免多租户公共基础设施后缀), 零样本 0ms 锁定真实应用。
 package output
 
 import "strings"
 
 var genericMultiTenantCDNs = map[string]struct{}{
-	"kunlunca.com":        {},
-	"alikunlun.com":       {},
-	"alikunlun.net":       {},
-	"cdngslb.com":         {},
-	"chinanetcenter.com":  {},
-	"wscdns.com":          {},
-	"wsglb0.com":          {},
-	"cdn20.com":           {},
-	"qtlcdn.com":          {},
-	"ksyuncdn.com":        {},
-	"ks-cdn.com":          {},
-	"cdn.cloudflare.net":  {},
-	"cloudfront.net":      {},
-	"akamaiedge.net":      {},
-	"akamaihd.net":        {},
-	"edgekey.net":         {},
-	"edgesuite.net":       {},
-	"fastly.net":          {},
-	"dnsv1.com":           {},
-	"dnsv1.com.cn":        {},
-	"smtcdns.net":         {},
-	"cdntip.com":          {},
-	"baishan-cloud.net":   {},
-	"bsclink.cn":          {},
-	"myhuaweicloud.com":   {},
-	"hwcdn.net":           {},
-	"cdnhwc1.com":         {},
-	"cdnhwc2.com":         {},
-	"cdnhwc3.com":         {},
-	"kunlungr.com":        {},
-	"kunlunar.com":        {},
-	"kunluncan.com":       {},
-	"eo-edge.com":         {},
-	"eo-dnse2.com":        {},
-	"tcdnvod.com":         {},
-	"ovscdns.com":         {},
-	"bdydns.com":          {},
-	"volcgslb.com":        {},
+	"kunlunca.com":       {},
+	"alikunlun.com":      {},
+	"alikunlun.net":      {},
+	"cdngslb.com":        {},
+	"chinanetcenter.com": {},
+	"wscdns.com":         {},
+	"wsglb0.com":         {},
+	"cdn20.com":          {},
+	"qtlcdn.com":         {},
+	"ksyuncdn.com":       {},
+	"ks-cdn.com":         {},
+	"cdn.cloudflare.net": {},
+	"cloudfront.net":     {},
+	"akamaiedge.net":     {},
+	"akamaihd.net":       {},
+	"edgekey.net":        {},
+	"edgesuite.net":      {},
+	"fastly.net":         {},
+	"dnsv1.com":          {},
+	"dnsv1.com.cn":       {},
+	"smtcdns.net":        {},
+	"cdntip.com":         {},
+	"baishan-cloud.net":  {},
+	"bsclink.cn":         {},
+	"myhuaweicloud.com":  {},
+	"hwcdn.net":          {},
+	"cdnhwc1.com":        {},
+	"cdnhwc2.com":        {},
+	"cdnhwc3.com":        {},
+	"kunlungr.com":       {},
+	"kunlunar.com":       {},
+	"kunluncan.com":      {},
+	"eo-edge.com":        {},
+	"eo-dnse2.com":       {},
+	"tcdnvod.com":        {},
+	"ovscdns.com":        {},
+	"bdydns.com":         {},
+	"volcgslb.com":       {},
 }
 
 func isGenericMultiTenantCDN(host string) bool {

@@ -67,15 +67,24 @@ var jobPool = sync.Pool{
 	},
 }
 
+const (
+	ctrlActiveEvery  = time.Second
+	ctrlIdleEvery    = 60 * time.Second
+	flushActiveEvery = 5 * time.Second
+	flushIdleEvery   = 60 * time.Second
+)
+
 // Engine executes fast/slow-path decoupled cleartext privacy leak detection.
 type Engine struct {
 	// 64-bit atomic counters placed at offset 0 for 32-bit ARMv7 alignment.
-	droppedCount   atomic.Uint64
-	submittedCount atomic.Uint64
-	scannedCount   atomic.Uint64
-	totalLeaks     atomic.Uint64
-	lastClearSeq   atomic.Int64
-	lastClearedAt  atomic.Int64
+	droppedCount     atomic.Uint64
+	submittedCount   atomic.Uint64
+	scannedCount     atomic.Uint64
+	totalLeaks       atomic.Uint64
+	ignoredCount     atomic.Uint64
+	lastClearSeq     atomic.Int64
+	lastClearedAt    atomic.Int64
+	lastLazySyncUnix atomic.Int64
 
 	enabled atomic.Bool
 	closed  atomic.Bool
@@ -87,18 +96,21 @@ type Engine struct {
 	knownMu   sync.RWMutex
 	knownMACs map[string]struct{}
 
-	ctrlMu          sync.RWMutex
-	ctrlMtimeNs     int64
-	ctrlSize        int64
-	persistMtimeNs  int64
-	blockedDomains  map[string]struct{}
-	blockedList     []string
+	ctrlMu         sync.RWMutex
+	ctrlMtimeNs    int64
+	ctrlSize       int64
+	persistMtimeNs int64
+	persistSize    int64
+	blockedDomains map[string]struct{}
+	blockedList    []string
+	ignoreRules    []IgnoreRule
 
 	workerMu   sync.Mutex
 	workerStop context.CancelFunc
 	workerDone chan struct{}
 
-	onAlert atomic.Pointer[func(LeakEvent)]
+	onAlert   atomic.Pointer[func(LeakEvent)]
+	idleCheck atomic.Pointer[func() bool]
 }
 
 // NewEngine constructs a LeakGuard Engine backed by a 256-slot async queue and
@@ -129,6 +141,47 @@ func (e *Engine) SetAlertHook(fn func(LeakEvent)) {
 	e.onAlert.Store(&fn)
 }
 
+// SetIdleCheck registers an optional callback reporting whether LeakGuard can
+// throttle background IPC polling (ctrlTk 1s->60s, flushTk 5s->60s when clean).
+func (e *Engine) SetIdleCheck(fn func() bool) {
+	if e == nil {
+		return
+	}
+	if fn == nil {
+		e.idleCheck.Store(nil)
+		return
+	}
+	e.idleCheck.Store(&fn)
+}
+
+func (e *Engine) isIdle() bool {
+	if e == nil {
+		return false
+	}
+	if fn := e.idleCheck.Load(); fn != nil && *fn != nil {
+		return (*fn)()
+	}
+	return false
+}
+
+// maybeLazySync triggers SyncControl at most once per second via lock-free CAS
+// on lastLazySyncUnix so incoming packets after standby see fresh rules/toggles
+// immediately without per-packet os.Stat overhead.
+func (e *Engine) maybeLazySync() bool {
+	if e == nil {
+		return false
+	}
+	nowUnix := time.Now().Unix()
+	prev := e.lastLazySyncUnix.Load()
+	if nowUnix-prev < 1 && nowUnix >= prev {
+		return false
+	}
+	if !e.lastLazySyncUnix.CompareAndSwap(prev, nowUnix) {
+		return false
+	}
+	return e.SyncControl()
+}
+
 // Start launches the background slow-path analyzer and IPC sync goroutine.
 func (e *Engine) Start(ctx context.Context) {
 	e.workerMu.Lock()
@@ -148,9 +201,36 @@ func (e *Engine) Start(ctx context.Context) {
 				log.Printf("[leakguard] worker panic recovered: %v", rec)
 			}
 		}()
-		ctrlTk := time.NewTicker(time.Second)
+		ctrlCur := ctrlActiveEvery
+		flushCur := flushActiveEvery
+		if e.isIdle() {
+			ctrlCur = ctrlIdleEvery
+			flushCur = flushIdleEvery
+		}
+		ctrlTk := time.NewTicker(ctrlCur)
 		defer ctrlTk.Stop()
+		flushTk := time.NewTicker(flushCur)
+		defer flushTk.Stop()
 		dirty := false
+		retime := func() {
+			idle := e.isIdle()
+			wantCtrl := ctrlActiveEvery
+			if idle {
+				wantCtrl = ctrlIdleEvery
+			}
+			if wantCtrl != ctrlCur {
+				ctrlCur = wantCtrl
+				ctrlTk.Reset(ctrlCur)
+			}
+			wantFlush := flushActiveEvery
+			if idle && !dirty {
+				wantFlush = flushIdleEvery
+			}
+			if wantFlush != flushCur {
+				flushCur = wantFlush
+				flushTk.Reset(flushCur)
+			}
+		}
 		for {
 			select {
 			case <-wctx.Done():
@@ -193,11 +273,19 @@ func (e *Engine) Start(ctx context.Context) {
 				} else if hasAny {
 					dirty = true
 				}
+				retime()
 			case <-ctrlTk.C:
-				if e.SyncControl() || dirty {
+				if e.SyncControl() {
 					_ = e.FlushEvents()
 					dirty = false
 				}
+				retime()
+			case <-flushTk.C:
+				if dirty {
+					_ = e.FlushEvents()
+					dirty = false
+				}
+				retime()
 			}
 		}
 	}()
@@ -242,8 +330,16 @@ func (e *Engine) SubmitPacket(clientMAC, clientIP, dstIP string, dstPort uint16,
 
 // Submit enqueues PacketInput onto the non-blocking 256-entry channel.
 func (e *Engine) Submit(in PacketInput) bool {
-	if e == nil || e.closed.Load() || !e.enabled.Load() || len(in.RawPayload) == 0 {
+	if e == nil || e.closed.Load() || len(in.RawPayload) == 0 {
 		return false
+	}
+	if !e.enabled.Load() {
+		if e.maybeLazySync() {
+			_ = e.FlushEvents()
+		}
+		if !e.enabled.Load() {
+			return false
+		}
 	}
 	job := jobPool.Get().(*packetJob)
 	n := len(in.RawPayload)
@@ -276,7 +372,14 @@ func (e *Engine) Submit(in PacketInput) bool {
 // ProcessSync synchronously scans one packet, updates the ring buffer, mirrors
 // leakguard_events.json when hits occur, and returns recorded events plus new alert count.
 func (e *Engine) ProcessSync(in PacketInput) ([]LeakEvent, int) {
-	if e == nil || !e.enabled.Load() {
+	if e == nil {
+		return nil, 0
+	}
+	ctrlChanged := e.maybeLazySync()
+	if !e.enabled.Load() {
+		if ctrlChanged {
+			_ = e.FlushEvents()
+		}
 		return nil, 0
 	}
 	raw := in.RawPayload
@@ -291,6 +394,9 @@ func (e *Engine) ProcessSync(in PacketInput) ([]LeakEvent, int) {
 
 	candidates := e.ExtractLeaks(in)
 	if len(candidates) == 0 {
+		if ctrlChanged {
+			_ = e.FlushEvents()
+		}
 		return nil, 0
 	}
 	now := in.Time
@@ -301,6 +407,10 @@ func (e *Engine) ProcessSync(in PacketInput) ([]LeakEvent, int) {
 	recorded := make([]LeakEvent, 0, len(candidates))
 	newAlerts := 0
 	for _, cand := range candidates {
+		if e.IsIgnored(cand) {
+			e.ignoredCount.Add(1)
+			continue
+		}
 		cand.Blocked = e.IsDomainBlocked(cand.DstHost) || e.IsDomainBlocked(cand.DstIP)
 		cand.IsBlocked = cand.Blocked
 		ev, isNew := e.ring.Record(cand, now)
@@ -313,7 +423,9 @@ func (e *Engine) ProcessSync(in PacketInput) ([]LeakEvent, int) {
 		}
 		recorded = append(recorded, ev)
 	}
-	_ = e.FlushEvents()
+	if len(recorded) > 0 || ctrlChanged {
+		_ = e.FlushEvents()
+	}
 	return recorded, newAlerts
 }
 
@@ -323,8 +435,9 @@ func (e *Engine) processJob(job *packetJob) (newAlert bool, dirty bool) {
 			log.Printf("[leakguard] job panic recovered: %v", rec)
 		}
 	}()
+	ctrlChanged := e.maybeLazySync()
 	if !e.enabled.Load() {
-		return false, false
+		return ctrlChanged, ctrlChanged
 	}
 	e.scannedCount.Add(1)
 	if normMAC := normalizeValidMAC(job.clientMAC); normMAC != "" {
@@ -344,13 +457,17 @@ func (e *Engine) processJob(job *packetJob) (newAlert bool, dirty bool) {
 	}
 	candidates := e.ExtractLeaks(in)
 	if len(candidates) == 0 {
-		return false, false
+		return ctrlChanged, ctrlChanged
 	}
 	now := job.ts
 	if now.IsZero() {
 		now = time.Now()
 	}
 	for _, cand := range candidates {
+		if e.IsIgnored(cand) {
+			e.ignoredCount.Add(1)
+			continue
+		}
 		cand.Blocked = e.IsDomainBlocked(cand.DstHost) || e.IsDomainBlocked(cand.DstIP)
 		cand.IsBlocked = cand.Blocked
 		ev, isNew := e.ring.Record(cand, now)
@@ -362,6 +479,10 @@ func (e *Engine) processJob(job *packetJob) (newAlert bool, dirty bool) {
 				(*hook)(ev)
 			}
 		}
+	}
+	if ctrlChanged {
+		newAlert = true
+		dirty = true
 	}
 	return newAlert, dirty
 }
@@ -378,8 +499,27 @@ func (e *Engine) ScannedCount() uint64 { return e.scannedCount.Load() }
 // TotalLeaks returns cumulative privacy leak hits observed since Engine start.
 func (e *Engine) TotalLeaks() uint64 { return e.totalLeaks.Load() }
 
+// IgnoredCount returns cumulative candidates skipped by persisted ignore whitelist rules.
+func (e *Engine) IgnoredCount() uint64 { return e.ignoredCount.Load() }
+
 // Ring exposes the underlying RingBuffer for direct in-process inspection.
 func (e *Engine) Ring() *RingBuffer { return e.ring }
+
+// IsIgnored reports whether ev matches any active ignore whitelist rule.
+func (e *Engine) IsIgnored(ev LeakEvent) bool {
+	if e == nil {
+		return false
+	}
+	e.ctrlMu.RLock()
+	rules := e.ignoreRules
+	e.ctrlMu.RUnlock()
+	for i := range rules {
+		if rules[i].MatchesEvent(ev) {
+			return true
+		}
+	}
+	return false
+}
 
 // RegisterKnownMAC adds a downstream hotspot device MAC to the known-MAC table.
 func (e *Engine) RegisterKnownMAC(mac string) {
@@ -440,25 +580,31 @@ func (e *Engine) IsDomainBlocked(host string) bool {
 }
 
 // SyncControl checks runDir/leakguard_ctrl.json (plus ../data/leakguard_config.json)
-// and applies dynamic changes (enabled, capacity, cooldown, clear, blocked domains).
+// and applies dynamic changes (enabled, capacity, cooldown, clear, blocked domains, ignore rules).
 func (e *Engine) SyncControl() bool {
+	if e == nil {
+		return false
+	}
+	e.lastLazySyncUnix.Store(time.Now().Unix())
 	cpath := CtrlPath(e.runDir)
 	persistPath := filepath.Join(filepath.Dir(filepath.Clean(e.runDir)), "data", "leakguard_config.json")
 
-	var ctrlMtime, ctrlSz, persistMtime int64
+	var ctrlMtime, ctrlSz, persistMtime, persistSz int64
 	if st, err := os.Stat(cpath); err == nil {
 		ctrlMtime = st.ModTime().UnixNano()
 		ctrlSz = st.Size()
 	}
 	if pst, perr := os.Stat(persistPath); perr == nil {
 		persistMtime = pst.ModTime().UnixNano()
+		persistSz = pst.Size()
 	}
 	if ctrlMtime == 0 && persistMtime == 0 {
 		return false
 	}
 
 	e.ctrlMu.RLock()
-	unchanged := ctrlMtime == e.ctrlMtimeNs && ctrlSz == e.ctrlSize && persistMtime == e.persistMtimeNs
+	unchanged := ctrlMtime == e.ctrlMtimeNs && ctrlSz == e.ctrlSize &&
+		persistMtime == e.persistMtimeNs && persistSz == e.persistSize
 	e.ctrlMu.RUnlock()
 	if unchanged {
 		return false
@@ -499,17 +645,27 @@ func (e *Engine) SyncControl() bool {
 	for _, d := range ctrl.BlockedDomains {
 		newSet[d] = struct{}{}
 	}
+	rulesChanged := false
 	e.ctrlMu.Lock()
 	e.ctrlMtimeNs = ctrlMtime
 	e.ctrlSize = ctrlSz
 	e.persistMtimeNs = persistMtime
+	e.persistSize = persistSz
 	if !sameStringSlice(e.blockedList, ctrl.BlockedDomains) {
 		e.blockedDomains = newSet
 		e.blockedList = ctrl.BlockedDomains
 		changed = true
 	}
+	if !sameIgnoreRules(e.ignoreRules, ctrl.IgnoreRules) {
+		e.ignoreRules = append([]IgnoreRule(nil), ctrl.IgnoreRules...)
+		rulesChanged = true
+		changed = true
+	}
 	e.ctrlMu.Unlock()
 
+	if rulesChanged && e.ring.PurgeIgnored(e.IsIgnored) > 0 {
+		changed = true
+	}
 	if e.ring.MarkBlockedDomains(e.IsDomainBlocked) {
 		changed = true
 	}
@@ -530,6 +686,7 @@ func (e *Engine) Snapshot() EventsSnapshot {
 		Capacity:       e.ring.Capacity(),
 		CooldownSec:    e.ring.CooldownSec(),
 		TotalLeaks:     e.totalLeaks.Load(),
+		IgnoredCount:   e.ignoredCount.Load(),
 		UniqueEvents:   len(evs),
 		SubmittedPkts:  e.submittedCount.Load(),
 		ScannedPkts:    e.scannedCount.Load(),
@@ -551,6 +708,18 @@ func sameStringSlice(a, b []string) bool {
 	}
 	for i := range a {
 		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func sameIgnoreRules(a, b []IgnoreRule) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].UniqueKey() != b[i].UniqueKey() || a[i].ID != b[i].ID {
 			return false
 		}
 	}

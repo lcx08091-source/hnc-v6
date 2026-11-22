@@ -52,13 +52,18 @@ function hms(sec) { sec = Math.max(0, Math.round(num(sec))); var h = Math.floor(
 function today() { var d = new Date(); return d.getFullYear() + '-' + pad2(d.getMonth() + 1) + '-' + pad2(d.getDate()); }
 function isMac(s) { return /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(String(s || '')); }
 function isRandomMac(m) { var c = parseInt(String(m || '').charAt(1), 16); return !isNaN(c) && (c & 2) === 2; }
+function cleanVer(v, fb) {
+  var s = String(v == null ? '' : v).trim();
+  if (!s || /^(dev|0|unknown|none|null|undefined|-)$/i.test(s)) return fb == null ? '' : fb;
+  return s;
+}
 
 /* ═════════════════════ v5.38.0 双层光学矢量图标系统 (24×24 · 1.85px · 零位图) ═════════════════════ */
 var I = {
   dev:'<rect x="2.5" y="3.5" width="19" height="13" rx="2.6" fill="currentColor" fill-opacity=".16"/><rect x="2.5" y="3.5" width="19" height="13" rx="2.6"/><path d="M8.5 20.5h7"/><path d="M12 16.5v4"/>',
   apps:'<rect x="3.2" y="3.2" width="7.2" height="7.2" rx="2.1" fill="currentColor" fill-opacity=".18"/><rect x="13.6" y="3.2" width="7.2" height="7.2" rx="2.1"/><rect x="3.2" y="13.6" width="7.2" height="7.2" rx="2.1"/><rect x="13.6" y="13.6" width="7.2" height="7.2" rx="2.1" fill="currentColor" fill-opacity=".18"/><rect x="3.2" y="3.2" width="7.2" height="7.2" rx="2.1"/><rect x="13.6" y="13.6" width="7.2" height="7.2" rx="2.1"/>',
   stats:'<rect x="4" y="12.5" width="3.8" height="7.5" rx="1.2" fill="currentColor" fill-opacity=".18"/><rect x="10.1" y="5.5" width="3.8" height="14.5" rx="1.2" fill="currentColor" fill-opacity=".22"/><rect x="16.2" y="9.5" width="3.8" height="10.5" rx="1.2" fill="currentColor" fill-opacity=".18"/><rect x="4" y="12.5" width="3.8" height="7.5" rx="1.2"/><rect x="10.1" y="5.5" width="3.8" height="14.5" rx="1.2"/><rect x="16.2" y="9.5" width="3.8" height="10.5" rx="1.2"/>',
-  gear:'<circle cx="12" cy="12" r="3.2" fill="currentColor" fill-opacity=".2"/><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
+  gear:'<circle cx="12" cy="12" r="3.2" fill="currentColor" fill-opacity=".2"/><circle cx="12" cy="12" r="3.2"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>',
   chev:'<path d="m6.5 9.5 5.5 5.5 5.5-5.5"/>', right:'<path d="m9.5 6.5 5.5 5.5-5.5 5.5"/>',
   search:'<circle cx="11" cy="11" r="7.5" fill="currentColor" fill-opacity=".14"/><circle cx="11" cy="11" r="7.5"/><path d="m20.5 20.5-4.2-4.2"/>',
   bolt:'<polygon points="13.2 2.4 4.2 13.6 11.8 13.6 10.8 21.6 19.8 10.4 12.2 10.4 13.2 2.4" fill="currentColor" fill-opacity=".18"/><polygon points="13.2 2.4 4.2 13.6 11.8 13.6 10.8 21.6 19.8 10.4 12.2 10.4 13.2 2.4"/>',
@@ -88,6 +93,7 @@ var I = {
   link:'<path d="M10 13a4.8 4.8 0 0 0 7.2.5l2.8-2.8a4.8 4.8 0 0 0-6.8-6.8l-1.6 1.6"/><path d="M14 11a4.8 4.8 0 0 0-7.2-.5L4 13.3a4.8 4.8 0 0 0 6.8 6.8l1.6-1.6"/>',
   lock:'<rect x="3.8" y="10.8" width="16.4" height="10.4" rx="2.4" fill="currentColor" fill-opacity=".16"/><rect x="3.8" y="10.8" width="16.4" height="10.4" rx="2.4"/><path d="M7.5 10.8V7.2a4.5 4.5 0 0 1 9 0v3.6"/>',
   x:'<path d="M18 6 6 18M6 6l12 12"/>',
+  undo:'<path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/>',
   warn:'<path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" fill="currentColor" fill-opacity=".16"/><path d="M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9.2v4M12 17h.01"/>',
   trend:'<path d="m22 6.5-8.8 8.8-4.6-4.6L2 17.3"/><path d="M16 6.5h6v6"/>',
   eye:'<path d="M1.8 12S5.5 5 12 5s10.2 7 10.2 7-3.7 7-10.2 7S1.8 12 1.8 12Z" fill="currentColor" fill-opacity=".14"/><path d="M1.8 12S5.5 5 12 5s10.2 7 10.2 7-3.7 7-10.2 7S1.8 12 1.8 12Z"/><circle cx="12" cy="12" r="2.8"/>',
@@ -388,9 +394,11 @@ function fetchReq(method, path, body, opt) {
     }, opt.timeout || 9000);
   });
   var init = { method: method, credentials: 'same-origin', cache: 'no-store', headers: { 'Cache-Control': 'no-cache' }, signal: ctrl ? ctrl.signal : undefined };
-  if (method === 'POST') { init.headers['Content-Type'] = 'application/json'; init.headers['X-HNC-CSRF'] = '1'; init.body = JSON.stringify(body || {}); }
   // 超时覆盖响应正文; Promise.race 也让没有 AbortController 的旧 WebView 能释放请求队列。
-  var response = Promise.resolve().then(function () { return fetch(path, init); }).then(function (resp) {
+  var response = Promise.resolve().then(function () {
+    if (method === 'POST') { init.headers['Content-Type'] = 'application/json'; init.headers['X-HNC-CSRF'] = '1'; init.body = JSON.stringify(body || {}); }
+    return fetch(path, init);
+  }).then(function (resp) {
     return resp.text().then(function (txt) {
       if (timedOut) throw HttpError('请求超时', 0);
       if (resp.status === 401) {
@@ -416,6 +424,9 @@ function qs(params) {
   return q ? '?' + q : '';
 }
 var api = {
+  writeGen: 0,
+  writeInFlight: 0,
+  bumpWriteGen: function () { api.writeGen = (api.writeGen || 0) + 1; return api.writeGen; },
   get: function (path, params, opt) {
     return req('GET', path + qs(params), null, opt).then(function (o) {
       if (o && o.ok === false) { var e = HttpError(o.error || '接口返回失败', 200, o); e.detail = o.detail; throw e; }
@@ -423,18 +434,38 @@ var api = {
     });
   },
   getSafe: function (path, params, fallback) { return api.get(path, params).catch(function () { return fallback; }); },
-  post: function (path, body, opt) { return req('POST', path, body, opt); },
+  post: function (path, body, opt) {
+    var skipFence = /^\/api\/(logout|export|rollback_ack)/.test(String(path || ''));
+    if (!skipFence) { api.bumpWriteGen(); api.writeInFlight++; }
+    return Promise.resolve().then(function () {
+      return req('POST', path, body, opt);
+    }).then(function (r) {
+      if (!skipFence) { api.writeInFlight = Math.max(0, api.writeInFlight - 1); api.bumpWriteGen(); }
+      return r;
+    }, function (e) {
+      if (!skipFence) { api.writeInFlight = Math.max(0, api.writeInFlight - 1); api.bumpWriteGen(); }
+      throw e;
+    });
+  },
   /* 写操作: 全局串行(与旧版一致, 避免 tc/json 竞态); params 的值必须全是字符串(后端 map[string]string) */
   _q: Promise.resolve(),
   action: function (name, params, opt) {
     var p = {}; params = params || {};
     Object.keys(params).forEach(function (k) { if (params[k] !== undefined && params[k] !== null) p[k] = String(params[k]); });
     var slow = /^(debug_bundle|cleanup_all|dpi_rules_update|capture_record|selfcheck_run|selfcheck_export|compat_report|self_studio_start|self_studio_distill|self_studio_export|dpi_distill_now|flow_cls_retrain|dpi_rulepack_export|device_merge|encdns_set|clsact_mode_set|dataplane_verify_run)$/.test(name);
+    var skipFence = /^(debug_bundle|selfcheck_run|selfcheck_export|compat_report|capture_record|dpi_rulepack_export|self_studio_export|clsact_check)$/.test(name);
     var defOpt = slow ? { timeout: 35000, maxTime: 30 } : { timeout: 12000, maxTime: 10 };
     var run = function () {
-      return req('POST', '/api/action', { action: name, params: p }, Object.assign(defOpt, opt)).then(function (o) {
+      if (!skipFence) { api.bumpWriteGen(); api.writeInFlight++; }
+      return Promise.resolve().then(function () {
+        return req('POST', '/api/action', { action: name, params: p }, Object.assign({}, defOpt, opt));
+      }).then(function (o) {
+        if (!skipFence) { api.writeInFlight = Math.max(0, api.writeInFlight - 1); api.bumpWriteGen(); }
         if (!o || !o.ok) { var e = HttpError((o && o.error) || '操作失败', 200, o); e.detail = o && o.detail; throw e; }
         return o;
+      }, function (e) {
+        if (!skipFence) { api.writeInFlight = Math.max(0, api.writeInFlight - 1); api.bumpWriteGen(); }
+        throw e;
       });
     };
     var pr = api._q.catch(function () {}).then(run);
@@ -452,15 +483,93 @@ function shell(cmd, timeoutMs) {
   });
 }
 
-/* ═════════════════════ 交互组件: toast / 弹层 / 确认 ═════════════════════ */
+/* ═════════════════════ 交互组件: toast / 5秒撤销胶囊(undoToast) / 弹层 / 确认 ═════════════════════ */
 var toastT;
 function toast(m, kind) {
   var t = $('#toast'), ic = $('#toast-ic');
+  if (!t || !ic) return;
   $('#toast-t').textContent = m;
   ic.style.color = kind === 'err' ? 'var(--red)' : kind === 'warn' ? 'var(--orange)' : 'var(--green)';
   ic.innerHTML = kind === 'err' ? I.x : kind === 'warn' ? I.warn : I.check;
   t.classList.remove('show'); void t.offsetWidth; t.classList.add('show');
   clearTimeout(toastT); toastT = setTimeout(function () { t.classList.remove('show'); }, kind === 'err' ? 3600 : 2200);
+}
+
+var undoT = 0, undoHideT = 0, undoCur = null, undoRunning = false, undoBound = false;
+function dismissUndo(immediate) {
+  clearTimeout(undoT); undoT = 0;
+  clearTimeout(undoHideT); undoHideT = 0;
+  undoCur = null; undoRunning = false;
+  var pill = typeof document !== 'undefined' ? document.getElementById('undo-pill') : null;
+  if (!pill) return;
+  var btn = document.getElementById('undo-btn');
+  if (btn) btn.disabled = false;
+  pill.classList.remove('show');
+  var noMotion = immediate || (typeof motionOn === 'function' && !motionOn());
+  if (noMotion) {
+    pill.hidden = true;
+  } else {
+    undoHideT = setTimeout(function () {
+      undoHideT = 0;
+      if (!undoCur && pill) pill.hidden = true;
+    }, 220);
+  }
+}
+function bindUndoOnce() {
+  if (undoBound || typeof document === 'undefined') return;
+  var pill = document.getElementById('undo-pill');
+  if (!pill) return;
+  undoBound = true;
+  var btn = document.getElementById('undo-btn');
+  var xBtn = document.getElementById('undo-x');
+  if (btn) btn.addEventListener('click', function () {
+    if (undoRunning || !undoCur || typeof undoCur.fn !== 'function') return;
+    undoRunning = true;
+    btn.disabled = true;
+    clearTimeout(undoT); undoT = 0;
+    var cur = undoCur;
+    if (typeof haptic === 'function') haptic(8);
+    Promise.resolve().then(cur.fn).then(function (res) {
+      var uMsg = cur.opt && cur.opt.undoMsg;
+      dismissUndo(true);
+      if (uMsg) toast(typeof uMsg === 'function' ? uMsg(res) : String(uMsg));
+    }, function (e) {
+      dismissUndo(true);
+      toast(errText(e), 'err');
+    });
+  });
+  if (xBtn) xBtn.addEventListener('click', function () { dismissUndo(false); });
+  document.addEventListener('visibilitychange', function () {
+    if (document.hidden) dismissUndo(true);
+  });
+}
+function undoToast(msg, undoFn, opt) {
+  if (msg && typeof msg === 'object' && typeof undoFn !== 'function') {
+    opt = msg; undoFn = opt.undo || opt.onUndo || opt.fn; msg = opt.msg || opt.text || '';
+  }
+  opt = opt || {};
+  if (typeof undoFn !== 'function') { toast(msg, opt.kind); return; }
+  var pill = typeof document !== 'undefined' ? document.getElementById('undo-pill') : null;
+  var msgEl = typeof document !== 'undefined' ? document.getElementById('undo-msg') : null;
+  if (!pill || !msgEl) { toast(msg, opt.kind); return; }
+  bindUndoOnce();
+  var topToast = document.getElementById('toast');
+  if (topToast && topToast.classList.contains('show')) { clearTimeout(toastT); topToast.classList.remove('show'); }
+  clearTimeout(undoT); undoT = 0;
+  clearTimeout(undoHideT); undoHideT = 0;
+  undoRunning = false;
+  var btn = document.getElementById('undo-btn');
+  if (btn) btn.disabled = false;
+  var btnTxt = document.getElementById('undo-btn-t');
+  if (btnTxt) btnTxt.textContent = String(opt.label || '撤销');
+  msgEl.textContent = String(msg == null ? '' : msg);
+  undoCur = { fn: undoFn, opt: opt };
+  pill.hidden = false;
+  pill.classList.remove('show');
+  void pill.offsetWidth;
+  pill.classList.add('show');
+  var dur = clamp(Math.round(num(opt.duration || opt.timeout, 5000)), 1500, 15000);
+  undoT = setTimeout(function () { dismissUndo(false); }, dur);
 }
 
 /* ═════════════════════ 状态 ═════════════════════ */
@@ -668,6 +777,12 @@ function mapDevice(d) {
 }
 function devBy(mac) { mac = String(mac || '').toLowerCase(); for (var i = 0; i < S.devices.length; i++) if (S.devices[i].mac === mac) return S.devices[i]; return null; }
 function applyLive(l) {
+  if (l && typeof l === 'object') {
+    var bv = cleanVer(l.backend_version, '');
+    if (bv) l.backend_version = bv; else delete l.backend_version;
+    var bvc = cleanVer(l.backend_version_code, '');
+    if (bvc) l.backend_version_code = bvc; else delete l.backend_version_code;
+  }
   S.live = l; S.lastOk = Date.now(); S.connected = true;
   var act = l.hotspot_active; S.hotspot.active = typeof act === 'boolean' ? act : S.hotspot.active;
   S.hotspot.iface = l.hotspot_iface || l.iface || S.hotspot.iface; S.hotspot.ip = l.hotspot_ip || S.hotspot.ip;
@@ -675,8 +790,19 @@ function applyLive(l) {
   if (l && l.signal && typeof l.signal === 'object') { S.signal = l.signal; if (typeof paintSignalPill === 'function') paintSignalPill(); }
   S.spark.push(num(l.rx_bps)); if (S.spark.length > 30) S.spark.shift();
 }
-function loadLive() { return api.get('/api/live', null, { timeout: 7000 }).then(function (l) { applyLive(l); return l; }); }
-function loadDevices() { return api.get('/api/devices', null, { timeout: 8000 }).then(applyDevices); }
+function loadLive(guardGen) {
+  return api.get('/api/live', null, { timeout: 7000 }).then(function (l) {
+    if (guardGen != null && (guardGen !== api.writeGen || api.writeInFlight > 0)) return S.live || l;
+    applyLive(l);
+    return l;
+  });
+}
+function loadDevices(guardGen) {
+  return api.get('/api/devices', null, { timeout: 8000 }).then(function (r) {
+    if (guardGen != null && (guardGen !== api.writeGen || api.writeInFlight > 0)) return S.devices;
+    return applyDevices(r);
+  });
+}
 function applyDevices(r) {
   {
     if (typeof r.hotspot_active === 'boolean') S.hotspot.active = r.hotspot_active;
@@ -694,10 +820,11 @@ function applyDevices(r) {
   }
 }
 /* 一次请求同时拿汇总和设备列表(本机桥接每个请求都要拉起一个 curl 进程) */
-function loadLiveAndDevices() {
+function loadLiveAndDevices(guardGen) {
   return api.get('/api/live', { devices: 1 }, { timeout: 8000 }).then(function (l) {
+    if (guardGen != null && (guardGen !== api.writeGen || api.writeInFlight > 0)) return S.live || l;
     applyLive(l);
-    if (Array.isArray(l.devices)) applyDevices(l); else return loadDevices().then(function () { return l; });
+    if (Array.isArray(l.devices)) applyDevices(l); else return loadDevices(guardGen).then(function () { return l; });
     return l;
   });
 }
@@ -821,7 +948,8 @@ function applyVectorSyncPayload(r) {
 
   var hObj = (r.health && typeof r.health === 'object') ? r.health : null;
   if (hObj || r.rollback || typeof r.healthy === 'boolean') {
-    S.lastHealth = hObj || { ok: r.healthy !== false, rollback: r.rollback, backend_version: r.version || r.backend_version };
+    var hv = cleanVer((hObj && hObj.backend_version) || r.version || r.backend_version, '');
+    S.lastHealth = hObj ? Object.assign({}, hObj, { backend_version: cleanVer(hObj.backend_version, hv) }) : { ok: r.healthy !== false, rollback: r.rollback, backend_version: hv };
     got.health = true;
   }
   var lvObj = (r.live && typeof r.live === 'object') ? r.live : ((r.rx_bps !== undefined || r.hotspot_active !== undefined) ? r : null);
@@ -830,10 +958,10 @@ function applyVectorSyncPayload(r) {
     : (lvObj && Array.isArray(lvObj.devices) ? lvObj.devices : null));
 
   if (lvObj) {
-    var verStr = (hObj && hObj.backend_version) || r.version || r.backend_version || '';
-    if (verStr && !lvObj.backend_version) lvObj.backend_version = verStr;
-    var verCode = (hObj && (hObj.backend_version_code || hObj.version_code)) || r.version_code || r.backend_version_code || '';
-    if (verCode && !lvObj.backend_version_code) lvObj.backend_version_code = verCode;
+    var verStr = cleanVer((hObj && hObj.backend_version) || r.version || r.backend_version, '');
+    if (verStr && !cleanVer(lvObj.backend_version, '')) lvObj.backend_version = verStr;
+    var verCode = cleanVer((hObj && (hObj.backend_version_code || hObj.version_code)) || r.version_code || r.backend_version_code, '');
+    if (verCode && !cleanVer(lvObj.backend_version_code, '')) lvObj.backend_version_code = verCode;
     if (rawDevArr && !lvObj.devices_sig) {
       var vSig = computeVecDevSig(rawDevArr);
       if (S.vecDevSig && S.vecDevSig !== vSig) lvObj.devices_sig = 'vsync:' + vSig;
@@ -907,7 +1035,7 @@ function applyVectorSyncPayload(r) {
   return got;
 }
 
-function loadVectorSync(params) {
+function loadVectorSync(params, guardGen) {
   if (S.vectorSyncState === 'unsupported') {
     var uErr = new Error('vector_sync unsupported');
     uErr.status = 404;
@@ -916,6 +1044,9 @@ function loadVectorSync(params) {
   }
   return api.get(V6_SYNC_PATH, params || null, { timeout: 8000 }).then(function (r) {
     S.vectorSyncState = 'supported';
+    if (guardGen != null && (guardGen !== api.writeGen || api.writeInFlight > 0)) {
+      return { raw: r, got: {}, stale: true, live: S.live || r.live || r };
+    }
     var got = applyVectorSyncPayload(r);
     return { raw: r, got: got, live: S.live || r.live || r };
   }, function (e) {

@@ -4,9 +4,14 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"os"
+	"path/filepath"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func findByType(evs []LeakEvent, leakType string) *LeakEvent {
@@ -251,5 +256,294 @@ func TestCooldownRingIPCAndAsyncNonBlockingQueue(t *testing.T) {
 	_ = eng.Close()
 	if eng.ScannedCount() < DefaultQueueCap {
 		t.Fatalf("expected worker to drain all %d queued packets on shutdown, got %d", DefaultQueueCap, eng.ScannedCount())
+	}
+}
+
+func TestEngine64BitAtomicHeadAlignment(t *testing.T) {
+	var z Engine
+	fields := []struct {
+		name string
+		off  uintptr
+		want uintptr
+	}{
+		{"droppedCount", unsafe.Offsetof(z.droppedCount), 0},
+		{"submittedCount", unsafe.Offsetof(z.submittedCount), 8},
+		{"scannedCount", unsafe.Offsetof(z.scannedCount), 16},
+		{"totalLeaks", unsafe.Offsetof(z.totalLeaks), 24},
+		{"ignoredCount", unsafe.Offsetof(z.ignoredCount), 32},
+		{"lastClearSeq", unsafe.Offsetof(z.lastClearSeq), 40},
+		{"lastClearedAt", unsafe.Offsetof(z.lastClearedAt), 48},
+		{"lastLazySyncUnix", unsafe.Offsetof(z.lastLazySyncUnix), 56},
+	}
+	for _, f := range fields {
+		if f.off != f.want || f.off%8 != 0 {
+			t.Fatalf("Engine.%s offset=%d want=%d (must be contiguous 8-byte aligned at struct head)", f.name, f.off, f.want)
+		}
+	}
+	rt := reflect.TypeOf((*Engine)(nil)).Elem()
+	for i := 0; i < rt.NumField(); i++ {
+		sf := rt.Field(i)
+		if sf.Type == reflect.TypeOf((*atomic.Uint64)(nil)).Elem() || sf.Type == reflect.TypeOf((*atomic.Int64)(nil)).Elem() {
+			if sf.Offset%8 != 0 {
+				t.Fatalf("Engine.%s (%s) at offset=%d is not 8-byte aligned for 32-bit ARM", sf.Name, sf.Type, sf.Offset)
+			}
+		}
+	}
+}
+
+func TestTombstoneAntiResurrectionAnd0600Permissions(t *testing.T) {
+	root := t.TempDir()
+	runDir := filepath.Join(root, "run")
+	dataDir := filepath.Join(root, "data")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(dataDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate ../data/leakguard_config.json holding a previously blocked domain and cold-start ignore rule.
+	persistedJSON := `{"blocked_targets":{"resurrect.bad.example":true},"ignore_rules":[{"scope":"host_type","dst_host":"trusted.login.example","leak_type":"PHONE"}]}`
+	if err := os.WriteFile(filepath.Join(dataDir, "leakguard_config.json"), []byte(persistedJSON), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctrl0, err := ReadControl(runDir)
+	if err != nil {
+		t.Fatalf("ReadControl initial: %v", err)
+	}
+	if len(ctrl0.BlockedDomains) != 1 || ctrl0.BlockedDomains[0] != "resurrect.bad.example" {
+		t.Fatalf("expected initial persisted domain merge, got %+v", ctrl0.BlockedDomains)
+	}
+	if len(ctrl0.IgnoreRules) != 1 || ctrl0.IgnoreRules[0].DstHost != "trusted.login.example" {
+		t.Fatalf("expected cold-start ignore rule merge, got %+v", ctrl0.IgnoreRules)
+	}
+
+	// RemoveBlockedDomain must record BlockedTargets["resurrect.bad.example"]=false tombstone
+	// so ReadControl never resurrects it from ../data/leakguard_config.json.
+	afterRm, err := RemoveBlockedDomain(runDir, "resurrect.bad.example")
+	if err != nil {
+		t.Fatalf("RemoveBlockedDomain: %v", err)
+	}
+	if active, exists := afterRm.BlockedTargets["resurrect.bad.example"]; !exists || active {
+		t.Fatalf("expected false tombstone in BlockedTargets, got %+v", afterRm.BlockedTargets)
+	}
+	ctrlAfter, err := ReadControl(runDir)
+	if err != nil {
+		t.Fatalf("ReadControl after remove: %v", err)
+	}
+	if len(ctrlAfter.BlockedDomains) != 0 {
+		t.Fatalf("unblocked domain resurrected from data/leakguard_config.json: %+v", ctrlAfter.BlockedDomains)
+	}
+
+	eng := NewEngine(runDir)
+	defer eng.Close()
+	if eng.IsDomainBlocked("resurrect.bad.example") {
+		t.Fatal("Engine still considers tombstoned domain blocked")
+	}
+
+	for _, p := range []string{CtrlPath(runDir), EventsPath(runDir)} {
+		st, err := os.Stat(p)
+		if err != nil {
+			t.Fatalf("stat %s: %v", p, err)
+		}
+		if perm := st.Mode().Perm(); perm != 0o600 {
+			t.Fatalf("file %s mode=%04o, want 0600", p, perm)
+		}
+	}
+}
+
+func TestIgnoreWhitelistGuardrailsPurgeAndZeroCount(t *testing.T) {
+	forbidden := []string{
+		"", "*", "*.qq.com", "a.*.example.com",
+		"0.0.0.0/0", "1.2.3.0/24", "2001:db8::/32", "example.com/path",
+		"127.0.0.1", "::1", "0.0.0.0", "::", "192.168.1.1", "10.0.0.8", "172.16.5.4",
+		"169.254.1.2", "255.255.255.255", "100.64.1.1",
+		"com", "cn", "net", "org", "localhost",
+		"com.cn", "net.cn", "org.cn", "gov.cn", "edu.cn", "co.uk", "org.uk",
+	}
+	for _, bad := range forbidden {
+		if _, _, err := ValidateIgnoreTarget(bad); err == nil {
+			t.Fatalf("ValidateIgnoreTarget(%q) unexpectedly succeeded; P0 guardrail must reject it", bad)
+		}
+	}
+
+	allowed := []string{
+		"login.example.com", "portal.school.edu.cn", "api.shop.com.cn", "news.bbc.co.uk",
+		"203.0.113.88", "2001:db8:abcd::99",
+	}
+	for _, okHost := range allowed {
+		if _, _, err := ValidateIgnoreTarget(okHost); err != nil {
+			t.Fatalf("ValidateIgnoreTarget(%q) failed unexpectedly: %v", okHost, err)
+		}
+	}
+
+	runDir := t.TempDir()
+	eng := NewEngine(runDir)
+	defer eng.Close()
+
+	var alertHits int
+	eng.SetAlertHook(func(LeakEvent) { alertHits++ })
+
+	t0 := time.Unix(1763550000, 0)
+	// Seed three distinct events across two devices and two types before adding whitelist rules.
+	_, _ = eng.ProcessSync(PacketInput{
+		Time:       t0,
+		ClientMAC:  "aa:bb:cc:dd:ee:01",
+		ClientIP:   "192.168.43.10",
+		DstIP:      "203.0.113.10",
+		RawPayload: []byte("GET /a?phone=13800138001&oaid=a1b2c3d4-e5f6-7890-abcd-ef1234567890 HTTP/1.1\r\nHost: sub.corp.com.cn\r\n\r\n"),
+	})
+	_, _ = eng.ProcessSync(PacketInput{
+		Time:       t0.Add(time.Second),
+		ClientMAC:  "aa:bb:cc:dd:ee:02",
+		ClientIP:   "192.168.43.11",
+		DstIP:      "203.0.113.11",
+		RawPayload: []byte("GET /b?phone=13900139002 HTTP/1.1\r\nHost: devonly.example.com\r\n\r\n"),
+	})
+	if eng.Ring().Len() != 3 || eng.TotalLeaks() != 3 || alertHits != 3 {
+		t.Fatalf("unexpected seed state: ring=%d total=%d alerts=%d", eng.Ring().Len(), eng.TotalLeaks(), alertHits)
+	}
+
+	// Add host_type rule for corp.com.cn PHONE and device_host_type rule for mac 02 on devonly.example.com PHONE.
+	r1, err := NormalizeIgnoreRule(IgnoreRule{Scope: ScopeHostType, DstHost: "corp.com.cn", LeakType: "phone"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r2, err := NormalizeIgnoreRule(IgnoreRule{
+		Scope:    ScopeDeviceHostType,
+		MAC:      "AA:BB:CC:DD:EE:02",
+		DstHost:  "devonly.example.com",
+		LeakType: "PHONE",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := UpdateControl(runDir, func(c *ControlState) {
+		c.IgnoreRules = []IgnoreRule{r1, r2}
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !eng.SyncControl() {
+		t.Fatal("expected SyncControl to apply new ignore rules and purge matching ring entries")
+	}
+
+	// PurgeIgnored should have evicted the two PHONE events while preserving the OAID DEVICE_ID event!
+	rem := eng.Ring().Snapshot()
+	if len(rem) != 1 || rem[0].LeakType != TypeDeviceID {
+		t.Fatalf("expected only DEVICE_ID event to remain after PurgeIgnored, got %+v", rem)
+	}
+
+	// Subsequent matching packets must NOT enter ring, NOT increment TotalLeaks, and NOT fire alert hook.
+	prevTotal := eng.TotalLeaks()
+	prevAlerts := alertHits
+	evsIgnored, newIgnored := eng.ProcessSync(PacketInput{
+		Time:       t0.Add(10 * time.Second),
+		ClientMAC:  "aa:bb:cc:dd:ee:01",
+		RawPayload: []byte("GET /a?phone=13800138009 HTTP/1.1\r\nHost: login.corp.com.cn\r\n\r\n"),
+	})
+	if len(evsIgnored) != 0 || newIgnored != 0 || eng.TotalLeaks() != prevTotal || alertHits != prevAlerts || eng.IgnoredCount() != 1 {
+		t.Fatalf("ignored packet leaked into stats: evs=%+v new=%d total=%d alerts=%d ignored=%d",
+			evsIgnored, newIgnored, eng.TotalLeaks(), alertHits, eng.IgnoredCount())
+	}
+
+	// Different device (mac 01) hitting devonly.example.com must NOT be ignored by mac 02's device_host_type rule.
+	evsOtherDev, newOther := eng.ProcessSync(PacketInput{
+		Time:       t0.Add(15 * time.Second),
+		ClientMAC:  "aa:bb:cc:dd:ee:01",
+		RawPayload: []byte("GET /b?phone=13700137007 HTTP/1.1\r\nHost: devonly.example.com\r\n\r\n"),
+	})
+	if len(evsOtherDev) != 1 || newOther != 1 {
+		t.Fatalf("device_host_type rule over-matched unrelated device: evs=%+v new=%d", evsOtherDev, newOther)
+	}
+}
+
+func TestEngineSetIdleCheckThrottleAndPacketLazySync(t *testing.T) {
+	runDir := t.TempDir()
+	eng := NewEngine(runDir)
+
+	var idle atomic.Bool
+	idle.Store(true)
+	eng.SetIdleCheck(func() bool { return idle.Load() })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	eng.Start(ctx)
+	defer eng.Close()
+
+	// 1. In idle standby (ctrlTk=60s), updating leakguard_ctrl.json without packets
+	// must NOT be polled at the 1s active cadence.
+	if _, err := AddBlockedDomain(runDir, "standby-lazy.example"); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1300 * time.Millisecond)
+	if eng.IsDomainBlocked("api.standby-lazy.example") {
+		t.Fatal("expected 1s ctrlTk polling to be suppressed while SetIdleCheck returns true")
+	}
+
+	// 2. First incoming packet on async queue (processJob) must lazily sync control
+	// via lastLazySyncUnix CAS before scanning, tagging the very first alert Blocked=true.
+	req := []byte("GET /hit?phone=13800138000 HTTP/1.1\r\nHost: api.standby-lazy.example\r\n\r\n")
+	if !eng.SubmitPacket("3c:22:fb:11:22:33", "192.168.43.20", "203.0.113.55", 80, "GET", "/hit", "api.standby-lazy.example", "TestUA", req, time.Now()) {
+		t.Fatal("SubmitPacket failed unexpectedly")
+	}
+	deadline := time.Now().Add(time.Second)
+	for eng.ScannedCount() < 1 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !eng.IsDomainBlocked("api.standby-lazy.example") {
+		t.Fatal("expected first packet in processJob to lazily SyncControl")
+	}
+	evs := eng.Ring().Snapshot()
+	if len(evs) != 1 || !evs[0].Blocked || !evs[0].IsBlocked {
+		t.Fatalf("expected first packet to see Blocked=true with zero lag, got %+v", evs)
+	}
+
+	// 3. CAS 1s throttle on ProcessSync: within the same Unix second, lazy sync is skipped;
+	// once >1s has elapsed since lastLazySyncUnix, ProcessSync immediately syncs.
+	if _, err := AddBlockedDomain(runDir, "cas-throttle.example"); err != nil {
+		t.Fatal(err)
+	}
+	pinnedSec := time.Now().Unix()
+	eng.lastLazySyncUnix.Store(pinnedSec)
+	_, _ = eng.ProcessSync(PacketInput{
+		Time:       time.Now(),
+		ClientMAC:  "3c:22:fb:11:22:33",
+		RawPayload: []byte("GET /benign HTTP/1.1\r\nHost: cas-throttle.example\r\n\r\n"),
+	})
+	if time.Now().Unix() == pinnedSec && eng.IsDomainBlocked("cas-throttle.example") {
+		t.Fatal("expected CAS throttle to skip redundant SyncControl within the same Unix second")
+	}
+
+	// Simulate >1s elapsed since last SyncControl -> ProcessSync must immediately sync.
+	eng.lastLazySyncUnix.Store(time.Now().Unix() - 2)
+	evsSync, _ := eng.ProcessSync(PacketInput{
+		Time:       time.Now(),
+		ClientMAC:  "3c:22:fb:11:22:33",
+		DstHost:    "sub.cas-throttle.example",
+		RawPayload: []byte("GET /p?phone=13912345678 HTTP/1.1\r\nHost: sub.cas-throttle.example\r\n\r\n"),
+	})
+	if !eng.IsDomainBlocked("sub.cas-throttle.example") || len(evsSync) != 1 || !evsSync[0].Blocked {
+		t.Fatalf("expected ProcessSync after >1s to lazy-sync and mark Blocked=true, got %+v", evsSync)
+	}
+
+	// 4. Resuming active state (idle=false) resets ctrlTk back to 1s immediately on wakeup.
+	idle.Store(false)
+	prevScanned := eng.ScannedCount()
+	benign := []byte("GET /wake HTTP/1.1\r\nHost: example.org\r\n\r\n")
+	eng.SubmitPacket("3c:22:fb:11:22:33", "192.168.43.20", "203.0.113.1", 80, "GET", "/wake", "example.org", "", benign, time.Now())
+	wakeDeadline := time.Now().Add(500 * time.Millisecond)
+	for eng.ScannedCount() <= prevScanned && time.Now().Before(wakeDeadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if _, err := AddBlockedDomain(runDir, "active-resumed.example"); err != nil {
+		t.Fatal(err)
+	}
+	resumedDeadline := time.Now().Add(1800 * time.Millisecond)
+	for !eng.IsDomainBlocked("active-resumed.example") && time.Now().Before(resumedDeadline) {
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !eng.IsDomainBlocked("active-resumed.example") {
+		t.Fatal("expected ctrlTk to reset back to 1s once SetIdleCheck returns false")
 	}
 }

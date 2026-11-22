@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# HNC hotfix18.5 JSON/debug bundle collector
+# HNC JSON/debug bundle collector
 # Collects JSON health status, backup inventory, guard results, and TC snapshot
 # without modifying live JSON files. Safe to run from Termux/root:
 #   su -c 'sh /data/local/hnc/bin/json_diag_bundle.sh'
@@ -35,14 +35,24 @@ run_cmd() {
   return "$rc"
 }
 
+_JDB_ROOT=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+_JDB_VER=""
+_JDB_PROP=""
+for _mp in "$MODDIR/module.prop" "$HNC/module.prop" "${_JDB_ROOT:+$_JDB_ROOT/module.prop}"; do
+  [ -n "$_mp" ] && [ -f "$_mp" ] || continue
+  _JDB_PROP="$_mp"
+  _JDB_VER=$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')
+  [ -n "$_JDB_VER" ] && break
+done
+
 # Basic environment metadata
 {
-  echo "HNC JSON debug bundle"
+  echo "HNC ${_JDB_VER:+$_JDB_VER }JSON debug bundle"
   echo "timestamp=$TS"
   echo "HNC=$HNC"
   echo "MODDIR=$MODDIR"
   echo "id=$(id 2>/dev/null)"
-  [ -f "$MODDIR/module.prop" ] && grep -E '^(version|versionCode|description)=' "$MODDIR/module.prop"
+  [ -n "$_JDB_PROP" ] && grep -E '^(version|versionCode|description)=' "$_JDB_PROP"
 } > "$OUT/summary.txt"
 
 # JSON doctor/guard status. status/list are read-only.

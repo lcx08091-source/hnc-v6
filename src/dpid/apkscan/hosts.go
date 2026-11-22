@@ -129,10 +129,6 @@ type tokenizer struct {
 	emit     func(tok []byte, urlCtx bool)
 }
 
-func (t *tokenizer) reset() {
-	t.n, t.inTok, t.overflow, t.urlCtx, t.p1, t.p2 = 0, false, false, false, 0, 0
-}
-
 func (t *tokenizer) feed(b []byte) {
 	for _, c := range b {
 		t.feedByte(c)

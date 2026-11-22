@@ -59,12 +59,6 @@ func hotspotIdle() bool {
 	return s.OK && s.Level == activity.LevelHotspotOff
 }
 
-// screenAwake activity 新鲜且亮屏或有界面在看 —— 此时不可能处于 Doze, 不必问系统。
-func screenAwake() bool {
-	s := actReader.Get()
-	return s.OK && !s.Quiet
-}
-
 // ─── 网卡事件 ──────────────────────────────────────────────────────────
 
 // linkWake 有网卡 / 地址变化时收到一个信号(容量 1, 合并突发)。

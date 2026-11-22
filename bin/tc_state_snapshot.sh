@@ -37,25 +37,25 @@ qos_scale=$(cat "$RUN/tc_qos_scale" 2>/dev/null | head -1 | tr -d '\r\n %')
 [ -f "$RUN/tc_qos_fallback" ] && fallback="true"
 
 if [ -n "$iface" ] && IP link show dev "$iface" >/dev/null 2>&1; then
-  qdisc_file="$RUN/tc_state.qdisc.$iface.txt"
-  class_file="$RUN/tc_state.class.$iface.txt"
-  filter_file="$RUN/tc_state.filter.$iface.txt"
-  TC -s qdisc show dev "$iface" > "$qdisc_file" 2>&1 || true
-  TC -s class show dev "$iface" > "$class_file" 2>&1 || true
-  TC filter show dev "$iface" > "$filter_file" 2>&1 || true
-  qdisc_first=$(sed -n '1p' "$qdisc_file" 2>/dev/null)
-  root_kind=$(echo "$qdisc_first" | awk '{print $2}')
+  rm -f "$RUN"/tc_state.*.txt 2>/dev/null || true
+  _qd_out=$(TC -s qdisc show dev "$iface" 2>&1 || true)
+  _cl_out=$(TC -s class show dev "$iface" 2>&1 || true)
+  _fl_out=$(TC filter show dev "$iface" 2>&1 || true)
+  qdisc_first=$(printf '%s\n' "$_qd_out" | sed -n '1p')
+  root_kind=$(printf '%s\n' "$qdisc_first" | awk '{print $2}')
   [ "$root_kind" = "htb" ] && htb_ready=true
-  grep -q 'netem' "$qdisc_file" 2>/dev/null && netem_seen=true
-  class_count=$(grep -c '^class ' "$class_file" 2>/dev/null || echo 0)
-  filter_count=$(grep -c '^filter ' "$filter_file" 2>/dev/null || echo 0)
+  printf '%s\n' "$_qd_out" | grep -q 'netem' 2>/dev/null && netem_seen=true
+  class_count=$(printf '%s\n' "$_cl_out" | awk '/^class /{c++} END{print c+0}')
+  filter_count=$(printf '%s\n' "$_fl_out" | awk '/^filter /{c++} END{print c+0}')
+  unset _qd_out _cl_out _fl_out
 else
   qdisc_first="iface missing"
 fi
 
 esc() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'; }
 now=$(date +%s 2>/dev/null || echo 0)
-cat > "$RUN/tc_state.json" <<JSON
+_tc_tmp="$RUN/tc_state.json.tmp.$$"
+cat > "$_tc_tmp" <<JSON
 {
   "ok": true,
   "ts": $now,
@@ -72,6 +72,10 @@ cat > "$RUN/tc_state.json" <<JSON
   "qos_scale": "$(esc "$qos_scale")"
 }
 JSON
+mv -f "$_tc_tmp" "$RUN/tc_state.json" 2>/dev/null || {
+  cp -f "$_tc_tmp" "$RUN/tc_state.json" 2>/dev/null || true
+  rm -f "$_tc_tmp" 2>/dev/null || true
+}
 
 {
   echo "[$(date '+%Y-%m-%d %H:%M:%S')] iface=$iface root=$root_kind htb_ready=$htb_ready netem=$netem_seen class=$class_count filter=$filter_count fallback=$fallback qos=$qos_mode scale=$qos_scale"

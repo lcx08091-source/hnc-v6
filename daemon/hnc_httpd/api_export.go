@@ -329,25 +329,26 @@ func (s *server) gatherDeviceInfo() map[string]string {
 	return d
 }
 
-// detectHNCVersion reads HNC's own module.prop. Best-effort.
+// detectHNCVersion 统一经 ServerVersion 获取控制面版本(编译期注入优先, 回退 module.prop)。
 func (s *server) detectHNCVersion() string {
+	if v := s.serverVersion(); v != "" && v != "dev" {
+		return v
+	}
 	for _, p := range []string{
+		filepath.Join(s.hncDir, "module.prop"),
 		filepath.Join(moduleDir(s.hncDir), "module.prop"),
 		"/data/adb/modules/hotspot_net_ctl/module.prop",
 		"/data/adb/modules/hotspot_network_control/module.prop",
-		filepath.Join(s.hncDir, "module.prop"),
 	} {
 		b, err := os.ReadFile(p)
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(b), "\n") {
-			if strings.HasPrefix(line, "version=") {
-				return strings.TrimSpace(strings.TrimPrefix(line, "version="))
-			}
+		if v := propLine(string(b), "version"); v != "" {
+			return v
 		}
 	}
-	return ""
+	return s.serverVersion()
 }
 
 func (s *server) runGetprop(key string) string {

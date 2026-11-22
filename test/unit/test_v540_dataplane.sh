@@ -554,3 +554,28 @@ assert_mock_called "HNC_EGRESS_FIX ! -o rmnet+ -m connmark --mark 0x00800000/0x0
 assert_mock_called "mangle -A POSTROUTING -j HNC_EGRESS_FIX" && \
 test_pass
 mock_teardown
+
+# ═══ 15. v6.1.0-rc.1 Vector Express 迁至 1:8010 / handle 8010: / prio 4 & 5 且不误伤 prio 2 ═══
+test_start "v6.1.0-rc.1 Vector Express: tc_manager vector_express 使用 classid 1:8010、handle 8010:、prio 4 / prio 5 且不误伤 prio 2"
+mock_setup
+mock_set_stdout tc "qdisc htb 1: root refcnt 2 default 0x9999
+class htb 1:1 root rate 1000Mbit ceil 1000Mbit"
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/tc_manager.sh" vector_express wlan2 on >/dev/null 2>&1
+assert_mock_called "classid 1:8010" "开启应建 classid 1:8010" && \
+assert_mock_called "handle 8010:" "开启应挂 handle 8010: 叶子队列" && \
+assert_mock_called "prio 4" "IPv4 Express 过滤器应使用 prio 4" && \
+assert_mock_called "prio 5" "IPv6 Express 过滤器应使用 prio 5" && \
+assert_mock_not_called "classid 1:10" "不得再占用与第 16 号设备冲突的 1:10" && \
+assert_mock_not_called "prio 2" "开启时不得触碰 prio 2" || { mock_teardown; true; }
+
+if [ -n "$MOCK_BIN_DIR" ]; then
+    : > "$MOCK_LOG"
+    HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/tc_manager.sh" vector_express wlan2 off >/dev/null 2>&1
+    assert_mock_called "classid 1:8010" "关闭应拆 classid 1:8010" && \
+    assert_mock_called "prio 4" "关闭应精确拆 prio 4" && \
+    assert_mock_called "prio 5" "关闭应精确拆 prio 5" && \
+    assert_mock_not_called "prio 2" "关闭时绝不能误删 prio 2 过滤器" && \
+    assert_mock_not_called "1:10" "关闭时不得误删 1:10 设备类" && \
+    test_pass
+    mock_teardown
+fi

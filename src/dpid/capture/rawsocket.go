@@ -57,7 +57,6 @@ type Stats struct {
 // ARPHRD_* link-layer type constants seen in the wild on Android.
 // Used by Handle.linkType to dispatch the right parser in Run.
 const (
-	arphrdEther = 1     // wlanX, ovnetX, dummyX, ifbX, eth0
 	arphrdRawIP = 519   // rmnet_dataX (Qualcomm cellular)
 	arphrdNone  = 65534 // tun0 (Clash, WireGuard, Tailscale)
 

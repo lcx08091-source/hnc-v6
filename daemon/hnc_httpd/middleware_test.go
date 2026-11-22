@@ -13,12 +13,14 @@ func TestIsSensitiveReadPath(t *testing.T) {
 		"/api/metrics", "/api/iface_info", "/api/offload_status",
 		"/api/dpi_state", "/api/dpi_probe", "/api/alerts",
 		"/api/dpi_history", "/api/app_limits",
-		// v6 review 补登: self 归因 / 导出内容 / SLA / SSE 事件流
-		"/api/whoami", "/api/json_health", "/api/self/studio",
+		// v6 review 补登: self 归因 / 导出内容 / SLA / SSE 事件流 / 一句话健康体检 / LeakGuard
+		"/api/whoami", "/api/json_health", "/api/health_check", "/api/self/studio",
 		"/api/autorate", "/api/signal", "/api/apps_overview", "/api/rules_hub", "/api/dpi_cockpit",
 		"/api/phone_usage", "/api/stats_health", "/api/dataplane_verify", "/api/connections", "/api/discover",
 		"/api/self", "/api/self/ifaces", "/api/self/attrib",
 		"/api/sla", "/api/events", "/api/exports",
+		"/api/leakguard/events", "/api/leakguard/stream", "/api/leakguard/whitelist", "/api/leakguard/undo-block",
+		"/api/v6/thermo",
 		"/api/exports/export-20260822-120000.zip", // 子路径前缀匹配
 	}
 	for _, p := range sensitive {
@@ -29,6 +31,7 @@ func TestIsSensitiveReadPath(t *testing.T) {
 
 	nonSensitive := []string{
 		"/", "/index.html", "/health", "/api/pair_pending", "/api/pair_verify",
+		"/api/thermo",                  // 幽灵路径已清理, 真实路由为 /api/v6/thermo
 		"/api/exportsx", "/api/selfie", // 前缀相似但不同的路径不得误中
 	}
 	for _, p := range nonSensitive {

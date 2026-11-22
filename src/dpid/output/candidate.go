@@ -414,7 +414,7 @@ func writePromotedRules(promoted map[string]autoExpandedRule) error {
 	file := autoExpandedFile{
 		SchemaVersion: "2.0",
 		Subset:        "_auto_promoted",
-		RulesVersion:  fmt.Sprintf("auto-promoted-v5.7-%d", time.Now().Unix()),
+		RulesVersion:  fmt.Sprintf("auto-promoted-%d", time.Now().Unix()),
 		Rules:         rules,
 	}
 	body, err := json.MarshalIndent(file, "", "  ")

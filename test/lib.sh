@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# test/lib.sh — HNC v3.5 测试框架核心库
+# test/lib.sh — HNC 测试框架核心库 (版本自根目录 module.prop 动态读取)
 #
 # 提供:
 #   - assert_eq / assert_ne / assert_match / assert_file_exists / assert_file_eq
@@ -28,6 +28,7 @@ TEST_FAIL=0
 TEST_SKIP=0
 TEST_FAILED_NAMES=""
 CURRENT_TEST=""
+HNC_MODULE_VERSION="$(awk -F= '$1=="version"{print $2; exit}' "${HNC_REPO_ROOT:-.}/module.prop" 2>/dev/null | tr -d '\r')"
 
 # ─── 隔离的 HNC_DIR(每个测试 process 独立)─────────
 # 依次探测可写临时目录: Android 非 root 沙箱 /data/local/tmp 存在但不可写, 需校验 -w

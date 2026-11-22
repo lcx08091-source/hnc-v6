@@ -10,6 +10,8 @@ set -e
 cd "$(dirname "$0")"
 
 ARCH=${1:-arm64}
+HNC_VER=$(sed -n 's/^version=//p' ../../module.prop 2>/dev/null | head -n 1 | tr -d '\r')
+[ -n "$HNC_VER" ] || HNC_VER="dev"
 
 # v5.0.0-beta.4 hotfix6: 改用 libbpf, 删除手撸 lsm/hnc_lsm_loader.c 的
 # sys_bpf 实现, 改为 libbpf 标准 API
@@ -68,7 +70,7 @@ fi
 # ── 编译 hotspotd 主体 + 链接 libbpf ─────────────────────────
 echo ""
 echo "[build] Compiler: $CC"
-echo "[build] Target:   $ARCH  Output: $OUT"
+echo "[build] Target:   $ARCH  Version: $HNC_VER  Output: $OUT"
 echo "[build] libs:     $LIBS_OUT/lib/libbpf.a (libelf/libz not linked)"
 
 CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -Wno-unused-parameter -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE -pthread"
@@ -76,6 +78,7 @@ LDFLAGS="-pie -pthread -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 
 # shellcheck disable=SC2086
 $CC $CFLAGS \
+    -DHNC_VERSION="\"${HNC_VER}\"" \
     -DHNC_HAVE_ADAPTER_BPF \
     -I"$LIBS_OUT/include" \
     -o "$OUT" \
@@ -100,7 +103,7 @@ echo "[build] Copied to $BINDIR/hotspotd"
 
 # ── 编 hnc_ipc ─────────────────────────────────────────────
 echo ""
-echo "=== v5.0 tools build (hnc_ipc) ==="
+echo "=== tools build (hnc_ipc) ==="
 if [ -d tools ]; then
     (cd tools && ANDROID_NDK="$ANDROID_NDK" bash build.sh "$ARCH" hnc_ipc)
     if [ -f "tools/prebuilt/${ARCH}/hnc_ipc" ]; then
@@ -117,6 +120,7 @@ echo "=== mdns_resolve build ==="
 if [ -f mdns_resolve.c ]; then
     # shellcheck disable=SC2086
     $CC $CFLAGS \
+        -DHNC_VERSION="\"${HNC_VER}\"" \
         -o "$BINDIR/mdns_resolve" mdns_resolve.c \
         $LDFLAGS
     "$STRIP" "$BINDIR/mdns_resolve" 2>/dev/null || true

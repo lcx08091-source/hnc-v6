@@ -482,10 +482,43 @@ function connActSheet(mac, key) {
     '<div class="note" style="margin-top:10px">封锁只对这台设备生效，其他设备不受影响。域名按 DPI 看到的 DNS / TLS 自动跟踪 IP 变化。</div>' +
     '<button class="btn sec wide press" id="ca-back" style="margin-top:10px">返回</button>', { onClose: function () {} });
   var back = function () { connSheet(d); };
-  var blk = function (kind, value, label) { api.action('conn_block_add', { mac: mac, kind: kind, value: value, label: label || '' }).then(function () { toast('已封锁 ' + value); back(); }).catch(function (e) { toast(errText(e), 'err'); }); };
+  var blk = function (kind, value, label) {
+    api.action('conn_block_add', { mac: mac, kind: kind, value: value, label: label || '' }).then(function () {
+      undoToast('已封锁 ' + value, function () {
+        return api.action('conn_block_del', { mac: mac, kind: kind, value: value }).then(function () {
+          toast('已撤销封锁 ' + value);
+          return loadConns(mac);
+        }).then(function () {
+          if (S.connMac === mac) paintConnSheet();
+          paintConnMini(mac);
+        });
+      });
+      back();
+    }).catch(function (e) { toast(errText(e), 'err'); });
+  };
   var bd = $('#ca-dom'); if (bd) bd.onclick = function () { blk('domain', dom, c.app || ''); };
   var bi = $('#ca-ip'); if (bi) bi.onclick = function () { blk('ip', c.dst, c.name || ''); };
-  var bl = $('#ca-limit'); if (bl) bl.onclick = function () { var v = mbsToMbps($('#ca-lim').value); if (!(v > 0)) { toast('填一个大于 0 的速度', 'warn'); return; } api.action('app_limit_set', { mac: mac, app_id: c.app_id, down_mbps: trim0(v.toFixed(3)) }).then(function () { toast('已给「' + c.app + '」限速'); return loadAppLimits(); }).then(back).catch(function (e) { toast(errText(e), 'err'); }); };
+  var bl = $('#ca-limit'); if (bl) bl.onclick = function () {
+    var v = mbsToMbps($('#ca-lim').value);
+    if (!(v > 0)) { toast('填一个大于 0 的速度', 'warn'); return; }
+    var prevEntry = (S.appLimits || []).filter(function (x) { return String(x.mac || '').toLowerCase() === mac && x.app_id === c.app_id; })[0];
+    var prevLim = prevEntry ? num(prevEntry.down_mbps) : 0;
+    api.action('app_limit_set', { mac: mac, app_id: c.app_id, down_mbps: trim0(v.toFixed(3)) }).then(function () {
+      return loadAppLimits();
+    }).then(function () {
+      refreshCard(mac);
+      undoToast('已给「' + c.app + '」限速', function () {
+        return (prevLim > 0
+          ? api.action('app_limit_set', { mac: mac, app_id: c.app_id, down_mbps: trim0(prevLim.toFixed(3)) })
+          : api.action('app_limit_clear', { mac: mac, app_id: c.app_id })
+        ).then(loadAppLimits).then(function () {
+          refreshCard(mac);
+          toast(prevLim > 0 ? '已恢复「' + c.app + '」原有限速' : '已撤销「' + c.app + '」限速');
+        });
+      });
+      back();
+    }).catch(function (e) { toast(errText(e), 'err'); });
+  };
   $('#ca-copy').onclick = function () { copyText(c.name || c.dst).then(function (ok) { toast(ok ? '已复制' : '复制失败', ok ? 'ok' : 'err'); }); };
   $('#ca-back').onclick = back;
   var fx = $('#ca-fix'); if (fx) fx.onclick = function () { dpiFixSheet(d, c, back); };
@@ -760,7 +793,7 @@ function renderDevices(anim1) {
         '<button class="row" data-act="clean-offline">' + gi('orange', 'trash') + '<span class="tx"><div class="t">清理离线设备</div><div class="s">移除 devices.json 中所有离线设备</div></span><span class="hint-a warn">清理</span></button>' +
         '<button class="row" data-act="release">' + gi('red', 'power') + '<span class="tx"><div class="t">释放并重启资源</div><div class="s">危险操作：清 tc / iptables 后自动拉起后端</div></span><span class="hint-a danger">重启</span></button>' +
       '</div></div></div></div>' +
-    '<div class="toolbar"><button class="chip press' + (S.batch ? ' on' : '') + '" data-act="batch">' + ico('box') + '批量</button><button class="chip press" data-act="tpl">' + ico('star') + '模板</button></div>' +
+    '<div class="toolbar"><button class="chip press' + (S.batch ? ' on' : '') + '" data-act="batch">' + ico('box') + '批量</button><button class="chip press" data-act="tpl">' + ico('star') + '模板</button><button class="chip press" data-act="quick-health">' + ico('shield') + '省电体检</button></div>' +
     (S.batch ? '<div class="glass batchbar swap"><div class="top"><span>已选 <b class="num" id="picked-n">' + Object.keys(S.picked).length + '</b> 台</span><button class="hint-a" data-act="b-all">全选</button><button class="hint-a" data-act="b-none">清空</button><button class="hint-a" data-act="batch">退出</button></div>' +
       '<div class="btns"><button class="btn sec press" data-act="b-tpl">应用模板</button><button class="btn sec press" data-act="b-clear">清除限速</button><button class="btn sec press" data-act="b-cdelay">清除延迟</button><button class="btn dan press" data-act="b-block">加黑</button><button class="btn ok press" data-act="b-unblock">解黑</button></div></div>' : '') +
     '<div class="sec"><span>设备列表</span><span class="r"><span id="list-on">' + on + '</span> 在线 · ' + (visibleDevs().length < S.devices.length ? ('当前显示 ' + visibleDevs().length + ' / 共 ' + S.devices.length) : ('共 ' + S.devices.length)) + '</span></div>' +
@@ -851,9 +884,9 @@ function busyWhile(el, p) { pend(el, true); return Promise.resolve(p).then(funct
 /* 卡片级动作: 加锁 → 执行 → 拉一次设备 → (弹层收起后)就地更新这张卡 → 成功提示
  * 成功提示和界面变化同时出现; 失败立即提示并按后端真实状态回滚(开关只回滚一次, 不会来回闪)。
  * 期间列表顺序冻结, 卡片不会因为状态变化被重排到别处。 */
-function devAct(mac, fn, okMsg, src) {
+function devAct(mac, fn, okMsg, src, undoOpt) {
   if (S.busy[mac]) { toast('这台设备还有操作在进行', 'warn'); return Promise.resolve(false); }
-  setBusy(mac, true); pend(src, true); freezeList(6000);
+  setBusy(mac, true); pend(src, true); freezeList(5600);
   var ok = false, msg = '';
   return Promise.resolve().then(fn).then(function (r) {
     ok = true; msg = okMsg ? (typeof okMsg === 'function' ? okMsg(r) : okMsg) : '';
@@ -861,8 +894,14 @@ function devAct(mac, fn, okMsg, src) {
     return loadDevices().catch(function () {});
   }).then(sheetSettled).then(function () {
     setBusy(mac, false); pend(src, false);
-    refreshCard(mac); updateStatsCounters(); freezeList(4000);
-    if (ok && msg) toast(msg);
+    refreshCard(mac); updateStatsCounters(); freezeList(5600);
+    if (ok && msg) {
+      if (undoOpt && typeof undoOpt.undo === 'function' && typeof undoToast === 'function') {
+        undoToast(msg, undoOpt.undo, undoOpt);
+      } else {
+        toast(msg);
+      }
+    }
     return ok;
   });
 }
@@ -892,9 +931,12 @@ function confirmBlock(d) {
   return confirmSheet('确认封锁 ' + d.name + '？', '这台设备的 IP（' + esc(d.ip || '—') + '）看起来像网关或上游路由器。封锁它可能让整个热点断网。', '仍然封锁');
 }
 function blockDevice(d) {
+  var mac = d.mac, nm = d.name;
   return confirmBlock(d).then(function (ok) {
     if (!ok) return false;
-    return devAct(d.mac, function () { return api.action('bl_add', { mac: d.mac }); }, d.name + ' 已封锁');
+    return devAct(mac, function () { return api.action('bl_add', { mac: mac }); }, nm + ' 已封锁', null, {
+      undo: function () { return devAct(mac, function () { return api.action('bl_del', { mac: mac }); }, nm + ' 已撤销封锁'); }
+    });
   });
 }
 function renameSheet(mac, name, after) {
@@ -1044,7 +1086,15 @@ function setWhitelistMode(on, el) {
     busyWhile(el, api.action('whitelist_set', { enabled: on ? 'true' : 'false' })).then(function () {
       S.cfg.whitelist_mode = on;
       var cnt = S.devices.filter(function (d) { return d.wl; }).length;
-      toast(on ? '白名单模式已开启 · 放行 ' + cnt + ' 台' : '白名单模式已关闭', 'ok');
+      undoToast(on ? '白名单模式已开启 · 放行 ' + cnt + ' 台' : '白名单模式已关闭', function () {
+        var rev = !on;
+        return api.action('whitelist_set', { enabled: rev ? 'true' : 'false' }).then(function () {
+          S.cfg.whitelist_mode = rev;
+          var sw = $('[data-act="wl-mode"]');
+          if (sw) sw.setAttribute('aria-checked', String(rev));
+          toast(rev ? '已恢复开启白名单模式' : '已撤销开启白名单模式');
+        });
+      });
     }).catch(function (e) { if (el) el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); });
   };
   if (!on) { commit(); return; }

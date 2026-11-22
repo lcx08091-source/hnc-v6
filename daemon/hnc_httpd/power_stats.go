@@ -119,14 +119,6 @@ func (fs powerFS) readTrim(p string) string {
 	return strings.TrimSpace(string(b))
 }
 
-func (fs powerFS) cmdline(pid int) string {
-	b, err := fs.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(strings.ReplaceAll(string(b), "\x00", " "))
-}
-
 // procFS 适配到共享包 procfind(v5.26 T3: 进程检测唯一权威)。
 func (fs powerFS) procFS() procfind.FS {
 	return procfind.FS{ReadFile: fs.ReadFile, ReadDir: fs.ReadDir, SelfPID: fs.SelfPID}

@@ -247,7 +247,7 @@ type SelfState struct {
 	CandidatePromoted int               `json:"candidate_promoted,omitempty"`  // rules actually auto-promoted
 	AutoExpandedCount int               `json:"auto_expanded_count,omitempty"` // confirmed _auto_expanded.json rules
 	AutoPromotedCount int               `json:"auto_promoted_count,omitempty"` // confirmed _auto_promoted.json rules
-	CandidateEntityDB int               `json:"entity_db_size,omitempty"`     // curated entity-lib entries loaded
+	CandidateEntityDB int               `json:"entity_db_size,omitempty"`      // curated entity-lib entries loaded
 	AutoPromoteOn     bool              `json:"auto_promote_on,omitempty"`
 	CandidateSamples  []CandidateSample `json:"candidate_samples,omitempty"`
 }
@@ -267,6 +267,8 @@ type State struct {
 	SchemaVersion string `json:"schema_version"`
 	GeneratedAt   int64  `json:"generated_at"`
 	Version       string `json:"version"`
+	ModuleVersion string `json:"module_version,omitempty"`
+	VersionCode   string `json:"version_code,omitempty"`
 	Mode          string `json:"mode"`
 	BlindReason   string `json:"blind_reason,omitempty"`
 	Interface     string `json:"interface,omitempty"`
@@ -512,6 +514,13 @@ func NewWriter(path, version string) *Writer {
 		evidence: NewEvidenceLedger(64, 1024),
 		causal:   NewCausalBurstEngine(),
 	}
+}
+
+func (w *Writer) SetModuleVersion(moduleVersion, versionCode string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.state.ModuleVersion = moduleVersion
+	w.state.VersionCode = versionCode
 }
 
 func (w *Writer) SetMode(mode, reason, iface string, tlsReassembly, offloadHint, ipv6Capture bool) {

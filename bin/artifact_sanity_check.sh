@@ -101,7 +101,7 @@ if grep -x 'bin/hnc_dpid' "$TMP.entries" >/dev/null; then
       warn "od not available; skipped hnc_dpid ELF machine check"
     fi
     if command -v grep >/dev/null 2>&1; then
-      if grep -a -E '0\.1\.0-rc1\.|0\.2\.0-l2|0\.3\.|0\.5\.|hnc_dpid' "$TMP.extract/hnc_dpid" >/dev/null 2>&1; then
+      if grep -a -E '0\.5\.|hnc_dpid' "$TMP.extract/hnc_dpid" >/dev/null 2>&1; then
         ok "hnc_dpid contains expected version/name marker"
       else
         fail "hnc_dpid missing expected version/name marker; binary may be stale or wrong"
@@ -125,17 +125,13 @@ if grep -x 'daemon/hnc_httpd/hnc_httpd' "$TMP.entries" >/dev/null; then
     else warn "od not available; skipped hnc_httpd ELF machine check"; fi
     if command -v grep >/dev/null 2>&1; then
       [ -n "$VER" ] && { grep -a -F "$VER" "$TMP.extract/hnc_httpd" >/dev/null 2>&1 && ok "hnc_httpd embeds module version $VER" || fail "hnc_httpd does not embed module version $VER; Go binary may be stale"; }
-      (strings -a "$TMP.extract/hnc_httpd" 2>/dev/null || strings "$TMP.extract/hnc_httpd" 2>/dev/null) > "$TMP.httpd.strings" 
       case "$VER" in
-        v5.3.*)
-          grep -F '/api/dpi_state' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_state" || fail "hnc_httpd missing /api/dpi_state"
-          grep -F '/api/dpi_probe' "$TMP.httpd.strings" >/dev/null && ok "hnc_httpd contains /api/dpi_probe" || fail "hnc_httpd missing /api/dpi_probe" ;;
         v6.*)
           for v6sym in /api/vector_sync /api/leakguard/events /api/v6/express /api/v6/blackbox /api/backup; do
             grep -a -F "$v6sym" "$TMP.extract/hnc_httpd" >/dev/null 2>&1 && ok "hnc_httpd embeds $v6sym" || fail "hnc_httpd missing $v6sym"
           done ;;
       esac
-    else warn "strings not available; skipped hnc_httpd version/API symbol checks"; fi
+    else warn "grep not available; skipped hnc_httpd version/API symbol checks"; fi
   else fail "hnc_httpd extraction failed or produced empty file"; fi
 fi
 # v5.22: 全部原生二进制 ABI 一致性(混架构是多 ABI

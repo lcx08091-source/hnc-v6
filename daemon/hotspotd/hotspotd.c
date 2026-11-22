@@ -50,6 +50,10 @@
 
 #include "scheduler.h"       /* v5.0: offload 调度核心 */
 
+#ifndef HNC_VERSION
+#define HNC_VERSION         "dev"
+#endif
+
 /* ── 路径常量 ──────────────────────────────────────────────── */
 #define HNC_DIR             "/data/local/hnc"
 #define SOCK_PATH           HNC_DIR "/run/hotspotd.sock"
@@ -463,10 +467,14 @@ static void hnc_crash_handler(int sig, siginfo_t *info, void *ctx) {
 }
 
 int main(int argc, char *argv[]) {
-    /* 简单参数：-d 后台化，-l <logfile>；--no-discovery 照收(v5.33 起本来就不发现) */
+    /* 简单参数：--version 输出版本，-d 后台化，-l <logfile>；--no-discovery 照收 */
     int daemonize = 0;
     const char *logpath = LOG_FILE;
     for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--version") == 0) {
+            printf("hotspotd %s\n", HNC_VERSION);
+            return 0;
+        }
         if (strcmp(argv[i], "-d") == 0)      daemonize = 1;
         else if (strcmp(argv[i], "--no-discovery") == 0) { /* 旧参数, 忽略 */ }
         else if (strcmp(argv[i], "-l") == 0 && i+1 < argc) logpath = argv[++i];
@@ -513,8 +521,9 @@ int main(int argc, char *argv[]) {
 
     /* 日志 */
     g_log = fopen(logpath, "ae");
-    hlog("=== hotspotd %s started (PID=%d) ===", daemonize?"daemon":"fg", (int)getpid());
-    hlog("v5.33: offload + control socket only (device discovery is the Go watchdog's)");
+    hlog("=== hotspotd %s (%s) started (PID=%d) ===",
+         HNC_VERSION, daemonize ? "daemon" : "fg", (int)getpid());
+    hlog("offload + control socket only (device discovery is the Go watchdog's)");
     /* v3.5.2 P2-E: g_log 加 FD_CLOEXEC,避免子进程继承日志 fd */
     if (g_log) fcntl(fileno(g_log), F_SETFD, FD_CLOEXEC);
 

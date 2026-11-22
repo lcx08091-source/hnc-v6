@@ -4,21 +4,22 @@
 // DNAT 到这里(bin/dns_takeover.sh), 转发器:
 //   1. 解析问题; 非本机来源按客户端 IP 限速(令牌桶, 超限回 REFUSED);
 //   2. 查封锁表(按 MAC, 域名或其父域)→ 直接回 NXDOMAIN / 0.0.0.0;
-//   3. 查缓存(LRU, 尊重 TTL, 命中时按已过时间递减 TTL, 问题段用客户端原字节以兼容 0x20);
-//   4. 未命中: 原样(含 EDNS)转发给上游(默认 = 网关 IP:53, 即系统给热点用的解析器),
-//      UDP 应答带 TC 时改走 TCP 重取; 校验 ID + 问题一致才采纳;
+//   3. 查缓存(单锁 LRU, 尊重 TTL; 新鲜未命中时对正向应答提供最长 180s 弱网 Serve-Stale 保活);
+//   4. 未命中: 独立随机 TXID 转发给上游(800ms 快回退保活 + 2500ms 静默刷缓存),
+//      UDP 应答带 TC 时改走 TCP 重取; 校验随机 TXID + 问题一致才采纳; 上游/出口切网瞬时清空缓存;
 //   5. 应答超过客户端 UDP 上限(无 EDNS 512, 有 EDNS 按其声明)时截断置 TC, 客户端会改走 TCP。
 //
 // 防环: 转发器自身发往上游的包是本机产生的, 只经过 OUTPUT, 不经过 PREROUTING,
 // 永远不会被自己的 DNAT 规则再次改写; DNAT 规则也只匹配 -i <热点口>。
 //
 // 钩子(dns_takeover.go 注入): macOf(客户端 IP→MAC)、blocked(mac,qname)、
-// onAnswer(给 IP→域名表喂数据)、onLog(查询日志 / 今日热门域名)。
+// onAnswer(给 IP→域名表喂数据)、onLog(查询日志 / 今日热门域名)、netSig(出口网络签名)。
 
 package main
 
 import (
 	"container/list"
+	"context"
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
@@ -38,6 +39,7 @@ const (
 	dnsFwdTCPIdle        = 10 * time.Second
 	dnsFwdMaxInflight    = 256
 	dnsFwdMaxTCPConns    = 64
+	dnsFwdMaxStaleBg     = 64
 	dnsCacheMaxEntries   = 2048
 	dnsCacheMaxBytes     = 4 << 20
 	dnsCacheMaxTTL       = 3600
@@ -46,6 +48,12 @@ const (
 	dnsRateDefaultBurst  = 200
 	dnsRateMaxClients    = 1024
 	dnsLatRing           = 512
+
+	dnsFlagAA           = 0x0400
+	dnsStaleMaxAge      = 180 * time.Second
+	dnsStaleReplyTTL    = 5
+	dnsStaleFastWait    = 800 * time.Millisecond
+	dnsNetCheckInterval = 500 * time.Millisecond
 )
 
 // dnsLogEntry 一条客户端查询(内存环 / 日志文件 / API 共用)
@@ -84,6 +92,8 @@ type dnsFwdStats struct {
 	UpstreamErrs int64 `json:"upstream_errs"` // 上游超时 / 网络错误 / 串包
 	UpstreamTCP  int64 `json:"upstream_tcp"`  // TC 后改走 TCP 的次数
 	ServFail     int64 `json:"servfail"`      // 上游自己回的 SERVFAIL
+	Stale        int64 `json:"stale"`         // 弱网过期保活命中(Serve-Stale)
+	StaleFlushes int64 `json:"stale_flushes"` // 上游/网络切换清空缓存次数
 }
 
 type dnsForwarder struct {
@@ -91,19 +101,25 @@ type dnsForwarder struct {
 	st struct {
 		queries, cached, blocked, errors, limited, dropped atomic.Int64
 		upstream, upErrs, upTCP, servfail                  atomic.Int64
+		stale, staleFlush, netCheckNs                      atomic.Int64
 	}
 
 	upstream  atomic.Value // string "ip:port"
 	blockMode atomic.Value // string
 	timeout   time.Duration
+	staleWait time.Duration
 
 	macOf    func(ip net.IP) string
 	blocked  func(mac, qname string) bool
 	onAnswer func(ev dnsAnswerEvent)
 	onLog    func(e dnsLogEntry)
+	netSig   func() string
 
 	cache   *dnsCache
 	limiter *dnsRateLimiter
+
+	netSigMu   sync.Mutex
+	lastNetSig string
 
 	mu       sync.Mutex
 	udp      []*net.UDPConn
@@ -114,30 +130,85 @@ type dnsForwarder struct {
 	wg       sync.WaitGroup
 	sem      chan struct{}
 	tcpSem   chan struct{}
+	bgSem    chan struct{}
 	tcpConns map[net.Conn]bool
-	latMu  sync.Mutex
-	lat    [dnsLatRing]float64
-	latN   int
-	latPos int
+	latMu    sync.Mutex
+	lat      [dnsLatRing]float64
+	latN     int
+	latPos   int
 }
 
 func newDNSForwarder() *dnsForwarder {
 	f := &dnsForwarder{
-		timeout:  dnsFwdUpTimeout,
-		cache:    newDNSCache(dnsCacheMaxEntries, dnsCacheMaxBytes),
-		limiter:  newDNSRateLimiter(dnsRateDefaultPerSec, dnsRateDefaultBurst, dnsRateMaxClients),
-		local:    map[string]bool{},
-		sem:      make(chan struct{}, dnsFwdMaxInflight),
-		tcpSem:   make(chan struct{}, dnsFwdMaxTCPConns),
-		tcpConns: map[net.Conn]bool{},
+		timeout:   dnsFwdUpTimeout,
+		staleWait: dnsStaleFastWait,
+		cache:     newDNSCache(dnsCacheMaxEntries, dnsCacheMaxBytes),
+		limiter:   newDNSRateLimiter(dnsRateDefaultPerSec, dnsRateDefaultBurst, dnsRateMaxClients),
+		local:     map[string]bool{},
+		sem:       make(chan struct{}, dnsFwdMaxInflight),
+		tcpSem:    make(chan struct{}, dnsFwdMaxTCPConns),
+		bgSem:     make(chan struct{}, dnsFwdMaxStaleBg),
+		tcpConns:  map[net.Conn]bool{},
 	}
 	f.upstream.Store("")
 	f.blockMode.Store("nxdomain")
 	return f
 }
 
-func (f *dnsForwarder) SetUpstream(addr string) { f.upstream.Store(addr) }
-func (f *dnsForwarder) Upstream() string        { s, _ := f.upstream.Load().(string); return s }
+func (f *dnsForwarder) FlushCache() {
+	f.cache.Flush()
+	f.st.staleFlush.Add(1)
+}
+
+func (f *dnsForwarder) SetUpstream(addr string) {
+	prev, _ := f.upstream.Load().(string)
+	if prev == addr {
+		return
+	}
+	f.upstream.Store(addr)
+	if prev != "" || f.cache.Len() > 0 {
+		f.FlushCache()
+	}
+}
+
+func (f *dnsForwarder) Upstream() string { s, _ := f.upstream.Load().(string); return s }
+
+// SyncNetSig 同步默认出口网络签名; 完全断网无路由(sig == "")时不清空保活缓存;
+// 首次记录非空签名仅建立基线, 后续签名变化时立即 FlushCache 秒清跨网死 IP。
+func (f *dnsForwarder) SyncNetSig(sig string) bool {
+	if sig == "" {
+		return false
+	}
+	f.netSigMu.Lock()
+	prev := f.lastNetSig
+	if prev == sig {
+		f.netSigMu.Unlock()
+		return false
+	}
+	f.lastNetSig = sig
+	f.netSigMu.Unlock()
+	if prev == "" {
+		return false
+	}
+	f.FlushCache()
+	return true
+}
+
+func (f *dnsForwarder) maybeCheckNetSig(now time.Time) {
+	if f.netSig == nil {
+		return
+	}
+	ns := now.UnixNano()
+	last := f.st.netCheckNs.Load()
+	if last != 0 && ns >= last && ns-last < int64(dnsNetCheckInterval) {
+		return
+	}
+	if !f.st.netCheckNs.CompareAndSwap(last, ns) {
+		return
+	}
+	f.SyncNetSig(f.netSig())
+}
+
 func (f *dnsForwarder) SetBlockMode(m string) {
 	if m != "zero" {
 		m = "nxdomain"
@@ -408,6 +479,7 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 			logIt(resp, dnsLogEntry{Blocked: true})
 			return finish(resp)
 		}
+		f.maybeCheckNetSig(t0)
 	}
 	opcode := (q.Flags >> 11) & 0xF
 	cacheable := opcode == 0 && q.QClass == 1 && q.OptLen == 0
@@ -422,6 +494,11 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 			return finish(resp)
 		}
 	}
+	// Serve-Stale 严格排在 limiter.allow 与 blocked 之后, 且本机自检(internal)绝不走保活
+	if cacheable && !internal && f.cache.hasStale(key, t0) {
+		return f.handleWithStale(query, q, proto, key, mac, t0, logIt, finish)
+	}
+	seq := f.cache.seq()
 	resp, err := f.exchange(query, q, proto)
 	if err != nil {
 		f.st.errors.Add(1)
@@ -441,7 +518,7 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 		f.st.servfail.Add(1)
 	}
 	if cacheable && m.Flags&dnsFlagTC == 0 {
-		f.cache.put(key, resp, m, t0)
+		f.cache.putIfSeq(seq, key, resp, m, t0)
 	}
 	if !internal && f.onAnswer != nil && m.Rcode == dnsRcodeNoError {
 		if ips, cn := dnsAnswerIPs(q.QName, m.Answers); len(ips) > 0 {
@@ -450,6 +527,124 @@ func (f *dnsForwarder) handle(query []byte, src net.IP, proto string) []byte {
 	}
 	logIt(resp, dnsLogEntry{Answers: dnsLogAnswers(m)})
 	return finish(resp)
+}
+
+type dnsExchResult struct {
+	resp []byte
+	err  error
+}
+
+// handleWithStale 存在有效保活候选时: 前台等待上游最多 staleWait(800ms);
+// 800ms 内拿到非 SERVFAIL 合法应答直接回新包(REFUSED/FORMERR/NXDOMAIN 绝不回退);
+// 超时、网络错误或 SERVFAIL 时立即返回重写后的陈旧记录(TTL=5, 清 AA, 不调 onAnswer);
+// 后台在途单次上游查询受 bgSem(64) 并发封顶保护, 若在原 timeout(2500ms)内返回则静默刷入新缓存;
+// 超出 bgSem 上限时主动取消上游连接并丢弃后台刷新, 杜绝弱网风暴下 goroutine 堆积。
+func (f *dnsForwarder) handleWithStale(
+	query []byte, q dnsQuery, proto, key, mac string, t0 time.Time,
+	logIt func([]byte, dnsLogEntry), finish func([]byte) []byte,
+) []byte {
+	fallback := func() []byte {
+		if fresh, finfo := f.cache.get(key, query, q, time.Now()); fresh != nil {
+			f.st.cached.Add(1)
+			logIt(fresh, dnsLogEntry{Cached: true, Answers: dnsLogAnswers(finfo)})
+			return finish(fresh)
+		}
+		if sresp, sinfo := f.cache.getStale(key, query, q, t0); sresp != nil {
+			f.st.stale.Add(1)
+			// 红线: 命中 Stale 时绝不调用 f.onAnswer(防延长 6 小时 DPI 映射租期)
+			logIt(sresp, dnsLogEntry{Cached: true, Answers: dnsLogAnswers(sinfo)})
+			return finish(sresp)
+		}
+		f.st.errors.Add(1)
+		out := dnsRcodeReply(query, q, dnsRcodeServFail)
+		logIt(out, dnsLogEntry{})
+		return finish(out)
+	}
+
+	wait := f.staleWait
+	if wait <= 0 {
+		wait = dnsStaleFastWait
+	}
+
+	seq := f.cache.seq()
+	var res dnsExchResult
+	if f.timeout > 0 && wait >= f.timeout {
+		res.resp, res.err = f.exchange(query, q, proto)
+	} else {
+		ctx, cancelExch := context.WithCancel(context.Background())
+		ch := make(chan dnsExchResult, 1)
+		bgSave := make(chan bool, 1)
+		go func() {
+			r, err := f.exchangeCtx(ctx, query, q, proto)
+			ch <- dnsExchResult{resp: r, err: err}
+			if <-bgSave {
+				defer func() {
+					cancelExch()
+					if f.bgSem != nil {
+						<-f.bgSem
+					}
+				}()
+				if err == nil {
+					m, perr := dnsParseResponse(r)
+					if perr != nil || !dnsSameQuestion(q, m) {
+						f.st.upErrs.Add(1)
+						return
+					}
+					if m.Rcode == dnsRcodeServFail {
+						f.st.servfail.Add(1)
+						return
+					}
+					if m.Flags&dnsFlagTC == 0 {
+						f.cache.putIfSeq(seq, key, r, m, time.Now())
+					}
+				}
+			}
+		}()
+		tm := time.NewTimer(wait)
+		select {
+		case res = <-ch:
+			tm.Stop()
+			cancelExch()
+			bgSave <- false
+		case <-tm.C:
+			if f.bgSem == nil {
+				bgSave <- true
+			} else {
+				select {
+				case f.bgSem <- struct{}{}:
+					bgSave <- true
+				default:
+					cancelExch()
+					bgSave <- false
+				}
+			}
+			return fallback()
+		}
+	}
+
+	if res.err != nil {
+		return fallback()
+	}
+	m, perr := dnsParseResponse(res.resp)
+	if perr != nil || !dnsSameQuestion(q, m) {
+		f.st.upErrs.Add(1)
+		return fallback()
+	}
+	if m.Rcode == dnsRcodeServFail {
+		f.st.servfail.Add(1)
+		return fallback()
+	}
+	now := time.Now()
+	if m.Flags&dnsFlagTC == 0 {
+		f.cache.putIfSeq(seq, key, res.resp, m, now)
+	}
+	if f.onAnswer != nil && m.Rcode == dnsRcodeNoError {
+		if ips, cn := dnsAnswerIPs(q.QName, m.Answers); len(ips) > 0 {
+			f.onAnswer(dnsAnswerEvent{MAC: mac, QName: q.QName, CNAME: cn, IPs: ips, Ts: now})
+		}
+	}
+	logIt(res.resp, dnsLogEntry{Answers: dnsLogAnswers(m)})
+	return finish(res.resp)
 }
 
 func dnsLogAnswers(m dnsMsgInfo) []string {
@@ -469,6 +664,10 @@ func dnsLogAnswers(m dnsMsgInfo) []string {
 
 // exchange 发往上游: UDP(TC → TCP 重取)或 TCP
 func (f *dnsForwarder) exchange(query []byte, q dnsQuery, proto string) ([]byte, error) {
+	return f.exchangeCtx(context.Background(), query, q, proto)
+}
+
+func (f *dnsForwarder) exchangeCtx(ctx context.Context, query []byte, q dnsQuery, proto string) ([]byte, error) {
 	up := f.Upstream()
 	if up == "" {
 		f.st.upErrs.Add(1)
@@ -476,20 +675,22 @@ func (f *dnsForwarder) exchange(query []byte, q dnsQuery, proto string) ([]byte,
 	}
 	f.st.upstream.Add(1)
 	if proto == "tcp" {
-		resp, err := dnsExchangeTCP(up, query, f.timeout)
-		if err != nil {
+		resp, err := dnsExchangeTCPCtx(ctx, up, query, f.timeout)
+		if err != nil && ctx.Err() == nil {
 			f.st.upErrs.Add(1)
 		}
 		return resp, err
 	}
-	resp, err := dnsExchangeUDP(up, query, q, f.timeout)
+	resp, err := dnsExchangeUDPCtx(ctx, up, query, q, f.timeout)
 	if err != nil {
-		f.st.upErrs.Add(1)
+		if ctx.Err() == nil {
+			f.st.upErrs.Add(1)
+		}
 		return nil, err
 	}
 	if len(resp) >= 4 && binary.BigEndian.Uint16(resp[2:4])&dnsFlagTC != 0 {
 		f.st.upTCP.Add(1)
-		if full, terr := dnsExchangeTCP(up, query, f.timeout); terr == nil {
+		if full, terr := dnsExchangeTCPCtx(ctx, up, query, f.timeout); terr == nil {
 			return full, nil
 		}
 		// TCP 重取失败: 把截断应答原样给客户端, 客户端自己会再走 TCP
@@ -497,16 +698,41 @@ func (f *dnsForwarder) exchange(query []byte, q dnsQuery, proto string) ([]byte,
 	return resp, nil
 }
 
-// dnsExchangeUDP 用一次性 connected UDP socket(随机源端口)问上游; 只采纳 ID+问题一致的应答
+// dnsExchangeUDP 用一次性 connected UDP socket(随机源端口) + crypto/rand 独立随机 16-bit TXID 问上游;
+// 只采纳随机 TXID + 问题一致的应答, 返回前改回客户端 q.ID。
 func dnsExchangeUDP(up string, query []byte, q dnsQuery, timeout time.Duration) ([]byte, error) {
-	c, err := net.DialTimeout("udp", up, timeout)
+	return dnsExchangeUDPCtx(context.Background(), up, query, q, timeout)
+}
+
+func dnsExchangeUDPCtx(ctx context.Context, up string, query []byte, q dnsQuery, timeout time.Duration) ([]byte, error) {
+	if len(query) < 12 {
+		return nil, errDNSShort
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d := net.Dialer{Timeout: timeout}
+	c, err := d.DialContext(ctx, "udp", up)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stopCancel()
+
+	var rb [2]byte
+	upID := q.ID
+	if _, rerr := rand.Read(rb[:]); rerr == nil {
+		upID = binary.BigEndian.Uint16(rb[:])
+	}
+	upQuery := append([]byte(nil), query...)
+	binary.BigEndian.PutUint16(upQuery[0:2], upID)
+	upQ := q
+	upQ.ID = upID
+
 	deadline := time.Now().Add(timeout)
 	_ = c.SetDeadline(deadline)
-	if _, err := c.Write(query); err != nil {
+	if _, err := c.Write(upQuery); err != nil {
 		return nil, err
 	}
 	buf := make([]byte, 65535)
@@ -515,22 +741,35 @@ func dnsExchangeUDP(up string, query []byte, q dnsQuery, timeout time.Duration) 
 		if err != nil {
 			return nil, err
 		}
-		if n < 12 || binary.BigEndian.Uint16(buf[0:2]) != q.ID {
+		if n < 12 || binary.BigEndian.Uint16(buf[0:2]) != upID {
 			continue
 		}
-		if m, perr := dnsParseResponse(buf[:n]); perr == nil && !dnsSameQuestion(q, m) {
+		if m, perr := dnsParseResponse(buf[:n]); perr == nil && !dnsSameQuestion(upQ, m) {
 			continue
 		}
-		return append([]byte(nil), buf[:n]...), nil
+		out := append([]byte(nil), buf[:n]...)
+		binary.BigEndian.PutUint16(out[0:2], q.ID)
+		return out, nil
 	}
 }
 
 func dnsExchangeTCP(up string, query []byte, timeout time.Duration) ([]byte, error) {
-	c, err := net.DialTimeout("tcp", up, timeout)
+	return dnsExchangeTCPCtx(context.Background(), up, query, timeout)
+}
+
+func dnsExchangeTCPCtx(ctx context.Context, up string, query []byte, timeout time.Duration) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	d := net.Dialer{Timeout: timeout}
+	c, err := d.DialContext(ctx, "tcp", up)
 	if err != nil {
 		return nil, err
 	}
 	defer c.Close()
+	stopCancel := context.AfterFunc(ctx, func() { _ = c.Close() })
+	defer stopCancel()
+
 	_ = c.SetDeadline(time.Now().Add(timeout))
 	if err := dnsWriteTCPMsg(c, query); err != nil {
 		return nil, err
@@ -578,6 +817,7 @@ func (f *dnsForwarder) Stats() dnsFwdStats {
 		RateLimited: f.st.limited.Load(), Dropped: f.st.dropped.Load(),
 		Upstream: f.st.upstream.Load(), UpstreamErrs: f.st.upErrs.Load(),
 		UpstreamTCP: f.st.upTCP.Load(), ServFail: f.st.servfail.Load(),
+		Stale: f.st.stale.Load(), StaleFlushes: f.st.staleFlush.Load(),
 	}
 }
 
@@ -598,16 +838,17 @@ func dnsProbe(addr string, timeout time.Duration) (time.Duration, int, error) {
 	return time.Since(t0), int(binary.BigEndian.Uint16(resp[2:4]) & 0xF), nil
 }
 
-// ─── 缓存 ───────────────────────────────────────────────────────────────
+// ─── 缓存(单锁 + Serve-Stale)─────────────────────────────────────────────
 
 type dnsCacheEnt struct {
-	key     string
-	msg     []byte
-	ttlOffs []int
-	ttls    []uint32
-	stored  time.Time
-	expire  time.Time
-	info    dnsMsgInfo
+	key        string
+	msg        []byte
+	ttlOffs    []int
+	ttls       []uint32
+	stored     time.Time
+	expire     time.Time
+	staleUntil time.Time
+	info       dnsMsgInfo
 }
 
 type dnsCache struct {
@@ -617,6 +858,7 @@ type dnsCache struct {
 	bytes    int
 	maxN     int
 	maxBytes int
+	flushSeq uint64
 }
 
 func newDNSCache(maxN, maxBytes int) *dnsCache {
@@ -663,13 +905,77 @@ func dnsCacheTTL(m dnsMsgInfo) uint32 {
 	return 0
 }
 
+// dnsHasZeroAnswer 检查应答是否包含全零黑洞 IP(0.0.0.0 / ::)或本地回环毒化 IP(127.0.0.0/8 / ::1)
+func dnsHasZeroAnswer(m dnsMsgInfo) bool {
+	for _, r := range m.Answers {
+		if r.Type == dnsTypeA || r.Type == dnsTypeAAAA {
+			if r.Value == "0.0.0.0" || r.Value == "::" || r.Value == "127.0.0.1" || r.Value == "::1" {
+				return true
+			}
+			if ip := net.ParseIP(r.Value); ip != nil && (ip.IsUnspecified() || ip.IsLoopback()) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (c *dnsCache) seq() uint64 {
+	c.mu.Lock()
+	s := c.flushSeq
+	c.mu.Unlock()
+	return s
+}
+
+func (c *dnsCache) deleteKey(key string) {
+	c.mu.Lock()
+	if el, ok := c.m[key]; ok {
+		c.bytes -= len(el.Value.(*dnsCacheEnt).msg)
+		c.ll.Remove(el)
+		delete(c.m, key)
+	}
+	c.mu.Unlock()
+}
+
 func (c *dnsCache) put(key string, msg []byte, m dnsMsgInfo, now time.Time) {
+	c.putInternal(0, false, key, msg, m, now)
+}
+
+func (c *dnsCache) putIfSeq(seq uint64, key string, msg []byte, m dnsMsgInfo, now time.Time) {
+	c.putInternal(seq, true, key, msg, m, now)
+}
+
+func (c *dnsCache) putInternal(seq uint64, checkSeq bool, key string, msg []byte, m dnsMsgInfo, now time.Time) {
 	ttl := dnsCacheTTL(m)
 	if ttl == 0 || len(msg) > 8192 {
+		// 上游权威返回无 SOA 的 NXDOMAIN/NODATA 或 ttl == 0 时, 删除同键旧保活记录(防旧 IP 诈尸)
+		if m.Rcode == dnsRcodeNoError || m.Rcode == dnsRcodeNXDomain {
+			if !checkSeq {
+				c.deleteKey(key)
+			} else {
+				c.mu.Lock()
+				if c.flushSeq == seq {
+					if el, ok := c.m[key]; ok {
+						c.bytes -= len(el.Value.(*dnsCacheEnt).msg)
+						c.ll.Remove(el)
+						delete(c.m, key)
+					}
+				}
+				c.mu.Unlock()
+			}
+		}
 		return
 	}
-	e := &dnsCacheEnt{key: key, msg: append([]byte(nil), msg...), ttlOffs: m.TTLOffsets,
-		stored: now, expire: now.Add(time.Duration(ttl) * time.Second), info: m}
+	expire := now.Add(time.Duration(ttl) * time.Second)
+	staleUntil := expire
+	// 仅对正向非截断且不含 0.0.0.0/:: 黑洞的应答赋予 180s Serve-Stale 宽限; NXDOMAIN/NODATA 一律 0s 宽限
+	if m.Rcode == dnsRcodeNoError && m.ANCount > 0 && m.Flags&dnsFlagTC == 0 && !dnsHasZeroAnswer(m) {
+		staleUntil = expire.Add(dnsStaleMaxAge)
+	}
+	e := &dnsCacheEnt{
+		key: key, msg: append([]byte(nil), msg...), ttlOffs: m.TTLOffsets,
+		stored: now, expire: expire, staleUntil: staleUntil, info: m,
+	}
 	for _, off := range m.TTLOffsets {
 		t := binary.BigEndian.Uint32(msg[off : off+4])
 		if t > 0x7FFFFFFF {
@@ -679,6 +985,9 @@ func (c *dnsCache) put(key string, msg []byte, m dnsMsgInfo, now time.Time) {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if checkSeq && c.flushSeq != seq {
+		return
+	}
 	if el, ok := c.m[key]; ok {
 		c.bytes -= len(el.Value.(*dnsCacheEnt).msg)
 		c.ll.Remove(el)
@@ -695,7 +1004,7 @@ func (c *dnsCache) put(key string, msg []byte, m dnsMsgInfo, now time.Time) {
 	}
 }
 
-// get 命中返回改写过 ID / 问题段 / TTL 的应答副本
+// get 命中新鲜窗口时返回改写过 ID / 问题段 / TTL 的应答副本; 超过 staleUntil 的条目顺手驱逐
 func (c *dnsCache) get(key string, query []byte, q dnsQuery, now time.Time) ([]byte, dnsMsgInfo) {
 	c.mu.Lock()
 	el, ok := c.m[key]
@@ -705,9 +1014,11 @@ func (c *dnsCache) get(key string, query []byte, q dnsQuery, now time.Time) ([]b
 	}
 	e := el.Value.(*dnsCacheEnt)
 	if !now.Before(e.expire) {
-		c.bytes -= len(e.msg)
-		c.ll.Remove(el)
-		delete(c.m, key)
+		if !now.Before(e.staleUntil) {
+			c.bytes -= len(e.msg)
+			c.ll.Remove(el)
+			delete(c.m, key)
+		}
 		c.mu.Unlock()
 		return nil, dnsMsgInfo{}
 	}
@@ -736,6 +1047,74 @@ func (c *dnsCache) get(key string, query []byte, q dnsQuery, now time.Time) ([]b
 	return out, info
 }
 
+func (c *dnsCache) hasStale(key string, now time.Time) bool {
+	c.mu.Lock()
+	el, ok := c.m[key]
+	if !ok {
+		c.mu.Unlock()
+		return false
+	}
+	e := el.Value.(*dnsCacheEnt)
+	if !now.Before(e.staleUntil) {
+		c.bytes -= len(e.msg)
+		c.ll.Remove(el)
+		delete(c.m, key)
+		c.mu.Unlock()
+		return false
+	}
+	valid := !now.Before(e.expire) && e.staleUntil.After(e.expire)
+	c.mu.Unlock()
+	return valid
+}
+
+// getStale 命中过期保活窗口 [expire, staleUntil) 时返回重写副本:
+// 所有非 OPT RR 的 TTL 置为 5 秒, 并清除 AA(0x0400)标志位。
+func (c *dnsCache) getStale(key string, query []byte, q dnsQuery, now time.Time) ([]byte, dnsMsgInfo) {
+	c.mu.Lock()
+	el, ok := c.m[key]
+	if !ok {
+		c.mu.Unlock()
+		return nil, dnsMsgInfo{}
+	}
+	e := el.Value.(*dnsCacheEnt)
+	if !now.Before(e.staleUntil) {
+		c.bytes -= len(e.msg)
+		c.ll.Remove(el)
+		delete(c.m, key)
+		c.mu.Unlock()
+		return nil, dnsMsgInfo{}
+	}
+	if now.Before(e.expire) || !e.staleUntil.After(e.expire) {
+		c.mu.Unlock()
+		return nil, dnsMsgInfo{}
+	}
+	out := append([]byte(nil), e.msg...)
+	offs, info := e.ttlOffs, e.info
+	c.mu.Unlock()
+
+	binary.BigEndian.PutUint16(out[0:2], q.ID)
+	// 清除 AA(0x0400), RD / CD 跟随本次查询
+	fl := (binary.BigEndian.Uint16(out[2:4]) &^ (dnsFlagAA | dnsFlagRD | dnsFlagCD)) | (q.Flags & (dnsFlagRD | dnsFlagCD))
+	binary.BigEndian.PutUint16(out[2:4], fl)
+	if q.QEnd == info.Q.QEnd && q.QEnd <= len(out) && q.QEnd <= len(query) {
+		copy(out[12:q.QEnd], query[12:q.QEnd]) // 保留客户端问题段大小写(0x20)
+	}
+	for _, off := range offs {
+		binary.BigEndian.PutUint32(out[off:off+4], dnsStaleReplyTTL)
+	}
+	if len(info.Answers) > 0 {
+		ans := make([]dnsRR, len(info.Answers))
+		copy(ans, info.Answers)
+		for i := range ans {
+			ans[i].TTL = dnsStaleReplyTTL
+		}
+		info.Answers = ans
+	}
+	info.Flags = fl
+	info.MinTTL = dnsStaleReplyTTL
+	return out, info
+}
+
 func (c *dnsCache) Len() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -747,6 +1126,7 @@ func (c *dnsCache) Flush() {
 	c.ll.Init()
 	c.m = map[string]*list.Element{}
 	c.bytes = 0
+	c.flushSeq++
 	c.mu.Unlock()
 }
 
@@ -758,14 +1138,18 @@ type dnsBucket struct {
 }
 
 type dnsRateLimiter struct {
-	mu    sync.Mutex
-	rate  float64
-	burst float64
-	max   int
-	m     map[string]*dnsBucket
+	mu        sync.Mutex
+	rate      float64
+	burst     float64
+	max       int
+	lastSweep time.Time
+	m         map[string]*dnsBucket
 }
 
 func newDNSRateLimiter(rate, burst float64, max int) *dnsRateLimiter {
+	if max <= 0 {
+		max = dnsRateMaxClients
+	}
 	return &dnsRateLimiter{rate: rate, burst: burst, max: max, m: map[string]*dnsBucket{}}
 }
 
@@ -774,15 +1158,25 @@ func (l *dnsRateLimiter) allow(key string, now time.Time) bool {
 	defer l.mu.Unlock()
 	b, ok := l.m[key]
 	if !ok {
-		if len(l.m) >= l.max {
-			for k, v := range l.m { // 回收闲置 60 秒以上的
-				if now.Sub(v.last) > time.Minute {
-					delete(l.m, k)
+		capLimit := l.max
+		if capLimit <= 0 {
+			capLimit = dnsRateMaxClients
+		}
+		if len(l.m) >= capLimit {
+			if l.lastSweep.IsZero() || now.Sub(l.lastSweep) >= time.Minute {
+				l.lastSweep = now
+				for k, v := range l.m { // 回收闲置 60 秒以上的
+					if now.Sub(v.last) >= time.Minute {
+						delete(l.m, k)
+					}
 				}
 			}
-			if len(l.m) >= l.max {
-				return true // 表满: 不跟踪(宁可放行也不误伤)
+			if len(l.m) >= capLimit {
+				return false // 表满且未到/刚过清扫周期仍无空位: 对新增伪造源 IP 直接拒绝防洪水与 CPU 空转
 			}
+		}
+		if l.lastSweep.IsZero() {
+			l.lastSweep = now
 		}
 		b = &dnsBucket{tokens: l.burst, last: now}
 		l.m[key] = b

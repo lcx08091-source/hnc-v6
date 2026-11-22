@@ -33,6 +33,8 @@ bin/hnc_clsact_ctl
 .DS_Store
 Thumbs.db
 /.tmp/
+__pycache__/
+*.pyc
 
 # IDE
 .idea/

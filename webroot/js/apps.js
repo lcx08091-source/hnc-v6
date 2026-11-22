@@ -347,11 +347,24 @@ function downloadExport(name, url) {
 }
 function selfToggle(el, path) {
   var on = el.getAttribute('aria-checked') === 'true';
+  var lbl = el.getAttribute('aria-label') || '自训设置';
   pend(el, true);
   api.post('/api/self/' + path, { enabled: on }).then(function (r) {
     if (r && r.error) throw new Error(r.error);
-    toast((el.getAttribute('aria-label') || '') + (on ? ' 已开启' : ' 已关闭'));
     if (path !== 'toggle') S.selfCfg[path.split('/')[0] + '_enabled'] = on;
+    undoToast(lbl + (on ? ' 已开启' : ' 已关闭'), function () {
+      var rev = !on;
+      return api.post('/api/self/' + path, { enabled: rev }).then(function (r2) {
+        if (r2 && r2.error) throw new Error(r2.error);
+        if (path !== 'toggle') S.selfCfg[path.split('/')[0] + '_enabled'] = rev;
+        if (el && el.isConnected) el.setAttribute('aria-checked', String(rev));
+        toast('已撤销 · ' + lbl + (rev ? ' 已开启' : ' 已关闭'));
+        return loadApps();
+      }).then(function () {
+        if (S.page === 'apps') renderApps(false);
+        if (S.page === 'stats' && S.aseg === 'dpi') paintDpi();
+      });
+    });
     setTimeout(function () { loadApps().then(function () { if (S.page === 'apps') renderApps(false); if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); }); }, 800);
   }).catch(function (e) { el.setAttribute('aria-checked', String(!on)); toast(errText(e), 'err'); }).then(function () { pend(el, false); });
 }
@@ -364,6 +377,17 @@ function candAct(kind, apex) {
 function excludeApp(pkg, name) {
   confirmSheet('不学习「' + name + '」的规则？', 'VPN / 代理类应用会代发其他应用的流量，排除后它的域名不会被学成单应用规则。', '排除', { safe: true }).then(function (ok) {
     if (!ok) return;
-    api.action('flywheel_exclude_set', { op: 'add', pkg: pkg }).then(function () { toast('已排除 ' + name); return loadConfig(); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e) { toast(errText(e), 'err'); });
+    api.action('flywheel_exclude_set', { op: 'add', pkg: pkg }).then(function () {
+      undoToast('已排除 ' + name, function () {
+        return api.action('flywheel_exclude_set', { op: 'remove', pkg: pkg }).then(function () {
+          toast('已撤销排除 ' + name);
+          return loadConfig();
+        }).then(function () {
+          if (S.page === 'apps') renderApps(false);
+          else if (S.page === 'settings') renderSettings(false);
+        });
+      });
+      return loadConfig();
+    }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e) { toast(errText(e), 'err'); });
   });
 }

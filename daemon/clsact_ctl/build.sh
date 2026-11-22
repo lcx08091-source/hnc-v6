@@ -20,6 +20,9 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 ARCH="${1:-arm64}"
+HNC_VER=$(sed -n 's/^version=//p' ../../module.prop 2>/dev/null | head -n 1 | tr -d '\r')
+[ -n "$HNC_VER" ] || HNC_VER="dev"
+
 BINDIR="../../bin"
 case "$ARCH" in
     arm) OUTBIN="$BINDIR/armeabi-v7a" ;;
@@ -60,7 +63,7 @@ if [ "$ARCH" = "host" ]; then
     CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
     LDFLAGS="-pie"
     # shellcheck disable=SC2086
-    $CC $CFLAGS -o "${HNC_HOST_OUT:-/tmp/hnc_clsact_ctl}" main.c $LDFLAGS
+    $CC $CFLAGS -DHNC_VERSION="\"${HNC_VER}\"" -o "${HNC_HOST_OUT:-/tmp/hnc_clsact_ctl}" main.c $LDFLAGS
     echo "[build] Host sanity build OK"
     exit 0
 fi
@@ -93,7 +96,7 @@ CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -DANDROI
 LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
 mkdir -p "$OUTBIN"
 # shellcheck disable=SC2086
-$CC $CFLAGS -o "$OUTBIN/hnc_clsact_ctl" main.c $LDFLAGS
+$CC $CFLAGS -DHNC_VERSION="\"${HNC_VER}\"" -o "$OUTBIN/hnc_clsact_ctl" main.c $LDFLAGS
 
 if [ -x "$STRIP" ]; then
     $STRIP "$OUTBIN/hnc_clsact_ctl"

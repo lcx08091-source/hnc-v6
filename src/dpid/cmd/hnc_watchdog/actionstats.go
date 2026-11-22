@@ -148,6 +148,8 @@ type wdActionOutItem struct {
 
 type wdActionOut struct {
 	Schema      int                        `json:"schema"`
+	Version     string                     `json:"version,omitempty"`
+	VersionCode string                     `json:"version_code,omitempty"`
 	GeneratedAt int64                      `json:"generated_at"`
 	Actions     map[string]wdActionOutItem `json:"actions"`
 	Order       []string                   `json:"order"` // 按 calls_1h 降序(前端小表用)
@@ -166,7 +168,13 @@ type wdActionOut struct {
 func (s *actionStats) snapshot(now time.Time) wdActionOut {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	out := wdActionOut{Schema: 1, GeneratedAt: now.Unix(), Actions: make(map[string]wdActionOutItem, len(s.m))}
+	out := wdActionOut{
+		Schema:      1,
+		Version:     currentWatchdogVersion(),
+		VersionCode: versionCode,
+		GeneratedAt: now.Unix(),
+		Actions:     make(map[string]wdActionOutItem, len(s.m)),
+	}
 	if wdActionsSnapshotExtra != nil {
 		out.NativeUnknown = wdActionsSnapshotExtra()
 	}

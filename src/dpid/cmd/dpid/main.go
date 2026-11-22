@@ -44,7 +44,77 @@ import (
 	"hnc.io/dpid/tzlocal"
 )
 
-var version = "0.5.4-rc30.12.5-v600-vector"
+const engineVersion = "0.5.4"
+
+var (
+	moduleVersion = "dev"
+	versionCode   = "0"
+	version       = engineVersion + "-" + moduleVersion
+)
+
+func readModuleProp(hncDir string) (modVer, verCode string) {
+	candidates := []string{
+		"/data/local/hnc/module.prop",
+		"/data/adb/modules/hotspot_net_ctl/module.prop",
+		"/data/adb/modules/hotspot_network_control/module.prop",
+	}
+	if cleanDir := strings.TrimSpace(hncDir); cleanDir != "" {
+		candidates = append([]string{filepath.Join(cleanDir, "module.prop")}, candidates...)
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	for _, p := range candidates {
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var fv, fc string
+		for _, raw := range strings.Split(string(b), "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if v, ok := strings.CutPrefix(line, "version="); ok && fv == "" {
+				fv = strings.TrimSpace(v)
+			} else if c, ok := strings.CutPrefix(line, "versionCode="); ok && fc == "" {
+				fc = strings.TrimSpace(c)
+			}
+		}
+		if fv != "" || fc != "" {
+			return fv, fc
+		}
+	}
+	return "", ""
+}
+
+func resolveDpidVersion(hncDir string) {
+	modVer := strings.TrimSpace(moduleVersion)
+	verCode := strings.TrimSpace(versionCode)
+	if modVer == "" || modVer == "dev" || verCode == "" || verCode == "0" {
+		fv, fc := readModuleProp(hncDir)
+		if (modVer == "" || modVer == "dev") && fv != "" {
+			modVer = fv
+		}
+		if (verCode == "" || verCode == "0") && fc != "" {
+			verCode = fc
+		}
+	}
+	if modVer == "" {
+		modVer = "dev"
+	}
+	if verCode == "" {
+		verCode = "0"
+	}
+	if trimmed, ok := strings.CutPrefix(modVer, engineVersion+"-"); ok && trimmed != "" {
+		modVer = trimmed
+	}
+	moduleVersion = modVer
+	versionCode = verCode
+	version = engineVersion + "-" + modVer
+}
 
 // v5.22 功耗: hnc_httpd 写的 run/activity.json(热点/在线设备/亮屏/界面)。
 // 文件缺失或过期时一律按基准间隔(旧行为)。
@@ -71,6 +141,7 @@ const (
 
 	maxCrashesWindow  = 60 * time.Second
 	maxCrashesAllowed = 3
+	crashLoopCooldown = 2 * time.Minute
 
 	debugEventsPerSec = 20
 
@@ -81,8 +152,8 @@ const (
 	// appLabelDexName is the dex helper shipped alongside the dpid binary
 	// (in the module bin/ dir). Run via app_process to read real PM labels.
 	appLabelDexName = "hnc_applabel.dex"
-	// appLabelDexModule is the on-device fallback path if dpid's own
-	// directory can't be determined (module id from bin/ahnc_migration.sh).
+	// appLabelDexModulePrimary and appLabelDexModuleLegacy are on-device
+	// fallback paths if dpid's own directory cannot be determined.
 	appLabelDexModulePrimary = "/data/adb/modules/hotspot_net_ctl/bin/" + appLabelDexName
 	appLabelDexModuleLegacy  = "/data/adb/modules/hotspot_network_control/bin/" + appLabelDexName
 )
@@ -309,11 +380,10 @@ func main() {
 
 	cfgPath := flag.String("config", defaultConfigPath, "path to dpi_config.json")
 	showVer := flag.Bool("version", false, "print version and exit")
-	// v5.15: 一次性扫描本机已装 App 的安装包域名(写 run/apk_domains.json)后退出
-	apkScanOnce := flag.Bool("apk-scan", false, "scan installed APKs for embedded domains once, write apk_domains.json and exit")
 	flag.Parse()
 
 	if *showVer {
+		resolveDpidVersion(filepath.Dir(filepath.Dir(filepath.Clean(*cfgPath))))
 		fmt.Println("hnc_dpid", version)
 		return
 	}
@@ -326,25 +396,16 @@ func main() {
 	// v5.29 T4: 流量录制(只录握手类事件包, 见 capture/recorder.go)。
 	// exports 根 = run_dir 的上两级(run/ 的父目录就是 HNC 根)。
 	_hncRoot := filepath.Dir(filepath.Clean(cfg.RunDir))
+	resolveDpidVersion(_hncRoot)
 	capture.DefaultRecorder.Store(capture.NewRecorder(_hncRoot, cfg.RunDir))
-
-	if *apkScanOnce {
-		res := appmeta.NewResolver("/data/local/hnc/etc/app_labels.json")
-		sc := apkscan.New(apkscan.Options{OutPath: filepath.Join(cfg.RunDir, apkDomainsFile), Label: res.Display, PerAPKSleep: -1})
-		out, err := sc.Scan(context.Background())
-		if err != nil {
-			fmt.Printf("{\"ok\":false,\"error\":%q}\n", err.Error())
-			os.Exit(1)
-		}
-		fmt.Printf("{\"ok\":true,\"app_count\":%d,\"scan_ms\":%d,\"path\":%q}\n", out.AppCount, out.ScanMS, sc.OutPath())
-		return
-	}
 
 	lockFD, err := acquireLock(filepath.Join(cfg.RunDir, lockFileName))
 	if err != nil {
 		log.Fatalf("lock: %v", err)
 	}
 	defer releaseLock(lockFD)
+
+	log.Printf("hnc_dpid %s starting, pid=%d", version, os.Getpid())
 
 	// Write PID early so crash_loop, blind, disabled, and ok modes all have a pid file.
 	pidPath := filepath.Join(cfg.RunDir, pidFileName)
@@ -355,12 +416,13 @@ func main() {
 
 	statePath := filepath.Join(cfg.RunDir, stateFileName)
 	sw := output.NewWriter(statePath, version)
+	sw.SetModuleVersion(moduleVersion, versionCode)
 
 	if reason := checkCrashLoop(cfg.RunDir); reason != "" {
 		log.Printf("ERROR: %s", reason)
 		sw.SetMode(string(ModeCrashLoop), reason, "", false, false, false)
 		_ = sw.Flush()
-		idleUntilSignal(sw)
+		idleUntilSignal(cfg.RunDir, sw)
 		return
 	}
 
@@ -402,6 +464,18 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	wakeHistCh := make(chan struct{}, 1)
+	wakeIPMapCh := make(chan struct{}, 1)
+	wakeSelfCh := make(chan struct{}, 1)
+	wakeStandbyLoops := func() {
+		for _, ch := range []chan struct{}{wakeHistCh, wakeIPMapCh, wakeSelfCh} {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	}
+
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
 	go func() {
@@ -413,6 +487,7 @@ func main() {
 				return
 			case syscall.SIGHUP:
 				output.InvalidateRuleCache()
+				wakeStandbyLoops()
 				log.Printf("SIGHUP received: invalidated DPI rule & compiled FP caches")
 			}
 		}
@@ -420,13 +495,16 @@ func main() {
 
 	output.SetCompiledFPPath(cfg.RunDir)
 	actReader = activity.NewReader(cfg.RunDir)
-	armCrashFlag(cfg.RunDir)
 	bumpStartCount(cfg.RunDir) // rc42: 持久 lifetime 启动计数, 供 /api/sla
 
 	// v6.0.0 Vector: LeakGuard 明文隐私嗅探引擎 + 16KB 双槽 seqcount_latch 共享内存快照。
 	shmTracker := newSHMRuntimeTracker()
 	leakEngine := leakguard.NewEngine(cfg.RunDir)
 	seedKnownARPClients(leakEngine)
+	leakEngine.SetIdleCheck(func() bool {
+		s := actReader.Get()
+		return s.OK && (!s.Hotspot || (s.Clients <= 0 && !s.WebUI))
+	})
 	leakEngine.SetAlertHook(func(ev leakguard.LeakEvent) {
 		shmTracker.markLeak(ev.MAC)
 	})
@@ -440,15 +518,30 @@ func main() {
 		defer func() { _ = shmWriter.Close() }()
 		publishSHM := func() {
 			slots, af := shmTracker.snapshot(time.Now().Unix())
-			if werr := shmWriter.Write(shm.MonotonicNs(), af, leakEngine.TotalLeaks(), slots); werr != nil {
+			monoNs := shm.MonotonicNs()
+			if werr := shmWriter.Write(monoNs, af, leakEngine.TotalLeaks(), slots); werr != nil {
 				log.Printf("WARN: shm write: %v", werr)
 			}
 		}
 		publishSHM()
 		go func() {
-			tk := time.NewTicker(time.Second)
+			initSnap := actReader.Get()
+			wasHotspotOff := initSnap.OK && !initSnap.Hotspot
+			cur := activity.ShmFlushEvery(initSnap)
+			tk := time.NewTicker(cur)
 			defer tk.Stop()
-			var quietSkip int
+			retime := func() {
+				s := actReader.Get()
+				hotspotOff := s.OK && !s.Hotspot
+				if wasHotspotOff && !hotspotOff {
+					wakeStandbyLoops()
+				}
+				wasHotspotOff = hotspotOff
+				if want := activity.ShmFlushEvery(s); want != cur {
+					cur = want
+					tk.Reset(cur)
+				}
+			}
 			for {
 				select {
 				case <-ctx.Done():
@@ -456,15 +549,10 @@ func main() {
 					return
 				case <-shmTracker.poke:
 					publishSHM()
+					retime()
 				case <-tk.C:
-					if actReader != nil && actReader.Get().Quiet {
-						quietSkip++
-						if quietSkip < 5 {
-							continue
-						}
-					}
-					quietSkip = 0
 					publishSHM()
+					retime()
 				}
 			}
 		}()
@@ -478,8 +566,15 @@ func main() {
 	output.HistoryDir = cfg.RunDir
 	historySampler := output.NewHistorySampler(sw)
 	go func() {
-		tk := time.NewTicker(output.HistorySampleEvery)
+		cur := historySampleEvery(actReader.Get(), output.HistorySampleEvery)
+		tk := time.NewTicker(cur)
 		defer tk.Stop()
+		retime := func() {
+			if want := historySampleEvery(actReader.Get(), output.HistorySampleEvery); want != cur {
+				cur = want
+				tk.Reset(cur)
+			}
+		}
 		// Establish baseline immediately so the first row arrives at the
 		// FIRST scheduled tick, not the second.
 		historySampler.Tick(time.Now())
@@ -487,29 +582,42 @@ func main() {
 			select {
 			case <-ctx.Done():
 				return
+			case <-wakeHistCh:
+				retime()
 			case t := <-tk.C:
 				historySampler.Tick(t)
+				retime()
 			}
 		}
 	}()
 
 	// rc30.6: IP→app reverse map flusher. Writes /run/ip_app_map.json
-	// every 30s for apply_app_limits.sh to consume. Holding the data only
-	// in memory and dumping on a clock tick (vs. streaming on every
-	// classification hit) keeps the file lock contention near zero.
+	// every 30s (stretched to 120s when hotspot is off) for apply_app_limits.sh
+	// to consume. Holding the data only in memory and dumping on a clock tick
+	// keeps the file lock contention near zero.
 	if sw.IPAppMap != nil {
 		sw.IPAppMap.SetPath(filepath.Join(cfg.RunDir, "ip_app_map.json"))
 		go func() {
-			tk := time.NewTicker(30 * time.Second)
+			cur := ipAppMapFlushEvery(actReader.Get())
+			tk := time.NewTicker(cur)
 			defer tk.Stop()
+			retime := func() {
+				if want := ipAppMapFlushEvery(actReader.Get()); want != cur {
+					cur = want
+					tk.Reset(cur)
+				}
+			}
 			for {
 				select {
 				case <-ctx.Done():
 					return
+				case <-wakeIPMapCh:
+					retime()
 				case t := <-tk.C:
 					if err := sw.IPAppMap.Flush(t); err != nil {
 						log.Printf("ip_app_map flush: %v", err)
 					}
+					retime()
 				}
 			}
 		}()
@@ -517,6 +625,7 @@ func main() {
 
 	// v5.5: self-attribution sampler.
 	selfAttribFlag := filepath.Join(cfg.RunDir, "self_capture.enabled")
+	selfAttribAltFlag := filepath.Join(cfg.RunDir, "self_attrib.enabled")
 	selfAttrib := output.NewSelfAttribAggregator(cfg.RunDir)
 
 	appLabelsOverride := "/data/local/hnc/etc/app_labels.json"
@@ -529,31 +638,93 @@ func main() {
 	log.Printf("appmeta: resolver ready (curated=%d, override=%d, dex=%s, from %s)",
 		curated, overridden, dexPath, appLabelsOverride)
 	go func() {
-		isEnabled := func() bool {
+		var selfCaptureOn atomic.Bool
+		checkFlags := func() (captureEnabled bool, explicitEnabled bool) {
 			_, err := os.Stat(selfAttribFlag)
-			enabled := err == nil
-			if enabled {
+			captureEnabled = err == nil
+			explicitEnabled = captureEnabled
+			if !explicitEnabled {
+				if _, err2 := os.Stat(selfAttribAltFlag); err2 == nil {
+					explicitEnabled = true
+				}
+			}
+			selfCaptureOn.Store(captureEnabled)
+			if captureEnabled {
 				selfAttrib.SetEnabled(true, "")
 			} else {
 				selfAttrib.SetEnabled(false, "self-capture flag file not present")
 			}
-			return enabled
+			return captureEnabled, explicitEnabled
 		}
-		go func() {
-			tk := time.NewTicker(5 * time.Second)
-			defer tk.Stop()
-			isEnabled() // prime the flag once
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-tk.C:
-					isEnabled() // refresh enabled bit
-					sw.SetSelf(selfAttrib.Snapshot())
+
+		var (
+			samplerCancel context.CancelFunc
+			samplerDone   chan struct{}
+		)
+		reconcileSampler := func(standby bool) {
+			if standby {
+				if samplerCancel != nil {
+					samplerCancel()
+					<-samplerDone
+					samplerCancel = nil
+					samplerDone = nil
 				}
+				return
+			}
+			if samplerCancel == nil {
+				sctx, scancel := context.WithCancel(ctx)
+				done := make(chan struct{})
+				samplerCancel = scancel
+				samplerDone = done
+				go func() {
+					defer close(done)
+					selfAttrib.RunSampler(sctx, func() bool { return selfCaptureOn.Load() })
+				}()
+			}
+		}
+		defer func() {
+			if samplerCancel != nil {
+				samplerCancel()
+				<-samplerDone
 			}
 		}()
-		selfAttrib.RunSampler(ctx, isEnabled)
+
+		_, explicitInit := checkFlags()
+		actInit := actReader.Get()
+		wasOff := actInit.OK && !actInit.Hotspot
+		cur := selfAttribTickEvery(actInit, explicitInit)
+		reconcileSampler(!explicitInit && wasOff)
+		tk := time.NewTicker(cur)
+		defer tk.Stop()
+
+		step := func(doSnapshot bool) {
+			_, explicit := checkFlags()
+			s := actReader.Get()
+			off := s.OK && !s.Hotspot
+			if wasOff && !off {
+				wakeStandbyLoops()
+			}
+			wasOff = off
+			reconcileSampler(!explicit && off)
+			if want := selfAttribTickEvery(s, explicit); want != cur {
+				cur = want
+				tk.Reset(cur)
+			}
+			if doSnapshot {
+				sw.SetSelf(selfAttrib.Snapshot())
+			}
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-wakeSelfCh:
+				step(false)
+			case <-tk.C:
+				step(true)
+			}
+		}
 	}()
 
 	// v5.6.0-rc1: self-iface AF_PACKET capture supervisor.
@@ -605,17 +776,19 @@ func main() {
 
 	switch mode {
 	case ModeBlind, ModeDisabled:
+		clearCrashFlag(cfg.RunDir)
 		log.Printf("no capture in %s mode; idling for state writes", mode)
-		idleWithFlush(ctx, sw)
+		idleWithFlush(ctx, sw, wakeStandbyLoops)
 	case ModeOK:
-		if err := runCapture(ctx, cfg, pr, sw, devID, ipNames, leakEngine, shmTracker); err != nil {
+		armCrashFlag(cfg.RunDir)
+		if err := runCapture(ctx, cfg, pr, sw, devID, ipNames, leakEngine, shmTracker, wakeStandbyLoops); err != nil {
 			// Capture open/run failure is capability failure, not daemon crash.
 			reason := "open/run capture failed: " + err.Error()
 			log.Printf("ERROR: %s", reason)
 			sw.SetMode(string(ModeBlind), reason, pr.APIface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 			_ = sw.Flush()
 			clearCrashFlag(cfg.RunDir)
-			idleWithFlush(ctx, sw)
+			idleWithFlush(ctx, sw, wakeStandbyLoops)
 		}
 	}
 
@@ -698,6 +871,7 @@ func runCapture(
 	ipNames *output.IPNameTable,
 	leakEngine *leakguard.Engine,
 	shmTracker *shmRuntimeTracker,
+	wakeStandbyLoops func(),
 ) error {
 	iface := pr.APIface
 	attempt := 0
@@ -718,6 +892,7 @@ func runCapture(
 				log.Printf("WARN: %s", reason)
 				sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 				_ = sw.Flush()
+				clearCrashFlag(cfg.RunDir)
 				retry = activity.CaptureRetryBackoff(retry, actReader.Get())
 				if !sleepOrDone(ctx, retry) {
 					return nil
@@ -737,6 +912,9 @@ func runCapture(
 		log.Printf("capture started on %s (snaplen=%d, rcvbuf=%d, attempt=%d)", iface, cfg.Snaplen, cfg.RcvBufBytes, attempt)
 		sw.SetMode(string(ModeOK), "", iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 		_ = sw.Flush()
+		if wakeStandbyLoops != nil {
+			wakeStandbyLoops()
+		}
 
 		// rc40 (P2-20): once capture has run healthily for 5 min, clear the crash flag.
 		go func(ctxLocal context.Context) {
@@ -1014,6 +1192,7 @@ func runCapture(
 			log.Printf("WARN: %s", reason)
 			sw.SetMode(string(ModeBlind), reason, iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 			_ = sw.Flush()
+			clearCrashFlag(cfg.RunDir)
 			retry = activity.CaptureRetryBackoff(retry, actReader.Get())
 			if !sleepOrDone(ctx, retry) {
 				return nil
@@ -1053,9 +1232,48 @@ func sleepOrDone(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-func idleWithFlush(ctx context.Context, sw *output.Writer) {
+func selfAttribTickEvery(s activity.Snapshot, explicitEnabled bool) time.Duration {
+	if !explicitEnabled && s.OK && !s.Hotspot {
+		return 30 * time.Second
+	}
+	return 5 * time.Second
+}
+
+func ipAppMapFlushEvery(s activity.Snapshot) time.Duration {
+	if s.OK && !s.Hotspot {
+		return 120 * time.Second
+	}
+	return 30 * time.Second
+}
+
+func historySampleEvery(s activity.Snapshot, base time.Duration) time.Duration {
+	if base <= 0 {
+		base = output.HistorySampleEvery
+	}
+	if s.OK && !s.Hotspot {
+		idle := 300 * time.Second
+		if stretched := base * 5; stretched > idle {
+			idle = stretched
+		}
+		if idle > time.Hour {
+			idle = time.Hour
+		}
+		return idle
+	}
+	return base
+}
+
+func idleWithFlush(ctx context.Context, sw *output.Writer, wakeStandbyLoops func()) {
+	initSnap := actReader.Get()
+	wasOff := initSnap.OK && !initSnap.Hotspot
 	for {
-		tk := time.NewTimer(activity.BlindFlushEvery(actReader.Get()))
+		s := actReader.Get()
+		off := s.OK && !s.Hotspot
+		if wasOff && !off && wakeStandbyLoops != nil {
+			wakeStandbyLoops()
+		}
+		wasOff = off
+		tk := time.NewTimer(activity.BlindFlushEvery(s))
 		select {
 		case <-ctx.Done():
 			tk.Stop()
@@ -1066,19 +1284,21 @@ func idleWithFlush(ctx context.Context, sw *output.Writer) {
 	}
 }
 
-func idleUntilSignal(sw *output.Writer) {
+func idleUntilSignal(runDir string, sw *output.Writer) {
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	defer signal.Stop(sigCh)
 	tk := time.NewTicker(30 * time.Second)
 	defer tk.Stop()
-	deadline := time.NewTimer(30 * time.Minute)
+	deadline := time.NewTimer(crashLoopCooldown)
 	defer deadline.Stop()
 	for {
 		select {
 		case <-sigCh:
 			return
 		case <-deadline.C:
-			log.Printf("crash-loop idle timeout (30m); exiting for launcher re-evaluation")
+			clearCrashFlag(runDir)
+			log.Printf("crash-loop cooldown (%s) elapsed; cleared crash flag and exiting for launcher re-evaluation", crashLoopCooldown)
 			return
 		case <-tk.C:
 			_ = sw.Flush()

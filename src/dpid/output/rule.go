@@ -241,13 +241,13 @@ var ruleCache = struct {
 	size   int64
 	digest uint64
 	val    loadedRules
-}{val: loadedRules{seq: 1, version: "builtin-rc29", rules: builtinRules}}
+}{val: loadedRules{seq: 1, version: "builtin-v6", rules: builtinRules}}
 
 // currentL3RuleVersion returns the version tag (refreshing if mtime changed).
 func currentL3RuleVersion() string {
 	lr := loadL3Rules()
 	if lr.version == "" {
-		return "builtin-rc29"
+		return "builtin-v6"
 	}
 	return lr.version
 }
@@ -258,7 +258,7 @@ func loadL3Rules() loadedRules {
 	if lr, ok := loadL3RulesFromDir(); ok {
 		return lr
 	}
-	return loadedRules{version: "builtin-rc29", rules: builtinRules}
+	return loadedRules{version: "builtin-v6", rules: builtinRules}
 }
 
 // loadL3RulesFromDir tries the dpi_rules.d/ glob path.

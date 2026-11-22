@@ -79,6 +79,7 @@ rm -f "$HNC_DIR/data/m4_owner" "$HNC_DIR/run/m4_owner.current" "$HNC_DIR/run/wd_
       "$HNC_DIR/run/offload_guard.pid" "$HNC_DIR/run/clsact_wd.pid" \
       "$HNC_DIR/run/wd_native.disabled" "$HNC_DIR/run/httpd_bind_ip" "$HNC_DIR/run/httpd.wanted" \
       "$HNC_DIR/run/json_legacy_fallback.log" "$HNC_DIR/run/json_legacy_fallback.count" \
+      "$HNC_DIR/run/.ahnc_migration_done" "$HNC_DIR/run/dpid_crashflag" \
       "$HNC_DIR/etc/dpi_rules.json" 2>/dev/null
 # 运行目录里从没用过的 api/(模块里就没有)和 test/(测试不进安装包): 空的就删
 rmdir "$HNC_DIR/api" "$HNC_DIR/test" 2>/dev/null
@@ -107,12 +108,9 @@ if grep -q '"clsact_bpf_enabled"' "$HNC_DIR/data/rules.json" 2>/dev/null; then
         HNC="$HNC_DIR" sh "$MODDIR/bin/hnc_json" del-object-key "$HNC_DIR/data/rules.json" clsact_bpf_enabled 2>/dev/null
 fi
 
-# rc3.1.13: config.json 弃用 · 不再创建默认
-# 历史上 config.json 承载 auth_required (cfg_set 写) + 4 个死字段
-# (api_port/poll_interval/watchdog_interval/log_level 没人读) +
-# hotspot_iface (watchdog 写但没人读). 字段分裂导致 rc3.1.9~12 P0 反复.
-# rc3.1.13 起所有活字段统一到 rules.json, config.json 只做单向迁移.
-# (迁移块在下方 cp -rf 后执行, 不依赖目标目录残留脚本)
+# config.json 弃用 · 不再创建默认, 仅做单向迁移
+_HNC_PFD_VER=$(sed -n '/^version=/{s/^version=//p;q;}' "$MODDIR/module.prop" 2>/dev/null | tr -d ' \t\r\n"')
+echo "[HNC] === post-fs-data (${_HNC_PFD_VER:-unknown}) starting ===" >> "$HNC_DIR/logs/boot.log"
 
 # v5.29 T3: 升级快照 + 钉住检查, 必须在下面的 cp 之前 —— 本脚本每次开机都
 # 比 service.sh 先把模块文件拷进运行目录, 快照放在 service.sh 里打包到的已经
@@ -134,16 +132,10 @@ else
     sh "$MODDIR/bin/hnc_runtime_sync.sh" sync "$MODDIR" "$HNC_DIR" >> "$HNC_DIR/logs/boot.log" 2>&1
 fi
 
-# rc3.1.13.1 修 P0 (review §1): 单向迁移块必须在 cp -rf 之后,
-# 不能依赖 $HNC_DIR/bin/json_set.sh 的残留版本 (上一版可能不存在 top 子命令).
-# 优先用 $MODDIR/bin/json_set.sh, 兜底 $HNC_DIR/bin/. 严格检查 rc.
 # 单向迁移: 老装机 config.json.auth_required → rules.json.auth_required
 # (仅在 rules.json 没有 auth_required 字段时迁移, 避免覆盖用户在新版的设置)
-# 注: auth_required=false 也会被迁移. 这是用户主动选择的状态,
-#     迁移的是"用户的设定"而非"开启状态". 不要改成 [ "$OLD_AUTH" = "true" ].
 if [ -f "$HNC_DIR/data/config.json" ] && [ -f "$HNC_DIR/data/rules.json" ]; then
     if ! grep -q '"auth_required"' "$HNC_DIR/data/rules.json" 2>/dev/null; then
-        # rc3.1.13.1: grep -E 兼容 pretty-printed JSON (跨行) 和字符串值 (true/"true"/True/TRUE)
         OLD_AUTH=$(grep -oE '"auth_required"[[:space:]]*:[[:space:]]*"?(true|false|True|TRUE|False|FALSE)"?' \
                    "$HNC_DIR/data/config.json" 2>/dev/null \
                    | grep -oE '(true|false|True|TRUE|False|FALSE)' | tr 'A-Z' 'a-z' | head -n 1)
@@ -151,15 +143,13 @@ if [ -f "$HNC_DIR/data/config.json" ] && [ -f "$HNC_DIR/data/rules.json" ]; then
             JSON_SET="$MODDIR/bin/json_set.sh"
             [ -f "$JSON_SET" ] || JSON_SET="$HNC_DIR/bin/json_set.sh"
             if HNC="$HNC_DIR" sh "$JSON_SET" top auth_required "$OLD_AUTH" >> "$HNC_DIR/logs/boot.log" 2>&1; then
-                echo "[HNC] rc3.1.13 migrate OK: auth_required=$OLD_AUTH from config.json to rules.json" >> "$HNC_DIR/logs/boot.log"
+                echo "[HNC] migrate OK: auth_required=$OLD_AUTH from config.json to rules.json" >> "$HNC_DIR/logs/boot.log"
             else
                 rc=$?
-                echo "[HNC] rc3.1.13 migrate FAILED rc=$rc (script=$JSON_SET, value=$OLD_AUTH)" >> "$HNC_DIR/logs/boot.log"
+                echo "[HNC] migrate FAILED rc=$rc (script=$JSON_SET, value=$OLD_AUTH)" >> "$HNC_DIR/logs/boot.log"
             fi
         fi
     fi
-    # config.json 文件本身保留不删 · 留一个版本观察期, rc3.1.14+ 再清.
-    # 观察期检测 (review §6 P1): 监控 config.json mtime 漂移, 看是否还有写者
     if [ -d "$HNC_DIR/run" ]; then
         CFG_MTIME=$(stat -c %Y "$HNC_DIR/data/config.json" 2>/dev/null)
         LAST_MTIME=$(cat "$HNC_DIR/run/config_json_mtime" 2>/dev/null)
@@ -168,20 +158,16 @@ if [ -f "$HNC_DIR/data/config.json" ] && [ -f "$HNC_DIR/data/rules.json" ]; then
         fi
         [ -n "$CFG_MTIME" ] && echo "$CFG_MTIME" > "$HNC_DIR/run/config_json_mtime" 2>/dev/null
     fi
-    # 用户手编 config.json 后无反馈检测 (review §1 P2)
     if [ "$HNC_DIR/data/config.json" -nt "$HNC_DIR/data/rules.json" ] 2>/dev/null; then
-        echo "[HNC] WARN: config.json was modified after rules.json — but config.json is DEPRECATED since rc3.1.13. Edits to it are IGNORED. Edit rules.json instead." >> "$HNC_DIR/logs/boot.log"
+        echo "[HNC] WARN: config.json was modified after rules.json — config.json is DEPRECATED and edits to it are IGNORED. Edit rules.json instead." >> "$HNC_DIR/logs/boot.log"
     fi
 fi
 chmod 644 "$HNC_DIR/data/rules.json" 2>/dev/null
 [ -f "$HNC_DIR/data/config.json" ] && chmod 644 "$HNC_DIR/data/config.json"
 
-# v3.4.9: 自动备份用户数据 — 每天首次开机时备份 data/ 目录
-# (rules.json / device_names.json / devices.json),保留最近 7 天。
-# 防止 HNC 升级 / JSON schema 变更 / 用户误操作导致配置丢失。
+# 自动备份用户数据 — 每天首次开机时备份 data/ 目录, 保留最近 7 天。
 TODAY=$(date +%Y%m%d 2>/dev/null)
-# v5.20: post-fs-data 往往早于 NTP 对时 —— 时钟不可信(1970/2000/落后高水位)时
-# 不建 .backup-<错日期>(跑到未来的日期会按名字排序长期霸占 7 个保留位)。
+# post-fs-data 往往早于 NTP 对时 —— 时钟不可信时不建 .backup-<错日期>
 if [ -n "$TODAY" ] && [ -f "$HNC_DIR/bin/hnc_clock.sh" ] && \
    ! HNC_DIR="$HNC_DIR" sh "$HNC_DIR/bin/hnc_clock.sh" sane 2>/dev/null; then
     echo "[HNC] backup: skipped, clock not trustworthy ($(date +%s 2>/dev/null))" >> "$HNC_DIR/logs/boot.log"
@@ -191,17 +177,13 @@ if [ -n "$TODAY" ]; then
     BACKUP_DIR="$HNC_DIR/data/.backup-$TODAY"
     if [ ! -d "$BACKUP_DIR" ]; then
         mkdir -p "$BACKUP_DIR" 2>/dev/null
-        # v5.9.3 BUG-009:备份目录里是 rules.json / tokens.json 的完整副本,
-        # 权限必须和 data/ 同级,否则等于给凭据开了个 0777 的后门。
         chmod 700 "$BACKUP_DIR" 2>/dev/null
-        # 只备份 .json 文件,不备份 .backup-* 子目录(避免递归)
         for f in "$HNC_DIR"/data/*.json; do
             [ -f "$f" ] && cp "$f" "$BACKUP_DIR/" 2>/dev/null
         done
         echo "[HNC] backup: created $BACKUP_DIR" >> "$HNC_DIR/logs/boot.log"
     fi
 
-    # 清理 7 天前的备份(简化:按目录名排序保留最新 7 个)
     BACKUP_LIST=$(ls -d "$HNC_DIR"/data/.backup-* 2>/dev/null | sort -r)
     KEEP=7
     n=0
@@ -217,28 +199,16 @@ fi
 # PID文件清理（防上次未正常退出）
 rm -f "$HNC_DIR"/run/*.pid
 
-# v5.9.3 BUG-010:portal(v5.8.9 实验分支,最终未合入 main)在 run/ 留下
-# portal_pending.json / portal_sessions.json。run/ 的清理是白名单式逐项 rm,
-# 从来不含 portal_*,只有 uninstall.sh 的 `rm -rf run/` 会带走 —— 而
-# v5.8.9-portal → v5.9.x 的升级路径根本不走卸载,于是这两个文件(含会话表)
-# 会一直躺在 run/ 里。cleanup.sh 也补了同样一行,但 cleanup 不是每次开机都跑,
-# 所以开机路径这一处是必须的。
-# 守卫:portal 若将来真的合入 main(bin/portal_manager.sh 会存在),这里绝不能
-# 删,否则每次开机都清空会话表 = 用户被强制重认证。合入时请显式删掉这几行。
 if [ ! -f "$HNC_DIR/bin/portal_manager.sh" ]; then
     rm -f "$HNC_DIR/run/portal_pending.json" "$HNC_DIR/run/portal_sessions.json" 2>/dev/null
 fi
 
-# v3.5.0 P2-6: 日志轮转 — 启动时检查每个 .log 文件,>10MB 的轮转一次
-# 之前 HNC 没有日志轮转,长跑(几周)后 logs 目录可能涨到几百 MB
-# 三级轮转:.log.2 → 删除,.log.1 → .log.2,.log → .log.1,新建空文件
-# 保留约 3/4 的历史(相比之前单级轮转只保留 1/2)
+# 日志轮转 — 启动时检查每个 .log 文件, >10MB 的三级轮转一次
 LOG_MAX_BYTES=$((10 * 1024 * 1024))
 for logf in "$HNC_DIR"/logs/*.log; do
     [ -f "$logf" ] || continue
     size=$(wc -c < "$logf" 2>/dev/null | tr -d ' ')
     if [ -n "$size" ] && [ "$size" -gt "$LOG_MAX_BYTES" ]; then
-        # Rotate: .log.2 → deleted, .log.1 → .log.2, .log → .log.1
         [ -f "${logf}.2" ] && rm -f "${logf}.2"
         [ -f "${logf}.1" ] && mv "${logf}.1" "${logf}.2"
         [ -f "$logf" ] && mv "$logf" "${logf}.1"
@@ -247,4 +217,5 @@ for logf in "$HNC_DIR"/logs/*.log; do
     fi
 done
 
-echo "[HNC] post-fs-data: initialization complete" >> "$HNC_DIR/logs/boot.log"
+echo "[HNC] post-fs-data (${_HNC_PFD_VER:-unknown}): initialization complete" >> "$HNC_DIR/logs/boot.log"
+unset _HNC_PFD_VER

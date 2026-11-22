@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# test/run_all.sh — HNC v3.5 测试主入口
+# test/run_all.sh — HNC 测试主入口 (版本自 module.prop 动态读取)
 #
 # 用法:
 #   sh test/run_all.sh                    # 跑所有单元测试
@@ -43,8 +43,9 @@ done
 
 [ -z "$FILTER" ] && FILTER="unit"
 
+_HNC_SUITE_VER="$(awk -F= '$1=="version"{print $2; exit}' "$HNC_REPO_ROOT/module.prop" 2>/dev/null | tr -d '\r')"
 echo "════════════════════════════════════════"
-echo "  HNC v3.5 测试套件"
+echo "  HNC ${_HNC_SUITE_VER:-v6} 测试套件"
 echo "  仓库: $HNC_REPO_ROOT"
 echo "  过滤: $FILTER"
 echo "════════════════════════════════════════"

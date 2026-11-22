@@ -332,7 +332,7 @@ func m5SpawnDpid(now time.Time, g *spawnGate) {
 
 // launcherBroken launcher 的日志(最近 rescueLogFresh 内写过)末 rescueTail 行有 abort 字样。
 func launcherBroken(now time.Time) bool {
-	for _, f := range []string{"launcher.log", "dpid_guard.log"} {
+	for _, f := range []string{"launcher.log", "dpid_guard.log", "dpid_launcher.log"} {
 		p := filepath.Join(m5LogDir, f)
 		st, err := os.Stat(p)
 		if err != nil || now.Sub(st.ModTime()) > rescueLogFresh {

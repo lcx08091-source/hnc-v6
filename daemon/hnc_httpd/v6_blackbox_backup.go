@@ -43,8 +43,16 @@ const (
 	v6BlackboxSpikeDeltaRTTMs  = 30.0
 	v6BlackboxSpikeJitterMs    = 22.0
 	v6BlackboxSaturateUtilPct  = 88.0
+	v6BlackboxUpSaturatePct    = 85.0
 	v6BlackboxBurstFloorBps    = int64(2_500_000) // >= 20 Mbps 绝对突发门槛(无总上限配置时兜底判定)
+	v6BlackboxMinHogBps        = int64(500_000)   // >= 500 KB/s (4 Mbps) 才可能判定为抢网大户, 绝不冤枉 30KB/s 游戏流
 	v6BlackboxIncidentCooldown = int64(1000)      // 同一波突刺 1000ms 内合并去重
+
+	// 四维卡顿成因标准枚举 (复合优先级: thermal_throttle > uplink_saturated > device_hog > cell_jitter)
+	BlackboxDimThermalThrottle = "thermal_throttle"
+	BlackboxDimUplinkSaturated = "uplink_saturated"
+	BlackboxDimDeviceHog       = "device_hog"
+	BlackboxDimCellJitter      = "cell_jitter"
 
 	// /api/backup 整机备份参数
 	v6BackupSchemaVersion = "hnc.backup.v6"
@@ -67,63 +75,98 @@ type BlackboxDeviceSample struct {
 
 // BlackboxFrame 表示 200ms 环形飞行记录仪中的单帧遥测记录。
 type BlackboxFrame struct {
-	Seq              uint64  `json:"seq"`
-	TsUnixMs         int64   `json:"ts_unix_ms"`
-	RTTMs            float64 `json:"rtt_ms"`
-	BaseRTTMs        float64 `json:"base_rtt_ms"`
-	DeltaRTTMs       float64 `json:"delta_rtt_ms"`
-	JitterMs         float64 `json:"jitter_ms"`
-	TotalRxBps       int64   `json:"total_rx_bps"`
-	TotalTxBps       int64   `json:"total_tx_bps"`
-	CapacityBps      int64   `json:"capacity_bps,omitempty"`
-	BandwidthUtilPct float64 `json:"bandwidth_util_pct"`
-	SpikeReason      string  `json:"spike_reason,omitempty"` // "" | "rtt_spike" | "bw_saturated" | "rtt_and_bw_spike"
-	CulpritMAC       string  `json:"culprit_mac,omitempty"`
-	CulpritIP        string  `json:"culprit_ip,omitempty"`
-	CulpritName      string  `json:"culprit_name,omitempty"`
-	CulpritRxBps     int64   `json:"culprit_rx_bps,omitempty"`
-	CulpritTxBps     int64   `json:"culprit_tx_bps,omitempty"`
-	CulpritPeakBps   int64   `json:"culprit_peak_bps,omitempty"`
-	CulpritSharePct  float64 `json:"culprit_share_pct,omitempty"`
-	ActiveAppID      string  `json:"active_app_id,omitempty"`
-	ActiveAppName    string  `json:"active_app_name,omitempty"`
+	Seq              uint64   `json:"seq"`
+	TsUnixMs         int64    `json:"ts_unix_ms"`
+	RTTMs            float64  `json:"rtt_ms"`
+	BaseRTTMs        float64  `json:"base_rtt_ms"`
+	DeltaRTTMs       float64  `json:"delta_rtt_ms"`
+	JitterMs         float64  `json:"jitter_ms"`
+	TotalRxBps       int64    `json:"total_rx_bps"`
+	TotalTxBps       int64    `json:"total_tx_bps"`
+	ActualDownBps    int64    `json:"actual_down_bps,omitempty"`
+	ActualUpBps      int64    `json:"actual_up_bps,omitempty"`
+	CapacityBps      int64    `json:"capacity_bps,omitempty"`
+	UpCapacityBps    int64    `json:"up_capacity_bps,omitempty"`
+	BandwidthUtilPct float64  `json:"bandwidth_util_pct"`
+	DownUtilPct      float64  `json:"down_util_pct"`
+	UpUtilPct        float64  `json:"up_util_pct"`
+	SpikeReason      string   `json:"spike_reason,omitempty"` // "" | "rtt_spike" | "bw_saturated" | "rtt_and_bw_spike"
+	CauseDim         string   `json:"cause_dim,omitempty"`
+	CauseLabelZh     string   `json:"cause_label_zh,omitempty"`
+	SecondaryDims    []string `json:"secondary_dims,omitempty"`
+	VerdictZh        string   `json:"verdict_zh,omitempty"`
+	RootCauseZh      string   `json:"root_cause_zh,omitempty"`
+	CulpritIsHog     bool     `json:"culprit_is_hog"`
+	CulpritMAC       string   `json:"culprit_mac,omitempty"`
+	CulpritIP        string   `json:"culprit_ip,omitempty"`
+	CulpritName      string   `json:"culprit_name,omitempty"`
+	CulpritRxBps     int64    `json:"culprit_rx_bps,omitempty"`
+	CulpritTxBps     int64    `json:"culprit_tx_bps,omitempty"`
+	CulpritPeakBps   int64    `json:"culprit_peak_bps,omitempty"`
+	CulpritSharePct  float64  `json:"culprit_share_pct,omitempty"`
+	ActiveAppID      string   `json:"active_app_id,omitempty"`
+	ActiveAppName    string   `json:"active_app_name,omitempty"`
 }
 
-// BlackboxIncident 表示捕获到延迟突刺或带宽瞬时打满时的定格元凶事件。
+// BlackboxIncident 表示捕获到延迟突刺或带宽瞬时打满时的定格事件及四维大白话归因。
 type BlackboxIncident struct {
-	IncidentID       uint64  `json:"incident_id"`
-	TsUnixMs         int64   `json:"ts_unix_ms"`
-	Reason           string  `json:"reason"`
-	PeakRTTMs        float64 `json:"peak_rtt_ms"`
-	DeltaRTTMs       float64 `json:"delta_rtt_ms"`
-	JitterMs         float64 `json:"jitter_ms"`
-	BandwidthUtilPct float64 `json:"bandwidth_util_pct"`
-	TotalBps         int64   `json:"total_bps"`
-	CulpritMAC       string  `json:"culprit_mac"`
-	CulpritIP        string  `json:"culprit_ip,omitempty"`
-	CulpritName      string  `json:"culprit_name,omitempty"`
-	CulpritPeakBps   int64   `json:"culprit_peak_bps"`
-	CulpritSharePct  float64 `json:"culprit_share_pct"`
-	ActiveAppID      string  `json:"active_app_id,omitempty"`
-	ActiveAppName    string  `json:"active_app_name,omitempty"`
+	IncidentID       uint64   `json:"incident_id"`
+	TsUnixMs         int64    `json:"ts_unix_ms"`
+	Reason           string   `json:"reason"`
+	CauseDim         string   `json:"cause_dim"`
+	CauseLabelZh     string   `json:"cause_label_zh"`
+	SecondaryDims    []string `json:"secondary_dims,omitempty"`
+	VerdictZh        string   `json:"verdict_zh"`
+	RootCauseZh      string   `json:"root_cause_zh"`
+	PeakRTTMs        float64  `json:"peak_rtt_ms"`
+	DeltaRTTMs       float64  `json:"delta_rtt_ms"`
+	JitterMs         float64  `json:"jitter_ms"`
+	BandwidthUtilPct float64  `json:"bandwidth_util_pct"`
+	DownUtilPct      float64  `json:"down_util_pct"`
+	UpUtilPct        float64  `json:"up_util_pct"`
+	TotalBps         int64    `json:"total_bps"`
+	CulpritIsHog     bool     `json:"culprit_is_hog"`
+	CulpritMAC       string   `json:"culprit_mac"`
+	CulpritIP        string   `json:"culprit_ip,omitempty"`
+	CulpritName      string   `json:"culprit_name,omitempty"`
+	CulpritPeakBps   int64    `json:"culprit_peak_bps"`
+	CulpritSharePct  float64  `json:"culprit_share_pct"`
+	ActiveAppID      string   `json:"active_app_id,omitempty"`
+	ActiveAppName    string   `json:"active_app_name,omitempty"`
+	TempC            float64  `json:"temp_c,omitempty"`
+	ThermalStage     int      `json:"thermal_stage,omitempty"`
+	RSRPdBm          int      `json:"rsrp_dbm,omitempty"`
+	SINRdB           int      `json:"sinr_db,omitempty"`
 }
 
 // BlackboxTickInput 封装一次 200ms 采样的原始输入。
 type BlackboxTickInput struct {
-	Now         time.Time
-	RTTMs       float64
-	BaseRTTMs   float64
-	CapacityBps int64 // 当前总链路可用带宽上限 (Bytes/sec, <=0 时按活跃峰值估计)
-	Devices     []BlackboxDeviceSample
+	Now             time.Time
+	RTTMs           float64
+	BaseRTTMs       float64
+	CapacityBps     int64 // 当前总下行可用带宽上限 (Bytes/sec, <=0 时按活跃峰值估计)
+	UpCapacityBps   int64 // 当前总上行可用带宽上限 (Bytes/sec)
+	ActualDownBps   int64 // 整口实测下行吞吐 (Bytes/sec, 可选补充)
+	ActualUpBps     int64 // 整口实测上行吞吐 (Bytes/sec, 可选补充)
+	ThermalStage    int   // ThermoCruise 温控阶数 (0/1/2)
+	ThermalShaperOn bool  // ThermoCruise 二阶高温降速整形是否激活
+	TempC           float64
+	SignalAvailable bool
+	SignalMode      string
+	SignalQuality   string
+	SignalRSRPdBm   int
+	SignalSINRdB    int
+	SignalRSRQdB    int
+	Devices         []BlackboxDeviceSample
 }
 
 // JitterBlackbox 200ms 粒度纯内存零分配环形飞行记录仪。
 // 严格遵守 32 位 ARM 对齐铁律: 所有 64 位原子字段固定置于结构体顶部 offset 0。
 type JitterBlackbox struct {
-	totalTicks      atomic.Uint64
-	totalIncidents  atomic.Uint64
-	lastTickUnixMs  atomic.Int64
-	lastSpikeUnixMs atomic.Int64
+	totalTicks       atomic.Uint64
+	totalIncidents   atomic.Uint64
+	lastTickUnixMs   atomic.Int64
+	lastSpikeUnixMs  atomic.Int64
 	latestJitterBits atomic.Uint64
 
 	mu             sync.RWMutex
@@ -160,7 +203,186 @@ func (jb *JitterBlackbox) LatestJitterMs() float64 {
 	return math.Float64frombits(jb.latestJitterBits.Load())
 }
 
-// RecordSample 写入一帧 200ms 采样切片, 自动计算 RFC 3550 平滑抖动、带宽占用率并定格占网元凶设备。
+func blackboxDimLabelZh(dim string) string {
+	switch dim {
+	case BlackboxDimThermalThrottle:
+		return "发热降速"
+	case BlackboxDimUplinkSaturated:
+		return "上行占满"
+	case BlackboxDimDeviceHog:
+		return "设备抢网"
+	case BlackboxDimCellJitter:
+		return "基站抖动"
+	default:
+		return ""
+	}
+}
+
+func clampPct100(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v > 100.0 {
+		return 100.0
+	}
+	return v
+}
+
+type blackboxAttribution struct {
+	causeDim      string
+	causeLabelZh  string
+	secondaryDims []string
+	verdictZh     string
+	rootCauseZh   string
+	culpritIsHog  bool
+}
+
+func attributeBlackboxSpike(
+	in BlackboxTickInput,
+	rttSpike, downBwSpike, bwSpike bool,
+	effDownBps, effUpBps int64,
+	downUtilPct, upUtilPct float64,
+	culprit BlackboxDeviceSample,
+	culpritTotal int64,
+	sharePct float64,
+) blackboxAttribution {
+	hitThermal := in.ThermalShaperOn || in.ThermalStage >= 2
+
+	hitUplink := false
+	if in.UpCapacityBps > 0 {
+		hitUplink = upUtilPct >= v6BlackboxUpSaturatePct
+	} else {
+		hitUplink = effUpBps >= v6BlackboxBurstFloorBps*2 ||
+			(rttSpike && effUpBps >= v6BlackboxBurstFloorBps/2 && effUpBps > effDownBps)
+	}
+
+	// 严格保护低速率设备: 仅当单设备总流量 >= 500 KB/s (4 Mbps) 且显著挤占带宽池时才认定为抢网
+	hitHog := false
+	if culpritTotal >= v6BlackboxMinHogBps {
+		switch {
+		case in.CapacityBps > 0 && (downUtilPct >= 75.0 || float64(culprit.RxBps)/float64(in.CapacityBps) >= 0.50) && sharePct >= 45.0:
+			hitHog = true
+		case in.CapacityBps <= 0 && culprit.RxBps >= v6BlackboxBurstFloorBps && sharePct >= 45.0:
+			hitHog = true
+		case downBwSpike && sharePct >= 45.0:
+			hitHog = true
+		}
+	}
+
+	rfDegraded := in.SignalAvailable && (in.SignalQuality == "weak" ||
+		in.SignalQuality == "critical" ||
+		(in.SignalMode == "cellular" && validRSRQ(in.SignalRSRQdB) && in.SignalRSRQdB <= -17))
+	hitCell := rttSpike && (rfDegraded || (!hitThermal && !hitUplink && !hitHog))
+
+	// 复合故障严格优先级: 发热降速 > 上行占满 > 设备抢网 > 基站抖动
+	var dims []string
+	if hitThermal {
+		dims = append(dims, BlackboxDimThermalThrottle)
+	}
+	if hitUplink {
+		dims = append(dims, BlackboxDimUplinkSaturated)
+	}
+	if hitHog {
+		dims = append(dims, BlackboxDimDeviceHog)
+	}
+	if hitCell {
+		dims = append(dims, BlackboxDimCellJitter)
+	}
+	if len(dims) == 0 {
+		if bwSpike {
+			if upUtilPct > downUtilPct && upUtilPct >= 80.0 {
+				dims = append(dims, BlackboxDimUplinkSaturated)
+			} else {
+				dims = append(dims, BlackboxDimDeviceHog)
+			}
+		} else {
+			dims = append(dims, BlackboxDimCellJitter)
+		}
+	}
+
+	causeDim := dims[0]
+	var secondary []string
+	if len(dims) > 1 {
+		secondary = append([]string(nil), dims[1:]...)
+	}
+
+	// 判断是否存在真实抢网设备: 纯 cell_jitter 或纯 thermal_throttle 强制 CulpritIsHog=false!
+	uploaderIsHog := hitUplink && culprit.TxBps >= v6BlackboxMinHogBps &&
+		(effUpBps <= 0 || float64(culprit.TxBps)/float64(effUpBps) >= 0.45)
+	culpritIsHog := culpritTotal >= v6BlackboxMinHogBps && (hitHog || uploaderIsHog)
+	if causeDim == BlackboxDimCellJitter {
+		culpritIsHog = false
+	}
+	if causeDim == BlackboxDimThermalThrottle && !hitHog && !uploaderIsHog {
+		culpritIsHog = false
+	}
+
+	devLabel := strings.TrimSpace(culprit.Name)
+	if devLabel == "" {
+		devLabel = strings.TrimSpace(culprit.IP)
+	}
+	if devLabel == "" {
+		devLabel = strings.TrimSpace(culprit.MAC)
+	}
+	appPart := ""
+	if appNm := strings.TrimSpace(culprit.ActiveAppName); appNm != "" {
+		appPart = "（" + appNm + "）"
+	}
+
+	var verdict, rootCause string
+	switch causeDim {
+	case BlackboxDimThermalThrottle:
+		if in.TempC > 0 {
+			verdict = fmt.Sprintf("手机发热（%.1f°C）触发温控保护降速，引起延迟波动", in.TempC)
+		} else {
+			verdict = "手机机身高温触发二阶温控降速保护，引起延迟波动"
+		}
+		if culpritIsHog && devLabel != "" {
+			rootCause = fmt.Sprintf("手机高温触发散热限速，同时 %s%s 正在大流量占网，建议给手机降温或限制后台下载", devLabel, appPart)
+		} else {
+			rootCause = "本次波动源于手机机身高温触发散热降速保护，热点下挂设备流量平稳，并非设备抢网"
+		}
+	case BlackboxDimUplinkSaturated:
+		if culpritIsHog && devLabel != "" {
+			verdict = fmt.Sprintf("%s%s 正在大量上传数据，占满上行通道引起跳 Ping", devLabel, appPart)
+			rootCause = fmt.Sprintf("%s%s 突发大流量上传挤满上行带宽，导致其他设备确认包排队延迟飙升", devLabel, appPart)
+		} else if upUtilPct > 0 {
+			verdict = fmt.Sprintf("热点上行通道接近跑满（%.0f%%），确认包排队引起跳 Ping", upUtilPct)
+			rootCause = "上行发送通道瞬时跑满引起排队延迟抬升，建议暂停云盘备份或后台视频上传"
+		} else {
+			verdict = "热点上行上传流量突增占满通道，确认包排队引起跳 Ping"
+			rootCause = "上行发送通道瞬时突发满载引起排队延迟抬升，建议检查后台同步上传任务"
+		}
+	case BlackboxDimDeviceHog:
+		if culpritIsHog && devLabel != "" {
+			verdict = fmt.Sprintf("%s%s 突发大流量下载，挤占热点带宽引起卡顿", devLabel, appPart)
+			rootCause = fmt.Sprintf("%s%s 瞬时占用了 %.0f%% 的热点流量，跑满带宽池触发队列排队膨胀", devLabel, appPart, sharePct)
+		} else {
+			verdict = "局域网内多台设备同时高负载用网，跑满热点总带宽引起排队延迟"
+			rootCause = "热点下行总带宽瞬时跑满，多台设备叠加吞吐触及上限引起缓冲延迟"
+		}
+	default: // BlackboxDimCellJitter
+		if in.SignalAvailable && (in.SignalQuality == "weak" || in.SignalQuality == "critical") {
+			verdict = "热点手机当前蜂窝信号偏弱，空口重传引起延迟跳变"
+		} else if in.SignalAvailable && in.SignalMode == "cellular" && validRSRQ(in.SignalRSRQdB) && in.SignalRSRQdB <= -17 {
+			verdict = "手机信号格数尚可但周边基站繁忙拥塞，空口排队引起跳 Ping"
+		} else {
+			verdict = "上游移动网络基站空口瞬时抖动，并非热点内设备抢网"
+		}
+		rootCause = "热点下挂设备流量正常平稳（无抢网行为），本次跳 Ping 来自上游蜂窝基站信号或空口调度波动"
+	}
+
+	return blackboxAttribution{
+		causeDim:      causeDim,
+		causeLabelZh:  blackboxDimLabelZh(causeDim),
+		secondaryDims: secondary,
+		verdictZh:     verdict,
+		rootCauseZh:   rootCause,
+		culpritIsHog:  culpritIsHog,
+	}
+}
+
+// RecordSample 写入一帧 200ms 采样切片, 自动计算 RFC 3550 平滑抖动、上下行带宽占用率并执行四维大白话归因。
 func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *BlackboxIncident) {
 	now := in.Now
 	if now.IsZero() {
@@ -173,6 +395,7 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 	var totalRx, totalTx int64
 	var culprit BlackboxDeviceSample
 	var culpritTotal int64
+	var topUploader BlackboxDeviceSample
 	for _, d := range in.Devices {
 		rx := d.RxBps
 		tx := d.TxBps
@@ -191,23 +414,45 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 			culprit.TxBps = tx
 			culpritTotal = sum
 		}
+		if tx > topUploader.TxBps || (tx == topUploader.TxBps && tx > 0 && d.MAC < topUploader.MAC) {
+			topUploader = d
+			topUploader.RxBps = rx
+			topUploader.TxBps = tx
+		}
 	}
 	totalBps := totalRx + totalTx
+
+	effDownBps := totalRx
+	if in.ActualDownBps > effDownBps {
+		effDownBps = in.ActualDownBps
+	}
+	effUpBps := totalTx
+	if in.ActualUpBps > effUpBps {
+		effUpBps = in.ActualUpBps
+	}
 
 	deltaRTT := 0.0
 	if in.RTTMs > 0 && in.BaseRTTMs > 0 && in.RTTMs > in.BaseRTTMs {
 		deltaRTT = in.RTTMs - in.BaseRTTMs
 	}
 
-	utilPct := 0.0
+	downUtilPct := 0.0
 	if in.CapacityBps > 0 {
-		utilPct = (float64(totalRx) / float64(in.CapacityBps)) * 100.0
-		if upUtil := (float64(totalBps) / float64(in.CapacityBps)) * 100.0; upUtil > utilPct {
-			utilPct = upUtil
+		downUtilPct = clampPct100((float64(effDownBps) / float64(in.CapacityBps)) * 100.0)
+	}
+	upUtilPct := 0.0
+	if in.UpCapacityBps > 0 {
+		upUtilPct = clampPct100((float64(effUpBps) / float64(in.UpCapacityBps)) * 100.0)
+	}
+
+	utilPct := downUtilPct
+	if in.CapacityBps > 0 && in.UpCapacityBps <= 0 {
+		if legacyTotalUtil := clampPct100((float64(totalBps) / float64(in.CapacityBps)) * 100.0); legacyTotalUtil > utilPct {
+			utilPct = legacyTotalUtil
 		}
-		if utilPct > 100.0 {
-			utilPct = 100.0
-		}
+	}
+	if upUtilPct > utilPct {
+		utilPct = upUtilPct
 	}
 
 	sharePct := 0.0
@@ -235,8 +480,23 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 	jb.latestJitterBits.Store(math.Float64bits(jitter))
 
 	rttSpike := deltaRTT >= v6BlackboxSpikeDeltaRTTMs || jitter >= v6BlackboxSpikeJitterMs
-	bwSpike := (in.CapacityBps > 0 && utilPct >= v6BlackboxSaturateUtilPct) ||
-		(in.CapacityBps <= 0 && totalBps >= v6BlackboxBurstFloorBps*4)
+	downBwSpike := (in.CapacityBps > 0 && downUtilPct >= v6BlackboxSaturateUtilPct) ||
+		(in.CapacityBps > 0 && in.UpCapacityBps <= 0 && utilPct >= v6BlackboxSaturateUtilPct) ||
+		(in.CapacityBps <= 0 && (effDownBps+effUpBps) >= v6BlackboxBurstFloorBps*4)
+	upBwSpike := (in.UpCapacityBps > 0 && upUtilPct >= v6BlackboxUpSaturatePct) ||
+		(in.UpCapacityBps <= 0 && effUpBps >= v6BlackboxBurstFloorBps*2)
+	bwSpike := downBwSpike || upBwSpike
+
+	// 若发生上行饱和而无下行饱和, 且存在独立的上行上传大户, 优先锁定该上传大户作为观察目标
+	if upBwSpike && !downBwSpike && topUploader.TxBps >= v6BlackboxMinHogBps && topUploader.MAC != culprit.MAC {
+		if effUpBps > 0 && float64(topUploader.TxBps)/float64(effUpBps) >= 0.45 {
+			culprit = topUploader
+			culpritTotal = topUploader.RxBps + topUploader.TxBps
+			if totalTx > 0 {
+				sharePct = (float64(topUploader.TxBps) / float64(totalTx)) * 100.0
+			}
+		}
+	}
 
 	reason := ""
 	switch {
@@ -248,6 +508,11 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 		reason = "bw_saturated"
 	}
 
+	var attr blackboxAttribution
+	if reason != "" {
+		attr = attributeBlackboxSpike(in, rttSpike, downBwSpike, bwSpike, effDownBps, effUpBps, downUtilPct, upUtilPct, culprit, culpritTotal, sharePct)
+	}
+
 	frame := BlackboxFrame{
 		Seq:              seq,
 		TsUnixMs:         tsMs,
@@ -257,9 +522,20 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 		JitterMs:         math.Round(jitter*100) / 100,
 		TotalRxBps:       totalRx,
 		TotalTxBps:       totalTx,
+		ActualDownBps:    in.ActualDownBps,
+		ActualUpBps:      in.ActualUpBps,
 		CapacityBps:      in.CapacityBps,
+		UpCapacityBps:    in.UpCapacityBps,
 		BandwidthUtilPct: math.Round(utilPct*10) / 10,
+		DownUtilPct:      math.Round(downUtilPct*10) / 10,
+		UpUtilPct:        math.Round(upUtilPct*10) / 10,
 		SpikeReason:      reason,
+		CauseDim:         attr.causeDim,
+		CauseLabelZh:     attr.causeLabelZh,
+		SecondaryDims:    attr.secondaryDims,
+		VerdictZh:        attr.verdictZh,
+		RootCauseZh:      attr.rootCauseZh,
+		CulpritIsHog:     attr.culpritIsHog,
 	}
 	if culpritTotal > 0 {
 		frame.CulpritMAC = culprit.MAC
@@ -284,15 +560,27 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 		incID := jb.totalIncidents.Add(1)
 		jb.lastSpikeUnixMs.Store(tsMs)
 		jb.lastIncidentMs = tsMs
+		reportedTotalBps := totalBps
+		if effTotal := effDownBps + effUpBps; effTotal > reportedTotalBps {
+			reportedTotalBps = effTotal
+		}
 		inc := BlackboxIncident{
 			IncidentID:       incID,
 			TsUnixMs:         tsMs,
 			Reason:           reason,
+			CauseDim:         frame.CauseDim,
+			CauseLabelZh:     frame.CauseLabelZh,
+			SecondaryDims:    append([]string(nil), frame.SecondaryDims...),
+			VerdictZh:        frame.VerdictZh,
+			RootCauseZh:      frame.RootCauseZh,
 			PeakRTTMs:        frame.RTTMs,
 			DeltaRTTMs:       frame.DeltaRTTMs,
 			JitterMs:         frame.JitterMs,
 			BandwidthUtilPct: frame.BandwidthUtilPct,
-			TotalBps:         totalBps,
+			DownUtilPct:      frame.DownUtilPct,
+			UpUtilPct:        frame.UpUtilPct,
+			TotalBps:         reportedTotalBps,
+			CulpritIsHog:     frame.CulpritIsHog,
 			CulpritMAC:       frame.CulpritMAC,
 			CulpritIP:        frame.CulpritIP,
 			CulpritName:      frame.CulpritName,
@@ -300,6 +588,10 @@ func (jb *JitterBlackbox) RecordSample(in BlackboxTickInput) (BlackboxFrame, *Bl
 			CulpritSharePct:  frame.CulpritSharePct,
 			ActiveAppID:      frame.ActiveAppID,
 			ActiveAppName:    frame.ActiveAppName,
+			TempC:            math.Round(in.TempC*10) / 10,
+			ThermalStage:     in.ThermalStage,
+			RSRPdBm:          in.SignalRSRPdBm,
+			SINRdB:           in.SignalSINRdB,
 		}
 		jb.incidents[jb.incHead] = inc
 		jb.incHead = (jb.incHead + 1) % len(jb.incidents)
@@ -369,9 +661,12 @@ const (
 )
 
 type blackboxAutorateReading struct {
-	RTTMs       float64
-	BaseRTTMs   float64
-	CapacityBps int64
+	RTTMs         float64
+	BaseRTTMs     float64
+	CapacityBps   int64
+	UpCapacityBps int64
+	ActualDownBps int64
+	ActualUpBps   int64
 }
 
 func (s *server) ensureBlackboxWakeCh() chan struct{} {
@@ -548,6 +843,76 @@ func (s *server) currentBlackboxActivity() (<-chan struct{}, Activity) {
 
 const v6BlackboxAutorateMaxAgeSec = 15
 
+func parseTcRateToBps(raw string) int64 {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" || s == "0" {
+		return 0
+	}
+	idx := 0
+	for idx < len(s) && ((s[idx] >= '0' && s[idx] <= '9') || s[idx] == '.') {
+		idx++
+	}
+	if idx == 0 {
+		return 0
+	}
+	val, err := strconv.ParseFloat(s[:idx], 64)
+	if err != nil || math.IsNaN(val) || math.IsInf(val, 0) || val <= 0 {
+		return 0
+	}
+	unit := strings.TrimSpace(s[idx:])
+	switch unit {
+	case "gbit", "gbps":
+		return int64((val * 1_000_000_000.0) / 8.0)
+	case "mbit", "mbps", "":
+		return int64((val * 1_000_000.0) / 8.0)
+	case "kbit", "kbps":
+		return int64((val * 1_000.0) / 8.0)
+	case "bps", "bit":
+		return int64(val / 8.0)
+	default:
+		return 0
+	}
+}
+
+func extractStaticShaperFromRulesMap(m map[string]any) (downBps, upBps int64) {
+	if m == nil || !boolField(m, "global_shaper_enabled") {
+		return 0, 0
+	}
+	downBps = parseTcRateToBps(asString(m["global_shaper_down"]))
+	upBps = parseTcRateToBps(asString(m["global_shaper_up"]))
+	return downBps, upBps
+}
+
+// peekCachedStaticGlobalShaperBps 纯内存零 Stat 读取 jsonCache 中已缓存的静态全局整形容量。
+func (s *server) peekCachedStaticGlobalShaperBps() (downBps, upBps int64) {
+	if s == nil || s.hncDir == "" || s.jsonCache == nil {
+		return 0, 0
+	}
+	rulesPath := filepath.Join(s.hncDir, "data", "rules.json")
+	s.jsonCache.mu.Lock()
+	ent, ok := s.jsonCache.entries[rulesPath]
+	s.jsonCache.mu.Unlock()
+	if !ok {
+		return 0, 0
+	}
+	m, _ := ent.val.(map[string]any)
+	return extractStaticShaperFromRulesMap(m)
+}
+
+// readStaticGlobalShaperBps 通过 jsonCache 读取 rules.json 中的静态 global_shaper_* 带宽上限(Bytes/sec)。
+func (s *server) readStaticGlobalShaperBps() (downBps, upBps int64) {
+	if s == nil || s.hncDir == "" {
+		return 0, 0
+	}
+	rulesPath := filepath.Join(s.hncDir, "data", "rules.json")
+	raw, err := s.jsonCache.read(rulesPath)
+	if err != nil {
+		return 0, 0
+	}
+	m, _ := raw.(map[string]any)
+	return extractStaticShaperFromRulesMap(m)
+}
+
 func (s *server) readBlackboxAutorate() (blackboxAutorateReading, bool) {
 	if s == nil {
 		return blackboxAutorateReading{}, false
@@ -574,6 +939,15 @@ func (s *server) readBlackboxAutorate() (blackboxAutorateReading, bool) {
 	out.BaseRTTMs = ar.BaseRTTMs
 	if ar.CurDownMbps > 0 {
 		out.CapacityBps = int64((ar.CurDownMbps * 1_000_000.0) / 8.0)
+	}
+	if ar.CurUpMbps > 0 {
+		out.UpCapacityBps = int64((ar.CurUpMbps * 1_000_000.0) / 8.0)
+	}
+	if ar.ActualDownMbps > 0 {
+		out.ActualDownBps = int64((ar.ActualDownMbps * 1_000_000.0) / 8.0)
+	}
+	if ar.ActualUpMbps > 0 {
+		out.ActualUpBps = int64((ar.ActualUpMbps * 1_000_000.0) / 8.0)
 	}
 	return out, true
 }
@@ -602,7 +976,16 @@ func (s *server) sampleBlackbox(now time.Time, force bool) (BlackboxFrame, *Blac
 		in.RTTMs = ar.RTTMs
 		in.BaseRTTMs = ar.BaseRTTMs
 		in.CapacityBps = ar.CapacityBps
+		in.UpCapacityBps = ar.UpCapacityBps
+		in.ActualDownBps = ar.ActualDownBps
+		in.ActualUpBps = ar.ActualUpBps
 		if in.RTTMs > 0 && in.BaseRTTMs > 0 && (in.RTTMs-in.BaseRTTMs) >= v6BlackboxSpikeDeltaRTTMs {
+			hasSpike = true
+		}
+		if in.UpCapacityBps > 0 && in.ActualUpBps > 0 && (float64(in.ActualUpBps)/float64(in.UpCapacityBps))*100.0 >= v6BlackboxUpSaturatePct {
+			hasSpike = true
+		}
+		if in.CapacityBps > 0 && in.ActualDownBps > 0 && (float64(in.ActualDownBps)/float64(in.CapacityBps))*100.0 >= v6BlackboxSaturateUtilPct {
 			hasSpike = true
 		}
 	}
@@ -636,8 +1019,42 @@ func (s *server) sampleBlackbox(now time.Time, force bool) (BlackboxFrame, *Blac
 	}
 	s.blackboxRecordedTicks.Add(1)
 
+	// 纯内存零 IO 补充温控与蜂窝信号快照, 不触发任何 sysfs 或 dumpsys 调用
+	th := s.peekThermoQuickState()
+	in.ThermalStage = th.EffectiveStage
+	if th.RawThermalStage > in.ThermalStage && !th.Stage2Exempt {
+		in.ThermalStage = th.RawThermalStage
+	}
+	in.ThermalShaperOn = th.Stage2ShaperActive
+	in.TempC = th.TempC
+	if s.signalCtl != nil {
+		sig := s.signalCtl.PeekCached(s)
+		in.SignalAvailable = sig.Available
+		in.SignalMode = sig.Mode
+		in.SignalQuality = sig.Quality
+		in.SignalRSRPdBm = sig.RSRPdBm
+		in.SignalSINRdB = sig.SINRdB
+		in.SignalRSRQdB = sig.RSRQdB
+	}
+
 	if s.blackboxSampleOverride != nil {
 		return s.blackboxSampleOverride(in, ratesCopy)
+	}
+
+	// 静态 global_shaper_* 兜底: 空载突刺路径仅走纯内存缓存零 Stat, 活跃流量路径走 jsonCache.read
+	if in.CapacityBps <= 0 || in.UpCapacityBps <= 0 {
+		var sDown, sUp int64
+		if hasTraffic || force || in.ActualDownBps > 0 || in.ActualUpBps > 0 {
+			sDown, sUp = s.readStaticGlobalShaperBps()
+		} else {
+			sDown, sUp = s.peekCachedStaticGlobalShaperBps()
+		}
+		if in.CapacityBps <= 0 && sDown > 0 {
+			in.CapacityBps = sDown
+		}
+		if in.UpCapacityBps <= 0 && sUp > 0 {
+			in.UpCapacityBps = sUp
+		}
 	}
 
 	if hasTraffic {
@@ -874,13 +1291,14 @@ var (
 
 // V6BackupBundle 整机配置导出与导入的标准 JSON 载荷。
 type V6BackupBundle struct {
-	SchemaVersion string                     `json:"schema_version"`
-	ModuleVersion string                     `json:"module_version"`
-	ExportedAt    int64                      `json:"exported_at"`
-	FileCount     int                        `json:"file_count"`
-	Files         map[string]json.RawMessage `json:"files"`
-	FileSHA256    map[string]string          `json:"file_sha256"`
-	SHA256        string                     `json:"sha256"`
+	SchemaVersion     string                     `json:"schema_version"`
+	ModuleVersion     string                     `json:"module_version"`
+	ModuleVersionCode string                     `json:"module_version_code"`
+	ExportedAt        int64                      `json:"exported_at"`
+	FileCount         int                        `json:"file_count"`
+	Files             map[string]json.RawMessage `json:"files"`
+	FileSHA256        map[string]string          `json:"file_sha256"`
+	SHA256            string                     `json:"sha256"`
 }
 
 func isAllowedBackupConfigName(name string) bool {
@@ -991,6 +1409,20 @@ func computeBackupManifestSHA256(canonFiles map[string][]byte) (string, map[stri
 	return hex.EncodeToString(h.Sum(nil)), perFile
 }
 
+func backupCollectionLen(v any) (int, bool) {
+	if v == nil {
+		return 0, true
+	}
+	switch c := v.(type) {
+	case []any:
+		return len(c), true
+	case map[string]any:
+		return len(c), true
+	default:
+		return 0, false
+	}
+}
+
 // validateBackupFileSemantics 对各关键配置文件执行深层结构与业务红线校验。
 func validateBackupFileSemantics(name string, canon []byte) error {
 	dec := json.NewDecoder(bytes.NewReader(canon))
@@ -1069,6 +1501,33 @@ func validateBackupFileSemantics(name string, canon []byte) error {
 				return fmt.Errorf("conn_blocks.json: invalid kind %q", it.Kind)
 			}
 		}
+	case "leakguard_config.json":
+		scopes := []map[string]any{rootObj}
+		if cfgSub, ok := rootObj["config"].(map[string]any); ok && cfgSub != nil {
+			scopes = append(scopes, cfgSub)
+		}
+		for _, sc := range scopes {
+			if rawIR, exists := sc["ignore_rules"]; exists {
+				n, ok := backupCollectionLen(rawIR)
+				if !ok {
+					return errors.New("leakguard_config.json: ignore_rules must be an array or object")
+				}
+				if n > 256 {
+					return fmt.Errorf("leakguard_config.json: ignore_rules exceeds 256 limit (got %d)", n)
+				}
+			}
+			if rawUS, exists := sc["undo_stack"]; exists {
+				if rawUS != nil {
+					arr, ok := rawUS.([]any)
+					if !ok {
+						return errors.New("leakguard_config.json: undo_stack must be an array")
+					}
+					if len(arr) > 10 {
+						return fmt.Errorf("leakguard_config.json: undo_stack exceeds 10 limit (got %d)", len(arr))
+					}
+				}
+			}
+		}
 	}
 	return nil
 }
@@ -1132,13 +1591,14 @@ func ExportBackupBundle(hncDir string) (V6BackupBundle, error) {
 
 	manifestSHA, fileSHAs := computeBackupManifestSHA256(canonMap)
 	return V6BackupBundle{
-		SchemaVersion: v6BackupSchemaVersion,
-		ModuleVersion: version,
-		ExportedAt:    time.Now().Unix(),
-		FileCount:     len(rawFiles),
-		Files:         rawFiles,
-		FileSHA256:    fileSHAs,
-		SHA256:        manifestSHA,
+		SchemaVersion:     v6BackupSchemaVersion,
+		ModuleVersion:     version,
+		ModuleVersionCode: versionCode,
+		ExportedAt:        time.Now().Unix(),
+		FileCount:         len(rawFiles),
+		Files:             rawFiles,
+		FileSHA256:        fileSHAs,
+		SHA256:            manifestSHA,
 	}, nil
 }
 
@@ -1184,8 +1644,53 @@ func validateBackupBundle(bundle V6BackupBundle) (map[string][]byte, error) {
 	return canonMap, nil
 }
 
+func (s *server) reloadAfterBackupRestore() {
+	s.invalidateServerJSONCaches()
+	if s == nil {
+		return
+	}
+	if s.autorate != nil {
+		cfg := s.autorate.loadConfigFromDisk()
+		s.autorate.mu.Lock()
+		s.autorate.cfg = cfg
+		s.autorate.syncStatusConfigLocked(cfg)
+		s.autorate.mu.Unlock()
+		s.autorate.Poke()
+	}
+	if v, ok := v6Registry.Load(s); ok {
+		if st, ok := v.(*v6ServerState); ok && st != nil {
+			st.reloadAllFromDisk()
+		}
+	}
+}
+
+func reloadRuntimeCachesAndV6Engines(hncDir string, optSrv ...*server) {
+	cleanDir := filepath.Clean(strings.TrimSpace(hncDir))
+	seen := make(map[*server]bool)
+	for _, s := range optSrv {
+		if s != nil && !seen[s] {
+			seen[s] = true
+			s.reloadAfterBackupRestore()
+		}
+	}
+	v6Registry.Range(func(key, _ any) bool {
+		srv, ok := key.(*server)
+		if !ok || srv == nil || seen[srv] {
+			return true
+		}
+		if cleanDir != "" && filepath.Clean(strings.TrimSpace(srv.hncDir)) == cleanDir {
+			seen[srv] = true
+			srv.reloadAfterBackupRestore()
+		}
+		return true
+	})
+	if len(seen) == 0 {
+		((*server)(nil)).invalidateServerJSONCaches()
+	}
+}
+
 // restoreValidatedBackupBundle 将已校验通过的规范化配置集合通过两阶段 .tmp + fsync + os.Rename 原子落盘。
-func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte) ([]string, error) {
+func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, optSrv ...*server) ([]string, error) {
 	if strings.TrimSpace(hncDir) == "" {
 		return nil, errors.New("empty hncDir")
 	}
@@ -1196,7 +1701,12 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte) ([]
 
 	// 协同获取 JSON 目录锁
 	releaseJSONLock := acquireCooperativeJSONLock(hncDir)
-	defer releaseJSONLock()
+	lockHeld := true
+	defer func() {
+		if lockHeld {
+			releaseJSONLock()
+		}
+	}()
 
 	keys := make([]string, 0, len(canonMap))
 	for k := range canonMap {
@@ -1263,6 +1773,12 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte) ([]
 		}
 	}
 	triggerAppLimitApply(hncDir)
+
+	lockHeld = false
+	releaseJSONLock()
+
+	// 清空服务端 JSON 缓存并触发全部活跃 v6 引擎从磁盘热重载最新配置
+	reloadRuntimeCachesAndV6Engines(hncDir, optSrv...)
 	return restored, nil
 }
 
@@ -1338,7 +1854,7 @@ func (s *server) apiBackupPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.actionMu.Lock()
-	restored, rErr := restoreValidatedBackupBundle(s.hncDir, canonMap)
+	restored, rErr := restoreValidatedBackupBundle(s.hncDir, canonMap, s)
 	if rErr != nil {
 		s.actionMu.Unlock()
 		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": rErr.Error()})
@@ -1442,6 +1958,13 @@ func (s *server) v6ScreenshotPackSummary() map[string]any {
 	if len(incidents) > 0 {
 		latestIncident = incidents[0]
 	}
+	recentIncidents := incidents
+	if len(recentIncidents) > 5 {
+		recentIncidents = recentIncidents[:5]
+	}
+	if recentIncidents == nil {
+		recentIncidents = []BlackboxIncident{}
+	}
 
 	return map[string]any{
 		"multi_iface": map[string]any{
@@ -1474,6 +1997,7 @@ func (s *server) v6ScreenshotPackSummary() map[string]any {
 			"incident_count":   globalJitterBlackbox.totalIncidents.Load(),
 			"latest_jitter_ms": math.Round(globalJitterBlackbox.LatestJitterMs()*100) / 100,
 			"latest_incident":  latestIncident,
+			"incidents":        recentIncidents,
 		},
 		"backup": map[string]any{
 			"schema_version": v6BackupSchemaVersion,

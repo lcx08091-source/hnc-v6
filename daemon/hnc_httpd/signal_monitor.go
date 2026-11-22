@@ -1,18 +1,18 @@
 // signal_monitor.go — HNC v6.0.0 · Vector: 热点手机自身 5G-A / 5G SA/NSA · 4G LTE · Wi-Fi STA 异步零阻塞全频段信号感知
 //
 // 技术原理:
-//   1. 彻底消灭 HTTP 请求线程同步跑 dumpsys:
-//      - Get() / Snapshot() 永不在调用线程内执行外部命令! 缓存未命中或过期时立即返回上一份
-//        内存快照(首次尚未采样时返回轻量初始态), 同时通过无阻塞容量为 1 的信号槽唤醒单实例
-//        后台协程异步刷新;
-//   2. 自适应刷新节拍省掉 70% system_server Binder 唤醒:
-//      - 活跃态刷新周期从 3s 调优至 8s, 空闲态(熄屏无面板/无在线设备/热点关闭)放宽至 45s;
-//      - 外部命令统一启用进程组隔离(Setpgid + 超时向 -pgid 发 SIGKILL), 杜绝僵尸进程堆积;
-//   3. AOSP 12–16 / ColorOS 16 全频段 5G-A 精准解析与 5G Autorate 联动:
-//      - 扩大 Scanner 缓冲至 512KB、头部扫描上限放宽至 2500 行(遇 "local logs:" 立即截断, 零 Modem 唤醒);
-//      - 精准识别 NR_ADVANCED (5G-A) 图标态与 PrimaryServing + SecondaryServing 多载波聚合 (2CC/3CC) 组合及总带宽;
-//      - 当高通/联发科基带隐藏 mBand=0 时, 自动通过 mDownlinkChannelNumber / mNrArfcn / mEarfcn 查 3GPP 频段表反推;
-//      - 完整保留既有 JSON 字段语义(RAT 保持 "5G SA"/"5G NSA"/"4G LTE" 零破坏既有单测, 新增 DisplayRAT="5G-A" 等增强字段)。
+//  1. 彻底消灭 HTTP 请求线程同步跑 dumpsys:
+//     - Get() / Snapshot() 永不在调用线程内执行外部命令! 缓存未命中或过期时立即返回上一份
+//     内存快照(首次尚未采样时返回轻量初始态), 同时通过无阻塞容量为 1 的信号槽唤醒单实例
+//     后台协程异步刷新;
+//  2. 自适应刷新节拍省掉 70% system_server Binder 唤醒:
+//     - 活跃态刷新周期从 3s 调优至 8s, 空闲态(熄屏无面板/无在线设备/热点关闭)放宽至 45s;
+//     - 外部命令统一启用进程组隔离(Setpgid + 超时向 -pgid 发 SIGKILL), 杜绝僵尸进程堆积;
+//  3. AOSP 12–16 / ColorOS 16 全频段 5G-A 精准解析与 5G Autorate 联动:
+//     - 扩大 Scanner 缓冲至 512KB、头部扫描上限放宽至 2500 行(遇 "local logs:" 立即截断, 零 Modem 唤醒);
+//     - 精准识别 NR_ADVANCED (5G-A) 图标态与 PrimaryServing + SecondaryServing 多载波聚合 (2CC/3CC) 组合及总带宽;
+//     - 当高通/联发科基带隐藏 mBand=0 时, 自动通过 mDownlinkChannelNumber / mNrArfcn / mEarfcn 查 3GPP 频段表反推;
+//     - 完整保留既有 JSON 字段语义(RAT 保持 "5G SA"/"5G NSA"/"4G LTE" 零破坏既有单测, 新增 DisplayRAT="5G-A" 等增强字段)。
 package main
 
 import (
@@ -35,39 +35,38 @@ const (
 	sigUnavailable    = 2147483647
 	sigActiveInterval = 8 * time.Second
 	sigIdleInterval   = 45 * time.Second
-	sigCacheTTL       = 8 * time.Second
 )
 
 type hostSignalStatus struct {
 	Available          bool    `json:"available"`
-	Mode               string  `json:"mode"`                         // "cellular" | "wifi_sta" | "unknown"
-	RAT                string  `json:"rat"`                          // 兼容契约: "5G SA" | "5G NSA" | "4G LTE" | "Wi-Fi 中继" | "Unknown"
-	DisplayRAT         string  `json:"display_rat,omitempty"`        // 界面展示制式: "5G-A" | "5G SA" | "5G NSA" | "4G+" | "4G LTE" | "Wi-Fi 中继"
-	Is5GA              bool    `json:"is_5ga,omitempty"`             // 是否处于 5G-A (NR_ADVANCED / 多载波聚合 / >=140MHz)
-	Slot               int     `json:"slot,omitempty"`               // 1 | 2
-	SubID              int     `json:"sub_id,omitempty"`             // active data subId
-	Carrier            string  `json:"carrier,omitempty"`            // 归一化运营商全称 (如 "中国移动", "中国广电")
-	CarrierShort       string  `json:"carrier_short,omitempty"`      // 顶栏紧凑短名 (如 "移动", "广电", "电信", "联通")
-	MCCMNC             string  `json:"mcc_mnc,omitempty"`            // 5~6 位 PLMN (如 "46000", "46015")
-	SharingMode        string  `json:"sharing_mode,omitempty"`       // 共建共享提示 (如 "700MHz 移广共建共享", "3.5GHz 电联共建共享")
-	UpstreamIface      string  `json:"upstream_iface,omitempty"`     // 如 "rmnet_data2", "ccmni0"
-	Band               string  `json:"band,omitempty"`               // 主载波频段: 如 "n41", "n78", "n28", "B3", "5GHz"
-	BandwidthMHz       int     `json:"bandwidth_mhz,omitempty"`      // 主载波带宽 (MHz)
-	BandCombo          string  `json:"band_combo,omitempty"`         // 多载波组合: 如 "n41+n28", "n78+n78"
-	TotalBWMHz         int     `json:"total_bw_mhz,omitempty"`       // 多载波聚合总带宽 (MHz), 如 130, 200
-	CACount            int     `json:"ca_count,omitempty"`           // 活跃聚合载波数 (1..4)
-	ARFCN              int     `json:"arfcn,omitempty"`              // 主载波 NR-ARFCN / EARFCN 频点号
-	FreqMHz            int     `json:"freq_mhz,omitempty"`           // 主频段近似中心频率 (MHz), 如 2600, 700, 3500
-	BandTrait          string  `json:"band_trait,omitempty"`         // 频段物理特性人话解读
-	RSRPdBm            int     `json:"rsrp_dbm,omitempty"`           // NR ssRsrp or LTE rsrp (-140..-44)
-	RSRQdB             int     `json:"rsrq_db,omitempty"`            // NR ssRsrq or LTE rsrq (-20..-3)
-	SINRdB             int     `json:"sinr_db,omitempty"`            // NR ssSinr or LTE rssnr (-20..40)
-	LTERSRPdBm         int     `json:"lte_rsrp_dbm,omitempty"`       // NSA 场景下的 LTE 锚点 RSRP
-	WifiRSSIdBm        int     `json:"wifi_rssi_dbm,omitempty"`      // Wi-Fi STA RSSI
-	WifiLinkMbps       int     `json:"wifi_link_mbps,omitempty"`     // Wi-Fi STA 协商速率
-	RSRPLabel          string  `json:"rsrp_label,omitempty"`         // 信号强度人话评级 ("极强"/"良好"/"一般"/"偏弱"/"极弱")
-	SINRLabel          string  `json:"sinr_label,omitempty"`         // 信号纯净度人话评级 ("极纯净"/"纯净"/"轻度干扰"/"嘈杂易跳Ping")
-	RSRQLabel          string  `json:"rsrq_label,omitempty"`         // 基站空闲度人话评级 ("基站空闲"/"负载正常"/"晚高峰偏忙"/"基站拥塞")
+	Mode               string  `json:"mode"`                          // "cellular" | "wifi_sta" | "unknown"
+	RAT                string  `json:"rat"`                           // 兼容契约: "5G SA" | "5G NSA" | "4G LTE" | "Wi-Fi 中继" | "Unknown"
+	DisplayRAT         string  `json:"display_rat,omitempty"`         // 界面展示制式: "5G-A" | "5G SA" | "5G NSA" | "4G+" | "4G LTE" | "Wi-Fi 中继"
+	Is5GA              bool    `json:"is_5ga,omitempty"`              // 是否处于 5G-A (NR_ADVANCED / 多载波聚合 / >=140MHz)
+	Slot               int     `json:"slot,omitempty"`                // 1 | 2
+	SubID              int     `json:"sub_id,omitempty"`              // active data subId
+	Carrier            string  `json:"carrier,omitempty"`             // 归一化运营商全称 (如 "中国移动", "中国广电")
+	CarrierShort       string  `json:"carrier_short,omitempty"`       // 顶栏紧凑短名 (如 "移动", "广电", "电信", "联通")
+	MCCMNC             string  `json:"mcc_mnc,omitempty"`             // 5~6 位 PLMN (如 "46000", "46015")
+	SharingMode        string  `json:"sharing_mode,omitempty"`        // 共建共享提示 (如 "700MHz 移广共建共享", "3.5GHz 电联共建共享")
+	UpstreamIface      string  `json:"upstream_iface,omitempty"`      // 如 "rmnet_data2", "ccmni0"
+	Band               string  `json:"band,omitempty"`                // 主载波频段: 如 "n41", "n78", "n28", "B3", "5GHz"
+	BandwidthMHz       int     `json:"bandwidth_mhz,omitempty"`       // 主载波带宽 (MHz)
+	BandCombo          string  `json:"band_combo,omitempty"`          // 多载波组合: 如 "n41+n28", "n78+n78"
+	TotalBWMHz         int     `json:"total_bw_mhz,omitempty"`        // 多载波聚合总带宽 (MHz), 如 130, 200
+	CACount            int     `json:"ca_count,omitempty"`            // 活跃聚合载波数 (1..4)
+	ARFCN              int     `json:"arfcn,omitempty"`               // 主载波 NR-ARFCN / EARFCN 频点号
+	FreqMHz            int     `json:"freq_mhz,omitempty"`            // 主频段近似中心频率 (MHz), 如 2600, 700, 3500
+	BandTrait          string  `json:"band_trait,omitempty"`          // 频段物理特性人话解读
+	RSRPdBm            int     `json:"rsrp_dbm,omitempty"`            // NR ssRsrp or LTE rsrp (-140..-44)
+	RSRQdB             int     `json:"rsrq_db,omitempty"`             // NR ssRsrq or LTE rsrq (-20..-3)
+	SINRdB             int     `json:"sinr_db,omitempty"`             // NR ssSinr or LTE rssnr (-20..40)
+	LTERSRPdBm         int     `json:"lte_rsrp_dbm,omitempty"`        // NSA 场景下的 LTE 锚点 RSRP
+	WifiRSSIdBm        int     `json:"wifi_rssi_dbm,omitempty"`       // Wi-Fi STA RSSI
+	WifiLinkMbps       int     `json:"wifi_link_mbps,omitempty"`      // Wi-Fi STA 协商速率
+	RSRPLabel          string  `json:"rsrp_label,omitempty"`          // 信号强度人话评级 ("极强"/"良好"/"一般"/"偏弱"/"极弱")
+	SINRLabel          string  `json:"sinr_label,omitempty"`          // 信号纯净度人话评级 ("极纯净"/"纯净"/"轻度干扰"/"嘈杂易跳Ping")
+	RSRQLabel          string  `json:"rsrq_label,omitempty"`          // 基站空闲度人话评级 ("基站空闲"/"负载正常"/"晚高峰偏忙"/"基站拥塞")
 	SpeedPotentialPct  int     `json:"speed_potential_pct,omitempty"` // 网速潜力百分比 (35..100)
 	SpeedPotentialText string  `json:"speed_potential_text,omitempty"`
 	Bars               int     `json:"bars"`              // 0..4
@@ -173,6 +172,30 @@ func (m *signalMonitor) Get(s *server) hostSignalStatus {
 // Snapshot 兼容全仓既有调用点(s.signalCtl.Snapshot(s)), 同样走 100% 非阻塞快路径。
 func (m *signalMonitor) Snapshot(s *server) hostSignalStatus {
 	return m.Get(s)
+}
+
+// PeekCached 纯内存零唤醒读取最近一次缓存的信号快照, 绝不触发后台 dumpsys 采样协程(供 200ms 黑匣子归因高频读取)。
+func (m *signalMonitor) PeekCached(s *server) hostSignalStatus {
+	if s != nil && s.hncDir != "" && s.simActive() {
+		return simSignalSnapshot(s)
+	}
+	if m == nil {
+		return hostSignalStatus{
+			Mode:            "unknown",
+			RAT:             "Unknown",
+			Quality:         "unknown",
+			QualityCN:       "待采样",
+			RFCeilingFactor: 1.0,
+			Diagnosis:       "idle",
+		}
+	}
+	m.mu.RLock()
+	cp := m.last
+	m.mu.RUnlock()
+	if s != nil && cp.Available {
+		enrichSignalDiagnosis(&cp, s)
+	}
+	return cp
 }
 
 // TriggerRefresh 非阻塞触发单实例后台异步刷新(已在途时自动合并, 零排队、零常驻泄漏)。
@@ -349,16 +372,40 @@ func simSignalSnapshot(s *server) hostSignalStatus {
 }
 
 func enrichSignalDiagnosis(st *hostSignalStatus, s *server) {
-	if st == nil || s == nil || s.autorate == nil {
+	if st == nil || !st.Available || s == nil {
 		return
 	}
-	ar := s.autorate.Snapshot()
-	if !st.Available {
-		return
+	var ar autorateStatus
+	if s.autorate != nil {
+		ar = s.autorate.Snapshot()
 	}
 	weakRF := st.Quality == "weak" || st.Quality == "critical"
 	cellBusy := st.Mode == "cellular" && validRSRQ(st.RSRQdB) && st.RSRQdB <= -17
 	bloated := ar.Enabled && ar.DeltaRTTMs > math.Max(20, ar.RTTDeltaMs)
+	thermo := s.peekThermoQuickState()
+	lanSat := ar.Enabled && (ar.State == "active" || ar.State == "backoff") && (ar.LoadDown >= 0.88 || ar.LoadUp >= 0.88)
+	if !lanSat {
+		var rxSum, txSum int64
+		s.rateMu.Lock()
+		for _, v := range s.rates {
+			if v.rxBps > 0 {
+				rxSum += v.rxBps
+			}
+			if v.txBps > 0 {
+				txSum += v.txBps
+			}
+		}
+		s.rateMu.Unlock()
+		if rxSum > 0 || txSum > 0 {
+			downCap, upCap := s.peekCachedStaticGlobalShaperBps()
+			if (downCap > 0 && float64(rxSum)/float64(downCap) >= 0.88) ||
+				(upCap > 0 && float64(txSum)/float64(upCap) >= 0.88) {
+				lanSat = true
+			}
+		}
+	}
+	wifiLinkLow := st.Mode == "wifi_sta" && st.WifiLinkMbps > 0 && st.WifiLinkMbps <= 72
+
 	switch {
 	case weakRF && bloated:
 		st.Diagnosis = "rf_weak"
@@ -372,6 +419,16 @@ func enrichSignalDiagnosis(st *hostSignalStatus, s *server) {
 			st.DiagnosisCN = "手机信号强度充足，但基站当前上网人数多（排队延迟升高），智能带宽正在自动稳帧"
 		} else {
 			st.DiagnosisCN = "手机信号格数充足，但当前基站信道负载偏忙，高峰期网速可能略有波动"
+		}
+	case thermo.Stage2ShaperActive || lanSat || wifiLinkLow:
+		st.Diagnosis = "lan_bottleneck"
+		switch {
+		case thermo.Stage2ShaperActive:
+			st.DiagnosisCN = "上游基站信号正常，当前受手机高温二阶温控保护限制热点总带宽"
+		case wifiLinkLow:
+			st.DiagnosisCN = "上游信号强度尚可，但本地 Wi-Fi 物理握手速率偏低，建议切换至 5GHz 频段"
+		default:
+			st.DiagnosisCN = "上游基站空口通畅，当前热点局域网带宽池已被连接设备跑满"
 		}
 	default:
 		st.Diagnosis = "ok"
@@ -934,10 +991,6 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 	out.Diagnosis = "ok"
 	out.DiagnosisCN = "蜂窝射频状态已同步"
 	return out
-}
-
-func scoreCellularSignal(rsrp, sinr int, is5G bool) (bars int, quality, qualityCN string, alpha float64) {
-	return scoreCellularSignal4D(rsrp, sinr, -9, false, is5G, false)
 }
 
 func scoreCellularSignal4D(rsrp, sinr, rsrq int, hasRSRQ, is5G, is5GA bool) (bars int, quality, qualityCN string, alpha float64) {

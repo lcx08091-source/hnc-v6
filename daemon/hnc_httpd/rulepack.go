@@ -598,7 +598,8 @@ func rulepackSummary(hncDir string, now time.Time) map[string]interface{} {
 	}
 	domain := len(src.autoExpanded) + len(src.autoPromoted) + len(src.userCustom) + len(src.userDomain)
 	return map[string]interface{}{
-		"ok": true,
+		"ok":      true,
+		"version": ServerVersion(hncDir),
 		"sources": map[string]interface{}{
 			"auto_expanded":    part(src.autoExpanded),
 			"auto_promoted":    part(src.autoPromoted),
@@ -627,7 +628,7 @@ func isRulepackExport(n string) bool {
 func actionDPIRulepackExport(s *server, p map[string]string) actionResp {
 	now := time.Now()
 	inc := p["include_imported"] == "1" || p["include_imported"] == "true"
-	pack := buildRulepack(s.hncDir, p["note"], inc, s.detectHNCVersion(), now)
+	pack := buildRulepack(s.hncDir, p["note"], inc, s.serverVersion(), now)
 	b, err := json.MarshalIndent(pack, "", "  ")
 	if err != nil {
 		return actionResp{OK: false, Error: "marshal failed", Detail: err.Error()}

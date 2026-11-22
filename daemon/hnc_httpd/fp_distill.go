@@ -10,41 +10,38 @@
 //     或未定制 Cronet 的通用 TLS 指纹在小样本单 App 测试时误判为专属指纹。
 //
 // 核心安全机制(五层防误判):
-//  - 层 1(先验熔断): 浏览器/系统 WebView 包名真值污染标记 + VPN/代理导管包排除 +
-//    data/dpi_ja4_fingerprints.json browser 种子与 Chromium/BoringSSL 标准密码套件哈希识别。
-//  - 层 2(跨源负样本联合纯度): 同时联合最近 N 天全量 label_samples、现有热点学习表
-//    fpStore.m(含 _other 未知站点流量)计算跨应用纯度, 任一非同源应用共现即降级。
-//  - 层 3(协议栈四档分层):
-//      * exclusive       — 高置信度专属指纹(自定义 ALPN / 定制 QTP / 通过背景对照组门控的独立栈)
-//      * vendor_family   — 同厂多应用共享网络栈(如字节 TTNet / 阿里 ANet / 米哈游同系, 不绑单一 App)
-//      * provisional     — 样本或背景对照不足的候选栈(提示用户再测 1~2 个其它 App 对照, 绝不盲目放行)
-//      * generic_stack   — 系统 WebView / 浏览器 / 通用 OkHttp·Cronet 栈(主动标 Generic, 拦截种子与手工误绑)
-//  - 层 4(冷启动前台真值辅助切分): 融合 run/self_fg.YYYYMMDD.jsonl 前台切换时刻与 45s 短静默窗,
-//    剔除 tierHidden(广告/统计 SDK/公共 CDN)token, 支持 1~2 次冷启动在严格独占特征下安全生效。
-//  - 层 5(幂等游标 + 群智隔离): 独立维护 data/fp_distill_state.json 增量游标, 反复点击「立即蒸馏」
-//    绝不重复累加计数; 保持真实 Support 不虚增且置信度封顶 <= 0.78, 天然被 rulepack.go
-//    (Support >= 50 && Conf >= 0.80)挡在本机之内, 不污染导出的群智规则包。
+//   - 层 1(先验熔断): 浏览器/系统 WebView 包名真值污染标记 + VPN/代理导管包排除 +
+//     data/dpi_ja4_fingerprints.json browser 种子与 Chromium/BoringSSL 标准密码套件哈希识别。
+//   - 层 2(跨源负样本联合纯度): 同时联合最近 N 天全量 label_samples、现有热点学习表
+//     fpStore.m(含 _other 未知站点流量)计算跨应用纯度, 任一非同源应用共现即降级。
+//   - 层 3(协议栈四档分层):
+//   - exclusive       — 高置信度专属指纹(自定义 ALPN / 定制 QTP / 通过背景对照组门控的独立栈)
+//   - vendor_family   — 同厂多应用共享网络栈(如字节 TTNet / 阿里 ANet / 米哈游同系, 不绑单一 App)
+//   - provisional     — 样本或背景对照不足的候选栈(提示用户再测 1~2 个其它 App 对照, 绝不盲目放行)
+//   - generic_stack   — 系统 WebView / 浏览器 / 通用 OkHttp·Cronet 栈(主动标 Generic, 拦截种子与手工误绑)
+//   - 层 4(冷启动前台真值辅助切分): 融合 run/self_fg.YYYYMMDD.jsonl 前台切换时刻与 45s 短静默窗,
+//     剔除 tierHidden(广告/统计 SDK/公共 CDN)token, 支持 1~2 次冷启动在严格独占特征下安全生效。
+//   - 层 5(幂等游标 + 群智隔离): 独立维护 data/fp_distill_state.json 增量游标, 反复点击「立即蒸馏」
+//     绝不重复累加计数; 保持真实 Support 不虚增且置信度封顶 <= 0.78, 天然被 rulepack.go
+//     (Support >= 50 && Conf >= 0.80)挡在本机之内, 不污染导出的群智规则包。
 //
 // ── 接入现有文件所需的最小改动(共 4 处, 约 18 行)──────────────────────────────
 //
-//  1) fp_learn.go: fpEntry 增加可选字段(omitempty 保持旧 JSON 完全兼容):
-//       PersonalTier string `json:"personal_tier,omitempty"` // exclusive | vendor_family | provisional | generic_stack
-//       PersonalExp  int64  `json:"personal_exp,omitempty"`  // 快速蒸馏过期 unix(默认 +7 天)
-//       PersonalSNIs int    `json:"personal_snis,omitempty"` // 本机真值验证过的独立域名数
+//  1. fp_learn.go: fpEntry 增加可选字段(omitempty 保持旧 JSON 完全兼容):
+//     PersonalTier string `json:"personal_tier,omitempty"` // exclusive | vendor_family | provisional | generic_stack
+//     PersonalExp  int64  `json:"personal_exp,omitempty"`  // 快速蒸馏过期 unix(默认 +7 天)
+//     PersonalSNIs int    `json:"personal_snis,omitempty"` // 本机真值验证过的独立域名数
 //     并在 (e *fpEntry) verdict(now int64) 末尾 return 前调用:
-//       e.applyPersonalVerdict(&v, now)
+//     e.applyPersonalVerdict(&v, now)
 //
-//  2) startup_fp.go: startupApp 增加可选字段:
-//       PersonalFast bool  `json:"personal_fast,omitempty"`
-//       PersonalExp  int64 `json:"personal_exp,omitempty"`
+//  2. startup_fp.go: startupApp 增加可选字段:
+//     PersonalFast bool  `json:"personal_fast,omitempty"`
+//     PersonalExp  int64 `json:"personal_exp,omitempty"`
 //     并在 buildStartupModel 过滤条件处调用 startupAppUsableFast(a, ma, shared, hiddenToks, now)。
 //
-//  3) action.go: switch action 增加:
-//       case "dpi_distill_now":
-//           return actionDPIDistillNow(s, p)
-//
-//  4) server.go(可选富 JSON 端点, 供工作台展示逐应用蒸馏明细):
-//       mux.HandleFunc("/api/dpi_distill", s.requireMutation(s.apiDPIDistill))
+//  3. action.go: switch action 增加:
+//     case "dpi_distill_now":
+//     return actionDPIDistillNow(s, p)
 package main
 
 import (
@@ -53,7 +50,6 @@ import (
 	"fmt"
 	"io"
 	"math"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -80,10 +76,10 @@ const (
 	distillMinSNIsQTP     = 2 // QUIC + QTP 至少命中 2 个独立目标
 	distillMinPoolAppsQTP = 2 // 样本池至少出现过 2 个不同应用, 排除完全未改默认参数的裸 Cronet
 
-	distillMinSamplesStdTCP     = 6  // 标准 TCP TLS(h2 / http/1.1 / 空 ALPN, 无 QTP)最小真值样本数
-	distillMinSNIsStdTCP        = 3  // 标准 TCP TLS 至少命中 3 个独立业务域名
-	distillMinContrastAppsTCP   = 3  // 背景对照组门控: 样本池至少测过 3 个不同应用
-	distillMinContrastOtherSmp  = 10 // 背景对照组门控: 其它应用合计至少 10 条样本, 确保系统 WebView/OkHttp 已暴露
+	distillMinSamplesStdTCP    = 6  // 标准 TCP TLS(h2 / http/1.1 / 空 ALPN, 无 QTP)最小真值样本数
+	distillMinSNIsStdTCP       = 3  // 标准 TCP TLS 至少命中 3 个独立业务域名
+	distillMinContrastAppsTCP  = 3  // 背景对照组门控: 样本池至少测过 3 个不同应用
+	distillMinContrastOtherSmp = 10 // 背景对照组门控: 其它应用合计至少 10 条样本, 确保系统 WebView/OkHttp 已暴露
 
 	// 主导率(纯度)与置信度上限
 	distillMinPurityCustomOrQTP = 0.95 // 自定义 ALPN / QTP 允许极少量噪声(>= 95%)
@@ -114,35 +110,35 @@ const (
 // 立即将该指纹打标为 generic_stack, 彻底阻断任何单一业务 App 认领。
 var distillBrowserWebViewPkgs = map[string]bool{
 	// Android System WebView / Chromium 内核提供者
-	"com.google.android.webview":      true,
-	"com.android.webview":             true,
-	"com.huawei.webview":              true,
-	"org.chromium.webview_shell":      true,
+	"com.google.android.webview":          true,
+	"com.android.webview":                 true,
+	"com.huawei.webview":                  true,
+	"org.chromium.webview_shell":          true,
 	"com.google.android.trichromelibrary": true,
 	// 主流移动浏览器与内置搜索容器
-	"com.android.chrome":              true,
-	"com.chrome.beta":                 true,
-	"com.chrome.dev":                  true,
-	"com.chrome.canary":               true,
-	"org.mozilla.firefox":             true,
-	"org.mozilla.fenix":               true,
-	"com.microsoft.emmx":              true,
-	"com.opera.browser":               true,
-	"com.brave.browser":               true,
-	"com.vivaldi.browser":             true,
-	"com.kiwibrowser.browser":         true,
-	"com.UCMobile":                    true,
-	"com.quark.browser":               true,
-	"com.tencent.mtt":                 true,
-	"com.baidu.searchbox":             true,
-	"com.heytap.browser":              true,
-	"com.coloros.browser":             true,
-	"com.vivo.browser":                true,
-	"com.mi.globalbrowser":            true,
-	"com.android.browser":             true,
-	"com.huawei.browser":              true,
-	"com.sec.android.app.sbrowser":    true,
-	"mark.via":                        true,
+	"com.android.chrome":           true,
+	"com.chrome.beta":              true,
+	"com.chrome.dev":               true,
+	"com.chrome.canary":            true,
+	"org.mozilla.firefox":          true,
+	"org.mozilla.fenix":            true,
+	"com.microsoft.emmx":           true,
+	"com.opera.browser":            true,
+	"com.brave.browser":            true,
+	"com.vivaldi.browser":          true,
+	"com.kiwibrowser.browser":      true,
+	"com.UCMobile":                 true,
+	"com.quark.browser":            true,
+	"com.tencent.mtt":              true,
+	"com.baidu.searchbox":          true,
+	"com.heytap.browser":           true,
+	"com.coloros.browser":          true,
+	"com.vivo.browser":             true,
+	"com.mi.globalbrowser":         true,
+	"com.android.browser":          true,
+	"com.huawei.browser":           true,
+	"com.sec.android.app.sbrowser": true,
+	"mark.via":                     true,
 }
 
 // distillBuiltinConduitPkgs VPN / 代理导管包(与 dpid builtinFlywheelExcludePkgs 对齐):
@@ -315,8 +311,8 @@ type DistillReport struct {
 // ─── fpEntry 与 startupModel 的最小判定钩子 ───────────────────────────
 
 // applyPersonalVerdict 供 (e *fpEntry) verdict(now int64) 在常规判定后调用:
-//  - generic_stack: 即使样本 < 20 也立即标 Generic = true, 拦截种子表与手工误绑;
-//  - exclusive(有效期内): 实时重验当前 Purity(一旦后续混入其它 App 或 _other 立即自动失效)。
+//   - generic_stack: 即使样本 < 20 也立即标 Generic = true, 拦截种子表与手工误绑;
+//   - exclusive(有效期内): 实时重验当前 Purity(一旦后续混入其它 App 或 _other 立即自动失效)。
 func (e *fpEntry) applyPersonalVerdict(v *fpVerdict, now int64) {
 	if e == nil || v == nil || e.PersonalTier == "" {
 		return
@@ -458,27 +454,6 @@ func actionDPIDistillNow(s *server, p map[string]string) actionResp {
 	}
 	b, _ := json.Marshal(rep)
 	return actionResp{OK: true, Detail: string(b)}
-}
-
-// apiDPIDistill 供 POST /api/dpi_distill(挂载 requireMutation)直接返回结构化 DistillReport。
-func (s *server) apiDPIDistill(w http.ResponseWriter, r *http.Request) {
-	opt := DistillOptions{AllowUnmappedPkg: true}
-	if r.Body != nil {
-		var bodyOpt DistillOptions
-		err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&bodyOpt)
-		if err == nil {
-			opt = bodyOpt
-		} else if err != io.EOF {
-			writeJSON(w, http.StatusBadRequest, map[string]interface{}{"ok": false, "error": err.Error()})
-			return
-		}
-	}
-	rep, err := s.DistillPersonalNow(time.Now(), opt)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]interface{}{"ok": false, "error": err.Error()})
-		return
-	}
-	writeJSON(w, http.StatusOK, rep)
 }
 
 // ─── 内部实现: 样本读取与包名归并 ─────────────────────────────────────

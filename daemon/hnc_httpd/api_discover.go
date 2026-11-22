@@ -653,6 +653,7 @@ func (s *server) apiDiscover(w http.ResponseWriter, r *http.Request) {
 	_, statErr := os.Stat(filepath.Join(s.hncDir, "run", "dpi_discover.json"))
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"ok":          true,
+		"version":     s.serverVersion(),
 		"available":   statErr == nil,
 		"groups":      list,
 		"apk_scan":    map[string]interface{}{"generated_at": ix.at, "app_count": ix.apps, "requested": fileExists(filepath.Join(s.hncDir, "run", "apk_scan.request"))},
@@ -820,7 +821,7 @@ func actionDiscoverConfirm(s *server, p map[string]string) actionResp {
 	if !merged {
 		rules = append(rules, map[string]interface{}{
 			"id": ruleID, "app": name, "category": cat, "confidence": "user", "suffixes": sufs,
-			"note": "v5.15 未知应用发现 · 用户确认 " + time.Now().Format("2006-01-02"),
+			"note": "未知应用发现 · 用户确认 " + time.Now().Format("2006-01-02"),
 		})
 	}
 	doc["rules"] = rules

@@ -54,6 +54,10 @@
 #  error "unknown arch, define SYS_BPF_NO"
 #endif
 
+#ifndef HNC_VERSION
+#define HNC_VERSION      "dev"
+#endif
+
 #define OBJ_PATH_DEFAULT "/data/local/hnc/bin/hnc_clsact.o"
 #define PIN_DIR          "/sys/fs/bpf/hnc"
 #define MAP_PIN          PIN_DIR "/ip_mark_map"
@@ -1212,14 +1216,19 @@ static void usage(const char *prog)
         "  %s check     <iface>\n"
         "  %s update    <ip|mac> <mark>\n"
         "  %s sync                     (reads '<ip|mac> <mark>' lines from stdin)\n"
-        "  %s uninstall <iface>\n",
-        prog, prog, prog, prog, prog, prog);
+        "  %s uninstall <iface>\n"
+        "  %s --version\n",
+        prog, prog, prog, prog, prog, prog, prog);
 }
 
 int main(int argc, char **argv)
 {
     if (argc < 2) { usage(argv[0]); return RC_USAGE; }
     const char *cmd = argv[1];
+    if (strcmp(cmd, "--version") == 0) {
+        printf("hnc_clsact_ctl %s\n", HNC_VERSION);
+        return RC_OK;
+    }
     if (strcmp(cmd, "install") == 0 || strcmp(cmd, "repair") == 0) {
         if (argc < 3) { usage(argv[0]); return RC_USAGE; }
         const char *obj = NULL;

@@ -57,8 +57,15 @@ run_cmd() {
 }
 
 # ── 1. 环境摘要 ─────────────────────────────────────────────
+_DB_ROOT=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+_DB_VER=""
+for _mp in "$MODDIR/module.prop" "$HNC/module.prop" "${_DB_ROOT:+$_DB_ROOT/module.prop}"; do
+    [ -n "$_mp" ] && [ -f "$_mp" ] || continue
+    _DB_VER=$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')
+    [ -n "$_DB_VER" ] && break
+done
 {
-    echo "HNC debug bundle"
+    echo "HNC ${_DB_VER:+$_DB_VER }debug bundle"
     echo "timestamp=$TS"
     echo "HNC=$HNC"
     echo "MODDIR=$MODDIR"
@@ -66,7 +73,12 @@ run_cmd() {
     echo "uname=$(uname -a 2>/dev/null)"
     echo "android=$(getprop ro.build.version.release 2>/dev/null) sdk=$(getprop ro.build.version.sdk 2>/dev/null)"
     echo "device=$(getprop ro.product.model 2>/dev/null) / $(getprop ro.product.manufacturer 2>/dev/null)"
-    [ -f "$MODDIR/module.prop" ] && grep -E '^(version|versionCode)=' "$MODDIR/module.prop" 2>/dev/null
+    for _mp in "$MODDIR/module.prop" "$HNC/module.prop" "${_DB_ROOT:+$_DB_ROOT/module.prop}"; do
+        if [ -n "$_mp" ] && [ -f "$_mp" ]; then
+            grep -E '^(version|versionCode)=' "$_mp" 2>/dev/null
+            break
+        fi
+    done
 } > "$OUT/summary.txt" 2>/dev/null
 
 # ── 2. 配置与状态 JSON(脱敏) ───────────────────────────────

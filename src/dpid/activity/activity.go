@@ -43,6 +43,7 @@ type Snapshot struct {
 	OK      bool // 文件新鲜可信
 	Level   string
 	Quiet   bool // 熄屏且没有界面在看
+	WebUI   bool // 界面正在活跃访问
 	Hotspot bool
 	Clients int
 }
@@ -57,6 +58,7 @@ func Parse(b []byte, now time.Time) Snapshot {
 	s := Snapshot{
 		Level:   f.Level,
 		Quiet:   f.ScreenKnown && !f.ScreenOn && !f.WebUIActive,
+		WebUI:   f.WebUIActive,
 		Hotspot: f.HotspotActive,
 		Clients: f.ClientsOnline,
 	}
@@ -134,6 +136,23 @@ func BlindFlushEvery(s Snapshot) time.Duration {
 		return 30 * time.Second
 	}
 	return 10 * time.Second
+}
+
+// ShmFlushEvery shm_vector.bin 写入间隔:
+// activity 不可信或 WebUI 活跃 → 1s;
+// 热点未开或无在线设备 → 10s(严格 < 15s, 防 CoreHub 陈旧误判);
+// 熄屏静默 → 5s; 其余 → 1s。
+func ShmFlushEvery(s Snapshot) time.Duration {
+	if !s.OK || s.WebUI {
+		return time.Second
+	}
+	if !s.Hotspot || s.Clients <= 0 {
+		return 10 * time.Second
+	}
+	if s.Quiet {
+		return 5 * time.Second
+	}
+	return time.Second
 }
 
 // ByteSampleEvery 本机按 uid 字节采样: 自身归因没开 → 0(不采, 调用方 60s 后再看开关);

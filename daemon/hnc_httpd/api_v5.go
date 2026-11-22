@@ -25,10 +25,10 @@ import (
 // ── /api/config ────────────────────────────────────────────────
 
 type configResp struct {
-	AuthRequired  bool `json:"auth_required"`
-	RemoteAuthRequired  bool   `json:"remote_auth_required"`
-	WhitelistMode bool `json:"whitelist_mode"`
-	RemoteEnabled bool `json:"remote_enabled"`
+	AuthRequired       bool `json:"auth_required"`
+	RemoteAuthRequired bool `json:"remote_auth_required"`
+	WhitelistMode      bool `json:"whitelist_mode"`
+	RemoteEnabled      bool `json:"remote_enabled"`
 	// v5.1 P2-1: 字段对齐 shell (rules.json 里实际用 hotspot_auto/_pass/_delay)
 	// 前端/JSON 输出保持向前兼容的 hotspot_autostart/hotspot_delay_sec 名字
 	HotspotAutostart bool   `json:"hotspot_autostart"`

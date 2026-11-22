@@ -2,7 +2,7 @@
 
 > 格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/) + [Semantic Versioning 2.0.0](https://semver.org/lang/zh-CN/).
 >
-> 版本号约定:`X.Y.Z` 主.次.补丁。预发布测试期按阶段带 `-alpha.N` / `-beta.N` / `-rc.N` 后缀（对应前置 `versionCode` 走廊 `XXYY9101..XXYY9399`，正式版归位整万 `XXYY0000`）。
+> 版本号约定:`X.Y.Z` 主.次.补丁。预发布测试期按阶段带 `-alpha.N` / `-beta.N` / `-rc.N` 后缀（对应前置 `versionCode` 走廊 `XXYY9101..XXYY9999`，正式版归位整万 `XXYY0000`）。
 >
 > 每个版本下分类:
 > - **Added** — 新功能
@@ -13,6 +13,19 @@
 > - **Internals** — 内部架构、可观测性、文档,不直接面向用户
 
 ---
+
+## [6.1.0-rc.1] - 2026-11-22
+
+> **通道说明（候选发布通道 · 稳定版当前为 `v6.0.1`）**：本版本为 `v6.1.0` 正式版前的首个候选封版（`versionCode=6009301`），集中落地防误操作交互、一句话省电健康体检、弱网 DNS 保活、卡顿人话归因、四引擎深度待机停表与全栈二进制换牌；自动更新广播文件（`update.json`）继续锁死在 `v6.0.1`（`6000001`），不会向稳定版用户自动推送。
+
+### v6.1.0 全量收尾工程第四阶段 · 候选封版体验打磨、深度待机停表与全栈统一换牌版
+- **Added · 高风险操作 5s 撤销胶囊与前端零拖动滑条 (`webroot/*`)**: 拉黑设备、冻结连接与一键管控等高风险动作新增底部 5 秒「后悔药」撤销胶囊，手滑点错可当场一键撤回；全站彻底清零易在手机 WebView 滚动时误触卡顿的 `<input type="range">` 拖动滑条，玻璃浓度、壁纸景深模糊与遮罩护眼浓度统一升级为清脆档位点选与步进微调。
+- **Added · 一句话省电健康体检单与黑匣子四维人话归因 (`daemon/hnc_httpd/*` + `webroot/*`)**: 新增直白易懂的一句话省电健康体检单，一眼看清当前热点待机档位、后台唤醒节奏与潜在耗电点；`200ms` 卡顿黑匣子升级四维人话归因引擎，将底层 RTT 突刺、队列丢包、带宽占满与射频波动直接翻译为上行基站拥塞、单设备跑满带宽、热点无线干扰或主动限速生效四大明白结论。
+- **Added · 隐私安检忽略白名单与公共 CDN 防误杀保护 (`daemon/hnc_httpd/*` + `src/dpid/leakguard/*` + `webroot/*`)**: `LeakGuard` 明文隐私安检支持按应用或域名一键加入忽略白名单不再重复打扰，并内置公共 CDN 与多应用共享基础设施防误杀守卫，杜绝一键封禁误伤正常系统与常用软件联网。
+- **Fixed · 单锁 DNS 弱网保活与切网秒清 (`bin/dns_takeover.sh` + `daemon/hnc_httpd/*` + `src/dpid/*`)**: 收敛 DNS 接管与探测互斥为单一排他锁串行执行，消除并发操作打架；弱网偶发超时期间智能保活现有解析规则不断网，一旦检测到蜂窝/Wi-Fi 上行网络切换立即秒清陈旧缓存恢复解析。
+- **Fixed · `Vector Express` 迁至 `1:8010` 专属加速通道 (`bin/tc_manager.sh` + `daemon/hnc_httpd/*`)**: 将救护车零排队加速类由易与第 16 号受控设备类撞车的旧类号迁移至专属 `classid 1:8010`（`handle 8010:`），双栈过滤优先级迁至 `prio 4` / `prio 5`，彻底避让 `prio 2` 应用 QoS 与镜像过滤链，启停加速零误伤。
+- **Fixed · 四引擎深度待机零唤醒停表与 SHM 真降频 (`daemon/hnc_httpd/*` + `src/dpid/*`)**: 热点未开启或零客户端空闲期，四大后台巡检与采样引擎彻底停表休眠实现零无效唤醒，同时 `16KB` 共享内存（`shm_vector.bin`）按活跃等级真正降频刷写，大幅压低息屏待机功耗。
+- **Changed · 全栈六大二进制与规则库版本号统一对齐及废弃脚本清退 (`.github/workflows/build.yml` + `src/*` + `daemon/*` + `data/dpi_rules.d/*` + `bin/*` + `test/*`)**: CI 双架构流水线为 `hnc_httpd`、`hnc_dpid`、`hnc_watchdog`、`hnc_launcher`、`hotspotd`、`hnc_clsact_ctl` 六大原生二进制与内置 DPI 规则库统一注入 `v6.1.0-rc.1`（`6009301`）并严格校验；清退已废弃的 `./bin/hnc_common.sh`、`./bin/watchdog.sh` 冗余 `is_doze` 分支与残留历史工具打包步骤，刷机包剔除纯 CI 门禁脚本，测试框架横幅动态读取 `module.prop` 版本号。
 
 ## [6.1.0-beta.2] - 2026-11-22
 

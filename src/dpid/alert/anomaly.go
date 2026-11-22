@@ -40,16 +40,6 @@ const (
 	anomalyBaselineDays = 7
 )
 
-// historyRow mirrors the JSONL shape from history.go. We don't import that
-// package because the alert package must stay free of capture-side deps.
-type historyRow struct {
-	T     int64  `json:"t"`
-	MAC   string `json:"mac"`
-	AppID string `json:"app_id"`
-	TX    uint64 `json:"tx"`
-	RX    uint64 `json:"rx"`
-}
-
 // detectAnomalyTraffic walks the last N days of history JSONL files and
 // emits unknown_device-style alerts for any MAC whose current-hour total
 // exceeds (baseline × ratio) AND a minimum-bytes floor.

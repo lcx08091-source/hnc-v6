@@ -123,9 +123,9 @@ func saveRMACState(hncDir string, st rmacStateFile) {
 }
 
 // rmacReconcile 在后台 MacMergeLoop 周期内执行:
-//  1) 自动解除旧版本遗留的陌生随机 MAC 默认限速/隔离护栏(零误伤新连入设备);
-//  2) 高置信度随机 MAC 自动无感继承(旧设备离线 + 综合评分 >= auto_inherit_score);
-//  3) 离线短命无规则随机 MAC 自动清理陈旧邻居与记录, 防止 /24 租约池膨胀。
+//  1. 自动解除旧版本遗留的陌生随机 MAC 默认限速/隔离护栏(零误伤新连入设备);
+//  2. 高置信度随机 MAC 自动无感继承(旧设备离线 + 综合评分 >= auto_inherit_score);
+//  3. 离线短命无规则随机 MAC 自动清理陈旧邻居与记录, 防止 /24 租约池膨胀。
 func (s *server) rmacReconcile(now time.Time) {
 	pol := loadRMACPolicy(s.hncDir)
 	nowU := now.Unix()

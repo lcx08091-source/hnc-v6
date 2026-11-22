@@ -57,8 +57,6 @@ const (
 
 	hbFile      = runDir + "/watchdog.heartbeat"
 	wdPidFile   = runDir + "/watchdog.pid"
-	spawnLock   = runDir + "/spawn.lock"
-	doztMarker  = runDir + "/doze.marker"
 	passiveMark = runDir + "/watchdog_passive.marker"
 
 	intervalNormal     = 60 * time.Second
@@ -74,7 +72,6 @@ const (
 	logMaxBytes        = 1 << 20 // 1 MiB
 
 	// Restart cooldowns
-	dpidRestartCD     = 30 * time.Second
 	hotspotdRestartCD = 60 * time.Second
 	httpdRestartCD    = 30 * time.Second
 
@@ -85,8 +82,89 @@ const (
 
 	actionTimeout = 30 * time.Second
 
-	version = "0.6.0-vector"
+	engineVersion = "0.6.0"
 )
+
+var (
+	moduleVersion = "dev"
+	versionCode   = "0"
+	version       = engineVersion + "-" + moduleVersion
+)
+
+func readWatchdogModuleProp(baseDir string) (modVer, verCode string) {
+	candidates := []string{
+		hncDir + "/module.prop",
+		"/data/adb/modules/hotspot_net_ctl/module.prop",
+		"/data/adb/modules/hotspot_network_control/module.prop",
+	}
+	if cleanDir := strings.TrimSpace(baseDir); cleanDir != "" {
+		candidates = append([]string{filepath.Join(cleanDir, "module.prop")}, candidates...)
+	}
+	seen := make(map[string]struct{}, len(candidates))
+	for _, p := range candidates {
+		if _, dup := seen[p]; dup {
+			continue
+		}
+		seen[p] = struct{}{}
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var fv, fc string
+		for _, raw := range strings.Split(string(b), "\n") {
+			line := strings.TrimSpace(raw)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			if v, ok := strings.CutPrefix(line, "version="); ok && fv == "" {
+				fv = strings.TrimSpace(v)
+			} else if c, ok := strings.CutPrefix(line, "versionCode="); ok && fc == "" {
+				fc = strings.TrimSpace(c)
+			}
+		}
+		if fv != "" || fc != "" {
+			return fv, fc
+		}
+	}
+	return "", ""
+}
+
+func resolveWatchdogVersion(baseDir string) {
+	modVer := strings.TrimSpace(moduleVersion)
+	verCode := strings.TrimSpace(versionCode)
+	if modVer == "" || modVer == "dev" || verCode == "" || verCode == "0" {
+		fv, fc := readWatchdogModuleProp(baseDir)
+		if (modVer == "" || modVer == "dev") && fv != "" {
+			modVer = fv
+		}
+		if (verCode == "" || verCode == "0") && fc != "" {
+			verCode = fc
+		}
+	}
+	if modVer == "" {
+		modVer = "dev"
+	}
+	if verCode == "" {
+		verCode = "0"
+	}
+	if trimmed, ok := strings.CutPrefix(modVer, engineVersion+"-"); ok && trimmed != "" {
+		modVer = trimmed
+	}
+	moduleVersion = modVer
+	versionCode = verCode
+	version = engineVersion + "-" + modVer
+}
+
+func currentWatchdogVersion() string {
+	modVer := strings.TrimSpace(moduleVersion)
+	if modVer == "" {
+		return engineVersion + "-dev"
+	}
+	if strings.HasPrefix(modVer, engineVersion+"-") {
+		return modVer
+	}
+	return engineVersion + "-" + modVer
+}
 
 // ─── globals & monotonic progress vector ────────────────────────────────
 
@@ -972,8 +1050,9 @@ var _ = readFirstLine
 func main() {
 	showVer := flag.Bool("version", false, "print version and exit")
 	flag.Parse()
+	resolveWatchdogVersion(hncDir)
 	if *showVer {
-		fmt.Println(version)
+		fmt.Println("hnc_watchdog", version)
 		return
 	}
 
@@ -991,6 +1070,10 @@ func main() {
 	if _, err := os.Stat(wdShell); err != nil {
 		logf("FATAL: shell action driver missing at %s, cannot supervise", wdShell)
 		os.Exit(3)
+	}
+
+	if err := wdActionsFlushFn(actionsFile, nowFn()); err != nil {
+		logf("action stats initial flush: %v", err)
 	}
 
 	touchMainLoopStep()

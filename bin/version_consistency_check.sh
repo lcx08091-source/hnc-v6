@@ -11,15 +11,12 @@ else
   VERSION="$(sed -n 's/^version=//p' "$MODULE_PROP" | head -1)"
   VERSION_CODE="$(sed -n 's/^versionCode=//p' "$MODULE_PROP" | head -1)"
   echo "module.prop: $VERSION / $VERSION_CODE"
-  # v5.9.0: 正则与 bin/ci_preflight.sh 统一为同一表达式(此前两处各写一份且
-  # 互相矛盾:这里强制 -hotfix、那里强制 -rc + -hf,v5.8.9-portal 手工发布
-  # 正好从两条缝里穿过)。不匹配从 warn 升级为 fail —— 版本格式是发布护栏,
-  # 不是建议。接受:
-  #   v5.9.0                       (正式版, 三段, 无后缀)
-  #   v5.3.0-rc30 / -rc30.12 / -rc30.12.18 / -rc30.12.18.1  (rc 一至四段)
-  #   v5.1.0-rc1-hotfix17.3        (rc + hotfix 旧风格)
-  #   v5.3.0-rc30.12-hf2           (rc + hf 新风格)
-  #   v5.9.0-hotfix1               (正式版 + hotfix)
+  # v5.9.0 / v6.1+: 正则与 bin/ci_preflight.sh 统一为同一表达式。
+  # 接受:
+  #   v6.1.0                       (正式版, 三段, versionCode 整万 XXYY0000)
+  #   v6.1.0-alpha.1 / -beta.2 / -rc.1 (v6.1+ 预发布走廊 XXYY9101..XXYY9999)
+  #   v5.3.0-rc30 / -rc30.12.18    (历史 rc 一至四段)
+  #   v5.9.0-hotfix1 / -hf2        (正式版或 rc + hotfix/hf)
   if printf '%s\n' "$VERSION" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc)\.?[0-9]+(\.[0-9]+){0,3})?(-(hotfix|hf)[0-9]+(\.[0-9]+)?)?$'; then ok "module version format is accepted"; else fail "module version format is unexpected: $VERSION"; fi
   MOD_DESC="$(sed -n '/^description=/{s/^description=//p;q;}' "$MODULE_PROP" | tr -d '\r')"
   DESC_VERS="$(printf '%s\n' "$MOD_DESC" | grep -Eo 'v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*' || true)"
@@ -53,7 +50,20 @@ else
     if [ -n "$CL_SEC" ]; then ok "CHANGELOG.md has non-empty section for [$VER_BARE]"; else fail "CHANGELOG.md missing or empty section for ## [$VER_BARE]"; fi
   fi
   if [ -f webroot/changelog.html ]; then
-    if grep -Fq "data-version=\"$VERSION\"" webroot/changelog.html; then ok "webroot/changelog.html contains $VERSION entry"; else fail "webroot/changelog.html missing data-version=\"$VERSION\""; fi
+    if grep -Fq "data-version=\"$VERSION\"" webroot/changelog.html; then
+      ok "webroot/changelog.html contains $VERSION entry"
+      CL_HTML_LINE="$(grep -F "data-version=\"$VERSION\"" webroot/changelog.html | head -n 1)"
+      case "$CL_HTML_LINE" in
+        *data-version-code=*)
+          if printf '%s\n' "$CL_HTML_LINE" | grep -Fq "data-version-code=\"$VERSION_CODE\""; then
+            ok "webroot/changelog.html data-version-code matches $VERSION_CODE"
+          else
+            fail "webroot/changelog.html data-version-code mismatch for $VERSION (expected $VERSION_CODE)"
+          fi ;;
+      esac
+    else
+      fail "webroot/changelog.html missing data-version=\"$VERSION\""
+    fi
   fi
   if [ ! -f update.json ]; then
     fail "update.json not found"
@@ -128,6 +138,17 @@ if [ -f daemon/hnc_httpd/hnc_httpd ]; then
   if [ -n "$OLD_HTTPD_HITS" ]; then printf '%s\n' "$OLD_HTTPD_HITS"; fail "old hnc_httpd hotfix4 runtime string found"; else ok "no hotfix4 runtime string found"; fi
 else
   warn "daemon/hnc_httpd/hnc_httpd not found"
+fi
+if [ "${HNC_RELEASE_CHECK:-0}" = "1" ] && [ -n "${VERSION:-}" ]; then
+  for _rbin in daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/hnc_watchdog bin/hnc_launcher bin/hotspotd bin/hnc_clsact_ctl bin/mdns_resolve bin/hnc_ipc; do
+    if [ -f "$_rbin" ]; then
+      if grep -a -qF "$VERSION" "$_rbin" 2>/dev/null; then
+        ok "$_rbin embeds $VERSION"
+      else
+        fail "$_rbin missing module version $VERSION"
+      fi
+    fi
+  done
 fi
 if [ -d webroot ]; then
   OLD_WEBUI_HITS="$(grep -RIna --binary-files=text -E 'v5\.1\.0-rc1-hotfix(4|10|16\.7|17\.3)' webroot 2>/dev/null | grep -vE 'webroot/changelog\.html|webroot/json-health\.html' | head -20 || true)"

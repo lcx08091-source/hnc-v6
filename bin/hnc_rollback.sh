@@ -17,8 +17,6 @@
 #       (httpd 活 + 8444 在听 + watchdog 活, 任一项不满足即算这轮失败),
 #       或崩溃重启合计 ≥ 5 次(首次看到的 pid 只当基线) → 恢复 .prev/ + 写 rollback.json
 #       + 钉住新版本 + 重启核心进程。data/rollback.disabled 存在时只记录。
-#   hnc_rollback.sh status <hncdir>
-#       打印 rollback.json(诊断 / httpd 转出用)。
 #
 # 端口判定不依赖 curl/nc(手机上不保证有): 读 /proc/net/tcp{,6},
 # 本地端口 20FC(8444)且状态 0A(LISTEN)。
@@ -321,16 +319,10 @@ rb_observe_cleanup() {
           "$_d/rollback.lastpid_httpd" "$_d/rollback.lastpid_watchdog" 2>/dev/null || true
 }
 
-# ── status ───────────────────────────────────────────────────────────
-rb_status() {
-    cat "$2/data/rollback.json" 2>/dev/null || true
-}
-
 case "${1:-}" in
     snapshot) rb_snapshot "$2" "$3"; exit $? ;;
     observe)  rb_observe "$2"; exit $? ;;
-    status)   rb_status "$@"; exit 0 ;;
     *)
-        echo "usage: $0 snapshot <moddir> <hncdir> | observe <hncdir> | status <hncdir>" >&2
+        echo "usage: $0 snapshot <moddir> <hncdir> | observe <hncdir>" >&2
         exit 4 ;;
 esac

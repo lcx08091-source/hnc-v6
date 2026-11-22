@@ -1,17 +1,17 @@
 // core_hub_v6.go — HNC v6.0.0 · Vector: 四舱壁防连坐 HNC Core 中枢与无锁 RCU 原子快照环
 //
 // 核心架构:
-//   1. WorldSnapshot 无锁原子快照环:
-//      - 内部以 atomic.Pointer[WorldSnapshot] 持有最新不可变全栈态势快照(含预编码 JSON 字节);
-//      - 后台协程每 1.5s 异步刷新并原子替换指针;
-//      - GET /api/vector_sync 仅执行一次原子 Load()(< 50ns), 零互斥锁等待、零子进程、零磁盘阻塞!
-//   2. 四大防连坐隔离舱壁 (DataplaneBulkhead / DpiShmBulkhead / AndroidBridgeBulkhead / StorageBulkhead):
-//      - 有界非阻塞任务队列 + recover() 异常隔离罩 + 连续超时半开熔断器(Circuit Breaker:
-//        如 AndroidBridgeBulkhead 连续 2 次超时自动熔断退避 45s) + 基于单调时钟的 actorBeatMonoNs 心跳槽;
-//   3. 进程组隔离包装器 ExecIsolatedAndroidCmd:
-//      - 默认 2s 硬超时; Linux/Android 下强制 Setpgid: true 并在超时瞬间向 -pgid 发送 SIGKILL 连根清理孙进程;
-//   4. 解耦式扩展注册器 RegisterVectorSyncProvider(name, fn):
-//      - 各 v6 子模块按名字异步注册状态快照回调, 彻底解除跨组编译期函数签名耦合。
+//  1. WorldSnapshot 无锁原子快照环:
+//     - 内部以 atomic.Pointer[WorldSnapshot] 持有最新不可变全栈态势快照(含预编码 JSON 字节);
+//     - 后台协程每 1.5s 异步刷新并原子替换指针;
+//     - GET /api/vector_sync 仅执行一次原子 Load()(< 50ns), 零互斥锁等待、零子进程、零磁盘阻塞!
+//  2. 四大防连坐隔离舱壁 (DataplaneBulkhead / DpiShmBulkhead / AndroidBridgeBulkhead / StorageBulkhead):
+//     - 有界非阻塞任务队列 + recover() 异常隔离罩 + 连续超时半开熔断器(Circuit Breaker:
+//     如 AndroidBridgeBulkhead 连续 2 次超时自动熔断退避 45s) + 基于单调时钟的 actorBeatMonoNs 心跳槽;
+//  3. 进程组隔离包装器 ExecIsolatedAndroidCmd:
+//     - 默认 2s 硬超时; Linux/Android 下强制 Setpgid: true 并在超时瞬间向 -pgid 发送 SIGKILL 连根清理孙进程;
+//  4. 解耦式扩展注册器 RegisterVectorSyncProvider(name, fn):
+//     - 各 v6 子模块按名字异步注册状态快照回调, 彻底解除跨组编译期函数签名耦合。
 package main
 
 import (
@@ -831,6 +831,8 @@ type WorldSnapshot struct {
 	GeneratedMonoNs int64                     `json:"generated_mono_ns"`
 	Version         string                    `json:"version"`
 	VersionCode     string                    `json:"version_code"`
+	DPIDVersion     string                    `json:"dpid_version,omitempty"`
+	WatchdogVersion string                    `json:"watchdog_version,omitempty"`
 	CoreUptimeSec   int64                     `json:"core_uptime_sec"`
 	Healthy         bool                      `json:"healthy"`
 	Bulkheads       map[string]BulkheadHealth `json:"bulkheads"`
@@ -1128,14 +1130,20 @@ func (h *CoreHub) RefreshSnapshotNow() *WorldSnapshot {
 	}
 	exts["dpi_shm_vector"] = shmRes.toExtensionMap()
 
+	var hncDir string
+	if h.srv != nil {
+		hncDir = h.srv.hncDir
+	}
 	snap := &WorldSnapshot{
 		OK:              true,
 		Schema:          1,
 		Seq:             seq,
 		GeneratedAt:     now.Unix(),
 		GeneratedMonoNs: nowMono,
-		Version:         version,
-		VersionCode:     versionCode,
+		Version:         ServerVersion(hncDir),
+		VersionCode:     ServerVersionCode(hncDir),
+		DPIDVersion:     h.srv.dpidVersion(),
+		WatchdogVersion: h.srv.watchdogVersion(),
 		CoreUptimeSec:   coreUptimeSeconds(),
 		Healthy:         allHealthy,
 		Bulkheads:       bhMap,

@@ -148,14 +148,3 @@ func readTrim(path string) string {
 	}
 	return strings.TrimSpace(string(b))
 }
-
-// IsSelfBPFFilter returns the BPF filter expression to apply to a
-// self-capture handle. Currently identical to the main HNC capture
-// because rule matching needs both DNS and TLS regardless of which
-// side of the conversation we're on. Kept as a function so it can be
-// customized later (e.g. drop DNS on cellular if proven redundant).
-func IsSelfBPFFilter() string {
-	// Empty string = no extra BPF; the capture handle's default filter
-	// already targets TCP/443 + UDP/53 + UDP/443 via cBPF.
-	return ""
-}

@@ -1,7 +1,6 @@
 #!/system/bin/sh
-# dpi_rules_import.sh — HNC v5.3.0-rc20.1
-# Import/export/reset DPI L3 domain rule library without reflashing.
-# Runtime rule path (v5.9.92): /data/local/hnc/etc/dpi_rules.d/99-user-custom.json
+# dpi_rules_import.sh — Import/export/reset DPI L3 domain rule library without reflashing.
+# Runtime rule path: /data/local/hnc/etc/dpi_rules.d/99-user-custom.json
 #
 # v5.9.92 修: 导入此前写 legacy 单文件 etc/dpi_rules.json, 而 dpid 自
 # rc30.12.31 起优先读 etc/dpi_rules.d/*.json (99-user-custom 最后加载、

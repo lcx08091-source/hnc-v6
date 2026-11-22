@@ -65,8 +65,8 @@ const (
 	dpV540DevMarkBase uint32 = DefaultDevMarkBase
 
 	dpAppClassMinBase int = 0x9000 // 36864: 单应用限速子类起点(1:9001 .. 1:9998)
-	dpAppClassMinMax  int    = 0x9998 // 39320: 避开默认类 1:9999
-	dpAppQosMinorBase int    = 0xa000 // 40960: 应用感知三档 QoS 子类基址
+	dpAppClassMinMax  int = 0x9998 // 39320: 避开默认类 1:9999
+	dpAppQosMinorBase int = 0xa000 // 40960: 应用感知三档 QoS 子类基址
 )
 
 // ── 核心数据结构与前后端 JSON 契约 ────────────────────────────────────
@@ -172,19 +172,19 @@ type GoroutineLeakSummary struct {
 
 // DataplaneVerifyReport /api/dataplane_verify 顶层 JSON 响应结构。
 type DataplaneVerifyReport struct {
-	OK                  bool                   `json:"ok"`
-	CheckedAt           int64                  `json:"checked_at"`
-	Iface               string                 `json:"iface"`
-	HotspotActive       bool                   `json:"hotspot_active"`
-	EngineMode          string                 `json:"engine_mode"`
-	MarkLayout          string                 `json:"mark_layout"`
-	NetdLow16Protected  bool                   `json:"netd_low16_protected"`
-	IPv6QUICControlled  bool                   `json:"ipv6_quic_controlled"`
-	BPFMaps             DataplaneBPFMaps       `json:"bpf_maps"`
-	OffloadGuard        DataplaneOffloadGuard  `json:"offload_guard"`
-	Summary             DataplaneSummary       `json:"summary"`
-	Devices             []DataplaneDeviceEntry `json:"devices"`
-	GoroutineLeak       *GoroutineLeakSummary  `json:"goroutineleak,omitempty"`
+	OK                 bool                   `json:"ok"`
+	CheckedAt          int64                  `json:"checked_at"`
+	Iface              string                 `json:"iface"`
+	HotspotActive      bool                   `json:"hotspot_active"`
+	EngineMode         string                 `json:"engine_mode"`
+	MarkLayout         string                 `json:"mark_layout"`
+	NetdLow16Protected bool                   `json:"netd_low16_protected"`
+	IPv6QUICControlled bool                   `json:"ipv6_quic_controlled"`
+	BPFMaps            DataplaneBPFMaps       `json:"bpf_maps"`
+	OffloadGuard       DataplaneOffloadGuard  `json:"offload_guard"`
+	Summary            DataplaneSummary       `json:"summary"`
+	Devices            []DataplaneDeviceEntry `json:"devices"`
+	GoroutineLeak      *GoroutineLeakSummary  `json:"goroutineleak,omitempty"`
 }
 
 // ── 内存上一帧快照差分存储(64 位原子字段严格位于偏移 0 + Mutex 保护) ──
@@ -394,8 +394,9 @@ func dispatchDataplaneVerifyAction(s *server, action string, p map[string]string
 	if s != nil && s.hncDir != "" && (dpParamTruthy(p["resync"]) || dpParamTruthy(p["repair"])) {
 		if ifc := readHotspotIfaceName(s.hncDir); ifc != "" {
 			_, _ = runBin(s.hncDir, "hnc_offload_guard.sh", "apply")
-			_, _ = runBin(s.hncDir, "tc_manager.sh", "sync_all", ifc)
+			_, _ = runBin(s.hncDir, "tc_manager.sh", "restore")
 			InvalidateDataplaneReconcileNative(s.hncDir, "")
+			replayVectorExpressIfActive(s, s.hncDir)
 		}
 	}
 	wantLeak := dpParamTruthy(p["check_goroutineleak"]) || dpParamTruthy(p["goroutineleak"])
@@ -487,8 +488,9 @@ var (
 
 // parseTCStatsText 解析 `tc -s class show dev <iface>` 输出文本(纯函数)。
 // 精确兼容:
-//   class htb 1:2 parent 1:1 leaf 1002: prio 0 rate 10Mbit ceil 10Mbit ...
-//    Sent 123456 bytes 789 pkt (dropped 12, overlimits 34 requeues 0)
+//
+//	class htb 1:2 parent 1:1 leaf 1002: prio 0 rate 10Mbit ceil 10Mbit ...
+//	 Sent 123456 bytes 789 pkt (dropped 12, overlimits 34 requeues 0)
 func parseTCStatsText(out string) map[string]TCClassStats {
 	res := make(map[string]TCClassStats)
 	if strings.TrimSpace(out) == "" {

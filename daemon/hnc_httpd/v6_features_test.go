@@ -335,7 +335,7 @@ func TestV6VectorExpressEscortAndP2PGuard(t *testing.T) {
 		t.Fatalf("gaming device did not activate escort: %+v", snapGame)
 	}
 	dp, _ := snapGame["dataplane"].(VectorExpressDataplaneSpec)
-	if !dp.Active || dp.Prio != 0 || dp.Qdisc != "fq_codel" || dp.BgPoolCeilPct != 85 {
+	if !dp.Active || dp.ClassID != "1:8010" || dp.Prio != 0 || dp.FilterPrioV4 != 4 || dp.FilterPrioV6 != 5 || dp.Qdisc != "fq_codel" || dp.BgPoolCeilPct != 85 {
 		t.Fatalf("unexpected dataplane spec: %+v", dp)
 	}
 
@@ -724,6 +724,13 @@ func TestV6ThermoCruiseSchmittHysteresisAndExemptions(t *testing.T) {
 			t.Fatalf("v6FeaturesSummary missing module %q: %+v", key, sum)
 		}
 	}
+
+	// 9) 删除 sysfs 目录后验证 PeekQuickState 纯内存零 sysfs IO 仍能返回上次缓存状态
+	_ = os.RemoveAll(psRoot)
+	qs := s.peekThermoQuickState()
+	if !qs.Enabled || !qs.Available || qs.TempC <= 0 {
+		t.Fatalf("peekThermoQuickState must read cached memory without sysfs IO: %+v", qs)
+	}
 }
 
 func TestV6BackupRedactionAndLoopbackGuard(t *testing.T) {
@@ -744,12 +751,16 @@ func TestV6BackupRedactionAndLoopbackGuard(t *testing.T) {
 	_ = os.WriteFile(filepath.Join(dataDir, "vector_express.json"), []byte(`{"enabled":true}`), 0o600)
 	_ = os.WriteFile(filepath.Join(dataDir, "update_leash.json"), []byte(`{"enabled":true}`), 0o600)
 	_ = os.WriteFile(filepath.Join(dataDir, "thermo_cruise.json"), []byte(`{"enabled":true}`), 0o600)
+	_ = os.WriteFile(filepath.Join(dataDir, "leakguard_config.json"), []byte(`{"config":{"capacity":300},"ignore_rules":["a.example"],"undo_stack":[{"op":"block"}]}`), 0o600)
 
 	bundle, err := ExportBackupBundle(dir)
 	if err != nil {
 		t.Fatalf("ExportBackupBundle failed: %v", err)
 	}
-	for _, name := range []string{"rules.json", "vector_express.json", "update_leash.json", "thermo_cruise.json"} {
+	if bundle.ModuleVersionCode != versionCode {
+		t.Fatalf("bundle.ModuleVersionCode=%q want %q", bundle.ModuleVersionCode, versionCode)
+	}
+	for _, name := range []string{"rules.json", "vector_express.json", "update_leash.json", "thermo_cruise.json", "leakguard_config.json"} {
 		if _, ok := bundle.Files[name]; !ok {
 			t.Fatalf("expected %s in backup bundle, got keys=%v", name, bundle.FileSHA256)
 		}
@@ -797,6 +808,21 @@ func TestV6BackupRedactionAndLoopbackGuard(t *testing.T) {
 		if perm := st.Mode().Perm(); perm&0o077 != 0 {
 			t.Fatalf("restored rules.json permissions too wide: %o (want 0600)", perm)
 		}
+	}
+
+	// 验证 leakguard_config.json 超限拦截: ignore_rules > 256 或 undo_stack > 10 必须被拒绝
+	tooManyIgnore := make([]string, 257)
+	for i := range tooManyIgnore {
+		tooManyIgnore[i] = "rule"
+	}
+	irBytes, _ := json.Marshal(map[string]any{"ignore_rules": tooManyIgnore})
+	if err := validateBackupFileSemantics("leakguard_config.json", irBytes); err == nil {
+		t.Fatal("expected validateBackupFileSemantics to reject ignore_rules > 256")
+	}
+	tooManyUndo := make([]int, 11)
+	usBytes, _ := json.Marshal(map[string]any{"undo_stack": tooManyUndo})
+	if err := validateBackupFileSemantics("leakguard_config.json", usBytes); err == nil {
+		t.Fatal("expected validateBackupFileSemantics to reject undo_stack > 10")
 	}
 }
 

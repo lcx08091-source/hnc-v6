@@ -9,8 +9,8 @@ import (
 
 var ruleReloadGen atomic.Uint64
 
-func bumpRuleReloadGen()            { ruleReloadGen.Add(1) }
-func currentRuleReloadGen() uint64  { return ruleReloadGen.Load() }
+func bumpRuleReloadGen()           { ruleReloadGen.Add(1) }
+func currentRuleReloadGen() uint64 { return ruleReloadGen.Load() }
 
 const SPLTMaxPkts = 10
 

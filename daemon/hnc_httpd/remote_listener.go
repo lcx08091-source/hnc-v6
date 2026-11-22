@@ -191,9 +191,9 @@ func (rl *remoteListener) start() error {
 	rl.mu.Unlock()
 
 	if ip := net.ParseIP(rl.bind); ip != nil && ip.IsUnspecified() && !readAuthRequired(rl.hncDir) {
-		// rc3.1.14 起的提示: 0.0.0.0 + auth_required=false。rc30.12.18 起中间件默认拒绝,
+		// rc3.1.14 起的提示: 0.0.0.0 + auth_required=false。中间件默认拒绝,
 		// 远程客户端照样要 cookie; 本机 KSU 走 loopback 的 X-HNC-Local-Admin。
-		log.Printf("SECURITY: bind=0.0.0.0 with auth_required=false — rc30.12.18 default-deny enforces cookie auth on remote clients. Local KSU loopback bypass remains via X-HNC-Local-Admin secret.")
+		log.Printf("SECURITY: bind=0.0.0.0 with auth_required=false — default-deny enforces cookie auth on remote clients. Local KSU loopback bypass remains via X-HNC-Local-Admin secret.")
 	}
 	log.Printf("remote listener: serving %s (tls=%v, redirect=%v)", ln.Addr(), !rl.noTLS, redir != nil)
 	go func() {

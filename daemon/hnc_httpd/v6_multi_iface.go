@@ -48,16 +48,16 @@ const (
 
 // V6IfaceProbeInput 表示单个网卡的内核状态快照(既可由 sysfs+net.Interfaces 实时采集, 也可由单元测试直接注入)。
 type V6IfaceProbeInput struct {
-	Name          string   `json:"name"`
-	Ifindex       int      `json:"ifindex"`
-	OperUp        bool     `json:"oper_up"`
-	Carrier       bool     `json:"carrier"`
-	MasterBridge  string   `json:"master_bridge,omitempty"` // 若被桥接进 ap_br_wlan2 等桥口, 记录主桥名防双重限速
-	PhyIndex      int      `json:"phy_index,omitempty"`     // ieee80211 phyN 编号(同 phy 多活跃 AP 口识别为双频并发/MLO)
-	MTU           int      `json:"mtu,omitempty"`
-	IPv4CIDRs     []string `json:"ipv4_cidrs,omitempty"`
-	IPv6Global    []string `json:"ipv6_global,omitempty"`
-	IsDefaultWAN  bool     `json:"is_default_wan,omitempty"` // 若持有默认网关(如 wlan0 STA 上游), 严禁误判为热点下游口
+	Name         string   `json:"name"`
+	Ifindex      int      `json:"ifindex"`
+	OperUp       bool     `json:"oper_up"`
+	Carrier      bool     `json:"carrier"`
+	MasterBridge string   `json:"master_bridge,omitempty"` // 若被桥接进 ap_br_wlan2 等桥口, 记录主桥名防双重限速
+	PhyIndex     int      `json:"phy_index,omitempty"`     // ieee80211 phyN 编号(同 phy 多活跃 AP 口识别为双频并发/MLO)
+	MTU          int      `json:"mtu,omitempty"`
+	IPv4CIDRs    []string `json:"ipv4_cidrs,omitempty"`
+	IPv6Global   []string `json:"ipv6_global,omitempty"`
+	IsDefaultWAN bool     `json:"is_default_wan,omitempty"` // 若持有默认网关(如 wlan0 STA 上游), 严禁误判为热点下游口
 }
 
 // V6ManagedDownstream 表示经分类去重后纳入 HNC 并管的活跃下游接口。
@@ -562,10 +562,10 @@ func buildU32LANPairFilterMsg(seq uint32, ifindex int, parent uint32, prio uint1
 }
 
 // BuildLANFastlaneNetlinkBatch 为指定下游网卡编码完整的 1:fffe 2.5Gbps 局域网直通类 Netlink 消息批次:
-//   1. RTM_NEWTCLASS: parent 1:1 -> classid 1:fffe, RATE64=CEIL64=312,500,000 B/s (2.5Gbps), prio=0;
-//   2. RTM_NEWQDISC:  parent 1:fffe -> handle fffe: fq_codel 低延迟叶子队列;
-//   3. RTM_NEWTFILTER(fw): prio 1 handle 0x00fe0000/0x00ff0000 -> flowid 1:fffe (支持显式局域网标记直通);
-//   4. RTM_DELTFILTER + RTM_NEWTFILTER(u32): prio 2 两两匹配全部活跃热点/USB 下游子网互传流量 -> flowid 1:fffe。
+//  1. RTM_NEWTCLASS: parent 1:1 -> classid 1:fffe, RATE64=CEIL64=312,500,000 B/s (2.5Gbps), prio=0;
+//  2. RTM_NEWQDISC:  parent 1:fffe -> handle fffe: fq_codel 低延迟叶子队列;
+//  3. RTM_NEWTFILTER(fw): prio 1 handle 0x00fe0000/0x00ff0000 -> flowid 1:fffe (支持显式局域网标记直通);
+//  4. RTM_DELTFILTER + RTM_NEWTFILTER(u32): prio 2 两两匹配全部活跃热点/USB 下游子网互传流量 -> flowid 1:fffe。
 func BuildLANFastlaneNetlinkBatch(ifindex int, lanSubnets []string, tickInUsec float64) ([][]byte, error) {
 	if ifindex <= 0 {
 		return nil, fmt.Errorf("BuildLANFastlaneNetlinkBatch: invalid ifindex %d", ifindex)

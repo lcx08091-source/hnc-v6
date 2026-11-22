@@ -6,6 +6,7 @@
 //   - Android 原生通知严格通过 exec.CommandContext 纯参数数组直调 /system/bin/cmd + 2s 硬超时 + 控制字符/元字符清洗。
 //   - 锁屏脱敏: lockscreen_mask=true 时对通知正文 raw_value 中间位打码; WebUI API 与 SSE 始终返回 100% 完整原文。
 //   - 系统告警统一经由 hnc.io/dpid/alert.Append 原子落盘。
+//   - RC1 加固: 持久化忽略白名单、三级共享 CDN 防误杀守卫、10 条封禁一键撤销栈、0o600 最小权限与后台零唤醒停表。
 
 package main
 
@@ -33,6 +34,7 @@ import (
 	"unicode"
 
 	"hnc.io/dpid/alert"
+	dpidlg "hnc.io/dpid/leakguard"
 )
 
 // ── v6.0.0 统一挂载入口与按 server 隔离的运行时状态池（零侵入 server.go） ───────
@@ -78,6 +80,8 @@ func (s *server) registerV6FeatureRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/leakguard/clear", s.requireMutation(s.apiLeakGuardClear))
 	mux.HandleFunc("/api/leakguard/config", s.requireMutation(s.apiLeakGuardConfig))
 	mux.HandleFunc("/api/leakguard/block-domain", s.requireMutation(s.apiLeakGuardBlockDomain))
+	mux.HandleFunc("/api/leakguard/whitelist", s.requireMutation(s.apiLeakGuardWhitelist))
+	mux.HandleFunc("/api/leakguard/undo-block", s.requireMutation(s.apiLeakGuardUndoBlock))
 
 	// 模块 2: Vector Express 跨设备微秒级零排队护航
 	mux.HandleFunc("/api/v6/express", s.apiVectorExpress)
@@ -142,6 +146,8 @@ const (
 	leakCmdBinPath          = "/system/bin/cmd"
 	leakMaxSSEClients       = 32
 	leakSSEHeartbeatDefault = 15 * time.Second
+	leakDefaultPollInterval = 3 * time.Second
+	leakMaxUndoStack        = 10
 )
 
 var leakSSEActiveConns atomic.Int64
@@ -184,43 +190,72 @@ type LeakEvent struct {
 	IsBlocked  bool   `json:"is_blocked"`
 }
 
+// LeakBlockUndoEntry 最近 10 条封禁一键撤销栈记录。
+type LeakBlockUndoEntry struct {
+	ID        string   `json:"id"`
+	DstHost   string   `json:"dst_host"`
+	Kind      string   `json:"kind"`              // "domain" | "ip"
+	AlsoIP    string   `json:"also_ip,omitempty"` // 同次连带封锁的独立 IP（若命中共享 CDN IP 自动跳过则为空）
+	MACs      []string `json:"macs,omitempty"`    // 本次封禁实际作用的设备 MAC 列表
+	CreatedAt int64    `json:"created_at"`
+}
+
 type leakGuardCtrlFile struct {
-	Capacity       int             `json:"capacity"`
-	CooldownSec    int             `json:"cooldown_sec"`
-	NotifyEnabled  bool            `json:"notify_enabled"`
-	LockscreenMask bool            `json:"lockscreen_mask"`
-	ClearSeq       int64           `json:"clear_seq"`
-	ClearedAt      int64           `json:"cleared_at"`
-	BlockedTargets map[string]bool `json:"blocked_targets,omitempty"`
-	UpdatedAt      int64           `json:"updated_at"`
+	Capacity       int                 `json:"capacity"`
+	CooldownSec    int                 `json:"cooldown_sec"`
+	NotifyEnabled  bool                `json:"notify_enabled"`
+	LockscreenMask bool                `json:"lockscreen_mask"`
+	ClearSeq       int64               `json:"clear_seq"`
+	ClearedAt      int64               `json:"cleared_at"`
+	BlockedTargets map[string]bool     `json:"blocked_targets,omitempty"`
+	IgnoreRules    []dpidlg.IgnoreRule `json:"ignore_rules"`
+	UpdatedAt      int64               `json:"updated_at"`
 }
 
 type leakGuardPersistFile struct {
-	Config         LeakGuardConfig `json:"config"`
-	BlockedTargets map[string]bool `json:"blocked_targets,omitempty"`
-	ClearSeq       int64           `json:"clear_seq,omitempty"`
-	ClearedAt      int64           `json:"cleared_at,omitempty"`
+	Config         LeakGuardConfig      `json:"config"`
+	BlockedTargets map[string]bool      `json:"blocked_targets,omitempty"`
+	IgnoreRules    []dpidlg.IgnoreRule  `json:"ignore_rules,omitempty"`
+	UndoStack      []LeakBlockUndoEntry `json:"undo_stack,omitempty"`
+	ClearSeq       int64                `json:"clear_seq,omitempty"`
+	ClearedAt      int64                `json:"cleared_at,omitempty"`
 }
 
 type leakNotifyFunc func(ctx context.Context, bin string, args ...string) error
 
 type leakGuardEngine struct {
-	// 64 位原子字段严格置于 offset 0
-	totalHits atomic.Int64
-	clearSeq  atomic.Int64
+	// 64 位原子字段严格连续置于结构体最顶部 offset 0, 8, 16, 24, 32 (兼容 32 位 GOARCH=arm)
+	totalHits     atomic.Int64
+	clearSeq      atomic.Int64
+	ignoredHits   atomic.Int64
+	guardBlocks   atomic.Int64
+	diskReadCount atomic.Int64
 
-	srv            *server
-	mu             sync.Mutex
-	cfg            LeakGuardConfig
-	clearedAt      int64
-	maxSeenTs      int64
-	events         []LeakEvent // 按时间升序存储, 容量受 cfg.Capacity 约束
-	seenIDs        map[string]int64
-	cooldownLedger map[string]int64
-	blockedTargets map[string]bool
-	subs           map[chan LeakEvent]struct{}
-	notifyExec     leakNotifyFunc
-	sseHeartbeat   time.Duration
+	tickerActive atomic.Bool
+
+	srv               *server
+	mu                sync.Mutex
+	cfg               LeakGuardConfig
+	clearedAt         int64
+	maxSeenTs         int64
+	hasEventsStat     bool
+	lastEventsMtimeNs int64
+	lastEventsSize    int64
+	events            []LeakEvent // 按时间升序存储, 容量受 cfg.Capacity 约束
+	seenIDs           map[string]int64
+	ignoredSeenIDs    map[string]int64
+	cooldownLedger    map[string]int64
+	blockedTargets    map[string]bool
+	tombstones        map[string]bool
+	ignoreRules       []dpidlg.IgnoreRule
+	undoStack         []LeakBlockUndoEntry
+	subs              map[chan LeakEvent]struct{}
+	notifyExec        leakNotifyFunc
+	sseHeartbeat      time.Duration
+	pollInterval      time.Duration
+	wakeOnce          sync.Once
+	wakeCh            chan struct{}
+	activityHook      func() (<-chan struct{}, Activity, bool)
 }
 
 func defaultLeakNotifyExec(ctx context.Context, bin string, args ...string) error {
@@ -229,16 +264,47 @@ func defaultLeakNotifyExec(ctx context.Context, bin string, args ...string) erro
 	return cmd.Run()
 }
 
+// writeLeakGuardAtomic0600 原子落盘并强制收紧权限为 0o600, 防止明文隐私配置/事件被同机非特权进程读取。
+func writeLeakGuardAtomic0600(path string, b []byte) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	seq := discoverWriteSeq.Add(1)
+	tmp := fmt.Sprintf("%s.tmp.%d.%d", path, os.Getpid(), seq)
+	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	_ = f.Chmod(0o600)
+	if _, err := f.Write(b); err != nil {
+		_ = f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
+}
+
 func newLeakGuardEngine(s *server) *leakGuardEngine {
 	eng := &leakGuardEngine{
 		srv:            s,
 		cfg:            defaultLeakGuardConfig(),
 		seenIDs:        make(map[string]int64),
+		ignoredSeenIDs: make(map[string]int64),
 		cooldownLedger: make(map[string]int64),
 		blockedTargets: make(map[string]bool),
+		tombstones:     make(map[string]bool),
 		subs:           make(map[chan LeakEvent]struct{}),
 		notifyExec:     defaultLeakNotifyExec,
 		sseHeartbeat:   leakSSEHeartbeatDefault,
+		pollInterval:   leakDefaultPollInterval,
 	}
 	eng.loadPersistedLocked()
 	return eng
@@ -273,10 +339,41 @@ func (e *leakGuardEngine) loadPersistedLocked() {
 	}
 	if pf.BlockedTargets != nil {
 		for k, v := range pf.BlockedTargets {
+			nk := strings.ToLower(strings.TrimSpace(k))
+			if nk == "" {
+				continue
+			}
 			if v {
-				e.blockedTargets[strings.ToLower(strings.TrimSpace(k))] = true
+				e.blockedTargets[nk] = true
+			} else {
+				e.tombstones[nk] = true
 			}
 		}
+	}
+	if len(pf.IgnoreRules) > 0 {
+		seen := make(map[string]bool, len(pf.IgnoreRules))
+		for _, raw := range pf.IgnoreRules {
+			nr, rerr := dpidlg.NormalizeIgnoreRule(raw)
+			if rerr != nil {
+				continue
+			}
+			uk := nr.UniqueKey()
+			if seen[uk] {
+				continue
+			}
+			seen[uk] = true
+			e.ignoreRules = append(e.ignoreRules, nr)
+			if len(e.ignoreRules) >= dpidlg.MaxIgnoreRules {
+				break
+			}
+		}
+	}
+	if len(pf.UndoStack) > 0 {
+		start := 0
+		if len(pf.UndoStack) > leakMaxUndoStack {
+			start = len(pf.UndoStack) - leakMaxUndoStack
+		}
+		e.undoStack = append([]LeakBlockUndoEntry(nil), pf.UndoStack[start:]...)
 	}
 	if pf.ClearSeq > 0 {
 		e.clearSeq.Store(pf.ClearSeq)
@@ -286,19 +383,24 @@ func (e *leakGuardEngine) loadPersistedLocked() {
 	}
 }
 
-func (e *leakGuardEngine) saveStateLocked() error {
+func (e *leakGuardEngine) writeCtrlFileLocked(now int64) error {
 	if e.srv == nil || e.srv.hncDir == "" {
 		return nil
 	}
-	now := time.Now().Unix()
-	pf := leakGuardPersistFile{
-		Config:         e.cfg,
-		BlockedTargets: e.blockedTargets,
-		ClearSeq:       e.clearSeq.Load(),
-		ClearedAt:      e.clearedAt,
+	ctrlBlocked := make(map[string]bool, len(e.blockedTargets)+len(e.tombstones))
+	for k := range e.tombstones {
+		if k != "" {
+			ctrlBlocked[k] = false
+		}
 	}
-	if pb, err := json.MarshalIndent(pf, "", "  "); err == nil {
-		_ = discoverWriteAtomic(e.persistPath(), pb)
+	for k, v := range e.blockedTargets {
+		if v && k != "" {
+			ctrlBlocked[k] = true
+		}
+	}
+	ctrlRules := e.ignoreRules
+	if ctrlRules == nil {
+		ctrlRules = []dpidlg.IgnoreRule{}
 	}
 	ctrl := leakGuardCtrlFile{
 		Capacity:       e.cfg.Capacity,
@@ -307,14 +409,86 @@ func (e *leakGuardEngine) saveStateLocked() error {
 		LockscreenMask: e.cfg.LockscreenMask,
 		ClearSeq:       e.clearSeq.Load(),
 		ClearedAt:      e.clearedAt,
-		BlockedTargets: e.blockedTargets,
+		BlockedTargets: ctrlBlocked,
+		IgnoreRules:    ctrlRules,
 		UpdatedAt:      now,
 	}
 	cb, err := json.MarshalIndent(ctrl, "", "  ")
 	if err != nil {
 		return err
 	}
-	return discoverWriteAtomic(e.ctrlPath(), cb)
+	return writeLeakGuardAtomic0600(e.ctrlPath(), cb)
+}
+
+func (e *leakGuardEngine) saveStateLocked() error {
+	if e.srv == nil || e.srv.hncDir == "" {
+		return nil
+	}
+	now := time.Now().Unix()
+	activeBlocked := make(map[string]bool, len(e.blockedTargets))
+	for k, v := range e.blockedTargets {
+		if v && k != "" {
+			activeBlocked[k] = true
+		}
+	}
+
+	pf := leakGuardPersistFile{
+		Config:         e.cfg,
+		BlockedTargets: activeBlocked,
+		IgnoreRules:    e.ignoreRules,
+		UndoStack:      e.undoStack,
+		ClearSeq:       e.clearSeq.Load(),
+		ClearedAt:      e.clearedAt,
+	}
+	if pb, err := json.MarshalIndent(pf, "", "  "); err == nil {
+		if werr := writeLeakGuardAtomic0600(e.persistPath(), pb); werr != nil {
+			return werr
+		}
+	}
+	return e.writeCtrlFileLocked(now)
+}
+
+// ReloadFromDisk 在整机备份恢复后从磁盘重新加载 LeakGuard 配置并同步 run/leakguard_ctrl.json。
+func (e *leakGuardEngine) ReloadFromDisk() {
+	if e == nil || e.srv == nil || e.srv.hncDir == "" {
+		return
+	}
+	cbNow := readConnBlocks(e.srv.hncDir)
+	e.mu.Lock()
+	e.cfg = defaultLeakGuardConfig()
+	e.blockedTargets = make(map[string]bool)
+	e.tombstones = make(map[string]bool)
+	e.ignoreRules = nil
+	e.undoStack = nil
+	e.ignoredSeenIDs = make(map[string]int64)
+	e.hasEventsStat = false
+	e.loadPersistedLocked()
+	if len(e.events) > e.cfg.Capacity {
+		e.events = append([]LeakEvent(nil), e.events[len(e.events)-e.cfg.Capacity:]...)
+	}
+	_ = e.purgeIgnoredEventsLocked()
+	e.recomputeEventsBlockedLocked(cbNow)
+	_ = e.writeCtrlFileLocked(time.Now().Unix())
+	e.mu.Unlock()
+	e.notifySSEChanged()
+}
+
+func (st *v6ServerState) reloadAllFromDisk() {
+	if st == nil {
+		return
+	}
+	if st.leakGuard != nil {
+		st.leakGuard.ReloadFromDisk()
+	}
+	if st.express != nil {
+		st.express.ReloadFromDisk()
+	}
+	if st.leash != nil {
+		st.leash.ReloadFromDisk()
+	}
+	if st.thermo != nil {
+		st.thermo.ReloadFromDisk()
+	}
 }
 
 // ── 防注入参数清洗与防锁屏社死打码器 ─────────────────────────────────────────
@@ -665,6 +839,33 @@ func normalizeBlockTarget(raw string) (kind, val string, ok bool) {
 	return "", "", false
 }
 
+func matchConnBlockTarget(it connBlock, normVal string) bool {
+	v := strings.ToLower(strings.TrimSpace(it.Value))
+	if v == "" {
+		return false
+	}
+	if it.Kind == "ip" {
+		return normVal == v
+	}
+	if it.Kind == "domain" {
+		return normVal == v || strings.HasSuffix(normVal, "."+v)
+	}
+	return false
+}
+
+func hasAnyDeviceConnBlock(cb connBlockFile, normVal string) bool {
+	normVal = strings.ToLower(strings.TrimSpace(normVal))
+	if normVal == "" {
+		return false
+	}
+	for _, it := range cb.Items {
+		if strings.EqualFold(strings.TrimSpace(it.Value), normVal) {
+			return true
+		}
+	}
+	return false
+}
+
 func matchBlockedHost(hostOrIP string, mac string, cb connBlockFile, lgBlocked map[string]bool) bool {
 	_, normVal, ok := normalizeBlockTarget(hostOrIP)
 	if !ok {
@@ -673,38 +874,200 @@ func matchBlockedHost(hostOrIP string, mac string, cb connBlockFile, lgBlocked m
 	if normVal == "" {
 		return false
 	}
-	for tgt := range lgBlocked {
-		if normVal == tgt || strings.HasSuffix(normVal, "."+tgt) {
+	mac = strings.ToLower(strings.TrimSpace(mac))
+	anyDeviceRuleForTarget := false
+	for _, it := range cb.Items {
+		if !matchConnBlockTarget(it, normVal) {
+			continue
+		}
+		anyDeviceRuleForTarget = true
+		itMAC := strings.ToLower(strings.TrimSpace(it.MAC))
+		if itMAC == "" || itMAC == "*" || itMAC == "all" || (mac != "" && itMAC == mac) {
 			return true
 		}
 	}
-	mac = strings.ToLower(strings.TrimSpace(mac))
-	for _, it := range cb.Items {
-		if mac != "" && it.MAC != "" && it.MAC != mac {
+	if anyDeviceRuleForTarget {
+		return false
+	}
+	for tgt, active := range lgBlocked {
+		if !active {
 			continue
 		}
-		v := strings.ToLower(strings.TrimSpace(it.Value))
-		if v == "" {
-			continue
-		}
-		if it.Kind == "ip" && normVal == v {
-			return true
-		}
-		if it.Kind == "domain" && (normVal == v || strings.HasSuffix(normVal, "."+v)) {
+		if normVal == tgt || strings.HasSuffix(normVal, "."+tgt) {
 			return true
 		}
 	}
 	return false
 }
 
+func toDPIDLeakEventForMatch(ev LeakEvent) dpidlg.LeakEvent {
+	return dpidlg.LeakEvent{
+		MAC:      ev.MAC,
+		SrcIP:    ev.SrcIP,
+		ClientIP: ev.SrcIP,
+		DstHost:  ev.DstHost,
+		DstIP:    ev.DstIP,
+		LeakType: ev.LeakType,
+	}
+}
+
+func (e *leakGuardEngine) matchesIgnoreRuleLocked(ev LeakEvent) bool {
+	if len(e.ignoreRules) == 0 {
+		return false
+	}
+	dev := toDPIDLeakEventForMatch(ev)
+	for i := range e.ignoreRules {
+		if e.ignoreRules[i].MatchesEvent(dev) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *leakGuardEngine) purgeIgnoredEventsLocked() int {
+	if len(e.events) == 0 || len(e.ignoreRules) == 0 {
+		return 0
+	}
+	if e.ignoredSeenIDs == nil {
+		e.ignoredSeenIDs = make(map[string]int64)
+	}
+	kept := make([]LeakEvent, 0, len(e.events))
+	purged := 0
+	var removedHits int64
+	for _, ev := range e.events {
+		if e.matchesIgnoreRuleLocked(ev) {
+			purged++
+			hc := ev.HitCount
+			if hc <= 0 {
+				hc = 1
+			}
+			removedHits += hc
+			delete(e.seenIDs, ev.ID)
+			e.ignoredSeenIDs[ev.ID] = hc
+			e.ignoredHits.Add(hc)
+			continue
+		}
+		kept = append(kept, ev)
+	}
+	if purged > 0 {
+		e.events = kept
+		cur := e.totalHits.Load()
+		next := cur - removedHits
+		if next < int64(len(kept)) {
+			next = int64(len(kept))
+		}
+		e.totalHits.Store(next)
+	}
+	return purged
+}
+
+func (e *leakGuardEngine) recomputeEventsBlockedLocked(cb connBlockFile) {
+	for i := range e.events {
+		blocked := matchBlockedHost(e.events[i].DstHost, e.events[i].MAC, cb, e.blockedTargets)
+		if !blocked && e.events[i].DstIP != "" {
+			blocked = matchBlockedHost(e.events[i].DstIP, e.events[i].MAC, cb, e.blockedTargets)
+		}
+		e.events[i].IsBlocked = blocked
+	}
+}
+
+func sameSortedMACs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+func (e *leakGuardEngine) pushUndoLocked(entry LeakBlockUndoEntry) {
+	filtered := make([]LeakBlockUndoEntry, 0, len(e.undoStack)+1)
+	for _, cur := range e.undoStack {
+		if cur.Kind == entry.Kind && cur.DstHost == entry.DstHost && cur.AlsoIP == entry.AlsoIP && sameSortedMACs(cur.MACs, entry.MACs) {
+			continue
+		}
+		filtered = append(filtered, cur)
+	}
+	filtered = append(filtered, entry)
+	if len(filtered) > leakMaxUndoStack {
+		filtered = append([]LeakBlockUndoEntry(nil), filtered[len(filtered)-leakMaxUndoStack:]...)
+	}
+	e.undoStack = filtered
+}
+
+func (e *leakGuardEngine) pruneUndoOnUnblockLocked(kind, normVal string, unblockedMACs []string) {
+	if len(e.undoStack) == 0 {
+		return
+	}
+	unblkSet := make(map[string]bool, len(unblockedMACs))
+	for _, m := range unblockedMACs {
+		unblkSet[strings.ToLower(strings.TrimSpace(m))] = true
+	}
+	kept := make([]LeakBlockUndoEntry, 0, len(e.undoStack))
+	for _, cur := range e.undoStack {
+		if cur.Kind != kind || cur.DstHost != normVal {
+			kept = append(kept, cur)
+			continue
+		}
+		if len(cur.MACs) == 0 || len(unblkSet) == 0 {
+			continue
+		}
+		var rem []string
+		for _, m := range cur.MACs {
+			if !unblkSet[strings.ToLower(strings.TrimSpace(m))] {
+				rem = append(rem, m)
+			}
+		}
+		if len(rem) > 0 {
+			cur.MACs = rem
+			kept = append(kept, cur)
+		}
+	}
+	e.undoStack = kept
+}
+
+// DiskReadCount 返回 syncFromDisk 实际触发 os.ReadFile 的累计次数（单测核验 stat 免读短路）。
+func (e *leakGuardEngine) DiskReadCount() int64 {
+	if e == nil {
+		return 0
+	}
+	return e.diskReadCount.Load()
+}
+
 func (e *leakGuardEngine) syncFromDisk() []LeakEvent {
-	if e.srv == nil || e.srv.hncDir == "" {
+	if e == nil || e.srv == nil || e.srv.hncDir == "" {
 		return nil
 	}
-	raw, err := os.ReadFile(e.dpidEventsPath())
+	epath := e.dpidEventsPath()
+	st, err := os.Stat(epath)
+	if err != nil || st.IsDir() || st.Size() <= 0 {
+		return nil
+	}
+	mtimeNs := st.ModTime().UnixNano()
+	sz := st.Size()
+
+	e.mu.Lock()
+	unchanged := e.hasEventsStat && e.lastEventsMtimeNs == mtimeNs && e.lastEventsSize == sz
+	e.mu.Unlock()
+	if unchanged {
+		return nil
+	}
+
+	raw, err := os.ReadFile(epath)
 	if err != nil || len(raw) == 0 {
 		return nil
 	}
+	e.diskReadCount.Add(1)
+
+	e.mu.Lock()
+	e.hasEventsStat = true
+	e.lastEventsMtimeNs = mtimeNs
+	e.lastEventsSize = sz
+	e.mu.Unlock()
+
 	parsed := decodeLeakEventsPayload(raw)
 	if len(parsed) == 0 {
 		return nil
@@ -722,6 +1085,9 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 	e.mu.Lock()
 	cfg := e.cfg
 	clearedAt := e.clearedAt
+	if e.ignoredSeenIDs == nil {
+		e.ignoredSeenIDs = make(map[string]int64)
+	}
 	var added []LeakEvent
 	var toNotify []LeakEvent
 
@@ -760,6 +1126,16 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 			ev.HitCount = 1
 		}
 		ev.ID = computeLeakEventID(ev)
+
+		if e.matchesIgnoreRuleLocked(ev) {
+			prev := e.ignoredSeenIDs[ev.ID]
+			if ev.HitCount > prev {
+				e.ignoredHits.Add(ev.HitCount - prev)
+				e.ignoredSeenIDs[ev.ID] = ev.HitCount
+			}
+			continue
+		}
+
 		if _, dup := e.seenIDs[ev.ID]; dup {
 			for idx := len(e.events) - 1; idx >= 0; idx-- {
 				if e.events[idx].ID == ev.ID {
@@ -806,6 +1182,9 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 			keep[it.ID] = it.Ts
 		}
 		e.seenIDs = keep
+	}
+	if len(e.ignoredSeenIDs) > seenLimit {
+		e.ignoredSeenIDs = make(map[string]int64)
 	}
 
 	var subs []chan LeakEvent
@@ -862,6 +1241,10 @@ func (e *leakGuardEngine) snapshotPayload() map[string]any {
 			lgBlocked[k] = true
 		}
 	}
+	ignoreRules := make([]dpidlg.IgnoreRule, len(e.ignoreRules))
+	copy(ignoreRules, e.ignoreRules)
+	undoStack := make([]LeakBlockUndoEntry, len(e.undoStack))
+	copy(undoStack, e.undoStack)
 	list := make([]LeakEvent, len(e.events))
 	copy(list, e.events)
 	e.mu.Unlock()
@@ -908,6 +1291,8 @@ func (e *leakGuardEngine) snapshotPayload() map[string]any {
 	if int64(len(out)) > totalHits {
 		totalHits = int64(len(out))
 	}
+	ignoredHits := e.ignoredHits.Load()
+	guardBlocks := e.guardBlocks.Load()
 	affectedDevs := len(devSet)
 	blockedDomains := len(blockedHostSet)
 
@@ -915,10 +1300,17 @@ func (e *leakGuardEngine) snapshotPayload() map[string]any {
 		"ok":               true,
 		"events":           out,
 		"total_hits":       totalHits,
+		"ignored_hits":     ignoredHits,
+		"guard_blocks":     guardBlocks,
 		"affected_devices": affectedDevs,
 		"blocked_domains":  blockedDomains,
+		"ignore_rules":     ignoreRules,
+		"undo_stack":       undoStack,
+		"undo_count":       len(undoStack),
 		"stats": map[string]any{
 			"total_hits":       totalHits,
+			"ignored_hits":     ignoredHits,
+			"guard_blocks":     guardBlocks,
 			"affected_devices": affectedDevs,
 			"blocked_domains":  blockedDomains,
 		},
@@ -931,24 +1323,128 @@ func (e *leakGuardEngine) summary() map[string]any {
 	cfg := e.cfg
 	cnt := len(e.events)
 	blockedCnt := len(e.blockedTargets)
+	ignoreCnt := len(e.ignoreRules)
+	undoCnt := len(e.undoStack)
 	e.mu.Unlock()
 	return map[string]any{
-		"total_hits":      e.totalHits.Load(),
-		"buffered_events": cnt,
-		"blocked_domains": blockedCnt,
-		"notify_enabled":  cfg.NotifyEnabled,
-		"lockscreen_mask": cfg.LockscreenMask,
+		"total_hits":       e.totalHits.Load(),
+		"ignored_hits":     e.ignoredHits.Load(),
+		"guard_blocks":     e.guardBlocks.Load(),
+		"buffered_events":  cnt,
+		"blocked_domains":  blockedCnt,
+		"ignore_rules_cnt": ignoreCnt,
+		"undo_count":       undoCnt,
+		"notify_enabled":   cfg.NotifyEnabled,
+		"lockscreen_mask":  cfg.LockscreenMask,
 	}
 }
 
+func (e *leakGuardEngine) ensureWakeCh() chan struct{} {
+	if e == nil {
+		return nil
+	}
+	e.wakeOnce.Do(func() {
+		if e.wakeCh == nil {
+			e.wakeCh = make(chan struct{}, 1)
+		}
+	})
+	return e.wakeCh
+}
+
+func (e *leakGuardEngine) notifySSEChanged() {
+	ch := e.ensureWakeCh()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// IsTickerActive 返回后台轮询定时器是否处于激活态（待机停表时为 false）。
+func (e *leakGuardEngine) IsTickerActive() bool {
+	if e == nil {
+		return false
+	}
+	return e.tickerActive.Load()
+}
+
+func (e *leakGuardEngine) effectivePollInterval() time.Duration {
+	if e != nil && e.pollInterval > 0 {
+		return e.pollInterval
+	}
+	return leakDefaultPollInterval
+}
+
+func (e *leakGuardEngine) currentActivity() (<-chan struct{}, Activity, bool) {
+	if e != nil && e.activityHook != nil {
+		return e.activityHook()
+	}
+	ch := activityChanged()
+	act := activityNow()
+	simOn := e != nil && e.srv != nil && e.srv.simActive()
+	return ch, act, simOn
+}
+
 func (e *leakGuardEngine) runLoop(stop <-chan struct{}) {
-	tk := time.NewTicker(3 * time.Second)
-	defer tk.Stop()
+	if e == nil {
+		<-stop
+		return
+	}
+	wakeCh := e.ensureWakeCh()
+	var (
+		tk       *time.Ticker
+		tkCh     <-chan time.Time
+		sleeping bool
+	)
+	stopTicker := func() {
+		if tk != nil {
+			tk.Stop()
+			tk = nil
+			tkCh = nil
+		}
+		e.tickerActive.Store(false)
+	}
+	ensureTicker := func() {
+		if tk == nil {
+			tk = time.NewTicker(e.effectivePollInterval())
+			tkCh = tk.C
+		}
+		e.tickerActive.Store(true)
+	}
+	defer stopTicker()
+
 	for {
+		actCh, act, simOn := e.currentActivity()
+		shouldSleep := act.Known && !simOn && (!act.HotspotActive || (act.ClientsOnline <= 0 && !act.WebUIActive && leakSSEActiveConns.Load() == 0))
+		if shouldSleep {
+			if !sleeping {
+				// 进入休眠停表前先执行一次收尾同步, 随后彻底停表 0 唤醒
+				e.syncFromDisk()
+				stopTicker()
+				sleeping = true
+			}
+			select {
+			case <-stop:
+				return
+			case <-actCh:
+			case <-wakeCh:
+			}
+			continue
+		}
+
+		if sleeping {
+			sleeping = false
+			e.syncFromDisk()
+		}
+		ensureTicker()
 		select {
 		case <-stop:
 			return
-		case <-tk.C:
+		case <-actCh:
+		case <-wakeCh:
+		case <-tkCh:
 			e.syncFromDisk()
 		}
 	}
@@ -971,13 +1467,18 @@ func (s *server) apiLeakGuardStream(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusMethodNotAllowed, map[string]any{"ok": false, "error": "GET only"})
 		return
 	}
+	eng := s.v6State().leakGuard
 	if n := leakSSEActiveConns.Add(1); n > leakMaxSSEClients {
 		leakSSEActiveConns.Add(-1)
 		w.Header().Set("Retry-After", "5")
 		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "error": "too many leakguard SSE streams"})
 		return
 	}
-	defer leakSSEActiveConns.Add(-1)
+	eng.notifySSEChanged()
+	defer func() {
+		leakSSEActiveConns.Add(-1)
+		eng.notifySSEChanged()
+	}()
 
 	rc := http.NewResponseController(w)
 	_ = rc.SetWriteDeadline(time.Time{})
@@ -1011,7 +1512,6 @@ func (s *server) apiLeakGuardStream(w http.ResponseWriter, r *http.Request) {
 		return flushOut() == nil
 	}
 
-	eng := s.v6State().leakGuard
 	subCh := make(chan LeakEvent, 64)
 	eng.mu.Lock()
 	eng.subs[subCh] = struct{}{}
@@ -1070,13 +1570,15 @@ func (s *server) apiLeakGuardClear(w http.ResponseWriter, r *http.Request) {
 	}
 	eng.events = nil
 	eng.seenIDs = make(map[string]int64)
+	eng.ignoredSeenIDs = make(map[string]int64)
 	eng.cooldownLedger = make(map[string]int64)
+	eng.hasEventsStat = false
 	eng.clearedAt = clrTs
 	eng.maxSeenTs = clrTs
 	seq := eng.clearSeq.Add(1)
 	eng.totalHits.Store(0)
 	if s.hncDir != "" {
-		_ = discoverWriteAtomic(eng.dpidEventsPath(), []byte("{\"events\":[]}\n"))
+		_ = writeLeakGuardAtomic0600(eng.dpidEventsPath(), []byte("{\"events\":[]}\n"))
 	}
 	err := eng.saveStateLocked()
 	eng.mu.Unlock()
@@ -1092,6 +1594,7 @@ func (s *server) apiLeakGuardClear(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiLeakGuardConfig POST /api/leakguard/config
+// 仅更新基础 4 字段配置, 完整保留内存与持久化层已存的 ignore_rules 与 undo_stack。
 func (s *server) apiLeakGuardConfig(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Capacity       *int  `json:"capacity"`
@@ -1143,19 +1646,213 @@ func (s *server) apiLeakGuardConfig(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write ctrl failed", "detail": err.Error()})
 		return
 	}
+	eng.notifySSEChanged()
 	writeJSON(w, http.StatusOK, map[string]any{
 		"ok":     true,
 		"config": next,
 	})
 }
 
+// apiLeakGuardWhitelist POST /api/leakguard/whitelist
+// 支持 action: "add" | "remove" | "clear", 三级作用域 "host_type" | "host" | "device_host_type", 硬上限 200 条。
+func (s *server) apiLeakGuardWhitelist(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Action   string `json:"action"`
+		ID       string `json:"id"`
+		Scope    string `json:"scope"`
+		DstHost  string `json:"dst_host"`
+		LeakType string `json:"leak_type"`
+		MAC      string `json:"mac"`
+		Note     string `json:"note"`
+	}
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad json", "detail": err.Error()})
+		return
+	}
+
+	act := strings.ToLower(strings.TrimSpace(req.Action))
+	if act == "" {
+		act = "add"
+	}
+	eng := s.v6State().leakGuard
+
+	switch act {
+	case "add":
+		rule, err := dpidlg.NormalizeIgnoreRule(dpidlg.IgnoreRule{
+			Scope:    req.Scope,
+			DstHost:  req.DstHost,
+			LeakType: req.LeakType,
+			MAC:      req.MAC,
+			Note:     req.Note,
+		})
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad whitelist rule", "detail": err.Error()})
+			return
+		}
+
+		eng.mu.Lock()
+		uk := rule.UniqueKey()
+		existsIdx := -1
+		for i := range eng.ignoreRules {
+			if eng.ignoreRules[i].UniqueKey() == uk {
+				existsIdx = i
+				break
+			}
+		}
+		if existsIdx < 0 {
+			if len(eng.ignoreRules) >= dpidlg.MaxIgnoreRules {
+				eng.mu.Unlock()
+				writeJSON(w, http.StatusBadRequest, map[string]any{
+					"ok":     false,
+					"error":  "too_many_rules",
+					"detail": fmt.Sprintf("ignore whitelist reached max capacity (%d)", dpidlg.MaxIgnoreRules),
+				})
+				return
+			}
+			eng.ignoreRules = append(eng.ignoreRules, rule)
+		} else {
+			if rule.Note != "" {
+				eng.ignoreRules[existsIdx].Note = rule.Note
+			}
+			rule = eng.ignoreRules[existsIdx]
+		}
+		purged := eng.purgeIgnoredEventsLocked()
+		rulesOut := make([]dpidlg.IgnoreRule, len(eng.ignoreRules))
+		copy(rulesOut, eng.ignoreRules)
+		saveErr := eng.saveStateLocked()
+		eng.mu.Unlock()
+		if saveErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write whitelist failed", "detail": saveErr.Error()})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":            true,
+			"action":        "add",
+			"rule":          rule,
+			"purged_events": purged,
+			"ignore_rules":  rulesOut,
+		})
+
+	case "remove":
+		targetID := strings.TrimSpace(req.ID)
+		var targetKey string
+		if targetID == "" {
+			if strings.TrimSpace(req.DstHost) == "" {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": "id or dst_host is required for remove"})
+				return
+			}
+			if nr, err := dpidlg.NormalizeIgnoreRule(dpidlg.IgnoreRule{
+				Scope:    req.Scope,
+				DstHost:  req.DstHost,
+				LeakType: req.LeakType,
+				MAC:      req.MAC,
+			}); err == nil {
+				targetKey = nr.UniqueKey()
+			} else {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": err.Error()})
+				return
+			}
+		}
+
+		eng.mu.Lock()
+		kept := make([]dpidlg.IgnoreRule, 0, len(eng.ignoreRules))
+		removed := 0
+		for _, cur := range eng.ignoreRules {
+			if (targetID != "" && cur.ID == targetID) || (targetKey != "" && cur.UniqueKey() == targetKey) {
+				removed++
+				continue
+			}
+			kept = append(kept, cur)
+		}
+		eng.ignoreRules = kept
+		if removed > 0 {
+			eng.ignoredSeenIDs = make(map[string]int64)
+			eng.hasEventsStat = false
+		}
+		rulesOut := make([]dpidlg.IgnoreRule, len(eng.ignoreRules))
+		copy(rulesOut, eng.ignoreRules)
+		saveErr := eng.saveStateLocked()
+		eng.mu.Unlock()
+		if saveErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write whitelist failed", "detail": saveErr.Error()})
+			return
+		}
+		eng.notifySSEChanged()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":           true,
+			"action":       "remove",
+			"removed":      removed,
+			"ignore_rules": rulesOut,
+		})
+
+	case "clear":
+		eng.mu.Lock()
+		removed := len(eng.ignoreRules)
+		eng.ignoreRules = nil
+		eng.ignoredSeenIDs = make(map[string]int64)
+		eng.hasEventsStat = false
+		saveErr := eng.saveStateLocked()
+		eng.mu.Unlock()
+		if saveErr != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write whitelist failed", "detail": saveErr.Error()})
+			return
+		}
+		eng.notifySSEChanged()
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":           true,
+			"action":       "clear",
+			"removed":      removed,
+			"ignore_rules": []dpidlg.IgnoreRule{},
+		})
+
+	default:
+		writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad params", "detail": "action must be add|remove|clear"})
+	}
+}
+
+func applyConnBlockActionForMACs(s *server, act, kind, normVal string, targetMACs []string, scriptExists bool) (applied int, lastDetail string, errResp *actionResp) {
+	for _, mac := range targetMACs {
+		params := map[string]string{
+			"mac":   mac,
+			"kind":  kind,
+			"value": normVal,
+			"label": "LeakGuard 反制",
+		}
+		var resp actionResp
+		if act == "block" {
+			resp = actionConnBlockAdd(s, params)
+		} else {
+			resp = actionConnBlockDel(s, params)
+		}
+		if resp.OK {
+			applied++
+			lastDetail = resp.Detail
+			continue
+		}
+		if resp.Error == "sync failed" && !scriptExists {
+			applied++
+			lastDetail = "saved (sandbox no connblock_sync.sh)"
+			continue
+		}
+		if act == "unblock" && resp.Error == "not found" {
+			continue
+		}
+		return applied, lastDetail, &resp
+	}
+	return applied, lastDetail, nil
+}
+
 // apiLeakGuardBlockDomain POST /api/leakguard/block-domain
-// 支持 action: "block" | "unblock", 自动识别域名或纯 IPv4/IPv6 并直联 conn_blocks.go 双栈拦截。
+// 支持 action: "block" | "unblock", 集成三级共享基础设施防误杀守卫、also_ip 共享 CDN IP 剥离与 10 条撤销栈。
 func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Action  string `json:"action"`
 		DstHost string `json:"dst_host"`
 		MAC     string `json:"mac"`
+		Force   bool   `json:"force"`
+		AlsoIP  string `json:"also_ip"`
 	}
 	dec := json.NewDecoder(r.Body)
 	dec.DisallowUnknownFields()
@@ -1178,6 +1875,39 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 	}
 
 	eng := s.v6State().leakGuard
+
+	var guardDecision leakBlockGuardDecision
+	if act == "block" {
+		guardDecision = evaluateLeakBlockGuard(s, kind, normVal)
+		if guardDecision.Level == leakGuardLevelHardBlock {
+			eng.guardBlocks.Add(1)
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"ok":          false,
+				"error":       "guard_hard_block",
+				"guard_level": leakGuardLevelHardBlock,
+				"vendor":      guardDecision.Vendor,
+				"category":    guardDecision.Category,
+				"dst_host":    normVal,
+				"detail":      guardDecision.Detail,
+			})
+			return
+		}
+		if guardDecision.Level == leakGuardLevelWarnConfirm && !req.Force {
+			eng.guardBlocks.Add(1)
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"ok":               false,
+				"error":            "guard_warn_confirm",
+				"guard_level":      leakGuardLevelWarnConfirm,
+				"requires_confirm": true,
+				"vendor":           guardDecision.Vendor,
+				"category":         guardDecision.Category,
+				"dst_host":         normVal,
+				"detail":           guardDecision.Detail,
+			})
+			return
+		}
+	}
+
 	reqMAC := strings.ToLower(strings.TrimSpace(req.MAC))
 	var targetMACs []string
 	if reqMAC != "" && reqMAC != "all" && reqMAC != "*" {
@@ -1224,70 +1954,210 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 		scriptExists = true
 	}
 
-	applied := 0
-	var lastDetail string
-	for _, mac := range targetMACs {
-		params := map[string]string{
-			"mac":   mac,
-			"kind":  kind,
-			"value": normVal,
-			"label": "LeakGuard 反制",
-		}
-		var resp actionResp
-		if act == "block" {
-			resp = actionConnBlockAdd(s, params)
-		} else {
-			resp = actionConnBlockDel(s, params)
-		}
-		if resp.OK {
-			applied++
-			lastDetail = resp.Detail
-			continue
-		}
-		if resp.Error == "sync failed" && !scriptExists {
-			applied++
-			lastDetail = "saved (sandbox no connblock_sync.sh)"
-			continue
-		}
-		if act == "unblock" && resp.Error == "not found" {
-			continue
-		}
+	applied, lastDetail, errResp := applyConnBlockActionForMACs(s, act, kind, normVal, targetMACs, scriptExists)
+	if errResp != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]any{
 			"ok":     false,
-			"error":  resp.Error,
-			"detail": resp.Detail,
+			"error":  errResp.Error,
+			"detail": errResp.Detail,
 		})
 		return
 	}
 
-	eng.mu.Lock()
-	if act == "block" {
-		eng.blockedTargets[normVal] = true
-	} else {
-		delete(eng.blockedTargets, normVal)
-	}
-	for i := range eng.events {
-		_, evHost, hok := normalizeBlockTarget(eng.events[i].DstHost)
-		if !hok {
-			evHost = strings.ToLower(eng.events[i].DstHost)
-		}
-		if evHost == normVal || strings.HasSuffix(evHost, "."+normVal) || eng.events[i].DstIP == normVal {
-			if reqMAC == "" || reqMAC == "all" || reqMAC == "*" || eng.events[i].MAC == reqMAC {
-				eng.events[i].IsBlocked = (act == "block")
+	var (
+		skippedSharedIP bool
+		skippedIPVendor string
+		blockedAlsoIP   string
+		normAlsoIP      string
+	)
+	if rawAlso := strings.TrimSpace(req.AlsoIP); rawAlso != "" && kind == "domain" {
+		if ipKind, parsedIP, ipOK := normalizeBlockTarget(rawAlso); ipOK && ipKind == "ip" && !strings.EqualFold(parsedIP, normVal) {
+			normAlsoIP = parsedIP
+			if act == "block" {
+				if shared, vendor := detectSharedInfraIP(s, normAlsoIP); shared {
+					skippedSharedIP = true
+					skippedIPVendor = vendor
+				} else {
+					if _, _, ipErr := applyConnBlockActionForMACs(s, "block", "ip", normAlsoIP, targetMACs, scriptExists); ipErr == nil {
+						blockedAlsoIP = normAlsoIP
+					}
+				}
+			} else {
+				_, _, _ = applyConnBlockActionForMACs(s, "unblock", "ip", normAlsoIP, targetMACs, scriptExists)
 			}
 		}
 	}
+
+	cbNow := readConnBlocks(s.hncDir)
+	now := time.Now().Unix()
+
+	eng.mu.Lock()
+	if act == "block" {
+		eng.blockedTargets[normVal] = true
+		delete(eng.tombstones, normVal)
+		if blockedAlsoIP != "" {
+			eng.blockedTargets[blockedAlsoIP] = true
+			delete(eng.tombstones, blockedAlsoIP)
+		}
+		sum := sha1.Sum([]byte(fmt.Sprintf("%d|%s|%s|%s", time.Now().UnixNano(), kind, normVal, strings.Join(targetMACs, ","))))
+		eng.pushUndoLocked(LeakBlockUndoEntry{
+			ID:        "ub_" + hex.EncodeToString(sum[:6]),
+			DstHost:   normVal,
+			Kind:      kind,
+			AlsoIP:    blockedAlsoIP,
+			MACs:      append([]string(nil), targetMACs...),
+			CreatedAt: now,
+		})
+	} else {
+		if !hasAnyDeviceConnBlock(cbNow, normVal) {
+			delete(eng.blockedTargets, normVal)
+			eng.tombstones[normVal] = true
+		}
+		if normAlsoIP != "" && !hasAnyDeviceConnBlock(cbNow, normAlsoIP) {
+			delete(eng.blockedTargets, normAlsoIP)
+			eng.tombstones[normAlsoIP] = true
+		}
+		eng.pruneUndoOnUnblockLocked(kind, normVal, targetMACs)
+	}
+	eng.recomputeEventsBlockedLocked(cbNow)
+	undoCnt := len(eng.undoStack)
 	_ = eng.saveStateLocked()
 	eng.mu.Unlock()
 
+	respBody := map[string]any{
+		"ok":                true,
+		"action":            act,
+		"kind":              kind,
+		"dst_host":          normVal,
+		"is_blocked":        act == "block",
+		"macs":              targetMACs,
+		"applied_cnt":       applied,
+		"skipped_shared_ip": skippedSharedIP,
+		"undo_count":        undoCnt,
+		"detail":            lastDetail,
+	}
+	if skippedSharedIP {
+		respBody["skipped_ip"] = normAlsoIP
+		respBody["skipped_ip_vendor"] = skippedIPVendor
+	}
+	if blockedAlsoIP != "" {
+		respBody["blocked_also_ip"] = blockedAlsoIP
+	}
+	if act == "block" && guardDecision.Level == leakGuardLevelWarnConfirm && req.Force {
+		respBody["guard_forced"] = true
+		respBody["vendor"] = guardDecision.Vendor
+	}
+	writeJSON(w, http.StatusOK, respBody)
+}
+
+// apiLeakGuardUndoBlock POST /api/leakguard/undo-block
+// 一键弹出最近 1 条（或按 id 指定）封禁记录执行回滚解封, 且仅当无其他设备封锁该目标时才从全局 blockedTargets 移除。
+func (s *server) apiLeakGuardUndoBlock(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		ID string `json:"id"`
+	}
+	if r.Body != nil {
+		raw, err := io.ReadAll(r.Body)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad body", "detail": err.Error()})
+			return
+		}
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) > 0 {
+			dec := json.NewDecoder(bytes.NewReader(trimmed))
+			dec.DisallowUnknownFields()
+			if err := dec.Decode(&req); err != nil {
+				writeJSON(w, http.StatusBadRequest, map[string]any{"ok": false, "error": "bad json", "detail": err.Error()})
+				return
+			}
+		}
+	}
+
+	eng := s.v6State().leakGuard
+	targetID := strings.TrimSpace(req.ID)
+
+	eng.mu.Lock()
+	if len(eng.undoStack) == 0 {
+		eng.mu.Unlock()
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"ok":     false,
+			"error":  "empty_undo_stack",
+			"detail": "当前没有可撤销的封禁记录",
+		})
+		return
+	}
+	pickIdx := len(eng.undoStack) - 1
+	if targetID != "" {
+		pickIdx = -1
+		for i := len(eng.undoStack) - 1; i >= 0; i-- {
+			if eng.undoStack[i].ID == targetID {
+				pickIdx = i
+				break
+			}
+		}
+		if pickIdx < 0 {
+			eng.mu.Unlock()
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"ok":     false,
+				"error":  "undo_not_found",
+				"detail": "指定的封禁撤销记录不存在",
+			})
+			return
+		}
+	}
+	entry := eng.undoStack[pickIdx]
+	eng.undoStack = append(eng.undoStack[:pickIdx], eng.undoStack[pickIdx+1:]...)
+	eng.mu.Unlock()
+
+	scriptExists := false
+	if st, err := os.Stat(filepath.Join(s.hncDir, "bin", "connblock_sync.sh")); err == nil && !st.IsDir() {
+		scriptExists = true
+	}
+
+	macsToUnblock := entry.MACs
+	if len(macsToUnblock) == 0 {
+		for _, it := range readConnBlocks(s.hncDir).Items {
+			if it.Kind == entry.Kind && strings.EqualFold(it.Value, entry.DstHost) && validMAC(it.MAC) {
+				macsToUnblock = append(macsToUnblock, it.MAC)
+			}
+		}
+	}
+
+	applied, lastDetail, _ := applyConnBlockActionForMACs(s, "unblock", entry.Kind, entry.DstHost, macsToUnblock, scriptExists)
+	if entry.AlsoIP != "" {
+		_, _, _ = applyConnBlockActionForMACs(s, "unblock", "ip", entry.AlsoIP, macsToUnblock, scriptExists)
+	}
+
+	cbNow := readConnBlocks(s.hncDir)
+
+	eng.mu.Lock()
+	if !hasAnyDeviceConnBlock(cbNow, entry.DstHost) {
+		delete(eng.blockedTargets, entry.DstHost)
+		eng.tombstones[entry.DstHost] = true
+	}
+	if entry.AlsoIP != "" && !hasAnyDeviceConnBlock(cbNow, entry.AlsoIP) {
+		delete(eng.blockedTargets, entry.AlsoIP)
+		eng.tombstones[entry.AlsoIP] = true
+	}
+	eng.recomputeEventsBlockedLocked(cbNow)
+	remUndo := len(eng.undoStack)
+	saveErr := eng.saveStateLocked()
+	eng.mu.Unlock()
+
+	if saveErr != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write state failed", "detail": saveErr.Error()})
+		return
+	}
+
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"action":      act,
-		"kind":        kind,
-		"dst_host":    normVal,
-		"is_blocked":  act == "block",
-		"macs":        targetMACs,
-		"applied_cnt": applied,
-		"detail":      lastDetail,
+		"ok":             true,
+		"undone":         entry,
+		"dst_host":       entry.DstHost,
+		"kind":           entry.Kind,
+		"also_ip":        entry.AlsoIP,
+		"macs":           macsToUnblock,
+		"applied_cnt":    applied,
+		"remaining_undo": remUndo,
+		"detail":         lastDetail,
 	})
 }

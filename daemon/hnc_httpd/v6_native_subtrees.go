@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -44,11 +45,11 @@ const (
 	v6InnerPrioDefAll uint16 = 9
 
 	// 动态 QoS 延迟联动阈值 (毫秒)
-	v6QoSCalmJitterMs    = 12.0
-	v6QoSCombatJitterMs  = 35.0
-	v6QoSCalmDeltaRTTMs  = 15.0
-	v6QoSCombatDeltaMs   = 45.0
-	v6QoSRatioDeadband   = 3 // 档位变化 >= 3% 才触发内核 RTM_NEWTCLASS 原地更新, 消除微幅振荡
+	v6QoSCalmJitterMs   = 12.0
+	v6QoSCombatJitterMs = 35.0
+	v6QoSCalmDeltaRTTMs = 15.0
+	v6QoSCombatDeltaMs  = 45.0
+	v6QoSRatioDeadband  = 3 // 档位变化 >= 3% 才触发内核 RTM_NEWTCLASS 原地更新, 消除微幅振荡
 
 	// IPv6 原生邻居同步常量
 	v6IPv6SrcHdrOff int = 8  // IPv6 报头源地址偏移 (8..24)
@@ -58,13 +59,13 @@ const (
 
 // QoSDynamicRatios 表示三档应用 QoS 的实时保证带宽比例 (严格满足 Tier1Pct + Tier2Pct + Tier3Pct == 100)。
 type QoSDynamicRatios struct {
-	Tier1Pct      int     `json:"tier1_pct"`       // 实时游戏/语音档: 常规 50% -> 团战抗抖 70%
-	Tier2Pct      int     `json:"tier2_pct"`       // 交互浏览默认档: 常规 35% -> 团战抗抖 20%
-	Tier3Pct      int     `json:"tier3_pct"`       // 后台下载大流档: 常规 15% -> 团战抗抖 10%
-	Mode          string  `json:"mode"`            // "normal_50_35_15" | "adaptive_blend" | "combat_70_20_10"
-	StressFactor  float64 `json:"stress_factor"`   // 0.0 .. 1.0
-	TriggerJitter float64 `json:"trigger_jitter"`  // ms
-	TriggerDelta  float64 `json:"trigger_delta"`   // ms
+	Tier1Pct      int     `json:"tier1_pct"`      // 实时游戏/语音档: 常规 50% -> 团战抗抖 70%
+	Tier2Pct      int     `json:"tier2_pct"`      // 交互浏览默认档: 常规 35% -> 团战抗抖 20%
+	Tier3Pct      int     `json:"tier3_pct"`      // 后台下载大流档: 常规 15% -> 团战抗抖 10%
+	Mode          string  `json:"mode"`           // "normal_50_35_15" | "adaptive_blend" | "combat_70_20_10"
+	StressFactor  float64 `json:"stress_factor"`  // 0.0 .. 1.0
+	TriggerJitter float64 `json:"trigger_jitter"` // ms
+	TriggerDelta  float64 `json:"trigger_delta"`  // ms
 }
 
 // V6AppLimitSlotAssignment 描述单条 (设备, 应用) 限速分配到的正交槽位、子类号与目的 IP 列表。
@@ -903,7 +904,12 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 	if lockErr != nil {
 		return rep, lockErr
 	}
-	defer unlock()
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
 
 	// 1. 多口发现与 1:fffe 直通类就绪
 	miSnap, miErr := s.ReconcileMultiDownstreamV6()
@@ -991,6 +997,8 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 	}
 	rep.AppLimitClasses = len(assignments)
 
+	expActive, expMark, expBgCeilKbps := resolveActiveVectorExpressParams(s, s.hncDir)
+
 	// 3. 若处于原生数据面环境且存在活跃下游口, 下发全部 HTB 设备类、二级子树与双栈防火墙
 	if useNativeDataplane(s.hncDir) && len(downIfindexes) > 0 {
 		fd, sErr := openRTNetlinkSocket()
@@ -1035,18 +1043,49 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 				}
 				rep.DevicesRestored++
 			}
+
+			// 若 Vector Express 活跃, 对全部并管下游口与 ifb0 重放 1:8010 特快通道
+			if expActive {
+				expMask := resolveOrthogonalFilterMask(expMark, DefaultAppQoSMarkMask)
+				bgBps := kbpsToBytesPerSec(expBgCeilKbps)
+				for _, downIdx := range downIfindexes {
+					var eb [][]byte
+					eb = append(eb, buildVectorExpressLegacyCleanupBatch(s.hncDir, downIdx, false, expMark, expMask)...)
+					eb = append(eb, buildVectorExpressUpsertBatch(downIdx, false, DefaultHTBRootRateBps, bgBps, expMark, expMask, tick)...)
+					nSent, _ := sendNetlinkBatchBestEffort(fd, eb)
+					rep.NetlinkMessages += nSent
+				}
+				if ifbIdx > 0 {
+					var ub [][]byte
+					ub = append(ub, buildVectorExpressLegacyCleanupBatch(s.hncDir, ifbIdx, true, expMark, expMask)...)
+					ub = append(ub, buildVectorExpressUpsertBatch(ifbIdx, true, DefaultHTBRootRateBps, 0, expMark, expMask, tick)...)
+					nSent, _ := sendNetlinkBatchBestEffort(fd, ub)
+					rep.NetlinkMessages += nSent
+				}
+			}
 		}
 
-		// 同步应用限速双栈防火墙链
+		// 同步应用限速双栈防火墙链及顶层挂载跳转 (mangle/FORWARD, filter/FORWARD, mangle/POSTROUTING before HNC_SAVE)
 		if len(assignments) > 0 {
 			v4App, v6App := BuildAppLimitFirewallPayloads(assignments, liveIPv4, nil)
+			v4Restored := false
 			if v4Bin := resolveIptablesRestoreBin("iptables-restore"); v4Bin != "" {
 				if pipeIptablesRestore(v4Bin, v4App) == nil {
 					rep.FirewallUpdated = true
+					v4Restored = true
 				}
 			}
+			v6Restored := false
 			if v6Bin := resolveIptablesRestoreBin("ip6tables-restore"); v6Bin != "" {
-				_ = pipeIptablesRestore(v6Bin, v6App)
+				if pipeIptablesRestore(v6Bin, v6App) == nil {
+					v6Restored = true
+				}
+			}
+			if v4Restored || resolveIptablesRestoreBin("iptables-restore") == "" {
+				ensureAppLimitTopHooksOnBin(resolveIptablesRestoreBin("iptables"))
+			}
+			if v6Restored || resolveIptablesRestoreBin("ip6tables-restore") == "" {
+				ensureAppLimitTopHooksOnBin(resolveIptablesRestoreBin("ip6tables"))
 			}
 		}
 
@@ -1063,6 +1102,13 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 		}
 	}
 
+	locked = false
+	unlock()
+
+	if expActive && useNativeDataplane(s.hncDir) {
+		replayVectorExpressIfActive(s, s.hncDir)
+	}
+
 	rep.DurationMs = math.Round(float64(time.Since(t0).Microseconds())/10.0) / 100.0
 	globalV6Subtrees.mu.Lock()
 	globalV6Subtrees.lastRestore = rep
@@ -1076,6 +1122,165 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 	return rep, nil
 }
 
+func runSubtreeIptCmd(iptBin string, args ...string) (string, error) {
+	withWait := append([]string{"-w", "2"}, args...)
+	out, err := nativeIptCmdRunner(iptBin, withWait...)
+	if err == nil {
+		return out, nil
+	}
+	lower := strings.ToLower(out)
+	if strings.Contains(lower, "unknown option") || strings.Contains(lower, "unrecognized option") || strings.Contains(lower, "bad argument `-w'") {
+		return nativeIptCmdRunner(iptBin, args...)
+	}
+	return out, err
+}
+
+func findIptLastChainRuleLine(listOut, saveOut string, targets ...string) int {
+	want := make(map[string]bool, len(targets))
+	for _, t := range targets {
+		want[t] = true
+	}
+	lastMatch := 0
+	for _, rawLn := range strings.Split(listOut, "\n") {
+		fs := strings.Fields(strings.TrimSpace(rawLn))
+		if len(fs) < 2 {
+			continue
+		}
+		n, err := strconv.Atoi(fs[0])
+		if err != nil || n <= 0 {
+			continue
+		}
+		if want[fs[1]] {
+			lastMatch = n
+		}
+	}
+	if lastMatch > 0 || strings.TrimSpace(saveOut) == "" {
+		return lastMatch
+	}
+	ruleIdx := 0
+	for _, rawLn := range strings.Split(saveOut, "\n") {
+		fs := strings.Fields(strings.TrimSpace(rawLn))
+		if len(fs) < 4 || fs[0] != "-A" {
+			continue
+		}
+		ruleIdx++
+		for i := 2; i+1 < len(fs); i++ {
+			if (fs[i] == "-j" || fs[i] == "-g") && want[fs[i+1]] {
+				lastMatch = ruleIdx
+			}
+		}
+	}
+	return lastMatch
+}
+
+func findIptFirstChainRuleLine(listOut, saveOut, target string) int {
+	for _, rawLn := range strings.Split(listOut, "\n") {
+		fs := strings.Fields(strings.TrimSpace(rawLn))
+		if len(fs) < 2 {
+			continue
+		}
+		n, err := strconv.Atoi(fs[0])
+		if err != nil || n <= 0 {
+			continue
+		}
+		if fs[1] == target {
+			return n
+		}
+	}
+	if strings.TrimSpace(saveOut) == "" {
+		return 0
+	}
+	ruleIdx := 0
+	for _, rawLn := range strings.Split(saveOut, "\n") {
+		fs := strings.Fields(strings.TrimSpace(rawLn))
+		if len(fs) < 4 || fs[0] != "-A" {
+			continue
+		}
+		ruleIdx++
+		for i := 2; i+1 < len(fs); i++ {
+			if (fs[i] == "-j" || fs[i] == "-g") && fs[i+1] == target {
+				return ruleIdx
+			}
+		}
+	}
+	return 0
+}
+
+// ensureAppLimitTopHooksOnBin 幂等确保单应用限速三条顶层跳转链就绪:
+//   - mangle/FORWARD -> HNC_APP_LIMIT_UP;
+//   - filter/FORWARD -> HNC_QUIC_APPLIM;
+//   - mangle/POSTROUTING -> HNC_APP_LIMIT_DOWN (严格位于 HNC_SAVE 之前, 防止尾部 HNC_EGRESS_FIX 覆盖前漏存 CONNMARK)。
+func ensureAppLimitTopHooksOnBin(iptBin string) {
+	iptBin = strings.TrimSpace(iptBin)
+	if iptBin == "" {
+		return
+	}
+	ensureChainExists := func(tbl, chain string) {
+		if _, err := runSubtreeIptCmd(iptBin, "-t", tbl, "-L", chain, "-n"); err != nil {
+			_, _ = runSubtreeIptCmd(iptBin, "-t", tbl, "-N", chain)
+		}
+	}
+
+	// 1. mangle/FORWARD -> HNC_APP_LIMIT_UP
+	if _, err := runSubtreeIptCmd(iptBin, "-t", "mangle", "-C", "FORWARD", "-j", "HNC_APP_LIMIT_UP"); err != nil {
+		ensureChainExists("mangle", "HNC_APP_LIMIT_UP")
+		listOut, _ := runSubtreeIptCmd(iptBin, "-t", "mangle", "-L", "FORWARD", "-n", "--line-numbers")
+		saveOut := ""
+		if findIptLastChainRuleLine(listOut, "", "HNC_STATS", "HNC_MARK") == 0 {
+			saveOut, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-S", "FORWARD")
+		}
+		if anchorLn := findIptLastChainRuleLine(listOut, saveOut, "HNC_STATS", "HNC_MARK"); anchorLn > 0 {
+			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-I", "FORWARD", strconv.Itoa(anchorLn+1), "-j", "HNC_APP_LIMIT_UP"); iErr != nil {
+				_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "FORWARD", "-j", "HNC_APP_LIMIT_UP")
+			}
+		} else {
+			_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "FORWARD", "-j", "HNC_APP_LIMIT_UP")
+		}
+	}
+
+	// 2. filter/FORWARD -> HNC_QUIC_APPLIM
+	if _, err := runSubtreeIptCmd(iptBin, "-t", "filter", "-C", "FORWARD", "-j", "HNC_QUIC_APPLIM"); err != nil {
+		ensureChainExists("filter", "HNC_QUIC_APPLIM")
+		if _, iErr := runSubtreeIptCmd(iptBin, "-t", "filter", "-I", "FORWARD", "1", "-j", "HNC_QUIC_APPLIM"); iErr != nil {
+			_, _ = runSubtreeIptCmd(iptBin, "-t", "filter", "-A", "FORWARD", "-j", "HNC_QUIC_APPLIM")
+		}
+	}
+
+	// 3. mangle/POSTROUTING -> HNC_APP_LIMIT_DOWN (严格位于 HNC_SAVE 之前!)
+	locatePostLines := func() (int, int) {
+		lOut, _ := runSubtreeIptCmd(iptBin, "-t", "mangle", "-L", "POSTROUTING", "-n", "--line-numbers")
+		sLn := findIptFirstChainRuleLine(lOut, "", "HNC_SAVE")
+		dLn := findIptFirstChainRuleLine(lOut, "", "HNC_APP_LIMIT_DOWN")
+		if sLn == 0 && dLn == 0 {
+			sOut, _ := runSubtreeIptCmd(iptBin, "-t", "mangle", "-S", "POSTROUTING")
+			sLn = findIptFirstChainRuleLine(lOut, sOut, "HNC_SAVE")
+			dLn = findIptFirstChainRuleLine(lOut, sOut, "HNC_APP_LIMIT_DOWN")
+		}
+		return sLn, dLn
+	}
+
+	saveLn, downLn := locatePostLines()
+	_, hasDownErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-C", "POSTROUTING", "-j", "HNC_APP_LIMIT_DOWN")
+	if hasDownErr == nil && saveLn > 0 && downLn > saveLn {
+		// 若已有 HNC_APP_LIMIT_DOWN 误排在 HNC_SAVE 之后, 先摘除再重插到 HNC_SAVE 之前
+		_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-D", "POSTROUTING", "-j", "HNC_APP_LIMIT_DOWN")
+		saveLn, _ = locatePostLines()
+		hasDownErr = errors.New("reinsert HNC_APP_LIMIT_DOWN before HNC_SAVE")
+	}
+	if hasDownErr != nil {
+		ensureChainExists("mangle", "HNC_APP_LIMIT_DOWN")
+		if saveLn > 0 {
+			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-I", "POSTROUTING", strconv.Itoa(saveLn), "-j", "HNC_APP_LIMIT_DOWN"); iErr != nil {
+				_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "POSTROUTING", "-j", "HNC_APP_LIMIT_DOWN")
+			}
+		} else {
+			if _, iErr := runSubtreeIptCmd(iptBin, "-t", "mangle", "-I", "POSTROUTING", "1", "-j", "HNC_APP_LIMIT_DOWN"); iErr != nil {
+				_, _ = runSubtreeIptCmd(iptBin, "-t", "mangle", "-A", "POSTROUTING", "-j", "HNC_APP_LIMIT_DOWN")
+			}
+		}
+	}
+}
+
 func (s *server) apiV6NativeSubtreesGet(w http.ResponseWriter, _ *http.Request) {
 	ratios := s.CurrentDynamicQoSRatios()
 	globalV6Subtrees.mu.RLock()
@@ -1083,8 +1288,8 @@ func (s *server) apiV6NativeSubtreesGet(w http.ResponseWriter, _ *http.Request) 
 	globalV6Subtrees.mu.RUnlock()
 
 	writeJSON(w, http.StatusOK, map[string]any{
-		"ok":          true,
-		"qos_ratios":  ratios,
+		"ok":           true,
+		"qos_ratios":   ratios,
 		"last_restore": lastRestore,
 		"counters": map[string]uint64{
 			"app_limit_applies": globalV6Subtrees.appLimitApplies.Load(),

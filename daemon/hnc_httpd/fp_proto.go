@@ -1,12 +1,13 @@
 // fp_proto.go — HNC v5.38.0: 极少样本 (1~3 条真值即可生效) 多模态原型匹配器 (IDF-Jaccard + 对数归一化 SPLT 余弦)
 //
 // 解决痛点:
-//   旧 fp_learn.go 要求 support >= 50 且 purity >= 90%, 个人手机日常亮屏仅采集几百条样本时大量 App 只有 1~5 条冷启动记录,
-//   长期处于 0 条可用指纹死锁状态; 而 flow_cls.go 分箱朴素贝叶斯在少样本下退化为平滑噪声且只能分大类。
-//   本模块为每个应用构建轻量多模态原型(<400B/App):
-//     1) 离散上下文特征词 (TLSFP / JA4 / QTP / ASN / /24 子网) 采用全局逆应用频率 (IDF) 加权广义 Jaccard,
-//        自动压低 20 个应用共用的系统 WebView/通用栈权重, 放大专属栈与专属网段区分度;
-//     2) 连续行为序列采用对数压缩 L2 归一化 8 包有向 SPLT 质心余弦相似度, 区分共享同一 TTNet/Cronet 栈的短视频 vs 小说图文。
+//
+//	旧 fp_learn.go 要求 support >= 50 且 purity >= 90%, 个人手机日常亮屏仅采集几百条样本时大量 App 只有 1~5 条冷启动记录,
+//	长期处于 0 条可用指纹死锁状态; 而 flow_cls.go 分箱朴素贝叶斯在少样本下退化为平滑噪声且只能分大类。
+//	本模块为每个应用构建轻量多模态原型(<400B/App):
+//	  1) 离散上下文特征词 (TLSFP / JA4 / QTP / ASN / /24 子网) 采用全局逆应用频率 (IDF) 加权广义 Jaccard,
+//	     自动压低 20 个应用共用的系统 WebView/通用栈权重, 放大专属栈与专属网段区分度;
+//	  2) 连续行为序列采用对数压缩 L2 归一化 8 包有向 SPLT 质心余弦相似度, 区分共享同一 TTNet/Cronet 栈的短视频 vs 小说图文。
 package main
 
 import (
@@ -26,13 +27,13 @@ const (
 )
 
 type AppPrototype struct {
-	AppID        string             `json:"app_id"`
-	AppName      string             `json:"app_name"`
-	Category     string             `json:"category,omitempty"`
-	SampleCount  uint32             `json:"sample_count"`
-	Tokens       map[string]float32 `json:"tokens"`
+	AppID        string                `json:"app_id"`
+	AppName      string                `json:"app_name"`
+	Category     string                `json:"category,omitempty"`
+	SampleCount  uint32                `json:"sample_count"`
+	Tokens       map[string]float32    `json:"tokens"`
 	SPLTCentroid [protoSPLTDim]float32 `json:"splt_centroid,omitempty"`
-	UpdatedAt    int64              `json:"updated_at"`
+	UpdatedAt    int64                 `json:"updated_at"`
 }
 
 type protoStoreFile struct {
@@ -274,7 +275,6 @@ func logNormSPLT8(raw [protoSPLTDim]int16) ([protoSPLTDim]float32, bool) {
 	}
 	return out, true
 }
-
 
 // distillFewShotPrototypes 扫描最近 7 天本机真值 label_samples, 1~3 条样本即可生成 IDF-Jaccard + SPLT 原型库
 func distillFewShotPrototypes(hncDir string, now time.Time) int {

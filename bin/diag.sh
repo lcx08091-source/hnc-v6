@@ -1,26 +1,21 @@
 #!/system/bin/sh
 
-# v3.8.6 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
-# diag.sh — HNC 自检脚本 (hotfix18.5)
-# rc3.1.34 修 #28: 之前固定写 v3.8.6 的版本号字面, 每次发版都过期. 改成版本前缀
-# 不带具体补丁号. 真实版本以 module.prop 为准 (script 内可读 $HNC_DIR/module.prop).
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
+# diag.sh — HNC 自检脚本
 #
 # 用法:
 #   sh /data/local/hnc/bin/diag.sh
 #   sh /data/local/hnc/bin/diag.sh --json     # 输出 JSON 格式
 #
-# 检查核心系统状态,每项 OK / FAIL / WARN,
-# 帮助快速定位问题。LTS 版本必备的故障排查工具。
+# 检查核心系统状态, 每项 OK / FAIL / WARN, 帮助快速定位问题。
 #
-# v5.9.3 · 与 bin/diag/diag.sh 的关系(此前 README 与 COMPATIBILITY 各指一个
-# 脚本,用户以为是同一个东西写错了路径,这里一次说清):
-#   bin/diag.sh       —— 本脚本,逐项判定型自检。给 OK/WARN/FAIL + 退出码,
+# 与 bin/diag/diag.sh 的关系:
+#   bin/diag.sh       —— 本脚本, 逐项判定型自检。给 OK/WARN/FAIL + 退出码,
 #                        回答"现在健不健康"。
-#   bin/diag/diag.sh  —— 信息转储型。不判定、不返回错误码,输出内核/ROM/
-#                        root 框架/fork 兼容性等原始信息,回答"这台机器是
-#                        什么环境",用于汇报兼容性问题。
-# 两者互补不互相替代;报兼容性问题时建议两个都跑。
+#   bin/diag/diag.sh  —— 信息转储型。不判定、不返回错误码, 输出内核/ROM/
+#                        root 框架/fork 兼容性等原始信息, 回答"这台机器是
+#                        什么环境", 用于汇报兼容性问题。
+# 两者互补不互相替代; 报兼容性问题时建议两个都跑。
 #
 # 退出码:
 #   0 = 全部 OK
@@ -38,30 +33,32 @@ FAIL=0
 RESULTS=""
 
 ok()   { PASS=$((PASS+1)); RESULTS="$RESULTS$1|OK|$2
-"; [ $JSON_MODE -eq 0 ] && printf '  \033[32m✓\033[0m %-22s %s\n' "$1" "$2"; }
+"; [ $JSON_MODE -eq 0 ] && printf '  \033[32m[OK]\033[0m   %-22s %s\n' "$1" "$2"; }
 warn() { WARN=$((WARN+1)); RESULTS="$RESULTS$1|WARN|$2
-"; [ $JSON_MODE -eq 0 ] && printf '  \033[33m!\033[0m %-22s %s\n' "$1" "$2"; }
+"; [ $JSON_MODE -eq 0 ] && printf '  \033[33m[WARN]\033[0m %-22s %s\n' "$1" "$2"; }
 fail() { FAIL=$((FAIL+1)); RESULTS="$RESULTS$1|FAIL|$2
-"; [ $JSON_MODE -eq 0 ] && printf '  \033[31m✗\033[0m %-22s %s\n' "$1" "$2"; }
+"; [ $JSON_MODE -eq 0 ] && printf '  \033[31m[FAIL]\033[0m %-22s %s\n' "$1" "$2"; }
 
-# rc5.1.1 修 H2: 提前读 VER, 标题能显示实际版本
-MODDIR=/data/adb/modules/hotspot_net_ctl; [ -d "$MODDIR" ] || MODDIR=/data/adb/modules/hotspot_network_control
-[ -f "$MODDIR/module.prop" ] && VER=$(grep "^version=" "$MODDIR/module.prop" | cut -d= -f2) || VER="unknown"
+_DIAG_SELF_ROOT=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+MODDIR=/data/adb/modules/hotspot_net_ctl
+[ -d "$MODDIR" ] || MODDIR=/data/adb/modules/hotspot_network_control
+VER="unknown"
+for _mp in "$MODDIR/module.prop" "$HNC/module.prop" "${_DIAG_SELF_ROOT:+$_DIAG_SELF_ROOT/module.prop}"; do
+    [ -n "$_mp" ] && [ -f "$_mp" ] || continue
+    VER=$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')
+    [ -n "$VER" ] && break
+done
+[ -n "$VER" ] || VER="unknown"
 
 [ $JSON_MODE -eq 0 ] && {
     echo ""
     echo "  HNC $VER 自检"
-    echo "  ──────────────────────────────────────────────"
+    echo "  ----------------------------------------------"
 }
 
-# ── [1/14] HNC 安装目录 ──────────────────────────────────
-# v3.8.6 修复:module.prop 在 Magisk/KernelSU 模块目录,
-# 不在 $HNC 运行目录。之前检查 $HNC/module.prop 永远 FAIL,
-# 因为 HNC 从 v3.5 开始就没这个文件(只有 bin/data/logs/run)。
-MODDIR=/data/adb/modules/hotspot_net_ctl; [ -d "$MODDIR" ] || MODDIR=/data/adb/modules/hotspot_network_control
+# ── [1/16] HNC 安装目录 ──────────────────────────────────
 if [ -d "$HNC" ]; then
-    if [ -d "$HNC/bin" ] && [ -d "$HNC/data" ] && [ -f "$MODDIR/module.prop" ]; then
-        VER=$(grep "^version=" "$MODDIR/module.prop" | cut -d= -f2)
+    if [ -d "$HNC/bin" ] && [ -d "$HNC/data" ] && [ "$VER" != "unknown" ]; then
         ok "安装目录" "$HNC ($VER)"
     elif [ -d "$HNC/bin" ] && [ -d "$HNC/data" ]; then
         warn "安装目录" "$HNC 齐全但 module.prop 位置异常($MODDIR 未找到)"
@@ -222,26 +219,12 @@ if [ -e "$HNC/bin/hotspotd" ]; then
         warn "hotspotd daemon" "binary 存在但未运行(watchdog 会在 60s 内拉起)"
     fi
 else
-    warn "hotspotd daemon" "binary 未部署,shell fallback 模式(v3.5+ 不推荐)"
+    warn "hotspotd daemon" "binary 未部署,shell fallback 模式(不推荐)"
 fi
 
-# ── [14/14] dumpsys network_stack 格式探针(v3.8.6) ───────
-# v3.7.0 加入的 DHCP hostname 识别功能,依赖 `dumpsys network_stack` 输出里
-# 同时包含 "hwAddr: " 和 "hostname: " 两个字段。Android mainline 模块没有
-# 稳定的 API 合约,将来 Google 改了输出格式 HNC 会静默失效(WebUI 所有
-# 设备都变成 MAC 兜底或 OUI 兜底)。
-#
-# Gemini P1-6 审查指出的问题。这个探针让格式变化**在启动时立刻暴露**,
-# 不是等到某个用户抱怨"为什么所有设备都变名字了"才发现。
-#
-# 检查策略:
-#   1. 能跑 dumpsys network_stack 且有输出(root 权限正常)
-#   2. 输出至少包含一次 "hwAddr: "
-#   3. 输出至少包含一次 "hostname: "
-#
-# 三个都 OK → 格式匹配 v3.7+ 预期
-# 有输出但缺 hwAddr/hostname → 格式已变,WARN + 建议升级
-# 无输出 / 命令失败 → WARN(可能 root 受限 / Android < 14)
+# ── [14/16] dumpsys network_stack 格式探针 ─────────────────
+# DHCP hostname 识别功能依赖 `dumpsys network_stack` 输出里同时包含
+# "hwAddr: " 和 "hostname: " 两个字段。探针让格式变化在自检时立刻暴露。
 NS_OUT=$(dumpsys network_stack 2>/dev/null | head -200)
 if [ -z "$NS_OUT" ]; then
     warn "dumpsys 格式探针" "dumpsys network_stack 无输出(Android < 14 或 root 受限),DHCP hostname 识别将降级"
@@ -259,9 +242,8 @@ else
     fi
 fi
 
-# ── [15/16] JSON 健康状态(hotfix18.5) ───────────────────
-# hotfix18.3/18.4 引入 json_guard/json_doctor 后,diag 也显示 JSON 健康情况。
-# 这里只调用只读 status,不会修改 live JSON。
+# ── [15/16] JSON 健康状态 ─────────────────────────────────
+# 只调用只读 status,不会修改 live JSON。
 if [ -x "$HNC/bin/json_doctor.sh" ]; then
     JSON_STATUS_OUT=$(sh "$HNC/bin/json_doctor.sh" status 2>/dev/null)
     JSON_STATUS_RC=$?
@@ -271,10 +253,10 @@ if [ -x "$HNC/bin/json_doctor.sh" ]; then
         warn "JSON 健康" "json_doctor status rc=$JSON_STATUS_RC,建议运行 json_diag_bundle.sh 导出诊断包"
     fi
 else
-    warn "JSON 健康" "json_doctor.sh 未安装(hotfix18.4+ 应存在)"
+    warn "JSON 健康" "json_doctor.sh 未安装(核心组件缺失)"
 fi
 
-# ── [16/16] JSON 备份与 TC 快照(hotfix18.5) ─────────────
+# ── [16/16] JSON 备份与 TC 快照 ───────────────────────────
 JSON_BACKUP_COUNT=$(ls "$HNC/data/.json_backups"/* 2>/dev/null | wc -l)
 HAS_TC_STATE=0
 [ -f "$HNC/run/tc_state.json" ] && HAS_TC_STATE=1
@@ -288,13 +270,13 @@ else
     warn "诊断快照" "无 JSON 备份且无 tc_state.json,可运行 json_diag_bundle.sh"
 fi
 
-# ── [16b] tc_state 快照新鲜度(v5.9.3 · BUG-012 步骤2) ────
+# ── [16b] tc_state 快照新鲜度 ─────────────────────────────
 # tc_state.json 是纯事件驱动快照:只有 tc_manager.sh 的命令分发会触发
 # tc_snapshot_async,自身没有心跳/定时器。所以稳态下它几天不更新是设计,
 # 不是故障 —— 上面那行"已生成"只证明文件在,不证明内容还对得上当前 tc 树。
 # 这里补一条新鲜度提示,避免直接 cat 快照排障时被几天前的数据误导:
-#   ≤900s  → OK
-#   >900s  → WARN,措辞明确写"不代表 tc 树有问题"(别把设计当故障报)
+#   <=900s -> OK
+#   >900s  -> WARN,措辞明确写"不代表 tc 树有问题"(别把设计当故障报)
 # 真实 tc 状态以 `tc qdisc show dev <iface>` 为准;或跑 json_diag_bundle.sh,
 # 它打包前会重跑一次 snapshot,正式诊断包里的快照总是新鲜的。
 TC_STATE_MAX_AGE=900
@@ -334,19 +316,19 @@ if [ $JSON_MODE -eq 1 ]; then
     printf ']}\n'
 else
     echo ""
-    echo "  ──────────────────────────────────────────────"
+    echo "  ----------------------------------------------"
     printf "  汇总: \033[32m%d OK\033[0m  \033[33m%d WARN\033[0m  \033[31m%d FAIL\033[0m\n" "$PASS" "$WARN" "$FAIL"
     if [ "$FAIL" -gt 0 ]; then
         echo ""
-        echo "  ⚠ 检测到失败项,请查看上方 ✗ 标记"
+        echo "  [!] 检测到失败项,请查看上方 [FAIL] 标记"
         echo "  日志路径: $HNC/logs/"
         echo "  GitHub: 报 issue 时请附上本输出"
     elif [ "$WARN" -gt 0 ]; then
         echo ""
-        echo "  ✓ 系统基本正常,有少量警告(非致命)"
+        echo "  [OK] 系统基本正常,有少量警告(非致命)"
     else
         echo ""
-        echo "  ✓ 系统完全正常"
+        echo "  [OK] 系统完全正常"
     fi
     echo ""
 fi

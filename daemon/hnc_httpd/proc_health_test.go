@@ -86,7 +86,7 @@ func TestBuildProcHealthOK(t *testing.T) {
 	b, _ := json.Marshal(out)
 	for _, k := range []string{`"schema_version":1`, `"timestamp":1700000000`, `"status":"ok"`,
 		`"watchdog_total"`, `"watchdog_main"`, `"dpid_guard_total"`, `"dpid_guard_main"`,
-		`"hnc_httpd"`, `"hnc_dpid"`, `"hotspotd"`, `"dpid_child"`} {
+		`"hnc_httpd"`, `"hnc_dpid"`, `"hotspotd"`} {
 		if !strings.Contains(string(b), k) {
 			t.Errorf("JSON 缺字段 %s: %s", k, b)
 		}

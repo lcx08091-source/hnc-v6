@@ -1,12 +1,12 @@
 // self_studio.go — v5.37.0 「亮屏智能常驻 + 熄屏休眠自动增量蒸馏」统一 DPI 自训练控制器
 //
 // 彻底收口旧版 /api/self/* 三散装开关与 Studio 手动会话的锁竞态:
-//  1) 支持三态统一策略 (持久化于 data/self_policy.json, 进程重启不丢失、不泄漏后台抓包):
+//  1. 支持三态统一策略 (持久化于 data/self_policy.json, 进程重启不丢失、不泄漏后台抓包):
 //     - smart_screen (默认推荐): 亮屏智能常驻 — 手机亮屏时自动挂载双路真值采集与个人飞轮,
-//       熄屏立即拆除抓包句柄(0 轮询耗电), 并在熄屏静默满 25 秒且有新增样本时自动执行增量蒸馏 + 编译下发 dpid;
+//     熄屏立即拆除抓包句柄(0 轮询耗电), 并在熄屏静默满 25 秒且有新增样本时自动执行增量蒸馏 + 编译下发 dpid;
 //     - lease_15m (兼容旧参 full / observe): 15 分钟集中快训 — 到期自动增量蒸馏并无损退回原模式(smart_screen 或 off);
 //     - off (兼容旧参 stop): 完全关闭, 0 唤醒。
-//  2) 修复 countLocalUsableArtifacts 未调用 fpFor(hncDir) + fpSt.loadLocked() 的统计与编译隐患。
+//  2. 修复 countLocalUsableArtifacts 未调用 fpFor(hncDir) + fpSt.loadLocked() 的统计与编译隐患。
 package main
 
 import (
@@ -438,7 +438,7 @@ func actionSelfStudioStart(s *server, p map[string]string) actionResp {
 	var normMode string
 	observeOnly := false
 	switch rawMode {
-	case "smart_screen", "resident_smart":
+	case "smart_screen":
 		normMode = "smart_screen"
 	case "lease_15m", "full":
 		normMode = "lease_15m"

@@ -42,9 +42,6 @@ const (
 // TC_H_ROOT 根 parent 的值(qdisc "root")。
 const TC_H_ROOT = 0xFFFFFFFF
 
-// TC_H_INGRESS ingress parent 的值("parent ffff:")。
-const TC_H_INGRESS = 0xFFFF0000
-
 // TC_HMaj(handle "1:")的数值 —— handle = major<<16。
 func TC_HMaj(major uint32) uint32 { return major << 16 }
 

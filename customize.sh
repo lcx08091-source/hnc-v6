@@ -1,5 +1,5 @@
 #!/system/bin/sh
-# customize.sh — HNC 安装期脚本(v5.22)
+# customize.sh — HNC 安装期脚本
 #
 # Magisk(v20.4+)与 KernelSU / SukiSU 安装模块时都会 source 本文件:
 #   - 运行时模块文件已解压到 $MODPATH(未设 SKIPUNZIP), 默认权限已套用
@@ -20,6 +20,11 @@ fi
 if ! command -v abort >/dev/null 2>&1; then
     abort() { ui_print "$*"; exit 1; }
 fi
+
+_HNC_CVER=$(sed -n '/^version=/{s/^version=//p;q;}' "$MODPATH/module.prop" 2>/dev/null | tr -d ' \t\r\n"')
+_HNC_CVC=$(sed -n '/^versionCode=/{s/^versionCode=//p;q;}' "$MODPATH/module.prop" 2>/dev/null | tr -d ' \t\r\n"')
+[ -n "$_HNC_CVER" ] && ui_print "- HNC $_HNC_CVER${_HNC_CVC:+ ($_HNC_CVC)}"
+unset _HNC_CVER _HNC_CVC
 
 if [ ! -f "$MODPATH/bin/hnc_arch.sh" ]; then
     abort "! 安装包损坏: 缺少 bin/hnc_arch.sh"

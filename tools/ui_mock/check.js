@@ -160,7 +160,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await shot('signal-sheet'); await checkText('signal-sheet'); await closeSheet();
       }
 
-      // ── 智能护航 (v6.0.0 网速护航 + 隐私安检 + 连接排障) ──
+      // ── 智能护航 (v6.1.0-rc.1 网速护航 + 隐私安检 + 连接排障) ──
       await tab('vector');
       await settle(900);
       await scrollShots('vector-escort', 4);
@@ -171,6 +171,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       if (await page.locator('[data-v6-act="lgd-toggle-btn"]').count()) {
         await click('[data-v6-act="lgd-toggle-btn"]', 500);
         await shot('vector-leakguard-forensic'); await checkText('vector-leakguard-forensic');
+      }
+      if (await page.locator('[data-v6-act="lgd-ignore-sheet"]').count()) {
+        await click('[data-v6-act="lgd-ignore-sheet"]', 600);
+        await shot('vector-leakguard-ignore'); await checkText('vector-leakguard-ignore'); await closeSheet();
+      }
+      if (await page.locator('[data-v6-fold="lgGuard"] > summary').count()) {
+        await click('[data-v6-fold="lgGuard"] > summary', 500);
+        await shot('vector-leakguard-guard'); await checkText('vector-leakguard-guard');
       }
       if (await page.locator('[data-v6-subtab="troubleshoot"]').count()) {
         await click('[data-v6-subtab="troubleshoot"]', 500);
@@ -201,6 +209,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await tab('settings');
       await settle(600);
       await scrollShots('settings', 6);
+      if (await page.locator('[data-act="quick-health"]').count()) {
+        await click('[data-act="quick-health"]', 900);
+        await shot('quick-health'); await checkText('quick-health'); await closeSheet();
+      }
       await click('.sgrp[data-foldkey="scard-look"] > .sgrp-h', 1000);   // 外观折叠卡
       await page.evaluate(() => { const f = document.querySelector('[data-foldkey="look"]'), p = document.querySelector('.page.on'); if (f && p) p.scrollTop += f.getBoundingClientRect().top - 80; });
       await settle(700); await shot('settings-look-1');

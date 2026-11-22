@@ -111,12 +111,12 @@ r=$?
   && grep -q recorded_only "$HNC/data/rollback.json" \
   && test_pass || test_fail "r=$r bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
 
-test_start "rollback: status 打印 rollback.json"
+test_start "rollback: 已清退子命令 status 返回退出码 4"
 rbseed 5290001 5280001
 rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
 rbrun observe "$HNC" >/dev/null 2>&1
-out=$(rbrun status "$HNC")
-[ -z "$out" ] && [ ! -f "$HNC/data/rollback.json" ] && test_pass || test_fail "status 应为空(未回滚), got: $out"
+out=$(rbrun status "$HNC" 2>/dev/null); rc=$?
+[ "$rc" -eq 4 ] && [ -z "$out" ] && [ ! -f "$HNC/data/rollback.json" ] && test_pass || test_fail "未知子命令 status 应返回 rc=4 且 stdout 为空, got: rc=$rc out=$out"
 
 # ── v5.29 审查修复 ──────────────────────────────────────────────────
 
@@ -218,3 +218,29 @@ rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
 i=0; while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; i=$((i+1)); done
 [ -f "$HNC/data/rollback.json" ] && [ ! -f "$HNC/data/rollback.ack" ] \
   && test_pass || test_fail "ack 仍在: $(ls "$HNC/data")"
+
+test_start "rollback: 6000001 -> 6009202 -> 6009301 跨预发布连刷全程锁住 6000001 黄金 .prev 快照"
+rbseed 6009202 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-beta.2\nversionCode=6009202\n' > "$MOD/module.prop"
+echo "GOLDEN-BIN-v601" > "$HNC/bin/hnc_watchdog"
+echo "GOLDEN-HTTPD-v601" > "$HNC/daemon/hnc_httpd/hnc_httpd"
+echo "GOLDEN-WEB-v601" > "$HNC/webroot/index.html"
+rbrun snapshot "$MOD" "$HNC"; rc1=$?
+# 模拟 beta.2 同步运行并在观察期结束后继续升刷 rc.1 (6009301)
+echo "BETA2-BIN" > "$HNC/bin/hnc_watchdog"
+echo "BETA2-HTTPD" > "$HNC/daemon/hnc_httpd/hnc_httpd"
+echo "BETA2-WEB" > "$HNC/webroot/index.html"
+rm -f "$HNC/data/rollback.observing"
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.1\nversionCode=6009301\n' > "$MOD/module.prop"
+rbrun snapshot "$MOD" "$HNC"; rc2=$?
+echo "RC1-BROKEN-BIN" > "$HNC/bin/hnc_watchdog"
+i=0; r_obs=0
+while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_obs=$?; i=$((i+1)); done
+[ "$rc1" -eq 0 ] && [ "$rc2" -eq 0 ] \
+  && [ "$(cat "$HNC/.prev/version" 2>/dev/null | tr -d ' \r\n')" = "6000001" ] \
+  && [ "$r_obs" -eq 9 ] \
+  && [ "$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null)" = "GOLDEN-BIN-v601" ] \
+  && [ "$(cat "$HNC/data/runtime_version" 2>/dev/null | tr -d ' \r\n')" = "6000001" ] \
+  && [ "$(cat "$HNC/data/rollback.pinned" 2>/dev/null | tr -d ' \r\n')" = "6009301" ] \
+  && grep -q '"from":"6009301","to":"6000001"' "$HNC/data/rollback.json" \
+  && test_pass || test_fail "rc1=$rc1 rc2=$rc2 robs=$r_obs prev=$(cat "$HNC/.prev/version" 2>/dev/null) bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"

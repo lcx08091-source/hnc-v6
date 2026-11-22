@@ -13,12 +13,12 @@ WD="$HNC_REPO_ROOT/bin/watchdog.sh"
 
 test_start "v5.33 watchdog.sh: 四个检查 action 已删(退 64), 动手的 action 还在"
 bad=""
-for a in probe_hotspot check_health httpd_drift get_iface; do
+for a in probe_hotspot check_health httpd_drift get_iface is_doze; do
     HNC_DIR="$HNC_TEST_DIR" sh "$WD" action "$a" >/dev/null 2>&1
     rc=$?
     [ "$rc" = 64 ] || bad="$bad $a=$rc"
 done
-for a in full_restore full_init migrate tc_uplink_healthy capability_probe is_doze prune_dup_hotspotd rotate_logs cleanup_stale_rules; do
+for a in full_restore full_init migrate tc_uplink_healthy capability_probe prune_dup_hotspotd rotate_logs cleanup_stale_rules; do
     grep -q "^        $a)" "$WD" || bad="$bad missing:$a"
 done
 for f in probe_valid_hotspot check_health check_httpd_bind_drift httpd_guard_install httpd_guard_remove; do

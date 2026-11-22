@@ -1,10 +1,11 @@
 /*
- * mdns_resolve.c — HNC v3.4.6 主动 mDNS 反向查询工具
+ * mdns_resolve.c — HNC 主动 mDNS 反向查询工具
  *
  * 用法:
  *   mdns_resolve <ipv4>          查询 IP 对应的 .local 主机名
  *   mdns_resolve -t 800 <ipv4>   自定义超时(ms),默认 800
  *   mdns_resolve -v <ipv4>       verbose,打印诊断信息到 stderr
+ *   mdns_resolve --version       输出版本号并退出
  *
  * 输出:
  *   成功 → 一行 hostname (去掉 .local 尾巴),exit 0
@@ -46,6 +47,10 @@
 #include <sys/select.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+
+#ifndef HNC_VERSION
+#define HNC_VERSION     "dev"
+#endif
 
 #define MDNS_PORT       5353
 #define MDNS_MULTICAST  "224.0.0.251"
@@ -386,16 +391,18 @@ static int try_query(const char *src_ip, const char *target_ip, int timeout_ms,
 static void usage(const char *prog)
 {
     fprintf(stderr,
-        "HNC v3.4.6 mDNS Reverse Resolver\n\n"
+        "HNC %s mDNS Reverse Resolver\n\n"
         "用法:\n"
-        "  %s [-t ms] [-v] <ipv4>\n\n"
+        "  %s [-t ms] [-v] <ipv4>\n"
+        "  %s --version\n\n"
         "选项:\n"
-        "  -t <ms>   超时(毫秒),默认 800\n"
-        "  -v        verbose,打印诊断到 stderr\n\n"
+        "  -t <ms>     超时(毫秒),默认 800\n"
+        "  -v          verbose,打印诊断到 stderr\n"
+        "  --version   输出版本号并退出\n\n"
         "示例:\n"
         "  %s 10.193.171.30\n"
         "  %s -t 1500 -v 192.168.43.5\n",
-        prog, prog, prog);
+        HNC_VERSION, prog, prog, prog, prog);
 }
 
 int main(int argc, char *argv[])
@@ -405,7 +412,10 @@ int main(int argc, char *argv[])
 
     int i = 1;
     while (i < argc) {
-        if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
+        if (strcmp(argv[i], "--version") == 0) {
+            printf("mdns_resolve %s\n", HNC_VERSION);
+            return 0;
+        } else if (strcmp(argv[i], "-t") == 0 && i + 1 < argc) {
             timeout_ms = atoi(argv[i+1]);
             if (timeout_ms <= 0 || timeout_ms > 10000) timeout_ms = DEFAULT_TIMEOUT;
             i += 2;

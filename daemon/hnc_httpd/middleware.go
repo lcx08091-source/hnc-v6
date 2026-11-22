@@ -250,7 +250,7 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 			// rc30.12.18 默认拒绝重构后就语义死了, 但变量留着误导读者. 已从 main.go 删.
 			if !readAuthRequired(s.hncDir) {
 				// 老用户 rules.json 还是 false. 打 log 一次性提醒, 但仍 fail-closed.
-				log.Printf("auth: anonymous request to %s (auth_required=false in rules.json, but rc30.12.18 enforces default-deny → 401)", r.URL.Path)
+				log.Printf("auth: anonymous request to %s (auth_required=false in rules.json, default-deny enforces cookie auth → 401)", r.URL.Path)
 			}
 			respondUnauthorized(w, r, false)
 			return
@@ -282,7 +282,6 @@ func (s *server) authMiddleware(next http.Handler) http.Handler {
 func isWritePath(p string) bool {
 	switch p {
 	case "/api/action",
-		"/api/dpi_distill",
 		"/api/self/toggle",
 		"/api/self/auto_expand/toggle",
 		"/api/self/auto_promote/toggle",
@@ -290,6 +289,8 @@ func isWritePath(p string) bool {
 		"/api/leakguard/clear",
 		"/api/leakguard/config",
 		"/api/leakguard/block-domain",
+		"/api/leakguard/whitelist",
+		"/api/leakguard/undo-block",
 		"/api/v6/scalpel/cut",
 		"/api/restore":
 		return true
@@ -400,6 +401,7 @@ func isSensitiveReadPath(p string) bool {
 		"/api/app_limits",
 		"/api/whoami",
 		"/api/json_health",
+		"/api/health_check",
 		"/api/usage_month",
 		"/api/connections",
 		"/api/discover",
@@ -428,10 +430,11 @@ func isSensitiveReadPath(p string) bool {
 		"/api/v6/diag_dump",
 		"/api/leakguard/events",
 		"/api/leakguard/stream",
+		"/api/leakguard/whitelist",
+		"/api/leakguard/undo-block",
 		"/api/v6/express",
 		"/api/v6/update_leash",
 		"/api/v6/scalpel/flows",
-		"/api/thermo",
 		"/api/v6/thermo",
 		"/api/v6/blackbox",
 		"/api/v6/multi_iface",

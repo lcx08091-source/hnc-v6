@@ -76,11 +76,11 @@ make_minimal_module_zip_rc5() {
             cp "$src" "$dst"
         else
             case "$relpath" in
-                bin/hnc_dpid|bin/hnc_clsact_ctl)
+                bin/hnc_dpid|bin/hnc_clsact_ctl|bin/hnc_watchdog|bin/hnc_launcher|bin/hotspotd)
                     if [ "$_httpd_m" = "28 00" ]; then
-                        { printf '\177ELF\001\001\001'; dd if=/dev/zero bs=1 count=11 2>/dev/null; printf '\050\000'; printf '\nhnc_dpid\n'; } > "$dst"
+                        { printf '\177ELF\001\001\001'; dd if=/dev/zero bs=1 count=11 2>/dev/null; printf '\050\000'; printf '\nhnc_dpid 0.5.4 %s\n' "${embedded_ver:-$cur_ver}"; } > "$dst"
                     else
-                        { printf '\177ELF\002\001\001'; dd if=/dev/zero bs=1 count=11 2>/dev/null; printf '\267\000'; printf '\nhnc_dpid\n'; } > "$dst"
+                        { printf '\177ELF\002\001\001'; dd if=/dev/zero bs=1 count=11 2>/dev/null; printf '\267\000'; printf '\nhnc_dpid 0.5.4 %s\n' "${embedded_ver:-$cur_ver}"; } > "$dst"
                     fi
                     chmod 755 "$dst"
                     ;;

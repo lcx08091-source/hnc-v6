@@ -395,7 +395,7 @@
 .scard>.fold .fold-in{padding-top:0!important;display:block}
 .scard>.fold .fold-in>div+div{margin-top:0}
 
-/* 9. iOS 27 Crystal Water-Droplet Switch (.toggle) & Range Slider (.gx-range) */
+/* 9. iOS 27 Crystal Water-Droplet Switch (.toggle) */
 [data-glass="liquid"] .toggle{
   height:30px;
   width:52px;
@@ -1349,7 +1349,7 @@
 }
 [data-style="cyber"] .btn{
   border-radius:6px;
-  height:40px;
+  height:39px;
   font-family:var(--mono);
   letter-spacing:.02em;
 }
@@ -1862,7 +1862,8 @@ html.has-wallpaper:not([data-wp-tone="light"]) #fresh,
 .wp-actions .box{
   flex:1;
   min-width:160px;
-  height:36px;
+  height:39px;
+  border-radius:12px;
 }
 .wp-actions .btn{
   height:36px;
@@ -4902,21 +4903,21 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
   letter-spacing: -0.01em;
 }
 [data-style="cyber"] .btn {
-  height: 38px;
+  height: 39px;
   padding: 0 14px;
   border-radius: 5px !important;
   font-size: 13px;
   font-weight: 700;
 }
-/* 卡片内次级控制区、横幅、合并条与未知域名行采用更精悍的 33~36px 紧凑比例 */
+/* 卡片内控制区主次按钮统一 39px/12px，横幅、合并条与未知域名行保持 33px 紧凑比例 */
 [data-style="apple"] .ctrl .btn,
 [data-glass] .ctrl .btn,
 [data-style="apple"] .v6-card .btns > .btn,
 [data-glass] .v6-card .btns > .btn {
-  height: 38px !important;
+  height: 39px !important;
   font-size: 13.5px !important;
   padding: 0 14px !important;
-  border-radius: 11px;
+  border-radius: 12px;
 }
 .mrg .btns .btn,
 [data-style="apple"] .mrg .btns .btn,
@@ -5223,6 +5224,157 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
   color: #fbbf24;
   background: rgba(251, 191, 36, .16);
 }
+
+/* v6.1.0-rc.1 零滑条 39px/12px 离散档位胶囊与 SVG 步进器 (.gx-row / .gx-pills-5 / .gx-step-bar / .gx-btn) */
+.gx-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 2px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.gx-pills-5 {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 6px;
+  width: 100%;
+  padding: 6px 0 2px;
+}
+.gx-step-bar {
+  display: grid;
+  grid-template-columns: 39px repeat(4, minmax(0, 1fr)) 39px;
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+  padding: 6px 0 2px;
+}
+.gx-btn {
+  height: 39px;
+  border-radius: 12px;
+  padding: 0 6px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  font-size: 12.5px;
+  font-weight: 700;
+  color: var(--text-2);
+  background: var(--card-2);
+  border: 1px solid var(--stroke);
+  cursor: pointer;
+  white-space: nowrap;
+  min-width: 0;
+  transition: background .18s ease, color .18s ease, border-color .18s ease, box-shadow .18s ease;
+}
+.gx-btn svg {
+  width: 15px;
+  height: 15px;
+  flex: none;
+}
+.gx-btn.on {
+  background: linear-gradient(180deg, #1982FF 0%, #006CE6 100%) !important;
+  color: #FFFFFF !important;
+  border-color: transparent !important;
+  box-shadow: inset 0 .75px 0 rgba(255, 255, 255, .24), 0 4px 12px -4px rgba(0, 110, 230, .32);
+}
+[data-glass="liquid"]:not([data-theme="dark"]) .gx-btn:not(.on),
+[data-glass="frosted"]:not([data-theme="dark"]) .gx-btn:not(.on) {
+  background: rgba(255, 255, 255, .58);
+  border: 0;
+  box-shadow: inset 0 .75px 0 rgba(255, 255, 255, .82), 0 0 0 .5px rgba(15, 23, 42, .08);
+}
+:root[data-glass][data-theme="dark"] .gx-btn:not(.on) {
+  background: rgba(30, 38, 56, .62);
+  border: 0;
+  box-shadow: inset 0 .75px 0 rgba(220, 238, 255, .14), 0 0 0 .5px rgba(190, 225, 255, .10);
+}
+[data-style="cyber"] .gx-btn {
+  border-radius: 5px;
+  font-family: var(--mono);
+  background: var(--cy-sub);
+  border: 1px solid var(--stroke-2);
+}
+[data-style="cyber"] .gx-btn.on {
+  background: linear-gradient(135deg, var(--cy-accent-2), var(--indigo)) !important;
+  border-color: var(--cy-accent) !important;
+  color: #F8FAFC !important;
+  box-shadow: 0 4px 12px -4px var(--cy-glow);
+}
+@media (max-width: 370px) {
+  .gx-pills-5, .gx-step-bar { gap: 4px; }
+  .gx-btn { font-size: 11.5px; padding: 0 3px; }
+}
+/* 花哨壁纸下底部撤销胶囊高对比防吃字托底 */
+:root[data-has-wp="1"] .undo-pill,
+html.has-wallpaper .undo-pill {
+  background: rgba(250, 252, 255, .96) !important;
+  border: 1px solid rgba(15, 23, 42, .12) !important;
+  box-shadow: 0 16px 40px rgba(8, 16, 36, .28), inset 0 1px 0 rgba(255, 255, 255, .9);
+}
+:root[data-has-wp="1"][data-theme="dark"] .undo-pill,
+html.has-wallpaper[data-theme="dark"] .undo-pill {
+  background: rgba(18, 22, 32, .96) !important;
+  border: 1px solid rgba(255, 255, 255, .18) !important;
+}
+:root.lowfx .undo-pill,
+:root.lowfx[data-has-wp="1"] .undo-pill {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background: var(--card-solid) !important;
+}
+:root.lowfx[data-glass="frosted"] .glass,
+:root.lowfx[data-glass="frosted"] .hbtn,
+:root.lowfx[data-glass="frosted"] .sheet,
+:root.lowfx[data-glass="frosted"] .dd-menu,
+:root.lowfx[data-glass="frosted"] .tabbar,
+:root.lowfx[data-glass="frosted"] .toast,
+:root.lowfx[data-glass="frosted"] .v6-drawer,
+:root.lowfx[data-glass="frosted"] .undo-pill {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  background: var(--card-solid) !important;
+}
+:root.lowfx .gx-btn:not(.on) {
+  background: var(--card-2) !important;
+  border: 1px solid var(--stroke) !important;
+  box-shadow: none !important;
+}
+@media (prefers-reduced-transparency: reduce) {
+  .header,
+  .header::before,
+  .header.hs-on::after,
+  [data-glass] .header.hs-on::after {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+  }
+  .glass,
+  .hbtn,
+  .sheet,
+  .dd-menu,
+  .tabbar,
+  .toast,
+  .v6-drawer,
+  .undo-pill,
+  [data-glass="liquid"] .glass,
+  [data-glass="frosted"] .glass:not(.seg),
+  [data-glass="liquid"] .v6-drawer,
+  [data-glass="frosted"] .v6-drawer,
+  :root[data-has-wp="1"] .undo-pill,
+  html.has-wallpaper .undo-pill {
+    -webkit-backdrop-filter: none !important;
+    backdrop-filter: none !important;
+    background: var(--card-solid) !important;
+  }
+  .gx-btn:not(.on),
+  [data-glass="liquid"]:not([data-theme="dark"]) .gx-btn:not(.on),
+  [data-glass="frosted"]:not([data-theme="dark"]) .gx-btn:not(.on),
+  :root[data-glass][data-theme="dark"] .gx-btn:not(.on) {
+    background: var(--card-2) !important;
+    border: 1px solid var(--stroke) !important;
+    box-shadow: none !important;
+  }
+}
 </style>
 <!-- 首帧前按本地偏好设好主题/风格/玻璃浓度, 避免外链脚本加载期间先闪一下默认样式(与 fx.js applyTheme / applyGlassTint 一致, 之后由它接管) -->
 <script>(function () { try { var r = document.documentElement, g = function (k) { return localStorage.getItem(k); }, t = g('hnc6.theme'), s = g('hnc6.style'), gm = g('hnc6.glass_mode') === 'frosted' ? 'frosted' : 'liquid', wp = g('hnc6.wp_id'); var sysDk = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches; var resT = (t === 'light' || t === 'dark') ? t : (sysDk ? 'dark' : 'light'); r.setAttribute('data-theme', resT); r.setAttribute('data-theme-mode', (t === 'light' || t === 'dark') ? t : 'auto'); if (parseFloat(g('hnc6.wp_blur')) > 0) r.setAttribute('data-wp-blurred', '1'); if (s === 'liquid') { r.setAttribute('data-style', 'apple'); r.setAttribute('data-glass', gm); } else if (s === 'cyber' || s === 'apple') r.setAttribute('data-style', 'cyber'); if (wp && wp !== 'none' && (wp !== 'custom' || g('hnc6.wp_custom'))) { r.setAttribute('data-has-wp', '1'); r.setAttribute('data-has-wallpaper', '1'); r.classList.add('has-wallpaper'); r.setAttribute('data-wp-text', g('hnc6.wp_text_v2') === 'capsule' ? 'capsule' : 'adaptive'); var wts = (g('hnc6.wp_tones') || '').split(','); if (wp === 'prism') wts = ['light', 'light', 'light']; else if (wts.length !== 3) wts = ['dark', 'light', 'dark']; r.setAttribute('data-wp-top', wts[0]); r.setAttribute('data-wp-tone', wts[1]); r.setAttribute('data-wp-bot', wts[2]); } if (g('hnc6.motion') === '0') r.classList.add('calm'); if (g('hnc6.lowfx') === '1' && g('hnc6.lowfx_manual') === '1') r.classList.add('lowfx'); var gt = parseFloat(g('hnc6.glass_tint')); if (isFinite(gt)) { gt = Math.max(0, Math.min(100, Math.round(gt))); if (gt > 50) r.style.setProperty('--gx-up', ((gt - 50) / 50).toFixed(3)); if (gt < 50) r.style.setProperty('--gx-dn', ((50 - gt) / 50).toFixed(3)); } } catch (_) {} })();</script>
@@ -5258,6 +5410,7 @@ html[data-glass="frosted"]:not([data-theme="dark"]):not([data-has-wp="1"]),
 <div class="v6-drawer-scrim" id="v6-scalpel-scrim"></div>
 <aside class="v6-drawer glass" id="v6-scalpel-drawer" role="dialog" aria-modal="true" aria-label="活跃连接管理与异常断流" hidden><div class="grab"></div><div id="v6-scalpel-body"></div></aside>
 <div class="toast" id="toast" role="status" aria-live="polite"><svg id="toast-ic" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg><span id="toast-t"></span></div>
+<div class="undo-pill" id="undo-pill" role="region" aria-label="操作撤销提示" aria-live="polite" hidden><span class="undo-ic" id="undo-ic" aria-hidden="true"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg></span><span class="undo-msg" id="undo-msg"></span><button type="button" class="btn pri press undo-btn" id="undo-btn"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg><span id="undo-btn-t">撤销</span></button><button type="button" class="undo-x press" id="undo-x" aria-label="关闭提示"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg></button></div>
 
 <script src="hyalite.js"></script>
 <script src="js/core.js"></script>

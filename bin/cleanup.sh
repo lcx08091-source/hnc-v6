@@ -160,37 +160,102 @@ for _ifc in $_cand_ifaces wlan2; do
         tc qdisc del dev "$_ifc" parent :1 2>/dev/null || tc qdisc del dev "$_ifc" parent 0:1 2>/dev/null || true
         rm -f "$RUN/tc_mq_child_$_ifc" 2>/dev/null
     else
-        # 复用 OEM htb 1: 根的场景: 不删根, 但逐项拆除 HNC 自建的 filter 与子类(防限速幽灵残留)
-        for _pf in 1 2 50 199 200; do
-            tc filter del dev "$_ifc" parent 1: pref "$_pf" 2>/dev/null || true
+        # 复用 OEM htb 1: 根的场景: 不删根, 用单次 tc filter show + awk 精准摘除实际存在的 HNC 过滤器
+        tc filter show dev "$_ifc" parent 1: 2>/dev/null | awk '
+            /^filter / {
+                pf=""; pr=""
+                for (i=1; i<NF; i++) {
+                    if ($i == "pref" || $i == "prio") pf=$(i+1)
+                    else if ($i == "protocol") pr=$(i+1)
+                }
+                if (pf ~ /^[0-9]+$/) {
+                    p = pf + 0
+                    if ((p >= 1 && p <= 7) || p == 50 || p == 51 || (p >= 101 && p <= 299)) {
+                        k = p " " pr
+                        if (!seen[k]++) print p, pr
+                    }
+                }
+            }
+        ' | while read -r _pf _pr; do
+            [ -n "$_pf" ] || continue
+            if [ -n "$_pr" ]; then
+                tc filter del dev "$_ifc" parent 1: pref "$_pf" protocol "$_pr" 2>/dev/null \
+                    || tc filter del dev "$_ifc" parent 1: pref "$_pf" 2>/dev/null || true
+            else
+                tc filter del dev "$_ifc" parent 1: pref "$_pf" 2>/dev/null || true
+            fi
         done
-        _p=101
-        while [ "$_p" -le 299 ]; do
-            tc filter del dev "$_ifc" parent 1: prio "$_p" protocol ipv6 2>/dev/null || true
-            tc filter del dev "$_ifc" parent 1: prio "$_p" protocol ip 2>/dev/null || true
-            _p=$((_p + 1))
+        # 先拆设备子树孙子类(parent != 1:1), 再拆 1:1 下的 HNC 子类(保留 1:1 与 1:9999)
+        _cls_dump=$(tc class show dev "$_ifc" 2>/dev/null)
+        printf '%s\n' "$_cls_dump" | awk '
+            $1=="class" && $2=="htb" {
+                cid=$3; par=""
+                for (i=4; i<NF; i++) if ($i == "parent") { par=$(i+1); break }
+                if (cid ~ /^1:/ && cid != "1:1" && cid != "1:9999" && par != "" && par != "1:1") print cid
+            }
+        ' | while IFS= read -r _sc; do
+            [ -n "$_sc" ] || continue
+            tc qdisc del dev "$_ifc" parent "$_sc" 2>/dev/null || true
+            tc class del dev "$_ifc" classid "$_sc" 2>/dev/null || true
         done
-        tc class show dev "$_ifc" 2>/dev/null | awk '/class htb 1:/{print $3}' | while IFS= read -r _cid; do
+        printf '%s\n' "$_cls_dump" | awk '/class htb 1:/{print $3}' | while IFS= read -r _cid; do
             case "$_cid" in
                 1:1|1:9999) continue ;;
                 1:*) tc filter del dev "$_ifc" parent "$_cid" 2>/dev/null || true
+                     tc qdisc del dev "$_ifc" parent "$_cid" 2>/dev/null || true
                      tc class del dev "$_ifc" classid "$_cid" 2>/dev/null || true ;;
             esac
         done
+        unset _cls_dump
     fi
     if [ -x "$HNC_DIR/bin/hnc_clsact_ctl" ]; then
         "$HNC_DIR/bin/hnc_clsact_ctl" uninstall "$_ifc" >/dev/null 2>&1 && log "clsact BPF filter/map removed on $_ifc"
     fi
-    # 精确移除 HNC 自装的 ingress pref 1 mirred filter(保留 AOSP clsact qdisc 本身)
+    # 精确移除 HNC 自装的入向过滤器(保留 AOSP clsact qdisc 与系统 tether BPF! pref 2/3 仅匹配 mirred.*ifb0 时才删)
     tc filter del dev "$_ifc" ingress pref 1 2>/dev/null || true
     tc filter del dev "$_ifc" parent ffff: pref 1 2>/dev/null || true
-    _pp=301
-    while [ "$_pp" -le 400 ]; do
-        tc filter del dev "$_ifc" parent ffff: prio "$_pp" protocol all 2>/dev/null || true
-        tc filter del dev "$_ifc" parent ffff: prio "$_pp" protocol ip 2>/dev/null || true
-        tc filter del dev "$_ifc" parent ffff: prio "$_pp" protocol ipv6 2>/dev/null || true
-        _pp=$((_pp + 1))
+    for _ing_mode in ingress "parent ffff:"; do
+        # shellcheck disable=SC2086
+        _ing_dump=$(tc filter show dev "$_ifc" $_ing_mode 2>/dev/null)
+        [ -n "$_ing_dump" ] || continue
+        printf '%s\n' "$_ing_dump" | awk '
+            /^filter / {
+                pf=""; pr=""
+                for (i=1; i<NF; i++) {
+                    if ($i == "pref" || $i == "prio") pf=$(i+1)
+                    else if ($i == "protocol") pr=$(i+1)
+                }
+                cur_pf = (pf ~ /^[0-9]+$/) ? (pf + 0) : 0
+                cur_pr = pr
+                if ((cur_pf >= 301 && cur_pf <= 400) || (cur_pf >= 5301 && cur_pf <= 7400) || (cur_pf >= 20001 && cur_pf <= 20100) || (cur_pf >= 25001 && cur_pf <= 27100)) {
+                    want[cur_pf " " cur_pr] = 1
+                }
+                if ((cur_pf == 2 || cur_pf == 3) && tolower($0) ~ /mirred.*ifb0/) {
+                    want[cur_pf " " cur_pr] = 1
+                }
+                next
+            }
+            cur_pf == 2 || cur_pf == 3 {
+                if (tolower($0) ~ /mirred.*ifb0/) {
+                    want[cur_pf " " cur_pr] = 1
+                }
+            }
+            END {
+                for (k in want) print k
+            }
+        ' | while read -r _ipf _ipr; do
+            [ -n "$_ipf" ] || continue
+            if [ -n "$_ipr" ]; then
+                # shellcheck disable=SC2086
+                tc filter del dev "$_ifc" $_ing_mode pref "$_ipf" protocol "$_ipr" 2>/dev/null \
+                    || tc filter del dev "$_ifc" $_ing_mode pref "$_ipf" 2>/dev/null || true
+            else
+                # shellcheck disable=SC2086
+                tc filter del dev "$_ifc" $_ing_mode pref "$_ipf" 2>/dev/null || true
+            fi
+        done
     done
+    unset _ing_dump _ing_mode
     tc qdisc show dev "$_ifc" 2>/dev/null | grep -q "qdisc ingress ffff:" && tc qdisc del dev "$_ifc" ingress 2>/dev/null || true
 done
 # 若卸载/全停时热点网卡早已销毁, 兜底解绑 /sys/fs/bpf/hnc 避免内核 eBPF map 泄漏
@@ -215,13 +280,14 @@ fi
 log "TC cleanup done"
 
 # ── 3. 清除 iptables 规则 ────────────────────────────────────
-# v3.3.4：双栈清理 v4 + v6 所有 HNC 链
 log "Cleaning iptables chains (v4+v6)..."
-# v5.35.0: 双栈幂等拆链（包含 HNC_STATS v6、HNC_APP_LIMIT_UP/DOWN + 二级槽位链 HNC_AL_C*、HNC_APP_QOS_MARK/QOS_IP 与 HNC_CONNBLK_DNS）
+# 双栈幂等拆链(含 HNC_TUN_GUARD, HNC_ISOLATE, HNC_QUIC_APPLIM, HNC_SCALPEL 等全部子链)
 _cleanup_ipt_stack() {
     _cmd="$1"
     for _tc in "mangle PREROUTING  HNC_PREROUTE_GUARD" \
+               "mangle PREROUTING  HNC_TUN_GUARD" \
                "mangle PREROUTING  HNC_RESTORE" \
+               "mangle FORWARD     HNC_TUN_GUARD" \
                "mangle FORWARD     HNC_RESTORE" \
                "mangle FORWARD     HNC_MARK" \
                "mangle FORWARD     HNC_STATS" \
@@ -232,9 +298,12 @@ _cleanup_ipt_stack() {
                "mangle POSTROUTING HNC_APP_QOS" \
                "mangle POSTROUTING HNC_SAVE" \
                "mangle POSTROUTING HNC_EGRESS_FIX" \
+               "filter FORWARD     HNC_SCALPEL" \
+               "filter FORWARD     HNC_ISOLATE" \
                "filter FORWARD     HNC_CTRL" \
                "filter FORWARD     HNC_WHITELIST" \
                "filter FORWARD     HNC_QUIC" \
+               "filter FORWARD     HNC_QUIC_APPLIM" \
                "filter FORWARD     HNC_CONNBLK" \
                "filter INPUT       HNC_CONNBLK_DNS" \
                "filter FORWARD     HNC_CONNBLK_DNS" \
@@ -259,10 +328,10 @@ _cleanup_ipt_stack() {
         "$_cmd" -w 2 -t mangle -F "$_al" 2>/dev/null || true
         "$_cmd" -w 2 -t mangle -X "$_al" 2>/dev/null || true
     done
-    for _h in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE HNC_EGRESS_FIX; do
+    for _h in HNC_PREROUTE_GUARD HNC_TUN_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE HNC_EGRESS_FIX; do
         "$_cmd" -w 2 -t mangle -X "$_h" 2>/dev/null || true
     done
-    for _h in HNC_CTRL HNC_WHITELIST HNC_QUIC HNC_CONNBLK HNC_CONNBLK_DNS HNC_ENCDNS HNC_ENCDNS_STRICT HNC_ENCDNS_DOT; do
+    for _h in HNC_SCALPEL HNC_ISOLATE HNC_CTRL HNC_WHITELIST HNC_QUIC HNC_QUIC_APPLIM HNC_CONNBLK HNC_CONNBLK_DNS HNC_ENCDNS HNC_ENCDNS_STRICT HNC_ENCDNS_DOT; do
         "$_cmd" -w 2 -t filter -X "$_h" 2>/dev/null || true
     done
 }

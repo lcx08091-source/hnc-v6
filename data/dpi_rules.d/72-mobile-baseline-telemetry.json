@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "72-mobile-baseline-telemetry",
-  "rules_version": "hnc-curated-v3-rc30.12-2026-05-20-claude-export-analysis#72-mobile-baseline-telemetry",
+  "rules_version": "hnc-curated-v6.1.0-rc.1#72-mobile-baseline-telemetry",
   "rules": [
     {
       "id": "cmcc_dm_self_register",

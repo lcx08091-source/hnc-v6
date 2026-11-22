@@ -76,20 +76,24 @@ type scSummary struct {
 }
 
 type scReport struct {
-	Schema       int         `json:"schema"`
-	GeneratedAt  int64       `json:"generated_at"`
-	GeneratedISO string      `json:"generated_at_iso"`
-	Version      string      `json:"version"`
-	DurationMs   int64       `json:"duration_ms"`
-	Redacted     bool        `json:"redacted"`
-	Sections     []scSection `json:"sections"`
-	Summary      scSummary   `json:"summary"`
+	Schema          int         `json:"schema"`
+	GeneratedAt     int64       `json:"generated_at"`
+	GeneratedISO    string      `json:"generated_at_iso"`
+	Version         string      `json:"version"`
+	VersionCode     string      `json:"version_code,omitempty"`
+	DPIDVersion     string      `json:"dpid_version,omitempty"`
+	WatchdogVersion string      `json:"watchdog_version,omitempty"`
+	DurationMs      int64       `json:"duration_ms"`
+	Redacted        bool        `json:"redacted"`
+	Sections        []scSection `json:"sections"`
+	Summary         scSummary   `json:"summary"`
 }
 
 // scEnv 外部世界的全部入口(测试注入假实现)。
 type scEnv struct {
 	HNCDir       string
 	Version      string
+	VersionCode  string
 	SelfPID      int
 	LoopbackPort int
 	CmdTimeout   time.Duration
@@ -414,13 +418,36 @@ func runSelfcheckDefs(env *scEnv, opts scOptions, defs []scSectionDef) *scReport
 		}
 	}
 	now := env.Now()
+	ver := strings.TrimSpace(env.Version)
+	if ver == "" {
+		ver = ServerVersion(env.HNCDir)
+	}
+	vc := strings.TrimSpace(env.VersionCode)
+	if vc == "" {
+		vc = ServerVersionCode(env.HNCDir)
+	}
+	var dpidVer, wdVer string
+	if m := c.readJSON(c.hnc("run", "dpi_state.json")); m != nil {
+		dpidVer = strings.TrimSpace(asString(m["version"]))
+	}
+	if dpidVer == "" {
+		if m := c.readJSON(c.hnc("run", "capabilities.json")); m != nil {
+			dpidVer = strings.TrimSpace(asString(m["dpid_version"]))
+		}
+	}
+	if m := c.readJSON(c.hnc("run", "watchdog_actions.json")); m != nil {
+		wdVer = strings.TrimSpace(asString(m["version"]))
+	}
 	r := &scReport{
-		Schema:       selfcheckSchema,
-		GeneratedAt:  now.Unix(),
-		GeneratedISO: now.Format(time.RFC3339),
-		Version:      env.Version,
-		DurationMs:   now.Sub(start).Milliseconds(),
-		Sections:     secs,
+		Schema:          selfcheckSchema,
+		GeneratedAt:     now.Unix(),
+		GeneratedISO:    now.Format(time.RFC3339),
+		Version:         ver,
+		VersionCode:     vc,
+		DPIDVersion:     dpidVer,
+		WatchdogVersion: wdVer,
+		DurationMs:      now.Sub(start).Milliseconds(),
+		Sections:        secs,
 	}
 	r.Summary = scSummarize(secs)
 	return r
@@ -2792,7 +2819,8 @@ func scSectionIdent(c *scCtx) []scItem {
 func realSelfcheckEnv(hncDir string) *scEnv {
 	return &scEnv{
 		HNCDir:       hncDir,
-		Version:      version,
+		Version:      ServerVersion(hncDir),
+		VersionCode:  ServerVersionCode(hncDir),
 		SelfPID:      os.Getpid(),
 		LoopbackPort: *flagLoopbackPort,
 		CmdTimeout:   selfcheckCmdTimeout,

@@ -22,7 +22,6 @@ import (
 	"bufio"
 	"encoding/json"
 	"math"
-	"net"
 	"net/http"
 	"net/netip"
 	"os"
@@ -1135,8 +1134,6 @@ type liveCall struct {
 var callExcludedPorts = map[int]bool{443: true, 80: true, 53: true, 123: true, 853: true, 5353: true, 1900: true, 137: true, 67: true, 68: true}
 
 var wechatVoipPrefix = netip.MustParsePrefix("183.232.84.0/24")
-
-func mustCIDR(s string) *net.IPNet { _, n, _ := net.ParseCIDR(s); return n }
 
 func callCandidate(e ctEntry, up, dn float64, apps map[string]ipApp, names map[string]ipName) (liveCall, bool) {
 	if e.Proto != "udp" || callExcludedPorts[e.Dport] || isPrivateIP(e.Dst) {

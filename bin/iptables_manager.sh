@@ -69,12 +69,6 @@ log() {
     echo "[$(date '+%H:%M:%S')] [IPT] $*" >> "$LOG" 2>/dev/null || true
 }
 
-# v4.0 Patch 1.6: [ERROR] 前缀便于 grep 故障排查
-log_error() {
-    [ -d "$(dirname "$LOG")" ] || mkdir -p "$(dirname "$LOG")" 2>/dev/null
-    echo "[$(date '+%H:%M:%S')] [IPT] [ERROR] $*" >> "$LOG" 2>/dev/null || true
-}
-
 if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
     . "$HNC_DIR/bin/hnc_constants.sh"
 elif [ -f "${0%/*}/hnc_constants.sh" ]; then
@@ -84,54 +78,45 @@ MARK_BASE="${HNC_MARK_BASE:-0x00800000}"
 DEV_MARK_MASK="${HNC_MARK_MASK:-0x00ff0000}"
 CONNMARK_MASK="${HNC_CONNMARK_MASK:-0xffff0000}"
 command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
-    hnc_dev_mark_hex() { printf '0x%08x
-' $(( 0x00800000 | ($1 << 16) )); }
+    hnc_dev_mark_hex() { printf '0x%08x\n' $(( 0x00800000 | ($1 << 16) )); }
 }
 
-# rc2 修 S7: 全文件 iptables/ip6tables 走 $IPT/$IP6T, 统一带 -w 2 xtables 锁.
-# 没 -w 时 xtables 被占(watchdog + apply_device_rule 并发常见)会直接 EAGAIN 退,
-# 规则部分应用 / 静默失败. -w 2 等最多 2 秒, 覆盖瞬时竞争.
-# 例外: 下面 `command -v ip6tables` 探测必须用裸名, command -v 只能接 1 个 arg.
 IPT="iptables -w 2"
 IP6T="ip6tables -w 2"
 
 # ═══════════════════════════════════════════════════════════════
-# v3.3.4 双栈抽象
+# 双栈抽象: 按需懒探测 IPv6 netfilter (消除每 5s stats_all 顶层白抢 xtables 锁!)
 # ═══════════════════════════════════════════════════════════════
-
-# 运行时检测 $IP6T 是否可用（部分裁剪内核可能没有 IPv6 netfilter）
+_IPV6_PROBED=0
 IPV6_OK=0
-if command -v ip6tables >/dev/null 2>&1 \
-    && $IP6T -t mangle -L -n >/dev/null 2>&1; then
-    IPV6_OK=1
-fi
+ipv6_ok() {
+    if [ "$_IPV6_PROBED" = "0" ]; then
+        _IPV6_PROBED=1
+        if command -v ip6tables >/dev/null 2>&1 \
+            && $IP6T -t mangle -L -n >/dev/null 2>&1; then
+            IPV6_OK=1
+        else
+            IPV6_OK=0
+        fi
+    fi
+    [ "$IPV6_OK" = "1" ]
+}
 
-# 在 v4 和 v6 上同时执行同一条命令
-# 仅用于协议无关的操作（CONNMARK / MARK / MAC match / 链创建）
-# 调用方必须确保参数里不含 -s/-d 这种协议相关的地址参数
-# 返回值取 v4 的返回码；v6 失败仅记 warn 日志，不影响流程
 ipt_dual() {
     $IPT "$@"
     local r4=$?
-    if [ "$IPV6_OK" = "1" ]; then
-        # v4.0 patch3.b.2: v6 失败不打 WARN(SD8 Elite/IPA 卸载下 v6 链可能不存在,这是常态不是错误)
-        # apply.log/iptables.log 之前每次 mark 都 4 行 WARN 太脏
-        # 真要排查 v6, 直接看 $IP6T -t mangle -nL 就够
+    if ipv6_ok; then
         $IP6T "$@" 2>/dev/null || true
     fi
     return $r4
 }
 
-# 同上，但忽略所有错误（用于幂等删除/清理场景）
 ipt_dual_q() {
     $IPT "$@" 2>/dev/null
-    [ "$IPV6_OK" = "1" ] && $IP6T "$@" 2>/dev/null
+    ipv6_ok && $IP6T "$@" 2>/dev/null
     return 0
 }
 
-# v5.1.0-rc1 hotfix: 删除旧规则时循环 -D 直到不存在,避免历史重复规则残留。
-# v5.8.8 (audit): 加轮次上限,防 -D 恒"成功"(异常内核/规则)时的理论死循环。
-# 同一规则重复 >100 条几乎不可能;到上限即停。
 ipt_del_all() {
     local cmd=$1
     shift
@@ -145,27 +130,25 @@ ipt_del_all() {
 
 ipt_dual_del_all() {
     ipt_del_all "$IPT" "$@"
-    [ "$IPV6_OK" = "1" ] && ipt_del_all "$IP6T" "$@"
+    ipv6_ok && ipt_del_all "$IP6T" "$@"
     return 0
 }
 
-# 幂等创建并 flush 用户自定义链（v4+v6）
 _ensure_chain() {
     local table=$1 chain=$2
     $IPT -t "$table" -N "$chain" 2>/dev/null
     $IPT -t "$table" -F "$chain" 2>/dev/null
-    if [ "$IPV6_OK" = "1" ]; then
+    if ipv6_ok; then
         $IP6T -t "$table" -N "$chain" 2>/dev/null
         $IP6T -t "$table" -F "$chain" 2>/dev/null
     fi
 }
 
-# 幂等将用户链挂到 builtin 链（v4+v6 独立判断，避免一边重复挂另一边漏挂）
 _ensure_link() {
     local table=$1 parent=$2 child=$3 pos=${4:-1}
     $IPT -t "$table" -C "$parent" -j "$child" 2>/dev/null \
         || $IPT -t "$table" -I "$parent" "$pos" -j "$child"
-    if [ "$IPV6_OK" = "1" ]; then
+    if ipv6_ok; then
         $IP6T -t "$table" -C "$parent" -j "$child" 2>/dev/null \
             || $IP6T -t "$table" -I "$parent" "$pos" -j "$child" 2>/dev/null
     fi
@@ -175,9 +158,9 @@ _ensure_link() {
 # 初始化所有链（v4 + v6）
 # ═══════════════════════════════════════════════════════════════
 init_chains() {
+    ipv6_ok >/dev/null 2>&1 || true
     log "=== Init chains (ipv6=$IPV6_OK) ==="
 
-    # 加载必要 netfilter 模块
     for mod in xt_CONNMARK xt_connmark xt_mark xt_mac xt_conntrack \
                nf_conntrack nf_conntrack_ipv6 nf_defrag_ipv6 \
                ip6t_REJECT ip6t_mac; do
@@ -186,11 +169,7 @@ init_chains() {
     echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
     echo 1 > /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || true
 
-    # ── v5.40.1 HNC_PREROUTE_GUARD (mangle/PREROUTING): 策略路由护栏 ──
-    # RMX5010 / ColorOS 16 真机实证: ip rule 10000(0xc0000/0xd0000) 与 18000-20000(0x0/0x10000)
-    # 检查 [19:16] 位。clsact 入向打标报文已完成 ifb0 上行整形, 进入路由前清零完整 [23:16]
-    # 设备位域 (${DEV_MARK_MASK}=0x00ff0000, 绝不触碰低 16 位 netd 0x0000ffff),
-    # 路由完成后在 mangle/FORWARD 由 HNC_RESTORE + HNC_MARK 恢复完整正交设备标。
+    # ── HNC_PREROUTE_GUARD (mangle/PREROUTING): 策略路由护栏 ──
     if $IPT -t mangle -S PREROUTING 2>/dev/null | grep -q 'HNC_RESTORE'; then
         ipt_dual_del_all -t mangle -D PREROUTING -j HNC_RESTORE
     fi
@@ -201,8 +180,6 @@ init_chains() {
     _ensure_link mangle PREROUTING HNC_PREROUTE_GUARD 1
 
     # ── HNC_RESTORE (mangle/FORWARD pos 1): CONNMARK → MARK ───
-    # 移入 FORWARD(在 ip rule 路由决策之后执行), 彻底杜绝下行回包在 PREROUTING 提前恢复
-    # [19:16] 导致失配 20000: fwmark 0x0/0x10000 lookup local_network 掉入 unreachable!
     _ensure_chain mangle HNC_RESTORE
     ipt_dual -t mangle -A HNC_RESTORE \
         -m connmark ! --mark "0x0/$CONNMARK_MASK" \
@@ -215,9 +192,6 @@ init_chains() {
     _ensure_link mangle FORWARD HNC_MARK 2
 
     # ── HNC_STATS (mangle/FORWARD pos 3): 双栈流量字节计数 (v4 + v6) ──
-    # re-init 时绝不 -F 已有链, 保住在线会话累计字节; 若内核链尚不存在(首次建链或
-    # cleanup 后重启热点), 同步清空 run/stats_v6_map 与 run/stats_v6_retired, 防止
-    # 上一轮会话结转的退休 IPv6 流量幽灵叠加到新热点会话.
     if ! $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
         $IPT -t mangle -N HNC_STATS 2>/dev/null
         rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
@@ -225,7 +199,7 @@ init_chains() {
     $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -A FORWARD -j HNC_STATS
-    if [ "$IPV6_OK" = "1" ]; then
+    if ipv6_ok; then
         if ! $IP6T -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
             $IP6T -t mangle -N HNC_STATS 2>/dev/null
             rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
@@ -236,7 +210,6 @@ init_chains() {
     fi
 
     # ── HNC_SAVE (mangle/POSTROUTING pos 1): MARK → CONNMARK ──
-    # 在厂商链之前第一时间将完整 0xffff0000 标记存入 conntrack
     _ensure_chain mangle HNC_SAVE
     ipt_dual -t mangle -A HNC_SAVE \
         -m mark ! --mark "0x0/$CONNMARK_MASK" \
@@ -244,10 +217,7 @@ init_chains() {
         --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
     _ensure_link mangle POSTROUTING HNC_SAVE 1
 
-    # ── v5.40.1 HNC_EGRESS_FIX (mangle/POSTROUTING tail): 修复 bw_mangle 冲刷 ──
-    # RMX5010 真机实证: bw_mangle_POSTROUTING 无接口过滤执行 MARK --set-xmark 0x0/0x100000,
-    # 清零第 20 位导致 mark_id 16..31 下行 HTB fw 失配。挂在 POSTROUTING 末尾且排除 rmnet+,
-    # 既完整恢复热点下行 HTB 标记, 又 100% 保留高通 rmnet_data* QMI 无线电 QoS 标记。
+    # ── HNC_EGRESS_FIX (mangle/POSTROUTING tail): 修复 bw_mangle 冲刷 ──
     _ensure_chain mangle HNC_EGRESS_FIX
     ipt_dual -t mangle -A HNC_EGRESS_FIX \
         ! -o rmnet+ -m connmark --mark 0x00800000/0x00800000 \
@@ -255,7 +225,7 @@ init_chains() {
         --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
     $IPT -t mangle -C POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null \
         || $IPT -t mangle -A POSTROUTING -j HNC_EGRESS_FIX
-    if [ "$IPV6_OK" = "1" ]; then
+    if ipv6_ok; then
         $IP6T -t mangle -C POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null \
             || $IP6T -t mangle -A POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null
     fi
@@ -434,7 +404,7 @@ blacklist_add() {
         -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null \
         || $IPT -t filter -I HNC_CTRL 1 -m mac --mac-source "$mac" -p tcp -j DROP
 
-    if [ "$IPV6_OK" = "1" ]; then
+    if ipv6_ok; then
         $IP6T -t filter -I HNC_CTRL 1 -m mac --mac-source "$mac" \
             -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null \
             || $IP6T -t filter -I HNC_CTRL 1 -m mac --mac-source "$mac" -p tcp -j DROP 2>/dev/null
@@ -485,7 +455,7 @@ whitelist_mode_on() {
 
 whitelist_mode_off() {
     $IPT -t filter -F HNC_WHITELIST 2>/dev/null
-    [ "$IPV6_OK" = "1" ] && $IP6T -t filter -F HNC_WHITELIST 2>/dev/null
+    ipv6_ok && $IP6T -t filter -F HNC_WHITELIST 2>/dev/null
     log "Whitelist mode OFF"
 }
 
@@ -515,7 +485,7 @@ whitelist_remove() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# 流量统计（仅 v4）
+# 流量统计（双栈 v4 + v6）
 # ═══════════════════════════════════════════════════════════════
 # HNC_STATS 轻量互斥锁: 串行化 ensure_stats_online(结转 /128 退休字节 + 删内核规则)
 # 与 stats_all(汇总内核实时字节 + stats_v6_retired), 消除并发读写导致的 2x 翻倍毛刺与归零重扣费。
@@ -579,30 +549,9 @@ _ensure_v4_stats_ip() {
     return 0
 }
 
-get_stats() {
-    local ip=$1 line rx=0 tx=0
-    [ -z "$ip" ] && { echo '{"upload_bytes":0,"download_bytes":0}'; return 0; }
-    # 复用双栈 stats_all(兼容 iptables-nft 无 opt 列的 NF==8 输出并合并 IPv6 流量)
-    line=$(stats_all | awk -v ip="$ip" '$1 == ip { print $2, $3; exit }')
-    if [ -n "$line" ]; then
-        rx=${line% *}
-        tx=${line#* }
-    fi
-    echo "{\"upload_bytes\":${tx:-0},\"download_bytes\":${rx:-0}}"
-}
-
-reset_counters() {
-    stats_lock || true
-    $IPT -t mangle -Z HNC_STATS 2>/dev/null
-    [ "$IPV6_OK" = "1" ] && $IP6T -t mangle -Z HNC_STATS 2>/dev/null
-    rm -f "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
-    stats_unlock
-    log "Counters reset (v4+v6 + retired cleared)"
-}
-
 # ═══════════════════════════════════════════════════════════════
 # 清理所有规则（v4+v6）
-# v3.3.4：双栈清理所有链 + 解绑所有 builtin 跳转
+# 双栈清理所有链 + 解绑所有 builtin 跳转
 # ═══════════════════════════════════════════════════════════════
 cleanup() {
     log "Cleanup all HNC rules..."
@@ -634,7 +583,7 @@ cleanup() {
     done
 
     # flush + delete 所有用户链（v6，含 HNC_STATS）
-    if [ "$IPV6_OK" = "1" ]; then
+    if ipv6_ok; then
         for chain in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE HNC_EGRESS_FIX; do
             $IP6T -t mangle -F "$chain" 2>/dev/null
             $IP6T -t mangle -X "$chain" 2>/dev/null
@@ -644,8 +593,8 @@ cleanup() {
             $IP6T -t filter -X "$chain" 2>/dev/null
         done
     fi
-    # v5.37.0: 兜底回收应用限速与应用 QoS 孤儿链
-    for _T in "$IPT" "$([ "$IPV6_OK" = "1" ] && echo "$IP6T")"; do
+    # 兜底回收应用限速与应用 QoS 孤儿链
+    for _T in "$IPT" "$(ipv6_ok && echo "$IP6T")"; do
         [ -z "$_T" ] && continue
         for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_QOS_MARK; do
             for _k in 1 2 3 4; do $_T -t mangle -D FORWARD -j "$_ac" 2>/dev/null || break; done
@@ -669,50 +618,21 @@ cleanup() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# v3.4.4：per-device 流量统计扩展
+# per-device 流量统计扩展（ensure_stats_online / stats_all）
 # ═══════════════════════════════════════════════════════════════
-#
-# 背景：v3.4.3 之前，HNC_STATS 链只在 mark_device（限速/延迟）时
-# 才会为某 IP 添加 RETURN 规则，所以"未限速"的设备没有计数。
-# WebUI 上的"下行/上行"字段也因此永远显示 0。
-#
-# v3.4.4 新增两个命令，让 device_detect.sh 在每次扫描时为所有
-# 在线设备维护统计规则，并一次性读出 rx/tx 字节：
-#
-#   ensure_stats <ip>
-#     给某 IP 在 HNC_STATS 链里添加 -s/-d RETURN 规则。
-#     用 $IPT -C 检查规则是否已存在,避免重复添加导致双倍计数。
-#     mark_device 已经在添加同样规则,先检查再加完全幂等。
-#
 #   stats_all
 #     一次性输出所有 IP 的累计 rx/tx 字节,空格分隔,一行一个。
 #     格式: <ip> <rx_bytes> <tx_bytes>
 #     注: rx = download = 设备是 dst (-d ip 规则)
 #         tx = upload   = 设备是 src (-s ip 规则)
-#     v3.4.3 之前的 get_stats 函数 src/dst 写反了,本版顺手修正。
-
-ensure_stats() {
-    local ip=$1 rc
-    [ -z "$ip" ] && return 1
-    $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1 || return 1
-    stats_lock || true
-    _ensure_v4_stats_ip "$ip"
-    rc=$?
-    stats_unlock
-    return $rc
-}
 
 # ensure_stats_online — 让 HNC_STATS 的 per-IP 计数规则与当前在线设备【对齐】:
 #   - 在线 IP 缺规则 → 幂等补上(先 -C 检测、缺了才 -A,绝不删/重加,保住累计)
 #   - 链里有但已不在线的 IP → 删掉(兜底防链无限增长; 该设备在线时已被采样过)
 #
-# 为什么需要: hotspotd 模式下 device_detect 扫描循环不跑 → 没人调 ensure_stats
-# 维护计数规则; 且 init 改为不再 -F HNC_STATS 后, 离线残留也需要这里兜底清理。
-# 由 stats_sample.sh 每周期(~60s)调一次。单线程无并发, -C/-A 安全。
-#
 # 安全护栏: devices.json 缺失/解析不出任何在线 IP 时【只补不删】(空集不当作
 # "全部离线"去清空整条链, 防 devices.json 半写/损坏瞬间误删所有计数)。
-# v5.35.0: 双栈 HNC_STATS 计数辅助 — 兼容有无 opt 列的 ip6tables -nvxL 输出
+# 双栈 HNC_STATS 计数辅助 — 兼容有无 opt 列的 ip6tables -nvxL 输出
 # AWK 内置 IPv6 规范化片段: 展开 :: 并去除每组前导 0, 消除 ip -6 neigh 与 ip6tables -nvxL 缩写差异
 _IP6_CANON_AWK='
 function canon_ip6(raw,    s, hal, nl, nr, L, R, z, out, i, h) {
@@ -739,7 +659,8 @@ function canon_ip6(raw,    s, hal, nl, nr, L, R, z, out, i, h) {
 '
 
 _ip6_stats_dump() {
-    [ "$IPV6_OK" = "1" ] || return 0
+    [ "$_IPV6_PROBED" = "1" ] && [ "$IPV6_OK" = "0" ] && return 0
+    command -v ip6tables >/dev/null 2>&1 || return 0
     $IP6T -t mangle -L HNC_STATS -nvx 2>/dev/null | awk "$_IP6_CANON_AWK"'
     $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 == "RETURN" {
         b = $2 + 0
@@ -779,15 +700,15 @@ ensure_stats_online() {
         rm -f "$v6_map" "$v6_ret" 2>/dev/null
     fi
     $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
-        || $IPT -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null \
+        || $IPT -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
-    if [ "$IPV6_OK" = "1" ]; then
+    if ipv6_ok; then
         if ! $IP6T -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
             $IP6T -t mangle -N HNC_STATS 2>/dev/null
             rm -f "$v6_map" "$v6_ret" 2>/dev/null
         fi
         $IP6T -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
-            || $IP6T -t mangle -I FORWARD 2 -j HNC_STATS 2>/dev/null \
+            || $IP6T -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
             || $IP6T -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
     fi
     if [ ! -s "$devices_file" ]; then
@@ -837,12 +758,12 @@ ensure_stats_online() {
         ipt_del_all "$IPT" -t mangle -D HNC_STATS -d "$ip" -j RETURN
     done
 
-    # v5.35.1: IPv6 双栈设备流量计数闭环
+    # IPv6 双栈设备流量计数闭环
     #   1) 在线 MAC: 幂等维护唯一一条 -m mac 上行计数与活跃邻居 -d <ip6>/128 下行计数;
     #   2) 在线设备过期的 RFC 4941 临时地址: 先把内核字节结转累加至 stats_v6_retired[mac], 再删 -d 规则, 零漏计零泄漏;
     #   3) 已离线设备(不在 on_macs_tmp): 同步删除 -m mac 与其名下全部 -d <ip6>/128 规则, 并清空 stats_v6_map/stats_v6_retired,
     #      保证 v4+v6 同步归零, 杜绝重连时 cur<prev 非对称残留引发 limit_policy 重复扣减配额!
-    if [ "$IPV6_OK" = "1" ]; then
+    if ipv6_ok; then
         local iface neigh_tmp d6_now act_d6_tmp del_d6_tmp _cnt _extra
         iface=$(cat "$HNC_DIR/run/iface.cache" 2>/dev/null | tr -d '\r\n ')
         [ -z "$iface" ] && iface=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null | tr -d '\r\n ')
@@ -1152,11 +1073,11 @@ case "$1" in
         mac_unlock "$3"
         exit $rc ;;
 
-    # ═══ 只读 / 只改 counter,不加锁 ═══════════════════════════
+    # ═══ 客户端隔离与统计 ════════════════════════════════════
     set_isolation)
         gate_lock || exit 11
         _iso_if=$2; _iso_on=$3
-        for _T in "$IPT" "$([ "$IPV6_OK" = "1" ] && echo "$IP6T")"; do
+        for _T in "$IPT" "$(ipv6_ok && echo "$IP6T")"; do
             [ -z "$_T" ] && continue
             for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j HNC_ISOLATE 2>/dev/null || break; done
             $_T -t filter -F HNC_ISOLATE 2>/dev/null || true
@@ -1171,15 +1092,12 @@ case "$1" in
         done
         gate_unlock
         exit 0 ;;
-    stats)             get_stats "$2" ;;
-    ensure_stats)      ensure_stats "$2" ;;
     ensure_stats_online) ensure_stats_online ;;
     stats_all)         stats_all ;;
-    reset_counters)    reset_counters ;;
     *)
         echo "Usage: $0 {init|mark|unmark|blacklist_add|blacklist_remove|"
         echo "           whitelist_add|whitelist_remove|whitelist_on|whitelist_off|"
-        echo "           stats|ensure_stats|stats_all|reset_counters|cleanup}"
+        echo "           set_isolation|ensure_stats_online|stats_all|cleanup}"
         echo ""
         _ipt_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
         _ipt_ver=""
@@ -1188,8 +1106,9 @@ case "$1" in
             _ipt_ver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_ipt_p" 2>/dev/null | tr -d ' \t\r\n"')
             [ -n "$_ipt_p" ] && [ -n "$_ipt_ver" ] && break
         done
+        ipv6_ok >/dev/null 2>&1 || true
         echo "HNC ${_ipt_ver:-v6.1} 双栈支持（IPv4 + IPv6 · 保护低 16 位 netd 路由 netId）"
-        echo "支持 ensure_stats / ensure_stats_online / stats_all 按设备流量统计与 gate/mac 原子锁"
+        echo "支持 ensure_stats_online / stats_all 双栈流量统计与 gate/mac 原子锁"
         echo "运行时检测：IPV6_OK=$IPV6_OK"
         echo ""
         echo "验证命令："
@@ -1199,6 +1118,6 @@ case "$1" in
         echo "  $IP6T -t mangle -L HNC_RESTORE -nv    # v6 CONNMARK restore"
         echo "  $IPT  -t mangle -L HNC_SAVE    -nv    # v4 CONNMARK save"
         echo "  $IP6T -t mangle -L HNC_SAVE    -nv    # v6 CONNMARK save"
-        echo "  $IPT  -t mangle -L HNC_STATS   -nvx   # v4 流量统计(v3.4.4+)"
+        echo "  $IPT  -t mangle -L HNC_STATS   -nvx   # v4 流量统计"
         exit 1 ;;
 esac

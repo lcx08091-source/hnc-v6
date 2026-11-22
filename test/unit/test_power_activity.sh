@@ -98,12 +98,11 @@ act_write "$(date +%s)" hotspot_off false true false 0 false
 p=$(grun plan)
 [ "$p" = "300 hotspot" ] && test_pass || test_fail "plan=$p"
 
-test_start "watchdog / offload guard: 引入 hnc_activity.sh 且 sh -n 通过"
+test_start "watchdog / offload guard: hnc_offload_guard 引入 hnc_activity.sh 且 sh -n 通过"
 ok=1
 for f in watchdog.sh hnc_offload_guard.sh hnc_activity.sh; do
     sh -n "$HNC_REPO_ROOT/bin/$f" 2>/dev/null || ok=0
 done
-grep -q 'hnc_activity.sh' "$HNC_REPO_ROOT/bin/watchdog.sh" || ok=0
 grep -q 'hnc_activity.sh' "$HNC_REPO_ROOT/bin/hnc_offload_guard.sh" || ok=0
 # v5.26 T1: shell 主循环已删, 改查 Go 版 power.go 的 intervalIdleProbe。
 grep -q 'intervalIdleProbe' "$HNC_REPO_ROOT/src/dpid/cmd/hnc_watchdog/power.go" || ok=0

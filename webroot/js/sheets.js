@@ -210,7 +210,7 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
   // 触屏整卡顶部下拉关闭
   sh.addEventListener('touchstart', function (e) {
     if (e.touches.length !== 1) return;
-    if (e.target.closest('input,textarea,select,.seg,.toggle,[data-lcc-track]')) return;
+    if (e.target.closest('input,textarea,select,.seg,.toggle')) return;
     var onGrab = !!(e.target.closest && e.target.closest('.grab'));
     beginDrag(e.touches[0].clientY, onGrab, null);
   }, { passive: true });
@@ -364,3 +364,301 @@ function alertAction(kind, id, mac) {
     if (dr && dr.classList.contains('show') && typeof closeScalpelDrawer === 'function') closeScalpelDrawer(true);
   });
 })();
+
+/* ═════════════════════ v6.1.0-rc.1 一句话热点省电与健康体检单（按需拉取 · 平时 0 轮询） ═════════════════════ */
+var QH_DEF_META = {
+  hotspot_forward: { title: '热点连通与转发通路', icon: 'wifi', color: 'blue', target: 'scard-hs', targetLabel: '热点设置' },
+  zero_wakeup_power: { title: '零唤醒待机与省电巡航', icon: 'bolt', color: 'green', target: 'pwr', targetLabel: '功耗自测' },
+  shaping_offload: { title: '限速生效与防加速绕过', icon: 'shield', color: 'orange', target: 'scard-dpv', targetLabel: '限速检验' },
+  tmpfs_config: { title: '内存空间与配置完整性', icon: 'cpu', color: 'purple', target: 'json-health', targetLabel: '配置健康' }
+};
+var QH_FIX_LABELS = {
+  hotspot_start: '一键开启热点',
+  restart_service: '一键重启恢复服务',
+  self_studio_start: '关闭后台自训采样',
+  dataplane_verify_run: '一键重下发修复限速',
+  self_attrib_purge: '一键清理运行空间',
+  json_doctor_repair: '一键修复损坏配置',
+  refresh: '一键恢复网关转发',
+  clsact_mode_set: '开启自动防旁路',
+  cache_clear: '一键释放运行空间'
+};
+function qhNormStatus(raw) {
+  var s = String(raw || '').toLowerCase().trim();
+  if (s === 'fail' || s === 'error' || s === 'bad' || s === 'critical') return 'fail';
+  if (s === 'warn' || s === 'warning' || s === 'degraded') return 'warn';
+  if (s === 'info') return 'info';
+  return 'ok';
+}
+function qhPickCards(r) {
+  if (!r || typeof r !== 'object') return [];
+  if (Array.isArray(r.cards)) return r.cards;
+  if (Array.isArray(r.items)) return r.items;
+  if (Array.isArray(r.checks)) return r.checks;
+  if (Array.isArray(r.dimensions)) return r.dimensions;
+  return [];
+}
+function qhParseActionSpec(specStr, extraParams) {
+  var raw = String(specStr || '').trim();
+  if (!raw) return null;
+  var parts = raw.split(/\s+/).filter(Boolean);
+  var act = parts[0] || '';
+  if (!act || act.length > 48 || !/^[a-z][a-z0-9_]+$/.test(act)) return null;
+  var p = {};
+  if (extraParams && typeof extraParams === 'object') {
+    Object.keys(extraParams).forEach(function (k) {
+      if (extraParams[k] !== undefined && extraParams[k] !== null) p[k] = String(extraParams[k]);
+    });
+  }
+  for (var i = 1; i < parts.length; i++) {
+    var tok = parts[i], eqIdx = tok.indexOf('=');
+    if (eqIdx > 0) p[tok.slice(0, eqIdx)] = tok.slice(eqIdx + 1);
+    else if (act === 'self_studio_start' && !p.mode) p.mode = tok;
+  }
+  if (act === 'self_studio_start' && !p.mode) p.mode = 'off';
+  if (act === 'dataplane_verify_run' && !p.resync) { p.resync = '1'; p.check_goroutineleak = '0'; }
+  return { name: act, params: p };
+}
+function renderQuickHealthSheet(raw, keepScroll) {
+  var sh = $('#sheet');
+  var bodyHtml = '';
+  if (!raw) {
+    bodyHtml = '<h3>一句话省电与健康体检</h3>' +
+      '<div class="sub">按需秒检热点转发、待机省电、限速生效与内存空间（平时 0 轮询）</div>' +
+      '<div class="dbox" style="text-align:center;padding:24px 14px"><span class="spin" style="margin-right:8px;vertical-align:-2px"></span>正在读取实时健康状态…</div>' +
+      '<div class="btns" style="margin-top:12px"><button type="button" class="btn sec wide press" data-close>关闭</button></div>';
+  } else if (raw._err) {
+    bodyHtml = '<h3>一句话省电与健康体检</h3>' +
+      '<div class="sub">按需秒检热点转发、待机省电、限速生效与内存空间（平时 0 轮询）</div>' +
+      '<div class="qh-hero is-warn">' +
+        '<span class="qh-hero-ic">' + ico('warn') + '</span>' +
+        '<div class="qh-hero-txt"><div class="qh-hero-t">暂未获取到实时体检结果</div><div class="qh-hero-s">' + esc(raw._err) + '</div></div>' +
+      '</div>' +
+      (S.refreshMode === 'realtime'
+        ? '<div class="qh-card is-warn"><div class="qh-card-top"><span class="qh-card-l">' + gi('orange', 'bolt') + '<span>前台刷新模式耗电提示</span></span><span class="badge b-warn">可省电</span></div>' +
+          '<div class="qh-card-sum">当前处于「实时刷新」高频模式</div><div class="qh-card-det">日常挂机使用建议切回「均衡刷新」，在保持流畅度的同时减少前台桥接唤醒。</div>' +
+          '<div class="qh-card-acts"><button type="button" class="btn pri press" data-act="qh-set-balanced">一键切回均衡刷新</button></div></div>'
+        : '') +
+      '<div class="btns" style="margin-top:12px"><button type="button" class="btn sec press" data-act="qh-refresh">' + ico('refresh') + '<span>重试体检</span></button><button type="button" class="btn pri press" data-close>关闭</button></div>';
+  } else {
+    var cards = qhPickCards(raw);
+    var worst = qhNormStatus(raw.overall || raw.status || raw.overall_status || raw.level || raw.grade);
+    if (!raw.overall && !raw.status && !raw.overall_status && cards.length) {
+      cards.forEach(function (c) {
+        var cs = qhNormStatus(c && (c.status || c.level || c.state));
+        if (cs === 'fail') worst = 'fail';
+        else if (cs === 'warn' && worst !== 'fail') worst = 'warn';
+      });
+    }
+    var sumObj = raw.summary && typeof raw.summary === 'object' ? raw.summary : null;
+    var headline = String(raw.headline || raw.one_liner || raw.summary_text || (typeof raw.summary === 'string' ? raw.summary : '') || (sumObj && (sumObj.headline || sumObj.text)) || (worst === 'ok' ? '热点省电与限速状态一切健康，空闲自动零唤醒休眠' : worst === 'fail' ? '发现影响上网或限速的异常项，可点击下方按钮一键修复' : '热点运行正常，有部分省电或加速项可一键优化'));
+    var subline = String(raw.subline || raw.subtitle || raw.detail || (sumObj && sumObj.detail) || ('本机按需快照检测 · 平时后台 0 额外轮询' + (raw.checked_at ? ' · ' + ago(raw.checked_at) : '')));
+    var heroCls = worst === 'fail' ? ' is-fail' : (worst === 'warn' ? ' is-warn' : '');
+    var heroIc = worst === 'fail' ? 'warn' : (worst === 'warn' ? 'info' : 'shield');
+    var shownPowerBtn = false;
+
+    var cardsHtml = cards.map(function (c, idx) {
+      c = c || {};
+      var cid = String(c.id || c.key || ('item_' + idx));
+      var meta = QH_DEF_META[cid] || { title: '健康检查项', icon: 'check', color: 'blue', target: '', targetLabel: '查看详情' };
+      var st = qhNormStatus(c.status || c.level || c.state);
+      var isPowerCard = cid === 'zero_wakeup_power' || /省电|唤醒|功耗/.test(String(c.title || c.label || meta.title));
+      if (isPowerCard && S.refreshMode === 'realtime' && st === 'ok') st = 'warn';
+      var bdgCls = st === 'fail' ? 'b-red' : (st === 'warn' ? 'b-warn' : (st === 'info' ? 'b-acc' : 'b-ok'));
+      var bdgTxt = String(c.status_label || c.badge || c.state_cn || (st === 'fail' ? '需修复' : st === 'warn' ? '可优化' : st === 'info' ? '提示' : '健康'));
+      var cTitle = String(c.title || c.label || c.name || meta.title);
+      var cSum = String(c.verdict || c.summary || c.headline || c.value || c.text_cn || '');
+      var cDet = String(c.detail || c.desc || c.message || c.reason || '');
+      var fixRaw = String(c.fix_action || (c.fix && c.fix.action) || '').trim();
+      var fixParams = (c.fix_params && typeof c.fix_params === 'object') ? c.fix_params : ((c.fix && typeof c.fix.params === 'object') ? c.fix.params : null);
+      var spec = c.fix_kind === 'nav' ? null : qhParseActionSpec(fixRaw, fixParams);
+      var fixLbl = String(c.fix_label || c.fix_text || (c.fix && c.fix.label) || (spec && QH_FIX_LABELS[spec.name]) || '一键修复');
+      var jumpTo = String(c.jump_target || c.target || c.nav_target || meta.target || '');
+      var jumpLbl = String((c.fix_kind === 'nav' && c.fix_label) ? c.fix_label : (c.jump_label || c.target_label || meta.targetLabel || '前往设置'));
+      var acts = '';
+      if (spec) {
+        acts += '<button type="button" class="btn ' + (st === 'fail' ? 'dan' : 'pri') + ' press" data-qh-fix="' + esc(fixRaw) + '" data-qh-params="' + esc(fixParams ? JSON.stringify(fixParams) : '') + '">' + ico('tool') + '<span>' + esc(fixLbl) + '</span></button>';
+      }
+      if (isPowerCard && S.refreshMode === 'realtime') {
+        shownPowerBtn = true;
+        acts += '<button type="button" class="btn pri press" data-act="qh-set-balanced">' + ico('bolt') + '<span>一键切回均衡刷新</span></button>';
+      }
+      if (jumpTo) {
+        acts += '<button type="button" class="btn sec press" data-qh-jump="' + esc(jumpTo) + '"><span>' + esc(jumpLbl) + '</span>' + ico('right') + '</button>';
+      }
+      var giCol = st === 'fail' ? 'red' : (st === 'warn' ? 'orange' : (st === 'ok' ? 'green' : meta.color));
+      return '<div class="qh-card' + (st === 'fail' ? ' is-fail' : st === 'warn' ? ' is-warn' : '') + '" data-qh-id="' + esc(cid) + '">' +
+        '<div class="qh-card-top"><span class="qh-card-l">' + gi(giCol, meta.icon) + '<span>' + esc(cTitle) + '</span></span><span class="badge ' + bdgCls + '">' + esc(bdgTxt) + '</span></div>' +
+        (cSum ? '<div class="qh-card-sum">' + esc(cSum) + '</div>' : '') +
+        (cDet ? '<div class="qh-card-det">' + esc(cDet) + '</div>' : '') +
+        (isPowerCard && S.refreshMode === 'realtime' ? '<div class="qh-card-det" style="color:var(--badge-warn)">当前前台处于「实时刷新」档位，切回「均衡刷新」可进一步降低亮屏轮询开销。</div>' : '') +
+        (acts ? '<div class="qh-card-acts">' + acts + '</div>' : '') +
+      '</div>';
+    }).join('');
+
+    if (!shownPowerBtn && S.refreshMode === 'realtime') {
+      cardsHtml += '<div class="qh-card is-warn" data-qh-id="realtime_mode_hint">' +
+        '<div class="qh-card-top"><span class="qh-card-l">' + gi('orange', 'bolt') + '<span>前台轮询省电建议</span></span><span class="badge b-warn">可省电</span></div>' +
+        '<div class="qh-card-sum">当前设备页为「实时刷新」高频档位</div>' +
+        '<div class="qh-card-det">切回「均衡刷新」后按在线状态智能降频，日常看管更省电。</div>' +
+        '<div class="qh-card-acts"><button type="button" class="btn pri press" data-act="qh-set-balanced">' + ico('bolt') + '<span>一键切回均衡刷新</span></button></div>' +
+      '</div>';
+    }
+
+    bodyHtml = '<h3>一句话省电与健康体检</h3>' +
+      '<div class="sub">按需秒检热点转发、待机省电、限速生效与内存空间（平时 0 轮询）</div>' +
+      '<div class="qh-hero' + heroCls + '">' +
+        '<span class="qh-hero-ic">' + ico(heroIc) + '</span>' +
+        '<div class="qh-hero-txt"><div class="qh-hero-t">' + esc(headline) + '</div><div class="qh-hero-s">' + esc(subline) + '</div></div>' +
+      '</div>' +
+      '<div class="qh-list">' + (cardsHtml || '<div class="empty">' + uiSvg('check') + ' 各项核心指标均处于健康状态</div>') + '</div>' +
+      '<div class="btns" style="margin-top:12px"><button type="button" class="btn sec press" data-act="qh-refresh">' + ico('refresh') + '<span>重新体检</span></button><button type="button" class="btn pri press" data-close>完成</button></div>';
+  }
+
+  if (keepScroll && sh && sh.classList.contains('show') && sh.dataset.kind === 'quick-health') {
+    var topY = sh.scrollTop;
+    $('#sheet-body').innerHTML = bodyHtml;
+    sh.scrollTop = topY;
+  } else {
+    sheet(bodyHtml, { kind: 'quick-health', tall: true });
+  }
+}
+function openQuickHealthSheet(forceRefresh) {
+  var isOpen = $('#sheet') && $('#sheet').classList.contains('show') && $('#sheet').dataset.kind === 'quick-health';
+  if (!forceRefresh && S.quickHealth && !S.quickHealth._err && isOpen) {
+    renderQuickHealthSheet(S.quickHealth, true);
+  } else if (!isOpen) {
+    renderQuickHealthSheet(S.quickHealth && !forceRefresh ? S.quickHealth : null, false);
+  }
+  return api.get('/api/health_check', forceRefresh ? { refresh: 1 } : null, { timeout: 12000 }).then(function (r) {
+    S.quickHealth = r || {};
+    if ($('#sheet') && $('#sheet').classList.contains('show') && $('#sheet').dataset.kind === 'quick-health') {
+      renderQuickHealthSheet(S.quickHealth, true);
+    }
+    if (S.page === 'settings' && typeof renderSettings === 'function') renderSettings(false);
+    return S.quickHealth;
+  }).catch(function (e) {
+    var errObj = { _err: errText(e) };
+    if ($('#sheet') && $('#sheet').classList.contains('show') && $('#sheet').dataset.kind === 'quick-health') {
+      renderQuickHealthSheet(errObj, true);
+    } else {
+      toast('体检读取失败：' + errText(e), 'err');
+    }
+    return errObj;
+  });
+}
+function execQuickHealthFix(fixActRaw, fixParamsObj, btnEl) {
+  var parsedParams = fixParamsObj;
+  if (typeof fixParamsObj === 'string' && fixParamsObj) {
+    try { parsedParams = JSON.parse(fixParamsObj); } catch (_) { parsedParams = null; }
+  }
+  var spec = qhParseActionSpec(fixActRaw, parsedParams);
+  if (!spec) { toast('不支持的修复动作', 'err'); return Promise.resolve(false); }
+  var runChain = function () {
+    return api.action(spec.name, spec.params).then(function (res) {
+      if (spec.name === 'self_attrib_purge') {
+        return api.action('cache_clear', {}).catch(function () {}).then(function () { return res; });
+      }
+      if (spec.name === 'cache_clear') {
+        return api.action('self_attrib_purge', {}).catch(function () {}).then(function () { return res; });
+      }
+      return res;
+    });
+  };
+  var p = btnEl && typeof busyWhile === 'function' ? busyWhile(btnEl, runChain()) : runChain();
+  return p.then(function (res) {
+    var okTxt = (QH_FIX_LABELS[spec.name] || '修复操作') + '已执行';
+    if (res && res.detail && typeof res.detail === 'string' && res.detail.length < 60 && res.detail.charAt(0) !== '{') okTxt += ' · ' + res.detail;
+    toast(okTxt);
+    var waitMs = spec.name === 'restart_service' ? 2200 : (spec.name === 'hotspot_start' ? 1500 : 250);
+    return new Promise(function (resolve) {
+      setTimeout(function () {
+        Promise.all([
+          api.get('/api/health_check', { refresh: 1 }, { timeout: 12000 }).then(function (hr) {
+            S.quickHealth = hr || {};
+            if ($('#sheet') && $('#sheet').classList.contains('show') && $('#sheet').dataset.kind === 'quick-health') {
+              renderQuickHealthSheet(S.quickHealth, true);
+            }
+          }).catch(function () {}),
+          typeof loadLive === 'function' ? loadLive().catch(function () {}) : Promise.resolve(),
+          typeof loadConfig === 'function' ? loadConfig().catch(function () {}) : Promise.resolve()
+        ]).then(function () {
+          if (S.page === 'settings' && typeof renderSettings === 'function') renderSettings(false);
+          else if (S.page === 'devices' && typeof renderDevices === 'function') renderDevices(false);
+          resolve(true);
+        });
+      }, waitMs);
+    });
+  }).catch(function (e) {
+    toast(errText(e), 'err');
+    return false;
+  });
+}
+function jumpQuickHealthTarget(target, cardId) {
+  var t = String(target || '').trim();
+  var cid = String(cardId || '').trim();
+  closeSheet(0);
+  if (!t) return;
+  if (t === 'json-health' || t === 'json_health') { location.href = 'json-health.html'; return; }
+  if (t === 'devices') { if (typeof go === 'function') go('devices'); return; }
+  if (t === 'vector') { if (typeof go === 'function') go('vector'); return; }
+  if (t === 'stats') {
+    var isPowerJump = cid === 'zero_wakeup_power' || (!cid && S && S.quickHealth && qhPickCards(S.quickHealth).some(function (x) {
+      return x && x.id === 'zero_wakeup_power' && (x.nav_target === 'stats' || x.target === 'stats');
+    }));
+    if (isPowerJump) {
+      S.setLv = 'all'; S.open['scard-maint'] = true; S.open.pwr = true;
+      if (typeof go === 'function') go('settings');
+      if (typeof renderSettings === 'function') renderSettings(false);
+      if (typeof loadPower === 'function') loadPower(false);
+    } else {
+      if (typeof go === 'function') go('stats');
+    }
+    return;
+  }
+  if (t === 'settings') {
+    S.setLv = 'all'; S.open['scard-diag'] = true;
+    if (typeof go === 'function') go('settings');
+    if (typeof renderSettings === 'function') renderSettings(false);
+    return;
+  }
+  if (t === 'dpi-studio' || t === 'self_studio') {
+    S.aseg = 'dpi';
+    if (typeof go === 'function') go('stats');
+    if (typeof renderStats === 'function') renderStats(false);
+    return;
+  }
+  if (t === 'hotspot' || t === 'hotspot_forward' || t === 'scard-hs') {
+    S.setLv = 'all'; S.open['scard-hs'] = true;
+    if (typeof go === 'function') go('settings');
+    if (typeof renderSettings === 'function') renderSettings(false);
+    return;
+  }
+  if (t === 'power' || t === 'pwr' || t === 'zero_wakeup_power' || t === 'scard-maint' || t === 'tmpfs_config' || t === 'maint') {
+    S.setLv = 'all'; S.open['scard-maint'] = true;
+    if (t === 'power' || t === 'pwr' || t === 'zero_wakeup_power') S.open.pwr = true;
+    if (typeof go === 'function') go('settings');
+    if (typeof renderSettings === 'function') renderSettings(false);
+    if (S.open.pwr && typeof loadPower === 'function') loadPower(false);
+    return;
+  }
+  if (t === 'dpv' || t === 'shaping_offload' || t === 'scard-dpv' || t === 'offload') {
+    S.setLv = 'all'; S.open['scard-dpv'] = true;
+    if (typeof go === 'function') go('settings');
+    if (typeof renderSettings === 'function') renderSettings(false);
+    if (typeof dpvLoadSilent === 'function') dpvLoadSilent();
+    return;
+  }
+  if (t === 'guard' || t === 'scard-guard') {
+    S.setLv = 'all'; S.open['scard-guard'] = true;
+    if (typeof go === 'function') go('settings');
+    if (typeof renderSettings === 'function') renderSettings(false);
+    return;
+  }
+  if (t.indexOf('scard-') === 0) {
+    S.setLv = 'all'; S.open[t] = true;
+    if (typeof go === 'function') go('settings');
+    if (typeof renderSettings === 'function') renderSettings(false);
+  }
+}
+

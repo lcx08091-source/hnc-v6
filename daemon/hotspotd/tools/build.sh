@@ -1,20 +1,19 @@
 #!/bin/bash
-# tools/build.sh — 编译 v5.0 alpha.1 独立工具
+# tools/build.sh — 编译 hotspotd 独立工具 (hnc_ipc)
 #
 # 工具:
-#   platform_probe   平台探测 (host 模式可用, 字段会空)
-#   offload_ctl      (removed v5.9.92 — 从不构建不随包; 真机验证用 termux 直接编)
+#   hnc_ipc          hotspotd UNIX socket 命令行客户端
 #
 # 用法:
 #   export ANDROID_NDK=/path/to/android-ndk-r30
 #   bash tools/build.sh [arm64|arm|x86_64|host] [tool]
 #
 #   tool 可选:
-#     all              (默认) 编译两个工具
-#     platform_probe   只编 platform_probe
+#     all              (默认) 编译 hnc_ipc
+#     hnc_ipc          编译 hnc_ipc
 #
 # 输出:
-#   tools/prebuilt/<arch>/<tool>
+#   tools/prebuilt/<arch>/hnc_ipc
 
 set -e
 cd "$(dirname "$0")"
@@ -22,10 +21,8 @@ cd "$(dirname "$0")"
 ARCH=${1:-arm64}
 TOOL=${2:-all}
 
-# 公共源码 (按需链入)
-# alpha.2: 加 upstream.c (scheduler 依赖)
-COMMON_SRCS="../hnc_helpers.c ../platform.c ../scheduler.c ../upstream.c ../offload/adapter.c ../offload/adapter_null.c ../offload/adapter_bpf.c"
-COMMON_DEFS="-DHNC_HAVE_ADAPTER_BPF"
+HNC_VER=$(sed -n 's/^version=//p' ../../../module.prop 2>/dev/null | head -n 1 | tr -d '\r')
+[ -n "$HNC_VER" ] || HNC_VER="dev"
 
 OUTDIR="prebuilt/${ARCH}"
 mkdir -p "$OUTDIR"
@@ -33,9 +30,9 @@ mkdir -p "$OUTDIR"
 # 决定 compiler
 if [ "$ARCH" = "host" ]; then
     CC="${CC:-gcc}"
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 $COMMON_DEFS -fPIE"
-    LDFLAGS="-pie -pthread"
-    echo "[build] Host build (Android props will be empty)"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
+    LDFLAGS="-pie"
+    echo "[build] Host build (Version: $HNC_VER)"
 else
     case "$ARCH" in
         arm64)   TARGET=aarch64-linux-android;     API=28 ;;
@@ -59,9 +56,9 @@ else
         [ -x "$TOOLCHAIN/bin/llvm-strip" ] && STRIP="$TOOLCHAIN/bin/llvm-strip"
     fi
 
-    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 $COMMON_DEFS -fPIE -pthread"
+    CFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -D_GNU_SOURCE -DANDROID -D_FILE_OFFSET_BITS=64 -fPIE"
     LDFLAGS="-pie -Wl,-z,max-page-size=16384 -Wl,-z,common-page-size=16384"
-    echo "[build] Compiler: $CC  Target: $ARCH"
+    echo "[build] Compiler: $CC  Target: $ARCH  Version: $HNC_VER"
 fi
 
 build_one() {
@@ -69,29 +66,18 @@ build_one() {
     local MAIN=${NAME}.c
     local OUT=${OUTDIR}/${NAME}
     echo "[build] -> $OUT"
-    # hnc_ipc 是独立工具, 不需要 platform/scheduler/adapter 公共代码
-    if [ "$NAME" = "hnc_ipc" ]; then
-        # shellcheck disable=SC2086
-        $CC $CFLAGS -o "$OUT" "$MAIN" $LDFLAGS
-    else
-        # shellcheck disable=SC2086
-        $CC $CFLAGS -I.. -I../offload -o "$OUT" "$MAIN" $COMMON_SRCS $LDFLAGS
-    fi
+    # shellcheck disable=SC2086
+    $CC $CFLAGS -DHNC_VERSION="\"${HNC_VER}\"" -o "$OUT" "$MAIN" $LDFLAGS
     [ "$ARCH" != "host" ] && "${STRIP:-strip}" "$OUT" 2>/dev/null || true
     ls -lh "$OUT" | awk '{print "         " $5 "  " $9}'
 }
 
 case "$TOOL" in
-    all)
-        build_one platform_probe
-        build_one sched_test
+    all|hnc_ipc)
         build_one hnc_ipc
         ;;
-    platform_probe|sched_test|hnc_ipc)
-        build_one "$TOOL"
-        ;;
     *)
-        echo "Unknown tool: $TOOL"
+        echo "Unknown tool: $TOOL (expected: all | hnc_ipc)"
         exit 1
         ;;
 esac

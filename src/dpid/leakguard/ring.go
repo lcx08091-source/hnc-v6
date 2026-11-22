@@ -285,6 +285,38 @@ func (r *RingBuffer) MarkBlockedDomains(isBlocked func(host string) bool) bool {
 	return changed
 }
 
+// PurgeIgnored removes buffered LeakEvents matching shouldIgnore in-place while
+// preserving chronological order of remaining entries. Returns evicted count.
+func (r *RingBuffer) PurgeIgnored(shouldIgnore func(LeakEvent) bool) int {
+	if r == nil || shouldIgnore == nil {
+		return 0
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.count == 0 {
+		return 0
+	}
+	nextBuf := make([]LeakEvent, r.cap)
+	kept := 0
+	purged := 0
+	for i := 0; i < r.count; i++ {
+		phys := (r.head + i) % r.cap
+		ev := r.buf[phys]
+		if shouldIgnore(ev) {
+			purged++
+			continue
+		}
+		nextBuf[kept] = ev
+		kept++
+	}
+	if purged > 0 {
+		r.buf = nextBuf
+		r.head = 0
+		r.count = kept
+	}
+	return purged
+}
+
 // Snapshot returns a copy of all buffered events ordered newest-first.
 func (r *RingBuffer) Snapshot() []LeakEvent {
 	r.mu.RLock()

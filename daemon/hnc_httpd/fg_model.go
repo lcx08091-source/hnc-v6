@@ -469,14 +469,14 @@ func fgScore(f fgFeat, contSec float64, id, cat string) float64 {
 }
 
 type fgAgg struct {
-	name, cat                string
-	dn, up, hb               uint64
-	inf, v6Bytes             uint64
-	lowB, intB, rtB          uint64
-	conns                    map[string]uint64
-	closingKeys              map[string]bool
-	newTick, rr              int
-	hasConnDetail            bool
+	name, cat       string
+	dn, up, hb      uint64
+	inf, v6Bytes    uint64
+	lowB, intB, rtB uint64
+	conns           map[string]uint64
+	closingKeys     map[string]bool
+	newTick, rr     int
+	hasConnDetail   bool
 }
 
 // reset 清空设备状态(时间回退/长间隔/时钟跳变), 打开的会话在 at 收尾

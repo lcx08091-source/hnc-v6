@@ -9,7 +9,7 @@ test_start "proc_health: Go 实现存在且 JSON 字段齐全"
   && grep -q 'schema_version' "$HNC_REPO_ROOT/daemon/hnc_httpd/proc_health.go" \
   && grep -q 'watchdog_main' "$HNC_REPO_ROOT/daemon/hnc_httpd/proc_health.go" \
   && grep -q 'dpid_guard_main' "$HNC_REPO_ROOT/daemon/hnc_httpd/proc_health.go" \
-  && grep -q 'dpid_child' "$HNC_REPO_ROOT/daemon/hnc_httpd/proc_health.go" \
+  && grep -q 'hnc_dpid' "$HNC_REPO_ROOT/daemon/hnc_httpd/proc_health.go" \
   && grep -q 'pidfile 不可用' "$HNC_REPO_ROOT/daemon/hnc_httpd/proc_health.go" && test_pass || test_fail "Go 实现缺失"
 
 test_start "proc_health: 四处调用方全部走 procfind"

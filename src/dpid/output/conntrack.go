@@ -28,29 +28,9 @@ type ConntrackReport struct {
 	Flows     int    // number of conntrack entries
 }
 
-// ReadConntrack scans the first available conntrack export and returns
-// the entry count. Counting is line-based; we cap at maxConntrackLines to
-// avoid pathological behaviour on huge tables.
-func ReadConntrack() ConntrackReport {
-	return ReadConntrackWith(nil)
-}
-
-// ReadConntrackWith 同 ReadConntrack, onDst 非 nil 时对每条记录的原方向
-// 目的地址(第一个 "dst=" 字段, 即客户端连向的远端)回调一次(v5.18: 供
-// IP→域名表给活跃连接顺延映射)。地址已按 net.IP.String() 规范化。
-func ReadConntrackWith(onDst func(dst string)) ConntrackReport {
-	if onDst == nil {
-		return ReadConntrackLines(nil)
-	}
-	return ReadConntrackLines(func(line string) {
-		if d := conntrackOrigDst(line); d != "" {
-			onDst(d)
-		}
-	})
-}
-
-// ReadConntrackLines 同 ReadConntrack, onLine 非 nil 时对每条记录回调原始行
-// (v5.21: 一次扫描同时做 IP→域名顺延与 853 连接计数)。
+// ReadConntrackLines scans the first available conntrack export and returns
+// the entry count (capped at maxConntrackLines); when onLine != nil, invokes
+// it on each non-empty non-comment conntrack line.
 func ReadConntrackLines(onLine func(line string)) ConntrackReport {
 	const maxConntrackLines = 1 << 16 // 65536 flows ought to be enough
 

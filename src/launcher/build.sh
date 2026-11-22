@@ -23,6 +23,10 @@
 
 set -eu
 
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+HNC_VER=$(sed -n 's/^version=//p' "$SCRIPT_DIR/../../module.prop" 2>/dev/null | head -n 1 | tr -d '\r')
+[ -n "$HNC_VER" ] || HNC_VER="dev"
+
 # ─── 0. 命令行参数解析与校验 ─────────────────────────────────────
 DO_INSTALL=0
 ARCH="arm64"
@@ -35,13 +39,13 @@ case "${1:-}" in
             echo "ERROR: unexpected extra argument after 'host': $2" >&2
             exit 1
         fi
-        cd "$(dirname "$0")"
+        cd "$SCRIPT_DIR"
         CC="${CC:-gcc}"
         OUT="${HNC_HOST_OUT:-out/host}"
         mkdir -p "$OUT"
         HFLAGS="-O2 -std=c11 -Wall -Wextra -Wsign-compare -Werror -Wno-unused-parameter -D_GNU_SOURCE -D_FILE_OFFSET_BITS=64 -fPIE"
         $CC $HFLAGS -o "$OUT/fork_probe" fork_probe.c -pie
-        $CC $HFLAGS -o "$OUT/hnc_launcher" hnc_launcher.c -pie
+        $CC $HFLAGS -DHNC_VERSION="\"${HNC_VER}\"" -o "$OUT/hnc_launcher" hnc_launcher.c -pie
         echo "Host build OK: $OUT/hnc_launcher $OUT/fork_probe"
         exit 0
         ;;
@@ -174,7 +178,7 @@ ls -lh "$OUT/fork_probe"
 
 echo ""
 echo "Building hnc_launcher (PIE, dynamic linked)..."
-"$CLANG" $COMMON_FLAGS -o "$OUT/hnc_launcher" hnc_launcher.c $LDFLAGS_BIONIC
+"$CLANG" $COMMON_FLAGS -DHNC_VERSION="\"${HNC_VER}\"" -o "$OUT/hnc_launcher" hnc_launcher.c $LDFLAGS_BIONIC
 [ -x "$STRIP" ] && "$STRIP" "$OUT/hnc_launcher"
 file "$OUT/hnc_launcher"
 ls -lh "$OUT/hnc_launcher"
@@ -198,8 +202,8 @@ for s in "hnc_launcher" "/data/local/hnc/bin/hnc_dpid" "execv failed" "CRASH_LOO
         exit 1
     fi
 done
-if ! (strings -a "$OUT/hnc_launcher" 2>/dev/null || strings "$OUT/hnc_launcher") | grep -qE '0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*'; then
-    echo "  ERROR: hnc_launcher missing version string matching 0.X.Y-rcN(.M)*" >&2
+if ! grep -a -qF "$HNC_VER" "$OUT/hnc_launcher"; then
+    echo "  ERROR: hnc_launcher missing version string: $HNC_VER" >&2
     exit 1
 fi
 

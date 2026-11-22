@@ -1,7 +1,7 @@
 #!/system/bin/sh
 
-# v3.5.0 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
+# PATH 健壮性,见 service.sh
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 # v6_sync.sh — IPv6 地址 → tc u32 filter 周期性同步器
 #
 # v3.4.0 新增。解决 IPv6 限速问题：
@@ -502,9 +502,15 @@ sync_all() {
 # 显示当前同步状态（人类可读）
 # ═══════════════════════════════════════════════════════════════
 show_status() {
-    local iface
+    local iface _v6_root _v6_ver="" _mp
+    _v6_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
+    for _mp in "${_v6_root:+$_v6_root/module.prop}" "$HNC_DIR/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
+        [ -n "$_mp" ] && [ -f "$_mp" ] || continue
+        _v6_ver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')
+        [ -n "$_v6_ver" ] && break
+    done
     iface=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null)
-    echo "=== HNC v6 sync status ==="
+    echo "=== HNC ${_v6_ver:+$_v6_ver }v6 sync status ==="
     echo "iface: $iface"
     echo "snap dir: $SNAP_DIR"
     echo ""

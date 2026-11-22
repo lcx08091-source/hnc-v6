@@ -47,7 +47,7 @@ write_state(){
     _mver=$(json_escape "${_mver:-unknown}")
     # v5.12: 临时名带 pid, 不与 dpid / supervisor 的同名 .tmp 互踩
     cat > "$RUN/dpi_state.json.tmp.$$" <<EOF_STATE
-{"schema_version":1,"timestamp":$now,"version":"0.5.4-rc30.12.5-rebind+${_mver}","mode":"blind","interface":"$iface","uptime_s":0,"blind_reason":"$reason","stats":{"packets":0,"dns_events":0,"tls_events":0,"kernel_drops":0,"ignored_packets":0,"parse_errors":0}}
+{"schema_version":"2.0","timestamp":$now,"version":"0.5.4-rebind+${_mver}","mode":"blind","interface":"$iface","uptime_s":0,"blind_reason":"$reason","stats":{"packets":0,"dns_events":0,"tls_events":0,"kernel_drops":0,"ignored_packets":0,"parse_errors":0}}
 EOF_STATE
     mv -f "$RUN/dpi_state.json.tmp.$$" "$RUN/dpi_state.json" 2>/dev/null || true
 }
@@ -63,8 +63,6 @@ kill_pidfile(){
 }
 
 IFACE=$(get_iface "$1")
-# Validate iface name (must match Go-side regex, 回移自 5.9.91 分叉线;
-# 与 hnc_httpd action.go 的 ifaceNameRE 保持同一字符集)
 case "$IFACE" in
     -*|.*|*..*)
         echo "invalid iface: $IFACE" >&2
@@ -87,21 +85,10 @@ else
 fi
 chmod 644 "$CONFIG" 2>/dev/null || true
 
-# rc11: the authoritative launcher is the C launcher (hnc_launcher), kept alive
-# by hnc_watchdog. The OLD rebind killed it (via dpid_guard.pid) and started a
-# COMPETING shell guard → two managers fighting over dpid (one SIGTERMs it, the
-# other treats rc=0 as "stop" and gives up) → dpid dies → user must rebind
-# again, forever. New behaviour: clear crash flags, restart only the dpid CHILD
-# so the C launcher respawns it with the refreshed iface config. (v5.33: the
-# shell guard / Go supervisor no longer exist.)
-
-# Clear crash flags so the launcher/dpid actually (re)start. The C launcher
-# enters "observe mode" (no restart) while dpid_crashflag exists; dpid has its
-# own dpid.crashflag.
+# Clear crash flags so the launcher/dpid actually (re)start.
 rm -f "$RUN/dpid_crashflag" "$RUN/dpid.crashflag" 2>/dev/null || true
 
 # Restart only the dpid child; the launcher respawns it with the new config.
-kill_pidfile "$RUN/dpid.child.pid"
 kill_pidfile "$RUN/dpid.pid"
 if command -v pidof >/dev/null 2>&1; then
     for p in $(pidof hnc_dpid 2>/dev/null); do

@@ -57,8 +57,8 @@ const (
 
 	appBlockMaxDomains    = 256  // 单个应用最多展开后缀(修复抖音 92 后缀截断漏封 snssdk.com 等)
 	appCatMaxDomains      = 1024 // 单个类别最多展开后缀(video/game/social 达 469~850 个)
-	appBlockMaxExtraNames = 32  // 反查表里归到该应用、但规则后缀没覆盖的名字
-	appBlockMaxIPs        = 64  // ip_app_map(IP 规则命中)里归到该应用的 IP
+	appBlockMaxExtraNames = 32   // 反查表里归到该应用、但规则后缀没覆盖的名字
+	appBlockMaxIPs        = 64   // ip_app_map(IP 规则命中)里归到该应用的 IP
 
 	connBlockSrcAppTime  = "app_time"
 	connBlockSrcCategory = "category"

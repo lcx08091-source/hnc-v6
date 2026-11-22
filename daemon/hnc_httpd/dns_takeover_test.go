@@ -79,6 +79,7 @@ type tkHarness struct {
 	v6res   string
 	alerts  []alert.Alert
 	now     time.Time
+	netSig  string
 }
 
 func newTKHarness(t *testing.T) *tkHarness {
@@ -88,7 +89,7 @@ func newTKHarness(t *testing.T) *tkHarness {
 		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
 	}
 	h := &tkHarness{t: t, dir: dir, s: newServer(dir), upOK: true, selfOK: true, present: true, v6res: "0",
-		now: time.Unix(1_800_000_000, 0)}
+		now: time.Unix(1_800_000_000, 0), netSig: "100.64.0.1|rmnet_data0"}
 	h.tk = h.s.dnsTK()
 	uc, ln, port := freeDualPort(t)
 	uc.Close()
@@ -131,6 +132,7 @@ func newTKHarness(t *testing.T) *tkHarness {
 	h.tk.ifaceAddrs = func(string) ([]string, []string) { return []string{"127.0.0.1"}, nil }
 	h.tk.hotspotIface = func() string { return "wlan2" }
 	h.tk.systemDNS = func() []string { return nil }
+	h.tk.upstreamSig = func(string) string { h.mu.Lock(); defer h.mu.Unlock(); return h.netSig }
 	h.tk.blockSources = func(time.Time) *dnsBlockSet { return buildDNSBlockSet(nil, encdnsConf{}, nil) }
 	h.tk.emitAlert = func(a alert.Alert) { h.mu.Lock(); h.alerts = append(h.alerts, a); h.mu.Unlock() }
 	h.tk.now = func() time.Time { h.mu.Lock(); defer h.mu.Unlock(); return h.now }
@@ -362,7 +364,7 @@ func TestDNSTakeoverActionAndAPI(t *testing.T) {
 		}
 	}
 	st := resp["stats"].(map[string]interface{})
-	for _, k := range []string{"queries", "cached", "blocked", "errors", "p50_ms", "p95_ms"} {
+	for _, k := range []string{"queries", "cached", "blocked", "errors", "stale", "stale_flushes", "p50_ms", "p95_ms"} {
 		if _, ok := st[k]; !ok {
 			t.Fatalf("stats missing %s", k)
 		}
@@ -507,5 +509,104 @@ func TestDNSIPNamesBounded(t *testing.T) {
 	}
 	if n.size() > dnsTKNamesMax {
 		t.Fatalf("size %d", n.size())
+	}
+}
+
+func TestDNSTakeoverDefaultUpstreamSigAndTetherSwitchFlush(t *testing.T) {
+	// 1. 实测 defaultUpstreamSig() 零子进程微秒级耗时与过滤语义
+	_ = defaultUpstreamSig("wlan2") // 预热一次
+	const runs = 32
+	t0 := time.Now()
+	var sig string
+	for i := 0; i < runs; i++ {
+		sig = defaultUpstreamSig("wlan2")
+	}
+	avg := time.Since(t0) / runs
+	t.Logf("defaultUpstreamSig avg=%v sig=%q", avg, sig)
+	if avg > 500*time.Microsecond {
+		t.Fatalf("defaultUpstreamSig too slow: avg=%v (want <100us typical, <500us hard limit)", avg)
+	}
+	if sig != "" {
+		parts := strings.SplitN(sig, "|", 2)
+		if len(parts) != 2 || parts[0] == "" {
+			t.Fatalf("unexpected sig format: %q", sig)
+		}
+		for _, ifn := range strings.Split(parts[1], ",") {
+			if ifn == "lo" || ifn == "wlan2" {
+				t.Fatalf("sig must exclude loopback and hotspot iface, got %q", sig)
+			}
+		}
+	}
+	_ = defaultUpstreamSig() // 无参调用同样安全可用
+
+	// 2. tether 模式(上游地址保持 127.0.0.1:53 不变)下:
+	//    完全断网("")保留保活缓存; 500ms 节流后经 tickLocked() 与 handle() 秒清跨网死 IP
+	h := newTKHarness(t)
+	h.conf(`{"enabled":true}`)
+	h.tk.tick()
+	if st, act := h.state(); st != "active" || !act || h.tk.upstreamKind != "tether" {
+		t.Fatalf("expected active tether, got state=%s active=%v kind=%s", st, act, h.tk.upstreamKind)
+	}
+	fwd := h.tk.fwd
+	seedEntry := func(name string) {
+		q := dnsBuildQuery(1, name, dnsTypeA, 0, false)
+		pq, _ := dnsParseQuery(q)
+		raw := buildTestAReply(q, pq, net.IPv4(9, 9, 9, 9), 30, false)
+		fwd.cache.put(dnsCacheKey(pq), raw, mustResp(t, raw), time.Now().Add(-40*time.Second))
+	}
+	seedEntry("tether1.test")
+	if fwd.cache.Len() != 1 || fwd.Stats().StaleFlushes != 0 {
+		t.Fatalf("precheck cache len=%d flushes=%d", fwd.cache.Len(), fwd.Stats().StaleFlushes)
+	}
+
+	// 完全断网无路由(sig == ""): tick 绝不清空 Serve-Stale 保活缓存
+	h.set(func() { h.netSig = "" })
+	h.advance(2 * time.Second)
+	h.tk.tick()
+	if fwd.cache.Len() != 1 || fwd.Stats().StaleFlushes != 0 {
+		t.Fatalf("offline empty sig must NOT flush stale cache: len=%d flushes=%d", fwd.cache.Len(), fwd.Stats().StaleFlushes)
+	}
+
+	// 500ms 节流验证: 距离上次 tick 仅推进 100ms(<500ms)时暂不重复探测; 满 500ms 后秒清跨网死 IP
+	h.set(func() { h.netSig = "192.168.88.2|wlan0" })
+	h.advance(100 * time.Millisecond)
+	fwd.maybeCheckNetSig(h.tk.now())
+	if fwd.cache.Len() != 1 {
+		t.Fatal("netSig check within 500ms throttle window must skip")
+	}
+	h.advance(500 * time.Millisecond)
+	h.tk.tick()
+	if fwd.cache.Len() != 0 || fwd.Stats().StaleFlushes != 1 {
+		t.Fatalf("tether network switch via tick must flush cache: len=%d flushes=%d", fwd.cache.Len(), fwd.Stats().StaleFlushes)
+	}
+
+	// 再验证数据面 handle() 路径在 500ms 节流窗口后直接触发切网秒清
+	u := startFakeUpstream(t)
+	fwd.upstream.Store(u.addr) // 保持 StaleFlushes 不因改测试地址增加
+	// 同步把 fwd.st.netCheckNs 对齐到当前真实时钟以便测试 handle() 内的 time.Now() 节流
+	fwd.st.netCheckNs.Store(time.Now().Add(-time.Second).UnixNano())
+	seedEntry("tether2.test")
+	h.set(func() { h.netSig = "10.99.0.5|ccmni0" })
+	_ = mustResp(t, fwd.handle(dnsBuildQuery(2, "live.test", dnsTypeA, 0, false), dnsTestClient, "udp"))
+	if fwd.Stats().StaleFlushes != 2 {
+		t.Fatalf("handle() path must trigger SyncNetSig flush, got flushes=%d", fwd.Stats().StaleFlushes)
+	}
+	// tether2.test 旧跨网记录已被秒清, 只剩本次刚从新网查回的 live.test
+	qOld := dnsBuildQuery(3, "tether2.test", dnsTypeA, 0, false)
+	pqOld, _ := dnsParseQuery(qOld)
+	if s, _ := fwd.cache.getStale(dnsCacheKey(pqOld), qOld, pqOld, time.Now()); s != nil {
+		t.Fatal("stale entry from previous network must have been flushed")
+	}
+
+	// 验证 /api/dns 暴露 stale_flushes == 2
+	rec := httptest.NewRecorder()
+	h.s.apiDNS(rec, httptest.NewRequest("GET", "/api/dns", nil))
+	var apiResp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiResp); err != nil {
+		t.Fatal(err)
+	}
+	stMap := apiResp["stats"].(map[string]interface{})
+	if got := stMap["stale_flushes"].(float64); got != 2 {
+		t.Fatalf("/api/dns stats.stale_flushes = %v, want 2", got)
 	}
 }

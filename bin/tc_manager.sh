@@ -119,7 +119,6 @@ qos_mode_raw() {
 }
 
 qos_mode() { qos_mode_raw; }
-qos_precise_mode() { [ "$(qos_mode)" = "precise" ]; }
 
 # hotfix17.6: root-HTB fallback rate calibration.
 # Android Wi-Fi root HTB can report higher real throughput than configured rate
@@ -221,11 +220,6 @@ sqm_preferred_leaf() {
             echo off ;;
         *) echo off ;;
     esac
-}
-
-leaf_qdisc_kind() {
-    local dev=$1 class_id=$2
-    tc qdisc show dev "$dev" 2>/dev/null | awk -v p="parent 1:$class_id" '$0 ~ p {print $2; exit}'
 }
 
 leaf_has_active_netem() {
@@ -479,16 +473,9 @@ log_uplink_unsupported_once() {
 # 症状：整数 Mbps 生效、小数 Mbps（0.1 / 0.2 / 0.5）完全不生效。
 #
 # 用法：gt0 "$var"            # $var > 0 ?
-#       ge_val "$a" "$b"      # $a >= $b ?
 # ═══════════════════════════════════════════════════════════════
 gt0() {
     awk -v v="${1:-0}" 'BEGIN{exit !(v+0 > 0)}'
-}
-ge_val() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{exit !(a+0 >= b+0)}'
-}
-lt_val() {
-    awk -v a="${1:-0}" -v b="${2:-0}" 'BEGIN{exit !(a+0 < b+0)}'
 }
 
 # rc18: parse a tc rate string (e.g. "10Mbit", "500Kbit", "1Gbit", "8000000bit")
@@ -663,14 +650,6 @@ tc_class_set() {
     return 1
 }
 
-# 确保 HTB class 有叶子 qdisc（无叶子时 pfifo 兜底偶发丢包）
-tc_leaf_ensure() {
-    local dev=$1 parent=$2 handle=$3
-    tc qdisc change dev "$dev" parent "$parent" handle "$handle" fq_codel 2>/dev/null && return 0
-    tc qdisc add   dev "$dev" parent "$parent" handle "$handle" fq_codel 2>/dev/null \
-        || tc qdisc add dev "$dev" parent "$parent" handle "$handle" pfifo 2>/dev/null || true
-}
-
 # fw mark filter（备用，prio=1）
 tc_filter_fw_set() {
     local dev=$1 mark=$2 flowid=$3
@@ -719,14 +698,6 @@ tc_filter_u32_src() {
     tc filter add dev "$dev" parent 1: protocol ip prio "$prio" u32 \
         match ip src "$ip/32" flowid "$flowid" 2>/dev/null \
         && log "u32 src $ip → $flowid on $dev"
-}
-
-# netem qdisc add-or-change
-netem_qdisc_set() {
-    local dev=$1 parent=$2 handle=$3; shift 3
-    tc qdisc change dev "$dev" parent "$parent" handle "$handle" netem "$@" 2>/dev/null && return 0
-    tc qdisc del dev "$dev" parent "$parent" 2>/dev/null || true
-    tc qdisc add dev "$dev" parent "$parent" handle "$handle" netem "$@" 2>/dev/null
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1133,6 +1104,10 @@ clear_uplink_police() {
     local prio6=$((INGRESS_POLICE_PRIO_BASE + 5000 + class_id))
     local prio_fw4=$((INGRESS_POLICE_PRIO_BASE + 6000 + class_id))
     local prio_fw6=$((INGRESS_POLICE_PRIO_BASE + 7000 + class_id))
+    local nprio=$((20000 + class_id))
+    local nprio6=$((25000 + class_id))
+    local nprio_fw4=$((26000 + class_id))
+    local nprio_fw6=$((27000 + class_id))
     # shellcheck disable=SC2086
     tc filter del dev "$iface" $_ing_parent protocol ip prio "$prio" 2>/dev/null || true
     if [ -z "${HNC_TEST_MODE:-}" ]; then
@@ -1142,6 +1117,15 @@ clear_uplink_police() {
         tc filter del dev "$iface" $_ing_parent protocol ip prio "$prio_fw4" 2>/dev/null || true
         # shellcheck disable=SC2086
         tc filter del dev "$iface" $_ing_parent protocol ipv6 prio "$prio_fw6" 2>/dev/null || true
+        # 兼容清理历史旧版 Go 原生下发的 20001..20100 与 25001..27100 ingress police
+        # shellcheck disable=SC2086
+        tc filter del dev "$iface" $_ing_parent protocol ip prio "$nprio" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        tc filter del dev "$iface" $_ing_parent protocol ipv6 prio "$nprio6" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        tc filter del dev "$iface" $_ing_parent protocol ip prio "$nprio_fw4" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        tc filter del dev "$iface" $_ing_parent protocol ipv6 prio "$nprio_fw6" 2>/dev/null || true
     fi
 }
 
@@ -1264,33 +1248,159 @@ set_global_shaper() {
     fi
 }
 
-# v5.37.0: 5G Autorate 原地热调速快路径 (不重置 1:9999 AQM 叶子、不刷快照、零文件开销)
-# v6.0.0 T2: Vector Express 1:10 (prio 0) 浅驻留 fq_codel 特快护航子命令兜底
+_ve_root_kbps() {
+    local _d=$1 _ln _rt _bps
+    _ln=$(tc class show dev "$_d" 2>/dev/null | awk '$1=="class" && $2=="htb" && $3=="1:1" {print; exit}')
+    _rt=$(printf '%s\n' "$_ln" | awk '{for(i=1;i<NF;i++) if($i=="ceil"){print $(i+1); exit}}')
+    [ -n "$_rt" ] || _rt=$(printf '%s\n' "$_ln" | awk '{for(i=1;i<NF;i++) if($i=="rate"){print $(i+1); exit}}')
+    [ -n "$_rt" ] || _rt="$DEFAULT_RATE"
+    _bps=$(rate_to_bps "$_rt")
+    if [ "${_bps:-0}" -gt 0 ]; then
+        echo $(( _bps / 1000 ))
+    else
+        echo 1000000
+    fi
+}
+
+_ve_clean_legacy() {
+    local _d=$1 _allow_c10=$2 _fshow _qshow _has_legacy_p2=0 _has_legacy_p4v6=0 _has_legacy_10=0
+    _fshow=$(tc filter show dev "$_d" parent 1: 2>/dev/null)
+    if [ -n "$_fshow" ]; then
+        printf '%s\n' "$_fshow" | awk '
+            /(pref|prio) 2 / && (/0x0*1000000/ || /(flowid|classid) 1:10([^0-9]|$)/) { found=1; exit 0 }
+            END { exit(found ? 0 : 1) }
+        ' && _has_legacy_p2=1
+        printf '%s\n' "$_fshow" | awk '
+            /protocol ipv6/ && /(pref|prio) 4 / && (/0x0*1000000/ || /(flowid|classid) 1:10([^0-9]|$)/) { found=1; exit 0 }
+            END { exit(found ? 0 : 1) }
+        ' && _has_legacy_p4v6=1
+        printf '%s\n' "$_fshow" | awk '
+            /0x0*1000000/ && /(flowid|classid) 1:10([^0-9]|$)/ { found=1; exit 0 }
+            END { exit(found ? 0 : 1) }
+        ' && _has_legacy_10=1
+    fi
+    # 仅当内核确有旧版 prio 2/4 Express 过滤器时按精确 handle 清理(绝不裸删或盲删 prio 2!)
+    if [ "$_has_legacy_p2" = "1" ]; then
+        tc filter del dev "$_d" parent 1: protocol all prio 2 handle 0x01000000/0x03000000 fw 2>/dev/null || true
+        tc filter del dev "$_d" parent 1: protocol ip prio 2 handle 0x01000000/0x03000000 fw 2>/dev/null || true
+    fi
+    if [ "$_has_legacy_p4v6" = "1" ]; then
+        tc filter del dev "$_d" parent 1: protocol ipv6 prio 4 handle 0x01000000/0x03000000 fw 2>/dev/null || true
+    fi
+    # 清理当前 prio 4/5 同 handle 过滤器以保证幂等更新/拆除
+    tc filter del dev "$_d" parent 1: protocol all prio 4 handle 0x01000000/0x03000000 fw 2>/dev/null || true
+    tc filter del dev "$_d" parent 1: protocol ip prio 4 handle 0x01000000/0x03000000 fw 2>/dev/null || true
+    tc filter del dev "$_d" parent 1: protocol ipv6 prio 5 handle 0x01000000/0x03000000 fw 2>/dev/null || true
+    # 仅在 rules.json 无 "mark_id": 10 且内核确有旧版 Express 孤儿 1:10(handle 1010:/1110: 或指向 1:10 的 Express filter)时回收
+    if [ "$_allow_c10" = "1" ]; then
+        if [ "$_has_legacy_10" != "1" ]; then
+            _qshow=$(tc qdisc show dev "$_d" 2>/dev/null)
+            printf '%s\n' "$_qshow" | grep -qE 'qdisc fq_codel (1010|1110): parent 1:10([^0-9]|$)' && _has_legacy_10=1
+        fi
+        if [ "$_has_legacy_10" = "1" ]; then
+            tc qdisc del dev "$_d" parent 1:10 2>/dev/null || true
+            tc class del dev "$_d" parent 1:1 classid 1:10 2>/dev/null || true
+        fi
+    fi
+}
+
+_ve_install_filters() {
+    local _d=$1
+    if ! tc filter add dev "$_d" parent 1: protocol all prio 4 handle 0x01000000/0x03000000 fw flowid 1:8010 2>/dev/null; then
+        tc filter add dev "$_d" parent 1: protocol ip prio 4 handle 0x01000000/0x03000000 fw flowid 1:8010 2>/dev/null || true
+    fi
+    tc filter add dev "$_d" parent 1: protocol ipv6 prio 5 handle 0x01000000/0x03000000 fw flowid 1:8010 2>/dev/null || true
+}
+
+# Vector Express 1:8010 (prio 0) 浅驻留 fq_codel 特快护航子命令兜底
 set_vector_express() {
-    local iface=$1 mode=${2:-off} bg_pct=${3:-85}
+    local iface=$1 mode=${2:-off} bg_pct=${3:-}
     [ -n "$iface" ] || return 1
+    if [ -z "$bg_pct" ]; then
+        local _vef _ve_val
+        for _vef in "$HNC_DIR/data/vector_express.json" "$HNC_DIR/run/vector_express_state.json"; do
+            [ -f "$_vef" ] || continue
+            _ve_val=$(tr -d '\r\n\t ' < "$_vef" 2>/dev/null | awk '
+                {
+                    for (i = 1; i <= 3; i++) {
+                        k = (i == 1 ? "\"bg_ceil_pct\":" : (i == 2 ? "\"bg_pct\":" : "\"bg_pool_ceil_pct\":"))
+                        if (i == 3 && index($0, "\"active\":false") > 0) continue
+                        p = index($0, k)
+                        if (p > 0) {
+                            s = substr($0, p + length(k))
+                            if (match(s, /^[0-9]+/)) {
+                                v = substr(s, 1, RLENGTH) + 0
+                                if (v > 0 && !(i == 3 && v == 100)) { print v; exit }
+                            }
+                        }
+                    }
+                }')
+            if [ -n "$_ve_val" ]; then
+                bg_pct="$_ve_val"
+                break
+            fi
+        done
+    fi
+    case "$bg_pct" in ''|*[!0-9]*) bg_pct=85 ;; esac
+    [ "$bg_pct" -lt 50 ] && bg_pct=50
+    [ "$bg_pct" -gt 98 ] && bg_pct=98
+
+    local _clean_1_10=1
+    if [ -f "$RULES_FILE" ] && grep -qE '"mark_id"[[:space:]]*:[[:space:]]*10([^0-9]|$)' "$RULES_FILE" 2>/dev/null; then
+        _clean_1_10=0
+    fi
+
     if [ "$mode" = "on" ]; then
         ensure_egress_htb_ready "$iface" || return 1
-        tc class replace dev "$iface" parent 1:1 classid 1:10 htb rate 250mbit ceil "$DEFAULT_RATE" burst 64k cburst 200k prio 0 quantum 1514 2>/dev/null || true
-        tc qdisc replace dev "$iface" parent 1:10 handle 1010: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
-        tc filter replace dev "$iface" parent 1: protocol ip prio 2 handle 0x01000000/0x03000000 fw flowid 1:10 2>/dev/null || true
-        tc filter replace dev "$iface" parent 1: protocol ipv6 prio 4 handle 0x01000000/0x03000000 fw flowid 1:10 2>/dev/null || true
+        _ve_clean_legacy "$iface" "$_clean_1_10"
+        local _dkbps _drate _dbgk _dburst
+        _dkbps=$(_ve_root_kbps "$iface")
+        _drate=$(( _dkbps / 4 ))
+        [ "$_drate" -lt 20000 ] && _drate=20000
+        [ "$_drate" -gt 250000 ] && _drate=250000
+        [ "$_drate" -gt "$_dkbps" ] && _drate="$_dkbps"
+        tc class replace dev "$iface" parent 1:1 classid 1:8010 htb rate "${_drate}kbit" ceil "${_dkbps}kbit" burst 64k cburst 200k prio 0 quantum 1514 2>/dev/null || true
+        tc qdisc replace dev "$iface" parent 1:8010 handle 8010: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
+        _ve_install_filters "$iface"
+        _dbgk=$(( _dkbps * bg_pct / 100 ))
+        [ "$_dbgk" -lt 1000 ] && _dbgk=1000
+        _dburst=$(burst_for_rate "${_dbgk}kbit")
+        tc_class_set "$iface" 1:1 1:9999 rate "${_dbgk}kbit" ceil "${_dbgk}kbit" burst "$_dburst" cburst "$_dburst" prio 7 || true
+
         if tc qdisc show dev "$IFB_IFACE" 2>/dev/null | grep -q "htb 1:"; then
-            tc class replace dev "$IFB_IFACE" parent 1:1 classid 1:10 htb rate 100mbit ceil "$DEFAULT_RATE" burst 32k cburst 200k prio 0 quantum 1514 2>/dev/null || true
-            tc qdisc replace dev "$IFB_IFACE" parent 1:10 handle 1110: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
-            tc filter replace dev "$IFB_IFACE" parent 1: protocol ip prio 2 handle 0x01000000/0x03000000 fw flowid 1:10 2>/dev/null || true
-            tc filter replace dev "$IFB_IFACE" parent 1: protocol ipv6 prio 4 handle 0x01000000/0x03000000 fw flowid 1:10 2>/dev/null || true
+            _ve_clean_legacy "$IFB_IFACE" "$_clean_1_10"
+            local _ukbps _urate _ubgk _uburst
+            _ukbps=$(_ve_root_kbps "$IFB_IFACE")
+            _urate=$(( _ukbps / 4 ))
+            [ "$_urate" -lt 20000 ] && _urate=20000
+            [ "$_urate" -gt 100000 ] && _urate=100000
+            [ "$_urate" -gt "$_ukbps" ] && _urate="$_ukbps"
+            tc class replace dev "$IFB_IFACE" parent 1:1 classid 1:8010 htb rate "${_urate}kbit" ceil "${_ukbps}kbit" burst 32k cburst 200k prio 0 quantum 1514 2>/dev/null || true
+            tc qdisc replace dev "$IFB_IFACE" parent 1:8010 handle 8110: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
+            _ve_install_filters "$IFB_IFACE"
+            _ubgk=$(( _ukbps * bg_pct / 100 ))
+            [ "$_ubgk" -lt 1000 ] && _ubgk=1000
+            _uburst=$(burst_for_rate "${_ubgk}kbit")
+            tc_class_set "$IFB_IFACE" 1:1 1:9999 rate "${_ubgk}kbit" ceil "${_ubgk}kbit" burst "$_uburst" cburst "$_uburst" prio 7 || true
         fi
     else
-        tc filter del dev "$iface" parent 1: protocol ip prio 2 2>/dev/null || true
-        tc filter del dev "$iface" parent 1: protocol ipv6 prio 4 2>/dev/null || true
-        tc qdisc del dev "$iface" parent 1:10 2>/dev/null || true
-        tc class del dev "$iface" parent 1:1 classid 1:10 2>/dev/null || true
+        _ve_clean_legacy "$iface" "$_clean_1_10"
+        tc qdisc del dev "$iface" parent 1:8010 2>/dev/null || true
+        tc class del dev "$iface" parent 1:1 classid 1:8010 2>/dev/null || true
+        if tc qdisc show dev "$iface" 2>/dev/null | grep -q "htb 1:"; then
+            local _rdk _rdb
+            _rdk=$(_ve_root_kbps "$iface")
+            _rdb=$(burst_for_rate "${_rdk}kbit")
+            tc_class_set "$iface" 1:1 1:9999 rate "${_rdk}kbit" ceil "${_rdk}kbit" burst "$_rdb" cburst "$_rdb" || true
+        fi
         if tc qdisc show dev "$IFB_IFACE" 2>/dev/null | grep -q "htb 1:"; then
-            tc filter del dev "$IFB_IFACE" parent 1: protocol ip prio 2 2>/dev/null || true
-            tc filter del dev "$IFB_IFACE" parent 1: protocol ipv6 prio 4 2>/dev/null || true
-            tc qdisc del dev "$IFB_IFACE" parent 1:10 2>/dev/null || true
-            tc class del dev "$IFB_IFACE" parent 1:1 classid 1:10 2>/dev/null || true
+            _ve_clean_legacy "$IFB_IFACE" "$_clean_1_10"
+            tc qdisc del dev "$IFB_IFACE" parent 1:8010 2>/dev/null || true
+            tc class del dev "$IFB_IFACE" parent 1:1 classid 1:8010 2>/dev/null || true
+            local _ruk _rub
+            _ruk=$(_ve_root_kbps "$IFB_IFACE")
+            _rub=$(burst_for_rate "${_ruk}kbit")
+            tc_class_set "$IFB_IFACE" 1:1 1:9999 rate "${_ruk}kbit" ceil "${_ruk}kbit" burst "$_rub" cburst "$_rub" || true
         fi
     fi
     return 0
@@ -1920,10 +2030,10 @@ init_tc() {
     default_class_leaf_ensure "$iface" || true
 
     if uplink_supported_runtime; then
-        # hotfix13: ingress mirred is installed only through install_ingress_mirred().
-        # The old inline u32/matchall block could duplicate or delete the pref-1
-        # redirect installed by the netlink/shell compatibility path.
-        install_ingress_mirred "$iface" || log_error "init_tc: ingress mirred ensure failed on $iface"
+        # 非测试模式下 L1869 已完成首轮 install_ingress_mirred, 跳过冗余第二次调用; 测试模式保留黄金序列不变
+        if [ -n "${HNC_TEST_MODE:-}" ]; then
+            install_ingress_mirred "$iface" || log_error "init_tc: ingress mirred ensure failed on $iface"
+        fi
         # ── IFB0 Egress HTB（上传整形）──────────────────────────
         # v5.0 alpha.3 P1: 同 wlan2, 保留已有 htb qdisc, 避免清掉 class 1:XX
         _ifb_root=$(tc qdisc show dev "$IFB_IFACE" 2>/dev/null | awk '$4 == "root" {print $2; exit}')
@@ -1949,8 +2059,10 @@ init_tc() {
     # 防 ROM 换根 qdisc 触发重建后整形静默失效。树已就绪,set_global_shaper 不会递归。
     apply_global_shaper_if_enabled "$iface"
 
-    # T1 tier: install clsact BPF filter at pref 1 (before AOSP offload pref 2/3)
-    _hnc_install_clsact_bpf "$iface"
+    # 非测试模式下 L1873 已安装 clsact BPF, 跳过冗余第二次调用
+    if [ -n "${HNC_TEST_MODE:-}" ]; then
+        _hnc_install_clsact_bpf "$iface"
+    fi
 
     # v5.12: 记下建树时的 ifindex。ColorOS 热点关→开会销毁并重建同名 wlan2,
     # oplus-netd 随即预装 htb root —— watchdog 只看"有 htb root"会误判健康,
@@ -2731,16 +2843,7 @@ restore_rules() {
     log "Restore complete"
 }
 
-# ─── 状态 / 清理 ─────────────────────────────────────────────
-show_status() {
-    local iface=${1:-$(sh "$HNC_DIR/bin/device_detect.sh" iface)}
-    echo "=== Egress TC: $iface ===" && tc qdisc show dev "$iface"
-    tc class show dev "$iface" && echo "--- Filters ---" && tc filter show dev "$iface"
-    echo "" && echo "=== Ingress TC (ifb0) ===" && tc qdisc show dev "$IFB_IFACE"
-    tc class show dev "$IFB_IFACE" && echo "--- Filters ---" && tc filter show dev "$IFB_IFACE"
-    echo "" && echo "--- Redirect filter on $iface ---" && tc filter show dev "$iface" parent ffff:
-}
-
+# ─── 清理 ────────────────────────────────────────────────────
 cleanup_tc() {
     local iface=${1:-$(sh "$HNC_DIR/bin/device_detect.sh" iface)}
     # hotfix13: delete root qdisc only when this boot actually created it.
@@ -2755,7 +2858,7 @@ cleanup_tc() {
         log "cleanup_tc: preserving root qdisc on $iface (not owned by HNC)"
     fi
     if [ -n "$iface" ]; then
-        # 绝不删整个 clsact qdisc(GKI AOSP tether offload BPF 程序挂载于其上), 仅摘除 HNC 自装的 pref 1/2/3 与 police 301..7400!
+        # 绝不删整个 clsact qdisc(GKI AOSP tether offload BPF 程序挂载于其上), 仅摘除 HNC 自装的 pref 1/2/3 与 police 301..400 / 5301..7400 / 20001..20100 / 25001..27100!
         tc filter del dev "$iface" ingress pref 3 2>/dev/null || true
         tc filter del dev "$iface" parent ffff: pref 3 2>/dev/null || true
         tc filter del dev "$iface" ingress pref 2 2>/dev/null || true
@@ -2769,6 +2872,10 @@ cleanup_tc() {
             _p6=$((5300 + _pp))
             _pfw4=$((6300 + _pp))
             _pfw6=$((7300 + _pp))
+            _np4=$((20000 + _pp))
+            _np6=$((25000 + _pp))
+            _npfw4=$((26000 + _pp))
+            _npfw6=$((27000 + _pp))
             # shellcheck disable=SC2086
             tc filter del dev "$iface" $_ing_parent prio "$_p4" protocol all 2>/dev/null || true
             # shellcheck disable=SC2086
@@ -2781,8 +2888,46 @@ cleanup_tc() {
             tc filter del dev "$iface" $_ing_parent prio "$_pfw4" protocol ip 2>/dev/null || true
             # shellcheck disable=SC2086
             tc filter del dev "$iface" $_ing_parent prio "$_pfw6" protocol ipv6 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_np4" protocol ip 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_np6" protocol ipv6 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_npfw4" protocol ip 2>/dev/null || true
+            # shellcheck disable=SC2086
+            tc filter del dev "$iface" $_ing_parent prio "$_npfw6" protocol ipv6 2>/dev/null || true
             _pp=$((_pp + 1))
         done
+        # 动态兜底扫描并清理落在 301..400 / 5301..7400 / 20001..20100 / 25001..27100 内的其余残留 police 过滤器
+        # shellcheck disable=SC2086
+        _ing_dump=$(tc filter show dev "$iface" $_ing_parent 2>/dev/null)
+        if [ -n "$_ing_dump" ]; then
+            printf '%s\n' "$_ing_dump" | awk '
+                /^filter / {
+                    pf=""; pr=""
+                    for (i=1; i<NF; i++) {
+                        if ($i == "pref" || $i == "prio") pf=$(i+1)
+                        else if ($i == "protocol") pr=$(i+1)
+                    }
+                    cur_pf = (pf ~ /^[0-9]+$/) ? (pf + 0) : 0
+                    if ((cur_pf >= 301 && cur_pf <= 400) || (cur_pf >= 5301 && cur_pf <= 7400) || (cur_pf >= 20001 && cur_pf <= 20100) || (cur_pf >= 25001 && cur_pf <= 27100)) {
+                        want[cur_pf " " pr] = 1
+                    }
+                }
+                END { for (k in want) print k }
+            ' | while read -r _ipf _ipr; do
+                [ -n "$_ipf" ] || continue
+                if [ -n "$_ipr" ]; then
+                    # shellcheck disable=SC2086
+                    tc filter del dev "$iface" $_ing_parent pref "$_ipf" protocol "$_ipr" 2>/dev/null \
+                        || tc filter del dev "$iface" $_ing_parent pref "$_ipf" 2>/dev/null || true
+                else
+                    # shellcheck disable=SC2086
+                    tc filter del dev "$iface" $_ing_parent pref "$_ipf" 2>/dev/null || true
+                fi
+            done
+        fi
+        unset _ing_dump
         tc qdisc show dev "$iface" 2>/dev/null | grep -q "qdisc ingress ffff:" && tc qdisc del dev "$iface" ingress 2>/dev/null || true
     fi
     tc qdisc del dev "$IFB_IFACE" root 2>/dev/null || true
@@ -3034,13 +3179,6 @@ case "$1" in
         tc_snapshot_async "$2"
         tc_action_unlock
         exit $rc ;;
-    set_all)
-        tc_action_lock set_all || exit 12
-        set_all "$2" "$3" "$4" "$5" "$6" "$7" "$8" "$9"
-        rc=$?
-        tc_snapshot_async "$2"
-        tc_action_unlock
-        exit $rc ;;
     ensure_class)
         # v5.30 T4 / v5.40 W4: 应用感知 QoS / 单应用限速挂在设备 class 下及拆树后补回 fq_codel 叶子;
         # 瞬时锁竞争带 12 次 × 250ms 退避重试, 杜绝直接 exit 12 导致设备类退回 pfifo!
@@ -3080,10 +3218,8 @@ case "$1" in
         _dl=false; default_leaf_aqm_enabled && _dl=true
         echo "chosen=$(lowlat_chosen) chain=$(lowlat_chain | tr ' ' ',') default_chain=$(lowlat_chain_default | tr ' ' ',') tc_leaf_aqm=$(leaf_aqm_mode) default_leaf_aqm=$_dl"
         exit 0 ;;
-    status)     show_status "$2" ;;
-    snapshot)   sh "$HNC_DIR/bin/tc_state_snapshot.sh" "$2" ;;
     *)
-        echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_sqm|global_shaper|set_all|remove|restore|ensure_ingress|ensure_class|status|snapshot|cleanup}"
+        echo "Usage: tc_manager.sh {init|set_limit|set_delay|set_sqm|global_shaper|global_shaper_tune|vector_express|remove|restore|ensure_ingress|ensure_class|set_uplink_police|cleanup}"
         echo ""
         _tcm_root=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
         _tcm_ver=""

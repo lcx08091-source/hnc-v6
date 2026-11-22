@@ -44,8 +44,6 @@ var (
 	nlQdiscListFn = nlroute.QdiscList
 	// netInterfaceByNameFn 查网卡(默认 net.InterfaceByName)。
 	netInterfaceByNameFn = net.InterfaceByName
-	// netInterfacesFn 列全部网卡(默认 net.Interfaces)。
-	netInterfacesFn = net.Interfaces
 	// execCommandFn 直接执行外部命令(不经 sh; iptables / tc 文本探测用),
 	// 强制 10s 超时 + 独立进程组 SIGKILL + WaitDelay, 防锁阻塞挂死主循环。
 	execCommandFn = func(name string, args ...string) (string, int, error) {
@@ -73,8 +71,6 @@ var (
 		}
 		return string(b), rc, err
 	}
-	// processAliveFn PID 存活(默认 processAlive)。
-	processAliveFn = processAlive
 	// netIfAddrsFn 网卡地址列表(默认真实 Addrs 方法; 测试注入假地址)。
 	netIfAddrsFn = func(ni *net.Interface) ([]net.Addr, error) { return ni.Addrs() }
 	// sysIfIndexFn 读 /sys/class/net/<口>/ifindex(默认真实; 测试注入)。

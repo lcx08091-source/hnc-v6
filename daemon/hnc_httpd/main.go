@@ -24,6 +24,8 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 )
@@ -34,7 +36,7 @@ var (
 	flagHTTPPort     = flag.Int("http-port", 8080, "HTTP port for redirect to HTTPS (0 = disable)")
 	flagLoopbackPort = flag.Int("loopback-port", 8444, "loopback plain HTTP port for local KSU WebUI (0 = disable)")
 	flagHNCDir       = flag.String("hnc-dir", "/data/local/hnc", "HNC installation root")
-	flagNoTLS        = flag.Bool("no-tls", false, "disable TLS (for Patch 1 development only)")
+	flagNoTLS        = flag.Bool("no-tls", false, "disable TLS (for local development only)")
 	flagVersion      = flag.Bool("version", false, "print version and exit")
 
 	// rc11: when a remote listener is bound to 0.0.0.0 while rules.json still
@@ -55,6 +57,98 @@ var version = "dev"
 // 关于页据此显示真实 versionCode(此前前端把它硬编码在 data-vcode 属性)。
 var versionCode = "0"
 
+func readModulePropField(hncDir, key string) string {
+	if hncDir == "" {
+		return ""
+	}
+	candidates := []string{
+		filepath.Join(hncDir, "module.prop"),
+		filepath.Join(moduleDir(hncDir), "module.prop"),
+	}
+	for _, p := range candidates {
+		b, err := os.ReadFile(p)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		if v := propLine(string(b), key); v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+// ServerVersion 全控制面版本号统一入口: 编译期 ldflags 注入优先, 开发态依次回退读
+// <hncDir>/module.prop 与 moduleDir(hncDir)/module.prop。
+func ServerVersion(hncDir string) string {
+	if v := strings.TrimSpace(version); v != "" && v != "dev" {
+		return v
+	}
+	if v := readModulePropField(hncDir, "version"); v != "" {
+		return v
+	}
+	if v := strings.TrimSpace(version); v != "" {
+		return v
+	}
+	return "dev"
+}
+
+// ServerVersionCode 全控制面整数版本号统一入口: 编译期 ldflags 注入优先, 开发态依次回退读
+// <hncDir>/module.prop 与 moduleDir(hncDir)/module.prop。
+func ServerVersionCode(hncDir string) string {
+	if vc := strings.TrimSpace(versionCode); vc != "" && vc != "0" {
+		return vc
+	}
+	if vc := readModulePropField(hncDir, "versionCode"); vc != "" {
+		return vc
+	}
+	if vc := strings.TrimSpace(versionCode); vc != "" {
+		return vc
+	}
+	return "0"
+}
+
+func (s *server) serverVersion() string {
+	if s == nil {
+		return ServerVersion("")
+	}
+	return ServerVersion(s.hncDir)
+}
+
+func (s *server) serverVersionCode() string {
+	if s == nil {
+		return ServerVersionCode("")
+	}
+	return ServerVersionCode(s.hncDir)
+}
+
+func (s *server) readCachedJSONStringField(relPath, key string) string {
+	if s == nil || s.hncDir == "" {
+		return ""
+	}
+	raw, err := s.readCachedJSON(filepath.Join(s.hncDir, relPath))
+	if err != nil {
+		return ""
+	}
+	m, ok := raw.(map[string]any)
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(asString(m[key]))
+}
+
+// dpidVersion 经 s.jsonCache 零子进程读取 run/dpi_state.json["version"], 回退 run/capabilities.json["dpid_version"]。
+func (s *server) dpidVersion() string {
+	if v := s.readCachedJSONStringField(filepath.Join("run", "dpi_state.json"), "version"); v != "" {
+		return v
+	}
+	return s.readCachedJSONStringField(filepath.Join("run", "capabilities.json"), "dpid_version")
+}
+
+// watchdogVersion 经 s.jsonCache 零子进程读取 run/watchdog_actions.json["version"]。
+func (s *server) watchdogVersion() string {
+	return s.readCachedJSONStringField(filepath.Join("run", "watchdog_actions.json"), "version")
+}
+
 func main() {
 	flag.Parse()
 	// v5.12: GOOS=android 时 Go 标准库不读系统时区, time.Local 恒为 UTC ——
@@ -63,7 +157,7 @@ func main() {
 	time.Local = tzlocal.Location()
 
 	if *flagVersion {
-		fmt.Println("hnc_httpd", version)
+		fmt.Println("hnc_httpd", ServerVersion(*flagHNCDir))
 		return
 	}
 
@@ -87,7 +181,7 @@ func main() {
 	setupLog(*flagHNCDir)
 
 	log.Printf("hnc_httpd %s starting, remote=%s(:%d, follows remote_enabled) loopback=%v(127.0.0.1:%d) tls=%v hnc_dir=%s",
-		version, *flagBind, *flagPort, haveLocal, *flagLoopbackPort, !*flagNoTLS, *flagHNCDir)
+		ServerVersion(*flagHNCDir), *flagBind, *flagPort, haveLocal, *flagLoopbackPort, !*flagNoTLS, *flagHNCDir)
 
 	// v5.40.2: 进程级非阻塞排他锁防双实例并发抢占 :8443 / 误删存活实例 httpd.pid
 	_ = os.MkdirAll(*flagHNCDir+"/run", 0755)
@@ -154,21 +248,21 @@ func main() {
 	go srv.CtEventLoop(stopCh)  // v5.18: conntrack DESTROY 事件, 补短连接/连接尾巴(失败退纯轮询)
 	// v5.21: conntrack NEW 事件, 共现推断用的精确建连时间(失败退 10s 粒度)
 	go srv.CtNewEventLoop(stopCh)
-	go srv.CertProbeLoop(stopCh)        // v5.15: 未知应用发现 · 后台取证书
-	go srv.limitCtl.Loop(stopCh)        // 设备配额 + 分时段限速(每分钟对齐)
-	go srv.RateLoop(stopCh)             // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
-	go srv.PhoneUsageLoop(stopCh)       // 本机/热点月度流量: 60s 采 /proc/net/dev, 停机补采落盘
-	go srv.StatsCalibrationLoop(stopCh) // v5.21: 与系统 NetworkStats 对账 + 分流漏计检测(15 分钟)
-	go srv.V6NeighLoop(stopCh)          // v5.20: IPv6 新邻居(临时地址轮换)→ 500ms 内 v6_sync.sh sync_macs(失败退 60s 周期)
-	go srv.MacMergeLoop(stopCh)         // v5.21: 随机 MAC 画像 + 疑似同一设备建议(30s)
-	go srv.ActivityLoop(stopCh)         // v5.22: 亮屏/热点/在线设备/界面 → 活动档位 + run/activity.json(15s)
-	go srv.PowerSamplerLoop(stopCh)     // v5.22: 自测 CPU/唤醒 → run/power_stats.json(5 分钟)
-	go srv.DNSTakeoverLoop(stopCh)      // DPI v2: 可选 DNS 接管(默认关; 开启时 10s 健康检查, 异常自动撤 DNAT)
-	go srv.fgTruthLoop(stopCh)          // v5.24 T2: 本机前台真值采集(仅本机抓包开启且亮屏时, 10s 探测, 只记变化)
-	go srv.SelfResidentLoop(stopCh)       // v5.37.0: 亮屏智能常驻 DPI 自训 + 熄屏静默增量蒸馏控制器
-	go srv.AutorateLoop(stopCh)           // v5.37.0: 5G 自适应总带宽控制器(无活跃客户端时事件驱动零唤醒真休眠)
-	go srv.CoreHubLoop(stopCh)            // v6.0.0: 四舱壁防连坐中枢与 1.5s 无锁 WorldSnapshot 刷新环
-	go srv.StartV6FeatureLoops(stopCh)    // v6.0.0: LeakGuard / Vector Express / UpdateLeash / FlowScalpel / ThermoCruise
+	go srv.CertProbeLoop(stopCh)           // v5.15: 未知应用发现 · 后台取证书
+	go srv.limitCtl.Loop(stopCh)           // 设备配额 + 分时段限速(每分钟对齐)
+	go srv.RateLoop(stopCh)                // 单一后台速率采样器 · 2s 刷 s.rates, /api/devices 与 /api/live 同源一致
+	go srv.PhoneUsageLoop(stopCh)          // 本机/热点月度流量: 60s 采 /proc/net/dev, 停机补采落盘
+	go srv.StatsCalibrationLoop(stopCh)    // v5.21: 与系统 NetworkStats 对账 + 分流漏计检测(15 分钟)
+	go srv.V6NeighLoop(stopCh)             // v5.20: IPv6 新邻居(临时地址轮换)→ 500ms 内 v6_sync.sh sync_macs(失败退 60s 周期)
+	go srv.MacMergeLoop(stopCh)            // v5.21: 随机 MAC 画像 + 疑似同一设备建议(30s)
+	go srv.ActivityLoop(stopCh)            // v5.22: 亮屏/热点/在线设备/界面 → 活动档位 + run/activity.json(15s)
+	go srv.PowerSamplerLoop(stopCh)        // v5.22: 自测 CPU/唤醒 → run/power_stats.json(5 分钟)
+	go srv.DNSTakeoverLoop(stopCh)         // DPI v2: 可选 DNS 接管(默认关; 开启时 10s 健康检查, 异常自动撤 DNAT)
+	go srv.fgTruthLoop(stopCh)             // v5.24 T2: 本机前台真值采集(仅本机抓包开启且亮屏时, 10s 探测, 只记变化)
+	go srv.SelfResidentLoop(stopCh)        // v5.37.0: 亮屏智能常驻 DPI 自训 + 熄屏静默增量蒸馏控制器
+	go srv.AutorateLoop(stopCh)            // v5.37.0: 5G 自适应总带宽控制器(无活跃客户端时事件驱动零唤醒真休眠)
+	go srv.CoreHubLoop(stopCh)             // v6.0.0: 四舱壁防连坐中枢与 1.5s 无锁 WorldSnapshot 刷新环
+	go srv.StartV6FeatureLoops(stopCh)     // v6.0.0: LeakGuard / Vector Express / UpdateLeash / FlowScalpel / ThermoCruise
 	go srv.StartBlackboxFlightLoop(stopCh) // v6.0.0: 200ms 纯内存卡顿黑匣子飞行记录仪
 
 	if srv.remote != nil {

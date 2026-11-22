@@ -298,7 +298,6 @@ func (s *server) apiRulesExport(w http.ResponseWriter, r *http.Request) {
 // runStatusScript 只含常量, 不拼接任何请求参数。
 const runStatusScript = `IF=$(sed -n 's/^ACTIVE://p' "$HNC_DIR/run/hnc_state" 2>/dev/null | head -1)
 [ -n "$IF" ] || IF=$(head -1 "$HNC_DIR/run/iface.cache" 2>/dev/null)
-# v5.26 T3: hotspotd PID 由 Go 侧 procfind(pidfile+cmdline 校验)预计算, 经环境变量传入
 HP=${HNC_HP:-}
 [ -n "$HP" ] || HP=$(cat "$HNC_DIR/run/hotspotd.pid" 2>/dev/null)
 if [ -n "$HP" ] && [ -d "/proc/$HP" ]; then echo HOTSPOTD=up; echo HPID=$HP; echo HRSS=$(awk '/VmRSS/{print $2}' /proc/$HP/status 2>/dev/null); else echo HOTSPOTD=down; fi

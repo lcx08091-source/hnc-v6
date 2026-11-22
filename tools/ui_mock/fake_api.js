@@ -13,7 +13,7 @@
   'use strict';
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = META.version || 'v6.1.0-beta.2', VCODE = String(META.versionCode || '6009202');
+  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.1', VCODE = String(META.versionCode || '6009301');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 
@@ -548,12 +548,27 @@
       };
     });
     var idb = 0.89;
+    var MOCK_L3_SUBS = [
+      'hnc-curated-v6.1.0-rc.1-dedup#00-core-meta',
+      'hnc-curated-v6.1.0-rc.1#01-short-video', 'hnc-curated-v6.1.0-rc.1#02-video-live', 'hnc-curated-v6.1.0-rc.1#03-social-im',
+      'hnc-curated-v6.1.0-rc.1#04-games-cn', 'hnc-curated-v6.1.0-rc.1#05-games-global', 'hnc-curated-v6.1.0-rc.1#06-shopping-life',
+      'hnc-curated-v6.1.0-rc.1#07-music-audio', 'hnc-curated-v6.1.0-rc.1#08-reading-news', 'hnc-curated-v6.1.0-rc.1#09-office-edu',
+      'hnc-curated-v6.1.0-rc.1#10-cloud-drive', 'hnc-curated-v6.1.0-rc.1#11-finance-bank', 'hnc-curated-v6.1.0-rc.1#12-travel-map',
+      'hnc-curated-v6.1.0-rc.1#13-ai-tools', 'hnc-curated-v6.1.0-rc.1#14-dev-tech', 'hnc-curated-v6.1.0-rc.1#15-app-stores',
+      'hnc-curated-v6.1.0-rc.1#16-oem-vendors', 'hnc-curated-v6.1.0-rc.1#17-iot-smart', 'hnc-curated-v6.1.0-rc.1#18-tv-ott',
+      'hnc-curated-v6.1.0-rc.1#19-carrier-isp', 'hnc-curated-v6.1.0-rc.1#20-gov-public', 'hnc-curated-v6.1.0-rc.1#21-auto-ev',
+      'hnc-curated-v6.1.0-rc.1#22-health-sport', 'hnc-curated-v6.1.0-rc.1#23-food-retail', 'hnc-curated-v6.1.0-rc.1#24-social-global',
+      'hnc-curated-v6.1.0-rc.1#25-stream-global', 'hnc-curated-v6.1.0-rc.1#26-browser-search', 'hnc-curated-v6.1.0-rc.1#27-mail-collab',
+      'hnc-curated-v6.1.0-rc.1#28-security-dns', 'hnc-curated-v6.1.0-rc.1#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.1#30-cdn-infra',
+      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.1#47-v2fly-b',
+      'hnc-curated-v6.1.0-rc.1#95-system-updates', 'hnc-curated-v6.1.0-rc.1#96-system-updates-v6'
+    ];
     return {
       available: true,
       state: {
-        schema_version: 3, generated_at: t - 2, version: VER, mode: 'af_packet', interface: IFACE, tls_reassembly: true, ipv6_capture: true, offload_hint: false,
+        schema_version: '2.0', generated_at: t - 2, version: VER, mode: 'af_packet', interface: IFACE, tls_reassembly: true, ipv6_capture: true, offload_hint: false,
         uptime_s: round(up), stats: stats, clients: clients, client_count: Object.keys(clients).length, health: 'ok', rebind_count: 1,
-        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: '2026.10.02', dfp_enabled: true,
+        unique_hostnames: 2610 + round(up / 300), unique_sni: 1843 + round(up / 400), unique_ja4: 96, l3_enabled: true, l3_rule_version: 'external-d:' + MOCK_L3_SUBS.join(','), dfp_enabled: true,
         conntrack_available: true, conntrack_readable: true, conntrack_path: '/proc/net/nf_conntrack', conntrack_flows: 412,
         unidentified_ratio: { total_bytes: round(sumDays(1)), identified_bytes: round(sumDays(1) * idb), ratio: 1 - idb },
         evidence_summary: { total: 48211 + round(up / 10), by_source: { sni: 31022, dns: 12840, ja4: 2210, ip_owner: 2139 } },
@@ -881,11 +896,86 @@
   function logText() {
     var t = Date.now(), L = [], fmt = function (ms) { var d = new Date(ms); return ymdDash(d) + ' ' + p2(d.getHours()) + ':' + p2(d.getMinutes()) + ':' + p2(d.getSeconds()); };
     var M = ['[service] HNC ' + VER + ' 启动完成 · 热点接口 ' + IFACE, '[hotspotd] 新设备 d2:6e:4a:8c:15:f3 → 192.168.43.96（无主机名）', '[tc] class 1:15 rate 24mbit ceil 24mbit（iPad Air）',
-      '[watchdog] 规则巡检通过 · tc 46 条 · iptables 31 条', '[dpid] 绑定 ' + IFACE + ' · AF_PACKET · 规则库 2026.10.02', '[apply] app_qos on 0a:7f:3c:41:9e:21 · 3 档优先级',
+      '[watchdog] 规则巡检通过 · tc 46 条 · iptables 31 条', '[dpid] 绑定 ' + IFACE + ' · AF_PACKET · 规则库 ' + VER, '[apply] app_qos on 0a:7f:3c:41:9e:21 · 3 档优先级',
       '[stats] 采样 9 台设备 · 用时 41ms', '[detect] 低延迟队列: cake 不可用, fq_codel 不可用 → sfq', 'WARN [tc] sch_cake 不可用, 低延迟模式退回 sfq',
       '[hotspotd] 5e:20:b7:3a:c4:18 计数器 +312MB（下载中）', '[watchdog] 心跳 ok · 14s', '[dpid] 前台推断: 1e:52:a8:0c:77:3d → 抖音 0.91'];
     for (var i = 0; i < 48; i++) L.push(fmt(t - (48 - i) * 37000) + ' ' + M[(i * 7) % M.length]);
     return L.join('\n') + '\n';
+  }
+  function quickHealthCheckPayload() {
+    var checkedAt = now();
+    var onCnt = DEVS.filter(function (d) { return d.online; }).length;
+    var limCnt = DEVS.filter(function (d) { return d.down_mbps > 0 || d.up_mbps > 0 || d.status === 'blocked'; }).length;
+    return {
+      ok: true,
+      checked_at: checkedAt,
+      duration_ms: 3,
+      version: VER,
+      version_code: VCODE,
+      dpid_version: VER,
+      watchdog_version: VER,
+      overall: 'ok',
+      headline: '热点省电与限速状态一切健康，空闲自动零唤醒休眠',
+      subline: '本机按需快照检测 · 耗时 3 ms · 平时后台 0 额外轮询',
+      items: [
+        {
+          id: 'hotspot_forward',
+          title: '热点与转发通畅度',
+          status: 'ok',
+          badge: '转发顺畅',
+          verdict: '热点接口 ' + IFACE + '（' + GW + '）转发已开启，当前 ' + onCnt + ' 台设备在线',
+          detail: '内核 IPv4/IPv6 转发正常，看门狗主动守护中，无被动保护降级',
+          fix_kind: 'none',
+          fix_label: '',
+          fix_action: '',
+          fix_params: {},
+          nav_target: '',
+          metrics: { iface: IFACE, gateway: GW, ip_forward: 1, online_devices: onCnt }
+        },
+        {
+          id: 'zero_wakeup_power',
+          title: '待机零唤醒省电状态',
+          status: 'ok',
+          badge: '极低功耗',
+          verdict: '后台总 CPU 占用 0.62%（约 22.3 秒/小时），无设备时自动进入零唤醒深睡',
+          detail: '看门狗自适应退避巡检正常，无异常高频唤醒循环',
+          fix_kind: 'none',
+          fix_label: '',
+          fix_action: '',
+          fix_params: {},
+          nav_target: '',
+          metrics: { cpu_pct_1h: 0.62, cpu_sec_per_hour: 22.3, level: 'active' }
+        },
+        {
+          id: 'shaping_offload',
+          title: '限速与加速规则一致性',
+          status: 'ok',
+          badge: '规则一致',
+          verdict: '当前 ' + limCnt + ' 台受控策略全部在内核生效，硬件加速旁路已受控无漏流',
+          detail: '原生 Netlink 队列树对账一致，最近 0 次修复失败',
+          fix_kind: 'none',
+          fix_label: '',
+          fix_action: '',
+          fix_params: {},
+          nav_target: '',
+          metrics: { controlled_devices: limCnt, tc_repair_fail_count: 0, offload_active: false }
+        },
+        {
+          id: 'tmpfs_config',
+          title: '内存盘与配置文件健康度',
+          status: 'ok',
+          badge: '零擦写健康',
+          verdict: '32M 内存盘余量充足（已用 2.4 / 32 MB），核心配置文件全部完好',
+          detail: '已校验 8 个核心配置文件无损坏，高频运行态驻留内存保护手机闪存',
+          fix_kind: 'none',
+          fix_label: '',
+          fix_action: '',
+          fix_params: {},
+          nav_target: '',
+          metrics: { is_tmpfs: true, used_mb: 2.4, total_mb: 32, checked_files: 8, bad_files: 0 }
+        }
+      ]
+    };
   }
   var GET = {
     '/api/health': function () {
@@ -896,6 +986,31 @@
         else h.capture_rec = { recording: true, minutes: REC_STATE.minutes, started_at: REC_STATE.started_at, bytes: elapsed * 42 * KB };
       }
       return h;
+    },
+    '/api/health_check': function () { return quickHealthCheckPayload(); },
+    '/api/json_health': function () {
+      return {
+        ok: true,
+        backend_version: VER,
+        backend_version_code: VCODE,
+        timestamp: now(),
+        overall: 'ok',
+        json_doctor_rc: '0',
+        json_doctor_message: 'all managed json files valid',
+        files: {
+          'rules.json': 'ok',
+          'device_names.json': 'ok',
+          'templates.json': 'ok',
+          'remote_tokens.json': 'ok',
+          'devices.json': 'ok'
+        },
+        backup_count: 5,
+        latest_backup: 'rules.json.bak',
+        last_bundle: '',
+        has_tc_state: true,
+        tc_state: { present: true, ts: now() - 42, age_s: 42, max_age_s: 900, fresh: true, note: '快照新鲜(42s 前刷新)' },
+        has_capabilities: true
+      };
     },
     '/api/signal': function () { MOCK_SIGNAL.updated_at = now(); return clone(MOCK_SIGNAL); },
     '/api/live': function (q) { var l = liveSummary(); l.signal = clone(MOCK_SIGNAL); if (q.devices) { var p = devicesPayload(); l.devices = p.devices; l.whitelist_mode = p.whitelist_mode; l.remote_enabled = p.remote_enabled; } return l; },
@@ -1102,7 +1217,7 @@
     bl_add: function (p) { var d = needDev(p.mac); d.status = 'blocked'; return 'blacklisted'; },
     bl_del: function (p) { var d = needDev(p.mac); d.status = 'allowed'; return 'removed from blacklist'; },
     refresh: function () { return 'scan ok · ' + DEVS.filter(function (d) { return d.online; }).length + ' online'; },
-    cleanup_rules: function () { DEVS.forEach(function (d) { d.down_mbps = d.up_mbps = d.delay_ms = d.jitter_ms = d.loss_pct = 0; d.limit_enabled = false; d.status = 'allowed'; d.blocks = []; }); if (typeof V6_LG_STATE === 'object') V6_LG_STATE.blocked_set = {}; if (typeof V6_EXP_STATE === 'object') V6_EXP_STATE.forced_macs = []; if (typeof V6_SC_STATE === 'object') V6_SC_STATE.frozen_rules = []; return ''; },
+    cleanup_rules: function () { DEVS.forEach(function (d) { d.down_mbps = d.up_mbps = d.delay_ms = d.jitter_ms = d.loss_pct = 0; d.limit_enabled = false; d.status = 'allowed'; d.blocks = []; }); if (typeof V6_LG_STATE === 'object') { V6_LG_STATE.blocked_set = {}; V6_LG_STATE.undo_stack = []; } if (typeof V6_EXP_STATE === 'object') V6_EXP_STATE.forced_macs = []; if (typeof V6_SC_STATE === 'object') V6_SC_STATE.frozen_rules = []; return ''; },
     cleanup_offline_devices: function (p) {
       var inc = bool(p.include_rules), rm = 0, kept = 0;
       DEVS = DEVS.filter(function (d) {
@@ -1253,7 +1368,7 @@
     user_rule_del: function (p) { DISC.user_rules = DISC.user_rules.filter(function (x) { return x.id !== p.id; }); return ''; },
     dpi_correct: function (p) { FP_RULES.push({ id: 'fp-u' + (FP_RULES.length + 1), kind: p.name ? 'domain' : 'ip', value: p.name || p.dst_ip, app_id: p.app_id, app_name: p.app_name || p.app_id }); return ''; },
     dpi_correct_del: function (p) { FP_RULES = bool(p.all) ? [] : FP_RULES.filter(function (x) { return x.id !== p.id; }); return ''; },
-    dpi_rules_update: function () { return J({ update_available: 'no', current: '2026.10.02', remote: '2026.10.02' }); },
+    dpi_rules_update: function () { return J({ update_available: 'no', current: 'builtin', remote: VER }); },
     dpi_rules_reset: function () { return '已恢复内置规则库（演示）'; },
     autorate_set: function (p) {
       if (p.autorate_enabled != null) AUTORATE.enabled = bool(p.autorate_enabled);
@@ -1325,7 +1440,8 @@
     },
     dpi_rebind: function () { return 'rebind requested'; },
     restart_service: function () { return 'restart scheduled'; },
-    cleanup_all: function () { return 'safe release scheduled'; }
+    cleanup_all: function () { return 'safe release scheduled'; },
+    json_doctor_repair: function () { return '已校验并修复全部核心 JSON 配置文件（0 个异常残留）'; }
   };
   function doAction(body) {
     var name = body && body.action, p = (body && body.params) || {}, fn = ACT[name];
@@ -1351,13 +1467,43 @@
   };
 
 
-  /* ═════════════ HNC v6.0.0 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
+  /* ═════════════ HNC v6.1.0-rc.1 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
+  function v6MockInfraGuard(host) {
+    var h = String(host || '').trim().toLowerCase();
+    if (!h) return null;
+    if (/(connectivitycheck\.gstatic\.com|captive\.apple\.com|connect\.rom\.miui\.com|msftconnecttest\.com|dns\.alidns\.com|doh\.pub)$/.test(h)) {
+      return { level: 'hard_block', label: '系统联网探测核心域' };
+    }
+    if (/(alicdn\.com|aliyuncs\.com|myqcloud\.com|cdnhwc1\.com|cloudfront\.net|bytecdn\.cn|kwimgs\.com|hdslb\.com)$/.test(h)) {
+      return { level: 'warn_confirm', label: '共享公共云 CDN' };
+    }
+    return null;
+  }
+
+  function v6MockSharedCdnIpVendor(ip, hostGuard) {
+    var s = String(ip || '').trim().toLowerCase();
+    if (!s) return '';
+    if (/^(104\.(1[6-9]|2[0-9]|3[01])\.|172\.(6[4-9]|7[01])\.|162\.15[89]\.|108\.162\.)/.test(s)) return 'Cloudflare';
+    if (/^(151\.101\.|199\.232\.)/.test(s)) return 'Fastly';
+    if (/^(13\.(32|33|35|22[4-7])\.|52\.8[45]\.|54\.230\.|99\.84\.|143\.204\.)/.test(s)) return 'Amazon CloudFront';
+    if (/^(23\.(0|[1-9]|[1-9][0-9]|1[0-9]{2}|2[0-5][0-5])\.|104\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.|184\.(2[4-9]|3[01])\.)/.test(s)) return 'Akamai';
+    if (/^17\./.test(s)) return 'Apple';
+    if (hostGuard && hostGuard.level === 'warn_confirm') return hostGuard.label || 'Shared CDN';
+    return '';
+  }
+
   var V6_LG_STATE = {
     notify_enabled: true,
     lockscreen_mask: true,
     capacity: 300,
     cooldown_sec: 300,
-    blocked_set: { 'adtrack-legacy.example.cn': 1 },
+    blocked_set: { 'adtrack-legacy.example.cn': 1, '106.11.43.88': 1 },
+    ignore_rules: [
+      { id: 'ig_seed_1', scope: 'host_type', dst_host: 'weather-sdk.demo-cdn.cn', leak_type: 'GPS', mac: '', note: '天气组件定位更新', created_at: T - 600 }
+    ],
+    undo_stack: [
+      { id: 'ub_seed_1', dst_host: 'adtrack-legacy.example.cn', kind: 'domain', also_ip: '106.11.43.88', macs: ['6a:0e:55:b1:9c:42'], created_at: T - 260 }
+    ],
     events: [
       {
         id: 'lg_v6_01',
@@ -1411,13 +1557,14 @@
         proto: 'tcp',
         leak_type: 'GPS',
         raw_value: '31.230416,121.473701',
-        dst_host: 'weather-loc.iot-probe.cn',
+        dst_host: 'oss-cn-shanghai.aliyuncs.com',
+        infra_guard: { level: 'warn_confirm', label: '阿里云 OSS 公共底座' },
         hit_count: 2,
         method: 'GET',
         path: '/loc/check?latlng=31.230416,121.473701&coord=gcj02',
         user_agent: 'okhttp/4.12.0',
         is_blocked: false,
-        raw_snippet: 'GET /loc/check?latlng=31.230416,121.473701&coord=gcj02 HTTP/1.1\r\nHost: weather-loc.iot-probe.cn\r\nUser-Agent: okhttp/4.12.0\r\nConnection: keep-alive'
+        raw_snippet: 'GET /loc/check?latlng=31.230416,121.473701&coord=gcj02 HTTP/1.1\r\nHost: oss-cn-shanghai.aliyuncs.com\r\nUser-Agent: okhttp/4.12.0\r\nConnection: keep-alive'
       },
       {
         id: 'lg_v6_04',
@@ -1451,27 +1598,54 @@
         proto: 'tcp',
         leak_type: 'MAC_ADDR',
         raw_value: '7e:c4:19:20:5a:8b',
-        dst_host: 'ota-ping.smartspeaker-demo.cn',
+        dst_host: 'connect.rom.miui.com',
+        infra_guard: { level: 'hard_block', label: '系统联网探测核心域' },
         hit_count: 1,
         method: 'POST',
-        path: '/device/heartbeat',
+        path: '/generate_204?mac=7e:c4:19:20:5a:8b',
         user_agent: 'SmartSpeaker-HTTP/1.8',
         is_blocked: false,
-        raw_snippet: 'POST /device/heartbeat HTTP/1.1\r\nHost: ota-ping.smartspeaker-demo.cn\r\nUser-Agent: SmartSpeaker-HTTP/1.8\r\nContent-Type: application/json\r\n\r\n{"mac":"7e:c4:19:20:5a:8b","fw":"2.14.8"}'
+        raw_snippet: 'POST /generate_204?mac=7e:c4:19:20:5a:8b HTTP/1.1\r\nHost: connect.rom.miui.com\r\nUser-Agent: SmartSpeaker-HTTP/1.8\r\nContent-Type: application/json\r\n\r\n{"mac":"7e:c4:19:20:5a:8b","fw":"2.14.8"}'
       }
     ]
   };
 
+  function v6MockEventWhitelisted(ev) {
+    var host = String((ev && ev.dst_host) || '').toLowerCase();
+    var tp = String((ev && ev.leak_type) || '').toUpperCase();
+    var mac = String((ev && ev.mac) || '').toLowerCase();
+    return (V6_LG_STATE.ignore_rules || []).some(function (w) {
+      if (!w) return false;
+      var wh = String(w.dst_host || '').toLowerCase();
+      if (wh && host !== wh && host.slice(-(wh.length + 1)) !== '.' + wh && ev.dst_ip !== wh) return false;
+      if (w.leak_type && String(w.leak_type).toUpperCase() !== tp) return false;
+      if (w.mac && String(w.mac).toLowerCase() !== mac) return false;
+      return true;
+    });
+  }
+
   function v6LeakGuardPayload() {
     var totalHits = 0, devMap = {};
-    V6_LG_STATE.events.forEach(function (ev) {
+    var visibleEvents = V6_LG_STATE.events.filter(function (ev) { return !v6MockEventWhitelisted(ev); });
+    visibleEvents.forEach(function (ev) {
       totalHits += (ev.hit_count || 1);
       if (ev.mac || ev.src_ip) devMap[ev.mac || ev.src_ip] = 1;
+      if (!ev.infra_guard) {
+        var ig = v6MockInfraGuard(ev.dst_host);
+        if (ig) ev.infra_guard = ig;
+      }
       ev.is_blocked = !!V6_LG_STATE.blocked_set[String(ev.dst_host || '').toLowerCase()] || !!V6_LG_STATE.blocked_set[String(ev.dst_ip || '').toLowerCase()];
     });
     var blkCnt = Object.keys(V6_LG_STATE.blocked_set).filter(function (k) { return !/^\d+\.\d+\.\d+\.\d+$/.test(k); }).length;
+    var affectedCnt = Object.keys(devMap).length;
+    var igCnt = V6_LG_STATE.ignore_rules.length;
+    var undoCnt = V6_LG_STATE.undo_stack.length;
     return {
       ok: true,
+      total_hits: totalHits,
+      affected_devices: affectedCnt,
+      blocked_domains: blkCnt,
+      ignore_rules_cnt: igCnt,
       config: {
         notify_enabled: V6_LG_STATE.notify_enabled,
         lockscreen_mask: V6_LG_STATE.lockscreen_mask,
@@ -1480,10 +1654,15 @@
       },
       stats: {
         total_hits: totalHits,
-        affected_devices: Object.keys(devMap).length,
-        blocked_domains: blkCnt
+        affected_devices: affectedCnt,
+        blocked_domains: blkCnt,
+        ignore_rules_cnt: igCnt,
+        undo_count: undoCnt
       },
-      events: V6_LG_STATE.events
+      ignore_rules: V6_LG_STATE.ignore_rules.slice(),
+      undo_stack: V6_LG_STATE.undo_stack.slice(),
+      undo_count: undoCnt,
+      events: visibleEvents
     };
   }
 
@@ -1531,7 +1710,7 @@
       configured_bg_ceil_pct: V6_EXP_STATE.configured_bg_ceil_pct,
       cooldown_remaining_sec: 0,
       transitions: V6_EXP_STATE.transitions,
-      dataplane: { qdisc: V6_EXP_STATE.qdisc, tier: 'tier_b_native_htb' }
+      dataplane: { qdisc: V6_EXP_STATE.qdisc, tier: 'tier2_native_netlink', active_tier: 'tier2_native_netlink' }
     };
   }
 
@@ -1724,18 +1903,91 @@
     latest_jitter_ms: 4.8,
     incidents: [
       {
-        unix_ms: (T - 340) * 1000,
-        rtt_ms: 46.2,
+        incident_id: 4,
+        ts_unix_ms: (T - 190) * 1000,
+        reason: 'rtt_and_bw_spike',
+        cause_dim: 'device_hog',
+        cause_label_zh: '设备大流量抢网',
+        verdict_zh: '任天堂 Switch（任天堂 eShop）突发大流量下载，挤占热点带宽引起卡顿',
+        root_cause_zh: '任天堂 Switch（任天堂 eShop）瞬时占用了 78% 的热点流量，已由后台限速平滑压制',
+        peak_rtt_ms: 46.2,
+        delta_rtt_ms: 21.7,
         jitter_ms: 28.4,
-        culprit_device: '任天堂 Switch (192.168.43.52)',
-        root_cause_zh: 'eShop 突发多线程并发拉取触发上行队列瞬时水位抬升，已由 UpdateLeash 压制收敛'
+        bandwidth_util_pct: 91.5,
+        down_util_pct: 91.5,
+        up_util_pct: 18.2,
+        culprit_is_hog: true,
+        culprit_mac: '5e:20:b7:3a:c4:18',
+        culprit_ip: '192.168.43.52',
+        culprit_name: '任天堂 Switch',
+        culprit_share_pct: 78,
+        active_app_id: 'nintendo_eshop',
+        active_app_name: '任天堂 eShop'
       },
       {
-        unix_ms: (T - 1920) * 1000,
-        rtt_ms: 39.5,
-        jitter_ms: 21.0,
-        culprit_device: '5G NR 空口切站 (rmnet_data2)',
-        root_cause_zh: '上游基站 PCI 切换引起 180ms 短暂重传，5G Autorate 已平滑重锚定'
+        incident_id: 3,
+        ts_unix_ms: (T - 840) * 1000,
+        reason: 'rtt_spike',
+        cause_dim: 'cell_jitter',
+        cause_label_zh: '基站信号抖动',
+        verdict_zh: '上游移动网络基站空口瞬时抖动，并非热点内设备抢网',
+        root_cause_zh: '热点下挂设备流量正常平稳（无抢网行为），本次跳 Ping 来自 5G NR n78 基站切站重传',
+        display_rat: '5G NR SA',
+        band: 'n78',
+        rsrp_dbm: -106,
+        sinr_db: 3,
+        peak_rtt_ms: 58.6,
+        delta_rtt_ms: 34.1,
+        jitter_ms: 24.2,
+        bandwidth_util_pct: 22.0,
+        down_util_pct: 22.0,
+        up_util_pct: 9.4,
+        culprit_is_hog: false,
+        culprit_mac: '',
+        culprit_name: ''
+      },
+      {
+        incident_id: 2,
+        ts_unix_ms: (T - 1920) * 1000,
+        reason: 'bw_saturated',
+        cause_dim: 'uplink_saturated',
+        cause_label_zh: '手机上行占满',
+        secondary_dims: ['device_hog'],
+        verdict_zh: 'MacBook Pro（飞书）正在大量上传数据，占满上行通道引起跳 Ping',
+        root_cause_zh: 'MacBook Pro（飞书）突发大流量上传挤满上行带宽，导致其他设备确认包排队延迟飙升',
+        peak_rtt_ms: 63.4,
+        delta_rtt_ms: 38.9,
+        jitter_ms: 26.8,
+        bandwidth_util_pct: 64.0,
+        down_util_pct: 31.2,
+        up_util_pct: 94.6,
+        culprit_is_hog: true,
+        culprit_mac: '3a:91:d4:6b:02:5f',
+        culprit_ip: '192.168.43.31',
+        culprit_name: 'MacBook Pro',
+        culprit_share_pct: 84,
+        active_app_id: 'feishu',
+        active_app_name: '飞书'
+      },
+      {
+        incident_id: 1,
+        ts_unix_ms: (T - 3480) * 1000,
+        reason: 'rtt_spike',
+        cause_dim: 'thermal_throttle',
+        cause_label_zh: '发热温控降速',
+        verdict_zh: '手机发热（45.6°C）触发温控保护降速，引起延迟波动',
+        root_cause_zh: '本次波动源于手机机身高温触发散热降速保护，热点下挂设备流量平稳，并非设备抢网',
+        temp_c: 45.6,
+        thermal_stage: 2,
+        peak_rtt_ms: 49.0,
+        delta_rtt_ms: 24.5,
+        jitter_ms: 19.6,
+        bandwidth_util_pct: 38.0,
+        down_util_pct: 38.0,
+        up_util_pct: 14.0,
+        culprit_is_hog: false,
+        culprit_mac: '',
+        culprit_name: ''
       }
     ]
   };
@@ -1794,6 +2046,11 @@
       backend_version: VER,
       healthy: true,
       core_uptime_sec: 14820 + Math.floor((Date.now() - PAGE_T0) / 1000),
+      dataplane: {
+        tier: 'tier2_native_netlink',
+        active_tier: 'tier2_native_netlink',
+        qdisc: V6_EXP_STATE.qdisc
+      },
       bulkheads: {
         dataplane: { healthy: true, circuit_state: 'closed', fail_count: 0 },
         dpi_shm: { healthy: true, circuit_state: 'closed', fail_count: 0 },
@@ -1823,6 +2080,9 @@
     };
   };
   GET['/api/leakguard/events'] = function () { return v6LeakGuardPayload(); };
+  GET['/api/leakguard/whitelist'] = function () {
+    return { ok: true, ignore_rules: V6_LG_STATE.ignore_rules.slice(), ignore_rules_cnt: V6_LG_STATE.ignore_rules.length };
+  };
   GET['/api/v6/express'] = function () { return v6ExpressPayload(); };
   GET['/api/v6/update_leash'] = function () { return v6LeashPayload(); };
   GET['/api/v6/thermo'] = function () { return v6ThermoPayload(); };
@@ -1836,14 +2096,15 @@
       version: VER,
       generated_at: now(),
       bulkheads: GET['/api/vector_sync']().bulkheads,
-      dataplane_tier: 'tier_b_native_htb',
+      dataplane_tier: 'tier2_native_netlink',
       json_engine: 'go1.27_encoding_json_v2'
     };
   };
   GET['/api/backup'] = function () {
     return {
-      schema: 'hnc.config.vault.v6',
+      schema_version: 'hnc.backup.v6',
       module_version: VER,
+      module_version_code: VCODE,
       exported_at: now(),
       file_count: 16,
       sha256: V6_VAULT_SHA,
@@ -1856,32 +2117,211 @@
     };
   };
 
+  function v6SyncDeviceBlocksForTarget(val, targetMac, add, labelTxt) {
+    var norm = String(val || '').trim().toLowerCase();
+    if (!norm) return;
+    DEVS.forEach(function (d) {
+      if (targetMac && d.mac !== targetMac) return;
+      d.blocks = (d.blocks || []).filter(function (x) { return String(x.value || '').toLowerCase() !== norm; });
+      if (add) {
+        d.blocks.push({ kind: /^\d+\.\d+\.\d+\.\d+$/.test(norm) || norm.indexOf(':') >= 0 ? 'ip' : 'domain', value: norm, label: labelTxt || '隐私安检拦截', source: 'manual' });
+      }
+    });
+  }
+
+  function v6AssertAllowedKeys(obj, allowed) {
+    if (!obj || typeof obj !== 'object') return;
+    Object.keys(obj).forEach(function (k) {
+      if (allowed.indexOf(k) < 0) throw err('json: unknown field "' + k + '"', 400);
+    });
+  }
+
   POST['/api/leakguard/config'] = function (b) {
+    v6AssertAllowedKeys(b, ['capacity', 'cooldown_sec', 'notify_enabled', 'lockscreen_mask']);
     if (b && typeof b.notify_enabled === 'boolean') V6_LG_STATE.notify_enabled = b.notify_enabled;
     if (b && typeof b.lockscreen_mask === 'boolean') V6_LG_STATE.lockscreen_mask = b.lockscreen_mask;
     if (b && b.capacity != null) V6_LG_STATE.capacity = lim(round(+b.capacity || 300), 10, 2000);
     if (b && b.cooldown_sec != null) V6_LG_STATE.cooldown_sec = lim(round(+b.cooldown_sec || 300), 0, 86400);
-    return v6LeakGuardPayload();
+    return {
+      ok: true,
+      config: {
+        notify_enabled: V6_LG_STATE.notify_enabled,
+        lockscreen_mask: V6_LG_STATE.lockscreen_mask,
+        capacity: V6_LG_STATE.capacity,
+        cooldown_sec: V6_LG_STATE.cooldown_sec
+      }
+    };
   };
   POST['/api/leakguard/clear'] = function () {
     V6_LG_STATE.events = [];
-    return v6LeakGuardPayload();
+    return { ok: true };
+  };
+  POST['/api/leakguard/whitelist'] = function (b) {
+    v6AssertAllowedKeys(b, ['action', 'id', 'scope', 'dst_host', 'leak_type', 'mac', 'note']);
+    var act = String((b && b.action) || 'add').toLowerCase();
+    if (act === 'clear') {
+      var rmAll = V6_LG_STATE.ignore_rules.length;
+      V6_LG_STATE.ignore_rules = [];
+      return { ok: true, action: 'clear', removed: rmAll, ignore_rules: [] };
+    }
+    var host = String((b && b.dst_host) || '').trim().toLowerCase();
+    var lType = String((b && b.leak_type) || '').trim().toUpperCase();
+    var mac = String((b && b.mac) || '').trim().toLowerCase();
+    var scope = String((b && b.scope) || (mac && lType ? 'device_host_type' : (lType ? 'host_type' : 'host'))).toLowerCase();
+    if (act === 'remove' || act === 'del' || act === 'delete') {
+      var rid = String((b && b.id) || '').trim();
+      var beforeLen = V6_LG_STATE.ignore_rules.length;
+      V6_LG_STATE.ignore_rules = V6_LG_STATE.ignore_rules.filter(function (w) {
+        if (!w) return false;
+        if (rid && w.id === rid) return false;
+        if (!rid && String(w.dst_host || '').toLowerCase() === host && String(w.scope || '') === scope && String(w.leak_type || '').toUpperCase() === lType && String(w.mac || '').toLowerCase() === mac) return false;
+        return true;
+      });
+      return { ok: true, action: 'remove', removed: beforeLen - V6_LG_STATE.ignore_rules.length, ignore_rules: V6_LG_STATE.ignore_rules.slice() };
+    }
+    if (scope !== 'host_type' && scope !== 'host' && scope !== 'device_host_type') {
+      throw err('scope must be host_type|host|device_host_type', 400);
+    }
+    if (!host) throw err('missing dst_host', 400);
+    if ((scope === 'host_type' || scope === 'device_host_type') && !lType) {
+      throw err('valid leak_type is required for scope=' + scope, 400);
+    }
+    if (scope === 'device_host_type' && !mac) {
+      throw err('valid device mac is required for scope=device_host_type', 400);
+    }
+    var item = {
+      id: 'ig_' + Date.now() + '_' + Math.floor(Math.random() * 1000),
+      scope: scope,
+      dst_host: host,
+      leak_type: (scope === 'host_type' || scope === 'device_host_type') ? lType : '',
+      mac: scope === 'device_host_type' ? mac : '',
+      note: String((b && b.note) || ''),
+      created_at: now()
+    };
+    V6_LG_STATE.ignore_rules = V6_LG_STATE.ignore_rules.filter(function (w) {
+      return !(w.dst_host === item.dst_host && w.scope === item.scope && w.leak_type === item.leak_type && w.mac === item.mac);
+    });
+    V6_LG_STATE.ignore_rules.push(item);
+    return { ok: true, action: 'add', rule: item, ignore_rules: V6_LG_STATE.ignore_rules.slice() };
   };
   POST['/api/leakguard/block-domain'] = function (b) {
+    v6AssertAllowedKeys(b, ['action', 'dst_host', 'mac', 'force', 'also_ip']);
     var host = String((b && b.dst_host) || '').trim().toLowerCase();
     if (!host) throw err('missing dst_host', 400);
+    var isIp = /^\d+\.\d+\.\d+\.\d+$/.test(host) || host.indexOf(':') >= 0;
+    var kind = isIp ? 'ip' : 'domain';
+    var alsoIp = String((b && b.also_ip) || '').trim().toLowerCase();
+    if (alsoIp === host) alsoIp = '';
     var unb = !!(b && b.action === 'unblock');
-    if (unb) delete V6_LG_STATE.blocked_set[host];
-    else V6_LG_STATE.blocked_set[host] = 1;
     var targetMac = String((b && b.mac) || '').toLowerCase();
-    DEVS.forEach(function (d) {
-      if (targetMac && d.mac !== targetMac) return;
-      d.blocks = (d.blocks || []).filter(function (x) { return String(x.value || '').toLowerCase() !== host; });
-      if (!unb) {
-        d.blocks.push({ kind: /^\d+\.\d+\.\d+\.\d+$/.test(host) ? 'ip' : 'domain', value: host, label: '隐私安检拦截', source: 'manual' });
+    if (targetMac === 'all' || targetMac === '*') targetMac = '';
+    var targetMacs = targetMac ? [targetMac] : DEVS.map(function (d) { return d.mac; });
+    var skippedSharedIp = false;
+    var skippedVendor = '';
+    var blockedAlsoIp = '';
+    if (!unb) {
+      var evHit = V6_LG_STATE.events.filter(function (x) { return String(x.dst_host || '').toLowerCase() === host; })[0];
+      var ig = (evHit && evHit.infra_guard) || v6MockInfraGuard(host);
+      if (ig && ig.level === 'hard_block') {
+        throw err('核心公共基础设施域名禁止封禁', 409, {
+          guard_level: 'hard_block',
+          provider: ig.label,
+          reason_zh: '该域名属于系统联网探测或核心公共服务，封禁会导致连接设备出现 Wi-Fi 断网叹号，建议改用「忽略误报」。'
+        });
       }
-    });
-    return v6LeakGuardPayload();
+      if (ig && ig.level === 'warn_confirm' && !(b && b.force)) {
+        throw err('共享公共底座封禁需二次确认', 409, {
+          guard_level: 'warn_confirm',
+          provider: ig.label,
+          reason_zh: '该域名属于「' + ig.label + '」多应用共用节点，封禁后可能连带影响使用同一加速节点的其他正常应用。'
+        });
+      }
+      if (alsoIp) {
+        skippedVendor = v6MockSharedCdnIpVendor(alsoIp, ig);
+        if (skippedVendor) {
+          skippedSharedIp = true;
+        } else {
+          blockedAlsoIp = alsoIp;
+        }
+      }
+      V6_LG_STATE.blocked_set[host] = 1;
+      if (blockedAlsoIp) V6_LG_STATE.blocked_set[blockedAlsoIp] = 1;
+      v6SyncDeviceBlocksForTarget(host, targetMac, true, 'LeakGuard 反制');
+      if (blockedAlsoIp) v6SyncDeviceBlocksForTarget(blockedAlsoIp, targetMac, true, 'LeakGuard 关联 IP');
+      V6_LG_STATE.undo_stack = V6_LG_STATE.undo_stack.filter(function (u) { return String(u.dst_host || '').toLowerCase() !== host; });
+      V6_LG_STATE.undo_stack.push({
+        id: 'ub_' + Date.now(),
+        dst_host: host,
+        kind: kind,
+        also_ip: blockedAlsoIp,
+        macs: targetMacs.slice(),
+        created_at: now()
+      });
+      while (V6_LG_STATE.undo_stack.length > 10) V6_LG_STATE.undo_stack.shift();
+    } else {
+      delete V6_LG_STATE.blocked_set[host];
+      if (alsoIp) delete V6_LG_STATE.blocked_set[alsoIp];
+      v6SyncDeviceBlocksForTarget(host, targetMac, false);
+      if (alsoIp) v6SyncDeviceBlocksForTarget(alsoIp, targetMac, false);
+      V6_LG_STATE.undo_stack = V6_LG_STATE.undo_stack.filter(function (u) { return String(u.dst_host || '').toLowerCase() !== host; });
+    }
+    var resp = {
+      ok: true,
+      action: unb ? 'unblock' : 'block',
+      kind: kind,
+      dst_host: host,
+      is_blocked: !unb,
+      macs: targetMacs,
+      applied_cnt: targetMacs.length,
+      skipped_shared_ip: skippedSharedIp,
+      undo_count: V6_LG_STATE.undo_stack.length
+    };
+    if (skippedSharedIp) {
+      resp.skipped_ip = alsoIp;
+      resp.skipped_ip_vendor = skippedVendor;
+    }
+    if (blockedAlsoIp) resp.blocked_also_ip = blockedAlsoIp;
+    return resp;
+  };
+  POST['/api/leakguard/undo-block'] = function (b) {
+    v6AssertAllowedKeys(b, ['id']);
+    if (!V6_LG_STATE.undo_stack.length) throw err('当前没有可撤销的封禁记录', 400);
+    var uid = String((b && b.id) || '').trim();
+    var idx = V6_LG_STATE.undo_stack.length - 1;
+    if (uid) {
+      idx = -1;
+      for (var i = V6_LG_STATE.undo_stack.length - 1; i >= 0; i--) {
+        if (V6_LG_STATE.undo_stack[i].id === uid) { idx = i; break; }
+      }
+      if (idx < 0) throw err('指定的封禁撤销记录不存在', 400);
+    }
+    var popped = V6_LG_STATE.undo_stack.splice(idx, 1)[0];
+    var macsToUnblock = (popped && Array.isArray(popped.macs)) ? popped.macs : [];
+    if (popped) {
+      var ph = String(popped.dst_host || '').toLowerCase();
+      var pip = String(popped.also_ip || '').toLowerCase();
+      delete V6_LG_STATE.blocked_set[ph];
+      if (pip) delete V6_LG_STATE.blocked_set[pip];
+      if (macsToUnblock.length) {
+        macsToUnblock.forEach(function (m) {
+          v6SyncDeviceBlocksForTarget(ph, m, false);
+          if (pip) v6SyncDeviceBlocksForTarget(pip, m, false);
+        });
+      } else {
+        v6SyncDeviceBlocksForTarget(ph, '', false);
+        if (pip) v6SyncDeviceBlocksForTarget(pip, '', false);
+      }
+    }
+    return {
+      ok: true,
+      undone: popped,
+      dst_host: popped ? popped.dst_host : '',
+      kind: (popped && popped.kind) || 'domain',
+      also_ip: (popped && popped.also_ip) || '',
+      macs: macsToUnblock,
+      applied_cnt: macsToUnblock.length,
+      remaining_undo: V6_LG_STATE.undo_stack.length
+    };
   };
   POST['/api/v6/express'] = function (b) {
     if (b && typeof b.enabled === 'boolean') V6_EXP_STATE.enabled = b.enabled;
@@ -1950,6 +2390,9 @@
     return v6SubtreesPayload();
   };
   POST['/api/backup'] = function (b) {
+    if (b && b.schema_version && b.schema_version !== 'hnc.backup.v6') {
+      throw err('unsupported backup schema_version', 400);
+    }
     var cnt = (b && b.files && typeof b.files === 'object') ? Object.keys(b.files).length : (round(+(b && b.file_count) || 16));
     return { ok: true, restored_count: Math.max(1, cnt), sha256: (b && b.sha256) || V6_VAULT_SHA };
   };

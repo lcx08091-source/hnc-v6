@@ -323,7 +323,7 @@ if [ -x "$HNC/bin/hnc_dpid" ]; then
     if strings "$HNC/bin/hnc_dpid" 2>/dev/null | grep -q "iface-retry"; then
         DPID_HAS_IFACE_RETRY=true
     fi
-    DPID_VERSION=$(strings "$HNC/bin/hnc_dpid" 2>/dev/null | grep -oE "0\\.5\\.3-rc[0-9.]+[-a-z]*" | head -1)
+    DPID_VERSION=$(strings "$HNC/bin/hnc_dpid" 2>/dev/null | grep -oE '0\.5\.[0-9]+[-0-9A-Za-z._+]*' | head -1)
     [ -z "$DPID_VERSION" ] && DPID_VERSION="unknown"
 fi
 

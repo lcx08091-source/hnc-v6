@@ -1,4 +1,4 @@
-name: Build HNC arm64
+name: Build HNC (arm64 + armv7)
 
 # Triggers:
 #   - push to main: full build + zip artifact
@@ -117,12 +117,14 @@ jobs:
       - name: Get version from module.prop
         id: version
         run: |
-          VERSION=$(grep '^version=' module.prop | cut -d= -f2)
+          VERSION=$(grep '^version=' module.prop | cut -d= -f2 | tr -d '\r')
+          VERSION_CODE=$(grep '^versionCode=' module.prop | cut -d= -f2 | tr -d '\r')
           VERSION_SAFE=${VERSION//./_}
           VERSION_SAFE=${VERSION_SAFE//+/_}
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "version_code=$VERSION_CODE" >> $GITHUB_OUTPUT
           echo "version_safe=$VERSION_SAFE" >> $GITHUB_OUTPUT
-          echo "Building HNC version: $VERSION"
+          echo "Building HNC version: $VERSION (versionCode=$VERSION_CODE)"
 
       # v5.9.0 一键发版: 解析本 run 是否要发 Release,输出 steps.reltag.outputs.tag
       # (空 = 不发版)。fail fast: 校验不过直接挂掉 run,构建不白跑。
@@ -254,11 +256,11 @@ jobs:
           CC64="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
           STRIP64="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           if ! GOFLAGS="-mod=mod" CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
-            go build -buildvcs=false -trimpath -ldflags="-s -w" \
+            go build -buildvcs=false -trimpath -ldflags="-s -w -X main.moduleVersion=${{ steps.version.outputs.version }} -X main.versionCode=${{ steps.version.outputs.version_code }}" \
             -o ../../bin/hnc_dpid ./cmd/dpid; then
             echo "WARN: hnc_dpid CGO_ENABLED=0 failed; retrying with CGO_ENABLED=1 NDK clang..." >&2
             GOFLAGS="-mod=mod" CC="$CC64" CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
-              go build -buildvcs=false -trimpath -ldflags="-s -w -extldflags=-Wl,-z,max-page-size=16384" \
+              go build -buildvcs=false -trimpath -ldflags="-s -w -X main.moduleVersion=${{ steps.version.outputs.version }} -X main.versionCode=${{ steps.version.outputs.version_code }} -extldflags=-Wl,-z,max-page-size=16384" \
               -o ../../bin/hnc_dpid ./cmd/dpid
             [ -x "$STRIP64" ] && "$STRIP64" ../../bin/hnc_dpid || true
           fi
@@ -278,11 +280,11 @@ jobs:
           CC64="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/aarch64-linux-android28-clang"
           STRIP64="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-strip"
           if ! GOFLAGS="-mod=mod" CGO_ENABLED=0 GOOS=android GOARCH=arm64 \
-            go build -buildvcs=false -trimpath -ldflags="-s -w" \
+            go build -buildvcs=false -trimpath -ldflags="-s -w -X main.moduleVersion=${{ steps.version.outputs.version }} -X main.versionCode=${{ steps.version.outputs.version_code }}" \
             -o ../../bin/hnc_watchdog ./cmd/hnc_watchdog; then
             echo "WARN: hnc_watchdog CGO_ENABLED=0 failed; retrying with CGO_ENABLED=1 NDK clang..." >&2
             GOFLAGS="-mod=mod" CC="$CC64" CGO_ENABLED=1 GOOS=android GOARCH=arm64 \
-              go build -buildvcs=false -trimpath -ldflags="-s -w -extldflags=-Wl,-z,max-page-size=16384" \
+              go build -buildvcs=false -trimpath -ldflags="-s -w -X main.moduleVersion=${{ steps.version.outputs.version }} -X main.versionCode=${{ steps.version.outputs.version_code }} -extldflags=-Wl,-z,max-page-size=16384" \
               -o ../../bin/hnc_watchdog ./cmd/hnc_watchdog
             [ -x "$STRIP64" ] && "$STRIP64" ../../bin/hnc_watchdog || true
           fi
@@ -349,7 +351,7 @@ jobs:
       # hnc_clsact_ctl 是裸 syscall 的迷你加载器(netlink 挂载 + map 写入),
       # 不链接 libbpf/libelf。与分叉版不同: .o 不再预提交进 git, 每次 CI
       # 现编, 杜绝陈旧产物(与 PKG-1 的历史教训一致)。
-      - name: Build hnc_clsact_ctl + BPF object (v5.9.7)
+      - name: Build hnc_clsact_ctl + BPF object
         env:
           ANDROID_NDK: ${{ steps.ndk.outputs.path }}
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
@@ -398,6 +400,7 @@ jobs:
           ANDROID_NDK: ${{ steps.ndk.outputs.path }}
           ANDROID_NDK_HOME: ${{ steps.ndk.outputs.path }}
           VERSION: ${{ steps.version.outputs.version }}
+          VERSION_CODE: ${{ steps.version.outputs.version_code }}
         run: |
           set -e
           CC7="$ANDROID_NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/armv7a-linux-androideabi28-clang"
@@ -410,7 +413,7 @@ jobs:
            for pair in dpid:hnc_dpid hnc_watchdog:hnc_watchdog; do
              src=${pair%%:*}; out=${pair#*:}
              GOFLAGS="-mod=mod" CC="$CC7" CGO_ENABLED=1 GOOS=android GOARCH=arm GOARM=7 \
-               go build -buildvcs=false -trimpath -ldflags="-s -w -extldflags=-Wl,-z,max-page-size=16384" -o "../../bin/armeabi-v7a/$out" "./cmd/$src"
+               go build -buildvcs=false -trimpath -ldflags="-s -w -X main.moduleVersion=${{ steps.version.outputs.version }} -X main.versionCode=${{ steps.version.outputs.version_code }} -extldflags=-Wl,-z,max-page-size=16384" -o "../../bin/armeabi-v7a/$out" "./cmd/$src"
              [ -x "$STRIP7" ] && "$STRIP7" "../../bin/armeabi-v7a/$out" || true
            done)
           (cd src/launcher && bash build.sh install arm)
@@ -427,8 +430,10 @@ jobs:
             chmod 755 "$f"
           done
           file "bin/armeabi-v7a/hnc_watchdog" | grep -q "not stripped" && { echo "ERROR: armv7 hnc_watchdog not stripped"; exit 1; }
-          grep -a -qF "$VERSION" bin/armeabi-v7a/hnc_httpd \
-            || { echo "ERROR: armv7 hnc_httpd missing version $VERSION"; exit 1; }
+          for b in hnc_httpd hnc_dpid hnc_watchdog hnc_launcher hotspotd hnc_clsact_ctl mdns_resolve hnc_ipc; do
+            grep -a -qF "$VERSION" "bin/armeabi-v7a/$b" \
+              || { echo "ERROR: armv7 $b missing version $VERSION"; exit 1; }
+          done
           ls -lh bin/armeabi-v7a/
           echo "OK: armeabi-v7a binaries built"
 
@@ -447,28 +452,14 @@ jobs:
         run: |
           VERSION="${{ steps.version.outputs.version }}"
           echo "Expecting version $VERSION in binaries..."
-          
-          # hnc_httpd should have main.version injected
-          if ! grep -a -qF "$VERSION" daemon/hnc_httpd/hnc_httpd; then
-            echo "ERROR: hnc_httpd missing version string $VERSION"
-            echo "       (build.sh should have injected it via -X main.version=$VERSION)"
-            exit 1
-          fi
-          echo "OK: hnc_httpd contains $VERSION"
-          
-          # hnc_dpid has its own version (0.5.3-rc30.12.x), not module version
-          if ! (strings -a bin/hnc_dpid 2>/dev/null || strings bin/hnc_dpid) | grep -qE "0\.5\.[0-9]+.*rc30"; then
-            echo "WARN: hnc_dpid version string not in expected format"
-          else
-            echo "OK: hnc_dpid version string present"
-          fi
-          
-          # hnc_launcher version check aligned with src/launcher/build.sh regex
-          if ! (strings -a bin/hnc_launcher 2>/dev/null || strings bin/hnc_launcher) | grep -qE '^0\.[0-9]+\.[0-9]+-rc[0-9]+(\.[0-9]+)*$'; then
-            echo "WARN: hnc_launcher version string missing"
-          else
-            echo "OK: hnc_launcher version string present"
-          fi
+
+          for b in daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/hnc_watchdog bin/hnc_launcher bin/hotspotd bin/hnc_clsact_ctl bin/mdns_resolve bin/hnc_ipc; do
+            if ! grep -a -qF "$VERSION" "$b"; then
+              echo "ERROR: $b missing version string $VERSION"
+              exit 1
+            fi
+            echo "OK: $b contains $VERSION"
+          done
 
       # ─── v5.9.3 · BUG-015 B: 文档版本占位符注入 ────────────
       # bin/inject_version_to_docs.sh 从 rc30.12.34 就写好了, 但从来没被任何
@@ -496,7 +487,6 @@ jobs:
         run: |
           OUT="HNC-${{ steps.version.outputs.version_safe }}-arm64.zip"
           OUT7="HNC-${{ steps.version.outputs.version_safe }}-armv7.zip"
-          TOOLS_OUT="hnc-ground-truth-tools.zip"
           # v5.22: 包 ABI 标记(customize.sh / bin/hnc_arch.sh 安装期据此校验设备)
           echo arm64-v8a > bin/hnc_pkg_abi
           
@@ -506,8 +496,7 @@ jobs:
           rm -rf third_party_build/_libs_out 2>/dev/null || true
           rm -rf third_party_build/_obj 2>/dev/null || true
           
-          # Main module zip - EXCLUDES tools/ground_truth/ (rc30.12.23+)
-          # tools/ground_truth/ is shipped as a separate zip below.
+          # Main module zip
           # v5.22: webroot/css/*.css 与 webroot/js/*.js(WebUI 拆分后的样式/脚本)随
           # webroot/ 递归打包 —— 下面的排除规则不得匹配它们; artifact_sanity_check.sh
           # 的必需文件清单逐个校验(arm64 / armv7 两个包)。
@@ -518,13 +507,18 @@ jobs:
             -x ".github/*" \
             -x "bin/armeabi-v7a/*" -x "bin/armeabi-v7a" \
             -x "bin/arm64-v8a/*" -x "bin/arm64-v8a" \
+            -x "bin/ci_preflight.sh" \
+            -x "bin/artifact_sanity_check.sh" \
+            -x "bin/artifact_pick_flashable.sh" \
+            -x "bin/pitfall_lint*" \
+            -x "bin/version_consistency_check.sh" \
+            -x "bin/inject_version_to_docs.sh" \
+            -x "bin/json_regression_test.sh" \
             -x "**/_libs_out/*" \
             -x "**/_obj/*" \
             -x "**/build/*" \
             -x "**/out/*" \
             -x "**/prebuilt/*" \
-            -x "tools/ground_truth/*" \
-            -x "tools/ground_truth" \
             -x "tools/applabel/*" \
             -x "tools/applabel" \
             -x "src/*" -x "src" \
@@ -580,22 +574,11 @@ jobs:
           echo "OUT_ZIP_ARMV7=$OUT7" >> $GITHUB_ENV
           ls -lh "$OUT7"
           
-          # Separate ground-truth tools zip (rc30.12.23+)
-          if [ -d tools/ground_truth ]; then
-            (cd tools/ground_truth && zip -rqX "../../$TOOLS_OUT" .)
-            echo "TOOLS_ZIP=$TOOLS_OUT" >> $GITHUB_ENV
-            ls -lh "$TOOLS_OUT"
-          fi
-          
           # Print summary
           echo ""
           echo "=== Module zip contents (last lines) ==="
           unzip -l "$OUT" | tail -5
           echo ""
-          if [ -f "$TOOLS_OUT" ]; then
-            echo "=== Tools zip contents ==="
-            unzip -l "$TOOLS_OUT"
-          fi
 
       # ─── Build DPI curated-rules update package (v5.10.0, F3) ──
       - name: Build DPI rules update package
@@ -635,11 +618,6 @@ jobs:
         run: |
           sha256sum "${{ env.OUT_ZIP }}" | tee "${{ env.OUT_ZIP }}.sha256"
           sha256sum "${{ env.OUT_ZIP_ARMV7 }}" | tee "${{ env.OUT_ZIP_ARMV7 }}.sha256"
-          if [ -n "${{ env.TOOLS_ZIP }}" ] && [ -f "${{ env.TOOLS_ZIP }}" ]; then
-            TOOLS_SHA="${{ env.TOOLS_ZIP }}.sha256"
-            sha256sum "${{ env.TOOLS_ZIP }}" | tee "$TOOLS_SHA"
-            echo "TOOLS_SHA=$TOOLS_SHA" >> "$GITHUB_ENV"
-          fi
 
       # ─── Upload as Actions artifact ───────────────────────
       - name: Upload module artifact
@@ -660,16 +638,6 @@ jobs:
           path: |
             ${{ env.OUT_ZIP_ARMV7 }}
             ${{ env.OUT_ZIP_ARMV7 }}.sha256
-          retention-days: 30
-
-      - name: Upload ground-truth tools artifact
-        if: env.TOOLS_ZIP != ''
-        uses: actions/upload-artifact@v4
-        with:
-          name: hnc-ground-truth-tools
-          path: |
-            ${{ env.TOOLS_ZIP }}
-            ${{ env.TOOLS_SHA }}
           retention-days: 30
 
       # ─── Auto-release: tag push 或 workflow_dispatch 一键发版 ───────
@@ -715,5 +683,3 @@ jobs:
             ${{ env.OUT_ZIP_ARMV7 }}.sha256
             dpi-rules.zip
             dpi-rules.zip.sha256
-            ${{ env.TOOLS_ZIP }}
-            ${{ env.TOOLS_SHA }}

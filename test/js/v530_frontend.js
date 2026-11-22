@@ -121,27 +121,115 @@ const cases = {
     eq([0, 9, 10, 39, 40, 50, 59, 60, 89, 90, 100].map((v) => c.glassTintLabel(v)),
       ['清透', '清透', '偏清透', '偏清透', '标准', '标准', '标准', '偏着色', '偏着色', '着色', '着色'], '档位');
   },
-  // UI: 接线 —— 滑块拖动实时生效不存, 松手才存; 标准档 ±3 吸附, 拖进标准档轻震
-  glass_tint_input() {
+  // UI: 玻璃浓度档位点选 —— setGlassTint 立即更新 CSS 变量、文案并写入本地存储
+  glass_tint_pick() {
     const k = load(core, ['num', 'clamp']);
-    const props = {}, ls = {}, lb = { textContent: '' }, S = { glassTint: 50 };
+    const props = {}, attrs = {}, ls = {}, lb = { textContent: '' }, S = { glassTint: 50 };
     let buzz = 0;
-    const f = load(fxjs, ['glassTintVars', 'applyGlassTint', 'glassTintLabel'], { num: k.num, clamp: k.clamp, document: { documentElement: fakeRoot(props) }, S, GX_T: gxTable() });
-    const m = load(mainjs, ['glassTintInput'], {
-      num: k.num, clamp: k.clamp, S, LS: { set: (a, b) => { ls[a] = b; } }, $: (q) => (q === '#glass-tint-v' ? lb : null),
-      haptic: () => { buzz++; }, gxShown: null, applyGlassTint: f.applyGlassTint, glassTintLabel: f.glassTintLabel,
+    const mkBtn = (v) => ({
+      dataset: { gxPick: String(v), glassTint: String(v), val: String(v) },
+      getAttribute: (n) => (n === 'data-gx-pick' || n === 'data-glass-tint' || n === 'data-val' ? String(v) : null),
+      setAttribute() {},
+      removeAttribute() {},
+      classList: { toggle() {}, add() {}, remove() {} },
     });
-    const el = { value: '52' };
-    m.glassTintInput(el, false);
-    eq([props, lb.textContent, ls, el.value, buzz], [{}, '标准', {}, '52', 0], '52 拖动: 吸到标准, 不存');
-    el.value = '90';
-    m.glassTintInput(el, false);
-    eq([props, ls, S.glassTint], [{ '--gx-up': '0.800' }, {}, 50], '90 拖动: 实时生效, 不存');
-    m.glassTintInput(el, true);
-    eq([ls, S.glassTint, lb.textContent], [{ 'hnc6.glass_tint': '90' }, 90, '着色'], '90 松手: 存');
-    el.value = '48';
-    m.glassTintInput(el, true);
-    eq([props, ls, S.glassTint, el.value, buzz], [{}, { 'hnc6.glass_tint': '50' }, 50, '50', 1], '48 松手: 吸回标准并存, 轻震一次');
+    const btns = [0, 25, 50, 75, 100].map(mkBtn);
+    const rootEl = {
+      style: { setProperty: (a, b) => { props[a] = b; }, removeProperty: (a) => { delete props[a]; } },
+      setAttribute: (a, b) => { attrs[a] = String(b); },
+      removeAttribute: (a) => { delete attrs[a]; },
+      classList: { toggle() {}, add() {}, remove() {} },
+    };
+    const doc = {
+      documentElement: rootEl,
+      getElementById: (id) => (id === 'glass-tint-v' ? lb : null),
+      querySelector: (q) => (q === '#glass-tint-v' ? lb : null),
+      querySelectorAll: () => btns,
+    };
+    const f = load(fxjs, ['glassTintVars', 'applyGlassTint', 'glassTintLabel'], { num: k.num, clamp: k.clamp, document: doc, S, GX_T: gxTable() });
+    const srcFile = [mainjs, fxjs, path.join(root, 'webroot/js/settings.js')].find((p) => /(^|\n)function setGlassTint\s*\(/.test(fs.readFileSync(p, 'utf8'))) || mainjs;
+    const m = load(srcFile, ['setGlassTint'], {
+      num: k.num, clamp: k.clamp, S, document: doc,
+      LS: { set: (a, b) => { ls[a] = String(b); }, get: (a, d) => (a in ls ? ls[a] : d) },
+      $: (q) => (q === '#glass-tint-v' ? lb : null),
+      $$: () => btns,
+      haptic: () => { buzz++; },
+      applyGlassTint: f.applyGlassTint, glassTintLabel: f.glassTintLabel,
+      setTimeout: (fn) => { fn(); return 1; }, clearTimeout: () => {},
+    });
+    m.setGlassTint(90);
+    eq([props, S.glassTint, ls['hnc6.glass_tint'], lb.textContent], [{ '--gx-up': '0.800' }, 90, '90', '着色'], '点选 90 着色档');
+    m.setGlassTint(20);
+    eq([props, S.glassTint, ls['hnc6.glass_tint'], lb.textContent], [{ '--gx-dn': '0.600' }, 20, '20', '偏清透'], '点选 20 偏清透档');
+    m.setGlassTint(50);
+    eq([props, S.glassTint, ls['hnc6.glass_tint'], lb.textContent], [{}, 50, '50', '标准'], '点选 50 标准档清空变量');
+    m.setGlassTint(150);
+    eq([S.glassTint, ls['hnc6.glass_tint']], [100, '100'], '上限钳制 100');
+    m.setGlassTint(-20);
+    eq([S.glassTint, ls['hnc6.glass_tint']], [0, '0'], '下限钳制 0');
+  },
+  // UI: 壁纸模糊与遮罩步进/档位 —— syncWpNumericVars / setWpBlur / setWpDim
+  wp_blur_dim_step() {
+    const k = load(core, ['num', 'clamp']);
+    const props = {}, attrs = {}, ls = {};
+    const blurLb = { textContent: '' }, dimLb = { textContent: '' };
+    const S = { wpBlur: 0, wpDim: 12 };
+    const rootEl = {
+      style: { setProperty: (a, b) => { props[a] = b; }, removeProperty: (a) => { delete props[a]; } },
+      setAttribute: (a, b) => { attrs[a] = String(b); },
+      removeAttribute: (a) => { delete attrs[a]; },
+      classList: { toggle() {}, add() {}, remove() {} },
+    };
+    const qEl = (q) => (q === '#wp-blur-v' || q === 'wp-blur-v' ? blurLb : q === '#wp-dim-v' || q === 'wp-dim-v' ? dimLb : null);
+    const doc = {
+      documentElement: rootEl,
+      getElementById: qEl,
+      querySelector: qEl,
+      querySelectorAll: () => [],
+    };
+    const globals = {
+      num: k.num, clamp: k.clamp, S, document: doc,
+      LS: { set: (a, b) => { ls[a] = String(b); }, get: (a, d) => (a in ls ? ls[a] : d) },
+      $: qEl, $$: () => [], haptic: () => {},
+      setTimeout: (fn) => { fn(); return 1; }, clearTimeout: () => {},
+    };
+    const m = load(mainjs, ['syncWpNumericVars', 'setWpBlur', 'setWpDim'], globals);
+    m.syncWpNumericVars();
+    eq([props['--wp-blur'], props['--wp-dim'], 'data-wp-blurred' in attrs], ['0px', '0.12', false], '初始 0px 不标 data-wp-blurred');
+    m.setWpBlur(12);
+    eq([S.wpBlur, props['--wp-blur'], attrs['data-wp-blurred'], blurLb.textContent, ls['hnc6.wp_blur']], [12, '12px', '1', '12 px', '12'], '设置模糊 12px');
+    m.setWpBlur(99);
+    eq([S.wpBlur, props['--wp-blur'], ls['hnc6.wp_blur']], [24, '24px', '24'], '模糊上限钳制 24px');
+    m.setWpBlur(-5);
+    eq([S.wpBlur, props['--wp-blur'], 'data-wp-blurred' in attrs, ls['hnc6.wp_blur']], [0, '0px', false, '0'], '模糊归零移除 data-wp-blurred');
+    m.setWpDim(35);
+    eq([S.wpDim, props['--wp-dim'], dimLb.textContent, ls['hnc6.wp_dim']], [35, '0.35', '35%', '35'], '设置遮罩 35%');
+    m.setWpDim(120);
+    eq([S.wpDim, props['--wp-dim'], ls['hnc6.wp_dim']], [75, '0.75', '75'], '遮罩上限钳制 75%');
+    m.setWpDim(-8);
+    eq([S.wpDim, props['--wp-dim'], ls['hnc6.wp_dim']], [0, '0.00', '0'], '遮罩下限钳制 0%');
+  },
+  // UI: 前端零拖动滑条 —— webroot 运行时代码零 <input type=range>、零 .gx-range、零 glassTintInput
+  webroot_zero_range() {
+    const webDir = path.join(root, 'webroot');
+    const walk = (dir) => {
+      const out = [];
+      for (const ent of fs.readdirSync(dir, { withFileTypes: true })) {
+        const fp = path.join(dir, ent.name);
+        if (ent.isDirectory()) out.push(...walk(fp));
+        else if (/\.(html|css|js)$/.test(ent.name) && ent.name !== 'changelog.html') out.push(fp);
+      }
+      return out;
+    };
+    const hits = [];
+    for (const fp of walk(webDir)) {
+      const rel = path.relative(root, fp);
+      const txt = fs.readFileSync(fp, 'utf8');
+      if (/<input[^>]*\btype\s*=\s*["']?range\b/i.test(txt)) hits.push(rel + ':<input type=range>');
+      if (txt.indexOf('gx-range') >= 0) hits.push(rel + ':gx-range');
+      if (/\bfunction\s+glassTintInput\b/.test(txt)) hits.push(rel + ':glassTintInput');
+    }
+    eq(hits, [], 'webroot 应零拖动滑条残留');
   },
   // UI: liquid.css 的填充按 --gx-up / --gx-dn 插值; 两个都 0 时等于旧版数值; 两端不越界; 降低透明度 → 着色
   liquid_tint_css() {

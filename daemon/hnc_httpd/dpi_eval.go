@@ -116,27 +116,27 @@ type dpiEvalUnknown struct {
 
 // dpiEvalResult 就是 GET /api/dpi_eval 的返回体, 也是 run/dpi_eval.json 的内容。
 type dpiEvalResult struct {
-	OK            bool                     `json:"ok"`
-	GeneratedAt   int64                    `json:"generated_at"`
-	Days          int                      `json:"days"`
-	Enabled       bool                     `json:"enabled"`
-	Samples       int                      `json:"samples"`
-	Apps          int                      `json:"apps"`
-	Capped        bool                     `json:"capped"`
-	SkippedSystem int                      `json:"skipped_system"`
-	SDKSamples    int                      `json:"sdk_samples"`
-	Unlabeled     int                      `json:"unlabeled"` // v5.25: 包名不在对照表(多为系统应用)的样本, 只算覆盖率不算准确率 // 规则库认成广告 / SDK / CDN 类的样本(不计入规则预测)
-	Methods       map[string]dpiEvalMethod `json:"methods"`
-	ByApp         []dpiEvalByApp           `json:"by_app"`
-	TopWrong      []dpiEvalWrong           `json:"top_wrong"`
-	TopUnknown    []dpiEvalUnknown         `json:"top_unknown"`
-	FGTruth       selfFGSummary            `json:"fg_truth"`
-	QUIC          dpiEvalQUIC              `json:"quic"`               // v5.27 T2
-	Startup       *dpiEvalStartup          `json:"startup,omitempty"`  // v5.27 T3
-	Discover      *dpiEvalDiscover         `json:"discover,omitempty"` // v5.28 B1: 新应用发现自评
-	FlowCls            *dpiEvalFlowCls        `json:"flow_cls,omitempty"`             // v5.28 B3: 流量形状猜类别
-	LANSelfConsistency *dpiLANSelfConsistency `json:"lan_self_consistency,omitempty"` // v5.34: 外部设备无真值双栈与跨模态自检
-	Note               string                 `json:"note"`
+	OK                 bool                     `json:"ok"`
+	GeneratedAt        int64                    `json:"generated_at"`
+	Days               int                      `json:"days"`
+	Enabled            bool                     `json:"enabled"`
+	Samples            int                      `json:"samples"`
+	Apps               int                      `json:"apps"`
+	Capped             bool                     `json:"capped"`
+	SkippedSystem      int                      `json:"skipped_system"`
+	SDKSamples         int                      `json:"sdk_samples"`
+	Unlabeled          int                      `json:"unlabeled"` // v5.25: 包名不在对照表(多为系统应用)的样本, 只算覆盖率不算准确率 // 规则库认成广告 / SDK / CDN 类的样本(不计入规则预测)
+	Methods            map[string]dpiEvalMethod `json:"methods"`
+	ByApp              []dpiEvalByApp           `json:"by_app"`
+	TopWrong           []dpiEvalWrong           `json:"top_wrong"`
+	TopUnknown         []dpiEvalUnknown         `json:"top_unknown"`
+	FGTruth            selfFGSummary            `json:"fg_truth"`
+	QUIC               dpiEvalQUIC              `json:"quic"`                           // v5.27 T2
+	Startup            *dpiEvalStartup          `json:"startup,omitempty"`              // v5.27 T3
+	Discover           *dpiEvalDiscover         `json:"discover,omitempty"`             // v5.28 B1: 新应用发现自评
+	FlowCls            *dpiEvalFlowCls          `json:"flow_cls,omitempty"`             // v5.28 B3: 流量形状猜类别
+	LANSelfConsistency *dpiLANSelfConsistency   `json:"lan_self_consistency,omitempty"` // v5.34: 外部设备无真值双栈与跨模态自检
+	Note               string                   `json:"note"`
 }
 
 func emptyEvalResult(days int, enabled bool, note string, now time.Time) dpiEvalResult {

@@ -111,4 +111,16 @@ grep -q "__HNC_HTTP__%{http_code}" "$SRC" && ok "bridge curl reads HTTP status" 
 grep -q "return blockDevice(d)" "$SRC" && ok "alert block goes through gateway guard" || bad "alert block bypasses gateway guard"
 grep -q "paintOnlineHours()" "$SRC" && ok "online hours painted after render" || bad "online hours never painted"
 
+# v6.1.0-rc.1: 静态零拖动滑条门禁 (全站禁止 <input type=range> 与 .gx-range)
+if grep -qiE '<input[^>]*type=["'"'"']?range' "$SRC"; then
+  bad "WebUI still contains forbidden <input type=range> slider"
+else
+  ok "zero <input type=range> sliders in WebUI"
+fi
+if grep -qF 'gx-range' "$SRC"; then
+  bad "WebUI still contains forbidden .gx-range slider class/selector"
+else
+  ok "zero .gx-range references in WebUI"
+fi
+
 exit $fail

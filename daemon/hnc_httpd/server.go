@@ -54,7 +54,7 @@ type server struct {
 	tokens       *TokensStore
 	limiter      *RateLimiter
 	writeCounter *WriteCounter // Patch 3.a per-token write rate limit
-	// hotfix4 → v5.9.0: serialize state-changing actions only. The underlying
+	// v5.9.0: serialize state-changing actions only. The underlying
 	// shell scripts mutate tc/iptables/JSON in several steps, so /api/action
 	// stays strictly serialized. Readers no longer take this lock: every JSON
 	// file (devices/rules/device_names) is published by its writer via
@@ -92,11 +92,11 @@ type server struct {
 
 func newServer(hncDir string) *server {
 	s := &server{
-		hncDir:       hncDir,
-		tokens:       NewTokensStore(filepath.Join(hncDir, "data", "remote_tokens.json")),
-		limiter:      NewRateLimiter(),
-		writeCounter: NewWriteCounter(),
-		jsonCache:    newJSONFileCache(),
+		hncDir:         hncDir,
+		tokens:         NewTokensStore(filepath.Join(hncDir, "data", "remote_tokens.json")),
+		limiter:        NewRateLimiter(),
+		writeCounter:   NewWriteCounter(),
+		jsonCache:      newJSONFileCache(),
 		blackboxWakeCh: make(chan struct{}, 1),
 		lastSamples:    make(map[string]rateSample),
 		rates:          make(map[string]rateOut),
@@ -171,7 +171,7 @@ func (s *server) handler() http.Handler {
 	mux.HandleFunc("/api/rules_export", s.apiRulesExport)
 	mux.HandleFunc("/api/run_status", s.apiRunStatus)
 	mux.HandleFunc("/api/proc_health", s.apiProcHealth)
-	mux.HandleFunc("/api/selfcheck", s.apiSelfcheck) // v5.20: 自检报告(selfcheck.go / selfcheck_api.go)
+	mux.HandleFunc("/api/selfcheck", s.apiSelfcheck)              // v5.20: 自检报告(selfcheck.go / selfcheck_api.go)
 	mux.HandleFunc("/api/dataplane_verify", s.apiDataplaneVerify) // v5.40.0 T2.9: 数据面命中自检接口
 	mux.HandleFunc("/api/dpi_rules", s.apiDPIRules)
 	mux.HandleFunc("/api/usage_month", s.apiUsageMonth)   // v5.12: 设备本月流量
@@ -201,7 +201,7 @@ func (s *server) handler() http.Handler {
 	})
 	mux.HandleFunc("/json-health.html", s.serveWebrootPage("json-health.html"))
 	mux.HandleFunc("/api/json_health", s.apiJSONHealth)
-	mux.HandleFunc("/api/dpi_distill", s.requireMutation(s.apiDPIDistill))
+	mux.HandleFunc("/api/health_check", s.apiQuickHealthCheck)
 	// v5.11: 新 WebUI 的底栏折射库(Hyalite, MIT)
 	mux.HandleFunc("/hyalite.js", s.serveWebrootPage("hyalite.js"))
 	// v5.22: WebUI 拆分后的样式/脚本(webroot/css/*.css、webroot/js/*.js), 逐个字面量注册
@@ -384,6 +384,8 @@ var v6RequiredAPIMarkers = []string{
 	"dpi_rebind",
 	"/api/dataplane_verify",
 	"dataplane_verify_run",
+	"/api/health_check",
+	"json_doctor_repair",
 	"/api/vector_sync",
 	"/api/v6/diag_dump",
 	"/api/leakguard/events",
@@ -457,7 +459,8 @@ func (s *server) apiHealth(w http.ResponseWriter, r *http.Request) {
 	runtime.KeepAlive(&dataplaneRequiredAPIMarkers)
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"status":           "ok",
-		"version":          version,
+		"version":          s.serverVersion(),
+		"version_code":     s.serverVersionCode(),
 		"watchdog_passive": passive,
 		// v5.29 T3: 升级回滚信息(前端顶部横幅; 值域见 rollback.go)
 		"rollback": s.rollbackStatus(),
@@ -774,10 +777,7 @@ func (s *server) buildDevicesPayload() (int, map[string]interface{}) {
 // 速率采样周期. hotspotd 最快 ~5s 才刷一次 devices.json 的 rx_bytes (hotspotd.c
 // g_last_stats_update<5 return), 所以这里 2s 跑一轮但只在字节真变了才前移基线、重算速率;
 // rateIdleZeroSec 内字节没动则沿用上次速率 (跨过 5s 刷新间隔不掉零), 超过则衰减到 0.
-const (
-	rateLoopInterval = 2 * time.Second
-	rateIdleZeroSec  = 10 // 字节连续 10s 没增长 = 真空闲 → 速率归零
-)
+const rateIdleZeroSec = 10 // 字节连续 10s 没增长 = 真空闲 → 速率归零
 
 // RateLoop — 单一后台速率采样器. 每 2s 读 devices.json, 算每台 rx_bps/tx_bps 发布到
 // s.rates. /api/devices 与 /api/live 都只读 s.rates → hero 与卡片永远同源一致, 速率准.
@@ -1154,17 +1154,7 @@ func validMAC(m string) bool {
 	return true
 }
 
-func filterByMAC(rows []map[string]interface{}, mac string) []map[string]interface{} {
-	out := make([]map[string]interface{}, 0, len(rows))
-	for _, r := range rows {
-		if m, _ := r["mac"].(string); strings.ToLower(m) == mac {
-			out = append(out, r)
-		}
-	}
-	return out
-}
-
-// filterByMACResolved 同 filterByMAC, 但按别名解析后的 MAC 比较(v5.21 设备合并)。
+// filterByMACResolved 按别名解析后的 MAC 过滤统计行(v5.21 设备合并)。
 func filterByMACResolved(rows []map[string]interface{}, mac string, resolve func(string) string) []map[string]interface{} {
 	out := make([]map[string]interface{}, 0, len(rows))
 	for _, r := range rows {
@@ -1466,7 +1456,6 @@ func (s *server) pruneLoop(stop <-chan struct{}) {
 		}
 	}
 }
-
 
 // apiJSONHealth v5.36.0: 为远程浏览器访问 /json-health.html 提供只读 HTTP 诊断摘要
 func (s *server) apiJSONHealth(w http.ResponseWriter, r *http.Request) {

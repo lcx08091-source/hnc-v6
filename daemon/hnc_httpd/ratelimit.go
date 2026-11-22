@@ -252,34 +252,6 @@ func (rl *RateLimiter) ConsumePinAttempt(ip string) (allowed bool, retryAfter in
 	return true, 0, rlPinAttemptsMax - e.pinAttempts
 }
 
-// RegisterPinFail 记一次 PIN 验证失败。
-// 累计到 rlPinAttemptsMax 触发锁定。
-// 返回: locked=是否已锁定 / remaining=剩余允许尝试次数(锁定时为 0)
-//
-// rc30.12.33 (P0.2): 此方法 deprecated, 不再被 handlePairVerify 调用。
-// 保留是因为旧 unit test 仍引用, 删除会让 ratelimit_test.go 编译失败。
-// 新代码应使用 ConsumePinAttempt 做原子占用。
-func (rl *RateLimiter) RegisterPinFail(ip string) (locked bool, remaining int) {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	now := rlNow().Unix()
-	e := rl.getOrCreate(ip, now)
-	if e == nil {
-		return false, 0
-	}
-	// 窗口过期则重置
-	if now-e.pinWindowStart > int64(rlPinWindow.Seconds()) {
-		e.pinWindowStart = now
-		e.pinAttempts = 0
-	}
-	e.pinAttempts++
-	if e.pinAttempts >= rlPinAttemptsMax {
-		e.pinLockTS = now + int64(rlPinLockDuration.Seconds())
-		return true, 0
-	}
-	return false, rlPinAttemptsMax - e.pinAttempts
-}
-
 // ResetPin 成功 PIN 验证后清理计数
 func (rl *RateLimiter) ResetPin(ip string) {
 	rl.mu.Lock()

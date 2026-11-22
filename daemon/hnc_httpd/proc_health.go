@@ -132,7 +132,6 @@ func buildProcHealth(fs procfind.FS, hncDir string, now time.Time) phOut {
 	}
 	pf("httpd", "httpd.pid")
 	pf("dpid", "dpid.pid")
-	pf("dpid_child", "dpid.child.pid")
 	pf("dpid_guard", "dpid_guard.pid")
 	pf("hotspotd", "hotspotd.pid")
 	pf("watchdog", "watchdog.pid")

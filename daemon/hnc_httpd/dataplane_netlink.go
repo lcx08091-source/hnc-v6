@@ -65,9 +65,9 @@ const (
 
 	rtnlTcHRoot    = uint32(0xffffffff) // TC_H_ROOT
 	rtnlTcHIngress = uint32(0xfffffff1) // TC_H_INGRESS / TC_H_CLSACT
-	rtnlHtbRootMaj = 0x00010000 // handle 1:
-	rtnlHtbRootCls = 0x00010001 // classid 1:1
-	rtnlDefMinor   = 0x9999     // 默认未分类流量 minor: 1:9999
+	rtnlHtbRootMaj = 0x00010000         // handle 1:
+	rtnlHtbRootCls = 0x00010001         // classid 1:1
+	rtnlDefMinor   = 0x9999             // 默认未分类流量 minor: 1:9999
 
 	//顶层 TCA_* 属性枚举 (linux/rtnetlink.h)
 	rtnlTcaKind    = 1 // TCA_KIND
@@ -128,9 +128,9 @@ const (
 	DefaultAppQoSMarkMask   = uint32(0x03000000)
 	DefaultAppLimitMarkMask = uint32(0xfc000000)
 	DefaultConnmarkMask     = uint32(0xffff0000)
-	DefaultHTBRootRateBps  = uint64(125_000_000) // 1000 Mbit/s = 125,000,000 Bytes/s
-	DefaultHTBRootBurstB   = uint32(200 * 1024)  // 200 KiB
-	DefaultHTBRootQuantumB = uint32(60000)
+	DefaultHTBRootRateBps   = uint64(125_000_000) // 1000 Mbit/s = 125,000,000 Bytes/s
+	DefaultHTBRootBurstB    = uint32(200 * 1024)  // 200 KiB
+	DefaultHTBRootQuantumB  = uint32(60000)
 
 	pschedTimeUnitsPerSec = 1_000_000.0
 	pschedDefaultTickUsec = 15.625 // Linux 高精度时钟默认: t2us=1000(0x3e8), us2t=64(0x40) -> 15.625 ticks/us
@@ -297,7 +297,7 @@ func calcHTBRateTable(rateBytesPerSec uint64, mtu uint32, mpu uint16, tickInUsec
 		mtu = rtnlDefaultMTU
 	}
 	cellLog := uint8(0)
-	for (mtu >> cellLog) > 255 && cellLog < 31 {
+	for (mtu>>cellLog) > 255 && cellLog < 31 {
 		cellLog++
 	}
 	if rateBytesPerSec == 0 {
@@ -2085,8 +2085,8 @@ const (
 )
 
 var (
-	nativeDPLockMu    sync.Mutex
-	nativeBPFDirPath  = "/sys/fs/bpf/hnc"
+	nativeDPLockMu     sync.Mutex
+	nativeBPFDirPath   = "/sys/fs/bpf/hnc"
 	nativeIptCmdRunner = defaultNativeIptCmdRunner
 )
 
@@ -2272,7 +2272,7 @@ func ensureNativeIPv4StatsRule(iptBin, ip string) {
 			_, _ = runIptWithWaitFallback(iptBin, "-t", "mangle", "-N", "HNC_STATS")
 		}
 		if _, err := runIptWithWaitFallback(iptBin, "-t", "mangle", "-C", "FORWARD", "-j", "HNC_STATS"); err != nil {
-			if _, iErr := runIptWithWaitFallback(iptBin, "-t", "mangle", "-I", "FORWARD", "2", "-j", "HNC_STATS"); iErr != nil {
+			if _, iErr := runIptWithWaitFallback(iptBin, "-t", "mangle", "-I", "FORWARD", "3", "-j", "HNC_STATS"); iErr != nil {
 				_, _ = runIptWithWaitFallback(iptBin, "-t", "mangle", "-A", "FORWARD", "-j", "HNC_STATS")
 			}
 		}
@@ -2704,7 +2704,7 @@ func tryNativeRuleSet(hncDir, mac, dnMbps, upMbps string) (string, bool) {
 			return "", false
 		}
 	} else if upBps > 0 && usePoliceUplink {
-		if !applyNativeIngressPolice(iface, mid, mac, ip, upBps, markVal, markMask) {
+		if applyNativeIngressPolice(hncDir, iface, mid, mac, ip, upBps, markVal, markMask) != nil {
 			return "", false
 		}
 	} else if upBps == 0 {
@@ -2853,19 +2853,26 @@ func tryNativeBlacklistSet(hncDir, mac string, blocked bool) bool {
 	return true
 }
 
-// ── HNC v6.0.0 · Vector (T2): 原生特快护航 (1:10) / 更新细流 (1:9990) 报文构造器 ──
+// ── HNC v6.0.0 · Vector (T2): 原生特快护航 (1:8010) / 更新细流 (1:9990) 报文构造器 ──
 
 const (
-	v6ExpressClassMinor   uint16 = 0x0010
-	v6ExpressLeafDown     uint32 = 0x10100000
-	v6ExpressLeafUp       uint32 = 0x11100000
+	v6ExpressClassMinor   uint16 = 0x8010
+	v6ExpressLeafDown     uint32 = 0x80100000
+	v6ExpressLeafUp       uint32 = 0x81100000
 	v6ExpressTargetUs     uint32 = 2000  // 2ms 浅驻留 fq_codel target
 	v6ExpressIntervalUs   uint32 = 40000 // 40ms fq_codel interval
 	v6ExpressQuantumB     uint32 = 300
 	v6ExpressLimitPkts    uint32 = 512
-	v6ExpressFilterPrioV4 uint16 = 2
-	v6ExpressFilterPrioV6 uint16 = 4
+	v6ExpressFilterPrioV4 uint16 = 4
+	v6ExpressFilterPrioV6 uint16 = 5
 	v6ExpressDefaultMark  uint32 = 0x01000000
+
+	// 热升级旧版 Vector Express 残留清理常量 (旧 1:10 / 1010: / 1110: / prio 2 & 4)
+	v6ExpressLegacyClassMinor uint16 = 0x0010
+	v6ExpressLegacyLeafDown   uint32 = 0x10100000
+	v6ExpressLegacyLeafUp     uint32 = 0x11100000
+	v6ExpressLegacyPrioV4     uint16 = 2
+	v6ExpressLegacyPrioV6     uint16 = 4
 
 	v6LeashClassMinor   uint16 = 0x9990
 	v6LeashLeafDown     uint32 = 0x99900000
@@ -2897,7 +2904,85 @@ func buildDelQdiscMsg(seq uint32, ifindex int, parent, handle uint32) []byte {
 	return rtnlBuildTCMsg(rtnlDelQdisc, rtnlFRequest|rtnlFAck, seq, ifindex, handle, parent, 0, nil)
 }
 
-// buildVectorExpressUpsertBatch 构造 1:10 (prio 0) + 浅驻留 fq_codel (2ms/40ms/300B) + prio 2/4 fw 过滤器批消息。
+func rulesHasMarkID10(hncDir string) bool {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		return false
+	}
+	checkDevs := func(root map[string]interface{}) bool {
+		devs, ok := root["devices"].(map[string]interface{})
+		if !ok {
+			return false
+		}
+		for _, rawObj := range devs {
+			if dm, ok := rawObj.(map[string]interface{}); ok {
+				if anyToRuleInt(dm["mark_id"]) == 10 {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json")); err == nil && len(b) > 0 {
+		var parsed map[string]interface{}
+		if json.Unmarshal(b, &parsed) == nil {
+			return checkDevs(parsed)
+		}
+	}
+	if root, err := rulesStore.ReadAll(hncDir); err == nil && len(root) > 0 {
+		return checkDevs(root)
+	}
+	return false
+}
+
+// buildVectorExpressLegacyCleanupBatch 构造热升级残留安全清理消息序列:
+//   - 精确按 kind="fw" + handle=0x01000000 (掩码 0x03000000) 删除旧 prio 2 (all/ip) 与旧 prio 4 (ipv6) 过滤器,
+//     绝不裸删 prio 2 从而严保 LAN Fastlane u32 直通过滤器零误伤;
+//   - 检查 rules.json 无 mark_id == 10 时逆序清理旧叶子 1010:/1110: 与旧类 1:10 (存在 mark_id == 10 时保留 1:10)。
+func buildVectorExpressLegacyCleanupBatch(
+	hncDir string,
+	ifindex int,
+	isUplink bool,
+	gameMark, gameMask uint32,
+) [][]byte {
+	const low16Mask = uint32(0x0000ffff)
+	gameMark &^= low16Mask
+	gameMask &^= low16Mask
+	if gameMask == 0 {
+		gameMask = DefaultAppQoSMarkMask
+	}
+	defaultHandle := v6ExpressDefaultMark & DefaultAppQoSMarkMask
+	handles := []uint32{defaultHandle}
+	if custom := gameMark & gameMask; custom != 0 && custom != defaultHandle {
+		handles = append(handles, custom)
+	}
+
+	var msgs [][]byte
+	for _, h := range handles {
+		if h == 0 {
+			continue
+		}
+		msgs = append(msgs,
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, h, v6ExpressLegacyPrioV4, rtnlEthPAll, "fw"),
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, h, v6ExpressLegacyPrioV4, rtnlEthPIP, "fw"),
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, h, v6ExpressLegacyPrioV6, rtnlEthPIPv6, "fw"),
+		)
+	}
+	if !rulesHasMarkID10(hncDir) {
+		legacyCls := rtnlHtbRootMaj | uint32(v6ExpressLegacyClassMinor)
+		legacyLeaf := v6ExpressLegacyLeafDown
+		if isUplink {
+			legacyLeaf = v6ExpressLegacyLeafUp
+		}
+		msgs = append(msgs,
+			buildDelQdiscMsg(rtnlNextSeq(), ifindex, legacyCls, legacyLeaf),
+			buildDelClassMsg(rtnlNextSeq(), ifindex, rtnlHtbRootCls, legacyCls),
+		)
+	}
+	return msgs
+}
+
+// buildVectorExpressUpsertBatch 构造 1:8010 (prio 0) + 浅驻留 fq_codel (2ms/40ms/300B) + prio 4/5 fw 过滤器批消息。
 func buildVectorExpressUpsertBatch(
 	ifindex int,
 	isUplink bool,
@@ -2906,6 +2991,9 @@ func buildVectorExpressUpsertBatch(
 	tickInUsec float64,
 ) [][]byte {
 	keepDataplaneAPIMarkersAlive()
+	const low16Mask = uint32(0x0000ffff)
+	gameMark &^= low16Mask
+	gameMask &^= low16Mask
 	if rootRateBps == 0 {
 		rootRateBps = DefaultHTBRootRateBps
 	}
@@ -2954,7 +3042,7 @@ func buildVectorExpressUpsertBatch(
 	return msgs
 }
 
-// buildVectorExpressRemoveBatch 构造停用 Vector Express 时拆除 prio 2/4 过滤器、叶子与 1:10 类并恢复 1:9999 的消息序列。
+// buildVectorExpressRemoveBatch 构造停用 Vector Express 时拆除 prio 4/5 过滤器、叶子与 1:8010 类并恢复 1:9999 的消息序列。
 func buildVectorExpressRemoveBatch(
 	ifindex int,
 	isUplink bool,
@@ -2962,6 +3050,9 @@ func buildVectorExpressRemoveBatch(
 	gameMark, gameMask uint32,
 	tickInUsec float64,
 ) [][]byte {
+	const low16Mask = uint32(0x0000ffff)
+	gameMark &^= low16Mask
+	gameMask &^= low16Mask
 	if restoreRootRateBps == 0 {
 		restoreRootRateBps = DefaultHTBRootRateBps
 	}
@@ -3160,26 +3251,52 @@ func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfin
 	return sent, nil
 }
 
+var (
+	nlBatchDumpQdiscsFn    = rtnlDumpQdiscsOnSocket
+	nlBatchDumpClassesFn   = nlDumpHTBClassStatsOnSocket
+	nlBatchEnsureHTBRootFn = nlEnsureHTBRootOnSocket
+)
+
 // nlApplyBatchWithFWFallbackOnSocket 在长连接 fd 上顺序下发批消息:
+//   - 对批次中所有含 RTM_NEWTCLASS 的不重复 ifindex 幂等确保根 htb 1: 与父类 1:1 就绪;
 //   - 对裁剪内核不支持 ETH_P_ALL cls_fw 的场景自动回退 ETH_P_IP 重试;
 //   - 对删除不存在过滤器/队列/类的 ENOENT/ESRCH/EINVAL 幂等放行。
 func nlApplyBatchWithFWFallbackOnSocket(fd int, msgs [][]byte) (int, error) {
 	if len(msgs) == 0 {
 		return 0, nil
 	}
-	firstIfidx := int(int32(binary.LittleEndian.Uint32(msgs[0][20:24])))
-	if firstIfidx > 0 && binary.LittleEndian.Uint16(msgs[0][4:6]) == rtnlNewTClass {
-		if qdiscs, err := rtnlDumpQdiscsOnSocket(fd, firstIfidx); err == nil {
-			hasHTB := false
-			for _, q := range qdiscs {
-				if q.handle == rtnlHtbRootMaj && q.kind == "htb" {
-					hasHTB = true
-					break
-				}
+	seenClassIfidx := make(map[int]bool, 2)
+	for _, m := range msgs {
+		if len(m) < rtnlMsgHdrLen+rtnlTcMsgLen {
+			continue
+		}
+		if binary.LittleEndian.Uint16(m[4:6]) != rtnlNewTClass {
+			continue
+		}
+		ifidx := int(int32(binary.LittleEndian.Uint32(m[20:24])))
+		if ifidx <= 0 || seenClassIfidx[ifidx] {
+			continue
+		}
+		seenClassIfidx[ifidx] = true
+		qdiscs, qErr := nlBatchDumpQdiscsFn(fd, ifidx)
+		if qErr != nil {
+			continue
+		}
+		hasHTB := false
+		for _, q := range qdiscs {
+			if q.handle == rtnlHtbRootMaj && q.kind == "htb" {
+				hasHTB = true
+				break
 			}
-			if !hasHTB {
-				_ = nlEnsureHTBRootOnSocket(fd, firstIfidx, rtnlDefMinor, DefaultHTBRootRateBps)
+		}
+		hasRootCls := false
+		if hasHTB {
+			if classes, cErr := nlBatchDumpClassesFn(fd, ifidx); cErr == nil {
+				_, hasRootCls = classes["1:1"]
 			}
+		}
+		if !hasHTB || !hasRootCls {
+			_ = nlBatchEnsureHTBRootFn(fd, ifidx, rtnlDefMinor, DefaultHTBRootRateBps)
 		}
 	}
 
@@ -3260,7 +3377,6 @@ func nlProbeKernelCapabilities(ifindex int) (hasRTNetlink bool, hasClsact bool, 
 	}
 	return hasRTNetlink, hasClsact, hasSchFQ
 }
-
 
 func closeRTNetlinkSocket(fd int) {
 	_ = syscall.Close(fd)
@@ -3376,7 +3492,17 @@ func filterActiveSubnetIPv4(iface, ipv4 string) string {
 	return ""
 }
 
-const nativeIngressPolicePrioBase = 20000
+const (
+	nativeIngressPolicePrioBase       uint16 = 300
+	legacyNativeIngressPolicePrioBase uint16 = 20000
+)
+
+var (
+	nativeResolveSystemBinFn = resolveSystemBin
+	nativeTCExecFn           = defaultRunNativeTC
+	nativeTCQdiscShowFn      = defaultShowNativeTCQdisc
+	nativeCollectDevIPv6Fn   func(hncDir, iface, mac string) []string
+)
 
 func resolveSystemBin(name string) string {
 	for _, dir := range []string{"/system/bin", "/system/xbin", "/vendor/bin", "/usr/sbin", "/sbin", "/usr/bin", "/bin"} {
@@ -3392,7 +3518,7 @@ func resolveSystemBin(name string) string {
 	return ""
 }
 
-func runNativeTC(tcBin string, args ...string) error {
+func defaultRunNativeTC(tcBin string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, tcBin, args...))
@@ -3401,31 +3527,113 @@ func runNativeTC(tcBin string, args ...string) error {
 	return err
 }
 
-// nativeIngressFilterHookArgs 探测热点口入口队列是 clsact 还是传统 ingress ffff:,
-// 若已挂载 clsact 则返回 ["ingress"] (对齐 tc_manager.sh _ingress_filter_parent), 否则返回 ["parent", "ffff:"]。
-func nativeIngressFilterHookArgs(tcBin, iface string) ([]string, bool) {
+func runNativeTC(tcBin string, args ...string) error {
+	return nativeTCExecFn(tcBin, args...)
+}
+
+func defaultShowNativeTCQdisc(tcBin, iface string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, tcBin, "qdisc", "show", "dev", iface))
 	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"}
 	out, _ := cmd.CombinedOutput()
-	s := string(out)
-	if strings.Contains(s, "clsact") {
-		return []string{"ingress"}, true
+	return string(out)
+}
+
+func isGlobalUnicastOrULAIPv6(ip net.IP) bool {
+	if ip == nil || ip.To4() != nil {
+		return false
 	}
-	return []string{"parent", "ffff:"}, strings.Contains(s, "ffff:")
+	if ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() {
+		return false
+	}
+	return true
+}
+
+func collectDeviceIPv6Addrs(hncDir, iface, mac string) []string {
+	if nativeCollectDevIPv6Fn != nil {
+		return nativeCollectDevIPv6Fn(hncDir, iface, mac)
+	}
+	cm := canonMAC(mac)
+	if cm == "" {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var out []string
+	addAddr := func(raw string) {
+		parsed := net.ParseIP(strings.TrimSpace(raw))
+		if !isGlobalUnicastOrULAIPv6(parsed) {
+			return
+		}
+		s := parsed.String()
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+
+	if hncDir != "" {
+		if b, err := os.ReadFile(filepath.Join(hncDir, "run", "v6", cm)); err == nil && len(b) > 0 {
+			for _, ln := range strings.Split(string(b), "\n") {
+				if fs := strings.Fields(ln); len(fs) > 0 {
+					addAddr(fs[0])
+				}
+			}
+		}
+	}
+
+	var allow map[int]bool
+	if iface != "" {
+		if idx, err := nlIfaceIndexByName(iface); err == nil && idx > 0 {
+			allow = map[int]bool{idx: true}
+		}
+	}
+	if neighMap, err := DumpNativeIPv6Neighbors(allow); err == nil {
+		for _, ip6 := range neighMap[cm] {
+			if isGlobalUnicastOrULAIPv6(ip6) {
+				s := ip6.String()
+				if !seen[s] {
+					seen[s] = true
+					out = append(out, s)
+				}
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// nativeIngressFilterHookState 探测热点口入口队列是 clsact 还是传统 ingress ffff:,
+// 若已挂载 clsact 则返回 (["ingress"], true, true), 否则返回 (["parent", "ffff:"], hasFFFF, false)。
+func nativeIngressFilterHookState(tcBin, iface string) (hookArgs []string, hasQdisc bool, clsactQdisc bool) {
+	s := nativeTCQdiscShowFn(tcBin, iface)
+	if strings.Contains(s, "clsact") {
+		return []string{"ingress"}, true, true
+	}
+	return []string{"parent", "ffff:"}, strings.Contains(s, "ffff:"), false
+}
+
+func nativeIngressFilterHookArgs(tcBin, iface string) ([]string, bool) {
+	hookArgs, hasQdisc, _ := nativeIngressFilterHookState(tcBin, iface)
+	return hookArgs, hasQdisc
 }
 
 // applyNativeIngressPolice 在 GKI 6.1/6.6 无 IFB 内核上通过双栈 ingress police 实施每客户端上行限速(对齐 tc_manager.sh set_uplink_police)。
-func applyNativeIngressPolice(iface string, mid int, mac, ip string, upBps uint64, markVal, markMask uint32) bool {
-	tcBin := resolveSystemBin("tc")
+func applyNativeIngressPolice(hncDir, iface string, mid int, mac, ip string, upBps uint64, markVal, markMask uint32) error {
+	tcBin := nativeResolveSystemBinFn("tc")
 	cidStr := classIDStringForMid(mid)
 	cid, err := strconv.Atoi(cidStr)
-	if tcBin == "" || err != nil || cid <= 0 || upBps == 0 {
-		return false
+	if tcBin == "" || iface == "" || err != nil || cid <= 0 || upBps == 0 {
+		return errors.New("ingress police: invalid parameters or missing tc binary")
 	}
-	// 确保 ffff: ingress 或 clsact 已存在, 并按实际队列类型选择 ingress 或 parent ffff: 挂点
-	hookArgs, hasQdisc := nativeIngressFilterHookArgs(tcBin, iface)
+	hookArgs, hasQdisc, clsactQdisc := nativeIngressFilterHookState(tcBin, iface)
+	clsactActive := clsactQdisc && defaultCheckClsactPinnedReady(hncDir)
+	v6Addrs := collectDeviceIPv6Addrs(hncDir, iface, mac)
+	if !clsactActive && len(v6Addrs) > 0 {
+		// 无 clsact BPF L2 MAC 打标且客户端存在全局 IPv6 地址时, 返回错误使调用方安全回退 ./bin/tc_manager.sh 下发完整 IPv4+IPv6 u32 警察过滤器
+		return errors.New("ingress police: fallback to tc_manager.sh for IPv6 u32 when clsact BPF inactive")
+	}
+
 	if !hasQdisc {
 		_ = runNativeTC(tcBin, "qdisc", "add", "dev", iface, "handle", "ffff:", "ingress")
 		hookArgs = []string{"parent", "ffff:"}
@@ -3444,9 +3652,11 @@ func applyNativeIngressPolice(iface string, mid int, mac, ip string, upBps uint6
 	}
 	burstStr := strconv.FormatUint(burstBytes, 10) + "b"
 
-	prio4 := strconv.Itoa(nativeIngressPolicePrioBase + cid)
-	prioFw4 := strconv.Itoa(nativeIngressPolicePrioBase + 6000 + cid)
-	prioFw6 := strconv.Itoa(nativeIngressPolicePrioBase + 7000 + cid)
+	base := int(nativeIngressPolicePrioBase)
+	prio4 := strconv.Itoa(base + cid)
+	prio6 := strconv.Itoa(base + 5000 + cid)
+	prioFw4 := strconv.Itoa(base + 6000 + cid)
+	prioFw6 := strconv.Itoa(base + 7000 + cid)
 	if markMask == 0 {
 		markMask = DefaultDevMarkMask
 	}
@@ -3467,6 +3677,12 @@ func applyNativeIngressPolice(iface string, mid int, mac, ip string, upBps uint6
 			anyOK = true
 		}
 	}
+	for _, v6 := range v6Addrs {
+		if runNativeTC(tcBin, buildAddArgs("protocol", "ipv6", "prio", prio6,
+			"u32", "match", "ip6", "src", v6+"/128", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop")...) == nil {
+			anyOK = true
+		}
+	}
 	if (markVal & markMask) != 0 {
 		if runNativeTC(tcBin, buildAddArgs("protocol", "ip", "prio", prioFw4,
 			"handle", fwHandle, "fw", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop")...) == nil {
@@ -3477,30 +3693,36 @@ func applyNativeIngressPolice(iface string, mid int, mac, ip string, upBps uint6
 			anyOK = true
 		}
 	}
-	_ = mac
-	return anyOK
+	if !anyOK {
+		return errors.New("ingress police: failed to install any filter")
+	}
+	return nil
 }
 
 func clearNativeIngressPoliceWithHook(tcBin, iface string, cid int, hookArgs []string) {
-	for _, item := range []struct {
-		proto string
-		prio  int
-	}{
-		{"ip", nativeIngressPolicePrioBase + cid},
-		{"ipv6", nativeIngressPolicePrioBase + 5000 + cid},
-		{"ip", nativeIngressPolicePrioBase + 6000 + cid},
-		{"ipv6", nativeIngressPolicePrioBase + 7000 + cid},
-	} {
-		args := make([]string, 0, 8+len(hookArgs))
-		args = append(args, "filter", "del", "dev", iface)
-		args = append(args, hookArgs...)
-		args = append(args, "protocol", item.proto, "prio", strconv.Itoa(item.prio))
-		_ = runNativeTC(tcBin, args...)
+	for _, base := range []int{int(nativeIngressPolicePrioBase), int(legacyNativeIngressPolicePrioBase)} {
+		for _, item := range []struct {
+			proto string
+			prio  int
+		}{
+			{"all", base + cid},
+			{"ip", base + cid},
+			{"ipv6", base + cid},
+			{"ipv6", base + 5000 + cid},
+			{"ip", base + 6000 + cid},
+			{"ipv6", base + 7000 + cid},
+		} {
+			args := make([]string, 0, 8+len(hookArgs))
+			args = append(args, "filter", "del", "dev", iface)
+			args = append(args, hookArgs...)
+			args = append(args, "protocol", item.proto, "prio", strconv.Itoa(item.prio))
+			_ = runNativeTC(tcBin, args...)
+		}
 	}
 }
 
 func clearNativeIngressPolice(iface string, mid int) {
-	tcBin := resolveSystemBin("tc")
+	tcBin := nativeResolveSystemBinFn("tc")
 	cidStr := classIDStringForMid(mid)
 	cid, err := strconv.Atoi(cidStr)
 	if tcBin == "" || iface == "" || err != nil || cid <= 0 {

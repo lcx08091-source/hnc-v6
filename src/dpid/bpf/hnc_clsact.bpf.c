@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0
-/* hnc_clsact.bpf.c — HNC v6.0.0 Vector Dual-Stack Bidirectional clsact BPF program
+/* hnc_clsact.bpf.c — HNC v6.1 Vector Dual-Stack Bidirectional clsact BPF program
  *
  * Verifier hardened for Linux 5.10 / 5.15 / 6.1 / 6.6 (arm64 + armv7):
  *   - Strict __always_inline helpers (no BPF-to-BPF .text relocations).
@@ -536,7 +536,7 @@ int hnc_clsact_ingress(struct __sk_buff *skb)
     }
 
     /* Even for unmarked (unthrottled) gaming clients, promote realtime uplink
-     * packets BEFORE ifb0 redirect so Vector Express 1:10 prio 0 catches them! */
+     * packets BEFORE ifb0 redirect so Vector Express 1:8010 prio 0 catches them! */
     promote_uplink_realtime_pkt(skb, h_proto, l3_off);
     return TC_ACT_UNSPEC;
 }

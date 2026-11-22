@@ -50,7 +50,7 @@ func (s *server) apiMetrics(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"instrumented":    false,
 		"mode":            "live-read",
-		"backend_version": version,
+		"backend_version": s.serverVersion(),
 		"compat":          "hotfix16.8-live-api",
 	})
 }
@@ -97,8 +97,8 @@ func (s *server) apiLive(w http.ResponseWriter, r *http.Request) {
 		"rx_bps":               rxBps,
 		"tx_bps":               txBps,
 		"devices_sig":          liveDevicesSig(devices, active, iface),
-		"backend_version":      version,
-		"backend_version_code": versionCode,
+		"backend_version":      s.serverVersion(),
+		"backend_version_code": s.serverVersionCode(),
 	}
 	// v5.20: 探测来源 + USB/蓝牙共享(只上报, 不管控), 供 WebUI/自检展示
 	if d := readIfaceDetect(s.hncDir); d.Method != "" {

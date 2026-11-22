@@ -56,12 +56,12 @@ var dfpCache = struct {
 	mtime int64
 	size  int64
 	val   loadedDFP
-}{val: loadedDFP{version: "builtin-rc29", byJA4: map[string]DFPFingerprint{}}}
+}{val: loadedDFP{version: "builtin-v6", byJA4: map[string]DFPFingerprint{}}}
 
 func currentDFPRuleVersion() string {
 	d := loadDFPRules()
 	if d.version == "" {
-		return "builtin-rc29"
+		return "builtin-v6"
 	}
 	return d.version
 }
@@ -73,7 +73,7 @@ func loadDFPRules() loadedDFP {
 		defer dfpCache.Unlock()
 		dfpCache.mtime = 0
 		dfpCache.size = 0
-		dfpCache.val = loadedDFP{version: "builtin-rc29", byJA4: map[string]DFPFingerprint{}}
+		dfpCache.val = loadedDFP{version: "builtin-v6", byJA4: map[string]DFPFingerprint{}}
 		return dfpCache.val
 	}
 	mtime := st.ModTime().UnixNano()
@@ -91,7 +91,7 @@ func loadDFPRules() loadedDFP {
 	if err != nil || len(b) == 0 || len(b) > 256*1024 {
 		dfpCache.Lock()
 		defer dfpCache.Unlock()
-		dfpCache.val = loadedDFP{version: "builtin-rc29", byJA4: map[string]DFPFingerprint{}}
+		dfpCache.val = loadedDFP{version: "builtin-v6", byJA4: map[string]DFPFingerprint{}}
 		dfpCache.mtime = mtime
 		dfpCache.size = size
 		return dfpCache.val
@@ -101,7 +101,7 @@ func loadDFPRules() loadedDFP {
 	if err := json.Unmarshal(b, &f); err != nil {
 		dfpCache.Lock()
 		defer dfpCache.Unlock()
-		dfpCache.val = loadedDFP{version: "builtin-rc29+invalid", byJA4: map[string]DFPFingerprint{}}
+		dfpCache.val = loadedDFP{version: "builtin-v6+invalid", byJA4: map[string]DFPFingerprint{}}
 		dfpCache.mtime = mtime
 		dfpCache.size = size
 		return dfpCache.val

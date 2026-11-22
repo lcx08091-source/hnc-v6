@@ -164,13 +164,11 @@ func buildCompatReport(hncDir string, c *scCtx) *compatReport {
 		Schema:      1,
 		GeneratedAt: time.Now().Unix(),
 	}
-	// 模块版本: 编译期注入的 version / versionCode(build.sh 从 module.prop
-	// 读)。运行目录里并没有 module.prop(post-fs-data / service.sh 都不拷它,
-	// rc1 只读那里, 真机上恒为空); 只有开发构建(version=dev)才回退去读。
-	if version != "dev" {
-		rep.Module = compatModule{Version: compatClean(version), VersionCode: compatClean(versionCode)}
-	} else if b, err := os.ReadFile(filepath.Join(hncDir, "module.prop")); err == nil {
-		rep.Module = compatModule{Version: compatClean(propLine(string(b), "version")), VersionCode: compatClean(propLine(string(b), "versionCode"))}
+	// 模块版本: 走全控制面统一入口 ServerVersion / ServerVersionCode(编译期注入优先,
+	// 开发构建依次回退读 <hncDir>/module.prop 与 moduleDir(hncDir)/module.prop)。
+	rep.Module = compatModule{
+		Version:     compatClean(ServerVersion(hncDir)),
+		VersionCode: compatClean(ServerVersionCode(hncDir)),
 	}
 	// Android: getprop 三键 + 内核(/proc/version 首行)
 	rep.Android = compatAndroid{
@@ -278,13 +276,4 @@ func actionCompatReport(s *server) actionResp {
 func isCompatExport(n string) bool {
 	ok, _ := regexp.MatchString(`^hnc-compat-\d{8}\.json$`, n)
 	return ok
-}
-
-// dispatchCompatReport 供 dispatchSelfcheckAction 调用。
-func dispatchCompatReport(s *server, action string, p map[string]string) (actionResp, bool) {
-	if action != "compat_report" {
-		return actionResp{}, false
-	}
-	_ = p
-	return actionCompatReport(s), true
 }

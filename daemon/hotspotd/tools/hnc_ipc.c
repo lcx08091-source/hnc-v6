@@ -43,6 +43,10 @@
 #include <sys/socket.h>
 #include <sys/un.h>
 
+#ifndef HNC_VERSION
+#define HNC_VERSION        "dev"
+#endif
+
 #define DEFAULT_SOCK_PATH  "/data/local/hnc/run/hotspotd.sock"
 #define DEFAULT_TIMEOUT    3
 #define CMD_BUF_SIZE       1024
@@ -80,16 +84,22 @@ static int read_cmd_from_stdin(char *out, size_t out_size)
 
 int main(int argc, char **argv)
 {
+    if (argc >= 2 && strcmp(argv[1], "--version") == 0) {
+        printf("hnc_ipc %s\n", HNC_VERSION);
+        return 0;
+    }
+
     if (argc < 2) {
         fprintf(stderr,
             "usage:\n"
             "  %s <cmd> [arg...]    send command from argv\n"
             "  %s -                  read command from stdin\n"
+            "  %s --version          print version and exit\n"
             "\n"
             "env:\n"
             "  HNC_SOCK         socket path (default %s)\n"
             "  HNC_IPC_TIMEOUT  timeout in seconds (default %d)\n",
-            argv[0], argv[0], DEFAULT_SOCK_PATH, DEFAULT_TIMEOUT);
+            argv[0], argv[0], argv[0], DEFAULT_SOCK_PATH, DEFAULT_TIMEOUT);
         return 1;
     }
 

@@ -25,7 +25,6 @@ package devscan
 import (
 	"bytes"
 	"encoding/json"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -35,8 +34,6 @@ import (
 
 // 与 hotspotd 同名同值的语义常量(这是跨文件约定, 改动需同时改 C 侧并过 T5 影子比对)。
 const (
-	// OfflineCheckInterval 每 30 秒检查一次离线(hotspotd.c OFFLINE_CHECK_INTERVAL)。
-	OfflineCheckInterval = 30 * time.Second
 	// OfflineThreshold 90 秒未活跃 = 离线(hotspotd.c OFFLINE_THRESHOLD)。
 	OfflineThreshold = 90 * time.Second
 	// MaxDevices 设备表上限(hotspotd.c MAX_DEVICES); 满了淘汰最旧条目。
@@ -51,12 +48,11 @@ const (
 // Linux 邻居表状态(netlink ndmsg.ndm_state, 内核 ABI 值)。neigh 包只导出了
 // Usable() 一个判断, 这里的值与 include/uapi/linux/neighbour.h 一致。
 const (
-	nudIncomplete = 0x01
-	nudReachable  = 0x02
-	nudStale      = 0x04
-	nudDelay      = 0x08
-	nudProbe      = 0x10
-	nudFailed     = 0x20
+	nudReachable = 0x02
+	nudStale     = 0x04
+	nudDelay     = 0x08
+	nudProbe     = 0x10
+	nudFailed    = 0x20
 )
 
 // Device devices.json 里一台设备的字段(顺序、名字与 hotspotd.c write_json 相同)。
@@ -438,7 +434,7 @@ func (t *Table) FullSync(es []neigh.Entry, now time.Time) bool {
 	return changed
 }
 
-// EvictOffline 离线检查(每 OfflineCheckInterval 一次; 语义 = hotspotd 主循环
+// EvictOffline 离线检查(每 30 秒一次; 语义 = hotspotd 主循环
 // R-13: now - last_seen > OfflineThreshold 的设备移出)。返回移出数量。
 func (t *Table) EvictOffline(now time.Time) int {
 	t.mu.Lock()
@@ -537,16 +533,4 @@ func (t *Table) RenderJSON(stats map[string][2]int64, blacklist map[string]bool)
 	}
 	b := buf.Bytes()
 	return b[:len(b)-1] // Encoder 会补一个换行, 去掉(C 的输出没有)
-}
-
-// SortedMACs 在线设备 MAC 列表(排序), 给测试与演练比对用。
-func (t *Table) SortedMACs() []string {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	out := make([]string, 0, len(t.devs))
-	for mac := range t.devs {
-		out = append(out, mac)
-	}
-	sort.Strings(out)
-	return out
 }

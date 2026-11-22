@@ -43,7 +43,7 @@
 //   {ok, enabled, active, healthy, state, iface, listen:[..], port, upstream, upstream_kind,
 //    v6:{status, reason}, block_mode, log_queries, log_redact,
 //    stats:{queries, cached, blocked, errors, ratelimited, dropped, upstream, upstream_errs,
-//           upstream_tcp, servfail, p50_ms, p95_ms, cache_entries},
+//           upstream_tcp, servfail, stale, stale_flushes, p50_ms, p95_ms, cache_entries},
 //    top_domains_today:[{name,count}], recent:[...](仅 log_queries 时), blocklist:{devices, global},
 //    failopen:{count, last_ts, reason, retry_at}, last_error, last_check, selftest_ms, ip_names}
 // GET /api/dns/log?mac=&limit= → {ok, log_queries, entries:[...] (新→旧)}
@@ -53,6 +53,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"log"
 	"net"
@@ -61,11 +62,14 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+	"unsafe"
 
 	"hnc.io/dpid/alert"
 )
@@ -689,6 +693,7 @@ type dnsTakeover struct {
 	ifaceAddrs   func(iface string) (v4, v6 []string)
 	hotspotIface func() string
 	systemDNS    func() []string
+	upstreamSig  func(hotspotIface string) string
 	blockSources func(now time.Time) *dnsBlockSet
 	emitAlert    func(a alert.Alert)
 	now          func() time.Time
@@ -720,6 +725,7 @@ func newDNSTakeover(s *server) *dnsTakeover {
 	t.ifaceAddrs = dnsIfaceAddrs
 	t.hotspotIface = func() string { return readHotspotIfaceName(s.hncDir) }
 	t.systemDNS = dnsSystemServers
+	t.upstreamSig = func(iface string) string { return defaultUpstreamSig(iface) }
 	t.blockSources = func(now time.Time) *dnsBlockSet {
 		return buildDNSBlockSet(expandConnBlockDomains(s.connBlocksEffective(now)), loadEncdns(s.hncDir), dnsResolverHosts(s.hncDir))
 	}
@@ -730,6 +736,137 @@ func newDNSTakeover(s *server) *dnsTakeover {
 		}
 	}
 	return t
+}
+
+func isHotspotOnlyIface(name string) bool {
+	return strings.HasPrefix(name, "ap") || strings.HasPrefix(name, "softap") || strings.HasPrefix(name, "swlan")
+}
+
+func isIgnoredUpstreamIface(name string, skip map[string]bool) bool {
+	if name == "" || name == "lo" || strings.HasPrefix(name, "ifb") || strings.HasPrefix(name, "dummy") {
+		return true
+	}
+	return skip[name] || (len(skip) == 0 && isHotspotOnlyIface(name))
+}
+
+type linuxIfconf struct {
+	len int32
+	buf *byte
+}
+
+// fastFlagUpIfaces 通过单次 SIOCGIFCONF + SIOCGIFFLAGS 在 <25us 内读取非热点/非回环 FlagUp 接口名,
+// 避免 Android 下 net.Interfaces() 触发全量 NetlinkRIB / SELinux 回退导致 ~500us 开销。
+func fastFlagUpIfaces(skip map[string]bool) ([]string, bool) {
+	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return nil, false
+	}
+	defer syscall.Close(fd)
+	var raw [4096]byte
+	ifc := linuxIfconf{len: int32(len(raw)), buf: &raw[0]}
+	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFCONF, uintptr(unsafe.Pointer(&ifc)))
+	runtime.KeepAlive(&raw)
+	if errno != 0 {
+		return nil, false
+	}
+	stride := 32
+	if unsafe.Sizeof(uintptr(0)) == 8 {
+		stride = 40
+	}
+	seen := map[string]bool{}
+	var out []string
+	for off := 0; off+stride <= int(ifc.len); off += stride {
+		nb := raw[off : off+16]
+		z := 0
+		for z < len(nb) && nb[z] != 0 {
+			z++
+		}
+		if z == 0 {
+			continue
+		}
+		name := string(nb[:z])
+		if seen[name] || isIgnoredUpstreamIface(name, skip) {
+			continue
+		}
+		seen[name] = true
+		var req [40]byte
+		copy(req[:16], nb[:z])
+		_, _, e2 := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFFLAGS, uintptr(unsafe.Pointer(&req[0])))
+		if e2 != 0 {
+			continue
+		}
+		flags := binary.NativeEndian.Uint16(req[16:18])
+		if flags&syscall.IFF_UP != 0 && flags&syscall.IFF_LOOPBACK == 0 {
+			out = append(out, name)
+		}
+	}
+	sort.Strings(out)
+	return out, len(out) > 0
+}
+
+// defaultUpstreamSig 零子进程(<100us)获取当前默认上游出口签名:
+// net.Dial("udp", "223.5.5.5:53") 出口源 IP + IPv6 /64 兜底 + 非热点/非回环 FlagUp 接口签名;
+// 完全断网无默认路由时返回 "", 调用方不清空 Serve-Stale 保活缓存。
+func defaultUpstreamSig(hotspotIfaces ...string) string {
+	var v4Src, v6Pfx string
+	if c, err := net.Dial("udp", "223.5.5.5:53"); err == nil {
+		if ua, ok := c.LocalAddr().(*net.UDPAddr); ok && ua.IP != nil && !ua.IP.IsLoopback() && !ua.IP.IsUnspecified() {
+			if ip4 := ua.IP.To4(); ip4 != nil {
+				v4Src = ip4.String()
+			}
+		}
+		_ = c.Close()
+	}
+	if v4Src == "" {
+		if c, err := net.Dial("udp6", "[2400:3200::1]:53"); err == nil {
+			if ua, ok := c.LocalAddr().(*net.UDPAddr); ok && ua.IP != nil && ua.IP.To4() == nil && ua.IP.IsGlobalUnicast() {
+				v6Pfx = ua.IP.Mask(net.CIDRMask(64, 128)).String() + "/64"
+			}
+			_ = c.Close()
+		}
+	}
+	if v4Src == "" && v6Pfx == "" {
+		return ""
+	}
+	skip := map[string]bool{}
+	for _, h := range hotspotIfaces {
+		if h != "" {
+			skip[h] = true
+		}
+	}
+	ifs, ok := fastFlagUpIfaces(skip)
+	if !ok && v4Src == "" {
+		if list, err := net.Interfaces(); err == nil {
+			for _, ifc := range list {
+				if ifc.Flags&net.FlagUp == 0 || ifc.Flags&net.FlagLoopback != 0 {
+					continue
+				}
+				if isIgnoredUpstreamIface(ifc.Name, skip) {
+					continue
+				}
+				ifs = append(ifs, ifc.Name)
+			}
+			sort.Strings(ifs)
+		}
+	}
+	src := v4Src
+	if src == "" {
+		src = v6Pfx
+	}
+	return src + "|" + strings.Join(ifs, ",")
+}
+
+func (t *dnsTakeover) currentUpstreamSig() string {
+	if t.upstreamSig == nil {
+		return ""
+	}
+	t.mu.Lock()
+	ifc := t.iface
+	t.mu.Unlock()
+	if ifc == "" && t.hotspotIface != nil {
+		ifc = t.hotspotIface()
+	}
+	return t.upstreamSig(ifc)
 }
 
 // dnsIfaceAddrs 热点口的 IPv4(非链路本地) / IPv6(全局单播, 含 ULA)地址
@@ -1068,6 +1205,7 @@ func (t *dnsTakeover) tickLocked() {
 	}
 	fwd.SetBlockMode(cfg.BlockMode)
 	t.refreshBlocklist(now)
+	fwd.maybeCheckNetSig(now)
 
 	// 2. 上游: 没选过 / 非 tether 每分钟重探(优先回到 tether)
 	t.mu.Lock()
@@ -1184,6 +1322,7 @@ func (t *dnsTakeover) openForwarder(listen []string) (*dnsForwarder, []string, e
 	mk := func() *dnsForwarder {
 		nf := newDNSForwarder()
 		nf.macOf, nf.blocked, nf.onLog, nf.onAnswer = t.macOf, t.blocked, t.onLog, t.names.record
+		nf.netSig = t.currentUpstreamSig
 		return nf
 	}
 	nf := mk()
@@ -1427,6 +1566,7 @@ func (s *server) apiDNS(w http.ResponseWriter, r *http.Request) {
 	t.mu.Unlock()
 	stats := map[string]interface{}{"queries": 0, "cached": 0, "blocked": 0, "errors": 0, "ratelimited": 0,
 		"dropped": 0, "upstream": 0, "upstream_errs": 0, "upstream_tcp": 0, "servfail": 0,
+		"stale": 0, "stale_flushes": 0,
 		"p50_ms": 0, "p95_ms": 0, "cache_entries": 0}
 	if fwd != nil {
 		st := fwd.Stats()
@@ -1434,6 +1574,7 @@ func (s *server) apiDNS(w http.ResponseWriter, r *http.Request) {
 		stats = map[string]interface{}{"queries": st.Queries, "cached": st.Cached, "blocked": st.Blocked,
 			"errors": st.Errors, "ratelimited": st.RateLimited, "dropped": st.Dropped, "upstream": st.Upstream,
 			"upstream_errs": st.UpstreamErrs, "upstream_tcp": st.UpstreamTCP, "servfail": st.ServFail,
+			"stale": st.Stale, "stale_flushes": st.StaleFlushes,
 			"p50_ms": p50, "p95_ms": p95, "cache_entries": fwd.cache.Len()}
 	}
 	resp["stats"] = stats

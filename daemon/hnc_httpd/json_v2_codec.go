@@ -1,13 +1,13 @@
 // json_v2_codec.go — HNC v6.0.0 · Vector: Go 1.27 encoding/json/v2 + jsontext 零缓冲复用编解码器与透明排障导出
 //
 // 设计原则:
-//   1. 采用 Go 1.27 标准库 encoding/json/v2 与 encoding/json/jsontext, 配合 sync.Pool 复用
-//      bytes.Buffer 与 *jsontext.Encoder, 消除高频 HTTP JSON 响应的临时切片分配与反射开销;
-//   2. 显式启用 jsontext.AllowInvalidUTF8(true) 与 jsontext.AllowDuplicateNames(true), 防止异常
-//      客户端主机名/SSID 含非 UTF-8 字节时导致序列化报错, 并通过 DefaultOptionsV2() 保持空切片 []
-//      与空映射 {} 的前端友好语义(若遇遗留未标注类型自动无损回退 v1 编码器);
-//   3. 落实反驳组「绝不变成二进制黑盒」铁律: 提供 GET /api/v6/diag_dump 输出带缩进的人类可读
-//      全栈诊断 JSON, 同时校验持久配置文件的可读性。
+//  1. 采用 Go 1.27 标准库 encoding/json/v2 与 encoding/json/jsontext, 配合 sync.Pool 复用
+//     bytes.Buffer 与 *jsontext.Encoder, 消除高频 HTTP JSON 响应的临时切片分配与反射开销;
+//  2. 显式启用 jsontext.AllowInvalidUTF8(true) 与 jsontext.AllowDuplicateNames(true), 防止异常
+//     客户端主机名/SSID 含非 UTF-8 字节时导致序列化报错, 并通过 DefaultOptionsV2() 保持空切片 []
+//     与空映射 {} 的前端友好语义(若遇遗留未标注类型自动无损回退 v1 编码器);
+//  3. 落实反驳组「绝不变成二进制黑盒」铁律: 提供 GET /api/v6/diag_dump 输出带缩进的人类可读
+//     全栈诊断 JSON, 同时校验持久配置文件的可读性。
 package main
 
 import (
@@ -400,9 +400,9 @@ func (s *server) BuildCoreDiagDump() CoreDiagDump {
 		Schema:         1,
 		GeneratedAt:    now.Unix(),
 		GeneratedISO:   now.Format(time.RFC3339),
-		Note:           "HNC v6.0 Vector human-readable diagnostic dump (persistent configs remain plaintext JSON)",
-		Version:        version,
-		VersionCode:    versionCode,
+		Note:           "HNC Vector human-readable diagnostic dump (persistent configs remain plaintext JSON)",
+		Version:        ServerVersion(hncDir),
+		VersionCode:    ServerVersionCode(hncDir),
 		CoreUptimeSec:  coreUptimeSeconds(),
 		VectorSyncHits: hits,
 		Runtime: diagRuntimeStats{

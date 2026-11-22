@@ -38,4 +38,3 @@ bash build.sh arm64          # 或 arm
 - `test/test_hotspotd_ipc.c`:`#define HNC_TEST_MODE` 后 include `hotspotd.c`,测真实的
   `handle_client` / `nl_process` / `count_devices_in_file_at`(接进
   `test/unit/test_v533_hotspotd_ipc_c.sh`,本机没有 cc 时跳过)。
-- `test/test_mdns_parse.c`:`mdns_resolve`(独立二进制,Go 名字解析调用它)的响应解析。

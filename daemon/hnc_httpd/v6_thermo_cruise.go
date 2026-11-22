@@ -66,10 +66,28 @@ type ThermoBatteryReading struct {
 	ReadLatency int64   `json:"read_latency_ns"`
 }
 
+// ThermoQuickState 纯内存零 sysfs IO 温控快速快照（供黑匣子 200ms 归因与信号诊断无阻塞读取）。
+type ThermoQuickState struct {
+	Enabled            bool    `json:"enabled"`
+	Available          bool    `json:"available"`
+	RawThermalStage    int     `json:"raw_thermal_stage"`
+	EffectiveStage     int     `json:"effective_stage"`
+	Stage2ShaperActive bool    `json:"stage2_shaper_active"`
+	Stage2Exempt       bool    `json:"stage2_exempt"`
+	TempC              float64 `json:"temp_c"`
+	CapacityPct        int     `json:"capacity_pct"`
+	IsCharging         bool    `json:"is_charging"`
+}
+
 type thermoCruiseEngine struct {
 	// 64 位原子字段严格置于 offset 0 (兼容 32-bit ARM)
 	evalCount      atomic.Uint64
 	effectiveStage atomic.Int64
+
+	// 非 64 位原子字段与通道/钩子严格排在全部 64 位原子字段之后
+	loopMode atomic.Int32
+	wakeOnce sync.Once
+	wakeCh   chan struct{}
 
 	srv                  *server
 	mu                   sync.Mutex
@@ -79,13 +97,22 @@ type thermoCruiseEngine struct {
 	rawThermalStage      int       // 0 | 1 | 2（纯温度施密特状态机输出）
 	coolBelowStage2Since time.Time // 持续 <= stage2_temp_c - 3.0°C 的起始时刻
 	coolBelowStage1Since time.Time // 持续 <= stage1_temp_c - 3.0°C 的起始时刻
+	lastStage2Shaper     bool
+	lastStage2Exempt     bool
 	lastReading          ThermoBatteryReading
 	lastSnap             map[string]any
 	lastPersistedKey     string
+
+	pollInterval    time.Duration
+	coolHoldDur     time.Duration
+	activityHook    func() (<-chan struct{}, Activity)
+	simActiveHook   func() bool
+	batteryReadHook func() ThermoBatteryReading
 }
 
 func newThermoCruiseEngine(s *server) *thermoCruiseEngine {
 	eng := &thermoCruiseEngine{
+		wakeCh:    make(chan struct{}, 1),
 		srv:       s,
 		cfg:       defaultThermoCruiseConfig(),
 		sysfsRoot: thermoDefaultSysfsRoot,
@@ -102,6 +129,52 @@ func (e *thermoCruiseEngine) stateRunPath() string {
 	return filepath.Join(e.srv.hncDir, "run", "thermo_state.json")
 }
 
+func (e *thermoCruiseEngine) effectivePollInterval() time.Duration {
+	if e != nil && e.pollInterval > 0 {
+		return e.pollInterval
+	}
+	return 10 * time.Second
+}
+
+func (e *thermoCruiseEngine) effectiveCoolHoldDuration() time.Duration {
+	if e != nil && e.coolHoldDur > 0 {
+		return e.coolHoldDur
+	}
+	return thermoCoolHoldDuration
+}
+
+func (e *thermoCruiseEngine) ensureWakeCh() chan struct{} {
+	if e == nil {
+		return nil
+	}
+	e.wakeOnce.Do(func() {
+		if e.wakeCh == nil {
+			e.wakeCh = make(chan struct{}, 1)
+		}
+	})
+	return e.wakeCh
+}
+
+// Wake 非阻塞唤醒温控巡航协程（配置修改或外部事件触发时即时重算）。
+func (e *thermoCruiseEngine) Wake() {
+	ch := e.ensureWakeCh()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// LoopMode 返回当前温控巡航协程的休眠/定时器/活跃档位。
+func (e *thermoCruiseEngine) LoopMode() v6EngineLoopMode {
+	if e == nil {
+		return v6EngineModeSleeping
+	}
+	return v6EngineLoopMode(e.loopMode.Load())
+}
+
 func (e *thermoCruiseEngine) loadConfigLocked() {
 	if e.srv == nil || e.srv.hncDir == "" {
 		return
@@ -116,6 +189,20 @@ func (e *thermoCruiseEngine) loadConfigLocked() {
 	}
 	if validThermoConfig(c) == "" {
 		e.cfg = c
+	}
+}
+
+// ReloadFromDisk 在整机备份恢复后从磁盘重新加载 ThermoCruise 配置。
+func (e *thermoCruiseEngine) ReloadFromDisk() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.cfg = defaultThermoCruiseConfig()
+	e.loadConfigLocked()
+	e.mu.Unlock()
+	if !e.isHotspotOffReadOnly() {
+		e.Wake()
 	}
 }
 
@@ -286,11 +373,59 @@ func (e *thermoCruiseEngine) ReadBatteryFromSysfs() ThermoBatteryReading {
 	}
 }
 
+func (e *thermoCruiseEngine) sampleBattery() ThermoBatteryReading {
+	if e != nil && e.batteryReadHook != nil {
+		return e.batteryReadHook()
+	}
+	return e.ReadBatteryFromSysfs()
+}
+
+// PeekQuickState 纯内存零 sysfs IO 读取最新缓存的温控状态（供 200ms 黑匣子归因与信号诊断高频调用）。
+func (e *thermoCruiseEngine) PeekQuickState() ThermoQuickState {
+	if e == nil {
+		return ThermoQuickState{}
+	}
+	eff := int(e.effectiveStage.Load())
+	e.mu.Lock()
+	cfg := e.cfg
+	raw := e.rawThermalStage
+	rd := e.lastReading
+	s2Active := e.lastStage2Shaper
+	s2Exempt := e.lastStage2Exempt
+	e.mu.Unlock()
+
+	return ThermoQuickState{
+		Enabled:            cfg.Enabled,
+		Available:          rd.Available,
+		RawThermalStage:    raw,
+		EffectiveStage:     eff,
+		Stage2ShaperActive: s2Active,
+		Stage2Exempt:       s2Exempt,
+		TempC:              rd.TempC,
+		CapacityPct:        rd.CapacityPct,
+		IsCharging:         rd.IsCharging || strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full"),
+	}
+}
+
+func (s *server) peekThermoQuickState() ThermoQuickState {
+	if s == nil {
+		return ThermoQuickState{}
+	}
+	if v, ok := v6Registry.Load(s); ok {
+		return v.(*v6ServerState).thermo.PeekQuickState()
+	}
+	if s.hncDir == "" {
+		return ThermoQuickState{}
+	}
+	return s.v6State().thermo.PeekQuickState()
+}
+
 // ── 3.0°C 施密特回差 + 60s 持续冷却 + 快充/游戏护航豁免推演核心 ───────────────
 
 // Evaluate 给定当前时刻、电池读数与 Vector Express 激活标志, 推进温控巡航状态机。
 func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, expressActive bool) map[string]any {
 	e.evalCount.Add(1)
+	holdDur := e.effectiveCoolHoldDuration()
 
 	e.mu.Lock()
 	cfg := e.cfg
@@ -329,8 +464,8 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 				} else {
 					e.coolBelowStage1Since = time.Time{}
 				}
-				if now.Sub(e.coolBelowStage2Since) >= thermoCoolHoldDuration {
-					if !e.coolBelowStage1Since.IsZero() && now.Sub(e.coolBelowStage1Since) >= thermoCoolHoldDuration {
+				if now.Sub(e.coolBelowStage2Since) >= holdDur {
+					if !e.coolBelowStage1Since.IsZero() && now.Sub(e.coolBelowStage1Since) >= holdDur {
 						e.rawThermalStage = 0
 						e.coolBelowStage1Since = time.Time{}
 					} else {
@@ -348,7 +483,7 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 				if e.coolBelowStage1Since.IsZero() {
 					e.coolBelowStage1Since = now
 				}
-				if now.Sub(e.coolBelowStage1Since) >= thermoCoolHoldDuration {
+				if now.Sub(e.coolBelowStage1Since) >= holdDur {
 					e.rawThermalStage = 0
 					e.coolBelowStage1Since = time.Time{}
 				}
@@ -395,16 +530,18 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 			}
 		}
 	}
+	e.lastStage2Shaper = stage2ShaperActive
+	e.lastStage2Exempt = stage2Exempt
 	e.effectiveStage.Store(int64(effStage))
 
 	coolHoldRemSec := 0
 	if rawStage == 2 && !e.coolBelowStage2Since.IsZero() {
-		rem := thermoCoolHoldDuration - now.Sub(e.coolBelowStage2Since)
+		rem := holdDur - now.Sub(e.coolBelowStage2Since)
 		if rem > 0 {
 			coolHoldRemSec = int((rem + time.Second - 1) / time.Second)
 		}
 	} else if rawStage == 1 && !e.coolBelowStage1Since.IsZero() {
-		rem := thermoCoolHoldDuration - now.Sub(e.coolBelowStage1Since)
+		rem := holdDur - now.Sub(e.coolBelowStage1Since)
 		if rem > 0 {
 			coolHoldRemSec = int((rem + time.Second - 1) / time.Second)
 		}
@@ -437,8 +574,33 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 	e.lastSnap = snap
 
 	// 状态脏检查(忽略 updated_at 与 read_latency_ns): 状态无实质变化时不重复刷盘 run/thermo_state.json
-	stateKey := ""
-	if db, err := json.Marshal(struct {
+	stateKey := buildThermoPersistKey(cfg, rawStage, effStage, stage1PollingRelax, stage2ShaperActive, stage2Exempt, exemptReasonStr, lowBatActive, expressActive, coolHoldRemSec, rd, pluggedIn)
+	needPersist := stateKey == "" || stateKey != e.lastPersistedKey
+	e.mu.Unlock()
+
+	if needPersist && e.srv != nil && e.srv.hncDir != "" {
+		if b, err := json.MarshalIndent(snap, "", "  "); err == nil {
+			if discoverWriteAtomic(e.stateRunPath(), b) == nil && stateKey != "" {
+				e.mu.Lock()
+				e.lastPersistedKey = stateKey
+				e.mu.Unlock()
+			}
+		}
+	}
+	return snap
+}
+
+func buildThermoPersistKey(
+	cfg ThermoCruiseConfig,
+	rawStage, effStage int,
+	s1Relax, s2Active, s2Exempt bool,
+	exemptReason string,
+	lowBat, express bool,
+	coolRem int,
+	rd ThermoBatteryReading,
+	plugged bool,
+) string {
+	db, err := json.Marshal(struct {
 		Cfg          ThermoCruiseConfig `json:"cfg"`
 		RawStage     int                `json:"raw"`
 		EffStage     int                `json:"eff"`
@@ -456,14 +618,62 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 		Status       string             `json:"st"`
 		Plugged      bool               `json:"pl"`
 	}{
-		Cfg: cfg, RawStage: rawStage, EffStage: effStage, S1Relax: stage1PollingRelax,
-		S2Active: stage2ShaperActive, S2Exempt: stage2Exempt, ExemptReason: exemptReasonStr,
-		LowBat: lowBatActive, Express: expressActive, CoolRem: coolHoldRemSec,
+		Cfg: cfg, RawStage: rawStage, EffStage: effStage, S1Relax: s1Relax,
+		S2Active: s2Active, S2Exempt: s2Exempt, ExemptReason: exemptReason,
+		LowBat: lowBat, Express: express, CoolRem: coolRem,
 		Avail: rd.Available, Node: rd.SupplyNode, TempC: rd.TempC, CapPct: rd.CapacityPct,
-		Status: rd.Status, Plugged: pluggedIn,
-	}); err == nil {
-		stateKey = string(db)
+		Status: rd.Status, Plugged: plugged,
+	})
+	if err != nil {
+		return ""
 	}
+	return string(db)
+}
+
+// resetForHotspotOff 在热点关闭时即刻复位温控阶数与冷却计时, 并归零落盘 thermo_state.json。
+func (e *thermoCruiseEngine) resetForHotspotOff(now time.Time) {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	e.mu.Lock()
+	cfg := e.cfg
+	rd := e.lastReading
+	e.rawThermalStage = 0
+	e.coolBelowStage1Since = time.Time{}
+	e.coolBelowStage2Since = time.Time{}
+	e.lastStage2Shaper = false
+	e.lastStage2Exempt = false
+	e.effectiveStage.Store(0)
+
+	exitStage2Temp := cfg.Stage2TempC - thermoHysteresisC
+	exitStage1Temp := cfg.Stage1TempC - thermoHysteresisC
+	pluggedIn := rd.IsCharging || strings.EqualFold(rd.Status, "Charging") || strings.EqualFold(rd.Status, "Full")
+
+	snap := map[string]any{
+		"ok":                      true,
+		"enabled":                 cfg.Enabled,
+		"stage2_shaper_enabled":   cfg.Stage2ShaperEnabled,
+		"stage1_temp_c":           cfg.Stage1TempC,
+		"stage2_temp_c":           cfg.Stage2TempC,
+		"stage1_exit_temp_c":      math.Round(exitStage1Temp*10) / 10,
+		"stage2_exit_temp_c":      math.Round(exitStage2Temp*10) / 10,
+		"hysteresis_c":            thermoHysteresisC,
+		"low_bat_pct":             cfg.LowBatPct,
+		"raw_thermal_stage":       0,
+		"effective_stage":         0,
+		"stage1_polling_relaxed":  false,
+		"stage2_shaper_active":    false,
+		"stage2_exempt":           false,
+		"exempt_reason":           "",
+		"low_battery_cruise":      false,
+		"vector_express_active":   false,
+		"cool_hold_remaining_sec": 0,
+		"battery":                 rd,
+		"config":                  cfg,
+		"updated_at":              now.Unix(),
+	}
+	e.lastSnap = snap
+	stateKey := buildThermoPersistKey(cfg, 0, 0, false, false, false, "", false, false, 0, rd, pluggedIn)
 	needPersist := stateKey == "" || stateKey != e.lastPersistedKey
 	e.mu.Unlock()
 
@@ -476,7 +686,61 @@ func (e *thermoCruiseEngine) Evaluate(now time.Time, rd ThermoBatteryReading, ex
 			}
 		}
 	}
-	return snap
+}
+
+func (e *thermoCruiseEngine) needsHotspotOffCleanup() bool {
+	if e.effectiveStage.Load() != 0 {
+		return true
+	}
+	e.mu.Lock()
+	dirty := e.rawThermalStage != 0 || !e.coolBelowStage1Since.IsZero() || !e.coolBelowStage2Since.IsZero() || e.lastStage2Shaper
+	e.mu.Unlock()
+	return dirty
+}
+
+func (e *thermoCruiseEngine) isHotspotOffReadOnly() bool {
+	if e == nil {
+		return false
+	}
+	_, act, sim := e.readActivity()
+	return act.Known && !act.HotspotActive && !sim
+}
+
+// ReadOnlySnapshot 在 HotspotOff 期间返回配置与实时传感器读数的纯只读快照,
+// 严禁推进 effectiveStage / rawThermalStage, 严禁覆写 run/thermo_state.json。
+func (e *thermoCruiseEngine) ReadOnlySnapshot(now time.Time, rd ThermoBatteryReading) map[string]any {
+	if now.IsZero() {
+		now = time.Now()
+	}
+	e.mu.Lock()
+	cfg := e.cfg
+	e.mu.Unlock()
+
+	exitStage2Temp := cfg.Stage2TempC - thermoHysteresisC
+	exitStage1Temp := cfg.Stage1TempC - thermoHysteresisC
+	return map[string]any{
+		"ok":                      true,
+		"enabled":                 cfg.Enabled,
+		"stage2_shaper_enabled":   cfg.Stage2ShaperEnabled,
+		"stage1_temp_c":           cfg.Stage1TempC,
+		"stage2_temp_c":           cfg.Stage2TempC,
+		"stage1_exit_temp_c":      math.Round(exitStage1Temp*10) / 10,
+		"stage2_exit_temp_c":      math.Round(exitStage2Temp*10) / 10,
+		"hysteresis_c":            thermoHysteresisC,
+		"low_bat_pct":             cfg.LowBatPct,
+		"raw_thermal_stage":       0,
+		"effective_stage":         0,
+		"stage1_polling_relaxed":  false,
+		"stage2_shaper_active":    false,
+		"stage2_exempt":           false,
+		"exempt_reason":           "",
+		"low_battery_cruise":      false,
+		"vector_express_active":   false,
+		"cool_hold_remaining_sec": 0,
+		"battery":                 rd,
+		"config":                  cfg,
+		"updated_at":              now.Unix(),
+	}
 }
 
 func (e *thermoCruiseEngine) summary() map[string]any {
@@ -495,16 +759,180 @@ func (e *thermoCruiseEngine) summary() map[string]any {
 	}
 }
 
+func (e *thermoCruiseEngine) readActivity() (<-chan struct{}, Activity, bool) {
+	if e.activityHook != nil {
+		ch, act := e.activityHook()
+		sim := false
+		if e.simActiveHook != nil {
+			sim = e.simActiveHook()
+		} else if e.srv != nil && e.srv.hncDir != "" {
+			sim = e.srv.simActive()
+		}
+		return ch, act, sim
+	}
+	ch := activityChanged()
+	act := activityNow()
+	sim := false
+	if e.simActiveHook != nil {
+		sim = e.simActiveHook()
+	} else if e.srv != nil && e.srv.hncDir != "" {
+		sim = e.srv.simActive()
+	}
+	return ch, act, sim
+}
+
+func (e *thermoCruiseEngine) evalNoClientsRelease(now time.Time, probedOnce *bool) (time.Duration, bool) {
+	e.mu.Lock()
+	rawStage := e.rawThermalStage
+	e.mu.Unlock()
+
+	// rawThermalStage == 0 (含纯低电态 low_battery_cruise) 直接停表 0 唤醒!
+	if rawStage <= 0 {
+		return 0, false
+	}
+
+	if probedOnce != nil && !*probedOnce {
+		*probedOnce = true
+		rd := e.sampleBattery()
+		e.Evaluate(now, rd, e.srv.isVectorExpressActive())
+	}
+
+	holdDur := e.effectiveCoolHoldDuration()
+	e.mu.Lock()
+	rawStage = e.rawThermalStage
+	c2 := e.coolBelowStage2Since
+	c1 := e.coolBelowStage1Since
+	e.mu.Unlock()
+
+	if rawStage <= 0 {
+		return 0, false
+	}
+	var rem time.Duration
+	if rawStage == 2 && !c2.IsZero() {
+		rem = holdDur - now.Sub(c2)
+	} else if rawStage == 1 && !c1.IsZero() {
+		rem = holdDur - now.Sub(c1)
+	} else {
+		rem = holdDur
+	}
+	if rem < 0 {
+		rem = 0
+	}
+	return rem + 15*time.Millisecond, true
+}
+
 func (e *thermoCruiseEngine) runLoop(stop <-chan struct{}) {
-	tk := time.NewTicker(10 * time.Second)
-	defer tk.Stop()
+	if e == nil {
+		<-stop
+		return
+	}
+	wakeCh := e.ensureWakeCh()
+
+	var (
+		tk              *time.Ticker
+		tkCh            <-chan time.Time
+		relTimer        *time.Timer
+		relTimerCh      <-chan time.Time
+		wasActive       bool
+		resetDone       bool
+		noClientsProbed bool
+	)
+	stopTicker := func() {
+		if tk != nil {
+			tk.Stop()
+			tk = nil
+			tkCh = nil
+		}
+	}
+	ensureTicker := func(d time.Duration) {
+		if tk == nil {
+			tk = time.NewTicker(d)
+			tkCh = tk.C
+		}
+	}
+	stopRelTimer := func() {
+		if relTimer != nil {
+			if !relTimer.Stop() {
+				select {
+				case <-relTimer.C:
+				default:
+				}
+			}
+			relTimer = nil
+			relTimerCh = nil
+		}
+	}
+	armRelTimer := func(d time.Duration) {
+		stopRelTimer()
+		if d <= 0 {
+			d = time.Millisecond
+		}
+		relTimer = time.NewTimer(d)
+		relTimerCh = relTimer.C
+	}
+	defer func() {
+		stopTicker()
+		stopRelTimer()
+		e.loopMode.Store(int32(v6EngineModeSleeping))
+	}()
+
+	patrolOnce := func(now time.Time) {
+		rd := e.sampleBattery()
+		e.Evaluate(now, rd, e.srv.isVectorExpressActive())
+	}
+
 	for {
+		actCh, act, simOn := e.readActivity()
+		now := time.Now()
+
+		if isV6EngineActive(act, simOn) {
+			resetDone = false
+			noClientsProbed = false
+			stopRelTimer()
+			if !wasActive {
+				patrolOnce(now)
+				wasActive = true
+			}
+			ensureTicker(e.effectivePollInterval())
+			e.loopMode.Store(int32(v6EngineModeActive))
+		} else if !act.HotspotActive {
+			wasActive = false
+			noClientsProbed = false
+			stopTicker()
+			stopRelTimer()
+			if !resetDone || e.effectiveStage.Load() != 0 || e.needsHotspotOffCleanup() {
+				e.resetForHotspotOff(now)
+				resetDone = true
+			}
+			e.loopMode.Store(int32(v6EngineModeSleeping))
+		} else {
+			wasActive = false
+			resetDone = false
+			stopTicker()
+			if rem, pending := e.evalNoClientsRelease(now, &noClientsProbed); pending {
+				armRelTimer(rem)
+				e.loopMode.Store(int32(v6EngineModeReleaseTimer))
+			} else {
+				stopRelTimer()
+				e.loopMode.Store(int32(v6EngineModeSleeping))
+			}
+		}
+
 		select {
 		case <-stop:
 			return
-		case now := <-tk.C:
-			rd := e.ReadBatteryFromSysfs()
-			e.Evaluate(now, rd, e.srv.isVectorExpressActive())
+		case <-actCh:
+		case <-wakeCh:
+			noClientsProbed = false
+			if wasActive {
+				patrolOnce(time.Now())
+			}
+		case tickNow := <-tkCh:
+			patrolOnce(tickNow)
+		case timerNow := <-relTimerCh:
+			relTimer = nil
+			relTimerCh = nil
+			patrolOnce(timerNow)
 		}
 	}
 }
@@ -513,8 +941,21 @@ func (e *thermoCruiseEngine) runLoop(stop <-chan struct{}) {
 
 func (s *server) apiThermoCruise(w http.ResponseWriter, r *http.Request) {
 	eng := s.v6State().thermo
+	isOffReadOnly := func() bool {
+		if eng.isHotspotOffReadOnly() {
+			return true
+		}
+		if act := activityNow(); act.Known && !act.HotspotActive && (s == nil || !s.simActive()) {
+			return true
+		}
+		return false
+	}
 	if r.Method == http.MethodGet {
-		rd := eng.ReadBatteryFromSysfs()
+		rd := eng.sampleBattery()
+		if isOffReadOnly() {
+			writeJSON(w, http.StatusOK, eng.ReadOnlySnapshot(time.Now(), rd))
+			return
+		}
 		snap := eng.Evaluate(time.Now(), rd, s.isVectorExpressActive())
 		writeJSON(w, http.StatusOK, snap)
 		return
@@ -564,8 +1005,13 @@ func (s *server) apiThermoCruise(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write failed", "detail": err.Error()})
 			return
 		}
-		rd := eng.ReadBatteryFromSysfs()
+		rd := eng.sampleBattery()
+		if isOffReadOnly() {
+			writeJSON(w, http.StatusOK, eng.ReadOnlySnapshot(time.Now(), rd))
+			return
+		}
 		snap := eng.Evaluate(time.Now(), rd, s.isVectorExpressActive())
+		eng.Wake()
 		writeJSON(w, http.StatusOK, snap)
 	})(w, r)
 }

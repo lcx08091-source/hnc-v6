@@ -283,15 +283,15 @@ func identReset() {
 
 // identCtx 一轮记账需要的上下文
 type identCtx struct {
-	st       *identState
-	now      time.Time
-	owner    map[string]string
-	apps     map[string]ipApp
-	names    map[string]ipName
-	sigKey   map[string]bool // 本轮判为签名流的连接 key
-	released []appUsageDelta
+	st        *identState
+	now       time.Time
+	owner     map[string]string
+	apps      map[string]ipApp
+	names     map[string]ipName
+	sigKey    map[string]bool // 本轮判为签名流的连接 key
+	released  []appUsageDelta
 	dscpByMAC map[string]map[string]uint8
-	fp       *fpStore // v6.x DPI v2: 指纹/用户纠正归属(fp_learn.go); nil = 不用
+	fp        *fpStore // v6.x DPI v2: 指纹/用户纠正归属(fp_learn.go); nil = 不用
 }
 
 func isLocalDst(dst string, owner map[string]string) bool {

@@ -19,10 +19,6 @@
 
 package output
 
-import (
-	"sort"
-)
-
 const (
 	bucketSeconds        = 30
 	bucketCount          = 16 // 8 minutes of history
@@ -240,19 +236,4 @@ func (ft *flowTracker) backgroundShare(nowUnix int64) float64 {
 		return 0
 	}
 	return float64(bg) / float64(total)
-}
-
-// topFlowsByBytes is currently unused but kept for future WebUI views and
-// to help debug the persistence detector. Returns flows sorted by byte
-// count descending, capped at n.
-func (ft *flowTracker) topFlowsByBytes(n int) []*flowEntry {
-	out := make([]*flowEntry, 0, len(ft.flows))
-	for _, f := range ft.flows {
-		out = append(out, f)
-	}
-	sort.Slice(out, func(i, j int) bool { return out[i].bytes > out[j].bytes })
-	if n > 0 && len(out) > n {
-		out = out[:n]
-	}
-	return out
 }

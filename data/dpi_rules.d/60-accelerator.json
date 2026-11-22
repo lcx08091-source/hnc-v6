@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "60-accelerator",
-  "rules_version": "hnc-curated-v3-rc30.12-2026-05-19-v6-valorant-mobile#60-accelerator",
+  "rules_version": "hnc-curated-v6.1.0-rc.1#60-accelerator",
   "rules": [
     {
       "id": "xunlei",

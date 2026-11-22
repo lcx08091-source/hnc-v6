@@ -251,7 +251,7 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// hotfix4 → v5.9.0: serialize state-changing actions. The underlying shell
+	// v5.9.0: serialize state-changing actions. The underlying shell
 	// scripts mutate tc, iptables and JSON files in several steps; concurrent
 	// writes from two remote clients can interleave and leave UI/API state out
 	// of sync. Reads (/api/devices, /api/live) no longer share this lock —
@@ -537,6 +537,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return s.limitCtl.actionScheduleClear(p)
 	case "clsact_mode_set": // v5.18: auto | on | off
 		return actionClsactModeSet(hncDir, p)
+	case "json_doctor_repair":
+		return actionJSONDoctorRepair(s)
 	default:
 		return actionResp{OK: false, Error: "unknown action"}
 	}
@@ -891,6 +893,8 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 		timeoutSec = 60
 	case "hnc_offload_guard.sh": // v5.18: apply 含 check_offload 5s 采样 + hotspotd IPC
 		timeoutSec = 25
+	case "json_doctor.sh":
+		timeoutSec = 20
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeoutSec)*time.Second)
 	defer cancel()

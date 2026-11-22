@@ -26,7 +26,7 @@ import (
 	"hnc.io/dpid/output"
 )
 
-const version = "v5.29.0-rc1"
+var version = "dev"
 
 // replayEvent JSON 行结构(字段名与文档 T4 规格一致)。
 type replayEvent struct {
@@ -61,6 +61,12 @@ func kindString(ev capture.Event) string {
 }
 
 func main() {
+	for _, arg := range os.Args[1:] {
+		if arg == "-version" || arg == "--version" {
+			fmt.Println("dpid_replay", version)
+			return
+		}
+	}
 	if len(os.Args) < 2 {
 		fmt.Fprintln(os.Stderr, "usage: dpid_replay <file.pcap> [file2.pcap ...]")
 		os.Exit(1)

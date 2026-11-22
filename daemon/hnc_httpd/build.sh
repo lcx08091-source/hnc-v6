@@ -50,8 +50,13 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-VERSION_CODE=$(grep "^versionCode=" ../../module.prop 2>/dev/null | cut -d= -f2 | tr -d '\r')
-[ -z "$VERSION_CODE" ] && VERSION_CODE=0
+VERSION_CODE=$(grep "^versionCode=" ../../module.prop 2>/dev/null | cut -d= -f2 | tr -d ' \t\r')
+case "$VERSION_CODE" in
+    ''|*[!0-9]*)
+        echo "ERROR: module.prop versionCode= missing or non-numeric: '$VERSION_CODE' (cwd=$(pwd))" >&2
+        exit 1
+        ;;
+esac
 
 echo "Building hnc_httpd for android/$GOARCH (version=$VERSION code=$VERSION_CODE cgo=$CGO_ENABLED)..."
 if [ "$HNC_ARCH" = "arm64" ]; then
@@ -91,6 +96,8 @@ required = [
     "dpi_rebind",
     "/api/dataplane_verify",
     "dataplane_verify_run",
+    "/api/health_check",
+    "json_doctor_repair",
     "/api/vector_sync",
     "/api/leakguard/events",
     "/api/v6/express",
@@ -110,6 +117,8 @@ else
         dpi_rebind \
         /api/dataplane_verify \
         dataplane_verify_run \
+        /api/health_check \
+        json_doctor_repair \
         /api/vector_sync \
         /api/leakguard/events \
         /api/v6/express \

@@ -327,6 +327,39 @@ function sparkSvg(a, color) {
   return '<svg class="spark-mini" viewBox="0 0 100 26" preserveAspectRatio="none"><path d="' + d.map(function (v, i) { return (i ? 'L' : 'M') + (i * st).toFixed(1) + ' ' + (H - 2 - v / mx * (H - 5)).toFixed(1); }).join(' ') + '" fill="none" stroke="' + color + '" stroke-width="1.6" vector-effect="non-scaling-stroke"/></svg>';
 }
 function stRow(t, v, cls, s) { return '<div class="row"><span class="tx"><div class="t" style="font-weight:600">' + t + '</div>' + (s ? '<div class="s">' + s + '</div>' : '') + '</span><span class="v ' + (cls || '') + '">' + v + '</span></div>'; }
+function fmtDpiRuleVersionHtml(rawVer, dfpEnabled) {
+  var raw = String(rawVer == null ? '' : rawVer).trim();
+  var tail = dfpEnabled ? ' · DFP' : '';
+  if (!raw) return '—' + esc(tail);
+  if (raw.indexOf('external-d:') === 0) {
+    var body = raw.slice('external-d:'.length);
+    var parts = body ? body.split(',').map(function (p) { return p.trim(); }).filter(Boolean) : [];
+    var cnt = parts.length;
+    var verCounts = {}, bestVer = '', bestCnt = 0;
+    parts.forEach(function (p) {
+      var head = p.split('#')[0] || '';
+      var m = /^hnc-curated-(v\d+\.\d+(?:\.\d+)?(?:-(?:alpha|beta|rc)\.\d+)?)/i.exec(head) || /(v\d+\.\d+\.\d+(?:-(?:alpha|beta|rc)\.\d+)?)/i.exec(head);
+      if (m && m[1]) {
+        var v = m[1];
+        verCounts[v] = (verCounts[v] || 0) + 1;
+        if (verCounts[v] > bestCnt) { bestCnt = verCounts[v]; bestVer = v; }
+      }
+    });
+    if (!bestVer && S && S.live && S.live.backend_version && !/^(dev|unknown)$/i.test(String(S.live.backend_version))) {
+      bestVer = String(S.live.backend_version);
+    }
+    var summary = cnt > 0 ? ((bestVer || '模块化规则集') + ' · ' + cnt + ' 个规则分包') : (bestVer || '模块化规则目录');
+    return '<span title="' + esc(raw) + '">' + esc(summary + tail) + '</span>';
+  }
+  if (/^builtin(?:[-_+]|$)/i.test(raw)) {
+    var bLabel = /\+invalid/i.test(raw) ? '内置兜底规则（外置规则异常）' : '内置规则库（随模块版本）';
+    return '<span title="' + esc(raw) + '">' + esc(bLabel + tail) + '</span>';
+  }
+  if (raw.length > 42) {
+    return '<span title="' + esc(raw) + '">' + esc(raw.slice(0, 36) + '…' + tail) + '</span>';
+  }
+  return '<span title="' + esc(raw) + '">' + esc(raw + tail) + '</span>';
+}
 function paintDpi() {
   var hero = $('#dpi-hero'); if (!hero) return;
   var r = S.dpi, st = r && r.available && r.state, s = (st && st.stats) || {};
@@ -349,7 +382,7 @@ function paintDpi() {
   // 状态
   var ur = st && st.unidentified_ratio, p = S.proc;
   $('#dpi-status').innerHTML = !st ? stRow('dpid', esc(S.dpiErr || (r && r.error) || '未运行'), 'bad') :
-    stRow('健康度', esc(health), ok ? 'ok' : 'warn') + stRow('规则库', esc(st.l3_rule_version || '—') + (st.dfp_enabled ? ' · DFP' : ''), '') +
+    stRow('健康度', esc(health), ok ? 'ok' : 'warn') + stRow('规则库', fmtDpiRuleVersionHtml(st.l3_rule_version, st.dfp_enabled), '') +
     stRow('识别覆盖', ur && ur.total_bytes ? Math.round((1 - num(ur.ratio)) * 100) + '%' : '—', '', ur && ur.total_bytes ? '已识别 ' + bytes(ur.identified_bytes) + ' / ' + bytes(ur.total_bytes) : '按字节') +
     stRow('去重域名', num(st.unique_sni) + ' SNI · ' + num(st.unique_hostnames) + ' 主机名 · ' + num(st.unique_ja4) + ' 种指纹', '') +
     (st.evidence_summary && st.evidence_summary.total ? stRow('识别依据统计', num(st.evidence_summary.total) + ' 条', '', Object.keys(st.evidence_summary.by_source || {}).map(function (k) { var zh = { sni: 'TLS域名', dns: 'DNS解析', cname: 'CNAME链', quic: 'QUIC握手', ja4: '协议指纹', fp: '学习指纹', burst: '并发关联', proto: '流量形态', ip: '已知IP' }[k] || k; return esc(zh) + ' ' + esc(st.evidence_summary.by_source[k]); }).join(' · ')) : '') +
@@ -671,9 +704,10 @@ function rulesAct(act) {
     rulesOut('正在检查…');
     return api.action('dpi_rules_update', { mode: 'check' }, { timeout: 40000, maxTime: 38 }).then(function (r) {
       var d = detailJSON(r);
-      if (String(d.update_available) !== 'yes') { rulesOut('已是最新 · 当前 ' + (d.current || '—') + (d.remote ? ' · 远端 ' + d.remote : '')); return; }
-      rulesOut('有新版本：' + (d.current || '—') + ' → ' + d.remote);
-      return confirmSheet('更新规则库？', '当前 ' + esc(d.current || '—') + '，远端 ' + esc(d.remote) + '。', '更新', { safe: true }).then(function (ok) {
+      var curVer = d.current ? (/^builtin(?:[-_+]|$)/i.test(String(d.current).trim()) ? '内置规则库（随模块版本）' : String(d.current)) : '—';
+      if (String(d.update_available) !== 'yes') { rulesOut('已是最新 · 当前 ' + curVer + (d.remote ? ' · 远端 ' + d.remote : '')); return; }
+      rulesOut('有新版本：' + curVer + ' → ' + d.remote);
+      return confirmSheet('更新规则库？', '当前 ' + esc(curVer) + '，远端 ' + esc(d.remote) + '。', '更新', { safe: true }).then(function (ok) {
         if (!ok) return;
         rulesOut('正在下载安装…');
         return api.action('dpi_rules_update', { mode: 'install' }, { timeout: 90000, maxTime: 88 }).then(function (r2) { rulesOut(r2.detail || '已更新'); toast('规则库已更新'); });

@@ -455,7 +455,7 @@ func writeExpansions(st *autoExpandState) error {
 	file := autoExpandedFile{
 		SchemaVersion: "2.0",
 		Subset:        "_auto_expanded",
-		RulesVersion:  fmt.Sprintf("auto-expanded-v5.6-%d", time.Now().Unix()),
+		RulesVersion:  fmt.Sprintf("auto-expanded-%d", time.Now().Unix()),
 		Rules:         rules,
 	}
 	body, err := json.MarshalIndent(file, "", "  ")
@@ -511,7 +511,6 @@ func invalidateRuleCache() {
 	bumpRuleReloadGen()
 	BumpCompiledFPGen()
 }
-
 
 // InvalidateRuleCache exports invalidateRuleCache for cross-package hot-reload triggers.
 func InvalidateRuleCache() {

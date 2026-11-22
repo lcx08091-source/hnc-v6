@@ -52,20 +52,18 @@
 
 /* ─── 编译期常量 ───────────────────────────────────────────────────── */
 
-/* rc30.13.1 audit-fix: 关于这个版本号选择 —
- * 内容上这版加了 fork-failure crash tracker + 修了 fork 失败误导日志,
- * 按规矩应该 bump 到 0.1.1-rc30.13.1. 但 CI workflow build.yml 的 sanity
- * check 写死了 `strings hnc_launcher | grep -q "0.1.0-rc30.12"`, 跳出
- * rc30.12 序列号会让 CI fail. 在 CI workflow 还没改之前, 继续用 rc30.12.x
- * 序列号 (0.1.0-rc30.12.30) 同时兼容 sanity check 和反映 minor change.
- * 等用户改完 .github/workflows/build.yml 后可以 bump 到 0.1.1-rc30.13.x. */
-#define VERSION                 "0.1.0-rc30.12.32"
+/* 编译期由 build.sh 从根目录 module.prop 自动注入 -DHNC_VERSION;
+ * 保留 0.1.0- 代际前缀并嵌入模块版本。 */
+#ifndef HNC_VERSION
+#define HNC_VERSION             "dev"
+#endif
+#define VERSION                 ("0.1.0-" HNC_VERSION)
 
 #define BIN_DPID                "/data/local/hnc/bin/hnc_dpid"
 #define DPID_CONFIG             "/data/local/hnc/etc/dpi_config.json"
 #define PID_DPID                "/data/local/hnc/run/dpid.pid"
 #define PID_GUARD               "/data/local/hnc/run/dpid_guard.pid"
-#define CRASH_FLAG              "/data/local/hnc/run/dpid_crashflag"
+#define CRASH_FLAG              "/data/local/hnc/run/dpid.crashflag"
 #define LOG_LAUNCHER            "/data/local/hnc/logs/dpid_launcher.log"
 #define LOG_DPID                "/data/local/hnc/logs/dpid.log"
 
@@ -121,12 +119,6 @@ static void log_msg(const char *fmt, ...)
 }
 
 /* ─── 文件操作 helpers ─────────────────────────────────────────────── */
-
-static int file_exists(const char *path)
-{
-	struct stat st;
-	return stat(path, &st) == 0;
-}
 
 static int write_pid_file(const char *path, pid_t pid)
 {
@@ -225,7 +217,7 @@ static void crash_tracker_init(struct crash_tracker *t)
 	memset(t, 0, sizeof(*t));
 }
 
-/* 记录一次崩溃. 返回 1 表示窗口内崩溃数 >= 阈值 (需进 observe 模式) */
+/* 记录一次崩溃. 返回 1 表示窗口内崩溃数 >= 阈值 */
 /* rc30.12.29 (P1.9): 重写为 "先压缩窗口外, 再追加新崩溃" 的两步语义.
  * 之前是 "滑动窗口里现有几次 + 加新条目 + 滚动覆盖" 三步交错,
  * 在窗口边界滚动时容易让人误读. 行为等价, 代码更直白. */
@@ -266,10 +258,56 @@ static int crash_tracker_record(struct crash_tracker *t)
 
 static void write_crash_flag(void)
 {
-	FILE *f = fopen(CRASH_FLAG, "we");
+	FILE *f = fopen(CRASH_FLAG, "ae");
 	if (f) {
 		fprintf(f, "%ld\n", (long)time(NULL));
 		fclose(f);
+	}
+}
+
+/* 读取 CRASH_FLAG, 统计窗口 CRASH_WINDOW_SEC 内的有效 Unix 秒时间戳行数.
+ * 注意: Go dpid 正常启动前 5 分钟内文件恒有 1 行 armed 时间戳, 严禁凭文件存在即睡 120s! */
+static int count_recent_crash_flags(void)
+{
+	FILE *f = fopen(CRASH_FLAG, "re");
+	char line[64];
+	long long now_ll;
+	int recent = 0;
+
+	if (f == NULL)
+		return 0;
+
+	now_ll = (long long)time(NULL);
+	while (fgets(line, sizeof(line), f) != NULL) {
+		char *p = line;
+		char *endp = NULL;
+		long long ts;
+
+		while (*p == ' ' || *p == '\t')
+			p++;
+		if (*p == '\0' || *p == '\r' || *p == '\n')
+			continue;
+		errno = 0;
+		ts = strtoll(p, &endp, 10);
+		if (errno != 0 || endp == p || ts <= 0)
+			continue;
+		while (*endp == ' ' || *endp == '\t' || *endp == '\r' || *endp == '\n')
+			endp++;
+		if (*endp != '\0')
+			continue;
+		if (ts <= now_ll + 5 && now_ll - ts <= CRASH_WINDOW_SEC)
+			recent++;
+	}
+	fclose(f);
+	return recent;
+}
+
+static void cooldown_sleep(int sec)
+{
+	int waited = 0;
+	while (waited < sec && !g_shutdown) {
+		sleep(1);
+		waited++;
 	}
 }
 
@@ -481,11 +519,17 @@ static int run_supervise_loop(void)
 			log_msg("fork failed (errno=%d), retrying after %ds backoff",
 				errno, backoff);
 			if (crash_tracker_record(&fork_fails)) {
-				log_msg("FORK_LOOP: %d fork failures in %ds window, "
-					"refusing to retry. Clear %s manually to recover.",
-					CRASH_LIMIT, CRASH_WINDOW_SEC, CRASH_FLAG);
+				log_msg("FORK_LOOP: %d fork failures in %ds; cooling down %ds then self-healing "
+					"(no permanent give-up)",
+					CRASH_LIMIT, CRASH_WINDOW_SEC, CRASH_COOLDOWN_SEC);
 				write_crash_flag();
-				return 1;
+				cooldown_sleep(CRASH_COOLDOWN_SEC);
+				if (g_shutdown)
+					break;
+				unlink(CRASH_FLAG);
+				crash_tracker_init(&fork_fails);
+				backoff = RESTART_BACKOFF_MIN;
+				continue;
 			}
 			if (g_shutdown)
 				break;
@@ -528,18 +572,15 @@ static int run_supervise_loop(void)
 
 		/* 异常退出 或 意外的 rc=0 — 记崩溃, 检查 loop 保护 */
 		if (crash_tracker_record(&crashes)) {
-			/* rc12: 不再永久放弃。以前这里 write_crash_flag()+return 1 → launcher
-			 * 退出 → watchdog 重新拉起 → 因 crashflag 进 observe 模式永不再拉 dpid,
-			 * 用户必须手动"重新绑定"。被动只读守护进程应当自愈:写崩溃标志仅作诊断,
-			 * 长冷却后清标志、重置计数、继续监管。制造崩溃风暴的瞬时原因(如残留
-			 * shell guard、/system/bin 暂时蒸发)消退后,dpid 会自动恢复。 */
+			/* rc12: 不再永久放弃。被动只读守护进程应当自愈:
+			 * 子进程正常启动后的崩溃时间戳由 Go dpid 自身追加, 若早期崩溃/execv 失败
+			 * 未留下记录则补记一行诊断标记; 长冷却后清标志、重置计数、继续监管。 */
 			log_msg("CRASH_LOOP: %d crashes in %ds; cooling down %ds then self-healing "
 				"(no permanent give-up)",
 				CRASH_LIMIT, CRASH_WINDOW_SEC, CRASH_COOLDOWN_SEC);
-			write_crash_flag();      /* 诊断标记; 冷却后清掉 */
-			if (g_shutdown)
-				break;
-			sleep(CRASH_COOLDOWN_SEC);
+			if (count_recent_crash_flags() == 0)
+				write_crash_flag();
+			cooldown_sleep(CRASH_COOLDOWN_SEC);
 			if (g_shutdown)
 				break;
 			unlink(CRASH_FLAG);
@@ -616,6 +657,7 @@ static void print_usage(const char *argv0)
 int main(int argc, char **argv)
 {
 	int i;
+	int recent_crashes;
 
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--version") == 0) {
@@ -648,17 +690,15 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* rc12: stale crashflag 不再永久 observe(以前 pause() 死等用户手动删文件 →
-	 * "launcher 活着但永不拉 dpid",必须手动重新绑定)。改为冷却一段时间让瞬时
-	 * 原因消退,然后清标志、正常监管,实现自愈。 */
-	if (file_exists(CRASH_FLAG)) {
-		int waited = 0;
-		log_msg("crashflag exists (%s); cooling down %ds then resuming supervision "
-			"(self-heal, no permanent observe)", CRASH_FLAG, CRASH_COOLDOWN_SEC);
-		while (waited < CRASH_COOLDOWN_SEC && !g_shutdown) {
-			sleep(1);
-			waited++;
-		}
+	/* Go dpid 正常启动前 5 分钟内 dpid.crashflag 恒有 1 行 armed 时间戳,
+	 * 严禁凭文件存在即睡 120s! 仅当 CRASH_WINDOW_SEC (60s) 内有效时间戳行数
+	 * >= CRASH_LIMIT (5) 时才进入冷却并清理标志。 */
+	recent_crashes = count_recent_crash_flags();
+	if (recent_crashes >= CRASH_LIMIT) {
+		log_msg("crashflag storm active (%s, recent=%d >= %d in %ds); cooling down %ds "
+			"then resuming supervision (self-heal, no permanent observe)",
+			CRASH_FLAG, recent_crashes, CRASH_LIMIT, CRASH_WINDOW_SEC, CRASH_COOLDOWN_SEC);
+		cooldown_sleep(CRASH_COOLDOWN_SEC);
 		if (g_shutdown) {
 			log_msg("crashflag cooldown interrupted by signal; exiting");
 			cleanup_singleton_and_log();

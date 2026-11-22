@@ -85,13 +85,13 @@ type fpAppCount struct {
 }
 
 type fpEntry struct {
-	JA4   string                 `json:"ja4"`
-	ALPN  string                 `json:"alpn,omitempty"`
-	Port  string                 `json:"port"`
-	QTP   string                 `json:"qtp,omitempty"` // v5.27 T2, 旧文件没有
-	Apps  map[string]*fpAppCount `json:"apps"`
-	Total float64                `json:"total"`
-	Devs  map[string]int64       `json:"devs,omitempty"` // MAC 散列前缀 → 最近出现
+	JA4          string                 `json:"ja4"`
+	ALPN         string                 `json:"alpn,omitempty"`
+	Port         string                 `json:"port"`
+	QTP          string                 `json:"qtp,omitempty"` // v5.27 T2, 旧文件没有
+	Apps         map[string]*fpAppCount `json:"apps"`
+	Total        float64                `json:"total"`
+	Devs         map[string]int64       `json:"devs,omitempty"` // MAC 散列前缀 → 最近出现
 	First        int64                  `json:"first"`
 	Last         int64                  `json:"last"`
 	Upd          int64                  `json:"upd"` // 计数衰减到的时刻

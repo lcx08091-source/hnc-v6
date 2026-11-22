@@ -600,4 +600,3 @@ func ctKeyProtoDport(k string) (string, int) {
 	}
 	return "", 0
 }
-

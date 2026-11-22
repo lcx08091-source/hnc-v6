@@ -112,8 +112,12 @@ func scWriteFile0600(path string, b []byte) error {
 }
 
 type scAPIResp struct {
-	Available bool `json:"available"`
-	Running   bool `json:"running"`
+	Available       bool   `json:"available"`
+	Running         bool   `json:"running"`
+	Version         string `json:"version"`
+	VersionCode     string `json:"version_code"`
+	DPIDVersion     string `json:"dpid_version,omitempty"`
+	WatchdogVersion string `json:"watchdog_version,omitempty"`
 	*scReport
 }
 
@@ -124,15 +128,46 @@ func (s *server) apiSelfcheck(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	setNoStore(w)
+	ver := s.serverVersion()
+	vc := s.serverVersionCode()
+	dpidVer := s.dpidVersion()
+	wdVer := s.watchdogVersion()
 	rep := selfcheckCached(s.hncDir)
 	if rep == nil {
-		writeJSON(w, http.StatusOK, scAPIResp{Available: false, Running: selfcheckIsRunning()})
+		writeJSON(w, http.StatusOK, scAPIResp{
+			Available:       false,
+			Running:         selfcheckIsRunning(),
+			Version:         ver,
+			VersionCode:     vc,
+			DPIDVersion:     dpidVer,
+			WatchdogVersion: wdVer,
+		})
 		return
+	}
+	if ver == "dev" && rep.Version != "" {
+		ver = rep.Version
+	}
+	if vc == "0" && rep.VersionCode != "" {
+		vc = rep.VersionCode
+	}
+	if dpidVer == "" {
+		dpidVer = rep.DPIDVersion
+	}
+	if wdVer == "" {
+		wdVer = rep.WatchdogVersion
 	}
 	if r.URL.Query().Get("redact") == "1" {
 		rep = redactReport(rep)
 	}
-	writeJSON(w, http.StatusOK, scAPIResp{Available: true, Running: selfcheckIsRunning(), scReport: rep})
+	writeJSON(w, http.StatusOK, scAPIResp{
+		Available:       true,
+		Running:         selfcheckIsRunning(),
+		Version:         ver,
+		VersionCode:     vc,
+		DPIDVersion:     dpidVer,
+		WatchdogVersion: wdVer,
+		scReport:        rep,
+	})
 }
 
 func scParamOn(v string) bool {

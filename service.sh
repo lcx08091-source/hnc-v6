@@ -90,7 +90,7 @@ provision_fallback_tools() {
                 case " $_core " in *" $ap "*) ln -sf .hnc_mc "$bbdir/$ap" 2>/dev/null ;; esac
             fi
         done
-        command -v log >/dev/null 2>&1 && log "rc15: provisioned fallback applets from $mc -> $bbdir"
+        command -v log >/dev/null 2>&1 && log "provisioned fallback applets from $mc -> $bbdir"
     fi
     if [ -x "$bbdir/.hnc_mc" ] && "$bbdir/.hnc_mc" ash -c 'exit 0' 2>/dev/null; then
         ln -sf .hnc_mc "$bbdir/sh" 2>/dev/null
@@ -103,21 +103,29 @@ provision_fallback_tools() {
 }
 provision_fallback_tools 2>/dev/null || true
 
-# rc3.1 修 N-15R: 记下自己路径让 cleanup.sh restart 时能找到我们
+# 记下自己路径让 cleanup.sh restart 时能找到我们
 echo "$MODDIR" > "$RUN/service.path" 2>/dev/null
 
 log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [HNC] $1" >> "$LOG"
 }
 
-# v5.20: 兼容性环境快照
+_HNC_SVC_VER=""
+for _mp in "$MODDIR/module.prop" "$HNC_DIR/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
+    [ -f "$_mp" ] || continue
+    _HNC_SVC_VER=$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')
+    [ -n "$_HNC_SVC_VER" ] && break
+done
+unset _mp
+
+# 兼容性环境快照
 _HNC_COMPAT="$MODDIR/bin/hnc_compat.sh"
 [ -f "$_HNC_COMPAT" ] || _HNC_COMPAT="$HNC_DIR/bin/hnc_compat.sh"
 if [ -f "$_HNC_COMPAT" ]; then
     HNC_DIR="$HNC_DIR" sh "$_HNC_COMPAT" root >/dev/null 2>&1 || true
-    log "v5.20 compat: $(tr -d '\n' < "$RUN/root_env.json" 2>/dev/null | cut -c1-400)"
+    log "compat: $(tr -d '\n' < "$RUN/root_env.json" 2>/dev/null | cut -c1-400)"
     case "$(cat "$RUN/root_env.json" 2>/dev/null)" in
-        *'"module_webui":false'*) log "v5.20 compat: 当前 root 方案无模块 WebUI, 请用浏览器打开 $(cat "$RUN/webui_url" 2>/dev/null)" ;;
+        *'"module_webui":false'*) log "compat: 当前 root 方案无模块 WebUI, 请用浏览器打开 $(cat "$RUN/webui_url" 2>/dev/null)" ;;
     esac
 fi
 rm -f "$RUN/iface_detect.json" 2>/dev/null
@@ -198,7 +206,7 @@ prune_duplicate_watchdogs() {
         keep=$(echo "$pids" | tr ' ' '\n' | awk 'NF' | sort -n | head -n 1)
     fi
     [ -n "$keep" ] && echo "$keep" > "$RUN/watchdog.pid" 2>/dev/null || true
-    log "watchdogfix-v6.1: duplicate watchdogs detected count=$count keep=$keep reason=$reason"
+    log "duplicate watchdogs detected count=$count keep=$keep reason=$reason"
 
     for p in $pids; do
         [ -z "$p" ] && continue
@@ -211,7 +219,7 @@ prune_duplicate_watchdogs() {
         [ "$p" = "$keep" ] && continue
         if is_pid_alive "$p"; then
             kill -9 "$p" 2>/dev/null || true
-            log "watchdogfix-v6.1: KILL duplicate hnc_watchdog pid=$p keep=$keep"
+            log "KILL duplicate hnc_watchdog pid=$p keep=$keep"
         fi
     done
 }
@@ -225,7 +233,7 @@ prune_stale_service_sentinels() {
         : > "/data/adb/modules/hotspot_network_control/remove" 2>/dev/null || true
     fi
     pids=""
-    # v6.0: 删除 sentinel.pid 前必须先读出旧哨兵 PID 并校验 /proc/<pid>/cmdline 含 service.sh,
+    # 删除 sentinel.pid 前必须先读出旧哨兵 PID 并校验 /proc/<pid>/cmdline 含 service.sh,
     # 优雅终止后再删 pidfile, 根治重启后端时旧后台哨兵 subshell 残留堆积!
     if [ -f "$RUN/sentinel.pid" ]; then
         old_spid=$(cat "$RUN/sentinel.pid" 2>/dev/null | tr -dc '0-9')
@@ -250,7 +258,7 @@ prune_stale_service_sentinels() {
     done
     pids=$(printf '%s\n' $pids | awk 'NF && !seen[$1]++ { print $1 }' | tr '\n' ' ')
     if [ -n "$pids" ]; then
-        log "v6.0: stopping stale service/sentinel pids: $pids"
+        log "stopping stale service/sentinel pids: $pids"
         for p in $pids; do
             [ -n "$p" ] && kill "$p" 2>/dev/null || true
         done
@@ -259,7 +267,7 @@ prune_stale_service_sentinels() {
             [ -z "$p" ] && continue
             if is_pid_alive "$p"; then
                 kill -9 "$p" 2>/dev/null || true
-                log "v6.0: KILL stale service/sentinel pid=$p"
+                log "KILL stale service/sentinel pid=$p"
             fi
         done
     fi
@@ -269,7 +277,7 @@ prune_stale_service_sentinels() {
 # Kill old buggy sentinel/service shells before this fixed service starts supervisors.
 prune_stale_service_sentinels
 
-log "=== HNC Service Starting ==="
+log "=== HNC ${_HNC_SVC_VER:+$_HNC_SVC_VER }Service Starting ==="
 log "Android $(getprop ro.build.version.release) / $(getprop ro.product.brand) $(getprop ro.product.model)"
 
 # v5.29 T3: 升级快照 + 钉住检查
@@ -350,22 +358,20 @@ migrate_remove_ndpi() {
     for _f in "$HNC_DIR"/bin/stats_shadow_*.sh "$HNC_DIR"/bin/stats_v52_*.sh "$HNC_DIR"/bin/stats_v52_README.md \
               "$HNC_DIR/bin/stats_compare.sh" "$HNC_DIR/bin/stats_migration_readiness.sh" \
               "$HNC_DIR/bin/stats_source_diag.sh" "$RUN/stats_shadow.enabled" \
-              "$RUN/stats_v52_rc.enabled" "$RUN/stats_v52_rc1.enabled"; do
+              "$RUN/stats_v52_rc.enabled" "$RUN/stats_v52_rc1.enabled" \
+              "$HNC_DIR/bin/ahnc_migration.sh" "$HNC_DIR/bin/hnc_common.sh" \
+              "$RUN/.ahnc_migration_done" "$RUN/dpid_crashflag"; do
         if [ -e "$_f" ]; then
             rm -f "$_f" 2>/dev/null && _nd_removed=$((_nd_removed + 1))
         fi
     done
-    [ "$_nd_removed" -gt 0 ] && log "migrate: removed $_nd_removed legacy nDPI/shadow-stats file(s)"
+    [ "$_nd_removed" -gt 0 ] && log "migrate: removed $_nd_removed legacy file(s)"
     return 0
 }
 migrate_remove_ndpi
 
 if [ -f "$HNC_DIR/bin/capability_probe.sh" ]; then
     ( HNC="$HNC_DIR" sh "$HNC_DIR/bin/capability_probe.sh" >> "$HNC_DIR/logs/capabilities.log" 2>&1 ) &
-fi
-
-if [ -x "$HNC_DIR/bin/ahnc_migration.sh" ]; then
-    ( sh "$HNC_DIR/bin/ahnc_migration.sh" >> "$HNC_DIR/logs/migration.log" 2>&1 ) &
 fi
 
 wait_for_network() {
@@ -395,16 +401,16 @@ wait_boot_complete() {
 wait_boot_complete
 wait_for_network
 
-log "v4.0.0-patch1.5 Defer Init: iface detection + tc/iptables init delegated to watchdog"
+log "defer-init: iface detection + tc/iptables init delegated to watchdog"
 
-# ─── rc30.12.18: auth_required 自动迁移到默认拒绝 ────────────────
+# ─── auth_required 自动迁移到默认拒绝 ────────────────
 RULES_JSON="$HNC_DIR/data/rules.json"
 if [ -f "$RULES_JSON" ]; then
     CUR_AUTH=$(grep -o '"auth_required"[[:space:]]*:[[:space:]]*[a-z]*' \
         "$RULES_JSON" 2>/dev/null | awk -F: '{print $2}' | tr -d ' ')
     if [ "$CUR_AUTH" = "false" ]; then
-        log "rc30.12.18 migration: auth_required=false in rules.json detected, auto-upgrading to true"
-        log "  (rc30.12.18 enforces default-deny regardless; this just keeps WebUI toggle consistent)"
+        log "migration: auth_required=false in rules.json detected, auto-upgrading to true"
+        log "  (default-deny enforced regardless; keeping WebUI toggle consistent)"
         JSON_SET="$MODDIR/bin/json_set.sh"
         [ -f "$JSON_SET" ] || JSON_SET="$HNC_DIR/bin/json_set.sh"
         if HNC=$HNC_DIR sh "$JSON_SET" top auth_required true >/dev/null 2>&1; then
@@ -426,7 +432,7 @@ if [ ! -x "$HTTPD_BIN" ]; then
     log "      check that post-fs-data.sh copied daemon/hnc_httpd/hnc_httpd"
 fi
 
-# ─── rc30.12.14: 生成本机管理员密钥 (loopback 鉴权加固) ───────────
+# ─── 生成本机管理员密钥 (loopback 鉴权加固) ───────────
 LOCAL_ADMIN_SECRET="$RUN/local_admin.secret"
 if [ ! -s "$LOCAL_ADMIN_SECRET" ]; then
     if [ -r /dev/urandom ]; then
@@ -441,9 +447,9 @@ if [ ! -s "$LOCAL_ADMIN_SECRET" ]; then
         ( umask 077; printf "%s" "$SECRET_VAL" > "$LOCAL_ADMIN_SECRET" )
         chmod 600 "$LOCAL_ADMIN_SECRET" 2>/dev/null
         chown root:root "$LOCAL_ADMIN_SECRET" 2>/dev/null
-        log "rc30.12.14: generated local admin secret ($LOCAL_ADMIN_SECRET, mode 0600)"
+        log "generated local admin secret ($LOCAL_ADMIN_SECRET, mode 0600)"
     else
-        log "v5.8.8: WARN no CSPRNG available, NOT generating local_admin.secret — loopback write/sensitive paths stay fail-closed (cookie required), no weak-entropy fallback"
+        log "WARN: no CSPRNG available, NOT generating local_admin.secret — loopback write/sensitive paths stay fail-closed (cookie required), no weak-entropy fallback"
     fi
 fi
 
@@ -470,13 +476,13 @@ else
 fi
 prune_duplicate_hotspotd
 
-# ─── v5.22: WebUI 访问白名单落防火墙(必须在 httpd 开监听之前) ────────
+# ─── WebUI 访问白名单落防火墙(必须在 httpd 开监听之前) ────────
 if [ -f "$HNC_DIR/bin/webui_guard.sh" ]; then
     sh "$HNC_DIR/bin/webui_guard.sh" apply >> "$HNC_DIR/logs/service.log" 2>&1 \
-        || log "v5.22: WARN webui_guard apply failed (HTTP-level guard in hnc_httpd still active)"
+        || log "WARN: webui_guard apply failed (HTTP-level guard in hnc_httpd still active)"
 fi
 
-# ─── rc30.12: shell pre-launch hnc_httpd ─────────────────────
+# ─── shell pre-launch hnc_httpd ─────────────────────
 launch_httpd_safe() {
     nohup "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" -hnc-dir "$HNC_DIR" \
         >> "$HNC_DIR/logs/httpd.log" 2>&1 &
@@ -484,7 +490,7 @@ launch_httpd_safe() {
     log "launch_httpd_safe: hnc_httpd started (PID=$!; remote port follows remote_enabled)"
 }
 
-# v5.40.1: 基于 /proc/<pid>/cmdline 清理旧模块残留的重复 hnc_httpd 实例
+# 基于 /proc/<pid>/cmdline 清理旧模块残留的重复 hnc_httpd 实例
 prune_duplicate_httpds() {
     local proot="${HNC_PROC_ROOT:-/proc}"
     local keep="" d p cmd count=0 all_pids=""
@@ -500,7 +506,7 @@ prune_duplicate_httpds() {
                         kill "$p" 2>/dev/null || true
                         usleep 100000 2>/dev/null || sleep 1
                         kill -9 "$p" 2>/dev/null || true
-                        log "v5.40.1: terminated legacy hnc_httpd instance pid=$p"
+                        log "terminated legacy hnc_httpd instance pid=$p"
                         continue
                         ;;
                 esac
@@ -520,7 +526,7 @@ prune_duplicate_httpds() {
             kill "$p" 2>/dev/null || true
             usleep 100000 2>/dev/null || sleep 1
             kill -9 "$p" 2>/dev/null || true
-            log "v5.40.1: terminated duplicate hnc_httpd pid=$p (kept=$keep)"
+            log "terminated duplicate hnc_httpd pid=$p (kept=$keep)"
         done
     fi
 }
@@ -547,7 +553,7 @@ if [ -x "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" ]; then
     fi
     if [ -n "$HP" ] && kill -0 "$HP" 2>/dev/null; then
         echo "$HP" > "$RUN/httpd.pid" 2>/dev/null || true
-        log "rc30.12 pre-launch: hnc_httpd already running (PID=$HP)"
+        log "pre-launch: hnc_httpd already running (PID=$HP)"
     else
         launch_httpd_safe
         sleep 1
@@ -571,22 +577,22 @@ else
         if [ -x "$HNC_DIR/bin/hnc_watchdog" ]; then
             nohup "$HNC_DIR/bin/hnc_watchdog" >> "$HNC_DIR/logs/watchdog.log" 2>&1 &
             echo $! > "$RUN/watchdog.pid"
-            log "watchdog (Go, rc30.1+) started (PID=$(cat "$RUN/watchdog.pid" 2>/dev/null))"
+            log "watchdog (Go) started (PID=$(cat "$RUN/watchdog.pid" 2>/dev/null))"
         else
             log "FATAL: bin/hnc_watchdog missing, watchdog not started"
         fi
     fi
 fi
 
-# hotfix10: 启动后延迟清理一次长期未见的离线规则,防止 rules.json 膨胀。
+# 启动后延迟清理一次长期未见的离线规则, 防止 rules.json 膨胀。
 if [ -x "$HNC_DIR/bin/cleanup_stale_rules.sh" ]; then
     (sleep 60 && sh "$HNC_DIR/bin/cleanup_stale_rules.sh") >> "$HNC_DIR/logs/cleanup_stale.log" 2>&1 &
 fi
 
 log "=== All services started ==="
-log "All services started. WebUI: open KernelSU manager → modules → HNC"
+log "All services started. WebUI: open KernelSU manager -> modules -> HNC"
 
-# ─── v5.0 alpha.2: Offload Recovery ────────────────────────
+# ─── Offload Recovery ────────────────────────
 (
     sleep 3
     RULES="$HNC_DIR/data/rules.json"
@@ -618,7 +624,7 @@ else
     log "hotspot_auto=false, skipping autostart"
 fi
 
-# ─── hnc_dpid (DPI 被动观察 daemon, v5.3.0-rc12 新增) ────────────
+# ─── hnc_dpid (DPI 被动观察 daemon) ────────────
 DPID_BIN="$HNC_DIR/bin/hnc_dpid"
 DPID_LAUNCHER_C="$HNC_DIR/bin/hnc_launcher"
 FORK_PROBE="$HNC_DIR/bin/fork_probe"
@@ -641,7 +647,7 @@ find_live_dpid_guard_pid() {
     ps -ef 2>/dev/null | awk '$0 !~ /awk/ && $0 ~ /(^|[ \/])hnc_launcher([ \t]|$)/ { print $2; exit }'
 }
 
-# rc30.12 launcher 探测
+# launcher 探测
 LAUNCHER_CHOICE=""
 if [ -x "$DPID_LAUNCHER_C" ] && [ -x "$FORK_PROBE" ]; then
     if "$FORK_PROBE" /system/bin/true >/dev/null 2>&1; then
@@ -655,7 +661,7 @@ if [ -x "$DPID_LAUNCHER_C" ] && [ -x "$FORK_PROBE" ]; then
         else
             DPID_LAUNCHER="$DPID_LAUNCHER_C"
             LAUNCHER_CHOICE="c_launcher"
-            log "dpid launcher: hnc_launcher (C, rc30.12+) — fork_probe PASS + exec PASS"
+            log "dpid launcher: hnc_launcher (C) — fork_probe PASS + exec PASS"
         fi
         unset _launcher_test _launcher_test_rc
     else
@@ -855,4 +861,4 @@ fi
     done
 ) >> "$HNC_DIR/logs/sentinel.log" 2>&1 &
 echo $! > "$RUN/sentinel.pid" 2>/dev/null || true
-log "sentinel started (PID=$(cat "$RUN/sentinel.pid" 2>/dev/null), dpid_launcher=$DPID_LAUNCHER, scope=watchdog+rollback, v6.0)"
+log "sentinel started (PID=$(cat "$RUN/sentinel.pid" 2>/dev/null), dpid_launcher=$DPID_LAUNCHER, scope=watchdog+rollback, ${_HNC_SVC_VER:-v6.1})"

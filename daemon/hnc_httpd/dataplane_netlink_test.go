@@ -7,6 +7,7 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"math"
 	"net"
@@ -713,9 +714,9 @@ func TestOrthogonalMarkAndHTBHexMinorAllMidsLocked(t *testing.T) {
 	if (DefaultDevMarkMask & uint32(0x0000ffff)) != 0 {
 		t.Fatalf("DefaultDevMarkMask 0x%08x overlaps netd low16", DefaultDevMarkMask)
 	}
-	if (DefaultDevMarkMask & DefaultAppQoSMarkMask) != 0 ||
-		(DefaultDevMarkMask & DefaultAppLimitMarkMask) != 0 ||
-		(DefaultAppQoSMarkMask & DefaultAppLimitMarkMask) != 0 {
+	if (DefaultDevMarkMask&DefaultAppQoSMarkMask) != 0 ||
+		(DefaultDevMarkMask&DefaultAppLimitMarkMask) != 0 ||
+		(DefaultAppQoSMarkMask&DefaultAppLimitMarkMask) != 0 {
 		t.Fatal("orthogonal mark masks overlap!")
 	}
 	if (DefaultDevMarkMask | DefaultAppQoSMarkMask | DefaultAppLimitMarkMask) != DefaultConnmarkMask {
@@ -935,11 +936,11 @@ func TestWave4FWDeleteSpecsAndCrossProcessLock(t *testing.T) {
 	// 1. 验证 nlDeleteDeviceHTB 根过滤器删除规格涵盖 pref 1/3/50/51
 	specs := deviceFWDeleteSpecs()
 	want := map[[2]uint16]bool{
-		{1, rtnlEthPAll}:  true,
-		{1, rtnlEthPIP}:   true,
-		{3, rtnlEthPIPv6}: true,
-		{50, rtnlEthPAll}: true,
-		{50, rtnlEthPIP}:  true,
+		{1, rtnlEthPAll}:   true,
+		{1, rtnlEthPIP}:    true,
+		{3, rtnlEthPIPv6}:  true,
+		{50, rtnlEthPAll}:  true,
+		{50, rtnlEthPIP}:   true,
 		{50, rtnlEthPIPv6}: true,
 		{51, rtnlEthPIPv6}: true,
 	}
@@ -994,7 +995,7 @@ func TestWave4FWDeleteSpecsAndCrossProcessLock(t *testing.T) {
 	}
 }
 
-// ── 6. HNC v6.0.0 T2: Vector Express (1:10) & UpdateLeash (1:9990) 字节级编码单测 ──
+// ── 6. HNC v6.0.0 T2 / RC1: Vector Express (1:8010) & UpdateLeash (1:9990) 字节级编码单测 ──
 
 func TestV6ExpressAndUpdateLeashNetlinkEncoding(t *testing.T) {
 	tick := pschedDefaultTickUsec
@@ -1003,15 +1004,63 @@ func TestV6ExpressAndUpdateLeashNetlinkEncoding(t *testing.T) {
 
 	expMsgs := buildVectorExpressUpsertBatch(4, false, rootBps, bgCeilBps, v6ExpressDefaultMark, DefaultAppQoSMarkMask, tick)
 	if len(expMsgs) != 5 {
-		t.Fatalf("expected 5 Vector Express upsert msgs (class 1:10, leaf fq_codel, fw v4, fw v6, bg 1:9999), got %d", len(expMsgs))
+		t.Fatalf("expected 5 Vector Express upsert msgs (class 1:8010, leaf fq_codel, fw v4, fw v6, bg 1:9999), got %d", len(expMsgs))
 	}
 
-	// 验证首条消息为 1:10 (0x00010010), parent 1:1 (0x00010001), prio 0
-	if gotH := binary.LittleEndian.Uint32(expMsgs[0][24:28]); gotH != 0x00010010 {
-		t.Fatalf("1:10 handle = 0x%08x, want 0x00010010", gotH)
+	// 验证首条消息为 1:8010 (0x00018010), parent 1:1 (0x00010001), prio 0
+	if gotH := binary.LittleEndian.Uint32(expMsgs[0][24:28]); gotH != 0x00018010 {
+		t.Fatalf("1:8010 handle = 0x%08x, want 0x00018010", gotH)
 	}
 	if gotP := binary.LittleEndian.Uint32(expMsgs[0][28:32]); gotP != rtnlHtbRootCls {
-		t.Fatalf("1:10 parent = 0x%08x, want 0x%08x", gotP, rtnlHtbRootCls)
+		t.Fatalf("1:8010 parent = 0x%08x, want 0x%08x", gotP, rtnlHtbRootCls)
+	}
+	// 验证下行叶子 handle 8010: (0x80100000) 与上行叶子 handle 8110: (0x81100000)
+	if gotLeafDn := binary.LittleEndian.Uint32(expMsgs[1][24:28]); gotLeafDn != 0x80100000 {
+		t.Fatalf("down leaf handle = 0x%08x, want 0x80100000", gotLeafDn)
+	}
+	upExpMsgs := buildVectorExpressUpsertBatch(5, true, rootBps, 0, v6ExpressDefaultMark, DefaultAppQoSMarkMask, tick)
+	if gotLeafUp := binary.LittleEndian.Uint32(upExpMsgs[1][24:28]); gotLeafUp != 0x81100000 {
+		t.Fatalf("up leaf handle = 0x%08x, want 0x81100000", gotLeafUp)
+	}
+	// 验证 fw 过滤器迁至 prio 4 (ETH_P_ALL) 与 prio 5 (ETH_P_IPV6), 且绝不触碰低 16 位
+	wantV4Info := (uint32(4) << 16) | uint32(rtnlHtons(rtnlEthPAll))
+	wantV6Info := (uint32(5) << 16) | uint32(rtnlHtons(rtnlEthPIPv6))
+	if gotInfo4 := binary.LittleEndian.Uint32(expMsgs[2][32:36]); gotInfo4 != wantV4Info {
+		t.Fatalf("v4 fw filter info = 0x%08x, want 0x%08x (prio 4)", gotInfo4, wantV4Info)
+	}
+	if gotInfo6 := binary.LittleEndian.Uint32(expMsgs[3][32:36]); gotInfo6 != wantV6Info {
+		t.Fatalf("v6 fw filter info = 0x%08x, want 0x%08x (prio 5)", gotInfo6, wantV6Info)
+	}
+	if gotMarkH := binary.LittleEndian.Uint32(expMsgs[2][24:28]); gotMarkH != 0x01000000 || (gotMarkH&0x0000ffff) != 0 {
+		t.Fatalf("unexpected fw filter handle 0x%08x", gotMarkH)
+	}
+
+	// 验证热升级残留清理: 无 mark_id==10 时逆序清理 fw(prio 2/4) -> qdisc(1010:) -> class(1:10); 有 mark_id==10 时保留 1:10
+	cleanDir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(cleanDir, "data"), 0o755)
+	_ = os.WriteFile(filepath.Join(cleanDir, "data", "rules.json"), []byte(`{"devices":{"aa:bb:cc:dd:ee:01":{"mark_id":2}}}`), 0o644)
+	legNo10 := buildVectorExpressLegacyCleanupBatch(cleanDir, 4, false, v6ExpressDefaultMark, DefaultAppQoSMarkMask)
+	if len(legNo10) != 5 {
+		t.Fatalf("expected 5 legacy cleanup msgs without mark_id==10, got %d", len(legNo10))
+	}
+	for i := 0; i < 3; i++ {
+		if binary.LittleEndian.Uint16(legNo10[i][4:6]) != rtnlDelTFilter ||
+			binary.LittleEndian.Uint32(legNo10[i][24:28]) != 0x01000000 ||
+			!strings.Contains(string(legNo10[i][36:]), "fw\x00") {
+			t.Fatalf("legacy filter delete msg[%d] must specify handle=0x01000000 and kind=fw", i)
+		}
+	}
+	if binary.LittleEndian.Uint16(legNo10[3][4:6]) != rtnlDelQdisc || binary.LittleEndian.Uint32(legNo10[3][24:28]) != 0x10100000 {
+		t.Fatalf("expected legacy leaf 1010: delete before 1:10 class delete")
+	}
+	if binary.LittleEndian.Uint16(legNo10[4][4:6]) != rtnlDelTClass || binary.LittleEndian.Uint32(legNo10[4][24:28]) != 0x00010010 {
+		t.Fatalf("expected legacy 1:10 class delete at end")
+	}
+
+	_ = os.WriteFile(filepath.Join(cleanDir, "data", "rules.json"), []byte(`{"devices":{"aa:bb:cc:dd:ee:10":{"mark_id":10}}}`), 0o644)
+	legWith10 := buildVectorExpressLegacyCleanupBatch(cleanDir, 4, false, v6ExpressDefaultMark, DefaultAppQoSMarkMask)
+	if len(legWith10) != 3 {
+		t.Fatalf("expected only 3 fw filter deletes when mark_id==10 exists (must keep 1:10!), got %d", len(legWith10))
 	}
 
 	// 验证 UpdateLeash 1:9990 (0x00019990), 默认 1500 Kbps (187,500 B/s), prio 7
@@ -1033,5 +1082,90 @@ func TestV6ExpressAndUpdateLeashNetlinkEncoding(t *testing.T) {
 	st, ok := parsed["1:9990"]
 	if !ok || st.RateKbit != 1500 || st.CeilKbit != 1500 || st.Prio != 7 {
 		t.Fatalf("unexpected 1:9990 decoded stat: %+v", st)
+	}
+}
+
+func TestEnsureAppLimitTopHooksBeforeHNCSaveAndBatchMultiIfindex(t *testing.T) {
+	// 1. 验证 ensureAppLimitTopHooksOnBin 确保 mangle/FORWARD(HNC_APP_LIMIT_UP)、filter/FORWARD(HNC_QUIC_APPLIM)
+	//    以及 mangle/POSTROUTING 严格在 HNC_SAVE 之前挂载 HNC_APP_LIMIT_DOWN (含错位自动纠正)
+	origRunner := nativeIptCmdRunner
+	defer func() { nativeIptCmdRunner = origRunner }()
+
+	var recorded []string
+	postMisordered := true
+	nativeIptCmdRunner = func(_ string, args ...string) (string, error) {
+		cmdStr := strings.Join(args, " ")
+		recorded = append(recorded, cmdStr)
+		switch {
+		case strings.Contains(cmdStr, "-t mangle -C FORWARD -j HNC_APP_LIMIT_UP"):
+			return "", errors.New("missing")
+		case strings.Contains(cmdStr, "-t mangle -L FORWARD -n --line-numbers"):
+			return "Chain FORWARD (policy ACCEPT)\n1    HNC_RESTORE  all  --  0.0.0.0/0  0.0.0.0/0\n2    HNC_MARK     all  --  0.0.0.0/0  0.0.0.0/0\n3    HNC_STATS    all  --  0.0.0.0/0  0.0.0.0/0\n", nil
+		case strings.Contains(cmdStr, "-t filter -C FORWARD -j HNC_QUIC_APPLIM"):
+			return "", errors.New("missing")
+		case strings.Contains(cmdStr, "-t mangle -C POSTROUTING -j HNC_APP_LIMIT_DOWN"):
+			if postMisordered {
+				return "", nil
+			}
+			return "", errors.New("deleted")
+		case strings.Contains(cmdStr, "-t mangle -D POSTROUTING -j HNC_APP_LIMIT_DOWN"):
+			postMisordered = false
+			return "", nil
+		case strings.Contains(cmdStr, "-t mangle -L POSTROUTING -n --line-numbers"):
+			if postMisordered {
+				return "Chain POSTROUTING (policy ACCEPT)\n1    HNC_SAVE            all  --  0.0.0.0/0  0.0.0.0/0\n2    HNC_APP_LIMIT_DOWN  all  --  0.0.0.0/0  0.0.0.0/0\n", nil
+			}
+			return "Chain POSTROUTING (policy ACCEPT)\n2    HNC_SAVE  all  --  0.0.0.0/0  0.0.0.0/0\n", nil
+		}
+		return "", nil
+	}
+
+	ensureAppLimitTopHooksOnBin("/system/bin/iptables")
+	allCmds := strings.Join(recorded, "\n")
+	if !strings.Contains(allCmds, "-t mangle -I FORWARD 4 -j HNC_APP_LIMIT_UP") {
+		t.Fatalf("expected HNC_APP_LIMIT_UP inserted at FORWARD pos 4, got:\n%s", allCmds)
+	}
+	if !strings.Contains(allCmds, "-t filter -I FORWARD 1 -j HNC_QUIC_APPLIM") {
+		t.Fatalf("expected HNC_QUIC_APPLIM inserted at filter/FORWARD pos 1, got:\n%s", allCmds)
+	}
+	if !strings.Contains(allCmds, "-t mangle -D POSTROUTING -j HNC_APP_LIMIT_DOWN") ||
+		!strings.Contains(allCmds, "-t mangle -I POSTROUTING 2 -j HNC_APP_LIMIT_DOWN") {
+		t.Fatalf("expected HNC_APP_LIMIT_DOWN relocated strictly before HNC_SAVE (pos 2), got:\n%s", allCmds)
+	}
+
+	// 2. 验证 nlApplyBatchWithFWFallbackOnSocket 对首条为 DELTFILTER、后续含多不重复 ifindex(9, 10) 的批次均确保根 htb 1: 与 1:1 就绪
+	origDumpQ := nlBatchDumpQdiscsFn
+	origDumpC := nlBatchDumpClassesFn
+	origEnsure := nlBatchEnsureHTBRootFn
+	defer func() {
+		nlBatchDumpQdiscsFn = origDumpQ
+		nlBatchDumpClassesFn = origDumpC
+		nlBatchEnsureHTBRootFn = origEnsure
+	}()
+
+	var ensured []int
+	nlBatchDumpQdiscsFn = func(_ int, ifidx int) ([]rtnlQdiscBrief, error) {
+		if ifidx == 9 {
+			// ifidx=9 仅有空 htb 1: 但缺父类 1:1 -> 必须触发补齐
+			return []rtnlQdiscBrief{{ifIndex: 9, handle: rtnlHtbRootMaj, kind: "htb"}}, nil
+		}
+		// ifidx=10 无根 htb -> 必须触发补齐
+		return nil, nil
+	}
+	nlBatchDumpClassesFn = func(_ int, _ int) (map[string]HTBClassStat, error) {
+		return map[string]HTBClassStat{}, nil
+	}
+	nlBatchEnsureHTBRootFn = func(_ int, ifidx int, _ uint16, _ uint64) error {
+		ensured = append(ensured, ifidx)
+		return nil
+	}
+
+	var batch [][]byte
+	batch = append(batch, buildDelFilterMsg(1, 9, rtnlHtbRootMaj, 0x01000000, 2, rtnlEthPAll, "fw"))
+	batch = append(batch, buildVectorExpressUpsertBatch(9, false, DefaultHTBRootRateBps, 0, v6ExpressDefaultMark, DefaultAppQoSMarkMask, pschedDefaultTickUsec)...)
+	batch = append(batch, buildVectorExpressUpsertBatch(10, true, DefaultHTBRootRateBps, 0, v6ExpressDefaultMark, DefaultAppQoSMarkMask, pschedDefaultTickUsec)...)
+	_, _ = nlApplyBatchWithFWFallbackOnSocket(-1, batch)
+	if len(ensured) != 2 || ensured[0] != 9 || ensured[1] != 10 {
+		t.Fatalf("expected HTB root+1:1 ensured on distinct ifindexes [9 10], got %v", ensured)
 	}
 }

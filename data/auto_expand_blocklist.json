@@ -1,5 +1,5 @@
 {
-  "_comment": "Apex domains where auto-expansion (走法 1) is BLOCKED. These are shared infrastructure (CDN, API gateways, generic SDK providers, analytics) — multiple unrelated companies use the same apex, so eTLD+1 identity inference would misattribute traffic. Update this file when you see misattributions in _auto_expanded.json (also possible: remove an entry from _auto_expanded.json + add its apex here + restart dpid). v5.7 will handle these via the candidate accumulator path (走法 2) with human approval instead.",
+  "_comment": "Apex domains where auto-expansion is BLOCKED. These are shared infrastructure (CDN, API gateways, generic SDK providers, analytics) — multiple unrelated apps share the same apex, so eTLD+1 identity inference would misattribute traffic. Shared apexes are routed through the candidate accumulator path with manual confirmation instead.",
   "blocked_apex": [
     "akamai.net",
     "akamaiedge.net",

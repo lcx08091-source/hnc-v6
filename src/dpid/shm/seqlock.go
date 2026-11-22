@@ -52,11 +52,10 @@ const (
 
 // Per-device bit flags stored in DeviceSlot.Flags.
 const (
-	FlagOnline     uint32 = 1 << 0
-	FlagIPv4       uint32 = 1 << 1
-	FlagIPv6       uint32 = 1 << 2
-	FlagLeakHit    uint32 = 1 << 3
-	FlagBackground uint32 = 1 << 4
+	FlagOnline  uint32 = 1 << 0
+	FlagIPv4    uint32 = 1 << 1
+	FlagIPv6    uint32 = 1 << 2
+	FlagLeakHit uint32 = 1 << 3
 )
 
 var (
@@ -397,18 +396,6 @@ func (w *Writer) Seq() uint64 {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.seq
-}
-
-// WriteSnapshot publishes a prepared Snapshot into the inactive latch slot.
-func (w *Writer) WriteSnapshot(snap *Snapshot) error {
-	if snap == nil {
-		return w.Write(MonotonicNs(), 0, 0, nil)
-	}
-	mono := snap.Header.UpdatedMonoNs
-	if mono <= 0 {
-		mono = MonotonicNs()
-	}
-	return w.WriteWithFlags(mono, snap.Header.ActiveFlows, snap.Header.TotalLeaks, snap.Header.Flags, snap.ValidDevices())
 }
 
 // Write publishes device slots + summary counters into the inactive latch slot

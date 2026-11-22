@@ -7,7 +7,7 @@
 //     - 内置按 (操作域, hncDir, iface, ifindex) 索引的 O(1) 增量摘要对账表, 自动去重无变化的重复下发。
 //  2. 三级自适应限速层级与启动期实证探针 ProbeDataplaneTier(hncDir, iface):
 //     - tier1_ebpf_edt: 硬件卸载已受控 + clsact BPF 就绪 + sch_fq (或 mq 子队列 fq) 实测可用;
-//     - tier2_native_netlink: 长连接 AF_NETLINK 原生维护 HTB 根/设备类/1:10 Vector Express/1:9990 UpdateLeash + fq_codel 叶子;
+//     - tier2_native_netlink: 长连接 AF_NETLINK 原生维护 HTB 根/设备类/1:8010 Vector Express/1:9990 UpdateLeash + fq_codel 叶子;
 //     - tier3_atomic_batch: 内存拼装 `tc -force -batch -` + `iptables-restore -w 2 --noflush` 管道兜底 (单次事务严格 <= 3 次子进程)。
 //  3. 32 位 ARM 对齐铁律: 所有包含 atomic.Uint64 / atomic.Int64 的结构体一律将 64 位原子字段置于 offset 0;
 //     100% 标准库 encoding/binary.LittleEndian, 零 unsafe。
@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,9 +83,10 @@ type v6ShaperDesiredState struct {
 }
 
 type v6ExpressDesiredState struct {
-	active     bool
-	gameMark   uint32
-	bgCeilKbps int
+	active       bool
+	gameMark     uint32
+	bgCeilKbps   int
+	upBgCeilKbps int
 }
 
 type v6LeashDesiredState struct {
@@ -102,10 +104,10 @@ type dataplaneActorJob struct {
 // DataplaneActor 单写者串行数据面执行器。
 // 严格遵守 32 位 ARM 对齐铁律: 所有 64 位原子字段严格排在结构体最起始位置 (offset 0..63)。
 type DataplaneActor struct {
-	savedForks      atomic.Uint64
-	nlOpsTotal      atomic.Uint64
-	nlFallbacks     atomic.Uint64
-	tier3Batches    atomic.Uint64
+	savedForks             atomic.Uint64
+	nlOpsTotal             atomic.Uint64
+	nlFallbacks            atomic.Uint64
+	tier3Batches           atomic.Uint64
 	dedupHits              atomic.Uint64
 	reconcileInvalidations atomic.Uint64
 	lastApplyUsec          atomic.Int64
@@ -120,13 +122,14 @@ type DataplaneActor struct {
 	stopOnce   sync.Once
 
 	// 以下字段仅由唯一常驻 writer 协程读写, 零并发竞争、零读侧锁等待:
-	nlFD         int
-	probeState   dataplaneProbeSnapshot
-	reconcileMap map[string]string
-	ifindexMap   map[string]int
-	shaperSpec   v6ShaperDesiredState
-	expressSpec  v6ExpressDesiredState
-	leashSpec    v6LeashDesiredState
+	nlFD                 int
+	probeState           dataplaneProbeSnapshot
+	reconcileMap         map[string]string
+	ifindexMap           map[string]int
+	expressLegacyCleaned map[string]bool
+	shaperSpec           v6ShaperDesiredState
+	expressSpec          v6ExpressDesiredState
+	leashSpec            v6LeashDesiredState
 }
 
 // dpTierHooks 汇总底层探测与执行钩子, 生产环境直连原生 AF_NETLINK / 批处理管道, 单测可局部替换确定性桩。
@@ -188,12 +191,13 @@ func init() {
 // NewDataplaneActor 创建并启动独立的单写者 DataplaneActor 实例。
 func NewDataplaneActor() *DataplaneActor {
 	a := &DataplaneActor{
-		reqCh:        make(chan dataplaneActorJob, dpActorQueueSize),
-		stopCh:       make(chan struct{}),
-		doneCh:       make(chan struct{}),
-		nlFD:         -1,
-		reconcileMap: make(map[string]string, 16),
-		ifindexMap:   make(map[string]int, 4),
+		reqCh:                make(chan dataplaneActorJob, dpActorQueueSize),
+		stopCh:               make(chan struct{}),
+		doneCh:               make(chan struct{}),
+		nlFD:                 -1,
+		reconcileMap:         make(map[string]string, 16),
+		ifindexMap:           make(map[string]int, 4),
+		expressLegacyCleaned: make(map[string]bool, 4),
 		probeState: dataplaneProbeSnapshot{
 			tier: DataplaneTierNativeNetlink,
 		},
@@ -323,6 +327,9 @@ func (a *DataplaneActor) invalidateAllReconcileLocked() int {
 		return 0
 	}
 	a.shaperSpec = v6ShaperDesiredState{}
+	if len(a.expressLegacyCleaned) > 0 {
+		clear(a.expressLegacyCleaned)
+	}
 	if len(a.reconcileMap) == 0 {
 		return 0
 	}
@@ -393,6 +400,9 @@ func (a *DataplaneActor) invalidateReconcileLocked(hncDir, iface string) int {
 		} else {
 			delete(a.ifindexMap, iface)
 		}
+	}
+	if len(a.expressLegacyCleaned) > 0 {
+		clear(a.expressLegacyCleaned)
 	}
 	if iface == "" || iface == "*" || a.shaperSpec.iface == iface || strings.HasPrefix(iface, "ifb") {
 		a.shaperSpec = v6ShaperDesiredState{}
@@ -818,15 +828,15 @@ func tuneGlobalShaperOnActor(actor *DataplaneActor, hncDir string, downKbps, upK
 	})
 }
 
-// ── 导出接口 2: ApplyVectorExpressNative (1:10 prio 0 特快通道) ──────────────
+// ── 导出接口 2: ApplyVectorExpressNative (1:8010 prio 0 特快通道) ────────────
 
 // ApplyVectorExpressNative 在热点下行口与 ifb0(若就绪)上通过原生 Netlink 幂等激活或停用
-// 1:10 高优特快队列 (prio 0 + 浅驻留 fq_codel: target=2ms, interval=40ms, quantum=300)。
-func ApplyVectorExpressNative(hncDir string, enable bool, gameMark uint32, bgCeilKbps int) error {
-	return applyVectorExpressOnActor(DefaultDataplaneActor(), hncDir, enable, gameMark, bgCeilKbps)
+// 1:8010 高优特快队列 (prio 0 + 浅驻留 fq_codel: target=2ms, interval=40ms, quantum=300)。
+func ApplyVectorExpressNative(hncDir string, active bool, mark uint32, bgCeilKbps int, optUpBgCeilKbps ...int) error {
+	return applyVectorExpressOnActor(DefaultDataplaneActor(), hncDir, active, mark, bgCeilKbps, optUpBgCeilKbps...)
 }
 
-func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool, gameMark uint32, bgCeilKbps int) error {
+func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool, gameMark uint32, bgCeilKbps int, optUpBgCeilKbps ...int) error {
 	if !useNativeDataplane(hncDir) {
 		return errors.New("native dataplane disabled for test/compat environment")
 	}
@@ -837,9 +847,17 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 	if gameMark == 0 {
 		gameMark = v6ExpressDefaultMark
 	}
+	gameMark &^= uint32(0x0000ffff)
 	gameMask := resolveOrthogonalFilterMask(gameMark, DefaultAppQoSMarkMask)
 	if !enable || bgCeilKbps < 0 {
 		bgCeilKbps = 0
+	}
+	reqUpBgCeilKbps := bgCeilKbps
+	if len(optUpBgCeilKbps) > 0 {
+		reqUpBgCeilKbps = optUpBgCeilKbps[0]
+	}
+	if !enable || reqUpBgCeilKbps < 0 {
+		reqUpBgCeilKbps = 0
 	}
 
 	h := getDPTierHooks()
@@ -856,10 +874,30 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 		if a.reconcileMap == nil {
 			a.reconcileMap = make(map[string]string, 16)
 		}
+		if a.expressLegacyCleaned == nil {
+			a.expressLegacyCleaned = make(map[string]bool, 4)
+		}
 		a.trackIfindexLocked(hncDir, iface, downIdx)
 		a.trackIfindexLocked(hncDir, "ifb0", ifbIdx)
+
+		upKbps := resolveConfiguredUpShaperKbpsWithServer(nil, hncDir, a.shaperSpec.upKbps)
+		downRootKbps := effectiveRootRateKbps(a.shaperSpec.downKbps)
+		downRootBps := effectiveRootRateBps(a.shaperSpec.downKbps)
+		upRootBps := effectiveRootRateBps(upKbps)
+		bgCeilBps := kbpsToBytesPerSec(bgCeilKbps)
+		upBgCeilBps := kbpsToBytesPerSec(reqUpBgCeilKbps)
+
+		// 铁律: 仅当全局上行整形已启用(upKbps > 0)且 upBgCeilBps < upRootBps 时才收紧 ifb0 1:9999;
+		// 当 upKbps == 0 时强制 upBgCeil = 0, 绝不误拿 1000mbit 根速率乱锁上行!
+		upBgCeil := uint64(0)
+		effUpBgCeilKbps := 0
+		if enable && upBgCeilBps > 0 && upKbps > 0 && upBgCeilBps < upRootBps {
+			upBgCeil = upBgCeilBps
+			effUpBgCeilKbps = reqUpBgCeilKbps
+		}
+
 		digestKey := "express:" + hncDir + ":" + iface
-		digestVal := fmt.Sprintf("%d:%d:%t:0x%08x:%d", downIdx, ifbIdx, enable, gameMark&gameMask, bgCeilKbps)
+		digestVal := fmt.Sprintf("%d:%d:%t:0x%08x:%d:%d", downIdx, ifbIdx, enable, gameMark&gameMask, bgCeilKbps, effUpBgCeilKbps)
 		if prev, ok := a.reconcileMap[digestKey]; ok && prev == digestVal {
 			a.dedupHits.Add(1)
 			a.savedForks.Add(1)
@@ -875,19 +913,21 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 		}
 		defer unlock()
 
-		downRootBps := effectiveRootRateBps(a.shaperSpec.downKbps)
-		upRootBps := effectiveRootRateBps(a.shaperSpec.upKbps)
-		bgCeilBps := kbpsToBytesPerSec(bgCeilKbps)
 		tick := readPschedTickInUsec()
 
+		legacyKey := fmt.Sprintf("%s:%s:%d:%d", hncDir, iface, downIdx, ifbIdx)
+		needLegacyCleanup := !a.expressLegacyCleaned[legacyKey]
+
 		var allMsgs [][]byte
+		if needLegacyCleanup {
+			allMsgs = append(allMsgs, buildVectorExpressLegacyCleanupBatch(hncDir, downIdx, false, gameMark, gameMask)...)
+			if ifbIdx > 0 {
+				allMsgs = append(allMsgs, buildVectorExpressLegacyCleanupBatch(hncDir, ifbIdx, true, gameMark, gameMask)...)
+			}
+		}
 		if enable {
 			allMsgs = append(allMsgs, buildVectorExpressUpsertBatch(downIdx, false, downRootBps, bgCeilBps, gameMark, gameMask, tick)...)
 			if ifbIdx > 0 {
-				upBgCeil := uint64(0)
-				if bgCeilBps > 0 && upRootBps > 0 && bgCeilBps < upRootBps {
-					upBgCeil = bgCeilBps
-				}
 				allMsgs = append(allMsgs, buildVectorExpressUpsertBatch(ifbIdx, true, upRootBps, upBgCeil, gameMark, gameMask, tick)...)
 			}
 		} else {
@@ -903,11 +943,13 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 				return bErr
 			})
 			if nlErr == nil {
+				a.expressLegacyCleaned[legacyKey] = true
 				a.reconcileMap[digestKey] = digestVal
 				a.expressSpec = v6ExpressDesiredState{
-					active:     enable,
-					gameMark:   gameMark & gameMask,
-					bgCeilKbps: bgCeilKbps,
+					active:       enable,
+					gameMark:     gameMark & gameMask,
+					bgCeilKbps:   bgCeilKbps,
+					upBgCeilKbps: effUpBgCeilKbps,
 				}
 				a.savedForks.Add(2)
 				a.publishSnapshotLocked()
@@ -917,14 +959,19 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 		}
 
 		// Tier 3 批处理管道兜底 (单次 `tc -force -batch -` <= 3 次外部调用)
-		tcLines := buildTier3VectorExpressBatchLines(iface, ifbIdx > 0, enable, gameMark&gameMask, gameMask, bgCeilKbps, effectiveRootRateKbps(a.shaperSpec.downKbps))
-		if bErr := execTier3AtomicBatch(h, tcLines, nil, nil); bErr == nil {
+		cleanLegacyCls := needLegacyCleanup && !rulesHasMarkID10(hncDir)
+		if bErr := applyVectorExpressBatchFallback(
+			h, iface, ifbIdx > 0, enable, needLegacyCleanup, cleanLegacyCls,
+			gameMark&gameMask, gameMask, bgCeilKbps, effUpBgCeilKbps, downRootKbps, upKbps,
+		); bErr == nil {
 			a.tier3Batches.Add(1)
+			a.expressLegacyCleaned[legacyKey] = true
 			a.reconcileMap[digestKey] = digestVal
 			a.expressSpec = v6ExpressDesiredState{
-				active:     enable,
-				gameMark:   gameMark & gameMask,
-				bgCeilKbps: bgCeilKbps,
+				active:       enable,
+				gameMark:     gameMark & gameMask,
+				bgCeilKbps:   bgCeilKbps,
+				upBgCeilKbps: effUpBgCeilKbps,
 			}
 			a.publishSnapshotLocked()
 			return nil
@@ -932,6 +979,130 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 		a.publishSnapshotLocked()
 		return errors.New("ApplyVectorExpressNative: netlink and tier3 batch failed")
 	})
+}
+
+func resolveActiveVectorExpressParamsFull(s *server, hncDir string) (active bool, gameMark uint32, bgCeilKbps int, upBgCeilKbps int) {
+	if hncDir == "" && s != nil {
+		hncDir = s.hncDir
+	}
+	gameMark = v6ExpressDefaultMark
+	var globalDownKbps, globalUpKbps int
+
+	if defaultDPActorReady.Load() {
+		st := CurrentDataplaneTierStatus()
+		globalDownKbps = st.GlobalDownKbps
+		globalUpKbps = st.GlobalUpKbps
+		if st.ExpressActive {
+			active = true
+			bgCeilKbps = st.ExpressBgCeilKbps
+		}
+		_ = DefaultDataplaneActor().Do("read_express_spec", func(a *DataplaneActor) error {
+			if a.expressSpec.gameMark != 0 {
+				gameMark = a.expressSpec.gameMark
+			}
+			if a.expressSpec.active {
+				active = true
+				if a.expressSpec.bgCeilKbps > 0 {
+					bgCeilKbps = a.expressSpec.bgCeilKbps
+				}
+				if a.expressSpec.upBgCeilKbps > 0 {
+					upBgCeilKbps = a.expressSpec.upBgCeilKbps
+				}
+			}
+			return nil
+		})
+	}
+
+	bgPct := 0
+	if s != nil {
+		if v, ok := v6Registry.Load(s); ok {
+			if vs, ok := v.(*v6ServerState); ok && vs != nil && vs.express != nil && vs.express.isActive() {
+				active = true
+				vs.express.mu.Lock()
+				bgPct = vs.express.lastApplied.BgPoolCeilPct
+				if bgPct <= 0 || bgPct >= 100 {
+					bgPct = vs.express.cfg.BgCeilPct
+				}
+				vs.express.mu.Unlock()
+			}
+		}
+	}
+	if !active && hncDir != "" {
+		if b, err := os.ReadFile(filepath.Join(hncDir, "run", "vector_express_state.json")); err == nil && len(b) > 0 {
+			var spec VectorExpressDataplaneSpec
+			if json.Unmarshal(b, &spec) == nil && spec.Active {
+				active = true
+				bgPct = spec.BgPoolCeilPct
+			}
+		}
+	}
+	if active && bgPct > 0 && bgPct < 100 {
+		if bgCeilKbps <= 0 {
+			baseDownKbps := globalDownKbps
+			if baseDownKbps <= 0 {
+				diskDownMbps, _ := readAutorateDiskCurMbps(hncDir)
+				if s != nil && s.autorate != nil {
+					if ar := s.autorate.Snapshot(); ar.Enabled && ar.CurDownMbps > 0 && (diskDownMbps <= 0 || (ar.State != "sleeping" && ar.State != "disabled")) {
+						baseDownKbps = int(math.Round(ar.CurDownMbps * 1000.0))
+					}
+				}
+				if baseDownKbps <= 0 && diskDownMbps > 0 {
+					baseDownKbps = int(math.Round(diskDownMbps * 1000.0))
+				}
+			}
+			if baseDownKbps <= 0 {
+				var downBps int64
+				if s != nil {
+					downBps, _ = s.readStaticGlobalShaperBps()
+				}
+				if downBps <= 0 && hncDir != "" {
+					downBps, _ = readStaticShaperDiskBps(hncDir)
+				}
+				if downBps > 0 {
+					baseDownKbps = int((downBps * 8) / 1000)
+				}
+			}
+			if baseDownKbps > 0 {
+				bgCeilKbps = (baseDownKbps * bgPct) / 100
+				if bgCeilKbps <= 0 {
+					bgCeilKbps = 1
+				}
+			}
+		}
+		if upBgCeilKbps <= 0 {
+			baseUpKbps := resolveConfiguredUpShaperKbpsWithServer(s, hncDir, globalUpKbps)
+			if baseUpKbps > 0 {
+				upBgCeilKbps = (baseUpKbps * bgPct) / 100
+				if upBgCeilKbps <= 0 {
+					upBgCeilKbps = 1
+				}
+			}
+		}
+	}
+	return active, gameMark &^ uint32(0x0000ffff), bgCeilKbps, upBgCeilKbps
+}
+
+// resolveActiveVectorExpressParams 检查当前 Vector Express 是否处于活跃护航态,
+// 聚合 DataplaneActor 内存期望、server.v6State().express 实时状态与 run/vector_express_state.json。
+func resolveActiveVectorExpressParams(s *server, hncDir string) (active bool, gameMark uint32, bgCeilKbps int) {
+	active, gameMark, bgCeilKbps, _ = resolveActiveVectorExpressParamsFull(s, hncDir)
+	return active, gameMark, bgCeilKbps
+}
+
+// replayVectorExpressIfActive 在数据面 resync / 全量恢复后若 Vector Express 处于活跃态则幂等重放 1:8010。
+func replayVectorExpressIfActive(s *server, hncDir string) {
+	if hncDir == "" && s != nil {
+		hncDir = s.hncDir
+	}
+	if hncDir == "" {
+		return
+	}
+	active, gameMark, bgCeilKbps, upBgCeilKbps := resolveActiveVectorExpressParamsFull(s, hncDir)
+	if !active {
+		return
+	}
+	InvalidateDataplaneReconcileNative(hncDir, "")
+	_ = ApplyVectorExpressNative(hncDir, true, gameMark, bgCeilKbps, upBgCeilKbps)
 }
 
 // ── 导出接口 3: ApplyUpdateLeashNative (1:9990 后台细流限速类) ───────────────
@@ -1059,6 +1230,7 @@ func applyUpdateLeashOnActor(actor *DataplaneActor, hncDir string, leashMark uin
 //  1. `tc -force -batch -` (1 次)
 //  2. `iptables-restore -w 2 --noflush` (最多 1 次)
 //  3. `ip6tables-restore -w 2 --noflush` (最多 1 次)
+//
 // 整个事务总外部子进程派生数严格封顶 <= 3!
 func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore []byte) error {
 	subprocs := 0
@@ -1154,51 +1326,126 @@ func buildTier3GlobalShaperBatchLines(iface string, downKbps int, hasIFB bool, u
 	return lines
 }
 
-func buildTier3VectorExpressBatchLines(iface string, hasIFB, enable bool, markVal, markMask uint32, bgCeilKbps, rootDownKbps int) []string {
-	targets := []struct {
-		dev    string
-		leafID string
-	}{
-		{dev: iface, leafID: "1010:"},
-	}
-	if hasIFB {
-		targets = append(targets, struct {
-			dev    string
-			leafID string
-		}{dev: "ifb0", leafID: "1110:"})
+func applyVectorExpressBatchFallback(
+	h dpTierHooks,
+	iface string,
+	hasIFB, enable, cleanupLegacy, cleanLegacyClass bool,
+	markVal, markMask uint32,
+	bgCeilKbps, upBgCeilKbps, rootDownKbps, upKbps int,
+) error {
+	tcLines := buildTier3VectorExpressBatchLines(
+		iface, hasIFB, enable, cleanupLegacy, cleanLegacyClass,
+		markVal, markMask, bgCeilKbps, rootDownKbps, upKbps, upBgCeilKbps,
+	)
+	return execTier3AtomicBatch(h, tcLines, nil, nil)
+}
+
+func buildTier3VectorExpressBatchLines(
+	iface string,
+	hasIFB, enable, cleanupLegacy, cleanLegacyClass bool,
+	markVal, markMask uint32,
+	bgCeilKbps, rootDownKbps, configuredUpKbps int,
+	optUpBgCeilKbps ...int,
+) []string {
+	const low16Mask = uint32(0x0000ffff)
+	markVal &^= low16Mask
+	markMask &^= low16Mask
+	if markMask == 0 {
+		markMask = DefaultAppQoSMarkMask
 	}
 	if rootDownKbps <= 0 {
 		rootDownKbps = dpDefaultRootRateKbp
 	}
+	rootUpKbps := configuredUpKbps
+	if rootUpKbps <= 0 {
+		rootUpKbps = dpDefaultRootRateKbp
+	}
+	upBgCeilKbps := bgCeilKbps
+	if len(optUpBgCeilKbps) > 0 {
+		upBgCeilKbps = optUpBgCeilKbps[0]
+	}
+	if configuredUpKbps <= 0 || upBgCeilKbps <= 0 {
+		upBgCeilKbps = 0
+	}
+	targets := []struct {
+		dev          string
+		leafID       string
+		legacyLeafID string
+		rootKbps     int
+		isUplink     bool
+	}{
+		{dev: iface, leafID: "8010:", legacyLeafID: "1010:", rootKbps: rootDownKbps, isUplink: false},
+	}
+	if hasIFB {
+		targets = append(targets, struct {
+			dev          string
+			leafID       string
+			legacyLeafID string
+			rootKbps     int
+			isUplink     bool
+		}{dev: "ifb0", leafID: "8110:", legacyLeafID: "1110:", rootKbps: rootUpKbps, isUplink: true})
+	}
+
+	legacyMark := v6ExpressDefaultMark & DefaultAppQoSMarkMask
+	legacyMask := DefaultAppQoSMarkMask
+	masked := markVal & markMask
+
 	var lines []string
 	for _, tg := range targets {
+		if cleanupLegacy {
+			lines = append(lines,
+				fmt.Sprintf("filter del dev %s parent 1: protocol all prio 2 handle 0x%x/0x%x fw", tg.dev, legacyMark, legacyMask),
+				fmt.Sprintf("filter del dev %s parent 1: protocol ip prio 2 handle 0x%x/0x%x fw", tg.dev, legacyMark, legacyMask),
+				fmt.Sprintf("filter del dev %s parent 1: protocol ipv6 prio 4 handle 0x%x/0x%x fw", tg.dev, legacyMark, legacyMask),
+			)
+			if masked != 0 && masked != legacyMark {
+				lines = append(lines,
+					fmt.Sprintf("filter del dev %s parent 1: protocol all prio 2 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+					fmt.Sprintf("filter del dev %s parent 1: protocol ip prio 2 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+					fmt.Sprintf("filter del dev %s parent 1: protocol ipv6 prio 4 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+				)
+			}
+			if cleanLegacyClass {
+				lines = append(lines,
+					fmt.Sprintf("qdisc del dev %s parent 1:10 handle %s", tg.dev, tg.legacyLeafID),
+					fmt.Sprintf("class del dev %s parent 1:1 classid 1:10", tg.dev),
+				)
+			}
+		}
 		if enable {
-			expRate := rootDownKbps / 4
+			expRate := tg.rootKbps / 4
 			if expRate < 20000 {
 				expRate = 20000
 			}
-			if expRate > rootDownKbps {
-				expRate = rootDownKbps
+			if expRate > tg.rootKbps {
+				expRate = tg.rootKbps
 			}
 			lines = append(lines,
-				fmt.Sprintf("class replace dev %s parent 1:1 classid 1:10 htb rate %dkbit ceil %dkbit prio 0 quantum 1514", tg.dev, expRate, rootDownKbps),
-				fmt.Sprintf("qdisc replace dev %s parent 1:10 handle %s fq_codel target 2ms interval 40ms quantum 300 limit 512", tg.dev, tg.leafID),
-				fmt.Sprintf("filter replace dev %s parent 1: protocol ip prio 2 handle 0x%x/0x%x fw flowid 1:10", tg.dev, markVal, markMask),
-				fmt.Sprintf("filter replace dev %s parent 1: protocol ipv6 prio 4 handle 0x%x/0x%x fw flowid 1:10", tg.dev, markVal, markMask),
+				fmt.Sprintf("class replace dev %s parent 1:1 classid 1:8010 htb rate %dkbit ceil %dkbit prio 0 quantum 1514", tg.dev, expRate, tg.rootKbps),
+				fmt.Sprintf("qdisc replace dev %s parent 1:8010 handle %s fq_codel target 2ms interval 40ms quantum 300 limit 512", tg.dev, tg.leafID),
+				fmt.Sprintf("filter replace dev %s parent 1: protocol ip prio 4 handle 0x%x/0x%x fw flowid 1:8010", tg.dev, masked, markMask),
+				fmt.Sprintf("filter replace dev %s parent 1: protocol ipv6 prio 5 handle 0x%x/0x%x fw flowid 1:8010", tg.dev, masked, markMask),
 			)
-			if bgCeilKbps > 0 && tg.dev == iface {
-				lines = append(lines, fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9999 htb rate %dkbit ceil %dkbit prio 7", tg.dev, bgCeilKbps, bgCeilKbps))
+			if !tg.isUplink {
+				if bgCeilKbps > 0 {
+					lines = append(lines, fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9999 htb rate %dkbit ceil %dkbit prio 7", tg.dev, bgCeilKbps, bgCeilKbps))
+				}
+			} else if configuredUpKbps > 0 && upBgCeilKbps > 0 && upBgCeilKbps < tg.rootKbps {
+				lines = append(lines, fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9999 htb rate %dkbit ceil %dkbit prio 7", tg.dev, upBgCeilKbps, upBgCeilKbps))
 			}
 		} else {
-			lines = append(lines,
-				fmt.Sprintf("filter del dev %s parent 1: protocol ip prio 2", tg.dev),
-				fmt.Sprintf("filter del dev %s parent 1: protocol ipv6 prio 4", tg.dev),
-				fmt.Sprintf("qdisc del dev %s parent 1:10", tg.dev),
-				fmt.Sprintf("class del dev %s parent 1:1 classid 1:10", tg.dev),
-			)
-			if tg.dev == iface {
-				lines = append(lines, fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9999 htb rate %dkbit ceil %dkbit prio 7", tg.dev, rootDownKbps, rootDownKbps))
+			if masked != 0 {
+				lines = append(lines,
+					fmt.Sprintf("filter del dev %s parent 1: protocol all prio 4 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+					fmt.Sprintf("filter del dev %s parent 1: protocol ip prio 4 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+					fmt.Sprintf("filter del dev %s parent 1: protocol ipv6 prio 5 handle 0x%x/0x%x fw", tg.dev, masked, markMask),
+				)
 			}
+			lines = append(lines,
+				fmt.Sprintf("qdisc del dev %s parent 1:8010 handle %s", tg.dev, tg.leafID),
+				fmt.Sprintf("class del dev %s parent 1:1 classid 1:8010", tg.dev),
+				fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9999 htb rate %dkbit ceil %dkbit prio 7", tg.dev, tg.rootKbps, tg.rootKbps),
+			)
 		}
 	}
 	return lines

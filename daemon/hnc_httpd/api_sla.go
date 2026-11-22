@@ -8,7 +8,6 @@
 //   dpid.start_count            (dpid main 启动 +1, 持久, lifetime 重启数)
 //   watchdog_full_restore.count (watchdog full_restore +1, 持久)
 //   dpid.crashflag              (崩溃环启动时间戳, 健康跑 5min 后清; 行数=近期崩溃启动)
-//   dpid_guard.heartbeat        (supervisor 2s 一次; now-ts = 心跳年龄)
 //   tc_repair_fail_count        (watchdog tc 修复连续失败数, 熔断器)
 //   uplink_fail_count           (上行 IFB/police 失败累计)
 //   tc_qos_fallback / uplink_unsupported (能力降级标记, 存在=降级中)
@@ -51,17 +50,6 @@ func (s *server) apiSLA(w http.ResponseWriter, r *http.Request) {
 		}
 		return c
 	}
-	heartbeatAge := func() interface{} {
-		b, err := os.ReadFile(filepath.Join(run, "dpid_guard.heartbeat"))
-		if err != nil {
-			return nil
-		}
-		ts, err := strconv.ParseInt(strings.TrimSpace(string(b)), 10, 64)
-		if err != nil {
-			return nil
-		}
-		return time.Now().Unix() - ts
-	}
 	marker := func(name string) bool {
 		_, err := os.Stat(filepath.Join(run, name))
 		return err == nil
@@ -72,7 +60,6 @@ func (s *server) apiSLA(w http.ResponseWriter, r *http.Request) {
 		// 重启 / 崩溃
 		"dpid_restart_count":          readInt("dpid.start_count"),
 		"dpid_crash_recent":           countLines("dpid.crashflag"),
-		"dpid_guard_heartbeat_age_s":  heartbeatAge(),
 		"watchdog_full_restore_count": readInt("watchdog_full_restore.count"),
 		// tc / 上行健康
 		"tc_repair_fail_count": readInt("tc_repair_fail_count"),

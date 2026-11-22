@@ -15,11 +15,11 @@ func line(ts int64, level string, screenOn, known, hot bool, clients int, ui boo
 func TestParse(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	s := Parse(line(now.Unix()-10, LevelHotspotOff, false, true, false, 0, false), now)
-	if !s.OK || s.Level != LevelHotspotOff || !s.Quiet || s.Hotspot || s.Clients != 0 {
+	if !s.OK || s.Level != LevelHotspotOff || !s.Quiet || s.WebUI || s.Hotspot || s.Clients != 0 {
 		t.Fatalf("fresh hotspot_off: %+v", s)
 	}
 	// 过期 → 不可信, 保守
-	if s := Parse(line(now.Unix()-300, LevelHotspotOff, false, true, false, 0, false), now); s.OK || s.Level != LevelUnknown || !s.Hotspot {
+	if s := Parse(line(now.Unix()-300, LevelHotspotOff, false, true, false, 0, false), now); s.OK || s.Level != LevelUnknown || !s.Hotspot || s.WebUI {
 		t.Errorf("stale: %+v", s)
 	}
 	// 未来时间(时钟回拨)
@@ -33,8 +33,8 @@ func TestParse(t *testing.T) {
 	if s := Parse(line(now.Unix(), "unknown", true, true, true, 1, false), now); s.OK {
 		t.Error("unknown level must not be OK")
 	}
-	// 界面在看 → 不 quiet
-	if s := Parse(line(now.Unix(), LevelActive, false, true, true, 2, true), now); !s.OK || s.Quiet {
+	// 界面在看 → WebUI=true 且不 quiet
+	if s := Parse(line(now.Unix(), LevelActive, false, true, true, 2, true), now); !s.OK || s.Quiet || !s.WebUI {
 		t.Errorf("ui: %+v", s)
 	}
 	// 屏幕未知 → 不 quiet
@@ -46,9 +46,11 @@ func TestParse(t *testing.T) {
 func TestIntervals(t *testing.T) {
 	now := time.Unix(1_700_000_000, 0)
 	off := Parse(line(now.Unix(), LevelHotspotOff, false, true, false, 0, false), now)
+	offUI := Parse(line(now.Unix(), LevelHotspotOff, false, true, false, 0, true), now)
 	none := Parse(line(now.Unix(), LevelNoClients, true, true, true, 0, false), now)
 	bg := Parse(line(now.Unix(), LevelBackground, false, true, true, 2, false), now)
 	act := Parse(line(now.Unix(), LevelActive, true, true, true, 2, false), now)
+	actUI := Parse(line(now.Unix(), LevelActive, false, true, true, 2, true), now)
 	unk := Snapshot{Level: LevelUnknown}
 	cases := []struct {
 		name string
@@ -63,6 +65,13 @@ func TestIntervals(t *testing.T) {
 		{"flush act", StateFlushEvery(act), 5 * time.Second},
 		{"blind off", BlindFlushEvery(off), 30 * time.Second},
 		{"blind unk", BlindFlushEvery(unk), 10 * time.Second},
+		{"shm unk", ShmFlushEvery(unk), time.Second},
+		{"shm off", ShmFlushEvery(off), 10 * time.Second},
+		{"shm off+webui", ShmFlushEvery(offUI), time.Second},
+		{"shm no_clients", ShmFlushEvery(none), 10 * time.Second},
+		{"shm quiet", ShmFlushEvery(bg), 5 * time.Second},
+		{"shm screen_on", ShmFlushEvery(act), time.Second},
+		{"shm webui_active", ShmFlushEvery(actUI), time.Second},
 		{"bytes disabled", ByteSampleEvery(act, false), 0},
 		{"bytes bg", ByteSampleEvery(bg, true), 30 * time.Second},
 		{"bytes act", ByteSampleEvery(act, true), 5 * time.Second},
@@ -73,10 +82,13 @@ func TestIntervals(t *testing.T) {
 			t.Errorf("%s: %v want %v", c.name, c.got, c.want)
 		}
 	}
-	// 状态落盘必须远小于自检「卡住」阈值 180s
-	for _, s := range []Snapshot{off, none, bg, act, unk} {
+	// 状态落盘必须远小于自检「卡住」阈值 180s; SHM 落盘必须严格 < 15s 防 CoreHub 陈旧误判
+	for _, s := range []Snapshot{off, offUI, none, bg, act, actUI, unk} {
 		if StateFlushEvery(s) >= 180*time.Second || BlindFlushEvery(s) >= 180*time.Second {
 			t.Errorf("flush too slow for %+v", s)
+		}
+		if ShmFlushEvery(s) <= 0 || ShmFlushEvery(s) >= 15*time.Second {
+			t.Errorf("shm flush out of (0, 15s) range for %+v: %v", s, ShmFlushEvery(s))
 		}
 	}
 }

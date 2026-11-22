@@ -145,7 +145,7 @@ if [ -f bin/hnc_dpid ]; then
     warn "od unavailable; cannot inspect bin/hnc_dpid architecture"
   fi
   if command -v strings >/dev/null 2>&1; then
-    DPID_MARKERS="$({ strings -a bin/hnc_dpid 2>/dev/null || strings bin/hnc_dpid 2>/dev/null; } | grep -E '0\.1\.0-rc1\.2-fixed|0\.1\.0-rc1\.3|0\.2\.0-l2-rc19|0\.3\.0-l3-rc20|0\.3\.1-l3-rc20\.1|0\.4\.0-rc23|hnc_dpid' | head -n 5)"
+    DPID_MARKERS="$({ strings -a bin/hnc_dpid 2>/dev/null || strings bin/hnc_dpid 2>/dev/null; } | grep -E '0\.5\.|hnc_dpid' | head -n 5)"
     if [ -n "$DPID_MARKERS" ]; then ok "hnc_dpid contains expected version/name marker"; else fail "hnc_dpid missing expected version/name marker"; fi
   else
     warn "strings unavailable; cannot inspect hnc_dpid version/name marker"
@@ -290,7 +290,7 @@ if [ -n "$ARTIFACT" ]; then
           warn "od unavailable; cannot inspect artifact hnc_dpid architecture"
         fi
         if command -v strings >/dev/null 2>&1; then
-          DPID_ART_MARKERS="$({ strings -a "$ZIPTMP.hnc_dpid" 2>/dev/null || strings "$ZIPTMP.hnc_dpid" 2>/dev/null; } | grep -E '0\.1\.0-rc1\.2-fixed|0\.1\.0-rc1\.3|0\.2\.0-l2-rc19|0\.3\.0-l3-rc20|0\.3\.1-l3-rc20\.1|0\.4\.0-rc23|hnc_dpid' | head -n 5)"
+          DPID_ART_MARKERS="$({ strings -a "$ZIPTMP.hnc_dpid" 2>/dev/null || strings "$ZIPTMP.hnc_dpid" 2>/dev/null; } | grep -E '0\.5\.|hnc_dpid' | head -n 5)"
           if [ -n "$DPID_ART_MARKERS" ]; then ok "artifact hnc_dpid contains expected version/name marker"; else fail "artifact hnc_dpid missing expected version/name marker"; fi
         fi
       else

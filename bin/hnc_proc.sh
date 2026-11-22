@@ -80,7 +80,7 @@ prune_duplicate_hotspotd() {
             seen=1
             continue
         fi
-        log "rc17: killing duplicate hotspotd pid=$p keep=$keep"
+        log "killing duplicate hotspotd pid=$p keep=$keep"
         kill -9 "$p" 2>/dev/null || true
     done
 }

@@ -9,16 +9,11 @@
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
 RULES="$HNC_DIR/data/rules.json"
 LOG="$HNC_DIR/logs/service.log"
-DRY=0
-[ "$1" = "--dry-run" ] && DRY=1
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
 
 log() { { echo "$(date '+%Y-%m-%d %H:%M:%S') [quic_block] $*" >> "$LOG"; } 2>/dev/null; }
-run() {
-    if [ "$DRY" = "1" ]; then echo "DRY: $*"; return 0; fi
-    "$@" 2>/dev/null
-}
+run() { "$@" 2>/dev/null; }
 
 mode=false
 if [ -f "$RULES" ]; then
@@ -40,10 +35,8 @@ fi
 
 v6=0
 _ip6_bin="${IP6T%% *}"
-if command -v "$_ip6_bin" >/dev/null 2>&1; then
-    if [ "$DRY" = "1" ] || $IP6T -t filter -L -n >/dev/null 2>&1; then
-        v6=1
-    fi
+if command -v "$_ip6_bin" >/dev/null 2>&1 && $IP6T -t filter -L -n >/dev/null 2>&1; then
+    v6=1
 fi
 
 teardown() {
@@ -54,7 +47,6 @@ teardown() {
         while run $T -t filter -D FORWARD -j HNC_QUIC; do
             i=$((i + 1))
             [ "$i" -ge 20 ] && break
-            [ "$DRY" = 1 ] && break
         done
         run $T -t filter -F HNC_QUIC
         run $T -t filter -X HNC_QUIC

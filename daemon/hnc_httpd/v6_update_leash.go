@@ -129,12 +129,18 @@ type UpdateLeashSession struct {
 
 	lastFlowTotals map[string]uint64
 	accumFromEnded uint64
+	updatedTime    time.Time
 }
 
 type updateLeashEngine struct {
 	// 64 位原子字段严格置于 offset 0 (兼容 32-bit ARM)
 	leashedCount atomic.Int64
 	totalSavedB  atomic.Uint64
+
+	// 非 64 位原子字段、通道与钩子严格排在全部 64 位原子字段之后
+	loopMode atomic.Int32
+	wakeOnce sync.Once
+	wakeCh   chan struct{}
 
 	srv               *server
 	mu                sync.Mutex
@@ -146,10 +152,21 @@ type updateLeashEngine struct {
 	applyHook         func(active []UpdateLeashSession)
 	lastPersistedKey  string
 	hasPersistedState bool
+	lastAppliedKbps   int
+
+	pollInterval     time.Duration
+	idleExpire       time.Duration
+	activityHook     func() (<-chan struct{}, Activity)
+	simActiveHook    func() bool
+	flowsHook        func() []UpdateFlowInput
+	applyDataplaneFn func(hncDir string, leashMark uint32, rateKbps int) error
+	removeNativeFn   func(hncDir string, leashMark uint32) error
+	invalidateFn     func(hncDir, iface string)
 }
 
 func newUpdateLeashEngine(s *server) *updateLeashEngine {
 	eng := &updateLeashEngine{
+		wakeCh:      make(chan struct{}, 1),
 		srv:         s,
 		cfg:         defaultUpdateLeashConfig(),
 		sessions:    make(map[string]*UpdateLeashSession),
@@ -159,6 +176,59 @@ func newUpdateLeashEngine(s *server) *updateLeashEngine {
 	eng.loadConfigLocked()
 	eng.reloadRuleSuffixesLocked()
 	return eng
+}
+
+func (e *updateLeashEngine) effectivePollInterval() time.Duration {
+	if e != nil && e.pollInterval > 0 {
+		return e.pollInterval
+	}
+	return 5 * time.Second
+}
+
+func (e *updateLeashEngine) effectiveIdleExpire() time.Duration {
+	if e != nil && e.idleExpire > 0 {
+		return e.idleExpire
+	}
+	return leashFlowIdleExpire
+}
+
+func (e *updateLeashEngine) ensureWakeCh() chan struct{} {
+	if e == nil {
+		return nil
+	}
+	e.wakeOnce.Do(func() {
+		if e.wakeCh == nil {
+			e.wakeCh = make(chan struct{}, 1)
+		}
+	})
+	return e.wakeCh
+}
+
+// Wake 非阻塞唤醒更新拴绳协程（配置变更或手动放行/暂停后即时重算）。
+func (e *updateLeashEngine) Wake() {
+	ch := e.ensureWakeCh()
+	if ch == nil {
+		return
+	}
+	select {
+	case ch <- struct{}{}:
+	default:
+	}
+}
+
+// LoopMode 返回当前更新拴绳协程的休眠/一次性释放定时器/活跃周期档位。
+func (e *updateLeashEngine) LoopMode() v6EngineLoopMode {
+	if e == nil {
+		return v6EngineModeSleeping
+	}
+	return v6EngineLoopMode(e.loopMode.Load())
+}
+
+func (e *updateLeashEngine) sampleLiveFlows() []UpdateFlowInput {
+	if e != nil && e.flowsHook != nil {
+		return e.flowsHook()
+	}
+	return e.collectLiveFlows()
 }
 
 func (e *updateLeashEngine) configPath() string {
@@ -185,6 +255,20 @@ func (e *updateLeashEngine) loadConfigLocked() {
 		c.LeashKbps >= leashMinKbps && c.LeashKbps <= leashMaxKbps {
 		e.cfg = c
 	}
+}
+
+// ReloadFromDisk 在整机备份恢复后从磁盘重新加载 UpdateLeash 配置与更新规则后缀。
+func (e *updateLeashEngine) ReloadFromDisk() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	e.cfg = defaultUpdateLeashConfig()
+	e.loadConfigLocked()
+	e.suffixCache = nil
+	e.reloadRuleSuffixesLocked()
+	e.mu.Unlock()
+	e.Wake()
 }
 
 func (e *updateLeashEngine) saveConfigLocked() error {
@@ -422,13 +506,23 @@ func (e *updateLeashEngine) ObserveFlows(now time.Time, flows []UpdateFlowInput)
 		sess.DownBps = activeBpsSums[skey]
 		sess.DstIP = fl.DstIP
 		sess.UpdatedAt = nowUnix
+		sess.updatedTime = now
 	}
+
+	prevLeashed := e.leashedCount.Load()
+	idleExp := e.effectiveIdleExpire()
 
 	// 清理超期空闲会话并刷新全部会话状态
 	var leashedList []UpdateLeashSession
 	var leashedCnt int64
 	for skey, sess := range e.sessions {
-		if nowUnix-sess.UpdatedAt > int64(leashFlowIdleExpire/time.Second) && !e.pausedSet[skey] {
+		expired := false
+		if !sess.updatedTime.IsZero() {
+			expired = now.Sub(sess.updatedTime) >= idleExp
+		} else {
+			expired = nowUnix-sess.UpdatedAt >= int64(idleExp/time.Second)
+		}
+		if expired && !e.pausedSet[skey] {
 			delete(e.sessions, skey)
 			delete(e.bypassedSet, skey)
 			continue
@@ -471,11 +565,29 @@ func (e *updateLeashEngine) ObserveFlows(now time.Time, flows []UpdateFlowInput)
 	}
 	e.leashedCount.Store(leashedCnt)
 
+	needApplyDP := cfg.Enabled && leashedCnt > 0 && (prevLeashed == 0 || e.lastAppliedKbps != cfg.LeashKbps)
+	applyKbps := cfg.LeashKbps
+	needRemoveDP := leashedCnt == 0 && (prevLeashed > 0 || e.lastAppliedKbps > 0)
+	if needRemoveDP {
+		e.lastAppliedKbps = 0
+	}
+
 	out := e.sortedSessionsLocked()
 	hook := e.applyHook
 	e.mu.Unlock()
 
 	e.persistActiveLeash(leashedList)
+	if needApplyDP {
+		if e.applyLeashDataplane(applyKbps) == nil {
+			e.mu.Lock()
+			if e.cfg.Enabled && e.leashedCount.Load() > 0 && e.cfg.LeashKbps == applyKbps {
+				e.lastAppliedKbps = applyKbps
+			}
+			e.mu.Unlock()
+		}
+	} else if needRemoveDP {
+		e.removeLeashDataplane(false)
+	}
 	if hook != nil {
 		hook(leashedList)
 	}
@@ -487,6 +599,7 @@ func (e *updateLeashEngine) sortedSessionsLocked() []UpdateLeashSession {
 	for _, s := range e.sessions {
 		cp := *s
 		cp.lastFlowTotals = nil
+		cp.updatedTime = time.Time{}
 		out = append(out, cp)
 	}
 	sort.Slice(out, func(i, j int) bool {
@@ -496,6 +609,87 @@ func (e *updateLeashEngine) sortedSessionsLocked() []UpdateLeashSession {
 		return out[i].SessionKey < out[j].SessionKey
 	})
 	return out
+}
+
+func (e *updateLeashEngine) applyLeashDataplane(leashKbps int) error {
+	hncDir := ""
+	if e.srv != nil {
+		hncDir = e.srv.hncDir
+	}
+	if hncDir == "" && e.applyDataplaneFn == nil {
+		return nil
+	}
+	apFn := ApplyUpdateLeashNative
+	if e.applyDataplaneFn != nil {
+		apFn = e.applyDataplaneFn
+	}
+	return apFn(hncDir, 0, leashKbps)
+}
+
+func (e *updateLeashEngine) removeLeashDataplane(invalidate bool) {
+	hncDir := ""
+	if e.srv != nil {
+		hncDir = e.srv.hncDir
+	}
+	if hncDir == "" && e.removeNativeFn == nil && e.invalidateFn == nil {
+		return
+	}
+	rmFn := RemoveUpdateLeashNative
+	if e.removeNativeFn != nil {
+		rmFn = e.removeNativeFn
+	}
+	invFn := InvalidateDataplaneReconcileNative
+	if e.invalidateFn != nil {
+		invFn = e.invalidateFn
+	}
+	_ = rmFn(hncDir, 0)
+	if invalidate {
+		invFn(hncDir, "")
+	}
+}
+
+// resetForHotspotOff 在热点关闭时即刻删除非 pausedSet 动态会话(严格保留 pausedSet 与 conn_blocks),
+// 归零 leashedCount、刷新 active JSON 并调用原生接口移除 1:9990 限速类及清空对账缓存。
+func (e *updateLeashEngine) resetForHotspotOff() {
+	e.mu.Lock()
+	hadLeashed := e.leashedCount.Load() > 0
+	e.lastAppliedKbps = 0
+	for skey, sess := range e.sessions {
+		if !e.pausedSet[skey] {
+			delete(e.sessions, skey)
+			delete(e.bypassedSet, skey)
+			continue
+		}
+		sess.State = leashStatePaused
+		sess.Paused = true
+		sess.AppliedKbps = 0
+		sess.DownBps = 0
+	}
+	e.leashedCount.Store(0)
+	hook := e.applyHook
+	e.mu.Unlock()
+
+	e.persistActiveLeash(nil)
+	e.removeLeashDataplane(true)
+	if hadLeashed && hook != nil {
+		hook(nil)
+	}
+}
+
+func (e *updateLeashEngine) needsHotspotOffCleanup() bool {
+	if e.leashedCount.Load() > 0 {
+		return true
+	}
+	e.mu.Lock()
+	hasNonPaused := false
+	for skey := range e.sessions {
+		if !e.pausedSet[skey] {
+			hasNonPaused = true
+			break
+		}
+	}
+	e.mu.Unlock()
+	return hasNonPaused
 }
 
 func (e *updateLeashEngine) persistActiveLeash(leashed []UpdateLeashSession) {
@@ -560,7 +754,7 @@ func (e *updateLeashEngine) persistActiveLeash(leashed []UpdateLeashSession) {
 
 func (e *updateLeashEngine) snapshot(refreshLive bool) map[string]any {
 	if refreshLive {
-		e.ObserveFlows(time.Now(), e.collectLiveFlows())
+		e.ObserveFlows(time.Now(), e.sampleLiveFlows())
 	} else {
 		e.ObserveFlows(time.Now(), nil)
 	}
@@ -595,15 +789,187 @@ func (e *updateLeashEngine) summary() map[string]any {
 	}
 }
 
+func (e *updateLeashEngine) readActivity() (<-chan struct{}, Activity, bool) {
+	if e.activityHook != nil {
+		ch, act := e.activityHook()
+		sim := false
+		if e.simActiveHook != nil {
+			sim = e.simActiveHook()
+		} else if e.srv != nil && e.srv.hncDir != "" {
+			sim = e.srv.simActive()
+		}
+		return ch, act, sim
+	}
+	ch := activityChanged()
+	act := activityNow()
+	sim := false
+	if e.simActiveHook != nil {
+		sim = e.simActiveHook()
+	} else if e.srv != nil && e.srv.hncDir != "" {
+		sim = e.srv.simActive()
+	}
+	return ch, act, sim
+}
+
+func (e *updateLeashEngine) evalNoClientsRelease(now time.Time) (time.Duration, bool) {
+	idleExp := e.effectiveIdleExpire()
+	findEarliestRem := func(ref time.Time) (time.Duration, bool, bool) {
+		e.mu.Lock()
+		defer e.mu.Unlock()
+		var (
+			found      bool
+			anyExpired bool
+			minRem     time.Duration
+		)
+		for skey, sess := range e.sessions {
+			if e.pausedSet[skey] || sess.State != leashStateLeashed {
+				continue
+			}
+			baseTs := sess.updatedTime
+			if baseTs.IsZero() {
+				baseTs = time.Unix(sess.UpdatedAt, 0)
+			}
+			rem := idleExp - ref.Sub(baseTs)
+			if rem <= 0 {
+				anyExpired = true
+				continue
+			}
+			if !found || rem < minRem {
+				found = true
+				minRem = rem
+			}
+		}
+		return minRem, found, anyExpired
+	}
+
+	minRem, found, anyExpired := findEarliestRem(now)
+	if anyExpired {
+		e.ObserveFlows(now, nil)
+		if e.leashedCount.Load() == 0 {
+			e.removeLeashDataplane(true)
+		}
+		minRem, found, _ = findEarliestRem(now)
+	}
+	if !found && e.leashedCount.Load() > 0 {
+		return 50 * time.Millisecond, true
+	}
+	if !found {
+		return 0, false
+	}
+	return minRem + 15*time.Millisecond, true
+}
+
 func (e *updateLeashEngine) runLoop(stop <-chan struct{}) {
-	tk := time.NewTicker(5 * time.Second)
-	defer tk.Stop()
+	if e == nil {
+		<-stop
+		return
+	}
+	wakeCh := e.ensureWakeCh()
+
+	var (
+		tk                *time.Ticker
+		tkCh              <-chan time.Time
+		relTimer          *time.Timer
+		relTimerCh        <-chan time.Time
+		wasActive         bool
+		hotspotOffCleaned bool
+	)
+	stopTicker := func() {
+		if tk != nil {
+			tk.Stop()
+			tk = nil
+			tkCh = nil
+		}
+	}
+	ensureTicker := func(d time.Duration) {
+		if tk == nil {
+			tk = time.NewTicker(d)
+			tkCh = tk.C
+		}
+	}
+	stopRelTimer := func() {
+		if relTimer != nil {
+			if !relTimer.Stop() {
+				select {
+				case <-relTimer.C:
+				default:
+				}
+			}
+			relTimer = nil
+			relTimerCh = nil
+		}
+	}
+	armRelTimer := func(d time.Duration) {
+		stopRelTimer()
+		if d <= 0 {
+			d = time.Millisecond
+		}
+		relTimer = time.NewTimer(d)
+		relTimerCh = relTimer.C
+	}
+	defer func() {
+		stopTicker()
+		stopRelTimer()
+		e.loopMode.Store(int32(v6EngineModeSleeping))
+	}()
+
+	patrolOnce := func(now time.Time) {
+		e.ObserveFlows(now, e.sampleLiveFlows())
+	}
+
 	for {
+		actCh, act, simOn := e.readActivity()
+		now := time.Now()
+
+		if isV6EngineActive(act, simOn) {
+			hotspotOffCleaned = false
+			stopRelTimer()
+			if !wasActive {
+				patrolOnce(now)
+				wasActive = true
+			}
+			ensureTicker(e.effectivePollInterval())
+			e.loopMode.Store(int32(v6EngineModeActive))
+		} else if !act.HotspotActive {
+			wasActive = false
+			stopTicker()
+			stopRelTimer()
+			if !hotspotOffCleaned || e.needsHotspotOffCleanup() {
+				e.resetForHotspotOff()
+				hotspotOffCleaned = true
+			}
+			e.loopMode.Store(int32(v6EngineModeSleeping))
+		} else {
+			wasActive = false
+			hotspotOffCleaned = false
+			stopTicker()
+			if rem, pending := e.evalNoClientsRelease(now); pending {
+				armRelTimer(rem)
+				e.loopMode.Store(int32(v6EngineModeReleaseTimer))
+			} else {
+				stopRelTimer()
+				e.loopMode.Store(int32(v6EngineModeSleeping))
+			}
+		}
+
 		select {
 		case <-stop:
 			return
-		case now := <-tk.C:
-			e.ObserveFlows(now, e.collectLiveFlows())
+		case <-actCh:
+		case <-wakeCh:
+			hotspotOffCleaned = false
+			if wasActive {
+				patrolOnce(time.Now())
+			}
+		case tickNow := <-tkCh:
+			patrolOnce(tickNow)
+		case timerNow := <-relTimerCh:
+			relTimer = nil
+			relTimerCh = nil
+			e.ObserveFlows(timerNow, nil)
+			if e.leashedCount.Load() == 0 {
+				e.removeLeashDataplane(true)
+			}
 		}
 	}
 }
@@ -613,7 +979,7 @@ func (e *updateLeashEngine) runLoop(stop <-chan struct{}) {
 func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 	eng := s.v6State().leash
 	if r.Method == http.MethodGet {
-		live := eng.collectLiveFlows()
+		live := eng.sampleLiveFlows()
 		if len(live) > 0 {
 			eng.ObserveFlows(time.Now(), live)
 		}
@@ -668,7 +1034,9 @@ func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 				writeJSON(w, http.StatusInternalServerError, map[string]any{"ok": false, "error": "write failed", "detail": err.Error()})
 				return
 			}
-			writeJSON(w, http.StatusOK, eng.snapshot(false))
+			resp := eng.snapshot(false)
+			eng.Wake()
+			writeJSON(w, http.StatusOK, resp)
 
 		case "bypass_once":
 			mac := canonMAC(req.MAC)
@@ -706,6 +1074,7 @@ func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 			resp := eng.snapshot(false)
 			resp["action"] = "bypass_once"
 			resp["bypassed_sessions"] = matched
+			eng.Wake()
 			writeJSON(w, http.StatusOK, resp)
 
 		case "pause_update", "resume_update":
@@ -754,6 +1123,7 @@ func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 
 			grpHost := canonicalUpdateHostGroup(normVal, normVal)
 			skey := mac + "|" + grpHost
+			now := time.Now()
 			eng.mu.Lock()
 			if pause {
 				eng.pausedSet[skey] = true
@@ -766,8 +1136,9 @@ func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 						VendorLabel:    vendor,
 						State:          leashStatePaused,
 						Paused:         true,
-						FirstSeen:      time.Now().Unix(),
-						UpdatedAt:      time.Now().Unix(),
+						FirstSeen:      now.Unix(),
+						UpdatedAt:      now.Unix(),
+						updatedTime:    now,
 						lastFlowTotals: make(map[string]uint64),
 					}
 				}
@@ -780,6 +1151,7 @@ func (s *server) apiUpdateLeash(w http.ResponseWriter, r *http.Request) {
 			resp["action"] = act
 			resp["paused"] = pause
 			resp["dst_host"] = normVal
+			eng.Wake()
 			writeJSON(w, http.StatusOK, resp)
 
 		default:

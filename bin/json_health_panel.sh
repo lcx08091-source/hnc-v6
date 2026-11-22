@@ -126,13 +126,11 @@ if [ -x "$BIN/stats_health_summary.sh" ]; then
 fi
 
 
-# Refresh json_health files if doctor exists, but status is read-only.
-[ -x "$BIN/json_doctor.sh" ] && sh "$BIN/json_doctor.sh" status >/dev/null 2>&1
-
+_JHP_ROOT=$(CDPATH='' cd -P -- "$(dirname -- "$0")/.." 2>/dev/null && pwd -P)
 BACKEND_VER=""
 BACKEND_VC=""
-for _mp in "$HNC/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop"; do
-  [ -f "$_mp" ] || continue
+for _mp in "${_JHP_ROOT:+$_JHP_ROOT/module.prop}" "$HNC/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop" "/data/adb/modules/hotspot_network_control/module.prop"; do
+  [ -n "$_mp" ] && [ -f "$_mp" ] || continue
   [ -n "$BACKEND_VER" ] || BACKEND_VER="$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')"
   [ -n "$BACKEND_VC" ] || BACKEND_VC="$(sed -n '/^versionCode=/{s/^versionCode=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')"
 done

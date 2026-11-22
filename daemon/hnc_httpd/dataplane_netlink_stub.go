@@ -109,9 +109,9 @@ const (
 	DefaultAppQoSMarkMask   = uint32(0x03000000)
 	DefaultAppLimitMarkMask = uint32(0xfc000000)
 	DefaultConnmarkMask     = uint32(0xffff0000)
-	DefaultHTBRootRateBps  = uint64(125_000_000)
-	DefaultHTBRootBurstB   = uint32(200 * 1024)
-	DefaultHTBRootQuantumB = uint32(60000)
+	DefaultHTBRootRateBps   = uint64(125_000_000)
+	DefaultHTBRootBurstB    = uint32(200 * 1024)
+	DefaultHTBRootQuantumB  = uint32(60000)
 
 	pschedTimeUnitsPerSec = 1_000_000.0
 	pschedDefaultTickUsec = 15.625
@@ -229,7 +229,7 @@ func calcHTBRateTable(rateBytesPerSec uint64, mtu uint32, mpu uint16, tickInUsec
 		mtu = rtnlDefaultMTU
 	}
 	cellLog := uint8(0)
-	for (mtu >> cellLog) > 255 && cellLog < 31 {
+	for (mtu>>cellLog) > 255 && cellLog < 31 {
 		cellLog++
 	}
 	if rateBytesPerSec == 0 {
@@ -1219,19 +1219,26 @@ func syncNativeDataplaneSideEffects(hncDir, _ string) {
 	markAppLimitsDirtyIfNeeded(hncDir)
 }
 
-// ── HNC v6.0.0 · Vector (T2): 原生特快护航 (1:10) / 更新细流 (1:9990) 报文构造器 ──
+// ── HNC v6.0.0 · Vector (T2): 原生特快护航 (1:8010) / 更新细流 (1:9990) 报文构造器 ──
 
 const (
-	v6ExpressClassMinor   uint16 = 0x0010
-	v6ExpressLeafDown     uint32 = 0x10100000
-	v6ExpressLeafUp       uint32 = 0x11100000
+	v6ExpressClassMinor   uint16 = 0x8010
+	v6ExpressLeafDown     uint32 = 0x80100000
+	v6ExpressLeafUp       uint32 = 0x81100000
 	v6ExpressTargetUs     uint32 = 2000  // 2ms 浅驻留 fq_codel target
 	v6ExpressIntervalUs   uint32 = 40000 // 40ms fq_codel interval
 	v6ExpressQuantumB     uint32 = 300
 	v6ExpressLimitPkts    uint32 = 512
-	v6ExpressFilterPrioV4 uint16 = 2
-	v6ExpressFilterPrioV6 uint16 = 4
+	v6ExpressFilterPrioV4 uint16 = 4
+	v6ExpressFilterPrioV6 uint16 = 5
 	v6ExpressDefaultMark  uint32 = 0x01000000
+
+	// 热升级旧版 Vector Express 残留清理常量 (旧 1:10 / 1010: / 1110: / prio 2 & 4)
+	v6ExpressLegacyClassMinor uint16 = 0x0010
+	v6ExpressLegacyLeafDown   uint32 = 0x10100000
+	v6ExpressLegacyLeafUp     uint32 = 0x11100000
+	v6ExpressLegacyPrioV4     uint16 = 2
+	v6ExpressLegacyPrioV6     uint16 = 4
 
 	v6LeashClassMinor   uint16 = 0x9990
 	v6LeashLeafDown     uint32 = 0x99900000
@@ -1263,7 +1270,85 @@ func buildDelQdiscMsg(seq uint32, ifindex int, parent, handle uint32) []byte {
 	return rtnlBuildTCMsg(rtnlDelQdisc, rtnlFRequest|rtnlFAck, seq, ifindex, handle, parent, 0, nil)
 }
 
-// buildVectorExpressUpsertBatch 构造 1:10 (prio 0) + 浅驻留 fq_codel (2ms/40ms/300B) + prio 2/4 fw 过滤器批消息。
+func rulesHasMarkID10(hncDir string) bool {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		return false
+	}
+	checkDevs := func(root map[string]interface{}) bool {
+		devs, ok := root["devices"].(map[string]interface{})
+		if !ok {
+			return false
+		}
+		for _, rawObj := range devs {
+			if dm, ok := rawObj.(map[string]interface{}); ok {
+				if anyToRuleInt(dm["mark_id"]) == 10 {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json")); err == nil && len(b) > 0 {
+		var parsed map[string]interface{}
+		if json.Unmarshal(b, &parsed) == nil {
+			return checkDevs(parsed)
+		}
+	}
+	if root, err := rulesStore.ReadAll(hncDir); err == nil && len(root) > 0 {
+		return checkDevs(root)
+	}
+	return false
+}
+
+// buildVectorExpressLegacyCleanupBatch 构造热升级残留安全清理消息序列:
+//   - 精确按 kind="fw" + handle=0x01000000 (掩码 0x03000000) 删除旧 prio 2 (all/ip) 与旧 prio 4 (ipv6) 过滤器,
+//     绝不裸删 prio 2 从而严保 LAN Fastlane u32 直通过滤器零误伤;
+//   - 检查 rules.json 无 mark_id == 10 时逆序清理旧叶子 1010:/1110: 与旧类 1:10 (存在 mark_id == 10 时保留 1:10)。
+func buildVectorExpressLegacyCleanupBatch(
+	hncDir string,
+	ifindex int,
+	isUplink bool,
+	gameMark, gameMask uint32,
+) [][]byte {
+	const low16Mask = uint32(0x0000ffff)
+	gameMark &^= low16Mask
+	gameMask &^= low16Mask
+	if gameMask == 0 {
+		gameMask = DefaultAppQoSMarkMask
+	}
+	defaultHandle := v6ExpressDefaultMark & DefaultAppQoSMarkMask
+	handles := []uint32{defaultHandle}
+	if custom := gameMark & gameMask; custom != 0 && custom != defaultHandle {
+		handles = append(handles, custom)
+	}
+
+	var msgs [][]byte
+	for _, h := range handles {
+		if h == 0 {
+			continue
+		}
+		msgs = append(msgs,
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, h, v6ExpressLegacyPrioV4, rtnlEthPAll, "fw"),
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, h, v6ExpressLegacyPrioV4, rtnlEthPIP, "fw"),
+			buildDelFilterMsg(rtnlNextSeq(), ifindex, rtnlHtbRootMaj, h, v6ExpressLegacyPrioV6, rtnlEthPIPv6, "fw"),
+		)
+	}
+	if !rulesHasMarkID10(hncDir) {
+		legacyCls := rtnlHtbRootMaj | uint32(v6ExpressLegacyClassMinor)
+		legacyLeaf := v6ExpressLegacyLeafDown
+		if isUplink {
+			legacyLeaf = v6ExpressLegacyLeafUp
+		}
+		msgs = append(msgs,
+			buildDelQdiscMsg(rtnlNextSeq(), ifindex, legacyCls, legacyLeaf),
+			buildDelClassMsg(rtnlNextSeq(), ifindex, rtnlHtbRootCls, legacyCls),
+		)
+	}
+	return msgs
+}
+
+// buildVectorExpressUpsertBatch 构造 1:8010 (prio 0) + 浅驻留 fq_codel (2ms/40ms/300B) + prio 4/5 fw 过滤器批消息。
 func buildVectorExpressUpsertBatch(
 	ifindex int,
 	isUplink bool,
@@ -1272,6 +1357,9 @@ func buildVectorExpressUpsertBatch(
 	tickInUsec float64,
 ) [][]byte {
 	keepDataplaneAPIMarkersAlive()
+	const low16Mask = uint32(0x0000ffff)
+	gameMark &^= low16Mask
+	gameMask &^= low16Mask
 	if rootRateBps == 0 {
 		rootRateBps = DefaultHTBRootRateBps
 	}
@@ -1320,7 +1408,7 @@ func buildVectorExpressUpsertBatch(
 	return msgs
 }
 
-// buildVectorExpressRemoveBatch 构造停用 Vector Express 时拆除 prio 2/4 过滤器、叶子与 1:10 类并恢复 1:9999 的消息序列。
+// buildVectorExpressRemoveBatch 构造停用 Vector Express 时拆除 prio 4/5 过滤器、叶子与 1:8010 类并恢复 1:9999 的消息序列。
 func buildVectorExpressRemoveBatch(
 	ifindex int,
 	isUplink bool,
@@ -1328,6 +1416,9 @@ func buildVectorExpressRemoveBatch(
 	gameMark, gameMask uint32,
 	tickInUsec float64,
 ) [][]byte {
+	const low16Mask = uint32(0x0000ffff)
+	gameMark &^= low16Mask
+	gameMask &^= low16Mask
 	if restoreRootRateBps == 0 {
 		restoreRootRateBps = DefaultHTBRootRateBps
 	}
@@ -1569,7 +1660,6 @@ func nlApplyBatchWithFWFallbackOnSocket(_ int, _ [][]byte) (int, error) {
 func nlProbeKernelCapabilities(_ int) (bool, bool, bool) {
 	return false, false, false
 }
-
 
 func closeRTNetlinkSocket(_ int) {}
 

@@ -394,6 +394,7 @@ function renderSettings(anim1) {
   if (S.open.look === undefined) S.open.look = true;
   var curStyleKey = S.style === 'liquid' ? (S.glassMode === 'frosted' ? 'frosted' : 'liquid') : (S.style === 'cyber' ? 'cyber' : 'default');
   var curStyleName = { liquid: '液态玻璃 · 光学折射', frosted: '经典毛玻璃', cyber: '赛博机甲', default: '极简精密' }[curStyleKey] || '液态玻璃';
+  var gxLbl = glassTintLabel(S.glassTint);
   groups.push(['外观', sFold('look', ['purple', 'palette'], '主题与动画', curStyleName + ' · 浅色 / 深色 / 跟随系统 · 120fps 动态引擎',
     '<div class="note" style="margin-bottom:2px">四大独立视觉架构（点按即时切换，均支持浅色 / 纯正 OLED 暗夜双态）</div>' +
     '<div class="style-pick style-pick-4">' + [
@@ -407,19 +408,24 @@ function renderSettings(anim1) {
         '<span class="style-meta"><b>' + t[1] + '</b><small>' + t[2] + '</small></span>' +
       '</button>';
     }).join('') + '</div>' +
-    // v5.30 玻璃浓度(只在液态玻璃风格下显示, liquid.css .lg-only): 往右更不透明, 文字更清楚; 拖动时整页实时预览
+    // v6.1.0-rc.1 玻璃透光度五档离散胶囊(只在液态玻璃风格下显示, liquid.css .lg-only): 点按即切换并保存, 零滑条防展开手势误触
     '<div class="lg-only">' +
-    '<div class="note" style="margin:2px 0 -2px">玻璃透光度微调 · <span id="glass-tint-v">' + glassTintLabel(S.glassTint) + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
-    '<div class="gx-row"><span>清透</span><input type="range" class="gx-range" id="glass-tint" min="0" max="100" step="1" value="' + S.glassTint + '" aria-label="玻璃浓度"><span>着色</span></div></div>' +
+    '<div class="note" style="margin:2px 0 -2px">玻璃透光度微调 · <span id="glass-tint-v">' + gxLbl + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
+    '<div class="gx-pills-5" id="glass-tint" role="group" aria-label="玻璃浓度">' +
+      [[0, '清透'], [25, '偏清透'], [50, '标准'], [75, '偏着色'], [100, '着色']].map(function (g) {
+        var isOn = gxLbl === g[1];
+        return '<button type="button" class="gx-btn press' + (isOn ? ' on' : '') + '" data-gx-tint="' + g[0] + '" aria-pressed="' + isOn + '">' + g[1] + '</button>';
+      }).join('') +
+    '</div></div>' +
     '<div class="note" style="margin-bottom:-2px">颜色</div><div class="theme-pick">' + [['auto', '跟随系统', 'linear-gradient(135deg,#F5F5F7 50%,#1c1c1e 50%)'], ['light', '浅色', '#F5F5F7'], ['dark', '深色', '#1c1c1e']].map(function (t) {
       return '<button class="press' + (S.theme === t[0] ? ' on' : '') + '" data-theme-pick="' + t[0] + '"><span class="sw" style="background:' + t[2] + '"></span>' + t[1] + '</button>'; }).join('') + '</div>' +
     (typeof wpSettingsHtml === 'function' ? wpSettingsHtml() : '') + '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">界面动画</div><div class="s">弹簧切页、列表浮现、按压回弹</div></span>' + toggle(S.motion, 'data-set="motion" aria-label="界面动画"') + '</div>' + fxSettingsHtml())]);
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-beta.2', HNC_UI_VC = '6009202', HNC_UI_DATE = '2026-11-22';
-  var bVer = String(l.backend_version || HNC_UI_VER);
-  var bVc = String(l.backend_version_code || HNC_UI_VC);
+  var HNC_UI_VER = 'v6.1.0-rc.1', HNC_UI_VC = '6009301', HNC_UI_DATE = '2026-11-22';
+  var bVer = cleanVer(l.backend_version, HNC_UI_VER);
+  var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
   groups.push(['关于', sItem(['blue', 'info'], '版本', 'HNC 后端 · ' + bChan + ' · versionCode ' + esc(bVc), val(esc(bVer))) +
     sBtn(['green', 'doc'], '更新日志', '查看完整变更记录', 'changelog', '查看') +
@@ -460,7 +466,7 @@ function renderSettings(anim1) {
   var advCards = [
     scard('scard-v6', ['blue', 'vector'], '智能护航与配置备份',
       '游戏通话优先 · 后台更新限速 · 温控保护（' + esc(v6TempS) + '）· 隐私安检（' + v6LgHits + ' 条）',
-      (function(){ var _rv = String(l.backend_version || 'v6.1.0-beta.2'); var _short = _rv.replace(/^(v\d+\.\d+)\.\d+-(alpha|beta|rc)\.?(\d+).*$/i, function(_, m, c, n){ return m + ' ' + c.charAt(0).toUpperCase() + n; }); return '<span class="badge b-acc" title="' + esc(_rv) + '">' + esc(_short) + '</span>'; })(),
+      (function(){ var _rv = cleanVer(l.backend_version, HNC_UI_VER); var _short = _rv.replace(/^(v\d+\.\d+)\.\d+-(alpha|beta|rc)\.?(\d+).*$/i, function(_, m, c, n){ return m + ' ' + (c.toLowerCase() === 'rc' ? 'RC' + n : c.charAt(0).toUpperCase() + n); }); return '<span class="badge b-acc" title="' + esc(_rv) + '">' + esc(_short) + '</span>'; })(),
       typeof v6SettingsBodyHtml === 'function' ? v6SettingsBodyHtml() : ''),
     scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
       'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
@@ -495,6 +501,15 @@ function renderSettings(anim1) {
           ? '<span class="badge b-ok" id="dpv-scard-badge">真实生效</span>'
           : '<span class="badge b-acc" id="dpv-scard-badge">待命就绪</span>');
   var diagCards = [
+    (function () {
+      var qh = S.quickHealth && !S.quickHealth._err ? S.quickHealth : null;
+      var qhSt = qh && typeof qhNormStatus === 'function' ? qhNormStatus(qh.overall || qh.status || qh.overall_status || qh.level) : '';
+      var qhSub = qh && (qh.headline || qh.one_liner || qh.summary_text) ? String(qh.headline || qh.one_liner || qh.summary_text) : '热点转发 · 零唤醒省电 · 限速防绕过 · 内存空间四维秒检';
+      var qhBdg = qhSt === 'fail' ? '<span class="badge b-red">需修复</span>' : qhSt === 'warn' ? '<span class="badge b-warn">可优化</span>' : qh ? '<span class="badge b-ok">健康</span>' : '<span class="badge b-ok">秒检</span>';
+      return '<div class="sgrp scard glass" data-ic-color="green"><button type="button" class="sgrp-h scard-h press" data-act="quick-health">' +
+        gi('green', 'shield') + '<span class="tx"><b>一句话省电与健康体检</b><small>' + esc(qhSub) + '</small></span>' +
+        qhBdg + ico('right', 'chev') + '</button></div>';
+    })(),
     scard('scard-dpv', [dpvHasErr ? 'orange' : 'green', 'shield'], '限速真实生效检验',
       esc(dpvSubTxt),
       dpvBadgeHtml,
@@ -512,7 +527,7 @@ function renderSettings(anim1) {
       '<span class="badge b-acc">' + ({ realtime: '实时', balanced: '均衡', powersave: '省电' }[S.refreshMode]) + '</span>',
       (gMap['刷新与功耗'] || '') + (gMap['维护'] || '')),
     scard('scard-about', ['gray', 'info'], '模拟环境与关于本模块',
-      '调试模拟设备 · 后端版本 ' + esc(l.backend_version || '—') + ' · 完整更新日志',
+      '调试模拟设备 · 后端版本 ' + esc(bVer) + ' · 完整更新日志',
       '<span class="badge b-gray">' + esc(bVer) + '</span>',
       (gMap['模拟环境（调试）'] || '') + (gMap['关于'] || ''))
   ];
@@ -1073,8 +1088,8 @@ function scBody() {
   if (!r) {
     return h + '<div class="note" style="text-align:center;margin:14px 0 10px">' + (SC.running ? '' : '还没有自检记录。自检会检查机型与系统、限速能力、防火墙、硬件加速、热点、IPv6、时间、进程和识别引擎，只读不改任何设置。') + '</div>' + extraTools;
   }
-  var s = r.summary || {};
-  h += '<div class="sc-meta">' + esc(scAgo(r.generated_at)) + '生成 · 耗时 ' + scDur(r.duration_ms) + (r.version ? ' · ' + esc(r.version) : '') + (r.redacted ? ' · 已打码' : '') + '</div>';
+  var s = r.summary || {}, scVer = cleanVer(r.version, '');
+  h += '<div class="sc-meta">' + esc(scAgo(r.generated_at)) + '生成 · 耗时 ' + scDur(r.duration_ms) + (scVer ? ' · ' + esc(scVer) : '') + (r.redacted ? ' · 已打码' : '') + '</div>';
   h += '<div class="sc-chips">' + ['ok', 'warn', 'fail', 'info'].map(function (k) { return '<div class="sc-chip ' + k + (num(s[k]) ? ' has' : '') + '"><b class="num">' + SC_ST[k][0] + ' ' + num(s[k]) + '</b><span>' + SC_ST[k][1] + '</span></div>'; }).join('') + '</div>';
   h += dpvRenderSelfCheckSummaryHtml();
   if (SC.seenAt !== r.generated_at) {   // 新报告: 含警告 / 失败的分组自动展开, 其余收起
@@ -1176,7 +1191,7 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = m.version || (S.live && S.live.backend_version) || 'v6.1.0-beta.2';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.1';
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +

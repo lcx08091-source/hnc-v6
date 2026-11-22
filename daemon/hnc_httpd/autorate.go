@@ -51,27 +51,27 @@ type autorateConfig struct {
 }
 
 type autorateStatus struct {
-	Enabled        bool     `json:"enabled"`
-	DownMinMbps    float64  `json:"down_min_mbps"`
-	DownMaxMbps    float64  `json:"down_max_mbps"`
-	UpMinMbps      float64  `json:"up_min_mbps"`
-	UpMaxMbps      float64  `json:"up_max_mbps"`
-	RTTDeltaMs     float64  `json:"rtt_delta_ms"`
-	State          string   `json:"state"`
-	SleepReason    string   `json:"sleep_reason,omitempty"`
-	HotspotIface   string   `json:"hotspot_iface,omitempty"`
-	UpstreamIface  string   `json:"upstream_iface,omitempty"`
-	CurDownMbps    float64  `json:"cur_down_mbps"`
-	CurUpMbps      float64  `json:"cur_up_mbps"`
-	ActualDownMbps float64  `json:"actual_down_mbps"`
-	ActualUpMbps   float64  `json:"actual_up_mbps"`
-	LoadDown       float64  `json:"load_down"`
-	LoadUp         float64  `json:"load_up"`
-	BaseRTTMs      float64  `json:"base_rtt_ms"`
-	RTTMs          float64  `json:"rtt_ms"`
-	DeltaRTTMs     float64  `json:"delta_rtt_ms"`
-	ScaleEventsUp  uint64   `json:"scale_events_up"`
-	ScaleEventsDn  uint64   `json:"scale_events_down"`
+	Enabled         bool     `json:"enabled"`
+	DownMinMbps     float64  `json:"down_min_mbps"`
+	DownMaxMbps     float64  `json:"down_max_mbps"`
+	UpMinMbps       float64  `json:"up_min_mbps"`
+	UpMaxMbps       float64  `json:"up_max_mbps"`
+	RTTDeltaMs      float64  `json:"rtt_delta_ms"`
+	State           string   `json:"state"`
+	SleepReason     string   `json:"sleep_reason,omitempty"`
+	HotspotIface    string   `json:"hotspot_iface,omitempty"`
+	UpstreamIface   string   `json:"upstream_iface,omitempty"`
+	CurDownMbps     float64  `json:"cur_down_mbps"`
+	CurUpMbps       float64  `json:"cur_up_mbps"`
+	ActualDownMbps  float64  `json:"actual_down_mbps"`
+	ActualUpMbps    float64  `json:"actual_up_mbps"`
+	LoadDown        float64  `json:"load_down"`
+	LoadUp          float64  `json:"load_up"`
+	BaseRTTMs       float64  `json:"base_rtt_ms"`
+	RTTMs           float64  `json:"rtt_ms"`
+	DeltaRTTMs      float64  `json:"delta_rtt_ms"`
+	ScaleEventsUp   uint64   `json:"scale_events_up"`
+	ScaleEventsDn   uint64   `json:"scale_events_down"`
 	UpdatedAt       int64    `json:"updated_at"`
 	SignalRAT       string   `json:"signal_rat,omitempty"`
 	SignalDbm       int      `json:"signal_dbm,omitempty"`
@@ -82,20 +82,21 @@ type autorateStatus struct {
 }
 
 type autorateCtl struct {
-	hncDir        string
-	mu            sync.RWMutex
-	cfg           autorateConfig
-	st            autorateStatus
-	wakeCh        chan struct{}
-	prevDev       map[string][2]uint64
-	prevSampleAt  time.Time
-	fastRTT       float64
-	lastBackoffAt time.Time
-	appliedIface  string
-	appliedDown   float64
-	appliedUp     float64
-	refCursor     int
-	lastSignalRAT string
+	hncDir            string
+	mu                sync.RWMutex
+	cfg               autorateConfig
+	st                autorateStatus
+	wakeCh            chan struct{}
+	prevDev           map[string][2]uint64
+	prevSampleAt      time.Time
+	fastRTT           float64
+	lastBackoffAt     time.Time
+	appliedIface      string
+	appliedDown       float64
+	appliedUp         float64
+	refCursor         int
+	lastSignalRAT     string
+	lastUpstreamIface string
 }
 
 func defaultAutorateConfig() autorateConfig {
@@ -405,25 +406,145 @@ func actionAutorateSet(s *server, p map[string]string) actionResp {
 	return s.autorate.ApplyConfig(cur, iface)
 }
 
-func (s *server) resolvePhysicalUpstream(devMap map[string][2]uint64) string {
-	det := readIfaceDetect(s.hncDir)
-	for _, cand := range []string{det.TetherUpstream, det.Upstream} {
-		if cand != "" && !isVPNIface(cand) && ifaceNameOK(cand) {
-			return cand
-		}
+type autorateIfaceState struct {
+	Exists  bool
+	FlagUp  bool
+	HasIPv4 bool
+}
+
+var (
+	autorateInspectIfaceFn = defaultInspectAutorateIface
+	autorateProbeRTTFn     = probeReflectorRTT
+	autorateReadNetDevFn   = func() ([]byte, error) { return os.ReadFile("/proc/net/dev") }
+	autorateNowFn          = time.Now
+)
+
+func defaultInspectAutorateIface(name string) autorateIfaceState {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return autorateIfaceState{}
 	}
-	var bestIface string
-	var bestBytes uint64
-	for ifc, cnt := range devMap {
-		if isCellIface(ifc) {
-			sum := cnt[0] + cnt[1]
-			if sum > bestBytes {
-				bestBytes = sum
-				bestIface = ifc
+	ifi, err := net.InterfaceByName(name)
+	if err != nil || ifi == nil {
+		return autorateIfaceState{}
+	}
+	st := autorateIfaceState{
+		Exists: true,
+		FlagUp: (ifi.Flags & net.FlagUp) != 0,
+	}
+	if addrs, aErr := ifi.Addrs(); aErr == nil {
+		for _, a := range addrs {
+			var ip net.IP
+			switch v := a.(type) {
+			case *net.IPNet:
+				ip = v.IP
+			case *net.IPAddr:
+				ip = v.IP
+			default:
+				if parsed, _, pErr := net.ParseCIDR(a.String()); pErr == nil {
+					ip = parsed
+				} else {
+					ip = net.ParseIP(a.String())
+				}
+			}
+			if v4 := ip.To4(); v4 != nil && !v4.IsUnspecified() && !v4.IsLoopback() {
+				st.HasIPv4 = true
+				break
 			}
 		}
 	}
-	return bestIface
+	return st
+}
+
+func is464XLATCellIface(name string) bool {
+	name = strings.TrimSpace(name)
+	if name == "" || strings.HasPrefix(name, "v4-") {
+		return false
+	}
+	if isCellIface(name) {
+		return true
+	}
+	return strings.HasPrefix(name, "rmnet_data") ||
+		strings.HasPrefix(name, "ccmni") ||
+		strings.HasPrefix(name, "sipa_eth") ||
+		(strings.HasPrefix(name, "rmnet") &&
+			!strings.HasPrefix(name, "rmnet_ipa") &&
+			!strings.HasPrefix(name, "rmnet_mhi") &&
+			!strings.HasPrefix(name, "rmnet_usb"))
+}
+
+// resolveProbeBindIface 针对 5G SA 纯 IPv6 + 464XLAT 场景解析 tcp4 探测实际绑定的网卡:
+// 当物理蜂窝口无可用 IPv4 地址而 "v4-" + physIface 存在且处于 FlagUp 时,
+// 将 SO_BINDTODEVICE 目标切向 clat 口, 同时保持上层状态 UpstreamIface = physIface 不变。
+func resolveProbeBindIface(physIface string) string {
+	physIface = strings.TrimSpace(physIface)
+	if physIface == "" || !is464XLATCellIface(physIface) {
+		return physIface
+	}
+	st := autorateInspectIfaceFn(physIface)
+	if st.HasIPv4 {
+		return physIface
+	}
+	clatIface := "v4-" + physIface
+	clatSt := autorateInspectIfaceFn(clatIface)
+	if clatSt.Exists && clatSt.FlagUp {
+		return clatIface
+	}
+	return physIface
+}
+
+func autorateUpstreamIfaceUp(iface string) bool {
+	iface = strings.TrimSpace(iface)
+	if iface == "" {
+		return false
+	}
+	st := autorateInspectIfaceFn(iface)
+	if st.Exists && st.FlagUp {
+		return true
+	}
+	if !strings.HasPrefix(iface, "v4-") {
+		clatSt := autorateInspectIfaceFn("v4-" + iface)
+		if clatSt.Exists && clatSt.FlagUp {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *server) resolvePhysicalUpstream(devMap map[string][2]uint64) string {
+	det := readIfaceDetect(s.hncDir)
+	for _, cand := range []string{det.TetherUpstream, det.Upstream} {
+		if cand != "" && !isVPNIface(cand) && ifaceNameOK(cand) && autorateUpstreamIfaceUp(cand) {
+			return cand
+		}
+	}
+	var bestUpIface string
+	var bestUpBytes uint64
+	var bestFallbackIface string
+	var bestFallbackBytes uint64
+	for ifc, cnt := range devMap {
+		if !isCellIface(ifc) {
+			continue
+		}
+		sum := cnt[0] + cnt[1]
+		if autorateUpstreamIfaceUp(ifc) {
+			if sum > bestUpBytes {
+				bestUpBytes = sum
+				bestUpIface = ifc
+			}
+			continue
+		}
+		st := autorateInspectIfaceFn(ifc)
+		clatSt := autorateInspectIfaceFn("v4-" + ifc)
+		if !st.Exists && !clatSt.Exists && sum > bestFallbackBytes {
+			bestFallbackBytes = sum
+			bestFallbackIface = ifc
+		}
+	}
+	if bestUpIface != "" {
+		return bestUpIface
+	}
+	return bestFallbackIface
 }
 
 func probeReflectorRTT(upstreamIface string, reflectors []string, cursor *int) (float64, bool) {
@@ -581,13 +702,14 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	if hotspotIface == "" {
 		return
 	}
-	rawDev, err := os.ReadFile("/proc/net/dev")
+	rawDev, err := autorateReadNetDevFn()
 	if err != nil {
 		return
 	}
 	curDev := puParseNetDev(rawDev)
-	now := time.Now()
+	now := autorateNowFn()
 	upstreamIface := s.resolvePhysicalUpstream(curDev)
+	probeBindIface := resolveProbeBindIface(upstreamIface)
 
 	if ctl.prevSampleAt.IsZero() || now.Sub(ctl.prevSampleAt) <= 100*time.Millisecond {
 		ctl.prevDev = curDev
@@ -629,16 +751,15 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	curUp := ctl.st.CurUpMbps
 	baseRTT := ctl.st.BaseRTTMs
 	prevRAT := ctl.lastSignalRAT
+	prevUpstream := ctl.lastUpstreamIface
 	ctl.mu.RUnlock()
 
-	// v6.0.0: 仅在跨代际制式切换 (5G <-> 4G LTE <-> Wi-Fi) 瞬间重锚定 BaseRTT, 避免 5G SA/NSA/5G-A 载波聚合跳变误清空基线!
-	if sig.Available && sig.RAT != "" && prevRAT != "" && ratGeneration(sig.RAT) != ratGeneration(prevRAT) {
-		baseRTT = 0
-		ctl.fastRTT = 0
-	}
+	upstreamChanged := upstreamIface != "" && prevUpstream != "" && upstreamIface != prevUpstream
+	ratChanged := sig.Available && sig.RAT != "" && prevRAT != "" && ratGeneration(sig.RAT) != ratGeneration(prevRAT)
 
 	loadDown := actualDownMbps / math.Max(1.0, curDown)
 	loadUp := actualUpMbps / math.Max(1.0, curUp)
+	maxLoad := math.Max(loadDown, loadUp)
 
 	midDown := (cfg.DownMinMbps + effDownMax) * 0.55
 	midUp := (cfg.UpMinMbps + effUpMax) * 0.55
@@ -647,19 +768,25 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	var sampleRTT, deltaRTT float64
 	var scaleUpInc, scaleDnInc uint64
 
-	if math.Max(loadDown, loadUp) < autorateIdleTraffic {
+	if maxLoad < autorateIdleTraffic {
 		newState = "idle_traffic"
 		nextDown = curDown + (midDown-curDown)*0.05
 		nextUp = curUp + (midUp-curUp)*0.05
-	} else if rtt, ok := probeReflectorRTT(upstreamIface, cfg.Reflectors, &ctl.refCursor); ok {
+	} else if rtt, ok := autorateProbeRTTFn(probeBindIface, cfg.Reflectors, &ctl.refCursor); ok {
 		sampleRTT = rtt
-		if baseRTT <= 0 {
+		reanchorBase := baseRTT <= 0 ||
+			((upstreamChanged || ratChanged) && rtt < baseRTT) ||
+			((upstreamChanged || ratChanged) && maxLoad < autorateActiveBloat && rtt <= baseRTT+cfg.RTTDeltaMs)
+		if reanchorBase {
 			baseRTT = rtt
+			ctl.fastRTT = rtt
+		} else if upstreamChanged || ratChanged {
+			// 跨代际制式或物理上游切换瞬间处于拥塞/高膨胀状态: 仅更新 fastRTT 触发退避, 严禁将拥塞 RTT 写入 baseRTT!
 			ctl.fastRTT = rtt
 		} else {
 			if rtt < baseRTT {
 				baseRTT = 0.92*baseRTT + 0.08*rtt
-			} else if math.Max(loadDown, loadUp) < 0.50 {
+			} else if maxLoad < 0.50 {
 				baseRTT = 0.998*baseRTT + 0.002*rtt
 			}
 			ctl.fastRTT = 0.50*ctl.fastRTT + 0.50*rtt
@@ -795,8 +922,13 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	}
 	ctl.st.ScaleEventsUp += scaleUpInc
 	ctl.st.ScaleEventsDn += scaleDnInc
+	if upstreamIface != "" && (ctl.lastUpstreamIface == "" || sampleRTT > 0) {
+		ctl.lastUpstreamIface = upstreamIface
+	}
 	if sig.Available {
-		ctl.lastSignalRAT = sig.RAT
+		if sig.RAT != "" && (ctl.lastSignalRAT == "" || sampleRTT > 0) {
+			ctl.lastSignalRAT = sig.RAT
+		}
 		ctl.st.SignalRAT = sig.RAT
 		if sig.Mode == "wifi_sta" {
 			ctl.st.SignalDbm = sig.WifiRSSIdBm

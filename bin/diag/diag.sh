@@ -1,13 +1,12 @@
 #!/system/bin/sh
-# HNC rc30.12 一键诊断脚本
+# HNC 一键兼容性诊断脚本
 # 用途: 在用户报告兼容性问题时, 收集所有关键信息.
 # 输出: stdout (可重定向到文件)
 # 使用: su -c '/data/local/hnc/bin/diag/diag.sh > /sdcard/hnc_diag.txt'
 #
 # 不会修改任何文件, 不会重启任何服务, 纯读取信息.
 #
-# v5.9.3 · 与 bin/diag.sh 的关系(此前 README 与 COMPATIBILITY 各指一个脚本,
-# 用户以为是同一个东西写错了路径, 这里一次说清):
+# 与 bin/diag.sh 的关系:
 #   bin/diag.sh       —— 逐项判定型自检. 每项给 OK/WARN/FAIL, 支持 --json,
 #                        退出码 0/1/2 有语义, 回答"现在健不健康".
 #   bin/diag/diag.sh  —— 本脚本, 信息转储型. 不判定, 不返回错误码, 输出
@@ -16,9 +15,16 @@
 # 两者互补不互相替代; 报兼容性问题时建议两个都跑, 一起发给维护者.
 
 HNC=${HNC:-/data/local/hnc}
+_DIAG_ROOT=$(CDPATH='' cd -P -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd -P)
+MOD_VER=""
+for _mp in "${_DIAG_ROOT:+$_DIAG_ROOT/module.prop}" "$HNC/module.prop" "/data/adb/modules/hotspot_net_ctl/module.prop" "/data/adb/modules/hotspot_network_control/module.prop"; do
+    [ -n "$_mp" ] && [ -f "$_mp" ] || continue
+    MOD_VER=$(sed -n '/^version=/{s/^version=//p;q;}' "$_mp" 2>/dev/null | tr -d ' \t\r\n"')
+    [ -n "$MOD_VER" ] && break
+done
 
 echo "════════════════════════════════════════════════════════════════"
-echo "  HNC Diagnostic Report"
+echo "  HNC Diagnostic Report (${MOD_VER:-unknown})"
 echo "  Generated: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "════════════════════════════════════════════════════════════════"
 echo ""
@@ -53,6 +59,8 @@ if [ -f /data/adb/modules/hotspot_net_ctl/module.prop ]; then
     cat /data/adb/modules/hotspot_net_ctl/module.prop
 elif [ -f /data/adb/modules/hotspot_network_control/module.prop ]; then
     cat /data/adb/modules/hotspot_network_control/module.prop
+elif [ -n "$_DIAG_ROOT" ] && [ -f "$_DIAG_ROOT/module.prop" ]; then
+    cat "$_DIAG_ROOT/module.prop"
 fi
 echo ""
 
@@ -61,8 +69,19 @@ for bin in hnc_dpid hnc_httpd hnc_watchdog hnc_launcher hotspotd; do
     p="$HNC/bin/$bin"
     [ -x "$HNC/daemon/$bin/$bin" ] && p="$HNC/daemon/$bin/$bin"
     if [ -x "$p" ]; then
-        size=$(wc -c < "$p" 2>/dev/null)
-        ver=$(strings "$p" 2>/dev/null | grep -oE "rc30\.[0-9.]+[-a-z]*" | head -1)
+        size=$(wc -c < "$p" 2>/dev/null | tr -d ' ')
+        _str_out=$(strings "$p" 2>/dev/null)
+        ver=""
+        if [ -n "$MOD_VER" ]; then
+            ver=$(printf '%s\n' "$_str_out" | grep -oF "$MOD_VER" | head -1)
+        fi
+        if [ -z "$ver" ]; then
+            ver=$(printf '%s\n' "$_str_out" | grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta|rc|hotfix|hf)\.?[0-9A-Za-z._+-]+)?' | head -1)
+        fi
+        if [ -z "$ver" ]; then
+            ver=$(printf '%s\n' "$_str_out" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+[-0-9A-Za-z._+]*' | grep -vE '^(0\.0\.0|127\.0\.0|255\.255\.)' | head -1)
+        fi
+        unset _str_out
         echo "  $bin: size=$size version=${ver:-N/A}"
     else
         echo "  $bin: MISSING"
@@ -86,8 +105,13 @@ echo "SELinux context: $(cat /proc/self/attr/current 2>/dev/null | tr -d '\0\r\n
 echo ""
 
 echo "── [8] AVC denied (最近 dmesg) ───────────────────────────────"
-dmesg 2>/dev/null | grep -iE "avc.*denied" | tail -10
-[ $? -ne 0 ] || echo "  (无 hnc/dpid/hotspotd/launcher 相关 AVC denied — 这是好事)"
+_avc_hits=$(dmesg 2>/dev/null | grep -iE 'avc.*denied.*(hnc|dpid|hotspotd|launcher)' | tail -10)
+if [ -n "$_avc_hits" ]; then
+    printf '%s\n' "$_avc_hits"
+else
+    echo "  (无 hnc/dpid/hotspotd/launcher 相关 AVC denied — 这是好事)"
+fi
+unset _avc_hits
 echo ""
 
 echo "── [9] 热点接口状态 ───────────────────────────────────────────"
@@ -113,23 +137,24 @@ fi
 echo ""
 
 echo "── [11] HNC dpi_state.json (DPI 当前状态) ────────────────────"
-# v5.9.3 修 BUG-007 A: 之前只读 $HNC/data/dpi_state.json, 但 dpid 一直写在
-# $HNC/run/(src/dpid/cmd/dpid/main.go 的 stateFileName, httpd 侧 api_dpi_v53.go /
-# api_self.go / api_export.go / server.go 也全部读 run/) → 本段对任何机器都
-# 恒定输出 "MISSING", 把正常运行的 dpid 误报成挂了.
-# 现在 run/ 优先、data/ 兜底(兼容历史布局), 并打印实际命中的路径.
 DPI_STATE=""
 for c in "$HNC/run/dpi_state.json" "$HNC/data/dpi_state.json"; do
     [ -f "$c" ] && { DPI_STATE="$c"; break; }
 done
 if [ -n "$DPI_STATE" ]; then
     echo "  path: $DPI_STATE"
-    # 不 dump 全部 (太大), 只关键字段
     head -c 2000 "$DPI_STATE" 2>/dev/null
     echo ""
     echo "  (truncated, full file at $DPI_STATE)"
 else
     echo "  dpi_state.json MISSING (run/ 与 data/ 均无 — dpid 可能未运行)"
+fi
+if [ -f "$HNC/run/dpid.crashflag" ]; then
+    _cf_lines=$(wc -l < "$HNC/run/dpid.crashflag" 2>/dev/null | tr -d ' ')
+    echo "  run/dpid.crashflag: PRESENT (lines=${_cf_lines:-0})"
+    unset _cf_lines
+else
+    echo "  run/dpid.crashflag: absent (lines=0)"
 fi
 echo ""
 
@@ -140,10 +165,6 @@ fi
 echo ""
 
 echo "── [13] dpid 日志尾部 (最近 20 行) ──────────────────────────"
-# v5.9.3 修 BUG-007 A(同族路径漂移): 实际日志名是 logs/dpid.log
-# (hnc_launcher.c 与 service.sh / 看门狗 direct 模式都写这个,
-# httpd allowedLogs 白名单里也是 dpid.log), 之前写的 hnc_dpid.log 不存在
-# → 本段永远空白. 现在 dpid.log 优先、hnc_dpid.log 兜底.
 DPI_LOG=""
 for c in "$HNC/logs/dpid.log" "$HNC/logs/hnc_dpid.log"; do
     [ -f "$c" ] && { DPI_LOG="$c"; break; }
