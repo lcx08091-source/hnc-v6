@@ -122,7 +122,7 @@ _mac_sanitize() {
 # 都支持). Android 普遍 toybox/busybox 都 OK.
 _try_reclaim_stale() {
     local lockdir=$1
-    local holder
+    local holder holder2
     holder=$(cat "$lockdir/pid" 2>/dev/null)
     if [ -z "$holder" ]; then
         # 空 PID 文件: 检查 lockdir 创建多久了
@@ -131,10 +131,15 @@ _try_reclaim_stale() {
         now=$(date +%s)
         age=$((now - mtime))
         if [ "$mtime" -gt 0 ] && [ "$age" -gt 5 ]; then
-            # mkdir 5 秒后仍未写 pid → 必然是 mkdir 后崩溃, 安全回收
-            rm -f "$lockdir/pid" "$lockdir/depth" 2>/dev/null
-            rmdir "$lockdir" 2>/dev/null
-            return 0
+            if mkdir "${lockdir}.reclaim" 2>/dev/null; then
+                if [ -d "$lockdir" ] && [ -z "$(cat "$lockdir/pid" 2>/dev/null)" ]; then
+                    rm -f "$lockdir/pid" "$lockdir/depth" 2>/dev/null
+                    rmdir "$lockdir" 2>/dev/null
+                    rmdir "${lockdir}.reclaim" 2>/dev/null
+                    return 0
+                fi
+                rmdir "${lockdir}.reclaim" 2>/dev/null
+            fi
         fi
         return 1
     fi
@@ -142,10 +147,19 @@ _try_reclaim_stale() {
     if kill -0 "$holder" 2>/dev/null; then
         return 1
     fi
-    # PID 已死: 安全回收
-    rm -f "$lockdir/pid" "$lockdir/depth" 2>/dev/null
-    rmdir "$lockdir" 2>/dev/null
-    return 0
+    # PID 已死: 持 .reclaim 互斥并二次复读确认 pid 未切换给新进程后再拆锁(防 TOCTOU 竞态)
+    mkdir "${lockdir}.reclaim" 2>/dev/null || return 1
+    holder2=$(cat "$lockdir/pid" 2>/dev/null)
+    if [ -n "$holder2" ] && [ "$holder2" = "$holder" ] && ! kill -0 "$holder2" 2>/dev/null; then
+        if [ "$(cat "$lockdir/pid" 2>/dev/null)" = "$holder2" ]; then
+            rm -f "$lockdir/pid" "$lockdir/depth" 2>/dev/null
+            rmdir "$lockdir" 2>/dev/null
+            rmdir "${lockdir}.reclaim" 2>/dev/null
+            return 0
+        fi
+    fi
+    rmdir "${lockdir}.reclaim" 2>/dev/null
+    return 1
 }
 
 # ═══ per-MAC 锁 ═════════════════════════════════════════════════
