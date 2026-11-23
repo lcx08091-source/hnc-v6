@@ -63,6 +63,65 @@ rb_is_stable_vc() {
 rb_data() { echo "$1/data"; }
 rb_run() { echo "$1/run"; }
 
+# v6.1.0-rc.2: 配置快照白名单(覆盖核心策略、五大战术舱、隐私安检、随机 MAC / 访问守卫 / 自训策略及 v6_*.json; 严禁包含凭据与运行态文件)
+RB_CFG_STATIC_LIST="rules.json device_names.json templates.json conn_blocks.json app_limits.json limit_policies.json autorate.json alerts_config.json app_controls.json dns_takeover.json encdns.json mac_aliases.json dpi_user_rules.json phone_usage_config.json dpi_experiment.json device_ident_override.json startup_fp.json fp_prototypes.json dpi_self_config.json leakguard_config.json vector_express.json update_leash.json thermo_cruise.json rmac_policy.json webui_access.json dpi_fp_prototypes.json self_policy.json"
+
+rb_is_cfg_whitelisted() {
+    case "$1" in
+        ''|*/*|*'..'*) return 1 ;;
+        remote_tokens.json|devices.json|rollback.*|runtime_version*|*.jsonl) return 1 ;;
+        leakguard_config.json|vector_express.json|update_leash.json|thermo_cruise.json|\
+        rmac_policy.json|webui_access.json|dpi_fp_prototypes.json|self_policy.json|\
+        rules.json|device_names.json|templates.json|conn_blocks.json|app_limits.json|\
+        limit_policies.json|autorate.json|alerts_config.json|app_controls.json|\
+        dns_takeover.json|encdns.json|mac_aliases.json|dpi_user_rules.json|\
+        phone_usage_config.json|dpi_experiment.json|device_ident_override.json|\
+        startup_fp.json|fp_prototypes.json|dpi_self_config.json)
+            return 0 ;;
+        v6_*.json)
+            case "${1#v6_}" in
+                ''|.json|*[!A-Za-z0-9_.-]*) return 1 ;;
+                *) return 0 ;;
+            esac ;;
+    esac
+    return 1
+}
+
+rb_pack_cfg_snapshot() {
+    _src_d="$1"; _dst_c="$2"
+    [ -d "$_src_d" ] || return 0
+    mkdir -p "$_dst_c" 2>/dev/null || return 0
+    for _cfn in $RB_CFG_STATIC_LIST; do
+        [ -f "$_src_d/$_cfn" ] || continue
+        rb_is_cfg_whitelisted "$_cfn" || continue
+        cp -af "$_src_d/$_cfn" "$_dst_c/$_cfn" 2>/dev/null || true
+    done
+    for _v6f in "$_src_d"/v6_*.json; do
+        [ -f "$_v6f" ] || continue
+        _v6bn="${_v6f##*/}"
+        rb_is_cfg_whitelisted "$_v6bn" || continue
+        cp -af "$_v6f" "$_dst_c/$_v6bn" 2>/dev/null || true
+    done
+    return 0
+}
+
+rb_restore_cfg_snapshot() {
+    _src_c="$1"; _dst_d="$2"
+    [ -d "$_src_c" ] && [ -d "$_dst_d" ] || return 0
+    for _cfp in "$_src_c"/*.json; do
+        [ -f "$_cfp" ] || continue
+        _cfbn="${_cfp##*/}"
+        rb_is_cfg_whitelisted "$_cfbn" || continue
+        if cp -af "$_cfp" "$_dst_d/${_cfbn}.rb" 2>/dev/null; then
+            mv -f "$_dst_d/${_cfbn}.rb" "$_dst_d/$_cfbn" 2>/dev/null || cp -af "$_cfp" "$_dst_d/$_cfbn" 2>/dev/null || true
+            rm -f "$_dst_d/${_cfbn}.rb" 2>/dev/null || true
+        else
+            cp -af "$_cfp" "$_dst_d/$_cfbn" 2>/dev/null || true
+        fi
+    done
+    return 0
+}
+
 # ── 快照 ─────────────────────────────────────────────────────────────
 # 返回: 0 = 正常(继续 sync); 3 = pinned 且模块版本没变(跳过 sync);
 #       1 = 内部错误(照常继续 sync, 失败不影响开机)。
@@ -120,6 +179,7 @@ rb_snapshot() {
                && cp -a "$_hnc/daemon/." "$_tmp/daemon/" 2>/dev/null \
                && cp -a "$_hnc/webroot/." "$_tmp/webroot/" 2>/dev/null; then
                 [ -f "$_hnc/module.prop" ] && cp -af "$_hnc/module.prop" "$_tmp/module.prop" 2>/dev/null || true
+                rb_pack_cfg_snapshot "$_d" "$_tmp/data_cfg"
                 echo "$_old" > "$_tmp/version" 2>/dev/null || true
                 [ -d "$_prev" ] && mv -f "$_prev" "$_bak" 2>/dev/null || true
                 if mv -f "$_tmp" "$_prev" 2>/dev/null; then
@@ -265,6 +325,7 @@ rb_do_rollback() {
             fi
         done
         [ -f "$_prev/module.prop" ] && cp -af "$_prev/module.prop" "$_hnc/module.prop" 2>/dev/null || true
+        rb_restore_cfg_snapshot "$_prev/data_cfg" "$_d"
         chmod 755 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         chcon u:object_r:system_file:s0 "$_hnc/daemon/hnc_httpd/hnc_httpd" 2>/dev/null || true
         # 拷来拷去 SELinux 上下文会变成 system_data_file, ColorOS 上 Go 进程

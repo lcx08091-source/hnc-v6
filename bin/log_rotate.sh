@@ -32,22 +32,42 @@
 #   写位置带回文件头,不会留稀疏洞。一处修好全部长驻 daemon。
 #   代价:cp 与 truncate 之间新写入的几行会丢 —— 日志场景可接受。
 
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
-    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
-
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
-DEFAULT_SIZE_LIMIT=1048576   # 1 MB
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
+
+DEFAULT_SIZE_LIMIT=1048576          # 1 MB
+EXPORTS_MAX_FILES=${HNC_EXPORTS_MAX_FILES:-10}
+EXPORTS_MAX_BYTES=${HNC_EXPORTS_MAX_BYTES:-134217728}  # 128 MB
+
+# 防 mksh 32 位有符号整数(>2.14GB)溢出的十进制无符号小于比较
+uint_lt() {
+    _ul_a="${1:-0}"; _ul_b="${2:-0}"
+    case "$_ul_a" in ''|*[!0-9]*) _ul_a=0 ;; esac
+    case "$_ul_b" in ''|*[!0-9]*) _ul_b=0 ;; esac
+    while [ "${_ul_a#0}" != "$_ul_a" ]; do _ul_a=${_ul_a#0}; done; [ -n "$_ul_a" ] || _ul_a=0
+    while [ "${_ul_b#0}" != "$_ul_b" ]; do _ul_b=${_ul_b#0}; done; [ -n "$_ul_b" ] || _ul_b=0
+    [ "${#_ul_a}" -lt "${#_ul_b}" ] && return 0
+    [ "${#_ul_a}" -gt "${#_ul_b}" ] && return 1
+    awk 'BEGIN { exit !(ARGV[1] < ARGV[2]) }' "$_ul_a" "$_ul_b"
+}
 
 # get_size <file>  → bytes (文件不存在返 0)
 get_size() {
     local f=$1
     [ -f "$f" ] || { echo 0; return; }
-    # stat -c 在 Android/Linux 都支持;BSD/macOS 不支持但不是目标平台
     local sz
-    sz=$(stat -c %s "$f" 2>/dev/null)
+    sz=$(stat -c %s "$f" 2>/dev/null | tr -dc '0-9')
     if [ -z "$sz" ]; then
-        # fallback: wc -c
-        sz=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+        sz=$(wc -c < "$f" 2>/dev/null | tr -dc '0-9')
     fi
     echo "${sz:-0}"
 }
@@ -59,24 +79,17 @@ rotate_one() {
     local sz
     sz=$(get_size "$f")
 
-    # 未达阈值 → 什么都不做
-    [ "$sz" -lt "$limit" ] 2>/dev/null && return 0
+    # 未达阈值 → 什么都不做(使用无符号比较防止 >2.14GB 溢出为负数漏转)
+    uint_lt "$sz" "$limit" && return 0
 
-    # 达到阈值 → 三代轮转(保留份数与阈值判定同旧版,只把最后一步换成 copytruncate)
-    # 先删最老的 .2,再把 .1 → .2(.1/.2 无人持有,mv 安全且省一次拷贝)
     rm -f "$f.2" 2>/dev/null
     [ -f "$f.1" ] && mv "$f.1" "$f.2" 2>/dev/null
 
-    # v5.9.3 BUG-014:.log → .1 用 copytruncate。
-    # cp 与 truncate **必须** && 串联:cp 失败(磁盘满 / 只读 / 被删)时绝不能
-    # 截断原文件,否则就从"日志没轮转"升级成"日志被清空"。
+    # v5.9.3 BUG-014: .log → .1 用 copytruncate, cp 失败绝不截断原文件
     if cp "$f" "$f.1" 2>/dev/null; then
         chmod 644 "$f.1" 2>/dev/null
-        # `: > "$f"` 是 O_TRUNC 打开已存在的 inode,不 unlink 不重建,
-        # 长驻 daemon 手里的 fd 依旧指向同一个 inode,继续写进新的 foo.log。
         : > "$f" 2>/dev/null
     else
-        # cp 失败:原文件原样留着,下一轮再试。返回非 0 让调用方能看出异常。
         return 1
     fi
 
@@ -84,14 +97,48 @@ rotate_one() {
     return 0
 }
 
-# rotate_all_logs  — 扫 $HNC_DIR/logs/ 下所有 *.log
+# prune_exports_dir — 清理 exports/ 超配额旧文件(保留最近 10 个且总大小 <= 128MB, 跳过 .staging)
+prune_exports_dir() {
+    local exp_dir="${HNC_EXPORTS_DIR:-$HNC_DIR/exports}"
+    [ -d "$exp_dir" ] || return 0
+    local _fn _sz
+    ls -1t "$exp_dir" 2>/dev/null | while IFS= read -r _fn; do
+        case "$_fn" in ''|.*) continue ;; esac
+        [ -f "$exp_dir/$_fn" ] || continue
+        _sz=$(get_size "$exp_dir/$_fn")
+        printf '%s\t%s\n' "$_sz" "$_fn"
+    done | awk -F '\t' -v max_n="$EXPORTS_MAX_FILES" -v max_b="$EXPORTS_MAX_BYTES" '
+        BEGIN { max_n += 0; max_b += 0; kept = 0; over = 0 }
+        NF >= 2 {
+            idx++
+            sz = $1 + 0
+            if (over || idx > max_n || (kept + sz) > max_b) {
+                over = 1
+                print $2
+            } else {
+                kept += sz
+            }
+        }
+    ' | while IFS= read -r _del; do
+        [ -n "$_del" ] && rm -f "$exp_dir/$_del" 2>/dev/null || true
+    done
+    return 0
+}
+
+# rotate_all_logs — 扫 $HNC_DIR/logs/*.log + 轮转 run/m4_go_write.log + 清理 exports/
 rotate_all_logs() {
     local dir="$HNC_DIR/logs"
-    [ -d "$dir" ] || return 0
-    for f in "$dir"/*.log; do
-        [ -f "$f" ] || continue
-        rotate_one "$f" "$DEFAULT_SIZE_LIMIT"
-    done
+    if [ -d "$dir" ]; then
+        for f in "$dir"/*.log; do
+            [ -f "$f" ] || continue
+            rotate_one "$f" "$DEFAULT_SIZE_LIMIT"
+        done
+    fi
+    if [ -f "$HNC_DIR/run/m4_go_write.log" ]; then
+        rotate_one "$HNC_DIR/run/m4_go_write.log" "${HNC_M4_LOG_MAX_BYTES:-$DEFAULT_SIZE_LIMIT}" || true
+    fi
+    prune_exports_dir
+    return 0
 }
 
 # ─── main ─────────────────────────────────────────────────
@@ -103,13 +150,11 @@ case "$1" in
     "")
         echo "Usage:"
         echo "  log_rotate.sh <file> [size_bytes]"
-        echo "  log_rotate.sh check                  # rotate all logs/*.log"
+        echo "  log_rotate.sh check                  # rotate all logs/*.log + m4_go_write.log + prune exports/"
         exit 1
         ;;
     *)
-        # rotate 单个文件
         if [ ! -f "$1" ] && [ ! -e "$1" ]; then
-            # 文件不存在也 OK,静默退出(调用者不用先判断)
             exit 0
         fi
         rotate_one "$1" "${2:-$DEFAULT_SIZE_LIMIT}"

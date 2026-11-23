@@ -13,11 +13,20 @@
 #
 # rollup 时才把累计转成日聚合。见 stats_rollup.sh。
 
-# PATH 健壮性
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
-
 HNC_DIR=${HNC_DIR:-${HNC:-/data/local/hnc}}
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
+
 RAW_FILE="$HNC_DIR/data/stats_raw.jsonl"
+DEVICES_FLAT="$HNC_DIR/run/devices.flat"
 DEVICES_FILE="$HNC_DIR/data/devices.json"
 LOG="$HNC_DIR/logs/stats.log"
 IPT_MGR="$HNC_DIR/bin/iptables_manager.sh"
@@ -44,11 +53,6 @@ mkdir -p "$(dirname "$RAW_FILE")" 2>/dev/null
 # ═══════════════════════════════════════════════════════════════
 # 0. 对齐 HNC_STATS 的 per-IP 计数规则(rc46)
 # ═══════════════════════════════════════════════════════════════
-# hotspotd 模式下 device_detect 扫描循环不跑、无人调 ensure_stats 维护 HNC_STATS
-# 的 per-IP RETURN 计数规则 → 链一旦被 init flush(或新设备接入)就没人重建 →
-# 计数冻结(统计页"一直不动" + rx_bytes 归 0 连带速率变假)。这里每周期先对齐:
-# 在线设备缺规则就幂等补、已离线的删(保累计、防链增长)。让计数自愈。
-# 测试模式(STATS_ALL_CMD 被覆盖)跳过,避免动真 iptables。
 if [ -z "$HNC_TEST_MODE" ] && [ -x "$IPT_MGR" ]; then
     sh "$IPT_MGR" ensure_stats_online >/dev/null 2>&1 || true
 fi
@@ -56,61 +60,61 @@ fi
 # ═══════════════════════════════════════════════════════════════
 # 1. 从 iptables 拿当前累计 stats(IP -> rx,tx)
 # ═══════════════════════════════════════════════════════════════
-# stats_all 输出格式: "<ip> <rx_bytes> <tx_bytes>",每行一台
-# HNC_STATS 链没初始化的话 stats_all 输出空,直接退出,不写空采样
-
 stats_out=$(_run_stats_all 2>/dev/null)
 if [ -z "$stats_out" ]; then
-    # 热点没开 / iptables 链没建 / 没设备连接,都走这里,不算错误
     exit 0
 fi
 
 # ═══════════════════════════════════════════════════════════════
-# 2. 构建 IP -> MAC 映射(从 devices.json)
+# 2. 构建 IP -> MAC 映射(优先读 run/devices.flat, 回退单趟 awk 解析 devices.json, 消除逐设备 sed 风暴)
 # ═══════════════════════════════════════════════════════════════
-# devices.json 格式: {"mac":{"ip":"...","mac":"..",...}, ...}
-# 只需要 ip 和 mac 两个字段,单行 JSON,awk 按 '":' 分块提即可。
-# 设备下线但还没从 devices.json 清出去也没关系,MAC 还在就能用。
-
-if [ ! -f "$DEVICES_FILE" ]; then
-    log "WARN: devices.json missing, sample skipped"
+if [ ! -s "$DEVICES_FLAT" ] && [ ! -f "$DEVICES_FILE" ]; then
+    log "WARN: devices.flat and devices.json missing, sample skipped"
     exit 0
 fi
 
-# 用 grep -oE 提出每个设备块,再用 sed 拆 mac / ip
-# 为什么不用 awk while match:POSIX awk 的 match() 在循环里对 line=rest 的语义,
-# 不同实现(gawk / busybox awk / toybox awk)行为微妙不同,真机用 toybox 最稳。
-# grep -oE 走固定 regex,各平台一致。两步法稍慢但清晰可靠。
-ip_to_mac=$(grep -oE '"([0-9a-f]{2}:){5}[0-9a-f]{2}"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$DEVICES_FILE" 2>/dev/null | \
-while IFS= read -r block; do
-    # block 形如 "aa:bb:cc:dd:ee:01":{"ip":"192.168.43.10","mac":"aa:..","hostname":...}
-    # 取 key(开头引号之间的 MAC)
-    mac=$(echo "$block" | sed -nE 's/^"([0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2}:[0-9a-f]{2})".*/\1/p')
-    # 取 ip 字段值
-    ip=$(echo "$block" | sed -nE 's/.*"ip"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p')
-    [ -n "$mac" ] && [ -n "$ip" ] && echo "$ip $mac"
-done)
+if [ -s "$DEVICES_FLAT" ]; then
+    ip_to_mac=$(awk '
+        !/^[[:space:]]*(#|$)/ {
+            mac = ""; ip = ""
+            for (i = 1; i <= NF; i++) {
+                tok = tolower($i)
+                if (mac == "" && tok ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/) mac = tok
+                else if (ip == "" && tok ~ /^([0-9]{1,3}\.){3}[0-9]{1,3}$/) ip = tok
+            }
+            if (ip != "" && mac != "") print ip, mac
+        }
+    ' "$DEVICES_FLAT" 2>/dev/null)
+else
+    ip_to_mac=$(awk '
+        { s = s $0 " " }
+        END {
+            rest = s
+            while (match(rest, /"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^{}]*\}/)) {
+                blk = substr(rest, RSTART, RLENGTH)
+                rest = substr(rest, RSTART + RLENGTH)
+                mac = tolower(substr(blk, 2, 17))
+                if (match(blk, /"ip"[[:space:]]*:[[:space:]]*"[^"]*"/)) {
+                    ip = substr(blk, RSTART, RLENGTH)
+                    sub(/.*"ip"[[:space:]]*:[[:space:]]*"/, "", ip)
+                    sub(/"$/, "", ip)
+                    if (ip != "") print ip, mac
+                }
+            }
+        }
+    ' "$DEVICES_FILE" 2>/dev/null)
+fi
 
 if [ -z "$ip_to_mac" ]; then
-    # devices.json 存在但没设备,也是正常情况
     exit 0
 fi
 
 # ═══════════════════════════════════════════════════════════════
 # 3. 按 MAC 聚合(同一 MAC 多个 IP 的字节相加)
 # ═══════════════════════════════════════════════════════════════
-# stats_out: "<ip> <rx> <tx>"
-# ip_to_mac: "<ip> <mac>"
-# 用 awk 做 join:先读 ip_to_mac 建表,再读 stats_out 累加
-
 ts=$(date +%s 2>/dev/null)
 [ -z "$ts" ] && { log "WARN: date +%s failed"; exit 1; }
 
-# v5.20: 时钟健壮性(hnc_clock.sh, 与 httpd 同规则/同高水位 data/clock_hwm)。
-#   - 不可信(开机未对时 1970/2000、过期 RTC 落后高水位)→ 本轮不采样, 不写
-#     stats_last_date(否则 1970 的采样进 raw、跨日判定触发 1970 的 rollup);
-#   - 跳变 > 10 分钟只记日志: raw 存的是累计值, 没有需要重建的差分基线,
-#     rollup 对计数回退已按复位处理。
 CLOCK_JUMPED=""
 if [ -f "$HNC_DIR/bin/hnc_clock.sh" ]; then
     . "$HNC_DIR/bin/hnc_clock.sh"
@@ -125,30 +129,27 @@ if [ -f "$HNC_DIR/bin/hnc_clock.sh" ]; then
     hnc_clock_note "$ts"
 fi
 
-# 临时文件传 ip_to_mac 给 awk(避免 -v 二次转义)
 MAP_TMP="$HNC_DIR/run/stats_map.$$"
 printf '%s\n' "$ip_to_mac" > "$MAP_TMP"
 trap 'rm -f "$MAP_TMP" 2>/dev/null' EXIT INT TERM
 
 aggregated=$(echo "$stats_out" | awk -v mapfile="$MAP_TMP" -v ts="$ts" '
 BEGIN {
-    # 读 IP -> MAC 映射
     while ((getline line < mapfile) > 0) {
         split(line, a, " ")
         if (a[1] != "" && a[2] != "") ip2mac[a[1]] = a[2]
     }
     close(mapfile)
 }
-# stats_out: ip rx tx
 $1 != "" && $2 ~ /^[0-9]+$/ && $3 ~ /^[0-9]+$/ {
     mac = ip2mac[$1]
-    if (mac == "") next  # IP 没对应 MAC(可能是网关或已完全下线),跳过
-    rx[mac] += $2
-    tx[mac] += $3
+    if (mac == "") next
+    rx[mac] += ($2 + 0)
+    tx[mac] += ($3 + 0)
 }
 END {
     for (mac in rx) {
-        printf "{\"ts\":%d,\"mac\":\"%s\",\"rx\":%d,\"tx\":%d}\n", ts, mac, rx[mac], tx[mac]
+        printf "{\"ts\":%.0f,\"mac\":\"%s\",\"rx\":%.0f,\"tx\":%.0f}\n", ts + 0, mac, rx[mac], tx[mac]
     }
 }
 ')

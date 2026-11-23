@@ -48,7 +48,13 @@
 # 环境: HNC_ENCDNS_IFACE / HNC_WL_IFACE 指定热点口; HNC_ENCDNS_LIST 指定名单文件;
 #       HNC_ENCDNS_REPROBE=1 强制重新探测 xt_string
 
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 CONF="$HNC_DIR/data/encdns.json"
 CAPS="$HNC_DIR/run/encdns_caps.json"
 LOG="$HNC_DIR/logs/service.log"
@@ -71,17 +77,22 @@ run() {
     "$@" 2>/dev/null
 }
 
+if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ]; then
+    iptables -w 2 -t filter -L -n >/dev/null 2>&1 || {
+        iptables -t filter -L -n >/dev/null 2>&1 && IPT="iptables"
+    }
+fi
+if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ] && command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || {
+        ip6tables -t filter -L -n >/dev/null 2>&1 && IP6T="ip6tables"
+    }
+fi
+
 v6=0
 command -v ip6tables >/dev/null 2>&1 && $IP6T -t filter -L -n >/dev/null 2>&1 && v6=1
 [ -n "${HNC_IP6T:-}" ] && $IP6T -t filter -L -n >/dev/null 2>&1 && v6=1
 
-# ── --counters: 解析 iptables -nvxL ─────────────────────────────────
-# 每行前两列是 pkts / bytes(ip6tables 的 opt 列可能为空, 所以只按内容分类):
-#   子链 DOT 里的规则                     → dot
-#   子链 STRICT: STRING 且 dpt:53          → doh_dns
-#               STRING 且 dpt:443          → doh_sni
-#               其余 dpt:443               → doh_ip
-#   跳转规则(target 为 HNC_ENCDNS_*)不计
+# ── --counters: 解析 iptables -nvxL(awk %.0f 浮点汇总, 彻底根治 >2.14GB mksh 32位溢出) ──
 counters_family() {
     # $1 = iptables 命令; 输出 "dot_p dot_b ip_p ip_b sni_p sni_b dns_p dns_b"
     {
@@ -90,34 +101,37 @@ counters_family() {
     } | awk '
         BEGIN { dp=0; db=0; ip=0; ib=0; sp=0; sb=0; np=0; nb=0 }
         {
-            ch = $1; p = $2; b = $3
-            if (p !~ /^[0-9]+$/ || b !~ /^[0-9]+$/) next
+            ch = $1; p = $2 + 0; b = $3 + 0
+            if ($2 !~ /^[0-9]+$/ || $3 !~ /^[0-9]+$/) next
             if ($4 ~ /^HNC_ENCDNS/) next
             if (ch == "DOT") { dp += p; db += b; next }
             if ($0 ~ /STRING/ && $0 ~ /dpt:53([^0-9]|$)/) { np += p; nb += b; next }
             if ($0 ~ /STRING/ && $0 ~ /dpt:443([^0-9]|$)/) { sp += p; sb += b; next }
             if ($0 ~ /dpt:443([^0-9]|$)/) { ip += p; ib += b; next }
         }
-        END { printf "%d %d %d %d %d %d %d %d\n", dp, db, ip, ib, sp, sb, np, nb }'
+        END { printf "%.0f %.0f %.0f %.0f %.0f %.0f %.0f %.0f\n", dp, db, ip, ib, sp, sb, np, nb }'
 }
 
 if [ "$MODE" = counters ]; then
     chain=false
     $IPT -t filter -nL "$C_MAIN" >/dev/null 2>&1 && chain=true
-    set -- $(counters_family "$IPT")
-    a1=${1:-0}; a2=${2:-0}; a3=${3:-0}; a4=${4:-0}; a5=${5:-0}; a6=${6:-0}; a7=${7:-0}; a8=${8:-0}
-    b1=0; b2=0; b3=0; b4=0; b5=0; b6=0; b7=0; b8=0
+    c4=$(counters_family "$IPT")
+    c6="0 0 0 0 0 0 0 0"
     v6j=false
     if [ "$v6" = 1 ]; then
         v6j=true
-        set -- $(counters_family "$IP6T")
-        b1=${1:-0}; b2=${2:-0}; b3=${3:-0}; b4=${4:-0}; b5=${5:-0}; b6=${6:-0}; b7=${7:-0}; b8=${8:-0}
+        c6=$(counters_family "$IP6T")
     fi
-    v4p=$((a1 + a3 + a5 + a7)); v6p=$((b1 + b3 + b5 + b7))
-    tb=$((a2 + a4 + a6 + a8 + b2 + b4 + b6 + b8))
-    printf '{"chain":%s,"v6":%s,"dot":{"pkts":%d,"bytes":%d},"doh_ip":{"pkts":%d,"bytes":%d},"doh_sni":{"pkts":%d,"bytes":%d},"doh_dns":{"pkts":%d,"bytes":%d},"total_pkts":%d,"total_bytes":%d,"v4_pkts":%d,"v6_pkts":%d}\n' \
-        "$chain" "$v6j" $((a1 + b1)) $((a2 + b2)) $((a3 + b3)) $((a4 + b4)) $((a5 + b5)) $((a6 + b6)) $((a7 + b7)) $((a8 + b8)) \
-        $((v4p + v6p)) "$tb" "$v4p" "$v6p"
+    awk -v ch="$chain" -v v6j="$v6j" -v s4="$c4" -v s6="$c6" 'BEGIN {
+        split(s4, a, " "); split(s6, b, " ")
+        for (i = 1; i <= 8; i++) { a[i] += 0; b[i] += 0 }
+        v4p = a[1] + a[3] + a[5] + a[7]
+        v6p = b[1] + b[3] + b[5] + b[7]
+        tb  = a[2] + a[4] + a[6] + a[8] + b[2] + b[4] + b[6] + b[8]
+        printf "{\"chain\":%s,\"v6\":%s,\"dot\":{\"pkts\":%.0f,\"bytes\":%.0f},\"doh_ip\":{\"pkts\":%.0f,\"bytes\":%.0f},\"doh_sni\":{\"pkts\":%.0f,\"bytes\":%.0f},\"doh_dns\":{\"pkts\":%.0f,\"bytes\":%.0f},\"total_pkts\":%.0f,\"total_bytes\":%.0f,\"v4_pkts\":%.0f,\"v6_pkts\":%.0f}\n",
+            ch, v6j, a[1]+b[1], a[2]+b[2], a[3]+b[3], a[4]+b[4], a[5]+b[5], a[6]+b[6], a[7]+b[7], a[8]+b[8],
+            v4p+v6p, tb, v4p, v6p
+    }'
     exit 0
 fi
 
@@ -269,6 +283,20 @@ sni_hex() { printf '|00%04x|%s' "${#1}" "$1"; }
 
 nr=0
 addr() { run "$@" && nr=$((nr + 1)); }
+addr_reject() {
+    # $1 = iptables 命令, $2 = reject-with 类型, 其余参数 = 规则匹配项; 缺 REJECT 模块时降级 DROP
+    _rcmd=$1; _rw=$2
+    shift 2
+    if run $_rcmd "$@" -j REJECT --reject-with "$_rw"; then
+        nr=$((nr + 1))
+        return 0
+    fi
+    if run $_rcmd "$@" -j DROP; then
+        nr=$((nr + 1))
+        return 0
+    fi
+    return 1
+}
 
 # ── 子链 ─────────────────────────────────────────────────────────────
 build_family() {
@@ -278,13 +306,13 @@ build_family() {
     run $_T -t filter -N "$C_DOT"
     run $_T -t filter -N "$C_STRICT"
     run $_T -t filter -N "$C_MAIN"
-    addr $_T -t filter -A "$C_DOT" -p tcp --dport 853 -j REJECT --reject-with tcp-reset
-    addr $_T -t filter -A "$C_DOT" -p udp --dport 853 -j REJECT --reject-with "$_icmp"
+    addr_reject "$_T" tcp-reset -t filter -A "$C_DOT" -p tcp --dport 853
+    addr_reject "$_T" "$_icmp"  -t filter -A "$C_DOT" -p udp --dport 853
     run $_T -t filter -A "$C_STRICT" -j "$C_DOT"
     [ "$need_strict" = 1 ] || return 0
     for _ip in $_ips; do
-        addr $_T -t filter -A "$C_STRICT" -d "$_ip" -p tcp --dport 443 -j REJECT --reject-with tcp-reset
-        addr $_T -t filter -A "$C_STRICT" -d "$_ip" -p udp --dport 443 -j REJECT --reject-with "$_icmp"
+        addr_reject "$_T" tcp-reset -t filter -A "$C_STRICT" -d "$_ip" -p tcp --dport 443
+        addr_reject "$_T" "$_icmp"  -t filter -A "$C_STRICT" -d "$_ip" -p udp --dport 443
     done
     if [ "$_s" = 1 ]; then
         for _h in $hosts; do
@@ -292,7 +320,7 @@ build_family() {
             for _p in udp tcp; do
                 addr $_T -t filter -A "$C_STRICT" -p "$_p" --dport 53 -m string --algo bm --icase --hex-string "$_hx" -j DROP
             done
-            addr $_T -t filter -A "$C_STRICT" -p tcp --dport 443 -m string --algo bm --icase --hex-string "$(sni_hex "$_h")" -j REJECT --reject-with tcp-reset
+            addr_reject "$_T" tcp-reset -t filter -A "$C_STRICT" -p tcp --dport 443 -m string --algo bm --icase --hex-string "$(sni_hex "$_h")"
         done
     fi
 }

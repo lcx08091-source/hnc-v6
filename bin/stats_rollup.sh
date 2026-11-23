@@ -19,9 +19,18 @@
 # 4. 清理 raw: 保留 < 48 小时内的采样点,删掉更早的(给下次 rollup 留安全边界)
 # 5. 清理 daily: 保留最近 90 天
 
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
-
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
+
 RAW_FILE="$HNC_DIR/data/stats_raw.jsonl"
 DAILY_FILE="$HNC_DIR/data/stats_daily.jsonl"
 DEVICES_FILE="$HNC_DIR/data/devices.json"
@@ -36,6 +45,64 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] [ROLLUP] $*" >> "$LOG" 2>/dev/null || true
 }
 
+# 纯 POSIX awk 儒略日/格里高利历 <-> Unix 纪元秒换算(兼容 Android 15/16 one-true-awk)
+_tz_offset_str() {
+    date +%z 2>/dev/null || echo "+0000"
+}
+
+epoch_to_ymd_posix() {
+    awk -v ts="${1:-0}" -v tz="$(_tz_offset_str)" 'BEGIN {
+        off = 0
+        if (tz ~ /^[+-][0-9][0-9][0-9][0-9]$/) {
+            sgn = (substr(tz, 1, 1) == "-") ? -1 : 1
+            off = sgn * ((substr(tz, 2, 2) + 0) * 3600 + (substr(tz, 4, 2) + 0) * 60)
+        }
+        lt = (ts + 0) + off
+        z = int(lt >= 0 ? lt / 86400 : (lt - 86399) / 86400) + 719468
+        era = int((z >= 0 ? z : z - 146096) / 146097)
+        doe = z - era * 146097
+        yoe = int((doe - int(doe / 1460) + int(doe / 36524) - int(doe / 146096)) / 365)
+        y = yoe + era * 400
+        doy = doe - (365 * yoe + int(yoe / 4) - int(yoe / 100))
+        mp = int((5 * doy + 2) / 153)
+        d = doy - int((153 * mp + 2) / 5) + 1
+        m = mp + (mp < 10 ? 3 : -9)
+        if (m <= 2) y = y + 1
+        printf "%04d-%02d-%02d\n", y, m, d
+    }'
+}
+
+ymd_to_start_epoch_posix() {
+    awk -v ymd="$1" -v tz="$(_tz_offset_str)" 'BEGIN {
+        if (split(ymd, a, "-") != 3) exit 1
+        y = a[1] + 0; m = a[2] + 0; d = a[3] + 0
+        off = 0
+        if (tz ~ /^[+-][0-9][0-9][0-9][0-9]$/) {
+            sgn = (substr(tz, 1, 1) == "-") ? -1 : 1
+            off = sgn * ((substr(tz, 2, 2) + 0) * 3600 + (substr(tz, 4, 2) + 0) * 60)
+        }
+        yr = y - (m <= 2 ? 1 : 0)
+        era = int((yr >= 0 ? yr : yr - 399) / 400)
+        yoe = yr - era * 400
+        mo = m + (m > 2 ? -3 : 9)
+        doy = int((153 * mo + 2) / 5) + d - 1
+        doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+        days = era * 146097 + doe - 719468
+        printf "%.0f\n", days * 86400 - off
+    }'
+}
+
+uint_gt() {
+    _ug_a="${1:-0}"; _ug_b="${2:-0}"
+    case "$_ug_a" in ''|*[!0-9]*) _ug_a=0 ;; esac
+    case "$_ug_b" in ''|*[!0-9]*) _ug_b=0 ;; esac
+    while [ "${_ug_a#0}" != "$_ug_a" ]; do _ug_a=${_ug_a#0}; done; [ -n "$_ug_a" ] || _ug_a=0
+    while [ "${_ug_b#0}" != "$_ug_b" ]; do _ug_b=${_ug_b#0}; done; [ -n "$_ug_b" ] || _ug_b=0
+    [ "${#_ug_a}" -gt "${#_ug_b}" ] && return 0
+    [ "${#_ug_a}" -lt "${#_ug_b}" ] && return 1
+    awk 'BEGIN { exit !(ARGV[1] > ARGV[2]) }' "$_ug_a" "$_ug_b"
+}
+
 # v5.20: 时钟不可信时整轮跳过 —— raw/daily 保留期清理用当前时间算截止点(跑到
 # 未来的时钟会把历史全删), .backup-YYYYMMDD 也会用错的日期。见 hnc_clock.sh。
 if [ -f "$HNC_DIR/bin/hnc_clock.sh" ]; then
@@ -48,17 +115,13 @@ fi
 
 TARGET_DATE=${1:-$(date -d 'yesterday' +%Y-%m-%d 2>/dev/null)}
 if [ -z "$TARGET_DATE" ]; then
-    # date -d 在 toybox 不一定支持,fallback:根据当前时间戳减 86400
-    now=$(date +%s)
-    yesterday_ts=$((now - 86400))
+    now=$(date +%s 2>/dev/null || echo 0)
+    yesterday_ts=$(awk -v n="$now" 'BEGIN { printf "%.0f\n", (n + 0) - 86400 }')
     TARGET_DATE=$(date -d "@$yesterday_ts" +%Y-%m-%d 2>/dev/null)
+    [ -n "$TARGET_DATE" ] || TARGET_DATE=$(epoch_to_ymd_posix "$yesterday_ts" 2>/dev/null)
 fi
 if [ -z "$TARGET_DATE" ]; then
-    # 还不行的话用 awk 手动算
-    TARGET_DATE=$(awk 'BEGIN { t = systime() - 86400; print strftime("%Y-%m-%d", t) }' 2>/dev/null)
-fi
-if [ -z "$TARGET_DATE" ]; then
-    log "ERROR: cannot compute yesterday date (no date -d, no awk strftime)"
+    log "ERROR: cannot compute yesterday date"
     exit 1
 fi
 if ! printf '%s' "$TARGET_DATE" | grep -Eq '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[12][0-9]|3[01])$'; then
@@ -67,7 +130,6 @@ if ! printf '%s' "$TARGET_DATE" | grep -Eq '^[0-9]{4}-(0[1-9]|1[0-2])-(0[1-9]|[1
 fi
 
 # v4.0 Patch 1.6: raw 缺失时只跳过 stats 聚合,logs 备份仍要跑
-# (装机前几天没 raw,但 logs 照样每日备份)
 if [ ! -f "$RAW_FILE" ]; then
     log "raw file missing, skipping stats rollup (logs backup will still run)"
     SKIP_STATS=1
@@ -75,13 +137,14 @@ fi
 
 if [ -z "$SKIP_STATS" ]; then
 log "rollup for $TARGET_DATE"
+_raw_bytes=$(wc -c < "$RAW_FILE" 2>/dev/null | tr -dc '0-9')
+if uint_gt "${_raw_bytes:-0}" "2147483647"; then
+    log "WARN: $RAW_FILE exceeds 2.14GB (${_raw_bytes} bytes), processing with 64-bit float awk"
+fi
 
 # ═══════════════════════════════════════════════════════════════
 # 1. 先构建 MAC → name 映射(给输出的 daily 行加可读名)
 # ═══════════════════════════════════════════════════════════════
-# 优先级:device_names.json(手动) > devices.json 的 hostname
-# 仅用于友好显示,不是计算依据,失败时输出空串
-
 MAC_NAMES_TMP="$HNC_DIR/run/rollup_names.$$"
 mkdir -p "$HNC_DIR/run" 2>/dev/null
 : > "$MAC_NAMES_TMP"
@@ -104,8 +167,6 @@ if [ -f "$DEVICES_FILE" ]; then
         h=$(echo "$block" | sed -nE 's/.*"hostname"[[:space:]]*:[[:space:]]*"([^"]*)".*/\1/p')
         [ -z "$m" ] && continue
         [ -z "$h" ] && continue
-        # 去重:只在 mac 还没有记录时加
-        # 用 grep -E + 行首锚点(-F 不支持锚点)
         if ! grep -qE "^${m}	" "$MAC_NAMES_TMP" 2>/dev/null; then
             echo "$m	$h" >> "$MAC_NAMES_TMP"
         fi
@@ -119,13 +180,8 @@ fi
 DATE_START=$(date -d "$TARGET_DATE 00:00:00" +%s 2>/dev/null)
 DATE_END=$(date -d "$TARGET_DATE 23:59:59" +%s 2>/dev/null)
 if [ -z "$DATE_START" ] || [ -z "$DATE_END" ]; then
-    # awk 兜底
-    DATE_START=$(awk -v d="$TARGET_DATE" 'BEGIN {
-        split(d, a, "-")
-        t = mktime(a[1]" "a[2]" "a[3]" 00 00 00")
-        print t
-    }')
-    DATE_END=$((DATE_START + 86399))
+    DATE_START=$(ymd_to_start_epoch_posix "$TARGET_DATE" 2>/dev/null)
+    [ -n "$DATE_START" ] && DATE_END=$(awk -v ds="$DATE_START" 'BEGIN { printf "%.0f\n", (ds + 0) + 86399 }')
 fi
 
 if [ -z "$DATE_START" ] || [ "$DATE_START" = "0" ]; then
@@ -134,44 +190,36 @@ if [ -z "$DATE_START" ] || [ "$DATE_START" = "0" ]; then
     exit 1
 fi
 
-# 聚合输出(一行一台 mac)
 AGG_TMP="$HNC_DIR/run/rollup_agg.$$"
 awk -v ds="$DATE_START" -v de="$DATE_END" -v target="$TARGET_DATE" \
     -v namesfile="$MAC_NAMES_TMP" '
 BEGIN {
-    # 读 name 映射
+    ds = ds + 0
+    de = de + 0
     while ((getline line < namesfile) > 0) {
         split(line, a, "\t")
         if (a[1] != "") names[a[1]] = a[2]
     }
     close(namesfile)
 }
-# 解析 JSON 每行: {"ts":N,"mac":"..","rx":N,"tx":N}
-# 不用完整 JSON 解析,靠字段位置确定的格式做 regex 提取
 {
-    # ts
     if (!match($0, /"ts"[[:space:]]*:[[:space:]]*[0-9]+/)) next
     s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s)
     ts = s + 0
     if (ts < ds || ts > de) next
 
-    # mac
     if (!match($0, /"mac"[[:space:]]*:[[:space:]]*"[^"]*"/)) next
     s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*"/, "", s); sub(/"$/, "", s)
     mac = s
 
-    # rx
     if (!match($0, /"rx"[[:space:]]*:[[:space:]]*[0-9]+/)) next
     s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s)
     rx_cur = s + 0
 
-    # tx
     if (!match($0, /"tx"[[:space:]]*:[[:space:]]*[0-9]+/)) next
     s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s)
     tx_cur = s + 0
 
-    # 按 MAC 聚 delta(按时间顺序处理:因为 raw 是 append-only 按时间追加的)
-    # 跳变 (cur < prev):delta=0,重置 prev = cur
     if (mac in last_rx) {
         d_rx = rx_cur - last_rx[mac]
         d_tx = tx_cur - last_tx[mac]
@@ -180,21 +228,18 @@ BEGIN {
         sum_rx[mac] += d_rx
         sum_tx[mac] += d_tx
     }
-    # 首次见此 mac: 不加 delta(prev 视为 0 等价于第一次采样 = 基线)
     last_rx[mac] = rx_cur
     last_tx[mac] = tx_cur
     seen[mac] = 1
 }
 END {
     for (mac in seen) {
-        # 无流量的设备也输出 0(方便图表"某天没使用"可见)
         rx = sum_rx[mac] + 0
         tx = sum_tx[mac] + 0
         name = (mac in names) ? names[mac] : ""
-        # 转义 name 的 " 和 \(JSON 安全)
         gsub(/\\/, "\\\\", name)
         gsub(/"/, "\\\"", name)
-        printf "{\"date\":\"%s\",\"mac\":\"%s\",\"rx\":%d,\"tx\":%d,\"name\":\"%s\"}\n", \
+        printf "{\"date\":\"%s\",\"mac\":\"%s\",\"rx\":%.0f,\"tx\":%.0f,\"name\":\"%s\"}\n", \
             target, mac, rx, tx, name
     }
 }' "$RAW_FILE" > "$AGG_TMP"
@@ -207,7 +252,6 @@ log "aggregated $agg_count device-days for $TARGET_DATE"
 # ═══════════════════════════════════════════════════════════════
 if [ -s "$AGG_TMP" ]; then
     if [ -f "$DAILY_FILE" ]; then
-        # 过滤掉已有的 target_date 记录,再追加新的(rc=0 有保留行, rc=1 全过滤; rc>=2 为异常, 绝不覆盖)
         FILTER_TMP="${DAILY_FILE}.filter.$$"
         grep -Fv "\"date\":\"$TARGET_DATE\"" "$DAILY_FILE" > "$FILTER_TMP" 2>/dev/null
         _grc=$?
@@ -231,10 +275,11 @@ rm -f "$AGG_TMP" "$MAC_NAMES_TMP"
 # ═══════════════════════════════════════════════════════════════
 # 4. 清理 raw: 只保留最近 RAW_RETAIN_HOURS 小时
 # ═══════════════════════════════════════════════════════════════
-NOW_TS=$(date +%s)
-CUTOFF=$((NOW_TS - RAW_RETAIN_HOURS * 3600))
+NOW_TS=$(date +%s 2>/dev/null || echo 0)
+CUTOFF=$(awk -v now="$NOW_TS" -v h="$RAW_RETAIN_HOURS" 'BEGIN { printf "%.0f\n", (now + 0) - (h + 0) * 3600 }')
 PRUNE_TMP="${RAW_FILE}.prune.$$"
 awk -v cutoff="$CUTOFF" '
+BEGIN { cutoff = cutoff + 0 }
 {
     if (match($0, /"ts"[[:space:]]*:[[:space:]]*[0-9]+/)) {
         s = substr($0, RSTART, RLENGTH); sub(/.*:[[:space:]]*/, "", s)
@@ -249,11 +294,9 @@ log "raw pruned: $raw_after lines remain (> $RAW_RETAIN_HOURS h)"
 # 5. 清理 daily: 保留最近 DAILY_RETAIN_DAYS 天
 # ═══════════════════════════════════════════════════════════════
 if [ -f "$DAILY_FILE" ]; then
-    CUTOFF_DATE=$(date -d "@$((NOW_TS - DAILY_RETAIN_DAYS * 86400))" +%Y-%m-%d 2>/dev/null)
-    if [ -z "$CUTOFF_DATE" ]; then
-        CUTOFF_DATE=$(awk -v t="$((NOW_TS - DAILY_RETAIN_DAYS * 86400))" \
-            'BEGIN { print strftime("%Y-%m-%d", t) }' 2>/dev/null)
-    fi
+    DAILY_CUTOFF_TS=$(awk -v now="$NOW_TS" -v d="$DAILY_RETAIN_DAYS" 'BEGIN { printf "%.0f\n", (now + 0) - (d + 0) * 86400 }')
+    CUTOFF_DATE=$(date -d "@$DAILY_CUTOFF_TS" +%Y-%m-%d 2>/dev/null)
+    [ -n "$CUTOFF_DATE" ] || CUTOFF_DATE=$(epoch_to_ymd_posix "$DAILY_CUTOFF_TS" 2>/dev/null)
     if [ -n "$CUTOFF_DATE" ]; then
         PRUNE_TMP="${DAILY_FILE}.prune.$$"
         awk -v cutoff="$CUTOFF_DATE" '

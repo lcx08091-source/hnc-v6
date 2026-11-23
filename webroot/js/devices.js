@@ -22,6 +22,9 @@ function badges(d) {
   if (d.sim) b += '<span class="badge b-sim" title="模拟环境里的虚构设备，操作不会碰 tc / iptables">模拟</span>';
   if (d.blocked) b += '<span class="badge b-red">已封锁</span>';
   else if (!d.online) b += '<span class="badge b-gray">离线</span>';
+  if (typeof isUsbTetherIface === 'function' && isUsbTetherIface(d.iface)) {
+    b += '<span class="badge b-acc" title="通过 USB 数据线共享网络（' + esc(d.iface) + '）">USB 有线共享</span>';
+  }
   if (d.limitOn) b += '<span class="badge ' + (d.limitMode === 'failed' ? 'b-red' : 'b-acc') + '">限速 ' + (mbpsToMBs(d.down) || '∞') + '/' + (mbpsToMBs(d.up) || '∞') + modeSuffix('limit', d.limitMode) + '</span>';
   if (d.hasDelay) b += '<span class="badge ' + (d.delayMode === 'failed' ? 'b-red' : 'b-pur') + '">延迟 ' + d.delay + 'ms' + (d.loss ? ' · 丢包 ' + d.loss + '%' : '') + modeSuffix('delay', d.delayMode) + '</span>';
   if (d.sqm) b += '<span class="badge b-ok">低延迟</span>';
@@ -32,7 +35,7 @@ function badges(d) {
   if (d.autoInhFrom) b += '<span class="badge b-ok" title="更换随机 MAC 后已自动无感继承 ' + esc(d.autoInhName || d.autoInhFrom) + ' 的名称与规则（置信度 ' + (d.autoInhScore || 90) + '）">无感继承</span>';
   else if (d.rmac) b += '<span class="badge b-gray" title="Android/iOS 隐私 Wi-Fi 的随机 MAC；高置信度换地址时自动继承规则">随机 MAC</span>';
   if (d.mergedInto) b += '<span class="badge b-gray" title="这个旧 MAC 已合并到 ' + esc(d.mergedInto) + '">已合并</span>';
-  if (typeof v6DeviceBadgesHtml === 'function') b += v6DeviceBadgesHtml(d);
+  if (typeof v6DeviceBadgesHtml === 'function') b += v6DeviceBadgesHtml(d, true);
   return b;
 }
 
@@ -140,8 +143,9 @@ function schedSheet(d) {
   }
   paint();
   $('#sw-list').onclick = function (e) {
-    var b = e.target.closest('[data-wd]'); if (b) { b.classList.toggle('on'); return; }
-    var x = e.target.closest('[data-wdel]'); if (x) { read(); ws.splice(+x.getAttribute('data-wdel'), 1); paint(); }
+    var t0 = evEl(e); if (!t0 || !t0.closest) return;
+    var b = t0.closest('[data-wd]'); if (b) { b.classList.toggle('on'); return; }
+    var x = t0.closest('[data-wdel]'); if (x) { read(); ws.splice(+x.getAttribute('data-wdel'), 1); paint(); }
   };
   $('#sw-add').onclick = function () { read(); if (ws.length >= 16) { toast('最多 16 个时段', 'warn'); return; } ws.push({ days: [], start: '08:00', end: '12:00', down: '', up: '', block: false }); paint(); };
   $('#sw-save').onclick = function () {
@@ -284,7 +288,7 @@ function appTimeSheet(d, id, name) {
     '<label class="field" style="margin-top:12px">每天可用<span class="box"><input id="atm" type="number" inputmode="numeric" min="1" max="1440" placeholder="分钟" value="' + (cur ? num(cur.minutes) : '') + '"><span class="u">分钟</span></span></label>' +
     (cur ? '<div class="note" style="margin-top:8px">今天已用 ' + fmtDur(cur.used_sec) + (cur.exhausted ? ' · 已用完' : '') + '</div>' : '') +
     '<div class="btns" style="margin-top:12px">' + (cur ? '<button class="btn dan press" id="atm-del">取消限时</button>' : '<button class="btn sec press" data-close>取消</button>') + '<button class="btn pri press" id="atm-ok">保存</button></div>');
-  $('#atm-pre').onclick = function (e) { var b = e.target.closest('[data-atm]'); if (!b) return; $('#atm').value = b.getAttribute('data-atm'); $$('#atm-pre [data-atm]').forEach(function (x) { x.classList.toggle('on', x === b); }); };
+  $('#atm-pre').onclick = function (e) { var t0 = evEl(e); var b = t0 && t0.closest ? t0.closest('[data-atm]') : null; if (!b) return; $('#atm').value = b.getAttribute('data-atm'); $$('#atm-pre [data-atm]').forEach(function (x) { x.classList.toggle('on', x === b); }); };
   var after = function () { return loadAppTime(d.mac, true); };
   $('#atm-ok').onclick = function () {
     var m = Math.round(num($('#atm').value)); if (!(m >= 1 && m <= 1440)) { toast('填 1~1440 分钟', 'err'); return; }
@@ -302,6 +306,10 @@ function devBody(d) {
   h += vpnNote(d);
   if (d.mergedInto) { var mt = devBy(d.mergedInto); h += '<div class="note" style="padding:0 2px">旧随机 MAC 已合并到「' + esc(mt ? mt.name : d.mergedInto) + '」</div>'; }
   if (d.autoInhFrom) { h += '<div class="note" style="padding:0 2px;color:var(--badge-ok)">已通过指纹自动继承「' + esc(d.autoInhName || d.autoInhFrom) + '」规则（置信 ' + num(d.autoInhScore, 90) + ' 分）</div>'; }
+  else if (d.mergedFrom) { h += '<div class="note" style="padding:0 2px">已合并旧地址「' + esc(d.mergedFromName || d.mergedFrom) + '」的名称与规则</div>'; }
+  if (d.mergedFrom || d.mergedInto) {
+    h += '<button type="button" class="btn pri wide press" data-act="device-unmerge"' + busy + '>' + ico('isolate') + '<span>拆分恢复独立设备</span></button>';
+  }
 
   // 顶部紧凑 3 格 Bento 快捷开关 + 单行连接速览条 + 3-Tab 分段器
   h += '<div class="cc-bento-row">' +
@@ -428,7 +436,7 @@ function identSheet(d) {
     '<div class="grid2"><label class="field">品牌' + inp('idf-brand', id.brand || '', '', 'maxlength="40" placeholder="小米"') + '</label><label class="field">型号' + inp('idf-model', id.model || '', '', 'maxlength="40" placeholder="Xiaomi 14"') + '</label></div>' +
     '<div class="btns" style="margin-top:12px">' + (id.manual ? '<button class="btn sec press" id="idf-clear">恢复自动识别</button>' : '<button class="btn sec press" data-close>取消</button>') + '<button class="btn pri press" id="idf-save">保存</button></div>');
   var pick = ty;
-  $('#idt').onclick = function (e) { var b = e.target.closest('[data-idt]'); if (!b) return; pick = pick === b.getAttribute('data-idt') ? '' : b.getAttribute('data-idt'); $$('#idt [data-idt]').forEach(function (x) { x.classList.toggle('on', x.getAttribute('data-idt') === pick); }); };
+  $('#idt').onclick = function (e) { var t0 = evEl(e); var b = t0 && t0.closest ? t0.closest('[data-idt]') : null; if (!b) return; pick = pick === b.getAttribute('data-idt') ? '' : b.getAttribute('data-idt'); $$('#idt [data-idt]').forEach(function (x) { x.classList.toggle('on', x.getAttribute('data-idt') === pick); }); };
   var send = function (p, msg) { api.action('device_ident_set', p).then(function () { closeSheet(); toast(msg); return loadDevices(); }).then(function () { refreshCard(d.mac); }).catch(function (e) { toast(errText(e), 'err'); }); };
   $('#idf-save').onclick = function () { send({ mac: d.mac, type: pick, os: $('#idf-os').value.trim(), os_ver: $('#idf-ver').value.trim(), brand: $('#idf-brand').value.trim(), model: $('#idf-model').value.trim() }, '已保存识别结果'); };
   var cl = $('#idf-clear'); if (cl) cl.onclick = function () { send({ mac: d.mac, clear: 'true' }, '已恢复自动识别'); };
@@ -854,7 +862,7 @@ function rollNum(el, str, unit) {
   if (!apple() || !fxOn('num') || !sameUnit || !/^\d+(\.\d+)?$/.test(str)) { el.textContent = str; return; }
   tween(el, parseFloat(str), (str.split('.')[1] || '').length);
 }
-function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge ? d.merge.old_mac + '/' + d.merge.score : '', d.vpn ? d.vpn.level : '', d.rmac ? 1 : 0, d.mergedInto, d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.appQos ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError, d.sim ? 1 : 0,
+function shapeOf() { return S.devices.map(function (d) { return [d.mac, d.merge ? d.merge.old_mac + '/' + d.merge.score : '', d.vpn ? d.vpn.level : '', d.rmac ? 1 : 0, d.mergedInto, d.mergedFrom || '', d.mergedFromName || '', d.autoInhFrom || '', d.iface || '', d.online ? 1 : 0, d.blocked ? 1 : 0, d.down, d.up, d.delay, d.jitter, d.loss, d.sqm ? 1 : 0, d.wl ? 1 : 0, d.appQos ? 1 : 0, d.name, d.limitMode, d.delayMode, d.applyError, d.sim ? 1 : 0,
   d.eff ? [d.eff.reason, d.eff.blocked ? 1 : 0, d.eff.down_mbps, d.eff.up_mbps, d.eff.apply_error || ''].join(',') : '', d.quota ? [d.quota.state, d.quota.applied ? 1 : 0, d.quota.daily_gb, d.quota.monthly_gb, d.quota.action].join(',') : '',
   d.sched ? d.sched.windows.length + ',' + d.sched.active_window_index : '', d.atl.map(function (x) { return x.app_id + (x.exhausted ? '!' : '') + x.minutes; }).join(','), d.cblocks.map(function (x) { return x.category; }).join(','), typeof v6DeviceShapeSig === 'function' ? v6DeviceShapeSig(d) : ''].join(':'); }).join('|'); }
 function refreshCard(mac) {
@@ -925,7 +933,18 @@ function doDelay(d, delay, jitter, loss) {
   return api.action('delay_set', { mac: d.mac, delay_ms: Math.round(delay), jitter_ms: Math.round(jitter), loss_pct: trim0(clamp(loss, 0, 100).toFixed(2)) });
 }
 /* 网关保护: 看起来像路由器/网关的设备, 封锁前多问一句(旧版告警面板里的「拉黑」绕过了这一步) */
-function looksLikeGateway(d) { return /\.(1|254)$/.test(d.ip || '') || (d.iface && d.iface === 'wlan0'); }
+function looksLikeGateway(d) {
+  if (!d) return false;
+  if (d.iface && d.iface === 'wlan0') return true;
+  var ip = String(d.ip || '').trim();
+  var gw = String((S.ifaceInfo && (S.ifaceInfo.gateway || S.ifaceInfo.ip)) || (S.hotspot && S.hotspot.ip) || '').trim();
+  if (gw && ip) {
+    if (ip === gw) return true;
+    var gp = gw.split('.').slice(0, 3).join('.'), ipP = ip.split('.').slice(0, 3).join('.');
+    if (gp && gp === ipP) return false;
+  }
+  return /\.(1|254)$/.test(ip);
+}
 function confirmBlock(d) {
   if (!looksLikeGateway(d)) return Promise.resolve(true);
   return confirmSheet('确认封锁 ' + d.name + '？', '这台设备的 IP（' + esc(d.ip || '—') + '）看起来像网关或上游路由器。封锁它可能让整个热点断网。', '仍然封锁');

@@ -12,8 +12,9 @@
  *      12B -> 20B/24B Mainline APEX 变更) 与 downstream64_map。
  *   2. T+0 空表主动预锁 (Zero-Packet-Leak Pre-Seeding):
  *      当 disable_global 发现 map_offload_tether_limit_map 为空时, 主动扫描
- *      /sys/class/net 下处于 IFF_UP 的上游候选接口 (rmnet*, ccmni*, wlan*, eth*,
- *      v4-*, usb*, 排除 lo 及当前热点 AP 口, 最多预写 12 个以严守 max_entries=16),
+ *      /sys/class/net 下处于 IFF_UP 的上游候选接口 (rmnet*, ccmni*, sipa_eth*,
+ *      seth_*, gti*, wwan*, wlan*, eth*, v4-*, 排除 lo / r_rmnet* / usb* 及当前
+ *      热点 AP 口, 最多预写 12 个以严守 max_entries=16),
  *      通过 if_nametoindex 以 BPF_ANY 预写入 uint64_t quota = 0 (绝不触碰 stats_map,
  *      防止破坏 BpfCoordinator 的 BPF_NOEXIST 初始化), 并同步清空存量流表!
  *
@@ -159,19 +160,19 @@ static offload_err_t errno_to_offload(int e)
  * Map 路径与常量定义
  * ══════════════════════════════════════════════════════════ */
 
-#define BPF_TETHER_DIR          "/sys/fs/bpf/tethering"
-#define BPF_LIMIT_MAP           BPF_TETHER_DIR "/map_offload_tether_limit_map"
-#define BPF_STATS_MAP           BPF_TETHER_DIR "/map_offload_tether_stats_map"
-#define BPF_ERROR_MAP           BPF_TETHER_DIR "/map_offload_tether_error_map"
-#define BPF_LEGACY_R_DOWN6_MAP  "/sys/fs/bpf/map_offload_tether_downstream6_map"
-#define SYSFS_NET_DIR           "/sys/class/net"
+#define BPF_TETHER_DIR             "/sys/fs/bpf/tethering"
+#define BPF_LIMIT_MAP              BPF_TETHER_DIR "/map_offload_tether_limit_map"
+#define BPF_STATS_MAP              BPF_TETHER_DIR "/map_offload_tether_stats_map"
+#define BPF_LEGACY_R_DOWN6_MAP     "/sys/fs/bpf/map_offload_tether_downstream6_map"
+#define SYSFS_NET_DIR              "/sys/class/net"
 
-/* 动态 key_size 安全栈上限与遍历熔断余量 */
-#define HNC_BPF_MAX_KEY_SIZE      256U
-#define HNC_BPF_EVICT_GUARD_EXTRA 64U
+/* 动态 key_size / value_size 安全栈上限与遍历熔断余量 */
+#define HNC_BPF_MAX_KEY_SIZE       256U
+#define HNC_BPF_MAX_STATS_VAL_SIZE 256U
+#define HNC_BPF_EVICT_GUARD_EXTRA  64U
 
 /* T+0 空表预锁最多写入 12 个活跃上游接口, 严守 AOSP limit_map max_entries=16 */
-#define HNC_T0_PRESEED_MAX        12U
+#define HNC_T0_PRESEED_MAX         12U
 
 typedef struct {
     uint64_t rx_packets;
@@ -181,6 +182,37 @@ typedef struct {
     uint64_t tx_bytes;
     uint64_t tx_errors;
 } tether_stats_t;
+
+_Static_assert(sizeof(tether_stats_t) == 48U, "tether_stats_t must be 48 bytes");
+
+static bool is_percpu_map_type(uint32_t type)
+{
+    return type == (uint32_t)BPF_MAP_TYPE_PERCPU_HASH ||
+           type == (uint32_t)BPF_MAP_TYPE_PERCPU_ARRAY ||
+           type == (uint32_t)BPF_MAP_TYPE_LRU_PERCPU_HASH ||
+           type == 21U; /* BPF_MAP_TYPE_PERCPU_CGROUP_STORAGE */
+}
+
+static int validate_stats_map_fd(int fd)
+{
+    struct bpf_map_info info;
+    uint32_t info_len = sizeof(info);
+    if (hnc_bpf_obj_get_info_by_fd(fd, &info, &info_len) != 0) {
+        fprintf(stderr, "[bpf] stats_map get_info_by_fd failed: errno=%d\n", errno);
+        return -1;
+    }
+    if (info.key_size != sizeof(uint32_t) ||
+        info.value_size < sizeof(tether_stats_t) ||
+        info.value_size > HNC_BPF_MAX_STATS_VAL_SIZE ||
+        is_percpu_map_type(info.type)) {
+        fprintf(stderr,
+                "[bpf] stats_map schema rejected (type=%u key_size=%u value_size=%u)\n",
+                info.type, info.key_size, info.value_size);
+        errno = EINVAL;
+        return -1;
+    }
+    return 0;
+}
 
 #define BPF_LIMIT_NONE  ((uint64_t)0xFFFFFFFFFFFFFFFFULL)
 #define BPF_LIMIT_ZERO  ((uint64_t)0ULL)
@@ -198,7 +230,6 @@ static struct {
 
     int fd_limit;
     int fd_stats;
-    int fd_error;
 
     int      cached_active;
     int64_t  cached_refresh_ts;
@@ -213,7 +244,6 @@ static struct {
     .initialized             = 0,
     .fd_limit                = -1,
     .fd_stats                = -1,
-    .fd_error                = -1,
     .cached_active           = 0,
     .cached_refresh_ts       = 0,
     .cached_delta_bytes      = 0,
@@ -429,26 +459,41 @@ static void read_active_ap_ifname(char out[IFNAMSIZ])
         hnc_dir = "/data/local/hnc";
 
     char state_path[PATH_MAX];
-    int n = snprintf(state_path, sizeof(state_path), "%s/run/hnc_state", hnc_dir);
-    if (n < 0 || (size_t)n >= sizeof(state_path))
-        return;
-
-    FILE *f = fopen(state_path, "re");
-    if (!f)
-        return;
-
     char line[128];
-    while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "ACTIVE:", 7) == 0) {
-            char *nl = strpbrk(line + 7, "\r\n \t");
-            if (nl) *nl = '\0';
-            if (line[7] != '\0') {
-                snprintf(out, IFNAMSIZ, "%.*s", IFNAMSIZ - 1, line + 7);
-                break;
+    int n = snprintf(state_path, sizeof(state_path), "%s/run/hnc_state", hnc_dir);
+    if (n > 0 && (size_t)n < sizeof(state_path)) {
+        FILE *f = fopen(state_path, "re");
+        if (f) {
+            while (fgets(line, sizeof(line), f)) {
+                if (strncmp(line, "ACTIVE:", 7) == 0) {
+                    char *nl = strpbrk(line + 7, "\r\n \t");
+                    if (nl) *nl = '\0';
+                    if (line[7] != '\0') {
+                        snprintf(out, IFNAMSIZ, "%.*s", IFNAMSIZ - 1, line + 7);
+                        break;
+                    }
+                }
             }
+            fclose(f);
         }
     }
-    fclose(f);
+    if (out[0] != '\0')
+        return;
+
+    /* Tier 2 fallback: run/hotspot_iface */
+    n = snprintf(state_path, sizeof(state_path), "%s/run/hotspot_iface", hnc_dir);
+    if (n > 0 && (size_t)n < sizeof(state_path)) {
+        FILE *f = fopen(state_path, "re");
+        if (f) {
+            if (fgets(line, sizeof(line), f)) {
+                char *nl = strpbrk(line, "\r\n \t");
+                if (nl) *nl = '\0';
+                if (line[0] != '\0')
+                    snprintf(out, IFNAMSIZ, "%.*s", IFNAMSIZ - 1, line);
+            }
+            fclose(f);
+        }
+    }
 }
 
 static int classify_upstream_candidate(const char *ifname, const char *ap_ifname)
@@ -463,11 +508,15 @@ static int classify_upstream_candidate(const char *ifname, const char *ap_ifname
     if ((!ap_ifname || ap_ifname[0] == '\0') && strcmp(ifname, "wlan2") == 0)
         return 0;
 
-    if (starts_with(ifname, "ifb") ||
+    /* Exclude virtual, reverse cellular (r_rmnet), USB tethering (usb/rndis/ncm), and AP interfaces */
+    if (starts_with(ifname, "r_rmnet") ||
+        starts_with(ifname, "usb") ||
+        starts_with(ifname, "ifb") ||
         starts_with(ifname, "dummy") ||
         starts_with(ifname, "ap") ||
         starts_with(ifname, "swlan") ||
         starts_with(ifname, "softap") ||
+        starts_with(ifname, "wigig") ||
         starts_with(ifname, "p2p") ||
         starts_with(ifname, "aware") ||
         starts_with(ifname, "rndis") ||
@@ -477,16 +526,18 @@ static int classify_upstream_candidate(const char *ifname, const char *ap_ifname
     }
 
     if (starts_with(ifname, "rmnet") ||
-        starts_with(ifname, "r_rmnet") ||
         starts_with(ifname, "ccmni") ||
+        starts_with(ifname, "sipa_eth") ||
+        starts_with(ifname, "seth_") ||
+        starts_with(ifname, "gti") ||
+        starts_with(ifname, "wwan") ||
         strcmp(ifname, "wlan0") == 0 ||
         starts_with(ifname, "eth")) {
         return 1;
     }
 
     if (starts_with(ifname, "wlan") ||
-        starts_with(ifname, "v4-") ||
-        starts_with(ifname, "usb")) {
+        starts_with(ifname, "v4-")) {
         return 2;
     }
 
@@ -533,7 +584,9 @@ static uint32_t preseed_t0_limit_map_locked(void)
     uint32_t cap = HNC_T0_PRESEED_MAX;
 
     if (hnc_bpf_obj_get_info_by_fd(s.fd_limit, &info, &info_len) == 0) {
-        if (info.key_size != sizeof(uint32_t) || info.value_size != sizeof(uint64_t))
+        if (info.key_size != sizeof(uint32_t) ||
+            info.value_size != sizeof(uint64_t) ||
+            is_percpu_map_type(info.type))
             return 0U;
         if (info.max_entries > 0U && info.max_entries < cap)
             cap = info.max_entries;
@@ -603,10 +656,16 @@ static uint32_t preseed_t0_limit_map_locked(void)
 static uint64_t stats_total_bytes(void)
 {
     if (ensure_stats_fd() != 0) return 0;
+    if (validate_stats_map_fd(s.fd_stats) != 0) {
+        close(s.fd_stats);
+        s.fd_stats = -1;
+        return 0;
+    }
 
     uint32_t key = 0, next_key = 0;
     uint64_t total = 0;
     int has_prev = 0;
+    _Alignas(8) uint8_t val_buf[HNC_BPF_MAX_STATS_VAL_SIZE];
 
     for (int guard = 0; guard < 256; guard++) {
         int rc = hnc_bpf_map_get_next_key(s.fd_stats,
@@ -618,10 +677,12 @@ static uint64_t stats_total_bytes(void)
             break;
         }
 
-        tether_stats_t v;
-        memset(&v, 0, sizeof(v));
-        if (hnc_bpf_map_lookup_elem(s.fd_stats, &next_key, &v) == 0)
+        memset(val_buf, 0, sizeof(val_buf));
+        if (hnc_bpf_map_lookup_elem(s.fd_stats, &next_key, val_buf) == 0) {
+            tether_stats_t v;
+            memcpy(&v, val_buf, sizeof(v));
             total += v.rx_bytes + v.tx_bytes;
+        }
 
         key = next_key;
         has_prev = 1;
@@ -657,11 +718,10 @@ static offload_err_t bpf_init(void)
     if (ensure_stats_fd() != 0) {
         fprintf(stderr, "[bpf] init: stats_map open failed, will retry on refresh\n");
     }
-    s.fd_error = hnc_bpf_obj_get(BPF_ERROR_MAP);
 
     s.initialized = 1;
-    fprintf(stderr, "[bpf] init OK (limit_fd=%d stats_fd=%d error_fd=%d)\n",
-            s.fd_limit, s.fd_stats, s.fd_error);
+    fprintf(stderr, "[bpf] init OK (limit_fd=%d stats_fd=%d)\n",
+            s.fd_limit, s.fd_stats);
     BPF_UNLOCK();
     return ret;
 }
@@ -675,7 +735,6 @@ static void bpf_shutdown(void)
     }
     if (s.fd_limit >= 0) { close(s.fd_limit); s.fd_limit = -1; }
     if (s.fd_stats >= 0) { close(s.fd_stats); s.fd_stats = -1; }
-    if (s.fd_error >= 0) { close(s.fd_error); s.fd_error = -1; }
     s.initialized = 0;
     BPF_UNLOCK();
 }
@@ -699,14 +758,26 @@ static offload_err_t bpf_self_check(void)
         return OFFLOAD_EINTERNAL;
     }
 
-    if (info.key_size != 4 || info.value_size != 8) {
+    if (info.key_size != sizeof(uint32_t) ||
+        info.value_size != sizeof(uint64_t) ||
+        is_percpu_map_type(info.type)) {
         fprintf(stderr,
             "[bpf] self_check FAIL: limit_map schema drift "
-            "(key_size=%u expected 4, value_size=%u expected 8)\n",
-            info.key_size, info.value_size);
+            "(type=%u key_size=%u expected 4, value_size=%u expected 8)\n",
+            info.type, info.key_size, info.value_size);
         BPF_UNLOCK();
         return OFFLOAD_EINTERNAL;
     }
+
+    if (s.fd_stats < 0)
+        s.fd_stats = hnc_bpf_obj_get(BPF_STATS_MAP);
+    if (s.fd_stats >= 0 && validate_stats_map_fd(s.fd_stats) != 0) {
+        close(s.fd_stats);
+        s.fd_stats = -1;
+        BPF_UNLOCK();
+        return OFFLOAD_EINTERNAL;
+    }
+
     BPF_UNLOCK();
     return ret;
 }

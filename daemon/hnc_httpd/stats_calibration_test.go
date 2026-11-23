@@ -666,3 +666,39 @@ func TestActionPhoneUsageSetUseNetstats(t *testing.T) {
 		t.Error("default must be auto")
 	}
 }
+
+func TestStatsCalRC2EarliestDayAndIptFallback(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "data"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	_ = os.WriteFile(filepath.Join(dir, "run", "phone_usage.20260902.json"), []byte(`{}`), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "data", "phone_usage.20260905.json"), []byte(`{}`), 0o644)
+	if got := calEarliestDay(dir); got != "20260902" {
+		t.Fatalf("calEarliestDay=%q, want 20260902 from run/ fallback", got)
+	}
+	_ = os.WriteFile(filepath.Join(dir, "data", "phone_usage.20260820.json"), []byte(`{}`), 0o644)
+	if got := calEarliestDay(dir); got != "20260820" {
+		t.Fatalf("calEarliestDay=%q, want 20260820 from data/", got)
+	}
+
+	// Verify 3-level iptables fallback: -w 2 fails -> -w fails -> bare succeeds
+	var attempts []string
+	out, err := calRunIptWithFallback(func(to time.Duration, name string, args ...string) (string, error) {
+		call := name + " " + strings.Join(args, " ")
+		attempts = append(attempts, call)
+		if len(args) >= 1 && args[0] == "-w" {
+			return "", os.ErrInvalid
+		}
+		return "Chain FORWARD (policy ACCEPT 0 packets, 0 bytes)\n  10  4096 RETURN all -- wlan2 * 0.0.0.0/0 0.0.0.0/0\n", nil
+	}, 5*time.Second, "iptables", "-nvxL", "FORWARD")
+	if err != nil || !strings.Contains(out, "4096") {
+		t.Fatalf("3-level fallback failed: err=%v out=%q", err, out)
+	}
+	if len(attempts) != 3 ||
+		attempts[0] != "iptables -w 2 -nvxL FORWARD" ||
+		attempts[1] != "iptables -w -nvxL FORWARD" ||
+		attempts[2] != "iptables -nvxL FORWARD" {
+		t.Fatalf("unexpected fallback sequence: %v", attempts)
+	}
+}
+

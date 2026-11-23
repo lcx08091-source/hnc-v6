@@ -5,6 +5,14 @@
 # 没法在沙箱造 → 用可注入的桩(HNC_RB_PROC_OVERRIDE / HNC_RB_PORT_OVERRIDE)
 # 覆盖 pidfile_pid_matches / rb_port_listening 两个外部依赖。
 
+_RB_STANDALONE=0
+if ! command -v test_start >/dev/null 2>&1; then
+    _RB_STANDALONE=1
+    HNC_REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+    export HNC_REPO_ROOT
+    . "$HNC_REPO_ROOT/test/lib.sh"
+fi
+
 RBSCRIPT="$HNC_REPO_ROOT/bin/hnc_rollback.sh"
 
 rbseed() {
@@ -244,3 +252,65 @@ while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_obs=$?; i=$((i+1)
   && [ "$(cat "$HNC/data/rollback.pinned" 2>/dev/null | tr -d ' \r\n')" = "6009301" ] \
   && grep -q '"from":"6009301","to":"6000001"' "$HNC/data/rollback.json" \
   && test_pass || test_fail "rc1=$rc1 rc2=$rc2 robs=$r_obs prev=$(cat "$HNC/.prev/version" 2>/dev/null) bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
+
+test_start "rollback: 6000001 -> 6009301 -> 6009302 (rc.2) 走廊回退 + 全量配置快照白名单恢复"
+rbseed 6009301 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.1\nversionCode=6009301\n' > "$MOD/module.prop"
+echo "GOLDEN-BIN-v601" > "$HNC/bin/hnc_watchdog"
+for _cfg in leakguard_config.json vector_express.json update_leash.json thermo_cruise.json \
+            rmac_policy.json webui_access.json dpi_fp_prototypes.json self_policy.json v6_custom_slot.json; do
+    printf '{"golden":"%s"}\n' "$_cfg" > "$HNC/data/$_cfg"
+done
+printf '{"token":"keep-live"}\n' > "$HNC/data/remote_tokens.json"
+rbrun snapshot "$MOD" "$HNC"; rc_s1=$?
+rm -f "$HNC/data/rollback.observing"
+echo "RC1-BIN" > "$HNC/bin/hnc_watchdog"
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.2\nversionCode=6009302\n' > "$MOD/module.prop"
+rbrun snapshot "$MOD" "$HNC"; rc_s2=$?
+echo "RC2-BROKEN-BIN" > "$HNC/bin/hnc_watchdog"
+for _cfg in leakguard_config.json vector_express.json update_leash.json thermo_cruise.json \
+            rmac_policy.json webui_access.json dpi_fp_prototypes.json self_policy.json v6_custom_slot.json; do
+    printf '{"corrupted_by_rc2":"%s"}\n' "$_cfg" > "$HNC/data/$_cfg"
+done
+printf '{"token":"updated-live"}\n' > "$HNC/data/remote_tokens.json"
+i=0; r_rc2=0
+while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_rc2=$?; i=$((i+1)); done
+_cfg_ok=1
+for _cfg in leakguard_config.json vector_express.json update_leash.json thermo_cruise.json \
+            rmac_policy.json webui_access.json dpi_fp_prototypes.json self_policy.json v6_custom_slot.json; do
+    grep -q "\"golden\":\"$_cfg\"" "$HNC/data/$_cfg" 2>/dev/null || _cfg_ok=0
+done
+[ "$rc_s1" -eq 0 ] && [ "$rc_s2" -eq 0 ] && [ "$r_rc2" -eq 9 ] && [ "$_cfg_ok" -eq 1 ] \
+  && grep -q '"token":"updated-live"' "$HNC/data/remote_tokens.json" \
+  && [ "$(cat "$HNC/data/rollback.pinned" 2>/dev/null | tr -d ' \r\n')" = "6009302" ] \
+  && grep -q '"from":"6009302","to":"6000001"' "$HNC/data/rollback.json" \
+  && test_pass || test_fail "s1=$rc_s1 s2=$rc_s2 r=$r_rc2 cfg_ok=$_cfg_ok json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
+
+test_start "rollback: 6009302 (rc.2) 升正式版 6010000 (v6.1.0) 保黄金底包, 6010000 稳定后接班新黄金 .prev"
+rbseed 6009302 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.2\nversionCode=6009302\n' > "$MOD/module.prop"
+echo "GOLDEN-601" > "$HNC/bin/hnc_watchdog"
+rbrun snapshot "$MOD" "$HNC" >/dev/null 2>&1
+rm -f "$HNC/data/rollback.observing"
+echo "RC2-LIVE" > "$HNC/bin/hnc_watchdog"
+# rc.2 (6009302) -> 正式版 v6.1.0 (6010000): 仍锁住 6000001 黄金底包以防 6010000 坏包退回测试版
+printf 'id=hotspot_net_ctl\nversion=v6.1.0\nversionCode=6010000\n' > "$MOD/module.prop"
+rbrun snapshot "$MOD" "$HNC"; rc_ga=$?
+_prev_on_ga="$(cat "$HNC/.prev/version" 2>/dev/null | tr -d ' \r\n')"
+# 6010000 观察期通过后升 v6.1.1 (6010001): 6010000 作为正式版接班成为新 .prev
+rm -f "$HNC/data/rollback.observing"
+echo "STABLE-610" > "$HNC/bin/hnc_watchdog"
+printf 'id=hotspot_net_ctl\nversion=v6.1.1\nversionCode=6010001\n' > "$MOD/module.prop"
+rbrun snapshot "$MOD" "$HNC"; rc_next=$?
+_prev_on_next="$(cat "$HNC/.prev/version" 2>/dev/null | tr -d ' \r\n')"
+[ "$rc_ga" -eq 0 ] && [ "$_prev_on_ga" = "6000001" ] \
+  && [ "$rc_next" -eq 0 ] && [ "$_prev_on_next" = "6010000" ] \
+  && [ "$(cat "$HNC/.prev/bin/hnc_watchdog" 2>/dev/null)" = "STABLE-610" ] \
+  && test_pass || test_fail "rc_ga=$rc_ga prev_ga=$_prev_on_ga rc_next=$rc_next prev_next=$_prev_on_next"
+
+if [ "$_RB_STANDALONE" = "1" ]; then
+    teardown_test_env
+    echo "summary: total=$TEST_TOTAL pass=$TEST_PASS fail=$TEST_FAIL"
+    [ "$TEST_FAIL" -eq 0 ] || exit 1
+    exit 0
+fi

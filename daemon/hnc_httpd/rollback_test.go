@@ -86,6 +86,7 @@ func TestVcName(t *testing.T) {
 		"6009101": "6.1.0-alpha.1",
 		"6009201": "6.1.0-beta.1",
 		"6009301": "6.1.0-rc.1",
+		"6009302": "6.1.0-rc.2",
 		"6010000": "6.1.0",
 		"6010002": "6.1.2",
 		"6019203": "6.2.0-beta.3",
@@ -98,6 +99,57 @@ func TestVcName(t *testing.T) {
 		if got := vcName(in); got != want {
 			t.Errorf("vcName(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestRollbackCorridorRC2And610(t *testing.T) {
+	// 场景 1: 6009302 (6.1.0-rc.2) 启动失败自动退回黄金底包 6000001 (6.0.1)
+	dir1 := t.TempDir()
+	data1 := filepath.Join(dir1, "data")
+	if err := os.MkdirAll(data1, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	rc2JSON := `{"from":"6009302","to":"6000001","reason":"failstreak=6 restarts=0","at":1795382400,"action":"rolled_back"}`
+	if err := os.WriteFile(filepath.Join(data1, "rollback.json"), []byte(rc2JSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(data1, "rollback.pinned"), []byte("6009302\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s1 := &server{hncDir: dir1}
+	got1 := s1.rollbackStatus()
+	if got1 == nil || !got1.Rolled || got1.From != "6009302" || got1.To != "6000001" ||
+		got1.FromName != "6.1.0-rc.2" || got1.ToName != "6.0.1" || !got1.Pinned || got1.Acknowledged {
+		t.Fatalf("rc.2 -> 6.0.1 rollbackStatus mismatch: %+v", got1)
+	}
+
+	f := newFakeSys(t.TempDir())
+	c := &scCtx{env: f.scEnv()}
+	f.files[f.h("data", "rollback.json")] = rc2JSON
+	if it := scRollbackItem(c); it.Status != scWarn || it.Value != "已自动退回 6.0.1" ||
+		!strings.Contains(it.Detail, "检测到 6.1.0-rc.2 启动失败") {
+		t.Fatalf("rc.2 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
+	}
+
+	// 场景 2: 6010000 (6.1.0 正式版) 回退至 6000001 (6.0.1) 与后续预发布回退至 6010000 (6.1.0)
+	dir2 := t.TempDir()
+	data2 := filepath.Join(dir2, "data")
+	if err := os.MkdirAll(data2, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	gaJSON := `{"from":"6010000","to":"6000001","reason":"restarts=5","at":1795468800,"action":"rolled_back"}`
+	if err := os.WriteFile(filepath.Join(data2, "rollback.json"), []byte(gaJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s2 := &server{hncDir: dir2}
+	got2 := s2.rollbackStatus()
+	if got2 == nil || got2.FromName != "6.1.0" || got2.ToName != "6.0.1" {
+		t.Fatalf("6.1.0 -> 6.0.1 rollbackStatus mismatch: %+v", got2)
+	}
+	f.files[f.h("data", "rollback.json")] = `{"from":"6019301","to":"6010000","reason":"failstreak=6","at":1795555200,"action":"rolled_back"}`
+	if it := scRollbackItem(c); it.Status != scWarn || it.Value != "已自动退回 6.1.0" ||
+		!strings.Contains(it.Detail, "检测到 6.2.0-rc.1 启动失败") {
+		t.Fatalf("6.2.0-rc.1 -> 6.1.0 scRollbackItem mismatch: status=%v value=%q detail=%q", it.Status, it.Value, it.Detail)
 	}
 }
 

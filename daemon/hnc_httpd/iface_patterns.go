@@ -12,13 +12,13 @@ package main
 import "regexp"
 
 const (
-	hncCellIfaceERE    = `^(rmnet_data[0-9]+|rmnet[0-9]+|ccmni[0-9]+|seth_[a-z]+[0-9]+|sipa_eth[0-9]+|wwan[0-9]+)$`
+	hncCellIfaceERE    = `^(rmnet_data[0-9]+|rmnet[0-9]+|ccmni[0-9]+|seth_[a-z]+[0-9]+|sipa_eth[0-9]+|gti[0-9]+|wwan[0-9]+)$`
 	hncAPIfaceERE      = `^(ap[0-9]*|ap_br_[a-z0-9_]+|softap[0-9]+|swlan[0-9]+)$`
 	hncAPMaybeIfaceERE = `^(wlan[1-9][0-9]*|wigig[0-9]+)$`
 	hncUSBTetherERE    = `^(rndis[0-9]+|usb[0-9]+|ncm[0-9]+)$`
 	hncBTTetherERE     = `^bt-pan[0-9]*$`
-	// v5.20.1: VPN 虚拟口 —— 可能是本机出口(root 在 VPN uid 范围内), 但永远不是热点上游
-	hncVPNIfaceERE = `^(tun[0-9]+|tap[0-9]+|ppp[0-9]+|wg[0-9]+|ipsec[0-9a-z_]*|xfrm[0-9]+)$`
+	// v5.20.1+: VPN 虚拟口(含 Tailscale / Clash Meta / sing-box / utun)—— 可能是本机出口, 但永远不是热点上游
+	hncVPNIfaceERE = `^(tun[0-9]+|tap[0-9]+|ppp[0-9]+|wg[0-9]+|ipsec[0-9a-z_]*|xfrm[0-9]+|tailscale[0-9]*|utun[0-9]*|sing_tun[0-9]*|Meta)$`
 )
 
 var (

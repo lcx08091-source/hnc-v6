@@ -27,18 +27,19 @@ package main
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
+
+	"hnc.io/dpid/neigh"
 )
 
 const (
@@ -133,9 +134,14 @@ func saveWebUIAccess(hncDir string, c webuiAccessCfg) error {
 	}
 	tmp := p + ".tmp"
 	if err := os.WriteFile(tmp, append(b, '\n'), 0o600); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, p)
+	if err := os.Rename(tmp, p); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // normalizeAllowEntries 解析逗号/空白分隔的 MAC / IP 列表: MAC 统一小写冒号格式,
@@ -174,7 +180,7 @@ func normalizeAllowEntries(raw string) ([]string, string) {
 	return out, ""
 }
 
-// ── 客户端身份 ─────────────────────────────────────────────────
+// ── 客户端身份与邻居表(纯 Go Netlink + 单测桩兼容) ────────────
 
 // clientIP 解析 RemoteAddr 为 net.IP(去端口、去 IPv6 zone、v4-mapped 还原)。
 func clientIP(remoteAddr string) net.IP {
@@ -192,17 +198,28 @@ func clientIP(remoteAddr string) net.IP {
 	return ip
 }
 
+// localAddrIP 从请求 Context(http.LocalAddrContextKey)提取连接到达的本地目标 IP。
+func localAddrIP(r *http.Request) net.IP {
+	if r == nil {
+		return nil
+	}
+	la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr)
+	if !ok || la == nil {
+		return nil
+	}
+	return clientIP(la.String())
+}
+
 func isLoopbackIP(ip net.IP) bool { return ip != nil && ip.IsLoopback() }
 
-// 邻居表来源(测试替换为 fixture)
+// 邻居表来源:
+//   - neighV6Dump 非 nil 时优先调用(单测 fixture 桩钩子);
+//   - 生产默认 neighV6Dump == nil, 走纯 Go Netlink(neigh.Dump / DumpNativeIPv6Neighbors),
+//     彻底消除每 2 秒 fork `ip -6 neigh show` 子进程。
 var (
-	neighArpPath = "/proc/net/arp"
-	neighV6Dump  = func() (string, error) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		out, err := hardenCmd(exec.CommandContext(ctx, "ip", "-6", "neigh", "show")).Output()
-		return string(out), err
-	}
+	neighArpPath  = "/proc/net/arp"
+	neighV6Dump   func() (string, error)
+	neighV6Native = defaultNativeNeigh6
 	neighCacheTTL = 2 * time.Second
 )
 
@@ -212,6 +229,35 @@ var (
 	neighSnapAt  time.Time
 	neighSnapSrc string // 快照对应的 arp 路径(测试切换 fixture 时失效)
 )
+
+func defaultNativeNeigh6(into map[string]string) {
+	if es, err := neigh.Dump(syscall.AF_INET6); err == nil {
+		for _, e := range es {
+			if !e.Usable() || e.IP == nil {
+				continue
+			}
+			mac := strings.ToLower(e.MAC)
+			if !macRE.MatchString(mac) {
+				continue
+			}
+			into[e.IP.String()] = mac
+		}
+		return
+	}
+	if byMAC, err := DumpNativeIPv6Neighbors(nil); err == nil {
+		for mac, ips := range byMAC {
+			mac = strings.ToLower(strings.TrimSpace(mac))
+			if !macRE.MatchString(mac) {
+				continue
+			}
+			for _, ip := range ips {
+				if ip != nil {
+					into[ip.String()] = mac
+				}
+			}
+		}
+	}
+}
 
 func parseArpTable(r *bufio.Scanner, into map[string]string) {
 	first := true
@@ -227,7 +273,7 @@ func parseArpTable(r *bufio.Scanner, into map[string]string) {
 		}
 		mac := strings.ToLower(f[3])
 		ip := net.ParseIP(f[0])
-		if ip == nil || !macRE.MatchString(mac) || mac == "00:00:00:00:00:00" {
+		if ip == nil || ip.To4() == nil || !macRE.MatchString(mac) || mac == "00:00:00:00:00:00" {
 			continue
 		}
 		into[ip.To4().String()] = mac
@@ -271,8 +317,12 @@ func neighborMAC(ip net.IP) string {
 			parseArpTable(bufio.NewScanner(f), m)
 			f.Close()
 		}
-		if out, err := neighV6Dump(); err == nil {
-			parseNeigh6(out, m)
+		if neighV6Dump != nil {
+			if out, err := neighV6Dump(); err == nil {
+				parseNeigh6(out, m)
+			}
+		} else {
+			neighV6Native(m)
 		}
 		neighSnap, neighSnapAt, neighSnapSrc = m, time.Now(), neighArpPath
 	}
@@ -307,10 +357,339 @@ func webuiClientAllowed(ip net.IP, entries []string) (bool, string) {
 	return false, mac
 }
 
-// webuiAccessDecision 中间件与测试共用的判定。
-func webuiAccessDecision(hncDir string, ip net.IP) bool {
+// ── 上游公共 Wi-Fi / WAN 越权访问拦截(纵深防御) ───────────────
+
+type webuiIfaceInfo struct {
+	Name  string
+	Up    bool
+	Addrs []*net.IPNet
+}
+
+func defaultWebUIListIfaces() []webuiIfaceInfo {
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return nil
+	}
+	out := make([]webuiIfaceInfo, 0, len(ifaces))
+	for _, ifi := range ifaces {
+		info := webuiIfaceInfo{Name: ifi.Name, Up: ifi.Flags&net.FlagUp != 0}
+		if addrs, err := ifi.Addrs(); err == nil {
+			for _, a := range addrs {
+				if ipn, ok := a.(*net.IPNet); ok && ipn != nil && ipn.IP != nil {
+					info.Addrs = append(info.Addrs, ipn)
+				}
+			}
+		}
+		out = append(out, info)
+	}
+	return out
+}
+
+// webuiListIfaces 系统网卡快照入口(单测可注入 fake 拓扑)。
+var (
+	webuiListIfaces   = defaultWebUIListIfaces
+	webuiBoundaryTTL  = 2 * time.Second
+	webuiBoundaryMu   sync.Mutex
+	webuiBoundarySnap = map[string]webuiBoundaryEntry{}
+)
+
+type webuiBoundaryEntry struct {
+	at                time.Time
+	downSet           map[string]bool
+	upSet             map[string]bool
+	configuredHotspot string
+	ifaces            []webuiIfaceInfo
+	downV4            []*net.IPNet
+	downV6            []*net.IPNet
+}
+
+const webuiIfaceDetectMaxAge = 3 * time.Minute
+
+type webuiDetectInfo struct {
+	Iface              string   `json:"iface"`
+	Method             string   `json:"method"`
+	Authoritative      bool     `json:"authoritative"`
+	Wlan0AP            bool     `json:"wlan0_ap"`
+	USBTether          []string `json:"usb_tether"`
+	BTTether           []string `json:"bt_tether"`
+	Upstream           string   `json:"upstream"`
+	TetherUpstream     string   `json:"tether_upstream"`
+	LocalUpstream      string   `json:"local_upstream"`
+	DefaultRouteIfaces []string `json:"default_route_ifaces"`
+	Ts                 int64    `json:"ts"`
+}
+
+func isExplicitIdleStateLine(upper string) bool {
+	for _, kw := range []string{"IDLE", "PENDING", "INACTIVE", "OFF", "DOWN"} {
+		if upper == kw || strings.HasPrefix(upper, kw+":") {
+			return true
+		}
+	}
+	return false
+}
+
+func readWebUIIfaceDetect(hncDir string, now time.Time) (webuiDetectInfo, bool) {
+	var d webuiDetectInfo
+	p := filepath.Join(hncDir, "run", "iface_detect.json")
+	st, err := os.Stat(p)
+	if err != nil || st.IsDir() {
+		return d, false
+	}
+	b, err := os.ReadFile(p)
+	if err != nil || json.Unmarshal(b, &d) != nil || !ifaceNameOK(d.Iface) {
+		return webuiDetectInfo{}, false
+	}
+	fresh := false
+	if d.Ts > 0 {
+		age := now.Unix() - d.Ts
+		fresh = age >= -60 && age <= int64(webuiIfaceDetectMaxAge/time.Second)
+	} else {
+		fresh = now.Sub(st.ModTime()) <= webuiIfaceDetectMaxAge
+	}
+	return d, fresh
+}
+
+func loadWebUIBoundary(hncDir string) webuiBoundaryEntry {
+	webuiBoundaryMu.Lock()
+	if e, ok := webuiBoundarySnap[hncDir]; ok && webuiBoundaryTTL > 0 && time.Since(e.at) <= webuiBoundaryTTL {
+		webuiBoundaryMu.Unlock()
+		return e
+	}
+	webuiBoundaryMu.Unlock()
+
+	now := time.Now()
+	downSet := map[string]bool{}
+	upSet := map[string]bool{}
+	activeStateSet := map[string]bool{}
+	explicitIdle := false
+
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "hnc_state")); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln == "" {
+				continue
+			}
+			upper := strings.ToUpper(ln)
+			if strings.HasPrefix(upper, "ACTIVE:") {
+				if v := strings.TrimSpace(ln[len("ACTIVE:"):]); v != "" && ifaceNameOK(v) {
+					activeStateSet[v] = true
+					explicitIdle = false
+				}
+			} else if isExplicitIdleStateLine(upper) {
+				for k := range activeStateSet {
+					delete(activeStateSet, k)
+				}
+				explicitIdle = true
+			}
+		}
+	}
+	readFirstIface := func(rel string) string {
+		b, err := os.ReadFile(filepath.Join(hncDir, rel))
+		if err != nil {
+			return ""
+		}
+		v := strings.TrimSpace(strings.SplitN(string(b), "\n", 2)[0])
+		if v != "" && ifaceNameOK(v) {
+			return v
+		}
+		return ""
+	}
+
+	det, detFresh := readWebUIIfaceDetect(hncDir, now)
+
+	addCandidateDown := func(v string) {
+		v = strings.TrimSpace(v)
+		if v == "" || !ifaceNameOK(v) || v == "wlan0" {
+			return
+		}
+		downSet[v] = true
+	}
+
+	if !explicitIdle {
+		for v := range activeStateSet {
+			addCandidateDown(v)
+		}
+		addCandidateDown(readFirstIface(filepath.Join("run", "hotspot_iface")))
+		addCandidateDown(readFirstIface(filepath.Join("run", "iface.cache")))
+		addCandidateDown(det.Iface)
+		for _, u := range det.USBTether {
+			addCandidateDown(u)
+		}
+		for _, bt := range det.BTTether {
+			addCandidateDown(bt)
+		}
+
+		// 单芯片机型 wlan0 严格活跃热点态门控:
+		// 仅当未处于显式空闲/待命态、未被最新探测指认为上游 STA, 且满足
+		// hnc_state == "ACTIVE:wlan0" 或新鲜 iface_detect.json 明确 wlan0_ap == true 时才视为下游口。
+		wlan0DetectedAsUpstream := false
+		if detFresh && !det.Wlan0AP {
+			for _, u := range append([]string{det.Upstream, det.TetherUpstream, det.LocalUpstream}, det.DefaultRouteIfaces...) {
+				if strings.TrimSpace(u) == "wlan0" {
+					wlan0DetectedAsUpstream = true
+					break
+				}
+			}
+		}
+		if !wlan0DetectedAsUpstream && (activeStateSet["wlan0"] || (detFresh && det.Wlan0AP)) {
+			downSet["wlan0"] = true
+		}
+	}
+
+	upCandidates := []string{
+		det.Upstream,
+		det.TetherUpstream,
+		det.LocalUpstream,
+		readFirstIface(filepath.Join("run", "wan_iface")),
+	}
+	upCandidates = append(upCandidates, det.DefaultRouteIfaces...)
+	for _, up := range upCandidates {
+		up = strings.TrimSpace(up)
+		if up != "" && ifaceNameOK(up) && !downSet[up] {
+			upSet[up] = true
+		}
+	}
+
+	configuredHotspot := ""
+	if b, err := os.ReadFile(filepath.Join(hncDir, "data", "rules.json")); err == nil {
+		var m map[string]interface{}
+		if json.Unmarshal(b, &m) == nil {
+			if v, ok := m["hotspot_iface"].(string); ok {
+				configuredHotspot = strings.TrimSpace(v)
+			}
+		}
+	}
+
+	ifaces := webuiListIfaces()
+	var downV4, downV6 []*net.IPNet
+	for _, ifi := range ifaces {
+		if !ifi.Up || !downSet[ifi.Name] {
+			continue
+		}
+		for _, ipn := range ifi.Addrs {
+			if ipn == nil || ipn.IP == nil || ipn.IP.IsLoopback() || ipn.IP.IsUnspecified() || ipn.IP.IsMulticast() {
+				continue
+			}
+			if v4 := ipn.IP.To4(); v4 != nil {
+				downV4 = append(downV4, ipn)
+			} else if !ipn.IP.IsLinkLocalUnicast() {
+				downV6 = append(downV6, ipn)
+			}
+		}
+	}
+
+	e := webuiBoundaryEntry{
+		at:                now,
+		downSet:           downSet,
+		upSet:             upSet,
+		configuredHotspot: configuredHotspot,
+		ifaces:            ifaces,
+		downV4:            downV4,
+		downV6:            downV6,
+	}
+	webuiBoundaryMu.Lock()
+	if len(webuiBoundarySnap) > 16 {
+		webuiBoundarySnap = map[string]webuiBoundaryEntry{}
+	}
+	webuiBoundarySnap[hncDir] = e
+	webuiBoundaryMu.Unlock()
+	return e
+}
+
+func isUpstreamWANIface(name string, b webuiBoundaryEntry) bool {
+	if name == "" || b.downSet[name] {
+		return false
+	}
+	if isCellIface(name) || isVPNIface(name) || strings.HasPrefix(name, "v4-") || strings.HasPrefix(name, "clat") {
+		return true
+	}
+	if b.upSet[name] {
+		return true
+	}
+	// Android 上 wlan0 默认是连接上游公共/家庭路由器的 Wi-Fi STA 口;
+	// 仅当当前确实处于活跃热点态(已在上方命中 b.downSet["wlan0"])时才放行, 绝不凭持久化的 configuredHotspot 永久豁免。
+	if name == "wlan0" {
+		return true
+	}
+	return false
+}
+
+// webuiRemoteBoundaryAllowed 纵深边界检查:
+//  1. 若请求到达的本地目标 IP(http.LocalAddrContextKey)明确属于上游 WAN 接口(如公共 Wi-Fi wlan0、rmnet*、tun*) → 拒绝;
+//  2. 若当前存在活跃热点下游子网, 而非回环客户端源 IP 不属于任何活跃热点下游子网 → 拒绝;
+//  3. 无活跃热点接口的单测环境(downV4/downV6 均为空且无 WAN localIP)继续放行, 交由后续 mode/allowlist 判定。
+func webuiRemoteBoundaryAllowed(hncDir string, client net.IP, dstLocal net.IP) bool {
+	if client == nil {
+		return false
+	}
+	b := loadWebUIBoundary(hncDir)
+
+	if dstLocal != nil && !dstLocal.IsLoopback() && !dstLocal.IsUnspecified() {
+		hitDown := false
+		hitUp := false
+		for _, ifi := range b.ifaces {
+			if !ifi.Up {
+				continue
+			}
+			owns := false
+			for _, ipn := range ifi.Addrs {
+				if ipn != nil && ipn.IP != nil && ipn.IP.Equal(dstLocal) {
+					owns = true
+					break
+				}
+			}
+			if !owns {
+				continue
+			}
+			if b.downSet[ifi.Name] {
+				hitDown = true
+			} else if isUpstreamWANIface(ifi.Name, b) {
+				hitUp = true
+			}
+		}
+		if hitUp && !hitDown {
+			return false
+		}
+	}
+
+	hasActiveDown := len(b.downV4) > 0 || len(b.downV6) > 0
+	if !hasActiveDown {
+		return true
+	}
+
+	if v4 := client.To4(); v4 != nil {
+		for _, sub := range b.downV4 {
+			if sub.Contains(v4) {
+				return true
+			}
+		}
+		return false
+	}
+
+	// IPv6 客户端: 链路本地(fe80::/10)没有跨路由器路由能力, 只要目标地址不在上游 WAN 口即允许进入后续白名单判定;
+	// 全局/ULA 地址必须落在当前活跃热点下游 IPv6 子网内。
+	if client.IsLinkLocalUnicast() {
+		return true
+	}
+	for _, sub := range b.downV6 {
+		if sub.Contains(client) {
+			return true
+		}
+	}
+	return false
+}
+
+// webuiAccessDecision 中间件与测试共用的判定(可选传入请求到达的本地目标 IP 做 WAN 边界校验)。
+func webuiAccessDecision(hncDir string, ip net.IP, localIP ...net.IP) bool {
 	if isLoopbackIP(ip) {
 		return true
+	}
+	var dstIP net.IP
+	if len(localIP) > 0 {
+		dstIP = localIP[0]
+	}
+	if !webuiRemoteBoundaryAllowed(hncDir, ip, dstIP) {
+		return false
 	}
 	cfg := loadWebUIAccess(hncDir)
 	switch cfg.Mode {
@@ -331,7 +710,8 @@ var webuiDenyLogAt = map[string]time.Time{}
 func (s *server) webuiAccessGuard(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ip := clientIP(r.RemoteAddr)
-		if webuiAccessDecision(s.hncDir, ip) {
+		dstIP := localAddrIP(r)
+		if webuiAccessDecision(s.hncDir, ip, dstIP) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -342,7 +722,7 @@ func (s *server) webuiAccessGuard(next http.Handler) http.Handler {
 				webuiDenyLogAt = map[string]time.Time{}
 			}
 			webuiDenyLogAt[key] = time.Now()
-			log.Printf("webui_access: denied %s %s (mode=%s)", key, r.URL.Path, loadWebUIAccess(s.hncDir).Mode)
+			log.Printf("webui_access: denied %s -> %v %s (mode=%s)", key, dstIP, r.URL.Path, loadWebUIAccess(s.hncDir).Mode)
 		}
 		webuiDenyLogMu.Unlock()
 		w.Header().Set("Connection", "close")

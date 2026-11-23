@@ -221,6 +221,8 @@ static int json_bool_true_in_block(const char *block, const char *key)
  *   调用方必须未持 sched.lock (本函数内部 lock)。只在 init 末尾调用。
  * ══════════════════════════════════════════════════════════ */
 
+#define HNC_RULES_MAX_BYTES (4U * 1024U * 1024U)
+
 static int rebuild_from_rules(void)
 {
     FILE *f = fopen(RULES_JSON_PATH, "re");
@@ -230,27 +232,57 @@ static int rebuild_from_rules(void)
         return 0;    /* 没配置文件 = 无限速设备, 正常场景 */
     }
 
-    /* rc39 (P1-5): 动态读整文件。旧的 static char buf[16384] 在 rules.json >16KB
-     * (~80+ 限速设备) 时截断 → brace-count 找不到 devices 结尾 → return 0 →
-     * limited 集合空 → BPF offload 不被 disable → 被限速流量静默走 fast-path 绕过
-     * HTB。改用 fseek/ftell 取大小后 malloc 读全量(无 sys/stat.h 依赖)。 */
     long fsz = 0;
-    if (fseek(f, 0, SEEK_END) == 0) { fsz = ftell(f); rewind(f); }
-    /* v5.8.8 (audit): don't trust ftell. When fseek/ftell fail (fsz<=0) the
-     * old code capped at 65536 and fread truncated any rules.json >64KB — the
-     * exact truncation rc39 set out to fix, just on the ftell-failure path.
-     * Read with a growing buffer so the whole file is consumed regardless. */
-    size_t cap = (fsz > 0) ? (size_t)fsz + 1 : 65536;
+    if (fseek(f, 0, SEEK_END) == 0) {
+        fsz = ftell(f);
+        if (fseek(f, 0, SEEK_SET) != 0) {
+            fclose(f);
+            return 0;
+        }
+    }
+    if (fsz > (long)HNC_RULES_MAX_BYTES) {
+        fclose(f);
+        fprintf(stderr, "[sched] rebuild: rules.json exceeds 4MB (%ld bytes), skip\n", fsz);
+        return 0;
+    }
+
+    size_t cap = (fsz > 0) ? ((size_t)fsz + 1U) : 65536U;
+    if (cap > HNC_RULES_MAX_BYTES + 1U)
+        cap = HNC_RULES_MAX_BYTES + 1U;
+
     char *buf = malloc(cap);
     if (!buf) {
         fclose(f);
         fprintf(stderr, "[sched] rebuild: OOM allocating %zu bytes, skip\n", cap);
         return 0;
     }
+
     size_t n = 0;
     for (;;) {
-        if (n + 1 >= cap) {
-            size_t ncap = cap * 2;
+        if (n + 1U >= cap) {
+            if (n >= HNC_RULES_MAX_BYTES) {
+                int extra = fgetc(f);
+                if (extra != EOF) {
+                    free(buf);
+                    fclose(f);
+                    fprintf(stderr, "[sched] rebuild: rules.json exceeds 4MB cap, skip\n");
+                    return 0;
+                }
+                break;
+            }
+            if (cap > (SIZE_MAX / 2U)) {
+                free(buf);
+                fclose(f);
+                return 0;
+            }
+            size_t ncap = cap * 2U;
+            if (ncap > HNC_RULES_MAX_BYTES + 1U)
+                ncap = HNC_RULES_MAX_BYTES + 1U;
+            if (ncap <= cap) {
+                free(buf);
+                fclose(f);
+                return 0;
+            }
             char *nb = realloc(buf, ncap);
             if (!nb) {
                 free(buf);
@@ -261,12 +293,18 @@ static int rebuild_from_rules(void)
             buf = nb;
             cap = ncap;
         }
-        size_t got = fread(buf + n, 1, cap - 1 - n, f);
+        size_t got = fread(buf + n, 1, cap - 1U - n, f);
         n += got;
         if (got == 0) break; /* EOF or read error */
     }
+    int had_err = ferror(f);
     fclose(f);
-    if (n == 0) { free(buf); return 0; }
+    if (had_err || n == 0) {
+        if (had_err)
+            fprintf(stderr, "[sched] rebuild: read error on rules.json, skip\n");
+        free(buf);
+        return 0;
+    }
     buf[n] = '\0';
 
     /* 定位 devices section: "devices":{...} */
@@ -496,6 +534,9 @@ static void trigger_adapter_disable_locked(void)
 
 static void trigger_adapter_restore_locked(void)
 {
+    sched.eempty_retry_pending = 0;
+    sched.eempty_fast_credits  = 0;
+
     if (sched.adapter == NULL) return;
     offload_adapter_t *a = sched.adapter;
 
@@ -584,27 +625,6 @@ static void *worker_main(void *arg)
         sched.worker_refresh_requested = 0;
         pthread_mutex_unlock(&sched.worker_lock);
 
-        /* beta.3: 周期性重探 primary upstream (cold-start race fix)
-         *
-         * 历史 bug (beta.1 / beta.2):
-         *   refresh_primary_upstream_locked() 只在 3 个时机调用:
-         *     1. hnc_scheduler_init() 启动一次
-         *     2. rebuild_from_rules() 当 limited_count > 0 时
-         *     3. notify_device_limit_changed() 在 0->>0 转换时
-         *   一旦冷启动踩到 "BPF upstream4_map 还空" 窗口 (热点刚开/客户端还
-         *   没流量), Tier3/Tier4 都 fail → primary_upstream_ifindex=0 永久
-         *   保持. 之后 limited_count 持续 >0 不会再触发 0->>0,worker 60s
-         *   只跑 refresh_active 不重探, 系统永远停留在 "fallback disable_global"
-         *   状态. 实测 RMX5010 ColorOS 16 上 init 时机比 BPF map 填充早,
-         *   100% 命中此 race.
-         *
-         * 修复:
-         *   每个 worker 周期(60s)都重探一次. 状态变化时 (探到新 upstream
-         *   或上游切换) 自动 re-trigger adapter 操作,与 0->>0 路径等价.
-         *   纯 BPF 反查, 性能开销 < 1ms, 无副作用.
-         *
-         * v5.9.0: 探测本体移出 sched.lock(probe 锁外 / apply 锁内),
-         *   Tier1 的外部 ip 命令(500ms 超时)不再把主线程 IPC 卡在锁上. */
         time_t cyc_ts = time(NULL);
         int p_idx = 0;
         char p_name[HNC_SCHED_IFNAME_LEN] = {0};
@@ -636,9 +656,12 @@ static void *worker_main(void *arg)
             fprintf(stderr, "[sched] EEMPTY re-try: triggering disable again\n");
             trigger_adapter_disable_locked();   /* 仍空会再次置 pending */
         }
-        /* 决定下一轮等待: pending 且还有快速额度 → 5s, 否则回落 60s */
+        /* 决定下一轮等待: 若已无限速设备则清零 pending, 否则有快速额度时 5s, 其余回落 60s */
         next_wait_sec = HNC_SCHED_REFRESH_INTERVAL_SEC;
-        if (sched.eempty_retry_pending && sched.eempty_fast_credits > 0) {
+        if (sched.limited_count == 0) {
+            sched.eempty_retry_pending = 0;
+            sched.eempty_fast_credits  = 0;
+        } else if (sched.eempty_retry_pending && sched.eempty_fast_credits > 0) {
             sched.eempty_fast_credits--;
             next_wait_sec = HNC_SCHED_EEMPTY_FAST_RETRY_SEC;
         }
@@ -651,11 +674,6 @@ static void *worker_main(void *arg)
                 fprintf(stderr, "[sched] refresh_active: %s\n", offload_err_str(e));
             }
         }
-        /* v5.9.0: 统计字段读写全部收进 sched.lock(get_summary 的读侧同步
-         * 移入锁内), 消除跨线程 data race。语义微移: ts/count 现表示"本轮
-         * refresh 周期开始"(cyc_ts 在锁外先算好, 不为 time() 延长临界区),
-         * 不再等 refresh_active 的 5s 采样结束 —— sched_test [10] 段等 7s
-         * 判 count 增长, 不受影响。 */
         pthread_mutex_lock(&sched.lock);
         sched.worker_last_refresh_ts = (int64_t)cyc_ts;
         sched.worker_refresh_count++;
@@ -722,8 +740,7 @@ int hnc_scheduler_init(void)
     }
     offload_set_sleep_fn(scheduler_sleep_interruptible);
 
-    /* 初次探测上游 (v5.9.0: probe 锁外 / apply 锁内 —— 此时 worker 未启,
-     * 单线程本无竞争, 改动纯为四个调用点形态统一) */
+    /* 初次探测上游 (probe 锁外 / apply 锁内) */
     {
         int p_idx = 0;
         char p_name[HNC_SCHED_IFNAME_LEN] = {0};
@@ -756,14 +773,11 @@ int hnc_scheduler_init(void)
      * 这样重启后不需要手动 apply_device_rule.sh, 限速自动恢复 */
     int rebuilt = rebuild_from_rules();
     if (rebuilt > 0) {
-        /* 0 → >0 转换等价: 重新探测上游 + trigger disable
-         * (notify 路径一致, 避免重复代码; v5.9.0 probe 移到锁外) */
         int p_idx = 0;
         char p_name[HNC_SCHED_IFNAME_LEN] = {0};
         int p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
         pthread_mutex_lock(&sched.lock);
         apply_primary_upstream_locked(p_rc, p_idx, p_name);
-        /* v5.9.0: 新一轮 disable episode → 发满 EEMPTY 快速重试额度 */
         sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
         trigger_adapter_disable_locked();
         pthread_mutex_unlock(&sched.lock);
@@ -821,15 +835,22 @@ void hnc_scheduler_notify_device_limit_changed(const char *mac, int is_limited)
     int old_count, new_count;
     int triggered_disable = 0, triggered_restore = 0;
 
-    /* v5.9.0: 无条件先探测再加锁。旧实现在锁内 0→>0 分支里探测 ——
-     * Tier1 的外部 ip 命令会把持锁时间拉到无界(见 probe/apply 拆分注释)。
-     * 两段式"锁内查转换→放锁探测→重加锁复核"引入 ABA 复杂度不值;
-     * 常态(map 已填充)下 Tier3/4 是 <1ms 的纯 syscall, 无条件探测成本
-     * 可忽略; 最坏(走 Tier1)被 500ms 超时封顶, 而 IPC 客户端本就带 1s
-     * 超时。探测结果只在 0→>0 分支 apply, 非转换调用不改变现有行为。 */
+    /* 仅在可能发生 0 -> >0 跃迁时于锁外探测主上游, 避免批量限速/解除限速时重复探测 */
+    int may_need_probe = 0;
+    if (is_limited) {
+        pthread_mutex_lock(&sched.lock);
+        may_need_probe = (sched.limited_count == 0);
+        pthread_mutex_unlock(&sched.lock);
+    }
+
     int p_idx = 0;
     char p_name[HNC_SCHED_IFNAME_LEN] = {0};
-    int p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
+    int p_rc = -1;
+    int did_probe = 0;
+    if (may_need_probe) {
+        p_rc = probe_primary_upstream(&p_idx, p_name, sizeof(p_name));
+        did_probe = 1;
+    }
 
     pthread_mutex_lock(&sched.lock);
     old_count = sched.limited_count;
@@ -843,18 +864,16 @@ void hnc_scheduler_notify_device_limit_changed(const char *mac, int is_limited)
 
     /* 状态机: 0 → >0 / >0 → 0 */
     if (old_count == 0 && new_count > 0) {
-        /* 采纳锁外探测结果 (上次可能是冷启时, 上游可能已切换) */
-        apply_primary_upstream_locked(p_rc, p_idx, p_name);
-        /* v5.9.0: 新一轮 disable episode → 发满 EEMPTY 快速重试额度 */
+        if (did_probe)
+            apply_primary_upstream_locked(p_rc, p_idx, p_name);
         sched.eempty_fast_credits = HNC_SCHED_EEMPTY_FAST_RETRIES;
         triggered_disable = 1;
     } else if (old_count > 0 && new_count == 0) {
+        sched.eempty_retry_pending = 0;
+        sched.eempty_fast_credits  = 0;
         triggered_restore = 1;
     }
 
-    /* 注 (v5.9.0 更新): trigger_* 只做 BPF map 写 (<1ms), 可持 sched.lock
-     * 调用; 上游探测已全部移到锁外 (probe_primary_upstream), 主线程 IPC
-     * 不再被探测卡锁。 */
     if (triggered_disable)  trigger_adapter_disable_locked();
     if (triggered_restore)  trigger_adapter_restore_locked();
 
@@ -876,26 +895,44 @@ void hnc_scheduler_request_refresh(void)
 }
 
 /* ══════════════════════════════════════════════════════════
- * 强制操作 (control 命令直接驱动)
+ * 强制操作 (control 命令直接驱动, 全程持 sched.lock 防并发竞态)
  * ══════════════════════════════════════════════════════════ */
 
 offload_err_t hnc_scheduler_force_disable_global(void)
 {
     if (!sched.initialized || sched.adapter == NULL) return OFFLOAD_EINTERNAL;
-    if (sched.adapter->disable_global == NULL)       return OFFLOAD_ENOTSUP;
-    return sched.adapter->disable_global();
+
+    pthread_mutex_lock(&sched.lock);
+    if (sched.adapter == NULL || sched.adapter->disable_global == NULL) {
+        pthread_mutex_unlock(&sched.lock);
+        return OFFLOAD_ENOTSUP;
+    }
+    offload_err_t e = sched.adapter->disable_global();
+    if (e == OFFLOAD_EEMPTY) {
+        sched.eempty_retry_pending = 1;
+        sched.eempty_fast_credits  = HNC_SCHED_EEMPTY_FAST_RETRIES;
+    } else if (e == OFFLOAD_OK) {
+        sched.eempty_retry_pending = 0;
+    }
+    pthread_mutex_unlock(&sched.lock);
+    return e;
 }
 
 offload_err_t hnc_scheduler_force_restore_global(void)
 {
     if (!sched.initialized || sched.adapter == NULL) return OFFLOAD_EINTERNAL;
-    if (sched.adapter->restore_global == NULL)       return OFFLOAD_ENOTSUP;
 
     pthread_mutex_lock(&sched.lock);
-    sched.limited_count = 0;     /* 强制 restore 隐含清空集合 */
+    if (sched.adapter == NULL || sched.adapter->restore_global == NULL) {
+        pthread_mutex_unlock(&sched.lock);
+        return OFFLOAD_ENOTSUP;
+    }
+    sched.limited_count        = 0; /* 强制 restore 隐含清空集合与重试状态 */
+    sched.eempty_retry_pending = 0;
+    sched.eempty_fast_credits  = 0;
+    offload_err_t e = sched.adapter->restore_global();
     pthread_mutex_unlock(&sched.lock);
-
-    return sched.adapter->restore_global();
+    return e;
 }
 
 /* ══════════════════════════════════════════════════════════

@@ -65,6 +65,83 @@ else
       fail "webroot/changelog.html missing data-version=\"$VERSION\""
     fi
   fi
+  if [ -f webroot/json-health.html ]; then
+    if grep -Fq "data-ui-ver=\"$VERSION\"" webroot/json-health.html && grep -Fq ">HNC $VERSION</span>" webroot/json-health.html; then
+      ok "webroot/json-health.html embeds $VERSION"
+    else
+      fail "webroot/json-health.html UI version mismatch (expected $VERSION)"
+    fi
+  fi
+  if [ -f data/dpi_ja4_fingerprints.json ]; then
+    DFP_VER="$(sed -n 's/.*"rules_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' data/dpi_ja4_fingerprints.json | head -n 1 | tr -d '\r')"
+    if [ "$DFP_VER" = "hnc-dfp-$VERSION" ]; then
+      ok "data/dpi_ja4_fingerprints.json matches hnc-dfp-$VERSION"
+    else
+      fail "data/dpi_ja4_fingerprints.json rules_version mismatch (expected hnc-dfp-$VERSION, got '$DFP_VER')"
+    fi
+  fi
+  if [ -d data/dpi_rules.d ]; then
+    _cur_ok=0
+    _cur_bad=0
+    for _rf in data/dpi_rules.d/*.json; do
+      [ -f "$_rf" ] || continue
+      _rbn="${_rf##*/}"
+      [ "$_rbn" = "46-v2fly-a.json" ] && continue
+      _sub="${_rbn%.json}"
+      _rv="$(sed -n 's/.*"rules_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$_rf" | head -n 1 | tr -d '\r')"
+      if [ "$_rbn" = "00-core-meta.json" ]; then
+        _exp_rv="hnc-curated-${VERSION}-dedup#${_sub}"
+      else
+        _exp_rv="hnc-curated-${VERSION}#${_sub}"
+      fi
+      if [ "$_rv" = "$_exp_rv" ]; then
+        _cur_ok=$((_cur_ok + 1))
+      else
+        fail "$_rf rules_version mismatch (expected '$_exp_rv', got '$_rv')"
+        _cur_bad=$((_cur_bad + 1))
+      fi
+    done
+    if [ "$_cur_bad" -eq 0 ] && [ "$_cur_ok" -gt 0 ]; then
+      ok "data/dpi_rules.d curated rules_version matches $VERSION ($_cur_ok files, 46-v2fly-a.json skipped)"
+    fi
+  fi
+  if [ -f webroot/js/settings.js ]; then
+    SET_VER="$(sed -n "s/.*HNC_UI_VER[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" webroot/js/settings.js | head -n 1 | tr -d '\r')"
+    SET_VC="$(sed -n "s/.*HNC_UI_VC[[:space:]]*=[[:space:]]*'\([^']*\)'.*/\1/p" webroot/js/settings.js | head -n 1 | tr -d '\r')"
+    if [ "$SET_VER" = "$VERSION" ] && [ "$SET_VC" = "$VERSION_CODE" ]; then
+      ok "webroot/js/settings.js matches $VERSION / $VERSION_CODE"
+    else
+      fail "webroot/js/settings.js version mismatch (expected $VERSION / $VERSION_CODE, got '${SET_VER:-missing}' / '${SET_VC:-missing}')"
+    fi
+  fi
+  if [ -f webroot/js/vector_v6.js ]; then
+    VEC_VERS="$(grep -Eo 'HNC v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z]+)*' webroot/js/vector_v6.js 2>/dev/null | awk '{print $2}' || true)"
+    if [ -n "$VEC_VERS" ]; then
+      VEC_BAD=0
+      for _vv in $VEC_VERS; do
+        [ "$_vv" = "$VERSION" ] || VEC_BAD=1
+      done
+      if [ "$VEC_BAD" -eq 0 ]; then
+        ok "webroot/js/vector_v6.js embeds exact $VERSION"
+      else
+        fail "webroot/js/vector_v6.js version mismatch (expected $VERSION, got: $(printf '%s' "$VEC_VERS" | tr '\n' ' '))"
+      fi
+    elif grep -Fq "$VERSION" webroot/js/vector_v6.js; then
+      ok "webroot/js/vector_v6.js embeds $VERSION"
+    else
+      fail "webroot/js/vector_v6.js missing current version $VERSION"
+    fi
+  fi
+  if [ -f tools/ui_mock/fake_api.js ]; then
+    FAKE_VER="$(sed -n "s/.*META\.version[[:space:]]*:[[:space:]]*'\([^']*\)'.*/\1/p" tools/ui_mock/fake_api.js | head -n 1 | tr -d '\r')"
+    FAKE_VC="$(sed -n "s/.*META\.versionCode[[:space:]]*||[[:space:]]*'\([^']*\)'.*/\1/p" tools/ui_mock/fake_api.js | head -n 1 | tr -d '\r')"
+    FAKE_STALE="$(grep -Eo 'hnc-curated-v[0-9]+\.[0-9]+\.[0-9]+(-[A-Za-z0-9.]+)?' tools/ui_mock/fake_api.js 2>/dev/null | sed 's/-dedup$//' | grep -vxF "hnc-curated-$VERSION" | head -n 1 || true)"
+    if [ "$FAKE_VER" = "$VERSION" ] && [ "$FAKE_VC" = "$VERSION_CODE" ] && [ -z "$FAKE_STALE" ]; then
+      ok "tools/ui_mock/fake_api.js matches $VERSION / $VERSION_CODE"
+    else
+      fail "tools/ui_mock/fake_api.js version mismatch (expected $VERSION / $VERSION_CODE, got '${FAKE_VER:-missing}' / '${FAKE_VC:-missing}'${FAKE_STALE:+, stale '$FAKE_STALE'})"
+    fi
+  fi
   if [ ! -f update.json ]; then
     fail "update.json not found"
   else
@@ -114,9 +191,16 @@ else
         fi ;;
       *)
         UPD_BAD=0
+        VER_SAFE="$(printf '%s' "$VERSION" | tr '.+' '__')"
         case "$UPD_ZIP" in
           *-alpha*|*-beta*|*-rc*)
             fail "update.json zipUrl points to pre-release artifact on stable release: $UPD_ZIP"
+            UPD_BAD=1 ;;
+        esac
+        case "$UPD_ZIP" in
+          https://*/releases/download/"$VERSION"/HNC-"$VER_SAFE"-arm64.zip) ;;
+          *)
+            fail "update.json zipUrl must target https://.../releases/download/$VERSION/HNC-${VER_SAFE}-arm64.zip (got: '$UPD_ZIP')"
             UPD_BAD=1 ;;
         esac
         case "$UPD_CL" in
@@ -124,8 +208,18 @@ else
             fail "update.json changelog points to pre-release ref on stable release: $UPD_CL"
             UPD_BAD=1 ;;
         esac
+        case "$UPD_CL" in
+          https://*/"$VERSION"/CHANGELOG.md) ;;
+          *)
+            fail "update.json changelog must target https://.../$VERSION/CHANGELOG.md (got: '$UPD_CL')"
+            UPD_BAD=1 ;;
+        esac
+        if [ -z "$UPD_VC" ] || ! printf '%s\n' "$UPD_VC" | grep -Eq '^[1-9][0-9]*$' || [ "$UPD_VC" -le 6000001 ]; then
+          fail "stable update.json versionCode ($UPD_VC) must be > 6000001"
+          UPD_BAD=1
+        fi
         if [ -n "$UPD_VER" ] && [ "$UPD_VER" = "$VERSION" ] && [ "$UPD_VC" = "$VERSION_CODE" ]; then
-          [ "$UPD_BAD" -eq 0 ] && ok "update.json matches stable release ($UPD_VER / $UPD_VC)"
+          [ "$UPD_BAD" -eq 0 ] && ok "update.json matches stable release ($UPD_VER / $UPD_VC, url verified)"
         else
           fail "stable module.prop ($VERSION / $VERSION_CODE) differs from update.json ($UPD_VER / $UPD_VC)"
         fi ;;

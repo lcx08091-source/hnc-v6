@@ -34,7 +34,7 @@
   --amb-1:rgba(40,110,255,.34); --amb-2:rgba(210,60,160,.26); --amb-3:rgba(30,170,150,.24); --amb-4:rgba(230,140,40,.20);
 }
 /* 环境光: 白底上四团极淡的色光, 缓慢漂移(减少动态 / 低端机静止) */
-[data-glass="liquid"] .mesh{display:block;inset:-25%;filter:blur(60px) saturate(140%);opacity:1;
+[data-glass="liquid"] .mesh{display:block;top:-25%;right:-25%;bottom:-25%;left:-25%;inset:-25%;filter:blur(60px) saturate(140%);opacity:1;
   background:radial-gradient(34% 30% at 14% 10%,var(--amb-1),transparent 70%),radial-gradient(30% 28% at 88% 24%,var(--amb-2),transparent 70%),
              radial-gradient(34% 30% at 18% 78%,var(--amb-3),transparent 70%),radial-gradient(30% 30% at 86% 92%,var(--amb-4),transparent 70%);
   animation:lgDrift 38s ease-in-out infinite alternate}
@@ -48,7 +48,7 @@
 [data-glass="liquid"] .tabbar{height:64px;border-radius:32px;background:var(--lg-fill);
   -webkit-backdrop-filter:var(--hyalite, blur(10px) saturate(190%) brightness(1.04));backdrop-filter:var(--hyalite, blur(10px) saturate(190%) brightness(1.04));
   box-shadow:var(--hyalite-edge, var(--lg-rim)),var(--lg-drop)}
-[data-glass="liquid"] .tabbar::after{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:var(--lg-sheen);opacity:.8}
+[data-glass="liquid"] .tabbar::after{content:"";position:absolute;top:0;right:0;bottom:0;left:0;inset:0;border-radius:inherit;pointer-events:none;background:var(--lg-sheen);opacity:.8}
 [data-glass="liquid"] .lens{top:5px;height:54px;border-radius:27px;box-shadow:var(--lg-rim),0 4px 14px -4px rgba(30,45,90,.22)}
 [data-glass="liquid"] .lens-tint{background:var(--lg-tint)}
 [data-glass="liquid"] .lens-in{height:54px}
@@ -56,14 +56,14 @@
 [data-glass="liquid"] .lens-in .tab{color:var(--blue);opacity:1;font-weight:600}
 [data-glass="liquid"] .tabbar.drag .lens-tint{opacity:.05}
 /* 顶栏: 边缘渐隐的模糊(iOS 26 滚动边缘效果), 按钮是一颗颗玻璃圆 */
-[data-glass="liquid"] .header::before{bottom:-26px;background:linear-gradient(to bottom,color-mix(in srgb,var(--bg) 92%,transparent) 0%,color-mix(in srgb,var(--bg) 80%,transparent) 55%,color-mix(in srgb,var(--bg) 0%,transparent));box-shadow:none;
+[data-glass="liquid"] .header::before{bottom:-26px;background:linear-gradient(to bottom,rgba(248,249,252,.92) 0%,rgba(248,249,252,.80) 55%,rgba(248,249,252,0));background:linear-gradient(to bottom,color-mix(in srgb,var(--bg) 92%,transparent) 0%,color-mix(in srgb,var(--bg) 80%,transparent) 55%,color-mix(in srgb,var(--bg) 0%,transparent));box-shadow:none;
   -webkit-backdrop-filter:blur(14px) saturate(180%);backdrop-filter:blur(14px) saturate(180%);
   -webkit-mask-image:linear-gradient(to bottom,#000 62%,transparent);mask-image:linear-gradient(to bottom,#000 62%,transparent);
   opacity:calc(var(--hp,0) * (1 - var(--hs,0)))}
 /* 内容真正滚到顶栏下面(大标题收起之后): 渐隐边缘换成一条统一的实底顶栏 + 底部细线(iOS 27), 文字不再透出来。
    --hs 由 fx.js navSync 按滚动距离写; .hs-on 只在 --hs > 0 时挂, 平时不多画一层磨砂 */
-[data-glass="liquid"] .header.hs-on::after{content:"";position:absolute;inset:0;z-index:-1;pointer-events:none;
-  background:color-mix(in srgb,var(--bg) 94%,transparent);-webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);
+[data-glass="liquid"] .header.hs-on::after{content:"";position:absolute;top:0;right:0;bottom:0;left:0;inset:0;z-index:-1;pointer-events:none;
+  background:var(--card);background:color-mix(in srgb,var(--bg) 94%,transparent);-webkit-backdrop-filter:blur(20px) saturate(180%);backdrop-filter:blur(20px) saturate(180%);
   box-shadow:0 .5px 0 var(--divider);opacity:var(--hs,0)}
 :root.lowfx[data-glass="liquid"] .header.hs-on::after{-webkit-backdrop-filter:none;backdrop-filter:none;background:var(--bg)}
 [data-glass="liquid"] .hbtn{width:40px;height:40px;margin-left:4px;color:var(--text-1);background:var(--lg-fill);
@@ -239,4 +239,83 @@
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .v6-kpi b,
 :root[data-has-wp="1"][data-glass][data-theme="dark"] .lgd-dev {
   text-shadow: 0 1px 2px rgba(2, 6, 18, .62);
+}
+
+/* 液态玻璃信号双轨图与四维干扰拆解高对比度内嵌层 */
+[data-glass="liquid"] .sig-wave-card,
+[data-glass="liquid"] .sig-intf-card,
+[data-glass="liquid"] .sig-4d-cell,
+[data-glass="liquid"] .sig-hero-bar {
+  -webkit-backdrop-filter: none !important;
+  backdrop-filter: none !important;
+  border: 0;
+  background: rgba(255, 255, 255, .58);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, .86), 0 0 0 .5px rgba(20, 30, 60, .09);
+}
+[data-glass="liquid"] .sig-intf-row {
+  background: rgba(255, 255, 255, .74);
+  border-color: rgba(20, 30, 60, .09);
+}
+[data-glass="liquid"] .sig-wave-svg {
+  background: rgba(255, 255, 255, .64);
+  border-color: rgba(20, 30, 60, .09);
+}
+:root[data-glass="liquid"][data-theme="dark"] .sig-wave-card,
+:root[data-glass="liquid"][data-theme="dark"] .sig-intf-card,
+:root[data-glass="liquid"][data-theme="dark"] .sig-4d-cell,
+:root[data-glass="liquid"][data-theme="dark"] .sig-hero-bar {
+  background: rgba(16, 24, 40, .58);
+  box-shadow: inset 0 1px 0 rgba(220, 238, 255, .14), 0 0 0 .5px rgba(190, 225, 255, .11);
+}
+:root[data-glass="liquid"][data-theme="dark"] .sig-intf-row,
+:root[data-glass="liquid"][data-theme="dark"] .sig-wave-svg {
+  background: rgba(12, 18, 32, .62);
+  border-color: rgba(190, 225, 255, .12);
+}
+@media (prefers-color-scheme: dark) {
+  :root[data-glass="liquid"]:not([data-theme="light"]) .sig-wave-card,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .sig-intf-card,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .sig-4d-cell,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .sig-hero-bar {
+    background: rgba(16, 24, 40, .58);
+    box-shadow: inset 0 1px 0 rgba(220, 238, 255, .14), 0 0 0 .5px rgba(190, 225, 255, .11);
+  }
+  :root[data-glass="liquid"]:not([data-theme="light"]) .sig-intf-row,
+  :root[data-glass="liquid"]:not([data-theme="light"]) .sig-wave-svg {
+    background: rgba(12, 18, 32, .62);
+    border-color: rgba(190, 225, 255, .12);
+  }
+}
+
+/* 老内核 WebView 不支持 backdrop-filter / color-mix 时的实底可读性兜底 */
+@supports not ((-webkit-backdrop-filter: blur(1px)) or (backdrop-filter: blur(1px))) {
+  [data-glass="liquid"] .glass,
+  [data-glass="liquid"] .hbtn,
+  [data-glass="liquid"] .sheet,
+  [data-glass="liquid"] .dd-menu,
+  [data-glass="liquid"] .tabbar,
+  [data-glass="liquid"] .toast,
+  [data-glass="liquid"] .v6-drawer,
+  [data-glass="frosted"] .v6-drawer {
+    background: var(--card-solid);
+  }
+  [data-glass="liquid"] .header.hs-on::after {
+    background: var(--bg);
+  }
+}
+@supports not (background: color-mix(in srgb, #000 50%, transparent)) {
+  [data-glass="liquid"] .header::before {
+    background: linear-gradient(to bottom, rgba(248, 249, 252, .92) 0%, rgba(248, 249, 252, .80) 55%, rgba(248, 249, 252, 0));
+  }
+  :root[data-glass="liquid"][data-theme="dark"] .header::before {
+    background: linear-gradient(to bottom, rgba(4, 4, 6, .92) 0%, rgba(4, 4, 6, .80) 55%, rgba(4, 4, 6, 0));
+  }
+  @media (prefers-color-scheme: dark) {
+    :root[data-glass="liquid"]:not([data-theme="light"]) .header::before {
+      background: linear-gradient(to bottom, rgba(4, 4, 6, .92) 0%, rgba(4, 4, 6, .80) 55%, rgba(4, 4, 6, 0));
+    }
+  }
+  [data-glass="liquid"] .header.hs-on::after {
+    background: var(--card);
+  }
 }

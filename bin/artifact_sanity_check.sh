@@ -68,7 +68,7 @@ fi
 grep -E '\.rej$|\.orig$' "$TMP.entries" >/dev/null && fail "artifact contains .rej/.orig patch residue" || ok "artifact has no .rej/.orig residue"
 grep -E '(^|/)[^/]+\.TODO$' "$TMP.entries" >/dev/null && fail "artifact contains .TODO unfinished file" || ok "artifact has no .TODO unfinished file"
 grep -E '(^|/)(\.ssh|id_rsa|id_ed25519|.*_ed25519|.*_rsa|.*\.pem)$' "$TMP.entries" >/dev/null && fail "artifact may contain private key/secret files" || ok "artifact has no obvious private key/secret files"
-for req in LICENSE webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/vector_v6.js webroot/js/main.js data/dpi_rules.d/96-system-updates-v6.json webroot/json-health.html bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json data/ip_owner.bin data/pkg_app_map.json bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_runtime_sync.sh bin/hnc_proc.sh customize.sh bin/hnc_arch.sh; do
+for req in LICENSE webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/vector_v6.js webroot/js/main.js data/dpi_rules.d/96-system-updates-v6.json webroot/json-health.html bin/hnc_env.sh bin/capability_probe.sh daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json data/ip_owner.bin data/pkg_app_map.json bin/hnc_clsact_ctl bin/hnc_clsact.o bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_runtime_sync.sh bin/hnc_proc.sh customize.sh bin/hnc_arch.sh; do
   grep -x "$req" "$TMP.entries" >/dev/null && ok "required file exists: $req" || fail "required file missing at ZIP root path: $req"
 done
 
@@ -141,20 +141,81 @@ _elf_machine() { # <zip-entry> → "b7 00" / "28 00" / ...
   unzip -p "$ZIP" "$1" 2>/dev/null | head -c 20 > "$TMP.elfhdr" 2>/dev/null
   od -An -tx1 -j18 -N2 "$TMP.elfhdr" 2>/dev/null | awk '{print $1 " " $2}'
 }
+_elf_check_16k() { # <zip-entry> — Android 15/16 16KB page size gate (PT_LOAD p_align >= 0x4000)
+  command -v readelf >/dev/null 2>&1 || return 0
+  mkdir -p "$TMP.extract" 2>/dev/null
+  _e16_f="$TMP.extract/elf16k.$$"
+  unzip -p "$ZIP" "$1" > "$_e16_f" 2>/dev/null
+  [ -s "$_e16_f" ] || { rm -f "$_e16_f" 2>/dev/null; return 0; }
+  _e16_out=$(readelf -l -W "$_e16_f" 2>/dev/null)
+  [ -n "$_e16_out" ] || _e16_out=$(readelf -l "$_e16_f" 2>/dev/null)
+  rm -f "$_e16_f" 2>/dev/null
+  _e16_res=$(printf '%s\n' "$_e16_out" | awk '
+    function hex2num(h,    i, c, v, res) {
+      sub(/^0[xX]/, "", h)
+      if (h == "") return -1
+      res = 0
+      for (i = 1; i <= length(h); i++) {
+        c = tolower(substr(h, i, 1))
+        v = index("0123456789abcdef", c) - 1
+        if (v < 0) return -1
+        res = res * 16 + v
+      }
+      return res
+    }
+    $1 == "LOAD" && $NF ~ /^0[xX][0-9a-fA-F]+$/ {
+      loads++
+      al = hex2num($NF)
+      if (al < 16384 || (al % 16384) != 0) {
+        if (bad == "") bad = $NF
+      }
+      next
+    }
+    $1 == "LOAD" { pend = 1; next }
+    pend && $NF ~ /^0[xX][0-9a-fA-F]+$/ {
+      pend = 0
+      loads++
+      al = hex2num($NF)
+      if (al < 16384 || (al % 16384) != 0) {
+        if (bad == "") bad = $NF
+      }
+    }
+    END {
+      if (loads == 0) print "SKIP"
+      else if (bad != "") print "FAIL:" bad
+      else print "OK"
+    }
+  ')
+  case "$_e16_res" in
+    OK) ok "16KB PT_LOAD alignment (0x4000+): $1" ;;
+    FAIL:*) fail "arm64-v8a ELF PT_LOAD underaligned (< 0x4000 / 16KB): $1 align=${_e16_res#FAIL:}" ;;
+    *) ;;
+  esac
+}
 if command -v od >/dev/null 2>&1; then
   for b in bin/hotspotd bin/hnc_ipc bin/mdns_resolve bin/hnc_tc_ingress bin/hnc_clsact_ctl \
            bin/hnc_launcher bin/fork_probe bin/hnc_dpid bin/hnc_watchdog \
            daemon/hnc_httpd/hnc_httpd; do
     grep -x "$b" "$TMP.entries" >/dev/null || continue
     M=$(_elf_machine "$b")
-    [ "$M" = "$WANT_MACHINE" ] && ok "ABI $EXPECT_ABI: $b" || fail "ABI mismatch: $b machine='$M' (want $WANT_MACHINE for $EXPECT_ABI)"
+    if [ "$M" = "$WANT_MACHINE" ]; then
+      ok "ABI $EXPECT_ABI: $b"
+      [ "$EXPECT_ABI" = "arm64-v8a" ] && _elf_check_16k "$b"
+    else
+      fail "ABI mismatch: $b machine='$M' (want $WANT_MACHINE for $EXPECT_ABI)"
+    fi
   done
   # 可选的通用包覆盖层 bin/<abi>/*: 每层内二进制必须与该层 ABI 一致
   for ov in arm64-v8a armeabi-v7a; do
     case "$ov" in arm64-v8a) OW="b7 00" ;; *) OW="28 00" ;; esac
     for b in $(grep -E "^bin/$ov/[^/]+$" "$TMP.entries"); do
       M=$(_elf_machine "$b")
-      [ "$M" = "$OW" ] && ok "overlay ABI $ov: $b" || fail "overlay ABI mismatch: $b machine='$M' (want $OW)"
+      if [ "$M" = "$OW" ]; then
+        ok "overlay ABI $ov: $b"
+        [ "$ov" = "arm64-v8a" ] && _elf_check_16k "$b"
+      else
+        fail "overlay ABI mismatch: $b machine='$M' (want $OW)"
+      fi
     done
   done
 else

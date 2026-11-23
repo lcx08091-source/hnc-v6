@@ -11,18 +11,28 @@
 // 内容没变不写(省电)。rx/tx 在写前经 `sh bin/iptables_manager.sh stats_all` 刷新
 // (参数分开传, 3s 超时, 5s TTL), TTL 内沿用上一次的数字。
 //
-// v6.0 加固: 修复 runStatsAll 硬编码 /system/bin/sh 为动态探测可用 sh 解释器路径,
-// 并补齐独立进程组 SIGKILL + WaitDelay 超时收尾保护, 防止孙进程持管道挂死写者协程!
+// v6.0 RC2 加固:
+//   - 纯 Go 2s 进程组超时流式解析 iptables/ip6tables -nvxL HNC_STATS(兼容 legacy 9 列与
+//     iptables-nft 8 列) + stats_v6_map / stats_v6_retired 聚合, 消灭每 5s 约 90 子进程风暴;
+//   - writeDevicesAtomic 写完 data/devices.json 后同步原子写出 run/devices.flat;
+//   - 生产默认 dumpIfFn 内置 SELinux AF_NETLINK 权限受限时的 /proc/net/arp 兜底, 主循环与
+//     订阅重连遇权限错误退避 30s 并去重日志, 消灭 1Hz AVC 审计风暴;
+//   - m4_go_write.log 封顶 256 KiB, 防止撑爆 32M tmpfs。
 package main
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,32 +45,45 @@ import (
 )
 
 const (
-	m4WriteHardRateMS = 200              // 距上次写 <200ms 永不写(rc30.9 硬限速)
-	m4IdleTickMS      = 500              // v5.32 T4: 空闲(无 dirty/待解析名字/在途解析)时主循环 500ms 醒一次(REFRESH 要在 1 秒内响应)
-	m4WriteIdleMS     = 500              // 空闲后首事件立即写(rc30.9)
-	m4WriteMergeMS    = 200              // 合并窗口: 200ms 无新事件(rc30.9)
-	m4WriteMaxDirtyMS = 30000            // dirty 兜底 30s(rc30.9)
-	m4StatsTTL        = 5 * time.Second  // 流量字节 5s TTL(C update_traffic_stats)
-	m4StatsTimeout    = 3 * time.Second  // hnc_run_cmd_timeout(..., 3000)
-	m4FullSyncEvery   = 30 * time.Second // 全量 dump 兜底(WORK T1)
-	m4NonceMax        = 64               // run/devices.refresh 里 nonce 的长度上限
+	m4WriteHardRateMS    = 200              // 距上次写 <200ms 永不写(rc30.9 硬限速)
+	m4IdleTickMS         = 500              // v5.32 T4: 空闲(无 dirty/待解析名字/在途解析)时主循环 500ms 醒一次(REFRESH 要在 1 秒内响应)
+	m4WriteIdleMS        = 500              // 空闲后首事件立即写(rc30.9)
+	m4WriteMergeMS       = 200              // 合并窗口: 200ms 无新事件(rc30.9)
+	m4WriteMaxDirtyMS    = 30000            // dirty 兜底 30s(rc30.9)
+	m4StatsTTL           = 5 * time.Second  // 流量字节 5s TTL(C update_traffic_stats)
+	m4StatsTimeout       = 3 * time.Second  // 脚本兜底超时 hnc_run_cmd_timeout(..., 3000)
+	m4IptablesTimeout    = 2 * time.Second  // 纯 Go 单次 iptables/ip6tables 进程组硬超时
+	m4FullSyncEvery      = 30 * time.Second // 全量 dump 兜底(WORK T1)
+	m4NonceMax           = 64               // run/devices.refresh 里 nonce 的长度上限
+	m4GoWriteLogMaxBytes = 256 << 10        // m4_go_write.log 256 KiB 封顶(防撑爆 32M tmpfs)
 )
 
-// 路径做成变量(单测重定向到临时目录)。
+// 路径与策略做成变量(单测重定向到临时目录)。
 var (
-	m4DevicesJSON  = dataDir + "/devices.json"        // 输出
+	m4DevicesJSON  = dataDir + "/devices.json"        // 输出(唯一写者)
 	m4DevicesTmpGo = dataDir + "/devices.json.tmp.go" // 临时文件
+	m4DevicesFlat  = runDir + "/devices.flat"         // 同步原子写出的三列纯文本(<mac>\t<ipv4>\t<iface>)
 	// v5.31 T4 / v5.33: 「立刻扫一次」的请求与回执(见文件头)。
 	m4RefreshFile    = runDir + "/devices.refresh"
 	m4RefreshAckFile = runDir + "/devices.refresh.ack"
 	// v5.31 T5: 写出日志(每写一行时间戳; 排查「谁在什么时候写了 devices.json」)。
 	m4GoWriteLog = runDir + "/m4_go_write.log"
 
-	// v5.31 T2: devname 解析用到的路径(devname.Resolver 的注入字段)。
+	// v5.31 T2 / v6.0 RC2: devname 解析用到的路径(devname.Resolver 的注入字段)。
 	m4NamesPath     = dataDir + "/device_names.json"
+	m4DevIDPath     = runDir + "/dpi_devid.json"
 	m4CachePath     = dataDir + "/hostname_cache.json"
 	m4OverridesPath = dataDir + "/oui_overrides.json"
 	m4MDNSBin       = binDir + "/mdns_resolve"
+
+	// 双栈 IPv6 流量归属与退役临时地址结转文件(由 ensure_stats_online 维护, 纯 Go 流量统计只读聚合)。
+	m4StatsV6Map     = runDir + "/stats_v6_map"
+	m4StatsV6Retired = runDir + "/stats_v6_retired"
+
+	// SELinux 拦截 AF_NETLINK 时的 /proc/net/arp 兜底与退避参数。
+	m4ProcNetARP      = "/proc/net/arp"
+	m4NetlinkDumpIfFn = neigh.DumpIf
+	m4PermErrBackoff  = 30 * time.Second
 
 	m4ReconnectBaseBackoff = time.Second
 	m4ReconnectMaxBackoff  = 30 * time.Second
@@ -131,7 +154,7 @@ type m4GoRunner struct {
 	stopCancel context.CancelFunc
 	table      *devscan.Table
 
-	// v5.31 T2: devname 全链解析(手动 → DHCP → mDNS → 缓存 → 厂商 → MAC)。
+	// v5.31 T2: devname 全链解析(手动 → dpi_devid → DHCP → mDNS → 缓存 → 厂商 → MAC)。
 	resolver *devname.Resolver
 
 	// 名字解析钩子(测试注入; 生产在 newM4GoRunner 里由 resolver 提供)
@@ -145,7 +168,12 @@ type m4GoRunner struct {
 	dumpIfFn    func(int) ([]neigh.Entry, error)
 	ifIndexFn   func(string) (int, error)
 	statsCmdFn  func() (map[string][2]int64, error)
+	statsFn     func() (map[string][2]int64, error) // 单测可选覆写钩子别名
 	blacklistFn func() map[string]bool
+
+	arpFallbackMu    sync.Mutex
+	netlinkDenyUntil time.Time
+	lastArpFallback  string
 }
 
 func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
@@ -155,7 +183,7 @@ func m4NextTickMS(dirty, hasPending, resolving bool) time.Duration {
 	return m4IdleTickMS * time.Millisecond
 }
 
-// newM4GoRunner 生产构造: 真订阅 / 真 dump / 真命令。
+// newM4GoRunner 生产构造: 真订阅 / 真 dump(含 /proc/net/arp 兜底) / 纯 Go 流量统计。
 func newM4GoRunner(iface string) *m4GoRunner {
 	stopCtx, stopCancel := context.WithCancel(context.Background())
 	r := &m4GoRunner{
@@ -166,7 +194,7 @@ func newM4GoRunner(iface string) *m4GoRunner {
 		stopCancel: stopCancel,
 	}
 	r.subscribeFn = func() (m4NeighSource, error) { return neigh.Subscribe() }
-	r.dumpIfFn = neigh.DumpIf
+	r.dumpIfFn = r.defaultDumpIf
 	r.ifIndexFn = func(name string) (int, error) {
 		ifi, err := net.InterfaceByName(name)
 		if err != nil {
@@ -174,10 +202,11 @@ func newM4GoRunner(iface string) *m4GoRunner {
 		}
 		return ifi.Index, nil
 	}
-	r.statsCmdFn = runStatsAll
+	r.statsCmdFn = r.collectStats
 	r.blacklistFn = readBlacklist
 	r.resolver = &devname.Resolver{
 		NamesPath:     m4NamesPath,
+		DevIDPath:     m4DevIDPath,
 		CachePath:     m4CachePath,
 		OverridesPath: m4OverridesPath,
 		MDNSBin:       m4MDNSBin,
@@ -322,11 +351,13 @@ func (r *m4GoRunner) run() {
 	}
 
 	initSrc, err := r.subscribeFn()
+	initSubErrMsg := ""
 	if err != nil {
-		logf("m4_owner: 初始订阅邻居表失败: %v(转入后台指数退避重连 + 30s 全量兜底)", err)
+		initSubErrMsg = err.Error()
+		logf("m4_owner: 初始订阅邻居表失败: %v(转入后台退避重连 + 全量兜底)", err)
 	}
 	readWG.Add(1)
-	go func(src m4NeighSource) {
+	go func(src m4NeighSource, initErr error, firstErrMsg string) {
 		defer readWG.Done()
 		var closeCurr func()
 		if src != nil {
@@ -346,6 +377,10 @@ func (r *m4GoRunner) run() {
 		}()
 
 		backoff := m4ReconnectBaseBackoff
+		if isNetlinkPermErr(initErr) {
+			backoff = m4PermErrBackoff
+		}
+		lastSubErrMsg := firstErrMsg
 		var lastEnobufsLog time.Time
 		for {
 			select {
@@ -376,9 +411,16 @@ func (r *m4GoRunner) run() {
 				}
 				next, sErr := r.subscribeFn()
 				if sErr != nil {
-					logf("m4_owner: 重连邻居表订阅失败(wait=%v): %v", wait, sErr)
+					if isNetlinkPermErr(sErr) {
+						backoff = m4PermErrBackoff
+					}
+					if msg := sErr.Error(); msg != lastSubErrMsg {
+						lastSubErrMsg = msg
+						logf("m4_owner: 重连邻居表订阅失败(wait=%v): %v", wait, sErr)
+					}
 					continue
 				}
+				lastSubErrMsg = ""
 				var ok bool
 				closeCurr, ok = bindSub(next)
 				if !ok {
@@ -420,6 +462,9 @@ func (r *m4GoRunner) run() {
 				closeSub = nil
 				subMu.Unlock()
 				src, closeCurr = nil, nil
+				if isNetlinkPermErr(rErr) {
+					backoff = m4PermErrBackoff
+				}
 				continue
 			}
 			backoff = m4ReconnectBaseBackoff
@@ -432,7 +477,7 @@ func (r *m4GoRunner) run() {
 				return
 			}
 		}
-	}(initSrc)
+	}(initSrc, err, initSubErrMsg)
 
 	var (
 		dirty           bool
@@ -444,6 +489,8 @@ func (r *m4GoRunner) run() {
 		lastStatsMap    = map[string][2]int64{}
 		lastSync        time.Time
 		lastSyncAttempt time.Time
+		syncRetryWait   = time.Second
+		lastDumpErrMsg  string
 		initialWritten  bool
 		lastPending     time.Time
 		inFlightMu      sync.Mutex
@@ -592,11 +639,11 @@ func (r *m4GoRunner) run() {
 			}
 			syncDue := false
 			if lastSync.IsZero() {
-				syncDue = lastSyncAttempt.IsZero() || now.Sub(lastSyncAttempt) >= time.Second
+				syncDue = lastSyncAttempt.IsZero() || now.Sub(lastSyncAttempt) >= syncRetryWait
 			} else if now.Sub(lastSync) >= m4FullSyncEvery {
-				syncDue = now.Sub(lastSyncAttempt) >= time.Second
+				syncDue = now.Sub(lastSyncAttempt) >= syncRetryWait
 			} else if needResync && now.Sub(lastSync) >= time.Second {
-				syncDue = now.Sub(lastSyncAttempt) >= time.Second
+				syncDue = now.Sub(lastSyncAttempt) >= syncRetryWait
 			}
 			if syncDue {
 				lastSyncAttempt = now
@@ -605,9 +652,19 @@ func (r *m4GoRunner) run() {
 					if es, dumpErr := r.dumpIfFn(r.ifIdx); dumpErr == nil {
 						needResync = false
 						lastSync = now
+						syncRetryWait = time.Second
+						lastDumpErrMsg = ""
 						if r.table.FullSync(es, now) || !initialWritten {
 							markDirty()
 						}
+					} else if isNetlinkPermErr(dumpErr) {
+						syncRetryWait = m4PermErrBackoff
+						if msg := dumpErr.Error(); msg != lastDumpErrMsg {
+							lastDumpErrMsg = msg
+							logf("m4_owner: 邻居表全量同步受限(退避 %v): %v", m4PermErrBackoff, dumpErr)
+						}
+					} else {
+						syncRetryWait = time.Second
 					}
 				}
 				if r.table.EvictOffline(now) > 0 {
@@ -696,31 +753,206 @@ func (r *m4GoRunner) writeOutErr(lastWritten []byte, lastStatsAt *time.Time, las
 	now := time.Now()
 	stopping := r.stopCtx != nil && r.stopCtx.Err() != nil
 	if !stopping && (force || now.Sub(*lastStatsAt) >= m4StatsTTL) {
-		if s, err := r.statsCmdFn(); err == nil {
-			*lastStatsMap, *lastStatsAt = s, now
+		statsFn := r.statsFn
+		if statsFn == nil {
+			statsFn = r.statsCmdFn
+		}
+		if statsFn != nil {
+			if s, err := statsFn(); err == nil {
+				*lastStatsMap, *lastStatsAt = s, now
+			}
 		}
 	}
 	b := r.table.RenderJSON(*lastStatsMap, r.blacklistFn())
 	if !force && string(b) == string(lastWritten) {
+		if m4DevicesFlat != "" {
+			if _, err := os.Stat(m4DevicesFlat); err != nil {
+				r.writeDevicesFlatAtomic()
+			}
+		}
 		return lastWritten, nil
 	}
+	if err := r.writeDevicesAtomic(b); err != nil {
+		return lastWritten, err
+	}
+	return b, nil
+}
+
+// writeDevicesAtomic 原子写出唯一权威设备表 data/devices.json, 随后同步原子写出 run/devices.flat。
+func (r *m4GoRunner) writeDevicesAtomic(b []byte) error {
 	out, tmp := m4DevicesJSON, m4DevicesTmpGo
 	if err := os.WriteFile(tmp, b, 0o644); err != nil {
 		m4GoWriteFails.Add(1)
 		logf("m4_owner: 写 %s 失败: %v", tmp, err)
-		return lastWritten, err
+		return err
 	}
-	_ = appendLine(m4GoWriteLog, time.Now().Format("2006-01-02T15:04:05")+": "+out)
+	m4Log(time.Now().Format("2006-01-02T15:04:05") + ": " + out)
 	if err := os.Rename(tmp, out); err != nil {
+		_ = os.Remove(tmp)
 		m4GoWriteFails.Add(1)
 		logf("m4_owner: rename %s 失败: %v", out, err)
-		return lastWritten, err
+		return err
 	}
 	m4GoWrites.Add(1)
-	return b, nil
+	r.writeDevicesFlatAtomic()
+	return nil
 }
 
-// ─── 纯函数 / 小工具(单测直接测) ─────────────────────────────────
+func (r *m4GoRunner) writeDevicesFlatAtomic() {
+	if m4DevicesFlat == "" || r.table == nil {
+		return
+	}
+	flat := r.table.RenderFlat()
+	tmp := m4DevicesFlat + ".tmp.go"
+	if err := os.WriteFile(tmp, flat, 0o644); err != nil {
+		logf("m4_owner: 写 %s 失败: %v", tmp, err)
+		return
+	}
+	if err := os.Rename(tmp, m4DevicesFlat); err != nil {
+		_ = os.Remove(tmp)
+		logf("m4_owner: rename %s 失败: %v", m4DevicesFlat, err)
+	}
+}
+
+// m4Log 写入 m4_go_write.log 并封顶 256 KiB(超限时保留最近一半完整行或原地截断, 防撑爆 32M tmpfs)。
+func m4Log(line string) {
+	if m4GoWriteLog == "" {
+		return
+	}
+	payload := []byte(line + "\n")
+	if err := appendCappedLines(m4GoWriteLog, payload, m4GoWriteLogMaxBytes); err != nil {
+		_ = os.WriteFile(m4GoWriteLog, payload, 0o644)
+	}
+}
+
+// ─── SELinux AF_NETLINK 权限识别与 /proc/net/arp 兜底 ──────────────
+
+func isNetlinkPermErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.EACCES) ||
+		errors.Is(err, syscall.EPERM) ||
+		errors.Is(err, syscall.EPROTONOSUPPORT) ||
+		errors.Is(err, syscall.EAFNOSUPPORT) ||
+		errors.Is(err, syscall.ESOCKTNOSUPPORT) ||
+		errors.Is(err, os.ErrPermission) {
+		return true
+	}
+	msg := err.Error()
+	return strings.HasSuffix(msg, "netlink error -1") ||
+		strings.HasSuffix(msg, "netlink error -13") ||
+		strings.HasSuffix(msg, "netlink error -93")
+}
+
+// defaultDumpIf 生产默认邻居表全量读取: 仅在 neigh.DumpIf 遭遇权限/不支持错误时
+// 回退读取 /proc/net/arp(单测覆写 r.dumpIfFn 时不经过本函数, 保持错误门控语义)。
+func (r *m4GoRunner) defaultDumpIf(ifIdx int) ([]neigh.Entry, error) {
+	now := time.Now()
+	r.arpFallbackMu.Lock()
+	inCooldown := !r.netlinkDenyUntil.IsZero() && now.Before(r.netlinkDenyUntil)
+	r.arpFallbackMu.Unlock()
+
+	var nlErr error
+	if !inCooldown {
+		es, err := m4NetlinkDumpIfFn(ifIdx)
+		if err == nil {
+			r.arpFallbackMu.Lock()
+			r.netlinkDenyUntil = time.Time{}
+			r.lastArpFallback = ""
+			r.arpFallbackMu.Unlock()
+			return es, nil
+		}
+		if !isNetlinkPermErr(err) {
+			return nil, err
+		}
+		nlErr = err
+		r.arpFallbackMu.Lock()
+		r.netlinkDenyUntil = now.Add(m4PermErrBackoff)
+		if msg := err.Error(); msg != r.lastArpFallback {
+			r.lastArpFallback = msg
+			logf("m4_owner: netlink 邻居表受限, 回退 %s: %v", m4ProcNetARP, err)
+		}
+		r.arpFallbackMu.Unlock()
+	}
+
+	es, arpErr := readProcNetARP(m4ProcNetARP, r.iface, ifIdx)
+	if arpErr != nil {
+		if nlErr != nil {
+			return nil, fmt.Errorf("%w (arp fallback: %v)", nlErr, arpErr)
+		}
+		return nil, fmt.Errorf("netlink denied (%w) and arp fallback failed: %v", syscall.EACCES, arpErr)
+	}
+	return es, nil
+}
+
+func isValidClientMAC(mac string) bool {
+	if len(mac) != 17 || mac == "00:00:00:00:00:00" || mac == "ff:ff:ff:ff:ff:ff" {
+		return false
+	}
+	for i := 0; i < 17; i++ {
+		c := mac[i]
+		if i%3 == 2 {
+			if c != ':' {
+				return false
+			}
+			continue
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			return false
+		}
+	}
+	return true
+}
+
+func readProcNetARP(path, iface string, ifIdx int) ([]neigh.Entry, error) {
+	if iface == "" {
+		return nil, errors.New("arp fallback: empty iface")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	var out []neigh.Entry
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "IP ") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 6 || fields[5] != iface {
+			continue
+		}
+		flags, fErr := strconv.ParseUint(fields[2], 0, 32)
+		if fErr != nil || flags == 0 || (flags&0x2) == 0 {
+			continue
+		}
+		mac := strings.ToLower(fields[3])
+		if !isValidClientMAC(mac) {
+			continue
+		}
+		ip := net.ParseIP(fields[0])
+		if ip == nil || ip.To4() == nil {
+			continue
+		}
+		out = append(out, neigh.Entry{
+			IfIndex: ifIdx,
+			Family:  syscall.AF_INET,
+			IP:      ip.To4(),
+			MAC:     mac,
+			State:   neigh.NUDReachable,
+		})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// ─── 纯函数 / 流量统计(纯 Go 流式解析 + 平滑兜底) ─────────────────
 
 func m4ShouldWrite(firstDirtyMs, lastEventMs, lastWriteMs, nowMs int64) bool {
 	if firstDirtyMs == 0 {
@@ -772,10 +1004,393 @@ func resolveM4ShellPath() string {
 	return shellPath()
 }
 
-// runStatsAll `sh bin/iptables_manager.sh stats_all`(参数分开传, 3s 超时 + 进程组 SIGKILL 隔离),
-// 输出每行 "<ip> <rx> <tx>"。
+func resolveIptablesBin(name string) string {
+	for _, cand := range []string{
+		"/system/bin/" + name,
+		"/system/xbin/" + name,
+		"/vendor/bin/" + name,
+		binDir + "/" + name,
+		"/sbin/" + name,
+		"/usr/sbin/" + name,
+		"/bin/" + name,
+		"/usr/bin/" + name,
+	} {
+		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+			return cand
+		}
+	}
+	if p, err := exec.LookPath(name); err == nil && p != "" {
+		return p
+	}
+	return ""
+}
+
+// m4IptablesExecFn 执行单次 iptables / ip6tables 子进程(单测可注入替换)。
+var m4IptablesExecFn = execIptablesRaw
+
+func execIptablesRaw(parentCtx context.Context, nameOrPath string, args ...string) (stdout, stderr string, rc int, err error) {
+	binPath := nameOrPath
+	if !strings.Contains(binPath, "/") {
+		binPath = resolveIptablesBin(binPath)
+	}
+	if binPath == "" {
+		return "", "binary not found", -1, os.ErrNotExist
+	}
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, m4IptablesTimeout)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, binPath, args...)
+	var outBuf, errBuf bytes.Buffer
+	cmd.Stdout = &outBuf
+	cmd.Stderr = &errBuf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 500 * time.Millisecond
+
+	runErr := cmd.Run()
+	stdout, stderr = outBuf.String(), errBuf.String()
+	if ctx.Err() != nil {
+		return stdout, stderr, -1, ctx.Err()
+	}
+	if runErr == nil {
+		return stdout, stderr, 0, nil
+	}
+	if ee, ok := runErr.(*exec.ExitError); ok {
+		return stdout, stderr, ee.ExitCode(), runErr
+	}
+	return stdout, stderr, -1, runErr
+}
+
+func isIptablesUnsupportedWaitOpt(rc int, stderr string) bool {
+	if rc != 2 && rc != 1 {
+		return false
+	}
+	s := strings.ToLower(stderr)
+	if strings.Contains(s, "no chain") || strings.Contains(s, "does not exist") || strings.Contains(s, "xtables lock") {
+		return false
+	}
+	return strings.Contains(s, "unknown option") ||
+		strings.Contains(s, "unrecognized option") ||
+		strings.Contains(s, "invalid option") ||
+		strings.Contains(s, "bad argument") ||
+		strings.Contains(s, "try '") ||
+		strings.Contains(s, "usage:")
+}
+
+// runIptablesChainStats 带 2s 进程组硬超时读取 iptables/ip6tables -t mangle -L HNC_STATS -nvx,
+// 自动按 `-w 2` → `-w` → 无 `-w` 回退; 链或表尚未创建时返回空字符串与 nil 错误。
+func runIptablesChainStats(ctx context.Context, name string) (string, error) {
+	variants := [][]string{
+		{"-w", "2"},
+		{"-w"},
+		{},
+	}
+	var lastErr error
+	for idx, wArgs := range variants {
+		args := make([]string, 0, len(wArgs)+5)
+		args = append(args, wArgs...)
+		args = append(args, "-t", "mangle", "-L", "HNC_STATS", "-nvx")
+		stdout, stderr, rc, err := m4IptablesExecFn(ctx, name, args...)
+		if err == nil && rc == 0 {
+			return stdout, nil
+		}
+		if ctx != nil && ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		if rc < 0 {
+			return "", err
+		}
+		errLC := strings.ToLower(stderr)
+		if strings.Contains(errLC, "no chain/target/match") || strings.Contains(errLC, "does not exist") {
+			return "", nil
+		}
+		if idx+1 < len(variants) && isIptablesUnsupportedWaitOpt(rc, stderr) {
+			lastErr = err
+			continue
+		}
+		return "", fmt.Errorf("%s rc=%d: %s", name, rc, strings.TrimSpace(stderr))
+	}
+	return "", lastErr
+}
+
+func (r *m4GoRunner) collectStats() (map[string][2]int64, error) {
+	ctx := r.stopCtx
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return collectStatsWithTable(ctx, r.table)
+}
+
+// runStatsAll 兼容入口: STATS_ALL_CMD 非空时保持测试命令钩子; 否则走纯 Go 双栈采样, 失败平滑回退脚本。
 func runStatsAll() (map[string][2]int64, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), m4StatsTimeout)
+	return collectStatsWithTable(context.Background(), nil)
+}
+
+func collectStatsWithTable(parentCtx context.Context, table *devscan.Table) (map[string][2]int64, error) {
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	if cmdStr := strings.TrimSpace(os.Getenv("STATS_ALL_CMD")); cmdStr != "" {
+		return runStatsAllOverrideCmd(parentCtx, cmdStr)
+	}
+
+	v4Out, v4Err := runIptablesChainStats(parentCtx, "iptables")
+	if v4Err != nil {
+		if parentCtx.Err() == nil && iptablesMgrPath != "" {
+			if fi, err := os.Stat(iptablesMgrPath); err == nil && !fi.IsDir() {
+				return runStatsAllScript(parentCtx)
+			}
+		}
+		return nil, v4Err
+	}
+
+	v6Out, _ := runIptablesChainStats(parentCtx, "ip6tables")
+
+	macIP := map[string]string{}
+	if table != nil {
+		macIP = table.SnapshotMACIP()
+	}
+	if m4DevicesJSON != "" {
+		if b, err := os.ReadFile(m4DevicesJSON); err == nil && len(b) > 0 && len(b) <= 4<<20 {
+			var diskDevs map[string]struct {
+				IP string `json:"ip"`
+			}
+			if json.Unmarshal(b, &diskDevs) == nil {
+				for mac, d := range diskDevs {
+					m := strings.ToLower(strings.TrimSpace(mac))
+					if m != "" && d.IP != "" {
+						if _, exists := macIP[m]; !exists {
+							macIP[m] = d.IP
+						}
+					}
+				}
+			}
+		}
+	}
+
+	var v6MapBytes, v6RetBytes []byte
+	if m4StatsV6Map != "" {
+		v6MapBytes, _ = os.ReadFile(m4StatsV6Map)
+	}
+	if m4StatsV6Retired != "" {
+		v6RetBytes, _ = os.ReadFile(m4StatsV6Retired)
+	}
+
+	return aggregateDualStackStats(v4Out, v6Out, macIP, string(v6MapBytes), string(v6RetBytes)), nil
+}
+
+func addSatInt64(a, b int64) int64 {
+	if b <= 0 {
+		return a
+	}
+	if a > math.MaxInt64-b {
+		return math.MaxInt64
+	}
+	return a + b
+}
+
+func parseStatsCountInt64(s string) (int64, bool) {
+	if v, err := strconv.ParseInt(s, 10, 64); err == nil {
+		if v < 0 {
+			return 0, false
+		}
+		return v, true
+	}
+	if fv, err := strconv.ParseFloat(s, 64); err == nil && fv >= 0 && fv <= float64(math.MaxInt64) {
+		return int64(fv), true
+	}
+	return 0, false
+}
+
+// canonIP6 规范化 IPv6 字符串为 8 段小写无前导零形式, 与 bin/iptables_manager.sh canon_ip6 完全一致。
+func canonIP6(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if idx := strings.IndexByte(s, '/'); idx >= 0 {
+		s = s[:idx]
+	}
+	if idx := strings.IndexByte(s, '%'); idx >= 0 {
+		s = s[:idx]
+	}
+	if !strings.Contains(s, ":") {
+		return s
+	}
+	ip := net.ParseIP(s)
+	if ip == nil || ip.To4() != nil || len(ip) != net.IPv6len {
+		return s
+	}
+	var parts [8]string
+	for i := 0; i < 8; i++ {
+		w := binary.BigEndian.Uint16(ip[i*2 : i*2+2])
+		parts[i] = strconv.FormatUint(uint64(w), 16)
+	}
+	return strings.Join(parts[:], ":")
+}
+
+// aggregateDualStackStats 流式解析 IPv4/IPv6 HNC_STATS 输出(兼容 legacy 9 列与 iptables-nft 8 列无 opt 列),
+// 结合当前设备表 MAC→IPv4、stats_v6_map 与 stats_v6_retired 精确汇总每台设备的上下行字节。
+func aggregateDualStackStats(v4Out, v6Out string, macIP map[string]string, v6MapRaw, v6RetRaw string) map[string][2]int64 {
+	rx := map[string]int64{}
+	tx := map[string]int64{}
+	seen := map[string]bool{}
+
+	if v4Out != "" {
+		sc := bufio.NewScanner(strings.NewReader(v4Out))
+		for sc.Scan() {
+			f := strings.Fields(sc.Text())
+			if len(f) < 8 || f[2] != "RETURN" {
+				continue
+			}
+			if _, err := strconv.ParseUint(f[0], 10, 64); err != nil {
+				continue
+			}
+			b, ok := parseStatsCountInt64(f[1])
+			if !ok {
+				continue
+			}
+			var src, dst string
+			if len(f) >= 9 && strings.HasPrefix(f[4], "-") {
+				src, dst = f[7], f[8]
+			} else {
+				src, dst = f[6], f[7]
+			}
+			src = strings.TrimSuffix(src, "/32")
+			dst = strings.TrimSuffix(dst, "/32")
+			if src != "0.0.0.0/0" && dst == "0.0.0.0/0" {
+				tx[src] = addSatInt64(tx[src], b)
+				seen[src] = true
+			} else if src == "0.0.0.0/0" && dst != "0.0.0.0/0" {
+				rx[dst] = addSatInt64(rx[dst], b)
+				seen[dst] = true
+			}
+		}
+	}
+
+	ip6Owner := map[string]string{}
+	if v6MapRaw != "" {
+		sc := bufio.NewScanner(strings.NewReader(v6MapRaw))
+		for sc.Scan() {
+			f := strings.Fields(sc.Text())
+			if len(f) >= 2 && f[0] != "" && f[1] != "" {
+				ip6Owner[canonIP6(f[0])] = strings.ToLower(f[1])
+			}
+		}
+	}
+
+	if v6Out != "" && len(macIP) > 0 {
+		sc := bufio.NewScanner(strings.NewReader(v6Out))
+		for sc.Scan() {
+			f := strings.Fields(sc.Text())
+			if len(f) < 8 || f[2] != "RETURN" {
+				continue
+			}
+			if _, err := strconv.ParseUint(f[0], 10, 64); err != nil {
+				continue
+			}
+			b, ok := parseStatsCountInt64(f[1])
+			if !ok {
+				continue
+			}
+			mac := ""
+			for i := 3; i+1 < len(f); i++ {
+				if f[i] == "MAC" {
+					mac = strings.ToLower(f[i+1])
+					break
+				}
+			}
+			if mac != "" {
+				if ip4 := macIP[mac]; ip4 != "" {
+					tx[ip4] = addSatInt64(tx[ip4], b)
+					seen[ip4] = true
+				}
+				continue
+			}
+			for i := 3; i+1 < len(f); i++ {
+				if f[i] == "::/0" && f[i+1] != "::/0" && strings.Contains(f[i+1], ":") {
+					dst6 := canonIP6(f[i+1])
+					if own := ip6Owner[dst6]; own != "" {
+						if ip4 := macIP[own]; ip4 != "" {
+							rx[ip4] = addSatInt64(rx[ip4], b)
+							seen[ip4] = true
+						}
+					}
+					break
+				}
+			}
+		}
+	}
+
+	if v6RetRaw != "" && len(macIP) > 0 {
+		sc := bufio.NewScanner(strings.NewReader(v6RetRaw))
+		for sc.Scan() {
+			f := strings.Fields(sc.Text())
+			if len(f) < 2 {
+				continue
+			}
+			m := strings.ToLower(f[0])
+			ip4 := macIP[m]
+			if ip4 == "" {
+				continue
+			}
+			rRx, _ := parseStatsCountInt64(f[1])
+			var rTx int64
+			if len(f) >= 3 {
+				rTx, _ = parseStatsCountInt64(f[2])
+			}
+			rx[ip4] = addSatInt64(rx[ip4], rRx)
+			tx[ip4] = addSatInt64(tx[ip4], rTx)
+			seen[ip4] = true
+		}
+	}
+
+	stats := make(map[string][2]int64, len(seen))
+	for ip := range seen {
+		stats[ip] = [2]int64{rx[ip], tx[ip]}
+	}
+	return stats
+}
+
+func runStatsAllOverrideCmd(parentCtx context.Context, cmdStr string) (map[string][2]int64, error) {
+	fields := strings.Fields(cmdStr)
+	if len(fields) == 0 {
+		return map[string][2]int64{}, nil
+	}
+	ctx, cancel := context.WithTimeout(parentCtx, m4StatsTimeout)
+	defer cancel()
+
+	var cmd *exec.Cmd
+	if p, err := exec.LookPath(fields[0]); err == nil && p != "" {
+		cmd = exec.CommandContext(ctx, p, fields[1:]...)
+	} else {
+		cmd = exec.CommandContext(ctx, resolveM4ShellPath(), "-c", cmdStr)
+	}
+	cmd.Env = os.Environ()
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = time.Second
+	out, err := cmd.Output()
+	if err != nil {
+		return nil, err
+	}
+	return parseStatsAllLines(string(out)), nil
+}
+
+func runStatsAllScript(parentCtx context.Context) (map[string][2]int64, error) {
+	ctx, cancel := context.WithTimeout(parentCtx, m4StatsTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, resolveM4ShellPath(), iptablesMgrPath, "stats_all")
 	cmd.Env = os.Environ()
@@ -792,22 +1407,25 @@ func runStatsAll() (map[string][2]int64, error) {
 	if err != nil {
 		return nil, err
 	}
+	return parseStatsAllLines(string(out)), nil
+}
+
+func parseStatsAllLines(raw string) map[string][2]int64 {
 	stats := map[string][2]int64{}
-	for _, line := range strings.Split(string(out), "\n") {
-		f := strings.Fields(line)
+	sc := bufio.NewScanner(strings.NewReader(raw))
+	for sc.Scan() {
+		f := strings.Fields(sc.Text())
 		if len(f) != 3 {
 			continue
 		}
-		var rx, tx int64
-		if _, err := fmt.Sscanf(f[1], "%d", &rx); err != nil {
-			continue
-		}
-		if _, err := fmt.Sscanf(f[2], "%d", &tx); err != nil {
+		rx, ok1 := parseStatsCountInt64(f[1])
+		tx, ok2 := parseStatsCountInt64(f[2])
+		if !ok1 || !ok2 {
 			continue
 		}
 		stats[f[0]] = [2]int64{rx, tx}
 	}
-	return stats, nil
+	return stats
 }
 
 // readBlacklist 读 rules.json 的 blacklist(JSON 解析, 失败 = 空)。

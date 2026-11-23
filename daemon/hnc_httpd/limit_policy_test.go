@@ -435,3 +435,90 @@ func TestQuotaSetValidation(t *testing.T) {
 		t.Fatalf("not persisted: %s", b)
 	}
 }
+
+func rc2Hex2(b int) string {
+	const hx = "0123456789abcdef"
+	return string([]byte{hx[(b>>4)&0xf], hx[b&0xf]})
+}
+
+func TestLimitPolicyRC2PasserbyCapAndRollover(t *testing.T) {
+	f := newFixture(t)
+	t0 := at(1, 10, 0)
+
+	// 1. Offline passerby random MACs + online 0-byte passerby random MAC must not pollute persisted state
+	devsMap := map[string]interface{}{
+		"da:00:00:00:00:01": map[string]interface{}{"ip": "", "rx_bytes": 0, "tx_bytes": 0},
+		"da:00:00:00:00:02": map[string]interface{}{"ip": "192.168.43.88", "rx_bytes": 0, "tx_bytes": 0},
+	}
+	rawDevs, _ := json.Marshal(devsMap)
+	_ = os.WriteFile(filepath.Join(f.dir, "data", "devices.json"), rawDevs, 0o644)
+	f.c.tick(t0)
+	if _, ok := f.c.st.Devices["da:00:00:00:00:01"]; ok {
+		t.Fatal("offline zero-byte policy-less passerby MAC must not enter c.st.Devices")
+	}
+	f.c.saveStateLocked(t0, true)
+	stBytes, _ := os.ReadFile(f.c.statePath())
+	if strings.Contains(string(stBytes), "da:00:00:00:00:02") {
+		t.Fatalf("online zero-byte passerby MAC must not be persisted to limit_ctl_state.json: %s", stBytes)
+	}
+	// Once da:00:00:00:00:02 goes offline with 0 bytes, it is evicted from memory too
+	devsMap["da:00:00:00:00:02"] = map[string]interface{}{"ip": "", "rx_bytes": 0, "tx_bytes": 0}
+	rawDevs, _ = json.Marshal(devsMap)
+	_ = os.WriteFile(filepath.Join(f.dir, "data", "devices.json"), rawDevs, 0o644)
+	f.c.tick(t0.Add(time.Minute))
+	if _, ok := f.c.st.Devices["da:00:00:00:00:02"]; ok {
+		t.Fatal("zero-byte passerby MAC must be evicted once offline")
+	}
+
+	// 2. 600 devices with traffic -> enforced <= 512 cap, while policied tMAC is never evicted
+	if r := f.c.actionQuotaSet(map[string]string{"mac": tMAC, "daily_gb": "5"}); !r.OK {
+		t.Fatalf("quota_set: %+v", r)
+	}
+	many := map[string]interface{}{
+		tMAC: map[string]interface{}{"ip": "192.168.43.2", "rx_bytes": 100, "tx_bytes": 100},
+	}
+	for i := 0; i < 600; i++ {
+		mac := "06:aa:bb:cc:" + rc2Hex2(i/256) + ":" + rc2Hex2(i%256)
+		many[mac] = map[string]interface{}{"ip": "192.168.43.50", "rx_bytes": 100, "tx_bytes": 50}
+	}
+	rawMany, _ := json.Marshal(many)
+	_ = os.WriteFile(filepath.Join(f.dir, "data", "devices.json"), rawMany, 0o644)
+	f.c.tick(t0.Add(2 * time.Minute))
+	for i := 0; i < 600; i++ {
+		mac := "06:aa:bb:cc:" + rc2Hex2(i/256) + ":" + rc2Hex2(i%256)
+		many[mac] = map[string]interface{}{"ip": "", "rx_bytes": 500, "tx_bytes": 200}
+	}
+	rawMany, _ = json.Marshal(many)
+	_ = os.WriteFile(filepath.Join(f.dir, "data", "devices.json"), rawMany, 0o644)
+	f.c.tick(t0.Add(3 * time.Minute))
+	if len(f.c.st.Devices) > limitMaxTrackedDevices {
+		t.Fatalf("tracked devices=%d exceeds cap %d", len(f.c.st.Devices), limitMaxTrackedDevices)
+	}
+	if _, ok := f.c.st.Devices[tMAC]; !ok {
+		t.Fatal("policied tMAC must never be evicted by 512 cap")
+	}
+
+	// 3. Rollover > 30 days sweeps offline dead policy-less MACs and clears c.logged
+	f.c.logged["06:aa:bb:cc:00:01"] = "old error"
+	_ = os.WriteFile(filepath.Join(f.dir, "data", "devices.json"), []byte(`{}`), 0o644)
+	tFuture := t0.Add(32 * 24 * time.Hour)
+	f.c.tick(tFuture)
+	if len(f.c.logged) != 0 {
+		t.Fatalf("expected c.logged cleared on day rollover, got %v", f.c.logged)
+	}
+	if len(f.c.st.Devices) != 1 || f.c.st.Devices[tMAC] == nil {
+		t.Fatalf("expected all >30d offline policy-less MACs swept leaving only tMAC, got %d", len(f.c.st.Devices))
+	}
+
+	// 4. Dual-dir sumStatsHistory prefers data/dpi_history/stats.YYYYMMDD.jsonl over run/
+	_ = os.MkdirAll(filepath.Join(f.dir, "data", "dpi_history"), 0o755)
+	tSample := time.Unix(1791028800, 0).UTC()
+	dk := tSample.Format("20060102")
+	_ = os.WriteFile(filepath.Join(f.dir, "data", "dpi_history", "stats."+dk+".jsonl"),
+		[]byte(`{"t":1791028800,"mac":"`+tMAC+`","tx":1000,"rx":2000}`+"\n"), 0o644)
+	gotHist := sumStatsHistory(f.dir, tSample.Add(-time.Hour), tSample.Add(time.Hour))
+	if gotHist[tMAC] != 3000 {
+		t.Fatalf("sumStatsHistory from data/dpi_history = %d, want 3000", gotHist[tMAC])
+	}
+}
+

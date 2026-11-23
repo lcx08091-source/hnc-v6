@@ -14,9 +14,14 @@
 set -eu
 
 SELF="$0"
+HNC_BASE="${HNC:-${HNC_DIR:-/data/local/hnc}}"
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_BASE/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+  case "$_he" in /bin/hnc_env.sh) continue ;; esac
+  if [ -f "$_he" ]; then . "$_he"; break; fi
+done
+unset _he
 BINDIR="$(cd "$(dirname "$SELF")" 2>/dev/null && pwd)"
 JSON_GUARD="$BINDIR/json_guard.sh"
-HNC_BASE="${HNC:-/data/local/hnc}"
 # 全局写锁(所有 JSON 写者共用一把; mkdir 锁, 写 pid + ts)。
 LOCKDIR="$HNC_BASE/run/json.lock"
 BACKUP_DIR="${JSON_BACKUP_DIR:-$HNC_BASE/data/.json_backups}"

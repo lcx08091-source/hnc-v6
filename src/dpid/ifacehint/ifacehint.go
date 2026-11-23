@@ -24,9 +24,11 @@ import (
 const FreshWindow = 10 * time.Minute
 
 type detectJSON struct {
-	Schema int    `json:"schema"`
-	Ts     int64  `json:"ts"`
-	Iface  string `json:"iface"`
+	Schema        int    `json:"schema"`
+	Ts            int64  `json:"ts"`
+	Iface         string `json:"iface"`
+	Authoritative bool   `json:"authoritative"`
+	Wlan0AP       bool   `json:"wlan0_ap"`
 }
 
 // Read 返回当前权威热点网卡名。
@@ -53,23 +55,31 @@ func Read(runDir string, now time.Time) (string, bool) {
 	return "", false
 }
 
+// ReadAuthoritative 只读 iface_detect.json(不回退 hotspot_iface), 要求 ts 在
+// now 前后 window 以内且 iface 非空; authoritative 表示 json 明确含
+// "authoritative":true 或 "wlan0_ap":true。
+func ReadAuthoritative(runDir string, now time.Time, window time.Duration) (string, bool, bool) {
+	b, err := os.ReadFile(filepath.Join(runDir, "iface_detect.json"))
+	if err != nil {
+		return "", false, false
+	}
+	var d detectJSON
+	if json.Unmarshal(b, &d) != nil || d.Iface == "" || !validIface(d.Iface) {
+		return "", false, false
+	}
+	ts := time.Unix(d.Ts, 0)
+	if now.Add(-window).After(ts) || ts.After(now.Add(window)) {
+		return "", false, false
+	}
+	return d.Iface, d.Authoritative || d.Wlan0AP, true
+}
+
 // ReadDetect 只读 iface_detect.json(不回退 hotspot_iface), 且要求 ts 在
 // now 前后 window 以内、iface 非空。v5.29 看门狗原生 probe 用: 回退的
 // hotspot_iface 没有时间戳, 拿它当结论会让「探测器很久没跑」无从察觉。
 func ReadDetect(runDir string, now time.Time, window time.Duration) (string, bool) {
-	b, err := os.ReadFile(filepath.Join(runDir, "iface_detect.json"))
-	if err != nil {
-		return "", false
-	}
-	var d detectJSON
-	if json.Unmarshal(b, &d) != nil || d.Iface == "" || !validIface(d.Iface) {
-		return "", false
-	}
-	ts := time.Unix(d.Ts, 0)
-	if now.Add(-window).After(ts) || ts.After(now.Add(window)) {
-		return "", false
-	}
-	return d.Iface, true
+	iface, _, ok := ReadAuthoritative(runDir, now, window)
+	return iface, ok
 }
 
 // validIface 与 v5.26 前 capture.readHNCHint 的校验一致。

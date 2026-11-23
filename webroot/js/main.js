@@ -242,7 +242,90 @@ function ensureAboveTabbar(el) {
   }, waitMs);
 }
 
-/* ═══ 顶栏热点手机本机 5G-A / 全频段运营商实时胶囊与四维体感诊断弹层 ═══ */
+/* ═══ 顶栏热点手机本机 5G-A / 全频段运营商实时胶囊与双轨波形·四维干扰诊断弹层 ═══ */
+var _sigClientHist = [];
+var _sigPollT = 0;
+var _sigPollBusy = false;
+var _sigTechFoldOpen = false;
+
+function _sigValidDbm(v) {
+  var n = Number(v);
+  return isFinite(n) && n <= -20 && n >= -150;
+}
+function _sigHasSinr(sig, isWifi) {
+  if (!sig) return false;
+  if (isWifi) return Boolean(sig.has_sinr);
+  return sig.has_sinr === true || (sig.has_sinr !== false && sig.sinr_db != null && isFinite(Number(sig.sinr_db)) && Number(sig.sinr_db) !== 0);
+}
+function _sigNormPoint(pt, isWifiFallback, rttFallback) {
+  if (!pt || typeof pt !== 'object') return null;
+  var ts = Math.round(num(pt.ts, 0));
+  if (!(ts > 0)) return null;
+  var rsrp = _sigValidDbm(pt.rsrp_dbm) ? Math.round(Number(pt.rsrp_dbm)) : 0;
+  var wrssi = _sigValidDbm(pt.wifi_rssi_dbm) ? Math.round(Number(pt.wifi_rssi_dbm)) : 0;
+  var hasSinr = pt.has_sinr != null ? Boolean(pt.has_sinr) : (pt.sinr_db != null && isFinite(Number(pt.sinr_db)) && Number(pt.sinr_db) !== 0);
+  var hasPci = pt.has_pci === true || (pt.pci != null && Number(pt.pci) > 0);
+  return {
+    ts: ts,
+    rsrp_dbm: rsrp,
+    wifi_rssi_dbm: wrssi,
+    sinr_db: hasSinr ? Math.round(Number(pt.sinr_db)) : 0,
+    has_sinr: !!hasSinr,
+    rsrq_db: pt.rsrq_db != null && isFinite(Number(pt.rsrq_db)) ? Math.round(Number(pt.rsrq_db)) : 0,
+    pci: hasPci ? Math.round(Number(pt.pci)) : 0,
+    has_pci: !!hasPci,
+    band: String(pt.band || ''),
+    rtt_ms: num(pt.rtt_ms, num(rttFallback, 0))
+  };
+}
+function ingestSignalSample(sig) {
+  if (!sig || typeof sig !== 'object' || !sig.available) return _sigClientHist;
+  var ar = S.autorate || (S.cfg && S.cfg.autorate) || {};
+  var rttFb = num(ar.rtt_ms, 0);
+  var isWifi = sig.mode === 'wifi_sta';
+  var map = {};
+  var i, p, np;
+  for (i = 0; i < _sigClientHist.length; i++) {
+    p = _sigClientHist[i];
+    if (p && p.ts > 0) map[p.ts] = p;
+  }
+  if (Array.isArray(sig.history)) {
+    for (i = 0; i < sig.history.length; i++) {
+      np = _sigNormPoint(sig.history[i], isWifi, 0);
+      if (np) map[np.ts] = np;
+    }
+  }
+  var curTs = Math.round(num(sig.updated_at, Math.floor(Date.now() / 1000)));
+  if (curTs > 0 && (_sigValidDbm(sig.rsrp_dbm) || _sigValidDbm(sig.wifi_rssi_dbm))) {
+    var curHasSinr = _sigHasSinr(sig, isWifi);
+    var curHasPci = !isWifi && (sig.has_pci === true || num(sig.pci, 0) > 0);
+    var curPt = _sigNormPoint({
+      ts: curTs,
+      rsrp_dbm: sig.rsrp_dbm,
+      wifi_rssi_dbm: sig.wifi_rssi_dbm,
+      sinr_db: sig.sinr_db,
+      has_sinr: curHasSinr,
+      rsrq_db: sig.rsrq_db,
+      pci: sig.pci,
+      has_pci: curHasPci,
+      band: sig.band || sig.band_combo || '',
+      rtt_ms: rttFb
+    }, isWifi, rttFb);
+    if (curPt) map[curPt.ts] = curPt;
+  }
+  var keys = Object.keys(map).map(function (k) { return Number(k); }).filter(function (n) { return isFinite(n) && n > 0; }).sort(function (a, b) { return a - b; });
+  if (keys.length > 60) keys = keys.slice(keys.length - 60);
+  _sigClientHist = keys.map(function (k) { return map[k]; });
+  return _sigClientHist;
+}
+function _mergeSigHistory(sig) {
+  if (sig && sig.available) ingestSignalSample(sig);
+  return _sigClientHist.slice();
+}
+function _svgCoord(v, fb) {
+  var n = Number(v);
+  return isFinite(n) ? Number(n.toFixed(1)) : fb;
+}
 function sigShortCarrier(sig) {
   if (!sig) return '';
   if (sig.carrier_short) return sig.carrier_short;
@@ -279,13 +362,332 @@ function paintSignalPill() {
   var cShort = isWifi ? '' : sigShortCarrier(sig);
   var bandShort = sig.band ? (' · ' + sig.band) : '';
   var labelMain = (cShort ? cShort + ' ' : '') + dRat + bandShort;
-  btn.innerHTML = cellSvg(sig.bars, sig.mode) + '<span>' + esc(labelMain) + (dbm ? '<span class="sig-unit"> ' + dbm + 'dBm</span>' : '') + '</span>';
+  btn.innerHTML = cellSvg(sig.bars, sig.mode) + '<span>' + esc(labelMain) + (_sigValidDbm(dbm) ? '<span class="sig-unit"> ' + dbm + 'dBm</span>' : '') + '</span>';
+}
+function _buildSigCarrierStripHtml(sig, isWifi, combo) {
+  var list = Array.isArray(sig.carriers) && sig.carriers.length ? sig.carriers.slice() : [];
+  if (!list.length) {
+    if (isWifi) {
+      if (sig.band || sig.wifi_link_mbps) {
+        list.push({ is_primary: true, band: sig.band || 'Wi-Fi', bw_mhz: num(sig.bandwidth_mhz, 0), net_type: 'WLAN' });
+      }
+    } else if (combo) {
+      var parts = String(combo).split('+').map(function (s) { return s.trim(); }).filter(Boolean);
+      parts.forEach(function (b, idx) {
+        list.push({
+          is_primary: idx === 0,
+          band: b,
+          bw_mhz: idx === 0 ? num(sig.bandwidth_mhz, 0) : 0,
+          arfcn: idx === 0 ? num(sig.arfcn, 0) : 0,
+          pci: idx === 0 ? num(sig.pci, 0) : 0,
+          has_pci: idx === 0 && (sig.has_pci === true || num(sig.pci, 0) > 0)
+        });
+      });
+    }
+  }
+  if (!list.length) return '';
+  var chips = list.map(function (c, idx) {
+    var isPcc = c.is_primary === true || idx === 0;
+    var role = isWifi ? 'Wi-Fi 主信道' : (isPcc ? 'PCC 主载波' : ('SCC' + (list.length > 2 ? idx : '') + ' 辅载波'));
+    var segs = [role];
+    if (c.band || c.net_type) segs.push(String(c.band || c.net_type));
+    if (num(c.bw_mhz) > 0) segs.push(Math.round(num(c.bw_mhz)) + 'MHz');
+    else if (isWifi && num(sig.wifi_link_mbps) > 0) segs.push(Math.round(num(sig.wifi_link_mbps)) + 'Mbps');
+    if (!isWifi && (c.has_pci === true || num(c.pci) > 0)) segs.push('PCI ' + Math.round(num(c.pci)));
+    else if (!isWifi && num(c.arfcn) > 0) segs.push('ARFCN ' + Math.round(num(c.arfcn)));
+    return '<span class="sig-ca-chip' + (isPcc ? ' is-pcc' : '') + '">' + esc(segs.join(' · ')) + '</span>';
+  }).join('');
+  return '<div class="sig-ca-strip">' + chips + '</div>';
+}
+function _buildSigWaveCardHtml(sig, isWifi, curDbm, curSinr) {
+  var rawPts = _mergeSigHistory(sig);
+  var validPts = [];
+  var i, p, vDbm;
+  for (i = 0; i < rawPts.length; i++) {
+    p = rawPts[i];
+    vDbm = isWifi ? (p.wifi_rssi_dbm || p.rsrp_dbm) : (p.rsrp_dbm || p.wifi_rssi_dbm);
+    if (_sigValidDbm(vDbm)) {
+      validPts.push({
+        dbm: vDbm,
+        sinr: p.sinr_db,
+        has_sinr: Boolean(p.has_sinr),
+        pci: p.pci,
+        has_pci: p.has_pci,
+        band: p.band
+      });
+    }
+  }
+  if (!validPts.length && _sigValidDbm(curDbm)) {
+    validPts.push({
+      dbm: Math.round(Number(curDbm)),
+      sinr: Math.round(num(curSinr, 0)),
+      has_sinr: _sigHasSinr(sig, isWifi),
+      pci: Math.round(num(sig.pci, 0)),
+      has_pci: !isWifi && (sig.has_pci === true || num(sig.pci, 0) > 0),
+      band: String(sig.band || sig.band_combo || '')
+    });
+  }
+
+  var minDbm = 0, maxDbm = 0, avgDbm = 0, sumDbm = 0, detHandover = 0;
+  if (validPts.length) {
+    minDbm = validPts[0].dbm;
+    maxDbm = validPts[0].dbm;
+    for (i = 0; i < validPts.length; i++) {
+      var dVal = validPts[i].dbm;
+      if (dVal < minDbm) minDbm = dVal;
+      if (dVal > maxDbm) maxDbm = dVal;
+      sumDbm += dVal;
+      if (i > 0) {
+        var prev = validPts[i - 1], cur = validPts[i];
+        var pciChg = cur.has_pci && prev.has_pci && cur.pci !== prev.pci;
+        var bandChg = cur.band && prev.band && cur.band !== prev.band;
+        if (pciChg || bandChg) detHandover++;
+      }
+    }
+    avgDbm = Math.round(sumDbm / validPts.length);
+  }
+  var dispMax = _sigValidDbm(sig.max_dbm) ? Math.round(Number(sig.max_dbm)) : maxDbm;
+  var dispAvg = _sigValidDbm(sig.avg_dbm) ? Math.round(Number(sig.avg_dbm)) : avgDbm;
+  var dispJitter = sig.jitter_db != null && num(sig.jitter_db, -1) >= 0
+    ? Math.round(num(sig.jitter_db, 0))
+    : (validPts.length ? Math.max(0, Math.round(maxDbm - minDbm)) : 0);
+  var handoverCnt = Math.max(detHandover, Math.round(num(sig.handover_count, num(sig.handover_count_5m, 0))));
+
+  var W = 340, padL = 8, padR = 8, plotW = W - padL - padR, topY = 12, botY = 106, plotH = botY - topY;
+  var refStrong = isWifi ? -60 : -85;
+  var refWeak = isWifi ? -77 : -105;
+  var domLo = isWifi ? -90 : -120;
+  var domHi = isWifi ? -42 : -65;
+  if (validPts.length) {
+    domLo = Math.min(domLo, minDbm - 4);
+    domHi = Math.max(domHi, maxDbm + 4);
+  }
+  var domSpan = Math.max(1, domHi - domLo);
+  var yDbm = function (v) {
+    var ratio = (num(v, domLo) - domLo) / domSpan;
+    ratio = clamp(isFinite(ratio) ? ratio : 0.5, 0, 1);
+    return _svgCoord(botY - ratio * plotH, 60);
+  };
+  var xIdx = function (idx, total) {
+    if (total <= 1) return padL + plotW;
+    return _svgCoord(padL + (idx / (total - 1)) * plotW, padL);
+  };
+
+  var yRefStrong = yDbm(refStrong);
+  var yRefWeak = yDbm(refWeak);
+  var refLinesSvg =
+    '<line x1="' + padL + '" y1="' + yRefStrong + '" x2="' + (W - padR) + '" y2="' + yRefStrong + '" stroke="currentColor" stroke-opacity="0.16" stroke-width="1" stroke-dasharray="3 3"/>' +
+    '<text x="' + (padL + 2) + '" y="' + _svgCoord(Math.max(9, yRefStrong - 3), 12) + '" font-size="8.5" fill="currentColor" opacity="0.45">' + refStrong + 'dBm</text>' +
+    '<line x1="' + padL + '" y1="' + yRefWeak + '" x2="' + (W - padR) + '" y2="' + yRefWeak + '" stroke="currentColor" stroke-opacity="0.16" stroke-width="1" stroke-dasharray="3 3"/>' +
+    '<text x="' + (padL + 2) + '" y="' + _svgCoord(Math.min(115, yRefWeak - 3), 90) + '" font-size="8.5" fill="currentColor" opacity="0.45">' + refWeak + 'dBm</text>';
+
+  var handoverSvg = '';
+  var rsrpCoords = [];
+  if (validPts.length === 1) {
+    var singleY = yDbm(validPts[0].dbm);
+    rsrpCoords.push([padL, singleY], [padL + plotW, singleY]);
+  } else {
+    for (i = 0; i < validPts.length; i++) {
+      var cx = xIdx(i, validPts.length);
+      var cy = yDbm(validPts[i].dbm);
+      rsrpCoords.push([cx, cy]);
+      if (i > 0) {
+        var pv = validPts[i - 1], cv = validPts[i];
+        if ((cv.has_pci && pv.has_pci && cv.pci !== pv.pci) || (cv.band && pv.band && cv.band !== pv.band)) {
+          handoverSvg += '<line x1="' + cx + '" y1="' + topY + '" x2="' + cx + '" y2="' + botY + '" stroke="#FF9500" stroke-width="1.25" stroke-dasharray="3 2" stroke-opacity="0.88"/>';
+        }
+      }
+    }
+  }
+
+  var rsrpSvg = '';
+  if (rsrpCoords.length >= 2) {
+    var polyPts = rsrpCoords.map(function (c) { return c[0] + ',' + c[1]; }).join(' ');
+    var firstC = rsrpCoords[0], lastC = rsrpCoords[rsrpCoords.length - 1];
+    var areaD = 'M ' + firstC[0] + ',' + botY + ' L ' + rsrpCoords.map(function (c) { return c[0] + ',' + c[1]; }).join(' L ') + ' L ' + lastC[0] + ',' + botY + ' Z';
+    rsrpSvg =
+      '<path d="' + areaD + '" fill="url(#sigRsrpGrad)"/>' +
+      '<polyline fill="none" stroke="#007AFF" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" points="' + polyPts + '"/>' +
+      '<circle cx="' + lastC[0] + '" cy="' + lastC[1] + '" r="3.4" fill="#007AFF" stroke="#ffffff" stroke-width="1.4"/>';
+  }
+
+  var sinrPts = [];
+  var sMin = 999, sMax = -999;
+  for (i = 0; i < validPts.length; i++) {
+    if (validPts[i].has_sinr && isFinite(Number(validPts[i].sinr))) {
+      var sv = Number(validPts[i].sinr);
+      if (sv < sMin) sMin = sv;
+      if (sv > sMax) sMax = sv;
+      sinrPts.push({ idx: i, val: sv });
+    }
+  }
+  var sinrSvg = '';
+  if (sinrPts.length >= 1) {
+    var sLo = Math.min(-5, sMin - 3), sHi = Math.max(30, sMax + 3), sSpan = Math.max(1, sHi - sLo);
+    var ySinr = function (sv2) {
+      var sr = (num(sv2, sLo) - sLo) / sSpan;
+      sr = clamp(isFinite(sr) ? sr : 0.5, 0, 1);
+      return _svgCoord((botY - 6) - sr * (plotH - 12), 64);
+    };
+    var sCoords = [];
+    if (sinrPts.length === 1 && validPts.length <= 1) {
+      var sy0 = ySinr(sinrPts[0].val);
+      sCoords.push([padL, sy0], [padL + plotW, sy0]);
+    } else if (sinrPts.length === 1) {
+      var sx1 = xIdx(sinrPts[0].idx, validPts.length), sy1 = ySinr(sinrPts[0].val);
+      sCoords.push([Math.max(padL, _svgCoord(sx1 - 18, padL)), sy1], [sx1, sy1]);
+    } else {
+      for (i = 0; i < sinrPts.length; i++) {
+        sCoords.push([xIdx(sinrPts[i].idx, validPts.length), ySinr(sinrPts[i].val)]);
+      }
+    }
+    var sPoly = sCoords.map(function (c) { return c[0] + ',' + c[1]; }).join(' ');
+    var sLast = sCoords[sCoords.length - 1];
+    sinrSvg =
+      '<polyline fill="none" stroke="#00C7BE" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" opacity="0.92" points="' + sPoly + '"/>' +
+      '<circle cx="' + sLast[0] + '" cy="' + sLast[1] + '" r="2.5" fill="#00C7BE"/>';
+  }
+
+  var metaTxt = '峰值 ' + (validPts.length ? dispMax + 'dBm' : '—') +
+    ' · 均值 ' + (validPts.length ? dispAvg + 'dBm' : '—') +
+    ' · 波动 Δ' + dispJitter + 'dB' +
+    (handoverCnt > 0 ? (' · 切换 ' + handoverCnt + ' 次') : '');
+
+  return {
+    handoverCount: handoverCnt,
+    jitterDb: dispJitter,
+    html: '<div class="sig-wave-card">' +
+      '<div class="sig-chart-head">' +
+        '<span class="sig-live-badge"><i class="sig-live-dot"></i>2.5s 实时监测</span>' +
+        '<span class="sig-chart-meta">' + esc(metaTxt) + '</span>' +
+      '</div>' +
+      '<svg class="sig-wave-svg" viewBox="0 0 340 120" preserveAspectRatio="none" role="img" aria-label="实时信号强度与抗干扰双轨波形">' +
+        '<defs><linearGradient id="sigRsrpGrad" x1="0" y1="0" x2="0" y2="1">' +
+          '<stop offset="0%" stop-color="#007AFF" stop-opacity="0.30"/>' +
+          '<stop offset="100%" stop-color="#007AFF" stop-opacity="0.02"/>' +
+        '</linearGradient></defs>' +
+        refLinesSvg +
+        handoverSvg +
+        rsrpSvg +
+        sinrSvg +
+      '</svg>' +
+      '<div class="sig-chart-legend">' +
+        '<span class="sig-leg-item"><i class="sig-leg-sw is-rsrp"></i>信号强度 (dBm)</span>' +
+        '<span class="sig-leg-item"><i class="sig-leg-sw is-sinr"></i>抗干扰信噪比 SINR (dB)</span>' +
+      '</div>' +
+    '</div>'
+  };
+}
+function _sigIntfRowTone(lv, pct) {
+  var s = String(lv || '').toLowerCase();
+  if (s === 'severe' || s === 'bad' || s === 'critical' || s === 'high' || s === 'is-bad') return 'is-bad';
+  if (s === 'moderate' || s === 'mild' || s === 'warn' || s === 'fair' || s === 'medium' || s === 'is-warn') return 'is-warn';
+  if (s === 'clean' || s === 'ok' || s === 'good' || s === 'low' || s === 'is-ok') return 'is-ok';
+  return pct >= 75 ? 'is-bad' : (pct >= 25 ? 'is-warn' : 'is-ok');
+}
+function _buildSigIntfCardHtml(sig, isWifi, dbm, sinr, rsrq, jitterDb, handoverCnt, rtt, dRtt) {
+  var srcList = Array.isArray(sig.interference_sources) && sig.interference_sources.length ? sig.interference_sources : null;
+  if (!srcList) {
+    var hasSinr = _sigHasSinr(sig, isWifi);
+    var pEm = isWifi
+      ? (_sigValidDbm(dbm) ? clamp(Math.round((-52 - dbm) * 2.1), 6, 92) : 14)
+      : (hasSinr ? clamp(Math.round((22 - sinr) * 3.6), 4, 96) : 16);
+    var pLoad = isWifi
+      ? 14
+      : (rsrq ? clamp(Math.round((-8 - rsrq) * 7.5), 5, 96) : 16);
+    var pFade = clamp(Math.round(jitterDb * 5.5 + handoverCnt * 18), 4, 96);
+    var pBackhaul = rtt > 0 ? clamp(Math.round(Math.max(0, dRtt) * 2.4), 4, 96) : 8;
+    var fbLvl = function (p) { return p >= 75 ? 'severe' : (p >= 50 ? 'moderate' : (p >= 25 ? 'mild' : 'clean')); };
+    srcList = [
+      {
+        id: 'co_channel',
+        name: '同频与邻区电磁干扰',
+        pct: pEm,
+        level: fbLvl(pEm),
+        value: isWifi ? (_sigValidDbm(dbm) ? dbm + ' dBm' : '正常') : (hasSinr ? 'SINR ' + sinr + ' dB' : '待上报'),
+        summary: (!hasSinr || sinr >= 13)
+          ? '同频邻区底噪干净，高阶 QAM 调制稳定'
+          : (sinr >= 3 ? '存在邻区同频重叠干扰，调制阶数偶有回落，建议靠近窗边' : '同频电磁干扰强烈，物理层易触发重传跳 Ping')
+      },
+      {
+        id: 'air_load',
+        name: '基站空口信道负载',
+        pct: pLoad,
+        level: fbLvl(pLoad),
+        value: isWifi ? (sig.band || 'WLAN') : (rsrq ? 'RSRQ ' + rsrq + ' dB' : '正常'),
+        summary: (!rsrq || rsrq >= -14)
+          ? '空口资源块充裕，基站下行调度响应及时'
+          : (rsrq >= -17 ? '当前扇区并发用户偏多，晚高峰偶有调度排队' : '基站空口资源拥塞，多用户争抢时隙明显')
+      },
+      {
+        id: 'multipath_handover',
+        name: '多径衰落与乒乓切换',
+        pct: pFade,
+        level: fbLvl(pFade),
+        value: 'Δ' + jitterDb + ' dB' + (handoverCnt > 0 ? ' · ' + handoverCnt + '次切换' : ''),
+        summary: (handoverCnt === 0 && jitterDb <= 5)
+          ? '主服务小区驻留稳定，未发生频繁乒乓切换'
+          : (handoverCnt > 0 ? '近期检测到小区或频段切换，建议固定手机摆放位置' : '室内墙体反射引起电平波动，移近开阔窗边可显著改善')
+      },
+      {
+        id: 'backhaul_jitter',
+        name: '回程排队延迟抖动',
+        pct: pBackhaul,
+        level: fbLvl(pBackhaul),
+        value: rtt > 0 ? ('ΔRTT +' + Math.round(Math.max(0, dRtt)) + ' ms') : '空闲待命',
+        summary: dRtt <= 15
+          ? '上游蜂窝回程平稳，未检出缓冲区膨胀排队'
+          : (dRtt <= 30 ? '检测到轻度排队膨胀，自适应带宽正在吸收抖动' : '上游基站排队明显，建议启用 5G 自适应总带宽稳住延迟')
+      }
+    ];
+  }
+
+  var weighted = 0;
+  if (srcList.length >= 4) {
+    weighted = Math.round(
+      clamp(num(srcList[0].pct), 0, 100) * 0.38 +
+      clamp(num(srcList[1].pct), 0, 100) * 0.26 +
+      clamp(num(srcList[2].pct), 0, 100) * 0.20 +
+      clamp(num(srcList[3].pct), 0, 100) * 0.16
+    );
+  } else if (srcList.length) {
+    weighted = Math.round(sum(srcList, function (x) { return clamp(num(x.pct), 0, 100); }) / srcList.length);
+  }
+  var intfPct = sig.interference_pct != null && num(sig.interference_pct, -1) >= 0
+    ? clamp(Math.round(num(sig.interference_pct)), 0, 100)
+    : clamp(weighted, 0, 100);
+  var intfTone = _sigIntfRowTone(sig.interference_level, intfPct);
+  var intfLbl = sig.interference_label || (intfPct >= 75 ? '强干扰' : (intfPct >= 50 ? '中度干扰' : (intfPct >= 25 ? '轻度干扰' : '信道纯净')));
+  var intfBadgeCls = intfTone === 'is-bad' ? 'b-red' : (intfTone === 'is-warn' ? 'b-warn' : 'b-ok');
+
+  var rowsHtml = srcList.map(function (it) {
+    var pct = clamp(Math.round(num(it.pct, 0)), 0, 100);
+    var tone = _sigIntfRowTone(it.level, pct);
+    return '<div class="sig-intf-row ' + tone + '">' +
+      '<div class="sig-intf-top">' +
+        '<span class="sig-intf-name">' + esc(it.name || it.id || '') + '</span>' +
+        '<span class="sig-intf-val mono">' + esc(it.value != null && it.value !== '' ? String(it.value) : (pct + '%')) + '</span>' +
+      '</div>' +
+      '<div class="sig-ibar"><i style="width:' + pct + '%"></i></div>' +
+      (it.summary ? '<div class="sig-intf-sub">' + esc(it.summary) + '</div>' : '') +
+    '</div>';
+  }).join('');
+
+  return '<div class="sig-intf-card">' +
+    '<div class="sig-intf-head">' +
+      '<b>实时多维干扰源拆解</b>' +
+      '<span class="badge ' + intfBadgeCls + '">干扰指数 ' + intfPct + '% · ' + esc(intfLbl) + '</span>' +
+    '</div>' +
+    '<div class="sig-intf-list">' + rowsHtml + '</div>' +
+  '</div>';
 }
 function signalSheetHtml() {
   var sig = S.signal || {};
   var ar = S.autorate || (S.cfg && S.cfg.autorate) || {};
   var isWifi = sig.mode === 'wifi_sta';
   var dbm = isWifi ? sig.wifi_rssi_dbm : sig.rsrp_dbm;
+  var validDbm = _sigValidDbm(dbm);
+  var hasSinr = _sigHasSinr(sig, isWifi);
   var sinr = num(sig.sinr_db, 0), rsrq = num(sig.rsrq_db, 0);
   var rtt = num(ar.rtt_ms), dRtt = num(ar.delta_rtt_ms);
   var dRat = sig.display_rat || (sig.is_5ga ? '5G-A' : (sig.rat || (isWifi ? 'Wi-Fi 中继' : '5G')));
@@ -293,25 +695,31 @@ function signalSheetHtml() {
   var totBw = num(sig.total_bw_mhz, num(sig.bandwidth_mhz, 0));
   var caCnt = num(sig.ca_count, combo.indexOf('+') > 0 ? combo.split('+').length : (combo ? 1 : 0));
 
-  var rsrpLbl = sig.rsrp_label || (dbm >= -85 ? '极强' : dbm >= -95 ? '良好' : dbm >= -105 ? '一般' : dbm >= -115 ? '偏弱' : '极弱');
-  var sinrLbl = sig.sinr_label || (isWifi ? 'Wi-Fi 信道' : (sinr >= 20 ? '极纯净' : sinr >= 13 ? '纯净' : sinr >= 3 ? '轻度干扰' : '干扰明显'));
+  var rsrpLbl = sig.rsrp_label || (!validDbm ? '待采样' : (dbm >= -85 ? '极强' : dbm >= -95 ? '良好' : dbm >= -105 ? '一般' : dbm >= -115 ? '偏弱' : '极弱'));
+  var sinrLbl = sig.sinr_label || (!hasSinr ? (isWifi ? '按RSSI估算' : '基带未上报') : (sinr >= 20 ? '极纯净' : sinr >= 13 ? '纯净' : sinr >= 3 ? '轻度干扰' : '嘈杂易跳Ping'));
   var rsrqLbl = sig.rsrq_label || (isWifi ? '自动协商' : (!rsrq ? '负载正常' : (rsrq >= -10 ? '基站空闲' : rsrq >= -14 ? '负载正常' : rsrq >= -17 ? '晚高峰偏忙' : '基站拥塞')));
   var spPct = num(sig.speed_potential_pct, Math.round(num(sig.rf_ceiling_factor, 1) * 100));
   var spTxt = sig.speed_potential_text || (spPct >= 95 ? '可跑满套餐峰值' : ('约发挥 ' + spPct + '% 潜力'));
 
-  var rsrpTone = dbm >= -95 ? 'is-ok' : (dbm >= -108 ? '' : 'is-bad');
-  var sinrTone = isWifi || sinr >= 10 ? 'is-ok' : (sinr >= 0 ? 'is-warn' : 'is-bad');
+  var rsrpTone = !validDbm ? '' : (dbm >= -95 ? 'is-ok' : (dbm >= -108 ? '' : 'is-bad'));
+  var sinrTone = !hasSinr ? '' : (sinr >= 13 ? 'is-ok' : (sinr >= 3 ? 'is-warn' : 'is-bad'));
   var rsrqTone = isWifi || !rsrq || rsrq >= -14 ? 'is-ok' : (rsrq >= -17 ? 'is-warn' : 'is-bad');
   var spTone = spPct >= 90 ? 'is-ok' : (spPct >= 75 ? 'is-warn' : 'is-bad');
 
   var quadTitle = '手机信号通畅 · 可跑满物理网速';
   var quadDesc = sig.diagnosis_cn || '当前手机基站信号纯净、排队延迟平稳，连热点的设备可顺畅跑满高速带宽。';
   var quadCls = 'b-ok';
-  if (sig.quality === 'weak' || sig.quality === 'critical') {
+  if (sig.quality === 'weak' || sig.quality === 'critical' || sig.diagnosis === 'rf_weak') {
     quadTitle = '手机当前位置基站信号偏弱';
     quadDesc = '手机接收信号较弱（网速发挥约 ' + spPct + '%），建议将热点手机移至靠近窗户或开阔位置，并开启「5G 自适应总带宽」防止打游戏断流。';
     quadCls = 'b-red';
-  } else if (dRtt > 25 || (!isWifi && rsrq && rsrq <= -17)) {
+  } else if (sig.diagnosis === 'rf_interference' || (hasSinr && sinr < 13)) {
+    quadTitle = sinr < 3 ? '同频电磁干扰明显 · 易触发丢包跳 Ping' : '信号格数正常，但存在同频邻区轻度干扰';
+    quadDesc = (sig.diagnosis === 'rf_interference' && sig.diagnosis_cn)
+      ? sig.diagnosis_cn
+      : ('当前抗干扰信噪比 SINR 为 ' + sinr + ' dB（低于 13 dB 纯净基线），多由墙体金属反射或双基站同频重叠引起；建议将热点手机移近窗边开阔处，远离路由器或金属遮挡物。');
+    quadCls = sinr < 3 ? 'b-red' : 'b-warn';
+  } else if (sig.diagnosis === 'congestion' || dRtt > 25 || (!isWifi && rsrq && rsrq <= -17)) {
     quadTitle = '信号格数充足，但当前基站上网人数较多';
     quadDesc = dRtt > 25
       ? ('手机信号良好，但基站排队延迟升高 +' + Math.round(dRtt) + ' ms，属于晚高峰基站繁忙；HNC 智能带宽正在自动介入稳住延迟。')
@@ -331,8 +739,26 @@ function signalSheetHtml() {
     : (sig.upstream_iface ? ('出口接口 ' + sig.upstream_iface) : '等待基带上报频段');
   var traitTxt = sig.band_trait || sigFallbackTrait(sig.band, combo, totBw, isWifi);
 
+  var caStripHtml = _buildSigCarrierStripHtml(sig, isWifi, combo);
+  var waveRes = _buildSigWaveCardHtml(sig, isWifi, dbm, sinr);
+  var intfHtml = _buildSigIntfCardHtml(sig, isWifi, dbm, sinr, rsrq, waveRes.jitterDb, waveRes.handoverCount, rtt, dRtt);
+
+  var pciSegs = [];
+  if (!isWifi && (sig.has_pci === true || num(sig.pci) > 0)) pciSegs.push('NR/主小区 PCI ' + Math.round(num(sig.pci)));
+  if (!isWifi && (sig.has_lte_pci === true || num(sig.lte_pci) > 0)) pciSegs.push('LTE 锚点 PCI ' + Math.round(num(sig.lte_pci)));
+  var lteSegs = [];
+  if (!isWifi && _sigValidDbm(sig.lte_rsrp_dbm)) lteSegs.push('RSRP ' + Math.round(Number(sig.lte_rsrp_dbm)) + ' dBm');
+  if (!isWifi && sig.lte_rsrq_db) lteSegs.push('RSRQ ' + Math.round(Number(sig.lte_rsrq_db)) + ' dB');
+  if (!isWifi && (sig.has_lte_sinr === true || (sig.lte_sinr_db != null && Number(sig.lte_sinr_db) !== 0))) lteSegs.push('SINR ' + Math.round(Number(sig.lte_sinr_db)) + ' dB');
+  var totalRssiTxt = isWifi
+    ? (_sigValidDbm(sig.wifi_rssi_dbm) ? (sig.wifi_rssi_dbm + ' dBm' + (_sigValidDbm(sig.wifi_noise_dbm) ? ' (底噪 ' + sig.wifi_noise_dbm + ' dBm)' : '')) : '')
+    : (_sigValidDbm(sig.rssi_dbm) ? (sig.rssi_dbm + ' dBm') : '');
+
+  var foldCls = 'v6-adv-fold' + (_sigTechFoldOpen ? ' open' : '');
+  var foldAttr = _sigTechFoldOpen ? ' open' : '';
+
   return '<h3>热点手机实时信号与频段诊断</h3>' +
-    '<div class="sub">实时读取手机基带状态（零额外唤醒耗电） · 支持 5G-A 多载波与全频段识别</div>' +
+    '<div class="sub">开窗期间每 2.5 秒实时采样（关窗与熄屏即刻静默零唤醒） · 支持 5G-A 多载波与四维干扰拆解</div>' +
     '<div class="sig-hero-bar">' +
       '<div class="sig-hero-l">' +
         '<div class="sig-hero-carrier">' +
@@ -344,22 +770,28 @@ function signalSheetHtml() {
       '</div>' +
       '<span class="badge ' + quadCls + '" style="font-size:12px;padding:5px 10px">' + esc(sig.quality_cn || '良好') + '</span>' +
     '</div>' +
+    caStripHtml +
+    waveRes.html +
     '<div class="sig-4d-grid">' +
-      '<div class="sig-4d-cell ' + rsrpTone + '"><span class="sig-4d-k">信号强度</span><div class="sig-4d-v"><span>' + esc(rsrpLbl) + '</span><small>' + (dbm ? dbm + ' dBm' : '—') + '</small></div></div>' +
-      '<div class="sig-4d-cell ' + sinrTone + '"><span class="sig-4d-k">' + (isWifi ? '连接速率' : '信号纯净度') + '</span><div class="sig-4d-v"><span>' + esc(isWifi && sig.wifi_link_mbps ? (sig.wifi_link_mbps + ' Mbps') : sinrLbl) + '</span>' + (!isWifi && sig.sinr_db != null ? '<small>SINR ' + sinr + ' dB</small>' : '') + '</div></div>' +
+      '<div class="sig-4d-cell ' + rsrpTone + '"><span class="sig-4d-k">信号强度</span><div class="sig-4d-v"><span>' + esc(rsrpLbl) + '</span><small>' + (validDbm ? dbm + ' dBm' : '—') + '</small></div></div>' +
+      '<div class="sig-4d-cell ' + sinrTone + '"><span class="sig-4d-k">' + (isWifi ? '连接速率' : '信号纯净度') + '</span><div class="sig-4d-v"><span>' + esc(isWifi && sig.wifi_link_mbps ? (sig.wifi_link_mbps + ' Mbps') : sinrLbl) + '</span>' + (hasSinr ? '<small>SINR ' + sinr + ' dB</small>' : '') + '</div></div>' +
       '<div class="sig-4d-cell ' + rsrqTone + '"><span class="sig-4d-k">' + (isWifi ? '工作频段' : '基站空闲度') + '</span><div class="sig-4d-v"><span>' + esc(isWifi ? (sig.band || '5GHz') : rsrqLbl) + '</span>' + (!isWifi && rsrq ? '<small>RSRQ ' + rsrq + ' dB</small>' : '') + '</div></div>' +
       '<div class="sig-4d-cell ' + spTone + '"><span class="sig-4d-k">网速发挥度</span><div class="sig-4d-v"><span>' + spPct + '%</span><small>' + esc(spTxt) + '</small></div></div>' +
     '</div>' +
+    intfHtml +
     (traitTxt ? '<div class="sig-band-box"><b>当前频段解读：</b>' + esc(traitTxt) + '</div>' : '') +
     '<div class="dbox" style="margin-bottom:10px"><div style="font-weight:750;margin-bottom:3px">' + esc(quadTitle) + '</div><div class="note" style="margin:0">' + esc(quadDesc) + '</div></div>' +
-    '<details class="v6-adv-fold" id="sig-tech-fold">' +
-      '<summary><span>底层射频工程参数（RSRP / 频点 / 接口）</span><span class="v6-adv-r"><span>展开详情</span></span></summary>' +
+    '<details class="' + foldCls + '" id="sig-tech-fold"' + foldAttr + '>' +
+      '<summary><span>底层射频工程参数（PCI / RSSI / 频点 / 切换）</span><span class="v6-adv-r"><span>展开详情</span></span></summary>' +
       '<div class="v6-adv-body">' +
         '<div class="dbox">' +
           '<div class="row2"><span class="k">协议制式 / 出口网卡</span><span class="v mono">' + esc((sig.rat || '—') + (sig.is_5ga ? ' (NR_ADVANCED)' : '') + (sig.upstream_iface ? ' · ' + sig.upstream_iface : '')) + '</span></div>' +
           (sig.mcc_mnc ? '<div class="row2"><span class="k">运营商 PLMN 编码</span><span class="v mono">' + esc(sig.mcc_mnc) + '</span></div>' : '') +
+          (pciSegs.length ? '<div class="row2"><span class="k">物理小区标识 (PCI)</span><span class="v mono">' + esc(pciSegs.join(' · ')) + '</span></div>' : '') +
           (sig.arfcn ? '<div class="row2"><span class="k">下行频点号 (ARFCN)</span><span class="v mono">' + sig.arfcn + (sig.freq_mhz ? ' (~' + sig.freq_mhz + ' MHz)' : '') + '</span></div>' : '') +
-          (!isWifi && sig.lte_rsrp_dbm ? '<div class="row2"><span class="k">4G 锚点信号 (NSA)</span><span class="v mono">' + sig.lte_rsrp_dbm + ' dBm</span></div>' : '') +
+          (totalRssiTxt ? '<div class="row2"><span class="k">总接收功率 (RSSI)</span><span class="v mono">' + esc(totalRssiTxt) + '</span></div>' : '') +
+          '<div class="row2"><span class="k">近 5 分钟基站切换次数</span><span class="v mono">' + waveRes.handoverCount + ' 次</span></div>' +
+          (lteSegs.length ? '<div class="row2"><span class="k">4G 锚点信号 (NSA/LTE)</span><span class="v mono">' + esc(lteSegs.join(' · ')) + '</span></div>' : '') +
           '<div class="row2"><span class="k">Autorate 射频上限系数</span><span class="v mono">' + Math.round(num(sig.rf_ceiling_factor, 1) * 100) + '%</span></div>' +
           (rtt > 0 ? '<div class="row2"><span class="k">实测基站延迟 / 排队增量</span><span class="v mono">' + rtt.toFixed(1) + ' ms (Δ ' + dRtt.toFixed(1) + ' ms)</span></div>' : '') +
         '</div>' +
@@ -367,28 +799,77 @@ function signalSheetHtml() {
     '</details>' +
     '<div class="btns" style="margin-top:12px"><button class="btn sec press" id="sig-refresh-btn">立即刷新信号</button><button class="btn pri press" data-close>完成</button></div>';
 }
+function isSignalSheetOpen() {
+  var sh = $('#sheet');
+  return !!(sh && sh.classList.contains('show') && !(typeof SM !== 'undefined' && SM.closing) && sh.dataset && sh.dataset.kind === 'signal');
+}
+function stopSignalSheetPoll() {
+  if (_sigPollT) { clearInterval(_sigPollT); _sigPollT = 0; }
+  _sigPollBusy = false;
+}
+function _renderSignalSheetInPlace(sig) {
+  if (sig && typeof sig === 'object') {
+    S.signal = sig;
+    ingestSignalSample(sig);
+  }
+  paintSignalPill();
+  if (!isSignalSheetOpen()) return;
+  var sh = $('#sheet'), sb = $('#sheet-body');
+  if (sh.classList.contains('is-dragging')) return;
+  if (!sb) return;
+  var prevShTop = sh ? sh.scrollTop : 0;
+  var prevSbTop = sb.scrollTop || 0;
+  var foldEl = $('#sig-tech-fold');
+  if (foldEl) _sigTechFoldOpen = !!(foldEl.open || foldEl.classList.contains('open'));
+  sb.innerHTML = signalSheetHtml();
+  var nf = $('#sig-tech-fold');
+  if (nf && _sigTechFoldOpen) {
+    nf.open = true;
+    nf.classList.add('open');
+  }
+  bindSignalSheetBtn();
+  if (sh) sh.scrollTop = prevShTop;
+  sb.scrollTop = prevSbTop;
+}
+function tickSignalSheetPoll() {
+  if (!isSignalSheetOpen()) { stopSignalSheetPoll(); return; }
+  if (document.hidden || _sigPollBusy) return;
+  _sigPollBusy = true;
+  api.get('/api/signal', { refresh: 1 }, { timeout: 4500 }).then(function (r) {
+    _sigPollBusy = false;
+    if (r && typeof r === 'object') _renderSignalSheetInPlace(r);
+  }).catch(function () {
+    _sigPollBusy = false;
+  });
+}
+function startSignalSheetPoll() {
+  stopSignalSheetPoll();
+  if (document.hidden || !isSignalSheetOpen()) return;
+  _sigPollT = setInterval(tickSignalSheetPoll, 2500);
+}
 function bindSignalSheetBtn() {
+  var nf = $('#sig-tech-fold');
+  if (nf && !nf.__sigBound) {
+    nf.__sigBound = true;
+    nf.addEventListener('toggle', function () {
+      _sigTechFoldOpen = !!nf.open;
+      nf.classList.toggle('open', _sigTechFoldOpen);
+    });
+  }
   var rb = $('#sig-refresh-btn');
   if (rb) rb.onclick = function () {
-    var foldEl = $('#sig-tech-fold');
-    var wasOpen = !!(foldEl && foldEl.open);
-    busyWhile(rb, api.get('/api/signal', { refresh: 1 }).then(function (r) {
-      S.signal = r;
-      paintSignalPill();
-      var sb = $('#sheet-body');
-      if (sb && $('#sheet') && $('#sheet').classList.contains('show')) {
-        sb.innerHTML = signalSheetHtml();
-        var nf = $('#sig-tech-fold');
-        if (nf && wasOpen) nf.open = true;
-        bindSignalSheetBtn();
-      }
+    busyWhile(rb, api.get('/api/signal', { refresh: 1 }, { timeout: 5000 }).then(function (r) {
+      _renderSignalSheetInPlace(r);
       toast('实时信号与频段已刷新');
-    }));
+    }).catch(function (e) { toast(errText(e), 'err'); }));
   };
 }
 function signalSheet() {
-  sheet(signalSheetHtml());
+  if (S.signal) ingestSignalSample(S.signal);
+  sheet(signalSheetHtml(), { kind: 'signal', tall: true, onClose: stopSignalSheetPoll });
   bindSignalSheetBtn();
+  startSignalSheetPoll();
+  tickSignalSheetPoll();
 }
 
 /* ═════════════════════ 主题(圆形扩散 / 战术瞬切) ═════════════════════ */
@@ -470,7 +951,8 @@ function runBatch(act) {
   });
 }
 document.addEventListener('click', function (e) {
-  var t = e.target, q;
+  var t = evEl(e), q;
+  if (!t || !t.closest) return;
   if (!t.closest('.dd')) closeDD();
   if ((q = t.closest('.seg button'))) {
     var sg = q.parentNode, k = sg.getAttribute('data-seg'), v = q.getAttribute('data-v');
@@ -599,6 +1081,7 @@ document.addEventListener('click', function (e) {
   if ((q = t.closest('[data-dsuf]'))) { if (S.discForm) { var sx = q.getAttribute('data-dsuf'); S.discForm.sufs[sx] = !S.discForm.sufs[sx]; q.classList.toggle('on', S.discForm.sufs[sx]); } return; }
   if ((q = t.closest('[data-rule-tpl]'))) { ruleTemplate(q.getAttribute('data-rule-tpl')); return; }
   if ((q = t.closest('[data-mm-open]'))) { var mmp = q.getAttribute('data-mm-open').split('|'); mergeSheet(mmp[0], mmp[1]); return; }
+  if ((q = t.closest('[data-mm-unmerge]'))) { var mmu = q.getAttribute('data-mm-unmerge').split('|'); unmergeSheet(mmu[0], mmu[1] || ''); return; }
   // 模拟环境 / 应用限时 / 类别封锁
   if ((q = t.closest('[data-sim-preset]'))) { var spk = q.getAttribute('data-sim-preset'); api.action('sim_preset', { preset: spk }).then(simAfter('已载入预设「' + ((SIM_P[spk] || [spk])[0]) + '」· 模拟环境已开启')).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
   if ((q = t.closest('[data-sim-del]'))) { var sdm = q.getAttribute('data-sim-del'), sdn = q.getAttribute('data-name'); api.action('sim_device_del', { mac: sdm }).then(simAfter('已删除 ' + sdn)).catch(function (e2) { toast(errText(e2), 'err'); }); return; }
@@ -686,6 +1169,7 @@ document.addEventListener('click', function (e) {
     case 'fg-tl': if (d) fgTimelineSheet(d); break;
     case 'merge-yes': if (d && d.merge) doMerge(d.mac, d.merge.old_mac, d.merge.old_name || d.merge.old_mac, false); break;
     case 'merge-no': if (d && d.merge) dismissMerge(d.mac, d.merge.old_mac, d.merge.old_name || d.merge.old_mac); break;
+    case 'device-unmerge': if (d) unmergeSheet(d.mergedInto || d.mac, d.mergedInto ? d.mac : (d.mergedFrom || '')); break;
     case 'fx-demo': fxDemo(a.getAttribute('data-demo')); break;
     case 'fx-perf': setLowFx(!PERF.low, false); PERF.strikes = 0; fxRefresh(); toast(PERF.low ? '已切到简化动画' : '已恢复完整动画'); break;
     case 'self-conns': selfConnSheet(); break;
@@ -1181,9 +1665,14 @@ function startSlowPolls() {
 }
 document.addEventListener('visibilitychange', function () {
   if (typeof v6OnVisibility === 'function') v6OnVisibility(document.hidden);
-  if (document.hidden) { clearTimeout(pollT); stopSSE(); stopSlowPolls(); }
-  else if (S.booted) { startSlowPolls(); burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); }
-  else if (!booting) { boot(true); }
+  if (document.hidden) {
+    stopSignalSheetPoll();
+    clearTimeout(pollT); stopSSE(); stopSlowPolls();
+  } else {
+    if (isSignalSheetOpen()) { startSignalSheetPoll(); tickSignalSheetPoll(); }
+    if (S.booted) { startSlowPolls(); burstUntil = Date.now() + 2000; schedulePoll(0); loadAlerts(); startSSE(); }
+    else if (!booting) { boot(true); }
+  }
 });
 
 /* ═════════════════════ 启动 ═════════════════════
@@ -1225,7 +1714,7 @@ function boot(retry) {
   };
   booting = fastBootChain().then(function () {
     S.booted = true; S.bootErr = '';
-    $('#mode-pill').hidden = false; $('#mode-pill').textContent = KSU ? '本机' : '远程';
+    $('#mode-pill').hidden = false; $('#mode-pill').textContent = IS_LOCAL ? '本机' : '远程';
     RENDER[S.page](!retry); onEnter(S.page);
     setTimeout(function () {
       ORDER.forEach(function (pName, idx) {
@@ -1251,6 +1740,16 @@ function boot(retry) {
   return booting;
 }
 
+function onMQChange(mq, fn) {
+  if (!mq || typeof fn !== 'function') return;
+  try {
+    if (typeof mq.addEventListener === 'function') mq.addEventListener('change', fn);
+    else if (typeof mq.addListener === 'function') mq.addListener(fn);
+  } catch (_) {
+    try { if (typeof mq.addListener === 'function') mq.addListener(fn); } catch (_2) {}
+  }
+}
+
 var saved = LS.get('hnc6.page', 'devices');
 if (ORDER.indexOf(saved) >= 0) S.page = saved;
 $$('.page').forEach(function (p) { p.classList.toggle('on', p.getAttribute('data-page') === S.page); });
@@ -1258,9 +1757,9 @@ RENDER[S.page](true);
 layoutLens(); syncTab(S.page, true);
 // v5.36.0: #lens 作为 #tabbar 内部水滴光晕胶囊不再嵌套挂载二次 Hyalite，根治底栏白蛋与白色折射摩尔纹
 if (window.Hyalite && lens) { try { Hyalite.detach(lens); } catch (_) {} }
-wideMQ.addEventListener('change', function () { RENDER[S.page](false); });
+onMQChange(wideMQ, function () { RENDER[S.page](false); });
 addEventListener('resize', function () { layoutLens(); syncTab(S.page, true); placeSegs(document); drawSpark(); });
-matchMedia('(prefers-color-scheme: dark)').addEventListener('change', function () { if (S.theme === 'auto') applyTheme(); });
+onMQChange(typeof matchMedia === 'function' ? matchMedia('(prefers-color-scheme: dark)') : null, function () { if (S.theme === 'auto') applyTheme(); });
 boot(false);
 window.__hnc6 = { S: S, go: go, api: api, boot: boot, L: L };   // 调试/截图用
 
@@ -1355,9 +1854,11 @@ function showRollbackBanner(rb) {
   function cancelPendingSpot() { if (_spotHoldT) { clearTimeout(_spotHoldT); _spotHoldT = 0; } }
   document.addEventListener('pointerdown', function (e) {
     cancelPendingSpot();
+    var pt = evEl(e);
+    if (!pt || !pt.closest) return;
     var mode = typeof motionTheme === 'function' ? motionTheme() : 'default';
     if ((mode === 'liquid' || mode === 'cyber') && motionOn() && !(typeof lowFx === 'function' && lowFx())) {
-      var g = e.target.closest && e.target.closest('.glass:not(.seg):not(.search):not(#tabbar):not(.hbtn)');
+      var g = pt.closest('.glass:not(.seg):not(.search):not(#tabbar):not(.hbtn)');
       if (g && !g.closest('#sheet')) {
         clearSpotCtx();
         _spotDownX = e.clientX; _spotDownY = e.clientY;
@@ -1366,7 +1867,7 @@ function showRollbackBanner(rb) {
           var gr = g.getBoundingClientRect();
           if (mode === 'liquid') {
             var wpOn = typeof hasWpActive === 'function' && hasWpActive();
-            var canTilt = !wpOn && fxOn('press') && !g.classList.contains('open') && gr.height < 240 && !e.target.closest('input,textarea,select,.toggle,.seg');
+            var canTilt = !wpOn && fxOn('press') && !g.classList.contains('open') && gr.height < 240 && !pt.closest('input,textarea,select,.toggle,.seg');
             g.classList.add('is-spotting');
             if (canTilt) g.classList.add('is-tilting');
             spotCtx = { el: g, rect: gr, pid: e.pointerId, cx: e.clientX, cy: e.clientY, x0: e.clientX, y0: e.clientY, tilt: canTilt, raf: 0 };
@@ -1413,16 +1914,19 @@ function showRollbackBanner(rb) {
 
   // Sync manual input typing back to preset pills
   document.addEventListener('input', function (e) {
-    var f = e.target && e.target.getAttribute && e.target.getAttribute('data-f');
-    if (f === 'down') {
-      var box = e.target.closest('[data-dev]') || e.target.closest('[data-side]');
+    var it = evEl(e);
+    var f = it && it.getAttribute && it.getAttribute('data-f');
+    if (f === 'down' && it.closest) {
+      var box = it.closest('[data-dev]') || it.closest('[data-side]');
       syncLccFromInput(box, f);
     }
   });
 
   // Wire preset pills & Control Center 3-tile Bento toggles
   document.addEventListener('click', function (e) {
-    var jMac = e.target.closest && e.target.closest('[data-jump-mac]');
+    var ct = evEl(e);
+    if (!ct || !ct.closest) return;
+    var jMac = ct.closest('[data-jump-mac]');
     if (jMac) {
       var targetMac = String(jMac.getAttribute('data-jump-mac') || '').trim().toLowerCase();
       if (targetMac) {
@@ -1438,7 +1942,7 @@ function showRollbackBanner(rb) {
       }
       return;
     }
-    var pre = e.target.closest && e.target.closest('[data-lcc-preset]');
+    var pre = ct.closest('[data-lcc-preset]');
     if (pre) {
       var box = pre.closest('[data-dev]') || pre.closest('[data-side]');
       if (!box) return;
@@ -1459,7 +1963,7 @@ function showRollbackBanner(rb) {
       if (typeof haptic === 'function') haptic(8);
       return;
     }
-    var cc = e.target.closest && e.target.closest('[data-cc-tog]');
+    var cc = ct.closest('[data-cc-tog]');
     if (cc && !cc.disabled) {
       var box2 = cc.closest('[data-dev]') || cc.closest('[data-side]');
       var mac2 = box2 && (box2.getAttribute('data-dev') || box2.getAttribute('data-side'));
@@ -1491,7 +1995,7 @@ function showRollbackBanner(rb) {
   });
  function tabState(){host.querySelectorAll('[data-tab]').forEach(function(el){var name=el.getAttribute('data-tab'),on=name===S.page;el.setAttribute('role','tab');el.setAttribute('aria-label',NAV_T[name]);el.setAttribute('aria-selected',String(on));el.setAttribute('aria-controls','p-'+name);el.tabIndex=on?0:-1;});}
  var originalSync=syncTab;syncTab=function(name,instant){originalSync(name,instant);tabState();};tabState();
- host.addEventListener('keydown',function(e){var el=e.target.closest('[data-tab]');if(!el)return;var n=ORDER.indexOf(el.getAttribute('data-tab'));var len=ORDER.length;if(e.key==='ArrowRight')n=(n+1)%len;else if(e.key==='ArrowLeft')n=(n+len-1)%len;else if(e.key==='Home')n=0;else if(e.key==='End')n=len-1;else if(e.key!=='Enter'&&e.key!==' ')return;e.preventDefault();go(ORDER[n]);host.querySelector('[data-tab="'+ORDER[n]+'"]').focus();});
+ host.addEventListener('keydown',function(e){var kt=evEl(e),el=kt&&kt.closest?kt.closest('[data-tab]'):null;if(!el)return;var n=ORDER.indexOf(el.getAttribute('data-tab'));var len=ORDER.length;if(e.key==='ArrowRight')n=(n+1)%len;else if(e.key==='ArrowLeft')n=(n+len-1)%len;else if(e.key==='Home')n=0;else if(e.key==='End')n=len-1;else if(e.key!=='Enter'&&e.key!==' ')return;e.preventDefault();go(ORDER[n]);host.querySelector('[data-tab="'+ORDER[n]+'"]').focus();});
 })();
 
 /* === v5.33.1 Enhancement Layer 2: Dual RX/TX Bezier Sparkline, Filter Pills & Live Settings Search === */
@@ -1738,13 +2242,15 @@ function showRollbackBanner(rb) {
 
   /* ── 7. 绑定新增交互事件（快捷胶囊、设置搜索、液态滑块松手自动下发限速） ── */
   document.addEventListener('click', function(e) {
-    var qp = e.target.closest && e.target.closest('[data-qpill]');
+    var t2 = evEl(e);
+    if (!t2 || !t2.closest) return;
+    var qp = t2.closest('[data-qpill]');
     if (qp) {
       S.qpill = qp.getAttribute('data-qpill');
       renderDevList(false);
       return;
     }
-    var setLvBtn = e.target.closest && e.target.closest('[data-seg="set-lv"] button');
+    var setLvBtn = t2.closest('[data-seg="set-lv"] button');
     if (setLvBtn && S.setQ && S.setQ.trim()) {
       setTimeout(applySetSearch, 0);
     }
@@ -2198,7 +2704,9 @@ function showRollbackBanner(rb) {
 
   /* ── 5. 快捷胶囊、分段切换、带宽清空与壁纸交互委托 ── */
   document.addEventListener('click', function(e) {
-    var clr = e.target.closest && e.target.closest('[data-bw-clr]');
+    var t3 = evEl(e);
+    if (!t3 || !t3.closest) return;
+    var clr = t3.closest('[data-bw-clr]');
     if (clr) {
       e.preventDefault();
       var fld = clr.getAttribute('data-bw-clr');
@@ -2211,7 +2719,7 @@ function showRollbackBanner(rb) {
       }
       return;
     }
-    var wpPick = e.target.closest && e.target.closest('[data-wp-pick]');
+    var wpPick = t3.closest('[data-wp-pick]');
     if (wpPick) {
       var wid = wpPick.getAttribute('data-wp-pick');
       if (!wid || !WP_PRESETS[wid]) return;
@@ -2222,13 +2730,13 @@ function showRollbackBanner(rb) {
       toast(wid === 'none' ? '已恢复主题默认背景' : '已切换壁纸：「' + WP_PRESETS[wid].label + '」');
       return;
     }
-    var wpUp = e.target.closest && e.target.closest('[data-act="wp-upload"]');
+    var wpUp = t3.closest('[data-act="wp-upload"]');
     if (wpUp) {
       var wf = $('#wp-file');
       if (wf) wf.click();
       return;
     }
-    var wpUrlBtn = e.target.closest && e.target.closest('[data-act="wp-url-apply"]');
+    var wpUrlBtn = t3.closest('[data-act="wp-url-apply"]');
     if (wpUrlBtn) {
       var uInp = $('#wp-url-inp');
       var urlVal = uInp ? uInp.value.trim() : '';
@@ -2253,21 +2761,21 @@ function showRollbackBanner(rb) {
       toast('已应用自定义网络壁纸');
       return;
     }
-    var qp = e.target.closest && e.target.closest('[data-qpill]');
+    var qp = t3.closest('[data-qpill]');
     if (qp && typeof stagger === 'function') {
       requestAnimationFrame(function() {
         var dl = $('#dev-list');
         if (dl) stagger(dl, 8);
       });
     }
-    var cc = e.target.closest && e.target.closest('.cc-tile');
+    var cc = t3.closest('.cc-tile');
     var c0 = cc && cc.closest('.dev, .swap'), m0 = c0 && (c0.getAttribute('data-dev') || c0.getAttribute('data-side'));
     if (cc && !cc.disabled && !(m0 && S.busy[m0])) {
       cc.classList.remove('pulse');
       void cc.offsetWidth;
       cc.classList.add('pulse');
     }
-    var segBtn = e.target.closest && e.target.closest('.seg button');
+    var segBtn = t3.closest('.seg button');
     if (segBtn) {
       var sg = segBtn.parentNode;
       var k = sg && sg.getAttribute('data-seg');
@@ -2330,7 +2838,9 @@ function showRollbackBanner(rb) {
   }
 
   document.addEventListener('click', function(e) {
-    var tm = e.target.closest && e.target.closest('[data-wp-tmode]');
+    var t4 = evEl(e);
+    if (!t4 || !t4.closest) return;
+    var tm = t4.closest('[data-wp-tmode]');
     if (tm) {
       S.wpTextMode = tm.getAttribute('data-wp-tmode') === 'capsule' ? 'capsule' : 'adaptive';
       LS.set('hnc6.wp_text_v2', S.wpTextMode);
@@ -2342,7 +2852,7 @@ function showRollbackBanner(rb) {
       toast(S.wpTextMode === 'capsule' ? '已切换：无边框轻纱微托底' : '已切换：原生无界透字排版');
       return;
     }
-    var hs = e.target.closest && e.target.closest('[data-act="toggle-hide-shared"]');
+    var hs = t4.closest('[data-act="toggle-hide-shared"]');
     if (hs) {
       S.hideSharedUnk = !S.hideSharedUnk;
       LS.set('hnc6.hide_shared_unk', S.hideSharedUnk ? '1' : '0');

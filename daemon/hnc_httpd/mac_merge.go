@@ -53,21 +53,25 @@ import (
 )
 
 const (
-	macMergeRelPath     = "data/mac_merge_suggestions.json"
-	macMergeEvery       = 30 * time.Second
-	macMergeMinScore    = 40         // 低于此分不作为建议
-	macMergeAlertScore  = 60         // 首次达到此分发告警
-	macMergeNewWindow   = 24 * 3600  // 新 MAC 出现后多久内持续重算建议
-	macMergeCandMaxAge  = 30 * 86400 // 候选旧设备: 最近 30 天见过
-	macMergeOverlapSlop = 120        // 旧 MAC 在新 MAC 出现后仍活跃超过此秒数 = 同时在线
-	macMergeProfileTTL  = 90 * 86400 // 画像保留 90 天
-	macMergeMaxProfiles = 512        // 画像上限(按 last_seen 淘汰最旧)
-	macMergeTopN        = 3          // 每个新 MAC 最多保留几个候选
-	macMergeMaxJA4      = 16         // 画像里最多记几个 JA4
-	macMergeMaxApps     = 24         // 画像里最多记几个应用
-	macMergeAlertKind   = "mac_merge_suggest"
-	macMergeIdentMin    = 15 // 身份信号(不含时间)至少这么多分才给建议
-	macMergeDismissTTL  = 180 * 86400
+	macMergeRelPath       = "data/mac_merge_suggestions.json"
+	macMergeEvery         = 30 * time.Second
+	macMergeMinScore      = 40         // 低于此分不作为建议
+	macMergeAlertScore    = 60         // 首次达到此分发告警
+	macMergeNewWindow     = 24 * 3600  // 新 MAC 出现后多久内持续重算建议
+	macMergeCandMaxAge    = 30 * 86400 // 候选旧设备: 最近 30 天见过
+	macMergeOverlapSlop   = 120        // 旧 MAC 在新 MAC 出现后仍活跃超过此秒数 = 同时在线
+	macMergeProfileTTL    = 90 * 86400 // 画像保留 90 天
+	macMergeMaxProfiles   = 512        // 画像上限(按 last_seen 淘汰最旧)
+	macMergeTopN          = 3          // 每个新 MAC 最多保留几个候选
+	macMergeMaxJA4        = 16         // 画像里最多记几个 JA4
+	macMergeMaxApps       = 24         // 画像里最多记几个应用
+	macMergeAlertKind     = "mac_merge_suggest"
+	macMergeIdentMin      = 15 // 身份信号(不含时间)至少这么多分才给建议
+	macMergeDismissTTL    = 180 * 86400
+	macMergeMutexApartTTL = int64(90 * 86400) // 双端物理共活互斥锁保留 90 天
+	macMergeMaxMutexApart = 512               // 互斥锁容量上限(按时间戳淘汰最旧)
+	macTrafficWinSec      = int64(180)        // 双端真实流量采样窗口(秒)
+	macTrafficMinDelta    = int64(512)        // 采样窗口内单端真实正增长字节门槛(rx+tx >= 512)
 )
 
 type macProfile struct {
@@ -100,10 +104,22 @@ type macMergeFile struct {
 	Suggestions  map[string][]macMergeCand `json:"suggestions"`
 	Dismissed    map[string]int64          `json:"dismissed"`
 	Alerted      map[string]int64          `json:"alerted"`
+	MutexApart   map[string]int64          `json:"mutex_apart,omitempty"`
 }
 
 // macMergeMu 串行化 mac_merge_suggestions.json 的读改写(后台 tick 与动作)。
 var macMergeMu sync.Mutex
+
+type macTrafficSample struct {
+	ts      int64
+	rxBytes int64
+	txBytes int64
+}
+
+var (
+	macTrafficWinMu sync.Mutex
+	macTrafficWin   = map[string]map[string]macTrafficSample{} // hncDir -> mac -> sample
+)
 
 func macMergePath(hncDir string) string { return filepath.Join(hncDir, macMergeRelPath) }
 
@@ -125,6 +141,9 @@ func loadMacMergeFile(hncDir string) *macMergeFile {
 	if f.Alerted == nil {
 		f.Alerted = map[string]int64{}
 	}
+	if f.MutexApart == nil {
+		f.MutexApart = map[string]int64{}
+	}
 	for k, p := range f.Profiles {
 		if p == nil {
 			delete(f.Profiles, k)
@@ -142,6 +161,95 @@ func saveMacMergeFile(hncDir string, f *macMergeFile) error {
 }
 
 func macMergeDismissKey(newMAC, oldMAC string) string { return newMAC + "|" + oldMAC }
+
+// macMutexApartKey 构造双端物理共活互斥锁规范键 "macMin|macMax"(小写)。
+func macMutexApartKey(a, b string) string {
+	a = strings.ToLower(strings.TrimSpace(a))
+	b = strings.ToLower(strings.TrimSpace(b))
+	if a == "" || b == "" || a == b {
+		return ""
+	}
+	if a < b {
+		return a + "|" + b
+	}
+	return b + "|" + a
+}
+
+func isMacMutexApart(f *macMergeFile, a, b string, now int64) bool {
+	if f == nil || len(f.MutexApart) == 0 {
+		return false
+	}
+	k := macMutexApartKey(a, b)
+	if k == "" {
+		return false
+	}
+	ts, ok := f.MutexApart[k]
+	if !ok {
+		return false
+	}
+	if now > 0 && ts > 0 && now-ts > macMergeMutexApartTTL {
+		return false
+	}
+	return true
+}
+
+func mutexApartRawHas(raw map[string]interface{}, a, b string, now int64) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	k := macMutexApartKey(a, b)
+	if k == "" {
+		return false
+	}
+	v, ok := raw[k]
+	if !ok {
+		return false
+	}
+	if ts, ok2 := toInt64(v); ok2 && now > 0 && ts > 0 && now-ts > macMergeMutexApartTTL {
+		return false
+	}
+	return true
+}
+
+func pruneMutexApartMap(m map[string]int64, now int64) {
+	if len(m) == 0 {
+		return
+	}
+	for k, ts := range m {
+		sep := strings.IndexByte(k, '|')
+		if sep <= 0 || sep >= len(k)-1 {
+			delete(m, k)
+			continue
+		}
+		m1, m2 := k[:sep], k[sep+1:]
+		if !validMAC(m1) || !validMAC(m2) || m1 >= m2 {
+			delete(m, k)
+			continue
+		}
+		if now > 0 && ts > 0 && now-ts > macMergeMutexApartTTL {
+			delete(m, k)
+		}
+	}
+	if len(m) > macMergeMaxMutexApart {
+		type kv struct {
+			k  string
+			ts int64
+		}
+		all := make([]kv, 0, len(m))
+		for k, ts := range m {
+			all = append(all, kv{k: k, ts: ts})
+		}
+		sort.Slice(all, func(i, j int) bool {
+			if all[i].ts != all[j].ts {
+				return all[i].ts < all[j].ts
+			}
+			return all[i].k < all[j].k
+		})
+		for _, x := range all[:len(all)-macMergeMaxMutexApart] {
+			delete(m, x.k)
+		}
+	}
+}
 
 // isRandomizedMAC 本地管理位(首字节 bit 0x02)置位的单播 MAC; 模拟设备不算。
 func isRandomizedMAC(mac string) bool {
@@ -162,7 +270,10 @@ func isSimMACPrefix(mac string) bool { return strings.HasPrefix(strings.ToLower(
 // ─── 观测: 从各数据源收集每个 MAC 的当前信号 ───────────────────────────
 
 type macObs struct {
-	inDevices   bool // 出现在 devices.json(= hotspotd 认为在线/刚离线 < 90s)
+	inDevices   bool   // 出现在 devices.json(= hotspotd 认为在线/刚离线 < 90s)
+	ip          string // devices.json 中的在线 IPv4(空串表示无在线 IP)
+	rxBytes     int64
+	txBytes     int64
 	lastSeen    int64
 	dhcpName    string
 	mdnsName    string
@@ -240,6 +351,15 @@ func collectMacObs(hncDir string, appDay *appUsageDay) map[string]*macObs {
 			continue
 		}
 		o.inDevices = true
+		if ip := strings.TrimSpace(asString(d["ip"])); ip != "" {
+			o.ip = ip
+		}
+		if rx, ok := toInt64(d["rx_bytes"]); ok && rx >= 0 {
+			o.rxBytes = rx
+		}
+		if tx, ok := toInt64(d["tx_bytes"]); ok && tx >= 0 {
+			o.txBytes = tx
+		}
 		if ls, ok := toInt64(d["last_seen"]); ok && ls > o.lastSeen {
 			o.lastSeen = ls
 		}
@@ -617,7 +737,7 @@ func scoreMacPair(np, op *macProfile) (score int, reasons []string, ok bool) {
 }
 
 // macMergeCandidates 为新 MAC 在画像里找候选(已按分数降序, 最多 TopN)。
-// aliases: 已被合并走的旧 MAC 不再作为候选; dismissed 过滤。
+// aliases: 已被合并走的旧 MAC 不再作为候选; dismissed 与 mutex_apart 过滤。
 func macMergeCandidates(f *macMergeFile, newMAC string, aliases map[string]string, now int64) []macMergeCand {
 	np := f.Profiles[newMAC]
 	if np == nil {
@@ -635,6 +755,9 @@ func macMergeCandidates(f *macMergeFile, newMAC string, aliases map[string]strin
 			continue
 		}
 		if _, d := f.Dismissed[macMergeDismissKey(newMAC, mac)]; d {
+			continue
+		}
+		if isMacMutexApart(f, newMAC, mac, now) {
 			continue
 		}
 		sc, why, ok := scoreMacPair(np, op)
@@ -689,6 +812,112 @@ func filterNonUbiquitousApps(apps []string) []string {
 		}
 	}
 	return out
+}
+
+// sampleConcurrentTrafficPairs 维护按 hncDir 隔离的内存流量采样窗口 macTrafficWin:
+// 仅当两台在线且有 IP 的 MAC 在 180s 采样窗口内均有基线且 (rx-prev.rx)+(tx-prev.tx) >= 512B 真实流量正增长时,
+// 返回双端物理共活对列表(100% 排除同一手机刚换随机 MAC 时旧租约 90s 无流量残留假象)。
+func sampleConcurrentTrafficPairs(hncDir string, nowU int64, obs map[string]*macObs) [][2]string {
+	curOnline := map[string]macTrafficSample{}
+	for rawMac, o := range obs {
+		mac := strings.ToLower(strings.TrimSpace(rawMac))
+		if o == nil || !o.inDevices || o.ip == "" || !validMAC(mac) || isSimMACPrefix(mac) {
+			continue
+		}
+		if o.lastSeen > 0 && nowU-o.lastSeen > 120 {
+			continue
+		}
+		rx, tx := o.rxBytes, o.txBytes
+		if rx < 0 {
+			rx = 0
+		}
+		if tx < 0 {
+			tx = 0
+		}
+		curOnline[mac] = macTrafficSample{ts: nowU, rxBytes: rx, txBytes: tx}
+	}
+	for rawMac, raw := range readJSONMap(filepath.Join(hncDir, "data", "devices.json")) {
+		mac := strings.ToLower(strings.TrimSpace(rawMac))
+		if !validMAC(mac) || isSimMACPrefix(mac) {
+			continue
+		}
+		d, _ := raw.(map[string]interface{})
+		if d == nil {
+			continue
+		}
+		ip := strings.TrimSpace(asString(d["ip"]))
+		ls, _ := toInt64(d["last_seen"])
+		if ip == "" || (ls > 0 && nowU-ls > 120) {
+			continue
+		}
+		rx, _ := toInt64(d["rx_bytes"])
+		tx, _ := toInt64(d["tx_bytes"])
+		if rx < 0 {
+			rx = 0
+		}
+		if tx < 0 {
+			tx = 0
+		}
+		if prevCur, exists := curOnline[mac]; !exists || (prevCur.rxBytes == 0 && prevCur.txBytes == 0 && (rx > 0 || tx > 0)) {
+			curOnline[mac] = macTrafficSample{ts: nowU, rxBytes: rx, txBytes: tx}
+		}
+	}
+
+	macTrafficWinMu.Lock()
+	defer macTrafficWinMu.Unlock()
+
+	if len(macTrafficWin) > 64 {
+		for k, w := range macTrafficWin {
+			if len(w) == 0 && k != hncDir {
+				delete(macTrafficWin, k)
+			}
+		}
+	}
+	if len(curOnline) == 0 {
+		delete(macTrafficWin, hncDir)
+		return nil
+	}
+	win := macTrafficWin[hncDir]
+	if win == nil {
+		win = map[string]macTrafficSample{}
+		macTrafficWin[hncDir] = win
+	}
+	for m := range win {
+		if _, online := curOnline[m]; !online {
+			delete(win, m)
+		}
+	}
+
+	macs := make([]string, 0, len(curOnline))
+	for m := range curOnline {
+		macs = append(macs, m)
+	}
+	sort.Strings(macs)
+
+	var active []string
+	for _, m := range macs {
+		cur := curOnline[m]
+		prev, hasPrev := win[m]
+		if !hasPrev || nowU < prev.ts || nowU-prev.ts > macTrafficWinSec || cur.rxBytes < prev.rxBytes || cur.txBytes < prev.txBytes {
+			win[m] = cur
+			continue
+		}
+		delta := (cur.rxBytes - prev.rxBytes) + (cur.txBytes - prev.txBytes)
+		if delta >= macTrafficMinDelta {
+			active = append(active, m)
+			win[m] = cur
+		}
+	}
+	if len(active) < 2 {
+		return nil
+	}
+	var pairs [][2]string
+	for i := 0; i < len(active); i++ {
+		for j := i + 1; j < len(active); j++ {
+			pairs = append(pairs, [2]string{active[i], active[j]})
+		}
+	}
+	return pairs
 }
 
 // ─── 后台循环 ──────────────────────────────────────────────────────────
@@ -770,11 +999,20 @@ func (s *server) macMergeTick(now time.Time) {
 // macMergeStep 纯状态推进(测试直接调)。
 func (s *server) macMergeStep(now time.Time, obs map[string]*macObs) {
 	nowU := now.Unix()
+	pruneMACAliases(s.hncDir, nowU)
 	aliases := loadMACAliases(s.hncDir)
+	activePairs := sampleConcurrentTrafficPairs(s.hncDir, nowU, obs)
+
 	macMergeMu.Lock()
 	defer macMergeMu.Unlock()
 	f := loadMacMergeFile(s.hncDir)
 	before, _ := json.Marshal(f)
+
+	for _, pair := range activePairs {
+		if k := macMutexApartKey(pair[0], pair[1]); k != "" {
+			f.MutexApart[k] = nowU
+		}
+	}
 
 	if !f.Bootstrapped {
 		// 首轮: 现有设备全部登记为已知, 不产生建议
@@ -840,6 +1078,9 @@ func (s *server) macMergeStep(now time.Time, obs map[string]*macObs) {
 		if len(cs) == 0 || cs[0].Score < macMergeAlertScore {
 			continue
 		}
+		if isMacMutexApart(f, mac, cs[0].OldMAC, nowU) {
+			continue
+		}
 		if _, sent := f.Alerted[mac]; sent {
 			continue
 		}
@@ -859,8 +1100,9 @@ func (s *server) macMergeStep(now time.Time, obs map[string]*macObs) {
 	}
 }
 
-// macMergePruneLocked 淘汰过期画像/建议/忽略记录, 画像数封顶。
+// macMergePruneLocked 淘汰过期画像/建议/忽略/互斥锁记录, 画像数与互斥锁数封顶。
 func (s *server) macMergePruneLocked(f *macMergeFile, now int64, aliases map[string]string) {
+	pruneMutexApartMap(f.MutexApart, now)
 	for mac, p := range f.Profiles {
 		if p.LastSeen > 0 && now-p.LastSeen > macMergeProfileTTL {
 			delete(f.Profiles, mac)
@@ -891,6 +1133,9 @@ func (s *server) macMergePruneLocked(f *macMergeFile, now int64, aliases map[str
 				continue
 			}
 			if _, d := f.Dismissed[macMergeDismissKey(mac, c.OldMAC)]; d {
+				continue
+			}
+			if isMacMutexApart(f, mac, c.OldMAC, now) {
 				continue
 			}
 			kept = append(kept, c)
@@ -936,6 +1181,9 @@ func (s *server) macMergeAlert(f *macMergeFile, macs []string, now time.Time) {
 	}
 	names, _ := loadDeviceNames(filepath.Join(s.hncDir, deviceNamesRelPath))
 	for _, mac := range macs {
+		if len(f.Suggestions[mac]) == 0 {
+			continue
+		}
 		best := f.Suggestions[mac][0]
 		newName, oldName := macDisplayName(names, f, mac), macDisplayName(names, f, best.OldMAC)
 		if newName == "" {
@@ -960,10 +1208,17 @@ func (s *server) macMergeAlert(f *macMergeFile, macs []string, now time.Time) {
 // ─── API ───────────────────────────────────────────────────────────────
 
 func (s *server) apiMacMerge(w http.ResponseWriter, r *http.Request) {
+	nowU := time.Now().Unix()
 	aliases := loadMACAliases(s.hncDir)
+	_, aliasTs := readMACAliasesWithTs(macAliasesPath(s.hncDir))
 	macMergeMu.Lock()
 	f := loadMacMergeFile(s.hncDir)
 	macMergeMu.Unlock()
+	archFile := loadMacMergeArchives(s.hncDir)
+	rmacMu.Lock()
+	rmacSt := loadRMACState(s.hncDir)
+	rmacMu.Unlock()
+
 	names, _ := loadDeviceNames(filepath.Join(s.hncDir, deviceNamesRelPath))
 	online := map[string]bool{}
 	for mac, raw := range readJSONMap(filepath.Join(s.hncDir, "data", "devices.json")) {
@@ -989,6 +1244,9 @@ func (s *server) apiMacMerge(w http.ResponseWriter, r *http.Request) {
 			if _, d := f.Dismissed[macMergeDismissKey(nm, c.OldMAC)]; d {
 				continue
 			}
+			if isMacMutexApart(f, nm, c.OldMAC, nowU) {
+				continue
+			}
 			it := map[string]interface{}{
 				"new_mac": nm, "old_mac": c.OldMAC, "score": c.Score, "reasons": c.Reasons,
 				"new_name": macDisplayName(names, f, nm), "old_name": macDisplayName(names, f, c.OldMAC),
@@ -1006,22 +1264,106 @@ func (s *server) apiMacMerge(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	sort.SliceStable(list, func(i, j int) bool { return list[i]["score"].(int) > list[j]["score"].(int) })
+
+	mutexApartCount := 0
+	for _, ts := range f.MutexApart {
+		if ts <= 0 || nowU-ts <= macMergeMutexApartTTL {
+			mutexApartCount++
+		}
+	}
+
+	mergedList := make([]map[string]interface{}, 0, len(aliases))
+	oldKeys := make([]string, 0, len(aliases))
+	for oldMAC := range aliases {
+		oldKeys = append(oldKeys, oldMAC)
+	}
+	sort.Strings(oldKeys)
+	for _, oldMAC := range oldKeys {
+		toMAC := resolveMACAlias(aliases, aliases[oldMAC])
+		arch := findArchiveInSlice(archFile.Archives, oldMAC, toMAC)
+		fromName := ""
+		toName := macDisplayName(names, f, toMAC)
+		var mergedAt int64
+		if arch != nil {
+			fromName = arch.FromName
+			if fromName == "" {
+				fromName = arch.FromSnap.DeviceName
+			}
+			if toName == "" {
+				toName = arch.ToName
+			}
+			mergedAt = arch.MergedAt
+		}
+		autoRec, hasAuto := rmacSt.AutoInherited[toMAC]
+		isAuto := hasAuto && autoRec.OldMAC == oldMAC
+		if fromName == "" && isAuto {
+			fromName = autoRec.OldName
+		}
+		if fromName == "" {
+			fromName = macDisplayName(names, f, oldMAC)
+		}
+		if mergedAt == 0 && isAuto {
+			mergedAt = autoRec.Ts
+		}
+		if mergedAt == 0 {
+			mergedAt = aliasTs[oldMAC]
+		}
+		autoScore := 0
+		if isAuto {
+			autoScore = autoRec.Score
+		}
+		mergedList = append(mergedList, map[string]interface{}{
+			"from_mac":     oldMAC,
+			"to_mac":       toMAC,
+			"old_mac":      oldMAC,
+			"new_mac":      toMAC,
+			"from_name":    fromName,
+			"to_name":      toName,
+			"old_name":     fromName,
+			"new_name":     toName,
+			"merged_at":    mergedAt,
+			"ts":           mergedAt,
+			"has_archive":  arch != nil,
+			"auto_inherit": isAuto,
+			"auto":         isAuto,
+			"score":        autoScore,
+			"old_online":   online[oldMAC],
+			"new_online":   online[toMAC],
+		})
+	}
+	sort.SliceStable(mergedList, func(i, j int) bool {
+		ti, _ := mergedList[i]["merged_at"].(int64)
+		tj, _ := mergedList[j]["merged_at"].(int64)
+		if ti != tj {
+			return ti > tj
+		}
+		return mergedList[i]["from_mac"].(string) < mergedList[j]["from_mac"].(string)
+	})
+
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"ok": true, "suggestions": list, "aliases": aliases,
-		"min_score": macMergeMinScore, "alert_score": macMergeAlertScore,
+		"ok":                true,
+		"suggestions":       list,
+		"aliases":           aliases,
+		"merged_list":       mergedList,
+		"mutex_apart_count": mutexApartCount,
+		"min_score":         macMergeMinScore,
+		"alert_score":       macMergeAlertScore,
 	})
 }
 
-// annotateMacMerge 给 /api/devices 行加 randomized_mac / merge_suggestion / merged_into。
+// annotateMacMerge 给 /api/devices 行加 randomized_mac / merge_suggestion / merged_into / merged_from / merged_from_name。
 // 读 jsonCache(mtime 缓存), 高频轮询零解析开销。
 func (s *server) annotateMacMerge(rows []map[string]interface{}, names map[string]interface{}) {
+	nowU := time.Now().Unix()
 	aliases := loadMACAliases(s.hncDir)
 	var sugg map[string]interface{}
 	var profiles map[string]interface{}
+	var mutexApart map[string]interface{}
 	if raw, err := s.jsonCache.read(macMergePath(s.hncDir)); err == nil {
 		if root, ok := raw.(map[string]interface{}); ok {
 			sugg, _ = root["suggestions"].(map[string]interface{})
 			profiles, _ = root["profiles"].(map[string]interface{})
+			mutexApart, _ = root["mutex_apart"].(map[string]interface{})
 		}
 	}
 	nameOf := func(mac string) string {
@@ -1036,6 +1378,83 @@ func (s *server) annotateMacMerge(rows []map[string]interface{}, names map[strin
 		}
 		return ""
 	}
+
+	type mergedFromMeta struct {
+		fromMAC  string
+		fromName string
+		ts       int64
+	}
+	var mergedTargets map[string]mergedFromMeta
+	if len(aliases) > 0 {
+		mergedTargets = make(map[string]mergedFromMeta, len(aliases))
+		type archLite struct {
+			fromName string
+			ts       int64
+		}
+		archByPair := map[string]archLite{}
+		archByFrom := map[string]archLite{}
+		if rawArch, err := s.jsonCache.read(macMergeArchivesPath(s.hncDir)); err == nil {
+			if root, ok := rawArch.(map[string]interface{}); ok {
+				if arr, ok2 := root["archives"].([]interface{}); ok2 {
+					for _, elem := range arr {
+						am, _ := elem.(map[string]interface{})
+						if am == nil {
+							continue
+						}
+						fm := strings.ToLower(asString(am["from_mac"]))
+						tm := strings.ToLower(asString(am["to_mac"]))
+						fn := asString(am["from_name"])
+						if fn == "" {
+							if fs, ok3 := am["from_snap"].(map[string]interface{}); ok3 {
+								fn = asString(fs["device_name"])
+							}
+						}
+						ts, _ := toInt64(am["merged_at"])
+						if fm != "" {
+							archByFrom[fm] = archLite{fromName: fn, ts: ts}
+							if tm != "" {
+								archByPair[fm+"|"+tm] = archLite{fromName: fn, ts: ts}
+							}
+						}
+					}
+				}
+			}
+		}
+		var autoInh map[string]interface{}
+		if rawRMAC, err := s.jsonCache.read(rmacStatePath(s.hncDir)); err == nil {
+			if root, ok := rawRMAC.(map[string]interface{}); ok {
+				autoInh, _ = root["auto_inherited"].(map[string]interface{})
+			}
+		}
+		for oldMAC, rawTo := range aliases {
+			toMAC := resolveMACAlias(aliases, rawTo)
+			var fn string
+			var ts int64
+			if al, ok := archByPair[oldMAC+"|"+toMAC]; ok {
+				fn, ts = al.fromName, al.ts
+			} else if al, ok := archByFrom[oldMAC]; ok {
+				fn, ts = al.fromName, al.ts
+			}
+			if autoInh != nil {
+				if rec, ok := autoInh[toMAC].(map[string]interface{}); ok && rec != nil && strings.EqualFold(asString(rec["old_mac"]), oldMAC) {
+					if fn == "" {
+						fn = asString(rec["old_name"])
+					}
+					if ts == 0 {
+						ts, _ = toInt64(rec["ts"])
+					}
+				}
+			}
+			if fn == "" {
+				fn = nameOf(oldMAC)
+			}
+			cur, exists := mergedTargets[toMAC]
+			if !exists || ts > cur.ts || (ts == cur.ts && oldMAC < cur.fromMAC) {
+				mergedTargets[toMAC] = mergedFromMeta{fromMAC: oldMAC, fromName: fn, ts: ts}
+			}
+		}
+	}
+
 	for _, d := range rows {
 		mac := strings.ToLower(asString(d["mac"]))
 		if b, _ := d["sim"].(bool); b {
@@ -1047,14 +1466,23 @@ func (s *server) annotateMacMerge(rows []map[string]interface{}, names map[strin
 			d["merged_into"] = resolveMACAlias(aliases, to)
 			continue
 		}
+		if mergedTargets != nil {
+			if info, ok := mergedTargets[mac]; ok {
+				d["merged_from"] = info.fromMAC
+				d["merged_from_name"] = info.fromName
+			}
+		}
 		cs, _ := sugg[mac].([]interface{})
 		for _, c := range cs {
 			cm, _ := c.(map[string]interface{})
 			if cm == nil {
 				continue
 			}
-			old := asString(cm["old_mac"])
+			old := strings.ToLower(asString(cm["old_mac"]))
 			if _, gone := aliases[old]; gone || old == "" {
+				continue
+			}
+			if mutexApartRawHas(mutexApart, mac, old, nowU) {
 				continue
 			}
 			best := map[string]interface{}{

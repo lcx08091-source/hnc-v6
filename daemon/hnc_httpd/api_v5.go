@@ -9,16 +9,15 @@
 package main
 
 import (
-	"context"
+	"bytes"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -268,9 +267,8 @@ func (s *server) apiIfaceInfo(w http.ResponseWriter, r *http.Request) {
 			for _, addr := range addrs {
 				if ipnet, ok := addr.(*net.IPNet); ok {
 					ip4 := ipnet.IP.To4()
-					// rc3 修 N-13: 用 net.IP.IsPrivate() 代替手写子网判定
-					// 覆盖 10/8, 172.16/12, 192.168/16 (RFC 1918)
-					if ip4 != nil && ip4.IsPrivate() {
+					// 覆盖 RFC 1918 (10/8, 172.16/12, 192.168/16) 与部分 ROM 热点使用的 RFC 6598 (100.64.0.0/10)
+					if isHotspotPrivateIPv4(ip4) {
 						resp.IP = ip4.String()
 						resp.Network = ipnet.String()
 						break
@@ -294,6 +292,18 @@ func (s *server) apiIfaceInfo(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// isHotspotPrivateIPv4 识别热点接口私网 IPv4 地址: RFC 1918 及 RFC 6598 CGNAT (100.64.0.0/10)
+func isHotspotPrivateIPv4(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	if ip4.IsPrivate() {
+		return true
+	}
+	return ip4[0] == 100 && (ip4[1]&0xc0) == 64
+}
+
 // ── /api/offload_status ────────────────────────────────────────
 // v5.1 P2-6: 取代前端直接 kexec check_offload.sh
 // 返回 { active: bool, detail: "IDLE"/"bpf_on"/... }
@@ -303,11 +313,40 @@ func (s *server) apiIfaceInfo(w http.ResponseWriter, r *http.Request) {
 // 前端 init 每次都调会同步阻塞 ksu.exec bridge 5 秒 · 占着 bridge 锁
 // 导致其他 API 排队等, 是 Ling 真机"加载 5 秒"的根因.
 
+const mtkHwnatNoKnobHintText = "检测到天玑 MDDP/HWNAT 硬件直通且无运行期开关；HNC 已设置 tether_offload_disabled=1，请关闭并重新开启一次手机热点使其生效"
+
 type offloadResp struct {
 	Active bool   `json:"active"`
 	Detail string `json:"detail"`
+	HWNAT  string `json:"hwnat,omitempty"`
+	Hint   string `json:"hint,omitempty"`
 	// v5.18: 兜底状态(同 /api/config 的 offload_guard), 无则 null
 	Guard map[string]interface{} `json:"offload_guard"`
+}
+
+func detectMtkHwnatNoKnob(hncDir string, guard map[string]interface{}) bool {
+	if guard != nil && strings.EqualFold(asString(guard["hwnat"]), "detected_no_knob") {
+		return true
+	}
+	if b, err := os.ReadFile(filepath.Join(hncDir, "run", "mtk_hwnat.json")); err == nil && len(b) > 0 {
+		var m map[string]interface{}
+		if json.Unmarshal(b, &m) == nil && strings.EqualFold(asString(m["action"]), "detected_no_knob") {
+			return true
+		}
+	}
+	return false
+}
+
+func applyMtkNoKnobHint(resp *offloadResp, hncDir string, guard map[string]interface{}) {
+	if strings.EqualFold(resp.Detail, "detected_no_knob") || detectMtkHwnatNoKnob(hncDir, guard) {
+		resp.Active = true
+		resp.HWNAT = "detected_no_knob"
+		resp.Hint = mtkHwnatNoKnobHintText
+		switch strings.ToUpper(strings.TrimSpace(resp.Detail)) {
+		case "", "IDLE", "NOMAP", "CAPABLE", "PENDING":
+			resp.Detail = "detected_no_knob"
+		}
+	}
 }
 
 // runOffloadCheck · 跑一次 check_offload.sh 并把结果写入 s.offloadCache
@@ -328,21 +367,19 @@ func (s *server) runOffloadCheck() {
 	if out == "" {
 		out = "IDLE"
 	}
-	// v5.9.1: 整词判定取代子串 contains。check_offload.sh 的 stdout 只有
-	// NOMAP / IDLE / ACTIVE 三个词,子串匹配在正常路径等价;但 runBin 失败时
-	// 会把错误串塞进 out,任何含 "active" 的错误文本都会假报"硬件 offload
-	// 正在截胡限速"。前端已改成完全由该字段驱动警告横幅,假阳性会直接骚扰
-	// 用户,故收紧。保留 warning/bpf_on/offload_on 作为将来脚本扩展的整词。
+	// v5.9.1: 整词判定取代子串 contains; 额外联动天玑 detected_no_knob 硬件直通提示。
 	low := strings.ToLower(strings.TrimSpace(out))
 	active := false
-	for _, kw := range []string{"active", "warning", "bpf_on", "offload_on"} {
+	for _, kw := range []string{"active", "warning", "bpf_on", "offload_on", "detected_no_knob"} {
 		if low == kw {
 			active = true
 			break
 		}
 	}
+	cached := offloadResp{Active: active, Detail: out}
+	applyMtkNoKnobHint(&cached, s.hncDir, readOffloadGuard(s.hncDir))
 	s.offloadMu.Lock()
-	s.offloadCache = offloadResp{Active: active, Detail: out}
+	s.offloadCache = cached
 	s.offloadReady = true
 	s.offloadMu.Unlock()
 }
@@ -371,6 +408,7 @@ func (s *server) apiOffloadStatus(w http.ResponseWriter, r *http.Request) {
 		resp = offloadResp{Active: false, Detail: "PENDING"}
 	}
 	resp.Guard = readOffloadGuard(s.hncDir)
+	applyMtkNoKnobHint(&resp, s.hncDir, resp.Guard)
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -429,44 +467,119 @@ func (s *server) apiLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, logResp{File: file, Content: content, Tail: n})
 }
 
-// tailFile · 读文件末尾 N 行
-// rc2 修 G10: 加 3 秒 context 超时. 原代码无 timeout, 如果磁盘卡/fuse 挂起,
-// tail 子进程会永久 hang, 前端 /api/logs 请求就跟着挂, goroutine 泄漏到重启.
-// 3s 对正常 tail 绰绰有余 (就算 10MB 日志也远远够), 卡住的立即放行.
+const (
+	tailChunkSize    = 64 * 1024
+	tailMaxReadBytes = 4 << 20 // 单次最大读取 4MB 保护, 防超长无换行文件 OOM
+)
+
+// tailFile 纯 Go 读文件末尾 N 行(尾部 Seek 64KB 分块倒序扫换行符, 零 fork 子进程)
 func tailFile(path string, n int) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	cmd := hardenCmd(exec.CommandContext(ctx, "tail", "-n", strconv.Itoa(n), path)) // v5.11: WaitDelay
-	out, err := cmd.Output()
-	if err != nil {
-		// 读不到或文件不存在或超时 - 返回空而不是 error
-		return ""
-	}
-	return string(out)
+	return tailFileWithCap(path, n, tailChunkSize, tailMaxReadBytes)
 }
 
-// combinedLog · 合并多个 log
+func tailFileWithCap(path string, n int, chunkSize, maxBytes int64) string {
+	if n <= 0 || chunkSize <= 0 || maxBytes <= 0 {
+		return ""
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	endPos, err := f.Seek(0, io.SeekEnd)
+	if err != nil || endPos <= 0 {
+		return ""
+	}
+
+	var chunks [][]byte
+	var totalRead int64
+	offset := endPos
+	needNewlines := n
+	checkedTrailingNL := false
+
+	for offset > 0 && totalRead < maxBytes {
+		toRead := chunkSize
+		if toRead > offset {
+			toRead = offset
+		}
+		if rem := maxBytes - totalRead; toRead > rem {
+			toRead = rem
+		}
+		offset -= toRead
+		buf := make([]byte, int(toRead))
+		nr, rerr := f.ReadAt(buf, offset)
+		if nr <= 0 {
+			if rerr != nil {
+				break
+			}
+			break
+		}
+		buf = buf[:nr]
+		totalRead += int64(nr)
+
+		scanEnd := len(buf)
+		if !checkedTrailingNL {
+			checkedTrailingNL = true
+			if buf[len(buf)-1] == '\n' {
+				scanEnd--
+			}
+		}
+
+		cutInBuf := -1
+		sub := buf[:scanEnd]
+		for len(sub) > 0 {
+			idx := bytes.LastIndexByte(sub, '\n')
+			if idx < 0 {
+				break
+			}
+			needNewlines--
+			if needNewlines == 0 {
+				cutInBuf = idx + 1
+				break
+			}
+			sub = sub[:idx]
+		}
+
+		if cutInBuf >= 0 {
+			buf = buf[cutInBuf:]
+			if len(chunks) == 0 {
+				return string(buf)
+			}
+			chunks = append(chunks, buf)
+			break
+		}
+		chunks = append(chunks, buf)
+	}
+
+	if len(chunks) == 0 {
+		return ""
+	}
+	if len(chunks) == 1 {
+		return string(chunks[0])
+	}
+	totalLen := 0
+	for _, c := range chunks {
+		totalLen += len(c)
+	}
+	var sb strings.Builder
+	sb.Grow(totalLen)
+	for i := len(chunks) - 1; i >= 0; i-- {
+		sb.Write(chunks[i])
+	}
+	return sb.String()
+}
+
+// combinedLog · 纯 Go 合并多个日志文件尾部, 零 tail 子进程 fork
 func combinedLog(hncDir string, n int) string {
-	// rc3.1.11 perf: 并发 tail 避免串行 fork 3 次 exec 累加延迟.
-	// 中端机 fork+exec 各 ~30-80ms, 串行 ≈200ms; 并发 ≈ max(80) + goroutine 开销.
-	// KSU bridge curl 10s 超时下这个差距能避免用户感知"卡死".
 	files := []string{"service.log", "watchdog.log", "detect.log"}
 	per := n / 3
-	outs := make([]string, len(files))
-	var wg sync.WaitGroup
-	for i, f := range files {
-		wg.Add(1)
-		go func(idx int, name string) {
-			defer wg.Done()
-			outs[idx] = tailFile(hncDir+"/logs/"+name, per)
-		}(i, f)
-	}
-	wg.Wait()
 	var buf strings.Builder
-	for i, f := range files {
+	for _, f := range files {
+		out := tailFile(filepath.Join(hncDir, "logs", f), per)
 		buf.WriteString("─── " + f + " ───\n")
-		buf.WriteString(outs[i])
-		if !strings.HasSuffix(outs[i], "\n") {
+		buf.WriteString(out)
+		if !strings.HasSuffix(out, "\n") {
 			buf.WriteString("\n")
 		}
 	}

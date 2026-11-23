@@ -47,18 +47,29 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"hnc.io/dpid/alert"
 )
 
-const macMergeAuditTID = "macmerge"
+const (
+	macMergeAuditTID        = "macmerge"
+	macMergeArchivesRelPath = "data/mac_merge_archives.json"
+	macMergeArchiveMax      = 64
+	macMergeArchiveTTL      = int64(90 * 86400)
+)
 
-// mergeOps 把"系统副作用"抽出来(规则动作 / 同步脚本), 测试注入假的实现。
+// macArchiveMu 串行化 mac_merge_archives.json 的读改写。
+var macArchiveMu sync.Mutex
+
+// mergeOps 把"系统副作用"抽出来(规则动作 / 离线规则写回 / 同步脚本), 测试注入假的实现。
 type mergeOps interface {
 	// rule 走正常动作路径: rule_set / rule_clear / bl_add / bl_del / delay_set /
 	// delay_clear / rule_sqm / device_whitelist_set / rules_device_remove
 	rule(action string, p map[string]string) actionResp
+	// persistOfflineRule 当目标设备离线无 IP 时, 直接经 rulesStore 将完整规则状态写回 rules.json
+	persistOfflineRule(mac string, r ruleState) error
 	// syncConnBlocks 重新展开 conn_blocks(含 app_controls 派生项)并跑同步脚本; 调用方持 connBlockMu
 	syncConnBlocks() error
 	// syncAppLimits 让 apply_app_limits.sh 按新 app_limits 重新下发
@@ -100,6 +111,64 @@ func (o realMergeOps) rule(action string, p map[string]string) actionResp {
 	}
 	auditLog(h, macMergeAuditTID, action, p, map[bool]string{true: "ok", false: "error"}[r.OK], r.Error+" "+r.Detail)
 	return r
+}
+
+func (o realMergeOps) persistOfflineRule(mac string, r ruleState) error {
+	h := o.s.hncDir
+	if err := rulesStore.SetBlacklist(h, mac, r.bl); err != nil {
+		return err
+	}
+	hasDevRule := r.exists || r.limit || r.delay || r.sqm || r.wl || r.appQos
+	if !hasDevRule {
+		_ = rulesStore.SetWhitelist(h, mac, false)
+		return rulesStore.RemoveDevice(h, mac)
+	}
+	dnMbps, upMbps := "0", "0"
+	if r.limit {
+		if r.down > 0 {
+			if s, err := rateToMbpsStr(kbitRateStr(r.down)); err == nil {
+				dnMbps = s
+			}
+		}
+		if r.up > 0 {
+			if s, err := rateToMbpsStr(kbitRateStr(r.up)); err == nil {
+				upMbps = s
+			}
+		}
+	}
+	if _, err := rulesStore.UpdateDeviceLimit(h, mac, "", dnMbps, upMbps, r.limit); err != nil {
+		return err
+	}
+	if err := rulesStore.SetWhitelist(h, mac, r.wl); err != nil {
+		return err
+	}
+	if r.appQos {
+		if _, err := rulesStore.SetDeviceAppQoS(h, mac, true); err != nil {
+			return err
+		}
+	} else if r.delay || r.sqm {
+		_, _ = rulesStore.AllocMarkID(h, mac)
+	}
+	lossPct := 0.0
+	if r.loss != "" {
+		lossPct, _ = strconv.ParseFloat(r.loss, 64)
+	}
+	batch := map[string]interface{}{
+		"delay_enabled": r.delay,
+		"delay_ms":      r.delayMs,
+		"jitter_ms":     r.jitterMs,
+		"loss_pct":      lossPct,
+		"sqm_enabled":   r.sqm,
+		"app_qos":       r.appQos,
+	}
+	if err := rulesStore.SetDeviceBatch(h, mac, batch); err != nil {
+		return err
+	}
+	if r.appQos {
+		_ = os.WriteFile(filepath.Join(h, "run", "app_limit.dirty"), []byte("1\n"), 0o644)
+	}
+	auditLog(h, macMergeAuditTID, "persist_offline_rule", map[string]string{"mac": mac}, "ok", "")
+	return nil
 }
 
 func (o realMergeOps) syncConnBlocks() error {
@@ -362,6 +431,13 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 
 	// ── 冲突检查 ──
 	var conflicts []string
+	macMergeMu.Lock()
+	mfPre := loadMacMergeFile(h)
+	apartLocked := isMacMutexApart(mfPre, from, to, now.Unix())
+	macMergeMu.Unlock()
+	if apartLocked {
+		conflicts = append(conflicts, "双端曾同时在线产生真实流量(互斥锁保护中)")
+	}
 	if oldWant.limit && newBase.limit && (oldWant.down != newBase.down || oldWant.up != newBase.up) {
 		conflicts = append(conflicts, "限速")
 	}
@@ -423,6 +499,9 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 	if needOnline && lookupCurrentDeviceIP(h, to) == "" {
 		return res, &mergeErr{"device offline", "新 MAC 当前不在线: 限速/延迟/低延迟需要设备在线才能下发, 请等它连上热点后再合并"}
 	}
+
+	// 采集轻量合并前完整快照与旧 MAC 水位(仅在阶段一提交成功后才写入 mac_merge_archives.json)
+	pendingArchive := s.buildMergeArchiveBeforeCommit(from, to, oldWant, oldObs, newBase, newObs, names, idents, appLim, appCtl, oldPol, newPol, now)
 
 	// ── 阶段一: 写新 MAC 状态 ──
 	var steps []mergeStep
@@ -988,7 +1067,7 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 			}
 		}
 		if so := c.st.Devices[from]; so != nil {
-			mergeCtlUsage(c.devState(to), so)
+			pendingArchive.UsageTransferred = mergeCtlUsageWithTransfer(c.devState(to), so)
 			delete(c.st.Devices, from)
 			c.dirty = true
 			c.saveStateLocked(now, true)
@@ -1002,6 +1081,7 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 		mig["known_devices"] = true
 	}
 	s.macMergeAfterMerge(from, to)
+	upsertMacMergeArchive(h, pendingArchive, now.Unix())
 	mig["mac_merge_suggestions"] = true
 	usageCache.mu.Lock()
 	usageCache.out = nil
@@ -1019,6 +1099,9 @@ func (s *server) deviceMerge(from, to string, force bool, now time.Time) (*merge
 }
 
 func clonePolicy(p *devicePolicy) *devicePolicy {
+	if p == nil {
+		return nil
+	}
 	cp := &devicePolicy{}
 	if p.Quota != nil {
 		q := *p.Quota
@@ -1074,30 +1157,73 @@ func hasConnBlockFor(f connBlockFile, mac string) bool {
 
 // mergeCtlUsage 把旧 MAC 的当日/当周期已用量并入新 MAC(同一周期才加), 告警去重标记沿用。
 func mergeCtlUsage(dst, src *ctlDevState) {
+	_ = mergeCtlUsageWithTransfer(dst, src)
+}
+
+func mergeCtlUsageWithTransfer(dst, src *ctlDevState) macUsageTransfer {
+	var tr macUsageTransfer
+	if dst == nil || src == nil {
+		return tr
+	}
 	u, o := &dst.Usage, src.Usage
 	if o.DayKey != "" {
 		if u.DayKey == "" {
 			u.DayKey = o.DayKey
 		}
-		if u.DayKey == o.DayKey {
+		if u.DayKey == o.DayKey && o.DayBytes > 0 {
 			u.DayBytes += o.DayBytes
+			tr.DayKey = o.DayKey
+			tr.DayBytes = o.DayBytes
 		}
 	}
 	if o.MonthKey != "" {
 		if u.MonthKey == "" {
 			u.MonthKey = o.MonthKey
 		}
-		if u.MonthKey == o.MonthKey {
+		if u.MonthKey == o.MonthKey && (o.MonthBytes > 0 || o.MonthRx > 0 || o.MonthTx > 0) {
 			u.MonthBytes += o.MonthBytes
 			u.MonthRx += o.MonthRx
 			u.MonthTx += o.MonthTx
+			tr.MonthKey = o.MonthKey
+			tr.MonthBytes = o.MonthBytes
+			tr.MonthRx = o.MonthRx
+			tr.MonthTx = o.MonthTx
 		}
 	}
-	if dst.AlertedDay == "" {
+	if dst.AlertedDay == "" && src.AlertedDay != "" {
 		dst.AlertedDay = src.AlertedDay
+		tr.InheritedDay = true
 	}
-	if dst.AlertedMonth == "" {
+	if dst.AlertedMonth == "" && src.AlertedMonth != "" {
 		dst.AlertedMonth = src.AlertedMonth
+		tr.InheritedMonth = true
+	}
+	return tr
+}
+
+func revertCtlUsageTransfer(dst *ctlDevState, tr macUsageTransfer) {
+	if dst == nil {
+		return
+	}
+	subU64 := func(cur, delta uint64) uint64 {
+		if cur >= delta {
+			return cur - delta
+		}
+		return 0
+	}
+	if tr.DayKey != "" && dst.Usage.DayKey == tr.DayKey {
+		dst.Usage.DayBytes = subU64(dst.Usage.DayBytes, tr.DayBytes)
+	}
+	if tr.MonthKey != "" && dst.Usage.MonthKey == tr.MonthKey {
+		dst.Usage.MonthBytes = subU64(dst.Usage.MonthBytes, tr.MonthBytes)
+		dst.Usage.MonthRx = subU64(dst.Usage.MonthRx, tr.MonthRx)
+		dst.Usage.MonthTx = subU64(dst.Usage.MonthTx, tr.MonthTx)
+	}
+	if tr.InheritedDay {
+		dst.AlertedDay = ""
+	}
+	if tr.InheritedMonth {
+		dst.AlertedMonth = ""
 	}
 }
 
@@ -1157,6 +1283,9 @@ func (s *server) macMergeAfterMerge(from, to string) {
 	delete(f.Profiles, from)
 	delete(f.Suggestions, to)
 	delete(f.Suggestions, from)
+	delete(f.MutexApart, macMutexApartKey(from, to))
+	delete(f.Dismissed, macMergeDismissKey(to, from))
+	delete(f.Dismissed, macMergeDismissKey(from, to))
 	for mac, cs := range f.Suggestions {
 		kept := cs[:0]
 		for _, c := range cs {
@@ -1171,4 +1300,926 @@ func (s *server) macMergeAfterMerge(from, to string) {
 		}
 	}
 	_ = saveMacMergeFile(s.hncDir, f)
+}
+
+// ─── 合并归档快照 & 无损秒拆 (device_unmerge / 旧 MAC 重连自动秒拆) ──────────
+
+type macRuleSnap struct {
+	Exists   bool   `json:"exists"`
+	Limit    bool   `json:"limit,omitempty"`
+	DownKbit int    `json:"down_kbit,omitempty"`
+	UpKbit   int    `json:"up_kbit,omitempty"`
+	Delay    bool   `json:"delay,omitempty"`
+	DelayMs  int    `json:"delay_ms,omitempty"`
+	JitterMs int    `json:"jitter_ms,omitempty"`
+	Loss     string `json:"loss,omitempty"`
+	SQM      bool   `json:"sqm,omitempty"`
+	WL       bool   `json:"wl,omitempty"`
+	BL       bool   `json:"bl,omitempty"`
+	AppQos   bool   `json:"app_qos,omitempty"`
+}
+
+type macDeviceSnap struct {
+	Rule           macRuleSnap            `json:"rule"`
+	DeviceName     string                 `json:"device_name,omitempty"`
+	IdentOverride  map[string]interface{} `json:"ident_override,omitempty"`
+	AppLimits      []AppLimitItem         `json:"app_limits,omitempty"`
+	TimeLimits     []appTimeLimit         `json:"time_limits,omitempty"`
+	CategoryBlocks []categoryBlock        `json:"category_blocks,omitempty"`
+	ConnBlocks     []connBlock            `json:"conn_blocks,omitempty"`
+	LimitPolicy    *devicePolicy          `json:"limit_policy,omitempty"`
+	CtlState       *ctlDevState           `json:"ctl_state,omitempty"`
+	EncdnsPolicy   string                 `json:"encdns_policy,omitempty"`
+	KnownExisted   bool                   `json:"known_existed,omitempty"`
+	KnownFirstSeen int64                  `json:"known_first_seen,omitempty"`
+	KnownMarkedAt  int64                  `json:"known_marked_at,omitempty"`
+	Profile        *macProfile            `json:"profile,omitempty"`
+}
+
+type macUsageTransfer struct {
+	DayKey         string `json:"day_key,omitempty"`
+	DayBytes       uint64 `json:"day_bytes,omitempty"`
+	MonthKey       string `json:"month_key,omitempty"`
+	MonthBytes     uint64 `json:"month_bytes,omitempty"`
+	MonthRx        uint64 `json:"month_rx,omitempty"`
+	MonthTx        uint64 `json:"month_tx,omitempty"`
+	InheritedDay   bool   `json:"inherited_day,omitempty"`
+	InheritedMonth bool   `json:"inherited_month,omitempty"`
+}
+
+type macMergeArchive struct {
+	FromMAC             string           `json:"from_mac"`
+	ToMAC               string           `json:"to_mac"`
+	FromName            string           `json:"from_name,omitempty"`
+	ToName              string           `json:"to_name,omitempty"`
+	MergedAt            int64            `json:"merged_at"`
+	OldInDevicesAtMerge bool             `json:"old_in_devices_at_merge"`
+	OldLastSeenAtMerge  int64            `json:"old_last_seen_at_merge,omitempty"`
+	OldBytesAtMerge     int64            `json:"old_bytes_at_merge,omitempty"`
+	FromSnap            macDeviceSnap    `json:"from_snap"`
+	ToBefore            macDeviceSnap    `json:"to_before"`
+	UsageTransferred    macUsageTransfer `json:"usage_transferred"`
+}
+
+type macMergeArchiveFile struct {
+	Version  int                `json:"version"`
+	Archives []*macMergeArchive `json:"archives"`
+}
+
+type unmergeResult struct {
+	Restored       []string
+	Warnings       []string
+	LegacyFallback bool
+}
+
+func macMergeArchivesPath(hncDir string) string {
+	return filepath.Join(hncDir, macMergeArchivesRelPath)
+}
+
+func ruleStateToSnap(want, obs ruleState) macRuleSnap {
+	loss := want.loss
+	if !want.delay {
+		loss = "0"
+	}
+	return macRuleSnap{
+		Exists:   obs.exists,
+		Limit:    want.limit,
+		DownKbit: want.down,
+		UpKbit:   want.up,
+		Delay:    want.delay,
+		DelayMs:  want.delayMs,
+		JitterMs: want.jitterMs,
+		Loss:     loss,
+		SQM:      want.sqm,
+		WL:       want.wl,
+		BL:       want.bl,
+		AppQos:   want.appQos,
+	}
+}
+
+func snapToRuleState(s macRuleSnap) ruleState {
+	loss := s.Loss
+	if loss == "" || !s.Delay {
+		loss = "0"
+	}
+	return ruleState{
+		exists:   s.Exists,
+		limit:    s.Limit && (s.DownKbit > 0 || s.UpKbit > 0),
+		down:     s.DownKbit,
+		up:       s.UpKbit,
+		delay:    s.Delay,
+		delayMs:  s.DelayMs,
+		jitterMs: s.JitterMs,
+		loss:     loss,
+		sqm:      s.SQM,
+		wl:       s.WL,
+		bl:       s.BL,
+		appQos:   s.AppQos,
+	}
+}
+
+func cloneCtlDevState(st *ctlDevState) *ctlDevState {
+	if st == nil {
+		return nil
+	}
+	cp := *st
+	return &cp
+}
+
+func cloneMacProfile(p *macProfile) *macProfile {
+	if p == nil {
+		return nil
+	}
+	cp := *p
+	cp.JA4 = append([]string(nil), p.JA4...)
+	cp.Apps = append([]string(nil), p.Apps...)
+	return &cp
+}
+
+func cloneIdentMap(m map[string]interface{}) map[string]interface{} {
+	if m == nil {
+		return nil
+	}
+	cp := make(map[string]interface{}, len(m))
+	for k, v := range m {
+		cp[k] = v
+	}
+	return cp
+}
+
+func readKnownDeviceSnap(hncDir, mac string) (existed bool, firstSeen, markedAt int64) {
+	cfg := alert.NewConfig(hncDir)
+	b, err := os.ReadFile(cfg.KnownDevicesPath)
+	if err != nil {
+		return false, 0, 0
+	}
+	var kf struct {
+		MACs map[string]struct {
+			FirstSeen     int64 `json:"first_seen"`
+			MarkedKnownAt int64 `json:"marked_known_at"`
+		} `json:"macs"`
+	}
+	if json.Unmarshal(b, &kf) != nil || kf.MACs == nil {
+		return false, 0, 0
+	}
+	e, ok := kf.MACs[mac]
+	if !ok {
+		return false, 0, 0
+	}
+	return true, e.FirstSeen, e.MarkedKnownAt
+}
+
+func restoreKnownDevicesAfterUnmerge(hncDir, from string, fromSnap macDeviceSnap, to string, toBefore macDeviceSnap) {
+	cfg := alert.NewConfig(hncDir)
+	raw := readJSONMap(cfg.KnownDevicesPath)
+	if raw == nil {
+		if !fromSnap.KnownExisted && !toBefore.KnownExisted {
+			return
+		}
+		raw = map[string]interface{}{"version": 1, "macs": map[string]interface{}{}}
+	}
+	macs, _ := raw["macs"].(map[string]interface{})
+	if macs == nil {
+		macs = map[string]interface{}{}
+		raw["macs"] = macs
+	}
+	applyOne := func(mac string, sn macDeviceSnap) {
+		if !sn.KnownExisted {
+			delete(macs, mac)
+			return
+		}
+		entry := map[string]interface{}{}
+		if prev, ok := macs[mac].(map[string]interface{}); ok && prev != nil {
+			for k, v := range prev {
+				entry[k] = v
+			}
+		}
+		if sn.KnownFirstSeen > 0 {
+			entry["first_seen"] = sn.KnownFirstSeen
+		}
+		if sn.KnownMarkedAt > 0 {
+			entry["marked_known_at"] = sn.KnownMarkedAt
+		} else {
+			delete(entry, "marked_known_at")
+		}
+		macs[mac] = entry
+	}
+	applyOne(to, toBefore)
+	applyOne(from, fromSnap)
+	if b, err := json.Marshal(raw); err == nil {
+		_ = discoverWriteAtomic(cfg.KnownDevicesPath, b)
+	}
+}
+
+func (s *server) buildMergeArchiveBeforeCommit(
+	from, to string,
+	oldWant, oldObs, newBase, newObs ruleState,
+	names map[string]string,
+	idents map[string]map[string]interface{},
+	appLim AppLimitFile,
+	appCtl appControlsFile,
+	oldPol, newPol *devicePolicy,
+	now time.Time,
+) *macMergeArchive {
+	h := s.hncDir
+	cbFile := readConnBlocks(h)
+	encCfg := loadEncdns(h)
+
+	var oldCtl, newCtl *ctlDevState
+	if c := s.limitCtl; c != nil {
+		c.mu.Lock()
+		oldCtl = cloneCtlDevState(c.st.Devices[from])
+		newCtl = cloneCtlDevState(c.st.Devices[to])
+		c.mu.Unlock()
+	}
+
+	macMergeMu.Lock()
+	mf := loadMacMergeFile(h)
+	fromProf := cloneMacProfile(mf.Profiles[from])
+	toProf := cloneMacProfile(mf.Profiles[to])
+	fromDisp := macDisplayName(names, mf, from)
+	toDisp := macDisplayName(names, mf, to)
+	macMergeMu.Unlock()
+
+	snapFor := func(mac string, want, obs ruleState, pol *devicePolicy, ctl *ctlDevState, prof *macProfile) macDeviceSnap {
+		sn := macDeviceSnap{
+			Rule:          ruleStateToSnap(want, obs),
+			DeviceName:    names[mac],
+			IdentOverride: cloneIdentMap(idents[mac]),
+			LimitPolicy:   clonePolicy(pol),
+			CtlState:      ctl,
+			EncdnsPolicy:  encCfg.Devices[mac],
+			Profile:       prof,
+		}
+		for _, it := range appLim.Items {
+			if it.MAC == mac {
+				sn.AppLimits = append(sn.AppLimits, it)
+			}
+		}
+		for _, tl := range appCtl.TimeLimits {
+			if tl.MAC == mac {
+				sn.TimeLimits = append(sn.TimeLimits, tl)
+			}
+		}
+		for _, cb := range appCtl.CategoryBlocks {
+			if cb.MAC == mac {
+				sn.CategoryBlocks = append(sn.CategoryBlocks, cb)
+			}
+		}
+		for _, it := range cbFile.Items {
+			if it.MAC == mac {
+				sn.ConnBlocks = append(sn.ConnBlocks, it)
+			}
+		}
+		sn.KnownExisted, sn.KnownFirstSeen, sn.KnownMarkedAt = readKnownDeviceSnap(h, mac)
+		return sn
+	}
+
+	var oldInDevs bool
+	var oldLS, oldBytes int64
+	if devsMap := readJSONMap(filepath.Join(h, "data", "devices.json")); devsMap != nil {
+		if raw, ok := devsMap[from]; ok {
+			if dm, ok2 := raw.(map[string]interface{}); ok2 && dm != nil {
+				oldInDevs = true
+				oldLS, _ = toInt64(dm["last_seen"])
+				rx, _ := toInt64(dm["rx_bytes"])
+				tx, _ := toInt64(dm["tx_bytes"])
+				if rx < 0 {
+					rx = 0
+				}
+				if tx < 0 {
+					tx = 0
+				}
+				oldBytes = rx + tx
+			}
+		}
+	}
+
+	return &macMergeArchive{
+		FromMAC:             from,
+		ToMAC:               to,
+		FromName:            fromDisp,
+		ToName:              toDisp,
+		MergedAt:            now.Unix(),
+		OldInDevicesAtMerge: oldInDevs,
+		OldLastSeenAtMerge:  oldLS,
+		OldBytesAtMerge:     oldBytes,
+		FromSnap:            snapFor(from, oldWant, oldObs, oldPol, oldCtl, fromProf),
+		ToBefore:            snapFor(to, newBase, newObs, newPol, newCtl, toProf),
+	}
+}
+
+func pruneMacMergeArchivesList(list []*macMergeArchive, now int64) []*macMergeArchive {
+	kept := make([]*macMergeArchive, 0, len(list))
+	for _, a := range list {
+		if a == nil || !validMAC(a.FromMAC) || !validMAC(a.ToMAC) || a.FromMAC == a.ToMAC {
+			continue
+		}
+		if now > 0 && a.MergedAt > 0 && now-a.MergedAt > macMergeArchiveTTL {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	sort.SliceStable(kept, func(i, j int) bool {
+		return kept[i].MergedAt < kept[j].MergedAt
+	})
+	if len(kept) > macMergeArchiveMax {
+		kept = append([]*macMergeArchive(nil), kept[len(kept)-macMergeArchiveMax:]...)
+	}
+	return kept
+}
+
+func loadMacMergeArchivesUnlocked(hncDir string, now int64) *macMergeArchiveFile {
+	f := &macMergeArchiveFile{Version: 1}
+	if b, err := os.ReadFile(macMergeArchivesPath(hncDir)); err == nil {
+		_ = json.Unmarshal(b, f)
+	}
+	f.Version = 1
+	f.Archives = pruneMacMergeArchivesList(f.Archives, now)
+	return f
+}
+
+func loadMacMergeArchives(hncDir string) *macMergeArchiveFile {
+	macArchiveMu.Lock()
+	defer macArchiveMu.Unlock()
+	return loadMacMergeArchivesUnlocked(hncDir, time.Now().Unix())
+}
+
+func saveMacMergeArchivesUnlocked(hncDir string, f *macMergeArchiveFile, now int64) error {
+	f.Version = 1
+	f.Archives = pruneMacMergeArchivesList(f.Archives, now)
+	b, err := json.Marshal(f)
+	if err != nil {
+		return err
+	}
+	return discoverWriteAtomic(macMergeArchivesPath(hncDir), b)
+}
+
+func upsertMacMergeArchive(hncDir string, arch *macMergeArchive, now int64) {
+	if arch == nil {
+		return
+	}
+	macArchiveMu.Lock()
+	defer macArchiveMu.Unlock()
+	f := loadMacMergeArchivesUnlocked(hncDir, now)
+	kept := make([]*macMergeArchive, 0, len(f.Archives)+1)
+	for _, a := range f.Archives {
+		if a.FromMAC == arch.FromMAC {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	kept = append(kept, arch)
+	f.Archives = kept
+	_ = saveMacMergeArchivesUnlocked(hncDir, f, now)
+}
+
+func removeMacMergeArchive(hncDir, from, to string, now int64) {
+	macArchiveMu.Lock()
+	defer macArchiveMu.Unlock()
+	if _, err := os.Stat(macMergeArchivesPath(hncDir)); err != nil {
+		return
+	}
+	f := loadMacMergeArchivesUnlocked(hncDir, now)
+	kept := make([]*macMergeArchive, 0, len(f.Archives))
+	for _, a := range f.Archives {
+		if a.FromMAC == from && (to == "" || a.ToMAC == to) {
+			continue
+		}
+		kept = append(kept, a)
+	}
+	f.Archives = kept
+	_ = saveMacMergeArchivesUnlocked(hncDir, f, now)
+}
+
+func findArchiveInSlice(list []*macMergeArchive, from, to string) *macMergeArchive {
+	var fallback *macMergeArchive
+	for i := len(list) - 1; i >= 0; i-- {
+		a := list[i]
+		if a == nil || a.FromMAC != from {
+			continue
+		}
+		if to != "" && a.ToMAC == to {
+			return a
+		}
+		if fallback == nil {
+			fallback = a
+		}
+	}
+	return fallback
+}
+
+func findMacMergeArchive(hncDir, from, to string, now int64) *macMergeArchive {
+	macArchiveMu.Lock()
+	defer macArchiveMu.Unlock()
+	f := loadMacMergeArchivesUnlocked(hncDir, now)
+	return findArchiveInSlice(f.Archives, from, to)
+}
+
+func firstNonEmptyStr(vals ...string) string {
+	for _, v := range vals {
+		if s := strings.TrimSpace(v); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func applyRuleStateOnline(ops mergeOps, cur, want ruleState, mac string, warnings *[]string) {
+	run := func(action string, p map[string]string) bool {
+		r := ops.rule(action, p)
+		if !r.OK {
+			*warnings = append(*warnings, fmt.Sprintf("%s %s: %s %s", action, mac, r.Error, strings.TrimSpace(r.Detail)))
+			return false
+		}
+		return true
+	}
+	limitParams := func(m string, r ruleState) map[string]string {
+		p := map[string]string{"mac": m}
+		if r.down > 0 {
+			p["rate_down"] = kbitRateStr(r.down)
+		}
+		if r.up > 0 {
+			p["rate_up"] = kbitRateStr(r.up)
+		}
+		return p
+	}
+	delayParams := func(m string, r ruleState) map[string]string {
+		return map[string]string{
+			"mac": m, "delay_ms": strconv.Itoa(r.delayMs),
+			"jitter_ms": strconv.Itoa(r.jitterMs), "loss_pct": r.loss,
+		}
+	}
+
+	allOK := true
+	if want.bl && !cur.bl {
+		allOK = run("bl_add", map[string]string{"mac": mac}) && allOK
+	} else if !want.bl && cur.bl {
+		allOK = run("bl_del", map[string]string{"mac": mac}) && allOK
+	}
+	// 先关闭互斥对立项, 避免后续开启另一项时报 conflict
+	if cur.appQos && !want.appQos {
+		allOK = run("app_qos_set", map[string]string{"mac": mac, "enabled": "false"}) && allOK
+	}
+	if cur.delay && !want.delay {
+		allOK = run("delay_clear", map[string]string{"mac": mac}) && allOK
+	}
+	if want.limit && !(cur.limit && want.down == cur.down && want.up == cur.up) {
+		allOK = run("rule_set", limitParams(mac, want)) && allOK
+	} else if !want.limit && cur.limit {
+		allOK = run("rule_clear", map[string]string{"mac": mac}) && allOK
+	}
+	if want.delay && !(cur.delay && want.delayEq(cur)) {
+		allOK = run("delay_set", delayParams(mac, want)) && allOK
+	}
+	if want.appQos && !cur.appQos {
+		allOK = run("app_qos_set", map[string]string{"mac": mac, "enabled": "true"}) && allOK
+	}
+	if want.sqm != cur.sqm {
+		allOK = run("rule_sqm", map[string]string{"mac": mac, "enabled": strconv.FormatBool(want.sqm)}) && allOK
+	}
+	if want.wl != cur.wl {
+		allOK = run("device_whitelist_set", map[string]string{"mac": mac, "enabled": strconv.FormatBool(want.wl)}) && allOK
+	}
+	hasDev := want.exists || want.limit || want.delay || want.sqm || want.wl || want.appQos
+	if !hasDev && cur.exists {
+		allOK = run("rules_device_remove", map[string]string{"mac": mac}) && allOK
+	}
+	if !allOK {
+		_ = ops.persistOfflineRule(mac, want)
+	}
+}
+
+func actionDeviceUnmerge(s *server, p map[string]string) actionResp {
+	from := normalizeMAC(firstNonEmptyStr(p["from_mac"], p["old_mac"]))
+	to := normalizeMAC(firstNonEmptyStr(p["to_mac"], p["new_mac"]))
+	aliases := loadMACAliases(s.hncDir)
+	if from == "" && to == "" {
+		if m := normalizeMAC(p["mac"]); m != "" {
+			if _, isFrom := aliases[m]; isFrom {
+				from = m
+			} else {
+				to = m
+			}
+		}
+	}
+	if from != "" && to == "" {
+		if rawTo, ok := aliases[from]; ok {
+			to = resolveMACAlias(aliases, rawTo)
+		} else if arch := findMacMergeArchive(s.hncDir, from, "", time.Now().Unix()); arch != nil {
+			to = arch.ToMAC
+		}
+	} else if from == "" && to != "" {
+		var bestOld string
+		var bestTs int64 = -1
+		archFile := loadMacMergeArchives(s.hncDir)
+		for oldMAC, rawTo := range aliases {
+			if resolveMACAlias(aliases, rawTo) != to {
+				continue
+			}
+			var ts int64
+			if a := findArchiveInSlice(archFile.Archives, oldMAC, to); a != nil {
+				ts = a.MergedAt
+			}
+			if bestOld == "" || ts > bestTs || (ts == bestTs && oldMAC < bestOld) {
+				bestOld, bestTs = oldMAC, ts
+			}
+		}
+		from = bestOld
+	}
+	if from == "" || to == "" {
+		return actionResp{OK: false, Error: "bad params", Detail: "from_mac / to_mac 必须是有效的已合并 MAC"}
+	}
+	if from == to {
+		return actionResp{OK: false, Error: "bad params", Detail: "from_mac 与 to_mac 相同"}
+	}
+	if isSimMACPrefix(from) || isSimMACPrefix(to) {
+		return actionResp{OK: false, Error: "bad params", Detail: "模拟设备(02:5e:00)不能参与拆分"}
+	}
+	if isProtectedMAC(s.hncDir, from) || isProtectedMAC(s.hncDir, to) {
+		return actionResp{OK: false, Error: "protected mac", Detail: "cannot unmerge host/broadcast/null mac"}
+	}
+	res, err := s.deviceUnmerge(from, to, false, time.Now())
+	if err != nil {
+		var me *mergeErr
+		if errors.As(err, &me) {
+			return actionResp{OK: false, Error: me.code, Detail: me.detail}
+		}
+		return actionResp{OK: false, Error: "unmerge failed", Detail: err.Error()}
+	}
+	var detail string
+	if res.LegacyFallback {
+		detail = "已解除旧版合并别名 " + from + " → " + to + " 并写入双端互斥锁(历史旧别名无归档快照, 保持现有规则不变)"
+	} else {
+		detail = "已无损拆分 " + from + " 与 " + to + "; 还原: " + strings.Join(res.Restored, ",")
+	}
+	if len(res.Warnings) > 0 {
+		detail += "; 警告: " + strings.Join(res.Warnings, " | ")
+	}
+	return actionResp{OK: true, Detail: detail}
+}
+
+// deviceUnmerge 调用方持 s.actionMu:
+//   - 若存在 mac_merge_archives.json 快照: 还原 to 至 ToBefore(安全扣回 UsageTransferred), 完整恢复 from 至 FromSnap;
+//   - 若为无快照历史旧别名: 优雅降级解绑;
+//   - 统一移除 mac_aliases.json 别名、清理 rmac_guard_state.json AutoInherited[to]、写入 MutexApart 与双向 Dismissed。
+func (s *server) deviceUnmerge(from, to string, auto bool, now time.Time) (*unmergeResult, error) {
+	h := s.hncDir
+	nowU := now.Unix()
+	ops := macMergeOpsFor(s)
+	res := &unmergeResult{}
+	warn := func(format string, a ...interface{}) {
+		res.Warnings = append(res.Warnings, fmt.Sprintf(format, a...))
+	}
+
+	aliases := loadMACAliases(h)
+	arch := findMacMergeArchive(h, from, to, nowU)
+	if _, hasAlias := aliases[from]; !hasAlias && arch == nil {
+		return nil, &mergeErr{"not merged", "设备对 " + from + " → " + to + " 当前未处于已合并状态"}
+	}
+	if to == "" {
+		if rawTo, ok := aliases[from]; ok {
+			to = resolveMACAlias(aliases, rawTo)
+		} else if arch != nil {
+			to = arch.ToMAC
+		}
+	}
+
+	restoredSet := map[string]bool{}
+	if arch != nil {
+		// 1) 还原双方规则(在线走 ops.rule 实时挂载, 离线走 ops.persistOfflineRule 经 rulesStore 写回)
+		curRS, err := readRuleStates(h)
+		if err != nil {
+			warn("read rules: %v", err)
+			curRS = map[string]ruleState{}
+		}
+		wantTo := snapToRuleState(arch.ToBefore.Rule)
+		if lookupCurrentDeviceIP(h, to) != "" {
+			applyRuleStateOnline(ops, curRS[to], wantTo, to, &res.Warnings)
+		} else if err := ops.persistOfflineRule(to, wantTo); err != nil {
+			warn("persist_offline_rule %s: %v", to, err)
+		}
+
+		wantFrom := snapToRuleState(arch.FromSnap.Rule)
+		if lookupCurrentDeviceIP(h, from) != "" {
+			applyRuleStateOnline(ops, curRS[from], wantFrom, from, &res.Warnings)
+		} else if err := ops.persistOfflineRule(from, wantFrom); err != nil {
+			warn("persist_offline_rule %s: %v", from, err)
+		}
+		restoredSet["rules"] = true
+
+		// 2) 还原设备名称
+		{
+			namesPath := filepath.Join(h, deviceNamesRelPath)
+			deviceNamesWriteMu.Lock()
+			curNames, err := loadDeviceNames(namesPath)
+			if err == nil {
+				if arch.ToBefore.DeviceName != "" {
+					curNames[to] = arch.ToBefore.DeviceName
+				} else {
+					delete(curNames, to)
+				}
+				if arch.FromSnap.DeviceName != "" {
+					curNames[from] = arch.FromSnap.DeviceName
+				} else {
+					delete(curNames, from)
+				}
+				if err := saveDeviceNames(namesPath, curNames); err != nil {
+					warn("device_names: %v", err)
+				} else {
+					restoredSet["device_names"] = true
+				}
+			} else {
+				warn("device_names load: %v", err)
+			}
+			deviceNamesWriteMu.Unlock()
+		}
+
+		// 3) 还原设备识别手动纠正
+		{
+			all := readIdentOverrides(h)
+			_, hadFile := os.Stat(identOverridePath(h))
+			if arch.ToBefore.IdentOverride != nil {
+				all[to] = cloneIdentMap(arch.ToBefore.IdentOverride)
+			} else {
+				delete(all, to)
+			}
+			if arch.FromSnap.IdentOverride != nil {
+				all[from] = cloneIdentMap(arch.FromSnap.IdentOverride)
+			} else {
+				delete(all, from)
+			}
+			if len(all) > 0 || hadFile == nil {
+				b, _ := json.MarshalIndent(all, "", "  ")
+				if err := discoverWriteAtomic(identOverridePath(h), b); err != nil {
+					warn("ident_override: %v", err)
+				} else {
+					restoredSet["ident_override"] = true
+				}
+			}
+		}
+
+		// 4) 还原按应用限速(JSON + flat)
+		{
+			appLimitMu.Lock()
+			f := loadAppLimits(h)
+			hadAny := hasAppLimitFor(f, from) || hasAppLimitFor(f, to) || len(arch.ToBefore.AppLimits) > 0 || len(arch.FromSnap.AppLimits) > 0
+			if hadAny {
+				kept := make([]AppLimitItem, 0, len(f.Items))
+				for _, it := range f.Items {
+					if it.MAC != from && it.MAC != to {
+						kept = append(kept, it)
+					}
+				}
+				kept = append(kept, arch.ToBefore.AppLimits...)
+				kept = append(kept, arch.FromSnap.AppLimits...)
+				f.Items = kept
+				if err := saveAppLimits(h, f); err != nil {
+					warn("app_limits: %v", err)
+				} else {
+					restoredSet["app_limits"] = true
+				}
+			}
+			appLimitMu.Unlock()
+			if hadAny {
+				ops.syncAppLimits()
+			}
+		}
+
+		// 5) 还原应用时长上限与类别封锁
+		hadAppCtl := false
+		{
+			appCtlMu.Lock()
+			f := loadAppControls(h)
+			hadAppCtl = hasAppCtlFor(f, from) || hasAppCtlFor(f, to) ||
+				len(arch.ToBefore.TimeLimits) > 0 || len(arch.ToBefore.CategoryBlocks) > 0 ||
+				len(arch.FromSnap.TimeLimits) > 0 || len(arch.FromSnap.CategoryBlocks) > 0
+			if hadAppCtl {
+				kl := make([]appTimeLimit, 0, len(f.TimeLimits))
+				for _, l := range f.TimeLimits {
+					if l.MAC != from && l.MAC != to {
+						kl = append(kl, l)
+					}
+				}
+				kl = append(kl, arch.ToBefore.TimeLimits...)
+				kl = append(kl, arch.FromSnap.TimeLimits...)
+				f.TimeLimits = kl
+
+				kc := make([]categoryBlock, 0, len(f.CategoryBlocks))
+				for _, c := range f.CategoryBlocks {
+					if c.MAC != from && c.MAC != to {
+						kc = append(kc, c)
+					}
+				}
+				kc = append(kc, arch.ToBefore.CategoryBlocks...)
+				kc = append(kc, arch.FromSnap.CategoryBlocks...)
+				f.CategoryBlocks = kc
+
+				if err := saveAppControls(h, f); err != nil {
+					warn("app_controls: %v", err)
+				} else {
+					restoredSet["app_controls"] = true
+				}
+			}
+			appCtlMu.Unlock()
+		}
+
+		// 6) 还原连接/域名封锁并同步
+		{
+			connBlockMu.Lock()
+			f := readConnBlocks(h)
+			hadCB := hasConnBlockFor(f, from) || hasConnBlockFor(f, to) ||
+				len(arch.ToBefore.ConnBlocks) > 0 || len(arch.FromSnap.ConnBlocks) > 0 || hadAppCtl
+			if hadCB {
+				kept := make([]connBlock, 0, len(f.Items))
+				for _, it := range f.Items {
+					if it.MAC != from && it.MAC != to {
+						kept = append(kept, it)
+					}
+				}
+				kept = append(kept, arch.ToBefore.ConnBlocks...)
+				kept = append(kept, arch.FromSnap.ConnBlocks...)
+				f.Items = kept
+				b, _ := json.MarshalIndent(f, "", "  ")
+				if err := discoverWriteAtomic(connBlocksPath(h), b); err != nil {
+					warn("conn_blocks: %v", err)
+				} else if err := ops.syncConnBlocks(); err != nil {
+					warn("conn_blocks sync: %v", err)
+				} else {
+					restoredSet["conn_blocks"] = true
+				}
+			}
+			connBlockMu.Unlock()
+		}
+
+		// 7) 还原加密 DNS 按设备策略
+		{
+			encdnsMu.Lock()
+			c := loadEncdns(h)
+			_, hadTo := c.Devices[to]
+			_, hadFrom := c.Devices[from]
+			if hadTo || hadFrom || arch.ToBefore.EncdnsPolicy != "" || arch.FromSnap.EncdnsPolicy != "" {
+				if c.Devices == nil {
+					c.Devices = map[string]string{}
+				}
+				if arch.ToBefore.EncdnsPolicy != "" {
+					c.Devices[to] = arch.ToBefore.EncdnsPolicy
+				} else {
+					delete(c.Devices, to)
+				}
+				if arch.FromSnap.EncdnsPolicy != "" {
+					c.Devices[from] = arch.FromSnap.EncdnsPolicy
+				} else {
+					delete(c.Devices, from)
+				}
+				c.Ts = nowU
+				b, _ := json.Marshal(c)
+				if err := discoverWriteAtomic(encdnsPath(h), b); err != nil {
+					warn("encdns: %v", err)
+				} else {
+					encdnsCountersInvalidate()
+					if _, err := os.Stat(filepath.Join(h, "bin", "encdns_sync.sh")); err == nil {
+						_, _ = runBin(h, "encdns_sync.sh")
+					}
+					restoredSet["encdns"] = true
+				}
+			}
+			encdnsMu.Unlock()
+		}
+
+		// 8) 还原配额/时段策略与控制器状态(对 to 安全扣回 UsageTransferred, 对 from 恢复原状态)
+		if c := s.limitCtl; c != nil {
+			c.mu.Lock()
+			if arch.ToBefore.LimitPolicy != nil {
+				c.policies[to] = clonePolicy(arch.ToBefore.LimitPolicy)
+			} else {
+				delete(c.policies, to)
+			}
+			if arch.FromSnap.LimitPolicy != nil {
+				c.policies[from] = clonePolicy(arch.FromSnap.LimitPolicy)
+			} else {
+				delete(c.policies, from)
+			}
+			if err := c.savePoliciesLocked(); err != nil {
+				warn("limit_policies: %v", err)
+			} else {
+				restoredSet["limit_policies"] = true
+			}
+
+			if stTo := c.st.Devices[to]; stTo != nil {
+				revertCtlUsageTransfer(stTo, arch.UsageTransferred)
+				if arch.ToBefore.CtlState != nil {
+					stTo.Adopted = arch.ToBefore.CtlState.Adopted
+					stTo.Base = arch.ToBefore.CtlState.Base
+				} else {
+					stTo.Adopted = false
+					stTo.Base = limitRule{}
+					stTo.LastDesired = limitRule{}
+					stTo.LastObserved = limitRule{}
+				}
+			} else if arch.ToBefore.CtlState != nil {
+				c.st.Devices[to] = cloneCtlDevState(arch.ToBefore.CtlState)
+			}
+
+			if arch.FromSnap.CtlState != nil {
+				c.st.Devices[from] = cloneCtlDevState(arch.FromSnap.CtlState)
+			} else {
+				delete(c.st.Devices, from)
+			}
+			c.dirty = true
+			c.saveStateLocked(now, true)
+			restoredSet["limit_ctl_state"] = true
+			c.mu.Unlock()
+			c.Poke()
+		}
+
+		// 9) 还原陌生设备已知账本
+		restoreKnownDevicesAfterUnmerge(h, from, arch.FromSnap, to, arch.ToBefore)
+		restoredSet["known_devices"] = true
+
+		// 10) 移除已消费的归档快照
+		removeMacMergeArchive(h, from, to, nowU)
+	} else {
+		res.LegacyFallback = true
+	}
+
+	// 公共收尾 A: 移除 mac_aliases.json 中的别名绑定
+	{
+		m := map[string]string{}
+		for k, v := range loadMACAliases(h) {
+			if k != from {
+				m[k] = v
+			}
+		}
+		if err := saveMACAliasesAt(h, m, nowU, nil); err != nil {
+			warn("mac_aliases: %v", err)
+		} else {
+			restoredSet["mac_aliases"] = true
+		}
+	}
+
+	// 公共收尾 B: 清理 rmac_guard_state.json AutoInherited[to]
+	{
+		rmacMu.Lock()
+		st := loadRMACState(h)
+		if rec, ok := st.AutoInherited[to]; ok && (rec.OldMAC == "" || rec.OldMAC == from) {
+			delete(st.AutoInherited, to)
+			saveRMACState(h, st)
+		}
+		rmacMu.Unlock()
+	}
+
+	// 公共收尾 C: 恢复画像并写入 MutexApart + 双向 Dismissed 防反弹重合并
+	{
+		macMergeMu.Lock()
+		f := loadMacMergeFile(h)
+		if arch != nil {
+			if arch.FromSnap.Profile != nil {
+				f.Profiles[from] = cloneMacProfile(arch.FromSnap.Profile)
+			}
+			if arch.ToBefore.Profile != nil {
+				f.Profiles[to] = cloneMacProfile(arch.ToBefore.Profile)
+			}
+		}
+		if k := macMutexApartKey(from, to); k != "" {
+			f.MutexApart[k] = nowU
+			pruneMutexApartMap(f.MutexApart, nowU)
+		}
+		f.Dismissed[macMergeDismissKey(to, from)] = nowU
+		f.Dismissed[macMergeDismissKey(from, to)] = nowU
+		for mac, cs := range f.Suggestions {
+			kept := cs[:0]
+			for _, c := range cs {
+				if (mac == to && c.OldMAC == from) || (mac == from && c.OldMAC == to) {
+					continue
+				}
+				kept = append(kept, c)
+			}
+			if len(kept) == 0 {
+				delete(f.Suggestions, mac)
+			} else {
+				f.Suggestions[mac] = kept
+			}
+		}
+		if err := saveMacMergeFile(h, f); err != nil {
+			warn("mac_merge_suggestions: %v", err)
+		} else {
+			restoredSet["mac_merge_suggestions"] = true
+		}
+		macMergeMu.Unlock()
+	}
+
+	usageCache.mu.Lock()
+	usageCache.out = nil
+	usageCache.mu.Unlock()
+
+	for k := range restoredSet {
+		res.Restored = append(res.Restored, k)
+	}
+	sort.Strings(res.Restored)
+	auditLog(h, macMergeAuditTID, "device_unmerge", map[string]string{
+		"from_mac": from, "to_mac": to, "auto": strconv.FormatBool(auto),
+		"legacy": strconv.FormatBool(res.LegacyFallback), "restored": strings.Join(res.Restored, ","),
+	}, map[bool]string{true: "ok", false: "partial"}[len(res.Warnings) == 0], strings.Join(res.Warnings, " | "))
+	return res, nil
 }

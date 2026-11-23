@@ -558,3 +558,165 @@ func TestLeakGuardStatShortCircuitAndZeroWakeupSleepResume(t *testing.T) {
 		t.Fatal("leakGuardEngine.runLoop leaked goroutine on stop")
 	}
 }
+
+type rc2DeadlineSSEWriter struct {
+	mu           sync.Mutex
+	hdr          http.Header
+	deadlines    []time.Time
+	writes       int
+	failAfterN   int
+	status       int
+	readyFlushed chan struct{}
+}
+
+func (w *rc2DeadlineSSEWriter) Header() http.Header {
+	if w.hdr == nil {
+		w.hdr = make(http.Header)
+	}
+	return w.hdr
+}
+
+func (w *rc2DeadlineSSEWriter) WriteHeader(code int) { w.status = code }
+
+func (w *rc2DeadlineSSEWriter) SetWriteDeadline(t time.Time) error {
+	w.mu.Lock()
+	w.deadlines = append(w.deadlines, t)
+	w.mu.Unlock()
+	return nil
+}
+
+func (w *rc2DeadlineSSEWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.writes++
+	n := w.writes
+	failAt := w.failAfterN
+	w.mu.Unlock()
+	if failAt > 0 && n >= failAt {
+		return 0, os.ErrDeadlineExceeded
+	}
+	return len(p), nil
+}
+
+func (w *rc2DeadlineSSEWriter) Flush() {
+	select {
+	case w.readyFlushed <- struct{}{}:
+	default:
+	}
+}
+
+func TestLeakGuardRC2LedgerCapsNotifySemAndSSEDeadline(t *testing.T) {
+	srv, _, _ := newV6TestMux(t)
+	lg := srv.v6State().leakGuard
+
+	// 1. Notification concurrency semaphore cap = 2 (non-blocking drop on 3rd+ simultaneous hung Binder call)
+	var inFlight atomic.Int32
+	var maxInFlight atomic.Int32
+	blockCh := make(chan struct{})
+	lg.notifyExec = func(ctx context.Context, bin string, args ...string) error {
+		cur := inFlight.Add(1)
+		for {
+			old := maxInFlight.Load()
+			if cur <= old || maxInFlight.CompareAndSwap(old, cur) {
+				break
+			}
+		}
+		defer inFlight.Add(-1)
+		select {
+		case <-blockCh:
+		case <-ctx.Done():
+		}
+		return nil
+	}
+	for i := 0; i < 10; i++ {
+		lg.postAndroidNotificationAsync(LeakEvent{
+			ID: fmt.Sprintf("n_%d", i), Ts: 1700000000 + int64(i),
+			DstHost: "example.org", LeakType: "phone", RawValue: "13812345678",
+		}, true)
+	}
+	waitLeakGuardCond(t, time.Second, "2 concurrent notifications running", func() bool {
+		return inFlight.Load() == 2
+	})
+	time.Sleep(25 * time.Millisecond)
+	if got := maxInFlight.Load(); got > 2 {
+		close(blockCh)
+		t.Fatalf("concurrent notifications=%d exceeded semaphore cap 2", got)
+	}
+	close(blockCh)
+	waitLeakGuardCond(t, time.Second, "notifications drained", func() bool {
+		return inFlight.Load() == 0
+	})
+	lg.notifyExec = func(ctx context.Context, bin string, args ...string) error { return nil }
+
+	// 2. cooldownLedger cap 4096 & tombstones cap 1024 + 7d TTL
+	baseTs := int64(1800000000)
+	lg.mu.Lock()
+	lg.cfg.CooldownSec = 86400
+	for i := 0; i < 4500; i++ {
+		lg.cooldownLedger[fmt.Sprintf("02:00:00:00:00:01|h%d.example|phone", i)] = baseTs + int64(i%100)
+	}
+	lg.setTombstoneLocked("expired.7d.example", baseTs-8*86400)
+	for i := 0; i < 1200; i++ {
+		lg.setTombstoneLocked(fmt.Sprintf("tb-%d.example", i), baseTs+int64(i%60))
+	}
+	lg.mu.Unlock()
+
+	lg.IngestEvents([]LeakEvent{{
+		ID: "cap_trigger", Ts: baseTs + 200, MAC: "02:00:00:00:00:01",
+		DstHost: "fresh.example", LeakType: "token", RawValue: "secret",
+	}})
+
+	lg.mu.Lock()
+	cdLen := len(lg.cooldownLedger)
+	tbLen := len(lg.tombstones)
+	_, expiredAlive := lg.tombstones["expired.7d.example"]
+	lg.mu.Unlock()
+	if cdLen > leakMaxCooldownEntries {
+		t.Fatalf("cooldownLedger=%d exceeds cap %d", cdLen, leakMaxCooldownEntries)
+	}
+	if tbLen > leakMaxTombstones {
+		t.Fatalf("tombstones=%d exceeds cap %d", tbLen, leakMaxTombstones)
+	}
+	if expiredAlive {
+		t.Fatal("tombstone older than 7d TTL should have been evicted")
+	}
+
+	// 3. SSE stream sets ~10s write deadline per frame and releases slot immediately on write timeout
+	lg.mu.Lock()
+	lg.sseHeartbeat = 20 * time.Millisecond
+	lg.mu.Unlock()
+
+	dw := &rc2DeadlineSSEWriter{
+		failAfterN:   2, // 1st write (ready) succeeds, 2nd write (heartbeat) fails with ErrDeadlineExceeded
+		readyFlushed: make(chan struct{}, 4),
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/api/leakguard/stream", nil).WithContext(ctx)
+	doneSSE := make(chan struct{})
+	go func() {
+		srv.apiLeakGuardStream(dw, req)
+		close(doneSSE)
+	}()
+	select {
+	case <-doneSSE:
+	case <-time.After(time.Second):
+		t.Fatal("apiLeakGuardStream did not exit promptly on write deadline error")
+	}
+	if leakSSEActiveConns.Load() != 0 {
+		t.Fatalf("SSE slot leaked: activeConns=%d, want 0", leakSSEActiveConns.Load())
+	}
+	dw.mu.Lock()
+	dls := append([]time.Time(nil), dw.deadlines...)
+	dw.mu.Unlock()
+	hasNonZeroDeadline := false
+	for _, dl := range dls {
+		if !dl.IsZero() {
+			hasNonZeroDeadline = true
+			break
+		}
+	}
+	if !hasNonZeroDeadline {
+		t.Fatal("apiLeakGuardStream must set a non-zero write deadline before writing each SSE frame")
+	}
+}
+

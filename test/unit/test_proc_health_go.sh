@@ -16,7 +16,7 @@ test_start "proc_health: 四处调用方全部走 procfind"
 grep -q 'procfind' "$HNC_REPO_ROOT/daemon/hnc_httpd/selfcheck.go" \
   && grep -q 'procfind' "$HNC_REPO_ROOT/daemon/hnc_httpd/power_stats.go" \
   && grep -q 'procfind' "$HNC_REPO_ROOT/daemon/hnc_httpd/proc_health.go" \
-  && grep -q 'HNC_HP=' "$HNC_REPO_ROOT/daemon/hnc_httpd/action_v511.go" \
+  && grep -q 'procfind.Spec("hotspotd")' "$HNC_REPO_ROOT/daemon/hnc_httpd/action_v511.go" \
   && [ "$(grep -cF 'HP=$(pidof' "$HNC_REPO_ROOT/daemon/hnc_httpd/action_v511.go")" = "0" ] \
   && [ "$(grep -cF 'pidof", d.Pidof' "$HNC_REPO_ROOT/daemon/hnc_httpd/selfcheck.go")" = "0" ] && test_pass || test_fail "procfind 未接齐"
 

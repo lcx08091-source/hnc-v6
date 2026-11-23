@@ -109,7 +109,7 @@
 
 ### T5 · 文档
 - `README.md`:功能清单与当前一致;安装 / 升级 / 回退说明(v5.29 的自动回滚、`data/m4_owner`)。
-- `docs/ROADMAP.md`:v5.32 行标 rc1 ✅;正式版之后的小版本:真机结论出来后决定删哪些旧代码(shell guard / Go supervisor / hotspotd 发现代码)、方案 B。
+- `docs/ROADMAP.md`:v5.32 行标 rc1 [OK];正式版之后的小版本:真机结论出来后决定删哪些旧代码(shell guard / Go supervisor / hotspotd 发现代码)、方案 B。
 - `docs/CODEMAP.md` / `docs/API.md`:与代码一致。
 - 正式版说明草稿:在 `CHANGELOG.md` 末尾写一段「5.x 正式版(草稿)」—— 相对上一个正式版(5.18 及以前)用户能感知到的全部变化、怎么退回;正式发版时由 Claude 挪到正式版小节。
 

@@ -16,10 +16,25 @@
 #   - mid 查 rules.json 复用,不存在则按 MAC 哈希分配 + 线性探测避碰
 #   - IP 从 devices.json 现读 (不信任 caller 传入)
 
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
-    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
-
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
+
+is_authoritative_wlan0_ap() {
+    local _jf="$HNC_DIR/run/iface_detect.json"
+    [ -f "$_jf" ] || return 1
+    grep -q '"authoritative"[[:space:]]*:[[:space:]]*true' "$_jf" 2>/dev/null \
+        && grep -q '"wlan0_ap"[[:space:]]*:[[:space:]]*true' "$_jf" 2>/dev/null
+}
+
 RULES="$HNC_DIR/data/rules.json"
 DEVICES="$HNC_DIR/data/devices.json"
 JSON_SET="$HNC_DIR/bin/json_set.sh"
@@ -291,7 +306,7 @@ case "$CMD" in
             emit_err "device not found in devices.json (mac=$MAC, 设备可能离线或还没被探到)"
         fi
         IFACE=$(sh "$DETECT" iface 2>/dev/null)
-        if [ -z "$IFACE" ] || [ "$IFACE" = "wlan0" ]; then
+        if [ -z "$IFACE" ] || { [ "$IFACE" = "wlan0" ] && ! is_authoritative_wlan0_ap; }; then
             emit_err "no active hotspot iface (got '$IFACE')"
         fi
         gate_lock || emit_err "gate_lock timeout (5s), another global op in progress"
@@ -410,7 +425,7 @@ case "$CMD" in
         fi
 
         if [ "$HAS_DELAY" = "1" ] || [ "$HAS_SUBCLASS" = "1" ]; then
-            if [ -n "$IFACE" ] && [ "$IFACE" != "wlan0" ]; then
+            if [ -n "$IFACE" ] && { [ "$IFACE" != "wlan0" ] || is_authoritative_wlan0_ap; }; then
                 sh "$TC" set_limit "$IFACE" "$MID" 0 0 "$IP" >> "$LOG" 2>&1 \
                     || log "tc set_limit clear-rate warn (mid=$MID, delay preserved)"
             else
@@ -418,7 +433,7 @@ case "$CMD" in
             fi
             log "clear limit only: delay/netem preserved (mac=$MAC mid=$MID)"
         else
-            if [ -n "$IFACE" ] && [ "$IFACE" != "wlan0" ]; then
+            if [ -n "$IFACE" ] && { [ "$IFACE" != "wlan0" ] || is_authoritative_wlan0_ap; }; then
                 sh "$TC" remove "$IFACE" "$MID" >> "$LOG" 2>&1 || log "tc remove warn (mid=$MID may not be applied)"
             fi
             notify_offload "$MAC" 0

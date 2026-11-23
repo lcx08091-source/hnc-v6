@@ -479,6 +479,38 @@ static __always_inline int parse_l2_hdr(struct __sk_buff *skb, int use_src_mac,
     if (h_proto != bpf_htons(ETH_P_IP) && h_proto != bpf_htons(ETH_P_IPV6))
         return -1;
 
+    /* Validate L3 IPv4/IPv6 version nibble at l3_off before any mac_mark_map lookup */
+    __u32 base_off = l3_off & 0x3eU;
+    if (h_proto == bpf_htons(ETH_P_IP)) {
+        const __u8 *nh = data + base_off;
+        if (nh + 20 > data_end) {
+            __u32 need4 = (base_off + 20U) & 0x7fU;
+            if (skb->len < need4 || bpf_skb_pull_data(skb, need4) < 0)
+                return -1;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
+            nh = data + base_off;
+            if (nh + 20 > data_end)
+                return -1;
+        }
+        if ((nh[0] >> 4) != 4 || (nh[0] & 0x0fU) < 5U)
+            return -1;
+    } else {
+        const __u8 *v6h = data + base_off;
+        if (v6h + 40 > data_end) {
+            __u32 need6 = (base_off + 40U) & 0x7fU;
+            if (skb->len < need6 || bpf_skb_pull_data(skb, need6) < 0)
+                return -1;
+            data = skb_data_ptr(skb);
+            data_end = skb_data_end_ptr(skb);
+            v6h = data + base_off;
+            if (v6h + 40 > data_end)
+                return -1;
+        }
+        if ((v6h[0] >> 4) != 6)
+            return -1;
+    }
+
     *out_proto = h_proto;
     *out_l3_off = l3_off;
     return 0;
@@ -544,6 +576,9 @@ int hnc_clsact_ingress(struct __sk_buff *skb)
 SEC("tc_egress")
 int hnc_clsact_egress(struct __sk_buff *skb)
 {
+    if (skb->mark == HNC_MARK_DROP)
+        return TC_ACT_SHOT;
+
     if ((skb->mark & HNC_MARK_DEV_VALID) != 0) {
         account_dev_stats(skb, skb->mark, 0);
         return TC_ACT_UNSPEC;

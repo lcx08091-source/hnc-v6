@@ -86,3 +86,35 @@ func TestJSONFileCacheBadJSONNotCached(t *testing.T) {
 		t.Fatalf("got %v, want {ok:true}", v)
 	}
 }
+
+func TestJsonCacheRC2DeleteEvictsMemory(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "ephemeral.json")
+	if err := os.WriteFile(path, []byte(`{"alive":true}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c := newJSONFileCache()
+	if _, err := c.read(path); err != nil {
+		t.Fatalf("initial read: %v", err)
+	}
+	c.mu.Lock()
+	_, cachedBefore := c.entries[path]
+	c.mu.Unlock()
+	if !cachedBefore {
+		t.Fatal("expected entry in c.entries after initial read")
+	}
+
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.read(path); !os.IsNotExist(err) {
+		t.Fatalf("expected IsNotExist after remove, got %v", err)
+	}
+	c.mu.Lock()
+	_, cachedAfter := c.entries[path]
+	c.mu.Unlock()
+	if cachedAfter {
+		t.Fatal("deleted file entry must be evicted from jsonFileCache memory")
+	}
+}
+

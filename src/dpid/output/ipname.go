@@ -138,11 +138,28 @@ func (t *IPNameTable) SetPath(p string) {
 	t.mu.Unlock()
 }
 
+var (
+	_, fakeIPv4Net, _ = net.ParseCIDR("198.18.0.0/15")
+	_, fakeIPv6Net, _ = net.ParseCIDR("fc00::/18")
+)
+
+// isFakeIP 识别透明代理(Clash/Mihomo/Sing-box 等)常用的 Fake-IP 网段:
+// IPv4 198.18.0.0/15 与 IPv6 fc00::/18, 防止虚假 IP 污染 DPI IP→App 映射表。
+func isFakeIP(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if v4 := ip.To4(); v4 != nil {
+		return fakeIPv4Net.Contains(v4)
+	}
+	return fakeIPv6Net.Contains(ip)
+}
+
 // canonIP 把 IP 字符串规范化(net.IP.String(), IPv4-mapped IPv6 折叠成
-// 点分 IPv4); 非法/未指定/回环/组播地址返回空。
+// 点分 IPv4); 非法/未指定/回环/组播/Fake-IP 地址返回空。
 func canonIP(s string) string {
 	ip := net.ParseIP(strings.TrimSpace(s))
-	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() {
+	if ip == nil || ip.IsUnspecified() || ip.IsLoopback() || ip.IsMulticast() || isFakeIP(ip) {
 		return ""
 	}
 	return ip.String()

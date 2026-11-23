@@ -27,6 +27,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -250,21 +251,42 @@ func logf(format string, args ...interface{}) {
 	}
 }
 
-// rotateLogIfBig moves wdLog → wdLog.1 when it exceeds logMaxBytes.
+var wdLogPath = wdLog
+
+// rotateLogIfBig 采用 copytruncate 原地轮转日志(复制副本至 .1 后原地 Truncate(0)),
+// 保持原文件 inode 不变, 避免长驻句柄继续写向被重命名的旧 inode。
 func rotateLogIfBig() {
-	st, err := os.Stat(wdLog)
+	st, err := os.Stat(wdLogPath)
 	if err != nil || st.Size() < logMaxBytes {
 		return
 	}
 	logMu.Lock()
-	if logFile != nil {
-		_ = logFile.Close()
+	copied := copyLogBackup(wdLogPath, wdLogPath+".1")
+	if copied || st.Size() >= 4*logMaxBytes {
+		_ = os.Truncate(wdLogPath, 0)
+		if logFile != nil && wdLogPath == wdLog {
+			_ = logFile.Truncate(0)
+		}
 	}
-	_ = os.Rename(wdLog, wdLog+".1")
-	f, _ := os.OpenFile(wdLog, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	logFile = f
 	logMu.Unlock()
-	logf("log rotated (>%d bytes)", logMaxBytes)
+	if copied {
+		logf("log rotated via copytruncate (>%d bytes)", logMaxBytes)
+	}
+}
+
+func copyLogBackup(srcPath, dstPath string) bool {
+	src, err := os.Open(srcPath)
+	if err != nil {
+		return false
+	}
+	defer src.Close()
+	dst, err := os.OpenFile(dstPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o644)
+	if err != nil {
+		return false
+	}
+	_, copyErr := io.Copy(dst, src)
+	closeErr := dst.Close()
+	return copyErr == nil && closeErr == nil
 }
 
 func heartbeatLoop() {
@@ -589,12 +611,194 @@ func cooldownOK(name string, cd time.Duration) bool {
 	return true
 }
 
+const (
+	httpdHealthURL              = "http://127.0.0.1:8444/api/health"
+	httpdHealthProbeTimeout     = 2 * time.Second
+	httpdStartupGrace           = 15 * time.Second
+	httpdFreezeTimeoutThreshold = 2
+)
+
+var (
+	wdProcRoot              = "/proc"
+	wdCgroupV2Root          = "/sys/fs/cgroup"
+	wdDevFreezerRoot        = "/dev/freezer"
+	protectDaemonProcessFn  = protectDaemonProcess
+	dnsTakeoverRemoveFn     = runDNSTakeoverRemove
+	terminateFrozenDaemonFn = terminateFrozenDaemon
+	spawnDaemonFn           = spawnDaemon
+	httpdStateFn            = readState
+	httpdHealthProbeEnabled bool
+	httpdHealthProbeFn      = probeHttpdHealth
+	httpdLastSpawnAt        time.Time
+	httpdUnresponsiveStreak int
+
+	protectedPIDsMu sync.Mutex
+	protectedPIDs   = map[int]struct{}{}
+)
+
+// protectDaemonProcess 尽力将守护进程 PID 迁出国产 ROM 的 App cgroup 冻结组,
+// 并设置 oom_score_adj=-900 降低 LMK 误杀概率。
+func protectDaemonProcess(pid int) {
+	if pid <= 0 {
+		return
+	}
+	pidStr := strconv.Itoa(pid)
+	_ = os.WriteFile(filepath.Join(wdCgroupV2Root, "cgroup.procs"), []byte(pidStr), 0o644)
+	_ = os.WriteFile(filepath.Join(wdDevFreezerRoot, "cgroup.procs"), []byte(pidStr), 0o644)
+	_ = os.WriteFile(filepath.Join(wdCgroupV2Root, "freezer", "cgroup.procs"), []byte(pidStr), 0o644)
+	_ = os.WriteFile(filepath.Join(wdProcRoot, pidStr, "oom_score_adj"), []byte("-900\n"), 0o644)
+}
+
+func hardenSelfProcess() {
+	_ = os.WriteFile(filepath.Join(wdProcRoot, "self", "oom_score_adj"), []byte("-900\n"), 0o644)
+	protectDaemonProcessFn(os.Getpid())
+}
+
+func ensureDaemonProtectedOnce(pid int) {
+	if pid <= 0 {
+		return
+	}
+	protectedPIDsMu.Lock()
+	_, seen := protectedPIDs[pid]
+	if !seen {
+		if len(protectedPIDs) > 64 {
+			protectedPIDs = map[int]struct{}{}
+		}
+		protectedPIDs[pid] = struct{}{}
+	}
+	protectedPIDsMu.Unlock()
+	if !seen {
+		protectDaemonProcessFn(pid)
+	}
+}
+
+func forgetProtectedPID(pid int) {
+	protectedPIDsMu.Lock()
+	delete(protectedPIDs, pid)
+	protectedPIDsMu.Unlock()
+}
+
+// isProcessCgroupFrozen 读取 /proc/<pid>/cgroup 检查进程是否被 ROM 置入 cgroup.freeze=1 或 FROZEN 墓碑态。
+func isProcessCgroupFrozen(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	raw, err := os.ReadFile(filepath.Join(wdProcRoot, strconv.Itoa(pid), "cgroup"))
+	if err != nil {
+		return false
+	}
+	for _, ln := range strings.Split(string(raw), "\n") {
+		parts := strings.SplitN(strings.TrimSpace(ln), ":", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		rel := strings.TrimPrefix(strings.TrimSpace(parts[2]), "/")
+		if rel == "" || rel == "." || strings.Contains(rel, "..") {
+			continue
+		}
+		if parts[0] == "0" {
+			if b, err := os.ReadFile(filepath.Join(wdCgroupV2Root, rel, "cgroup.freeze")); err == nil {
+				if strings.TrimSpace(string(b)) == "1" {
+					return true
+				}
+			}
+			if b, err := os.ReadFile(filepath.Join(wdCgroupV2Root, rel, "cgroup.events")); err == nil {
+				for _, ev := range strings.Split(string(b), "\n") {
+					if strings.TrimSpace(ev) == "frozen 1" {
+						return true
+					}
+				}
+			}
+		}
+		if strings.Contains(parts[1], "freezer") {
+			for _, base := range []string{wdDevFreezerRoot, filepath.Join(wdCgroupV2Root, "freezer")} {
+				if b, err := os.ReadFile(filepath.Join(base, rel, "freezer.state")); err == nil {
+					st := strings.TrimSpace(string(b))
+					if st == "FROZEN" || st == "FREEZING" {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
+}
+
+func probeHttpdHealth() bool {
+	client := &http.Client{
+		Timeout:   httpdHealthProbeTimeout,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	resp, err := client.Get(httpdHealthURL)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 512))
+	return resp.StatusCode >= 200 && resp.StatusCode < 500
+}
+
+func checkHttpdFrozen(pid int) (bool, string) {
+	if isProcessCgroupFrozen(pid) {
+		return true, "cgroup_frozen"
+	}
+	if httpdHealthProbeEnabled && httpdStateFn().kind == stateActive {
+		now := nowFn()
+		if !httpdLastSpawnAt.IsZero() && now.Sub(httpdLastSpawnAt) >= 0 && now.Sub(httpdLastSpawnAt) < httpdStartupGrace {
+			return false, ""
+		}
+		if httpdHealthProbeFn() {
+			httpdUnresponsiveStreak = 0
+			return false, ""
+		}
+		httpdUnresponsiveStreak++
+		if httpdUnresponsiveStreak >= httpdFreezeTimeoutThreshold {
+			return true, fmt.Sprintf("health_timeout_streak=%d", httpdUnresponsiveStreak)
+		}
+		return false, ""
+	}
+	httpdUnresponsiveStreak = 0
+	return false, ""
+}
+
+func terminateFrozenDaemon(pid int) {
+	if pid <= 0 {
+		return
+	}
+	_ = syscall.Kill(pid, syscall.SIGTERM)
+	time.Sleep(200 * time.Millisecond)
+	if processAlive(pid) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func runDNSTakeoverRemove() {
+	ctx, cancel := context.WithTimeout(context.Background(), auxScriptTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, shellPath(), hncDir+"/bin/dns_takeover.sh", "remove")
+	cmd.Env = os.Environ()
+	cmd.Stdout, cmd.Stderr = nil, nil
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = 2 * time.Second
+	_ = cmd.Run()
+}
+
 // ensureDaemonRunning checks the daemon's pidfile, repairs it if a live
-// process matches, otherwise (re)launches under cooldown.
+// process matches, detects frozen/unresponsive hnc_httpd to prevent DNS blackholes,
+// otherwise (re)launches under cooldown.
 func ensureDaemonRunning(d daemonSpec) {
 	launcher := d.binPath
 	launcherArgs := d.args
 	watchPidFile := d.pidFile
+	alivePid := 0
 
 	// Is the watched pidfile alive? (Prefer kernel pidfd handle when spawned by us)
 	if data, err := os.ReadFile(watchPidFile); err == nil {
@@ -602,21 +806,48 @@ func ensureDaemonRunning(d daemonSpec) {
 			if proc := lookupSpawnedProcess(watchPidFile, pid); proc != nil {
 				if alive, supported := pidfdProcessAlive(proc); supported {
 					if alive {
-						return // healthy (pidfd verified, immune to PID wraparound)
+						alivePid = pid
+					} else {
+						untrackSpawnedProcess(watchPidFile, proc)
 					}
-					untrackSpawnedProcess(watchPidFile, proc)
 				} else if processAlive(pid) {
-					return // fallback when kernel lacks pidfd
+					alivePid = pid
 				}
 			} else if processAlive(pid) {
-				return // healthy
+				alivePid = pid
 			}
 		}
 	}
-	if live := findLiveByName(filepath.Base(launcher)); live > 0 {
-		_ = os.WriteFile(watchPidFile, []byte(strconv.Itoa(live)), 0o644)
-		logf("%s: live without pidfile, repaired (pid=%d)", d.name, live)
-		return
+	if alivePid <= 0 {
+		if live := findLiveByName(filepath.Base(launcher)); live > 0 {
+			alivePid = live
+			_ = os.WriteFile(watchPidFile, []byte(strconv.Itoa(live)), 0o644)
+			logf("%s: live without pidfile, repaired (pid=%d)", d.name, live)
+		}
+	}
+
+	dnsRemoved := false
+	if alivePid > 0 {
+		ensureDaemonProtectedOnce(alivePid)
+		if d.name != "hnc_httpd" {
+			return
+		}
+		frozen, reason := checkHttpdFrozen(alivePid)
+		if !frozen {
+			return
+		}
+		logf("WARN: hnc_httpd pid=%d frozen/unresponsive (%s); removing dns_takeover before restart", alivePid, reason)
+		// 先跑 ./bin/dns_takeover.sh remove 解除 DNS 劫持保热点不断网, 再解冻并重拉 hnc_httpd
+		dnsTakeoverRemoveFn()
+		dnsRemoved = true
+		protectDaemonProcessFn(alivePid)
+		terminateFrozenDaemonFn(alivePid)
+		if proc := lookupSpawnedProcess(watchPidFile, alivePid); proc != nil {
+			untrackSpawnedProcess(watchPidFile, proc)
+		}
+		forgetProtectedPID(alivePid)
+		_ = os.Remove(watchPidFile)
+		httpdUnresponsiveStreak = 0
 	}
 
 	if _, err := os.Stat(launcher); err != nil {
@@ -626,27 +857,12 @@ func ensureDaemonRunning(d daemonSpec) {
 		return
 	}
 
-	// v6.0: 为 dns_takeover.sh remove 补上 15s 硬超时 + 独立进程组 SIGKILL, 防 xtables 锁永久挂死 mainLoop!
-	if d.name == "hnc_httpd" {
-		ctx, cancel := context.WithTimeout(context.Background(), auxScriptTimeout)
-		cmd := exec.CommandContext(ctx, shellPath(), hncDir+"/bin/dns_takeover.sh", "remove")
-		cmd.Env = os.Environ()
-		cmd.Stdout, cmd.Stderr = nil, nil
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			if cmd.Process != nil && cmd.Process.Pid > 0 {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				return cmd.Process.Kill()
-			}
-			return nil
-		}
-		cmd.WaitDelay = 2 * time.Second
-		_ = cmd.Run()
-		cancel()
+	if d.name == "hnc_httpd" && !dnsRemoved {
+		dnsTakeoverRemoveFn()
 	}
 
 	logf("%s: process gone, launching %s", d.name, launcher)
-	if err := spawnDaemon(launcher, launcherArgs, d.logFile, watchPidFile); err != nil {
+	if err := spawnDaemonFn(launcher, launcherArgs, d.logFile, watchPidFile); err != nil {
 		logf("%s: launch failed: %v", d.name, err)
 	}
 }
@@ -671,6 +887,12 @@ func spawnDaemon(bin string, args []string, logPath, pidFile string) error {
 			_ = out.Close()
 		}
 		return err
+	}
+	protectDaemonProcessFn(cmd.Process.Pid)
+	ensureDaemonProtectedOnce(cmd.Process.Pid)
+	if filepath.Base(bin) == "hnc_httpd" {
+		httpdLastSpawnAt = nowFn()
+		httpdUnresponsiveStreak = 0
 	}
 	trackSpawnedProcess(pidFile, cmd.Process)
 	go func() {
@@ -770,13 +992,63 @@ func isDoze() bool {
 // ─── restore window throttle ────────────────────────────────────────────
 
 type restoreThrottle struct {
-	windowStart   time.Time
-	windowCount   int
-	consecutive   int
-	passiveMode   bool
-	passiveExitTS time.Time
-	totalRestores int
-	passiveLogged bool
+	windowStart     time.Time
+	windowCount     int
+	consecutive     int
+	passiveMode     bool
+	passiveExitTS   time.Time
+	totalRestores   int
+	passiveLogged   bool
+	activeIface     string
+	activeIfIndex   int
+	exemptedIfIndex int
+}
+
+func (r *restoreThrottle) resetActiveIface() {
+	r.activeIface = ""
+	r.activeIfIndex = 0
+	r.exemptedIfIndex = 0
+}
+
+func (r *restoreThrottle) recordHealthyIface(iface string, ifindex int) {
+	if r.activeIface != "" && r.activeIface != iface {
+		r.activeIfIndex = 0
+		r.exemptedIfIndex = 0
+	}
+	r.activeIface = iface
+	if ifindex > 0 {
+		r.activeIfIndex = ifindex
+		r.exemptedIfIndex = 0
+	}
+}
+
+// tryExemptBandSwitch 仅当同热点口名下实测正整数 ifindex 相比上一轮健康值发生真实跳变
+// (每次新 ifindex 仅豁免一次)时返回 (prevIfIndex, true), 将重建视为正常切频段而不计入熔断窗口。
+func (r *restoreThrottle) tryExemptBandSwitch(iface string, curIfIndex int) (int, bool) {
+	if iface == "" || r.activeIface != iface || r.activeIfIndex <= 0 || curIfIndex <= 0 {
+		return 0, false
+	}
+	if curIfIndex == r.activeIfIndex || curIfIndex == r.exemptedIfIndex {
+		return 0, false
+	}
+	prev := r.activeIfIndex
+	r.exemptedIfIndex = curIfIndex
+	return prev, true
+}
+
+func readPositiveIfIndex(iface string) int {
+	if iface == "" || sysIfIndexFn == nil {
+		return 0
+	}
+	s, err := sysIfIndexFn(iface)
+	if err != nil {
+		return 0
+	}
+	idx, err := strconv.Atoi(strings.TrimSpace(s))
+	if err != nil || idx <= 0 {
+		return 0
+	}
+	return idx
 }
 
 func (r *restoreThrottle) currentWindowDur() time.Duration {
@@ -849,6 +1121,7 @@ func handleSignals() {
 // ─── main loop ──────────────────────────────────────────────────────────
 
 func mainLoop() {
+	httpdHealthProbeEnabled = true
 	ls := newLoopState()
 	touchMainLoopStep()
 
@@ -885,8 +1158,11 @@ func mainLoop() {
 	}
 }
 
-func handlePending(_ *restoreThrottle) time.Duration {
+func handlePending(throttle *restoreThrottle) time.Duration {
 	m4Writer.hotspotDown()
+	if throttle != nil {
+		throttle.resetActiveIface()
+	}
 	touchMainLoopStep()
 	res := probeHotspotFn()
 	touchMainLoopStep()
@@ -906,9 +1182,13 @@ func handlePending(_ *restoreThrottle) time.Duration {
 		logf("full_init returned rc=%d; staying PENDING", res.exitCode)
 		return intervalProbe
 	}
+	if throttle != nil {
+		throttle.recordHealthyIface(iface, readPositiveIfIndex(iface))
+	}
 	writeStateFn(wdState{kind: stateActive, iface: iface})
 	m4Writer.tick(iface, nowFn())
 	wakeAppLimitLoop()
+	wakeOffloadSched()
 	return intervalNormal
 }
 
@@ -918,6 +1198,9 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	touchMainLoopStep()
 	if probe.exitCode != 0 || probe.stdout == "" {
 		logf("STATE ACTIVE:%s -> PENDING (hotspot closed)", activeIface)
+		if throttle != nil {
+			throttle.resetActiveIface()
+		}
 		m4Writer.hotspotDown()
 		onlineAcc.hotspotDown(nowFn())
 		writeStateFn(wdState{kind: statePending})
@@ -934,14 +1217,25 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		res := runActionFn("migrate", activeIface, newIface, newIP)
 		touchMainLoopStep()
 		if res.exitCode == 0 {
+			if throttle != nil {
+				throttle.recordHealthyIface(newIface, readPositiveIfIndex(newIface))
+			}
 			writeStateFn(wdState{kind: stateActive, iface: newIface})
 			m4Writer.tick(newIface, nowFn())
 			wakeAppLimitLoop()
+			wakeOffloadSched()
 		} else {
+			if throttle != nil {
+				throttle.resetActiveIface()
+			}
 			logf("migrate rc=%d; stopping stale m4 writer", res.exitCode)
 			m4Writer.hotspotDown()
 		}
 		return intervalNormal
+	}
+
+	if throttle != nil && throttle.activeIface != "" && throttle.activeIface != newIface {
+		throttle.resetActiveIface()
 	}
 
 	now := nowFn()
@@ -957,6 +1251,9 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 	touchMainLoopStep()
 	switch healthRC {
 	case 0:
+		if throttle != nil {
+			throttle.recordHealthyIface(newIface, readPositiveIfIndex(newIface))
+		}
 		recovering := aux.recoveryRounds > 0
 		if aux.recoveryRounds > 0 {
 			aux.recoveryRounds--
@@ -986,6 +1283,21 @@ func handleActive(activeIface string, throttle *restoreThrottle, aux *activeAux)
 		return intervalNormal
 
 	default:
+		curIdx := readPositiveIfIndex(newIface)
+		if throttle != nil {
+			if prevIdx, exempt := throttle.tryExemptBandSwitch(newIface, curIdx); exempt {
+				logf("iface %s ifindex jumped %d -> %d (band switch), restoring without throttle penalty",
+					newIface, prevIdx, curIdx)
+				res := runActionFn("full_restore",
+					fmt.Sprintf("band_switch_ifindex (%s %d->%d)", newIface, prevIdx, curIdx))
+				touchMainLoopStep()
+				if res.exitCode != 0 {
+					logf("full_restore (band switch) rc=%d", res.exitCode)
+				}
+				aux.recoveryRounds = 3
+				return intervalRecovery
+			}
+		}
 		if !throttle.onHealthFail() {
 			return intervalNormal
 		}
@@ -1060,6 +1372,7 @@ func main() {
 	time.Local = tzlocal.Location()
 
 	openLog()
+	hardenSelfProcess()
 	logf("hnc_watchdog %s starting, pid=%d", version, os.Getpid())
 
 	if !acquireLock() {

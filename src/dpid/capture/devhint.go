@@ -160,10 +160,11 @@ func hintSrcMACOK(ev Event) bool {
 // 热点客户端, 而不是上游网络经桥接漏进来的组播)。IPv6 mDNS 源通常是
 // fe80:: 链路本地地址, 不在热点前缀里, 只靠 MAC 判断。
 func hintSrcIPOK(ev Event) bool {
-	if ev.IsIPv6 || len(hotspotNets) == 0 {
+	nets := getHotspotNets()
+	if ev.IsIPv6 || len(nets) == 0 {
 		return true
 	}
-	return ipInHotspot(ev.SrcIP)
+	return ipInNets(ev.SrcIP, nets)
 }
 
 // ─── DHCPv4 ────────────────────────────────────────────────────────────

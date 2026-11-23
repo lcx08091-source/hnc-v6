@@ -6,6 +6,16 @@
 # 在模块禁用/卸载/手动调用时执行，确保无残留进程和规则
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
+if [ -f "$HNC_DIR/bin/hnc_proc.sh" ]; then
+    . "$HNC_DIR/bin/hnc_proc.sh"
+elif [ -f "${0%/*}/hnc_proc.sh" ]; then
+    . "${0%/*}/hnc_proc.sh"
+fi
 RUN=$HNC_DIR/run
 LOG=$HNC_DIR/logs/service.log
 
@@ -76,17 +86,100 @@ if [ "$MODE" = "all" ] || [ "$MODE" = "restart" ]; then
 # 修法: 收集所有要杀的 PID, SIGTERM 后 polling kill -0 等死, 最多 3s,
 # 仍活的升级 SIGKILL. SIGKILL 内核直接回收, hotspotd 没机会跑 mdns_worker stop,
 # 但反正我们要 cleanup 全清, 子进程清理路径跑完跑半都无关紧要.
+_cleanup_is_service_sh_pid() {
+    local _sp="$1" _proot="${HNC_PROC_ROOT:-/proc}" _comm="" _a0="" _a1=""
+    case "$_sp" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    [ "$_sp" = "$$" ] && return 1
+    [ -n "${PPID:-}" ] && [ "$_sp" = "$PPID" ] && return 1
+    [ -r "$_proot/$_sp/cmdline" ] || return 1
+    if [ -r "$_proot/$_sp/comm" ]; then
+        _comm=$(tr -d '\r\n' < "$_proot/$_sp/comm" 2>/dev/null)
+        case "$_comm" in
+            ""|sh|mksh|ash|dash|busybox|toybox|service.sh) ;;
+            *) return 1 ;;
+        esac
+    fi
+    _a0=$(tr '\000' '\n' < "$_proot/$_sp/cmdline" 2>/dev/null | sed -n '1p')
+    _a1=$(tr '\000' '\n' < "$_proot/$_sp/cmdline" 2>/dev/null | sed -n '2p')
+    case "$_a0" in
+        */hotspot_net_ctl/service.sh|*/hotspot_network_control/service.sh|/data/adb/hnc/service.sh|"$HNC_DIR/service.sh")
+            return 0
+            ;;
+    esac
+    case "${_a0##*/}" in
+        sh|mksh|ash|dash|busybox|toybox)
+            [ "$_a1" = "-c" ] && return 1
+            case "$_a1" in
+                */hotspot_net_ctl/service.sh|*/hotspot_network_control/service.sh|/data/adb/hnc/service.sh|"$HNC_DIR/service.sh")
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
+_cleanup_is_hnc_script_pid() {
+    local _sp="$1" _rel="$2" _proot="${HNC_PROC_ROOT:-/proc}" _bn _comm="" _a0="" _a1=""
+    case "$_sp" in ''|*[!0-9]*|0|1) return 1 ;; esac
+    [ "$_sp" = "$$" ] && return 1
+    [ -n "${PPID:-}" ] && [ "$_sp" = "$PPID" ] && return 1
+    [ -n "$_rel" ] && [ -r "$_proot/$_sp/cmdline" ] || return 1
+    _bn="${_rel##*/}"
+    if [ -r "$_proot/$_sp/comm" ]; then
+        _comm=$(tr -d '\r\n' < "$_proot/$_sp/comm" 2>/dev/null)
+        case "$_comm" in
+            ""|sh|mksh|ash|dash|busybox|toybox|"$_bn") ;;
+            *) return 1 ;;
+        esac
+    fi
+    _a0=$(tr '\000' '\n' < "$_proot/$_sp/cmdline" 2>/dev/null | sed -n '1p')
+    _a1=$(tr '\000' '\n' < "$_proot/$_sp/cmdline" 2>/dev/null | sed -n '2p')
+    case "$_a0" in
+        "$HNC_DIR/$_rel"|"/data/local/hnc/$_rel"|*/hotspot_net_ctl/"$_rel"|*/hotspot_network_control/"$_rel"|/data/adb/hnc/"$_rel")
+            return 0
+            ;;
+    esac
+    case "${_a0##*/}" in
+        sh|mksh|ash|dash|busybox|toybox)
+            [ "$_a1" = "-c" ] && return 1
+            case "$_a1" in
+                "$HNC_DIR/$_rel"|"/data/local/hnc/$_rel"|*/hotspot_net_ctl/"$_rel"|*/hotspot_network_control/"$_rel"|/data/adb/hnc/"$_rel")
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
+_cleanup_pidfile_verified() {
+    local _p="$1" _role="$2"
+    case "$_role" in
+        sentinel) _cleanup_is_service_sh_pid "$_p" ;;
+        watchdog) pid_matches "$_p" hnc_watchdog || _cleanup_is_hnc_script_pid "$_p" "bin/watchdog.sh" ;;
+        dpid_guard|launcher) pid_matches "$_p" hnc_launcher ;;
+        dpid) pid_matches "$_p" hnc_dpid ;;
+        hotspotd) pid_matches "$_p" hotspotd ;;
+        hotspot) _cleanup_is_hnc_script_pid "$_p" "bin/hotspot_autostart.sh" || _cleanup_is_service_sh_pid "$_p" ;;
+        httpd) pid_matches "$_p" hnc_httpd ;;
+        *) return 1 ;;
+    esac
+}
+
 PIDS_TO_WAIT=""
-# v5.33: 只列现在还有人写的 pidfile(clsact_wd / offload_guard / detect / api / netmon /
-# dpid.monitor / dpid.child 的写者都早已删除)。
+# v5.33 / RC2: 只列现在还有人写的 pidfile, 强制纯数字正整数校验 + 排除 $$/$PPID + pid_matches 精确身份核验!
 for pidfile in sentinel watchdog dpid_guard launcher dpid hotspotd hotspot httpd; do
-    PID=$(cat "$RUN/${pidfile}.pid" 2>/dev/null)
-    if [ -n "$PID" ] && kill -0 "$PID" 2>/dev/null; then
+    PID=$(tr -d ' \t\r\n' < "$RUN/${pidfile}.pid" 2>/dev/null)
+    rm -f "$RUN/${pidfile}.pid"
+    case "$PID" in ''|*[!0-9]*|0|1) continue ;; esac
+    [ "$PID" = "$$" ] && continue
+    [ -n "${PPID:-}" ] && [ "$PID" = "$PPID" ] && continue
+    if _cleanup_pidfile_verified "$PID" "$pidfile" && kill -0 "$PID" 2>/dev/null; then
         kill "$PID" 2>/dev/null
         log "TERM $pidfile (PID=$PID)"
         PIDS_TO_WAIT="$PIDS_TO_WAIT $PID:$pidfile"
     fi
-    rm -f "$RUN/${pidfile}.pid"
 done
 
 # 等所有 PID 真死, 最多 3s (30 轮 × 100ms)
@@ -95,6 +188,7 @@ while [ $WAIT_ROUND -lt 30 ]; do
     STILL_ALIVE=""
     for entry in $PIDS_TO_WAIT; do
         pid_only=${entry%%:*}
+        case "$pid_only" in ''|*[!0-9]*|0|1) continue ;; esac
         if kill -0 "$pid_only" 2>/dev/null; then
             STILL_ALIVE="$STILL_ALIVE $entry"
         fi
@@ -110,25 +204,63 @@ done
 for entry in $PIDS_TO_WAIT; do
     pid_only=${entry%%:*}
     name_only=${entry#*:}
-    if kill -0 "$pid_only" 2>/dev/null; then
+    case "$pid_only" in ''|*[!0-9]*|0|1) continue ;; esac
+    [ "$pid_only" = "$$" ] && continue
+    [ -n "${PPID:-}" ] && [ "$pid_only" = "$PPID" ] && continue
+    if _cleanup_pidfile_verified "$pid_only" "$name_only" && kill -0 "$pid_only" 2>/dev/null; then
         kill -9 "$pid_only" 2>/dev/null
         log "KILL -9 $name_only (PID=$pid_only) - did not exit cleanly within 3s"
     fi
 done
 
-# rc2 修 S9: pkill -f 用完整 bin/xxx.sh 前缀而不是裸名.
-#   原 "watchdog" 会匹配 cmdline 里任何含 "watchdog" 的进程 (例如用户在编辑器打开
-#   watchdog.sh, 或其他模块路径含 watchdog). "bin/watchdog.sh" 把误杀面收窄到实际
-#   含 HNC 脚本路径的进程.
-# rc30.0+ : 加入 hnc_watchdog (Go 二进制) 的清理(v5.33 删了 dpid supervisor / shell guard).
-for proc in bin/hnc_launcher bin/hnc_watchdog bin/hnc_offload_guard.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
-    pkill -f "$proc" 2>/dev/null && log "pkill $proc"
-done
-# watchdogfix-v6.1: also stop stale service.sh sentinel shells; otherwise
-# cleanup/restart can kill watchdog and an old sentinel immediately recreates it.
-for svcpat in "hotspot_net_ctl/service.sh" "hotspot_network_control/service.sh" "/data/adb/hnc/service.sh"; do
-    pkill -f "$svcpat" 2>/dev/null && log "pkill service/sentinel $svcpat"
-done
+# RC2 P1-2: 移除宽泛的 pkill -f, 改用 /proc/<pid>/comm + argv[0] 精确身份匹配清理未登记孤儿进程
+# (非 /data/local/hnc 单测沙箱且未显式指定 HNC_PROC_ROOT 时绝不扫描宿主机 /proc!)
+_proot="${HNC_PROC_ROOT:-/proc}"
+if [ "$_proot" != "/proc" ] || { [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+    _SWEEP_PIDS=""
+    for _d in "$_proot"/[0-9]*; do
+        [ -r "$_d/cmdline" ] || continue
+        _p=${_d##*/}
+        case "$_p" in ''|*[!0-9]*|0|1) continue ;; esac
+        [ "$_p" = "$$" ] && continue
+        [ -n "${PPID:-}" ] && [ "$_p" = "$PPID" ] && continue
+        _matched=""
+        for _bname in hnc_launcher hnc_watchdog hnc_dpid hotspotd hnc_httpd; do
+            if pid_matches "$_p" "$_bname"; then
+                _matched="$_bname"
+                break
+            fi
+        done
+        if [ -z "$_matched" ]; then
+            for _sname in bin/hnc_offload_guard.sh bin/device_detect.sh bin/watchdog.sh bin/hotspot_autostart.sh; do
+                if _cleanup_is_hnc_script_pid "$_p" "$_sname"; then
+                    _matched="$_sname"
+                    break
+                fi
+            done
+        fi
+        if [ -z "$_matched" ] && _cleanup_is_service_sh_pid "$_p"; then
+            _matched="service.sh"
+        fi
+        if [ -n "$_matched" ]; then
+            kill "$_p" 2>/dev/null && log "TERM orphan $_matched (PID=$_p)"
+            _SWEEP_PIDS="$_SWEEP_PIDS $_p:$_matched"
+        fi
+    done
+    if [ -n "$_SWEEP_PIDS" ]; then
+        sleep 0.2 2>/dev/null || sleep 1
+        for _se in $_SWEEP_PIDS; do
+            _sp=${_se%%:*}
+            _sn=${_se#*:}
+            case "$_sp" in ''|*[!0-9]*|0|1) continue ;; esac
+            [ "$_sp" = "$$" ] && continue
+            [ -n "${PPID:-}" ] && [ "$_sp" = "$PPID" ] && continue
+            if kill -0 "$_sp" 2>/dev/null; then
+                kill -9 "$_sp" 2>/dev/null && log "KILL -9 orphan $_sn (PID=$_sp)"
+            fi
+        done
+    fi
+fi
 fi  # end MODE=all|restart 的进程清理分支
 
 # ── 2. 清除 TC 规则(覆盖当前活跃接口 + 历史迁移/缓存接口 + mq 子树/复用树残留)──
@@ -284,6 +416,12 @@ log "Cleaning iptables chains (v4+v6)..."
 # 双栈幂等拆链(含 HNC_TUN_GUARD, HNC_ISOLATE, HNC_QUIC_APPLIM, HNC_SCALPEL 等全部子链)
 _cleanup_ipt_stack() {
     _cmd="$1"
+    _w="-w 2"
+    if [ -z "${HNC_TEST_MODE:-}" ]; then
+        "$_cmd" -w 2 -t filter -L -n >/dev/null 2>&1 || {
+            "$_cmd" -t filter -L -n >/dev/null 2>&1 && _w=""
+        }
+    fi
     for _tc in "mangle PREROUTING  HNC_PREROUTE_GUARD" \
                "mangle PREROUTING  HNC_TUN_GUARD" \
                "mangle PREROUTING  HNC_RESTORE" \
@@ -291,6 +429,7 @@ _cleanup_ipt_stack() {
                "mangle FORWARD     HNC_RESTORE" \
                "mangle FORWARD     HNC_MARK" \
                "mangle FORWARD     HNC_STATS" \
+               "mangle FORWARD     HNC_TCPMSS" \
                "mangle FORWARD     HNC_APP_LIMIT" \
                "mangle FORWARD     HNC_APP_LIMIT_UP" \
                "mangle POSTROUTING HNC_APP_LIMIT_DOWN" \
@@ -314,25 +453,34 @@ _cleanup_ipt_stack() {
         set -- $_tc
         _t="$1"; _p="$2"; _h="$3"
         _n=0
-        while "$_cmd" -w 2 -t "$_t" -D "$_p" -j "$_h" 2>/dev/null; do
+        # shellcheck disable=SC2086
+        while "$_cmd" $_w -t "$_t" -D "$_p" -j "$_h" 2>/dev/null; do
             _n=$((_n + 1))
             [ "$_n" -ge 32 ] && break
         done
-        "$_cmd" -w 2 -t "$_t" -F "$_h" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        "$_cmd" $_w -t "$_t" -F "$_h" 2>/dev/null || true
     done
     # 二级 -g 子链在父链清空后引用归零，安全清空并删除
-    "$_cmd" -w 2 -t mangle -F HNC_APP_QOS_IP 2>/dev/null || true
-    "$_cmd" -w 2 -t mangle -X HNC_APP_QOS_IP 2>/dev/null || true
-    for _al in $("$_cmd" -w 2 -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}'); do
+    # shellcheck disable=SC2086
+    "$_cmd" $_w -t mangle -F HNC_APP_QOS_IP 2>/dev/null || true
+    # shellcheck disable=SC2086
+    "$_cmd" $_w -t mangle -X HNC_APP_QOS_IP 2>/dev/null || true
+    # shellcheck disable=SC2086
+    for _al in $("$_cmd" $_w -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}'); do
         [ -n "$_al" ] || continue
-        "$_cmd" -w 2 -t mangle -F "$_al" 2>/dev/null || true
-        "$_cmd" -w 2 -t mangle -X "$_al" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        "$_cmd" $_w -t mangle -F "$_al" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        "$_cmd" $_w -t mangle -X "$_al" 2>/dev/null || true
     done
-    for _h in HNC_PREROUTE_GUARD HNC_TUN_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE HNC_EGRESS_FIX; do
-        "$_cmd" -w 2 -t mangle -X "$_h" 2>/dev/null || true
+    for _h in HNC_PREROUTE_GUARD HNC_TUN_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_TCPMSS HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS_MARK HNC_APP_QOS HNC_SAVE HNC_EGRESS_FIX; do
+        # shellcheck disable=SC2086
+        "$_cmd" $_w -t mangle -X "$_h" 2>/dev/null || true
     done
     for _h in HNC_SCALPEL HNC_ISOLATE HNC_CTRL HNC_WHITELIST HNC_QUIC HNC_QUIC_APPLIM HNC_CONNBLK HNC_CONNBLK_DNS HNC_ENCDNS HNC_ENCDNS_STRICT HNC_ENCDNS_DOT; do
-        "$_cmd" -w 2 -t filter -X "$_h" 2>/dev/null || true
+        # shellcheck disable=SC2086
+        "$_cmd" $_w -t filter -X "$_h" 2>/dev/null || true
     done
 }
 _cleanup_ipt_stack iptables

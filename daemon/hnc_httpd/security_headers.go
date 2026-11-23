@@ -36,7 +36,7 @@ import (
 	"sync"
 )
 
-const cspCommonTail = "style-src 'self' 'unsafe-inline'; img-src 'self' data:; " +
+const cspCommonTail = "style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; " +
 	"connect-src 'self' http://127.0.0.1:8444; object-src 'none'; base-uri 'self'; " +
 	"form-action 'self'; frame-ancestors 'none'"
 

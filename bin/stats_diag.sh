@@ -5,6 +5,11 @@
 
 set +e
 HNC_DIR="${HNC_DIR:-${HNC:-/data/local/hnc}}"
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+  case "$_he" in /bin/hnc_env.sh) continue ;; esac
+  if [ -f "$_he" ]; then . "$_he"; break; fi
+done
+unset _he
 DATA="$HNC_DIR/data"
 RUN="$HNC_DIR/run"
 LOGS="$HNC_DIR/logs"
@@ -15,7 +20,7 @@ LOG="$LOGS/stats.log"
 MODE="${1:-json}"
 
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r/ /g; s/\n/ /g; s/\t/ /g'
+  printf '%s' "$1" | tr '\r\n	' '   ' | tr -d '\000-\010\013\014\016-\037' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g'
 }
 
 num_or_zero() {
@@ -72,7 +77,7 @@ stats_jsonl_summary() {
   }
   END {
     if (kind == "raw" && newest > 0 && now > newest) age=now-newest; else age=0
-    printf "%d %d %d %d %d %d %d", total+0, valid+0, invalid+0, uniq+0, oldest+0, newest+0, age+0
+    printf "%.0f %.0f %.0f %.0f %.0f %.0f %.0f", total+0, valid+0, invalid+0, uniq+0, oldest+0, newest+0, age+0
   }' "$f" 2>/dev/null)"
   set -- $out
   total="$(num_or_zero "$1")"

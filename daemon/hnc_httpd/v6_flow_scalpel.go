@@ -284,6 +284,11 @@ func buildScalpelRestorePayload(isIPv6 bool, rules []ScalpelActiveRule) string {
 	return b.String()
 }
 
+var (
+	scalpelResolveBinFn = resolveScalpelBin
+	scalpelIptExecFn    = defaultScalpelIptExec
+)
+
 func resolveScalpelBin(name string) string {
 	for _, dir := range []string{"/system/bin", "/system/xbin", "/vendor/bin", "/usr/sbin", "/sbin", "/usr/bin", "/bin"} {
 		cand := dir + "/" + name
@@ -295,6 +300,37 @@ func resolveScalpelBin(name string) string {
 		return p
 	}
 	return ""
+}
+
+func defaultScalpelIptExec(binPath string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	cmd := hardenCmd(exec.CommandContext(ctx, binPath, args...))
+	cmd.Env = subprocEnvWithFallbackPath()
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	err := cmd.Run()
+	return buf.String(), err
+}
+
+func runScalpelIptWithWaitFallback(binPath string, args ...string) error {
+	out1, err1 := scalpelIptExecFn(binPath, append([]string{"-w", "2"}, args...)...)
+	if err1 == nil {
+		return nil
+	}
+	if !isXtablesWaitFlagError(out1 + " " + err1.Error()) {
+		return err1
+	}
+	out2, err2 := scalpelIptExecFn(binPath, append([]string{"-w"}, args...)...)
+	if err2 == nil {
+		return nil
+	}
+	if isXtablesWaitFlagError(out2 + " " + err2.Error()) {
+		_, err3 := scalpelIptExecFn(binPath, args...)
+		return err3
+	}
+	return err2
 }
 
 func (e *flowScalpelEngine) ensureForwardJump(isIPv6 bool) {
@@ -311,15 +347,13 @@ func (e *flowScalpelEngine) ensureForwardJump(isIPv6 bool) {
 	if isIPv6 {
 		iptName = "ip6tables"
 	}
-	binPath := resolveScalpelBin(iptName)
+	binPath := scalpelResolveBinFn(iptName)
 	if binPath == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = hardenCmd(exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-N", scalpelChainName)).Run()
-	if hardenCmd(exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-C", "FORWARD", "-j", scalpelChainName)).Run() != nil {
-		_ = hardenCmd(exec.CommandContext(ctx, binPath, "-w", "2", "-t", "filter", "-I", "FORWARD", "1", "-j", scalpelChainName)).Run()
+	_ = runScalpelIptWithWaitFallback(binPath, "-t", "filter", "-N", scalpelChainName)
+	if runScalpelIptWithWaitFallback(binPath, "-t", "filter", "-C", "FORWARD", "-j", scalpelChainName) != nil {
+		_ = runScalpelIptWithWaitFallback(binPath, "-t", "filter", "-I", "FORWARD", "1", "-j", scalpelChainName)
 	}
 	e.mu.Lock()
 	if isIPv6 {
@@ -339,20 +373,11 @@ func (e *flowScalpelEngine) defaultPipeRestore(family int, payload string) error
 	if isV6 {
 		binName = "ip6tables-restore"
 	}
-	binPath := resolveScalpelBin(binName)
+	binPath := scalpelResolveBinFn(binName)
 	if binPath == "" {
 		return fmt.Errorf("%s not found", binName)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), scalpelRestoreTimeout)
-	defer cancel()
-	cmd := hardenCmd(exec.CommandContext(ctx, binPath, "-w", "2", "--noflush"))
-	cmd.Stdin = strings.NewReader(payload)
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s: %v (%s)", binName, err, strings.TrimSpace(stderr.String()))
-	}
-	return nil
+	return pipeIptablesRestoreWithTimeout(binPath, []byte(payload), scalpelRestoreTimeout)
 }
 
 // Cut 执行两步秒斩手术并启动 5s 自动清理定时器（若 mode=cut_freeze_15m 同步挂入 15m 冻结）。

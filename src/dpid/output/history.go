@@ -32,6 +32,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -43,7 +44,10 @@ import (
 // Tunables. Exported so the main entrypoint can override for tests, but the
 // defaults are what production uses.
 var (
-	HistoryDir         = "/data/local/hnc/run"
+	// RC2: moved out of 32M tmpfs (/data/local/hnc/run) to persistent storage
+	// (/data/local/hnc/data/dpi_history) so 32-day JSONL retention (~13MB) never
+	// pressures tmpfs or disappears across reboots.
+	HistoryDir         = "/data/local/hnc/data/dpi_history"
 	HistorySampleEvery = 15 * time.Minute
 	// v5.12: 7 → 32。alert/quota.go 的月度配额按自然月(本地时区 1 号 0 点
 	// 至今)读 stats.YYYYMMDD.jsonl, 旧的 7 天保留期让每月 8 号以后只剩最近
@@ -325,6 +329,138 @@ func normalizeHistMAC(mac string) string {
 		return ""
 	}
 	return mac
+}
+
+// MigrateLegacyHistory creates targetDir and migrates any residual
+// stats.*.jsonl files from legacyDir (typically 32M tmpfs run/) into targetDir
+// (persistent data/dpi_history). Handles EXDEV cross-filesystem moves (tmpfs ->
+// f2fs/ext4) via copy+fsync+rename, and safely merges rows when the destination
+// daily file already exists.
+func MigrateLegacyHistory(legacyDir, targetDir string) error {
+	if targetDir == "" {
+		return nil
+	}
+	if err := os.MkdirAll(targetDir, 0o755); err != nil {
+		return err
+	}
+	if legacyDir == "" || filepath.Clean(legacyDir) == filepath.Clean(targetDir) {
+		return nil
+	}
+	pattern := filepath.Join(legacyDir, HistoryFilePrefix+"*"+HistoryFileSuffix)
+	files, err := filepath.Glob(pattern)
+	if err != nil || len(files) == 0 {
+		return nil
+	}
+	var firstErr error
+	for _, src := range files {
+		dst := filepath.Join(targetDir, filepath.Base(src))
+		if merr := migrateSingleHistoryFile(src, dst); merr != nil && firstErr == nil {
+			firstErr = merr
+		}
+	}
+	_ = os.Remove(filepath.Join(legacyDir, "stats.write_err"))
+	return firstErr
+}
+
+func migrateSingleHistoryFile(src, dst string) error {
+	if _, err := os.Stat(dst); os.IsNotExist(err) {
+		if rerr := os.Rename(src, dst); rerr == nil {
+			return nil
+		}
+		// Cross-device EXDEV (tmpfs -> /data): copy to temp in dst dir, fsync, rename, remove src.
+		in, err := os.Open(src)
+		if err != nil {
+			return err
+		}
+		tmp := fmt.Sprintf("%s.mig.%d.tmp", dst, os.Getpid())
+		out, err := os.OpenFile(tmp, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
+		if err != nil {
+			_ = in.Close()
+			return err
+		}
+		if _, err := io.Copy(out, in); err != nil {
+			_ = out.Close()
+			_ = in.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+		_ = in.Close()
+		if err := out.Sync(); err != nil {
+			_ = out.Close()
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := out.Close(); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		if err := os.Rename(tmp, dst); err != nil {
+			_ = os.Remove(tmp)
+			return err
+		}
+		return os.Remove(src)
+	}
+
+	// Destination already exists: deduplicate identical lines and append new ones.
+	existing := make(map[string]struct{}, 128)
+	if df, err := os.Open(dst); err == nil {
+		sc := bufio.NewScanner(df)
+		sc.Buffer(make([]byte, 0, 8192), 256*1024)
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line != "" {
+				existing[line] = struct{}{}
+			}
+		}
+		_ = df.Close()
+	}
+
+	sf, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	var toAppend []string
+	sc := bufio.NewScanner(sf)
+	sc.Buffer(make([]byte, 0, 8192), 256*1024)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" {
+			continue
+		}
+		if _, dup := existing[line]; !dup {
+			existing[line] = struct{}{}
+			toAppend = append(toAppend, line)
+		}
+	}
+	scanErr := sc.Err()
+	_ = sf.Close()
+	if scanErr != nil {
+		return scanErr
+	}
+
+	if len(toAppend) > 0 {
+		out, err := os.OpenFile(dst, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		bw := bufio.NewWriter(out)
+		for _, l := range toAppend {
+			_, _ = bw.WriteString(l)
+			_ = bw.WriteByte('\n')
+		}
+		if err := bw.Flush(); err != nil {
+			_ = out.Close()
+			return err
+		}
+		if err := out.Sync(); err != nil {
+			_ = out.Close()
+			return err
+		}
+		if err := out.Close(); err != nil {
+			return err
+		}
+	}
+	return os.Remove(src)
 }
 
 // _unused silences "fmt imported but not used" once we drop debug helpers.

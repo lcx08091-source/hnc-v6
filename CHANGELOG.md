@@ -14,18 +14,31 @@
 
 ---
 
+## [6.1.0-rc.2] - 2026-11-22
+
+> **通道说明（候选发布通道 · 稳定版当前为 `v6.0.1`）**：本版本为 `v6.1.0` 正式版前的第二候选封版（`versionCode=6009302`），全面收口实时信号双轨波形与四维干扰诊断、双胞胎设备防误并秒拆、VPN/透明代理礼让与双栈 TCPMSS 钳制、全芯片/全 Root 框架/跨内核/老旧 WebView 与 Safari 证书兼容，并将跨月账单迁出 `32M tmpfs` 内存盘；自动更新广播文件（`update.json`）继续锁定于 `v6.0.1`（`6000001`），不会向稳定版用户自动推送。
+
+### v6.1.0 全量收尾工程第五阶段 · 实时信号双轨波形、全芯片全框架兼容大满贯与内存盘减负封版
+- **Added · 热点手机实时信号双轨波形与四维干扰诊断 (`daemon/hnc_httpd/signal_monitor.go` + `webroot/*`)**: 信号诊断弹层新增 `RSRP` 信号强度与 `SINR` 信噪比双轨实时历史趋势波形图、`PCC/SCC` 多载波聚合频段胶囊条，并拆解输出邻区同频干扰、基站空口拥塞、弱覆盖边缘衰减与上行功率受限四维量化状态条，全面适配深浅双色与液态玻璃高对比度显示。
+- **Added · 同型号双胞胎在线互斥与误合并一键秒拆 (`daemon/hnc_httpd/mac_merge*.go` + `webroot/*`)**: 强化家庭多台同型号手机/平板同时在线时的随机 MAC 互斥守卫，杜绝双胞胎设备误合并；新增已合并记录一键秒拆回退能力，当场独立还原原设备备注名、限速、配额与流量统计归属。
+- **Fixed · VPN/透明代理礼让与双栈 TCPMSS 自动钳制 (`./bin/iptables_manager.sh` + `./bin/tc_manager.sh` + `daemon/hnc_httpd/*`)**: 自动感知本机 `tun+` / `wg+` / 透明代理分流隧道并智能礼让策略路由与 DNS 转发防止环路冲突，同步在热点转发链补齐 IPv4/IPv6 双栈 `TCPMSS --clamp-mss-to-pmtu` 自动钳制，根治开启代理或特殊 MTU 链路上网页卡白屏与 App 转圈黑洞。
+- **Fixed · 多芯片天玑 `MDDP` / Pixel `gti*` / 双 Wi-Fi / 墓碑防冻与跨内核降级 (`./bin/hnc_offload_guard.sh` + `./bin/tc_manager.sh` + `./service.sh` + `daemon/*` + `src/*`)**: 深化联发科天玑 `MDDP` 硬件快径压制、Google Pixel `gti*` 虚拟热点网卡匹配、Wi-Fi 7 MLO 与双 Wi-Fi 并发并管及 Android 14–16 Cached Apps Freezer / 墓碑机制守护进程防冻结豁免；完善老旧或裁剪内核缺失 `ifb`、`sch_fq_codel`、`clsact` 或 `ip6tables` 扩展时的无感降级回退链。
+- **Fixed · 四大 Root 框架与 Magisk 本机免输解锁 (`./action.sh` + `./bin/pair_gen.sh` + `webroot/json-health.html` + `daemon/hnc_httpd/web/pair.html`)**: 全面打通 KernelSU（含 Next / SukiSU Ultra）、APatch（SuperKey）与 Magisk 兼容，剥离 `json-health.html` 套在 `ksu.exec` 外层多余的 `su -c` 包装并支持浏览器模式直接调用 `/api/export` 下载诊断包；`pair.html` 补齐 Magisk 模块页操作按钮本机一键免输进入及命令行 `./bin/pair_gen.sh` 取码指引。
+- **Fixed · 老内核 WebView CSS 全量回退与 Safari `<=397` 天 TLS 证书兼容 (`webroot/css/*.css` + `webroot/*.html` + `daemon/hnc_httpd/*`)**: 拆分 `apple.css` 中含 `:has(>.gi)` 的选择器防 Chromium `<105` 整条丢弃列表分隔线，补齐全站 `color-mix`（含 `@supports` 守卫防 `var()` 计算期隐形）、`inset` 四向定位、`dvh`、`clamp`、`scale`、`backdrop-filter` 与 `env(..., 0px)` 回退以兼容 Chromium 83–110 系统 WebView 与 iOS 15 Safari；自签 TLS 证书有效期严格收口至 `<=397` 天并完备 SAN 扩展。
+- **Changed · 跨月账单撤出 `32M tmpfs`、命令原生化减负与全仓 `v6.1.0-rc.2` 换牌 (`daemon/hnc_httpd/*` + `src/dpid/*` + `./bin/hnc_rollback.sh` + `./bin/version_consistency_check.sh` + `data/*`)**: 将跨月持久化流量账单迁出 `/data/local/hnc/run`（`32M tmpfs`）落回持久化数据目录防止挤占内存盘与重启丢失，收敛高频外部命令派生为原生读取减负；扩展 `./bin/hnc_rollback.sh` 配置快照白名单覆盖 `leakguard_config.json`、`vector_express.json`、`update_leash.json`、`thermo_cruise.json`、`rmac_policy.json`、`webui_access.json`、`dpi_fp_prototypes.json`、`self_policy.json` 及 `v6_*.json`，同步全仓 34 个策展规则分包与 JA4 指纹库至 `v6.1.0-rc.2`（`6009302`）。
+
 ## [6.1.0-rc.1] - 2026-11-22
 
 > **通道说明（候选发布通道 · 稳定版当前为 `v6.0.1`）**：本版本为 `v6.1.0` 正式版前的首个候选封版（`versionCode=6009301`），集中落地防误操作交互、一句话省电健康体检、弱网 DNS 保活、卡顿人话归因、四引擎深度待机停表与全栈二进制换牌；自动更新广播文件（`update.json`）继续锁死在 `v6.0.1`（`6000001`），不会向稳定版用户自动推送。
 
 ### v6.1.0 全量收尾工程第四阶段 · 候选封版体验打磨、深度待机停表与全栈统一换牌版
-- **Added · 高风险操作 5s 撤销胶囊与前端零拖动滑条 (`webroot/*`)**: 拉黑设备、冻结连接与一键管控等高风险动作新增底部 5 秒「后悔药」撤销胶囊，手滑点错可当场一键撤回；全站彻底清零易在手机 WebView 滚动时误触卡顿的 `<input type="range">` 拖动滑条，玻璃浓度、壁纸景深模糊与遮罩护眼浓度统一升级为清脆档位点选与步进微调。
-- **Added · 一句话省电健康体检单与黑匣子四维人话归因 (`daemon/hnc_httpd/*` + `webroot/*`)**: 新增直白易懂的一句话省电健康体检单，一眼看清当前热点待机档位、后台唤醒节奏与潜在耗电点；`200ms` 卡顿黑匣子升级四维人话归因引擎，将底层 RTT 突刺、队列丢包、带宽占满与射频波动直接翻译为上行基站拥塞、单设备跑满带宽、热点无线干扰或主动限速生效四大明白结论。
+- **Added · 高风险操作 5s 撤销胶囊与前端零拖动滑条 (`webroot/*`)**: 拉黑设备、冻结连接与一键管控等高风险动作新增底部 5 秒「后悔药」撤销胶囊，手滑点错可当场一键撤回；全站彻底清零易在手机 WebView 滚动时误触卡顿的原生横向拖动滑条，玻璃浓度、壁纸景深模糊与遮罩护眼浓度统一升级为清脆档位点选与步进微调。
+- **Added · 一句话省电健康体检单与黑匣子四维人话归因 (`daemon/hnc_httpd/*` + `webroot/*`)**: 新增直白易懂的一句话省电健康体检单，一眼看清当前热点待机档位、后台唤醒节奏与潜在耗电点；`200ms` 卡顿黑匣子升级四维人话归因引擎，将底层 RTT 突刺、队列丢包、带宽占满与射频温控采样直接翻译为上行基站拥塞、单设备跑满带宽、手机发热降速 / 上行基站波动或主动限速生效四大明白结论。
 - **Added · 隐私安检忽略白名单与公共 CDN 防误杀保护 (`daemon/hnc_httpd/*` + `src/dpid/leakguard/*` + `webroot/*`)**: `LeakGuard` 明文隐私安检支持按应用或域名一键加入忽略白名单不再重复打扰，并内置公共 CDN 与多应用共享基础设施防误杀守卫，杜绝一键封禁误伤正常系统与常用软件联网。
-- **Fixed · 单锁 DNS 弱网保活与切网秒清 (`bin/dns_takeover.sh` + `daemon/hnc_httpd/*` + `src/dpid/*`)**: 收敛 DNS 接管与探测互斥为单一排他锁串行执行，消除并发操作打架；弱网偶发超时期间智能保活现有解析规则不断网，一旦检测到蜂窝/Wi-Fi 上行网络切换立即秒清陈旧缓存恢复解析。
-- **Fixed · `Vector Express` 迁至 `1:8010` 专属加速通道 (`bin/tc_manager.sh` + `daemon/hnc_httpd/*`)**: 将救护车零排队加速类由易与第 16 号受控设备类撞车的旧类号迁移至专属 `classid 1:8010`（`handle 8010:`），双栈过滤优先级迁至 `prio 4` / `prio 5`，彻底避让 `prio 2` 应用 QoS 与镜像过滤链，启停加速零误伤。
+- **Fixed · 单锁 DNS 弱网保活与切网秒清 (`daemon/hnc_httpd/dns_forwarder.go` + `daemon/hnc_httpd/dns_takeover.go`)**: 收敛 DNS 接管与探测互斥为单一排他锁串行执行，消除并发操作打架；弱网偶发超时期间智能保活现有解析规则不断网，一旦检测到蜂窝/Wi-Fi 上行网络切换立即秒清陈旧缓存恢复解析。
+- **Fixed · `Vector Express` 迁至 `1:8010` 专属加速通道 (`./bin/tc_manager.sh` + `daemon/hnc_httpd/*`)**: 将救护车零排队加速类由易与第 16 号受控设备类撞车的旧类号迁移至专属 `classid 1:8010`（`handle 8010:`），双栈过滤优先级迁至 `prio 4` / `prio 5`，彻底避让 `prio 2` 应用 QoS 与镜像过滤链，启停加速零误伤。
 - **Fixed · 四引擎深度待机零唤醒停表与 SHM 真降频 (`daemon/hnc_httpd/*` + `src/dpid/*`)**: 热点未开启或零客户端空闲期，四大后台巡检与采样引擎彻底停表休眠实现零无效唤醒，同时 `16KB` 共享内存（`shm_vector.bin`）按活跃等级真正降频刷写，大幅压低息屏待机功耗。
-- **Changed · 全栈六大二进制与规则库版本号统一对齐及废弃脚本清退 (`.github/workflows/build.yml` + `src/*` + `daemon/*` + `data/dpi_rules.d/*` + `bin/*` + `test/*`)**: CI 双架构流水线为 `hnc_httpd`、`hnc_dpid`、`hnc_watchdog`、`hnc_launcher`、`hotspotd`、`hnc_clsact_ctl` 六大原生二进制与内置 DPI 规则库统一注入 `v6.1.0-rc.1`（`6009301`）并严格校验；清退已废弃的 `./bin/hnc_common.sh`、`./bin/watchdog.sh` 冗余 `is_doze` 分支与残留历史工具打包步骤，刷机包剔除纯 CI 门禁脚本，测试框架横幅动态读取 `module.prop` 版本号。
+- **Changed · 全栈六大二进制与规则库版本号统一对齐及废弃脚本清退 (`.github/workflows/build.yml` + `src/*` + `daemon/*` + `data/dpi_rules.d/*` + `./bin/*` + `test/*`)**: CI 双架构流水线为 `hnc_httpd`、`hnc_dpid`、`hnc_watchdog`、`hnc_launcher`、`hotspotd`、`hnc_clsact_ctl` 六大原生二进制与内置 DPI 规则库统一注入 `v6.1.0-rc.1`（`6009301`）并严格校验；清退已废弃的 `./bin/hnc_common.sh`、`./bin/watchdog.sh` 冗余 `is_doze` 分支与残留历史工具打包步骤，刷机包剔除纯 CI 门禁脚本，测试框架横幅动态读取 `module.prop` 版本号。
 
 ## [6.1.0-beta.2] - 2026-11-22
 
@@ -364,7 +377,7 @@ ho_{	ext{close}} \ge 0.70$），上滑划掉应用后秒级退出前台，同时
 - 新测试:`test/unit/test_v532_scan_count.sh`(计数 3 项)、`daemon/hotspotd/test/test_scan_arp_ip_select.c`(host 编译,21 项断言:dump 解析 + 单调合并,接入 `test/unit/test_v532_scan_arp_c.sh`)、`test/sim/run_m4_sim_v532.sh` + `test/unit/test_v532_sim_rescan.sh`(T2 场景:换 IP 后不发包直接 `SIGUSR1` 重扫 ×3 + 重启 ×2,每次都是新 IP)、`TestM4NextTickMS` / `TestRunnerIdleWakeRate`(T4)。每个修复都有「改动前会失败」的证据(BASE 干净树上新测试编译失败或行为断言不过,验证输出见提交说明)。
 - hotspotd C 改动(`scan_arp` / `nl_parse_dump_msgs` / `scan_apply_candidate` / `Device.confirmed_at`)本机 gcc 完整编译链接通过(含全部生产文件);**未在 NDK 下交叉编译**(本沙箱无 NDK;CI 按 `.github/workflows/build.yml` 编,审查时 Claude 用 NDK 编)。
 - 模拟设备(T2 / T3 场景)**本沙箱无 root 未跑**;维护者云端容器 `HNC_SIM=1 sh test/run_all.sh` 跑,报告 `m4_sim_v531_report.txt` + `m4_sim_v532_report.txt`。
-- 文档:README(hotspotd / hnc_watchdog 职责与现状一致、新增「升级与回退」段:5.29 自动回滚、`data/m4_owner` 的退路用法)、ROADMAP(v5.32 标 rc1 ✅)、CODEMAP(m4_owner 段补 v5.32 变化)、API.md(devices.json 写者说明修正)。
+- 文档:README(hotspotd / hnc_watchdog 职责与现状一致、新增「升级与回退」段:5.29 自动回滚、`data/m4_owner` 的退路用法)、ROADMAP(v5.32 标 rc1 [OK])、CODEMAP(m4_owner 段补 v5.32 变化)、API.md(devices.json 写者说明修正)。
 
 ### 审查修复(Claude,合入前)
 
@@ -833,7 +846,7 @@ C 改动用 NDK r27c 交叉编译(arm64 / armv7,不含需要 libbpf 的 BPF 适�
 
 ### Fixed(来自真机自检报告)
 
-- **能力探测文件损坏**:`capability_probe.sh` 统计 SELinux 拒绝次数时 `grep -c … || echo 0` 在没有记录时输出两个 `0`,整个 `capabilities.json` 解析失败(自检「能力探测结果」✗ 的根因,老问题)。计数字段加整数兜底;先写基础能力、队列探测改为限时后台(默认 45 秒,超时本次开机不再尝试加载模块并清理残留探测口)。
+- **能力探测文件损坏**:`capability_probe.sh` 统计 SELinux 拒绝次数时 `grep -c … || echo 0` 在没有记录时输出两个 `0`,整个 `capabilities.json` 解析失败(自检「能力探测结果」[FAIL] 的根因,老问题)。计数字段加整数兜底;先写基础能力、队列探测改为限时后台(默认 45 秒,超时本次开机不再尝试加载模块并清理残留探测口)。
 - **开 VPN 时热点上游判断成 tun0**:`hnc_iface.sh` 在子 shell 里给变量赋值,系统热点服务报告的上游永远取不到。修复后优先用系统热点上游;`iface_detect.json` 新增 `tether_upstream / local_upstream / vpn_active`,本月流量按热点真实上游拆分本机与热点,自检显示「热点上游 rmnet_data3(蜂窝) · 本机走 VPN tun0」。
 - **SukiSU 被识别为 KernelSU**:按证据强弱识别(版本串 / 管理器数据目录 / kpm 子命令 / SuSFS),证据不足时显示「KernelSU 系(可能为 SukiSU)」。
 - 自检补项:IPv6 邻居事件订阅、时钟守护、低延迟队列尝试过程、高通 IPA 可能绕过热点计数的提示;IP→域名映射为空时区分「还没有流量」与「路径异常」。
@@ -866,7 +879,7 @@ C 改动用 NDK r27c 交叉编译(arm64 / armv7,不含需要 libbpf 的 BPF 适�
 
 ### Added
 
-- **自检报告**(设置 → 诊断 → 自检报告,`selfcheck.go` / `selfcheck_api.go`):9 个分区并发、总时长 ≤ 18 秒 —— 设备与系统(ROM / SoC / 内核 / root 方案 / SELinux / WebUI 入口)、限速能力(tc 各 qdisc/filter/action、上行模式、低延迟队列实测)、防火墙(ip(6)tables 各 match、conntrack 计数与事件)、硬件加速(兜底状态、AOSP tether BPF、高通 IPA / 联发科 HWNAT / 三星 / 展锐)、热点与网络(接口与识别方式、上游、共享状态、双卡、热点 IPv6、开热点命令)、IPv6 覆盖(逐台比对 IPv6 地址与已装过滤器)、时间、进程与资源、识别(dpid、未识别占比、私人 DNS)。每项 ✓ / ! / ✗ / · 并附修复建议;全程只读(测试断言不发出任何 add/del 命令)。导出文本 + JSON 到 `exports/`,默认给 MAC / IP 打码。`GET /api/selfcheck`,动作 `selfcheck_run` / `selfcheck_export`。
+- **自检报告**(设置 → 诊断 → 自检报告,`selfcheck.go` / `selfcheck_api.go`):9 个分区并发、总时长 ≤ 18 秒 —— 设备与系统(ROM / SoC / 内核 / root 方案 / SELinux / WebUI 入口)、限速能力(tc 各 qdisc/filter/action、上行模式、低延迟队列实测)、防火墙(ip(6)tables 各 match、conntrack 计数与事件)、硬件加速(兜底状态、AOSP tether BPF、高通 IPA / 联发科 HWNAT / 三星 / 展锐)、热点与网络(接口与识别方式、上游、共享状态、双卡、热点 IPv6、开热点命令)、IPv6 覆盖(逐台比对 IPv6 地址与已装过滤器)、时间、进程与资源、识别(dpid、未识别占比、私人 DNS)。每项 [OK] / ! / [FAIL] / · 并附修复建议;全程只读(测试断言不发出任何 add/del 命令)。导出文本 + JSON 到 `exports/`,默认给 MAC / IP 打码。`GET /api/selfcheck`,动作 `selfcheck_run` / `selfcheck_export`。
 - **多机型兼容层**:
   - 统一热点接口探测 `bin/hnc_iface.sh`(用户设置 → `dumpsys tethering` → 共享防火墙规则 → `dumpsys wifi` 热点接口 → 按名扫描),结果写 `run/iface_detect.json`;识别 USB / 蓝牙 / 以太网共享(只上报,不管控)。设置 → 热点显示识别方式。
   - 蜂窝 / 热点接口名规则表 shell 与 Go 共用一份(高通 / 联发科 / 三星 / 展锐 / Tensor),有测试防止两边漂移。
@@ -1372,12 +1385,12 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 
 - **DPI 规则导入按钮静默无效**(`bin/dpi_rules_import.sh`)。导入此前写 legacy 单文件 `etc/dpi_rules.json`,而 dpid 自 rc30.12.31 起优先读 `etc/dpi_rules.d/*.json`(99-user-custom 最后加载、可覆盖策展规则)且 service.sh 每次开机重同步该目录——**用户在 WebUI 导入规则库,看到"导入成功",规则永远不被读取**。导入/安装默认/重置全部改写 `etc/dpi_rules.d/99-user-custom.json`(与 service.sh 的保留机制、rule.go 的注释约定三方对齐),`--export` 改为聚合导出(用户导入 → 旧版单文件 → 模块默认)。
 - **热点接口偏好是假功能**(`bin/device_detect.sh` + `bin/watchdog.sh`)。前端保存的 `hotspot_iface` 偏好,探测链完全不读;更糟的是 watchdog 每轮 init/迁移都用探测值**覆写**用户刚保存的值——"已保存"提示后 5 分钟内被冲掉。修复:探测链新增"方法 0"读偏好(接口存在且有 IPv4 才生效,防偏好指向已消失接口钉死模块);watchdog 两处覆写点加守卫——非 auto 偏好不覆盖,不一致时记日志。
-- **monthly_quota 告警只差一个函数**(`src/dpid/alert/quota.go` 新建)。JSON schema、配置结构、默认配置、前端渲染分支(📈 图标)自 v3.9 就全部就位,唯独检测函数从未写出——用户设了配额永远收不到告警。实现 `detectMonthlyQuota`:自然月窗口按天滚 `sumByMAC` 统计,`WarnAtPct`(默认 80%)预警 + 100% 超限两档,每月每档每设备最多一条(月粒度 dedup),超限档不受免打扰限制;接入 `Run()`。
+- **monthly_quota 告警只差一个函数**(`src/dpid/alert/quota.go` 新建)。JSON schema、配置结构、默认配置、前端渲染分支(图标)自 v3.9 就全部就位,唯独检测函数从未写出——用户设了配额永远收不到告警。实现 `detectMonthlyQuota`:自然月窗口按天滚 `sumByMAC` 统计,`WarnAtPct`(默认 80%)预警 + 100% 超限两档,每月每档每设备最多一条(月粒度 dedup),超限档不受免打扰限制;接入 `Run()`。
 
 ### Added — 七个"后端就绪差一根线"的接线
 
 - **远程 SPA 登出复活**:实现 server.go 注释里规划了一个版本的 `/api/whoami`(鉴权端点,返回 token label);`app.js` 的 `loadSessionInfo` 改走它——rc30.12.30 删除 health 的 session_label 后,登出按钮三个版本恒隐藏、`doLogout` 白写。
-- **远程 SPA 补应用级限速 + 设备重命名**:两个后端 action 均非 loopback-only、一直是"后端允许、前端没做"(远程正是管孩子设备的主场景)。设备卡加 ✏️ 改名 / 📱 应用限速按钮 + 两个处理函数(参数契约对齐 `actionDeviceRename` / `actionAppLimitSet`)。
+- **远程 SPA 补应用级限速 + 设备重命名**:两个后端 action 均非 loopback-only、一直是"后端允许、前端没做"(远程正是管孩子设备的主场景)。设备卡加 改名 / 应用限速按钮 + 两个处理函数(参数契约对齐 `actionDeviceRename` / `actionAppLimitSet`)。
 - **self_attrib 明细手动清理入口**:「我的应用」设置区加"清理自学习明细数据"按钮(confirm → `self_attrib_purge` action)——该 action 自 v5.9.7 就绪,BUGSV5-TRIAGE 里计划的前端入口从未落地。
 - **三个 dpid 指标首次上 UI**:DPI 进程卡新增"字节统计来源 · 规则覆盖"行——`byte_sampler_source`(为字节全 0 时解释"数据来自哪/为什么是 0",后端注释早就把这条产品需求写好了)、`unidentified_ratio`(规则覆盖率)、`evidence_summary.total`(证据账本条目数),均为后端已产出、UI 零消费的字段。
 - **模板持久化双写**:save/delete 在写 localStorage 的同时落盘 `data/templates.json`(经 json_set.sh tpl_set/tpl_del,失败只提示不阻断);启动加载时合并后端模板(换浏览器/清缓存后恢复)。此前模板只存 localStorage——清缓存即丢、远程端不可见,而后端 `/api/templates` 端点在等一个永远没人写的文件。
@@ -1410,7 +1423,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 - **v5.9.9 新加的 clsact「检查/修复」按钮完全点不动**(`webroot/index.html`)。两个 case 被写进了 `e.target.closest('.set-row.clickable')` 分支,但按钮所在行是 `<div class="set-row">`(无 clickable)——点击落到后面的 `.btn[data-action]` 分支,那里没有 case,静默无效(连 v5.9.9 专门加的兜底告警都够不到,因为根本进不了 clickable 分支)。已挪到 `.btn[data-action]` 分支。**顺带发现同型的存量死按钮**:「热点接口偏好」保存按钮(`save-iface`)也在非 clickable 行里、handler 同样写错分支——一并修活。
 - **hotspotd 接口重建后设备表冻结**(`daemon/hotspotd/hotspotd.c`)。`refresh_hotspot_iface` 只在接口**名字**变化时才重解析 ifindex,但 Android 热点重启是"同名接口销毁重建"(wlan2 down/up,ifindex 5→8)——名字不变、ifindex 变,旧缓存让 `ndm_ifindex(8) != g_hs_ifindex(5)` 把所有热点邻居事件当上游丢弃,设备表冻在重启前,直到接口改名。现在每次调用都 `if_nametoindex`(一次 syscall),顺带修掉失败时把 0 永久缓存住的问题。
 - **restore_rules 空 iface 整链静默空跑**(`bin/tc_manager.sh`)。启动早期 `device_detect.sh` 探测失败时 `iface=""`,恢复链跑完、clsact 安装也拿空 iface 只打 WARN,watchdog 认为"恢复完成"实际什么都没恢复。补上与 `init_tc` 同款的空 iface 守卫(`return 1` 让调用方重试)。
-- **clsact watchdog 探测序与热点进程不一致**(`bin/hnc_clsact_watchdog.sh`)。兜底探测 `wlan2 ap0 wlan1` 而 upstream.c 是 `wlan2 ap0 swlan0`——swlan0 机型(部分三星/LG)上 hnc_state 未就绪的启动窗口会把 BPF filter 挂到 wlan1(STA 接口),clsact_check 显示 ✅ 但拦不到任何热点包。对齐探测序。
+- **clsact watchdog 探测序与热点进程不一致**(`bin/hnc_clsact_watchdog.sh`)。兜底探测 `wlan2 ap0 wlan1` 而 upstream.c 是 `wlan2 ap0 swlan0`——swlan0 机型(部分三星/LG)上 hnc_state 未就绪的启动窗口会把 BPF filter 挂到 wlan1(STA 接口),clsact_check 显示 [OK] 但拦不到任何热点包。对齐探测序。
 - **hnc_json token 撤销对老数据"假成功"**(`daemon/hotspotd/tools/hnc_json.c`)。老版写出的 tokens.json 条目可能没有 `revoked` 字段,单 tid 撤销路径 `find_key` 未命中时 `return 0`——调用方把 rc=0 当成功,撤销被静默吞掉。未命中时改为在 token 对象收尾 `}` 前插入 `"revoked":true`。
 - **evidence 账本热路径 O(keys) 回归**(`src/dpid/output/evidence_ledger.go`)。`enforceTotalLocked` 原版每条 Add 都全量重算总数,而这发生在 dpid 的 `w.mu` 持有期间——数百 pps 时临界区拉长一个数量级,直接放大 AF_PACKET drops。改 `runningTotal` 增量计数(O(1) 判断,超限才扫),Trim/驱逐同步扣减。
 - **client 被驱逐时全局流计数漏扣**(`src/dpid/output/state.go`)。`evictOldestClientLocked` 整个 client(含其全部流)被删时没回扣 `totalActiveFlows`——计数单向正漂移,漂到恒超 `maxGlobalFlows` 后每包都进超限驱逐(O(客户端×流)),退化回分叉版的热路径问题。已回扣。
@@ -1436,7 +1449,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 - **clsact BPF 在 v5.9.7/v5.9.8 实际不可用**(`post-fs-data.sh` / `service.sh`)。新加的 `hnc_clsact_ctl` 二进制没进那两处 `chmod 755 + chcon u:object_r:system_file:s0` 白名单 —— 从模块目录拷到 `/data/local/hnc/bin/` 后是 `644` + `system_data_file:s0`,而三处门控(`service.sh` watchdog 启动、`tc_manager.sh` 的 `_hnc_clsact_enabled`、`hnc_clsact_watchdog.sh`)全是 `[ -x ]` 判定 → **开了开关也全链路静默降级,用户看不到任何错误**。同型前科已有两次,就写在 `post-fs-data.sh` 的注释里:beta.1 漏 `hnc_tc_ingress` 导致上行限速失败、rc30.8 漏 `hnc_dpid_supervisor`/`hnc_watchdog` 导致后端起不来。
 - **「导出诊断包」是死按钮**(`bin/debug_bundle.sh` 新建)。WebUI 从第一版起就调 `$HNC/bin/debug_bundle.sh`,但仓库里从来没有这个文件,点了必报错。现补上真实实现:环境摘要、配置/状态 JSON(password/pass/secret/token/pin/psk 与 `X-HNC-Local-Admin` 全部脱敏,`remote_tokens.json` 只留键名)、每个日志尾 400 行、`ip`/`tc`/`iptables`/`arp` 状态、进程与自检输出、clsact 状态,打成 `tar.gz`(tar 不可用则留目录形式)。
 - **统计来源下拉完全失效**(`webroot/index.html`)。`onStatsSourceChange` 定义在主脚本的 IIFE 内部,而唯一调用点是内联 `onchange=` 属性 —— 内联属性只能在全局作用域解析,每次切换都是 `ReferenceError` 被 WebView 静默吞掉:localStorage 不写、图不重绘、无 toast。改为 `window.onStatsSourceChange = function …`(同文件其余 13 个内联 handler 都有 window 导出,只有这个漏了)。
-- **clsact 面板三个问题**:① 旧「检查并修复」在检出缺失后**无条件**调 `clsact_repair` —— 开关显示 OFF 时也会安装内核 pref1 BPF filter + pin map,UI 态与内核态劈裂,且是未经用户同意的数据面变更;② `data-action="clsact_check"` 根本没有处理分支,点整行会落到委托兜底、弹出一个内容为字符串 `clsact_check` 的**假成功** toast(行内按钮的 `onclick` 又会让每次点击多弹一个);③ 状态行从不自动刷新,进设置页永远停在「—」。现在:查/修拆成两个按钮与两个独立函数、修复按钮仅在功能已启用且检出缺失时可点、进设置页自动查一次、关闭态直接显示「未启用」而不是四个 ❌(旧显示会让人以为功能坏了)、`checkClsact` 从 `init` 的 try 块内提到 IIFE 顶层(块级作用域 + 内联 onclick 有竞态窗口)。
+- **clsact 面板三个问题**:① 旧「检查并修复」在检出缺失后**无条件**调 `clsact_repair` —— 开关显示 OFF 时也会安装内核 pref1 BPF filter + pin map,UI 态与内核态劈裂,且是未经用户同意的数据面变更;② `data-action="clsact_check"` 根本没有处理分支,点整行会落到委托兜底、弹出一个内容为字符串 `clsact_check` 的**假成功** toast(行内按钮的 `onclick` 又会让每次点击多弹一个);③ 状态行从不自动刷新,进设置页永远停在「—」。现在:查/修拆成两个按钮与两个独立函数、修复按钮仅在功能已启用且检出缺失时可点、进设置页自动查一次、关闭态直接显示「未启用」而不是四个 [FAIL](旧显示会让人以为功能坏了)、`checkClsact` 从 `init` 的 try 块内提到 IIFE 顶层(块级作用域 + 内联 onclick 有竞态窗口)。
 - **点击委托兜底把「漏接」伪装成「成功」**。`toast(act, 'ok')` 是本次两个「点了没反应」缺陷(`clsact_check`、`modal-close`)能进版本的根因 —— 人工点测时都不像 bug。改为 `dbg(…, true)` + 红色 toast 显式告警。
 - **配对失败弹窗的「关闭」按钮点不动**:`data-action="modal-close"` 全文件仅此一处且无处理器,其余 10 个弹窗关闭按钮都用 `modal-cancel`,是笔误。
 - **关于页 versionCode 永久陈旧**。前端从 HTML 的 `data-vcode="580000"` 死属性读取,版本升了 code 不变,实机显示「v5.9.8 · versionCode 580000」。改为 `build.sh` 用 `-X main.versionCode` 从 module.prop 注入 → `/api/live` 返回 `backend_version_code` → 前端读后端值(缺失时回退旧属性)。
@@ -1838,7 +1851,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 ### Internals
 - **CI 补编 `hnc_dpid_supervisor`**(`.github/workflows/build.yml`)。它是纯 Go(`src/dpid/cmd/dpid_supervisor`)、不依赖 libbpf,但 CI 此前只编 `./cmd/dpid` 与 `./cmd/hnc_watchdog`、**漏编了它** → 一直以陈旧的提交版预编译形式发布,rc38 的 netlink 防抖修复(及之后改动)从未到达用户。现按 `hnc_dpid` / `hnc_watchdog` 同款每次 CI 重编 + strip。
 - **预编译 C 二进制新鲜度护栏**(`.github/workflows/build.yml` + `bin/.hotspotd_src.sha256`)。`bin/hotspotd` / `bin/hnc_ipc` / `bin/mdns_resolve` 依赖未 vendoring 的 libbpf,CI 无法重编,只能预编译入库——这正是 rc39 `scheduler.c`(16KB 定长→动态读)修复"号称修了却没进包"的根因。新增护栏:对 `daemon/hotspotd/**` 的 C 源码(排除 `test/`)算确定性指纹,与 `bin/.hotspotd_src.sha256` 比对,**源码改了却没重编 → CI 失败**并提示重编步骤,从此杜绝静默发布陈旧二进制。
-  - ⚠️ **遗留债**:护栏基线设在当前(v5.8.1)源码,故从本版起防"未来"的假修复;但**存量 `bin/hotspotd` 仍是 rc30.12.20 的旧二进制**(早于 rc39/rc43),缺 `scheduler.c` 动态读、offload 换网重探等修复。需在装有 NDK+libbpf 的机器上**一次性重编 hotspotd 并刷新指纹**,本远程环境无该工具链、无法代劳。(注:rc39 截断 bug 的危害链"漏识别→BPF offload 不关→绕过 HTB"在 RMX5010 上因 BPF tether offload 实测不旁路 tc 而不触发,实际影响低于报告定级。)
+  - [注意] **遗留债**:护栏基线设在当前(v5.8.1)源码,故从本版起防"未来"的假修复;但**存量 `bin/hotspotd` 仍是 rc30.12.20 的旧二进制**(早于 rc39/rc43),缺 `scheduler.c` 动态读、offload 换网重探等修复。需在装有 NDK+libbpf 的机器上**一次性重编 hotspotd 并刷新指纹**,本远程环境无该工具链、无法代劳。(注:rc39 截断 bug 的危害链"漏识别→BPF offload 不关→绕过 HTB"在 RMX5010 上因 BPF tether offload 实测不旁路 tc 而不触发,实际影响低于报告定级。)
 
 ---
 
@@ -1945,7 +1958,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 
 ### Added (v5.7.0-rc35, 2026-05-25)
 - **VPN 飞轮排除:可视化(卡片徽标)+ 可管理(WebUI)+ 单元测试**(用户选定的三项打包)。承 rc33/34 的引擎,补齐 UX 与测试:
-  - **① 应用卡片标注**(`src/dpid/output/state.go`·`self_attrib.go`·`candidate.go` + `webroot/index.html`):`SelfApp` 新增 `flywheel_excluded`,在 Snapshot 里按三种来源置位——内置清单 / 用户清单(`flywheelExcludePkgs`)/ 导管自动识别(新增 `conduitUIDs`,由 expander 每 tick `SetConduitUIDs` 发布)。「应用」页对被排除的应用显示「🛡️ VPN/代理 · 不学习规则」徽标;未排除且已知包名的卡片上有「排除 · 不学习此应用规则」按钮,一键加入。
+  - **① 应用卡片标注**(`src/dpid/output/state.go`·`self_attrib.go`·`candidate.go` + `webroot/index.html`):`SelfApp` 新增 `flywheel_excluded`,在 Snapshot 里按三种来源置位——内置清单 / 用户清单(`flywheelExcludePkgs`)/ 导管自动识别(新增 `conduitUIDs`,由 expander 每 tick `SetConduitUIDs` 发布)。「应用」页对被排除的应用显示「 VPN/代理 · 不学习规则」徽标;未排除且已知包名的卡片上有「排除 · 不学习此应用规则」按钮,一键加入。
   - **② WebUI 管理**(`daemon/hnc_httpd/action_flywheel.go` 新增 + `api_v5.go` + `webroot/index.html`):设置页新增「飞轮排除名单 · VPN/代理」卡片,展示/添加/删除你**自定义**的排除包名。新 action `flywheel_exclude_set`(op=add|remove,pkg 校验为合法包名)load-modify-store `etc/flywheel_exclude.json`(原子写,镜像 `action_candidate.go`);`/api/config` 新增 `flywheel_exclude_user` 供前端回读。内置清单 + 导管识别始终生效、不在此管理(文案已注明)。
   - **③ Go 单元测试**(`src/dpid/output/flywheel_exclude_test.go` 新增,该包此前零测试):覆盖 `loadFlywheelExcludePkgs`(内置常驻 / 用户合并去空格 / 坏 JSON 降级到内置)、`IsFlywheelExcludedUID`+`IsFlywheelExcludedPkg`(VPN/普通/未知 uid、空包名)、构造器播种、`classifyTier`(high/med/low/shared/blocklist/SharedLearned 六种路径)。`flywheelExcludeFile` 由 const 改 var 以便测试覆盖路径。
   - 含 `dpid` + `hnc_httpd`(Go)改动,**需 CI 重编两者**。`go vet ./...` + `go test ./output/`(6 测试全过)+ `android/arm64` 交叉编译 + `node --check`(两段内联 JS)全通过。版本 rc34 → rc35(570135)。
@@ -1980,7 +1993,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 ### Added (v5.7.0-rc31, 2026-05-25)
 - **远程 WebUI 功能对齐本机 —— 设备卡片在用 app 展示 + 每设备低延迟开关**(`daemon/hnc_httpd/web/app.js`)。本机 KSU WebUI(`webroot/index.html`)在 rc20/rc22 加的两个能力此前远程 SPA 没有,这版补齐:
   - **① 设备卡片直接显示「在用」的 app**:`renderCard` 读 `/api/devices` 已带的 `dpi_apps`(dpid 按 MAC 上报的 `{name,category,confidence,count}`),在卡片正文渲染最多 4 个蓝色 app 标签,`confidence=low` 标「?」,hover 看分类/命中次数。和本机折叠卡一致——不藏二级页。
-  - **② 每设备「低延迟(智能队列)」开关**:动作栏加「🚀 低延迟」按钮,开启后变「低延迟·关」+ 卡片亮蓝色「低延迟」角标;走后端已有的 `rule_sqm`(`actionDeviceSQMSet` → 叶子换 CAKE/fq_codel/sfq)。门控对齐本机:新增 `remoteCapBool()` 三态读 `/api/capabilities`,`tc_htb=false` 时禁用按钮(后端也会拒,前端先拦避免无谓往返);与延迟注入互斥(`delayOn` 时禁用,两者抢叶子)。
+  - **② 每设备「低延迟(智能队列)」开关**:动作栏加「低延迟」按钮,开启后变「低延迟·关」+ 卡片亮蓝色「低延迟」角标;走后端已有的 `rule_sqm`(`actionDeviceSQMSet` → 叶子换 CAKE/fq_codel/sfq)。门控对齐本机:新增 `remoteCapBool()` 三态读 `/api/capabilities`,`tc_htb=false` 时禁用按钮(后端也会拒,前端先拦避免无谓往返);与延迟注入互斥(`delayOn` 时禁用,两者抢叶子)。
   - 走 `callAction('rule_sqm', {mac, enabled})` + 统一 `handleActionResult` toast/刷新链路,与远程已有的限速/延迟写操作一致(CSRF header、actionInFlight 去重、超时后强刷)。
   - web 资源经 `go:embed`(`embed.go`)打进 hnc_httpd 二进制,**本版需 CI 重编**。`node --check`(app.js)+ `go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` 均通过。版本 rc30 → rc31(570131)。
 
@@ -1995,7 +2008,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 - **修"未匹配的 SNI"卡误导 —— 它只讲陌生子域、无视陌生主域候选**(`webroot/index.html` `appsRenderUnmatched`,用户提出"飞轮有没有把陌生主域名加进去")。后端是**两条独立轨**:
   - 走法1 `unmatched_snis_pending` = 没匹配规则的**子域**(完整 SNI)→ auto-expand 队列。
   - 走法2 `candidate_pending` = **全新主域名(apex)** 累积器 → "自动识别候选"区(`appsRenderCandidates`,可一键 promote / 拒绝)。真机已证明在工作:`candidate_accum.json` 抓到 `claude.com`/`idouyinvod.com`/`proxyinfo.net`,`_auto_promoted.json` 已晋级 claude.com→Claude、抖音。
-  - **bug**:`appsRenderUnmatched` 只看走法1,当子域队列为 0 时直接显示"✓ 规则集已覆盖所有抓到的 SNI · 没有陌生子域",**完全不提走法2 的主域候选** → 即使有 3 个全新主域在排队,也喊"全覆盖" → 用户误以为主域名没被识别。
+  - **bug**:`appsRenderUnmatched` 只看走法1,当子域队列为 0 时直接显示"[OK] 规则集已覆盖所有抓到的 SNI · 没有陌生子域",**完全不提走法2 的主域候选** → 即使有 3 个全新主域在排队,也喊"全覆盖" → 用户误以为主域名没被识别。
   - **修复**:子域队列空、但 `candidate_pending > 0` 时,卡片改显示"子域已覆盖;另有 N 个陌生主域名在候选区(其中 M 个已达 HIGH 可晋级)· 见下方'自动识别候选'",指向走法2 审批区;真·两轨全空时文案补上"也没有陌生主域候选(走法2)"。
   - 说明(非本版改):走法2 自动晋级需 ≥3 窗口 + ≥6 命中(`candPromoteMinWindows/Hits`);真机候选多为 Windows=1/hits=1(app 只用过一两次),所以"已晋级 2"目前是手动 promote 的,自动晋级要该 app 多用几次累积到阈值才会触发——这是保守设计,不是 bug。纯前端,`node --check` 通过,不用重编。版本 rc28 → rc29(570129)。
 
@@ -2016,7 +2029,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 - **修 rc25 自建 NAT 的「上联口探测」bug**(`bin/hotspot_autostart.sh`)。真机干净测试(手动热点关闭)确认:`cmd wifi start-softap ... -b any` 后 **`wlan2` 起来并带 `10.126.123.0/24` 子网** → 本地热点会给客户端发 IP,A 方案地基成立。但 rc25 的 `detect_up_iface` 用 `ip route show default` 取上联接口 —— **Android 用策略路由(per-network 路由表),main 表常常没有 default route**,所以探到空 → `setup_nat` 走"找不到 up"分支直接跳过 → 客户端永远没网。
   - **修复**:`detect_up_iface` 改用 `ip route get 1.1.1.1` 解析实际互联网出口接口(`rmnet_data2` / VPN `tun0` 都能正确取到;纯 `${var#*dev }` 参数展开,不依赖 awk/sed)。这样 `setup_nat` 才能正确挂上 MASQUERADE。
   - 其余同 rc25:start-softap `-b any`、删 `svc wifi enable`、`stop` 撤 NAT、UI 诚实标注 ColorOS 限制。
-  - ⚠ 仍需真机端到端验证:刷后**关掉手动热点** → 点「立即启动」(或 `hotspot_autostart.sh start-now`)→ 另一台设备连上 → 看能否上网。VPN(tun0)在跑时,转发流量能否过 VPN 取决于该 VPN 的实现,属另一回事。
+  - [注意] 仍需真机端到端验证:刷后**关掉手动热点** → 点「立即启动」(或 `hotspot_autostart.sh start-now`)→ 另一台设备连上 → 看能否上网。VPN(tun0)在跑时,转发流量能否过 VPN 取决于该 VPN 的实现,属另一回事。
   - `sh -n` 通过、参数解析已单测;纯 shell,不用重编。版本 rc25 → rc26(570126)。
 
 ### Fixed (v5.7.0-rc25, 2026-05-25)
@@ -2025,7 +2038,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
   - `cmd wifi start-softap` 能用,但**不带 `-b` 会撞频段** → `Soft AP start failed with tether error: 18`;`-b 5` / `-b any` **成功**。且它起的是**本地热点**(Android 明说 shell 命令不激活 internet tethering),系统不给它做 NAT/共享。
   - 之前脚本里的 `svc wifi enable` 是多余的(softap 不需要开 STA WiFi,实测 WiFi 关着也能起),反而会**无谓打开用户的 WiFi**。
   - **改动**:① start-softap 加 `-b any`(固件自选可用频段);② 删 `svc wifi enable`,只等 WifiService 可响应;③ **A 方向(自建共享)**:起热点成功后 `setup_nat` —— 检测上联(默认路由口)+ 本地热点口,`echo 1 > .../ip_forward` + `iptables -t nat MASQUERADE -o 上联` + `FORWARD` 放行(全 best-effort、幂等),让客户端用手机流量上网;`stop` 时 `teardown_nat` 撤掉;④ **B 方向(诚实标注)**:热点面板描述 + 技术说明如实写明 ColorOS 限制 + "没网就改从系统设置手动开"。
-  - ⚠ **本地热点能否给客户端发 IP / NAT 后能否上网,仍需真机验证**(要先关掉手动热点再测,避免频段冲突)。若本地热点这条路在该机型不通,只能走系统设置——UI 已如实说明。
+  - [注意] **本地热点能否给客户端发 IP / NAT 后能否上网,仍需真机验证**(要先关掉手动热点再测,避免频段冲突)。若本地热点这条路在该机型不通,只能走系统设置——UI 已如实说明。
   - 纯 shell + 前端,`sh -n` / `node --check` 通过,不用重编。版本 rc24 → rc25(570125)。
 
 ### Fixed (v5.7.0-rc24, 2026-05-25)
@@ -2034,7 +2047,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
   - 注:能否真正点亮 AP 取决于 ColorOS 是否放行 `cmd wifi start-softap`/`cmd tethering`/`svc wifi hotspot enable`——失败需看 `/data/local/hnc/logs/hotspot.log` 定位,属环境问题。
 - **每设备「低延迟」开关报 `SQM_APPLY_MODE=no_aqm`**(真机,rc22 的 TC_ACTION_BUSY 已修)。根因:`bin/tc_manager.sh:device_sqm_leaf` 只试 `cake` → `fq_codel`,你这台内核两者都装不上就 `return 1`。**修复**:cake/fq_codel 之后**加 `sfq perturb 10` 兜底**(每流公平、缓解 bufferbloat;`init_tc` 默认叶子早就 `fq_codel || sfq`,sfq 几乎必有),只有连 sfq 都没有才算真无 AQM;前端 `低延迟` 文案在无 CAKE/fq_codel 时提示「用 sfq 兜底(效果略弱)」。这样低延迟在更多内核上可用。
 - 「低延迟 + 高速」其他优化(回应用户):核心是「HTB 限速做瓶颈 + AQM 叶子压队列延迟」,本版补全了叶子的 sfq 兜底;rc18 的 netem `limit` 按速率缩放已避免限速压低吞吐。全局带宽整形(整个热点抗 bufferbloat)属架构级,留待真机验证 A/B 后再议。
-- 验证:`sh -n`(hotspot_autostart/tc_manager)、`go vet`+`CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build`、`node --check` 均通过。⚠ 有一处 Go 改动,需 CI 重编 `hnc_httpd`。版本 rc23 → rc24(570124)。
+- 验证:`sh -n`(hotspot_autostart/tc_manager)、`go vet`+`CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build`、`node --check` 均通过。[注意] 有一处 Go 改动,需 CI 重编 `hnc_httpd`。版本 rc23 → rc24(570124)。
 
 ### Fixed (v5.7.0-rc23, 2026-05-25)
 - **设置页"运行状态"面板整块是硬编码假值 → 改为真实数据**(`webroot/index.html`,设备卡+应用页"断连数据"扫描的结果)。原来 4 行全是写死字面量、无任何 JS/接口喂数据:hotspotd "PID 18432 · RES 4.2 MB"、tc 规则数 "11"、iptables "7 chains"、watchdog "运行中"——永远是这串假的。**修复**:进设置页(`refreshLocalDiagnostics`)时新增 `fetchRunStatus()`,本机 KSU WebUI 走 kexec 实采:hotspotd `pidof`+`/proc/$pid/status` 的 VmRSS、`tc qdisc/class` 对象数、`iptables/ip6tables -t mangle` 里 `0x800000` 规则数、`hnc_watchdog` 存活;采不到显示 `—`,远程(无 kexec)显示"远程不可读"——不再展示假数字。
@@ -2052,7 +2065,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
   - **前端**(`webroot/index.html`):移除 SQM 设置卡 HTML(Smart Queue 行 + `.sqm-control-panel` 三排按钮)、`.sqm-*` CSS、全部 SQM JS(`normalizeSqm*`/`sqm*Label`/`sqmPresetDetail`/`applySqmStatus`/`updateSqmPanel`/`fetchSQM`/`setSqmBackend`/`fillCardWithSqmPreset`、`data-sqm-*` 与 `sqm-gray-diag` 点击处理、init 的 `fetchSQM()`/诊断页的 `await fetchSQM()`、`state.sqm*` 字段)、以及设备卡延迟区那个依赖 SQM 预设的"填入预设"按钮 + 处理。删后 grep 确认 index.html **零残留旧 SQM 引用**,`node --check` 双 script 块均通过。
   - **后端**:删 `daemon/hnc_httpd/api_sqm_v53.go`、`action_sqm_v53.go`;移除 `/api/sqm` 路由(`server.go`)、middleware loopback 白名单条目、`sqm_set` action 注册(`action.go`);删 `bin/sqm_manager.sh`、`bin/sqm_gray_diag.sh`。`go build`(android/arm64)通过 → 编译器确认无悬空引用。
   - **测试/CI**:删 5 个 `test/unit/test_sqm_v53*.sh`(测的是已删功能);从 `test_ci_preflight_artifact_gate.sh`/`test_artifact_release_rc5.sh` 的必需文件清单移除 `bin/sqm_manager.sh`;从 `bin/artifact_sanity_check.sh` 移除 `sqm_manager.sh` 必需项 + `/api/sqm` 符号校验。CI 关键路径(`ci_preflight.sh`/`build.sh`/`version_consistency_check.sh`)无 SQM 依赖,已确认不破。
-  - 保留:每设备「低延迟」(`rule_sqm`/`set_sqm`/`device_sqm_leaf`/`sqm_enabled`)完整不动。已知遗留:`bin/rc_selfcheck_v53.sh`、`bin/hnc_cleanup_test_rules_v53.sh` 这两个 v5.3 手动诊断脚本里还提到 `/api/sqm`(非 CI、非运行时,404 时优雅降级),暂留。⚠ Go 改动需 CI 重编 `hnc_httpd`。版本 rc20 → rc21(570121)。
+  - 保留:每设备「低延迟」(`rule_sqm`/`set_sqm`/`device_sqm_leaf`/`sqm_enabled`)完整不动。已知遗留:`bin/rc_selfcheck_v53.sh`、`bin/hnc_cleanup_test_rules_v53.sh` 这两个 v5.3 手动诊断脚本里还提到 `/api/sqm`(非 CI、非运行时,404 时优雅降级),暂留。[注意] Go 改动需 CI 重编 `hnc_httpd`。版本 rc20 → rc21(570121)。
 
 ### Added (v5.7.0-rc20, 2026-05-24)
 - **每设备「低延迟」开关 —— 做进设备卡片(取代设置页那个复杂的全局 SQM)**。展开任一设备卡 → 新的「低延迟」一键开关 → 把该设备 HTB class 的叶子 qdisc 换成 **CAKE/fq_codel(AQM)**,这台设备自己跑满时也跟手;关闭则换回按速率缩放的 netem 占位。
@@ -2060,13 +2073,13 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
   - **互斥**:与延迟/弱网注入互斥(同一个叶子:一个压低延迟、一个注入延迟)。卡片上注入了延迟时,低延迟开关禁用并提示;后端 `device_sqm_leaf` 也会在叶子已有真实 netem(delay/loss)时不抢。
   - **持久化 + restore**:`rules.json` per-device 加 `sqm_enabled`;开机/切热点 `restore_rules` 解析并 `set_sqm on` 恢复(连"只开低延迟、没限速"的设备也会建好 class + AQM 叶子),不会切热点后丢失。
   - **链路**(改动文件):前端卡片开关 `data-action="toggle-sqm"` → `applySqmBackend` → `apiAction('rule_sqm')`;Go `action_dev_sqm.go: actionDeviceSQMSet`(镜像 delay 路径:解析 iface/mark_id/ip,`tc_htb` 不支持则拒绝)→ `apply_device_rule.sh alloc_mid`(复用)+ `tc_manager.sh set_sqm`(新增 `set_sqm`/`device_sqm_leaf` + CLI dispatch)+ `json_set.sh device … sqm_enabled`;`action.go` 注册 `rule_sqm`;`server.go` 把 `sqm_enabled` 加进 `/api/devices` 字段白名单;`index.html` 设备模型加 `sqm`、卡片加低延迟 section + 点击处理。
-  - cake 不支持自动退 fq_codel,都没有则提示无 AQM;`tc_htb` 不支持时开关在 UI 灰掉。⚠ **Go 改动,需 CI 重编 `hnc_httpd`**;`go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` + `node --check` + `sh -n` 均通过。(设置页旧全局 SQM 卡暂留,后续看是否简化/移除。)版本 rc19 → rc20(570120)。
+  - cake 不支持自动退 fq_codel,都没有则提示无 AQM;`tc_htb` 不支持时开关在 UI 灰掉。[注意] **Go 改动,需 CI 重编 `hnc_httpd`**;`go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` + `node --check` + `sh -n` 均通过。(设置页旧全局 SQM 卡暂留,后续看是否简化/移除。)版本 rc19 → rc20(570120)。
 
 ### Fixed (v5.7.0-rc19, 2026-05-24)
 - **修复"SQM 一点就报错"——设置页 SQM 任意按钮点了都弹「SQM 切换失败」**(`bin/sqm_manager.sh`)。根因:`actionSQMSet` → `sqm_manager.sh apply` → `apply_default_leaf` 是**增量**应用(只在已存在的 HTB 树上替换默认类 `1:9999` 的叶子 qdisc),它要求 `qdisc htb 1:` 和 `class htb 1:9999` 已经存在;**否则 `return 3`/`return 4` 硬失败**。但 HTB 队列树只在 `set_limit`(第一次给某设备设限速)时经 `ensure_egress_htb_ready→init_tc` **惰性创建**,开机 / 开热点都不主动建。**结果:只要你没给任何设备设过限速,点 SQM 的任意模式/档位都命中 rc=3「HTB root 1: not found」→ 前端每次 toast「SQM 切换失败: sqm apply failed」**——SQM 实际上从来没法独立用。
   - **修复**:`apply_default_leaf` 在热点网卡存在、但 HTB 根缺失时,先 `sh tc_manager.sh init "$iface"` 把树建起来(幂等,建 root + 默认类 1:9999 + fq_codel 叶子),再做增量叶子替换;若 bootstrap 仍失败(如内核真不支持 HTB),改为**优雅保存 `return 0`**(stderr/log 给 WARN)而不是硬报错——前端不再误报失败。默认类缺失同样改为优雅保存。
   - 这样 SQM 在"开了热点但没设任何限速"的常见场景下**能真正生效**(给默认类挂上 fq_codel/CAKE AQM 叶子),而不是一点就红。纯 shell,`sh -n` 通过,不用重编。
-  - ⚠ 注:之前讨论的"把低延迟做成每设备卡片开关 / 全局带宽整形(`1:1` ceil)"是更大的方向,本版**先按下不表**,只修这个一点就报错的 bug。版本 rc18 → rc19(570119)。
+  - [注意] 注:之前讨论的"把低延迟做成每设备卡片开关 / 全局带宽整形(`1:1` ceil)"是更大的方向,本版**先按下不表**,只修这个一点就报错的 bug。版本 rc18 → rc19(570119)。
 
 ### Changed (v5.7.0-rc18, 2026-05-24)
 - **限速/延迟引擎:兼容性 + 优化(多代理审查后落地最值的两项,纯 `tc_manager.sh` shell 改动,不用重编)**。
@@ -2080,7 +2093,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
   - `dpid` 核心抓包**无任何 shell-out**;它的 `pm`/`dumpsys`/`cmd`/`app_process` 都是 Android 框架工具、**没有 toybox/busybox 替代**(PATH 兜底救不了),且都是 best-effort + 错误处理、优雅降级,不影响抓包。无需也无法改。
   - `hnc_watchdog`:**核心保活循环(让 launcher/dpid 不死)是纯 Go、免疫**(这也是真机上系统没崩的原因);但它的业务动作(`runAction` → `watchdog.sh action`,每周期)和定时任务(`v6_sync.sh`/`stats_sample.sh`/ndpi 启停/脚本运行)用的是**硬编码 `/system/bin/sh` 共 6 处**。`/system/bin` 被卸的那几秒,这些杂活会失败、跳过该周期,过会儿自恢复——非致命,但确属残留 `/system/bin` 依赖。
   - **修复**(`src/dpid/cmd/hnc_watchdog/main.go`):新增 `shellPath()` 帮手——有 `/system/bin/sh` 就用,没有就退到 `binDir + "/sh"`(rc13 预置的 mksh 副本;脚本是 mksh 方言,兜底必须 mksh、不能 busybox ash);**逐调用求值(不缓存)**,因为 `/system/bin` 会运行期来回变。六处 `exec.Command("/system/bin/sh", …)` 全改走 `shellPath()`。
-  - ⚠ **Go 改动,需 CI 重编 `hnc_watchdog` 二进制**。`go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` 均通过。至此根因 A 在模块层可处理的部分全部做满:rc12(C launcher 自愈)+ rc13/rc15(`/data` 兜底工具)+ rc16(shell guard 去硬编码)+ rc17(Go watchdog 加 sh 兜底)。版本 rc16 → rc17(570117)。
+  - [注意] **Go 改动,需 CI 重编 `hnc_watchdog` 二进制**。`go vet` + `CGO_ENABLED=0 GOOS=android GOARCH=arm64 go build` 均通过。至此根因 A 在模块层可处理的部分全部做满:rc12(C launcher 自愈)+ rc13/rc15(`/data` 兜底工具)+ rc16(shell guard 去硬编码)+ rc17(Go watchdog 加 sh 兜底)。版本 rc16 → rc17(570117)。
 
 ### Fixed (v5.7.0-rc16, 2026-05-24)
 - **补上 fallback shell guard 残留的硬编码 `/system/bin/*` 绝对路径(rc13 标注"留作后续"的那处)—— 真机数据定位后确认是最后一块短板**。诊断过程(真机 `mount` / `mountinfo` / `ps etime` / 模块清单):
@@ -2088,11 +2101,11 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
   - "为什么现在才有":内核升到 **6.6 android15 GKI**,新内核**砍了内置自动挂载**,改由用户态元模块挂载;叠加 HNC rc6/rc7 把抓包改成 24h 常驻,于是早期命名空间未就绪的瞬时窗口天天被撞上。
   - 真机日志确认 ENOENT 全部来自 `hnc_dpid_guard.sh` 的**硬编码绝对路径**(`/system/bin/sleep`、`/system/bin/date`),它们**绕过 PATH**,所以 rc13 的 PATH 兜底救不到;且 guard 旧设计是 `ensure_path_or_die`"die-fast 等 watchdog 重启"。当前 boot 是 **C launcher 胜出**(launcher/dpid 稳定在线 3.5h、零 churn),guard 只是 boot 初瞬间跑了一下就被 C launcher 接管杀掉——所以系统当前是好的;但在 **C launcher 落选**(ColorOS fork/TLS 探测失败 → shell guard 成为主监管)的那些 boot 上,这些硬编码路径就会让 guard 反复 ENOENT、wedge,重现"必须重新绑定"。
   - **修复**(`bin/hnc_dpid_guard.sh`):把 `ensure_path_or_die` / `wait_for_clean_env` / `sleep_s` / 主循环心跳 / 锁接管里所有 `/system/bin/sleep`、`/system/bin/date` 绝对路径**改成裸命令**——PATH 已含 `/data/local/hnc/bin`(rc13 预置、`/data` 永不被卸),`/system/bin` 一旦消失自动 fallthrough 到 `/data` 副本,guard **不再 die、继续监管 dpid**;只有连 `/data` 兜底也没有(真·坏)才退出让 watchdog 重开。这把 rc13 标注"留作后续"的 fallback-only 硬编码路径清干净了。
-  - 纯 shell 改动,`sh -n` 通过,不用重编任何二进制。⚠ 底层 SukiSU/元模块在运行期动挂载仍是 ROM/隐藏栈行为,模块只能"撞上也不崩";rc13/rc15 的预置 + 本版 guard 加固共同构成这层韧性。版本 rc15 → rc16(570116)。
+  - 纯 shell 改动,`sh -n` 通过,不用重编任何二进制。[注意] 底层 SukiSU/元模块在运行期动挂载仍是 ROM/隐藏栈行为,模块只能"撞上也不崩";rc13/rc15 的预置 + 本版 guard 加固共同构成这层韧性。版本 rc15 → rc16(570116)。
 
 ### Changed (v5.7.0-rc15, 2026-05-24)
 - **加固"无挂载模块"对根因 A(SukiSU 运行期卸 `/system/bin`)的韧性 —— 取外部 AI 建议的安全子集**。背景:把根因 A 的问题陈述发给外部 AI 咨询"能否从其他途径绕过",结论是"HNC 这种纯守护模块不该和 OverlayFS 全局 `/system` overlay 同命运"。我对其方案做了安全甄别后落地可安全的部分:
-  - **⚠ 否决了它的头号建议(用 `busybox sh -o standalone` 跑常驻脚本)**:实测本仓库常驻脚本(watchdog.sh / hnc_dpid_guard.sh / service.sh 等)**大量使用 `[[ ]]` 和 `(( ))`**,这是 mksh/ksh 方言,**busybox `ash` 不支持**,换解释器会直接把脚本跑崩。解释器**继续用 mksh**(rc13 已把 mksh 复制到 `/data`)。
+  - **[注意] 否决了它的头号建议(用 `busybox sh -o standalone` 跑常驻脚本)**:实测本仓库常驻脚本(watchdog.sh / hnc_dpid_guard.sh / service.sh 等)**大量使用 `[[ ]]` 和 `(( ))`**,这是 mksh/ksh 方言,**busybox `ash` 不支持**,换解释器会直接把脚本跑崩。解释器**继续用 mksh**(rc13 已把 mksh 复制到 `/data`)。
   - **`provision_fallback_tools` 升级**(`service.sh`):multicall 源**优先用常驻 `/data` 上的 KSU/Magisk busybox**(`/data/adb/ksu/bin/busybox` 等)——它永不被卸、且 applet 比 toybox 全(很多 ROM 的 toybox 不带 `awk`,而我们常驻循环 `awk` 用得很多);system 的 busybox/toybox 作兜底。applet 链接表从 11 个扩到含 `awk rm mkdir mv touch dirname basename stat readlink sort uniq find ln chmod chown id seq pidof ps xargs`,并**按二进制实际支持的 applet 列表(busybox `--list` / toybox 无参)安全建链**——探测不到就只建 toybox/busybox 都必有的核心集,绝不建出"调用即 unknown applet"的死链。
   - **修 `device_detect.sh` 的 PATH 缺口**:它是常驻 daemon 循环(`while true`),但 PATH 此前**漏了 `/data/local/hnc/bin`**(watchdog/iptables/guard 在 rc11/rc13 都补了,就它没补)→ `/system/bin` 被卸时它的裸命令(`awk`/`grep`/`sleep`)仍会 ENOENT。现已补上。
   - **新增空 `skip_mount` 文件**:本模块本就没有 `system/` 文件夹、不替换任何 `/system` 文件,`skip_mount` 显式声明"不参与 systemless 挂载"(KernelSU/Magisk 仅判存在;脚本/sepolicy/webroot 不受影响)。它不能阻止管理器对别的 overlay 做 umount,但让 HNC 明确不进入挂载规划。
@@ -2119,7 +2132,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
 - **C launcher 自愈,堵上"launcher 活着但 dpid 永久没了"的盲区**(`src/launcher/hnc_launcher.c`,补 rc11)。外部审查(GPT)指出残留 P0:rc11 让 launcher 不再因单次外部 SIGTERM(rc=0)放弃,但**crash-loop / 启动见到旧 `dpid_crashflag` 时仍会永久放弃**(`run_supervise_loop` 崩溃超限 → `write_crash_flag()+return 1`;`main` 见 crashflag → `pause()` 死等)→ launcher 进程活着、`hnc_dpid` 子进程永远不被拉起、没人自动恢复,用户必须手动"重新绑定"。
   - 改为**自愈**:① crash-loop 触发 → 写崩溃标志(仅诊断)+ 冷却 `CRASH_COOLDOWN_SEC`(120s)+ 清标志 + 重置计数 + 继续监管,不再 `return 1` 永久退出;② 启动见到旧 crashflag → 冷却 120s + 清标志 + 正常监管,不再 `pause()` 死等用户删文件。被动只读守护进程应当自愈:制造崩溃风暴的瞬时原因(残留 shell guard、/system/bin 暂时蒸发)消退后,dpid 自动恢复。
   - launcher 内部版本 `0.1.0-rc30.12.30 → .31`(保持 CI sanity grep 的 `0.1.0-rc30.12` 前缀)。**需 CI 重编 hnc_launcher 二进制**。版本 rc11 → rc12(570112)。
-  - ⚠ 根因 A(SukiSU 运行期把 /system/bin 从模块命名空间卸载)仍未根治,建议用户在 SukiSU 管理器调 Umount Modules / Mount Namespace 模式。
+  - [注意] 根因 A(SukiSU 运行期把 /system/bin 从模块命名空间卸载)仍未根治,建议用户在 SukiSU 管理器调 Umount Modules / Mount Namespace 模式。
 
 ### Fixed (v5.7.0-rc11, 2026-05-24)
 - **"开机必须点重新绑定 / 抓不到包"**(realme RMX5010 / Android16 / SukiSU,真机日志确诊)。根因有二:
@@ -2130,7 +2143,7 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
     - `src/launcher/hnc_launcher.c`:dpid 在 launcher 未关闭(`g_shutdown` 假)时 rc=0 退出 → 当意外退出**重启**而非放弃(断开"必须重新绑定"致命链)。**需 CI 重编 hnc_launcher**。
     - `service.sh`:用 C launcher 时 `pkill` 残留 shell guard / Go supervisor,避免双监管。
     - `bin/hnc_dpid_guard.sh`:`get_iface` 取空(工具 ENOENT)不再触发 rebind(空=探测失败,保留当前 iface)。
-  - ⚠ 根因是 SukiSU 卸载 /system/bin(root 管理器行为),模块只能"少受伤";建议在 SukiSU 管理器找挂载命名空间设置(umount modules / namespace 模式)。版本 rc10 → rc11(570111)。
+  - [注意] 根因是 SukiSU 卸载 /system/bin(root 管理器行为),模块只能"少受伤";建议在 SukiSU 管理器找挂载命名空间设置(umount modules / namespace 模式)。版本 rc10 → rc11(570111)。
 
 ### Fixed (v5.7.0-rc10, 2026-05-24)
 - **导出下载在本机点了没反应** — 打包是成功的,坏在下载:`下载 zip` 是 `<a href="/api/exports/..">`,在本机 KSU WebUI(`file://`)下会被解析成 `file:///api/exports/..`(指向文件系统而非 http 守护进程),且带不了 loopback 鉴权头 → 点了无效(远程 `:8443` 浏览器正常)。新增 `appsDownloadExport(name,url)`:本机走 `ksu.exec` `cp` 到 `/sdcard/Download/` 并 toast;远程仍用原生 `<a download>`。两处下载入口(打包结果 + 最近导出列表)都改走它。
@@ -2158,12 +2171,12 @@ v5.9.92 的 14 项声称中 10 项验证完全通过(whoami 接线/远程改名�
   - 后果:热点没开时 dpid 根本没跑 → `dpi_state.json` 没有 self 块(界面显示「dpid 暂未上报 self 块」而非「采样器停止」)→ 自抓取/飞轮永远拿不到数据。而自抓取用的是本机自己的网卡(rmnet/wlan0)+ `/proc/net`,**本不该依赖热点**。
   - **修复**:`hnc_dpid_guard.sh` 与 `cmd/dpid_supervisor/main.go` 改为**无条件常驻拉起 dpid**——热点没就绪时 dpid 走 blind 模式(AP 抓取暂停,但 `main.go:303+` 的自抓取 + 飞轮 goroutine 照常跑),热点一就绪(netlink 事件或 3s 轮询)就自动 kill+rebind 升级成全量 AP 抓取。沿用各自原有的 grace/debounce/netlink 逻辑。C launcher 无需改(本就无条件)。
   - 配合 rc6 的 self-capture 常驻,本机 app 识别现在完全不依赖热点。版本 rc6 → rc7(versionCode 570107)。
-  - ⚠️ 这是 dpid 生命周期核心改动,本容器无法跑安卓验证,需真机确认:热点关时应用 tab 应「运行中」、热点开时 AP 客户端识别仍正常、热点开关切换无重启抖动。
+  - [注意] 这是 dpid 生命周期核心改动,本容器无法跑安卓验证,需真机确认:热点关时应用 tab 应「运行中」、热点开时 AP 客户端识别仍正常、热点开关切换无重启抖动。
 
 ### Changed (v5.7.0-rc6, 2026-05-24)
 - **self-capture 改为常驻(默认开)** — 自动识别飞轮(per-uid `/proc/net` 采样 + 自接口 AF_PACKET SNI 抓取)全靠 `run/self_capture.enabled` flag 驱动;此前默认关,用户不手动开「追踪本机应用流量」就永远没数据(界面一直「追踪状态:未就绪 / dpid 暂未上报 self 块」)。
   - `service.sh`(dpid 段)现在每次启动 `[ -f ] || : > "$RUN/self_capture.enabled"`,即默认常驻开;会话内仍可在 WebUI 临时关(删 flag),重启后恢复常驻。dpid 每 5s 读 flag,~5s 内生效。
-  - UI:「追踪本机应用流量」卡加「✓ 常驻(默认开)」标注。
+  - UI:「追踪本机应用流量」卡加「[OK] 常驻(默认开)」标注。
 - **诊断说明**:读码确认 dpid 只要在跑就**无条件每 5s** 发布 self 块(`main.go:316-329`,关时 `enabled:false`)。所以若界面显示「dpid 暂未上报 self 块」(self=null,而非「采样器停止」),说明 **dpid 没在正常产出**(崩溃/crash-loop/capture 初始化失败),常驻 flag 救不了——需查 `logs/dpid.log` + `ps | grep hnc_dpid` 定位后端启动问题。
 
 ### Added (v5.7.0-rc5, 2026-05-24)
@@ -2283,7 +2296,7 @@ v5.7 是 HNC 历史上第一次产品定位升级 —— 不再只是给极客�
 
 | M | 名称 | 状态 | 工期 |
 |---|---|---|---|
-| M1 | per-uid 字节统计 | ⏳ 研究中 | 2-3 天 |
+| M1 | per-uid 字节统计 | [WIP] 研究中 | 2-3 天 |
 | M2 | app metadata (icon + display name) | 待定 | 1 天 |
 | M3 | 时间序列存储 (5-min 桶, 30 天保留) | 待定 | 1-2 天 |
 | M4 | 事件流 (auto-expand / daemon / device 事件) | 待定 | 1 天 |
@@ -2317,11 +2330,11 @@ v5.7 是 HNC 历史上第一次产品定位升级 —— 不再只是给极客�
 - **rc3**: VPN tun 接口加入 self capture 候选 (Clash/WireGuard/Tailscale)
   - `self_iface.go` 把 tun/vpn/wg/tailscale 从 negative 挪到 positive
 - **rc6**: WebUI 应用 tab hero 增加 "SNI 抓取" 计数
-- **rc6**: 每个 app card 的规则 pill 显示 hit count,≥10 时变绿 + ✓
+- **rc6**: 每个 app card 的规则 pill 显示 hit count,≥10 时变绿 + [OK]
 - **rc6**: WebUI 设置页加 auto-expand toggle (rc7 接通后端)
 - **rc7**: 未匹配 SNI 候选块显示 (我的应用子页底部)
-  - pending=0 显示 "✓ 规则集已覆盖" 解释性零状态
-  - pending>0 显示 sample 候选 + ⚠ 计数
+  - pending=0 显示 "[OK] 规则集已覆盖" 解释性零状态
+  - pending>0 显示 sample 候选 + [注意] 计数
 - **rc7**: httpd `POST /api/self/auto_expand/toggle` endpoint
   - 重构 `flipFlagFile` shared helper 给将来 toggle 类 endpoint 复用
 
@@ -2349,7 +2362,7 @@ v5.7 是 HNC 历史上第一次产品定位升级 —— 不再只是给极客�
 ### 产品价值校正(实测发现)
 rc4 后实测显示:**整个 self-capture 子系统全栈工作**(rmnet/tun 抓 SNI, uid 归因准, kuaishou hit=12 跨阈值),但 `_auto_expanded.json` 始终不生成。诊断后(rc5 导出 unmatched 队列状态):**463 个规则 apex 已经覆盖所有看到的 SNI**,unmatched 队列长期为空。
 
-**结论:v5.6 真正的产品价值是"让用户看见",不是"自动加规则"。** auto-expand 功能技术完整但实际很少触发(这是符合预期的状态,在 UI 上以绿色 ✓ 状态显式展示给用户)。
+**结论:v5.6 真正的产品价值是"让用户看见",不是"自动加规则"。** auto-expand 功能技术完整但实际很少触发(这是符合预期的状态,在 UI 上以绿色 [OK] 状态显式展示给用户)。
 
 ---
 

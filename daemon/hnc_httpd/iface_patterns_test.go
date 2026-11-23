@@ -35,9 +35,9 @@ func TestIfacePatternsMatchShell(t *testing.T) {
 
 func TestIfacePatternClassification(t *testing.T) {
 	cell := []string{"rmnet_data0", "rmnet_data11", "rmnet0", "rmnet7", "ccmni0", "ccmni2",
-		"seth_lte0", "seth_w0", "sipa_eth0", "wwan0"}
+		"seth_lte0", "seth_w0", "sipa_eth0", "gti0", "gti1", "wwan0"}
 	notCell := []string{"v4-rmnet_data0", "r_rmnet_data0", "rmnet_ipa0", "rmnet_mhi0", "rmnet_usb0",
-		"wlan0", "wlan2", "ap0", "rndis0", "ifb0", "dummy0", "ccmni", "rmnet_data"}
+		"wlan0", "wlan2", "ap0", "rndis0", "ifb0", "dummy0", "ccmni", "rmnet_data", "gti"}
 	for _, n := range cell {
 		if !isCellIface(n) {
 			t.Errorf("%s should be cell", n)
@@ -46,6 +46,18 @@ func TestIfacePatternClassification(t *testing.T) {
 	for _, n := range notCell {
 		if isCellIface(n) {
 			t.Errorf("%s should NOT be cell", n)
+		}
+	}
+	vpn := []string{"tun0", "tap0", "ppp0", "wg0", "ipsec0", "xfrm0", "tailscale0", "tailscale", "utun", "utun2", "sing_tun", "sing_tun0", "Meta"}
+	notVPN := []string{"wlan0", "wlan2", "rmnet_data0", "Meta0", "metax"}
+	for _, n := range vpn {
+		if !isVPNIface(n) {
+			t.Errorf("%s should be VPN", n)
+		}
+	}
+	for _, n := range notVPN {
+		if isVPNIface(n) {
+			t.Errorf("%s should NOT be VPN", n)
 		}
 	}
 	ap := []string{"ap0", "ap1", "ap", "ap_br_wlan2", "softap0", "swlan0"}
@@ -66,6 +78,7 @@ func TestIfacePatternClassification(t *testing.T) {
 	// phone_usage 分类: 新增的 SoC 名字归蜂窝, 热点口未知时 ap_br_* 按热点兜底
 	cases := []struct{ name, hs, want string }{
 		{"sipa_eth0", "wlan2", "cell"},
+		{"gti0", "wlan2", "cell"},
 		{"seth_w0", "wlan2", "cell"},
 		{"rmnet3", "", "cell"},
 		{"ap_br_wlan2", "", "hotspot"},

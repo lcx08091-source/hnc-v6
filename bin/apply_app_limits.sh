@@ -18,14 +18,31 @@
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 RUN="$HNC_DIR/run"
 LIMITS_FLAT="$HNC_DIR/data/app_limits.flat"
 IP_APP_FLAT="$HNC_DIR/run/ip_app_map.flat"
+DEVICES_FLAT="$HNC_DIR/run/devices.flat"
 DEVICES="$HNC_DIR/data/devices.json"
 RULES="$HNC_DIR/data/rules.json"
 DIRTY="$HNC_DIR/run/app_limit.dirty"
 LOG="$HNC_DIR/logs/app_limits.log"
 TCM="$HNC_DIR/bin/tc_manager.sh"
+
+TC_BIN=${TC_BIN:-}
+if [ -z "$TC_BIN" ]; then
+    if [ -z "${HNC_TEST_MODE:-}" ]; then
+        for _tc in "$HNC_DIR/bin/hnc_tc" "$HNC_DIR/bin/tc" /system/bin/tc /vendor/bin/tc /system/xbin/tc; do
+            [ -x "$_tc" ] && { TC_BIN="$_tc"; break; }
+        done
+    fi
+    [ -z "$TC_BIN" ] && TC_BIN=$(command -v tc 2>/dev/null || echo tc)
+fi
+tc() { "$TC_BIN" "$@"; }
 
 APP_SIG_FILE="$RUN/app_limits.applied.sig"
 FULL_SIG_FILE="$RUN/app_limits.full_state.sig"
@@ -77,6 +94,12 @@ fi
 
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
+if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v iptables >/dev/null 2>&1; then
+    iptables -w 2 -t mangle -L -n >/dev/null 2>&1 || IPT="iptables"
+fi
+if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -w 2 -t mangle -L -n >/dev/null 2>&1 || IP6T="ip6tables"
+fi
 IPV6_OK=0
 if command -v "${IP6T%% *}" >/dev/null 2>&1 && $IP6T -t mangle -L -n >/dev/null 2>&1; then
     IPV6_OK=1
@@ -109,12 +132,20 @@ IP6T_RESTORE_BIN=""
 [ "$IPV6_OK" = 1 ] && IP6T_RESTORE_BIN=$(resolve_restore_bin "$IP6T" "ip6tables-restore" "${HNC_IP6T_RESTORE:-}" "${HNC_IP6T:-}")
 
 run_restore_noflush() {
-    local rbin=$1 batch=$2
+    local rbin=$1 batch=$2 _drop="${2}.drop" _rc=1
     [ -n "$rbin" ] && [ -s "$batch" ] || return 1
-    if $rbin -w 2 --noflush < "$batch" 2>/dev/null; then
+    if $rbin -w 2 --noflush < "$batch" 2>/dev/null || $rbin --noflush < "$batch" 2>/dev/null; then
         return 0
     fi
-    $rbin --noflush < "$batch" 2>/dev/null
+    if grep -q -- '-j REJECT' "$batch" 2>/dev/null; then
+        if sed -e 's/-j REJECT --reject-with [^ ]*/-j DROP/g' -e 's/-j REJECT$/-j DROP/g' "$batch" > "$_drop" 2>/dev/null; then
+            if $rbin -w 2 --noflush < "$_drop" 2>/dev/null || $rbin --noflush < "$_drop" 2>/dev/null; then
+                _rc=0
+            fi
+        fi
+        rm -f "$_drop" 2>/dev/null
+    fi
+    return $_rc
 }
 
 AL_LOCK="$RUN/app_limits.lock"
@@ -295,7 +326,9 @@ if [ -z "$IFACE" ]; then
     exit 0
 fi
 
-V6_NEIGH_RAW=$(ip -6 neigh show dev "$IFACE" 2>/dev/null)
+if ! V6_NEIGH_RAW=$(ip -6 neigh show dev "$IFACE" 2>/dev/null) || { [ -z "$V6_NEIGH_RAW" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+    V6_NEIGH_RAW=$(ip neigh show dev "$IFACE" 2>/dev/null)
+fi
 V6_NEIGH_SORTED=$(printf '%s\n' "$V6_NEIGH_RAW" | awk '
     $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $NF != "FAILED" && $NF != "INCOMPLETE" {
         for (i = 2; i < NF; i++) if ($i == "lladdr") print tolower($1), tolower($(i+1))
@@ -318,6 +351,7 @@ compute_full_sig() {
         printf 'iface=%s|v6=%s\n' "$IFACE" "$IPV6_OK"
         cat "$LIMITS_FLAT" 2>/dev/null
         cat "$IP_APP_FLAT" 2>/dev/null
+        [ -s "$DEVICES_FLAT" ] && cat "$DEVICES_FLAT" 2>/dev/null
         cat "$DEVICES" 2>/dev/null
         cat "$RULES" 2>/dev/null
         cat "$AQ_STATE_FILE" 2>/dev/null
@@ -338,6 +372,34 @@ app_classes_alive() {
     return 0
 }
 
+heal_postrouting_before_save() {
+    local _cmd="$1" _ch="$2" _del_n _k _save_ln
+    [ -n "$_cmd" ] || return 0
+    _del_n=$($_cmd -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk -v ch="$_ch" '
+        $1 ~ /^[0-9]+$/ {
+            ln = $1 + 0
+            if ($2 == "HNC_SAVE" && save_ln == 0) save_ln = ln
+            if ($2 == ch) { cnt++; max_ch = ln }
+        }
+        END {
+            if (cnt > 0 && save_ln > 0 && (max_ch > save_ln || cnt > 1)) printf "%d\n", cnt
+        }
+    ')
+    [ -n "$_del_n" ] || return 0
+    _k=0
+    while [ "$_k" -lt "$_del_n" ]; do
+        $_cmd -t mangle -D POSTROUTING -j "$_ch" 2>/dev/null || break
+        _k=$((_k + 1))
+    done
+    _save_ln=$($_cmd -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $2 == "HNC_SAVE" {print $1; exit}')
+    if [ -n "$_save_ln" ]; then
+        $_cmd -t mangle -I POSTROUTING "$_save_ln" -j "$_ch" 2>/dev/null \
+            || $_cmd -t mangle -A POSTROUTING -j "$_ch" 2>/dev/null
+    else
+        $_cmd -t mangle -A POSTROUTING -j "$_ch" 2>/dev/null
+    fi
+}
+
 if [ "$HAD_DIRTY" = 0 ] && [ -s "$LIMITS_FLAT" ] && [ -s "$IP_APP_FLAT" ] && [ -f "$FULL_SIG_FILE" ]; then
     CUR_FULL_SIG=$(compute_full_sig)
     OLD_FULL_SIG=$(cat "$FULL_SIG_FILE" 2>/dev/null)
@@ -348,6 +410,8 @@ if [ "$HAD_DIRTY" = 0 ] && [ -s "$LIMITS_FLAT" ] && [ -s "$IP_APP_FLAT" ] && [ -
        && { [ "$IPV6_OK" = 0 ] || { $IP6T -t mangle -C FORWARD -j "$CHAIN_UP" 2>/dev/null && $IP6T -t mangle -C POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null && $IP6T -t filter -C FORWARD -j "$CHAIN_QUIC" 2>/dev/null; }; } \
        && tc qdisc show dev "$IFACE" 2>/dev/null | grep -q "htb 1:" \
        && app_classes_alive; then
+        heal_postrouting_before_save "$IPT" "$CHAIN_DOWN"
+        [ "$IPV6_OK" = 1 ] && heal_postrouting_before_save "$IP6T" "$CHAIN_DOWN"
         al_unlock
         exit 0
     fi
@@ -540,19 +604,21 @@ ensure_top_hooks() {
         _rc=$?
         if [ "$_rc" -eq 1 ]; then
             # v5.40.2: 插入到 HNC_SAVE 之前, 使 [31:24] 单应用标记同步写入 CONNMARK, 防止尾部 HNC_EGRESS_FIX 还原时清零 [31:24]
-            _save_ln=$($T -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$2 == "HNC_SAVE" {print $1; exit}')
+            _save_ln=$($T -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $2 == "HNC_SAVE" {print $1; exit}')
             if [ -n "$_save_ln" ]; then
                 $T -t mangle -I POSTROUTING "$_save_ln" -j "$CHAIN_DOWN" 2>/dev/null \
                     || $T -t mangle -A POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null
             else
                 $T -t mangle -A POSTROUTING -j "$CHAIN_DOWN" 2>/dev/null
             fi
+        elif [ "$_rc" -eq 0 ]; then
+            heal_postrouting_before_save "$T" "$CHAIN_DOWN"
         fi
     done
 }
 
 replay_al_batch_fallback() {
-    local T=$1 batch=$2 tbl=${3:-mangle} line _ch
+    local T=$1 batch=$2 tbl=${3:-mangle} line _ch _dline
     [ -s "$batch" ] || return 0
     while IFS= read -r line; do
         case "$line" in
@@ -569,7 +635,18 @@ replay_al_batch_fallback() {
                 # shellcheck disable=SC2086
                 set -- $line
                 set +f
-                $T -t "$tbl" "$@" 2>/dev/null
+                if ! $T -t "$tbl" "$@" 2>/dev/null; then
+                    case "$line" in
+                        *" -j REJECT"*)
+                            _dline=$(printf '%s\n' "$line" | sed -e 's/-j REJECT --reject-with [^ ]*/-j DROP/g' -e 's/-j REJECT$/-j DROP/g')
+                            set -f
+                            # shellcheck disable=SC2086
+                            set -- $_dline
+                            set +f
+                            $T -t "$tbl" "$@" 2>/dev/null
+                            ;;
+                    esac
+                fi
                 ;;
         esac
     done < "$batch"
@@ -711,10 +788,31 @@ if [ -z "$HNC_TEST_MODE" ] && ! tc qdisc show dev "$IFACE" 2>/dev/null | grep -q
 fi
 
 DEV_MAC_IP_MAP=""
+if [ -s "$DEVICES_FLAT" ]; then
+    DEV_MAC_IP_MAP=$(awk '
+        BEGIN { FS="[ \t|]+" }
+        /^#/ || NF < 2 { next }
+        {
+            m = ""; a = ""
+            for (i = 1; i <= NF; i++) {
+                t = tolower($i)
+                if (m == "" && t ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/) m = t
+                else if (a == "" && $i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) a = $i
+            }
+            if (m != "" && a != "") print m, a
+        }
+    ' "$DEVICES_FLAT" 2>/dev/null)
+fi
 if [ -f "$DEVICES" ]; then
-    DEV_MAC_IP_MAP=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null | tr 'A-Z' 'a-z' \
+    _dev_json_map=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null | tr 'A-Z' 'a-z' \
         | grep -oE '"[0-9a-f:]{17}"[[:space:]]*:[[:space:]]*\{[^}]*\}' \
         | sed -n 's/^"\([0-9a-f:]*\)".*"ip"[[:space:]]*:[[:space:]]*"\([0-9.]*\)".*/\1 \2/p')
+    if [ -n "$DEV_MAC_IP_MAP" ] && [ -n "$_dev_json_map" ]; then
+        DEV_MAC_IP_MAP="$DEV_MAC_IP_MAP
+$_dev_json_map"
+    elif [ -n "$_dev_json_map" ]; then
+        DEV_MAC_IP_MAP="$_dev_json_map"
+    fi
 fi
 
 resolve_mac_ip() {
@@ -1139,9 +1237,14 @@ if [ "$applied" -gt 0 ] && [ -s "$DEV_META_MAP" ]; then
             || tc qdisc replace dev "$IFACE" parent "1:$def_hex" handle "${def_hex}:" pfifo 2>/dev/null || true
         tc filter del dev "$IFACE" parent "1:$d_cid" prio "$INNER_PRIO_DEF" 2>/dev/null || true
         tc filter del dev "$IFACE" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_DEF_V6" 2>/dev/null || true
-        if ! tc filter add dev "$IFACE" parent "1:$d_cid" protocol all prio "$INNER_PRIO_DEF" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null; then
-            tc filter add dev "$IFACE" parent "1:$d_cid" protocol ip prio "$INNER_PRIO_DEF" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
-            [ "$IPV6_OK" = 1 ] && tc filter add dev "$IFACE" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_DEF_V6" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
+        if ! tc filter add dev "$IFACE" parent "1:$d_cid" protocol all prio "$INNER_PRIO_DEF" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null \
+           && ! tc filter add dev "$IFACE" parent "1:$d_cid" protocol all prio "$INNER_PRIO_DEF" matchall flowid "1:$def_hex" 2>/dev/null; then
+            tc filter add dev "$IFACE" parent "1:$d_cid" protocol ip prio "$INNER_PRIO_DEF" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null \
+                || tc filter add dev "$IFACE" parent "1:$d_cid" protocol ip prio "$INNER_PRIO_DEF" matchall flowid "1:$def_hex" 2>/dev/null || true
+            if [ "$IPV6_OK" = 1 ]; then
+                tc filter add dev "$IFACE" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_DEF_V6" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null \
+                    || tc filter add dev "$IFACE" parent "1:$d_cid" protocol ipv6 prio "$INNER_PRIO_DEF_V6" matchall flowid "1:$def_hex" 2>/dev/null || true
+            fi
         fi
         echo "DEF $IFACE 1:$d_cid 1:$def_hex" >> "$TREE_TMP"
     done < "$DEV_META_MAP"

@@ -25,10 +25,13 @@ import (
 	"encoding/json"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+
+	"hnc.io/dpid/nlroute"
 )
 
 const (
@@ -39,19 +42,92 @@ const (
 	offloadMaxSec      = 900              // 与 shell INTERVAL/IDLE_INTERVAL 的上界一致
 	clsactCheckEvery   = 10 * time.Second
 	clsactCheckTimeout = 5 * time.Second
+
+	// StateIdle 关热点待机态(对应看门狗 PENDING 态); 待机且无残留待清理项时挂起调度定时器实现零唤醒。
+	StateIdle = statePending
 )
 
 // ── 可注入外部调用 ──────────────────────────────────────────────────
 var (
 	// runOffloadPlanFn 跑一轮 plan(默认 runOffloadPlan, 返回末行)。
 	runOffloadPlanFn = runOffloadPlan
-	// clsactCheckFn 直接 exec hnc_clsact_ctl check(默认 execClsactCheck)。
-	clsactCheckFn = execClsactCheck
+	// clsactCheckFn 检查 clsact 状态(默认 checkClsact: 纯 Go netlink 优先, 异常才回退子进程)。
+	clsactCheckFn = checkClsact
+	// nlClsactBPFCheckFn 纯 Go RTM_GETTFILTER + bpffs 探活(默认 nlroute.CheckClsactBPF)。
+	nlClsactBPFCheckFn = nlroute.CheckClsactBPF
+	// clsactMapPinPath clsact pinned ip_mark_map 路径(测试可重定向)。
+	clsactMapPinPath = nlroute.DefaultBPFMapPinPath
 	// clsactTargetFn 该盯哪个口(默认 clsactTarget: 读 offload guard 状态; "" = 不盯)。
 	clsactTargetFn = clsactTarget
 	// offloadGuardStatusPath plan / apply 写的状态文件(测试重定向)。
 	offloadGuardStatusPath = runDir + "/offload_guard.json"
+	// offloadRunDir 清理标志位所在 run 目录(测试重定向)。
+	offloadRunDir = runDir
+	// offloadStateFn 读取当前看门狗状态(默认 readState)。
+	offloadStateFn = readState
+	// offloadFirstDelayDur / clsactEveryDur 循环节拍(单测可调小)。
+	offloadFirstDelayDur = offloadFirstDelay
+	clsactEveryDur       = clsactCheckEvery
 )
+
+var (
+	offloadWakeCh = make(chan struct{}, 1)
+	clsactWakeCh  = make(chan struct{}, 1)
+)
+
+// wakeOffloadSched 热点开启或迁移网卡时即时唤醒待机挂起的 offloadLoop 与 clsactLoop。
+func wakeOffloadSched() {
+	select {
+	case offloadWakeCh <- struct{}{}:
+	default:
+	}
+	select {
+	case clsactWakeCh <- struct{}{}:
+	default:
+	}
+}
+
+// offloadNeedsCleanup 判断关热点后是否仍存在待恢复的 offload / clsact / HWNAT 状态。
+// 若存在残留标记或 offload_guard.json 尚未归位到 NOHOTSPOT/SKIPPED, 保持调度直到清理完毕。
+func offloadNeedsCleanup(runPath string) bool {
+	for _, name := range []string{
+		"offload_guard.clsact",
+		"orig_tether_offload_disabled",
+		"mtk_hwnat.state",
+	} {
+		if _, err := os.Stat(filepath.Join(runPath, name)); err == nil {
+			return true
+		}
+	}
+	if b, err := os.ReadFile(filepath.Join(runPath, "offload_guard.state")); err == nil {
+		for _, ln := range strings.Split(string(b), "\n") {
+			if strings.TrimSpace(ln) == "fallback=1" {
+				return true
+			}
+		}
+	}
+	if b, err := os.ReadFile(offloadGuardStatusPath); err == nil {
+		var st struct {
+			OffloadState   string `json:"offload_state"`
+			FallbackActive bool   `json:"fallback_active"`
+			Clsact         string `json:"clsact"`
+		}
+		if json.Unmarshal(b, &st) == nil {
+			if st.FallbackActive || st.Clsact == "installed" {
+				return true
+			}
+			if st.OffloadState != "" && st.OffloadState != "NOHOTSPOT" && st.OffloadState != "SKIPPED" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// offloadIdleShouldPause 关热点处于 StateIdle 且无需任何残留清理时返回 true, 暂停定时器实现零唤醒。
+func offloadIdleShouldPause() bool {
+	return offloadStateFn().kind == StateIdle && !offloadNeedsCleanup(offloadRunDir)
+}
 
 // runOffloadPlan 执行 `sh bin/hnc_offload_guard.sh plan`, 30 秒超时, 经
 // 动作记账(动作名 offload_guard_plan), 返回输出末行(空 = 失败)。
@@ -153,7 +229,7 @@ func offloadEarlyWake(wake, level string, prevClients, curClients int) bool {
 	return false
 }
 
-// startOffloadSched 常驻 goroutine: 20 秒后第一轮, 之后按 plan 睡。
+// startOffloadSched 常驻 goroutine: 20 秒后第一轮, 之后按 plan 睡; StateIdle 待机零唤醒。
 func startOffloadSched() {
 	go offloadLoop()
 	go clsactLoop()
@@ -161,18 +237,38 @@ func startOffloadSched() {
 
 func offloadLoop() {
 	p := &offloadPlanner{}
-	// 启动 20 秒后第一轮(让热点 / hotspotd 就绪)
-	time.Sleep(offloadFirstDelay)
+	if offloadFirstDelayDur > 0 && !sleepUntil(offloadFirstDelayDur) {
+		return
+	}
 	last := nowFn()
 	for {
-		// 睡到下一检查点(早醒检查每 30 秒一次, 不会睡过头超过 30 秒)
-		if d := time.Until(last); d > 0 {
-			time.Sleep(d)
+		if offloadIdleShouldPause() {
+			select {
+			case <-stopCh:
+				return
+			case <-offloadWakeCh:
+				p.started = false
+				last = nowFn()
+			}
+		} else if d := last.Sub(nowFn()); d > 0 {
+			tmr := time.NewTimer(d)
+			select {
+			case <-stopCh:
+				tmr.Stop()
+				return
+			case <-offloadWakeCh:
+				tmr.Stop()
+				p.started = false
+			case <-tmr.C:
+			}
 		}
-		last = last.Add(offloadWakeEvery)
+		last = nowFn().Add(offloadWakeEvery)
+		if offloadIdleShouldPause() {
+			continue
+		}
 		now := nowFn()
 		s := actSnapshotFn()
-		early := s.OK && offloadEarlyWake(p.wakeMode, s.Level, p.prevClients, s.Clients) // 同 shell: 快照不新鲜不早醒
+		early := s.OK && offloadEarlyWake(p.wakeMode, s.Level, p.prevClients, s.Clients)
 		if p.advance(now, early) {
 			dur, wake := parseOffloadPlan(runOffloadPlanFn())
 			curClients := 0
@@ -182,7 +278,7 @@ func offloadLoop() {
 				curClients = s.Clients
 			}
 			p.observeWithClients(dur, wake, curClients, now)
-			last = now.Add(offloadWakeEvery)
+			last = nowFn().Add(offloadWakeEvery)
 		}
 	}
 }
@@ -193,6 +289,24 @@ func offloadLoop() {
 type clsactSched struct {
 	checks  int
 	repairs int // 修复调用次数(测试断言用)
+}
+
+// checkClsact 优先使用纯 Go netlink RTM_GETTFILTER + bpffs stat 检查 clsact 状态
+// (省去每 10s 一次的 hnc_clsact_ctl check 子进程, 少 360 次/小时 fork);
+// 仅在网卡查询或 netlink 权限不可用时回退 execClsactCheck。
+func checkClsact(iface string) string {
+	if iface == "" {
+		return ""
+	}
+	if ni, err := netInterfaceByNameFn(iface); err == nil && ni != nil && ni.Index > 0 && nlClsactBPFCheckFn != nil {
+		if st, nlErr := nlClsactBPFCheckFn(ni.Index, clsactMapPinPath); nlErr == nil {
+			if st.OK() {
+				return `{"ok":true,"qdisc":true,"bpf_filter":true,"map":true}`
+			}
+			return `{"ok":false}`
+		}
+	}
+	return execClsactCheck(iface)
 }
 
 // execClsactCheck 直接 exec hnc_clsact_ctl check <口>(不经 sh, 带 5s 硬超时防挂死)。
@@ -239,17 +353,33 @@ func clsactTarget() string {
 	return ""
 }
 
-// clsactLoop 每 10 秒一轮 clsactTick。
+// clsactLoop 活跃期每 10 秒一轮 clsactTick; 关热点 StateIdle 且无需清理时暂停定时器实现待机零唤醒。
 func clsactLoop() {
 	c := &clsactSched{}
-	tick := time.NewTicker(clsactCheckEvery)
-	defer tick.Stop()
-	for range tick.C {
+	for {
+		if clsactTargetFn() == "" && offloadIdleShouldPause() {
+			select {
+			case <-stopCh:
+				return
+			case <-clsactWakeCh:
+			}
+			clsactTick(c, nowFn())
+			continue
+		}
+		tmr := time.NewTimer(clsactEveryDur)
+		select {
+		case <-stopCh:
+			tmr.Stop()
+			return
+		case <-clsactWakeCh:
+			tmr.Stop()
+		case <-tmr.C:
+		}
 		clsactTick(c, nowFn())
 	}
 }
 
-// clsactTick 一轮: offload guard 说 on 模式装着 clsact 才 exec check, 不 ok 才
+// clsactTick 一轮: offload guard 说 on 模式装着 clsact 才检查, 不 ok 才
 // `sh hnc_offload_guard.sh clsact_repair <口>`(它会再过一遍 shell 的闸门)。
 func clsactTick(c *clsactSched, now time.Time) {
 	iface := clsactTargetFn()
@@ -260,8 +390,6 @@ func clsactTick(c *clsactSched, now time.Time) {
 	out := clsactCheckFn(iface)
 	if !strings.Contains(out, `"ok":true`) {
 		logf("clsact check not ok on %s, repair", iface)
-		// 脚本路径与参数分开传(v5.29 rc1 拼成一个字符串, sh 去找名叫
-		// "… repair wlan2" 的文件, 修复从没执行过)
 		runScriptFn(binDir+"/hnc_offload_guard.sh", "clsact_repair", iface)
 		c.repairs++
 	}

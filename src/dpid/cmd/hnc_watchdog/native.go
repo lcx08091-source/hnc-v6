@@ -42,6 +42,11 @@ var natRunDir, natDataDir = runDir, dataDir
 var (
 	// nlQdiscListFn 查询某网卡的 qdisc(默认 nlroute.QdiscList)。
 	nlQdiscListFn = nlroute.QdiscList
+	// nlIngressMirredFn 原生 netlink RTM_GETTFILTER 查热点口 ingress/clsact 是否存在
+	// 指向目标 ifb0 ifindex 的 mirred 动作(默认 nlroute.HasIngressMirred; 失败回退 tc filter show)。
+	nlIngressMirredFn = nlroute.HasIngressMirred
+	// iptTargetsPath 内核已注册 xtables target 列表路径(单测可重定向防穿透宿主机)。
+	iptTargetsPath = "/proc/net/ip_tables_targets"
 	// netInterfaceByNameFn 查网卡(默认 net.InterfaceByName)。
 	netInterfaceByNameFn = net.InterfaceByName
 	// execCommandFn 直接执行外部命令(不经 sh; iptables / tc 文本探测用),
@@ -49,7 +54,7 @@ var (
 	execCommandFn = func(name string, args ...string) (string, int, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), nativeExecTimeout)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, name, args...)
+		cmd := exec.CommandContext(ctx, resolveSysBinPath(name), args...)
 		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 		cmd.Cancel = func() error {
 			if cmd.Process != nil && cmd.Process.Pid > 0 {
@@ -85,6 +90,34 @@ var (
 	probeHotspotFn = probeHotspot
 	checkHealthFn  = checkHealth
 )
+
+func resolveSysBinPath(name string) string {
+	if strings.Contains(name, "/") {
+		return name
+	}
+	if p, err := exec.LookPath(name); err == nil && p != "" {
+		return p
+	}
+	for _, dir := range []string{"/system/bin", "/system/xbin", "/vendor/bin"} {
+		cand := dir + "/" + name
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+			return cand
+		}
+	}
+	return name
+}
+
+// execSysCmd 先按命令名调 execCommandFn; 若启动失败(rc < 0)且为裸命令名(如 iptables / tc),
+// 自动兜底试一次 /system/bin/<name>, 防止 Magisk/KSU 极简 PATH 丢失 /system/bin。
+func execSysCmd(name string, args ...string) (string, int, error) {
+	out, rc, err := execCommandFn(name, args...)
+	if rc < 0 && !strings.Contains(name, "/") {
+		if out2, rc2, err2 := execCommandFn("/system/bin/"+name, args...); rc2 >= 0 {
+			return out2, rc2, err2
+		}
+	}
+	return out, rc, err
+}
 
 // nativeExecTimeout execCommandFn 的单次外部命令超时(iptables / tc 探测)。
 var nativeExecTimeout = 10 * time.Second
@@ -167,19 +200,34 @@ type nativeProbeResult struct {
 	unknown bool
 }
 
-// nativeProbeHotspot 照 v5.32 及以前的 shell probe_valid_hotspot 写的(行号见 git 历史)。
-// 分支对应:
+func isHotspotPrivateIPv4(ip net.IP) bool {
+	ip4 := ip.To4()
+	if ip4 == nil {
+		return false
+	}
+	if ip4.IsPrivate() {
+		return true
+	}
+	// RFC 6598 100.64.0.0/10(部分定制 ROM 热点共享网段)
+	return ip4[0] == 100 && (ip4[1]&0xc0) == 64
+}
+
+func isWlan0AuthoritativeHotspot() bool {
+	authIface, auth, ok := ifacehint.ReadAuthoritative(natRunDir, nowFn(), natHintFresh)
+	return ok && auth && authIface == "wlan0"
+}
+
+// nativeProbeHotspot 照 v5.32 及以前的 shell probe_valid_hotspot 写的:
 //   - device_detect.sh iface → ifacehint.ReadDetect(陈旧即 unknown, probeHotspot 刷新);
 //   - ip -4 addr show <口> → net.InterfaceByName + Addrs;
-//   - 「必须是私网 IPv4」→ ip.IsPrivate() && To4() != nil;
-//   - 输出 "<口> <IP>" → ok=true(网卡非 wlan0 才算, 与 shell get_iface 语义一致)。
+//   - 「必须是私网 IPv4」→ RFC1918 或 100.64.0.0/10;
+//   - wlan0 默认视为 STA 口拒绝, 仅当 iface_detect.json 明确含 authoritative=true 或 wlan0_ap=true 时放行。
 func nativeProbeHotspot() nativeProbeResult {
 	iface, ok := ifaceHintReadFn()
 	if !ok || iface == "" {
 		return nativeProbeResult{unknown: true}
 	}
-	if iface == "wlan0" {
-		// shell 探测器同样不认 wlan0(手机 wlan0 是 STA 口)
+	if iface == "wlan0" && !isWlan0AuthoritativeHotspot() {
 		return nativeProbeResult{unknown: true}
 	}
 	ni, err := netInterfaceByNameFn(iface)
@@ -195,9 +243,8 @@ func nativeProbeHotspot() nativeProbeResult {
 		if !ok {
 			continue
 		}
-		ip4 := ipn.IP.To4()
-		if ip4 != nil && ipn.IP.IsPrivate() {
-			return nativeProbeResult{iface: iface, ip: ipn.IP.String(), ok: true}
+		if isHotspotPrivateIPv4(ipn.IP) {
+			return nativeProbeResult{iface: iface, ip: ipn.IP.To4().String(), ok: true}
 		}
 	}
 	return nativeProbeResult{unknown: true} // 无私网 IPv4
@@ -227,21 +274,80 @@ func capBool(key string) (bool, bool) {
 	return v, ok
 }
 
-// nativeCheckHealth 照 v5.32 及以前的 shell check_health 写的(注释里的「shell 行 N」
-// 是当时 watchdog.sh 的行号), 逐项:
-//  0. iface 为空 → 1(shell: `[ -z "$iface" ] && rc=1`);
-//     run/tc_restore_pending 存在 → 1(shell: 行 281);
-//  1. 能力 tc_htb 显式 false → 跳过 tc 检查(watchdog_tc_core_supported,
-//     watchdog.sh:112); 否则 nlroute.QdiscList 要求存在 kind=htb 且
-//     (parent = 根 0xFFFFFFFF 或 handle = "1:")的条目, 否则 1。
-//     「1:」 = 0x00010000 —— 同时覆盖 root htb 与 mq 子队列 htb
-//     (try_mq_child_htb 路径, shell 行 ~301);
+func isXtablesWaitUnsupported(out string) bool {
+	lo := strings.ToLower(out)
+	return strings.Contains(lo, "bad argument") ||
+		strings.Contains(lo, "unknown option") ||
+		strings.Contains(lo, "unrecognized option") ||
+		strings.Contains(lo, "invalid option") ||
+		strings.Contains(lo, "unknown arg")
+}
+
+func isXtablesLockBusy(out string, rc int) bool {
+	if rc == 4 {
+		return true
+	}
+	lo := strings.ToLower(out)
+	return strings.Contains(lo, "resource temporarily unavailable") ||
+		strings.Contains(lo, "xtables lock")
+}
+
+func isXtablesChainMissing(out string) bool {
+	lo := strings.ToLower(out)
+	return strings.Contains(lo, "no chain") ||
+		strings.Contains(lo, "does not exist") ||
+		strings.Contains(lo, "bad chain")
+}
+
+// iptablesDumpChain 查询 mangle 表指定链规则, 支持 `-w 2` → `-w` → 无 `-w` 三级回退,
+// 并修复真机 AOSP `iptables -S <CHAIN>` 丢链时返回 rc==1 被误判成锁忙的 P0 漏洞。
+func iptablesDumpChain(chain string) (string, int) {
+	out, rc, _ := execSysCmd("iptables", "-w", "2", "-t", "mangle", "-S", chain)
+	if (rc == 1 || rc == 2) && isXtablesWaitUnsupported(out) {
+		out, rc, _ = execSysCmd("iptables", "-w", "-t", "mangle", "-S", chain)
+		if (rc == 1 || rc == 2) && isXtablesWaitUnsupported(out) {
+			out, rc, _ = execSysCmd("iptables", "-t", "mangle", "-S", chain)
+		}
+	}
+	if rc < 0 {
+		return out, natHealthUnknown
+	}
+	if rc == 0 {
+		return out, natHealthOK
+	}
+	if isXtablesLockBusy(out, rc) {
+		return out, natHealthBusy
+	}
+	if rc == 1 || rc == 2 || isXtablesChainMissing(out) {
+		return out, natHealthLost
+	}
+	return out, natHealthBusy
+}
+
+// connmarkUnsupported 判断内核是否明确缺少 xt_CONNMARK target 支持:
+// 仅当 capabilities.json 显式标记 ipt_connmark=false 或 xt_connmark=false,
+// 或 /proc/net/ip_tables_targets 可读非空且不含 CONNMARK 时返回 true, 豁免 HNC_RESTORE 空链检查以防恢复风暴。
+func connmarkUnsupported() bool {
+	if v, known := capBool("ipt_connmark"); known && !v {
+		return true
+	}
+	if v, known := capBool("xt_connmark"); known && !v {
+		return true
+	}
+	if b, err := os.ReadFile(iptTargetsPath); err == nil {
+		if s := strings.TrimSpace(string(b)); s != "" && !strings.Contains(s, "CONNMARK") {
+			return true
+		}
+	}
+	return false
+}
+
+// nativeCheckHealth 规则健康检查:
+//  0. iface 为空或 run/tc_restore_pending 存在 → 1;
+//  1. 能力 tc_htb 显式 false → 跳过 tc 检查; 否则要求存在 kind=htb 且(parent=root 或 handle="1:");
 //  2. /sys/class/net/<口>/ifindex 与 run/tc_ifindex_<口> 不一致 → 1;
-//  3. iptables -w 2 -t mangle -S HNC_MARK: rc=2 → 1(链真丢); rc!=0 →
-//     2(锁忙); (HNC_MARK 链空是合法状态 —— 只看命令返回, 不看内容);
-//  4. iptables -w 2 -t mangle -S HNC_RESTORE: rc=2 → 1; rc!=0 → 2;
-//     输出里没有 CONNMARK → 1(原 shell 版 `grep -q 'CONNMARK'`)。
-//     netlink / iptables 执行失败 → unknown(不误判)。
+//  3. iptables mangle HNC_MARK: 链丢失(rc=1/2, 非锁忙)→ 1; 锁忙(rc=4)→ 2;
+//  4. iptables mangle HNC_RESTORE: 链丢失 → 1; 锁忙 → 2; 未豁免 xt_connmark 时输出无 CONNMARK → 1。
 func nativeCheckHealth(iface string) int {
 	if iface == "" {
 		return natHealthLost
@@ -260,7 +366,6 @@ func nativeCheckHealth(iface string) int {
 			return natHealthLost
 		}
 	}
-	// ifindex 对比(shell: /sys/class/net/<口>/ifindex vs run/tc_ifindex_<口>)
 	want, err := sysIfIndexFn(iface)
 	if err != nil {
 		return natHealthUnknown
@@ -270,31 +375,16 @@ func nativeCheckHealth(iface string) int {
 		if got != want {
 			return natHealthLost
 		}
-	} // 没有 tc_ifindex 文件 = shell 同样放行(只在文件存在时比对)
+	}
 
-	// exec 契约(见 execCommandFn): rc<0 = 命令没跑起来 → unknown;
-	// *exec.ExitError 的退出码已折算成 rc ≥ 0, 照 shell 的 rc 语义判。
-	out, rc, _ := execCommandFn("iptables", "-w", "2", "-t", "mangle", "-S", "HNC_MARK")
-	if rc < 0 {
-		return natHealthUnknown
+	if _, st := iptablesDumpChain("HNC_MARK"); st != natHealthOK {
+		return st
 	}
-	if rc == 2 {
-		return natHealthLost
+	out, st := iptablesDumpChain("HNC_RESTORE")
+	if st != natHealthOK {
+		return st
 	}
-	if rc != 0 {
-		return natHealthBusy
-	}
-	out, rc, _ = execCommandFn("iptables", "-w", "2", "-t", "mangle", "-S", "HNC_RESTORE")
-	if rc < 0 {
-		return natHealthUnknown
-	}
-	if rc == 2 {
-		return natHealthLost
-	}
-	if rc != 0 {
-		return natHealthBusy
-	}
-	if !strings.Contains(out, "CONNMARK") {
+	if !strings.Contains(out, "CONNMARK") && !connmarkUnsupported() {
 		return natHealthLost
 	}
 	return natHealthOK
@@ -335,18 +425,11 @@ func readFileTrim(p string) (string, error) {
 	return strings.TrimSpace(string(b)), nil
 }
 
-// nativeUplinkOK 上行链路「需不需要修」(修在 shell ensure_tc_uplink_healthy, 它还管
-// 冷却 / 失败计数 / 降级标记, 修完自己再验证一遍):
-//   - 能力 uplink_supported 显式 false → false(调 shell 动作, 它带
-//     watchdog_mark_uplink_unsupported_once / 清 fail_count 的副作用);
-//   - ifb0 不存在 → false;
-//   - ifb0 根 qdisc 不是 htb(nlroute) → false;
-//   - 热点口 ingress 没有 mirred→ifb0 过滤器 → false。判断方式: Go 直接
-//     exec `tc filter show dev <口> ingress`, 失败(魔改 tc 拒绝 ingress
-//     关键字, ColorOS 坑)再试 `parent ffff:`; 输出含 "mirred" 且含
-//     "ifb0"(grep -iE "mirred.*ifb0" 同义)才算有。
-//     任一步执行失败(netlink / tc 都跑不动)→ unknown, 调用方照样调 shell
-//     (修复路径自己会判)。
+// nativeUplinkOK 上行链路「需不需要修」:
+//   - 能力 uplink_supported 显式 false → false;
+//   - ifb0 不存在或根 qdisc 不是 htb → false;
+//   - 热点口 ingress/clsact 是否存在指向 ifb0 的 mirred 动作: 优先走纯 Go nlIngressMirredFn
+//     (RTM_GETTFILTER, 0 fork); 若 netlink 查询不可用则回退 tc filter show。
 func nativeUplinkOK(iface string) (ok, unknown bool) {
 	if cap, known := capBool("uplink_supported"); known && !cap {
 		return false, false
@@ -372,14 +455,16 @@ func nativeUplinkOK(iface string) (ok, unknown bool) {
 	if iface == "" {
 		iface = "wlan2" // shell: `[ -z "$iface" ] && iface="wlan2"`
 	}
-	// shell: `! show ingress | grep mirred.*ifb0 && ! show parent ffff: | grep ...`
-	// —— 两种写法任一看到就算有。ColorOS 的 tc 对 `ingress` 可能 rc=0 但
-	// 输出为空, 所以第一种没看到(不论 rc)都要再试第二种。
-	out1, rc1, _ := execCommandFn("tc", "filter", "show", "dev", iface, "ingress")
+	if devIdx := ifIndex(iface); devIdx > 0 && nlIngressMirredFn != nil {
+		if hasMirred, nlErr := nlIngressMirredFn(devIdx, ifb.Index); nlErr == nil {
+			return hasMirred, false
+		}
+	}
+	out1, rc1, _ := execSysCmd("tc", "filter", "show", "dev", iface, "ingress")
 	if rc1 == 0 && hasMirredIfb0(out1) {
 		return true, false
 	}
-	out2, rc2, _ := execCommandFn("tc", "filter", "show", "dev", iface, "parent", "ffff:")
+	out2, rc2, _ := execSysCmd("tc", "filter", "show", "dev", iface, "parent", "ffff:")
 	if rc2 == 0 && hasMirredIfb0(out2) {
 		return true, false
 	}

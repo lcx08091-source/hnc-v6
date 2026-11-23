@@ -122,7 +122,7 @@
 ### T-last · 版本与文档
 1. `module.prop`:`version=v5.30.0-rc1`,`versionCode=5300001`。
 2. `CHANGELOG.md` 加 `## [5.30.0-rc1] - <日期>`;`webroot/changelog.html` 加大白话一段。
-3. `docs/ROADMAP.md`:§A v5.30 行标「rc1 ✅」;§B M5 标完成、M4 标「影子 ✅,替换待 v5.31」。
+3. `docs/ROADMAP.md`:§A v5.30 行标「rc1 [OK]」;§B M5 标完成、M4 标「影子 [OK],替换待 v5.31」。
 4. `docs/CODEMAP.md`:守护链、`neigh` 包、共享基础设施名单、QoS 子 class。
 5. `docs/API.md` 加「## 28. v5.30 变更」:`online_min`、`app_qos`、`m4_mismatch`、开关文件清单(`run/wd_m5.disabled`、`run/wd_m4_shadow.disabled`)。
 

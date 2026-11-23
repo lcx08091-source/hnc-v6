@@ -141,7 +141,7 @@
 1. `module.prop`:`version=v5.29.0-rc1`,`versionCode=5290001`。
 2. `CHANGELOG.md` 加 `## [5.29.0-rc1] - <日期>`:写清 M2 / M3 迁了什么、开关文件在哪、对照机制;回滚的触发条件与开关;录制的隐私边界。
 3. `webroot/changelog.html` 加一段大白话。
-4. `docs/ROADMAP.md`:§A v5.29 行标「rc1 ✅」;§B 的 M2、M3 标完成。
+4. `docs/ROADMAP.md`:§A v5.29 行标「rc1 [OK]」;§B 的 M2、M3 标完成。
 5. `docs/CODEMAP.md`:「手机上跑着的进程」去掉两个 shell 守护;权威实现表加 `nlroute`、`native.go`、回滚(`service.sh` + `data/rollback.*`)、`dpid_replay`。
 6. `docs/API.md` 加「## 27. v5.29 变更」:新 action、`rollback` 字段、`native_mismatch`、开关文件清单(`run/wd_native.disabled`、`run/wd_m3.disabled`、`data/rollback.disabled`)。
 

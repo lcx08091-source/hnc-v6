@@ -14,6 +14,11 @@
     export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 RUN="$HNC_DIR/run"
 PLAN="$RUN/app_qos.plan"
 STATE="$RUN/app_qos.state"
@@ -21,6 +26,17 @@ AL_DEVS="$RUN/app_limits.devs"
 SIG="$RUN/app_qos.sig"
 LOG="$HNC_DIR/logs/app_qos.log"
 TCM="$HNC_DIR/bin/tc_manager.sh"
+
+TC_BIN=${TC_BIN:-}
+if [ -z "$TC_BIN" ]; then
+    if [ -z "${HNC_TEST_MODE:-}" ]; then
+        for _tc in "$HNC_DIR/bin/hnc_tc" "$HNC_DIR/bin/tc" /system/bin/tc /vendor/bin/tc /system/xbin/tc; do
+            [ -x "$_tc" ] && { TC_BIN="$_tc"; break; }
+        done
+    fi
+    [ -z "$TC_BIN" ] && TC_BIN=$(command -v tc 2>/dev/null || echo tc)
+fi
+tc() { "$TC_BIN" "$@"; }
 
 if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
     . "$HNC_DIR/bin/hnc_constants.sh"
@@ -87,9 +103,12 @@ restore_applim_default_child() {
         || tc class add dev "$iface" parent "1:$cid" classid "1:$def_hex" htb rate "${def_rate}kbit" ceil "${ck}kbit" prio 2 2>/dev/null || true
     tc qdisc replace dev "$iface" parent "1:$def_hex" handle "${def_hex}:" fq_codel 2>/dev/null \
         || tc qdisc replace dev "$iface" parent "1:$def_hex" handle "${def_hex}:" pfifo 2>/dev/null || true
-    if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null; then
-        tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
-        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null || true
+    if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null \
+       && ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" matchall flowid "1:$def_hex" 2>/dev/null; then
+        tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null \
+            || tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" matchall flowid "1:$def_hex" 2>/dev/null || true
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" u32 match u32 0 0 flowid "1:$def_hex" 2>/dev/null \
+            || tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" matchall flowid "1:$def_hex" 2>/dev/null || true
     fi
 }
 
@@ -342,9 +361,12 @@ build_dev() {
         tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_FW" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null || return 1
         tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_FW_V6" handle "$TIER_BG/$TIER_MASK" fw flowid "1:$(child_minor "$mid" 3)" 2>/dev/null || true
     fi
-    if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null; then
-        tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || return 1
-        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || true
+    if ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null \
+       && ! tc filter add dev "$iface" parent "1:$cid" protocol all prio "$INNER_PREF_ALL" matchall flowid "1:$(child_minor "$mid" 2)" 2>/dev/null; then
+        tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null \
+            || tc filter add dev "$iface" parent "1:$cid" protocol ip prio "$INNER_PREF_ALL" matchall flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || return 1
+        tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" u32 match u32 0 0 flowid "1:$(child_minor "$mid" 2)" 2>/dev/null \
+            || tc filter add dev "$iface" parent "1:$cid" protocol ipv6 prio "$INNER_PREF_ALL_V6" matchall flowid "1:$(child_minor "$mid" 2)" 2>/dev/null || true
     fi
 
     tc filter del dev "$iface" parent 1: protocol all pref "$ROOT_PREF" handle "${dm}/${DEV_MASK}" fw 2>/dev/null || true
@@ -395,6 +417,12 @@ resolve_restore_bin() {
 probe_ipv6() {
     [ "$_IPV6_PROBED" = 1 ] && return 0
     _IPV6_PROBED=1
+    if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v iptables >/dev/null 2>&1; then
+        iptables -w 2 -t mangle -L -n >/dev/null 2>&1 || IPT="iptables"
+    fi
+    if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -w 2 -t mangle -L -n >/dev/null 2>&1 || IP6T="ip6tables"
+    fi
     IPT_RESTORE_BIN=$(resolve_restore_bin "$IPT" "iptables-restore" "${HNC_IPT_RESTORE:-}" "${HNC_IPT:-}")
     if command -v "${IP6T%% *}" >/dev/null 2>&1 && $IP6T -t mangle -L -n >/dev/null 2>&1; then
         IPV6_OK=1
@@ -471,13 +499,46 @@ ipt_remove() {
     return 0
 }
 
+heal_postrouting_before_save() {
+    local _cmd="$1" _ch="$2" _del_n _k _save_ln
+    [ -n "$_cmd" ] || return 0
+    _del_n=$($_cmd -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk -v ch="$_ch" '
+        $1 ~ /^[0-9]+$/ {
+            ln = $1 + 0
+            if ($2 == "HNC_SAVE" && save_ln == 0) save_ln = ln
+            if ($2 == ch) { cnt++; max_ch = ln }
+        }
+        END {
+            if (cnt > 0 && save_ln > 0 && (max_ch > save_ln || cnt > 1)) printf "%d\n", cnt
+        }
+    ')
+    [ -n "$_del_n" ] || return 0
+    _k=0
+    while [ "$_k" -lt "$_del_n" ]; do
+        $_cmd -t mangle -D POSTROUTING -j "$_ch" 2>/dev/null || break
+        _k=$((_k + 1))
+    done
+    _save_ln=$($_cmd -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $2 == "HNC_SAVE" {print $1; exit}')
+    if [ -n "$_save_ln" ]; then
+        $_cmd -t mangle -I POSTROUTING "$_save_ln" -j "$_ch" 2>/dev/null \
+            || $_cmd -t mangle -A POSTROUTING -j "$_ch" 2>/dev/null
+    else
+        $_cmd -t mangle -A POSTROUTING -j "$_ch" 2>/dev/null
+    fi
+}
+
 ipt_build() {
     probe_ipv6
-    local v4_batch="$RUN/.aq_v4_batch.$$" v6_batch="$RUN/.aq_v6_batch.$$" v6_neigh="" T _anchor_ln _save_ln
-    [ "$IPV6_OK" = 1 ] && v6_neigh=$(ip -6 neigh show dev "$IFACE" 2>/dev/null | awk '
-        $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $NF != "FAILED" && $NF != "INCOMPLETE" {
-            for (i = 2; i < NF; i++) if ($i == "lladdr") print tolower($(i+1)), tolower($1)
-        }' | tr -d '\r' | tr '\n' ';')
+    local v4_batch="$RUN/.aq_v4_batch.$$" v6_batch="$RUN/.aq_v6_batch.$$" v6_neigh="" _n6_raw="" T _anchor_ln _save_ln
+    if [ "$IPV6_OK" = 1 ]; then
+        if ! _n6_raw=$(ip -6 neigh show dev "$IFACE" 2>/dev/null) || { [ -z "$_n6_raw" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+            _n6_raw=$(ip neigh show dev "$IFACE" 2>/dev/null)
+        fi
+        v6_neigh=$(printf '%s\n' "$_n6_raw" | awk '
+            $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $NF != "FAILED" && $NF != "INCOMPLETE" {
+                for (i = 2; i < NF; i++) if ($i == "lladdr") print tolower($(i+1)), tolower($1)
+            }' | tr -d '\r' | tr '\n' ';')
+    fi
 
     awk -v iface="$IFACE" -v cm="$CHAIN_MARK" -v ch="$CHAIN" -v ci="$CHAIN_IP" \
         -v dmask="$DEV_MASK" -v amask="$APPLIM_MASK" -v rt="$TIER_RT" -v bg="$TIER_BG" -v tmask="$TIER_MASK" \
@@ -561,13 +622,15 @@ ipt_build() {
         fi
         if ! $T -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null; then
             # v5.40.2: 插入到 HNC_SAVE 之前, 避免尾部 HNC_EGRESS_FIX (--nfmask 0xffff0000) 覆盖清零 [25:24] 应用 QoS 档位
-            _save_ln=$($T -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$2 == "HNC_SAVE" {print $1; exit}')
+            _save_ln=$($T -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $2 == "HNC_SAVE" {print $1; exit}')
             if [ -n "$_save_ln" ]; then
                 $T -t mangle -I POSTROUTING "$_save_ln" -j "$CHAIN" 2>/dev/null \
                     || $T -t mangle -A POSTROUTING -j "$CHAIN" 2>/dev/null
             else
                 $T -t mangle -A POSTROUTING -j "$CHAIN" 2>/dev/null
             fi
+        else
+            heal_postrouting_before_save "$T" "$CHAIN"
         fi
     done
 }
@@ -694,6 +757,9 @@ if [ -f "$STATE" ]; then
        || ! $IPT -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null \
        || { [ "$IPV6_OK" = 1 ] && { ! $IP6T -t mangle -C FORWARD -j "$CHAIN_MARK" 2>/dev/null || ! $IP6T -t mangle -C POSTROUTING -j "$CHAIN" 2>/dev/null; }; }; then
         ipt_build
+    else
+        heal_postrouting_before_save "$IPT" "$CHAIN"
+        [ "$IPV6_OK" = 1 ] && heal_postrouting_before_save "$IP6T" "$CHAIN"
     fi
     if [ "$BUILD_ERR" = 0 ] && [ -n "$TCSIG" ] && [ -n "$NEWSIG" ]; then
         printf '%s\n%s\n' "$TCSIG" "$NEWSIG" > "$SIG"

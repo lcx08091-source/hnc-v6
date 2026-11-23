@@ -1948,33 +1948,250 @@ func resolveIptablesRestoreBin(name string) string {
 	return ""
 }
 
-func pipeIptablesRestore(binPath string, payload []byte) error {
+const defaultSubprocSafePath = "/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"
+
+func subprocEnvWithFallbackPath(extra ...string) []string {
+	pathVal := defaultSubprocSafePath
+	if cur := strings.TrimSpace(os.Getenv("PATH")); cur != "" && cur != defaultSubprocSafePath {
+		pathVal = pathVal + ":" + cur
+	}
+	env := make([]string, 0, 1+len(extra))
+	env = append(env, "PATH="+pathVal)
+	env = append(env, extra...)
+	return env
+}
+
+// isXtablesWaitFlagError 识别各代 xtables/iptables 对 -w 2 或 -w 的不兼容报错特征
+// (涵盖 xtables 1.4.20/1.4.21 仅支持裸 -w 不支持秒数时输出的 "Bad argument '2'" 以及更老版本无 -w 报错)。
+func isXtablesWaitFlagError(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, pat := range []string{
+		"unknown option",
+		"unrecognized option",
+		"invalid option",
+		"bad argument",
+		"option requires an argument",
+		"doesn't allow an argument",
+		"does not take",
+		"parameter problem",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+// isIptablesRejectMissingError 识别裁剪内核缺失 ipt_REJECT / ip6t_REJECT 模块或目标的报错特征。
+func isIptablesRejectMissingError(msg string) bool {
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "reject") {
+		return true
+	}
+	for _, pat := range []string{
+		"no chain/target/match",
+		"couldn't load target",
+		"could not load target",
+		"cannot load target",
+		"no such file or directory",
+		"unknown target",
+		"target_offset",
+		"invalid argument",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+// replaceRejectWithDropInRestorePayload 在运行期将 iptables-restore / ip6tables-restore 载荷中的
+// `-j REJECT [--reject-with <mode>]` 精准降级为 `-j DROP`, 保持非 REJECT 行与默认规则生成器输出不变。
+func replaceRejectWithDropInRestorePayload(payload string) string {
+	if !strings.Contains(payload, "REJECT") {
+		return payload
+	}
+	lines := strings.Split(payload, "\n")
+	changed := false
+	for idx, rawLn := range lines {
+		trimmed := strings.TrimSpace(rawLn)
+		if trimmed == "" || strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, ":") ||
+			strings.HasPrefix(trimmed, "#") || trimmed == "COMMIT" {
+			continue
+		}
+		if !strings.Contains(trimmed, "REJECT") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		outFields := make([]string, 0, len(fields))
+		lineChanged := false
+		for i := 0; i < len(fields); i++ {
+			if (fields[i] == "-j" || fields[i] == "--jump") && i+1 < len(fields) && fields[i+1] == "REJECT" {
+				outFields = append(outFields, fields[i], "DROP")
+				i++
+				lineChanged = true
+				continue
+			}
+			if fields[i] == "--reject-with" {
+				if i+1 < len(fields) {
+					i++
+				}
+				lineChanged = true
+				continue
+			}
+			if strings.HasPrefix(fields[i], "--reject-with=") {
+				lineChanged = true
+				continue
+			}
+			outFields = append(outFields, fields[i])
+		}
+		if lineChanged {
+			lines[idx] = strings.Join(outFields, " ")
+			changed = true
+		}
+	}
+	if !changed {
+		return payload
+	}
+	return strings.Join(lines, "\n")
+}
+
+// splitRestorePayloadByTable 将含多张表 (*mangle / *filter 等) 的 iptables-restore 载荷按表拆分为独立块,
+// 供运行期分步提交防止 *filter 缺 ipt_REJECT 等模块时连坐回滚 *mangle 打标规则。
+func splitRestorePayloadByTable(payload []byte) [][]byte {
+	s := strings.ReplaceAll(string(payload), "\r\n", "\n")
+	var blocks [][]byte
+	var cur strings.Builder
+	inTable := false
+	for _, ln := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "*") {
+			if inTable && cur.Len() > 0 {
+				blocks = append(blocks, []byte(cur.String()))
+				cur.Reset()
+			}
+			inTable = true
+			cur.WriteString(trimmed)
+			cur.WriteByte('\n')
+			continue
+		}
+		if inTable {
+			cur.WriteString(trimmed)
+			cur.WriteByte('\n')
+			if trimmed == "COMMIT" {
+				blocks = append(blocks, []byte(cur.String()))
+				cur.Reset()
+				inTable = false
+			}
+		}
+	}
+	if inTable && cur.Len() > 0 {
+		blocks = append(blocks, []byte(cur.String()))
+	}
+	return blocks
+}
+
+var nativePipeRestoreExecFn = defaultPipeRestoreExec
+
+func defaultPipeRestoreExec(binPath string, args []string, payload []byte, timeout time.Duration) error {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := hardenCmd(exec.CommandContext(ctx, binPath, args...))
+	cmd.Env = subprocEnvWithFallbackPath()
+	cmd.Stdin = bytes.NewReader(payload)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("%s timeout: %w", filepath.Base(binPath), ctx.Err())
+		}
+		return fmt.Errorf("%s %v failed: %w (%s)", filepath.Base(binPath), args, err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func pipeIptablesRestoreWithTimeout(binPath string, payload []byte, timeout time.Duration) error {
 	if binPath == "" {
 		return errors.New("restore binary not found")
 	}
-	runOnce := func(args ...string) error {
-		ctx, cancel := context.WithTimeout(context.Background(), iptRestoreTimeout)
-		defer cancel()
-		cmd := hardenCmd(exec.CommandContext(ctx, binPath, args...))
-		cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"}
-		cmd.Stdin = bytes.NewReader(payload)
-		out, err := cmd.CombinedOutput()
-		if err != nil {
-			if ctx.Err() == context.DeadlineExceeded {
-				return fmt.Errorf("%s timeout: %w", filepath.Base(binPath), ctx.Err())
-			}
-			return fmt.Errorf("%s %v failed: %w (%s)", filepath.Base(binPath), args, err, strings.TrimSpace(string(out)))
-		}
-		return nil
+	if timeout <= 0 {
+		timeout = iptRestoreTimeout
 	}
-	// 优先携带 -w 2 等待 xtables 锁; 若老版本二进制不支持 -w 参数则无缝重试裸 --noflush
-	if err := runOnce("-w", "2", "--noflush"); err != nil {
-		if err2 := runOnce("--noflush"); err2 == nil {
+	runWithWaitFallback := func(data []byte) error {
+		// 三级锁参数回退: `-w 2 --noflush` -> `-w --noflush` (xtables 1.4.20/1.4.21) -> `--noflush` (极老版)
+		err1 := nativePipeRestoreExecFn(binPath, []string{"-w", "2", "--noflush"}, data, timeout)
+		if err1 == nil {
 			return nil
 		}
-		return err
+		if isXtablesWaitFlagError(err1.Error()) {
+			err2 := nativePipeRestoreExecFn(binPath, []string{"-w", "--noflush"}, data, timeout)
+			if err2 == nil {
+				return nil
+			}
+			if isXtablesWaitFlagError(err2.Error()) {
+				if err3 := nativePipeRestoreExecFn(binPath, []string{"--noflush"}, data, timeout); err3 == nil {
+					return nil
+				}
+			}
+			return err2
+		}
+		return err1
 	}
-	return nil
+
+	err := runWithWaitFallback(payload)
+	if err == nil {
+		return nil
+	}
+	// 若载荷含 REJECT 且提交报错(如裁剪内核未编译 ipt_REJECT / ip6t_REJECT), 自动降级为 -j DROP 重试
+	if bytes.Contains(payload, []byte("REJECT")) && isIptablesRejectMissingError(err.Error()) {
+		rawStr := string(payload)
+		if dropStr := replaceRejectWithDropInRestorePayload(rawStr); dropStr != rawStr {
+			if dErr := runWithWaitFallback([]byte(dropStr)); dErr == nil {
+				return nil
+			}
+		}
+	}
+	return err
+}
+
+func pipeIptablesRestore(binPath string, payload []byte) error {
+	return pipeIptablesRestoreWithTimeout(binPath, payload, iptRestoreTimeout)
+}
+
+// pipeRestoreTablesIsolated 先尝试整包原子提交(含三级 -w 回退与 REJECT->DROP 自动降级);
+// 若整包仍失败则按表(*mangle / *filter)拆分独立提交, 确保 *filter 异常绝不连坐回滚 *mangle 限速打标规则。
+func pipeRestoreTablesIsolated(binPath string, payload []byte) (mangleOK bool, filterOK bool, anyOK bool, lastErr error) {
+	if binPath == "" {
+		return false, false, false, errors.New("restore binary not found")
+	}
+	if err := pipeIptablesRestore(binPath, payload); err == nil {
+		hasMangle := bytes.Contains(payload, []byte("*mangle"))
+		hasFilter := bytes.Contains(payload, []byte("*filter"))
+		return hasMangle, hasFilter, true, nil
+	}
+	blocks := splitRestorePayloadByTable(payload)
+	if len(blocks) == 0 {
+		err := pipeIptablesRestore(binPath, payload)
+		return false, false, err == nil, err
+	}
+	for _, blk := range blocks {
+		isMangle := bytes.HasPrefix(bytes.TrimSpace(blk), []byte("*mangle"))
+		isFilter := bytes.HasPrefix(bytes.TrimSpace(blk), []byte("*filter"))
+		if bErr := pipeIptablesRestore(binPath, blk); bErr == nil {
+			anyOK = true
+			if isMangle {
+				mangleOK = true
+			}
+			if isFilter {
+				filterOK = true
+			}
+		} else {
+			lastErr = bErr
+		}
+	}
+	return mangleOK, filterOK, anyOK, lastErr
 }
 
 func fallbackApplyDeviceRuleScript(hncDir, mac string, mid int, enableMark, enableBlock bool) error {
@@ -2235,22 +2452,30 @@ func defaultNativeIptCmdRunner(binPath string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, binPath, args...))
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"}
+	cmd.Env = subprocEnvWithFallbackPath()
 	out, err := cmd.CombinedOutput()
 	return string(out), err
 }
 
 func runIptWithWaitFallback(iptBin string, args ...string) (string, error) {
-	withWait := append([]string{"-w", "2"}, args...)
-	out, err := nativeIptCmdRunner(iptBin, withWait...)
+	withWait2 := append([]string{"-w", "2"}, args...)
+	out, err := nativeIptCmdRunner(iptBin, withWait2...)
 	if err == nil {
 		return out, nil
 	}
-	lower := strings.ToLower(out)
-	if strings.Contains(lower, "unknown option") || strings.Contains(lower, "unrecognized option") || strings.Contains(lower, "bad argument `-w'") {
+	errMsg := out + " " + err.Error()
+	if !isXtablesWaitFlagError(errMsg) {
+		return out, err
+	}
+	withWaitBare := append([]string{"-w"}, args...)
+	outW, errW := nativeIptCmdRunner(iptBin, withWaitBare...)
+	if errW == nil {
+		return outW, nil
+	}
+	if isXtablesWaitFlagError(outW + " " + errW.Error()) {
 		return nativeIptCmdRunner(iptBin, args...)
 	}
-	return out, err
+	return outW, errW
 }
 
 // ensureNativeIPv4StatsRule 严格对齐 bin/iptables_manager.sh 的 _ensure_v4_stats_ip:
@@ -2560,16 +2785,11 @@ func ensureFirewallBaseHooksLinked() bool {
 		return false
 	}
 	checkTable := func(tbl, chain string) bool {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		cmd := hardenCmd(exec.CommandContext(ctx, iptBin, "-w", "2", "-t", tbl, "-S"))
-		cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"}
-		out, err := cmd.CombinedOutput()
+		out, err := runIptWithWaitFallback(iptBin, "-t", tbl, "-S")
 		if err != nil {
 			return false
 		}
-		s := string(out)
-		return strings.Contains(s, "-N "+chain) && strings.Contains(s, "-j "+chain)
+		return strings.Contains(out, "-N "+chain) && strings.Contains(out, "-j "+chain)
 	}
 	return checkTable("mangle", "HNC_MARK") && checkTable("filter", "HNC_CTRL")
 }
@@ -2580,17 +2800,20 @@ func pipeNativeFirewallOnly(hncDir, iface, mac, ipv4 string, mid int, enableMark
 		return err
 	}
 	v4Bin := resolveIptablesRestoreBin("iptables-restore")
-	if err := pipeIptablesRestore(v4Bin, v4Payload); err != nil {
+	if _, _, anyOK, rErr := pipeRestoreTablesIsolated(v4Bin, v4Payload); !anyOK {
 		v4Drop, v6Drop, bErr := buildDeviceFirewallRestorePayloads(hncDir, iface, mac, ipv4, mid, enableMark, enableBlock, true)
-		if bErr != nil || pipeIptablesRestore(v4Bin, v4Drop) != nil {
-			return err
+		if bErr != nil {
+			return rErr
+		}
+		if _, _, dropOK, _ := pipeRestoreTablesIsolated(v4Bin, v4Drop); !dropOK {
+			return rErr
 		}
 		v6Payload = v6Drop
 	}
 	if v6Bin := resolveIptablesRestoreBin("ip6tables-restore"); v6Bin != "" {
-		if err6 := pipeIptablesRestore(v6Bin, v6Payload); err6 != nil {
+		if _, _, v6OK, _ := pipeRestoreTablesIsolated(v6Bin, v6Payload); !v6OK {
 			if _, v6Drop, bErr := buildDeviceFirewallRestorePayloads(hncDir, iface, mac, ipv4, mid, enableMark, enableBlock, true); bErr == nil {
-				_ = pipeIptablesRestore(v6Bin, v6Drop)
+				_, _, _, _ = pipeRestoreTablesIsolated(v6Bin, v6Drop)
 			}
 		}
 	}
@@ -3255,11 +3478,163 @@ var (
 	nlBatchDumpQdiscsFn    = rtnlDumpQdiscsOnSocket
 	nlBatchDumpClassesFn   = nlDumpHTBClassStatsOnSocket
 	nlBatchEnsureHTBRootFn = nlEnsureHTBRootOnSocket
+	nlBatchSendAckFn       = rtnlSendAndWaitAck
 )
+
+// fallbackIPv6FilterPrio 为老内核 4.14/4.19 拒绝 ETH_P_ALL 时拆出的 ETH_P_IPV6 过滤器分配无冲突优先级:
+//   - 根 parent 1: 上 origPrio=1 映射至 prio=3 (避开 prio=2 的 LAN Fastlane u32, 对齐 deviceFWDeleteSpecs);
+//   - 二级子树 parent 1:<cid> 上 origPrio=1->3 (避开 prio=2 的 AppQoS), origPrio=2->4, origPrio=9->10。
+func fallbackIPv6FilterPrio(parent uint32, origPrio uint16) uint16 {
+	if parent == rtnlHtbRootMaj {
+		if origPrio == rtnlFilterPrioFW {
+			return 3
+		}
+		return origPrio + 1
+	}
+	switch origPrio {
+	case 1:
+		return 3
+	case 2:
+		return 4
+	default:
+		return origPrio + 1
+	}
+}
+
+func extractBatchParentCeilRates(msgs [][]byte) map[uint32]uint64 {
+	rates := make(map[uint32]uint64, 4)
+	var doneHdr [rtnlMsgHdrLen]byte
+	binary.LittleEndian.PutUint32(doneHdr[0:4], rtnlMsgHdrLen)
+	binary.LittleEndian.PutUint16(doneHdr[4:6], rtnlMsgDone)
+
+	for _, m := range msgs {
+		if len(m) < rtnlMsgHdrLen+rtnlTcMsgLen || binary.LittleEndian.Uint16(m[4:6]) != rtnlNewTClass {
+			continue
+		}
+		buf := make([]byte, 0, len(m)+rtnlMsgHdrLen)
+		buf = append(buf, m...)
+		buf = append(buf, doneHdr[:]...)
+		if parsed, err := parseTCClassDumpMsgs(buf, 0); err == nil {
+			for _, st := range parsed {
+				if st.HandleRaw != 0 && st.CeilBps > 0 {
+					rates[st.HandleRaw] = st.CeilBps
+				}
+			}
+		}
+	}
+	return rates
+}
+
+// nlSendBatchWithCompatFallback 统一执行 Netlink 批消息发送与跨内核降级:
+//   - 老内核 4.14/4.19 拒绝 ETH_P_ALL 过滤器时自动拆分为 ETH_P_IP + ETH_P_IPV6 双栈补发;
+//   - 裁剪内核拒绝自定义或默认 fq_codel 时按 fq_codel(无参) -> fq -> sfq -> 按速率缩放 pfifo 自适应降级;
+//   - 删除不存在对象的 ENOENT/ESRCH/EINVAL 幂等忽略。
+func nlSendBatchWithCompatFallback(fd int, msgs [][]byte, bestEffortAfterFirstClass bool) (int, error) {
+	if len(msgs) == 0 {
+		return 0, nil
+	}
+	parentRates := extractBatchParentCeilRates(msgs)
+	sent := 0
+	ethAllNet := rtnlHtons(rtnlEthPAll)
+	ethIPNet := rtnlHtons(rtnlEthPIP)
+	ethIPv6Net := rtnlHtons(rtnlEthPIPv6)
+
+	for idx, m := range msgs {
+		if len(m) < rtnlMsgHdrLen+rtnlTcMsgLen {
+			continue
+		}
+		seq := binary.LittleEndian.Uint32(m[8:12])
+		msgType := binary.LittleEndian.Uint16(m[4:6])
+		err := nlBatchSendAckFn(fd, m, seq)
+		if err == nil {
+			sent++
+			continue
+		}
+		if (msgType == rtnlDelTFilter || msgType == rtnlDelTClass || msgType == rtnlDelQdisc) && isIgnorableDelErr(err) {
+			continue
+		}
+		if idx == 0 && msgType == rtnlNewTClass && bestEffortAfterFirstClass {
+			return sent, err
+		}
+
+		// 若 ETH_P_ALL 过滤器被 4.14/4.19 裁剪内核拒绝, 拆分为 ETH_P_IP + ETH_P_IPV6 双栈重发
+		if msgType == rtnlNewTFilter {
+			parent := binary.LittleEndian.Uint32(m[28:32])
+			info := binary.LittleEndian.Uint32(m[32:36])
+			protoNet := uint16(info & 0xffff)
+			origPrio := uint16(info >> 16)
+			if protoNet == ethAllNet {
+				cp4 := append([]byte(nil), m...)
+				seq4 := rtnlNextSeq()
+				binary.LittleEndian.PutUint32(cp4[8:12], seq4)
+				binary.LittleEndian.PutUint32(cp4[32:36], (uint32(origPrio)<<16)|uint32(ethIPNet))
+				err4 := nlBatchSendAckFn(fd, cp4, seq4)
+				if err4 == nil {
+					sent++
+				}
+
+				v6Prio := fallbackIPv6FilterPrio(parent, origPrio)
+				cp6 := append([]byte(nil), m...)
+				seq6 := rtnlNextSeq()
+				binary.LittleEndian.PutUint32(cp6[8:12], seq6)
+				binary.LittleEndian.PutUint32(cp6[32:36], (uint32(v6Prio)<<16)|uint32(ethIPv6Net))
+				if err6 := nlBatchSendAckFn(fd, cp6, seq6); err6 == nil {
+					sent++
+				}
+				if err4 == nil {
+					continue
+				}
+			}
+			// IPv6 备用过滤器在纯 IPv4 精简内核上容忍失败
+			if protoNet == ethIPv6Net || bestEffortAfterFirstClass {
+				continue
+			}
+		}
+
+		// 若叶子队列(带参或默认 fq_codel)不被老内核支持, 按 fq_codel(无参) -> fq -> sfq -> 缩放 pfifo 逐级自适应降级
+		if msgType == rtnlNewQdisc {
+			ifidx := int(int32(binary.LittleEndian.Uint32(m[20:24])))
+			handle := binary.LittleEndian.Uint32(m[24:28])
+			parent := binary.LittleEndian.Uint32(m[28:32])
+			rateBps := parentRates[parent]
+
+			fbSeq := rtnlNextSeq()
+			if nlBatchSendAckFn(fd, buildFqCodelLeafMsg(fbSeq, ifidx, parent, handle, false), fbSeq) == nil {
+				sent++
+				continue
+			}
+			attached := false
+			for _, kind := range []string{"fq", "sfq"} {
+				seqK := rtnlNextSeq()
+				if nlBatchSendAckFn(fd, buildSimpleKindLeafMsg(seqK, ifidx, parent, handle, kind), seqK) == nil {
+					sent++
+					attached = true
+					break
+				}
+			}
+			if attached {
+				continue
+			}
+			seqP := rtnlNextSeq()
+			if nlBatchSendAckFn(fd, buildPfifoScaledLeafMsg(seqP, ifidx, parent, handle, rateBps), seqP) == nil {
+				sent++
+				continue
+			}
+			continue
+		}
+
+		if bestEffortAfterFirstClass {
+			continue
+		}
+		return sent, err
+	}
+	return sent, nil
+}
 
 // nlApplyBatchWithFWFallbackOnSocket 在长连接 fd 上顺序下发批消息:
 //   - 对批次中所有含 RTM_NEWTCLASS 的不重复 ifindex 幂等确保根 htb 1: 与父类 1:1 就绪;
-//   - 对裁剪内核不支持 ETH_P_ALL cls_fw 的场景自动回退 ETH_P_IP 重试;
+//   - 对老内核不支持 ETH_P_ALL 的场景自动拆分为 ETH_P_IP + ETH_P_IPV6 双栈重试;
+//   - 对叶子队列按 fq_codel -> fq -> sfq -> pfifo 自适应降级;
 //   - 对删除不存在过滤器/队列/类的 ENOENT/ESRCH/EINVAL 幂等放行。
 func nlApplyBatchWithFWFallbackOnSocket(fd int, msgs [][]byte) (int, error) {
 	if len(msgs) == 0 {
@@ -3299,59 +3674,7 @@ func nlApplyBatchWithFWFallbackOnSocket(fd int, msgs [][]byte) (int, error) {
 			_ = nlBatchEnsureHTBRootFn(fd, ifidx, rtnlDefMinor, DefaultHTBRootRateBps)
 		}
 	}
-
-	sent := 0
-	ethAllNet := rtnlHtons(rtnlEthPAll)
-	ethIPNet := rtnlHtons(rtnlEthPIP)
-
-	for _, m := range msgs {
-		if len(m) < rtnlMsgHdrLen+rtnlTcMsgLen {
-			continue
-		}
-		seq := binary.LittleEndian.Uint32(m[8:12])
-		msgType := binary.LittleEndian.Uint16(m[4:6])
-		err := rtnlSendAndWaitAck(fd, m, seq)
-		if err == nil {
-			sent++
-			continue
-		}
-		if (msgType == rtnlDelTFilter || msgType == rtnlDelTClass || msgType == rtnlDelQdisc) && isIgnorableDelErr(err) {
-			continue
-		}
-		// 若 ETH_P_ALL fw 过滤器被裁剪内核拒绝, 克隆报文将协议改为 ETH_P_IP 重发
-		if msgType == rtnlNewTFilter {
-			info := binary.LittleEndian.Uint32(m[32:36])
-			if uint16(info&0xffff) == ethAllNet {
-				cp := append([]byte(nil), m...)
-				newSeq := rtnlNextSeq()
-				binary.LittleEndian.PutUint32(cp[8:12], newSeq)
-				newInfo := (info & 0xffff0000) | uint32(ethIPNet)
-				binary.LittleEndian.PutUint32(cp[32:36], newInfo)
-				if retryErr := rtnlSendAndWaitAck(fd, cp, newSeq); retryErr == nil {
-					sent++
-					continue
-				}
-			}
-			// IPv6 备用过滤器在纯 IPv4 精简内核上容忍失败
-			if uint16(info&0xffff) == rtnlHtons(rtnlEthPIPv6) {
-				continue
-			}
-		}
-		if msgType == rtnlNewQdisc {
-			// 若自定义 fq_codel 参数在极老内核不支持, 降级无参 fq_codel 兜底
-			ifidx := int(int32(binary.LittleEndian.Uint32(m[20:24])))
-			handle := binary.LittleEndian.Uint32(m[24:28])
-			parent := binary.LittleEndian.Uint32(m[28:32])
-			fbSeq := rtnlNextSeq()
-			if rtnlSendAndWaitAck(fd, buildFqCodelLeafMsg(fbSeq, ifidx, parent, handle, false), fbSeq) == nil {
-				sent++
-				continue
-			}
-			continue
-		}
-		return sent, err
-	}
-	return sent, nil
+	return nlSendBatchWithCompatFallback(fd, msgs, false)
 }
 
 // nlProbeKernelCapabilities 通过只读 AF_NETLINK RTM_GETQDISC 实测内核 RTNetlink、clsact 与 sch_fq 可用性。
@@ -3376,6 +3699,209 @@ func nlProbeKernelCapabilities(ifindex int) (hasRTNetlink bool, hasClsact bool, 
 		}
 	}
 	return hasRTNetlink, hasClsact, hasSchFQ
+}
+
+const rtnlGetTFilter = 46 // RTM_GETTFILTER
+
+// nlDumpIngressFilterSummary 通过原生 RTNetlink RTM_GETTFILTER 读取入口(clsact ffff:fff2 / ingress ffff:)过滤器摘要,
+// 绕过 ColorOS /system/bin/tc 对 `ingress` 关键字返回空串或语法报错的缺陷。
+func nlDumpIngressFilterSummary(ifindex int) string {
+	if ifindex <= 0 {
+		return ""
+	}
+	fd, err := openRTNetlinkSocket()
+	if err != nil {
+		return ""
+	}
+	defer syscall.Close(fd)
+
+	var lines []string
+	buf := make([]byte, 65536)
+	for _, parent := range []uint32{0xfffffff2, 0xffff0000, rtnlTcHIngress} {
+		seq := rtnlNextSeq()
+		req := rtnlBuildTCMsg(rtnlGetTFilter, rtnlFRequest|rtnlFDump, seq, ifindex, 0, parent, 0, nil)
+		if syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}) != nil {
+			continue
+		}
+		for {
+			n, _, rErr := syscall.Recvfrom(fd, buf, 0)
+			if errors.Is(rErr, syscall.EINTR) {
+				continue
+			}
+			if rErr != nil || n <= 0 {
+				break
+			}
+			done := parseIngressFilterSummaryChunk(buf[:n], ifindex, &lines)
+			if done {
+				break
+			}
+		}
+		if len(lines) > 0 {
+			break
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+func parseIngressFilterSummaryChunk(b []byte, wantIfIndex int, lines *[]string) bool {
+	for off := 0; off < len(b); {
+		rem := len(b) - off
+		if rem < rtnlMsgHdrLen {
+			return true
+		}
+		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
+		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
+		if msgLen < rtnlMsgHdrLen || msgLen > rem {
+			return true
+		}
+		msg := b[off : off+msgLen]
+		adv := rtnlAlign(msgLen)
+		if adv > rem {
+			off = len(b)
+		} else {
+			off += adv
+		}
+		if msgType == rtnlMsgDone || msgType == rtnlMsgError {
+			return true
+		}
+		if msgType != rtnlNewTFilter || len(msg) < rtnlMsgHdrLen+rtnlTcMsgLen {
+			continue
+		}
+		ifidx := int(int32(binary.LittleEndian.Uint32(msg[20:24])))
+		if wantIfIndex > 0 && ifidx != wantIfIndex {
+			continue
+		}
+		handle := binary.LittleEndian.Uint32(msg[24:28])
+		info := binary.LittleEndian.Uint32(msg[32:36])
+		prio := info >> 16
+		if prio == 0 {
+			continue
+		}
+		var kind string
+		var rawAttrs []byte
+		if len(msg) > rtnlMsgHdrLen+rtnlTcMsgLen {
+			rawAttrs = msg[rtnlMsgHdrLen+rtnlTcMsgLen:]
+		}
+		for aoff := 0; aoff < len(rawAttrs); {
+			arem := len(rawAttrs) - aoff
+			if arem < rtnlAttrHdr {
+				break
+			}
+			alen := int(binary.LittleEndian.Uint16(rawAttrs[aoff : aoff+2]))
+			atype := binary.LittleEndian.Uint16(rawAttrs[aoff+2:aoff+4]) & nlaTypeMask
+			if alen < rtnlAttrHdr || alen > arem {
+				break
+			}
+			if atype == rtnlTcaKind {
+				kind = rtnlCString(rawAttrs[aoff+4 : aoff+alen])
+			}
+			nadv := rtnlAlign(alen)
+			if nadv > arem {
+				break
+			}
+			aoff += nadv
+		}
+		if kind == "" {
+			continue
+		}
+		var extras []string
+		if bytes.Contains(rawAttrs, []byte("hnc_clsact")) || kind == "bpf" {
+			extras = append(extras, "hnc_clsact direct-action")
+		}
+		if bytes.Contains(rawAttrs, []byte("mirred")) || bytes.Contains(rawAttrs, []byte("ifb0")) {
+			extras = append(extras, "action mirred (Egress Redirect to device ifb0)")
+		}
+		// u32/fw 的 TCA_U32_POLICE / TCA_FW_POLICE 嵌套或 act police 标记
+		if bytes.Contains(rawAttrs, []byte("police")) || hasNestedPoliceAttr(rawAttrs, kind) {
+			extras = append(extras, "police")
+		}
+		*lines = append(*lines, fmt.Sprintf("filter parent ffff: protocol all pref %d %s handle 0x%x %s",
+			prio, kind, handle, strings.Join(extras, " ")))
+	}
+	return false
+}
+
+func hasNestedPoliceAttr(rawAttrs []byte, kind string) bool {
+	if kind != "u32" && kind != "fw" {
+		return false
+	}
+	// linux/pkt_cls.h: TCA_U32_POLICE = 2, TCA_FW_POLICE = 2 (内部含 struct tc_police >= 20B)
+	for aoff := 0; aoff < len(rawAttrs); {
+		arem := len(rawAttrs) - aoff
+		if arem < rtnlAttrHdr {
+			return false
+		}
+		alen := int(binary.LittleEndian.Uint16(rawAttrs[aoff : aoff+2]))
+		atype := binary.LittleEndian.Uint16(rawAttrs[aoff+2:aoff+4]) & nlaTypeMask
+		if alen < rtnlAttrHdr || alen > arem {
+			return false
+		}
+		if atype == rtnlTcaOptions {
+			opts := rawAttrs[aoff+4 : aoff+alen]
+			for noff := 0; noff < len(opts); {
+				nrem := len(opts) - noff
+				if nrem < rtnlAttrHdr {
+					break
+				}
+				nlen := int(binary.LittleEndian.Uint16(opts[noff : noff+2]))
+				ntype := binary.LittleEndian.Uint16(opts[noff+2:noff+4]) & nlaTypeMask
+				if nlen < rtnlAttrHdr || nlen > nrem {
+					break
+				}
+				if ntype == 2 && nlen >= rtnlAttrHdr+20 {
+					return true
+				}
+				nadv := rtnlAlign(nlen)
+				if nadv > nrem {
+					break
+				}
+				noff += nadv
+			}
+		}
+		nadv := rtnlAlign(alen)
+		if nadv > arem {
+			break
+		}
+		aoff += nadv
+	}
+	return false
+}
+
+// dumpDefaultRouteIfindexesOS 通过原生 AF_NETLINK RTM_GETROUTE 扫描全系统策略路由表(含 Dual-STA 独立 netd 表),
+// 返回所有持有 rtm_dst_len == 0 且 RTN_UNICAST 默认路由的出接口 ifindex 集合。
+func dumpDefaultRouteIfindexesOS() (map[int]bool, error) {
+	fd, err := openRTNetlinkSocket()
+	if err != nil {
+		return nil, err
+	}
+	defer syscall.Close(fd)
+
+	out := make(map[int]bool)
+	buf := make([]byte, 65536)
+	for _, family := range []uint8{2, 10} { // AF_INET, AF_INET6
+		seq := rtnlNextSeq()
+		req := buildGetRouteDumpMsg(seq, family)
+		if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+			continue
+		}
+		for {
+			n, _, rErr := syscall.Recvfrom(fd, buf, 0)
+			if errors.Is(rErr, syscall.EINTR) {
+				continue
+			}
+			if rErr != nil || n <= 0 {
+				break
+			}
+			chunkIfs, done, pErr := parseDefaultRouteIfindexesMsgs(buf[:n])
+			for idx := range chunkIfs {
+				out[idx] = true
+			}
+			if pErr != nil || done {
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 func closeRTNetlinkSocket(fd int) {
@@ -3423,8 +3949,8 @@ func dumpNativeIPv6NeighborsOS(allowedIfindexes map[int]bool) (map[string][]net.
 		return nil, fmt.Errorf("rtnl neigh dump send: %w", err)
 	}
 
-	merged := make(map[string][]net.IP)
-	seen := make(map[string]bool)
+	allCands := make(map[string]map[string]ipv6NeighCandidate)
+	orderCounter := 0
 	buf := make([]byte, 65536)
 	for {
 		n, _, err := syscall.Recvfrom(fd, buf, 0)
@@ -3437,21 +3963,13 @@ func dumpNativeIPv6NeighborsOS(allowedIfindexes map[int]bool) (map[string][]net.
 		if n <= 0 {
 			return nil, errors.New("rtnl neigh dump: empty recv")
 		}
-		chunkMap, done, pErr := parseIPv6NeighDumpMsgs(buf[:n], allowedIfindexes)
+		done, pErr := parseIPv6NeighDumpChunkCandidates(buf[:n], allowedIfindexes, allCands, &orderCounter)
 		if pErr != nil {
 			return nil, pErr
 		}
-		for mac, ips := range chunkMap {
-			for _, ip := range ips {
-				k := mac + "|" + ip.String()
-				if !seen[k] && len(merged[mac]) < v6IPv6MaxAddrs {
-					seen[k] = true
-					merged[mac] = append(merged[mac], ip)
-				}
-			}
-		}
 		if done {
-			return merged, nil
+			// 收齐全量分片后按状态优先级(REACHABLE > DELAY/PROBE/PERMANENT > STALE)与确认时间统一排序再截断前 16 条
+			return rankAndCapIPv6Neighbors(allCands, v6IPv6MaxAddrs), nil
 		}
 	}
 }
@@ -3502,6 +4020,7 @@ var (
 	nativeTCExecFn           = defaultRunNativeTC
 	nativeTCQdiscShowFn      = defaultShowNativeTCQdisc
 	nativeCollectDevIPv6Fn   func(hncDir, iface, mac string) []string
+	nativeDumpIPv6NeighFn    = DumpNativeIPv6Neighbors
 )
 
 func resolveSystemBin(name string) string {
@@ -3522,7 +4041,7 @@ func defaultRunNativeTC(tcBin string, args ...string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, tcBin, args...))
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"}
+	cmd.Env = subprocEnvWithFallbackPath()
 	_, err := cmd.CombinedOutput()
 	return err
 }
@@ -3532,10 +4051,34 @@ func runNativeTC(tcBin string, args ...string) error {
 }
 
 func defaultShowNativeTCQdisc(tcBin, iface string) string {
+	// 优先走原生 RTNetlink RTM_GETQDISC 查询 clsact / ingress ffff:,
+	// 既省去 fork tc 子进程, 又绕过 ColorOS /system/bin/tc 对 ingress 队列输出残缺/为空的缺陷。
+	if iface != "" {
+		if ifidx, err := nlIfaceIndexByName(iface); err == nil && ifidx > 0 {
+			if fd, sErr := openRTNetlinkSocket(); sErr == nil {
+				qdiscs, dErr := rtnlDumpQdiscsOnSocket(fd, ifidx)
+				_ = syscall.Close(fd)
+				if dErr == nil {
+					var sb strings.Builder
+					for _, q := range qdiscs {
+						hStr := formatTCHandle(q.handle)
+						if q.kind == "ingress" && hStr == "ffff:fff1" {
+							hStr = "ffff:"
+						}
+						fmt.Fprintf(&sb, "qdisc %s %s parent %s\n", q.kind, hStr, formatTCHandle(q.parent))
+					}
+					return sb.String()
+				}
+			}
+		}
+	}
+	if tcBin == "" {
+		return ""
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, tcBin, "qdisc", "show", "dev", iface))
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"}
+	cmd.Env = subprocEnvWithFallbackPath()
 	out, _ := cmd.CombinedOutput()
 	return string(out)
 }
@@ -3560,46 +4103,78 @@ func collectDeviceIPv6Addrs(hncDir, iface, mac string) []string {
 	}
 	seen := make(map[string]bool)
 	var out []string
-	addAddr := func(raw string) {
+	addAddr := func(raw string) bool {
+		if len(out) >= v6IPv6MaxAddrs {
+			return false
+		}
 		parsed := net.ParseIP(strings.TrimSpace(raw))
 		if !isGlobalUnicastOrULAIPv6(parsed) {
-			return
+			return true
 		}
 		s := parsed.String()
 		if !seen[s] {
 			seen[s] = true
 			out = append(out, s)
 		}
+		return len(out) < v6IPv6MaxAddrs
 	}
 
-	if hncDir != "" {
-		if b, err := os.ReadFile(filepath.Join(hncDir, "run", "v6", cm)); err == nil && len(b) > 0 {
-			for _, ln := range strings.Split(string(b), "\n") {
-				if fs := strings.Fields(ln); len(fs) > 0 {
-					addAddr(fs[0])
-				}
-			}
-		}
-	}
-
+	// 1. 优先采用经状态优先级(REACHABLE > DELAY/PROBE/PERMANENT > STALE)与确认时间排好序的实时活跃邻居
 	var allow map[int]bool
 	if iface != "" {
 		if idx, err := nlIfaceIndexByName(iface); err == nil && idx > 0 {
 			allow = map[int]bool{idx: true}
 		}
 	}
-	if neighMap, err := DumpNativeIPv6Neighbors(allow); err == nil {
-		for _, ip6 := range neighMap[cm] {
-			if isGlobalUnicastOrULAIPv6(ip6) {
-				s := ip6.String()
-				if !seen[s] {
-					seen[s] = true
-					out = append(out, s)
+	if nativeDumpIPv6NeighFn != nil {
+		if neighMap, err := nativeDumpIPv6NeighFn(allow); err == nil {
+			for _, ip6 := range neighMap[cm] {
+				if isGlobalUnicastOrULAIPv6(ip6) {
+					if !addAddr(ip6.String()) {
+						return out
+					}
 				}
 			}
 		}
 	}
-	sort.Strings(out)
+
+	// 2. 若不足 16 条, 从 run/v6/<mac> 快照按最近看到的时间戳降序优胜劣汰补齐
+	if hncDir != "" && len(out) < v6IPv6MaxAddrs {
+		if b, err := os.ReadFile(filepath.Join(hncDir, "run", "v6", cm)); err == nil && len(b) > 0 {
+			type snapEntry struct {
+				addr   string
+				seenTS int64
+				idx    int
+			}
+			var snaps []snapEntry
+			for i, ln := range strings.Split(string(b), "\n") {
+				trimmed := strings.TrimSpace(ln)
+				if trimmed == "" || strings.HasPrefix(trimmed, "#") {
+					continue
+				}
+				fs := strings.Fields(trimmed)
+				if len(fs) == 0 {
+					continue
+				}
+				var ts int64
+				if len(fs) >= 2 {
+					ts, _ = strconv.ParseInt(fs[1], 10, 64)
+				}
+				snaps = append(snaps, snapEntry{addr: fs[0], seenTS: ts, idx: i})
+			}
+			sort.Slice(snaps, func(i, j int) bool {
+				if snaps[i].seenTS != snaps[j].seenTS {
+					return snaps[i].seenTS > snaps[j].seenTS
+				}
+				return snaps[i].idx < snaps[j].idx
+			})
+			for _, se := range snaps {
+				if !addAddr(se.addr) {
+					break
+				}
+			}
+		}
+	}
 	return out
 }
 
@@ -3618,7 +4193,7 @@ func nativeIngressFilterHookArgs(tcBin, iface string) ([]string, bool) {
 	return hookArgs, hasQdisc
 }
 
-// applyNativeIngressPolice 在 GKI 6.1/6.6 无 IFB 内核上通过双栈 ingress police 实施每客户端上行限速(对齐 tc_manager.sh set_uplink_police)。
+// applyNativeIngressPolice 在 GKI 6.1/6.6/6.12 无 IFB 内核上通过双栈 ingress police 实施每客户端上行限速(对齐 tc_manager.sh set_uplink_police)。
 func applyNativeIngressPolice(hncDir, iface string, mid int, mac, ip string, upBps uint64, markVal, markMask uint32) error {
 	tcBin := nativeResolveSystemBinFn("tc")
 	cidStr := classIDStringForMid(mid)
@@ -3662,34 +4237,56 @@ func applyNativeIngressPolice(hncDir, iface string, mid int, mac, ip string, upB
 	}
 	fwHandle := fmt.Sprintf("0x%x/0x%x", markVal&markMask, markMask)
 
-	buildAddArgs := func(tail ...string) []string {
-		args := make([]string, 0, 4+len(hookArgs)+len(tail))
+	buildAddArgsWith := func(hk []string, tail ...string) []string {
+		args := make([]string, 0, 4+len(hk)+len(tail))
 		args = append(args, "filter", "add", "dev", iface)
-		args = append(args, hookArgs...)
+		args = append(args, hk...)
 		args = append(args, tail...)
 		return args
 	}
 
+	// runAddWithColorOSFallback: ColorOS 定制 /system/bin/tc 对裸 `ingress` 关键字可能报错退出,
+	// 失败时自动回退显式 `parent ffff:fff2` (clsact ingress minor) 及 `parent ffff:`。
+	fallbackCleaned := false
+	runAdd := func(tail ...string) bool {
+		if runNativeTC(tcBin, buildAddArgsWith(hookArgs, tail...)...) == nil {
+			return true
+		}
+		if len(hookArgs) == 1 && hookArgs[0] == "ingress" {
+			for _, altHook := range [][]string{{"parent", "ffff:fff2"}, {"parent", "ffff:"}} {
+				if !fallbackCleaned {
+					clearNativeIngressPoliceWithHook(tcBin, iface, cid, altHook)
+				}
+				if runNativeTC(tcBin, buildAddArgsWith(altHook, tail...)...) == nil {
+					hookArgs = altHook
+					fallbackCleaned = true
+					return true
+				}
+			}
+		}
+		return false
+	}
+
 	anyOK := false
 	if validStrictIPv4(ip) {
-		if runNativeTC(tcBin, buildAddArgs("protocol", "ip", "prio", prio4,
-			"u32", "match", "ip", "src", ip+"/32", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop")...) == nil {
+		if runAdd("protocol", "ip", "prio", prio4,
+			"u32", "match", "ip", "src", ip+"/32", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop") {
 			anyOK = true
 		}
 	}
 	for _, v6 := range v6Addrs {
-		if runNativeTC(tcBin, buildAddArgs("protocol", "ipv6", "prio", prio6,
-			"u32", "match", "ip6", "src", v6+"/128", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop")...) == nil {
+		if runAdd("protocol", "ipv6", "prio", prio6,
+			"u32", "match", "ip6", "src", v6+"/128", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop") {
 			anyOK = true
 		}
 	}
 	if (markVal & markMask) != 0 {
-		if runNativeTC(tcBin, buildAddArgs("protocol", "ip", "prio", prioFw4,
-			"handle", fwHandle, "fw", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop")...) == nil {
+		if runAdd("protocol", "ip", "prio", prioFw4,
+			"handle", fwHandle, "fw", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop") {
 			anyOK = true
 		}
-		if runNativeTC(tcBin, buildAddArgs("protocol", "ipv6", "prio", prioFw6,
-			"handle", fwHandle, "fw", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop")...) == nil {
+		if runAdd("protocol", "ipv6", "prio", prioFw6,
+			"handle", fwHandle, "fw", "police", "rate", rateStr, "burst", burstStr, "mtu", "65535", "drop") {
 			anyOK = true
 		}
 	}
@@ -3700,24 +4297,33 @@ func applyNativeIngressPolice(hncDir, iface string, mid int, mac, ip string, upB
 }
 
 func clearNativeIngressPoliceWithHook(tcBin, iface string, cid int, hookArgs []string) {
-	for _, base := range []int{int(nativeIngressPolicePrioBase), int(legacyNativeIngressPolicePrioBase)} {
-		for _, item := range []struct {
-			proto string
-			prio  int
-		}{
-			{"all", base + cid},
-			{"ip", base + cid},
-			{"ipv6", base + cid},
-			{"ipv6", base + 5000 + cid},
-			{"ip", base + 6000 + cid},
-			{"ipv6", base + 7000 + cid},
-		} {
-			args := make([]string, 0, 8+len(hookArgs))
-			args = append(args, "filter", "del", "dev", iface)
-			args = append(args, hookArgs...)
-			args = append(args, "protocol", item.proto, "prio", strconv.Itoa(item.prio))
-			_ = runNativeTC(tcBin, args...)
+	delAllForHook := func(hk []string) (anyOK bool) {
+		for _, base := range []int{int(nativeIngressPolicePrioBase), int(legacyNativeIngressPolicePrioBase)} {
+			for _, item := range []struct {
+				proto string
+				prio  int
+			}{
+				{"all", base + cid},
+				{"ip", base + cid},
+				{"ipv6", base + cid},
+				{"ipv6", base + 5000 + cid},
+				{"ip", base + 6000 + cid},
+				{"ipv6", base + 7000 + cid},
+			} {
+				args := make([]string, 0, 8+len(hk))
+				args = append(args, "filter", "del", "dev", iface)
+				args = append(args, hk...)
+				args = append(args, "protocol", item.proto, "prio", strconv.Itoa(item.prio))
+				if runNativeTC(tcBin, args...) == nil {
+					anyOK = true
+				}
+			}
 		}
+		return anyOK
+	}
+	if !delAllForHook(hookArgs) && len(hookArgs) == 1 && hookArgs[0] == "ingress" {
+		delAllForHook([]string{"parent", "ffff:fff2"})
+		delAllForHook([]string{"parent", "ffff:"})
 	}
 }
 

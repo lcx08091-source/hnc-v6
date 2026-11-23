@@ -403,7 +403,7 @@ shell + C + Go 协作,每个组件做自己擅长的:
 按可能性排:
 
 **P0 — 真有用**
-- ✅ ARCHITECTURE.md(本文档,以及 EVOLUTION.md)
+- [OK] ARCHITECTURE.md(本文档,以及 EVOLUTION.md)
 - 完整诊断脚本固化到 `bin/diag/`
 - zip 减肥(去掉源码,只保留运行时)
 

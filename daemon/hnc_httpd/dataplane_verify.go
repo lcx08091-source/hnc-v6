@@ -280,19 +280,20 @@ type dpVerifyOptions struct {
 }
 
 type dpVerifyEnv struct {
-	HNCDir            string
-	UplinkIface       string
-	BPFMACMapPin      string
-	BPFIPMapPin       string
-	BPFTetherLimitPin string
-	Now               func() time.Time
-	ReadFile          func(path string) ([]byte, error)
-	Exists            func(path string) bool
-	Ifindex           func(iface string) int
-	DumpHTBNetlink    func(ifindex int) (map[string]TCClassStats, error)
-	RunCmd            func(ctx context.Context, name string, args ...string) (string, error)
-	LiveDeviceBps     func(mac string) int64
-	Snaps             *dpVerifySnapshotStore
+	HNCDir             string
+	UplinkIface        string
+	BPFMACMapPin       string
+	BPFIPMapPin        string
+	BPFTetherLimitPin  string
+	Now                func() time.Time
+	ReadFile           func(path string) ([]byte, error)
+	Exists             func(path string) bool
+	Ifindex            func(iface string) int
+	DumpHTBNetlink     func(ifindex int) (map[string]TCClassStats, error)
+	DumpIngressNetlink func(ifindex int) string
+	RunCmd             func(ctx context.Context, name string, args ...string) (string, error)
+	LiveDeviceBps      func(mac string) int64
+	Snaps              *dpVerifySnapshotStore
 }
 
 // dpVerifyHTBDumpHook 桥接复用 dataplane_netlink.go 的 nlDumpHTBClassStats。
@@ -315,13 +316,14 @@ func realDPVerifyEnv(s *server) *dpVerifyEnv {
 			_, err := os.Stat(path)
 			return err == nil
 		},
-		Ifindex:        sysIfindex,
-		DumpHTBNetlink: dpVerifyHTBDumpHook,
+		Ifindex:            sysIfindex,
+		DumpHTBNetlink:     dpVerifyHTBDumpHook,
+		DumpIngressNetlink: nlDumpIngressFilterSummary,
 		RunCmd: func(ctx context.Context, name string, args ...string) (string, error) {
 			cmd := hardenCmd(exec.CommandContext(ctx, name, args...))
 			cmd.Env = []string{
 				"HNC_DIR=" + hncDir,
-				"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin:" + filepath.Join(hncDir, "bin"),
+				"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin:" + filepath.Join(hncDir, "bin"),
 			}
 			out, err := cmd.CombinedOutput()
 			return string(out), err
@@ -883,14 +885,16 @@ func runDataplaneVerify(env *dpVerifyEnv, opts dpVerifyOptions) *DataplaneVerify
 	iptFilterV4 := ""
 	iptFilterV6 := ""
 
-	if hotspotActive && iface != "" && env.RunCmd != nil {
-		tcEgressFilters = dpRunQuick(env, "tc", "filter", "show", "dev", iface)
-		tcIngressFilters = dpRunQuick(env, "tc", "filter", "show", "dev", iface, "ingress")
-		tcIFBFilters = dpRunQuick(env, "tc", "filter", "show", "dev", uplinkIface)
-		iptMangleV4 = dpRunQuick(env, "iptables", "-w", "2", "-t", "mangle", "-S")
-		iptMangleV6 = dpRunQuick(env, "ip6tables", "-w", "2", "-t", "mangle", "-S")
-		iptFilterV4 = dpRunQuick(env, "iptables", "-w", "2", "-t", "filter", "-S")
-		iptFilterV6 = dpRunQuick(env, "ip6tables", "-w", "2", "-t", "filter", "-S")
+	if hotspotActive && iface != "" {
+		tcIngressFilters = dpCollectIngressFilters(env, iface)
+		if env.RunCmd != nil {
+			tcEgressFilters = dpRunQuick(env, "tc", "filter", "show", "dev", iface)
+			tcIFBFilters = dpRunQuick(env, "tc", "filter", "show", "dev", uplinkIface)
+			iptMangleV4 = dpRunIptablesQuick(env, "iptables", "-t", "mangle", "-S")
+			iptMangleV6 = dpRunIptablesQuick(env, "ip6tables", "-t", "mangle", "-S")
+			iptFilterV4 = dpRunIptablesQuick(env, "iptables", "-t", "filter", "-S")
+			iptFilterV6 = dpRunIptablesQuick(env, "ip6tables", "-t", "filter", "-S")
+		}
 	}
 
 	markLayout, low16Protected := checkNetdLow16Protection(iptMangleV4, iptMangleV6, tcEgressFilters)
@@ -1039,6 +1043,75 @@ func dpRunQuick(env *dpVerifyEnv, name string, args ...string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), dpCmdTimeout)
 	defer cancel()
 	out, _ := env.RunCmd(ctx, name, args...)
+	return out
+}
+
+func dpRunIptablesQuick(env *dpVerifyEnv, bin string, args ...string) string {
+	if env == nil || env.RunCmd == nil {
+		return ""
+	}
+	tryArgs := func(a []string) (string, error) {
+		ctx, cancel := context.WithTimeout(context.Background(), dpCmdTimeout)
+		defer cancel()
+		return env.RunCmd(ctx, bin, a...)
+	}
+	out1, err1 := tryArgs(append([]string{"-w", "2"}, args...))
+	if err1 == nil {
+		return out1
+	}
+	if !isXtablesWaitFlagError(out1 + " " + err1.Error()) {
+		return out1
+	}
+	out2, err2 := tryArgs(append([]string{"-w"}, args...))
+	if err2 == nil {
+		return out2
+	}
+	if isXtablesWaitFlagError(out2 + " " + err2.Error()) {
+		out3, _ := tryArgs(args)
+		return out3
+	}
+	return out2
+}
+
+func hasValidIngressFilterLines(s string) bool {
+	lower := strings.ToLower(strings.TrimSpace(s))
+	if lower == "" {
+		return false
+	}
+	for _, kw := range []string{"pref ", "prio ", "police", "hnc_clsact", "direct-action", "mirred", "u32", "fw "} {
+		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// dpCollectIngressFilters 针对 ColorOS /system/bin/tc 对 `ingress` 关键字返回空串或报错的缺陷,
+// 优先支持原生 RTNetlink RTM_GETTFILTER 查询, 并在 shell 路径依次回退 `ingress` -> `parent ffff:` -> `parent ffff:fff2`。
+func dpCollectIngressFilters(env *dpVerifyEnv, iface string) string {
+	if env == nil || iface == "" {
+		return ""
+	}
+	if env.DumpIngressNetlink != nil && env.Ifindex != nil {
+		if idx := env.Ifindex(iface); idx > 0 {
+			if nlOut := env.DumpIngressNetlink(idx); hasValidIngressFilterLines(nlOut) {
+				return nlOut
+			}
+		}
+	}
+	if env.RunCmd == nil {
+		return ""
+	}
+	out := dpRunQuick(env, "tc", "filter", "show", "dev", iface, "ingress")
+	if hasValidIngressFilterLines(out) {
+		return out
+	}
+	if fb1 := dpRunQuick(env, "tc", "filter", "show", "dev", iface, "parent", "ffff:"); hasValidIngressFilterLines(fb1) {
+		return fb1
+	}
+	if fb2 := dpRunQuick(env, "tc", "filter", "show", "dev", iface, "parent", "ffff:fff2"); hasValidIngressFilterLines(fb2) {
+		return fb2
+	}
 	return out
 }
 
@@ -1861,7 +1934,10 @@ func dpInspectOffloadGuard(env *dpVerifyEnv) (DataplaneOffloadGuard, string) {
 	hwnat := strings.TrimSpace(dpJSONString(m["hwnat"]))
 	if hwnat == "" {
 		mtk := dpReadJSONMap(env, filepath.Join(env.HNCDir, "run", "mtk_hwnat.json"))
-		hwnat = strings.TrimSpace(dpJSONString(mtk["state"]))
+		hwnat = strings.TrimSpace(dpJSONString(mtk["action"]))
+		if hwnat == "" {
+			hwnat = strings.TrimSpace(dpJSONString(mtk["state"]))
+		}
 	}
 	if hwnat == "" {
 		hwnat = "none"

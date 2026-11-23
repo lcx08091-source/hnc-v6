@@ -167,6 +167,30 @@ func issuedCookie(value string) *http.Cookie {
 	}
 }
 
+// cookieSecureForReq 仅对本机明文 loopback(http://127.0.0.1:8444 / [::1]:8444)放开 Secure=false,
+// 解决本机浏览器访问 :8444 配对后因 Secure cookie 不落盘导致的 302 /pair 死循环;
+// 其余所有场景(含 :8443 TLS 端口、远程非回环请求及 r==nil)一律严格强制 Secure=true。
+func cookieSecureForReq(r *http.Request) bool {
+	if r != nil && r.TLS == nil && isLoopbackRequest(r) {
+		return false
+	}
+	return true
+}
+
+// clearCookieForReq 按请求上下文决定 Secure 标志后清除 hnc_token cookie。
+func clearCookieForReq(r *http.Request) *http.Cookie {
+	c := clearCookie()
+	c.Secure = cookieSecureForReq(r)
+	return c
+}
+
+// issuedCookieForReq 按请求上下文决定 Secure 标志后签发 30 天 hnc_token cookie。
+func issuedCookieForReq(r *http.Request, value string) *http.Cookie {
+	c := issuedCookie(value)
+	c.Secure = cookieSecureForReq(r)
+	return c
+}
+
 // authMiddleware 要求请求带合法 token,否则 redirect/401
 func (s *server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -450,7 +474,7 @@ func isSensitiveReadPath(p string) bool {
 // clearExisting=true 时下发过期 cookie 清浏览器
 func respondUnauthorized(w http.ResponseWriter, r *http.Request, clearExisting bool) {
 	if clearExisting {
-		http.SetCookie(w, clearCookie())
+		http.SetCookie(w, clearCookieForReq(r))
 	}
 	if strings.HasPrefix(r.URL.Path, "/api/") {
 		w.Header().Set("Content-Type", "application/json; charset=utf-8")

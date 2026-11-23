@@ -27,7 +27,13 @@
 #    "detail":".."}
 # 用法: hnc_mtk_hwnat.sh detect|disable|restore|status   (disable/restore 末行打印 action)
 
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 RUN="$HNC_DIR/run"
 R=${HNC_HWNAT_ROOT:-}
 STATE="$RUN/mtk_hwnat.state"
@@ -37,21 +43,28 @@ LOG_FILE="$HNC_DIR/logs/offload_guard.log"
 log() { echo "$(date '+%Y-%m-%d %H:%M:%S' 2>/dev/null) [mtk-hwnat] $*" >> "$LOG_FILE" 2>/dev/null; }
 
 soc() {
-    if [ -f "$HNC_DIR/bin/hnc_compat.sh" ]; then
+    if [ -n "${HNC_SOC:-}" ]; then
+        echo "$HNC_SOC"
+    elif [ -f "$HNC_DIR/bin/hnc_compat.sh" ]; then
         HNC_COMPAT_LIB=1 . "$HNC_DIR/bin/hnc_compat.sh"
         hnc_soc_vendor
+    elif [ -f "${0%/*}/hnc_compat.sh" ]; then
+        HNC_COMPAT_LIB=1 . "${0%/*}/hnc_compat.sh"
+        hnc_soc_vendor
     else
-        echo "${HNC_SOC:-unknown}"
+        echo "unknown"
     fi
 }
 
 # 输出检测到的路径(每行一个, 不带前缀 R)
 detect_paths() {
     local p
-    for p in /sys/kernel/debug/hnat /proc/hnat /sys/kernel/debug/mtk_ppe /proc/mddp /sys/kernel/mddp; do
+    for p in /sys/kernel/debug/hnat /proc/hnat /sys/kernel/debug/mtk_ppe \
+             /proc/mddp /sys/kernel/mddp /dev/mddp \
+             /proc/sys/net/nf_conntrack_hnat_offload; do
         [ -e "$R$p" ] && echo "$p"
     done
-    for p in "$R"/sys/module/*hnat* "$R"/sys/module/mtk_ppe*; do
+    for p in "$R"/sys/module/*hnat* "$R"/sys/module/mtk_ppe* "$R"/sys/module/*mddp*; do
         [ -e "$p" ] && echo "${p#$R}"
     done
     return 0
@@ -60,7 +73,9 @@ detect_paths() {
 # 输出可写开关(不带前缀)
 detect_knobs() {
     local p
-    for p in /sys/kernel/debug/hnat/hook_toggle /proc/hnat/hook_toggle /sys/kernel/mddp/enable /proc/mddp/enable; do
+    for p in /sys/kernel/debug/hnat/hook_toggle /proc/hnat/hook_toggle \
+             /sys/kernel/mddp/enable /proc/mddp/enable \
+             /proc/sys/net/nf_conntrack_hnat_offload; do
         [ -w "$R$p" ] && echo "$p"
     done
     for p in "$R"/sys/module/*hnat*/parameters/hook_toggle "$R"/sys/module/*hnat*/parameters/hnat_enable \
@@ -83,8 +98,8 @@ write_json() {  # $1 soc $2 paths $3 knobs $4 action $5 detail
     local det=false
     [ -n "$2" ] && det=true
     mkdir -p "$RUN" 2>/dev/null
-    printf '{"experimental":true,"ts":%s,"soc":"%s","detected":%s,"paths":%s,"knobs":%s,"action":"%s","detail":"%s"}\n' \
-        "$(date +%s 2>/dev/null || echo 0)" "$1" "$det" "$(jlist "$2")" "$(jlist "$3")" "$4" \
+    printf '{"experimental":true,"ts":%s,"soc":"%s","detected":%s,"paths":%s,"knobs":%s,"action":"%s","state":"%s","detail":"%s"}\n' \
+        "$(date +%s 2>/dev/null || echo 0)" "$1" "$det" "$(jlist "$2")" "$(jlist "$3")" "$4" "$4" \
         "$(printf '%s' "$5" | tr -d '"\\\r\n')" > "$OUT.tmp.$$" 2>/dev/null && mv -f "$OUT.tmp.$$" "$OUT" 2>/dev/null
     echo "$4"
 }
@@ -110,6 +125,7 @@ do_disable() {
         write_json "$s" "$paths" "" detected_no_knob "检测到 HWNAT/PPE/MDDP 但无安全的运行期开关, 限速可能被旁路(实验性, 需真机确认)"
         return 0
     fi
+    mkdir -p "$RUN" 2>/dev/null
     for k in $knobs; do
         v=$(knob_val "$k")
         [ "$v" = 0 ] && continue
@@ -131,7 +147,16 @@ do_disable() {
 
 do_restore() {
     local s paths line k v n=0
-    [ -f "$STATE" ] || { [ -f "$OUT" ] && sed -i 's/"action":"[a-z_]*"/"action":"none"/' "$OUT" 2>/dev/null; echo none; return 0; }
+    if [ ! -f "$STATE" ]; then
+        if [ -f "$OUT" ]; then
+            sed -e 's/"action":"[a-z_]*"/"action":"none"/' \
+                -e 's/"state":"[a-z_]*"/"state":"none"/' "$OUT" > "$OUT.tmp.$$" 2>/dev/null \
+                && mv -f "$OUT.tmp.$$" "$OUT" 2>/dev/null \
+                || rm -f "$OUT.tmp.$$" 2>/dev/null
+        fi
+        echo none
+        return 0
+    fi
     while IFS= read -r line; do
         k=${line%%=*}; v=${line#*=}
         [ -n "$k" ] || continue

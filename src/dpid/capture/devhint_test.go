@@ -178,9 +178,9 @@ func nbnsRegistration(name string, group bool) []byte {
 func withHotspot(t *testing.T) {
 	t.Helper()
 	_, n, _ := net.ParseCIDR("192.168.43.0/24")
-	old := hotspotNets
+	old := getHotspotNets()
 	SetHotspotNets([]*net.IPNet{n})
-	t.Cleanup(func() { hotspotNets = old })
+	t.Cleanup(func() { SetHotspotNets(old) })
 }
 
 // ─── 用例 ──────────────────────────────────────────────────────────────

@@ -107,3 +107,29 @@ func TestReadDetectNoFallback(t *testing.T) {
 		t.Fatalf("iface 为空不能回退 hotspot_iface, got (%q,%v)", s, ok)
 	}
 }
+
+func TestReadAuthoritative(t *testing.T) {
+	dir := t.TempDir()
+	tsFresh := strconv.FormatInt(tNow.Add(-time.Minute).Unix(), 10)
+
+	write(t, dir, "iface_detect.json", `{"schema":1,"ts":`+tsFresh+`,"iface":"wlan0","authoritative":true}`)
+	if s, auth, ok := ReadAuthoritative(dir, tNow, 5*time.Minute); !ok || !auth || s != "wlan0" {
+		t.Fatalf("authoritative=true: got (%q,%v,%v)", s, auth, ok)
+	}
+
+	write(t, dir, "iface_detect.json", `{"schema":1,"ts":`+tsFresh+`,"iface":"wlan0","wlan0_ap":true}`)
+	if s, auth, ok := ReadAuthoritative(dir, tNow, 5*time.Minute); !ok || !auth || s != "wlan0" {
+		t.Fatalf("wlan0_ap=true: got (%q,%v,%v)", s, auth, ok)
+	}
+
+	write(t, dir, "iface_detect.json", `{"schema":1,"ts":`+tsFresh+`,"iface":"wlan0","authoritative":false,"wlan0_ap":false}`)
+	if s, auth, ok := ReadAuthoritative(dir, tNow, 5*time.Minute); !ok || auth || s != "wlan0" {
+		t.Fatalf("non-auth wlan0: got (%q,%v,%v), want (wlan0,false,true)", s, auth, ok)
+	}
+
+	tsStale := strconv.FormatInt(tNow.Add(-6*time.Minute).Unix(), 10)
+	write(t, dir, "iface_detect.json", `{"schema":1,"ts":`+tsStale+`,"iface":"wlan0","authoritative":true}`)
+	if s, auth, ok := ReadAuthoritative(dir, tNow, 5*time.Minute); ok || auth || s != "" {
+		t.Fatalf("stale detect should fail: got (%q,%v,%v)", s, auth, ok)
+	}
+}

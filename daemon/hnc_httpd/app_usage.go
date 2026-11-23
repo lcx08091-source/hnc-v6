@@ -77,19 +77,37 @@ var appUsage struct {
 }
 
 func appUsagePath(hncDir, date string) string {
+	return filepath.Join(hncDir, "data", "app_usage."+date+".json")
+}
+
+func appUsageLegacyPath(hncDir, date string) string {
 	return filepath.Join(hncDir, "run", "app_usage."+date+".json")
+}
+
+func resolveAppUsageReadPath(hncDir, date string) (string, bool) {
+	if hncDir == "" || date == "" {
+		return "", false
+	}
+	for _, p := range []string{appUsagePath(hncDir, date), appUsageLegacyPath(hncDir, date)} {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p, true
+		}
+	}
+	return "", false
 }
 
 func loadAppUsageDay(hncDir, date string) *appUsageDay {
 	d := &appUsageDay{Date: date, Hours: map[string]map[string][2]uint64{}, Apps: map[string]appUsageMeta{}}
-	if b, err := os.ReadFile(appUsagePath(hncDir, date)); err == nil {
-		var x appUsageDay
-		if json.Unmarshal(b, &x) == nil && x.Hours != nil {
-			if x.Apps == nil {
-				x.Apps = map[string]appUsageMeta{}
+	for _, p := range []string{appUsagePath(hncDir, date), appUsageLegacyPath(hncDir, date)} {
+		if b, err := os.ReadFile(p); err == nil {
+			var x appUsageDay
+			if json.Unmarshal(b, &x) == nil && x.Hours != nil {
+				if x.Apps == nil {
+					x.Apps = map[string]appUsageMeta{}
+				}
+				x.Date = date
+				return &x
 			}
-			x.Date = date
-			return &x
 		}
 	}
 	return d
@@ -368,11 +386,74 @@ func appUsageAcctStep(prev *map[string][2]uint64, init *bool, entries []ctEntry,
 }
 
 func saveAppUsageDay(hncDir string, d *appUsageDay) error {
+	if err := os.MkdirAll(filepath.Join(hncDir, "data"), 0o755); err != nil {
+		return err
+	}
 	b, err := json.Marshal(d)
 	if err != nil {
 		return err
 	}
 	return discoverWriteAtomic(appUsagePath(hncDir, d.Date), b)
+}
+
+func migrateAndPruneAppUsageFiles(hncDir, cutDate string) {
+	if hncDir == "" {
+		return
+	}
+	dataDir := filepath.Join(hncDir, "data")
+	runDir := filepath.Join(hncDir, "run")
+	_ = os.MkdirAll(dataDir, 0o755)
+	if ents, err := os.ReadDir(runDir); err == nil {
+		for _, e := range ents {
+			if e.IsDir() {
+				continue
+			}
+			n := e.Name()
+			if !strings.HasPrefix(n, "app_usage.") || !strings.HasSuffix(n, ".json") {
+				continue
+			}
+			date := strings.TrimSuffix(strings.TrimPrefix(n, "app_usage."), ".json")
+			if !puIsAllDigits8(date) {
+				continue
+			}
+			src := filepath.Join(runDir, n)
+			if cutDate != "" && date < cutDate {
+				_ = os.Remove(src)
+				continue
+			}
+			dst := filepath.Join(dataDir, n)
+			if dstBytes, err := os.ReadFile(dst); err == nil {
+				var existing appUsageDay
+				if json.Unmarshal(dstBytes, &existing) == nil && existing.Hours != nil {
+					_ = os.Remove(src)
+					continue
+				}
+			}
+			srcBytes, err := os.ReadFile(src)
+			if err != nil {
+				continue
+			}
+			var parsed appUsageDay
+			if json.Unmarshal(srcBytes, &parsed) != nil || parsed.Hours == nil {
+				continue
+			}
+			if discoverWriteAtomic(dst, srcBytes) == nil {
+				_ = os.Remove(src)
+			}
+		}
+	}
+	if cutDate != "" {
+		if ents, err := os.ReadDir(dataDir); err == nil {
+			for _, e := range ents {
+				n := e.Name()
+				if strings.HasPrefix(n, "app_usage.") && strings.HasSuffix(n, ".json") {
+					if date := strings.TrimSuffix(strings.TrimPrefix(n, "app_usage."), ".json"); puIsAllDigits8(date) && date < cutDate {
+						_ = os.Remove(filepath.Join(dataDir, n))
+					}
+				}
+			}
+		}
+	}
 }
 
 func (s *server) appUsageFlush(now time.Time) {
@@ -393,26 +474,21 @@ func (s *server) appUsageFlush(now time.Time) {
 			appUsage.mu.Unlock()
 		}
 	}
-	// 清理 32 天前的文件(v5.20: 时钟不可信时不清, 防跑到未来的时钟把历史全删)
+	// 清理 32 天前的文件并平滑迁出旧 run/ 日文件(v5.20: 时钟不可信时不清, 防跑到未来的时钟把历史全删)
 	if !clockSane(s.hncDir, now) {
 		return
 	}
-	ents, _ := os.ReadDir(filepath.Join(s.hncDir, "run"))
 	cut := now.AddDate(0, 0, -appUsageKeepDays).Format("20060102")
-	for _, e := range ents {
-		n := e.Name()
-		if strings.HasPrefix(n, "app_usage.") && strings.HasSuffix(n, ".json") {
-			if date := strings.TrimSuffix(strings.TrimPrefix(n, "app_usage."), ".json"); len(date) == 8 && date < cut {
-				_ = os.Remove(filepath.Join(s.hncDir, "run", n))
-			}
-		}
-	}
+	migrateAndPruneAppUsageFiles(s.hncDir, cut)
 }
 
 // AppUsageLoop 后台采样(基准 10s, v5.22 按活动状态自适应, 见 power_sched.go)与落盘(60s)
 func (s *server) AppUsageLoop(stop <-chan struct{}) {
 	last := time.Now()
 	lastFlush := last
+	if clockSane(s.hncDir, last) {
+		migrateAndPruneAppUsageFiles(s.hncDir, last.AddDate(0, 0, -appUsageKeepDays).Format("20060102"))
+	}
 	fgSt.load(s.hncDir, last)  // DPI v2: 载入今天已有的前台时间线
 	setStartupHMMDir(s.hncDir) // v5.27 T4: 前台 HMM 读本目录的启动事件(startup_fp.go)
 	for {
@@ -478,7 +554,7 @@ func (s *server) apiAppUsage(w http.ResponseWriter, r *http.Request) {
 		}
 		appUsage.mu.Unlock()
 		if d == nil {
-			if _, err := os.Stat(appUsagePath(s.hncDir, date)); err == nil {
+			if _, ok := resolveAppUsageReadPath(s.hncDir, date); ok {
 				d = loadAppUsageDay(s.hncDir, date)
 			}
 		}

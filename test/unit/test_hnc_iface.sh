@@ -4,6 +4,13 @@
 # 桩: dumpsys / ip / iptables 走 PATH 拦截, 读 $FX 下的 fixture 文件;
 #     /sys/class/net 与 /proc/net/arp 走 HNC_SYS_NET / HNC_PROC_NET_ARP。
 
+_HNC_IFACE_STANDALONE=0
+if [ -z "${HNC_REPO_ROOT:-}" ]; then
+    HNC_REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
+    export HNC_REPO_ROOT
+    . "$HNC_REPO_ROOT/test/lib.sh"
+    _HNC_IFACE_STANDALONE=1
+fi
 IFSCRIPT="$HNC_REPO_ROOT/bin/hnc_iface.sh"
 
 fx_init() {
@@ -220,11 +227,11 @@ assert_eq "wlan2" "$o1" && assert_eq 0 "$c1" "cache hit must not call dumpsys" &
 test_start "hnc_iface classify: cross-SoC upstream + AP names"
 fx_init
 r=""
-for n in rmnet_data0 rmnet1 ccmni2 seth_lte0 sipa_eth0 wwan0 v4-rmnet_data0 r_rmnet_data0 rmnet_ipa0 \
+for n in rmnet_data0 rmnet1 ccmni2 seth_lte0 sipa_eth0 gti0 wwan0 v4-rmnet_data0 r_rmnet_data0 rmnet_ipa0 \
          ap0 ap_br_wlan2 swlan0 softap0 wlan1 wigig0 wlan0 rndis0 usb0 ncm0 bt-pan eth0 p2p-wlan0-0 ifb0 dummy0; do
     r="$r $n=$(irun classify "$n")"
 done
-exp=" rmnet_data0=cell rmnet1=cell ccmni2=cell seth_lte0=cell sipa_eth0=cell wwan0=cell v4-rmnet_data0=ignore r_rmnet_data0=ignore rmnet_ipa0=ignore ap0=ap ap_br_wlan2=ap swlan0=ap softap0=ap wlan1=ap_maybe wigig0=ap_maybe wlan0=wifi_sta rndis0=usb usb0=usb ncm0=usb bt-pan=bt eth0=eth p2p-wlan0-0=p2p ifb0=ignore dummy0=ignore"
+exp=" rmnet_data0=cell rmnet1=cell ccmni2=cell seth_lte0=cell sipa_eth0=cell gti0=cell wwan0=cell v4-rmnet_data0=ignore r_rmnet_data0=ignore rmnet_ipa0=ignore ap0=ap ap_br_wlan2=ap swlan0=ap softap0=ap wlan1=ap_maybe wigig0=ap_maybe wlan0=wifi_sta rndis0=usb usb0=usb ncm0=usb bt-pan=bt eth0=eth p2p-wlan0-0=p2p ifb0=ignore dummy0=ignore"
 assert_eq "$exp" "$r" && test_pass
 
 # ─── device_detect.sh 走新探测器 ─────────────────────────────────────────────
@@ -254,6 +261,7 @@ assert_eq "wlan2" "$out" "iface" \
   && assert_eq '"tun0"' "$(jf local_upstream)" "本机出口" \
   && assert_eq '"vpn"' "$(jf local_upstream_class)" \
   && assert_eq 'true' "$(jf vpn_active)" \
+  && assert_eq '["rmnet_data3","tun0"]' "$(jf default_route_ifaces)" \
   && assert_json_valid "$HNC_TEST_DIR/run/iface_detect.json" && test_pass
 
 test_start "hnc_iface VPN: no tethering upstream line → physical default-route iface (not tun0)"
@@ -282,3 +290,61 @@ upstream rmnet_data0
 irun detect >/dev/null
 assert_eq 'false' "$(jf vpn_active)" && assert_eq '"route"' "$(jf upstream_source)" \
   && assert_eq '"rmnet_data0"' "$(jf local_upstream)" && assert_eq '"rmnet_data0"' "$(jf upstream)" && test_pass
+
+# ─── v6.1 RC2: CGNAT 100.64.0.0/10 + 新 VPN 口 + override 防绑 STA + 老 timeout -t + wlan0_ap 放行 ──
+test_start "hnc_iface RC2: 100.64.0.0/10 SoftAP subnet recognized; Tailscale/Meta/sing_tun VPN excluded"
+fx_init
+link wlan2 up 100.88.12.1; link tailscale0 up 100.100.1.2; link Meta up 198.18.0.1; link gti0 up 10.2.3.4
+upstream Meta; defroute gti0
+tether_state wlan2 TetheredState
+out=$(irun detect)
+assert_eq "wlan2" "$out" \
+  && assert_eq '"100.88.12.1"' "$(jf ipv4)" \
+  && assert_eq '"gti0"' "$(jf upstream)" \
+  && assert_eq '"cell"' "$(jf upstream_class)" \
+  && assert_eq 'true' "$(jf vpn_active)" \
+  && assert_eq '["wlan2"]' "$(jf candidates)" \
+  && assert_json_valid "$HNC_TEST_DIR/run/iface_detect.json" && test_pass
+
+test_start "hnc_iface RC2: override refuses wlan0 STA with default route; device_detect allows authoritative wlan0_ap"
+fx_init
+link wlan0 up 192.168.1.20; link rmnet_data0 up 10.1.1.2
+upstream wlan0
+echo '{"version":1,"hotspot_iface":"wlan0","devices":{}}' > "$HNC_TEST_DIR/data/rules.json"
+irun detect >/dev/null; rc_sta=$?
+st_sta=$(jf override_state)
+# 切到单网卡 AP 模式(wlan0 无 default route, dumpsys tethering 权威上报 wlan0 TetheredState)
+fx_init
+link wlan0 up 192.168.43.1; link rmnet_data0 up 10.1.1.2
+upstream rmnet_data0
+tether_state wlan0 TetheredState
+det_ap=$(HNC_DIR="$HNC_TEST_DIR" HNC_SKIP_PATH_HARDENING=1 HNC_SYS_NET="$FX/sys" HNC_PROC_NET_ARP="$FX/arp" \
+         PATH="$FX/mock:$PATH" sh "$HNC_TEST_DIR/bin/device_detect.sh" iface 2>/dev/null)
+assert_eq 1 "$rc_sta" "wlan0 STA with default route must be rejected" \
+  && assert_eq '"invalid"' "$st_sta" \
+  && assert_eq "wlan0" "$det_ap" "authoritative wlan0_ap must pass device_detect" && test_pass
+
+test_start "hnc_iface RC2: legacy BusyBox timeout -t SECS CMD compatibility"
+fx_init
+{
+    printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
+    cat <<'M'
+if [ "$1" = "-t" ]; then
+    shift 2
+    exec "$@"
+fi
+echo "timeout: can't execute '$1'" >&2
+exit 127
+M
+} > "$FX/mock/timeout"
+chmod +x "$FX/mock/timeout"
+link wlan2 up 100.64.0.1; link rmnet_data0 up 10.1.1.2
+upstream rmnet_data0
+tether_state wlan2 TetheredState
+out=$(irun detect)
+assert_eq "wlan2" "$out" "legacy timeout -t must succeed" && assert_eq '"tethering"' "$(jf method)" && test_pass
+
+if [ "$_HNC_IFACE_STANDALONE" = 1 ]; then
+    print_test_summary
+    exit $?
+fi

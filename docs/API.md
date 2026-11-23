@@ -1666,9 +1666,9 @@ window.doLogout = function() {
       if (resp.status === 429) {
         var sec = data.locked_for_sec || parseInt(resp.headers.get('Retry-After')) || 600;
         var mins = Math.ceil(sec / 60);
-        showMsg('error', '⛔ 尝试次数过多,请 ' + mins + ' 分钟后重试');
+        showMsg('error', '[BLOCKED] 尝试次数过多,请 ' + mins + ' 分钟后重试');
       } else if (resp.status === 410 || errMsg.indexOf('expired') >= 0) {
-        showMsg('error', '⏱ 配对码已过期,请回本机重新生成');
+        showMsg('error', '[EXPIRED] 配对码已过期,请回本机重新生成');
       } else if (errMsg.indexOf('no active') >= 0) {
         showMsg('error', '当前没有活动配对请求,请先在本机点"生成配对码"');
       } else if (errMsg.indexOf('wrong pin') >= 0) {
@@ -1678,7 +1678,7 @@ window.doLogout = function() {
           if (rem === 0) {
             showMsg('error', 'PIN 错误,已达到尝试上限');
           } else if (rem === 1) {
-            showMsg('error', '⚠ PIN 错误,<b>最后 1 次机会</b>,再错就锁 10 分钟');
+            showMsg('error', '[WARN] PIN 错误,<b>最后 1 次机会</b>,再错就锁 10 分钟');
           } else {
             showMsg('error', 'PIN 错误,还有 ' + rem + ' 次机会');
           }

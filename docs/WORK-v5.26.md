@@ -189,7 +189,7 @@ v5.25 刚查出 Go 版看门狗缺了「定时开关热点」「在线时长」�
 2. `CHANGELOG.md` 最上面加 `## [5.26.0-rc1] - <日期>`,格式参照 5.25.0-rc2;重点写清:每块功能的「权威实现」是谁、删了什么、用户能感知的变化(月用量口径统一、告警配额按计费日)。
 3. `webroot/changelog.html` 最上面加一段大白话。
 4. `docs/CODEMAP.md`:「手机上跑着的进程」一节更新(看门狗只有 Go 版;dpid 守护由 `run/dpid_launcher.choice` 决定)。新增一节「权威实现表」:进程检测 → `procfind`;热点网卡 → `hnc_iface.sh` + `ifacehint`;时钟规则 → `clockhwm`;月用量 → `limitCtl`;告警写入 → `alert.Append`。
-5. `docs/ROADMAP.md` §A 表格:插入 v5.26「去重收口」一行(✅ rc1),原 v5.26「DPI 3.0 自学习」顺延为 v5.27,后面依次顺延;v5.29 行里「移除 shell 版看门狗主循环」标注已在 v5.26 完成。
+5. `docs/ROADMAP.md` §A 表格:插入 v5.26「去重收口」一行([OK] rc1),原 v5.26「DPI 3.0 自学习」顺延为 v5.27,后面依次顺延;v5.29 行里「移除 shell 版看门狗主循环」标注已在 v5.26 完成。
 6. `docs/API.md` 末尾加「## 24. v5.26 变更」:`/api/usage_month` 周期与 `period_start`、`/api/proc_health` 改为 Go 实现(字段不变)、`run/dpid_launcher.choice`。
 
 ---

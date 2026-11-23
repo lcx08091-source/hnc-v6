@@ -960,8 +960,8 @@ func applyVectorExpressOnActor(actor *DataplaneActor, hncDir string, enable bool
 
 		// Tier 3 批处理管道兜底 (单次 `tc -force -batch -` <= 3 次外部调用)
 		cleanLegacyCls := needLegacyCleanup && !rulesHasMarkID10(hncDir)
-		if bErr := applyVectorExpressBatchFallback(
-			h, iface, ifbIdx > 0, enable, needLegacyCleanup, cleanLegacyCls,
+		if bErr := applyVectorExpressBatchFallbackWithDir(
+			hncDir, h, iface, ifbIdx > 0, enable, needLegacyCleanup, cleanLegacyCls,
 			gameMark&gameMask, gameMask, bgCeilKbps, effUpBgCeilKbps, downRootKbps, upKbps,
 		); bErr == nil {
 			a.tier3Batches.Add(1)
@@ -1207,7 +1207,7 @@ func applyUpdateLeashOnActor(actor *DataplaneActor, hncDir string, leashMark uin
 			a.nlFallbacks.Add(1)
 		}
 
-		tcLines := buildTier3UpdateLeashBatchLines(iface, ifbIdx > 0, enable, leashMark&leashMask, leashMask, rateKbps)
+		tcLines := buildTier3UpdateLeashBatchLines(iface, ifbIdx > 0, enable, leashMark&leashMask, leashMask, rateKbps, hncDir)
 		if bErr := execTier3AtomicBatch(h, tcLines, nil, nil); bErr == nil {
 			a.tier3Batches.Add(1)
 			a.reconcileMap[digestKey] = digestVal
@@ -1224,14 +1224,91 @@ func applyUpdateLeashOnActor(actor *DataplaneActor, hncDir string, leashMark uin
 	})
 }
 
-// ── Tier 3 原子批处理执行器 (严格封顶 <= 3 次子进程调用) ──────────────────────
+// ── Tier 3 原子批处理执行器 (严格封顶 <= 3 个逻辑提交阶段) ──────────────────────
 
-// execTier3AtomicBatch 在内存拼装批处理缓冲并一次性提交给:
-//  1. `tc -force -batch -` (1 次)
-//  2. `iptables-restore -w 2 --noflush` (最多 1 次)
-//  3. `ip6tables-restore -w 2 --noflush` (最多 1 次)
-//
-// 整个事务总外部子进程派生数严格封顶 <= 3!
+func isTCBatchDelLine(line string) bool {
+	fs := strings.Fields(strings.TrimSpace(line))
+	return len(fs) >= 2 && (fs[1] == "del" || fs[1] == "delete")
+}
+
+func isIgnorableTCBatchDelError(err error) bool {
+	if err == nil {
+		return true
+	}
+	lower := strings.ToLower(err.Error())
+	for _, pat := range []string{
+		"no such file",
+		"cannot find",
+		"not found",
+		"invalid argument",
+		"does not exist",
+		"doesn't exist",
+		"cannot delete",
+		"unknown filter",
+		"enoent",
+		"esrch",
+		"einval",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+func stripFqCodelParamsInBatchLines(lines []string) ([]string, bool) {
+	out := make([]string, len(lines))
+	changed := false
+	for i, ln := range lines {
+		if idx := strings.Index(ln, " fq_codel target "); idx > 0 {
+			out[i] = ln[:idx] + " fq_codel"
+			changed = true
+		} else {
+			out[i] = ln
+		}
+	}
+	return out, changed
+}
+
+func runTier3RestoreWithFallback(h dpTierHooks, binPath string, payload []byte) error {
+	execWithWait := func(data []byte) error {
+		err1 := h.runTier3Cmd(binPath, []string{"-w", "2", "--noflush"}, data)
+		if err1 == nil {
+			return nil
+		}
+		if isXtablesWaitFlagError(err1.Error()) {
+			err2 := h.runTier3Cmd(binPath, []string{"-w", "--noflush"}, data)
+			if err2 == nil {
+				return nil
+			}
+			if isXtablesWaitFlagError(err2.Error()) {
+				if err3 := h.runTier3Cmd(binPath, []string{"--noflush"}, data); err3 == nil {
+					return nil
+				}
+			}
+			return err2
+		}
+		return err1
+	}
+	err := execWithWait(payload)
+	if err == nil {
+		return nil
+	}
+	if bytes.Contains(payload, []byte("REJECT")) && isIptablesRejectMissingError(err.Error()) {
+		rawStr := string(payload)
+		if dropStr := replaceRejectWithDropInRestorePayload(rawStr); dropStr != rawStr {
+			if dErr := execWithWait([]byte(dropStr)); dErr == nil {
+				return nil
+			}
+		}
+	}
+	return err
+}
+
+// execTier3AtomicBatch 在内存拼装批处理缓冲并提交给:
+//  1. `tc -force -batch -` (容忍幂等预清理 `del` 不存在节点的退出码, 隔离确保主变更 `replace` 严格生效)
+//  2. `iptables-restore -w 2 -> -w -> 无 -w --noflush`
+//  3. `ip6tables-restore -w 2 -> -w -> 无 -w --noflush`
 func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore []byte) error {
 	subprocs := 0
 	if len(tcLines) > 0 {
@@ -1245,7 +1322,41 @@ func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore 
 		payload := []byte(strings.Join(tcLines, "\n") + "\n")
 		subprocs++
 		if err := h.runTier3Cmd(tcBin, []string{"-force", "-batch", "-"}, payload); err != nil {
-			return fmt.Errorf("tier3 tc -batch failed: %w", err)
+			var delLines, mainLines []string
+			for _, ln := range tcLines {
+				if strings.TrimSpace(ln) == "" {
+					continue
+				}
+				if isTCBatchDelLine(ln) {
+					delLines = append(delLines, ln)
+				} else {
+					mainLines = append(mainLines, ln)
+				}
+			}
+			recovered := false
+			if len(mainLines) == 0 && len(delLines) > 0 && isIgnorableTCBatchDelError(err) {
+				recovered = true
+			} else if len(mainLines) > 0 {
+				if len(delLines) > 0 {
+					mainPayload := []byte(strings.Join(mainLines, "\n") + "\n")
+					if mErr := h.runTier3Cmd(tcBin, []string{"-force", "-batch", "-"}, mainPayload); mErr == nil {
+						recovered = true
+					} else {
+						err = mErr
+					}
+				}
+				if !recovered {
+					if stripped, changed := stripFqCodelParamsInBatchLines(mainLines); changed {
+						fbPayload := []byte(strings.Join(stripped, "\n") + "\n")
+						if fbErr := h.runTier3Cmd(tcBin, []string{"-force", "-batch", "-"}, fbPayload); fbErr == nil {
+							recovered = true
+						}
+					}
+				}
+			}
+			if !recovered {
+				return fmt.Errorf("tier3 tc -batch failed: %w", err)
+			}
 		}
 	}
 	if len(v4Restore) > 0 {
@@ -1257,7 +1368,7 @@ func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore 
 			return errors.New("tier3 batch: iptables-restore binary not found")
 		}
 		subprocs++
-		if err := h.runTier3Cmd(v4Bin, []string{"-w", "2", "--noflush"}, v4Restore); err != nil {
+		if err := runTier3RestoreWithFallback(h, v4Bin, v4Restore); err != nil {
 			return fmt.Errorf("tier3 iptables-restore failed: %w", err)
 		}
 	}
@@ -1267,7 +1378,7 @@ func execTier3AtomicBatch(h dpTierHooks, tcLines []string, v4Restore, v6Restore 
 		}
 		if v6Bin := h.resolveBin("ip6tables-restore"); v6Bin != "" {
 			subprocs++
-			_ = h.runTier3Cmd(v6Bin, []string{"-w", "2", "--noflush"}, v6Restore)
+			_ = runTier3RestoreWithFallback(h, v6Bin, v6Restore)
 		}
 	}
 	return nil
@@ -1277,7 +1388,7 @@ func defaultRunTier3PipeCmd(binPath string, args []string, stdin []byte) error {
 	ctx, cancel := context.WithTimeout(context.Background(), dpTier3BatchTimeout)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, binPath, args...))
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"}
+	cmd.Env = subprocEnvWithFallbackPath()
 	cmd.Stdin = bytes.NewReader(stdin)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -1309,6 +1420,62 @@ func resolveDataplaneSystemBin(name string) string {
 	return ""
 }
 
+// resolveTier3LeafQdiscSpec 根据 <hncDir>/run/qdisc_caps.json 实测结果动态选择 Tier 3 叶子队列:
+// 默认或支持 fq_codel 时使用带参 fq_codel; 裁剪内核无 fq_codel 时按 fq -> sfq -> 按速率缩放 pfifo 自动降级。
+func resolveTier3LeafQdiscSpec(hncDir string, isExpress bool, rateKbps int) string {
+	defaultSpec := "fq_codel target 5ms interval 100ms quantum 1514 limit 1024"
+	if isExpress {
+		defaultSpec = "fq_codel target 2ms interval 40ms quantum 300 limit 512"
+	}
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		return defaultSpec
+	}
+	b, err := os.ReadFile(filepath.Join(hncDir, "run", "qdisc_caps.json"))
+	if err != nil || len(b) == 0 {
+		return defaultSpec
+	}
+	var qc struct {
+		Available []string `json:"available"`
+		Chosen    string   `json:"chosen"`
+	}
+	if json.Unmarshal(b, &qc) != nil {
+		return defaultSpec
+	}
+	sup := make(map[string]bool, len(qc.Available)+1)
+	for _, item := range qc.Available {
+		if name := strings.ToLower(strings.TrimSpace(item)); name != "" {
+			sup[name] = true
+		}
+	}
+	chosen := strings.ToLower(strings.TrimSpace(qc.Chosen))
+	if chosen != "" {
+		sup[chosen] = true
+	}
+	if len(sup) == 0 || sup["fq_codel"] {
+		return defaultSpec
+	}
+	if sup["fq"] || sup["sch_fq"] {
+		return "fq"
+	}
+	if sup["sfq"] {
+		return "sfq perturb 10"
+	}
+	// pfifo 按约 40ms BDP 窗口缩放队列长度 [16, 256]
+	limitPkts := uint64(128)
+	if rateBps := kbpsToBytesPerSec(rateKbps); rateBps > 0 {
+		bdp := (rateBps * 40) / (1000 * 1500)
+		if bdp < 16 {
+			limitPkts = 16
+		} else if bdp > 256 {
+			limitPkts = 256
+		} else {
+			limitPkts = bdp
+		}
+	}
+	return fmt.Sprintf("pfifo limit %d", limitPkts)
+}
+
 func buildTier3GlobalShaperBatchLines(iface string, downKbps int, hasIFB bool, upKbps int) []string {
 	var lines []string
 	if downKbps > 0 && iface != "" {
@@ -1333,8 +1500,22 @@ func applyVectorExpressBatchFallback(
 	markVal, markMask uint32,
 	bgCeilKbps, upBgCeilKbps, rootDownKbps, upKbps int,
 ) error {
-	tcLines := buildTier3VectorExpressBatchLines(
-		iface, hasIFB, enable, cleanupLegacy, cleanLegacyClass,
+	return applyVectorExpressBatchFallbackWithDir(
+		"", h, iface, hasIFB, enable, cleanupLegacy, cleanLegacyClass,
+		markVal, markMask, bgCeilKbps, upBgCeilKbps, rootDownKbps, upKbps,
+	)
+}
+
+func applyVectorExpressBatchFallbackWithDir(
+	hncDir string,
+	h dpTierHooks,
+	iface string,
+	hasIFB, enable, cleanupLegacy, cleanLegacyClass bool,
+	markVal, markMask uint32,
+	bgCeilKbps, upBgCeilKbps, rootDownKbps, upKbps int,
+) error {
+	tcLines := buildTier3VectorExpressBatchLinesWithCaps(
+		hncDir, iface, hasIFB, enable, cleanupLegacy, cleanLegacyClass,
 		markVal, markMask, bgCeilKbps, rootDownKbps, upKbps, upBgCeilKbps,
 	)
 	return execTier3AtomicBatch(h, tcLines, nil, nil)
@@ -1342,6 +1523,19 @@ func applyVectorExpressBatchFallback(
 
 func buildTier3VectorExpressBatchLines(
 	iface string,
+	hasIFB, enable, cleanupLegacy, cleanLegacyClass bool,
+	markVal, markMask uint32,
+	bgCeilKbps, rootDownKbps, configuredUpKbps int,
+	optUpBgCeilKbps ...int,
+) []string {
+	return buildTier3VectorExpressBatchLinesWithCaps(
+		"", iface, hasIFB, enable, cleanupLegacy, cleanLegacyClass,
+		markVal, markMask, bgCeilKbps, rootDownKbps, configuredUpKbps, optUpBgCeilKbps...,
+	)
+}
+
+func buildTier3VectorExpressBatchLinesWithCaps(
+	hncDir, iface string,
 	hasIFB, enable, cleanupLegacy, cleanLegacyClass bool,
 	markVal, markMask uint32,
 	bgCeilKbps, rootDownKbps, configuredUpKbps int,
@@ -1420,9 +1614,10 @@ func buildTier3VectorExpressBatchLines(
 			if expRate > tg.rootKbps {
 				expRate = tg.rootKbps
 			}
+			leafSpec := resolveTier3LeafQdiscSpec(hncDir, true, tg.rootKbps)
 			lines = append(lines,
 				fmt.Sprintf("class replace dev %s parent 1:1 classid 1:8010 htb rate %dkbit ceil %dkbit prio 0 quantum 1514", tg.dev, expRate, tg.rootKbps),
-				fmt.Sprintf("qdisc replace dev %s parent 1:8010 handle %s fq_codel target 2ms interval 40ms quantum 300 limit 512", tg.dev, tg.leafID),
+				fmt.Sprintf("qdisc replace dev %s parent 1:8010 handle %s %s", tg.dev, tg.leafID, leafSpec),
 				fmt.Sprintf("filter replace dev %s parent 1: protocol ip prio 4 handle 0x%x/0x%x fw flowid 1:8010", tg.dev, masked, markMask),
 				fmt.Sprintf("filter replace dev %s parent 1: protocol ipv6 prio 5 handle 0x%x/0x%x fw flowid 1:8010", tg.dev, masked, markMask),
 			)
@@ -1451,7 +1646,12 @@ func buildTier3VectorExpressBatchLines(
 	return lines
 }
 
-func buildTier3UpdateLeashBatchLines(iface string, hasIFB, enable bool, markVal, markMask uint32, rateKbps int) []string {
+func buildTier3UpdateLeashBatchLines(iface string, hasIFB, enable bool, markVal, markMask uint32, rateKbps int, optHNCDir ...string) []string {
+	hncDir := ""
+	if len(optHNCDir) > 0 {
+		hncDir = optHNCDir[0]
+	}
+	leafSpec := resolveTier3LeafQdiscSpec(hncDir, false, rateKbps)
 	targets := []struct {
 		dev    string
 		leafID string
@@ -1469,7 +1669,7 @@ func buildTier3UpdateLeashBatchLines(iface string, hasIFB, enable bool, markVal,
 		if enable {
 			lines = append(lines,
 				fmt.Sprintf("class replace dev %s parent 1:1 classid 1:9990 htb rate %dkbit ceil %dkbit burst 16k cburst 16k prio 7 quantum 1514", tg.dev, rateKbps, rateKbps),
-				fmt.Sprintf("qdisc replace dev %s parent 1:9990 handle %s fq_codel target 5ms interval 100ms quantum 1514 limit 1024", tg.dev, tg.leafID),
+				fmt.Sprintf("qdisc replace dev %s parent 1:9990 handle %s %s", tg.dev, tg.leafID, leafSpec),
 				fmt.Sprintf("filter replace dev %s parent 1: protocol ip prio 6 handle 0x%x/0x%x fw flowid 1:9990", tg.dev, markVal, markMask),
 				fmt.Sprintf("filter replace dev %s parent 1: protocol ipv6 prio 7 handle 0x%x/0x%x fw flowid 1:9990", tg.dev, markVal, markMask),
 			)

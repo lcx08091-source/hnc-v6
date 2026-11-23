@@ -21,7 +21,10 @@ package main
 
 import (
 	"archive/zip"
+	"bufio"
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,14 +35,199 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
-// osExecCommand is an alias of os/exec.Command to allow renaming in
-// tests without exposing the import everywhere.
-var osExecCommand = osExec.Command
+const (
+	exportSchemaVersion  = "3"
+	exportGetpropTimeout = 2 * time.Second
+	exportTmpMaxAge      = time.Hour
+	exportMaxKeepFiles   = 10
+	exportMaxKeepBytes   = int64(128 << 20)
+)
 
-const exportSchemaVersion = "3"
+var (
+	exportBuildPropPaths = []string{
+		"/system/build.prop",
+		"/product/etc/build.prop",
+		"/vendor/build.prop",
+	}
+	exportStaticPropsOnce sync.Once
+	exportStaticProps     map[string]string
+	exportGetpropExec     = defaultExportGetpropExec
+	exportCreateZipFile   = func(path string) (io.WriteCloser, error) { return os.Create(path) }
+)
+
+func parseBuildPropFiles(paths []string) map[string]string {
+	props := make(map[string]string, 64)
+	for _, p := range paths {
+		f, err := os.Open(p)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(io.LimitReader(f, 1<<20))
+		for sc.Scan() {
+			line := strings.TrimSpace(sc.Text())
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			eq := strings.IndexByte(line, '=')
+			if eq <= 0 {
+				continue
+			}
+			k := strings.TrimSpace(line[:eq])
+			v := strings.Trim(strings.TrimSpace(line[eq+1:]), "\"")
+			if k == "" || v == "" {
+				continue
+			}
+			if props[k] == "" {
+				props[k] = v
+			}
+		}
+		_ = f.Close()
+	}
+	// Android Treble 分区属性别名回退(直接键存在时优先直接键)
+	for _, alias := range [][2]string{
+		{"ro.product.model", "ro.product.product.model"},
+		{"ro.product.model", "ro.product.vendor.model"},
+		{"ro.product.model", "ro.product.system.model"},
+		{"ro.product.brand", "ro.product.product.brand"},
+		{"ro.product.brand", "ro.product.vendor.brand"},
+		{"ro.product.brand", "ro.product.system.brand"},
+		{"ro.build.version.release", "ro.product.build.version.release"},
+		{"ro.build.version.release", "ro.system.build.version.release"},
+		{"ro.build.id", "ro.product.build.id"},
+		{"ro.build.id", "ro.system.build.id"},
+	} {
+		if props[alias[0]] == "" && props[alias[1]] != "" {
+			props[alias[0]] = props[alias[1]]
+		}
+	}
+	return props
+}
+
+func getStaticBuildProp(key string) string {
+	exportStaticPropsOnce.Do(func() {
+		exportStaticProps = parseBuildPropFiles(exportBuildPropPaths)
+	})
+	return exportStaticProps[key]
+}
+
+func resetExportStaticPropsForTest() {
+	exportStaticPropsOnce = sync.Once{}
+	exportStaticProps = nil
+}
+
+func defaultExportGetpropExec(key string) (string, error) {
+	binPath := ""
+	for _, cand := range []string{"/system/bin/getprop", "/system/xbin/getprop", "/vendor/bin/getprop"} {
+		if st, err := os.Stat(cand); err == nil && !st.IsDir() {
+			binPath = cand
+			break
+		}
+	}
+	if binPath == "" {
+		p, err := osExec.LookPath("getprop")
+		if err != nil {
+			return "", nil
+		}
+		binPath = p
+	}
+	return runIsolatedGetpropBin(exportGetpropTimeout, binPath, key)
+}
+
+func runIsolatedGetpropBin(timeout time.Duration, binPath string, args ...string) (string, error) {
+	if timeout <= 0 {
+		timeout = exportGetpropTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	cmd := hardenCmd(osExec.CommandContext(ctx, binPath, args...))
+	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin"}
+	if runtime.GOOS == "linux" || runtime.GOOS == "android" {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			if cmd.Process != nil && cmd.Process.Pid > 0 {
+				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+				return cmd.Process.Kill()
+			}
+			return nil
+		}
+	}
+	cmd.WaitDelay = 400 * time.Millisecond
+	out, err := cmd.Output()
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return "", fmt.Errorf("getprop timed out after %v: %w", timeout, context.DeadlineExceeded)
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func isExportTmpFile(name string) bool {
+	return strings.HasSuffix(name, ".tmp") || strings.Contains(name, ".tmp.")
+}
+
+// pruneExportsDir 按修改时间清理 exports/ 目录:
+//  1. 删除超过 1 小时的残留 .tmp 临时文件;
+//  2. 正式导出文件按修改时间从新到旧最多保留 10 个且累计总大小不超过 128MB。
+func pruneExportsDir(exportsDir string, now time.Time, protectName string) {
+	entries, err := os.ReadDir(exportsDir)
+	if err != nil {
+		return
+	}
+	type exportFileMeta struct {
+		name    string
+		size    int64
+		modTime time.Time
+	}
+	files := make([]exportFileMeta, 0, len(entries))
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		if isExportTmpFile(n) {
+			if !now.Before(info.ModTime()) && now.Sub(info.ModTime()) > exportTmpMaxAge {
+				_ = os.Remove(filepath.Join(exportsDir, n))
+			}
+			continue
+		}
+		files = append(files, exportFileMeta{
+			name:    n,
+			size:    info.Size(),
+			modTime: info.ModTime(),
+		})
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].modTime.Equal(files[j].modTime) {
+			return files[i].modTime.After(files[j].modTime)
+		}
+		return files[i].name > files[j].name
+	})
+
+	keptCount := 0
+	var keptBytes int64
+	for _, f := range files {
+		if protectName != "" && f.name == protectName && keptCount == 0 {
+			keptCount++
+			keptBytes += f.size
+			continue
+		}
+		if keptCount < exportMaxKeepFiles && keptBytes+f.size <= exportMaxKeepBytes {
+			keptCount++
+			keptBytes += f.size
+			continue
+		}
+		_ = os.Remove(filepath.Join(exportsDir, f.name))
+	}
+}
 
 type exportRequest struct {
 	From  int64    `json:"from"`
@@ -118,6 +306,9 @@ func (s *server) apiExport(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// 生成新包前先清理超时残留 .tmp 与超配额旧包, 提前释放磁盘余量防 ENOSPC
+	pruneExportsDir(s.exportsDir(), now, "")
+
 	name := fmt.Sprintf("hnc-export-%s.zip", now.Format("20060102-150405"))
 	full := filepath.Join(s.exportsDir(), name)
 	tmp := full + ".tmp"
@@ -138,68 +329,99 @@ func (s *server) apiExport(w http.ResponseWriter, r *http.Request) {
 		Notes:  req.Notes,
 	}
 
-	zf, err := os.Create(tmp)
+	zf, err := exportCreateZipFile(tmp)
 	if err != nil {
+		_ = os.Remove(tmp)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	abortZip := func(err error) {
+		_ = zf.Close()
+		_ = os.Remove(tmp)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	}
+
 	zw := zip.NewWriter(zf)
 
 	// Track: dpi_state.json (current snapshot)
-	if t, err := addSingleFileToZip(zw,
-		filepath.Join(s.hncDir, "run", "dpi_state.json"),
-		"dpi_state.json"); err == nil {
-		manifest.Tracks["dpi_state"] = t
+	tState, err := addSingleFileToZip(zw, filepath.Join(s.hncDir, "run", "dpi_state.json"), "dpi_state.json")
+	if err != nil {
+		abortZip(err)
+		return
+	}
+	if tState.Included {
+		manifest.Tracks["dpi_state"] = tState
 	}
 
 	// Track: self_attrib JSONL files in range
-	manifest.Tracks["self_attrib"] = s.addDailyJSONLToZip(zw, "self_attrib.",
-		"self_attrib/", req.From, req.To)
+	tSelf, err := s.addDailyJSONLToZip(zw, "self_attrib.", "self_attrib/", req.From, req.To)
+	if err != nil {
+		abortZip(err)
+		return
+	}
+	manifest.Tracks["self_attrib"] = tSelf
 
-	// Track: stats JSONL files (existing HNC history)
-	manifest.Tracks["stats"] = s.addDailyJSONLToZip(zw, "stats.",
-		"stats/", req.From, req.To)
+	// Track: stats JSONL files (data/dpi_history preferred, fallback run/)
+	tStats, err := s.addDailyJSONLToZip(zw, "stats.", "stats/", req.From, req.To)
+	if err != nil {
+		abortZip(err)
+		return
+	}
+	manifest.Tracks["stats"] = tStats
 
 	// Track: ip_app_map.json
-	if t, err := addSingleFileToZip(zw,
-		filepath.Join(s.hncDir, "run", "ip_app_map.json"),
-		"ip_app_map.json"); err == nil {
-		manifest.Tracks["ip_app_map"] = t
+	tIPMap, err := addSingleFileToZip(zw, filepath.Join(s.hncDir, "run", "ip_app_map.json"), "ip_app_map.json")
+	if err != nil {
+		abortZip(err)
+		return
+	}
+	if tIPMap.Included {
+		manifest.Tracks["ip_app_map"] = tIPMap
 	}
 
 	// Track: dpi_rules.d/ point-in-time snapshot
-	manifest.Tracks["dpi_rules"] = s.addDPIRulesToZip(zw)
+	tRules, err := s.addDPIRulesToZip(zw)
+	if err != nil {
+		abortZip(err)
+		return
+	}
+	manifest.Tracks["dpi_rules"] = tRules
 
 	// manifest.json LAST
-	if mw, err := zw.Create("manifest.json"); err == nil {
-		enc := json.NewEncoder(mw)
-		enc.SetIndent("", "  ")
-		_ = enc.Encode(manifest)
+	mw, err := zw.Create("manifest.json")
+	if err != nil {
+		abortZip(err)
+		return
+	}
+	enc := json.NewEncoder(mw)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(manifest); err != nil {
+		abortZip(err)
+		return
 	}
 
 	if err := zw.Close(); err != nil {
-		zf.Close()
-		os.Remove(tmp)
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		abortZip(err)
 		return
 	}
 	if err := zf.Close(); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
 	if err := os.Rename(tmp, full); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
+	// 新包落定后再次执行 10 个文件 / 128MB 硬上限配额修剪
+	pruneExportsDir(s.exportsDir(), time.Now(), name)
+
 	info, _ := os.Stat(full)
 	var size int64
 	if info != nil {
 		size = info.Size()
 	}
-	// JSON-marshal+unmarshal to convert manifest struct to generic map
-	// (mirrors AHNC's response shape so WebUI can iterate tracks).
 	mb, _ := json.Marshal(manifest)
 	var mGeneric map[string]interface{}
 	_ = json.Unmarshal(mb, &mGeneric)
@@ -214,14 +436,20 @@ func (s *server) apiExport(w http.ResponseWriter, r *http.Request) {
 }
 
 // addSingleFileToZip copies one file into the zip at the given archive path.
-// Returns a trackInfo with included=true on success.
+// Missing optional source files return Included=false, err=nil; ZIP/IO write errors (e.g. ENOSPC) are strictly propagated.
 func addSingleFileToZip(zw *zip.Writer, src, archivePath string) (trackInfo, error) {
 	info, err := os.Stat(src)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return trackInfo{Included: false}, nil
+		}
 		return trackInfo{Included: false}, err
 	}
 	in, err := os.Open(src)
 	if err != nil {
+		if os.IsNotExist(err) {
+			return trackInfo{Included: false}, nil
+		}
 		return trackInfo{Included: false}, err
 	}
 	defer in.Close()
@@ -246,32 +474,53 @@ func addSingleFileToZip(zw *zip.Writer, src, archivePath string) (trackInfo, err
 	}, nil
 }
 
-// addDailyJSONLToZip copies all *YYYYMMDD.jsonl files matching prefix
-// in cfg.run dir whose day overlaps [from, to].
-func (s *server) addDailyJSONLToZip(zw *zip.Writer, prefix, archiveDir string, from, to int64) trackInfo {
-	runDir := filepath.Join(s.hncDir, "run")
-	entries, err := os.ReadDir(runDir)
-	if err != nil {
-		return trackInfo{Included: false}
-	}
-	// v5.11: stats.* 按 UTC 日期命名、self_attrib.* 按本地日期命名(见
-	// dayFileKeys 注释), 只按本地日期比会漏掉窗口一端的 stats 文件。取本地
-	// 与 UTC 两种日期的并集区间, 最多多打包一个相邻日文件。
+// addDailyJSONLToZip copies all *YYYYMMDD.jsonl files matching prefix whose day overlaps [from, to].
+// Priority: data/dpi_history/ -> data/ -> run/ (deduplicated by filename, preferring newer persistent directory).
+func (s *server) addDailyJSONLToZip(zw *zip.Writer, prefix, archiveDir string, from, to int64) (trackInfo, error) {
 	keys := dayFileKeys(time.Unix(from, 0), time.Unix(to, 0))
 	fromDay, toDay := keys[0], keys[len(keys)-1]
 
-	t := trackInfo{}
-	for _, e := range entries {
-		n := e.Name()
-		if !strings.HasPrefix(n, prefix) || !strings.HasSuffix(n, ".jsonl") {
-			continue
-		}
-		day := strings.TrimSuffix(strings.TrimPrefix(n, prefix), ".jsonl")
-		if day < fromDay || day > toDay {
-			continue
-		}
-		sub, err := addSingleFileToZip(zw, filepath.Join(runDir, n), archiveDir+n)
+	scanDirs := []string{
+		filepath.Join(s.hncDir, "data", "dpi_history"),
+		filepath.Join(s.hncDir, "data"),
+		filepath.Join(s.hncDir, "run"),
+	}
+	chosenPath := make(map[string]string)
+	for _, dir := range scanDirs {
+		entries, err := os.ReadDir(dir)
 		if err != nil {
+			continue
+		}
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			n := e.Name()
+			if !strings.HasPrefix(n, prefix) || !strings.HasSuffix(n, ".jsonl") {
+				continue
+			}
+			day := strings.TrimSuffix(strings.TrimPrefix(n, prefix), ".jsonl")
+			if day < fromDay || day > toDay {
+				continue
+			}
+			if _, seen := chosenPath[n]; !seen {
+				chosenPath[n] = filepath.Join(dir, n)
+			}
+		}
+	}
+	names := make([]string, 0, len(chosenPath))
+	for n := range chosenPath {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+
+	t := trackInfo{}
+	for _, n := range names {
+		sub, err := addSingleFileToZip(zw, chosenPath[n], archiveDir+n)
+		if err != nil {
+			return trackInfo{Included: false}, err
+		}
+		if !sub.Included {
 			continue
 		}
 		t.Files = append(t.Files, n)
@@ -279,21 +528,23 @@ func (s *server) addDailyJSONLToZip(zw *zip.Writer, prefix, archiveDir string, f
 		t.FileCount++
 	}
 	t.Included = t.FileCount > 0
-	sort.Strings(t.Files)
-	return t
+	return t, nil
 }
 
 // addDPIRulesToZip copies data/dpi_rules.d/*.json into the zip.
-func (s *server) addDPIRulesToZip(zw *zip.Writer) trackInfo {
+func (s *server) addDPIRulesToZip(zw *zip.Writer) (trackInfo, error) {
 	files := dpiRuleFiles(s.hncDir)
 	if len(files) == 0 {
-		return trackInfo{Included: false}
+		return trackInfo{Included: false}, nil
 	}
 	t := trackInfo{}
 	for _, fullPath := range files {
 		n := filepath.Base(fullPath)
 		sub, err := addSingleFileToZip(zw, fullPath, "dpi_rules.d/"+n)
 		if err != nil {
+			return trackInfo{Included: false}, err
+		}
+		if !sub.Included {
 			continue
 		}
 		t.Files = append(t.Files, n)
@@ -302,14 +553,16 @@ func (s *server) addDPIRulesToZip(zw *zip.Writer) trackInfo {
 	}
 	t.Included = t.FileCount > 0
 	sort.Strings(t.Files)
-	return t
+	return t, nil
 }
 
-// gatherDeviceInfo reads a few /system properties for the manifest.
+// gatherDeviceInfo reads static ro.* properties from build.prop first (sync.Once),
+// falling back to 2s-isolated getprop only for missing keys so exportMu can never deadlock.
 func (s *server) gatherDeviceInfo() map[string]string {
 	d := map[string]string{
 		"arch": runtime.GOARCH,
 	}
+	getpropTimedOut := false
 	for _, p := range []struct {
 		key, prop string
 	}{
@@ -318,7 +571,14 @@ func (s *server) gatherDeviceInfo() map[string]string {
 		{"android_version", "ro.build.version.release"},
 		{"build_id", "ro.build.id"},
 	} {
-		v := s.runGetprop(p.prop)
+		v := getStaticBuildProp(p.prop)
+		if v == "" && !getpropTimedOut {
+			var err error
+			v, err = getpropCmd(p.prop)
+			if errors.Is(err, context.DeadlineExceeded) {
+				getpropTimedOut = true
+			}
+		}
 		if v != "" {
 			d[p.key] = v
 		}
@@ -352,6 +612,9 @@ func (s *server) detectHNCVersion() string {
 }
 
 func (s *server) runGetprop(key string) string {
+	if v := getStaticBuildProp(key); v != "" {
+		return v
+	}
 	out, err := getpropCmd(key)
 	if err != nil {
 		return ""
@@ -423,22 +686,15 @@ func (s *server) apiExportFile(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, path)
 }
 
-// getpropCmd shells out to `getprop <key>`. Empty + nil-error on
-// non-Android hosts (e.g. dev box) so this file compiles+links cleanly
-// outside of an Android NDK build.
 func getpropCmd(key string) (string, error) {
-	out, err := execCommand("getprop", key)
-	return out, err
-}
-
-// execCommand is a thin wrapper for swap-in-test-able exec.
-func execCommand(name string, args ...string) (string, error) {
-	cmd := osExecCommand(name, args...)
-	b, err := cmd.Output()
+	if exportGetpropExec == nil {
+		return "", nil
+	}
+	out, err := exportGetpropExec(key)
 	if err != nil {
 		return "", err
 	}
-	return string(b), nil
+	return strings.TrimSpace(out), nil
 }
 
 // isExportArchive v5.11: /api/exports 可列出/下载的产物 —— 数据导出 .zip 与诊断包 .tar.gz。

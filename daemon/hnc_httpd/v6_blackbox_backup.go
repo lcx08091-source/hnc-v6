@@ -1280,11 +1280,18 @@ var (
 		"leakguard_config.json",
 		"device_ident_override.json",
 		"startup_fp.json",
-		"fp_prototypes.json",
-		"dpi_self_config.json",
+		"dpi_fp_prototypes.json",
+		"self_policy.json",
+		"rmac_policy.json",
+		"webui_access.json",
 		"vector_express.json",
 		"update_leash.json",
 		"thermo_cruise.json",
+	}
+	// v6BackupLegacyKeyMap 兼容导入旧版备份包中误写的键名, 恢复落盘时自动映射至真实配置文件名。
+	v6BackupLegacyKeyMap = map[string]string{
+		"fp_prototypes.json":   "dpi_fp_prototypes.json",
+		"dpi_self_config.json": "self_policy.json",
 	}
 	v6DynamicConfigNameRE = regexp.MustCompile(`^v6_[a-z0-9_.-]{1,48}\.json$`)
 )
@@ -1301,12 +1308,24 @@ type V6BackupBundle struct {
 	SHA256            string                     `json:"sha256"`
 }
 
+func isSupportedBackupSchemaVersion(v string) bool {
+	switch strings.TrimSpace(v) {
+	case v6BackupSchemaVersion, "hnc.backup.v6.0", "hnc.backup.v6.1", "6.0", "6.1":
+		return true
+	default:
+		return false
+	}
+}
+
 func isAllowedBackupConfigName(name string) bool {
 	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
 		return false
 	}
 	if name == "remote_tokens.json" || name == "devices.json" || strings.HasSuffix(name, ".jsonl") {
 		return false
+	}
+	if _, ok := v6BackupLegacyKeyMap[name]; ok {
+		return true
 	}
 	for _, allowed := range v6BackupStaticAllowList {
 		if name == allowed {
@@ -1425,6 +1444,9 @@ func backupCollectionLen(v any) (int, bool) {
 
 // validateBackupFileSemantics 对各关键配置文件执行深层结构与业务红线校验。
 func validateBackupFileSemantics(name string, canon []byte) error {
+	if mapped, ok := v6BackupLegacyKeyMap[name]; ok {
+		name = mapped
+	}
 	dec := json.NewDecoder(bytes.NewReader(canon))
 	dec.UseNumber()
 	var rootObj map[string]any
@@ -1500,6 +1522,16 @@ func validateBackupFileSemantics(name string, canon []byte) error {
 			if it.Kind != "ip" && it.Kind != "domain" {
 				return fmt.Errorf("conn_blocks.json: invalid kind %q", it.Kind)
 			}
+		}
+	case "webui_access.json":
+		var wc webuiAccessCfg
+		if err := json.Unmarshal(canon, &wc); err != nil {
+			return fmt.Errorf("webui_access.json: %w", err)
+		}
+		switch wc.Mode {
+		case webuiModeAll, webuiModeAllowlist, webuiModeLocalOnly:
+		default:
+			return fmt.Errorf("webui_access.json: invalid mode %q", wc.Mode)
 		}
 	case "leakguard_config.json":
 		scopes := []map[string]any{rootObj}
@@ -1604,8 +1636,8 @@ func ExportBackupBundle(hncDir string) (V6BackupBundle, error) {
 
 // validateBackupBundle 纯内存执行整机备份载荷的白名单、语法、业务语义及常量时间 SHA256 校验。
 func validateBackupBundle(bundle V6BackupBundle) (map[string][]byte, error) {
-	if bundle.SchemaVersion != v6BackupSchemaVersion {
-		return nil, fmt.Errorf("unsupported schema_version %q (want %q)", bundle.SchemaVersion, v6BackupSchemaVersion)
+	if !isSupportedBackupSchemaVersion(bundle.SchemaVersion) {
+		return nil, fmt.Errorf("unsupported schema_version %q (want %q or 6.0/6.1)", bundle.SchemaVersion, v6BackupSchemaVersion)
 	}
 	if len(bundle.Files) == 0 {
 		return nil, errors.New("backup bundle contains zero files")
@@ -1648,6 +1680,14 @@ func (s *server) reloadAfterBackupRestore() {
 	s.invalidateServerJSONCaches()
 	if s == nil {
 		return
+	}
+	if s.limitCtl != nil {
+		s.limitCtl.ReloadPoliciesFromDisk()
+	}
+	if s.hncDir != "" {
+		connBlockMu.Lock()
+		_, _ = s.connBlockSyncLocked(true)
+		connBlockMu.Unlock()
 	}
 	if s.autorate != nil {
 		cfg := s.autorate.loadConfigFromDisk()
@@ -1699,6 +1739,18 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 		return nil, fmt.Errorf("mkdir data: %w", err)
 	}
 
+	// 将旧版误写键名归一化至真实配置文件名(若新旧同时出现则优先保留新键名)
+	effectiveMap := make(map[string][]byte, len(canonMap))
+	for k, v := range canonMap {
+		if mapped, isLegacy := v6BackupLegacyKeyMap[k]; isLegacy {
+			if _, hasNew := canonMap[mapped]; !hasNew {
+				effectiveMap[mapped] = v
+			}
+			continue
+		}
+		effectiveMap[k] = v
+	}
+
 	// 协同获取 JSON 目录锁
 	releaseJSONLock := acquireCooperativeJSONLock(hncDir)
 	lockHeld := true
@@ -1708,13 +1760,13 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 		}
 	}()
 
-	keys := make([]string, 0, len(canonMap))
-	for k := range canonMap {
+	keys := make([]string, 0, len(effectiveMap))
+	for k := range effectiveMap {
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
 
-	// 阶段 1: 全部预写成格式化 JSON 至 .tmp 隐藏文件并 fsync, 任一失败全量清理回滚
+	// 阶段 1: 全部预写成规范 JSON 至 .tmp 隐藏文件并 fsync, 任一失败全量清理回滚
 	type stagedPair struct {
 		name string
 		tmp  string
@@ -1730,12 +1782,18 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 	pid := os.Getpid()
 	tsNano := time.Now().UnixNano()
 	for _, name := range keys {
-		var pretty bytes.Buffer
-		if err := json.Indent(&pretty, canonMap[name], "", "  "); err != nil {
-			cleanupTmp()
-			return nil, fmt.Errorf("format %s: %w", name, err)
+		var outBuf bytes.Buffer
+		if name == "webui_access.json" {
+			// webui_guard.sh 要求单行紧凑 JSON
+			outBuf.Write(effectiveMap[name])
+			outBuf.WriteByte('\n')
+		} else {
+			if err := json.Indent(&outBuf, effectiveMap[name], "", "  "); err != nil {
+				cleanupTmp()
+				return nil, fmt.Errorf("format %s: %w", name, err)
+			}
+			outBuf.WriteByte('\n')
 		}
-		pretty.WriteByte('\n')
 
 		destPath := filepath.Join(dataDir, name)
 		tmpPath := filepath.Join(dataDir, fmt.Sprintf(".%s.restore.%d.%d.tmp", name, pid, tsNano))
@@ -1744,7 +1802,7 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 			cleanupTmp()
 			return nil, fmt.Errorf("stage %s: %w", name, err)
 		}
-		_, wErr := f.Write(pretty.Bytes())
+		_, wErr := f.Write(outBuf.Bytes())
 		sErr := f.Sync()
 		cErr := f.Close()
 		if wErr != nil || sErr != nil || cErr != nil {
@@ -1766,7 +1824,7 @@ func restoreValidatedBackupBundle(hncDir string, canonMap map[string][]byte, opt
 	}
 
 	// 同步伴生 app_limits.flat 与脏标记, 使 rulesStore / 数据面立即感知恢复后的新状态
-	if rawAL, ok := canonMap["app_limits.json"]; ok {
+	if rawAL, ok := effectiveMap["app_limits.json"]; ok {
 		var af AppLimitFile
 		if json.Unmarshal(rawAL, &af) == nil {
 			_ = saveAppLimits(hncDir, af)

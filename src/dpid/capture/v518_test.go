@@ -283,9 +283,9 @@ func withHotspot6(t *testing.T) {
 	t.Helper()
 	_, n4, _ := net.ParseCIDR("192.168.43.0/24")
 	_, n6, _ := net.ParseCIDR("2409:8a00:1:2::/64")
-	old := hotspotNets
+	old := getHotspotNets()
 	SetHotspotNets([]*net.IPNet{n4, n6})
-	t.Cleanup(func() { hotspotNets = old })
+	t.Cleanup(func() { SetHotspotNets(old) })
 }
 
 func resetTLSAsm(t *testing.T) {

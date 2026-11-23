@@ -79,6 +79,7 @@ const (
 	dnsTKProbeTimeout  = 1500 * time.Millisecond
 	dnsTKBackoffMin    = time.Minute
 	dnsTKBackoffMax    = 30 * time.Minute
+	dnsTKYieldRecheck  = 60 * time.Second
 	dnsTKRingSize      = 2000
 	dnsTKRecentN       = 50
 	dnsTKTopMax        = 5000
@@ -92,12 +93,13 @@ const (
 )
 
 type dnsTKConf struct {
-	Enabled    bool   `json:"enabled"`
-	BlockMode  string `json:"block_mode"`
-	LogQueries bool   `json:"log_queries"`
-	LogRedact  bool   `json:"log_redact"`
-	Upstream   string `json:"upstream,omitempty"`
-	Ts         int64  `json:"ts,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	BlockMode     string `json:"block_mode"`
+	LogQueries    bool   `json:"log_queries"`
+	LogRedact     bool   `json:"log_redact"`
+	Upstream      string `json:"upstream,omitempty"`
+	ForceTakeover bool   `json:"force_takeover,omitempty"`
+	Ts            int64  `json:"ts,omitempty"`
 }
 
 func dnsTKPath(hncDir string) string { return filepath.Join(hncDir, "data", "dns_takeover.json") }
@@ -112,7 +114,7 @@ func loadDNSTKConf(hncDir string) dnsTKConf {
 	if json.Unmarshal(b, &x) != nil {
 		return c
 	}
-	c.Enabled, c.LogQueries, c.LogRedact, c.Ts = x.Enabled, x.LogQueries, x.LogRedact, x.Ts
+	c.Enabled, c.LogQueries, c.LogRedact, c.ForceTakeover, c.Ts = x.Enabled, x.LogQueries, x.LogRedact, x.ForceTakeover, x.Ts
 	if x.BlockMode == "zero" {
 		c.BlockMode = "zero"
 	}
@@ -315,7 +317,7 @@ func (t *dnsIPNames) record(ev dnsAnswerEvent) {
 	defer t.mu.Unlock()
 	for _, r := range ev.IPs {
 		ip := net.ParseIP(r.Value)
-		if ip == nil {
+		if ip == nil || isFakeIPAddr(ip) {
 			continue
 		}
 		keep := int64(r.TTL)
@@ -659,6 +661,9 @@ type dnsTakeover struct {
 	healthy      bool
 	state        string
 	lastErr      string
+	yieldTProxy  bool
+	yieldNote    string
+	yieldUntil   time.Time
 	v6Status     string
 	v6Reason     string
 	foCount      int
@@ -754,54 +759,95 @@ type linuxIfconf struct {
 	buf *byte
 }
 
-// fastFlagUpIfaces 通过单次 SIOCGIFCONF + SIOCGIFFLAGS 在 <25us 内读取非热点/非回环 FlagUp 接口名,
+// fastFlagUpIfaces 通过 SIOCGIFCONF + SIOCGIFFLAGS 并补读 /sys/class/net 兼容纯 IPv6 单栈接口(如无 IPv4 的蜂窝 rmnet_data/ccmni),
 // 避免 Android 下 net.Interfaces() 触发全量 NetlinkRIB / SELinux 回退导致 ~500us 开销。
 func fastFlagUpIfaces(skip map[string]bool) ([]string, bool) {
+	return fastFlagUpIfacesFrom("/sys/class/net", skip)
+}
+
+func fastFlagUpIfacesFrom(sysNetDir string, skip map[string]bool) ([]string, bool) {
 	fd, err := syscall.Socket(syscall.AF_INET, syscall.SOCK_DGRAM|syscall.SOCK_CLOEXEC, 0)
 	if err != nil {
 		return nil, false
 	}
 	defer syscall.Close(fd)
+
+	checkFlags := func(name string) (bool, bool) {
+		if len(name) > 0 && len(name) < 16 {
+			var req [40]byte
+			copy(req[:16], name)
+			_, _, e2 := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFFLAGS, uintptr(unsafe.Pointer(&req[0])))
+			if e2 == 0 {
+				flags := binary.NativeEndian.Uint16(req[16:18])
+				return flags&syscall.IFF_UP != 0 && flags&syscall.IFF_LOOPBACK == 0, true
+			}
+		}
+		if sysNetDir != "" {
+			if b, rerr := os.ReadFile(filepath.Join(sysNetDir, name, "flags")); rerr == nil {
+				if v, perr := strconv.ParseUint(strings.TrimSpace(string(b)), 0, 32); perr == nil {
+					return v&uint64(syscall.IFF_UP) != 0 && v&uint64(syscall.IFF_LOOPBACK) == 0, true
+				}
+			}
+		}
+		return false, false
+	}
+
+	seen := map[string]bool{}
+	var out []string
+	anyProbeOK := false
+
 	var raw [4096]byte
 	ifc := linuxIfconf{len: int32(len(raw)), buf: &raw[0]}
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFCONF, uintptr(unsafe.Pointer(&ifc)))
 	runtime.KeepAlive(&raw)
-	if errno != 0 {
-		return nil, false
-	}
-	stride := 32
-	if unsafe.Sizeof(uintptr(0)) == 8 {
-		stride = 40
-	}
-	seen := map[string]bool{}
-	var out []string
-	for off := 0; off+stride <= int(ifc.len); off += stride {
-		nb := raw[off : off+16]
-		z := 0
-		for z < len(nb) && nb[z] != 0 {
-			z++
+	if errno == 0 {
+		anyProbeOK = true
+		stride := 32
+		if unsafe.Sizeof(uintptr(0)) == 8 {
+			stride = 40
 		}
-		if z == 0 {
-			continue
-		}
-		name := string(nb[:z])
-		if seen[name] || isIgnoredUpstreamIface(name, skip) {
-			continue
-		}
-		seen[name] = true
-		var req [40]byte
-		copy(req[:16], nb[:z])
-		_, _, e2 := syscall.Syscall(syscall.SYS_IOCTL, uintptr(fd), syscall.SIOCGIFFLAGS, uintptr(unsafe.Pointer(&req[0])))
-		if e2 != 0 {
-			continue
-		}
-		flags := binary.NativeEndian.Uint16(req[16:18])
-		if flags&syscall.IFF_UP != 0 && flags&syscall.IFF_LOOPBACK == 0 {
-			out = append(out, name)
+		for off := 0; off+stride <= int(ifc.len); off += stride {
+			nb := raw[off : off+16]
+			z := 0
+			for z < len(nb) && nb[z] != 0 {
+				z++
+			}
+			if z == 0 {
+				continue
+			}
+			name := string(nb[:z])
+			if seen[name] || isIgnoredUpstreamIface(name, skip) {
+				continue
+			}
+			seen[name] = true
+			if up, _ := checkFlags(name); up {
+				out = append(out, name)
+			}
 		}
 	}
+
+	// 补读 /sys/class/net: SIOCGIFCONF(AF_INET) 不会返回纯 IPv6 接口(如纯 IPv6 蜂窝口 rmnet_data*/ccmni*)
+	if sysNetDir != "" {
+		if df, derr := os.Open(sysNetDir); derr == nil {
+			names, nerr := df.Readdirnames(-1)
+			_ = df.Close()
+			if nerr == nil {
+				anyProbeOK = true
+				for _, name := range names {
+					if seen[name] || isIgnoredUpstreamIface(name, skip) {
+						continue
+					}
+					seen[name] = true
+					if up, _ := checkFlags(name); up {
+						out = append(out, name)
+					}
+				}
+			}
+		}
+	}
+
 	sort.Strings(out)
-	return out, len(out) > 0
+	return out, len(out) > 0 || anyProbeOK
 }
 
 // defaultUpstreamSig 零子进程(<100us)获取当前默认上游出口签名:
@@ -917,7 +963,7 @@ func parseDumpsysDNS(out string) []string {
 	return res
 }
 
-// dnsSystemServers 默认网络的 DNS: getprop net.dns1..4(老系统), 再 dumpsys connectivity
+// dnsSystemServers 默认网络的 DNS: 直接从 dumpsys connectivity 解析(Android 8+ net.dns1..4 已废弃, 不再白跑 4 次 getprop)
 func dnsSystemServers() []string {
 	var out []string
 	seen := map[string]bool{}
@@ -927,21 +973,13 @@ func dnsSystemServers() []string {
 			out = append(out, ip.String())
 		}
 	}
-	run := func(name string, args ...string) string {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		b, _ := hardenCmd(exec.CommandContext(ctx, name, args...)).Output()
-		return string(b)
-	}
-	for i := 1; i <= 4; i++ {
-		add(run("getprop", "net.dns"+strconv.Itoa(i)))
-	}
-	if len(out) == 0 {
-		for _, s := range parseDumpsysDNS(run("dumpsys", "connectivity")) {
-			add(s)
-			if len(out) >= 4 {
-				break
-			}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	b, _ := hardenCmd(exec.CommandContext(ctx, "dumpsys", "connectivity")).Output()
+	for _, s := range parseDumpsysDNS(string(b)) {
+		add(s)
+		if len(out) >= 4 {
+			break
 		}
 	}
 	return out
@@ -1015,11 +1053,39 @@ func dnsTKMergeIPNames(s *server, out map[string]ipName) {
 	t.mergeInto(out)
 }
 
+// parseDNSTKYieldTProxy 解析 dns_takeover.sh 返回的透明代理礼让回显:
+//
+//	DNSTK=yield_tproxy [chain=BOX_EXTERNAL] [proxy=clash] ...
+func parseDNSTKYieldTProxy(last string) (string, bool) {
+	fields := strings.Fields(strings.TrimSpace(last))
+	if len(fields) == 0 || fields[0] != "DNSTK=yield_tproxy" {
+		return "", false
+	}
+	var hints []string
+	for _, f := range fields[1:] {
+		for _, pfx := range []string{"chain=", "proxy=", "by=", "target=", "rule=", "reason="} {
+			if strings.HasPrefix(f, pfx) {
+				if v := strings.TrimPrefix(f, pfx); v != "" {
+					hints = append(hints, v)
+				}
+			}
+		}
+	}
+	who := "Box4Magisk/Clash/Mihomo/Sing-box"
+	if len(hints) > 0 {
+		who = strings.Join(hints, "/")
+	}
+	return "检测到透明代理(" + who + ")已接管 53 端口，HNC DNS 接管已自动礼让共存，热点 DNS 交由透明代理处理", true
+}
+
 func (t *dnsTakeover) setState(st, errStr string) {
 	t.mu.Lock()
 	t.state, t.lastErr = st, errStr
 	if st != "active" {
 		t.healthy = false
+	}
+	if st != "yield_tproxy" {
+		t.yieldTProxy, t.yieldNote, t.yieldUntil = false, "", time.Time{}
 	}
 	t.mu.Unlock()
 }
@@ -1171,6 +1237,15 @@ func (t *dnsTakeover) tickLocked() {
 		t.stopLocked("waiting_hotspot", "")
 		return
 	}
+
+	// 透明代理礼让驻留期: 不反复每 10s 探测或强插 PREROUTING 1, 满 60s(或热点口/地址变化)再轻量复查
+	t.mu.Lock()
+	yielding := !cfg.ForceTakeover && t.state == "yield_tproxy" && now.Before(t.yieldUntil) && t.iface == iface && sameStrings(t.dst4, v4)
+	t.mu.Unlock()
+	if yielding {
+		return
+	}
+
 	listen := append([]string{v4[0]}, v6...)
 
 	// 1. 转发器: 监听地址变了就重开
@@ -1257,6 +1332,9 @@ func (t *dnsTakeover) tickLocked() {
 	t.mu.Unlock()
 
 	sig := strings.Join([]string{iface, listen[0], strings.Join(v4, ","), strings.Join(v6, ","), strconv.Itoa(t.port)}, "|")
+	if cfg.ForceTakeover {
+		sig += "|force"
+	}
 	if !active {
 		if perr != nil {
 			t.setState("error", "selftest: "+perr.Error())
@@ -1310,6 +1388,7 @@ func (t *dnsTakeover) tickLocked() {
 	}
 	t.mu.Lock()
 	t.healthy, t.state, t.lastErr = true, "active", ""
+	t.yieldTProxy, t.yieldNote, t.yieldUntil = false, "", time.Time{}
 	if !t.healthySince.IsZero() && now.Sub(t.healthySince) > 10*time.Minute {
 		t.backoff = dnsTKBackoffMin
 	}
@@ -1349,12 +1428,38 @@ func (t *dnsTakeover) lastErrSnapshot() string {
 }
 
 func (t *dnsTakeover) applyLocked(iface, listen4 string, v4, v6 []string, sig string, now time.Time) {
-	args := []string{"apply", iface, strconv.Itoa(t.port), listen4, strings.Join(v4, ",")}
+	t.mu.Lock()
+	force := t.cfg.ForceTakeover
+	t.mu.Unlock()
+	args := []string{"apply"}
+	if force {
+		args = append(args, "--force")
+	}
+	args = append(args, iface, strconv.Itoa(t.port), listen4, strings.Join(v4, ","))
 	if len(v6) > 0 {
 		args = append(args, strings.Join(v6, ","))
 	}
 	rc, out := t.runScript(args...)
 	last := lastLine(strings.TrimSpace(out))
+	if note, isYield := parseDNSTKYieldTProxy(last); isYield {
+		t.mu.Lock()
+		fwd := t.fwd
+		t.fwd, t.listen = nil, nil
+		t.active, t.healthy = false, false
+		t.state, t.lastErr = "yield_tproxy", ""
+		t.yieldTProxy, t.yieldNote = true, note
+		t.yieldUntil = now.Add(dnsTKYieldRecheck)
+		t.ruleSig, t.iface, t.dst4, t.dst6 = "", iface, v4, v6
+		t.v6Status, t.v6Reason = "untouched", note
+		t.havePrev = false
+		t.healthySince = time.Time{}
+		t.mu.Unlock()
+		if fwd != nil {
+			fwd.Close()
+		}
+		log.Printf("dns_takeover: yield to transparent proxy iface=%s (%s)", iface, last)
+		return
+	}
 	if rc != 0 || !strings.HasPrefix(last, "DNSTK=on") {
 		t.removeRulesLocked()
 		t.setState("error", "apply failed: "+last)
@@ -1377,6 +1482,7 @@ func (t *dnsTakeover) applyLocked(iface, listen4 string, v4, v6 []string, sig st
 	}
 	t.mu.Lock()
 	t.active, t.healthy, t.state, t.lastErr = true, true, "active", ""
+	t.yieldTProxy, t.yieldNote, t.yieldUntil = false, "", time.Time{}
 	t.ruleSig, t.iface, t.dst4, t.dst6 = sig, iface, v4, v6
 	t.v6Status, t.v6Reason = v6st, v6r
 	t.havePrev = false
@@ -1512,23 +1618,33 @@ func actionDNSTakeoverSet(s *server, p map[string]string) actionResp {
 		}
 		touched = true
 	}
+	if v, ok := p["force_takeover"]; ok {
+		b, valid := parseBoolParam(v)
+		if !valid {
+			return actionResp{OK: false, Error: "bad params", Detail: "force_takeover must be true|false"}
+		}
+		c.ForceTakeover, touched = b, true
+	}
 	if !touched {
-		return actionResp{OK: false, Error: "bad params", Detail: "nothing to set (enabled|block_mode|log_queries|log_redact|upstream)"}
+		return actionResp{OK: false, Error: "bad params", Detail: "nothing to set (enabled|block_mode|log_queries|log_redact|upstream|force_takeover)"}
 	}
 	c.Ts = time.Now().Unix()
 	b, _ := json.Marshal(c)
 	if err := discoverWriteAtomic(dnsTKPath(s.hncDir), b); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
-	// 用户主动操作: 清掉 fail-open 退避, 立刻重试
+	// 用户主动操作: 清掉 fail-open 退避与礼让冷却, 立刻重试
 	t.mu.Lock()
-	t.retryAt, t.backoff = time.Time{}, dnsTKBackoffMin
+	t.retryAt, t.yieldUntil, t.backoff = time.Time{}, time.Time{}, dnsTKBackoffMin
 	t.mu.Unlock()
 	t.tickLocked()
 	t.mu.Lock()
 	detail := "state=" + t.state
 	if t.upstream != "" {
 		detail += " upstream=" + t.upstream + "(" + t.upstreamKind + ")"
+	}
+	if t.yieldNote != "" {
+		detail += " note=" + t.yieldNote
 	}
 	if t.lastErr != "" {
 		detail += " error=" + t.lastErr
@@ -1558,7 +1674,8 @@ func (s *server) apiDNS(w http.ResponseWriter, r *http.Request) {
 		"upstream": t.upstream, "upstream_kind": t.upstreamKind,
 		"v6":         map[string]interface{}{"status": t.v6Status, "reason": t.v6Reason},
 		"block_mode": cfg.BlockMode, "log_queries": cfg.LogQueries, "log_redact": cfg.LogRedact,
-		"upstream_config": cfg.Upstream,
+		"upstream_config": cfg.Upstream, "force_takeover": cfg.ForceTakeover,
+		"yield_tproxy": t.yieldTProxy, "yield_reason": t.yieldNote, "status_note": t.yieldNote,
 		"failopen": map[string]interface{}{"count": t.foCount, "last_ts": t.foLast, "reason": t.foReason,
 			"retry_at": dnsUnixOrZero(t.retryAt)},
 		"last_error": t.lastErr, "last_check": t.lastCheck, "selftest_ms": t.selftestMS,

@@ -28,6 +28,7 @@
 
 #include <arpa/inet.h>
 #include <net/if.h>
+#include <sys/ioctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/syscall.h>
@@ -896,6 +897,76 @@ static void json_escape_str(const char *src, char *dst, size_t cap)
 
 /* ── Subcommands ─────────────────────────────────────────────────────── */
 
+#ifndef ARPHRD_ETHER
+#define ARPHRD_ETHER 1
+#endif
+
+static int verify_ether_iface(const char *iface)
+{
+    if (!iface || iface[0] == '\0' || iface[0] == '.' ||
+        strchr(iface, '/') != NULL || strstr(iface, "..") != NULL) {
+        LOGE("invalid iface name: %s", iface ? iface : "(null)");
+        return -1;
+    }
+
+    char path[128];
+    int n = snprintf(path, sizeof(path), "/sys/class/net/%s/type", iface);
+    if (n < 0 || (size_t)n >= sizeof(path)) {
+        LOGE("iface path too long: %s", iface);
+        return -1;
+    }
+
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) {
+        if (errno == EACCES || errno == EPERM) {
+            int sfd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+            if (sfd >= 0) {
+                struct ifreq ifr;
+                memset(&ifr, 0, sizeof(ifr));
+                snprintf(ifr.ifr_name, sizeof(ifr.ifr_name), "%.*s", IFNAMSIZ - 1, iface);
+                int irc = ioctl(sfd, SIOCGIFHWADDR, &ifr);
+                close(sfd);
+                if (irc == 0) {
+                    unsigned int hwtype = (unsigned int)(unsigned short)ifr.ifr_hwaddr.sa_family;
+                    if (hwtype != (unsigned int)ARPHRD_ETHER) {
+                        LOGE("iface %s rejected: link type=%u is not ARPHRD_ETHER (%d)",
+                             iface, hwtype, ARPHRD_ETHER);
+                        return -1;
+                    }
+                    return 0;
+                }
+            }
+        }
+        LOGE("open %s: %s", path, strerror(errno));
+        return -1;
+    }
+
+    char buf[32];
+    ssize_t r = read(fd, buf, sizeof(buf) - 1U);
+    close(fd);
+    if (r <= 0) {
+        LOGE("read %s failed", path);
+        return -1;
+    }
+    buf[r] = '\0';
+
+    char *endp = NULL;
+    errno = 0;
+    long arphrd = strtol(buf, &endp, 0);
+    if (errno != 0 || endp == buf) {
+        LOGE("parse %s failed", path);
+        return -1;
+    }
+    while (*endp && isspace((unsigned char)*endp))
+        endp++;
+    if (*endp != '\0' || arphrd != (long)ARPHRD_ETHER) {
+        LOGE("iface %s rejected: link type=%ld is not ARPHRD_ETHER (%d)",
+             iface, arphrd, ARPHRD_ETHER);
+        return -1;
+    }
+    return 0;
+}
+
 static int cmd_install(const char *iface, const char *obj)
 {
     unsigned ifindex = if_nametoindex(iface);
@@ -903,6 +974,9 @@ static int cmd_install(const char *iface, const char *obj)
         LOGE("iface %s not found", iface);
         return RC_IFACE;
     }
+    if (verify_ether_iface(iface) != 0)
+        return RC_IFACE;
+
     struct elf_ctx c;
     if (elf_load(&c, obj) < 0)
         return RC_BPF;
@@ -995,8 +1069,8 @@ static int cmd_install(const char *iface, const char *obj)
     int rc = clsact_qdisc_ensure(nlfd, ifindex);
     if (rc == 0) {
         int in_rc = bpf_filter_attach_dir(nlfd, ifindex, TC_H_INGRESS_PARENT, prog_in, HNC_PROG_NAME);
-        /* Attach optional egress filter as well so tether6 egress bypass stays guarded. */
-        if (prog_eg >= 0) {
+        /* Attach optional egress filter only when ingress filter attached cleanly. */
+        if (in_rc == 0 && prog_eg >= 0) {
             int eg_rc = bpf_filter_attach_dir(nlfd, ifindex, TC_H_EGRESS_PARENT, prog_eg, HNC_EGRESS_NAME);
             (void)eg_rc;
         }

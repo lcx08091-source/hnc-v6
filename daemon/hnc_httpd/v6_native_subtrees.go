@@ -702,10 +702,53 @@ func (s *server) PlanAppLimitSlotAssignments(midByMAC map[string]int) []V6AppLim
 // buildGetNeighIPv6DumpMsg 构造 RTM_GETNEIGH (AF_INET6, NLM_F_REQUEST|NLM_F_DUMP) 报文:
 // nlmsghdr(16B) + struct ndmsg(12B)。
 const (
-	rtnlNewNeigh uint16 = 28 // RTM_NEWNEIGH
-	rtnlGetNeigh uint16 = 30 // RTM_GETNEIGH
-	rtnlAfInet6  uint8  = 10 // AF_INET6
+	rtnlNewNeigh uint16 = 28   // RTM_NEWNEIGH
+	rtnlGetNeigh uint16 = 30   // RTM_GETNEIGH
+	rtnlAfInet6  uint8  = 10   // AF_INET6
+	ndaCacheInfo uint16 = 3    // NDA_CACHEINFO (struct nda_cacheinfo: confirmed/used/updated/refcnt u32)
+	nudProbe     uint16 = 0x10 // NUD_PROBE
+	nudPermanent uint16 = 0x80 // NUD_PERMANENT
 )
+
+type ipv6NeighCandidate struct {
+	ip           net.IP
+	ipStr        string
+	stateRank    int // 3=REACHABLE, 2=DELAY/PROBE/PERMANENT, 1=STALE
+	hasCacheInfo bool
+	confirmedAge uint32 // NDA_CACHEINFO.ndm_confirmed (ticks since last confirm, smaller = fresher)
+	updatedAge   uint32 // NDA_CACHEINFO.ndm_updated (ticks since last update, smaller = fresher)
+	orderIdx     int
+}
+
+func ipv6NeighStateRank(state uint16) int {
+	switch {
+	case (state & nudReachable) != 0:
+		return 3
+	case (state & (nudDelay | nudProbe | nudPermanent)) != 0:
+		return 2
+	case (state & nudStale) != 0:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func ipv6NeighCandidateBetter(a, b ipv6NeighCandidate) bool {
+	if a.stateRank != b.stateRank {
+		return a.stateRank > b.stateRank
+	}
+	if a.hasCacheInfo && b.hasCacheInfo {
+		if a.confirmedAge != b.confirmedAge {
+			return a.confirmedAge < b.confirmedAge
+		}
+		if a.updatedAge != b.updatedAge {
+			return a.updatedAge < b.updatedAge
+		}
+	} else if a.hasCacheInfo != b.hasCacheInfo {
+		return a.hasCacheInfo
+	}
+	return a.orderIdx < b.orderIdx
+}
 
 func buildGetNeighIPv6DumpMsg(seq uint32) []byte {
 	const ndmsgLen = 12
@@ -719,20 +762,22 @@ func buildGetNeighIPv6DumpMsg(seq uint32) []byte {
 	return buf
 }
 
-// parseIPv6NeighDumpMsgs 纯字节流解析 RTM_NEWNEIGH dump 响应报文, 按小写 MAC 聚合可用全局 IPv6 地址。
-func parseIPv6NeighDumpMsgs(b []byte, allowedIfindexes map[int]bool) (map[string][]net.IP, bool, error) {
-	byMAC := make(map[string][]net.IP)
-	seen := make(map[string]bool)
-
+func parseIPv6NeighDumpChunkCandidates(
+	b []byte,
+	allowedIfindexes map[int]bool,
+	byMAC map[string]map[string]ipv6NeighCandidate,
+	orderCounter *int,
+) (bool, error) {
+	const ndmsgLen = 12
 	for off := 0; off < len(b); {
 		rem := len(b) - off
 		if rem < rtnlMsgHdrLen {
-			return byMAC, false, errors.New("rtnl neigh dump: truncated nlmsghdr")
+			return false, errors.New("rtnl neigh dump: truncated nlmsghdr")
 		}
 		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
 		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
 		if msgLen < rtnlMsgHdrLen || msgLen > rem {
-			return byMAC, false, fmt.Errorf("rtnl neigh dump: bad nlmsg_len %d", msgLen)
+			return false, fmt.Errorf("rtnl neigh dump: bad nlmsg_len %d", msgLen)
 		}
 		msg := b[off : off+msgLen]
 		adv := rtnlAlign(msgLen)
@@ -744,42 +789,210 @@ func parseIPv6NeighDumpMsgs(b []byte, allowedIfindexes map[int]bool) (map[string
 
 		switch msgType {
 		case rtnlMsgDone:
-			return byMAC, true, nil
+			return true, nil
 		case rtnlMsgError:
 			if len(msg) < rtnlMsgHdrLen+4 {
-				return byMAC, false, errors.New("rtnl neigh dump: truncated nlmsgerr")
+				return false, errors.New("rtnl neigh dump: truncated nlmsgerr")
 			}
 			code := int32(binary.LittleEndian.Uint32(msg[rtnlMsgHdrLen : rtnlMsgHdrLen+4]))
 			if code != 0 {
-				return byMAC, false, fmt.Errorf("rtnl neigh dump errno %d", code)
+				return false, fmt.Errorf("rtnl neigh dump errno %d", code)
 			}
 			continue
 		case rtnlMsgNoop:
 			continue
 		}
 
-		ev, ok := parseNeighMsg(msgType, msg[rtnlMsgHdrLen:])
-		if !ok || !neighUsable(ev) {
+		if msgType != rtnlNewNeigh || len(msg) < rtnlMsgHdrLen+ndmsgLen {
 			continue
 		}
-		if len(allowedIfindexes) > 0 && !allowedIfindexes[ev.Ifindex] {
+		body := msg[rtnlMsgHdrLen:]
+		if body[0] != rtnlAfInet6 {
 			continue
 		}
-		mac := strings.ToLower(strings.TrimSpace(ev.MAC))
-		ipStr := ev.IP.String()
-		dedupKey := mac + "|" + ipStr
-		if seen[dedupKey] || len(byMAC[mac]) >= v6IPv6MaxAddrs {
+		ifidx := int(int32(binary.LittleEndian.Uint32(body[4:8])))
+		if len(allowedIfindexes) > 0 && !allowedIfindexes[ifidx] {
 			continue
 		}
-		seen[dedupKey] = true
-		byMAC[mac] = append(byMAC[mac], ev.IP)
+		state := binary.LittleEndian.Uint16(body[8:10])
+		rank := ipv6NeighStateRank(state)
+		if rank <= 0 {
+			continue
+		}
+
+		var (
+			ip           net.IP
+			mac          string
+			hasCacheInfo bool
+			confirmedAge uint32
+			updatedAge   uint32
+		)
+		attrs := body[ndmsgLen:]
+		for aoff := 0; aoff < len(attrs); {
+			arem := len(attrs) - aoff
+			if arem < rtnlAttrHdr {
+				break
+			}
+			alen := int(binary.LittleEndian.Uint16(attrs[aoff : aoff+2]))
+			atype := binary.LittleEndian.Uint16(attrs[aoff+2:aoff+4]) & 0x3fff
+			if alen < rtnlAttrHdr || alen > arem {
+				break
+			}
+			aval := attrs[aoff+4 : aoff+alen]
+			switch {
+			case atype == ndaDst && len(aval) == 16:
+				ip = net.IP(append([]byte(nil), aval...))
+			case atype == ndaLLAddr && len(aval) == 6:
+				mac = strings.ToLower(net.HardwareAddr(aval).String())
+			case atype == ndaCacheInfo && len(aval) >= 12:
+				confirmedAge = binary.LittleEndian.Uint32(aval[0:4])
+				updatedAge = binary.LittleEndian.Uint32(aval[8:12])
+				hasCacheInfo = true
+			}
+			nadv := rtnlAlign(alen)
+			if nadv > arem {
+				break
+			}
+			aoff += nadv
+		}
+
+		if mac == "" || ip == nil || ip.To4() != nil ||
+			ip.IsLinkLocalUnicast() || ip.IsMulticast() || ip.IsUnspecified() || ip.IsLoopback() {
+			continue
+		}
+		ipStr := ip.String()
+		idxVal := 0
+		if orderCounter != nil {
+			idxVal = *orderCounter
+			*orderCounter++
+		}
+		cand := ipv6NeighCandidate{
+			ip:           ip,
+			ipStr:        ipStr,
+			stateRank:    rank,
+			hasCacheInfo: hasCacheInfo,
+			confirmedAge: confirmedAge,
+			updatedAge:   updatedAge,
+			orderIdx:     idxVal,
+		}
+		mMap := byMAC[mac]
+		if mMap == nil {
+			mMap = make(map[string]ipv6NeighCandidate, 4)
+			byMAC[mac] = mMap
+		}
+		if prev, exists := mMap[ipStr]; !exists || ipv6NeighCandidateBetter(cand, prev) {
+			if exists || len(mMap) < 4096 {
+				mMap[ipStr] = cand
+			}
+		}
 	}
-	return byMAC, false, nil
+	return false, nil
+}
+
+func rankAndCapIPv6Neighbors(byMAC map[string]map[string]ipv6NeighCandidate, maxPerMAC int) map[string][]net.IP {
+	out := make(map[string][]net.IP, len(byMAC))
+	for mac, mMap := range byMAC {
+		if len(mMap) == 0 {
+			continue
+		}
+		cands := make([]ipv6NeighCandidate, 0, len(mMap))
+		for _, c := range mMap {
+			cands = append(cands, c)
+		}
+		sort.Slice(cands, func(i, j int) bool {
+			return ipv6NeighCandidateBetter(cands[i], cands[j])
+		})
+		limit := len(cands)
+		if maxPerMAC > 0 && limit > maxPerMAC {
+			limit = maxPerMAC
+		}
+		ips := make([]net.IP, 0, limit)
+		for i := 0; i < limit; i++ {
+			ips = append(ips, cands[i].ip)
+		}
+		out[mac] = ips
+	}
+	return out
+}
+
+// parseIPv6NeighDumpMsgs 纯字节流解析 RTM_NEWNEIGH dump 响应报文:
+// 收集全部全局 IPv6 邻居后按状态优先级(REACHABLE > DELAY/PROBE/PERMANENT > STALE)与确认时间排序再截断前 16 条。
+func parseIPv6NeighDumpMsgs(b []byte, allowedIfindexes map[int]bool) (map[string][]net.IP, bool, error) {
+	allCands := make(map[string]map[string]ipv6NeighCandidate)
+	orderCounter := 0
+	done, err := parseIPv6NeighDumpChunkCandidates(b, allowedIfindexes, allCands, &orderCounter)
+	return rankAndCapIPv6Neighbors(allCands, v6IPv6MaxAddrs), done, err
+}
+
+// acquireV6SyncLock 获取与 ./bin/v6_sync.sh 完全兼容的 <hncDir>/run/v6_sync.lock 目录锁(含 <lock>/pid 死进程回收),
+// 杜绝 Go 原生 IPv6 u32 同步与 watchdog/事件脚本并发交错操作同一 prio 段。
+var v6SyncLocalMu sync.Mutex
+
+func acquireV6SyncLock(hncDir string) (func(), error) {
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		return func() {}, nil
+	}
+	v6SyncLocalMu.Lock()
+	runDir := filepath.Join(hncDir, "run")
+	if err := os.MkdirAll(runDir, 0o755); err != nil {
+		v6SyncLocalMu.Unlock()
+		return nil, err
+	}
+	lockDir := filepath.Join(runDir, "v6_sync.lock")
+	pidPath := filepath.Join(lockDir, "pid")
+	selfPID := os.Getpid()
+	selfPIDStr := strconv.Itoa(selfPID)
+
+	for round := 0; round < 120; round++ {
+		if err := os.Mkdir(lockDir, 0o755); err == nil {
+			_ = os.WriteFile(pidPath, []byte(selfPIDStr+"\n"), 0o644)
+			var once sync.Once
+			return func() {
+				once.Do(func() {
+					if b, rErr := os.ReadFile(pidPath); rErr == nil {
+						if holder := strings.TrimSpace(string(b)); holder == "" || holder == selfPIDStr {
+							_ = os.RemoveAll(lockDir)
+						}
+					} else {
+						_ = os.RemoveAll(lockDir)
+					}
+					v6SyncLocalMu.Unlock()
+				})
+			}, nil
+		}
+		if b, rErr := os.ReadFile(pidPath); rErr == nil {
+			if pid, pErr := strconv.Atoi(strings.TrimSpace(string(b))); pErr == nil && pid > 0 && !dpPidAlive(pid) {
+				_ = os.RemoveAll(lockDir)
+				continue
+			}
+		} else if st, sErr := os.Stat(lockDir); sErr == nil && time.Since(st.ModTime()) >= 5*time.Second {
+			_ = os.RemoveAll(lockDir)
+			continue
+		}
+		if st, sErr := os.Stat(lockDir); sErr == nil && time.Since(st.ModTime()) >= 60*time.Second {
+			_ = os.RemoveAll(lockDir)
+			continue
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	v6SyncLocalMu.Unlock()
+	return nil, errors.New("v6_sync.lock busy timeout")
 }
 
 // DumpNativeIPv6Neighbors 通过原生 AF_NETLINK RTM_GETNEIGH 读取指定下游接口上的活跃全局 IPv6 邻居映射。
 func DumpNativeIPv6Neighbors(allowedIfindexes map[int]bool) (map[string][]net.IP, error) {
 	return dumpNativeIPv6NeighborsOS(allowedIfindexes)
+}
+
+// NativeSyncIPv6FiltersWithDirV6 在持有 run/v6_sync.lock 互斥锁保护下同步受控设备的 128-bit IPv6 u32 过滤器。
+func NativeSyncIPv6FiltersWithDirV6(hncDir string, downIfindexes []int, ifbIfindex int, midByMAC map[string]int, upLimitedMAC map[string]bool) (int, error) {
+	unlock, err := acquireV6SyncLock(hncDir)
+	if err != nil {
+		return 0, err
+	}
+	defer unlock()
+	return NativeSyncIPv6FiltersV6(downIfindexes, ifbIfindex, midByMAC, upLimitedMAC)
 }
 
 // NativeSyncIPv6FiltersV6 在所有并管下游接口与上行 ifb0 上原生同步受控设备的 128-bit IPv6 u32 过滤器。
@@ -820,12 +1033,12 @@ func NativeSyncIPv6FiltersV6(downIfindexes []int, ifbIfindex int, midByMAC map[s
 
 		for _, downIdx := range downIfindexes {
 			delSeq := rtnlNextSeq()
-			_ = rtnlSendAndWaitAck(fd, buildDelFilterMsg(delSeq, downIdx, rtnlHtbRootMaj, 0, prio, rtnlEthPIPv6, ""), delSeq)
+			_ = nlBatchSendAckFn(fd, buildDelFilterMsg(delSeq, downIdx, rtnlHtbRootMaj, 0, prio, rtnlEthPIPv6, ""), delSeq)
 			for _, ip6 := range ips {
 				seq := rtnlNextSeq()
 				msg, bErr := BuildU32IPv6FilterMsg(seq, downIdx, rtnlHtbRootMaj, prio, ip6, false, clsHandle)
 				if bErr == nil {
-					if rtnlSendAndWaitAck(fd, msg, seq) == nil {
+					if nlBatchSendAckFn(fd, msg, seq) == nil {
 						totalSynced++
 					}
 				}
@@ -833,12 +1046,12 @@ func NativeSyncIPv6FiltersV6(downIfindexes []int, ifbIfindex int, midByMAC map[s
 		}
 		if ifbIfindex > 0 && upLimitedMAC[strings.ToLower(mac)] {
 			delSeq := rtnlNextSeq()
-			_ = rtnlSendAndWaitAck(fd, buildDelFilterMsg(delSeq, ifbIfindex, rtnlHtbRootMaj, 0, prio, rtnlEthPIPv6, ""), delSeq)
+			_ = nlBatchSendAckFn(fd, buildDelFilterMsg(delSeq, ifbIfindex, rtnlHtbRootMaj, 0, prio, rtnlEthPIPv6, ""), delSeq)
 			for _, ip6 := range ips {
 				seq := rtnlNextSeq()
 				msg, bErr := BuildU32IPv6FilterMsg(seq, ifbIfindex, rtnlHtbRootMaj, prio, ip6, true, clsHandle)
 				if bErr == nil {
-					_ = rtnlSendAndWaitAck(fd, msg, seq)
+					_ = nlBatchSendAckFn(fd, msg, seq)
 				}
 			}
 		}
@@ -849,22 +1062,7 @@ func NativeSyncIPv6FiltersV6(downIfindexes []int, ifbIfindex int, midByMAC map[s
 // ── 6. 开机冷启全量原生恢复 NativeFullRestoreV6 (<25ms 替代 18+ 次 shell 拉起) ──
 
 func sendNetlinkBatchBestEffort(fd int, msgs [][]byte) (sent int, hardErr error) {
-	for idx, m := range msgs {
-		seq := binary.LittleEndian.Uint32(m[8:12])
-		msgType := binary.LittleEndian.Uint16(m[4:6])
-		err := rtnlSendAndWaitAck(fd, m, seq)
-		if err == nil {
-			sent++
-			continue
-		}
-		if (msgType == rtnlDelTFilter || msgType == rtnlDelTClass || msgType == rtnlDelQdisc) && isIgnorableDelErr(err) {
-			continue
-		}
-		if idx == 0 && msgType == rtnlNewTClass {
-			return sent, err
-		}
-	}
-	return sent, nil
+	return nlSendBatchWithCompatFallback(fd, msgs, true)
 }
 
 // CurrentDynamicQoSRatios 从 autorate 与黑匣子实时读取当前 RTT/抖动并平滑计算最新三档比例。
@@ -881,6 +1079,288 @@ func (s *server) CurrentDynamicQoSRatios() QoSDynamicRatios {
 	}
 	ratios, _ := globalV6Subtrees.SmoothStepDynamicQoS(jitterMs, deltaRTTMs)
 	return ratios
+}
+
+var (
+	v6ResolveIfaceIndexFn  = nlIfaceIndexByName
+	v6DumpIPv6NeighborsFn  = DumpNativeIPv6Neighbors
+	v6EnsureBaseHooksFn    = ensureFirewallBaseHooksLinked
+	v6ResolveRestoreBinFn  = resolveIptablesRestoreBin
+	v6TriggerAppQoSFn      = defaultTriggerAppQoSScript
+	v6AppQoSSyncInFlight   atomic.Bool
+)
+
+func subtreeDeviceNeedsMark(hncDir, mac string, mid int, dm map[string]any) bool {
+	if mid < 1 || mid > 99 {
+		return false
+	}
+	if anyToRuleBool(dm["limit_enabled"]) || anyToRuleBool(dm["delay_enabled"]) ||
+		anyToRuleBool(dm["sqm_enabled"]) || anyToRuleBool(dm["app_qos"]) {
+		return true
+	}
+	for _, f := range []string{"down_mbps", "up_mbps", "delay_ms", "jitter_ms", "loss_pct"} {
+		if numFieldGT0(dm[f]) {
+			return true
+		}
+	}
+	return deviceHasSecondaryQdiscOwner(hncDir, "", mac, mid, dm)
+}
+
+// BuildFirewallPayloads 从 rules.json 快照(root)与在线 IPv4 映射(liveIPv4)全量构造设备级
+// 双栈 iptables-restore / ip6tables-restore --noflush 载荷(:HNC_MARK - [0:0] 与 :HNC_CTRL - [0:0])。
+func BuildFirewallPayloads(hncDir string, root map[string]any, liveIPv4 map[string]string, rejectDropFallback bool) ([]byte, []byte) {
+	if root == nil && hncDir != "" {
+		root, _ = rulesStore.ReadAll(hncDir)
+	}
+	if liveIPv4 == nil && hncDir != "" {
+		liveIPv4 = readLiveDeviceIPv4Map(hncDir)
+	}
+
+	type devEntry struct {
+		mac  string
+		ipv4 string
+		mid  int
+	}
+	markedByMAC := make(map[string]devEntry)
+	devIPByMAC := make(map[string]string)
+	if devs, ok := root["devices"].(map[string]any); ok {
+		for rawMAC, rawObj := range devs {
+			mac := strings.ToLower(strings.TrimSpace(rawMAC))
+			dm, ok := rawObj.(map[string]any)
+			if !ok || !macRE.MatchString(mac) {
+				continue
+			}
+			ip := strings.TrimSpace(liveIPv4[mac])
+			if !validStrictIPv4(ip) {
+				if sIP := strings.TrimSpace(anyToRuleString(dm["ip"])); validStrictIPv4(sIP) {
+					ip = sIP
+				} else {
+					ip = ""
+				}
+			}
+			if ip != "" {
+				devIPByMAC[mac] = ip
+			}
+			mid := anyToRuleInt(dm["mark_id"])
+			if subtreeDeviceNeedsMark(hncDir, mac, mid, dm) {
+				markedByMAC[mac] = devEntry{mac: mac, ipv4: ip, mid: mid}
+			}
+		}
+	}
+
+	blockedByMAC := make(map[string]string)
+	addBlocked := func(raw string) {
+		mac := strings.ToLower(strings.TrimSpace(raw))
+		if !macRE.MatchString(mac) {
+			return
+		}
+		ip := strings.TrimSpace(liveIPv4[mac])
+		if !validStrictIPv4(ip) {
+			ip = devIPByMAC[mac]
+		}
+		blockedByMAC[mac] = ip
+	}
+	switch bl := root["blacklist"].(type) {
+	case []any:
+		for _, v := range bl {
+			addBlocked(anyToRuleString(v))
+		}
+	case []string:
+		for _, v := range bl {
+			addBlocked(v)
+		}
+	}
+
+	markedList := make([]devEntry, 0, len(markedByMAC))
+	for _, d := range markedByMAC {
+		markedList = append(markedList, d)
+	}
+	sort.Slice(markedList, func(i, j int) bool { return markedList[i].mac < markedList[j].mac })
+
+	blockedList := make([]devEntry, 0, len(blockedByMAC))
+	for mac, ip := range blockedByMAC {
+		blockedList = append(blockedList, devEntry{mac: mac, ipv4: ip})
+	}
+	sort.Slice(blockedList, func(i, j int) bool { return blockedList[i].mac < blockedList[j].mac })
+
+	var v4, v6 bytes.Buffer
+	v4.WriteString("*mangle\n:HNC_MARK - [0:0]\n")
+	v6.WriteString("*mangle\n:HNC_MARK - [0:0]\n")
+	for _, d := range markedList {
+		markVal, markMask := readDeviceMarkSpec(hncDir, d.mid)
+		xmark := fmt.Sprintf("0x%08x/0x%08x", markVal, markMask)
+		zeroMatch := fmt.Sprintf("0x0/0x%08x", markMask)
+		if d.ipv4 != "" {
+			fmt.Fprintf(&v4, "-A HNC_MARK -s %s/32 -m mac --mac-source %s -j MARK --set-xmark %s\n", d.ipv4, d.mac, xmark)
+		}
+		fmt.Fprintf(&v4, "-A HNC_MARK -m mac --mac-source %s -m mark --mark %s -j MARK --set-xmark %s\n", d.mac, zeroMatch, xmark)
+		if d.ipv4 != "" {
+			fmt.Fprintf(&v4, "-A HNC_MARK -d %s/32 -j MARK --set-xmark %s\n", d.ipv4, xmark)
+		}
+		fmt.Fprintf(&v6, "-A HNC_MARK -m mac --mac-source %s -m mark --mark %s -j MARK --set-xmark %s\n", d.mac, zeroMatch, xmark)
+	}
+	v4.WriteString("COMMIT\n")
+	v6.WriteString("COMMIT\n")
+
+	v4.WriteString("*filter\n:HNC_CTRL - [0:0]\n")
+	v6.WriteString("*filter\n:HNC_CTRL - [0:0]\n")
+	for _, b := range blockedList {
+		if rejectDropFallback {
+			fmt.Fprintf(&v4, "-A HNC_CTRL -m mac --mac-source %s -p tcp -j DROP\n", b.mac)
+			fmt.Fprintf(&v6, "-A HNC_CTRL -m mac --mac-source %s -p tcp -j DROP\n", b.mac)
+		} else {
+			fmt.Fprintf(&v4, "-A HNC_CTRL -m mac --mac-source %s -p tcp -j REJECT --reject-with tcp-reset\n", b.mac)
+			fmt.Fprintf(&v6, "-A HNC_CTRL -m mac --mac-source %s -p tcp -j REJECT --reject-with tcp-reset\n", b.mac)
+		}
+		fmt.Fprintf(&v4, "-A HNC_CTRL -m mac --mac-source %s -p udp --dport 443 -j DROP\n", b.mac)
+		fmt.Fprintf(&v4, "-A HNC_CTRL -m mac --mac-source %s -j DROP\n", b.mac)
+		if b.ipv4 != "" {
+			fmt.Fprintf(&v4, "-A HNC_CTRL -s %s/32 -j DROP\n", b.ipv4)
+			fmt.Fprintf(&v4, "-A HNC_CTRL -d %s/32 -j DROP\n", b.ipv4)
+		}
+		fmt.Fprintf(&v6, "-A HNC_CTRL -m mac --mac-source %s -p udp --dport 443 -j DROP\n", b.mac)
+		fmt.Fprintf(&v6, "-A HNC_CTRL -m mac --mac-source %s -j DROP\n", b.mac)
+	}
+	v4.WriteString("COMMIT\n")
+	v6.WriteString("COMMIT\n")
+
+	return v4.Bytes(), v6.Bytes()
+}
+
+func classifyAppQoSTierForPlan(category string) int {
+	c := strings.ToLower(strings.TrimSpace(category))
+	switch {
+	case c == "":
+		return 2
+	case strings.HasPrefix(c, "game"), strings.Contains(c, "voip"), c == "call", strings.HasPrefix(c, "sdk-tencent-game"):
+		return 1
+	case c == "download", c == "cloud", c == "update", strings.HasPrefix(c, "p2p"),
+		c == "system", strings.HasPrefix(c, "system-"), strings.HasPrefix(c, "system_"),
+		strings.Contains(c, "telemetry"), c == "ads", c == "ad-sdk", strings.HasPrefix(c, "sdk"):
+		return 3
+	default:
+		return 2
+	}
+}
+
+func writeNativeRestoreAppQoSPlan(hncDir, iface string, root map[string]any, liveIPv4 map[string]string) {
+	iface = strings.TrimSpace(iface)
+	if hncDir == "" || iface == "" || !ifaceNameOK(iface) {
+		return
+	}
+	type qosDev struct {
+		mid int
+		mac string
+		ip  string
+	}
+	var ds []qosDev
+	seenMid := map[int]bool{}
+	if devs, ok := root["devices"].(map[string]any); ok {
+		for rawMAC, rawObj := range devs {
+			mac := strings.ToLower(strings.TrimSpace(rawMAC))
+			dm, ok := rawObj.(map[string]any)
+			if !ok || !macRE.MatchString(mac) || !anyToRuleBool(dm["app_qos"]) || deviceHasDelayOwner(dm) {
+				continue
+			}
+			mid := anyToRuleInt(dm["mark_id"])
+			if mid < 1 || mid > 99 || seenMid[mid] {
+				continue
+			}
+			seenMid[mid] = true
+			ip := strings.TrimSpace(liveIPv4[mac])
+			if !validStrictIPv4(ip) {
+				if sIP := strings.TrimSpace(anyToRuleString(dm["ip"])); validStrictIPv4(sIP) {
+					ip = sIP
+				} else {
+					ip = ""
+				}
+			}
+			ds = append(ds, qosDev{mid: mid, mac: mac, ip: ip})
+		}
+	}
+	if len(ds) == 0 {
+		return
+	}
+	sort.Slice(ds, func(i, j int) bool { return ds[i].mid < ds[j].mid })
+
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "iface %s\n", iface)
+	for _, d := range ds {
+		if d.ip != "" {
+			fmt.Fprintf(&sb, "dev %d %s %s\n", d.mid, d.mac, d.ip)
+		} else {
+			fmt.Fprintf(&sb, "dev %d %s\n", d.mid, d.mac)
+		}
+	}
+
+	if ipMapRaw, err := os.ReadFile(filepath.Join(hncDir, "run", "ip_app_map.json")); err == nil {
+		var doc struct {
+			Entries []struct {
+				IP       string `json:"ip"`
+				Category string `json:"category"`
+			} `json:"entries"`
+		}
+		if json.Unmarshal(ipMapRaw, &doc) == nil {
+			type ipTier struct {
+				ip   string
+				tier int
+			}
+			var v4s, v6s []ipTier
+			seen := map[string]bool{}
+			for _, e := range doc.Entries {
+				tier := classifyAppQoSTierForPlan(e.Category)
+				if tier == 2 {
+					continue
+				}
+				nip := net.ParseIP(strings.TrimSpace(e.IP))
+				if nip == nil || nip.IsLoopback() || nip.IsLinkLocalUnicast() || nip.IsMulticast() || nip.IsUnspecified() {
+					continue
+				}
+				canon := nip.String()
+				if seen[canon] {
+					continue
+				}
+				seen[canon] = true
+				if nip.To4() != nil {
+					v4s = append(v4s, ipTier{ip: canon, tier: tier})
+				} else {
+					v6s = append(v6s, ipTier{ip: canon, tier: tier})
+				}
+			}
+			sort.Slice(v4s, func(i, j int) bool { return v4s[i].ip < v4s[j].ip })
+			sort.Slice(v6s, func(i, j int) bool { return v6s[i].ip < v6s[j].ip })
+			if len(v4s) > 1000 {
+				v4s = v4s[:1000]
+			}
+			if len(v6s) > 1000 {
+				v6s = v6s[:1000]
+			}
+			for _, it := range v4s {
+				fmt.Fprintf(&sb, "ip %d %s\n", it.tier, it.ip)
+			}
+			for _, it := range v6s {
+				fmt.Fprintf(&sb, "ip %d %s\n", it.tier, it.ip)
+			}
+		}
+	}
+	_ = discoverWriteAtomic(filepath.Join(hncDir, "run", "app_qos.plan"), []byte(sb.String()))
+}
+
+func defaultTriggerAppQoSScript(hncDir string) {
+	if hncDir == "" {
+		return
+	}
+	scriptPath := filepath.Join(hncDir, "bin", "apply_app_qos.sh")
+	if st, err := os.Stat(scriptPath); err != nil || st.IsDir() {
+		return
+	}
+	if !v6AppQoSSyncInFlight.CompareAndSwap(false, true) {
+		return
+	}
+	go func(dir string) {
+		defer v6AppQoSSyncInFlight.Store(false)
+		_, _ = runBin(dir, "apply_app_qos.sh")
+	}(hncDir)
 }
 
 // NativeFullRestoreV6 执行全量 Go 原生数据面冷启/热恢复:
@@ -923,7 +1403,7 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 			downIfindexes = append(downIfindexes, ds.Ifindex)
 		}
 	}
-	ifbIdx, _ := nlIfaceIndexByName("ifb0")
+	ifbIdx, _ := v6ResolveIfaceIndexFn("ifb0")
 
 	// 2. 读取 rules.json 与在线 IP 表
 	root, err := rulesStore.ReadAll(s.hncDir)
@@ -1001,9 +1481,76 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 
 	// 3. 若处于原生数据面环境且存在活跃下游口, 下发全部 HTB 设备类、二级子树与双栈防火墙
 	if useNativeDataplane(s.hncDir) && len(downIfindexes) > 0 {
+		allowIfidx := make(map[int]bool, len(downIfindexes))
+		for _, idx := range downIfindexes {
+			if idx > 0 {
+				allowIfidx[idx] = true
+			}
+		}
+		var devIPv6ByMAC map[string][]string
+		if neighByMAC, nErr := v6DumpIPv6NeighborsFn(allowIfidx); nErr == nil && len(neighByMAC) > 0 {
+			devIPv6ByMAC = make(map[string][]string, len(neighByMAC))
+			for mac, ips := range neighByMAC {
+				macKey := strings.ToLower(strings.TrimSpace(mac))
+				for _, ip6 := range ips {
+					if ip6 != nil && ip6.To4() == nil {
+						devIPv6ByMAC[macKey] = append(devIPv6ByMAC[macKey], ip6.String())
+					}
+				}
+			}
+		}
+
+		// 同步设备级双栈 HNC_MARK / HNC_CTRL 防火墙规则
+		if v6EnsureBaseHooksFn() {
+			v4DevFW, v6DevFW := BuildFirewallPayloads(s.hncDir, root, liveIPv4, false)
+			if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
+				mangleOK, filterOK, anyOK, _ := pipeRestoreTablesIsolated(v4Bin, v4DevFW)
+				if !anyOK {
+					v4Drop, v6Drop := BuildFirewallPayloads(s.hncDir, root, liveIPv4, true)
+					if mOK, fOK, dOK, _ := pipeRestoreTablesIsolated(v4Bin, v4Drop); mOK || fOK || dOK {
+						anyOK = true
+						v6DevFW = v6Drop
+					}
+				} else if mangleOK || filterOK {
+					anyOK = true
+				}
+				if anyOK {
+					rep.FirewallUpdated = true
+					iptBin := v6ResolveRestoreBinFn("iptables")
+					for _, ds := range devSpecs {
+						if validStrictIPv4(ds.ipv4) {
+							ensureNativeIPv4StatsRule(iptBin, ds.ipv4)
+						}
+					}
+				}
+			}
+			if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
+				if mOK, fOK, v6OK, _ := pipeRestoreTablesIsolated(v6Bin, v6DevFW); mOK || fOK || v6OK {
+					rep.FirewallUpdated = true
+				} else {
+					_, v6Drop := BuildFirewallPayloads(s.hncDir, root, liveIPv4, true)
+					if m2, f2, d2, _ := pipeRestoreTablesIsolated(v6Bin, v6Drop); m2 || f2 || d2 {
+						rep.FirewallUpdated = true
+					}
+				}
+			}
+		}
+
 		fd, sErr := openRTNetlinkSocket()
 		if sErr != nil {
 			rep.Warnings = append(rep.Warnings, sErr.Error())
+			for _, ds := range devSpecs {
+				if ds.upBps > 0 && ifbIdx <= 0 {
+					markVal, markMask := readDeviceMarkSpec(s.hncDir, ds.mid)
+					for _, downName := range rep.DownstreamIfaces {
+						_ = applyNativeIngressPolice(s.hncDir, downName, ds.mid, ds.mac, ds.ipv4, ds.upBps, markVal, markMask)
+					}
+				}
+				if ds.appQoSOn {
+					rep.AppQoSDevices++
+				}
+				rep.DevicesRestored++
+			}
 		} else {
 			defer closeRTNetlinkSocket(fd)
 			tick := readPschedTickInUsec()
@@ -1037,6 +1584,21 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 				}
 				if ds.upBps > 0 && ifbIdx > 0 {
 					_ = nlUpsertDeviceHTB(ifbIdx, minor, ds.upBps, ds.upBps, 0, 0, 0, markVal, markMask, ds.ipv4, true)
+				} else if ds.upBps > 0 {
+					// GKI 6.1/6.6/6.12 无 CONFIG_IFB 场景: 全量恢复时补齐双栈入口 ingress police 上行限速
+					for _, downName := range rep.DownstreamIfaces {
+						if pErr := applyNativeIngressPolice(s.hncDir, downName, ds.mid, ds.mac, ds.ipv4, ds.upBps, markVal, markMask); pErr != nil {
+							upKbit := (ds.upBps * 8) / 1000
+							if upKbit < 64 {
+								upKbit = 64
+							}
+							if _, stErr := os.Stat(filepath.Join(s.hncDir, "bin", "tc_manager.sh")); stErr == nil {
+								_, _ = runBin(s.hncDir, "tc_manager.sh", "set_uplink_police", downName, classIDStringForMid(ds.mid), strconv.FormatUint(upKbit, 10)+"kbit", ds.ipv4, ds.mac)
+							} else {
+								rep.Warnings = append(rep.Warnings, fmt.Sprintf("ingress police (%s/%s): %v", downName, ds.mac, pErr))
+							}
+						}
+					}
 				}
 				if ds.appQoSOn {
 					rep.AppQoSDevices++
@@ -1065,32 +1627,33 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 			}
 		}
 
-		// 同步应用限速双栈防火墙链及顶层挂载跳转 (mangle/FORWARD, filter/FORWARD, mangle/POSTROUTING before HNC_SAVE)
+		// 同步应用限速双栈防火墙链及顶层挂载跳转 (分表容错提交 + 缺 REJECT 自动降级 -j DROP, 严防连坐回滚 *mangle 打标)
 		if len(assignments) > 0 {
-			v4App, v6App := BuildAppLimitFirewallPayloads(assignments, liveIPv4, nil)
+			v4App, v6App := BuildAppLimitFirewallPayloads(assignments, liveIPv4, devIPv6ByMAC)
 			v4Restored := false
-			if v4Bin := resolveIptablesRestoreBin("iptables-restore"); v4Bin != "" {
-				if pipeIptablesRestore(v4Bin, v4App) == nil {
+			if v4Bin := v6ResolveRestoreBinFn("iptables-restore"); v4Bin != "" {
+				if mangleOK, _, anyOK, _ := pipeRestoreTablesIsolated(v4Bin, v4App); mangleOK || anyOK {
 					rep.FirewallUpdated = true
 					v4Restored = true
 				}
 			}
 			v6Restored := false
-			if v6Bin := resolveIptablesRestoreBin("ip6tables-restore"); v6Bin != "" {
-				if pipeIptablesRestore(v6Bin, v6App) == nil {
+			if v6Bin := v6ResolveRestoreBinFn("ip6tables-restore"); v6Bin != "" {
+				if mangleOK, _, anyOK, _ := pipeRestoreTablesIsolated(v6Bin, v6App); mangleOK || anyOK {
+					rep.FirewallUpdated = true
 					v6Restored = true
 				}
 			}
-			if v4Restored || resolveIptablesRestoreBin("iptables-restore") == "" {
-				ensureAppLimitTopHooksOnBin(resolveIptablesRestoreBin("iptables"))
+			if v4Restored || v6ResolveRestoreBinFn("iptables-restore") == "" {
+				ensureAppLimitTopHooksOnBin(v6ResolveRestoreBinFn("iptables"))
 			}
-			if v6Restored || resolveIptablesRestoreBin("ip6tables-restore") == "" {
-				ensureAppLimitTopHooksOnBin(resolveIptablesRestoreBin("ip6tables"))
+			if v6Restored || v6ResolveRestoreBinFn("ip6tables-restore") == "" {
+				ensureAppLimitTopHooksOnBin(v6ResolveRestoreBinFn("ip6tables"))
 			}
 		}
 
-		// 同步原生 IPv6 邻居过滤器
-		if synced, nErr := NativeSyncIPv6FiltersV6(downIfindexes, ifbIdx, midByMAC, upLimitedMAC); nErr == nil {
+		// 同步原生 IPv6 邻居过滤器 (持 run/v6_sync.lock 防与脚本竞态)
+		if synced, nErr := NativeSyncIPv6FiltersWithDirV6(s.hncDir, downIfindexes, ifbIdx, midByMAC, upLimitedMAC); nErr == nil {
 			rep.IPv6AddrsSynced = synced
 		}
 	} else {
@@ -1104,6 +1667,13 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 
 	locked = false
 	unlock()
+
+	if rep.AppQoSDevices > 0 && useNativeDataplane(s.hncDir) && len(rep.DownstreamIfaces) > 0 {
+		_ = os.MkdirAll(filepath.Join(s.hncDir, "run"), 0o755)
+		_ = os.WriteFile(filepath.Join(s.hncDir, "run", "app_limit.dirty"), nil, 0o644)
+		writeNativeRestoreAppQoSPlan(s.hncDir, rep.DownstreamIfaces[0], root, liveIPv4)
+		v6TriggerAppQoSFn(s.hncDir)
+	}
 
 	if expActive && useNativeDataplane(s.hncDir) {
 		replayVectorExpressIfActive(s, s.hncDir)
@@ -1123,16 +1693,7 @@ func (s *server) NativeFullRestoreV6() (V6NativeRestoreReport, error) {
 }
 
 func runSubtreeIptCmd(iptBin string, args ...string) (string, error) {
-	withWait := append([]string{"-w", "2"}, args...)
-	out, err := nativeIptCmdRunner(iptBin, withWait...)
-	if err == nil {
-		return out, nil
-	}
-	lower := strings.ToLower(out)
-	if strings.Contains(lower, "unknown option") || strings.Contains(lower, "unrecognized option") || strings.Contains(lower, "bad argument `-w'") {
-		return nativeIptCmdRunner(iptBin, args...)
-	}
-	return out, err
+	return runIptWithWaitFallback(iptBin, args...)
 }
 
 func findIptLastChainRuleLine(listOut, saveOut string, targets ...string) int {

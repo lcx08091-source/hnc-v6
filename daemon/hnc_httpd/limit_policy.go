@@ -55,10 +55,12 @@ const (
 	limitHistEvery     = 15 * time.Minute
 	limitStatePersist  = 5 * time.Minute
 	maxScheduleWindows = 16
-	defThrottleDownKb  = 1000
-	defThrottleUpKb    = 500
-	limitAuditTID      = "limitctl"
-	quotaNotifyTimeout = 3 * time.Second // v6.0: 锁外异步系统通知硬超时上限
+	defThrottleDownKb      = 1000
+	defThrottleUpKb        = 500
+	limitAuditTID          = "limitctl"
+	quotaNotifyTimeout     = 3 * time.Second // v6.0: 锁外异步系统通知硬超时上限
+	limitMaxTrackedDevices = 512             // v6.1 RC2: 设备跟踪表与日志表硬上限
+	limitDeadDevPruneAge   = 30 * 24 * time.Hour
 )
 
 // limitUsageMonthKeep /api/usage_month 最近被请求后, DPI 下限保持计算多久(v5.26 T4)。必须长于
@@ -434,6 +436,7 @@ type ctlDevState struct {
 	LastDesired  limitRule `json:"last_desired"`
 	LastObserved limitRule `json:"last_observed"`
 	Usage        usageAcc  `json:"usage"`
+	LastSeen     int64     `json:"last_seen,omitempty"`
 	AlertedDay   string    `json:"alerted_day,omitempty"`
 	AlertedMonth string    `json:"alerted_month,omitempty"`
 	LastErr      string    `json:"last_err,omitempty"`
@@ -475,6 +478,7 @@ type limitCtl struct {
 	histMonKey   string              // 已计算 DPI 下限的计费月 key(空=没算过, usage_month 走回退)
 	histAt       time.Time
 	histKey      string
+	lastRollDay  string
 	usageMonthAt time.Time  // v5.26 T4: /api/usage_month 最近一次被请求的时刻
 	guard        clockGuard // v5.20: 时钟不可信/跳变检测(clock_guard.go)
 	dirty        bool
@@ -524,8 +528,173 @@ func (c *limitCtl) load() {
 	if b, err := os.ReadFile(c.statePath()); err == nil {
 		var sf ctlStateFile
 		if json.Unmarshal(b, &sf) == nil && sf.Devices != nil {
+			for _, s := range sf.Devices {
+				if s != nil && s.LastSeen == 0 && s.Usage.DayKey != "" {
+					if t, perr := time.ParseInLocation("2006-01-02", s.Usage.DayKey, time.Local); perr == nil {
+						s.LastSeen = t.Unix()
+					}
+				}
+			}
 			c.st = sf
 		}
+	}
+}
+
+// ReloadPoliciesFromDisk 在整机备份恢复后从磁盘重新加载配额与分时段策略并尽快重算。
+func (c *limitCtl) ReloadPoliciesFromDisk() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	next := map[string]*devicePolicy{}
+	if b, err := os.ReadFile(c.policyPath()); err == nil {
+		var pf policyFile
+		if json.Unmarshal(b, &pf) == nil && pf.Devices != nil {
+			for k, v := range pf.Devices {
+				if v != nil {
+					next[strings.ToLower(k)] = v
+				}
+			}
+		}
+	}
+	c.policies = next
+	c.histAt = time.Time{}
+	c.mu.Unlock()
+	c.Poke()
+}
+
+func (c *limitCtl) isZeroPasserbyDevLocked(mac string, s *ctlDevState) bool {
+	if s == nil {
+		return true
+	}
+	if c.policies[mac] != nil || s.Adopted {
+		return false
+	}
+	return s.Usage.DayBytes == 0 && s.Usage.MonthBytes == 0
+}
+
+func (c *limitCtl) isEvictableDevLocked(mac string, s *ctlDevState) bool {
+	if s == nil {
+		return true
+	}
+	if c.policies[mac] != nil {
+		return false
+	}
+	if s.Adopted && (s.Base != (limitRule{}) || s.LastDesired != (limitRule{})) {
+		return false
+	}
+	return true
+}
+
+func (c *limitCtl) pruneDailyRolloverLocked(now, ds time.Time, dayKey, monKey string, devs map[string]devObs, devsOK bool) {
+	if c.lastRollDay == dayKey {
+		return
+	}
+	if c.lastRollDay != "" {
+		c.logged = map[string]string{}
+	}
+	c.lastRollDay = dayKey
+
+	for mac, s := range c.st.Devices {
+		if s == nil {
+			delete(c.st.Devices, mac)
+			delete(c.logged, mac)
+			c.dirty = true
+			continue
+		}
+		if !c.isEvictableDevLocked(mac, s) || (devsOK && devs[mac].online) {
+			continue
+		}
+		stale := false
+		if s.LastSeen > 0 {
+			stale = now.Sub(time.Unix(s.LastSeen, 0)) > limitDeadDevPruneAge
+		} else if s.Usage.DayKey != "" {
+			if t, err := time.ParseInLocation("2006-01-02", s.Usage.DayKey, now.Location()); err == nil {
+				stale = ds.Sub(t) > limitDeadDevPruneAge
+			}
+		}
+		if stale {
+			delete(c.st.Devices, mac)
+			delete(c.logged, mac)
+			c.dirty = true
+		}
+	}
+	for mac, mk := range c.st.GlobalAlertWarn {
+		if mk != monKey {
+			delete(c.st.GlobalAlertWarn, mac)
+			c.dirty = true
+		}
+	}
+	for mac, mk := range c.st.GlobalAlertOver {
+		if mk != monKey {
+			delete(c.st.GlobalAlertOver, mac)
+			c.dirty = true
+		}
+	}
+}
+
+func (c *limitCtl) enforceDeviceCapLocked(devs map[string]devObs, devsOK bool) {
+	if devsOK {
+		for mac, s := range c.st.Devices {
+			if c.isZeroPasserbyDevLocked(mac, s) && !devs[mac].online {
+				delete(c.st.Devices, mac)
+				delete(c.logged, mac)
+			}
+		}
+	}
+	if len(c.logged) > limitMaxTrackedDevices {
+		keptLog := make(map[string]string, len(c.policies))
+		for mac := range c.policies {
+			if msg, ok := c.logged[mac]; ok {
+				keptLog[mac] = msg
+			}
+		}
+		c.logged = keptLog
+	}
+	if len(c.st.Devices) <= limitMaxTrackedDevices {
+		return
+	}
+	type evictCand struct {
+		mac      string
+		online   bool
+		hasBytes bool
+		lastSeen int64
+	}
+	cands := make([]evictCand, 0, len(c.st.Devices))
+	for mac, s := range c.st.Devices {
+		if !c.isEvictableDevLocked(mac, s) {
+			continue
+		}
+		var ls int64
+		var hasBytes bool
+		if s != nil {
+			ls = s.LastSeen
+			hasBytes = s.Usage.DayBytes > 0 || s.Usage.MonthBytes > 0
+		}
+		cands = append(cands, evictCand{
+			mac:      mac,
+			online:   devsOK && devs[mac].online,
+			hasBytes: hasBytes,
+			lastSeen: ls,
+		})
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].online != cands[j].online {
+			return !cands[i].online
+		}
+		if cands[i].hasBytes != cands[j].hasBytes {
+			return !cands[i].hasBytes
+		}
+		if cands[i].lastSeen != cands[j].lastSeen {
+			return cands[i].lastSeen < cands[j].lastSeen
+		}
+		return cands[i].mac < cands[j].mac
+	})
+	drop := len(c.st.Devices) - limitMaxTrackedDevices
+	for i := 0; i < len(cands) && i < drop; i++ {
+		delete(c.st.Devices, cands[i].mac)
+		delete(c.logged, cands[i].mac)
+		c.dirty = true
 	}
 }
 
@@ -537,7 +706,23 @@ func (c *limitCtl) saveStateLocked(now time.Time, force bool) {
 	if !force && !c.dirty && !(c.usageDirty && now.Sub(c.savedAt) >= limitStatePersist) {
 		return
 	}
-	if err := writeJSONAtomic(c.statePath(), c.st); err != nil {
+	persistedDevs := make(map[string]*ctlDevState, len(c.st.Devices))
+	for mac, s := range c.st.Devices {
+		if c.isZeroPasserbyDevLocked(mac, s) {
+			continue
+		}
+		persistedDevs[mac] = s
+	}
+	snap := ctlStateFile{
+		Version:         c.st.Version,
+		Devices:         persistedDevs,
+		GlobalAlertWarn: c.st.GlobalAlertWarn,
+		GlobalAlertOver: c.st.GlobalAlertOver,
+	}
+	if snap.Version == 0 {
+		snap.Version = 1
+	}
+	if err := writeJSONAtomic(c.statePath(), snap); err != nil {
 		log.Printf("limitctl: save state: %v", err)
 		return
 	}
@@ -673,12 +858,16 @@ func readObserved(hncDir string) (map[string]limitRule, int, bool) {
 	return out, bd, true
 }
 
-// sumStatsHistory 汇总 run/stats.YYYYMMDD.jsonl 在 [from,to) 的每 MAC tx+rx。
+// sumStatsHistory 汇总 data/dpi_history/stats.YYYYMMDD.jsonl(回退 run/stats.YYYYMMDD.jsonl) 在 [from,to) 的每 MAC tx+rx。
 func sumStatsHistory(hncDir string, from, to time.Time) map[string]uint64 {
 	out := map[string]uint64{}
 	resolve := macAliasResolver(hncDir) // v5.21: 合并过的旧 MAC 用量计入新 MAC 的配额
 	for _, dk := range dayFileKeys(from, to) {
-		f, err := os.Open(filepath.Join(hncDir, "run", "stats."+dk+".jsonl"))
+		path, ok := resolveStatsJSONLPath(hncDir, dk)
+		if !ok {
+			continue
+		}
+		f, err := os.Open(path)
 		if err != nil {
 			continue
 		}
@@ -724,7 +913,11 @@ func sumStatsHistorySplit(hncDir string, from, to time.Time) (map[string]rxTxPai
 	oldest := int64(0)
 	resolve := macAliasResolver(hncDir)
 	for _, dk := range dayFileKeys(from, to) {
-		f, err := os.Open(filepath.Join(hncDir, "run", "stats."+dk+".jsonl"))
+		path, ok := resolveStatsJSONLPath(hncDir, dk)
+		if !ok {
+			continue
+		}
+		f, err := os.Open(path)
 		if err != nil {
 			continue
 		}
@@ -819,13 +1012,19 @@ func (c *limitCtl) tick(now time.Time) {
 		}
 		c.dirty = true
 	}
-	// 1) 用量(所有非模拟在线设备都累加, 之后才设配额也有当日/当月数据)
+	// 1) 用量(所有非模拟在线设备都累加, 之后才设配额也有当日/当月数据; 纯离线无策略过客不入表)
 	if devsOK {
 		for mac, o := range devs {
 			if limitSkipMAC(mac) || !o.hasCnt {
 				continue
 			}
+			if !o.online && c.policies[mac] == nil && c.st.Devices[mac] == nil {
+				continue
+			}
 			dsRec := c.devState(mac)
+			if o.online {
+				dsRec.LastSeen = now.Unix()
+			}
 			before := dsRec.Usage
 			dsRec.Usage.add(o.rx, o.tx, dayKey, monKey) // 用量按 limitStatePersist 周期落盘
 			if dsRec.Usage != before {
@@ -840,6 +1039,8 @@ func (c *limitCtl) tick(now time.Time) {
 			c.usageDirty = true
 		}
 	}
+	c.pruneDailyRolloverLocked(now, ds, dayKey, monKey, devs, devsOK)
+	c.enforceDeviceCapLocked(devs, devsOK)
 	// 2) 历史下限(DPI 增量文件), 15 分钟 / 周期切换时刷新
 	hk := dayKey + "|" + monKey
 	if c.histKey != hk || now.Sub(c.histAt) >= limitHistEvery || now.Before(c.histAt) {

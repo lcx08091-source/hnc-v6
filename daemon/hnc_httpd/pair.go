@@ -26,13 +26,69 @@ import (
 	"crypto/subtle"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 )
+
+func canonicalOriginHostPort(scheme, hostport string) string {
+	hostport = strings.ToLower(strings.TrimSpace(hostport))
+	if hostport == "" {
+		return ""
+	}
+	if h, p, err := net.SplitHostPort(hostport); err == nil {
+		return net.JoinHostPort(strings.TrimSuffix(h, "."), p)
+	}
+	defPort := ""
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case "http":
+		defPort = "80"
+	case "https":
+		defPort = "443"
+	}
+	cleanHost := strings.TrimSuffix(strings.Trim(hostport, "[]"), ".")
+	if defPort == "" || cleanHost == "" {
+		return hostport
+	}
+	return net.JoinHostPort(cleanHost, defPort)
+}
+
+// isCrossSiteFormRequest 拦截跨站表单请求(防跨站 PIN 配额耗尽与登出 CSRF):
+//   - Sec-Fetch-Site 为 "cross-site" 直接拒绝;
+//   - Origin 非空时, 其解析出的 host(含非默认端口)必须与当前请求 r.Host 一致;
+//   - 无 Origin 且非 cross-site 的命令行工具/同源请求正常放行。
+func isCrossSiteFormRequest(r *http.Request) bool {
+	if r == nil {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(r.Header.Get("Sec-Fetch-Site")), "cross-site") {
+		return true
+	}
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return true
+	}
+	reqHost := strings.TrimSpace(r.Host)
+	if reqHost == "" && r.URL != nil {
+		reqHost = strings.TrimSpace(r.URL.Host)
+	}
+	if reqHost == "" {
+		return true
+	}
+	if strings.EqualFold(u.Host, reqHost) {
+		return false
+	}
+	return canonicalOriginHostPort(u.Scheme, u.Host) != canonicalOriginHostPort(u.Scheme, reqHost)
+}
 
 // pairPending 从 $RUN/pair_pending 读出的配对记录
 type pairPending struct {
@@ -146,6 +202,10 @@ func (s *server) handlePair(w http.ResponseWriter, r *http.Request) {
 func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if isCrossSiteFormRequest(r) {
+		writePairError(w, http.StatusForbidden, "cross-site request forbidden")
 		return
 	}
 
@@ -278,7 +338,7 @@ func (s *server) handlePairVerify(w http.ResponseWriter, r *http.Request) {
 	// 清 rate limit 计数
 	s.limiter.ResetPin(ip)
 
-	http.SetCookie(w, issuedCookie(cookieValue))
+	http.SetCookie(w, issuedCookieForReq(r, cookieValue))
 	// 302 到首页(dashboard 会用 cookie 走 authMiddleware 进入)
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -311,12 +371,12 @@ func writePairSuccess(hncDir, sid, tokenID, label string) error {
 	tmp := filepath.Join(runDir, "pair_success.tmp")
 	final := filepath.Join(runDir, "pair_success."+sid)
 
-	// 顺手 GC 旧 pair_success.* 残留 (>60min)
+	// 顺手 GC 旧 pair_success.* 残留 (>60min, 含上次异常中断遗留的陈旧 pair_success.tmp)
 	cutoff := time.Now().Add(-60 * time.Minute)
 	if entries, err := os.ReadDir(runDir); err == nil {
 		for _, ent := range entries {
 			name := ent.Name()
-			if !strings.HasPrefix(name, "pair_success.") || name == "pair_success.tmp" {
+			if !strings.HasPrefix(name, "pair_success.") {
 				continue
 			}
 			full := filepath.Join(runDir, name)
@@ -331,9 +391,14 @@ func writePairSuccess(hncDir, sid, tokenID, label string) error {
 		strings.ReplaceAll(label, "\n", " "), // 防换行注入
 		time.Now().Unix())
 	if err := os.WriteFile(tmp, []byte(body), 0600); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, final)
+	if err := os.Rename(tmp, final); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // labelFromUA 从 User-Agent 猜一个可读设备名
@@ -397,6 +462,10 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
+	if isCrossSiteFormRequest(r) {
+		writePairError(w, http.StatusForbidden, "cross-site request forbidden")
+		return
+	}
 
 	// 自己解 cookie. cookie 不存在或无效都 fall-through 到清浏览器 cookie + 200.
 	cookie, err := r.Cookie(CookieName)
@@ -413,7 +482,7 @@ func (s *server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	http.SetCookie(w, clearCookie())
+	http.SetCookie(w, clearCookieForReq(r))
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = w.Write([]byte(`{"ok":true}`))

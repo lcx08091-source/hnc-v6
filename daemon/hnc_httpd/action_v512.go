@@ -111,7 +111,11 @@ func (s *server) apiUsageMonth(w http.ResponseWriter, r *http.Request) {
 	oldest = int64(0)
 	resolve := macAliasResolver(s.hncDir) // v5.21: 合并过的旧 MAC 历史算到新 MAC 上
 	for _, dk := range dayFileKeys(start, now) {
-		f, err := os.Open(filepath.Join(s.hncDir, "run", "stats."+dk+".jsonl"))
+		statsPath, ok := resolveStatsJSONLPath(s.hncDir, dk)
+		if !ok || statsPath == "" {
+			continue
+		}
+		f, err := os.Open(statsPath)
 		if err != nil {
 			continue
 		}

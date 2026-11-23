@@ -148,6 +148,11 @@ const (
 	leakSSEHeartbeatDefault = 15 * time.Second
 	leakDefaultPollInterval = 3 * time.Second
 	leakMaxUndoStack        = 10
+	leakMaxCooldownEntries  = 4096
+	leakMaxTombstones       = 1024
+	leakTombstoneTTLSec     = 7 * 86400
+	leakMaxConcurrentNotify = 2
+	leakSSEWriteTimeout     = 10 * time.Second
 )
 
 var leakSSEActiveConns atomic.Int64
@@ -247,10 +252,12 @@ type leakGuardEngine struct {
 	cooldownLedger    map[string]int64
 	blockedTargets    map[string]bool
 	tombstones        map[string]bool
+	tombstoneAt       map[string]int64
 	ignoreRules       []dpidlg.IgnoreRule
 	undoStack         []LeakBlockUndoEntry
 	subs              map[chan LeakEvent]struct{}
 	notifyExec        leakNotifyFunc
+	notifySem         chan struct{}
 	sseHeartbeat      time.Duration
 	pollInterval      time.Duration
 	wakeOnce          sync.Once
@@ -301,13 +308,130 @@ func newLeakGuardEngine(s *server) *leakGuardEngine {
 		cooldownLedger: make(map[string]int64),
 		blockedTargets: make(map[string]bool),
 		tombstones:     make(map[string]bool),
+		tombstoneAt:    make(map[string]int64),
 		subs:           make(map[chan LeakEvent]struct{}),
 		notifyExec:     defaultLeakNotifyExec,
+		notifySem:      make(chan struct{}, leakMaxConcurrentNotify),
 		sseHeartbeat:   leakSSEHeartbeatDefault,
 		pollInterval:   leakDefaultPollInterval,
 	}
 	eng.loadPersistedLocked()
 	return eng
+}
+
+func (e *leakGuardEngine) setTombstoneLocked(key string, nowTs int64) {
+	if key == "" {
+		return
+	}
+	if e.tombstones == nil {
+		e.tombstones = make(map[string]bool)
+	}
+	if e.tombstoneAt == nil {
+		e.tombstoneAt = make(map[string]int64)
+	}
+	if nowTs <= 0 {
+		nowTs = time.Now().Unix()
+	}
+	e.tombstones[key] = true
+	e.tombstoneAt[key] = nowTs
+}
+
+func (e *leakGuardEngine) deleteTombstoneLocked(key string) {
+	delete(e.tombstones, key)
+	delete(e.tombstoneAt, key)
+}
+
+func (e *leakGuardEngine) pruneTombstonesLocked(nowTs int64) {
+	if len(e.tombstones) == 0 {
+		if len(e.tombstoneAt) > 0 {
+			e.tombstoneAt = make(map[string]int64)
+		}
+		return
+	}
+	if e.tombstoneAt == nil {
+		e.tombstoneAt = make(map[string]int64, len(e.tombstones))
+	}
+	if nowTs <= 0 {
+		nowTs = time.Now().Unix()
+	}
+	for k, active := range e.tombstones {
+		if !active || k == "" {
+			delete(e.tombstones, k)
+			delete(e.tombstoneAt, k)
+			continue
+		}
+		ts, ok := e.tombstoneAt[k]
+		if !ok || ts <= 0 {
+			e.tombstoneAt[k] = nowTs
+			continue
+		}
+		if nowTs-ts > leakTombstoneTTLSec {
+			delete(e.tombstones, k)
+			delete(e.tombstoneAt, k)
+		}
+	}
+	for k := range e.tombstoneAt {
+		if !e.tombstones[k] {
+			delete(e.tombstoneAt, k)
+		}
+	}
+	if len(e.tombstones) <= leakMaxTombstones {
+		return
+	}
+	type kv struct {
+		k  string
+		ts int64
+	}
+	arr := make([]kv, 0, len(e.tombstones))
+	for k := range e.tombstones {
+		arr = append(arr, kv{k: k, ts: e.tombstoneAt[k]})
+	}
+	sort.Slice(arr, func(i, j int) bool {
+		if arr[i].ts != arr[j].ts {
+			return arr[i].ts < arr[j].ts
+		}
+		return arr[i].k < arr[j].k
+	})
+	drop := len(arr) - leakMaxTombstones
+	for i := 0; i < drop; i++ {
+		delete(e.tombstones, arr[i].k)
+		delete(e.tombstoneAt, arr[i].k)
+	}
+}
+
+func (e *leakGuardEngine) pruneCooldownLedgerLocked(nowTs int64) {
+	if len(e.cooldownLedger) == 0 {
+		return
+	}
+	ttl := int64(e.cfg.CooldownSec)
+	if ttl > 0 && nowTs > 0 {
+		for k, ts := range e.cooldownLedger {
+			if nowTs-ts >= ttl {
+				delete(e.cooldownLedger, k)
+			}
+		}
+	}
+	if len(e.cooldownLedger) <= leakMaxCooldownEntries {
+		return
+	}
+	type kv struct {
+		k  string
+		ts int64
+	}
+	arr := make([]kv, 0, len(e.cooldownLedger))
+	for k, ts := range e.cooldownLedger {
+		arr = append(arr, kv{k: k, ts: ts})
+	}
+	sort.Slice(arr, func(i, j int) bool {
+		if arr[i].ts != arr[j].ts {
+			return arr[i].ts < arr[j].ts
+		}
+		return arr[i].k < arr[j].k
+	})
+	drop := len(arr) - leakMaxCooldownEntries
+	for i := 0; i < drop; i++ {
+		delete(e.cooldownLedger, arr[i].k)
+	}
 }
 
 func (e *leakGuardEngine) persistPath() string {
@@ -337,6 +461,7 @@ func (e *leakGuardEngine) loadPersistedLocked() {
 	if pf.Config.Capacity >= leakMinCapacity && pf.Config.Capacity <= leakMaxCapacity {
 		e.cfg = pf.Config
 	}
+	nowTs := time.Now().Unix()
 	if pf.BlockedTargets != nil {
 		for k, v := range pf.BlockedTargets {
 			nk := strings.ToLower(strings.TrimSpace(k))
@@ -346,10 +471,11 @@ func (e *leakGuardEngine) loadPersistedLocked() {
 			if v {
 				e.blockedTargets[nk] = true
 			} else {
-				e.tombstones[nk] = true
+				e.setTombstoneLocked(nk, nowTs)
 			}
 		}
 	}
+	e.pruneTombstonesLocked(nowTs)
 	if len(pf.IgnoreRules) > 0 {
 		seen := make(map[string]bool, len(pf.IgnoreRules))
 		for _, raw := range pf.IgnoreRules {
@@ -387,6 +513,7 @@ func (e *leakGuardEngine) writeCtrlFileLocked(now int64) error {
 	if e.srv == nil || e.srv.hncDir == "" {
 		return nil
 	}
+	e.pruneTombstonesLocked(now)
 	ctrlBlocked := make(map[string]bool, len(e.blockedTargets)+len(e.tombstones))
 	for k := range e.tombstones {
 		if k != "" {
@@ -425,6 +552,7 @@ func (e *leakGuardEngine) saveStateLocked() error {
 		return nil
 	}
 	now := time.Now().Unix()
+	e.pruneTombstonesLocked(now)
 	activeBlocked := make(map[string]bool, len(e.blockedTargets))
 	for k, v := range e.blockedTargets {
 		if v && k != "" {
@@ -458,6 +586,7 @@ func (e *leakGuardEngine) ReloadFromDisk() {
 	e.cfg = defaultLeakGuardConfig()
 	e.blockedTargets = make(map[string]bool)
 	e.tombstones = make(map[string]bool)
+	e.tombstoneAt = make(map[string]int64)
 	e.ignoreRules = nil
 	e.undoStack = nil
 	e.ignoredSeenIDs = make(map[string]int64)
@@ -620,10 +749,22 @@ func (e *leakGuardEngine) postAndroidNotificationAsync(ev LeakEvent, lockscreenM
 	if execFn == nil {
 		return
 	}
+	sem := e.notifySem
+	if sem != nil {
+		select {
+		case sem <- struct{}{}:
+		default:
+			// ColorOS Binder 卡死保护: 最多并发 2 个系统通知子进程, 满载时非阻塞丢弃
+			return
+		}
+	}
 	title := sanitizeLeakNotifyArg("HNC LeakGuard · 明文隐私泄露预警", 48)
 	tag := "hnc_leakguard"
 	body := formatLeakNotificationBody(ev, lockscreenMask)
 	go func() {
+		if sem != nil {
+			defer func() { <-sem }()
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), leakNotifyTimeout)
 		defer cancel()
 		_ = execFn(ctx, leakCmdBinPath, "notification", "post", "-t", title, tag, body)
@@ -1186,6 +1327,12 @@ func (e *leakGuardEngine) IngestEvents(incoming []LeakEvent) []LeakEvent {
 	if len(e.ignoredSeenIDs) > seenLimit {
 		e.ignoredSeenIDs = make(map[string]int64)
 	}
+	pruneNow := e.maxSeenTs
+	if pruneNow <= 0 {
+		pruneNow = time.Now().Unix()
+	}
+	e.pruneCooldownLedgerLocked(pruneNow)
+	e.pruneTombstonesLocked(pruneNow)
 
 	var subs []chan LeakEvent
 	if len(added) > 0 && len(e.subs) > 0 {
@@ -1506,10 +1653,15 @@ func (s *server) apiLeakGuardStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeFrame := func(frame string) bool {
+		_ = rc.SetWriteDeadline(time.Now().Add(leakSSEWriteTimeout))
 		if _, err := io.WriteString(w, frame); err != nil {
 			return false
 		}
-		return flushOut() == nil
+		if flushOut() != nil {
+			return false
+		}
+		_ = rc.SetWriteDeadline(time.Time{})
+		return true
 	}
 
 	subCh := make(chan LeakEvent, 64)
@@ -1994,10 +2146,10 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 	eng.mu.Lock()
 	if act == "block" {
 		eng.blockedTargets[normVal] = true
-		delete(eng.tombstones, normVal)
+		eng.deleteTombstoneLocked(normVal)
 		if blockedAlsoIP != "" {
 			eng.blockedTargets[blockedAlsoIP] = true
-			delete(eng.tombstones, blockedAlsoIP)
+			eng.deleteTombstoneLocked(blockedAlsoIP)
 		}
 		sum := sha1.Sum([]byte(fmt.Sprintf("%d|%s|%s|%s", time.Now().UnixNano(), kind, normVal, strings.Join(targetMACs, ","))))
 		eng.pushUndoLocked(LeakBlockUndoEntry{
@@ -2011,11 +2163,11 @@ func (s *server) apiLeakGuardBlockDomain(w http.ResponseWriter, r *http.Request)
 	} else {
 		if !hasAnyDeviceConnBlock(cbNow, normVal) {
 			delete(eng.blockedTargets, normVal)
-			eng.tombstones[normVal] = true
+			eng.setTombstoneLocked(normVal, now)
 		}
 		if normAlsoIP != "" && !hasAnyDeviceConnBlock(cbNow, normAlsoIP) {
 			delete(eng.blockedTargets, normAlsoIP)
-			eng.tombstones[normAlsoIP] = true
+			eng.setTombstoneLocked(normAlsoIP, now)
 		}
 		eng.pruneUndoOnUnblockLocked(kind, normVal, targetMACs)
 	}
@@ -2129,15 +2281,16 @@ func (s *server) apiLeakGuardUndoBlock(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cbNow := readConnBlocks(s.hncDir)
+	undoNow := time.Now().Unix()
 
 	eng.mu.Lock()
 	if !hasAnyDeviceConnBlock(cbNow, entry.DstHost) {
 		delete(eng.blockedTargets, entry.DstHost)
-		eng.tombstones[entry.DstHost] = true
+		eng.setTombstoneLocked(entry.DstHost, undoNow)
 	}
 	if entry.AlsoIP != "" && !hasAnyDeviceConnBlock(cbNow, entry.AlsoIP) {
 		delete(eng.blockedTargets, entry.AlsoIP)
-		eng.tombstones[entry.AlsoIP] = true
+		eng.setTombstoneLocked(entry.AlsoIP, undoNow)
 	}
 	eng.recomputeEventsBlockedLocked(cbNow)
 	remUndo := len(eng.undoStack)

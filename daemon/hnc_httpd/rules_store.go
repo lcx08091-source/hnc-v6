@@ -89,6 +89,9 @@ func decodeRulesBytes(b []byte) (map[string]interface{}, error) {
 	if err := dec.Decode(&root); err != nil {
 		return nil, err
 	}
+	if int(dec.InputOffset()) < len(trimmed) && len(bytes.TrimSpace(trimmed[dec.InputOffset():])) > 0 {
+		return nil, errors.New("trailing garbage after JSON root")
+	}
 	if root == nil {
 		return defaultRulesRoot(), nil
 	}
@@ -150,7 +153,8 @@ func acquireCooperativeJSONLock(hncDir string) func() {
 
 	deadline := time.Now().Add(1500 * time.Millisecond)
 	for {
-		if err := os.Mkdir(lockDir, 0o700); err == nil {
+		err := os.Mkdir(lockDir, 0o700)
+		if err == nil {
 			pidStr := strconv.Itoa(os.Getpid())
 			tsStr := strconv.FormatInt(time.Now().Unix(), 10)
 			_ = os.WriteFile(filepath.Join(lockDir, "pid"), []byte(pidStr+"\n"), 0o600)
@@ -158,6 +162,10 @@ func acquireCooperativeJSONLock(hncDir string) func() {
 			return func() {
 				_ = os.RemoveAll(lockDir)
 			}
+		}
+		if !os.IsExist(err) {
+			// ENOSPC / EROFS / 父目录不可写等非锁竞争错误: 立即降级返回, 避免白白空转 1.5s
+			return func() {}
 		}
 		reclaimStaleJSONLockDir(lockDir)
 		if time.Now().After(deadline) {
@@ -190,6 +198,59 @@ func reclaimStaleJSONLockDir(lockDir string) {
 	}
 }
 
+func (rs *rulesStoreEngine) recoverCorruptRulesLocked(hncDir, path string) (map[string]interface{}, error) {
+	backupDir := filepath.Join(hncDir, "data", ".json_backups")
+	type bakCand struct {
+		path    string
+		name    string
+		modNano int64
+	}
+	var cands []bakCand
+	if ents, err := os.ReadDir(backupDir); err == nil {
+		for _, en := range ents {
+			if en.IsDir() {
+				continue
+			}
+			nm := en.Name()
+			if !strings.HasPrefix(nm, "rules.json") || !strings.HasSuffix(nm, ".bak") {
+				continue
+			}
+			full := filepath.Join(backupDir, nm)
+			st, serr := os.Stat(full)
+			if serr != nil || st.IsDir() || st.Size() <= 0 {
+				continue
+			}
+			cands = append(cands, bakCand{path: full, name: nm, modNano: st.ModTime().UnixNano()})
+		}
+	}
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].modNano != cands[j].modNano {
+			return cands[i].modNano > cands[j].modNano
+		}
+		return cands[i].name > cands[j].name
+	})
+
+	corruptArchive := fmt.Sprintf("%s.corrupt.%d", path, time.Now().Unix())
+	for _, c := range cands {
+		raw, rerr := os.ReadFile(c.path)
+		if rerr != nil || len(bytes.TrimSpace(raw)) == 0 {
+			continue
+		}
+		restored, derr := decodeRulesBytes(raw)
+		if derr != nil {
+			continue
+		}
+		_ = os.Rename(path, corruptArchive)
+		_ = rs.saveLocked(hncDir, restored)
+		return deepCloneRulesMap(restored), nil
+	}
+
+	_ = os.Rename(path, corruptArchive)
+	def := defaultRulesRoot()
+	_ = rs.saveLocked(hncDir, def)
+	return deepCloneRulesMap(def), nil
+}
+
 func (rs *rulesStoreEngine) loadLocked(hncDir string) (map[string]interface{}, error) {
 	path := rulesFilePath(hncDir)
 	st, err := os.Stat(path)
@@ -217,7 +278,7 @@ func (rs *rulesStoreEngine) loadLocked(hncDir string) (map[string]interface{}, e
 	}
 	root, err := decodeRulesBytes(b)
 	if err != nil {
-		return nil, fmt.Errorf("rulesStore: corrupt %s: %w", path, err)
+		return rs.recoverCorruptRulesLocked(hncDir, path)
 	}
 	if st2, err2 := os.Stat(path); err2 == nil &&
 		st2.ModTime().UnixNano() == st.ModTime().UnixNano() &&

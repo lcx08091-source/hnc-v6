@@ -4,9 +4,17 @@
 # written to /data/local/hnc/run/capabilities.json and consumed by WebUI,
 # tc_manager.sh, watchdog.sh and hnc_httpd.
 
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/adb/magisk:/data/adb/ksu/bin:$PATH
+HNC=${HNC:-${HNC_DIR:-/data/local/hnc}}
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
 
-HNC=${HNC:-/data/local/hnc}
 RUN="$HNC/run"
 LOGDIR="$HNC/logs"
 OUT="$RUN/capabilities.json"
@@ -15,8 +23,8 @@ mkdir -p "$RUN" "$LOGDIR" 2>/dev/null || true
 
 log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] [CAP] $*"; }
 json_escape() {
-    # v5.20.1: 顺带去掉 TAB/其它控制字符(JSON 字符串里裸控制字符非法, Go 解析直接失败)
-    printf '%s' "$1" | tr '\t' ' ' | tr -d '\000-\010\013\014\016-\037' | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r//g; s/$/\\n/' | tr -d '\n' | sed 's/\\n$//'
+    # v5.20.1: 顺带去掉 TAB/换行/其它控制字符(JSON 字符串里裸控制字符非法, Go 解析直接失败)
+    printf '%s' "$1" | tr '\r\n	' '   ' | tr -d '\000-\010\013\014\016-\037' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g'
 }
 # v5.20.1: 只保留纯数字(给 JSON 数值字段兜底; 空/多行/非数字 → $2 或 0)
 json_int() {

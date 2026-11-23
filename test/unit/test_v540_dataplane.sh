@@ -1,4 +1,7 @@
 #!/system/bin/sh
+if ! command -v test_start >/dev/null 2>&1; then
+    exec sh "$(cd "$(dirname "$0")/.." && pwd)/run_all.sh" "unit/$(basename "$0" .sh)"
+fi
 # test/unit/test_v540_dataplane.sh — HNC v5.40.0 T2 Android 13–16 真机数据面全场景核心单测
 #
 # 覆盖:
@@ -533,8 +536,8 @@ if [ -n "$MOCK_BIN_DIR" ]; then
     mock_teardown
 fi
 
-# ═══ 14. v5.40.1 RMX5010 真机护栏: HNC_PREROUTE_GUARD + FORWARD HNC_RESTORE + HNC_EGRESS_FIX ═══
-test_start "v5.40.1 RMX5010: HNC_RESTORE 移至 FORWARD 避开 ip rule, HNC_PREROUTE_GUARD 清 [23:16], HNC_EGRESS_FIX 防 bw_mangle 冲刷"
+# ═══ 14. v5.40.1+ RMX5010 / VPN 共存护栏: HNC_PREROUTE_GUARD + HNC_TCPMSS + 多蜂窝/VPN HNC_EGRESS_FIX ═══
+test_start "v5.40.1+ RMX5010/VPN: HNC_PREROUTE_GUARD 清 [31:16] 0xffff0000, HNC_TCPMSS 钳制 MSS, HNC_EGRESS_FIX 多蜂窝/VPN RETURN"
 mock_setup
 for _b in iptables ip6tables; do
     cat > "$MOCK_BIN_DIR/$_b" <<EOF
@@ -548,8 +551,13 @@ EOF
     chmod +x "$MOCK_BIN_DIR/$_b"
 done
 HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/iptables_manager.sh" init >/dev/null 2>&1
-assert_mock_called "HNC_PREROUTE_GUARD -m mark --mark 0x00800000/0x00800000 -j MARK --set-xmark 0x0/0x00ff0000" && \
+assert_mock_called "HNC_PREROUTE_GUARD -m mark --mark 0x00800000/0x00800000 -j MARK --set-xmark 0x0/0xffff0000" && \
 assert_mock_called "mangle -I FORWARD 1 -j HNC_RESTORE" && \
+assert_mock_called "HNC_TCPMSS -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu" && \
+assert_mock_called "HNC_EGRESS_FIX -o ccmni+ -j RETURN" && \
+assert_mock_called "HNC_EGRESS_FIX -o gti+ -j RETURN" && \
+assert_mock_called "HNC_EGRESS_FIX -o tun+ -j RETURN" && \
+assert_mock_called "HNC_EGRESS_FIX -o utun+ -j RETURN" && \
 assert_mock_called "HNC_EGRESS_FIX ! -o rmnet+ -m connmark --mark 0x00800000/0x00800000 -j CONNMARK --restore-mark --nfmask 0xffff0000 --ctmask 0xffff0000" && \
 assert_mock_called "mangle -A POSTROUTING -j HNC_EGRESS_FIX" && \
 test_pass
@@ -579,3 +587,96 @@ if [ -n "$MOCK_BIN_DIR" ]; then
     test_pass
     mock_teardown
 fi
+
+# ═══ 16. RC2: GKI 无 sch_netem 退回 FIFO 不中断 set_limit + >=2.5Gbit Vector Express 无 32位溢出 + 禁写 bridge-nf ═══
+test_start "RC2 GKI/32bit: 无 sch_netem 内核 set_limit 平滑退回默认 FIFO; >=2.5Gbit _ve_root_kbps 零溢出; 禁强开 bridge-nf-call-iptables"
+mock_setup
+cat > "$MOCK_BIN_DIR/tc" <<EOF
+#!${HNC_TEST_SH:-/system/bin/sh}
+echo "tc|\$*" >> "\$MOCK_LOG"
+case "\$*" in
+    *" netem "*) exit 2 ;;
+    "qdisc show dev wlan2"*)
+        echo "qdisc htb 1: root refcnt 2 default 0x9999"
+        exit 0
+        ;;
+    "class show dev wlan2"*)
+        echo "class htb 1:1 root rate 2500Mbit ceil 2500Mbit"
+        exit 0
+        ;;
+esac
+exit 0
+EOF
+chmod +x "$MOCK_BIN_DIR/tc"
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/tc_manager.sh" set_limit wlan2 5 10 0 192.168.43.5 >/dev/null 2>&1
+_rc_lim=$?
+: > "$MOCK_LOG"
+HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/tc_manager.sh" vector_express wlan2 on 85 >/dev/null 2>&1
+_rc_ve=$?
+! grep -v '^[[:space:]]*#' "$HNC_REPO_ROOT/bin/tc_manager.sh" | grep -q 'bridge-nf-call-iptables'
+_rc_br=$?
+assert_eq "0" "$_rc_lim" "无 sch_netem 时 set_limit 应平滑退回默认 FIFO 返回 0" && \
+assert_eq "0" "$_rc_ve" "2.5Gbit vector_express 应返回 0" && \
+assert_eq "0" "$_rc_br" "tc_manager.sh 不得强写 bridge-nf-call-iptables=1" && \
+assert_mock_called "classid 1:8010 htb rate 250000kbit ceil 2500000kbit" "2.5Gbit 根类应算出 ceil 2500000kbit 无 32位溢出" && \
+assert_mock_called "classid 1:9999 htb rate 2125000kbit ceil 2125000kbit" "2.5Gbit 85% 背景池应为 2125000kbit" && \
+test_pass
+mock_teardown
+
+# ═══ 17. RC2: stats_all 与 whitelist_sync 优先读取 run/devices.flat 快路径 ═══
+test_start "RC2 devices.flat: stats_all 在无 devices.json 时从 run/devices.flat 映射双栈(v4+v6)设备流量"
+mock_setup
+cat > "$MOCK_BIN_DIR/iptables" <<EOF
+#!${HNC_TEST_SH:-/system/bin/sh}
+case "\$*" in
+    *"-t mangle -L HNC_STATS -nvx"*)
+        echo "Chain HNC_STATS (1 references)"
+        echo " pkts bytes target prot opt in out source destination"
+        echo "   10  4096 RETURN all  --  *  *   192.168.43.55 0.0.0.0/0"
+        echo "   20  8192 RETURN all  --  *  *   0.0.0.0/0     192.168.43.55"
+        ;;
+esac
+exit 0
+EOF
+cat > "$MOCK_BIN_DIR/ip6tables" <<EOF
+#!${HNC_TEST_SH:-/system/bin/sh}
+case "\$*" in
+    *"-t mangle -L HNC_STATS -nvx"*)
+        echo "Chain HNC_STATS (1 references)"
+        echo " pkts bytes target prot opt in out source destination"
+        echo "    5  1024 RETURN all  *   *  ::/0 ::/0 MAC aa:bb:cc:dd:ee:55"
+        ;;
+esac
+exit 0
+EOF
+chmod +x "$MOCK_BIN_DIR/iptables" "$MOCK_BIN_DIR/ip6tables"
+printf 'aa:bb:cc:dd:ee:55 192.168.43.55\n' > "$HNC_TEST_DIR/run/devices.flat"
+rm -f "$HNC_TEST_DIR/data/devices.json"
+_st_out=$(HNC_DIR="$HNC_TEST_DIR" sh "$HNC_REPO_ROOT/bin/iptables_manager.sh" stats_all 2>/dev/null)
+assert_contains "$_st_out" '192.168.43.55 8192 5120' "stats_all 应从 devices.flat 合并 v4(rx=8192,tx=4096)+v6(tx=1024)" && \
+test_pass
+mock_teardown
+
+# ═══ 18. RC2: 天玑 HNC_SOC=mtk + NOMAP 主动禁用 Tether Offload HAL 与 MDDP/hnat 节点探测 ═══
+test_start "RC2 MTK/MDDP: 天玑平台 NOMAP 状态主动压制 tether_offload_disabled=true 且 hnc_mtk_hwnat 输出 action/state 双字段"
+mock_setup
+mkdir -p "$HNC_TEST_DIR/fake_hw/dev" "$HNC_TEST_DIR/fake_hw/proc/sys/net" "$HNC_TEST_DIR/fake_hw/sys/module/ccci_md_mddp"
+touch "$HNC_TEST_DIR/fake_hw/dev/mddp"
+echo "1" > "$HNC_TEST_DIR/fake_hw/proc/sys/net/nf_conntrack_hnat_offload"
+cat > "$HNC_TEST_DIR/bin/check_offload.sh" <<EOF
+#!${HNC_TEST_SH:-/system/bin/sh}
+echo "NOMAP"
+EOF
+chmod +x "$HNC_TEST_DIR/bin/check_offload.sh"
+HNC_DIR="$HNC_TEST_DIR" HNC_SOC="mtk" HNC_HWNAT_ROOT="$HNC_TEST_DIR/fake_hw" sh "$HNC_REPO_ROOT/bin/hnc_mtk_hwnat.sh" disable >/dev/null 2>&1
+_hw_json=$(cat "$HNC_TEST_DIR/run/mtk_hwnat.json" 2>/dev/null)
+_hnat_val=$(cat "$HNC_TEST_DIR/fake_hw/proc/sys/net/nf_conntrack_hnat_offload" 2>/dev/null)
+HNC_DIR="$HNC_TEST_DIR" HNC_SOC="mtk" HNC_HWNAT_ROOT="$HNC_TEST_DIR/fake_hw" sh "$HNC_TEST_DIR/bin/hnc_offload_guard.sh" apply wlan2 >/dev/null 2>&1
+_og_json=$(cat "$HNC_TEST_DIR/run/offload_guard.json" 2>/dev/null)
+assert_eq "0" "$_hnat_val" "nf_conntrack_hnat_offload 应被置 0" && \
+assert_contains "$_hw_json" '"/dev/mddp"' "应识别 /dev/mddp 硬件卸载特征" && \
+assert_contains "$_hw_json" '"action":"disabled"' "mtk_hwnat.json 应含 action 字段" && \
+assert_contains "$_hw_json" '"state":"disabled"' "mtk_hwnat.json 应含 state 兼容字段" && \
+assert_contains "$_og_json" '"tether_offload_disabled":true' "天玑 NOMAP 时应主动压制 Tether Offload HAL 并落盘 tether_offload_disabled:true" && \
+test_pass
+mock_teardown

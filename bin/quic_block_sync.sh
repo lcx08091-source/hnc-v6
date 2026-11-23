@@ -1,16 +1,24 @@
 #!/system/bin/sh
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 # quic_block_sync.sh — v5.40.0 双栈「强制 QUIC 回落 TCP」全局开关 (IPv4 + IPv6)
 #
 # 做法: 独立链 HNC_QUIC 挂在双栈 filter/FORWARD 第 1 位:
-#   - IPv4: -i <iface> -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable
-#   - IPv6: -i <iface> -p udp --dport 443 -j REJECT --reject-with icmp6-port-unreachable
+#   - IPv4: -i <iface> -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable (缺 xt_REJECT 回退 DROP)
+#   - IPv6: -i <iface> -p udp --dport 443 -j REJECT --reject-with icmp6-port-unreachable (缺 ip6t_REJECT 回退 DROP)
 # 输出契约(末行): QUIC_BLOCK=off | QUIC_BLOCK=pending | QUIC_BLOCK=on iface=<iface>
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+[ -f "$HNC_DIR/bin/hnc_env.sh" ] && . "$HNC_DIR/bin/hnc_env.sh"
 RULES="$HNC_DIR/data/rules.json"
 LOG="$HNC_DIR/logs/service.log"
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
+if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v iptables >/dev/null 2>&1; then
+    iptables -w 2 -t filter -L -n >/dev/null 2>&1 || IPT="iptables"
+fi
+if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || IP6T="ip6tables"
+fi
 
 log() { { echo "$(date '+%Y-%m-%d %H:%M:%S') [quic_block] $*" >> "$LOG"; } 2>/dev/null; }
 run() { "$@" 2>/dev/null; }
@@ -66,11 +74,13 @@ if [ -z "$iface" ]; then
 fi
 
 run $IPT -t filter -N HNC_QUIC
-run $IPT -t filter -A HNC_QUIC -i "$iface" -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable
+run $IPT -t filter -A HNC_QUIC -i "$iface" -p udp --dport 443 -j REJECT --reject-with icmp-port-unreachable \
+    || run $IPT -t filter -A HNC_QUIC -i "$iface" -p udp --dport 443 -j DROP
 run $IPT -t filter -I FORWARD 1 -j HNC_QUIC || log "WARN: v4 link failed"
 if [ "$v6" = 1 ]; then
     run $IP6T -t filter -N HNC_QUIC
-    run $IP6T -t filter -A HNC_QUIC -i "$iface" -p udp --dport 443 -j REJECT --reject-with icmp6-port-unreachable
+    run $IP6T -t filter -A HNC_QUIC -i "$iface" -p udp --dport 443 -j REJECT --reject-with icmp6-port-unreachable \
+        || run $IP6T -t filter -A HNC_QUIC -i "$iface" -p udp --dport 443 -j DROP
     run $IP6T -t filter -I FORWARD 1 -j HNC_QUIC || log "WARN: v6 link failed"
 fi
 log "mode=on iface=$iface v6=$v6"

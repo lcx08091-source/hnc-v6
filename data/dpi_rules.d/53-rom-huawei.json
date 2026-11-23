@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "53-rom-huawei",
-  "rules_version": "hnc-curated-v6.1.0-rc.1#53-rom-huawei",
+  "rules_version": "hnc-curated-v6.1.0-rc.2#53-rom-huawei",
   "rules": [
     {
       "id": "huawei",

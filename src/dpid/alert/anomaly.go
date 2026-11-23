@@ -55,9 +55,10 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 	now := nowLocal()
 	hour := now.Hour()
 
-	// Resolve the history directory. The history sampler writes to
-	// HNCDir/run by default in rc30.4, so we mirror that.
-	historyDir := filepath.Join(cfg.HNCDir, "run")
+	// RC2: HistorySampler now writes to HNCDir/data/dpi_history (moved out of
+	// 32M tmpfs run/). Scan data/dpi_history first and merge/fallback to
+	// HNCDir/run so legacy files and tests writing to <tmp>/run still work.
+	historyDirs := historyDirsForHNC(cfg.HNCDir)
 
 	// Step 1: current-hour totals (MAC → bytes summed across all apps).
 	curHourStart := time.Date(now.Year(), now.Month(), now.Day(), hour, 0, 0, 0, now.Location()).Unix()
@@ -65,7 +66,7 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 	current := map[string]uint64{}
 	// v8 修正: stats.YYYYMMDD.jsonl 在整刻写入代表过去 15 分钟增量(t=14:00:00 实属 13:45~14:00),
 	// 故排除左端点 curHourStart(+1), 采用 (curHourStart, curHourEnd] 左开右闭窗口。
-	if err := sumByMAC(historyDir, curHourStart+1, curHourEnd+1, current); err != nil {
+	if err := sumByMACDirs(historyDirs, curHourStart+1, curHourEnd+1, current); err != nil {
 		// Probably "today's file doesn't exist yet". Not fatal —
 		// nothing to compare against, just exit cleanly.
 		return 0, nil
@@ -87,7 +88,7 @@ func detectAnomalyTraffic(cfg Config, uc AlertConfig) (int, error) {
 			AddDate(0, 0, -offset)
 		dayEnd := dayStart.Add(time.Hour)
 		perDay := map[string]uint64{}
-		if err := sumByMAC(historyDir, dayStart.Unix()+1, dayEnd.Unix()+1, perDay); err != nil {
+		if err := sumByMACDirs(historyDirs, dayStart.Unix()+1, dayEnd.Unix()+1, perDay); err != nil {
 			continue
 		}
 		validHistoryDays++
@@ -213,44 +214,83 @@ func dayFileKeys(from, to time.Time) []string {
 // 时段)。改为按窗口覆盖的本地∪UTC 日期集合找文件(dayFileKeys), 并把窗口
 // 改为左闭右开 —— 旧的两端闭区间会让恰好落在边界秒的行在相邻两个窗口里各算
 // 一次(配额按天分段累加时重复计数)。
+func historyDirsForHNC(hncDir string) []string {
+	return []string{
+		filepath.Join(hncDir, "data", "dpi_history"),
+		filepath.Join(hncDir, "run"),
+	}
+}
+
 func sumByMAC(dir string, startTs, endTs int64, out map[string]uint64) error {
-	if endTs <= startTs {
+	return sumByMACDirs([]string{dir}, startTs, endTs, out)
+}
+
+func sumByMACDirs(dirs []string, startTs, endTs int64, out map[string]uint64) error {
+	if endTs <= startTs || len(dirs) == 0 {
 		return nil
 	}
 	loc := tzlocal.Location()
 	from := time.Unix(startTs, 0).In(loc)
 	to := time.Unix(endTs-1, 0).In(loc)
 	for _, key := range dayFileKeys(from, to) {
-		p := filepath.Join(dir, "stats."+key+".jsonl")
-		f, err := os.Open(p)
-		if err != nil {
-			continue // missing day = zero contribution
+		fileName := "stats." + key + ".jsonl"
+		var existing []string
+		seenDir := map[string]struct{}{}
+		for _, d := range dirs {
+			if d == "" {
+				continue
+			}
+			cd := filepath.Clean(d)
+			if _, dup := seenDir[cd]; dup {
+				continue
+			}
+			seenDir[cd] = struct{}{}
+			p := filepath.Join(cd, fileName)
+			if _, err := os.Stat(p); err == nil {
+				existing = append(existing, p)
+			}
 		}
-		// We could use json.Decoder, but JSONL is line-oriented and lots
-		// of rows are small; a bufio.Scanner over the file with a hand
-		// parser is materially faster for the volumes involved.
-		sc := bufio.NewScanner(f)
-		// Bump max line size: history rows are small (~120 bytes) but
-		// guard against future schema growth.
-		sc.Buffer(make([]byte, 0, 8192), 64*1024)
-		for sc.Scan() {
-			line := sc.Bytes()
-			if len(line) < 10 {
-				continue
-			}
-			t := jsonExtractInt(line, `"t":`)
-			if t < startTs || t >= endTs { // v5.12: 左闭右开
-				continue
-			}
-			mac := jsonExtractString(line, `"mac":"`)
-			if mac == "" {
-				continue
-			}
-			tx := jsonExtractUint(line, `"tx":`)
-			rx := jsonExtractUint(line, `"rx":`)
-			out[mac] += tx + rx
+		if len(existing) == 0 {
+			continue
 		}
-		f.Close()
+
+		var dedup map[string]struct{}
+		if len(existing) > 1 {
+			dedup = make(map[string]struct{}, 256)
+		}
+		for _, p := range existing {
+			f, err := os.Open(p)
+			if err != nil {
+				continue
+			}
+			sc := bufio.NewScanner(f)
+			sc.Buffer(make([]byte, 0, 8192), 64*1024)
+			for sc.Scan() {
+				line := sc.Bytes()
+				if len(line) < 10 {
+					continue
+				}
+				t := jsonExtractInt(line, `"t":`)
+				if t < startTs || t >= endTs { // v5.12: 左闭右开
+					continue
+				}
+				if dedup != nil {
+					sline := strings.TrimSpace(string(line))
+					if _, dup := dedup[sline]; dup {
+						continue
+					}
+					dedup[sline] = struct{}{}
+				}
+				mac := jsonExtractString(line, `"mac":"`)
+				if mac == "" {
+					continue
+				}
+				tx := jsonExtractUint(line, `"tx":`)
+				rx := jsonExtractUint(line, `"rx":`)
+				out[mac] += tx + rx
+			}
+			_ = f.Close()
+		}
 	}
 	return nil
 }

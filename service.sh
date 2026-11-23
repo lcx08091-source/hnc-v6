@@ -2,20 +2,6 @@
 # service.sh — Magisk late_start service
 # 在系统完全启动后执行,可访问所有系统服务
 
-# v3.5.0 alpha-0:PATH 健壮性
-# 强制使用系统 PATH,排除 user app(MT 管理器/termux 等)对 awk/sed/grep/tc 的劫持
-# 之前的隐患:如果 user 在 root shell 中调用 service.sh,继承的 PATH 可能含 user app 路径,
-# 导致 HNC 用错版本的命令(行为可能跟系统 toybox 不一致)
-# v5.20: 末尾追加 /data/local/hnc/bin —— /system/bin 运行期被卸时, 本进程及其全部
-# 子进程(offload_guard / hotspotd 拉起的脚本等)的裸 applet 能落到 /data 副本上
-# (见下方 provision_fallback_tools)。放在最后, 平时仍优先用系统命令。
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
-
-# v5.9.3 BUG-009:service.sh 也会被 magiskd 直接拉起(umask=0),而且 WebUI 的
-# "重启后端"是直接 fork service.sh、根本不经过 post-fs-data.sh,所以这里必须
-# 有一份同款的 umask + chmod,不能只在 post-fs-data.sh 收。
-# 取 022 而非 077 的理由见 post-fs-data.sh 同段注释(bin/hnc_runtime_sync.sh
-# 的 `cp -rf` 同样不带 -p,077 会把脚本/二进制压到不可执行)。
 umask 022
 
 MODDIR=${0%/*}
@@ -25,24 +11,49 @@ RUN=$HNC_DIR/run
 RUN_DIR=$RUN
 DATA_DIR=$HNC_DIR/data
 
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
+
 # v5.28 A3: 哨兵的进程判活改读 /proc/<pid>/cmdline(不再依赖 ps 的输出格式,
 # ColorOS 的 ps 只显示短名字曾造成进程风暴)。pid_matches / pidfile_pid_matches
 # 定义在 bin/hnc_proc.sh; 优先用模块目录的副本, 运行目录副本兜底。
 _HNC_PROC="$MODDIR/bin/hnc_proc.sh"
 [ -f "$_HNC_PROC" ] || _HNC_PROC="$HNC_DIR/bin/hnc_proc.sh"
 [ -f "$_HNC_PROC" ] && . "$_HNC_PROC"
+command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$$" -500 2>/dev/null || true
 
 mkdir -p "$HNC_DIR/logs" "$RUN"
 # v6.0.0 Vector: 将 /data/local/hnc/run 挂载为 32M 内存 tmpfs (mode=0700),
 # 令 shm_vector.bin 双槽 seqlock 共享内存与高频运行态快照 100% 驻留 RAM, 实现手机 UFS 闪存零擦写寿命损耗。
-if [ -z "$HNC_TEST_MODE" ] && [ "$RUN" = "/data/local/hnc/run" ]; then
-    if ! grep -q " $RUN tmpfs " /proc/mounts 2>/dev/null; then
+if { [ -z "$HNC_TEST_MODE" ] && [ "$RUN" = "/data/local/hnc/run" ]; } || [ "${HNC_TEST_TMPFS_FALLBACK:-0}" = "1" ]; then
+    if grep -q " $RUN tmpfs " /proc/mounts 2>/dev/null; then
+        rm -f "$RUN/tmpfs_unavailable" 2>/dev/null || true
+    else
         _live_daemon=0
         if [ -f "$RUN/httpd.pid" ] && command -v pidfile_pid_matches >/dev/null 2>&1; then
             pidfile_pid_matches "$RUN/httpd.pid" hnc_httpd && _live_daemon=1
         fi
         if [ "$_live_daemon" -eq 0 ]; then
-            mount -t tmpfs -o size=32M,mode=0700,nosuid,nodev tmpfs "$RUN" 2>/dev/null || true
+            if [ "${HNC_TEST_TMPFS_FALLBACK:-0}" != "1" ]; then
+                mount -t tmpfs -o size=32M,mode=0700,nosuid,nodev tmpfs "$RUN" 2>/dev/null || true
+            fi
+            if grep -q " $RUN tmpfs " /proc/mounts 2>/dev/null; then
+                rm -f "$RUN/tmpfs_unavailable" 2>/dev/null || true
+            else
+                # tmpfs 挂载失败退回普通目录: 清空跨重启残留的运行态与锁目录并记标记
+                rm -rf "$RUN/app_limits.devs" "$RUN"/offload_guard.* "$RUN/mtk_hwnat.state" \
+                       "$RUN/clsact.state" "$RUN"/*.lock "$RUN/daemon.spawn" 2>/dev/null || true
+                printf 'tmpfs mount failed at %s\n' "$(date +%s 2>/dev/null || echo 0)" > "$RUN/tmpfs_unavailable" 2>/dev/null \
+                    || : > "$RUN/tmpfs_unavailable" 2>/dev/null || true
+                chmod 644 "$RUN/tmpfs_unavailable" 2>/dev/null || true
+            fi
         fi
     fi
 fi
@@ -55,51 +66,17 @@ chmod 700 "$HNC_DIR" "$HNC_DIR/logs" "$RUN" 2>/dev/null
 rm -f "$RUN/uplink_unsupported" "$RUN/uplink_fail_count" "$RUN/uplink_unsupported_logged" \
       "$RUN_DIR/leakguard_events.json" "$RUN_DIR/shm_vector.bin" 2>/dev/null || true
 
-# rc13: /system/bin resilience. SukiSU/ColorOS 在运行期会间歇性把 /system/bin 从
-# 模块脚本的挂载命名空间里卸掉 → 裸命令 sleep/head/sh 等 ENOENT,watchdog/
-# iptables_manager 等常驻 shell 逻辑随时崩(日志: full_init rc=-1、iptables sleep
-# ENOENT)。对策: 在 /data/local/hnc/bin(在 /data,永不被卸)放一组指向已复制
-# multicall 二进制的 applet 符号链接;脚本 PATH 含 /data/local/hnc/bin,/system/bin
-# 一旦消失,裸命令会自动 fallthrough 到这些 /data 副本。启动时 /system 仍正常,
-# 趁机复制。全程 best-effort,绝不让 service 失败。
 provision_fallback_tools() {
-    bbdir="$HNC_DIR/bin"
-    mkdir -p "$bbdir" 2>/dev/null || true
-    mc=""
-    _bbl="/data/adb/ksu/bin/busybox /data/adb/ap/bin/busybox /data/adb/magisk/busybox /system/xbin/busybox /system/bin/busybox"
-    for _cl in "$MODDIR/bin/hnc_compat.sh" "$HNC_DIR/bin/hnc_compat.sh"; do
-        [ -f "$_cl" ] || continue
-        _bbx=$(HNC_COMPAT_LIB=1 . "$_cl" && hnc_busybox_candidates | tr '\n' ' ')
-        [ -n "$_bbx" ] && _bbl="$_bbx"
-        break
-    done
-    for c in $_bbl /system/bin/toybox; do
-        [ -x "$c" ] && { mc="$c"; break; }
-    done
-    if [ -n "$mc" ] && cp -f "$mc" "$bbdir/.hnc_mc" 2>/dev/null; then
-        chmod 755 "$bbdir/.hnc_mc" 2>/dev/null
-        chcon u:object_r:system_file:s0 "$bbdir/.hnc_mc" 2>/dev/null || true
-        _al=" $("$bbdir/.hnc_mc" --list 2>/dev/null | tr '\n' ' ') "
-        [ "$_al" = "  " ] && _al=" $("$bbdir/.hnc_mc" 2>/dev/null | tr '\n' ' ') "
-        _core="sleep head tail cat printf date grep sed cut tr wc"
-        _extra="awk rm mkdir mv touch dirname basename stat readlink sort uniq find ln chmod chown id seq pidof ps xargs nohup cp cmp ls rmdir pkill usleep od timeout"
-        for ap in $_core $_extra; do
-            if [ "$_al" != "  " ]; then
-                case "$_al" in *" $ap "*) ln -sf .hnc_mc "$bbdir/$ap" 2>/dev/null ;; esac
-            else
-                case " $_core " in *" $ap "*) ln -sf .hnc_mc "$bbdir/$ap" 2>/dev/null ;; esac
-            fi
+    if ! command -v hnc_provision_fallback_tools >/dev/null 2>&1; then
+        for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh"; do
+            case "$_he" in /bin/hnc_env.sh) continue ;; esac
+            if [ -f "$_he" ]; then . "$_he"; break; fi
         done
-        command -v log >/dev/null 2>&1 && log "provisioned fallback applets from $mc -> $bbdir"
+        unset _he
     fi
-    if [ -x "$bbdir/.hnc_mc" ] && "$bbdir/.hnc_mc" ash -c 'exit 0' 2>/dev/null; then
-        ln -sf .hnc_mc "$bbdir/sh" 2>/dev/null
-    elif [ -e /system/bin/mksh ] && cp -fL /system/bin/mksh "$bbdir/sh" 2>/dev/null; then
-        chmod 755 "$bbdir/sh" 2>/dev/null
-    elif [ -e /system/bin/sh ] && cp -fL /system/bin/sh "$bbdir/sh" 2>/dev/null; then
-        chmod 755 "$bbdir/sh" 2>/dev/null
+    if command -v hnc_provision_fallback_tools >/dev/null 2>&1; then
+        hnc_provision_fallback_tools "$HNC_DIR" "$MODDIR"
     fi
-    [ -e "$bbdir/sh" ] && chcon u:object_r:system_file:s0 "$bbdir/sh" 2>/dev/null || true
 }
 provision_fallback_tools 2>/dev/null || true
 
@@ -135,16 +112,21 @@ is_pid_alive() {
 }
 
 process_by_name_alive() {
-    local n
+    local n _proot _d _p
     n="$1"
     [ -z "$n" ] && return 1
+    _proot="${HNC_PROC_ROOT:-/proc}"
+    if command -v pid_matches >/dev/null 2>&1; then
+        for _d in "$_proot"/[0-9]*; do
+            [ -r "$_d/cmdline" ] || continue
+            _p=${_d##*/}
+            if pid_matches "$_p" "$n" && is_pid_alive "$_p"; then
+                return 0
+            fi
+        done
+    fi
     pidof "$n" >/dev/null 2>&1 && return 0
-    ps -ef 2>/dev/null | awk -v n="$n" '
-        $0 !~ /awk/ && $0 !~ /grep/ {
-            if ($0 ~ ("(^|[ /])" n "([[:space:]]|$)")) found=1
-        }
-        END { exit found ? 0 : 1 }
-    '
+    return 1
 }
 
 list_watchdog_pids() {
@@ -154,22 +136,24 @@ list_watchdog_pids() {
             _wp=$(pidfile_live_pid "$RUN/watchdog.pid" hnc_watchdog 2>/dev/null)
             [ -n "$_wp" ] && echo "$_wp"
         fi
-        if [ "$_proot" = "/proc" ] && command -v pid_matches >/dev/null 2>&1; then
+        if command -v pid_matches >/dev/null 2>&1; then
             for _d in "$_proot"/[0-9]*; do
                 [ -r "$_d/cmdline" ] || continue
                 _p=${_d##*/}
                 pid_matches "$_p" hnc_watchdog && echo "$_p"
             done
         fi
-        for _cand in $(pidof hnc_watchdog 2>/dev/null) \
-                     $(ps -ef 2>/dev/null | awk '$0 !~ /awk/ && $0 !~ /grep/ && $0 ~ /(^|[ /])hnc_watchdog([[:space:]]|$)/ { print $2 }'); do
-            case "$_cand" in ''|*[!0-9]*) continue ;; esac
-            if [ -r "$_proot/$_cand/cmdline" ] && command -v pid_matches >/dev/null 2>&1; then
-                pid_matches "$_cand" hnc_watchdog && echo "$_cand"
-            else
-                echo "$_cand"
-            fi
-        done
+        if [ ! -r "$_proot/$$/cmdline" ]; then
+            for _cand in $(pidof hnc_watchdog 2>/dev/null) \
+                         $(ps -A 2>/dev/null | awk '$0 !~ /awk/ && $0 !~ /grep/ && $0 ~ /(^|[ /])hnc_watchdog([[:space:]]|$)/ { print $2 }'); do
+                case "$_cand" in ''|*[!0-9]*) continue ;; esac
+                if [ -r "$_proot/$_cand/cmdline" ] && command -v pid_matches >/dev/null 2>&1; then
+                    pid_matches "$_cand" hnc_watchdog && echo "$_cand"
+                else
+                    echo "$_cand"
+                fi
+            done
+        fi
     ) | awk 'NF && !seen[$1]++ { print $1 }'
 }
 
@@ -190,8 +174,11 @@ find_live_watchdog_pid() {
 }
 
 prune_duplicate_watchdogs() {
-    local reason pids count keep p
+    local reason pids count keep p _proot="${HNC_PROC_ROOT:-/proc}"
     reason="$1"
+    if [ "$_proot" = "/proc" ] && { [ "${HNC_DIR:-/data/local/hnc}" != "/data/local/hnc" ] || [ -n "${HNC_TEST_MODE:-}" ]; }; then
+        return 0
+    fi
     pids="$(list_watchdog_pids | tr '\n' ' ')"
     count=$(echo "$pids" | wc -w | tr -d ' ')
     [ -z "$count" ] && count=0
@@ -210,12 +197,16 @@ prune_duplicate_watchdogs() {
 
     for p in $pids; do
         [ -z "$p" ] && continue
+        [ "$p" = "$$" ] && continue
+        [ -n "${PPID:-}" ] && [ "$p" = "$PPID" ] && continue
         [ "$p" = "$keep" ] && continue
         kill "$p" 2>/dev/null || true
     done
     sleep 0.3 2>/dev/null || sleep 1
     for p in $pids; do
         [ -z "$p" ] && continue
+        [ "$p" = "$$" ] && continue
+        [ -n "${PPID:-}" ] && [ "$p" = "$PPID" ] && continue
         [ "$p" = "$keep" ] && continue
         if is_pid_alive "$p"; then
             kill -9 "$p" 2>/dev/null || true
@@ -224,47 +215,73 @@ prune_duplicate_watchdogs() {
     done
 }
 
+_is_exact_service_sh_pid() {
+    local _sp="$1" _proot="${2:-/proc}" _a0="" _a1=""
+    case "$_sp" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$_sp" = "$$" ] && return 1
+    [ -n "${PPID:-}" ] && [ "$_sp" = "$PPID" ] && return 1
+    [ -r "$_proot/$_sp/cmdline" ] || return 1
+    _a0=$(tr '\000' '\n' < "$_proot/$_sp/cmdline" 2>/dev/null | sed -n '1p')
+    _a1=$(tr '\000' '\n' < "$_proot/$_sp/cmdline" 2>/dev/null | sed -n '2p')
+    case "$_a0" in
+        */hotspot_net_ctl/service.sh|*/hotspot_network_control/service.sh|/data/adb/hnc/service.sh|"$MODDIR/service.sh")
+            return 0
+            ;;
+    esac
+    case "${_a0##*/}" in
+        sh|mksh|ash|dash|busybox)
+            [ "$_a1" = "-c" ] && return 1
+            case "$_a1" in
+                */hotspot_net_ctl/service.sh|*/hotspot_network_control/service.sh|/data/adb/hnc/service.sh|"$MODDIR/service.sh")
+                    return 0
+                    ;;
+            esac
+            ;;
+    esac
+    return 1
+}
+
 prune_stale_service_sentinels() {
-    local self proot old_spid sp_cmd pids d p cl
+    local self proot old_spid pids d p
     self=$$
     proot="${HNC_PROC_ROOT:-/proc}"
-    if [ "$MODDIR" != "/data/adb/modules/hotspot_network_control" ] && [ -d "/data/adb/modules/hotspot_network_control" ]; then
-        : > "/data/adb/modules/hotspot_network_control/disable" 2>/dev/null || true
-        : > "/data/adb/modules/hotspot_network_control/remove" 2>/dev/null || true
+    if [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+        if [ "$MODDIR" != "/data/adb/modules/hotspot_network_control" ] && [ -d "/data/adb/modules/hotspot_network_control" ]; then
+            : > "/data/adb/modules/hotspot_network_control/disable" 2>/dev/null || true
+            : > "/data/adb/modules/hotspot_network_control/remove" 2>/dev/null || true
+        fi
     fi
     pids=""
-    # 删除 sentinel.pid 前必须先读出旧哨兵 PID 并校验 /proc/<pid>/cmdline 含 service.sh,
+    # 删除 sentinel.pid 前必须先读出旧哨兵 PID 并精确校验 argv 指向 service.sh,
     # 优雅终止后再删 pidfile, 根治重启后端时旧后台哨兵 subshell 残留堆积!
     if [ -f "$RUN/sentinel.pid" ]; then
         old_spid=$(cat "$RUN/sentinel.pid" 2>/dev/null | tr -dc '0-9')
-        if [ -n "$old_spid" ] && [ "$old_spid" != "$self" ] && [ -r "$proot/$old_spid/cmdline" ]; then
-            sp_cmd=$(tr '\000' ' ' < "$proot/$old_spid/cmdline" 2>/dev/null)
-            case "$sp_cmd" in
-                *service.sh*) pids="$old_spid" ;;
-            esac
+        if [ -n "$old_spid" ] && [ "$old_spid" != "$self" ] && _is_exact_service_sh_pid "$old_spid" "$proot"; then
+            pids="$old_spid"
         fi
     fi
-    # 扫描 /proc/<pid>/cmdline 兜底捕获未登记在 sentinel.pid 的旧 service.sh 实例(不依赖截断的 ps)
-    for d in "$proot"/[0-9]*; do
-        [ -r "$d/cmdline" ] || continue
-        p=${d##*/}
-        [ "$p" = "$self" ] && continue
-        cl=$(tr '\000' ' ' < "$d/cmdline" 2>/dev/null)
-        case "$cl" in
-            *hotspot_net_ctl/service.sh*|*hotspot_network_control/service.sh*|*/data/adb/hnc/service.sh*|*"$MODDIR/service.sh"*)
+    # 仅在真机运行环境扫描 /proc 兜底未登记在 sentinel.pid 的旧 service.sh 实例(沙箱单测绝不扫宿主机 /proc)
+    if [ "$proot" != "/proc" ] || { [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+        for d in "$proot"/[0-9]*; do
+            [ -r "$d/cmdline" ] || continue
+            p=${d##*/}
+            [ "$p" = "$self" ] && continue
+            if _is_exact_service_sh_pid "$p" "$proot"; then
                 pids="$pids $p"
-                ;;
-        esac
-    done
+            fi
+        done
+    fi
     pids=$(printf '%s\n' $pids | awk 'NF && !seen[$1]++ { print $1 }' | tr '\n' ' ')
     if [ -n "$pids" ]; then
         log "stopping stale service/sentinel pids: $pids"
         for p in $pids; do
-            [ -n "$p" ] && kill "$p" 2>/dev/null || true
+            [ -n "$p" ] && [ "$p" != "$$" ] && [ "$p" != "${PPID:-}" ] && kill "$p" 2>/dev/null || true
         done
         sleep 0.3 2>/dev/null || sleep 1
         for p in $pids; do
             [ -z "$p" ] && continue
+            [ "$p" = "$$" ] && continue
+            [ -n "${PPID:-}" ] && [ "$p" = "$PPID" ] && continue
             if is_pid_alive "$p"; then
                 kill -9 "$p" 2>/dev/null || true
                 log "KILL stale service/sentinel pid=$p"
@@ -324,19 +341,20 @@ fi
 
 # v6.x 升级迁移: nDPI 实验已整体移除
 migrate_remove_ndpi() {
-    _np=$(cat "$RUN/ndpi_continuous.pid" 2>/dev/null)
-    case "$_np" in
-        ''|*[!0-9]*) _np="" ;;
-    esac
-    if [ -n "$_np" ] && kill -0 "$_np" 2>/dev/null \
-       && grep -q "ndpi_continuous" "/proc/$_np/cmdline" 2>/dev/null; then
-        kill "$_np" 2>/dev/null
-        sleep 1
-        kill -9 "$_np" 2>/dev/null
-        log "migrate: stopped legacy ndpi_continuous.sh pid=$_np"
+    _np=$(cat "$RUN/ndpi_continuous.pid" 2>/dev/null | tr -dc '0-9')
+    if [ -n "$_np" ] && [ "$_np" != "$$" ] && [ "$_np" != "${PPID:-}" ] && kill -0 "$_np" 2>/dev/null; then
+        _na0=$(tr '\000' '\n' < "/proc/$_np/cmdline" 2>/dev/null | sed -n '1p')
+        _na1=$(tr '\000' '\n' < "/proc/$_np/cmdline" 2>/dev/null | sed -n '2p')
+        if [ "${_na0##*/}" = "ndpi_continuous.sh" ] || { [ "$_na1" != "-c" ] && [ "${_na1##*/}" = "ndpi_continuous.sh" ]; }; then
+            kill "$_np" 2>/dev/null
+            sleep 1
+            kill -9 "$_np" 2>/dev/null
+            log "migrate: stopped legacy ndpi_continuous.sh pid=$_np"
+        fi
+        unset _na0 _na1
     fi
-    if command -v pkill >/dev/null 2>&1; then
-        pkill -f "$HNC_DIR/bin/hnc_ndpi_probe" 2>/dev/null || true
+    if [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v pkill >/dev/null 2>&1; then
+        pkill -x hnc_ndpi_probe 2>/dev/null || true
     fi
     _nd_removed=0
     for _f in "$RUN/ndpi_continuous.pid" "$RUN/ndpi_continuous_current.csv" \
@@ -368,7 +386,11 @@ migrate_remove_ndpi() {
     [ "$_nd_removed" -gt 0 ] && log "migrate: removed $_nd_removed legacy file(s)"
     return 0
 }
-migrate_remove_ndpi
+if [ "$_RB" != 3 ]; then
+    migrate_remove_ndpi
+else
+    log "rollback: version pinned, skip migrate_remove_ndpi"
+fi
 
 if [ -f "$HNC_DIR/bin/capability_probe.sh" ]; then
     ( HNC="$HNC_DIR" sh "$HNC_DIR/bin/capability_probe.sh" >> "$HNC_DIR/logs/capabilities.log" 2>&1 ) &
@@ -475,6 +497,8 @@ else
     log "WARN: hotspotd not up after 5s (watchdog will retry; device list unaffected)"
 fi
 prune_duplicate_hotspotd
+_hp_keep=$(pidfile_live_pid "$RUN/hotspotd.pid" hotspotd 2>/dev/null)
+[ -n "$_hp_keep" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$_hp_keep" -800 2>/dev/null || true
 
 # ─── WebUI 访问白名单落防火墙(必须在 httpd 开监听之前) ────────
 if [ -f "$HNC_DIR/bin/webui_guard.sh" ]; then
@@ -490,30 +514,32 @@ launch_httpd_safe() {
     log "launch_httpd_safe: hnc_httpd started (PID=$!; remote port follows remote_enabled)"
 }
 
-# 基于 /proc/<pid>/cmdline 清理旧模块残留的重复 hnc_httpd 实例
+# 基于精确进程名/argv[0] 清理旧模块残留的重复 hnc_httpd 实例(严禁整条 cmdline *hnc_httpd* 通配)
 prune_duplicate_httpds() {
     local proot="${HNC_PROC_ROOT:-/proc}"
     local keep="" d p cmd count=0 all_pids=""
-    keep=$(cat "$RUN/httpd.pid" 2>/dev/null | tr -dc '0-9')
+    if [ "$proot" = "/proc" ] && { [ "${HNC_DIR:-/data/local/hnc}" != "/data/local/hnc" ] || [ -n "${HNC_TEST_MODE:-}" ]; }; then
+        return 0
+    fi
+    keep=$(pidfile_live_pid "$RUN/httpd.pid" hnc_httpd 2>/dev/null)
     for d in "$proot"/[0-9]*; do
         [ -r "$d/cmdline" ] || continue
         p=${d##*/}
+        [ "$p" = "$$" ] && continue
+        [ -n "${PPID:-}" ] && [ "$p" = "$PPID" ] && continue
+        pid_matches "$p" hnc_httpd || continue
         cmd=$(tr '\000' ' ' < "$d/cmdline" 2>/dev/null)
         case "$cmd" in
-            *hnc_httpd*)
-                case "$cmd" in
-                    *" -port "*|*" -loopback-port "*|*hotspot_network_control*)
-                        kill "$p" 2>/dev/null || true
-                        usleep 100000 2>/dev/null || sleep 1
-                        kill -9 "$p" 2>/dev/null || true
-                        log "terminated legacy hnc_httpd instance pid=$p"
-                        continue
-                        ;;
-                esac
-                all_pids="$all_pids $p"
-                count=$((count + 1))
+            *" -port "*|*" -loopback-port "*|*hotspot_network_control*)
+                kill "$p" 2>/dev/null || true
+                usleep 100000 2>/dev/null || sleep 1
+                kill -9 "$p" 2>/dev/null || true
+                log "terminated legacy hnc_httpd instance pid=$p"
+                continue
                 ;;
         esac
+        all_pids="$all_pids $p"
+        count=$((count + 1))
     done
     if [ "$count" -gt 1 ]; then
         case " $all_pids " in
@@ -523,6 +549,8 @@ prune_duplicate_httpds() {
         [ -n "$keep" ] && echo "$keep" > "$RUN/httpd.pid" 2>/dev/null || true
         for p in $all_pids; do
             [ "$p" = "$keep" ] && continue
+            [ "$p" = "$$" ] && continue
+            [ -n "${PPID:-}" ] && [ "$p" = "$PPID" ] && continue
             kill "$p" 2>/dev/null || true
             usleep 100000 2>/dev/null || sleep 1
             kill -9 "$p" 2>/dev/null || true
@@ -534,6 +562,9 @@ prune_duplicate_httpds() {
 find_live_httpd_by_proc() {
     local proot="${HNC_PROC_ROOT:-/proc}"
     local d p
+    if [ "$proot" = "/proc" ] && { [ "${HNC_DIR:-/data/local/hnc}" != "/data/local/hnc" ] || [ -n "${HNC_TEST_MODE:-}" ]; }; then
+        return 1
+    fi
     for d in "$proot"/[0-9]*; do
         [ -r "$d/cmdline" ] || continue
         p=${d##*/}
@@ -558,7 +589,9 @@ if [ -x "$HNC_DIR/daemon/hnc_httpd/hnc_httpd" ]; then
         launch_httpd_safe
         sleep 1
         prune_duplicate_httpds
+        HP=$(pidfile_live_pid "$RUN/httpd.pid" hnc_httpd 2>/dev/null)
     fi
+    [ -n "$HP" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$HP" -800 2>/dev/null || true
 fi
 
 # ─── 启动 Watchdog ──────────────────────────────────────────
@@ -571,18 +604,21 @@ else
     LIVE_WD=$(find_live_watchdog_pid)
     if [ -n "$LIVE_WD" ] && kill -0 "$LIVE_WD" 2>/dev/null; then
         echo "$LIVE_WD" > "$RUN/watchdog.pid" 2>/dev/null || true
+        WPID="$LIVE_WD"
         log "watchdog live without pidfile (PID=$LIVE_WD), repaired pidfile"
     else
         rm -f "$RUN/watchdog.pid" 2>/dev/null || true
         if [ -x "$HNC_DIR/bin/hnc_watchdog" ]; then
             nohup "$HNC_DIR/bin/hnc_watchdog" >> "$HNC_DIR/logs/watchdog.log" 2>&1 &
-            echo $! > "$RUN/watchdog.pid"
+            WPID="$!"
+            echo "$WPID" > "$RUN/watchdog.pid"
             log "watchdog (Go) started (PID=$(cat "$RUN/watchdog.pid" 2>/dev/null))"
         else
             log "FATAL: bin/hnc_watchdog missing, watchdog not started"
         fi
     fi
 fi
+[ -n "$WPID" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$WPID" -900 2>/dev/null || true
 
 # 启动后延迟清理一次长期未见的离线规则, 防止 rules.json 膨胀。
 if [ -x "$HNC_DIR/bin/cleanup_stale_rules.sh" ]; then
@@ -636,6 +672,9 @@ DPID_GUARD_PID="$RUN/dpid_guard.pid"
 find_live_dpid_guard_pid() {
     local proot="${HNC_PROC_ROOT:-/proc}"
     local d p
+    if [ "$proot" = "/proc" ] && { [ "${HNC_DIR:-/data/local/hnc}" != "/data/local/hnc" ] || [ -n "${HNC_TEST_MODE:-}" ]; }; then
+        return 1
+    fi
     for d in "$proot"/[0-9]*; do
         [ -r "$d/cmdline" ] || continue
         p=${d##*/}
@@ -644,7 +683,7 @@ find_live_dpid_guard_pid() {
             return 0
         fi
     done
-    ps -ef 2>/dev/null | awk '$0 !~ /awk/ && $0 ~ /(^|[ \/])hnc_launcher([ \t]|$)/ { print $2; exit }'
+    return 1
 }
 
 # launcher 探测
@@ -708,97 +747,115 @@ else
         log "dpid: installed default dpi_config.json to $DPID_CONFIG"
     fi
 
-    MOD_RULES_D="$MODDIR/data/dpi_rules.d"
-    DPID_RULES_D="$HNC_DIR/etc/dpi_rules.d"
-    if [ -d "$MOD_RULES_D" ]; then
-        _RSYNC="$MODDIR/bin/dpi_rules_sync.sh"
-        [ -f "$_RSYNC" ] || _RSYNC="$HNC_DIR/bin/dpi_rules_sync.sh"
-        if [ -f "$_RSYNC" ] && sh "$_RSYNC" "$MOD_RULES_D" "$DPID_RULES_D" "$MODDIR/module.prop" >> "$LOG" 2>&1; then
-            log "dpid: synced dpi_rules.d/ ($(find "$DPID_RULES_D" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l) subset files) to $DPID_RULES_D"
-        else
-            log "dpid: WARN dpi_rules.d sync failed (see logs/dpi_rules_sync.log); keeping existing $DPID_RULES_D"
+    if [ "$_RB" = 3 ]; then
+        log "rollback: version pinned, skip etc/ DPI rules sync (keeping existing $HNC_DIR/etc)"
+    else
+        MOD_RULES_D="$MODDIR/data/dpi_rules.d"
+        DPID_RULES_D="$HNC_DIR/etc/dpi_rules.d"
+        if [ -d "$MOD_RULES_D" ]; then
+            _RSYNC="$MODDIR/bin/dpi_rules_sync.sh"
+            [ -f "$_RSYNC" ] || _RSYNC="$HNC_DIR/bin/dpi_rules_sync.sh"
+            if [ -f "$_RSYNC" ] && sh "$_RSYNC" "$MOD_RULES_D" "$DPID_RULES_D" "$MODDIR/module.prop" >> "$LOG" 2>&1; then
+                log "dpid: synced dpi_rules.d/ ($(find "$DPID_RULES_D" -maxdepth 1 -type f -name '*.json' 2>/dev/null | wc -l) subset files) to $DPID_RULES_D"
+            else
+                log "dpid: WARN dpi_rules.d sync failed (see logs/dpi_rules_sync.log); keeping existing $DPID_RULES_D"
+            fi
         fi
-    fi
 
-    DPID_BLOCKLIST="$HNC_DIR/etc/auto_expand_blocklist.json"
-    if [ ! -f "$DPID_BLOCKLIST" ] && [ -f "$MODDIR/data/auto_expand_blocklist.json" ]; then
-        cp -f "$MODDIR/data/auto_expand_blocklist.json" "$DPID_BLOCKLIST" 2>/dev/null
-        chmod 644 "$DPID_BLOCKLIST" 2>/dev/null
-        log "dpid: installed default auto_expand_blocklist.json to $DPID_BLOCKLIST"
-    elif [ -f "$DPID_BLOCKLIST" ] && [ -f "$MODDIR/data/auto_expand_blocklist.json" ]; then
-        _BLK_TMP="$DPID_BLOCKLIST.merge.$$"
-        if awk '
-            FNR == NR {
-                if (match($0, /"[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+"/)) {
-                    d = substr($0, RSTART + 1, RLENGTH - 2)
-                    if (d !~ / /) seen[tolower(d)] = 1
-                }
-                lines[++n] = $0
-                next
-            }
-            {
-                if (match($0, /"[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+"/)) {
-                    d = substr($0, RSTART + 1, RLENGTH - 2)
-                    dl = tolower(d)
-                    if (d !~ / / && !(dl in seen)) {
-                        seen[dl] = 1
-                        add[++m] = dl
+        DPID_BLOCKLIST="$HNC_DIR/etc/auto_expand_blocklist.json"
+        if [ ! -f "$DPID_BLOCKLIST" ] && [ -f "$MODDIR/data/auto_expand_blocklist.json" ]; then
+            cp -f "$MODDIR/data/auto_expand_blocklist.json" "$DPID_BLOCKLIST" 2>/dev/null
+            chmod 644 "$DPID_BLOCKLIST" 2>/dev/null
+            log "dpid: installed default auto_expand_blocklist.json to $DPID_BLOCKLIST"
+        elif [ -f "$DPID_BLOCKLIST" ] && [ -f "$MODDIR/data/auto_expand_blocklist.json" ]; then
+            _BLK_TMP="$DPID_BLOCKLIST.merge.$$"
+            if awk '
+                FNR == NR {
+                    if (match($0, /"[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+"/)) {
+                        d = substr($0, RSTART + 1, RLENGTH - 2)
+                        if (d !~ / /) seen[tolower(d)] = 1
                     }
+                    lines[++n] = $0
+                    next
                 }
-            }
-            END {
-                if (m == 0) exit 2
-                ins = 0
-                for (i = n; i >= 1; i--) {
-                    if (lines[i] ~ /\]/) { ins = i; break }
-                }
-                if (ins == 0) exit 1
-                prev = ins - 1
-                while (prev >= 1 && lines[prev] ~ /^[[:space:]]*$/) prev--
-                if (prev >= 1 && lines[prev] !~ /\[[[:space:]]*$/ && lines[prev] !~ /,[[:space:]]*$/) {
-                    sub(/[[:space:]]*$/, ",", lines[prev])
-                }
-                for (i = 1; i <= n; i++) {
-                    if (i == ins) {
-                        for (j = 1; j <= m; j++) {
-                            sep = (j < m) ? "," : ""
-                            print "    \"" add[j] "\"" sep
+                {
+                    if (match($0, /"[A-Za-z0-9._-]+\.[A-Za-z0-9._-]+"/)) {
+                        d = substr($0, RSTART + 1, RLENGTH - 2)
+                        dl = tolower(d)
+                        if (d !~ / / && !(dl in seen)) {
+                            seen[dl] = 1
+                            add[++m] = dl
                         }
                     }
-                    print lines[i]
                 }
-            }
-        ' "$DPID_BLOCKLIST" "$MODDIR/data/auto_expand_blocklist.json" > "$_BLK_TMP" 2>/dev/null && [ -s "$_BLK_TMP" ]; then
-            chmod 644 "$_BLK_TMP" 2>/dev/null || true
-            mv -f "$_BLK_TMP" "$DPID_BLOCKLIST" 2>/dev/null && log "dpid: merged newly shipped shared-infra apexes into $DPID_BLOCKLIST"
-        else
-            rm -f "$_BLK_TMP" 2>/dev/null || true
+                END {
+                    if (m == 0) exit 2
+                    ins = 0
+                    for (i = n; i >= 1; i--) {
+                        if (lines[i] ~ /\]/) { ins = i; break }
+                    }
+                    if (ins == 0) exit 1
+                    prev = ins - 1
+                    while (prev >= 1 && lines[prev] ~ /^[[:space:]]*$/) prev--
+                    if (prev >= 1 && lines[prev] !~ /\[[[:space:]]*$/ && lines[prev] !~ /,[[:space:]]*$/) {
+                        sub(/[[:space:]]*$/, ",", lines[prev])
+                    }
+                    for (i = 1; i <= n; i++) {
+                        if (i == ins) {
+                            for (j = 1; j <= m; j++) {
+                                sep = (j < m) ? "," : ""
+                                print "    \"" add[j] "\"" sep
+                            }
+                        }
+                        print lines[i]
+                    }
+                }
+            ' "$DPID_BLOCKLIST" "$MODDIR/data/auto_expand_blocklist.json" > "$_BLK_TMP" 2>/dev/null && [ -s "$_BLK_TMP" ]; then
+                chmod 644 "$_BLK_TMP" 2>/dev/null || true
+                mv -f "$_BLK_TMP" "$DPID_BLOCKLIST" 2>/dev/null && log "dpid: merged newly shipped shared-infra apexes into $DPID_BLOCKLIST"
+            else
+                rm -f "$_BLK_TMP" 2>/dev/null || true
+            fi
         fi
-    fi
 
-    DPID_ENTITY="$HNC_DIR/etc/entity_db.json"
-    MOD_ENTITY="$MODDIR/data/entity_db.json"
-    if [ ! -f "$DPID_ENTITY" ] && [ -f "$MOD_ENTITY" ]; then
-        cp -f "$MOD_ENTITY" "$DPID_ENTITY" 2>/dev/null
-        chmod 644 "$DPID_ENTITY" 2>/dev/null
-        log "dpid: installed default entity_db.json to $DPID_ENTITY"
-    elif [ -f "$DPID_ENTITY" ] && [ -f "$MOD_ENTITY" ]; then
-        MOD_EV=$(grep -m1 '"version"' "$MOD_ENTITY" 2>/dev/null | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-        ETC_EV=$(grep -m1 '"version"' "$DPID_ENTITY" 2>/dev/null | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
-        if [ -n "$MOD_EV" ] && [ "$MOD_EV" != "$ETC_EV" ]; then
-            BAK="$DPID_ENTITY.bak-$(date +%s 2>/dev/null || echo prev)"
-            mv "$DPID_ENTITY" "$BAK" 2>/dev/null
+        DPID_ENTITY="$HNC_DIR/etc/entity_db.json"
+        MOD_ENTITY="$MODDIR/data/entity_db.json"
+        if [ ! -f "$DPID_ENTITY" ] && [ -f "$MOD_ENTITY" ]; then
             cp -f "$MOD_ENTITY" "$DPID_ENTITY" 2>/dev/null
             chmod 644 "$DPID_ENTITY" 2>/dev/null
-            log "dpid: upgraded entity_db.json: was [$ETC_EV] -> now [$MOD_EV]; user backup at $BAK"
+            log "dpid: installed default entity_db.json to $DPID_ENTITY"
+        elif [ -f "$DPID_ENTITY" ] && [ -f "$MOD_ENTITY" ]; then
+            MOD_EV=$(grep -m1 '"version"' "$MOD_ENTITY" 2>/dev/null | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+            ETC_EV=$(grep -m1 '"version"' "$DPID_ENTITY" 2>/dev/null | sed 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+            if [ -n "$MOD_EV" ] && [ "$MOD_EV" != "$ETC_EV" ]; then
+                BAK="$DPID_ENTITY.bak-$(date +%s 2>/dev/null || echo prev)"
+                mv "$DPID_ENTITY" "$BAK" 2>/dev/null
+                cp -f "$MOD_ENTITY" "$DPID_ENTITY" 2>/dev/null
+                chmod 644 "$DPID_ENTITY" 2>/dev/null
+                log "dpid: upgraded entity_db.json: was [$ETC_EV] -> now [$MOD_EV]; user backup at $BAK"
+            fi
         fi
-    fi
 
-    DPID_JA4="$HNC_DIR/etc/dpi_ja4_fingerprints.json"
-    if [ ! -f "$DPID_JA4" ] && [ -f "$MODDIR/data/dpi_ja4_fingerprints.json" ]; then
-        cp -f "$MODDIR/data/dpi_ja4_fingerprints.json" "$DPID_JA4" 2>/dev/null
-        chmod 644 "$DPID_JA4" 2>/dev/null
-        log "dpid: installed default dpi_ja4_fingerprints.json to $DPID_JA4"
+        DPID_JA4="$HNC_DIR/etc/dpi_ja4_fingerprints.json"
+        MOD_JA4="$MODDIR/data/dpi_ja4_fingerprints.json"
+        if [ ! -f "$DPID_JA4" ] && [ -f "$MOD_JA4" ]; then
+            cp -f "$MOD_JA4" "$DPID_JA4" 2>/dev/null
+            chmod 644 "$DPID_JA4" 2>/dev/null
+            log "dpid: installed default dpi_ja4_fingerprints.json to $DPID_JA4"
+        elif [ -f "$DPID_JA4" ] && [ -f "$MOD_JA4" ]; then
+            MOD_JV=$(grep -m1 '"rules_version"' "$MOD_JA4" 2>/dev/null | sed 's/.*"rules_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+            ETC_JV=$(grep -m1 '"rules_version"' "$DPID_JA4" 2>/dev/null | sed 's/.*"rules_version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/')
+            if [ -n "$MOD_JV" ] && [ "$MOD_JV" != "$ETC_JV" ]; then
+                JA4_BAK="$DPID_JA4.bak-$(date +%s 2>/dev/null || echo prev)"
+                cp -f "$DPID_JA4" "$JA4_BAK" 2>/dev/null || true
+                if cp -f "$MOD_JA4" "$DPID_JA4.tmp.$$" 2>/dev/null && mv -f "$DPID_JA4.tmp.$$" "$DPID_JA4" 2>/dev/null; then
+                    chmod 644 "$DPID_JA4" 2>/dev/null
+                    log "dpid: upgraded dpi_ja4_fingerprints.json: was [$ETC_JV] -> now [$MOD_JV]; backup at $JA4_BAK"
+                else
+                    rm -f "$DPID_JA4.tmp.$$" 2>/dev/null || true
+                fi
+            fi
+        fi
     fi
 
     if [ "$DPID_LAUNCHER" != "$DPID_BIN" ]; then
@@ -809,15 +866,20 @@ else
             live_gp=$(find_live_dpid_guard_pid)
             if [ -n "$live_gp" ] && kill -0 "$live_gp" 2>/dev/null; then
                 echo "$live_gp" > "$DPID_GUARD_PID" 2>/dev/null || true
+                gp="$live_gp"
                 log "hnc_dpid launcher live without pidfile (PID=$live_gp, choice=$LAUNCHER_CHOICE), repaired pidfile and skipped duplicate launch"
             else
                 rm -f "$DPID_GUARD_PID" 2>/dev/null || true
                 log "starting hnc_dpid launcher: $DPID_LAUNCHER (choice=$LAUNCHER_CHOICE)"
                 nohup "$DPID_LAUNCHER" >> "$HNC_DIR/logs/dpid_guard.log" 2>&1 &
-                echo $! > "$DPID_GUARD_PID"
-                log "hnc_dpid launcher started (PID: $(cat $DPID_GUARD_PID))"
+                gp="$!"
+                echo "$gp" > "$DPID_GUARD_PID"
+                log "hnc_dpid launcher started (PID: $(cat "$DPID_GUARD_PID"))"
             fi
         fi
+        [ -n "$gp" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$gp" -850 2>/dev/null || true
+        _dp_child=$(pidfile_live_pid "$DPID_PID" hnc_dpid 2>/dev/null)
+        [ -n "$_dp_child" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$_dp_child" -700 2>/dev/null || true
     else
         dp=$(pidfile_live_pid "$DPID_PID" hnc_dpid)
         if [ -n "$dp" ] && kill -0 "$dp" 2>/dev/null; then
@@ -825,14 +887,17 @@ else
         else
             log "starting hnc_dpid direct: $DPID_BIN (no launcher available)"
             nohup "$DPID_BIN" -config "$DPID_CONFIG" >> "$HNC_DIR/logs/dpid.log" 2>&1 &
-            echo $! > "$DPID_PID"
-            log "hnc_dpid started (PID: $(cat $DPID_PID))"
+            dp="$!"
+            echo "$dp" > "$DPID_PID"
+            log "hnc_dpid started (PID: $(cat "$DPID_PID"))"
         fi
+        [ -n "$dp" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$dp" -700 2>/dev/null || true
     fi
 fi
 
 # ─── rc30.12.16: 进程哨兵循环 ──────────────────────────────────
 (
+    command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$$" -850 2>/dev/null || true
     sleep 15
     [ -f "$HNC_DIR/bin/hnc_activity.sh" ] && . "$HNC_DIR/bin/hnc_activity.sh"
     log "sentinel: starting (launcher_choice=$LAUNCHER_CHOICE, dpid_launcher=$DPID_LAUNCHER, scope=watchdog(+rollback); dpid->launcher+go-watchdog)"
@@ -843,9 +908,13 @@ fi
             log "sentinel: hnc_watchdog not running, relaunching"
             nohup "$HNC_DIR/bin/hnc_watchdog" \
                 >> "$HNC_DIR/logs/watchdog.log" 2>&1 &
-            echo $! > "$RUN/watchdog.pid" 2>/dev/null || true
+            _new_wd="$!"
+            echo "$_new_wd" > "$RUN/watchdog.pid" 2>/dev/null || true
+            command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$_new_wd" -900 2>/dev/null || true
             sleep 2
         fi
+        _cur_dp=$(pidfile_live_pid "$RUN/dpid.pid" hnc_dpid 2>/dev/null)
+        [ -n "$_cur_dp" ] && command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$_cur_dp" -700 2>/dev/null || true
 
         _sent_sleep=30
         if [ -f "$HNC_DIR/data/rollback.observing" ] && [ -f "$HNC_DIR/bin/hnc_rollback.sh" ]; then
@@ -860,5 +929,7 @@ fi
         sleep "$_sent_sleep"
     done
 ) >> "$HNC_DIR/logs/sentinel.log" 2>&1 &
-echo $! > "$RUN/sentinel.pid" 2>/dev/null || true
+_sent_pid="$!"
+echo "$_sent_pid" > "$RUN/sentinel.pid" 2>/dev/null || true
+command -v hnc_protect_daemon >/dev/null 2>&1 && hnc_protect_daemon "$_sent_pid" -850 2>/dev/null || true
 log "sentinel started (PID=$(cat "$RUN/sentinel.pid" 2>/dev/null), dpid_launcher=$DPID_LAUNCHER, scope=watchdog+rollback, ${_HNC_SVC_VER:-v6.1})"

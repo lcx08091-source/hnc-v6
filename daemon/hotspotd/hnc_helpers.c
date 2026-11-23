@@ -133,6 +133,8 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
     }
 
     if (pid == 0) {
+        (void)setpgid(0, 0);
+
         struct sigaction sa_dfl;
         memset(&sa_dfl, 0, sizeof(sa_dfl));
         sa_dfl.sa_handler = SIG_DFL;
@@ -158,6 +160,7 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
         _exit(127);
     }
 
+    (void)setpgid(pid, pid);
     close(pipefd[1]);
     int flags = fcntl(pipefd[0], F_GETFL, 0);
     if (flags >= 0) fcntl(pipefd[0], F_SETFL, flags | O_NONBLOCK);
@@ -171,7 +174,8 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
     while (got < cap - 1) {
         int64_t remain_us = deadline_us - hnc_mono_us();
         if (remain_us <= 0) {
-            kill(pid, SIGKILL);
+            (void)kill(-pid, SIGKILL);
+            (void)kill(pid, SIGKILL);
             killed = 1;
             break;
         }
@@ -191,7 +195,8 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
             break;
         }
         if (ret == 0) {
-            kill(pid, SIGKILL);
+            (void)kill(-pid, SIGKILL);
+            (void)kill(pid, SIGKILL);
             killed = 1;
             break;
         }
@@ -208,13 +213,44 @@ int hnc_run_cmd_timeout(char *const argv[], char *buf, size_t cap, int timeout_m
         got += (size_t)n;
     }
 
-    if (!killed && got >= cap - 1) kill(pid, SIGKILL);
+    if (!killed && got >= cap - 1) {
+        (void)kill(-pid, SIGKILL);
+        (void)kill(pid, SIGKILL);
+        killed = 1;
+    }
 
     close(pipefd[0]);
 
-    int status;
-    pid_t w;
-    do { w = waitpid(pid, &status, 0); } while (w < 0 && errno == EINTR);
+    /* 关闭管道后用 WNOHANG 等到截止时间, 未退则 kill(-pid, SIGKILL) 后有界回收,
+     * 彻底堵死子进程提前关闭 stdout 但本体卡住导致的无超时阻塞 waitpid */
+    int status = 0;
+    int reaped = 0;
+    while (!reaped) {
+        pid_t w = waitpid(pid, &status, WNOHANG);
+        if (w == pid || (w < 0 && errno != EINTR)) {
+            reaped = 1;
+            break;
+        }
+        if (killed || hnc_mono_us() >= deadline_us)
+            break;
+        struct timespec req_ts = { .tv_sec = 0, .tv_nsec = 5L * 1000L * 1000L };
+        nanosleep(&req_ts, NULL);
+    }
+
+    if (!reaped) {
+        (void)kill(-pid, SIGKILL);
+        (void)kill(pid, SIGKILL);
+        int64_t kill_deadline_us = hnc_mono_us() + 200000LL;
+        for (;;) {
+            pid_t w = waitpid(pid, &status, WNOHANG);
+            if (w == pid || (w < 0 && errno != EINTR))
+                break;
+            if (hnc_mono_us() >= kill_deadline_us)
+                break;
+            struct timespec req_ts = { .tv_sec = 0, .tv_nsec = 2L * 1000L * 1000L };
+            nanosleep(&req_ts, NULL);
+        }
+    }
     (void)status;
 
     buf[got] = '\0';

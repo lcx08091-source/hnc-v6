@@ -161,7 +161,7 @@
 1. `module.prop`:`version=v5.28.0-rc1`,`versionCode=5280001`。
 2. `CHANGELOG.md` 加 `## [5.28.0-rc1] - <日期>`:A 部分写清每道防线拦的是哪一次真实事故;B 部分写清「影子运行、能改变什么」。
 3. `webroot/changelog.html` 加一段大白话。
-4. `docs/ROADMAP.md` §A 的 v5.28 行标「rc1 ✅」;§B 迁移清单里 M1 标完成。
+4. `docs/ROADMAP.md` §A 的 v5.28 行标「rc1 [OK]」;§B 迁移清单里 M1 标完成。
 5. `docs/CODEMAP.md` 权威实现表加:看门狗动作记账 → `runActionFn`;进程判断(shell)→ `bin/hnc_proc.sh`;老坑检查 → `bin/pitfall_lint.sh`;流量形状分类器 → `flow_cls.go`。
 6. `docs/API.md` 加「## 26. v5.28 变更」:`/api/power.watchdog_actions`、`run/watchdog_actions.json`、`/api/connections` 的 `cls_category` / `cls_conf`、`/api/devices[].fg.engagement`、`/api/dpi_eval` 的 `discover` / `flow_cls` 段、`/api/discover` 每组的建议名字段。
 

@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "36-bytedance-music",
-  "rules_version": "hnc-curated-v6.1.0-rc.1#36-bytedance-music",
+  "rules_version": "hnc-curated-v6.1.0-rc.2#36-bytedance-music",
   "rules": [
     {
       "id": "qishui_music",

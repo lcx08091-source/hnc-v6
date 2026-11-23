@@ -411,3 +411,91 @@ func TestQuickHealthUnifiedVersionAndComponentVersions(t *testing.T) {
 		t.Errorf("/api/discover version = %v", discOut["version"])
 	}
 }
+
+func TestQuickHealthRC2Tmpfs32MAndPublicDNSGuard(t *testing.T) {
+	dir := setupQuickHealthTestDir(t)
+	ipFwdFile := filepath.Join(dir, "run", "fake_ip_forward")
+	_ = os.WriteFile(ipFwdFile, []byte("1\n"), 0o600)
+	s := newServer(dir)
+
+	// 1. 32MB tmpfs with 20MB used (12MB free = 37.5% >= 15% and >= 4MB) must be ok, NOT false-alarm warn!
+	env := quickHealthEnv{
+		Now:           time.Now,
+		IPForwardPath: ipFwdFile,
+		IfaceIPv4:     func(string) string { return "192.168.43.1" },
+		EnforceTmpfs:  true,
+		Statfs: func(string) (quickStatfsInfo, error) {
+			total := uint64(32 << 20)
+			used := uint64(20 << 20)
+			return quickStatfsInfo{
+				Supported: true, FSType: 0x01021994, IsTmpfs: true,
+				TotalBytes: total, UsedBytes: used, FreeBytes: total - used,
+			}, nil
+		},
+	}
+	repOK := s.buildQuickHealthReport(env)
+	for _, it := range repOK.Items {
+		if it.ID == "tmpfs_config" && it.Status != "ok" {
+			t.Fatalf("32MB tmpfs with 12MB free should be ok, got %+v", it)
+		}
+	}
+
+	// 2. 32MB tmpfs with 3.5MB free (< 4MB / < 15%) must trigger warn
+	env.Statfs = func(string) (quickStatfsInfo, error) {
+		total := uint64(32 << 20)
+		free := uint64(3500 * 1024)
+		return quickStatfsInfo{
+			Supported: true, FSType: 0x01021994, IsTmpfs: true,
+			TotalBytes: total, UsedBytes: total - free, FreeBytes: free,
+		}, nil
+	}
+	repLow := s.buildQuickHealthReport(env)
+	for _, it := range repLow.Items {
+		if it.ID == "tmpfs_config" && (it.Status != "warn" || it.FixAction != "cache_clear") {
+			t.Fatalf("32MB tmpfs with 3.5MB free should warn with cache_clear, got %+v", it)
+		}
+	}
+
+	// 3. Kernel lacks tmpfs (run/tmpfs_unavailable exists): must report ok without restart_service loop!
+	_ = os.WriteFile(filepath.Join(dir, "run", "tmpfs_unavailable"), []byte("1\n"), 0o600)
+	env.Statfs = func(string) (quickStatfsInfo, error) {
+		return quickStatfsInfo{
+			Supported: true, FSType: 0xef53, IsTmpfs: false,
+			TotalBytes: 64 << 30, UsedBytes: 58 << 30, FreeBytes: 6 << 30,
+		}, nil
+	}
+	repNoTmpfs := s.buildQuickHealthReport(env)
+	for _, it := range repNoTmpfs.Items {
+		if it.ID == "tmpfs_config" {
+			if it.Status != "ok" || it.FixAction == "restart_service" {
+				t.Fatalf("tmpfs_unavailable must report ok without restart_service, got %+v", it)
+			}
+		}
+	}
+
+	// 4. Historically mis-blocked public base DNS (single 223.5.5.5 -> conn_block_del; multiple 223.5.5.5 + 119.29.29.29 -> nav devices)
+	_ = os.WriteFile(filepath.Join(dir, "data", "conn_blocks.json"),
+		[]byte(`{"items":[{"mac":"aa:bb:cc:dd:ee:01","kind":"ip","value":"223.5.5.5","label":"old"}]}`), 0o600)
+	s.invalidateServerJSONCaches()
+	repDNS1 := s.buildQuickHealthReport(env)
+	for _, it := range repDNS1.Items {
+		if it.ID == "tmpfs_config" {
+			if it.Status != "warn" || it.FixAction != "conn_block_del" || !strings.Contains(it.Verdict, "223.5.5.5") {
+				t.Fatalf("expected single misblocked DNS conn_block_del warning, got %+v", it)
+			}
+		}
+	}
+
+	_ = os.WriteFile(filepath.Join(dir, "data", "conn_blocks.json"),
+		[]byte(`{"items":[{"mac":"aa:bb:cc:dd:ee:01","kind":"ip","value":"223.5.5.5","label":"old"},{"mac":"aa:bb:cc:dd:ee:01","kind":"ip","value":"119.29.29.29","label":"old"}]}`), 0o600)
+	s.invalidateServerJSONCaches()
+	repDNS2 := s.buildQuickHealthReport(env)
+	for _, it := range repDNS2.Items {
+		if it.ID == "tmpfs_config" {
+			if it.Status != "warn" || it.FixKind != "nav" || it.NavTarget != "devices" || !strings.Contains(it.Verdict, "119.29.29.29") {
+				t.Fatalf("expected multi misblocked DNS warning on tmpfs_config card, got %+v", it)
+			}
+		}
+	}
+}
+

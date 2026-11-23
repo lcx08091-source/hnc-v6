@@ -1,4 +1,5 @@
 #!/system/bin/sh
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 # whitelist_sync.sh — 按 rules.json 把白名单模式真正落到 iptables(v5.11)
 #
 # 背景: 此前 WebUI 的「白名单模式」开关(action whitelist_set)只把
@@ -21,7 +22,9 @@
 # 用法: whitelist_sync.sh [--dry-run]   (--dry-run 只打印将执行的动作)
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+[ -f "$HNC_DIR/bin/hnc_env.sh" ] && . "$HNC_DIR/bin/hnc_env.sh"
 RULES="$HNC_DIR/data/rules.json"
+DEVICES_FLAT="$HNC_DIR/run/devices.flat"
 DEVICES="$HNC_DIR/data/devices.json"
 IPTM="$HNC_DIR/bin/iptables_manager.sh"
 LOG="$HNC_DIR/logs/service.log"
@@ -56,7 +59,7 @@ fi
 # 只取 devices 对象里 "whitelist":true 的条目。块内不含嵌套对象(与
 # cleanup_offline_devices.sh 的 device_has_rule 同一约定)。
 # rules.json / devices.json 可能是多行格式化的, grep 按行匹配会漏掉跨行的块 ——
-# 先压成一行再匹配。
+# 先压成一行再匹配。优先读 run/devices.flat, 缺失或未命中时回退 data/devices.json。
 FLAT_RULES=$(tr -d '\r\n' < "$RULES" 2>/dev/null)
 FLAT_DEVS=""
 [ -f "$DEVICES" ] && FLAT_DEVS=$(tr -d '\r\n' < "$DEVICES" 2>/dev/null)
@@ -67,7 +70,22 @@ count=0
 for mac in $macs; do
     # MAC 已由正则约束为 17 位 hex+冒号; IP 只接受点分十进制, 否则只按 MAC 放行
     ip=""
-    if [ -n "$FLAT_DEVS" ]; then
+    if [ -s "$DEVICES_FLAT" ]; then
+        ip=$(awk -v target="$mac" '
+            BEGIN { FS="[ \t|]+" }
+            /^#/ || NF < 2 { next }
+            {
+                m = ""; a = ""
+                for (i = 1; i <= NF; i++) {
+                    t = tolower($i)
+                    if (m == "" && t ~ /^([0-9a-f]{2}:){5}[0-9a-f]{2}$/) m = t
+                    else if (a == "" && $i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) a = $i
+                }
+                if (m == target && a != "") { print a; exit }
+            }
+        ' "$DEVICES_FLAT" 2>/dev/null)
+    fi
+    if [ -z "$ip" ] && [ -n "$FLAT_DEVS" ]; then
         blk=$(printf '%s' "$FLAT_DEVS" | grep -oiE "\"$mac\"[[:space:]]*:[[:space:]]*\\{[^}]*\\}" 2>/dev/null | head -1)
         ip=$(printf '%s' "$blk" | grep -oE '"ip"[[:space:]]*:[[:space:]]*"[0-9.]+"' | head -1 | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
     fi

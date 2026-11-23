@@ -148,9 +148,12 @@ func TestAppUsageOldDayFileCompat(t *testing.T) {
 	resetAppTimeGlobals(t)
 	dir := t.TempDir()
 	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "data"), 0o755)
 	date := time.Now().AddDate(0, 0, -1).Format("20060102")
 	old := `{"date":"` + date + `","hours":{"10":{"aa:bb:cc:00:00:01|douyin":[100,900]}},"apps":{"douyin":{"name":"抖音","category":"video"}}}`
-	_ = os.WriteFile(appUsagePath(dir, date), []byte(old), 0o644)
+	if err := os.WriteFile(appUsageLegacyPath(dir, date), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	d := loadAppUsageDay(dir, date)
 	if d.Hours["10"]["aa:bb:cc:00:00:01|douyin"] != [2]uint64{100, 900} || d.Active != nil {
 		t.Fatalf("old load: %+v", d)
@@ -450,3 +453,39 @@ func TestDPIUnknownAPI(t *testing.T) {
 		t.Fatalf("dpi_unknown: %s", rec.Body.String())
 	}
 }
+
+func TestAppTimeRC2AppUsageDualDirAndMigration(t *testing.T) {
+	resetAppTimeGlobals(t)
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	now := time.Now()
+	yday := now.AddDate(0, 0, -1).Format("20060102")
+
+	// Write legacy day file only in run/ (same as mac_merge_test fixture pattern)
+	legacyPayload := `{"date":"` + yday + `","hours":{"9":{"aa:bb:cc:00:00:01|bilibili":[200,800]}},"active":{"9":{"aa:bb:cc:00:00:01|bilibili":30}},"apps":{"bilibili":{"name":"B站","category":"video"}}}`
+	if err := os.WriteFile(appUsageLegacyPath(dir, yday), []byte(legacyPayload), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	s := newServer(dir)
+	rec := httptest.NewRecorder()
+	s.apiAppUsage(rec, httptest.NewRequest("GET", "/api/app_usage?days=2", nil))
+	if !strings.Contains(rec.Body.String(), `"bilibili"`) {
+		t.Fatalf("apiAppUsage missed legacy run/ file: %s", rec.Body.String())
+	}
+	rec2 := httptest.NewRecorder()
+	s.apiAppTime(rec2, httptest.NewRequest("GET", "/api/app_time?days=2&mac=aa:bb:cc:00:00:01", nil))
+	if !strings.Contains(rec2.Body.String(), `"bilibili"`) {
+		t.Fatalf("apiAppTime missed legacy run/ file: %s", rec2.Body.String())
+	}
+
+	// Migration moves run/app_usage.<date>.json -> data/app_usage.<date>.json
+	migrateAndPruneAppUsageFiles(dir, now.AddDate(0, 0, -appUsageKeepDays).Format("20060102"))
+	if _, err := os.Stat(appUsagePath(dir, yday)); err != nil {
+		t.Fatalf("expected migrated file in data/: %v", err)
+	}
+	if _, err := os.Stat(appUsageLegacyPath(dir, yday)); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy run/ file removed after migration, err=%v", err)
+	}
+}
+

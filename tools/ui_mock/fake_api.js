@@ -13,7 +13,7 @@
   'use strict';
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.1', VCODE = String(META.versionCode || '6009301');
+  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.2', VCODE = String(META.versionCode || '6009302');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 
@@ -75,7 +75,7 @@
   /* ═════════════ 设备(全部虚构; MAC 用本地管理地址) ═════════════ */
   var T = now();
   var DEVS = [
-    { mac: '0a:7f:3c:41:9e:21', ip: '192.168.43.23', hostname: '小米 14', hostname_src: 'manual', vendor: 'Xiaomi', online: true, mark_id: 1, randomized_mac: true, auto_inherited_from: '6e:19:b4:82:0c:55', auto_inherited_name: '小米 14', auto_inherited_score: 94,
+    { mac: '0a:7f:3c:41:9e:21', ip: '192.168.43.23', hostname: '小米 14', hostname_src: 'manual', vendor: 'Xiaomi', online: true, mark_id: 1, randomized_mac: true, auto_inherited_from: 'ce:41:7a:09:3b:62', auto_inherited_name: '小米 14', auto_inherited_score: 94,
       base: [1.1 * MB, 115 * KB], usage8: 5.2 * GB, onlineMin: [312, 288, 351, 240, 402, 198, 267],
       ident: { type: 'phone', os: 'Android', os_ver: '15', brand: '小米', model: 'Xiaomi 14', confidence: 93, hostname: 'Xiaomi-14', hostname_src: 'dhcp',
         evidence: [{ src: 'dhcp', detail: 'option 60 = android-dhcp-15' }, { src: 'hostname', detail: 'Xiaomi-14' }, { src: 'sni', detail: '*.miui.com · *.xiaomi.net' }, { src: 'ja4', detail: 'Android 15 系统 TLS 栈' }] },
@@ -231,6 +231,18 @@
     if (d.online && d.live_call) r.live_call = d.live_call;
     if (d.vpn) r.vpn = d.vpn;
     if (d.merge_suggestion) r.merge_suggestion = d.merge_suggestion;
+    if (d.auto_inherited_from) {
+      r.auto_inherited_from = d.auto_inherited_from;
+      r.auto_inherited_name = d.auto_inherited_name || '';
+      r.auto_inherited_score = d.auto_inherited_score || 0;
+    }
+    var mFromList = Object.keys(ALIASES).filter(function (om) { return ALIASES[om] === d.mac; });
+    if (mFromList.length) {
+      r.merged_from = mFromList[0];
+      r.merged_from_list = mFromList;
+      var mArch = MERGE_ARCHIVES[mFromList[0]];
+      r.merged_from_name = (mArch && mArch.from_name) || d.auto_inherited_name || mFromList[0];
+    }
     if (d.quota) { var qs = quotaState(d.quota); r.quota = Object.assign({}, d.quota, { state: qs.state, exceeded_period: qs.period, applied: e.reason === 'quota', month_start: Math.floor(new Date(new Date().getFullYear(), new Date().getMonth(), 1).getTime() / 1000) }); }
     if (d.schedule) r.schedule = { windows: d.schedule.windows, active_window_index: schedIdx(d) };
     if (d.app_time_limits.length) r.app_time_limits = d.app_time_limits;
@@ -242,7 +254,7 @@
     return hashStr(DEVS.map(function (d) {
       return [d.mac, d.ip, d.online, d.status, d.down_mbps, d.up_mbps, d.delay_ms, d.jitter_ms, d.loss_pct, d.sqm_enabled, d.whitelist, d.app_qos, d.hostname,
         JSON.stringify(d.quota || ''), JSON.stringify(d.schedule || ''), JSON.stringify(d.app_time_limits), JSON.stringify(d.category_blocks), d.merge_suggestion ? 1 : 0, schedIdx(d)].join('|');
-    }).join('#')).toString(16) + 'c0ffee';
+    }).join('#') + '@' + JSON.stringify(ALIASES)).toString(16) + 'c0ffee';
   }
   function devicesPayload() {
     stepRates();
@@ -290,7 +302,117 @@
   ];
   var APP_LIMIT_SHARED = false;
   var ENC = { policy: 'dot', devices: {} };
-  var MOCK_SIGNAL = { available: true, mode: 'cellular', rat: '5G SA', display_rat: '5G-A', is_5ga: true, slot: 1, sub_id: 1, carrier: '中国移动', carrier_short: '移动', mcc_mnc: '46000', sharing_mode: '2.6GHz+700MHz 移广双载波共享', upstream_iface: 'rmnet_data2', band: 'n41', bandwidth_mhz: 100, band_combo: 'n41+n28', total_bw_mhz: 130, ca_count: 2, arfcn: 504990, freq_mhz: 2600, band_trait: '5G-A 高低频黄金双载波聚合 n41+n28（总带宽 130MHz） · 兼顾 2.6GHz 极速大带宽与 700MHz 强穿墙稳上行', rsrp_dbm: -84, rsrq_db: -8, sinr_db: 21, rsrp_label: '极强', sinr_label: '极纯净', rsrq_label: '基站空闲', speed_potential_pct: 100, speed_potential_text: '可跑满套餐峰值', bars: 4, quality: 'excellent', quality_cn: '5G-A 极佳', rf_ceiling_factor: 1.0, diagnosis: 'ok', diagnosis_cn: '5G-A 多载波通道（n41+n28）信号纯净、基站空闲，热点可跑满高速带宽', updated_at: T };
+  var MOCK_SIGNAL = {
+    available: true, mode: 'cellular', rat: '5G SA', display_rat: '5G-A', is_5ga: true,
+    slot: 1, sub_id: 1, carrier: '中国移动', carrier_short: '移动', mcc_mnc: '46000',
+    sharing_mode: '2.6GHz+700MHz 移广双载波共享', upstream_iface: 'rmnet_data2',
+    band: 'n41', bandwidth_mhz: 100, band_combo: 'n41+n28', total_bw_mhz: 130, ca_count: 2,
+    arfcn: 504990, freq_mhz: 2600,
+    band_trait: '5G-A 高低频黄金双载波聚合 n41+n28（总带宽 130MHz） · 兼顾 2.6GHz 极速大带宽与 700MHz 强穿墙稳上行',
+    rsrp_dbm: -84, rsrq_db: -8, sinr_db: 21, has_sinr: true, has_rsrq: true,
+    rssi_dbm: -56, pci: 384, has_pci: true,
+    lte_pci: 126, has_lte_pci: true, lte_rsrp_dbm: -86, lte_rsrq_db: -9, lte_sinr_db: 18, has_lte_sinr: true,
+    rsrp_label: '极强', sinr_label: '极纯净', rsrq_label: '基站空闲',
+    speed_potential_pct: 100, speed_potential_text: '可跑满套餐峰值',
+    bars: 4, quality: 'excellent', quality_cn: '5G-A 极佳', rf_ceiling_factor: 1.0,
+    diagnosis: 'ok', diagnosis_cn: '5G-A 多载波通道（n41+n28）信号纯净、基站空闲，热点可跑满高速带宽',
+    carriers: [
+      { is_primary: true, net_type: 'NR', band: 'n41', bw_mhz: 100, arfcn: 504990, freq_mhz: 2600, pci: 384, has_pci: true },
+      { is_primary: false, net_type: 'NR', band: 'n28', bw_mhz: 30, arfcn: 145600, freq_mhz: 700, pci: 192, has_pci: true }
+    ],
+    handover_count: 1, jitter_db: 4, min_dbm: -87, max_dbm: -83, avg_dbm: -85,
+    interference_pct: 14, interference_level: 'clean', interference_label: '信道纯净低噪',
+    interference_sources: [],
+    history: [],
+    updated_at: T
+  };
+  function _recalcMockSignalMeta() {
+    var h = MOCK_SIGNAL.history;
+    if (!h.length) return;
+    var mn = h[0].rsrp_dbm, mx = h[0].rsrp_dbm, sm = 0, ho = 0;
+    for (var i = 0; i < h.length; i++) {
+      var v = h[i].rsrp_dbm;
+      if (v < mn) mn = v;
+      if (v > mx) mx = v;
+      sm += v;
+      if (i > 0 && h[i].pci !== h[i - 1].pci) ho++;
+    }
+    var cur = h[h.length - 1];
+    MOCK_SIGNAL.rsrp_dbm = cur.rsrp_dbm;
+    MOCK_SIGNAL.sinr_db = cur.sinr_db;
+    MOCK_SIGNAL.rsrq_db = cur.rsrq_db;
+    MOCK_SIGNAL.pci = cur.pci;
+    MOCK_SIGNAL.rssi_dbm = cur.rsrp_dbm + 28;
+    MOCK_SIGNAL.min_dbm = mn;
+    MOCK_SIGNAL.max_dbm = mx;
+    MOCK_SIGNAL.avg_dbm = round(sm / h.length);
+    MOCK_SIGNAL.jitter_db = Math.max(1, mx - mn);
+    MOCK_SIGNAL.handover_count = ho;
+    MOCK_SIGNAL.rsrp_label = cur.rsrp_dbm >= -85 ? '极强' : (cur.rsrp_dbm >= -95 ? '良好' : '一般');
+    MOCK_SIGNAL.sinr_label = cur.sinr_db >= 20 ? '极纯净' : (cur.sinr_db >= 13 ? '纯净' : '轻度干扰');
+    var pEm = lim(round((23 - cur.sinr_db) * 3.4), 6, 92);
+    var pLoad = lim(round((-7 - cur.rsrq_db) * 7.2), 8, 92);
+    var pFade = lim(round(MOCK_SIGNAL.jitter_db * 4.5 + ho * 12), 6, 92);
+    var pBh = lim(round(Math.max(0, cur.rtt_ms - 18) * 2.2), 6, 92);
+    var lvlOf = function (p) { return p >= 75 ? 'severe' : (p >= 50 ? 'moderate' : (p >= 25 ? 'mild' : 'clean')); };
+    MOCK_SIGNAL.interference_sources = [
+      { id: 'co_channel', name: '同频与邻区电磁干扰', pct: pEm, level: lvlOf(pEm), value: 'SINR ' + cur.sinr_db + ' dB', summary: cur.sinr_db >= 13 ? '同频邻区底噪干净，256QAM 高阶调制稳定' : '存在邻区同频重叠干扰，建议移近窗边' },
+      { id: 'air_load', name: '基站空口信道负载', pct: pLoad, level: lvlOf(pLoad), value: 'RSRQ ' + cur.rsrq_db + ' dB', summary: 'n41+n28 双载波资源块充裕，下行调度响应及时' },
+      { id: 'multipath_handover', name: '多径衰落与乒乓切换', pct: pFade, level: lvlOf(pFade), value: 'Δ' + MOCK_SIGNAL.jitter_db + ' dB' + (ho > 0 ? ' · ' + ho + '次切换' : ''), summary: ho > 0 ? '近期完成 1 次更优扇区切换，当前驻留 PCI ' + cur.pci + ' 稳定' : '驻留主服务小区锁频稳定，无乒乓切换' },
+      { id: 'backhaul_jitter', name: '回程排队延迟抖动', pct: pBh, level: lvlOf(pBh), value: 'RTT ' + cur.rtt_ms.toFixed(1) + ' ms', summary: '上游 rmnet_data2 回程延迟平稳，零缓冲区膨胀' }
+    ];
+    MOCK_SIGNAL.interference_pct = round(pEm * 0.38 + pLoad * 0.26 + pFade * 0.20 + pBh * 0.16);
+    MOCK_SIGNAL.interference_level = lvlOf(MOCK_SIGNAL.interference_pct);
+    MOCK_SIGNAL.interference_label = MOCK_SIGNAL.interference_pct >= 75 ? '强干扰易跳Ping' : (MOCK_SIGNAL.interference_pct >= 50 ? '中度射频干扰' : (MOCK_SIGNAL.interference_pct >= 25 ? '轻度环境干扰' : '信道纯净低噪'));
+    MOCK_SIGNAL.updated_at = cur.ts;
+  }
+  (function seedMockSignalHistory() {
+    var r = srand('sig-seed-rc2');
+    var baseR = -85, baseS = 20;
+    for (var i = 23; i >= 0; i--) {
+      baseR = lim(round(baseR + (r() - 0.48) * 2.2), -88, -82);
+      baseS = lim(round(baseS + (r() - 0.48) * 2.4), 16, 23);
+      var pciVal = i > 17 ? 381 : 384;
+      MOCK_SIGNAL.history.push({
+        ts: T - i * 3,
+        rsrp_dbm: baseR,
+        sinr_db: baseS,
+        has_sinr: true,
+        rsrq_db: -8 - Math.floor(r() * 2),
+        pci: pciVal,
+        has_pci: true,
+        band: 'n41',
+        rtt_ms: +(20.2 + r() * 4.2).toFixed(1)
+      });
+    }
+    _recalcMockSignalMeta();
+  })();
+  var _lastSigStepMs = Date.now();
+  function stepMockSignal(force) {
+    var nowMs = Date.now();
+    if (!force && nowMs - _lastSigStepMs < 1800) return;
+    _lastSigStepMs = nowMs;
+    var h = MOCK_SIGNAL.history;
+    var prev = h.length ? h[h.length - 1] : { ts: now() - 3, rsrp_dbm: -84, sinr_db: 21, rsrq_db: -8, pci: 384, rtt_ms: 21.5 };
+    var nextTs = Math.max(now(), prev.ts + 1);
+    var nextRsrp = lim(round(prev.rsrp_dbm + rnd(-1.4, 1.4) + (-84 - prev.rsrp_dbm) * 0.25), -89, -81);
+    var nextSinr = lim(round(prev.sinr_db + rnd(-1.6, 1.6) + (20.5 - prev.sinr_db) * 0.25), 15, 24);
+    var nextRsrq = lim(round(prev.rsrq_db + rnd(-0.8, 0.8) + (-8.2 - prev.rsrq_db) * 0.3), -11, -7);
+    var nextRtt = +(lim(prev.rtt_ms + rnd(-1.2, 1.2) + (21.5 - prev.rtt_ms) * 0.25, 18.5, 27.5)).toFixed(1);
+    h.push({
+      ts: nextTs,
+      rsrp_dbm: nextRsrp,
+      sinr_db: nextSinr,
+      has_sinr: true,
+      rsrq_db: nextRsrq,
+      pci: 384,
+      has_pci: true,
+      band: 'n41',
+      rtt_ms: nextRtt
+    });
+    if (h.length > 60) h.splice(0, h.length - 60);
+    _recalcMockSignalMeta();
+  }
   var PU_CFG = { billing_day: 1, warn_percent: 80, plan_sim1_gb: 100, plan_sim2_gb: 0, anchor_sim1_gb: 0, anchor_sim2_gb: 0, use_netstats: 'auto' };
   var SELF_ON = { toggle: true, auto_expand: true, auto_promote: false };
   var DNS = { enabled: false, block_mode: 'nxdomain', log_queries: false };
@@ -298,6 +420,29 @@
   var SIM = { enabled: false, devices: [] };
   var REC_STATE = { recording: false, minutes: 10, started_at: 0 };
   var ALIASES = { 'ce:41:7a:09:3b:62': '0a:7f:3c:41:9e:21' };
+  var MERGE_ARCHIVES = {
+    'ce:41:7a:09:3b:62': {
+      from_mac: 'ce:41:7a:09:3b:62',
+      to_mac: '0a:7f:3c:41:9e:21',
+      from_name: '小米 14 (第二台/旧MAC)',
+      to_name: '小米 14',
+      merged_at: T - 3600,
+      has_archive: true,
+      auto_inherit: true,
+      score: 94,
+      snap: {
+        mac: 'ce:41:7a:09:3b:62', ip: '192.168.43.88', hostname: 'Xiaomi-14-B', hostname_src: 'dhcp',
+        vendor: 'Xiaomi', online: false, last_seen: T - 3600, mark_id: 12, randomized_mac: true,
+        status: 'allowed', down_mbps: 0, up_mbps: 0, delay_ms: 0, jitter_ms: 0, loss_pct: 0,
+        k: [1, 1], cur: [0, 0], auto: ['Xiaomi-14-B', 'dhcp'], blocks: [],
+        base: [0, 0], usage8: 0.42 * GB, rx_bytes: 0.05 * GB, tx_bytes: 0.004 * GB,
+        onlineMin: [42, 0, 0, 0, 0, 0, 0], app_time_limits: [], category_blocks: [],
+        ident: { type: 'phone', os: 'Android', os_ver: '15', brand: '小米', model: 'Xiaomi 14', confidence: 88 },
+        live: [], hist: ['wechat', 'douyin']
+      }
+    }
+  };
+  var MUTEX_APART_COUNT = 1;
   var MERGE_DONE = {};
   var FP_RULES = [
     { id: 'fp-u1', kind: 'domain', value: 'xhscdn.net', app_id: 'xiaohongshu', app_name: '小红书' },
@@ -549,19 +694,19 @@
     });
     var idb = 0.89;
     var MOCK_L3_SUBS = [
-      'hnc-curated-v6.1.0-rc.1-dedup#00-core-meta',
-      'hnc-curated-v6.1.0-rc.1#01-short-video', 'hnc-curated-v6.1.0-rc.1#02-video-live', 'hnc-curated-v6.1.0-rc.1#03-social-im',
-      'hnc-curated-v6.1.0-rc.1#04-games-cn', 'hnc-curated-v6.1.0-rc.1#05-games-global', 'hnc-curated-v6.1.0-rc.1#06-shopping-life',
-      'hnc-curated-v6.1.0-rc.1#07-music-audio', 'hnc-curated-v6.1.0-rc.1#08-reading-news', 'hnc-curated-v6.1.0-rc.1#09-office-edu',
-      'hnc-curated-v6.1.0-rc.1#10-cloud-drive', 'hnc-curated-v6.1.0-rc.1#11-finance-bank', 'hnc-curated-v6.1.0-rc.1#12-travel-map',
-      'hnc-curated-v6.1.0-rc.1#13-ai-tools', 'hnc-curated-v6.1.0-rc.1#14-dev-tech', 'hnc-curated-v6.1.0-rc.1#15-app-stores',
-      'hnc-curated-v6.1.0-rc.1#16-oem-vendors', 'hnc-curated-v6.1.0-rc.1#17-iot-smart', 'hnc-curated-v6.1.0-rc.1#18-tv-ott',
-      'hnc-curated-v6.1.0-rc.1#19-carrier-isp', 'hnc-curated-v6.1.0-rc.1#20-gov-public', 'hnc-curated-v6.1.0-rc.1#21-auto-ev',
-      'hnc-curated-v6.1.0-rc.1#22-health-sport', 'hnc-curated-v6.1.0-rc.1#23-food-retail', 'hnc-curated-v6.1.0-rc.1#24-social-global',
-      'hnc-curated-v6.1.0-rc.1#25-stream-global', 'hnc-curated-v6.1.0-rc.1#26-browser-search', 'hnc-curated-v6.1.0-rc.1#27-mail-collab',
-      'hnc-curated-v6.1.0-rc.1#28-security-dns', 'hnc-curated-v6.1.0-rc.1#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.1#30-cdn-infra',
-      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.1#47-v2fly-b',
-      'hnc-curated-v6.1.0-rc.1#95-system-updates', 'hnc-curated-v6.1.0-rc.1#96-system-updates-v6'
+      'hnc-curated-v6.1.0-rc.2-dedup#00-core-meta',
+      'hnc-curated-v6.1.0-rc.2#01-short-video', 'hnc-curated-v6.1.0-rc.2#02-video-live', 'hnc-curated-v6.1.0-rc.2#03-social-im',
+      'hnc-curated-v6.1.0-rc.2#04-games-cn', 'hnc-curated-v6.1.0-rc.2#05-games-global', 'hnc-curated-v6.1.0-rc.2#06-shopping-life',
+      'hnc-curated-v6.1.0-rc.2#07-music-audio', 'hnc-curated-v6.1.0-rc.2#08-reading-news', 'hnc-curated-v6.1.0-rc.2#09-office-edu',
+      'hnc-curated-v6.1.0-rc.2#10-cloud-drive', 'hnc-curated-v6.1.0-rc.2#11-finance-bank', 'hnc-curated-v6.1.0-rc.2#12-travel-map',
+      'hnc-curated-v6.1.0-rc.2#13-ai-tools', 'hnc-curated-v6.1.0-rc.2#14-dev-tech', 'hnc-curated-v6.1.0-rc.2#15-app-stores',
+      'hnc-curated-v6.1.0-rc.2#16-oem-vendors', 'hnc-curated-v6.1.0-rc.2#17-iot-smart', 'hnc-curated-v6.1.0-rc.2#18-tv-ott',
+      'hnc-curated-v6.1.0-rc.2#19-carrier-isp', 'hnc-curated-v6.1.0-rc.2#20-gov-public', 'hnc-curated-v6.1.0-rc.2#21-auto-ev',
+      'hnc-curated-v6.1.0-rc.2#22-health-sport', 'hnc-curated-v6.1.0-rc.2#23-food-retail', 'hnc-curated-v6.1.0-rc.2#24-social-global',
+      'hnc-curated-v6.1.0-rc.2#25-stream-global', 'hnc-curated-v6.1.0-rc.2#26-browser-search', 'hnc-curated-v6.1.0-rc.2#27-mail-collab',
+      'hnc-curated-v6.1.0-rc.2#28-security-dns', 'hnc-curated-v6.1.0-rc.2#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.2#30-cdn-infra',
+      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.2#47-v2fly-b',
+      'hnc-curated-v6.1.0-rc.2#95-system-updates', 'hnc-curated-v6.1.0-rc.2#96-system-updates-v6'
     ];
     return {
       available: true,
@@ -1012,8 +1157,8 @@
         has_capabilities: true
       };
     },
-    '/api/signal': function () { MOCK_SIGNAL.updated_at = now(); return clone(MOCK_SIGNAL); },
-    '/api/live': function (q) { var l = liveSummary(); l.signal = clone(MOCK_SIGNAL); if (q.devices) { var p = devicesPayload(); l.devices = p.devices; l.whitelist_mode = p.whitelist_mode; l.remote_enabled = p.remote_enabled; } return l; },
+    '/api/signal': function (q) { stepMockSignal(bool(q && q.refresh)); return clone(MOCK_SIGNAL); },
+    '/api/live': function (q) { stepMockSignal(false); var l = liveSummary(); l.signal = clone(MOCK_SIGNAL); if (q.devices) { var p = devicesPayload(); l.devices = p.devices; l.whitelist_mode = p.whitelist_mode; l.remote_enabled = p.remote_enabled; } return l; },
     '/api/devices': function () { return devicesPayload(); },
     '/api/config': function () { return Object.assign({}, CFG, { sim_enabled: SIM.enabled, autorate: AUTORATE, rmac_policy: RMAC_POL, client_isolation_enabled: RMAC_POL.client_isolation }); },
     '/api/capabilities': function () {
@@ -1088,7 +1233,42 @@
       var sg = DEVS.filter(function (d) { return d.merge_suggestion; }).map(function (d) {
         return Object.assign({ new_mac: d.mac, new_name: d.hostname || d.mac, new_online: d.online, randomized: !!d.randomized_mac, new_first_seen: d.first_seen }, d.merge_suggestion);
       });
-      return { ok: true, suggestions: sg, aliases: ALIASES, min_score: 40, alert_score: 60 };
+      var mergedList = Object.keys(ALIASES).map(function (oldMac) {
+        var toMac = ALIASES[oldMac];
+        var toDev = dev(toMac);
+        var oldDev = dev(oldMac);
+        var arch = MERGE_ARCHIVES[oldMac] || null;
+        var a = arch || { merged_at: T - 1800 };
+        var fromName = a.from_name || (oldDev && oldDev.hostname) || oldMac;
+        var toName = (toDev && toDev.hostname) || a.to_name || toMac;
+        return {
+          from_mac: oldMac,
+          to_mac: toMac,
+          old_mac: oldMac,
+          new_mac: toMac,
+          from_name: fromName,
+          to_name: toName,
+          old_name: fromName,
+          new_name: toName,
+          merged_at: a.merged_at,
+          ts: a.merged_at,
+          has_archive: !!arch,
+          auto_inherit: Boolean(a.auto_inherit),
+          auto: Boolean(a.auto_inherit),
+          score: a.score || 91,
+          old_online: !!(oldDev && oldDev.online),
+          new_online: !!(toDev && toDev.online)
+        };
+      });
+      return {
+        ok: true,
+        suggestions: sg,
+        aliases: ALIASES,
+        merged_list: mergedList,
+        mutex_apart_count: MUTEX_APART_COUNT,
+        min_score: 40,
+        alert_score: 60
+      };
     },
     '/api/stats_health': function () {
       return { issues: [], precise_mode: true, ct_events_active: true, ct_destroy_events_per_min: 186, ct_poll_fallback: false, ct_acct: 1, iptables_stats_ok: true, iptables_checked: true,
@@ -1285,10 +1465,63 @@
       return 'saved';
     },
     device_merge: function (p) {
-      var to = needDev(p.to_mac), from = dev(p.from_mac);
-      ALIASES[String(p.from_mac).toLowerCase()] = to.mac; MERGE_DONE[to.mac] = 1;
-      if (from) { if (to.hostname_src !== 'manual') { to.hostname = from.hostname.replace(/-/g, ' '); to.hostname_src = 'manual'; } DEVS = DEVS.filter(function (d) { return d !== from; }); }
+      var to = needDev(p.to_mac), from = dev(p.from_mac), oldMac = String(p.from_mac || '').toLowerCase();
+      ALIASES[oldMac] = to.mac; MERGE_DONE[to.mac] = 1;
+      if (from) {
+        MERGE_ARCHIVES[oldMac] = {
+          from_mac: oldMac,
+          to_mac: to.mac,
+          from_name: from.hostname || oldMac,
+          to_name: to.hostname || to.mac,
+          merged_at: now(),
+          has_archive: true,
+          auto_inherit: false,
+          snap: clone(from)
+        };
+        if (to.hostname_src !== 'manual') { to.hostname = from.hostname.replace(/-/g, ' '); to.hostname_src = 'manual'; }
+        DEVS = DEVS.filter(function (d) { return d !== from; });
+      }
       delete to.merge_suggestion; to.randomized_mac = true; return 'merged';
+    },
+    device_unmerge: function (p) {
+      var reqFrom = String((p && (p.from_mac || p.old_mac)) || '').toLowerCase();
+      var reqTo = String((p && (p.to_mac || p.new_mac || p.mac)) || '').toLowerCase();
+      var oldMac = '';
+      if (reqFrom && ALIASES[reqFrom]) {
+        oldMac = reqFrom;
+      } else if (reqTo) {
+        Object.keys(ALIASES).forEach(function (k) { if (!oldMac && ALIASES[k] === reqTo) oldMac = k; });
+      }
+      var toMac = oldMac ? ALIASES[oldMac] : reqTo;
+      var toDev = toMac ? dev(toMac) : null;
+      if (!oldMac && toDev && toDev.auto_inherited_from) {
+        oldMac = String(toDev.auto_inherited_from).toLowerCase();
+      }
+      if (!oldMac && !toDev) throw err('merge record not found', 404);
+      if (oldMac) delete ALIASES[oldMac];
+      if (toMac) delete MERGE_DONE[toMac];
+      if (toDev) {
+        delete toDev.auto_inherited_from;
+        delete toDev.auto_inherited_name;
+        delete toDev.auto_inherited_score;
+      }
+      var arch = oldMac ? MERGE_ARCHIVES[oldMac] : null;
+      if (arch && arch.snap && !dev(oldMac)) {
+        DEVS.push(clone(arch.snap));
+      } else if (oldMac && !dev(oldMac)) {
+        DEVS.push({
+          mac: oldMac, ip: '192.168.43.189', hostname: (arch && arch.from_name) || oldMac, hostname_src: 'dhcp',
+          vendor: (toDev && toDev.vendor) || '', online: false, last_seen: now() - 600, mark_id: 14, randomized_mac: true,
+          status: 'allowed', down_mbps: 0, up_mbps: 0, delay_ms: 0, jitter_ms: 0, loss_pct: 0,
+          k: [1, 1], cur: [0, 0], auto: [oldMac, 'dhcp'], blocks: [],
+          base: [0, 0], usage8: 0, rx_bytes: 0, tx_bytes: 0,
+          onlineMin: [0, 0, 0, 0, 0, 0, 0], app_time_limits: [], category_blocks: [],
+          ident: toDev && toDev.ident ? clone(toDev.ident) : null, live: [], hist: []
+        });
+      }
+      if (oldMac) delete MERGE_ARCHIVES[oldMac];
+      MUTEX_APART_COUNT += 1;
+      return J({ ok: true, from_mac: oldMac, to_mac: toMac || '', restored_archive: !!arch, mutex_apart: true });
     },
     device_merge_dismiss: function (p) { var d = needDev(p.to_mac); delete d.merge_suggestion; return 'dismissed'; },
     template_set: function (p) { TPL[p.name] = { down_mbps: +p.down_mbps || 0, up_mbps: +p.up_mbps || 0, delay_ms: +p.delay_ms || 0, jitter_ms: +p.jitter_ms || 0, loss_pct: +p.loss_pct || 0 }; return ''; },
@@ -1467,7 +1700,7 @@
   };
 
 
-  /* ═════════════ HNC v6.1.0-rc.1 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
+  /* ═════════════ HNC v6.1.0-rc.2 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
   function v6MockInfraGuard(host) {
     var h = String(host || '').trim().toLowerCase();
     if (!h) return null;

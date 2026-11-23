@@ -58,9 +58,11 @@ const (
 	hmmHold       = 0.25  // 当前前台后验 ≥ 它就保持
 	hmmNone       = "_none"
 	hmmShortSegS  = 30 // 短于 30 秒就结束的前台段算「短段」(来回跳)
-	fgEngineHMM   = "hmm"
-	fgEngineClass = "classic"
-	fgCmpKeepDays = 7
+	fgEngineHMM     = "hmm"
+	fgEngineClass   = "classic"
+	fgCmpKeepDays   = 7
+	fgCmpDevIdleTTL = 30 * time.Minute
+	fgCmpMaxDevs    = 256
 )
 
 // hmmDev 一台设备的 HMM 状态
@@ -391,6 +393,7 @@ type fgCmpFile struct {
 type fgCmpDev struct {
 	classicCur, hmmCur     string
 	classicSince, hmmSince time.Time
+	lastSeen               time.Time
 }
 
 type fgCompare struct {
@@ -405,6 +408,57 @@ func newFgCompare() *fgCompare {
 }
 
 func fgCmpPath(hncDir string) string { return filepath.Join(hncDir, "run", "fg_compare.json") }
+
+// forget 单台设备离线或遗忘时清理其段起点记录。
+func (c *fgCompare) forget(mac string) {
+	if c == nil || c.devs == nil {
+		return
+	}
+	delete(c.devs, mac)
+	if norm := strings.ToLower(strings.TrimSpace(mac)); norm != mac {
+		delete(c.devs, norm)
+	}
+}
+
+// pruneDevs 在 fgCompare 入口自洁: 驱逐静默超过 30 分钟的陈旧设备, 并强制执行 256 台硬上限。
+func (c *fgCompare) pruneDevs(now time.Time, keepMAC string) {
+	if c == nil || len(c.devs) == 0 {
+		return
+	}
+	if !now.IsZero() {
+		for k, d := range c.devs {
+			if k == keepMAC {
+				continue
+			}
+			if d == nil || (!d.lastSeen.IsZero() && now.Sub(d.lastSeen) > fgCmpDevIdleTTL) {
+				delete(c.devs, k)
+			}
+		}
+	}
+	for len(c.devs) > fgCmpMaxDevs {
+		var oldestKey string
+		var oldestAt time.Time
+		hasOldest := false
+		for k, d := range c.devs {
+			if k == keepMAC {
+				continue
+			}
+			var ls time.Time
+			if d != nil {
+				ls = d.lastSeen
+			}
+			if !hasOldest || ls.Before(oldestAt) || (ls.Equal(oldestAt) && k < oldestKey) {
+				oldestKey = k
+				oldestAt = ls
+				hasOldest = true
+			}
+		}
+		if !hasOldest {
+			break
+		}
+		delete(c.devs, oldestKey)
+	}
+}
 
 func (c *fgCompare) bucket(now time.Time) *fgCmpBucket {
 	h := now.Unix() / 3600 * 3600
@@ -424,11 +478,16 @@ func (c *fgCompare) bucket(now time.Time) *fgCmpBucket {
 
 // record 一台有流量的设备一轮: 两套引擎本轮的前台("" = 没有)
 func (c *fgCompare) record(mac string, now time.Time, dt float64, classic, hmm string) {
+	c.pruneDevs(now, "")
 	d := c.devs[mac]
 	if d == nil {
-		// 第一次看到这台设备: 当前段从什么时候开始不知道(since 为零值), 结束时不算短段
+		// 第一次看到这台设备(或静默超 30m 重来): 当前段起点未知(since 为零值), 结束时不算短段
 		d = &fgCmpDev{classicCur: classic, hmmCur: hmm}
 		c.devs[mac] = d
+	}
+	d.lastSeen = now
+	if len(c.devs) > fgCmpMaxDevs {
+		c.pruneDevs(now, mac)
 	}
 	b := c.bucket(now)
 	b.Rounds++
@@ -451,7 +510,7 @@ func (c *fgCompare) record(mac string, now time.Time, dt float64, classic, hmm s
 	c.dirty = true
 }
 
-// forget 设备被清掉 / 模型重置时去掉段起点(下一轮重新开始计)
+// reset 模型整体重置时清空所有设备段起点(下一轮重新开始计)
 func (c *fgCompare) reset() { c.devs = map[string]*fgCmpDev{} }
 
 func (c *fgCompare) load(hncDir string) {
@@ -485,6 +544,7 @@ func (c *fgCompare) load(hncDir string) {
 }
 
 func (c *fgCompare) snapshot(now time.Time) []byte {
+	c.pruneDevs(now, "")
 	cut := now.Unix()/3600*3600 - fgCmpKeepDays*24*3600
 	f := fgCmpFile{Schema: 1}
 	for h, b := range c.buckets {
@@ -500,6 +560,7 @@ func (c *fgCompare) snapshot(now time.Time) []byte {
 
 // summary days 天内合计
 func (c *fgCompare) summary(now time.Time, days int) map[string]interface{} {
+	c.pruneDevs(now, "")
 	cut := now.Unix() - int64(days)*24*3600
 	var tot fgCmpBucket
 	for h, b := range c.buckets {

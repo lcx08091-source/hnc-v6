@@ -49,6 +49,11 @@ func (c *jsonFileCache) read(path string) (interface{}, error) {
 	}
 	st, err := os.Stat(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			c.mu.Lock()
+			delete(c.entries, path)
+			c.mu.Unlock()
+		}
 		return nil, err
 	}
 	c.mu.Lock()
@@ -60,6 +65,11 @@ func (c *jsonFileCache) read(path string) (interface{}, error) {
 
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if os.IsNotExist(err) {
+			c.mu.Lock()
+			delete(c.entries, path)
+			c.mu.Unlock()
+		}
 		return nil, err
 	}
 	var v interface{}
@@ -69,7 +79,15 @@ func (c *jsonFileCache) read(path string) (interface{}, error) {
 	// 读后再 stat 一次 (tokens.go 的双检模式): 读取期间文件被 rename 替换时
 	// 前后 stat 会不一致, 此时放弃入缓存, 避免把旧内容记在新版本名下。
 	st2, err := os.Stat(path)
-	if err != nil || !st2.ModTime().Equal(st.ModTime()) || st2.Size() != st.Size() {
+	if err != nil {
+		if os.IsNotExist(err) {
+			c.mu.Lock()
+			delete(c.entries, path)
+			c.mu.Unlock()
+		}
+		return v, nil
+	}
+	if !st2.ModTime().Equal(st.ModTime()) || st2.Size() != st.Size() {
 		return v, nil
 	}
 	c.mu.Lock()

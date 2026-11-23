@@ -68,7 +68,7 @@
 
 ## 3. 任务拆分(按顺序做,每个任务独立可测)
 
-### T1 · dpid:写本机带标签样本(✅ v5.24.0-rc1 已完成;计数快照见 `run/label_samples.stats.json`,T4 直接读它取 `skipped_system`)
+### T1 · dpid:写本机带标签样本([OK] v5.24.0-rc1 已完成;计数快照见 `run/label_samples.stats.json`,T4 直接读它取 `skipped_system`)
 **文件**:新建 `src/dpid/output/label_samples.go` + `label_samples_test.go`;在 `self_capture.go` 的 `EventTLSClientHello` 分支里**追加一次调用**(不改原有逻辑,原有 `ObserveSNI` 照常执行)。
 
 **行为**:
@@ -193,7 +193,7 @@
 2. `CHANGELOG.md`:在最上面(`## [5.23.0-rc1]` 之前)加 `## [5.24.0-rc1] - <日期>`,格式照 5.23 那段(Added / Changed / Fixed / 需真机验证)。
 3. `webroot/changelog.html`:在最上面加一段,格式照 `<!-- v5.23.0-rc1 -->` 那段,写给普通用户看的大白话。
 4. `docs/API.md`:末尾加「## 22. v5.24 识别自评」,写 `GET /api/dpi_eval`、动作 `dpi_eval_clear`、两个 jsonl 文件格式。
-5. `docs/ROADMAP.md`:§A 表格里 v5.24 一行后面标「✅ 已完成(rc1)」。
+5. `docs/ROADMAP.md`:§A 表格里 v5.24 一行后面标「[OK] 已完成(rc1)」。
 
 ---
 

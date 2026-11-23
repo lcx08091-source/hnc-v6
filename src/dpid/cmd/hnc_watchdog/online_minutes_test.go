@@ -229,3 +229,40 @@ func TestPendingDoesNotSampleOnline(t *testing.T) {
 		t.Fatalf("PENDING 不应采样: %v", onlineAcc.pending)
 	}
 }
+
+func TestOnlineAccumCapsFileAt512KiB(t *testing.T) {
+	a := withTempOnlineAcc(t)
+	var pre strings.Builder
+	for i := 0; pre.Len() < 600<<10; i++ {
+		fmt.Fprintf(&pre, "{\"t\":%d,\"day\":\"20261001\",\"mac\":\"aa:bb:cc:dd:ee:00\",\"m\":5}\n", 1700000000+i)
+	}
+	if err := os.WriteFile(a.file, []byte(pre.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	t0 := time.Date(2026, 10, 7, 10, 0, 0, 0, cst)
+	setDevices(t, a, t0, macA)
+	a.sample(t0)
+	a.flush(t0)
+
+	fi, err := os.Stat(a.file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > onlineHoursMaxBytes || fi.Size() < (onlineHoursMaxBytes/3) {
+		t.Fatalf("裁剪后文件大小 %d 不在合理区间 [%d, %d]", fi.Size(), onlineHoursMaxBytes/3, onlineHoursMaxBytes)
+	}
+	lines := readLines(t, a.file)
+	if len(lines) == 0 {
+		t.Fatal("裁剪后行数为 0")
+	}
+	for idx, ln := range lines {
+		if !strings.HasPrefix(ln, `{"t":`) || !strings.HasSuffix(ln, `}`) {
+			t.Fatalf("第 %d 行不是完整 JSON 行: %q", idx, ln)
+		}
+	}
+	wantLast := fmt.Sprintf(`{"t":%d,"day":"20261007","mac":"%s","m":5}`, t0.Unix(), macA)
+	if lines[len(lines)-1] != wantLast {
+		t.Fatalf("最后一行应为新刷入行: got %q want %q", lines[len(lines)-1], wantLast)
+	}
+}

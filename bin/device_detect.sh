@@ -1,7 +1,16 @@
 #!/system/bin/sh
 
-# v3.5.0 alpha-0: PATH 健壮性,见 service.sh
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
+HNC_DIR=${HNC_DIR:-/data/local/hnc}
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
 # device_detect.sh — HNC 设备检测的命令行入口
 #
 # v5.33 起设备发现只有一份: Go 看门狗(src/dpid/cmd/hnc_watchdog/m4_owner.go)订阅
@@ -15,7 +24,6 @@
 #   iface   热点网卡名(bin/hnc_iface.sh, 带 5 分钟缓存)
 #   count   devices.json 里的设备数
 
-HNC_DIR=${HNC_DIR:-/data/local/hnc}
 DEVICES_FILE=$HNC_DIR/data/devices.json
 LOG=$HNC_DIR/logs/detect.log
 HOTSPOTD_BIN=$HNC_DIR/bin/hotspotd
@@ -33,6 +41,14 @@ hotspotd_alive() {
     local pid
     pid=$(cat "$HOTSPOTD_PID" 2>/dev/null)
     [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null
+}
+
+# 单网卡机型权威判定: 仅当 run/iface_detect.json 明确标记 authoritative=true 且 wlan0_ap=true 时放行 wlan0
+is_authoritative_wlan0_ap() {
+    local _jf="$HNC_DIR/run/iface_detect.json"
+    [ -f "$_jf" ] || return 1
+    grep -q '"authoritative"[[:space:]]*:[[:space:]]*true' "$_jf" 2>/dev/null \
+        && grep -q '"wlan0_ap"[[:space:]]*:[[:space:]]*true' "$_jf" 2>/dev/null
 }
 
 # ── 热点接口检测 ─────────────────────────────────────────────
@@ -127,7 +143,7 @@ case "${1:-scan}" in
             now_ts=$(date +%s)
             if [ -n "$cache_ts" ] && [ $((now_ts - cache_ts)) -lt 300 ]; then
                 cached=$(cat "$IFACE_CACHE" 2>/dev/null)
-                if [ -n "$cached" ] && [ "$cached" != "wlan0" ] && \
+                if [ -n "$cached" ] && { [ "$cached" != "wlan0" ] || is_authoritative_wlan0_ap; } && \
                    ip addr show "$cached" 2>/dev/null | grep -q 'inet '; then
                     echo "$cached"
                     exit 0
@@ -136,8 +152,8 @@ case "${1:-scan}" in
         fi
         mkdir -p "$HNC_DIR/run" 2>/dev/null
         detected=$(get_hotspot_iface)
-        if [ -n "$detected" ] && [ "$detected" != "wlan0" ]; then
-            echo "$detected" > "$IFACE_CACHE" 2>/dev/null
+        if [ -n "$detected" ] && { [ "$detected" != "wlan0" ] || is_authoritative_wlan0_ap; }; then
+            [ "$detected" != "wlan0" ] && echo "$detected" > "$IFACE_CACHE" 2>/dev/null
             echo "$detected"
         else
             exit 1

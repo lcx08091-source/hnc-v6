@@ -1,3 +1,9 @@
+<style>
+:root{--t2:var(--text-2,#64748b);--t3:var(--text-3,#94a3b8)}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--t2:var(--text-2,#94a3b8);--t3:var(--text-3,#64748b)}}
+:root[data-theme="dark"]{--t2:var(--text-2,#94a3b8);--t3:var(--text-3,#64748b)}
+.cl-ic{width:16px;height:16px;vertical-align:-3px;margin-right:4px;flex:none;display:inline-block}
+</style>
 <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute;width:0;height:0;overflow:hidden">
   <defs>
     <symbol id="cl-sparkles" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3 1.9 4.6L18.5 9.5l-4.6 1.9L12 16l-1.9-4.6L5.5 9.5l4.6-1.9L12 3Z"/><path d="m19 15 .9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9.9-2.1Z"/></symbol>
@@ -13,6 +19,16 @@
     <symbol id="cl-dataplane" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z" fill="currentColor" fill-opacity=".16"/><path d="M12 3L4.5 6.2v5.4c0 5.05 3.2 9.55 7.5 10.9 4.3-1.35 7.5-5.85 7.5-10.9V6.2L12 3z"/><path d="M7.5 12.2h2.4l1.6-3.2 2.2 6 1.6-2.8h1.9"/></symbol>
   </defs>
 </svg>
+<div class="cl-section" id="release-v6-1-0-rc-2" data-version="v6.1.0-rc.2" data-version-code="6009302">
+  <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-rocket"/></svg>v6.1.0-rc.2(准正式版): 实时信号双轨波形与四维干扰拆解 · 双胞胎互斥与误合并秒拆 · VPN/透明代理礼让与 TCPMSS 钳制 · 全芯片全框架老内核兼容大满贯 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-22 · versionCode 6009302</span></div>
+  <ul class="cl-list">
+    <li><b>热点手机实时信号双轨波形与四维干扰诊断</b>：新增 <span class="mono">RSRP</span> 信号强度与 <span class="mono">SINR</span> 信噪比双轨实时历史趋势波形图、<span class="mono">PCC/SCC</span> 多载波聚合频段胶囊条，并拆解展示邻区同频干扰、基站空口拥塞、弱覆盖边缘衰减与上行功率受限四维量化状态条。</li>
+    <li><b>同型号双胞胎在线互斥与误合并一键秒拆</b>：强化家庭多台同型号手机同时在线时的互斥守卫杜绝随机 MAC 误合并；新增已合并设备一键秒拆回退能力，无损还原原设备名称、限速、配额与历史流量归属。</li>
+    <li><b>VPN/透明代理智能礼让与双栈 TCPMSS 钳制</b>：自动检测本机 <span class="mono">tun+</span> / <span class="mono">wg+</span> / 透明代理隧道并礼让策略路由与 DNS 转发防环路打架，补齐热点转发链双栈 <span class="mono">TCPMSS --clamp-mss-to-pmtu</span> 自动钳制，根治开代理分流后网页白屏与大包卡死。</li>
+    <li><b>多芯片热点网卡、双 Wi-Fi、墓碑防冻与跨内核降级</b>：深化联发科天玑 <span class="mono">MDDP</span> 压制、Google Pixel <span class="mono">gti*</span> 接口识别、双 Wi-Fi 并发并管与 Android 14–16 墓碑冻结豁免保活；在缺失 <span class="mono">ifb</span> / <span class="mono">fq_codel</span> / <span class="mono">clsact</span> 的裁剪内核上平滑无感降级。</li>
+    <li><b>全 Root 框架兼容、老 WebView 回退与内存盘减负</b>：移除 <span class="mono">json-health.html</span> 冗余 <span class="mono">su -c</span> 包装修复 APatch SuperKey 与 KSU 关闭 <span class="mono">su</span> 报错，补齐 Magisk 模块页一键免输登入与 <span class="mono">./bin/pair_gen.sh</span> 指引；补齐全站 Chromium 83–110 / iOS 15 CSS 兼容回退并将自签 TLS 证书收口至 <span class="mono">&lt;=397</span> 天；跨月持久化账单迁出 <span class="mono">32M tmpfs</span> 内存盘并收敛高频外部命令派生开销。</li>
+  </ul>
+</div>
 <div class="cl-section" id="release-v6-1-0-rc-1" data-version="v6.1.0-rc.1" data-version-code="6009301">
   <div class="cl-title"><svg class="cl-ic" width="16" height="16" viewBox="0 0 24 24"><use href="#cl-rocket"/></svg>v6.1.0-rc.1(准正式版): 5 秒写操作撤销胶囊与防闪回代数锁 · 卡顿黑匣子四维人话归因与信号温控证据 · 隐私安检三级公共底座守卫与忽略白名单 · 配置自愈与全仓规则库版本对齐 <span class="badge b-ok" style="margin-left:4px">RC 准正式版</span> <span style="font-size:11px;color:var(--t2);font-weight:400">2026-11-22 · versionCode 6009301</span></div>
   <ul class="cl-list">

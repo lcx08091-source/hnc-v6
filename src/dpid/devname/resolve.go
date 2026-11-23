@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"embed"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -43,10 +44,16 @@ const (
 	HNLen = 64
 	// cacheMaxEntries 与 C 的 HNC_CACHE_MAX_ENTRIES 对齐。
 	cacheMaxEntries = 1024
-	// dumpsysTimeout 与 C 的 500ms select 超时对齐。
-	dumpsysTimeout = 500 * time.Millisecond
-	// mdnsTimeout: 二进制自带 -t 800ms; 外层再多给 200ms 余量。
+	// dumpsysTimeout 适度放宽至 1000ms, 降低高负载下 Binder 调用误超时概率。
+	dumpsysTimeout = 1000 * time.Millisecond
+	// mdnsTimeout: 外部二进制自带 -t 800ms; 外层再多给 200ms 余量。
 	mdnsTimeout = 1 * time.Second
+
+	mdnsPort         = 5353
+	mdnsMulticastIP  = "224.0.0.251"
+	mdnsStageTimeout = 400 * time.Millisecond
+	mdnsMaxNameJumps = 16
+	mdnsMaxNameLen   = 255
 )
 
 // OUI 内置表(启动时从嵌入数据构建, 排序后二分)。
@@ -144,18 +151,23 @@ func MACFallback(mac string) string {
 	return noColon
 }
 
-// Resolver 六级链。零值即可用(全 miss → mac 兜底); 路径 / 命令可注入,
+// Resolver 解析链。零值即可用(全 miss → mac 兜底); 路径 / 命令可注入,
 // 单测用假实现。
 type Resolver struct {
 	NamesPath     string // data/device_names.json
+	DevIDPath     string // run/dpi_devid.json (hnc_dpid 被动嗅探主机名)
 	CachePath     string // data/hostname_cache.json
 	OverridesPath string // data/oui_overrides.json
 	MDNSBin       string // bin/mdns_resolve
 
-	// 注入点(单测替换; 生产为 exec)
-	RunDumpsys func() ([]byte, error)
-	RunMDNS    func(ip string) ([]byte, error)
-	Now        func() time.Time
+	// 注入点(单测替换; 生产为纯 Go mDNS / exec)
+	RunDumpsys          func() ([]byte, error)
+	RunMDNS             func(ip string) ([]byte, error)
+	Now                 func() time.Time
+	NativeMDNS          bool
+	mdnsUnicastTargetFn func(ip net.IP) *net.UDPAddr
+	mdnsMulticastTarget *net.UDPAddr
+	mdnsQueryOnceFn     func(ctx context.Context, qname string, dst *net.UDPAddr, multicast bool, timeout time.Duration) (string, bool, error)
 
 	cacheMu    sync.Mutex
 	cacheLoad  bool
@@ -175,8 +187,8 @@ func (r *Resolver) Resolve(mac, ip string) (string, string) {
 	return r.ResolveContext(context.Background(), mac, ip)
 }
 
-// ResolveContext 带上下文取消的完整六级链; ctx 取消后立即中止在途外部子进程
-// (dumpsys / mdns_resolve), 不阻塞看门狗停机。
+// ResolveContext 带上下文取消的完整解析链; ctx 取消后立即中止在途外部子进程
+// 或 UDP 查询, 不阻塞看门狗停机。
 func (r *Resolver) ResolveContext(ctx context.Context, mac, ip string) (string, string) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -186,14 +198,21 @@ func (r *Resolver) ResolveContext(ctx context.Context, mac, ip string) (string, 
 	if hn, ok := LookupManual(mac, r.NamesPath); ok {
 		return hn, "manual"
 	}
-	// 2. DHCP(被动数据, ~35ms; 超时 500ms)
+	// 1.5 hnc_dpid 被动嗅探主机名(run/dpi_devid.json: DHCP Opt12 / DHCPv6 / mDNS / NBNS)
+	if ctx.Err() == nil {
+		if hn, src, ok := LookupDevID(mac, r.DevIDPath); ok {
+			r.CacheUpdate(mac, hn, src)
+			return hn, src
+		}
+	}
+	// 2. DHCP(dumpsys network_stack, 超时 1000ms)
 	if ctx.Err() == nil {
 		if hn, ok := r.tryDHCP(ctx, mac); ok {
 			r.CacheUpdate(mac, hn, "dhcp")
 			return hn, "dhcp"
 		}
 	}
-	// 3. mDNS(只在有 IP 时; 二进制自带 -t 800)
+	// 3. mDNS(只在有 IP 时; 纯 Go UDP 5353 PTR 单播+组播, 异常回退 mdns_resolve)
 	if ip != "" && ctx.Err() == nil {
 		if hn, ok := r.tryMDNS(ctx, ip); ok {
 			r.CacheUpdate(mac, hn, "mdns")
@@ -213,6 +232,52 @@ func (r *Resolver) ResolveContext(ctx context.Context, mac, ip string) (string, 
 	}
 	// 6. MAC 兜底
 	return MACFallback(mac), "mac"
+}
+
+// LookupDevID 读取 hnc_dpid 被动嗅探落盘的 run/dpi_devid.json, 提取对应 MAC 的有效非垃圾主机名。
+func LookupDevID(mac, devIDPath string) (string, string, bool) {
+	if devIDPath == "" || mac == "" {
+		return "", "", false
+	}
+	b, err := os.ReadFile(devIDPath)
+	if err != nil || len(b) == 0 || len(b) > 4<<20 {
+		return "", "", false
+	}
+	var f struct {
+		Schema  int `json:"schema"`
+		Devices map[string]struct {
+			Hostname    string `json:"hostname"`
+			HostnameSrc string `json:"hostname_src"`
+		} `json:"devices"`
+	}
+	if err := json.Unmarshal(b, &f); err != nil || len(f.Devices) == 0 {
+		return "", "", false
+	}
+	macLC := strings.ToLower(strings.TrimSpace(mac))
+	entry, ok := f.Devices[macLC]
+	if !ok {
+		for k, v := range f.Devices {
+			if strings.EqualFold(strings.TrimSpace(k), macLC) {
+				entry = v
+				ok = true
+				break
+			}
+		}
+	}
+	if !ok {
+		return "", "", false
+	}
+	hn := stripLocalSuffix(entry.Hostname)
+	if hn == "" || hostname.IsJunk(hn) || len(hn) > HNLen {
+		return "", "", false
+	}
+	src := strings.ToLower(strings.TrimSpace(entry.HostnameSrc))
+	switch src {
+	case "dhcp", "dhcpv6", "mdns", "nbns":
+	default:
+		src = "dhcp"
+	}
+	return hn, src, true
 }
 
 // LookupManual 与 hnc_lookup_manual_name 一致: 容错的子串匹配
@@ -383,8 +448,10 @@ func (r *Resolver) dhcpOut(ctx context.Context) []byte {
 	return b
 }
 
-// tryMDNS 与 try_mdns_resolve 一致: exit 0 才信输出, 去尾部换行,
-// 垃圾名当作没解析到。
+// tryMDNS 优先走 RunMDNS 测试钩子; 生产默认路径用纯 Go net.UDPConn 执行
+// .in-addr.arpa PTR 单播(<ip>:5353) + 组播(224.0.0.251:5353) 查询,
+// 若底层 UDP 套接字/发送失败且外部 MDNSBin 存在则平滑回退 mdns_resolve 二进制。
+// 当 MDNSBin 设为空或不存在的假路径(如单测 .../no_mdns_resolve)且未显式开启 NativeMDNS 时立即跳过。
 func (r *Resolver) tryMDNS(ctx context.Context, ip string) (string, bool) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -392,45 +459,309 @@ func (r *Resolver) tryMDNS(ctx context.Context, ip string) (string, bool) {
 	if ctx.Err() != nil {
 		return "", false
 	}
-	var (
-		out []byte
-		err error
-	)
 	if r.RunMDNS != nil {
-		out, err = r.RunMDNS(ip)
+		out, err := r.RunMDNS(ip)
 		if err != nil {
 			return "", false
 		}
-	} else {
-		if r.MDNSBin == "" {
-			return "", false
-		}
-		if pip := net.ParseIP(ip); pip == nil || pip.To4() == nil { // 与 C 的 inet_pton 防御一致
-			return "", false
-		}
-		subCtx, cancel := context.WithTimeout(ctx, mdnsTimeout)
-		defer cancel()
-		cmd := exec.CommandContext(subCtx, r.MDNSBin, "-t", "800", ip)
-		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		cmd.Cancel = func() error {
-			if cmd.Process != nil && cmd.Process.Pid > 0 {
-				_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-				return cmd.Process.Kill()
-			}
-			return nil
-		}
-		cmd.WaitDelay = time.Second
-		out, err = cmd.Output()
-		if err != nil {
-			return "", false
+		return cleanMDNSHostname(string(out))
+	}
+
+	hasBin := false
+	if r.MDNSBin != "" {
+		if fi, err := os.Stat(r.MDNSBin); err == nil && !fi.IsDir() {
+			hasBin = true
 		}
 	}
-	hn := strings.TrimRight(string(out), "\n\r")
-	hn = strings.TrimSpace(hn)
+	if !r.NativeMDNS && !hasBin {
+		return "", false
+	}
+
+	pip := net.ParseIP(strings.TrimSpace(ip))
+	if pip == nil || pip.To4() == nil { // 与 C 的 inet_pton 防御一致
+		return "", false
+	}
+	ip4 := pip.To4()
+
+	hn, ok, sockErr := r.queryMDNSNative(ctx, ip4)
+	if ok {
+		if clean, valid := cleanMDNSHostname(hn); valid {
+			return clean, true
+		}
+	}
+	if sockErr != nil && hasBin && ctx.Err() == nil {
+		out, err := r.execMDNSBin(ctx, ip4.String())
+		if err == nil {
+			return cleanMDNSHostname(string(out))
+		}
+	}
+	return "", false
+}
+
+func cleanMDNSHostname(raw string) (string, bool) {
+	hn := strings.TrimRight(raw, "\n\r")
+	hn = stripLocalSuffix(hn)
 	if hn == "" || hostname.IsJunk(hn) || len(hn) > HNLen {
 		return "", false
 	}
 	return hn, true
+}
+
+func stripLocalSuffix(name string) string {
+	name = strings.TrimRight(strings.TrimSpace(name), ".")
+	if len(name) > 6 && strings.EqualFold(name[len(name)-6:], ".local") {
+		name = name[:len(name)-6]
+	}
+	return strings.TrimSpace(name)
+}
+
+func (r *Resolver) execMDNSBin(ctx context.Context, ip string) ([]byte, error) {
+	subCtx, cancel := context.WithTimeout(ctx, mdnsTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(subCtx, r.MDNSBin, "-t", "800", ip)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
+	cmd.WaitDelay = time.Second
+	return cmd.Output()
+}
+
+func (r *Resolver) queryMDNSNative(ctx context.Context, ip4 net.IP) (string, bool, error) {
+	qname := fmt.Sprintf("%d.%d.%d.%d.in-addr.arpa", ip4[3], ip4[2], ip4[1], ip4[0])
+	queryFn := r.mdnsQueryOnceFn
+	if queryFn == nil {
+		queryFn = queryMDNSOnce
+	}
+
+	var uniDst *net.UDPAddr
+	if r.mdnsUnicastTargetFn != nil {
+		uniDst = r.mdnsUnicastTargetFn(ip4)
+	} else {
+		uniDst = &net.UDPAddr{IP: ip4, Port: mdnsPort}
+	}
+	if hn, ok, uErr := queryFn(ctx, qname, uniDst, false, mdnsStageTimeout); ok {
+		return hn, true, nil
+	} else if ctx.Err() != nil {
+		return "", false, nil
+	} else {
+		mcastDst := r.mdnsMulticastTarget
+		if mcastDst == nil {
+			mcastDst = &net.UDPAddr{IP: net.IPv4(224, 0, 0, 251), Port: mdnsPort}
+		}
+		hn2, ok2, mErr := queryFn(ctx, qname, mcastDst, true, mdnsStageTimeout)
+		if ok2 {
+			return hn2, true, nil
+		}
+		if uErr != nil {
+			return "", false, uErr
+		}
+		return "", false, mErr
+	}
+}
+
+func queryMDNSOnce(ctx context.Context, qname string, dst *net.UDPAddr, multicast bool, timeout time.Duration) (string, bool, error) {
+	if ctx.Err() != nil {
+		return "", false, nil
+	}
+	txid := uint16(time.Now().UnixNano() ^ int64(os.Getpid()<<8))
+	req, ok := buildMDNSPTRQuery(qname, txid)
+	if !ok {
+		return "", false, nil
+	}
+	conn, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4zero, Port: 0})
+	if err != nil {
+		return "", false, err
+	}
+	defer conn.Close()
+
+	if multicast {
+		if raw, err := conn.SyscallConn(); err == nil {
+			_ = raw.Control(func(fd uintptr) {
+				_ = syscall.SetsockoptInt(int(fd), syscall.IPPROTO_IP, syscall.IP_MULTICAST_TTL, 255)
+			})
+		}
+	}
+
+	deadline := time.Now().Add(timeout)
+	if ctxDL, hasDL := ctx.Deadline(); hasDL && ctxDL.Before(deadline) {
+		deadline = ctxDL
+	}
+	_ = conn.SetDeadline(deadline)
+
+	stopWatch := make(chan struct{})
+	defer close(stopWatch)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.SetDeadline(time.Now())
+		case <-stopWatch:
+		}
+	}()
+
+	if _, err := conn.WriteToUDP(req, dst); err != nil {
+		if ctx.Err() != nil {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+
+	var buf [1500]byte
+	for {
+		n, _, rerr := conn.ReadFromUDP(buf[:])
+		if rerr != nil {
+			if ne, isNet := rerr.(net.Error); isNet && ne.Timeout() {
+				return "", false, nil
+			}
+			if ctx.Err() != nil {
+				return "", false, nil
+			}
+			return "", false, rerr
+		}
+		if hn, matched := parseMDNSPTRResponse(buf[:n], qname); matched {
+			return hn, true, nil
+		}
+	}
+}
+
+func encodeDNSName(name string) ([]byte, bool) {
+	name = strings.TrimSuffix(strings.TrimSpace(name), ".")
+	if name == "" || len(name) > mdnsMaxNameLen {
+		return nil, false
+	}
+	var out []byte
+	for _, label := range strings.Split(name, ".") {
+		if len(label) == 0 || len(label) > 63 {
+			return nil, false
+		}
+		out = append(out, byte(len(label)))
+		out = append(out, label...)
+	}
+	out = append(out, 0)
+	return out, true
+}
+
+func buildMDNSPTRQuery(qname string, txid uint16) ([]byte, bool) {
+	enc, ok := encodeDNSName(qname)
+	if !ok {
+		return nil, false
+	}
+	pkt := make([]byte, 12+len(enc)+4)
+	binary.BigEndian.PutUint16(pkt[0:2], txid)
+	binary.BigEndian.PutUint16(pkt[4:6], 1) // QDCOUNT = 1
+	copy(pkt[12:], enc)
+	pos := 12 + len(enc)
+	binary.BigEndian.PutUint16(pkt[pos:pos+2], 0x000C)   // PTR
+	binary.BigEndian.PutUint16(pkt[pos+2:pos+4], 0x0001) // IN
+	return pkt, true
+}
+
+// decodeDNSName 解码 DNS 域名(含 0xC0 压缩指针); 严格要求压缩指针 ptr < cur 防自环与前跳放大。
+func decodeDNSName(pkt []byte, startOff int) (string, int, bool) {
+	var buf bytes.Buffer
+	cur := startOff
+	jumps := 0
+	jumped := false
+	nextOff := 0
+	for {
+		if cur < 0 || cur >= len(pkt) {
+			return "", 0, false
+		}
+		l := int(pkt[cur])
+		if l == 0 {
+			cur++
+			break
+		}
+		if l&0xC0 == 0xC0 {
+			if cur+1 >= len(pkt) {
+				return "", 0, false
+			}
+			ptr := ((l & 0x3F) << 8) | int(pkt[cur+1])
+			if !jumped {
+				nextOff = cur + 2
+				jumped = true
+			}
+			jumps++
+			if jumps > mdnsMaxNameJumps || ptr >= cur || ptr >= len(pkt) {
+				return "", 0, false
+			}
+			cur = ptr
+			continue
+		}
+		if l&0xC0 != 0 || l > 63 || cur+1+l > len(pkt) {
+			return "", 0, false
+		}
+		if buf.Len()+l+1 > mdnsMaxNameLen {
+			return "", 0, false
+		}
+		if buf.Len() > 0 {
+			buf.WriteByte('.')
+		}
+		buf.Write(pkt[cur+1 : cur+1+l])
+		cur += 1 + l
+	}
+	if !jumped {
+		nextOff = cur
+	}
+	return buf.String(), nextOff, true
+}
+
+// parseMDNSPTRResponse 解析 mDNS 响应并校验 rname 匹配 expectedRName(防组播伪造)。
+func parseMDNSPTRResponse(pkt []byte, expectedRName string) (string, bool) {
+	if len(pkt) < 12 {
+		return "", false
+	}
+	flags := binary.BigEndian.Uint16(pkt[2:4])
+	if flags&0x8000 == 0 { // QR 必须为 1(Response)
+		return "", false
+	}
+	qdcount := int(binary.BigEndian.Uint16(pkt[4:6]))
+	ancount := int(binary.BigEndian.Uint16(pkt[6:8]))
+	if ancount == 0 {
+		return "", false
+	}
+	off := 12
+	for i := 0; i < qdcount; i++ {
+		var ok bool
+		_, off, ok = decodeDNSName(pkt, off)
+		if !ok || off+4 > len(pkt) {
+			return "", false
+		}
+		off += 4
+	}
+	wantName := strings.TrimSuffix(expectedRName, ".")
+	for i := 0; i < ancount; i++ {
+		rname, nextOff, ok := decodeDNSName(pkt, off)
+		if !ok || nextOff+10 > len(pkt) {
+			return "", false
+		}
+		rtype := binary.BigEndian.Uint16(pkt[nextOff : nextOff+2])
+		rdlen := int(binary.BigEndian.Uint16(pkt[nextOff+8 : nextOff+10]))
+		rdataOff := nextOff + 10
+		if rdataOff+rdlen > len(pkt) {
+			return "", false
+		}
+		off = rdataOff + rdlen
+		if wantName != "" && !strings.EqualFold(strings.TrimSuffix(rname, "."), wantName) {
+			continue
+		}
+		if rtype == 0x000C { // PTR
+			target, afterRdata, ok := decodeDNSName(pkt, rdataOff)
+			if !ok || afterRdata > rdataOff+rdlen {
+				return "", false
+			}
+			hn := stripLocalSuffix(target)
+			if hn != "" {
+				return hn, true
+			}
+			return "", false
+		}
+	}
+	return "", false
 }
 
 // LookupOverride 与 hnc_override_lookup 一致: {"<前缀>":"<标签>"},

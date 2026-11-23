@@ -461,3 +461,43 @@ func TestPuPrune(t *testing.T) {
 		t.Error("recent file pruned")
 	}
 }
+
+func TestPhoneUsageRC2DualDirAndMigration(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+	now := time.Date(2026, 10, 15, 12, 0, 0, 0, time.UTC)
+	yday := now.AddDate(0, 0, -1).Format("20060102")
+
+	// Legacy file only in run/ must be readable via puLoadDay and migrated to data/ on flush
+	leg := newPuDay(yday)
+	leg.Wifi = [2]uint64{1024, 2048}
+	raw, _ := json.Marshal(leg)
+	if err := os.WriteFile(puLegacyDayPath(dir, yday), raw, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	loaded, ok := puLoadDay(dir, yday)
+	if !ok || loaded.Wifi != ([2]uint64{1024, 2048}) {
+		t.Fatalf("legacy run/ fallback read failed: ok=%v wifi=%v", ok, loaded.Wifi)
+	}
+
+	// New writes go to data/ (auto MkdirAll)
+	today := now.Format("20060102")
+	cur := newPuDay(today)
+	cur.Wifi = [2]uint64{4096, 8192}
+	if err := puSaveDay(dir, cur); err != nil {
+		t.Fatalf("puSaveDay auto-mkdir data/: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "data", "phone_usage."+today+".json")); err != nil {
+		t.Fatalf("expected new day file in data/: %v", err)
+	}
+
+	e := newPuEngine(dir, (&puFake{}).env())
+	e.flush(now)
+	if _, err := os.Stat(puDayPath(dir, yday)); err != nil {
+		t.Fatalf("legacy run/ file was not migrated to data/: %v", err)
+	}
+	if _, err := os.Stat(puLegacyDayPath(dir, yday)); !os.IsNotExist(err) {
+		t.Fatalf("legacy run/ file should be removed after migration, err=%v", err)
+	}
+}
+

@@ -114,6 +114,24 @@ static int prop_get_int(const char *name, int dflt)
  *   3) ro.product.board (SoC codename, 例 "kalama" "sm8550")
  * ══════════════════════════════════════════════════════════ */
 
+static int s_is_unisoc = 0;
+
+static int is_unisoc_token(const char *s)
+{
+    if (!s || !s[0]) return 0;
+    if (strncasecmp(s, "unisoc", 6) == 0 ||
+        strncasecmp(s, "spreadtrum", 10) == 0 ||
+        strncasecmp(s, "sprd", 4) == 0 ||
+        strncasecmp(s, "ums", 3) == 0 ||
+        strncasecmp(s, "uis", 3) == 0 ||
+        strncasecmp(s, "ud710", 5) == 0)
+        return 1;
+    if ((strncasecmp(s, "sp", 2) == 0 || strncasecmp(s, "sc", 2) == 0) &&
+        isdigit((unsigned char)s[2]))
+        return 1;
+    return 0;
+}
+
 static plat_soc_vendor_t classify_soc_vendor(const char *manuf,
                                              const char *hw,
                                              const char *board)
@@ -126,6 +144,11 @@ static plat_soc_vendor_t classify_soc_vendor(const char *manuf,
         if (strcasecmp(manuf, "Samsung") == 0)         return PLAT_SOC_SAMSUNG;
         if (strcasecmp(manuf, "HiSilicon") == 0)       return PLAT_SOC_HISI;
         if (strcasecmp(manuf, "Google") == 0)          return PLAT_SOC_GOOGLE;
+        if (strncasecmp(manuf, "unisoc", 6) == 0 ||
+            strncasecmp(manuf, "spreadtrum", 10) == 0) {
+            s_is_unisoc = 1;
+            return PLAT_SOC_OTHER;
+        }
     }
 
     /* hw 老属性 fallback */
@@ -135,6 +158,10 @@ static plat_soc_vendor_t classify_soc_vendor(const char *manuf,
         if (strncasecmp(hw, "exynos", 6) == 0)         return PLAT_SOC_SAMSUNG;
         if (strncasecmp(hw, "kirin", 5) == 0)          return PLAT_SOC_HISI;
         if (strncasecmp(hw, "gs", 2) == 0)             return PLAT_SOC_GOOGLE;  /* gs101..gs401 */
+        if (is_unisoc_token(hw)) {
+            s_is_unisoc = 1;
+            return PLAT_SOC_OTHER;
+        }
     }
 
     /* board codename 兜底 */
@@ -149,6 +176,10 @@ static plat_soc_vendor_t classify_soc_vendor(const char *manuf,
                 return PLAT_SOC_QCOM;
         if (strncasecmp(board, "mt", 2) == 0)          return PLAT_SOC_MTK;
         if (strncasecmp(board, "exynos", 6) == 0)      return PLAT_SOC_SAMSUNG;
+        if (is_unisoc_token(board)) {
+            s_is_unisoc = 1;
+            return PLAT_SOC_OTHER;
+        }
     }
 
     return PLAT_SOC_UNKNOWN;
@@ -159,14 +190,19 @@ static void probe_soc(void)
     char manuf[HNC_PLATFORM_STR_LEN] = {0};
     char hw[HNC_PLATFORM_STR_LEN] = {0};
     char board[HNC_PLATFORM_STR_LEN] = {0};
+    char bplat[HNC_PLATFORM_STR_LEN] = {0};
     char model[HNC_PLATFORM_STR_LEN] = {0};
 
+    s_is_unisoc = 0;
     prop_get("ro.soc.manufacturer", manuf, sizeof(manuf));
     prop_get("ro.hardware", hw, sizeof(hw));
     prop_get("ro.product.board", board, sizeof(board));
+    prop_get("ro.board.platform", bplat, sizeof(bplat));
     prop_get("ro.soc.model", model, sizeof(model));
 
-    g_platform.soc_vendor = classify_soc_vendor(manuf, hw, board);
+    g_platform.soc_vendor = classify_soc_vendor(manuf, hw, board[0] ? board : bplat);
+    if (g_platform.soc_vendor == PLAT_SOC_UNKNOWN && bplat[0])
+        g_platform.soc_vendor = classify_soc_vendor(NULL, NULL, bplat);
 
     /* soc_vendor_raw 优先 manuf, fallback hw */
     if (manuf[0]) snprintf(g_platform.soc_vendor_raw,
@@ -174,11 +210,13 @@ static void probe_soc(void)
     else          snprintf(g_platform.soc_vendor_raw,
                             sizeof(g_platform.soc_vendor_raw), "%s", hw);
 
-    /* soc_model 优先 ro.soc.model, fallback ro.product.board */
-    if (model[0]) snprintf(g_platform.soc_model,
-                            sizeof(g_platform.soc_model), "%s", model);
-    else          snprintf(g_platform.soc_model,
-                            sizeof(g_platform.soc_model), "%s", board);
+    /* soc_model 优先 ro.soc.model, fallback ro.product.board / ro.board.platform */
+    if (model[0])      snprintf(g_platform.soc_model,
+                                 sizeof(g_platform.soc_model), "%s", model);
+    else if (board[0]) snprintf(g_platform.soc_model,
+                                 sizeof(g_platform.soc_model), "%s", board);
+    else               snprintf(g_platform.soc_model,
+                                 sizeof(g_platform.soc_model), "%s", bplat);
 
     snprintf(g_platform.soc_hardware, sizeof(g_platform.soc_hardware), "%s", hw);
 }
@@ -332,12 +370,16 @@ static void probe_offload(void)
     g_platform.has_bpf_tethering         = has_limit_map ? 1 : 0;
     g_platform.has_bpf_tethering_partial = (has_tether_dir && !has_limit_map) ? 1 : 0;
 
-    /* MTK PPE/HNAT */
+    /* MTK PPE / HNAT / MDDP / DIT */
     g_platform.has_mtk_ppe =
         (path_exists("/sys/kernel/debug/hnat") ||
          path_exists("/proc/sys/net/nf_conntrack_hnat_offload") ||
          path_exists("/sys/module/mtk_ppe") ||
-         path_exists("/sys/module/mtk_hnat"))
+         path_exists("/sys/module/mtk_hnat") ||
+         path_exists("/dev/mddp") ||
+         path_exists("/sys/module/mddp") ||
+         path_exists("/sys/module/mtk_mddp") ||
+         path_exists("/sys/devices/platform/dit"))
         ? 1 : 0;
 
     /* 三星 NSS - 探测点未确认, v5.2 补 */
@@ -408,7 +450,7 @@ const char *platform_soc_vendor_str(plat_soc_vendor_t v)
     case PLAT_SOC_SAMSUNG: return "samsung";
     case PLAT_SOC_HISI:    return "hisi";
     case PLAT_SOC_GOOGLE:  return "google";
-    case PLAT_SOC_OTHER:   return "other";
+    case PLAT_SOC_OTHER:   return s_is_unisoc ? "unisoc" : "other";
     }
     return "invalid";
 }

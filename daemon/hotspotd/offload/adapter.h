@@ -22,10 +22,10 @@
  *      维护 cache。
  *
  * v5.0 alpha.1 状态:
- *   - adapter_null:        ✅ 实现
- *   - adapter_bpf:         🚧 PER_UPSTREAM 模式实现中
- *   - adapter_ppe (MTK):   ⏳ v5.1 占位
- *   - adapter_nss (三星):  ⏳ v5.2 占位
+ *   - adapter_null:        [OK] 实现
+ *   - adapter_bpf:         [WIP] PER_UPSTREAM 模式实现中
+ *   - adapter_ppe (MTK):   [TODO] v5.1 占位
+ *   - adapter_nss (三星):  [TODO] v5.2 占位
  *
  * SPDX-License-Identifier: GPL-2.0
  */

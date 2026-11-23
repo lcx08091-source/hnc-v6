@@ -17,12 +17,19 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
-const macAliasesRelPath = "data/mac_aliases.json"
+const (
+	macAliasesRelPath = "data/mac_aliases.json"
+	macAliasesMax     = 1024
+	macAliasesTTL     = int64(90 * 86400)
+	macAliasTsPrefix  = "@ts:"
+)
 
 func macAliasesPath(hncDir string) string { return filepath.Join(hncDir, macAliasesRelPath) }
 
@@ -56,39 +63,155 @@ func loadMACAliases(hncDir string) map[string]string {
 	return m
 }
 
-func readMACAliasesFile(path string) map[string]string {
+func readMACAliasesWithTs(path string) (map[string]string, map[string]int64) {
 	out := map[string]string{}
+	tsMap := map[string]int64{}
 	b, err := os.ReadFile(path)
 	if err != nil {
-		return out
+		return out, tsMap
 	}
 	var raw map[string]string
 	if json.Unmarshal(b, &raw) != nil {
-		return out
+		return out, tsMap
 	}
 	for k, v := range raw {
-		k, v = strings.ToLower(strings.TrimSpace(k)), strings.ToLower(strings.TrimSpace(v))
-		if validMAC(k) && validMAC(v) && k != v {
-			out[k] = v
+		ks := strings.ToLower(strings.TrimSpace(k))
+		vs := strings.TrimSpace(v)
+		if strings.HasPrefix(ks, macAliasTsPrefix) {
+			mac := strings.TrimPrefix(ks, macAliasTsPrefix)
+			if validMAC(mac) {
+				if ts, err := strconv.ParseInt(vs, 10, 64); err == nil && ts > 0 {
+					tsMap[mac] = ts
+				}
+			}
+			continue
+		}
+		vs = strings.ToLower(vs)
+		if validMAC(ks) && validMAC(vs) && ks != vs {
+			out[ks] = vs
 		}
 	}
+	return out, tsMap
+}
+
+// pruneMACAliasesMap 按 90 天 TTL 与 1024 条容量上限裁剪别名表(原地修改 m 与 tsMap), 返回是否有变动。
+func pruneMACAliasesMap(m map[string]string, tsMap map[string]int64, now int64) bool {
+	changed := false
+	if now > 0 {
+		for k := range m {
+			if ts := tsMap[k]; ts > 0 && now-ts > macAliasesTTL {
+				delete(m, k)
+				delete(tsMap, k)
+				changed = true
+			}
+		}
+	}
+	for k := range tsMap {
+		if _, ok := m[k]; !ok {
+			delete(tsMap, k)
+			changed = true
+		}
+	}
+	if len(m) > macAliasesMax {
+		type item struct {
+			mac string
+			ts  int64
+		}
+		all := make([]item, 0, len(m))
+		for k := range m {
+			all = append(all, item{mac: k, ts: tsMap[k]})
+		}
+		sort.Slice(all, func(i, j int) bool {
+			if all[i].ts != all[j].ts {
+				return all[i].ts < all[j].ts
+			}
+			return all[i].mac < all[j].mac
+		})
+		drop := len(m) - macAliasesMax
+		for i := 0; i < drop; i++ {
+			delete(m, all[i].mac)
+			delete(tsMap, all[i].mac)
+		}
+		changed = true
+	}
+	return changed
+}
+
+func readMACAliasesFile(path string) map[string]string {
+	out, tsMap := readMACAliasesWithTs(path)
+	pruneMACAliasesMap(out, tsMap, time.Now().Unix())
 	return out
 }
 
 // saveMACAliases 原子写别名表并让缓存失效(同秒同尺寸的改写 mtime 可能不变)。
 func saveMACAliases(hncDir string, m map[string]string) error {
-	if m == nil {
-		m = map[string]string{}
+	return saveMACAliasesAt(hncDir, m, time.Now().Unix(), nil)
+}
+
+// saveMACAliasesAt 支持指定当前时间与自定义时间戳映射(供归档/后台裁剪与单测精确控制 TTL)。
+func saveMACAliasesAt(hncDir string, m map[string]string, now int64, customTs map[string]int64) error {
+	path := macAliasesPath(hncDir)
+	prevM, prevTs := readMACAliasesWithTs(path)
+	clean := map[string]string{}
+	tsOut := map[string]int64{}
+	for k, v := range m {
+		ks, vs := strings.ToLower(strings.TrimSpace(k)), strings.ToLower(strings.TrimSpace(v))
+		if !validMAC(ks) || !validMAC(vs) || ks == vs {
+			continue
+		}
+		clean[ks] = vs
+		if customTs != nil && customTs[ks] > 0 {
+			tsOut[ks] = customTs[ks]
+		} else if prevV, had := prevM[ks]; had && prevV == vs && prevTs[ks] > 0 {
+			tsOut[ks] = prevTs[ks]
+		} else if now > 0 {
+			tsOut[ks] = now
+		}
 	}
-	b, err := json.Marshal(m)
+	pruneMACAliasesMap(clean, tsOut, now)
+	raw := make(map[string]string, len(clean)*2)
+	for k, v := range clean {
+		raw[k] = v
+		if ts := tsOut[k]; ts > 0 {
+			raw[macAliasTsPrefix+k] = strconv.FormatInt(ts, 10)
+		}
+	}
+	b, err := json.Marshal(raw)
 	if err != nil {
 		return err
 	}
-	err = discoverWriteAtomic(macAliasesPath(hncDir), b)
+	err = discoverWriteAtomic(path, b)
 	macAliasCache.mu.Lock()
 	macAliasCache.m = nil
 	macAliasCache.mu.Unlock()
 	return err
+}
+
+// pruneMACAliases 周期性裁剪过期(>90 天)或超上限(>1024 条)的别名记录; 无变动时零写盘。
+func pruneMACAliases(hncDir string, now int64) {
+	path := macAliasesPath(hncDir)
+	if _, err := os.Stat(path); err != nil {
+		return
+	}
+	m, tsMap := readMACAliasesWithTs(path)
+	if len(m) == 0 && len(tsMap) == 0 {
+		return
+	}
+	changed := false
+	if now > 0 {
+		for k := range m {
+			if tsMap[k] <= 0 {
+				tsMap[k] = now
+				changed = true
+			}
+		}
+	}
+	if pruneMACAliasesMap(m, tsMap, now) {
+		changed = true
+	}
+	if changed {
+		_ = saveMACAliasesAt(hncDir, m, now, tsMap)
+	}
 }
 
 // addMACAlias 在 m 上登记 from→to 并压平链: 指向 from 的旧别名改指 to; to 自己

@@ -20,6 +20,7 @@ import (
 	"context"
 	"math"
 	"net/http"
+	"os"
 	"os/exec"
 	"regexp"
 	"runtime"
@@ -32,10 +33,49 @@ import (
 )
 
 const (
-	sigUnavailable    = 2147483647
-	sigActiveInterval = 8 * time.Second
-	sigIdleInterval   = 45 * time.Second
+	sigUnavailable      = 2147483647
+	sigActiveInterval   = 8 * time.Second
+	sigIdleInterval     = 45 * time.Second
+	sigForceMinInterval = 1500 * time.Millisecond
+	sigHistoryCap       = 60
+	sigHandoverWindowS  = 300
 )
+
+// SignalCarrierInfo 描述主/辅服务载波的频段、带宽、频点与物理小区标识。
+type SignalCarrierInfo struct {
+	IsPrimary bool   `json:"is_primary"`
+	NetType   string `json:"net_type,omitempty"`
+	Band      string `json:"band,omitempty"`
+	BWMHz     int    `json:"bw_mhz,omitempty"`
+	ARFCN     int    `json:"arfcn,omitempty"`
+	FreqMHz   int    `json:"freq_mhz,omitempty"`
+	PCI       int    `json:"pci,omitempty"`
+	HasPCI    bool   `json:"has_pci,omitempty"`
+}
+
+// SignalHistoryPoint 描述单次采样的双轨信号历史点(电平 RSRP/RSSI + 信噪比 SINR/RTT)。
+type SignalHistoryPoint struct {
+	Ts          int64   `json:"ts"`
+	RSRPdBm     int     `json:"rsrp_dbm,omitempty"`
+	WifiRSSIdBm int     `json:"wifi_rssi_dbm,omitempty"`
+	SINRdB      int     `json:"sinr_db,omitempty"`
+	HasSINR     bool    `json:"has_sinr,omitempty"`
+	RSRQdB      int     `json:"rsrq_db,omitempty"`
+	PCI         int     `json:"pci,omitempty"`
+	HasPCI      bool    `json:"has_pci,omitempty"`
+	Band        string  `json:"band,omitempty"`
+	RTTMs       float64 `json:"rtt_ms,omitempty"`
+}
+
+// SignalInterferenceSource 描述四维射频/空口干扰源中的单个维度量化评估。
+type SignalInterferenceSource struct {
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Pct     int    `json:"pct"`
+	Level   string `json:"level"`
+	Value   string `json:"value"`
+	Summary string `json:"summary"`
+}
 
 type hostSignalStatus struct {
 	Available          bool    `json:"available"`
@@ -73,9 +113,33 @@ type hostSignalStatus struct {
 	Quality            string  `json:"quality"`           // "excellent" | "good" | "fair" | "weak" | "critical" | "unknown"
 	QualityCN          string  `json:"quality_cn"`        // 中文健康标签
 	RFCeilingFactor    float64 `json:"rf_ceiling_factor"` // α_rf in [0.35, 1.0] for Autorate
-	Diagnosis          string  `json:"diagnosis"`         // "ok" | "rf_weak" | "congestion" | "lan_bottleneck" | "idle"
+	Diagnosis          string  `json:"diagnosis"`         // "ok" | "rf_weak" | "rf_interference" | "congestion" | "lan_bottleneck" | "idle"
 	DiagnosisCN        string  `json:"diagnosis_cn"`
 	UpdatedAt          int64   `json:"updated_at"`
+
+	// RC2 无损追加字段: 双轨曲线、物理小区标识、载波详情、乒乓切换与四维干扰诊断
+	HasSINR             bool                       `json:"has_sinr,omitempty"`
+	HasRSRQ             bool                       `json:"has_rsrq,omitempty"`
+	RSSIdBm             int                        `json:"rssi_dbm,omitempty"`
+	PCI                 int                        `json:"pci,omitempty"`
+	HasPCI              bool                       `json:"has_pci,omitempty"`
+	LTEPCI              int                        `json:"lte_pci,omitempty"`
+	HasLTEPCI           bool                       `json:"has_lte_pci,omitempty"`
+	LTERSRQdB           int                        `json:"lte_rsrq_db,omitempty"`
+	LTESINRdB           int                        `json:"lte_sinr_db,omitempty"`
+	HasLTESINR          bool                       `json:"has_lte_sinr,omitempty"`
+	WifiNoiseDbm        int                        `json:"wifi_noise_dbm,omitempty"`
+	Carriers            []SignalCarrierInfo        `json:"carriers,omitempty"`
+	HandoverCount       int                        `json:"handover_count"`
+	JitterdB            int                        `json:"jitter_db"`
+	MinDbm              int                        `json:"min_dbm,omitempty"`
+	MaxDbm              int                        `json:"max_dbm,omitempty"`
+	AvgDbm              int                        `json:"avg_dbm,omitempty"`
+	InterferencePct     int                        `json:"interference_pct"`
+	InterferenceLevel   string                     `json:"interference_level,omitempty"`
+	InterferenceLabel   string                     `json:"interference_label,omitempty"`
+	InterferenceSources []SignalInterferenceSource `json:"interference_sources,omitempty"`
+	History             []SignalHistoryPoint       `json:"history,omitempty"`
 }
 
 // signalMonitor 零阻塞异步信号监测器。
@@ -92,9 +156,14 @@ type signalMonitor struct {
 	hncDir   string
 	sampleFn func(s *server) hostSignalStatus // 单测注入点(默认 sampleHostSignal)
 
-	mu     sync.RWMutex
-	last   hostSignalStatus
-	lastAt time.Time
+	mu          sync.RWMutex
+	last        hostSignalStatus
+	lastAt      time.Time
+	lastForceAt time.Time
+	history     [sigHistoryCap]SignalHistoryPoint
+	histHead    int
+	histLen     int
+	handoverTs  []int64
 }
 
 func newSignalMonitor(hncDir string) *signalMonitor {
@@ -138,6 +207,23 @@ func (m *signalMonitor) currentTTL() time.Duration {
 	return sigActiveInterval
 }
 
+func cloneHostSignalStatus(src hostSignalStatus) hostSignalStatus {
+	cp := src
+	if len(src.Carriers) > 0 {
+		cp.Carriers = make([]SignalCarrierInfo, len(src.Carriers))
+		copy(cp.Carriers, src.Carriers)
+	}
+	if len(src.InterferenceSources) > 0 {
+		cp.InterferenceSources = make([]SignalInterferenceSource, len(src.InterferenceSources))
+		copy(cp.InterferenceSources, src.InterferenceSources)
+	}
+	if len(src.History) > 0 {
+		cp.History = make([]SignalHistoryPoint, len(src.History))
+		copy(cp.History, src.History)
+	}
+	return cp
+}
+
 // Get 供 HTTP 线程(/api/signal, /api/live, /api/vector_sync)无阻塞读取信号状态:
 // 绝不在当前请求线程内同步执行 dumpsys! 缓存过期时立即返回上一份快照并触发单飞后台协程刷新。
 func (m *signalMonitor) Get(s *server) hostSignalStatus {
@@ -157,7 +243,7 @@ func (m *signalMonitor) Get(s *server) hostSignalStatus {
 	ttl := m.currentTTL()
 	m.mu.RLock()
 	stale := m.lastAt.IsZero() || time.Since(m.lastAt) >= ttl
-	cp := m.last
+	cp := cloneHostSignalStatus(m.last)
 	m.mu.RUnlock()
 
 	if s != nil {
@@ -190,7 +276,7 @@ func (m *signalMonitor) PeekCached(s *server) hostSignalStatus {
 		}
 	}
 	m.mu.RLock()
-	cp := m.last
+	cp := cloneHostSignalStatus(m.last)
 	m.mu.RUnlock()
 	if s != nil && cp.Available {
 		enrichSignalDiagnosis(&cp, s)
@@ -199,6 +285,7 @@ func (m *signalMonitor) PeekCached(s *server) hostSignalStatus {
 }
 
 // TriggerRefresh 非阻塞触发单实例后台异步刷新(已在途时自动合并, 零排队、零常驻泄漏)。
+// 当 force==true 时启用 1500ms lastForceAt 最小防抖间隔保护 system_server。
 func (m *signalMonitor) TriggerRefresh(s *server, force bool) {
 	if m == nil || m.closed.Load() {
 		return
@@ -207,6 +294,15 @@ func (m *signalMonitor) TriggerRefresh(s *server, force bool) {
 		return
 	}
 	if force {
+		now := time.Now()
+		m.mu.Lock()
+		if !m.lastForceAt.IsZero() && now.Sub(m.lastForceAt) < sigForceMinInterval {
+			m.mu.Unlock()
+			m.asyncCoalesced.Add(1)
+			return
+		}
+		m.lastForceAt = now
+		m.mu.Unlock()
 		m.forceNext.Store(true)
 	}
 	if !m.inFlight.CompareAndSwap(false, true) {
@@ -235,7 +331,7 @@ func (m *signalMonitor) TriggerRefresh(s *server, force bool) {
 	}(s)
 }
 
-// Refresh 执行单次真实采样并更新缓存(仅供后台异步协程或显式单测内部调用)。
+// Refresh 执行单次真实采样并更新缓存与 60 点环形历史缓冲(仅供后台异步协程或显式单测内部调用)。
 func (m *signalMonitor) Refresh(s *server) hostSignalStatus {
 	if s != nil && s.simActive() {
 		return simSignalSnapshot(s)
@@ -249,14 +345,223 @@ func (m *signalMonitor) Refresh(s *server) hostSignalStatus {
 	if st.UpdatedAt == 0 {
 		st.UpdatedAt = now.Unix()
 	}
+
+	var curRTT float64
+	if s != nil && s.autorate != nil {
+		ar := s.autorate.Snapshot()
+		if ar.Enabled && ar.RTTMs > 0 && !invalidFiniteFloat(ar.RTTMs) {
+			curRTT = math.Round(ar.RTTMs*10) / 10
+		}
+	}
+
+	m.mu.Lock()
+	m.recordHistoryLocked(&st, curRTT)
+	m.mu.Unlock()
+
 	if s != nil {
 		enrichSignalDiagnosis(&st, s)
+	} else if st.Available {
+		computeInterference4D(&st, autorateStatus{})
 	}
+
 	m.mu.Lock()
-	m.last = st
+	m.last = cloneHostSignalStatus(st)
 	m.lastAt = now
 	m.mu.Unlock()
 	return st
+}
+
+// recordHistoryLocked 在 m.mu 写锁保护下维护 60 点环形缓冲、跨制式清空重置、近 5 分钟乒乓切换统计及极值抖动。
+// Copy-on-Write 铁律: 每次导出的 st.History 均为全新 make 切片, 绝不暴露内部数组引用。
+func (m *signalMonitor) recordHistoryLocked(st *hostSignalStatus, curRTT float64) {
+	if st == nil {
+		return
+	}
+	// 检测蜂窝与 Wi-Fi STA 制式切换: 一旦切换立即清空环形缓冲与切换记录
+	if st.Mode == "cellular" || st.Mode == "wifi_sta" {
+		modeSwitched := (m.last.Mode == "cellular" || m.last.Mode == "wifi_sta") && m.last.Mode != st.Mode
+		if !modeSwitched && m.histLen > 0 {
+			lastIdx := (m.histHead - 1 + sigHistoryCap) % sigHistoryCap
+			prev := m.history[lastIdx]
+			if (st.Mode == "wifi_sta" && prev.RSRPdBm != 0) || (st.Mode == "cellular" && prev.WifiRSSIdBm != 0) {
+				modeSwitched = true
+			}
+		}
+		if modeSwitched {
+			m.history = [sigHistoryCap]SignalHistoryPoint{}
+			m.histHead = 0
+			m.histLen = 0
+			m.handoverTs = nil
+		}
+	}
+
+	if !st.Available {
+		return
+	}
+
+	hasValidLevel := (st.Mode == "wifi_sta" && st.WifiRSSIdBm < 0) ||
+		(st.Mode != "wifi_sta" && validRSRP(st.RSRPdBm))
+	if !hasValidLevel {
+		return
+	}
+
+	// 蜂窝 PCI 或主频段跳变统计(近 300 秒滑窗)
+	if st.Mode == "cellular" {
+		if m.histLen > 0 {
+			prevIdx := (m.histHead - 1 + sigHistoryCap) % sigHistoryCap
+			prev := m.history[prevIdx]
+			pciChanged := st.HasPCI && prev.HasPCI && st.PCI != prev.PCI
+			bandChanged := st.Band != "" && prev.Band != "" && st.Band != prev.Band
+			if pciChanged || bandChanged {
+				m.handoverTs = append(m.handoverTs, st.UpdatedAt)
+			}
+		}
+		cutoff := st.UpdatedAt - sigHandoverWindowS
+		keep := m.handoverTs[:0]
+		for _, ts := range m.handoverTs {
+			if ts >= cutoff {
+				keep = append(keep, ts)
+			}
+		}
+		m.handoverTs = keep
+		st.HandoverCount = len(m.handoverTs)
+	} else {
+		st.HandoverCount = 0
+	}
+
+	sinrVal, hasSINR := effectiveSINR(st)
+	rsrqVal, _ := effectiveRSRQ(st)
+	pt := SignalHistoryPoint{
+		Ts:    st.UpdatedAt,
+		Band:  st.Band,
+		RTTMs: curRTT,
+	}
+	if st.Mode == "wifi_sta" {
+		pt.WifiRSSIdBm = st.WifiRSSIdBm
+		if hasSINR {
+			pt.SINRdB = sinrVal
+			pt.HasSINR = true
+		}
+	} else {
+		pt.RSRPdBm = st.RSRPdBm
+		if hasSINR {
+			pt.SINRdB = sinrVal
+			pt.HasSINR = true
+		}
+		pt.RSRQdB = rsrqVal
+		if st.HasPCI {
+			pt.PCI = st.PCI
+			pt.HasPCI = true
+		}
+	}
+
+	m.history[m.histHead] = pt
+	m.histHead = (m.histHead + 1) % sigHistoryCap
+	if m.histLen < sigHistoryCap {
+		m.histLen++
+	}
+
+	outHist := make([]SignalHistoryPoint, m.histLen)
+	startIdx := (m.histHead - m.histLen + sigHistoryCap) % sigHistoryCap
+	minDbm, maxDbm, sumDbm, cnt := 0, 0, 0, 0
+	for i := 0; i < m.histLen; i++ {
+		item := m.history[(startIdx+i)%sigHistoryCap]
+		outHist[i] = item
+		v := item.RSRPdBm
+		if st.Mode == "wifi_sta" {
+			v = item.WifiRSSIdBm
+		}
+		if v < 0 {
+			if cnt == 0 || v < minDbm {
+				minDbm = v
+			}
+			if cnt == 0 || v > maxDbm {
+				maxDbm = v
+			}
+			sumDbm += v
+			cnt++
+		}
+	}
+	st.History = outHist
+	if cnt > 0 {
+		st.MinDbm = minDbm
+		st.MaxDbm = maxDbm
+		st.AvgDbm = int(math.Round(float64(sumDbm) / float64(cnt)))
+		st.JitterdB = maxDbm - minDbm
+	}
+}
+
+// isWifiSTAUpstream 判断热点当前上游是否为 Wi-Fi STA 中继链路(排除本地下行热点 AP 自身接口)。
+func isWifiSTAUpstream(det ifaceDetect, upIf string) bool {
+	up := strings.TrimSpace(upIf)
+	ap := strings.TrimSpace(det.Iface)
+	if up != "" && ap != "" && up == ap {
+		return false
+	}
+	isCellIface := strings.HasPrefix(up, "rmnet") ||
+		strings.HasPrefix(up, "ccmni") ||
+		strings.HasPrefix(up, "seth") ||
+		strings.HasPrefix(up, "pdp") ||
+		strings.HasPrefix(up, "clat")
+	if strings.EqualFold(strings.TrimSpace(det.UpstreamClass), "wifi") && !isCellIface {
+		return true
+	}
+	if up != "" && (strings.HasPrefix(up, "wlan") || strings.HasPrefix(up, "sta")) {
+		return true
+	}
+	return false
+}
+
+func sampleWifiSTASignal(upIf, apIface string, nowUnix int64, runWifiCmd func() (string, error), readWireless func() (string, error)) hostSignalStatus {
+	var st hostSignalStatus
+	if runWifiCmd != nil {
+		if out, err := runWifiCmd(); err == nil && out != "" {
+			st = parseWifiStatusOutput(out, upIf, nowUnix)
+		}
+	}
+	// 若 cmd wifi status 已成功但缺少底噪, 顺手尝试从 /proc/net/wireless 补齐 WifiNoiseDbm 与 SNR;
+	// 若 cmd wifi status 失败, 则完整用 /proc/net/wireless 兜底提取 RSSI 与 Noise。
+	if readWireless != nil {
+		if raw, err := readWireless(); err == nil && raw != "" {
+			fb := parseProcNetWireless(raw, upIf, apIface, nowUnix)
+			if !st.Available && fb.Available {
+				st = fb
+			} else if st.Available && fb.Available {
+				if st.WifiNoiseDbm == 0 && fb.WifiNoiseDbm < 0 {
+					st.WifiNoiseDbm = fb.WifiNoiseDbm
+				}
+				if !st.HasSINR && st.WifiNoiseDbm < 0 {
+					snr := st.WifiRSSIdBm - st.WifiNoiseDbm
+					if validSINR(snr) {
+						st.SINRdB = snr
+						st.HasSINR = true
+					}
+				}
+				if st.UpstreamIface == "" {
+					st.UpstreamIface = fb.UpstreamIface
+				}
+				computeInterference4D(&st, autorateStatus{})
+			}
+		}
+	}
+	if st.Available {
+		return st
+	}
+	// 严禁回退蜂窝基带 dumpTelephonyRegistryHead, 避免 Wi-Fi STA 串台显示 SIM 卡信号!
+	return hostSignalStatus{
+		Available:       false,
+		Mode:            "wifi_sta",
+		RAT:             "Wi-Fi 中继",
+		DisplayRAT:      "Wi-Fi 中继",
+		UpstreamIface:   upIf,
+		Bars:            0,
+		Quality:         "unknown",
+		QualityCN:       "Wi-Fi 状态待读取",
+		RFCeilingFactor: 1.0,
+		Diagnosis:       "idle",
+		DiagnosisCN:     "上游为 Wi-Fi 中继模式，暂未读取到无线网卡信号指标",
+		UpdatedAt:       nowUnix,
+	}
 }
 
 func (m *signalMonitor) sampleHostSignal(s *server) hostSignalStatus {
@@ -267,47 +572,60 @@ func (m *signalMonitor) sampleHostSignal(s *server) hostSignalStatus {
 		upIf = det.Upstream
 	}
 
-	// 若服务器已挂载 AndroidBridgeBulkhead, 先检查熔断器状态, 熔断期间直接跳过系统调用保护 system_server。
+	// Wi-Fi STA 上游独立通道: 即使桥接熔断也可走 /proc/net/wireless 零 Binder 纯文件兜底, 且绝不回退蜂窝!
 	var bridge *Bulkhead
 	if s != nil {
 		bridge = s.CoreHub().AndroidBridgeBulkhead
-		if bridge != nil && bridge.CircuitState() == "open" {
-			return hostSignalStatus{
-				Available:       false,
-				Mode:            "unknown",
-				RAT:             "Unknown",
-				UpstreamIface:   upIf,
-				Bars:            0,
-				Quality:         "unknown",
-				QualityCN:       "桥接熔断保护中",
-				RFCeilingFactor: 1.0,
-				Diagnosis:       "idle",
-				DiagnosisCN:     "Android 服务响应超时，熔断退避中",
-				UpdatedAt:       now.Unix(),
+	}
+	if isWifiSTAUpstream(det, upIf) {
+		var wifiCmdFn func() (string, error)
+		if bridge == nil || bridge.CircuitState() != "open" {
+			wifiCmdFn = func() (string, error) {
+				return runFastSystemCmd(1500*time.Millisecond, "cmd", "wifi", "status")
 			}
+		}
+		return sampleWifiSTASignal(
+			upIf,
+			det.Iface,
+			now.Unix(),
+			wifiCmdFn,
+			func() (string, error) {
+				b, err := os.ReadFile("/proc/net/wireless")
+				return string(b), err
+			},
+		)
+	}
+
+	// 蜂窝路径: 若服务器已挂载 AndroidBridgeBulkhead, 先检查熔断器状态保护 system_server。
+	if bridge != nil && bridge.CircuitState() == "open" {
+		return hostSignalStatus{
+			Available:       false,
+			Mode:            "unknown",
+			RAT:             "Unknown",
+			UpstreamIface:   upIf,
+			Bars:            0,
+			Quality:         "unknown",
+			QualityCN:       "桥接熔断保护中",
+			RFCeilingFactor: 1.0,
+			Diagnosis:       "idle",
+			DiagnosisCN:     "Android 服务响应超时，熔断退避中",
+			UpdatedAt:       now.Unix(),
 		}
 	}
 
 	var st hostSignalStatus
-	if strings.HasPrefix(upIf, "wlan") && upIf == "wlan0" {
-		if out, err := runFastSystemCmd(1500*time.Millisecond, "cmd", "wifi", "status"); err == nil && out != "" {
-			st = parseWifiStatusOutput(out, upIf, now.Unix())
-		}
-	}
-	if !st.Available {
-		if bridge != nil {
-			var raw string
-			_ = bridge.Execute(context.Background(), 1800*time.Millisecond, func(ctx context.Context) error {
-				var derr error
-				raw, derr = dumpTelephonyRegistryHeadCtx(ctx, 1800*time.Millisecond)
-				return derr
-			})
-			if raw != "" {
-				st = parseTelephonyRegistryDump(raw, upIf, now.Unix())
-			}
-		} else if raw, err := dumpTelephonyRegistryHead(1800 * time.Millisecond); err == nil && raw != "" {
+	if bridge != nil {
+		var raw string
+		_ = bridge.Execute(context.Background(), 1800*time.Millisecond, func(ctx context.Context) error {
+			var derr error
+			raw, derr = dumpTelephonyRegistryHeadCtx(ctx, 1800*time.Millisecond)
+			return derr
+		})
+		if raw != "" {
 			st = parseTelephonyRegistryDump(raw, upIf, now.Unix())
 		}
+	} else if raw, err := dumpTelephonyRegistryHead(1800 * time.Millisecond); err == nil && raw != "" {
+		st = parseTelephonyRegistryDump(raw, upIf, now.Unix())
 	}
 	if !st.Available {
 		st = hostSignalStatus{
@@ -329,7 +647,43 @@ func (m *signalMonitor) sampleHostSignal(s *server) hostSignalStatus {
 
 // simSignalSnapshot 提供符合真实国内运营商频谱分配的 5G-A 双载波模拟快照(中国移动 n41 100MHz + n28 30MHz = 130MHz)。
 func simSignalSnapshot(s *server) hostSignalStatus {
+	nowUnix := time.Now().Unix()
 	rsrpLbl, sinrLbl, rsrqLbl, spPct, spTxt := build4DSignalLabels(-84, 21, -8, true, 1.0, false, 0)
+	carriers := []SignalCarrierInfo{
+		{IsPrimary: true, NetType: "NR", Band: "n41", BWMHz: 100, ARFCN: 504990, FreqMHz: 2600, PCI: 312, HasPCI: true},
+		{IsPrimary: false, NetType: "NR", Band: "n28", BWMHz: 30, ARFCN: 154570, FreqMHz: 700, PCI: 108, HasPCI: true},
+	}
+	rsrpWave := [8]int{-85, -84, -83, -82, -84, -85, -86, -84}
+	sinrWave := [8]int{20, 21, 22, 23, 21, 20, 19, 21}
+	rttWave := [8]float64{19.4, 18.8, 18.5, 19.1, 20.2, 21.0, 19.8, 18.9}
+	const simPts = 24
+	hist := make([]SignalHistoryPoint, simPts)
+	minDbm, maxDbm, sumDbm := 0, 0, 0
+	for i := 0; i < simPts; i++ {
+		idx := i % len(rsrpWave)
+		if i == simPts-1 {
+			idx = 7
+		}
+		rv := rsrpWave[idx]
+		hist[i] = SignalHistoryPoint{
+			Ts:      nowUnix - int64((simPts-1-i)*8),
+			RSRPdBm: rv,
+			SINRdB:  sinrWave[idx],
+			HasSINR: true,
+			RSRQdB:  -8,
+			PCI:     312,
+			HasPCI:  true,
+			Band:    "n41",
+			RTTMs:   rttWave[idx],
+		}
+		if i == 0 || rv < minDbm {
+			minDbm = rv
+		}
+		if i == 0 || rv > maxDbm {
+			maxDbm = rv
+		}
+		sumDbm += rv
+	}
 	st := hostSignalStatus{
 		Available:          true,
 		Mode:               "cellular",
@@ -365,23 +719,406 @@ func simSignalSnapshot(s *server) hostSignalStatus {
 		RFCeilingFactor:    1.0,
 		Diagnosis:          "ok",
 		DiagnosisCN:        "上游 5G-A 双载波 (n41+n28 · 130MHz) 满格低延迟，空口无拥塞",
-		UpdatedAt:          time.Now().Unix(),
+		UpdatedAt:          nowUnix,
+		HasSINR:            true,
+		HasRSRQ:            true,
+		PCI:                312,
+		HasPCI:             true,
+		Carriers:           carriers,
+		HandoverCount:      0,
+		JitterdB:           maxDbm - minDbm,
+		MinDbm:             minDbm,
+		MaxDbm:             maxDbm,
+		AvgDbm:             int(math.Round(float64(sumDbm) / float64(simPts))),
+		History:            hist,
 	}
-	enrichSignalDiagnosis(&st, s)
+	computeInterference4D(&st, autorateStatus{})
+	if s != nil {
+		enrichSignalDiagnosis(&st, s)
+	}
 	return st
 }
 
+// effectiveSINR 单测零值兼容守卫: 既有单测构造字面量未填 SINRdB(默认为 0)且 HasSINR==false 时不视为有效 0dB SINR。
+func effectiveSINR(st *hostSignalStatus) (int, bool) {
+	if st == nil {
+		return 0, false
+	}
+	if st.HasSINR && validSINR(st.SINRdB) {
+		return st.SINRdB, true
+	}
+	if st.SINRdB != 0 && validSINR(st.SINRdB) {
+		return st.SINRdB, true
+	}
+	return 0, false
+}
+
+// effectiveRSRQ 单测零值兼容守卫: 既有单测构造字面量未填 RSRQdB(默认为 0)且 HasRSRQ==false 时不视为有效 0dB RSRQ。
+func effectiveRSRQ(st *hostSignalStatus) (int, bool) {
+	if st == nil {
+		return 0, false
+	}
+	if st.HasRSRQ && validRSRQ(st.RSRQdB) {
+		return st.RSRQdB, true
+	}
+	if st.RSRQdB != 0 && validRSRQ(st.RSRQdB) {
+		return st.RSRQdB, true
+	}
+	return 0, false
+}
+
+func sigClampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func interferenceLevelFromPct(pct int) (level, label string) {
+	p := sigClampInt(pct, 0, 100)
+	switch {
+	case p >= 75:
+		return "severe", "强干扰易跳Ping"
+	case p >= 50:
+		return "moderate", "中度射频干扰"
+	case p >= 25:
+		return "mild", "轻度环境干扰"
+	default:
+		return "clean", "信道纯净低噪"
+	}
+}
+
+// computeInterference4D 计算四维干扰源(同频底噪 / 基站负载 / 多径切换 / 空口排队)及峰值加权总干扰指数。
+// Copy-on-Write 铁律: 每次调用总是 make 全新 []SignalInterferenceSource 切片, 绝不原地修改已发布切片!
+func computeInterference4D(st *hostSignalStatus, ar autorateStatus) {
+	if st == nil || !st.Available {
+		return
+	}
+	sinrVal, hasSINR := effectiveSINR(st)
+	rsrqVal, hasRSRQ := effectiveRSRQ(st)
+
+	// 1. co_channel: 同频与邻区底噪干扰
+	var coPct int
+	var coVal, coSum string
+	if st.Mode == "wifi_sta" {
+		if st.WifiNoiseDbm < 0 && st.WifiRSSIdBm < 0 {
+			snr := st.WifiRSSIdBm - st.WifiNoiseDbm
+			switch {
+			case snr >= 30:
+				coPct = 10
+			case snr >= 20:
+				coPct = sigClampInt(26+(29-snr)*2, 25, 48)
+			case snr >= 12:
+				coPct = sigClampInt(52+(19-snr)*3, 50, 74)
+			default:
+				coPct = sigClampInt(78+(11-snr)*3, 75, 98)
+			}
+			coVal = "SNR " + strconv.Itoa(snr) + " dB"
+		} else {
+			is24G := strings.HasPrefix(st.Band, "2.4")
+			switch {
+			case is24G && st.WifiRSSIdBm < -70:
+				coPct = 56
+			case is24G:
+				coPct = 28
+			case st.WifiRSSIdBm >= -68:
+				coPct = 10
+			case st.WifiRSSIdBm >= -77:
+				coPct = 28
+			default:
+				coPct = 54
+			}
+			if st.WifiRSSIdBm < 0 {
+				coVal = "RSSI " + strconv.Itoa(st.WifiRSSIdBm) + " dBm"
+			} else {
+				coVal = "Wi-Fi 信道"
+			}
+		}
+		switch {
+		case coPct >= 75:
+			coSum = "Wi-Fi 信道底噪极高或同频路由严重拥挤，建议切换至 5GHz 低干扰信道"
+		case coPct >= 50:
+			coSum = "周边存在明显邻道 Wi-Fi 争抢，吞吐波动偏大"
+		case coPct >= 25:
+			coSum = "存在轻度同频 Wi-Fi 共享环境底噪，整体连接可用"
+		default:
+			coSum = "无线回传信道底噪干净，信噪比充裕"
+		}
+	} else if hasSINR {
+		switch {
+		case sinrVal >= 20:
+			coPct = sigClampInt(12-(sinrVal-20)/2, 4, 12)
+		case sinrVal >= 13:
+			coPct = sigClampInt(12+(20-sinrVal)*10/7, 12, 23)
+		case sinrVal >= 6:
+			coPct = sigClampInt(30+(13-sinrVal)*15/7, 28, 48)
+		case sinrVal >= 3:
+			coPct = sigClampInt(52+(6-sinrVal)*6, 52, 70)
+		case sinrVal >= 0:
+			coPct = sigClampInt(76+(3-sinrVal)*4, 76, 88)
+		default:
+			coPct = sigClampInt(88+(-sinrVal)*2, 88, 100)
+		}
+		coVal = "SINR " + strconv.Itoa(sinrVal) + " dB"
+		switch {
+		case coPct >= 75:
+			coSum = "邻区同频强串扰导致信噪比极低，易丢包跳Ping，建议移至靠窗开阔处"
+		case coPct >= 50:
+			coSum = "周边基站同频与隔墙干扰明显，高阶调制受限，建议避开墙体遮挡"
+		case coPct >= 25:
+			coSum = "存在轻度同频或隔墙环境底噪干扰，移至窗边可提升空口纯净度"
+		default:
+			coSum = "主载波信噪比优良，同频串扰极低"
+		}
+	} else {
+		coPct = 8
+		if st.Quality == "weak" || st.Quality == "critical" {
+			coPct = 22
+		}
+		coVal = "待基带上报"
+		coSum = "基带暂未上报实时 SINR，按参考电平基线评估"
+	}
+
+	// 2. cell_load: 基站扇区或无线信道负载
+	var loadPct int
+	var loadVal, loadSum string
+	if st.Mode == "wifi_sta" {
+		switch {
+		case st.WifiLinkMbps == 0:
+			loadPct = 12
+			loadVal = "自动协商"
+		case st.WifiLinkMbps >= 300:
+			loadPct = 10
+			loadVal = strconv.Itoa(st.WifiLinkMbps) + " Mbps"
+		case st.WifiLinkMbps >= 144:
+			loadPct = 22
+			loadVal = strconv.Itoa(st.WifiLinkMbps) + " Mbps"
+		case st.WifiLinkMbps > 72:
+			loadPct = 42
+			loadVal = strconv.Itoa(st.WifiLinkMbps) + " Mbps"
+		default:
+			loadPct = 72
+			loadVal = strconv.Itoa(st.WifiLinkMbps) + " Mbps"
+		}
+		if loadPct >= 50 {
+			loadSum = "本地 Wi-Fi 物理协商速率偏低，空口占空比受限"
+		} else {
+			loadSum = "上游路由器物理握手速率正常"
+		}
+	} else if hasRSRQ {
+		switch {
+		case rsrqVal >= -12:
+			loadPct = sigClampInt(8+(-3-rsrqVal)*14/9, 6, 22)
+		case rsrqVal >= -15:
+			loadPct = sigClampInt(30+(-13-rsrqVal)*8, 30, 46)
+		case rsrqVal >= -17:
+			loadPct = sigClampInt(56+(-16-rsrqVal)*12, 56, 70)
+		default:
+			loadPct = sigClampInt(80+(-18-rsrqVal)*4, 78, 96)
+		}
+		loadVal = "RSRQ " + strconv.Itoa(rsrqVal) + " dB"
+		switch {
+		case loadPct >= 75:
+			loadSum = "当前基站扇区资源块重度拥塞，多用户密集争抢空口时隙"
+		case loadPct >= 50:
+			loadSum = "基站扇区晚高峰负载偏忙，网速上限可能随并发波动"
+		case loadPct >= 25:
+			loadSum = "基站存在日常共享负载，空口调度基本顺畅"
+		default:
+			loadSum = "基站扇区资源充裕，空口时隙空闲"
+		}
+	} else {
+		loadPct = 10
+		loadVal = "正常"
+		loadSum = "扇区参考信号负载正常"
+	}
+
+	// 3. multipath_fading: 多径衰落与乒乓切换
+	var jitterScore, hoScore, fadeScore int
+	switch {
+	case st.JitterdB <= 3:
+		jitterScore = 6 + st.JitterdB*3
+	case st.JitterdB <= 6:
+		jitterScore = 20 + (st.JitterdB-4)*3
+	case st.JitterdB <= 10:
+		jitterScore = 32 + (st.JitterdB-7)*5
+	case st.JitterdB <= 15:
+		jitterScore = 52 + (st.JitterdB-11)*5
+	default:
+		jitterScore = sigClampInt(76+(st.JitterdB-16)*3, 76, 98)
+	}
+	if st.Mode == "cellular" {
+		switch {
+		case st.HandoverCount >= 3:
+			hoScore = sigClampInt(78+(st.HandoverCount-3)*6, 78, 98)
+		case st.HandoverCount == 2:
+			hoScore = 52
+		case st.HandoverCount == 1:
+			hoScore = 28
+		}
+		if validRSRP(st.RSRPdBm) {
+			switch {
+			case st.RSRPdBm <= -115:
+				fadeScore = 72
+			case st.RSRPdBm <= -108:
+				fadeScore = 46
+			case st.RSRPdBm <= -100:
+				fadeScore = 26
+			}
+			if hasSINR && sinrVal < 10 && st.RSRPdBm < -88 && fadeScore < 26 {
+				fadeScore = 26
+			}
+		}
+	} else if st.WifiRSSIdBm < 0 {
+		switch {
+		case st.WifiRSSIdBm <= -82:
+			fadeScore = 64
+		case st.WifiRSSIdBm <= -74:
+			fadeScore = 34
+		}
+	}
+	mpPct := jitterScore
+	if hoScore > mpPct {
+		mpPct = hoScore
+	}
+	if fadeScore > mpPct {
+		mpPct = fadeScore
+	}
+	mpPct = sigClampInt(mpPct, 0, 100)
+	var mpVal, mpSum string
+	if st.Mode == "cellular" {
+		mpVal = "波动 " + strconv.Itoa(st.JitterdB) + " dB · 切换 " + strconv.Itoa(st.HandoverCount) + " 次/5m"
+	} else {
+		mpVal = "波动 " + strconv.Itoa(st.JitterdB) + " dB"
+	}
+	switch {
+	case st.Mode == "cellular" && st.HandoverCount >= 3:
+		mpSum = "近 5 分钟发生 " + strconv.Itoa(st.HandoverCount) + " 次基站/频段乒乓切换，建议固定手机位置避免跨区摇摆"
+	case st.JitterdB >= 10:
+		mpSum = "信号电平起伏达 " + strconv.Itoa(st.JitterdB) + " dB，存在遮挡反射或移动多径衰落"
+	case mpPct >= 25:
+		mpSum = "存在墙体遮挡衰减或轻微多径波动，靠近窗边摆放更稳"
+	default:
+		mpSum = "驻留小区稳定，电平曲线平滑无乒乓切换"
+	}
+
+	// 4. bufferbloat: 空口排队与延迟膨胀
+	var bloatPct int
+	var bloatVal, bloatSum string
+	if ar.Enabled && (ar.RTTMs > 0 || ar.DeltaRTTMs > 0) && !invalidFiniteFloat(ar.DeltaRTTMs) {
+		thr := math.Max(20, ar.RTTDeltaMs)
+		ratio := 0.0
+		if ar.DeltaRTTMs > 0 {
+			ratio = ar.DeltaRTTMs / thr
+		}
+		switch {
+		case ratio <= 0.35:
+			bloatPct = sigClampInt(int(math.Round(ratio*40))+4, 4, 20)
+		case ratio < 1.0:
+			bloatPct = sigClampInt(int(math.Round(25+(ratio-0.35)/0.65*23)), 25, 48)
+		case ratio < 1.8:
+			bloatPct = sigClampInt(int(math.Round(52+(ratio-1.0)/0.8*22)), 52, 74)
+		default:
+			bloatPct = sigClampInt(int(math.Round(76+(ratio-1.8)*15)), 76, 98)
+		}
+		bloatVal = "+" + strconv.FormatFloat(math.Max(0, ar.DeltaRTTMs), 'f', 1, 64) + " ms"
+		switch {
+		case bloatPct >= 50:
+			bloatSum = "空口队列积压导致 RTT 明显抬升，智能带宽正在主动削峰稳延迟"
+		case bloatPct >= 25:
+			bloatSum = "大流量突发引起轻微空口排队波动，整体延迟受控"
+		default:
+			bloatSum = "空口转发时延紧贴基线，无队列膨胀积压"
+		}
+	} else {
+		bloatPct = 6
+		bloatVal = "平稳"
+		bloatSum = "当前空口转发队列平稳，无明显排队积压"
+	}
+
+	coLvl, _ := interferenceLevelFromPct(coPct)
+	loadLvl, _ := interferenceLevelFromPct(loadPct)
+	mpLvl, _ := interferenceLevelFromPct(mpPct)
+	bloatLvl, _ := interferenceLevelFromPct(bloatPct)
+
+	sources := make([]SignalInterferenceSource, 4)
+	sources[0] = SignalInterferenceSource{
+		ID:      "co_channel",
+		Name:    "同频与底噪干扰",
+		Pct:     coPct,
+		Level:   coLvl,
+		Value:   coVal,
+		Summary: coSum,
+	}
+	sources[1] = SignalInterferenceSource{
+		ID:      "cell_load",
+		Name:    "基站信道负载",
+		Pct:     loadPct,
+		Level:   loadLvl,
+		Value:   loadVal,
+		Summary: loadSum,
+	}
+	sources[2] = SignalInterferenceSource{
+		ID:      "multipath_fading",
+		Name:    "多径衰落与切换",
+		Pct:     mpPct,
+		Level:   mpLvl,
+		Value:   mpVal,
+		Summary: mpSum,
+	}
+	sources[3] = SignalInterferenceSource{
+		ID:      "bufferbloat",
+		Name:    "空口排队膨胀",
+		Pct:     bloatPct,
+		Level:   bloatLvl,
+		Value:   bloatVal,
+		Summary: bloatSum,
+	}
+
+	// 峰值加权合成总干扰指数: 最大单维干扰主导, 次要超额维度协同叠加
+	arr := [4]int{coPct, loadPct, mpPct, bloatPct}
+	for i := 0; i < 3; i++ {
+		for j := i + 1; j < 4; j++ {
+			if arr[j] > arr[i] {
+				arr[i], arr[j] = arr[j], arr[i]
+			}
+		}
+	}
+	boost := 0.18*math.Max(0, float64(arr[1]-12)) +
+		0.10*math.Max(0, float64(arr[2]-12)) +
+		0.06*math.Max(0, float64(arr[3]-12))
+	totalPct := sigClampInt(int(math.Round(float64(arr[0])+boost)), 0, 100)
+	totLvl, totLbl := interferenceLevelFromPct(totalPct)
+
+	st.InterferencePct = totalPct
+	st.InterferenceLevel = totLvl
+	st.InterferenceLabel = totLbl
+	st.InterferenceSources = sources
+}
+
 func enrichSignalDiagnosis(st *hostSignalStatus, s *server) {
-	if st == nil || !st.Available || s == nil {
+	if st == nil || !st.Available {
 		return
 	}
 	var ar autorateStatus
-	if s.autorate != nil {
+	if s != nil && s.autorate != nil {
 		ar = s.autorate.Snapshot()
 	}
+	computeInterference4D(st, ar)
+	if s == nil {
+		return
+	}
+
+	sinrVal, hasSINR := effectiveSINR(st)
+	rsrqVal, hasRSRQ := effectiveRSRQ(st)
 	weakRF := st.Quality == "weak" || st.Quality == "critical"
-	cellBusy := st.Mode == "cellular" && validRSRQ(st.RSRQdB) && st.RSRQdB <= -17
+	cellBusy := st.Mode == "cellular" && hasRSRQ && rsrqVal <= -17
 	bloated := ar.Enabled && ar.DeltaRTTMs > math.Max(20, ar.RTTDeltaMs)
+	severeCellInterf := st.Mode == "cellular" && ((hasSINR && sinrVal < 3) || st.HandoverCount >= 3)
+	mildModCellInterf := st.Mode == "cellular" && hasSINR && sinrVal < 13
 	thermo := s.peekThermoQuickState()
 	lanSat := ar.Enabled && (ar.State == "active" || ar.State == "backoff") && (ar.LoadDown >= 0.88 || ar.LoadUp >= 0.88)
 	if !lanSat {
@@ -413,6 +1150,16 @@ func enrichSignalDiagnosis(st *hostSignalStatus, s *server) {
 	case weakRF:
 		st.Diagnosis = "rf_weak"
 		st.DiagnosisCN = "热点机当前基站信号偏弱（建议移至窗边），已启用弱网防断流保护"
+	case severeCellInterf:
+		st.Diagnosis = "rf_interference"
+		switch {
+		case st.HandoverCount >= 3 && hasSINR && sinrVal < 3:
+			st.DiagnosisCN = "手机信号格数尚可，但存在强同频干扰（SINR " + strconv.Itoa(sinrVal) + " dB）且近 5 分钟频繁切换基站 " + strconv.Itoa(st.HandoverCount) + " 次，建议移至靠窗固定位置"
+		case st.HandoverCount >= 3:
+			st.DiagnosisCN = "手机近 5 分钟发生 " + strconv.Itoa(st.HandoverCount) + " 次基站/频段乒乓切换，跨区摇摆易引起瞬时跳Ping，建议移至窗边固定摆放"
+		default:
+			st.DiagnosisCN = "手机信号强度尚可，但同频与邻区强射频干扰严重（SINR " + strconv.Itoa(sinrVal) + " dB），空口重传率高易跳Ping，建议将热点机移至窗边开阔处"
+		}
 	case bloated || cellBusy:
 		st.Diagnosis = "congestion"
 		if bloated {
@@ -430,6 +1177,16 @@ func enrichSignalDiagnosis(st *hostSignalStatus, s *server) {
 		default:
 			st.DiagnosisCN = "上游基站空口通畅，当前热点局域网带宽池已被连接设备跑满"
 		}
+	case mildModCellInterf:
+		st.Diagnosis = "rf_interference"
+		if sinrVal < 6 {
+			st.DiagnosisCN = "手机信号格数充足，但存在中度同频与隔墙多径干扰（SINR " + strconv.Itoa(sinrVal) + " dB），建议将热点机移至窗边开阔处以减少空口抖动"
+		} else {
+			st.DiagnosisCN = "手机信号强度良好，但存在轻度同频或隔墙多径干扰（SINR " + strconv.Itoa(sinrVal) + " dB），移至窗边开阔位置可提升信道纯净度与峰值网速"
+		}
+	case st.Mode == "wifi_sta" && st.InterferencePct >= 50:
+		st.Diagnosis = "rf_interference"
+		st.DiagnosisCN = "上游 Wi-Fi 中继信道存在同频干扰或底噪偏高，建议切换至 5GHz 低拥挤信道并靠近主路由"
 	default:
 		st.Diagnosis = "ok"
 		if st.Mode == "wifi_sta" {
@@ -536,6 +1293,9 @@ var (
 	reChanBand       = regexp.MustCompile(`mBand\s*=\s*(\d+)`)
 	reChanDLKhz      = regexp.MustCompile(`mCellBandwidthDownlinkKhz\s*=\s*(\d+)`)
 	reChanDLArfcn    = regexp.MustCompile(`(?:mDownlinkChannelNumber|mChannelNumber)\s*=\s*(\d+)`)
+	rePhysCellId     = regexp.MustCompile(`\b(?:mPhysicalCellId|mPci)\s*=\s*(-?\d+)`)
+	rePciField       = regexp.MustCompile(`\bmPci\s*=\s*(-?\d+)`)
+	reUnregCellInfo  = regexp.MustCompile(`CellInfo(?:Nr|Lte|Wcdma|Gsm):\s*\{[^{}]*mRegistered\s*=\s*(?:NO|false)[^{}]*CellIdentity(?:Nr|Lte):\s*\{[^}]*\}`)
 	reCellIdNr       = regexp.MustCompile(`CellIdentityNr:\s*\{[^}]*\}`)
 	reCellIdLte      = regexp.MustCompile(`CellIdentityLte:\s*\{[^}]*\}`)
 	reNrArfcnField   = regexp.MustCompile(`mNrArfcn\s*=\s*(\d+)`)
@@ -543,8 +1303,9 @@ var (
 	reBandsArray     = regexp.MustCompile(`mBands\s*=\s*\[([0-9,\s]+)\]`)
 	reLteBwField     = regexp.MustCompile(`mBandwidth\s*=\s*(\d+)`)
 	reWifiRSSI       = regexp.MustCompile(`RSSI:\s*(-?\d+)`)
-	reWifiSpeed      = regexp.MustCompile(`Tx Link speed:\s*(\d+)Mbps`)
-	reWifiFreq       = regexp.MustCompile(`Frequency:\s*(\d+)MHz`)
+	reWifiSpeed      = regexp.MustCompile(`(?:Tx\s+)?Link speed:\s*(\d+)\s*Mbps`)
+	reWifiFreq       = regexp.MustCompile(`Frequency:\s*(\d+)\s*MHz`)
+	reWifiNoise      = regexp.MustCompile(`Noise:\s*(-?\d+)`)
 )
 
 type parsedServingCarrier struct {
@@ -553,41 +1314,55 @@ type parsedServingCarrier struct {
 	Band      string
 	BWMHz     int
 	ARFCN     int
+	PCI       int
+	HasPCI    bool
 }
 
 type parsedPhoneSlot struct {
-	PhoneID          int
-	SubID            int
-	AlphaLong        string
-	AlphaShort       string
-	MCCMNC           string
-	Ifaces           map[string]bool
-	HasNRValid       bool
-	NRRsrp           int
-	NRRsrq           int
-	NRSinr           int
-	HasNRRsrq        bool
-	HasLTEValid      bool
-	LTERsrp          int
-	LTERsrq          int
-	LTESinr          int
-	HasLTERsrq       bool
-	IsSA             bool
-	IsNSA            bool
-	IsLTE            bool
-	Is5GA            bool
-	IsLTECA          bool
-	Carriers         []parsedServingCarrier
-	FallbackNRBand   string
-	FallbackNRArfcn  int
-	FallbackLTEBand  string
-	FallbackLTEArfcn int
-	FallbackLTEBWMHz int
+	PhoneID           int
+	SubID             int
+	AlphaLong         string
+	AlphaShort        string
+	MCCMNC            string
+	Ifaces            map[string]bool
+	HasNRValid        bool
+	NRRsrp            int
+	NRRsrq            int
+	NRSinr            int
+	HasNRRsrq         bool
+	HasNRSinr         bool
+	HasLTEValid       bool
+	LTERssi           int
+	HasLTERssi        bool
+	LTERsrp           int
+	LTERsrq           int
+	LTESinr           int
+	HasLTERsrq        bool
+	HasLTESinr        bool
+	IsSA              bool
+	IsNSA             bool
+	IsLTE             bool
+	Is5GA             bool
+	IsLTECA           bool
+	Carriers          []parsedServingCarrier
+	FallbackNRBand    string
+	FallbackNRArfcn   int
+	FallbackNRPCI     int
+	HasFallbackNRPCI  bool
+	FallbackLTEBand   string
+	FallbackLTEArfcn  int
+	FallbackLTEBWMHz  int
+	FallbackLTEPCI    int
+	HasFallbackLTEPCI bool
 }
 
-func validRSRP(v int) bool { return v != sigUnavailable && v >= -145 && v <= -40 }
-func validRSRQ(v int) bool { return v != sigUnavailable && v >= -30 && v <= 0 }
-func validSINR(v int) bool { return v != sigUnavailable && v >= -25 && v <= 50 }
+func validRSRP(v int) bool      { return v != sigUnavailable && v >= -145 && v <= -40 }
+func validRSRQ(v int) bool      { return v != sigUnavailable && v >= -30 && v <= 0 }
+func validSINR(v int) bool      { return v != sigUnavailable && v >= -25 && v <= 50 }
+func validRSSI(v int) bool      { return v != sigUnavailable && v >= -120 && v <= -25 }
+func validNRPCI(v int) bool     { return v >= 0 && v <= 1007 }
+func validLTEPCI(v int) bool    { return v >= 0 && v <= 503 }
+func validWifiNoise(v int) bool { return v >= -120 && v <= -40 }
 
 func parseBandsBracket(s string, prefix string) string {
 	for _, part := range strings.Split(s, ",") {
@@ -659,22 +1434,29 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 				}
 				if validSINR(sinr) {
 					cur.NRSinr = sinr
+					cur.HasNRSinr = true
 				}
 			}
 		}
 		if m := reLteSignal.FindStringSubmatch(line); m != nil {
+			rssi, _ := strconv.Atoi(m[1])
 			rsrp, _ := strconv.Atoi(m[2])
 			rsrq, _ := strconv.Atoi(m[3])
 			sinr, _ := strconv.Atoi(m[4])
 			if validRSRP(rsrp) {
 				cur.HasLTEValid = true
 				cur.LTERsrp = rsrp
+				if validRSSI(rssi) {
+					cur.LTERssi = rssi
+					cur.HasLTERssi = true
+				}
 				if validRSRQ(rsrq) {
 					cur.LTERsrq = rsrq
 					cur.HasLTERsrq = true
 				}
 				if validSINR(sinr) {
 					cur.LTESinr = sinr
+					cur.HasLTESinr = true
 				}
 			}
 		}
@@ -705,8 +1487,12 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 			}
 		}
 
-		// 提取 CellIdentityNr / CellIdentityLte 兜底频段与频点 (防止部分 ROM 清空 PhysicalChannelConfig)
-		for _, nrBlk := range reCellIdNr.FindAllString(line, -1) {
+		// 提取 CellIdentityNr / CellIdentityLte 兜底频段、频点与 PCI (屏蔽 mCellInfo 未注册邻区污染)
+		cellScanLine := line
+		if strings.Contains(line, "mCellInfo") {
+			cellScanLine = reUnregCellInfo.ReplaceAllString(line, "")
+		}
+		for _, nrBlk := range reCellIdNr.FindAllString(cellScanLine, -1) {
 			if am := reNrArfcnField.FindStringSubmatch(nrBlk); am != nil {
 				if arfcn, err := strconv.Atoi(am[1]); err == nil && arfcn > 0 && arfcn != sigUnavailable {
 					cur.FallbackNRArfcn = arfcn
@@ -715,17 +1501,29 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 					}
 				}
 			}
+			if pm := rePciField.FindStringSubmatch(nrBlk); pm != nil {
+				if pci, err := strconv.Atoi(pm[1]); err == nil && validNRPCI(pci) {
+					cur.FallbackNRPCI = pci
+					cur.HasFallbackNRPCI = true
+				}
+			}
 			if bm := reBandsArray.FindStringSubmatch(nrBlk); bm != nil && cur.FallbackNRBand == "" {
 				cur.FallbackNRBand = parseBandsBracket(bm[1], "n")
 			}
 		}
-		for _, lteBlk := range reCellIdLte.FindAllString(line, -1) {
+		for _, lteBlk := range reCellIdLte.FindAllString(cellScanLine, -1) {
 			if am := reEarfcnField.FindStringSubmatch(lteBlk); am != nil {
 				if earfcn, err := strconv.Atoi(am[1]); err == nil && earfcn >= 0 && earfcn != sigUnavailable {
 					cur.FallbackLTEArfcn = earfcn
 					if b, _ := lteBandFromEARFCN(earfcn); b != "" && cur.FallbackLTEBand == "" {
 						cur.FallbackLTEBand = b
 					}
+				}
+			}
+			if pm := rePciField.FindStringSubmatch(lteBlk); pm != nil {
+				if pci, err := strconv.Atoi(pm[1]); err == nil && validLTEPCI(pci) {
+					cur.FallbackLTEPCI = pci
+					cur.HasFallbackLTEPCI = true
 				}
 			}
 			if bm := reBandsArray.FindStringSubmatch(lteBlk); bm != nil && cur.FallbackLTEBand == "" {
@@ -758,7 +1556,8 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 				} else if cur.HasNRValid && !cur.IsLTE {
 					isNR = true
 				}
-				var arfcn, bwMHz int
+				var arfcn, bwMHz, pci int
+				var hasPCI bool
 				if cm := reChanDLArfcn.FindStringSubmatch(ent); cm != nil {
 					if v, err := strconv.Atoi(cm[1]); err == nil && v > 0 && v != sigUnavailable {
 						arfcn = v
@@ -767,6 +1566,14 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 				if bm := reChanDLKhz.FindStringSubmatch(ent); bm != nil {
 					if khz, err := strconv.Atoi(bm[1]); err == nil && khz >= 1000 && khz <= 400000 {
 						bwMHz = khz / 1000
+					}
+				}
+				if pm := rePhysCellId.FindStringSubmatch(ent); pm != nil {
+					if v, err := strconv.Atoi(pm[1]); err == nil {
+						if (isNR && validNRPCI(v)) || (!isNR && validLTEPCI(v)) {
+							pci = v
+							hasPCI = true
+						}
 					}
 				}
 				bandStr := ""
@@ -786,13 +1593,15 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 						bandStr, _ = lteBandFromEARFCN(arfcn)
 					}
 				}
-				if bandStr != "" || bwMHz > 0 || arfcn > 0 {
+				if bandStr != "" || bwMHz > 0 || arfcn > 0 || hasPCI {
 					lineCarriers = append(lineCarriers, parsedServingCarrier{
 						IsPrimary: isPri,
 						IsNR:      isNR,
 						Band:      bandStr,
 						BWMHz:     bwMHz,
 						ARFCN:     arfcn,
+						PCI:       pci,
+						HasPCI:    hasPCI,
 					})
 				}
 			}
@@ -838,10 +1647,13 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		}
 	}
 
-	// 汇总主载波与多载波聚合信息
+	// 汇总主载波、多载波聚合信息与物理小区标识
 	var priBand string
 	var priBW, priArfcn, totalBW, nrCount, activeCount int
+	var nrPCI, ltePCI int
+	var hasNRPCI, hasLTEPCI bool
 	var comboParts []string
+	var outCarriers []SignalCarrierInfo
 	wantNR := chosen.HasNRValid
 
 	for _, c := range chosen.Carriers {
@@ -851,6 +1663,13 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 		activeCount++
 		if c.IsNR {
 			nrCount++
+			if c.HasPCI && (!hasNRPCI || c.IsPrimary) {
+				nrPCI = c.PCI
+				hasNRPCI = true
+			}
+		} else if c.HasPCI && (!hasLTEPCI || c.IsPrimary) {
+			ltePCI = c.PCI
+			hasLTEPCI = true
 		}
 		if c.BWMHz > 0 {
 			totalBW += c.BWMHz
@@ -867,6 +1686,46 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 			priBW = c.BWMHz
 			priArfcn = c.ARFCN
 		}
+
+		netType := "LTE"
+		if c.IsNR {
+			netType = "NR"
+		}
+		cFreq := lookupBandFreqMHz(c.Band)
+		if cFreq == 0 && c.ARFCN > 0 {
+			if c.IsNR {
+				_, cFreq = nrBandFromARFCN(c.ARFCN, chosen.MCCMNC)
+			} else {
+				_, cFreq = lteBandFromEARFCN(c.ARFCN)
+			}
+		}
+		cPCI, cHasPCI := c.PCI, c.HasPCI
+		if !cHasPCI && c.IsPrimary {
+			if c.IsNR && chosen.HasFallbackNRPCI {
+				cPCI, cHasPCI = chosen.FallbackNRPCI, true
+			} else if !c.IsNR && chosen.HasFallbackLTEPCI {
+				cPCI, cHasPCI = chosen.FallbackLTEPCI, true
+			}
+		}
+		outCarriers = append(outCarriers, SignalCarrierInfo{
+			IsPrimary: c.IsPrimary,
+			NetType:   netType,
+			Band:      c.Band,
+			BWMHz:     c.BWMHz,
+			ARFCN:     c.ARFCN,
+			FreqMHz:   cFreq,
+			PCI:       cPCI,
+			HasPCI:    cHasPCI,
+		})
+	}
+
+	if !hasNRPCI && chosen.HasFallbackNRPCI {
+		nrPCI = chosen.FallbackNRPCI
+		hasNRPCI = true
+	}
+	if !hasLTEPCI && chosen.HasFallbackLTEPCI {
+		ltePCI = chosen.FallbackLTEPCI
+		hasLTEPCI = true
 	}
 
 	// 若 PhysicalChannelConfigList 未给出频段, 启用 CellIdentity NR-ARFCN / EARFCN 兜底反推
@@ -950,10 +1809,30 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 	if chosen.HasNRValid {
 		out.RSRPdBm = chosen.NRRsrp
 		out.RSRQdB = chosen.NRRsrq
+		out.HasRSRQ = chosen.HasNRRsrq
 		out.SINRdB = chosen.NRSinr
+		out.HasSINR = chosen.HasNRSinr
 		hasValidRSRQ = chosen.HasNRRsrq
+		if hasNRPCI {
+			out.PCI = nrPCI
+			out.HasPCI = true
+		}
 		if chosen.HasLTEValid {
 			out.LTERSRPdBm = chosen.LTERsrp
+			if chosen.HasLTERsrq {
+				out.LTERSRQdB = chosen.LTERsrq
+			}
+			if chosen.HasLTESinr {
+				out.LTESINRdB = chosen.LTESinr
+				out.HasLTESINR = true
+			}
+			if chosen.HasLTERssi {
+				out.RSSIdBm = chosen.LTERssi
+			}
+			if hasLTEPCI {
+				out.LTEPCI = ltePCI
+				out.HasLTEPCI = true
+			}
 		}
 		// 若明确为 SA 且未启用 EN-DC 锚点, RAT 记为 "5G SA", 否则记为 "5G NSA" (100% 保持既有单测兼容);
 		// 5G-A 图标展示统一走 DisplayRAT = "5G-A"。
@@ -972,8 +1851,17 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 	} else {
 		out.RSRPdBm = chosen.LTERsrp
 		out.RSRQdB = chosen.LTERsrq
+		out.HasRSRQ = chosen.HasLTERsrq
 		out.SINRdB = chosen.LTESinr
+		out.HasSINR = chosen.HasLTESinr
 		hasValidRSRQ = chosen.HasLTERsrq
+		if chosen.HasLTERssi {
+			out.RSSIdBm = chosen.LTERssi
+		}
+		if hasLTEPCI {
+			out.PCI = ltePCI
+			out.HasPCI = true
+		}
 		out.RAT = "4G LTE"
 		if chosen.IsLTECA || activeCount >= 2 {
 			out.DisplayRAT = "4G+"
@@ -981,6 +1869,26 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 			out.DisplayRAT = "4G LTE"
 		}
 	}
+
+	if len(outCarriers) == 0 && (priBand != "" || priArfcn > 0 || out.HasPCI) {
+		netType := "LTE"
+		if wantNR {
+			netType = "NR"
+		}
+		outCarriers = []SignalCarrierInfo{
+			{
+				IsPrimary: true,
+				NetType:   netType,
+				Band:      priBand,
+				BWMHz:     priBW,
+				ARFCN:     priArfcn,
+				FreqMHz:   freqMHz,
+				PCI:       out.PCI,
+				HasPCI:    out.HasPCI,
+			},
+		}
+	}
+	out.Carriers = outCarriers
 
 	out.Bars, out.Quality, out.QualityCN, out.RFCeilingFactor = scoreCellularSignal4D(
 		out.RSRPdBm, out.SINRdB, out.RSRQdB, hasValidRSRQ, strings.HasPrefix(out.RAT, "5G"), is5GA,
@@ -990,6 +1898,7 @@ func parseTelephonyRegistryDump(raw, wantIface string, nowUnix int64) hostSignal
 	)
 	out.Diagnosis = "ok"
 	out.DiagnosisCN = "蜂窝射频状态已同步"
+	computeInterference4D(&out, autorateStatus{})
 	return out
 }
 
@@ -1015,10 +1924,27 @@ func scoreCellularSignal4D(rsrp, sinr, rsrq int, hasRSRQ, is5G, is5GA bool) (bar
 		return 3, "good", prefix + " 良好", 0.95
 	case rsrp >= -108 && sinr >= 0:
 		return 2, "fair", "信号一般", 0.80
+	case rsrp >= -105 && sinr < 0:
+		return 2, "fair", "强干扰受限", 0.60
 	case rsrp >= -116:
 		return 1, "weak", "弱信号边缘", 0.55
 	default:
 		return 0, "critical", "极弱易断流", 0.35
+	}
+}
+
+func scoreWifiSignal(rssi int) (bars int, q, qCN string, alpha float64) {
+	switch {
+	case rssi >= -58:
+		return 4, "excellent", "Wi-Fi 极佳", 1.0
+	case rssi >= -68:
+		return 3, "good", "Wi-Fi 良好", 0.95
+	case rssi >= -77:
+		return 2, "fair", "Wi-Fi 一般", 0.78
+	case rssi >= -85:
+		return 1, "weak", "Wi-Fi 偏弱", 0.52
+	default:
+		return 0, "critical", "Wi-Fi 极弱", 0.35
 	}
 }
 
@@ -1031,12 +1957,17 @@ func parseWifiStatusOutput(raw, upIf string, nowUnix int64) hostSignalStatus {
 	if rssi < -100 || rssi > -15 {
 		return hostSignalStatus{Available: false, UpdatedAt: nowUnix}
 	}
-	var linkMbps, freq int
+	var linkMbps, freq, noise int
 	if sm := reWifiSpeed.FindStringSubmatch(raw); sm != nil {
 		linkMbps, _ = strconv.Atoi(sm[1])
 	}
 	if fm := reWifiFreq.FindStringSubmatch(raw); fm != nil {
 		freq, _ = strconv.Atoi(fm[1])
+	}
+	if nm := reWifiNoise.FindStringSubmatch(raw); nm != nil {
+		if nv, err := strconv.Atoi(nm[1]); err == nil && validWifiNoise(nv) {
+			noise = nv
+		}
 	}
 	band := "2.4GHz"
 	if freq >= 5900 {
@@ -1044,23 +1975,9 @@ func parseWifiStatusOutput(raw, upIf string, nowUnix int64) hostSignalStatus {
 	} else if freq >= 5000 {
 		band = "5GHz"
 	}
-	var bars int
-	var q, qCN string
-	var alpha float64
-	switch {
-	case rssi >= -58:
-		bars, q, qCN, alpha = 4, "excellent", "Wi-Fi 极佳", 1.0
-	case rssi >= -68:
-		bars, q, qCN, alpha = 3, "good", "Wi-Fi 良好", 0.95
-	case rssi >= -77:
-		bars, q, qCN, alpha = 2, "fair", "Wi-Fi 一般", 0.78
-	case rssi >= -85:
-		bars, q, qCN, alpha = 1, "weak", "Wi-Fi 偏弱", 0.52
-	default:
-		bars, q, qCN, alpha = 0, "critical", "Wi-Fi 极弱", 0.35
-	}
+	bars, q, qCN, alpha := scoreWifiSignal(rssi)
 	rsrpLbl, sinrLbl, rsrqLbl, spPct, spTxt := build4DSignalLabels(0, 0, 0, false, alpha, true, rssi)
-	return hostSignalStatus{
+	out := hostSignalStatus{
 		Available:          true,
 		Mode:               "wifi_sta",
 		RAT:                "Wi-Fi 中继",
@@ -1072,6 +1989,7 @@ func parseWifiStatusOutput(raw, upIf string, nowUnix int64) hostSignalStatus {
 		BandTrait:          describeBandTrait(band, band, 0, 1, true),
 		WifiRSSIdBm:        rssi,
 		WifiLinkMbps:       linkMbps,
+		WifiNoiseDbm:       noise,
 		RSRPLabel:          rsrpLbl,
 		SINRLabel:          sinrLbl,
 		RSRQLabel:          rsrqLbl,
@@ -1085,6 +2003,108 @@ func parseWifiStatusOutput(raw, upIf string, nowUnix int64) hostSignalStatus {
 		DiagnosisCN:        "上游 Wi-Fi 中继状态已同步",
 		UpdatedAt:          nowUnix,
 	}
+	if noise < 0 {
+		snr := rssi - noise
+		if validSINR(snr) {
+			out.SINRdB = snr
+			out.HasSINR = true
+		}
+	}
+	computeInterference4D(&out, autorateStatus{})
+	return out
+}
+
+func parseWirelessDotInt(tok string) (int, bool) {
+	clean := strings.TrimSuffix(strings.TrimSpace(tok), ".")
+	if clean == "" {
+		return 0, false
+	}
+	v, err := strconv.Atoi(clean)
+	if err != nil {
+		return 0, false
+	}
+	// 兼容部分 WEXT 驱动以无符号 u8 补码(136..241 -> -120..-15 dBm)输出负电平
+	if v > 127 && v < 256 {
+		v -= 256
+	}
+	return v, true
+}
+
+// parseProcNetWireless 解析 /proc/net/wireless 作为 Wi-Fi STA 信号与底噪的零 Binder 兜底源。
+func parseProcNetWireless(raw, upIf, apIface string, nowUnix int64) hostSignalStatus {
+	want := strings.TrimSpace(upIf)
+	ap := strings.TrimSpace(apIface)
+
+	for _, line := range strings.Split(raw, "\n") {
+		colonIdx := strings.IndexByte(line, ':')
+		if colonIdx <= 0 {
+			continue
+		}
+		ifc := strings.TrimSpace(line[:colonIdx])
+		if ifc == "" || strings.Contains(ifc, "|") {
+			continue
+		}
+		if want != "" {
+			if ifc != want {
+				continue
+			}
+		} else if ap != "" && ifc == ap {
+			continue
+		}
+
+		fields := strings.Fields(line[colonIdx+1:])
+		// /proc/net/wireless 列布局: status(0) link(1) level(2) noise(3) ...
+		if len(fields) < 3 {
+			continue
+		}
+		rssi, ok := parseWirelessDotInt(fields[2])
+		if !ok || rssi < -100 || rssi > -15 {
+			continue
+		}
+		var noise int
+		if len(fields) >= 4 {
+			if nv, nok := parseWirelessDotInt(fields[3]); nok && validWifiNoise(nv) {
+				noise = nv
+			}
+		}
+
+		bars, q, qCN, alpha := scoreWifiSignal(rssi)
+		rsrpLbl, sinrLbl, rsrqLbl, spPct, spTxt := build4DSignalLabels(0, 0, 0, false, alpha, true, rssi)
+		out := hostSignalStatus{
+			Available:          true,
+			Mode:               "wifi_sta",
+			RAT:                "Wi-Fi 中继",
+			DisplayRAT:         "Wi-Fi 中继",
+			UpstreamIface:      ifc,
+			Band:               "Wi-Fi",
+			BandCombo:          "Wi-Fi",
+			BandTrait:          "无线中继回传链路 · 自动跟踪主路由信号与信道底噪",
+			WifiRSSIdBm:        rssi,
+			WifiNoiseDbm:       noise,
+			RSRPLabel:          rsrpLbl,
+			SINRLabel:          sinrLbl,
+			RSRQLabel:          rsrqLbl,
+			SpeedPotentialPct:  spPct,
+			SpeedPotentialText: spTxt,
+			Bars:               bars,
+			Quality:            q,
+			QualityCN:          qCN,
+			RFCeilingFactor:    alpha,
+			Diagnosis:          "ok",
+			DiagnosisCN:        "上游 Wi-Fi 中继状态已同步",
+			UpdatedAt:          nowUnix,
+		}
+		if noise < 0 {
+			snr := rssi - noise
+			if validSINR(snr) {
+				out.SINRdB = snr
+				out.HasSINR = true
+			}
+		}
+		computeInterference4D(&out, autorateStatus{})
+		return out
+	}
+	return hostSignalStatus{Available: false, UpdatedAt: nowUnix}
 }
 
 func (s *server) apiSignal(w http.ResponseWriter, r *http.Request) {

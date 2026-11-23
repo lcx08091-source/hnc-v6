@@ -314,3 +314,39 @@ func TestFgEngineLoadedFromFile(t *testing.T) {
 		t.Fatal("flush should refresh engine")
 	}
 }
+
+func TestFgHmmRC2CompareForgetAndDevCap(t *testing.T) {
+	c := newFgCompare()
+	t0 := time.Date(2026, 10, 5, 12, 0, 0, 0, time.UTC)
+
+	// 1. 320 unique MACs in same minute -> hard-capped at fgCmpMaxDevs (256)
+	const hx = "0123456789abcdef"
+	mkMAC := func(i int) string {
+		return "02:11:22:33:" + string([]byte{hx[(i>>12)&0xf], hx[(i>>8)&0xf]}) + ":" + string([]byte{hx[(i>>4)&0xf], hx[i&0xf]})
+	}
+	for i := 0; i < 320; i++ {
+		c.record(mkMAC(i), t0.Add(time.Duration(i)*time.Millisecond), 10, "a", "a")
+	}
+	if len(c.devs) != fgCmpMaxDevs {
+		t.Fatalf("fgCompare devs=%d, want cap %d", len(c.devs), fgCmpMaxDevs)
+	}
+
+	// 2. forget(mac) removes target device immediately
+	latestMAC := mkMAC(319)
+	c.forget(strings.ToUpper(latestMAC))
+	if _, exists := c.devs[latestMAC]; exists {
+		t.Fatalf("forget(%s) did not remove entry", latestMAC)
+	}
+
+	// 3. > 30m idle devices are evicted automatically on record/snapshot/summary
+	tLater := t0.Add(35 * time.Minute)
+	c.record("aa:bb:cc:00:00:99", tLater, 10, "b", "b")
+	if len(c.devs) != 1 || c.devs["aa:bb:cc:00:00:99"] == nil {
+		t.Fatalf("expected >30m idle devs pruned leaving 1 active dev, got %d", len(c.devs))
+	}
+	_ = c.summary(tLater.Add(31*time.Minute), 1)
+	if len(c.devs) != 0 {
+		t.Fatalf("expected summary after 31m idle to prune remaining dev, got %d", len(c.devs))
+	}
+}
+

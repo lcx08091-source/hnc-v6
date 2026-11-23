@@ -32,14 +32,20 @@
 # 退出码: 0 成功; 1 v4 规则落地失败; 2 用法错误
 # 测试钩子: HNC_IPT / HNC_IP6T(iptables 命令, 可为桩), HNC_WEBUI_PORTS
 
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 CONF="$HNC_DIR/data/webui_access.json"
 STATE="$HNC_DIR/run/webui_guard.state"
 LOG="$HNC_DIR/logs/service.log"
 CHAIN=HNC_WEBUI
 PORTS=${HNC_WEBUI_PORTS:-"8443 8080 8444"}
-CELL_IFACES="rmnet+ ccmni+ wwan+ seth_+ sipa_eth+ v4-rmnet+ clat+"
-UPSTREAM_TUN_IFACES="tun+ wg+ ppp+ tailscale+"
+CELL_IFACES="rmnet+ ccmni+ wwan+ seth_+ sipa_eth+ gti+ v4-+ clat+"
+UPSTREAM_TUN_IFACES="tun+ wg+ ppp+ tailscale+ utun+ sing_tun+"
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
 
@@ -53,12 +59,129 @@ run() {
     "$@" 2>/dev/null
 }
 
+if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ]; then
+    iptables -w 2 -L INPUT -n >/dev/null 2>&1 || {
+        iptables -L INPUT -n >/dev/null 2>&1 && IPT="iptables"
+    }
+fi
+if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && [ "$DRY" != "1" ] && command -v ip6tables >/dev/null 2>&1; then
+    ip6tables -w 2 -L INPUT -n >/dev/null 2>&1 || {
+        ip6tables -L INPUT -n >/dev/null 2>&1 && IP6T="ip6tables"
+    }
+fi
+
 v6=0
 if [ -n "$HNC_IP6T" ]; then
     v6=1
 elif command -v ip6tables >/dev/null 2>&1 && $IP6T -L INPUT -n >/dev/null 2>&1; then
     v6=1
 fi
+
+valid_ifname() {
+    case "$1" in ""|*[!a-zA-Z0-9_.-+]*) return 1 ;; esac
+    [ "${#1}" -le 32 ]
+}
+
+detect_ap_iface() {
+    local _ap="${HNC_WEBUI_AP_IFACE:-${HNC_WL_IFACE:-}}" _st _idj _ts _now _age _fresh _cand _f
+    if [ -n "$_ap" ]; then
+        valid_ifname "$_ap" && printf '%s' "$_ap"
+        return 0
+    fi
+    # 若 hnc_state 存在: 非 ACTIVE:* (如 PENDING / PASSIVE) 直接认定当前无活跃热点,
+    # 绝不回退读取陈旧的 iface_detect.json / hotspot_iface / data/rules.json!
+    if [ -f "$HNC_DIR/run/hnc_state" ]; then
+        _st=$(head -n 1 "$HNC_DIR/run/hnc_state" 2>/dev/null | tr -d ' \t\r\n')
+        case "$_st" in
+            ACTIVE:*)
+                _ap="${_st#ACTIVE:}"
+                valid_ifname "$_ap" && printf '%s' "$_ap"
+                return 0
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    fi
+    if [ -f "$HNC_DIR/run/iface_detect.json" ]; then
+        _idj=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null)
+        _ts=$(printf '%s' "$_idj" | grep -oE '"ts"[[:space:]]*:[[:space:]]*[0-9]+' | head -1 | sed 's/.*:[[:space:]]*//')
+        _fresh=1
+        if [ -n "$_ts" ]; then
+            _now=$(date +%s 2>/dev/null || echo 0)
+            case "$_now" in ''|*[!0-9]*) _now=0 ;; esac
+            if [ "$_now" -gt 0 ] && [ "$_ts" -gt 0 ]; then
+                _age=$((_now - _ts))
+                [ "$_age" -gt "${HNC_IFACE_TTL:-120}" ] && _fresh=0
+            fi
+        fi
+        if [ "$_fresh" = "1" ]; then
+            _cand=$(printf '%s' "$_idj" | grep -oE '"iface"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+            if [ "$_cand" = "wlan0" ]; then
+                if printf '%s' "$_idj" | grep -qE '"wlan0_ap"[[:space:]]*:[[:space:]]*true'; then
+                    _ap="wlan0"
+                elif [ -z "$_ts" ] && ! printf '%s' "$_idj" | grep -qE '"wlan0_ap"[[:space:]]*:[[:space:]]*false'; then
+                    _ap="wlan0"
+                fi
+            elif [ -n "$_cand" ]; then
+                _ap="$_cand"
+            elif printf '%s' "$_idj" | grep -qE '"wlan0_ap"[[:space:]]*:[[:space:]]*true'; then
+                _ap="wlan0"
+            fi
+        fi
+    fi
+    # 无 hnc_state 时的兜底文件仅允许非 wlan0 专用 AP 接口(防持久化 rules.json / 陈旧缓存误豁免公共 Wi-Fi wlan0)
+    if [ -z "$_ap" ]; then
+        for _f in "$HNC_DIR/run/hotspot_iface" "$HNC_DIR/run/active_iface" "$HNC_DIR/run/iface.cache"; do
+            [ -f "$_f" ] || continue
+            _cand=$(head -n 1 "$_f" 2>/dev/null | tr -d ' \t\r\n')
+            if [ -n "$_cand" ] && [ "$_cand" != "wlan0" ]; then
+                _ap="$_cand"
+                break
+            fi
+        done
+    fi
+    if [ -z "$_ap" ] && [ -f "$HNC_DIR/data/rules.json" ]; then
+        _cand=$(tr -d '\r\n' < "$HNC_DIR/data/rules.json" 2>/dev/null | grep -oE '"hotspot_iface"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        if [ -n "$_cand" ] && [ "$_cand" != "wlan0" ]; then
+            _ap="$_cand"
+        fi
+    fi
+    valid_ifname "$_ap" && printf '%s' "$_ap"
+}
+
+upstream_lan_ifaces() {
+    local _ap _up="" _lup="" _idj _list="" _cand
+    _ap=$(detect_ap_iface)
+    if [ -f "$HNC_DIR/run/iface_detect.json" ]; then
+        _idj=$(tr -d '\r\n' < "$HNC_DIR/run/iface_detect.json" 2>/dev/null)
+        _up=$(printf '%s' "$_idj" | grep -oE '"upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+        _lup=$(printf '%s' "$_idj" | grep -oE '"local_upstream"[[:space:]]*:[[:space:]]*"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')
+    fi
+    # 公共 Wi-Fi 上游 STA(wlan0): 仅当当前热点口不是 wlan0 时封堵, 保护单芯片 wlan0 AP 机型
+    if [ "$_ap" != "wlan0" ]; then
+        _list="wlan0"
+    fi
+    # 有线上游口 eth+: 只要当前热点口不是 eth* 即封堵
+    case "$_ap" in
+        eth*) ;;
+        *) _list="$_list eth+" ;;
+    esac
+    # 动态识别到的其他非热点上游口(如双 Wi-Fi STA 副口 wlan1)
+    for _cand in "$_up" "$_lup"; do
+        valid_ifname "$_cand" || continue
+        [ "$_cand" = "$_ap" ] && continue
+        [ "$_cand" = "lo" ] && continue
+        case "$_cand" in
+            rmnet*|ccmni*|wwan*|seth_*|sipa_eth*|gti*|v4-*|clat*|eth*|tun*|wg*|ppp*|tailscale*|utun*|sing_tun*) continue ;;
+        esac
+        case " $_list " in
+            *" $_cand "*) ;;
+            *) _list="$_list $_cand" ;;
+        esac
+    done
+    printf '%s' "${_list# }"
+}
 
 # ─── 配置解析 ────────────────────────────────────────────────────
 MODE=all
@@ -120,19 +243,16 @@ teardown() {  # $1=iptables 命令
 
 build() {  # $1=iptables 命令  $2=4|6
     _T=$1
+    _wan_lan=$(upstream_lan_ifaces)
     run $_T -N $CHAIN          # 已存在时失败, 无妨
     run $_T -F $CHAIN || return 1
     run $_T -A $CHAIN -i lo -j RETURN || return 1
-    for _c in $CELL_IFACES; do
+    for _c in $CELL_IFACES $_wan_lan $UPSTREAM_TUN_IFACES; do
         run $_T -A $CHAIN -i "$_c" -p tcp -j REJECT --reject-with tcp-reset \
             || run $_T -A $CHAIN -i "$_c" -j DROP
     done
     case "$MODE" in
         all)
-            for _c in $UPSTREAM_TUN_IFACES; do
-                run $_T -A $CHAIN -i "$_c" -p tcp -j REJECT --reject-with tcp-reset \
-                    || run $_T -A $CHAIN -i "$_c" -j DROP
-            done
             run $_T -A $CHAIN -j RETURN || return 1
             ;;
         allowlist)
@@ -157,7 +277,7 @@ build() {  # $1=iptables 命令  $2=4|6
             run $_T -I INPUT 1 -p tcp --dport "$_p" -j $CHAIN || return 1
         fi
     done
-    unset _T _c _e _p
+    unset _T _c _e _p _wan_lan
     return 0
 }
 

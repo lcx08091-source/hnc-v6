@@ -116,12 +116,12 @@ else
     test_fail "canary file created - shell injection succeeded"
 fi
 
-# ═══ 中文 + emoji name ═══════════════════════════════════
-test_start "tpl_set with Chinese + emoji name round-trips"
+# ═══ 中文 + 4字节UTF-8生僻字 name ════════════════════════
+test_start "tpl_set with Chinese + 4-byte UTF-8 name round-trips"
 rm -f "$TPL_FILE"
-js tpl_set "游戏🎮" 50 20 0 0 0
+js tpl_set "游戏𠀀" 50 20 0 0 0
 content=$(cat "$TPL_FILE")
-assert_contains "$content" '游戏' && \
+assert_contains "$content" '游戏𠀀' && \
     assert_json_valid "$TPL_FILE" && test_pass
 
 # ═══ 浮点数字 ═════════════════════════════════════════════

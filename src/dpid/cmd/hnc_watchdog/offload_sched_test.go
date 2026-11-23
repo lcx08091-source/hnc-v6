@@ -2,12 +2,16 @@
 package main
 
 import (
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"hnc.io/dpid/nlroute"
 )
 
 // ── parseOffloadPlan(plan 子命令末行 "<秒> <早醒条件>") ─────────────
@@ -332,4 +336,123 @@ func TestWatchdogHeartbeatBoundToMainLoopProgress(t *testing.T) {
 	if !heartbeatTickOnce() || exitCode.Load() != -1 {
 		t.Fatalf("planned 180s Doze sleep must remain healthy at 150s (exitCode=%d)", exitCode.Load())
 	}
+}
+
+func TestClsactPureGoZeroForkCheck(t *testing.T) {
+	oldByN, oldNL, oldPin := netInterfaceByNameFn, nlClsactBPFCheckFn, clsactMapPinPath
+	t.Cleanup(func() {
+		netInterfaceByNameFn, nlClsactBPFCheckFn, clsactMapPinPath = oldByN, oldNL, oldPin
+	})
+
+	netInterfaceByNameFn = func(name string) (*net.Interface, error) {
+		return &net.Interface{Name: name, Index: 7}, nil
+	}
+	clsactMapPinPath = filepath.Join(t.TempDir(), "ip_mark_map")
+
+	nlClsactBPFCheckFn = func(ifindex int, pin string) (nlroute.ClsactStatus, error) {
+		if ifindex != 7 {
+			t.Fatalf("unexpected ifindex=%d", ifindex)
+		}
+		return nlroute.ClsactStatus{Qdisc: true, IngressBPF: true, MapOK: true}, nil
+	}
+	if out := checkClsact("wlan2"); !strings.Contains(out, `"ok":true`) {
+		t.Fatalf("pure Go healthy check want ok:true, got %q", out)
+	}
+
+	nlClsactBPFCheckFn = func(ifindex int, pin string) (nlroute.ClsactStatus, error) {
+		return nlroute.ClsactStatus{Qdisc: true, IngressBPF: false, MapOK: true}, nil
+	}
+	if out := checkClsact("wlan2"); strings.Contains(out, `"ok":true`) {
+		t.Fatalf("pure Go missing BPF want ok:false, got %q", out)
+	}
+
+	// netlink 不可用时回退 execClsactCheck(测试环境二进制不存在返回空串, 不 panic)
+	nlClsactBPFCheckFn = func(ifindex int, pin string) (nlroute.ClsactStatus, error) {
+		return nlroute.ClsactStatus{}, errors.New("netlink EACCES")
+	}
+	_ = checkClsact("wlan2")
+}
+
+func TestOffloadIdleCleanupAndZeroWakePause(t *testing.T) {
+	tmp := t.TempDir()
+	oldRun, oldStatus, oldState := offloadRunDir, offloadGuardStatusPath, offloadStateFn
+	oldPlan, oldFirst, oldEvery, oldStop := runOffloadPlanFn, offloadFirstDelayDur, clsactEveryDur, stopCh
+	oldTarget := clsactTargetFn
+
+	offloadRunDir = tmp
+	offloadGuardStatusPath = filepath.Join(tmp, "offload_guard.json")
+	curState := wdState{kind: StateIdle}
+	offloadStateFn = func() wdState { return curState }
+	offloadFirstDelayDur = 0
+	clsactEveryDur = 20 * time.Millisecond
+	clsactTargetFn = func() string { return "" }
+	localStop := make(chan struct{})
+	stopCh = localStop
+
+	var planCount atomic.Int32
+	runOffloadPlanFn = func() string {
+		planCount.Add(1)
+		return "300 none"
+	}
+
+	t.Cleanup(func() {
+		offloadRunDir, offloadGuardStatusPath, offloadStateFn = oldRun, oldStatus, oldState
+		runOffloadPlanFn, offloadFirstDelayDur, clsactEveryDur, stopCh = oldPlan, oldFirst, oldEvery, oldStop
+		clsactTargetFn = oldTarget
+	})
+
+	// 1. 存在残留 orig_tether_offload_disabled 时必须判为需要清理, 不可挂起!
+	origFile := filepath.Join(tmp, "orig_tether_offload_disabled")
+	_ = os.WriteFile(origFile, []byte("0\n"), 0o644)
+	if offloadIdleShouldPause() {
+		t.Fatal("残留 orig_tether_offload_disabled 未清理前绝不能提前挂起")
+	}
+
+	// 2. 清理完毕且归位 NOHOTSPOT + StateIdle → 允许挂起, 待机零唤醒!
+	_ = os.Remove(origFile)
+	_ = os.WriteFile(offloadGuardStatusPath, []byte(`{"mode":"auto","offload_state":"NOHOTSPOT","fallback_active":false,"clsact":"off","iface":""}`), 0o644)
+	if !offloadIdleShouldPause() {
+		t.Fatal("StateIdle 且无残留清理项时应允许挂起定时器")
+	}
+
+	// 清空可能残留的信号后启动两个调度循环, 验证 StateIdle 下 0 次 plan 调用
+	select {
+	case <-offloadWakeCh:
+	default:
+	}
+	select {
+	case <-clsactWakeCh:
+	default:
+	}
+
+	doneOffload := make(chan struct{})
+	doneClsact := make(chan struct{})
+	go func() {
+		defer close(doneOffload)
+		offloadLoop()
+	}()
+	go func() {
+		defer close(doneClsact)
+		clsactLoop()
+	}()
+
+	time.Sleep(60 * time.Millisecond)
+	if got := planCount.Load(); got != 0 {
+		t.Fatalf("StateIdle 挂起期间不应触发任何 offload plan, got %d", got)
+	}
+
+	// 3. 模拟热点开启切换至 ACTIVE 并调用 wakeOffloadSched() → 立即唤醒跑首轮 plan!
+	curState = wdState{kind: stateActive, iface: "wlan2"}
+	wakeOffloadSched()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && planCount.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := planCount.Load(); got == 0 {
+		t.Fatal("wakeOffloadSched 后应立即唤醒 offloadLoop 执行 plan")
+	}
+
+	close(localStop)
+	<-doneOffload
+	<-doneClsact
 }

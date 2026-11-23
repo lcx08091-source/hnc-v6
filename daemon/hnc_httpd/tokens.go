@@ -60,6 +60,7 @@ type TokensStore struct {
 	tokens   map[string]Token
 	dirty    bool  // v5.12: 内存有未落盘的变化; SaveLoop 只在 dirty 时写盘(此前每 30s 无条件全量重写, 闪存写放大)
 	lastRead int64 // 上次 reload 时的文件 mtime(Unix ns)
+	lastSize int64 // 上次 reload 时的文件大小(配合 mtime 防同秒写与坏文件重复解析风暴)
 }
 
 // NewTokensStore 创建 store。首次会尝试从磁盘 load;文件不存在视为空 store,不报错。
@@ -86,6 +87,7 @@ func (s *TokensStore) reload() error {
 	const maxRetry = 3
 	var data []byte
 	var newMtime int64
+	var newSize int64
 	for attempt := 0; attempt < maxRetry; attempt++ {
 		st1, err := os.Stat(s.path)
 		if err != nil {
@@ -93,6 +95,7 @@ func (s *TokensStore) reload() error {
 				s.mu.Lock()
 				s.tokens = make(map[string]Token)
 				s.lastRead = 0
+				s.lastSize = 0
 				s.mu.Unlock()
 				return nil
 			}
@@ -104,6 +107,7 @@ func (s *TokensStore) reload() error {
 				s.mu.Lock()
 				s.tokens = make(map[string]Token)
 				s.lastRead = 0
+				s.lastSize = 0
 				s.mu.Unlock()
 				return nil
 			}
@@ -115,16 +119,25 @@ func (s *TokensStore) reload() error {
 		}
 		if st1.ModTime().Equal(st2.ModTime()) && st1.Size() == st2.Size() {
 			newMtime = st2.ModTime().UnixNano()
+			newSize = st2.Size()
 			break
 		}
 		// 文件在 read 期间又被改, 重试. 最后一次仍不一致也用最新结果(稀少情况).
 		if attempt == maxRetry-1 {
 			newMtime = st2.ModTime().UnixNano()
+			newSize = st2.Size()
 		}
 	}
 
 	var tf tokensFile
 	if err := json.Unmarshal(data, &tf); err != nil {
+		// 记录坏文件当前的 mtime/size, 保留内存已有有效 tokens, 防止每次 API 请求都重复读盘解析坏 JSON
+		s.mu.Lock()
+		if newMtime > s.lastRead || (newMtime == s.lastRead && newSize != s.lastSize) {
+			s.lastRead = newMtime
+			s.lastSize = newSize
+		}
+		s.mu.Unlock()
 		return fmt.Errorf("parse tokens.json: %w", err)
 	}
 	if tf.Tokens == nil {
@@ -134,12 +147,12 @@ func (s *TokensStore) reload() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	// Double-check: 并发场景下别的协程可能已经 reload 过
-	// 比较 mtime,如果内存中的 lastRead 已经是最新或更新,就跳过
-	if s.lastRead >= newMtime {
+	if s.lastRead > newMtime || (s.lastRead == newMtime && s.lastSize == newSize) {
 		return nil
 	}
 	s.tokens = tf.Tokens
 	s.lastRead = newMtime
+	s.lastSize = newSize
 	return nil
 }
 
@@ -155,13 +168,14 @@ func (s *TokensStore) SyncIfChanged() error {
 				s.tokens = make(map[string]Token)
 			}
 			s.lastRead = 0
+			s.lastSize = 0
 			s.mu.Unlock()
 			return nil
 		}
 		return err
 	}
 	s.mu.RLock()
-	need := st.ModTime().UnixNano() != s.lastRead
+	need := st.ModTime().UnixNano() != s.lastRead || st.Size() != s.lastSize
 	s.mu.RUnlock()
 	if need {
 		return s.reload()
@@ -219,6 +233,7 @@ func (s *TokensStore) saveAtomicLocked() error {
 	}
 	tmp := s.path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write tmp: %w", err)
 	}
 	if err := os.Chmod(tmp, 0600); err != nil {
@@ -230,10 +245,11 @@ func (s *TokensStore) saveAtomicLocked() error {
 		return fmt.Errorf("rename: %w", err)
 	}
 	s.dirty = false
-	// 更新自己的 mtime cache,避免下次 SyncIfChanged 误重载
+	// 更新自己的 mtime/size cache,避免下次 SyncIfChanged 误重载
 	st, err := os.Stat(s.path)
 	if err == nil {
 		s.lastRead = st.ModTime().UnixNano()
+		s.lastSize = st.Size()
 	}
 	return nil
 }
@@ -252,7 +268,11 @@ func (s *TokensStore) PutIfAbsent(tokenID string, t Token) error {
 		return ErrTokenIDCollision
 	}
 	s.tokens[tokenID] = t
-	return s.saveAtomicLocked()
+	if err := s.saveAtomicLocked(); err != nil {
+		delete(s.tokens, tokenID)
+		return err
+	}
+	return nil
 }
 
 // Revoke 把 id 标记 revoked=true 并立即持久化。id 不存在返回 false

@@ -1195,6 +1195,26 @@ func acquireNativeDataplaneLock(hncDir, op string) (func(), error) {
 	return nil, errors.New("native dataplane: lock busy timeout")
 }
 
+func runIptWithWaitFallback(iptBin string, args ...string) (string, error) {
+	withWait2 := append([]string{"-w", "2"}, args...)
+	out, err := nativeIptCmdRunner(iptBin, withWait2...)
+	if err == nil {
+		return out, nil
+	}
+	if !isXtablesWaitFlagError(out + " " + err.Error()) {
+		return out, err
+	}
+	withWaitBare := append([]string{"-w"}, args...)
+	outW, errW := nativeIptCmdRunner(iptBin, withWaitBare...)
+	if errW == nil {
+		return outW, nil
+	}
+	if isXtablesWaitFlagError(outW + " " + errW.Error()) {
+		return nativeIptCmdRunner(iptBin, args...)
+	}
+	return outW, errW
+}
+
 func ensureNativeIPv4StatsRule(iptBin, ip string) {
 	iptBin = strings.TrimSpace(iptBin)
 	ip = strings.TrimSpace(ip)
@@ -1202,8 +1222,8 @@ func ensureNativeIPv4StatsRule(iptBin, ip string) {
 		return
 	}
 	for _, dirFlag := range []string{"-s", "-d"} {
-		if _, err := nativeIptCmdRunner(iptBin, "-w", "2", "-t", "mangle", "-C", "HNC_STATS", dirFlag, ip, "-j", "RETURN"); err != nil {
-			_, _ = nativeIptCmdRunner(iptBin, "-w", "2", "-t", "mangle", "-A", "HNC_STATS", dirFlag, ip, "-j", "RETURN")
+		if _, err := runIptWithWaitFallback(iptBin, "-t", "mangle", "-C", "HNC_STATS", dirFlag, ip, "-j", "RETURN"); err != nil {
+			_, _ = runIptWithWaitFallback(iptBin, "-t", "mangle", "-A", "HNC_STATS", dirFlag, ip, "-j", "RETURN")
 		}
 	}
 }
@@ -1538,6 +1558,213 @@ func readPschedTickInUsec() float64 {
 	return pschedDefaultTickUsec
 }
 
+const defaultSubprocSafePath = "/system/bin:/system/xbin:/vendor/bin:/usr/sbin:/sbin:/usr/bin:/bin"
+
+func subprocEnvWithFallbackPath(extra ...string) []string {
+	pathVal := defaultSubprocSafePath
+	if cur := strings.TrimSpace(os.Getenv("PATH")); cur != "" && cur != defaultSubprocSafePath {
+		pathVal = pathVal + ":" + cur
+	}
+	env := make([]string, 0, 1+len(extra))
+	env = append(env, "PATH="+pathVal)
+	env = append(env, extra...)
+	return env
+}
+
+func isXtablesWaitFlagError(msg string) bool {
+	lower := strings.ToLower(msg)
+	for _, pat := range []string{
+		"unknown option",
+		"unrecognized option",
+		"invalid option",
+		"bad argument",
+		"option requires an argument",
+		"doesn't allow an argument",
+		"does not take",
+		"parameter problem",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+func isIptablesRejectMissingError(msg string) bool {
+	lower := strings.ToLower(msg)
+	if strings.Contains(lower, "reject") {
+		return true
+	}
+	for _, pat := range []string{
+		"no chain/target/match",
+		"couldn't load target",
+		"could not load target",
+		"cannot load target",
+		"no such file or directory",
+		"unknown target",
+		"target_offset",
+		"invalid argument",
+	} {
+		if strings.Contains(lower, pat) {
+			return true
+		}
+	}
+	return false
+}
+
+func replaceRejectWithDropInRestorePayload(payload string) string {
+	if !strings.Contains(payload, "REJECT") {
+		return payload
+	}
+	lines := strings.Split(payload, "\n")
+	changed := false
+	for idx, rawLn := range lines {
+		trimmed := strings.TrimSpace(rawLn)
+		if trimmed == "" || strings.HasPrefix(trimmed, "*") || strings.HasPrefix(trimmed, ":") ||
+			strings.HasPrefix(trimmed, "#") || trimmed == "COMMIT" {
+			continue
+		}
+		if !strings.Contains(trimmed, "REJECT") {
+			continue
+		}
+		fields := strings.Fields(trimmed)
+		outFields := make([]string, 0, len(fields))
+		lineChanged := false
+		for i := 0; i < len(fields); i++ {
+			if (fields[i] == "-j" || fields[i] == "--jump") && i+1 < len(fields) && fields[i+1] == "REJECT" {
+				outFields = append(outFields, fields[i], "DROP")
+				i++
+				lineChanged = true
+				continue
+			}
+			if fields[i] == "--reject-with" {
+				if i+1 < len(fields) {
+					i++
+				}
+				lineChanged = true
+				continue
+			}
+			if strings.HasPrefix(fields[i], "--reject-with=") {
+				lineChanged = true
+				continue
+			}
+			outFields = append(outFields, fields[i])
+		}
+		if lineChanged {
+			lines[idx] = strings.Join(outFields, " ")
+			changed = true
+		}
+	}
+	if !changed {
+		return payload
+	}
+	return strings.Join(lines, "\n")
+}
+
+func splitRestorePayloadByTable(payload []byte) [][]byte {
+	s := strings.ReplaceAll(string(payload), "\r\n", "\n")
+	var blocks [][]byte
+	var cur strings.Builder
+	inTable := false
+	for _, ln := range strings.Split(s, "\n") {
+		trimmed := strings.TrimSpace(ln)
+		if trimmed == "" {
+			continue
+		}
+		if strings.HasPrefix(trimmed, "*") {
+			if inTable && cur.Len() > 0 {
+				blocks = append(blocks, []byte(cur.String()))
+				cur.Reset()
+			}
+			inTable = true
+			cur.WriteString(trimmed)
+			cur.WriteByte('\n')
+			continue
+		}
+		if inTable {
+			cur.WriteString(trimmed)
+			cur.WriteByte('\n')
+			if trimmed == "COMMIT" {
+				blocks = append(blocks, []byte(cur.String()))
+				cur.Reset()
+				inTable = false
+			}
+		}
+	}
+	if inTable && cur.Len() > 0 {
+		blocks = append(blocks, []byte(cur.String()))
+	}
+	return blocks
+}
+
+var nativePipeRestoreExecFn = func(_ string, _ []string, _ []byte, _ time.Duration) error {
+	return errNetlinkUnsupportedOS
+}
+
+func pipeIptablesRestoreWithTimeout(binPath string, payload []byte, timeout time.Duration) error {
+	if binPath == "" {
+		return errors.New("restore binary not found")
+	}
+	runWithWaitFallback := func(data []byte) error {
+		err1 := nativePipeRestoreExecFn(binPath, []string{"-w", "2", "--noflush"}, data, timeout)
+		if err1 == nil {
+			return nil
+		}
+		if isXtablesWaitFlagError(err1.Error()) {
+			err2 := nativePipeRestoreExecFn(binPath, []string{"-w", "--noflush"}, data, timeout)
+			if err2 == nil {
+				return nil
+			}
+			if isXtablesWaitFlagError(err2.Error()) {
+				if err3 := nativePipeRestoreExecFn(binPath, []string{"--noflush"}, data, timeout); err3 == nil {
+					return nil
+				}
+			}
+			return err2
+		}
+		return err1
+	}
+	err := runWithWaitFallback(payload)
+	if err == nil {
+		return nil
+	}
+	if bytes.Contains(payload, []byte("REJECT")) && isIptablesRejectMissingError(err.Error()) {
+		rawStr := string(payload)
+		if dropStr := replaceRejectWithDropInRestorePayload(rawStr); dropStr != rawStr {
+			if dErr := runWithWaitFallback([]byte(dropStr)); dErr == nil {
+				return nil
+			}
+		}
+	}
+	return err
+}
+
+func buildSimpleKindLeafMsg(seq uint32, ifindex int, parent, leafHandle uint32, kind string) []byte {
+	var attrs []byte
+	attrs = rtnlPutAttrString(attrs, rtnlTcaKind, kind)
+	return rtnlBuildTCMsg(rtnlNewQdisc, rtnlFRequest|rtnlFAck|rtnlFCreate|rtnlFReplace, seq, ifindex, leafHandle, parent, 0, attrs)
+}
+
+func buildPfifoScaledLeafMsg(seq uint32, ifindex int, parent, leafHandle uint32, rateBps uint64) []byte {
+	limitPkts := uint32(128)
+	if rateBps > 0 {
+		bdp := (rateBps * 40) / (1000 * 1500)
+		if bdp < 16 {
+			limitPkts = 16
+		} else if bdp > 256 {
+			limitPkts = 256
+		} else {
+			limitPkts = uint32(bdp)
+		}
+	}
+	var qopt [4]byte
+	binary.LittleEndian.PutUint32(qopt[:], limitPkts)
+	var attrs []byte
+	attrs = rtnlPutAttrString(attrs, rtnlTcaKind, "pfifo")
+	attrs = rtnlPutAttr(attrs, rtnlTcaOptions, qopt[:])
+	return rtnlBuildTCMsg(rtnlNewQdisc, rtnlFRequest|rtnlFAck|rtnlFCreate|rtnlFReplace, seq, ifindex, leafHandle, parent, 0, attrs)
+}
+
 func buildFqCodelLeafMsg(seq uint32, ifindex int, parent, leafHandle uint32, withParams bool) []byte {
 	var attrs []byte
 	attrs = rtnlPutAttrString(attrs, rtnlTcaKind, "fq_codel")
@@ -1570,8 +1797,36 @@ func resolveIptablesRestoreBin(_ string) string {
 	return ""
 }
 
-func pipeIptablesRestore(_ string, _ []byte) error {
-	return errNetlinkUnsupportedOS
+func pipeIptablesRestore(binPath string, payload []byte) error {
+	return pipeIptablesRestoreWithTimeout(binPath, payload, 3*time.Second)
+}
+
+func pipeRestoreTablesIsolated(binPath string, payload []byte) (bool, bool, bool, error) {
+	if binPath == "" {
+		return false, false, false, errors.New("restore binary not found")
+	}
+	if err := pipeIptablesRestore(binPath, payload); err == nil {
+		return bytes.Contains(payload, []byte("*mangle")), bytes.Contains(payload, []byte("*filter")), true, nil
+	}
+	blocks := splitRestorePayloadByTable(payload)
+	var mangleOK, filterOK, anyOK bool
+	var lastErr error
+	for _, blk := range blocks {
+		isMangle := bytes.HasPrefix(bytes.TrimSpace(blk), []byte("*mangle"))
+		isFilter := bytes.HasPrefix(bytes.TrimSpace(blk), []byte("*filter"))
+		if bErr := pipeIptablesRestore(binPath, blk); bErr == nil {
+			anyOK = true
+			if isMangle {
+				mangleOK = true
+			}
+			if isFilter {
+				filterOK = true
+			}
+		} else {
+			lastErr = bErr
+		}
+	}
+	return mangleOK, filterOK, anyOK, lastErr
 }
 
 func readLiveDeviceIPv4Map(hncDir string) map[string]string {
@@ -1621,6 +1876,7 @@ func nlEnsureHTBRootOnSocket(_ int, _ int, _ uint16, _ uint64) error {
 var (
 	nlShaperSendAndWaitAckFn = rtnlSendAndWaitAck
 	nlShaperEnsureHTBRootFn  = nlEnsureHTBRootOnSocket
+	nlBatchSendAckFn         = rtnlSendAndWaitAck
 )
 
 func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfindex int, upBps uint64) (int, error) {
@@ -1653,12 +1909,163 @@ func nlTuneGlobalShaperOnSocket(fd int, downIfindex int, downBps uint64, ifbIfin
 	return sent, nil
 }
 
-func nlApplyBatchWithFWFallbackOnSocket(_ int, _ [][]byte) (int, error) {
-	return 0, errNetlinkUnsupportedOS
+func fallbackIPv6FilterPrio(parent uint32, origPrio uint16) uint16 {
+	if parent == rtnlHtbRootMaj {
+		if origPrio == rtnlFilterPrioFW {
+			return 3
+		}
+		return origPrio + 1
+	}
+	switch origPrio {
+	case 1:
+		return 3
+	case 2:
+		return 4
+	default:
+		return origPrio + 1
+	}
+}
+
+func extractBatchParentCeilRates(msgs [][]byte) map[uint32]uint64 {
+	rates := make(map[uint32]uint64, 4)
+	var doneHdr [rtnlMsgHdrLen]byte
+	binary.LittleEndian.PutUint32(doneHdr[0:4], rtnlMsgHdrLen)
+	binary.LittleEndian.PutUint16(doneHdr[4:6], rtnlMsgDone)
+
+	for _, m := range msgs {
+		if len(m) < rtnlMsgHdrLen+rtnlTcMsgLen || binary.LittleEndian.Uint16(m[4:6]) != rtnlNewTClass {
+			continue
+		}
+		buf := make([]byte, 0, len(m)+rtnlMsgHdrLen)
+		buf = append(buf, m...)
+		buf = append(buf, doneHdr[:]...)
+		if parsed, err := parseTCClassDumpMsgs(buf, 0); err == nil {
+			for _, st := range parsed {
+				if st.HandleRaw != 0 && st.CeilBps > 0 {
+					rates[st.HandleRaw] = st.CeilBps
+				}
+			}
+		}
+	}
+	return rates
+}
+
+func nlSendBatchWithCompatFallback(fd int, msgs [][]byte, bestEffortAfterFirstClass bool) (int, error) {
+	if len(msgs) == 0 {
+		return 0, nil
+	}
+	parentRates := extractBatchParentCeilRates(msgs)
+	sent := 0
+	ethAllNet := rtnlHtons(rtnlEthPAll)
+	ethIPNet := rtnlHtons(rtnlEthPIP)
+	ethIPv6Net := rtnlHtons(rtnlEthPIPv6)
+
+	for idx, m := range msgs {
+		if len(m) < rtnlMsgHdrLen+rtnlTcMsgLen {
+			continue
+		}
+		seq := binary.LittleEndian.Uint32(m[8:12])
+		msgType := binary.LittleEndian.Uint16(m[4:6])
+		err := nlBatchSendAckFn(fd, m, seq)
+		if err == nil {
+			sent++
+			continue
+		}
+		if (msgType == rtnlDelTFilter || msgType == rtnlDelTClass || msgType == rtnlDelQdisc) && isIgnorableDelErr(err) {
+			continue
+		}
+		if idx == 0 && msgType == rtnlNewTClass && bestEffortAfterFirstClass {
+			return sent, err
+		}
+		if msgType == rtnlNewTFilter {
+			parent := binary.LittleEndian.Uint32(m[28:32])
+			info := binary.LittleEndian.Uint32(m[32:36])
+			protoNet := uint16(info & 0xffff)
+			origPrio := uint16(info >> 16)
+			if protoNet == ethAllNet {
+				cp4 := append([]byte(nil), m...)
+				seq4 := rtnlNextSeq()
+				binary.LittleEndian.PutUint32(cp4[8:12], seq4)
+				binary.LittleEndian.PutUint32(cp4[32:36], (uint32(origPrio)<<16)|uint32(ethIPNet))
+				err4 := nlBatchSendAckFn(fd, cp4, seq4)
+				if err4 == nil {
+					sent++
+				}
+				v6Prio := fallbackIPv6FilterPrio(parent, origPrio)
+				cp6 := append([]byte(nil), m...)
+				seq6 := rtnlNextSeq()
+				binary.LittleEndian.PutUint32(cp6[8:12], seq6)
+				binary.LittleEndian.PutUint32(cp6[32:36], (uint32(v6Prio)<<16)|uint32(ethIPv6Net))
+				if nlBatchSendAckFn(fd, cp6, seq6) == nil {
+					sent++
+				}
+				if err4 == nil {
+					continue
+				}
+			}
+			if protoNet == ethIPv6Net || bestEffortAfterFirstClass {
+				continue
+			}
+		}
+		if msgType == rtnlNewQdisc {
+			ifidx := int(int32(binary.LittleEndian.Uint32(m[20:24])))
+			handle := binary.LittleEndian.Uint32(m[24:28])
+			parent := binary.LittleEndian.Uint32(m[28:32])
+			rateBps := parentRates[parent]
+			fbSeq := rtnlNextSeq()
+			if nlBatchSendAckFn(fd, buildFqCodelLeafMsg(fbSeq, ifidx, parent, handle, false), fbSeq) == nil {
+				sent++
+				continue
+			}
+			attached := false
+			for _, kind := range []string{"fq", "sfq"} {
+				seqK := rtnlNextSeq()
+				if nlBatchSendAckFn(fd, buildSimpleKindLeafMsg(seqK, ifidx, parent, handle, kind), seqK) == nil {
+					sent++
+					attached = true
+					break
+				}
+			}
+			if attached {
+				continue
+			}
+			seqP := rtnlNextSeq()
+			if nlBatchSendAckFn(fd, buildPfifoScaledLeafMsg(seqP, ifidx, parent, handle, rateBps), seqP) == nil {
+				sent++
+				continue
+			}
+			continue
+		}
+		if bestEffortAfterFirstClass {
+			continue
+		}
+		return sent, err
+	}
+	return sent, nil
+}
+
+func nlApplyBatchWithFWFallbackOnSocket(fd int, msgs [][]byte) (int, error) {
+	return nlSendBatchWithCompatFallback(fd, msgs, false)
 }
 
 func nlProbeKernelCapabilities(_ int) (bool, bool, bool) {
 	return false, false, false
+}
+
+func nlDumpIngressFilterSummary(_ int) string {
+	return ""
+}
+
+func dumpDefaultRouteIfindexesOS() (map[int]bool, error) {
+	return nil, errNetlinkUnsupportedOS
+}
+
+func dpPidAlive(pid int) bool {
+	return pid > 0
+}
+
+func applyNativeIngressPolice(_, _ string, _ int, _, _ string, _ uint64, _, _ uint32) error {
+	return errNetlinkUnsupportedOS
 }
 
 func closeRTNetlinkSocket(_ int) {}

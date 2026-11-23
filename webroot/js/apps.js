@@ -151,7 +151,7 @@ function renderApps(anim1) {
   var au = S.appUsage && S.appUsage[1] && S.appUsage[1].d;
   var hsAppCnt = au && Array.isArray(au.by_app) ? au.by_app.filter(function (a) { return a.id && a.id.charAt(0) !== '_'; }).length : 0;
   var pend = rulesPendingCount();
-  var st = !self ? ['待连接', 'var(--text-3)'] : self.enabled ? ['采集中', 'var(--badge-ok)'] : ['休眠中', 'var(--accent)'];
+  var st = !self ? ['待连接', 'var(--text-3)'] : self.enabled ? ['采集中', 'var(--badge-ok)'] : ['休眠中', 'var(--accent, var(--blue))'];
   var foot = '热点今日识别 ' + hsAppCnt + ' 个应用 · 本机活跃 ' + active + ' 个应用 · 自训工作台已整合至「分析 → DPI 与自训」';
 
   var h = '<div class="wrap">' +
@@ -291,11 +291,11 @@ function appsSub() {
 }
 
 function appRow(r, mx) {
-  var a = r.a, key = 'app' + r.uid, nm = r.name;
+  var a = r.a, key = 'app' + r.uid, nm = r.name, c = appColor(a.pkg || nm);
   var snis = (a.top_snis || []).slice(0, 6), rules = (a.top_rules || []).slice(0, 4), hits = a.rule_hit_counts || {};
   var val = r.bytes ? bytes(r.bytes) : num(a.total_conns) + ' 次';
   return '<div class="row-wrap' + (S.open[key] ? ' open' : '') + '" data-foldkey="' + esc(key) + '"><button class="row-h" data-act="fold" data-key="' + esc(key) + '">' +
-    '<span class="appi" style="background:linear-gradient(145deg,' + appColor(a.pkg || nm) + ',color-mix(in srgb,' + appColor(a.pkg || nm) + ' 60%,#000))">' + esc(nm.charAt(0).toUpperCase()) + '</span>' +
+    '<span class="appi" style="background:' + c + ';background:linear-gradient(145deg,' + c + ',color-mix(in srgb,' + c + ' 60%,#000))">' + esc(nm.charAt(0).toUpperCase()) + '</span>' +
     '<span class="tx"><div class="dev-name" style="font-size:14.5px"><span class="nm">' + esc(nm) + '</span>' + (a.flywheel_excluded ? '<span class="badge b-gray">已排除代理</span>' : '') + '</div>' +
       (r.bytes ? '<div class="bar1"><i style="width:' + Math.max(2, r.bytes / mx * 100).toFixed(1) + '%"></i></div>' : '<div class="s">' + (a.last_seen ? '最近 ' + ago(a.last_seen) : '') + '</div>') + '</span>' +
     '<span style="text-align:right"><div class="num" style="font-size:13px;font-weight:700">' + val + '</div><div style="font-size:11px;color:var(--text-3)">' + num(a.active_conns) + ' 连接</div></span>' + ico('chev', 'chev') + '</button>' +
@@ -342,7 +342,14 @@ function buildExport(btn) {
 }
 function downloadExport(name, url) {
   if (!/^[A-Za-z0-9._-]+$/.test(name)) { toast('文件名不合法', 'err'); return; }
-  if (!KSU) { var a = document.createElement('a'); a.href = url || '/api/exports/' + encodeURIComponent(name); a.download = name; document.body.appendChild(a); a.click(); a.remove(); return; }
+  if (!KSU) {
+    var href = url || '/api/exports/' + encodeURIComponent(name);
+    var a = document.createElement('a'); a.href = href; a.download = name; document.body.appendChild(a); a.click(); a.remove();
+    if (/^blob:/i.test(href) && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') {
+      setTimeout(function () { try { URL.revokeObjectURL(href); } catch (_) {} }, 3000);
+    }
+    return;
+  }
   shell('mkdir -p /sdcard/Download && cp ' + sq(HNC_DIR + '/exports/' + name) + ' /sdcard/Download/ && echo ok').then(function () { toast('已存到 /sdcard/Download/' + name); }, function (e) { toast(errText(e), 'err'); });
 }
 function selfToggle(el, path) {

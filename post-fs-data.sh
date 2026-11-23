@@ -2,22 +2,23 @@
 # post-fs-data.sh — 在文件系统挂载后、Zygote启动前执行
 # 此阶段主要做目录初始化和文件权限设置
 
-# v3.5.0 alpha-0:PATH 健壮性(见 service.sh 同段注释)
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
-
 # v5.9.3 BUG-009:引导脚本继承 magiskd/KSU 的 umask=0,裸 `mkdir -p` 建出来的
 # 目录就是 0777、裸 `>` 建出来的文件就是 0666 —— 仓库里一处 chmod 777 都没有,
 # 真机上那一堆 0777 全是这么来的。这里显式定 umask。
-# 为什么是 022 不是 077:bin/hnc_runtime_sync.sh 的 `cp -rf` 不带 -p,新建文件的权限是
-# 源权限 & ~umask;umask=077 会把仓库里 644 的脚本和 755 的二进制统统压成
-# 0600/0700,而后面的 chmod 覆盖面并不完整(`chmod 755 bin/*.sh` 的 glob 不
-# 递归,漏 bin/diag/diag.sh;二进制 chmod 只覆盖 10 个白名单名字,漏
-# bin/diag/fork_probe)→ 会变成"文件在但不能执行"的静默
-# 回归,比 0777 更难查。022 足以杀掉 0777 这个根因,敏感目录再单独 chmod 700。
 umask 022
 
 MODDIR=${0%/*}
 HNC_DIR=/data/local/hnc
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "${HNC_DIR:-/data/local/hnc}/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
 
 # v5.40.1: 若当前运行在 hotspot_net_ctl, 立即停用并标记移除残留的旧版 hotspot_network_control,
 # 防止紧随其后的 late_start 阶段被旧模块拉起第二份 service.sh 覆盖运行目录。
@@ -57,12 +58,15 @@ rm -rf "$HNC_DIR/run/hnc_json.lock" "$HNC_DIR/run/json.lock" 2>/dev/null
 #   - v6/(v6_sync 快照)、iface.cache: 上次会话的地址/接口,开机后必须重新探测。
 rm -rf "$HNC_DIR/run/lock" "$HNC_DIR/run/tc_action.lock" "$HNC_DIR/run/v6" \
        "$HNC_DIR/run/stats_v6.lock" "$HNC_DIR/run/app_limits.lock" \
-       "$HNC_DIR/run/app_qos.lock" "$HNC_DIR/run/connblock.lock" 2>/dev/null
-rm -rf "$HNC_DIR"/run/tc_action.lock.stale.* 2>/dev/null
+       "$HNC_DIR/run/app_qos.lock" "$HNC_DIR/run/connblock.lock" \
+       "$HNC_DIR/run/daemon.spawn" "$HNC_DIR"/run/*.lock 2>/dev/null
+rm -rf "$HNC_DIR"/run/tc_action.lock.stale.* "$HNC_DIR"/run/offload_guard.* 2>/dev/null
 rm -f "$HNC_DIR"/run/tc_root_owned_* "$HNC_DIR"/run/tc_mq_child_* "$HNC_DIR"/run/tc_ifindex_* \
       "$HNC_DIR/run/tc_qos_fallback" "$HNC_DIR/run/iface.cache" \
       "$HNC_DIR/run/tc_restore_pending" "$HNC_DIR/run/stats_v6_map" \
       "$HNC_DIR/run/stats_v6_retired" "$HNC_DIR/run/app_limits.full.sig" \
+      "$HNC_DIR/run/app_limits.devs" "$HNC_DIR/run/mtk_hwnat.state" \
+      "$HNC_DIR/run/clsact.state" "$HNC_DIR/run/tmpfs_unavailable" \
       "$HNC_DIR/run/app_qos.sig" "$HNC_DIR/run/app_qos.state" 2>/dev/null
 # v5.26 T2: dpid 守护者选择是本次开机的探测结果。上次会话的 choice(尤其 sentinel
 # 救命改写的 direct)不能带进新开机: Go 看门狗比 service.sh 落盘 choice 更早启动,
@@ -130,6 +134,18 @@ if [ "$_HNC_RB" = 3 ]; then
     sh "$MODDIR/bin/hnc_runtime_sync.sh" perms "$MODDIR" "$HNC_DIR" >> "$HNC_DIR/logs/boot.log" 2>&1
 else
     sh "$MODDIR/bin/hnc_runtime_sync.sh" sync "$MODDIR" "$HNC_DIR" >> "$HNC_DIR/logs/boot.log" 2>&1
+fi
+
+# 早阶预置 .hnc_mc 与白名单 applet 软链(解决 Android 11-13 + Magisk 开机缺 awk / base64 / strings / paste)
+if ! command -v hnc_provision_fallback_tools >/dev/null 2>&1; then
+    for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh"; do
+        case "$_he" in /bin/hnc_env.sh) continue ;; esac
+        if [ -f "$_he" ]; then . "$_he"; break; fi
+    done
+    unset _he
+fi
+if command -v hnc_provision_fallback_tools >/dev/null 2>&1; then
+    hnc_provision_fallback_tools "$HNC_DIR" "$MODDIR" >> "$HNC_DIR/logs/boot.log" 2>&1 || true
 fi
 
 # 单向迁移: 老装机 config.json.auth_required → rules.json.auth_required
@@ -203,12 +219,13 @@ if [ ! -f "$HNC_DIR/bin/portal_manager.sh" ]; then
     rm -f "$HNC_DIR/run/portal_pending.json" "$HNC_DIR/run/portal_sessions.json" 2>/dev/null
 fi
 
-# 日志轮转 — 启动时检查每个 .log 文件, >10MB 的三级轮转一次
-LOG_MAX_BYTES=$((10 * 1024 * 1024))
+# 日志轮转 — 启动时检查每个 .log 文件, >10MB 的三级轮转一次(防 mksh >2.14GB 32 位有符号溢出)
+LOG_MAX_BYTES=10485760
 for logf in "$HNC_DIR"/logs/*.log; do
     [ -f "$logf" ] || continue
-    size=$(wc -c < "$logf" 2>/dev/null | tr -d ' ')
-    if [ -n "$size" ] && [ "$size" -gt "$LOG_MAX_BYTES" ]; then
+    size=$(wc -c < "$logf" 2>/dev/null | tr -dc '0-9')
+    while [ "${size#0}" != "$size" ]; do size=${size#0}; done
+    if [ -n "$size" ] && { [ "${#size}" -gt "${#LOG_MAX_BYTES}" ] || { [ "${#size}" -eq "${#LOG_MAX_BYTES}" ] && [ "$size" -gt "$LOG_MAX_BYTES" ] 2>/dev/null; }; }; then
         [ -f "${logf}.2" ] && rm -f "${logf}.2"
         [ -f "${logf}.1" ] && mv "${logf}.1" "${logf}.2"
         [ -f "$logf" ] && mv "$logf" "${logf}.1"

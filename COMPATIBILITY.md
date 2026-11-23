@@ -4,11 +4,11 @@
 **最后更新**: 2026-05-19
 
 **图例**:
-- ✅ 工作
-- ⚠️ 工作但有限制(见备注)
-- 🔧 需要 rc30.12.3+ 才能工作
-- ❌ 不工作
-- ❓ 未测试
+- [OK] 工作
+- [WARN] 工作但有限制(见备注)
+- [FIX] 需要 rc30.12.3+ 才能工作
+- [FAIL] 不工作
+- [?] 未测试
 
 ---
 
@@ -16,7 +16,7 @@
 
 | ROM | 设备 | Android | 内核 | Root | 限速 | DPI | SQM | 关键备注 |
 |---|---|---|---|---|---|---|---|---|
-| **ColorOS 16** | realme GT 7 Pro (RMX5010) | 16 | 6.6.102-android15-9 | SukiSU Ultra | ✅ | 🔧 | ✅ | **主测设备**. **必须 rc30.12.3+** 才能用 — 早期版本 Go fork EPERM 必现, dpid 一直 blind. 详见第三节. |
+| **ColorOS 16** | realme GT 7 Pro (RMX5010) | 16 | 6.6.102-android15-9 | SukiSU Ultra | [OK] | [FIX] | [OK] | **主测设备**. **必须 rc30.12.3+** 才能用 — 早期版本 Go fork EPERM 必现, dpid 一直 blind. 详见第三节. |
 
 ---
 
@@ -26,14 +26,14 @@
 
 | ROM | 设备示例 | Android | 风险 | 备注 |
 |---|---|---|---|---|
-| **OxygenOS 15** | OnePlus 13 | 15 | 🟥 高 | 跟 ColorOS 共享内核, 大概率同样的 Go fork EPERM. 仍需 rc30.12.3+. |
-| **MIUI 14+ / HyperOS 2** | 小米/红米 | 14-16 | 🟧 中 | 小米可能有不同 kernel hook, 需真机验证 |
-| **ColorOS 14/15** | realme/OPPO 老机型 | 13-15 | 🟧 中 | 旧 ColorOS 不一定有 CLONE_VM hook |
-| **OriginOS 5** | vivo/iQOO | 14-16 | 🟨 低 | vivo 历史上 root 兼容性更好 |
-| **OneUI 7** | Samsung Galaxy | 15-16 | 🟨 低 | 三星生态相对独立, 未知 |
-| **Pixel 原生 16** | Pixel 8/9 | 16 | 🟩 极低 | KernelSU 主测平台, Go fork 应该 OK (但仍建议 rc30.12+ 兜底) |
-| **LineageOS 22** | 通用 | 15 | 🟩 极低 | AOSP 衍生, 大概率 Go fork OK |
-| **APatch** | 通用 | 13-16 | ❓ | 不同 root 框架, 行为可能不同 |
+| **OxygenOS 15** | OnePlus 13 | 15 | [HIGH] 高 | 跟 ColorOS 共享内核, 大概率同样的 Go fork EPERM. 仍需 rc30.12.3+. |
+| **MIUI 14+ / HyperOS 2** | 小米/红米 | 14-16 | [MED] 中 | 小米可能有不同 kernel hook, 需真机验证 |
+| **ColorOS 14/15** | realme/OPPO 老机型 | 13-15 | [MED] 中 | 旧 ColorOS 不一定有 CLONE_VM hook |
+| **OriginOS 5** | vivo/iQOO | 14-16 | [LOW] 低 | vivo 历史上 root 兼容性更好 |
+| **OneUI 7** | Samsung Galaxy | 15-16 | [LOW] 低 | 三星生态相对独立, 未知 |
+| **Pixel 原生 16** | Pixel 8/9 | 16 | [MIN] 极低 | KernelSU 主测平台, Go fork 应该 OK (但仍建议 rc30.12+ 兜底) |
+| **LineageOS 22** | 通用 | 15 | [MIN] 极低 | AOSP 衍生, 大概率 Go fork OK |
+| **APatch** | 通用 | 13-16 | [?] | 不同 root 框架, 行为可能不同 |
 
 ---
 
@@ -77,9 +77,9 @@ C bionic `fork()+execv()` 不带 `CLONE_VM`, 完全工作.
 
 ### 影响版本
 
-- rc30.0 - rc30.11: ❌ 在 ColorOS 16 + SukiSU 上整条后端起不来
-- rc30.11: ⚠️ shell pre-launch 临时绕过, 系统能用但不优雅
-- **rc30.12.3+**: ✅ **完整修复**, 装上即用
+- rc30.0 - rc30.11: [FAIL] 在 ColorOS 16 + SukiSU 上整条后端起不来
+- rc30.11: [WARN] shell pre-launch 临时绕过, 系统能用但不优雅
+- **rc30.12.3+**: [OK] **完整修复**, 装上即用
 
 ### 详细文档
 

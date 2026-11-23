@@ -1754,11 +1754,7 @@ func buildVectorLiveSummaryInternal(s *server, now time.Time, shmRes dpiShmReadR
 		} else if simLive {
 			sum.Signal = simSignalSnapshot(s)
 		} else {
-			s.signalCtl.mu.RLock()
-			sig := s.signalCtl.last
-			s.signalCtl.mu.RUnlock()
-			enrichSignalDiagnosis(&sig, s)
-			sum.Signal = sig
+			sum.Signal = s.signalCtl.PeekCached(s)
 		}
 	}
 	if s.autorate != nil {

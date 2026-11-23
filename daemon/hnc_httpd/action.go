@@ -31,6 +31,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -251,6 +252,20 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// v6.1: debug_bundle 是只读诊断打包(最长 90s), 使用独立 debugBundleMu 移出全局 s.actionMu,
+	// 避免阻塞后台 autorate 与其他实时设备控制按钮长达 90 秒。
+	if req.Action == "debug_bundle" {
+		resp := runDebugBundleIsolated(s.hncDir)
+		st := http.StatusOK
+		if !resp.OK {
+			st = http.StatusInternalServerError
+		}
+		auditLog(s.hncDir, tid, req.Action, redactSensitive(req.Params),
+			map[bool]string{true: "ok", false: "error"}[resp.OK], resp.Error+resp.Detail)
+		writeActionResp(w, st, resp)
+		return
+	}
+
 	// v5.9.0: serialize state-changing actions. The underlying shell
 	// scripts mutate tc, iptables and JSON files in several steps; concurrent
 	// writes from two remote clients can interleave and leave UI/API state out
@@ -265,7 +280,7 @@ func (s *server) handleAction(w http.ResponseWriter, r *http.Request) {
 	}
 	resp := func() actionResp {
 		defer s.actionMu.Unlock()
-		return dispatchAction(s, req.Action, req.Params, tid == "loopback")
+		return dispatchAction(s, req.Action, req.Params, tid == "loopback" || isLoopbackRequest(r))
 	}()
 	if resp.OK {
 		// 手动规则/策略变更后让配额/时段控制器尽快重算(外部修改会被采纳为新基线)
@@ -395,8 +410,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionDPIRulepackClear(hncDir)
 	case "dpi_eval_clear": // v5.24 T4: 删除本机样本 / 前台真值 / 评估结果
 		return actionDPIEvalClear(hncDir)
-	case "debug_bundle":
-		return actionDebugBundle(hncDir)
+	case "debug_bundle": // 正常由 handleAction 在锁外经 debugBundleMu 处理, 这里兜底
+		return runDebugBundleIsolated(hncDir)
 	case "selfcheck_run", "selfcheck_export": // v5.20: 正常由 handleAction 在锁外处理, 这里兜底
 		r, _ := dispatchSelfcheckAction(s, action, p)
 		return r
@@ -489,6 +504,8 @@ func dispatchAction(s *server, action string, p map[string]string, isLoopback bo
 		return actionDeviceMerge(s, p)
 	case "device_merge_dismiss":
 		return actionDeviceMergeDismiss(s, p)
+	case "device_unmerge": // v6.1: 误合并无损秒拆(mac_merge_action.go)
+		return actionDeviceUnmerge(s, p)
 	case "alert_mark_seen":
 		return actionAlertMarkSeen(hncDir, p)
 	case "alert_mark_known":
@@ -833,10 +850,23 @@ func validateRate(r string) error {
 // 持 s.actionMu 调用 runBin, 一个卡住的孙进程就能让之后所有 /api/action 永久
 // 排队。设置 Cmd.WaitDelay(Go ≥1.20)后, 超时再过 execWaitDelay 强制关闭管道
 // 返回, 孙进程自生自灭, 锁得以释放。
-const execWaitDelay = 2 * time.Second
+const (
+	execWaitDelay = 2 * time.Second
+	hncExecPATH   = "/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+)
 
-// hardenCmd 给 exec.Cmd 统一挂上 WaitDelay(见 execWaitDelay)。
+// debugBundleMu 独立串行化只读诊断打包 debug_bundle(最长 90s), 避免占用全局 s.actionMu。
+var debugBundleMu sync.Mutex
+
+func runDebugBundleIsolated(hncDir string) actionResp {
+	debugBundleMu.Lock()
+	defer debugBundleMu.Unlock()
+	return actionDebugBundle(hncDir)
+}
+
+// hardenCmd 给 exec.Cmd 统一挂上进程组隔离(Setpgid + Cancel 向 -pid 发 SIGKILL)与 WaitDelay(见 execWaitDelay)。
 func hardenCmd(cmd *exec.Cmd) *exec.Cmd {
+	hardenCmdSysProc(cmd)
 	cmd.WaitDelay = execWaitDelay
 	return cmd
 }
@@ -852,7 +882,7 @@ func runExe(hncDir, name string, args ...string) (int, string) {
 	cmd.Env = []string{
 		"HNC_DIR=" + hncDir,
 		"HNC=" + hncDir,
-		"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin",
+		"PATH=" + hncExecPATH,
 	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -903,7 +933,7 @@ func runBin(hncDir, script string, args ...string) (int, string) {
 	cmd.Env = []string{
 		"HNC_DIR=" + hncDir,
 		"HNC=" + hncDir, // rc3: json_set.sh / 其他脚本用 $HNC 不是 $HNC_DIR
-		"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin",
+		"PATH=" + hncExecPATH,
 	}
 	out, err := cmd.CombinedOutput()
 	rc := 0
@@ -1010,7 +1040,7 @@ func actionClsactCheck(hncDir string) actionResp {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	cmd := hardenCmd(exec.CommandContext(ctx, hncDir+"/bin/hnc_clsact_ctl", "check", iface)) // v5.11: WaitDelay
-	cmd.Env = []string{"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin:/data/local/hnc/bin"}
+	cmd.Env = []string{"PATH=" + hncExecPATH}
 	out, _ := cmd.CombinedOutput()
 	s := string(out)
 	hasClsact := strings.Contains(s, `"qdisc":true`)
@@ -1081,7 +1111,7 @@ func writeActionResp(w http.ResponseWriter, status int, r actionResp) {
 }
 
 func isBadParamErr(msg string) bool {
-	return msg == "bad params" || msg == "invalid mac" || msg == "invalid rate"
+	return msg == "bad params" || msg == "invalid mac" || msg == "invalid rate" || msg == "not merged"
 }
 
 // rc3 N-5: 敏感字段白名单. 记 audit log 前对 key 匹配的 value 替换成 <redacted>.
@@ -1108,16 +1138,20 @@ func redactSensitive(p map[string]string) map[string]string {
 	return out
 }
 
+// detachedMaxLifetime runBinDetached 后台子进程最大存活寿命兜底, 防止卡死脚本产生永久泄漏的回收协程与孤儿进程组。
+var detachedMaxLifetime = 5 * time.Minute
+
 // runBinDetached · rc3 N-15: fork shell 脚本到后台, Go 立即返回.
 // 用于会 kill httpd 自己的场景 (cleanup all/restart). nohup + setsid 让子进程
 // 脱离父进程 session, httpd 被 kill 时子进程还活着继续跑完.
 func runBinDetached(hncDir, script string, args ...string) error {
 	cmdArgs := append([]string{hncDir + "/bin/" + script}, args...)
 	cmd := exec.Command("sh", cmdArgs...)
+	cmd.WaitDelay = execWaitDelay
 	cmd.Env = []string{
 		"HNC_DIR=" + hncDir,
 		"HNC=" + hncDir, // rc3: json_set.sh 等脚本读 $HNC
-		"PATH=/system/bin:/system/xbin:/vendor/bin:/usr/bin:/bin:/data/local/hnc/bin",
+		"PATH=" + hncExecPATH,
 	}
 	// 重定向 stdout/stderr 到 cleanup.log · 脱离 httpd
 	// M-3 (回移自 5.9.91 分叉): 0600 防 world-readable 日志泄敏感审计信息
@@ -1128,21 +1162,24 @@ func runBinDetached(hncDir, script string, args ...string) error {
 		cmd.Stderr = f
 		defer f.Close()
 	}
-	// SysProcAttr.Setsid 让子进程成新 session leader, httpd kill 不影响它
+	// SysProcAttr.Setsid 让子进程成新 session leader(兼具独立进程组 pgid==pid), httpd kill 不影响它
 	cmd.SysProcAttr = detachedSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return err
 	}
-	// 不等, 让子进程继续
-	// rc2 修 G9: goroutine 里 cmd.Wait() 返回的 error 被丢弃没问题, 但如果 Wait 本身
-	// panic (已知的 Go runtime race — Windows 不会, Linux 罕见但可能在 exec.Cmd 内部
-	// state 被并发访问时 panic), 会杀掉整个 httpd 进程. 加 defer recover 隔离.
+	// 不等, 让子进程继续; 若 httpd 未被重启且脚本卡死超过 5 分钟, 连根强杀进程组防泄漏。
+	maxLife := detachedMaxLifetime
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				log.Printf("runBinDetached: cmd.Wait panicked: %v", r)
 			}
 		}()
+		timer := time.AfterFunc(maxLife, func() {
+			log.Printf("runBinDetached: script=%s exceeded max lifetime %s, killing process group", script, maxLife)
+			killCmdProcessGroup(cmd)
+		})
+		defer timer.Stop()
 		_ = cmd.Wait()
 	}()
 	return nil

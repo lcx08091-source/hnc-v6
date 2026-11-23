@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"net"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"hnc.io/dpid/output"
@@ -412,25 +413,42 @@ func parseL4(ev Event, proto byte, payload []byte) (Event, ParseResult) {
 // ClientIP, polluting the clients map with one fake "client" per remote
 // server IP. The fix is direction-by-membership: if RemoteIP is in
 // hotspotNets, swap so SrcIP/DstIP refer to client.
-var hotspotNets []*net.IPNet
+var hotspotNets atomic.Pointer[[]*net.IPNet]
 
-// SetHotspotNets installs the hotspot's IP membership table. Caller passes
-// every IPv4 subnet and every IPv6 prefix configured on the AP interface.
+// SetHotspotNets installs the hotspot's IP membership table atomically. Caller
+// passes every IPv4 subnet and every IPv6 prefix configured on the AP interface.
 // Pass nil to disable direction inference (rc20.1 fallback).
 func SetHotspotNets(nets []*net.IPNet) {
-	hotspotNets = nets
+	if len(nets) == 0 {
+		hotspotNets.Store(nil)
+		return
+	}
+	cp := make([]*net.IPNet, len(nets))
+	copy(cp, nets)
+	hotspotNets.Store(&cp)
+}
+
+func getHotspotNets() []*net.IPNet {
+	if p := hotspotNets.Load(); p != nil {
+		return *p
+	}
+	return nil
+}
+
+func ipInNets(ip net.IP, nets []*net.IPNet) bool {
+	for _, n := range nets {
+		if n != nil && n.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // ipInHotspot reports whether ip is in any configured hotspot net.
 // Returns false if hotspotNets is nil (rc20.1 fallback, accept whatever
 // the caller decided).
 func ipInHotspot(ip net.IP) bool {
-	for _, n := range hotspotNets {
-		if n.Contains(ip) {
-			return true
-		}
-	}
-	return false
+	return ipInNets(ip, getHotspotNets())
 }
 
 // assignClient fills client/remote direction fields.
@@ -443,9 +461,9 @@ func ipInHotspot(ip net.IP) bool {
 //  3. Fallback: SrcIP is the client (rc20.1 behaviour; works for outbound
 //     flows from client but mislabels reverse-direction packets).
 func assignClient(ev *Event, isResponseToClient bool) {
-	if len(hotspotNets) > 0 {
-		srcInHS := ipInHotspot(ev.SrcIP)
-		dstInHS := ipInHotspot(ev.DstIP)
+	if nets := getHotspotNets(); len(nets) > 0 {
+		srcInHS := ipInNets(ev.SrcIP, nets)
+		dstInHS := ipInNets(ev.DstIP, nets)
 		switch {
 		case srcInHS && !dstInHS:
 			// src is the client (uplink).

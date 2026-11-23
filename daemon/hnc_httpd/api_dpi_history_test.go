@@ -1,9 +1,13 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // v6 review fix 回归测试: readHistJSONL 在文件超 10MB 时必须"截断读"而不是
@@ -55,3 +59,37 @@ func TestReadHistJSONLSmallAndMissing(t *testing.T) {
 		t.Fatalf("missing file must return nil, got %v", got)
 	}
 }
+
+func TestDpiHistoryRC2DualDirPreferData(t *testing.T) {
+	dir := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(dir, "data", "dpi_history"), 0o755)
+	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
+
+	now := time.Now()
+	todayUTC := now.UTC().Format("20060102")
+	ydayTs := now.Add(-24 * time.Hour)
+	ydayUTC := ydayTs.UTC().Format("20060102")
+
+	// Yesterday only in run/ (fallback), today in BOTH data/dpi_history and run/ (must prefer data/dpi_history without double-counting)
+	_ = os.WriteFile(filepath.Join(dir, "run", "stats."+ydayUTC+".jsonl"),
+		[]byte(fmt.Sprintf(`{"t":%d,"mac":"aa:bb:cc:00:00:01","app":"微信","tx":100,"rx":200}`+"\n", ydayTs.Unix())), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "run", "stats."+todayUTC+".jsonl"),
+		[]byte(fmt.Sprintf(`{"t":%d,"mac":"aa:bb:cc:00:00:01","app":"微信","tx":9999,"rx":9999}`+"\n", now.Add(-time.Minute).Unix())), 0o644)
+	_ = os.WriteFile(filepath.Join(dir, "data", "dpi_history", "stats."+todayUTC+".jsonl"),
+		[]byte(fmt.Sprintf(`{"t":%d,"mac":"aa:bb:cc:00:00:01","app":"微信","tx":300,"rx":400}`+"\n", now.Add(-time.Minute).Unix())), 0o644)
+
+	s := newServer(dir)
+	rec := httptest.NewRecorder()
+	s.apiDPIHistory(rec, httptest.NewRequest("GET", "/api/dpi_history?days=2", nil))
+	var out struct {
+		TotalTX uint64 `json:"total_tx"`
+		TotalRX uint64 `json:"total_rx"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode apiDPIHistory: %v (%s)", err, rec.Body.String())
+	}
+	if out.TotalTX != 400 || out.TotalRX != 600 {
+		t.Fatalf("dual-dir merge mismatch: got tx=%d rx=%d (body=%s), want tx=400 rx=600", out.TotalTX, out.TotalRX, rec.Body.String())
+	}
+}
+

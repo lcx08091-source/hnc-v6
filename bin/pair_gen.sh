@@ -14,20 +14,27 @@
 # 看到 PIN → 在远端浏览器的 /pair 页输入 → httpd 读 pair_pending + 校验
 # httpd 写 pair_success.<session_id> → 本机 WebUI 轮询感知配对成功
 
-# v3.5.0 alpha-0: PATH 健壮性
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
-    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH
-
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
+
 RUN="$HNC_DIR/run"
 PENDING="$RUN/pair_pending"
 TMP="$RUN/pair_pending.tmp"
 
 VALID_SEC=120  # PIN 有效期(秒),跟 pair.go 的默认一致
 
-# ─── 辅助: JSON 转义(只转义双引号和反斜杠,其他字符都是 ASCII 安全) ───
+# ─── 辅助: JSON 转义(含字面 Tab 兼容 pitfall_lint P5) ───
 json_escape() {
-    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+    printf '%s' "$1" | tr '\r\n	' '   ' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g'
 }
 
 emit_err() {
@@ -89,21 +96,25 @@ if ! kill -0 "$pid" 2>/dev/null; then
     emit_err "httpd process dead (stale pid file)"
 fi
 
-# 生成 6 位 PIN(均匀分布)
-# rc3.1.14 修 P2 (review §鲁棒性): 之前 -N3 -tu4 字节不匹配 (3 字节输入但
-# -tu4 期待 4 字节 unsigned), 行为未定义 — 不同 toolbox 可能补 0 / 报错 / 截断.
-# 改 -N4 严格 4 字节, 0-2^32-1 → % 1000000 → 6 位.
-# 注意: % 1000000 有轻微偏置 (4294967296 % 1000000 = 967296), 但对 PIN 场景可接受.
+# 生成 6 位均匀 PIN:
+# 使用 od -An -N3 -tx1 读取 3 个单字节十六进制(范围 0..16777215, 远小于 mksh 有符号 32 位上限 2147483647),
+# 并拒绝 >= 16000000 的尾数实现零模偏置均匀分布。
+gen_pin() {
+    _gp_hex=$(od -An -N3 -tx1 /dev/urandom 2>/dev/null | tr -dc '0-9a-fA-F')
+    [ "${#_gp_hex}" -eq 6 ] || return 1
+    _gp_num=$(( 0x$_gp_hex ))
+    [ "$_gp_num" -ge 0 ] 2>/dev/null || return 1
+    if [ "${1:-0}" -lt 9 ] && [ "$_gp_num" -ge 16000000 ]; then
+        return 1
+    fi
+    printf '%06d' $(( _gp_num % 1000000 ))
+}
+
 pin=""
 attempts=0
 while [ -z "$pin" ] && [ $attempts -lt 10 ]; do
     attempts=$((attempts + 1))
-    # od 把 4 字节解析为 unsigned int
-    num=$(od -An -N4 -tu4 /dev/urandom 2>/dev/null | tr -d ' ')
-    if [ -n "$num" ] && [ "$num" -ge 0 ] 2>/dev/null; then
-        # 加上基准 100000 确保必为 6 位,避免 PIN=000042 被 strip 成 42
-        pin=$(printf '%06d' $((num % 1000000)))
-    fi
+    pin=$(gen_pin "$attempts") || pin=""
 done
 [ -z "$pin" ] && emit_err "random generation failed"
 

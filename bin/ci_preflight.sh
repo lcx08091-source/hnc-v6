@@ -96,7 +96,7 @@ else
 fi
 
 # 4. Required files
-for f in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/vector_v6.js webroot/js/main.js data/dpi_rules.d/96-system-updates-v6.json webroot/json-health.html bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json; do
+for f in webroot/index.html webroot/css/base.css webroot/css/apple.css webroot/css/liquid.css webroot/js/core.js webroot/js/fx.js webroot/js/devices.js webroot/js/apps.js webroot/js/stats.js webroot/js/settings.js webroot/js/sheets.js webroot/js/vector_v6.js webroot/js/main.js data/dpi_rules.d/96-system-updates-v6.json webroot/json-health.html bin/hnc_env.sh bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh bin/json_guard.sh bin/json_set.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/hnc_dpid bin/dpi_rules_import.sh data/dpi_rules.d/00-core-meta.json; do
   if [ -e "$f" ]; then ok "required file exists: $f"; else warn "required file missing: $f"; fi
 done
 # v5.22: 安装期 ABI 选择(customize.sh → bin/hnc_arch.sh)缺一不可 —— 缺了 armv7
@@ -106,7 +106,7 @@ for f in customize.sh bin/hnc_arch.sh; do
 done
 
 # 5. Executable bits & POSIX sh -n syntax gate, source tree check only.
-for f in customize.sh service.sh post-fs-data.sh uninstall.sh action.sh bin/iptables_manager.sh bin/apply_app_limits.sh bin/apply_app_qos.sh bin/connblock_sync.sh bin/cleanup.sh bin/v6_sync.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/hnc_clsact_ctl bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh daemon/hnc_httpd/build.sh; do
+for f in customize.sh service.sh post-fs-data.sh uninstall.sh action.sh bin/hnc_env.sh bin/iptables_manager.sh bin/apply_app_limits.sh bin/apply_app_qos.sh bin/connblock_sync.sh bin/cleanup.sh bin/v6_sync.sh bin/json_set.sh bin/json_set_batch.sh bin/json_guard.sh bin/json_doctor.sh bin/json_diag_bundle.sh bin/stats_diag.sh bin/stats_identity_diag.sh bin/stats_retention_diag.sh bin/stats_health_summary.sh bin/tc_manager.sh bin/watchdog.sh bin/hnc_dpid bin/dpi_rules_import.sh bin/hnc_clsact_ctl bin/hnc_clsact_sync.sh bin/hnc_offload_guard.sh bin/debug_bundle.sh daemon/hnc_httpd/build.sh; do
   [ -e "$f" ] || continue
   if [ -x "$f" ]; then ok "executable: $f"; else fail "not executable: $f"; fi
 done
@@ -157,6 +157,61 @@ else
   # 摘掉 continue-on-error 让真 fail 拦住构建。(artifact 模式对成品 zip 的
   # 同名检查保持 fail 不动 —— 成品必须有。)
   warn "bin/hnc_dpid not present in source tree; CI must build it before packaging"
+fi
+
+# 6a1. Android 15/16 16KB page-size gate: any arm64-v8a ELF present in source tree must have PT_LOAD p_align >= 0x4000.
+_elf_check_16k_file() {
+  command -v readelf >/dev/null 2>&1 || return 0
+  _e16_f="$1"
+  [ -s "$_e16_f" ] || return 0
+  _e16_out=$(readelf -l -W "$_e16_f" 2>/dev/null)
+  [ -n "$_e16_out" ] || _e16_out=$(readelf -l "$_e16_f" 2>/dev/null)
+  _e16_res=$(printf '%s\n' "$_e16_out" | awk '
+    function hex2num(h,    i, c, v, res) {
+      sub(/^0[xX]/, "", h)
+      if (h == "") return -1
+      res = 0
+      for (i = 1; i <= length(h); i++) {
+        c = tolower(substr(h, i, 1))
+        v = index("0123456789abcdef", c) - 1
+        if (v < 0) return -1
+        res = res * 16 + v
+      }
+      return res
+    }
+    $1 == "LOAD" && $NF ~ /^0[xX][0-9a-fA-F]+$/ {
+      loads++
+      al = hex2num($NF)
+      if (al < 16384 || (al % 16384) != 0) { if (bad == "") bad = $NF }
+      next
+    }
+    $1 == "LOAD" { pend = 1; next }
+    pend && $NF ~ /^0[xX][0-9a-fA-F]+$/ {
+      pend = 0
+      loads++
+      al = hex2num($NF)
+      if (al < 16384 || (al % 16384) != 0) { if (bad == "") bad = $NF }
+    }
+    END {
+      if (loads == 0) print "SKIP"
+      else if (bad != "") print "FAIL:" bad
+      else print "OK"
+    }
+  ')
+  case "$_e16_res" in
+    OK) ok "16KB PT_LOAD alignment (0x4000+): $_e16_f" ;;
+    FAIL:*) fail "arm64-v8a ELF PT_LOAD underaligned (< 0x4000 / 16KB): $_e16_f align=${_e16_res#FAIL:}" ;;
+    *) ;;
+  esac
+}
+if command -v od >/dev/null 2>&1 && command -v readelf >/dev/null 2>&1; then
+  for _ef in daemon/hnc_httpd/hnc_httpd bin/hnc_dpid bin/hotspotd bin/hnc_ipc bin/mdns_resolve \
+             bin/hnc_tc_ingress bin/hnc_clsact_ctl bin/hnc_launcher bin/fork_probe bin/hnc_watchdog \
+             bin/arm64-v8a/*; do
+    [ -f "$_ef" ] || continue
+    _em="$(od -An -tx1 -j18 -N2 "$_ef" 2>/dev/null | awk '{print $1 " " $2}')"
+    [ "$_em" = "b7 00" ] && _elf_check_16k_file "$_ef"
+  done
 fi
 
 # 6a2. v5.22: armeabi-v7a 构建暂存目录(CI 构建期产物, 打 armv7 包用)里的
@@ -368,6 +423,84 @@ if [ -f "bin/pitfall_lint.sh" ]; then
     trap - INT TERM
 else
     warn "bin/pitfall_lint.sh 不存在, 跳过 pitfall lint"
+fi
+
+if [ -e ".extract" ]; then
+    fail "residue directory/file .extract found in repo root"
+else
+    ok "no .extract residue directory"
+fi
+
+# 11. Zero-Emoji Hygiene Gate (production code, tests, docs & CHANGELOG.md)
+_PY_BIN=""
+if command -v python3 >/dev/null 2>&1; then
+    _PY_BIN="python3"
+elif command -v python >/dev/null 2>&1; then
+    _PY_BIN="python"
+fi
+if [ -n "$_PY_BIN" ]; then
+    _EMOJI_HITS=$("$_PY_BIN" - "$ROOT" <<'PYEOF'
+import os, sys
+
+root = sys.argv[1]
+bmp_emoji = {
+    0x231A, 0x231B, 0x23E9, 0x23EA, 0x23EB, 0x23EC, 0x23ED, 0x23EE, 0x23EF,
+    0x23F0, 0x23F1, 0x23F2, 0x23F3, 0x23F8, 0x23F9, 0x23FA,
+    0x2614, 0x2615, 0x2648, 0x2649, 0x264A, 0x264B, 0x264C, 0x264D, 0x264E,
+    0x264F, 0x2650, 0x2651, 0x2652, 0x2653, 0x267F, 0x2693, 0x26A0, 0x26A1,
+    0x26AA, 0x26AB, 0x26BD, 0x26BE, 0x26C4, 0x26C5, 0x26CE, 0x26D4, 0x26EA,
+    0x26F2, 0x26F3, 0x26F5, 0x26FA, 0x26FD, 0x2705, 0x2708, 0x2709, 0x270A,
+    0x270B, 0x270C, 0x270D, 0x2728, 0x274C, 0x274E, 0x2753, 0x2754, 0x2755,
+    0x2757, 0x2763, 0x2764, 0x2795, 0x2796, 0x2797, 0x27B0, 0x27BF,
+    0x2B1B, 0x2B1C, 0x2B50, 0x2B55, 0xFE0F, 0x200D, 0x20E3,
+}
+
+def is_emoji(ch):
+    cp = ord(ch)
+    return (0x1F000 <= cp <= 0x1FAFF) or (cp in bmp_emoji)
+
+skip_dirs = {'.git', '.tmp', 'node_modules'}
+skip_exts = {'.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.woff', '.woff2', '.ttf', '.o', '.so', '.a', '.zip', '.gz', '.xz', '.tar'}
+found = []
+
+for dirpath, dirnames, filenames in os.walk(root):
+    dirnames[:] = [d for d in dirnames if d not in skip_dirs]
+    for fn in sorted(filenames):
+        _, ext = os.path.splitext(fn)
+        if ext.lower() in skip_exts:
+            continue
+        fp = os.path.join(dirpath, fn)
+        rel = os.path.relpath(fp, root)
+        try:
+            with open(fp, 'rb') as bf:
+                if bf.read(4).startswith(b'\x7fELF'):
+                    continue
+            with open(fp, 'r', encoding='utf-8') as f:
+                for lineno, line in enumerate(f, 1):
+                    bad = [f'U+{ord(c):04X}' for c in line if is_emoji(c)]
+                    if bad:
+                        found.append(f'{rel}:{lineno}: {",".join(sorted(set(bad)))}')
+                        if len(found) >= 30:
+                            break
+        except (UnicodeDecodeError, OSError):
+            continue
+        if len(found) >= 30:
+            break
+    if len(found) >= 30:
+        break
+
+if found:
+    print('\n'.join(found))
+PYEOF
+    )
+    if [ -n "$_EMOJI_HITS" ]; then
+        fail "Emoji codepoints found in repository (zero-emoji policy):"
+        printf '%s\n' "$_EMOJI_HITS" | sed 's/^/        /'
+    else
+        ok "zero emoji codepoints across production code, docs & CHANGELOG.md"
+    fi
+else
+    warn "python3/python unavailable; skipping Unicode emoji codepoint scan"
 fi
 
 say "summary: failures=$FAIL warnings=$WARN"

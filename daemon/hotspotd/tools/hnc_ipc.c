@@ -30,15 +30,17 @@
  * SPDX-License-Identifier: GPL-2.0
  */
 
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
-#include <errno.h>
-
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE
 #endif
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <stdint.h>
+#include <string.h>
+#include <signal.h>
+#include <unistd.h>
+#include <errno.h>
 #include <sys/time.h>
 #include <sys/socket.h>
 #include <sys/un.h>
@@ -50,36 +52,37 @@
 #define DEFAULT_SOCK_PATH  "/data/local/hnc/run/hotspotd.sock"
 #define DEFAULT_TIMEOUT    3
 #define CMD_BUF_SIZE       1024
-#define RESP_BUF_SIZE      65536
+#define RESP_CHUNK_SIZE    16384U
+#define MAX_RESP_BYTES     (4U * 1024U * 1024U)
 
 static int build_cmd_from_argv(int argc, char **argv, char *out, size_t out_size)
 {
-    int pos = 0;
+    size_t pos = 0;
     for (int i = 1; i < argc; i++) {
         int n = snprintf(out + pos, out_size - pos, "%s%s",
                          i > 1 ? " " : "", argv[i]);
-        if (n < 0 || (size_t)(pos + n) >= out_size) return -1;
-        pos += n;
+        if (n < 0 || pos + (size_t)n >= out_size) return -1;
+        pos += (size_t)n;
     }
     /* 追加换行 (hotspotd 命令解析期望) */
-    if ((size_t)(pos + 1) >= out_size) return -1;
+    if (pos + 1U >= out_size) return -1;
     out[pos++] = '\n';
     out[pos]   = '\0';
-    return pos;
+    return (int)pos;
 }
 
 static int read_cmd_from_stdin(char *out, size_t out_size)
 {
-    if (fgets(out, out_size, stdin) == NULL) return -1;
+    if (fgets(out, (int)out_size, stdin) == NULL) return -1;
     /* 确保以换行结尾 */
-    int len = (int)strlen(out);
+    size_t len = strlen(out);
     if (len == 0) return -1;
     if (out[len - 1] != '\n') {
-        if ((size_t)(len + 1) >= out_size) return -1;
+        if (len + 1U >= out_size) return -1;
         out[len++] = '\n';
         out[len]   = '\0';
     }
-    return len;
+    return (int)len;
 }
 
 int main(int argc, char **argv)
@@ -101,6 +104,14 @@ int main(int argc, char **argv)
             "  HNC_IPC_TIMEOUT  timeout in seconds (default %d)\n",
             argv[0], argv[0], argv[0], DEFAULT_SOCK_PATH, DEFAULT_TIMEOUT);
         return 1;
+    }
+
+    {
+        struct sigaction sa_ign;
+        memset(&sa_ign, 0, sizeof(sa_ign));
+        sa_ign.sa_handler = SIG_IGN;
+        sigemptyset(&sa_ign.sa_mask);
+        (void)sigaction(SIGPIPE, &sa_ign, NULL);
     }
 
     char cmd[CMD_BUF_SIZE];
@@ -174,29 +185,69 @@ int main(int argc, char **argv)
         return 4;
     }
 
-    /* recv 全部, 写到 stdout
-     * hotspotd 单次响应可能 KB 级 (GET_DEVICES 设备多时), 用大 buffer 累计
-     * 直到对端关闭或读到空。 */
-    char buf[RESP_BUF_SIZE];
-    ssize_t total = 0;
-    while (total < (ssize_t)sizeof(buf)) {
-        ssize_t n = recv(fd, buf + total, sizeof(buf) - (size_t)total, 0);
+    /* 流式循环接收并写出到 stdout (硬上限 4MB), 修复 >64KB devices.json 静默截断 */
+    char buf[RESP_CHUNK_SIZE];
+    size_t total = 0;
+    char last_byte = '\0';
+    int recv_err = 0;
+
+    while (total < MAX_RESP_BYTES) {
+        size_t want = sizeof(buf);
+        if (MAX_RESP_BYTES - total < want)
+            want = MAX_RESP_BYTES - total;
+
+        ssize_t n = recv(fd, buf, want, 0);
         if (n < 0) {
             if (errno == EINTR) continue;
+            if (total > 0) {
+                fprintf(stderr, "hnc_ipc: recv error after %zu bytes: %s\n",
+                        total, strerror(errno));
+                recv_err = 1;
+            }
             break;
         }
-        if (n == 0) break;     /* 对端关 */
-        total += n;
+        if (n == 0) break;     /* 对端正常关闭 */
+
+        size_t chunk = (size_t)n;
+        if (fwrite(buf, 1, chunk, stdout) != chunk || ferror(stdout)) {
+            fprintf(stderr, "hnc_ipc: stdout write failed\n");
+            close(fd);
+            return 4;
+        }
+        last_byte = buf[chunk - 1];
+        total += chunk;
+    }
+
+    if (total == MAX_RESP_BYTES) {
+        char extra = 0;
+        ssize_t rem;
+        do {
+            rem = recv(fd, &extra, 1, 0);
+        } while (rem < 0 && errno == EINTR);
+        if (rem > 0) {
+            fprintf(stderr, "hnc_ipc: response exceeds 4MB limit\n");
+            close(fd);
+            return 5;
+        }
     }
     close(fd);
 
-    if (total <= 0) {
-        fprintf(stderr, "hnc_ipc: no response (timeout %ds)\n", timeout);
+    if (total == 0 || recv_err) {
+        if (total == 0)
+            fprintf(stderr, "hnc_ipc: no response (timeout %ds)\n", timeout);
         return 5;
     }
 
-    fwrite(buf, 1, (size_t)total, stdout);
     /* hotspotd 响应可能不带换行, 给个收尾 (但若已有 \n 则不加) */
-    if (buf[total - 1] != '\n') fputc('\n', stdout);
+    if (last_byte != '\n') {
+        if (fputc('\n', stdout) == EOF) {
+            fprintf(stderr, "hnc_ipc: stdout putc failed\n");
+            return 4;
+        }
+    }
+    if (fflush(stdout) != 0 || ferror(stdout)) {
+        fprintf(stderr, "hnc_ipc: stdout flush failed\n");
+        return 4;
+    }
     return 0;
 }

@@ -36,6 +36,7 @@
 # 环境: HNC_CONNBLK_REPROBE=1 强制重新探测 xt_string
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+[ -f "$HNC_DIR/bin/hnc_env.sh" ] && . "$HNC_DIR/bin/hnc_env.sh"
 FLAT="$HNC_DIR/run/conn_blocks.flat"
 DNSLIST="$HNC_DIR/run/conn_blocks.dns"
 CAPS="$HNC_DIR/run/connblock_caps.json"
@@ -48,6 +49,14 @@ if [ -n "${HNC_IPT:-}" ] || [ -n "${HNC_IP6T:-}" ] || [ -n "${HNC_TEST_MODE:-}" 
 fi
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
+if [ "$_CB_CUSTOM_IPT" = "0" ] && [ "$DRY" != "1" ]; then
+    if command -v iptables >/dev/null 2>&1; then
+        iptables -w 2 -t filter -L -n >/dev/null 2>&1 || IPT="iptables"
+    fi
+    if command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || IP6T="ip6tables"
+    fi
+fi
 MAX_RULES=2000
 
 log() { { echo "$(date '+%Y-%m-%d %H:%M:%S') [connblock] $*" >> "$LOG"; } 2>/dev/null; }

@@ -36,8 +36,8 @@
 // 按卡归属: 每 5 分钟刷新一次"默认数据卡"(phone_usage_sim.go), 本分钟的蜂窝增量
 // 全部记给这张卡; 识别不到记 "0|蜂窝(未知卡)"。
 //
-// 存储(与 app_usage 一致放 run/, 在 /data 上, 非 tmpfs):
-//   run/phone_usage.YYYYMMDD.json   一天一个, 保留 400 天
+// 存储(跨月历史账单迁出 32M tmpfs 至 data/, 兼容回退读旧 run/ 并平滑迁移):
+//   data/phone_usage.YYYYMMDD.json  一天一个, 保留 400 天(兼容回退读旧 run/phone_usage.YYYYMMDD.json)
 //   run/phone_usage_state.json      上次计数器 + boot_id + 已发告警(去重)
 //   data/phone_usage_config.json    计费日 / 每卡套餐 / 预警百分比(独立文件,
 //                                   与 alerts_config.json 同款; 不写 rules.json,
@@ -290,28 +290,101 @@ func (d *puDay) clone() *puDay {
 }
 
 func puDayPath(hncDir, date string) string {
+	return filepath.Join(hncDir, "data", "phone_usage."+date+".json")
+}
+
+func puLegacyDayPath(hncDir, date string) string {
 	return filepath.Join(hncDir, "run", "phone_usage."+date+".json")
 }
 
 func puLoadDay(hncDir, date string) (*puDay, bool) {
-	b, err := os.ReadFile(puDayPath(hncDir, date))
-	if err != nil {
-		return newPuDay(date), false
+	for _, p := range []string{puDayPath(hncDir, date), puLegacyDayPath(hncDir, date)} {
+		b, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		var d puDay
+		if json.Unmarshal(b, &d) != nil {
+			continue
+		}
+		d.normalize(date)
+		return &d, true
 	}
-	var d puDay
-	if json.Unmarshal(b, &d) != nil {
-		return newPuDay(date), false
-	}
-	d.normalize(date)
-	return &d, true
+	return newPuDay(date), false
 }
 
 func puSaveDay(hncDir string, d *puDay) error {
+	if err := os.MkdirAll(filepath.Join(hncDir, "data"), 0o755); err != nil {
+		return err
+	}
 	b, err := json.Marshal(d)
 	if err != nil {
 		return err
 	}
 	return discoverWriteAtomic(puDayPath(hncDir, d.Date), b)
+}
+
+func puIsAllDigits8(s string) bool {
+	if len(s) != 8 {
+		return false
+	}
+	for i := 0; i < 8; i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// puMigrateLegacyRunDays 平滑迁移旧版残留在 run/(32M tmpfs)下的 phone_usage.YYYYMMDD.json 至 data/。
+func puMigrateLegacyRunDays(hncDir, cutDate string) {
+	if hncDir == "" {
+		return
+	}
+	runDir := filepath.Join(hncDir, "run")
+	ents, err := os.ReadDir(runDir)
+	if err != nil || len(ents) == 0 {
+		return
+	}
+	dataDir := filepath.Join(hncDir, "data")
+	_ = os.MkdirAll(dataDir, 0o755)
+	for _, en := range ents {
+		if en.IsDir() {
+			continue
+		}
+		n := en.Name()
+		if !strings.HasPrefix(n, "phone_usage.") || !strings.HasSuffix(n, ".json") {
+			continue
+		}
+		date := strings.TrimSuffix(strings.TrimPrefix(n, "phone_usage."), ".json")
+		if !puIsAllDigits8(date) {
+			continue
+		}
+		src := filepath.Join(runDir, n)
+		if cutDate != "" && date < cutDate {
+			_ = os.Remove(src)
+			continue
+		}
+		dst := filepath.Join(dataDir, n)
+		if dstBytes, err := os.ReadFile(dst); err == nil {
+			var existing puDay
+			if json.Unmarshal(dstBytes, &existing) == nil {
+				_ = os.Remove(src)
+				continue
+			}
+		}
+		srcBytes, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		var parsed puDay
+		if json.Unmarshal(srcBytes, &parsed) != nil {
+			continue
+		}
+		if discoverWriteAtomic(dst, srcBytes) == nil {
+			_ = os.Remove(src)
+		}
+	}
 }
 
 // ─── 配置 ─────────────────────────────────────────────────────────
@@ -766,7 +839,7 @@ func (e *puEngine) tick(now time.Time) map[string][2]uint64 {
 	return out
 }
 
-// flush 落盘当天 + 状态, 清理 400 天前的文件
+// flush 落盘当天 + 状态, 平滑迁移旧 run/ 账单并清理 400 天前的文件
 func (e *puEngine) flush(now time.Time) {
 	e.mu.Lock()
 	if e.day != nil && e.dirty {
@@ -783,14 +856,15 @@ func (e *puEngine) flush(now time.Time) {
 	if !sane {
 		return
 	}
-	ents, _ := os.ReadDir(filepath.Join(e.hncDir, "run"))
 	cut := now.AddDate(0, 0, -puKeepDays).Format("20060102")
+	puMigrateLegacyRunDays(e.hncDir, cut)
+	ents, _ := os.ReadDir(filepath.Join(e.hncDir, "data"))
 	for _, en := range ents {
 		n := en.Name()
 		if strings.HasPrefix(n, "phone_usage.") && strings.HasSuffix(n, ".json") {
 			date := strings.TrimSuffix(strings.TrimPrefix(n, "phone_usage."), ".json")
-			if len(date) == 8 && date < cut {
-				_ = os.Remove(filepath.Join(e.hncDir, "run", n))
+			if puIsAllDigits8(date) && date < cut {
+				_ = os.Remove(filepath.Join(e.hncDir, "data", n))
 			}
 		}
 	}
@@ -1287,7 +1361,9 @@ func (s *server) phoneUsage() *puEngine {
 // PhoneUsageLoop 每 60 秒采样+落盘, 每 5 分钟检查一次套餐告警; 停机时补采一次并落盘。
 func (s *server) PhoneUsageLoop(stop <-chan struct{}) {
 	e := s.phoneUsage()
-	e.tick(time.Now())
+	now0 := time.Now()
+	e.tick(now0)
+	e.flush(now0)
 	lastAlert := time.Time{}
 	// v5.22: 基准 puEvery(60s); 热点未开且熄屏无界面 300s(power_sched.go phone_usage)。
 	// 计数器差分, 放慢不丢字节(只是小时桶归属更粗)。

@@ -25,6 +25,7 @@ package devscan
 import (
 	"bytes"
 	"encoding/json"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -296,7 +297,7 @@ func hostnameSrcRank(src string) int {
 	switch {
 	case src == "manual":
 		return 5
-	case src == "dhcp", src == "mdns":
+	case src == "dhcp", src == "dhcpv6", src == "mdns", src == "nbns":
 		return 4
 	case strings.HasPrefix(src, "cache-"):
 		return 3
@@ -533,4 +534,58 @@ func (t *Table) RenderJSON(stats map[string][2]int64, blacklist map[string]bool)
 	}
 	b := buf.Bytes()
 	return b[:len(b)-1] // Encoder 会补一个换行, 去掉(C 的输出没有)
+}
+
+// SnapshotMACIP 拷贝当前在线设备的 MAC(小写) → IPv4 映射, 供纯 Go 流量统计聚合双栈字节。
+func (t *Table) SnapshotMACIP() map[string]string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[string]string, len(t.devs))
+	for mac, d := range t.devs {
+		if mac != "" && d.IP != "" {
+			out[mac] = d.IP
+		}
+	}
+	return out
+}
+
+// RenderFlat 渲染三列纯文本 "<mac>\t<ipv4>\t<iface>\n"(按 MAC 字典序排序, 过滤非法控制字符),
+// 供 Shell 脚本经 read 零正则高速读取。
+func (t *Table) RenderFlat() []byte {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if len(t.devs) == 0 {
+		return nil
+	}
+	macs := make([]string, 0, len(t.devs))
+	for mac := range t.devs {
+		macs = append(macs, mac)
+	}
+	sort.Strings(macs)
+	var buf bytes.Buffer
+	for _, mac := range macs {
+		d := t.devs[mac]
+		cm := sanitizeFlatField(mac)
+		cip := sanitizeFlatField(d.IP)
+		cif := sanitizeFlatField(d.Iface)
+		if cm == "" || cip == "" {
+			continue
+		}
+		buf.WriteString(cm)
+		buf.WriteByte('\t')
+		buf.WriteString(cip)
+		buf.WriteByte('\t')
+		buf.WriteString(cif)
+		buf.WriteByte('\n')
+	}
+	return buf.Bytes()
+}
+
+func sanitizeFlatField(s string) string {
+	return strings.Map(func(r rune) rune {
+		if r <= 0x20 || r == 0x7f {
+			return -1
+		}
+		return r
+	}, s)
 }

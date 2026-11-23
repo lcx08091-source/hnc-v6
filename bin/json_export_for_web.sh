@@ -3,13 +3,18 @@
 # Runs json_diag_bundle.sh and prints a small JSON response with the generated path.
 
 set +e
-HNC="${HNC:-/data/local/hnc}"
+HNC="${HNC:-${HNC_DIR:-/data/local/hnc}}"
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+  case "$_he" in /bin/hnc_env.sh) continue ;; esac
+  if [ -f "$_he" ]; then . "$_he"; break; fi
+done
+unset _he
 BIN="$HNC/bin"
 RUN="$HNC/run"
 mkdir -p "$RUN" 2>/dev/null
 
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g; s/\r/ /g; s/\n/ /g; s/\t/ /g'
+  printf '%s' "$1" | tr '\r\n	' '   ' | tr -d '\000-\010\013\014\016-\037' | sed 's/\\/\\\\/g; s/"/\\"/g; s/	/ /g'
 }
 
 if [ ! -x "$BIN/json_diag_bundle.sh" ]; then

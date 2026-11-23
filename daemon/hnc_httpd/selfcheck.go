@@ -34,6 +34,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"hnc.io/dpid/procfind" // v5.26 T3: 进程检测唯一权威
@@ -98,6 +99,8 @@ type scEnv struct {
 	LoopbackPort int
 	CmdTimeout   time.Duration
 	Budget       time.Duration
+	// RealSystem 仅 realSelfcheckEnv 置 true: 启用纯 Go 原生接口替代 fork, 假 runner 单测保持 false
+	RealSystem bool
 	// Run 跑一条命令, 返回 stdout; 非 0 退出 / 找不到命令 / 超时 → err != nil
 	Run      func(ctx context.Context, name string, args ...string) (string, error)
 	ReadFile func(path string) ([]byte, error)
@@ -135,6 +138,10 @@ type scCtx struct {
 	capNote string
 	// v5.20.1: capabilities.json 存在但解析失败
 	capCorrupt bool
+}
+
+func (c *scCtx) isReal() bool {
+	return c != nil && c.env != nil && c.env.RealSystem
 }
 
 func (c *scCtx) run(name string, args ...string) (string, bool) {
@@ -239,6 +246,7 @@ func (c *scCtx) kconfig() map[string]string {
 		if err != nil {
 			return
 		}
+		defer zr.Close()
 		txt, err := io.ReadAll(io.LimitReader(zr, 8<<20))
 		if err != nil && len(txt) == 0 {
 			return
@@ -708,6 +716,21 @@ func (c *scCtx) ksuVariant(ver string) (name, label string, ev []string) {
 	return "KernelSU", "KernelSU", ev
 }
 
+func scNativeUnameRelease() string {
+	var u syscall.Utsname
+	if syscall.Uname(&u) != nil {
+		return ""
+	}
+	b := make([]byte, 0, len(u.Release))
+	for _, v := range u.Release {
+		if v == 0 {
+			break
+		}
+		b = append(b, byte(v))
+	}
+	return strings.TrimSpace(string(b))
+}
+
 func (c *scCtx) detectRoot() scRoot {
 	var r scRoot
 	var vers []string
@@ -732,11 +755,22 @@ func (c *scCtx) detectRoot() scRoot {
 			vers = append(vers, name+" "+v)
 		}
 	}
-	if ex("/data/adb/magisk") || ex("/data/adb/magisk.db") {
+	hasMagiskPath := ex("/data/adb/magisk") || ex("/data/adb/magisk.db") || ex("/sbin/magisk") || ex("/debug_ramdisk/magisk")
+	if hasMagiskPath {
 		r.Impls = append(r.Impls, "Magisk")
 		v := ""
-		if out, ok := c.run("magisk", "-v"); ok {
+		if out, ok := c.run("magisk", "-v"); ok && strings.TrimSpace(out) != "" {
 			v = scShort(out, 40)
+		}
+		if v == "" {
+			for _, mb := range []string{"/data/adb/magisk/magisk", "/data/adb/magisk/magisk64", "/data/adb/magisk/magisk32", "/sbin/magisk", "/debug_ramdisk/magisk"} {
+				if ex(mb) {
+					if out, ok := c.run(mb, "-v"); ok && strings.TrimSpace(out) != "" {
+						v = scShort(out, 40)
+						break
+					}
+				}
+			}
 		}
 		if v == "" {
 			v = c.env.Getenv("MAGISK_VER")
@@ -745,12 +779,15 @@ func (c *scCtx) detectRoot() scRoot {
 			vers = append(vers, "Magisk "+v)
 		}
 	}
-	if ex("/data/adb/ap") || ex("/data/adb/apd") {
+	if ex("/data/adb/ap") || ex("/data/adb/apd") || ex("/data/adb/ap/bin/apd") {
 		r.Impls = append(r.Impls, "APatch")
 		v := ""
-		if ex("/data/adb/apd") {
-			if out, ok := c.run("/data/adb/apd", "-V"); ok {
-				v = scShort(out, 40)
+		for _, ab := range []string{"/data/adb/apd", "/data/adb/ap/bin/apd"} {
+			if ex(ab) {
+				if out, ok := c.run(ab, "-V"); ok && strings.TrimSpace(out) != "" {
+					v = scShort(out, 40)
+					break
+				}
 			}
 		}
 		if v == "" {
@@ -815,6 +852,9 @@ func scSectionSystem(c *scCtx) []scItem {
 		Detail: "vendor=" + vendor + " hardware=" + c.prop("ro.hardware")})
 
 	krel := c.readTrim("/proc/sys/kernel/osrelease")
+	if krel == "" && c.isReal() {
+		krel = scNativeUnameRelease()
+	}
 	if krel == "" {
 		if out, ok := c.run("uname", "-r"); ok {
 			krel = strings.TrimSpace(out)
@@ -885,7 +925,9 @@ func scSectionSystem(c *scCtx) []scItem {
 	case "0":
 		seV = "Permissive(宽容)"
 	default:
-		if out, ok := c.run("getenforce"); ok {
+		if c.isReal() && !c.env.Exists("/sys/fs/selinux") {
+			seV = "Disabled(未挂载)"
+		} else if out, ok := c.run("getenforce"); ok {
 			seV = strings.TrimSpace(out)
 		}
 	}
@@ -1410,8 +1452,7 @@ func scSectionFirewall(c *scCtx) []scItem {
 
 	hc := scItem{ID: "hnc_chain", Label: "HNC 打标链"}
 	if out, ok := c.run("iptables", "-t", "mangle", "-S", "HNC_MARK"); ok {
-		n := strings.Count(out, "\n-A ") + map[bool]int{true: 1, false: 0}[strings.HasPrefix(out, "-A ")]
-		hc.Status, hc.Value = scOK, fmt.Sprintf("已建立(%d 条规则)", n)
+		hc.Status, hc.Value = scOK, fmt.Sprintf("已建立(%d 条规则)", scCountChainRules(out))
 	} else {
 		hc.Status, hc.Value = scInfo, "未建立"
 		hc.Detail = "服务未启动或还没有限速设备"
@@ -1423,8 +1464,8 @@ func scSectionFirewall(c *scCtx) []scItem {
 	s6Out, s6OK := c.run("ip6tables", "-t", "mangle", "-S", "HNC_STATS")
 	switch {
 	case s4OK && s6OK:
-		n4 := strings.Count(s4Out, "\n-A ")
-		n6 := strings.Count(s6Out, "\n-A ")
+		n4 := scCountChainRules(s4Out)
+		n6 := scCountChainRules(s6Out)
 		hsc.Status, hsc.Value = scOK, fmt.Sprintf("IPv4(%d) + IPv6(%d) 双栈就绪", n4, n6)
 	case s4OK:
 		hsc.Status, hsc.Value = scInfo, "仅 IPv4 统计链已建立"
@@ -1474,12 +1515,208 @@ func scSectionFirewall(c *scCtx) []scItem {
 	ctf := scItem{ID: "conntrack_table", Label: "连接表可读"}
 	if c.env.Exists("/proc/net/nf_conntrack") {
 		ctf.Status, ctf.Value = scOK, "是"
+	} else if c.isReal() && canReadConntrackNetlink() {
+		ctf.Status, ctf.Value = scOK, "是(CTNETLINK 原生通道)"
+		ctf.Detail = "/proc/net/nf_conntrack 不存在, 已自动切换纯 Go CTNETLINK 双通道兜底"
 	} else {
 		ctf.Status, ctf.Value = scWarn, "否"
 		ctf.Detail = "/proc/net/nf_conntrack 不存在, 实时连接/按应用流量不可用"
 	}
 	items = append(items, ctf)
+	items = append(items, scTProxyCoexistItem(c))
 	return items
+}
+
+func scCountChainRules(out string) int {
+	n := strings.Count(out, "\n-A ")
+	if strings.HasPrefix(out, "-A ") {
+		n++
+	}
+	return n
+}
+
+var (
+	scTProxyChainRE = regexp.MustCompile(`(?i)^(BOX|CLASH|MIHOMO|SING|TPROXY|V2RAY|XRAY|SURFING|PASSWALL|OPENCLASH|NEKO)([_-]|$)`)
+	scSetMarkValRE  = regexp.MustCompile(`--set-(x?mark)\s+(0x[0-9a-fA-F]+|\d+)(?:/(0x[0-9a-fA-F]+|\d+))?`)
+	scDport53RE     = regexp.MustCompile(`--dports?\s+(?:[0-9,]+\b)?53\b`)
+)
+
+type scTProxyDiag struct {
+	Chains           []string
+	DNS53Intercepted bool
+	MarkConflicts    []string
+}
+
+func scIsAndroidSysChain(chain string) bool {
+	lc := strings.ToLower(chain)
+	for _, p := range []string{"bw_", "fw_", "oem_", "tetherctrl_", "routectrl_", "natctrl_", "st_", "idletimer_", "wakeupctrl_", "nm_", "connmark_"} {
+		if strings.HasPrefix(lc, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// scAnalyzeTProxyAndFwmark 纯函数: 分析 mangle/nat 规则中的透明代理共存与高 16 位(0xffff0000) fwmark 冲突
+func scAnalyzeTProxyAndFwmark(mangleOut, natOut string) scTProxyDiag {
+	var res scTProxyDiag
+	chainSet := map[string]bool{}
+	conflictSeen := map[string]bool{}
+	addConflict := func(s string) {
+		if !conflictSeen[s] && len(res.MarkConflicts) < 6 {
+			conflictSeen[s] = true
+			res.MarkConflicts = append(res.MarkConflicts, s)
+		}
+	}
+
+	bareTProxyTarget := false
+
+	scanTable := func(out string, isMangle bool) {
+		for _, raw := range strings.Split(out, "\n") {
+			ln := strings.TrimSpace(raw)
+			if ln == "" {
+				continue
+			}
+			f := strings.Fields(ln)
+			if len(f) < 2 {
+				continue
+			}
+			if f[0] == "-N" {
+				if !strings.HasPrefix(f[1], "HNC_") && scTProxyChainRE.MatchString(f[1]) {
+					chainSet[f[1]] = true
+				}
+				continue
+			}
+			if f[0] != "-A" {
+				continue
+			}
+			chain := f[1]
+			if strings.HasPrefix(chain, "HNC_") {
+				continue
+			}
+			target := ""
+			for i := 2; i+1 < len(f); i++ {
+				if f[i] == "-j" || f[i] == "-g" {
+					target = f[i+1]
+					break
+				}
+			}
+			if strings.HasPrefix(target, "HNC_") {
+				continue
+			}
+			isTPChain := scTProxyChainRE.MatchString(chain)
+			isTPTarget := target != "TPROXY" && scTProxyChainRE.MatchString(target)
+			if isTPChain {
+				chainSet[chain] = true
+			}
+			if isTPTarget {
+				chainSet[target] = true
+			}
+			if target == "TPROXY" {
+				bareTProxyTarget = true
+			}
+			if scDport53RE.MatchString(ln) {
+				if isTPChain || isTPTarget || target == "REDIRECT" || target == "DNAT" || target == "TPROXY" {
+					res.DNS53Intercepted = true
+				}
+			}
+			if !isMangle || scIsAndroidSysChain(chain) {
+				continue
+			}
+			if mm := scSetMarkValRE.FindStringSubmatch(ln); mm != nil {
+				val, err1 := strconv.ParseUint(mm[2], 0, 64)
+				if err1 != nil {
+					continue
+				}
+				mask := uint64(0xffffffff)
+				if mm[3] != "" {
+					if mv, err2 := strconv.ParseUint(mm[3], 0, 64); err2 == nil {
+						mask = mv
+					}
+				}
+				if (val & 0xffff0000) != 0 {
+					addConflict(fmt.Sprintf("%s 写入高16位(0x%x/0x%x)", chain, val, mask))
+				} else if (mask&0x00ff0000) != 0 && (isTPChain || chain == "PREROUTING" || chain == "FORWARD" || chain == "POSTROUTING") {
+					addConflict(fmt.Sprintf("%s 掩码覆盖高16位(0x%x/0x%x)", chain, val, mask))
+				}
+			}
+		}
+	}
+
+	scanTable(mangleOut, true)
+	scanTable(natOut, false)
+	if len(chainSet) == 0 && bareTProxyTarget {
+		chainSet["TPROXY"] = true
+	}
+	for ch := range chainSet {
+		res.Chains = append(res.Chains, ch)
+	}
+	sort.Strings(res.Chains)
+	return res
+}
+
+func scTProxyCoexistItem(c *scCtx) scItem {
+	it := scItem{ID: "tproxy_coexist", Label: "透明代理与标记共存"}
+	mOut, mOK := c.run("iptables", "-t", "mangle", "-S")
+	nOut, nOK := c.run("iptables", "-t", "nat", "-S")
+	diag := scAnalyzeTProxyAndFwmark(mOut, nOut)
+
+	var modHits []string
+	if c.env.Exists("/data/adb/box") {
+		modHits = append(modHits, "/data/adb/box")
+	}
+	if mods, err := c.env.ReadDir("/data/adb/modules"); err == nil {
+		for _, m := range mods {
+			lm := strings.ToLower(m)
+			for _, kw := range []string{"box_for_", "box4", "clash", "mihomo", "sing-box", "singbox", "surfing", "tproxy"} {
+				if strings.Contains(lm, kw) {
+					modHits = append(modHits, m)
+					break
+				}
+			}
+		}
+		sort.Strings(modHits)
+	}
+
+	var who []string
+	who = append(who, diag.Chains...)
+	for _, mh := range modHits {
+		who = append(who, mh)
+	}
+
+	if len(diag.MarkConflicts) > 0 {
+		it.Status = scWarn
+		it.Value = "检测到高 16 位 fwmark 冲突"
+		it.Detail = "冲突规则: " + strings.Join(diag.MarkConflicts, ", ") +
+			"; HNC 使用 skb->mark 高 16 位(0xffff0000)承载设备限速 ID 与应用 QoS, 被第三方规则写入或全掩码清零会导致限速失效"
+		it.Fix = "将透明代理 routing-mark / tproxy-mark 改为低 16 位并限定掩码(如 0x0162/0x0000ffff), 避开 0xffff0000"
+		return it
+	}
+	if len(who) > 0 || diag.DNS53Intercepted {
+		it.Status = scOK
+		labelWho := strings.Join(who, ",")
+		if labelWho == "" {
+			labelWho = "53端口重定向"
+		}
+		dnsCfg := c.readJSON(c.hnc("data", "dns_takeover.json"))
+		dnsEnabled := dnsCfg != nil && boolField(dnsCfg, "enabled")
+		dnsForce := dnsCfg != nil && boolField(dnsCfg, "force_takeover")
+		if diag.DNS53Intercepted && dnsEnabled && !dnsForce {
+			it.Value = "共存正常(DNS 已自动礼让)"
+			it.Detail = "检测到透明代理(" + scShort(labelWho, 80) + ")接管 53 端口且未触碰高 16 位 fwmark(0xffff0000), HNC DNS 接管自动礼让共存"
+		} else {
+			it.Value = "共存正常"
+			it.Detail = "检测到透明代理(" + scShort(labelWho, 80) + "), 未触碰 HNC 高 16 位 fwmark(0xffff0000)"
+		}
+		return it
+	}
+	if mOK || nOK {
+		it.Status, it.Value = scOK, "无冲突"
+		it.Detail = "未见透明代理抢占 53 端口或覆盖高 16 位 fwmark(0xffff0000)"
+	} else {
+		it.Status, it.Value = scInfo, "未检测到透明代理"
+	}
+	return it
 }
 
 // ═══ 硬件加速 ═════════════════════════════════════════════════════
@@ -1488,9 +1725,29 @@ var (
 	scMtkModRE     = regexp.MustCompile(`(?i)hnat|hw_nat|mtk_ppe|mddp|mtk_hwnat`)
 	scQcomAggModRE = regexp.MustCompile(`^(rmnet_offload|rmnet_perf_tether)$`)
 	scQcomModRE    = regexp.MustCompile(`(?i)^ipa|rmnet_ipa|ipam$|rmnet_offload|rmnet_shs|rmnet_perf`)
-	scSamsungModRE = regexp.MustCompile(`(?i)linkforward|link_forward`)
+	scSamsungModRE = regexp.MustCompile(`(?i)linkforward|link_forward|^dit$|^exynos_dit`)
 	scUnisocModRE  = regexp.MustCompile(`(?i)sipa`)
 )
+
+func (c *scCtx) isIpacmRunning() bool {
+	fs := procfind.FS{ReadFile: c.env.ReadFile, ReadDir: c.env.ReadDir, SelfPID: c.env.SelfPID}
+	tab := fs.Table()
+	if len(tab) > 0 {
+		if fs.FindPID(procfind.Def{ScanKey: "ipacm"}, c.env.HNCDir, tab) > 0 {
+			return true
+		}
+		for _, row := range tab {
+			if row.Comm == "ipacm" {
+				return true
+			}
+		}
+	}
+	if c.isReal() {
+		return false
+	}
+	out, ok := c.run("pidof", "ipacm")
+	return ok && strings.TrimSpace(out) != ""
+}
 
 func scSectionOffload(c *scCtx) []scItem {
 	var items []scItem
@@ -1557,7 +1814,7 @@ func scSectionOffload(c *scCtx) []scItem {
 			qd = append(qd, p)
 		}
 	}
-	if out, ok := c.run("pidof", "ipacm"); ok && strings.TrimSpace(out) != "" {
+	if c.isIpacmRunning() {
 		qd = append(qd, "ipacm 运行中")
 	}
 	qd = append(qd, c.moduleMatching(scQcomModRE)...)
@@ -1590,40 +1847,72 @@ func scSectionOffload(c *scCtx) []scItem {
 	// bin/hnc_mtk_hwnat.sh 的检测/处置结果(有则复用, 不重复探测)
 	hw := c.readJSON(c.hnc("run", "mtk_hwnat.json"))
 	hwDetected, _ := hw["detected"].(bool)
-	if len(md) > 0 || vendor == "mediatek" || hwDetected {
+	guardHwnat := ""
+	if g != nil {
+		guardHwnat = asString(g["hwnat"])
+	}
+	if len(md) > 0 || vendor == "mediatek" || hwDetected || guardHwnat == "detected_no_knob" {
 		it := scItem{ID: "mtk_hwnat", Label: "联发科 HWNAT/MDDP", Status: scInfo}
-		if len(md) > 0 || hwDetected {
+		if len(md) > 0 || hwDetected || guardHwnat == "detected_no_knob" {
 			it.Value = "检测到"
 			it.Detail = strings.Join(md, ", ") + "; MDDP/HWNAT 会让热点数据绕过内核协议栈, 可能导致限速/统计失效"
+			it.Detail = strings.TrimPrefix(it.Detail, "; ")
 			if state == "ACTIVE" {
 				it.Status = scWarn
 			}
 		} else {
 			it.Value = "未检测到"
 		}
+		act := guardHwnat
 		if hw != nil {
-			act := asString(hw["action"])
+			if a := asString(hw["action"]); a != "" {
+				act = a
+			}
 			it.Detail = strings.TrimPrefix(it.Detail+"; hnc_mtk_hwnat: "+act, "; ")
 			if d := asString(hw["detail"]); d != "" {
 				it.Detail += "(" + scShort(d, 100) + ")"
 			}
-			switch act {
-			case "disabled":
-				it.Status = scOK
-				it.Value = "检测到, 已由 HNC 关闭"
-			case "failed":
-				it.Status = scWarn
-			}
+		}
+		switch act {
+		case "disabled":
+			it.Status = scOK
+			it.Value = "检测到, 已由 HNC 关闭"
+		case "detected_no_knob":
+			it.Status = scWarn
+			it.Value = "检测到(无运行期开关, 需重开热点生效)"
+			it.Fix = "HNC 已写入 Settings.Global.tether_offload_disabled=1, 但系统仅在热点启动时读取该项; 请手动关闭并重新开启一次手机热点使其生效"
+		case "failed":
+			it.Status = scWarn
 		}
 		items = append(items, it)
 	}
 
-	if vendor == "samsung" {
-		sm := c.moduleMatching(scSamsungModRE)
+	var sd []string
+	for _, p := range []string{"/sys/devices/platform/dit", "/sys/module/dit"} {
+		if c.env.Exists(p) {
+			sd = append(sd, p)
+		}
+	}
+	for _, m := range c.moduleMatching(scSamsungModRE) {
+		dup := false
+		for _, x := range sd {
+			if x == m {
+				dup = true
+				break
+			}
+		}
+		if !dup {
+			sd = append(sd, m)
+		}
+	}
+	if vendor == "samsung" || len(sd) > 0 {
 		it := scItem{ID: "samsung_offload", Label: "三星转发加速", Status: scInfo, Value: "未检测到"}
-		if len(sm) > 0 {
+		if len(sd) > 0 {
 			it.Value = "检测到"
-			it.Detail = strings.Join(sm, ", ")
+			it.Detail = strings.Join(sd, ", ") + "; 三星 DIT/LinkForward 硬件加速可能绕过 tc 队列, 若限速偏松请开启 offload 兜底并重开热点"
+			if state == "ACTIVE" {
+				it.Status = scWarn
+			}
 		} else {
 			it.Detail = "Exynos 未见公开的转发加速接口, 以 tether BPF / offload 兜底状态为准"
 		}
@@ -1760,6 +2049,68 @@ func scUpstreamItem(local, tetherUp string, det ifaceDetect) scItem {
 	return it
 }
 
+func scNativeDefaultRouteIface() string {
+	var localIP net.IP
+	if conn, err := net.Dial("udp4", "1.1.1.1:53"); err == nil {
+		if ua, ok := conn.LocalAddr().(*net.UDPAddr); ok && ua.IP != nil && !ua.IP.IsUnspecified() {
+			localIP = ua.IP
+		}
+		_ = conn.Close()
+	}
+	if localIP == nil {
+		if conn, err := net.Dial("udp6", "[2400:3200::1]:53"); err == nil {
+			if ua, ok := conn.LocalAddr().(*net.UDPAddr); ok && ua.IP != nil && !ua.IP.IsUnspecified() {
+				localIP = ua.IP
+			}
+			_ = conn.Close()
+		}
+	}
+	if localIP == nil {
+		return ""
+	}
+	ifaces, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, ifi := range ifaces {
+		if ifi.Flags&net.FlagLoopback != 0 {
+			continue
+		}
+		addrs, aerr := ifi.Addrs()
+		if aerr != nil {
+			continue
+		}
+		for _, a := range addrs {
+			if ipn, ok := a.(*net.IPNet); ok && ipn.IP.Equal(localIP) {
+				return ifi.Name
+			}
+		}
+	}
+	return ""
+}
+
+func scNativeGlobalIPv6Count(iface string) (int, bool) {
+	ifi, err := net.InterfaceByName(iface)
+	if err != nil {
+		return 0, false
+	}
+	addrs, err := ifi.Addrs()
+	if err != nil {
+		return 0, false
+	}
+	g := 0
+	for _, a := range addrs {
+		ipn, ok := a.(*net.IPNet)
+		if !ok {
+			continue
+		}
+		if ip := ipn.IP; ip != nil && ip.To4() == nil && ip.IsGlobalUnicast() {
+			g++
+		}
+	}
+	return g, true
+}
+
 func scSectionNetwork(c *scCtx) []scItem {
 	var items []scItem
 	ifc := c.hotspotIface()
@@ -1801,8 +2152,13 @@ func scSectionNetwork(c *scCtx) []scItem {
 		Value: strings.Join(cands, ", ")})
 
 	local := ""
-	if out, ok := c.run("ip", "route", "get", "1.1.1.1"); ok {
-		local = puParseRouteGet(out)
+	if c.isReal() {
+		local = scNativeDefaultRouteIface()
+	}
+	if local == "" {
+		if out, ok := c.run("ip", "route", "get", "1.1.1.1"); ok {
+			local = puParseRouteGet(out)
+		}
 	}
 	tethOut, tethOK := c.run("dumpsys", "tethering")
 	tetherUp := ""
@@ -1862,11 +2218,17 @@ func scSectionNetwork(c *scCtx) []scItem {
 
 	vit := scItem{ID: "hotspot_ipv6", Label: "热点 IPv6", Status: scInfo}
 	if ifc != "" && c.env.Exists("/sys/class/net/"+ifc) {
-		out, _ := c.run("ip", "-6", "addr", "show", "dev", ifc)
 		g := 0
-		for _, ln := range strings.Split(out, "\n") {
-			if strings.Contains(ln, "inet6") && strings.Contains(ln, "scope global") {
-				g++
+		nativeOK := false
+		if c.isReal() {
+			g, nativeOK = scNativeGlobalIPv6Count(ifc)
+		}
+		if !nativeOK {
+			out, _ := c.run("ip", "-6", "addr", "show", "dev", ifc)
+			for _, ln := range strings.Split(out, "\n") {
+				if strings.Contains(ln, "inet6") && strings.Contains(ln, "scope global") {
+					g++
+				}
 			}
 		}
 		dis := c.readTrim("/proc/sys/net/ipv6/conf/" + ifc + "/disable_ipv6")
@@ -2166,16 +2528,54 @@ func (c *scCtx) markBase() int64 {
 	return 0x800000
 }
 
+func scNativeNeighV6(iface string) (map[string][]string, bool) {
+	ifi, err := net.InterfaceByName(iface)
+	if err != nil || ifi.Index <= 0 {
+		return nil, false
+	}
+	byMAC, err := DumpNativeIPv6Neighbors(map[int]bool{ifi.Index: true})
+	if err != nil {
+		return nil, false
+	}
+	res := make(map[string][]string, len(byMAC))
+	for mac, ips := range byMAC {
+		if !validMAC(mac) {
+			continue
+		}
+		var list []string
+		seen := map[string]bool{}
+		for _, ip := range ips {
+			s := scCanonIP6(ip.String())
+			if s != "" && !seen[s] {
+				seen[s] = true
+				list = append(list, s)
+			}
+		}
+		if len(list) > 0 {
+			sort.Strings(list)
+			res[mac] = list
+		}
+	}
+	return res, true
+}
+
 func scSectionIPv6(c *scCtx) []scItem {
 	ifc := c.hotspotIface()
 	if ifc == "" || !c.env.Exists("/sys/class/net/"+ifc) {
 		return []scItem{{ID: "v6_neigh", Label: "IPv6 邻居", Status: scInfo, Value: "热点未开启, 跳过"}, c.v6NeighSubItem()}
 	}
-	out, ok := c.run("ip", "-6", "neigh", "show", "dev", ifc)
-	if !ok || strings.TrimSpace(out) == "" {
-		out, _ = c.run("ip", "neigh", "show", "dev", ifc)
+	var neigh map[string][]string
+	nativeNeighOK := false
+	if c.isReal() {
+		neigh, nativeNeighOK = scNativeNeighV6(ifc)
 	}
-	neigh := scParseNeighV6(out)
+	if !nativeNeighOK {
+		out, ok := c.run("ip", "-6", "neigh", "show", "dev", ifc)
+		if !ok || strings.TrimSpace(out) == "" {
+			out, _ = c.run("ip", "neigh", "show", "dev", ifc)
+		}
+		neigh = scParseNeighV6(out)
+	}
 	mo, _ := c.run("iptables", "-t", "mangle", "-S", "HNC_MARK")
 	m6, _ := c.run("ip6tables", "-t", "mangle", "-S", "HNC_MARK")
 	eo, _ := c.run("tc", "filter", "show", "dev", ifc, "parent", "1:")
@@ -2525,7 +2925,13 @@ func scSectionProcess(c *scCtx) []scItem {
 	}
 	items = append(items, mem)
 	if la := c.readTrim("/proc/loadavg"); la != "" {
-		items = append(items, scItem{ID: "loadavg", Label: "系统负载", Status: scInfo, Value: strings.Join(strings.Fields(la)[:3], " ")})
+		lf := strings.Fields(la)
+		if len(lf) > 3 {
+			lf = lf[:3]
+		}
+		if len(lf) > 0 {
+			items = append(items, scItem{ID: "loadavg", Label: "系统负载", Status: scInfo, Value: strings.Join(lf, " ")})
+		}
 	}
 	items = append(items, scPowerItem(c))           // v5.22: 功耗汇总(power_stats.go)
 	items = append(items, scWatchdogActionsItem(c)) // v5.28 A2: 看门狗动作(watchdog_actions.go)
@@ -2737,13 +3143,7 @@ func scSectionIdent(c *scCtx) []scItem {
 	items = append(items, nit)
 
 	uit := scItem{ID: "unknown_ratio", Label: "今日未识别流量"}
-	var day *appUsageDay
-	if b, err := c.env.ReadFile(appUsagePath(c.env.HNCDir, c.env.Now().Format("20060102"))); err == nil {
-		var d appUsageDay
-		if json.Unmarshal(b, &d) == nil {
-			day = &d
-		}
-	}
+	day := scReadAppUsageDay(c, c.env.Now().Format("20060102"))
 	unk, tot := scUnknownRatio(day)
 	if tot <= 0 {
 		uit.Status, uit.Value = scInfo, "今日暂无流量记录"
@@ -2814,6 +3214,33 @@ func scSectionIdent(c *scCtx) []scItem {
 	return items
 }
 
+// scReadAppUsageDay 兼容读取 app_usage 新旧目录: 优先 data/ 目录, 不存在则回退 appUsagePath / run/ 目录
+func scReadAppUsageDay(c *scCtx, date string) *appUsageDay {
+	fname := "app_usage." + date + ".json"
+	candidates := []string{
+		c.hnc("data", fname),
+		c.hnc("data", "app_usage", fname),
+		appUsagePath(c.env.HNCDir, date),
+		c.hnc("run", fname),
+	}
+	seen := map[string]bool{}
+	for _, p := range candidates {
+		if seen[p] {
+			continue
+		}
+		seen[p] = true
+		b, err := c.env.ReadFile(p)
+		if err != nil || len(b) == 0 {
+			continue
+		}
+		var d appUsageDay
+		if json.Unmarshal(b, &d) == nil && d.Hours != nil {
+			return &d
+		}
+	}
+	return nil
+}
+
 // ─── 真实环境 ────────────────────────────────────────────────────
 
 func realSelfcheckEnv(hncDir string) *scEnv {
@@ -2825,6 +3252,7 @@ func realSelfcheckEnv(hncDir string) *scEnv {
 		LoopbackPort: *flagLoopbackPort,
 		CmdTimeout:   selfcheckCmdTimeout,
 		Budget:       selfcheckBudget,
+		RealSystem:   true,
 		Run:          scRealRunner(hncDir),
 		ReadFile: func(p string) ([]byte, error) {
 			f, err := os.Open(p)
@@ -2887,7 +3315,7 @@ func scRealRunner(hncDir string) func(ctx context.Context, name string, args ...
 		cmd := hardenCmd(exec.CommandContext(ctx, path, args...))
 		cmd.Env = []string{
 			"HNC_DIR=" + hncDir, "HNC=" + hncDir,
-			"PATH=/system/bin:/system/xbin:/vendor/bin:" + hncDir + "/bin:/data/adb/ksu/bin:/data/adb/magisk",
+			"PATH=/system/bin:/system/xbin:/vendor/bin:" + hncDir + "/bin:/data/adb/ksu/bin:/data/adb/magisk:/data/adb/ap/bin",
 		}
 		var out bytes.Buffer
 		cmd.Stdout = &scLimitWriter{w: &out, n: 4 << 20}

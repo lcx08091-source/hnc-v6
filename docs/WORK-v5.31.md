@@ -142,7 +142,7 @@ v5.30.0-rc2 上的首次结果(写进你的设计里):
 ### T-last · 版本与文档
 - `module.prop`:`version=v5.31.0-rc1`,`versionCode=5310001`。
 - `CHANGELOG.md` 加 `## [5.31.0-rc1] - <日期>`;`webroot/changelog.html` 加大白话一段(说清:设备发现换成新版、怎么退回旧版)。
-- `docs/ROADMAP.md`:M4 行改成「方案 A ✅(开关 `data/m4_owner`)」;`docs/CODEMAP.md`:设备发现的新归属、单写者规则、控制接口在两种模式下的行为;`docs/API.md` 若自检 / 动作统计输出加了字段要补。
+- `docs/ROADMAP.md`:M4 行改成「方案 A [OK](开关 `data/m4_owner`)」;`docs/CODEMAP.md`:设备发现的新归属、单写者规则、控制接口在两种模式下的行为;`docs/API.md` 若自检 / 动作统计输出加了字段要补。
 
 ---
 

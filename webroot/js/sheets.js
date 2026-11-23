@@ -55,7 +55,8 @@ function sheetCloseFx(v) {
 /* 共享元素展开: 记下刚点的那一行/卡片, 650ms 内打开的弹层从它的位置和大小"长"出来(裁剪 + 位移, 内容不变形) */
 var lastTap = null;
 document.addEventListener('pointerdown', function (e) {
-  var el = e.target.closest && e.target.closest('.chip, .btn, .cn, .dg, .row, .sni-row, .client, .dev-h, .cc-tile, [data-act], .dev, .glass');
+  var t0 = evEl(e);
+  var el = t0 && t0.closest && t0.closest('.chip, .btn, .cn, .dg, .row, .sni-row, .client, .dev-h, .cc-tile, [data-act], .dev, .glass');
   if (!el || (el.closest('#sheet') && !el.closest('.cn, .row, .dg, .btn'))) { lastTap = null; return; }
   var r = el.getBoundingClientRect();
   lastTap = { r: r, t: performance.now(), rad: parseFloat(getComputedStyle(el).borderRadius) || 14 };
@@ -210,8 +211,9 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
   // 触屏整卡顶部下拉关闭
   sh.addEventListener('touchstart', function (e) {
     if (e.touches.length !== 1) return;
-    if (e.target.closest('input,textarea,select,.seg,.toggle')) return;
-    var onGrab = !!(e.target.closest && e.target.closest('.grab'));
+    var te = evEl(e);
+    if (te && te.closest && te.closest('input,textarea,select,.seg,.toggle')) return;
+    var onGrab = !!(te && te.closest && te.closest('.grab'));
     beginDrag(e.touches[0].clientY, onGrab, null);
   }, { passive: true });
   sh.addEventListener('touchmove', function (e) {
@@ -224,7 +226,8 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
   // 桌面 / 触控笔按住顶部 .grab 拉手拖拽关闭
   sh.addEventListener('pointerdown', function (e) {
     if (e.pointerType === 'touch' || (e.button != null && e.button !== 0)) return;
-    var grab = e.target.closest && e.target.closest('.grab');
+    var pe = evEl(e);
+    var grab = pe && pe.closest && pe.closest('.grab');
     if (!grab) return;
     e.preventDefault();
     try { grab.setPointerCapture(e.pointerId); } catch (_) {}
@@ -242,7 +245,7 @@ $('#scrim').addEventListener('click', function () { closeSheet(0); });
   });
 })();
 
-$('#sheet').addEventListener('click', function (e) { if (e.target.closest('[data-close]')) closeSheet(0); });
+$('#sheet').addEventListener('click', function (e) { var t = evEl(e); if (t && t.closest && t.closest('[data-close]')) closeSheet(0); });
 document.addEventListener('keydown', function (e) { if (e.key === 'Escape') { closeSheet(0); closeDD(); } });
 function confirmSheet(title, desc, okText, opt) {
   opt = opt || {};
@@ -266,7 +269,9 @@ function closeDD() { $$('.dd.open').forEach(function (d) { d.classList.remove('o
 /* ═════════════════════ 告警 ═════════════════════ */
 var ALERT_KIND = { unknown_device: ['新设备接入', 'var(--orange)', devSvg('router', 'mini')], anomaly_traffic: ['流量异常', 'var(--red)', uiSvg('trend')], monthly_quota: ['月度配额', 'var(--purple)', uiSvg('chart')],
   device_quota: ['设备超出流量配额', 'var(--red)', uiSvg('traffic')], phone_quota: ['本机流量套餐', 'var(--orange)', devSvg('phone', 'mini')], app_time_warn: ['应用时长快用完', 'var(--orange)', uiSvg('hourglass')], app_time_exhausted: ['应用时长已用完', 'var(--red)', uiSvg('hourglass')],
-  mac_merge_suggest: ['疑似同一设备换了 MAC', 'var(--orange)', uiSvg('merge')] };
+  mac_merge_suggest: ['疑似同一设备换了 MAC', 'var(--orange)', uiSvg('merge')],
+  mac_merge_auto: ['随机 MAC 无感自动继承', 'var(--green)', uiSvg('merge')],
+  mac_merge_unmerge_auto: ['双胞胎同时在线 · 已自动拆分', 'var(--orange)', uiSvg('isolate')] };
 function alertTitle(a) { return (ALERT_KIND[a.kind] || [a.kind || '告警'])[0]; }
 function renderAlertsSheet(keep) {
   var list = (S.alerts.list || []).slice().sort(function (a, b) { return num(b.ts) - num(a.ts); });
@@ -276,6 +281,7 @@ function renderAlertsSheet(keep) {
       var acts = '';
       if (a.kind === 'unknown_device' && a.mac) acts += '<button class="linkish" data-al="rename">起名</button><button class="linkish" data-al="known">认识它</button><button class="linkish danger" data-al="block">拉黑</button>';
       if (a.kind === 'mac_merge_suggest' && a.mac) acts += '<button class="linkish" data-al="merge">查看建议</button>';
+      if (a.kind === 'mac_merge_auto' && a.mac) acts += '<button class="linkish" data-al="unmerge">拆分恢复</button>';
       if (!a.seen) acts += '<button class="linkish" data-al="seen">已读</button>';
       return '<div class="alrow' + (a.seen && !alertFresh[a.id] ? ' seen' : '') + '" data-alid="' + esc(a.id) + '" data-almac="' + esc(a.mac || '') + '"><i style="background:' + k[1] + '"></i><div style="min-width:0">' +
         '<div style="font-weight:700;font-size:14px">' + (k[2] ? '<span class="al-ic" style="color:' + k[1] + '">' + k[2] + '</span> ' : '') + esc(alertTitle(a)) + (nm ? ' · ' + esc(nm) : '') + '</div>' +
@@ -304,6 +310,13 @@ function alertAction(kind, id, mac) {
   var known = function () { return api.action('alert_mark_known', { mac: mac }).catch(function () {}); };
   if (kind === 'seen') return seen().then(loadAlerts);
   if (kind === 'merge') { var al = (S.alerts.list || []).filter(function (x) { return String(x.id) === String(id); })[0], ex = al && al.extra && typeof al.extra === 'object' ? al.extra : null; seen().then(loadAlerts); mergeSheet(mac, ex && ex.old_mac, ex); return; }
+  if (kind === 'unmerge') {
+    var alU = (S.alerts.list || []).filter(function (x) { return String(x.id) === String(id); })[0];
+    var exU = alU && alU.extra && typeof alU.extra === 'object' ? alU.extra : null;
+    seen().then(loadAlerts);
+    if (typeof unmergeSheet === 'function') unmergeSheet(mac, (exU && (exU.old_mac || exU.from_mac)) || d.mergedFrom || '', (exU && exU.old_name) || d.mergedFromName || '');
+    return;
+  }
   if (kind === 'known') return Promise.all([known(), seen()]).then(function () { toast('已记为认识的设备'); return loadAlerts(); });
   if (kind === 'rename') { Promise.all([known(), seen()]).then(loadAlerts); renameSheet(mac, d.name === mac ? '' : d.name); return; }
   if (kind === 'block') {
@@ -319,9 +332,10 @@ function alertAction(kind, id, mac) {
     dr.addEventListener('pointerdown', function (e) {
       if (e.button != null && e.button !== 0) return;
       if (!dr.classList.contains('show')) return;
-      if (e.target.closest('input, select, textarea, button, a')) return;
+      var de = evEl(e);
+      if (de && de.closest && de.closest('input, select, textarea, button, a')) return;
       var listEl = dr.querySelector('.v6-tuple-list');
-      var onGrab = !!e.target.closest('.grab, .v6-drawer-head');
+      var onGrab = !!(de && de.closest && de.closest('.grab, .v6-drawer-head'));
       if (!onGrab && listEl && listEl.scrollTop > 2) return;
       ds = { id: e.pointerId, y0: e.clientY, dy: 0, drag: false, cap: false };
     });

@@ -905,6 +905,35 @@ func dnsCacheTTL(m dnsMsgInfo) uint32 {
 	return 0
 }
 
+// isFakeIPAddr 识别透明代理(Clash/Mihomo/Sing-box/Box4Magisk)常用的 Fake-IP 地址段:
+//   - IPv4: 198.18.0.0/15 (RFC 2544 基准测试段, 198.18.0.0 ~ 198.19.255.255)
+//   - IPv6: fc00::/18 (前 18 bit = 11111100 00000000 00, 严禁误伤 fd00::/8 普通局域网 ULA)
+func isFakeIPAddr(ip net.IP) bool {
+	if ip == nil {
+		return false
+	}
+	if ip4 := ip.To4(); ip4 != nil {
+		return ip4[0] == 198 && (ip4[1]&0xfe) == 18
+	}
+	ip16 := ip.To16()
+	if ip16 == nil {
+		return false
+	}
+	return ip16[0] == 0xfc && ip16[1] == 0x00 && (ip16[2]&0xc0) == 0x00
+}
+
+// dnsHasFakeIPAnswer 检查应答是否包含透明代理动态分配的 Fake-IP
+func dnsHasFakeIPAnswer(m dnsMsgInfo) bool {
+	for _, r := range m.Answers {
+		if r.Type == dnsTypeA || r.Type == dnsTypeAAAA {
+			if isFakeIPAddr(net.ParseIP(r.Value)) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // dnsHasZeroAnswer 检查应答是否包含全零黑洞 IP(0.0.0.0 / ::)或本地回环毒化 IP(127.0.0.0/8 / ::1)
 func dnsHasZeroAnswer(m dnsMsgInfo) bool {
 	for _, r := range m.Answers {
@@ -947,8 +976,10 @@ func (c *dnsCache) putIfSeq(seq uint64, key string, msg []byte, m dnsMsgInfo, no
 
 func (c *dnsCache) putInternal(seq uint64, checkSeq bool, key string, msg []byte, m dnsMsgInfo, now time.Time) {
 	ttl := dnsCacheTTL(m)
-	if ttl == 0 || len(msg) > 8192 {
-		// 上游权威返回无 SOA 的 NXDOMAIN/NODATA 或 ttl == 0 时, 删除同键旧保活记录(防旧 IP 诈尸)
+	fakeIP := dnsHasFakeIPAnswer(m)
+	if ttl == 0 || fakeIP || len(msg) > 8192 {
+		// 上游权威返回无 SOA 的 NXDOMAIN/NODATA、ttl == 0 或含 Fake-IP 时,
+		// 不写入缓存且不启用 180s Serve-Stale, 同时删除同键旧缓存/保活记录防污染与旧 IP 诈尸
 		if m.Rcode == dnsRcodeNoError || m.Rcode == dnsRcodeNXDomain {
 			if !checkSeq {
 				c.deleteKey(key)
@@ -968,7 +999,7 @@ func (c *dnsCache) putInternal(seq uint64, checkSeq bool, key string, msg []byte
 	}
 	expire := now.Add(time.Duration(ttl) * time.Second)
 	staleUntil := expire
-	// 仅对正向非截断且不含 0.0.0.0/:: 黑洞的应答赋予 180s Serve-Stale 宽限; NXDOMAIN/NODATA 一律 0s 宽限
+	// 仅对正向非截断且不含 0.0.0.0/:: 黑洞与 Fake-IP 的应答赋予 180s Serve-Stale 宽限; NXDOMAIN/NODATA 一律 0s 宽限
 	if m.Rcode == dnsRcodeNoError && m.ANCount > 0 && m.Flags&dnsFlagTC == 0 && !dnsHasZeroAnswer(m) {
 		staleUntil = expire.Add(dnsStaleMaxAge)
 	}

@@ -30,6 +30,11 @@
 #   v6_sync.sh status           — 显示当前每台设备的 v6 地址 → tc filter 映射
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 LOG=$HNC_DIR/logs/v6_sync.log
 SNAP_DIR=$HNC_DIR/run/v6
 IFB_IFACE=ifb0
@@ -57,8 +62,8 @@ log() { echo "[$(date '+%H:%M:%S')] [V6] $*" >> "$LOG" 2>/dev/null; }
 # v5.20: 地址宽限 + 每台上限
 #   - 地址从邻居表消失(或短暂 FAILED/INCOMPLETE)后, 过滤器再保留 V6_GRACE 秒:
 #     NDP 探测抖动时不至于先删后加、让设备在空窗里绕过限速; 超过宽限才真正删除。
-#   - 每台设备最多 V6_MAX_ADDRS 个地址(按最近看到排序, 超出的最旧地址不装):
-#     隐私地址轮换 + 宽限叠加时限制 u32 过滤器条数。
+#   - 每台设备最多 V6_MAX_ADDRS 个地址(优先保留 REACHABLE/DELAY/PROBE, 再排 STALE,
+#     最后按最近看到排序, 超出的最旧地址不装): 隐私地址轮换 + 宽限叠加时限制过滤器条数。
 #   快照格式: 头行 "#hnc_v6 iface= mark= ing=" + 每行 "<地址> <最近看到的单调秒>"
 #   (旧格式只有地址, 读入时按"刚看到"处理, 向后兼容)。
 V6_GRACE=${HNC_V6_GRACE:-300}
@@ -115,11 +120,21 @@ v6_unlock() {
 
 # ═══════════════════════════════════════════════════════════════
 # 数据源：从 iptables HNC_MARK 提取 (mac, mark_hex) 对
-# 输出每行 "MAC MARK_HEX" 形如 "e2:0d:4a:48:5d:40 0x80003b"
+# 输出每行 "MAC MARK_HEX" 形如 "e2:0d:4a:48:5d:40 0x00bb0000/0x00ff0000"
 # ═══════════════════════════════════════════════════════════════
 list_marked_devices() {
     local raw parsed
-    raw=$(iptables -w 2 -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
+    if [ -n "${HNC_IPT:-}" ]; then
+        raw=$($HNC_IPT -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
+    else
+        raw=$(iptables -w 2 -t mangle -L HNC_MARK -n 2>/dev/null) || {
+            if [ -z "${HNC_TEST_MODE:-}" ] && iptables -t filter -L -n >/dev/null 2>&1; then
+                raw=$(iptables -t mangle -L HNC_MARK -n 2>/dev/null) || return 1
+            else
+                return 1
+            fi
+        }
+    fi
     parsed=$(printf '%s
 ' "$raw" | awk '
     /MAC/ && /MARK/ {
@@ -168,38 +183,38 @@ marked_devices() {
 }
 
 # ═══════════════════════════════════════════════════════════════
-# 拿一台设备当前活跃的 v6 地址
-# 排除 link-local fe80::（不可路由）和 FAILED/INCOMPLETE 状态
-# 同时排除 v4 地址（必须含 ":" 才算 v6）
-#
-# 注：Android 的 `ip -6 neigh` 可能不支持 -6 选项，先试 -6，
-# 失败 fallback 到 `ip neigh`（输出含 v4+v6 混合，靠 awk 过滤）
+# 拿一台设备当前活跃的 v6 地址(带状态优先级)
+#   tier=2: REACHABLE / DELAY / PROBE / PERMANENT (当前真实活跃地址)
+#   tier=1: STALE 等其他非失败邻居状态
+# 排除 link-local fe80:: / 多播 ff00::/8 及 FAILED/INCOMPLETE 状态
 # ═══════════════════════════════════════════════════════════════
-get_v6_addrs() {
+get_v6_addrs_ranked() {
     local mac=$1 iface=$2
     local raw
     raw=$(ip -6 neigh show dev "$iface" 2>/dev/null)
     [ -z "$raw" ] && raw=$(ip neigh show dev "$iface" 2>/dev/null)
-    echo "$raw" | awk -v mac="$mac" '
+    printf '%s\n' "$raw" | awk -v mac="$mac" '
     {
-        line=$0
-        m=tolower(mac)
-        # 必须：MAC 匹配 + 地址含冒号(v6) + 不是 link-local + 状态非失败
-        if (tolower(line) ~ m && $1 ~ /:/ && $1 !~ /^fe80/) {
-            state=$NF
-            if (state != "FAILED" && state != "INCOMPLETE") print $1
+        line = tolower($0)
+        m = tolower(mac)
+        if (index(line, m) > 0 && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $1 != "::1" && $1 != "::") {
+            st = toupper($NF)
+            if (st == "FAILED" || st == "INCOMPLETE") next
+            t = (st == "REACHABLE" || st == "DELAY" || st == "PROBE" || st == "PERMANENT") ? 2 : 1
+            if (!($1 in tier) || t > tier[$1]) tier[$1] = t
         }
-    }' | sort -u
+    }
+    END {
+        for (a in tier) printf "%d %s\n", tier[a], a
+    }'
+}
+
+get_v6_addrs() {
+    get_v6_addrs_ranked "$1" "$2" | awk 'NF>=2{print $2}' | sort -u
 }
 
 # ═══════════════════════════════════════════════════════════════
 # 同步一台设备的 v6 filter
-# 算法：
-#   1. 期望地址集 = 当前邻居地址 ∪ 宽限期内的旧地址, 按最近看到截取前 V6_MAX_ADDRS 个
-#   2. 头行 + 地址集都没变且 filter 仍在 → 只刷新快照时间戳(最常见路径)
-#   3. 只新增地址(临时地址轮换的典型情况)且旧 filter 仍在 → 只补新地址的 filter,
-#      不 flush(避免重建空窗)
-#   4. 其余(有地址过期 / 头行变化 / filter 丢失)→ flush 该设备 prio 段后按期望集重建
 # ═══════════════════════════════════════════════════════════════
 _v6_valid_mac() {
     case "$1" in
@@ -207,6 +222,25 @@ _v6_valid_mac() {
             return 0 ;;
         *) return 1 ;;
     esac
+}
+
+_write_snap_filtered() {
+    # $1 = snap 文件路径, $2 = hdr, $3 = merged("<addr> <ts>" 每行), $4 = 空格包裹的失败地址 " a1 a2 "
+    local _sf=$1 _shdr=$2 _sm=$3 _sbad=$4 _body
+    if [ -z "$_sm" ]; then
+        printf '%s\n' "$_shdr" > "${_sf}.tmp" && mv -f "${_sf}.tmp" "$_sf"
+        return 0
+    fi
+    if [ -n "$_sbad" ] && [ "$_sbad" != " " ]; then
+        _body=$(printf '%s\n' "$_sm" | awk -v bad="$_sbad" 'NF && index(bad, " " $1 " ") == 0 { print }')
+    else
+        _body="$_sm"
+    fi
+    if [ -n "$_body" ]; then
+        printf '%s\n%s\n' "$_shdr" "$_body" > "${_sf}.tmp" && mv -f "${_sf}.tmp" "$_sf"
+    else
+        printf '%s\n' "$_shdr" > "${_sf}.tmp" && mv -f "${_sf}.tmp" "$_sf"
+    fi
 }
 
 sync_one() {
@@ -225,7 +259,6 @@ sync_one() {
     local mark_hex
     mark_hex=$(marked_devices | awk -v m="$mac" '$1==m {print $2; exit}')
     if [ -z "$mark_hex" ]; then
-        # 没限速 → 顺手清理可能残留的 v6 filter / 快照(无快照 = 从没装过, 静默返回)
         [ -f "$snap" ] || return 0
         clear_one "$mac" "$iface"
         return 0
@@ -239,8 +272,6 @@ sync_one() {
     fi
 
     local prio=$((PRIO_BASE + mark_id))
-    # v5.12: 与 tc_manager.sh _class_id_for_mark 保持一致 —— mark_id=1 的 class
-    # 是 1:100(1:1 是 HTB 父类),否则 v6 filter flowid 指向父类,等于没分类。
     local cls=$mark_id
     [ "$mark_id" = "1" ] && cls=100
     mkdir -p "$SNAP_DIR" 2>/dev/null
@@ -251,19 +282,10 @@ sync_one() {
         has_ingress=1
     fi
 
-    # v5.12: 快照 = 头行(iface/mark/ingress) + 地址列表。
-    # 旧快照只存地址,地址不变即 return,以下场景 v6 filter 永远不会重建,设备走
-    # IPv6 时绕过限速:
-    #   - 热点关→开 / ROM 换根 qdisc 触发 init_tc 重建 / 重启(run/v6 跨重启残留)
-    #     → tc 树上的 filter 已没了,但地址没变;
-    #   - 接口切换(wlan1→wlan2),新接口上从未加过 filter;
-    #   - 先只限下行、后补上行限速:ifb0 class 新建,但 ingress filter 从未加。
-    #   - mid 被重新分配:旧 prio 段的 filter 残留,指向别人的 class。
-    # 头行记录这些维度,任一变化即重建;没变化时再核对 filter 是否仍在 tc 上。
     local hdr="#hnc_v6 iface=$iface mark=$mark_id ing=$has_ingress"
     local now; now=$(v6_now)
-    local cur prev_all prev_hdr prev_list prev prev_mark prev_iface merged n_all
-    cur=$(get_v6_addrs "$mac" "$iface")
+    local cur_ranked prev_all prev_hdr prev_list prev prev_mark prev_iface merged n_all
+    cur_ranked=$(get_v6_addrs_ranked "$mac" "$iface")
     prev_all=""
     [ -f "$snap" ] && prev_all=$(cat "$snap" 2>/dev/null)
     prev_hdr=$(printf '%s\n' "$prev_all" | grep '^#hnc_v6 ' | head -n 1)
@@ -272,19 +294,25 @@ sync_one() {
     prev_mark=$(printf '%s\n' "$prev_hdr" | sed -n 's/^#hnc_v6 .* mark=\([0-9]*\).*/\1/p' | head -n 1)
     prev_iface=$(printf '%s\n' "$prev_hdr" | sed -n 's/^#hnc_v6 iface=\([^ ]*\).*/\1/p' | head -n 1)
 
-    # 期望集: "<地址> <最近看到>", 当前地址 = now; 旧地址保留原时间戳(旧格式无时间戳
-    # 或时间戳在未来(uptime 回退)→ 视为刚看到); 超过宽限的丢弃; 按最近看到降序截断。
-    merged=$( { printf '%s\n' "$cur" | awk -v n="$now" 'NF{print $1, n}'
-                printf '%s\n' "$prev_list" | awk -v n="$now" 'NF{t=$2; if (t == "" || t !~ /^[0-9]+$/ || t+0 > n+0) t=n; print $1, t}'
+    # 期望集: 优先保留 REACHABLE/DELAY/PROBE(tier=2), 其次 STALE(tier=1), 最后宽限期内旧地址(tier=0),
+    # 按 (tier 降序, 最近看到时间戳降序, 地址字典序) 截取前 V6_MAX_ADDRS 条!
+    merged=$( { printf '%s\n' "$cur_ranked" | awk -v n="$now" 'NF>=2{print $1, $2, n}'
+                printf '%s\n' "$prev_list" | awk -v n="$now" 'NF{t=$2; if (t == "" || t !~ /^[0-9]+$/ || t+0 > n+0) t=n; print 0, $1, t}'
               } | awk -v n="$now" -v g="$V6_GRACE" '
-                NF { if (!($1 in ts) || $2+0 > ts[$1]+0) ts[$1]=$2 }
-                END { for (a in ts) if (n - ts[a] < g) print ts[a], a }' \
-              | sort -k1,1nr -k2,2 )
+                NF >= 3 {
+                    tr = $1 + 0; a = $2; t = $3 + 0
+                    if (!(a in ts) || t > ts[a]) ts[a] = t
+                    if (!(a in tier) || tr > tier[a]) tier[a] = tr
+                }
+                END {
+                    for (a in ts) if (n - ts[a] < g) printf "%d %d %s\n", tier[a], ts[a], a
+                }' \
+              | sort -k1,1nr -k2,2nr -k3,3 )
     n_all=$(printf '%s\n' "$merged" | awk 'NF' | wc -l | tr -d ' ')
     if [ "${n_all:-0}" -gt "$V6_MAX_ADDRS" ]; then
         log "  $mac: $n_all v6 addresses, capping to newest $V6_MAX_ADDRS"
     fi
-    merged=$(printf '%s\n' "$merged" | awk -v max="$V6_MAX_ADDRS" 'NF && c < max {c++; print $2, $1}')
+    merged=$(printf '%s\n' "$merged" | awk -v max="$V6_MAX_ADDRS" 'NF>=3 && c < max {c++; print $3, $2}')
     local want
     want=$(printf '%s\n' "$merged" | awk 'NF{print $1}' | sort -u)
     local snap_new="$hdr"
@@ -298,7 +326,6 @@ $merged"
     fi
 
     local added="" removed=""
-    # 集合差: 同一条流里用前缀区分两边(不依赖 awk -v 传多行、也不依赖 grep -f)
     local diff
     diff=$( { printf '%s\n' "$prev" | awk 'NF{print "P", $1}'
               printf '%s\n' "$want" | awk 'NF{print "W", $1}'
@@ -309,31 +336,40 @@ $merged"
 
     if [ "$hdr" = "$prev_hdr" ] && [ -z "$removed" ]; then
         if [ -z "$added" ]; then
-            # 无变化(最常见路径)。无地址时无需核对;有地址时确认 filter 仍挂在 tc 上。
             if [ -z "$want" ] || [ "$filters_ok" = "1" ]; then
-                [ "$snap_new" != "$prev_all" ] && printf '%s\n' "$snap_new" > "$snap"
+                [ "$snap_new" != "$prev_all" ] && { printf '%s\n' "$snap_new" > "${snap}.tmp" && mv -f "${snap}.tmp" "$snap"; }
                 return 0
             fi
             log "Sync $mac (mark=$mark_id prio=$prio): filters missing on tc (tree rebuilt?), rebuilding"
         elif [ -z "$prev" ] || [ "$filters_ok" = "1" ]; then
-            # 只新增(临时地址轮换): 只补新地址, 不 flush
-            local n=0 nfail=0
+            # 只新增(临时地址轮换): 只补新地址, 不 flush; 严格检查上下行返回码后再写快照!
+            local n=0 nfail=0 fail_addrs=" " _eg_ok _ig_ok
             for addr in $added; do
+                _eg_ok=0; _ig_ok=1
                 if tc filter add dev "$iface" parent 1: protocol ipv6 prio "$prio" u32 \
                         match ip6 dst "$addr/128" flowid "1:$cls" 2>/dev/null; then
-                    n=$((n+1))
+                    _eg_ok=1
                 else
-                    nfail=$((nfail+1))
                     log "  WARN: egress filter add failed for $addr"
                 fi
                 if [ "$has_ingress" = "1" ]; then
-                    tc filter add dev "$IFB_IFACE" parent 1: protocol ipv6 prio "$prio" u32 \
-                        match ip6 src "$addr/128" flowid "1:$cls" 2>/dev/null
+                    if ! tc filter add dev "$IFB_IFACE" parent 1: protocol ipv6 prio "$prio" u32 \
+                            match ip6 src "$addr/128" flowid "1:$cls" 2>/dev/null; then
+                        _ig_ok=0
+                        log "  WARN: ingress filter add failed for $addr on $IFB_IFACE"
+                    fi
+                fi
+                if [ "$_eg_ok" = "1" ] && [ "$_ig_ok" = "1" ]; then
+                    n=$((n+1))
+                else
+                    nfail=$((nfail+1))
+                    fail_addrs="${fail_addrs}${addr} "
                 fi
             done
-            printf '%s\n' "$snap_new" > "$snap"
+            _write_snap_filtered "$snap" "$hdr" "$merged" "$fail_addrs"
             log "Sync $mac (mark=$mark_id prio=$prio): +$(echo "$added" | tr '\n' ' ')(incremental, added=$n failed=$nfail ingress=$has_ingress)"
-            return 0
+            [ "$nfail" -eq 0 ]
+            return $?
         else
             log "Sync $mac (mark=$mark_id prio=$prio): new addresses but filters missing on tc, rebuilding"
         fi
@@ -344,7 +380,6 @@ $merged"
     [ -n "$prev" ] && log "  prev: $(echo "$prev" | tr '\n' ' ')"
     log "  want: $(echo "$want" | tr '\n' ' ')"
 
-    # v5.12: mid 变了 → 旧 prio 段的 filter 也要清(否则指向已归别人的 class)
     if [ -n "$prev_mark" ] && [ "$prev_mark" != "$mark_id" ]; then
         local old_prio=$((PRIO_BASE + prev_mark))
         tc filter del dev "$iface"     parent 1: prio "$old_prio" protocol ipv6 2>/dev/null
@@ -352,45 +387,47 @@ $merged"
         [ -n "$prev_iface" ] && [ "$prev_iface" != "$iface" ] && \
             tc filter del dev "$prev_iface" parent 1: prio "$old_prio" protocol ipv6 2>/dev/null
     fi
-    # 接口换了: 旧接口若还在,把旧 filter 一并清掉
     if [ -n "$prev_iface" ] && [ "$prev_iface" != "$iface" ]; then
         tc filter del dev "$prev_iface" parent 1: prio "$prio" protocol ipv6 2>/dev/null
     fi
 
-    # Flush 该设备的所有 v6 filter（egress + ingress）
-    # 该设备独占 prio 段，不会误删别的设备
     tc filter del dev "$iface"     parent 1: prio "$prio" protocol ipv6 2>/dev/null
     tc filter del dev "$IFB_IFACE" parent 1: prio "$prio" protocol ipv6 2>/dev/null
 
-    # 设备 v6 全失活(含宽限期已过) → 仅记录，不加 filter
     if [ -z "$want" ]; then
-        printf '%s\n' "$snap_new" > "$snap"
+        printf '%s\n' "$snap_new" > "${snap}.tmp" && mv -f "${snap}.tmp" "$snap"
         log "  $mac: no active v6 addresses"
         return 0
     fi
 
-    # 重建 filter，每个地址一条
-    local n=0 nfail=0
+    # 重建 filter，每个地址一条，严格核验上下行返回码再写快照
+    local n=0 nfail=0 fail_addrs=" " _eg_ok _ig_ok
     for addr in $want; do
-        # Egress（下行限速）：wlan2 上 dst 匹配
+        _eg_ok=0; _ig_ok=1
         if tc filter add dev "$iface" parent 1: protocol ipv6 prio "$prio" u32 \
                 match ip6 dst "$addr/128" flowid "1:$cls" 2>/dev/null; then
+            _eg_ok=1
+        else
+            log "  WARN: egress filter add failed for $addr"
+        fi
+        if [ "$has_ingress" = "1" ]; then
+            if ! tc filter add dev "$IFB_IFACE" parent 1: protocol ipv6 prio "$prio" u32 \
+                    match ip6 src "$addr/128" flowid "1:$cls" 2>/dev/null; then
+                _ig_ok=0
+                log "  WARN: ingress filter add failed for $addr on $IFB_IFACE"
+            fi
+        fi
+        if [ "$_eg_ok" = "1" ] && [ "$_ig_ok" = "1" ]; then
             n=$((n+1))
         else
             nfail=$((nfail+1))
-            log "  WARN: egress filter add failed for $addr"
-        fi
-
-        # Ingress（上行限速）：ifb0 上 src 匹配（仅当 class 存在）
-        if [ "$has_ingress" = "1" ]; then
-            tc filter add dev "$IFB_IFACE" parent 1: protocol ipv6 prio "$prio" u32 \
-                match ip6 src "$addr/128" flowid "1:$cls" 2>/dev/null
+            fail_addrs="${fail_addrs}${addr} "
         fi
     done
 
-    # 更新快照
-    printf '%s\n' "$snap_new" > "$snap"
+    _write_snap_filtered "$snap" "$hdr" "$merged" "$fail_addrs"
     log "  $mac: synced $n filter(s) (failed=$nfail, ingress=$has_ingress)"
+    [ "$nfail" -eq 0 ]
 }
 
 # v5.20: 同步若干台(httpd 邻居事件合并后调用)。iface / iptables 只读一次。

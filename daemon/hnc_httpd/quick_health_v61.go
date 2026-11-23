@@ -687,12 +687,13 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		}
 	}
 
-	var totalMB, usedMB, freeMB, usedPct float64
+	var totalMB, usedMB, freeMB, usedPct, freePct float64
 	if st.Supported && st.TotalBytes > 0 {
 		totalMB = float64(st.TotalBytes) / (1024.0 * 1024.0)
 		usedMB = float64(st.UsedBytes) / (1024.0 * 1024.0)
 		freeMB = float64(st.FreeBytes) / (1024.0 * 1024.0)
 		usedPct = float64(st.UsedBytes) * 100.0 / float64(st.TotalBytes)
+		freePct = float64(st.FreeBytes) * 100.0 / float64(st.TotalBytes)
 	}
 
 	checkedFiles := 0
@@ -729,29 +730,42 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		}
 	}
 
+	tmpfsUnavailable := false
+	if hncDir != "" {
+		if _, err := os.Stat(filepath.Join(hncDir, "run", "tmpfs_unavailable")); err == nil {
+			tmpfsUnavailable = true
+		}
+	}
+
+	misblockedDNS, misblockedItems := scanMisblockedPublicDNS(hncDir)
+
 	expectTmpfs := env.EnforceTmpfs || (hncDir != "" && filepath.Clean(hncDir) == "/data/local/hnc")
 
 	item.Metrics = map[string]any{
-		"statfs_supported": st.Supported,
-		"run_is_tmpfs":     st.IsTmpfs,
-		"run_fs_magic":     fmt.Sprintf("0x%x", st.FSType),
-		"run_total_bytes":  st.TotalBytes,
-		"run_used_bytes":   st.UsedBytes,
-		"run_free_bytes":   st.FreeBytes,
-		"run_used_pct":     math.Round(usedPct*10) / 10,
-		"json_checked":     checkedFiles,
-		"json_bad_count":   len(badFiles),
-		"json_bad_files":   badFiles,
-		"backup_count":     backupCount,
+		"statfs_supported":             st.Supported,
+		"run_is_tmpfs":                 st.IsTmpfs,
+		"tmpfs_unavailable":            tmpfsUnavailable,
+		"run_fs_magic":                 fmt.Sprintf("0x%x", st.FSType),
+		"run_total_bytes":              st.TotalBytes,
+		"run_used_bytes":               st.UsedBytes,
+		"run_free_bytes":               st.FreeBytes,
+		"run_used_pct":                 math.Round(usedPct*10) / 10,
+		"run_free_pct":                 math.Round(freePct*10) / 10,
+		"json_checked":                 checkedFiles,
+		"json_bad_count":               len(badFiles),
+		"json_bad_files":               badFiles,
+		"backup_count":                 backupCount,
+		"misblocked_public_dns":        misblockedDNS,
+		"misblocked_public_dns_count":  len(misblockedDNS),
 	}
 	if statfsErr != "" {
 		item.Metrics["statfs_error"] = statfsErr
 	}
 
 	spaceFail := st.Supported && st.TotalBytes > 0 &&
-		((st.IsTmpfs && usedPct >= qhTmpfsFailPct && st.FreeBytes < 16<<20) || st.FreeBytes < 2<<20)
+		((st.IsTmpfs && usedPct >= qhTmpfsFailPct && st.FreeBytes < 4<<20) || st.FreeBytes < 2<<20)
 	spaceWarn := !spaceFail && st.Supported && st.TotalBytes > 0 &&
-		((st.IsTmpfs && usedPct >= qhTmpfsWarnPct && st.FreeBytes < 32<<20) || st.FreeBytes < 8<<20)
+		((st.IsTmpfs && (st.FreeBytes < 4<<20 || freePct < 15.0)) || (!st.IsTmpfs && st.FreeBytes < 4<<20))
 
 	switch {
 	case len(badFiles) > 0:
@@ -778,11 +792,27 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		item.FixKind = qhFixAction
 		item.FixLabel = "一键释放空间"
 		item.FixAction = "cache_clear"
+	case len(misblockedDNS) > 0:
+		item.Status = qhStatusWarn
+		item.Badge = "误封公共DNS"
+		item.Verdict = fmt.Sprintf("检测到连接封锁配置中历史误封了公共基础 DNS（%s），会导致设备解析断网", strings.Join(misblockedDNS, "、"))
+		item.Detail = "建议立即移除对应公共基础 DNS 封禁条目（如 223.5.5.5、119.29.29.29 等），恢复设备正常联网解析"
+		if len(misblockedItems) == 1 {
+			it := misblockedItems[0]
+			item.FixKind = qhFixAction
+			item.FixLabel = "一键清理误封"
+			item.FixAction = "conn_block_del"
+			item.FixParams = map[string]string{"mac": it.MAC, "kind": it.Kind, "value": it.Value}
+		} else {
+			item.FixKind = qhFixNav
+			item.FixLabel = "前往清理封禁"
+			item.NavTarget = "devices"
+		}
 	case spaceWarn:
 		item.Status = qhStatusWarn
 		item.Badge = "空间偏紧"
 		if st.IsTmpfs {
-			item.Verdict = fmt.Sprintf("运行态内存盘已用 %.1f / %.0f MB（%.0f%%），剩余空间偏少", usedMB, totalMB, usedPct)
+			item.Verdict = fmt.Sprintf("运行态内存盘已用 %.1f / %.0f MB（剩余 %.1f MB，%.0f%%），剩余空间偏少", usedMB, totalMB, freeMB, freePct)
 		} else {
 			item.Verdict = fmt.Sprintf("运行目录可用空间仅剩 %.1f MB，剩余余量偏少", freeMB)
 		}
@@ -790,7 +820,7 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		item.FixKind = qhFixAction
 		item.FixLabel = "清理运行缓存"
 		item.FixAction = "cache_clear"
-	case st.Supported && expectTmpfs && !st.IsTmpfs:
+	case st.Supported && expectTmpfs && !st.IsTmpfs && !tmpfsUnavailable:
 		item.Status = qhStatusWarn
 		item.Badge = "未挂内存盘"
 		item.Verdict = "运行态目录未挂载到 32M 内存盘，高频状态正直接读写手机闪存"
@@ -800,16 +830,66 @@ func (s *server) evalTmpfsConfigCard(hncDir string, env quickHealthEnv) QuickHea
 		item.FixAction = "restart_service"
 	default:
 		item.Status = qhStatusOK
-		item.Badge = "零擦写健康"
-		if st.Supported && st.IsTmpfs && totalMB > 0 {
-			item.Verdict = fmt.Sprintf("32M 内存盘余量充足（已用 %.1f / %.0f MB），核心配置文件全部完好", usedMB, totalMB)
+		if tmpfsUnavailable && !st.IsTmpfs {
+			item.Badge = "兼容落盘健康"
+			item.Verdict = "当前内核不支持 tmpfs 内存盘，已自动启用低频闪存保护模式，核心配置全部完好"
+			item.Detail = fmt.Sprintf("已校验 %d 个核心配置文件无损坏；无需重复重启服务，长稳写节流已生效", checkedFiles)
 		} else {
-			item.Verdict = "核心 JSON 配置文件全部完好，运行目录剩余空间充足"
+			item.Badge = "零擦写健康"
+			if st.Supported && st.IsTmpfs && totalMB > 0 {
+				item.Verdict = fmt.Sprintf("32M 内存盘余量充足（已用 %.1f / %.0f MB），核心配置文件全部完好", usedMB, totalMB)
+			} else {
+				item.Verdict = "核心 JSON 配置文件全部完好，运行目录剩余空间充足"
+			}
+			item.Detail = fmt.Sprintf("已校验 %d 个核心配置文件无损坏，高频运行态驻留内存保护手机闪存", checkedFiles)
 		}
-		item.Detail = fmt.Sprintf("已校验 %d 个核心配置文件无损坏，高频运行态驻留内存保护手机闪存", checkedFiles)
 	}
 
 	return item
+}
+
+// scanMisblockedPublicDNS 扫描 data/conn_blocks.json 中历史误封的公共基础 DNS IP 或域名(如 223.5.5.5 / 119.29.29.29)。
+func scanMisblockedPublicDNS(hncDir string) ([]string, []connBlock) {
+	if hncDir == "" {
+		return []string{}, nil
+	}
+	cbf := readConnBlocks(hncDir)
+	if len(cbf.Items) == 0 {
+		return []string{}, nil
+	}
+	seenVal := map[string]bool{}
+	var vals []string
+	var matched []connBlock
+	for _, it := range cbf.Items {
+		v := strings.ToLower(strings.TrimSpace(it.Value))
+		if v == "" {
+			continue
+		}
+		isPublicDNS := false
+		if _, ok := hardBlockPublicDNSIPs[v]; ok {
+			isPublicDNS = true
+		} else if it.Kind == "domain" {
+			d := strings.TrimSuffix(strings.TrimPrefix(v, "*."), ".")
+			for sfx, meta := range hardBlockSystemSuffixes {
+				if meta.Category == "public_dns" && (d == sfx || strings.HasSuffix(d, "."+sfx)) {
+					isPublicDNS = true
+					break
+				}
+			}
+		}
+		if !isPublicDNS {
+			continue
+		}
+		matched = append(matched, it)
+		if !seenVal[v] {
+			seenVal[v] = true
+			vals = append(vals, v)
+		}
+	}
+	if vals == nil {
+		vals = []string{}
+	}
+	return vals, matched
 }
 
 func (s *server) readCachedJSON(path string) (any, error) {
@@ -819,7 +899,7 @@ func (s *server) readCachedJSON(path string) (any, error) {
 	return (*jsonFileCache)(nil).read(path)
 }
 
-// invalidateServerJSONCaches 清空 httpd 进程内 JSON 文件缓存与 rulesStore 快照缓存。
+// invalidateServerJSONCaches 清空 httpd 进程内 JSON 文件缓存、rulesStore 快照缓存及配套配置缓存。
 func (s *server) invalidateServerJSONCaches() {
 	if s != nil && s.jsonCache != nil {
 		s.jsonCache.mu.Lock()
@@ -832,6 +912,42 @@ func (s *server) invalidateServerJSONCaches() {
 	rulesStore.cachedModNano = 0
 	rulesStore.cachedSize = 0
 	rulesStore.mu.Unlock()
+
+	webuiCfgMu.Lock()
+	clear(webuiCfgCache)
+	webuiCfgMu.Unlock()
+
+	appCatalogCache.mu.Lock()
+	appCatalogCache.key = ""
+	appCatalogCache.cat = nil
+	appCatalogCache.mu.Unlock()
+
+	fgEngineCache.mu.Lock()
+	fgEngineCache.path = ""
+	fgEngineCache.key = ""
+	fgEngineCache.mu.Unlock()
+
+	studioMu.Lock()
+	studioLoadedDir = ""
+	studioPolicy = selfStudioPolicy{}
+	studioMu.Unlock()
+
+	fpStores.mu.Lock()
+	if s != nil && s.hncDir != "" {
+		delete(fpStores.m, s.hncDir)
+	} else {
+		clear(fpStores.m)
+	}
+	fpStores.mu.Unlock()
+
+	startupStores.mu.Lock()
+	if s != nil && s.hncDir != "" {
+		delete(startupStores.m, s.hncDir)
+	} else {
+		clear(startupStores.m)
+	}
+	startupStores.mu.Unlock()
+
 	if s != nil && s.tokens != nil {
 		_ = s.tokens.SyncIfChanged()
 	}

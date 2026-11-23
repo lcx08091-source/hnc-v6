@@ -141,10 +141,24 @@ func (rl *remoteListener) wantRemote() bool {
 	return v
 }
 
+// listenRemoteTCP 当未指定仅 IPv4(auto / "" / 0.0.0.0 / ::)时优先双栈监听 ":port"(失败回退 tcp4),
+// 显式 IPv4 字面量(如 127.0.0.1 / 192.168.43.1)仍固定走 tcp4。
+func listenRemoteTCP(bind string, port int) (net.Listener, error) {
+	if bind == "" || bind == "auto" || bind == "0.0.0.0" || bind == "::" {
+		if ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port)); err == nil {
+			return ln, nil
+		}
+		return net.Listen("tcp4", net.JoinHostPort("0.0.0.0", fmt.Sprint(port)))
+	}
+	if ip := net.ParseIP(bind); ip != nil && ip.To4() == nil {
+		return net.Listen("tcp", net.JoinHostPort(bind, fmt.Sprint(port)))
+	}
+	return net.Listen("tcp4", net.JoinHostPort(bind, fmt.Sprint(port)))
+}
+
 // start 监听远程端口。先同步 Listen(端口被占当场报错, 下一轮重试), 再后台 Serve。
 func (rl *remoteListener) start() error {
-	addr := net.JoinHostPort(rl.bind, fmt.Sprint(rl.port))
-	ln, err := net.Listen("tcp4", addr)
+	ln, err := listenRemoteTCP(rl.bind, rl.port)
 	if err != nil {
 		return err
 	}
@@ -170,7 +184,7 @@ func (rl *remoteListener) start() error {
 	var redirLn net.Listener
 	if rl.httpPort > 0 && !rl.noTLS {
 		// 跳转端口失败只记日志, 不影响 HTTPS(v4.0 Patch 2.b 起的约定)
-		if l, err := net.Listen("tcp4", net.JoinHostPort(rl.bind, fmt.Sprint(rl.httpPort))); err != nil {
+		if l, err := listenRemoteTCP(rl.bind, rl.httpPort); err != nil {
 			log.Printf("remote listener: HTTP redirect :%d not started: %v (HTTPS continues)", rl.httpPort, err)
 		} else {
 			redirLn = l
@@ -271,22 +285,24 @@ func (rl *remoteListener) Addr() string {
 // redirect HTTP → HTTPS。v6 review fix: 不信任 r.Host 构造目标(Host: evil.com 会变成
 // 开放重定向), 用连接实际到达的本地地址; 拿不到时仅当 Host 是合法 IP 才采用。
 func (rl *remoteListener) redirect(w http.ResponseWriter, r *http.Request) {
-	target := fmt.Sprintf("https://%s:%d", rl.redirHost(r), rl.port) + r.URL.RequestURI()
+	target := "https://" + net.JoinHostPort(rl.redirHost(r), fmt.Sprint(rl.port)) + r.URL.RequestURI()
 	http.Redirect(w, r, target, http.StatusPermanentRedirect)
 }
 
 func (rl *remoteListener) redirHost(r *http.Request) string {
 	if la, ok := r.Context().Value(http.LocalAddrContextKey).(net.Addr); ok {
 		if h, _, err := net.SplitHostPort(la.String()); err == nil && h != "" {
-			return h
+			if ip := clientIP(h); ip != nil && !ip.IsUnspecified() {
+				return ip.String()
+			}
 		}
 	}
 	if h, _, err := net.SplitHostPort(r.Host); err == nil {
-		if ip := net.ParseIP(h); ip != nil {
-			return h
+		if ip := net.ParseIP(h); ip != nil && !ip.IsUnspecified() {
+			return ip.String()
 		}
-	} else if ip := net.ParseIP(r.Host); ip != nil {
-		return r.Host
+	} else if ip := net.ParseIP(r.Host); ip != nil && !ip.IsUnspecified() {
+		return ip.String()
 	}
 	if ip := net.ParseIP(rl.bind); ip != nil && !ip.IsUnspecified() {
 		return rl.bind

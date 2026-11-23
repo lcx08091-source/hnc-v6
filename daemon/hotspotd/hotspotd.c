@@ -29,12 +29,14 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
 #include <time.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <poll.h>
 #include <stdarg.h>
 
 #include <sys/socket.h>
@@ -54,13 +56,18 @@
 #define HNC_VERSION         "dev"
 #endif
 
-/* ── 路径常量 ──────────────────────────────────────────────── */
+/* ── 路径与限制常量 ────────────────────────────────────────── */
 #define HNC_DIR             "/data/local/hnc"
 #define SOCK_PATH           HNC_DIR "/run/hotspotd.sock"
 #define DEVICES_JSON        HNC_DIR "/data/devices.json"
 #define REFRESH_FILE        HNC_DIR "/run/devices.refresh"
 #define LOG_FILE            HNC_DIR "/logs/hotspotd.log"
 #define PID_FILE            HNC_DIR "/run/hotspotd.pid"
+
+#define HNC_LOG_MAX_BYTES   (4LL * 1024LL * 1024LL)
+#define IPC_RD_TIMEOUT_MS   2000LL
+#define IPC_TOT_TIMEOUT_MS  5000LL
+#define NL_BATCH_PKT_CAP    64
 
 /* 单测改路径用(test/test_hotspotd_ipc.c); 生产 = 上面的常量 */
 static const char *g_devices_path = DEVICES_JSON;
@@ -72,11 +79,33 @@ static FILE *g_log    = NULL;
 static volatile sig_atomic_t g_need_refresh = 0;  /* SIGUSR1 → touch run/devices.refresh */
 static volatile sig_atomic_t g_running      = 1;  /* 0=退出主循环 */
 
+static int64_t mono_ms_now(void) {
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
+        return (int64_t)ts.tv_sec * 1000LL + (int64_t)(ts.tv_nsec / 1000000L);
+    struct timeval tv;
+    gettimeofday(&tv, NULL);
+    return (int64_t)tv.tv_sec * 1000LL + (int64_t)(tv.tv_usec / 1000L);
+}
+
 /* ══════════════════════════════════════════════════════════
-   日志
+   日志 (超 4MB 自动 ftruncate 自救)
 ══════════════════════════════════════════════════════════ */
+static void maybe_truncate_log(void) {
+    if (!g_log) return;
+    int lfd = fileno(g_log);
+    if (lfd < 0) return;
+    struct stat lst;
+    if (fstat(lfd, &lst) == 0 && (int64_t)lst.st_size > HNC_LOG_MAX_BYTES) {
+        fflush(g_log);
+        if (ftruncate(lfd, 0) == 0)
+            (void)lseek(lfd, 0, SEEK_SET);
+    }
+}
+
 static void hlog(const char *fmt, ...) {
     if (!g_log) return;
+    maybe_truncate_log();
     time_t t = time(NULL);
     struct tm tm_buf;
     char buf[32];
@@ -96,11 +125,12 @@ static void hlog(const char *fmt, ...) {
 ══════════════════════════════════════════════════════════ */
 static void nl_process(int fd) {
     char buf[8192] __attribute__((aligned(NLMSG_ALIGNTO)));
-    /* 一次 wakeup 抽干到 EAGAIN(rc3.1.33 #4)。事件风暴会被调度器 worker 合并
-     * 成一次重探, 这里每条链路事件都请求一次也没关系(只置 flag + cond_signal)。 */
-    for (;;) {
+    /* 单轮最多处理 64 包, 防止链路事件风暴饿死 IPC / SIGTERM;
+     * 剩余事件留待下一轮 poll 唤醒继续抽干。 */
+    for (int pkt = 0; pkt < NL_BATCH_PKT_CAP && g_running; pkt++) {
         ssize_t n = recv(fd, buf, sizeof(buf), MSG_DONTWAIT);
         if (n < 0) {
+            if (errno == EINTR) continue;
             if (errno == EAGAIN || errno == EWOULDBLOCK) return;
             if (errno == ENOBUFS) {
                 /* 丢了链路事件: 重探一次兜底 */
@@ -182,32 +212,45 @@ static int count_devices_in_file_at(const char *path) {
     return n;
 }
 
-/* hotfix2: send() may legally perform a short write.
- * Use a small helper for IPC responses so GET_DEVICES and status JSON are not truncated
- * when the client/socket buffer is temporarily full. */
-static int send_all(int fd, const void *buf, size_t len) {
+/* 基于 CLOCK_MONOTONIC 总截止时间与 g_running 的写辅助, 彻底防止慢速客户端逐字节拖死主线程 */
+static int send_all_deadline(int fd, const void *buf, size_t len, int64_t deadline_ms) {
     const char *p = (const char *)buf;
     size_t off = 0;
-    while (off < len) {
-        ssize_t n = send(fd, p + off, len - off, MSG_NOSIGNAL);
+    while (off < len && g_running) {
+        int64_t rem_ms = deadline_ms - mono_ms_now();
+        if (rem_ms <= 0) {
+            errno = ETIMEDOUT;
+            return -1;
+        }
+        ssize_t n = send(fd, p + off, len - off, MSG_NOSIGNAL | MSG_DONTWAIT);
         if (n > 0) {
             off += (size_t)n;
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            int wait_ms = (rem_ms > 500LL) ? 500 : (int)rem_ms;
+            struct pollfd pfd = { .fd = fd, .events = POLLOUT, .revents = 0 };
+            int prc = poll(&pfd, 1, wait_ms);
+            if (prc < 0 && errno == EINTR) continue;
+            if (prc <= 0 || (pfd.revents & (POLLERR | POLLHUP | POLLNVAL)))
+                return -1;
+            continue;
+        }
         return -1;
     }
-    return 0;
+    return (off == len) ? 0 : -1;
 }
 
 static void handle_client(int cfd) {
-    /* v3.5.2 P1-B: 加读写超时防止恶意客户端挂起主线程
-     * - 2 秒读超时:客户端连上但不发数据 → recv 超时后 close
-     * - 5 秒写超时:客户端慢读或不读 → send 超时后 close */
+    int64_t start_ms        = mono_ms_now();
+    int64_t rd_deadline_ms  = start_ms + IPC_RD_TIMEOUT_MS;
+    int64_t tot_deadline_ms = start_ms + IPC_TOT_TIMEOUT_MS;
+
     struct timeval tv_rd = {.tv_sec = 2, .tv_usec = 0};
     struct timeval tv_wr = {.tv_sec = 5, .tv_usec = 0};
-    setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv_rd, sizeof(tv_rd));
-    setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv_wr, sizeof(tv_wr));
+    (void)setsockopt(cfd, SOL_SOCKET, SO_RCVTIMEO, &tv_rd, sizeof(tv_rd));
+    (void)setsockopt(cfd, SOL_SOCKET, SO_SNDTIMEO, &tv_wr, sizeof(tv_wr));
 
     if (geteuid() == 0) {
         struct ucred cred;
@@ -218,13 +261,35 @@ static void handle_client(int cfd) {
             return;
         }
     }
+
     char req[64] = {0};
-    ssize_t n;
-    do {
-        n = recv(cfd, req, sizeof(req)-1, 0);
-    } while (n < 0 && errno == EINTR);
-    if (n <= 0) { close(cfd); return; }
-    req[n] = '\0';
+    size_t got = 0;
+    while (got < sizeof(req) - 1 && g_running) {
+        int64_t rem_ms = rd_deadline_ms - mono_ms_now();
+        if (rem_ms <= 0) break;
+
+        ssize_t n = recv(cfd, req + got, sizeof(req) - 1 - got, MSG_DONTWAIT);
+        if (n > 0) {
+            got += (size_t)n;
+            req[got] = '\0';
+            if (strchr(req, '\n') != NULL) break;
+            continue;
+        }
+        if (n == 0) break;
+        if (errno == EINTR) continue;
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+            int wait_ms = (rem_ms > 500LL) ? 500 : (int)rem_ms;
+            struct pollfd pfd = { .fd = cfd, .events = POLLIN, .revents = 0 };
+            int prc = poll(&pfd, 1, wait_ms);
+            if (prc < 0 && errno == EINTR) continue;
+            if (prc <= 0 || (pfd.revents & (POLLERR | POLLNVAL)))
+                break;
+            continue;
+        }
+        break;
+    }
+    if (got == 0 || !g_running) { close(cfd); return; }
+    req[got] = '\0';
     /* 去尾部空白 */
     for (int i = (int)strlen(req)-1; i >= 0 && (req[i]=='\n'||req[i]=='\r'||req[i]==' '); i--)
         req[i] = '\0';
@@ -232,26 +297,27 @@ static void handle_client(int cfd) {
     if (strcmp(req, "GET_DEVICES") == 0) {
         /* 直接发 JSON 文件内容(Go 写者的 devices.json) */
         FILE *f = fopen(g_devices_path, "re");
-        if (!f) { (void)send_all(cfd, "{}", 2); }
+        if (!f) { (void)send_all_deadline(cfd, "{}", 2, tot_deadline_ms); }
         else {
             char fbuf[65536];
             size_t rd;
-            while ((rd = fread(fbuf, 1, sizeof(fbuf), f)) > 0) {
-                /* hotfix2: 处理短写,避免设备较多时返回半截 JSON */
-                if (send_all(cfd, fbuf, rd) != 0) break;
+            size_t sent_tot = 0;
+            while (g_running && sent_tot < (size_t)HNC_LOG_MAX_BYTES &&
+                   (rd = fread(fbuf, 1, sizeof(fbuf), f)) > 0) {
+                if (mono_ms_now() >= tot_deadline_ms) break;
+                if (send_all_deadline(cfd, fbuf, rd, tot_deadline_ms) != 0) break;
+                sent_tot += rd;
             }
             fclose(f);
         }
     } else if (strcmp(req, "REFRESH") == 0) {
-        /* Go 写者看到 run/devices.refresh 的 mtime 变了就立刻全量扫一次。
-         * 高频 REFRESH 只是反复 touch 一个文件, Go 写者那边每拍最多扫一次。 */
         touch_refresh_file();
-        (void)send_all(cfd, "OK:queued\n", 10);
+        (void)send_all_deadline(cfd, "OK:queued\n", 10, tot_deadline_ms);
     } else if (strcmp(req, "STATUS") == 0) {
         char resp[128];
         snprintf(resp, sizeof(resp), "running:1 devices:%d pid:%d\n",
                  count_devices_in_file_at(g_devices_path), (int)getpid());
-        (void)send_all(cfd, resp, strlen(resp));
+        (void)send_all_deadline(cfd, resp, strlen(resp), tot_deadline_ms);
     } else if (strncmp(req, "OFFLOAD_NOTIFY_LIMIT ", 21) == 0) {
         /* v5.0: OFFLOAD_NOTIFY_LIMIT <mac> <0|1>
          * apply_device_rule.sh 在 tc 规则添加/删除后调 */
@@ -260,45 +326,43 @@ static void handle_client(int cfd) {
         if (sscanf(req + 21, "%31s %d", mac, &flag) == 2 &&
             (flag == 0 || flag == 1)) {
             hnc_scheduler_notify_device_limit_changed(mac, flag);
-            (void)send_all(cfd, "OK\n", 3);
+            (void)send_all_deadline(cfd, "OK\n", 3, tot_deadline_ms);
         } else {
-            (void)send_all(cfd, "ERR:bad args (expect MAC 0|1)\n", 30);
+            (void)send_all_deadline(cfd, "ERR:bad args (expect MAC 0|1)\n", 30, tot_deadline_ms);
         }
     } else if (strcmp(req, "OFFLOAD_REFRESH") == 0) {
         hnc_scheduler_request_refresh();
-        (void)send_all(cfd, "OK:queued\n", 10);
+        (void)send_all_deadline(cfd, "OK:queued\n", 10, tot_deadline_ms);
     } else if (strcmp(req, "OFFLOAD_STATUS") == 0) {
         hnc_offload_summary_t summ;
         hnc_scheduler_get_summary(&summ);
         char json[2048];
         int jlen = hnc_scheduler_summary_to_json(&summ, json, sizeof(json));
         if (jlen > 0) {
-            (void)send_all(cfd, json, (size_t)jlen);
-            (void)send_all(cfd, "\n", 1);
+            if (send_all_deadline(cfd, json, (size_t)jlen, tot_deadline_ms) == 0)
+                (void)send_all_deadline(cfd, "\n", 1, tot_deadline_ms);
         } else {
-            (void)send_all(cfd, "ERR:summary serialize\n", 22);
+            (void)send_all_deadline(cfd, "ERR:summary serialize\n", 22, tot_deadline_ms);
         }
     } else if (strcmp(req, "OFFLOAD_DISABLE_GLOBAL") == 0) {
         offload_err_t e = hnc_scheduler_force_disable_global();
         char resp[64];
-        /* v5.9.0: EEMPTY(map 空, 无事可做)对 IPC 调用方保持 OK 前缀
-         * (契约不破坏, 仓库内无解析者但保守处理), 细节段透出 "EMPTY"。 */
         snprintf(resp, sizeof(resp), "%s:%s\n",
                  (e == OFFLOAD_OK || e == OFFLOAD_EEMPTY) ? "OK" : "ERR",
                  offload_err_str(e));
-        (void)send_all(cfd, resp, strlen(resp));
+        (void)send_all_deadline(cfd, resp, strlen(resp), tot_deadline_ms);
     } else if (strcmp(req, "OFFLOAD_RESTORE_GLOBAL") == 0) {
         offload_err_t e = hnc_scheduler_force_restore_global();
         char resp[64];
         snprintf(resp, sizeof(resp), "%s:%s\n",
                  (e == OFFLOAD_OK || e == OFFLOAD_EEMPTY) ? "OK" : "ERR",
                  offload_err_str(e));
-        (void)send_all(cfd, resp, strlen(resp));
+        (void)send_all_deadline(cfd, resp, strlen(resp), tot_deadline_ms);
     } else if (strcmp(req, "QUIT") == 0) {
-        (void)send_all(cfd, "BYE\n", 4);
+        (void)send_all_deadline(cfd, "BYE\n", 4, tot_deadline_ms);
         g_running = 0;
     } else {
-        (void)send_all(cfd, "ERR:unknown command\n", 20);
+        (void)send_all_deadline(cfd, "ERR:unknown command\n", 20, tot_deadline_ms);
     }
     close(cfd);
 }
@@ -311,12 +375,34 @@ static void handle_client(int cfd) {
 #ifndef HNC_TEST_MODE
 
 /* ── 全局 fd ──────────────────────────────────────────────── */
-static int  g_nl_fd   = -1;   /* netlink socket(RTMGRP_LINK) */
+static int  g_nl_fd   = -1;   /* netlink socket(RTMGRP_LINK), -1 when degraded */
 static int  g_srv_fd  = -1;   /* UNIX socket server */
 
+static void write_best_effort(const char *path, const char *val) {
+    int fd = open(path, O_WRONLY | O_CLOEXEC);
+    if (fd < 0) return;
+    (void)write(fd, val, strlen(val));
+    close(fd);
+}
+
+static void harden_daemon_process(void) {
+    /* 防 LMKD 误杀 (-900) 并尽力迁入根 cgroup 逃离 app freezer / cached cgroup */
+    write_best_effort("/proc/self/oom_score_adj", "-900\n");
+
+    char pid_buf[32];
+    snprintf(pid_buf, sizeof(pid_buf), "%d\n", (int)getpid());
+    int cg_fd = open("/sys/fs/cgroup/cgroup.procs", O_WRONLY | O_CLOEXEC);
+    if (cg_fd >= 0) {
+        ssize_t w = write(cg_fd, pid_buf, strlen(pid_buf));
+        close(cg_fd);
+        if (w > 0) return;
+    }
+    write_best_effort("/dev/cg2_bpf/cgroup.procs", pid_buf);
+}
+
 static int nl_open(void) {
-    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
-    if (fd < 0) { hlog("ERROR: netlink socket: %s", strerror(errno)); return -1; }
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0) { hlog("WARN: netlink socket unavailable: %s", strerror(errno)); return -1; }
 
     struct sockaddr_nl sa = {
         .nl_family = AF_NETLINK,
@@ -327,7 +413,7 @@ static int nl_open(void) {
         .nl_groups = RTMGRP_LINK,
     };
     if (bind(fd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-        hlog("ERROR: netlink bind: %s", strerror(errno));
+        hlog("WARN: netlink bind unavailable: %s", strerror(errno));
         close(fd);
         return -1;
     }
@@ -335,7 +421,7 @@ static int nl_open(void) {
 }
 
 static int unix_server_open(void) {
-    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    int fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK | SOCK_CLOEXEC, 0);
     if (fd < 0) { hlog("ERROR: unix socket: %s", strerror(errno)); return -1; }
 
     struct sockaddr_un su = {.sun_family = AF_UNIX};
@@ -365,60 +451,52 @@ static void sig_usr1(int s) { (void)s; g_need_refresh = 1; }
 static void sig_term(int s) { (void)s; g_running      = 0; }
 
 /* ══════════════════════════════════════════════════════════
-   PID 文件
+   PID 文件 (flock + st_dev/st_ino 一致性校验防 unlink 孤岛双实例)
 ══════════════════════════════════════════════════════════ */
-
-/* v3.5.2 P1-D + P2-A:
- * 1) write_pid 用 O_CREAT|O_EXCL 原子创建,如果文件已存在:
- *    - 读出旧 PID,kill -0 检查活不活
- *    - 活着 → 返回 -1 让 main 退出(不做 cleanup 避免误删别人的文件)
- *    - 死了 → unlink 旧文件,重试 O_EXCL 创建
- * 2) fopen/write 失败时打日志而不是静默
- *
- * 防止的场景:watchdog 重启 hotspotd 时并发拉起两个实例,
- * 第二个实例 O_EXCL 失败,检测到第一个实例活着 → 干净退出,
- * 不会 unlink 第一个实例的 PID 文件。
- */
 static int g_pid_lock_fd = -1;
 
 static int write_pid(void) {
-    /* v7: 采用内核级 flock 排他锁替代脆弱的 kill(old_pid, 0) 检查，
-     * 彻底杜绝 Android pid_max=32768 下 PID 撞号复用导致永久拒启，进程崩溃内核自动解锁 */
-    int fd = open(PID_FILE, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
-    if (fd < 0) {
-        hlog("ERROR: cannot open PID file: %s", strerror(errno));
-        return -1;
-    }
-    if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
-        close(fd);
-        hlog("ERROR: another hotspotd instance holds PID flock, exiting");
-        return -1;
-    }
-    if (ftruncate(fd, 0) == 0) {
-        char buf[32];
-        int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
-        if (write(fd, buf, (size_t)n) != n) {
-            hlog("WARN: write PID file short/failed: %s", strerror(errno));
+    for (int attempt = 0; attempt < 4; attempt++) {
+        int fd = open(PID_FILE, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
+        if (fd < 0) {
+            hlog("ERROR: cannot open PID file: %s", strerror(errno));
+            return -1;
         }
+        if (flock(fd, LOCK_EX | LOCK_NB) < 0) {
+            close(fd);
+            hlog("ERROR: another hotspotd instance holds PID flock, exiting");
+            return -1;
+        }
+        struct stat st_fd, st_path;
+        if (fstat(fd, &st_fd) != 0 || stat(PID_FILE, &st_path) != 0 ||
+            st_fd.st_dev != st_path.st_dev || st_fd.st_ino != st_path.st_ino) {
+            close(fd);
+            continue; /* 并发旧实例刚 unlink 了该孤岛 inode, 重试打开当前路径 */
+        }
+        if (ftruncate(fd, 0) == 0) {
+            (void)lseek(fd, 0, SEEK_SET);
+            char buf[32];
+            int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+            if (n <= 0 || write(fd, buf, (size_t)n) != n) {
+                hlog("WARN: write PID file short/failed: %s", strerror(errno));
+            }
+        }
+        g_pid_lock_fd = fd; /* 随进程生命周期保持打开 */
+        return 0;
     }
-    g_pid_lock_fd = fd; /* 随进程生命周期保持打开 */
-    return 0;
+    hlog("ERROR: failed to acquire stable inode lock on %s", PID_FILE);
+    return -1;
 }
 
-/* v3.5.2 P1-D: cleanup 时验证 PID 文件里的 PID 是不是自己,
- * 是才删,不是说明别的实例已经 overwrite 了,不要删它的文件 */
 static void cleanup_pid(void) {
-    FILE *rf = fopen(PID_FILE, "re");
-    if (rf) {
-        int file_pid = 0;
-        if (fscanf(rf, "%d", &file_pid) == 1 && file_pid == (int)getpid()) {
-            fclose(rf);
-            unlink(PID_FILE);
-        } else {
-            fclose(rf);
-        }
-    }
     if (g_pid_lock_fd >= 0) {
+        struct stat st_fd, st_path;
+        if (fstat(g_pid_lock_fd, &st_fd) == 0 &&
+            stat(PID_FILE, &st_path) == 0 &&
+            st_fd.st_dev == st_path.st_dev &&
+            st_fd.st_ino == st_path.st_ino) {
+            unlink(PID_FILE);
+        }
         close(g_pid_lock_fd);
         g_pid_lock_fd = -1;
     }
@@ -527,13 +605,13 @@ int main(int argc, char *argv[]) {
     /* v3.5.2 P2-E: g_log 加 FD_CLOEXEC,避免子进程继承日志 fd */
     if (g_log) fcntl(fileno(g_log), F_SETFD, FD_CLOEXEC);
 
-    /* PID 文件
-     * v3.5.2 P1-D: 如果 write_pid 返回 -1(别的实例还活着),直接退出,
-     * 跳过 cleanup 避免误删别人的 PID 文件 */
+    /* PID 文件: 若别的实例还活着则直接干净退出, 跳过 cleanup */
     if (write_pid() < 0) {
         if (g_log) fclose(g_log);
-        return 0;  /* 干净退出,不走 cleanup */
+        return 0;
     }
+
+    harden_daemon_process();
 
     /* 信号 (sigaction 无 SA_RESTART, 确保 SIGTERM/SIGINT/SIGHUP 即时打断阻塞调用) */
     {
@@ -556,15 +634,20 @@ int main(int argc, char *argv[]) {
         sigaction(SIGPIPE, &sa_ign, NULL);
     }
 
-    /* Netlink socket */
+    /* Netlink socket: 若被 SELinux 拒绝则降级 g_nl_fd = -1, 依靠 scheduler 周期巡检继续服务 IPC */
     g_nl_fd = nl_open();
-    if (g_nl_fd < 0) { hlog("FATAL: cannot open netlink"); goto cleanup; }
+    if (g_nl_fd < 0) {
+        g_nl_fd = -1;
+        hlog("WARN: netlink RTMGRP_LINK unavailable (SELinux denied?), degraded to periodic timer mode");
+    }
 
     /* UNIX socket server */
     g_srv_fd = unix_server_open();
     if (g_srv_fd < 0) { hlog("FATAL: cannot open UNIX socket"); goto cleanup; }
 
-    hlog("Listening on netlink RTMGRP_LINK + %s", SOCK_PATH);
+    hlog("Listening on %s + %s",
+         g_nl_fd >= 0 ? "netlink RTMGRP_LINK" : "timer-only (netlink disabled)",
+         SOCK_PATH);
 
     /* v5.0: 启动 offload scheduler (探测平台 + 选 adapter + 启 worker)
      *
@@ -585,33 +668,52 @@ int main(int argc, char *argv[]) {
 
     /* ── 主事件循环 ────────────────────────────────────────── */
     while (g_running) {
+        maybe_truncate_log();
+
         if (g_need_refresh) {
             g_need_refresh = 0;
             touch_refresh_file();
         }
 
-        fd_set rfds;
-        FD_ZERO(&rfds);
-        FD_SET(g_nl_fd,  &rfds);
-        FD_SET(g_srv_fd, &rfds);
-        int maxfd = (g_nl_fd > g_srv_fd ? g_nl_fd : g_srv_fd) + 1;
+        struct pollfd pfds[2];
+        nfds_t nfds = 0;
+        int nl_idx = -1, srv_idx = -1;
+        if (g_nl_fd >= 0) {
+            nl_idx = (int)nfds;
+            pfds[nfds].fd      = g_nl_fd;
+            pfds[nfds].events  = POLLIN;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
+        if (g_srv_fd >= 0) {
+            srv_idx = (int)nfds;
+            pfds[nfds].fd      = g_srv_fd;
+            pfds[nfds].events  = POLLIN;
+            pfds[nfds].revents = 0;
+            nfds++;
+        }
 
-        /* 5s 超时只为兜住「SIGUSR1 恰好落在检查 g_need_refresh 之后、select 之前」 */
-        struct timeval tv = {.tv_sec = 5, .tv_usec = 0};
-        int ret = select(maxfd, &rfds, NULL, NULL, &tv);
+        /* 5s 超时兜住 SIGUSR1 信号窗口与周期日志尺寸自检 */
+        int ret = poll(pfds, nfds, 5000);
         if (ret < 0) {
             if (errno == EINTR) continue;  /* 信号打断,正常 */
-            hlog("ERROR: select: %s", strerror(errno));
+            hlog("ERROR: poll: %s", strerror(errno));
             break;
         }
         if (ret == 0) continue;
 
-        if (FD_ISSET(g_nl_fd, &rfds))
+        if (nl_idx >= 0 && (pfds[nl_idx].revents & (POLLIN | POLLERR)))
             nl_process(g_nl_fd);
 
-        if (FD_ISSET(g_srv_fd, &rfds)) {
-            int cfd = accept4(g_srv_fd, NULL, NULL, SOCK_CLOEXEC);
-            if (cfd >= 0) handle_client(cfd);
+        if (srv_idx >= 0 && (pfds[srv_idx].revents & POLLIN)) {
+            for (int acc = 0; acc < 16 && g_running; acc++) {
+                int cfd = accept4(g_srv_fd, NULL, NULL, SOCK_CLOEXEC | SOCK_NONBLOCK);
+                if (cfd < 0) {
+                    if (errno == EINTR) continue;
+                    break;
+                }
+                handle_client(cfd);
+            }
         }
     }
 
@@ -623,7 +725,6 @@ cleanup:
 
     if (g_nl_fd  >= 0) close(g_nl_fd);
     if (g_srv_fd >= 0) { close(g_srv_fd); unlink(SOCK_PATH); }
-    /* v3.5.2 P1-D: 验证 PID 文件是自己的才 unlink */
     cleanup_pid();
     if (g_log) { hlog("=== hotspotd stopped ==="); fclose(g_log); }
     return 0;

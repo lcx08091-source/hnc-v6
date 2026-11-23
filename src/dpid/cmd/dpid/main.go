@@ -13,6 +13,7 @@ package main
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -427,20 +428,20 @@ func main() {
 	}
 
 	pr := probe.Run(probe.Options{IfaceOverride: cfg.Iface})
+	if fresh := resolveCurrentIface(cfg); fresh != "" && fresh != pr.APIface {
+		pr.APIface = fresh
+		pr.APIfaceSource = "ifacehint"
+	}
 	if err := probe.WriteJSON(filepath.Join(cfg.RunDir, probeFileName), pr); err != nil {
 		log.Printf("WARN: write probe: %v", err)
 	}
 	log.Printf("probe: af_packet=%v iface=%q src=%s offload_hint=%v conntrack=%v ipv6_capture=%v",
 		pr.AFPacketAvailable, pr.APIface, pr.APIfaceSource, pr.OffloadHint, pr.ConntrackReadable, pr.IPv6Capture)
 
-	// rc29 fix: tell capture about the hotspot's own IP nets so assignClient
-	// can correctly identify which side of a flow is the client. Without
-	// this, reverse-direction packets (server -> client) get the server
-	// SrcIP assigned as the "client", flooding the clients map with bogus
-	// per-server entries (rc29 initial release bug).
+	// rc29 + RC2 fix: tell capture about the hotspot's own MAC and IP nets so
+	// assignClient can identify client vs server direction accurately.
 	if pr.APIface != "" {
-		nets := capture.InterfaceNets(pr.APIface)
-		capture.SetHotspotNets(nets)
+		nets := refreshHotspotContext(pr.APIface)
 		if len(nets) > 0 {
 			names := make([]string, 0, len(nets))
 			for _, n := range nets {
@@ -448,7 +449,7 @@ func main() {
 			}
 			log.Printf("hotspot nets on %s: %s", pr.APIface, strings.Join(names, " "))
 		} else {
-			log.Printf("WARN: no IP addrs detected on %s; client/server direction inference disabled", pr.APIface)
+			log.Printf("WARN: no IP addrs detected on %s; client/server direction inference pending", pr.APIface)
 		}
 	}
 
@@ -464,17 +465,22 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	output.SetCompiledFPPath(cfg.RunDir)
+	actReader = activity.NewReader(cfg.RunDir)
+
 	wakeHistCh := make(chan struct{}, 1)
 	wakeIPMapCh := make(chan struct{}, 1)
 	wakeSelfCh := make(chan struct{}, 1)
+	wakeCaptureCh := make(chan struct{}, 1)
 	wakeStandbyLoops := func() {
-		for _, ch := range []chan struct{}{wakeHistCh, wakeIPMapCh, wakeSelfCh} {
+		for _, ch := range []chan struct{}{wakeHistCh, wakeIPMapCh, wakeSelfCh, wakeCaptureCh} {
 			select {
 			case ch <- struct{}{}:
 			default:
 			}
 		}
 	}
+	startHotspotHintInotify(ctx, cfg.RunDir, wakeStandbyLoops)
 
 	sigCh := make(chan os.Signal, 4)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT, syscall.SIGHUP)
@@ -493,8 +499,6 @@ func main() {
 		}
 	}()
 
-	output.SetCompiledFPPath(cfg.RunDir)
-	actReader = activity.NewReader(cfg.RunDir)
 	bumpStartCount(cfg.RunDir) // rc42: 持久 lifetime 启动计数, 供 /api/sla
 
 	// v6.0.0 Vector: LeakGuard 明文隐私嗅探引擎 + 16KB 双槽 seqcount_latch 共享内存快照。
@@ -558,12 +562,9 @@ func main() {
 		}()
 	}
 
-	// rc30.4: traffic history sampler. Runs at the top-level ctx so it
-	// survives attempt restarts (interface migration, capture re-open).
-	// First tick after dpid start only establishes a baseline — no row is
-	// written. Subsequent ticks emit (mac, app, tx_delta, rx_delta) JSONL
-	// rows to /data/local/hnc/run/stats.YYYYMMDD.jsonl for trend graphs.
-	output.HistoryDir = cfg.RunDir
+	// rc30.4 + RC2: traffic history sampler persisted under <hnc>/data/dpi_history
+	// (migrating any residual stats.*.jsonl out of 32M tmpfs run/).
+	initHistoryStorage(cfg.RunDir)
 	historySampler := output.NewHistorySampler(sw)
 	go func() {
 		cur := historySampleEvery(actReader.Get(), output.HistorySampleEvery)
@@ -729,8 +730,8 @@ func main() {
 
 	// v5.6.0-rc1: self-iface AF_PACKET capture supervisor.
 	go runSelfCaptures(ctx, cfg, selfAttrib, func() string {
-		if p2 := probe.Run(probe.Options{IfaceOverride: cfg.Iface}); p2.APIface != "" {
-			return p2.APIface
+		if cur := resolveCurrentIface(cfg); cur != "" {
+			return cur
 		}
 		return pr.APIface
 	})
@@ -774,14 +775,21 @@ func main() {
 	apkScanner := apkscan.New(apkscan.Options{OutPath: filepath.Join(cfg.RunDir, apkDomainsFile), Label: appResolver.Display})
 	go apkscan.RunDaemon(ctx, apkScanner, apkscan.DaemonOptions{RequestFile: filepath.Join(cfg.RunDir, apkScanRequest)})
 
-	switch mode {
-	case ModeBlind, ModeDisabled:
+	// RC2: Decouple true blind/disabled mode (AF_PACKET unavailable or explicit
+	// disable_capture=true) from cold-start standby (hotspot temporarily off at
+	// boot, iface==""). Whenever canCapture(cfg, pr) is true, enter runCapture so
+	// dpid wakes up as soon as the hotspot interface appears.
+	if !canCapture(cfg, pr) {
 		clearCrashFlag(cfg.RunDir)
 		log.Printf("no capture in %s mode; idling for state writes", mode)
 		idleWithFlush(ctx, sw, wakeStandbyLoops)
-	case ModeOK:
-		armCrashFlag(cfg.RunDir)
-		if err := runCapture(ctx, cfg, pr, sw, devID, ipNames, leakEngine, shmTracker, wakeStandbyLoops); err != nil {
+	} else {
+		if pr.APIface != "" {
+			armCrashFlag(cfg.RunDir)
+		} else {
+			clearCrashFlag(cfg.RunDir)
+		}
+		if err := runCapture(ctx, cfg, pr, sw, devID, ipNames, leakEngine, shmTracker, wakeCaptureCh, wakeStandbyLoops); err != nil {
 			// Capture open/run failure is capability failure, not daemon crash.
 			reason := "open/run capture failed: " + err.Error()
 			log.Printf("ERROR: %s", reason)
@@ -836,15 +844,66 @@ func flushEvery(ctx context.Context, every time.Duration, name string, flush fun
 	}
 }
 
+type captureRunner interface {
+	Run(ctx context.Context, onEvent func(capture.Event)) error
+	Close()
+	Iface() string
+	CurrentIfindex() int
+	Stats() capture.Stats
+	Rebind(newIface string) error
+}
+
+// Runtime hooks (overridable in unit tests for deterministic self-healing verification).
+var (
+	openCaptureFn        = func(opts capture.Options) (captureRunner, error) { return capture.Open(opts) }
+	ifaceNetsFn          = capture.InterfaceNets
+	ifaceByNameFn        = net.InterfaceByName
+	discoverAPFn         = capture.DiscoverAPCandidates
+	rebindHandleFn       = func(h captureRunner, newIface string) error { return h.Rebind(newIface) }
+	rebindCheckTickEvery = 15 * time.Second
+)
+
 // setLocalMACsFor 把抓包接口自身的 MAC 告诉 capture, 避免把本机发出的
 // mDNS/SSDP 公告识别成一台客户端(v5.13)。
 func setLocalMACsFor(iface string) {
-	ifc, err := net.InterfaceByName(iface)
-	if err != nil || len(ifc.HardwareAddr) != 6 {
+	if iface == "" {
+		capture.SetLocalMACs(nil)
+		return
+	}
+	ifc, err := ifaceByNameFn(iface)
+	if err != nil || ifc == nil || len(ifc.HardwareAddr) != 6 {
 		capture.SetLocalMACs(nil)
 		return
 	}
 	capture.SetLocalMACs([]net.HardwareAddr{ifc.HardwareAddr})
+}
+
+// refreshHotspotContext atomically refreshes both local AP MACs and hotspot
+// subnets (IPv4 + IPv6) for capture direction inference.
+func refreshHotspotContext(iface string) []*net.IPNet {
+	if iface == "" {
+		capture.SetLocalMACs(nil)
+		capture.SetHotspotNets(nil)
+		return nil
+	}
+	setLocalMACsFor(iface)
+	nets := ifaceNetsFn(iface)
+	capture.SetHotspotNets(nets)
+	return nets
+}
+
+func netsSignature(nets []*net.IPNet) string {
+	if len(nets) == 0 {
+		return ""
+	}
+	parts := make([]string, 0, len(nets))
+	for _, n := range nets {
+		if n != nil {
+			parts = append(parts, n.String())
+		}
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // toDeviceHint 把 capture.DevHint 转成 output.DeviceHint(output 不依赖 capture)。
@@ -871,21 +930,46 @@ func runCapture(
 	ipNames *output.IPNameTable,
 	leakEngine *leakguard.Engine,
 	shmTracker *shmRuntimeTracker,
+	wakeCaptureCh <-chan struct{},
 	wakeStandbyLoops func(),
 ) error {
 	iface := pr.APIface
 	attempt := 0
-	rebindCount := 0
-	// v5.22: 接口暂时不在(热点关了)时重试间隔 2s 起翻倍, 上限 30s(确知热点未开 60s),
-	// 不再每 2 秒开一次 AF_PACKET + 写一次 dpi_state.json 空转。
+	var rebindCount atomic.Int64
+	// v5.22 + RC2: 接口暂时不在(开机热点未开/热点关了)时重试间隔 2s 起翻倍,
+	// 同时监听 wakeCaptureCh 实现重开热点毫秒级秒醒, 每次唤醒均重新解析最新口名。
 	var retry time.Duration
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
+		if cur := resolveCurrentIface(cfg); cur != "" {
+			iface = cur
+		} else if iface != "" && !isIfaceAliveUp(iface) {
+			iface = ""
+		}
+
+		if iface == "" {
+			refreshHotspotContext("")
+			sw.SetMode(string(ModeBlind), "no hotspot iface detected", "", pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
+			_ = sw.Flush()
+			clearCrashFlag(cfg.RunDir)
+			retry = activity.CaptureRetryBackoff(retry, actReader.Get())
+			cont, woken := sleepOrWake(ctx, retry, wakeCaptureCh)
+			if !cont {
+				return nil
+			}
+			if woken {
+				if isHotspotActiveOrUnknown(cfg.RunDir) {
+					retry = 0
+				}
+			}
+			continue
+		}
+
 		attempt++
-		setLocalMACsFor(iface)
-		h, err := capture.Open(capture.Options{Iface: iface, Snaplen: cfg.Snaplen, RcvBufBytes: cfg.RcvBufBytes})
+		refreshHotspotContext(iface)
+		h, err := openCaptureFn(capture.Options{Iface: iface, Snaplen: cfg.Snaplen, RcvBufBytes: cfg.RcvBufBytes})
 		if err != nil {
 			if isRecoverableCaptureError(err) {
 				reason := "interface down/rebind retry: " + err.Error()
@@ -894,21 +978,35 @@ func runCapture(
 				_ = sw.Flush()
 				clearCrashFlag(cfg.RunDir)
 				retry = activity.CaptureRetryBackoff(retry, actReader.Get())
-				if !sleepOrDone(ctx, retry) {
+				cont, woken := sleepOrWake(ctx, retry, wakeCaptureCh)
+				if !cont {
 					return nil
+				}
+				if woken {
+					if isHotspotActiveOrUnknown(cfg.RunDir) {
+						retry = 0
+					}
 				}
 				continue
 			}
 			return fmt.Errorf("open capture: %w", err)
 		}
 		retry = 0
+		armCrashFlag(cfg.RunDir)
+		refreshHotspotContext(iface)
 
 		// Launch rebind-check goroutine for this capture attempt.
-		// It monitors iface changes and zero-packet conditions.
+		// It monitors iface/ifindex/subnet changes and zero-packet conditions.
 		rebindCtx, rebindCancel := context.WithCancel(ctx)
-		go rebindCheckLoop(rebindCtx, h, cfg, sw, &rebindCount)
+		var rebindWG sync.WaitGroup
+		rebindWG.Add(1)
+		go func() {
+			defer rebindWG.Done()
+			rebindCheckLoop(rebindCtx, h, cfg, pr, sw, &rebindCount)
+		}()
 
 		attemptCtx, attemptCancel := context.WithCancel(ctx)
+		var attemptWG sync.WaitGroup
 		log.Printf("capture started on %s (snaplen=%d, rcvbuf=%d, attempt=%d)", iface, cfg.Snaplen, cfg.RcvBufBytes, attempt)
 		sw.SetMode(string(ModeOK), "", iface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
 		_ = sw.Flush()
@@ -917,7 +1015,9 @@ func runCapture(
 		}
 
 		// rc40 (P2-20): once capture has run healthily for 5 min, clear the crash flag.
+		attemptWG.Add(1)
 		go func(ctxLocal context.Context) {
+			defer attemptWG.Done()
 			t := time.NewTimer(5 * time.Minute)
 			defer t.Stop()
 			select {
@@ -932,7 +1032,9 @@ func runCapture(
 		var debugBudget atomic.Int64
 		if debug {
 			debugBudget.Store(int64(debugEventsPerSec))
+			attemptWG.Add(1)
 			go func() {
+				defer attemptWG.Done()
 				tk := time.NewTicker(time.Second)
 				defer tk.Stop()
 				for {
@@ -946,7 +1048,9 @@ func runCapture(
 			}()
 		}
 
-		go func(local *capture.Handle) {
+		attemptWG.Add(1)
+		go func(local captureRunner) {
+			defer attemptWG.Done()
 			// v5.22: 基准 5s; 热点上没有在线设备时 30s(activity.StateFlushEvery)
 			for {
 				tk := time.NewTimer(activity.StateFlushEvery(actReader.Get()))
@@ -974,7 +1078,9 @@ func runCapture(
 			}
 		}(h)
 
-		go func(local *capture.Handle) {
+		attemptWG.Add(1)
+		go func(local captureRunner) {
+			defer attemptWG.Done()
 			tk := time.NewTicker(15 * time.Second)
 			defer tk.Stop()
 			var lastPkts, lastEv uint64
@@ -1000,7 +1106,9 @@ func runCapture(
 		}(h)
 
 		// BUG-003: 5s health watchdog.
-		go func(local *capture.Handle) {
+		attemptWG.Add(1)
+		go func(local captureRunner) {
+			defer attemptWG.Done()
 			tk := time.NewTicker(5 * time.Second)
 			defer tk.Stop()
 			var (
@@ -1031,7 +1139,9 @@ func runCapture(
 		}(h)
 
 		// rc29: conntrack telemetry, refreshed every 15s.
+		attemptWG.Add(1)
 		go func() {
+			defer attemptWG.Done()
 			tk := time.NewTicker(15 * time.Second)
 			defer tk.Stop()
 			scan := func() {
@@ -1175,14 +1285,17 @@ func runCapture(
 		})
 		attemptCancel()
 		rebindCancel()
+		rebindWG.Wait()
+		attemptWG.Wait()
 		h.Close()
 		if err == nil {
 			return nil
 		}
 		if errors.Is(err, capture.ErrRebound) {
 			iface = h.Iface()
+			refreshHotspotContext(iface)
 			log.Printf("capture rebound to %s, retrying (attempt=%d)", iface, attempt+1)
-			if !sleepOrDone(ctx, 500*time.Millisecond) {
+			if cont, _ := sleepOrWake(ctx, 100*time.Millisecond, wakeCaptureCh); !cont {
 				return nil
 			}
 			continue
@@ -1194,8 +1307,14 @@ func runCapture(
 			_ = sw.Flush()
 			clearCrashFlag(cfg.RunDir)
 			retry = activity.CaptureRetryBackoff(retry, actReader.Get())
-			if !sleepOrDone(ctx, retry) {
+			cont, woken := sleepOrWake(ctx, retry, wakeCaptureCh)
+			if !cont {
 				return nil
+			}
+			if woken {
+				if isHotspotActiveOrUnknown(cfg.RunDir) {
+					retry = 0
+				}
 			}
 			continue
 		}
@@ -1222,13 +1341,20 @@ func isRecoverableCaptureError(err error) bool {
 }
 
 func sleepOrDone(ctx context.Context, d time.Duration) bool {
+	cont, _ := sleepOrWake(ctx, d, nil)
+	return cont
+}
+
+func sleepOrWake(ctx context.Context, d time.Duration, wakeCh <-chan struct{}) (cont bool, woken bool) {
 	t := time.NewTimer(d)
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
-		return false
+		return false, false
+	case <-wakeCh:
+		return true, true
 	case <-t.C:
-		return true
+		return true, false
 	}
 }
 
@@ -1306,6 +1432,14 @@ func idleUntilSignal(runDir string, sw *output.Writer) {
 	}
 }
 
+// canCapture reports whether dpid has kernel AF_PACKET capability and capture
+// is not explicitly disabled. When true, dpid enters runCapture even if no
+// hotspot interface exists yet at cold boot (standby-for-iface), preventing
+// permanent startup blindness.
+func canCapture(cfg Config, pr probe.Result) bool {
+	return !cfg.DisableCapture && pr.AFPacketAvailable
+}
+
 func decideMode(cfg Config, pr probe.Result) (Mode, string) {
 	if cfg.DisableCapture {
 		return ModeDisabled, "disable_capture=true"
@@ -1317,6 +1451,100 @@ func decideMode(cfg Config, pr probe.Result) (Mode, string) {
 		return ModeBlind, "no hotspot iface detected"
 	}
 	return ModeOK, ""
+}
+
+func initHistoryStorage(runDir string) string {
+	cleanRun := filepath.Clean(runDir)
+	histDir := filepath.Join(filepath.Dir(cleanRun), "data", "dpi_history")
+	output.HistoryDir = histDir
+	if err := os.MkdirAll(histDir, 0o755); err != nil {
+		log.Printf("WARN: mkdir history_dir %s: %v", histDir, err)
+	} else if err := output.MigrateLegacyHistory(cleanRun, histDir); err != nil {
+		log.Printf("WARN: migrate legacy history from %s to %s: %v", cleanRun, histDir, err)
+	}
+	return histDir
+}
+
+// isHotspotActiveOrUnknown returns true when hotspot state is unknown or active.
+// If actReader returns a cached hotspot-off snapshot (5s cacheTTL), it double-checks
+// runDir/activity.json directly so rapid <5s hotspot re-enables are never missed.
+func isHotspotActiveOrUnknown(runDir string) bool {
+	act := actReader.Get()
+	if !act.OK || act.Hotspot {
+		return true
+	}
+	if runDir == "" {
+		return false
+	}
+	b, err := os.ReadFile(filepath.Join(runDir, activity.FileName))
+	if err != nil {
+		return true
+	}
+	fresh := activity.Parse(b, time.Now())
+	return !fresh.OK || fresh.Hotspot
+}
+
+func startHotspotHintInotify(ctx context.Context, runDir string, onWake func()) {
+	if runDir == "" || onWake == nil {
+		return
+	}
+	fd, err := syscall.InotifyInit1(syscall.IN_CLOEXEC | syscall.IN_NONBLOCK)
+	if err != nil {
+		return
+	}
+	const mask = syscall.IN_MOVED_TO | syscall.IN_CLOSE_WRITE | syscall.IN_CREATE
+	if _, err := syscall.InotifyAddWatch(fd, runDir, mask); err != nil {
+		_ = syscall.Close(fd)
+		return
+	}
+	f := os.NewFile(uintptr(fd), "dpid-hotspot-inotify")
+	go func() {
+		done := make(chan struct{})
+		defer close(done)
+		defer f.Close()
+		go func() {
+			select {
+			case <-ctx.Done():
+				_ = f.Close()
+			case <-done:
+			}
+		}()
+		var buf [4096]byte
+		for {
+			n, rerr := f.Read(buf[:])
+			if rerr != nil {
+				return
+			}
+			off := 0
+			woke := false
+			for off+syscall.SizeofInotifyEvent <= n {
+				evMask := binary.LittleEndian.Uint32(buf[off+4 : off+8])
+				evLen := binary.LittleEndian.Uint32(buf[off+12 : off+16])
+				hdrEnd := off + syscall.SizeofInotifyEvent
+				if evLen > uint32(n-hdrEnd) {
+					break
+				}
+				endOff := hdrEnd + int(evLen)
+				raw := buf[hdrEnd:endOff]
+				end := 0
+				for end < len(raw) && raw[end] != 0 {
+					end++
+				}
+				switch string(raw[:end]) {
+				case "iface_detect.json", "hotspot_iface":
+					woke = true
+				case "activity.json":
+					if evMask&(syscall.IN_MOVED_TO|syscall.IN_CLOSE_WRITE) != 0 && isHotspotActiveOrUnknown(runDir) {
+						woke = true
+					}
+				}
+				off = endOff
+			}
+			if woke {
+				onWake()
+			}
+		}
+	}()
 }
 
 func loadConfig(path string) Config {
@@ -1505,14 +1733,39 @@ func doByteSample(sampler bytestats.ByteSampler, agg *output.SelfAttribAggregato
 	agg.RecordBytes(out, src, time.Now().Unix())
 }
 
-func resolveCurrentIface(cfg Config) string {
-	if cfg.Iface != "" {
-		return cfg.Iface
+func isIfaceAliveUp(name string) bool {
+	if name == "" {
+		return false
 	}
-	if s, ok := ifacehint.Read(cfg.RunDir, time.Now()); ok {
+	ifc, err := ifaceByNameFn(name)
+	return err == nil && ifc != nil && ifc.Flags&net.FlagUp != 0
+}
+
+func resolveCurrentIface(cfg Config) string {
+	// 1. Fresh iface_detect.json (within 10m) takes top priority so band-switching
+	// (e.g. wlan2 -> ap0) never gets stuck on a stale cfg.Iface from dpi_config.json.
+	if s, ok := ifacehint.ReadDetect(cfg.RunDir, time.Now(), ifacehint.FreshWindow); ok {
 		return s
 	}
-	if cands, _ := capture.DiscoverAPCandidates(); len(cands) > 0 {
+	// 2. Fallback hotspot_iface via ifacehint.Read unless cfg.Iface explicitly
+	// names a live UP interface while the fallback hint does not.
+	if s, ok := ifacehint.Read(cfg.RunDir, time.Now()); ok {
+		if cfg.Iface == "" || isIfaceAliveUp(s) || !isIfaceAliveUp(cfg.Iface) {
+			return s
+		}
+	}
+	// 3. Explicit cfg.Iface if alive, otherwise self-heal via live AP discovery.
+	if cfg.Iface != "" {
+		if isIfaceAliveUp(cfg.Iface) {
+			return cfg.Iface
+		}
+		if cands, _ := discoverAPFn(); len(cands) > 0 {
+			return cands[0].Name
+		}
+		return cfg.Iface
+	}
+	// 4. Auto-discovery fallback.
+	if cands, _ := discoverAPFn(); len(cands) > 0 {
 		return cands[0].Name
 	}
 	return ""
@@ -1527,15 +1780,21 @@ func readIfaceRxBytes(iface string) uint64 {
 	return n
 }
 
-func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *output.Writer, rebindCount *int) {
-	ticker := time.NewTicker(15 * time.Second)
+func rebindCheckLoop(ctx context.Context, h captureRunner, cfg Config, pr probe.Result, sw *output.Writer, rebindCount *atomic.Int64) {
+	tickDur := rebindCheckTickEvery
+	if tickDur <= 0 {
+		tickDur = 15 * time.Second
+	}
+	ticker := time.NewTicker(tickDur)
 	defer ticker.Stop()
 
 	var (
 		zeroPktStart time.Time
 		lastRxBytes  uint64
+		lastNetsSig  string
 	)
 	lastRxBytes = readIfaceRxBytes(h.Iface())
+	lastNetsSig = netsSignature(ifaceNetsFn(h.Iface()))
 
 	for {
 		select {
@@ -1550,8 +1809,8 @@ func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *out
 			handleIface := h.Iface()
 			handleIfindex := h.CurrentIfindex()
 
-			ifc, err := net.InterfaceByName(currentIface)
-			if err != nil {
+			ifc, err := ifaceByNameFn(currentIface)
+			if err != nil || ifc == nil {
 				continue
 			}
 
@@ -1560,12 +1819,12 @@ func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *out
 
 			if currentIface != handleIface {
 				needRebind = true
-				reason = fmt.Sprintf("iface name changed: %s → %s", handleIface, currentIface)
+				reason = fmt.Sprintf("iface name changed: %s -> %s", handleIface, currentIface)
 			}
 
 			if !needRebind && ifc.Index != handleIfindex {
 				needRebind = true
-				reason = fmt.Sprintf("ifindex changed on %s: %d → %d", currentIface, handleIfindex, ifc.Index)
+				reason = fmt.Sprintf("ifindex changed on %s: %d -> %d", currentIface, handleIfindex, ifc.Index)
 			}
 
 			if !needRebind {
@@ -1576,7 +1835,7 @@ func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *out
 						zeroPktStart = time.Now()
 					} else if time.Since(zeroPktStart) >= 3*time.Minute && rxBytes > lastRxBytes {
 						needRebind = true
-						reason = fmt.Sprintf("zero DPI packets for 3m but %s rx_bytes growing (%d → %d)",
+						reason = fmt.Sprintf("zero DPI packets for 3m but %s rx_bytes growing (%d -> %d)",
 							currentIface, lastRxBytes, rxBytes)
 					}
 				} else {
@@ -1587,16 +1846,32 @@ func rebindCheckLoop(ctx context.Context, h *capture.Handle, cfg Config, sw *out
 
 			if needRebind {
 				log.Printf("REBIND: %s", reason)
-				if err := h.Rebind(currentIface); err != nil {
+				if err := rebindHandleFn(h, currentIface); err != nil {
 					log.Printf("REBIND FAILED: %v", err)
 				} else {
-					*rebindCount++
-					sw.SetRebindCount(*rebindCount)
+					nets := refreshHotspotContext(currentIface)
+					lastNetsSig = netsSignature(nets)
+					var cnt int
+					if rebindCount != nil {
+						cnt = int(rebindCount.Add(1))
+					}
+					sw.SetMode(string(ModeOK), "", currentIface, pr.TLSReassembly, pr.OffloadHint, pr.IPv6Capture)
+					sw.SetRebindCount(cnt)
 					_ = sw.Flush()
 					log.Printf("REBIND OK: now on %s (ifindex=%d, rebind_count=%d)",
-						currentIface, ifc.Index, *rebindCount)
+						currentIface, ifc.Index, cnt)
 				}
 				zeroPktStart = time.Time{}
+				continue
+			}
+
+			// Same interface & ifindex: detect randomized subnet or delayed IPv4/IPv6 assignment.
+			curNets := ifaceNetsFn(currentIface)
+			if curSig := netsSignature(curNets); curSig != lastNetsSig {
+				setLocalMACsFor(currentIface)
+				capture.SetHotspotNets(curNets)
+				lastNetsSig = curSig
+				log.Printf("REBIND-NETS: hotspot subnet updated on %s: %s", currentIface, curSig)
 			}
 		}
 	}

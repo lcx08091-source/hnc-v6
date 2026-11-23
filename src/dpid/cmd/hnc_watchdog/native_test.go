@@ -4,9 +4,14 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -42,7 +47,10 @@ func (e *natTestEnv) inject(t *testing.T, iface string, qdiscs []nlroute.Qdisc,
 	execFn func(name string, args ...string) (string, int, error)) {
 	t.Helper()
 	oldHint, oldByN, oldAddrs, oldQ, oldExec := ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn, nlQdiscListFn, execCommandFn
+	oldMirred, oldTargets := nlIngressMirredFn, iptTargetsPath
 	ifaceHintReadFn = func() (string, bool) { return iface, iface != "" }
+	nlIngressMirredFn = func(int, int) (bool, error) { return false, os.ErrNotExist }
+	iptTargetsPath = filepath.Join(e.runDir, "no_such_ip_tables_targets")
 	netInterfaceByNameFn = func(name string) (*net.Interface, error) {
 		if iface == "" && name != "ifb0" {
 			return nil, os.ErrNotExist
@@ -71,6 +79,7 @@ func (e *natTestEnv) inject(t *testing.T, iface string, qdiscs []nlroute.Qdisc,
 	t.Cleanup(func() {
 		ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn = oldHint, oldByN, oldAddrs
 		nlQdiscListFn, execCommandFn, sysIfIndexFn = oldQ, oldExec, oldSys
+		nlIngressMirredFn, iptTargetsPath = oldMirred, oldTargets
 	})
 }
 
@@ -539,5 +548,246 @@ func TestSnapshotCarriesNativeUnknown(t *testing.T) {
 	out := s.snapshot(time.Now())
 	if out.NativeUnknown != 7 {
 		t.Fatalf("NativeUnknown=%d, want 7", out.NativeUnknown)
+	}
+}
+
+func TestProbeNativeCGNATAndAuthoritativeWlan0(t *testing.T) {
+	e := newNatTestEnv(t)
+	e.inject(t, "wlan2", nil, nil)
+
+	oldAddrs := netIfAddrsFn
+	t.Cleanup(func() { netIfAddrsFn = oldAddrs })
+	netIfAddrsFn = func(*net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("100.64.42.1").To4(), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	if r := nativeProbeHotspot(); !r.ok || r.ip != "100.64.42.1" {
+		t.Fatalf("100.64.0.0/10 应识别为热点私网, got %+v", r)
+	}
+	netIfAddrsFn = func(*net.Interface) ([]net.Addr, error) {
+		return []net.Addr{&net.IPNet{IP: net.ParseIP("100.128.0.1").To4(), Mask: net.CIDRMask(24, 32)}}, nil
+	}
+	if r := nativeProbeHotspot(); !r.unknown {
+		t.Fatalf("100.128.0.1 超出 /10 应 unknown, got %+v", r)
+	}
+
+	// wlan0 仅在 iface_detect.json 明确含 authoritative=true 或 wlan0_ap=true 时放行
+	e.inject(t, "wlan0", nil, nil)
+	ts := strconv.FormatInt(nowFn().Unix(), 10)
+	e.write(t, "iface_detect.json", `{"schema":1,"ts":`+ts+`,"iface":"wlan0","authoritative":false,"wlan0_ap":false}`)
+	if r := nativeProbeHotspot(); !r.unknown {
+		t.Fatalf("非权威 wlan0 必须保持 unknown, got %+v", r)
+	}
+	e.write(t, "iface_detect.json", `{"schema":1,"ts":`+ts+`,"iface":"wlan0","authoritative":true}`)
+	if r := nativeProbeHotspot(); !r.ok || r.iface != "wlan0" {
+		t.Fatalf("authoritative=true 的 wlan0 应放行, got %+v", r)
+	}
+	e.write(t, "iface_detect.json", `{"schema":1,"ts":`+ts+`,"iface":"wlan0","wlan0_ap":true}`)
+	if r := nativeProbeHotspot(); !r.ok || r.iface != "wlan0" {
+		t.Fatalf("wlan0_ap=true 的 wlan0 应放行, got %+v", r)
+	}
+}
+
+func TestHealthNativeIptablesRC1ChainGoneAndWaitFallback(t *testing.T) {
+	e := newNatTestEnv(t)
+	e.inject(t, "wlan2", htbRoot(), nil)
+	e.write(t, "tc_ifindex_wlan2", "5")
+
+	// 真机 AOSP: 链不存在时 iptables -S HNC_MARK 返回 rc=1
+	old := execCommandFn
+	t.Cleanup(func() { execCommandFn = old })
+	execCommandFn = func(name string, args ...string) (string, int, error) {
+		if len(args) > 0 && args[len(args)-1] == "HNC_MARK" {
+			return "iptables: No chain/target/match by that name.\n", 1, &fakeExitErr{code: 1}
+		}
+		return "-A HNC_RESTORE -j CONNMARK --restore-mark\n", 0, nil
+	}
+	if rc := nativeCheckHealth("wlan2"); rc != natHealthLost {
+		t.Fatalf("AOSP rc=1 丢链应返回 natHealthLost(1), got %d", rc)
+	}
+
+	// rc=1 但输出为 xtables 锁忙文案 → 仍判 natHealthBusy(2)
+	execCommandFn = func(name string, args ...string) (string, int, error) {
+		return "Another app is currently holding the xtables lock: Resource temporarily unavailable\n", 1, &fakeExitErr{code: 1}
+	}
+	if rc := nativeCheckHealth("wlan2"); rc != natHealthBusy {
+		t.Fatalf("锁争用应返回 natHealthBusy(2), got %d", rc)
+	}
+
+	// -w 2 → -w → 无 -w 三级回退 + /system/bin/iptables 绝对路径兜底
+	var calls []string
+	execCommandFn = func(name string, args ...string) (string, int, error) {
+		calls = append(calls, name+" "+strings.Join(args, " "))
+		if name == "iptables" {
+			return "", -1, os.ErrNotExist // 模拟 PATH 缺失, 逼出 /system/bin/iptables
+		}
+		if len(args) >= 2 && args[0] == "-w" && args[1] == "2" {
+			return "iptables v1.4.20: Bad argument `2'\n", 2, &fakeExitErr{code: 2}
+		}
+		if len(args) >= 1 && args[0] == "-w" {
+			return "iptables: unknown option \"-w\"\n", 2, &fakeExitErr{code: 2}
+		}
+		if args[len(args)-1] == "HNC_RESTORE" {
+			return "-A HNC_RESTORE -j CONNMARK --restore-mark\n", 0, nil
+		}
+		return "-N HNC_MARK\n", 0, nil
+	}
+	if rc := nativeCheckHealth("wlan2"); rc != natHealthOK {
+		t.Fatalf("三级回退 + /system/bin 兜底后应返回 natHealthOK(0), got %d (calls=%v)", rc, calls)
+	}
+}
+
+func TestHealthNativeConnmarkUnsupportedExemption(t *testing.T) {
+	e := newNatTestEnv(t)
+	e.inject(t, "wlan2", htbRoot(), func(name string, args ...string) (string, int, error) {
+		return "-N HNC_RESTORE\n", 0, nil // 链存在但无 CONNMARK 规则
+	})
+	e.write(t, "tc_ifindex_wlan2", "5")
+
+	// 默认(无 capabilities 标记且无 ip_tables_targets 证据)→ 判丢规则
+	if rc := nativeCheckHealth("wlan2"); rc != natHealthLost {
+		t.Fatalf("默认缺 CONNMARK 必须判 lost(1), got %d", rc)
+	}
+
+	// capabilities.json 明确 xt_connmark=false → 豁免
+	e.write(t, "capabilities.json", `{"xt_connmark":false}`)
+	if rc := nativeCheckHealth("wlan2"); rc != natHealthOK {
+		t.Fatalf("xt_connmark=false 应豁免空 HNC_RESTORE, got %d", rc)
+	}
+
+	// /proc/net/ip_tables_targets 可读非空且不含 CONNMARK → 豁免; 含 CONNMARK 则不豁免
+	e.write(t, "capabilities.json", `{}`)
+	e.write(t, "fake_targets", "MARK\nERROR\n")
+	iptTargetsPath = filepath.Join(e.runDir, "fake_targets")
+	if rc := nativeCheckHealth("wlan2"); rc != natHealthOK {
+		t.Fatalf("targets 非空且无 CONNMARK 应豁免, got %d", rc)
+	}
+	e.write(t, "fake_targets", "MARK\nCONNMARK\nERROR\n")
+	if rc := nativeCheckHealth("wlan2"); rc != natHealthLost {
+		t.Fatalf("targets 含 CONNMARK 时空链仍应判 lost(1), got %d", rc)
+	}
+}
+
+func TestUplinkNativeNetlinkMirredFastPath(t *testing.T) {
+	e := newNatTestEnv(t)
+	forked := 0
+	e.inject(t, "wlan2", htbRoot(), func(name string, args ...string) (string, int, error) {
+		forked++
+		return "filter parent ffff: action mirred egress redirect dev ifb0\n", 0, nil
+	})
+
+	nlIngressMirredFn = func(devIdx, ifbIdx int) (bool, error) {
+		return true, nil
+	}
+	if ok, unknown := nativeUplinkOK("wlan2"); !ok || unknown || forked != 0 {
+		t.Fatalf("netlink 命中应 0 fork 返回 true/false, got ok=%v unknown=%v forked=%d", ok, unknown, forked)
+	}
+
+	nlIngressMirredFn = func(devIdx, ifbIdx int) (bool, error) {
+		return false, nil
+	}
+	if ok, unknown := nativeUplinkOK("wlan2"); ok || unknown || forked != 0 {
+		t.Fatalf("netlink 判缺失应 0 fork 返回 false/false, got ok=%v unknown=%v forked=%d", ok, unknown, forked)
+	}
+
+	nlIngressMirredFn = func(devIdx, ifbIdx int) (bool, error) {
+		return false, errors.New("netlink unavailable")
+	}
+	if ok, unknown := nativeUplinkOK("wlan2"); !ok || unknown || forked == 0 {
+		t.Fatalf("netlink 报错应回退 tc filter show, got ok=%v unknown=%v forked=%d", ok, unknown, forked)
+	}
+}
+
+func TestRotateLogIfBigCopyTruncatePreservesInode(t *testing.T) {
+	tmp := t.TempDir()
+	p := filepath.Join(tmp, "watchdog.log")
+	payload := bytes.Repeat([]byte("A"), logMaxBytes+128)
+	if err := os.WriteFile(p, payload, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	stBefore, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inoBefore := stBefore.Sys().(*syscall.Stat_t).Ino
+
+	oldPath := wdLogPath
+	wdLogPath = p
+	t.Cleanup(func() { wdLogPath = oldPath })
+
+	rotateLogIfBig()
+
+	stAfter, err := os.Stat(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inoAfter := stAfter.Sys().(*syscall.Stat_t).Ino
+	if inoAfter != inoBefore {
+		t.Fatalf("rotateLogIfBig 不允许换 inode: before=%d after=%d", inoBefore, inoAfter)
+	}
+	if stAfter.Size() != 0 {
+		t.Fatalf("原文件应原地截断至 0 字节, got %d", stAfter.Size())
+	}
+	b1, err := os.ReadFile(p + ".1")
+	if err != nil || len(b1) != len(payload) {
+		t.Fatalf(".1 备份大小异常: err=%v len=%d want=%d", err, len(b1), len(payload))
+	}
+}
+
+func TestFrozenHttpdRemovesDNSTakeoverBeforeRestart(t *testing.T) {
+	tmp := t.TempDir()
+	fakeProc := filepath.Join(tmp, "proc")
+	fakeCg2 := filepath.Join(tmp, "cgroup2")
+	fakeFreezer := filepath.Join(tmp, "freezer")
+	fakePid := os.Getpid() // 借用当前存活进程 PID 验证冻结恢复链路(terminate/spawn 全部桩化)
+
+	_ = os.MkdirAll(filepath.Join(fakeProc, strconv.Itoa(fakePid)), 0o755)
+	_ = os.MkdirAll(filepath.Join(fakeCg2, "uid_10123"), 0o755)
+	_ = os.MkdirAll(fakeFreezer, 0o755)
+	_ = os.WriteFile(filepath.Join(fakeProc, strconv.Itoa(fakePid), "cgroup"), []byte("0::/uid_10123\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(fakeCg2, "uid_10123", "cgroup.freeze"), []byte("1\n"), 0o644)
+
+	binFile := filepath.Join(tmp, "hnc_httpd")
+	pidFile := filepath.Join(tmp, "httpd.pid")
+	_ = os.WriteFile(binFile, []byte("fake"), 0o755)
+	_ = os.WriteFile(pidFile, []byte(strconv.Itoa(fakePid)), 0o644)
+
+	oldProc, oldCg2, oldFrz := wdProcRoot, wdCgroupV2Root, wdDevFreezerRoot
+	oldDNS, oldTerm, oldSpawn := dnsTakeoverRemoveFn, terminateFrozenDaemonFn, spawnDaemonFn
+	wdProcRoot, wdCgroupV2Root, wdDevFreezerRoot = fakeProc, fakeCg2, fakeFreezer
+
+	var seq []string
+	dnsTakeoverRemoveFn = func() { seq = append(seq, "dns_remove") }
+	terminateFrozenDaemonFn = func(pid int) { seq = append(seq, "terminate") }
+	spawnDaemonFn = func(bin string, args []string, logPath, pf string) error {
+		seq = append(seq, "spawn")
+		return nil
+	}
+	lastRestartMu.Lock()
+	delete(lastRestart, "hnc_httpd")
+	lastRestartMu.Unlock()
+
+	t.Cleanup(func() {
+		wdProcRoot, wdCgroupV2Root, wdDevFreezerRoot = oldProc, oldCg2, oldFrz
+		dnsTakeoverRemoveFn, terminateFrozenDaemonFn, spawnDaemonFn = oldDNS, oldTerm, oldSpawn
+	})
+
+	ensureDaemonRunning(daemonSpec{
+		name:     "hnc_httpd",
+		binPath:  binFile,
+		args:     []string{"-hnc-dir", tmp},
+		logFile:  filepath.Join(tmp, "httpd.log"),
+		pidFile:  pidFile,
+		cooldown: time.Millisecond,
+	})
+
+	want := "dns_remove,terminate,spawn"
+	if got := strings.Join(seq, ","); got != want {
+		t.Fatalf("冻结恢复顺序错误: got %q, want %q", got, want)
+	}
+	if b, err := os.ReadFile(filepath.Join(fakeCg2, "cgroup.procs")); err != nil || strings.TrimSpace(string(b)) != strconv.Itoa(fakePid) {
+		t.Fatalf("应写入 /sys/fs/cgroup/cgroup.procs 迁出冻结组, err=%v data=%q", err, string(b))
+	}
+	if b, err := os.ReadFile(filepath.Join(fakeProc, strconv.Itoa(fakePid), "oom_score_adj")); err != nil || strings.TrimSpace(string(b)) != "-900" {
+		t.Fatalf("应写入 oom_score_adj=-900, err=%v data=%q", err, string(b))
 	}
 }

@@ -304,7 +304,9 @@ static int try_query(const char *src_ip, const char *target_ip, int timeout_ms,
     uint8_t pkt[MAX_PKT];
     struct timespec ts_id;
     clock_gettime(CLOCK_MONOTONIC, &ts_id);
-    uint16_t txid = (uint16_t)((ts_id.tv_nsec ^ ((long)getpid() << 8) ^ ts_id.tv_sec) & 0xFFFF);
+    uint16_t txid = (uint16_t)(((uint32_t)ts_id.tv_nsec ^
+                                ((uint32_t)getpid() << 8) ^
+                                (uint32_t)ts_id.tv_sec) & 0xFFFFU);
     int qlen = build_query(src_ip, pkt, sizeof(pkt), txid);
     if (qlen < 0) { VLOG("build_query failed\n"); close(fd); return -1; }
 
@@ -334,7 +336,7 @@ static int try_query(const char *src_ip, const char *target_ip, int timeout_ms,
     VLOG("sendto %s:%d (%d bytes, txid=0x%04x)\n",
          target_ip ? target_ip : MDNS_MULTICAST, MDNS_PORT, qlen, txid);
 
-    if (sendto(fd, pkt, qlen, 0, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
+    if (sendto(fd, pkt, (size_t)qlen, 0, (struct sockaddr *)&dst, sizeof(dst)) < 0) {
         VLOG("sendto: %s\n", strerror(errno));
         close(fd);
         return -1;
@@ -346,14 +348,16 @@ static int try_query(const char *src_ip, const char *target_ip, int timeout_ms,
 
     while (1) {
         clock_gettime(CLOCK_MONOTONIC, &t_now);
-        long elapsed_ms = (t_now.tv_sec - t_start.tv_sec) * 1000 +
-                          (t_now.tv_nsec - t_start.tv_nsec) / 1000000;
-        if (elapsed_ms >= timeout_ms) {
-            VLOG("timeout after %ld ms\n", elapsed_ms);
+        int64_t elapsed_ms = (int64_t)(t_now.tv_sec - t_start.tv_sec) * 1000LL +
+                             (int64_t)(t_now.tv_nsec - t_start.tv_nsec) / 1000000LL;
+        if (elapsed_ms < 0)
+            elapsed_ms = 0;
+        if (elapsed_ms >= (int64_t)timeout_ms) {
+            VLOG("timeout after %lld ms\n", (long long)elapsed_ms);
             close(fd);
             return -1;
         }
-        set_socket_timeout(fd, (int)(timeout_ms - elapsed_ms));
+        set_socket_timeout(fd, (int)((int64_t)timeout_ms - elapsed_ms));
 
         struct sockaddr_in from;
         socklen_t fromlen = sizeof(from);

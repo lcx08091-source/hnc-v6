@@ -62,10 +62,18 @@
 # 测试钩子: HNC_SYS_NET(默认 /sys/class/net)、HNC_PROC_NET_ARP(默认 /proc/net/arp)、
 #           HNC_IFACE_TTL(默认 60)、PATH 上的 dumpsys/ip/iptables 桩。
 
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && \
-    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
-
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "$HNC_DIR/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
+
 _HI_RUN="$HNC_DIR/run"
 _HI_JSON="$_HI_RUN/iface_detect.json"
 _HI_SYS_NET=${HNC_SYS_NET:-/sys/class/net}
@@ -74,10 +82,10 @@ _HI_TTL=${HNC_IFACE_TTL:-60}
 _HI_LOG="$HNC_DIR/logs/detect.log"
 
 # ─── 接口名模式表(POSIX ERE, 同一字符串 Go RE2 也能用; 与 iface_patterns.go 逐字一致)──
-# 蜂窝上游: 高通 rmnet_dataN / 三星 Exynos & Tensor rmnetN / 联发科 ccmniN /
+# 蜂窝上游: 高通 rmnet_dataN / 三星 Exynos & Tensor rmnetN, gtiN / 联发科 ccmniN /
 #           展锐(Unisoc)seth_lteN 与新平台 sipa_ethN / 老三星展锐 seth_wN 等 / 通用 wwanN。
 #           不含 v4-*(clat)、r_rmnet*(反向)、rmnet_ipa/mhi/usb*(物理聚合口)。
-HNC_CELL_IFACE_ERE='^(rmnet_data[0-9]+|rmnet[0-9]+|ccmni[0-9]+|seth_[a-z]+[0-9]+|sipa_eth[0-9]+|wwan[0-9]+)$'
+HNC_CELL_IFACE_ERE='^(rmnet_data[0-9]+|rmnet[0-9]+|ccmni[0-9]+|seth_[a-z]+[0-9]+|sipa_eth[0-9]+|gti[0-9]+|wwan[0-9]+)$'
 # 明确是 AP 的名字: MTK/Pixel ap0、双频桥接 ap_br_wlanX(Android 12+)、三星 swlan0、softap0
 HNC_AP_IFACE_ERE='^(ap[0-9]*|ap_br_[a-z0-9_]+|softap[0-9]+|swlan[0-9]+)$'
 # 可能是 AP 也可能是副 STA(STA+STA 双 Wi-Fi)的名字: 需要额外证据(无 default route)
@@ -86,8 +94,8 @@ HNC_USB_TETHER_ERE='^(rndis[0-9]+|usb[0-9]+|ncm[0-9]+)$'
 HNC_BT_TETHER_ERE='^bt-pan[0-9]*$'
 HNC_ETH_IFACE_ERE='^eth[0-9]+$'
 HNC_P2P_IFACE_ERE='^p2p'
-# v5.20.1: VPN 虚拟口(本机出口可能是它; 永远不是热点上游、也不计流量)
-HNC_VPN_IFACE_ERE='^(tun[0-9]+|tap[0-9]+|ppp[0-9]+|wg[0-9]+|ipsec[0-9a-z_]*|xfrm[0-9]+)$'
+# v5.20.1+: VPN 虚拟口(含 Tailscale / Clash Meta / sing-box / utun; 永不是热点上游或 AP 口)
+HNC_VPN_IFACE_ERE='^(tun[0-9]+|tap[0-9]+|ppp[0-9]+|wg[0-9]+|ipsec[0-9a-z_]*|xfrm[0-9]+|tailscale[0-9]*|utun[0-9]*|sing_tun[0-9]*|Meta)$'
 # 永不作为热点/上游的虚拟口
 HNC_IGNORE_IFACE_ERE='^(lo|dummy[0-9]*|v4-.*|tun[0-9]*|ifb[0-9]*|r_rmnet.*|rmnet_(ipa|mhi|usb).*|ip6tnl[0-9]*|sit[0-9]*|gre[0-9]*|gretap[0-9]*|erspan[0-9]*|ip_vti[0-9]*|ip6_vti[0-9]*|ip6gre[0-9]*|bond[0-9]*|umts_dm[0-9]*|clat.*)$'
 
@@ -135,8 +143,9 @@ _hi_physical_upstream() {
     echo "$best"
 }
 
-# Wi-Fi 类(可作为 Wi-Fi 热点口): ap / ap_maybe / wifi_sta(wlan0, 仅权威来源) / other
+# Wi-Fi 类(可作为 Wi-Fi 热点口): ap / ap_maybe / wifi_sta(wlan0, 仅权威来源) / other(排除 VPN)
 _hi_wifiish() {
+    _hi_is_vpn "$1" && return 1
     case "$(hnc_iface_class "$1")" in ap|ap_maybe|wifi_sta|other) return 0 ;; esac
     return 1
 }
@@ -146,19 +155,33 @@ _hi_log() {
     echo "[$(date '+%H:%M:%S' 2>/dev/null)] [IFACE] $*" >> "$_HI_LOG" 2>/dev/null || true
 }
 
-# 带超时执行(dumpsys 在系统服务卡死时会挂住)
+# 带超时执行(兼容现代 timeout SECS CMD 与老 BusyBox timeout -t SECS CMD)
+_HI_TIMEOUT_MODE=""
 _hi_to() {
     local t="$1"; shift
-    if command -v timeout >/dev/null 2>&1; then
-        timeout "$t" "$@"
-    else
-        "$@"
+    if [ -z "$_HI_TIMEOUT_MODE" ]; then
+        if ! command -v timeout >/dev/null 2>&1; then
+            _HI_TIMEOUT_MODE="none"
+        elif timeout 1 true >/dev/null 2>&1; then
+            _HI_TIMEOUT_MODE="pos"
+        elif timeout -t 1 true >/dev/null 2>&1; then
+            _HI_TIMEOUT_MODE="dash_t"
+        else
+            _HI_TIMEOUT_MODE="none"
+        fi
     fi
+    case "$_HI_TIMEOUT_MODE" in
+        pos)    timeout "$t" "$@" ;;
+        dash_t) timeout -t "$t" "$@" ;;
+        *)      "$@" ;;
+    esac
 }
 
+# 私网/热点地址段判定: RFC 1918 + RFC 6598 CGNAT 100.64.0.0/10(Android 14+ 随机热点子网常用)
 _hi_is_private() {
     case "$1" in
         10.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[0-1].*) return 0 ;;
+        100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.12[0-7].*) return 0 ;;
     esac
     return 1
 }
@@ -206,10 +229,11 @@ _hi_neigh_count() {
     awk -v n="$1" 'NR > 1 && $6 == n && $3 != "0x0" && $4 != "00:00:00:00:00:00" { c++ } END { print c + 0 }' "$_HI_ARP" 2>/dev/null || echo 0
 }
 
-# 候选: 有私网 IPv4、非 ignore/蜂窝、无 default route
+# 候选: 有私网 IPv4、非 ignore/蜂窝/VPN、无 default route
 _hi_candidates() {
     local n c out=""
     for n in $(printf '%s\n' "$_HI_ADDR4" | awk '{ print $1 }' | sort -u); do
+        _hi_is_vpn "$n" && continue
         c=$(hnc_iface_class "$n")
         case "$c" in ignore|cell) continue ;; esac
         _hi_has_defrt "$n" && continue
@@ -317,10 +341,12 @@ hnc_iface_detect() {
     _hi_collect
     cands=$(_hi_candidates)
 
-    # 0. 用户偏好
+    # 0. 用户偏好(防误绑带默认路由或当前上游的 wlan0 STA / VPN 口)
     ov=$(_hi_read_override)
     if [ -n "$ov" ]; then
-        if _hi_exists "$ov" && [ -n "$(_hi_ipv4_of "$ov")" ]; then
+        if _hi_exists "$ov" && [ -n "$(_hi_ipv4_of "$ov")" ] \
+           && ! _hi_has_defrt "$ov" && [ "$ov" != "$_HI_UPSTREAM" ] \
+           && ! _hi_is_vpn "$ov"; then
             ov_state=ok; HI_IFACE="$ov"; HI_METHOD=override; HI_AUTH=true
         else
             ov_state=invalid
@@ -432,10 +458,10 @@ EOF
     local wl0=false; [ "$HI_IFACE" = wlan0 ] && wl0=true
 
     mkdir -p "$_HI_RUN" 2>/dev/null
-    printf '{"schema":1,"ts":%s,"iface":"%s","method":"%s","authoritative":%s,"ipv4":"%s","wlan0_ap":%s,"override":"%s","override_state":"%s","tethered":%s,"local_only":%s,"wifi_tether":%s,"usb_tether":%s,"bt_tether":%s,"eth_tether":%s,"upstream":"%s","upstream_class":"%s","upstream_source":"%s","tether_upstream":"%s","local_upstream":"%s","local_upstream_class":"%s","vpn_active":%s,"candidates":%s,"sig":"%s","scope_note":"limits apply to the Wi-Fi hotspot iface only; USB/BT/Ethernet tethering clients are reported but not managed"}\n' \
+    printf '{"schema":1,"ts":%s,"iface":"%s","method":"%s","authoritative":%s,"ipv4":"%s","wlan0_ap":%s,"override":"%s","override_state":"%s","tethered":%s,"local_only":%s,"wifi_tether":%s,"usb_tether":%s,"bt_tether":%s,"eth_tether":%s,"upstream":"%s","upstream_class":"%s","upstream_source":"%s","tether_upstream":"%s","local_upstream":"%s","local_upstream_class":"%s","vpn_active":%s,"default_route_ifaces":%s,"candidates":%s,"sig":"%s","scope_note":"limits apply to the Wi-Fi hotspot iface only; USB/BT/Ethernet tethering clients are reported but not managed"}\n' \
         "$(date +%s 2>/dev/null || echo 0)" "$HI_IFACE" "$HI_METHOD" "$HI_AUTH" "$ip" "$wl0" "$ov" "$ov_state" \
         "$(_hi_jlist "$tethered")" "$(_hi_jlist "$local_only")" "$(_hi_jlist "$wifi_t")" "$(_hi_jlist "$usb_t")" \
-        "$(_hi_jlist "$bt_t")" "$(_hi_jlist "$eth_t")" "$up" "$upc" "$upsrc" "$tup" "$lup" "$lupc" "$vpn" "$(_hi_jlist "$cands")" "$(_hi_sig "$cands" "$ov")" \
+        "$(_hi_jlist "$bt_t")" "$(_hi_jlist "$eth_t")" "$up" "$upc" "$upsrc" "$tup" "$lup" "$lupc" "$vpn" "$(_hi_jlist "$_HI_DEFRT")" "$(_hi_jlist "$cands")" "$(_hi_sig "$cands" "$ov")" \
         > "$_HI_JSON.tmp.$$" 2>/dev/null && mv -f "$_HI_JSON.tmp.$$" "$_HI_JSON" 2>/dev/null
 
     if [ -n "$HI_IFACE" ]; then
@@ -453,7 +479,7 @@ _hi_json_field() {
     sed -n "s/.*\"$1\":\"\\([^\"]*\\)\".*/\\1/p" "$_HI_JSON" 2>/dev/null | head -n1
 }
 
-# 带缓存的读取: TTL 内、候选签名未变、接口仍有 IPv4(或为 tetherctrl 结果)→ 直接用
+# 带缓存的读取: TTL 内、候选签名未变、接口无默认路由且仍有 IPv4(或为 tetherctrl 结果)→ 直接用
 hnc_iface_get() {
     local ts now iface sig method cands
     if [ -f "$_HI_JSON" ]; then
@@ -469,7 +495,7 @@ hnc_iface_get() {
                 if [ -z "$iface" ]; then
                     return 1
                 fi
-                if [ -n "$(_hi_ipv4_of "$iface")" ] || [ "$method" = tetherctrl ]; then
+                if ! _hi_has_defrt "$iface" && { [ -n "$(_hi_ipv4_of "$iface")" ] || [ "$method" = tetherctrl ]; }; then
                     echo "$iface"
                     return 0
                 fi

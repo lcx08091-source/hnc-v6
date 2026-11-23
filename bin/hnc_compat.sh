@@ -35,8 +35,17 @@
 # 测试钩子: HNC_ADB_DIR(默认 /data/adb)、HNC_APP_DATA_DIR(默认 /data/data)、
 #           HNC_SOC(强制 SoC)、PATH 上的 getprop / cmd / svc 桩。
 
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && [ "${HNC_COMPAT_LIB:-0}" != 1 ] && \
-    export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
+if [ "${HNC_COMPAT_LIB:-0}" != 1 ]; then
+    _he_loaded=0
+    for _he in "${MODDIR:-}/bin/hnc_env.sh" "${HNC_DIR:-/data/local/hnc}/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+        case "$_he" in /bin/hnc_env.sh) continue ;; esac
+        if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+    done
+    if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+        export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+    fi
+    unset _he _he_loaded
+fi
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
 _HC_RUN="$HNC_DIR/run"
@@ -115,11 +124,17 @@ hnc_busybox_candidates() {
     case "$HNC_ROOT_FAMILY" in
         kernelsu) echo "$_HC_ADB/ksu/bin/busybox" ;;
         apatch)   echo "$_HC_ADB/ap/bin/busybox" ;;
-        magisk)   echo "$_HC_ADB/magisk/busybox" ;;
+        magisk)
+            echo "$_HC_ADB/magisk/busybox"
+            [ "$_HC_ADB" = "/data/adb" ] && echo /debug_ramdisk/.magisk/busybox
+            [ -n "${HNC_RAMDISK_DIR:-}" ] && echo "$HNC_RAMDISK_DIR/.magisk/busybox"
+            ;;
     esac
     echo "$_HC_ADB/ksu/bin/busybox"
     echo "$_HC_ADB/ap/bin/busybox"
     echo "$_HC_ADB/magisk/busybox"
+    [ "$_HC_ADB" = "/data/adb" ] && echo /debug_ramdisk/.magisk/busybox
+    [ -n "${HNC_RAMDISK_DIR:-}" ] && echo "$HNC_RAMDISK_DIR/.magisk/busybox"
     echo /system/xbin/busybox
     echo /system/bin/busybox
 }

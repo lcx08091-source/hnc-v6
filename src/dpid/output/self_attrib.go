@@ -44,6 +44,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -885,6 +886,8 @@ func (a *SelfAttribAggregator) purgeSeenTuplesIfFullLocked() {
 
 // ─── pkg cache (TTL'd) ────────────────────────────────────────────────
 
+var packagesListPath = "/data/system/packages.list"
+
 func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	a.mu.Lock()
 	if a.pkgCache != nil && time.Since(a.pkgCacheLoadedAt) < SelfPkgCacheTTL {
@@ -894,18 +897,26 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 	}
 	a.mu.Unlock()
 
-	m, err := loadPkgUIDs()
-	// v5.12: pm / 文件读取放到锁外。旧代码在持 a.mu 时 exec `pm list packages -s`
-	// (app_process 冷启动 ~1s, system_server 忙时可卡更久且无超时), 期间
-	// LookupUID / ObserveSNI / Snapshot 全部阻塞 —— 自抓包回调跑在抓包
-	// goroutine 里, 阻塞直接变成内核丢包。
-	var sysPkgs map[string]struct{}
-	var sysErr error
-	var excl map[string]struct{}
-	if err == nil {
-		sysPkgs, sysErr = loadSystemPkgs()
+	var (
+		m       map[int]string
+		sysPkgs map[string]struct{}
+		err     error
+		sysErr  error
+		excl    map[string]struct{}
+	)
+	// Primary: single pure-Go pass over /data/system/packages.list extracts both
+	// uid→pkg and systemPkgs without forking app_process (`pm`).
+	if lm, lsys, lerr := loadPackagesList(packagesListPath); lerr == nil && len(lm) > 0 {
+		m, sysPkgs = lm, lsys
 		excl = loadFlywheelExcludePkgs()
+	} else {
+		m, err = loadPkgUIDsViaPM()
+		if err == nil {
+			sysPkgs, sysErr = loadSystemPkgsViaPM()
+			excl = loadFlywheelExcludePkgs()
+		}
 	}
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if err != nil {
@@ -931,21 +942,43 @@ func (a *SelfAttribAggregator) getPkgCache() map[int]string {
 }
 
 // pmTimeout v5.12: pm 调用上限。pm 走 binder 找 system_server, 开机早期或
-// system_server 卡顿时可能长时间不返回; 旧代码无超时, 采样 goroutine 会被
-// 永久挂住(自归因从此停更)。
+// system_server 卡顿时可能长时间不返回; 加独立进程组 Setpgid + -pgid SIGKILL +
+// WaitDelay 防止 pm/app_process 子孙进程持管道挂死采样 goroutine。
 const pmTimeout = 20 * time.Second
 
 func pmCommand(args ...string) (*exec.Cmd, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(context.Background(), pmTimeout)
-	cmd := exec.CommandContext(ctx, "pm", args...)
+	return pmCommandWithTimeout(pmTimeout, "pm", args...)
+}
+
+func pmCommandWithTimeout(timeout time.Duration, bin string, args ...string) (*exec.Cmd, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	cmd := exec.CommandContext(ctx, bin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process != nil && cmd.Process.Pid > 0 {
+			if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err == nil {
+				return nil
+			}
+			return cmd.Process.Kill()
+		}
+		return nil
+	}
 	cmd.WaitDelay = 2 * time.Second
 	return cmd, cancel
 }
 
-// loadSystemPkgs runs `pm list packages -s` and returns the set of system
-// package names: lines look like "package:com.android.systemui".
+// loadSystemPkgs prefers extracting system packages directly from
+// /data/system/packages.list, and falls back to `pm list packages -s` only when
+// packages.list is unreadable or empty.
 func loadSystemPkgs() (map[string]struct{}, error) {
-	// v5.12: 加超时(见 pmCommand)。
+	if m, sys, err := loadPackagesList(packagesListPath); err == nil && len(m) > 0 {
+		return sys, nil
+	}
+	return loadSystemPkgsViaPM()
+}
+
+func loadSystemPkgsViaPM() (map[string]struct{}, error) {
+	// v5.12: 加超时与进程组强杀(见 pmCommand)。
 	cmd, cancel := pmCommand("list", "packages", "-s")
 	defer cancel()
 	// rc39 (P2-23): nohup-launched dpid may inherit an incomplete Env; without
@@ -1014,19 +1047,15 @@ func (a *SelfAttribAggregator) IsFlywheelExcludedPkg(pkg string) bool {
 	return ok
 }
 
-// loadPkgUIDsFromList parses /data/system/packages.list, the authoritative
-// root-readable package↔uid table. Each line:
+// parsePackagesListBytes parses /data/system/packages.list rows:
 //
-//	com.tencent.mm 10123 0 /data/user/0/com.tencent.mm default:... 3003,9997
+//	com.tencent.mm 10123 0 /data/user/0/com.tencent.mm default:targetSdkVersion=33 3003,9997
 //
-// fields[0]=pkg, fields[1]=uid. More complete + faster than `pm` (no fork)
-// and doesn't miss uids the way `pm list packages -U` occasionally does.
-func loadPkgUIDsFromList() (map[int]string, error) {
-	data, err := os.ReadFile("/data/system/packages.list")
-	if err != nil {
-		return nil, err
-	}
+// Extracts both uid→pkg and systemPkgs (identified by uid < 10000, seinfo
+// containing "platform"/"privapp", or non-/data/app system paths).
+func parsePackagesListBytes(data []byte) (map[int]string, map[string]struct{}) {
 	m := make(map[int]string, 512)
+	sys := make(map[string]struct{}, 256)
 	for _, line := range strings.Split(string(data), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
@@ -1044,24 +1073,88 @@ func loadPkgUIDsFromList() (map[int]string, error) {
 		if _, ok := m[uid]; !ok {
 			m[uid] = pkg
 		}
+		if isSystemPkgListRow(uid, fields) {
+			sys[pkg] = struct{}{}
+		}
 	}
-	return m, nil
+	return m, sys
 }
 
-// loadPkgUIDs runs `pm list packages -U` and parses output:
-//
-//	package:com.tencent.jkchess uid:10123
+func isSystemPkgListRow(uid int, fields []string) bool {
+	if uid >= 0 && (uid < 10000 || uid%100000 < 10000) {
+		return true
+	}
+	if len(fields) >= 5 {
+		seinfo := strings.ToLower(fields[4])
+		if strings.Contains(seinfo, "platform") || strings.Contains(seinfo, "privapp") {
+			return true
+		}
+	}
+	if len(fields) >= 4 && isSystemPkgPath(fields[3]) {
+		return true
+	}
+	return false
+}
+
+func isSystemPkgPath(p string) bool {
+	if !strings.HasPrefix(p, "/") {
+		return false
+	}
+	if strings.HasPrefix(p, "/data/app") ||
+		strings.HasPrefix(p, "/data/user/") ||
+		strings.HasPrefix(p, "/data/data/") ||
+		strings.HasPrefix(p, "/mnt/") ||
+		strings.HasPrefix(p, "/sdcard/") ||
+		strings.HasPrefix(p, "/storage/") {
+		return false
+	}
+	for _, sysPrefix := range []string{
+		"/system/",
+		"/system_ext/",
+		"/product/",
+		"/vendor/",
+		"/odm/",
+		"/oem/",
+		"/apex/",
+		"/data/user_de/",
+	} {
+		if strings.HasPrefix(p, sysPrefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func loadPackagesList(path string) (map[int]string, map[string]struct{}, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	m, sys := parsePackagesListBytes(data)
+	return m, sys, nil
+}
+
+// loadPkgUIDsFromList parses /data/system/packages.list, the authoritative
+// root-readable package↔uid table.
+func loadPkgUIDsFromList() (map[int]string, error) {
+	m, _, err := loadPackagesList(packagesListPath)
+	return m, err
+}
+
+// loadPkgUIDs prefers /data/system/packages.list and falls back to
+// `pm list packages -U` only when packages.list is unreadable or empty.
 func loadPkgUIDs() (map[int]string, error) {
-	// Primary: /data/system/packages.list (root, authoritative, complete).
-	// Falls back to pm when it's unreadable/empty.
 	if m, lerr := loadPkgUIDsFromList(); lerr == nil && len(m) > 0 {
 		return m, nil
 	}
+	return loadPkgUIDsViaPM()
+}
+
+func loadPkgUIDsViaPM() (map[int]string, error) {
 	cmd, cancel := pmCommand("list", "packages", "-U")
 	defer cancel()
 	// rc39 (P2-23): pin LD_LIBRARY_PATH so the pm fallback works under an
-	// incomplete (nohup) Env. (Primary path is packages.list above; this is the
-	// fallback when that's unreadable/empty.)
+	// incomplete (nohup) Env.
 	cmd.Env = append(os.Environ(), "LD_LIBRARY_PATH=/system/lib64:/system/lib")
 	out, err := cmd.Output()
 	if err != nil {
@@ -1083,10 +1176,6 @@ func loadPkgUIDs() (map[int]string, error) {
 		if err != nil {
 			continue
 		}
-		// Multiple packages can share a uid (sharedUserId). First wins —
-		// in practice this is fine because shared uids are well-known
-		// system ones (e.g. android.uid.system) and not what we want to
-		// surface anyway.
 		if _, ok := m[uid]; !ok {
 			m[uid] = pkg
 		}

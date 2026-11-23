@@ -7,12 +7,18 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"hnc.io/dpid/alert"
+)
+
+const (
+	rmacAutoInheritedMax = 1024
+	rmacAutoInheritedTTL = int64(90 * 86400)
 )
 
 type rmacPolicy struct {
@@ -95,6 +101,44 @@ func saveRMACPolicy(hncDir string, p rmacPolicy) error {
 	return discoverWriteAtomic(rmacPolicyPath(hncDir), append(b, '\n'))
 }
 
+// pruneRMACAutoInherited 按 90 天 TTL 与 1024 条容量上限裁剪 AutoInherited, 返回是否有变动。
+func pruneRMACAutoInherited(m map[string]rmacAutoInheritRec, now int64) bool {
+	if len(m) == 0 {
+		return false
+	}
+	changed := false
+	if now > 0 {
+		for k, rec := range m {
+			if rec.Ts > 0 && now-rec.Ts > rmacAutoInheritedTTL {
+				delete(m, k)
+				changed = true
+			}
+		}
+	}
+	if len(m) > rmacAutoInheritedMax {
+		type kv struct {
+			mac string
+			ts  int64
+		}
+		all := make([]kv, 0, len(m))
+		for k, rec := range m {
+			all = append(all, kv{mac: k, ts: rec.Ts})
+		}
+		sort.Slice(all, func(i, j int) bool {
+			if all[i].ts != all[j].ts {
+				return all[i].ts < all[j].ts
+			}
+			return all[i].mac < all[j].mac
+		})
+		drop := len(m) - rmacAutoInheritedMax
+		for i := 0; i < drop; i++ {
+			delete(m, all[i].mac)
+		}
+		changed = true
+	}
+	return changed
+}
+
 func loadRMACState(hncDir string) rmacStateFile {
 	st := rmacStateFile{
 		Version:       2,
@@ -117,25 +161,42 @@ func loadRMACState(hncDir string) rmacStateFile {
 
 func saveRMACState(hncDir string, st rmacStateFile) {
 	st.Version = 2
+	if st.AutoInherited != nil {
+		pruneRMACAutoInherited(st.AutoInherited, time.Now().Unix())
+	}
+	if b, err := json.Marshal(st); err == nil {
+		_ = discoverWriteAtomic(rmacStatePath(hncDir), b)
+	}
+}
+
+func saveRMACStateAt(hncDir string, st rmacStateFile, now int64) {
+	st.Version = 2
+	if st.AutoInherited != nil {
+		pruneRMACAutoInherited(st.AutoInherited, now)
+	}
 	if b, err := json.Marshal(st); err == nil {
 		_ = discoverWriteAtomic(rmacStatePath(hncDir), b)
 	}
 }
 
 // rmacReconcile 在后台 MacMergeLoop 周期内执行:
-//  1. 自动解除旧版本遗留的陌生随机 MAC 默认限速/隔离护栏(零误伤新连入设备);
-//  2. 高置信度随机 MAC 自动无感继承(旧设备离线 + 综合评分 >= auto_inherit_score);
-//  3. 离线短命无规则随机 MAC 自动清理陈旧邻居与记录, 防止 /24 租约池膨胀。
+//  0. 自动解除旧版本遗留的陌生随机 MAC 默认限速/隔离护栏, 并裁剪过期 AutoInherited;
+//     0.5 旧 MAC 重新上线自动无损秒拆(核验合并后真实重连水位);
+//  1. 高置信度随机 MAC 自动无感继承(旧设备离线 + 未命中 MutexApart + 综合评分 >= auto_inherit_score);
+//  2. 离线短命无规则随机 MAC 自动清理陈旧邻居与记录, 防止 /24 租约池膨胀。
 func (s *server) rmacReconcile(now time.Time) {
 	pol := loadRMACPolicy(s.hncDir)
 	nowU := now.Unix()
 
-	// 0. 自动清理 v5.37 遗留的默认限速/隔离护栏状态
+	// 0. 自动清理 v5.37 遗留的默认限速/隔离护栏状态 + AutoInherited 30 天长稳裁剪(1024 上限 / 90 天 TTL)
 	rmacMu.Lock()
 	st0 := loadRMACState(s.hncDir)
 	legacyGuarded := make(map[string]rmacGuardEntry, len(st0.Guarded))
 	for m, g := range st0.Guarded {
 		legacyGuarded[m] = g
+	}
+	if len(legacyGuarded) == 0 && pruneRMACAutoInherited(st0.AutoInherited, nowU) {
+		saveRMACStateAt(s.hncDir, st0, nowU)
 	}
 	rmacMu.Unlock()
 	if len(legacyGuarded) > 0 {
@@ -151,13 +212,15 @@ func (s *server) rmacReconcile(now time.Time) {
 		rmacMu.Lock()
 		stClean := loadRMACState(s.hncDir)
 		stClean.Guarded = nil
-		saveRMACState(s.hncDir, stClean)
+		pruneRMACAutoInherited(stClean.AutoInherited, nowU)
+		saveRMACStateAt(s.hncDir, stClean, nowU)
 		rmacMu.Unlock()
 	}
 
 	devsRaw := readJSONMap(filepath.Join(s.hncDir, "data", "devices.json"))
 	onlineIP := map[string]string{}
 	lastSeenMap := map[string]int64{}
+	bytesMap := map[string]int64{}
 	for m, v := range devsRaw {
 		dm, _ := v.(map[string]interface{})
 		if dm == nil {
@@ -165,9 +228,78 @@ func (s *server) rmacReconcile(now time.Time) {
 		}
 		mac := strings.ToLower(strings.TrimSpace(m))
 		ls, _ := toInt64(dm["last_seen"])
+		rx, _ := toInt64(dm["rx_bytes"])
+		tx, _ := toInt64(dm["tx_bytes"])
+		if rx < 0 {
+			rx = 0
+		}
+		if tx < 0 {
+			tx = 0
+		}
 		lastSeenMap[mac] = ls
+		bytesMap[mac] = rx + tx
 		if ip := strings.TrimSpace(asString(dm["ip"])); ip != "" && (ls == 0 || nowU-ls <= 120) {
 			onlineIP[mac] = ip
+		}
+	}
+
+	// 0.5 旧 MAC 重新上线自动无损秒拆: 先用内存缓存别名表零磁盘快筛 onlineIP[oldMAC] != ""
+	{
+		fastAliases := loadMACAliases(s.hncDir)
+		var onlineMergedOld []string
+		for oldMAC := range fastAliases {
+			if onlineIP[oldMAC] != "" {
+				onlineMergedOld = append(onlineMergedOld, oldMAC)
+			}
+		}
+		if len(onlineMergedOld) > 0 {
+			sort.Strings(onlineMergedOld)
+			for _, oldMAC := range onlineMergedOld {
+				toMAC := resolveMACAlias(fastAliases, fastAliases[oldMAC])
+				arch := findMacMergeArchive(s.hncDir, oldMAC, toMAC, nowU)
+				if arch == nil {
+					continue
+				}
+				ls := lastSeenMap[oldMAC]
+				curBytes := bytesMap[oldMAC]
+				reconnected := !arch.OldInDevicesAtMerge ||
+					(ls > arch.OldLastSeenAtMerge && ls > arch.MergedAt) ||
+					(arch.OldBytesAtMerge > 0 && curBytes > arch.OldBytesAtMerge)
+				if !reconnected {
+					continue
+				}
+				oldName := arch.FromName
+				if oldName == "" {
+					oldName = arch.FromSnap.DeviceName
+				}
+				if oldName == "" {
+					oldName = oldMAC
+				}
+				toName := arch.ToName
+				if toName == "" {
+					toName = toMAC
+				}
+				s.actionMu.Lock()
+				_, err := s.deviceUnmerge(oldMAC, toMAC, true, now)
+				s.actionMu.Unlock()
+				if err == nil {
+					cfg := alert.NewConfig(s.hncDir)
+					if alert.LoadConfig(cfg.AlertsConfigPath).Enabled {
+						_ = alert.Append(cfg.AlertsJSONLPath, alert.Alert{
+							ID:     "mac_merge_unmerge_auto_" + strings.ReplaceAll(oldMAC, ":", "") + "_" + strconv.FormatInt(nowU, 10),
+							Ts:     nowU,
+							Kind:   "mac_merge_unmerge_auto",
+							MAC:    oldMAC,
+							Detail: fmt.Sprintf("检测到被合并的旧设备「%s」(%s)重新连入热点活跃，已自动无损拆分与「%s」(%s)的合并并恢复双方设置", oldName, oldMAC, toName, toMAC),
+							Extra: map[string]interface{}{
+								"from_mac": oldMAC, "to_mac": toMAC,
+								"old_mac": oldMAC, "new_mac": toMAC,
+								"from_name": oldName, "to_name": toName,
+							},
+						})
+					}
+				}
+			}
 		}
 	}
 
@@ -200,6 +332,9 @@ func (s *server) rmacReconcile(now time.Time) {
 			if _, dis := mf.Dismissed[macMergeDismissKey(newMAC, best.OldMAC)]; dis {
 				continue
 			}
+			if isMacMutexApart(mf, newMAC, best.OldMAC, nowU) {
+				continue
+			}
 			oldName := macDisplayName(names, mf, best.OldMAC)
 			s.actionMu.Lock()
 			_, err := s.deviceMerge(best.OldMAC, newMAC, true, now)
@@ -214,7 +349,7 @@ func (s *server) rmacReconcile(now time.Time) {
 					Score:   best.Score,
 					Ts:      nowU,
 				}
-				saveRMACState(s.hncDir, st)
+				saveRMACStateAt(s.hncDir, st, nowU)
 				rmacMu.Unlock()
 
 				cfg := alert.NewConfig(s.hncDir)

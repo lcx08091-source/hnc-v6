@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"time"
@@ -32,6 +33,8 @@ const (
 	// onlineCreditMaxMin 单次采样最多记的分钟数。两次采样间隔被拉长(热点关过、
 	// 进程被冻结)时不把整段空档都算成在线。
 	onlineCreditMaxMin = 10
+	// onlineHoursMaxBytes run/online_hours.jsonl 大小上限(512 KiB), 超限自动保留最近一半完整行, 防撑爆 32M tmpfs。
+	onlineHoursMaxBytes = 512 << 10
 )
 
 type onlineKey struct{ day, mac string }
@@ -192,19 +195,85 @@ func (a *onlineAccum) flush(now time.Time) {
 	for _, k := range keys {
 		fmt.Fprintf(&buf, "{\"t\":%d,\"day\":\"%s\",\"mac\":\"%s\",\"m\":%d}\n", now.Unix(), k.day, k.mac, a.pending[k])
 	}
-	f, err := os.OpenFile(a.file, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
-	if err != nil {
+	if err := appendCappedLines(a.file, buf.Bytes(), onlineHoursMaxBytes); err != nil {
 		a.failLog("online minutes flush: %v", err)
-		return
-	}
-	_, werr := f.Write(buf.Bytes())
-	cerr := f.Close()
-	if werr != nil || cerr != nil {
-		a.failLog("online minutes flush: write=%v close=%v", werr, cerr)
 		return
 	}
 	a.pending = map[onlineKey]int{}
 	a.flushed = now
+}
+
+// appendCappedLines 追加行数据并确保目标文件不超过 maxBytes;
+// 超限时自动裁剪保留最近约一半的完整行并原子替换, 严防撑爆 32M tmpfs。
+func appendCappedLines(path string, extra []byte, maxBytes int64) error {
+	if len(extra) == 0 {
+		return nil
+	}
+	fi, statErr := os.Stat(path)
+	if statErr != nil || fi.Size()+int64(len(extra)) <= maxBytes {
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		_, werr := f.Write(extra)
+		cerr := f.Close()
+		if werr != nil {
+			return werr
+		}
+		return cerr
+	}
+
+	if int64(len(extra)) > maxBytes {
+		extra = extra[len(extra)-int(maxBytes):]
+		if idx := bytes.IndexByte(extra, '\n'); idx >= 0 && idx+1 < len(extra) {
+			extra = extra[idx+1:]
+		}
+	}
+
+	keep := maxBytes / 2
+	if keep+int64(len(extra)) > maxBytes {
+		keep = maxBytes - int64(len(extra))
+	}
+
+	var tail []byte
+	if keep > 0 && fi.Size() > 0 {
+		if f, err := os.Open(path); err == nil {
+			if fi.Size() > keep {
+				if _, sErr := f.Seek(fi.Size()-keep, io.SeekStart); sErr == nil {
+					raw := make([]byte, keep)
+					n, _ := io.ReadFull(f, raw)
+					raw = raw[:n]
+					if idx := bytes.IndexByte(raw, '\n'); idx >= 0 {
+						tail = raw[idx+1:]
+					}
+				}
+			} else {
+				raw, _ := io.ReadAll(f)
+				half := len(raw) / 2
+				if idx := bytes.IndexByte(raw[half:], '\n'); idx >= 0 {
+					tail = raw[half+idx+1:]
+				}
+			}
+			_ = f.Close()
+		}
+		if len(tail) > 0 && tail[len(tail)-1] != '\n' {
+			tail = append(tail, '\n')
+		}
+	}
+
+	merged := make([]byte, 0, len(tail)+len(extra))
+	merged = append(merged, tail...)
+	merged = append(merged, extra...)
+
+	tmp := path + ".tmp.go"
+	if err := os.WriteFile(tmp, merged, 0o644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 // hotspotDown 热点关闭时调用: 先落盘已累计分钟, 再重置采样基线 a.last,

@@ -27,7 +27,13 @@
 #                                 (DNAT 规则命中包数; nat 表只看每条连接的首包)
 # 环境: HNC_IPT / HNC_IP6T 覆盖 iptables 命令(测试用)
 
+[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 LOG="$HNC_DIR/logs/service.log"
 IPT=${HNC_IPT:-"iptables -w 2"}
 IP6T=${HNC_IP6T:-"ip6tables -w 2"}
@@ -36,7 +42,24 @@ C_IN=HNC_DNSTK_IN
 
 log() { { echo "$(date '+%Y-%m-%d %H:%M:%S') [dns_takeover] $*" >> "$LOG"; } 2>/dev/null; }
 
+_IPT_RESOLVED=0
+_ipt_resolve() {
+    [ "$_IPT_RESOLVED" = "1" ] && return 0
+    _IPT_RESOLVED=1
+    if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+        iptables -w 2 -t filter -L -n >/dev/null 2>&1 || {
+            iptables -t filter -L -n >/dev/null 2>&1 && IPT="iptables"
+        }
+    fi
+    if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || {
+            ip6tables -t filter -L -n >/dev/null 2>&1 && IP6T="ip6tables"
+        }
+    fi
+}
+
 has_v6() {
+    _ipt_resolve
     if [ -n "${HNC_IP6T:-}" ]; then
         $IP6T -t filter -L -n >/dev/null 2>&1
         return
@@ -59,9 +82,69 @@ teardown_family() {
 }
 
 teardown_all() {
+    _ipt_resolve
     teardown_family "$IPT"
     has_v6 && teardown_family "$IP6T"
     return 0
+}
+
+_check_tproxy_table() {
+    # $1 = iptables 命令, $2 = nat|mangle
+    _dump=$($1 -t "$2" -S 2>/dev/null)
+    [ -n "$_dump" ] || return 1
+    printf '%s\n' "$_dump" | awk '
+        function is_tp_name(s) {
+            return (toupper(s) ~ /(BOX_|CLASH|MIHOMO|SING|TPROXY)/)
+        }
+        function has_port53(line) {
+            return (line ~ /(--dport|--dports)[[:space:]]+([0-9,]*,)?53([[:space:],]|$)/ || line ~ /dpt:53([^0-9]|$)/)
+        }
+        $1 == "-A" {
+            ch = $2
+            tgt = ""
+            for (i = 3; i < NF; i++) {
+                if ($i == "-j" || $i == "-g") { tgt = $(i+1); break }
+            }
+            p53 = has_port53($0)
+            if (ch == "PREROUTING") {
+                if (p53 && (is_tp_name(tgt) || is_tp_name($0))) { hit = 1; exit 0 }
+                if (tgt != "") {
+                    pre_jump[tgt] = 1
+                    if (p53) pre_p53_jump[tgt] = 1
+                }
+            } else {
+                if (p53) chain_has_53[ch] = 1
+                if (is_tp_name(tgt)) chain_has_tp_tgt[ch] = 1
+                if (tgt != "") sub_jump[ch, ++sub_cnt[ch]] = tgt
+            }
+        }
+        END {
+            if (hit) exit 0
+            for (c in pre_jump) {
+                if (c == "HNC_DNSTK") continue
+                tp = is_tp_name(c) || chain_has_tp_tgt[c]
+                h53 = chain_has_53[c] || pre_p53_jump[c]
+                for (k = 1; k <= sub_cnt[c]; k++) {
+                    sc = sub_jump[c, k]
+                    if (is_tp_name(sc) || chain_has_tp_tgt[sc]) tp = 1
+                    if (chain_has_53[sc]) h53 = 1
+                }
+                if (tp && h53) { hit = 1; break }
+            }
+            exit(hit ? 0 : 1)
+        }
+    '
+}
+
+has_tproxy_dns() {
+    _ipt_resolve
+    _check_tproxy_table "$IPT" nat && return 0
+    _check_tproxy_table "$IPT" mangle && return 0
+    if has_v6; then
+        _check_tproxy_table "$IP6T" nat && return 0
+        _check_tproxy_table "$IP6T" mangle && return 0
+    fi
+    return 1
 }
 
 valid_iface() { case "$1" in ""|*[!a-zA-Z0-9_.-]*) return 1 ;; esac; [ "${#1}" -le 32 ]; }
@@ -79,16 +162,17 @@ valid_v6() {
     [ "${#1}" -le 39 ]
 }
 
-# 统计某族 HNC_DNSTK 里 DNAT 规则的包数; 链不存在输出 "0 0"
+# 统计某族 HNC_DNSTK 里 DNAT/REDIRECT 规则的包数; 链不存在输出 "0 0"
 counters_family() {
+    _ipt_resolve
     if ! $1 -t nat -nL "$C_NAT" >/dev/null 2>&1; then
         echo "0 0"
         return
     fi
     $1 -t nat -nvxL "$C_NAT" 2>/dev/null | awk '
         BEGIN { p = 0 }
-        $1 ~ /^[0-9]+$/ && $0 ~ /DNAT/ { p += $1 }
-        END { printf "1 %d\n", p }'
+        $1 ~ /^[0-9]+$/ && ($0 ~ /DNAT/ || $0 ~ /REDIRECT/) { p += $1 }
+        END { printf "1 %.0f\n", p }'
 }
 
 case "$1" in
@@ -99,6 +183,7 @@ case "$1" in
         exit 0
         ;;
     counters)
+        _ipt_resolve
         set -- $(counters_family "$IPT")
         p4=${1:-0}; k4=${2:-0}
         p6=0; k6=0
@@ -108,15 +193,27 @@ case "$1" in
         fi
         pres=false; [ "$p4" = 1 ] && pres=true
         pres6=false; [ "$p6" = 1 ] && pres6=true
-        printf '{"present":%s,"pkts":%d,"v6_present":%s,"pkts_v6":%d}\n' "$pres" "$k4" "$pres6" "$k6"
+        printf '{"present":%s,"pkts":%s,"v6_present":%s,"pkts_v6":%s}\n' "$pres" "$k4" "$pres6" "$k6"
         exit 0
         ;;
     apply) ;;
     *)
-        echo "usage: dns_takeover.sh apply <iface> <port> <listen4> <dst4,..> [<v6,..>] | remove | counters" >&2
+        echo "usage: dns_takeover.sh apply [--force] <iface> <port> <listen4> <dst4,..> [<v6,..>] | remove | counters" >&2
         exit 2
         ;;
 esac
+
+FORCE=0
+if [ "${2:-}" = "--force" ]; then
+    FORCE=1
+    set -- "$1" "${3:-}" "${4:-}" "${5:-}" "${6:-}" "${7:-}"
+elif [ "${6:-}" = "--force" ]; then
+    FORCE=1
+    set -- "$1" "$2" "$3" "$4" "$5" ""
+elif [ "${7:-}" = "--force" ]; then
+    FORCE=1
+    set -- "$1" "$2" "$3" "$4" "$5" "$6"
+fi
 
 iface=$2; port=$3; listen4=$4; dst4=$5; dst6=$6
 if ! valid_iface "$iface" || ! valid_port "$port" || ! valid_v4 "$listen4"; then
@@ -133,8 +230,14 @@ for a in $(echo "$dst6" | tr ',' ' '); do
     valid_v6 "$a" && d6="$d6 $a"
 done
 
-# 先整体拆(幂等), 再建
+# 先整体拆(幂等), 再检测透明代理礼让或重建
 teardown_all
+
+if [ "$FORCE" != "1" ] && has_tproxy_dns; then
+    log "yielded to transparent proxy (BOX_/CLASH/MIHOMO/SING/TPROXY on port 53); HNC_DNSTK kept clean"
+    echo "DNSTK=yield_tproxy"
+    exit 0
+fi
 
 nr=0
 fail=0
@@ -142,7 +245,8 @@ $IPT -t nat -N "$C_NAT" 2>/dev/null
 $IPT -t filter -N "$C_IN" 2>/dev/null
 for a in $d4; do
     for p in udp tcp; do
-        if $IPT -t nat -A "$C_NAT" -i "$iface" -d "$a" -p "$p" --dport 53 -j DNAT --to-destination "$listen4:$port" 2>/dev/null; then
+        if $IPT -t nat -A "$C_NAT" -i "$iface" -d "$a" -p "$p" --dport 53 -j DNAT --to-destination "$listen4:$port" 2>/dev/null \
+           || $IPT -t nat -A "$C_NAT" -i "$iface" -d "$a" -p "$p" --dport 53 -j REDIRECT --to-ports "$port" 2>/dev/null; then
             nr=$((nr + 1))
         else
             fail=1
@@ -170,7 +274,8 @@ if [ -n "$d6" ]; then
         n6=0; f6=0
         for a in $d6; do
             for p in udp tcp; do
-                if $IP6T -t nat -A "$C_NAT" -i "$iface" -d "$a" -p "$p" --dport 53 -j DNAT --to-destination "[$a]:$port" 2>/dev/null; then
+                if $IP6T -t nat -A "$C_NAT" -i "$iface" -d "$a" -p "$p" --dport 53 -j DNAT --to-destination "[$a]:$port" 2>/dev/null \
+                   || $IP6T -t nat -A "$C_NAT" -i "$iface" -d "$a" -p "$p" --dport 53 -j REDIRECT --to-ports "$port" 2>/dev/null; then
                     n6=$((n6 + 1))
                 else
                     f6=1

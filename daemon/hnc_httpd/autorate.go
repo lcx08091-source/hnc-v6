@@ -741,7 +741,11 @@ func (s *server) autorateStep(cfg autorateConfig) {
 	}
 	effDownMax := cfg.DownMaxMbps
 	effUpMax := cfg.UpMaxMbps
-	if sig.Available && sig.RFCeilingFactor > 0 && sig.RFCeilingFactor < 1.0 {
+	physUpstream := strings.TrimPrefix(strings.TrimSpace(upstreamIface), "v4-")
+	cellUpstream := isCellIface(physUpstream) && sig.Mode != "wifi_sta"
+	effRFFactor := 1.0
+	if cellUpstream && sig.Available && sig.RFCeilingFactor > 0 && sig.RFCeilingFactor < 1.0 {
+		effRFFactor = sig.RFCeilingFactor
 		effDownMax = math.Max(cfg.DownMinMbps, cfg.DownMaxMbps*sig.RFCeilingFactor)
 		effUpMax = math.Max(cfg.UpMinMbps, cfg.UpMaxMbps*sig.RFCeilingFactor)
 	}
@@ -936,7 +940,11 @@ func (s *server) autorateStep(cfg autorateConfig) {
 			ctl.st.SignalDbm = sig.RSRPdBm
 		}
 		ctl.st.SignalQuality = sig.Quality
-		ctl.st.RFCeilingFactor = sig.RFCeilingFactor
+		if cellUpstream && sig.RFCeilingFactor > 0 {
+			ctl.st.RFCeilingFactor = sig.RFCeilingFactor
+		} else {
+			ctl.st.RFCeilingFactor = effRFFactor
+		}
 		ctl.st.DiagnosisCode = sig.Diagnosis
 	}
 	ctl.st.UpdatedAt = now.Unix()

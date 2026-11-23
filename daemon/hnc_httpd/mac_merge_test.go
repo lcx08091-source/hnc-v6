@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -250,6 +252,60 @@ func (f *fakeMergeOps) rule(action string, p map[string]string) actionResp {
 	root["blacklist"] = bl
 	mmWrite(f.t, f.dir, "data/rules.json", root)
 	return actionResp{OK: true}
+}
+
+func (f *fakeMergeOps) persistOfflineRule(mac string, r ruleState) error {
+	f.calls = append(f.calls, "persist_offline_rule "+mac)
+	if f.failOn["persist_offline_rule "+mac] {
+		return fmt.Errorf("injected offline persist failure")
+	}
+	root := mmRead(f.t, f.dir, "data/rules.json")
+	devs, _ := root["devices"].(map[string]interface{})
+	if devs == nil {
+		devs = map[string]interface{}{}
+		root["devices"] = devs
+	}
+	blRaw, _ := root["blacklist"].([]interface{})
+	keptBL := []interface{}{}
+	for _, v := range blRaw {
+		if asString(v) != mac {
+			keptBL = append(keptBL, v)
+		}
+	}
+	if r.bl {
+		keptBL = append(keptBL, mac)
+	}
+	root["blacklist"] = keptBL
+
+	hasDev := r.exists || r.limit || r.delay || r.sqm || r.wl || r.appQos
+	if !hasDev {
+		delete(devs, mac)
+	} else {
+		d, _ := devs[mac].(map[string]interface{})
+		if d == nil {
+			d = map[string]interface{}{"mark_id": float64(42)}
+			devs[mac] = d
+		}
+		if r.limit {
+			d["limit_enabled"] = true
+			d["down_mbps"] = float64(r.down) / 1000
+			d["up_mbps"] = float64(r.up) / 1000
+		} else {
+			d["limit_enabled"] = false
+			d["down_mbps"] = float64(0)
+			d["up_mbps"] = float64(0)
+		}
+		lp, _ := strconv.ParseFloat(r.loss, 64)
+		d["delay_enabled"] = r.delay
+		d["delay_ms"] = float64(r.delayMs)
+		d["jitter_ms"] = float64(r.jitterMs)
+		d["loss_pct"] = lp
+		d["sqm_enabled"] = r.sqm
+		d["whitelist"] = r.wl
+		d["app_qos"] = r.appQos
+	}
+	mmWrite(f.t, f.dir, "data/rules.json", root)
+	return nil
 }
 
 func (f *fakeMergeOps) syncConnBlocks() error { f.connSyncs++; return nil }
@@ -945,4 +1001,626 @@ func TestDeviceMergeAppQosVsDelay(t *testing.T) {
 			t.Fatalf("回滚后新 MAC 的延迟应恢复 50ms: %v", d)
 		}
 	})
+}
+
+// ─── RC2: 双胞胎 MUTEX_APART + 无损秒拆(手动在线/离线、旧别名、重连自动) + 容量裁剪 + action 加固 ───
+
+func TestMutexApartTwinConcurrentTrafficAndFullChainBlock(t *testing.T) {
+	dir, s, _ := mmFixture(t)
+	now := time.Unix(1_791_000_000, 0)
+	twinOld := "da:a1:19:00:11:01"
+	twinNew := "da:a1:19:00:22:02"
+
+	// t0: 双胞胎设备同时在线且有 IP, 建立流量采样基线
+	mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+		twinOld: map[string]interface{}{
+			"ip": "192.168.43.11", "mac": twinOld, "hostname": "Family-iPhone", "hostname_src": "dhcp",
+			"rx_bytes": 1000, "tx_bytes": 500, "last_seen": now.Unix(),
+		},
+		twinNew: map[string]interface{}{
+			"ip": "192.168.43.12", "mac": twinNew, "hostname": "Family-iPhone", "hostname_src": "dhcp",
+			"rx_bytes": 2000, "tx_bytes": 800, "last_seen": now.Unix(),
+		},
+	})
+	s.macMergeStep(now, collectMacObs(dir, nil))
+	if f0 := loadMacMergeFile(dir); isMacMutexApart(f0, twinOld, twinNew, now.Unix()) {
+		t.Fatalf("首轮仅建基线不应写入 MutexApart: %+v", f0.MutexApart)
+	}
+
+	// t0+60s (180s 窗口内): 双方各自产生 >= 512 字节真实正增长 → 写入规范键 MutexApart
+	t1 := now.Add(60 * time.Second)
+	mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+		twinOld: map[string]interface{}{
+			"ip": "192.168.43.11", "mac": twinOld, "hostname": "Family-iPhone", "hostname_src": "dhcp",
+			"rx_bytes": 1400, "tx_bytes": 700, "last_seen": t1.Unix(), // +600 >= 512
+		},
+		twinNew: map[string]interface{}{
+			"ip": "192.168.43.12", "mac": twinNew, "hostname": "Family-iPhone", "hostname_src": "dhcp",
+			"rx_bytes": 2500, "tx_bytes": 1000, "last_seen": t1.Unix(), // +700 >= 512
+		},
+	})
+	s.macMergeStep(t1, collectMacObs(dir, nil))
+
+	f1 := loadMacMergeFile(dir)
+	canonKey := twinOld + "|" + twinNew
+	if f1.MutexApart[canonKey] != t1.Unix() {
+		t.Fatalf("want canonical MutexApart[%q]=%d, got %+v", canonKey, t1.Unix(), f1.MutexApart)
+	}
+
+	// 即使后续 twinOld 离线、画像时间调整为不重叠且预塞高分建议, 全链路仍拦截 MutexApart
+	t2 := t1.Add(10 * time.Minute)
+	macMergeMu.Lock()
+	f2 := loadMacMergeFile(dir)
+	f2.Profiles[twinOld] = &macProfile{FirstSeen: now.Unix() - 3600, LastSeen: now.Unix() - 300, DHCPName: "Unique-Twin-Phone", DHCPFP: "1,3,6,15", Model: "Mi 14"}
+	f2.Profiles[twinNew] = &macProfile{FirstSeen: now.Unix(), LastSeen: t2.Unix(), DHCPName: "Unique-Twin-Phone", DHCPFP: "1,3,6,15", Model: "Mi 14", New: true}
+	f2.Suggestions[twinNew] = []macMergeCand{{OldMAC: twinOld, Score: 96, Reasons: []string{"test"}, Ts: t2.Unix()}}
+	_ = saveMacMergeFile(dir, f2)
+	macMergeMu.Unlock()
+
+	// 1) macMergeCandidates 拦截
+	if cands := macMergeCandidates(loadMacMergeFile(dir), twinNew, nil, t2.Unix()); len(cands) != 0 {
+		t.Fatalf("macMergeCandidates should block MutexApart pair, got %+v", cands)
+	}
+
+	// 2) apiMacMerge 拦截并返回 mutex_apart_count
+	rec := httptest.NewRecorder()
+	s.apiMacMerge(rec, httptest.NewRequest(http.MethodGet, "/api/mac_merge", nil))
+	var apiResp map[string]interface{}
+	if err := json.Unmarshal(rec.Body.Bytes(), &apiResp); err != nil {
+		t.Fatal(err)
+	}
+	if gotCnt := int(numOf(apiResp["mutex_apart_count"])); gotCnt != 1 {
+		t.Fatalf("want mutex_apart_count=1, got %v (%s)", apiResp["mutex_apart_count"], rec.Body.String())
+	}
+	if sg, _ := apiResp["suggestions"].([]interface{}); len(sg) != 0 {
+		t.Fatalf("apiMacMerge leaked MutexApart suggestion: %v", sg)
+	}
+
+	// 3) annotateMacMerge 拦截
+	rows := []map[string]interface{}{{"mac": twinNew}}
+	s.annotateMacMerge(rows, map[string]interface{}{})
+	if rows[0]["merge_suggestion"] != nil {
+		t.Fatalf("annotateMacMerge leaked MutexApart suggestion: %+v", rows[0])
+	}
+
+	// 4) rmacReconcile 拦截自动继承(twinOld 离线、twinNew 在线且预塞 96 分建议)
+	mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+		twinNew: map[string]interface{}{"ip": "192.168.43.12", "mac": twinNew, "rx_bytes": 3000, "tx_bytes": 1200, "last_seen": t2.Unix()},
+	})
+	_ = saveRMACPolicy(dir, rmacPolicy{AutoInherit: true, AutoInheritScore: 85, EphemeralGCMinutes: 30})
+	s.rmacReconcile(t2)
+	if al := loadMACAliases(dir); al[twinOld] != "" {
+		t.Fatalf("rmacReconcile must not auto-inherit MutexApart pair, got aliases=%v", al)
+	}
+
+	// 5) macMergePruneLocked 清除预塞建议
+	macMergeMu.Lock()
+	fp := loadMacMergeFile(dir)
+	s.macMergePruneLocked(fp, t2.Unix(), nil)
+	_ = saveMacMergeFile(dir, fp)
+	macMergeMu.Unlock()
+	if len(loadMacMergeFile(dir).Suggestions) != 0 {
+		t.Fatalf("macMergePruneLocked did not prune MutexApart suggestion")
+	}
+
+	// 6) deviceMerge 非 force 返回 HTTP 409 conflict
+	body := `{"action":"device_merge","params":{"from_mac":"` + twinOld + `","to_mac":"` + twinNew + `"}}`
+	req := httptest.NewRequest(http.MethodPost, "/api/action", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-HNC-CSRF", "1")
+	req.RemoteAddr = "127.0.0.1:12345"
+	w := httptest.NewRecorder()
+	s.handleAction(w, req)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("expected 409 conflict on MutexApart device_merge without force, got status=%d body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestMutexApartStaleLeaseZeroTrafficNotLocked(t *testing.T) {
+	dir := t.TempDir()
+	s := newServer(dir)
+	now := time.Unix(1_791_100_000, 0)
+
+	// t0: 旧 MAC 在线建基线
+	mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+		mmOld: map[string]interface{}{"ip": "192.168.43.20", "mac": mmOld, "rx_bytes": 50000, "tx_bytes": 20000, "last_seen": now.Unix()},
+	})
+	s.macMergeStep(now, collectMacObs(dir, nil))
+
+	// t0+30s: 同一部手机刚切换新随机 MAC, 旧租约仍留在 devices.json 90s 内但流量不再增长(或不足 512B); 新 MAC 刚建基线
+	t1 := now.Add(30 * time.Second)
+	mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+		mmOld: map[string]interface{}{"ip": "192.168.43.20", "mac": mmOld, "rx_bytes": 50100, "tx_bytes": 20000, "last_seen": now.Unix()}, // +100 < 512
+		mmNew: map[string]interface{}{"ip": "192.168.43.21", "mac": mmNew, "rx_bytes": 1000, "tx_bytes": 500, "last_seen": t1.Unix()},
+	})
+	s.macMergeStep(t1, collectMacObs(dir, nil))
+
+	// t0+60s: 新 MAC 大幅走流(+20KB >= 512B), 旧租约依然静默残留(+0B)
+	t2 := now.Add(60 * time.Second)
+	mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+		mmOld: map[string]interface{}{"ip": "192.168.43.20", "mac": mmOld, "rx_bytes": 50100, "tx_bytes": 20000, "last_seen": now.Unix()},
+		mmNew: map[string]interface{}{"ip": "192.168.43.21", "mac": mmNew, "rx_bytes": 16000, "tx_bytes": 5500, "last_seen": t2.Unix()},
+	})
+	s.macMergeStep(t2, collectMacObs(dir, nil))
+
+	if f := loadMacMergeFile(dir); len(f.MutexApart) != 0 {
+		t.Fatalf("90s stale lease without >=512B growth must NOT trigger MutexApart, got %+v", f.MutexApart)
+	}
+}
+
+func TestMutexApartAndLongRunCapacityPruning(t *testing.T) {
+	dir := t.TempDir()
+	s := newServer(dir)
+	nowU := int64(1_792_000_000)
+
+	// 1) MutexApart: 512 上限 + 90 天 TTL
+	mf := loadMacMergeFile(dir)
+	mf.MutexApart[macMutexApartKey("aa:bb:cc:00:00:01", "aa:bb:cc:99:99:99")] = nowU - macMergeMutexApartTTL - 10 // 过期
+	for i := 1; i <= 540; i++ {
+		m1 := fmt.Sprintf("02:11:22:33:%02x:%02x", (i>>8)&0xff, i&0xff)
+		m2 := fmt.Sprintf("fe:11:22:33:%02x:%02x", (i>>8)&0xff, i&0xff)
+		mf.MutexApart[macMutexApartKey(m1, m2)] = nowU - int64(1000-i)
+	}
+	s.macMergePruneLocked(mf, nowU, nil)
+	if len(mf.MutexApart) != macMergeMaxMutexApart {
+		t.Fatalf("want MutexApart capped at %d, got %d", macMergeMaxMutexApart, len(mf.MutexApart))
+	}
+	if isMacMutexApart(mf, "aa:bb:cc:00:00:01", "aa:bb:cc:99:99:99", nowU) {
+		t.Fatalf("expired MutexApart entry not pruned")
+	}
+	if !isMacMutexApart(mf, "02:11:22:33:02:1c", "fe:11:22:33:02:1c", nowU) { // i=540 最新条目应保留
+		t.Fatalf("newest MutexApart entry unexpectedly evicted")
+	}
+
+	// 2) mac_merge_archives.json: 64 上限 + 90 天 TTL
+	upsertMacMergeArchive(dir, &macMergeArchive{
+		FromMAC: "02:aa:00:00:00:01", ToMAC: "02:bb:00:00:00:01", MergedAt: nowU - macMergeArchiveTTL - 5,
+	}, nowU)
+	for i := 1; i <= 70; i++ {
+		upsertMacMergeArchive(dir, &macMergeArchive{
+			FromMAC:  fmt.Sprintf("02:aa:11:00:%02x:%02x", (i>>8)&0xff, i&0xff),
+			ToMAC:    fmt.Sprintf("02:bb:11:00:%02x:%02x", (i>>8)&0xff, i&0xff),
+			MergedAt: nowU - int64(100-i),
+		}, nowU)
+	}
+	macArchiveMu.Lock()
+	archF := loadMacMergeArchivesUnlocked(dir, nowU)
+	macArchiveMu.Unlock()
+	if len(archF.Archives) != macMergeArchiveMax {
+		t.Fatalf("want archives capped at %d, got %d", macMergeArchiveMax, len(archF.Archives))
+	}
+	if findArchiveInSlice(archF.Archives, "02:aa:00:00:00:01", "") != nil {
+		t.Fatalf("expired archive not pruned")
+	}
+
+	// 3) rmacStateFile.AutoInherited: 1024 上限 + 90 天 TTL
+	st := rmacStateFile{Version: 2, AutoInherited: map[string]rmacAutoInheritRec{}}
+	st.AutoInherited["da:00:99:00:00:01"] = rmacAutoInheritRec{OldMAC: "00:11:22:33:44:55", Score: 90, Ts: nowU - rmacAutoInheritedTTL - 1}
+	for i := 1; i <= 1050; i++ {
+		k := fmt.Sprintf("da:22:33:44:%02x:%02x", (i>>8)&0xff, i&0xff)
+		st.AutoInherited[k] = rmacAutoInheritRec{OldMAC: "00:11:22:33:44:55", Score: 90, Ts: nowU - int64(2000-i)}
+	}
+	saveRMACStateAt(dir, st, nowU)
+	stLoaded := loadRMACState(dir)
+	if len(stLoaded.AutoInherited) != rmacAutoInheritedMax {
+		t.Fatalf("want AutoInherited capped at %d, got %d", rmacAutoInheritedMax, len(stLoaded.AutoInherited))
+	}
+	if _, exists := stLoaded.AutoInherited["da:00:99:00:00:01"]; exists {
+		t.Fatalf("expired AutoInherited entry not pruned")
+	}
+
+	// 4) mac_aliases.json: 1024 上限 + 90 天 TTL 且保持扁平映射返回
+	alMap := map[string]string{"00:aa:99:00:00:01": "da:bb:99:00:00:01"}
+	tsMap := map[string]int64{"00:aa:99:00:00:01": nowU - macAliasesTTL - 1}
+	for i := 1; i <= 1050; i++ {
+		oldM := fmt.Sprintf("02:cc:dd:ee:%02x:%02x", (i>>8)&0xff, i&0xff)
+		newM := fmt.Sprintf("da:cc:dd:ee:%02x:%02x", (i>>8)&0xff, i&0xff)
+		alMap[oldM] = newM
+		tsMap[oldM] = nowU - int64(2000-i)
+	}
+	if err := saveMACAliasesAt(dir, alMap, nowU, tsMap); err != nil {
+		t.Fatal(err)
+	}
+	loadedAl := loadMACAliases(dir)
+	if len(loadedAl) != macAliasesMax {
+		t.Fatalf("want mac_aliases capped at %d, got %d", macAliasesMax, len(loadedAl))
+	}
+	if _, exists := loadedAl["00:aa:99:00:00:01"]; exists {
+		t.Fatalf("expired mac_alias entry not pruned")
+	}
+	for k := range loadedAl {
+		if strings.HasPrefix(k, "@ts:") {
+			t.Fatalf("metadata key leaked into loadMACAliases: %s", k)
+		}
+	}
+}
+
+func TestDeviceUnmergeOnlineAndOfflineRestoresAllStores(t *testing.T) {
+	t.Run("offline_old_mac_restores_all_stores_and_deducts_transferred_usage", func(t *testing.T) {
+		dir, s, ops := mmFixture(t)
+		now := time.Now()
+		day := now.Format("2006-01-02")
+
+		// 给合并前的 to(mmNew) 也设置原有独立状态, 验证拆分后双方各自回到合并前快照
+		names := mmRead(t, dir, "data/device_names.json")
+		names[mmNew] = "平板原本的名字"
+		mmWrite(t, dir, "data/device_names.json", names)
+
+		mmSetDev(t, dir, mmNew, map[string]interface{}{
+			"mark_id": 15, "down_mbps": 12, "up_mbps": 4, "limit_enabled": true,
+			"delay_enabled": false, "sqm_enabled": false, "whitelist": false,
+		})
+		mmWrite(t, dir, "data/encdns.json", map[string]interface{}{
+			"policy": "off",
+			"devices": map[string]string{
+				mmOld: "strict",
+				mmNew: "dot",
+			},
+			"ts": now.Unix(),
+		})
+		s.limitCtl.mu.Lock()
+		s.limitCtl.policies[mmNew] = &devicePolicy{Quota: &quotaPolicy{DailyGB: 10, Action: "block"}}
+		_ = s.limitCtl.savePoliciesLocked()
+		s.limitCtl.st.Devices[mmNew] = &ctlDevState{
+			Adopted: true,
+			Base:    limitRule{DownKbit: 12000, UpKbit: 4000, Blocked: false},
+			Usage:   usageAcc{HavePrev: true, PrevRx: 100, PrevTx: 50, DayKey: day, DayBytes: 100 << 20, MonthKey: "m", MonthBytes: 200 << 20},
+		}
+		s.limitCtl.saveStateLocked(now, true)
+		s.limitCtl.mu.Unlock()
+
+		macMergeMu.Lock()
+		mf := loadMacMergeFile(dir)
+		mf.Bootstrapped = true
+		mf.Profiles[mmOld] = &macProfile{FirstSeen: 10, LastSeen: 20, DHCPName: "Xiaoming-Mi-10", Apps: []string{"weixin"}}
+		mf.Profiles[mmNew] = &macProfile{FirstSeen: 30, LastSeen: 40, DHCPName: "Guest-Pad", Apps: []string{"bilibili"}, New: true}
+		_ = saveMacMergeFile(dir, mf)
+		macMergeMu.Unlock()
+
+		// 强制合并(以旧 MAC 为准)
+		rMerge := dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew, "force": "true"}, false)
+		if !rMerge.OK {
+			t.Fatalf("force merge failed: %+v", rMerge)
+		}
+
+		// 模拟记录一条 AutoInherited, 验证拆分后一并清理
+		saveRMACStateAt(dir, rmacStateFile{
+			Version: 2,
+			AutoInherited: map[string]rmacAutoInheritRec{
+				mmNew: {OldMAC: mmOld, OldName: "小明的手机", Score: 92, Ts: now.Unix()},
+			},
+		}, now.Unix())
+
+		// 验证 /api/mac_merge 返回 merged_list, 且 annotateMacMerge 标注 merged_from / merged_from_name
+		rec := httptest.NewRecorder()
+		s.apiMacMerge(rec, httptest.NewRequest(http.MethodGet, "/api/mac_merge", nil))
+		var mmAPI map[string]interface{}
+		if err := json.Unmarshal(rec.Body.Bytes(), &mmAPI); err != nil {
+			t.Fatal(err)
+		}
+		ml, _ := mmAPI["merged_list"].([]interface{})
+		if len(ml) != 1 {
+			t.Fatalf("want merged_list len=1, got %v", mmAPI["merged_list"])
+		}
+		ml0 := ml[0].(map[string]interface{})
+		if ml0["from_mac"] != mmOld || ml0["to_mac"] != mmNew || ml0["from_name"] != "小明的手机" || ml0["has_archive"] != true {
+			t.Fatalf("unexpected merged_list[0]: %+v", ml0)
+		}
+		rows := []map[string]interface{}{{"mac": mmNew}}
+		s.annotateMacMerge(rows, map[string]interface{}{})
+		if rows[0]["merged_from"] != mmOld || rows[0]["merged_from_name"] != "小明的手机" {
+			t.Fatalf("annotateMacMerge missing merged_from/merged_from_name: %+v", rows[0])
+		}
+
+		// 模拟合并期间 mmNew 自己又新增了 50MB 流量
+		s.limitCtl.mu.Lock()
+		s.limitCtl.st.Devices[mmNew].Usage.DayBytes += 50 << 20
+		s.limitCtl.st.Devices[mmNew].Usage.MonthBytes += 50 << 20
+		s.limitCtl.saveStateLocked(now, true)
+		s.limitCtl.mu.Unlock()
+
+		// 执行手动拆分(此时 mmOld 不在 devices.json 中 = 离线, mmNew 在线)
+		ops.calls = nil
+		rUnmerge := dispatchAction(s, "device_unmerge", map[string]string{"from_mac": mmOld, "to_mac": mmNew}, false)
+		if !rUnmerge.OK {
+			t.Fatalf("device_unmerge failed: %+v", rUnmerge)
+		}
+
+		// 离线旧 MAC 走了 persist_offline_rule, 在线新 MAC 走了 ops.rule
+		joinedCalls := strings.Join(ops.calls, ",")
+		if !strings.Contains(joinedCalls, "persist_offline_rule "+mmOld) {
+			t.Errorf("expected offline mmOld to use persist_offline_rule, calls=%v", ops.calls)
+		}
+		if strings.Contains(joinedCalls, "persist_offline_rule "+mmNew) {
+			t.Errorf("online mmNew should use ops.rule instead of persist_offline_rule, calls=%v", ops.calls)
+		}
+
+		// 1) rules.json 还原
+		rules := mmRead(t, dir, "data/rules.json")
+		devs := rules["devices"].(map[string]interface{})
+		od := devs[mmOld].(map[string]interface{})
+		nd := devs[mmNew].(map[string]interface{})
+		if od["down_mbps"] != 5.0 || od["up_mbps"] != 2.0 || od["delay_ms"] != 80.0 || od["sqm_enabled"] != true || od["whitelist"] != true {
+			t.Errorf("mmOld rules not restored: %+v", od)
+		}
+		if nd["down_mbps"] != 12.0 || nd["up_mbps"] != 4.0 || truthy(nd["delay_enabled"]) || truthy(nd["sqm_enabled"]) {
+			t.Errorf("mmNew rules not restored to ToBefore: %+v", nd)
+		}
+		bl := rules["blacklist"].([]interface{})
+		if len(bl) != 1 || bl[0] != mmOld {
+			t.Errorf("blacklist not restored to [mmOld], got %v", bl)
+		}
+
+		// 2) 名称 / 识别纠正 / 应用限速 / 应用控制 / 封锁项 / encdns / 已知设备还原
+		namesAfter := mmRead(t, dir, "data/device_names.json")
+		if namesAfter[mmOld] != "小明的手机" || namesAfter[mmNew] != "平板原本的名字" {
+			t.Errorf("device_names not restored: %v", namesAfter)
+		}
+		idsAfter := readIdentOverrides(dir)
+		if idsAfter[mmOld]["model"] != "Mi 10" || idsAfter[mmNew] != nil {
+			t.Errorf("ident_override not restored: %v", idsAfter)
+		}
+		alAfter := loadAppLimits(dir)
+		if !hasAppLimitFor(alAfter, mmOld) || hasAppLimitFor(alAfter, mmNew) {
+			t.Errorf("app_limits not restored: %+v", alAfter.Items)
+		}
+		acAfter := loadAppControls(dir)
+		if !hasAppCtlFor(acAfter, mmOld) || hasAppCtlFor(acAfter, mmNew) {
+			t.Errorf("app_controls not restored: %+v", acAfter)
+		}
+		cbAfter := readConnBlocks(dir)
+		if !hasConnBlockFor(cbAfter, mmOld) || hasConnBlockFor(cbAfter, mmNew) {
+			t.Errorf("conn_blocks not restored: %+v", cbAfter.Items)
+		}
+		encAfter := loadEncdns(dir)
+		if encAfter.Devices[mmOld] != "strict" || encAfter.Devices[mmNew] != "dot" {
+			t.Errorf("encdns not restored: %+v", encAfter.Devices)
+		}
+		_, _, newMarked := readKnownDeviceSnap(dir, mmNew)
+		_, _, oldMarked := readKnownDeviceSnap(dir, mmOld)
+		if oldMarked == 0 || newMarked != 0 {
+			t.Errorf("known_devices not restored: oldMarked=%d newMarked=%d", oldMarked, newMarked)
+		}
+
+		// 3) 配额策略与 UsageTransferred 安全扣回验证(100MB + 50MB = 150MB, 扣回旧 MAC 的 3GB)
+		s.limitCtl.mu.Lock()
+		polOld := s.limitCtl.policies[mmOld]
+		polNew := s.limitCtl.policies[mmNew]
+		stOld := s.limitCtl.st.Devices[mmOld]
+		stNew := s.limitCtl.st.Devices[mmNew]
+		s.limitCtl.mu.Unlock()
+		if polOld == nil || polOld.Quota == nil || polOld.Quota.DailyGB != 2 || polNew == nil || polNew.Quota == nil || polNew.Quota.DailyGB != 10 {
+			t.Errorf("limit_policies not restored: old=%+v new=%+v", polOld, polNew)
+		}
+		if stOld == nil || stOld.Usage.DayBytes != 3<<30 || stOld.Base.DownKbit != 5000 {
+			t.Errorf("mmOld ctl state not restored: %+v", stOld)
+		}
+		if stNew == nil || stNew.Usage.DayBytes != 150<<20 || stNew.Usage.MonthBytes != 250<<20 || stNew.Base.DownKbit != 12000 {
+			t.Errorf("mmNew ctl usage/base not safely reverted: %+v", stNew)
+		}
+
+		// 4) 别名解绑、AutoInherited 清理、MutexApart 与双向 Dismissed 写入
+		if al := loadMACAliases(dir); len(al) != 0 {
+			t.Errorf("aliases should be empty after unmerge, got %v", al)
+		}
+		if len(loadRMACState(dir).AutoInherited) != 0 {
+			t.Errorf("AutoInherited[to] should be cleared after unmerge")
+		}
+		mfAfter := loadMacMergeFile(dir)
+		if !isMacMutexApart(mfAfter, mmOld, mmNew, now.Unix()) {
+			t.Errorf("unmerge must write MutexApart")
+		}
+		if mfAfter.Dismissed[macMergeDismissKey(mmNew, mmOld)] == 0 || mfAfter.Dismissed[macMergeDismissKey(mmOld, mmNew)] == 0 {
+			t.Errorf("unmerge must write bidirectional Dismissed: %+v", mfAfter.Dismissed)
+		}
+		if mfAfter.Profiles[mmOld] == nil || mfAfter.Profiles[mmNew] == nil || mfAfter.Profiles[mmNew].DHCPName != "Guest-Pad" {
+			t.Errorf("profiles not restored cleanly: old=%+v new=%+v", mfAfter.Profiles[mmOld], mfAfter.Profiles[mmNew])
+		}
+	})
+
+	t.Run("real_rulesStore_persistOfflineRule_roundtrip", func(t *testing.T) {
+		dir := t.TempDir()
+		mmWrite(t, dir, "data/rules.json", map[string]interface{}{
+			"version": 1, "devices": map[string]interface{}{}, "blacklist": []interface{}{}, "whitelist": []interface{}{},
+		})
+		s := newServer(dir)
+		ro := realMergeOps{s: s}
+		want := ruleState{
+			exists: true, limit: true, down: 8000, up: 2500,
+			delay: true, delayMs: 45, jitterMs: 5, loss: "0.2",
+			sqm: true, wl: true, bl: true, appQos: false,
+		}
+		if err := ro.persistOfflineRule(mmOld, want); err != nil {
+			t.Fatalf("realMergeOps.persistOfflineRule failed: %v", err)
+		}
+		gotRS, err := readRuleStates(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := gotRS[mmOld]
+		if !got.limit || got.down != 8000 || got.up != 2500 || !got.delay || got.delayMs != 45 || !got.sqm || !got.wl || !got.bl {
+			t.Fatalf("rulesStore offline persist mismatch: got=%+v want=%+v", got, want)
+		}
+	})
+
+	t.Run("online_old_mac_uses_live_rule_ops", func(t *testing.T) {
+		dir, s, ops := mmFixture(t)
+		rMerge := dispatchAction(s, "device_merge", map[string]string{"from_mac": mmOld, "to_mac": mmNew}, false)
+		if !rMerge.OK {
+			t.Fatalf("merge failed: %+v", rMerge)
+		}
+		// 让旧 MAC 重新在线有 IP 后手动拆分, 应走实时 ops.rule 挂载而非离线写回
+		now := time.Now().Unix()
+		mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+			mmOld: map[string]interface{}{"ip": "192.168.43.20", "mac": mmOld, "last_seen": now},
+			mmNew: map[string]interface{}{"ip": "192.168.43.31", "mac": mmNew, "last_seen": now},
+		})
+		ops.calls = nil
+		rUn := dispatchAction(s, "device_unmerge", map[string]string{"from_mac": mmOld, "to_mac": mmNew}, false)
+		if !rUn.OK {
+			t.Fatalf("online unmerge failed: %+v", rUn)
+		}
+		joined := strings.Join(ops.calls, ",")
+		for _, wantOp := range []string{"bl_add " + mmOld, "rule_set " + mmOld, "delay_set " + mmOld, "rule_sqm " + mmOld, "device_whitelist_set " + mmOld} {
+			if !strings.Contains(joined, wantOp) {
+				t.Errorf("online unmerge missing live rule op %q in %v", wantOp, ops.calls)
+			}
+		}
+		if strings.Contains(joined, "persist_offline_rule "+mmOld) {
+			t.Errorf("online mmOld should not fall back to persist_offline_rule: %v", ops.calls)
+		}
+	})
+}
+
+func TestDeviceUnmergeLegacyAliasWithoutArchive(t *testing.T) {
+	dir, s, _ := mmFixture(t)
+	now := time.Now().Unix()
+
+	// 模拟老版本遗留状态: 只有 mac_aliases.json 和 AutoInherited, 没有 mac_merge_archives.json
+	if err := saveMACAliasesAt(dir, map[string]string{mmOld: mmNew}, now-3600, nil); err != nil {
+		t.Fatal(err)
+	}
+	saveRMACStateAt(dir, rmacStateFile{
+		Version: 2,
+		AutoInherited: map[string]rmacAutoInheritRec{
+			mmNew: {OldMAC: mmOld, OldName: "旧版手机", Score: 90, Ts: now - 3600},
+		},
+	}, now)
+	names := mmRead(t, dir, "data/device_names.json")
+	names[mmNew] = "保留的新手机名"
+	mmWrite(t, dir, "data/device_names.json", names)
+
+	r := dispatchAction(s, "device_unmerge", map[string]string{"from_mac": mmOld}, false)
+	if !r.OK {
+		t.Fatalf("legacy unmerge failed: %+v", r)
+	}
+	if al := loadMACAliases(dir); len(al) != 0 {
+		t.Fatalf("legacy alias not removed: %v", al)
+	}
+	if len(loadRMACState(dir).AutoInherited) != 0 {
+		t.Fatalf("AutoInherited not cleared on legacy unmerge")
+	}
+	if gotName := mmRead(t, dir, "data/device_names.json")[mmNew]; gotName != "保留的新手机名" {
+		t.Fatalf("legacy unmerge should keep target existing config intact, got name=%v", gotName)
+	}
+	mf := loadMacMergeFile(dir)
+	if !isMacMutexApart(mf, mmOld, mmNew, now) {
+		t.Fatalf("legacy unmerge must set MutexApart")
+	}
+}
+
+func TestRMACReconnectAutoLosslessUnmerge(t *testing.T) {
+	dir, s, _ := mmFixture(t)
+	t0 := time.Now().Truncate(time.Second)
+
+	// 合并时刻旧 MAC 刚断开还残留在 devices.json 中(记录合并时刻水位)
+	mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+		mmOld: map[string]interface{}{
+			"ip": "192.168.43.20", "mac": mmOld, "rx_bytes": 5000, "tx_bytes": 2000, "last_seen": t0.Unix() - 30,
+		},
+		mmNew: map[string]interface{}{
+			"ip": "192.168.43.31", "mac": mmNew, "rx_bytes": 1000, "tx_bytes": 500, "last_seen": t0.Unix(),
+		},
+	})
+	res, err := s.deviceMerge(mmOld, mmNew, false, t0)
+	if err != nil {
+		t.Fatalf("merge failed: %v (res=%+v)", err, res)
+	}
+
+	// 1) t0+10s: 旧 MAC 在 devices.json 中仍是合并时刻的死残留(last_seen 与 rx+tx 均未增长) → 绝不误拆
+	s.rmacReconcile(t0.Add(10 * time.Second))
+	if al := loadMACAliases(dir); al[mmOld] != mmNew {
+		t.Fatalf("stale lease at merge watermark must NOT trigger auto-unmerge, aliases=%v", al)
+	}
+
+	// 2) t0+45s: 旧 MAC 真实重新发包上线(last_seen > MergedAt 且 rx+tx > OldBytesAtMerge) → 自动秒拆 + 告警
+	t2 := t0.Add(45 * time.Second)
+	mmWrite(t, dir, "data/devices.json", map[string]interface{}{
+		mmOld: map[string]interface{}{
+			"ip": "192.168.43.20", "mac": mmOld, "rx_bytes": 9000, "tx_bytes": 3500, "last_seen": t2.Unix(),
+		},
+		mmNew: map[string]interface{}{
+			"ip": "192.168.43.31", "mac": mmNew, "rx_bytes": 4000, "tx_bytes": 1500, "last_seen": t2.Unix(),
+		},
+	})
+	s.rmacReconcile(t2)
+
+	if al := loadMACAliases(dir); len(al) != 0 {
+		t.Fatalf("expected auto-unmerge on real old MAC reconnect, still got aliases=%v", al)
+	}
+	namesAfter := mmRead(t, dir, "data/device_names.json")
+	if namesAfter[mmOld] != "小明的手机" || namesAfter[mmNew] != nil {
+		t.Fatalf("auto-unmerge did not restore device names: %v", namesAfter)
+	}
+	alertsBytes, _ := os.ReadFile(filepath.Join(dir, "run", "alerts.jsonl"))
+	if !strings.Contains(string(alertsBytes), `"kind":"mac_merge_unmerge_auto"`) {
+		t.Fatalf("expected mac_merge_unmerge_auto alert, got %s", alertsBytes)
+	}
+	mf := loadMacMergeFile(dir)
+	if !isMacMutexApart(mf, mmOld, mmNew, t2.Unix()) {
+		t.Fatalf("auto-unmerge must lock MutexApart to prevent rebound re-merge")
+	}
+}
+
+func TestMacMergeActionHardeningLoopbackAndIsolatedDebugBundle(t *testing.T) {
+	dir := t.TempDir()
+	mmWrite(t, dir, "data/rules.json", map[string]interface{}{"version": 1, "devices": map[string]interface{}{}, "blacklist": []interface{}{}})
+	s := newServer(dir)
+
+	// 1) Magisk 本机浏览器 127.0.0.1:8444(已认证 Cookie, tid="tok_local_1" != "loopback", 带 Origin)
+	// 执行 loopback-only 动作 pair_revoke 不再被误拒 403 forbidden
+	body := `{"action":"pair_revoke","params":{"id":"nonexistent_id"}}`
+	reqLocal := httptest.NewRequest(http.MethodPost, "/api/action", strings.NewReader(body))
+	reqLocal.Header.Set("Content-Type", "application/json")
+	reqLocal.Header.Set("X-HNC-CSRF", "1")
+	reqLocal.Header.Set("Origin", "https://127.0.0.1:8444")
+	reqLocal.RemoteAddr = "127.0.0.1:51234"
+	reqLocal = reqLocal.WithContext(context.WithValue(reqLocal.Context(), ctxKeyTokenID, "tok_local_1"))
+	wLocal := httptest.NewRecorder()
+	s.handleAction(wLocal, reqLocal)
+	if wLocal.Code == http.StatusForbidden {
+		t.Fatalf("authenticated loopback browser should not get 403 forbidden, body=%s", wLocal.Body.String())
+	}
+
+	// 而局域网远程设备带 Cookie 调 loopback-only 动作仍然严格返回 403 forbidden
+	reqRemote := httptest.NewRequest(http.MethodPost, "/api/action", strings.NewReader(body))
+	reqRemote.Header.Set("Content-Type", "application/json")
+	reqRemote.Header.Set("X-HNC-CSRF", "1")
+	reqRemote.RemoteAddr = "192.168.43.88:51234"
+	reqRemote = reqRemote.WithContext(context.WithValue(reqRemote.Context(), ctxKeyTokenID, "tok_remote_1"))
+	wRemote := httptest.NewRecorder()
+	s.handleAction(wRemote, reqRemote)
+	if wRemote.Code != http.StatusForbidden {
+		t.Fatalf("remote LAN request must get 403 forbidden on pair_revoke, got %d body=%s", wRemote.Code, wRemote.Body.String())
+	}
+
+	// 2) debug_bundle 在全局 s.actionMu 被占住时仍可独立完成, 零阻塞实时控制锁
+	if err := os.MkdirAll(filepath.Join(dir, "bin"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	fakeScript := "#!/system/bin/sh\nout=\"$1/hnc_diag_test.tar.gz\"\necho ok > \"$out\"\necho \"$out\"\n"
+	if err := os.WriteFile(filepath.Join(dir, "bin", "debug_bundle.sh"), []byte(fakeScript), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s.actionMu.Lock()
+	done := make(chan int, 1)
+	go func() {
+		reqDB := httptest.NewRequest(http.MethodPost, "/api/action", strings.NewReader(`{"action":"debug_bundle","params":{}}`))
+		reqDB.Header.Set("Content-Type", "application/json")
+		reqDB.Header.Set("X-HNC-CSRF", "1")
+		reqDB.RemoteAddr = "127.0.0.1:51235"
+		wDB := httptest.NewRecorder()
+		s.handleAction(wDB, reqDB)
+		done <- wDB.Code
+	}()
+	select {
+	case code := <-done:
+		s.actionMu.Unlock()
+		if code != http.StatusOK {
+			t.Fatalf("isolated debug_bundle returned status %d, want 200", code)
+		}
+	case <-time.After(3 * time.Second):
+		s.actionMu.Unlock()
+		t.Fatalf("debug_bundle blocked on global s.actionMu")
+	}
 }

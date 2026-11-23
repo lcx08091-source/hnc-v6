@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "45-cn-apps-extra",
-  "rules_version": "hnc-curated-v6.1.0-rc.1#45-cn-apps-extra",
+  "rules_version": "hnc-curated-v6.1.0-rc.2#45-cn-apps-extra",
   "_comment": "v5.13: 补充现有规则集缺失的常见中国 App。全部为官方主域/公开静态资源域, 未经真机抓包核验(无 ground_truth), confidence=medium。已确认与其他子集无重复 id、无重复后缀; 支付宝(alipay.com 在 taobao)、QQ 邮箱(mail.qq.com 在 qq_extra)、126.net(netease_group) 已覆盖故未收录; 蛋仔派对域名不确定未收录。meeting.tencent.com / mail.163.com 依赖同优先级最长后缀胜出, 自动压过 tencent.com / 163.com。",
   "rules": [
     {

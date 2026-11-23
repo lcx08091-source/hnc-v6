@@ -1,13 +1,29 @@
 #!/system/bin/sh
-# DPI v2: dns_takeover.sh —— DNS 接管的 nat DNAT / INPUT 放行 / 拆除 / 计数
+if ! command -v test_start >/dev/null 2>&1; then
+    exec sh "$(cd "$(dirname "$0")/.." && pwd)/run_all.sh" "unit/$(basename "$0" .sh)"
+fi
+# DPI v2+: dns_takeover.sh —— DNS 接管的 nat DNAT/REDIRECT 回退 / 透明代理避让 / INPUT 放行 / 拆除 / 计数
 
 DSCRIPT="$HNC_REPO_ROOT/bin/dns_takeover.sh"
 
 dseed() {
 mkdir -p "$HNC_TEST_DIR/data" "$HNC_TEST_DIR/run" "$HNC_TEST_DIR/logs"
+rm -f "$HNC_TEST_DIR"/fail.* "$HNC_TEST_DIR"/list.* "$HNC_TEST_DIR"/has_chain.* "$HNC_TEST_DIR"/save.*
 # 桩: 记录 "<族> 参数"; -D 永远失败(链上没挂过); fail.<族> 里的子串命中则失败;
-# -nL HNC_DNSTK 看 has_chain.<族>; -nvxL 输出 list.<族>
+# -nL HNC_DNSTK 看 has_chain.<族>; -nvxL 输出 list.<族>; -t <tbl> -S 输出 save.<族>.<tbl>
 cat > "$HNC_TEST_DIR/ipt_stub.sh" <<'STUB'
+case " $* " in
+    *" -S"|*" -S "*)
+        tbl="filter"
+        prev=""
+        for a in "$@"; do
+            [ "$prev" = "-t" ] && tbl="$a"
+            prev="$a"
+        done
+        [ -f "$STUB_DIR/save.$FAM.$tbl" ] && cat "$STUB_DIR/save.$FAM.$tbl"
+        exit 0
+        ;;
+esac
 echo "$FAM $*" >> "$IPT_LOG"
 if [ -f "$STUB_DIR/fail.$FAM" ]; then
     while read -r pat; do
@@ -103,30 +119,43 @@ o2=$(: > "$HNC_TEST_DIR/ipt.log"; drun apply wlan2 15353 192.168.43.1 '')
   && [ "$o2" = "DNSTK=on iface=wlan2 port=15353 rules=2 v6=0" ] \
   && grep -q -- "-d 192.168.43.1 -p tcp --dport 53 -j DNAT" "$HNC_TEST_DIR/ipt.log" && test_pass || test_fail "out=$out o2=$o2"
 
-test_start "dns_takeover: DNAT unsupported → full rollback, PREROUTING never linked, exit 1"
+test_start "dns_takeover: DNAT unsupported → falls back to REDIRECT; both DNAT+REDIRECT fail → full rollback"
 dseed
 echo "-j DNAT" > "$HNC_TEST_DIR/fail.4"
+out_redir=$(drun apply wlan2 15353 192.168.43.1 192.168.43.1)
+Lg_redir=$(L)
+dseed
+printf '%s\n%s\n' "-j DNAT" "-j REDIRECT" > "$HNC_TEST_DIR/fail.4"
 out=$(drun apply wlan2 15353 192.168.43.1 192.168.43.1)
 Lg=$(L)
-[ "$out" = "DNSTK=error apply_failed" ] && ! echo "$Lg" | grep -q -- "-I PREROUTING" \
+[ "$out_redir" = "DNSTK=on iface=wlan2 port=15353 rules=2 v6=0" ] \
+  && echo "$Lg_redir" | grep -q -- "^4 -t nat -A HNC_DNSTK -i wlan2 -d 192.168.43.1 -p udp --dport 53 -j REDIRECT --to-ports 15353$" \
+  && [ "$out" = "DNSTK=error apply_failed" ] && ! echo "$Lg" | grep -q -- "-I PREROUTING" \
   && [ "$(echo "$Lg" | grep -c -- "^4 -t nat -X HNC_DNSTK$")" -ge 2 ] \
-  && grep -q "apply FAILED" "$HNC_TEST_DIR/logs/service.log" && test_pass || test_fail "out=$out"
+  && grep -q "apply FAILED" "$HNC_TEST_DIR/logs/service.log" && test_pass || test_fail "redir=$out_redir out=$out"
 
-test_start "dns_takeover: IPv6 with ip6tables nat → DNAT each v6 addr to [addr]:port"
+test_start "dns_takeover: IPv6 with ip6tables nat → DNAT each v6 addr to [addr]:port (or REDIRECT fallback)"
 dseed
 out=$(drun apply wlan2 15353 192.168.43.1 192.168.43.1 '2408:1:2::1,fe80::1')
 Lg=$(L)
+echo "-j DNAT" > "$HNC_TEST_DIR/fail.6"
+: > "$HNC_TEST_DIR/ipt.log"
+out6r=$(drun apply wlan2 15353 192.168.43.1 192.168.43.1 'fe80::1')
+Lg6r=$(L)
 [ "$out" = "DNSTK=on iface=wlan2 port=15353 rules=2 v6=4" ] \
   && echo "$Lg" | grep -q -- "^6 -t nat -A HNC_DNSTK -i wlan2 -d 2408:1:2::1 -p udp --dport 53 -j DNAT --to-destination \[2408:1:2::1\]:15353$" \
   && echo "$Lg" | grep -q -- "^6 -t filter -A HNC_DNSTK_IN -i wlan2 -p tcp --dport 15353 -j ACCEPT$" \
-  && echo "$Lg" | grep -q -- "^6 -t nat -I PREROUTING 1 -j HNC_DNSTK$" && test_pass || test_fail "out=$out"
+  && echo "$Lg" | grep -q -- "^6 -t nat -I PREROUTING 1 -j HNC_DNSTK$" \
+  && [ "$out6r" = "DNSTK=on iface=wlan2 port=15353 rules=2 v6=2" ] \
+  && echo "$Lg6r" | grep -q -- "^6 -t nat -A HNC_DNSTK -i wlan2 -d fe80::1 -p udp --dport 53 -j REDIRECT --to-ports 15353$" \
+  && test_pass || test_fail "out=$out out6r=$out6r"
 
 test_start "dns_takeover: IPv6 nat unavailable → v6=unsupported, v4 still on, v6 rolled back"
 dseed
 printf '%s\n' "-t nat -N HNC_DNSTK" > "$HNC_TEST_DIR/fail.6"
 out=$(drun apply wlan2 15353 192.168.43.1 192.168.43.1 '2408:1:2::1')
 Lg=$(L)
-o2=$(rm -f "$HNC_TEST_DIR/fail.6"; echo "-j DNAT" > "$HNC_TEST_DIR/fail.6"; : > "$HNC_TEST_DIR/ipt.log"; drun apply wlan2 15353 192.168.43.1 192.168.43.1 '2408:1:2::1')
+o2=$(rm -f "$HNC_TEST_DIR/fail.6"; printf '%s\n%s\n' "-j DNAT" "-j REDIRECT" > "$HNC_TEST_DIR/fail.6"; : > "$HNC_TEST_DIR/ipt.log"; drun apply wlan2 15353 192.168.43.1 192.168.43.1 '2408:1:2::1')
 [ "$out" = "DNSTK=on iface=wlan2 port=15353 rules=2 v6=unsupported" ] \
   && echo "$Lg" | grep -q -- "^4 -t nat -I PREROUTING 1 -j HNC_DNSTK$" \
   && ! echo "$Lg" | grep -q -- "^6 .* -A " \
@@ -134,7 +163,7 @@ o2=$(rm -f "$HNC_TEST_DIR/fail.6"; echo "-j DNAT" > "$HNC_TEST_DIR/fail.6"; : > 
   && ! grep -q -- "^6 -t nat -I PREROUTING" "$HNC_TEST_DIR/ipt.log" \
   && grep -q -- "^6 -t nat -X HNC_DNSTK$" "$HNC_TEST_DIR/ipt.log" && test_pass || test_fail "out=$out o2=$o2"
 
-test_start "dns_takeover: counters → present + DNAT pkts (v4/v6), absent chain → present=false"
+test_start "dns_takeover: counters → present + DNAT/REDIRECT pkts (v4/v6), absent chain → present=false"
 dseed
 out0=$(drun counters)
 touch "$HNC_TEST_DIR/has_chain.4" "$HNC_TEST_DIR/has_chain.6"
@@ -142,7 +171,7 @@ cat > "$HNC_TEST_DIR/list.4" <<'EOF'
 Chain HNC_DNSTK (1 references)
     pkts      bytes target     prot opt in     out     source               destination
       12      800 DNAT       udp  --  wlan2  *       0.0.0.0/0            192.168.43.1         udp dpt:53 to:192.168.43.1:15353
-       3      180 DNAT       tcp  --  wlan2  *       0.0.0.0/0            192.168.43.1         tcp dpt:53 to:192.168.43.1:15353
+       3      180 REDIRECT   tcp  --  wlan2  *       0.0.0.0/0            192.168.43.1         tcp dpt:53 redir ports 15353
 EOF
 cat > "$HNC_TEST_DIR/list.6" <<'EOF'
 Chain HNC_DNSTK (1 references)
@@ -152,6 +181,32 @@ EOF
 out=$(drun counters)
 [ "$out0" = '{"present":false,"pkts":0,"v6_present":false,"pkts_v6":0}' ] \
   && [ "$out" = '{"present":true,"pkts":15,"v6_present":true,"pkts_v6":5}' ] && test_pass || test_fail "out0=$out0 out=$out"
+
+test_start "dns_takeover: transparent proxy (BOX_EXTERNAL/CLASH/SING/TPROXY) port 53 → DNSTK=yield_tproxy unless --force"
+dseed
+cat > "$HNC_TEST_DIR/save.4.mangle" <<'EOF'
+-P PREROUTING ACCEPT
+-N BOX_EXTERNAL
+-A PREROUTING -j BOX_EXTERNAL
+-A BOX_EXTERNAL -p udp -m udp --dport 53 -j TPROXY --on-port 7893 --tproxy-mark 0x1/0x1
+EOF
+out_yield=$(drun apply wlan2 15353 192.168.43.1 192.168.43.1)
+Lg_yield=$(L)
+: > "$HNC_TEST_DIR/ipt.log"
+out_force=$(drun apply wlan2 15353 192.168.43.1 192.168.43.1 '' --force)
+cat > "$HNC_TEST_DIR/save.4.mangle" <<'EOF'
+-P PREROUTING ACCEPT
+-N CLASH_EXTERNAL
+-A PREROUTING -j CLASH_EXTERNAL
+-A CLASH_EXTERNAL -p tcp -m tcp --dport 443 -j TPROXY --on-port 7893
+EOF
+: > "$HNC_TEST_DIR/ipt.log"
+out_non53=$(drun apply wlan2 15353 192.168.43.1 192.168.43.1)
+[ "$out_yield" = "DNSTK=yield_tproxy" ] \
+  && ! echo "$Lg_yield" | grep -q -- "-I PREROUTING" \
+  && [ "$out_force" = "DNSTK=on iface=wlan2 port=15353 rules=2 v6=0" ] \
+  && [ "$out_non53" = "DNSTK=on iface=wlan2 port=15353 rules=2 v6=0" ] \
+  && test_pass || test_fail "yield=$out_yield force=$out_force non53=$out_non53"
 
 test_start "dns_takeover: cleanup.sh and watchdog (httpd dead) call remove"
 # v5.26 T1: shell ensure_httpd_running 已删, httpd 死亡时的 remove 由 Go 看门狗

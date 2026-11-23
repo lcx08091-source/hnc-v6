@@ -8,6 +8,8 @@ package main
 import (
 	"bytes"
 	"encoding/binary"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -148,6 +150,119 @@ func v6NormalizeSubnetV4(cidrStr string) (subnetStr, hostIPStr string, ipNet *ne
 	return canonNet.String(), v4.String(), canonNet, true
 }
 
+const (
+	rtnlNewRoute     uint16 = 24     // RTM_NEWROUTE
+	rtnlGetRoute     uint16 = 26     // RTM_GETROUTE
+	rtnlRtMsgLen     int    = 12     // sizeof(struct rtmsg)
+	rtnlRtnUnicast   uint8  = 1      // RTN_UNICAST
+	rtnlRtmFCloned   uint32 = 0x0200 // RTM_F_CLONED
+	rtnlRtaOif       uint16 = 4      // RTA_OIF (uint32 ifindex)
+	rtnlRtaMultipath uint16 = 9      // RTA_MULTIPATH (struct rtnexthop[])
+)
+
+// buildGetRouteDumpMsg 构造纯 Go RTM_GETROUTE (NLM_F_REQUEST|NLM_F_DUMP) 全表路由扫描报文,
+// 用于发现 Android per-network 策略路由表(如 table 1021/1022)中持有默认路由的 Dual-STA 副网卡(wlan1)。
+func buildGetRouteDumpMsg(seq uint32, family uint8) []byte {
+	total := rtnlMsgHdrLen + rtnlRtMsgLen
+	buf := make([]byte, total)
+	binary.LittleEndian.PutUint32(buf[0:4], uint32(total))
+	binary.LittleEndian.PutUint16(buf[4:6], rtnlGetRoute)
+	binary.LittleEndian.PutUint16(buf[6:8], uint16(rtnlFRequest|rtnlFDump))
+	binary.LittleEndian.PutUint32(buf[8:12], seq)
+	buf[16] = family
+	return buf
+}
+
+// parseDefaultRouteIfindexesMsgs 纯字节流解析 RTM_NEWROUTE dump 报文,
+// 精确提取全路由表中 rtm_dst_len == 0 且 rtm_type == RTN_UNICAST 的默认路由出接口 ifindex。
+func parseDefaultRouteIfindexesMsgs(b []byte) (map[int]bool, bool, error) {
+	out := make(map[int]bool)
+	for off := 0; off < len(b); {
+		rem := len(b) - off
+		if rem < rtnlMsgHdrLen {
+			return out, false, errors.New("rtnl route dump: truncated nlmsghdr")
+		}
+		msgLen := int(binary.LittleEndian.Uint32(b[off : off+4]))
+		msgType := binary.LittleEndian.Uint16(b[off+4 : off+6])
+		if msgLen < rtnlMsgHdrLen || msgLen > rem {
+			return out, false, fmt.Errorf("rtnl route dump: bad nlmsg_len %d", msgLen)
+		}
+		msg := b[off : off+msgLen]
+		adv := rtnlAlign(msgLen)
+		if adv > rem {
+			off = len(b)
+		} else {
+			off += adv
+		}
+
+		switch msgType {
+		case rtnlMsgDone:
+			return out, true, nil
+		case rtnlMsgError:
+			if len(msg) < rtnlMsgHdrLen+4 {
+				return out, false, errors.New("rtnl route dump: truncated nlmsgerr")
+			}
+			code := int32(binary.LittleEndian.Uint32(msg[rtnlMsgHdrLen : rtnlMsgHdrLen+4]))
+			if code != 0 {
+				return out, false, fmt.Errorf("rtnl route dump errno %d", code)
+			}
+			continue
+		case rtnlMsgNoop:
+			continue
+		}
+
+		if msgType != rtnlNewRoute || len(msg) < rtnlMsgHdrLen+rtnlRtMsgLen {
+			continue
+		}
+		rtm := msg[rtnlMsgHdrLen:]
+		dstLen := rtm[1]
+		rtmType := rtm[7]
+		rtmFlags := binary.LittleEndian.Uint32(rtm[8:12])
+		if dstLen != 0 || rtmType != rtnlRtnUnicast || (rtmFlags&rtnlRtmFCloned) != 0 {
+			continue
+		}
+
+		attrs := rtm[rtnlRtMsgLen:]
+		for aoff := 0; aoff < len(attrs); {
+			arem := len(attrs) - aoff
+			if arem < rtnlAttrHdr {
+				break
+			}
+			alen := int(binary.LittleEndian.Uint16(attrs[aoff : aoff+2]))
+			atype := binary.LittleEndian.Uint16(attrs[aoff+2:aoff+4]) & 0x3fff
+			if alen < rtnlAttrHdr || alen > arem {
+				break
+			}
+			aval := attrs[aoff+4 : aoff+alen]
+			switch atype {
+			case rtnlRtaOif:
+				if len(aval) >= 4 {
+					if oif := int(int32(binary.LittleEndian.Uint32(aval[0:4]))); oif > 0 {
+						out[oif] = true
+					}
+				}
+			case rtnlRtaMultipath:
+				for moff := 0; moff+8 <= len(aval); {
+					nhLen := int(binary.LittleEndian.Uint16(aval[moff : moff+2]))
+					if nhLen < 8 || moff+nhLen > len(aval) {
+						break
+					}
+					if nhIfidx := int(int32(binary.LittleEndian.Uint32(aval[moff+4 : moff+8]))); nhIfidx > 0 {
+						out[nhIfidx] = true
+					}
+					moff += rtnlAlign(nhLen)
+				}
+			}
+			nadv := rtnlAlign(alen)
+			if nadv > arem {
+				break
+			}
+			aoff += nadv
+		}
+	}
+	return out, false, nil
+}
+
 func v6ReadDefaultWANIfacesFromProcRoute(content string) map[string]bool {
 	out := make(map[string]bool)
 	for idx, ln := range strings.Split(content, "\n") {
@@ -156,32 +271,130 @@ func v6ReadDefaultWANIfacesFromProcRoute(content string) map[string]bool {
 		}
 		fs := strings.Fields(ln)
 		if len(fs) >= 8 && fs[1] == "00000000" && fs[7] == "00000000" {
-			out[fs[0]] = true
+			name := strings.TrimSpace(fs[0])
+			if name != "" && !isVPNIface(name) {
+				out[name] = true
+				if phys := strings.TrimPrefix(name, "v4-"); phys != "" && !isVPNIface(phys) {
+					out[phys] = true
+				}
+			}
 		}
 	}
 	return out
 }
 
-// CollectLiveIfaceProbeInputs 从本机 sysfs + net.Interfaces() + /proc/net/route 采集实时接口状态。
+// v6ReadIfaceDetectDefaultWANs 从 run/iface_detect.json 读取上游口及新增的 default_route_ifaces,
+// 确保 Dual-STA 双 Wi-Fi 加速场景下持有独立策略路由表默认路由的副 STA (如 wlan1) 被精准标为默认 WAN。
+func v6ReadIfaceDetectDefaultWANs(hncDir string) (map[string]bool, string) {
+	out := make(map[string]bool)
+	hncDir = strings.TrimSpace(hncDir)
+	if hncDir == "" {
+		return out, ""
+	}
+	b, err := os.ReadFile(filepath.Join(hncDir, "run", "iface_detect.json"))
+	if err != nil || len(b) == 0 {
+		return out, ""
+	}
+	var raw map[string]any
+	if json.Unmarshal(b, &raw) != nil {
+		return out, ""
+	}
+	detIface, _ := raw["iface"].(string)
+	detIface = strings.TrimSpace(detIface)
+	if !ifaceNameOK(detIface) {
+		detIface = ""
+	}
+	authHotspot, _ := raw["authoritative"].(bool)
+
+	addWAN := func(s string) {
+		s = strings.TrimSpace(s)
+		if s == "" || !ifaceNameOK(s) || isVPNIface(s) {
+			return
+		}
+		if authHotspot && detIface != "" && s == detIface {
+			return
+		}
+		out[s] = true
+		if phys := strings.TrimPrefix(s, "v4-"); phys != "" && phys != s && !isVPNIface(phys) {
+			if !(authHotspot && detIface != "" && phys == detIface) {
+				out[phys] = true
+			}
+		}
+	}
+
+	for _, key := range []string{"upstream", "tether_upstream", "local_upstream"} {
+		if v, ok := raw[key].(string); ok {
+			addWAN(v)
+		}
+	}
+	switch dr := raw["default_route_ifaces"].(type) {
+	case []any:
+		for _, item := range dr {
+			if s, ok := item.(string); ok {
+				addWAN(s)
+			}
+		}
+	case string:
+		for _, tok := range strings.FieldsFunc(dr, func(r rune) bool {
+			return r == ' ' || r == ',' || r == '\t' || r == '\n'
+		}) {
+			addWAN(tok)
+		}
+	}
+	if authHotspot {
+		return out, detIface
+	}
+	return out, ""
+}
+
+var (
+	v6DumpDefaultRouteIfindexesFn = dumpDefaultRouteIfindexesOS
+	v6LiveInterfacesFn            = net.Interfaces
+)
+
+// CollectLiveIfaceProbeInputs 从本机 sysfs + net.Interfaces() + /proc/net/route + RTM_GETROUTE 全表 + iface_detect.json 采集实时接口状态。
 func CollectLiveIfaceProbeInputs(hncDir string) []V6IfaceProbeInput {
 	defaultWAN := map[string]bool{}
 	if b, err := os.ReadFile("/proc/net/route"); err == nil {
 		defaultWAN = v6ReadDefaultWANIfacesFromProcRoute(string(b))
 	}
+	authHotspotIface := ""
 	if hncDir != "" {
-		det := readIfaceDetect(hncDir)
-		if det.Upstream != "" && !isVPNIface(det.Upstream) {
-			defaultWAN[det.Upstream] = true
+		detWANs, authIfc := v6ReadIfaceDetectDefaultWANs(hncDir)
+		authHotspotIface = authIfc
+		for k := range detWANs {
+			defaultWAN[k] = true
 		}
-		if det.TetherUpstream != "" && !isVPNIface(det.TetherUpstream) {
-			defaultWAN[det.TetherUpstream] = true
+	}
+	var nlDefIfindexes map[int]bool
+	if v6DumpDefaultRouteIfindexesFn != nil {
+		if m, err := v6DumpDefaultRouteIfindexesFn(); err == nil {
+			nlDefIfindexes = m
 		}
 	}
 
-	ifs, err := net.Interfaces()
+	ifs, err := v6LiveInterfacesFn()
 	if err != nil {
 		return nil
 	}
+	// 先将 RTM_GETROUTE 扫到的全表默认路由接口(含 v4-wlan1 对应的底层物理 wlan1)合并至 defaultWAN
+	for _, ifi := range ifs {
+		name := strings.TrimSpace(ifi.Name)
+		if name == "" || name == "lo" || isVPNIface(name) {
+			continue
+		}
+		if nlDefIfindexes[ifi.Index] {
+			if !(authHotspotIface != "" && name == authHotspotIface) {
+				defaultWAN[name] = true
+			}
+			if phys := strings.TrimPrefix(name, "v4-"); phys != "" && phys != name && !isVPNIface(phys) {
+				if !(authHotspotIface != "" && phys == authHotspotIface) {
+					defaultWAN[phys] = true
+				}
+			}
+		}
+	}
+
 	out := make([]V6IfaceProbeInput, 0, len(ifs))
 	for _, ifi := range ifs {
 		name := strings.TrimSpace(ifi.Name)
@@ -287,8 +500,8 @@ func AnalyzeMultiInterfaces(inputs []V6IfaceProbeInput, preferredPrimary string,
 			continue
 		}
 
-		// 2. 识别蜂窝或 STA 默认上游口 (rmnet_data* / ccmni* / 持默认路由的 wlan0)
-		if isCellIface(name) || in.IsDefaultWAN {
+		// 2. 识别蜂窝或 STA 默认上游口 (rmnet_data* / ccmni* / 持默认路由的主 STA wlan0 及 Dual-STA 副 STA wlan1)
+		if isCellIface(name) || (in.IsDefaultWAN && !isAPIfaceName(name)) {
 			if len(in.IPv4CIDRs) > 0 || len(in.IPv6Global) > 0 || in.IsDefaultWAN {
 				physUpstreams = append(physUpstreams, name)
 			}
@@ -321,8 +534,8 @@ func AnalyzeMultiInterfaces(inputs []V6IfaceProbeInput, preferredPrimary string,
 		case isAPIfaceName(name):
 			role = DownstreamRoleWiFiAP
 		case hncAPMaybeIfaceRE.MatchString(name):
-			// wlan1 / wlan2 / wigig0: 排除默认 WAN 后, 只要持有私网地址或已挂入 AP 桥即确认为并发 AP 口
-			if len(subnets) > 0 || in.MasterBridge != "" {
+			// wlan1 / wlan2 / wigig0: 排除默认 WAN(含 Dual-STA 副 STA)后, 只要持有私网地址或已挂入 AP 桥即确认为并发 AP 口
+			if !in.IsDefaultWAN && (len(subnets) > 0 || in.MasterBridge != "") {
 				role = DownstreamRoleWiFiAP
 			}
 		case hncUSBTetherRE.MatchString(name):
@@ -627,7 +840,15 @@ func BuildLANFastlaneNetlinkBatch(ifindex int, lanSubnets []string, tickInUsec f
 	return msgs, nil
 }
 
-// EnsureLANFastlaneOnIface 通过原生 AF_NETLINK 在指定网卡上幂等安装 1:fffe 2.5Gbps 局域网直通类。
+func applyLANFastlaneBatchOnSocket(fd int, ifindex int, msgs [][]byte) error {
+	if _, err := nlSendBatchWithCompatFallback(fd, msgs, true); err != nil {
+		return fmt.Errorf("install 1:fffe class on ifindex=%d: %w", ifindex, err)
+	}
+	return nil
+}
+
+// EnsureLANFastlaneOnIface 通过原生 AF_NETLINK 在指定网卡上幂等安装 1:fffe 2.5Gbps 局域网直通类
+// (支持老内核 4.14/4.19 ETH_P_ALL -> ETH_P_IP + ETH_P_IPV6 双栈回退及 fq_codel -> fq -> sfq -> pfifo 自适应叶子降级)。
 func EnsureLANFastlaneOnIface(ifindex int, lanSubnets []string) error {
 	if ifindex <= 0 {
 		return fmt.Errorf("EnsureLANFastlaneOnIface: invalid ifindex %d", ifindex)
@@ -645,22 +866,14 @@ func EnsureLANFastlaneOnIface(ifindex int, lanSubnets []string) error {
 	if err != nil {
 		return err
 	}
-	for idx, m := range msgs {
-		seq := binary.LittleEndian.Uint32(m[8:12])
-		msgType := binary.LittleEndian.Uint16(m[4:6])
-		if err := rtnlSendAndWaitAck(fd, m, seq); err != nil {
-			if msgType == rtnlDelTFilter && isIgnorableDelErr(err) {
-				continue
-			}
-			// 个别裁剪内核对 fq_codel 带参或 fw ETH_P_ALL 不支持时容忍降级, 核心 HTB 类必须成功
-			if idx == 0 {
-				return fmt.Errorf("install 1:fffe class on ifindex=%d: %w", ifindex, err)
-			}
-		}
+	if err := applyLANFastlaneBatchOnSocket(fd, ifindex, msgs); err != nil {
+		return err
 	}
 	globalV6MultiIface.fastlaneInstalls.Add(1)
 	return nil
 }
+
+var v6CollectProbeInputsFn = CollectLiveIfaceProbeInputs
 
 // ReconcileMultiDownstreamV6 自动探测全部活跃下游接口(wlan1+wlan2+ap0+rndis0/ncm0),
 // 并在每个需要整形的三层下游口上幂等确保 HTB 根树与 1:fffe 2.5Gbps 局域网互传直通类就绪。
@@ -674,7 +887,7 @@ func (s *server) ReconcileMultiDownstreamV6() (V6MultiIfaceSnapshot, error) {
 	if s != nil {
 		hncDir = s.hncDir
 	}
-	inputs := CollectLiveIfaceProbeInputs(hncDir)
+	inputs := v6CollectProbeInputsFn(hncDir)
 	snap := AnalyzeMultiInterfaces(inputs, preferred, nil)
 	if !useNativeDataplane(hncDir) || len(snap.ManagedDownstreams) == 0 {
 		return snap, nil

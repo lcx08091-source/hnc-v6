@@ -84,3 +84,52 @@ func TestDayFileKeys(t *testing.T) {
 		t.Fatalf("got %s", got)
 	}
 }
+
+func TestDetectAnomalyTraffic_ReadsDpiHistoryAndRunFallback(t *testing.T) {
+	now := time.Date(2026, 10, 10, 14, 30, 0, 0, cst)
+	withNow(t, now)
+
+	// Subcase A: baseline in legacy <hnc>/run, today's spike in <hnc>/data/dpi_history -> merged & triggers alert.
+	hncA := t.TempDir()
+	runDirA := filepath.Join(hncA, "run")
+	histDirA := filepath.Join(hncA, "data", "dpi_history")
+	if err := os.MkdirAll(runDirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(histDirA, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	for d := 1; d <= anomalyBaselineDays; d++ {
+		ts := time.Date(2026, 10, 10, 14, 15, 0, 0, cst).AddDate(0, 0, -d).Unix()
+		writeRows(t, runDirA, [3]int64{ts, 1, 10 * 1024 * 1024}) // 10 MB baseline in legacy run/
+	}
+	writeRows(t, histDirA, [3]int64{now.Add(-10 * time.Minute).Unix(), 1, 80 * 1024 * 1024}) // 80 MB today in data/dpi_history
+
+	cfgA := NewConfig(hncA)
+	cfgA.DisableNotify = true
+	n, err := detectAnomalyTraffic(cfgA, DefaultConfig())
+	if err != nil || n != 1 {
+		t.Fatalf("expected 1 alert from merged data/dpi_history + run/, got n=%d err=%v", n, err)
+	}
+
+	// Subcase B: pure legacy <hnc>/run only (backward compat for existing tests/deployments).
+	hncB := t.TempDir()
+	runDirB := filepath.Join(hncB, "run")
+	if err := os.MkdirAll(runDirB, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for d := 1; d <= anomalyBaselineDays; d++ {
+		ts := time.Date(2026, 10, 10, 14, 15, 0, 0, cst).AddDate(0, 0, -d).Unix()
+		writeRows(t, runDirB, [3]int64{ts, 2, 10 * 1024 * 1024})
+	}
+	writeRows(t, runDirB, [3]int64{now.Add(-5 * time.Minute).Unix(), 2, 90 * 1024 * 1024})
+
+	cfgB := NewConfig(hncB)
+	cfgB.DisableNotify = true
+	n2, err2 := detectAnomalyTraffic(cfgB, DefaultConfig())
+	if err2 != nil || n2 != 1 {
+		t.Fatalf("expected 1 alert from fallback run/, got n=%d err=%v", n2, err2)
+	}
+}
+

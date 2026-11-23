@@ -3,10 +3,16 @@
 package devname
 
 import (
+	"context"
+	"encoding/binary"
+	"errors"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 const macA = "02:5a:00:00:00:01" // LAA(随机 MAC)位开启
@@ -16,6 +22,7 @@ func testResolver(t *testing.T) (*Resolver, string) {
 	dir := t.TempDir()
 	r := &Resolver{
 		NamesPath:     filepath.Join(dir, "device_names.json"),
+		DevIDPath:     filepath.Join(dir, "dpi_devid.json"),
 		CachePath:     filepath.Join(dir, "hostname_cache.json"),
 		OverridesPath: filepath.Join(dir, "oui_overrides.json"),
 		MDNSBin:       filepath.Join(dir, "mdns_resolve"),
@@ -246,5 +253,152 @@ func TestManualKeepsCase(t *testing.T) {
 	}
 	if hn, src := r.Resolve(macA, ""); hn != "客厅的Mac" || src != "manual" {
 		t.Fatalf("Resolve 走手动名也要保留大小写: %q %q", hn, src)
+	}
+}
+
+func TestDevIDPassiveHostnamePriority(t *testing.T) {
+	r, _ := testResolver(t)
+	var dumpsysCalls atomic.Int32
+	r.RunDumpsys = func() ([]byte, error) {
+		dumpsysCalls.Add(1)
+		return []byte("m 02:5a:00:00:00:01 hostname: dumpsys-fallback\n"), nil
+	}
+
+	// 1. dpi_devid.json 有效主机名优先于 dumpsys, 避免 fork Binder 子进程
+	devIDJSON := `{"schema":1,"devices":{"02:5A:00:00:00:01":{"hostname":"Redmi-K70.local.","hostname_src":"nbns"}}}`
+	if err := os.WriteFile(r.DevIDPath, []byte(devIDJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	hn, src := r.Resolve(macA, "192.168.43.101")
+	if hn != "Redmi-K70" || src != "nbns" {
+		t.Fatalf("期望 dpi_devid 命中 Redmi-K70/nbns, 得 %q/%q", hn, src)
+	}
+	if dumpsysCalls.Load() != 0 {
+		t.Fatalf("dpi_devid 命中时不应调用 dumpsys, calls=%d", dumpsysCalls.Load())
+	}
+
+	// 2. 手动名仍高于 dpi_devid.json
+	if err := os.WriteFile(r.NamesPath, []byte(`{"02:5a:00:00:00:01":"老爸的手机"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if hn, src = r.Resolve(macA, "192.168.43.101"); hn != "老爸的手机" || src != "manual" {
+		t.Fatalf("手动名应优先于 dpi_devid: %q/%q", hn, src)
+	}
+	_ = os.Remove(r.NamesPath)
+
+	// 3. dpi_devid.json 中为垃圾名时自动落到 dumpsys
+	junkJSON := `{"schema":1,"devices":{"02:5a:00:00:00:01":{"hostname":"localhost","hostname_src":"dhcp"}}}`
+	if err := os.WriteFile(r.DevIDPath, []byte(junkJSON), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if hn, src = r.Resolve(macA, "192.168.43.101"); hn != "dumpsys-fallback" || src != "dhcp" {
+		t.Fatalf("dpi_devid 垃圾名应落到 dumpsys: %q/%q", hn, src)
+	}
+	if dumpsysCalls.Load() != 1 {
+		t.Fatalf("期望调用 1 次 dumpsys, 得 %d", dumpsysCalls.Load())
+	}
+}
+
+func TestMissingMDNSBinSkipsImmediately(t *testing.T) {
+	r, dir := testResolver(t)
+	r.MDNSBin = filepath.Join(dir, "no_mdns_resolve")
+	t0 := time.Now()
+	hn, src := r.Resolve(macA, "192.168.43.101")
+	took := time.Since(t0)
+	if hn != "00000001" || src != "mac" {
+		t.Fatalf("假 MDNSBin 应落回 mac 兜底: %q %q", hn, src)
+	}
+	if took > 200*time.Millisecond {
+		t.Fatalf("不存在的 MDNSBin 假路径不应阻塞 800ms, 实际耗时 %v", took)
+	}
+}
+
+func buildTestPTRReply(txid uint16, qname, ptrTarget string, useCompress bool) []byte {
+	qEnc, _ := encodeDNSName(qname)
+	tEnc, _ := encodeDNSName(ptrTarget)
+	var pkt []byte
+	hdr := make([]byte, 12)
+	binary.BigEndian.PutUint16(hdr[0:2], txid)
+	binary.BigEndian.PutUint16(hdr[2:4], 0x8400) // QR=1 AA=1
+	binary.BigEndian.PutUint16(hdr[4:6], 1)      // QD=1
+	binary.BigEndian.PutUint16(hdr[6:8], 1)      // AN=1
+	pkt = append(pkt, hdr...)
+	pkt = append(pkt, qEnc...)
+	pkt = append(pkt, 0x00, 0x0C, 0x00, 0x01) // QTYPE=PTR QCLASS=IN
+	if useCompress {
+		pkt = append(pkt, 0xC0, 0x0C) // 指向 offset 12 的 question name
+	} else {
+		pkt = append(pkt, qEnc...)
+	}
+	rrMeta := make([]byte, 10)
+	binary.BigEndian.PutUint16(rrMeta[0:2], 0x000C) // TYPE=PTR
+	binary.BigEndian.PutUint16(rrMeta[2:4], 0x0001) // CLASS=IN
+	binary.BigEndian.PutUint32(rrMeta[4:8], 120)    // TTL
+	binary.BigEndian.PutUint16(rrMeta[8:10], uint16(len(tEnc)))
+	pkt = append(pkt, rrMeta...)
+	pkt = append(pkt, tEnc...)
+	return pkt
+}
+
+func TestNativeMDNSPTRUnicastMulticastAndCompression(t *testing.T) {
+	// 1. 验证恶意自环压缩指针不会死循环
+	loopPkt := []byte{
+		0x00, 0x01, 0x84, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+		0xC0, 0x0C, // 自环指针 ptr == cur
+		0x00, 0x0C, 0x00, 0x01, 0x00, 0x00, 0x00, 0x3C, 0x00, 0x02, 0xC0, 0x0C,
+	}
+	if _, ok := parseMDNSPTRResponse(loopPkt, "101.43.168.192.in-addr.arpa"); ok {
+		t.Fatal("自环压缩指针必须被拒绝")
+	}
+
+	// 2. 启动本地单播与组播模拟 UDP 服务: 单播静默超时 → 组播先发一条伪造 rname 再发真 PTR(带压缩指针)
+	uniSrv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer uniSrv.Close()
+
+	mcastSrv, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mcastSrv.Close()
+
+	go func() {
+		var buf [1500]byte
+		_, cliAddr, err := mcastSrv.ReadFromUDP(buf[:])
+		if err != nil {
+			return
+		}
+		// 先发一条 rname 不匹配的伪造响应(必须被忽略)
+		spoof := buildTestPTRReply(0, "99.43.168.192.in-addr.arpa", "Evil-Spoof.local", false)
+		_, _ = mcastSrv.WriteToUDP(spoof, cliAddr)
+		// 再发匹配的压缩指针 PTR 响应
+		valid := buildTestPTRReply(0, "101.43.168.192.in-addr.arpa", "MacBook-Air.local.", true)
+		_, _ = mcastSrv.WriteToUDP(valid, cliAddr)
+	}()
+
+	r, _ := testResolver(t)
+	r.NativeMDNS = true
+	r.mdnsUnicastTargetFn = func(net.IP) *net.UDPAddr { return uniSrv.LocalAddr().(*net.UDPAddr) }
+	r.mdnsMulticastTarget = mcastSrv.LocalAddr().(*net.UDPAddr)
+
+	hn, src := r.Resolve(macA, "192.168.43.101")
+	if hn != "MacBook-Air" || src != "mdns" {
+		t.Fatalf("纯 Go mDNS 单播转组播应解析出 MacBook-Air/mdns, 得 %q/%q", hn, src)
+	}
+
+	// 3. 验证底层 UDP 发送报错时平滑回退外部 MDNSBin(测试用 /bin/echo 或等效可执行文件验证路径判断)
+	rErr, dir := testResolver(t)
+	fakeBin := filepath.Join(dir, "fake_mdns")
+	_ = os.WriteFile(fakeBin, []byte("#!/bin/sh\necho fallback-host\n"), 0o755)
+	rErr.MDNSBin = fakeBin
+	rErr.mdnsQueryOnceFn = func(context.Context, string, *net.UDPAddr, bool, time.Duration) (string, bool, error) {
+		return "", false, errors.New("socket permission denied")
+	}
+	// 若临时目录在支持 exec 的文件系统上则命中 fallback-host, 若在 noexec 上则优雅落到 mac 兜底不崩
+	hn2, src2 := rErr.Resolve(macA, "192.168.43.101")
+	if !(src2 == "mdns" && hn2 == "fallback-host") && src2 != "mac" {
+		t.Fatalf("UDP 报错回退行为异常: %q/%q", hn2, src2)
 	}
 }

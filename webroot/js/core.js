@@ -7,7 +7,41 @@
   定义的名字 —— 远程加载时两个 <script> 之间事件循环可能先跑 rAF/事件回调; 启动逻辑全在 main.js。 */
 'use strict';
 
-/* ═════════════════════ 基础工具 ═════════════════════ */
+/* ═════════════════════ 老内核 WebView 兼容补丁与基础工具 ═════════════════════ */
+if (!String.prototype.padStart) {
+  String.prototype.padStart = function (len, fill) {
+    var s = String(this), n = len >> 0, p = String(fill === undefined ? ' ' : fill);
+    if (s.length >= n || !p) return s;
+    n -= s.length;
+    while (p.length < n) p += p;
+    return p.slice(0, n) + s;
+  };
+}
+if (typeof Element !== 'undefined') {
+  if (!Element.prototype.matches) {
+    Element.prototype.matches = Element.prototype.msMatchesSelector || Element.prototype.webkitMatchesSelector || function () { return false; };
+  }
+  if (!Element.prototype.closest) {
+    Element.prototype.closest = function (s) {
+      var el = this;
+      while (el && el.nodeType === 1) { if (el.matches(s)) return el; el = el.parentElement || el.parentNode; }
+      return null;
+    };
+  }
+  if (!Element.prototype.replaceWith) {
+    Element.prototype.replaceWith = function (nu) {
+      if (this.parentNode && nu) this.parentNode.replaceChild(nu, this);
+    };
+  }
+  if (!Element.prototype.remove) {
+    Element.prototype.remove = function () {
+      if (this.parentNode) this.parentNode.removeChild(this);
+    };
+  }
+}
+function evEl(e) { var t = e && e.target; return t && t.nodeType === 3 ? t.parentNode : t; }
+function isUsbTetherIface(s) { return /(^|_)(rndis|ncm|usb)\d*$/i.test(String(s || '').trim()); }
+
 var $ = function (s, r) { return (r || document).querySelector(s); };
 var $$ = function (s, r) { return Array.prototype.slice.call((r || document).querySelectorAll(s)); };
 function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, function (c) { return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]; }); }
@@ -322,6 +356,7 @@ var API_BASE = 'http://127.0.0.1:8444';
 var HNC_DIR = '/data/local/hnc';
 var MOD_DIR = '/data/adb/modules/hotspot_net_ctl';
 var KSU = typeof window.ksu !== 'undefined' && window.ksu && typeof window.ksu.exec === 'function';
+var IS_LOCAL = KSU || /^(127\.0\.0\.1|localhost|\[?::1\]?)$/i.test((typeof location !== 'undefined' && location && location.hostname) || '');
 var rawCb = 0;
 function execRaw(cmd, timeoutMs) {
   return new Promise(function (resolve) {
@@ -357,16 +392,70 @@ function parseJSON(txt, status) {
   try { return JSON.parse(txt); }
   catch (_) { throw HttpError(status >= 400 ? 'HTTP ' + status + ' · ' + String(txt).slice(0, 60) : '返回的不是 JSON: ' + String(txt).slice(0, 60), status); }
 }
-function curlCmd(method, path, body, sec, maxTime) {
+function splitUtf16Safe(str, chunkSize) {
+  var chunks = [], i = 0, len = str.length;
+  while (i < len) {
+    var end = Math.min(i + chunkSize, len);
+    if (end < len) {
+      var code = str.charCodeAt(end - 1);
+      if (code >= 0xD800 && code <= 0xDBFF) end++;
+    }
+    chunks.push(str.slice(i, end));
+    i = end;
+  }
+  return chunks;
+}
+function curlCmd(method, path, bodyStr, sec, maxTime, bodyFile) {
   var c = 'curl -sS --connect-timeout 1 --max-time ' + (maxTime || 6) + " -w '\\n__HNC_HTTP__%{http_code}'";
-  if (method === 'POST') c += ' -X POST -H ' + sq('Content-Type: application/json') + ' -H ' + sq('X-HNC-CSRF: 1') + ' --data ' + sq(JSON.stringify(body || {}));
+  if (method === 'POST') {
+    c += ' -X POST -H ' + sq('Content-Type: application/json') + ' -H ' + sq('X-HNC-CSRF: 1');
+    if (bodyFile) c += ' --data-binary @' + sq(bodyFile);
+    else c += ' --data-raw ' + sq(bodyStr || '{}');
+  }
   if (sec) c += ' -H ' + sq('X-HNC-Local-Admin: ' + sec);
   return c + ' -H ' + sq('Cache-Control: no-cache') + ' ' + sq(API_BASE + path);
+}
+function ksuBridge(method, path, body, sec, opt) {
+  var bodyStr = method === 'POST' ? JSON.stringify(body || {}) : '';
+  var tmo = (opt.timeout || 9000) + 2000;
+  if (method !== 'POST' || bodyStr.length <= 65536) {
+    return execRaw(curlCmd(method, path, bodyStr, sec, opt.maxTime, ''), tmo);
+  }
+  // 超过 64KB 请求体按 48KB 分片写入 /data/local/hnc/run/.webui_req.$$.tmp，绕过 Linux MAX_ARG_STRLEN (128KB) E2BIG 限制
+  var parts = splitUtf16Safe(bodyStr, 49152);
+  var tmpPath = '';
+  var p = execRaw('umask 077 && mkdir -p /data/local/hnc/run && _f="/data/local/hnc/run/.webui_req.$$.tmp" && printf \'%s\' ' + sq(parts[0]) + ' > "$_f" && printf \'%s\' "$_f"', 8000).then(function (r0) {
+    var fp = String(r0.out || '').trim();
+    if (r0.code !== 0 || fp.indexOf('/data/local/hnc/run/.webui_req.') !== 0) {
+      return { code: r0.code || -1, out: '', err: r0.err || 'failed to stage request chunk 0' };
+    }
+    tmpPath = fp;
+    var chain = Promise.resolve({ code: 0 });
+    for (var idx = 1; idx < parts.length; idx++) {
+      (function (chunk) {
+        chain = chain.then(function (prev) {
+          if (prev.code !== 0) return prev;
+          return execRaw("printf '%s' " + sq(chunk) + ' >> ' + sq(tmpPath), 8000);
+        });
+      })(parts[idx]);
+    }
+    return chain.then(function (lastW) {
+      if (lastW.code !== 0) {
+        return execRaw('rm -f ' + sq(tmpPath), 3000).then(function () { return lastW; });
+      }
+      var sendCmd = curlCmd(method, path, '', sec, Math.max(opt.maxTime || 6, 15), tmpPath) + '; _rc=$?; rm -f ' + sq(tmpPath) + '; exit $_rc';
+      return execRaw(sendCmd, Math.max(tmo, 18000));
+    });
+  });
+  return p.then(function (res) {
+    if (res.code !== 0 && tmpPath) execRaw('rm -f ' + sq(tmpPath), 3000);
+    return res;
+  });
 }
 function bridgeReq(method, path, body, opt, retried) {
   opt = opt || {};
   return loadSecret().then(function (sec) {
-    return execRaw(curlCmd(method, path, body, sec, opt.maxTime), (opt.timeout || 9000) + 2000);
+    return ksuBridge(method, path, body, sec, opt);
   }).then(function (r) {
     if (r.code !== 0) {
       var raw = r.err || '';
@@ -452,7 +541,7 @@ var api = {
   action: function (name, params, opt) {
     var p = {}; params = params || {};
     Object.keys(params).forEach(function (k) { if (params[k] !== undefined && params[k] !== null) p[k] = String(params[k]); });
-    var slow = /^(debug_bundle|cleanup_all|dpi_rules_update|capture_record|selfcheck_run|selfcheck_export|compat_report|self_studio_start|self_studio_distill|self_studio_export|dpi_distill_now|flow_cls_retrain|dpi_rulepack_export|device_merge|encdns_set|clsact_mode_set|dataplane_verify_run)$/.test(name);
+    var slow = /^(debug_bundle|cleanup_all|dpi_rules_update|capture_record|selfcheck_run|selfcheck_export|compat_report|self_studio_start|self_studio_distill|self_studio_export|dpi_distill_now|flow_cls_retrain|dpi_rulepack_export|device_merge|device_unmerge|encdns_set|clsact_mode_set|dataplane_verify_run)$/.test(name);
     var skipFence = /^(debug_bundle|selfcheck_run|selfcheck_export|compat_report|capture_record|dpi_rulepack_export|self_studio_export|clsact_check)$/.test(name);
     var defOpt = slow ? { timeout: 35000, maxTime: 30 } : { timeout: 12000, maxTime: 10 };
     var run = function () {
@@ -682,7 +771,8 @@ var HNC_UI_SVGS = {
   chart: '<rect x="3.5" y="12" width="4" height="8" rx="1" fill="currentColor" fill-opacity=".20"/><rect x="10" y="7.5" width="4" height="12.5" rx="1" fill="currentColor" fill-opacity=".20"/><rect x="16.5" y="4" width="4" height="16" rx="1" fill="currentColor" fill-opacity=".20"/><path d="M2.5 20h19"/>',
   traffic: '<path d="M4.2 18a9 9 0 1 1 15.6 0Z" fill="currentColor" fill-opacity=".15"/><path d="M4.2 18a9 9 0 1 1 15.6 0"/><path d="m12 13 3.8-3.8"/><circle cx="12" cy="13" r="1.4" fill="currentColor" stroke="none"/>',
   hourglass: '<path d="M6.5 3h11M6.5 21h11"/><path d="M7.5 3v3.8a4.5 4.5 0 0 0 2.1 3.8L12 12l-2.4 1.4a4.5 4.5 0 0 0-2.1 3.8V21h9v-3.8a4.5 4.5 0 0 0-2.1-3.8L12 12l2.4-1.4a4.5 4.5 0 0 0 2.1-3.8V3h-9Z" fill="currentColor" fill-opacity=".16"/>',
-  merge: '<circle cx="6" cy="6" r="2.5" fill="currentColor" fill-opacity=".18"/><circle cx="6" cy="18" r="2.5" fill="currentColor" fill-opacity=".18"/><circle cx="18" cy="12" r="2.5" fill="currentColor" fill-opacity=".24"/><path d="M8.5 6.8c3.8.6 4.8 4.1 7 5.2m-7 5.2c3.8-.6 4.8-4.1 7-5.2"/>'
+  merge: '<circle cx="6" cy="6" r="2.5" fill="currentColor" fill-opacity=".18"/><circle cx="6" cy="18" r="2.5" fill="currentColor" fill-opacity=".18"/><circle cx="18" cy="12" r="2.5" fill="currentColor" fill-opacity=".24"/><path d="M8.5 6.8c3.8.6 4.8 4.1 7 5.2m-7 5.2c3.8-.6 4.8-4.1 7-5.2"/>',
+  isolate: '<circle cx="7" cy="12" r="2.6" fill="currentColor" fill-opacity=".18"/><circle cx="17" cy="12" r="2.6" fill="currentColor" fill-opacity=".18"/><circle cx="7" cy="12" r="2.6"/><circle cx="17" cy="12" r="2.6"/><path d="M12 4.5v15"/>'
 };
 function uiSvg(name, cls) {
   var body = HNC_UI_SVGS[name] || HNC_UI_SVGS.sparkles;
@@ -739,6 +829,12 @@ function mapDevice(d) {
   var mac = String(d.mac || '').toLowerCase();
   var active = S.hotspot.active !== false;
   var name = devName(d, mac);
+  var autoFrom = isMac(d.auto_inherited_from) ? String(d.auto_inherited_from).toLowerCase() : '';
+  var mfList = Array.isArray(d.merged_from)
+    ? d.merged_from.map(function (x) { return isMac(x) ? String(x).toLowerCase() : (x && isMac(x.old_mac) ? String(x.old_mac).toLowerCase() : ''); }).filter(Boolean)
+    : (isMac(d.merged_from) ? [String(d.merged_from).toLowerCase()] : []);
+  var mfPrimary = mfList[0] || autoFrom;
+  var mfName = d.merged_from_name || (Array.isArray(d.merged_from) && d.merged_from[0] && d.merged_from[0].old_name) || d.auto_inherited_name || '';
   var o = {
     mac: mac, ip: d.ip || '', name: name, manual: d.hostname_src === 'manual', vendor: d.vendor || '', lastSeen: num(d.last_seen),
     blocked: d.status === 'blocked', online: active && d.online === true,
@@ -758,7 +854,10 @@ function mapDevice(d) {
     rmac: typeof d.randomized_mac === 'boolean' ? d.randomized_mac : d.sim !== true && isRandomMac(mac),
     merge: d.merge_suggestion && typeof d.merge_suggestion === 'object' && isMac(d.merge_suggestion.old_mac) ? d.merge_suggestion : null,
     mergedInto: isMac(d.merged_into) ? String(d.merged_into).toLowerCase() : '',
-    autoInhFrom: isMac(d.auto_inherited_from) ? String(d.auto_inherited_from).toLowerCase() : '',
+    mergedFrom: mfPrimary,
+    mergedFromList: mfList.length ? mfList : (mfPrimary ? [mfPrimary] : []),
+    mergedFromName: String(mfName || ''),
+    autoInhFrom: autoFrom,
     autoInhName: d.auto_inherited_name || '',
     autoInhScore: num(d.auto_inherited_score),
     rmacGuarded: false,
@@ -787,7 +886,11 @@ function applyLive(l) {
   var act = l.hotspot_active; S.hotspot.active = typeof act === 'boolean' ? act : S.hotspot.active;
   S.hotspot.iface = l.hotspot_iface || l.iface || S.hotspot.iface; S.hotspot.ip = l.hotspot_ip || S.hotspot.ip;
   if (l && l.autorate && typeof l.autorate === 'object') { S.autorate = l.autorate; if (S.cfg) S.cfg.autorate = l.autorate; }
-  if (l && l.signal && typeof l.signal === 'object') { S.signal = l.signal; if (typeof paintSignalPill === 'function') paintSignalPill(); }
+  if (l && l.signal && typeof l.signal === 'object') {
+    S.signal = l.signal;
+    if (typeof ingestSignalSample === 'function') { try { ingestSignalSample(l.signal); } catch (_) {} }
+    if (typeof paintSignalPill === 'function') paintSignalPill();
+  }
   S.spark.push(num(l.rx_bps)); if (S.spark.length > 30) S.spark.shift();
 }
 function loadLive(guardGen) {

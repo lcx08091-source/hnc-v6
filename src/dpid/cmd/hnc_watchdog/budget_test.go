@@ -41,6 +41,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -154,12 +155,15 @@ func withNativeUnknown(t *testing.T) {
 	t.Helper()
 	oldRun, oldData := natRunDir, natDataDir
 	oldHint, oldByN, oldAddrs, oldQ, oldExec, oldSys := ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn, nlQdiscListFn, execCommandFn, sysIfIndexFn
+	oldMirred, oldTargets := nlIngressMirredFn, iptTargetsPath
 	oldUnknown := nativeUnknownTotal
 	natRunDir, natDataDir = t.TempDir(), t.TempDir()
 	ifaceHintReadFn = func() (string, bool) { return "", false }
 	netInterfaceByNameFn = func(string) (*net.Interface, error) { return nil, os.ErrNotExist }
 	netIfAddrsFn = func(*net.Interface) ([]net.Addr, error) { return nil, os.ErrNotExist }
 	nlQdiscListFn = func(int) ([]nlroute.Qdisc, error) { return nil, os.ErrNotExist }
+	nlIngressMirredFn = func(int, int) (bool, error) { return false, os.ErrNotExist }
+	iptTargetsPath = filepath.Join(natRunDir, "no_such_ip_tables_targets")
 	execCommandFn = func(string, ...string) (string, int, error) { return "", -1, os.ErrNotExist }
 	sysIfIndexFn = func(string) (string, error) { return "", os.ErrNotExist }
 	nativeUnknownTotal = 0
@@ -167,6 +171,7 @@ func withNativeUnknown(t *testing.T) {
 		natRunDir, natDataDir = oldRun, oldData
 		ifaceHintReadFn, netInterfaceByNameFn, netIfAddrsFn = oldHint, oldByN, oldAddrs
 		nlQdiscListFn, execCommandFn, sysIfIndexFn = oldQ, oldExec, oldSys
+		nlIngressMirredFn, iptTargetsPath = oldMirred, oldTargets
 		nativeUnknownTotal = oldUnknown
 	})
 }
@@ -175,6 +180,12 @@ func withNativeUnknown(t *testing.T) {
 // iptables 正常、ifb0 + mirred 在。
 func withNativeHealthy(t *testing.T) {
 	t.Helper()
+	oldMirred, oldTargets := nlIngressMirredFn, iptTargetsPath
+	nlIngressMirredFn = func(int, int) (bool, error) { return false, os.ErrNotExist }
+	iptTargetsPath = filepath.Join(natRunDir, "no_such_ip_tables_targets")
+	t.Cleanup(func() {
+		nlIngressMirredFn, iptTargetsPath = oldMirred, oldTargets
+	})
 	ifaceHintReadFn = func() (string, bool) { return "wlan2", true }
 	netInterfaceByNameFn = func(name string) (*net.Interface, error) {
 		return &net.Interface{Name: name, Index: 5}, nil
@@ -465,5 +476,50 @@ func TestBudgetNativeHealthUnknownNoShell(t *testing.T) {
 	}
 	if nativeUnknownTotal != 60 {
 		t.Errorf("native_unknown = %d, want 60(每轮一次)", nativeUnknownTotal)
+	}
+}
+
+func TestBudgetBandSwitchIfIndexJumpExemptsThrottle(t *testing.T) {
+	clk := &fakeClock{now: time.Date(2026, 10, 4, 12, 0, 0, 0, time.Local)}
+	rec := newActionRec()
+	rec.probeOut = "wlan2 192.168.43.1\n"
+	withFakeEnv(t, clk, rec)
+
+	curIdx := 20
+	sysIfIndexFn = func(string) (string, error) { return strconv.Itoa(curIdx), nil }
+
+	ls := newLoopState()
+	st := wdState{kind: stateActive, iface: "wlan2"}
+
+	// 首轮健康: 记录基线 activeIfIndex=20
+	rec.rc["check_health"] = 0
+	ls.tick(st)
+
+	// 5 分钟窗口内连续切频段 8 次(> restoreWindowMax=5): 每次 ifindex 真实跃迁恢复后变绿, 绝不误触发 passiveMode
+	for sw := 1; sw <= 8; sw++ {
+		clk.now = clk.now.Add(15 * time.Second)
+		curIdx = 20 + sw
+		rec.rc["check_health"] = 1
+		ls.tick(st)
+		if ls.throttle.passiveMode || ls.throttle.windowCount != 0 {
+			t.Fatalf("第 %d 次切频段不该计入熔断窗口: passive=%v count=%d", sw, ls.throttle.passiveMode, ls.throttle.windowCount)
+		}
+		clk.now = clk.now.Add(15 * time.Second)
+		rec.rc["check_health"] = 0
+		ls.tick(st)
+	}
+	if rec.counts["full_restore"] != 8 {
+		t.Fatalf("8 次切频段应全部执行 full_restore, got %d", rec.counts["full_restore"])
+	}
+
+	// 随后同一 ifindex(29) 跳变后持续失败: 首次豁免 1 次, 后续 5 次同 ifindex(29) 正常触发熔断
+	curIdx = 29
+	rec.rc["check_health"] = 1
+	for i := 0; i < 7; i++ {
+		clk.now = clk.now.Add(10 * time.Second)
+		ls.tick(st)
+	}
+	if !ls.throttle.passiveMode {
+		t.Fatal("同一新 ifindex 仅允许豁免 1 次, 持续不健康必须触发 passiveMode")
 	}
 }

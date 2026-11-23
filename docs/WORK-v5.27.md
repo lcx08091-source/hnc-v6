@@ -296,7 +296,7 @@ httpd(daemon/hnc_httpd)
 1. `module.prop`:`version=v5.27.0-rc1`,`versionCode=5270001`。
 2. `CHANGELOG.md` 最上面加 `## [5.27.0-rc1] - <日期>`,格式参照 5.26.0-rc1:写清每个新识别器「现在是影子运行 / 能改变什么」、T1 修的两个老 bug、规则包的隐私边界、规则库新增多少应用(写实际数字)。
 3. `webroot/changelog.html` 最上面加一段大白话。
-4. `docs/ROADMAP.md` §A:v5.27 行标「rc1 ✅」并把内容改成实际完成的情况。
+4. `docs/ROADMAP.md` §A:v5.27 行标「rc1 [OK]」并把内容改成实际完成的情况。
 5. `docs/CODEMAP.md` 权威实现表加:启动指纹 → `startup_fp.go`;前台 HMM → `fg_hmm.go`;规则包 → `rulepack.go`;规则同步 → `bin/dpi_rules_sync.sh`;规则挂靠 → `rule.go`。
 6. `docs/API.md` 末尾加「## 25. v5.27 变更」:`/api/dpi_startup`、`/api/fg_compare`、`/api/dpi_rulepack`、action `dpi_fg_engine` / `dpi_rulepack_export` / `dpi_rulepack_clear`、`/api/dpi_eval` 新增 `quic` / `startup` 段、`/api/dpi_fp` 新增 `qtp`、`dpi_flows.json` 与 `label_samples` 新增 `qtp` 字段。
 

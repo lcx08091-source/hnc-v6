@@ -483,3 +483,31 @@ func TestFullSyncFailedWithoutMAC(t *testing.T) {
 		t.Fatalf("dump 里的 FAILED 表项应让设备下线(设备数 %d)", tb.Count())
 	}
 }
+
+func TestRenderFlatAndSnapshotMACIP(t *testing.T) {
+	tb := NewTable("wlan2\t\n\x00\x7f", 7)
+	if got := tb.RenderFlat(); len(got) != 0 {
+		t.Fatalf("空表 RenderFlat 应为空, 得 %q", got)
+	}
+	tb.Apply(evc(macB, "192.168.43.102", nudReachable, 0), t0)
+	tb.Apply(evc(macA, "192.168.43.101", nudReachable, 0), t0)
+
+	wantFlat := "02:5a:00:00:00:01\t192.168.43.101\twlan2\n" +
+		"02:5a:00:00:00:02\t192.168.43.102\twlan2\n"
+	if got := string(tb.RenderFlat()); got != wantFlat {
+		t.Fatalf("RenderFlat =\n%q\nwant\n%q", got, wantFlat)
+	}
+
+	snap := tb.SnapshotMACIP()
+	if len(snap) != 2 || snap[macA] != "192.168.43.101" || snap[macB] != "192.168.43.102" {
+		t.Fatalf("SnapshotMACIP = %v", snap)
+	}
+
+	// 验证 dhcpv6 / nbns 主机名防降级
+	if !tb.ApplyResolution(macA, "Win11-PC", "nbns", t0.Add(2*time.Second)) {
+		t.Fatal("nbns 回填应成功")
+	}
+	if tb.ApplyResolution(macA, "Apple 设备", "oui", t0.Add(3*time.Second)) {
+		t.Fatal("oui 不应降级 nbns 主机名")
+	}
+}

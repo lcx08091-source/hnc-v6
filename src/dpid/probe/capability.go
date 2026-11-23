@@ -11,6 +11,7 @@ import (
 	"syscall"
 
 	"hnc.io/dpid/capture"
+	"hnc.io/dpid/output"
 )
 
 type Result struct {
@@ -67,12 +68,18 @@ func Run(opt Options) Result {
 		r.IPv6Capture = detectIPv6OnIface(r.APIface)
 	}
 
-	for _, p := range []string{"/proc/net/nf_conntrack", "/proc/net/ip_conntrack"} {
+	for _, p := range output.ConntrackPaths {
 		if f, err := os.Open(p); err == nil {
 			_ = f.Close()
 			r.ConntrackReadable = true
 			r.ConntrackPath = p
 			break
+		}
+	}
+	if !r.ConntrackReadable && usesDefaultProcConntrackPaths(output.ConntrackPaths) {
+		if output.ProbeConntrackNetlink() {
+			r.ConntrackReadable = true
+			r.ConntrackPath = output.ConntrackNetlinkPath
 		}
 	}
 
@@ -223,4 +230,16 @@ func atomicWrite(path string, data []byte, mode os.FileMode) error {
 		_ = d.Close()
 	}
 	return nil
+}
+
+func usesDefaultProcConntrackPaths(paths []string) bool {
+	if len(paths) == 0 {
+		return false
+	}
+	for _, p := range paths {
+		if !strings.HasPrefix(p, "/proc/") {
+			return false
+		}
+	}
+	return true
 }

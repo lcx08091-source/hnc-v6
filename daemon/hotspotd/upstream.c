@@ -21,100 +21,32 @@
 #include <unistd.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
 #include <sys/syscall.h>
+#include <sys/time.h>
 #include <linux/bpf.h>
+#include <linux/netlink.h>
+#include <linux/rtnetlink.h>
 
 #include <net/if.h>
 #include <pthread.h>
 
-/* ══════════════════════════════════════════════════════════
- * Tier 1: popen "ip route get 8.8.8.8"
- *
- * 典型输出 (ColorOS 16 / RMX5010 实测):
- *   8.8.8.8 via 10.97.46.162 dev rmnet_data3 table rmnet_data3 src 10.97.46.161 uid 0
- *       cache mtu 1410
- *
- * 解析策略:
- *   找 " dev " 子串, 后面跟 iface name, 到下一个 space 结束
- *   if_nametoindex 转 ifindex, 失败 tier fail
- *
- * 为什么用 8.8.8.8 不用 1.1.1.1:
- *   - 两者都公网 anycast, 选路结果一致
- *   - 8.8.8.8 在中国大陆更可能被解析器/防火墙"假装可达", route 查询仍会返回正确出口
- *   - 实际上 `ip route get` 不发包, 只查内核路由表, 目标 IP 无需真正可达
- * ══════════════════════════════════════════════════════════ */
-
-int upstream_detect_via_ip_route(int *ifindex_out,
-                                  char *ifname_out,
-                                  size_t ifname_size)
-{
-    if (!ifindex_out || !ifname_out || ifname_size < 2) return -1;
-
-    /* v5.9.0: popen(无超时) → hnc_run_cmd_timeout(500ms + SIGKILL)。
-     * 此前 `ip` 被 ROM/SELinux 异常挂起时 pclose 无限阻塞;而本函数会被
-     * scheduler worker(曾经还持着 sched.lock)每 60s 调到 —— 挂起等于
-     * 冻死整个 hotspotd 的 IPC。现在最坏 500ms 返回,失败走 Tier2。 */
-    char out[4096];
-    char *const cmd[] = { "ip", "route", "get", "8.8.8.8", NULL };
-    int n = hnc_run_cmd_timeout(cmd, out, sizeof(out), 500);
-    if (n <= 0) return -1;
-
-    int found = 0;
-    char *save = NULL;
-    for (char *line = strtok_r(out, "\n", &save); line != NULL;
-         line = strtok_r(NULL, "\n", &save)) {
-        /* 找 " dev " 子串 (两侧 space 防 "cache" 等误匹配) */
-        const char *dev = strstr(line, " dev ");
-        if (!dev) continue;
-        dev += 5;   /* 跳过 " dev " */
-
-        /* 提取 iface name (到下一个 whitespace 或 EOL) */
-        char iface[IFNAMSIZ] = {0};
-        int i = 0;
-        while (dev[i] && !isspace((unsigned char)dev[i]) && i < (int)sizeof(iface) - 1) {
-            iface[i] = dev[i];
-            i++;
-        }
-        if (i == 0) continue;
-
-        /* alpha.4: 过滤 VPN / tunnel 接口
-         * 用户开 Clash / WireGuard / OpenVPN 时 ip route get 会返回 tun0/wg0
-         * 这些不是物理上游, BPF upstream4_map 里没这 ifindex, disable 无效
-         * 跳过继续 (实际只返回一条, 所以这里会导致 Tier 1 返 -1, 触发 Tier 2/3) */
-        if (strncmp(iface, "tun",  3) == 0 ||
-            strncmp(iface, "tap",  3) == 0 ||
-            strncmp(iface, "ppp",  3) == 0 ||
-            strncmp(iface, "wg",   2) == 0 ||
-            strncmp(iface, "gre",  3) == 0 ||
-            strncmp(iface, "ipsec",5) == 0) {
-            fprintf(stderr, "[upstream] Tier1: skipping VPN iface '%s'\n", iface);
-            continue;
-        }
-
-        unsigned int idx = if_nametoindex(iface);
-        if (idx == 0) continue;
-
-        *ifindex_out = (int)idx;
-        snprintf(ifname_out, ifname_size, "%s", iface);
-        found = 1;
-        break;
-    }
-    return found ? 0 : -1;
-}
-
-/* ══════════════════════════════════════════════════════════
- * Tier 2: /proc/net/route 扫描 (放宽条件)
- *
- * 与 alpha.1 的 detect_primary_upstream 区别:
- *   - alpha.1 只认 Destination=00000000 (default route)
- *   - alpha.2 放宽: 任何 RTF_UP 且 iface 名以 rmnet/wwan/eth/wlan/ppp 开头的
- *     第一条, 作为 "cellular/wan uplink" 启发式
- *
- * 这样即使 main table 没 default route, 也能从某个网段路由反推出 uplink iface。
- * 不如 Tier 1 准, 但优于直接失败。
- *
- * 注意: 我们跳过 wlan2 (手机热点 downstream), 只取可能的 uplink。
- * ══════════════════════════════════════════════════════════ */
+#ifndef __NR_bpf
+#  if defined(__aarch64__)
+#    define __NR_bpf 280
+#  elif defined(__arm__)
+#    define __NR_bpf 386
+#  elif defined(__x86_64__)
+#    define __NR_bpf 321
+#  elif defined(__i386__)
+#    define __NR_bpf 357
+#  else
+#    error "unknown arch, define __NR_bpf"
+#  endif
+#endif
 
 /* BUG-004: 缓存已知热点接口名,防止上游探测把它误判为 upstream。
  * 由 upstream_detect_primary() 在每次探测前从状态文件刷新。
@@ -141,7 +73,7 @@ static void refresh_known_hs_iface(void)
     if (f) {
         while (fgets(line, sizeof(line), f)) {
             if (strncmp(line, "ACTIVE:", 7) == 0) {
-                char *nl = strpbrk(line + 7, "\r\n");
+                char *nl = strpbrk(line + 7, "\r\n \t");
                 if (nl) *nl = '\0';
                 if (line[7] != '\0') {
                     snprintf(buf, sizeof(buf), "%.*s", (int)sizeof(buf) - 1, line + 7);
@@ -157,7 +89,7 @@ static void refresh_known_hs_iface(void)
     f = fopen("/data/local/hnc/run/hotspot_iface", "re");
     if (f) {
         if (fgets(line, sizeof(line), f)) {
-            char *nl = strpbrk(line, "\r\n");
+            char *nl = strpbrk(line, "\r\n \t");
             if (nl) *nl = '\0';
             if (line[0] != '\0') {
                 snprintf(buf, sizeof(buf), "%.*s", (int)sizeof(buf) - 1, line);
@@ -174,23 +106,318 @@ done:
     }
 }
 
+static int is_vpn_or_tunnel_iface(const char *name)
+{
+    if (!name || name[0] == '\0') return 0;
+    return strncmp(name, "tun",   3) == 0 ||
+           strncmp(name, "tap",   3) == 0 ||
+           strncmp(name, "ppp",   3) == 0 ||
+           strncmp(name, "wg",    2) == 0 ||
+           strncmp(name, "gre",   3) == 0 ||
+           strncmp(name, "ipsec", 5) == 0;
+}
+
+static int is_excluded_downstream_iface(const char *name, const char *hs_iface)
+{
+    if (!name || name[0] == '\0') return 1;
+    if (hs_iface && hs_iface[0] != '\0' && strcmp(name, hs_iface) == 0)
+        return 1;
+    if (strcmp(name, "lo") == 0) return 1;
+    if (strncmp(name, "dummy",   5) == 0) return 1;
+    if (strncmp(name, "ifb",     3) == 0) return 1;
+    if (strncmp(name, "r_rmnet", 7) == 0) return 1;
+    if (strncmp(name, "wlan1",   5) == 0) return 1;
+    if (strncmp(name, "wlan2",   5) == 0) return 1;
+    if (strncmp(name, "wlan3",   5) == 0) return 1;
+    if (strncmp(name, "softap",  6) == 0) return 1;
+    if (strncmp(name, "ap_br_",  6) == 0) return 1;
+    if (strncmp(name, "ap",      2) == 0) return 1;
+    if (strncmp(name, "swlan",   5) == 0) return 1;
+    if (strncmp(name, "wigig",   5) == 0) return 1;
+    if (strncmp(name, "rndis",   5) == 0) return 1;
+    if (strncmp(name, "ncm",     3) == 0) return 1;
+    if (strncmp(name, "usb",     3) == 0) return 1;
+    if (strncmp(name, "bt-pan",  6) == 0) return 1;
+    if (strncmp(name, "p2p",     3) == 0) return 1;
+    return 0;
+}
+
+/* ══════════════════════════════════════════════════════════
+ * Tier 1: 纯 C AF_NETLINK RTM_GETROUTE -> 无发包 UDP connect+getsockname
+ *         -> 失败时回退 /system/bin/ip route get 8.8.8.8
+ * ══════════════════════════════════════════════════════════ */
+
+static int detect_via_netlink_getroute(const char *hs_iface,
+                                       int *ifindex_out,
+                                       char *ifname_out,
+                                       size_t ifname_size,
+                                       int *saw_excluded_out)
+{
+    if (saw_excluded_out) *saw_excluded_out = 0;
+
+    int fd = socket(AF_NETLINK, SOCK_RAW | SOCK_CLOEXEC, NETLINK_ROUTE);
+    if (fd < 0) return -1;
+
+    struct timeval tv = { .tv_sec = 0, .tv_usec = 200000 };
+    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    struct sockaddr_nl local_nl;
+    memset(&local_nl, 0, sizeof(local_nl));
+    local_nl.nl_family = AF_NETLINK;
+    if (bind(fd, (struct sockaddr *)&local_nl, sizeof(local_nl)) < 0) {
+        close(fd);
+        return -1;
+    }
+
+    char req_buf[128] __attribute__((aligned(NLMSG_ALIGNTO)));
+    memset(req_buf, 0, sizeof(req_buf));
+    struct nlmsghdr *nlh = (struct nlmsghdr *)req_buf;
+    nlh->nlmsg_len   = NLMSG_LENGTH(sizeof(struct rtmsg));
+    nlh->nlmsg_type  = RTM_GETROUTE;
+    nlh->nlmsg_flags = NLM_F_REQUEST;
+    nlh->nlmsg_seq   = 1U;
+
+    struct rtmsg *rtm = (struct rtmsg *)NLMSG_DATA(nlh);
+    rtm->rtm_family  = AF_INET;
+    rtm->rtm_dst_len = 32;
+
+    uint32_t dst_ip = htonl(0x08080808U); /* 8.8.8.8 */
+    struct rtattr *rta = (struct rtattr *)(req_buf + NLMSG_ALIGN(nlh->nlmsg_len));
+    rta->rta_type = RTA_DST;
+    rta->rta_len  = (unsigned short)RTA_LENGTH(sizeof(dst_ip));
+    memcpy(RTA_DATA(rta), &dst_ip, sizeof(dst_ip));
+    nlh->nlmsg_len = (uint32_t)(NLMSG_ALIGN(nlh->nlmsg_len) + RTA_ALIGN(rta->rta_len));
+
+    struct sockaddr_nl kern_nl;
+    memset(&kern_nl, 0, sizeof(kern_nl));
+    kern_nl.nl_family = AF_NETLINK;
+
+    ssize_t sent;
+    do {
+        sent = sendto(fd, req_buf, nlh->nlmsg_len, MSG_NOSIGNAL,
+                      (struct sockaddr *)&kern_nl, sizeof(kern_nl));
+    } while (sent < 0 && errno == EINTR);
+    if (sent < 0) {
+        close(fd);
+        return -1;
+    }
+
+    char resp_buf[4096] __attribute__((aligned(NLMSG_ALIGNTO)));
+    ssize_t n;
+    do {
+        n = recv(fd, resp_buf, sizeof(resp_buf), 0);
+    } while (n < 0 && errno == EINTR);
+    close(fd);
+    if (n <= 0) return -1;
+
+    size_t rem = (size_t)n;
+    for (size_t off = 0; rem >= sizeof(struct nlmsghdr); ) {
+        struct nlmsghdr *h = (struct nlmsghdr *)(resp_buf + off);
+        if (h->nlmsg_len < sizeof(struct nlmsghdr) || (size_t)h->nlmsg_len > rem)
+            break;
+        size_t step = NLMSG_ALIGN(h->nlmsg_len);
+        if (step > rem) step = rem;
+
+        if (h->nlmsg_type == NLMSG_ERROR)
+            return -1;
+
+        if (h->nlmsg_type == RTM_NEWROUTE &&
+            h->nlmsg_len >= NLMSG_LENGTH(sizeof(struct rtmsg))) {
+            size_t attr_off = NLMSG_SPACE(sizeof(struct rtmsg));
+            if ((size_t)h->nlmsg_len > attr_off) {
+                size_t attr_rem = (size_t)h->nlmsg_len - attr_off;
+                const char *ap = (const char *)h + attr_off;
+                while (attr_rem >= sizeof(struct rtattr)) {
+                    const struct rtattr *a = (const struct rtattr *)ap;
+                    if (a->rta_len < sizeof(struct rtattr) || (size_t)a->rta_len > attr_rem)
+                        break;
+                    if (a->rta_type == RTA_OIF &&
+                        (size_t)a->rta_len >= RTA_LENGTH(sizeof(uint32_t))) {
+                        uint32_t oif = 0;
+                        memcpy(&oif, RTA_DATA(a), sizeof(oif));
+                        if (oif > 0U && oif <= 65535U) {
+                            char iface[IFNAMSIZ] = {0};
+                            if (if_indextoname(oif, iface) != NULL) {
+                                if (is_vpn_or_tunnel_iface(iface) ||
+                                    is_excluded_downstream_iface(iface, hs_iface)) {
+                                    fprintf(stderr, "[upstream] Tier1(nl): skipping iface '%s'\n", iface);
+                                    if (saw_excluded_out) *saw_excluded_out = 1;
+                                    return -1;
+                                }
+                                *ifindex_out = (int)oif;
+                                snprintf(ifname_out, ifname_size, "%s", iface);
+                                return 0;
+                            }
+                        }
+                    }
+                    size_t astep = RTA_ALIGN(a->rta_len);
+                    if (astep > attr_rem) break;
+                    ap += astep;
+                    attr_rem -= astep;
+                }
+            }
+        }
+        off += step;
+        rem -= step;
+    }
+    return -1;
+}
+
+static int detect_via_udp_connect(const char *hs_iface,
+                                  int *ifindex_out,
+                                  char *ifname_out,
+                                  size_t ifname_size,
+                                  int *saw_excluded_out)
+{
+    if (saw_excluded_out) *saw_excluded_out = 0;
+
+    int fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0) return -1;
+
+    struct sockaddr_in dst;
+    memset(&dst, 0, sizeof(dst));
+    dst.sin_family      = AF_INET;
+    dst.sin_port        = htons(53);
+    dst.sin_addr.s_addr = htonl(0x08080808U); /* 8.8.8.8 — UDP connect 零发包 */
+
+    if (connect(fd, (struct sockaddr *)&dst, sizeof(dst)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    struct sockaddr_in local_sa;
+    memset(&local_sa, 0, sizeof(local_sa));
+    socklen_t slen = (socklen_t)sizeof(local_sa);
+    if (getsockname(fd, (struct sockaddr *)&local_sa, &slen) != 0 ||
+        local_sa.sin_family != AF_INET ||
+        local_sa.sin_addr.s_addr == 0U ||
+        (ntohl(local_sa.sin_addr.s_addr) >> 24) == 127U) {
+        close(fd);
+        return -1;
+    }
+
+    struct ifreq ifr_buf[64];
+    memset(ifr_buf, 0, sizeof(ifr_buf));
+    struct ifconf ifc;
+    memset(&ifc, 0, sizeof(ifc));
+    ifc.ifc_len = (int)sizeof(ifr_buf);
+    ifc.ifc_req = ifr_buf;
+
+    if (ioctl(fd, SIOCGIFCONF, &ifc) != 0 || ifc.ifc_len <= 0) {
+        close(fd);
+        return -1;
+    }
+    close(fd);
+
+    size_t n_ifr = (size_t)ifc.ifc_len / sizeof(struct ifreq);
+    for (size_t i = 0; i < n_ifr; i++) {
+        if (ifr_buf[i].ifr_addr.sa_family != AF_INET)
+            continue;
+        struct sockaddr_in *sa = (struct sockaddr_in *)&ifr_buf[i].ifr_addr;
+        if (sa->sin_addr.s_addr != local_sa.sin_addr.s_addr)
+            continue;
+
+        char iface[IFNAMSIZ];
+        snprintf(iface, sizeof(iface), "%.*s", IFNAMSIZ - 1, ifr_buf[i].ifr_name);
+        if (is_vpn_or_tunnel_iface(iface) ||
+            is_excluded_downstream_iface(iface, hs_iface)) {
+            fprintf(stderr, "[upstream] Tier1(udp): skipping iface '%s'\n", iface);
+            if (saw_excluded_out) *saw_excluded_out = 1;
+            return -1;
+        }
+        unsigned int idx = if_nametoindex(iface);
+        if (idx == 0U)
+            continue;
+        *ifindex_out = (int)idx;
+        snprintf(ifname_out, ifname_size, "%s", iface);
+        return 0;
+    }
+    return -1;
+}
+
+int upstream_detect_via_ip_route(int *ifindex_out,
+                                  char *ifname_out,
+                                  size_t ifname_size)
+{
+    if (!ifindex_out || !ifname_out || ifname_size < 2) return -1;
+
+    char hs_iface[IFNAMSIZ];
+    get_known_hs_iface(hs_iface);
+
+    int saw_excluded = 0;
+    if (detect_via_netlink_getroute(hs_iface, ifindex_out, ifname_out,
+                                    ifname_size, &saw_excluded) == 0) {
+        return 0;
+    }
+    if (saw_excluded) return -1;
+
+    if (detect_via_udp_connect(hs_iface, ifindex_out, ifname_out,
+                               ifname_size, &saw_excluded) == 0) {
+        return 0;
+    }
+    if (saw_excluded) return -1;
+
+    /* 仅当纯 C Netlink 与无发包 UDP 均失败时, 回退 /system/bin/ip */
+    char out[4096];
+    char *const cmd[] = { "/system/bin/ip", "route", "get", "8.8.8.8", NULL };
+    int n = hnc_run_cmd_timeout(cmd, out, sizeof(out), 500);
+    if (n <= 0) return -1;
+
+    int found = 0;
+    char *save = NULL;
+    for (char *line = strtok_r(out, "\n", &save); line != NULL;
+         line = strtok_r(NULL, "\n", &save)) {
+        const char *dev = strstr(line, " dev ");
+        if (!dev) continue;
+        dev += 5;
+
+        char iface[IFNAMSIZ] = {0};
+        int i = 0;
+        while (dev[i] && !isspace((unsigned char)dev[i]) && i < (int)sizeof(iface) - 1) {
+            iface[i] = dev[i];
+            i++;
+        }
+        if (i == 0) continue;
+
+        if (is_vpn_or_tunnel_iface(iface) ||
+            is_excluded_downstream_iface(iface, hs_iface)) {
+            fprintf(stderr, "[upstream] Tier1(ip): skipping iface '%s'\n", iface);
+            continue;
+        }
+
+        unsigned int idx = if_nametoindex(iface);
+        if (idx == 0) continue;
+
+        *ifindex_out = (int)idx;
+        snprintf(ifname_out, ifname_size, "%s", iface);
+        found = 1;
+        break;
+    }
+    return found ? 0 : -1;
+}
+
+/* ══════════════════════════════════════════════════════════
+ * Tier 2: /proc/net/route 扫描 (放宽条件)
+ * ══════════════════════════════════════════════════════════ */
+
 static int looks_like_uplink_iface(const char *name)
 {
     if (!name) return 0;
     char hs_iface[IFNAMSIZ];
     get_known_hs_iface(hs_iface);
-    if (hs_iface[0] != '\0' && strcmp(name, hs_iface) == 0)
+    if (is_excluded_downstream_iface(name, hs_iface))
         return 0;
-    if (strncmp(name, "wlan2", 5) == 0) return 0;
-    if (strncmp(name, "ap",    2) == 0) return 0;
-    if (strncmp(name, "swlan", 5) == 0) return 0;
 
-    if (strncmp(name, "rmnet", 5) == 0) return 1;
-    if (strncmp(name, "wwan",  4) == 0) return 1;
-    if (strncmp(name, "eth",   3) == 0) return 1;
-    if (strncmp(name, "ppp",   3) == 0) return 1;
-    if (strncmp(name, "wlan0", 5) == 0) return 1;
-    if (strncmp(name, "wlan1", 5) == 0) return 1;
+    if (strncmp(name, "rmnet",    5) == 0) return 1;
+    if (strncmp(name, "ccmni",    5) == 0) return 1;
+    if (strncmp(name, "sipa_eth", 8) == 0) return 1;
+    if (strncmp(name, "seth_",    5) == 0) return 1;
+    if (strncmp(name, "gti",      3) == 0) return 1;
+    if (strncmp(name, "wwan",     4) == 0) return 1;
+    if (strncmp(name, "eth",      3) == 0) return 1;
+    if (strncmp(name, "ppp",      3) == 0) return 1;
+    if (strcmp(name,  "wlan0")       == 0) return 1;
     return 0;
 }
 
@@ -393,6 +620,14 @@ int upstream_detect_via_bpf(int *ifindex_out,
         return -1;
     }
 
+    char hs_iface[IFNAMSIZ];
+    get_known_hs_iface(hs_iface);
+    if (is_vpn_or_tunnel_iface(name) ||
+        is_excluded_downstream_iface(name, hs_iface)) {
+        fprintf(stderr, "[upstream] Tier3: skipping excluded iface %s (oif=%u)\n", name, oif);
+        return -1;
+    }
+
     *ifindex_out = (int)oif;
     snprintf(ifname_out, ifname_size, "%s", name);
     fprintf(stderr, "[upstream] Tier3: found %s (ifindex=%d) via BPF upstream4_map\n",
@@ -438,6 +673,27 @@ int upstream_detect_via_limit_map(int *ifindex_out,
         return -1;
     }
 
+    /* 校验 limit_map key_size == 4, 防止魔改 ROM key_size > 4 导致栈溢出 */
+    struct bpf_map_info minfo;
+    memset(&minfo, 0, sizeof(minfo));
+    union bpf_attr iattr;
+    memset(&iattr, 0, sizeof(iattr));
+    iattr.info.bpf_fd   = (uint32_t)fd;
+    iattr.info.info_len = (uint32_t)sizeof(minfo);
+    iattr.info.info     = (uint64_t)(uintptr_t)&minfo;
+    if (_sys_bpf(BPF_OBJ_GET_INFO_BY_FD, &iattr, sizeof(iattr)) < 0) {
+        fprintf(stderr, "[upstream] Tier4: get_info failed: %s\n", strerror(errno));
+        close((int)fd);
+        return -1;
+    }
+    if (minfo.key_size != 4U) {
+        fprintf(stderr,
+                "[upstream] Tier4: incompatible limit_map key_size=%u (expected 4)\n",
+                minfo.key_size);
+        close((int)fd);
+        return -1;
+    }
+
     /* 遍历 limit_map, 收集所有 ifindex
      * limit_map key 是 u32 ifindex, value 是 u64 limit
      * 最多 16 个上游 (够覆盖 rmnet_data0..5, wlan0/1/2, eth0, tun0 等) */
@@ -478,7 +734,7 @@ int upstream_detect_via_limit_map(int *ifindex_out,
         prev_key = next_key;
         first = 0;
     }
-    close(fd);
+    close((int)fd);
 
     if (count == 0) {
         fprintf(stderr, "[upstream] Tier4: limit_map empty\n");
@@ -486,19 +742,23 @@ int upstream_detect_via_limit_map(int *ifindex_out,
     }
 
     /* 拿到 hotspot downstream ifindex (要跳过它) */
-    unsigned wlan2_idx = if_nametoindex("wlan2");
-    unsigned ap0_idx   = if_nametoindex("ap0");       /* 少数 ROM */
+    unsigned wlan1_idx  = if_nametoindex("wlan1");
+    unsigned wlan2_idx  = if_nametoindex("wlan2");
+    unsigned wlan3_idx  = if_nametoindex("wlan3");
+    unsigned ap0_idx    = if_nametoindex("ap0");
     unsigned swlan0_idx = if_nametoindex("swlan0");
     /* BUG-004: 也跳过已知热点接口的 ifindex */
     char hs_iface[IFNAMSIZ];
     get_known_hs_iface(hs_iface);
     unsigned hs_idx = hs_iface[0] ? if_nametoindex(hs_iface) : 0;
 
-    /* 找第一个非 downstream 的 ifindex */
+    /* 找第一个非 downstream / 非 VPN 的 ifindex */
     for (int i = 0; i < count; i++) {
         uint32_t idx = ifindexes[i];
         if (idx == 0) continue;
+        if (wlan1_idx && idx == wlan1_idx) continue;
         if (wlan2_idx && idx == wlan2_idx) continue;
+        if (wlan3_idx && idx == wlan3_idx) continue;
         if (ap0_idx && idx == ap0_idx) continue;
         if (swlan0_idx && idx == swlan0_idx) continue;
         if (hs_idx && idx == hs_idx) continue;
@@ -506,18 +766,9 @@ int upstream_detect_via_limit_map(int *ifindex_out,
         char name[IFNAMSIZ] = {0};
         if (if_indextoname(idx, name) == NULL) continue;
 
-        /* 再次检查是不是 downstream/VPN (按名字)
-         * 防 wlan2_idx 没查到但 idx 确实是 wlan2 的奇怪 case */
-        if (strncmp(name, "wlan2",  5) == 0) continue;
-        if (strncmp(name, "tun",    3) == 0) continue;
-        if (strncmp(name, "tap",    3) == 0) continue;
-        if (strncmp(name, "wg",     2) == 0) continue;
-        if (strncmp(name, "ppp",    3) == 0) continue;
-        if (strncmp(name, "ap",     2) == 0) continue;
-        if (strncmp(name, "swlan",  5) == 0) continue;
-        if (strncmp(name, "lo",     2) == 0) continue;
-        /* BUG-004: 排除已知热点接口 */
-        if (hs_iface[0] != '\0' && strcmp(name, hs_iface) == 0) continue;
+        if (is_vpn_or_tunnel_iface(name) ||
+            is_excluded_downstream_iface(name, hs_iface))
+            continue;
 
         *ifindex_out = (int)idx;
         snprintf(ifname_out, ifname_size, "%s", name);

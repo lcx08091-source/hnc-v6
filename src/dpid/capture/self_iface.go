@@ -34,12 +34,24 @@ import (
 	"strings"
 )
 
+var selfCellularPatterns = []*regexp.Regexp{
+	regexp.MustCompile(`^rmnet(_data)?\d+$`),
+	regexp.MustCompile(`^ccmni\d+$`),
+	regexp.MustCompile(`^wwan\d+$`),
+	regexp.MustCompile(`^sipa_eth\d+$`),
+	regexp.MustCompile(`^seth_[a-z]+\d+$`),
+	regexp.MustCompile(`^gti\d+$`),
+}
+
 // selfPositivePatterns: a name matches one of these → eligible (subject to
 // up/rx-bytes check).
 var selfPositivePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^rmnet(_data)?\d+$`),
 	regexp.MustCompile(`^ccmni\d+$`),
 	regexp.MustCompile(`^wwan\d+$`),
+	regexp.MustCompile(`^sipa_eth\d+$`),
+	regexp.MustCompile(`^seth_[a-z]+\d+$`),
+	regexp.MustCompile(`^gti\d+$`),
 	regexp.MustCompile(`^wlan0$`), // STA mode WiFi
 	regexp.MustCompile(`^eth\d+$`),
 	// v5.6.0-rc3: VPN tun interfaces. These carry decrypted in-app
@@ -56,8 +68,8 @@ var selfPositivePatterns = []*regexp.Regexp{
 }
 
 // selfNegativePatterns: name matches one of these → never picked, even if
-// up. These are virtual / loopback / AP-side. (VPN tun/vpn/wg/tailscale
-// moved to positives in rc3; see above.)
+// up. These are virtual / loopback / AP-side / downstream tethering. (VPN
+// tun/vpn/wg/tailscale moved to positives in rc3; see above.)
 var selfNegativePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^lo$`),
 	regexp.MustCompile(`^dummy\d*$`),
@@ -69,10 +81,20 @@ var selfNegativePatterns = []*regexp.Regexp{
 	regexp.MustCompile(`^gretap\d*$`),
 	regexp.MustCompile(`^docker\d*$`),
 	regexp.MustCompile(`^br-`),
+	regexp.MustCompile(`^ap_br_`),
 	regexp.MustCompile(`^ap\d*$`),
 	regexp.MustCompile(`^softap\d*$`),
 	regexp.MustCompile(`^swlan\d+$`),
+	regexp.MustCompile(`^wigig\d*$`),
+	regexp.MustCompile(`^rndis\d*$`),
+	regexp.MustCompile(`^ncm\d*$`),
+	regexp.MustCompile(`^bt-pan\d*$`),
+	regexp.MustCompile(`^p2p`),
 	regexp.MustCompile(`^wlan[1-9]\d*$`),
+}
+
+func isCellularSelfIface(name string) bool {
+	return matchAny(selfCellularPatterns, name)
 }
 
 // SelfIfaceCandidate describes one eligible self interface.
@@ -125,7 +147,7 @@ func DiscoverSelfCandidates(currentAP string) ([]SelfIfaceCandidate, error) {
 			OperState: st,
 			RxBytes:   rx,
 			IsWiFi:    strings.HasPrefix(name, "wlan") || strings.HasPrefix(name, "eth"),
-			IsCell:    strings.HasPrefix(name, "rmnet") || strings.HasPrefix(name, "ccmni") || strings.HasPrefix(name, "wwan"),
+			IsCell:    isCellularSelfIface(name),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].RxBytes > out[j].RxBytes })

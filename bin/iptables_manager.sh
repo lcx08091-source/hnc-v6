@@ -61,6 +61,11 @@
 #   缺点是无法限速"无对应上行连接的下行流量"（极罕见），可接受。
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 # rc30.13.1 cleanup: RULES_FILE 在此文件无引用. 子调用走 sh json_set.sh 自己拼路径.
 LOG=$HNC_DIR/logs/iptables.log
 
@@ -81,18 +86,38 @@ command -v hnc_dev_mark_hex >/dev/null 2>&1 || {
     hnc_dev_mark_hex() { printf '0x%08x\n' $(( 0x00800000 | ($1 << 16) )); }
 }
 
-IPT="iptables -w 2"
-IP6T="ip6tables -w 2"
+IPT=${HNC_IPT:-"iptables -w 2"}
+IP6T=${HNC_IP6T:-"ip6tables -w 2"}
+_IPT_RESOLVED=0
+_ipt_resolve() {
+    [ "$_IPT_RESOLVED" = "1" ] && return 0
+    _IPT_RESOLVED=1
+    if [ -z "${HNC_IPT:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+        iptables -w 2 -t filter -L -n >/dev/null 2>&1 || {
+            iptables -t filter -L -n >/dev/null 2>&1 && IPT="iptables"
+        }
+    fi
+    if [ -z "${HNC_IP6T:-}" ] && [ -z "${HNC_TEST_MODE:-}" ] && command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -w 2 -t filter -L -n >/dev/null 2>&1 || {
+            ip6tables -t filter -L -n >/dev/null 2>&1 && IP6T="ip6tables"
+        }
+    fi
+}
 
 # ═══════════════════════════════════════════════════════════════
-# 双栈抽象: 按需懒探测 IPv6 netfilter (消除每 5s stats_all 顶层白抢 xtables 锁!)
+# 双栈抽象: 按需懒探测并拆分 ipv6_mangle_ok / ipv6_filter_ok
+# 缺 ip6table_mangle 时仍允许 *filter 表 IPv6 黑名单/白名单/客户端隔离生效
 # ═══════════════════════════════════════════════════════════════
 _IPV6_PROBED=0
 IPV6_OK=0
-ipv6_ok() {
+_IPV6_FILTER_PROBED=0
+IPV6_FILTER_OK=0
+
+ipv6_mangle_ok() {
+    _ipt_resolve
     if [ "$_IPV6_PROBED" = "0" ]; then
         _IPV6_PROBED=1
-        if command -v ip6tables >/dev/null 2>&1 \
+        if command -v "${IP6T%% *}" >/dev/null 2>&1 \
             && $IP6T -t mangle -L -n >/dev/null 2>&1; then
             IPV6_OK=1
         else
@@ -102,22 +127,54 @@ ipv6_ok() {
     [ "$IPV6_OK" = "1" ]
 }
 
+ipv6_filter_ok() {
+    _ipt_resolve
+    if [ "$_IPV6_FILTER_PROBED" = "0" ]; then
+        _IPV6_FILTER_PROBED=1
+        if command -v "${IP6T%% *}" >/dev/null 2>&1 \
+            && $IP6T -t filter -L -n >/dev/null 2>&1; then
+            IPV6_FILTER_OK=1
+        else
+            IPV6_FILTER_OK=0
+        fi
+    fi
+    [ "$IPV6_FILTER_OK" = "1" ]
+}
+
+ipv6_ok() {
+    ipv6_mangle_ok
+}
+
+ipv6_table_ok() {
+    case "$1" in
+        filter) ipv6_filter_ok ;;
+        *)      ipv6_mangle_ok ;;
+    esac
+}
+
 ipt_dual() {
+    _ipt_resolve
+    local _tbl="filter"
+    [ "$1" = "-t" ] && _tbl=$2
     $IPT "$@"
     local r4=$?
-    if ipv6_ok; then
+    if ipv6_table_ok "$_tbl"; then
         $IP6T "$@" 2>/dev/null || true
     fi
     return $r4
 }
 
 ipt_dual_q() {
+    _ipt_resolve
+    local _tbl="filter"
+    [ "$1" = "-t" ] && _tbl=$2
     $IPT "$@" 2>/dev/null
-    ipv6_ok && $IP6T "$@" 2>/dev/null
+    ipv6_table_ok "$_tbl" && $IP6T "$@" 2>/dev/null
     return 0
 }
 
 ipt_del_all() {
+    _ipt_resolve
     local cmd=$1
     shift
     local i=0
@@ -129,54 +186,142 @@ ipt_del_all() {
 }
 
 ipt_dual_del_all() {
+    _ipt_resolve
+    local _tbl="filter"
+    [ "$1" = "-t" ] && _tbl=$2
     ipt_del_all "$IPT" "$@"
-    ipv6_ok && ipt_del_all "$IP6T" "$@"
+    ipv6_table_ok "$_tbl" && ipt_del_all "$IP6T" "$@"
     return 0
 }
 
 _ensure_chain() {
+    _ipt_resolve
     local table=$1 chain=$2
     $IPT -t "$table" -N "$chain" 2>/dev/null
     $IPT -t "$table" -F "$chain" 2>/dev/null
-    if ipv6_ok; then
+    if ipv6_table_ok "$table"; then
         $IP6T -t "$table" -N "$chain" 2>/dev/null
         $IP6T -t "$table" -F "$chain" 2>/dev/null
     fi
 }
 
 _ensure_link() {
+    _ipt_resolve
     local table=$1 parent=$2 child=$3 pos=${4:-1}
     $IPT -t "$table" -C "$parent" -j "$child" 2>/dev/null \
         || $IPT -t "$table" -I "$parent" "$pos" -j "$child"
-    if ipv6_ok; then
+    if ipv6_table_ok "$table"; then
         $IP6T -t "$table" -C "$parent" -j "$child" 2>/dev/null \
             || $IP6T -t "$table" -I "$parent" "$pos" -j "$child" 2>/dev/null
     fi
+}
+
+_ensure_postrouting_tail() {
+    _ipt_resolve
+    local _cmd="$1" _ch="$2" _del_n _k
+    if ! $_cmd -t mangle -C POSTROUTING -j "$_ch" 2>/dev/null; then
+        $_cmd -t mangle -A POSTROUTING -j "$_ch"
+        return $?
+    fi
+    _del_n=$($_cmd -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk -v ch="$_ch" '
+        $1 ~ /^[0-9]+$/ {
+            ln = $1 + 0
+            max_ln = ln
+            if ($2 == ch) { cnt++; eg_ln = ln }
+        }
+        END {
+            if (cnt > 0 && (cnt > 1 || eg_ln < max_ln)) printf "%d\n", cnt
+        }
+    ')
+    if [ -n "$_del_n" ]; then
+        _k=0
+        while [ "$_k" -lt "$_del_n" ]; do
+            $_cmd -t mangle -D POSTROUTING -j "$_ch" 2>/dev/null || break
+            _k=$((_k + 1))
+        done
+        $_cmd -t mangle -A POSTROUTING -j "$_ch"
+    fi
+}
+
+_heal_postrouting_before_save() {
+    _ipt_resolve
+    local _cmd="$1" _ch="$2" _del_n _k _save_ln
+    _del_n=$($_cmd -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk -v ch="$_ch" '
+        $1 ~ /^[0-9]+$/ {
+            ln = $1 + 0
+            if ($2 == "HNC_SAVE" && save_ln == 0) save_ln = ln
+            if ($2 == ch) { cnt++; max_ch = ln }
+        }
+        END {
+            if (cnt > 0 && save_ln > 0 && (max_ch > save_ln || cnt > 1)) printf "%d\n", cnt
+        }
+    ')
+    [ -n "$_del_n" ] || return 0
+    _k=0
+    while [ "$_k" -lt "$_del_n" ]; do
+        $_cmd -t mangle -D POSTROUTING -j "$_ch" 2>/dev/null || break
+        _k=$((_k + 1))
+    done
+    _save_ln=$($_cmd -t mangle -L POSTROUTING -n --line-numbers 2>/dev/null | awk '$1 ~ /^[0-9]+$/ && $2 == "HNC_SAVE" {print $1; exit}')
+    if [ -n "$_save_ln" ]; then
+        $_cmd -t mangle -I POSTROUTING "$_save_ln" -j "$_ch" 2>/dev/null \
+            || $_cmd -t mangle -A POSTROUTING -j "$_ch" 2>/dev/null
+    else
+        $_cmd -t mangle -A POSTROUTING -j "$_ch" 2>/dev/null
+    fi
+}
+
+# 检测是否存在活跃 VPN 口(tun+/wg+/utun+/sing_tun+)且系统或该接口显式设了 disable_ipv6=1
+_vpn_ipv6_disabled() {
+    local _sys_net="${HNC_SYS_NET:-/sys/class/net}"
+    local _proc_v6="${HNC_PROC_IPV6_CONF:-/proc/sys/net/ipv6/conf}"
+    local _d _ifn _oper _flags _dis_all _dis_if
+    _dis_all=$(cat "$_proc_v6/all/disable_ipv6" 2>/dev/null | tr -d ' \t\r\n')
+    for _d in "$_sys_net"/tun* "$_sys_net"/wg* "$_sys_net"/utun* "$_sys_net"/sing_tun*; do
+        [ -e "$_d" ] || continue
+        _ifn=${_d##*/}
+        _oper=$(cat "$_d/operstate" 2>/dev/null | tr -d ' \t\r\n')
+        [ "$_oper" = "down" ] && continue
+        _flags=$(cat "$_d/flags" 2>/dev/null | tr -d ' \t\r\n')
+        case "$_flags" in
+            0x*) [ $(( _flags & 1 )) -eq 0 ] && continue ;;
+        esac
+        _dis_if=$(cat "$_proc_v6/$_ifn/disable_ipv6" 2>/dev/null | tr -d ' \t\r\n')
+        if [ "$_dis_all" = "1" ] || [ "$_dis_if" = "1" ]; then
+            return 0
+        fi
+    done
+    return 1
 }
 
 # ═══════════════════════════════════════════════════════════════
 # 初始化所有链（v4 + v6）
 # ═══════════════════════════════════════════════════════════════
 init_chains() {
-    ipv6_ok >/dev/null 2>&1 || true
-    log "=== Init chains (ipv6=$IPV6_OK) ==="
+    ipv6_mangle_ok >/dev/null 2>&1 || true
+    ipv6_filter_ok >/dev/null 2>&1 || true
+    log "=== Init chains (ipv6_mangle=$IPV6_OK ipv6_filter=$IPV6_FILTER_OK) ==="
 
-    for mod in xt_CONNMARK xt_connmark xt_mark xt_mac xt_conntrack \
+    for mod in xt_CONNMARK xt_connmark xt_mark xt_mac xt_conntrack xt_TCPMSS \
                nf_conntrack nf_conntrack_ipv6 nf_defrag_ipv6 \
                ip6t_REJECT ip6t_mac; do
         modprobe "$mod" 2>/dev/null || true
     done
     echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true
-    echo 1 > /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || true
+    if _vpn_ipv6_disabled; then
+        log "Active VPN has disable_ipv6=1; skip enabling ipv6/conf/all/forwarding to prevent IPv6 leak"
+    else
+        echo 1 > /proc/sys/net/ipv6/conf/all/forwarding 2>/dev/null || true
+    fi
 
-    # ── HNC_PREROUTE_GUARD (mangle/PREROUTING): 策略路由护栏 ──
+    # ── HNC_PREROUTE_GUARD (mangle/PREROUTING): 清净高 16 位防 clsact 残留与代理碰撞 ──
     if $IPT -t mangle -S PREROUTING 2>/dev/null | grep -q 'HNC_RESTORE'; then
         ipt_dual_del_all -t mangle -D PREROUTING -j HNC_RESTORE
     fi
     _ensure_chain mangle HNC_PREROUTE_GUARD
     ipt_dual -t mangle -A HNC_PREROUTE_GUARD \
         -m mark --mark 0x00800000/0x00800000 \
-        -j MARK --set-xmark "0x0/${DEV_MARK_MASK}"
+        -j MARK --set-xmark 0x0/0xffff0000
     _ensure_link mangle PREROUTING HNC_PREROUTE_GUARD 1
 
     # ── HNC_RESTORE (mangle/FORWARD pos 1): CONNMARK → MARK ───
@@ -199,7 +344,7 @@ init_chains() {
     $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -A FORWARD -j HNC_STATS
-    if ipv6_ok; then
+    if ipv6_mangle_ok; then
         if ! $IP6T -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
             $IP6T -t mangle -N HNC_STATS 2>/dev/null
             rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
@@ -207,6 +352,30 @@ init_chains() {
         $IP6T -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
             || $IP6T -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
             || $IP6T -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
+    fi
+
+    # ── HNC_TCPMSS (mangle/FORWARD): 双栈 TCPMSS 钳制防 VPN/CLAT/PPPoE 握手卡死(缺模块容错跳过) ──
+    $IPT -t mangle -N HNC_TCPMSS 2>/dev/null || true
+    $IPT -t mangle -F HNC_TCPMSS 2>/dev/null || true
+    if $IPT -t mangle -A HNC_TCPMSS -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+        $IPT -t mangle -C FORWARD -j HNC_TCPMSS 2>/dev/null \
+            || $IPT -t mangle -I FORWARD 4 -j HNC_TCPMSS 2>/dev/null \
+            || $IPT -t mangle -A FORWARD -j HNC_TCPMSS 2>/dev/null || true
+    else
+        ipt_del_all "$IPT" -t mangle -D FORWARD -j HNC_TCPMSS
+        $IPT -t mangle -X HNC_TCPMSS 2>/dev/null || true
+    fi
+    if ipv6_mangle_ok; then
+        $IP6T -t mangle -N HNC_TCPMSS 2>/dev/null || true
+        $IP6T -t mangle -F HNC_TCPMSS 2>/dev/null || true
+        if $IP6T -t mangle -A HNC_TCPMSS -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null; then
+            $IP6T -t mangle -C FORWARD -j HNC_TCPMSS 2>/dev/null \
+                || $IP6T -t mangle -I FORWARD 4 -j HNC_TCPMSS 2>/dev/null \
+                || $IP6T -t mangle -A FORWARD -j HNC_TCPMSS 2>/dev/null || true
+        else
+            ipt_del_all "$IP6T" -t mangle -D FORWARD -j HNC_TCPMSS
+            $IP6T -t mangle -X HNC_TCPMSS 2>/dev/null || true
+        fi
     fi
 
     # ── HNC_SAVE (mangle/POSTROUTING pos 1): MARK → CONNMARK ──
@@ -217,17 +386,22 @@ init_chains() {
         --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
     _ensure_link mangle POSTROUTING HNC_SAVE 1
 
-    # ── HNC_EGRESS_FIX (mangle/POSTROUTING tail): 修复 bw_mangle 冲刷 ──
+    # ── HNC_EGRESS_FIX (mangle/POSTROUTING tail): 修复 bw_mangle 冲刷并保护多蜂窝/VPN 出向 mark ──
     _ensure_chain mangle HNC_EGRESS_FIX
+    for _eg_if in ccmni+ sipa_eth+ seth_+ gti+ wwan+ v4-+ clat+ tun+ wg+ tailscale+ utun+; do
+        ipt_dual -t mangle -A HNC_EGRESS_FIX -o "$_eg_if" -j RETURN
+    done
     ipt_dual -t mangle -A HNC_EGRESS_FIX \
         ! -o rmnet+ -m connmark --mark 0x00800000/0x00800000 \
         -j CONNMARK --restore-mark \
         --nfmask "$CONNMARK_MASK" --ctmask "$CONNMARK_MASK"
-    $IPT -t mangle -C POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null \
-        || $IPT -t mangle -A POSTROUTING -j HNC_EGRESS_FIX
-    if ipv6_ok; then
-        $IP6T -t mangle -C POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null \
-            || $IP6T -t mangle -A POSTROUTING -j HNC_EGRESS_FIX 2>/dev/null
+    for _pr_ch in HNC_APP_LIMIT_DOWN HNC_APP_QOS; do
+        _heal_postrouting_before_save "$IPT" "$_pr_ch"
+        ipv6_mangle_ok && _heal_postrouting_before_save "$IP6T" "$_pr_ch" 2>/dev/null || true
+    done
+    _ensure_postrouting_tail "$IPT" HNC_EGRESS_FIX
+    if ipv6_mangle_ok; then
+        _ensure_postrouting_tail "$IP6T" HNC_EGRESS_FIX 2>/dev/null || true
     fi
 
     # ── HNC_CTRL (filter/FORWARD): 黑名单 DROP ───────────────
@@ -404,7 +578,7 @@ blacklist_add() {
         -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null \
         || $IPT -t filter -I HNC_CTRL 1 -m mac --mac-source "$mac" -p tcp -j DROP
 
-    if ipv6_ok; then
+    if ipv6_filter_ok; then
         $IP6T -t filter -I HNC_CTRL 1 -m mac --mac-source "$mac" \
             -p tcp -j REJECT --reject-with tcp-reset 2>/dev/null \
             || $IP6T -t filter -I HNC_CTRL 1 -m mac --mac-source "$mac" -p tcp -j DROP 2>/dev/null
@@ -454,8 +628,9 @@ whitelist_mode_on() {
 }
 
 whitelist_mode_off() {
+    _ipt_resolve
     $IPT -t filter -F HNC_WHITELIST 2>/dev/null
-    ipv6_ok && $IP6T -t filter -F HNC_WHITELIST 2>/dev/null
+    ipv6_filter_ok && $IP6T -t filter -F HNC_WHITELIST 2>/dev/null
     log "Whitelist mode OFF"
 }
 
@@ -523,6 +698,7 @@ stats_unlock() {
 #   - 缺则 -A 补齐(保住已有规则的累计字节, 不因重设限速清零);
 #   - 若历史竞态留下了 >1 条同向重复规则, 仅裁掉多余副本保留 1 条。
 _ensure_v4_stats_ip() {
+    _ipt_resolve
     local ip=$1 _cnt _extra
     [ -z "$ip" ] && return 1
     $IPT -t mangle -L HNC_STATS -n >/dev/null 2>&1 || $IPT -t mangle -N HNC_STATS 2>/dev/null
@@ -554,6 +730,7 @@ _ensure_v4_stats_ip() {
 # 双栈清理所有链 + 解绑所有 builtin 跳转
 # ═══════════════════════════════════════════════════════════════
 cleanup() {
+    _ipt_resolve
     log "Cleanup all HNC rules..."
 
     # 解除 builtin 链上的 jump（v4+v6 双栈，循环 -D 清除可能的历史重复挂载）
@@ -563,6 +740,7 @@ cleanup() {
         "mangle FORWARD     HNC_RESTORE" \
         "mangle FORWARD     HNC_MARK"    \
         "mangle FORWARD     HNC_STATS"   \
+        "mangle FORWARD     HNC_TCPMSS"  \
         "mangle POSTROUTING HNC_SAVE"    \
         "mangle POSTROUTING HNC_EGRESS_FIX" \
         "filter FORWARD     HNC_CTRL"    \
@@ -573,7 +751,7 @@ cleanup() {
     done
 
     # flush + delete 所有用户链（v4）
-    for chain in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE HNC_EGRESS_FIX; do
+    for chain in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_TCPMSS HNC_SAVE HNC_EGRESS_FIX; do
         $IPT -t mangle -F "$chain" 2>/dev/null
         $IPT -t mangle -X "$chain" 2>/dev/null
     done
@@ -582,19 +760,21 @@ cleanup() {
         $IPT -t filter -X "$chain" 2>/dev/null
     done
 
-    # flush + delete 所有用户链（v6，含 HNC_STATS）
-    if ipv6_ok; then
-        for chain in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_SAVE HNC_EGRESS_FIX; do
+    # flush + delete 所有用户链（v6，mangle 与 filter 独立判断）
+    if ipv6_mangle_ok; then
+        for chain in HNC_PREROUTE_GUARD HNC_RESTORE HNC_MARK HNC_STATS HNC_TCPMSS HNC_SAVE HNC_EGRESS_FIX; do
             $IP6T -t mangle -F "$chain" 2>/dev/null
             $IP6T -t mangle -X "$chain" 2>/dev/null
         done
+    fi
+    if ipv6_filter_ok; then
         for chain in HNC_CTRL HNC_ISOLATE HNC_WHITELIST; do
             $IP6T -t filter -F "$chain" 2>/dev/null
             $IP6T -t filter -X "$chain" 2>/dev/null
         done
     fi
     # 兜底回收应用限速与应用 QoS 孤儿链
-    for _T in "$IPT" "$(ipv6_ok && echo "$IP6T")"; do
+    for _T in "$IPT" "$(ipv6_mangle_ok && echo "$IP6T")"; do
         [ -z "$_T" ] && continue
         for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_QOS_MARK; do
             for _k in 1 2 3 4; do $_T -t mangle -D FORWARD -j "$_ac" 2>/dev/null || break; done
@@ -602,14 +782,17 @@ cleanup() {
         for _ac in HNC_APP_LIMIT_DOWN HNC_APP_QOS; do
             for _k in 1 2 3 4; do $_T -t mangle -D POSTROUTING -j "$_ac" 2>/dev/null || break; done
         done
-        for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j HNC_QUIC_APPLIM 2>/dev/null || break; done
-        $_T -t filter -F HNC_QUIC_APPLIM 2>/dev/null || true
-        $_T -t filter -X HNC_QUIC_APPLIM 2>/dev/null || true
         for _ac in HNC_APP_LIMIT HNC_APP_LIMIT_UP HNC_APP_LIMIT_DOWN HNC_APP_QOS HNC_APP_QOS_IP HNC_APP_QOS_MARK \
                    $($_T -t mangle -S 2>/dev/null | awk '/^-N HNC_AL_C[0-9]+$/{print $2}'); do
             $_T -t mangle -F "$_ac" 2>/dev/null || true
             $_T -t mangle -X "$_ac" 2>/dev/null || true
         done
+    done
+    for _T in "$IPT" "$(ipv6_filter_ok && echo "$IP6T")"; do
+        [ -z "$_T" ] && continue
+        for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j HNC_QUIC_APPLIM 2>/dev/null || break; done
+        $_T -t filter -F HNC_QUIC_APPLIM 2>/dev/null || true
+        $_T -t filter -X HNC_QUIC_APPLIM 2>/dev/null || true
     done
     rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
     rm -rf "$HNC_DIR/run/stats_v6.lock" 2>/dev/null
@@ -659,8 +842,9 @@ function canon_ip6(raw,    s, hal, nl, nr, L, R, z, out, i, h) {
 '
 
 _ip6_stats_dump() {
+    _ipt_resolve
     [ "$_IPV6_PROBED" = "1" ] && [ "$IPV6_OK" = "0" ] && return 0
-    command -v ip6tables >/dev/null 2>&1 || return 0
+    command -v "${IP6T%% *}" >/dev/null 2>&1 || return 0
     $IP6T -t mangle -L HNC_STATS -nvx 2>/dev/null | awk "$_IP6_CANON_AWK"'
     $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ && $3 == "RETURN" {
         b = $2 + 0
@@ -690,6 +874,8 @@ _ip6_stats_dump() {
 }
 
 ensure_stats_online() {
+    _ipt_resolve
+    local devices_flat="$HNC_DIR/run/devices.flat"
     local devices_file="$HNC_DIR/data/devices.json"
     local v6_map="$HNC_DIR/run/stats_v6_map"
     local v6_ret="$HNC_DIR/run/stats_v6_retired"
@@ -702,7 +888,7 @@ ensure_stats_online() {
     $IPT -t mangle -C FORWARD -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
         || $IPT -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
-    if ipv6_ok; then
+    if ipv6_mangle_ok; then
         if ! $IP6T -t mangle -L HNC_STATS -n >/dev/null 2>&1; then
             $IP6T -t mangle -N HNC_STATS 2>/dev/null
             rm -f "$v6_map" "$v6_ret" 2>/dev/null
@@ -711,30 +897,48 @@ ensure_stats_online() {
             || $IP6T -t mangle -I FORWARD 3 -j HNC_STATS 2>/dev/null \
             || $IP6T -t mangle -A FORWARD -j HNC_STATS 2>/dev/null
     fi
-    if [ ! -s "$devices_file" ]; then
-        stats_unlock
-        return 0
-    fi
-    # 校验 devices.json 为完整闭合 JSON: 避免半写/截断瞬间误判全部设备离线;
-    # 若为合法空对象 "{}"(最后一台客户端已离线满 90s), 允许继续执行双栈离线清场!
-    local _trimmed_first _trimmed_last _json_valid=0
-    _trimmed_first=$(tr -d ' \t\r\n' < "$devices_file" 2>/dev/null | cut -c1)
-    _trimmed_last=$(tr -d ' \t\r\n' < "$devices_file" 2>/dev/null | awk '{print substr($0, length($0), 1)}')
-    [ "$_trimmed_first" = "{" ] && [ "$_trimmed_last" = "}" ] && _json_valid=1
-    if [ "$_json_valid" != "1" ]; then
-        stats_unlock
-        return 0
-    fi
 
     local online_tmp="$HNC_DIR/run/.stats_online.$$"
     local mac_tmp="$HNC_DIR/run/.stats_mac.$$"
     local on_macs_tmp="$HNC_DIR/run/.stats_onmac.$$"
-    grep -oE '"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$devices_file" 2>/dev/null | \
-    while IFS= read -r blk; do
-        m=$(printf '%s' "$blk" | sed -nE 's/^"([0-9a-fA-F:]{17})".*/\1/p' | tr 'A-F' 'a-f')
-        ip=$(printf '%s' "$blk" | sed -nE 's/.*"ip"[[:space:]]*:[[:space:]]*"([0-9.]+)".*/\1/p')
-        [ -n "$m" ] && [ -n "$ip" ] && printf '%s %s\n' "$ip" "$m"
-    done > "$mac_tmp"
+    : > "$mac_tmp"
+    if [ -s "$devices_flat" ]; then
+        awk -F'[ \t|]+' '
+            /^[[:space:]]*#/ || NF < 2 { next }
+            {
+                m = ""; ip = ""
+                for (i = 1; i <= NF; i++) {
+                    if (m == "" && $i ~ /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/) m = tolower($i)
+                    else if (ip == "" && $i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) ip = $i
+                }
+                if (m != "" && ip != "") printf "%s %s\n", ip, m
+            }
+        ' "$devices_flat" 2>/dev/null > "$mac_tmp"
+    fi
+    if [ ! -s "$mac_tmp" ]; then
+        if [ ! -s "$devices_file" ]; then
+            rm -f "$online_tmp" "$mac_tmp" "$on_macs_tmp" 2>/dev/null
+            stats_unlock
+            return 0
+        fi
+        # 校验 devices.json 为完整闭合 JSON: 避免半写/截断瞬间误判全部设备离线;
+        # 若为合法空对象 "{}"(最后一台客户端已离线满 90s), 允许继续执行双栈离线清场!
+        local _trimmed_first _trimmed_last _json_valid=0
+        _trimmed_first=$(tr -d ' \t\r\n' < "$devices_file" 2>/dev/null | cut -c1)
+        _trimmed_last=$(tr -d ' \t\r\n' < "$devices_file" 2>/dev/null | awk '{print substr($0, length($0), 1)}')
+        [ "$_trimmed_first" = "{" ] && [ "$_trimmed_last" = "}" ] && _json_valid=1
+        if [ "$_json_valid" != "1" ]; then
+            rm -f "$online_tmp" "$mac_tmp" "$on_macs_tmp" 2>/dev/null
+            stats_unlock
+            return 0
+        fi
+        grep -oE '"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$devices_file" 2>/dev/null | \
+        while IFS= read -r blk; do
+            m=$(printf '%s' "$blk" | sed -nE 's/^"([0-9a-fA-F:]{17})".*/\1/p' | tr 'A-F' 'a-f')
+            ip=$(printf '%s' "$blk" | sed -nE 's/.*"ip"[[:space:]]*:[[:space:]]*"([0-9.]+)".*/\1/p')
+            [ -n "$m" ] && [ -n "$ip" ] && printf '%s %s\n' "$ip" "$m"
+        done > "$mac_tmp"
+    fi
     awk '{print $2}' "$mac_tmp" | sort -u > "$on_macs_tmp"
     if [ -s "$mac_tmp" ]; then
         awk '{print $1}' "$mac_tmp" | sort -u > "$online_tmp"
@@ -748,7 +952,7 @@ ensure_stats_online() {
         _ensure_v4_stats_ip "$ip"
     done < "$online_tmp"
 
-    # 合法 JSON 下(含 "{}" 全员离线): 清理已离线 IPv4 计数规则
+    # 合法数据源下(含 "{}" 全员离线): 清理已离线 IPv4 计数规则
     $IPT -t mangle -S HNC_STATS 2>/dev/null \
         | awk '/-j RETURN/{for(i=1;i<=NF;i++) if($i=="-s"||$i=="-d"){t=$(i+1); sub(/\/32$/,"",t); print t}}' \
         | sort -u | while IFS= read -r ip; do
@@ -763,8 +967,8 @@ ensure_stats_online() {
     #   2) 在线设备过期的 RFC 4941 临时地址: 先把内核字节结转累加至 stats_v6_retired[mac], 再删 -d 规则, 零漏计零泄漏;
     #   3) 已离线设备(不在 on_macs_tmp): 同步删除 -m mac 与其名下全部 -d <ip6>/128 规则, 并清空 stats_v6_map/stats_v6_retired,
     #      保证 v4+v6 同步归零, 杜绝重连时 cur<prev 非对称残留引发 limit_policy 重复扣减配额!
-    if ipv6_ok; then
-        local iface neigh_tmp d6_now act_d6_tmp del_d6_tmp _cnt _extra
+    if ipv6_mangle_ok; then
+        local iface neigh_tmp d6_now act_d6_tmp del_d6_tmp _cnt _extra _n6_raw
         iface=$(cat "$HNC_DIR/run/iface.cache" 2>/dev/null | tr -d '\r\n ')
         [ -z "$iface" ] && iface=$(sh "$HNC_DIR/bin/device_detect.sh" iface 2>/dev/null | tr -d '\r\n ')
 
@@ -791,14 +995,17 @@ ensure_stats_online() {
             ipt_del_all "$IP6T" -t mangle -D HNC_STATS -m mac --mac-source "$m" -j RETURN
         done
 
-        # 2) 采集当前活跃的全局/ULA IPv6 邻居(仅限在线 MAC)
+        # 2) 采集当前活跃的全局/ULA IPv6 邻居(仅限在线 MAC; ip -6 neigh 失败时回退 ip neigh)
         neigh_tmp="$HNC_DIR/run/.stats_n6.$$"
         act_d6_tmp="$HNC_DIR/run/.stats_act6.$$"
         del_d6_tmp="$HNC_DIR/run/.stats_del6.$$"
         d6_now="$HNC_DIR/run/.stats_d6now.$$"
         : > "$neigh_tmp"
         if [ -n "$iface" ] && [ -s "$on_macs_tmp" ]; then
-            ip -6 neigh show dev "$iface" 2>/dev/null | awk -v onf="$on_macs_tmp" "$_IP6_CANON_AWK"'
+            if ! _n6_raw=$(ip -6 neigh show dev "$iface" 2>/dev/null) || { [ -z "$_n6_raw" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+                _n6_raw=$(ip neigh show dev "$iface" 2>/dev/null)
+            fi
+            printf '%s\n' "$_n6_raw" | awk -v onf="$on_macs_tmp" "$_IP6_CANON_AWK"'
             BEGIN { while ((getline m < onf) > 0) if (m != "") on[m] = 1; close(onf) }
             $1 ~ /:/ {
                 a = tolower($1)
@@ -915,6 +1122,8 @@ ensure_stats_online() {
 }
 
 stats_all() {
+    _ipt_resolve
+    local devices_flat="$HNC_DIR/run/devices.flat"
     local devices_file="$HNC_DIR/data/devices.json"
     local v6_map="$HNC_DIR/run/stats_v6_map"
     local v6_ret="$HNC_DIR/run/stats_v6_retired"
@@ -924,7 +1133,21 @@ stats_all() {
     $IPT -t mangle -L HNC_STATS -nvx 2>/dev/null > "$d4_tmp"
     _ip6_stats_dump > "$d6_tmp"
     : > "$map_tmp"
-    if [ -f "$devices_file" ]; then
+    # 优先读取 run/devices.flat 快路径(避免每轮正则切片 JSON), 缺失或无记录时回退 devices.json
+    if [ -s "$devices_flat" ]; then
+        awk -F'[ \t|]+' '
+            /^[[:space:]]*#/ || NF < 2 { next }
+            {
+                m = ""; ip = ""
+                for (i = 1; i <= NF; i++) {
+                    if (m == "" && $i ~ /^([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}$/) m = tolower($i)
+                    else if (ip == "" && $i ~ /^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$/) ip = $i
+                }
+                if (m != "" && ip != "") printf "%s %s\n", ip, m
+            }
+        ' "$devices_flat" 2>/dev/null > "$map_tmp"
+    fi
+    if [ ! -s "$map_tmp" ] && [ -f "$devices_file" ]; then
         grep -oE '"([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}"[[:space:]]*:[[:space:]]*\{[^}]*\}' "$devices_file" 2>/dev/null | \
         while IFS= read -r blk; do
             m=$(printf '%s' "$blk" | sed -nE 's/^"([0-9a-fA-F:]{17})".*/\1/p' | tr 'A-F' 'a-f')
@@ -1076,8 +1299,9 @@ case "$1" in
     # ═══ 客户端隔离与统计 ════════════════════════════════════
     set_isolation)
         gate_lock || exit 11
+        _ipt_resolve
         _iso_if=$2; _iso_on=$3
-        for _T in "$IPT" "$(ipv6_ok && echo "$IP6T")"; do
+        for _T in "$IPT" "$(ipv6_filter_ok && echo "$IP6T")"; do
             [ -z "$_T" ] && continue
             for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j HNC_ISOLATE 2>/dev/null || break; done
             $_T -t filter -F HNC_ISOLATE 2>/dev/null || true
@@ -1106,10 +1330,11 @@ case "$1" in
             _ipt_ver=$(sed -n '/^version=/{s/^version=//p;q;}' "$_ipt_p" 2>/dev/null | tr -d ' \t\r\n"')
             [ -n "$_ipt_p" ] && [ -n "$_ipt_ver" ] && break
         done
-        ipv6_ok >/dev/null 2>&1 || true
+        ipv6_mangle_ok >/dev/null 2>&1 || true
+        ipv6_filter_ok >/dev/null 2>&1 || true
         echo "HNC ${_ipt_ver:-v6.1} 双栈支持（IPv4 + IPv6 · 保护低 16 位 netd 路由 netId）"
         echo "支持 ensure_stats_online / stats_all 双栈流量统计与 gate/mac 原子锁"
-        echo "运行时检测：IPV6_OK=$IPV6_OK"
+        echo "运行时检测：IPV6_OK=$IPV6_OK (filter=$IPV6_FILTER_OK)"
         echo ""
         echo "验证命令："
         echo "  $IPT  -t mangle -L HNC_MARK    -nv    # v4 MARK 规则"

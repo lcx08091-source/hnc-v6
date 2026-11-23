@@ -19,17 +19,26 @@
 #      变成 system_data_file, ColorOS 16 / SukiSU 上 Go fork+exec 报 EPERM(rc30.11, 真机
 #      RMX5010 实测); 模块目录先修好, cp 出来的权限就对。
 
-[ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:/data/local/hnc/bin:$PATH
-
 MODE=$1
 MODDIR=$2
 HNC_DIR=$3
+
+_he_loaded=0
+for _he in "${MODDIR:-}/bin/hnc_env.sh" "${HNC_DIR:-/data/local/hnc}/bin/hnc_env.sh" "${0%/*}/hnc_env.sh"; do
+    case "$_he" in /bin/hnc_env.sh) continue ;; esac
+    if [ -f "$_he" ]; then . "$_he"; _he_loaded=1; break; fi
+done
+if [ "$_he_loaded" = "0" ] && [ -z "${HNC_SKIP_PATH_HARDENING:-}" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+    export PATH="/system/bin:/system/xbin:/vendor/bin:/apex/com.android.runtime/bin:${PATH:-}:/data/adb/ksu/bin:/data/adb/ap/bin:/data/adb/magisk:/data/local/hnc/bin"
+fi
+unset _he _he_loaded
+
 case "$MODE" in sync|perms) ;; *) echo "usage: $0 sync|perms <MODDIR> <HNC_DIR>" >&2; exit 2 ;; esac
 [ -d "$MODDIR" ] && [ -n "$HNC_DIR" ] || { echo "usage: $0 $MODE <MODDIR> <HNC_DIR>" >&2; exit 2; }
 RUN="$HNC_DIR/run"
 
-# 原生二进制(无 .sh 后缀, 不被 *.sh 的 chmod 覆盖)。hnc_httpd 在 daemon/hnc_httpd/ 单独处理。
-NATIVE_BINS="hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_json hnc_dpid hnc_watchdog hnc_launcher fork_probe hnc_clsact_ctl"
+# 原生二进制(无 .sh 后缀, 不被 *.sh 的 chmod 覆盖; 纯脚本 hnc_json 单独 chmod 755 不混入原生清单)。
+NATIVE_BINS="hotspotd hnc_ipc hnc_tc_ingress mdns_resolve hnc_dpid hnc_watchdog hnc_launcher fork_probe hnc_clsact_ctl"
 
 fix_exec() {
     [ -f "$1" ] || return 0
@@ -40,7 +49,15 @@ fix_exec() {
 fix_perms() {
     for _dir in "$MODDIR/bin" "$HNC_DIR/bin"; do
         [ -d "$_dir" ] || continue
-        chmod 755 "$_dir"/*.sh 2>/dev/null
+        chmod 755 "$_dir"/*.sh 2>/dev/null || true
+        [ -f "$_dir/hnc_json" ] && chmod 755 "$_dir/hnc_json" 2>/dev/null || true
+        if [ -d "$_dir/diag" ]; then
+            chmod 755 "$_dir/diag" 2>/dev/null || true
+            for _df in "$_dir/diag"/*; do
+                [ -f "$_df" ] || continue
+                chmod 755 "$_df" 2>/dev/null || true
+            done
+        fi
         for _b in $NATIVE_BINS; do fix_exec "$_dir/$_b"; done
     done
     fix_exec "$HNC_DIR/bin/.hnc_mc"
@@ -66,6 +83,9 @@ if [ -f "$MODDIR/module.prop" ]; then
     chmod 644 "$HNC_DIR/module.prop" 2>/dev/null || true
 fi
 
+_first_tok() { set -- $1; printf '%s' "${1:-}"; }
+_first_two_tok() { set -- $1; printf '%s:%s' "${1:-}" "${2:-}"; }
+
 H_MOD="$MODDIR/daemon/hnc_httpd/hnc_httpd"
 H_RUN="$HNC_DIR/daemon/hnc_httpd/hnc_httpd"
 _need_httpd=0
@@ -75,23 +95,60 @@ elif [ ! -s "$H_RUN" ]; then
     _need_httpd=1
 elif command -v cmp >/dev/null 2>&1; then
     cmp -s "$H_MOD" "$H_RUN" 2>/dev/null || _need_httpd=1
+elif command -v sha256sum >/dev/null 2>&1; then
+    _s_mod=$(_first_tok "$(sha256sum "$H_MOD" 2>/dev/null)")
+    _s_run=$(_first_tok "$(sha256sum "$H_RUN" 2>/dev/null)")
+    if [ -z "$_s_mod" ] || [ "$_s_mod" != "$_s_run" ]; then
+        _need_httpd=1
+    fi
+elif command -v cksum >/dev/null 2>&1; then
+    _c_mod=$(_first_two_tok "$(cksum "$H_MOD" 2>/dev/null)")
+    _c_run=$(_first_two_tok "$(cksum "$H_RUN" 2>/dev/null)")
+    if [ "$_c_mod" = ":" ] || [ "$_c_mod" != "$_c_run" ]; then
+        _need_httpd=1
+    fi
 else
-    echo "runtime sync WARN: cmp unavailable, keeping existing $H_RUN"
+    echo "runtime sync WARN: cmp/sha256sum/cksum unavailable, forcing refresh of $H_RUN"
+    _need_httpd=1
 fi
 if [ "$_need_httpd" = "1" ]; then
     _h_tmp="$H_RUN.new.$$"
     if cp -f "$H_MOD" "$_h_tmp" 2>/dev/null && [ -s "$_h_tmp" ]; then
         fix_exec "$_h_tmp"
-        # 旧 httpd 还在跑就先停(占着 8444, 新进程起不来)。只认 pidfile 里确是 hnc_httpd 的 pid,
-        # 再兜底 pidof(手动重启时 pidfile 可能已被删)。
+        # 旧 httpd 还在跑就先停(占着 8444, 新进程起不来)。
+        # 严格校验 comm 与 argv[0] 基底名为 hnc_httpd 且排除 $$/$PPID; 沙箱模式下仅读沙箱 pidfile, 绝不扫宿主机 /proc。
+        _is_real_httpd_pid() {
+            _irp="$1"
+            case "$_irp" in ''|*[!0-9]*) return 1 ;; esac
+            [ "$_irp" = "$$" ] && return 1
+            [ -n "${PPID:-}" ] && [ "$_irp" = "$PPID" ] && return 1
+            [ -r "/proc/$_irp/cmdline" ] || return 1
+            if [ -r "/proc/$_irp/comm" ]; then
+                _irc=$(tr -d '\r\n' < "/proc/$_irp/comm" 2>/dev/null)
+                [ "$_irc" = "hnc_httpd" ] || return 1
+            fi
+            _ira0=$(tr '\000' '\n' < "/proc/$_irp/cmdline" 2>/dev/null | head -n 1)
+            [ "${_ira0##*/}" = "hnc_httpd" ]
+        }
         _old=""
         if [ -f "$RUN/httpd.pid" ]; then
             _old=$(tr -d ' \r\n' < "$RUN/httpd.pid" 2>/dev/null)
-            case "$_old" in ''|*[!0-9]*) _old="" ;; esac
-            [ -n "$_old" ] && ! tr '\000' ' ' < "/proc/$_old/cmdline" 2>/dev/null | grep -q 'hnc_httpd' && _old=""
+            _is_real_httpd_pid "$_old" || _old=""
         fi
-        for _p in $_old $(pidof hnc_httpd 2>/dev/null); do
-            kill -9 "$_p" 2>/dev/null && echo "runtime sync: stopped old hnc_httpd pid=$_p"
+        _proc_httpds=""
+        if [ "${HNC_DIR:-/data/local/hnc}" = "/data/local/hnc" ] && [ -z "${HNC_TEST_MODE:-}" ]; then
+            for _pd in /proc/[0-9]*; do
+                [ -r "$_pd/cmdline" ] || continue
+                _pp=${_pd##*/}
+                _is_real_httpd_pid "$_pp" && _proc_httpds="$_proc_httpds $_pp"
+            done
+            for _pp in $(pidof hnc_httpd 2>/dev/null); do
+                _is_real_httpd_pid "$_pp" || continue
+                case " $_proc_httpds " in *" $_pp "*) ;; *) _proc_httpds="$_proc_httpds $_pp" ;; esac
+            done
+        fi
+        for _p in $_old $_proc_httpds; do
+            [ -n "$_p" ] && kill -9 "$_p" 2>/dev/null && echo "runtime sync: stopped old hnc_httpd pid=$_p"
         done
         rm -f "$RUN/httpd.pid" 2>/dev/null
         if mv -f "$_h_tmp" "$H_RUN" 2>/dev/null; then

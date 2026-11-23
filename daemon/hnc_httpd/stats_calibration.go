@@ -757,20 +757,22 @@ func calParseBootTime(stat string) int64 {
 	return 0
 }
 
-// calEarliestDay run/ 下最早的 phone_usage 日文件
+// calEarliestDay data/ 与旧 run/ 下最早的 phone_usage 日文件
 func calEarliestDay(hncDir string) string {
-	files, _ := filepath.Glob(filepath.Join(hncDir, "run", "phone_usage.*.json"))
 	best := ""
-	for _, f := range files {
-		d := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(f), "phone_usage."), ".json")
-		if len(d) != 8 {
-			continue
-		}
-		if _, err := strconv.Atoi(d); err != nil {
-			continue
-		}
-		if best == "" || d < best {
-			best = d
+	for _, sub := range []string{"data", "run"} {
+		files, _ := filepath.Glob(filepath.Join(hncDir, sub, "phone_usage.*.json"))
+		for _, f := range files {
+			d := strings.TrimSuffix(strings.TrimPrefix(filepath.Base(f), "phone_usage."), ".json")
+			if len(d) != 8 {
+				continue
+			}
+			if _, err := strconv.Atoi(d); err != nil {
+				continue
+			}
+			if best == "" || d < best {
+				best = d
+			}
 		}
 	}
 	return best
@@ -835,6 +837,19 @@ func (c *calibrator) result() *calResult {
 	return &r
 }
 
+// calRunIptWithFallback 执行 iptables/ip6tables 三级兼容回退: `-w 2` -> `-w` -> 裸调(适配不支持 -w 秒数或不支持 -w 的旧版 xtables)。
+func calRunIptWithFallback(run func(time.Duration, string, ...string) (string, error), timeout time.Duration, bin string, args ...string) (string, error) {
+	out, err := run(timeout, bin, append([]string{"-w", "2"}, args...)...)
+	if err == nil || errors.Is(err, os.ErrNotExist) || errors.Is(err, context.DeadlineExceeded) {
+		return out, err
+	}
+	out2, err2 := run(timeout, bin, append([]string{"-w"}, args...)...)
+	if err2 == nil || errors.Is(err2, os.ErrNotExist) || errors.Is(err2, context.DeadlineExceeded) {
+		return out2, err2
+	}
+	return run(timeout, bin, args...)
+}
+
 // takeSnap 读热点口 /proc/net/dev 与 iptables 计数
 func (c *calibrator) takeSnap(now time.Time) calSnap {
 	s := calSnap{T: now.Unix()}
@@ -851,11 +866,11 @@ func (c *calibrator) takeSnap(now time.Time) calSnap {
 		}
 	}
 	if c.env.run != nil {
-		if out, err := c.env.run(5*time.Second, "iptables", "-w", "2", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
+		if out, err := calRunIptWithFallback(c.env.run, 5*time.Second, "iptables", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
 			_, _, j, ok := calParseIptForward(out)
 			s.FwdV4, s.FwdV4OK = j, ok
 		}
-		if out, err := c.env.run(5*time.Second, "ip6tables", "-w", "2", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
+		if out, err := calRunIptWithFallback(c.env.run, 5*time.Second, "ip6tables", "-t", "mangle", "-L", "FORWARD", "-nvx"); err == nil {
 			p, ok, j, jOK := calParseIptForward(out)
 			if jOK {
 				s.FwdV6, s.FwdV6OK = j, true

@@ -1,4 +1,4 @@
-/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.1 · 智能护航、隐私明文安检与连接排障中心
+/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.2 · 智能护航、隐私明文安检与连接排障中心
  * 设计准则:
  *   1. 3秒简易认知渐进披露: 顶部一句话人话态势 + 3格控制中心磁贴 + 三大场景切换(网速护航 / 隐私安检 / 连接排障) + 高级参数按需折叠。
  *   2. 100% 真实后端能力闭环: 完整对接 /api/vector_sync、LeakGuard(含白名单/三级守卫/撤销栈)、Express、UpdateLeash、ThermoCruise、FlowScalpel、Blackbox(四维归因)、MultiIface、NativeSubtrees 与 ConfigVault。
@@ -1028,7 +1028,7 @@ function v6StartLeakGuardSSE() {
       clearTimeout(V6.sseRetryT);
       V6.sseRetryT = setTimeout(function () {
         V6.lg.sseFailed = false;
-        if (!document.hidden && S.page === 'vector') v6StartLeakGuardSSE();
+        v6EnsureLeakStream();
       }, 20000);
     };
   } catch (_) {
@@ -1036,6 +1036,10 @@ function v6StartLeakGuardSSE() {
     V6.lg.sseActive = false;
     V6.lg.sseFailed = true;
   }
+}
+
+function v6EnsureLeakStream() {
+  if (!document.hidden && V6.apiSupported.lg) v6StartLeakGuardSSE();
 }
 
 function v6StopLeakGuardSSE() {
@@ -1083,14 +1087,19 @@ function v6DeviceShapeSig(d) {
   var pin = V6.express.enabled && V6.express.forced_macs.indexOf(m) >= 0 ? 'P' : '';
   var esc = V6.express.enabled && V6.express.escorted_macs.indexOf(m) >= 0 ? 'E' : '';
   var lsh = v6IsDeviceLeashed(d) ? 'L' : '';
-  return pin + esc + lsh;
+  var usb = (typeof isUsbTetherIface === 'function' ? isUsbTetherIface(d.iface) : /(^|_)(rndis|ncm|usb)\d*$/i.test(String(d.iface || '').trim())) ? 'U' : '';
+  return pin + esc + lsh + usb;
 }
 
 /* 设备列表卡片上的直白中文状态标签 */
-function v6DeviceBadgesHtml(d) {
+function v6DeviceBadgesHtml(d, skipUsb) {
   if (!d) return '';
   var out = '';
   var m = String(d.mac || '').toLowerCase();
+  var isUsb = typeof isUsbTetherIface === 'function' ? isUsbTetherIface(d.iface) : /(^|_)(rndis|ncm|usb)\d*$/i.test(String(d.iface || '').trim());
+  if (!skipUsb && isUsb) {
+    out += '<span class="v6-mono-badge b-acc" title="通过 USB 数据线共享网络（' + escapeHtml(d.iface) + '）">USB 有线共享</span>';
+  }
   if (V6.express.enabled) {
     var isPin = V6.express.forced_macs.indexOf(m) >= 0;
     var isAuto = V6.express.escorted_macs.indexOf(m) >= 0;
@@ -2887,8 +2896,48 @@ function v6CleanBackupVer(v) {
   return s.replace(/[^a-zA-Z0-9._+-]/g, '_');
 }
 
-/* 备份文件导出（同时兼容普通浏览器下载与 Android KSU WebView 落盘 /sdcard/Download） */
+/* 备份文件导出（同时兼容普通浏览器下载与 Android KSU WebView 直写落盘 /sdcard/Download，绕过 128KB MAX_ARG_STRLEN） */
 function v6ExportBackupBundle(actEl) {
+  if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function' && typeof loadSecret === 'function') {
+    var ksuVer = v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
+      v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
+      'v6.1.0-rc.2';
+    var ksuFname = 'hnc-backup-' + ksuVer + '-' + Date.now() + '.json';
+    var outPath = '/sdcard/Download/' + ksuFname;
+    var runCurlSave = function (forceSec) {
+      return loadSecret(!!forceSec).then(function (sec) {
+        var cmd = 'mkdir -p /sdcard/Download && curl -sS -f --connect-timeout 2 --max-time 15' +
+          (sec ? ' -H ' + sq('X-HNC-Local-Admin: ' + sec) : '') +
+          ' -H ' + sq('Cache-Control: no-cache') +
+          ' ' + sq(API_BASE + V6_API.backup) +
+          ' -o ' + sq(outPath) +
+          ' && sed -n \'s/.*"sha256"[[:space:]]*:[[:space:]]*"\\([^"]*\\)".*/sha=\\1/p; s/.*"file_count"[[:space:]]*:[[:space:]]*\\([0-9]*\\).*/cnt=\\1/p\' ' + sq(outPath);
+        return shell(cmd);
+      });
+    };
+    busyWhile(actEl, runCurlSave(false).catch(function () {
+      return runCurlSave(true);
+    }).then(function (metaOut) {
+      var mSha = String(metaOut || '').match(/(?:^|\n)sha=([^\r\n]+)/);
+      var mCnt = String(metaOut || '').match(/(?:^|\n)cnt=(\d+)/);
+      if (mSha && mSha[1]) V6.vault.last_sha256 = mSha[1].trim();
+      if (mCnt && mCnt[1]) V6.vault.last_file_count = Math.round(num(mCnt[1], 0));
+      v6RefreshActiveSubviewDom();
+      toast('已保存到手机下载目录：' + ksuFname);
+    }).catch(function (err) {
+      return api.get(V6_API.backup, null, { timeout: 10000 }).then(function (bundle) {
+        if (!bundle || typeof bundle !== 'object') throw err;
+        var rawJson = JSON.stringify(bundle, null, 2);
+        if (typeof copyText === 'function') {
+          return copyText(rawJson).then(function (ok) {
+            toast(ok ? '写入下载目录失败，已复制备份内容到剪贴板' : '保存失败', ok ? 'warn' : 'err');
+          });
+        }
+        toast('保存失败', 'err');
+      }).catch(function (e2) { toast(errText(e2 || err), 'err'); });
+    }));
+    return;
+  }
   busyWhile(actEl, api.get(V6_API.backup, null, { timeout: 10000 }).then(function (bundle) {
     if (!bundle || typeof bundle !== 'object') { toast('导出数据为空', 'err'); return; }
     V6.vault.last_sha256 = String(bundle.sha256 || '');
@@ -2898,20 +2947,8 @@ function v6ExportBackupBundle(actEl) {
     var verTag = v6CleanBackupVer(bundle.module_version) ||
       v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6';
+      'v6.1.0-rc.2';
     var fname = 'hnc-backup-' + verTag + '-' + Date.now() + '.json';
-    if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function') {
-      var outPath = '/sdcard/Download/' + fname;
-      var b64 = btoa(unescape(encodeURIComponent(jsonStr)));
-      return shell("mkdir -p /sdcard/Download && printf '%s' " + sq(b64) + " | base64 -d > " + sq(outPath)).then(function () {
-        toast('已保存到手机下载目录：' + fname);
-      }).catch(function () {
-        if (typeof copyText === 'function') {
-          return copyText(jsonStr).then(function (ok) { toast(ok ? '写入下载目录失败，已复制备份内容到剪贴板' : '保存失败', ok ? 'warn' : 'err'); });
-        }
-        toast('保存失败', 'err');
-      });
-    }
     try {
       var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });
       var url = URL.createObjectURL(blob);
@@ -2924,13 +2961,15 @@ function v6ExportBackupBundle(actEl) {
       setTimeout(function () { URL.revokeObjectURL(url); }, 3000);
       toast('配置备份已导出（共 ' + V6.vault.last_file_count + ' 项）');
     } catch (_) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(jsonStr);
-        toast('配置备份已复制到剪贴板');
+      if (typeof copyText === 'function') {
+        copyText(jsonStr).then(function (ok) {
+          toast(ok ? '配置备份已复制到剪贴板' : '复制备份失败', ok ? 'ok' : 'err');
+        });
       }
     }
   })).catch(function (e) { toast(errText(e), 'err'); });
 }
+var v6ExportBackup = v6ExportBackupBundle;
 
 /* ═════════════════════ 全局事件委托与生命周期钩子 ═════════════════════ */
 function v6BindEvents() {
@@ -2946,7 +2985,7 @@ function v6BindEvents() {
 
   /* 记录 <details class="v6-adv-fold"> 展开态，保证后台轮询 morph 时不会自动合上用户展开的高级设置 */
   document.addEventListener('toggle', function (e) {
-    var dt = e.target;
+    var dt = typeof evEl === 'function' ? evEl(e) : (e && e.target && e.target.nodeType === 3 ? e.target.parentNode : e && e.target);
     if (dt && dt.matches && dt.matches('details[data-v6-fold]')) {
       var fk = dt.getAttribute('data-v6-fold');
       if (fk) V6.advOpen[fk] = !!dt.open;
@@ -2996,7 +3035,7 @@ function v6BindEvents() {
   });
 
   document.addEventListener('click', function (e) {
-    var t = e.target;
+    var t = typeof evEl === 'function' ? evEl(e) : (e && e.target && e.target.nodeType === 3 ? e.target.parentNode : e && e.target);
     if (!t || typeof t.closest !== 'function') return;
 
     /* 1. 顶部三大场景切换胶囊 */
@@ -3362,7 +3401,7 @@ function v6BootInit() {
   if (S.vectorSyncState !== 'supported') {
     v6RefreshSummarySilent();
   }
-  if (!KSU) v6StartLeakGuardSSE();
+  v6EnsureLeakStream();
 }
 
 function v6OnPollTick(tickN) {
@@ -3379,7 +3418,7 @@ function v6OnVisibility(hidden) {
     v6StopLeakGuardSSE();
     v6StopScalpelTimer();
   } else {
-    if (!KSU && V6.apiSupported.lg) v6StartLeakGuardSSE();
+    v6EnsureLeakStream();
     if (S.page === 'vector') { v6LoadLeakGuard(); v6LoadCockpitAll(); }
     if (V6.scalpel.open) {
       if (!V6.scalpel.paused) v6FetchScalpelFlows();

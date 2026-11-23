@@ -85,21 +85,127 @@ function dismissMerge(to, from, oldName) {
     toast('好的，不再把它当成「' + oldName + '」');
   }, function (e) { toast(errText(e), 'err'); }).then(mergeAfter);
 }
+function mmBuildMergedList(m) {
+  if (!m) return [];
+  if (Array.isArray(m.merged_list) && m.merged_list.length) {
+    return m.merged_list.map(function (x) {
+      var nm = String((x && (x.new_mac || x.to_mac || x.mac)) || '').toLowerCase();
+      var om = String((x && (x.old_mac || x.from_mac)) || '').toLowerCase();
+      var d = nm ? devBy(nm) : null;
+      return {
+        new_mac: nm,
+        old_mac: om,
+        new_name: (d && d.name) || (x && x.new_name) || nm,
+        old_name: (x && x.old_name) || (d && d.mergedFromName) || om,
+        auto: !!(x && x.auto),
+        score: num(x && x.score),
+        ts: num(x && x.ts)
+      };
+    }).filter(function (x) { return isMac(x.new_mac) && isMac(x.old_mac); });
+  }
+  var al = m.aliases && typeof m.aliases === 'object' ? m.aliases : {};
+  return Object.keys(al).sort().map(function (o) {
+    var oldM = String(o || '').toLowerCase(), newM = String(al[o] || '').toLowerCase();
+    var d = newM ? devBy(newM) : null, od = oldM ? devBy(oldM) : null;
+    return {
+      new_mac: newM,
+      old_mac: oldM,
+      new_name: (d && d.name) || newM,
+      old_name: (d && d.mergedFrom === oldM && d.mergedFromName) || (od && od.name) || oldM,
+      auto: !!(d && d.autoInhFrom === oldM),
+      score: d && d.autoInhFrom === oldM ? num(d.autoInhScore) : 0,
+      ts: 0
+    };
+  }).filter(function (x) { return isMac(x.new_mac) && isMac(x.old_mac); });
+}
+function mmFindMerged(newMac, oldMac) {
+  newMac = String(newMac || '').toLowerCase();
+  oldMac = String(oldMac || '').toLowerCase();
+  var list = mmBuildMergedList(S.mm);
+  for (var i = 0; i < list.length; i++) {
+    if (newMac && list[i].new_mac === newMac && (!oldMac || list[i].old_mac === oldMac)) return list[i];
+    if (!newMac && oldMac && list[i].old_mac === oldMac) return list[i];
+  }
+  var d = newMac ? devBy(newMac) : null;
+  if (d && (oldMac || d.mergedFrom)) {
+    var om = oldMac || d.mergedFrom;
+    return {
+      new_mac: d.mac,
+      old_mac: om,
+      new_name: d.name || d.mac,
+      old_name: d.mergedFromName || om,
+      auto: d.autoInhFrom === om,
+      score: num(d.autoInhScore)
+    };
+  }
+  return (isMac(newMac) && isMac(oldMac)) ? { new_mac: newMac, old_mac: oldMac, new_name: newMac, old_name: oldMac } : null;
+}
+function unmergeSheet(newMac, oldMac, oldName, fetched) {
+  newMac = String(newMac || '').toLowerCase();
+  oldMac = String(oldMac || '').toLowerCase();
+  var rec = mmFindMerged(newMac, oldMac);
+  if (!rec && !fetched) {
+    loadMacMerge().then(function () { unmergeSheet(newMac, oldMac, oldName, true); });
+    return;
+  }
+  if (!rec) {
+    sheet('<h3>拆分恢复独立设备</h3><div class="empty">该设备当前没有可拆分的合并记录（可能已拆分恢复）</div><button class="btn sec wide press" data-close>关闭</button>', { kind: 'unmerge' });
+    return;
+  }
+  var d = devBy(rec.new_mac);
+  var nn = (d && d.name) || rec.new_name || rec.new_mac;
+  var on = oldName || rec.old_name || rec.old_mac;
+  sheet('<h3>拆分恢复独立设备</h3><div class="sub">两台同型号设备（双胞胎机型）被误判为换随机 MAC 合并时，可一键拆分恢复为两台独立设备</div>' +
+    '<div class="mm-cmp"><div><div class="k">拆出独立设备</div><div class="n">' + esc(on) + '</div><div class="m">' + esc(rec.old_mac) + '</div><div class="k">' + (rec.auto ? '曾自动无感继承' : '曾手动合并') + '</div></div>' + ico('isolate') +
+    '<div><div class="k">当前在线设备</div><div class="n">' + esc(nn) + '</div><div class="m">' + esc(rec.new_mac) + '</div><div class="k">' + (d && d.online ? '当前在线' : '已记录') + '</div></div></div>' +
+    '<div class="note" style="margin:6px 0 12px">拆分后将解除两者的地址别名绑定，各自恢复独立的设备条目与流量统计，并自动写入<b>双胞胎互斥保护名单</b>，后台以后绝不再将这两台设备自动合并。</div>' +
+    '<div class="btns"><button type="button" class="btn sec press" data-close>取消</button><button type="button" class="btn pri press" id="mm-unmerge-ok">确认拆分恢复</button></div>', { kind: 'unmerge' });
+  $('#mm-unmerge-ok').onclick = function () { doUnmerge(rec.new_mac, rec.old_mac, on); };
+}
+function doUnmerge(to, from, oldName) {
+  to = String(to || '').toLowerCase();
+  from = String(from || '').toLowerCase();
+  var lockKey = to || from;
+  if (lockKey && S.busy[lockKey]) { toast('这台设备还有操作在进行', 'warn'); return Promise.resolve(false); }
+  var p = {};
+  if (to) { p.mac = to; p.to_mac = to; p.new_mac = to; }
+  if (from) { p.from_mac = from; p.old_mac = from; if (!p.mac) p.mac = from; }
+  if (lockKey) setBusy(lockKey, true);
+  var b = $('#mm-unmerge-ok'); if (b) b.disabled = true;
+  return api.action('device_unmerge', p, { timeout: 30000, maxTime: 28 }).then(function () {
+    if ($('#sheet') && $('#sheet').dataset.kind === 'unmerge') closeSheet(0);
+    toast('已拆分恢复独立设备' + (oldName ? ' · 「' + oldName + '」已独立并锁定双胞胎互斥' : ' · 已锁定双胞胎互斥不再误合并'));
+    return true;
+  }, function (e) {
+    toast(errText(e), 'err');
+    if (b) b.disabled = false;
+    return false;
+  }).then(function (ok) {
+    if (lockKey) setBusy(lockKey, false);
+    return mergeAfter().then(function () { return ok; });
+  });
+}
 function mergeSettingsHtml() {
   var m = S.mm;
   if (!m) return sItem(['gray', 'merge'], '设备合并建议', '当前后端不支持（需要新版 hnc_httpd）', val('—'));
-  var sg = m.suggestions || [], al = m.aliases && typeof m.aliases === 'object' ? m.aliases : {}, ak = Object.keys(al).sort();
+  var sg = m.suggestions || [], mList = mmBuildMergedList(m), mutexCnt = Math.round(num(m.mutex_apart_count, 0));
   var body = (sg.length ? sg.map(function (s) {
     var d = devBy(s.new_mac), nn = (d && d.name) || s.new_name || s.new_mac;
     return '<div class="mm-row"><span class="t">「' + esc(nn) + '」可能是「' + esc(s.old_name || s.old_mac) + '」</span><button class="linkish" data-mm-open="' + esc(s.new_mac + '|' + s.old_mac) + '">查看</button><span class="s">' + mergeScoreTxt(s) + (s.new_online ? ' · 新 MAC 在线' : '') + ((s.reasons || []).length ? ' · ' + esc(s.reasons.slice(0, 2).join(' · ')) : '') + '</span></div>';
   }).join('') : '<div class="note">暂时没有疑似换了 MAC 的设备</div>') +
-    '<div class="mm-sub">已合并的旧 MAC（' + ak.length + '）</div>' + (ak.length ? ak.map(function (o) {
-      var d = devBy(al[o]);
-      return '<div class="mm-row"><span class="t mono" style="font-size:12px">' + esc(o) + ' → ' + esc(al[o]) + '</span><span></span><span class="s">现在是「' + esc(d ? d.name : al[o]) + '」· 旧 MAC 的历史流量算在新 MAC 上</span></div>';
+    '<div class="mm-sub">已合并的旧 MAC（' + mList.length + '）</div>' + (mList.length ? mList.map(function (it) {
+      return '<div class="mm-row"><span class="t mono" style="font-size:12px">' + esc(it.old_mac) + ' → ' + esc(it.new_mac) + '</span><span></span><span class="s">原「' + esc(it.old_name || it.old_mac) + '」并入「' + esc(it.new_name || it.new_mac) + '」' + (it.auto ? '（自动无感继承）' : '') + ' · 旧 MAC 历史流量计入新 MAC</span>' +
+        '<div style="grid-column:1/-1;margin-top:6px"><button type="button" class="btn sec press" data-mm-unmerge="' + esc(it.new_mac + '|' + it.old_mac + '|' + (it.old_name || '')) + '">' + ico('isolate') + '<span>拆分恢复独立设备</span></button></div></div>';
     }).join('') : '<div class="note">还没有合并过</div>') +
-    '<div class="note" style="margin-top:8px">手机的「隐私 Wi-Fi 地址」（随机 MAC）会不定期更换。HNC 按主机名、DHCP 指纹、TLS 指纹、常用应用和上下线时间打分，' + num(m.min_score, 40) + ' 分以上给出建议，' + num(m.alert_score, 60) + ' 分以上发提醒。</div>';
-  return sFold('mmerge', ['orange', 'merge'], '设备合并建议', sg.length ? sg.length + ' 条待确认' + (ak.length ? ' · 已合并 ' + ak.length + ' 个旧 MAC' : '') : '随机 MAC 换地址后，把旧设备的名称和规则接过来' + (ak.length ? ' · 已合并 ' + ak.length + ' 个' : ''),
-    body, sg.length ? '<span class="badge b-warn" style="font-size:12px;padding:3px 8px">' + sg.length + '</span>' : val('0'));
+    (mutexCnt > 0 ? '<div class="note" style="margin-top:8px;color:var(--badge-ok)">双胞胎互斥锁定：已保护 ' + mutexCnt + ' 对同型号独立设备，同时在线或手动拆分后永不误合并。</div>' : '') +
+    '<div class="note" style="margin-top:8px">手机的「隐私 Wi-Fi 地址」（随机 MAC）会不定期更换。HNC 按主机名、DHCP 指纹、TLS 指纹、常用应用和上下线时间打分，' + num(m.min_score, 40) + ' 分以上给出建议，' + num(m.alert_score, 60) + ' 分以上发提醒；两台设备若曾同时在线则自动建立双胞胎互斥锁。</div>';
+  var sumParts = [];
+  if (sg.length) sumParts.push(sg.length + ' 条待确认');
+  else sumParts.push('随机 MAC 换地址后自动接续规则');
+  if (mList.length) sumParts.push('已合并 ' + mList.length + ' 个');
+  if (mutexCnt > 0) sumParts.push('双胞胎互斥 ' + mutexCnt + ' 对');
+  return sFold('mmerge', ['orange', 'merge'], '设备合并与双胞胎拆分', sumParts.join(' · '),
+    body, sg.length ? '<span class="badge b-warn" style="font-size:12px;padding:3px 8px">' + sg.length + '</span>' : val(String(mList.length)));
 }
 /* ═══ 加密 DNS 策略(GET /api/encdns + encdns_set) ═══ */
 S.encdns = null;
@@ -212,7 +318,7 @@ function simAddSheet() {
     '<div class="grid2" style="margin-top:12px"><label class="field">下行速率' + inp('sd-rx', '', 'B/s', 'maxlength="16" placeholder="3m" autocapitalize="off"') + '</label><label class="field">上行速率' + inp('sd-tx', '', 'B/s', 'maxlength="16" placeholder="200k" autocapitalize="off"') + '</label></div>' +
     '<label class="field" style="margin-top:10px">应用（规则库 id）' + inp('sd-app', '', '', 'maxlength="32" placeholder="douyin / bilibili / wechat，留空随机" autocapitalize="off" style="font-family:var(--mono)"') + '</label>' +
     '<div class="btns" style="margin-top:14px"><button class="btn sec press" data-close>取消</button><button class="btn pri press" id="sd-ok">添加</button></div>');
-  $('#sd-type').onclick = function (e) { var b = e.target.closest('[data-sdt]'); if (!b) return; pick = b.getAttribute('data-sdt'); $$('#sd-type [data-sdt]').forEach(function (x) { x.classList.toggle('on', x === b); }); };
+  $('#sd-type').onclick = function (e) { var t = evEl(e), b = t && t.closest ? t.closest('[data-sdt]') : null; if (!b) return; pick = b.getAttribute('data-sdt'); $$('#sd-type [data-sdt]').forEach(function (x) { x.classList.toggle('on', x === b); }); };
   $('#sd-ok').onclick = function () {
     var p = { type: pick }, re = /^\d+(\.\d+)?\s*[kmg]?$/i, rx = $('#sd-rx').value.trim(), tx = $('#sd-tx').value.trim(), nm = $('#sd-name').value.trim(), ap = $('#sd-app').value.trim().toLowerCase();
     if (rx && !re.test(rx)) { toast('下行速率格式：3m / 512k / 字节数', 'err'); return; }
@@ -347,16 +453,16 @@ function renderSettings(anim1) {
     powerFold() +
     sFold('caps', ['gray', 'flask'], '兼容性能力', 'tc / IFB / netem / 队列 / 启动器', '<dl class="kv">' + Object.keys(S.caps || {}).filter(function (k) { var v = S.caps[k]; return v !== null && typeof v !== 'object'; }).sort().map(function (k) { var v = S.caps[k]; return '<dt>' + esc(k) + '</dt><dd style="color:' + (v === true ? 'var(--badge-ok)' : v === false ? 'var(--badge-red)' : 'inherit') + '">' + esc(String(v)) + '</dd>'; }).join('') + '</dl>', val(capsSummary()))]);
   var rUrl = remoteUrl(), remOn = c.remote_enabled === true;
-  groups.push(['远程访问', (KSU ? sItem(['blue', 'globe'], '启用远程访问服务', '开启后 :8443 监听，热点内其他设备可用浏览器访问（约 1 分钟生效）', toggle(remOn, 'data-set="remote" aria-label="远程访问服务"')) : sItem(['blue', 'globe'], '远程访问服务', '你正在通过远程访问使用 HNC；开关只能在本机 WebUI 里改', val('已开启', 'ok'))) +
-    (remOn || !KSU ? '<div class="row">' + gi('gray', 'link') + '<span class="tx"><div class="t">访问地址</div><div class="s mono">' + esc(rUrl || '无法获取本机 IP · 请确认热点已开启') + '</div></span>' + (rUrl ? '<button class="linkish" data-act="url-copy">复制</button><button class="linkish" data-act="url-share">分享</button>' : '') + '</div>' : '') +
-    (KSU ? sItem(['purple', 'lock'], '远程 PIN 配对鉴权', '安全基线常驻保护 · 局域网浏览器首次访问必须验证 6 位配对码', val('强制开启', 'ok')) : '') +
-    (KSU ? sBtn(['orange', 'star'], '生成配对码', '远端新设备首次连接用 · 120 秒有效', 'pair-new', '生成') : '') +
+  groups.push(['远程访问', (IS_LOCAL ? sItem(['blue', 'globe'], '启用远程访问服务', '开启后 :8443 监听，热点内其他设备可用浏览器访问（约 1 分钟生效）', toggle(remOn, 'data-set="remote" aria-label="远程访问服务"')) : sItem(['blue', 'globe'], '远程访问服务', '你正在通过远程访问使用 HNC；开关只能在本机 WebUI 里改', val('已开启', 'ok'))) +
+    (remOn || !IS_LOCAL ? '<div class="row">' + gi('gray', 'link') + '<span class="tx"><div class="t">访问地址</div><div class="s mono">' + esc(rUrl || '无法获取本机 IP · 请确认热点已开启') + '</div></span>' + (rUrl ? '<button class="linkish" data-act="url-copy">复制</button><button class="linkish" data-act="url-share">分享</button>' : '') + '</div>' : '') +
+    (IS_LOCAL ? sItem(['purple', 'lock'], '远程 PIN 配对鉴权', '安全基线常驻保护 · 局域网浏览器首次访问必须验证 6 位配对码', val('强制开启', 'ok')) : '') +
+    (IS_LOCAL ? sBtn(['orange', 'star'], '生成配对码', '远端新设备首次连接用 · 120 秒有效', 'pair-new', '生成') : '') +
     (c.webui_access ? sFold('webacc', ['red', 'shield'], 'WebUI 访问控制', { all: '热点内所有设备都能打开登录页', allowlist: '只有名单里的设备能连接', local_only: '只有本机能打开' }[c.webui_access.mode || 'all'] || '',
       seg('webacc-mode', [['all', '全部'], ['allowlist', '白名单'], ['local_only', '仅本机']], S.webaccMode || c.webui_access.mode || 'all', 'small') +
       '<label class="field" style="margin-top:10px">白名单（MAC 或 IP，逗号分隔，最多 32 个）' + inp('webacc-macs', (c.webui_access.macs || []).join(', '), '', 'placeholder="aa:bb:cc:dd:ee:ff, 192.168.43.25"') + '</label>' +
       '<div class="note">在防火墙层直接断开不允许的设备；蜂窝网络上任何模式都连不上。本机和 KSU 里的 WebUI 永远可用。设置会把你自己锁在外面时会被拒绝。' + (c.webui_access.firewall ? '<br>防火墙状态：' + esc(c.webui_access.firewall) : '') + '</div>' +
       '<button class="btn pri wide press" data-act="webacc-save">保存</button>', val({ all: '全部', allowlist: '白名单', local_only: '仅本机' }[c.webui_access.mode || 'all'] || '—')) : '') +
-    sFold('tokens', ['gray', 'dev'], '已授权设备', '管理能远程访问的设备' + (KSU ? '' : ' · 撤销只能在本机操作'), '<div id="tokens-list" class="note">展开后加载</div>')]);
+    sFold('tokens', ['gray', 'dev'], '已授权设备', '管理能远程访问的设备' + (IS_LOCAL ? '' : ' · 撤销只能在本机操作'), '<div id="tokens-list" class="note">展开后加载</div>')]);
   groups.push(['运行状态', (!S.runStatus ? sItem(['gray', 'cpu'], '运行状态', '后端暂未提供 /api/run_status', val('—')) :
     sItem(['green', 'cpu'], 'hotspotd 进程', rs.hotspotd_pid ? 'pid ' + rs.hotspotd_pid + (rs.hotspotd_rss_kb ? ' · ' + Math.round(rs.hotspotd_rss_kb / 1024) + ' MB' : '') : '未运行', val(rs.hotspotd === 'up' ? '运行中' : '未运行', rs.hotspotd === 'up' ? 'ok' : 'bad')) +
     sItem(['purple', 'layers'], 'tc 规则数', 'qdisc + class（热点接口 + IFB）', val(num(rs.tc_rules))) +
@@ -408,7 +514,7 @@ function renderSettings(anim1) {
         '<span class="style-meta"><b>' + t[1] + '</b><small>' + t[2] + '</small></span>' +
       '</button>';
     }).join('') + '</div>' +
-    // v6.1.0-rc.1 玻璃透光度五档离散胶囊(只在液态玻璃风格下显示, liquid.css .lg-only): 点按即切换并保存, 零滑条防展开手势误触
+    // v6.1.0-rc.2 玻璃透光度五档离散胶囊(只在液态玻璃风格下显示, liquid.css .lg-only): 点按即切换并保存, 零滑条防展开手势误触
     '<div class="lg-only">' +
     '<div class="note" style="margin:2px 0 -2px">玻璃透光度微调 · <span id="glass-tint-v">' + gxLbl + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
     '<div class="gx-pills-5" id="glass-tint" role="group" aria-label="玻璃浓度">' +
@@ -423,7 +529,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-rc.1', HNC_UI_VC = '6009301', HNC_UI_DATE = '2026-11-22';
+  var HNC_UI_VER = 'v6.1.0-rc.2', HNC_UI_VC = '6009302', HNC_UI_DATE = '2026-11-22';
   var bVer = cleanVer(l.backend_version, HNC_UI_VER);
   var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -850,7 +956,6 @@ function rulepackImport(btn) {
     var o; try { o = JSON.parse(txt); } catch (e) { throw new Error('JSON 格式错误：' + e.message); }
     if (!o || o.format !== 'hnc-rulepack') throw new Error('这不是 HNC 规则包');
     if (txt.length > 1200 * 1024) throw new Error('规则包超过 1.2 MB');
-    if (KSU && txt.length > 120 * 1024) throw new Error('规则包较大，本机界面传不过去，请在浏览器里打开远程管理页面导入');
     return api.post('/api/dpi_rulepack', { pack: txt }, { timeout: 30000, maxTime: 28 });
   }).then(function (rep) {
     if (rep && rep.ok === false) throw new Error(rep.error || '导入失败');
@@ -904,7 +1009,7 @@ function loadTokens() {
     el.className = ''; el.setAttribute('data-keep', '');
     el.innerHTML = t.length ? t.map(function (x) {
       return '<div class="row" style="padding:8px 0;min-height:0"><span class="tx"><div class="t">' + esc(x.label || '未命名设备') + '</div><div class="s mono">' + esc(x.ip_hint || '') + ' · ' + (x.last_seen ? new Date(x.last_seen * 1000).toLocaleString() : '从未使用') + ' · ' + esc(String(x.token_id || '').slice(0, 8)) + '</div></span>' +
-        (KSU ? '<button class="hint-a danger" data-revoke="' + esc(x.token_id) + '" data-label="' + esc(x.label || '未命名设备') + '">撤销</button>' : '') + '</div>';
+        (IS_LOCAL ? '<button class="hint-a danger" data-revoke="' + esc(x.token_id) + '" data-label="' + esc(x.label || '未命名设备') + '">撤销</button>' : '') + '</div>';
     }).join('') : '<div class="note">还没有已授权的设备</div>';
   }).catch(function (e) { el.className = 'note err'; el.textContent = errText(e); });
 }
@@ -1039,7 +1144,7 @@ function exportRulesJson() {
       '<div class="btns" style="margin-top:12px"><button class="btn sec press" data-close>关闭</button>' + (KSU ? '<button class="btn sec press" id="rj-save">存到下载</button>' : '<button class="btn sec press" id="rj-dl">下载</button>') + '<button class="btn pri press" id="rj-copy">复制</button></div>', { tall: true });
     $('#rj-copy').onclick = function () { copyText(txt).then(function (ok) { toast(ok ? '已复制 rules.json' : '复制失败', ok ? 'ok' : 'err'); }); };
     var fn = 'hnc-rules-' + today() + '.json';
-    if ($('#rj-dl')) $('#rj-dl').onclick = function () { var a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([txt], { type: 'application/json' })); a.download = fn; document.body.appendChild(a); a.click(); a.remove(); };
+    if ($('#rj-dl')) $('#rj-dl').onclick = function () { var u = URL.createObjectURL(new Blob([txt], { type: 'application/json' })), a = document.createElement('a'); a.href = u; a.download = fn; document.body.appendChild(a); a.click(); a.remove(); setTimeout(function () { URL.revokeObjectURL(u); }, 3000); };
     if ($('#rj-save')) $('#rj-save').onclick = function () { shell('mkdir -p /sdcard/Download && cp ' + HNC_DIR + '/data/rules.json /sdcard/Download/' + fn + ' && echo ok').then(function () { toast('已存到 /sdcard/Download/' + fn); }, function (e) { toast(errText(e), 'err'); }); };
   }).catch(function (e) { toast(errText(e), 'err'); });
 }
@@ -1191,7 +1296,7 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.1';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.2';
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
@@ -1840,13 +1945,17 @@ function dpvRenderCardHtml(data, isBusy) {
   var markLayout = d.mark_layout;
   var low16Protected = Boolean(d.netd_low16_protected);
 
-  var offloadHealthy = sampled && (off.tether_offload_disabled || off.slowpath_active) &&
+  var hwnatLow = String(off.hwnat || '').toLowerCase();
+  var hwnatSkipped = hwnatLow === 'skipped_qcom' || hwnatLow === 'skipped_not_mtk' || hwnatLow === 'n/a';
+  var offloadHealthy = sampled && (off.tether_offload_disabled || off.slowpath_active || hwnatSkipped) &&
     off.hwnat !== 'detected_no_knob' && off.hwnat !== 'failed';
   var hwnatLabel = !sampled
     ? '系统加速接管状态：待检验'
     : (off.hwnat === 'none' || off.hwnat === 'disabled' || off.hwnat === 'suppressed'
         ? '系统硬件加速已受控（不绕过限速）'
-        : '硬件加速状态：' + off.hwnat);
+        : hwnatSkipped
+          ? '当前平台无需额外内核卸载干预'
+          : '硬件加速状态：' + off.hwnat);
 
   var fwmarkBadgeCls = !sampled ? '' : (low16Protected ? 'dpv-chip-ok' : 'dpv-chip-warn');
   var fwmarkBadgeText = !sampled
@@ -2300,7 +2409,7 @@ function dpvBindGlobalDelegate() {
   if (typeof document === 'undefined' || document.__dpvBound) return;
   document.__dpvBound = true;
   document.addEventListener('click', function (ev) {
-    var t = ev.target;
+    var t = typeof evEl === 'function' ? evEl(ev) : (ev && ev.target && ev.target.nodeType === 3 ? ev.target.parentNode : ev && ev.target);
     if (!t || typeof t.closest !== 'function') return;
     var btn = t.closest('[data-dpv-act]');
     if (!btn) return;

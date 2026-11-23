@@ -4,13 +4,17 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -18,34 +22,52 @@ import (
 )
 
 // m4TestEnv 重定向所有路径到临时目录(测试结束全部恢复)。
-// v5.31 审查修复: 原来只恢复 m4OwnerFile, 其余变量留在已删的临时目录; 名字解析的
-// 路径(device_names / hostname_cache / oui_overrides / mdns_resolve)、bin/iptables_manager.sh
-// 和 Go 写日志一并重定向 —— 测试绝不读写真实的 /data/local/hnc。
+// v5.31 审查修复 / v6.0 RC2: 含 devices.flat、dpi_devid.json、stats_v6_map、
+// stats_v6_retired、proc_net_arp 与 iptables 执行钩子一并隔离 —— 绝不碰真实宿主环境。
 func m4TestEnv(t *testing.T) string {
 	t.Helper()
 	dir := t.TempDir()
-	ptrs := []*string{&m4DevicesJSON, &m4DevicesTmpGo, &m4RefreshFile, &m4RefreshAckFile, &m4GoWriteLog,
-		&m4NamesPath, &m4CachePath, &m4OverridesPath, &m4MDNSBin, &rulesJSONPath, &iptablesMgrPath}
+	ptrs := []*string{
+		&m4DevicesJSON, &m4DevicesTmpGo, &m4DevicesFlat,
+		&m4RefreshFile, &m4RefreshAckFile, &m4GoWriteLog,
+		&m4NamesPath, &m4DevIDPath, &m4CachePath, &m4OverridesPath, &m4MDNSBin,
+		&m4StatsV6Map, &m4StatsV6Retired, &m4ProcNetARP,
+		&rulesJSONPath, &iptablesMgrPath,
+	}
 	old := make([]string, len(ptrs))
 	for i, p := range ptrs {
 		old[i] = *p
 	}
+	oldIptFn := m4IptablesExecFn
+	oldNlDumpFn := m4NetlinkDumpIfFn
+	oldPermBackoff := m4PermErrBackoff
 	t.Cleanup(func() {
 		for i, p := range ptrs {
 			*p = old[i]
 		}
+		m4IptablesExecFn = oldIptFn
+		m4NetlinkDumpIfFn = oldNlDumpFn
+		m4PermErrBackoff = oldPermBackoff
 	})
 	m4DevicesJSON = filepath.Join(dir, "devices.json")
 	m4DevicesTmpGo = filepath.Join(dir, "devices.json.tmp.go")
+	m4DevicesFlat = filepath.Join(dir, "run", "devices.flat")
 	m4RefreshFile = filepath.Join(dir, "run", "devices.refresh")
 	m4RefreshAckFile = filepath.Join(dir, "run", "devices.refresh.ack")
 	m4GoWriteLog = filepath.Join(dir, "run", "m4_go_write.log")
 	m4NamesPath = filepath.Join(dir, "device_names.json")
+	m4DevIDPath = filepath.Join(dir, "run", "dpi_devid.json")
 	m4CachePath = filepath.Join(dir, "hostname_cache.json")
 	m4OverridesPath = filepath.Join(dir, "oui_overrides.json")
 	m4MDNSBin = filepath.Join(dir, "no_mdns_resolve")
+	m4StatsV6Map = filepath.Join(dir, "run", "stats_v6_map")
+	m4StatsV6Retired = filepath.Join(dir, "run", "stats_v6_retired")
+	m4ProcNetARP = filepath.Join(dir, "run", "proc_net_arp")
 	rulesJSONPath = filepath.Join(dir, "rules.json")
 	iptablesMgrPath = filepath.Join(dir, "bin", "no_iptables_manager.sh")
+	m4IptablesExecFn = func(context.Context, string, ...string) (string, string, int, error) {
+		return "", "isolated", -1, os.ErrNotExist
+	}
 	_ = os.MkdirAll(filepath.Join(dir, "run"), 0o755)
 	return dir
 }
@@ -477,5 +499,229 @@ func TestRunnerEventStormDoesNotStarveTick(t *testing.T) {
 	}
 	if _, err := os.Stat(m4DevicesJSON); err != nil {
 		t.Fatalf("事件风暴中 devices.json 一次也没写出: %v", err)
+	}
+}
+
+func TestM4PureGoStatsLegacyNftDualStackAndFallback(t *testing.T) {
+	dir := m4TestEnv(t)
+	r := newM4GoRunner("wlan2")
+	r.blacklistFn = func() map[string]bool { return nil }
+	r.hooks.Fast = func(mac string) (string, string) { return "dev", "manual" }
+	r.applyHooks()
+
+	// 在线设备 A(legacy 9 列测试) 与 B(iptables-nft 8 列测试)
+	r.table.Apply(neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: neigh.NUDReachable}, time.Now())
+	r.table.Apply(neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.102"), MAC: "02:5a:00:00:00:02", State: neigh.NUDReachable}, time.Now())
+
+	// 写入 stats_v6_map(含前导零与 :: 缩写混排)与 stats_v6_retired
+	v6Map := "2408:8207:0000:0001::00ab 02:5a:00:00:00:01\n2408:8207:0:1::cd 02:5a:00:00:00:02\n"
+	v6Ret := "02:5a:00:00:00:01 500 300\n"
+	if err := os.WriteFile(m4StatsV6Map, []byte(v6Map), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(m4StatsV6Retired, []byte(v6Ret), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// 模拟 `-w 2` 与 `-w` 均报参数不支持, 自动回退到无 `-w`, 并混排 legacy 9 列与 nft 8 列输出
+	var iptCalls atomic.Int32
+	m4IptablesExecFn = func(_ context.Context, name string, args ...string) (string, string, int, error) {
+		iptCalls.Add(1)
+		if len(args) > 0 && args[0] == "-w" {
+			return "", "iptables: unrecognized option '-w'", 2, errors.New("exit status 2")
+		}
+		if name == "iptables" {
+			return "Chain HNC_STATS (1 references)\n" +
+				" pkts bytes target prot opt in out source destination\n" +
+				// legacy 9 列: A 上行 1000, A 下行 2000
+				"   10  1000 RETURN all  --  *  *   192.168.43.101/32  0.0.0.0/0\n" +
+				"   20  2000 RETURN all  --  *  *   0.0.0.0/0          192.168.43.101\n" +
+				// Android 14-16 iptables-nft 8 列(无 opt 列): B 上行 4000, B 下行 8000
+				"   40  4000 RETURN 0        *  *   192.168.43.102     0.0.0.0/0\n" +
+				"   80  8000 RETURN 0        *  *   0.0.0.0/0          192.168.43.102\n", "", 0, nil
+		}
+		if name == "ip6tables" {
+			return "Chain HNC_STATS (1 references)\n" +
+				" pkts bytes target prot opt in out source destination\n" +
+				// legacy 含 -- opt 列: A IPv6 MAC 上行 100 + DST 下行 200
+				"    5   100 RETURN all  --  *  *   ::/0  ::/0  MAC 02:5A:00:00:00:01\n" +
+				"    8   200 RETURN all  --  *  *   ::/0  2408:8207:0:1::ab/128\n" +
+				// nft 无 opt 列: B IPv6 MAC 上行 600 + DST 下行 900
+				"    6   600 RETURN 0        *  *   ::/0  ::/0  MAC 02:5a:00:00:00:02\n" +
+				"    9   900 RETURN 0        *  *   ::/0  2408:8207:0000:0001:0000:0000:0000:00cd\n", "", 0, nil
+		}
+		return "", "unknown binary", -1, os.ErrNotExist
+	}
+
+	got, err := r.collectStats()
+	if err != nil {
+		t.Fatalf("collectStats 纯 Go 解析失败: %v", err)
+	}
+	// A: rx = 2000(v4) + 200(v6 dst) + 500(v6 retired) = 2700; tx = 1000(v4) + 100(v6 mac) + 300(v6 retired) = 1400
+	if got["192.168.43.101"] != [2]int64{2700, 1400} {
+		t.Fatalf("设备 A 聚合字节 = %v, want [2700 1400]", got["192.168.43.101"])
+	}
+	// B: rx = 8000(v4) + 900(v6 dst) = 8900; tx = 4000(v4) + 600(v6 mac) = 4600
+	if got["192.168.43.102"] != [2]int64{8900, 4600} {
+		t.Fatalf("设备 B 聚合字节 = %v, want [8900 4600]", got["192.168.43.102"])
+	}
+
+	// 验证 STATS_ALL_CMD 环境变量优先钩子保持 100% 兼容
+	mockIn := filepath.Join(dir, "stats_all.in")
+	if err := os.WriteFile(mockIn, []byte("192.168.43.101 777 888\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("STATS_ALL_CMD", "cat "+mockIn)
+	gotEnv, err := r.collectStats()
+	if err != nil || gotEnv["192.168.43.101"] != [2]int64{777, 888} {
+		t.Fatalf("STATS_ALL_CMD 钩子失效: got=%v err=%v", gotEnv, err)
+	}
+	t.Setenv("STATS_ALL_CMD", "")
+
+	// 验证纯 Go iptables 失败时平滑回退原脚本兜底
+	m4IptablesExecFn = func(context.Context, string, ...string) (string, string, int, error) {
+		return "", "permission denied", -1, syscall.EACCES
+	}
+	fakeScript := filepath.Join(dir, "bin", "fake_iptables_manager.sh")
+	_ = os.MkdirAll(filepath.Dir(fakeScript), 0o755)
+	if err := os.WriteFile(fakeScript, []byte("#!/bin/sh\n[ \"$1\" = \"stats_all\" ] && echo '192.168.43.102 3333 4444'\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	iptablesMgrPath = fakeScript
+	gotFb, err := r.collectStats()
+	if err != nil || gotFb["192.168.43.102"] != [2]int64{3333, 4444} {
+		t.Fatalf("脚本兜底回退失败: got=%v err=%v", gotFb, err)
+	}
+}
+
+func TestM4WriteDevicesAtomicSyncsDevicesFlatAndCapsWriteLog(t *testing.T) {
+	m4TestEnv(t)
+	// 预填超过 256 KiB 的 m4_go_write.log
+	var bigLog strings.Builder
+	for i := 0; bigLog.Len() < 300<<10; i++ {
+		fmt.Fprintf(&bigLog, "2026-11-22T00:00:00: /tmp/old-%05d\n", i)
+	}
+	if err := os.WriteFile(m4GoWriteLog, []byte(bigLog.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := newM4GoRunner("wlan2")
+	r.statsFn = func() (map[string][2]int64, error) {
+		return map[string][2]int64{"192.168.43.101": {10, 20}}, nil
+	}
+	r.blacklistFn = func() map[string]bool { return nil }
+	r.hooks.Fast = func(mac string) (string, string) { return "phone", "manual" }
+	r.applyHooks()
+
+	now := time.Now()
+	r.table.Apply(neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), MAC: "02:5a:00:00:00:01", State: neigh.NUDReachable}, now)
+
+	statsAt := time.Time{}
+	statsMap := map[string][2]int64{}
+	written := r.writeOut(nil, &statsAt, &statsMap, true)
+
+	flatBytes, err := os.ReadFile(m4DevicesFlat)
+	if err != nil {
+		t.Fatalf("devices.flat 未同步写出: %v", err)
+	}
+	wantFlat := "02:5a:00:00:00:01\t192.168.43.101\twlan2\n"
+	if string(flatBytes) != wantFlat {
+		t.Fatalf("devices.flat = %q, want %q", string(flatBytes), wantFlat)
+	}
+
+	fi, err := os.Stat(m4GoWriteLog)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fi.Size() > m4GoWriteLogMaxBytes {
+		t.Fatalf("m4_go_write.log 未封顶 256 KiB: size=%d", fi.Size())
+	}
+
+	// 设备下线后再次写出 → devices.flat 同步清空
+	r.table.Apply(neigh.Entry{IfIndex: 7, IP: net.ParseIP("192.168.43.101"), State: neigh.NUDFailed}, now.Add(time.Second))
+	r.writeOut(written, &statsAt, &statsMap, true)
+	flatBytes2, err := os.ReadFile(m4DevicesFlat)
+	if err != nil || len(flatBytes2) != 0 {
+		t.Fatalf("全员离线后 devices.flat 应为空文件, got=%q err=%v", string(flatBytes2), err)
+	}
+}
+
+func TestM4SELinuxNetlinkPermFallbackARPAnd30sBackoff(t *testing.T) {
+	m4TestEnv(t)
+
+	// 1. 验证生产默认 dumpIfFn 在 neigh.DumpIf 权限受限时回退 /proc/net/arp(过滤网卡 + 排除 00:00:00:00:00:00 / 0x0)
+	arpContent := "IP address       HW type     Flags       HW address            Mask     Device\n" +
+		"192.168.43.101   0x1         0x2         02:5a:00:00:00:01     *        wlan2\n" +
+		"192.168.43.102   0x1         0x0         02:5a:00:00:00:02     *        wlan2\n" +
+		"192.168.43.103   0x1         0x2         00:00:00:00:00:00     *        wlan2\n" +
+		"10.0.0.1         0x1         0x2         aa:bb:cc:dd:ee:ff     *        wlan0\n"
+	if err := os.WriteFile(m4ProcNetARP, []byte(arpContent), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	var nlCalls atomic.Int32
+	m4NetlinkDumpIfFn = func(int) ([]neigh.Entry, error) {
+		nlCalls.Add(1)
+		return nil, fmt.Errorf("neigh: socket: %w", syscall.EACCES)
+	}
+
+	r := newM4GoRunner("wlan2")
+	src := &fakeNeighSource{ch: make(chan []neigh.Entry, 4), stop: make(chan struct{})}
+	r.subscribeFn = func() (m4NeighSource, error) { return src, nil }
+	r.ifIndexFn = func(string) (int, error) { return 7, nil }
+	r.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
+	r.blacklistFn = func() map[string]bool { return nil }
+	r.hooks.Fast = func(mac string) (string, string) { return "arp-client", "manual" }
+	r.hooks.Full = func(mac, ip string) (string, string) { return "arp-client", "manual" }
+	r.applyHooks()
+	r.start()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		b, err := os.ReadFile(m4DevicesJSON)
+		if err == nil && strings.Contains(string(b), "02:5a:00:00:00:01") {
+			s := string(b)
+			if strings.Contains(s, "02:5a:00:00:00:02") || strings.Contains(s, "aa:bb:cc:dd:ee:ff") || strings.Contains(s, "00:00:00:00:00:00") {
+				t.Fatalf("/proc/net/arp 过滤错误, 混入无效或非热点网卡条目: %s", s)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			b, _ := os.ReadFile(m4DevicesJSON)
+			t.Fatalf("/proc/net/arp 兜底未在 2s 内写出有效设备: %q", b)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	m4StopRunner(t, r)
+	if nlCalls.Load() != 1 {
+		t.Fatalf("冷却期内不应重复触发 AF_NETLINK 系统调用, nlCalls=%d", nlCalls.Load())
+	}
+
+	// 2. 验证当 dumpIfFn 持续返回 EACCES 时, 主循环按 m4PermErrBackoff 退避而非 1Hz 风暴
+	m4PermErrBackoff = 5 * time.Second
+	var permDumpCalls atomic.Int32
+	r2 := newM4GoRunner("wlan2")
+	src2 := &fakeNeighSource{ch: make(chan []neigh.Entry, 4), stop: make(chan struct{})}
+	r2.subscribeFn = func() (m4NeighSource, error) { return src2, nil }
+	r2.ifIndexFn = func(string) (int, error) { return 7, nil }
+	r2.dumpIfFn = func(int) ([]neigh.Entry, error) {
+		permDumpCalls.Add(1)
+		return nil, syscall.EACCES
+	}
+	r2.statsCmdFn = func() (map[string][2]int64, error) { return nil, os.ErrNotExist }
+	r2.blacklistFn = func() map[string]bool { return nil }
+	r2.applyHooks()
+	r2.start()
+
+	if _, ok := m4WaitCount(&permDumpCalls, 0, 2*time.Second); !ok {
+		m4StopRunner(t, r2)
+		t.Fatal("首轮 dump 未触发")
+	}
+	// 观察 1.6 秒: 旧代码 1Hz 重试至少触发 2 次; 退避后只允许首轮 1 次!
+	time.Sleep(1600 * time.Millisecond)
+	gotCalls := permDumpCalls.Load()
+	m4StopRunner(t, r2)
+	if gotCalls != 1 {
+		t.Fatalf("EACCES 权限错误未退避, 1.6s 内触发了 %d 次(期望仅 1 次)", gotCalls)
 	}
 }

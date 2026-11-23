@@ -30,12 +30,30 @@ import (
 )
 
 const (
-	statsFilePrefix = "stats."
-	statsFileSuffix = ".jsonl"
-	statsDirRel     = "run"
-	defaultDays     = 1
-	maxDays         = 7
+	statsFilePrefix    = "stats."
+	statsFileSuffix    = ".jsonl"
+	statsPrimaryDirRel = "data/dpi_history"
+	statsDirRel        = "run"
+	defaultDays        = 1
+	maxDays            = 7
 )
+
+// resolveStatsJSONLPath 优先查找 data/dpi_history/stats.YYYYMMDD.jsonl, 不存在时回退查找旧 run/stats.YYYYMMDD.jsonl。
+func resolveStatsJSONLPath(hncDir, dayKey string) (string, bool) {
+	if hncDir == "" || dayKey == "" {
+		return "", false
+	}
+	name := statsFilePrefix + dayKey + statsFileSuffix
+	primary := filepath.Join(hncDir, "data", "dpi_history", name)
+	if st, err := os.Stat(primary); err == nil && !st.IsDir() {
+		return primary, true
+	}
+	legacy := filepath.Join(hncDir, statsDirRel, name)
+	if st, err := os.Stat(legacy); err == nil && !st.IsDir() {
+		return legacy, true
+	}
+	return "", false
+}
 
 // histRow matches the on-disk JSONL schema written by dpid/output/history.go
 type histRow struct {
@@ -94,7 +112,6 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 	macFilter := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("mac")))
 
 	now := time.Now()
-	statsDir := filepath.Join(s.hncDir, statsDirRel)
 	// v5.11: 窗口 = [本地零点-(days-1)天, now], 与本文件头注释"today only /
 	// hour-of-day local time"一致。旧实现按"当前 UTC 日"取文件且不按时间戳
 	// 过滤: UTC+8 下 days=1 实际是本地 08:00 起(凌晨看到的是昨天 08:00 以后),
@@ -110,7 +127,10 @@ func (s *server) apiDPIHistory(w http.ResponseWriter, r *http.Request) {
 		macFilter = resolve(macFilter)
 	}
 	for _, dayKey := range dayFileKeys(windowStart, now) {
-		path := filepath.Join(statsDir, statsFilePrefix+dayKey+statsFileSuffix)
+		path, ok := resolveStatsJSONLPath(s.hncDir, dayKey)
+		if !ok {
+			continue
+		}
 		readRows := readHistJSONL(path)
 		for _, r := range readRows {
 			if r.Ts < fromTs || r.Ts > toTs {

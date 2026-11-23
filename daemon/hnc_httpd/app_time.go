@@ -227,7 +227,7 @@ func appUsageDayCopy(hncDir, date string) *appUsageDay {
 	if d != nil {
 		return d
 	}
-	if _, err := os.Stat(appUsagePath(hncDir, date)); err != nil {
+	if _, ok := resolveAppUsageReadPath(hncDir, date); !ok {
 		return nil
 	}
 	return loadAppUsageDay(hncDir, date)

@@ -20,7 +20,9 @@ package main
 
 import (
 	"bufio"
+	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"math"
 	"net/http"
 	"net/netip"
@@ -31,6 +33,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"hnc.io/dpid/output"
@@ -309,12 +312,312 @@ var ctState struct {
 	acctTried bool
 }
 
+// ─── 纯 Go CTNETLINK 双通道兜底(复用 ct_events.go / ct_new_events.go 同包符号) ───
+
+const (
+	ctnlMsgCtGet          = 1 // IPCTNL_MSG_CT_GET
+	ctnlAttrStatus        = 3 // CTA_STATUS
+	ctnlAttrProtoInfo     = 4 // CTA_PROTOINFO
+	ctnlAttrTimeout       = 7 // CTA_TIMEOUT
+	ctnlProtoInfoTCP      = 1 // CTA_PROTOINFO_TCP
+	ctnlProtoInfoTCPState = 1 // CTA_PROTOINFO_TCP_STATE
+	ctnlCountersPackets   = 1 // CTA_COUNTERS_PACKETS
+	ctnlCounters32Packets = 3 // CTA_COUNTERS32_PACKETS
+	ctnlIPSSeenReply      = 1 << 1
+	ctnlIPSAssured        = 1 << 2
+	ctnlDumpRcvBuf        = 512 * 1024
+)
+
+func ctnlTCPStateName(st uint8) string {
+	switch st {
+	case 1:
+		return "SYN_SENT"
+	case 2:
+		return "SYN_RECV"
+	case 3:
+		return "ESTABLISHED"
+	case 4:
+		return "FIN_WAIT"
+	case 5:
+		return "CLOSE_WAIT"
+	case 6:
+		return "LAST_ACK"
+	case 7:
+		return "TIME_WAIT"
+	case 8:
+		return "CLOSE"
+	case 9:
+		return "SYN_SENT2"
+	}
+	return ""
+}
+
+// buildCtNetlinkGetDumpReq 构造 IPCTNL_MSG_CT_GET | NLM_F_REQUEST | NLM_F_DUMP 报文(nlmsghdr 16B + nfgenmsg 4B)
+func buildCtNetlinkGetDumpReq(family uint8, seq uint32) []byte {
+	var req [20]byte
+	binary.NativeEndian.PutUint32(req[0:4], 20)
+	binary.NativeEndian.PutUint16(req[4:6], uint16(nfnlSubsysCtnetlink<<8|ctnlMsgCtGet))
+	binary.NativeEndian.PutUint16(req[6:8], uint16(syscall.NLM_F_REQUEST|syscall.NLM_F_DUMP))
+	binary.NativeEndian.PutUint32(req[8:12], seq)
+	req[16] = family
+	req[17] = 0 // NFNETLINK_V0
+	return req[:]
+}
+
+func readCtNetlinkCounters(v []byte) (pkts, bytes uint64, hasBytes bool) {
+	hasPkts := false
+	nlAttrs(v, func(t uint16, x []byte) {
+		switch {
+		case t == ctnlCountersPackets && len(x) >= 8:
+			pkts, hasPkts = binary.BigEndian.Uint64(x[:8]), true
+		case t == ctnlCounters32Packets && len(x) >= 4 && !hasPkts:
+			pkts, hasPkts = uint64(binary.BigEndian.Uint32(x[:4])), true
+		case t == ctaCountersBytes && len(x) >= 8:
+			bytes, hasBytes = binary.BigEndian.Uint64(x[:8]), true
+		case t == ctaCounters32Bytes && len(x) >= 4 && !hasBytes:
+			bytes, hasBytes = uint64(binary.BigEndian.Uint32(x[:4])), true
+		}
+	})
+	return pkts, bytes, hasBytes
+}
+
+// parseCtNetlinkEntry 解析单条 CTNETLINK dump 响应消息体(nfgenmsg 4B + 属性树)为 ctEntry
+func parseCtNetlinkEntry(msgType uint16, payload []byte, v6Intern map[string]string) (ctEntry, bool) {
+	sub := msgType >> 8
+	cmd := msgType & 0xff
+	if sub != nfnlSubsysCtnetlink || (cmd != ipctnlMsgCtNew && cmd != ctnlMsgCtGet) || len(payload) < 4 {
+		return ctEntry{}, false
+	}
+	var e ctEntry
+	if payload[0] == syscall.AF_INET6 {
+		e.Family = "ipv6"
+	} else if payload[0] == syscall.AF_INET {
+		e.Family = "ipv4"
+	}
+	nlAttrs(payload[4:], func(t uint16, v []byte) {
+		switch t {
+		case ctaTupleOrig:
+			nlAttrs(v, func(t2 uint16, v2 []byte) {
+				switch t2 {
+				case ctaTupleIP:
+					nlAttrs(v2, func(t3 uint16, v3 []byte) {
+						switch {
+						case t3 == ctaIPv4Src && len(v3) >= 4:
+							var a4 [4]byte
+							copy(a4[:], v3[:4])
+							e.Src = netip.AddrFrom4(a4).String()
+							e.Family = "ipv4"
+						case t3 == ctaIPv4Dst && len(v3) >= 4:
+							var a4 [4]byte
+							copy(a4[:], v3[:4])
+							e.Dst = netip.AddrFrom4(a4).String()
+						case t3 == ctaIPv6Src && len(v3) >= 16:
+							var a16 [16]byte
+							copy(a16[:], v3[:16])
+							e.Src = canonicalizeIPv6Addr(netip.AddrFrom16(a16).String(), v6Intern)
+							e.Family = "ipv6"
+						case t3 == ctaIPv6Dst && len(v3) >= 16:
+							var a16 [16]byte
+							copy(a16[:], v3[:16])
+							e.Dst = canonicalizeIPv6Addr(netip.AddrFrom16(a16).String(), v6Intern)
+						}
+					})
+				case ctaTupleProto:
+					nlAttrs(v2, func(t3 uint16, v3 []byte) {
+						switch {
+						case t3 == ctaProtoNum && len(v3) >= 1:
+							e.Proto = ctProtoName(v3[0])
+						case t3 == ctaProtoSrcPort && len(v3) >= 2:
+							e.Sport = int(binary.BigEndian.Uint16(v3[:2]))
+						case t3 == ctaProtoDstPort && len(v3) >= 2:
+							e.Dport = int(binary.BigEndian.Uint16(v3[:2]))
+						}
+					})
+				}
+			})
+		case ctnlAttrStatus:
+			if len(v) >= 4 {
+				st := binary.BigEndian.Uint32(v[:4])
+				e.Assured = st&ctnlIPSAssured != 0
+				e.Unrepl = st&ctnlIPSSeenReply == 0
+			}
+		case ctnlAttrTimeout:
+			if len(v) >= 4 {
+				e.TTL = int(binary.BigEndian.Uint32(v[:4]))
+			}
+		case ctnlAttrProtoInfo:
+			nlAttrs(v, func(t2 uint16, v2 []byte) {
+				if t2 == ctnlProtoInfoTCP {
+					nlAttrs(v2, func(t3 uint16, v3 []byte) {
+						if t3 == ctnlProtoInfoTCPState && len(v3) >= 1 {
+							e.State = ctnlTCPStateName(v3[0])
+						}
+					})
+				}
+			})
+		case ctaCountersOrig:
+			p, b, ok := readCtNetlinkCounters(v)
+			e.UpPkts = p
+			if ok {
+				e.UpB, e.Acct = b, true
+			}
+		case ctaCountersReply:
+			p, b, ok := readCtNetlinkCounters(v)
+			e.DnPkts = p
+			if ok {
+				e.DnB, e.Acct = b, true
+			}
+		}
+	})
+	if e.Src == "" || e.Dst == "" || e.Proto == "" || (e.Family != "ipv4" && e.Family != "ipv6") {
+		return ctEntry{}, false
+	}
+	return e, true
+}
+
+// parseCtNetlinkDumpChunk 解析单个 recvfrom 返回的 Netlink 数据报, 支持按协议族过滤防老内核重复全表返回
+func parseCtNetlinkDumpChunk(raw []byte, wantFamily string, v6Intern map[string]string, dst []ctEntry) ([]ctEntry, bool, bool, bool, error) {
+	msgs, err := syscall.ParseNetlinkMessage(raw)
+	if err != nil {
+		return dst, false, false, false, err
+	}
+	hasAcct, sawV6, done := false, false, false
+	for _, m := range msgs {
+		switch m.Header.Type {
+		case syscall.NLMSG_NOOP:
+			continue
+		case syscall.NLMSG_DONE:
+			return dst, hasAcct, sawV6, true, nil
+		case syscall.NLMSG_ERROR:
+			if len(m.Data) < 4 {
+				return dst, hasAcct, sawV6, false, errors.New("ctnetlink: truncated nlmsgerr")
+			}
+			code := int32(binary.NativeEndian.Uint32(m.Data[:4]))
+			if code == 0 {
+				continue
+			}
+			if code < 0 {
+				code = -code
+			}
+			return dst, hasAcct, sawV6, false, syscall.Errno(code)
+		}
+		if len(dst) >= ctMaxLines {
+			continue
+		}
+		if e, ok := parseCtNetlinkEntry(m.Header.Type, m.Data, v6Intern); ok {
+			if e.Family == "ipv6" {
+				sawV6 = true
+			}
+			if wantFamily == "" || e.Family == wantFamily {
+				dst = append(dst, e)
+				if e.Acct {
+					hasAcct = true
+				}
+			}
+		}
+	}
+	return dst, hasAcct, sawV6, done, nil
+}
+
+func shouldFallbackCTNetlink(err error) bool {
+	if err == nil {
+		return false
+	}
+	return os.IsNotExist(err) || errors.Is(err, os.ErrPermission) ||
+		errors.Is(err, syscall.ENOENT) || errors.Is(err, syscall.EACCES) || errors.Is(err, syscall.EPERM)
+}
+
+var ctNetlinkDumpFn = dumpConntrackNetlinkOS
+
+func dumpConntrackNetlinkOS() ([]ctEntry, bool, error) {
+	fd, err := syscall.Socket(syscall.AF_NETLINK, syscall.SOCK_RAW|syscall.SOCK_CLOEXEC, nlNetfilter)
+	if err != nil {
+		return nil, false, err
+	}
+	defer syscall.Close(fd)
+	if err := syscall.Bind(fd, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+		return nil, false, err
+	}
+	_ = syscall.SetsockoptInt(fd, syscall.SOL_SOCKET, syscall.SO_RCVBUF, ctnlDumpRcvBuf)
+	tv := syscall.Timeval{Sec: 2}
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_RCVTIMEO, &tv)
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
+
+	bufPtr := ctScanBufPool.Get().(*[]byte)
+	buf := *bufPtr
+	if len(buf) < 64*1024 {
+		buf = make([]byte, 64*1024)
+	}
+	defer func() {
+		if cap(buf) <= 256*1024 {
+			*bufPtr = buf
+			ctScanBufPool.Put(bufPtr)
+		}
+	}()
+
+	v6Intern := make(map[string]string, 32)
+	entries := make([]ctEntry, 0, 64)
+	hasAcct := false
+
+	dumpFamily := func(family uint8, seq uint32, wantFam string) (bool, error) {
+		req := buildCtNetlinkGetDumpReq(family, seq)
+		if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
+			return false, err
+		}
+		sawV6Any := false
+		for {
+			n, _, rerr := syscall.Recvfrom(fd, buf, 0)
+			if rerr != nil {
+				if errors.Is(rerr, syscall.EINTR) {
+					continue
+				}
+				return sawV6Any, rerr
+			}
+			if n <= 0 {
+				break
+			}
+			var chunkAcct, chunkV6, done bool
+			var perr error
+			entries, chunkAcct, chunkV6, done, perr = parseCtNetlinkDumpChunk(buf[:n], wantFam, v6Intern, entries)
+			if chunkAcct {
+				hasAcct = true
+			}
+			if chunkV6 {
+				sawV6Any = true
+			}
+			if perr != nil {
+				return sawV6Any, perr
+			}
+			if done {
+				return sawV6Any, nil
+			}
+		}
+		return sawV6Any, nil
+	}
+
+	sawV6, err4 := dumpFamily(syscall.AF_INET, 1, "")
+	var err6 error
+	if !sawV6 && len(entries) < ctMaxLines {
+		_, err6 = dumpFamily(syscall.AF_INET6, 2, "ipv6")
+	}
+	if err4 != nil && err6 != nil {
+		return nil, false, err4
+	}
+	return entries, hasAcct, nil
+}
+
+func canReadConntrackNetlink() bool {
+	_, _, err := ctNetlinkDumpFn()
+	return err == nil
+}
+
 func conntrackSnapshot() *ctSnapshot {
 	ctState.mu.Lock()
 	defer ctState.mu.Unlock()
 	now := time.Now()
 	ttl := conntrackEffectiveTTL(monoNowNs())
-	if os.Getenv("HNC_CONNTRACK_PATH") != "" && ttl > 1500*time.Millisecond {
+	customCTPath := os.Getenv("HNC_CONNTRACK_PATH")
+	if customCTPath != "" && ttl > 1500*time.Millisecond {
 		// 测试注入 HNC_CONNTRACK_PATH 时保持 1.5s 步进窗口(兼容 v513/v514 2s 差分与衰减循环);
 		// 生产环境无该环境变量, 100% 严格执行 4s(面板激活)/8s(后台静默)自适应 TTL。
 		ttl = 1500 * time.Millisecond
@@ -344,33 +647,48 @@ func conntrackSnapshot() *ctSnapshot {
 		upBps:   make(map[string]float64, prevCap),
 		dnBps:   make(map[string]float64, prevCap),
 	}
-	path := conntrackPath()
+	path := "/proc/net/nf_conntrack"
+	if customCTPath != "" {
+		path = customCTPath
+	}
 	f, err := os.Open(path)
 	if err != nil {
-		sn.err = err.Error()
-		ctState.snap = sn
-		return sn
-	}
-
-	bufPtr := ctScanBufPool.Get().(*[]byte)
-	sc := bufio.NewScanner(f)
-	sc.Buffer(*bufPtr, 1024*1024)
-	v6Intern := make(map[string]string, 32)
-	n := 0
-	for sc.Scan() {
-		if n++; n > ctMaxLines {
-			break
+		// 铁律: HNC_CONNTRACK_PATH 非空(测试注入路径)时严禁回退读取宿主机真实内核 CTNETLINK!
+		if customCTPath == "" && shouldFallbackCTNetlink(err) {
+			entries, hasAcct, nlErr := ctNetlinkDumpFn()
+			if nlErr != nil {
+				sn.err = err.Error() + " (ctnetlink: " + nlErr.Error() + ")"
+				ctState.snap = sn
+				return sn
+			}
+			sn.entries = entries
+			sn.acct = hasAcct
+		} else {
+			sn.err = err.Error()
+			ctState.snap = sn
+			return sn
 		}
-		if e, ok := parseConntrackLinePooled(sc.Text(), v6Intern); ok {
-			sn.entries = append(sn.entries, e)
-			if e.Acct {
-				sn.acct = true
+	} else {
+		bufPtr := ctScanBufPool.Get().(*[]byte)
+		sc := bufio.NewScanner(f)
+		sc.Buffer(*bufPtr, 1024*1024)
+		v6Intern := make(map[string]string, 32)
+		n := 0
+		for sc.Scan() {
+			if n++; n > ctMaxLines {
+				break
+			}
+			if e, ok := parseConntrackLinePooled(sc.Text(), v6Intern); ok {
+				sn.entries = append(sn.entries, e)
+				if e.Acct {
+					sn.acct = true
+				}
 			}
 		}
-	}
-	_ = f.Close()
-	if cap(*bufPtr) <= 256*1024 {
-		ctScanBufPool.Put(bufPtr)
+		_ = f.Close()
+		if cap(*bufPtr) <= 256*1024 {
+			ctScanBufPool.Put(bufPtr)
+		}
 	}
 
 	sn.readable = true

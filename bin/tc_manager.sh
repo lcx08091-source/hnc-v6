@@ -28,6 +28,11 @@
 #   set_limit <iface> <mark_id> <down_mbps> <up_mbps> [ip]
 
 HNC_DIR=${HNC_DIR:-/data/local/hnc}
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 if [ -f "$HNC_DIR/bin/hnc_constants.sh" ]; then
     . "$HNC_DIR/bin/hnc_constants.sh"
 elif [ -f "${0%/*}/hnc_constants.sh" ]; then
@@ -260,7 +265,9 @@ netem_leaf_replace_zero() {
     local lim; lim=$(netem_limit_pkts 0 0 0)
     tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$lim" 2>/dev/null && return 0
     tc qdisc del dev "$dev" parent "1:$class_id" 2>/dev/null || true
-    tc qdisc add dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$lim" 2>/dev/null
+    tc qdisc add dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$lim" 2>/dev/null && return 0
+    log "netem_leaf_replace_zero: sch_netem unavailable on $dev 1:$class_id; falling back to default FIFO leaf"
+    return 0
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -488,7 +495,7 @@ rate_to_bps() {
         if(u ~ /^[Gg]/) m=1000000000;
         else if(u ~ /^[Mm]/) m=1000000;
         else if(u ~ /^[Kk]/) m=1000;
-        v=(n+0)*m; if(v<0)v=0; print int(v);
+        v=(n+0)*m; if(v<0)v=0; printf "%.0f\n", (v - (v % 1));
     }'
 }
 
@@ -964,7 +971,9 @@ set_netem_only() {
     args="$args limit $(netem_limit_pkts "$_rate_bps" "$delay_ms" "$jitter_ms")"
 
     # v5.3: clearing delay can safely return to SQM leaf if the user enabled it.
+    local _zero_netem=0
     if ! gt0 "$delay_ms" && ! gt0 "$jitter_ms" && ! gt0 "$loss"; then
+        _zero_netem=1
         local leaf_kind; leaf_kind=$(sqm_preferred_leaf)
         if [ "$leaf_kind" != "off" ]; then
             sqm_leaf_replace "$dev" "$class_id" "$leaf_handle" "$leaf_kind" && return 0
@@ -981,7 +990,12 @@ set_netem_only() {
     tc qdisc replace dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem $args 2>/dev/null && return 0
     tc qdisc del    dev "$dev" parent "1:$class_id" 2>/dev/null || true
     # shellcheck disable=SC2086
-    tc qdisc add    dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem $args 2>/dev/null
+    tc qdisc add    dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem $args 2>/dev/null && return 0
+    if [ "$_zero_netem" = "1" ]; then
+        log "set_netem_only: sch_netem unavailable on $dev 1:$class_id while clearing delay; falling back to default FIFO leaf"
+        return 0
+    fi
+    return 1
 }
 
 # rc18: re-tune the zero-delay netem placeholder's queue limit to match the
@@ -995,7 +1009,7 @@ tune_leaf_netem_limit() {
     leaf_has_active_netem "$dev" "$class_id" && return 0
     local leaf_handle
     if [ "$dev" = "$IFB_IFACE" ]; then leaf_handle=$((class_id + 2000)); else leaf_handle=$((class_id + 1000)); fi
-    local bps; bps=$(awk -v m="${mbps:-0}" 'BEGIN{print int((m+0)*1000000)}')
+    local bps; bps=$(awk -v m="${mbps:-0}" 'BEGIN{v=(m+0)*1000000; if(v<0)v=0; printf "%.0f\n", (v - (v % 1))}')
     tc qdisc change dev "$dev" parent "1:$class_id" handle "${leaf_handle}:" netem delay 0ms limit "$(netem_limit_pkts "$bps" 0 0)" 2>/dev/null || true
 }
 
@@ -1057,7 +1071,7 @@ set_uplink_police() {
     fi
 
     # 解析该客户端 MAC 并为所有全局单播 IPv6 邻居挂载 u32 ip6 src police
-    local _mac="" _v6
+    local _mac="" _v6 _n6_out
     if [ -n "$ip" ] && [ -f "$DEVICES_FILE" ]; then
         _mac=$(tr -d '\r\n' < "$DEVICES_FILE" 2>/dev/null | awk -v t="$ip" '
             {
@@ -1076,7 +1090,10 @@ set_uplink_police() {
         _mac=$(ip -4 neigh show dev "$iface" to "$ip" 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="lladdr"){print tolower($(i+1)); exit}}')
     fi
     if [ -n "$_mac" ] && command -v ip >/dev/null 2>&1; then
-        for _v6 in $(ip -6 neigh show dev "$iface" 2>/dev/null | awk -v m="$_mac" 'tolower($0) ~ ("lladdr " m) && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $NF != "FAILED" && $NF != "INCOMPLETE" {print $1}'); do
+        if ! _n6_out=$(ip -6 neigh show dev "$iface" 2>/dev/null) || { [ -z "$_n6_out" ] && [ -z "${HNC_TEST_MODE:-}" ]; }; then
+            _n6_out=$(ip neigh show dev "$iface" 2>/dev/null)
+        fi
+        for _v6 in $(printf '%s\n' "$_n6_out" | awk -v m="$_mac" 'tolower($0) ~ ("lladdr " m) && $1 ~ /:/ && tolower($1) !~ /^(fe80:|ff)/ && $NF != "FAILED" && $NF != "INCOMPLETE" {print $1}'); do
             # shellcheck disable=SC2086
             tc filter add dev "$iface" $_ing_parent protocol ipv6 prio "$prio6" u32                 match ip6 src "${_v6}/128" police rate "$rate" burst "$pburst" mtu 65535 drop 2>/dev/null && _any_ok=1 || true
         done
@@ -1249,17 +1266,13 @@ set_global_shaper() {
 }
 
 _ve_root_kbps() {
-    local _d=$1 _ln _rt _bps
+    local _d=$1 _ln _rt _kbps
     _ln=$(tc class show dev "$_d" 2>/dev/null | awk '$1=="class" && $2=="htb" && $3=="1:1" {print; exit}')
     _rt=$(printf '%s\n' "$_ln" | awk '{for(i=1;i<NF;i++) if($i=="ceil"){print $(i+1); exit}}')
     [ -n "$_rt" ] || _rt=$(printf '%s\n' "$_ln" | awk '{for(i=1;i<NF;i++) if($i=="rate"){print $(i+1); exit}}')
     [ -n "$_rt" ] || _rt="$DEFAULT_RATE"
-    _bps=$(rate_to_bps "$_rt")
-    if [ "${_bps:-0}" -gt 0 ]; then
-        echo $(( _bps / 1000 ))
-    else
-        echo 1000000
-    fi
+    _kbps=$(rate_to_bps "$_rt" | awk '{v = ($1 + 0) / 1000.0; if (v > 0) printf "%.0f\n", (v - (v % 1)); else print 1000000}')
+    echo "${_kbps:-1000000}"
 }
 
 _ve_clean_legacy() {
@@ -1362,7 +1375,7 @@ set_vector_express() {
         tc class replace dev "$iface" parent 1:1 classid 1:8010 htb rate "${_drate}kbit" ceil "${_dkbps}kbit" burst 64k cburst 200k prio 0 quantum 1514 2>/dev/null || true
         tc qdisc replace dev "$iface" parent 1:8010 handle 8010: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
         _ve_install_filters "$iface"
-        _dbgk=$(( _dkbps * bg_pct / 100 ))
+        _dbgk=$(( (_dkbps / 100) * bg_pct + ((_dkbps % 100) * bg_pct) / 100 ))
         [ "$_dbgk" -lt 1000 ] && _dbgk=1000
         _dburst=$(burst_for_rate "${_dbgk}kbit")
         tc_class_set "$iface" 1:1 1:9999 rate "${_dbgk}kbit" ceil "${_dbgk}kbit" burst "$_dburst" cburst "$_dburst" prio 7 || true
@@ -1378,7 +1391,7 @@ set_vector_express() {
             tc class replace dev "$IFB_IFACE" parent 1:1 classid 1:8010 htb rate "${_urate}kbit" ceil "${_ukbps}kbit" burst 32k cburst 200k prio 0 quantum 1514 2>/dev/null || true
             tc qdisc replace dev "$IFB_IFACE" parent 1:8010 handle 8110: fq_codel target 2ms interval 40ms quantum 300 limit 512 2>/dev/null || true
             _ve_install_filters "$IFB_IFACE"
-            _ubgk=$(( _ukbps * bg_pct / 100 ))
+            _ubgk=$(( (_ukbps / 100) * bg_pct + ((_ukbps % 100) * bg_pct) / 100 ))
             [ "$_ubgk" -lt 1000 ] && _ubgk=1000
             _uburst=$(burst_for_rate "${_ubgk}kbit")
             tc_class_set "$IFB_IFACE" 1:1 1:9999 rate "${_ubgk}kbit" ceil "${_ubgk}kbit" burst "$_uburst" cburst "$_uburst" prio 7 || true
@@ -1494,10 +1507,8 @@ disable_offload() {
         [ -w "$p" ] && echo 0 > "$p" 2>/dev/null || true
     done
 
-    # bridge-nf 确保桥接帧走 iptables（v3.4.1：很多 ColorOS 内核没编 bridge 模块，
-    # /proc/sys/net/bridge 目录直接不存在。无害，静默忽略。）
-    [ -w /proc/sys/net/bridge/bridge-nf-call-iptables ]  && echo 1 > /proc/sys/net/bridge/bridge-nf-call-iptables  2>/dev/null || true
-    [ -w /proc/sys/net/bridge/bridge-nf-call-ip6tables ] && echo 1 > /proc/sys/net/bridge/bridge-nf-call-ip6tables 2>/dev/null || true
+    # 不强制开启 bridge-nf-call-ip*tables: 否则双频桥 ap_br_wlan0 下 2.4G<->5G 局域网互传帧
+    # 会被送入 FORWARD/HNC_STATS 误扣设备与全局外网月度配额。
 
     # 关闭 RPS（部分配置下绕过 tc ingress）
     for q in /sys/class/net/"$iface"/queues/rx-*/rps_cpus; do

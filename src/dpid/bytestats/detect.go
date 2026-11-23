@@ -54,6 +54,6 @@ func Detect() ByteSampler {
 		log.Printf("bytestats: dumpsys unavailable (%v), using none", err)
 	}
 
-	log.Printf("bytestats: ⚠ no backend available, per-uid byte stats disabled")
+	log.Printf("bytestats: [WARN] no backend available, per-uid byte stats disabled")
 	return &NoneSampler{}
 }

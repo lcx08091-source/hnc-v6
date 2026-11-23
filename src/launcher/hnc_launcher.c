@@ -38,6 +38,7 @@
 #endif
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <stdarg.h>
 #include <string.h>
 #include <unistd.h>
@@ -70,10 +71,11 @@
 /* 重启策略 */
 #define RESTART_BACKOFF_MIN     2          /* 第一次重启等 2s */
 #define RESTART_BACKOFF_MAX     30         /* 最长 30s (指数退避封顶) */
+#define STABLE_RUN_RESET_SEC    30         /* 稳定运行 >=30s 后重置 backoff = 2s */
 #define CRASH_WINDOW_SEC        60         /* 60s 滑动窗口 */
 #define CRASH_LIMIT             5          /* 窗口内 5 次崩溃 → 进入冷却(非永久放弃) */
-#define CRASH_COOLDOWN_SEC      120        /* rc12: 崩溃风暴后冷却 120s 再自愈重试,
-                                            * 不再永久 observe(被动只读守护进程应自愈) */
+#define CRASH_COOLDOWN_SEC      120        /* rc12: 崩溃风暴后冷却 120s 再自愈重试 */
+#define CRASH_FLAG_MAX_BYTES    4096       /* dpid.crashflag 4KB 硬上限裁剪 */
 
 /* ─── 全局状态 ─────────────────────────────────────────────────────── */
 
@@ -82,10 +84,6 @@ static volatile sig_atomic_t g_child_pid = 0;
 
 /* ─── 日志 ─────────────────────────────────────────────────────────── */
 
-/*
- * 用 line-buffered FILE* 输出. open() + dup2() 把 stdout/stderr 重定向到日志
- * 是更干净的做法, 但保留 fprintf 兼容 strings 里 "[%s] [LAUNCHER] %s" 格式.
- */
 static FILE *g_log = NULL;
 
 static void log_open(void)
@@ -118,7 +116,16 @@ static void log_msg(const char *fmt, ...)
 	fputc('\n', g_log);
 }
 
-/* ─── 文件操作 helpers ─────────────────────────────────────────────── */
+/* ─── 文件操作与进程加固 helpers ───────────────────────────────────── */
+
+static void set_oom_score_adj(const char *val)
+{
+	int fd = open("/proc/self/oom_score_adj", O_WRONLY | O_CLOEXEC);
+	if (fd < 0)
+		return;
+	(void)write(fd, val, strlen(val));
+	close(fd);
+}
 
 static int write_pid_file(const char *path, pid_t pid)
 {
@@ -142,60 +149,68 @@ static pid_t read_pid_file(const char *path)
 	return (pid_t)raw_pid;
 }
 
-/* rc30.12.29 (P1.10): pid_alive() 已删除 — check_singleton 改 flock 后不再使用 */
+/* ─── 单实例保护 (flock + fstat/stat inode 校验防 unlink 孤岛双实例) ── */
 
-/* ─── 单实例保护 ──────────────────────────────────────────────────── */
-
-/* rc30.12.29 (P1.10): TOCTOU 修复.
- * 之前 check_singleton 是 read_pid → kill(pid, 0) → write_pid_file 两阶段,
- * 中间窗口里两个 launcher 同时启动可能都过检查然后都写 pid, 后写者赢但实际
- * 有两个 launcher 在抢 dpid.
- *
- * 现在: open(O_CREAT|O_RDWR) + flock(LOCK_EX|LOCK_NB) 一步原子锁定.
- * fd 故意全程不 close — kernel 在进程退出时自动释放 flock, 干净.
- * 如果锁被另一个 launcher 持有, 读 pid 报告并退出. */
 static int g_lock_fd = -1;
 
 static int check_singleton(void)
 {
-	int fd = open(PID_GUARD, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
-	if (fd < 0) {
-		log_msg("cannot open %s: errno=%d %s",
-			PID_GUARD, errno, strerror(errno));
-		return -1;
+	int attempt;
+
+	for (attempt = 0; attempt < 4; attempt++) {
+		int fd = open(PID_GUARD, O_CREAT | O_RDWR | O_CLOEXEC, 0644);
+		if (fd < 0) {
+			log_msg("cannot open %s: errno=%d %s",
+				PID_GUARD, errno, strerror(errno));
+			return -1;
+		}
+		if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
+			pid_t existing = read_pid_file(PID_GUARD);
+			log_msg("another launcher running (PID=%d), exiting",
+				(int)existing);
+			close(fd);
+			return -1;
+		}
+
+		struct stat st_fd, st_path;
+		if (fstat(fd, &st_fd) != 0 || stat(PID_GUARD, &st_path) != 0 ||
+		    st_fd.st_dev != st_path.st_dev || st_fd.st_ino != st_path.st_ino) {
+			close(fd);
+			continue; /* 旧实例退出瞬间刚 unlink 了该孤岛 inode, 重试当前路径 */
+		}
+
+		if (ftruncate(fd, 0) < 0) {
+			log_msg("ftruncate %s failed: errno=%d %s",
+				PID_GUARD, errno, strerror(errno));
+		}
+		(void)lseek(fd, 0, SEEK_SET);
+		char buf[32];
+		int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
+		if (n <= 0 || write(fd, buf, (size_t)n) != n) {
+			log_msg("write pid to %s failed: errno=%d %s",
+				PID_GUARD, errno, strerror(errno));
+			close(fd);
+			return -1;
+		}
+		/* fd 不 close — 持续持有 flock 直到进程退出 */
+		g_lock_fd = fd;
+		return 0;
 	}
-	if (flock(fd, LOCK_EX | LOCK_NB) != 0) {
-		/* 另一个 launcher 已持锁 — 读它的 pid 用于日志 */
-		pid_t existing = read_pid_file(PID_GUARD);
-		log_msg("another launcher running (PID=%d), exiting",
-			(int)existing);
-		close(fd);
-		return -1;
-	}
-	/* 持锁成功. 写自己的 pid. ftruncate 清掉前一个 launcher 残留的 pid. */
-	if (ftruncate(fd, 0) < 0) {
-		log_msg("ftruncate %s failed: errno=%d %s",
-			PID_GUARD, errno, strerror(errno));
-		/* 非致命, 继续 */
-	}
-	char buf[32];
-	int n = snprintf(buf, sizeof(buf), "%d\n", (int)getpid());
-	if (n <= 0 || write(fd, buf, (size_t)n) != n) {
-		log_msg("write pid to %s failed: errno=%d %s",
-			PID_GUARD, errno, strerror(errno));
-		close(fd);
-		return -1;
-	}
-	/* fd 不 close — 持续持有 flock 直到进程退出 */
-	g_lock_fd = fd;
-	return 0;
+
+	log_msg("failed to acquire stable inode lock on %s", PID_GUARD);
+	return -1;
 }
 
 static void cleanup_singleton_and_log(void)
 {
 	if (g_lock_fd >= 0) {
-		if (read_pid_file(PID_GUARD) == getpid())
+		struct stat st_fd, st_path;
+		if (fstat(g_lock_fd, &st_fd) == 0 &&
+		    stat(PID_GUARD, &st_path) == 0 &&
+		    st_fd.st_dev == st_path.st_dev &&
+		    st_fd.st_ino == st_path.st_ino) {
 			unlink(PID_GUARD);
+		}
 		close(g_lock_fd);
 		g_lock_fd = -1;
 	}
@@ -208,7 +223,7 @@ static void cleanup_singleton_and_log(void)
 /* ─── Crash loop 保护 ─────────────────────────────────────────────── */
 
 struct crash_tracker {
-	time_t timestamps[CRASH_LIMIT];
+	int64_t timestamps[CRASH_LIMIT];
 	int count;
 };
 
@@ -217,35 +232,31 @@ static void crash_tracker_init(struct crash_tracker *t)
 	memset(t, 0, sizeof(*t));
 }
 
-/* 记录一次崩溃. 返回 1 表示窗口内崩溃数 >= 阈值 */
-/* rc30.12.29 (P1.9): 重写为 "先压缩窗口外, 再追加新崩溃" 的两步语义.
- * 之前是 "滑动窗口里现有几次 + 加新条目 + 滚动覆盖" 三步交错,
- * 在窗口边界滚动时容易让人误读. 行为等价, 代码更直白. */
-static time_t mono_sec(void)
+static int64_t mono_sec(void)
 {
 	struct timespec ts;
 	if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0)
-		return ts.tv_sec;
-	return time(NULL);
+		return (int64_t)ts.tv_sec;
+	return (int64_t)time(NULL);
 }
 
 static int crash_tracker_record(struct crash_tracker *t)
 {
-	time_t now = mono_sec();
+	int64_t now = mono_sec();
 	int kept = 0;
 	int i;
 
 	/* 1. 压缩: 把窗口内的留下, 窗口外的丢掉 (CLOCK_MONOTONIC 防 NTP 跳变) */
 	for (i = 0; i < t->count; i++) {
 		if (now >= t->timestamps[i] &&
-		    now - t->timestamps[i] <= CRASH_WINDOW_SEC)
+		    now - t->timestamps[i] <= (int64_t)CRASH_WINDOW_SEC)
 			t->timestamps[kept++] = t->timestamps[i];
 	}
 
 	/* 2. 追加当前崩溃 (数组满了就丢最老的, 用 memmove 保留语义) */
 	if (kept >= CRASH_LIMIT) {
 		memmove(&t->timestamps[0], &t->timestamps[1],
-			sizeof(time_t) * (CRASH_LIMIT - 1));
+			sizeof(int64_t) * (CRASH_LIMIT - 1));
 		t->timestamps[CRASH_LIMIT - 1] = now;
 		t->count = CRASH_LIMIT;
 	} else {
@@ -256,11 +267,55 @@ static int crash_tracker_record(struct crash_tracker *t)
 	return t->count >= CRASH_LIMIT;
 }
 
+/* 对 dpid.crashflag 实施 4KB 裁剪, 保留尾部完整行防止长期零星重启撑爆文件 */
+static void trim_crash_flag_if_needed(void)
+{
+	struct stat st;
+	if (stat(CRASH_FLAG, &st) != 0 || st.st_size <= (off_t)CRASH_FLAG_MAX_BYTES)
+		return;
+
+	int fd = open(CRASH_FLAG, O_RDWR | O_CLOEXEC);
+	if (fd < 0)
+		return;
+
+	char tail[CRASH_FLAG_MAX_BYTES / 2];
+	off_t keep_off = st.st_size - (off_t)sizeof(tail);
+	if (keep_off < 0)
+		keep_off = 0;
+
+	ssize_t n = 0;
+	if (lseek(fd, keep_off, SEEK_SET) >= 0)
+		n = read(fd, tail, sizeof(tail));
+
+	if (n <= 0) {
+		(void)ftruncate(fd, 0);
+		close(fd);
+		return;
+	}
+
+	size_t start = 0;
+	if (keep_off > 0) {
+		while (start < (size_t)n && tail[start] != '\n')
+			start++;
+		if (start < (size_t)n)
+			start++;
+	}
+
+	size_t kept_len = (size_t)n - start;
+	if (lseek(fd, 0, SEEK_SET) == 0) {
+		if (kept_len > 0)
+			(void)write(fd, tail + start, kept_len);
+		(void)ftruncate(fd, (off_t)kept_len);
+	}
+	close(fd);
+}
+
 static void write_crash_flag(void)
 {
+	trim_crash_flag_if_needed();
 	FILE *f = fopen(CRASH_FLAG, "ae");
 	if (f) {
-		fprintf(f, "%ld\n", (long)time(NULL));
+		fprintf(f, "%lld\n", (long long)time(NULL));
 		fclose(f);
 	}
 }
@@ -269,6 +324,8 @@ static void write_crash_flag(void)
  * 注意: Go dpid 正常启动前 5 分钟内文件恒有 1 行 armed 时间戳, 严禁凭文件存在即睡 120s! */
 static int count_recent_crash_flags(void)
 {
+	trim_crash_flag_if_needed();
+
 	FILE *f = fopen(CRASH_FLAG, "re");
 	char line[64];
 	long long now_ll;
@@ -394,7 +451,9 @@ static pid_t spawn_dpid(void)
 	}
 
 	if (pid == 0) {
-		/* 子进程: 恢复默认 SIGPIPE/信号掩码 + stdin 绑 /dev/null + stdout/stderr 绑 dpid.log */
+		/* 子进程恢复默认 oom_score_adj=0 (不继承守护进程 -900 免死金牌) */
+		set_oom_score_adj("0\n");
+
 		struct sigaction sa_dfl;
 		sigset_t empty_mask;
 		memset(&sa_dfl, 0, sizeof(sa_dfl));
@@ -419,10 +478,6 @@ static pid_t spawn_dpid(void)
 				close(fd);
 		}
 
-		/*
-		 * argv[]: { "hnc_dpid", "-config", DPID_CONFIG, NULL }
-		 * execv 不查 PATH, 必须传绝对路径.
-		 */
 		char *const dpid_argv[] = {
 			(char *)"hnc_dpid",
 			(char *)"-config",
@@ -431,7 +486,6 @@ static pid_t spawn_dpid(void)
 		};
 		execv(BIN_DPID, dpid_argv);
 
-		/* execv 失败. fprintf 到 stderr 现在指向 dpid.log */
 		fprintf(stderr, "execv failed: errno=%d %s\n", errno, strerror(errno));
 		_exit(127);
 	}
@@ -498,7 +552,7 @@ static int wait_dpid(pid_t pid, int *out_rc, int *out_signum)
 static int run_supervise_loop(void)
 {
 	struct crash_tracker crashes;
-	struct crash_tracker fork_fails;  /* rc30.13.1: 独立追踪 fork 失败 */
+	struct crash_tracker fork_fails;
 	int backoff = RESTART_BACKOFF_MIN;
 
 	crash_tracker_init(&crashes);
@@ -507,15 +561,11 @@ static int run_supervise_loop(void)
 	while (!g_shutdown) {
 		pid_t pid;
 		int rc, signum, abnormal;
+		int64_t spawn_mono = mono_sec();
 
 		/* 启动 dpid */
 		pid = spawn_dpid();
 		if (pid < 0) {
-			/* rc30.13.1 fix: 上一版日志 "spawning dpid anyway (it will
-			 * go blind mode)" 误导 — fork 失败根本没 spawn 任何东西.
-			 * 改成据实描述. 同时加 fork 失败的 crash tracker, 防止系统
-			 * OOM / ulimit 触顶时无限重试 (上一版只在 dpid 真跑起来后
-			 * 异常退出才计数, fork 失败永远不进 observe 模式). */
 			log_msg("fork failed (errno=%d), retrying after %ds backoff",
 				errno, backoff);
 			if (crash_tracker_record(&fork_fails)) {
@@ -536,15 +586,14 @@ static int run_supervise_loop(void)
 			sleep((unsigned int)backoff);
 			if (g_shutdown)
 				break;
-			if (backoff < RESTART_BACKOFF_MAX)
+			if (backoff < RESTART_BACKOFF_MAX) {
 				backoff *= 2;
+				if (backoff > RESTART_BACKOFF_MAX)
+					backoff = RESTART_BACKOFF_MAX;
+			}
 			continue;
 		}
 
-		/* v5.12+: 信号竞态修复。SIGTERM 若落在 fork() 与 spawn_dpid 里
-		 * g_child_pid = pid 赋值之间, on_term_signal 看到 g_child_pid==0 不会
-		 * 转发 SIGTERM; 若继续进阻塞 wait_dpid(), dpid 卡住将永久挂死。
-		 * 直接补发 SIGTERM 并 break 进入下方 10s WNOHANG + SIGKILL 有界清理路径。 */
 		if (g_shutdown) {
 			kill(pid, SIGTERM);
 			break;
@@ -560,21 +609,17 @@ static int run_supervise_loop(void)
 		if (g_shutdown)
 			break;
 
+		/* 子进程已稳定运行 >=30s, 重置指数退避为初始 2s */
+		if (mono_sec() - spawn_mono >= (int64_t)STABLE_RUN_RESET_SEC)
+			backoff = RESTART_BACKOFF_MIN;
+
 		if (abnormal == 0) {
-			/* rc11: dpid 干净退出(rc=0)但 launcher 没在关(g_shutdown 上面已
-			 * 处理)。dpid 把 SIGTERM 当干净退出 → 残留 shell guard / LMK 一旦
-			 * SIGTERM 掉 dpid,这里就会被误当"主动停止"而放弃监管,导致 dpid
-			 * 永远不再被拉起,用户必须手动"重新绑定"。真正的人工停止会先置
-			 * g_shutdown。所以这里当作意外退出 → 落入下面的重启路径。 */
 			log_msg("dpid exited rc=0 without supervisor shutdown "
 				"(external SIGTERM / stale guard?); treating as unexpected, restarting");
 		}
 
 		/* 异常退出 或 意外的 rc=0 — 记崩溃, 检查 loop 保护 */
 		if (crash_tracker_record(&crashes)) {
-			/* rc12: 不再永久放弃。被动只读守护进程应当自愈:
-			 * 子进程正常启动后的崩溃时间戳由 Go dpid 自身追加, 若早期崩溃/execv 失败
-			 * 未留下记录则补记一行诊断标记; 长冷却后清标志、重置计数、继续监管。 */
 			log_msg("CRASH_LOOP: %d crashes in %ds; cooling down %ds then self-healing "
 				"(no permanent give-up)",
 				CRASH_LIMIT, CRASH_WINDOW_SEC, CRASH_COOLDOWN_SEC);
@@ -594,8 +639,11 @@ static int run_supervise_loop(void)
 		sleep((unsigned int)backoff);
 		if (g_shutdown)
 			break;
-		if (backoff < RESTART_BACKOFF_MAX)
+		if (backoff < RESTART_BACKOFF_MAX) {
 			backoff *= 2;
+			if (backoff > RESTART_BACKOFF_MAX)
+				backoff = RESTART_BACKOFF_MAX;
+		}
 	}
 
 	log_msg("shutting down (signal received)");
@@ -606,9 +654,6 @@ static int run_supervise_loop(void)
 		int waited;
 		pid_t cpid = (pid_t)g_child_pid;
 		log_msg("waiting for dpid pid=%d to exit", (int)cpid);
-		/* v5.12: 补发 SIGTERM(幂等)并有界等待, 超时 SIGKILL。旧代码无限
-		 * waitpid: 若 SIGTERM 没送达(见上方竞态)或 dpid 卡在退出路径上,
-		 * launcher 永远退不出, service.sh 的停止/重启流程随之挂住。 */
 		kill(cpid, SIGTERM);
 		for (waited = 0; waited < 100; waited++) {	/* 100 × 100ms = 10s */
 			pid_t r = waitpid(cpid, &status, WNOHANG);
@@ -683,6 +728,9 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
+	/* 守护进程自身写 oom_score_adj=-900 防 LMKD 误杀 (子进程在 fork 后重置为 0) */
+	set_oom_score_adj("-900\n");
+
 	if (install_signal_handlers() < 0) {
 		log_msg("failed to install signal handlers: errno=%d %s",
 			errno, strerror(errno));
@@ -690,9 +738,6 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	/* Go dpid 正常启动前 5 分钟内 dpid.crashflag 恒有 1 行 armed 时间戳,
-	 * 严禁凭文件存在即睡 120s! 仅当 CRASH_WINDOW_SEC (60s) 内有效时间戳行数
-	 * >= CRASH_LIMIT (5) 时才进入冷却并清理标志。 */
 	recent_crashes = count_recent_crash_flags();
 	if (recent_crashes >= CRASH_LIMIT) {
 		log_msg("crashflag storm active (%s, recent=%d >= %d in %ds); cooling down %ds "

@@ -13,6 +13,11 @@
 [ -z "$HNC_SKIP_PATH_HARDENING" ] && [ -z "$HNC_TEST_MODE" ] && export PATH=/system/bin:/system/xbin:/vendor/bin:$PATH:/data/local/hnc/bin
 
 HNC_DIR="${HNC_DIR:-/data/local/hnc}"
+if [ -f "$HNC_DIR/bin/hnc_env.sh" ]; then
+    . "$HNC_DIR/bin/hnc_env.sh"
+elif [ -f "${0%/*}/hnc_env.sh" ]; then
+    . "${0%/*}/hnc_env.sh"
+fi
 RUN="$HNC_DIR/run"
 RULES="$HNC_DIR/data/rules.json"
 APP_LIMITS_FLAT="$HNC_DIR/data/app_limits.flat"
@@ -46,6 +51,35 @@ command -v hnc_act_load >/dev/null 2>&1 || {
 }
 GUARD_LAST_MODE=""
 GUARD_LAST_FB=0
+MTK_TETHER_SUPPRESSED=0
+
+guard_soc() {
+    if [ -n "${HNC_SOC:-}" ]; then
+        echo "$HNC_SOC"
+        return 0
+    fi
+    [ "${HNC_TEST_MODE:-0}" = "1" ] && { echo unknown; return 0; }
+    if [ -f "$HNC_DIR/bin/hnc_compat.sh" ]; then
+        ( HNC_COMPAT_LIB=1 . "$HNC_DIR/bin/hnc_compat.sh" && hnc_soc_vendor ) 2>/dev/null && return 0
+    elif [ -f "${0%/*}/hnc_compat.sh" ]; then
+        ( HNC_COMPAT_LIB=1 . "${0%/*}/hnc_compat.sh" && hnc_soc_vendor ) 2>/dev/null && return 0
+    fi
+    local _hw
+    _hw=$(getprop ro.hardware 2>/dev/null; getprop ro.board.platform 2>/dev/null; getprop ro.soc.manufacturer 2>/dev/null)
+    case "$(printf '%s' "$_hw" | tr 'A-Z' 'a-z')" in
+        *mt[0-9]*|*mediatek*|*dimensity*|*helio*) echo mtk ;;
+        *) echo unknown ;;
+    esac
+}
+
+is_mtk_platform() {
+    [ "$(guard_soc)" = "mtk" ] && return 0
+    local _r="${HNC_HWNAT_ROOT:-}"
+    if [ "${HNC_TEST_MODE:-0}" = "1" ] && [ -z "$_r" ]; then
+        return 1
+    fi
+    [ -e "$_r/dev/mddp" ] || [ -e "$_r/proc/mddp" ] || [ -e "$_r/sys/kernel/mddp" ]
+}
 
 guard_mode() {
     local v=""
@@ -92,11 +126,29 @@ st_save() {
 
 json_str() { printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g' | tr -d '\r\n'; }
 
+is_tether_offload_disabled() {
+    local _fb=${1:-0}
+    if [ "${HNC_TEST_MODE:-0}" = "1" ] && [ -z "${HNC_SETTINGS_BIN:-}" ]; then
+        [ "$_fb" = "1" ] || [ "${MTK_TETHER_SUPPRESSED:-0}" = "1" ] || [ -f "$ORIG_TETHER_FILE" ]
+        return $?
+    fi
+    if command -v "$SETTINGS_BIN" >/dev/null 2>&1; then
+        local _v
+        _v=$("$SETTINGS_BIN" get global tether_offload_disabled 2>/dev/null | strip_ws)
+        [ "$_v" = "1" ] && return 0
+        if [ "$_v" = "0" ] || [ "$_v" = "null" ]; then
+            return 1
+        fi
+    fi
+    [ "$_fb" = "1" ] || [ "${MTK_TETHER_SUPPRESSED:-0}" = "1" ] || [ -f "$ORIG_TETHER_FILE" ]
+}
+
 write_status() {
-    local fb=false
+    local fb=false tod=false
     [ "$3" = 1 ] && fb=true
-    printf '{"mode":"%s","offload_state":"%s","fallback_active":%s,"since":%s,"detail":"%s","last_check":%s,"slowpath":"%s","clsact":"%s","iface":"%s","hwnat":"%s"}\n' \
-        "$1" "$2" "$fb" "${4:-0}" "$(json_str "$5")" "$(now_s)" "$6" "$7" "$8" "${HWNAT_ST:-n/a}" > "$STATUS.tmp" 2>/dev/null \
+    is_tether_offload_disabled "$3" && tod=true
+    printf '{"mode":"%s","offload_state":"%s","fallback_active":%s,"tether_offload_disabled":%s,"since":%s,"detail":"%s","last_check":%s,"slowpath":"%s","clsact":"%s","iface":"%s","hwnat":"%s"}\n' \
+        "$1" "$2" "$fb" "$tod" "${4:-0}" "$(json_str "$5")" "$(now_s)" "$6" "$7" "$8" "${HWNAT_ST:-n/a}" > "$STATUS.tmp" 2>/dev/null \
         && mv -f "$STATUS.tmp" "$STATUS" 2>/dev/null
 }
 
@@ -132,6 +184,7 @@ tether_hal_suppress() {
 }
 
 tether_hal_restore() {
+    MTK_TETHER_SUPPRESSED=0
     [ -f "$ORIG_TETHER_FILE" ] || return 0
     if [ "${HNC_TEST_MODE:-0}" = "1" ] && [ -z "${HNC_SETTINGS_BIN:-}" ]; then
         rm -f "$ORIG_TETHER_FILE" 2>/dev/null
@@ -184,8 +237,7 @@ slowpath_disable() {
     esac
 }
 
-slowpath_restore() {
-    tether_hal_restore
+slowpath_restore_ipc_only() {
     [ -x "$IPC" ] || return 0
     "$IPC" OFFLOAD_RESTORE_GLOBAL >/dev/null 2>&1 || return 0
     local mac
@@ -195,6 +247,11 @@ slowpath_restore() {
                  | grep -oE '^"[0-9a-fA-F]{2}(:[0-9a-fA-F]{2}){5}"' | tr -d '"' | tr 'A-F' 'a-f'); do
         "$IPC" OFFLOAD_NOTIFY_LIMIT "$mac" 1 >/dev/null 2>&1 || true
     done
+}
+
+slowpath_restore() {
+    tether_hal_restore
+    slowpath_restore_ipc_only
 }
 
 # v5.40.0 T2 第 4 项: ifb0 mirred 已迁至 prio 2 (pref 2)!
@@ -290,13 +347,15 @@ do_restore() {
 }
 
 tick() {
-    local mode ifc state fb since calm sp="n/a" cl="off" detail policy_on=0
+    local mode ifc state fb since calm sp="n/a" cl="off" detail policy_on=0 mtk_plat=0
+    MTK_TETHER_SUPPRESSED=0
     mode=$(guard_mode)
     ifc=$(hotspot_iface) || ifc=""
     fb=$(st_get fallback); [ "$fb" = 1 ] || fb=0
     since=$(st_get since); case "$since" in ''|*[!0-9]*) since=0 ;; esac
     calm=$(st_get calm);   case "$calm" in ''|*[!0-9]*) calm=0 ;; esac
     has_active_policy && policy_on=1
+    is_mtk_platform && mtk_plat=1
 
     [ "$mode" != on ] && [ "$policy_on" = 0 ] && hwnat_restore
     if [ "$mode" = off ]; then
@@ -373,13 +432,33 @@ tick() {
         esac
     else
         if [ "$fb" = 1 ]; then
-            do_restore "$ifc"
+            if [ "$mtk_plat" = "1" ]; then
+                slowpath_restore_ipc_only
+                clsact_remove "$ifc"
+                hwnat_restore
+            else
+                do_restore "$ifc"
+            fi
             log "fallback OFF (offload=$state, calm=$calm)"
         fi
         fb=0; since=0; calm=0; sp="n/a"; cl="off"
+        # 天玑(MTK)平台即使 check_offload 为 NOMAP/IDLE 也提前置 tether_offload_disabled=1, 阻止 MDDP 硬件直通旁路!
+        if [ "$mtk_plat" = "1" ]; then
+            tether_hal_suppress
+            MTK_TETHER_SUPPRESSED=1
+            if [ "$mode" = on ] || [ "$policy_on" = "1" ]; then
+                HWNAT_ST=$(hwnat_disable)
+            fi
+        fi
         case "$state" in
             NOHOTSPOT) detail="热点未开启" ;;
-            NOMAP)     detail="本机无 tether offload map(非 GKI 或未启用), 无需兜底" ;;
+            NOMAP)
+                if [ "$mtk_plat" = "1" ]; then
+                    detail="联发科平台无 BPF offload map, 已提前置 tether_offload_disabled=1 防 MDDP 旁路"
+                else
+                    detail="本机无 tether offload map(非 GKI 或未启用), 无需兜底"
+                fi
+                ;;
             IDLE)      detail="offload 未在转发, 无需兜底" ;;
             CAPABLE)   detail="本机具备 offload, 当前无激活策略, 持续监测" ;;
             *)         detail="状态未知, 持续监测" ;;
