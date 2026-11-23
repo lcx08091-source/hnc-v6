@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "43-ai",
-  "rules_version": "hnc-curated-v6.1.0-rc.2#43-ai",
+  "rules_version": "hnc-curated-v6.1.0-rc.3#43-ai",
   "rules": [
     {
       "id": "anthropic",

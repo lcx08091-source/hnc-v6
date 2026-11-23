@@ -11,8 +11,8 @@ qseed() {
         printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
         cat <<'EOF'
 echo "$*" >> "$HNC_DIR/ipt.log"
-case "$*" in *"-D FORWARD -j HNC_QUIC"*)
-    n=$(grep -c -- '-D FORWARD -j HNC_QUIC' "$HNC_DIR/ipt.log")
+case "$*" in *"-D FORWARD -j HNC_QUIC")
+    n=$(grep -cE -- '-D FORWARD -j HNC_QUIC$' "$HNC_DIR/ipt.log")
     [ "$n" -le 1 ] && exit 0 || exit 1 ;;
 esac
 exit 0
@@ -22,8 +22,8 @@ EOF
         printf '#!%s\n' "${HNC_TEST_SH:-/system/bin/sh}"
         cat <<'EOF'
 echo "$*" >> "$HNC_DIR/ip6t.log"
-case "$*" in *"-D FORWARD -j HNC_QUIC"*)
-    n=$(grep -c -- '-D FORWARD -j HNC_QUIC' "$HNC_DIR/ip6t.log")
+case "$*" in *"-D FORWARD -j HNC_QUIC")
+    n=$(grep -cE -- '-D FORWARD -j HNC_QUIC$' "$HNC_DIR/ip6t.log")
     [ "$n" -le 1 ] && exit 0 || exit 1 ;;
 esac
 exit 0
@@ -72,3 +72,21 @@ out=$(qrun)
 [ "$out" = "QUIC_BLOCK=pending" ] && ! grep -q -- '-I FORWARD' "$HNC_TEST_DIR/ipt.log" \
     && ! grep -q -- '-I FORWARD' "$HNC_TEST_DIR/ip6t.log" \
     && test_pass || test_fail "out=$out"
+
+test_start "quic_block: iptables_manager.sh cleanup unlinks FORWARD -> HNC_QUIC and removes dual-stack HNC_QUIC chains"
+qseed '{"quic_block":true}' "ACTIVE:wlan2"
+out=$(qrun)
+: > "$HNC_TEST_DIR/ipt.log"
+: > "$HNC_TEST_DIR/ip6t.log"
+HNC_DIR="$HNC_TEST_DIR" HNC_IPT="$HNC_TEST_DIR/stub/iptables -w 2" HNC_IP6T="$HNC_TEST_DIR/stub/ip6tables -w 2" \
+    PATH="$HNC_TEST_DIR/stub:$PATH" sh "$HNC_REPO_ROOT/bin/iptables_manager.sh" cleanup >/dev/null 2>&1
+rc_cleanup=$?
+[ "$out" = "QUIC_BLOCK=on iface=wlan2" ] \
+    && [ "$rc_cleanup" -eq 0 ] \
+    && grep -qE -- '-t filter -D FORWARD -j HNC_QUIC$' "$HNC_TEST_DIR/ipt.log" \
+    && grep -qE -- '-t filter -F HNC_QUIC$' "$HNC_TEST_DIR/ipt.log" \
+    && grep -qE -- '-t filter -X HNC_QUIC$' "$HNC_TEST_DIR/ipt.log" \
+    && grep -qE -- '-t filter -D FORWARD -j HNC_QUIC$' "$HNC_TEST_DIR/ip6t.log" \
+    && grep -qE -- '-t filter -F HNC_QUIC$' "$HNC_TEST_DIR/ip6t.log" \
+    && grep -qE -- '-t filter -X HNC_QUIC$' "$HNC_TEST_DIR/ip6t.log" \
+    && test_pass || test_fail "out=$out rc=$rc_cleanup v4=$(cat "$HNC_TEST_DIR/ipt.log") v6=$(cat "$HNC_TEST_DIR/ip6t.log")"

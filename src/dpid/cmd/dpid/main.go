@@ -1202,7 +1202,7 @@ func runCapture(
 				if recQName := sw.ObserveHandshakeSideChannel(clientMAC, clientIP, remoteIP, ev.TLS.SNI, ev.TLS.IsQUIC, ev.DSCP, ev.DstPort, ev.Time); recQName != "" {
 					effSNI = recQName
 				}
-				sw.RecordTLS(clientMAC, clientIP, remoteIP, effSNI, ev.TLS.JA4, ev.Time)
+				sw.RecordTLS(clientMAC, clientIP, remoteIP, effSNI, ev.TLS.JA4, ev.Time, ev.TLS.QTP)
 				shmTracker.observePacket(clientMAC, clientIP, remoteIP, ev.IsUDP, ev.DstPort, ev.Bytes, true, nowUnix)
 				recordFlowFP(ev, clientMAC, clientIP, remoteIP) // v6.x DPI v2
 				if effSNI != "" {

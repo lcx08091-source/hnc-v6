@@ -1,7 +1,7 @@
 {
   "schema_version": "2.0",
   "subset": "51-rom-coloros",
-  "rules_version": "hnc-curated-v6.1.0-rc.2#51-rom-coloros",
+  "rules_version": "hnc-curated-v6.1.0-rc.3#51-rom-coloros",
   "rules": [
     {
       "id": "coloros_realme_device_indicator",

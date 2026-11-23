@@ -577,3 +577,64 @@ func TestBlacklistedDeviceVerdictPrecedenceOverNeedsHTB(t *testing.T) {
 		t.Fatalf("expected missing_rule/IPv6 阻断缺失 when v6 HNC_CTRL misses MAC, got verdict=%q label=%q", v3, lbl3)
 	}
 }
+
+func TestCheckIPv6QUICControlledExactChainMatch(t *testing.T) {
+	appLimOnly := "-N HNC_QUIC_APPLIM\n" +
+		"-A FORWARD -j HNC_QUIC_APPLIM\n" +
+		"-A HNC_QUIC_APPLIM -m mac --mac-source aa:bb:cc:dd:ee:01 -p udp -m udp --dport 443 -d 2400:3200::1/128 -j REJECT --reject-with icmp6-port-unreachable\n"
+
+	// 1. 仅含单应用限速链 HNC_QUIC_APPLIM 且 quic_block=false 时, IPv6QUICControlled 必须为 false
+	if dpCheckIPv6QUICControlled(false, appLimOnly) {
+		t.Fatalf("dpCheckIPv6QUICControlled(false, HNC_QUIC_APPLIM) must be false")
+	}
+	if dpCheckIPv6QUICControlled(true, appLimOnly) {
+		t.Fatalf("dpCheckIPv6QUICControlled(true, HNC_QUIC_APPLIM without HNC_QUIC) must be false")
+	}
+
+	// 2. 存在空的 HNC_QUIC 链定义但 443 规则仅在 HNC_QUIC_APPLIM 中时, 仍为 false
+	if dpCheckIPv6QUICControlled(false, "-N HNC_QUIC\n-A FORWARD -j HNC_QUIC\n"+appLimOnly) {
+		t.Fatalf("empty HNC_QUIC chain + HNC_QUIC_APPLIM 443 rule must be false")
+	}
+
+	// 3. 含真实全局 HNC_QUIC 443 阻断规则(无论是否并存 HNC_QUIC_APPLIM)时, 必须为 true
+	globalQUIC := "-N HNC_QUIC\n" +
+		"-A FORWARD -j HNC_QUIC\n" +
+		"-A HNC_QUIC -i wlan2 -p udp -m udp --dport 443 -j REJECT --reject-with icmp6-port-unreachable\n"
+	if !dpCheckIPv6QUICControlled(false, globalQUIC) {
+		t.Fatalf("expected true when global HNC_QUIC 443 rule is present")
+	}
+	if !dpCheckIPv6QUICControlled(true, appLimOnly+globalQUIC) {
+		t.Fatalf("expected true when both HNC_QUIC_APPLIM and global HNC_QUIC 443 rules are present")
+	}
+
+	// 4. 完整 runDataplaneVerify 回归: quic_block=false + 仅存在 HNC_QUIC_APPLIM 时 rep.IPv6QUICControlled 为 false
+	tmp := t.TempDir()
+	_ = os.MkdirAll(filepath.Join(tmp, "run"), 0o755)
+	_ = os.MkdirAll(filepath.Join(tmp, "data"), 0o755)
+	_ = os.WriteFile(filepath.Join(tmp, "run", "hnc_state"), []byte("ACTIVE:wlan2\n"), 0o644)
+	_ = os.WriteFile(filepath.Join(tmp, "data", "rules.json"), []byte(`{"quic_block": false, "devices": {}}`), 0o644)
+
+	env := &dpVerifyEnv{
+		HNCDir:      tmp,
+		UplinkIface: "ifb0",
+		Now:         func() time.Time { return time.Unix(1763520100, 0) },
+		ReadFile:    os.ReadFile,
+		Exists:      func(p string) bool { _, err := os.Stat(p); return err == nil },
+		Ifindex:     func(string) int { return 11 },
+		DumpHTBNetlink: func(int) (map[string]TCClassStats, error) {
+			return map[string]TCClassStats{"1:1": {ClassID: "1:1", ParentID: "root"}}, nil
+		},
+		RunCmd: func(_ context.Context, name string, args ...string) (string, error) {
+			joined := name + " " + strings.Join(args, " ")
+			if strings.Contains(joined, "ip6tables -w 2 -t filter -S") {
+				return appLimOnly, nil
+			}
+			return "", nil
+		},
+		Snaps: newDPVerifySnapshotStore(),
+	}
+	rep := runDataplaneVerify(env, dpVerifyOptions{})
+	if rep.IPv6QUICControlled {
+		t.Fatalf("runDataplaneVerify with quic_block=false and HNC_QUIC_APPLIM only: IPv6QUICControlled=true, want false")
+	}
+}

@@ -675,12 +675,18 @@ func (w *Writer) RecordDNS(clientMAC, clientIP, remoteIP, qname string, ts time.
 	}
 }
 
-// RecordTLS attributes a TLS ClientHello SNI (and optional JA4) to a client.
-func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts time.Time) {
+// RecordTLS attributes a TLS ClientHello / QUIC Initial SNI (and optional JA4 / QTP) to a client.
+// Optional qtpOpt[0] carries the QUIC transport-parameter fingerprint (qtp1_...).
+func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts time.Time, qtpOpt ...string) {
 	host := normalizeName(sni)
 	if clientIP == "" && clientMAC == "" {
 		return
 	}
+	var qtp string
+	if len(qtpOpt) > 0 {
+		qtp = strings.TrimSpace(qtpOpt[0])
+	}
+	isQUIC := strings.HasPrefix(ja4, "q") || qtp != ""
 	now := ts.Unix()
 	// v5.13: 设备识别器在 w.mu 释放后调用(defer LIFO)。ja4Client 由
 	// bumpJA4Locked 在锁内填好, 闭包执行时已是最终值。
@@ -708,20 +714,26 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 	w.encdns.observeTLS(host, remoteIP, c.ClientMAC, now) // v5.21: DoH 疑似
 	c.LastSeen = now
 	touchIP(c.RemoteIPs, remoteIP, now, maxIPsPerClient)
-	if host != "" || ja4 != "" {
+	if host != "" || ja4 != "" || qtp != "" {
 		var r l3Rule
 		var ok bool
+		isBlindOrECH := IsECHBlindOrOuterSNI(host, IsECHOuterHost(host))
 		if host != "" {
 			c.LastSNI = host
 			bumpName(c.SNI, host, now, maxNamesPerClient)
 			bumpName(w.globalSNI, host, now, maxGlobalNames)
-			r, ok = w.bumpLabelLocked(c, host, now, 0)
+			if !isBlindOrECH {
+				r, ok = w.bumpLabelLocked(c, host, now, 0)
+			}
 		}
-		if (!ok || IsECHOuterHost(host)) && ja4 != "" {
-			if cr, cok := MatchCompiledEncrypted(ja4, "", "", "", net.ParseIP(remoteIP), "", 0); cok {
+		if (!ok || strings.HasPrefix(r.ID, "_")) && (ja4 != "" || qtp != "") {
+			if cr, cok := MatchCompiledEncrypted(ja4, "", qtp, "", net.ParseIP(remoteIP), "", 0); cok {
 				r = l3Rule{ID: cr.AppID, Name: cr.AppName, Category: cr.Category, Priority: PrioritySpecific, Verified: true}
 				ok = true
 				evid := "fp:" + ja4
+				if ja4 == "" && qtp != "" {
+					evid = "qtp:" + qtp
+				}
 				bumpLabelWithBytes(c.Apps, r.ID, r.Name, r.Category, evid, now, 0, true, "", false)
 				bumpLabelWithBytes(w.globalApps, r.ID, r.Name, r.Category, evid, now, 0, true, "", false)
 				if r.Category != "" {
@@ -731,14 +743,16 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 				}
 			}
 		}
-		if (!ok || IsECHOuterHost(host)) && IsECHBlindOrOuterSNI(host, IsECHOuterHost(host)) {
+		if (!ok || strings.HasPrefix(r.ID, "_")) && isBlindOrECH {
 			if verd, vok := DefaultECHBlindEngine.Infer(ECHBlindQuery{
 				ClientIP:  clientIP,
 				RemoteIP:  remoteIP,
 				DstPort:   443,
+				IsUDP:     isQUIC,
 				OuterSNI:  host,
 				HasECHExt: IsECHOuterHost(host),
 				JA4:       ja4,
+				IPNames:   w.ipNames.Load(),
 				Now:       ts,
 			}); vok && verd.AppID != "" {
 				r = l3Rule{ID: verd.AppID, Name: verd.AppName, Category: verd.Category, Priority: PrioritySpecific, Verified: verd.Confidence >= 0.75}
@@ -757,21 +771,22 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 			}
 		}
 		if ok && r.ID != "" && !IsECHOuterHost(host) && ja4 != "" {
-			DefaultECHBlindEngine.ObserveVerifiedFlow(r.ID, r.Name, r.Category, ja4, false, 443, nil, ts)
+			DefaultECHBlindEngine.ObserveVerifiedFlow(r.ID, r.Name, r.Category, ja4, isQUIC, 443, nil, ts)
 		}
-		if !ok && host != "" && !IsECHOuterHost(host) {
+		if !ok && host != "" && !isBlindOrECH {
 			w.bumpUnknownLocked(c, host, now)
 		}
 		discRule, discKnown = r, ok
+		ck := c.ClientMAC
+		if ck == "" {
+			ck = clientIP
+		}
+		deterministicHit := ok && r.ID != "" && !strings.HasPrefix(r.ID, "_")
 		// BUG-011 (回移自 5.9.91 分叉): TLS 路径也写 IP→app 反查表 ——
 		// SNI 命中的远端 IP 不必等下一次 flow 命中才进表, 应用级限速
 		// (apply_app_limits.sh 读 ip_app_map) 不再因只靠 flow 路径而漏配。
-		if ok && r.ID != "" && w.causal != nil {
-			ck := c.ClientMAC
-			if ck == "" {
-				ck = clientIP
-			}
-			w.causal.RecordAnchor(ck, ts.UnixMilli(), r, remoteIP, ja4, "")
+		if deterministicHit && w.causal != nil {
+			w.causal.RecordAnchor(ck, ts.UnixMilli(), r, remoteIP, ja4, qtp)
 		}
 		if remoteIP != "" && w.IPAppMap != nil && ok && r.ID != "" {
 			w.IPAppMap.Record(remoteIP, r.ID, r.Name, r.Category, now, "tls")
@@ -779,12 +794,37 @@ func (w *Writer) RecordTLS(clientMAC, clientIP, remoteIP, sni, ja4 string, ts ti
 			if w.evidence != nil && c.ClientMAC != "" {
 				evDetail := host
 				if evDetail == "" {
-					evDetail = "fp:" + ja4
+					if ja4 != "" {
+						evDetail = "fp:" + ja4
+					} else {
+						evDetail = "qtp:" + qtp
+					}
 				}
 				w.evidence.Add(c.ClientMAC, r.ID, EvidenceEntry{
 					Ts: ts, Source: SrcTLS, RuleID: r.ID,
 					ParentEventID: evDetail, Detail: evDetail,
 				})
+			}
+		}
+		if !deterministicHit && w.causal != nil {
+			// v6.1.0-rc.3: 盲态 QUIC Initial (UDP/17) 与 ECH TLS (TCP/6) 握手未命中确定性规则时,
+			// 走 120ms 门控时间因果突发传播; 命中后与 RecordFlow 一致记入应用归属及 ip_app_map,
+			// 且绝不将次级传播结果喂回 RecordAnchor 防止级联传染。
+			dstPort := uint16(443)
+			proto := protoTCP
+			protoPrefix := "T"
+			if isQUIC {
+				proto = protoUDP
+				protoPrefix = "U"
+			}
+			parsedRemoteIP := net.ParseIP(remoteIP)
+			remoteIPStr := remoteIP
+			if parsedRemoteIP != nil {
+				remoteIPStr = parsedRemoteIP.String()
+			}
+			flowKey := protoPrefix + "|" + remoteIPStr + ":" + portStr(dstPort)
+			if cr, cok := w.causal.LookupOrPropagate(ck, flowKey, ts.UnixMilli(), remoteIPStr, ja4, qtp, isQUIC, dstPort); cok {
+				w.applyRuleHitLocked(c, cr, "causal_burst", parsedRemoteIP, remoteIPStr, proto, dstPort, 0, now, 0, true)
 			}
 		}
 	}

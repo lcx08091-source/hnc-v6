@@ -187,7 +187,7 @@ function paintStatsApps() {
   if (!r) { el.innerHTML = '<div class="note err">' + esc(c.err || '加载失败') + '</div>'; return; }
   if (r.readable === false) { el.innerHTML = '<div class="note warn">读不到内核连接表，按应用统计不可用（总量统计不受影响）</div>'; return; }
   var h = appUsageBars(r, 8);
-  el.innerHTML = h || '<div class="note">' + (r.acct === false ? '内核连接字节计数还没打开，已尝试打开，新连接开始计入' : '这段时间还没有按应用的记录（v5.16 起开始累计）') + '</div>';
+  el.innerHTML = h || '<div class="note">' + (r.acct === false ? '内核连接字节计数还没打开，已尝试打开，新连接开始计入' : '这段时间还没有按应用统计的流量记录') + '</div>';
 }
 var statsRefreshSeq = 0, puRefreshSeq = 0;
 function refreshStats() {

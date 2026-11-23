@@ -13,7 +13,7 @@
   'use strict';
 
   var META = window.__HNC_MOCK_META || {};
-  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.2', VCODE = String(META.versionCode || '6009302');
+  var VER = (META.version && !/^(dev|unknown)$/i.test(String(META.version).trim())) ? META.version : 'v6.1.0-rc.3', VCODE = String(META.versionCode || '6009303');
   var GB = 1073741824, MB = 1048576, KB = 1024;
   var IFACE = 'wlan2', GW = '192.168.43.1';
 
@@ -89,7 +89,7 @@
       ident: { type: 'tablet', os: 'iPadOS', os_ver: '18.6', brand: 'Apple', model: 'iPad Air', confidence: 88, hostname: 'iPad', hostname_src: 'mdns',
         services: ['_airplay._tcp', '_companion-link._tcp', '_rdlink._tcp'], evidence: [{ src: 'mdns', detail: '_companion-link._tcp · model=iPad13,16' }, { src: 'dhcp', detail: 'option 55 = 1,121,3,6,15,108,114,119,252' }, { src: 'oui', detail: 'Apple（随机 MAC 前缀已关闭）' }] },
       live: [['douyin', 0.78], ['bilibili', 0.12], ['wechat', 0.05]], hist: ['douyin', 'bilibili', 'wechat', 'xiaohongshu'],
-      fg: { state: 'active', screen_state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.93, label: '正在用：抖音', evidence_tags: ['秒级紧耦合', '触控微突发'], companion: { app_id: 'qqmusic', name: 'QQ音乐', mode: 'audio', label: '后台音频播放', bps: 192000 }, dual_stack: { v6_pct: 88, qos_cov: 'dual_stack_ok', escape_alert: false, limit_mbps: 24, actual_mbps: 16.2 }, reasons: ['DNS->QUIC 握手紧耦合 22ms + 重尾滑动突发 (CV=1.42)', '域名命中 *.douyinvod.com（IPv6 双栈限速已闭合）', 'ABR 虚拟播放缓冲信用保护中'] },
+      fg: { state: 'active', screen_state: 'active', app_id: 'douyin', name: '抖音', confidence: 0.93, label: '正在用：抖音', evidence_tags: ['即时连接', '触控划屏'], companion: { app_id: 'qqmusic', name: 'QQ音乐', mode: 'audio', label: '后台音频播放', bps: 192000 }, dual_stack: { v6_pct: 88, qos_cov: 'dual_stack_ok', escape_alert: false, limit_mbps: 24, actual_mbps: 16.2 }, reasons: ['域名解析后 22ms 立即连接，流量呈连续上划刷视频特征', '域名命中 *.douyinvod.com（IPv4/IPv6 双栈限速均已生效）', '播放缓冲充足，视频流畅播放保护中'] },
       traffic_type: { type: 'short_video', label: '刷短视频' },
       app_time_limits: [{ app_id: 'douyin', name: '抖音', category: 'short_video', minutes: 60, used_sec: 3120, used_min: 52, exhausted: false, enforced: true }],
       category_blocks: [{ category: 'game', app_count: 6, ts: T - 3 * 86400, enforced: true }],
@@ -416,7 +416,7 @@
   var PU_CFG = { billing_day: 1, warn_percent: 80, plan_sim1_gb: 100, plan_sim2_gb: 0, anchor_sim1_gb: 0, anchor_sim2_gb: 0, use_netstats: 'auto' };
   var SELF_ON = { toggle: true, auto_expand: true, auto_promote: false };
   var DNS = { enabled: false, block_mode: 'nxdomain', log_queries: false };
-  var FG_ENGINE = 'classic';
+  var FG_ENGINE = 'hmm';
   var SIM = { enabled: false, devices: [] };
   var REC_STATE = { recording: false, minutes: 10, started_at: 0 };
   var ALIASES = { 'ce:41:7a:09:3b:62': '0a:7f:3c:41:9e:21' };
@@ -694,19 +694,19 @@
     });
     var idb = 0.89;
     var MOCK_L3_SUBS = [
-      'hnc-curated-v6.1.0-rc.2-dedup#00-core-meta',
-      'hnc-curated-v6.1.0-rc.2#01-short-video', 'hnc-curated-v6.1.0-rc.2#02-video-live', 'hnc-curated-v6.1.0-rc.2#03-social-im',
-      'hnc-curated-v6.1.0-rc.2#04-games-cn', 'hnc-curated-v6.1.0-rc.2#05-games-global', 'hnc-curated-v6.1.0-rc.2#06-shopping-life',
-      'hnc-curated-v6.1.0-rc.2#07-music-audio', 'hnc-curated-v6.1.0-rc.2#08-reading-news', 'hnc-curated-v6.1.0-rc.2#09-office-edu',
-      'hnc-curated-v6.1.0-rc.2#10-cloud-drive', 'hnc-curated-v6.1.0-rc.2#11-finance-bank', 'hnc-curated-v6.1.0-rc.2#12-travel-map',
-      'hnc-curated-v6.1.0-rc.2#13-ai-tools', 'hnc-curated-v6.1.0-rc.2#14-dev-tech', 'hnc-curated-v6.1.0-rc.2#15-app-stores',
-      'hnc-curated-v6.1.0-rc.2#16-oem-vendors', 'hnc-curated-v6.1.0-rc.2#17-iot-smart', 'hnc-curated-v6.1.0-rc.2#18-tv-ott',
-      'hnc-curated-v6.1.0-rc.2#19-carrier-isp', 'hnc-curated-v6.1.0-rc.2#20-gov-public', 'hnc-curated-v6.1.0-rc.2#21-auto-ev',
-      'hnc-curated-v6.1.0-rc.2#22-health-sport', 'hnc-curated-v6.1.0-rc.2#23-food-retail', 'hnc-curated-v6.1.0-rc.2#24-social-global',
-      'hnc-curated-v6.1.0-rc.2#25-stream-global', 'hnc-curated-v6.1.0-rc.2#26-browser-search', 'hnc-curated-v6.1.0-rc.2#27-mail-collab',
-      'hnc-curated-v6.1.0-rc.2#28-security-dns', 'hnc-curated-v6.1.0-rc.2#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.2#30-cdn-infra',
-      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.2#47-v2fly-b',
-      'hnc-curated-v6.1.0-rc.2#95-system-updates', 'hnc-curated-v6.1.0-rc.2#96-system-updates-v6'
+      'hnc-curated-v6.1.0-rc.3-dedup#00-core-meta',
+      'hnc-curated-v6.1.0-rc.3#01-short-video', 'hnc-curated-v6.1.0-rc.3#02-video-live', 'hnc-curated-v6.1.0-rc.3#03-social-im',
+      'hnc-curated-v6.1.0-rc.3#04-games-cn', 'hnc-curated-v6.1.0-rc.3#05-games-global', 'hnc-curated-v6.1.0-rc.3#06-shopping-life',
+      'hnc-curated-v6.1.0-rc.3#07-music-audio', 'hnc-curated-v6.1.0-rc.3#08-reading-news', 'hnc-curated-v6.1.0-rc.3#09-office-edu',
+      'hnc-curated-v6.1.0-rc.3#10-cloud-drive', 'hnc-curated-v6.1.0-rc.3#11-finance-bank', 'hnc-curated-v6.1.0-rc.3#12-travel-map',
+      'hnc-curated-v6.1.0-rc.3#13-ai-tools', 'hnc-curated-v6.1.0-rc.3#14-dev-tech', 'hnc-curated-v6.1.0-rc.3#15-app-stores',
+      'hnc-curated-v6.1.0-rc.3#16-oem-vendors', 'hnc-curated-v6.1.0-rc.3#17-iot-smart', 'hnc-curated-v6.1.0-rc.3#18-tv-ott',
+      'hnc-curated-v6.1.0-rc.3#19-carrier-isp', 'hnc-curated-v6.1.0-rc.3#20-gov-public', 'hnc-curated-v6.1.0-rc.3#21-auto-ev',
+      'hnc-curated-v6.1.0-rc.3#22-health-sport', 'hnc-curated-v6.1.0-rc.3#23-food-retail', 'hnc-curated-v6.1.0-rc.3#24-social-global',
+      'hnc-curated-v6.1.0-rc.3#25-stream-global', 'hnc-curated-v6.1.0-rc.3#26-browser-search', 'hnc-curated-v6.1.0-rc.3#27-mail-collab',
+      'hnc-curated-v6.1.0-rc.3#28-security-dns', 'hnc-curated-v6.1.0-rc.3#29-ad-telemetry', 'hnc-curated-v6.1.0-rc.3#30-cdn-infra',
+      'v2fly-2c892a618f4e#46-v2fly-a', 'hnc-curated-v6.1.0-rc.3#47-v2fly-b',
+      'hnc-curated-v6.1.0-rc.3#95-system-updates', 'hnc-curated-v6.1.0-rc.3#96-system-updates-v6'
     ];
     return {
       available: true,
@@ -776,7 +776,7 @@
       ['network', '热点', [['iface', '热点接口', 'ok', IFACE + ' · 192.168.43.1/24'], ['dhcp', 'DHCP / 邻居表', 'ok', '9 个租约'], ['upstream', '上游', 'ok', 'rmnet_data2（蜂窝）']]],
       ['ipv6', 'IPv6', [['v6_neigh', 'IPv6 邻居', 'ok', '6 个地址, 4 台设备'], ['v6_uncovered', '未纳入限速的新地址', 'ok', '0']]],
       ['time', '时间', [['clock', '系统时间', 'ok', '正常'], ['auto_time', '自动同步时间', 'ok', '已开启']]],
-      ['process', '进程', [['hotspotd', 'hotspotd', 'ok', '运行中'], ['dpid', 'hnc_dpid', 'ok', '运行中 · 7 小时'], ['watchdog', 'watchdog', 'ok', 'pidfd 心跳正常'], ['proc_goroutineleak', '协程泄漏检测 (Go 1.27)', 'ok', '0 泄漏 · 当前协程 18', 'Go 1.27 runtime/pprof goroutineleak GC 可达性核验耗时 2 ms']]],
+      ['process', '进程', [['hotspotd', 'hotspotd', 'ok', '运行中'], ['dpid', 'hnc_dpid', 'ok', '运行中 · 7 小时'], ['watchdog', 'watchdog', 'ok', '心跳守护正常'], ['proc_goroutineleak', '后台任务泄漏检查', 'ok', '无残留 · 运行任务 18 个', '后台常驻任务健康巡检通过，无卡死或残留任务（耗时 2 ms）']]],
       ['ident', '识别引擎', [['rules', '规则库', 'ok', '2026.10.02 · 3412 条'], ['capture', 'DPI 抓包', 'ok', 'AF_PACKET · ' + IFACE], ['fp', '指纹学习', 'info', '5 个可用指纹']]]
     ];
     var sum = { ok: 0, warn: 0, fail: 0, info: 0 };
@@ -922,21 +922,21 @@
         outDownOver = appOverSum;
       }
 
-      var verdict = 'idle', statusLabel = '链路就绪（空闲）', reason = '规则链路完整就绪，等待客户端产生流量';
+      var verdict = 'idle', statusLabel = '规则就绪（空闲）', reason = '限速规则已准备就绪，等待设备产生流量';
       if (isBlacklisted) {
         verdict = 'hit';
         statusLabel = '黑名单阻断生效';
-        reason = '双栈防火墙 HNC_CTRL MAC 阻断规则已就绪并拦截该设备转发流量';
+        reason = '双栈防火墙设备阻断规则已生效，正在拦截该设备转发流量';
       } else if (outDownDelta + upDelta > 0 || outDownSent + snap.upSent > 0 || anyAppHit) {
         verdict = 'hit';
-        statusLabel = '队列真实命中';
+        statusLabel = '限速真实生效';
         var totalMb = ((outDownSent + snap.upSent) / MB).toFixed(2);
         var shapeCnt = outDownOver + outDownDrops + snap.upOver + snap.upDrops;
-        reason = '内核 HTB 限速队列已真实命中（累计转发 ' + totalMb + ' MB，超限整形/丢包 ' + shapeCnt + ' 次）';
+        reason = '限速规则已真实命中该设备流量（累计转发 ' + totalMb + ' MB，超速压制 ' + shapeCnt + ' 次）';
       } else if (!d.online) {
         verdict = 'idle';
         statusLabel = '就绪（设备离线）';
-        reason = '规则链路完整就绪，当前设备离线，重连产生流量后将自动命中队列';
+        reason = '限速规则已准备就绪，当前设备离线，重连上网后自动生效';
       }
 
       if (verdict === 'hit') hitCnt += 1;
@@ -978,8 +978,8 @@
 
     var overall = errCnt > 0 ? 'warn' : (hitCnt > 0 ? 'ok' : 'idle');
     var headline = hitCnt > 0
-      ? ('内核限速真实生效：' + hitCnt + '/' + devicesOut.length + ' 台受控设备已命中 HTB 队列（其余 ' + idleCnt + ' 台空闲就绪）')
-      : ('全部 ' + devicesOut.length + ' 台受控设备内核队列与正交掩码链路已就绪，等待客户端产生流量');
+      ? ('限速规则真实生效：' + hitCnt + '/' + devicesOut.length + ' 台受控设备正在按规则限速（其余 ' + idleCnt + ' 台空闲待命）')
+      : ('全部 ' + devicesOut.length + ' 台受控设备的限速规则已准备就绪，等待设备上网产生流量');
 
     var out = {
       ok: true,
@@ -989,7 +989,7 @@
       engine_mode: 'go_native_netlink',
       mark_layout: 'orthogonal_v540_0xffff0000',
       netd_low16_protected: true,
-      ipv6_quic_controlled: true,
+      ipv6_quic_controlled: !!CFG.quic_block,
       bpf_maps: {
         mac_mark_entries: onlineMarked,
         ip_mark_entries: onlineMarked,
@@ -1023,7 +1023,7 @@
         leaked_count: 0,
         duration_ms: 2,
         status: 'clean',
-        message: 'Go 1.27 goroutineleak GC 可达性核验通过：0 泄漏（总协程 ' + totalG + '，耗时 2 ms）'
+        message: '后台常驻任务健康检查通过：0 个异常残留（当前运行任务 ' + totalG + ' 个，耗时 2 ms）'
       };
     }
     return out;
@@ -1031,7 +1031,7 @@
 
   /* ═════════════ GET 路由 ═════════════ */
   function rulesJson() {
-    var o = { whitelist_mode: CFG.whitelist_mode, remote_enabled: CFG.remote_enabled, blacklist: [], devices: {} };
+    var o = { whitelist_mode: CFG.whitelist_mode, remote_enabled: CFG.remote_enabled, quic_block: CFG.quic_block, blacklist: [], devices: {} };
     DEVS.forEach(function (d) {
       if (d.status === 'blocked') o.blacklist.push(d.mac);
       if (d.down_mbps || d.up_mbps || d.delay_ms || d.sqm_enabled || d.whitelist) o.devices[d.mac] = { mark_id: d.mark_id, limit_enabled: d.down_mbps > 0 || d.up_mbps > 0, down_mbps: d.down_mbps, up_mbps: d.up_mbps, delay_ms: d.delay_ms, jitter_ms: d.jitter_ms, loss_pct: d.loss_pct, sqm_enabled: !!d.sqm_enabled, whitelist: !!d.whitelist, ip: d.ip };
@@ -1306,7 +1306,7 @@
         top_unknown: [{ name: '番茄小说', truth: 'fanqie', n: 31, snis: ['api.fqnovel.com', 'p3-novel.snssdk-novel.com'] }, { name: '得物', truth: 'dewu', n: 22, snis: ['app.dewu.com'] }],
         fg_truth: { source: 'usagestats', switches_24h: 146, last_pkg: 'com.tencent.mm', last_ts: now() - 120 } };
     },
-    '/api/fg_compare': function () { return { ok: true, engine: FG_ENGINE, rounds: 2880, classic: { switches_per_hour: 7.4, short_segments: 19 }, hmm: { switches_per_hour: 4.1, short_segments: 6 }, agree_pct: 87 }; },
+    '/api/fg_compare': function (q) { return { ok: true, engine: FG_ENGINE, days: Number(q && q.days) || 1, rounds: 2880, agree_rounds: 2506, device_hours: 8.0, classic: { switches: 59, switches_per_hour: 7.4, short_segments: 19, short_per_hour: 2.4 }, hmm: { switches: 33, switches_per_hour: 4.1, short_segments: 6, short_per_hour: 0.75 }, agree_pct: 87 }; },
     '/api/dpi_rulepack': function () { return { ok: true, exportable: { domain_rules: 38, fingerprints: 12, startup: 7 }, imported: { domain_rules: 0, fingerprints: 0, startup: 0, suffixes: 0 },
       sources: { auto_expanded: { rules: 21 }, auto_promoted: { rules: 6 }, user_custom: { rules: 3 }, user_corrections: { domain: 8 } } }; },
     '/api/dpi_startup': function () { return { ok: true, stats: { events_total: 342 }, learned: [['抖音', 'douyin', 14, 5], ['微信', 'wechat', 22, 4], ['B站', 'bilibili', 9, 4], ['王者荣耀', 'honor_of_kings', 6, 3], ['高德地图', 'amap', 5, 3], ['小红书', 'xiaohongshu', 4, 3], ['淘宝', 'taobao', 3, 2]].map(function (x) { return { name: x[0], app_id: x[1], starts: x[2], feat: x[3], usable: true }; }) }; },
@@ -1533,7 +1533,7 @@
     hotspot_stop: function () { return '演示模式：热点保持开启'; },
     stale_ttl_set: function (p) { CFG.stale_rule_ttl_days = +p.days || 0; return ''; },
     flywheel_exclude_set: function (p) { var l = CFG.flywheel_exclude_user; if (p.op === 'add') { if (l.indexOf(p.pkg) < 0) l.push(p.pkg); } else CFG.flywheel_exclude_user = l.filter(function (x) { return x !== p.pkg; }); return ''; },
-    quic_block_set: cfgSet('quic_block'),
+    quic_block_set: function (p) { CFG.quic_block = bool(p && p.enabled); return 'QUIC_BLOCK=' + (CFG.quic_block ? 'on iface=wlan2' : 'off'); },
     discover_cert_probe_set: function (p) { CFG.discover_cert_probe = bool(p.enabled); DISC.cert_probe = CFG.discover_cert_probe; return ''; },
     remote_enabled_set: cfgSet('remote_enabled'),
     global_shaper_set: function (p) {
@@ -1562,7 +1562,7 @@
     sim_device_del: function (p) { var m = String(p.mac || '').toLowerCase(); SIM.devices = SIM.devices.filter(function (d) { return d.mac !== m; }); DEVS = DEVS.filter(function (d) { return d.mac.toLowerCase() !== m; }); return 'deleted ' + m; },
     sim_device_update: function (p) { var d = needDev(p.mac); if (p.name) d.hostname = p.name; return 'updated'; },
     dpi_correct_list: function () { return J({ rules: FP_RULES }); },
-    dpi_fg_engine: function (p) { FG_ENGINE = p.engine === 'hmm' ? 'hmm' : 'classic'; return ''; },
+    dpi_fg_engine: function (p) { FG_ENGINE = (p && p.engine === 'classic') ? 'classic' : 'hmm'; return 'fg_engine=' + FG_ENGINE; },
     sim_set: function (p) { SIM.enabled = bool(p.enabled); return SIM.enabled ? '模拟环境已开启(' + SIM.devices.length + ' 台模拟设备)' : '模拟环境已关闭'; },
     sim_preset: function (p) { SIM.enabled = true; SIM.devices = [{ mac: '02:5e:00:11:22:33', ip: '192.168.43.210', name: '模拟-客厅电视', type: 'tv', online: true, cur_rx_bps: 3145728, cur_tx_bps: 92160 }]; return '已加载预设 ' + (p.preset || 'home'); },
     sim_device_add: function (p) { var mac = '02:5e:00:12:34:' + p2(10 + SIM.devices.length), nm = p.name || '模拟设备'; SIM.devices.push({ mac: mac, ip: '192.168.43.' + (215 + SIM.devices.length), name: nm, type: p.type || 'phone', online: true, cur_rx_bps: 524288, cur_tx_bps: 65536 }); return J({ mac: mac, name: nm, type: p.type || 'phone' }); },
@@ -1700,7 +1700,7 @@
   };
 
 
-  /* ═════════════ HNC v6.1.0-rc.2 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
+  /* ═════════════ HNC v6.1.0-rc.3 · Vector 战术中枢与 LeakGuard 仿真层 ═════════════ */
   function v6MockInfraGuard(host) {
     var h = String(host || '').trim().toLowerCase();
     if (!h) return null;

@@ -790,9 +790,11 @@ cleanup() {
     done
     for _T in "$IPT" "$(ipv6_filter_ok && echo "$IP6T")"; do
         [ -z "$_T" ] && continue
-        for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j HNC_QUIC_APPLIM 2>/dev/null || break; done
-        $_T -t filter -F HNC_QUIC_APPLIM 2>/dev/null || true
-        $_T -t filter -X HNC_QUIC_APPLIM 2>/dev/null || true
+        for _qc in HNC_QUIC HNC_QUIC_APPLIM; do
+            for _k in 1 2 3 4; do $_T -t filter -D FORWARD -j "$_qc" 2>/dev/null || break; done
+            $_T -t filter -F "$_qc" 2>/dev/null || true
+            $_T -t filter -X "$_qc" 2>/dev/null || true
+        done
     done
     rm -f "$HNC_DIR/run/stats_v6_map" "$HNC_DIR/run/stats_v6_retired" 2>/dev/null
     rm -rf "$HNC_DIR/run/stats_v6.lock" 2>/dev/null

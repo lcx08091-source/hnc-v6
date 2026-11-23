@@ -209,37 +209,38 @@ function mergeSettingsHtml() {
 }
 /* ═══ 加密 DNS 策略(GET /api/encdns + encdns_set) ═══ */
 S.encdns = null;
-var ENC_T = { off: '关闭', dot: '拦截 DoT', strict: '严格', inherit: '跟随全局' };
+var ENC_T = { off: '关闭', dot: '标准', strict: '严格', inherit: '跟随全局' };
 function loadEncdns() { return api.getSafe('/api/encdns', null, null).then(function (r) { S.encdns = r && typeof r.policy === 'string' ? r : null; return S.encdns; }); }
 function encdnsDevPol(mac) { var e = S.encdns; return e && e.devices && e.devices[mac] ? e.devices[mac] : 'inherit'; }
 function encdnsDevBlock(d) {
   var e = S.encdns; if (!e || d.sim) return '';
   var cur = encdnsDevPol(d.mac), g = ENC_T[e.policy] || e.policy || '关闭';
-  return '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--red)"></i>加密 DNS 拦截</div>' + seg('encdns-dev', [['inherit', '跟随全局'], ['off', '关闭'], ['dot', 'DoT'], ['strict', '严格']], cur, 'small') +
-    '<div class="note">' + (cur === 'inherit' ? '跟随全局（' + esc(g) + '）' : cur === 'off' ? '这台设备不拦截（豁免全局设置）' : '单独设为「' + esc(ENC_T[cur] || cur) + '」') + '。如果它把「私人 DNS」设成了指定主机名，拦截会让它断网 —— 那就选「关闭」</div></div>';
+  return '<div class="ctrl"><div class="ctrl-t"><i style="background:var(--red)"></i>加密 DNS 拦截</div>' + seg('encdns-dev', [['inherit', '跟随全局'], ['off', '关闭'], ['dot', '标准'], ['strict', '严格']], cur, 'small') +
+    '<div class="note">' + (cur === 'inherit' ? '跟随全局（' + esc(g) + '）' : cur === 'off' ? '这台设备不拦截（豁免全局设置）' : '单独设为「' + esc(ENC_T[cur] || cur) + '」') + '。如果它手动指定了「私人 DNS」主机名导致无法上网，选「关闭」即可恢复</div></div>';
 }
-function encdnsSettingsHtml() {
+function encdnsSettingsHtml(c0) {
   var e = S.encdns;
   if (!e) return sItem(['gray', 'shield'], '加密 DNS 拦截', '当前后端不支持（需要新版 hnc_httpd）', val('—'));
   var pol = ENC_T[e.policy] ? e.policy : 'off', c = e.counters, dp = e.dpid, nDev = Array.isArray(e.device_list) ? e.device_list.length : Object.keys(e.devices || {}).length;
-  var slT = { available: '可用', unavailable: '内核不支持（严格档只按 IP 拦公共 DoH）', unknown: '未检测（首次开启严格档时检测）' }[e.string_layer] || '—';
+  var slT = { available: '支持', unavailable: '当前内核不支持（严格档仅按常见公共服务器 IP 拦截）', unknown: '未检测（首次开启严格档时自动检测）' }[e.string_layer] || '—';
   var pk = function (k) { return c && c[k] ? num(c[k].pkts) : 0; };
-  var cnt = c ? '<div class="enc-cnt">' + [['dot', 'DoT / DoQ'], ['doh_ip', 'DoH · IP'], ['doh_sni', 'DoH · SNI'], ['doh_dns', 'DoH · 域名']].map(function (x) { return '<div><div class="n num">' + fmtN(pk(x[0])) + '</div><div class="l">' + x[1] + '</div></div>'; }).join('') + '</div>' +
-      '<div class="note" style="margin-top:4px">已拦下的包数（含客户端重试）· 合计 ' + fmtN(c.total_pkts) + ' 包 · ' + bytes(c.total_bytes) + (num(c.v6_pkts) ? ' · 其中 IPv6 ' + fmtN(c.v6_pkts) : '') + ' · 规则重新同步时清零</div>'
-    : '<div class="note" style="margin-top:6px">' + (e.counters_error ? '拦截计数读取失败：' + esc(e.counters_error) : pol === 'off' ? '开启后这里显示拦截计数' : '暂无拦截计数') + '</div>';
+  var cnt = c ? '<div class="enc-cnt">' + [['dot', '私人 DNS'], ['doh_ip', '加密 DNS · IP'], ['doh_sni', '加密 DNS · 握手'], ['doh_dns', '加密 DNS · 域名']].map(function (x) { return '<div><div class="n num">' + fmtN(pk(x[0])) + '</div><div class="l">' + x[1] + '</div></div>'; }).join('') + '</div>' +
+      '<div class="note" style="margin-top:4px">已拦下的数据包（含设备自动重试）· 合计 ' + fmtN(c.total_pkts) + ' 包 · ' + bytes(c.total_bytes) + (num(c.v6_pkts) ? ' · 其中 IPv6 ' + fmtN(c.v6_pkts) : '') + ' · 规则重新同步时清零</div>'
+    : '<div class="note" style="margin-top:6px">' + (e.counters_error ? '拦截计数读取失败：' + esc(e.counters_error) : pol === 'off' ? '开启后这里显示实时拦截计数' : '暂无拦截计数') + '</div>';
   var dpT = '';
   if (dp && typeof dp === 'object') {
     var rd = Array.isArray(dp.recent_doh) && dp.recent_doh.length ? dp.recent_doh[0] : null, rdd = rd && rd.client_mac ? devBy(rd.client_mac) : null;
-    dpT = 'DPI 观察：明文 DNS ' + fmtN(dp.dns_seen) + ' 次 · DoT 尝试 ' + fmtN(dp.dot_attempts) + (num(dp.dot_flows) ? '（' + num(dp.dot_flows) + ' 条仍在连）' : '') + ' · 疑似 DoH ' + fmtN(dp.doh_suspect) +
+    dpT = '实时统计：普通 DNS ' + fmtN(dp.dns_seen) + ' 次 · 私人 DNS 尝试 ' + fmtN(dp.dot_attempts) + (num(dp.dot_flows) ? '（' + num(dp.dot_flows) + ' 条仍在连）' : '') + ' · 疑似内置加密 DNS ' + fmtN(dp.doh_suspect) +
       (rd ? ' · 最近 <span class="mono">' + esc(rd.name || '?') + '</span>' + (rdd ? '（' + esc(rdd.name) + '）' : '') + (num(rd.ts) ? ' ' + ago(rd.ts) : '') : '');
   }
-  return '<div class="row" style="align-items:flex-start" id="encdns-row">' + gi('red', 'shield') + '<span class="tx"><div class="t">加密 DNS 拦截</div><div class="s">拦下 DoT / 公共 DoH，让设备回落明文 DNS：热点看得到每次解析，应用识别和域名封锁更准</div>' +
-    '<div style="margin-top:8px">' + seg('encdns', [['off', '关闭'], ['dot', '拦截 DoT'], ['strict', '严格']], pol, 'small') + '</div>' +
+  return '<div class="row" style="align-items:flex-start" id="encdns-row">' + gi('red', 'shield') + '<span class="tx"><div class="t">加密 DNS 拦截</div><div class="s">拦下加密域名解析请求，让接入设备自动回退普通 DNS，使应用识别与网站封锁更准确</div>' +
+    '<div style="margin-top:8px">' + seg('encdns', [['off', '关闭'], ['dot', '标准'], ['strict', '严格']], pol, 'small') + '</div>' +
+    '<div class="note" style="margin-top:6px"><b>标准</b>：只拦手机系统默认自动私人 DNS，最稳妥不易断网；<b>严格</b>：额外封堵浏览器和 App 内置公共加密 DNS，封锁更彻底。手动指定私人 DNS 的设备如无法上网，可在设备卡里单独选「关闭」。</div>' +
     (e.tradeoff ? '<div class="note warn" style="margin-top:6px">' + esc(e.tradeoff) + '</div>' : '') +
-    '<div class="note" style="margin-top:6px">名字层（SNI / 域名匹配）：' + slT + (nDev ? ' · ' + nDev + ' 台设备单独设置（在设备卡里改）' : ' · 可在设备卡里按设备单独设置') + '</div>' + cnt +
+    '<div class="note" style="margin-top:6px">按域名精准识别能力：' + slT + (nDev ? ' · 已有 ' + nDev + ' 台设备单独设置（可在设备卡里修改）' : ' · 可在设备卡里按设备单独设置') + '</div>' + cnt +
     (dpT ? '<div class="note" style="margin-top:4px">' + dpT + '</div>' : '') + '</span></div>';
 }
-function encdnsDetailTxt(r) { var d = String((r && r.detail) || ''); return /no change/.test(d) ? '（未变化）' : /global=pending/.test(d) ? ' · 热点开启后生效' : /string_layer=0/.test(d) ? ' · 内核不支持名字层，只按 IP 拦' : ''; }
+function encdnsDetailTxt(r) { var d = String((r && r.detail) || ''); return /no change/.test(d) ? '（未变化）' : /global=pending/.test(d) ? ' · 热点开启后生效' : /string_layer=0/.test(d) ? ' · 当前内核仅支持按 IP 拦截' : ''; }
 /* ═══ 统计健康(GET /api/stats_health) ═══ */
 S.sh = null;
 function loadStatsHealth() { return api.getSafe('/api/stats_health', null, null).then(function (r) { S.sh = r && Array.isArray(r.issues) ? r : null; return S.sh; }); }
@@ -475,7 +476,7 @@ function renderSettings(anim1) {
     sItem(['gray', 'layers'], 'watchdog 全量重建', 'tc 树被整体重建的次数', val(nz(sla.watchdog_full_restore_count), slaCls(sla.watchdog_full_restore_count))) +
     sItem(['gray', 'tool'], 'tc 修复失败 / 上行失败', '自修复熔断 · 上行 IFB/police 失败', val(nz(sla.tc_repair_fail_count) + ' / ' + nz(sla.uplink_fail_count), sla.tc_repair_fail_count == null && sla.uplink_fail_count == null ? '' : num(sla.tc_repair_fail_count) + num(sla.uplink_fail_count) ? 'warn' : 'ok')) +
     sItem(['gray', 'flask'], '能力降级标记', 'qos_fallback / uplink_unsupported', val([sla.qos_fallback_active ? 'QoS 兼容链路' : '', sla.uplink_unsupported ? '上行不支持' : ''].filter(Boolean).join(' · ') || '无', sla.qos_fallback_active || sla.uplink_unsupported ? 'warn' : 'ok')))]);
-  groups.push(['维护', sBtn(['blue', 'refresh'], '重启 HNC 服务', '重跑 post-fs-data.sh + service.sh', 'svc-restart', '重启', 'danger') +
+  groups.push(['维护', sBtn(['blue', 'refresh'], '重启 HNC 服务', '重新启动所有后台管控与识别服务（已设好的规则不会丢失，耗时约几秒）', 'svc-restart', '重启', 'danger') +
     sFold('ttl', ['orange', 'refresh'], '离线规则自动清理', num(c.stale_rule_ttl_days, 30) ? '设备离线超过 ' + num(c.stale_rule_ttl_days, 30) + ' 天后，自动删掉它的限速/延迟规则' : '已关闭 · 离线设备的规则永久保留',
       '<div style="display:flex;gap:8px"><span class="box" style="flex:1"><input id="ttl-days" type="number" min="0" max="3650" value="' + num(c.stale_rule_ttl_days, 30) + '"><span class="u">天</span></span><button class="btn pri press" data-act="ttl-save">保存</button></div><div class="note">填 0 = 永不自动清理。黑名单不受影响。</div>',
       val(num(c.stale_rule_ttl_days, 30) ? num(c.stale_rule_ttl_days, 30) + ' 天' : '关闭')) +
@@ -483,13 +484,13 @@ function renderSettings(anim1) {
     sBtn(['green', 'down'], '导出规则', '复制 rules.json（限速/延迟/黑名单/模板）', 'rules-json', '导出') +
     sBtn(['cyan', 'doc'], 'JSON 健康面板', 'rules / devices / tokens 的完整性与备份', 'json-health', '打开') +
     sBtn(['purple', 'down'], '导出诊断包', '快照、配置、日志尾部和 tc/iptables/ip 状态', 'debug-bundle', '导出')]);
-  // 应用识别 —— 强制 QUIC 回落 TCP
-  groups.push(['应用识别', sItem(['purple', 'flask'], '强制 QUIC 回落 TCP', '拦下 UDP 443（HTTP/3），App 会改走 TCP；默认无需开启（v5.38 已支持 QUIC Initial 解密 + 几何特征 + 120ms 因果传播）', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP"')) +
-    sItem(['blue', 'shield'], '自动获取服务器证书', '「应用规则中心」对陌生域名探读一次公开 TLS 证书组织名辅助聚类', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
-    (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '默认跳过多应用共用 CDN IP 防误伤；打开后一并限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
-    encdnsSettingsHtml() + dnsTakeoverFold() + fgEngineFold() +
+  // 应用识别与 DNS 策略 —— 按协议主次排列，强制 QUIC 回落 TCP 置于开关区末尾兜底
+  groups.push(['应用识别', encdnsSettingsHtml(c) + dnsTakeoverFold() + fgEngineFold() +
+    sItem(['blue', 'shield'], '自动获取服务器证书', '遇到陌生域名时，读取网站公开安全证书里的所属公司名，辅助认出是哪款新应用', toggle(c.discover_cert_probe !== false, 'data-set="certprobe" aria-label="自动获取服务器证书"')) +
+    (S.appLimitSharedKnown ? sItem(['orange', 'warn'], '按应用限速包含共享 IP', '默认跳过多款应用共用的云服务器 IP，防止限速甲应用时误伤乙应用；打开后一并限速', toggle(S.appLimitShared, 'data-set="appshared" aria-label="按应用限速包含共享 IP"')) : '') +
+    sItem(['purple', 'flask'], '强制 QUIC 回落 TCP（兜底排障）', '平时无需开启（系统默认已能直接识别主流 HTTP/3 流量，单应用限速也会自动单独回退）。仅在开启「加密 DNS 严格拦截 / 域名封锁」仍有浏览器绕过、个别应用漏识别、本机挂代理开热点刷视频转圈，或多人刷短视频抢网压不住游戏延迟时再打开（注意：开启后会停用手机系统硬件转发加速，且 Hysteria2 / TUIC 等纯 QUIC 节点将无法连接）', toggle(c.quic_block === true, 'data-set="quic" aria-label="强制 QUIC 回落 TCP（兜底排障）"')) +
     sBtn(['purple', 'rule_hub'], '应用规则中心', '新发现应用、候选晋级、识别纠正与规则包已统一整合至此', 'go-rules-hub', '前往') +
-    sBtn(['cyan', 'flask'], 'DPI 与自训工作台', '亮屏常驻自训、少样本原型蒸馏与准确率自评已整合至分析页', 'go-dpi-studio', '前往')]);
+    sBtn(['cyan', 'flask'], '应用识别学习与准确率自测', '利用本机日常联网自动学习新应用特征、查看识别准确率，已整合至「分析」页', 'go-dpi-studio', '前往')]);
   var cs = S.clsact;
   var gm = c.clsact_bpf_mode || 'auto', og = c.offload_guard || S.offload.guard || null;
   var ogS = gm === 'off' ? '已关闭：不做任何处理' : !og ? '等待第一次检测（约 1 分钟）' : og.fallback_active ? '兜底生效中：已让系统加速退回常规转发' + (og.since ? '（' + ago(og.since) + '起）' : '') : (OG_T[og.offload_state] || og.offload_state || '—');
@@ -514,7 +515,7 @@ function renderSettings(anim1) {
         '<span class="style-meta"><b>' + t[1] + '</b><small>' + t[2] + '</small></span>' +
       '</button>';
     }).join('') + '</div>' +
-    // v6.1.0-rc.2 玻璃透光度五档离散胶囊(只在液态玻璃风格下显示, liquid.css .lg-only): 点按即切换并保存, 零滑条防展开手势误触
+    // 玻璃透光度五档离散胶囊(只在液态玻璃风格下显示, liquid.css .lg-only): 点按即切换并保存, 零滑条防展开手势误触
     '<div class="lg-only">' +
     '<div class="note" style="margin:2px 0 -2px">玻璃透光度微调 · <span id="glass-tint-v">' + gxLbl + '</span>' + (typeof PERF !== 'undefined' && PERF.low ? '（已手动简化特效）' : '') + '</div>' +
     '<div class="gx-pills-5" id="glass-tint" role="group" aria-label="玻璃浓度">' +
@@ -529,7 +530,7 @@ function renderSettings(anim1) {
   groups.push(['模拟环境（调试）', simGroupHtml()]);
   var l = S.live || {};
   var wLabel = S.whoami && (S.whoami.session_label || S.whoami.label);
-  var HNC_UI_VER = 'v6.1.0-rc.2', HNC_UI_VC = '6009302', HNC_UI_DATE = '2026-11-22';
+  var HNC_UI_VER = 'v6.1.0-rc.3', HNC_UI_VC = '6009303', HNC_UI_DATE = '2026-11-23';
   var bVer = cleanVer(l.backend_version, HNC_UI_VER);
   var bVc = cleanVer(l.backend_version_code, HNC_UI_VC);
   var bChan = /-alpha/i.test(bVer) ? 'ALPHA 内测通道' : /-beta/i.test(bVer) ? 'BETA 公测通道' : /-rc/i.test(bVer) ? 'RC 准正式通道' : 'STABLE 稳定通道';
@@ -575,8 +576,8 @@ function renderSettings(anim1) {
       (function(){ var _rv = cleanVer(l.backend_version, HNC_UI_VER); var _short = _rv.replace(/^(v\d+\.\d+)\.\d+-(alpha|beta|rc)\.?(\d+).*$/i, function(_, m, c, n){ return m + ' ' + (c.toLowerCase() === 'rc' ? 'RC' + n : c.charAt(0).toUpperCase() + n); }); return '<span class="badge b-acc" title="' + esc(_rv) + '">' + esc(_short) + '</span>'; })(),
       typeof v6SettingsBodyHtml === 'function' ? v6SettingsBodyHtml() : ''),
     scard('scard-dpi', ['purple', 'search'], '应用识别与 DNS 策略',
-      'QUIC 回落 · 加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· 指纹学习与规则包',
-      '<span class="badge b-pur">DPI 识别</span>',
+      (c.quic_block === true ? 'QUIC 回落已开 · ' : '') + '加密 DNS（' + (ENC_T[(S.encdns && S.encdns.policy) || 'off'] || '关闭') + '）· ' + (S.fgcmp && S.fgcmp.engine === 'classic' ? '前台灵敏实时' : '前台智能防抖') + ' · 应用识别学习',
+      '<span class="badge b-pur">智能识别</span>',
       gMap['应用识别'] || ''),
     scard('scard-qos', ['cyan', 'layers'], '5G 自适应整形与全局队列',
       ((c.autorate && c.autorate.enabled) ? '5G Autorate 动态巡航中' : gsOn ? '静态下行 ' + (rateToMbps(c.global_shaper_down) || '∞') + ' Mbps' : '未启用全局限速') + ' · 默认队列 AQM（' + sqmLabel() + '）',
@@ -649,7 +650,7 @@ function renderSettings(anim1) {
     '<div class="set-top-bar">' + seg('set-lv', [['all', '全部 (' + (basicCards.length + advCards.length + diagCards.length) + ')'], ['basic', '常用 (' + basicCards.length + ')'], ['adv', '进阶 (' + advCards.length + ')'], ['diag', '诊断 (' + diagCards.length + ')']], S.setLv) +
     '<div class="set-top-meta"><span class="note">按级别分类折叠 · 点卡片展开对应设置</span><button class="linkish" data-act="set-fold-toggle">' + (anyOpen ? '全部收起' : '展开常用') + '</button></div></div>' +
     lvSec('basic', '一、基础常用', '热点 · 远程 · 外观 · 告警', basicCards) +
-    lvSec('adv', '二、进阶与识别', 'DPI 识别 · 带宽队列 · 加速兜底 · 设备合并', advCards) +
+    lvSec('adv', '二、进阶与识别', '智能识别 · 带宽队列 · 加速兜底 · 设备合并', advCards) +
     lvSec('diag', '三、诊断与系统', '自检日志 · 运行健康 · 维护备份 · 模拟与关于', diagCards) +
     '<div class="foot hnc-build-wm" id="hnc-build-wm">' + (/-alpha/i.test(bVer) ? '<span class="wm-chan">[ALPHA]</span>' : /-beta/i.test(bVer) ? '<span class="wm-chan">[BETA]</span>' : /-rc/i.test(bVer) ? '<span class="wm-chan">[RC]</span>' : '') + '<span>HNC · ' + esc(bVer) + ' · VC ' + esc(bVc) + ' · Build ' + HNC_UI_DATE + '</span></div></div>';
   var p = $('#p-settings');
@@ -683,13 +684,13 @@ function paintPower() {
   el.innerHTML = (rows || '<div class="note">暂无采样样本（每 5 分钟自动采样一次）</div>') + tips + '<button class="btn sec wide press" style="margin-top:8px" data-act="pwr-refresh">立即刷新采样</button>';
 }
 function dnsSumTxt() {
-  var r = S.dns; if (!r) return '默认关闭 · 让 HNC 代答热点设备的 DNS，识别更早、封锁更彻底';
-  if (!r.enabled) return '未开启 · 让 HNC 代答热点设备的 DNS，识别更早、封锁更彻底';
-  return r.active && r.healthy ? '运行中 · 今天 ' + num((r.stats || {}).queries) + ' 次查询' : '已开启 · 暂未生效（已自动放行直连）';
+  var r = S.dns; if (!r) return '默认关闭 · 由本机代答热点设备的域名解析，应用识别更早、网站封锁更彻底';
+  if (!r.enabled) return '未开启 · 由本机代答热点设备的域名解析，应用识别更早、网站封锁更彻底';
+  return r.active && r.healthy ? '运行中 · 今天已解析 ' + num((r.stats || {}).queries) + ' 次' : '已开启 · 暂未生效（已自动放行直连）';
 }
 function dnsTakeoverFold() {
-  return sFold('dnst', ['blue', 'shield'], 'DNS 接管（实验）', '<span id="dns-sum">' + esc(dnsSumTxt()) + '</span>', '<div id="dns-body"><div class="note">展开后加载</div></div>',
-    toggle(!!(S.dns && S.dns.enabled), 'data-set="dnst" aria-label="DNS 接管"' + (S.dns ? '' : ' disabled')));
+  return sFold('dnst', ['blue', 'shield'], 'DNS 解析接管', '<span id="dns-sum">' + esc(dnsSumTxt()) + '</span>', '<div id="dns-body"><div class="note">展开后加载</div></div>',
+    toggle(!!(S.dns && S.dns.enabled), 'data-set="dnst" aria-label="DNS 解析接管"' + (S.dns ? '' : ' disabled')));
 }
 function loadDNS() {
   return api.get('/api/dns', null, { timeout: 8000 }).then(function (r) { S.dns = r; }).catch(function (e) { S.dns = { ok: false, err: errText(e) }; }).then(paintDNS);
@@ -700,32 +701,33 @@ function paintDNS() {
   el.setAttribute('data-keep', '');
   var sm = $('#dns-sum'); if (sm) sm.textContent = dnsSumTxt();
   var tg = $('[data-set="dnst"]'); if (tg) { tg.removeAttribute('disabled'); if (!tg.closest('.pending')) tg.setAttribute('aria-checked', String(!!r.enabled)); }
-  if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持 DNS 接管）</div>'; return; }
+  if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持 DNS 解析接管）</div>'; return; }
   var st = r.stats || {}, fo = r.failopen || {}, h = '';
   if (r.enabled) {
     h += '<dl class="kv"><dt>状态</dt><dd style="color:' + (r.active && r.healthy ? 'var(--badge-ok)' : 'var(--orange)') + '">' + (r.active && r.healthy ? '运行中' : '未生效 · ' + esc(DNS_ST[fo.reason] || fo.reason || r.last_error || r.state || '检测中')) + '</dd>' +
       '<dt>上游</dt><dd class="mono">' + esc(r.upstream || '自动') + (r.upstream_kind ? ' · ' + esc(r.upstream_kind) : '') + '</dd>' +
       '<dt>今天</dt><dd>' + num(st.queries) + ' 次 · 缓存 ' + num(st.cached) + ' · 拦截 ' + num(st.blocked) + '</dd>' +
-      '<dt>耗时</dt><dd class="num">p50 ' + num(st.p50_ms) + 'ms · p95 ' + num(st.p95_ms) + 'ms</dd>' +
+      '<dt>耗时</dt><dd class="num">平均约 ' + num(st.p50_ms) + 'ms · 慢查询 ' + num(st.p95_ms) + 'ms</dd>' +
       (num(fo.count) ? '<dt>自动放行</dt><dd>' + num(fo.count) + ' 次' + (fo.last_ts ? ' · 最近 ' + ago(fo.last_ts) : '') + '</dd>' : '') + '</dl>';
     var td = Array.isArray(r.top_domains_today) ? r.top_domains_today.slice(0, 5) : [];
     if (td.length) h += '<div class="note">今天查询最多：' + td.map(function (x) { return esc(x.name) + ' ×' + num(x.count); }).join('、') + '</div>';
   }
-  h += '<div class="note" style="margin:8px 0 -2px">被封锁的域名怎么回</div>' + seg('dns-bm', [['nxdomain', '域名不存在'], ['zero', '返回 0.0.0.0']], r.block_mode || 'nxdomain', 'small') +
+  h += '<div class="note" style="margin:8px 0 -2px">封锁域名的返回方式</div>' + seg('dns-bm', [['nxdomain', '提示域名不存在（推荐）'], ['zero', '返回空地址 0.0.0.0']], r.block_mode || 'nxdomain', 'small') +
+    '<div class="note" style="margin-top:4px">默认选「提示域名不存在」可让应用立即停止转圈重试；个别老软件若反复报错可改选「返回空地址 0.0.0.0」。</div>' +
     '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">记录查询日志</div><div class="s">记下每台设备查了哪些域名（只存本机，约 2000 条滚动）</div></span>' + toggle(!!r.log_queries, 'data-set="dnslog" aria-label="记录查询日志"') + '</div>' +
     (r.log_queries ? '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">日志隐私脱敏</div><div class="s">开启后只记主域名、不记录完整子域与解析应答 IP</div></span>' + toggle(!!r.log_redact, 'data-set="dnsredact" aria-label="日志隐私脱敏"') + '</div><button class="btn sec wide press" style="margin:6px 0" data-act="dns-log-open">查看最近 DNS 查询明细</button>' : '') +
-    '<div class="note">好处：设备一查域名 HNC 就知道它要用哪个应用，比等到 TLS 握手更早；按域名封锁在解析这一步就拦住。<br>风险：HNC 自己的 DNS 出问题时会在约 10 秒内自动放行直连（不会断网，但这段时间解析可能变慢）；设备自己开了加密 DNS（DoH / DoT / 私人 DNS）时接管不到；开启查询日志会留下访问记录。只对热点设备生效，不影响本机。</div>';
+    '<div class="note">作用：设备刚查域名时系统就能提前认出应用，按域名封锁也能在第一步直接拦住。<br>安全兜底：万一本机解析服务异常，约 10 秒内会自动放行设备直连（不会断网）；设备若自己开启了私人 DNS 或内置加密 DNS 则不会被接管。只作用于接入热点的设备，不影响本机上网。</div>';
   el.innerHTML = h; placeSegs(el);
 }
-/* ── DPI v2: 识别纠正记录 + 指纹学习 ── */
+/* ── 识别纠正记录 + 指纹学习 ── */
 function fpFold() {
   var n = S.fpl && Array.isArray(S.fpl.user_rules) ? S.fpl.user_rules.length : null;
-  return sFold('fpl', ['green', 'flask'], '识别纠正与指纹学习', n == null ? '你纠正过的识别 · HNC 自动学会的 TLS 指纹' : n + ' 条纠正 · ' + num((S.fpl.stats || {}).usable) + ' 个可用指纹', '<div id="fp-body"><div class="note">展开后加载</div></div>');
+  return sFold('fpl', ['green', 'flask'], '识别纠正与指纹学习', n == null ? '你纠正过的识别 · HNC 自动学会的加密特征' : n + ' 条纠正 · ' + num((S.fpl.stats || {}).usable) + ' 个可用特征', '<div id="fp-body"><div class="note">展开后加载</div></div>');
 }
 function loadFP() {
   return api.get('/api/dpi_fp', null, { timeout: 8000 }).then(function (r) { S.fpl = r; }).catch(function (e) { S.fpl = { err: errText(e) }; }).then(paintFP);
 }
-var FPK_T = { domain: '域名', ip: 'IP', ja4: '指纹' };
+var FPK_T = { domain: '域名', ip: 'IP', ja4: '特征' };
 function paintFP() {
   var el = $('#fp-body'), r = S.fpl; if (!el || !r) return;
   el.setAttribute('data-keep', '');
@@ -735,15 +737,15 @@ function paintFP() {
     return '<div class="row2"><span class="k" style="color:var(--text-1);min-width:0;overflow-wrap:anywhere"><span class="badge b-acc">' + (FPK_T[x.kind] || esc(x.kind)) + '</span> <span class="mono">' + esc(x.kind === 'ja4' ? String(x.value).slice(0, 18) + '…' : x.value) + '</span> → ' + esc(x.app_name || x.app_id) + (x.expires ? ' <span class="note">· ' + Math.max(0, Math.ceil((num(x.expires) - Date.now() / 1000) / 86400)) + ' 天后过期</span>' : '') + '</span><button class="linkish danger" data-fpdel="' + esc(x.id) + '">撤销</button></div>';
   }).join('') + '</div>' + (ur.length > 1 ? '<button class="linkish danger" data-fpdel="__all" style="justify-self:start">全部撤销</button>' : '') : '<div class="note">还没有。在设备卡「实时连接 → 点一条连接 → 纠正识别」里添加。</div>');
   var use = ln.filter(function (x) { return x.usable; });
-  h += '<div class="note" style="margin-bottom:-2px">自动学会的指纹（' + use.length + ' 个可用 / 共 ' + ln.length + ' 个观察中）</div>' +
+  h += '<div class="note" style="margin-bottom:-2px">自动学会的特征（' + use.length + ' 个可用 / 共 ' + ln.length + ' 个观察中）</div>' +
     (use.length ? '<div class="dbox">' + use.slice(0, 12).map(function (x) {
       return '<div class="row2"><span class="k" style="color:var(--text-1)">' + esc(x.name || x.app_id) + ' <span class="note mono">' + esc(String(x.ja4).slice(0, 10)) + ' · ' + esc(x.port_class || '') + (x.qtp ? ' · ' + esc(String(x.qtp).replace(/^qtp1_/, '').slice(0, 8)) : '') + '</span></span><span class="v">' + pct100(x.purity) + '% · ' + num(x.devices) + ' 台</span></div>';
-    }).join('') + '</div>' : '<div class="note">还在学习：同一个指纹在 ≥2 台设备上见过 20 次以上、且 90% 都属于同一个应用后才会用来识别。</div>') +
-    '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠指纹认出 ' + num(st.flows_attributed_by_fp) + ' 条。指纹只在域名看不到（ECH / 直连 IP）时兜底，不会覆盖规则库。</div>';
+    }).join('') + '</div>' : '<div class="note">还在学习：同一个连接特征在 ≥2 台设备上见过 20 次以上、且 90% 都属于同一个应用后才会启用。</div>') +
+    '<div class="note">累计观察 ' + num(st.flows_seen) + ' 条连接 · 靠特征认出 ' + num(st.flows_attributed_by_fp) + ' 条。加密特征只在看不到域名（如直连 IP）时辅助兜底，不会覆盖规则库。</div>';
   el.innerHTML = h;
-  var sw = $('[data-foldkey="fpl"] .s'); if (sw) sw.textContent = ur.length + ' 条纠正 · ' + use.length + ' 个可用指纹';
+  var sw = $('[data-foldkey="fpl"] .s'); if (sw) sw.textContent = ur.length + ' 条纠正 · ' + use.length + ' 个可用特征';
 }
-/* ── v5.24 T5: 识别自评(只用这台手机自己的流量当标准答案) ── */
+/* ── 识别自评(只用这台手机自己的流量当标准答案) ── */
 S.eval = null; S.evalDays = 1;
 function evalSumTxt() {
   var r = S.eval; if (!r) return '用这台手机自己的流量当标准答案，看 HNC 认得准不准';
@@ -765,17 +767,17 @@ function loadEval(days, refresh) {
 }
 /* 准确率: 没有可判对错的样本(全是系统应用等无标准答案的)时显示「—」而不是 0% */
 function evalAcc(m) { return m && m.accuracy_na ? '—' : m && m.judged === 0 ? '—' : pct100(m && m.accuracy) + '%'; }
-var EVAL_M = [['rule', '规则库'], ['fp', '指纹'], ['owner', 'IP 归属']];
+var EVAL_M = [['rule', '规则库'], ['fp', '加密特征'], ['owner', 'IP 归属']];
 
 function lanSelfConsistencyHtml(r) {
   var lc = r && r.lan_self_consistency;
   if (!lc) return '';
   var okParity = lc.he_v4v6_parity == null || lc.he_v4v6_parity >= 0.9;
   var escCnt = num(lc.active_escape_alerts);
-  return '<div class="dbox" style="margin:8px 0"><div class="note" style="margin:0 0 6px;font-weight:600;color:var(--text-1)">热点外部客户端无真值双栈自检（无需开启本机抓包）</div>' +
-    '<div class="row2"><span class="k">DNS ↔ 握手跨模态冲突率（已豁免 ECH）</span><span class="v num">' + (lc.cm_conflict_rate != null ? (lc.cm_conflict_rate * 100).toFixed(1) + '%' : '0.0%') + '</span></div>' +
-    '<div class="row2"><span class="k">Happy Eyeballs IPv4/IPv6 同源一致率</span><span class="v num" style="color:' + (okParity ? 'var(--badge-ok)' : 'var(--badge-warn)') + '">' + (lc.he_v4v6_parity != null ? (lc.he_v4v6_parity * 100).toFixed(1) + '%' : '100%') + '</span></div>' +
-    '<div class="row2"><span class="k">实时 IPv6 应用限速逃逸告警</span><span class="v num" style="color:' + (escCnt > 0 ? 'var(--badge-red)' : 'var(--badge-ok)') + '">' + (escCnt > 0 ? escCnt + ' 台异常' : '0 逃逸（双栈闭合）') + '</span></div></div>';
+  return '<div class="dbox" style="margin:8px 0"><div class="note" style="margin:0 0 6px;font-weight:600;color:var(--text-1)">热点接入设备识别与双栈一致性自检（无需开启本机学习）</div>' +
+    '<div class="row2"><span class="k">域名解析与加密握手不一致率（越低越准）</span><span class="v num">' + (lc.cm_conflict_rate != null ? (lc.cm_conflict_rate * 100).toFixed(1) + '%' : '0.0%') + '</span></div>' +
+    '<div class="row2"><span class="k">IPv4 与 IPv6 双路连接识别一致率</span><span class="v num" style="color:' + (okParity ? 'var(--badge-ok)' : 'var(--badge-warn)') + '">' + (lc.he_v4v6_parity != null ? (lc.he_v4v6_parity * 100).toFixed(1) + '%' : '100%') + '</span></div>' +
+    '<div class="row2"><span class="k">IPv6 应用限速绕过监测</span><span class="v num" style="color:' + (escCnt > 0 ? 'var(--badge-red)' : 'var(--badge-ok)') + '">' + (escCnt > 0 ? escCnt + ' 台异常' : '正常（未绕过限速）') + '</span></div></div>';
 }
 function paintEval() {
   var el = $('#eval-body'), r = S.eval; if (!el || !r) return;
@@ -783,14 +785,14 @@ function paintEval() {
   var sm = $('#eval-sum'); if (sm) sm.textContent = evalSumTxt();
   if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持识别自评）</div>'; return; }
   if (!r.enabled) {
-    el.innerHTML = '<div class="note">「识别自评」要用这台手机自己的流量当标准答案：HNC 一边看它连了哪些网站，一边记下每个连接是哪个 App 发的（靠系统给的 UID → 包名），再回头对比 HNC 自己认得准不准。</div>' +
-      '<div class="note warn">现在本机流量归因没开，所以没有样本。</div>' +
+    el.innerHTML = '<div class="note">「识别自评」用这台手机自己的联网记录做标准答案：系统一边记录每次联网实际是哪个本机 App 发起的，一边检验识别规则有没有猜对。</div>' +
+      '<div class="note warn">当前尚未开启本机联网学习，因此还没有对比样本。</div>' +
       '<div class="btns"><button class="btn pri press" data-act="eval-enable">去开启</button></div>' +
-      '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。</div>' + lanSelfConsistencyHtml(r);
+      '<div class="note">只用这台手机自己的流量，样本仅在本地保存 7 天，绝不上传。</div>' + lanSelfConsistencyHtml(r);
     return;
   }
   var m = r.methods || {}, comb = m.combined || {};
-  var h = lanSelfConsistencyHtml(r) + '<div class="note" style="margin-bottom:-2px">本机真值评估时间范围</div>' + seg('eval-days', [[1, '24 小时'], [7, '7 天']], r.days || S.evalDays, 'small');
+  var h = lanSelfConsistencyHtml(r) + '<div class="note" style="margin-bottom:-2px">自测统计时间范围</div>' + seg('eval-days', [[1, '24 小时'], [7, '7 天']], r.days || S.evalDays, 'small');
   if (!num(r.samples)) {
     h += '<div class="note">还没有样本。正常用手机（刷视频、聊微信）十来分钟，回来点刷新就有了。</div>' + evalFootHtml();
     el.innerHTML = h; placeSegs(el); return;
@@ -801,7 +803,7 @@ function paintEval() {
     '<div class="en"><b class="num">' + pct100(comb.coverage) + '<i>%</i></b><span>覆盖率</span></div>' +
     '<div class="en"><b class="num">' + (evalAcc(comb) === '—' ? '—' : pct100(comb.accuracy) + '<i>%</i>') + '</b><span>准确率</span></div>' +
     '<div class="en"><b class="num">' + num(r.apps) + '</b><span>涉及应用</span></div></div>' +
-    '<div class="note">覆盖率＝这些连接里 HNC 认出了应用的比例；准确率＝认出来的里面认对的比例。（综合＝用户纠正 &gt; 规则库 &gt; 指纹）</div>';
+    '<div class="note">覆盖率＝这些连接里成功认出应用的比例；准确率＝认出来的结果里完全认对的比例。（综合优先级：手动纠正 &gt; 规则库 &gt; 加密特征）</div>';
   // 各方法一行
   h += '<dl class="kv">';
   EVAL_M.forEach(function (x) {
@@ -809,32 +811,32 @@ function paintEval() {
     h += '<dt>' + x[1] + '</dt><dd class="num">覆盖 ' + pct100(mm.coverage) + '% · 准确 ' + evalAcc(mm) + ' <span class="note">(' + num(mm.predicted) + '/' + num(mm.samples) + (mm.judged != null && !mm.accuracy_na ? ' · 可判 ' + num(mm.judged) : '') + ')</span></dd>';
   });
   h += '</dl>';
-  // v5.27 T2: QUIC 样本上「JA4 + 传输参数」与「仅 JA4」对比
+  // QUIC 样本特征对比
   var qq = r.quic || {};
   if (num(qq.samples) > 0) {
     var qw = qq.fp_with_qtp || {}, qj = qq.fp_ja4_only || {};
-    h += '<div class="note">QUIC 指纹（含传输参数）覆盖 ' + pct100(qw.coverage) + '% · 准确 ' + evalAcc(qw) + '（仅 JA4：覆盖 ' + pct100(qj.coverage) + '% · 准确 ' + evalAcc(qj) + '）· ' + num(qq.samples) + ' 条 QUIC 样本</div>';
+    h += '<div class="note">QUIC 加密流量特征覆盖 ' + pct100(qw.coverage) + '% · 准确 ' + evalAcc(qw) + '（基础特征：覆盖 ' + pct100(qj.coverage) + '% · 准确 ' + evalAcc(qj) + '）· 共 ' + num(qq.samples) + ' 条样本</div>';
   }
-  // v5.27 T3: 启动指纹(影子运行: 只观察, 不改任何识别结果)
+  // 应用打开瞬间特征学习
   var su = r.startup;
   if (su) {
-    h += '<div class="note" style="margin-bottom:-2px">启动指纹（实验 · 只观察，不影响识别）</div><div class="note">学会 ' + num(su.apps_learned) + ' 个应用' +
-      (num(su.days) >= 2 ? ' · 切换识别率 ' + pct100(su.switch_rate) + '% · 事件准确 ' + pct100(su.event_accuracy) + '%' + (num(su.switches) ? '（' + num(su.switch_hit) + '/' + num(su.switches) + ' 次切换）' : '') : ' · ' + esc(su.note || '')) +
-      '</div><button class="linkish" data-act="startup-list" style="justify-self:start">' + (S.startupOpen ? '收起学会的应用' : '查看学会的应用') + '</button><div id="startup-list">' + (S.startupOpen ? startupListHtml() : '') + '</div>';
+    h += '<div class="note" style="margin-bottom:-2px">应用启动特征学习（后台静默观察，不影响现有识别）</div><div class="note">已掌握 ' + num(su.apps_learned) + ' 个应用' +
+      (num(su.days) >= 2 ? ' · 切换识别率 ' + pct100(su.switch_rate) + '% · 准确率 ' + pct100(su.event_accuracy) + '%' + (num(su.switches) ? '（' + num(su.switch_hit) + '/' + num(su.switches) + ' 次切换）' : '') : ' · ' + esc(su.note || '')) +
+      '</div><button class="linkish" data-act="startup-list" style="justify-self:start">' + (S.startupOpen ? '收起已掌握的应用' : '查看已掌握的应用') + '</button><div id="startup-list">' + (S.startupOpen ? startupListHtml() : '') + '</div>';
   }
-  // v5.28 B1: 新应用发现(影子运行: 共现聚类准确率, 只统计不改动)
+  // 新应用自动发现准确度
   var dv = r.discover;
   if (dv && num(dv.samples) > 0) {
-    h += '<div class="note" style="margin-bottom:-2px">新应用发现（实验 · 只统计，不影响识别）</div><div class="note">纯度 ' + pct100(dv.purity) + '% · 完整度 ' + pct100(dv.completeness) + '%（共 ' + num(dv.groups) + ' 组' + (num(dv.hubs) ? ' · 枢纽域名 ' + num(dv.hubs) : '') + '）</div>';
+    h += '<div class="note" style="margin-bottom:-2px">新应用自动归类准确度（后台统计评估）</div><div class="note">归类准确度 ' + pct100(dv.purity) + '% · 归拢完整度 ' + pct100(dv.completeness) + '%（共 ' + num(dv.groups) + ' 组' + (num(dv.hubs) ? ' · 公共共用域名 ' + num(dv.hubs) + ' 个' : '') + '）</div>';
     var dvs = Array.isArray(dv.variants) ? dv.variants : [];
     if (dvs.length > 1) {
-      h += '<div class="note">参数对照：' + dvs.map(function (v) { return esc(v.label) + ' ' + pct100(v.purity) + '%/' + pct100(v.completeness) + '%（' + num(v.groups) + ' 组）'; }).join(' · ') + '</div>';
+      h += '<div class="note">不同分档对比：' + dvs.map(function (v) { return esc(v.label) + ' ' + pct100(v.purity) + '%/' + pct100(v.completeness) + '%（' + num(v.groups) + ' 组）'; }).join(' · ') + '</div>';
     }
   }
-  // v5.28 B3: 流量形状猜类别(影子运行, 只标注不改变归属)
+  // 按流量特征猜应用类别
   var fc = r.flow_cls;
   if (fc && num(fc.samples) > 0) {
-    h += '<div class="note">流量形状猜类别：模型 ' + pct100(fc.model_acc) + '% · 手工规则 ' + pct100(fc.manual_acc) + '%（' + num(fc.samples) + ' 条今日考题 · ' + num(fc.classes) + ' 类）</div>';
+    h += '<div class="note">按流量特征猜应用类别：智能模型 ' + pct100(fc.model_acc) + '% · 固定规则 ' + pct100(fc.manual_acc) + '%（今日 ' + num(fc.samples) + ' 条样本 · ' + num(fc.classes) + ' 类）</div>';
   }
   if (r.note) h += '<div class="note">' + esc(r.note) + '</div>';
   if (r.capped) h += '<div class="note warn">今天样本太多，超过单日上限后停止记录了（不影响已有统计）。</div>';
@@ -852,26 +854,26 @@ function paintEval() {
       return '<div class="row2"><span class="k" style="min-width:0;overflow-wrap:anywhere">' + esc(x.name || x.truth) + (snis.length ? '<div class="note mono" style="white-space:normal;overflow-wrap:anywhere;font-size:11px">' + esc(snis.join(' · ')) + '</div>' : '') + '</span><span class="v num" style="white-space:nowrap">' + num(x.n) + ' 次</span></div>';
     }).join('') + '</div>';
   }
-  // 前台记录
+  // 前台切换记录
   var fg = r.fg_truth || {};
-  var fgTxt = '24 小时切换 ' + num(fg.switches_24h) + ' 次' + (fg.last_pkg ? ' · 最近 ' + esc(fg.last_pkg) + (fg.last_ts ? '（' + ago(fg.last_ts) + '）' : '') : '');
+  var fgTxt = '近 24 小时切换 ' + num(fg.switches_24h) + ' 次' + (fg.last_pkg ? ' · 最近 ' + esc(fg.last_pkg) + (fg.last_ts ? '（' + ago(fg.last_ts) + '）' : '') : '');
   if (fg.source === 'none' || !num(fg.switches_24h)) {
-    fgTxt = '还没有前台记录。亮屏用一会儿手机后会出现；如果一直没有，说明这台手机的系统取不到前台应用，v5.25 的前台评估可能不可用';
+    fgTxt = '暂时还没有本机前台切换记录。正常亮屏使用一会儿手机后会自动生成；若一直没有，说明当前手机系统限制读取前台应用状态，不影响热点识别与限速';
   } else {
-    fgTxt += ' · 取数方式 ' + esc(fg.source);
+    fgTxt += ' · 来源 ' + esc(fg.source);
   }
-  h += '<div class="note" style="margin-bottom:-2px">前台记录（给以后的前台评估用）</div><div class="note">' + fgTxt + '</div>';
+  h += '<div class="note" style="margin-bottom:-2px">本机前台切换记录（辅助校验识别准确度）</div><div class="note">' + fgTxt + '</div>';
   h += evalFootHtml();
   el.innerHTML = h; placeSegs(el);
 }
-/* v5.27 T4: 前台识别引擎(经典 / HMM 实验)+ 过去 24 小时对比 */
+/* 前台应用判断模式(智能防抖 / 灵敏实时) + 近 24 小时对比 */
 S.fgcmp = null;
 function fgEngineSumTxt() {
-  var r = S.fgcmp; if (!r || r.err) return '经典（打分 + 滞回）· 新引擎（实验）更不容易来回跳';
-  return (r.engine === 'hmm' ? '新（实验）' : '经典') + ' · 过去 24 小时两者一致 ' + num(r.agree_pct) + '%';
+  var r = S.fgcmp; if (!r || r.err) return '智能防抖（推荐） · 自动过滤后台消息与更新干扰，显示不乱跳';
+  return (r.engine === 'classic' ? '当前：灵敏实时（经典）' : '当前：智能防抖（推荐）') + (num(r.rounds) ? ' · 近 24 小时两种模式一致率 ' + num(r.agree_pct) + '%' : '');
 }
 function fgEngineFold() {
-  return sFold('fgeng', ['purple', 'gauge'], '前台识别引擎', '<span id="fgeng-sum">' + esc(fgEngineSumTxt()) + '</span>', '<div id="fgeng-body"><div class="note">展开后加载</div></div>');
+  return sFold('fgeng', ['purple', 'gauge'], '前台应用判断模式', '<span id="fgeng-sum">' + esc(fgEngineSumTxt()) + '</span>', '<div id="fgeng-body"><div class="note">展开后加载</div></div>');
 }
 function loadFgEngine() {
   return api.get('/api/fg_compare', { days: 1 }, { timeout: 8000 }).then(function (r) { S.fgcmp = r; }).catch(function (e) { S.fgcmp = { err: errText(e) }; }).then(paintFgEngine);
@@ -882,18 +884,19 @@ function paintFgEngine() {
   var sm = $('#fgeng-sum'); if (sm) sm.textContent = fgEngineSumTxt();
   if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持）</div>'; return; }
   var c = r.classic || {}, hm = r.hmm || {};
-  el.innerHTML = seg('fg-engine', [['classic', '经典'], ['hmm', '新（实验）']], r.engine || 'classic', 'small') +
-    (num(r.rounds) ? '<div class="note">过去 24 小时：经典 切换 ' + num(c.switches_per_hour) + ' 次/小时、短于 30 秒的 ' + num(c.short_segments) + ' 段；新 ' + num(hm.switches_per_hour) + ' 次/小时、' + num(hm.short_segments) + ' 段；两者一致 ' + num(r.agree_pct) + '%</div>'
-      : '<div class="note">过去 24 小时还没有热点设备的流量，暂无对比。</div>') +
-    '<div class="note">新引擎更不容易来回跳；切换后前台时间线从此刻起按新引擎记录。只影响「正在用什么」的显示和前台时间线，不影响识别、限速和限时。</div>';
+  el.innerHTML = seg('fg-engine', [['hmm', '智能防抖（推荐）'], ['classic', '灵敏实时（经典）']], r.engine || 'hmm', 'small') +
+    '<div class="note" style="margin-top:6px"><b>智能防抖（默认推荐）</b>：结合应用类型与使用连贯性，自动过滤微信后台收消息、网盘同步、应用商店静默更新引起的偶发流量尖峰；看长视频分段缓冲、或边打语音边逛其他应用时也不会乱跳，设备卡「正在用」与前台时间线更干净准确。<br><b>灵敏实时（经典）</b>：只看最近十来秒谁流量猛就立刻切换显示，换应用瞬间反应更激进，适合紧盯设备瞬时联网动作的抓包排障，但容易被后台推送和预加载短暂抢走焦点。</div>' +
+    (num(r.rounds) ? '<div class="note">近 24 小时实测对比：智能防抖每小时切换 ' + num(hm.switches_per_hour) + ' 次（不足半分钟的短暂闪跳 ' + num(hm.short_segments) + ' 次）；灵敏实时每小时切换 ' + num(c.switches_per_hour) + ' 次（短暂闪跳 ' + num(c.short_segments) + ' 次），两种模式在 ' + num(r.agree_pct) + '% 的时间判断一致。</div>'
+      : '<div class="note">近 24 小时还没有热点设备的联网流量，暂无实测对比数据。</div>') +
+    '<div class="note">这里只影响设备卡片「正在用什么」的显示和前台时间线，完全不影响总流量统计、按应用限速和每日使用时长限制。</div>';
   placeSegs(el);
 }
-/* v5.27 T6: 我的规则包(导出 / 导入 / 清除已导入) */
+/* 我的规则包(导出 / 导入 / 清除已导入) */
 S.rpack = null; S.rpackRep = null;
 function rulepackSumTxt() {
   var r = S.rpack; if (!r || r.err) return '把这台手机学到的和你自己加的识别规则打包备份 / 分享';
   var ex = r.exportable || {}, im = r.imported || {};
-  return '可导出 ' + num(ex.domain_rules) + ' 条域名规则 · ' + num(ex.fingerprints) + ' 个指纹 · ' + num(ex.startup) + ' 个启动指纹' + (num(im.domain_rules) + num(im.fingerprints) + num(im.startup) ? ' · 已导入 ' + num(im.suffixes) + ' 个域名' : '');
+  return '可导出 ' + num(ex.domain_rules) + ' 条域名规则 · ' + num(ex.fingerprints) + ' 个特征 · ' + num(ex.startup) + ' 个启动特征' + (num(im.domain_rules) + num(im.fingerprints) + num(im.startup) ? ' · 已导入 ' + num(im.suffixes) + ' 个域名' : '');
 }
 function rulepackFold() {
   return sFold('rpack', ['green', 'down'], '我的规则包', '<span id="rpack-sum">' + esc(rulepackSumTxt()) + '</span>', '<div id="rpack-body"><div class="note">展开后加载</div></div>');
@@ -901,14 +904,14 @@ function rulepackFold() {
 function loadRulepack() {
   return api.get('/api/dpi_rulepack', { summary: 1 }, { timeout: 10000 }).then(function (r) { S.rpack = r; }).catch(function (e) { S.rpack = { err: errText(e) }; }).then(paintRulepack);
 }
-var RPK_SKIP = { conflict: '和本机规则冲突', already_local: '本机已有', public_suffix: '公共后缀', shared_apex: '共享基础设施', bad_suffix: '域名不合法', bad_id: 'id 不合法', bad_category: '类别本机没有', bad_attach: '挂靠目标不合法', bad_ja4: '指纹不合法', bad_qtp: 'QUIC 参数指纹不合法', bad_port: '端口类不合法', bad_alpn: 'ALPN 不合法', bad_value: '数值不合法', bad_token: '启动 token 不合法', too_few_tokens: '启动 token 太少', bad_entry: '格式不对' };
+var RPK_SKIP = { conflict: '和本机规则冲突', already_local: '本机已有', public_suffix: '公共后缀', shared_apex: '共享基础设施', bad_suffix: '域名不合法', bad_id: 'id 不合法', bad_category: '类别本机没有', bad_attach: '挂靠目标不合法', bad_ja4: '特征不合法', bad_qtp: 'QUIC 参数特征不合法', bad_port: '端口类不合法', bad_alpn: 'ALPN 不合法', bad_value: '数值不合法', bad_token: '启动特征不合法', too_few_tokens: '启动特征太少', bad_entry: '格式不对' };
 function rulepackRepHtml(rep) {
   if (!rep) return '';
   if (rep.err) return '<div class="note err">' + esc(rep.err) + '</div>';
   var a = rep.added || {}, m = rep.merged || {}, u = rep.unchanged || {}, sk = rep.skipped || {};
   var skl = Object.keys(sk).filter(function (k) { return num(sk[k]); }).map(function (k) { return (RPK_SKIP[k] || k) + ' ' + num(sk[k]); });
-  return '<div class="note">导入完成：新增 ' + num(a.suffixes) + ' 个域名（' + num(a.domain_rules) + ' 条规则）· ' + num(a.fingerprints) + ' 个指纹 · ' + num(a.startup) + ' 个启动指纹' +
-    (num(m.suffixes) + num(m.fingerprints) + num(m.startup) ? '；合并 ' + num(m.suffixes) + ' 个域名 · ' + num(m.fingerprints) + ' 个指纹 · ' + num(m.startup) + ' 个启动指纹' : '') +
+  return '<div class="note">导入完成：新增 ' + num(a.suffixes) + ' 个域名（' + num(a.domain_rules) + ' 条规则）· ' + num(a.fingerprints) + ' 个特征 · ' + num(a.startup) + ' 个启动特征' +
+    (num(m.suffixes) + num(m.fingerprints) + num(m.startup) ? '；合并 ' + num(m.suffixes) + ' 个域名 · ' + num(m.fingerprints) + ' 个特征 · ' + num(m.startup) + ' 个启动特征' : '') +
     (num(u.suffixes) + num(u.fingerprints) + num(u.startup) ? '；已有未变 ' + num(u.suffixes + u.fingerprints + u.startup) + ' 条' : '') + '</div>' +
     (skl.length ? '<div class="note warn">跳过：' + esc(skl.join('、')) + '</div>' : '') +
     (Array.isArray(rep.conflicts) && rep.conflicts.length ? '<div class="note mono" style="font-size:11px;overflow-wrap:anywhere">' + esc(rep.conflicts.slice(0, 5).join(' · ')) + '</div>' : '');
@@ -920,9 +923,9 @@ function paintRulepack() {
   if (r.err) { el.innerHTML = '<div class="note err">' + esc(r.err) + '（后端可能还不支持规则包）</div>'; return; }
   var src = r.sources || {}, ex = r.exportable || {}, im = r.imported || {}, uc = src.user_corrections || {};
   var pr = function (x) { return num((x || {}).rules); };
-  var h = '<div class="note">可导出：域名规则 ' + num(ex.domain_rules) + ' 条（自动扩展 ' + pr(src.auto_expanded) + ' / 晋升 ' + pr(src.auto_promoted) + ' / 自定义 ' + pr(src.user_custom) + ' / 纠正 ' + num(uc.domain) + '）· 指纹 ' + num(ex.fingerprints) + ' 条 · 启动指纹 ' + num(ex.startup) + ' 个应用</div>' +
+  var h = '<div class="note">可导出：域名规则 ' + num(ex.domain_rules) + ' 条（自动扩展 ' + pr(src.auto_expanded) + ' / 晋升 ' + pr(src.auto_promoted) + ' / 自定义 ' + pr(src.user_custom) + ' / 纠正 ' + num(uc.domain) + '）· 加密特征 ' + num(ex.fingerprints) + ' 条 · 启动特征 ' + num(ex.startup) + ' 个应用</div>' +
     '<div class="row" style="padding:4px 0;min-height:0"><span class="box" style="flex:1"><input id="rpack-note" maxlength="60" placeholder="备注（可空，例如「家里的手机」）"></span></div>' +
-    '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">包含已导入的</div><div class="s">已导入 ' + num(im.suffixes) + ' 个域名 · ' + num(im.fingerprints) + ' 个指纹 · ' + num(im.startup) + ' 个启动指纹（别人给你的）</div></span>' + toggle(false, 'id="rpack-inc" data-local="rpack-inc" aria-label="包含已导入的"') + '</div>' +
+    '<div class="row" style="padding:4px 0;min-height:0"><span class="tx"><div class="t">包含已导入的</div><div class="s">已导入 ' + num(im.suffixes) + ' 个域名 · ' + num(im.fingerprints) + ' 个特征 · ' + num(im.startup) + ' 个启动特征（别人给你的）</div></span>' + toggle(false, 'id="rpack-inc" data-local="rpack-inc" aria-label="包含已导入的"') + '</div>' +
     '<div class="btns"><button class="btn pri press" data-act="rpack-export">导出</button></div>' +
     '<div class="note" style="margin-bottom:-2px">导入</div>' +
     '<div class="row" style="padding:4px 0;min-height:0"><input id="rpack-file" type="file" accept=".json,application/json" style="flex:1;min-width:0"></div>' +
@@ -963,21 +966,21 @@ function rulepackImport(btn) {
   }).catch(function (e) { S.rpackRep = { err: errText(e) }; var rp = $('#rpack-rep'); if (rp) rp.innerHTML = rulepackRepHtml(S.rpackRep); toast(errText(e), 'err'); })
     .then(function () { btn.disabled = false; });
 }
-/* v5.27 T3: 学会的启动指纹列表(/api/dpi_startup) */
+/* 已掌握的应用启动特征列表(/api/dpi_startup) */
 S.startup = null; S.startupOpen = false;
 function startupListHtml() {
   var r = S.startup; if (!r) return '<div class="note">加载中…</div>';
   if (r.err) return '<div class="note err">' + esc(r.err) + '</div>';
   var ln = (Array.isArray(r.learned) ? r.learned : []).filter(function (x) { return x.usable; });
-  if (!ln.length) return '<div class="note">还没有学会的应用：同一个应用要冷启动 3 次以上、且每次都连到 2 个以上它特有的域名才算学会。</div>';
+  if (!ln.length) return '<div class="note">还没有掌握的应用：同一个应用正常冷启动 3 次以上、且每次都连到 2 个以上它专属的域名后会自动掌握。</div>';
   return '<div class="dbox">' + ln.slice(0, 20).map(function (x) {
     return '<div class="row2"><span class="k" style="min-width:0;overflow-wrap:anywhere">' + esc(x.name || x.app_id) + '</span><span class="v num" style="white-space:nowrap">启动 ' + num(Math.round(num(x.starts))) + ' 次 · 特征 ' + num(x.feat) + ' 个</span></div>';
-  }).join('') + '</div><div class="note">累计事件 ' + num((r.stats || {}).events_total) + ' 次（热点设备上认出的「打开了某应用」）</div>';
+  }).join('') + '</div><div class="note">累计识别事件 ' + num((r.stats || {}).events_total) + ' 次（热点设备上认出的「打开了某应用」）</div>';
 }
 function toggleStartupList() {
   S.startupOpen = !S.startupOpen;
   var el = $('#startup-list'), b = $('[data-act="startup-list"]');
-  if (b) b.textContent = S.startupOpen ? '收起学会的应用' : '查看学会的应用';
+  if (b) b.textContent = S.startupOpen ? '收起已掌握的应用' : '查看已掌握的应用';
   if (!el) return Promise.resolve();
   if (!S.startupOpen) { el.innerHTML = ''; return Promise.resolve(); }
   el.innerHTML = startupListHtml();
@@ -985,10 +988,10 @@ function toggleStartupList() {
     .then(function () { var e2 = $('#startup-list'); if (e2 && S.startupOpen) e2.innerHTML = startupListHtml(); });
 }
 function evalFootHtml() {
-  return '<div class="note">只用这台手机自己的流量，样本保存 7 天，不上传。采够样本后可点「立即蒸馏」把本机真值秒级转化为热点指纹与流分类模型。</div>' +
+  return '<div class="note">只用这台手机自己的联网记录做对比，数据仅存本机 7 天，绝不上传。积累足够记录后，点「立即更新学习模型」即可把新学到的应用特征同步给热点识别使用。</div>' +
     '<div class="btns" style="flex-wrap:wrap">' +
-      '<button class="btn pri press" data-act="dpi-distill-now">立即蒸馏训练</button>' +
-      '<button class="btn sec press" data-act="go-self-studio">自训工作台</button>' +
+      '<button class="btn pri press" data-act="dpi-distill-now">立即更新学习模型</button>' +
+      '<button class="btn sec press" data-act="go-self-studio">识别学习中心</button>' +
       '<button class="btn sec press" data-act="eval-refresh">刷新</button>' +
       '<button class="btn sec danger press" data-act="eval-clear">清除样本</button>' +
     '</div>';
@@ -1039,7 +1042,7 @@ function fxSettingsHtml() {
       var dis = !S.motion && x[0] !== 'title' && x[0] !== 'haptic';
       return '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">' + x[1] + '</div><div class="s">' + x[2] + '</div></span>' + toggle(FX[x[0]], 'data-set="fx-' + x[0] + '" aria-label="' + x[1] + '"' + (dis ? ' disabled' : '')) + '</div>';
     }).join('') +
-    '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">弹簧手感</div><div class="s">轻快：300 / 30 · 有弹性：200 / 20</div></span>' + seg('fxspring', [['light', '轻快'], ['bouncy', '有弹性']], FX.spring, 'small') + '</div>' +
+    '<div class="row" style="padding:6px 0;min-height:0"><span class="tx"><div class="t">弹簧手感</div><div class="s">轻快：收放干脆利落 · 有弹性：轻微回弹更灵动</div></span>' + seg('fxspring', [['light', '轻快'], ['bouncy', '有弹性']], FX.spring, 'small') + '</div>' +
     '<div class="note" style="margin:6px 0 -2px">效果演示</div><div class="chips">' + [['sheet', '弹层'], ['page', '切页'], ['list', '列表浮现'], ['num', '数字滚动']].map(function (b) { return '<button class="chip press" data-act="fx-demo" data-demo="' + b[0] + '">' + b[1] + '</button>'; }).join('') + '</div>' +
     '<div class="note">演示数字：<b class="num" id="fx-num" style="color:var(--text-1)">128.00</b> MB/s</div>';
   return '<div class="note" style="margin:8px 0 -2px">动画档位 · ' + FXP_T[pre] + '</div>' +
@@ -1049,8 +1052,8 @@ function fxSettingsHtml() {
 }
 function fxRefresh() { applyTheme(); navSync(); if (S.page === 'settings') renderSettings(false); }
 function fxDemo(k) {
-  if (k === 'sheet') sheet('<h3>弹层演示</h3><div class="sub">从你点的按钮里长出来；按住往下拖可以关闭，背后的页面会跟着缩放</div>' +
-    '<div class="dbox"><div class="row2"><span class="k">弹簧</span><span class="v">' + (FX.spring === 'bouncy' ? '有弹性 200 / 20' : '轻快 300 / 30') + '</span></div><div class="row2"><span class="k">性能模式</span><span class="v">' + (PERF.low ? '已简化' : '完整') + '</span></div></div>' +
+  if (k === 'sheet') sheet('<h3>弹层演示</h3><div class="sub">平滑弹出；按住顶部往下拖或点击空白处即可关闭</div>' +
+    '<div class="dbox"><div class="row2"><span class="k">弹簧手感</span><span class="v">' + (FX.spring === 'bouncy' ? '有弹性（灵动回弹）' : '轻快（干脆利落）') + '</span></div><div class="row2"><span class="k">性能模式</span><span class="v">' + (PERF.low ? '已简化' : '完整') + '</span></div></div>' +
     '<button class="btn pri wide press" data-close style="margin-top:14px">好的</button>');
   else if (k === 'page') { go('devices'); setTimeout(function () { go('settings'); }, 1100); }
   else if (k === 'list') { var w = $('#p-settings .wrap'); stagger(w, 14); }
@@ -1091,20 +1094,20 @@ function setToggleCfg(kind, el) {
       if (on) { var gw = el.closest('[data-foldkey]'); if (gw && !gw.classList.contains('open')) foldToggle(gw, 'gs'); el.setAttribute('aria-checked', 'false'); toast('填好上限后点「应用」启用'); return; }
       run(api.action('global_shaper_set', { enabled: 'false' }).then(done('全局带宽整形已关闭'))); return;
     case 'remote': run(api.action('remote_enabled_set', { enabled: String(on) }).then(function (r) { toast(on ? '远程访问已开启 · 约 1 分钟内可访问' : '远程访问已关闭 · 约 1 分钟内 :8443 关闭'); return loadConfig(); })).then(function () { if (S.page === 'settings') renderSettings(false); }); return;
-    case 'appshared': run(api.action('app_limit_shared_ips_set', { enabled: String(on) }).then(function () { S.appLimitShared = on; toast(on ? '已包含共享 IP · 同一 CDN 上的其他应用也可能被一起限速' : '已恢复：跳过与其他应用共用的地址'); return loadAppLimits(); })); return;
+    case 'appshared': run(api.action('app_limit_shared_ips_set', { enabled: String(on) }).then(function () { S.appLimitShared = on; toast(on ? '已包含共享 IP · 共用同一云服务器的其他应用也可能一并被限速' : '已恢复默认：跳过与其他应用共用的服务器 IP，避免误伤'); return loadAppLimits(); })); return;
     case 'certprobe': run(api.action('discover_cert_probe_set', { enabled: String(on) }).then(done())); return;
     case 'sim': run(simSet(on)); return;
     case 'dnst':
-      if (!on) { run(api.action('dns_takeover_set', { enabled: 'false' }).then(function () { toast('DNS 接管已关闭 · 设备恢复直连'); return loadDNS(); })); return; }
+      if (!on) { run(api.action('dns_takeover_set', { enabled: 'false' }).then(function () { toast('DNS 解析接管已关闭 · 设备恢复直连'); return loadDNS(); })); return; }
       el.setAttribute('aria-checked', 'false');
-      confirmSheet('开启 DNS 接管？', '热点设备的 DNS 查询改由 HNC 代答，识别更早、按域名封锁更彻底。<br>HNC 的 DNS 出问题时约 10 秒内自动放行直连；设备开了私人 DNS / DoH 时接管不到。随时可以关闭。', '开启', { safe: true }).then(function (ok) {
+      confirmSheet('开启 DNS 解析接管？', '热点设备的域名查询改由本机代答，应用识别更早、按域名封锁更彻底。<br>若本机解析服务出现异常，约 10 秒内会自动放行设备直连；设备自己开启了私人 DNS 或内置加密 DNS 时不受影响。随时可以关闭。', '开启', { safe: true }).then(function (ok) {
         if (!ok) return; el.setAttribute('aria-checked', 'true');
-        run(api.action('dns_takeover_set', { enabled: 'true' }).then(function () { toast('DNS 接管已开启 · 约 10 秒内生效'); return loadDNS(); }));
+        run(api.action('dns_takeover_set', { enabled: 'true' }).then(function () { toast('DNS 解析接管已开启 · 约 10 秒内生效'); return loadDNS(); }));
       }); return;
     case 'dnslog': run(api.action('dns_takeover_set', { log_queries: String(on) }).then(function () { toast(on ? '已开始记录查询日志' : '已停止记录查询日志'); return loadDNS(); })); return;
     case 'dnsredact': run(api.action('dns_takeover_set', { log_redact: String(on) }).then(function () { toast(on ? '已开启 DNS 日志脱敏' : '已关闭 DNS 日志脱敏'); return loadDNS(); })); return;
     case 'authreq': run(api.action('auth_required_set', { enabled: String(on) }).then(function () { if (S.cfg) { S.cfg.auth_required = on; S.cfg.remote_auth_required = on; } toast('已同步远程鉴权配置'); })); return;
-    case 'quic': run(api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启 · 热点打开后生效' : '已开启 · QUIC 流量会回落到 TCP') : '已关闭 · 恢复 QUIC'); return loadConfig(); })); return;
+    case 'quic': run(api.action('quic_block_set', { enabled: String(on) }).then(function (r) { toast(on ? (/pending/.test(r && r.detail || '') ? '已开启强制回落 TCP（热点打开后生效）' : '已开启强制回落 TCP · 设备将自动改走常规连接') : '已关闭强制回落 · 恢复默认连接方式'); return loadConfig(); }).then(function () { if (S.page === 'settings') renderSettings(false); })); return;
   }
 }
 function clsactCheck(quiet) {
@@ -1296,7 +1299,7 @@ function loadRemoteChangelog() {
   if (window.__HNC_MOCK_CHANGELOG) return Promise.resolve(window.__HNC_MOCK_CHANGELOG);
   return new Promise(function (resolve) {
     var m = window.__HNC_MOCK_META || {};
-    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.2';
+    var fbVer = cleanVer(m.version, '') || cleanVer(S.live && S.live.backend_version, '') || 'v6.1.0-rc.3';
     var fallback = '<div class="cl-section" id="cl-history">' +
       '<div class="cl-title">' + uiSvg('sparkles') + ' ' + esc(fbVer) + ' · Vector 四舱壁零开销网关与三级自适应数据面</div>' +
       '<ul class="cl-list">' +
@@ -1386,7 +1389,7 @@ function recStop() {
     .catch(function (e) { toast(errText(e), 'err'); });
 }
 
-/* ═════════════════════ v5.40.0 数据面真机命中核验面板 & Go 1.27 goroutineleak 按需诊断 ═════════════════════
+/* ═════════════════════ 限速真实生效检验面板 & 后台服务卡死自检（协程泄漏扫描） ═════════════════════
  * 100% 双向兼容专线 3 dataplane_verify.go JSON 契约与动作返回格式 (actionResp.Detail JSON 字符串)
  * 全量 24×24 viewBox · stroke-width="1.85" 双层光学纯矢量 SVG · 零位图 · 零坏词安全兜底
  */
@@ -1604,7 +1607,7 @@ function dpvDefaultData(leakOn) {
       bypass_or_missing_count: 0,
       app_classes_total: 0,
       overall_status: 'unsampled',
-      headline: '待采样核验：请点击立即核验读取内核计数，确认 HTB 队列与正交掩码真实命中状态'
+      headline: '尚未开始检验：请点击下方「立即重新检验」，核对每台限速设备的流量是否真正经过限速通道'
     },
     devices: [],
     goroutineleak: {
@@ -1615,7 +1618,7 @@ function dpvDefaultData(leakOn) {
       leaked_count: 0,
       duration_ms: 0,
       status: 'idle',
-      message: '默认零闲置开销（按需打开开关即可执行 Go 1.27 runtime/pprof goroutineleak 阻塞协程扫描）',
+      message: '平时不耗电（仅在怀疑后台控制服务卡顿或无响应时，打开右侧开关检查是否有后台任务卡住）',
       preview_stacks: []
     }
   };
@@ -1922,17 +1925,17 @@ function dpvDiagRowHtml() {
   var d = dpvNormalize(DPV_STATE.lastData, DPV_STATE.leakEnabled);
   var s = d.summary;
   var maskSummary = d.netd_low16_protected
-    ? '正交掩码 ' + dpvEsc(d.fwmark_mask)
-    : '低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')';
+    ? '与系统路由互不冲突'
+    : '存在系统网络标记冲突 (' + dpvEsc(d.mark_layout) + ')';
   var sub = d.sampled_ok
-    ? '受控 ' + dpvInt(s.controlled_devices) + ' 台 · 命中 ' + dpvInt(s.hitting_count) + ' 台 · ' + maskSummary
-    : '待采样核验 · 请点击立即核验读取内核计数';
+    ? '已设限速 ' + dpvInt(s.controlled_devices) + ' 台 · 正在生效 ' + dpvInt(s.hitting_count) + ' 台 · ' + maskSummary
+    : '尚未检验 · 点击查看并核对每台设备的限速生效情况';
   var icoTone = !d.sampled_ok
     ? 'gray'
     : (s.bypass_or_missing_count > 0 || !d.netd_low16_protected ? 'orange' : 'blue');
   return '<button type="button" class="row" data-dpv-act="sheet" data-dpv-diag-row="1">' +
     gi(icoTone, 'gauge') +
-    '<span class="tx"><div class="t">数据面命中逐设备计数器</div><div class="s">' + sub + '</div></span>' +
+    '<span class="tx"><div class="t">每台设备限速生效明细</div><div class="s">' + sub + '</div></span>' +
     '<span class="hint-a">查看明细</span></button>';
 }
 
@@ -2149,12 +2152,12 @@ function dpvRenderSheetContentHtml(data, isBusy) {
   if (!sampled) {
     devListHtml =
       '<div class="dpv-empty">' +
-      '待采样核验：请点击上方「刷新实时增量」或「一键重下发修复」读取内核 RTNetlink HTB 类与正交 Fwmark 实时计数器。' +
+      '尚未读取数据：请点击上方「刷新实时数据」或「一键修复限速」，查看每台设备的限速通道实时流量。' +
       '</div>';
   } else if (d.devices.length === 0) {
     devListHtml =
       '<div class="dpv-empty">' +
-      '当前暂无处于限速、应用感知 QoS 或黑名单策略下的受控客户端。为任意热点设备开启限速后，此处将实时展示内核 RTNetlink HTB 类与正交 Fwmark 命中计数器。' +
+      '目前还没有给任何热点设备设置限速、应用优先级或拉黑。给任意设备开启限速后，这里会实时展示它的限速生效流量与状态。' +
       '</div>';
   } else {
     for (var i = 0; i < d.devices.length; i++) {
@@ -2180,10 +2183,10 @@ function dpvRenderSheetContentHtml(data, isBusy) {
       : leakUnsupported
         ? '运行时不支持'
         : (glk.leaked_count > 0 || glk.status === 'leak_detected')
-          ? '检出泄漏 ' + dpvInt(glk.leaked_count)
+          ? '发现异常 ' + dpvInt(glk.leaked_count)
           : glk.sampled
-            ? '0 协程泄漏'
-            : '待采样';
+            ? '运行流畅（无卡死）'
+            : '待检测';
 
   var stacksHtml = '';
   if (leakOn && glk.preview_stacks && glk.preview_stacks.length > 0) {
@@ -2192,13 +2195,19 @@ function dpvRenderSheetContentHtml(data, isBusy) {
 
   var leakDescText = (leakOn && glk.sampled)
     ? ((leakErr || leakUnsupported)
-        ? '总协程 ' + dpvInt(glk.total_goroutines) + ' 个 · 耗时 ' + dpvInt(glk.duration_ms) + ' ms — ' + dpvEsc(glk.message)
-        : '总协程 ' + dpvInt(glk.total_goroutines) + ' 个 · 泄漏 ' + dpvInt(glk.leaked_count) + ' 个 · 耗时 ' + dpvInt(glk.duration_ms) + ' ms — ' + dpvEsc(glk.message))
+        ? '后台任务共 ' + dpvInt(glk.total_goroutines) + ' 个 · 耗时 ' + dpvInt(glk.duration_ms) + ' ms — ' + dpvEsc(glk.message)
+        : '后台任务共 ' + dpvInt(glk.total_goroutines) + ' 个 · 卡住泄漏 ' + dpvInt(glk.leaked_count) + ' 个 · 耗时 ' + dpvInt(glk.duration_ms) + ' ms — ' + dpvEsc(glk.message))
     : dpvEsc(glk.message);
+
+  var plainSummaryLine = !sampled
+    ? '点击下方「刷新实时数据」即可核对每台限速设备的流量是否真正经过限速通道。'
+    : (d.netd_low16_protected
+        ? '系统网络路由与限速标记互不干扰 · ' + (d.ipv6_quic_controlled ? 'IPv4 / IPv6 双栈限速闭环正常' : '按需启用双栈 QUIC 管控') + ' · 已登记设备地址 ' + dpvInt(bpf.mac_mark_entries) + ' 项 / IP ' + dpvInt(bpf.ip_mark_entries) + ' 项'
+        : '检测到限速标记可能与手机系统网络冲突，建议点击下方「一键修复限速」自动恢复');
 
   var pipeMaskLine = d.netd_low16_protected
     ? '设备标记 <code>0x00800000 | (mid &lt;&lt; 16)</code>（如 mid=1 → <code>0x00810000</code>，mid=5 → <code>0x00850000</code>），掩码 <code>' + dpvEsc(d.fwmark_mask) + '</code>，低 16 位 <code>0x0000ffff</code> 完整保留给 Android netd 策略路由'
-    : '检测到低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')，建议点击「一键重下发修复」恢复 <code>0xffff0000</code> 正交掩码保护';
+    : '检测到低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')，建议点击「一键修复限速」恢复 <code>0xffff0000</code> 正交掩码保护';
 
   var hasAnomaly = sampled && sum.bypass_or_missing_count > 0;
   var sheetRepairCls = 'dpv-btn dpv-btn-compact press' + (hasAnomaly ? ' dpv-btn-warn' : '');
@@ -2206,38 +2215,43 @@ function dpvRenderSheetContentHtml(data, isBusy) {
   return (
     '<div class="dpv-sheet-body" id="dpv-sheet-root">' +
     '  <div class="dpv-pipe-banner">' +
-    '    <div><strong>正交位域契约：</strong>' + pipeMaskLine + '</div>' +
-    '    <div><strong>clsact / GRO 管道：</strong>eBPF 返回 <code>TC_ACT_UNSPEC (-1)</code>（prio 1 着色 → prio 2 ifb0/police 128KB 突发桶）· ' + (d.ipv6_quic_controlled ? '双栈 IPv4/IPv6 QUIC (UDP 443) 已闭环管控' : '按需启用双栈 QUIC 管控') + '</div>' +
-    '    <div><strong>采集引擎状态：</strong>' + (sampled ? dpvEsc(d.engine_label) + ' · BPF mac_mark ' + dpvInt(bpf.mac_mark_entries) + ' 项 / ip_mark ' + dpvInt(bpf.ip_mark_entries) + ' 项' : '待采样核验 · 请点击刷新实时增量读取内核计数') + '</div>' +
+    '    <div><strong>当前通道状态：</strong>' + plainSummaryLine + '</div>' +
+    '    <details class="v6-adv-fold" style="margin-top:8px"><summary>底层技术参数（开发者）</summary>' +
+    '      <div class="v6-adv-body" style="gap:4px;padding-top:6px">' +
+    '        <div><strong>正交位域契约：</strong>' + pipeMaskLine + '</div>' +
+    '        <div><strong>clsact / GRO 管道：</strong>eBPF 返回 <code>TC_ACT_UNSPEC (-1)</code>（prio 1 着色 → prio 2 ifb0/police 128KB 突发桶）· ' + (d.ipv6_quic_controlled ? '双栈 IPv4/IPv6 QUIC (UDP 443) 已闭环管控' : '按需启用双栈 QUIC 管控') + '</div>' +
+    '        <div><strong>采集引擎状态：</strong>' + (sampled ? dpvEsc(d.engine_label) + ' · BPF mac_mark ' + dpvInt(bpf.mac_mark_entries) + ' 项 / ip_mark ' + dpvInt(bpf.ip_mark_entries) + ' 项' : '尚未采样核验') + '</div>' +
+    '      </div>' +
+    '    </details>' +
     '  </div>' +
     '  <div class="dpv-leak-box">' +
     '    <div class="dpv-leak-row">' +
     '      <div class="dpv-leak-info">' +
     '        <div class="dpv-leak-title">' +
     DPV_ICONS.leakScan +
-    '<span>Go 1.27 goroutineleak 按需诊断</span>' +
+    '<span>后台服务卡死自检（协程泄漏扫描）</span>' +
     '<span class="dpv-pill ' + leakBadgeCls + '">' + dpvEsc(leakBadgeTxt) + '</span>' +
     '        </div>' +
     '        <div class="dpv-leak-desc">' +
     leakDescText +
     '        </div>' +
     '      </div>' +
-    '      <button type="button" role="switch" aria-checked="' + (leakOn ? 'true' : 'false') + '" class="dpv-switch ' + (leakOn ? 'is-on' : '') + '" data-dpv-act="toggle-leak" aria-label="切换 goroutineleak 按需诊断">' +
+    '      <button type="button" role="switch" aria-checked="' + (leakOn ? 'true' : 'false') + '" class="dpv-switch ' + (leakOn ? 'is-on' : '') + '" data-dpv-act="toggle-leak" aria-label="切换后台服务卡死自检">' +
     '        <span class="dpv-switch-knob"></span>' +
     '      </button>' +
     '    </div>' +
     stacksHtml +
     '  </div>' +
     '  <div class="dpv-sheet-toolbar">' +
-    '    <span class="dpv-sheet-count">受控客户端明细（' + (sampled ? '共 ' + dpvInt(d.devices.length) + ' 台 · 单应用子类 ' + dpvInt(sum.app_classes_total) + ' 个' : '待采样核验') + '）</span>' +
+    '    <span class="dpv-sheet-count">已设限速设备明细（' + (sampled ? '共 ' + dpvInt(d.devices.length) + ' 台 · 单应用规则 ' + dpvInt(sum.app_classes_total) + ' 个' : '尚未检验') + '）</span>' +
     '    <div class="dpv-sheet-actions">' +
     '      <button type="button" class="' + sheetRepairCls + '" data-dpv-act="repair"' + (isBusy ? ' disabled' : '') + '>' +
     DPV_ICONS.repair +
-    '<span>' + (isBusy && DPV_STATE.resyncing ? '修复中…' : '一键重下发修复') + '</span>' +
+    '<span>' + (isBusy && DPV_STATE.resyncing ? '修复中…' : '一键修复限速') + '</span>' +
     '      </button>' +
     '      <button type="button" class="dpv-btn dpv-btn-compact press" data-dpv-act="run"' + (isBusy ? ' disabled' : '') + '>' +
     DPV_ICONS.runVerify +
-    '<span>' + (isBusy && !DPV_STATE.resyncing ? '采样中…' : '刷新实时增量') + '</span>' +
+    '<span>' + (isBusy && !DPV_STATE.resyncing ? '读取中…' : '刷新实时数据') + '</span>' +
     '      </button>' +
     '    </div>' +
     '  </div>' +
@@ -2253,19 +2267,19 @@ function dpvRenderSelfCheckSummaryHtml(data) {
   var sum = d.summary;
   var sampled = Boolean(d.sampled_ok);
   var maskTxt = d.netd_low16_protected
-    ? '正交掩码 ' + dpvEsc(d.fwmark_mask)
-    : '低 16 位 netd 掩码冲突 (' + dpvEsc(d.mark_layout) + ')';
+    ? '与系统路由互不冲突'
+    : '存在系统网络标记冲突 (' + dpvEsc(d.mark_layout) + ')';
   return (
     '<div class="dpv-selfcheck-bar" data-dpv-selfcheck="1">' +
     '  <div class="dpv-selfcheck-left">' +
     DPV_ICONS.dataplane +
     '    <div>' +
     '      <div class="dpv-selfcheck-title">' + (sampled
-      ? '内核限速队列真机命中：' + dpvInt(sum.hitting_count) + ' / ' + dpvInt(sum.controlled_devices) + ' 台命中'
-      : '内核限速队列真机命中：待采样核验') + '</div>' +
+      ? '限速真实生效检验：' + dpvInt(sum.hitting_count) + ' / ' + dpvInt(sum.controlled_devices) + ' 台设备正在生效'
+      : '限速真实生效检验：待检验') + '</div>' +
     '      <div class="dpv-selfcheck-sub">' + (sampled
-      ? maskTxt + ' · ' + (d.bpf_maps.clsact_attached ? 'BPF mac/ip_mark 就绪' : 'BPF 待挂载') + ' · 原生 RTNetlink 采样'
-      : '请点击核验明细读取内核实时计数器') + '</div>' +
+      ? maskTxt + ' · ' + (d.bpf_maps.clsact_attached ? '底层分流已就绪' : '底层分流待挂载') + ' · 实时计数正常'
+      : '点击右侧「核验明细」查看每台设备的限速过包情况') + '</div>' +
     '    </div>' +
     '  </div>' +
     '  <button type="button" class="dpv-btn dpv-btn-compact press" data-dpv-act="sheet">核验明细</button>' +
@@ -2302,11 +2316,17 @@ function dpvRefreshRenderedViews() {
   }
   var sheetRoot = document.getElementById('dpv-sheet-root');
   if (sheetRoot && sheetRoot.parentNode) {
+    var openSheetAdv = !!sheetRoot.querySelector('.v6-adv-fold[open]');
     var html = dpvRenderSheetContentHtml(DPV_STATE.lastData, DPV_STATE.loading);
     if (typeof morphOuter === 'function') {
       morphOuter(sheetRoot, html);
     } else {
       sheetRoot.outerHTML = html;
+    }
+    if (openSheetAdv) {
+      var newRoot = document.getElementById('dpv-sheet-root');
+      var af = newRoot && newRoot.querySelector('.v6-adv-fold');
+      if (af) af.open = true;
     }
   }
   var diagRows = document.querySelectorAll('[data-dpv-diag-row]');
@@ -2330,13 +2350,13 @@ function dpvRefreshRenderedViews() {
 }
 
 function dpvOpenSheet() {
-  var title = '内核限速命中逐设备计数器';
+  var title = '每台设备限速生效明细';
   var contentHtml = dpvRenderSheetContentHtml(DPV_STATE.lastData, DPV_STATE.loading);
   DPV_STATE.sheetOpen = true;
   if (typeof sheet === 'function' && typeof document !== 'undefined' && document.getElementById('sheet')) {
     sheet(
       '<h3>' + dpvEsc(title) + '</h3>' +
-      '<div class="sub">实时读取内核 RTNetlink HTB 类字节增量、超限整形与正交 Fwmark 状态</div>' +
+      '<div class="sub">实时核对每台限速设备的上下行过包流量，确认限速规则真实生效、未被系统加速绕过</div>' +
       contentHtml +
       '<button type="button" class="btn sec wide press" data-close style="margin-top:12px">关闭</button>',
       { tall: true, kind: 'dpv', onClose: function () { DPV_STATE.sheetOpen = false; } }

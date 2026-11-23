@@ -24,7 +24,9 @@ type fgTB struct {
 }
 
 func newFgTB(t *testing.T, start time.Time) *fgTB {
-	return &fgTB{t: t, m: newFgModel(), now: start, keys: map[string]string{}}
+	m := newFgModel()
+	m.engine = func() string { return fgEngineClass }
+	return &fgTB{t: t, m: m, now: start, keys: map[string]string{}}
 }
 
 // newKey 一条新连接

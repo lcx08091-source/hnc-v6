@@ -998,7 +998,7 @@ document.addEventListener('click', function (e) {
     else if (k === 'fgdays') { var fgd = devBy(S.fgMac); if (fgd) loadFgTl(fgd, +v); }
     else if (k === 'dns-bm') { busyWhile(sg, api.action('dns_takeover_set', { block_mode: v })).then(function () { toast('拦截方式：' + q.textContent); return loadDNS(); }).catch(function (e) { toast(errText(e), 'err'); loadDNS(); }); }
     else if (k === 'eval-days') { S.evalDays = +v; loadEval(S.evalDays); }
-    else if (k === 'fg-engine') { busyWhile(sg, api.action('dpi_fg_engine', { engine: v })).then(function () { toast('前台识别引擎：' + q.textContent + ' · 时间线从此刻起按它记录'); return loadFgEngine(); }).catch(function (e) { toast(errText(e), 'err'); loadFgEngine(); }); }
+    else if (k === 'fg-engine') { busyWhile(sg, api.action('dpi_fg_engine', { engine: v })).then(function () { toast('前台应用判断已切换为「' + (v === 'classic' ? '灵敏实时' : '智能防抖') + '」· 时间线从此刻起生效'); return loadFgEngine(); }).catch(function (e) { toast(errText(e), 'err'); loadFgEngine(); }); }
     else if (k === 'set-lv') {
       S.setLv = v; LS.set('hnc6.set_lv', v);
       $$('#p-settings [data-lv-sec]').forEach(function (sec) {
@@ -1389,16 +1389,16 @@ document.addEventListener('click', function (e) {
     case 'url-copy': copyText(remoteUrl()).then(function (ok) { toast(ok ? '已复制访问地址' : '复制失败', ok ? 'ok' : 'err'); }); break;
     case 'url-share': if (navigator.share) navigator.share({ title: 'HNC', url: remoteUrl() }).catch(function () {}); else copyText(remoteUrl()).then(function () { toast('已复制访问地址'); }); break;
     case 'pair-new': busyWhile(a, pairNew()); break;
-    case 'svc-restart': confirmSheet('重启 HNC 服务？', '重跑 post-fs-data.sh + service.sh，期间规则会短暂重建。', '重启').then(function (ok) { if (ok) api.action('restart_service', {}, { timeout: 20000, maxTime: 18 }).then(function () { toast('正在重启…'); setTimeout(function () { location.reload(); }, 2500); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
+    case 'svc-restart': confirmSheet('重启 HNC 服务？', '重新启动所有后台管控与识别服务，已设好的规则不会丢失，期间网络管控会短暂重载约几秒。', '重启').then(function (ok) { if (ok) api.action('restart_service', {}, { timeout: 20000, maxTime: 18 }).then(function () { toast('正在重启…'); setTimeout(function () { location.reload(); }, 2500); }).catch(function (e2) { toast(errText(e2), 'err'); }); }); break;
     case 'cache-clear': busyWhile(a, api.action('cache_clear')).then(function (r3) { toast('缓存已清理' + (r3.detail ? ' · ' + r3.detail : '')); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-enable': busyWhile(a, api.post('/api/self/toggle', { enabled: true }).then(function (r3) { if (r3 && r3.error) throw new Error(r3.error); return r3; })).then(function () { toast('本机流量归因已开启 · 5 秒后开始采集样本'); return loadEval(S.evalDays, true); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'eval-refresh': busyWhile(a, loadEval(S.evalDays, true)); break;
     case 'go-self-studio': S.aseg = 'dpi'; go('stats'); renderStats(false); break;
     case 'studio-recipe': S.studioRecipeOpen = !S.studioRecipeOpen; if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); else if (S.page === 'apps') renderApps(false); break;
     case 'studio-start': busyWhile(a, api.action('self_studio_start', { mode: 'full', auto_stop_min: '15' }, { timeout: 20000, maxTime: 18 })).then(function () { toast('已开启双路本机真值采集 · 15 分钟后自动停表并蒸馏'); return loadApps(); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
-    case 'studio-stop': busyWhile(a, api.action('self_studio_start', { mode: 'stop' }, { timeout: 25000, maxTime: 22 }).then(function () { return api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 }); })).then(function (r3) { var d0 = detailJSON(r3) || {}; var fpN = num(d0.exclusive_fps, d0.usable_fp); toast('已停止采集并完成蒸馏' + (fpN ? ' · 专属指纹 ' + fpN + ' 个' : '')); return loadApps(); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'studio-stop': busyWhile(a, api.action('self_studio_start', { mode: 'stop' }, { timeout: 25000, maxTime: 22 }).then(function () { return api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 }); })).then(function (r3) { var d0 = detailJSON(r3) || {}; var fpN = num(d0.exclusive_fps, d0.usable_fp); toast('已停止采集并完成模型更新' + (fpN ? ' · 专属特征 ' + fpN + ' 个' : '')); return loadApps(); }).then(function () { if (S.page === 'apps') renderApps(false); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'studio-distill':
-    case 'dpi-distill-now': busyWhile(a, api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 })).then(function (r3) { var dj = detailJSON(r3); var d0 = (dj && dj.distill) || dj || {}; toast('本机真值蒸馏完成 · 专属指纹 ' + num(d0.exclusive_fps, d0.usable_fp) + ' 个 · 启动指纹 ' + num(d0.startup_usable, d0.usable_startup) + ' 个'); return Promise.all([loadApps(), S.page === 'settings' ? Promise.all([loadFP(), loadEval(S.evalDays, true), loadRulepack()]) : null]); }).then(function () { if (S.page === 'apps') renderApps(false); if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
+    case 'dpi-distill-now': busyWhile(a, api.action('self_studio_distill', {}, { timeout: 25000, maxTime: 22 })).then(function (r3) { var dj = detailJSON(r3); var d0 = (dj && dj.distill) || dj || {}; toast('学习模型已更新 · 专属特征 ' + num(d0.exclusive_fps, d0.usable_fp) + ' 个 · 启动特征 ' + num(d0.startup_usable, d0.usable_startup) + ' 个'); return Promise.all([loadApps(), S.page === 'settings' ? Promise.all([loadFP(), loadEval(S.evalDays, true), loadRulepack()]) : null]); }).then(function () { if (S.page === 'apps') renderApps(false); if (S.page === 'stats' && S.aseg === 'dpi') paintDpi(); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'studio-export': busyWhile(a, api.action('self_studio_export', { note: '本机真值自训练规则包' }, { timeout: 25000, maxTime: 22 })).then(function (r3) { var dj = detailJSON(r3), nm = String(dj.name || ''); if (nm && /^[A-Za-z0-9._-]+$/.test(nm)) { if (KSU) return shell('mkdir -p /sdcard/Download && cp ' + sq(HNC_DIR + '/exports/' + nm) + ' /sdcard/Download/ && echo ok').then(function () { toast('已蒸馏并存到 /sdcard/Download/' + nm); }); downloadExport(nm, '/api/exports/' + encodeURIComponent(nm)); toast('已蒸馏并导出 ' + nm); } else toast('规则包已生成'); }).catch(function (e2) { toast(errText(e2), 'err'); }); break;
     case 'startup-list': busyWhile(a, toggleStartupList()); break;
     case 'rpack-export': rulepackExport(a); break;
@@ -2227,7 +2227,7 @@ function showRollbackBanner(rb) {
       if (bar && !$('#set-q')) {
         bar.insertAdjacentHTML('afterbegin',
           '<label class="glass search">' + ico('search') +
-            '<input id="set-q" type="search" placeholder="搜索设置项（如：DNS、QUIC、配对、液态玻璃、自检）" value="' + esc(S.setQ) + '" autocomplete="off">' +
+            '<input id="set-q" type="search" placeholder="搜索设置项（如：密码、定时、限速、主题、备份、自检）" value="' + esc(S.setQ) + '" autocomplete="off">' +
           '</label>'
         );
       }

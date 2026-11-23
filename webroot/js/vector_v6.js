@@ -1,4 +1,4 @@
-/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.2 · 智能护航、隐私明文安检与连接排障中心
+/* HNC WebUI · vector_v6.js —— HNC v6.1.0-rc.3 · 智能护航、隐私明文安检与连接排障中心
  * 设计准则:
  *   1. 3秒简易认知渐进披露: 顶部一句话人话态势 + 3格控制中心磁贴 + 三大场景切换(网速护航 / 隐私安检 / 连接排障) + 高级参数按需折叠。
  *   2. 100% 真实后端能力闭环: 完整对接 /api/vector_sync、LeakGuard(含白名单/三级守卫/撤销栈)、Express、UpdateLeash、ThermoCruise、FlowScalpel、Blackbox(四维归因)、MultiIface、NativeSubtrees 与 ConfigVault。
@@ -2901,7 +2901,7 @@ function v6ExportBackupBundle(actEl) {
   if (typeof KSU !== 'undefined' && KSU && typeof shell === 'function' && typeof loadSecret === 'function') {
     var ksuVer = v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.2';
+      'v6.1.0-rc.3';
     var ksuFname = 'hnc-backup-' + ksuVer + '-' + Date.now() + '.json';
     var outPath = '/sdcard/Download/' + ksuFname;
     var runCurlSave = function (forceSec) {
@@ -2947,7 +2947,7 @@ function v6ExportBackupBundle(actEl) {
     var verTag = v6CleanBackupVer(bundle.module_version) ||
       v6CleanBackupVer(window.S && S.live && S.live.backend_version) ||
       v6CleanBackupVer(window.S && S.lastHealth && (S.lastHealth.backend_version || S.lastHealth.version)) ||
-      'v6.1.0-rc.2';
+      'v6.1.0-rc.3';
     var fname = 'hnc-backup-' + verTag + '-' + Date.now() + '.json';
     try {
       var blob = new Blob([jsonStr], { type: 'application/json;charset=utf-8' });

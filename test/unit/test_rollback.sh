@@ -286,6 +286,35 @@ done
   && grep -q '"from":"6009302","to":"6000001"' "$HNC/data/rollback.json" \
   && test_pass || test_fail "s1=$rc_s1 s2=$rc_s2 r=$r_rc2 cfg_ok=$_cfg_ok json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
 
+test_start "rollback: 6000001 -> 6009301 -> 6009302 -> 6009303 (rc.3) 连刷全程保护 v6.0.1 (6000001) 黄金 .prev 底包"
+rbseed 6009301 6000001
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.1\nversionCode=6009301\n' > "$MOD/module.prop"
+echo "GOLDEN-BIN-v601" > "$HNC/bin/hnc_watchdog"
+echo "GOLDEN-HTTPD-v601" > "$HNC/daemon/hnc_httpd/hnc_httpd"
+echo "GOLDEN-WEB-v601" > "$HNC/webroot/index.html"
+rbrun snapshot "$MOD" "$HNC"; rc_r1=$?
+rm -f "$HNC/data/rollback.observing"
+echo "RC1-BIN" > "$HNC/bin/hnc_watchdog"
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.2\nversionCode=6009302\n' > "$MOD/module.prop"
+rbrun snapshot "$MOD" "$HNC"; rc_r2=$?
+_prev_after_rc2="$(cat "$HNC/.prev/version" 2>/dev/null | tr -d ' \r\n')"
+rm -f "$HNC/data/rollback.observing"
+echo "RC2-BIN" > "$HNC/bin/hnc_watchdog"
+printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.3\nversionCode=6009303\n' > "$MOD/module.prop"
+rbrun snapshot "$MOD" "$HNC"; rc_r3=$?
+_prev_after_rc3="$(cat "$HNC/.prev/version" 2>/dev/null | tr -d ' \r\n')"
+echo "RC3-BROKEN-BIN" > "$HNC/bin/hnc_watchdog"
+i=0; r_rc3=0
+while [ $i -lt 6 ]; do rbrun observe "$HNC" >/dev/null 2>&1; r_rc3=$?; i=$((i+1)); done
+[ "$rc_r1" -eq 0 ] && [ "$rc_r2" -eq 0 ] && [ "$rc_r3" -eq 0 ] \
+  && [ "$_prev_after_rc2" = "6000001" ] && [ "$_prev_after_rc3" = "6000001" ] \
+  && [ "$r_rc3" -eq 9 ] \
+  && [ "$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null)" = "GOLDEN-BIN-v601" ] \
+  && [ "$(cat "$HNC/data/runtime_version" 2>/dev/null | tr -d ' \r\n')" = "6000001" ] \
+  && [ "$(cat "$HNC/data/rollback.pinned" 2>/dev/null | tr -d ' \r\n')" = "6009303" ] \
+  && grep -q '"from":"6009303","to":"6000001"' "$HNC/data/rollback.json" \
+  && test_pass || test_fail "r1=$rc_r1 r2=$rc_r2 r3=$rc_r3 prev2=$_prev_after_rc2 prev3=$_prev_after_rc3 obs=$r_rc3 bin=$(cat "$HNC/bin/hnc_watchdog" 2>/dev/null) json=$(cat "$HNC/data/rollback.json" 2>/dev/null)"
+
 test_start "rollback: 6009302 (rc.2) 升正式版 6010000 (v6.1.0) 保黄金底包, 6010000 稳定后接班新黄金 .prev"
 rbseed 6009302 6000001
 printf 'id=hotspot_net_ctl\nversion=v6.1.0-rc.2\nversionCode=6009302\n' > "$MOD/module.prop"

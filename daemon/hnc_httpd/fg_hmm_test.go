@@ -188,9 +188,9 @@ func TestFgHMMResetOnGap(t *testing.T) {
 	}
 }
 
-// classic(默认)时: shown 恒等于 cur, HMM 只在后台算; 对比统计照记
+// 显式切到 classic 时: shown 恒等于 cur, HMM 只在后台算; 对比统计照记
 func TestFgClassicEngineShadowAndCompare(t *testing.T) {
-	b := newFgTB(t, fgStart())
+	b := newFgTBHMM(t, fgStart(), fgEngineClass)
 	b.tick(tk)
 	var v fgView
 	for i := 0; i < 8; i++ {
@@ -257,36 +257,50 @@ func TestFgEngineActionAndAPI(t *testing.T) {
 	for _, d := range []string{"data", "run"} {
 		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
 	}
-	if fgEngineFor(dir) != fgEngineClass {
-		t.Fatal("default must be classic")
+	if fgEngineFor("") != fgEngineHMM || fgEngineFor(dir) != fgEngineHMM {
+		t.Fatalf("empty/missing dir default must be hmm, got empty=%q dir=%q", fgEngineFor(""), fgEngineFor(dir))
 	}
 	if r := actionDPIFgEngine(dir, map[string]string{"engine": "magic"}); r.OK {
 		t.Fatal("invalid engine accepted")
 	}
 	_ = os.WriteFile(fgExperimentPath(dir), []byte(`{"other":1}`), 0o644)
-	if r := actionDPIFgEngine(dir, map[string]string{"engine": "hmm"}); !r.OK {
-		t.Fatalf("set hmm: %+v", r)
-	}
 	if fgEngineFor(dir) != fgEngineHMM {
-		t.Fatal("engine not hmm")
+		t.Fatal("missing fg_engine key must default to hmm")
+	}
+	// 显式切换到 classic -> 落盘读取为 classic 且保留其它键
+	if r := actionDPIFgEngine(dir, map[string]string{"engine": "classic"}); !r.OK {
+		t.Fatalf("set classic: %+v", r)
+	}
+	if fgEngineFor(dir) != fgEngineClass {
+		t.Fatal("engine not classic")
 	}
 	b, _ := os.ReadFile(fgExperimentPath(dir))
 	if !strings.Contains(string(b), `"other"`) {
-		t.Fatalf("other keys lost: %s", b)
-	}
-	// 同一秒内改回 classic(mtime 可能不变, size 变)
-	if r := dispatchAction(newServer(dir), "dpi_fg_engine", map[string]string{"engine": "classic"}, true); !r.OK {
-		t.Fatalf("dispatch: %+v", r)
-	}
-	if fgEngineFor(dir) != fgEngineClass {
-		t.Fatal("engine not back to classic")
+		t.Fatalf("other keys lost after classic: %s", b)
 	}
 	s := newServer(dir)
 	rec := httptest.NewRecorder()
 	s.apiFgCompare(rec, httptest.NewRequest("GET", "/api/fg_compare?days=7", nil))
 	var out map[string]interface{}
 	if json.Unmarshal(rec.Body.Bytes(), &out) != nil || out["ok"] != true || out["engine"] != "classic" || out["classic"] == nil {
-		t.Fatalf("api: %s", rec.Body.String())
+		t.Fatalf("api (classic): %s", rec.Body.String())
+	}
+	// 同一秒内再切回 hmm -> 落盘读取为 hmm 且保留其它键
+	if r := dispatchAction(s, "dpi_fg_engine", map[string]string{"engine": "hmm"}, true); !r.OK {
+		t.Fatalf("dispatch hmm: %+v", r)
+	}
+	if fgEngineFor(dir) != fgEngineHMM {
+		t.Fatal("engine not back to hmm")
+	}
+	b, _ = os.ReadFile(fgExperimentPath(dir))
+	if !strings.Contains(string(b), `"other"`) {
+		t.Fatalf("other keys lost after hmm: %s", b)
+	}
+	rec = httptest.NewRecorder()
+	s.apiFgCompare(rec, httptest.NewRequest("GET", "/api/fg_compare?days=7", nil))
+	out = nil
+	if json.Unmarshal(rec.Body.Bytes(), &out) != nil || out["ok"] != true || out["engine"] != "hmm" || out["hmm"] == nil {
+		t.Fatalf("api (hmm): %s", rec.Body.String())
 	}
 	rec = httptest.NewRecorder()
 	s.apiFgCompare(rec, httptest.NewRequest("GET", "/api/fg_compare?days=3", nil))
@@ -295,23 +309,195 @@ func TestFgEngineActionAndAPI(t *testing.T) {
 	}
 }
 
-// load / flush 时从文件刷新引擎; 每轮 step 不读文件
+// load / flush 时从文件刷新引擎; 空目录默认 hmm, 显式 classic 才切 classic, 再切回 hmm 正常生效
 func TestFgEngineLoadedFromFile(t *testing.T) {
 	dir := t.TempDir()
 	for _, d := range []string{"data", "run"} {
 		_ = os.MkdirAll(filepath.Join(dir, d), 0o755)
 	}
-	_ = os.WriteFile(fgExperimentPath(dir), []byte(`{"fg_engine":"hmm"}`), 0o644)
 	m := newFgModel()
 	now := fgStart()
 	m.load(dir, now)
 	if m.engineLocked() != fgEngineHMM {
-		t.Fatal("load should pick up hmm")
+		t.Fatalf("empty dir load should default to hmm, got %q", m.engineLocked())
 	}
 	_ = os.WriteFile(fgExperimentPath(dir), []byte(`{"fg_engine":"classic","x":1}`), 0o644)
 	m.flush(now)
 	if m.engineLocked() != fgEngineClass {
-		t.Fatal("flush should refresh engine")
+		t.Fatalf("flush should refresh engine to classic, got %q", m.engineLocked())
+	}
+	_ = os.WriteFile(fgExperimentPath(dir), []byte(`{"fg_engine":"hmm","x":1}`), 0o644)
+	m.flush(now)
+	if m.engineLocked() != fgEngineHMM {
+		t.Fatalf("flush should refresh engine back to hmm, got %q", m.engineLocked())
+	}
+}
+
+// (1) 默认新建并带空目录加载的模型默认走 hmm 引擎
+func TestFgDefaultModelUsesHMM(t *testing.T) {
+	dir := t.TempDir()
+	for _, sub := range []string{"data", "run"} {
+		_ = os.MkdirAll(filepath.Join(dir, sub), 0o755)
+	}
+	m := newFgModel()
+	if m.engineLocked() != fgEngineHMM {
+		t.Fatalf("newFgModel default engine=%q, want %q", m.engineLocked(), fgEngineHMM)
+	}
+	start := fgStart()
+	m.load(dir, start)
+	if m.engineLocked() != fgEngineHMM {
+		t.Fatalf("after load(emptyDir) engine=%q, want %q", m.engineLocked(), fgEngineHMM)
+	}
+	b := &fgTB{t: t, m: m, now: start, keys: map[string]string{}}
+	b.tick(tk)
+	var v fgView
+	for i := 0; i < 4; i++ {
+		v = b.tick(tk, b.video(tk))
+	}
+	if v.AppID != "bilibili" || !strings.Contains(strings.Join(v.Reasons, "|"), "HMM 后验") {
+		t.Fatalf("default model should use HMM foreground & reasons, got %+v", v)
+	}
+}
+
+// (2) 长视频 playBufSec > 0 在连续 2 轮 0 字节缓冲间隙下 HMM 不掉前台, 缓冲耗尽后正常释放
+func TestFgHMMPlayBufferHoldsAcrossZeroByteTicks(t *testing.T) {
+	b := newFgTBHMM(t, fgStart(), fgEngineHMM)
+	b.tick(tk)
+	var v fgView
+	for i := 0; i < 6; i++ {
+		v = b.tick(tk, b.video(tk))
+	}
+	if v.AppID != "bilibili" {
+		t.Fatalf("setup video fg failed: %+v", v)
+	}
+	a := b.m.devs[fgMAC].apps["bilibili"]
+	if a == nil || a.playBufSec < 25 {
+		t.Fatalf("expected charged playBufSec >= 25s, got %+v", a)
+	}
+	// 连续 2 轮 0 字节(20 秒本地缓冲区续播): playBufSec > 0, HMM 不得因 allSilent 把视频清出前台
+	for round := 1; round <= 2; round++ {
+		v = b.tick(tk)
+		if a.playBufSec <= 0 {
+			t.Fatalf("round %d: expected playBufSec > 0, got %.1f", round, a.playBufSec)
+		}
+		if v.AppID != "bilibili" || b.m.devs[fgMAC].hmm.cur != "bilibili" {
+			t.Fatalf("round %d: HMM dropped buffered video foreground: view=%+v hmmCur=%q playBuf=%.1f",
+				round, v, b.m.devs[fgMAC].hmm.cur, a.playBufSec)
+		}
+		if v.State != "paused" || !strings.Contains(strings.Join(v.EvidenceTags, "|"), "缓冲续播") {
+			t.Fatalf("round %d: unexpected view state/tags during buffer hold: %+v", round, v)
+		}
+	}
+	// 缓冲耗尽并继续静默后正常释放前台(无锁屏僵尸前台)
+	released := false
+	for i := 0; i < 8; i++ {
+		if v = b.tick(tk); v.AppID == "" {
+			released = true
+			break
+		}
+	}
+	if !released {
+		t.Fatalf("expected foreground release after playBufSec drained, got %+v (playBuf=%.1f)", v, a.playBufSec)
+	}
+}
+
+// (3) 微信语音持续通话(伴随轨)期间打开淘宝交互, HMM 主前台顺利切给淘宝且微信留在 Companion
+func TestFgHMMCompanionCallYieldsToShopping(t *testing.T) {
+	b := newFgTBHMM(t, fgStart(), fgEngineHMM)
+	b.tick(tk)
+	wxCall := func() []fgObs {
+		return []fgObs{{
+			MAC: fgMAC, ID: "wechat", Name: "微信", Category: "voip",
+			Key: b.key("wxcall", "2.2.2.8"), Up: 40 << 10, Dn: 60 << 10, DSCPClass: 3,
+		}}
+	}
+	taobaoShop := func() []fgObs {
+		var out []fgObs
+		for i := 0; i < 5; i++ {
+			out = append(out, fob("taobao", "手机淘宝", "shopping", b.newKey("4.4.8.8"), 2<<10, 30<<10))
+		}
+		return out
+	}
+
+	var v fgView
+	// 独自打微信语音: 正常显示在前台
+	for i := 0; i < 6; i++ {
+		v = b.tick(tk, wxCall())
+	}
+	if v.AppID != "wechat" {
+		t.Fatalf("solo voice call should be HMM foreground, got %+v", v)
+	}
+
+	// 保持微信语音不断, 打开手机淘宝浏览商品: HMM 主前台切给淘宝, 微信退居 Companion 伴随轨
+	for i := 0; i < 4; i++ {
+		v = b.tick(tk, wxCall(), taobaoShop())
+	}
+	if v.AppID != "taobao" || b.m.devs[fgMAC].hmm.cur != "taobao" {
+		t.Fatalf("expected HMM main foreground to switch to taobao, got view=%+v hmmCur=%q", v, b.m.devs[fgMAC].hmm.cur)
+	}
+	if v.Companion == nil || v.Companion.AppID != "wechat" || v.Companion.Mode != "call" {
+		t.Fatalf("expected wechat in Companion call slot, got %+v", v.Companion)
+	}
+
+	// 关掉淘宝继续独自语音: 微信恢复主前台
+	for i := 0; i < 5; i++ {
+		v = b.tick(tk, wxCall())
+	}
+	if v.AppID != "wechat" {
+		t.Fatalf("expected wechat to reclaim foreground after shopping stopped, got %+v", v)
+	}
+}
+
+// (4) doze 锁屏静默态下弱消息推送(< 52 分且无启动指纹)不抢占 HMM 前台
+func TestFgHMMDozeSuppressesWeakPush(t *testing.T) {
+	b := newFgTBHMM(t, fgStart(), fgEngineHMM)
+	b.tick(tk, b.wechatHB())
+	// 连续 70 秒静默进入 doze 锁屏态
+	var v fgView
+	for i := 0; i < 7; i++ {
+		v = b.tick(tk, b.wechatHB())
+	}
+	d := b.m.devs[fgMAC]
+	if d == nil || d.screenState != "doze" || v.AppID != "" {
+		t.Fatalf("expected device in doze with empty fg, got screen=%q view=%+v", d.screenState, v)
+	}
+
+	// 模拟锁屏推送唤醒(LastPushWakeAt 生效保持 doze), 连续 4 轮收到普通社交消息弱突发(20 < inst < 52)
+	for i := 0; i < 4; i++ {
+		b.m.setSidechan(nil, map[string]fgDevSideHint{
+			fgMAC: {LastPushWakeAt: b.now.Add(tk).Unix()},
+		})
+		pushObs := []fgObs{
+			fob("wechat", "微信", "social", b.newKey("2.2.2.9"), 1<<10, 12<<10),
+			fob("wechat", "微信", "social", b.newKey("2.2.2.10"), 1<<10, 12<<10),
+		}
+		v = b.tick(tk, pushObs)
+		wx := d.apps["wechat"]
+		if d.screenState != "doze" {
+			t.Fatalf("round %d: expected screenState=doze, got %q", i+1, d.screenState)
+		}
+		if wx == nil || wx.inst <= hmmTheta || wx.inst >= 52.0 {
+			t.Fatalf("round %d: expected weak push inst in (%.0f, 52), got %+v", i+1, hmmTheta, wx)
+		}
+		if v.AppID != "" || d.hmm.cur != "" {
+			t.Fatalf("round %d: weak push in doze hijacked HMM foreground: view=%+v hmmCur=%q", i+1, v, d.hmm.cur)
+		}
+	}
+}
+
+// (5) dt = 30s 省电粗采样档下 HMM 置信度扣减 10 分(上限 ≤ 85, < 95)
+func TestFgHMMCoarseTickCapsConfidence(t *testing.T) {
+	b := newFgTBHMM(t, fgStart(), fgEngineHMM)
+	b.tick(30 * time.Second)
+	var v fgView
+	for i := 0; i < 6; i++ {
+		v = b.tick(30*time.Second, b.video(30*time.Second))
+	}
+	if v.AppID != "bilibili" || !v.Coarse || v.TickSec != 30 {
+		t.Fatalf("expected 30s coarse HMM foreground bilibili, got %+v", v)
+	}
+	if v.Confidence <= 0 || v.Confidence > 85 || v.Confidence >= 95 {
+		t.Fatalf("expected coarse HMM confidence <= 85 (< 95), got %d (post=%.3f)", v.Confidence, b.m.devs[fgMAC].hmm.post)
 	}
 }
 

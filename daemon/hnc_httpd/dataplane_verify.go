@@ -1952,11 +1952,49 @@ func dpInspectOffloadGuard(env *dpVerifyEnv) (DataplaneOffloadGuard, string) {
 	}, rawState
 }
 
-func dpCheckIPv6QUICControlled(quicBlockCfg bool, iptFilterV6 string) bool {
-	if strings.Contains(iptFilterV6, "HNC_QUIC") && strings.Contains(iptFilterV6, "443") {
-		return true
+func isIptChainIdentByte(c byte) bool {
+	return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-'
+}
+
+func hasExactIptChainToken(s, chain string) bool {
+	if s == "" || chain == "" {
+		return false
 	}
-	return quicBlockCfg && iptFilterV6 == ""
+	for off := 0; off < len(s); {
+		idx := strings.Index(s[off:], chain)
+		if idx < 0 {
+			return false
+		}
+		pos := off + idx
+		end := pos + len(chain)
+		leftOK := pos == 0 || !isIptChainIdentByte(s[pos-1])
+		rightOK := end == len(s) || !isIptChainIdentByte(s[end])
+		if leftOK && rightOK {
+			return true
+		}
+		off = pos + 1
+	}
+	return false
+}
+
+func dpCheckIPv6QUICControlled(quicBlockCfg bool, iptFilterV6 string) bool {
+	if iptFilterV6 == "" {
+		return quicBlockCfg
+	}
+	hasGlobalChain := false
+	hasPort443OutsideAppLim := false
+	for _, line := range strings.Split(iptFilterV6, "\n") {
+		if strings.Contains(line, "HNC_QUIC_APPLIM") {
+			continue
+		}
+		if hasExactIptChainToken(line, "HNC_QUIC") {
+			hasGlobalChain = true
+		}
+		if strings.Contains(line, "443") {
+			hasPort443OutsideAppLim = true
+		}
+	}
+	return hasGlobalChain && hasPort443OutsideAppLim
 }
 
 // ── 辅助映射与格式化纯函数 ────────────────────────────────────────────

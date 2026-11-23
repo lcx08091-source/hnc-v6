@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "rules_version": "hnc-dfp-v6.1.0-rc.2",
+  "rules_version": "hnc-dfp-v6.1.0-rc.3",
   "_comment_top": "HNC DFP (JA4 客户端指纹基线库). 收录经公开样本与真机核验的 TLS ClientHello JA4 指纹; 动态自学习指纹由运行时规则包独立维护.",
   "_comment_workflow": "DFP 匹配流程: 1) dpid 提取 TLS ClientHello 并计算标准 JA4 摘要; 2) Top JA4 统计写入 dpi_state.json; 3) 命中本库或自学习高纯度指纹时辅助归因客户端类型, 未命中条目保留原始 JA4 供诊断查看.",
 

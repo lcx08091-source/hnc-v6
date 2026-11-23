@@ -4,8 +4,8 @@
 // 滤波: 人不会每 10 秒换一次 App(转移概率很小), 一次偶然的流量尖峰压不过「一直在用的那个」;
 // 而启动事件(startup_fp.go)这种强证据能让它当轮切换。
 //
-// 边界(工作文档 §2): 默认只在后台算、只出对比统计(fg_engine = classic)。用户在设置里把
-// 引擎切到「新(实验)」后, /api/devices[].fg 的前台应用和前台时间线改由 HMM 决定;
+// 边界(工作文档 §2): 默认启用智能防抖引擎(fg_engine = hmm), /api/devices[].fg 的前台应用和
+// 前台时间线默认由 HMM 决定; 用户在设置里显式切回「经典(classic)」时才走经典模型。
 // 后台列表仍用经典模型的。连接归属、限速、限时一律不变(前台只用于显示与时间线)。
 // 挂在 fg_model.go 每轮上, 不新开循环。
 //
@@ -18,12 +18,12 @@
 //	  观测: log L(a) = κ·inst_a/100; log L(_none) = κ·θ/100; 本轮有启动事件的应用再 +η
 //	  后验在 log 空间归一化(log-sum-exp)
 //	  决定: 后验最大者 ≥ 0.55 → 它; 否则当前前台后验 ≥ 0.25 → 保持; 否则 _none
-//	置信度 = round(100 × 后验), 再按 fg_model 的来源封顶(_org ≤ 60、隧道 / 系统类 ≤ 50、
-//	共现为主 ≤ 70)。两轮间隔 > 90 秒 → 与经典模型一起重置(fgModel.step 的 resetLocked)。
+//	置信度 = round(100 × 后验), 按 fg_model 来源封顶(_org ≤ 60、隧道 / 系统类 ≤ 50、
+//	共现为主 ≤ 70), 省电粗采样(dt > 15s)再扣减 10 分(上限 ≤ 85)。两轮间隔 > 90 秒 → 与经典模型一起重置。
 //
 // ── 引擎开关 ─────────────────────────────────────────────────────────────
 //
-//	data/dpi_experiment.json {"fg_engine":"classic"|"hmm"}, 按 mtime 缓存读取, 缺失 = classic。
+//	data/dpi_experiment.json {"fg_engine":"hmm"|"classic"}, 按 mtime 缓存读取, 缺失或未显式设为 classic = hmm。
 //	action dpi_fg_engine {engine}。
 //
 // ── 对比统计(无论选哪个引擎都记)──────────────────────────────────────────
@@ -293,9 +293,12 @@ func hmmStep(h *hmmDev, inst map[string]float64, started map[string]bool, dt flo
 	}
 }
 
-// hmmConfidence round(100×后验), 再按 fg_model 的来源封顶
-func hmmConfidence(a *fgApp, post float64) int {
+// hmmConfidence round(100×后验), 按 fg_model 的来源封顶; 省电粗采样(dt > 15s)扣减 10 分(上限 ≤ 85)
+func hmmConfidence(a *fgApp, post, dt float64) int {
 	c := math.Min(100*post, fgConfCap(a))
+	if dt > fgCoarseSec {
+		c -= 10
+	}
 	return int(math.Round(math.Max(c, 0)))
 }
 
@@ -312,10 +315,10 @@ var fgEngineCache struct {
 	engine string
 }
 
-// fgEngineFor 读当前前台引擎(按 mtime 缓存); 目录为空 / 文件缺失 / 内容不认 = classic。
+// fgEngineFor 读当前前台引擎(按 mtime 缓存); 目录为空 / 文件缺失 / 未显式设为 classic = hmm。
 func fgEngineFor(hncDir string) string {
 	if hncDir == "" {
-		return fgEngineClass
+		return fgEngineHMM
 	}
 	p := fgExperimentPath(hncDir)
 	key := "-"
@@ -327,13 +330,13 @@ func fgEngineFor(hncDir string) string {
 	if fgEngineCache.path == p && fgEngineCache.key == key {
 		return fgEngineCache.engine
 	}
-	eng := fgEngineClass
+	eng := fgEngineHMM
 	if b, err := os.ReadFile(p); err == nil && len(b) <= 64<<10 {
 		var f struct {
 			FgEngine string `json:"fg_engine"`
 		}
-		if json.Unmarshal(b, &f) == nil && f.FgEngine == fgEngineHMM {
-			eng = fgEngineHMM
+		if json.Unmarshal(b, &f) == nil && strings.TrimSpace(f.FgEngine) == fgEngineClass {
+			eng = fgEngineClass
 		}
 	}
 	fgEngineCache.path, fgEngineCache.key, fgEngineCache.engine = p, key, eng
@@ -359,6 +362,10 @@ func actionDPIFgEngine(hncDir string, p map[string]string) actionResp {
 	if err := writeFileAtomic(path, b); err != nil {
 		return actionResp{OK: false, Error: "write failed", Detail: err.Error()}
 	}
+	fgEngineCache.mu.Lock()
+	fgEngineCache.path = ""
+	fgEngineCache.key = ""
+	fgEngineCache.mu.Unlock()
 	fgSt.mu.Lock()
 	sameDir := fgSt.dir == hncDir
 	fgSt.mu.Unlock()

@@ -293,12 +293,15 @@ func newFgModel() *fgModel {
 
 func (m *fgModel) engineLocked() string {
 	if m.engine != nil {
-		return m.engine()
+		if m.engine() == fgEngineClass {
+			return fgEngineClass
+		}
+		return fgEngineHMM
 	}
-	if m.engineCur == "" {
+	if m.engineCur == fgEngineClass {
 		return fgEngineClass
 	}
-	return m.engineCur
+	return fgEngineHMM
 }
 
 // setEngine 切换动作写完文件后立即生效(不等下一次 flush)
@@ -734,7 +737,7 @@ func (m *fgModel) stepDevLocked(mac string, d *fgDev, aggs map[string]*fgAgg, no
 		} else {
 			// 若流媒体处于 ABR 本地缓冲区播放期（0 网络字节但缓冲池未耗尽），仅对平滑分维持持有基线，不覆盖真实瞬时分 a.inst
 			effInst := a.inst
-			if effInst == 0 && a.playBufSec > 0 {
+			if effInst < 1.0 && a.playBufSec > 0 {
 				effInst = 24.0
 			}
 			a.smooth += alpha * (effInst - a.smooth)
@@ -828,6 +831,13 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 	rank := fgRank(d)
 
 	// 正交因子解耦: 若排第 1 的是稳态通话/后台听歌, 而排第 2 的应用正发生明确主屏点按交互, 则将主屏让给交互应用!
+	var companion string
+	for _, a := range rank {
+		if _, _, isComp := fgIsCompanionCandidate(a); isComp {
+			companion = a.id
+			break
+		}
+	}
 	var focusRank []*fgApp
 	var hasInteractiveOther bool
 	for _, a := range rank {
@@ -893,7 +903,7 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 		d.cur = ""
 	}
 	// v5.27 T4: HMM 每轮都算(影子); 引擎 = hmm 时显示与时间线跟随 HMM 的决定。
-	hmmCur := m.hmmStepLocked(mac, d, now, dt)
+	hmmCur := m.hmmStepLocked(mac, d, now, dt, companion, d.screenState)
 	useHMM := m.engineLocked() == fgEngineHMM
 	shown := d.cur
 	if useHMM {
@@ -946,7 +956,7 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 	}
 	if useHMM && d.shown != "" {
 		if a := d.apps[d.shown]; a != nil {
-			d.view.Confidence = hmmConfidence(a, d.hmm.post)
+			d.view.Confidence = hmmConfidence(a, d.hmm.post, dt)
 			d.view.Reasons = append(d.view.Reasons, "HMM 后验 "+strconv.Itoa(int(math.Round(d.hmm.post*100)))+"%")
 		}
 	}
@@ -964,16 +974,70 @@ func (m *fgModel) decideLocked(mac string, d *fgDev, now time.Time, dt float64, 
 }
 
 // hmmStepLocked v5.27 T4: 用本轮各应用的分(a.inst)跑一轮 HMM, 返回 HMM 的前台("" = 无)
-func (m *fgModel) hmmStepLocked(mac string, d *fgDev, now time.Time, dt float64) string {
+func (m *fgModel) hmmStepLocked(mac string, d *fgDev, now time.Time, dt float64, companion, screenState string) string {
 	if d.hmm == nil {
 		d.hmm = newHMMDev()
 	}
+	var started map[string]bool
+	after := now.Add(-time.Duration(dt * float64(time.Second)))
+	if !d.hmmAt.IsZero() && d.hmmAt.Before(now) {
+		after = d.hmmAt
+	}
+	if m.started != nil {
+		started = m.started(mac, after.Unix(), now.Unix())
+	} else {
+		started = startupEventsForHMM(mac, after.Unix(), now.Unix())
+	}
+	d.hmmAt = now
+
+	activeStarted := false
+	for sid := range started {
+		if sa := d.apps[sid]; sa != nil && sa.f.Active {
+			activeStarted = true
+			break
+		}
+	}
+
+	hasInteractiveOther := false
+	hasSustainedInteractiveOther := false
+	if companion != "" {
+		for id, a := range d.apps {
+			if id == companion || a.f.Bulk {
+				continue
+			}
+			if _, _, isComp := fgIsCompanionCandidate(a); isComp {
+				continue
+			}
+			if a.inst >= 25.0 || a.smooth >= 25.0 {
+				hasInteractiveOther = true
+				if a.contSec >= 18.0 || a.lead >= fgLeadTicks || started[id] {
+					hasSustainedInteractiveOther = true
+				}
+			}
+		}
+	}
+
 	inst := make(map[string]float64, len(d.apps))
 	cats := make(map[string]string, len(d.apps))
 	fexit := make(map[string]bool)
 	hasCat := false
 	for id, a := range d.apps {
-		inst[id] = a.inst
+		v := a.inst
+		if a.playBufSec > 0 && v < 1.0 && !(activeStarted && !started[id]) {
+			v = 24.0
+		}
+		if companion != "" && id == companion && hasInteractiveOther {
+			if v > 12.0 {
+				v = 12.0
+			}
+			if d.hmm.cur == companion && hasSustainedInteractiveOther {
+				fexit[id] = true
+			}
+		}
+		if screenState == "doze" && !fgMusicCat(a.cat) && !fgVoipCat(a.cat) && !started[id] && v < 52.0 && v > 12.0 {
+			v = 12.0
+		}
+		inst[id] = v
 		if a.cat != "" {
 			cats[id] = a.cat
 			hasCat = true
@@ -992,17 +1056,6 @@ func (m *fgModel) hmmStepLocked(mac string, d *fgDev, now time.Time, dt float64)
 	} else {
 		d.hmm.fastExit = nil
 	}
-	var started map[string]bool
-	after := now.Add(-time.Duration(dt * float64(time.Second)))
-	if !d.hmmAt.IsZero() && d.hmmAt.Before(now) {
-		after = d.hmmAt
-	}
-	if m.started != nil {
-		started = m.started(mac, after.Unix(), now.Unix())
-	} else {
-		started = startupEventsForHMM(mac, after.Unix(), now.Unix())
-	}
-	d.hmmAt = now
 	hmmStep(d.hmm, inst, started, dt)
 	if d.hmm.cur != "" && d.apps[d.hmm.cur] == nil {
 		d.hmm.cur = ""
@@ -1175,7 +1228,7 @@ func (m *fgModel) buildViewLocked(d *fgDev, rank []*fgApp, now time.Time, dt flo
 	}
 	v.ScreenState = d.screenState
 	if v.ScreenState == "" {
-		if v.State == "active" {
+		if v.State == "active" || v.State == "paused" {
 			v.ScreenState = "active"
 		} else {
 			v.ScreenState = "doze"
@@ -1201,7 +1254,7 @@ func (m *fgModel) buildViewLocked(d *fgDev, rank []*fgApp, now time.Time, dt flo
 		if a.f.Micro.CausalTurns >= 1 || a.f.Micro.LightTurns >= 1 || a.f.RR >= 2 {
 			addTag("触控微突发")
 		}
-		if a.playBufSec > 2.0 && !a.f.Active {
+		if a.playBufSec > 0 && (!a.f.Active || a.inst < 1.0) {
 			addTag("缓冲续播")
 		}
 		if len(tags) == 0 && a.f.NewWin >= 2 {
